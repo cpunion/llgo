@@ -1,15 +1,14 @@
 {
-	"llvm-target":   "wasm32-unknown-wasi",
+	"llvm-target":   "wasm32-unknown-unknown",
 	"cpu":           "generic",
 	"features":      "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext,-multivalue,-reference-types",
-	"build-tags":    ["tinygo.wasm"],
+	"build-tags":    ["tinygo.wasm", "wasm_unknown"],
 	"goos":          "js",
 	"goarch":        "wasm",
 	"linker":        "wasm-ld",
-	"libc":          "wasi-libc",
+	"libc":          "wasmbuiltins",
 	"rtlib":         "compiler-rt",
 	"gc":            "leaking",
-	"scheduler":     "asyncify",
 	"default-stack-size": 65536,
 	"cflags": [
 		"-mbulk-memory",
@@ -21,7 +20,22 @@
 	"ldflags": [
 		"--allow-undefined-file={root}/targets/wasm-undefined.txt",
 		"--stack-first",
-		"--no-demangle"
+		"--no-demangle",
+		"--no-entry",
+		"--export=_start",
+		"--export=main",
+		"--export-memory",
+		"--export=malloc",
+		"--export=free",
+		"--export=__llgo_coro_host_next_action_v1",
+		"--export=__llgo_coro_host_profile_v1",
+		"--export=__llgo_coro_host_next_deadline_v1",
+		"--export=__llgo_coro_host_publish_time_v1",
+		"--export=__llgo_coro_host_publish_wall_time_v1",
+		"--export=__llgo_coro_host_ack_cancel_v1",
+		"--export=__llgo_coro_host_continue_slice_v1",
+		"--export=__llgo_coro_host_next_operation_v1",
+		"--export=__llgo_coro_host_complete_operation_v1"
 	],
 	"emulator":      "node {root}/targets/wasm_exec.js {}"
 }

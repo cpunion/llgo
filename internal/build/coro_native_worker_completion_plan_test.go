@@ -166,14 +166,34 @@ func TestNativeWorkerCompletionRootRequiresNativeWorkerCapability(t *testing.T) 
 		fixture := buildRequiredCoroRuntimeFixture(t, `
 type coroProgramRunResultV2 struct { Flags, Used, ExecutorSlot, ExecutorGeneration, Epoch, DeadlineLo, DeadlineHi, Reserved uint32 }
 type hostActionV1 struct { Kind, ExecutorSlot, ExecutorGeneration, Epoch, DeadlineLo, DeadlineHi, Reserved0, Reserved1 uint32 }
+type hostOperationActionV1 struct {
+	Kind, SourceSlot, SourceGeneration, Opcode, ArgCount, Reserved uint32
+	Args [18]uint32
+}
 func __llgo_coro_program_run_slice_v2(unsafe.Pointer, unsafe.Pointer, uint32, *coroProgramRunResultV2) uint32 { return 0 }
 func __llgo_coro_program_continue_slice_v2(uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
 func __llgo_coro_host_next_action_v1(*hostActionV1) uint32 { return 0 }
 func __llgo_coro_host_profile_v1() uint32 { return 0 }
 func __llgo_coro_host_next_deadline_v1(*hostActionV1) bool { return false }
 func __llgo_coro_host_publish_time_v1(uint32, uint32) bool { return false }
+func __llgo_coro_host_publish_wall_time_v1(uint32, uint32, uint32) bool { return false }
 func __llgo_coro_host_ack_cancel_v1(uint32, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_host_continue_slice_v1(uint32, uint32, uint32, uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
+func __llgo_coro_host_next_operation_v1(*hostOperationActionV1) uint32 { return 0 }
+func __llgo_coro_host_complete_operation_v1(uint32, uint32, uint32, uint32, uint32, uint32, uint32, uint32, uint32, uint32) uint32 { return 0 }
+func __llgo_coro_host_operation_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) {}
+func __llgo_coro_host_operation_resume_v1(unsafe.Pointer, unsafe.Pointer, *uintptr, *uintptr, *uintptr) uint32 { return 0 }
+func __llgo_coro_timer_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, int64) {}
+func __llgo_coro_timer_park_controlled_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, *uint32, *uint32, uint32, int64) {}
+func __llgo_coro_timer_resume_v2(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_timer_request_controlled_v2(uint32) uint32 { return 0 }
+func __llgo_coro_keyed_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_keyed_resume_v2(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_sema_prepare_or_abort_v2(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_sema_release_or_abort_v2(unsafe.Pointer) {}
+func __llgo_coro_notify_prepare_or_abort_v2(unsafe.Pointer, unsafe.Pointer, uint32) {}
+func __llgo_coro_notify_one_or_abort_v2(unsafe.Pointer, uint32) {}
+func __llgo_coro_notify_all_or_abort_v2(unsafe.Pointer, uint32) {}
 func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr) uint32 { return 1 }
 func install() {}
 `)

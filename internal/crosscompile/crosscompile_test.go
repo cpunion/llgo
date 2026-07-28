@@ -5,6 +5,7 @@ package crosscompile
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -521,8 +522,25 @@ func TestUseNamedWasmTargetResolvesTargetAndGC(t *testing.T) {
 	if export.GC != "leaking" {
 		t.Fatalf("named wasm GC = %q, want leaking", export.GC)
 	}
-	if !slices.Contains(export.BuildTags, "tinygo.wasm") {
-		t.Fatalf("named wasm build tags = %v, want tinygo.wasm", export.BuildTags)
+	for _, tag := range []string{"tinygo.wasm", "wasm_unknown"} {
+		if !slices.Contains(export.BuildTags, tag) {
+			t.Fatalf("named wasm build tags = %v, want %s", export.BuildTags, tag)
+		}
+	}
+	if export.Libc != "wasmbuiltins" {
+		t.Fatalf("named wasm libc = %q, want wasmbuiltins", export.Libc)
+	}
+	if filepath.Base(export.Linker) != "wasm-ld" {
+		t.Fatalf("named wasm linker = %q, want wasm-ld", export.Linker)
+	}
+	for _, flag := range []string{
+		"--no-entry",
+		"--export=_start",
+		"--export=__llgo_coro_host_continue_slice_v1",
+	} {
+		if !slices.Contains(export.LDFLAGS, flag) {
+			t.Fatalf("named wasm link flags = %v, want %s", export.LDFLAGS, flag)
+		}
 	}
 }
 

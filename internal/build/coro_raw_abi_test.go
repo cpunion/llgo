@@ -315,7 +315,10 @@ func ParkRoot() { <-blocked }
 		requiredPlain: map[*ssa.Function]struct{}{root: {}},
 	}
 	_, err = input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
-	if err == nil || !strings.Contains(err.Error(), "real local suspend effect may-park") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "real local suspend effect may-park") ||
+		!strings.Contains(err.Error(), "provenance:") ||
+		!strings.Contains(err.Error(), "compiler/runtime raw ABI entry") {
 		t.Fatalf("required synchronous runtime park error = %v; want exact raw-ABI feasibility rejection", err)
 	}
 }

@@ -107,6 +107,22 @@ func TestWasmBytealgSourcePatchReplacesAsm(t *testing.T) {
 			t.Fatalf("overlay[%q] = %q, want assembly replacement", path, got)
 		}
 	}
+
+	compareNative := filepath.Join(runtime.GOROOT(), "src", "internal", "bytealg", "compare_native.go")
+	filtered, ok := overlay[compareNative]
+	if !ok {
+		t.Fatalf("missing filtered wasm bytealg source %s", compareNative)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), compareNative, filtered, 0)
+	if err != nil {
+		t.Fatalf("parse filtered wasm bytealg source: %v", err)
+	}
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "abigen_runtime_cmpstring" {
+			t.Fatal("wasm bytealg source retained the competing runtime.cmpstring ABI declaration")
+		}
+	}
 }
 
 func TestCompilePkgSFilesSkipsSourcePatchedAssembly(t *testing.T) {
@@ -390,6 +406,96 @@ func TestNamedWebAssemblyChacha8UsesPureGoSourcePatch(t *testing.T) {
 	}
 	if !llruntime.HasSourcePatchPkg("internal/chacha8rand") {
 		t.Fatal("internal/chacha8rand should be registered as a source patch package")
+	}
+}
+
+func TestNativeWasmFrontendDoesNotDuplicateChacha8SourcePatch(t *testing.T) {
+	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+		goos:       "js",
+		goarch:     "wasm",
+		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,nogc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chachaDir := filepath.Join(runtime.GOROOT(), "src", "internal", "chacha8rand")
+	patchFile := filepath.Join(chachaDir, "z_llgo_patch_block_freestanding_webassembly_llgo.go")
+	if _, ok := overlay[patchFile]; ok {
+		t.Fatalf("native wasm frontend selected the freestanding non-wasm chacha8rand patch %s", patchFile)
+	}
+	wasmSource := filepath.Join(chachaDir, "chacha8_wasm.go")
+	if replacement, ok := overlay[wasmSource]; ok {
+		t.Fatalf("native wasm frontend unexpectedly filtered its standard chacha8rand body:\n%s", replacement)
+	}
+}
+
+func TestJSWasmTimeZoneSourcePatchUsesScalarHostFact(t *testing.T) {
+	overlay, err := buildSourcePatchOverlayForGOROOT(
+		nil,
+		env.LLGoRuntimeDir(),
+		runtime.GOROOT(),
+		sourcePatchBuildContext{
+			goos:      "js",
+			goarch:    "wasm",
+			goversion: runtime.Version(),
+			buildFlags: []string{
+				"-tags=llgo,llgo_coro,tinygo.wasm,wasm_unknown",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	timeDir := filepath.Join(runtime.GOROOT(), "src", "time")
+	injectedPath := filepath.Join(timeDir, "z_llgo_patch_zoneinfo_js_coro_llgo.go")
+	injected, ok := overlay[injectedPath]
+	if !ok {
+		t.Fatalf("missing JS/WASM time-zone patch %s", injectedPath)
+	}
+	for _, required := range []string{
+		"//go:wasmimport llgo_js timezone_offset",
+		"func initLocal()",
+		"var platformZoneSources",
+	} {
+		if !strings.Contains(string(injected), required) {
+			t.Errorf("JS/WASM time-zone patch lacks %q", required)
+		}
+	}
+
+	originalPath := filepath.Join(timeDir, "zoneinfo_js.go")
+	filtered, ok := overlay[originalPath]
+	if !ok {
+		t.Fatalf("JS/WASM time-zone patch did not filter %s", originalPath)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), originalPath, filtered, 0)
+	if err != nil {
+		t.Fatalf("parse filtered JS/WASM time source: %v", err)
+	}
+	for _, imported := range parsed.Imports {
+		if imported.Path.Value == `"syscall/js"` {
+			t.Error("filtered JS/WASM time source retained the syscall/js import")
+		}
+	}
+	for _, declaration := range parsed.Decls {
+		switch declaration := declaration.(type) {
+		case *ast.FuncDecl:
+			if declaration.Name.Name == "initLocal" {
+				t.Error("filtered JS/WASM time source retained initLocal")
+			}
+		case *ast.GenDecl:
+			for _, spec := range declaration.Specs {
+				value, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, name := range value.Names {
+					if name.Name == "platformZoneSources" {
+						t.Error("filtered JS/WASM time source retained platformZoneSources")
+					}
+				}
+			}
+		}
 	}
 }
 

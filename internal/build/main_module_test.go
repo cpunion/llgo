@@ -687,6 +687,7 @@ func assertCoroHostPullRetentionV1(t *testing.T, module llvm.Module, entryName s
 		{coroHostProfileSymbolV1, coroHostProfileReferenceSymbolV1, "i32 ()"},
 		{coroHostNextDeadlineSymbolV1, coroHostNextDeadlineReferenceSymbolV1, "i1 (ptr)"},
 		{coroHostPublishTimeSymbolV1, coroHostPublishTimeReferenceSymbolV1, "i1 (i32, i32)"},
+		{coroHostPublishWallTimeSymbolV1, coroHostPublishWallTimeReferenceSymbolV1, "i1 (i32, i32, i32)"},
 		{coroHostAckCancelSymbolV1, coroHostAckCancelReferenceSymbolV1, "i1 (i32, i32, i32, i32)"},
 		{coroHostContinueSliceSymbolV1, coroHostContinueSliceReferenceSymbolV1, "i32 (i32, i32, i32, i32, i32, i32, i32, ptr)"},
 		{coroHostNextOperationSymbolV1, coroHostNextOperationReferenceSymbolV1, "i32 (ptr)"},

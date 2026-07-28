@@ -250,7 +250,7 @@ func hostSocketFamily(domain int) (uintptr, error) {
 }
 
 func hostSocketType(socketType int) (uintptr, error) {
-	socketType &^= stdsyscall.SOCK_NONBLOCK | stdsyscall.SOCK_CLOEXEC
+	socketType &^= hostSocketCreationFlags
 	switch socketType {
 	case stdsyscall.SOCK_STREAM:
 		return coroHostSocketTypeStreamV1, nil

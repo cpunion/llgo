@@ -1260,6 +1260,29 @@ runtime旧logical wait/fleet分支随后已由Phase R删除；compiler下一阶�
   原有authority预算不增长。这个切片只建立JS/WASI reactor需要的host symbol元数据闭环，不把同步host import
   自动视为非阻塞，也不等于普通command已经有内建event pump。
 
+#### Phase B.13：JS/WebAssembly command reactor（已完成）
+
+- 命名`wasm` target现直接选择`wasm32-unknown-unknown + js/wasm + wasmbuiltins + leaking GC`
+  的freestanding组合；链接只发布`_start`、memory/allocator和冻结的host-pull callbacks，不再依赖
+  Emscripten、embind私有ABI、BDWGC、Asyncify、`go_scheduler`或`runtime.sleepTicks`。
+- 普通command `_start`仍只执行一次有界initial slice。仓库`wasm_exec.js`在调用它之前验证profile并发布
+  单调/墙钟；返回后只消费POD `NextAction`。Schedule用later-turn microtask，Alarm用可分段的
+  `setTimeout`，Cancel必须匹配exact executor/generation/epoch并ack，唯一恢复入口是
+  `ContinueSlice`。callback永不从`NextAction`栈内递归进入runtime。
+- `time.Now`读取host发布的Unix墙钟，deadline只使用non-regressing monotonic clock；
+  `time.Local`只通过一个scalar timezone-offset import取得host事实，不为time初始化引入完整
+  `syscall/js`反射链。最终WASM import allowlist精确为
+  `time.timezoneOffsetMinutes`和`syscall/js.emvalHostInvokeV1`。
+- alternate `syscall/js`的普通Value操作使用单个固定64-byte word record和32-bit opaque handle，
+  不再引用Emscripten `_emval_*`或通过函数地址反查调用语义。这个同步host边界不等待Promise；
+  动态JS→Go `FuncOf`在独立HostReentry/CallbackHandle协议完成前明确panic，legacy raw
+  `//export llgo_export_invoke`不会进入coroutine build。
+- 真实Go 1.26 fixture在WASM内部同时验证普通`syscall/js`对象、数组、method/constructor、
+  string和byte-copy边界，以及有效墙钟、合理local-zone offset、`Sleep(200ms)`至少推进
+  150ms的单调时间；LLVM 19专用CI fresh build、核对exact undefined symbols并由Node内建
+  reactor执行。当前完成范围是JS command的同步JS值边界和schedule/timer路径；
+  HostOp file/network、FuncOf/reentry和WASI pollable reactor仍是后续独立平台cohort。
+
 ### Phase C：analysis只消费facts
 
 - hidden lowered helper、`ClassifyElidedCall`、intrinsic site/local effect及physical implicit-fault选择已由

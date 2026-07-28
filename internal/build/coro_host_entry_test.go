@@ -37,6 +37,7 @@ func __llgo_coro_host_next_action_v1(*hostActionV1) uint32 { return 0 }
 func __llgo_coro_host_profile_v1() uint32 { return 0 }
 func __llgo_coro_host_next_deadline_v1(*hostActionV1) bool { return false }
 func __llgo_coro_host_publish_time_v1(uint32, uint32) bool { return false }
+func __llgo_coro_host_publish_wall_time_v1(uint32, uint32, uint32) bool { return false }
 func __llgo_coro_host_ack_cancel_v1(uint32, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_host_continue_slice_v1(uint32, uint32, uint32, uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
 func __llgo_coro_host_next_operation_v1(*hostOperationActionV1) uint32 { return 0 }
@@ -130,6 +131,7 @@ func __llgo_coro_program_main_return_v1() {}
 		coroHostProfileSymbolV1,
 		coroHostNextDeadlineSymbolV1,
 		coroHostPublishTimeSymbolV1,
+		coroHostPublishWallTimeSymbolV1,
 		coroHostAckCancelSymbolV1,
 		coroHostContinueSliceSymbolV1,
 		coroHostNextOperationSymbolV1,

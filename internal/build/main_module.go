@@ -908,6 +908,8 @@ func declareCoroHostPullCallbacksV1(pkg llssa.Package) []retainedCoroCallbackV1 
 			coroHostNextDeadlineReferenceSymbolV1, "coroutine host next-deadline callback"),
 		declare(coroHostPublishTimeSymbolV1, []types.Type{word, word}, []types.Type{boolean},
 			coroHostPublishTimeReferenceSymbolV1, "coroutine host publish-time callback"),
+		declare(coroHostPublishWallTimeSymbolV1, []types.Type{word, word, word}, []types.Type{boolean},
+			coroHostPublishWallTimeReferenceSymbolV1, "coroutine host publish-wall-time callback"),
 		declare(coroHostAckCancelSymbolV1, []types.Type{word, word, word, word}, []types.Type{boolean},
 			coroHostAckCancelReferenceSymbolV1, "coroutine host cancel-ack callback"),
 		declare(coroHostContinueSliceSymbolV1,
@@ -927,6 +929,7 @@ const (
 	coroHostProfileReferenceSymbolV1           = "__llgo_coro_host_profile_reference_v1"
 	coroHostNextDeadlineReferenceSymbolV1      = "__llgo_coro_host_next_deadline_reference_v1"
 	coroHostPublishTimeReferenceSymbolV1       = "__llgo_coro_host_publish_time_reference_v1"
+	coroHostPublishWallTimeReferenceSymbolV1   = "__llgo_coro_host_publish_wall_time_reference_v1"
 	coroHostAckCancelReferenceSymbolV1         = "__llgo_coro_host_ack_cancel_reference_v1"
 	coroHostContinueSliceReferenceSymbolV1     = "__llgo_coro_host_continue_slice_reference_v1"
 	coroHostNextOperationReferenceSymbolV1     = "__llgo_coro_host_next_operation_reference_v1"

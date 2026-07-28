@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	c "github.com/goplus/llgo/runtime/internal/clite"
+	"github.com/goplus/llgo/runtime/internal/clite/bitcast"
 )
 
 //llgo:skipall
@@ -157,7 +158,7 @@ func ValueOf(x any) Value {
 	case uintptr:
 		return floatValue(float64(x))
 	case unsafe.Pointer:
-		return floatValue(float64(uintptr(x)))
+		return floatValue(float64(bitcast.FromPointer(x)))
 	case float32:
 		return floatValue(float64(x))
 	case float64:

@@ -236,6 +236,70 @@
 				return decoder.decode(new DataView(this._inst.exports.memory.buffer, ptr, len));
 			}
 
+			const loadCString = (ptr) => {
+				ptr >>>= 0;
+				if (ptr === 0) {
+					return null;
+				}
+				const bytes = new Uint8Array(this._inst.exports.memory.buffer);
+				let end = ptr;
+				while (end < bytes.length && bytes[end] !== 0) {
+					end++;
+				}
+				if (end === bytes.length) {
+					throw new Error("unterminated LLGo JavaScript host string");
+				}
+				return decoder.decode(bytes.subarray(ptr, end));
+			}
+
+			const llgoJSValue = (handle) => {
+				handle >>>= 0;
+				switch (handle) {
+					case 2: return undefined;
+					case 4: return null;
+					case 6: return true;
+					case 8: return false;
+				}
+				if (!this._llgoJSValues || !this._llgoJSValues.has(handle)) {
+					throw new Error(`unknown LLGo JavaScript value handle ${handle}`);
+				}
+				return this._llgoJSValues.get(handle);
+			}
+
+			const llgoJSHandle = (value) => {
+				switch (value) {
+					case undefined: return 2;
+					case null: return 4;
+					case true: return 6;
+					case false: return 8;
+				}
+				if (!this._llgoJSValues) {
+					throw new Error("LLGo JavaScript value table is not initialized");
+				}
+				const handle = this._llgoJSNextHandle;
+				this._llgoJSNextHandle += 2;
+				if (handle === 0 || this._llgoJSNextHandle > 0xffff_fffe) {
+					throw new Error("LLGo JavaScript value handle space exhausted");
+				}
+				this._llgoJSValues.set(handle, value);
+				return handle;
+			}
+
+			const loadLLGoJSArgs = (ptr, count) => {
+				ptr >>>= 0;
+				count |= 0;
+				if (count < 0 || (count !== 0 && ptr === 0) ||
+					ptr + count * 4 > this._inst.exports.memory.buffer.byteLength) {
+					throw new Error("invalid LLGo JavaScript argument range");
+				}
+				const view = mem();
+				const args = new Array(count);
+				for (let index = 0; index < count; index++) {
+					args[index] = llgoJSValue(view.getUint32(ptr + index * 4, true));
+				}
+				return args;
+			}
+
 			const timeOrigin = Date.now() - performance.now();
 			this.importObject = {
 				wasi_snapshot_preview1: {
@@ -272,10 +336,7 @@
 					fd_fdstat_get: () => 0, // dummy
 					fd_seek: () => 0,       // dummy
 					proc_exit: (code) => {
-						this.exited = true;
-						this.exitCode = code;
-						this._resolveExitPromise();
-						throw wasmExit;
+						this._wasmExit(code);
 					},
 					random_get: (bufPtr, bufLen) => {
 						crypto.getRandomValues(loadSlice(bufPtr, bufLen));
@@ -286,19 +347,6 @@
 					// func ticks() int64
 					"runtime.ticks": () => {
 						return BigInt((timeOrigin + performance.now()) * 1e6);
-					},
-
-					// func sleepTicks(timeout int64)
-					"runtime.sleepTicks": (timeout) => {
-						// Do not sleep, only reactivate scheduler after the given timeout.
-						setTimeout(() => {
-							if (this.exited) return;
-							try {
-								this._inst.exports.go_scheduler();
-							} catch (e) {
-								if (e !== wasmExit) throw e;
-							}
-						}, Number(timeout)/1e6);
 					},
 
 					// func finalizeRef(v ref)
@@ -462,9 +510,534 @@
 				}
 			};
 
+			// LLGo uses a direct scalar/pointer WebAssembly ABI for syscall/js.
+			// It is intentionally separate from both Emscripten embind internals
+			// and the Go toolchain's private stack-pointer "gojs" ABI above.
+			this.importObject.llgo_js = {
+				timezone_offset: () => new Date().getTimezoneOffset(),
+				invoke_v1: (opcode, recordPtr) => {
+					opcode >>>= 0;
+					recordPtr >>>= 0;
+					if (recordPtr === 0 ||
+						recordPtr + 64 > this._inst.exports.memory.buffer.byteLength) {
+						throw new Error("invalid LLGo JavaScript host record");
+					}
+					const record = new DataView(
+						this._inst.exports.memory.buffer,
+						recordPtr,
+						64,
+					);
+					const word = (index) => record.getBigUint64(index * 8, true);
+					const scalar = (index) => Number(word(index) & 0xffff_ffffn);
+					const setWord = (index, value) => {
+						record.setBigUint64(index * 8, BigInt(value), true);
+					};
+					const setHandle = (value) => setWord(0, llgoJSHandle(value));
+
+					switch (opcode) {
+						case 2: {
+							const name = loadCString(scalar(0));
+							setHandle(name === null ? global : global[name]);
+							break;
+						}
+						case 3:
+							setHandle(record.getFloat64(0, true));
+							break;
+						case 4:
+							setHandle(loadCString(scalar(0)));
+							break;
+						case 5:
+							setHandle({});
+							break;
+						case 6:
+							setHandle([]);
+							break;
+						case 7:
+							Reflect.set(
+								llgoJSValue(scalar(0)),
+								llgoJSValue(scalar(1)),
+								llgoJSValue(scalar(2)),
+							);
+							break;
+						case 8:
+							setHandle(Reflect.get(
+								llgoJSValue(scalar(0)),
+								llgoJSValue(scalar(1)),
+							));
+							break;
+						case 9:
+							setWord(0, Reflect.deleteProperty(
+								llgoJSValue(scalar(0)),
+								llgoJSValue(scalar(1)),
+							) ? 1 : 0);
+							break;
+						case 10:
+							setWord(0, typeof llgoJSValue(scalar(0)) === "number" ? 1 : 0);
+							break;
+						case 11:
+							setWord(0, typeof llgoJSValue(scalar(0)) === "string" ? 1 : 0);
+							break;
+						case 12:
+							setWord(0, llgoJSValue(scalar(0)) in llgoJSValue(scalar(1)) ? 1 : 0);
+							break;
+						case 13:
+							setHandle(typeof llgoJSValue(scalar(0)));
+							break;
+						case 14:
+							setWord(0,
+								llgoJSValue(scalar(0)) instanceof llgoJSValue(scalar(1)) ? 1 : 0,
+							);
+							break;
+						case 15:
+							record.setFloat64(0, Number(llgoJSValue(scalar(0))), true);
+							break;
+						case 16:
+							setWord(0, encoder.encode(String(llgoJSValue(scalar(0)))).length);
+							break;
+						case 17: {
+							const bytes = encoder.encode(String(llgoJSValue(scalar(0))));
+							const dataPtr = scalar(1);
+							const size = scalar(2);
+							if (bytes.length !== size ||
+								dataPtr + size > this._inst.exports.memory.buffer.byteLength) {
+								setWord(0, 0);
+								break;
+							}
+							new Uint8Array(
+								this._inst.exports.memory.buffer,
+								dataPtr,
+								size,
+							).set(bytes);
+							setWord(0, size);
+							break;
+						}
+						case 18:
+							setWord(0,
+								llgoJSValue(scalar(0)) === llgoJSValue(scalar(1)) ? 1 : 0,
+							);
+							break;
+						case 19: {
+							const receiver = llgoJSValue(scalar(0));
+							try {
+								const method = Reflect.get(receiver, loadCString(scalar(1)));
+								setHandle(Reflect.apply(
+									method,
+									receiver,
+									loadLLGoJSArgs(scalar(2), scalar(3)),
+								));
+								setWord(1, 0);
+							} catch (error) {
+								setHandle(error);
+								setWord(1, 1);
+							}
+							break;
+						}
+						case 20: {
+							const callable = llgoJSValue(scalar(0));
+							const args = loadLLGoJSArgs(scalar(1), scalar(2));
+							try {
+								setHandle(scalar(3) === 1
+									? Reflect.construct(callable, args)
+									: Reflect.apply(callable, undefined, args));
+								setWord(1, 0);
+							} catch (error) {
+								setHandle(error);
+								setWord(1, 1);
+							}
+							break;
+						}
+						case 21: {
+							const length = scalar(0);
+							const dataPtr = scalar(1);
+							if (dataPtr + length > this._inst.exports.memory.buffer.byteLength) {
+								throw new Error("invalid LLGo JavaScript memory view");
+							}
+							setHandle(new Uint8Array(
+								this._inst.exports.memory.buffer,
+								dataPtr,
+								length,
+							));
+							break;
+						}
+						case 22:
+							console.log(llgoJSValue(scalar(0)));
+							break;
+						default:
+							throw new Error(`unsupported LLGo JavaScript host opcode ${opcode}`);
+					}
+					return 1;
+				},
+			};
+
 			// Go 1.20 uses 'env'. Go 1.21 uses 'gojs'.
 			// For compatibility, we use both as long as Go 1.20 is supported.
 			this.importObject.env = this.importObject.gojs;
+		}
+
+		_wasmExit(code) {
+			this.exited = true;
+			this.exitCode = Number(code);
+			this._cancelCoroHostActions();
+			if (this._resolveExitPromise) {
+				this._resolveExitPromise();
+			}
+			throw wasmExit;
+		}
+
+		_coroNow() {
+			return BigInt(Math.floor(performance.now() * 1e6));
+		}
+
+		_coroSplitWord(word) {
+			const unsigned = BigInt.asUintN(64, word);
+			return [
+				Number(unsigned & 0xffff_ffffn),
+				Number((unsigned >> 32n) & 0xffff_ffffn),
+			];
+		}
+
+		_coroReadWords(ptr, count) {
+			const state = this._coroHost;
+			if (!state || ptr < 0 || count < 0 || ptr + count * 4 > state.api.memory.buffer.byteLength) {
+				throw new Error("invalid LLGo coroutine host scratch range");
+			}
+			const view = new DataView(state.api.memory.buffer, ptr, count * 4);
+			return Array.from({ length: count }, (_, index) =>
+				view.getUint32(index * 4, true),
+			);
+		}
+
+		_coroAllZero(words) {
+			return words.every((word) => word === 0);
+		}
+
+		_coroPublishClocks() {
+			const state = this._coroHost;
+			const now = this._coroNow();
+			const [nowLo, nowHi] = this._coroSplitWord(now);
+			if (!state.api.__llgo_coro_host_publish_time_v1(nowLo, nowHi)) {
+				throw new Error("LLGo coroutine host rejected monotonic time");
+			}
+
+			const milliseconds = BigInt(Date.now());
+			let seconds = milliseconds / 1000n;
+			let remainder = milliseconds % 1000n;
+			if (remainder < 0) {
+				seconds--;
+				remainder += 1000n;
+			}
+			const [secLo, secHi] = this._coroSplitWord(seconds);
+			if (!state.api.__llgo_coro_host_publish_wall_time_v1(
+				secLo,
+				secHi,
+				Number(remainder * 1_000_000n),
+			)) {
+				throw new Error("LLGo coroutine host rejected wall time");
+			}
+			return [now, nowLo, nowHi];
+		}
+
+		_prepareCoroHost() {
+			const api = this._inst.exports;
+			if (typeof api.__llgo_coro_host_profile_v1 !== "function") {
+				return false;
+			}
+			for (const name of [
+				"memory",
+				"malloc",
+				"free",
+				"__llgo_coro_host_next_action_v1",
+				"__llgo_coro_host_publish_time_v1",
+				"__llgo_coro_host_publish_wall_time_v1",
+				"__llgo_coro_host_ack_cancel_v1",
+				"__llgo_coro_host_continue_slice_v1",
+				"__llgo_coro_host_next_operation_v1",
+				"__llgo_coro_host_complete_operation_v1",
+			]) {
+				if (!(name in api)) {
+					throw new Error(`missing LLGo coroutine host export ${name}`);
+				}
+			}
+			if (!api.memory || !api.memory.buffer ||
+				typeof api.malloc !== "function" || typeof api.free !== "function") {
+				throw new Error("invalid LLGo coroutine host memory ABI");
+			}
+
+			const profile = api.__llgo_coro_host_profile_v1() >>> 0;
+			const profileKindJS = 1;
+			const capabilitySchedule = 1 << 8;
+			const capabilityAlarm = 1 << 9;
+			const externalReactor = 0x80000000;
+			if ((profile & 0xff) !== profileKindJS ||
+				(profile & (capabilitySchedule | capabilityAlarm)) !==
+					(capabilitySchedule | capabilityAlarm) ||
+				(profile & externalReactor) === 0) {
+				throw new Error(`unsupported LLGo coroutine JS host profile 0x${profile.toString(16)}`);
+			}
+
+			const scratch = api.malloc(160) >>> 0;
+			if (scratch === 0 || scratch + 160 > api.memory.buffer.byteLength) {
+				throw new Error("LLGo coroutine host scratch allocation failed");
+			}
+			this._coroHost = {
+				api,
+				profile,
+				scratch,
+				actionPtr: scratch,
+				resultPtr: scratch + 32,
+				operationPtr: scratch + 64,
+				schedule: null,
+				alarm: null,
+				disposed: false,
+			};
+			try {
+				this._coroPublishClocks();
+			} catch (error) {
+				this._disposeCoroHost();
+				throw error;
+			}
+			return true;
+		}
+
+		_cancelCoroHostActions() {
+			const state = this._coroHost;
+			if (!state) {
+				return;
+			}
+			if (state.schedule) {
+				state.schedule.active = false;
+				state.schedule = null;
+			}
+			if (state.alarm) {
+				state.alarm.active = false;
+				if (state.alarm.timeout !== undefined) {
+					clearTimeout(state.alarm.timeout);
+				}
+				state.alarm = null;
+			}
+		}
+
+		_disposeCoroHost() {
+			const state = this._coroHost;
+			if (!state || state.disposed) {
+				return;
+			}
+			this._cancelCoroHostActions();
+			state.disposed = true;
+			state.api.free(state.scratch);
+		}
+
+		_failCoroHost(error) {
+			if (this.exited) {
+				return;
+			}
+			this.exited = true;
+			this.exitCode = 1;
+			this._disposeCoroHost();
+			this._rejectExitPromise(error);
+		}
+
+		_finishCoroHost() {
+			if (this.exited) {
+				return;
+			}
+			this.exited = true;
+			this.exitCode = 0;
+			this._disposeCoroHost();
+			this._resolveExitPromise();
+		}
+
+		_scheduleCoroTurn(record) {
+			const enqueue = typeof queueMicrotask === "function"
+				? queueMicrotask
+				: (callback) => Promise.resolve().then(callback);
+			enqueue(() => {
+				const state = this._coroHost;
+				if (!state || this.exited || !record.active || state.schedule !== record) {
+					return;
+				}
+				record.active = false;
+				state.schedule = null;
+				this._continueCoroHost(record, 1);
+			});
+		}
+
+		_armCoroAlarm(record) {
+			const tick = () => {
+				const state = this._coroHost;
+				if (!state || this.exited || !record.active || state.alarm !== record) {
+					return;
+				}
+				const remaining = record.deadline - this._coroNow();
+				if (remaining > 0) {
+					const maximumDelay = 2_147_483_647n * 1_000_000n;
+					const bounded = remaining > maximumDelay ? maximumDelay : remaining;
+					const delay = Number((bounded + 999_999n) / 1_000_000n);
+					record.timeout = setTimeout(tick, delay);
+					return;
+				}
+				record.active = false;
+				state.alarm = null;
+				this._continueCoroHost(record, 2);
+			};
+			record.timeout = setTimeout(tick, 0);
+		}
+
+		_takeCoroAction(kind, words) {
+			const state = this._coroHost;
+			const [, slot, generation, epoch, deadlineLo, deadlineHi, reserved0, reserved1] = words;
+			if (reserved0 !== 0 || reserved1 !== 0 || slot === 0 || generation === 0 || epoch === 0) {
+				throw new Error(`malformed LLGo coroutine host action ${words.join(",")}`);
+			}
+
+			if (kind === 3 || kind === 4) {
+				if (deadlineLo !== 0 || deadlineHi !== 0) {
+					throw new Error(`LLGo coroutine cancel carries a deadline: ${words.join(",")}`);
+				}
+				const field = kind === 3 ? "schedule" : "alarm";
+				const record = state[field];
+				if (!record || record.slot !== slot || record.generation !== generation || record.epoch !== epoch) {
+					throw new Error(`LLGo coroutine cancel has no exact ${field} obligation`);
+				}
+				record.active = false;
+				if (field === "alarm" && record.timeout !== undefined) {
+					clearTimeout(record.timeout);
+				}
+				state[field] = null;
+				if (!state.api.__llgo_coro_host_ack_cancel_v1(slot, generation, epoch, kind)) {
+					throw new Error(`LLGo coroutine ${field} cancellation was not acknowledged`);
+				}
+				return;
+			}
+
+			if (kind !== 1 && kind !== 2) {
+				throw new Error(`unknown LLGo coroutine host action kind ${kind}`);
+			}
+			const field = kind === 1 ? "schedule" : "alarm";
+			if (state[field]) {
+				throw new Error(`duplicate LLGo coroutine ${field} obligation`);
+			}
+			if (kind === 1 && (deadlineLo !== 0 || deadlineHi !== 0)) {
+				throw new Error(`LLGo coroutine schedule carries a deadline: ${words.join(",")}`);
+			}
+			const record = {
+				slot,
+				generation,
+				epoch,
+				deadline: (BigInt(deadlineHi) << 32n) | BigInt(deadlineLo),
+				active: true,
+			};
+			state[field] = record;
+			if (kind === 1) {
+				this._scheduleCoroTurn(record);
+			} else {
+				this._armCoroAlarm(record);
+			}
+		}
+
+		_drainCoroHost() {
+			const state = this._coroHost;
+			for (;;) {
+				const kind = state.api.__llgo_coro_host_next_operation_v1(state.operationPtr) >>> 0;
+				const words = this._coroReadWords(state.operationPtr, 24);
+				if (kind !== words[0]) {
+					throw new Error(`LLGo coroutine operation kind mismatch: ${kind}/${words[0]}`);
+				}
+				if (kind === 0) {
+					if (!this._coroAllZero(words)) {
+						throw new Error(`nonzero empty LLGo coroutine operation: ${words.join(",")}`);
+					}
+					break;
+				}
+				throw new Error(`unsupported LLGo JavaScript host operation opcode ${words[3]} (kind ${kind})`);
+			}
+
+			for (;;) {
+				const kind = state.api.__llgo_coro_host_next_action_v1(state.actionPtr) >>> 0;
+				const words = this._coroReadWords(state.actionPtr, 8);
+				if (kind !== words[0]) {
+					throw new Error(`LLGo coroutine action kind mismatch: ${kind}/${words[0]}`);
+				}
+				if (kind === 0) {
+					if (!this._coroAllZero(words)) {
+						throw new Error(`nonzero empty LLGo coroutine action: ${words.join(",")}`);
+					}
+					break;
+				}
+				this._takeCoroAction(kind, words);
+			}
+			return state.schedule !== null || state.alarm !== null;
+		}
+
+		_validateCoroRunResult(status, result) {
+			const [flags, used, slot, generation, epoch, deadlineLo, deadlineHi, reserved] = result;
+			if (reserved !== 0 || used > 1024) {
+				throw new Error(`malformed LLGo coroutine run result ${status}: ${result.join(",")}`);
+			}
+			if (status === 1) {
+				if (flags !== 0 || slot !== 0 || generation !== 0 || epoch !== 0 ||
+					deadlineLo !== 0 || deadlineHi !== 0) {
+					throw new Error(`malformed LLGo coroutine completion: ${result.join(",")}`);
+				}
+				return;
+			}
+			if (status === 3 || status === 6) {
+				if (flags !== 17 || slot === 0 || generation === 0 || epoch === 0 ||
+					deadlineLo !== 0 || deadlineHi !== 0) {
+					throw new Error(`malformed LLGo coroutine queued result ${status}: ${result.join(",")}`);
+				}
+				return;
+			}
+			if (status === 2) {
+				const hasDeadline = (flags & 4) !== 0;
+				if ((flags & ~6) !== 0 || (flags & 2) === 0 ||
+					slot === 0 || generation === 0 || epoch === 0 ||
+					(!hasDeadline && (deadlineLo !== 0 || deadlineHi !== 0))) {
+					throw new Error(`malformed LLGo coroutine suspended result: ${result.join(",")}`);
+				}
+				return;
+			}
+			throw new Error(`invalid LLGo coroutine drive status ${status}: ${result.join(",")}`);
+		}
+
+		_continueCoroHost(record, cause) {
+			if (this.exited) {
+				return;
+			}
+			try {
+				const state = this._coroHost;
+				const [, nowLo, nowHi] = this._coroPublishClocks();
+				let status;
+				try {
+					status = state.api.__llgo_coro_host_continue_slice_v1(
+						record.slot,
+						record.generation,
+						record.epoch,
+						cause,
+						nowLo,
+						nowHi,
+						1024,
+						state.resultPtr,
+					) >>> 0;
+				} catch (error) {
+					if (error === wasmExit) {
+						this._disposeCoroHost();
+						return;
+					}
+					throw error;
+				}
+				const result = this._coroReadWords(state.resultPtr, 8);
+				this._validateCoroRunResult(status, result);
+				if (status === 1) {
+					this._finishCoroHost();
+					return;
+				}
+				if (!this._drainCoroHost()) {
+					throw new Error(`LLGo coroutine drive status ${status} returned without a host obligation`);
+				}
+			} catch (error) {
+				this._failCoroHost(error);
+			}
 		}
 
 		async run(instance) {
@@ -481,20 +1054,39 @@
 			this._goRefCounts = []; // number of references that Go has to a JS value, indexed by reference id
 			this._ids = new Map();  // mapping from JS values to reference ids
 			this._idPool = [];      // unused ids that have been garbage collected
+			this._llgoJSValues = new Map();
+			this._llgoJSNextHandle = 10;
 			this.exited = false;    // whether the Go program has exited
 			this.exitCode = 0;
 
 			if (this._inst.exports._start) {
 				let exitPromise = new Promise((resolve, reject) => {
 					this._resolveExitPromise = resolve;
+					this._rejectExitPromise = reject;
 				});
+				let coroHost = false;
 
 				// Run program, but catch the wasmExit exception that's thrown
 				// to return back here.
 				try {
+					coroHost = this._prepareCoroHost();
 					this._inst.exports._start();
 				} catch (e) {
-					if (e !== wasmExit) throw e;
+					if (e !== wasmExit) {
+						this._disposeCoroHost();
+						throw e;
+					}
+				}
+				if (this.exited) {
+					this._disposeCoroHost();
+				} else if (coroHost) {
+					try {
+						if (!this._drainCoroHost()) {
+							this._finishCoroHost();
+						}
+					} catch (error) {
+						this._failCoroHost(error);
+					}
 				}
 
 				await exitPromise;

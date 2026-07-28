@@ -8,6 +8,11 @@ package bytealg
 
 import _ "unsafe" // for go:linkname
 
+// Go 1.26's compare_native.go retains a bodyless ABI-generator declaration
+// for runtime.cmpstring on wasm. This source patch owns the exact pure-Go body,
+// so remove that declaration together with the assembly implementation.
+//llgo:skip abigen_runtime_cmpstring
+
 func Compare(a, b []byte) int {
 	l := len(a)
 	if len(b) < l {

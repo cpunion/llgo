@@ -501,7 +501,6 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 			"-sEXPORTED_RUNTIME_METHODS=cwrap,allocateUTF8,stringToUTF8,UTF8ToString,FS,setValue,getValue",
 			"-sWASM=1",
 			"-sEXPORT_ALL=1",
-			"-sASYNCIFY=1",
 			"-sSTACK_SIZE=5242880", // 50MB
 		}...)
 
@@ -796,15 +795,17 @@ func Use(goos, goarch, targetName string, wasiThreads, forceEspClang bool, level
 		return UseTarget(targetName, level, ltoMode)
 	}
 
-	// The legacy wasm driver route has the complete WASI-SDK/Emscripten setup
-	// for frontend wasm GOARCH targets. Resolve the named target first so
-	// -target=wasm/wasip1 cannot accidentally compile a host Mach-O image using
-	// the caller's default GOOS/GOARCH. Targets such as wasip2 and wasm-unknown
-	// intentionally use an ARM frontend with a wasm LLVM triple and therefore
-	// continue through the JSON-driven target pipeline.
+	// Resolve named WebAssembly targets before choosing a toolchain. The JS
+	// command target deliberately combines the real js/wasm standard-library
+	// frontend with the freestanding wasmbuiltins core-module toolchain, so it
+	// must consume its complete JSON configuration. WASI Preview 1 still uses
+	// the legacy WASI-SDK route until wasi-libc is available through UseTarget.
 	config, resolveErr := targets.NewDefaultResolver().Resolve(targetName)
 	if resolveErr != nil {
 		return export, fmt.Errorf("failed to resolve target %s: %w", targetName, resolveErr)
+	}
+	if config.GOARCH == "wasm" && config.Libc == "wasmbuiltins" {
+		return UseTarget(targetName, level, ltoMode)
 	}
 	if config.GOARCH != "wasm" {
 		return UseTarget(targetName, level, ltoMode)

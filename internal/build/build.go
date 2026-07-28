@@ -1591,6 +1591,7 @@ func migrateCoroRawPlainReferenceClassifiers(
 type coroRawABIPlainClosure struct {
 	functions          map[*ssa.Function]struct{}
 	entries            map[*ssa.Function]struct{}
+	provenance         map[*ssa.Function]coroRawABIPlainProvenance
 	normal             map[*ssa.Function]struct{}
 	hostStack          map[*ssa.Function]struct{}
 	externalPlain      map[*ssa.Function]struct{}
@@ -1601,6 +1602,40 @@ type coroRawABIPlainClosure struct {
 	normalReturnBlocks map[*ssa.Function]map[*ssa.BasicBlock]struct{}
 	rawReferences      map[*ssa.Function][]*ssa.Function
 	rawReferenceSeen   map[*ssa.Function]map[*ssa.Function]struct{}
+}
+
+type coroRawABIPlainProvenance struct {
+	parent *ssa.Function
+	site   string
+}
+
+func (closure *coroRawABIPlainClosure) provenancePath(fn *ssa.Function) string {
+	if closure == nil || fn == nil {
+		return ""
+	}
+	const maxDepth = 64
+	steps := make([]string, 0, 8)
+	seen := make(map[*ssa.Function]struct{})
+	for current := fn; current != nil && len(steps) != maxDepth; {
+		if _, duplicate := seen[current]; duplicate {
+			steps = append(steps, current.String()+" (cycle)")
+			break
+		}
+		seen[current] = struct{}{}
+		provenance, ok := closure.provenance[current]
+		if !ok {
+			steps = append(steps, current.String())
+			break
+		}
+		step := current.String()
+		if provenance.site != "" {
+			step += " [" + provenance.site + "]"
+		}
+		steps = append(steps, step)
+		current = provenance.parent
+	}
+	slices.Reverse(steps)
+	return strings.Join(steps, " -> ")
 }
 
 func (closure *coroRawABIPlainClosure) recordRawReference(owner, target *ssa.Function) {
@@ -1694,6 +1729,7 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 	closure := &coroRawABIPlainClosure{
 		functions:          make(map[*ssa.Function]struct{}),
 		entries:            make(map[*ssa.Function]struct{}),
+		provenance:         make(map[*ssa.Function]coroRawABIPlainProvenance),
 		normal:             make(map[*ssa.Function]struct{}),
 		hostStack:          make(map[*ssa.Function]struct{}),
 		externalPlain:      make(map[*ssa.Function]struct{}),
@@ -1713,7 +1749,7 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 	hostReachable := make(map[*ssa.Function]bool)
 	queue := make([]*ssa.Function, 0)
 
-	enqueueGoBody := func(fn *ssa.Function, normal, hostStack bool) error {
+	enqueueGoBody := func(fn *ssa.Function, normal, hostStack bool, provenance coroRawABIPlainProvenance) error {
 		if fn == nil {
 			return fmt.Errorf("live raw ABI plain closure contains a nil function")
 		}
@@ -1740,6 +1776,9 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 		previousHost := hostReachable[fn]
 		if seen && (previousNormal || !normal) && (previousHost || !hostStack) {
 			return nil
+		}
+		if !seen {
+			closure.provenance[fn] = provenance
 		}
 		reachable[fn] = previousNormal || normal
 		hostReachable[fn] = previousHost || hostStack
@@ -1790,7 +1829,9 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 						target.Parent() != nil || len(target.FreeVars) != 0 {
 						return nil, fmt.Errorf("live cgo worker target %q has no exact receiver-less, non-capturing top-level shape", target.Name())
 					}
-					if err := enqueueGoBody(target, true, false); err != nil {
+					if err := enqueueGoBody(target, true, false, coroRawABIPlainProvenance{
+						site: "generated cgo worker entry",
+					}); err != nil {
 						return nil, err
 					}
 					closure.entries[target] = struct{}{}
@@ -1829,7 +1870,9 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 			return nil, fmt.Errorf("compiler runtime ABI synchronous root %d function %q has no exact receiver-less, non-capturing function shape", index, root.Function.Name())
 		}
 		_, hostStack := in.requiredHostPlain[root.Function]
-		if err := enqueueGoBody(root.Function, true, hostStack); err != nil {
+		if err := enqueueGoBody(root.Function, true, hostStack, coroRawABIPlainProvenance{
+			site: "compiler/runtime raw ABI entry",
+		}); err != nil {
 			return nil, err
 		}
 		closure.entries[root.Function] = struct{}{}
@@ -1870,7 +1913,9 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 					if !planned || targetPlan.Demand == coro.NoDemand || !targetPlan.RawPlainDemand || !targetPlan.RawPlainEntry {
 						return nil, fmt.Errorf("live raw ABI funcAddr target %q has no demanded raw-entry plan", target.Name())
 					}
-					if err := enqueueGoBody(target, true, false); err != nil {
+					if err := enqueueGoBody(target, true, false, coroRawABIPlainProvenance{
+						site: "published raw function address",
+					}); err != nil {
 						return nil, err
 					}
 					closure.entries[target] = struct{}{}
@@ -1906,7 +1951,10 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 					return nil, fmt.Errorf("live raw ABI reference %d in %q was not demanded by the preliminary plan", index, owner.Function.Name())
 				}
 				_, hostStack := in.requiredHostPlain[target]
-				if err := enqueueGoBody(target, true, hostStack); err != nil {
+				if err := enqueueGoBody(target, true, hostStack, coroRawABIPlainProvenance{
+					parent: owner.Function,
+					site:   "frontend raw ABI reference",
+				}); err != nil {
 					return nil, err
 				}
 				closure.entries[target] = struct{}{}
@@ -1925,7 +1973,10 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 			// UnwindOnly is the frozen frontend CFG proof that every physical
 			// use is past a no-normal-return boundary. All other exact calls
 			// inherit the current reachability context.
-			if err := enqueueGoBody(lowered.Target, normal && !lowered.UnwindOnly, hostStack); err != nil {
+			if err := enqueueGoBody(lowered.Target, normal && !lowered.UnwindOnly, hostStack, coroRawABIPlainProvenance{
+				parent: fn,
+				site:   "lowered helper " + lowered.LogicalName,
+			}); err != nil {
 				return nil, err
 			}
 		}
@@ -1974,7 +2025,10 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 						return nil, fmt.Errorf("live raw ABI function %q closure target %q is not one exact canonical function", fn.Name(), target.Name())
 					}
 					targetNormal := normal && !closure.instructionUnwindOnly(fn, instruction)
-					if err := enqueueGoBody(target, targetNormal, hostStack); err != nil {
+					if err := enqueueGoBody(target, targetNormal, hostStack, coroRawABIPlainProvenance{
+						parent: fn,
+						site:   makeClosure.String(),
+					}); err != nil {
 						return nil, err
 					}
 					if _, included := closure.functions[target]; included {
@@ -2033,7 +2087,10 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 					return nil, fmt.Errorf("live raw ABI static call in %q has an unresolved preliminary target", fn.Name())
 				}
 				targetNormal := normal && !closure.instructionUnwindOnly(fn, instruction)
-				if err := enqueueGoBody(target, targetNormal, hostStack); err != nil {
+				if err := enqueueGoBody(target, targetNormal, hostStack, coroRawABIPlainProvenance{
+					parent: fn,
+					site:   call.String(),
+				}); err != nil {
 					return nil, err
 				}
 			}
@@ -2300,10 +2357,12 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 		}
 		nonRawLocalEffects := coroRawPlainSSALocalEffect(fn).Join(raw.nonRawLocalEffects[fn])
 		if unsupported := nonRawLocalEffects &^ allowedEffects; unsupported != 0 {
-			return fmt.Errorf("live raw ABI plain closure function %q (%s) has real local suspend effect %s", functionPlan.ID, fn.String(), unsupported)
+			return fmt.Errorf("live raw ABI plain closure function %q (%s) has real local suspend effect %s; provenance: %s",
+				functionPlan.ID, fn.String(), unsupported, raw.provenancePath(fn))
 		}
 		if unsupported := functionPlan.LocalEffect &^ (allowedEffects | rawSyncEffects); unsupported != 0 {
-			return fmt.Errorf("live raw ABI plain closure function %q (%s) has real local suspend effect %s", functionPlan.ID, fn.String(), unsupported)
+			return fmt.Errorf("live raw ABI plain closure function %q (%s) has real local suspend effect %s; provenance: %s",
+				functionPlan.ID, fn.String(), unsupported, raw.provenancePath(fn))
 		}
 		if unsupported := functionPlan.LocalExec &^ allowedExec; unsupported != 0 {
 			return fmt.Errorf("live raw ABI plain closure function %q has unsupported legacy execution constraint %s", functionPlan.ID, unsupported)
@@ -4446,7 +4505,7 @@ func validCoroHostOperationActionPointerV1(typ types.Type) bool {
 func validateCoroHostPullRuntimeFunctionV1(name string, fn *ssa.Function) (bool, error) {
 	switch name {
 	case coroHostNextActionSymbolV1, coroHostProfileSymbolV1, coroHostNextDeadlineSymbolV1,
-		coroHostPublishTimeSymbolV1, coroHostAckCancelSymbolV1, coroHostContinueSliceSymbolV1,
+		coroHostPublishTimeSymbolV1, coroHostPublishWallTimeSymbolV1, coroHostAckCancelSymbolV1, coroHostContinueSliceSymbolV1,
 		coroHostNextOperationSymbolV1, coroHostCompleteOperationSymbolV1:
 	default:
 		return false, nil
@@ -4493,6 +4552,11 @@ func validateCoroHostPullRuntimeFunctionV1(name string, fn *ssa.Function) (bool,
 			return true, nil
 		}
 		return true, fmt.Errorf("coroutine host publish-time ABI %q must have exact func(uint32, uint32) bool signature", name)
+	case coroHostPublishWallTimeSymbolV1:
+		if allUint32Params(3) && oneResult(boolType) {
+			return true, nil
+		}
+		return true, fmt.Errorf("coroutine host publish-wall-time ABI %q must have exact func(uint32, uint32, uint32) bool signature", name)
 	case coroHostAckCancelSymbolV1:
 		if allUint32Params(4) && oneResult(boolType) {
 			return true, nil
@@ -4627,6 +4691,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 			coroHostProfileSymbolV1,
 			coroHostNextDeadlineSymbolV1,
 			coroHostPublishTimeSymbolV1,
+			coroHostPublishWallTimeSymbolV1,
 			coroHostAckCancelSymbolV1,
 			coroHostContinueSliceSymbolV1,
 			coroHostNextOperationSymbolV1,
