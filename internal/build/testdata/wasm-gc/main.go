@@ -62,10 +62,11 @@ func testHeapGrowth() {
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	const (
-		chunkSize  = 1 << 20
-		chunkCount = 24
-	)
+	const chunkSize = 1 << 20
+	chunkCount := int(before.HeapSys/chunkSize) + 8
+	if chunkCount > 128 {
+		panic("initial heap is too large for the bounded growth test")
+	}
 	liveChunks = make([][]byte, 0, chunkCount)
 	for i := 0; i < chunkCount; i++ {
 		chunk := make([]byte, chunkSize)
