@@ -89,8 +89,20 @@ jobs:
             ./test/llgoext \
             | tee -a "$results"
 
-      - name: Validate benchmark artifact
-        run: go run ./benchmark/baseline -mode validate -out .benchmark/results
+      - name: Validate and export benchmark artifact
+        run: |
+          go run ./benchmark/baseline \
+            -mode export \
+            -out .benchmark/results \
+            -benchmark-output .benchmark/results/benchmark.txt
+
+      - name: Record benchmark result
+        uses: cpunion/setup-benchmark-go-action@main
+        with:
+          config: .github/llgo-benchmark.yml
+          benchmark-file: .benchmark/results/benchmark.txt
+          platform-id: ${{ matrix.id }}
+          platform-label: ${{ matrix.display }}
 
       - name: Upload benchmark artifact
         uses: actions/upload-artifact@v7
@@ -100,6 +112,7 @@ jobs:
             .benchmark/results/size.json
             .benchmark/results/time.json
             .benchmark/results/go.txt
+            .benchmark/results/benchmark.txt
           if-no-files-found: error
           retention-days: 30
 
