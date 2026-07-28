@@ -72,8 +72,8 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 	}
 
 	want := map[string]int{
-		"contract": 9,
-		"noblock":  66,
+		"contract": 7,
+		"noblock":  60,
 		"sync":     60,
 	}
 	if !reflect.DeepEqual(got, want) {

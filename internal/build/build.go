@@ -1048,6 +1048,37 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 		}
 		return frontend.ElisionCertificate, nil
 	}
+	classifyStaticCallTarget := config.ClassifyStaticCallTarget
+	config.ClassifyStaticCallTarget = func(caller *ssa.Function, call ssa.CallInstruction) (*ssa.Function, bool, error) {
+		var requested *ssa.Function
+		requestedRedirect := false
+		if classifyStaticCallTarget != nil {
+			var err error
+			requested, requestedRedirect, err = classifyStaticCallTarget(caller, call)
+			if err != nil {
+				return nil, false, err
+			}
+		}
+		if in.callSitePlan == nil {
+			return requested, requestedRedirect, nil
+		}
+		frontend, frozen, err := in.callSitePlan(call)
+		if err != nil {
+			return nil, false, fmt.Errorf("read frozen static-call SitePlan in %q: %w", caller.Name(), err)
+		}
+		if !frozen {
+			return nil, false, fmt.Errorf("call %q in %q is absent from the frozen ProgramIR", call.String(), caller.Name())
+		}
+		compilerTarget := frontend.ManagedStaticTarget
+		compilerRedirect := compilerTarget != nil
+		if compilerRedirect != (frontend.ManagedStaticTargetCertificate != "") {
+			return nil, false, fmt.Errorf("managed static-call target in %q has incomplete frozen identity", caller.Name())
+		}
+		if requestedRedirect && (!compilerRedirect || requested != compilerTarget) {
+			return nil, false, fmt.Errorf("builder cannot forge a managed static-call target in %q", caller.Name())
+		}
+		return compilerTarget, compilerRedirect, nil
+	}
 	classifyStaticSpawnTarget := config.ClassifyStaticSpawnTarget
 	config.ClassifyStaticSpawnTarget = func(caller *ssa.Function, spawn *ssa.Go) (*ssa.Function, bool, error) {
 		var requested *ssa.Function
@@ -2317,6 +2348,7 @@ func (in CoroPlanInput) closedStaticSpawnTarget(owner *ssa.Function, spawn *ssa.
 	}
 	target := (*ssa.Function)(nil)
 	redirected := false
+	spawnWrapper := false
 	if in.callSitePlan != nil {
 		site, frozen, err := in.callSitePlan(spawn)
 		if err != nil {
@@ -2325,7 +2357,17 @@ func (in CoroPlanInput) closedStaticSpawnTarget(owner *ssa.Function, spawn *ssa.
 		if !frozen {
 			return nil, fmt.Errorf("spawn is absent from the frozen ProgramIR")
 		}
-		target = site.StaticSpawnTarget
+		if (site.ManagedStaticTarget != nil) != (site.ManagedStaticTargetCertificate != "") {
+			return nil, fmt.Errorf("spawn managed-call target has incomplete frozen identity")
+		}
+		if site.ManagedStaticTarget != nil && site.StaticSpawnTarget != nil {
+			return nil, fmt.Errorf("spawn has both a managed-call target and an intrinsic wrapper")
+		}
+		target = site.ManagedStaticTarget
+		if target == nil {
+			target = site.StaticSpawnTarget
+			spawnWrapper = target != nil
+		}
 		redirected = target != nil
 	}
 	if !redirected {
@@ -2335,8 +2377,11 @@ func (in CoroPlanInput) closedStaticSpawnTarget(owner *ssa.Function, spawn *ssa.
 	if !ok || canonical == nil || canonical != target {
 		return nil, fmt.Errorf("target %q is outside the frozen emission universe", target.Name())
 	}
-	if redirected && (target == raw || target.Synthetic == "") {
-		return nil, fmt.Errorf("target %q is not one distinct compiler-owned spawn wrapper", target.Name())
+	if redirected && target == raw {
+		return nil, fmt.Errorf("target %q is not one distinct compiler-owned spawn redirect", target.Name())
+	}
+	if spawnWrapper && target.Synthetic == "" {
+		return nil, fmt.Errorf("target %q is not one compiler-owned spawn wrapper", target.Name())
 	}
 	// A source function literal with no free variables is context-free even
 	// though x/tools records its lexical Parent. It has an exact static symbol

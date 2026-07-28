@@ -163,6 +163,20 @@ func (u *EmissionUniverse) freezeCoroCallableIdentityCertificates() error {
 		}
 		u.callableIdentities[canonical] = certificate
 	}
+	bindings, err := freezeCoroLocalExportBindings(coroLocalExportBindingFreezeInput{
+		functions:             u.functions,
+		callableIdentities:    u.callableIdentities,
+		linkIdentities:        u.linkIdentities,
+		canonicalAlias:        u.canonicalAlias,
+		functionSortKey:       u.functionSortKey,
+		freezeCallableShape:   u.freezeCoroCallableShape,
+		entrySourceSignature:  u.coroPhysicalEntrySourceSignature,
+		finalFunctionIdentity: u.finalIdentity,
+	})
+	if err != nil {
+		return err
+	}
+	u.localExportBindings = bindings
 	return nil
 }
 

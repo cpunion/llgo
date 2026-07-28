@@ -35,15 +35,16 @@ debt, not irreducible foreign semantics.
 ### 1.1 Implemented checkpoint
 
 The first inference cut reduced the exact production inventory to 154.  The
-raw-host operation cut then removed all 19 `schedulerwait` declarations, so the
-current exact production inventory is 135:
+raw-host operation cut then removed all 19 `schedulerwait` declarations.  The
+exact local-export cut removed another eight declaration-level annotations, so
+the current exact production inventory is 127:
 
 | Directive | Count | Status |
 | --- | ---: | --- |
-| `noblock` | 66 | legacy bottom behavior; not structurally inferable |
+| `noblock` | 60 | legacy bottom behavior; not structurally inferable |
 | `sync` | 60 | legacy bottom behavior; remove after the general same-M foreign episode or replace with producer metadata |
 | `schedulerwait` | 0 | removed; exact raw-host invocation is inferred from compiler-owned closure provenance |
-| `contract` | 9 | seven executor/thread contracts and two foreign-pointer result facts |
+| `contract` | 7 | executor/thread and foreign-pointer result facts |
 | `workeraddr` | 0 | removed; target identity is producer-owned and arity is sink-derived |
 | `workerresult` | 0 | removed; wrapper result flow is SSA-derived |
 | `worker` | 0 | removed; typed C declarations use the frozen foreign default |
@@ -56,6 +57,14 @@ exact selected LLGo patch alternate is an annotation-free catalog entry.
 Unannotated user declarations remain fail-closed.  One producer must reach
 exactly one sink ABI; a missing sink or conflicting sink widths poisons the
 producer before a worker certificate can be issued.
+
+The local-export inference is also occurrence-scoped.  A private builder joins
+one exact C declaration to one unambiguous local `//export` Go body using the
+frozen symbol and structural ABI.  It publishes only the target and certificate
+digest in the immutable call-site plan; it does not add another plan authority.
+Analysis, physical validation, and lowering consume that same target from the
+exact source call/defer/go instruction.  Raw code-address and raw/plain ingress
+continue to use the original C declaration.
 
 ## 2. Frozen principles
 
@@ -179,6 +188,60 @@ different source positions ends the proof.
 Consequently `workerresult` is compiler-derived metadata.  An annotation is not
 allowed to override an SSA mismatch.
 
+### 3.5 Exact local C declaration to Go export binding
+
+An unannotated typed C declaration may resolve to a bodyful Go implementation
+in the same frozen emission universe.  This is a link-identity proof, not a
+claim that an arbitrary C function is nonblocking.  The frontend issues a
+content-addressed binding certificate only when all of the following agree
+exactly:
+
+- one canonical bodyless C declaration and one canonical bodyful `//export`
+  target;
+- final physical symbol and structural C ABI;
+- declaration identity, target function identity, and target link identity;
+- no competing export/ABI directive and no explicit callable policy.
+
+The declaration and definition remain distinct emission identities.  A global
+alias is incorrect because the C symbol can still be observed as a raw code
+address or entered from C, while managed Go needs the bodyful target's
+coroutine ABI and effect.  Instead, `ProgramIR` records the target and
+certificate on each exact static `call`, `defer`, or `go` occurrence.  Dynamic
+calls, interface calls, function-value transport, and code-address observation
+continue to name the original C declaration.
+
+`AnalyzeSSA` substitutes the target only at that occurrence before unknown-call
+classification, call-graph construction, and final `CallPlan` creation.  The
+ordinary single Go fixed point then propagates every property of the bodyful
+target: suspension, preemption, panic/outcome, cleanup, recursion, entry demand,
+and function representation.  A target is not required to be synchronous; if
+it parks, its caller is colored and lowered as a coroutine in the normal way.
+There is no post-analysis effect subtraction, trusted-inline exception,
+target-name allow-list, or additional whole-program analysis pass.
+
+The dual entry remains explicit during lowering:
+
+- a managed coroutine call/defer/spawn selects the frozen Go target;
+- a raw/plain owner preserves the source C call and enters the target's
+  separately demanded raw export entry;
+- a plain managed call may preserve the C ABI round trip as an implementation
+  detail, but its semantic target and effect remain the Go body;
+- raw address publication continues to publish the C declaration, never a
+  coroutine entry.
+
+Raw/plain validation accepts the split only when the call-site certificate,
+declaration binding, target FunctionID, physical symbol, and ABI all replay
+exactly.  The target must have the raw/plain entry demanded by the same graph.
+A raw-only export root is not counted as a managed scheduler root merely
+because the same function also has independent managed coroutine demand.
+
+Missing, ambiguous, ABI-mismatched, explicitly annotated, or non-static
+bindings remain on the conservative foreign path.  Cross-archive use requires
+the producer's existing export-binding record plus the target's Go effect and
+physical-entry summary; the consumer must perform the same identity checks and
+must not synthesize a global alias.  Until that consumer path is enabled, this
+automatic redirect is intentionally local to one frozen emission universe.
+
 ## 4. Minimal explicit vocabulary
 
 The final source-level vocabulary should describe only bottom semantics:
@@ -207,7 +270,8 @@ production inventory is monotonically bounded.  `schedulerwait`, `workeraddr`,
 
 ### 4.1 How the remaining source metadata shrinks
 
-The remaining 126 legacy directives are not call-graph coloring facts.  They
+The remaining 120 legacy `noblock`/`sync` directives are not call-graph
+coloring facts.  They
 assert behavior of opaque C implementations, so deleting them merely because a
 signature looks harmless would be unsound.  They are reduced in this order:
 
@@ -316,9 +380,9 @@ The remaining directives have different removal rules:
 | Legacy class | Migration |
 | --- | --- |
 | `sync` (60) | Ordinary declarations use the conservative same-M/event default.  Runtime-only direct calls move under a small verified raw-host or executor adapter root. |
-| `noblock` (66) | Opaque C needs a producer proof; LLGo-owned definitions may use a closed C/LLVM proof.  The fact is embedded/generated and never propagated through Go source. |
+| `noblock` (60) | Opaque C needs a producer proof; LLGo-owned definitions may use a closed C/LLVM proof.  The fact is embedded/generated and never propagated through Go source. |
 | `schedulerwait` (0; removal complete) | Per-leaf tags were deleted.  The compiler verifies each may-block occurrence against exact raw-host closure provenance while preserving managed `WaitForeign`. |
-| `contract` (9) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, and wrapper flow. |
+| `contract` (7) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, wrapper flow, and exact local-export behavior. |
 
 The desired endpoint is not necessarily zero callable records.  It is zero
 manual Go coloring, zero compiler name allow-lists, and only a small number of
@@ -598,22 +662,27 @@ Special cases found in the current `sync` inventory map cleanly:
 
 ### 7.7 Directive elimination budget
 
-The 135 production directives are a migration budget, not an intended API:
+The 127 production directives are a migration budget, not an intended API:
 
 | Current class | Target | Removal gate |
 | --- | ---: | --- |
 | `sync` 60 | 0 | conservative same-M/event default plus family-4/5 internal operations |
 | `schedulerwait` 0 | 0 | complete: compiler-owned raw-host occurrence and closure proof |
-| `noblock` 66 | 0 in handwritten Go | generated/embedded proof, closed LLGo-owned C proof, or conservative fallback |
-| `contract` 9 | 0 in handwritten Go | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
+| `noblock` 60 | 0 in handwritten Go | generated/embedded proof, closed LLGo-owned C proof, or conservative fallback |
+| `contract` 7 | 0 in handwritten Go | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
 
-Eight current declarations name compiler-owned `//export` implementations and
-become inferable immediately from the export binding:
+Eight declarations naming compiler-owned `//export` implementations are now
+inferred from the exact export binding:
 
 - notify prepare/one/all;
 - semaphore prepare/release;
 - timer request;
 - poll deadline update and closing notification.
+
+The cut is guarded by exact/ABI-mismatch/explicit-policy/ambiguity tests,
+static call/defer/spawn propagation tests, raw-address and raw/plain-ingress
+tests, the dual-entry scheduler-root regression test, the production directive
+inventory, and real `time`/`sync` standard-library build acceptance.
 
 The two foreign-pointer-result contracts (`mmap` and `gai_strerror`) move to
 typed generated result-lifetime metadata.  Executor-safe poll/doorbell/queue

@@ -33,11 +33,9 @@ type llgoCoroSemaphoreParkV2 struct {
 	storage [256 - unsafe.Sizeof(uintptr(0))]byte
 }
 
-//llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return
 //go:linkname llgoCoroSemaphorePrepareOrAbortV2 C.__llgo_coro_sema_prepare_or_abort_v2
 func llgoCoroSemaphorePrepareOrAbortV2(state, addr unsafe.Pointer)
 
-//llgo:coro noblock
 //go:linkname llgoCoroSemaphoreReleaseOrAbortV2 C.__llgo_coro_sema_release_or_abort_v2
 func llgoCoroSemaphoreReleaseOrAbortV2(addr unsafe.Pointer)
 

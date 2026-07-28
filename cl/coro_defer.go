@@ -1004,7 +1004,19 @@ func resolveCoroStaticCleanupTarget(
 		canonicalRaw = resolved
 	}
 	if target != canonicalRaw {
-		return nil, coro.FunctionPlan{}, 0, fmt.Errorf("defer target %q is not its exact canonical static function", callPlan.Targets[0])
+		redirected := false
+		if len(universes) != 0 && universes[0] != nil {
+			site, frozen, err := universes[0].CoroCallSitePlan(instruction)
+			if err != nil {
+				return nil, coro.FunctionPlan{}, 0, fmt.Errorf("read deferred managed-call redirect: %w", err)
+			}
+			redirected = frozen &&
+				site.ManagedStaticTarget == target &&
+				site.ManagedStaticTargetCertificate != ""
+		}
+		if !redirected {
+			return nil, coro.FunctionPlan{}, 0, fmt.Errorf("defer target %q is not its exact canonical static function or frozen managed redirect", callPlan.Targets[0])
+		}
 	}
 	targetPlan, ok := whole.FunctionPlan(target)
 	if !ok || targetPlan.ID != callPlan.Targets[0] {

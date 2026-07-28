@@ -168,7 +168,6 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 	}
 	redirected := target != raw
 	if len(target.FreeVars) != 0 || !redirected && target.Synthetic != "" ||
-		redirected && target.Synthetic == "" ||
 		target.Origin() != nil || len(target.TypeArgs()) != 0 {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q is not an exact non-capturing context-free function", targetPlan.ID)
 	}
@@ -1196,7 +1195,7 @@ func (f *ssaFuncFlow) finalize(
 	base *Plan,
 	callKinds map[ssa.CallInstruction]CallKind,
 	unknownTargets map[ssa.CallInstruction]UnknownTarget,
-	staticSpawnTargets map[*ssa.Go]*ssa.Function,
+	staticCallTargets map[ssa.CallInstruction]*ssa.Function,
 ) (map[ssa.Value]SSAValuePlan, map[ssa.CallInstruction]SSACallPlan, error) {
 	valuePlans := make(map[ssa.Value]SSAValuePlan, len(f.allValues))
 	for value := range f.allValues {
@@ -1256,7 +1255,7 @@ func (f *ssaFuncFlow) finalize(
 			plan.SyncDispatch = certificate.SyncDispatch
 		}
 		if rawCallee := common.StaticCallee(); rawCallee != nil {
-			callee, resolved, err := resolveSSAStaticCallTarget(f, call, rawCallee, staticSpawnTargets)
+			callee, resolved, err := resolveSSAStaticCallTarget(f, call, rawCallee, staticCallTargets)
 			if err != nil {
 				caller := "<unknown>"
 				if call.Parent() != nil {

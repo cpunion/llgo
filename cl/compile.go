@@ -1480,7 +1480,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 						callPlan.Unresolved != coro.UnknownForeign || callPlan.SyncDispatch {
 						panic(fmt.Errorf("raw plain body %q has malformed raw C code-pointer call %q", p.goFn.Name(), v.String()))
 					}
-					ret = p.call(b, llssa.Call, &v.Call)
+					ret = p.callInstruction(b, llssa.Call, v)
 					handled = true
 				case callPlan.Rep == coro.Dispatch && !callPlan.SyncDispatch:
 					panic(fmt.Errorf("raw plain body %q contains non-synchronous descriptor call %q", p.goFn.Name(), v.String()))
@@ -1502,7 +1502,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					(common.StaticCallee() == nil || common.IsInvoke() || common.Method != nil) {
 					panic(fmt.Errorf("raw plain body %q contains an unplanned dynamic call %q", p.goFn.Name(), v.String()))
 				}
-				ret = p.call(b, llssa.Call, &v.Call)
+				ret = p.callInstruction(b, llssa.Call, v)
 			}
 		} else if p.hasCoroPhysicalBody() {
 			if coroDeferStackBuiltinCall(v) {
@@ -1510,14 +1510,14 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			} else if value, handled := p.tryCompileCoroPhysicalCall(b, v); handled {
 				ret = value
 			} else {
-				ret = p.call(b, llssa.Call, &v.Call)
+				ret = p.callInstruction(b, llssa.Call, v)
 			}
 		} else if value, handled := p.tryCompileCoroManagedInterfaceDispatch(b, v); handled {
 			ret = value
 		} else if value, handled := p.tryCompileCoroPlainDispatchCall(b, v); handled {
 			ret = value
 		} else {
-			ret = p.call(b, llssa.Call, &v.Call)
+			ret = p.callInstruction(b, llssa.Call, v)
 		}
 		if !p.hasCoroPhysicalBody() && p.rangeFuncCallNeedsDeferDrain(&v.Call) {
 			b.DeferStackDrain()
@@ -2381,15 +2381,15 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 			return
 		}
 		if v.DeferStack != nil {
-			p.callDeferStack(b, p.blkInfos[v.Block().Index].Kind, &v.Call, v.DeferStack, v.Parent())
+			p.callDeferStack(b, p.blkInfos[v.Block().Index].Kind, v, v.DeferStack, v.Parent())
 			return
 		}
-		p.call(b, p.blkInfos[v.Block().Index].Kind, &v.Call)
+		p.callInstruction(b, p.blkInfos[v.Block().Index].Kind, v)
 	case *ssa.Go:
 		if p.tryCompileCoroClosedStaticSpawn(b, v) {
 			return
 		}
-		p.call(b, llssa.Go, &v.Call)
+		p.callInstruction(b, llssa.Go, v)
 	case *ssa.RunDefers:
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {

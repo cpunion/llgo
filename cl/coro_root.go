@@ -53,11 +53,11 @@ func coroRootFactorySignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
-func explicitCoroRoot(plan *coro.SSAPlan, fn *ssa.Function) (coro.SSARootPlan, bool) {
+func explicitCoroFactoryRoot(plan *coro.SSAPlan, fn *ssa.Function) (coro.SSARootPlan, bool) {
 	if plan == nil || fn == nil {
 		return coro.SSARootPlan{}, false
 	}
-	for _, root := range plan.Roots() {
+	for _, root := range plan.RootFactoryRoots() {
 		if root.Function == fn {
 			return root, true
 		}
@@ -214,13 +214,8 @@ func (p *context) emitCoroRootFactory(pkg llssa.Package, entry plannedFunctionSy
 	if p.compilation == nil || p.compilation.CoroPlan == nil {
 		panic("coroutine root factory requires a compilation CoroPlan")
 	}
-	root, ok := explicitCoroRoot(p.compilation.CoroPlan, entry.function)
+	root, ok := explicitCoroFactoryRoot(p.compilation.CoroPlan, entry.function)
 	if !ok {
-		return
-	}
-	if !root.ManagedDemand.Contains(coro.AsyncDemand) {
-		// An explicit synchronous raw-address root is satisfied by the separately
-		// emitted legacy entry and needs no scheduler bootstrap factory.
 		return
 	}
 	if entry.plan.ID != root.ID {
