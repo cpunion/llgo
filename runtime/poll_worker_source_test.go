@@ -98,6 +98,36 @@ func requireRuntimeAnnotationFreeCDeclarations(t *testing.T, path string, names 
 	}
 }
 
+func TestRuntimeTerminalStdioUsesExactRawHostUseDomain(t *testing.T) {
+	const abortPath = "internal/runtime/coro_abort_libc.go"
+	const workerPath = "internal/runtime/coro_worker_owner_llgo.go"
+	const clitePath = "internal/clite/c.go"
+
+	requireRuntimeAnnotationFreeCDeclarations(
+		t, abortPath, "coroTerminalFputs", "coroTerminalFputc",
+	)
+	requireRuntimeAnnotationFreeCDeclarations(t, clitePath, "Fputs", "Fputc")
+
+	abort := readRuntimePollFile(t, abortPath)
+	if !strings.Contains(abort, "c.Exit(2)") {
+		t.Errorf("%s lost its terminal exit", abortPath)
+	}
+	paths, err := filepath.Glob("internal/runtime/*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		if path == abortPath || path == workerPath || strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		source := readRuntimePollFile(t, path)
+		if strings.Contains(source, "coroTerminalFputs") ||
+			strings.Contains(source, "coroTerminalFputc") {
+			t.Errorf("%s reaches private terminal stdio outside the audited abort adapters", path)
+		}
+	}
+}
+
 func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
 	core := readRuntimePollFile(t, runtimeCoroChannelSource)
 	for _, required := range []string{

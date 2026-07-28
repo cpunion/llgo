@@ -24,16 +24,16 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-// The scheduler-stack abort path is already fail-stop and cannot suspend into
-// the managed worker protocol. Keep its stdio leaves behind private,
-// synchronous declarations so ordinary c.Fputs/c.Fputc calls retain the
-// conservative default-worker policy everywhere else.
+// These private declarations retain the ordinary conservative may-block
+// contract. The compiler authorizes direct execution only for their exact
+// calls inside the closed scheduler-stack abort use domain; the production
+// plan gate rejects a managed, dynamic, escaped, or non-host raw occurrence.
+// Ordinary c.Fputs/c.Fputc declarations remain independent managed foreign
+// calls despite sharing the physical C symbols.
 //
-//llgo:coro sync
 //go:linkname coroTerminalFputs C.fputs
 func coroTerminalFputs(s *c.Char, fp c.FilePtr) c.Int
 
-//llgo:coro sync
 //go:linkname coroTerminalFputc C.fputc
 func coroTerminalFputc(ch c.Int, fp c.FilePtr) c.Int
 

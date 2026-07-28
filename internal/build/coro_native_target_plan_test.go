@@ -399,6 +399,40 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 		for _, record := range useDomains.legacySyncRecords() {
 			t.Log(record.diagnostic())
 		}
+		const runtimePath = "github.com/goplus/llgo/runtime/internal/runtime"
+		const clitePath = "github.com/goplus/llgo/runtime/internal/clite"
+		validateMigratedRawHost := func(record coroForeignUseDomainRecord, identity string) error {
+			if record.LegacySync || !record.rawHostOnly() {
+				return fmt.Errorf(
+					"native target migrated raw-host declaration %q = %s",
+					identity, record.diagnostic(),
+				)
+			}
+			if _, legacy := plan.ForeignSyncCertificate(record.Function); legacy {
+				return fmt.Errorf(
+					"native target raw-host declaration %q retained a foreign-sync certificate",
+					identity,
+				)
+			}
+			callable, certified := plan.CallableContractCertificate(record.Function)
+			function, planned := plan.FunctionPlan(record.Function)
+			if !certified ||
+				callable.Scope != coro.CallableContractScopeDeclaration ||
+				!coroRawPlainDirectForeignContractCompatible(callable.Contract) ||
+				!planned ||
+				function.External != coro.ExternalUnknownForeign ||
+				function.ManagedDemand != coro.NoDemand ||
+				!function.RawPlainDemand ||
+				function.Emission != coro.EmitExternal ||
+				!function.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) {
+				return fmt.Errorf(
+					"native target raw-host declaration %q lost its conservative default: "+
+						"callable=%+v certified=%t function=%+v planned=%t",
+					identity, callable, certified, function, planned,
+				)
+			}
+			return nil
+		}
 		migratedRawHostSymbols := map[string]bool{
 			"__llgo_coro_fleet_owner_count_v1":               false,
 			"__llgo_coro_fleet_factory_start_v1":             false,
@@ -420,34 +454,8 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 				return nil, fmt.Errorf("native target raw-host declaration %q is ambiguous", record.PhysicalSymbol)
 			}
 			migratedRawHostSymbols[record.PhysicalSymbol] = true
-			if record.LegacySync || !record.rawHostOnly() {
-				return nil, fmt.Errorf(
-					"native target migrated raw-host declaration = %s",
-					record.diagnostic(),
-				)
-			}
-			if _, legacy := plan.ForeignSyncCertificate(record.Function); legacy {
-				return nil, fmt.Errorf(
-					"native target raw-host declaration %q retained a foreign-sync certificate",
-					record.PhysicalSymbol,
-				)
-			}
-			callable, certified := plan.CallableContractCertificate(record.Function)
-			function, planned := plan.FunctionPlan(record.Function)
-			if !certified ||
-				callable.Scope != coro.CallableContractScopeDeclaration ||
-				!coroRawPlainDirectForeignContractCompatible(callable.Contract) ||
-				!planned ||
-				function.External != coro.ExternalUnknownForeign ||
-				function.ManagedDemand != coro.NoDemand ||
-				!function.RawPlainDemand ||
-				function.Emission != coro.EmitExternal ||
-				!function.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) {
-				return nil, fmt.Errorf(
-					"native target raw-host declaration %q lost its conservative default: "+
-						"callable=%+v certified=%t function=%+v planned=%t",
-					record.PhysicalSymbol, callable, certified, function, planned,
-				)
+			if err := validateMigratedRawHost(record, record.PhysicalSymbol); err != nil {
+				return nil, err
 			}
 			t.Log("migrated " + record.diagnostic())
 		}
@@ -455,6 +463,58 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			if !found {
 				return nil, fmt.Errorf("native target raw-host declaration %q is absent from the closed report", symbol)
 			}
+		}
+		terminalDeclarations := map[string]string{
+			runtimePath + ".coroTerminalFputs": "fputs",
+			runtimePath + ".coroTerminalFputc": "fputc",
+		}
+		ordinaryFputcFound := false
+		for _, record := range useDomains.Records {
+			identity := record.Function.String()
+			if physical, terminal := terminalDeclarations[identity]; terminal {
+				if record.PhysicalSymbol != physical {
+					return nil, fmt.Errorf(
+						"native target terminal declaration %q uses %q, want %q",
+						identity, record.PhysicalSymbol, physical,
+					)
+				}
+				if err := validateMigratedRawHost(record, identity); err != nil {
+					return nil, err
+				}
+				delete(terminalDeclarations, identity)
+				t.Log("migrated terminal " + record.diagnostic())
+				continue
+			}
+			if identity != clitePath+".Fputc" {
+				continue
+			}
+			if ordinaryFputcFound {
+				return nil, fmt.Errorf("native target ordinary Fputc declaration is ambiguous")
+			}
+			ordinaryFputcFound = true
+			if record.PhysicalSymbol != "fputc" ||
+				record.LegacySync ||
+				record.rawHostOnly() ||
+				!record.defaultUseDomainCompatible() ||
+				record.RawHostCalls != 0 ||
+				!slices.Contains(record.Rejections, "managed-call") {
+				return nil, fmt.Errorf(
+					"native target ordinary Fputc inherited terminal raw-host authority: %s",
+					record.diagnostic(),
+				)
+			}
+			if _, legacy := plan.ForeignSyncCertificate(record.Function); legacy {
+				return nil, fmt.Errorf("native target ordinary Fputc acquired a foreign-sync certificate")
+			}
+		}
+		for identity := range terminalDeclarations {
+			return nil, fmt.Errorf(
+				"native target terminal declaration %q is absent from the closed report",
+				identity,
+			)
+		}
+		if !ordinaryFputcFound {
+			return nil, fmt.Errorf("native target ordinary Fputc declaration is absent from the closed report")
 		}
 		find := func(path, name string) (*ssa.Function, error) {
 			var found *ssa.Function
@@ -479,7 +539,6 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			return found, nil
 		}
 		const doorbellPath = "github.com/goplus/llgo/runtime/internal/corodoorbell"
-		const runtimePath = "github.com/goplus/llgo/runtime/internal/runtime"
 		for _, want := range []struct {
 			path     string
 			name     string
