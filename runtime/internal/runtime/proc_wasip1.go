@@ -32,6 +32,7 @@ const (
 
 type runtimeContextPlatform struct {
 	context       wasmcontext.Context
+	gcRoot        wasmGCRootContext
 	stack         unsafe.Pointer
 	asyncifyStack unsafe.Pointer
 }
@@ -44,8 +45,13 @@ var wasmSched struct {
 	mainExited bool
 }
 
+var wasmSystemGCRoot wasmGCRootContext
+
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	gp := initG(ctx, callergp, status)
+	if wasmGCRootEnabled {
+		registerWasmGCRoot(&ctx.platform.gcRoot, false)
+	}
 	if status == _Grunning {
 		initWasmScheduler(gp)
 	}
@@ -58,6 +64,9 @@ func initWasmScheduler(gp *g) {
 		return
 	}
 	wasmSched.started = true
+	if wasmGCRootEnabled {
+		registerWasmGCRoot(&wasmSystemGCRoot, true)
+	}
 	mp := &wasmSched.m
 	pp := &wasmSched.p
 	mp.curg = gp
@@ -117,7 +126,12 @@ func runWasmContext(gp *g) {
 	pp.m = mp
 	gp.m = mp
 	setg(gp)
-	gp.context.platform.context.Resume()
+	gp.context.platform.context.Resume(
+		wasmGCRootPointer(&gp.context.platform.gcRoot),
+	)
+	if wasmGCRootEnabled {
+		adoptWasmGCRoot(&wasmSystemGCRoot)
+	}
 }
 
 func releaseWasmOwnership(gp *g) {
@@ -177,6 +191,9 @@ func releaseWasmContext(gp *g) {
 	}
 	ctx := gp.context
 	platform := &ctx.platform
+	if wasmGCRootEnabled {
+		unregisterWasmGCRoot(&platform.gcRoot)
+	}
 	if platform.stack != nil {
 		FreeRoot(platform.stack)
 		platform.stack = nil
@@ -209,13 +226,13 @@ func goschedBackend() {
 		fatal("runtime: invalid run queue insertion")
 		return
 	}
-	gp.context.platform.context.Suspend()
+	gp.context.platform.context.Suspend(wasmGCRootPointer(&wasmSystemGCRoot))
 }
 
 func gopark() {
 	gp := getg()
 	casgstatus(gp, _Grunning, _Gwaiting)
-	gp.context.platform.context.Suspend()
+	gp.context.platform.context.Suspend(wasmGCRootPointer(&wasmSystemGCRoot))
 }
 
 func goready(gp *g) {
@@ -234,7 +251,7 @@ func goexitBackend(gp *g) {
 	if gp.isMain {
 		wasmSched.mainExited = true
 	}
-	gp.context.platform.context.Suspend()
+	gp.context.platform.context.Suspend(wasmGCRootPointer(&wasmSystemGCRoot))
 	fatal("runtime: resumed dead WebAssembly goroutine")
 }
 

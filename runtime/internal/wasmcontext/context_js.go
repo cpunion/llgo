@@ -46,7 +46,3 @@ func (ctx *Context) Init(entry Entry, arg, stack unsafe.Pointer, stackSize uintp
 func (ctx *Context) InitCurrent(asyncifyStack unsafe.Pointer, asyncifyStackSize uintptr) {
 	emscripten.FiberInitCurrent(&ctx.fiber, asyncifyStack, asyncifyStackSize)
 }
-
-func (ctx *Context) Swap(next *Context) {
-	emscripten.FiberSwap(&ctx.fiber, &next.fiber)
-}
