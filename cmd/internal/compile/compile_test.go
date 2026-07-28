@@ -64,6 +64,53 @@ func TestSSACheckSeedDebugSettingsAreCompatible(t *testing.T) {
 	}
 }
 
+func TestTypeAssertDebugValue(t *testing.T) {
+	tests := []struct {
+		setting string
+		want    int
+		ok      bool
+	}{
+		{setting: "typeassert", want: 1, ok: true},
+		{setting: "typeassert=0", want: 0, ok: true},
+		{setting: "typeassert:2", want: 2, ok: true},
+		{setting: "other", want: 1},
+		{setting: "other=1"},
+		{setting: "typeassert=bad"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.setting, func(t *testing.T) {
+			got, ok := typeAssertDebugValue(tt.setting)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("typeAssertDebugValue(%q) = (%d, %v), want (%d, %v)", tt.setting, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestCompatibleDebugSetting(t *testing.T) {
+	tests := []struct {
+		setting string
+		want    bool
+	}{
+		{setting: "panic", want: true},
+		{setting: "ssa/check/on", want: true},
+		{setting: "ssa/check/seed", want: true},
+		{setting: "ssa/check/seed=1", want: true},
+		{setting: "typeassert", want: true},
+		{setting: "typeassert=0", want: true},
+		{setting: "ssa/check/seeded=1"},
+		{setting: "typeassert=bad"},
+		{setting: "libfuzzer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.setting, func(t *testing.T) {
+			if got := compatibleDebugSetting(tt.setting); got != tt.want {
+				t.Fatalf("compatibleDebugSetting(%q) = %v, want %v", tt.setting, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCountAndListFlags(t *testing.T) {
 	var count countFlag
 	if !count.IsBoolFlag() {
