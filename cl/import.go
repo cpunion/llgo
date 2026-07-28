@@ -664,6 +664,13 @@ const (
 	// pointer operands are copied into a fixed POD request catalog. It has no
 	// synchronous callable fallback.
 	llgoCoroHostOperation = llgoInstrBase + 0x57
+	// Typed control operations replace opaque C declarations at exact direct
+	// call sites. Their semantic kind is frozen in CoroCallSitePlan; target C
+	// spellings are selected only by the LLSSA backend.
+	llgoControlExit   = llgoInstrBase + 0x58
+	llgoControlTrap   = llgoInstrBase + 0x59
+	llgoControlFork   = llgoInstrBase + 0x5a
+	llgoControlExecve = llgoInstrBase + 0x5b
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )

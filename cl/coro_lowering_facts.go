@@ -326,6 +326,14 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 					materialized = true
 					class = coro.OpIntrinsic
 					recipe, effect = coroIntrinsicLoweringRecipe(semantics)
+					if found && frozenCall.plan.ControlOperation != CoroControlNone {
+						operation := frozenCall.plan.ControlOperation
+						class = coro.OpControl
+						recipe = coro.RecipeID("cl.control." + operation.String() + ".v1")
+						exec = operation.ExecFlags()
+						barrier = true
+						contract = coro.ContractID("llgo.control." + operation.String() + ".v1")
+					}
 					if direct, ok := instruction.(*ssa.Call); ok {
 						role, critical, criticalErr := u.coroCriticalCallSite(direct)
 						if criticalErr != nil {

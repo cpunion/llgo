@@ -44,7 +44,7 @@ raw-host cut removed two private stdio declarations, reaching the earlier
 105-directive checkpoint.
 
 The remaining-use audit, exact alias consolidation, and target-selected
-C/LLVM proof have since removed another 34 annotations:
+C/LLVM proof then covered these migration groups:
 
 - 20 exact declarations whose complete live use domain is compiler-owned
   raw-host code;
@@ -52,12 +52,27 @@ C/LLVM proof have since removed another 34 annotations:
 - seven duplicate declarations replaced by one canonical typed boundary; and
 - the WASM debug trap, recognized by exact LLVM intrinsic identity.
 
-The current exact production inventory is therefore 71:
+The first typed-control cut removes six more annotations: the two native
+`sigsetjmp` helper declarations, Darwin `fork`/`execve`, `clite.Exit`, and the
+freestanding WASM abort leaf.  Their exact intrinsic opcode is frozen on the
+source call site as one of returns-twice, nonlocal-jump, process-fork,
+process-exec, process-exit, or trap.  Analysis derives the occurrence-local
+execution constraint, physical planning freezes the same control subkind,
+sparse lowering facts archive it, and LLSSA selects the target C/LLVM leaf.
+Terminal operations receive a backend no-return contract plus an explicit
+unreachable terminator.  Native `sigsetjmp`/`siglongjmp` no longer introduce
+hidden runtime helper edges.  Because their saved state names a native stack
+activation, physical stackless-coroutine lowering rejects them until an
+explicit plain native-region adapter exists; unsupported target profiles also
+fail before emission.  No stage classifies a control operation from its C
+symbol spelling.
+
+The current exact production inventory is therefore 66:
 
 | Directive | Count | Status |
 | --- | ---: | --- |
-| `noblock` | 34 | opaque executor-safe or terminal bottom behavior which is not visible in Go/LLVM |
-| `sync` | 30 | opaque synchronous, same-thread, retained-callback, or control behavior |
+| `noblock` | 33 | opaque executor-safe bottom behavior which is not visible in Go/LLVM |
+| `sync` | 26 | opaque synchronous, same-thread, retained-callback, stack-sensitive, or runtime-internal behavior |
 | `schedulerwait` | 0 | removed; exact raw-host invocation is inferred from compiler-owned closure provenance |
 | `contract` | 7 | executor/thread and foreign-pointer result facts |
 | `workeraddr` | 0 | removed; target identity is producer-owned and arity is sink-derived |
@@ -383,7 +398,7 @@ production inventory is monotonically bounded.  `schedulerwait`, `workeraddr`,
 
 ### 4.1 How the remaining source metadata shrinks
 
-The remaining 65 legacy `noblock`/`sync` directives are not call-graph
+The remaining 59 legacy `noblock`/`sync` directives are not call-graph
 coloring facts.  They assert behavior of opaque C implementations, so deleting
 them merely because a signature looks harmless would be unsound.  They are
 reduced in this order:
@@ -416,13 +431,13 @@ been audited by semantic family:
 
 | Residual family | Directives | Why the compiler cannot derive it |
 | --- | ---: | --- |
-| libc memory/string, clocks, TLS, terminal/debug and signal leaves | 27 `noblock` | implementation is opaque or the contract includes platform progress/control semantics absent from the typed ABI |
+| libc memory/string, clocks, TLS, terminal/debug and signal leaves | 25 `noblock` | implementation is opaque or the contract includes platform progress/control semantics absent from the typed ABI |
 | pthread unlock/try/TLS leaves | 8 `noblock` | POSIX operation semantics, not Go SSA or C type structure, establish bounded progress and affinity |
-| process, nonlocal control, allocator/GC, loader/unwind and libc/FFI state | 30 `sync` | same-thread, returns-twice, retained-callback, stack identity, or internal-lock behavior is deliberately opaque |
+| allocator/GC, loader/unwind, retained callbacks and libc/FFI state | 26 `sync` | same-thread, retained-callback, stack identity, or internal-lock behavior is deliberately opaque |
 | poll/I/O adapters and foreign pointer-result word calls | 6 `contract` | event readiness, result provenance, and completion lifetime are API semantics |
 | baremetal stdio wrapper refinement | 1 `contract` | only the exact startup edge has the target-specific bounded-device guarantee |
 
-These totals are the 72-directive gate.  None is attached to an ordinary
+These totals are the 66-directive gate.  None is attached to an ordinary
 bodyful Go caller for effect propagation.  The only bodyful exception is the
 single `scope=wrapper` baremetal adapter, whose occurrence-local refinement
 cannot grant a declaration-wide capability.  Removing any remaining entry
@@ -511,8 +526,8 @@ The remaining directives have different removal rules:
 
 | Legacy class | Migration |
 | --- | --- |
-| `sync` (30) | Ordinary declarations ultimately use the conservative same-M/event default. Runtime-only direct calls move under a verified raw-host or executor adapter root. Opaque allocator/GC, FFI, retained callback, and control behavior remains an exact bottom contract until its operation adapter or producer metadata exists. |
-| `noblock` (35) | LLGo-owned definitions use the implemented closed C/LLVM proof. Opaque libc/pthread/TLS/clock/signal/terminal behavior still needs a producer contract; the fact is never propagated through Go source. |
+| `sync` (26) | Ordinary declarations ultimately use the conservative same-M/event default. Runtime-only direct calls move under a verified raw-host or executor adapter root. Opaque allocator/GC, FFI, retained callback, and stack-sensitive behavior remains an exact bottom contract until its operation adapter or producer metadata exists. |
+| `noblock` (33) | LLGo-owned definitions use the implemented closed C/LLVM proof. Opaque libc/pthread/TLS/clock/signal/terminal behavior still needs a producer contract; the fact is never propagated through Go source. |
 | `schedulerwait` (0; removal complete) | Per-leaf tags were deleted.  The compiler verifies each may-block occurrence against exact raw-host closure provenance while preserving managed `WaitForeign`. |
 | `contract` (7) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, wrapper flow, and exact local-export behavior. |
 
@@ -783,17 +798,22 @@ wrappers are ordinary inferred functions over family 2.  A helper such as
 from compilation; it does not receive an untyped address whose semantics must
 be rediscovered.
 
-Special cases found in the current `sync` inventory map cleanly:
+Special cases found in the original `sync` inventory map cleanly:
 
-- the live runtime `siglongjmp` edges now use exact raw-host control
-  occurrences without a declaration-wide annotation.  `sigsetjmp` remains an
-  explicit returns-twice boundary until both operations become family-5
-  compiler/runtime intrinsics.  A generic same-M thunk is invalid because it
-  adds a frame below the saved context.
-- `fork`/`execve` use a process-control adapter.  `fork` quiesces the scheduler
-  fleet, repairs the child to one physical execution domain, and resumes the
-  parent fleet; it must not start a replacement M while the process image is
-  being forked.
+- `sigsetjmp`/`siglongjmp` are exact family-5 typed intrinsics.  The immutable
+  call-site and physical plans carry returns-twice/nonlocal-jump identity, and
+  LLSSA emits the target C leaf directly without a hidden runtime helper.  A
+  generic same-M thunk is invalid because it would add a frame below the saved
+  context.  A stackless coroutine resume activation is likewise not a stable
+  native jump target, so physical coroutine preflight rejects this pair until a
+  plain native-region adapter is available.
+- Darwin `fork`/`execve` are exact current-thread process-control intrinsics,
+  isolated from the generic worker-capable raw-syscall carrier.  Scheduler
+  fleet quiescence and child repair, where required by a target runtime, remain
+  responsibilities of the surrounding process adapter rather than properties
+  inferred from a C signature.
+- process exit and freestanding abort are exact terminal control intrinsics;
+  the backend emits `exit` or `llvm.trap` plus an unreachable continuation.
 - BDWGC allocation/root operations execute through a verified GC/runtime
   adapter.  Finalizer registration carries retained callback/data metadata.
 - `pthread_key_create` retains its destructor despite returning synchronously;
@@ -807,14 +827,14 @@ Special cases found in the current `sync` inventory map cleanly:
 
 ### 7.7 Directive elimination budget
 
-The 71 production directives are a migration budget and an exact review
+The 66 production directives are a migration budget and an exact review
 manifest, not a caller-coloring API:
 
 | Current class | Target | Removal gate |
 | --- | ---: | --- |
-| `sync` 30 | irreducible bottom only | conservative same-M/event default plus family-4/5 internal operations or embedded producer facts |
+| `sync` 26 | irreducible bottom only | conservative same-M/event default plus family-4/5 internal operations or embedded producer facts |
 | `schedulerwait` 0 | 0 | complete: compiler-owned raw-host occurrence and closure proof |
-| `noblock` 34 | irreducible bottom only | generated/embedded facts, closed LLGo-owned C proof, exact control operation, or conservative fallback |
+| `noblock` 33 | irreducible bottom only | generated/embedded facts, closed LLGo-owned C proof, exact control operation, or conservative fallback |
 | `contract` 7 | irreducible bottom only | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
 
 Eight declarations naming compiler-owned `//export` implementations are now
@@ -864,8 +884,8 @@ regression keeps each migrated symbol annotation-free while proving that its
 managed demand remains empty, its raw demand remains present, and its external
 contract remains may-block.
 
-The post-105 inference cut removes 34 more source annotations without adding a
-symbol-name policy table:
+The post-105 inference work covered the following source-annotation groups
+without adding a symbol-name policy table:
 
 - 20 exact raw-host-only declarations covering doorbell, worker reservation,
   fleet retirement, poll-owner operations, startup GC roots, `siglongjmp`,
@@ -875,6 +895,11 @@ symbol-name policy table:
 - seven duplicate `rand`/`srand`, clock, exit, and errno declarations replaced
   by canonical typed boundaries and exact alias reuse; and
 - one WASM debug-trap declaration inferred from exact LLVM intrinsic identity.
+
+The subsequent typed-control cut removes six more declarations through exact
+opcode identity and structural ABI validation.  Its analysis, archive,
+physical-plan, and codegen gates prevent those annotations from being replaced
+by either a symbol-name policy or an emission-time guess.
 
 The C/LLVM producer gate additionally proves annotation-free generic
 executor-leaf contracts for already-unannotated closed leaves such as
@@ -911,9 +936,9 @@ The reduction is accepted only in complete, ordered cuts:
 3. reconcile return, recovered return, panic, `Goexit`, pending cancellation,
    and teardown across the C stack;
 4. change open and unannotated typed-C calls to the conservative target policy;
-5. **Scheduler-wait complete; control pending:** infer exact raw-host wait
-   occurrences and replace remaining control operations with typed internal
-   operations;
+5. **Scheduler-wait complete; first control cut complete:** infer exact raw-host
+   wait occurrences and move each remaining derivable control boundary to a
+   typed internal operation;
 6. remove every derivable member of each remaining directive class and update
    the exact inventory gate in the same cut;
 7. retain only reviewed bottom contracts whose implementation semantics are

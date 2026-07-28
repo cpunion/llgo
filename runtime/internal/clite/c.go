@@ -240,12 +240,11 @@ func Unreachable()
 
 // -----------------------------------------------------------------------------
 
-// Exit is a terminal foreign control operation. Until terminal no-return
-// lowering owns that behavior directly, retain the exact executor-safe leaf
-// contract rather than treating it as an ordinary may-block call.
+// Exit is a compiler-owned typed terminal control operation. The backend
+// selects the target C spelling and emits the exact noreturn/unreachable
+// lowering; no foreign-call contract is attached to this Go declaration.
 //
-//llgo:coro noblock
-//go:linkname Exit C.exit
+//go:linkname Exit llgo.controlExit
 func Exit(Int)
 
 // -----------------------------------------------------------------------------

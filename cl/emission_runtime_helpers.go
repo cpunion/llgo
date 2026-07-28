@@ -620,10 +620,6 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 				if helper, ok := emissionCgoConversionRuntimeHelper(opcode); ok {
 					add(helper)
 				}
-			case intrinsic && opcode == llgoSigsetjmp && u.coroUsesRuntimeSigjmpHelpers():
-				add("Sigsetjmp")
-			case intrinsic && opcode == llgoSiglongjmp && u.coroUsesRuntimeSigjmpHelpers():
-				add("Siglongjmp")
 			}
 		}
 		u.builtinRuntimeHelpers(ctx, &v.Call, add)

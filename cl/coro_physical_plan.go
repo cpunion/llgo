@@ -167,6 +167,7 @@ const (
 	coroPhysicalOperationWorkerCgo
 	coroPhysicalOperationWorkerCgoErrno
 	coroPhysicalOperationHostCall
+	coroPhysicalOperationControl
 )
 
 func (recipe coroPhysicalOperationRecipe) String() string {
@@ -195,6 +196,8 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "worker-cgo-errno"
 	case coroPhysicalOperationHostCall:
 		return "host-operation"
+	case coroPhysicalOperationControl:
+		return "control-operation"
 	default:
 		return fmt.Sprintf("physical-operation-recipe(%d)", uint8(recipe))
 	}
@@ -274,6 +277,7 @@ type coroPhysicalInstructionPlan struct {
 	operationCgo       *coroWorkerCgoCallShape
 	operationCgoErrno  *coroWorkerCgoErrnoCallShape
 	operationHost      coroHostOperationCallShape
+	operationControl   CoroControlOperation
 	outcome            coroPhysicalOutcomeRecipe
 	outcomeFailure     string
 	elideValue         bool
@@ -982,6 +986,20 @@ func planCoroPhysicalOperationInstruction(
 			frozen, found, err := audit.universe.coroProgramIR.callSitePlan(instruction)
 			if err != nil {
 				result.operationFailure = "load worker operation SitePlan: " + err.Error()
+				return
+			}
+			if found && frozen.plan.ControlOperation != CoroControlNone {
+				if frozen.failure != "" {
+					result.operationFailure = "invalid typed control operation: " + frozen.failure
+					return
+				}
+				if !frozen.plan.Intrinsic ||
+					frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend {
+					result.operationFailure = "typed control operation has an incompatible frozen intrinsic recipe"
+					return
+				}
+				result.operation = coroPhysicalOperationControl
+				result.operationControl = frozen.plan.ControlOperation
 				return
 			}
 			if found && frozen.plan.Intrinsic && frozen.opcode == llgoCoroHostOperation &&

@@ -489,6 +489,11 @@ const (
 type CoroCallSitePlan struct {
 	IntrinsicSemantics CoroIntrinsicCallSemantics
 	Intrinsic          bool
+	// ControlOperation identifies one compiler-owned non-suspending control
+	// leaf. It is derived from the exact intrinsic opcode during ProgramIR
+	// construction and is the only authority consumed by analysis, physical
+	// planning, lowering facts, and codegen.
+	ControlOperation CoroControlOperation
 	// RawPlainSynchronousIntrinsic proves that this exact direct llgo.syscall
 	// occurrence has the uintptr word ABI accepted by ordinary synchronous
 	// intrinsic lowering. It authorizes only a separately proven raw/plain
@@ -1758,6 +1763,7 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 	call ssa.CallInstruction,
 	opcode int,
 	intrinsic bool,
+	controlOperation CoroControlOperation,
 	workerCertificate CoroWorkerSyscallCertificate,
 	workerCertified bool,
 	cgoErrnoCertificate CoroCgoWorkerCallCertificate,
@@ -1832,6 +1838,25 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 			"emission universe intrinsic call semantics: inline intrinsic %q must be an exact direct call", callee.Name(),
 		)
+	}
+	if expected := coroControlOperationForIntrinsic(opcode); expected != controlOperation {
+		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+			"emission universe intrinsic call semantics: control operation %s does not match intrinsic opcode %d (%s)",
+			controlOperation, opcode, expected,
+		)
+	}
+	if controlOperation != CoroControlNone {
+		if (controlOperation == CoroControlReturnsTwice ||
+			controlOperation == CoroControlNonlocalJump) &&
+			!u.coroSupportsNativeSigjmpControl() {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: legacy llgo setjmp/longjmp call %q lowers directly to a target C leaf and requires a non-legacy coroutine PanicABI", direct.String(),
+			)
+		}
+		if err := verifyCoroTypedControlShape(controlOperation, direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	}
 	switch opcode {
 	case llgoCstr:
@@ -2080,32 +2105,10 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		}
 		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
 	case llgoSigjmpbuf:
-		if err := validateCoroSigjmpIntrinsicCallSite(opcode, direct); err != nil {
+		if err := verifyCoroSigjmpBufferShape(direct); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
-	case llgoSigsetjmp, llgoSiglongjmp:
-		if err := validateCoroSigjmpIntrinsicCallSite(opcode, direct); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		if !u.coroUsesRuntimeSigjmpHelpers() {
-			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-				"emission universe intrinsic call semantics: legacy llgo setjmp/longjmp call %q lowers directly to a target C leaf and requires a non-legacy coroutine PanicABI", direct.String(),
-			)
-		}
-		if !u.CompleteRuntimeABI() {
-			return CoroIntrinsicCallUnsupported, true, nil
-		}
-		helperName := "Sigsetjmp"
-		if opcode == llgoSiglongjmp {
-			helperName = "Siglongjmp"
-		}
-		if !sitePlan.hasManagedRuntimeHelper(helperName) {
-			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-				"emission universe intrinsic call semantics: legacy %s call %q has no exact frozen lowered call", helperName, direct.String(),
-			)
-		}
-		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
 	case llgoFuncAddr:
 		if _, _, err := u.validateCoroFuncAddrCallSite(direct); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
@@ -2760,11 +2763,12 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 	case llgoSigjmpbuf:
 		// sigjmpbuf is a target-sized LLVM alloca and has no callable edge.
 		return CoroIntrinsicCallInlineNoSuspend
-	case llgoSigsetjmp, llgoSiglongjmp:
-		// Native legacy PanicABI replaces these declarations with the exact
-		// runtime C-linkname leaves. WASM and explicit embedded targets fail
-		// closed until their non-legacy PanicABI is selected.
-		return CoroIntrinsicCallInlineWithLoweredCalls
+	case llgoSigsetjmp, llgoSiglongjmp,
+		llgoControlFork, llgoControlExecve, llgoControlExit, llgoControlTrap:
+		// ProgramIR freezes the exact typed control operation at the source
+		// occurrence. Native setjmp/longjmp and process leaf symbol spellings
+		// are selected only by LLSSA lowering, never by effect inference.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoFuncAddr:
 		// funcAddr structurally unwraps one exact MakeInterface{X:*ssa.Function}
 		// and emits the selected raw function entry address directly.
@@ -3193,7 +3197,7 @@ func emissionAtomicAddDeltaCompatible(left, right types.Type) bool {
 	return leftWidth != 0 && leftWidth == rightWidth && leftSigned != rightSigned
 }
 
-func (u *EmissionUniverse) coroUsesRuntimeSigjmpHelpers() bool {
+func (u *EmissionUniverse) coroSupportsNativeSigjmpControl() bool {
 	if u == nil || u.prog == nil || u.prog.Target() == nil {
 		return false
 	}
@@ -3201,34 +3205,95 @@ func (u *EmissionUniverse) coroUsesRuntimeSigjmpHelpers() bool {
 	return target.GOARCH != "wasm" && target.Target == ""
 }
 
-func validateCoroSigjmpIntrinsicCallSite(opcode int, direct *ssa.Call) error {
+func verifyCoroSigjmpBufferShape(direct *ssa.Call) error {
 	if direct == nil || direct.Common() == nil || direct.Common().IsInvoke() {
-		return fmt.Errorf("emission universe intrinsic call semantics: llgo setjmp/longjmp intrinsic must be an exact direct call")
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo.sigjmpbuf intrinsic must be an exact direct call")
 	}
 	common := direct.Common()
 	signature := common.Signature()
 	if signature == nil || signature.Recv() != nil || signature.Variadic() {
-		return fmt.Errorf("emission universe intrinsic call semantics: llgo setjmp/longjmp call %q has an invalid declaration shape", direct.String())
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo.sigjmpbuf call %q has an invalid declaration shape", direct.String())
 	}
 	params := signature.Params()
 	results := signature.Results()
-	switch opcode {
-	case llgoSigjmpbuf:
-		if len(common.Args) != 0 || params != nil && params.Len() != 0 || results == nil || results.Len() != 1 || !emissionIsUnsafePointerType(results.At(0).Type()) {
-			return fmt.Errorf("emission universe intrinsic call semantics: llgo.sigjmpbuf call %q requires the exact func() unsafe.Pointer shape", direct.String())
+	if len(common.Args) != 0 || params != nil && params.Len() != 0 ||
+		results == nil || results.Len() != 1 ||
+		!emissionIsUnsafePointerType(results.At(0).Type()) ||
+		!emissionIsUnsafePointerType(direct.Type()) {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo.sigjmpbuf call %q requires the exact func() unsafe.Pointer shape", direct.String())
+	}
+	return nil
+}
+
+func verifyCoroTypedControlShape(operation CoroControlOperation, direct *ssa.Call) error {
+	if direct == nil || direct.Common() == nil || direct.Common().IsInvoke() ||
+		direct.Common().Method != nil {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo control operation %s must be an exact direct call", operation)
+	}
+	common := direct.Common()
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo control operation %s call %q has an invalid declaration shape", operation, direct.String())
+	}
+	type shape struct {
+		parameters []coroIntrinsicTypeShape
+		result     *coroIntrinsicTypeShape
+		text       string
+	}
+	int32Shape := coroIntrinsicTypeShape{basic: types.Int32}
+	int8Pointer := coroIntrinsicTypeShape{pointerElement: types.Int8}
+	int8PointerPointer := coroIntrinsicTypeShape{pointerElement: types.Int8, pointerDepth: 2}
+	var expected shape
+	switch operation {
+	case CoroControlReturnsTwice:
+		expected = shape{
+			parameters: []coroIntrinsicTypeShape{{basic: types.UnsafePointer}, int32Shape},
+			result:     &int32Shape,
+			text:       "func(unsafe.Pointer, int32) int32",
 		}
-	case llgoSigsetjmp:
-		if len(common.Args) != 2 || params == nil || params.Len() != 2 || results == nil || results.Len() != 1 ||
-			!emissionIsUnsafePointerType(params.At(0).Type()) || !emissionIsBasicKind(params.At(1).Type(), types.Int32) || !emissionIsBasicKind(results.At(0).Type(), types.Int32) {
-			return fmt.Errorf("emission universe intrinsic call semantics: llgo.sigsetjmp call %q requires the exact func(unsafe.Pointer, int32) int32 shape", direct.String())
+	case CoroControlNonlocalJump:
+		expected = shape{
+			parameters: []coroIntrinsicTypeShape{{basic: types.UnsafePointer}, int32Shape},
+			text:       "func(unsafe.Pointer, int32)",
 		}
-	case llgoSiglongjmp:
-		if len(common.Args) != 2 || params == nil || params.Len() != 2 || results != nil && results.Len() != 0 ||
-			!emissionIsUnsafePointerType(params.At(0).Type()) || !emissionIsBasicKind(params.At(1).Type(), types.Int32) {
-			return fmt.Errorf("emission universe intrinsic call semantics: llgo.siglongjmp call %q requires the exact func(unsafe.Pointer, int32) shape", direct.String())
+	case CoroControlProcessFork:
+		expected = shape{result: &int32Shape, text: "func() int32"}
+	case CoroControlProcessExec:
+		expected = shape{
+			parameters: []coroIntrinsicTypeShape{int8Pointer, int8PointerPointer, int8PointerPointer},
+			result:     &int32Shape,
+			text:       "func(*int8, **int8, **int8) int32",
 		}
+	case CoroControlProcessExit:
+		expected = shape{parameters: []coroIntrinsicTypeShape{int32Shape}, text: "func(int32)"}
+	case CoroControlTrap:
+		expected = shape{text: "func()"}
 	default:
-		return fmt.Errorf("emission universe intrinsic call semantics: unknown llgo setjmp/longjmp opcode %d", opcode)
+		return fmt.Errorf("emission universe intrinsic call semantics: unknown llgo control operation %d", operation)
+	}
+	params := signature.Params()
+	results := signature.Results()
+	resultCount := 0
+	if expected.result != nil {
+		resultCount = 1
+	}
+	if len(common.Args) != len(expected.parameters) ||
+		params == nil && len(expected.parameters) != 0 ||
+		params != nil && params.Len() != len(expected.parameters) ||
+		results == nil && resultCount != 0 ||
+		results != nil && results.Len() != resultCount {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo control operation %s call %q requires the exact %s shape", operation, direct.String(), expected.text)
+	}
+	for index, parameter := range expected.parameters {
+		if !parameter.matches(common.Args[index].Type()) ||
+			!parameter.matches(params.At(index).Type()) {
+			return fmt.Errorf("emission universe intrinsic call semantics: llgo control operation %s call %q requires the exact %s shape", operation, direct.String(), expected.text)
+		}
+	}
+	if expected.result != nil &&
+		(!expected.result.matches(results.At(0).Type()) ||
+			!expected.result.matches(direct.Type())) {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo control operation %s call %q requires the exact %s shape", operation, direct.String(), expected.text)
 	}
 	return nil
 }

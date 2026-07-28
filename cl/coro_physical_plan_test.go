@@ -566,6 +566,69 @@ func Root(value int) int { return value + 1 }
 	}()
 }
 
+func TestCoroPhysicalPlanFreezesTypedControlSubkind(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `package control
+//llgo:link Exit llgo.controlExit
+func Exit(int32)
+func Root(status int32) { Exit(status) }
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: ssaPkg, Files: files, Identity: "control",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Root")
+	calls := allocaCStrTestCalls(root)
+	if len(calls) != 1 {
+		t.Fatalf("Root calls = %d, want one", len(calls))
+	}
+	call, ok := calls[0].(*ssa.Call)
+	if !ok {
+		t.Fatalf("Root call = %T, want *ssa.Call", calls[0])
+	}
+	owner := universe.ownerOf(root)
+	audit := &coroPhysicalPureSSAAudit{
+		universe: universe,
+		ctx:      &context{emissionOwner: owner},
+		fn:       root,
+	}
+	result := coroPhysicalInstructionPlan{}
+	planCoroPhysicalOperationInstruction(
+		audit, nil, call, coroPhysicalLoweringCapabilities{}, &result,
+	)
+	if result.operationFailure != "" ||
+		result.operation != coroPhysicalOperationControl ||
+		result.operationControl != CoroControlProcessExit {
+		t.Fatalf("typed-control physical plan = %+v", result)
+	}
+
+	ctx := &context{
+		coroEmission: &coroPhysicalEmissionSession{plan: &coroPhysicalFunctionPlan{
+			function: root,
+			owner:    owner,
+			instructions: map[ssa.Instruction]coroPhysicalInstructionPlan{
+				call: result,
+			},
+		}},
+	}
+	ctx.setCoroEmissionSite(&coroSiteEmissionObserver{
+		instruction:          call,
+		expectedPhysical:     result,
+		hasExpectedPhysical:  true,
+		seenPhysical:         true,
+		seenPhysicalControl:  true,
+		seenPhysicalOutcome:  true,
+		seenPhysicalNilGuard: false,
+	})
+	ctx.selectTypedControlOperation(call, CoroControlProcessExit)
+	if !ctx.coroEmissionSite().seenPhysicalOperation {
+		t.Fatal("typed-control physical selection was not observed")
+	}
+}
+
 func TestCoroPhysicalCodegenRejectsMissingCommittedPlan(t *testing.T) {
 	prog, ssaPkg, files, universe, plan := prepareCoroPhysicalValueTransportABI(t, nil)
 	defer prog.Dispose()

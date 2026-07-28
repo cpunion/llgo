@@ -549,8 +549,6 @@ func TestErrBuiltin(t *testing.T) {
 	test("string", func(ctx *context) { ctx.string(nil, nil) })
 	test("stringData", func(ctx *context) { ctx.stringData(nil, nil) })
 	test("funcAddr", func(ctx *context) { ctx.funcAddr(nil, nil) })
-	test("sigsetjmp", func(ctx *context) { ctx.sigsetjmp(nil, nil) })
-	test("siglongjmp", func(ctx *context) { ctx.siglongjmp(nil, nil) })
 	test("cstr(NoArgs)", func(ctx *context) { cstr(nil, nil) })
 	test("cstr(Nonconst)", func(ctx *context) { cstr(nil, []ssa.Value{&ssa.Parameter{}}) })
 	test("pystr(NoArgs)", func(ctx *context) { pystr(nil, nil) })

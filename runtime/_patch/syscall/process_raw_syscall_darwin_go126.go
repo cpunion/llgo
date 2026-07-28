@@ -26,23 +26,18 @@ import "unsafe"
 // shared function-word rawSyscall carrier used by ordinary file and socket
 // targets. Otherwise one uncertified process target would invalidate the
 // producer-forward worker certificate for every safe target that shares
-// rawSyscall. "sync" preserves the required current-thread execution and does
-// not claim that these operations are bounded or worker-safe.
+// rawSyscall. Compiler-owned typed control operations preserve exact
+// current-thread semantics without declaration-wide foreign contracts.
 //
 //llgo:skip fork execve exit
 
-//llgo:coro sync
-//go:linkname llgoCoroFork C.fork
+//go:linkname llgoCoroFork llgo.controlFork
 func llgoCoroFork() int32
 
-//llgo:coro sync
-//go:linkname llgoCoroExecve C.execve
+//go:linkname llgoCoroExecve llgo.controlExecve
 func llgoCoroExecve(path *int8, argv **int8, envp **int8) int32
 
-// C.exit remains an irreducible terminal no-return contract until the compiler
-// publishes the corresponding control operation.
-//
-//go:linkname llgoCoroExit C.exit
+//go:linkname llgoCoroExit llgo.controlExit
 func llgoCoroExit(res int32)
 
 //go:linkname llgoCoroProcessErrno C.cliteErrno

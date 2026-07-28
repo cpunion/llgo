@@ -20,8 +20,7 @@ package runtime
 
 import _ "unsafe"
 
-//llgo:coro noblock
-//go:linkname coroFreestandingAbort C.abort
+//go:linkname coroFreestandingAbort llgo.controlTrap
 func coroFreestandingAbort()
 
 // Freestanding core modules have no process stderr or exit ABI. A scheduler

@@ -1631,6 +1631,10 @@ func validateCoroPhysicalABIForOwner(
 						callPlan := frozen.plan
 						semantics, intrinsic := callPlan.IntrinsicSemantics, callPlan.Intrinsic
 						cgoWorker := callPlan.Elision == CoroCallElidedCgoWorker
+						if intrinsic && callPlan.ControlOperation.NativeActivationBound() {
+							return coroLeafInstructionError(fn, plan, instr,
+								"native setjmp/longjmp control cannot retain a stackless coroutine resume activation; isolate it in a plain native-stack adapter")
+						}
 						// InlineWithLoweredCalls is cleanup-safe for the same
 						// structural reason as an ordinary managed child: its
 						// exact helper edges remain in CoroLoweredCalls, and
@@ -1651,6 +1655,12 @@ func validateCoroPhysicalABIForOwner(
 							}
 							foreignWaits++
 							continue
+						}
+						if intrinsic && callPlan.ControlOperation != CoroControlNone &&
+							(instructionPlan.operation != coroPhysicalOperationControl ||
+								instructionPlan.operationControl != callPlan.ControlOperation) {
+							return coroLeafInstructionError(fn, plan, instr,
+								"typed control intrinsic has no matching frozen physical operation")
 						}
 						if intrinsic && semantics == CoroIntrinsicCallInlineForeignSuspend {
 							if frozen.opcode != llgoCgoCgocall ||

@@ -616,9 +616,9 @@ func TestDarwinCoroProcessSyscallsUseIsolatedRawCarrier(t *testing.T) {
 	}
 	source := string(injected)
 	for _, required := range []string{
-		"//llgo:coro sync\n//go:linkname llgoCoroFork C.fork",
-		"//llgo:coro sync\n//go:linkname llgoCoroExecve C.execve",
-		"//go:linkname llgoCoroExit C.exit",
+		"//go:linkname llgoCoroFork llgo.controlFork",
+		"//go:linkname llgoCoroExecve llgo.controlExecve",
+		"//go:linkname llgoCoroExit llgo.controlExit",
 		"//go:linkname llgoCoroProcessErrno C.cliteErrno",
 		"func fork()",
 		"func execve(",
@@ -632,6 +632,8 @@ func TestDarwinCoroProcessSyscallsUseIsolatedRawCarrier(t *testing.T) {
 		"llgo.syscall32",
 		"abi.FuncPCABI0(",
 		"llgoCoroProcessRawSyscall3",
+		"//llgo:coro sync\n//go:linkname llgoCoroFork",
+		"//llgo:coro sync\n//go:linkname llgoCoroExecve",
 		"//llgo:coro noblock\n//go:linkname llgoCoroExit C.exit",
 		"//llgo:coro noblock\n//go:linkname llgoCoroProcessErrno C.cliteErrno",
 	} {

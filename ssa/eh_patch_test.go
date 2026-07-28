@@ -33,6 +33,9 @@ func TestSetjmpLongjmpIRPaths(t *testing.T) {
 	if !strings.Contains(ir, "longjmp") {
 		t.Fatalf("expected longjmp/siglongjmp symbol in IR, got:\n%s", ir)
 	}
+	if strings.Contains(ir, "runtime.Sigsetjmp") || strings.Contains(ir, "runtime.Siglongjmp") {
+		t.Fatalf("sigjmp lowering retained hidden runtime leaves:\n%s", ir)
+	}
 }
 
 func TestSigjmpUsesSetjmpOnExplicitTarget(t *testing.T) {
@@ -53,6 +56,43 @@ func TestSigjmpUsesSetjmpOnExplicitTarget(t *testing.T) {
 	ir := pkg.Module().String()
 	if !strings.Contains(ir, "@setjmp") || !strings.Contains(ir, "@longjmp") {
 		t.Fatalf("expected setjmp/longjmp fallback on explicit target, got:\n%s", ir)
+	}
+}
+
+func TestTypedProcessControlIR(t *testing.T) {
+	prog := ssatest.NewProgram(t, nil)
+	pkg := prog.NewPackage("foo", "foo")
+
+	process := pkg.NewFunc("process", ssa.NoArgsNoRet, ssa.InGo)
+	b := process.MakeBody(1)
+	pid := b.ControlFork()
+	path := prog.Zero(prog.CStr())
+	argv := prog.Zero(prog.Pointer(prog.CStr()))
+	_ = pid
+	_ = b.ControlExecve(path, argv, argv)
+	b.Return()
+	b.EndBuild()
+
+	exit := pkg.NewFunc("exitNow", ssa.NoArgsNoRet, ssa.InGo)
+	b = exit.MakeBody(1)
+	b.ControlExit(prog.IntVal(2, prog.CInt()))
+	b.Unreachable()
+	b.EndBuild()
+
+	trap := pkg.NewFunc("trapNow", ssa.NoArgsNoRet, ssa.InGo)
+	b = trap.MakeBody(1)
+	b.ControlTrap()
+	b.Unreachable()
+	b.EndBuild()
+
+	ir := pkg.Module().String()
+	for _, symbol := range []string{"@fork", "@execve", "@exit", "@llvm.trap"} {
+		if !strings.Contains(ir, symbol) {
+			t.Fatalf("typed control IR omitted %s:\n%s", symbol, ir)
+		}
+	}
+	if !strings.Contains(ir, "noreturn") {
+		t.Fatalf("typed terminal control IR omitted noreturn attribute:\n%s", ir)
 	}
 }
 
