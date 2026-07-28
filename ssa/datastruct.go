@@ -299,7 +299,10 @@ func (b Builder) checkIndex(idx Expr, max Expr) Expr {
 // true when the Go index operation is out of range. It emits no panic helper.
 func (b Builder) IndexBounds(idx Expr, max Expr) (Expr, Expr) {
 	prog := b.Prog
-	checkMin, checkMax := checkRange(idx, max)
+	var checkMin, checkMax bool
+	if !prog.disableBoundsChecks {
+		checkMin, checkMax = checkRange(idx, max)
+	}
 	signed := idx.kind == vkSigned
 	var typ Type
 	if signed {
@@ -311,6 +314,9 @@ func (b Builder) IndexBounds(idx Expr, max Expr) (Expr, Expr) {
 		srcType := idx.Type
 		idx.Type = typ
 		idx.impl = castUintptr(b, idx.impl, srcType, typ)
+	}
+	if prog.disableBoundsChecks {
+		return idx, Expr{}
 	}
 	// check range expr
 	var check Expr
@@ -469,7 +475,11 @@ func (b Builder) Slice(x, low, high, max Expr) (ret Expr) {
 			highArg, highSigned = b.boundsArg(high)
 		}
 		ret.Type = x.Type
-		ret.impl = b.InlineCall(b.Pkg.rtFunc("StringSlice2"), x, lowArg, highArg, prog.BoolVal(lowSigned), prog.BoolVal(highSigned)).impl
+		if prog.disableBoundsChecks {
+			ret.impl = b.stringSliceUnchecked(x, low, high).impl
+		} else {
+			ret.impl = b.InlineCall(b.Pkg.rtFunc("StringSlice2"), x, lowArg, highArg, prog.BoolVal(lowSigned), prog.BoolVal(highSigned)).impl
+		}
 		return
 	case *types.Slice:
 		nEltSize = SizeOf(prog, prog.Index(x.Type))
@@ -490,7 +500,7 @@ func (b Builder) Slice(x, low, high, max Expr) (ret Expr) {
 			nCap = prog.IntVal(uint64(te.Len()), prog.Int())
 			upperIsLen = true
 			if high.IsNil() {
-				if lowIsNil && max.IsNil() {
+				if lowIsNil && max.IsNil() && !prog.disableBoundsChecks {
 					ret.impl = b.unsafeSlice(x, nCap.impl, nCap.impl).impl
 					return
 				}
@@ -499,6 +509,17 @@ func (b Builder) Slice(x, low, high, max Expr) (ret Expr) {
 			}
 			base = x
 		}
+	}
+	if prog.disableBoundsChecks {
+		if _, ok := x.raw.Type.Underlying().(*types.Pointer); ok && !isKnownNonNilArrayBase(x.impl) {
+			b.AssertNilDeref(x)
+		}
+		upper := nCap
+		if !max.IsNil() {
+			upper = max
+		}
+		ret.impl = b.sliceUnchecked(ret.Type, base, low, high, upper).impl
+		return
 	}
 	if max.IsNil() {
 		ret.impl = b.InlineCall(
@@ -578,6 +599,9 @@ func (b Builder) SliceBoundsChecks(
 	nhigh = b.FitIntSize(high64)
 	nlimit := b.FitIntSize(limit64)
 	if max.IsNil() {
+		if b.Prog.disableBoundsChecks {
+			return
+		}
 		checks = []SliceBoundsCheck{
 			{
 				OutOfRange: b.sliceBoundAbove(high64, highSigned, limit64),
@@ -595,6 +619,9 @@ func (b Builder) SliceBoundsChecks(
 	} else {
 		max64, maxSigned := b.boundsArg(max)
 		nmax = b.FitIntSize(max64)
+		if b.Prog.disableBoundsChecks {
+			return
+		}
 		checks = []SliceBoundsCheck{
 			{
 				OutOfRange: b.sliceBoundAbove(max64, maxSigned, limit64),
@@ -705,6 +732,30 @@ func (b Builder) sliceDataAt(base Expr, elem Type, index Expr) Expr {
 	index = b.normalizeIndex(index)
 	ptr := llvm.CreateGEP(b.impl, elem.ll, base.impl, []llvm.Value{index.impl})
 	return Expr{ptr, b.Prog.Pointer(elem)}
+}
+
+// stringSliceUnchecked and sliceUnchecked are the ordinary lowering helpers
+// used by -B. Structured coroutine lowering uses SliceUnchecked after its
+// frozen plan has either emitted or deliberately disabled the same checks.
+func (b Builder) stringSliceUnchecked(x, low, high Expr) Expr {
+	data := b.StringData(x)
+	advanced := b.Advance(data, low)
+	beforeEnd := llvm.CreateICmp(b.impl, llvm.IntSLT, low.impl, b.StringLen(x).impl)
+	data.impl = llvm.CreateSelect(b.impl, beforeEnd, advanced.impl, data.impl)
+	length := b.impl.CreateSub(high.impl, low.impl, "")
+	return b.unsafeString(data.impl, length)
+}
+
+func (b Builder) sliceUnchecked(t Type, base, low, high, upper Expr) Expr {
+	length := b.impl.CreateSub(high.impl, low.impl, "")
+	capacity := b.impl.CreateSub(upper.impl, low.impl, "")
+	advanced := b.Advance(base, low)
+	zero := llvm.ConstInt(capacity.Type(), 0, false)
+	hasCapacity := llvm.CreateICmp(b.impl, llvm.IntSGT, capacity, zero)
+	base.impl = llvm.CreateSelect(b.impl, hasCapacity, advanced.impl, base.impl)
+	ret := b.unsafeSlice(base, length, capacity)
+	ret.Type = t
+	return ret
 }
 
 // SliceLit creates a new slice with the specified elements.

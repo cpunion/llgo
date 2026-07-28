@@ -1791,6 +1791,12 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = p.compileCoroIndexAddrPlanned(b, v, x, idx, physicalInstruction)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("IndexAddr selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		} else if b.Prog.BoundsChecksDisabled() {
+			if _, pointer := types.Unalias(p.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
+				emissionArrayPointerNeedsNilCheck(v.X, v) {
+				b.AssertNilDeref(x)
+			}
+			ret = b.IndexAddrUnchecked(x, idx)
 		} else if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
 			if _, pointer := types.Unalias(p.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
 				!emissionKnownNonNilArrayBase(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
@@ -1822,6 +1828,20 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = p.compileCoroIndexPlanned(b, v, x, idx, takeArrayAddr, physicalInstruction)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("Index selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		} else if b.Prog.BoundsChecksDisabled() {
+			switch types.Unalias(p.patchType(v.X.Type())).Underlying().(type) {
+			case *types.Basic, *types.Array:
+				ret = b.IndexUnchecked(x, idx, takeArrayAddr)
+			case *types.Slice:
+				ret = b.Load(b.IndexAddrUnchecked(x, idx))
+			case *types.Pointer:
+				if emissionArrayPointerNeedsNilCheck(v.X, v) {
+					b.AssertNilDeref(x)
+				}
+				ret = b.Load(b.IndexAddrUnchecked(x, idx))
+			default:
+				panic("bounds-disabled Index lost its frozen container shape")
+			}
 		} else if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
 			switch types.Unalias(p.patchType(v.X.Type())).Underlying().(type) {
 			case *types.Array:
@@ -1868,6 +1888,8 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = p.compileCoroSlicePlanned(b, v, x, low, high, max, physicalInstruction)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("Slice selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		} else if unchecked, ok := p.compileBoundsDisabledSlice(b, v, x, low, high, max); ok {
+			ret = unchecked
 		} else {
 			ret = b.Slice(x, low, high, max)
 		}
@@ -2327,16 +2349,27 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		jmpb := p.jumpTo(v)
 		b.Jump(jmpb)
 	case *ssa.Return:
+		runDefers := p.returnNeedsImplicitRunDefers(v)
+		if runDefers {
+			p.recordPanicLocation(b, v.Pos())
+			b.RunDefers()
+		}
 		var results []llssa.Expr
 		if n := len(v.Results); n > 0 {
 			results = make([]llssa.Expr, n)
 			for i, r := range v.Results {
+				// A deferred call may change a named result independently of
+				// the SSA value in Return.Results. Reload the result's storage
+				// in the RunDefers continuation instead of depending on the
+				// particular SSA node used to form the return tuple.
+				if runDefers {
+					if slot := p.namedResultSlot(i); slot != nil {
+						results[i] = b.Load(p.compileValue(b, slot))
+						continue
+					}
+				}
 				results[i] = p.compileValue(b, r)
 			}
-		}
-		if p.returnNeedsImplicitRunDefers(v) {
-			p.recordPanicLocation(b, v.Pos())
-			b.RunDefers()
 		}
 		if p.shouldTrackCallerFrames() {
 			p.popCallerLocationFrame(b)
@@ -2738,6 +2771,30 @@ func (p *context) returnNeedsImplicitRunDefers(ret *ssa.Return) bool {
 		return false
 	}
 	return p.functionHasExplicitStackDeferInAnon(fn)
+}
+
+// namedResultSlot returns the allocation for fn's named result at index.
+// The SSA Function API exposes result variables through their source-level
+// Alloc instructions, while Return.Results only exposes the values currently
+// used to form a particular return tuple.
+func (p *context) namedResultSlot(index int) *ssa.Alloc {
+	fn := p.goFn
+	if fn == nil || index < 0 || index >= fn.Signature.Results().Len() {
+		return nil
+	}
+	result := fn.Signature.Results().At(index)
+	if result.Name() == "" {
+		return nil
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			alloc, ok := instr.(*ssa.Alloc)
+			if ok && alloc.Comment == result.Name() && alloc.Pos() == result.Pos() {
+				return alloc
+			}
+		}
+	}
+	return nil
 }
 
 func previousNonDebugInstrIsRunDefers(ret *ssa.Return) bool {

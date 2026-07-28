@@ -9,7 +9,7 @@ import (
 	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 )
 
-// Minimal signal support for stdlib os/signal on llgo/darwin.
+// Minimal signal support for stdlib os/signal on hosted native targets.
 
 type sigState struct {
 	handle  libuv.Signal

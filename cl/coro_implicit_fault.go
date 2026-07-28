@@ -286,6 +286,9 @@ func (p *context) compileCoroIndexAddrPlanned(
 	if plan.recipe != coroPhysicalInstructionIndexAddr {
 		panic("structured coroutine IndexAddr has the wrong physical recipe")
 	}
+	if plan.boundsDisabled != b.Prog.BoundsChecksDisabled() {
+		panic("structured coroutine IndexAddr disagrees with the frozen bounds-check mode")
+	}
 	var limit llssa.Expr
 	switch plan.container {
 	case coroPhysicalContainerSlice:
@@ -337,6 +340,9 @@ func (p *context) compileCoroIndexPlanned(
 	if plan.recipe != coroPhysicalInstructionIndex {
 		panic("structured coroutine Index has the wrong physical recipe")
 	}
+	if plan.boundsDisabled != b.Prog.BoundsChecksDisabled() {
+		panic("structured coroutine Index disagrees with the frozen bounds-check mode")
+	}
 	var limit llssa.Expr
 	if plan.boundsGuard {
 		switch plan.container {
@@ -349,7 +355,8 @@ func (p *context) compileCoroIndexPlanned(
 		default:
 			panic("structured coroutine Index has an invalid frozen container")
 		}
-	} else if plan.container != coroPhysicalContainerArray && plan.container != coroPhysicalContainerArrayPointer {
+	} else if !plan.boundsDisabled &&
+		plan.container != coroPhysicalContainerArray && plan.container != coroPhysicalContainerArrayPointer {
 		panic("unchecked coroutine Index is not a fixed-array recipe")
 	}
 	if plan.nilGuard {
@@ -389,11 +396,13 @@ func (p *context) compileCoroSlicePlanned(
 		b == nil || b.Func != p.fn {
 		panic("structured coroutine Slice escaped its physical body")
 	}
-	if !p.coroEmissionExplicitStatus() ||
-		body.abi.version < coroPhysicalABIVersionV1 {
+	if (plan.nilGuard || plan.boundsGuard) &&
+		(!p.coroEmissionExplicitStatus() || body.abi.version < coroPhysicalABIVersionV1) {
 		panic("structured coroutine Slice requires the PhysicalABIV1 explicit-status panic ABI")
 	}
-	if plan.recipe != coroPhysicalInstructionSlice || !plan.boundsGuard {
+	if plan.recipe != coroPhysicalInstructionSlice ||
+		plan.boundsDisabled != b.Prog.BoundsChecksDisabled() ||
+		plan.boundsGuard == plan.boundsDisabled {
 		panic("structured coroutine Slice has the wrong physical recipe")
 	}
 
@@ -430,6 +439,12 @@ func (p *context) compileCoroSlicePlanned(
 
 	threeIndex := !max.IsNil()
 	low, high, max, checks := b.SliceBoundsChecks(low, high, max, limit)
+	if plan.boundsDisabled {
+		if len(checks) != 0 {
+			panic("unchecked structured coroutine Slice retained bounds checks")
+		}
+		return b.SliceUnchecked(base, low, high, max)
+	}
 	var codes []coroBoundsFaultCode
 	if threeIndex {
 		upper := coroBoundsFaultSlice3Alen
@@ -461,6 +476,61 @@ func (p *context) compileCoroSlicePlanned(
 	}
 	p.compileCoroPlannedBoundsFaultSet(b, operation, faults)
 	return b.SliceUnchecked(base, low, high, max)
+}
+
+// compileBoundsDisabledSlice applies -B after source-order operand evaluation
+// while retaining the Go-required pointer-to-array nil check. When SSA already
+// proves the pointer non-nil, it bypasses LLSSA's conservative LLVM-value
+// fallback so lowering cannot manufacture an unplanned AssertNilDeref call
+// after the coroutine emission universe has been frozen.
+func (p *context) compileBoundsDisabledSlice(
+	b llssa.Builder,
+	operation *ssa.Slice,
+	base, low, high, max llssa.Expr,
+) (llssa.Expr, bool) {
+	if p == nil || b == nil || operation == nil || operation.X == nil ||
+		!b.Prog.BoundsChecksDisabled() {
+		return llssa.Expr{}, false
+	}
+	zero := b.Prog.IntVal(0, b.Prog.Int())
+	if low.IsNil() {
+		low = zero
+	}
+	var limit llssa.Expr
+	switch typ := types.Unalias(p.patchType(operation.X.Type())).Underlying().(type) {
+	case *types.Basic:
+		if typ.Kind() != types.String || !max.IsNil() {
+			return llssa.Expr{}, false
+		}
+		limit = b.StringLen(base)
+		if high.IsNil() {
+			high = limit
+		}
+	case *types.Slice:
+		limit = b.SliceCap(base)
+		if high.IsNil() {
+			high = b.SliceLen(base)
+		}
+	case *types.Pointer:
+		array, ok := types.Unalias(typ.Elem()).Underlying().(*types.Array)
+		if !ok {
+			return llssa.Expr{}, false
+		}
+		if emissionArrayPointerNeedsNilCheck(operation.X, operation) {
+			return llssa.Expr{}, false
+		}
+		limit = b.Prog.IntVal(uint64(array.Len()), b.Prog.Int())
+		if high.IsNil() {
+			high = limit
+		}
+	default:
+		return llssa.Expr{}, false
+	}
+	low, high, max, checks := b.SliceBoundsChecks(low, high, max, limit)
+	if len(checks) != 0 {
+		panic("bounds-disabled Slice unexpectedly retained a bounds predicate")
+	}
+	return b.SliceUnchecked(base, low, high, max), true
 }
 
 func (p *context) compileCoroFaultConditionGuard(b llssa.Builder, condition llssa.Expr, kind uint32) {
