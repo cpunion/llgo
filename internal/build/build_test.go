@@ -333,7 +333,7 @@ func TestFilterTestPackages(t *testing.T) {
 			pkg("github.com/goplus/llgo/chore/ardump"),
 			pkg("github.com/goplus/llgo/chore/ardump [github.com/goplus/llgo/chore/ardump.test]"),
 		}
-		filtered, err := filterTestPackages(initial, "")
+		filtered, err := filterTestPackages(initial, "", false)
 		if err != nil {
 			t.Fatalf("filterTestPackages returned unexpected error: %v", err)
 		}
@@ -347,7 +347,7 @@ func TestFilterTestPackages(t *testing.T) {
 			pkg("foo"),
 			pkg("foo.test"),
 		}
-		filtered, err := filterTestPackages(initial, "")
+		filtered, err := filterTestPackages(initial, "", false)
 		if err != nil {
 			t.Fatalf("filterTestPackages returned unexpected error: %v", err)
 		}
@@ -364,7 +364,7 @@ func TestFilterTestPackages(t *testing.T) {
 			pkg("a.test"),
 			pkg("b.test"),
 		}
-		_, err := filterTestPackages(initial, "/tmp/out")
+		_, err := filterTestPackages(initial, "/tmp/out", false)
 		if err == nil {
 			t.Fatal("expected error for -o with multiple test packages, got nil")
 		}
