@@ -74,6 +74,21 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 			return fail("classify external managed noblock capability: %v", err)
 		}
 		externalPlain = certified && certificate.ID != ""
+		if !externalPlain {
+			callable, callableCertified, err :=
+				universe.CoroCallableContractCertificate(fn)
+			if err != nil {
+				return fail(
+					"classify external managed callable capability: %v",
+					err,
+				)
+			}
+			externalPlain = callableCertified &&
+				callable.Scope == coro.CallableContractScopeDeclaration &&
+				coro.CallableContractDirectExecutorCompatible(
+					callable.Contract,
+				)
+		}
 	}
 	if fn == nil || !externalPlain && (plan.External != coro.Defined || len(fn.Blocks) == 0) {
 		return fail("requires one defined SSA body")
@@ -102,7 +117,9 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 		}
 	case coro.EmitExternal:
 		if !externalPlain {
-			return fail("external capability requires one exact managed noblock certificate")
+			return fail(
+				"external capability requires one exact direct executor-safe certificate",
+			)
 		}
 	default:
 		return fail("requires one plain or coroutine primary, got emission=%s primary=%s", plan.Emission, plan.Primary)

@@ -32,13 +32,15 @@ import (
 // selected and validated by the immutable occurrence plans before this record
 // is built.
 type coroForeignUseDomainRecord struct {
-	Function       *ssa.Function
-	FunctionID     coro.FunctionID
-	PhysicalSymbol string
-	LegacySync     bool
-	Calls          int
-	RawHostCalls   int
-	Rejections     []string
+	Function                *ssa.Function
+	FunctionID              coro.FunctionID
+	PhysicalSymbol          string
+	DirectExecutorCertified bool
+	NoBlockCertified        bool
+	SyncCertified           bool
+	Calls                   int
+	RawHostCalls            int
+	Rejections              []string
 }
 
 func (record coroForeignUseDomainRecord) rawHostOnly() bool {
@@ -83,8 +85,9 @@ func (record coroForeignUseDomainRecord) diagnostic() string {
 		reasons = "-"
 	}
 	return fmt.Sprintf(
-		"%s\t%s\tlegacy-sync=%t\tcalls=%d\traw=%d\treasons=%s",
-		status, record.PhysicalSymbol, record.LegacySync,
+		"%s\t%s\tdirect-executor-certified=%t\tnoblock-certified=%t\tsync-certified=%t\tcalls=%d\traw=%d\treasons=%s",
+		status, record.PhysicalSymbol, record.DirectExecutorCertified,
+		record.NoBlockCertified, record.SyncCertified,
 		record.Calls, record.RawHostCalls, reasons,
 	)
 }
@@ -94,10 +97,12 @@ type coroForeignUseDomainReport struct {
 	Records []coroForeignUseDomainRecord
 }
 
-func (report coroForeignUseDomainReport) legacySyncRecords() []coroForeignUseDomainRecord {
+func (report coroForeignUseDomainReport) certificateRecords() []coroForeignUseDomainRecord {
 	records := make([]coroForeignUseDomainRecord, 0)
 	for _, record := range report.Records {
-		if record.LegacySync {
+		if record.DirectExecutorCertified ||
+			record.NoBlockCertified ||
+			record.SyncCertified {
 			records = append(records, record)
 		}
 	}
@@ -191,12 +196,20 @@ func inspectCoroForeignUseDomains(
 				function.Plan.ID, err,
 			)
 		}
-		_, legacySync := fixed.ForeignSyncCertificate(target)
+		_, noBlockCertified := fixed.ForeignNoBlockCertificate(target)
+		_, syncCertified := fixed.ForeignSyncCertificate(target)
+		callable, callableCertified := fixed.CallableContractCertificate(target)
 		record := &coroForeignUseDomainRecord{
 			Function:       target,
 			FunctionID:     function.Plan.ID,
 			PhysicalSymbol: identity.PhysicalSymbol,
-			LegacySync:     legacySync,
+			DirectExecutorCertified: callableCertified &&
+				callable.Scope == coro.CallableContractScopeDeclaration &&
+				coro.CallableContractDirectExecutorCompatible(
+					callable.Contract,
+				),
+			NoBlockCertified: noBlockCertified,
+			SyncCertified:    syncCertified,
 		}
 		if !report.Closed {
 			addCoroForeignUseDomainRejection(record, "open-emission-universe")

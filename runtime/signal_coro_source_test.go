@@ -55,6 +55,12 @@ func TestRuntimeSignalCoroAdapterIsSignalSafeAndEventDriven(t *testing.T) {
 	}
 
 	coro := readRuntimePollFile(t, runtimeSignalCoroSource)
+	requireRuntimeAnnotationFreeCDeclarations(
+		t,
+		runtimeSignalCoroSource,
+		"coroSignalGenerationNativeV1",
+		"coroSignalIdleNativeV1",
+	)
 	for _, required := range []string{
 		"C.__llgo_runtime_signal_init_v1",
 		"C.__llgo_runtime_signal_enable_v1",

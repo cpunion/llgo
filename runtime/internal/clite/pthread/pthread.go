@@ -62,8 +62,9 @@ func Cancel(thread Thread) c.Int
 //
 // pthread_self only reads the calling thread's fixed-size identity. It neither
 // waits on an external resource nor invokes a callback; IRQUnsafe is retained.
+// All live runtime uses are proven to belong to the raw-host closure, which
+// also preserves the physical calling-thread identity without a global claim.
 //
-//llgo:coro noblock
 //go:linkname Self C.pthread_self
 func Self() Thread
 

@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/goplus/llgo/cl"
+	"github.com/goplus/llgo/internal/llvmproof"
 	"github.com/goplus/llgo/internal/packages"
 	llplan9asm "github.com/goplus/llgo/internal/plan9asm"
 	llruntime "github.com/goplus/llgo/runtime"
@@ -48,7 +49,9 @@ import (
 // codegen; Darwin cgo-import aliases are generated wholly from frozen pragmas.
 // Inputs without an equivalent pre-plan representation remain fail closed.
 type coroRawGlobalSymbolInventory struct {
-	profiles map[string]*coroRawGlobalSymbolProfile
+	profiles                       map[string]*coroRawGlobalSymbolProfile
+	foreignExecutorLeafProofs      map[string]cl.CoroForeignExecutorLeafProof
+	ambiguousForeignExecutorLeaves map[string]bool
 }
 
 type coroRawGlobalSymbolProfile struct {
@@ -131,11 +134,59 @@ func (b *coroRawGlobalSymbolInventoryBuilder) freeze() *coroRawGlobalSymbolProfi
 // synthetic universe has no non-Go linker inputs. Production callers freeze
 // the inventory from the actual aPackage set instead.
 func newCompleteCoroRawGlobalSymbolInventory(packageIdentities ...string) *coroRawGlobalSymbolInventory {
-	result := &coroRawGlobalSymbolInventory{profiles: make(map[string]*coroRawGlobalSymbolProfile, len(packageIdentities))}
+	result := &coroRawGlobalSymbolInventory{
+		profiles:                  make(map[string]*coroRawGlobalSymbolProfile, len(packageIdentities)),
+		foreignExecutorLeafProofs: make(map[string]cl.CoroForeignExecutorLeafProof),
+	}
 	for _, identity := range packageIdentities {
 		if identity != "" {
 			result.profiles[identity] = newCoroRawGlobalSymbolInventoryBuilder().freeze()
 		}
+	}
+	return result
+}
+
+func (i *coroRawGlobalSymbolInventory) addForeignExecutorLeafProof(proof cl.CoroForeignExecutorLeafProof) {
+	if i == nil || proof.PhysicalSymbol == "" ||
+		i.ambiguousForeignExecutorLeaves[proof.PhysicalSymbol] {
+		return
+	}
+	if i.foreignExecutorLeafProofs == nil {
+		i.foreignExecutorLeafProofs = make(map[string]cl.CoroForeignExecutorLeafProof)
+	}
+	if previous, duplicate := i.foreignExecutorLeafProofs[proof.PhysicalSymbol]; duplicate {
+		if previous.ProducerIdentity == proof.ProducerIdentity &&
+			previous.LLVMABISignature == proof.LLVMABISignature &&
+			previous.LLVMTargetTriple == proof.LLVMTargetTriple &&
+			previous.LLVMDataLayout == proof.LLVMDataLayout &&
+			previous.ClosureSHA256 == proof.ClosureSHA256 &&
+			slices.Equal(previous.CallClosure, proof.CallClosure) {
+			return
+		}
+		delete(i.foreignExecutorLeafProofs, proof.PhysicalSymbol)
+		if i.ambiguousForeignExecutorLeaves == nil {
+			i.ambiguousForeignExecutorLeaves = make(map[string]bool)
+		}
+		i.ambiguousForeignExecutorLeaves[proof.PhysicalSymbol] = true
+		return
+	}
+	i.foreignExecutorLeafProofs[proof.PhysicalSymbol] = proof
+}
+
+func (i *coroRawGlobalSymbolInventory) frozenForeignExecutorLeafProofs() []cl.CoroForeignExecutorLeafProof {
+	if i == nil || len(i.foreignExecutorLeafProofs) == 0 {
+		return nil
+	}
+	symbols := make([]string, 0, len(i.foreignExecutorLeafProofs))
+	for symbol := range i.foreignExecutorLeafProofs {
+		symbols = append(symbols, symbol)
+	}
+	slices.Sort(symbols)
+	result := make([]cl.CoroForeignExecutorLeafProof, 0, len(symbols))
+	for _, symbol := range symbols {
+		proof := i.foreignExecutorLeafProofs[symbol]
+		proof.CallClosure = append([]string(nil), proof.CallClosure...)
+		result = append(result, proof)
 	}
 	return result
 }
@@ -199,7 +250,10 @@ func (i *coroRawGlobalSymbolProfile) proveNoDefinitionOrReference(physicalSymbol
 // inputs selected later by buildPkg. Profiles are isolated by the exact stable
 // identity passed to cl; original and selected Alt inputs share one profile.
 func freezeCoroRawGlobalSymbolInventory(ctx *context, all []*aPackage) (*coroRawGlobalSymbolInventory, error) {
-	result := &coroRawGlobalSymbolInventory{profiles: make(map[string]*coroRawGlobalSymbolProfile)}
+	result := &coroRawGlobalSymbolInventory{
+		profiles:                  make(map[string]*coroRawGlobalSymbolProfile),
+		foreignExecutorLeafProofs: make(map[string]cl.CoroForeignExecutorLeafProof),
+	}
 
 	packagesInOrder := append([]*aPackage(nil), all...)
 	slices.SortFunc(packagesInOrder, func(left, right *aPackage) int {
@@ -247,14 +301,14 @@ func freezeCoroRawGlobalSymbolInventory(ctx *context, all []*aPackage) (*coroRaw
 		}
 
 		includeOriginalPlan9 := coroRawIncludesOriginalPlan9(aPkg)
-		if err := inventoryCoroRawPackageInputs(ctx, builder, aPkg, aPkg.Package, "original", includeOriginalPlan9); err != nil {
+		if err := inventoryCoroRawPackageInputs(ctx, result, builder, aPkg, aPkg.Package, "original", includeOriginalPlan9); err != nil {
 			return nil, err
 		}
 		if aPkg.AltPkg != nil && aPkg.AltPkg.Package != nil {
 			// buildPkg always compiles the selected Alt package's own SFiles. For
 			// replacement patches it omits the original SFiles; additive patches
 			// retain both sets. Keep this in lockstep with buildPkg.
-			if err := inventoryCoroRawPackageInputs(ctx, builder, aPkg, aPkg.AltPkg.Package, "alt", true); err != nil {
+			if err := inventoryCoroRawPackageInputs(ctx, result, builder, aPkg, aPkg.AltPkg.Package, "alt", true); err != nil {
 				return nil, err
 			}
 		}
@@ -279,6 +333,7 @@ func coroRawIncludesOriginalPlan9(aPkg *aPackage) bool {
 
 func inventoryCoroRawPackageInputs(
 	ctx *context,
+	inventory *coroRawGlobalSymbolInventory,
 	builder *coroRawGlobalSymbolInventoryBuilder,
 	aPkg *aPackage,
 	pkg *packages.Package,
@@ -290,7 +345,15 @@ func inventoryCoroRawPackageInputs(
 	}
 	origin := pkg.PkgPath + " (" + role + ")"
 	if value, ok := coroRawLLGoFiles(pkg); ok && strings.TrimSpace(value) != "" {
-		if err := inventoryCoroRawLLGoFiles(ctx, builder, pkg, value, origin); err != nil {
+		if err := inventoryCoroRawLLGoFiles(
+			ctx,
+			inventory,
+			coroRawPackageIdentity(aPkg),
+			builder,
+			pkg,
+			value,
+			origin,
+		); err != nil {
 			builder.block("opaque LLGoFiles input", origin+": "+value+" ("+err.Error()+")")
 		}
 	}
@@ -374,6 +437,8 @@ func coroRawLLGoFiles(pkg *packages.Package) (string, bool) {
 // inventory: absence is never inferred by searching C/C++ source text.
 func inventoryCoroRawLLGoFiles(
 	ctx *context,
+	inventory *coroRawGlobalSymbolInventory,
+	producerIdentity string,
 	builder *coroRawGlobalSymbolInventoryBuilder,
 	pkg *packages.Package,
 	files, origin string,
@@ -413,10 +478,11 @@ func inventoryCoroRawLLGoFiles(
 			os.Remove(objectPath)
 			return fmt.Errorf("close object inventory output for %s: %w", source, closeErr)
 		}
-		compileArgs := append([]string(nil), args...)
+		sourceArgs := append([]string(nil), args...)
 		if filepath.Ext(source) == ".c" {
-			compileArgs = append(compileArgs, "-x", "c")
+			sourceArgs = append(sourceArgs, "-x", "c")
 		}
+		compileArgs := append([]string(nil), sourceArgs...)
 		compileArgs = append(compileArgs, "-o", objectPath, "-c", source)
 		compileErr := ctx.compiler().Compile(compileArgs...)
 		if compileErr != nil {
@@ -435,11 +501,81 @@ func inventoryCoroRawLLGoFiles(
 		for _, symbol := range strings.Fields(string(output)) {
 			builder.mention(symbol, "LLGoFiles object symbol", origin+": "+source)
 		}
+		inferCoroRawLLGoFileExecutorLeaves(
+			ctx,
+			inventory,
+			producerIdentity,
+			sourceArgs,
+			source,
+		)
 	}
 	if selected == 0 {
 		return fmt.Errorf("LLGoFiles selected no source")
 	}
 	return nil
+}
+
+// inferCoroRawLLGoFileExecutorLeaves is an optional, fail-closed producer
+// analysis. Raw-symbol inventory remains authoritative even when LLVM IR
+// emission or parsing is unavailable; in that case no execution capability is
+// published and ordinary foreign planning remains conservative.
+func inferCoroRawLLGoFileExecutorLeaves(
+	ctx *context,
+	inventory *coroRawGlobalSymbolInventory,
+	producerIdentity string,
+	sourceArgs []string,
+	source string,
+) {
+	if ctx == nil || inventory == nil || producerIdentity == "" ||
+		filepath.Ext(source) != ".c" {
+		return
+	}
+	output, err := os.CreateTemp("", "llgo-coro-foreign-proof-*.ll")
+	if err != nil {
+		return
+	}
+	outputPath := output.Name()
+	if output.Close() != nil {
+		os.Remove(outputPath)
+		return
+	}
+	defer os.Remove(outputPath)
+
+	args := append([]string(nil), sourceArgs...)
+	args = append(args, "-emit-llvm", "-S", "-o", outputPath, "-c", source)
+	if err := ctx.compiler().Compile(args...); err != nil {
+		return
+	}
+	llvmContext := llvm.NewContext()
+	defer llvmContext.Dispose()
+	buffer, err := llvm.NewMemoryBufferFromFile(outputPath)
+	if err != nil {
+		return
+	}
+	module, err := llvmContext.ParseIR(buffer)
+	if err != nil {
+		return
+	}
+	defer module.Dispose()
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if function.IsDeclaration() || function.BasicBlocksCount() == 0 ||
+			function.Linkage() != llvm.ExternalLinkage {
+			continue
+		}
+		proof, err := llvmproof.ProveExecutorLeaf(module, function.Name())
+		if err != nil {
+			continue
+		}
+		inventory.addForeignExecutorLeafProof(cl.CoroForeignExecutorLeafProof{
+			ProducerIdentity: producerIdentity,
+			PhysicalSymbol:   proof.Symbol,
+			LLVMABISignature: proof.Signature,
+			LLVMTargetTriple: proof.TargetTriple,
+			LLVMDataLayout:   proof.DataLayout,
+			CallClosure:      append([]string(nil), proof.CallClosure...),
+			ClosureSHA256:    proof.ClosureSHA256,
+		})
+	}
 }
 
 func coroRawLLVMNM(ctx *context) (string, error) {

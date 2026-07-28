@@ -591,7 +591,7 @@ func TestDarwinRuntimeEnvironmentUsesFixedWorkerABI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(errnoSource), "//llgo:coro noblock\n//go:linkname Errno C.cliteErrno") {
-		t.Error("the runtime-owned Darwin fcntl bridge cannot read TLS errno without a no-suspend certificate")
+		t.Error("the opaque platform TLS accessor needs an exact no-suspend contract")
 	}
 }
 

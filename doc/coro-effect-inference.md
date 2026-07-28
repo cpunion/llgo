@@ -40,21 +40,35 @@ exact local-export cut removed another eight declaration-level annotations.
 The closed raw-host use-domain cut removed 11 declaration-wide `sync`
 annotations.  The first conservative-default cut removed another nine
 thread-independent lifecycle/notification declarations.  The terminal
-raw-host cut removed two private stdio declarations, so the current exact
-production inventory is 105:
+raw-host cut removed two private stdio declarations, reaching the earlier
+105-directive checkpoint.
+
+The remaining-use audit, exact alias consolidation, and target-selected
+C/LLVM proof have since removed another 34 annotations:
+
+- 20 exact declarations whose complete live use domain is compiler-owned
+  raw-host code;
+- six project-owned poll/signal C leaves whose implementations are proved;
+- seven duplicate declarations replaced by one canonical typed boundary; and
+- the WASM debug trap, recognized by exact LLVM intrinsic identity.
+
+The current exact production inventory is therefore 71:
 
 | Directive | Count | Status |
 | --- | ---: | --- |
-| `noblock` | 60 | legacy bottom behavior; not structurally inferable |
-| `sync` | 38 | legacy bottom behavior; remove after the general same-M foreign episode or replace with producer metadata |
+| `noblock` | 34 | opaque executor-safe or terminal bottom behavior which is not visible in Go/LLVM |
+| `sync` | 30 | opaque synchronous, same-thread, retained-callback, or control behavior |
 | `schedulerwait` | 0 | removed; exact raw-host invocation is inferred from compiler-owned closure provenance |
 | `contract` | 7 | executor/thread and foreign-pointer result facts |
 | `workeraddr` | 0 | removed; target identity is producer-owned and arity is sink-derived |
 | `workerresult` | 0 | removed; wrapper result flow is SSA-derived |
 | `worker` | 0 | removed; typed C declarations use the frozen foreign default |
 
-An executable monotonic gate enforces this inventory.  Removed directive
-classes cannot silently return.
+An executable monotonic gate enforces both the category counts and a canonical
+SHA-256 manifest of each source path, owning function, and complete directive.
+Moving a residual contract, changing one of its semantic fields, swapping it
+for a new annotation elsewhere, or restoring a removed directive class cannot
+silently pass.
 
 The address inference is deliberately not based on a suffix alone.  Only an
 exact selected LLGo patch alternate is an annotation-free catalog entry.
@@ -92,6 +106,13 @@ pthread lifecycle/notification operations and two native-only LLGo poll
 descriptor allocation operations.  It deliberately excludes allocator/GC
 bootstrap, retained roots or callbacks, process/control flow, FFI, TLS/errno,
 and WASM/baremetal allocation paths.
+
+The implementation proof is declaration-wide only when the implementation is
+actually visible.  The build compiles the exact target-selected `LLGoFiles` C
+input to LLVM IR with the same compiler configuration, proves one complete
+direct-call closure, and binds the result to a unique typed declaration.
+Opaque libc, pthread, BDWGC, libffi, OS, and dynamic-loader calls do not inherit
+that authority merely because their names or signatures look familiar.
 
 ## 2. Frozen principles
 
@@ -277,6 +298,63 @@ physical-entry summary; the consumer must perform the same identity checks and
 must not synthesize a global alias.  Until that consumer path is enabled, this
 automatic redirect is intentionally local to one frozen emission universe.
 
+### 3.6 Target-selected C/LLVM implementation proof
+
+An annotation-free C declaration may become executor-safe when the build owns
+the exact selected implementation rather than only its signature.  The
+implemented producer proof is deliberately fail-closed:
+
+1. compile each selected C `LLGoFiles` input to LLVM IR with the same target
+   flags used for its object file;
+2. start from one external definition and require its complete direct-call
+   closure to be present in that module;
+3. reject recursion, CFG cycles, external or indirect calls, inline assembly,
+   exception/control opcodes, unknown instructions, and intrinsics without the
+   complete progress attributes;
+4. allow only exact `llvm.trap` and `llvm.debugtrap` terminal intrinsics as
+   special finite operations;
+5. reject publication of pointer-bearing parameters, values derived from them,
+   or function-local storage; direct helpers are checked recursively;
+6. accept atomics only on a supported target, with natural alignment and width
+   no greater than 64 bits, so a wide operation cannot silently become a
+   blocking `libatomic` call.
+
+The immutable producer record contains package identity, physical symbol,
+LLVM ABI, target triple, data layout, sorted call closure, and a digest over
+the exact closure IR.  The frontend consumes it only when:
+
+- the LLVM architecture and data layout match the current program;
+- one physical C symbol has one unambiguous typed declaration ABI;
+- no competing producer proof exists; and
+- no explicit source contract overrides the conservative default.
+
+The resulting fact is not a synthesized legacy `noblock` certificate.  It
+replaces only the compiler-created conservative default with one generic
+declaration contract:
+
+- schema `llvm-executor-leaf.v1`;
+- executor-safe progress and caller-thread affinity;
+- no managed reentry; and
+- argument memory borrowed only until return.
+
+The contract certificate binds producer and consumer identities, the exact
+physical/LLVM ABI, and the current target profile.  It enters the same
+`LibraryEffectForeignCallable` record as an explicit generic producer
+contract.  A package archive therefore preserves it without knowing which
+consumer operation will eventually use it; a downstream package revalidates
+identity, ABI, target metadata, schema, and digest before reconstructing the
+same policy.  Static calls, dynamic dispatch, and raw/plain closure validation
+all consume this shared contract instead of consulting a separate proof-only
+side channel.
+
+Missing IR, compiler failure, a target/ABI mismatch, an opaque input, proof
+ambiguity, or a competing explicit contract leaves the normal may-block
+foreign contract intact.
+
+This proof authorizes executor progress and non-retention for the exact
+compiled closure.  It does not claim async-signal safety, general memory
+safety, or that an opaque library implementation shares the same semantics.
+
 ## 4. Minimal explicit vocabulary
 
 The final source-level vocabulary should describe only bottom semantics:
@@ -305,10 +383,10 @@ production inventory is monotonically bounded.  `schedulerwait`, `workeraddr`,
 
 ### 4.1 How the remaining source metadata shrinks
 
-The remaining 98 legacy `noblock`/`sync` directives are not call-graph
-coloring facts.  They
-assert behavior of opaque C implementations, so deleting them merely because a
-signature looks harmless would be unsound.  They are reduced in this order:
+The remaining 64 legacy `noblock`/`sync` directives are not call-graph
+coloring facts.  They assert behavior of opaque C implementations, so deleting
+them merely because a signature looks harmless would be unsound.  They are
+reduced in this order:
 
 1. A general typed C call uses the conservative foreign episode by default.
    It needs no `worker` or `sync` annotation for correctness.  A replacement M
@@ -332,6 +410,25 @@ This distinction matters: moving 145 names into a compiler table would reduce
 comments but not architecture debt.  Producer metadata may contain many exact
 callable records, but there should be only a few orthogonal semantic classes
 and no manually maintained Go propagation graph.
+
+After the implemented inference cuts, the residual handwritten facts have
+been audited by semantic family:
+
+| Residual family | Directives | Why the compiler cannot derive it |
+| --- | ---: | --- |
+| libc memory/string, clocks, TLS, terminal/debug and signal leaves | 26 `noblock` | implementation is opaque or the contract includes platform progress/control semantics absent from the typed ABI |
+| pthread unlock/try/TLS leaves | 8 `noblock` | POSIX operation semantics, not Go SSA or C type structure, establish bounded progress and affinity |
+| process, nonlocal control, allocator/GC, loader/unwind and libc/FFI state | 30 `sync` | same-thread, returns-twice, retained-callback, stack identity, or internal-lock behavior is deliberately opaque |
+| poll/I/O adapters and foreign pointer-result word calls | 6 `contract` | event readiness, result provenance, and completion lifetime are API semantics |
+| baremetal stdio wrapper refinement | 1 `contract` | only the exact startup edge has the target-specific bounded-device guarantee |
+
+These totals are the 71-directive gate.  None is attached to an ordinary
+bodyful Go caller for effect propagation.  The only bodyful exception is the
+single `scope=wrapper` baremetal adapter, whose occurrence-local refinement
+cannot grant a declaration-wide capability.  Removing any remaining entry
+requires a generated/embedded producer fact, a typed compiler/runtime
+operation, or a closed implementation proof with the same fail-closed tests;
+a symbol-name allow-list is not inference.
 
 ### 4.2 Review decision: three semantic scopes
 
@@ -414,16 +511,16 @@ The remaining directives have different removal rules:
 
 | Legacy class | Migration |
 | --- | --- |
-| `sync` (38) | Ordinary declarations ultimately use the conservative same-M/event default.  Runtime-only direct calls move under a verified raw-host or executor adapter root.  Eleven fleet/worker and two private terminal-stdio declarations completed raw-host cuts; nine thread-independent pthread/poll declarations completed the temporary any-thread/no-reentry default cut. |
-| `noblock` (60) | Opaque C needs a producer proof; LLGo-owned definitions may use a closed C/LLVM proof.  The fact is embedded/generated and never propagated through Go source. |
+| `sync` (30) | Ordinary declarations ultimately use the conservative same-M/event default. Runtime-only direct calls move under a verified raw-host or executor adapter root. Opaque allocator/GC, FFI, retained callback, and control behavior remains an exact bottom contract until its operation adapter or producer metadata exists. |
+| `noblock` (34) | LLGo-owned definitions use the implemented closed C/LLVM proof. Opaque libc/pthread/TLS/clock/signal/terminal behavior still needs a producer contract; the fact is never propagated through Go source. |
 | `schedulerwait` (0; removal complete) | Per-leaf tags were deleted.  The compiler verifies each may-block occurrence against exact raw-host closure provenance while preserving managed `WaitForeign`. |
 | `contract` (7) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, wrapper flow, and exact local-export behavior. |
 
 The desired endpoint is not necessarily zero callable records.  It is zero
-manual Go coloring, zero compiler name allow-lists, and only a small number of
-source-visible adapter-root contracts.  A generated library may contain many
-exact callable records without spreading them through runtime or standard
-library source.
+manual Go coloring, zero derivable source annotations, zero compiler name
+allow-lists, and only the exact bottom contracts whose behavior is not visible
+to the compiler.  A generated library may contain many exact callable records
+without spreading them through runtime or standard library source.
 
 ## 5. Migration gates
 
@@ -688,9 +785,11 @@ be rediscovered.
 
 Special cases found in the current `sync` inventory map cleanly:
 
-- `sigsetjmp`/`siglongjmp` are already compiler intrinsics.  Their four helper
-  declarations become family-5 raw control entries.  A generic same-M thunk is
-  invalid because it adds a frame below the saved context.
+- the live runtime `siglongjmp` edges now use exact raw-host control
+  occurrences without a declaration-wide annotation.  `sigsetjmp` remains an
+  explicit returns-twice boundary until both operations become family-5
+  compiler/runtime intrinsics.  A generic same-M thunk is invalid because it
+  adds a frame below the saved context.
 - `fork`/`execve` use a process-control adapter.  `fork` quiesces the scheduler
   fleet, repairs the child to one physical execution domain, and resumes the
   parent fleet; it must not start a replacement M while the process image is
@@ -708,14 +807,15 @@ Special cases found in the current `sync` inventory map cleanly:
 
 ### 7.7 Directive elimination budget
 
-The 105 production directives are a migration budget, not an intended API:
+The 71 production directives are a migration budget and an exact review
+manifest, not a caller-coloring API:
 
 | Current class | Target | Removal gate |
 | --- | ---: | --- |
-| `sync` 38 | 0 | conservative same-M/event default plus family-4/5 internal operations |
+| `sync` 30 | irreducible bottom only | conservative same-M/event default plus family-4/5 internal operations or embedded producer facts |
 | `schedulerwait` 0 | 0 | complete: compiler-owned raw-host occurrence and closure proof |
-| `noblock` 60 | 0 in handwritten Go | generated/embedded proof, closed LLGo-owned C proof, or conservative fallback |
-| `contract` 7 | 0 in handwritten Go | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
+| `noblock` 34 | irreducible bottom only | generated/embedded facts, closed LLGo-owned C proof, exact control operation, or conservative fallback |
+| `contract` 7 | irreducible bottom only | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
 
 Eight declarations naming compiler-owned `//export` implementations are now
 inferred from the exact export binding:
@@ -764,6 +864,26 @@ regression keeps each migrated symbol annotation-free while proving that its
 managed demand remains empty, its raw demand remains present, and its external
 contract remains may-block.
 
+The post-105 inference cut removes 34 more source annotations without adding a
+symbol-name policy table:
+
+- 20 exact raw-host-only declarations covering doorbell, worker reservation,
+  fleet retirement, poll-owner operations, startup GC roots, `siglongjmp`,
+  private string/thread/clock leaves, and their target variants;
+- six declarations backed by the target-selected poll/signal LLVM closure
+  proof;
+- seven duplicate `rand`/`srand`, clock, exit, and errno declarations replaced
+  by canonical typed boundaries and exact alias reuse; and
+- one WASM debug-trap declaration inferred from exact LLVM intrinsic identity.
+
+The C/LLVM producer gate additionally proves annotation-free generic
+executor-leaf contracts for already-unannotated closed leaves such as
+poll-owner atomics, the worker release query, `cliteClearenv`, and
+`llgo_address`.  Negative fixtures keep TLS errno, dynamic-loader calls, signal
+receive, and actual I/O on the explicit or conservative path.  The same
+contract is emitted in a library summary and remains usable after archive
+import; it does not become a legacy `noblock` fact during that round trip.
+
 The cut is guarded by exact/ABI-mismatch/explicit-policy/ambiguity tests,
 static call/defer/spawn propagation tests, raw-address and raw/plain-ingress
 tests, the dual-entry scheduler-root regression test, the production directive
@@ -794,9 +914,11 @@ The reduction is accepted only in complete, ordered cuts:
 5. **Scheduler-wait complete; control pending:** infer exact raw-host wait
    occurrences and replace remaining control operations with typed internal
    operations;
-6. remove each remaining directive class and change its inventory gate
-   directly to zero;
-7. reject any later source-visible increase.
+6. remove every derivable member of each remaining directive class and update
+   the exact inventory gate in the same cut;
+7. retain only reviewed bottom contracts whose implementation semantics are
+   unavailable to compiler proof, and reject any later unreviewed increase or
+   replacement.
 
 Executable coverage must include:
 
@@ -811,5 +933,6 @@ Executable coverage must include:
   closure ingress.
 
 Until gates 1 through 3 pass, the temporary any-thread/no-reentry default must
-not be changed.  Until a directive class reaches zero with its replacement
-tests, its exact monotonic snapshot remains in force.
+not be changed.  Until every derivable member has a replacement test, the exact
+monotonic snapshot remains in force; zero is required for propagation
+metadata, not for irreducible foreign semantics.

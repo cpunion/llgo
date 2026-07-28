@@ -288,14 +288,21 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 
 	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
 	requireRuntimeAnnotationFreeCDeclarations(
-		t, runtimeCoroWorkerCallSource, "QueueInit", "QueueCanRelease", "QueueStop",
+		t,
+		runtimeCoroWorkerCallSource,
+		"QueueInit",
+		"QueueCanRelease",
+		"QueueReserve",
+		"QueueCancelReservation",
+		"QueueSubmitReserved",
+		"QueueStop",
 	)
 	for _, required := range []string{
 		"//go:linkname QueueInit C.__llgo_coro_worker_queue_init_v1",
 		"//go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1",
-		"//llgo:coro noblock\n//go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1",
-		"//llgo:coro noblock\n//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1",
-		"//llgo:coro noblock\n//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1",
+		"//go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1",
+		"//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1",
+		"//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1",
 		"//go:linkname QueueStop C.__llgo_coro_worker_queue_stop_v1",
 		"lock-free by QueueInit",
 		"semaphore_signal never wait for worker",

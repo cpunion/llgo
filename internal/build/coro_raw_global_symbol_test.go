@@ -22,11 +22,16 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/crosscompile"
 	"github.com/goplus/llgo/internal/packages"
+	llssa "github.com/goplus/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -127,6 +132,142 @@ func TestCoroRawGlobalSymbolInventoryLLVMModuleSymbols(t *testing.T) {
 	}
 	if proved, reason := inventory.proveNoDefinitionOrReference("syscall.copyenv"); !proved || reason != "" {
 		t.Fatalf("absent LLVM module symbol proof = %t, %q; want true", proved, reason)
+	}
+}
+
+func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("runtime C executor-leaf fixtures require Darwin or Linux")
+	}
+	compiler, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang is unavailable")
+	}
+	ctx := &context{
+		buildConf:    &Config{Goos: runtime.GOOS, Goarch: runtime.GOARCH},
+		crossCompile: crosscompile.Export{CC: compiler},
+	}
+	sources := []string{
+		"../../runtime/internal/lib/runtime/_wrap/poll.c",
+		"../../runtime/internal/lib/runtime/_wrap/signal.c",
+		"../../runtime/internal/lib/runtime/_wrap/debugtrap.c",
+		"../../runtime/internal/clite/debug/_wrap/debug.c",
+		"../../runtime/internal/clite/os/_os/os.c",
+		"../../runtime/internal/coroworker/_worker/worker.c",
+	}
+	positive := []string{
+		"__llgo_runtime_poll_desc_state_v1",
+		"__llgo_runtime_poll_desc_deadline_v1",
+		"__llgo_runtime_poll_desc_set_deadline_v1",
+		"__llgo_runtime_poll_desc_mark_closing_v1",
+		"__llgo_runtime_poll_desc_publish_operation_v1",
+		"__llgo_runtime_poll_desc_clear_operation_v1",
+		"__llgo_runtime_poll_desc_load_operation_v1",
+		"__llgo_runtime_signal_generation_v1",
+		"__llgo_runtime_signal_idle_v1",
+		"__llgo_coro_worker_queue_can_release_v1",
+		"cliteClearenv",
+		"llgo_address",
+		"llgo_debugtrap",
+	}
+	negative := []string{
+		"__llgo_runtime_poll_fd_stream_v1",
+		"__llgo_runtime_poll_read_attempt_v1",
+		"__llgo_runtime_signal_receive_v1",
+		"cliteErrno",
+		"llgo_addrinfo",
+		"llgo_stacktrace",
+		"llgo_symbol",
+	}
+	for _, optimization := range []string{"-O0", "-O2", "-Oz"} {
+		t.Run(optimization, func(t *testing.T) {
+			inventory := &coroRawGlobalSymbolInventory{
+				foreignExecutorLeafProofs: make(map[string]cl.CoroForeignExecutorLeafProof),
+			}
+			for _, relative := range sources {
+				source, err := filepath.Abs(relative)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inferCoroRawLLGoFileExecutorLeaves(
+					ctx,
+					inventory,
+					"runtime-c-fixture",
+					[]string{"-x", "c", optimization},
+					source,
+				)
+			}
+			for _, symbol := range positive {
+				proof, inferred := inventory.foreignExecutorLeafProofs[symbol]
+				if !inferred || proof.PhysicalSymbol != symbol ||
+					proof.LLVMABISignature == "" ||
+					proof.LLVMTargetTriple == "" ||
+					proof.LLVMDataLayout == "" ||
+					len(proof.CallClosure) == 0 ||
+					len(proof.ClosureSHA256) != 64 {
+					t.Errorf(
+						"executor-leaf proof for %q = %+v, %t",
+						symbol, proof, inferred,
+					)
+				}
+			}
+			for _, symbol := range negative {
+				if proof, inferred := inventory.foreignExecutorLeafProofs[symbol]; inferred {
+					t.Errorf(
+						"externally calling or cyclic function %q was inferred: %+v",
+						symbol, proof,
+					)
+				}
+			}
+		})
+	}
+}
+
+func TestCoroRawLLGoFilesInfersWasmDebugTrap(t *testing.T) {
+	compiler, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang is unavailable")
+	}
+	ctx := &context{
+		buildConf: &Config{Goos: "wasip1", Goarch: "wasm"},
+		crossCompile: crosscompile.Export{
+			CC:      compiler,
+			CCFLAGS: []string{"-target", "wasm32-unknown-unknown"},
+		},
+	}
+	inventory := &coroRawGlobalSymbolInventory{
+		foreignExecutorLeafProofs: make(map[string]cl.CoroForeignExecutorLeafProof),
+	}
+	source, err := filepath.Abs(
+		"../../runtime/internal/lib/runtime/_wrap/debugtrap.c",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inferCoroRawLLGoFileExecutorLeaves(
+		ctx,
+		inventory,
+		"runtime-wasm-c-fixture",
+		[]string{"-x", "c"},
+		source,
+	)
+	proof, inferred := inventory.foreignExecutorLeafProofs["llgo_debugtrap"]
+	if !inferred ||
+		proof.LLVMTargetTriple != "wasm32-unknown-unknown" ||
+		proof.LLVMABISignature != "void ()" ||
+		len(proof.CallClosure) != 2 ||
+		proof.CallClosure[0] != "llgo_debugtrap" ||
+		proof.CallClosure[1] != "llvm.debugtrap" {
+		t.Fatalf("WASM debugtrap executor-leaf proof = %+v, %t", proof, inferred)
+	}
+
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	if proof.LLVMDataLayout != prog.DataLayout() {
+		t.Fatalf(
+			"WASM debugtrap proof data layout = %q, frontend = %q",
+			proof.LLVMDataLayout, prog.DataLayout(),
+		)
 	}
 }
 

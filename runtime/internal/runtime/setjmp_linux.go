@@ -12,6 +12,8 @@ import (
 //go:linkname Sigsetjmp C.__sigsetjmp
 func Sigsetjmp(env *SigjmpBuf, savemask c.Int) c.Int
 
-//llgo:coro sync
+// Siglongjmp is emitted only as the exact nonlocal-transfer leaf of the
+// compiler-owned raw panic/defer control closure.
+//
 //go:linkname Siglongjmp C.siglongjmp
 func Siglongjmp(env *SigjmpBuf, val c.Int)

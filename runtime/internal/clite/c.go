@@ -140,11 +140,10 @@ func Memcmp(s1, s2 Pointer, n uintptr) Int
 
 // -----------------------------------------------------------------------------
 
-// The following libc memory/string primitives inspect or update only the
-// caller-provided memory. They neither wait for an external event nor enter the
-// coroutine scheduler, so legacy raw ABI closures may call them synchronously.
+// Strlen is currently consumed only by the compiler-verified raw-host closure.
+// Its declaration retains the conservative foreign default so any future
+// managed use must pass through the ordinary foreign episode.
 //
-//llgo:coro noblock
 //go:linkname Strlen C.strlen
 func Strlen(s *Char) uintptr
 
@@ -239,6 +238,10 @@ func Unreachable()
 
 // -----------------------------------------------------------------------------
 
+// Exit is a terminal foreign control operation. Until terminal no-return
+// lowering owns that behavior directly, retain the exact executor-safe leaf
+// contract rather than treating it as an ordinary may-block call.
+//
 //llgo:coro noblock
 //go:linkname Exit C.exit
 func Exit(Int)

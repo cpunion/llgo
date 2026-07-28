@@ -100,6 +100,13 @@ func (p Program) PhysicalFuncDecl(sig *types.Signature, bg Background) *types.Si
 	return sig
 }
 
+// PhysicalFuncDeclIRType returns the canonical textual LLVM function type
+// emitted for sig. Unlike PhysicalFuncDecl, this constructs the final LLVM
+// type and is intended for exact ABI checks against target-selected LLVM IR.
+func (p Program) PhysicalFuncDeclIRType(sig *types.Signature, bg Background) string {
+	return p.toLLVMFunc(p.PhysicalFuncDecl(sig, bg)).String()
+}
+
 // Closure creates a closture type for a function.
 func (p Program) Closure(sig *types.Signature) Type {
 	closure := p.gocvt.cvtClosure(sig)

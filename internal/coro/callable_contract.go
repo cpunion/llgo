@@ -327,6 +327,29 @@ func CallableContractExecConstraints(contract CallableContract) ExecFlags {
 	return flags
 }
 
+// CallableContractDirectExecutorCompatible reports whether one declaration
+// contract can use a direct call while a runnable owns the executor. It is
+// deliberately narrower than ProgressExecutorSafe alone: the direct recipe
+// cannot change physical thread, enter managed code, or extend a borrowed
+// pointer lifetime.
+func CallableContractDirectExecutorCompatible(contract CallableContract) bool {
+	if contract.Progress != ProgressExecutorSafe ||
+		contract.Reentry != ReentryNone {
+		return false
+	}
+	switch contract.Affinity {
+	case AffinityAnyThread, AffinityCallerThread:
+	default:
+		return false
+	}
+	switch contract.Memory {
+	case MemoryByValue, MemoryBorrowUntilReturn:
+		return true
+	default:
+		return false
+	}
+}
+
 // CallableDeclarationPolicy is the single target-neutral projection from a
 // typed C declaration contract into SSA external/exec policy. It grants no
 // worker, same-M, event, raw-host, or trusted-inline recipe; those remain

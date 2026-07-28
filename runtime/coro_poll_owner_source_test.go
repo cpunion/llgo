@@ -214,7 +214,14 @@ func TestCoroPollDescriptorUsesOpaqueScalarOwner(t *testing.T) {
 	const sourcePath = "internal/lib/runtime/poll_linkname_coro_llgo.go"
 	source := readRuntimePollFile(t, sourcePath)
 	requireRuntimeAnnotationFreeCDeclarations(
-		t, sourcePath, "llgoCoroPollDescAllocV1", "llgoCoroPollDescFreeV1",
+		t,
+		sourcePath,
+		"llgoCoroPollDescAllocV1",
+		"llgoCoroPollDescFreeV1",
+		"llgoCoroPollDescStateV1",
+		"llgoCoroPollDescDeadlineV1",
+		"llgoCoroPollDescSetDeadlineV1",
+		"llgoCoroPollDescMarkClosingV1",
 	)
 	for _, marker := range []string{
 		"//go:build llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal",
@@ -224,10 +231,10 @@ func TestCoroPollDescriptorUsesOpaqueScalarOwner(t *testing.T) {
 		"//llgo:managedlink\n//go:linkname poll_runtime_pollWait internal/poll.runtime_pollWait",
 		"//go:linkname llgoCoroPollDescAllocV1 C.__llgo_runtime_poll_desc_alloc_v1",
 		"//go:linkname llgoCoroPollDescFreeV1 C.__llgo_runtime_poll_desc_free_v1",
-		"//llgo:coro noblock\n//go:linkname llgoCoroPollDescStateV1 C.__llgo_runtime_poll_desc_state_v1",
-		"//llgo:coro noblock\n//go:linkname llgoCoroPollDescDeadlineV1 C.__llgo_runtime_poll_desc_deadline_v1",
-		"//llgo:coro noblock\n//go:linkname llgoCoroPollDescSetDeadlineV1 C.__llgo_runtime_poll_desc_set_deadline_v1",
-		"//llgo:coro noblock\n//go:linkname llgoCoroPollDescMarkClosingV1 C.__llgo_runtime_poll_desc_mark_closing_v1",
+		"//go:linkname llgoCoroPollDescStateV1 C.__llgo_runtime_poll_desc_state_v1",
+		"//go:linkname llgoCoroPollDescDeadlineV1 C.__llgo_runtime_poll_desc_deadline_v1",
+		"//go:linkname llgoCoroPollDescSetDeadlineV1 C.__llgo_runtime_poll_desc_set_deadline_v1",
+		"//go:linkname llgoCoroPollDescMarkClosingV1 C.__llgo_runtime_poll_desc_mark_closing_v1",
 		"one opaque uintptr handle",
 		"FD reference count delays Free",
 		"ordinary foreign",

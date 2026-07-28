@@ -42,29 +42,30 @@ type nativePollFD struct {
 // nativeCDoorbellOpen is a fixed startup leaf. A successful return proves that
 // both descriptors are O_NONBLOCK and FD_CLOEXEC before Go can publish them.
 // Its C implementation has bounded EINTR retries and closes partial state.
+// Every live call is owned by the compiler-verified scheduler raw-host closure;
+// the declaration itself publishes no managed executor-safe capability.
 //
-//llgo:coro noblock
 //go:linkname nativeCDoorbellOpen C.__llgo_coro_doorbell_open_v1
 func nativeCDoorbellOpen(fds *[2]int32) int32
 
 // nativeCDoorbellRead performs at most one <=64-byte read from the private
 // nonblocking read end. The C leaf rejects every wider request.
+// Its exact raw-host use domain is frozen before physical lowering.
 //
-//llgo:coro noblock
 //go:linkname nativeCDoorbellRead C.__llgo_coro_doorbell_read_v1
 func nativeCDoorbellRead(fd int32, buffer *byte, size uintptr) uint64
 
 // nativeCDoorbellWrite performs exactly one one-byte write to the private
 // nonblocking write end. EAGAIN is returned to the retained-wake protocol.
+// Its exact raw-host use domain is frozen before physical lowering.
 //
-//llgo:coro noblock
 //go:linkname nativeCDoorbellWrite C.__llgo_coro_doorbell_write_v1
 func nativeCDoorbellWrite(fd int32, buffer *byte, size uintptr) uint64
 
 // nativeCDoorbellClose closes only a descriptor whose ownership has already
 // been sealed and removed from the published Pipe. It never retries close.
+// Its exact raw-host use domain is frozen before physical lowering.
 //
-//llgo:coro noblock
 //go:linkname nativeCDoorbellClose C.__llgo_coro_doorbell_close_v1
 func nativeCDoorbellClose(fd int32) int32
 

@@ -28,7 +28,6 @@ const (
 
 // -----------------------------------------------------------------------------
 
-//llgo:coro sync
 //go:linkname Rand C.rand
 func Rand() c.Int
 

@@ -95,7 +95,7 @@ func TestCoroForeignUseDomainInfersOnlyClosedRawHostCalls(t *testing.T) {
 	plan, report := analyzeForeignUseDomainFixture(t, fixture, true)
 	syncRecord := foreignUseDomainRecordBySymbol(t, report, "foreign_sync_exact")
 	syncPlan, _ := plan.FunctionPlan(syncRecord.Function)
-	if !report.Closed || !syncRecord.LegacySync || !syncRecord.rawHostOnly() ||
+	if !report.Closed || !syncRecord.SyncCertified || !syncRecord.rawHostOnly() ||
 		syncRecord.Calls != 1 || syncRecord.RawHostCalls != 1 {
 		t.Fatalf("closed raw-host sync record = %+v, function=%+v report-closed=%t", syncRecord, syncPlan, report.Closed)
 	}
@@ -104,7 +104,7 @@ func TestCoroForeignUseDomainInfersOnlyClosedRawHostCalls(t *testing.T) {
 	}
 
 	mayBlockRecord := foreignUseDomainRecordBySymbol(t, report, "foreign_may_block_exact")
-	if !mayBlockRecord.rawHostOnly() || mayBlockRecord.LegacySync {
+	if !mayBlockRecord.rawHostOnly() || mayBlockRecord.SyncCertified {
 		t.Fatalf("unannotated raw-host default record = %+v", mayBlockRecord)
 	}
 }

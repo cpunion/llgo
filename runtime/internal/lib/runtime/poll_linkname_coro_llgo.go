@@ -46,22 +46,18 @@ func llgoCoroPollDescAllocV1(fd int32, inlineStream uint32) uintptr
 //go:linkname llgoCoroPollDescFreeV1 C.__llgo_runtime_poll_desc_free_v1
 func llgoCoroPollDescFreeV1(ctx uintptr)
 
-//llgo:coro noblock
 //go:linkname llgoCoroPollDescStateV1 C.__llgo_runtime_poll_desc_state_v1
 func llgoCoroPollDescStateV1(ctx uintptr) uint64
 
-//llgo:coro noblock
 //go:linkname llgoCoroPollDescDeadlineV1 C.__llgo_runtime_poll_desc_deadline_v1
 func llgoCoroPollDescDeadlineV1(ctx uintptr, mode int32) int64
 
-//llgo:coro noblock
 //go:linkname llgoCoroPollDescSetDeadlineV1 C.__llgo_runtime_poll_desc_set_deadline_v1
 func llgoCoroPollDescSetDeadlineV1(ctx uintptr, mode int32, deadline int64)
 
 // llgoCoroPollDescMarkClosingV1 atomically sets closing and returns a state
 // word containing its previous value, so exactly one unblock posts wakeups.
 //
-//llgo:coro noblock
 //go:linkname llgoCoroPollDescMarkClosingV1 C.__llgo_runtime_poll_desc_mark_closing_v1
 func llgoCoroPollDescMarkClosingV1(ctx uintptr) uint64
 

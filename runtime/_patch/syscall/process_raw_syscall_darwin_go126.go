@@ -39,14 +39,12 @@ func llgoCoroFork() int32
 //go:linkname llgoCoroExecve C.execve
 func llgoCoroExecve(path *int8, argv **int8, envp **int8) int32
 
-// C.exit is the already-frozen terminal noblock physical declaration used by
-// the runtime abort path. Reuse that exact certificate for the syscall wrapper.
+// C.exit remains an irreducible terminal no-return contract until the compiler
+// publishes the corresponding control operation.
 //
-//llgo:coro noblock
 //go:linkname llgoCoroExit C.exit
 func llgoCoroExit(res int32)
 
-//llgo:coro noblock
 //go:linkname llgoCoroProcessErrno C.cliteErrno
 func llgoCoroProcessErrno() int32
 

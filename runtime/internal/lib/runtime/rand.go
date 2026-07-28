@@ -9,12 +9,8 @@ import (
 	"github.com/goplus/llgo/runtime/internal/runtime/math"
 )
 
-//llgo:coro sync
-//go:linkname c_rand C.rand
-func c_rand() c.Int
-
 func fastrand() uint32 {
-	return uint32(c_rand())
+	return uint32(c.Rand())
 }
 
 func rand() uint64 {

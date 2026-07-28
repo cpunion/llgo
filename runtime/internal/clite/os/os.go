@@ -56,6 +56,8 @@ type (
 
 // Errno reads the current thread's libc errno slot. It must remain adjacent to
 // the foreign call whose failure it describes and cannot enter the scheduler.
+// Its C spelling expands to an opaque platform TLS accessor, so closed LLVM
+// implementation proof cannot derive this semantic leaf.
 //
 //llgo:coro noblock
 //go:linkname Errno C.cliteErrno

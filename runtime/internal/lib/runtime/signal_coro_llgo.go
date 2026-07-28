@@ -65,11 +65,9 @@ func coroSignalIgnoredNativeV1(sig uint32) uint32
 //go:linkname coroSignalReceiveNativeV1 C.__llgo_runtime_signal_receive_v1
 func coroSignalReceiveNativeV1() uint32
 
-//llgo:coro noblock
 //go:linkname coroSignalGenerationNativeV1 C.__llgo_runtime_signal_generation_v1
 func coroSignalGenerationNativeV1() uint32
 
-//llgo:coro noblock
 //go:linkname coroSignalIdleNativeV1 C.__llgo_runtime_signal_idle_v1
 func coroSignalIdleNativeV1(target uint32) uint32
 

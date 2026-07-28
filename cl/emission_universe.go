@@ -105,6 +105,10 @@ type EmissionUniverseOptions struct {
 	// construction instead of being left to the legacy LLVM symbol resolver.
 	CompleteRuntimeABI     bool
 	CoroTargetCapabilities coro.TargetCapabilities
+	// CoroForeignExecutorLeafProofs are build-owned proofs over exact
+	// target-selected C/LLVM definitions. They are global because a Go
+	// declaration may link a C definition emitted by another package.
+	CoroForeignExecutorLeafProofs []CoroForeignExecutorLeafProof
 	// GOROOT is the exact source tree used by go/packages. It is an explicit
 	// frontend input because runtime.GOROOT may be empty in a trimpath compiler
 	// binary. GOROOT-only managed-linkname proofs fail closed when it is empty.
@@ -191,6 +195,7 @@ type EmissionUniverse struct {
 	// rediscovering it lets a type-only Index/Call acquire a phantom runtime edge.
 	unsafeLayoutUnevaluated map[*ssa.Function]map[ssa.Instruction]none
 	foreignNoBlock          map[*ssa.Function]CoroForeignNoBlockCertificate
+	executorLeafProofs      map[string]CoroForeignExecutorLeafProof
 	foreignSync             map[*ssa.Function]CoroForeignSyncCertificate
 	foreignWorker           map[*ssa.Function]CoroForeignWorkerCertificate
 	callableIdentities      map[*ssa.Function]CoroCallableIdentityCertificate
@@ -263,12 +268,15 @@ func (u *EmissionUniverse) coroRuntimeCodeAddressType(typ types.Type) bool {
 	return ok && selected == named
 }
 
-// CoroForeignNoBlockCertificate is the immutable frontend proof attached by
-// //llgo:coro noblock to one exact C declaration or bodyless managed-Go
-// declaration. ID is domain-separated and includes the frozen declaration
-// kind, owner, physical symbol, and structural ABI signature. PhysicalSymbol
-// and ABISignature are exposed only for diagnostics and audit; consumers must
-// compare/use ID rather than reclassifying a declaration from either field.
+// CoroForeignNoBlockCertificate is the immutable legacy frontend proof attached
+// to one exact declaration by //llgo:coro noblock. Compiler-derived LLVM
+// implementation facts use the generic callable-contract path instead so they
+// can be serialized into library metadata. The legacy directive also supports
+// a bodyless managed-Go declaration. ID is
+// domain-separated and includes the frozen declaration kind, owner, physical
+// symbol, and structural ABI signature. PhysicalSymbol and ABISignature are
+// exposed only for diagnostics and audit; consumers must compare/use ID rather
+// than reclassifying a declaration from either field.
 type CoroForeignNoBlockCertificate struct {
 	ID             string
 	PhysicalSymbol string
@@ -596,6 +604,17 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	if err != nil {
 		return nil, fmt.Errorf("prepare emission universe: %w", err)
 	}
+	executorLeafProofs, err := cloneCoroForeignExecutorLeafProofs(
+		options.CoroForeignExecutorLeafProofs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("prepare emission universe: %w", err)
+	}
+	if len(executorLeafProofs) != 0 && prog == nil {
+		return nil, fmt.Errorf(
+			"prepare emission universe: executor-leaf proofs require an LLVM SSA program",
+		)
+	}
 	pathCounts := make(map[string]int, len(inputs))
 	for _, input := range inputs {
 		if input.SSA != nil && input.SSA.Pkg != nil {
@@ -638,6 +657,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		normalReturnBlocks:      make(map[*ssa.Function]map[*ssa.BasicBlock]none),
 		unsafeLayoutUnevaluated: make(map[*ssa.Function]map[ssa.Instruction]none),
 		foreignNoBlock:          make(map[*ssa.Function]CoroForeignNoBlockCertificate),
+		executorLeafProofs:      executorLeafProofs,
 		foreignSync:             make(map[*ssa.Function]CoroForeignSyncCertificate),
 		foreignWorker:           make(map[*ssa.Function]CoroForeignWorkerCertificate),
 		callableIdentities:      make(map[*ssa.Function]CoroCallableIdentityCertificate),
@@ -1649,9 +1669,10 @@ func (u *EmissionUniverse) FunctionBackground(fn *ssa.Function) (background llss
 }
 
 // CoroForeignNoBlockCertificate returns the frozen declaration certificate for
-// fn. The proof exists only for an exact emitted C declaration carrying the
-// //llgo:coro noblock directive. Ordinary C declarations remain unclassified
-// and therefore retain the conservative BlockForeign/WaitForeign boundary.
+// fn. It exists only for an exact declaration carrying //llgo:coro noblock.
+// Ordinary C declarations retain the conservative BlockForeign/WaitForeign
+// boundary unless a generic callable contract (including an inferred
+// executor-leaf contract) refines it.
 func (u *EmissionUniverse) CoroForeignNoBlockCertificate(fn *ssa.Function) (certificate CoroForeignNoBlockCertificate, certified bool, err error) {
 	if u == nil {
 		return CoroForeignNoBlockCertificate{}, false, fmt.Errorf("coroutine foreign noblock certificate: nil emission universe")
@@ -7462,9 +7483,10 @@ func (u *EmissionUniverse) validateGeneratedWrapperPhysicalCollisions() error {
 }
 
 type coroForeignPhysicalABI struct {
-	kind      int
-	symbol    string
-	signature string
+	kind            int
+	symbol          string
+	signature       string
+	llvmIRSignature string
 }
 
 // freezeCoroForeignCallCertificates binds coroutine declaration directives to
@@ -7481,13 +7503,50 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		var abi coroForeignPhysicalABI
 		haveABI := false
 		for _, owner := range owners {
-			key := u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: owner}]
+			ownerKey := emissionFunctionOwnerKey{function: fn, owner: owner}
+			key := u.finalKeys[ownerKey]
 			ftype, symbol, signature, ok := splitManagedSymbolKey(key)
 			managedBodyless := ftype == goFunc && bodylessManagedGoDeclaration(fn)
 			if !ok || ftype != cFunc && !managedBodyless {
 				continue
 			}
-			candidate := coroForeignPhysicalABI{kind: ftype, symbol: symbol, signature: signature}
+			llvmIRSignature := ""
+			if ftype == cFunc {
+				if _, needsLLVMABI := u.executorLeafProofs[symbol]; needsLLVMABI {
+					state, stateFrozen := u.ownerStates[fn][owner]
+					if !stateFrozen {
+						return fmt.Errorf(
+							"prepare emission universe: C declaration %q has no frozen provenance for owner %q",
+							fn.Name(), owner.identity,
+						)
+					}
+					ctx := u.effectiveTypeContext(owner, fn)
+					if ctx == nil {
+						return fmt.Errorf(
+							"prepare emission universe: C declaration %q has no effective type context for owner %q",
+							fn.Name(), owner.identity,
+						)
+					}
+					ctx.state = state.state
+					patchedSignature, ok := ctx.patchType(fn.Signature).(*types.Signature)
+					if !ok {
+						return fmt.Errorf(
+							"prepare emission universe: C declaration %q has a non-signature effective type for owner %q",
+							fn.Name(), owner.identity,
+						)
+					}
+					llvmIRSignature = u.prog.PhysicalFuncDeclIRType(
+						patchedSignature,
+						llssa.InC,
+					)
+				}
+			}
+			candidate := coroForeignPhysicalABI{
+				kind:            ftype,
+				symbol:          symbol,
+				signature:       signature,
+				llvmIRSignature: llvmIRSignature,
+			}
 			if haveABI && candidate != abi {
 				return fmt.Errorf("prepare emission universe: declaration %q has owner-dependent physical ABI while freezing coroutine call metadata", fn.Name())
 			}
@@ -7559,9 +7618,6 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: coroutine foreign-call directive on %q: %w", fn.Name(), err)
 		}
-		if directive == coroForeignCallNone {
-			continue
-		}
 		// workeraddr is an address-target capability, not permission to emit an
 		// ordinary typed C call. Its exact target and word-call ABI are frozen by
 		// freezeCoroWorkerSyscallCertificates when a certified FuncPCABI0 result
@@ -7571,6 +7627,77 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		}
 		canonical := u.canonicalAlias(fn)
 		abi, ok := abiByFunction[canonical]
+		if directive == coroForeignCallNone {
+			if !ok || abi.kind != cFunc {
+				continue
+			}
+			proof, inferred := u.executorLeafProofs[abi.symbol]
+			_, genericContract := u.callableContracts[canonical]
+			_, defaultContract := u.callableDefaults[canonical]
+			explicitContract := genericContract && !defaultContract
+			inventorySymbol := fmt.Sprintf("%d:%s", abi.kind, abi.symbol)
+			if inferred && !explicitContract &&
+				len(signaturesBySymbol[inventorySymbol]) == 1 {
+				target := u.prog.TargetSpec()
+				if coroLLVMTargetArchitecture(proof.LLVMTargetTriple) !=
+					coroLLVMTargetArchitecture(target.Triple) ||
+					proof.LLVMDataLayout != u.prog.DataLayout() ||
+					proof.LLVMABISignature != abi.llvmIRSignature {
+					continue
+				}
+				linkIdentity, linked := u.linkIdentities[canonical]
+				if !linked || linkIdentity == "" {
+					return fmt.Errorf(
+						"prepare emission universe: inferred executor-leaf proof on %q has no frozen link identity",
+						fn.Name(),
+					)
+				}
+				base, frozenDefault := u.callableContracts[canonical]
+				if !frozenDefault || !defaultContract {
+					return fmt.Errorf(
+						"prepare emission universe: inferred executor-leaf proof on %q has no replaceable conservative declaration contract",
+						fn.Name(),
+					)
+				}
+				if base.LinkIdentity != linkIdentity ||
+					base.PhysicalSymbol != abi.symbol ||
+					base.PhysicalABISignature != abi.signature {
+					return fmt.Errorf(
+						"prepare emission universe: inferred executor-leaf proof on %q disagrees with its conservative declaration identity",
+						fn.Name(),
+					)
+				}
+				inferredContract, err := inferredCoroExecutorLeafContract(
+					base,
+					proof,
+				)
+				if err != nil {
+					return fmt.Errorf(
+						"prepare emission universe: inferred executor-leaf proof on %q: %w",
+						fn.Name(), err,
+					)
+				}
+				identity, identified := u.callableIdentities[canonical]
+				if !identified {
+					return fmt.Errorf(
+						"prepare emission universe: inferred executor-leaf proof on %q has no callable identity",
+						fn.Name(),
+					)
+				}
+				if err := coro.ValidateCallableContractIdentity(
+					identity,
+					inferredContract,
+				); err != nil {
+					return fmt.Errorf(
+						"prepare emission universe: inferred executor-leaf proof on %q: %w",
+						fn.Name(), err,
+					)
+				}
+				u.callableContracts[canonical] = inferredContract
+				delete(u.callableDefaults, canonical)
+			}
+			continue
+		}
 		if !ok {
 			if directive == coroForeignCallNoBlock {
 				return fmt.Errorf("prepare emission universe: %s on %q requires an exact frozen declaration (C or bodyless managed-Go)", directive, fn.Name())
