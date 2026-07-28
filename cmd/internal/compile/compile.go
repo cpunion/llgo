@@ -88,14 +88,6 @@ type options struct {
 	version     bool
 }
 
-func (opts *options) debugSettings() []string {
-	var items []string
-	for _, setting := range opts.debug {
-		items = append(items, strings.Split(setting, ",")...)
-	}
-	return items
-}
-
 func typeAssertDebugValue(setting string) (int, bool) {
 	i := strings.IndexAny(setting, "=:")
 	if i < 0 {
@@ -183,9 +175,11 @@ func runCmd(_ *base.Command, args []string) {
 	conf.NoErrorColumn = opts.noColumns.value != 0
 	conf.AllowNoBody = !opts.complete
 	conf.DisableBoundsChecks = opts.noBounds.value != 0
-	for _, setting := range opts.debugSettings() {
-		if value, ok := typeAssertDebugValue(setting); ok {
-			conf.DebugTypeAssert = value > 0
+	for _, setting := range opts.debug {
+		for _, item := range strings.Split(setting, ",") {
+			if value, ok := typeAssertDebugValue(item); ok {
+				conf.DebugTypeAssert = value > 0
+			}
 		}
 	}
 	var loaderCompilerFlags []string
@@ -231,11 +225,13 @@ func (opts *options) unsupported() []string {
 	appendFlag(opts.smallFrames, "-smallframes")
 	appendFlag(opts.runtimePkg, "-+")
 	appendFlag(opts.writeBar.set, "-wb")
-	for _, setting := range opts.debugSettings() {
-		if compatibleDebugSetting(setting) {
-			continue
+	for _, setting := range opts.debug {
+		for _, item := range strings.Split(setting, ",") {
+			if compatibleDebugSetting(item) {
+				continue
+			}
+			out = append(out, "-d="+item)
 		}
-		out = append(out, "-d="+setting)
 	}
 	return out
 }
