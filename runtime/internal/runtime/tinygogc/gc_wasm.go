@@ -3,9 +3,10 @@
 package tinygogc
 
 import (
-	_ "unsafe"
+	"unsafe"
 
 	c "github.com/goplus/llgo/runtime/internal/clite"
+	"github.com/goplus/llgo/runtime/internal/gcroot"
 )
 
 const LLGoFiles = "_wrap/gc_wasm.c"
@@ -49,6 +50,11 @@ func gcMarkReachable() {
 	if globalsStart < globalsEnd {
 		markRoots(globalsStart, globalsEnd)
 	}
+	gcroot.Visit(markWasmGCRoot)
+}
+
+func markWasmGCRoot(root *unsafe.Pointer, _ unsafe.Pointer) {
+	markRoot(uintptr(unsafe.Pointer(root)), uintptr(*root))
 }
 
 func gcStackStats() (inuse, sys uintptr) {

@@ -27,6 +27,7 @@ import (
 
 type runtimeContextPlatform struct {
 	context    wasmcontext.Context
+	gcRoot     wasmGCRootContext
 	runqNext   *g
 	runqQueued bool
 }
@@ -41,6 +42,9 @@ var wasmSched struct {
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	gp := initG(ctx, callergp, status)
+	if wasmGCRootEnabled {
+		registerWasmGCRoot(&ctx.platform.gcRoot, status == _Grunning)
+	}
 	if status == _Grunning {
 		initWasmScheduler(gp)
 	}
@@ -163,7 +167,10 @@ func resumeWasmG(old, next *g) {
 	next.m = mp
 	mp.curg = next
 	setg(next)
-	old.context.platform.context.Swap(&next.context.platform.context)
+	old.context.platform.context.Swap(
+		&next.context.platform.context,
+		wasmGCRootPointer(&next.context.platform.gcRoot),
+	)
 	reapRetiredWasmG()
 }
 
@@ -196,7 +203,10 @@ func resumeDeadWasmG(old, next *g) {
 	next.m = mp
 	mp.curg = next
 	setg(next)
-	old.context.platform.context.Swap(&next.context.platform.context)
+	old.context.platform.context.Swap(
+		&next.context.platform.context,
+		wasmGCRootPointer(&next.context.platform.gcRoot),
+	)
 	fatal("runtime: resumed dead WebAssembly goroutine")
 }
 
@@ -206,7 +216,11 @@ func reapRetiredWasmG() {
 		return
 	}
 	wasmSched.retired = nil
-	ctx.platform.context.Close(FreeRoot)
+	platform := &ctx.platform
+	if wasmGCRootEnabled {
+		unregisterWasmGCRoot(&platform.gcRoot)
+	}
+	platform.context.Close(FreeRoot)
 	freeRuntimeContext(ctx)
 }
 
