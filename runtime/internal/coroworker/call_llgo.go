@@ -36,24 +36,23 @@ import (
 // attributes. The C adapter owns the fixed routine: it waits and performs the
 // foreign call entirely on the native stack, then crosses into Go through the
 // one POD completion export. No arbitrary Go callback address is accepted.
-// pthread_create may still acquire libc, allocator, or collector locks; sync
-// records same-thread return without promising lock-free or bounded latency.
+// pthread_create may still acquire libc, allocator, or collector locks. The
+// compiler-owned raw-host occurrence executes that conservative may-block
+// contract on the scheduler stack; an ordinary managed occurrence would
+// retain its foreign-wait policy.
 //
-//llgo:coro sync
 //go:linkname Create C.__llgo_coro_worker_create_v1
 func Create(thread *pthread.Thread) c.Int
 
 // QueueInit constructs the one native worker transport. Initialization may
-// enter the platform semaphore implementation, so it is scheduler-owner sync,
-// not managed ingress and not a noblock leaf.
+// enter the platform semaphore implementation, so it is an inferred
+// scheduler-owner raw-host call, not managed ingress and not a noblock leaf.
 //
-//llgo:coro sync
 //go:linkname QueueInit C.__llgo_coro_worker_queue_init_v1
 func QueueInit() bool
 
 // QueueCanRelease is the exact zero-lifecycle query used before initialization.
 //
-//llgo:coro sync
 //go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1
 func QueueCanRelease() bool
 
@@ -83,9 +82,9 @@ func QueueSubmitReserved(reservation QueueReservation, job *Job) bool
 
 // QueueStop seals producer ingress and emits one terminal wake per raw worker.
 // It neither drains nor joins workers, but its platform signals may enter libc
-// or the kernel and are therefore kept on the scheduler-owner sync path.
+// or the kernel and are therefore kept on the inferred scheduler-owner
+// raw-host path.
 //
-//llgo:coro sync
 //go:linkname QueueStop C.__llgo_coro_worker_queue_stop_v1
 func QueueStop(workerCount uint32) bool
 
@@ -94,15 +93,14 @@ func QueueStop(workerCount uint32) bool
 // verifies that every published position was consumed. It performs no wait,
 // join, callback, or managed coroutine operation itself.
 //
-//llgo:coro sync
 //go:linkname QueueDestroyAfterJoin C.__llgo_coro_worker_queue_destroy_after_join_v1
 func QueueDestroyAfterJoin() bool
 
 // Call executes one exact uintptr-shaped foreign thunk synchronously on the
 // calling native thread. It is reserved for the runtime's dynamically proved
 // LockOSThread path; ordinary potentially blocking calls use the bounded
-// worker queue above.
+// worker queue above. Its compiler-owned raw-host caller is inferred from the
+// exact use domain rather than a declaration-wide synchronous capability.
 //
-//llgo:coro sync
 //go:linkname Call C.__llgo_coro_worker_call_v1
 func Call(function uintptr, argc uint32, args *[MaxArgs]uintptr, result *Result) bool

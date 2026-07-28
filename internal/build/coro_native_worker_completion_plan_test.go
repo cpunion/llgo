@@ -94,7 +94,11 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T) {
 		}
 
 		const workerPath = "github.com/goplus/llgo/runtime/internal/coroworker"
-		for _, legacyName := range []string{"Call", "QueueWaitTake"} {
+		// QueueWaitTake is the obsolete Go worker loop replaced by the native
+		// worker completion ingress above. Call remains an active external leaf
+		// for the dynamically proved LockOSThread same-M path; it is covered by
+		// the raw-host use-domain gate and is not a completion entry.
+		for _, legacyName := range []string{"QueueWaitTake"} {
 			legacy, err := findOptionalCoroWorkerPlanFunction(input.Program, workerPath, legacyName)
 			if err != nil {
 				return nil, err
