@@ -1,4 +1,4 @@
-//go:build !nogc && baremetal
+//go:build baremetal && !nogc
 
 package runtime
 
@@ -9,6 +9,9 @@ import (
 )
 
 func ReadMemStats(m *runtime.MemStats) {
+	if m == nil {
+		return
+	}
 	stats := tinygogc.ReadGCStats()
 	m.Alloc = stats.Alloc
 	m.TotalAlloc = stats.TotalAlloc
