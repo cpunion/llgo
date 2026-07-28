@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785209267456,
+  "lastUpdate": 1785209268854,
   "repoUrl": "https://github.com/cpunion/llgo",
   "entries": {
     "Linux program binary size": [
@@ -268,6 +268,90 @@ window.BENCHMARK_DATA = {
             "value": 42078,
             "unit": "ns/op",
             "extra": "100 times\n4 procs"
+          }
+        ]
+      }
+    ],
+    "macOS program binary size": [
+      {
+        "commit": {
+          "author": {
+            "name": "Li Jie",
+            "username": "cpunion",
+            "email": "cpunion@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "18e4ba595415435c7e1cba53dab4c47679a8bda7",
+          "message": "Merge pull request #76 from cpunion/codex/benchmark-baseline\n\nci: add continuous baseline benchmarks",
+          "timestamp": "2026-07-28T03:19:32Z",
+          "url": "https://github.com/cpunion/llgo/commit/18e4ba595415435c7e1cba53dab4c47679a8bda7"
+        },
+        "date": 1785209268722,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary/cprintf/file",
+            "value": 84752,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/cprintf/text",
+            "value": 15221,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/cprintf/data",
+            "value": 192,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/cprintf/bss",
+            "value": 17,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/println/file",
+            "value": 126768,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/println/text",
+            "value": 36252,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/println/data",
+            "value": 8833,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/println/bss",
+            "value": 244,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/fmtprintf/file",
+            "value": 2345856,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/fmtprintf/text",
+            "value": 1153837,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/fmtprintf/data",
+            "value": 365688,
+            "unit": "bytes"
+          },
+          {
+            "name": "binary/fmtprintf/bss",
+            "value": 320332,
+            "unit": "bytes"
           }
         ]
       }
