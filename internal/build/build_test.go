@@ -142,6 +142,28 @@ func TestEffectiveWasmTypeSizes(t *testing.T) {
 	}
 }
 
+func TestApplyWasmGCLinkFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		conf Config
+		want bool
+	}{
+		{name: "wasm32", conf: Config{Goos: "js", Goarch: "wasm", Tags: "llgo_wasm_gc"}, want: true},
+		{name: "comma separated tags", conf: Config{Goos: "js", Goarch: "wasm", Tags: "other,llgo_wasm_gc"}, want: true},
+		{name: "default wasm", conf: Config{Goos: "js", Goarch: "wasm"}},
+		{name: "WASI", conf: Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo_wasm_gc"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			export := crosscompile.Export{}
+			applyWasmGCLinkFlags(&test.conf, &export)
+			if got := slices.Contains(export.LDFLAGS, "-sMALLOC=none"); got != test.want {
+				t.Fatalf("MALLOC=none present = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 	runtimeDir := filepath.Join(env.LLGoRuntimeDir(), "internal", "lib", "runtime")
 	for _, goos := range []string{"js", "wasip1"} {
@@ -149,7 +171,7 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 			ctx := gobuild.Default
 			ctx.GOOS = goos
 			ctx.GOARCH = "wasm"
-			ctx.BuildTags = []string{"llgo", "nogc"}
+			ctx.BuildTags = []string{"llgo", "nogc", "llgo_wasm_gc"}
 			pkg, err := ctx.ImportDir(runtimeDir, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -176,8 +198,9 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 			}
 
 			for _, name := range []string{
-				"mfinal_nogc.go",
+				"mfinal_wasm.go",
 				"runtime_baremetal.go",
+				"runtime_gc_nonmoving.go",
 				"signal_baremetal_llgo.go",
 				"time_wasm_llgo.go",
 				"unwind_wasm_llgo.go",

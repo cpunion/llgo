@@ -35,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -329,6 +330,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if conf.Target != "" && export.GOARCH != "" {
 		conf.Goarch = export.GOARCH
 	}
+	applyWasmGCLinkFlags(conf, &export)
 	if conf.AppExt == "" {
 		conf.AppExt = defaultAppExt(conf)
 	}
@@ -686,6 +688,26 @@ func defaultBuildTags(goarch, target string) string {
 		tags += ",nogc"
 	}
 	return tags
+}
+
+func applyWasmGCLinkFlags(conf *Config, export *crosscompile.Export) {
+	if conf.Goos != "js" || conf.Goarch != "wasm" || !hasBuildTag(conf.Tags, "llgo_wasm_gc") {
+		return
+	}
+	if !slices.Contains(export.LDFLAGS, "-sMALLOC=none") {
+		export.LDFLAGS = append(export.LDFLAGS, "-sMALLOC=none")
+	}
+}
+
+func hasBuildTag(tags, want string) bool {
+	for _, tag := range strings.FieldsFunc(tags, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	}) {
+		if tag == want {
+			return true
+		}
+	}
+	return false
 }
 
 func effectiveTypeSizes(sizes types.Sizes, goos, goarch, target string) types.Sizes {
