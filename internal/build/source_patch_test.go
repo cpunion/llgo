@@ -258,7 +258,7 @@ func (ht *HashTrieMap[K, V]) CompareAndSwap(key K, old, new V) bool {
 }
 `)
 
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
 		goos:      runtime.GOOS,
 		goarch:    runtime.GOARCH,
 		goversion: "go1.24.2",
