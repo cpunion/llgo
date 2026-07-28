@@ -489,6 +489,12 @@ jobs:
           run_wasm_scheduler "$RUNNER_TEMP/wasm-scheduler.mjs"
           GOOS=wasip1 GOARCH=wasm llgo build -o "$RUNNER_TEMP/wasm-scheduler-wasip1.wasm" ./internal/build/testdata/wasm-scheduler
           run_wasi_scheduler "$RUNNER_TEMP/wasm-scheduler-wasip1.wasm"
+          GOOS=js GOARCH=wasm llgo build -tags=llgo_wasm_gc -o "$RUNNER_TEMP/wasm-gc-go.mjs" ./internal/build/testdata/wasm-gc
+          node --input-type=module -e "import Module from '$RUNNER_TEMP/wasm-gc-go.mjs'; await Module();"
+          llgo build -target wasm -tags=llgo_wasm_gc -o "$RUNNER_TEMP/wasm-gc.mjs" ./internal/build/testdata/wasm-gc
+          node --input-type=module -e "import Module from '$RUNNER_TEMP/wasm-gc.mjs'; await Module();"
+          GOOS=wasip1 GOARCH=wasm llgo build -tags=llgo_wasm_gc -o "$RUNNER_TEMP/wasm-gc-wasip1.wasm" ./internal/build/testdata/wasm-gc
           file "$RUNNER_TEMP/runtime-js.wasm" \
             "$RUNNER_TEMP/runtime-wasip1.wasm" \
-            "$RUNNER_TEMP/runtime-wasip1-threads.wasm"
+            "$RUNNER_TEMP/runtime-wasip1-threads.wasm" \
+            "$RUNNER_TEMP/wasm-gc-wasip1.wasm"
