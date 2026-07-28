@@ -170,6 +170,8 @@ type context struct {
 	debugAllocVars       map[*ssa.Alloc]*types.Var
 	runtimeCallerFuncs   map[*ssa.Function]bool
 	panicSiteFuncs       map[*ssa.Function]bool
+	gcRoots              map[ssa.Value][]llssa.Expr
+	gcClosureRoot        llssa.Expr
 	pcLineSeq            uint64
 	// The runtime PC-line table stores file and line, but not column. Keep the
 	// last emitted position within one SSA basic block so repeated checks for a
@@ -683,6 +685,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			oldFn, oldGoFn, oldMethodNilDerefChecks, oldCallerFrameMark := p.fn, p.goFn, p.methodNilDerefChecks, p.callerFrameMark
 			oldLocalityFunction := p.locality.function
 			oldRecoverSlots, oldImplicitDeferResults := p.recoverSlots, p.implicitDeferResults
+			oldGCRoots, oldGCClosureRoot := p.gcRoots, p.gcClosureRoot
 			p.fn = fn
 			p.goFn = f
 			p.callerFrameMark = llssa.Nil
@@ -698,6 +701,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 				p.locality.function = oldLocalityFunction
 				p.recoverSlots = oldRecoverSlots
 				p.implicitDeferResults = oldImplicitDeferResults
+				p.gcRoots, p.gcClosureRoot = oldGCRoots, oldGCClosureRoot
 			}()
 			p.phis = nil
 			if dbgSymsEnabled {
@@ -718,6 +722,8 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			p.prepareExportedLocalContext(f)
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
+			p.prepareGCRoots(f, hasCtx)
+			p.initGCRoots(b, f)
 			off := make([]int, len(f.Blocks))
 			if isCgo {
 				p.cgoArgs = make([]llssa.Expr, len(f.Params))
@@ -1417,6 +1423,7 @@ func (p *context) compilePhis(b llssa.Builder, block *ssa.BasicBlock) int {
 			for i := 0; i < n; i++ {
 				iv := block.Instrs[i].(*ssa.Phi)
 				p.bvals[iv] = rets[i]
+				p.publishGCRoot(b, iv, rets[i])
 			}
 			return n
 		}
@@ -1452,6 +1459,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		// on affected Windows hosts, turning the diagnostic into a hardware fault.
 		log.Panicf("unreachable: %T\n", iv)
 	}
+	defer func() {
+		p.publishGCRoot(b, iv, ret)
+	}()
 	switch v := iv.(type) {
 	case *ssa.Call:
 		ret = p.call(b, llssa.Call, &v.Call)
