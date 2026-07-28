@@ -9,9 +9,6 @@ import (
 )
 
 func ReadMemStats(m *runtime.MemStats) {
-	if m == nil {
-		return
-	}
 	stats := tinygogc.ReadGCStats()
 	m.Alloc = stats.Alloc
 	m.TotalAlloc = stats.TotalAlloc

@@ -13,7 +13,6 @@ var (
 )
 
 func main() {
-	runtime.ReadMemStats(nil)
 	if testAlignedAlloc() == 0 {
 		panic("aligned allocation failed")
 	}
