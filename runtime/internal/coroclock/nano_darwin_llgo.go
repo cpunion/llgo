@@ -29,10 +29,9 @@ import (
 const darwinClockUptimeRaw = c.Int(8)
 
 // clock_gettime_nsec_np is one bounded C leaf: it neither waits for an
-// external event nor invokes a callback. The certificate is not an
-// async-signal-safety claim.
+// external event nor invokes a callback. Its only live use is part of the
+// compiler-verified scheduler clock raw-host closure.
 //
-//llgo:coro noblock
 //go:linkname nativeClockGettimeNsec C.clock_gettime_nsec_np
 func nativeClockGettimeNsec(clockID c.Int) uint64
 

@@ -31,9 +31,9 @@ const (
 
 // Init completes collector initialization on the calling thread. It may take
 // collector/libc locks, but it neither waits for application I/O nor retains
-// caller-frame arguments after return.
+// caller-frame arguments after return. Its only live runtime occurrence is
+// part of the compiler-verified startup raw-host closure.
 //
-//llgo:coro sync
 //go:linkname Init C.GC_init
 func Init()
 
@@ -67,9 +67,8 @@ func Free(ptr c.Pointer)
 //
 // Root-table registration returns synchronously and does not retain pointers
 // to the caller's coroutine frame. The collector may acquire internal locks;
-// sync does not promise lock-free or bounded-latency execution.
+// the exact startup/TLS occurrence is proven to be in the raw-host closure.
 //
-//llgo:coro sync
 //go:linkname AddRoots C.GC_add_roots
 func AddRoots(start, end c.Pointer)
 

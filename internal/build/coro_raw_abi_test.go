@@ -122,8 +122,9 @@ func Owner() {}
 	}
 
 	// Replacing the conservative effect/exec shape with ExternalKnown is not
-	// itself a physical raw-call proof. Only an immutable frontend C noblock/sync
-	// or translated-assembly certificate may admit an ordinary raw path.
+	// itself a physical raw-call proof. Only an immutable generic direct-executor,
+	// legacy C noblock/sync, or translated-assembly certificate may admit an
+	// ordinary raw path.
 	_, err = input.Analyze(coro.Roots{{Function: owner, Demand: coro.SyncDemand}}, coro.SSAConfig{
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
@@ -135,7 +136,7 @@ func Owner() {}
 			return coro.SSAFunctionPolicy{}, nil
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "without an exact foreign-noblock, foreign-sync, or assembly-no-suspend certificate") {
+	if err == nil || !strings.Contains(err.Error(), "without an exact direct executor, foreign-noblock, foreign-sync, or assembly-no-suspend certificate") {
 		t.Fatalf("raw ExternalKnown/no-suspend closure error = %v; want exact-certificate rejection", err)
 	}
 }

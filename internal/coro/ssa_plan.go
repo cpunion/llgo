@@ -89,12 +89,12 @@ type SSAFunctionPolicy struct {
 	// foreign boundary from its progress dimension. Wrapper scope is metadata
 	// only and never suppresses SSA body analysis.
 	CallableContractCertificate CallableContractCertificate
-	// ForeignNoBlockCertificate is a frozen frontend proof that one exact
-	// external declaration has a bounded, nonblocking physical ABI. The
-	// opaque certificate identity is retained in SSAPlan and its archive digest;
-	// it must never be synthesized from a display name. Certified declarations
-	// remain IRQUnsafe unless a separate proof exists; this certificate removes
-	// only BlockForeign/WaitForeign.
+	// ForeignNoBlockCertificate is the frozen legacy //llgo:coro noblock proof
+	// for one exact external declaration. Generic and compiler-inferred
+	// executor-safe facts use CallableContractCertificate so they can cross
+	// archive boundaries without preserving directive-specific vocabulary. The
+	// opaque legacy identity remains in SSAPlan and its digest; it must never be
+	// synthesized from a display name.
 	ForeignNoBlockCertificate string
 	// ForeignSyncCertificate is a frozen proof for one exact C declaration
 	// carrying //llgo:coro sync. Like noblock it produces an

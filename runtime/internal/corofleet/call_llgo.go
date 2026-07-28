@@ -82,8 +82,8 @@ func ReleaseOwner(thread pthread.Thread, token, slot uint32) c.Int
 
 // RetireSelf detaches a permanently tainted owner record before pthread_exit.
 // The process entry thread has no factory record and never calls this leaf.
+// Its only live occurrence belongs to the verified scheduler raw-host closure.
 //
-//llgo:coro noblock
 //go:linkname RetireSelf C.__llgo_coro_fleet_owner_retire_self_v1
 func RetireSelf(slot uint32) c.Int
 

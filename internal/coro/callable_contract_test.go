@@ -124,6 +124,31 @@ func TestTrustedInlineCallableContractUsesSharedSafeRefinement(t *testing.T) {
 	}
 }
 
+func TestCallableContractDirectExecutorCompatible(t *testing.T) {
+	base := CallableContract{
+		ID:       "test.v1",
+		Progress: ProgressExecutorSafe,
+		Affinity: AffinityCallerThread,
+		Reentry:  ReentryNone,
+		Memory:   MemoryBorrowUntilReturn,
+	}
+	if !CallableContractDirectExecutorCompatible(base) {
+		t.Fatal("exact caller-thread borrowed executor leaf was rejected")
+	}
+	for _, mutate := range []func(*CallableContract){
+		func(contract *CallableContract) { contract.Progress = ProgressMayBlock },
+		func(contract *CallableContract) { contract.Affinity = AffinityOwnerThread },
+		func(contract *CallableContract) { contract.Reentry = ReentryManagedCallback },
+		func(contract *CallableContract) { contract.Memory = MemoryBorrowUntilComplete },
+	} {
+		candidate := base
+		mutate(&candidate)
+		if CallableContractDirectExecutorCompatible(candidate) {
+			t.Fatalf("incompatible direct executor contract was accepted: %+v", candidate)
+		}
+	}
+}
+
 func TestCallableContractFactsFailClosed(t *testing.T) {
 	for _, test := range []struct {
 		name string

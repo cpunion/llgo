@@ -52,6 +52,8 @@ func Create(thread *pthread.Thread) c.Int
 func QueueInit() bool
 
 // QueueCanRelease is the exact zero-lifecycle query used before initialization.
+// Its target-selected C body is a closed atomic leaf, so no source coroutine
+// directive is required.
 //
 //go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1
 func QueueCanRelease() bool
@@ -59,16 +61,15 @@ func QueueCanRelease() bool
 // QueueReserve owns one independent sequence slot without publishing it. Exact
 // P owners may reserve concurrently; all participating atomics were proved
 // lock-free by QueueInit, and each token is submitted or canceled inside its
-// no-suspend hook. No OS wait or callback is reachable from this leaf.
+// no-suspend hook. Every live occurrence is in the compiler-verified raw-host
+// closure, so the declaration publishes no managed executor-safe capability.
 //
-//llgo:coro noblock
 //go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1
 func QueueReserve(reservation *QueueReservation) bool
 
 // QueueCancelReservation publishes an internal tombstone for one unpublished
 // token. Consumers retire it without exposing an invalid worker job.
 //
-//llgo:coro noblock
 //go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1
 func QueueCancelReservation(reservation QueueReservation) bool
 
@@ -76,7 +77,6 @@ func QueueCancelReservation(reservation QueueReservation) bool
 // semaphore signal. sem_post and Mach semaphore_signal never wait for worker
 // progress; full capacity was already rejected by QueueReserve.
 //
-//llgo:coro noblock
 //go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1
 func QueueSubmitReserved(reservation QueueReservation, job *Job) bool
 

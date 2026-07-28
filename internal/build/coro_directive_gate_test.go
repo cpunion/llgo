@@ -19,6 +19,7 @@
 package build
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -26,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -38,6 +40,7 @@ import (
 func TestCoroProductionDirectiveInventory(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	got := make(map[string]int)
+	var manifest []string
 	err := filepath.WalkDir(repoRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -62,9 +65,13 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 				got[fields[1]]++
 			}
 		}
-		if err := validateCoroProductionDirectivePlacement(path, source); err != nil {
+		entries, err := validateCoroProductionDirectivePlacement(
+			repoRoot, path, source,
+		)
+		if err != nil {
 			return err
 		}
+		manifest = append(manifest, entries...)
 		return nil
 	})
 	if err != nil {
@@ -73,8 +80,8 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 
 	want := map[string]int{
 		"contract": 7,
-		"noblock":  60,
-		"sync":     38,
+		"noblock":  35,
+		"sync":     30,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf(
@@ -83,14 +90,34 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 			got, want,
 		)
 	}
+	sort.Strings(manifest)
+	const wantManifestSHA256 = "7b0f05863be6d8b50d31031cab7a11df70d5bab8150170ef8411978426421b3b"
+	manifestSHA256 := fmt.Sprintf(
+		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
+	)
+	if manifestSHA256 != wantManifestSHA256 {
+		t.Fatalf(
+			"production //llgo:coro owner/contract manifest SHA-256 = %s, want %s; "+
+				"review every residual bottom contract before updating this gate:\n%s",
+			manifestSHA256, wantManifestSHA256, strings.Join(manifest, "\n"),
+		)
+	}
 }
 
-func validateCoroProductionDirectivePlacement(path string, source []byte) error {
+func validateCoroProductionDirectivePlacement(
+	repoRoot, path string,
+	source []byte,
+) ([]string, error) {
 	files := token.NewFileSet()
 	file, err := parser.ParseFile(files, path, source, parser.ParseComments)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	relative, err := filepath.Rel(repoRoot, path)
+	if err != nil {
+		return nil, err
+	}
+	relative = filepath.ToSlash(relative)
 	owners := make(map[*ast.CommentGroup]*ast.FuncDecl)
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
@@ -98,6 +125,7 @@ func validateCoroProductionDirectivePlacement(path string, source []byte) error 
 			owners[function.Doc] = function
 		}
 	}
+	var manifest []string
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
 			fields := strings.Fields(comment.Text)
@@ -106,25 +134,29 @@ func validateCoroProductionDirectivePlacement(path string, source []byte) error 
 			}
 			function := owners[group]
 			if function == nil {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"%s:%d: production coroutine directive is not attached to an exact function declaration",
 					path, files.Position(comment.Pos()).Line,
 				)
 			}
+			manifest = append(
+				manifest,
+				relative+"\t"+function.Name.Name+"\t"+strings.Join(fields, " "),
+			)
 			if function.Body == nil || coroDirectiveDocLinksExternal(group) {
 				continue
 			}
 			if fields[1] == "contract" && coroDirectiveHasField(fields[2:], "scope=wrapper") {
 				continue
 			}
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"%s:%d: bodyful Go function %s carries %q caller-coloring metadata; "+
 					"derive its effect from SSA or use an exact bottom-level scope=wrapper contract",
 				path, files.Position(comment.Pos()).Line, function.Name.Name, fields[1],
 			)
 		}
 	}
-	return nil
+	return manifest, nil
 }
 
 func coroDirectiveDocLinksExternal(group *ast.CommentGroup) bool {

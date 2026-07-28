@@ -29,10 +29,9 @@ import (
 const _CLOCK_UPTIME_RAW = 8
 
 // clock_gettime_nsec_np reads one kernel-maintained monotonic counter. It does
-// not wait for an external event or invoke a callback; retain IRQUnsafe while
-// proving this exact foreign declaration cannot suspend a coroutine.
+// not wait for an external event or invoke a callback. The exact runtime clock
+// occurrence is inferred as raw-host and retains IRQUnsafe.
 //
-//llgo:coro noblock
 //go:linkname c_clock_gettime_nsec_np C.clock_gettime_nsec_np
 func c_clock_gettime_nsec_np(clockID int32) uint64
 

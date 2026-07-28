@@ -396,16 +396,108 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 		if !useDomains.Closed {
 			return nil, fmt.Errorf("native target foreign use-domain report is not closed")
 		}
-		for _, record := range useDomains.legacySyncRecords() {
+		// This target builds cl/_testgo/print, so only declarations in that
+		// program's exact emission universe may be asserted here. The producer
+		// proof test separately covers every target-selected poll/signal C leaf,
+		// including declarations that this program does not reach.
+		expectedLLVMInferred := map[string]bool{
+			"__llgo_runtime_poll_desc_publish_operation_v1": false,
+			"__llgo_runtime_poll_desc_clear_operation_v1":   false,
+			"__llgo_runtime_poll_desc_load_operation_v1":    false,
+			"__llgo_runtime_poll_desc_deadline_v1":          false,
+			"__llgo_coro_worker_queue_can_release_v1":       false,
+		}
+		for _, record := range useDomains.certificateRecords() {
 			t.Log(record.diagnostic())
+		}
+		for _, record := range useDomains.Records {
+			if _, expected := expectedLLVMInferred[record.PhysicalSymbol]; !expected {
+				continue
+			}
+			certificate, inferred := plan.CallableContractCertificate(
+				record.Function,
+			)
+			function, planned := plan.FunctionPlan(record.Function)
+			if !record.DirectExecutorCertified ||
+				record.NoBlockCertified ||
+				record.SyncCertified ||
+				!inferred ||
+				!strings.HasPrefix(
+					string(certificate.Contract.ID),
+					"llvm-executor-leaf.v1/",
+				) ||
+				!planned ||
+				function.External != coro.ExternalKnown ||
+				function.Effect != coro.NoSuspend ||
+				function.Exec != coro.IRQUnsafe {
+				return nil, fmt.Errorf(
+					"native target inferred foreign declaration %q has no exact executor-leaf plan: "+
+						"record=%s certificate=%+v inferred=%t function=%+v planned=%t",
+					record.PhysicalSymbol, record.diagnostic(),
+					certificate, inferred, function, planned,
+				)
+			}
+			t.Log("inferred LLVM executor leaf " + record.diagnostic())
+		}
+		for _, function := range input.EmissionUniverse.Functions() {
+			identity, external, err := input.callableIdentity(function)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"native target callable identity for %q: %w",
+					function.Name(), err,
+				)
+			}
+			if !external {
+				continue
+			}
+			if _, expected := expectedLLVMInferred[identity.PhysicalSymbol]; !expected {
+				continue
+			}
+			certificate, inferred, err :=
+				input.callableContract(function)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"native target inferred foreign declaration %q: %w",
+					identity.PhysicalSymbol, err,
+				)
+			}
+			if !inferred || certificate.ID == "" ||
+				certificate.PhysicalSymbol != identity.PhysicalSymbol ||
+				!coro.CallableContractDirectExecutorCompatible(
+					certificate.Contract,
+				) {
+				return nil, fmt.Errorf(
+					"native target inferred foreign declaration %q has no exact frontend certificate: "+
+						"certificate=%+v inferred=%t",
+					identity.PhysicalSymbol, certificate, inferred,
+				)
+			}
+			expectedLLVMInferred[identity.PhysicalSymbol] = true
+		}
+		for symbol, found := range expectedLLVMInferred {
+			if !found {
+				return nil, fmt.Errorf(
+					"native target inferred foreign declaration %q is absent from the exact emission universe",
+					symbol,
+				)
+			}
 		}
 		const runtimePath = "github.com/goplus/llgo/runtime/internal/runtime"
 		const clitePath = "github.com/goplus/llgo/runtime/internal/clite"
 		validateMigratedRawHost := func(record coroForeignUseDomainRecord, identity string) error {
-			if record.LegacySync || !record.rawHostOnly() {
+			if record.DirectExecutorCertified ||
+				record.NoBlockCertified ||
+				record.SyncCertified ||
+				!record.rawHostOnly() {
 				return fmt.Errorf(
 					"native target migrated raw-host declaration %q = %s",
 					identity, record.diagnostic(),
+				)
+			}
+			if _, legacy := plan.ForeignNoBlockCertificate(record.Function); legacy {
+				return fmt.Errorf(
+					"native target raw-host declaration %q retained a foreign-noblock certificate",
+					identity,
 				)
 			}
 			if _, legacy := plan.ForeignSyncCertificate(record.Function); legacy {
@@ -441,10 +533,24 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			"__llgo_coro_fleet_factory_stop_v2":              false,
 			"__llgo_coro_worker_create_v1":                   false,
 			"__llgo_coro_worker_queue_init_v1":               false,
-			"__llgo_coro_worker_queue_can_release_v1":        false,
 			"__llgo_coro_worker_queue_stop_v1":               false,
 			"__llgo_coro_worker_queue_destroy_after_join_v1": false,
 			"__llgo_coro_worker_call_v1":                     false,
+			"__llgo_coro_worker_queue_reserve_v1":            false,
+			"__llgo_coro_worker_queue_cancel_reservation_v1": false,
+			"__llgo_coro_worker_queue_submit_reserved_v1":    false,
+			"__llgo_coro_fleet_owner_retire_self_v1":         false,
+			"__llgo_coro_doorbell_open_v1":                   false,
+			"__llgo_coro_doorbell_read_v1":                   false,
+			"__llgo_coro_doorbell_write_v1":                  false,
+			"__llgo_coro_doorbell_close_v1":                  false,
+			"GC_init":                                        false,
+			"GC_add_roots":                                   false,
+			"siglongjmp":                                     false,
+			"pthread_self":                                   false,
+		}
+		if runtime.GOOS == "darwin" {
+			migratedRawHostSymbols["clock_gettime_nsec_np"] = false
 		}
 		for _, record := range useDomains.Records {
 			if _, migrated := migratedRawHostSymbols[record.PhysicalSymbol]; !migrated {
@@ -493,7 +599,8 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			}
 			ordinaryFputcFound = true
 			if record.PhysicalSymbol != "fputc" ||
-				record.LegacySync ||
+				record.DirectExecutorCertified ||
+				record.SyncCertified ||
 				record.rawHostOnly() ||
 				!record.defaultUseDomainCompatible() ||
 				record.RawHostCalls != 0 ||

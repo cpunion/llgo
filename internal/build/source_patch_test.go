@@ -618,8 +618,8 @@ func TestDarwinCoroProcessSyscallsUseIsolatedRawCarrier(t *testing.T) {
 	for _, required := range []string{
 		"//llgo:coro sync\n//go:linkname llgoCoroFork C.fork",
 		"//llgo:coro sync\n//go:linkname llgoCoroExecve C.execve",
-		"//llgo:coro noblock\n//go:linkname llgoCoroExit C.exit",
-		"//llgo:coro noblock\n//go:linkname llgoCoroProcessErrno C.cliteErrno",
+		"//go:linkname llgoCoroExit C.exit",
+		"//go:linkname llgoCoroProcessErrno C.cliteErrno",
 		"func fork()",
 		"func execve(",
 		"func exit(",
@@ -632,6 +632,8 @@ func TestDarwinCoroProcessSyscallsUseIsolatedRawCarrier(t *testing.T) {
 		"llgo.syscall32",
 		"abi.FuncPCABI0(",
 		"llgoCoroProcessRawSyscall3",
+		"//llgo:coro noblock\n//go:linkname llgoCoroExit C.exit",
+		"//llgo:coro noblock\n//go:linkname llgoCoroProcessErrno C.cliteErrno",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("Darwin process-syscall patch retained dynamic carrier %q", forbidden)

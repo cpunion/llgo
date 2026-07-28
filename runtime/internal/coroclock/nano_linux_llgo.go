@@ -19,9 +19,6 @@
 package coroclock
 
 import (
-	_ "unsafe"
-
-	c "github.com/goplus/llgo/runtime/internal/clite"
 	ctime "github.com/goplus/llgo/runtime/internal/clite/time"
 )
 
@@ -29,20 +26,12 @@ import (
 // Darwin's value 6, which Linux interprets as CLOCK_MONOTONIC_COARSE.
 const linuxClockMonotonic = ctime.ClockidT(1)
 
-// clock_gettime is one bounded C leaf: it neither waits for an external event
-// nor invokes a callback. The certificate is not an async-signal-safety claim.
-//
-//go:noescape
-//llgo:coro noblock
-//go:linkname nativeClockGettime C.clock_gettime
-func nativeClockGettime(clockID ctime.ClockidT, value *ctime.Timespec) c.Int
-
 // MonotonicNano returns the native monotonic clock in nanoseconds. false means
 // that the OS call failed or returned a value outside the runtime's int64
 // deadline domain. It allocates no storage and retains no pointer.
 func MonotonicNano() (int64, bool) {
 	var value ctime.Timespec
-	if nativeClockGettime(linuxClockMonotonic, &value) != 0 {
+	if ctime.ClockGettime(linuxClockMonotonic, &value) != 0 {
 		return 0, false
 	}
 	return composeMonotonicNano(int64(value.Sec), int64(value.Nsec))

@@ -29,19 +29,20 @@ const (
 	coroPollDescPublishClosingV1
 )
 
-//llgo:coro noblock
+// These owner-side descriptor operations are reachable only from the exact
+// compiler-verified scheduler raw-host closure. Their target-selected C
+// definitions are also closed, acyclic atomic leaves, so the compiler can
+// derive executor-safe certificates without source directives.
+//
 //go:linkname llgoCoroPollDescPublishOperationV1 C.__llgo_runtime_poll_desc_publish_operation_v1
 func llgoCoroPollDescPublishOperationV1(ctx uintptr, interest, sourceSlot, generation uint32) uint32
 
-//llgo:coro noblock
 //go:linkname llgoCoroPollDescClearOperationV1 C.__llgo_runtime_poll_desc_clear_operation_v1
 func llgoCoroPollDescClearOperationV1(ctx uintptr, interest, sourceSlot, generation uint32) uint32
 
-//llgo:coro noblock
 //go:linkname llgoCoroPollDescLoadOperationV1 C.__llgo_runtime_poll_desc_load_operation_v1
 func llgoCoroPollDescLoadOperationV1(ctx uintptr, interest uint32) uint64
 
-//llgo:coro noblock
 //go:linkname llgoCoroPollDescDeadlineOwnerV1 C.__llgo_runtime_poll_desc_deadline_v1
 func llgoCoroPollDescDeadlineOwnerV1(ctx uintptr, mode int32) int64
 

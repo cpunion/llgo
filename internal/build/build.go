@@ -2175,11 +2175,18 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 			return fmt.Errorf("live raw ABI plain closure %q reaches uncertified external target %q (%s) at %s (external=%s effect=%s exec=%s)",
 				owner.Name(), targetPlan.ID, target.String(), site, targetPlan.External, targetPlan.Effect, targetPlan.Exec)
 		}
+		if callable, certified := plan.CallableContractCertificate(target); certified &&
+			callable.Scope == coro.CallableContractScopeDeclaration &&
+			coro.CallableContractDirectExecutorCompatible(
+				callable.Contract,
+			) {
+			return nil
+		}
 		_, foreignNoBlock := plan.ForeignNoBlockCertificate(target)
 		_, foreignSync := plan.ForeignSyncCertificate(target)
 		_, assemblyNoSuspend := plan.AssemblyNoSuspendCertificate(target)
 		if !foreignNoBlock && !foreignSync && !assemblyNoSuspend {
-			return fmt.Errorf("live raw ABI plain closure %q reaches external target %q (%s) at %s without an exact foreign-noblock, foreign-sync, or assembly-no-suspend certificate",
+			return fmt.Errorf("live raw ABI plain closure %q reaches external target %q (%s) at %s without an exact direct executor, foreign-noblock, foreign-sync, or assembly-no-suspend certificate",
 				owner.Name(), targetPlan.ID, target.String(), site)
 		}
 		return nil
@@ -5499,11 +5506,12 @@ func exactCoroStaticFunctionValue(ctx *context, value ssa.Value) (*ssa.Function,
 // indirect call through an exact //llgo:type C value is a raw code-pointer leaf:
 // it stays on the foreign/native stack and never becomes a managed descriptor
 // edge. An exact frozen C declaration may terminate the closure when it carries
-// a frontend-owned noblock/sync certificate. A conservative non-reentrant
-// may-block callable contract is also valid without entering requiredPlain:
-// this raw callback already executes on its foreign caller's native stack, so
-// an inline blocking leaf cannot occupy a managed executor. The final raw
-// closure validator independently joins and revalidates that exact contract.
+// a frontend-owned legacy noblock/sync certificate or a generic direct
+// executor-safe contract. A conservative non-reentrant may-block callable
+// contract is also valid without entering requiredPlain: this raw callback
+// already executes on its foreign caller's native stack, so an inline blocking
+// leaf cannot occupy a managed executor. The final raw closure validator
+// independently joins and revalidates that exact contract.
 // Dynamic managed calls, go/defer, other bodyless leaves, captured closures,
 // and unresolved aliases remain on the ordinary Dispatch path. Effect and
 // representation are independently checked after fixed-point analysis; this
@@ -5634,7 +5642,13 @@ func provenCoroDirectPlainStaticClosureWithLibrary(
 						// Only this raw callback variant invokes it inline.
 						continue
 					}
-					if !tlsCallback && !noBlock && !synchronous {
+					directExecutor := callableCertified &&
+						callable.Scope == coro.CallableContractScopeDeclaration &&
+						coro.CallableContractDirectExecutorCompatible(
+							callable.Contract,
+						)
+					if !tlsCallback && !noBlock && !synchronous &&
+						!directExecutor {
 						return nil, false, nil
 					}
 					if _, ok := seenCLeaves[callee]; !ok {
@@ -5793,7 +5807,9 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		// deliberately prepare an incomplete package universe.
 		CompleteRuntimeABI:     hasRuntimeABI,
 		CoroTargetCapabilities: ctx.buildConf.coroTargetCapabilities(),
-		GOROOT:                 ctx.goRoot,
+		CoroForeignExecutorLeafProofs: ctx.coroRawGlobalSymbols.
+			frozenForeignExecutorLeafProofs(),
+		GOROOT: ctx.goRoot,
 	})
 	if err != nil {
 		return err

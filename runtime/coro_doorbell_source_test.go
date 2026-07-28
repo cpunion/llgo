@@ -38,12 +38,20 @@ func TestCoroDoorbellUsesExactBoundedForeignLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	goText := string(goSource)
+	requireRuntimeAnnotationFreeCDeclarations(
+		t,
+		coroDoorbellGoSource,
+		"nativeCDoorbellOpen",
+		"nativeCDoorbellRead",
+		"nativeCDoorbellWrite",
+		"nativeCDoorbellClose",
+	)
 	for _, required := range []string{
 		`LLGoFiles   = "_wrap/doorbell.c"`,
-		"//llgo:coro noblock\n//go:linkname nativeCDoorbellOpen C.__llgo_coro_doorbell_open_v1",
-		"//llgo:coro noblock\n//go:linkname nativeCDoorbellRead C.__llgo_coro_doorbell_read_v1",
-		"//llgo:coro noblock\n//go:linkname nativeCDoorbellWrite C.__llgo_coro_doorbell_write_v1",
-		"//llgo:coro noblock\n//go:linkname nativeCDoorbellClose C.__llgo_coro_doorbell_close_v1",
+		"//go:linkname nativeCDoorbellOpen C.__llgo_coro_doorbell_open_v1",
+		"//go:linkname nativeCDoorbellRead C.__llgo_coro_doorbell_read_v1",
+		"//go:linkname nativeCDoorbellWrite C.__llgo_coro_doorbell_write_v1",
+		"//go:linkname nativeCDoorbellClose C.__llgo_coro_doorbell_close_v1",
 		"unpackNativeDoorbellResult",
 	} {
 		if !strings.Contains(goText, required) {

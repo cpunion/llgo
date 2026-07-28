@@ -73,16 +73,17 @@ func TestCoroRuntimeAllocatorUsesPrivateSynchronousBoundary(t *testing.T) {
 		strings.Contains(bdwgcText, "//llgo:coro worker\n"+mallocDeclaration) {
 		t.Error("ordinary bdwgc.Malloc acquired a coroutine capability")
 	}
+	requireRuntimeAnnotationFreeCDeclarations(
+		t, "internal/clite/bdwgc/bdwgc.go", "Init", "AddRoots",
+	)
 	for _, declaration := range []string{
-		"//llgo:coro sync\n//go:linkname Init C.GC_init",
 		"//llgo:coro sync\n//go:linkname MallocUncollectable C.GC_malloc_uncollectable",
 		"//llgo:coro sync\n//go:linkname Free C.GC_free",
-		"//llgo:coro sync\n//go:linkname AddRoots C.GC_add_roots",
 		"//llgo:coro sync\n//go:linkname RemoveRoots C.GC_remove_roots",
 		"//llgo:coro sync\n//go:linkname RegisterFinalizer C.GC_register_finalizer",
 	} {
 		if !strings.Contains(bdwgcText, declaration) {
-			t.Errorf("BDWGC root boundary lacks synchronous contract %q", declaration)
+			t.Errorf("BDWGC managed boundary lacks synchronous contract %q", declaration)
 		}
 	}
 	for _, declaration := range []string{

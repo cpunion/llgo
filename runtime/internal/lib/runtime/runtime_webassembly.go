@@ -31,5 +31,4 @@ const (
 func c_maxprocs() int32 { return 1 }
 
 //go:linkname c_debugtrap C.llgo_debugtrap
-//llgo:coro noblock
 func c_debugtrap()
