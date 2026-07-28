@@ -179,6 +179,8 @@ type context struct {
 	debugDIVars          map[*types.Var]llssa.DIVar
 	debugAllocVars       map[*ssa.Alloc]*types.Var
 	runtimeCallerFuncs   map[*ssa.Function]bool
+	gcRoots              map[ssa.Value][]llssa.Expr
+	gcClosureRoot        llssa.Expr
 	pcLineSeq            uint64
 
 	patches          Patches
@@ -601,12 +603,14 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		dbgSymsEnabled := enableDbgSyms && (f == nil || f.Origin() == nil)
 		p.inits = append(p.inits, func() {
 			oldFn, oldGoFn, oldMethodNilDerefChecks, oldCallerFrameMark := p.fn, p.goFn, p.methodNilDerefChecks, p.callerFrameMark
+			oldGCRoots, oldGCClosureRoot := p.gcRoots, p.gcClosureRoot
 			p.fn = fn
 			p.goFn = f
 			p.callerFrameMark = llssa.Nil
 			p.state = state // restore pkgState when compiling funcBody
 			defer func() {
 				p.fn, p.goFn, p.methodNilDerefChecks, p.callerFrameMark = oldFn, oldGoFn, oldMethodNilDerefChecks, oldCallerFrameMark
+				p.gcRoots, p.gcClosureRoot = oldGCRoots, oldGCClosureRoot
 			}()
 			p.phis = nil
 			if dbgSymsEnabled {
@@ -626,6 +630,8 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			}
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
+			p.prepareGCRoots(f, hasCtx)
+			p.initGCRoots(b, f)
 			off := make([]int, len(f.Blocks))
 			if isCgo {
 				p.cgoArgs = make([]llssa.Expr, len(f.Params))
@@ -1170,6 +1176,7 @@ func (p *context) compilePhis(b llssa.Builder, block *ssa.BasicBlock) int {
 			for i := 0; i < n; i++ {
 				iv := block.Instrs[i].(*ssa.Phi)
 				p.bvals[iv] = rets[i]
+				p.publishGCRoot(b, iv, rets[i])
 			}
 			return n
 		}
@@ -1202,6 +1209,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		log.Panicln("unreachable:", iv)
 	}
+	defer func() {
+		p.publishGCRoot(b, iv, ret)
+	}()
 	switch v := iv.(type) {
 	case *ssa.Call:
 		ret = p.call(b, llssa.Call, &v.Call)
