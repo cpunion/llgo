@@ -20,9 +20,6 @@ package runtime
 
 import "unsafe"
 
-// FreeDeferNode is a no-op in baremetal environment.
-// Defer nodes become unreachable after being unlinked from the chain,
-// and tinygogc will reclaim them in the next GC cycle.
+// FreeDeferNode leaves unreachable nodes for the collector.
 func FreeDeferNode(ptr unsafe.Pointer) {
-	// no-op: let tinygogc collect
 }
