@@ -322,6 +322,85 @@ func Root(value uint32) uint32 {
 	}
 }
 
+func TestCoroLoweringFactsArchiveTypedControlOperation(t *testing.T) {
+	testProgram := newCoroLoweringFactsEmissionTestProgram(ssa.SanityCheckFunctions | ssa.InstantiateGenerics)
+	runtimePackage := testProgram.addPackage(t, llssa.PkgRuntime, `package runtime`)
+	callerPackage := testProgram.addPackage(t, "example.com/emission/loweringfacts-control", `package control
+//llgo:link exit llgo.controlExit
+func exit(int32)
+func Root(stop bool) {
+	if stop {
+		exit(2)
+	}
+}
+`)
+	testProgram.ssa.Build()
+	prog := newLLSSAProg(t)
+	t.Cleanup(prog.Dispose)
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePackage.ssa, Files: []*ast.File{runtimePackage.file}, Identity: "runtime-control"},
+		{SSA: callerPackage.ssa, Files: []*ast.File{callerPackage.file}, Identity: "caller-control"},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := callerPackage.ssa.Func("Root")
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProgram.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(testProgram.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		FunctionIDs:          functionIDs,
+		EmissionUniverse:     ssaUniverse,
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == root {
+				return coro.SSAFunctionPolicy{Exec: coro.IRQUnsafe}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			site, frozen, err := universe.CoroCallSitePlan(call)
+			return frozen && site.ElidesCall(), err
+		},
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
+		ResolveFunction: func(function *ssa.Function) (*ssa.Function, bool, error) {
+			resolved, ok := universe.Resolve(function)
+			return resolved, ok, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := (&Compilation{CoroPlan: plan, EmissionUniverse: universe}).BuildCoroLoweringFactsReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID, ok := plan.FunctionID(root)
+	if !ok {
+		t.Fatal("typed-control Root has no FunctionID")
+	}
+	facts := loweringFactsFunctionByID(t, report.Facts, rootID)
+	var controls []coro.LoweringFact
+	for _, fact := range facts.Sites {
+		if fact.Class == coro.OpControl {
+			controls = append(controls, fact)
+		}
+	}
+	if len(controls) != 1 ||
+		controls[0].Recipe != "cl.control.process-exit.v1" ||
+		controls[0].Contract != "llgo.control.process-exit.v1" ||
+		!controls[0].Exec.Contains(coro.IRQUnsafe) ||
+		!controls[0].Footprint.Contains(coro.FootprintBarrier) ||
+		controls[0].Footprint.Contains(coro.FootprintManagedCall|coro.FootprintSuspend) {
+		t.Fatalf("typed-control lowering facts = %+v", controls)
+	}
+}
+
 func TestCoroLoweringFactsReportFailsClosedWithoutFrozenInputs(t *testing.T) {
 	var nilCompilation *Compilation
 	if _, err := nilCompilation.BuildCoroLoweringFactsReport(); err == nil || !strings.Contains(err.Error(), "compilation") {

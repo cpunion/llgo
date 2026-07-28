@@ -67,6 +67,47 @@ func assertStoreToGlobal(t *testing.T, ir, global string) {
 	t.Fatalf("expected store to %s in IR:\n%s", global, ir)
 }
 
+func TestTypedControlIntrinsicsLowerToTargetLeaves(t *testing.T) {
+	const src = `package control
+//llgo:link fork llgo.controlFork
+func fork() int32
+//llgo:link execve llgo.controlExecve
+func execve(*int8, **int8, **int8) int32
+//llgo:link exit llgo.controlExit
+func exit(int32)
+//llgo:link trap llgo.controlTrap
+func trap()
+func Process(path *int8, argv **int8, envp **int8) int32 {
+	pid := fork()
+	if pid != 0 {
+		return pid
+	}
+	return execve(path, argv, envp)
+}
+func ExitNow(status int32) { exit(status) }
+func TrapNow() { trap() }
+`
+	ir := compileWithRewrites(t, src, nil)
+	for _, symbol := range []string{"@fork", "@execve", "@exit", "@llvm.trap"} {
+		if !strings.Contains(ir, symbol) {
+			t.Fatalf("typed control lowering omitted %s:\n%s", symbol, ir)
+		}
+	}
+	for _, compilerName := range []string{
+		"llgo.controlFork",
+		"llgo.controlExecve",
+		"llgo.controlExit",
+		"llgo.controlTrap",
+	} {
+		if strings.Contains(ir, compilerName) {
+			t.Fatalf("typed control lowering retained compiler declaration %s:\n%s", compilerName, ir)
+		}
+	}
+	if strings.Count(ir, "unreachable") < 2 {
+		t.Fatalf("terminal typed controls omitted unreachable continuations:\n%s", ir)
+	}
+}
+
 func TestRewriteGlobalStrings(t *testing.T) {
 	const src = `package rewritepkg
 var VarInit = "original_value"

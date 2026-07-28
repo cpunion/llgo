@@ -875,6 +875,9 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					if err != nil {
 						return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen intrinsic effect in %q: %w", fn.Name(), err)
 					}
+					if frozen && callSite.ControlOperation != cl.CoroControlNone {
+						policy.Exec = policy.Exec.Join(callSite.ControlOperation.ExecFlags())
+					}
 					if frozen && callSite.Elision == cl.CoroCallElidedCgoWorker {
 						policy.Effect = policy.Effect.Join(coro.WaitForeign)
 					} else if _, ordinary := call.(*ssa.Call); ordinary &&

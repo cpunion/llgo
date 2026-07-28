@@ -606,23 +606,61 @@ func remapTrampolineCNameForTarget(target *llssa.Target, name string) string {
 	return name
 }
 
-func (p *context) sigsetjmp(b llssa.Builder, args []ssa.Value) (ret llssa.Expr) {
-	if len(args) == 2 {
-		jb := p.compileValue(b, args[0])
-		savemask := p.compileValue(b, args[1])
-		return b.Sigsetjmp(jb, savemask)
+func (p *context) compileTypedControlOperation(
+	b llssa.Builder,
+	args []ssa.Value,
+	kind int,
+	operation CoroControlOperation,
+) (ret llssa.Expr) {
+	compiled := p.compileValues(b, args, kind)
+	switch operation {
+	case CoroControlReturnsTwice:
+		if len(compiled) == 2 {
+			return b.Sigsetjmp(compiled[0], compiled[1])
+		}
+	case CoroControlNonlocalJump:
+		if len(compiled) == 2 {
+			b.Siglongjmp(compiled[0], compiled[1])
+			return
+		}
+	case CoroControlProcessFork:
+		if len(compiled) == 0 {
+			return b.ControlFork()
+		}
+	case CoroControlProcessExec:
+		if len(compiled) == 3 {
+			return b.ControlExecve(compiled[0], compiled[1], compiled[2])
+		}
+	case CoroControlProcessExit:
+		if len(compiled) == 1 {
+			b.ControlExit(compiled[0])
+			return
+		}
+	case CoroControlTrap:
+		if len(compiled) == 0 {
+			b.ControlTrap()
+			return
+		}
 	}
-	panic("sigsetjmp(jb c.SigjmpBuf, savemask c.Int): invalid arguments")
+	panic(fmt.Sprintf("typed control operation %s has invalid arguments", operation))
 }
 
-func (p *context) siglongjmp(b llssa.Builder, args []ssa.Value) {
-	if len(args) == 2 {
-		jb := p.compileValue(b, args[0])
-		retval := p.compileValue(b, args[1])
-		b.Siglongjmp(jb, retval)
+func (p *context) selectTypedControlOperation(
+	instruction *ssa.Call,
+	expected CoroControlOperation,
+) {
+	physical, selected, planned := p.selectCoroPhysicalOperation(
+		instruction, coroPhysicalOperationControl,
+	)
+	if !planned {
 		return
 	}
-	panic("siglongjmp(jb c.SigjmpBuf, retval c.Int): invalid arguments")
+	if !selected || physical.operationControl != expected {
+		panic(fmt.Sprintf(
+			"typed control operation selected %s, frozen physical plan requires %s",
+			expected, physical.operationControl,
+		))
+	}
 }
 
 func (p *context) atomic(b llssa.Builder, op llssa.AtomicOp, args []llssa.Expr) (ret llssa.Expr) {
@@ -757,6 +795,10 @@ var llgoInstrs = map[string]int{
 	"coroOSThreadUnlock":      llgoCoroOSThreadUnlock,
 	"coroFFICall":             llgoCoroFFICall,
 	"coroHostOperation":       llgoCoroHostOperation,
+	"controlExit":             llgoControlExit,
+	"controlTrap":             llgoControlTrap,
+	"controlFork":             llgoControlFork,
+	"controlExecve":           llgoControlExecve,
 	"pystr":                   llgoPyStr,
 	"pyList":                  llgoPyList,
 	"pyTuple":                 llgoPyTuple,
@@ -2418,10 +2460,21 @@ func (p *context) callEx(
 			ret = p.string(b, args)
 		case llgoStringData:
 			ret = p.stringData(b, args)
-		case llgoSigsetjmp:
-			ret = p.sigsetjmp(b, args)
-		case llgoSiglongjmp:
-			p.siglongjmp(b, args)
+		case llgoSigsetjmp, llgoSiglongjmp,
+			llgoControlFork, llgoControlExecve, llgoControlExit, llgoControlTrap:
+			if act != llssa.Call || ds != nil || sourceCall == nil {
+				panic("typed control intrinsic requires an exact direct call")
+			}
+			operation := coroControlOperationForIntrinsic(ftype)
+			p.selectTypedControlOperation(sourceCall, operation)
+			ret = p.compileTypedControlOperation(b, args, kind, operation)
+			if operation.Terminal() {
+				b.Unreachable()
+				// The type-checked source tail remains in x/tools SSA. Detach it
+				// after the exact terminal operation so subsequent terminators
+				// and successor PHI edges stay structurally valid.
+				b.SetBlockContinuation(p.fn.MakeBlock())
+			}
 		case llgoStackSave:
 			ret = b.StackSave()
 		case llgoSigjmpbuf: // func sigjmpbuf()

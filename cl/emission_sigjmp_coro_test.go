@@ -24,10 +24,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
-func TestLegacySigjmpIntrinsicsFreezeNativeRuntimeLeaves(t *testing.T) {
+func TestLegacySigjmpIntrinsicsFreezeNativeTypedControl(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
 	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
@@ -65,15 +67,228 @@ func Use() int32 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lowered) != 2 || lowered[0].LogicalName != "Siglongjmp" || lowered[0].Target != runtimePkg.ssa.Func("Siglongjmp") ||
-		lowered[1].LogicalName != "Sigsetjmp" || lowered[1].Target != runtimePkg.ssa.Func("Sigsetjmp") {
-		t.Fatalf("legacy sigjmp lowered calls = %+v; want exact native runtime leaves", lowered)
+	if len(lowered) != 0 {
+		t.Fatalf("typed sigjmp lowered calls = %+v; want no hidden runtime leaves", lowered)
+	}
+	want := map[string]CoroControlOperation{
+		"Sigjmpbuf":  CoroControlNone,
+		"Sigsetjmp":  CoroControlReturnsTwice,
+		"Siglongjmp": CoroControlNonlocalJump,
 	}
 	for _, call := range allocaCStrTestCalls(owner) {
-		semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
-		if err != nil || !intrinsic || !semantics.ElidesManagedCall() {
-			t.Fatalf("legacy sigjmp call %q semantics = %v, %v, %v; want exact elided intrinsic", call, semantics, intrinsic, err)
+		plan, frozen, err := universe.CoroCallSitePlan(call)
+		callee := call.Common().StaticCallee()
+		expected, known := want[callee.Name()]
+		if err != nil || !frozen || !known || !plan.Intrinsic ||
+			plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend ||
+			plan.Elision != CoroCallElidedIntrinsic ||
+			plan.ControlOperation != expected {
+			t.Fatalf("typed sigjmp call %q plan = %+v, %v, %v; want control %s", call, plan, frozen, err, expected)
 		}
+		if expected != CoroControlNone && expected.ExecFlags() != coro.IRQUnsafe {
+			t.Fatalf("typed sigjmp operation %s exec = %s, want irq-unsafe", expected, expected.ExecFlags())
+		}
+	}
+}
+
+func TestProcessControlIntrinsicsFreezeExactTypedOperations(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/control", `package control
+//llgo:link Fork llgo.controlFork
+func Fork() int32
+//llgo:link Execve llgo.controlExecve
+func Execve(*int8, **int8, **int8) int32
+//llgo:link Exit llgo.controlExit
+func Exit(int32)
+//llgo:link Trap llgo.controlTrap
+func Trap()
+func Use(path *int8, argv **int8, envp **int8, status int32, trap bool) int32 {
+	pid := Fork()
+	if trap { Trap() }
+	if status != 0 { Exit(status) }
+	if pid != 0 { return pid }
+	return Execve(path, argv, envp)
+}
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]CoroControlOperation{
+		"Fork":   CoroControlProcessFork,
+		"Execve": CoroControlProcessExec,
+		"Exit":   CoroControlProcessExit,
+		"Trap":   CoroControlTrap,
+	}
+	seen := make(map[string]bool, len(want))
+	for _, call := range allocaCStrTestCalls(pkg.ssa.Func("Use")) {
+		callee := call.Common().StaticCallee()
+		if callee == nil {
+			continue
+		}
+		expected, relevant := want[callee.Name()]
+		if !relevant {
+			continue
+		}
+		plan, frozen, err := universe.CoroCallSitePlan(call)
+		if err != nil || !frozen || !plan.Intrinsic ||
+			plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend ||
+			plan.Elision != CoroCallElidedIntrinsic ||
+			plan.ControlOperation != expected ||
+			plan.ControlOperation.ExecFlags() != coro.IRQUnsafe {
+			t.Fatalf("control call %q plan = %+v, %v, %v; want %s", call, plan, frozen, err, expected)
+		}
+		seen[callee.Name()] = true
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Fatalf("control operation %s was not frozen", name)
+		}
+	}
+}
+
+func TestTypedControlIntrinsicsRejectNonCanonicalShapes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "returns-twice result",
+			source: `package badcontrol
+import "unsafe"
+//llgo:link Control llgo.sigsetjmp
+func Control(unsafe.Pointer, int32) int64
+func Use(value unsafe.Pointer) { _ = Control(value, 0) }
+`,
+			want: "func(unsafe.Pointer, int32) int32",
+		},
+		{
+			name: "fork result",
+			source: `package badcontrol
+//llgo:link Control llgo.controlFork
+func Control() int64
+func Use() { _ = Control() }
+`,
+			want: "func() int32",
+		},
+		{
+			name: "exec pointer",
+			source: `package badcontrol
+//llgo:link Control llgo.controlExecve
+func Control(*byte, **byte, **byte) int32
+func Use(path *byte, argv **byte) { _ = Control(path, argv, argv) }
+`,
+			want: "func(*int8, **int8, **int8) int32",
+		},
+		{
+			name: "exit status",
+			source: `package badcontrol
+//llgo:link Control llgo.controlExit
+func Control(int)
+func Use() { Control(2) }
+`,
+			want: "func(int32)",
+		},
+		{
+			name: "trap argument",
+			source: `package badcontrol
+//llgo:link Control llgo.controlTrap
+func Control(int32)
+func Use() { Control(2) }
+`,
+			want: "func()",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testProg := newEmissionTestProgram()
+			testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+			pkg := testProg.addPackage(
+				t,
+				"example.com/emission/badcontrol/"+strings.ReplaceAll(test.name, " ", "-"),
+				test.source,
+			)
+			testProg.ssa.Build()
+			prog := newLLSSAProg(t)
+			defer prog.Dispose()
+			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+				SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := allocaCStrTestCalls(pkg.ssa.Func("Use"))[0]
+			if _, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call); err == nil ||
+				!intrinsic || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("bad typed-control semantics = _, %v, %v; want exact %s shape error", intrinsic, err, test.want)
+			}
+		})
+	}
+}
+
+func TestNativeSigjmpControlFailsClosedInPhysicalCoroutine(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	pkg := testProg.addPackage(t, "example.com/emission/sigjmpcoroutine", `package sigjmpcoroutine
+import "unsafe"
+//llgo:link Sigsetjmp llgo.sigsetjmp
+func Sigsetjmp(unsafe.Pointer, int32) int32
+func Child() {}
+func Root(value unsafe.Pointer) { _ = Sigsetjmp(value, 0); Child() }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.ArchiveReady = true
+	root := pkg.ssa.Func("Root")
+	child := pkg.ssa.Func("Child")
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{
+		Function: root,
+		Demand:   coro.AsyncDemand,
+	}}, coro.SSAConfig{
+		EmissionUniverse: ssaUniverse,
+		FunctionIDs:      functionIDs,
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == child {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			site, frozen, err := universe.CoroCallSitePlan(call)
+			return frozen && site.ElidesCall(), err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPlan, planned := plan.FunctionPlan(root)
+	if !planned || rootPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("sigjmp Root plan = %+v, present=%t; want physical coroutine", rootPlan, planned)
+	}
+	err = validateCoroPhysicalABIWithUniverseCapabilities(
+		root, rootPlan, plan, universe, true, true, false, false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "cannot retain a stackless coroutine resume activation") {
+		t.Fatalf("physical sigjmp preflight error = %v; want native-activation rejection", err)
 	}
 }
 

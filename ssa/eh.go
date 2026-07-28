@@ -38,6 +38,18 @@ func (p Program) tySetjmp() *types.Signature {
 	return p.setjmpTy
 }
 
+// func sigsetjmp(env unsafe.Pointer, savemask c.Int) c.Int
+func (p Program) tySigsetjmp() *types.Signature {
+	if p.sigsetjmpTy == nil {
+		paramPtr := types.NewParam(token.NoPos, nil, "", p.VoidPtr().raw.Type)
+		paramCInt := types.NewParam(token.NoPos, nil, "", p.CInt().raw.Type)
+		params := types.NewTuple(paramPtr, paramCInt)
+		results := types.NewTuple(paramCInt)
+		p.sigsetjmpTy = types.NewSignatureType(nil, nil, nil, params, results, false)
+	}
+	return p.sigsetjmpTy
+}
+
 // func longjmp(env unsafe.Pointer, retval c.Int)
 func (p Program) tyLongjmp() *types.Signature {
 	if p.longjmpTy == nil {
@@ -101,12 +113,22 @@ func (b Builder) addReturnsTwiceAttr(fn Expr) {
 	fn.impl.AddFunctionAttr(attr)
 }
 
+func (b Builder) addNoReturnAttr(fn Expr) {
+	ctx := b.Pkg.mod.Context()
+	attr := ctx.CreateEnumAttribute(llvm.AttributeKindID("noreturn"), 0)
+	fn.impl.AddFunctionAttr(attr)
+}
+
 func (b Builder) Sigsetjmp(jb, savemask Expr) Expr {
 	// Use setjmp for wasm or targets specified via -target flag (baremetal, etc.)
 	if b.Prog.target.GOARCH == "wasm" || b.Prog.target.Target != "" {
 		return b.Setjmp(jb)
 	}
-	fn := b.Pkg.rtFunc("Sigsetjmp")
+	name := "sigsetjmp"
+	if b.Prog.target.GOOS == "linux" {
+		name = "__sigsetjmp"
+	}
+	fn := b.Pkg.cFunc(name, b.Prog.tySigsetjmp())
 	b.addReturnsTwiceAttr(fn)
 	return b.Call(fn, jb, savemask)
 }
@@ -117,9 +139,9 @@ func (b Builder) Siglongjmp(jb, retval Expr) {
 		b.Longjmp(jb, retval)
 		return
 	}
-	fn := b.Pkg.rtFunc("Siglongjmp") // TODO(xsw): mark as noreturn
+	fn := b.Pkg.cFunc("siglongjmp", b.Prog.tyLongjmp())
+	b.addNoReturnAttr(fn)
 	b.Call(fn, jb, retval)
-	// b.Unreachable()
 }
 
 func (b Builder) Setjmp(jb Expr) Expr {
@@ -130,8 +152,8 @@ func (b Builder) Setjmp(jb Expr) Expr {
 
 func (b Builder) Longjmp(jb, retval Expr) {
 	fn := b.Pkg.cFunc("longjmp", b.Prog.tyLongjmp())
+	b.addNoReturnAttr(fn)
 	b.Call(fn, jb, retval)
-	// b.Unreachable()
 }
 
 // -----------------------------------------------------------------------------

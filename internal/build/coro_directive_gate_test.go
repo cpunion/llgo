@@ -80,8 +80,8 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 
 	want := map[string]int{
 		"contract": 7,
-		"noblock":  35,
-		"sync":     30,
+		"noblock":  33,
+		"sync":     26,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf(
@@ -91,7 +91,7 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		)
 	}
 	sort.Strings(manifest)
-	const wantManifestSHA256 = "7b0f05863be6d8b50d31031cab7a11df70d5bab8150170ef8411978426421b3b"
+	const wantManifestSHA256 = "dfe1b64d2e68f9c886fddca54329655a9523a7fa213234a40e2c31fb19b11c14"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)

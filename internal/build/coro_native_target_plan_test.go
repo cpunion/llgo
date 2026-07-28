@@ -525,6 +525,54 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			}
 			return nil
 		}
+		validateElidedTypedControl := func(record coroForeignUseDomainRecord, identity string) error {
+			if record.DirectExecutorCertified ||
+				record.NoBlockCertified ||
+				record.SyncCertified ||
+				record.Calls != 0 ||
+				record.RawHostCalls != 0 ||
+				!slices.Equal(record.Rejections, []string{"no-live-call"}) {
+				return fmt.Errorf(
+					"native target elided typed-control declaration %q retained a foreign use-domain: %s",
+					identity, record.diagnostic(),
+				)
+			}
+			if _, legacy := plan.ForeignNoBlockCertificate(record.Function); legacy {
+				return fmt.Errorf(
+					"native target elided typed-control declaration %q retained a foreign-noblock certificate",
+					identity,
+				)
+			}
+			if _, legacy := plan.ForeignSyncCertificate(record.Function); legacy {
+				return fmt.Errorf(
+					"native target elided typed-control declaration %q retained a foreign-sync certificate",
+					identity,
+				)
+			}
+			callable, certified := plan.CallableContractCertificate(record.Function)
+			if !certified ||
+				callable.Scope != coro.CallableContractScopeDeclaration ||
+				!coroRawPlainDirectForeignContractCompatible(callable.Contract) {
+				return fmt.Errorf(
+					"native target elided typed-control declaration %q lost its conservative unused declaration contract: "+
+						"callable=%+v certified=%t",
+					identity, callable, certified,
+				)
+			}
+			function, planned := plan.FunctionPlan(record.Function)
+			if !planned ||
+				function.External != coro.ExternalUnknownForeign ||
+				function.ManagedDemand != coro.NoDemand ||
+				function.RawPlainDemand ||
+				function.Emission != coro.EmitNone {
+				return fmt.Errorf(
+					"native target elided typed-control declaration %q retained a physical foreign target: "+
+						"function=%+v planned=%t",
+					identity, function, planned,
+				)
+			}
+			return nil
+		}
 		migratedRawHostSymbols := map[string]bool{
 			"__llgo_coro_fleet_owner_count_v1":               false,
 			"__llgo_coro_fleet_factory_start_v1":             false,
@@ -546,13 +594,31 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			"__llgo_coro_doorbell_close_v1":                  false,
 			"GC_init":                                        false,
 			"GC_add_roots":                                   false,
-			"siglongjmp":                                     false,
 			"pthread_self":                                   false,
+		}
+		elidedTypedControlSymbols := map[string]bool{
+			"siglongjmp": false,
+		}
+		if runtime.GOOS == "linux" {
+			elidedTypedControlSymbols["__sigsetjmp"] = false
+		} else {
+			elidedTypedControlSymbols["sigsetjmp"] = false
 		}
 		if runtime.GOOS == "darwin" {
 			migratedRawHostSymbols["clock_gettime_nsec_np"] = false
 		}
 		for _, record := range useDomains.Records {
+			if _, typedControl := elidedTypedControlSymbols[record.PhysicalSymbol]; typedControl {
+				if elidedTypedControlSymbols[record.PhysicalSymbol] {
+					return nil, fmt.Errorf("native target typed-control declaration %q is ambiguous", record.PhysicalSymbol)
+				}
+				elidedTypedControlSymbols[record.PhysicalSymbol] = true
+				if err := validateElidedTypedControl(record, record.PhysicalSymbol); err != nil {
+					return nil, err
+				}
+				t.Log("elided typed control " + record.diagnostic())
+				continue
+			}
 			if _, migrated := migratedRawHostSymbols[record.PhysicalSymbol]; !migrated {
 				continue
 			}
@@ -568,6 +634,11 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 		for symbol, found := range migratedRawHostSymbols {
 			if !found {
 				return nil, fmt.Errorf("native target raw-host declaration %q is absent from the closed report", symbol)
+			}
+		}
+		for symbol, found := range elidedTypedControlSymbols {
+			if !found {
+				return nil, fmt.Errorf("native target typed-control declaration %q is absent from the closed report", symbol)
 			}
 		}
 		terminalDeclarations := map[string]string{

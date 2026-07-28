@@ -8,7 +8,6 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-//llgo:coro sync
 //go:linkname Sigsetjmp C.sigsetjmp
 func Sigsetjmp(env *SigjmpBuf, savemask c.Int) c.Int
 

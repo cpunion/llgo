@@ -222,6 +222,7 @@ type aProgram struct {
 	routineTy   *types.Signature
 	destructTy  *types.Signature
 	setjmpTy    *types.Signature
+	sigsetjmpTy *types.Signature
 	longjmpTy   *types.Signature
 
 	printfTy *types.Signature

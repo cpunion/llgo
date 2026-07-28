@@ -149,6 +149,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 							u.freezeCoroCgoWorkerCallCertificate(ctx, call)
 					}
 					semantics, intrinsic, opcode := CoroIntrinsicCallUnsupported, false, 0
+					controlOperation := CoroControlNone
 					var hostOperation coroHostOperationCallShape
 					var workerCertificate CoroWorkerSyscallCertificate
 					workerCertified := false
@@ -162,6 +163,9 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 							// classify an intrinsic edge for a frozen target.
 							if _, frozen := u.Resolve(callee); frozen {
 								opcode, intrinsic, classifyErr = u.coroIntrinsicOpcode(callee)
+								if intrinsic {
+									controlOperation = coroControlOperationForIntrinsic(opcode)
+								}
 							}
 						}
 						if classifyErr == nil && intrinsic && opcode == llgoCgoCgocall {
@@ -186,7 +190,8 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						}
 						if classifyErr == nil {
 							semantics, intrinsic, classifyErr = u.classifyCoroIntrinsicCallSite(
-								ctx, site, call, opcode, intrinsic, workerCertificate, workerCertified,
+								ctx, site, call, opcode, intrinsic, controlOperation,
+								workerCertificate, workerCertified,
 								cgoErrnoCertificate, cgoErrnoCertified,
 							)
 						}
@@ -226,6 +231,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 					plan := CoroCallSitePlan{
 						IntrinsicSemantics:           semantics,
 						Intrinsic:                    intrinsic,
+						ControlOperation:             controlOperation,
 						RawPlainSynchronousIntrinsic: rawPlainSynchronousIntrinsic,
 					}
 					if managedStatic && classifyErr == nil {
