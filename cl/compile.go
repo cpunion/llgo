@@ -678,6 +678,9 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 	// themselves must retain external linkage because LLVM rejects a bodyless
 	// linkonce global.
 	fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), hasCtx, p.needsLinkOnce(f))
+	if entry.hasWasmImport {
+		fn.SetWasmImport(entry.wasmImport.module, entry.wasmImport.name)
+	}
 	noInlineDirective := hasNoInlineDirective(f)
 	runtimeStackNoInline := needsRuntimeStackNoInline(pkgTypes, f)
 	pcLineNoInline := p.needsPCLineNoInline(f)

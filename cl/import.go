@@ -351,6 +351,78 @@ func (p *context) processNoInterfaceByDoc(doc *ast.CommentGroup, fullName string
 	}
 }
 
+type wasmImportSpec struct {
+	module string
+	name   string
+}
+
+// attachedWasmImportSource parses the exact source declaration once, before
+// lowering. A present but malformed directive is an error rather than an
+// absent capability: silently falling back would turn a host import into an
+// unresolved ordinary symbol.
+func attachedWasmImportSource(fn *ssa.Function) (wasmImportSpec, bool, error) {
+	var spec wasmImportSpec
+	if fn == nil {
+		return spec, false, nil
+	}
+	decl, _ := fn.Syntax().(*ast.FuncDecl)
+	if decl == nil || decl.Doc == nil {
+		return spec, false, nil
+	}
+	const prefix = "//go:wasmimport"
+	present := false
+	var competingABI string
+	for _, comment := range decl.Doc.List {
+		if comment == nil {
+			continue
+		}
+		text := strings.TrimSpace(comment.Text)
+		fields := strings.Fields(text)
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == prefix {
+			if present {
+				return spec, false, fmt.Errorf("duplicate %s directive", prefix)
+			}
+			present = true
+			if len(fields) != 3 || fields[1] == "" || fields[2] == "" {
+				return spec, false, fmt.Errorf("%s requires exactly one module and import name", prefix)
+			}
+			spec = wasmImportSpec{module: fields[1], name: fields[2]}
+			continue
+		}
+		switch fields[0] {
+		case "//go:linkname", "//llgo:link", "//export", "//go:wasmexport":
+			competingABI = text
+		case "//":
+			if len(fields) > 1 && fields[1] == "llgo:link" {
+				competingABI = text
+			}
+		}
+	}
+	if !present {
+		return spec, false, nil
+	}
+	if competingABI != "" {
+		return spec, false, fmt.Errorf("%s conflicts with physical ABI directive %q", prefix, competingABI)
+	}
+	if decl.Body != nil || decl.Recv != nil || fn.Parent() != nil || len(fn.FreeVars) != 0 ||
+		fn.Signature == nil || fn.Signature.Recv() != nil {
+		return spec, false, fmt.Errorf("%s requires an exact bodyless, non-method function declaration", prefix)
+	}
+	if params := fn.TypeParams(); params != nil && params.Len() != 0 {
+		return spec, false, fmt.Errorf("%s does not support generic declarations", prefix)
+	}
+	if params := fn.Signature.TypeParams(); params != nil && params.Len() != 0 {
+		return spec, false, fmt.Errorf("%s does not support generic declarations", prefix)
+	}
+	if strings.IndexByte(spec.module, 0) >= 0 || strings.IndexByte(spec.name, 0) >= 0 {
+		return spec, false, fmt.Errorf("%s module and import name must not contain NUL", prefix)
+	}
+	return spec, true, nil
+}
+
 const (
 	noDirective = iota
 	hasLinkname
