@@ -1,4 +1,4 @@
-//go:build baremetal && !nogc
+//go:build (baremetal && !nogc) || (wasm && llgo_wasm_gc)
 
 /*
  * Portions of this file are derived from TinyGo and remain subject to the

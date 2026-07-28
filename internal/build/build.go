@@ -517,6 +517,7 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	if conf.Target != "" && export.GOARCH != "" {
 		conf.Goarch = export.GOARCH
 	}
+	applyWasmGCLinkFlags(conf, &export)
 	if conf.AppExt == "" {
 		conf.AppExt = defaultAppExt(conf)
 	}
@@ -1238,6 +1239,16 @@ func defaultBuildTags(goarch, target string) string {
 		tags += ",nogc"
 	}
 	return tags
+}
+
+func applyWasmGCLinkFlags(conf *Config, export *crosscompile.Export) {
+	if conf.Goos != "js" || conf.Goarch != "wasm" ||
+		!slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo_wasm_gc") {
+		return
+	}
+	if !slices.Contains(export.LDFLAGS, "-sMALLOC=none") {
+		export.LDFLAGS = append(export.LDFLAGS, "-sMALLOC=none")
+	}
 }
 
 func effectiveTypeSizes(sizes types.Sizes, arch string, wasmABI crosscompile.WasmABI) types.Sizes {
