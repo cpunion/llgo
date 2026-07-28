@@ -17,9 +17,9 @@
       "label": "Branch codex/benchmark-v1-smoke",
       "path": "series/branch/e9898bfa5bbbfe25/history.json",
       "configPath": "series/branch/e9898bfa5bbbfe25/config.json",
-      "sha": "acf4c3e00dfcb52e48c033a731858f3a12126459",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/acf4c3e00dfcb52e48c033a731858f3a12126459",
-      "updatedAt": "2026-07-28T09:48:12.476Z"
+      "sha": "f25d20ef2a7eab7c7be6d40b5f3d621a178c9b57",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/f25d20ef2a7eab7c7be6d40b5f3d621a178c9b57",
+      "updatedAt": "2026-07-28T10:14:26.541Z"
     },
     {
       "kind": "pull",
@@ -45,9 +45,9 @@
       "label": "PR #83",
       "path": "series/pull/83/history.json",
       "configPath": "series/pull/83/config.json",
-      "sha": "acf4c3e00dfcb52e48c033a731858f3a12126459",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/acf4c3e00dfcb52e48c033a731858f3a12126459",
-      "updatedAt": "2026-07-28T09:48:12.473Z"
+      "sha": "f25d20ef2a7eab7c7be6d40b5f3d621a178c9b57",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/f25d20ef2a7eab7c7be6d40b5f3d621a178c9b57",
+      "updatedAt": "2026-07-28T10:14:26.538Z"
     }
   ]
 }
