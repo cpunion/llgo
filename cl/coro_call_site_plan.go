@@ -38,6 +38,33 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 	if ir.callsFrozen {
 		return fmt.Errorf("coroutine call SitePlans were frozen more than once")
 	}
+	// Freeze WebAssembly imports here with the other ProgramIR source facts.
+	// Keeping this inside the sole builder authority avoids creating another
+	// plan reader or letting codegen reparse declaration comments.
+	if u.prog != nil {
+		target := u.prog.Target()
+		if target != nil && target.GOARCH == "wasm" {
+			for _, function := range u.functions {
+				if function == nil {
+					continue
+				}
+				spec, present, err := attachedWasmImportSource(function)
+				if err != nil {
+					return fmt.Errorf("prepare emission universe: function %q: %w", function.Name(), err)
+				}
+				if !present {
+					continue
+				}
+				if canonical := u.canonicalAlias(function); canonical == nil || canonical != function {
+					return fmt.Errorf("prepare emission universe: wasm import %q is not an exact canonical declaration", function.Name())
+				}
+				if _, exists := ir.wasmImports[function]; exists {
+					return fmt.Errorf("prepare emission universe: duplicate frozen wasm import for %q", function.Name())
+				}
+				ir.wasmImports[function] = spec
+			}
+		}
+	}
 	// RawCritical is deliberately stronger than nopreempt/nounwind. Freeze an
 	// occurrence-level native-stack capability for each exact ordinary static
 	// call before the owner-scoped SitePlans consume it. Names, addresses,

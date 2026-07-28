@@ -50,6 +50,8 @@ type plannedFunctionSymbol struct {
 	importedLibrary   bool
 	libraryForeign    map[*ssa.Function]coro.LibraryEffectForeignCallable
 	patchOriginalInit bool
+	wasmImport        wasmImportSpec
+	hasWasmImport     bool
 }
 
 func (e plannedFunctionSymbol) usesCoroPhysicalABI() bool {
@@ -93,6 +95,17 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 		name:     name,
 		baseName: name,
 		ftype:    ftype,
+	}
+	if target := p.prog.Target(); target != nil && target.GOARCH == "wasm" {
+		var err error
+		if universe != nil {
+			entry.wasmImport, entry.hasWasmImport, err = universe.coroProgramIR.wasmImport(fn)
+		} else {
+			entry.wasmImport, entry.hasWasmImport, err = attachedWasmImportSource(fn)
+		}
+		if err != nil {
+			return plannedFunctionSymbol{}, err
+		}
 	}
 	if ftype != goFunc || p.compilation == nil {
 		return entry, nil

@@ -479,4 +479,13 @@ func (p Function) DisableTailCalls() {
 	p.impl.AddFunctionAttr(attr)
 }
 
+// SetWasmImport maps an external function declaration to one exact
+// WebAssembly host import. The frontend must freeze and validate the source
+// directive before calling this lowering-only operation.
+func (p Function) SetWasmImport(module, name string) {
+	ctx := p.Pkg.mod.Context()
+	p.impl.AddFunctionAttr(ctx.CreateStringAttribute("wasm-import-module", module))
+	p.impl.AddFunctionAttr(ctx.CreateStringAttribute("wasm-import-name", name))
+}
+
 // -----------------------------------------------------------------------------

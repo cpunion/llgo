@@ -34,6 +34,7 @@ type coroProgramIR struct {
 	localBodyFacts      map[*ssa.Function]coro.SSAFunctionBodyFacts
 	callPlans           map[ssa.CallInstruction]coroFrozenCallSitePlan
 	callsFrozen         bool
+	wasmImports         map[*ssa.Function]wasmImportSpec
 	cgoDirectReturns    map[*ssa.Return]ssa.Value
 	physicalPlans       map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan
 	physicalPlansSealed bool
@@ -46,9 +47,22 @@ func newCoroProgramIR() *coroProgramIR {
 		semanticPlans:    make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
 		localBodyFacts:   make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
 		callPlans:        make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
+		wasmImports:      make(map[*ssa.Function]wasmImportSpec),
 		cgoDirectReturns: make(map[*ssa.Return]ssa.Value),
 		physicalPlans:    make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
 	}
+}
+
+func (ir *coroProgramIR) wasmImport(function *ssa.Function) (wasmImportSpec, bool, error) {
+	var zero wasmImportSpec
+	if ir == nil || !ir.callsFrozen {
+		return zero, false, fmt.Errorf("wasm import facts are not frozen")
+	}
+	if function == nil {
+		return zero, false, fmt.Errorf("wasm import lookup requires one exact function")
+	}
+	spec, present := ir.wasmImports[function]
+	return spec, present, nil
 }
 
 func (ir *coroProgramIR) freezeCgoDirectReturns(plan *emissionCgoLoweringPlan) error {

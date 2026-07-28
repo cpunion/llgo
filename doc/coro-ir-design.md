@@ -1247,6 +1247,19 @@ WaitSet reconciliation或whole-function CFG已经由单一emitter拥有。后续
 runtime旧logical wait/fleet分支随后已由Phase R删除；compiler下一阶段必须继续完成统一function emitter，不得
 重新引入feature-local selector。
 
+#### Phase B.12：WebAssembly host import source fact（已完成）
+
+- `//go:wasmimport module name`只在WASM target的ProgramIR构建窗口读取一次，并以exact canonical
+  `*ssa.Function`冻结；bodyful、method、generic、重复、格式错误或与其他physical ABI directive冲突的声明
+  都在任何LLVM emission之前fail closed。参数、结果数量及pointer element layout按Go 1.26
+  `go:wasmimport`直接ABI验证；需要Go私有stack-pointer ABI的`gojs` module在实现专用wrapper前明确拒绝。
+- lowering只消费冻结的module/name并附加LLVM `wasm-import-module`/`wasm-import-name`属性，不再从AST
+  注释或函数地址反查host contract。无完整EmissionUniverse的legacy helper仅保留源码兼容路径，production
+  coroutine compilation不经过该路径。
+- freeze测试在构建ProgramIR后修改AST并验证结果不变；LLVM IR测试覆盖实际属性，architecture debt gate保持
+  原有authority预算不增长。这个切片只建立JS/WASI reactor需要的host symbol元数据闭环，不把同步host import
+  自动视为非阻塞，也不等于普通command已经有内建event pump。
+
 ### Phase C：analysis只消费facts
 
 - hidden lowered helper、`ClassifyElidedCall`、intrinsic site/local effect及physical implicit-fault选择已由
