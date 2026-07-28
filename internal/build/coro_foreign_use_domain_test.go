@@ -121,6 +121,7 @@ func TestCoroForeignUseDomainRejectsManagedAndEscapedUses(t *testing.T) {
 	)
 	mayBlock := foreignUseDomainRecordBySymbol(t, mixed, "foreign_may_block_exact")
 	if mayBlock.rawHostOnly() ||
+		!mayBlock.defaultUseDomainCompatible() ||
 		!slices.Contains(mayBlock.Rejections, "managed-call") ||
 		!slices.Contains(mayBlock.Rejections, "target-has-managed-demand") {
 		t.Fatalf("mixed managed/raw foreign record = %+v", mayBlock)
@@ -133,7 +134,7 @@ func TestCoroForeignUseDomainRejectsManagedAndEscapedUses(t *testing.T) {
 		fixture.pkg.Func("EscapeSync"),
 	)
 	syncRecord := foreignUseDomainRecordBySymbol(t, escaped, "foreign_escaped_sync_exact")
-	if syncRecord.rawHostOnly() ||
+	if syncRecord.rawHostOnly() || syncRecord.defaultUseDomainCompatible() ||
 		!slices.Contains(syncRecord.Rejections, "non-call-reference") {
 		t.Fatalf("escaped foreign function record = %+v", syncRecord)
 	}

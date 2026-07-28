@@ -49,11 +49,17 @@ func TestRuntimeNotifyListSelectsEventDrivenCoroImplementation(t *testing.T) {
 	}
 
 	coroSource := readRuntimePollFile(t, runtimeNotifyCoroSource)
+	requireRuntimeAnnotationFreeCDeclarations(
+		t,
+		runtimeNotifyCoroSource,
+		"llgoCoroNotifyPrepareOrAbortV2",
+		"llgoCoroNotifyOneOrAbortV2",
+		"llgoCoroNotifyAllOrAbortV2",
+	)
 	for _, marker := range []string{
 		"C.__llgo_coro_notify_prepare_or_abort_v2",
 		"C.__llgo_coro_notify_one_or_abort_v2",
 		"C.__llgo_coro_notify_all_or_abort_v2",
-		"progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return",
 		"//go:linkname llgoCoroNotifySuspendV2 llgo.coroPark",
 		"notifyListTicketLess(target, latomic.LoadUint32(&l.notify))",
 		"unsafe.Pointer(&l.notify)",

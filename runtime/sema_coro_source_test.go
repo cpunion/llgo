@@ -36,10 +36,15 @@ const (
 
 func TestRuntimeSemaphoreSelectsEventDrivenCoroImplementation(t *testing.T) {
 	coroSource := readRuntimePollFile(t, runtimeSemaphoreCoroSource)
+	requireRuntimeAnnotationFreeCDeclarations(
+		t,
+		runtimeSemaphoreCoroSource,
+		"llgoCoroSemaphorePrepareOrAbortV2",
+		"llgoCoroSemaphoreReleaseOrAbortV2",
+	)
 	for _, marker := range []string{
 		"C.__llgo_coro_sema_prepare_or_abort_v2",
 		"C.__llgo_coro_sema_release_or_abort_v2",
-		"progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return",
 		"//go:linkname llgoCoroSemaphoreSuspendV2 llgo.coroPark",
 		"llgoCoroSemaphorePrepareOrAbortV2(",
 		"unsafe.Pointer(addr)",

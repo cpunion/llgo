@@ -47,10 +47,36 @@ func (record coroForeignUseDomainRecord) rawHostOnly() bool {
 		len(record.Rejections) == 0
 }
 
+// defaultUseDomainCompatible reports only whether every live occurrence can
+// retain the ordinary may-block declaration contract: managed occurrences use
+// the foreign episode and exact raw-host occurrences remain direct. Producer
+// semantics such as thread independence, callback behavior, and retention
+// still require an independent review before a legacy sync annotation can be
+// removed.
+func (record coroForeignUseDomainRecord) defaultUseDomainCompatible() bool {
+	if record.Calls == 0 {
+		return false
+	}
+	for _, reason := range record.Rejections {
+		switch reason {
+		case "managed-call",
+			"managed-lowered-call",
+			"not-raw-host-only",
+			"target-has-managed-demand":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (record coroForeignUseDomainRecord) diagnostic() string {
 	status := "reject"
 	if record.rawHostOnly() {
 		status = "raw-host-only"
+	} else if record.defaultUseDomainCompatible() {
+		status = "default-use-domain"
 	}
 	reasons := strings.Join(record.Rejections, ",")
 	if reasons == "" {

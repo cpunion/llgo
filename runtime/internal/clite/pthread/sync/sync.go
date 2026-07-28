@@ -99,8 +99,9 @@ func c_pthread_mutex_init(m *Mutex, attr *MutexAttr) c.Int
 
 // Destroy releases caller-owned mutex metadata after its lifecycle is quiescent.
 // It does not wait for a future unlock; invalid live ownership is an API error.
+// The ordinary foreign default keeps managed calls off the executor while
+// audited raw-host calls remain direct.
 //
-//llgo:coro sync
 //go:linkname c_pthread_mutex_destroy C.pthread_mutex_destroy
 func c_pthread_mutex_destroy(m *Mutex) c.Int
 
@@ -173,11 +174,13 @@ func (a *RWLockAttr) GetPShared(pshared *c.Int) c.Int { return 0 }
 
 // -----------------------------------------------------------------------------
 
-//llgo:coro sync
+// Init and Destroy touch only caller-owned read/write-lock metadata. They do
+// not acquire the lock, invoke a callback, or retain either argument. The
+// ordinary foreign default is therefore sufficient.
+//
 //go:linkname c_pthread_rwlock_init C.pthread_rwlock_init
 func c_pthread_rwlock_init(rw *RWLock, attr *RWLockAttr) c.Int
 
-//llgo:coro sync
 //go:linkname c_pthread_rwlock_destroy C.pthread_rwlock_destroy
 func c_pthread_rwlock_destroy(rw *RWLock) c.Int
 
@@ -261,21 +264,21 @@ func (a *CondAttr) Destroy() {}
 
 // -----------------------------------------------------------------------------
 
-//llgo:coro sync
+// Condition lifecycle and notification operations do not wait for a waiter to
+// run, invoke a callback, or retain their arguments. They deliberately use the
+// ordinary foreign default rather than a declaration-wide sync capability.
+//
 //go:linkname c_pthread_cond_init C.pthread_cond_init
 func c_pthread_cond_init(c *Cond, attr *CondAttr) c.Int
 
-//llgo:coro sync
 //go:linkname c_pthread_cond_destroy C.pthread_cond_destroy
 func c_pthread_cond_destroy(c *Cond) c.Int
 
 // Signal and Broadcast publish wakeups but do not wait for a waiter to run.
 //
-//llgo:coro sync
 //go:linkname c_pthread_cond_signal C.pthread_cond_signal
 func c_pthread_cond_signal(c *Cond) c.Int
 
-//llgo:coro sync
 //go:linkname c_pthread_cond_broadcast C.pthread_cond_broadcast
 func c_pthread_cond_broadcast(c *Cond) c.Int
 
