@@ -419,10 +419,11 @@ func calledAlias(p *int) {
 	}
 
 	cyclicLocal := ssapkg.Func("cyclicLocal")
+	cyclicLocalBlocks := cyclicBlocks(cyclicLocal.Blocks)
 	var cyclicBlock *ssa.BasicBlock
 	var cyclicAllocs int
 	for _, alloc := range functionAllocs(cyclicLocal) {
-		if ctx.shouldClearAlloc(alloc) && blockIsCyclic(alloc.Block()) {
+		if ctx.shouldClearAlloc(alloc) && cyclicLocalBlocks[alloc.Block()] {
 			if cyclicBlock == nil {
 				cyclicBlock = alloc.Block()
 			}
@@ -591,20 +592,25 @@ func loop(p *int) {
 }
 	`)
 	fn := ssapkg.Func("flow")
-	if blockCanReach(nil, fn.Blocks[0], map[*ssa.BasicBlock]bool{}) {
-		t.Fatal("nil block should not reach anything")
+	if got := cyclicBlocks(nil); len(got) != 0 {
+		t.Fatalf("nil block list should have no cycles: %v", got)
 	}
-	if !blockCanReach(fn.Blocks[0], fn.Blocks[0], map[*ssa.BasicBlock]bool{}) {
-		t.Fatal("block should reach itself")
+	cycleA, cycleB, acyclic := &ssa.BasicBlock{}, &ssa.BasicBlock{}, &ssa.BasicBlock{}
+	cycleA.Succs = []*ssa.BasicBlock{cycleB}
+	cycleB.Succs = []*ssa.BasicBlock{cycleA, acyclic}
+	if got := cyclicBlocks([]*ssa.BasicBlock{cycleA, cycleB, acyclic, nil}); !got[cycleA] || !got[cycleB] || got[acyclic] {
+		t.Fatalf("SCC cycle classification = %v", got)
+	}
+	selfLoop := &ssa.BasicBlock{}
+	selfLoop.Succs = []*ssa.BasicBlock{selfLoop}
+	if got := cyclicBlocks([]*ssa.BasicBlock{selfLoop}); !got[selfLoop] {
+		t.Fatalf("self-loop classification = %v", got)
+	}
+	if got := cyclicBlocks(fn.Blocks); len(got) != 0 {
+		t.Fatalf("flow should have no cyclic blocks: %v", got)
 	}
 	loop := ssapkg.Func("loop")
-	var cyclic int
-	for _, block := range loop.Blocks {
-		if blockIsCyclic(block) {
-			cyclic++
-		}
-	}
-	if cyclic == 0 {
+	if cyclic := cyclicBlocks(loop.Blocks); len(cyclic) == 0 {
 		t.Fatal("loop should contain at least one cyclic block")
 	}
 	if instructionUsesValue(nil, fn.Params[0]) {
@@ -627,6 +633,7 @@ func loop(p *int) {
 		"call-value": &ssa.Call{Call: ssa.CallCommon{
 			Value: fn.Params[0],
 		}},
+		"unclassified-non-value": &ssa.Return{Results: []ssa.Value{fn.Params[0]}},
 		"select": &ssa.Select{States: []*ssa.SelectState{{
 			Dir:  types.SendOnly,
 			Send: fn.Params[0],
@@ -640,6 +647,7 @@ func loop(p *int) {
 		"store-address": &ssa.Store{Addr: fn.Params[0]},
 		"map":           &ssa.MapUpdate{Map: fn.Params[0]},
 		"channel":       &ssa.Send{Chan: fn.Params[0]},
+		"pure-value":    &ssa.ChangeType{X: fn.Params[0]},
 		"select-channel": &ssa.Select{States: []*ssa.SelectState{{
 			Dir:  types.RecvOnly,
 			Chan: fn.Params[0],
@@ -651,7 +659,7 @@ func loop(p *int) {
 	}
 
 	ctx := &context{}
-	if last, ok := ctx.lastUseInBlock(nil, fn.Blocks[0], map[ssa.Instruction]int{}, map[ssa.Value]bool{}); !ok || last != nil {
+	if last, ok := ctx.lastUseInBlock(nil, fn.Blocks[0], map[ssa.Instruction]int{}); !ok || last != nil {
 		t.Fatalf("lastUseInBlock(nil) = %v, %v", last, ok)
 	}
 
@@ -672,7 +680,7 @@ func loop(p *int) {
 	for i, instr := range block.Instrs {
 		order[instr] = i
 	}
-	if last, ok := ctx.lastUseInBlock(withCall.Params[0], block, order, map[ssa.Value]bool{}); !ok || last != call {
+	if last, ok := ctx.lastUseInBlock(withCall.Params[0], block, order); !ok || last != call {
 		t.Fatalf("lastUseInBlock(call parameter) = %v, %v; want call", last, ok)
 	}
 }
@@ -712,8 +720,8 @@ func derefOnly(p **int) {
 	if len(branch.Blocks) < 2 {
 		t.Fatalf("branch should have successors:\n%s", branch.String())
 	}
-	if blockCanReach(branch.Blocks[0], branch.Blocks[1], map[*ssa.BasicBlock]bool{branch.Blocks[0]: true}) {
-		t.Fatal("seen entry block should stop reachability recursion")
+	if got := cyclicBlocks(branch.Blocks); len(got) != 0 {
+		t.Fatalf("branch should have no cyclic blocks: %v", got)
 	}
 
 	useOne := ssapkg.Func("useOne")
@@ -736,7 +744,7 @@ func derefOnly(p **int) {
 		t.Fatal("instruction using p should not report use of q")
 	}
 	global := ssapkg.Members["Sink"].(*ssa.Global)
-	if last, ok := ctx.lastUseInBlock(global, useOne.Blocks[0], map[ssa.Instruction]int{}, map[ssa.Value]bool{}); !ok || last != nil {
+	if last, ok := ctx.lastUseInBlock(global, useOne.Blocks[0], map[ssa.Instruction]int{}); !ok || last != nil {
 		t.Fatalf("lastUseInBlock(global) = %v, %v", last, ok)
 	}
 
@@ -760,7 +768,7 @@ func derefOnly(p **int) {
 	for i, instr := range negInstr.Block().Instrs {
 		order[instr] = i
 	}
-	if last, ok := ctx.lastUseInBlock(neg.Params[0], negInstr.Block(), order, map[ssa.Value]bool{}); !ok {
+	if last, ok := ctx.lastUseInBlock(neg.Params[0], negInstr.Block(), order); !ok {
 		t.Fatalf("lastUseInBlock(neg param) = %v, %v", last, ok)
 	} else if _, ok := last.(*ssa.Return); !ok {
 		t.Fatalf("lastUseInBlock(neg param) = %T; want return", last)
@@ -786,7 +794,7 @@ func derefOnly(p **int) {
 	for i, instr := range deref.Block().Instrs {
 		order[instr] = i
 	}
-	if last, ok := ctx.lastUseInBlock(callDeref.Params[0], deref.Block(), order, map[ssa.Value]bool{}); !ok {
+	if last, ok := ctx.lastUseInBlock(callDeref.Params[0], deref.Block(), order); !ok {
 		t.Fatalf("lastUseInBlock(call deref param) = %v, %v", last, ok)
 	} else if _, ok := last.(*ssa.Call); !ok {
 		t.Fatalf("lastUseInBlock(call deref param) = %T; want call", last)
@@ -812,7 +820,7 @@ func derefOnly(p **int) {
 	for i, instr := range loneDeref.Block().Instrs {
 		order[instr] = i
 	}
-	if last, ok := ctx.lastUseInBlock(derefOnly.Params[0], loneDeref.Block(), order, map[ssa.Value]bool{}); !ok || last != loneDeref {
+	if last, ok := ctx.lastUseInBlock(derefOnly.Params[0], loneDeref.Block(), order); !ok || last != loneDeref {
 		t.Fatalf("lastUseInBlock(lone deref param) = %v, %v; want deref", last, ok)
 	}
 }
@@ -843,13 +851,13 @@ func use(p *int) {
 		for i, instr := range fn.Blocks[0].Instrs {
 			order[instr] = i
 		}
-		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], order, map[ssa.Value]bool{}); ok || last != nil {
+		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], order); ok || last != nil {
 			t.Fatalf("lastUseInBlock with malformed referrer = %v, %v; want failure", last, ok)
 		}
 	}
 
 	t.Run("missing-order-entry", func(t *testing.T) {
-		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], map[ssa.Instruction]int{}, map[ssa.Value]bool{}); ok || last != nil {
+		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], map[ssa.Instruction]int{}); ok || last != nil {
 			t.Fatalf("lastUseInBlock with unscheduled referrer = %v, %v; want failure", last, ok)
 		}
 	})
@@ -884,7 +892,7 @@ func use(p *int) {
 		for i, instr := range fn.Blocks[0].Instrs {
 			order[instr] = i
 		}
-		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], order, map[ssa.Value]bool{}); ok || last != nil {
+		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], order); ok || last != nil {
 			t.Fatalf("lastUseInBlock with malformed derived referrer = %v, %v; want failure", last, ok)
 		}
 	})
@@ -918,7 +926,7 @@ func use(p *int) {
 	for i, instr := range fn.Blocks[0].Instrs {
 		order[instr] = i
 	}
-	if last, ok := ctx.lastUseInBlock(fn.Params[0], fn.Blocks[0], order, map[ssa.Value]bool{}); !ok || last == nil {
+	if last, ok := ctx.lastUseInBlock(fn.Params[0], fn.Blocks[0], order); !ok || last == nil {
 		t.Fatalf("lastUseInBlock with DebugRef = %v, %v", last, ok)
 	}
 }

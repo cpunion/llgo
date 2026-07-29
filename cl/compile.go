@@ -1437,35 +1437,74 @@ func (p *context) shouldClearAlloc(v *ssa.Alloc) bool {
 	return ok && hasConservativeGCPointers(ptr.Elem(), map[types.Type]bool{})
 }
 
-func blockCanReach(from, to *ssa.BasicBlock, seen map[*ssa.BasicBlock]bool) bool {
-	if from == nil || to == nil {
-		return false
-	}
-	if from == to {
-		return true
-	}
-	if seen[from] {
-		return false
-	}
-	seen[from] = true
-	for _, succ := range from.Succs {
-		if blockCanReach(succ, to, seen) {
-			return true
-		}
-	}
-	return false
-}
+func cyclicBlocks(blocks []*ssa.BasicBlock) map[*ssa.BasicBlock]bool {
+	// Compute strongly connected components once per function so liveness
+	// candidates do not repeat reachability walks over the same CFG.
+	cyclic := make(map[*ssa.BasicBlock]bool)
+	indices := make(map[*ssa.BasicBlock]int, len(blocks))
+	lowlinks := make(map[*ssa.BasicBlock]int, len(blocks))
+	onStack := make(map[*ssa.BasicBlock]bool, len(blocks))
+	stack := make([]*ssa.BasicBlock, 0, len(blocks))
+	nextIndex := 1
 
-func blockIsCyclic(block *ssa.BasicBlock) bool {
-	if block == nil {
-		return false
-	}
-	for _, succ := range block.Succs {
-		if blockCanReach(succ, block, map[*ssa.BasicBlock]bool{}) {
-			return true
+	var visit func(*ssa.BasicBlock)
+	visit = func(block *ssa.BasicBlock) {
+		if block == nil {
+			return
+		}
+		index := nextIndex
+		nextIndex++
+		indices[block] = index
+		lowlinks[block] = index
+		stack = append(stack, block)
+		onStack[block] = true
+
+		for _, succ := range block.Succs {
+			if succ == nil {
+				continue
+			}
+			if indices[succ] == 0 {
+				visit(succ)
+				lowlinks[block] = min(lowlinks[block], lowlinks[succ])
+			} else if onStack[succ] {
+				lowlinks[block] = min(lowlinks[block], indices[succ])
+			}
+		}
+		if lowlinks[block] != index {
+			return
+		}
+
+		var component []*ssa.BasicBlock
+		for {
+			last := len(stack) - 1
+			member := stack[last]
+			stack = stack[:last]
+			onStack[member] = false
+			component = append(component, member)
+			if member == block {
+				break
+			}
+		}
+		if len(component) > 1 {
+			for _, member := range component {
+				cyclic[member] = true
+			}
+			return
+		}
+		for _, succ := range block.Succs {
+			if succ == block {
+				cyclic[block] = true
+				return
+			}
 		}
 	}
-	return false
+
+	for _, block := range blocks {
+		if block != nil && indices[block] == 0 {
+			visit(block)
+		}
+	}
+	return cyclic
 }
 
 type instructionOperandScratch struct {
@@ -1507,35 +1546,51 @@ func instructionRetainsAddress(instr ssa.Instruction, v ssa.Value) bool {
 	// Side-effecting instructions can hide a stack address from the SSA
 	// referrer graph, so the liveness walk cannot follow later aliases.
 	//
-	// Keep this switch in sync with the SSA instruction set: every instruction
-	// that can persist v beyond the current instruction must either be handled
-	// here, produce an ssa.Value whose uses the recursive walk can follow, or
-	// make the analysis fail closed. In particular, a new side-effecting,
-	// non-ssa.Value instruction that retains an operand must be added here.
+	// This switch deliberately defaults to retaining: every known instruction
+	// must either identify its non-retaining destination operand below or be a
+	// pure value instruction whose uses the recursive walk can follow. A new
+	// SSA instruction therefore fails closed until it is classified here.
 	switch instr := instr.(type) {
 	case *ssa.Store:
-		return instr.Val == v
-	case *ssa.MapUpdate:
-		return instr.Key == v || instr.Value == v
-	case *ssa.Send:
-		return instr.X == v
-	case *ssa.Call:
-		if instr.Call.Value == v {
+		if instr.Val == v {
 			return true
 		}
-		for _, arg := range instr.Call.Args {
-			if arg == v {
-				return true
-			}
+		return instr.Addr != v
+	case *ssa.MapUpdate:
+		if instr.Key == v || instr.Value == v {
+			return true
 		}
+		return instr.Map != v
+	case *ssa.Send:
+		if instr.X == v {
+			return true
+		}
+		return instr.Chan != v
+	case *ssa.Call:
+		// Calls may retain any operand, including invoke receivers.
+		return true
 	case *ssa.Select:
+		channelOperand := false
 		for _, state := range instr.States {
 			if state.Dir == types.SendOnly && state.Send == v {
 				return true
 			}
+			if state.Chan == v {
+				channelOperand = true
+			}
 		}
+		return !channelOperand
+	case *ssa.Alloc, *ssa.BinOp, *ssa.UnOp, *ssa.ChangeType,
+		*ssa.Convert, *ssa.MultiConvert, *ssa.ChangeInterface,
+		*ssa.SliceToArrayPointer, *ssa.MakeInterface, *ssa.MakeMap,
+		*ssa.MakeChan, *ssa.MakeSlice, *ssa.Slice, *ssa.FieldAddr,
+		*ssa.Field, *ssa.IndexAddr, *ssa.Index, *ssa.Lookup, *ssa.Range,
+		*ssa.Next, *ssa.TypeAssert, *ssa.Extract:
+		// These instructions only produce values. Recursively walking the
+		// result's referrers preserves address provenance until a load.
+		return false
 	}
-	return false
+	return true
 }
 
 func isTerminatingInstruction(instr ssa.Instruction) bool {
@@ -1565,13 +1620,9 @@ func (p *context) isRuntimeSetFinalizerCall(call *ssa.CallCommon) bool {
 	}
 }
 
-func (p *context) lastUseInBlock(v ssa.Value, blk *ssa.BasicBlock, order map[ssa.Instruction]int, seen map[ssa.Value]bool) (ssa.Instruction, bool) {
+func (p *context) lastUseInBlock(v ssa.Value, blk *ssa.BasicBlock, order map[ssa.Instruction]int) (ssa.Instruction, bool) {
 	var scratch instructionOperandScratch
-	states := make(map[stackLivenessState]bool, len(seen)*2)
-	for value := range seen {
-		states[stackLivenessState{value: value}] = true
-		states[stackLivenessState{value: value, slotAddress: true}] = true
-	}
+	states := make(map[stackLivenessState]bool)
 	_, slotAddress := v.(*ssa.Alloc)
 	return p.lastUseInBlockValue(v, blk, order, states, slotAddress, &scratch)
 }
@@ -1650,7 +1701,7 @@ func (p *context) lastUseInBlockValue(
 
 func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][]*ssa.Alloc {
 	plans := make(map[ssa.Instruction][]*ssa.Alloc)
-	blockCyclicity := make(map[*ssa.BasicBlock]bool)
+	blockCyclicity := cyclicBlocks(fn.Blocks)
 	for _, blk := range fn.Blocks {
 		for _, instr := range blk.Instrs {
 			alloc, ok := instr.(*ssa.Alloc)
@@ -1665,19 +1716,14 @@ func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][
 			if useBlk == nil {
 				continue
 			}
-			cyclic, ok := blockCyclicity[useBlk]
-			if !ok {
-				cyclic = blockIsCyclic(useBlk)
-				blockCyclicity[useBlk] = cyclic
-			}
-			if cyclic {
+			if blockCyclicity[useBlk] {
 				continue
 			}
 			order := make(map[ssa.Instruction]int, len(useBlk.Instrs))
 			for i, useInstr := range useBlk.Instrs {
 				order[useInstr] = i
 			}
-			last, ok := p.lastUseInBlock(alloc, useBlk, order, map[ssa.Value]bool{})
+			last, ok := p.lastUseInBlock(alloc, useBlk, order)
 			if ok && last != nil && !isTerminatingInstruction(last) {
 				plans[last] = append(plans[last], alloc)
 			}
