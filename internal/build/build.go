@@ -175,8 +175,8 @@ type Config struct {
 	// BuildParallelism is the package-level concurrency requested by Go's -p
 	// build flag for llgo test. Zero uses the Go default, GOMAXPROCS.
 	BuildParallelism int
-	LinkOptions  LinkOptions
-	PCLNMode     PCLNMode
+	LinkOptions      LinkOptions
+	PCLNMode         PCLNMode
 	// PCLNModeSet marks PCLNMode as authoritative. Command flags set it for
 	// explicit requests; Do sets it after resolving the legacy environment
 	// default.
