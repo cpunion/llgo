@@ -419,6 +419,7 @@ func collectSourcePatchDirectives(src []byte) (sourcePatchDirectives, error) {
 //   - //llgo:skipall: clear every stdlib .go file in the patched package to a package stub
 //   - //llgo:skip A B: comment the named declarations from the stdlib package view
 //   - //llgo:annotate F marker: attach //llgo:marker to the exact stdlib function F
+//   - //llgo:annotate F coro noblock: attach the exact multiword coroutine directive
 //
 // Unlike cl/import.go directives, these are consumed only while constructing the
 // load-time overlay and are rewritten to plain comments before type checking.
@@ -465,13 +466,20 @@ func parseSourcePatchAnnotationDirective(line string) (name, marker string, ok b
 		return "", "", false
 	}
 	fields := strings.Fields(tail)
-	if len(fields) != 2 || !validSourcePatchAnnotationMarker(fields[1]) {
+	if len(fields) < 2 {
 		return "", "", false
 	}
-	return fields[0], fields[1], true
+	marker = strings.Join(fields[1:], " ")
+	if !validSourcePatchAnnotationMarker(marker) {
+		return "", "", false
+	}
+	return fields[0], marker, true
 }
 
 func validSourcePatchAnnotationMarker(marker string) bool {
+	if marker == "coro noblock" {
+		return true
+	}
 	if marker == "" || marker[0] < 'a' || marker[0] > 'z' {
 		return false
 	}
@@ -484,6 +492,13 @@ func validSourcePatchAnnotationMarker(marker string) bool {
 		}
 	}
 	return true
+}
+
+func sourcePatchAnnotationDirective(marker string) string {
+	if marker == "coro noblock" {
+		return "//llgo:coro noblock"
+	}
+	return "//llgo:" + marker
 }
 
 func sanitizeSourcePatchDirectiveLines(src []byte) []byte {
@@ -556,7 +571,7 @@ func annotateSourcePatchFile(src []byte, annotations map[string][]string) ([]byt
 		}
 		var text strings.Builder
 		for _, marker := range markers {
-			directive := "//llgo:" + marker
+			directive := sourcePatchAnnotationDirective(marker)
 			if _, present := existing[directive]; present {
 				continue
 			}

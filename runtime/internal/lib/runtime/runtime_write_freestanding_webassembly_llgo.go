@@ -1,4 +1,4 @@
-//go:build wasip2 || wasm_unknown
+//go:build wasip1 || wasip2 || wasm_unknown
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -20,10 +20,11 @@ package runtime
 
 import "unsafe"
 
-// A freestanding core module has no implicit stdout/stderr capability. Treat a
-// diagnostic write as consumed so upstream runtime formatting remains bounded
-// and cannot retry forever. An embedding-owned logging event can replace this
-// single leaf without changing the synchronous runtime.write API.
+// A freestanding core module has no implicit stdout/stderr capability, and
+// WASI Preview 1 cannot block its executor on a diagnostic write. Treat the
+// write as consumed so upstream runtime formatting remains bounded and cannot
+// retry forever. An embedding-owned logging event can replace this single leaf
+// without changing the synchronous runtime.write API.
 func runtimeWrite(fd uintptr, p unsafe.Pointer, n int32) int32 {
 	_, _ = fd, p
 	return n

@@ -1,4 +1,4 @@
-//go:build tinygo.wasm && !(js && wasm)
+//go:build tinygo.wasm && !(js && wasm) && !wasip1 && !wasi
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

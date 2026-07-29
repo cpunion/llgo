@@ -1,4 +1,4 @@
-//go:build wasip2 || wasm_unknown
+//go:build wasip1 || wasip2 || wasm_unknown
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,10 +18,10 @@
 
 package runtime
 
-// These targets deliberately expose neither wall time nor an entropy import.
-// Their host-pull runtime is single-domain, so a deterministic xorshift state
-// is sufficient for map perturbation without inventing a blocking host ABI.
-// A future entropy capability can seed this state.
+// These targets do not expose an executor-safe entropy seed to this private
+// map-perturbation layer. Their host-pull runtime is single-domain, so a
+// deterministic xorshift state is sufficient without inventing a blocking
+// host ABI. A future entropy capability can seed this state.
 var fastRandState uint32 = 0x6d2b79f5
 
 func fastrand() uint32 {

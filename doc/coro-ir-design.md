@@ -1281,7 +1281,38 @@ runtime旧logical wait/fleet分支随后已由Phase R删除；compiler下一阶�
   string和byte-copy边界，以及有效墙钟、合理local-zone offset、`Sleep(200ms)`至少推进
   150ms的单调时间；LLVM 19专用CI fresh build、核对exact undefined symbols并由Node内建
   reactor执行。当前完成范围是JS command的同步JS值边界和schedule/timer路径；
-  HostOp file/network、FuncOf/reentry和WASI pollable reactor仍是后续独立平台cohort。
+  HostOp file/network及FuncOf/reentry仍是后续独立平台cohort。
+
+#### Phase B.14：WASI Preview 1 command reactor（已完成）
+
+- 普通`wasip1` executable固定选择单线程、自有并导出linear memory的command profile；
+  `LLGO_WASI_THREADS`只继续影响library/embedding build。链接使用`-nostartfiles`，避免
+  wasi-libc `crt1`替换LLGo `_start`并使managed main及reactor被dead-strip；线程profile仍显式
+  import host memory，两个profile不静默混用。
+- `_start`在第一次managed slice之前调用prepare hook，校验WASI host-pull capability并发布
+  monotonic/realtime clock。initial slice返回后才进入固定容量C reactor；reactor及其每次
+  `ContinueSlice`之间都不存在managed activation留在机器栈上，也不建立第二个scheduler、
+  pthread/worker pool、Asyncify或动态分配对象。
+- reactor只消费公共POD `NextAction`、`NextOperation`及exact
+  `(slot,generation,epoch)` continuation。Schedule在下一轮外层循环执行；Alarm与所有pending
+  fd read/write组成一个`poll_oneoff`集合，使用absolute monotonic deadline。cancel必须精确匹配
+  action或完整operation tuple并取得ack；malformed、duplicate、stale及超出固定64槽容量均
+  fail closed。
+- Preview 1 command HostOp现覆盖`open/read/write/seek/close/unlink`。descriptor保持
+  nonblocking，read/write只有在fd readiness后执行；路径及其他当前WASI-libc立即操作只在
+  managed slice已经返回后执行。Preview 1没有标准socket create/connect surface，未知及网络
+  HostOp明确以`ENOSYS`完成，不会丢请求或占住executor。
+- 真实Go fixture让child在20ms timer后执行六个`syscall`文件操作，同时main独立park在250ms
+  alarm；child必须在200ms内完成，文件内容、清理和主timer下界都由Wasmtime验证。LLVM 19
+  Coro CI会fresh build、检查wasm magic并以`/tmp` preopen运行该command。
+- 这项证据只覆盖Preview 1 command的clock、timer和上述低层文件API。高层`os.File`当前仍受
+  通用interface exact-effect候选闭包缺口阻挡。`path_open`、`unlink`及metadata import在
+  Preview 1中没有标准pollable形式，当前会在无managed activation的reactor机器栈上同步执行；
+  fixture证明普通文件往返能与已park timer共同推进，但不证明慢host filesystem不会暂停这个
+  single-thread command。因而该profile的nonpoll file compensation仍是明确的Degraded能力，
+  Full必须依赖WASI threads/async host或Preview 2 pollable adapter。Preview 1网络、
+  Preview 2 component lifecycle、JS HostOp/reentry及embedded/baremetal glue继续分阶段完成，
+  不能由本项宣称完整`os`、`net`、标准库或GOROOT兼容。
 
 ### Phase C：analysis只消费facts
 

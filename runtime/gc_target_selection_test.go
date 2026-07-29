@@ -77,6 +77,11 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 				}
 			}
 			assertFiles("github.com/goplus/llgo/runtime/internal/runtime", []string{"z_nogc.go"}, []string{"z_gc.go"})
+			if target.name == "wasip1" {
+				assertFiles("github.com/goplus/llgo/runtime/internal/runtime",
+					[]string{"coro_abort_freestanding_webassembly.go"},
+					[]string{"coro_abort_libc.go"})
+			}
 			assertFiles("github.com/goplus/llgo/runtime/internal/lib/runtime", []string{"runtime_nogc.go", "mfinal_nogc.go"}, []string{"runtime_gc.go", "mfinal.go"})
 			assertFiles("github.com/goplus/llgo/runtime/internal/clite/pthread", []string{"pthread_nogc.go"}, []string{"pthread_gc.go"})
 			assertFiles("github.com/goplus/llgo/runtime/internal/clite/tls", []string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})
@@ -86,11 +91,14 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 
 func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testing.T) {
 	targets := []struct {
-		name string
-		tags string
+		name   string
+		goos   string
+		goarch string
+		tags   string
 	}{
-		{name: "wasip2", tags: "llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},
-		{name: "wasm-unknown", tags: "llgo,llgo_coro,tinygo.wasm,wasm_unknown,nogc"},
+		{name: "wasip1", goos: "wasip1", goarch: "wasm", tags: "llgo,llgo_coro,nogc"},
+		{name: "wasip2", goos: "linux", goarch: "arm", tags: "llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},
+		{name: "wasm-unknown", goos: "linux", goarch: "arm", tags: "llgo,llgo_coro,tinygo.wasm,wasm_unknown,nogc"},
 	}
 	moduleRoot, err := filepath.Abs(".")
 	if err != nil {
@@ -101,7 +109,7 @@ func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testin
 			cmd := exec.Command("go", "list", "-deps", "-json", "-tags="+target.tags,
 				"./internal/runtime", "./internal/lib/runtime", "./internal/clite/ffi", "./internal/clite/tls")
 			cmd.Dir = moduleRoot
-			cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=arm", "CGO_ENABLED=0")
+			cmd.Env = append(os.Environ(), "GOOS="+target.goos, "GOARCH="+target.goarch, "CGO_ENABLED=0")
 			output, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("go list freestanding WebAssembly packages: %v", err)

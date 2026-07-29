@@ -415,7 +415,9 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 				assertCoroProgramNativeSliceV2(t, mod, test.entryName)
 			} else if hostCoroPullRuntimeABI(ctx.buildConf) {
-				assertCoroProgramHostSliceV2(t, mod, test.entryName)
+				assertCoroProgramHostSliceV2(
+					t, mod, test.entryName, wasiCoroCommandRuntimeABI(ctx.buildConf),
+				)
 				assertCoroHostPullRetentionV1(t, mod, test.entryName)
 			} else {
 				assertCoroProgramContinueRetention(t, mod, test.entryName)
@@ -609,7 +611,7 @@ func assertCoroProgramNativeSliceV2(t *testing.T, module llvm.Module, entryName 
 	}
 }
 
-func assertCoroProgramHostSliceV2(t *testing.T, module llvm.Module, entryName string) {
+func assertCoroProgramHostSliceV2(t *testing.T, module llvm.Module, entryName string, commandReactor bool) {
 	t.Helper()
 	run := module.NamedFunction(coroProgramRunSliceSymbolV2)
 	if run.IsNil() || !run.IsDeclaration() || run.GlobalValueType().String() != "i32 (ptr, ptr, i32, ptr)" {
@@ -655,6 +657,21 @@ func assertCoroProgramHostSliceV2(t *testing.T, module llvm.Module, entryName st
 	if strings.Contains(body, "call i32 @"+coroProgramContinueSliceSymbolV2) {
 		t.Fatalf("host V2 entry recursively drove a continuation instead of returning to the embedding:\n%s", body)
 	}
+	for _, symbol := range []string{
+		coroWASICommandPrepareSymbolV1,
+		coroWASICommandReactorSymbolV1,
+	} {
+		function := module.NamedFunction(symbol)
+		if commandReactor {
+			if function.IsNil() || !function.IsDeclaration() ||
+				function.GlobalValueType().String() != "i32 ()" ||
+				strings.Count(body, "call i32 @"+symbol+"()") != 1 {
+				t.Fatalf("WASI command hook %q is missing or has the wrong ABI:\n%s", symbol, module.String())
+			}
+		} else if !function.IsNil() {
+			t.Fatalf("external host-pull entry acquired WASI command hook %q:\n%s", symbol, module.String())
+		}
+	}
 	for label, pattern := range map[string]string{
 		"complete status":  `icmp eq i32 [^,\n]+, 1`,
 		"suspended status": `icmp eq i32 [^,\n]+, 2`,
@@ -667,11 +684,15 @@ func assertCoroProgramHostSliceV2(t *testing.T, module llvm.Module, entryName st
 			t.Fatalf("host V2 entry has no exact %s check %q:\n%s", label, pattern, body)
 		}
 	}
-	// Complete owns the ordinary return path. Both async states share a second
-	// direct return, so a hand-built module with Python declarations cannot run
-	// Py_Finalize while scheduler work remains host-owned.
-	if got := strings.Count(body, "ret i32 0"); got != 2 {
-		t.Fatalf("host V2 entry return paths = %d, want complete and detached returns:\n%s", got, body)
+	// External reactors detach directly. A WASI command instead rejoins the
+	// sole ordinary return only after its plain poll_oneoff pump reports exact
+	// program completion.
+	wantReturns := 2
+	if commandReactor {
+		wantReturns = 1
+	}
+	if got := strings.Count(body, "ret i32 0"); got != wantReturns {
+		t.Fatalf("host V2 entry return paths = %d, want %d:\n%s", got, wantReturns, body)
 	}
 	if strings.Count(body, "call void @Py_Finalize()") > 1 {
 		t.Fatalf("host V2 entry duplicated Py_Finalize across detached paths:\n%s", body)

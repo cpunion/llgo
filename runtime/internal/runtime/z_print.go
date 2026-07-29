@@ -1,4 +1,4 @@
-//go:build !wasip2 && !wasm_unknown
+//go:build !wasip1 && !wasip2 && !wasm_unknown
 
 /*
  * Copyright (c) 2024 The XGo Authors (xgo.dev). All rights reserved.

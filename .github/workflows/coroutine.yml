@@ -35,6 +35,7 @@ jobs:
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-core", check: "test target adapters (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-js-wasm", check: "test JS/WASM command reactor (llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasi-command", check: "test WASI command reactor (llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, llvm19)" }
     steps:
@@ -52,6 +53,12 @@ jobs:
         uses: ./.github/actions/setup-go
         with:
           go-version: ${{ matrix.go }}
+
+      - name: Set up Wasmtime
+        if: matrix.lane == 'target-wasi-command'
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "39.0.1"
 
       # This focused LLVM/runtime matrix complements the regular upstream Go,
       # cache, LLGo and target workflows, including their macOS lanes.
@@ -242,8 +249,26 @@ jobs:
             <(llvm-nm --undefined-only --format=just-symbols "$output" | sort)
           node targets/wasm_exec.js "$output"
 
+      - name: Run the built-in WASI Preview 1 command reactor
+        if: matrix.lane == 'target-wasi-command'
+        run: |
+          go test ./internal/crosscompile \
+            -run '^Test(WASICommandReactorUsesOneBoundedHostPullCore|WASIMemoryOwnershipLinkFlags|ResolvedLLVMTargetSpecWASIThreads)$' \
+            -count=1
+          go test ./internal/build \
+            -run '^Test(WASICommandOwnsSingleThreadedMemory|WASIP1CoroSyscallMetadataSourcePatch)$' \
+            -count=1
+          go build -o /tmp/llgo-wasi-command ./cmd/llgo
+          output=/tmp/llgo-wasi-command-reactor.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-wasi-command build -p=1 -target=wasip1 -o "$output" \
+            ./internal/build/_testgo/coro_wasi_command_reactor
+          test "$(od -An -t x1 -N4 "$output" | tr -d ' \n')" = '0061736d'
+          wasmtime run --dir=/tmp "$output"
+          test ! -e /tmp/llgo-coro-wasi-command-reactor
+
       - name: Upload failed WebAssembly coroutine probes
-        if: failure() && (matrix.lane == 'target-wasm' || matrix.lane == 'target-js-wasm')
+        if: failure() && (matrix.lane == 'target-wasm' || matrix.lane == 'target-js-wasm' || matrix.lane == 'target-wasi-command')
         uses: actions/upload-artifact@v7
         with:
           name: coroutine-wasm-failure-${{ github.run_id }}-${{ matrix.wasm_target || matrix.lane }}
@@ -252,6 +277,7 @@ jobs:
             /tmp/llgo-*-host-network.wasm
             /tmp/llgo-*-stdlib-tcp.wasm
             /tmp/llgo-js-wasm-time.wasm
+            /tmp/llgo-wasi-command-reactor.wasm
           if-no-files-found: error
           retention-days: 1
           compression-level: 0

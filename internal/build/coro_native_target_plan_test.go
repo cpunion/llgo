@@ -93,14 +93,27 @@ func TestHostCoroPullRuntimeABISelection(t *testing.T) {
 	}
 }
 
-func TestValidateCoroHostPullEntryConfigRejectsPythonOwnership(t *testing.T) {
-	host := &Config{Goos: "wasip1", Goarch: "wasm"}
-	if err := validateCoroHostPullEntryConfig(host, false); err != nil {
+func TestValidateCoroHostPullEntryConfigPythonOwnership(t *testing.T) {
+	command := &Config{
+		BuildMode: BuildModeExe,
+		Goos:      "wasip1",
+		Goarch:    "wasm",
+	}
+	if err := validateCoroHostPullEntryConfig(command, false); err != nil {
 		t.Fatalf("host-pull entry without Python ownership: %v", err)
 	}
-	err := validateCoroHostPullEntryConfig(host, true)
+	if err := validateCoroHostPullEntryConfig(command, true); err != nil {
+		t.Fatalf("WASI command reactor unexpectedly rejected Python ownership: %v", err)
+	}
+
+	detached := &Config{
+		BuildMode: BuildModeCArchive,
+		Goos:      "wasip1",
+		Goarch:    "wasm",
+	}
+	err := validateCoroHostPullEntryConfig(detached, true)
 	if err == nil {
-		t.Fatal("host-pull entry accepted compiler-owned Python finalization")
+		t.Fatal("detached host-pull entry accepted compiler-owned Python finalization")
 	}
 	for _, want := range []string{"host-pull", "Python", "Py_Finalize"} {
 		if !strings.Contains(err.Error(), want) {

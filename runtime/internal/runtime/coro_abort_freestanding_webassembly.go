@@ -1,4 +1,4 @@
-//go:build wasip2 || wasm_unknown
+//go:build wasip1 || wasip2 || wasm_unknown
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -23,9 +23,11 @@ import _ "unsafe"
 //go:linkname coroFreestandingAbort llgo.controlTrap
 func coroFreestandingAbort()
 
-// Freestanding core modules have no process stderr or exit ABI. A scheduler
-// invariant failure is therefore an immediate WebAssembly trap; richer
-// diagnostics belong to an embedding-owned host adapter.
+// Freestanding core modules have no process stderr or exit ABI, while WASI
+// Preview 1 cannot perform a potentially blocking diagnostic write from the
+// executor stack. A scheduler invariant failure is therefore an immediate
+// WebAssembly trap; richer diagnostics belong to an embedding-owned host
+// adapter or a future terminal WASI control operation.
 func coroRuntimeAbort(string) {
 	coroFreestandingAbort()
 	for {

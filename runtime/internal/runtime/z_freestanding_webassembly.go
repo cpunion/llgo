@@ -1,4 +1,4 @@
-//go:build wasip2 || wasm_unknown
+//go:build wasip1 || wasip2 || wasm_unknown
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -19,8 +19,10 @@
 package runtime
 
 // A freestanding core module has neither a process exit ABI nor an output
-// stream. Managed panic/defer/recover use explicit coroutine status; a panic
-// that escapes the last raw/plain boundary can only terminate by trapping.
+// stream. WASI Preview 1 has process services, but none that may be called from
+// this terminal executor-stack boundary. Managed panic/defer/recover use
+// explicit coroutine status; a panic that escapes the last raw/plain boundary
+// can only terminate by trapping.
 func Rethrow(_ *Defer) {
 	coroFreestandingAbort()
 	for {

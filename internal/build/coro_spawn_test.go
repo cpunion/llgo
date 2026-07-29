@@ -334,6 +334,51 @@ func launch() { go target() }
 	}
 }
 
+func TestCoroClosedStaticSpawnRunGateReportsPreciseEffectTrace(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/spawntrace", `package spawntrace
+func leaf() {}
+func target() { leaf() }
+func launch() { go target() }
+`, nil)
+	launch := ssaPkg.Func("launch")
+	target := ssaPkg.Func("target")
+	leaf := ssaPkg.Func("leaf")
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: launch, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				switch fn {
+				case launch:
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				case target:
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				case leaf:
+					return coro.SSAFunctionPolicy{Effect: coro.WaitForeign}, nil
+				default:
+					return coro.SSAFunctionPolicy{}, nil
+				}
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.SuspensionEffectTrace(target, coro.WaitForeign); got == "unavailable" ||
+		!strings.Contains(got, target.String()) ||
+		!strings.Contains(got, leaf.String()) ||
+		!strings.Contains(got, "[local=wait-foreign") {
+		t.Fatalf("suspension trace = %q, want target-to-leaf WaitForeign explanation", got)
+	}
+	err = validateCoroClosedStaticSpawnRunGate(&Config{}, plan, "")
+	if err == nil ||
+		!strings.Contains(err.Error(), "effect trace:") ||
+		!strings.Contains(err.Error(), leaf.String()) {
+		t.Fatalf("spawn gate error = %v, want precise propagated effect trace", err)
+	}
+}
+
 func TestCoroPlanInputClosedStaticSpawnSupportsDiscardedResults(t *testing.T) {
 	const source = `package spawn; func worker() int { return 1 }; func launch() { go worker() }`
 	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/spawn", source, nil)

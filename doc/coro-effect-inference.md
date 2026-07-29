@@ -575,7 +575,9 @@ order:
 3. precise suspended-frame GC roots and barriers;
 4. dynamic/sharded timer, channel, worker, and registry capacity;
 5. dynamic/closure/method `go`, reflect/select, and callable dispatch;
-6. complete WASM/WASI, RTOS, baremetal, and embedded event adapters;
+6. complete JS HostOp/reentry, WASI Preview 2, RTOS, baremetal, and embedded
+   event adapters; the JS command timer pump and WASI Preview 1 command
+   timer/file reactor are already concrete users of the same inferred effects;
 7. full repository `test/*` and GOROOT compatibility gates.
 
 This order keeps later standard-library work on one scheduler/event/cancellation
