@@ -484,6 +484,12 @@ jobs:
             test "$output" = "wasm timers ok"
           }
 
+          run_wasm_workers() {
+            local output
+            output=$(node -e "import('$1').then(module => module.default()).catch(error => { console.error(error); process.exit(1); });" 2>&1)
+            grep -Fxq "wasm workers ok" <<<"$output"
+          }
+
           run_wasi_timers() {
             local output
             wasm-tools validate --features all "$1"
@@ -508,6 +514,34 @@ jobs:
           run_wasm_timers "$RUNNER_TEMP/wasm-timers.mjs"
           GOOS=wasip1 GOARCH=wasm llgo build -o "$RUNNER_TEMP/wasm-timers-wasip1.wasm" ./internal/build/testdata/wasm-timers
           run_wasi_timers "$RUNNER_TEMP/wasm-timers-wasip1.wasm"
+          LLGO_WASM_WORKERS=2 GOOS=js GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-workers-go.mjs" ./internal/build/testdata/wasm-workers
+          run_wasm_workers "$RUNNER_TEMP/wasm-workers-go.mjs"
+          LLGO_WASM_WORKERS=2 llgo build -target wasm \
+            -o "$RUNNER_TEMP/wasm-workers.mjs" ./internal/build/testdata/wasm-workers
+          run_wasm_workers "$RUNNER_TEMP/wasm-workers.mjs"
+          cp ./internal/build/testdata/wasm-workers/browser.html "$RUNNER_TEMP/browser.html"
+          node ./internal/build/testdata/wasm-workers/server.mjs "$RUNNER_TEMP" 8123 &
+          browser_server=$!
+          trap 'kill "$browser_server" 2>/dev/null || true' EXIT
+          for attempt in {1..50}; do
+            if curl -fsS http://127.0.0.1:8123/ >/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          curl -fsS http://127.0.0.1:8123/ >/dev/null
+          browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          test -n "$browser"
+          for module in wasm-timers.mjs wasm-workers.mjs wasm-workers-go.mjs; do
+            html=$("$browser" --headless=new --no-sandbox --disable-gpu \
+              --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom \
+              "http://127.0.0.1:8123/browser.html?module=$module")
+            grep -Fq 'data-result="pass"' <<<"$html"
+          done
+          kill "$browser_server"
+          wait "$browser_server" || true
+          trap - EXIT
           GOOS=js GOARCH=wasm llgo build -o "$RUNNER_TEMP/wasm-gc-go.mjs" ./internal/build/testdata/wasm-gc
           node --input-type=module -e "import Module from '$RUNNER_TEMP/wasm-gc-go.mjs'; await Module();"
           llgo build -target wasm -o "$RUNNER_TEMP/wasm-gc.mjs" ./internal/build/testdata/wasm-gc
