@@ -4,6 +4,8 @@
 package build
 
 import (
+	"go/token"
+	"go/types"
 	"regexp"
 	"strconv"
 	"strings"
@@ -837,6 +839,55 @@ func TestGenMainModuleCoroControlWrappersAfterCoroPasses(t *testing.T) {
 		t.Fatalf("emit lowered coroutine control wrapper object: %v\n%s", err, post)
 	}
 	object.Dispose()
+}
+
+func TestGenMainModuleInstallsLocalContextWhenNeeded(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	runtimePkg := types.NewPackage(llssa.PkgRuntime, "runtime")
+	contextName := types.NewTypeName(token.NoPos, runtimePkg, "LocalContext", nil)
+	contextType := types.NewNamed(contextName, types.NewStruct(nil, nil), nil)
+	runtimePkg.Scope().Insert(contextName)
+	contextPointer := types.NewPointer(contextType)
+	enterParams := types.NewTuple(types.NewParam(token.NoPos, runtimePkg, "ctx", contextPointer))
+	enterResults := types.NewTuple(types.NewParam(token.NoPos, runtimePkg, "previous", contextPointer))
+	runtimePkg.Scope().Insert(types.NewFunc(token.NoPos, runtimePkg, "EnterLocalContext", types.NewSignatureType(nil, nil, nil, enterParams, enterResults, false)))
+	leaveParams := types.NewTuple(
+		types.NewParam(token.NoPos, runtimePkg, "ctx", contextPointer),
+		types.NewParam(token.NoPos, runtimePkg, "previous", contextPointer),
+	)
+	runtimePkg.Scope().Insert(types.NewFunc(token.NoPos, runtimePkg, "LeaveLocalContext", types.NewSignatureType(nil, nil, nil, leaveParams, nil, false)))
+	prog.SetRuntime(runtimePkg)
+	prog.SetLocalityInfo("example.com/state.Value", llssa.LocalityInfo{Locality: llssa.GoroutineLocal})
+	prog.SetLocalStorage("example.com/state.Value", llssa.LocalStoragePackage)
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode: BuildModeExe,
+			Goos:      "linux",
+			Goarch:    "amd64",
+		},
+	}
+	pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
+	bootstrap := &coroProgramBootstrapV1{
+		Version: coroProgramBootstrapVersionV2,
+		Steps: []coroProgramBootstrapStepV1{
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleRuntimeInitV2, FunctionID: "runtime-init", Target: llssa.PkgRuntime + ".init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleABIInitV2, FunctionID: "abi-init", Target: "init$abitypes"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePublicRuntimeInitV2, FunctionID: coroProgramPublicRuntimeNoopIDV2, Target: coroProgramPublicRuntimeNoopSymbolV2},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "package-init", Target: pkg.PkgPath + ".init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV2, FunctionID: "main", Target: pkg.PkgPath + ".main"},
+		},
+	}
+	ir := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{coroBootstrap: bootstrap}).LPkg.String()
+	assertInOrder(t, ir,
+		"call void @"+coroFrameAllocatorBootstrapSymbolV1,
+		"EnterLocalContext",
+		"call ptr @"+coroProgramBeginSymbolV1,
+		"LeaveLocalContext",
+	)
 }
 
 func assertInOrder(t *testing.T, s string, wants ...string) {

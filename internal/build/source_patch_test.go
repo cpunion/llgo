@@ -27,7 +27,7 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
+			overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
 				goos:      goos,
 				goarch:    "wasm",
 				goversion: goversion,
@@ -126,7 +126,7 @@ func TestWasmBytealgSourcePatchReplacesAsm(t *testing.T) {
 		}
 	}
 
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:      "js",
 		goarch:    "wasm",
 		goversion: runtime.Version(),
@@ -195,7 +195,7 @@ func TestSourcePatchAssemblyMatchError(t *testing.T) {
 package bytealg
 `)
 
-	_, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
+	_, _, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
 		goos:   "js",
 		goarch: "wasm",
 	})
@@ -205,7 +205,7 @@ package bytealg
 }
 
 func TestBuildSourcePatchOverlayForIter(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{})
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ type Mutex struct{}
 func boolToUint8(bool) uint8
 `)
 
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
 		goos:      runtime.GOOS,
 		goarch:    runtime.GOARCH,
 		goversion: "go1.26.0",
@@ -840,7 +840,7 @@ func TestApplySourcePatchForPkg_MissingStdlibPkg(t *testing.T) {
 func Pull[V any](seq func(func(V) bool)) {}
 `)
 
-	changed, overlay, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
+	changed, overlay, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,7 +869,7 @@ package demo
 const Only = "patched"
 `)
 
-	changed, overlay, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
+	changed, overlay, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
 		goos:      runtime.GOOS,
 		goarch:    runtime.GOARCH,
 		goversion: "go1.24.11",
@@ -881,7 +881,7 @@ const Only = "patched"
 		t.Fatalf("expected go1.26-tagged patch to be ignored on go1.24, got overlay: %#v", overlay)
 	}
 
-	changed, overlay, err = applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
+	changed, overlay, _, err = applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
 		goos:      runtime.GOOS,
 		goarch:    runtime.GOARCH,
 		goversion: "go1.26.0",
@@ -1010,7 +1010,7 @@ func TestApplySourcePatchForPkg_UnreadableStdlibPkg(t *testing.T) {
 func Pull[V any](seq func(func(V) bool)) {}
 `)
 
-	changed, overlay, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
+	changed, overlay, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1035,7 @@ func runSourcePatchCase(t *testing.T, caseName string) {
 	copyTree(t, filepath.Join(assetRoot, "pkg"), srcDir)
 	copyTree(t, filepath.Join(assetRoot, "patch"), patchDir)
 
-	changed, overlay, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
+	changed, overlay, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
 	if err != nil {
 		t.Fatal(err)
 	}

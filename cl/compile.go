@@ -227,6 +227,7 @@ type context struct {
 	staticGlobalInits map[*ssa.Global]llssa.Expr
 	staticInitStores  map[*ssa.Store]none
 	staticInitInstrs  map[ssa.Instruction]none
+	locality          localityLowering
 }
 
 func (p *context) rewriteValue(name string) (string, bool) {
@@ -411,7 +412,10 @@ func (p *context) compileGlobal(pkg llssa.Package, gbl *ssa.Global) {
 		return
 	}
 	dbgInstrln("==> NewVar", name, typ)
-	g := pkg.NewVar(name, typ, llssa.Background(vtype))
+	g, skip := p.localityGlobalStorage(pkg, gbl, name, typ, llssa.Background(vtype))
+	if skip {
+		return
+	}
 	if p.emissionUniverse != nil {
 		identity, certified, err := p.emissionUniverse.CoroGlobalPhysicalIdentity(gbl)
 		if err != nil {
@@ -739,14 +743,17 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		dbgSymsEnabled := enableDbgSyms && (f == nil || f.Origin() == nil)
 		p.inits = append(p.inits, func() {
 			oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldCallerFrameMark, oldRawPlainBody := p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.callerFrameMark, p.rawPlainBody
+			oldLocalityFunction := p.locality.function
 			p.fn = fn
 			p.goFn = f
 			p.patchOriginalInitIf = patchOriginalInitIf
 			p.rawPlainBody = rawPlain
 			p.callerFrameMark = llssa.Nil
+			p.locality.function = localityFunction{}
 			p.state = state // restore pkgState when compiling funcBody
 			defer func() {
 				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.callerFrameMark, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldCallerFrameMark, oldRawPlainBody
+				p.locality.function = oldLocalityFunction
 			}()
 			p.phis = nil
 			if dbgSymsEnabled {
@@ -773,6 +780,13 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			p.cgoArgs = nil
 			p.cgoRet = llssa.Expr{}
 			p.cgoErrno = llssa.Nil
+			// A stackless physical body always runs with the scheduler-owned
+			// runtime G installed, whose sidecar already owns LocalContext.
+			// Enter/LeaveLocalContext belongs only to a synchronous native ABI
+			// entry (including the separately emitted raw/plain twin).
+			if physicalABI == nil {
+				p.prepareExportedLocalContext(f)
+			}
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
 			if p.emissionUniverse != nil {
@@ -1015,6 +1029,9 @@ func (p *context) sourceBlock(index int) llssa.BasicBlock {
 }
 
 func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, doModInit bool) llssa.BasicBlock {
+	oldLocalBlock := p.locality.function.block
+	p.locality.function.block = block
+	defer func() { p.locality.function.block = oldLocalBlock }()
 	var last int
 	var pyModInit bool
 	var prog = p.prog
@@ -1023,6 +1040,9 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	var instrs = block.Instrs[n:]
 	var ret = p.sourceBlock(block.Index)
 	b.SetBlock(ret)
+	if block.Index == 0 {
+		p.enterExportedLocalContext(b)
+	}
 	if block.Index == 0 && p.shouldTrackCallerFrames() {
 		p.pushCallerLocationFrame(b, block.Parent())
 	}
@@ -1035,6 +1055,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	}
 
 	if doModInit {
+		p.initializeLocalGuardsWithCoroPlan(b)
 		if p.state != pkgInPatch {
 			p.applyEmbedInits(b)
 		}
@@ -2377,6 +2398,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		if p.shouldTrackCallerFrames() {
 			p.popCallerLocationFrame(b)
 		}
+		p.leaveExportedLocalContext(b)
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			if outcome.outcome != coroPhysicalOutcomeReturn {
@@ -2673,7 +2695,7 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		if isCgoVar(varName) {
 			p.cgoSymbols = append(p.cgoSymbols, val.Name())
 		}
-		if enableDbgSyms {
+		if enableDbgSyms && p.localityAllowsGlobalDebug(v) {
 			pos := p.fset.Position(v.Pos())
 			b.DIGlobal(val, v.Name(), pos)
 		}
@@ -2978,6 +3000,15 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		pkg.Pkg = pkgTypes
 		patch.Alt.Pkg = pkgTypes
 	}
+	if err = ParsePkgSyntax(prog, pkgProg.Fset, pkgTypes, files); err != nil {
+		return nil, nil, err
+	}
+	if err = prog.ValidateLocalities(llssa.PathOf(pkgTypes)); err != nil {
+		return nil, nil, err
+	}
+	if err = validateLocalInitializers(prog, pkgTypes); err != nil {
+		return nil, nil, err
+	}
 	if pkgPath == llssa.PkgRuntime {
 		prog.SetRuntime(pkgTypes)
 	}
@@ -3142,6 +3173,17 @@ func processPkg(ctx *context, ret llssa.Package, pkg *ssa.Package) {
 	sort.Slice(members, func(i, j int) bool {
 		return members[i].name < members[j].name
 	})
+	localGlobals := make([]*ssa.Global, 0)
+	for _, m := range members {
+		global, ok := m.val.(*ssa.Global)
+		if !ok || isCgoFuncPtrVar(global.Name()) {
+			continue
+		}
+		localGlobals = append(localGlobals, global)
+	}
+	// Address accessors and replay guards must exist before any function body
+	// can reference a local package variable, regardless of member sort order.
+	ctx.prepareLocalVariables(ret, localGlobals)
 
 	for _, m := range members {
 		member := m.val

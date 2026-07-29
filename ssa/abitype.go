@@ -627,7 +627,7 @@ func (b Builder) abiMethodName(anonymous bool, mPkg *types.Package, method *type
 	mName := method.Name()
 	var fullName string
 	if anonymous {
-		fullName = b.Pkg.Path() + "." + mSig.Recv().Type().String() + "." + mName
+		fullName = b.Pkg.Path() + "." + types.TypeString(mSig.Recv().Type(), abi.PathOf) + "." + mName
 	} else {
 		fullName = FuncName(mPkg, mName, mSig.Recv(), false)
 	}
