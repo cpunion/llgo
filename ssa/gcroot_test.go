@@ -13,6 +13,17 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
+func TestCooperativeSafepointConfiguration(t *testing.T) {
+	prog := ssatest.NewProgram(t, nil)
+	if prog.CooperativeSafepointsEnabled() {
+		t.Fatal("cooperative safepoints enabled by default")
+	}
+	prog.EnableCooperativeSafepoints(true)
+	if !prog.CooperativeSafepointsEnabled() {
+		t.Fatal("cooperative safepoints remain disabled")
+	}
+}
+
 func TestGCRootFrameIR(t *testing.T) {
 	prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "js", GOARCH: "wasm"})
 	pkg := prog.NewPackage("main", "main")
