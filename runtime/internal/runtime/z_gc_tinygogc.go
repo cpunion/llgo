@@ -1,4 +1,4 @@
-//go:build !nogc && baremetal
+//go:build !nogc && (baremetal || ((wasm || tinygo.wasm) && llgo_wasm_gc))
 
 /*
  * Copyright (c) 2024 The XGo Authors (xgo.dev). All rights reserved.
@@ -43,13 +43,11 @@ func AllocRoot(size uintptr) unsafe.Pointer {
 }
 
 func FreeRoot(ptr unsafe.Pointer) {
+	_ = ptr
 }
 
-// AddCleanupPtr is not implemented in baremetal builds because tinygogc
-// does not support finalizers. Cleanup functions will never be called.
-//
-// Returns: a no-op cancel function
+// AddCleanupPtr is unavailable until tinygogc owns a finalizer/cleanup queue.
 func AddCleanupPtr(ptr unsafe.Pointer, cleanup func()) (cancel func()) {
-	// Not implemented: tinygogc does not support finalizers
-	return func() {} // no-op cancel
+	_, _ = ptr, cleanup
+	return func() {}
 }

@@ -1,4 +1,4 @@
-//go:build baremetal
+//go:build baremetal || (!nogc && (wasm || tinygo.wasm) && llgo_wasm_gc)
 
 /*
  * Copyright (c) 2018-2025 The TinyGo Authors. All rights reserved.
@@ -17,14 +17,16 @@
  * limitations under the License.
  */
 
-// Package tinygogc implements a conservative mark-and-sweep garbage collector
-// for baremetal environments where the standard Go runtime and bdwgc are unavailable.
+// Package tinygogc implements a conservative, non-moving mark-and-sweep
+// collector for serialized baremetal and WebAssembly environments where the
+// standard Go runtime and BDWGC are unavailable.
 //
 // This implementation is based on TinyGo's GC and is designed for resource-constrained
 // embedded systems. It uses a block-based allocator with conservative pointer scanning.
 //
 // Build tags:
-//   - baremetal: Enables this GC for baremetal targets
+//   - baremetal: enables this GC for baremetal targets
+//   - llgo_wasm_gc: enables the compiler-owned single-executor WebAssembly profile
 //
 // Memory Layout:
 // The heap is divided into fixed-size blocks (32 bytes on 64-bit). Metadata is stored
@@ -69,6 +71,7 @@ var (
 	gcMallocs     uint64  // total number of allocations
 	gcFrees       uint64  // total number of objects freed
 	gcFreedBlocks uint64  // total number of freed blocks
+	gcNumGC       uint32  // completed stop-the-world collections
 
 	// stackOverflow is a flag which is set when the GC scans too deep while marking.
 	// After it is set, all marked allocations must be re-scanned.
@@ -91,20 +94,23 @@ const (
 	markStackSize      = 8 * unsafe.Sizeof((*int)(nil)) // number of to-be-marked blocks to queue before forcing a rescan
 )
 
-// this function MUST be initalized first, which means it's required to be initalized before runtime
+// this function MUST be initialized first, which means it's required to be
+// initialized before runtime allocations become visible.
 func initGC() {
-	// reserve 2K blocks for libc internal malloc, we cannot wrap those internal functions
-	heapStart = uintptr(unsafe.Pointer(&_heapStart)) + 2048
-	heapEnd = uintptr(unsafe.Pointer(&_heapEnd))
-	globalsStart = uintptr(unsafe.Pointer(&_globals_start))
-	globalsEnd = uintptr(unsafe.Pointer(&_globals_end))
+	heapStart, heapEnd, globalsStart, globalsEnd, stackTop = gcMemoryLayout()
+	if heapStart >= heapEnd {
+		gcPanic(c.Str("gc: invalid heap range"))
+	}
+	configureHeap()
+	metadataSize := heapEnd - uintptr(metadataStart)
+	c.Memset(metadataStart, 0, metadataSize)
+}
+
+func configureHeap() {
 	totalSize := heapEnd - heapStart
 	metadataSize := (totalSize + blocksPerStateByte*bytesPerBlock) / (1 + blocksPerStateByte*bytesPerBlock)
 	metadataStart = unsafe.Pointer(heapEnd - metadataSize)
 	endBlock = (uintptr(metadataStart) - heapStart) / bytesPerBlock
-	stackTop = uintptr(unsafe.Pointer(&_stackStart))
-
-	c.Memset(metadataStart, 0, metadataSize)
 }
 
 func lazyInit() {
@@ -427,6 +433,7 @@ func gc() (freeBytes uintptr) {
 	// Sweep phase: free all non-marked objects and unmark marked objects for
 	// the next collection cycle.
 	freeBytes = sweep()
+	gcNumGC++
 
 	return
 }
@@ -593,16 +600,21 @@ func sweep() (freeBytes uintptr) {
 // growHeap tries to grow the heap size. It returns true if it succeeds, false
 // otherwise.
 func growHeap() bool {
-	// On baremetal, there is no way the heap can be grown.
-	return false
-}
+	oldHeapEnd := heapEnd
+	oldMetadataStart := metadataStart
+	oldMetadataSize := oldHeapEnd - uintptr(oldMetadataStart)
+	newHeapEnd := gcGrowMemory(oldHeapEnd)
+	if newHeapEnd <= oldHeapEnd {
+		return false
+	}
 
-//llgo:nounwind
-func gcMarkReachable() {
-	markRoots(uintptr(getsp()), stackTop)
-	markRoots(globalsStart, globalsEnd)
-}
-
-func gcResumeWorld() {
-	// Nothing to do here (single threaded).
+	heapEnd = newHeapEnd
+	configureHeap()
+	newMetadataSize := heapEnd - uintptr(metadataStart)
+	if newMetadataSize < oldMetadataSize {
+		gcPanic(c.Str("gc: metadata shrank while growing heap"))
+	}
+	c.Memmove(metadataStart, oldMetadataStart, oldMetadataSize)
+	c.Memset(unsafe.Add(metadataStart, oldMetadataSize), 0, newMetadataSize-oldMetadataSize)
+	return true
 }

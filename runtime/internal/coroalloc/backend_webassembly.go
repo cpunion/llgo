@@ -1,4 +1,4 @@
-//go:build !nogc && !baremetal && (wasm || tinygo.wasm)
+//go:build !nogc && !baremetal && (wasm || tinygo.wasm) && !llgo_wasm_gc
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -24,9 +24,10 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-// tinygo.wasm is the common target tag carried by wasm, wasip1, wasip2, and
-// wasm-unknown configurations. Keep the built-in wasm alternative so direct
-// GOARCH=wasm package builds select the same backend.
+// Direct GOARCH=wasm package tests and WebAssembly profiles without the
+// compiler-owned llgo_wasm_gc capability keep the libc backend. Production
+// named targets currently pair this path with nogc; the !nogc form remains
+// useful to compile the runtime package with the host Go toolchain.
 const backendKind = "malloc"
 
 func backendBootstrap() bool {

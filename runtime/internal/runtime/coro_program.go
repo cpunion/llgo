@@ -107,8 +107,9 @@ const (
 // the process entry coroutine. Keeping G and P in static storage avoids a
 // pthread, TLS, or event-library dependency for scheduler state. LLVM frames
 // use the explicitly bootstrapped, statically selected coroalloc backend:
-// native GC builds use BDWGC uncollectable ranges, nogc/wasm profiles use C
-// malloc/free, and bare-metal builds use tinygogc.
+// native GC builds use BDWGC uncollectable ranges, leaking WebAssembly profiles
+// use C malloc/free, and bare-metal plus the opt-in serialized WebAssembly GC
+// profile use tinygogc.
 //
 // The entry path is intentionally single-use. No failure path resets this
 // object: exported ABI failures terminate the process, and successful startup

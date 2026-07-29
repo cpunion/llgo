@@ -159,8 +159,8 @@ func coroFaultBoundsPayloadV2(
 // The boundsError object must outlive the active LLVM frame: a child fault is
 // copied as an interface pair into its parent's CompletionRecord after the
 // child frame is destroyed. AllocZ provides GC-visible storage on native,
-// tinygogc storage on bare metal, and the configured malloc storage on
-// wasm/nogc targets.
+// tinygogc storage on bare metal or the opt-in WebAssembly GC profile, and
+// configured malloc storage on leaking WebAssembly targets.
 func coroFaultPayloadV2(kind uint32, arg0 uint64, arg1 uintptr) (typeWord, dataWord unsafe.Pointer) {
 	if kind == coroFaultSliceConvertV1 {
 		return coroFaultBoundsPayloadV2(arg0, arg1, true, boundsConvert)

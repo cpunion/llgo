@@ -1,0 +1,4 @@
+{
+	"inherits": ["wasip1"],
+	"gc": "conservative"
+}

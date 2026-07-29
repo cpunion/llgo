@@ -267,6 +267,14 @@ jobs:
           wasmtime run --dir=/tmp "$output"
           test ! -e /tmp/llgo-coro-wasi-command-reactor
 
+          gc_output=/tmp/llgo-wasi-frame-gc.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-wasi-command build -p=1 -target=wasip1-gc -o "$gc_output" \
+            ./internal/build/_testgo/coro_wasi_frame_gc
+          test "$(od -An -t x1 -N4 "$gc_output" | tr -d ' \n')" = '0061736d'
+          ! llvm-nm --defined-only --format=just-symbols "$gc_output" | grep -E '^GC_'
+          wasmtime run "$gc_output"
+
       - name: Upload failed WebAssembly coroutine probes
         if: failure() && (matrix.lane == 'target-wasm' || matrix.lane == 'target-js-wasm' || matrix.lane == 'target-wasi-command')
         uses: actions/upload-artifact@v7
@@ -278,6 +286,7 @@ jobs:
             /tmp/llgo-*-stdlib-tcp.wasm
             /tmp/llgo-js-wasm-time.wasm
             /tmp/llgo-wasi-command-reactor.wasm
+            /tmp/llgo-wasi-frame-gc.wasm
           if-no-files-found: error
           retention-days: 1
           compression-level: 0

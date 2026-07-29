@@ -24,7 +24,7 @@ import (
 	"testing"
 )
 
-func TestWebAssemblyTargetsSelectMallocBackend(t *testing.T) {
+func TestWebAssemblyTargetsSelectExplicitCollectorBackend(t *testing.T) {
 	targets := []struct {
 		name   string
 		goos   string
@@ -60,7 +60,7 @@ func TestWebAssemblyTargetsSelectMallocBackend(t *testing.T) {
 				t.Fatalf("decode go list output: %v\n%s", err, output)
 			}
 			if !slices.Contains(pkg.GoFiles, "backend_webassembly.go") {
-				t.Fatalf("GoFiles = %v, want backend_webassembly.go", pkg.GoFiles)
+				t.Fatalf("GoFiles = %v, want backend_webassembly.go without the compiler GC capability", pkg.GoFiles)
 			}
 			if slices.Contains(pkg.GoFiles, "backend_gc.go") {
 				t.Fatalf("GoFiles = %v, unexpectedly selected BDWGC backend", pkg.GoFiles)
@@ -70,6 +70,42 @@ func TestWebAssemblyTargetsSelectMallocBackend(t *testing.T) {
 			}
 			if slices.Contains(pkg.TestGoFiles, "backend_gc_test.go") {
 				t.Fatalf("TestGoFiles = %v, unexpectedly selected BDWGC backend test", pkg.TestGoFiles)
+			}
+			if slices.Contains(pkg.Imports, "github.com/goplus/llgo/runtime/internal/clite/bdwgc") {
+				t.Fatalf("Imports = %v, unexpectedly retained BDWGC", pkg.Imports)
+			}
+		})
+	}
+
+	for _, target := range targets {
+		t.Run(target.name+"-gc", func(t *testing.T) {
+			t.Parallel()
+
+			cmd := exec.Command("go", "list", "-json", "-tags="+target.tags+",llgo_wasm_gc", ".")
+			cmd.Env = append(os.Environ(),
+				"GOOS="+target.goos,
+				"GOARCH="+target.goarch,
+				"CGO_ENABLED=0",
+			)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("go list target GC package: %v\n%s", err, output)
+			}
+
+			var pkg struct {
+				GoFiles []string
+				Imports []string
+			}
+			if err := json.Unmarshal(output, &pkg); err != nil {
+				t.Fatalf("decode go list output: %v\n%s", err, output)
+			}
+			if !slices.Contains(pkg.GoFiles, "backend_tinygogc.go") ||
+				slices.Contains(pkg.GoFiles, "backend_webassembly.go") ||
+				slices.Contains(pkg.GoFiles, "backend_gc.go") {
+				t.Fatalf("GoFiles = %v, want only the tinygogc WebAssembly backend", pkg.GoFiles)
+			}
+			if !slices.Contains(pkg.Imports, "github.com/goplus/llgo/runtime/internal/runtime/tinygogc") {
+				t.Fatalf("Imports = %v, want tinygogc", pkg.Imports)
 			}
 			if slices.Contains(pkg.Imports, "github.com/goplus/llgo/runtime/internal/clite/bdwgc") {
 				t.Fatalf("Imports = %v, unexpectedly retained BDWGC", pkg.Imports)

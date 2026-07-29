@@ -89,6 +89,89 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 	}
 }
 
+func TestConservativeWebAssemblyProfileSelectsTinyGoGC(t *testing.T) {
+	moduleRoot, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(
+		"go", "list", "-deps", "-json",
+		"-tags=llgo,llgo_coro,tinygo.wasm,llgo_wasm_gc",
+		"./internal/runtime", "./internal/lib/runtime", "./internal/coroalloc",
+		"./internal/clite/pthread",
+	)
+	cmd.Dir = moduleRoot
+	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list conservative WebAssembly packages: %v", err)
+	}
+	type packageFiles struct {
+		GoFiles []string
+		Imports []string
+	}
+	packages := make(map[string]packageFiles)
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	for {
+		var pkg struct {
+			ImportPath string
+			GoFiles    []string
+			Imports    []string
+		}
+		if err := decoder.Decode(&pkg); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatalf("decode go list stream: %v", err)
+		}
+		if pkg.ImportPath == "github.com/goplus/llgo/runtime/internal/clite/bdwgc" {
+			t.Fatal("conservative WebAssembly dependency graph retained BDWGC")
+		}
+		packages[pkg.ImportPath] = packageFiles{GoFiles: pkg.GoFiles, Imports: pkg.Imports}
+	}
+	assertFiles := func(path string, required, forbidden []string) {
+		t.Helper()
+		pkg, ok := packages[path]
+		if !ok {
+			t.Fatalf("go list stream is missing %s", path)
+		}
+		for _, file := range required {
+			if !slices.Contains(pkg.GoFiles, file) {
+				t.Fatalf("%s GoFiles = %v, want %s", path, pkg.GoFiles, file)
+			}
+		}
+		for _, file := range forbidden {
+			if slices.Contains(pkg.GoFiles, file) {
+				t.Fatalf("%s GoFiles = %v, unexpectedly selected %s", path, pkg.GoFiles, file)
+			}
+		}
+	}
+	assertFiles(
+		"github.com/goplus/llgo/runtime/internal/runtime",
+		[]string{"z_gc_tinygogc.go", "z_defer_tinygogc.go"},
+		[]string{"z_gc.go", "z_nogc.go", "z_defer_gc.go"},
+	)
+	assertFiles(
+		"github.com/goplus/llgo/runtime/internal/lib/runtime",
+		[]string{"runtime_gc_tinygogc.go", "mfinal_nogc.go"},
+		[]string{"runtime_gc.go", "runtime_nogc.go", "mfinal.go"},
+	)
+	assertFiles(
+		"github.com/goplus/llgo/runtime/internal/coroalloc",
+		[]string{"backend_tinygogc.go"},
+		[]string{"backend_webassembly.go", "backend_gc.go", "backend_nogc.go"},
+	)
+	assertFiles(
+		"github.com/goplus/llgo/runtime/internal/runtime/tinygogc",
+		[]string{"gc.go", "gc_tinygo.go", "gc_wasm.go"},
+		nil,
+	)
+	assertFiles(
+		"github.com/goplus/llgo/runtime/internal/clite/pthread",
+		[]string{"pthread_nogc.go"},
+		[]string{"pthread_gc.go"},
+	)
+}
+
 func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testing.T) {
 	targets := []struct {
 		name   string
