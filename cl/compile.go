@@ -183,11 +183,7 @@ type context struct {
 	debugDIVars          map[*types.Var]llssa.DIVar
 	debugAllocVars       map[*ssa.Alloc]*types.Var
 	stackClears          map[ssa.Instruction][]*ssa.Alloc
-	entryClears          map[*ssa.BasicBlock][]*ssa.Alloc
-	loadClears           map[ssa.Instruction]bool
-	callClobbers         map[ssa.Instruction]bool
-	paramClobbers        map[ssa.Instruction]bool
-	paramScans           map[ssa.Instruction][]*ssa.Parameter
+	finalizerPkgUses     map[*ssa.Package]bool
 	runtimeCallerFuncs   map[*ssa.Function]bool
 	logicalCallerFuncs   map[*ssa.Function]bool
 	compilation          *Compilation
@@ -807,18 +803,8 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			}
 			if p.enableConservativeLivenessClears(f) {
 				p.stackClears = p.collectStackClearPlans(f)
-				p.entryClears = p.collectEntryClearPlans(f)
-				p.loadClears = make(map[ssa.Instruction]bool)
-				p.callClobbers = p.collectCallClobberPlans(f)
-				p.paramClobbers = p.collectParamClobberPlans(f)
-				p.paramScans = p.collectParamScanPlans(f)
 			} else {
 				p.stackClears = nil
-				p.entryClears = nil
-				p.loadClears = nil
-				p.callClobbers = nil
-				p.paramClobbers = nil
-				p.paramScans = nil
 			}
 			if physicalABI != nil {
 				p.compileCoroPhysicalBody(b, f, *physicalABI, isInit)
@@ -1064,7 +1050,6 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	if block.Index == 0 {
 		p.emitFunctionPreambleWithCoroPlan(b, block.Parent(), doModInit)
 	}
-	p.clearEntryAllocs(b, block)
 	if block.Index == 0 && enableCallTracing && !strings.HasPrefix(fn.Name(), "github.com/goplus/llgo/runtime/internal/runtime.Print") {
 		b.Printf("call " + fn.Name() + "\n\x00")
 	}
@@ -1106,9 +1091,6 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 				fnOld := pkg.NewFunc(initFnNameOld, llssa.NoArgsNoRet, llssa.InC)
 				b.Call(fnOld.Expr)
 			}
-		}
-		if !(isCgoCfunc || isCgoC2 || isCgoCmacro) && p.shouldSkipLateSetFinalizerValue(instr) {
-			continue
 		}
 		if isCgoCfunc || isCgoC2 || isCgoCmacro {
 			switch instr := instr.(type) {
@@ -1179,13 +1161,6 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 			continue
 		}
 		p.clearDeadAllocs(b, instr)
-		if p.callClobbers[instr] {
-			p.clobberPointerRegs(b)
-		}
-		p.scanParamPointers(b, instr)
-		if p.paramClobbers[instr] {
-			p.clobberPointerRegs(b)
-		}
 	}
 	// is cgo cfunc but not return yet, some funcs has multiple blocks
 	if (isCgoCfunc || isCgoC2 || isCgoCmacro) && !cgoReturned {
@@ -1433,24 +1408,80 @@ func isAllocVargs(ctx *context, v *ssa.Alloc) bool {
 }
 
 func (p *context) enableConservativeLivenessClears(fn *ssa.Function) bool {
-	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
+	if fn == nil || isCgoExternSymbol(fn) {
 		return false
 	}
-	path := fn.Pkg.Pkg.Path()
-	if path == "command-line-arguments" {
-		return p.packageUsesRuntimeSetFinalizer(fn.Pkg)
+	pkg := declaredSSAPackage(fn)
+	if pkg == nil {
+		return false
 	}
-	return false
+	return p.packageUsesRuntimeSetFinalizer(pkg)
 }
 
 func (p *context) packageUsesRuntimeSetFinalizer(pkg *ssa.Package) bool {
+	if pkg == nil {
+		return false
+	}
+	if uses, ok := p.finalizerPkgUses[pkg]; ok {
+		return uses
+	}
+	if p.finalizerPkgUses == nil {
+		p.finalizerPkgUses = make(map[*ssa.Package]bool)
+	}
+	uses := false
+	seen := make(map[*ssa.Function]bool)
+	check := func(fn *ssa.Function) bool {
+		return p.functionUsesRuntimeSetFinalizer(fn, seen)
+	}
 	for _, member := range pkg.Members {
-		fn, ok := member.(*ssa.Function)
-		if ok && p.functionUsesRuntimeSetFinalizer(fn, map[*ssa.Function]bool{}) {
-			return true
+		if fn, ok := member.(*ssa.Function); ok && check(fn) {
+			uses = true
+			break
 		}
 	}
-	return false
+	if !uses && pkg.Prog != nil {
+		for _, member := range pkg.Members {
+			typ, ok := member.(*ssa.Type)
+			if !ok {
+				continue
+			}
+			for _, recv := range []types.Type{typ.Type(), types.NewPointer(typ.Type())} {
+				methods := pkg.Prog.MethodSets.MethodSet(recv)
+				for i := 0; i < methods.Len(); i++ {
+					obj, ok := methods.At(i).Obj().(*types.Func)
+					if !ok {
+						continue
+					}
+					if check(pkg.Prog.FuncValue(obj.Origin())) {
+						uses = true
+						break
+					}
+				}
+				if uses {
+					break
+				}
+			}
+			if uses {
+				break
+			}
+		}
+	}
+	p.finalizerPkgUses[pkg] = uses
+	return uses
+}
+
+func declaredSSAPackage(fn *ssa.Function) *ssa.Package {
+	for fn != nil {
+		if fn.Pkg != nil {
+			return fn.Pkg
+		}
+		if origin := fn.Origin(); origin != nil && origin != fn {
+			fn = origin
+			continue
+		}
+		fn = fn.Parent()
+	}
+	return nil
 }
 
 func (p *context) functionUsesRuntimeSetFinalizer(fn *ssa.Function, seen map[*ssa.Function]bool) bool {
@@ -1511,7 +1542,7 @@ func hasConservativeGCPointers(t types.Type, seen map[types.Type]bool) bool {
 }
 
 func (p *context) shouldClearAlloc(v *ssa.Alloc) bool {
-	if v == nil || v.Comment == "varargs" || v.Comment == "makeslice" {
+	if v == nil || v.Heap || v.Comment == "varargs" || v.Comment == "makeslice" {
 		return false
 	}
 	ptr, ok := v.Type().Underlying().(*types.Pointer)
@@ -1537,11 +1568,16 @@ func blockCanReach(from, to *ssa.BasicBlock, seen map[*ssa.BasicBlock]bool) bool
 	return false
 }
 
-func refBlock(ref ssa.Instruction) *ssa.BasicBlock {
-	if ref == nil {
-		return nil
+func blockIsCyclic(block *ssa.BasicBlock) bool {
+	if block == nil {
+		return false
 	}
-	return ref.Block()
+	for _, succ := range block.Succs {
+		if blockCanReach(succ, block, map[*ssa.BasicBlock]bool{}) {
+			return true
+		}
+	}
+	return false
 }
 
 func instructionUsesValue(instr ssa.Instruction, v ssa.Value) bool {
@@ -1552,14 +1588,6 @@ func instructionUsesValue(instr ssa.Instruction, v ssa.Value) bool {
 		if operand != nil && *operand == v {
 			return true
 		}
-	}
-	return false
-}
-
-func isCallLikeInstruction(instr ssa.Instruction) bool {
-	switch instr.(type) {
-	case *ssa.Call, *ssa.Defer, *ssa.Go:
-		return true
 	}
 	return false
 }
@@ -1580,123 +1608,15 @@ func (p *context) isRuntimeSetFinalizerCall(call *ssa.CallCommon) bool {
 	if !ok || fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
 		return false
 	}
-	return fn.Name() == "SetFinalizer" &&
-		fn.Pkg.Pkg.Path() == "github.com/goplus/llgo/runtime/internal/lib/runtime"
-}
-
-func (p *context) isOnlyRuntimeSetFinalizerArg(v ssa.Value) bool {
-	refs := v.Referrers()
-	if refs == nil || len(*refs) != 1 {
+	if fn.Name() != "SetFinalizer" {
 		return false
 	}
-	call, ok := (*refs)[0].(*ssa.Call)
-	return ok && p.isRuntimeSetFinalizerCall(&call.Call)
-}
-
-func (p *context) shouldSkipLateSetFinalizerValue(instr ssa.Instruction) bool {
-	switch instr := instr.(type) {
-	case *ssa.MakeInterface:
-		return p.isOnlyRuntimeSetFinalizerArg(instr)
-	case *ssa.UnOp:
-		if instr.Op != token.MUL {
-			return false
-		}
-		refs := instr.Referrers()
-		if refs == nil || len(*refs) != 1 {
-			return false
-		}
-		mi, ok := (*refs)[0].(*ssa.MakeInterface)
-		return ok && p.isOnlyRuntimeSetFinalizerArg(mi)
-	}
-	return false
-}
-
-func (p *context) collectValueUseBlocks(v ssa.Value, blocks map[*ssa.BasicBlock]bool, seen map[ssa.Value]bool, followPhi bool) bool {
-	if v == nil || seen[v] {
+	switch fn.Pkg.Pkg.Path() {
+	case "runtime", "github.com/goplus/llgo/runtime/internal/lib/runtime":
 		return true
+	default:
+		return false
 	}
-	seen[v] = true
-	refs := v.Referrers()
-	if refs == nil {
-		return true
-	}
-	for _, ref := range *refs {
-		switch ref := ref.(type) {
-		case *ssa.DebugRef:
-			continue
-		case *ssa.FieldAddr, *ssa.IndexAddr, *ssa.ChangeType, *ssa.Convert, *ssa.MakeInterface:
-			refVal, ok := ref.(ssa.Value)
-			if !ok {
-				return false
-			}
-			if !p.collectValueUseBlocks(refVal, blocks, seen, followPhi) {
-				return false
-			}
-		case *ssa.UnOp:
-			if ref.Op != token.MUL || ref.X != v {
-				blk := refBlock(ref)
-				if blk == nil {
-					return false
-				}
-				blocks[blk] = true
-				continue
-			}
-			blk := refBlock(ref)
-			if blk == nil {
-				return false
-			}
-			blocks[blk] = true
-			if !p.collectValueUseBlocks(ref, blocks, seen, followPhi) {
-				return false
-			}
-		case *ssa.Phi:
-			if followPhi {
-				if !p.collectValueUseBlocks(ref, blocks, seen, followPhi) {
-					return false
-				}
-				continue
-			}
-			for i, edge := range ref.Edges {
-				if edge == v && i < len(ref.Block().Preds) {
-					blocks[ref.Block().Preds[i]] = true
-				}
-			}
-		default:
-			instr, ok := ref.(ssa.Instruction)
-			if !ok || !instructionUsesValue(instr, v) {
-				return false
-			}
-			blk := refBlock(instr)
-			if blk == nil {
-				return false
-			}
-			blocks[blk] = true
-		}
-	}
-	return true
-}
-
-func (p *context) valueLastUseBlock(v ssa.Value) (*ssa.BasicBlock, bool) {
-	blocks := make(map[*ssa.BasicBlock]bool)
-	if !p.collectValueUseBlocks(v, blocks, map[ssa.Value]bool{}, true) {
-		return nil, false
-	}
-	if len(blocks) == 0 {
-		return nil, true
-	}
-	for candidate := range blocks {
-		ok := true
-		for blk := range blocks {
-			if blk != candidate && !blockCanReach(blk, candidate, map[*ssa.BasicBlock]bool{}) {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			return candidate, true
-		}
-	}
-	return nil, false
 }
 
 func (p *context) lastUseInBlock(v ssa.Value, blk *ssa.BasicBlock, order map[ssa.Instruction]int, seen map[ssa.Value]bool) (ssa.Instruction, bool) {
@@ -1717,73 +1637,31 @@ func (p *context) lastUseInBlock(v ssa.Value, blk *ssa.BasicBlock, order map[ssa
 			last = instr
 		}
 	}
-	refBeforeBlock := func(refBlk *ssa.BasicBlock) bool {
-		return refBlk != nil && blk != nil && refBlk != blk && blockCanReach(refBlk, blk, map[*ssa.BasicBlock]bool{})
-	}
 	for _, ref := range *refs {
 		switch ref := ref.(type) {
 		case *ssa.DebugRef:
 			continue
-		case *ssa.FieldAddr, *ssa.IndexAddr, *ssa.ChangeType, *ssa.Convert, *ssa.MakeInterface:
-			refVal := ref.(ssa.Value)
-			refInstr := ref.(ssa.Instruction)
-			if refInstr.Block() != blk {
-				if refBeforeBlock(refInstr.Block()) {
-					continue
-				}
-				return nil, false
-			}
-			use, ok := p.lastUseInBlock(refVal, blk, order, seen)
-			if !ok {
-				return nil, false
-			}
-			updateLast(use)
-		case *ssa.UnOp:
-			if ref.Op != token.MUL || ref.X != v {
-				if ref.Block() != blk {
-					if refBeforeBlock(ref.Block()) {
-						continue
-					}
-					return nil, false
-				}
-				updateLast(ref)
-				continue
-			}
-			if ref.Block() != blk {
-				if refBeforeBlock(ref.Block()) {
-					continue
-				}
-				return nil, false
-			}
-			use, ok := p.lastUseInBlock(ref, blk, order, seen)
-			if !ok {
-				return nil, false
-			}
-			if use != nil {
-				if isCallLikeInstruction(use) {
-					updateLast(ref)
-					continue
-				}
-				updateLast(use)
-			} else {
-				updateLast(ref)
-			}
+		case *ssa.Defer, *ssa.Go, *ssa.MakeClosure:
+			return nil, false
 		case *ssa.Phi:
-			use, ok := p.lastUseInBlock(ref, blk, order, seen)
-			if !ok {
-				return nil, false
-			}
-			updateLast(use)
+			return nil, false
 		default:
 			instr, ok := ref.(ssa.Instruction)
 			if !ok || !instructionUsesValue(instr, v) {
 				return nil, false
 			}
 			if instr.Block() != blk {
-				if refBeforeBlock(instr.Block()) {
+				return nil, false
+			}
+			if refVal, ok := ref.(ssa.Value); ok {
+				use, ok := p.lastUseInBlock(refVal, blk, order, seen)
+				if !ok {
+					return nil, false
+				}
+				if use != nil {
+					updateLast(use)
 					continue
 				}
-				return nil, false
 			}
 			updateLast(instr)
 		}
@@ -1799,11 +1677,12 @@ func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][
 			if !ok || !p.shouldClearAlloc(alloc) {
 				continue
 			}
-			useBlk, ok := p.valueLastUseBlock(alloc)
-			if !ok || useBlk == nil {
-				continue
-			}
-			if useBlk != alloc.Block() && alloc.Block().Index != 0 {
+			// Deliberately limit clearing to exact, non-escaping slots whose
+			// complete use graph stays in one acyclic basic block. This can
+			// retain stale roots, but it cannot guess across control-flow,
+			// closure, defer, goroutine, or heap-escape boundaries.
+			useBlk := alloc.Block()
+			if useBlk == nil || blockIsCyclic(useBlk) {
 				continue
 			}
 			order := make(map[ssa.Instruction]int, len(useBlk.Instrs))
@@ -1811,7 +1690,7 @@ func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][
 				order[useInstr] = i
 			}
 			last, ok := p.lastUseInBlock(alloc, useBlk, order, map[ssa.Value]bool{})
-			if ok && last != nil {
+			if ok && last != nil && !isTerminatingInstruction(last) {
 				plans[last] = append(plans[last], alloc)
 			}
 		}
@@ -1819,198 +1698,13 @@ func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][
 	return plans
 }
 
-func (p *context) collectEntryClearPlans(fn *ssa.Function) map[*ssa.BasicBlock][]*ssa.Alloc {
-	plans := make(map[*ssa.BasicBlock][]*ssa.Alloc)
-	for _, blk := range fn.Blocks {
-		if blk == nil || len(blk.Succs) < 2 {
-			continue
-		}
-		for _, instr := range blk.Instrs {
-			alloc, ok := instr.(*ssa.Alloc)
-			if !ok || !p.shouldClearAlloc(alloc) {
-				continue
-			}
-			useBlocks := make(map[*ssa.BasicBlock]bool)
-			if !p.collectValueUseBlocks(alloc, useBlocks, map[ssa.Value]bool{}, false) {
-				continue
-			}
-			liveSucc := make(map[*ssa.BasicBlock]bool, len(blk.Succs))
-			for _, succ := range blk.Succs {
-				for useBlk := range useBlocks {
-					if useBlk == nil {
-						continue
-					}
-					if succ == useBlk || blockCanReach(succ, useBlk, map[*ssa.BasicBlock]bool{}) {
-						liveSucc[succ] = true
-						break
-					}
-				}
-			}
-			if len(liveSucc) == 0 || len(liveSucc) == len(blk.Succs) {
-				continue
-			}
-			for _, succ := range blk.Succs {
-				if !liveSucc[succ] && len(succ.Preds) == 1 {
-					plans[succ] = append(plans[succ], alloc)
-				}
-			}
-		}
-	}
-	return plans
-}
-
-func (p *context) collectParamClobberPlans(fn *ssa.Function) map[ssa.Instruction]bool {
-	plans := make(map[ssa.Instruction]bool)
-	for _, param := range fn.Params {
-		if !hasConservativeGCPointers(param.Type(), map[types.Type]bool{}) {
-			continue
-		}
-		useBlk, ok := p.valueLastUseBlock(param)
-		if !ok || useBlk == nil {
-			continue
-		}
-		order := make(map[ssa.Instruction]int, len(useBlk.Instrs))
-		for i, useInstr := range useBlk.Instrs {
-			order[useInstr] = i
-		}
-		last, ok := p.lastUseInBlock(param, useBlk, order, map[ssa.Value]bool{})
-		if ok && last != nil {
-			plans[last] = true
-		}
-	}
-	return plans
-}
-
-func (p *context) collectParamScanPlans(fn *ssa.Function) map[ssa.Instruction][]*ssa.Parameter {
-	plans := make(map[ssa.Instruction][]*ssa.Parameter)
-	for _, param := range fn.Params {
-		if !hasConservativeGCPointers(param.Type(), map[types.Type]bool{}) {
-			continue
-		}
-		useBlk, ok := p.valueLastUseBlock(param)
-		if !ok || useBlk == nil {
-			continue
-		}
-		order := make(map[ssa.Instruction]int, len(useBlk.Instrs))
-		for i, useInstr := range useBlk.Instrs {
-			order[useInstr] = i
-		}
-		last, ok := p.lastUseInBlock(param, useBlk, order, map[ssa.Value]bool{})
-		if ok && last != nil {
-			plans[last] = append(plans[last], param)
-		}
-	}
-	return plans
-}
-
-func (p *context) collectCallClobberPlans(fn *ssa.Function) map[ssa.Instruction]bool {
-	plans := make(map[ssa.Instruction]bool)
-	for _, blk := range fn.Blocks {
-		for _, instr := range blk.Instrs {
-			call, ok := instr.(*ssa.Call)
-			if !ok {
-				continue
-			}
-			for _, arg := range call.Common().Args {
-				if hasConservativeGCPointers(arg.Type(), map[types.Type]bool{}) {
-					plans[instr] = true
-					break
-				}
-			}
-		}
-	}
-	return plans
-}
-
-func (p *context) compileLateValue(b llssa.Builder, v ssa.Value) llssa.Expr {
-	switch v := v.(type) {
-	case *ssa.MakeInterface:
-		t := p.type_(v.Type(), llssa.InGo)
-		x := p.compileLateValue(b, v.X)
-		return b.MakeInterface(t, x)
-	case *ssa.UnOp:
-		if v.Op != token.MUL {
-			return p.compileValue(b, v)
-		}
-		x := p.compileLateValue(b, v.X)
-		return b.UnOp(v.Op, x)
-	case *ssa.FieldAddr:
-		x := p.compileLateValue(b, v.X)
-		return b.FieldAddr(x, v.Field)
-	case *ssa.IndexAddr:
-		x := p.compileLateValue(b, v.X)
-		idx := p.compileLateValue(b, v.Index)
-		return b.IndexAddr(x, idx)
-	case *ssa.ChangeType:
-		t := p.type_(v.Type(), llssa.InGo)
-		x := p.compileLateValue(b, v.X)
-		return b.ChangeType(t, x)
-	case *ssa.Convert:
-		t := p.type_(v.Type(), llssa.InGo)
-		x := p.compileLateValue(b, v.X)
-		return b.Convert(t, x)
-	}
-	return p.compileValue(b, v)
-}
-
-func (p *context) scanStackPointer(b llssa.Builder, val llssa.Expr) {
-	b.Pkg.NeedRuntime = true
-	t := p.type_(types.Typ[types.Uintptr], llssa.InGo)
-	if !types.Identical(val.RawType(), t.RawType()) {
-		val = b.Convert(t, val)
-	}
-	fn := b.Pkg.NewFunc("llgo_clear_stack_ptr",
-		types.NewSignatureType(nil, nil, nil, types.NewTuple(types.NewParam(token.NoPos, nil, "target", types.Typ[types.Uintptr])), nil, false), llssa.InC)
-	b.Call(fn.Expr, val)
-}
-
-func (p *context) scanPointerExpr(b llssa.Builder, val llssa.Expr) {
-	switch t := types.Unalias(val.RawType()).Underlying().(type) {
-	case *types.Pointer:
-		p.scanStackPointer(b, val)
-	case *types.Struct:
-		if t.NumFields() == 1 {
-			if _, ok := types.Unalias(t.Field(0).Type()).Underlying().(*types.Pointer); ok {
-				p.scanStackPointer(b, b.Field(val, 0))
-			}
-		}
-	}
-}
-
-func (p *context) scanAllocPointer(b llssa.Builder, ptr llssa.Expr) {
-	elem := b.Prog.Elem(ptr.Type)
-	switch t := types.Unalias(elem.RawType()).Underlying().(type) {
-	case *types.Pointer:
-		p.scanStackPointer(b, b.Load(ptr))
-	case *types.Struct:
-		if t.NumFields() == 1 {
-			if _, ok := types.Unalias(t.Field(0).Type()).Underlying().(*types.Pointer); ok {
-				p.scanStackPointer(b, b.Load(b.FieldAddr(ptr, 0)))
-			}
-		}
-	}
-}
-
-func (p *context) scanParamPointers(b llssa.Builder, instr ssa.Instruction) {
-	params := p.paramScans[instr]
-	for _, param := range params {
-		p.scanPointerExpr(b, p.compileValue(b, param))
-	}
-}
-
 func (p *context) clearAlloc(b llssa.Builder, alloc *ssa.Alloc) {
 	ptr := p.compileValue(b, alloc)
-	b.IfThen(b.BinOp(token.NEQ, ptr, p.prog.Zero(ptr.Type)), func() {
-		p.scanAllocPointer(b, ptr)
-		elem := b.Prog.Elem(ptr.Type)
-		b.Store(ptr, p.prog.Zero(elem))
-	})
+	elem := b.Prog.Elem(ptr.Type)
+	b.StoreVolatile(ptr, p.prog.Zero(elem))
 }
 
 func (p *context) clearDeadAllocs(b llssa.Builder, instr ssa.Instruction) {
-	if p.loadClears[instr] {
-		return
-	}
 	allocs := p.stackClears[instr]
 	if len(allocs) == 0 {
 		return
@@ -2018,35 +1712,6 @@ func (p *context) clearDeadAllocs(b llssa.Builder, instr ssa.Instruction) {
 	for _, alloc := range allocs {
 		p.clearAlloc(b, alloc)
 	}
-	if unop, ok := instr.(*ssa.UnOp); ok && unop.Op == token.MUL {
-		return
-	}
-	p.clobberPointerRegs(b)
-}
-
-func (p *context) clearEntryAllocs(b llssa.Builder, block *ssa.BasicBlock) {
-	allocs := p.entryClears[block]
-	if len(allocs) == 0 {
-		return
-	}
-	for _, alloc := range allocs {
-		p.clearAlloc(b, alloc)
-	}
-	p.clobberPointerRegs(b)
-}
-
-func (p *context) clobberPointerRegs(b llssa.Builder) {
-	b.Pkg.NeedRuntime = true
-	uintptrParam := func(name string) *types.Var {
-		return types.NewParam(token.NoPos, nil, name, types.Typ[types.Uintptr])
-	}
-	fn := b.Pkg.NewFunc("llgo_clobber_pointer_regs",
-		types.NewSignatureType(nil, nil, nil, types.NewTuple(
-			uintptrParam("a0"), uintptrParam("a1"), uintptrParam("a2"), uintptrParam("a3"),
-			uintptrParam("a4"), uintptrParam("a5"), uintptrParam("a6"), uintptrParam("a7"),
-		), nil, false), llssa.InC)
-	zero := b.Prog.IntVal(0, b.Prog.Uintptr())
-	b.Call(fn.Expr, zero, zero, zero, zero, zero, zero, zero, zero)
 }
 
 func isPhi(i ssa.Instruction) bool {
@@ -2330,14 +1995,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					fnSig := p.syscallFnSig(0)
 					cfn := b.Pkg.NewFunc(cname, fnSig, llssa.InC)
 					ret = b.Convert(p.type_(types.Typ[types.Uintptr], llssa.InGo), cfn.Expr)
-					p.bvals[iv] = ret
-					return ret
-				}
-			}
-			if len(p.stackClears[v]) > 0 {
-				x := p.compileValue(b, v.X)
-				if ret, ok := b.LoadAndClearSinglePointer(x); ok {
-					p.loadClears[v] = true
 					p.bvals[iv] = ret
 					return ret
 				}

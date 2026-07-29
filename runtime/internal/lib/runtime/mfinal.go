@@ -88,14 +88,14 @@ func init() {
 }
 
 func SetFinalizer(obj any, finalizer any) {
-	objFace := *(*eface)(unsafe.Pointer(&obj))
+	objFace := (*eface)(unsafe.Pointer(&obj))
 	if objFace._type == nil {
 		throw("runtime.SetFinalizer: first argument is nil")
 	}
 	if objFace._type.Kind() != abi.Pointer {
 		throw("runtime.SetFinalizer: first argument is " + objFace._type.String() + ", not pointer")
 	}
-	objPtr := ifacePointerData(&objFace)
+	objPtr := ifacePointerData(objFace)
 	if objPtr == nil {
 		throw("runtime.SetFinalizer: first argument is nil")
 	}
