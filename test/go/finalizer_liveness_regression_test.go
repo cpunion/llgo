@@ -38,9 +38,7 @@ type Box struct {
 
 type HeapObject [8]int64
 
-type StackSlot struct {
-	p *HeapObject
-}
+type StackSlots [8]*HeapObject
 
 var (
 	savedClosure func()
@@ -155,11 +153,14 @@ func evalOrderCase() {
 	runtime.KeepAlive(p)
 }
 
-func sameBlockFinalizationCase() {
+//go:noinline
+func sameBlockFinalizationCase(writeIndex, readIndex int) {
 	finalized := make(chan struct{}, 1)
-	var slot StackSlot
-	slot.p = new(HeapObject)
-	runtime.SetFinalizer(slot.p, func(*HeapObject) {
+	var slots StackSlots
+	// Keep the dynamic store and load distinct in SSA while the caller supplies
+	// the same index, so this exercises clearing the exact dead stack allocation.
+	slots[writeIndex] = new(HeapObject)
+	runtime.SetFinalizer(slots[readIndex], func(*HeapObject) {
 		finalized <- struct{}{}
 	})
 
@@ -174,6 +175,18 @@ func sameBlockFinalizationCase() {
 		time.Sleep(10 * time.Millisecond)
 	}
 	panic("same-block dead stack slot kept finalizer object alive")
+}
+
+func storedAliasCase() {
+	x := 42
+	var box Box
+	var alias **int
+	box.p = &x
+	aliasSlot := &alias
+	*aliasSlot = &box.p
+	if **aliasSlot == nil || ***aliasSlot != 42 {
+		panic("stack slot was cleared before a stored alias read")
+	}
 }
 
 func main() {
@@ -200,7 +213,10 @@ func main() {
 	case "eval-order":
 		evalOrderCase()
 	case "same-block-finalization":
-		sameBlockFinalizationCase()
+		index := len(os.Args[1]) & (len(StackSlots{}) - 1)
+		sameBlockFinalizationCase(index, index)
+	case "stored-alias":
+		storedAliasCase()
 	default:
 		panic("unknown case")
 	}
@@ -250,6 +266,7 @@ func TestRuntimeSetFinalizerPreservesLiveValues(t *testing.T) {
 		"uintptr",
 		"eval-order",
 		"same-block-finalization",
+		"stored-alias",
 	} {
 		t.Run(caseName, func(t *testing.T) {
 			runFinalizerLivenessProbe(t, hostBin, caseName)

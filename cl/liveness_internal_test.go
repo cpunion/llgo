@@ -278,7 +278,10 @@ func TestConservativeLivenessPlanCollectors(t *testing.T) {
 
 type Box struct{ p *int }
 
-var Sink any
+var (
+	Sink any
+	Held *Box
+)
 
 func linear(p *int) {
 	var first, second Box
@@ -353,6 +356,28 @@ func phiLocal(p *int, cond bool) {
 		box = &right
 	}
 	Sink = box.p
+	Sink = 1
+}
+
+func storedAlias(p *int) {
+	var box Box
+	var alias **int
+	box.p = p
+	aliasSlot := &alias
+	*aliasSlot = &box.p
+	Sink = **aliasSlot
+	Sink = 1
+}
+
+func holdBox(box *Box) {
+	Held = box
+}
+
+func calledAlias(p *int) {
+	var box Box
+	box.p = p
+	holdBox(&box)
+	Sink = Held.p
 	Sink = 1
 }
 `)
@@ -464,6 +489,80 @@ func phiLocal(p *int, cond bool) {
 	if got := ctx.collectStackClearPlans(phiLocal); len(got) != 0 {
 		t.Fatalf("phiLocal should fail closed instead of producing clear plans: %v", got)
 	}
+
+	findStructAlloc := func(fn *ssa.Function) *ssa.Alloc {
+		t.Helper()
+		for _, alloc := range functionAllocs(fn) {
+			ptr, ok := alloc.Type().Underlying().(*types.Pointer)
+			if !ok {
+				continue
+			}
+			if _, ok := ptr.Elem().Underlying().(*types.Struct); ok {
+				return alloc
+			}
+		}
+		var dump strings.Builder
+		fn.WriteTo(&dump)
+		t.Fatalf("%s should contain a struct allocation:\n%s", fn.Name(), dump.String())
+		return nil
+	}
+
+	storedAlias := ssapkg.Func("storedAlias")
+	boxAlloc := findStructAlloc(storedAlias)
+	var storesFieldPointer bool
+	for _, ref := range *boxAlloc.Referrers() {
+		fieldAddr, ok := ref.(*ssa.FieldAddr)
+		if !ok {
+			continue
+		}
+		for _, block := range storedAlias.Blocks {
+			for _, instr := range block.Instrs {
+				if store, ok := instr.(*ssa.Store); ok && store.Val == fieldAddr {
+					storesFieldPointer = true
+				}
+			}
+		}
+	}
+	if !storesFieldPointer {
+		var dump strings.Builder
+		storedAlias.WriteTo(&dump)
+		t.Fatalf("storedAlias should store the address of box.p in another stack slot:\n%s", dump.String())
+	}
+	// Current x/tools marks box as escaping, but do not make safety depend on
+	// that implementation detail: simulate a less conservative escape result.
+	boxAlloc.Heap = false
+	for _, allocs := range ctx.collectStackClearPlans(storedAlias) {
+		for _, alloc := range allocs {
+			if alloc == boxAlloc {
+				t.Fatalf("storedAlias should fail closed for a pointer stored through another stack slot: %v", alloc)
+			}
+		}
+	}
+
+	calledAlias := ssapkg.Func("calledAlias")
+	calledBoxAlloc := findStructAlloc(calledAlias)
+	var callsWithAddress bool
+	for _, ref := range *calledBoxAlloc.Referrers() {
+		call, ok := ref.(*ssa.Call)
+		if ok && instructionUsesValue(call, calledBoxAlloc) {
+			callsWithAddress = true
+		}
+	}
+	if !callsWithAddress {
+		var dump strings.Builder
+		calledAlias.WriteTo(&dump)
+		t.Fatalf("calledAlias should pass the Box address to a call:\n%s", dump.String())
+	}
+	// Likewise, make the call boundary independently fail closed even if a
+	// future SSA builder no longer heap-promotes the explicit address.
+	calledBoxAlloc.Heap = false
+	for _, allocs := range ctx.collectStackClearPlans(calledAlias) {
+		for _, alloc := range allocs {
+			if alloc == calledBoxAlloc {
+				t.Fatalf("calledAlias should fail closed when a call can retain the stack address: %v", alloc)
+			}
+		}
+	}
 }
 
 func TestConservativeLivenessGraphHelpers(t *testing.T) {
@@ -516,6 +615,39 @@ func loop(p *int) {
 	}
 	if !isTerminatingInstruction(fn.Blocks[0].Instrs[len(fn.Blocks[0].Instrs)-1]) {
 		t.Fatal("entry block should end with a terminator")
+	}
+	for name, instr := range map[string]ssa.Instruction{
+		"store":     &ssa.Store{Val: fn.Params[0]},
+		"map-key":   &ssa.MapUpdate{Key: fn.Params[0]},
+		"map-value": &ssa.MapUpdate{Value: fn.Params[0]},
+		"channel":   &ssa.Send{X: fn.Params[0]},
+		"call": &ssa.Call{Call: ssa.CallCommon{
+			Args: []ssa.Value{fn.Params[0]},
+		}},
+		"call-value": &ssa.Call{Call: ssa.CallCommon{
+			Value: fn.Params[0],
+		}},
+		"select": &ssa.Select{States: []*ssa.SelectState{{
+			Dir:  types.SendOnly,
+			Send: fn.Params[0],
+		}}},
+	} {
+		if !instructionRetainsAddress(instr, fn.Params[0]) {
+			t.Errorf("%s should retain an address", name)
+		}
+	}
+	for name, instr := range map[string]ssa.Instruction{
+		"store-address": &ssa.Store{Addr: fn.Params[0]},
+		"map":           &ssa.MapUpdate{Map: fn.Params[0]},
+		"channel":       &ssa.Send{Chan: fn.Params[0]},
+		"select-channel": &ssa.Select{States: []*ssa.SelectState{{
+			Dir:  types.RecvOnly,
+			Chan: fn.Params[0],
+		}}},
+	} {
+		if instructionRetainsAddress(instr, fn.Params[0]) {
+			t.Errorf("%s should not treat its destination as a stored address", name)
+		}
 	}
 
 	ctx := &context{}

@@ -1580,13 +1580,65 @@ func blockIsCyclic(block *ssa.BasicBlock) bool {
 	return false
 }
 
-func instructionUsesValue(instr ssa.Instruction, v ssa.Value) bool {
+type instructionOperandScratch struct {
+	inline   [8]*ssa.Value
+	operands []*ssa.Value
+}
+
+type stackLivenessState struct {
+	value       ssa.Value
+	slotAddress bool
+}
+
+func (s *instructionOperandScratch) uses(instr ssa.Instruction, v ssa.Value) bool {
 	if instr == nil || v == nil {
 		return false
 	}
-	for _, operand := range instr.Operands(nil) {
+	if s.operands == nil {
+		s.operands = s.inline[:0]
+	} else {
+		s.operands = s.operands[:0]
+	}
+	// Referrer lists are mutable in x/tools. Re-scan operands deliberately
+	// so malformed or stale referrers make the liveness proof fail closed.
+	s.operands = instr.Operands(s.operands)
+	for _, operand := range s.operands {
 		if operand != nil && *operand == v {
 			return true
+		}
+	}
+	return false
+}
+
+func instructionUsesValue(instr ssa.Instruction, v ssa.Value) bool {
+	var scratch instructionOperandScratch
+	return scratch.uses(instr, v)
+}
+
+func instructionRetainsAddress(instr ssa.Instruction, v ssa.Value) bool {
+	// Side-effecting instructions can hide a stack address from the SSA
+	// referrer graph, so the liveness walk cannot follow later aliases.
+	switch instr := instr.(type) {
+	case *ssa.Store:
+		return instr.Val == v
+	case *ssa.MapUpdate:
+		return instr.Key == v || instr.Value == v
+	case *ssa.Send:
+		return instr.X == v
+	case *ssa.Call:
+		if instr.Call.Value == v {
+			return true
+		}
+		for _, arg := range instr.Call.Args {
+			if arg == v {
+				return true
+			}
+		}
+	case *ssa.Select:
+		for _, state := range instr.States {
+			if state.Dir == types.SendOnly && state.Send == v {
+				return true
+			}
 		}
 	}
 	return false
@@ -1620,10 +1672,29 @@ func (p *context) isRuntimeSetFinalizerCall(call *ssa.CallCommon) bool {
 }
 
 func (p *context) lastUseInBlock(v ssa.Value, blk *ssa.BasicBlock, order map[ssa.Instruction]int, seen map[ssa.Value]bool) (ssa.Instruction, bool) {
-	if v == nil || seen[v] {
+	var scratch instructionOperandScratch
+	states := make(map[stackLivenessState]bool, len(seen)*2)
+	for value := range seen {
+		states[stackLivenessState{value: value}] = true
+		states[stackLivenessState{value: value, slotAddress: true}] = true
+	}
+	_, slotAddress := v.(*ssa.Alloc)
+	return p.lastUseInBlockValue(v, blk, order, states, slotAddress, &scratch)
+}
+
+func (p *context) lastUseInBlockValue(
+	v ssa.Value,
+	blk *ssa.BasicBlock,
+	order map[ssa.Instruction]int,
+	seen map[stackLivenessState]bool,
+	slotAddress bool,
+	scratch *instructionOperandScratch,
+) (ssa.Instruction, bool) {
+	state := stackLivenessState{value: v, slotAddress: slotAddress}
+	if v == nil || seen[state] {
 		return nil, true
 	}
-	seen[v] = true
+	seen[state] = true
 	refs := v.Referrers()
 	if refs == nil {
 		return nil, true
@@ -1641,20 +1712,27 @@ func (p *context) lastUseInBlock(v ssa.Value, blk *ssa.BasicBlock, order map[ssa
 		switch ref := ref.(type) {
 		case *ssa.DebugRef:
 			continue
-		case *ssa.Defer, *ssa.Go, *ssa.MakeClosure:
-			return nil, false
-		case *ssa.Phi:
+		case *ssa.Defer, *ssa.Go, *ssa.MakeClosure, *ssa.Phi:
 			return nil, false
 		default:
 			instr, ok := ref.(ssa.Instruction)
-			if !ok || !instructionUsesValue(instr, v) {
+			if !ok || !scratch.uses(instr, v) {
 				return nil, false
 			}
 			if instr.Block() != blk {
 				return nil, false
 			}
+			if slotAddress && instructionRetainsAddress(instr, v) {
+				return nil, false
+			}
 			if refVal, ok := ref.(ssa.Value); ok {
-				use, ok := p.lastUseInBlock(refVal, blk, order, seen)
+				nextSlotAddress := slotAddress
+				if unop, ok := refVal.(*ssa.UnOp); ok && unop.Op == token.MUL {
+					// A load copies the slot contents; the result no longer
+					// aliases the stack storage that will be cleared.
+					nextSlotAddress = false
+				}
+				use, ok := p.lastUseInBlockValue(refVal, blk, order, seen, nextSlotAddress, scratch)
 				if !ok {
 					return nil, false
 				}
