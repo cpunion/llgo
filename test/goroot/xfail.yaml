@@ -1295,10 +1295,6 @@ xfails:
     reason: llgo parser does not emit the expected malformed-name diagnostic
   - version: go1.26
     directive: errorcheck
-    case: fixedbugs/bug050.go
-    reason: llgo parser emits an additional malformed-declaration diagnostic
-  - version: go1.26
-    directive: errorcheck
     case: bombad.go
     reason: llgo parser recovery emits additional byte-order-mark diagnostics
   - platform: darwin/arm64
