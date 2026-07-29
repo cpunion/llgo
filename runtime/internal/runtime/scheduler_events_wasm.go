@@ -1,4 +1,4 @@
-//go:build !darwin && !linux && !baremetal && (!wasm || (wasip1 && llgo.wasi_threads))
+//go:build llgo && wasm && !(wasip1 && llgo.wasi_threads)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,16 +18,20 @@
 
 package runtime
 
-import (
-	"unsafe"
+import "github.com/goplus/llgo/runtime/internal/wasmevent"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	ct "github.com/goplus/llgo/runtime/internal/clite/time"
-)
+func popWasmRunq() *g {
+	wasmevent.Poll()
+	return wasmSched.runq.Pop()
+}
 
-// nanotime1 keeps the previous behavior on remaining platforms.
-func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_MONOTONIC, tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
+func waitWasmRunq() *g {
+	for {
+		if gp := popWasmRunq(); gp != nil {
+			return gp
+		}
+		if !wasmevent.Wait() {
+			return nil
+		}
+	}
 }

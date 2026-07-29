@@ -158,9 +158,13 @@ func goschedBackend() {
 func gopark() {
 	gp := getg()
 	casgstatus(gp, _Grunning, _Gwaiting)
-	next := popWasmRunq()
+	next := waitWasmRunq()
 	if next == nil {
 		fatal("all goroutines are asleep - deadlock!")
+		return
+	}
+	if next == gp {
+		casgstatus(gp, _Grunnable, _Grunning)
 		return
 	}
 	resumeWasmG(gp, next)
@@ -208,7 +212,7 @@ func goexitBackend(gp *g) {
 		return
 	}
 
-	next := popWasmRunq()
+	next := waitWasmRunq()
 	if next == nil {
 		if gp.isMain {
 			fatal("no goroutines (main called runtime.Goexit) - deadlock!")
@@ -256,10 +260,6 @@ func reapRetiredWasmG() {
 		platform.asyncifyStack = nil
 	}
 	freeRuntimeContext(ctx)
-}
-
-func popWasmRunq() *g {
-	return wasmSched.runq.Pop()
 }
 
 // CurrentGForTesting returns an opaque handle suitable for ReadyForTesting.

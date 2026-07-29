@@ -1,5 +1,3 @@
-//go:build !darwin && !linux && !baremetal && (!wasm || (wasip1 && llgo.wasi_threads))
-
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -16,18 +14,34 @@
  * limitations under the License.
  */
 
-package runtime
+package wasmevent
 
-import (
-	"unsafe"
-
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	ct "github.com/goplus/llgo/runtime/internal/clite/time"
+var (
+	pollEvents func() int
+	waitEvent  func() bool
 )
 
-// nanotime1 keeps the previous behavior on remaining platforms.
-func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_MONOTONIC, tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
+// Poll runs host events that are ready without blocking.
+func Poll() int {
+	if pollEvents == nil {
+		return 0
+	}
+	return pollEvents()
+}
+
+// Wait blocks until a host event is ready. It reports false when no event
+// source has been activated.
+func Wait() bool {
+	if waitEvent == nil {
+		return false
+	}
+	return waitEvent()
+}
+
+func installEventLoop(poll func() int, wait func() bool) {
+	if pollEvents != nil {
+		return
+	}
+	pollEvents = poll
+	waitEvent = wait
 }
