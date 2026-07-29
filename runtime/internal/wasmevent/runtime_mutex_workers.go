@@ -2,24 +2,26 @@
 
 package wasmevent
 
-import "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
+import "github.com/goplus/llgo/runtime/internal/wasmsync"
 
 type runtimeMutex struct {
-	mutex sync.Mutex
+	mutex wasmsync.Mutex
 }
 
-func newRuntimeMutex() runtimeMutex {
-	var result runtimeMutex
-	if result.mutex.Init(nil) != 0 {
-		panic("wasmevent: failed to initialize timer mutex")
-	}
-	return result
-}
+var cooperativeSafepoint func()
+
+func newRuntimeMutex() runtimeMutex { return runtimeMutex{} }
 
 func (m *runtimeMutex) Lock() {
-	m.mutex.Lock()
+	m.mutex.Lock(cooperativeSafepoint)
 }
 
 func (m *runtimeMutex) Unlock() {
 	m.mutex.Unlock()
+}
+
+// InstallCooperativeSafepoint installs the worker scheduler poll used while
+// the timer queue lock is contended.
+func InstallCooperativeSafepoint(safepoint func()) {
+	cooperativeSafepoint = safepoint
 }

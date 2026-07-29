@@ -345,7 +345,7 @@ func TestConfigureWasmGC(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			export := crosscompile.Export{}
-			enabled, err := configureWasmGC(&test.conf, &export, false)
+			enabled, err := configureWasmGC(&test.conf, &export)
 			if (err != nil) != test.err {
 				t.Fatalf("configureWasmGC error = %v, want error %v", err, test.err)
 			}
@@ -365,7 +365,7 @@ func TestConfigureWasmGC(t *testing.T) {
 func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
 	t.Setenv("LLGO_WASI_THREADS", "1")
 	conf := Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo_wasm_gc"}
-	if _, err := configureWasmGC(&conf, &crosscompile.Export{}, false); err == nil {
+	if _, err := configureWasmGC(&conf, &crosscompile.Export{}); err == nil {
 		t.Fatal("expected llgo_wasm_gc with WASI threads to fail")
 	}
 }
@@ -373,7 +373,7 @@ func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
 func TestConfigureWasmGCLeavesWASIThreadsDisabled(t *testing.T) {
 	t.Setenv("LLGO_WASI_THREADS", "1")
 	conf := Config{Goos: "wasip1", Goarch: "wasm"}
-	enabled, err := configureWasmGC(&conf, &crosscompile.Export{}, false)
+	enabled, err := configureWasmGC(&conf, &crosscompile.Export{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,10 +435,23 @@ func TestConfigureWasmWorkersRejectsUnsupportedTarget(t *testing.T) {
 	}
 }
 
-func TestConfigureWasmWorkersRejectsCurrentGC(t *testing.T) {
-	conf := Config{Goos: "js", Goarch: "wasm", Tags: "llgo_wasm_gc"}
-	if _, err := configureWasmGC(&conf, &crosscompile.Export{}, true); err == nil {
-		t.Fatal("multi-worker wasm GC configuration succeeded before M2")
+func TestConfigureWasmWorkersEnableGC(t *testing.T) {
+	t.Setenv(llgoWasmWorkers, "2")
+	conf := Config{Goos: "js", Goarch: "wasm"}
+	export := crosscompile.Export{}
+	workers, err := configureWasmWorkers(&conf, &export)
+	if err != nil || !workers.Enabled() {
+		t.Fatalf("multi-worker wasm configuration = %+v, %v", workers, err)
+	}
+	if enabled, err := configureWasmGC(&conf, &export); err != nil || !enabled {
+		t.Fatalf("multi-worker wasm GC configuration = %v, %v", enabled, err)
+	}
+	if !hasBuildTag(conf.Tags, "llgo_wasm_gc") ||
+		!slices.Contains(export.BuildTags, "llgo.wasm_workers") {
+		t.Fatalf("multi-worker wasm GC tags = %q, %v", conf.Tags, export.BuildTags)
+	}
+	if !slices.Contains(export.LDFLAGS, "-sMALLOC=none") {
+		t.Fatalf("multi-worker wasm GC linker flags = %v", export.LDFLAGS)
 	}
 }
 

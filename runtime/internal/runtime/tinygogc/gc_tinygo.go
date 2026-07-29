@@ -387,19 +387,18 @@ func gc() (freeBytes uintptr) {
 		println("running collection cycle...")
 	}
 
+	gcStopWorld()
+
 	// Mark phase: mark all reachable objects, recursively.
 	gcMarkReachable()
 
 	finishMark()
 
-	// If we're using threads, resume all other threads before starting the
-	// sweep.
-	gcResumeWorld()
-
 	// Sweep phase: free all non-marked objects and unmark marked objects for
 	// the next collection cycle.
 	freeBytes = sweep()
 
+	gcResumeWorld()
 	return
 }
 
@@ -571,10 +570,6 @@ func growHeap() bool {
 	c.Memmove(metadataStart, oldMetadataStart, oldMetadataSize)
 	c.Memset(unsafe.Add(metadataStart, oldMetadataSize), 0, newMetadataSize-oldMetadataSize)
 	return true
-}
-
-func gcResumeWorld() {
-	// Nothing to do here (single threaded).
 }
 
 //go:linkname getsp llgo.stackSave

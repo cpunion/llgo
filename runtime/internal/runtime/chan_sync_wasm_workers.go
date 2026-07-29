@@ -3,23 +3,17 @@
 package runtime
 
 import (
-	"github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
-	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
-	"github.com/goplus/llgo/runtime/internal/wasmworkers"
+	"github.com/goplus/llgo/runtime/internal/wasmsync"
 )
 
 type chanMutex struct {
-	mutex sync.Mutex
+	mutex wasmsync.Mutex
 }
 
-func (m *chanMutex) init() {
-	if m.mutex.Init(nil) != 0 {
-		fatal("runtime: failed to initialize channel mutex")
-	}
-}
+func (*chanMutex) init() {}
 
 func (m *chanMutex) Lock() {
-	m.mutex.Lock()
+	m.mutex.Lock(CooperativeSafepoint)
 }
 
 func (m *chanMutex) Unlock() {
@@ -27,8 +21,8 @@ func (m *chanMutex) Unlock() {
 }
 
 type chanSignal struct {
-	lockWord uint32
-	waiter   SchedulerWaiter
+	mutex  wasmsync.Mutex
+	waiter SchedulerWaiter
 }
 
 func (s *chanSignal) init() {
@@ -36,17 +30,11 @@ func (s *chanSignal) init() {
 }
 
 func (s *chanSignal) lock() {
-	for {
-		if _, ok := atomic.CompareAndExchange(&s.lockWord, uint32(0), uint32(1)); ok {
-			return
-		}
-		wasmworkers.Wait(&s.lockWord, 1, -1)
-	}
+	s.mutex.Lock(CooperativeSafepoint)
 }
 
 func (s *chanSignal) unlock() {
-	atomic.Store(&s.lockWord, uint32(0))
-	wasmworkers.Wake(&s.lockWord)
+	s.mutex.Unlock()
 }
 
 func (s *chanSignal) park() {
