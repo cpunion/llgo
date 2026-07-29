@@ -596,6 +596,104 @@ func outsideFrozenUniverse() {}
 	}
 }
 
+func TestAnalyzeSSAManagedValueReferencesUseDispatchWithoutInheritingEffects(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_value_references.go", `package coroid
+
+var channel chan int
+
+func owner() {}
+func deadOwner() {}
+func dispatcher() { <-channel }
+func deadDispatcher() {}
+func outsideFrozenUniverse() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	deadOwner := packageFunction(t, pkg, "deadOwner")
+	dispatcher := packageFunction(t, pkg, "dispatcher")
+	deadDispatcher := packageFunction(t, pkg, "deadDispatcher")
+	outside := packageFunction(t, pkg, "outsideFrozenUniverse")
+	universe, err := NewSSAEmissionUniverse(
+		prog, []*ssa.Function{owner, deadOwner, dispatcher, deadDispatcher},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classify := func(fn *ssa.Function) ([]*ssa.Function, error) {
+		switch fn {
+		case owner:
+			return []*ssa.Function{dispatcher}, nil
+		case deadOwner:
+			return []*ssa.Function{deadDispatcher}, nil
+		default:
+			return nil, nil
+		}
+	}
+	config := planDigestSSAConfig()
+	config.EmissionUniverse = universe
+	config.ClassifyManagedValueReferences = classify
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if ownerPlan.Effect != NoSuspend || ownerPlan.Emission != EmitPlain {
+		t.Fatalf("owner plan = %+v, managed value reference inherited target effects", ownerPlan)
+	}
+	dispatcherPlan := functionPlanFor(t, plan, dispatcher)
+	if dispatcherPlan.Demand != AsyncDemand || dispatcherPlan.Emission != EmitCoroutine ||
+		dispatcherPlan.Primary != PrimaryCoroutine || dispatcherPlan.FuncRep != Dispatch {
+		t.Fatalf("dispatcher plan = %+v, want one managed coroutine descriptor", dispatcherPlan)
+	}
+	valuePlan, ok := plan.ValuePlan(dispatcher)
+	if !ok || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != Dispatch ||
+		valuePlan.Funcs[0].Transport != ManagedTransport ||
+		len(valuePlan.Funcs[0].Targets) != 1 || valuePlan.Funcs[0].Targets[0] != dispatcherPlan.ID {
+		t.Fatalf("dispatcher value plan = %+v, present=%t", valuePlan, ok)
+	}
+	for _, fn := range []*ssa.Function{deadOwner, deadDispatcher} {
+		got := functionPlanFor(t, plan, fn)
+		if got.Demand != NoDemand || got.Emission != EmitNone {
+			t.Fatalf("unreachable %s plan = %+v, want no demand and no emission", fn.Name(), got)
+		}
+	}
+	document, err := plan.canonicalPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatalf("digest managed function-value references: %v", err)
+	}
+	ownerID, _ := plan.FunctionID(owner)
+	dispatcherID, _ := plan.FunctionID(dispatcher)
+	found := false
+	for _, value := range document.Values {
+		if value.Site.Function != ownerID || value.Site.Kind != "managed-value" {
+			continue
+		}
+		if value.Site.Index != 0 || len(value.Funcs) != 1 ||
+			value.Funcs[0].Rep != uint8(Dispatch) ||
+			value.Funcs[0].Transport != uint8(ManagedTransport) ||
+			value.Funcs[0].MayBeNil || len(value.Funcs[0].Targets) != 1 ||
+			value.Funcs[0].Targets[0] != dispatcherID {
+			t.Fatalf("managed-value digest entry = %+v", value)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("managed function-value reference is absent from canonical digest")
+	}
+
+	outsideConfig := planDigestSSAConfig()
+	outsideConfig.EmissionUniverse = universe
+	outsideConfig.ClassifyManagedValueReferences = func(fn *ssa.Function) ([]*ssa.Function, error) {
+		if fn == owner {
+			return []*ssa.Function{outside}, nil
+		}
+		return nil, nil
+	}
+	_, err = AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, outsideConfig)
+	if err == nil || !strings.Contains(err.Error(), "outside the effective emission universe") {
+		t.Fatalf("outside managed value reference error = %v", err)
+	}
+}
+
 func TestAnalyzeSSASynchronousDemandReferenceIsExactSubsetAndRetainsPlainABI(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "sync_implicit_references.go", `package coroid
 

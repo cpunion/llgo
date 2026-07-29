@@ -70,6 +70,18 @@ func payloadChecksum(head *payload) uint64 {
 //go:linkname overwriteNativeResumeStack C.llgo_coro_wasi_frame_gc_scrub_stack
 func overwriteNativeResumeStack(seed uintptr) uintptr
 
+// This test-only C leaf terminates the WASI command through libc's proc_exit
+// binding and gives each invariant a stable process status.
+//
+//llgo:coro noblock
+//go:linkname wasiFrameGCExit C.llgo_coro_wasi_frame_gc_exit
+func wasiFrameGCExit(status int32)
+
+func failWASIFrameGC(status int32) {
+	wasiFrameGCExit(status)
+	panic("WASI proc_exit unexpectedly returned")
+}
+
 func main() {
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -85,7 +97,7 @@ func main() {
 	// stale words from the child's last resume cannot make the test pass.
 	time.Sleep(10 * time.Millisecond)
 	if overwriteNativeResumeStack(uintptr(expected))&wasmNonPointer == 0 {
-		panic("native resume stack scrub returned an invalid result")
+		failWASIFrameGC(101)
 	}
 	allocateGarbage()
 	runtime.GC()
@@ -93,13 +105,13 @@ func main() {
 	runtime.GC()
 
 	if got := <-result; got != expected {
-		panic("suspended LLVM coroutine frame lost a live Go pointer")
+		failWASIFrameGC(102)
 	}
 
 	var stats runtime.MemStats
 	runtime.ReadMemStats(&stats)
 	if stats.NumGC < before.NumGC+2 || stats.Mallocs < before.Mallocs+8192 ||
 		stats.Frees <= before.Frees || stats.HeapSys == 0 || stats.GCSys == 0 {
-		panic("WebAssembly non-moving collector did not publish heap statistics")
+		failWASIFrameGC(103)
 	}
 }

@@ -33,12 +33,20 @@ import (
 func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instruction ssa.Instruction) []string {
 	if u.coroProgramIR == nil {
 		shape, _ := prepareCoroEmissionFunctionShape(instruction.Parent())
-		return u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		helpers, err := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		if err != nil {
+			panic(err)
+		}
+		return helpers
 	}
 	helpers, err := u.coroProgramIR.plannedRuntimeHelpers(ctx, instruction)
 	if err != nil {
 		shape, _ := prepareCoroEmissionFunctionShape(instruction.Parent())
-		return u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		helpers, classifyErr := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		if classifyErr != nil {
+			panic(classifyErr)
+		}
+		return helpers
 	}
 	return helpers
 }
@@ -46,13 +54,19 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instruction ssa.I
 func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instruction ssa.Instruction) []string {
 	if u.coroProgramIR == nil {
 		shape, _ := prepareCoroEmissionFunctionShape(instruction.Parent())
-		managed := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		managed, err := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		if err != nil {
+			panic(err)
+		}
 		return u.classifyPlainRuntimeHelpers(ctx, instruction, managed)
 	}
 	plan, err := u.coroProgramIR.sitePlan(ctx, instruction)
 	if err != nil {
 		shape, _ := prepareCoroEmissionFunctionShape(instruction.Parent())
-		managed := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		managed, classifyErr := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		if classifyErr != nil {
+			panic(classifyErr)
+		}
 		return u.classifyPlainRuntimeHelpers(ctx, instruction, managed)
 	}
 	return plan.plainRuntimeHelpers
@@ -148,6 +162,82 @@ func TestCoroSitePlanEmissionObserverRejectsUnexpectedAndMissing(t *testing.T) {
 				t.Fatalf("observer panic = %q, want %q", message, test.want)
 			}
 		})
+	}
+}
+
+func TestCoroPhysicalPhiObservesFrozenSemanticSitePlan(t *testing.T) {
+	prog, ssaPkg, files, universe, plan := prepareCoroRootFactoryTestPlan(
+		t,
+		`package foo
+func Leaf(flag bool, left, right uint32) uint32 {
+	value := left
+	if flag {
+		value = right
+	}
+	return value
+}
+`,
+		[]coroRootFactoryTestRoot{{name: "Leaf", demand: coro.AsyncDemand}},
+		[]string{"Leaf"},
+	)
+	defer prog.Dispose()
+	leaf := ssaPkg.Func("Leaf")
+	var phi *ssa.Phi
+	for _, block := range leaf.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.Phi); ok {
+				phi = candidate
+				break
+			}
+		}
+	}
+	if phi == nil {
+		t.Fatal("Leaf fixture has no Phi instruction")
+	}
+
+	compilation := &Compilation{
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+		CoroPlanObserver: func(*ssa.Package, *coro.SSAPlan) {
+			owners := universe.sortedUseOwners(leaf)
+			if len(owners) != 1 {
+				t.Fatalf("Leaf physical owners = %d, want 1", len(owners))
+			}
+			key := emissionFunctionOwnerKey{function: leaf, owner: owners[0]}
+			physical := universe.coroProgramIR.physicalPlans[key]
+			if physical == nil {
+				t.Fatal("Leaf has no committed physical plan")
+			}
+			instruction, ok := physical.instructions[phi]
+			if !ok {
+				t.Fatal("Phi has no frozen physical SitePlan")
+			}
+			// Deliberately corrupt the immutable test projection after
+			// preflight. Codegen must still consume this exact Phi SitePlan and
+			// fail closed; bypassing the deferred Phi observer would silently
+			// accept it.
+			instruction.semantic.recipe = ""
+			physical.instructions[phi] = instruction
+		},
+	}
+	message := captureCoroSitePlanPanic(func() {
+		compiled, _, compileErr := NewPackageExWithEmbedOptions(
+			prog,
+			nil,
+			nil,
+			nil,
+			ssaPkg,
+			files,
+			goembed.VarMap{},
+			PackageOptions{Compilation: compilation},
+		)
+		if compileErr != nil {
+			panic(compileErr)
+		}
+		compiled.Module().Dispose()
+	})
+	if !strings.Contains(message, "semantic recipe emission has no exact physical SitePlan") {
+		t.Fatalf("corrupt Phi SitePlan failure = %q", message)
 	}
 }
 

@@ -162,7 +162,7 @@ func TestConservativeWebAssemblyProfileSelectsTinyGoGC(t *testing.T) {
 	)
 	assertFiles(
 		"github.com/goplus/llgo/runtime/internal/runtime/tinygogc",
-		[]string{"gc.go", "gc_tinygo.go", "gc_wasm.go"},
+		[]string{"gc.go", "gc_tinygo.go", "gc_wasm.go", "rooted.go"},
 		nil,
 	)
 	assertFiles(

@@ -278,6 +278,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_poll_route_default_llgo.go":        false,
 		"coro_ready_distribution_default.go":     false,
 		"coro_setmaxthreads_single_llgo.go":      false,
+		"coro_task_context_test_adapter.go":      false,
 		"coro_target_native_llgo.go":             false,
 		"coro_target_none.go":                    false,
 		"coro_target_test_adapter.go":            false,
@@ -368,7 +369,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	}
 
 	if fixture.name == "time" || fixture.name == "timer" {
-		const sleepPatch = "z_llgo_patch_sleep_coro_native_llgo.go"
+		const sleepPatch = "sleep_coro_native_llgo.go"
 		selected := false
 		for _, pkg := range packages {
 			if pkg == nil || pkg.PkgPath != "time" {

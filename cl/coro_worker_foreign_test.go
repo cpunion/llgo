@@ -168,7 +168,7 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 	// Production import records //llgo:type background metadata before the
 	// emission universe freezes physical signatures. Mirror that ordering so C
 	// callback word-shape tests exercise the real ABI.
-	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		nil,

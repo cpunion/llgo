@@ -212,6 +212,28 @@ func TestGoProgramSizesUnaliasFunctionFieldStruct(t *testing.T) {
 	}
 }
 
+func TestGoProgramSizesPreserveNativeTrailingZeroFieldRule(t *testing.T) {
+	prog := NewProgram(nil)
+	native := types.SizesFor("gc", runtime.GOARCH)
+	sizes := prog.TypeSizes(native)
+
+	fields := []*types.Var{
+		types.NewField(token.NoPos, nil, "Word", types.Typ[types.Uintptr], false),
+		types.NewField(token.NoPos, nil, "Tail", types.NewStruct(nil, nil), false),
+	}
+	structure := types.NewStruct(fields, nil)
+	if got, want := sizes.Sizeof(structure), native.Sizeof(structure); got != want {
+		t.Fatalf("Sizeof(native trailing-zero struct) = %d, want %d", got, want)
+	}
+	gotOffsets, wantOffsets := sizes.Offsetsof(fields), native.Offsetsof(fields)
+	for index := range fields {
+		if gotOffsets[index] != wantOffsets[index] {
+			t.Fatalf("Offsetsof(native trailing-zero struct)[%d] = %d, want %d",
+				index, gotOffsets[index], wantOffsets[index])
+		}
+	}
+}
+
 func TestNamedStructLayoutEquivalent(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))

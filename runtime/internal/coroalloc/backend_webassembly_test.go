@@ -43,7 +43,7 @@ func TestWasmBackendAllocatesAndFreesWithLibc(t *testing.T) {
 			t.Fatalf("wasm malloc frame byte %d = %d, want %d", offset, got, want)
 		}
 	}
-	if !FreeFrame(ptr) {
+	if !FreeFrame(ptr, size) {
 		t.Fatal("wasm free frame rejected allocated range")
 	}
 }

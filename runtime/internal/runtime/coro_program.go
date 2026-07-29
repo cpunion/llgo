@@ -258,7 +258,8 @@ func coroProgramBeginOwnedV1(manifest, expectedFactory unsafe.Pointer) (unsafe.P
 	}
 	if !coroInitG(&coroProgramGV1State) ||
 		!coro.BindRunnableOwner(&coroProgramGV1State) ||
-		!coroProgramBindExecutorV1() {
+		!coroProgramBindExecutorV1() ||
+		!coroBindRuntimeContext(&coroProgramGV1State, nil, true) {
 		coroProgramLifecycleV1State = coroProgramFailedV1
 		return nil, false
 	}

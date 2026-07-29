@@ -175,6 +175,17 @@ func (u *EmissionUniverse) coroLoweringFunctionSites(plan *coro.SSAPlan, functio
 	}
 
 	sites := make([]coro.LoweringFact, 0)
+	preamble, materialized, err := (coroProgramIRBuilder{
+		canonical: emissionCanonicalIndex{universe: u},
+	}).coroFunctionPreambleLoweringFact(
+		plan, function, owner, instance, loweredCalls,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coroutine lowering facts: function %q preamble: %w", function.Name(), err)
+	}
+	if materialized {
+		sites = append(sites, preamble)
+	}
 	for _, block := range function.Blocks {
 		for _, instruction := range block.Instrs {
 			if _, unevaluated := ctx.unevaluatedSSA[instruction]; unevaluated {
@@ -193,6 +204,72 @@ func (u *EmissionUniverse) coroLoweringFunctionSites(plan *coro.SSAPlan, functio
 		}
 	}
 	return sites, nil
+}
+
+func (builder coroProgramIRBuilder) coroFunctionPreambleLoweringFact(
+	plan *coro.SSAPlan,
+	function *ssa.Function,
+	owner *preparedEmissionPackage,
+	instance coro.EmissionInstanceID,
+	loweredCalls map[string]coro.SSALoweredCall,
+) (coro.LoweringFact, bool, error) {
+	u := builder.canonical.universe
+	preamble, err := u.coroProgramIR.functionPreambleForOwner(function, owner)
+	if err != nil {
+		return coro.LoweringFact{}, false, err
+	}
+	recipe, err := preamble.loweringRecipe()
+	if err != nil {
+		return coro.LoweringFact{}, false, err
+	}
+	if recipe == "" {
+		return coro.LoweringFact{}, false, nil
+	}
+	helpers := make([]coro.ManagedEdge, 0, len(preamble.managedRuntimeHelpers))
+	for _, logicalName := range preamble.managedRuntimeHelpers {
+		planned, ok := loweredCalls[logicalName]
+		if !ok || planned.Target == nil || planned.RawPlain {
+			return coro.LoweringFact{}, false, fmt.Errorf(
+				"function-preamble helper %q is absent from the frozen managed plan",
+				logicalName,
+			)
+		}
+		targetID, ok := plan.FunctionID(planned.Target)
+		if !ok {
+			return coro.LoweringFact{}, false, fmt.Errorf(
+				"function-preamble helper %q target %q has no frozen FunctionID",
+				logicalName, planned.Target.Name(),
+			)
+		}
+		helpers = append(helpers, coro.ManagedEdge{
+			Order:                len(helpers),
+			Role:                 coro.RoleHelper,
+			Ordinal:              len(helpers),
+			LogicalName:          logicalName,
+			Target:               targetID,
+			NoUnwind:             planned.NoUnwind,
+			UnwindOnly:           planned.UnwindOnly,
+			ExplicitStatusElided: planned.ExplicitStatusElided,
+		})
+	}
+	site, err := coro.NewFunctionEmissionSiteID(instance, coro.RolePrimary, 0)
+	if err != nil {
+		return coro.LoweringFact{}, false, err
+	}
+	footprint := coro.BackendFootprint(0)
+	if len(helpers) != 0 {
+		footprint |= coro.FootprintManagedCall
+	}
+	return coro.LoweringFact{
+		Site:      site,
+		Class:     coro.OpLowered,
+		Recipe:    recipe,
+		Effect:    coro.NoSuspend,
+		Exec:      0,
+		Footprint: footprint,
+		Helpers:   helpers,
+		Contract:  coro.ContractID("llgo.coro.logical-locality-init-guards.v0"),
+	}, true, nil
 }
 
 func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.SSAPlan, function *ssa.Function, instance coro.EmissionInstanceID, instruction ssa.Instruction, loweredCalls map[string]coro.SSALoweredCall) (coro.LoweringFact, bool, error) {

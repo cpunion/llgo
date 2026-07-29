@@ -449,6 +449,7 @@ func analyzeSSAFunctionFlow(
 	directPlainArgs []ssaCallArgumentUse,
 	rawAddressArgs []ssaCallArgumentUse,
 	closedDynamicCalls map[ssa.CallInstruction]SSAClosedDynamicCallCertificate,
+	managedValueReferences []*ssa.Function,
 	classifyRawCFunctionType func(types.Type) (bool, error),
 ) (*ssaFuncFlow, error) {
 	directPlainSet := make(map[ssaCallArgumentUse]struct{}, len(directPlainArgs))
@@ -499,6 +500,9 @@ func analyzeSSAFunctionFlow(
 			Targets:  append([]*ssa.Function(nil), certificate.Targets...),
 			MayBeNil: certificate.MayBeNil,
 		}
+	}
+	for _, target := range managedValueReferences {
+		flow.recordValue(target)
 	}
 
 	for _, fn := range functions {
@@ -673,6 +677,9 @@ func analyzeSSAFunctionFlow(
 			// or memory flow proves otherwise.
 			flow.markUnknown(value)
 		}
+	}
+	for _, target := range managedValueReferences {
+		flow.markBoundary(target)
 	}
 
 	for _, fn := range functions {

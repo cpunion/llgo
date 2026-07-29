@@ -423,6 +423,7 @@ func gc() (freeBytes uintptr) {
 
 	// Mark phase: mark all reachable objects, recursively.
 	gcMarkReachable()
+	markRootedAllocations()
 
 	finishMark()
 

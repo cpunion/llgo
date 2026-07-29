@@ -24,5 +24,20 @@ func Rethrow(link *Defer) {
 		} else {
 			c.Siglongjmp(link.Addr, 1)
 		}
+	} else if gp.goexit {
+		// Goexit must run deferred functions before terminating the current
+		// goroutine. Reuse the longjmp-based defer unwinding:
+		// 1) If we have a defer frame, longjmp to it so it can execute defers.
+		// 2) Once we've unwound past the last frame (link==nil), terminate the
+		//    current pthread.
+		if link != nil {
+			c.Siglongjmp(link.Addr, 1)
+		}
+		if gp.isMain {
+			fatal("no goroutines (main called runtime.Goexit) - deadlock!")
+			c.Exit(2)
+		}
+		leaveCurrentLocalContext()
+		exitCurrentM()
 	}
 }

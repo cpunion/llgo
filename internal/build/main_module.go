@@ -32,9 +32,8 @@ import (
 	"go/types"
 
 	"github.com/goplus/llgo/internal/packages"
-	llvm "github.com/xgo-dev/llvm"
-
 	llssa "github.com/goplus/llgo/ssa"
+	llvm "github.com/xgo-dev/llvm"
 )
 
 type genConfig struct {
@@ -105,6 +104,11 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		})
 	}
 
+	pkgPath := pkg.PkgPath
+	if ctx.buildConf.RewriteMainPrefix && pkg.Types != nil && pkg.Types.Name() == "main" {
+		pkgPath = "main"
+	}
+
 	if ctx.buildConf.BuildMode != BuildModeExe {
 		runtimeStub = defineWeakNoArgStub(mainPkg, "runtime.init")
 		// TODO(lijie): workaround for syscall patch
@@ -112,7 +116,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		if cfg.rtInit {
 			rtInit = declareNoArgFunc(mainPkg, rtPkgPath+".init")
 		}
-		mainInit = declareNoArgFunc(mainPkg, pkg.PkgPath+".init")
+		mainInit = declareNoArgFunc(mainPkg, pkgPath+".init")
 		initArraySection := ""
 		if ctx.buildConf.BuildMode == BuildModeCShared && ctx.buildConf.Goos == "linux" {
 			initArraySection = ".init_array"
@@ -513,6 +517,8 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		fnVal.SetUnnamedAddr(true)
 	}
 	b := fn.MakeBody(1)
+	var localCtx, previousLocalCtx llssa.Expr
+	hasLocalContext := prog.NeedsLocalContext()
 	b.Store(argcVar.Expr, fn.Param(0))
 	b.Store(argvVar.Expr, fn.Param(1))
 	if fns.coroAllocatorBootstrap != nil {
@@ -532,6 +538,13 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 			b.Call(fns.abiInit.Expr)
 		}
 		b.Call(fns.runtimeStub.Expr)
+	}
+	// The pthread getg key is established by the coroutine allocator bootstrap
+	// or by ordinary runtime initialization. EnterLocalContext calls getg, so
+	// installing the compiler-owned outer entry context before either bootstrap
+	// would use an invalid zero pthread key.
+	if hasLocalContext {
+		localCtx, previousLocalCtx = b.EnterLocalContext()
 	}
 	if fns.coroHostPrepare != nil {
 		prepared := b.Call(fns.coroHostPrepare.Expr)
@@ -574,6 +587,9 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 	}
 	if fns.pyFinalize != nil {
 		b.Call(fns.pyFinalize.Expr)
+	}
+	if hasLocalContext {
+		b.LeaveLocalContext(localCtx, previousLocalCtx)
 	}
 	b.Return(prog.IntVal(0, prog.Int32()))
 	return fn

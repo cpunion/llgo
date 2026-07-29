@@ -20,6 +20,7 @@ package cl
 
 import (
 	"go/ast"
+	"slices"
 	"strings"
 	"testing"
 
@@ -93,6 +94,73 @@ func Allocate() *int { return new(int) }
 	}
 	if len(lowered) != 1 || lowered[0].LogicalName != "AllocZ" || lowered[0].Target != target {
 		t.Fatalf("complete runtime ABI lowered calls = %+v; want exact AllocZ target", lowered)
+	}
+}
+
+func TestEmissionUniverseRuntimeABIExportsOwnTheirLocalContext(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+type LocalContext struct{}
+func EnterLocalContext(*LocalContext) *LocalContext { return nil }
+func LeaveLocalContext(*LocalContext, *LocalContext) {}
+//export RuntimeHook
+func RuntimeHook() {}
+`)
+	userPkg := testProg.addPackage(t, "example.com/emission/localcontextentry", `package localcontextentry
+//export UserHook
+func UserHook() {}
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	prog.SetLocalityInfo("example.com/state.value", llssa.LocalityInfo{Locality: llssa.GoroutineLocal})
+	prog.SetLocalStorage("example.com/state.value", llssa.LocalStoragePackage)
+
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: userPkg.ssa, Files: []*ast.File{userPkg.file}},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeHook := runtimePkg.ssa.Func("RuntimeHook")
+	runtimePlan, err := universe.coroProgramIR.functionPreambleForOwner(
+		runtimeHook,
+		universe.packages[runtimePkg.ssa],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimePlan.localContextEntry || len(runtimePlan.plainRuntimeHelpers) != 0 {
+		t.Fatalf("compiler runtime ABI export preamble = %+v; want scheduler-owned context", runtimePlan)
+	}
+	for _, helper := range []string{"EnterLocalContext", "LeaveLocalContext"} {
+		if target, found, err := universe.ResolveCoroPlainLoweredCall(runtimeHook, helper); err != nil {
+			t.Fatal(err)
+		} else if found || target != nil {
+			t.Fatalf("compiler runtime ABI export has plain helper %q = %v, %v", helper, target, found)
+		}
+	}
+
+	userHook := userPkg.ssa.Func("UserHook")
+	userPlan, err := universe.coroProgramIR.functionPreambleForOwner(
+		userHook,
+		universe.packages[userPkg.ssa],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !userPlan.localContextEntry ||
+		!slices.Equal(userPlan.plainRuntimeHelpers, []string{"EnterLocalContext"}) {
+		t.Fatalf("user native export preamble = %+v; want one native local-context entry", userPlan)
+	}
+	for _, helper := range []string{"EnterLocalContext", "LeaveLocalContext"} {
+		if target, found, err := universe.ResolveCoroPlainLoweredCall(userHook, helper); err != nil {
+			t.Fatal(err)
+		} else if !found || target != runtimePkg.ssa.Func(helper) {
+			t.Fatalf("user native export plain helper %q = %v, %v", helper, target, found)
+		}
 	}
 }
 

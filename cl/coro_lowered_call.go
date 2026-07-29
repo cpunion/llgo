@@ -94,18 +94,22 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 			helper, p.goFn.Name(), targetPlan.ID, types.Unalias(marker.RawType()), marker.RawType(),
 		))
 	}
-	// x/tools SSA has already packed a variadic invocation into the final
-	// slice argument. The frozen physical source signature deliberately clears
-	// that source-only flag, so compare the compiler-created rtFunc marker in
-	// the same normalized domain. This does not relax named-type identity or
-	// any transported parameter/result type.
+	// The compiler-created rtFunc marker already carries LLGo's physical Go ABI:
+	// function values are {fn,env}, interfaces use their runtime headers, and
+	// other source types have crossed the same target-specific conversion.
+	// Convert the frozen logical source signature through that one canonical
+	// boundary before comparing. x/tools SSA has also packed a variadic
+	// invocation into the final slice argument, so normalize both sides.
 	markerSig = coroPhysicalNormalizeSourceSignature(markerSig)
-	if !types.Identical(markerSig, sourceSig) {
+	physicalSourceSig := coroPhysicalNormalizeSourceSignature(
+		p.prog.PhysicalFuncDecl(sourceSig, llssa.InGo),
+	)
+	if !types.Identical(markerSig, physicalSourceSig) {
 		panic(fmt.Errorf(
 			"coroutine lowered runtime call %q in %q target %q has a different effective source signature: marker=%s target=%s",
 			helper, p.goFn.Name(), targetPlan.ID,
 			types.TypeString(markerSig, types.RelativeTo(nil)),
-			types.TypeString(sourceSig, types.RelativeTo(nil)),
+			types.TypeString(physicalSourceSig, types.RelativeTo(nil)),
 		))
 	}
 	if plainOnly || rawPlainOccurrence || explicitStatusLegacyPlain {

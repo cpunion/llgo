@@ -41,7 +41,7 @@ func Managed(callback func(int) int) {}
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)

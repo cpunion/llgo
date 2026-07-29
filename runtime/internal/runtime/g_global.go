@@ -21,6 +21,10 @@ package runtime
 // Host builds and single-context targets share one process-wide current G.
 var currentG *g
 
+func coroRuntimeContextBootstrap() bool {
+	return true
+}
+
 func getg() *g {
 	if currentG == nil {
 		currentG = initRuntimeContext(new(runtimeContext), nil, _Grunning)

@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #define LLGO_CORO_WASM_GC_SCRUB_WORDS 4096
 #define LLGO_CORO_WASM_NON_POINTER ((uintptr_t)1 << 31)
@@ -18,4 +19,9 @@ uintptr_t llgo_coro_wasi_frame_gc_scrub_stack(uintptr_t seed) {
 		checksum = (checksum << 7) ^ (checksum >> 3) ^ words[index];
 	}
 	return checksum | LLGO_CORO_WASM_NON_POINTER;
+}
+
+__attribute__((noreturn))
+void llgo_coro_wasi_frame_gc_exit(int32_t status) {
+	_Exit(status);
 }

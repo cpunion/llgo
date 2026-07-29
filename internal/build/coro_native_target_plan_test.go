@@ -668,11 +668,44 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 						identity, record.PhysicalSymbol, physical,
 					)
 				}
-				if err := validateMigratedRawHost(record, identity); err != nil {
-					return nil, err
+				if record.DirectExecutorCertified ||
+					record.NoBlockCertified ||
+					!record.SyncCertified ||
+					record.rawHostOnly() ||
+					!record.defaultUseDomainCompatible() ||
+					record.RawHostCalls != 0 ||
+					!slices.Contains(record.Rejections, "managed-call") {
+					return nil, fmt.Errorf(
+						"native target terminal declaration %q lost its private synchronous boundary: %s",
+						identity, record.diagnostic(),
+					)
+				}
+				if _, legacy := plan.ForeignNoBlockCertificate(record.Function); legacy {
+					return nil, fmt.Errorf(
+						"native target terminal declaration %q acquired a foreign-noblock certificate",
+						identity,
+					)
+				}
+				if _, certified := plan.ForeignSyncCertificate(record.Function); !certified {
+					return nil, fmt.Errorf(
+						"native target terminal declaration %q lost its exact foreign-sync certificate",
+						identity,
+					)
+				}
+				function, planned := plan.FunctionPlan(record.Function)
+				if !planned ||
+					function.External != coro.ExternalKnown ||
+					function.Effect != coro.NoSuspend ||
+					function.Exec != coro.IRQUnsafe ||
+					function.Emission != coro.EmitExternal {
+					return nil, fmt.Errorf(
+						"native target terminal declaration %q plan = %+v, present=%t; "+
+							"want one synchronous external leaf",
+						identity, function, planned,
+					)
 				}
 				delete(terminalDeclarations, identity)
-				t.Log("migrated terminal " + record.diagnostic())
+				t.Log("private terminal sync " + record.diagnostic())
 				continue
 			}
 			if identity != clitePath+".Fputc" {

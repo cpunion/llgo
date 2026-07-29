@@ -1990,6 +1990,15 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 	}
 	interfaceType.Complete()
 	switch value := value.(type) {
+	case *ssa.Const:
+		if value.Value != nil {
+			return "interface constant is not nil"
+		}
+		// An exact nil interface constant lowers to two zero words. It borrows
+		// no coroutine-frame storage, and the panic handoff normalizes that
+		// pair to the package-rooted Go 1.21+ *PanicNilError payload before
+		// publishing it.
+		return ""
 	case *ssa.Parameter:
 		proof := audit.currentFrameRetentionProof()
 		if proof == nil || !proof.provesInterfaceParameter(value) {

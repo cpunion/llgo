@@ -24,16 +24,18 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-// These private declarations retain the ordinary conservative may-block
-// contract. The compiler authorizes direct execution only for their exact
-// calls inside the closed scheduler-stack abort use domain; the production
-// plan gate rejects a managed, dynamic, escaped, or non-host raw occurrence.
-// Ordinary c.Fputs/c.Fputc declarations remain independent managed foreign
-// calls despite sharing the physical C symbols.
+// These private declarations are used only after a fatal runtime invariant has
+// committed to process termination. Their exact C implementations return on
+// the calling thread, invoke no Go callback, and retain no arguments. The
+// bottom contract prevents this terminal diagnostic from trying to park on an
+// already-invalid scheduler; ordinary c.Fputs/c.Fputc declarations remain
+// independent may-block calls despite sharing the physical C symbols.
 //
+//llgo:coro sync
 //go:linkname coroTerminalFputs C.fputs
 func coroTerminalFputs(s *c.Char, fp c.FilePtr) c.Int
 
+//llgo:coro sync
 //go:linkname coroTerminalFputc C.fputc
 func coroTerminalFputc(ch c.Int, fp c.FilePtr) c.Int
 

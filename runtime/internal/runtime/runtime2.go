@@ -18,6 +18,12 @@ package runtime
 
 import "unsafe"
 
+// goroutineFunc is the target-independent entry ABI between compiler-generated
+// goroutine wrappers and the runtime scheduler.
+//
+//llgo:type C
+type goroutineFunc func(unsafe.Pointer) unsafe.Pointer
+
 // These G and P states intentionally keep the values used by the Go runtime.
 // Only states reachable by the current 1:1 backend are defined here.
 const (
@@ -50,6 +56,10 @@ type g struct {
 	startarg unsafe.Pointer
 
 	context *runtimeContext
+	// localContext follows the logical G. Native pthread execution installs a
+	// stack-owned context at its outer Go entry; the stackless scheduler points
+	// this field at the context embedded in the task's runtime sidecar.
+	localContext *LocalContext
 
 	goexit       bool
 	isMain       bool

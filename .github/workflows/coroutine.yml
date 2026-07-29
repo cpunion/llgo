@@ -89,6 +89,7 @@ jobs:
           # cross-language linked smoke test.
           go test -race -shuffle=on -tags=coro_runtime_adapter_test \
             ./internal/runtime/coro_run_slice.go \
+            ./internal/runtime/coro_task_context_test_adapter.go \
             ./internal/runtime/coro_execution_quota_default.go \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
@@ -105,6 +106,7 @@ jobs:
           # symbols do not collide with the host Go runtime.
           go test -race -shuffle=on -tags=coro_native_fleet_test \
             ./internal/runtime/coro_run_slice.go \
+            ./internal/runtime/coro_task_context_test_adapter.go \
             ./internal/runtime/coro_execution_quota_default.go \
             ./internal/runtime/coro_ready_distribution_default.go \
             ./internal/runtime/coro_native_fleet.go \
@@ -116,6 +118,7 @@ jobs:
             -tags=coro_runtime_adapter_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
             ./internal/runtime/coro_run_slice.go \
+            ./internal/runtime/coro_task_context_test_adapter.go \
             ./internal/runtime/coro_execution_quota_default.go \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
@@ -331,7 +334,18 @@ jobs:
 
       - name: Test native linked coroutine islands
         if: matrix.lane == 'native-e2e'
-        run: go test ./internal/build -run '^TestCoro(StaticPlainDeferNativeNoStdlibRuntimeE2E|ExplicitPanicNativeNoStdlibRuntimeE2E|ChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E)$' -timeout=10m -count=1
+        # Each fixture builds and optimizes its own LLVM runtime island. Keep
+        # them in separate processes so LLVM state from an earlier fixture
+        # cannot consume the shared 10-minute test timeout.
+        run: |
+          tests=(
+            TestCoroStaticPlainDeferNativeNoStdlibRuntimeE2E
+            TestCoroExplicitPanicNativeNoStdlibRuntimeE2E
+            TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E
+          )
+          for test in "${tests[@]}"; do
+            go test ./internal/build -run "^${test}$" -timeout=10m -count=1
+          done
 
       - name: Test native coroutine fleet
         if: matrix.lane == 'fleet-e2e'
@@ -397,7 +411,7 @@ jobs:
           go test ./internal/crosscompile -run '^Test(UseTarget|UseExportsResolvedLLVMConfig|ResolvedLLVMTargetSpecWASIThreads)$' -count=1
           go test ./internal/cabi -run '^TestDevLTOGlobalDCETargetArchAndNewTransformerArchSelection$' -count=1
           go test -v ./ssa -run '^Test(ResolvedTargetConfig(|IsAuthoritativeAndFrozen)|TargetDataLegacyLayoutCompatibility|ResolvedPointerWidthMismatchFallsBack|NewProgramDefaultTargetCompatibility|ResolvedExternalBackendCompatibilityFallback|ResolvedTargetABINameControlsRISCVObject)$' -count=1
-          go test ./internal/build -run '^Test(NewLLSSATargetUsesResolvedLLVMConfig|LLVMCPUAndFeaturesAffectBuildFingerprint|DefaultTargetKeepsLegacyCacheIdentity|NonDefaultLLVMFeaturesEnterCacheIdentity|ResolvedTargetCompatibilityAudit)$' -count=1
+          go test ./internal/build -run '^Test(NewLLSSATargetUsesResolvedLLVMConfig|LLVMCPUAndFeaturesAffectBuildFingerprint|DefaultTargetKeepsLegacyCacheIdentity|NonDefaultLLVMFeaturesEnterCacheIdentity|ResolvedTargetCompatibilityAudit|WasmFrontendLayoutMatchesLLVM)$' -count=1
 
       - name: Check llgo-tag build
         if: matrix.lane == 'integration'

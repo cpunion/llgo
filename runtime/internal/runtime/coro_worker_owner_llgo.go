@@ -21,7 +21,6 @@ package runtime
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/coroworker"
 )
@@ -58,17 +57,10 @@ func validCoroWorkerResultWordsV1(state unsafe.Pointer, r1, r2, errno *uintptr) 
 		r1 != r2 && r1 != errno && r2 != errno
 }
 
-// coroWorkerAbortV1 emits one allocation-free phase byte before the common
-// terminal diagnostic. Worker cleanup is an exact multi-stage ownership
-// transaction, and reducing every invariant violation to the same exit made a
-// rare scheduler/producer race impossible to distinguish in production. The
-// phase byte has no success-path cost and remains stable for crash triage:
-// P/Q/R/S/T/U are park admission; A/B/D/E/G/H are resume ABI, packet decision,
-// completed/canceled tuple, payload, and scalar validation.
-func coroWorkerAbortV1(phase byte, message string) {
-	coroTerminalFputs(c.Str("coroutine worker abort phase "), c.Stderr)
-	coroTerminalFputc(c.Int(phase), c.Stderr)
-	coroTerminalFputc(c.Int('\n'), c.Stderr)
+// coroWorkerAbortV1 routes terminal output through coroRuntimeAbort's private
+// synchronous terminal boundary. Every call site has a distinct stable
+// message, so a second phase byte would add no diagnostic information.
+func coroWorkerAbortV1(message string) {
 	coroRuntimeAbort(message)
 	for {
 	}
@@ -92,12 +84,12 @@ func __llgo_coro_worker_park_v1(
 	if g == nil || handle == nil || header == nil || state == nil ||
 		*state != (CoroWorkerParkV1{}) || function == 0 || argc > coroworker.MaxArgs ||
 		!current {
-		coroWorkerAbortV1('P', "invalid coroutine worker park ABI")
+		coroWorkerAbortV1("invalid coroutine worker park ABI")
 		return
 	}
 	reservation, reserved := coroReserveNativeWorkerSubmissionV1(executor, route)
 	if !reserved {
-		coroWorkerAbortV1('Q', "coroutine worker queue capacity unavailable")
+		coroWorkerAbortV1("coroutine worker queue capacity unavailable")
 		return
 	}
 
@@ -115,23 +107,23 @@ func __llgo_coro_worker_park_v1(
 		canceled := coroCancelNativeWorkerSubmissionV1(executor, route, reservation)
 		*state = CoroWorkerParkV1{}
 		if !canceled {
-			coroWorkerAbortV1('R', "coroutine worker park reservation rollback failed")
+			coroWorkerAbortV1("coroutine worker park reservation rollback failed")
 			return
 		}
-		coroWorkerAbortV1('S', "cannot prepare coroutine worker park")
+		coroWorkerAbortV1("cannot prepare coroutine worker park")
 		return
 	}
 	state.ticket = ticket
 	state.operation = operation
 	if !coro.BindSingleWaitSetResumePacket(&state.wait, &state.packet, operation) {
-		coroWorkerAbortV1('U', "cannot bind coroutine worker resume packet")
+		coroWorkerAbortV1("cannot bind coroutine worker resume packet")
 		return
 	}
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	if !coroCommitNativeWorkerSubmissionV1(
 		driver, task, executor, route, reservation, operation, function, argc, &args,
 	) {
-		coroWorkerAbortV1('T', "cannot commit coroutine worker submission")
+		coroWorkerAbortV1("cannot commit coroutine worker submission")
 	}
 }
 
@@ -148,7 +140,7 @@ func __llgo_coro_worker_resume_v1(
 	state := (*CoroWorkerParkV1)(storage)
 	if g == nil || !validCoroWorkerParkV1(state) ||
 		!validCoroWorkerResultWordsV1(storage, r1, r2, errno) {
-		coroWorkerAbortV1('A', "invalid coroutine worker resume ABI")
+		coroWorkerAbortV1("invalid coroutine worker resume ABI")
 		return 0
 	}
 	*r1, *r2, *errno = 0, 0, 0
@@ -162,20 +154,20 @@ func __llgo_coro_worker_resume_v1(
 		&payload,
 	)
 	if !ok {
-		coroWorkerAbortV1('B', "invalid coroutine worker run decision")
+		coroWorkerAbortV1("invalid coroutine worker run decision")
 		return 0
 	}
 	discard := outcome == coro.ParkOutcomeCanceled
 	if outcome == coro.ParkOutcomeCompleted {
 		if caseID != 1 || cancel != coro.TaskCancelNone ||
 			result != coro.ResumeResultScalar || small != coro.ResumeSmallInvalid {
-			coroWorkerAbortV1('D', "invalid completed coroutine worker decision")
+			coroWorkerAbortV1("invalid completed coroutine worker decision")
 			return 0
 		}
 	} else if !discard || caseID != 0 ||
 		cancel != coro.TaskCancelAbort && cancel != coro.TaskCancelShutdown ||
 		result != coro.ResumeResultNone || small != coro.ResumeSmallInvalid {
-		coroWorkerAbortV1('E', "invalid canceled coroutine worker decision")
+		coroWorkerAbortV1("invalid canceled coroutine worker decision")
 		return 0
 	}
 	*state = CoroWorkerParkV1{}
@@ -186,14 +178,14 @@ func __llgo_coro_worker_resume_v1(
 		return coroWorkerResumeTaskAbortV1
 	}
 	if payload.Kind() != coro.ScalarResultKindWords || payload.Count() != 3 {
-		coroWorkerAbortV1('G', "invalid coroutine worker result payload")
+		coroWorkerAbortV1("invalid coroutine worker result payload")
 		return 0
 	}
 	values := [3]*uintptr{r1, r2, errno}
 	for index, output := range values {
 		value, scalarOK := payload.Scalar(uint8(index))
 		if !scalarOK || uint64(uintptr(value)) != value {
-			coroWorkerAbortV1('H', "coroutine worker result does not fit uintptr")
+			coroWorkerAbortV1("coroutine worker result does not fit uintptr")
 			return 0
 		}
 		*output = uintptr(value)

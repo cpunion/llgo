@@ -65,7 +65,7 @@ func prepareCoroRawCAdapterFixture(t *testing.T) coroRawCAdapterFixture {
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, coroRawCAdapterFixtureSource)
 	prog := newLLSSAProg(t)
-	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()

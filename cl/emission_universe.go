@@ -105,6 +105,11 @@ type EmissionUniverseOptions struct {
 	// construction instead of being left to the legacy LLVM symbol resolver.
 	CompleteRuntimeABI     bool
 	CoroTargetCapabilities coro.TargetCapabilities
+	// LogicalLocality freezes the compiler-inserted package-block and lazy
+	// initializer edges used when locality follows a stackless logical G.
+	// It is an explicit construction input because Program.LogicalLocality is
+	// enabled only after the resulting coroutine plan passes every gate.
+	LogicalLocality bool
 	// CoroForeignExecutorLeafProofs are build-owned proofs over exact
 	// target-selected C/LLVM definitions. They are global because a Go
 	// declaration may link a C definition emitted by another package.
@@ -145,6 +150,7 @@ type EmissionUniverse struct {
 	goroot             string
 	patches            Patches
 	completeRuntimeABI bool
+	logicalLocality    bool
 	coroCapabilities   coro.TargetCapabilities
 	packages           map[*ssa.Package]*preparedEmissionPackage
 	byTypes            map[*types.Package]*preparedEmissionPackage
@@ -160,35 +166,37 @@ type EmissionUniverse struct {
 	// EmissionUniverse/plan authority.
 	libraryEffects CoroLibraryEffectView
 
-	functions             []*ssa.Function
-	required              map[*ssa.Function]none
-	aliases               map[*ssa.Function]*ssa.Function
-	goLinknameDefinitions map[*ssa.Function]emissionGoLinknamePair
-	fnOwners              map[*ssa.Function]*preparedEmissionPackage
-	fnStates              map[*ssa.Function]emissionFunctionState
-	functionKinds         map[emissionFunctionOwnerKey]int
-	intrinsicOps          map[emissionFunctionOwnerKey]int
-	finalKeys             map[emissionFunctionOwnerKey]string
-	physicalNames         map[emissionFunctionOwnerKey]string
-	linkOnceNames         map[*ssa.Function]string
-	callWraps             map[intrinsicWrapperKey]*ssa.Function
-	callWrapInfo          map[*ssa.Function]intrinsicWrapperKey
-	syntheticKeys         map[*ssa.Function]string
-	linkIdentities        map[*ssa.Function]string
-	excluded              map[*ssa.Function]none
-	materialized          map[*ssa.Function]none
-	useOwners             map[*ssa.Function]map[*preparedEmissionPackage]none
-	ownerStates           map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState
-	materializedOwners    map[*ssa.Function]map[*preparedEmissionPackage]none
-	ownerStateErr         error
-	abiMethodReferences   map[*ssa.Function]map[*ssa.Function]none
-	abiSyncReferences     map[*ssa.Function]map[*ssa.Function]none
-	loweredCalls          map[*ssa.Function]map[string]coroLoweredCallTarget
-	plainLoweredCalls     map[*ssa.Function]map[string]*ssa.Function
-	coroProgramIR         *coroProgramIR
-	patchInitEntries      []*ssa.Function
-	patchInitRedirects    coroPatchInitRedirectIndex
-	normalReturnBlocks    map[*ssa.Function]map[*ssa.BasicBlock]none
+	functions              []*ssa.Function
+	required               map[*ssa.Function]none
+	aliases                map[*ssa.Function]*ssa.Function
+	goLinknameDefinitions  map[*ssa.Function]emissionGoLinknamePair
+	fnOwners               map[*ssa.Function]*preparedEmissionPackage
+	fnStates               map[*ssa.Function]emissionFunctionState
+	functionKinds          map[emissionFunctionOwnerKey]int
+	intrinsicOps           map[emissionFunctionOwnerKey]int
+	finalKeys              map[emissionFunctionOwnerKey]string
+	physicalNames          map[emissionFunctionOwnerKey]string
+	linkOnceNames          map[*ssa.Function]string
+	callWraps              map[intrinsicWrapperKey]*ssa.Function
+	callWrapInfo           map[*ssa.Function]intrinsicWrapperKey
+	syntheticKeys          map[*ssa.Function]string
+	linkIdentities         map[*ssa.Function]string
+	excluded               map[*ssa.Function]none
+	materialized           map[*ssa.Function]none
+	useOwners              map[*ssa.Function]map[*preparedEmissionPackage]none
+	ownerStates            map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState
+	materializedOwners     map[*ssa.Function]map[*preparedEmissionPackage]none
+	ownerStateErr          error
+	abiMethodReferences    map[*ssa.Function]map[*ssa.Function]none
+	abiSyncReferences      map[*ssa.Function]map[*ssa.Function]none
+	managedValueReferences map[*ssa.Function]map[*ssa.Function]none
+	loweredCalls           map[*ssa.Function]map[string]coroLoweredCallTarget
+	plainLoweredCalls      map[*ssa.Function]map[string]*ssa.Function
+	localityDispatchers    map[*ssa.Package]map[llssa.Locality]*ssa.Function
+	coroProgramIR          *coroProgramIR
+	patchInitEntries       []*ssa.Function
+	patchInitRedirects     coroPatchInitRedirectIndex
+	normalReturnBlocks     map[*ssa.Function]map[*ssa.BasicBlock]none
 	// unsafeLayoutUnevaluated freezes the exact source SSA instructions erased
 	// by unsafe.Sizeof/Alignof/Offsetof lowering. Inventory, coroutine lowering
 	// facts, preflight, and codegen must all consume this same set: independently
@@ -578,8 +586,13 @@ type coroFrozenCallSitePlan struct {
 type coroEmissionSitePlan struct {
 	managedRuntimeHelpers []coroPlannedRuntimeHelper
 	plainRuntimeHelpers   []string
-	callPlan              coroFrozenCallSitePlan
-	hasCallPlan           bool
+	// localityDispatchers are compiler-materialized func() values passed to
+	// EnsureLogicalLocalInitializer at this source instruction. They are
+	// demand references rather than owner-local calls; the runtime helper owns
+	// their dynamic invocation.
+	localityDispatchers []*ssa.Function
+	callPlan            coroFrozenCallSitePlan
+	hasCallPlan         bool
 }
 
 type emissionFunctionState struct {
@@ -632,6 +645,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		goroot:                  goroot,
 		patches:                 patches,
 		completeRuntimeABI:      options.CompleteRuntimeABI,
+		logicalLocality:         options.LogicalLocality,
 		coroCapabilities:        options.CoroTargetCapabilities,
 		packages:                make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
 		byTypes:                 make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
@@ -655,8 +669,10 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		syntheticKeys:           make(map[*ssa.Function]string),
 		abiMethodReferences:     make(map[*ssa.Function]map[*ssa.Function]none),
 		abiSyncReferences:       make(map[*ssa.Function]map[*ssa.Function]none),
+		managedValueReferences:  make(map[*ssa.Function]map[*ssa.Function]none),
 		loweredCalls:            make(map[*ssa.Function]map[string]coroLoweredCallTarget),
 		plainLoweredCalls:       make(map[*ssa.Function]map[string]*ssa.Function),
+		localityDispatchers:     make(map[*ssa.Package]map[llssa.Locality]*ssa.Function),
 		coroProgramIR:           newCoroProgramIR(),
 		patchInitRedirects:      make(coroPatchInitRedirectIndex),
 		normalReturnBlocks:      make(map[*ssa.Function]map[*ssa.BasicBlock]none),
@@ -1227,6 +1243,17 @@ func (u *EmissionUniverse) CoroDemandReferences(owner *ssa.Function) ([]*ssa.Fun
 	return u.coroFrozenABIReferences(owner, u.abiMethodReferences, "method")
 }
 
+// CoroManagedValueReferences returns exact managed function values introduced
+// by compiler lowering without a source SSA operand. These values use the
+// canonical descriptor transport and are deliberately disjoint from raw ABI
+// method/code-address references.
+func (u *EmissionUniverse) CoroManagedValueReferences(owner *ssa.Function) ([]*ssa.Function, error) {
+	if u == nil {
+		return nil, fmt.Errorf("coroutine managed value references require a prepared emission universe")
+	}
+	return u.coroFrozenABIReferences(owner, u.managedValueReferences, "managed value")
+}
+
 // CoroSyncDemandReferences returns the exact subset of CoroDemandReferences
 // synchronously called through a raw function signature. ABI equality/hash
 // callbacks and plain-representation helpers have this physical contract;
@@ -1290,6 +1317,11 @@ func (u *EmissionUniverse) recordABISyncReferences(owner *ssa.Function, targets 
 
 func (u *EmissionUniverse) recordABIMethodReferences(owner *ssa.Function, targets []*ssa.Function) error {
 	return u.recordABIReferences(owner, targets, u.abiMethodReferences, "method")
+}
+
+func (builder coroProgramIRBuilder) recordManagedValueReferences(owner *ssa.Function, targets []*ssa.Function) error {
+	u := builder.canonical.universe
+	return u.recordABIReferences(owner, targets, u.managedValueReferences, "managed value")
 }
 
 func (u *EmissionUniverse) recordABIReferences(
@@ -4130,6 +4162,7 @@ func (index emissionCanonicalIndex) aliasUnmaterializedPatchedGenericInstance(or
 	}
 	retarget(u.abiMethodReferences)
 	retarget(u.abiSyncReferences)
+	retarget(u.managedValueReferences)
 	for _, calls := range u.loweredCalls {
 		for name, call := range calls {
 			if call.target == original {
@@ -4896,15 +4929,57 @@ func (u *EmissionUniverse) managedGoLinknameDefinitionHasKey(definition *ssa.Fun
 		if u.functionKinds[ownerKey] != goFunc {
 			continue
 		}
-		candidate, err := u.managedGoLinknamePairKey(owner, definition, u.finalKeys[ownerKey])
-		if err == nil && candidate == key {
-			return true
+		candidates, err := (emissionCanonicalIndex{
+			universe: u,
+		}).managedGoLinknameDefinitionPairKeys(owner, definition, u.finalKeys[ownerKey])
+		if err == nil {
+			for _, candidate := range candidates {
+				if candidate == key {
+					return true
+				}
+			}
 		}
 	}
 	return false
 }
 
 func (u *EmissionUniverse) managedGoLinknamePairKey(owner *preparedEmissionPackage, function *ssa.Function, finalKey string) (string, error) {
+	return (emissionCanonicalIndex{
+		universe: u,
+	}).managedGoLinknamePairKeyWithPointerFacade(owner, function, finalKey, false)
+}
+
+// managedGoLinknameDefinitionPairKeys includes one additional key that erases
+// direct typed-pointer parameter/result pointees. Bodyless declarations use
+// that key only when they explicitly expose a direct unsafe.Pointer. This
+// permits the standard runtime.getg-style *privateType/unsafe.Pointer facade
+// without weakening ordinary typed-pointer mirror checks.
+func (index emissionCanonicalIndex) managedGoLinknameDefinitionPairKeys(
+	owner *preparedEmissionPackage,
+	function *ssa.Function,
+	finalKey string,
+) ([]string, error) {
+	primary, err := index.managedGoLinknamePairKeyWithPointerFacade(owner, function, finalKey, false)
+	if err != nil {
+		return nil, err
+	}
+	facade, err := index.managedGoLinknamePairKeyWithPointerFacade(owner, function, finalKey, true)
+	if err != nil {
+		return nil, err
+	}
+	if facade == primary {
+		return []string{primary}, nil
+	}
+	return []string{primary, facade}, nil
+}
+
+func (index emissionCanonicalIndex) managedGoLinknamePairKeyWithPointerFacade(
+	owner *preparedEmissionPackage,
+	function *ssa.Function,
+	finalKey string,
+	forcePointerFacade bool,
+) (string, error) {
+	u := index.universe
 	if u == nil || owner == nil || function == nil {
 		return "", fmt.Errorf("managed go:linkname pair requires an exact function owner")
 	}
@@ -4928,7 +5003,11 @@ func (u *EmissionUniverse) managedGoLinknamePairKey(owner *preparedEmissionPacka
 	if _, ok := physicalSignature.(*types.Signature); !ok {
 		return "", fmt.Errorf("managed go:linkname pair for %q has a non-signature physical type", function.Name())
 	}
-	signature := structuralGoLinknameABITypeKey(physicalSignature)
+	signatureType := physicalSignature
+	if signature := physicalSignature.(*types.Signature); forcePointerFacade || managedGoLinknameHasDirectUnsafePointer(signature) {
+		signatureType = managedGoLinknameDirectPointerFacade(signature)
+	}
+	signature := structuralGoLinknameABITypeKey(signatureType)
 	if typeArgs := function.TypeArgs(); len(typeArgs) != 0 {
 		fields := make([]string, 0, len(typeArgs)+2)
 		fields = append(fields, "go-linkname-callable-instance-v1", signature)
@@ -4938,6 +5017,49 @@ func (u *EmissionUniverse) managedGoLinknamePairKey(owner *preparedEmissionPacka
 		signature = framedEmissionKey(fields...)
 	}
 	return managedSymbolKey(goFunc, symbol, managedGoLinknameABISignatureKey(signature)), nil
+}
+
+func managedGoLinknameHasDirectUnsafePointer(signature *types.Signature) bool {
+	if signature == nil {
+		return false
+	}
+	for _, tuple := range []*types.Tuple{signature.Params(), signature.Results()} {
+		for index := 0; index < tuple.Len(); index++ {
+			if basic, ok := types.Unalias(tuple.At(index).Type()).(*types.Basic); ok &&
+				basic.Kind() == types.UnsafePointer {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func managedGoLinknameDirectPointerFacade(signature *types.Signature) *types.Signature {
+	if signature == nil {
+		return nil
+	}
+	mapTuple := func(tuple *types.Tuple) *types.Tuple {
+		values := make([]*types.Var, tuple.Len())
+		for index := range values {
+			value := tuple.At(index)
+			typ := types.Unalias(value.Type())
+			if _, pointer := typ.(*types.Pointer); pointer {
+				typ = types.Typ[types.UnsafePointer]
+			} else if basic, unsafePointer := typ.(*types.Basic); unsafePointer && basic.Kind() == types.UnsafePointer {
+				typ = types.Typ[types.UnsafePointer]
+			}
+			values[index] = types.NewVar(value.Pos(), value.Pkg(), value.Name(), typ)
+		}
+		return types.NewTuple(values...)
+	}
+	return types.NewSignatureType(
+		nil,
+		nil,
+		nil,
+		mapTuple(signature.Params()),
+		mapTuple(signature.Results()),
+		signature.Variadic(),
+	)
 }
 
 // managedGoLinknameABISignatureKey keeps the complete structural ABI
@@ -5014,16 +5136,20 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 			if len(function.Blocks) == 0 {
 				continue
 			}
-			pairKey, err := u.managedGoLinknamePairKey(prepared, function, key)
+			pairKeys, err := (emissionCanonicalIndex{
+				universe: u,
+			}).managedGoLinknameDefinitionPairKeys(prepared, function, key)
 			if err != nil {
 				return err
 			}
-			group := groups[pairKey]
-			if group == nil {
-				group = &emissionGoLinknameGroup{definitions: make(map[*ssa.Function]none)}
-				groups[pairKey] = group
+			for _, pairKey := range pairKeys {
+				group := groups[pairKey]
+				if group == nil {
+					group = &emissionGoLinknameGroup{definitions: make(map[*ssa.Function]none)}
+					groups[pairKey] = group
+				}
+				group.definitions[function] = none{}
 			}
-			group.definitions[function] = none{}
 		}
 	}
 
@@ -5248,7 +5374,8 @@ func (u *EmissionUniverse) activateBodylessGoLinknameAlias(declaration *ssa.Func
 		return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q was materialized before exact aliasing", declaration.Name())
 	}
 	if len(u.materializedOwners[declaration]) != 0 || len(u.abiMethodReferences[declaration]) != 0 ||
-		len(u.abiSyncReferences[declaration]) != 0 || len(u.loweredCalls[declaration]) != 0 ||
+		len(u.abiSyncReferences[declaration]) != 0 || len(u.managedValueReferences[declaration]) != 0 ||
+		len(u.loweredCalls[declaration]) != 0 ||
 		len(u.plainLoweredCalls[declaration]) != 0 || len(u.normalReturnBlocks[declaration]) != 0 {
 		return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q has materialized owner metadata before exact aliasing", declaration.Name())
 	}
@@ -5685,6 +5812,9 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 	if err != nil {
 		return err
 	}
+	programBuilder := coroProgramIRBuilder{
+		canonical: emissionCanonicalIndex{universe: u},
+	}
 	_, _, ftype := ctx.funcName(fn)
 	isCgo := ftype == goFunc && isCgoExternSymbol(fn)
 	var cgoPlan *emissionCgoLoweringPlan
@@ -5713,6 +5843,9 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				return fmt.Errorf("prepare emission universe: function %q semantic SitePlan: %w", fn.Name(), err)
 			}
 		}
+	}
+	if err := programBuilder.materializeFunctionPreamble(ctx, fn, owner, emissionState, ftype); err != nil {
+		return err
 	}
 	if ftype != goFunc {
 		// compileFuncDecl retains the declaration/symbol classification but
@@ -5791,7 +5924,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				// Alloc may insert runtime.AllocZ. Freeze those exact hidden
 				// helpers even though the rest of the generated adapter CFG is
 				// frontend-unevaluated.
-				if err := u.materializeLoweredRuntimeHelpers(
+				if err := programBuilder.materializeLoweredRuntimeHelpers(
 					ctx, fn, owner, emissionState, functionShape, instruction,
 				); err != nil {
 					return err
@@ -5823,7 +5956,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 			if _, unevaluated := ctx.unevaluatedSSA[instr]; unevaluated {
 				continue
 			}
-			if err := u.materializeLoweredRuntimeHelpers(ctx, fn, owner, emissionState, functionShape, instr); err != nil {
+			if err := programBuilder.materializeLoweredRuntimeHelpers(ctx, fn, owner, emissionState, functionShape, instr); err != nil {
 				return err
 			}
 			if call, ok := instr.(ssa.CallInstruction); ok {

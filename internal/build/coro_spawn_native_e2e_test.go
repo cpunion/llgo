@@ -183,6 +183,9 @@ type eface struct {
 	data  unsafe.Pointer
 }
 
+type Defer struct{}
+type mOS struct{}
+
 type PanicNilError struct {
 	_ [0]*PanicNilError
 }
@@ -201,6 +204,12 @@ func coroChannelNativeE2EPanicWrapNilPointer(bool, string, string) {}
 func AllocU(uintptr) unsafe.Pointer
 
 func AllocZ(size uintptr) unsafe.Pointer { return AllocU(size) }
+func AllocRoot(size uintptr) unsafe.Pointer { return AllocU(size) }
+
+//go:linkname FreeRoot C.free
+func FreeRoot(unsafe.Pointer)
+
+func fatal(message string) { coroRuntimeAbort(message) }
 
 // libc rand returns C int. Keep this fixture ABI identical to every other
 // declaration of the shared physical symbol, then perform the Go uint32
@@ -722,7 +731,7 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 
 func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	t.Helper()
-	files := []string{
+	files := append(coroNativeTaskContextRuntimeSources(), []string{
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_abort_libc.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
@@ -750,7 +759,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro_atomic_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_wait_coro.go"),
-	}
+	}...)
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_slice.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_execution_quota_default.go")
@@ -776,7 +785,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	// runtime files through the private compiler channel; the public Config.Tags
 	// path must reject this capability as forged.
 	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag}
-	configureCoroRuntimeIslandPlan(conf)
+	configureCoroRuntimeIslandPlan(conf, "NewChan")
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
 		"github.com/goplus/llgo/runtime/internal/coro":         true,
@@ -835,7 +844,11 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 // package identity. Source lists are deliberately loaded as
 // command-line-arguments, so this is fixture provenance rather than a runtime
 // profile or a production feature switch.
-func configureCoroRuntimeIslandPlan(conf *Config) {
+func configureCoroRuntimeIslandPlan(conf *Config, linkedRuntimeEntries ...string) {
+	linkedRuntimeEntry := make(map[string]struct{}, len(linkedRuntimeEntries))
+	for _, name := range linkedRuntimeEntries {
+		linkedRuntimeEntry[name] = struct{}{}
+	}
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		if input.requiredPlain == nil {
 			input.requiredPlain = make(map[*ssa.Function]struct{})
@@ -863,8 +876,11 @@ func configureCoroRuntimeIslandPlan(conf *Config) {
 				}
 				continue
 			}
+			_, linkedRuntimeRoot := linkedRuntimeEntry[fn.Name()]
 			externalRuntimeEntry := pkgPath == "command-line-arguments" &&
-				(strings.HasPrefix(fn.Name(), "__llgo_coro_") || token.IsExported(fn.Name()))
+				(strings.HasPrefix(fn.Name(), "__llgo_coro_") ||
+					strings.HasPrefix(fn.Name(), "Coro") ||
+					linkedRuntimeRoot)
 			externalCoreEntry := pkgPath == "github.com/goplus/llgo/runtime/internal/coro" &&
 				token.IsExported(fn.Name())
 			if fn.Parent() != nil || fn.Signature == nil || fn.Signature.Recv() != nil ||

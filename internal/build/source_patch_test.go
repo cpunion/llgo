@@ -27,7 +27,7 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
+			overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
 				goos:      goos,
 				goarch:    "wasm",
 				goversion: goversion,
@@ -37,7 +37,7 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 			}
 
 			pkgs, err := packages.LoadEx(nil, func(types.Sizes, string, string) types.Sizes {
-				return &types.StdSizes{WordSize: 4, MaxAlign: 4}
+				return &types.StdSizes{WordSize: 4, MaxAlign: 8}
 			}, &packages.Config{
 				Mode:    loadSyntax | packages.NeedDeps | packages.NeedModule | packages.NeedExportFile,
 				Env:     cfgEnv,
@@ -60,7 +60,7 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 
 func TestWASIP1CoroSyscallMetadataSourcePatch(t *testing.T) {
 	goroot := runtime.GOROOT()
-	overlay, err := buildSourcePatchOverlayForGOROOT(
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(
 		nil,
 		env.LLGoRuntimeDir(),
 		goroot,
@@ -126,7 +126,7 @@ func TestWasmBytealgSourcePatchReplacesAsm(t *testing.T) {
 		}
 	}
 
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:      "js",
 		goarch:    "wasm",
 		goversion: runtime.Version(),
@@ -195,7 +195,7 @@ func TestSourcePatchAssemblyMatchError(t *testing.T) {
 package bytealg
 `)
 
-	_, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
+	_, _, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
 		goos:   "js",
 		goarch: "wasm",
 	})
@@ -205,7 +205,7 @@ package bytealg
 }
 
 func TestBuildSourcePatchOverlayForIter(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{})
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ type Mutex struct{}
 func boolToUint8(bool) uint8
 `)
 
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
 		goos:      runtime.GOOS,
 		goarch:    runtime.GOARCH,
 		goversion: "go1.26.0",
@@ -305,7 +305,7 @@ func TestNativeCoroTimeSleepUsesSourcePatch(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine time.Sleep patch requires Darwin or Linux")
 	}
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       runtime.GOOS,
 		goarch:     runtime.GOARCH,
 		buildFlags: []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc"},
@@ -386,7 +386,7 @@ func TestNativeCoroTimeSleepUsesSourcePatch(t *testing.T) {
 }
 
 func TestNativeCoroTimeSleepPatchIsCapabilityGated(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       runtime.GOOS,
 		goarch:     runtime.GOARCH,
 		buildFlags: []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,nogc"},
@@ -404,7 +404,7 @@ func TestNativeCoroTimeSleepPatchIsCapabilityGated(t *testing.T) {
 }
 
 func TestNamedWebAssemblyChacha8UsesPureGoSourcePatch(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       "linux",
 		goarch:     "arm",
 		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},
@@ -449,7 +449,7 @@ func TestNamedWebAssemblyChacha8UsesPureGoSourcePatch(t *testing.T) {
 }
 
 func TestNativeWasmFrontendDoesNotDuplicateChacha8SourcePatch(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       "js",
 		goarch:     "wasm",
 		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,nogc"},
@@ -469,7 +469,7 @@ func TestNativeWasmFrontendDoesNotDuplicateChacha8SourcePatch(t *testing.T) {
 }
 
 func TestJSWasmTimeZoneSourcePatchUsesScalarHostFact(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(
 		nil,
 		env.LLGoRuntimeDir(),
 		runtime.GOROOT(),
@@ -539,7 +539,7 @@ func TestJSWasmTimeZoneSourcePatchUsesScalarHostFact(t *testing.T) {
 }
 
 func TestCoroBytealgCountUsesPreemptibleGoSourcePatch(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       "linux",
 		goarch:     "amd64",
 		buildFlags: []string{"-tags=llgo,llgo_coro,nogc"},
@@ -593,7 +593,7 @@ func TestCoroBytealgCountUsesPreemptibleGoSourcePatch(t *testing.T) {
 }
 
 func TestNamedWebAssemblyInternalLinuxSyscallFailsClosed(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       "linux",
 		goarch:     "arm",
 		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},
@@ -734,7 +734,7 @@ func TestDarwinCompatibilityFiles(t *testing.T) {
 }
 
 func TestDarwinCoroProcessSyscallsUseIsolatedRawCarrier(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(
 		nil,
 		env.LLGoRuntimeDir(),
 		runtime.GOROOT(),
@@ -840,7 +840,7 @@ func TestApplySourcePatchForPkg_MissingStdlibPkg(t *testing.T) {
 func Pull[V any](seq func(func(V) bool)) {}
 `)
 
-	changed, overlay, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
+	changed, overlay, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,7 +869,7 @@ package demo
 const Only = "patched"
 `)
 
-	changed, overlay, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
+	changed, overlay, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
 		goos:      runtime.GOOS,
 		goarch:    runtime.GOARCH,
 		goversion: "go1.24.11",
@@ -881,7 +881,7 @@ const Only = "patched"
 		t.Fatalf("expected go1.26-tagged patch to be ignored on go1.24, got overlay: %#v", overlay)
 	}
 
-	changed, overlay, err = applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
+	changed, overlay, _, err = applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
 		goos:      runtime.GOOS,
 		goarch:    runtime.GOARCH,
 		goversion: "go1.26.0",
@@ -915,7 +915,7 @@ func Other() {}
 //llgo:annotate Other coro noblock
 `)
 
-	changed, overlay, err := applySourcePatchForPkg(
+	changed, overlay, _, err := applySourcePatchForPkg(
 		nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{},
 	)
 	if err != nil {
@@ -951,7 +951,7 @@ func forkAndExecInChild1() {}
 func doCheckClonePidfd() {}
 `)
 
-	changed, overlay, err := applySourcePatchForPkg(
+	changed, overlay, _, err := applySourcePatchForPkg(
 		nil, nil, env.LLGoRuntimeDir(), goroot, pkgPath,
 		sourcePatchBuildContext{goos: "linux", goarch: "amd64", goversion: "go1.26.0"},
 	)
@@ -979,7 +979,7 @@ func TestApplySourcePatchForPkg_RejectsMissingAnnotationTarget(t *testing.T) {
 //llgo:annotate Missing rawcritical
 `)
 
-	_, _, err := applySourcePatchForPkg(
+	_, _, _, err := applySourcePatchForPkg(
 		nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{},
 	)
 	if err == nil || !strings.Contains(err.Error(), `annotation target "Missing" was not found`) {
@@ -1010,7 +1010,7 @@ func TestApplySourcePatchForPkg_UnreadableStdlibPkg(t *testing.T) {
 func Pull[V any](seq func(func(V) bool)) {}
 `)
 
-	changed, overlay, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
+	changed, overlay, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1035,7 @@ func runSourcePatchCase(t *testing.T, caseName string) {
 	copyTree(t, filepath.Join(assetRoot, "pkg"), srcDir)
 	copyTree(t, filepath.Join(assetRoot, "patch"), patchDir)
 
-	changed, overlay, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
+	changed, overlay, _, err := applySourcePatchForPkg(nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{})
 	if err != nil {
 		t.Fatal(err)
 	}

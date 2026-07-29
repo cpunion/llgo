@@ -18,34 +18,7 @@ package runtime
 
 import (
 	"unsafe"
-
-	c "github.com/goplus/llgo/runtime/internal/clite"
 )
-
-// goroutineFunc is the target-independent entry ABI between compiler-generated
-// goroutine wrappers and the runtime scheduler.
-//
-//llgo:type C
-type goroutineFunc func(unsafe.Pointer) unsafe.Pointer
-
-// runtimeContext keeps the G, M, and P for the current 1:1 backend in one
-// allocation. Keeping their ownership together makes mexit deterministic while
-// leaving the individual objects and links compatible with a later M:N backend.
-type runtimeContext struct {
-	g g
-	m m
-	p p
-
-	// root is non-nil for contexts passed through a host-thread API. Such
-	// contexts must remain visible to the collector until mexit.
-	root unsafe.Pointer
-}
-
-var sched struct {
-	goidgen uint64
-	midgen  int64
-	pidgen  int32
-}
 
 // NewProc creates a new G running fn.
 //
@@ -75,18 +48,6 @@ func newproc1(fn goroutineFunc, arg unsafe.Pointer, callergp *g) *g {
 	gp.startfn = fn
 	gp.startarg = arg
 	return gp
-}
-
-func allocRuntimeContext() *runtimeContext {
-	size := unsafe.Sizeof(runtimeContext{})
-	root := AllocRoot(size)
-	if root == nil {
-		panic("runtime: failed to allocate goroutine context")
-	}
-	c.Memset(root, 0, size)
-	ctx := (*runtimeContext)(root)
-	ctx.root = root
-	return ctx
 }
 
 // newm starts the platform execution resource for mp.
@@ -150,33 +111,6 @@ func mexit(mp *m) {
 		ctx.root = nil
 		FreeRoot(root)
 	}
-}
-
-func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
-	gp := &ctx.g
-	mp := &ctx.m
-	pp := &ctx.p
-
-	gp.m = mp
-	gp.atomicstatus = status
-	gp.goid = nextGoid(gp)
-	if callergp != nil {
-		gp.parentGoid = callergp.goid
-	}
-	gp.context = ctx
-
-	mp.curg = gp
-	mp.p = pp
-	mp.id = nextMid(mp)
-
-	pp.id = nextPid(pp)
-	pstatus := uint32(_Pidle)
-	if status == _Grunning {
-		pstatus = _Prunning
-	}
-	setpstatus(pp, pstatus)
-	pp.m = mp
-	return gp
 }
 
 // GMPForTesting reports the current runtime ownership graph. It is kept

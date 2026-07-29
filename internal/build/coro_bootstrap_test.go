@@ -32,8 +32,27 @@ import (
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/packages"
 	llssa "github.com/goplus/llgo/ssa"
+	"github.com/goplus/llgo/ssa/abi"
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestCoroProgramSourcePackagePathIgnoresMainABISymbolRewrite(t *testing.T) {
+	abi.SetRewriteMainPrefix(true)
+	t.Cleanup(func() { abi.SetRewriteMainPrefix(false) })
+
+	mainPkg := types.NewPackage("example.com/bootstrap-main", "main")
+	if got := llssa.PathOf(mainPkg); got != "main" {
+		t.Fatalf("rewritten main ABI path = %q, want main", got)
+	}
+	if got := coroProgramSourcePackagePath(mainPkg); got != mainPkg.Path() {
+		t.Fatalf("main source owner = %q, want %q", got, mainPkg.Path())
+	}
+
+	patchPkg := types.NewPackage(abi.PatchPathPrefix+"runtime", "runtime")
+	if got := coroProgramSourcePackagePath(patchPkg); got != "runtime" {
+		t.Fatalf("patch source owner = %q, want runtime", got)
+	}
+}
 
 func TestSelectCoroProgramBootstrapV2ExactMixedFiveStageProgram(t *testing.T) {
 	fixture := newCoroBootstrapV2TestContext(t)

@@ -880,7 +880,7 @@ schema与digest接入production plan、Compilation、package fingerprint和manif
 `llgo.coro.plan-digest.v26`。v26仍不表示集中EmissionLedger observer、PrimitiveCatalog、CoroOverlay或
 VirtualStoragePlan已经实现。随后声明级`schedulerwait`证书被完整删除，raw-host可阻塞调用改为
 exact host root及closed call closure上的调用场景事实；对应字段从plan/digest移除，当前schema为
-`llgo.coro.plan-digest.v27`。
+`llgo.coro.plan-digest.v28`。
 
 后续不预留空v22/v23字段，也不沿用历史v9/v10标号。只在某一层的canonical事实真正进入
 production plan/cache identity时，从届时当前schema递增一次。每次升级都验证：任一相关fact

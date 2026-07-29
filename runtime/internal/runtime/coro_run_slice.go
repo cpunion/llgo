@@ -101,6 +101,15 @@ type coroRunPolicyV1 struct {
 	lifecycle *coroProgramLifecycleV1
 }
 
+// coroRuntimeContextActivationV1 distinguishes a physical-thread install from
+// a nested resume which borrows the same already-installed logical G. The
+// latter occurs when C synchronously calls Go while the parent LLVM resume is
+// still active below the C frame.
+type coroRuntimeContextActivationV1 struct {
+	previous unsafe.Pointer
+	borrowed bool
+}
+
 func (policy coroRunPolicyV1) valid() bool {
 	return policy.main == nil && policy.lifecycle == nil || policy.main != nil && policy.lifecycle != nil
 }
@@ -132,7 +141,14 @@ func coroRunPhysicalActionV1(p *coro.P, g *coro.G, action coro.Action) (coro.Act
 		if !ok || next.Kind != coro.ActionResume || next.Handle != action.Handle {
 			return coro.Action{}, false
 		}
+		activation, entered := coroEnterRuntimeContext(g)
+		if !entered {
+			return coro.Action{}, false
+		}
 		coroHandleResume(next.Handle)
+		if !coroLeaveRuntimeContext(g, activation) {
+			return coro.Action{}, false
+		}
 		return coro.Resumed(p, g, next)
 	case coro.ActionCheckDestroy:
 		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))

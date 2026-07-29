@@ -527,8 +527,9 @@ func (sources *ExecutorSourceSet) resolvePublishedEpochProgress(p *P) (promoted,
 		return 0, 0, false, false, false
 	}
 	var cursor publishedEpochResolveCursor
+	var step publishedEpochResolveStep
 	for {
-		step, advanced := resolvePublishedEpochStep(sources, p, &cursor)
+		advanced := resolvePublishedEpochStep(sources, p, &cursor, &step)
 		if !advanced {
 			return promoted, applyVisits, retryBudget, awaitExternal, false
 		}

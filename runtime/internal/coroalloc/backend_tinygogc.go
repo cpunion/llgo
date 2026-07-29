@@ -32,12 +32,9 @@ func backendBootstrap() bool {
 }
 
 func backendAllocFrame(size uintptr) unsafe.Pointer {
-	return tinygogc.Alloc(size)
+	return tinygogc.AllocRooted(size)
 }
 
-func backendFreeFrame(ptr unsafe.Pointer) {
-	// Frames and task records are unlinked and cleared exactly once by the
-	// scheduler. The stop-the-world collector reclaims their physical blocks
-	// after the live P/G graph no longer reaches them.
-	_ = ptr
+func backendFreeFrame(ptr unsafe.Pointer, size uintptr) bool {
+	return tinygogc.FreeRooted(ptr, size)
 }

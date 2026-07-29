@@ -90,7 +90,7 @@ type goProgram aProgram
 // Alignof must implement the alignment guarantees required by the spec.
 // The result must be >= 1.
 func (p *goProgram) Alignof(T types.Type) int64 {
-	return p.sizes.Alignof(T)
+	return p.physicalAlignof(p.layoutType(T))
 }
 
 // Offsetsof returns the offsets of the given struct fields, in bytes.
@@ -98,61 +98,179 @@ func (p *goProgram) Alignof(T types.Type) int64 {
 // A negative entry in the result indicates that the struct is too large.
 func (p *goProgram) Offsetsof(fields []*types.Var) (ret []int64) {
 	prog := Program(unsafe.Pointer(p))
-	ptrSize := int64(prog.PointerSize())
 	if abi.IsClosureFields(fields) {
-		return []int64{0, ptrSize}
+		return []int64{0, int64(prog.PointerSize())}
 	}
-	extra := int64(0)
-	ret = p.sizes.Offsetsof(fields)
-	for i, f := range fields {
-		ret[i] += extra
-		extra += p.extraSize(f.Type(), ptrSize)
+	physical := make([]*types.Var, len(fields))
+	for index, field := range fields {
+		physical[index] = types.NewField(
+			field.Pos(),
+			field.Pkg(),
+			field.Name(),
+			p.layoutType(field.Type()),
+			field.Anonymous(),
+		)
 	}
-	return
+	return p.physicalOffsetsof(physical)
 }
 
 // Sizeof returns the size of a variable of type T.
 // Sizeof must implement the size guarantees required by the spec.
 // A negative result indicates that T is too large.
 func (p *goProgram) Sizeof(T types.Type) int64 {
-	prog := Program(unsafe.Pointer(p))
-	ptrSize := int64(prog.PointerSize())
-	baseSize := prog.sizes.Sizeof(T) + p.extraSize(T, ptrSize)
-	switch T.Underlying().(type) {
-	case *types.Struct, *types.Array:
-		return align(baseSize, prog.sizes.Alignof(T))
-	}
-	return baseSize
+	return p.physicalSizeof(p.layoutType(T))
 }
 
-func (p *goProgram) extraSize(typ types.Type, ptrSize int64) (ret int64) {
-retry:
-	switch t := typ.(type) {
+// layoutType produces the physical Go value shape needed only by go/types
+// layout queries. It deliberately does not use goTypes.cvtType: the Sizes
+// callback can run while a named type is still being declared, and caching a
+// converted shell at that point would permanently freeze an incomplete
+// underlying type. Pointer-like containers stop recursion because their
+// element shape cannot affect their own size or alignment.
+func (p *goProgram) layoutType(typ types.Type) types.Type {
+	switch typ := typ.(type) {
+	case *types.Alias:
+		return p.layoutType(types.Unalias(typ))
 	case *types.Named:
-		if v, ok := p.gocvt.typbg.Load(namedLinkname(t)); ok && v.(Background) == InC {
+		if background, ok := p.gocvt.typbg.Load(namedLinkname(typ)); ok &&
+			background.(Background) == InC {
+			return typ
+		}
+		return p.layoutType(typ.Underlying())
+	case *types.Signature:
+		return p.gocvt.cvtClosure(typ)
+	case *types.Struct:
+		if IsClosure(typ) {
+			return typ
+		}
+		fields := make([]*types.Var, typ.NumFields())
+		tags := make([]string, typ.NumFields())
+		for index := range fields {
+			field := typ.Field(index)
+			fields[index] = types.NewField(
+				field.Pos(),
+				field.Pkg(),
+				field.Name(),
+				p.layoutType(field.Type()),
+				field.Anonymous(),
+			)
+			tags[index] = typ.Tag(index)
+		}
+		return types.NewStruct(fields, tags)
+	case *types.Array:
+		return types.NewArray(p.layoutType(typ.Elem()), typ.Len())
+	case *types.Tuple:
+		vars := make([]*types.Var, typ.Len())
+		for index := range vars {
+			value := typ.At(index)
+			vars[index] = types.NewVar(
+				value.Pos(), value.Pkg(), value.Name(), p.layoutType(value.Type()),
+			)
+		}
+		return types.NewTuple(vars...)
+	default:
+		return typ
+	}
+}
+
+func (p *goProgram) physicalAlignof(typ types.Type) int64 {
+	if tuple, ok := types.Unalias(typ).Underlying().(*types.Tuple); ok {
+		alignment := int64(1)
+		for index := 0; index < tuple.Len(); index++ {
+			if fieldAlignment := p.physicalAlignof(tuple.At(index).Type()); fieldAlignment > alignment {
+				alignment = fieldAlignment
+			}
+		}
+		return alignment
+	}
+	return p.sizes.Alignof(typ)
+}
+
+func (p *goProgram) physicalOffsetsof(fields []*types.Var) []int64 {
+	offsets := make([]int64, len(fields))
+	var offset int64
+	for index, field := range fields {
+		if offset < 0 {
+			offsets[index] = -1
+			continue
+		}
+		offset = align(offset, p.physicalAlignof(field.Type()))
+		if offset < 0 {
+			offsets[index] = -1
+			continue
+		}
+		offsets[index] = offset
+		size := p.physicalSizeof(field.Type())
+		if size < 0 || offset > int64(^uint64(0)>>1)-size {
+			offset = -1
+			continue
+		}
+		offset += size
+	}
+	return offsets
+}
+
+func (p *goProgram) physicalSizeof(typ types.Type) int64 {
+	switch underlying := types.Unalias(typ).Underlying().(type) {
+	case *types.Struct:
+		if underlying.NumFields() == 0 {
 			return 0
 		}
-		typ = t.Underlying()
-		goto retry
-	case *types.Alias:
-		typ = types.Unalias(t)
-		goto retry
-	case *types.Signature:
-		return ptrSize
-	case *types.Struct:
-		if IsClosure(t) {
-			return
+		fields := make([]*types.Var, underlying.NumFields())
+		for index := range fields {
+			fields[index] = underlying.Field(index)
 		}
-		n := t.NumFields()
-		for i := 0; i < n; i++ {
-			f := t.Field(i)
-			ret += p.extraSize(f.Type(), ptrSize)
+		offsets := p.physicalOffsetsof(fields)
+		last := len(fields) - 1
+		size := p.physicalSizeof(fields[last].Type())
+		if offsets[last] < 0 || size < 0 ||
+			offsets[last] > int64(^uint64(0)>>1)-size {
+			return -1
 		}
-		return
+		end := offsets[last] + size
+		// Preserve target-specific source rules that are stricter than the raw
+		// field walk, notably gc's addressable trailing zero-sized field.
+		if baseline := p.sizes.Sizeof(typ); baseline > end {
+			end = baseline
+		}
+		return align(end, p.physicalAlignof(typ))
+	case *types.Tuple:
+		if underlying.Len() == 0 {
+			return 0
+		}
+		fields := make([]*types.Var, underlying.Len())
+		for index := range fields {
+			fields[index] = underlying.At(index)
+		}
+		offsets := p.physicalOffsetsof(fields)
+		last := len(fields) - 1
+		size := p.physicalSizeof(fields[last].Type())
+		if offsets[last] < 0 || size < 0 ||
+			offsets[last] > int64(^uint64(0)>>1)-size {
+			return -1
+		}
+		return align(offsets[last]+size, p.physicalAlignof(typ))
 	case *types.Array:
-		return p.extraSize(t.Elem(), ptrSize) * t.Len()
+		length := underlying.Len()
+		if length <= 0 {
+			return 0
+		}
+		elementSize := p.physicalSizeof(underlying.Elem())
+		if elementSize <= 0 {
+			return elementSize
+		}
+		stride := align(elementSize, p.physicalAlignof(underlying.Elem()))
+		if stride < 0 || length > int64(^uint64(0)>>1)/stride {
+			return -1
+		}
+		size := stride * length
+		if baseline := p.sizes.Sizeof(typ); baseline > size {
+			return baseline
+		}
+		return size
+	default:
+		return p.sizes.Sizeof(typ)
 	}
-	return 0
 }
 
 func align(x, a int64) int64 {

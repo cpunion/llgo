@@ -24,6 +24,7 @@ import (
 	"go/types"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/packages"
@@ -200,7 +201,7 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 		aPkg = ctx.pkgByID[pkg.ID]
 	}
 	if aPkg == nil || aPkg.Package == nil || aPkg.SSA == nil || aPkg.SSA.Pkg == nil ||
-		aPkg.ID != pkg.ID || aPkg.PkgPath != pkg.PkgPath || llssa.PathOf(aPkg.SSA.Pkg) != pkg.PkgPath {
+		aPkg.ID != pkg.ID || aPkg.PkgPath != pkg.PkgPath || aPkg.SSA.Pkg.Path() != pkg.PkgPath {
 		return nil, fmt.Errorf("coroutine program bootstrap v2: linked main package %q has no exact SSA package", pkg.ID)
 	}
 
@@ -214,6 +215,10 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 	}
 	mainInit := aPkg.SSA.Func("init")
 	mainMain := aPkg.SSA.Func("main")
+	mainSymbolPrefix := aPkg.PkgPath
+	if ctx.buildConf.RewriteMainPrefix && pkg.Types != nil && pkg.Types.Name() == "main" {
+		mainSymbolPrefix = "main"
+	}
 	steps := make([]coroProgramBootstrapStepV1, 0, 5)
 	for _, spec := range []struct {
 		fn     *ssa.Function
@@ -223,8 +228,8 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 		role   uint32
 	}{
 		{runtimeInit, llssa.PkgRuntime + ".init", llssa.PkgRuntime, "internal runtime init", coroProgramStepRoleRuntimeInitV2},
-		{mainInit, aPkg.PkgPath + ".init", aPkg.PkgPath, "main package init", coroProgramStepRolePackageInitV2},
-		{mainMain, aPkg.PkgPath + ".main", aPkg.PkgPath, "main", coroProgramStepRoleMainV2},
+		{mainInit, mainSymbolPrefix + ".init", aPkg.PkgPath, "main package init", coroProgramStepRolePackageInitV2},
+		{mainMain, mainSymbolPrefix + ".main", aPkg.PkgPath, "main", coroProgramStepRoleMainV2},
 	} {
 		step, err := selectCoroProgramManagedStepV2(ctx, spec.fn, spec.target, spec.owner, spec.label, spec.role)
 		if err != nil {
@@ -327,7 +332,9 @@ func selectCoroProgramManagedStepV2(
 	if !ok || fn == nil || fn != original {
 		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: exact function is absent from the frozen emission universe", label)
 	}
-	if fn.Pkg == nil || fn.Pkg.Pkg == nil || llssa.PathOf(fn.Pkg.Pkg) != owner || fn.Parent() != nil || fn.Origin() != nil || len(fn.TypeArgs()) != 0 {
+	if fn.Pkg == nil || fn.Pkg.Pkg == nil ||
+		coroProgramSourcePackagePath(fn.Pkg.Pkg) != owner ||
+		fn.Parent() != nil || fn.Origin() != nil || len(fn.TypeArgs()) != 0 {
 		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: frozen target is not the exact top-level owner function", label)
 	}
 	if link, exists := ctx.prog.Linkname(target); exists && link != target {
@@ -410,6 +417,17 @@ func selectCoroProgramManagedStepV2(
 	default:
 		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target %q has unsupported emission %s", label, plan.ID, plan.Emission)
 	}
+}
+
+// coroProgramSourcePackagePath is an ownership identity, not a linker-symbol
+// projection. Alternate runtime packages retain their canonical source owner,
+// while a user main package keeps its import path even when its physical ABI
+// symbols are intentionally rewritten to main.*.
+func coroProgramSourcePackagePath(pkg *types.Package) string {
+	if pkg == nil {
+		return ""
+	}
+	return strings.TrimPrefix(pkg.Path(), altPkgPathPrefix)
 }
 
 func coroProgramFunctionValueSites(plan *coro.SSAPlan, target *ssa.Function) []string {

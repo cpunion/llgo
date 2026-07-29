@@ -69,7 +69,7 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 		t.Skipf("native coroutine time.Sleep compilation is unavailable on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       runtime.GOOS,
 		goarch:     runtime.GOARCH,
 		buildFlags: []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc"},

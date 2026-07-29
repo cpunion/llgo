@@ -17,6 +17,7 @@
 package coro
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -173,6 +174,7 @@ func TestExecutionQuotaConcurrentResizeMaintainsPhysicalBound(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32
 	start := make(chan struct{})
+	overlap := make(chan struct{})
 	var workers sync.WaitGroup
 	for route := RouteID(1); route <= RouteID(ExecutorFleetCapacity); route++ {
 		route := route
@@ -199,6 +201,7 @@ func TestExecutionQuotaConcurrentResizeMaintainsPhysicalBound(t *testing.T) {
 				if current > int32(ExecutorFleetCapacity) {
 					t.Errorf("active managed executions = %d, physical capacity %d", current, ExecutorFleetCapacity)
 				}
+				<-overlap
 				active.Add(-1)
 				if _, ok := quota.Release(route); !ok {
 					t.Errorf("route %d resize release invalid", route)
@@ -211,6 +214,15 @@ func TestExecutionQuotaConcurrentResizeMaintainsPhysicalBound(t *testing.T) {
 	go func() {
 		defer workers.Done()
 		<-start
+		if _, _, ok := quota.SetLimit(ExecutorFleetCapacity); !ok {
+			t.Error("grow execution quota for overlap")
+			close(overlap)
+			return
+		}
+		for active.Load() < 2 {
+			runtime.Gosched()
+		}
+		close(overlap)
 		for iteration := 0; iteration < 4000; iteration++ {
 			limit := uint32(iteration%ExecutorFleetCapacity + 1)
 			if _, _, ok := quota.SetLimit(limit); !ok {

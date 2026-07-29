@@ -38,6 +38,8 @@ func backendAllocFrame(size uintptr) unsafe.Pointer {
 	return c.Malloc(size)
 }
 
-func backendFreeFrame(ptr unsafe.Pointer) {
+func backendFreeFrame(ptr unsafe.Pointer, size uintptr) bool {
+	_ = size
 	c.Free(ptr)
+	return true
 }

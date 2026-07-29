@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"log"
@@ -159,6 +160,7 @@ type CoroPlanInput struct {
 	staticCodeAddressCallArgument  func(ssa.CallInstruction, int) (bool, error)
 	demandReferences               func(*ssa.Function) ([]*ssa.Function, error)
 	syncDemandReferences           func(*ssa.Function) ([]*ssa.Function, error)
+	managedValueReferences         func(*ssa.Function) ([]*ssa.Function, error)
 	loweredCalls                   func(*ssa.Function) ([]coro.SSALoweredCall, error)
 	requiredRoots                  coro.Roots
 	requiredPlain                  map[*ssa.Function]struct{}
@@ -1318,6 +1320,36 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				}
 				if !sameExactCoroFunctionReferences(requested, compilerTargets) {
 					return nil, fmt.Errorf("builder synchronous demand references in %q conflict with the frozen frontend raw-ABI references", owner.Name())
+				}
+			}
+			return compilerTargets, nil
+		}
+	}
+	if in.managedValueReferences != nil || config.ClassifyManagedValueReferences != nil {
+		classifyManagedValues := config.ClassifyManagedValueReferences
+		config.ClassifyManagedValueReferences = func(owner *ssa.Function) ([]*ssa.Function, error) {
+			var compilerTargets []*ssa.Function
+			var err error
+			if in.managedValueReferences != nil {
+				compilerTargets, err = in.managedValueReferences(owner)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"classify frozen frontend managed value references for %q: %w",
+						owner.Name(), err,
+					)
+				}
+			}
+			compilerTargets = append([]*ssa.Function(nil), compilerTargets...)
+			if classifyManagedValues != nil {
+				requested, err := classifyManagedValues(owner)
+				if err != nil {
+					return nil, err
+				}
+				if !sameExactCoroFunctionReferences(requested, compilerTargets) {
+					return nil, fmt.Errorf(
+						"builder managed value references in %q conflict with the frozen frontend references",
+						owner.Name(),
+					)
 				}
 			}
 			return compilerTargets, nil
@@ -3012,6 +3044,11 @@ type Config struct {
 	// when it would otherwise be enabled by full LTO.
 	DisableGoGlobalDCE bool
 
+	// RewriteMainPrefix controls whether symbols in the main package
+	// use "main." as their package path prefix instead of the actual
+	// import path. When true, pkgpath.sym is rewritten to main.sym.
+	RewriteMainPrefix bool
+
 	// GlobalRewrites specifies compile-time overrides for global string variables.
 	// Keys are fully qualified package paths (e.g. "main" or "github.com/user/pkg").
 	// Each Rewrites entry maps variable names to replacement string values. Only
@@ -3021,6 +3058,7 @@ type Config struct {
 	ModuleHook       ModuleHook
 	CoroPlanBuilder  CoroPlanBuilder
 	CoroPlanObserver CoroPlanObserver
+	Overlay          map[string][]byte
 
 	// compilerBuildTags is a compiler-owned channel for isolated runtime-island
 	// builds that deliberately do not enable the complete program-bootstrap
@@ -3220,6 +3258,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if conf.Mode == ModeTest {
 		cfg.Mode |= packages.NeedForTest
 	}
+	abi.SetRewriteMainPrefix(conf.RewriteMainPrefix)
 
 	emitDebugInfo := shouldEmitDebugInfo(conf, &export)
 	cl.EnableDebug(emitDebugInfo)
@@ -3252,17 +3291,30 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	// final-PC sites for sidecar construction.
 	prog.EnableFuncInfoSites(shouldEnablePCLNSites(conf, funcInfo, emitDebugInfo))
 	sizes := func(sizes types.Sizes, compiler, arch string) types.Sizes {
-		if arch == "wasm" {
-			sizes = &types.StdSizes{WordSize: 4, MaxAlign: 4}
-		}
-		return prog.TypeSizes(sizes)
+		return prog.TypeSizes(llgoTargetTypeSizes(sizes, compiler, arch, export.LLVMTarget))
 	}
 	dedup := packages.NewDeduper()
+	var syntaxErr error
+	var syntaxErrMu sync.Mutex
+	recordSyntaxErr := func(err error) {
+		syntaxErrMu.Lock()
+		defer syntaxErrMu.Unlock()
+		if syntaxErr == nil {
+			syntaxErr = err
+		}
+	}
+	loadSyntaxErr := func() error {
+		syntaxErrMu.Lock()
+		defer syntaxErrMu.Unlock()
+		return syntaxErr
+	}
 	dedup.SetPreload(func(pkg *types.Package, files []*ast.File) {
 		if llruntime.SkipToBuild(pkg.Path()) {
 			return
 		}
-		cl.ParsePkgSyntax(prog, pkg, files)
+		if err := cl.ParsePkgSyntax(prog, cfg.Fset, pkg, files); err != nil {
+			recordSyntaxErr(err)
+		}
 	})
 
 	if patterns == nil {
@@ -3272,7 +3324,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Overlay, err = buildSourcePatchOverlayForGOROOT(cfg.Overlay, llgoRuntimeDir, sourcePatchGOROOT, sourcePatchBuildContext{
+	var llgoFiles map[string][]string
+	conf.Overlay, llgoFiles, err = buildSourcePatchOverlayForGOROOT(conf.Overlay, llgoRuntimeDir, sourcePatchGOROOT, sourcePatchBuildContext{
 		goos:       conf.Goos,
 		goarch:     conf.Goarch,
 		goversion:  sourcePatchGoVersion,
@@ -3281,8 +3334,21 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
+	dedup.SetLLGoFiles(llgoFiles)
+	cfg.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+		if data, ok := conf.Overlay[filename]; ok {
+			src = data
+		}
+		// We implicitly promise to keep doing ast.Object resolution. :(
+		const mode = parser.AllErrors | parser.ParseComments
+		return parser.ParseFile(fset, filename, src, mode)
+	}
+
 	initial, err := packages.LoadExWithGoVersion(dedup, sizes, cfg, conf.GoVersion, patterns...)
 	if err != nil {
+		return nil, err
+	}
+	if err := loadSyntaxErr(); err != nil {
 		return nil, err
 	}
 	if conf.AllowNoBody {
@@ -3290,7 +3356,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 	mode := conf.Mode
 	if mode == ModeTest {
-		initial, err = filterTestPackages(initial, conf.OutFile)
+		initial, err = filterTestPackages(initial, conf.OutFile, conf.RewriteMainPrefix)
 		if err != nil {
 			return nil, err
 		}
@@ -3325,6 +3391,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := loadSyntaxErr(); err != nil {
+		return nil, err
+	}
 
 	prog.SetRuntime(func() *types.Package {
 		return altPkgs[0].Types
@@ -3332,7 +3401,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	prog.SetPython(func() *types.Package {
 		return dedup.Check(llssa.PkgPython).Types
 	})
-	preCollectRuntimeLinknames(prog, altPkgs)
+	if err := prepareLocalVariables(prog, initial, altPkgs); err != nil {
+		return nil, err
+	}
 
 	buildMode := ssaBuildMode
 	cabiOptimize := true
@@ -3500,6 +3571,19 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 
 	return allPkgs, nil
+}
+
+func llgoTargetTypeSizes(sizes types.Sizes, _, arch, llvmTarget string) types.Sizes {
+	if arch == "wasm" || strings.HasPrefix(llvmTarget, "wasm32-") {
+		// LLGo's wasm targets use 32-bit words and pointers, while LLVM's wasm
+		// data layout gives i64/f64 an 8-byte ABI alignment. Named TinyGo-style
+		// targets retain GOARCH=arm for source selection, so the resolved LLVM
+		// triple—not only GOARCH—must select this layout. Keep the frontend
+		// layout identical so unsafe constants and LLVM GEP/alloc sizes cannot
+		// disagree.
+		return &types.StdSizes{WordSize: 4, MaxAlign: 8}
+	}
+	return sizes
 }
 
 func targetGCBuildTags(gc string) ([]string, error) {
@@ -3791,6 +3875,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.staticCodeAddressCallArgument = ctx.coroEmission.CoroStaticCodeAddressCallArgument
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences
 		input.syncDemandReferences = ctx.coroEmission.CoroSyncDemandReferences
+		input.managedValueReferences = ctx.coroEmission.CoroManagedValueReferences
 		input.loweredCalls = ctx.coroEmission.CoroLoweredCalls
 		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
 			if config.CoroABI == "" {
@@ -3872,6 +3957,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		CoroLibraryEffectMetadata:   importedLibraryMetadata,
 		CoroLibraryEffects:          maps.Clone(importedLibraryEffects),
 		CoroLibraryForeignCallables: maps.Clone(libraryForeign),
+	}
+	if ctx.prog != nil {
+		ctx.prog.SetLogicalLocality(true)
 	}
 	if ctx.coroEmission != nil {
 		bootstraps, err := prepareCoroProgramBootstrapsV1(ctx)
@@ -4222,7 +4310,10 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 		if aPkg == nil {
 			aPkg = ctx.pkgByID[pkg.ID]
 		}
-		if aPkg == nil || aPkg.SSA == nil || aPkg.SSA.Pkg == nil || llssa.PathOf(aPkg.SSA.Pkg) != pkg.PkgPath {
+		// Package identity must use the source types path. llssa.PathOf is an
+		// ABI-symbol projection and intentionally returns "main" when
+		// RewriteMainPrefix is enabled.
+		if aPkg == nil || aPkg.SSA == nil || aPkg.SSA.Pkg == nil || aPkg.SSA.Pkg.Path() != pkg.PkgPath {
 			return nil, fmt.Errorf("coroutine managed program roots: linked main package %q has no exact SSA package", pkg.ID)
 		}
 		for _, name := range []string{"init", "main"} {
@@ -4698,6 +4789,13 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	names := []string{"init"}
 	demandByName := map[string]coro.Demand{"init": coro.AsyncDemand}
 	plainRootByName := map[string]bool{"init": false}
+	if ctx.prog != nil && ctx.prog.NeedsLogicalLocalContext() {
+		// defineEntryFunction emits these calls after a successful coroutine
+		// plan commits logical locality. They have no source SSA instruction,
+		// so retain their exact direct-plain runtime bodies here rather than
+		// depending on an unrelated //export wrapper to make them reachable.
+		names = append(names, "EnterLocalContext", "LeaveLocalContext")
+	}
 	names = append(names,
 		coroFrameAllocatorBootstrapSymbolV1,
 		coroProgramBeginSymbolV1,
@@ -5289,6 +5387,34 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		if !goBody {
 			return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has no emitted Go body in %q", name, llssa.PkgRuntime)
 		}
+		if name == "EnterLocalContext" {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 1 || sig.Results().Len() != 1 ||
+				!coroRuntimeLocalContextPointer(sig.Params().At(0).Type()) ||
+				!types.Identical(sig.Results().At(0).Type(), sig.Params().At(0).Type()) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine program local-context entry ABI %q must have exact func(*LocalContext) *LocalContext signature",
+					name,
+				)
+			}
+		}
+		if name == "LeaveLocalContext" {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 2 || sig.Results().Len() != 0 ||
+				!coroRuntimeLocalContextPointer(sig.Params().At(0).Type()) ||
+				!types.Identical(sig.Params().At(1).Type(), sig.Params().At(0).Type()) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine program local-context exit ABI %q must have exact func(*LocalContext, *LocalContext) signature",
+					name,
+				)
+			}
+		}
 		roots = append(roots, coro.Root{Function: fn, Demand: demandByName[name]})
 	}
 
@@ -5436,6 +5562,19 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	// deliberately replaces.
 	roots = appendCoroDirectPlainRoots(roots, directPlain)
 	return roots, plain, directPlain, closedDynamic, nil
+}
+
+func coroRuntimeLocalContextPointer(typ types.Type) bool {
+	pointer, ok := types.Unalias(typ).(*types.Pointer)
+	if !ok {
+		return false
+	}
+	named, ok := types.Unalias(pointer.Elem()).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Name() != "LocalContext" ||
+		named.Obj().Pkg() == nil {
+		return false
+	}
+	return llssa.PathOf(named.Obj().Pkg()) == llssa.PkgRuntime
 }
 
 func frozenGoEmittedBody(universe *cl.EmissionUniverse, fn *ssa.Function) (bool, error) {
@@ -5933,6 +6072,7 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		// deliberately prepare an incomplete package universe.
 		CompleteRuntimeABI:     hasRuntimeABI,
 		CoroTargetCapabilities: ctx.buildConf.coroTargetCapabilities(),
+		LogicalLocality:        true,
 		CoroForeignExecutorLeafProofs: ctx.coroRawGlobalSymbols.
 			frozenForeignExecutorLeafProofs(),
 		GOROOT: ctx.goRoot,
@@ -6071,11 +6211,14 @@ func needLink(pkg *packages.Package, mode Mode) bool {
 	return pkg.Name == "main"
 }
 
-func filterTestPackages(initial []*packages.Package, outFile string) ([]*packages.Package, error) {
+func filterTestPackages(initial []*packages.Package, outFile string, rewriteMainPrefix bool) ([]*packages.Package, error) {
 	filtered := initial[:0]
 	for _, pkg := range initial {
 		if needLink(pkg, ModeTest) {
 			filtered = append(filtered, pkg)
+		}
+		if rewriteMainPrefix && pkg.Types != nil && pkg.Types.Name() == "main" {
+			pkg.Types.SetName("main.test")
 		}
 	}
 	if len(filtered) > 1 && outFile != "" {
@@ -6593,6 +6736,9 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	methodByName := make(map[string]none)
 	allPkgs := []*packages.Package{pkg}
 	for _, v := range pkgs {
+		if v.PkgPath != pkg.PkgPath && v.Types != nil && v.Types.Name() == "main" {
+			continue
+		}
 		allPkgs = append(allPkgs, v.Package)
 	}
 	visitRoots := allPkgs
@@ -7550,13 +7696,22 @@ func altPkgs(initial []*packages.Package, conf *Config, alts ...string) []string
 	return alts
 }
 
-func preCollectRuntimeLinknames(prog llssa.Program, pkgs []*packages.Package) {
-	for _, pkg := range pkgs {
-		if pkg != nil && pkg.PkgPath == llssa.PkgRuntime && len(pkg.Syntax) != 0 {
-			cl.PreCollectLinknames(prog, pkg.PkgPath, pkg.Syntax)
-			return
+func prepareLocalVariables(prog llssa.Program, groups ...[]*packages.Package) error {
+	seen := make(map[*types.Package]bool)
+	var firstErr error
+	for _, roots := range groups {
+		packages.Visit(roots, nil, func(p *packages.Package) {
+			if firstErr != nil || p.Types == nil || p.IllTyped || seen[p.Types] {
+				return
+			}
+			seen[p.Types] = true
+			firstErr = cl.PrepareLocalVariables(prog, p.Fset, p.Types, p.TypesInfo, p.Syntax)
+		})
+		if firstErr != nil {
+			return firstErr
 		}
 	}
+	return nil
 }
 
 func altSSAPkgs(prog *ssa.Program, patches cl.Patches, alts []*packages.Package, conf *Config, verbose bool) {

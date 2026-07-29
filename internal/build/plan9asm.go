@@ -43,7 +43,7 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 			// Some stdlib .s files are placeholders without any TEXT bodies
 			// (e.g. runtime/debug/debug.s). They carry no executable asm and
 			// are safe to ignore.
-			hasText, err := llplan9asm.HasAnyTextAsm(ctx.conf.Overlay, sfiles)
+			hasText, err := llplan9asm.HasAnyTextAsm(ctx.buildConf.Overlay, sfiles)
 			if err != nil {
 				return nil, fmt.Errorf("%s: inspect asm files: %w", pkg.PkgPath, err)
 			}
@@ -61,7 +61,7 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 	skipDarwinDynimportTrampolines := shouldCheckDarwinDynimportTrampolineAsm(ctx, pkg)
 	objFiles := make([]string, 0, len(sfiles))
 	for _, sfile := range sfiles {
-		src, err := llplan9asm.ReadFileWithOverlay(ctx.conf.Overlay, sfile)
+		src, err := llplan9asm.ReadFileWithOverlay(ctx.buildConf.Overlay, sfile)
 		if err != nil {
 			return nil, fmt.Errorf("%s: read %s: %w", pkg.PkgPath, sfile, err)
 		}
@@ -266,7 +266,7 @@ func plan9asmSigsForPkg(ctx *context, pkgPath string) (map[string]struct{}, erro
 	}
 	sfiles = plan9AsmSFiles(sfiles)
 	for _, sfile := range sfiles {
-		src, err := llplan9asm.ReadFileWithOverlay(ctx.conf.Overlay, sfile)
+		src, err := llplan9asm.ReadFileWithOverlay(ctx.buildConf.Overlay, sfile)
 		if err != nil {
 			return nil, fmt.Errorf("%s: read %s: %w", pkg.PkgPath, sfile, err)
 		}
