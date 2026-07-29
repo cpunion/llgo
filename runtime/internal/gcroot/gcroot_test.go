@@ -30,7 +30,7 @@ func TestVisitAndSwitchContexts(t *testing.T) {
 		stackEntry: stackEntry{m: &m.frameMap},
 		roots:      [2]unsafe.Pointer{firstValue, secondValue},
 	}
-	currentRootChain = unsafe.Pointer(&entry.stackEntry)
+	currentRootChain = uintptr(unsafe.Pointer(&entry.stackEntry))
 
 	var first, second Context
 	RegisterActive(&first)
@@ -49,7 +49,7 @@ func TestVisitAndSwitchContexts(t *testing.T) {
 	}
 
 	Switch(&second)
-	if first.chain != unsafe.Pointer(&entry.stackEntry) || currentRootChain != nil {
+	if first.chain != unsafe.Pointer(&entry.stackEntry) || currentRootChain != 0 {
 		t.Fatal("Switch did not save the active chain and restore the next chain")
 	}
 	Unregister(&first)
@@ -85,7 +85,7 @@ func TestRestoreChain(t *testing.T) {
 
 	first := unsafe.Pointer(uintptr(0x11))
 	second := unsafe.Pointer(uintptr(0x22))
-	currentRootChain = first
+	currentRootChain = uintptr(first)
 	if got := CurrentChain(); got != first {
 		t.Fatalf("CurrentChain() = %p, want %p", got, first)
 	}
@@ -102,14 +102,32 @@ func TestAdoptCurrent(t *testing.T) {
 	var first, second Context
 	RegisterActive(&first)
 	Register(&second)
-	currentRootChain = unsafe.Pointer(uintptr(0x11))
+	currentRootChain = uintptr(0x11)
 
 	AdoptCurrent(&second)
-	if active != &second {
+	if activeContext != uintptr(unsafe.Pointer(&second)) {
 		t.Fatal("AdoptCurrent did not replace the active context")
 	}
-	if currentRootChain != unsafe.Pointer(uintptr(0x11)) {
+	if currentRootChain != uintptr(0x11) {
 		t.Fatal("AdoptCurrent changed the chain restored by the stack switch")
+	}
+}
+
+func TestPublishAndSwitchToSystem(t *testing.T) {
+	resetForTest()
+	t.Cleanup(resetForTest)
+
+	var ctx Context
+	RegisterActive(&ctx)
+	currentRootChain = uintptr(0x44)
+	PublishCurrent()
+	if ctx.chain != unsafe.Pointer(uintptr(0x44)) {
+		t.Fatalf("published chain = %p, want %p", ctx.chain, unsafe.Pointer(uintptr(0x44)))
+	}
+
+	SwitchAtBoundary(nil)
+	if activeContext != 0 || currentRootChain != 0 {
+		t.Fatalf("system boundary retained active=%#x chain=%#x", activeContext, currentRootChain)
 	}
 }
 
@@ -125,6 +143,6 @@ func assertPanics(t *testing.T, fn func()) {
 
 func resetForTest() {
 	contexts = nil
-	active = nil
-	currentRootChain = nil
+	currentRootChain = 0
+	activeContext = 0
 }

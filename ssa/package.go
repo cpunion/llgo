@@ -242,6 +242,7 @@ type aProgram struct {
 	enableGoGlobalDCE     bool
 	enableDeadcodeDrop    bool
 	enableGCRoots         bool
+	threadLocalGCRoots    bool
 	enableSafepoints      bool
 	disableBoundsChecks   bool
 	pthreadStackSize      uint64
