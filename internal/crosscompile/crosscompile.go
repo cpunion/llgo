@@ -43,9 +43,15 @@ type Export struct {
 	Emulator     string // Emulator command template (e.g., "qemu-system-arm -M {} -kernel {}")
 	DebugInfo    DebugInfoPolicy
 	WasmPostLink WasmPostLink
+	WasmRuntime  WasmRuntime
 
 	// Flashing/Debugging configuration
 	Device flash.Device // Device configuration for flashing/debugging
+}
+
+// WasmRuntime describes entry behavior implemented by the selected runtime.
+type WasmRuntime struct {
+	RunMainTask bool
 }
 
 // WasmPostLink describes transformations required after the core module is

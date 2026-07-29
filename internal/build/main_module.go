@@ -128,7 +128,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 
 	var wasmRunMain llssa.Function
-	if ctx.crossCompile.WasmPostLink.Asyncify {
+	if ctx.crossCompile.WasmPostLink.Asyncify || ctx.crossCompile.WasmRuntime.RunMainTask {
 		defineWasmMainTask(mainPkg, mainInit, mainMain)
 		wasmRunMain = declareNoArgFunc(mainPkg, rtPkgPath+".RunWasmMain")
 	}
@@ -143,7 +143,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		abiInit:     abiInit,
 	})
 
-	if needStart(ctx) {
+	if needStart(ctx) && !ctx.crossCompile.WasmRuntime.RunMainTask {
 		defineStart(mainPkg, entryFn, argvValueType)
 	}
 
@@ -248,7 +248,8 @@ type entryFunctions struct {
 func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa.Global, argvType llssa.Type, fns entryFunctions) llssa.Function {
 	prog := pkg.Prog
 	entryName := "main"
-	if !needStart(ctx) && isWasmTarget(ctx.buildConf.Goos) {
+	if isWasmTarget(ctx.buildConf.Goos) &&
+		(!needStart(ctx) || ctx.crossCompile.WasmRuntime.RunMainTask) {
 		entryName = "__main_argc_argv"
 	}
 	sig := newEntrySignature(argvType.RawType())

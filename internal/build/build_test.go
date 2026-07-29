@@ -30,6 +30,7 @@ import (
 	"github.com/goplus/llgo/internal/meta"
 	"github.com/goplus/llgo/internal/mockable"
 	"github.com/goplus/llgo/internal/packages"
+	"github.com/goplus/llgo/internal/wasmworkers"
 	llssa "github.com/goplus/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
@@ -165,7 +166,7 @@ func TestConfigureWasmGC(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			export := crosscompile.Export{}
-			enabled, err := configureWasmGC(&test.conf, &export)
+			enabled, err := configureWasmGC(&test.conf, &export, false)
 			if (err != nil) != test.err {
 				t.Fatalf("configureWasmGC error = %v, want error %v", err, test.err)
 			}
@@ -185,7 +186,7 @@ func TestConfigureWasmGC(t *testing.T) {
 func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
 	t.Setenv("LLGO_WASI_THREADS", "1")
 	conf := Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo_wasm_gc"}
-	if _, err := configureWasmGC(&conf, &crosscompile.Export{}); err == nil {
+	if _, err := configureWasmGC(&conf, &crosscompile.Export{}, false); err == nil {
 		t.Fatal("expected llgo_wasm_gc with WASI threads to fail")
 	}
 }
@@ -193,12 +194,72 @@ func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
 func TestConfigureWasmGCLeavesWASIThreadsDisabled(t *testing.T) {
 	t.Setenv("LLGO_WASI_THREADS", "1")
 	conf := Config{Goos: "wasip1", Goarch: "wasm"}
-	enabled, err := configureWasmGC(&conf, &crosscompile.Export{})
+	enabled, err := configureWasmGC(&conf, &crosscompile.Export{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if enabled || hasBuildTag(conf.Tags, "llgo_wasm_gc") {
 		t.Fatalf("threaded WASI selected wasm GC: enabled=%v tags=%q", enabled, conf.Tags)
+	}
+}
+
+func TestConfigureWasmWorkers(t *testing.T) {
+	t.Setenv(llgoWasmWorkers, "4")
+	conf := Config{Goos: "js", Goarch: "wasm"}
+	export := crosscompile.Export{}
+	config, err := configureWasmWorkers(&conf, &export)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Count != 4 || !config.Enabled() {
+		t.Fatalf("worker config = %+v, want four enabled workers", config)
+	}
+	for _, flag := range []string{"-pthread", "-DLLGO_WASM_WORKERS=4"} {
+		if !slices.Contains(export.CCFLAGS, flag) {
+			t.Fatalf("CCFLAGS do not contain %q: %v", flag, export.CCFLAGS)
+		}
+	}
+	for _, flag := range []string{"-pthread", "-sPTHREAD_POOL_SIZE=4", "-sPROXY_TO_PTHREAD=1", "-sEXIT_RUNTIME=1"} {
+		if !slices.Contains(export.LDFLAGS, flag) {
+			t.Fatalf("LDFLAGS do not contain %q: %v", flag, export.LDFLAGS)
+		}
+	}
+	preJS := wasmworkers.PreJSPath(env.LLGoROOT())
+	if i := slices.Index(export.LDFLAGS, "--pre-js"); i < 0 || i+1 == len(export.LDFLAGS) || export.LDFLAGS[i+1] != preJS {
+		t.Fatalf("LDFLAGS do not select worker host shim %q: %v", preJS, export.LDFLAGS)
+	}
+	if !slices.Contains(export.BuildTags, "llgo.wasm_workers") {
+		t.Fatalf("BuildTags do not select the worker runtime: %v", export.BuildTags)
+	}
+	if !export.WasmRuntime.RunMainTask {
+		t.Fatal("worker runtime does not run main as a schedulable task")
+	}
+}
+
+func TestConfigureWasmWorkersDefaultIsInert(t *testing.T) {
+	conf := Config{Goos: "linux", Goarch: "amd64"}
+	export := crosscompile.Export{}
+	config, err := configureWasmWorkers(&conf, &export)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Enabled() || len(export.CCFLAGS) != 0 || len(export.LDFLAGS) != 0 || len(export.BuildTags) != 0 {
+		t.Fatalf("default worker config changed native build: config=%+v export=%+v", config, export)
+	}
+}
+
+func TestConfigureWasmWorkersRejectsUnsupportedTarget(t *testing.T) {
+	t.Setenv(llgoWasmWorkers, "2")
+	conf := Config{Goos: "wasip1", Goarch: "wasm"}
+	if _, err := configureWasmWorkers(&conf, &crosscompile.Export{}); err == nil {
+		t.Fatal("WASI worker configuration succeeded")
+	}
+}
+
+func TestConfigureWasmWorkersRejectsCurrentGC(t *testing.T) {
+	conf := Config{Goos: "js", Goarch: "wasm", Tags: "llgo_wasm_gc"}
+	if _, err := configureWasmGC(&conf, &crosscompile.Export{}, true); err == nil {
+		t.Fatal("multi-worker wasm GC configuration succeeded before M2")
 	}
 }
 
