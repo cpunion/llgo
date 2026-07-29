@@ -1,5 +1,3 @@
-//go:build llgo && wasm && !(wasip1 && llgo.wasi_threads)
-
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -16,8 +14,6 @@
  * limitations under the License.
  */
 
-package runtime
-
-// mOS is empty for the single-worker WebAssembly backend. The host Worker is
-// owned by Emscripten rather than created for an individual M.
-type mOS struct{}
+// Package wasmcontext provides suspended execution contexts for WebAssembly
+// runtime schedulers.
+package wasmcontext

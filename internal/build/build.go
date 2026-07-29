@@ -1372,12 +1372,15 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	}
 	linkArgs = append(linkArgs, cSharedExportArgs(ctx, linkedOrder)...)
 
-	err = linkObjFiles(ctx, outputPath, linkInputs, linkArgs, verbose)
+	linkOutput, err := prepareWasmLinkOutput(ctx.buildConf, &ctx.crossCompile, outputPath)
 	if err != nil {
 		return err
 	}
-
-	return nil
+	defer cleanupWasmLinkOutput(linkOutput, outputPath)
+	if err := linkObjFiles(ctx, linkOutput, linkInputs, linkArgs, verbose); err != nil {
+		return err
+	}
+	return publishWasmLinkOutput(ctx, linkOutput, outputPath, verbose)
 }
 
 func linkedModuleGlobals(pkgs []Package) map[string]none {
@@ -2364,7 +2367,7 @@ func llvmPassPipeline(level optlevel.Level, ltoMode lto.Mode) string {
 }
 
 func IsWasiThreadsEnabled() bool {
-	return isEnvOn(llgoWasiThreads, true)
+	return isEnvOn(llgoWasiThreads, false)
 }
 
 func IsFullRpathEnabled() bool {
