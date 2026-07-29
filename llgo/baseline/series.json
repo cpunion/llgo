@@ -22,6 +22,16 @@
       "updatedAt": "2026-07-28T10:14:26.541Z"
     },
     {
+      "kind": "branch",
+      "id": "0d13d036a7f0a264",
+      "label": "Branch coro/sync-main-20260729",
+      "path": "series/branch/0d13d036a7f0a264/history.json",
+      "configPath": "series/branch/0d13d036a7f0a264/config.json",
+      "sha": "df66a728a09e12c96d85fc3837532c94908a5d9a",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/df66a728a09e12c96d85fc3837532c94908a5d9a",
+      "updatedAt": "2026-07-29T06:09:30.571Z"
+    },
+    {
       "kind": "pull",
       "id": "78",
       "label": "PR #78",
@@ -48,6 +58,16 @@
       "sha": "f25d20ef2a7eab7c7be6d40b5f3d621a178c9b57",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/f25d20ef2a7eab7c7be6d40b5f3d621a178c9b57",
       "updatedAt": "2026-07-28T10:14:26.538Z"
+    },
+    {
+      "kind": "pull",
+      "id": "91",
+      "label": "PR #91",
+      "path": "series/pull/91/history.json",
+      "configPath": "series/pull/91/config.json",
+      "sha": "df66a728a09e12c96d85fc3837532c94908a5d9a",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/df66a728a09e12c96d85fc3837532c94908a5d9a",
+      "updatedAt": "2026-07-29T06:09:30.566Z"
     }
   ]
 }
