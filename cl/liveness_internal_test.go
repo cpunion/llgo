@@ -848,6 +848,11 @@ func use(p *int) {
 		}
 	}
 
+	t.Run("missing-order-entry", func(t *testing.T) {
+		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], map[ssa.Instruction]int{}, map[ssa.Value]bool{}); ok || last != nil {
+			t.Fatalf("lastUseInBlock with unscheduled referrer = %v, %v; want failure", last, ok)
+		}
+	})
 	t.Run("unary", func(t *testing.T) {
 		check(t, &ssa.UnOp{Op: token.SUB, X: param})
 	})

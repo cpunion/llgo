@@ -1358,8 +1358,8 @@ func (s *instructionOperandScratch) uses(instr ssa.Instruction, v ssa.Value) boo
 	} else {
 		s.operands = s.operands[:0]
 	}
-	// Referrer lists are mutable in x/tools. Re-scan operands deliberately
-	// so malformed or stale referrers make the liveness proof fail closed.
+	// Referrer lists are mutable in x/tools. Re-scan operands deliberately so
+	// stale entries that no longer name v make the liveness proof fail closed.
 	s.operands = instr.Operands(s.operands)
 	for _, operand := range s.operands {
 		if operand != nil && *operand == v {
@@ -1464,6 +1464,10 @@ func (p *context) lastUseInBlockValue(
 	if refs == nil {
 		return nil, true
 	}
+	// x/tools defines Referrers for function-local values as the inverse of
+	// Instruction.Operands. Rely on that builder contract for completeness,
+	// but reject stale entries that no longer name v or are no longer
+	// scheduled in this block.
 	var last ssa.Instruction
 	updateLast := func(instr ssa.Instruction) {
 		if instr == nil {
@@ -1485,6 +1489,9 @@ func (p *context) lastUseInBlockValue(
 				return nil, false
 			}
 			if instr.Block() != blk {
+				return nil, false
+			}
+			if _, ok := order[instr]; !ok {
 				return nil, false
 			}
 			if slotAddress && instructionRetainsAddress(instr, v) {
