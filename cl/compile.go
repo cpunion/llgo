@@ -1377,6 +1377,12 @@ func instructionUsesValue(instr ssa.Instruction, v ssa.Value) bool {
 func instructionRetainsAddress(instr ssa.Instruction, v ssa.Value) bool {
 	// Side-effecting instructions can hide a stack address from the SSA
 	// referrer graph, so the liveness walk cannot follow later aliases.
+	//
+	// Keep this switch in sync with the SSA instruction set: every instruction
+	// that can persist v beyond the current instruction must either be handled
+	// here, produce an ssa.Value whose uses the recursive walk can follow, or
+	// make the analysis fail closed. In particular, a new side-effecting,
+	// non-ssa.Value instruction that retains an operand must be added here.
 	switch instr := instr.(type) {
 	case *ssa.Store:
 		return instr.Val == v
@@ -1545,7 +1551,13 @@ func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][
 }
 
 func (p *context) clearAlloc(b llssa.Builder, alloc *ssa.Alloc) {
-	ptr := p.compileValue(b, alloc)
+	// Eligible allocs are lowered before their later clear sites. Reuse that
+	// exact stack pointer; rematerializing the alloc here would clear unrelated
+	// storage and invalidate the liveness proof.
+	ptr, ok := p.bvals[alloc]
+	if !ok {
+		log.Panicln("stack clear for unmaterialized alloc:", alloc)
+	}
 	elem := b.Prog.Elem(ptr.Type)
 	b.StoreVolatile(ptr, p.prog.Zero(elem))
 }
