@@ -27,6 +27,7 @@ func main() {
 	testRecoveredRootChain()
 	testReclamation()
 	testHeapGrowth()
+	testMultiWorkerGC()
 	println("wasm gc ok")
 }
 

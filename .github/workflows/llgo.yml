@@ -485,9 +485,10 @@ jobs:
           }
 
           run_wasm_workers() {
+            local expected="$2"
             local output
             output=$(node -e "import('$1').then(module => module.default()).catch(error => { console.error(error); process.exit(1); });" 2>&1)
-            grep -Fxq "wasm workers ok" <<<"$output"
+            grep -Fxq "$expected" <<<"$output"
           }
 
           run_wasi_timers() {
@@ -516,10 +517,16 @@ jobs:
           run_wasi_timers "$RUNNER_TEMP/wasm-timers-wasip1.wasm"
           LLGO_WASM_WORKERS=2 GOOS=js GOARCH=wasm llgo build \
             -o "$RUNNER_TEMP/wasm-workers-go.mjs" ./internal/build/testdata/wasm-workers
-          run_wasm_workers "$RUNNER_TEMP/wasm-workers-go.mjs"
+          run_wasm_workers "$RUNNER_TEMP/wasm-workers-go.mjs" "wasm workers ok"
           LLGO_WASM_WORKERS=2 llgo build -target wasm \
             -o "$RUNNER_TEMP/wasm-workers.mjs" ./internal/build/testdata/wasm-workers
-          run_wasm_workers "$RUNNER_TEMP/wasm-workers.mjs"
+          run_wasm_workers "$RUNNER_TEMP/wasm-workers.mjs" "wasm workers ok"
+          LLGO_WASM_WORKERS=2 GOOS=js GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-gc-workers-go.mjs" ./internal/build/testdata/wasm-gc
+          run_wasm_workers "$RUNNER_TEMP/wasm-gc-workers-go.mjs" "wasm gc ok"
+          LLGO_WASM_WORKERS=2 llgo build -target wasm \
+            -o "$RUNNER_TEMP/wasm-gc-workers.mjs" ./internal/build/testdata/wasm-gc
+          run_wasm_workers "$RUNNER_TEMP/wasm-gc-workers.mjs" "wasm gc ok"
           cp ./internal/build/testdata/wasm-workers/browser.html "$RUNNER_TEMP/browser.html"
           node ./internal/build/testdata/wasm-workers/server.mjs "$RUNNER_TEMP" 8123 &
           browser_server=$!
@@ -533,7 +540,8 @@ jobs:
           curl -fsS http://127.0.0.1:8123/ >/dev/null
           browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
           test -n "$browser"
-          for module in wasm-timers.mjs wasm-workers.mjs wasm-workers-go.mjs; do
+          for module in wasm-timers.mjs wasm-workers.mjs wasm-workers-go.mjs \
+            wasm-gc-workers.mjs wasm-gc-workers-go.mjs; do
             html=$("$browser" --headless=new --no-sandbox --disable-gpu \
               --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom \
               "http://127.0.0.1:8123/browser.html?module=$module")
