@@ -222,7 +222,7 @@ func includeDebugRefsForMovedValues(instrs []ssa.Instruction, move map[int]struc
 	moved := movedValues(instrs, move)
 	// DebugRef is metadata, not an ssa.Value, so adding one cannot introduce
 	// another value whose DebugRefs would require a second scan.
-	for i := 0; i <= recvIdx && i < len(instrs); i++ {
+	for i := 0; i < recvIdx && i < len(instrs); i++ {
 		if _, moving := move[i]; moving {
 			continue
 		}
