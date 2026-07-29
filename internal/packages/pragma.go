@@ -25,10 +25,10 @@ import (
 
 const noescapeBodyDiagnostic = "can only use //go:noescape with external func implementations"
 
-// validateCompilerDirectives applies compiler-only semantic checks that are
-// outside go/types. The go command may report these checks while loading export
-// data, but it can stop before reaching them when an earlier compiler error is
-// present, so the source frontend must validate them independently.
+// validateCompilerDirectives applies cmd/compile's //go:noescape body check,
+// which is outside go/types. The go command may report this check while loading
+// export data, but it can stop before reaching it when an earlier compiler error
+// is present, so the source frontend must validate it independently.
 func validateCompilerDirectives(fset *token.FileSet, files []*ast.File) []types.Error {
 	if fset == nil {
 		return nil

@@ -514,7 +514,9 @@ func loadPackageEx(dedup Deduper, ld *loader, lpkg *loaderPackage) {
 	// cmd/compile reaches compiler-directive body checks only after parsing and
 	// type-checking the complete package and its imports. Do not gate on
 	// ListError: an earlier compiler-directive diagnostic may itself be why go
-	// list stopped early.
+	// list stopped early. When function bodies are deliberately ignored, their
+	// type-check phase is incomplete, so writer-only checks cannot be safely
+	// synthesized.
 	hasSourceErrors := tc.IgnoreFuncBodies || len(errs) != 0 || typErr != nil ||
 		len(lpkg.TypeErrors) != 0 || hasIllTypedImport
 	if !hasSourceErrors {
