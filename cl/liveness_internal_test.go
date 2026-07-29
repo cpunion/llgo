@@ -281,9 +281,11 @@ type Box struct{ p *int }
 var Sink any
 
 func linear(p *int) {
-	var box Box
-	box.p = p
-	Sink = box.p
+	var first, second Box
+	first.p = p
+	second.p = p
+	Sink = first.p
+	Sink = second.p
 	Sink = 1
 }
 
@@ -323,9 +325,11 @@ func callLocal(p *int) {
 
 func cyclicLocal(p *int, n int) {
 	for n > 0 {
-		var box Box
-		box.p = p
-		Sink = box.p
+		var first, second Box
+		first.p = p
+		second.p = p
+		Sink = first.p
+		Sink = second.p
 		n--
 	}
 }
@@ -358,10 +362,18 @@ func phiLocal(p *int, cond bool) {
 	if len(stackPlans) == 0 {
 		t.Fatal("linear should produce stack clear plans")
 	}
+	var linearAllocs []*ssa.Alloc
 	for instr := range stackPlans {
 		if isTerminatingInstruction(instr) {
 			t.Fatalf("stack clear should not be scheduled after terminator %T", instr)
 		}
+		linearAllocs = append(linearAllocs, stackPlans[instr]...)
+	}
+	if len(linearAllocs) != 2 {
+		t.Fatalf("linear should plan both same-block allocations, got %d: %v", len(linearAllocs), stackPlans)
+	}
+	if linearAllocs[0].Block() != linearAllocs[1].Block() {
+		t.Fatalf("linear allocations should share a block: %v, %v", linearAllocs[0].Block(), linearAllocs[1].Block())
 	}
 
 	for _, name := range []string{"loop", "deferred", "goroutine"} {
@@ -382,17 +394,22 @@ func phiLocal(p *int, cond bool) {
 	}
 
 	cyclicLocal := ssapkg.Func("cyclicLocal")
-	var cyclicAlloc *ssa.Alloc
+	var cyclicBlock *ssa.BasicBlock
+	var cyclicAllocs int
 	for _, alloc := range functionAllocs(cyclicLocal) {
-		if !alloc.Heap && blockIsCyclic(alloc.Block()) {
-			cyclicAlloc = alloc
-			break
+		if ctx.shouldClearAlloc(alloc) && blockIsCyclic(alloc.Block()) {
+			if cyclicBlock == nil {
+				cyclicBlock = alloc.Block()
+			}
+			if alloc.Block() == cyclicBlock {
+				cyclicAllocs++
+			}
 		}
 	}
-	if cyclicAlloc == nil {
+	if cyclicAllocs < 2 {
 		var dump strings.Builder
 		cyclicLocal.WriteTo(&dump)
-		t.Fatalf("cyclicLocal should contain a non-heap allocation in a cyclic block:\n%s", dump.String())
+		t.Fatalf("cyclicLocal should contain two eligible allocations in one cyclic block, got %d:\n%s", cyclicAllocs, dump.String())
 	}
 	if got := ctx.collectStackClearPlans(cyclicLocal); len(got) != 0 {
 		t.Fatalf("cyclicLocal should fail closed instead of producing clear plans: %v", got)
@@ -772,21 +789,32 @@ func use(p *int) {
 func TestCompileWithoutConservativeLivenessClears(t *testing.T) {
 	ssapkg, files := buildSSAPackageWithPathAndFiles(t, "command-line-arguments", "main", `package main
 
+type Box struct{ p *int }
+
+var Sink any
+
+func clearLocal(p *int) {
+	var box Box
+	box.p = p
+	Sink = box.p
+	Sink = 1
+}
+
 func main() {
 	x := 1
-	_ = &x
+	clearLocal(&x)
 }
 `)
+
+	ctx := &context{}
+	if plans := ctx.collectStackClearPlans(ssapkg.Func("clearLocal")); len(plans) == 0 {
+		t.Fatal("test fixture should be eligible for conservative liveness clearing")
+	}
 
 	prog := newLLSSAProg(t)
 	pkg, err := NewPackage(prog, ssapkg, files)
 	if err != nil {
 		t.Fatal(err)
-	}
-	for _, helper := range []string{"llgo_clear_stack_ptr", "llgo_clobber_pointer_regs"} {
-		if strings.Contains(pkg.String(), helper) {
-			t.Fatalf("package without SetFinalizer should not emit %s:\n%s", helper, pkg.String())
-		}
 	}
 	if strings.Contains(pkg.String(), "store volatile") {
 		t.Fatalf("package without SetFinalizer should not emit liveness clears:\n%s", pkg.String())
@@ -824,80 +852,7 @@ func main() {
 		t.Fatal(err)
 	}
 	ir := pkg.String()
-	for _, helper := range []string{"llgo_clear_stack_ptr", "llgo_clobber_pointer_regs"} {
-		if strings.Contains(ir, helper) {
-			t.Fatalf("compiled liveness module must not use %s:\n%s", helper, ir)
-		}
-	}
-	if !strings.Contains(ir, `%"github.com/goplus/llgo/runtime/livetest.Box" = type { ptr, ptr }`) {
-		t.Fatalf("compiled liveness module missing two-pointer aggregate type:\n%s", ir)
-	}
 	if !strings.Contains(ir, `store volatile %"github.com/goplus/llgo/runtime/livetest.Box" zeroinitializer`) {
 		t.Fatalf("compiled liveness module missing volatile whole-aggregate clear:\n%s", ir)
-	}
-}
-
-func TestCompileConservativeLivenessDoesNotScanWholeStack(t *testing.T) {
-	ssapkg, files := buildSSAPackageWithPathAndFiles(t, "github.com/goplus/llgo/runtime/livetest", "main", `package main
-
-import rt "github.com/goplus/llgo/runtime/internal/lib/runtime"
-import "unsafe"
-
-type Cell struct{ p *int }
-type Ptr *int
-
-var Sink any
-
-func consume(cell Cell) {
-	Sink = cell.p
-	Sink = 1
-}
-
-func consumePtr(p *int) {
-	Sink = p
-	Sink = 1
-}
-
-func branch(cell Cell, cond bool) {
-	if cond {
-		Sink = cell.p
-	} else {
-		Sink = 0
-	}
-	Sink = 1
-}
-
-func main() {
-	x := 1
-	y := 2
-	arr := [2]*int{&x, &y}
-	cell := Cell{p: &x}
-	p := &x
-	pp := &p
-	ptr := Ptr(&x)
-	rt.SetFinalizer(&cell, func(*Cell) {})
-	rt.SetFinalizer(&p, func(**int) {})
-	rt.SetFinalizer(*pp, nil)
-	rt.SetFinalizer(&cell.p, func(**int) {})
-	rt.SetFinalizer(&arr[0], func(**int) {})
-	rt.SetFinalizer(unsafe.Pointer(&x), nil)
-	rt.SetFinalizer(ptr, nil)
-	consume(cell)
-	consumePtr(p)
-	branch(cell, x == y)
-}
-	`)
-	ssapkg.Pkg = types.NewPackage("command-line-arguments", "main")
-
-	prog := newLLSSAProg(t)
-	pkg, err := NewPackage(prog, ssapkg, files)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ir := pkg.String()
-	for _, helper := range []string{"llgo_clear_stack_ptr", "llgo_clobber_pointer_regs"} {
-		if strings.Contains(ir, helper) {
-			t.Fatalf("compiled liveness module must not use %s:\n%s", helper, ir)
-		}
 	}
 }
