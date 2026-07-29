@@ -57,6 +57,7 @@ type wasmWorker struct {
 	systemAsyncifyStack unsafe.Pointer
 	index               int
 	safepointBudget     pollbudget.Budget
+	gc                  wasmWorkerGCState
 }
 
 var wasmMultiSched struct {
@@ -73,6 +74,9 @@ var wasmMultiSched struct {
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	gp := initG(ctx, callergp, status)
+	if wasmGCRootEnabled {
+		registerWasmGCRoot(&ctx.platform.gcRoot, status == _Grunning)
+	}
 	if status == _Grunning {
 		initWasmScheduler(gp)
 	}
@@ -109,12 +113,13 @@ func initWasmScheduler(gp *g) {
 		worker.p.m = &worker.m
 		setpstatus(&worker.p, _Prunning)
 	}
-
 	mainWorker := &wasmMultiSched.workers[0]
 	setCurrentWasmWorker(mainWorker)
 	bindWasmWorkerG(mainWorker, gp)
 	gp.context.platform.owner = mainWorker
 	wasmMultiSched.started = true
+	wasmevent.InstallWake(wakeWasmEventWorker)
+	wasmevent.InstallCooperativeSafepoint(CooperativeSafepoint)
 
 	for i := 1; i < count; i++ {
 		worker := &wasmMultiSched.workers[i]
@@ -123,7 +128,6 @@ func initWasmScheduler(gp *g) {
 			return
 		}
 	}
-	wasmevent.InstallWake(wakeWasmEventWorker)
 }
 
 //go:linkname wasmMainTask __llgo_wasm_main
@@ -173,6 +177,7 @@ func initWasmWorkerSystem(worker *wasmWorker) {
 	if worker.systemAsyncifyStack != nil {
 		return
 	}
+	initWasmWorkerGCSystem(worker)
 	worker.systemAsyncifyStack = allocWasmStack(defaultWasmAsyncifyStackSize)
 	worker.system.InitCurrent(worker.systemAsyncifyStack, defaultWasmAsyncifyStackSize)
 }
@@ -184,14 +189,8 @@ func runWasmWorker(worker *wasmWorker, stopAtMain bool) {
 			continue
 		}
 		casgstatus(gp, _Grunnable, _Grunning)
-		bindWasmWorkerG(worker, gp)
-		setg(gp)
-		worker.system.Swap(
-			&gp.context.platform.context,
-			wasmGCRootPointer(&gp.context.platform.gcRoot),
-		)
-		setg(nil)
-		releaseWasmWorkerG(worker, gp)
+		runWasmG(worker, gp)
+		wasmWorkerStopForGC(worker)
 
 		if readgstatus(gp) != _Gdead {
 			continue
@@ -206,6 +205,26 @@ func runWasmWorker(worker *wasmWorker, stopAtMain bool) {
 				fatal("no goroutines (main called runtime.Goexit) - deadlock!")
 				return
 			}
+		}
+	}
+}
+
+func runWasmG(worker *wasmWorker, gp *g) {
+	for {
+		bindWasmWorkerG(worker, gp)
+		setg(gp)
+		worker.system.Swap(
+			&gp.context.platform.context,
+			wasmGCRootPointer(&gp.context.platform.gcRoot),
+		)
+		setg(nil)
+		releaseWasmWorkerG(worker, gp)
+		if readgstatus(gp) != _Grunning {
+			return
+		}
+		if !wasmWorkerStopForGC(worker) {
+			fatal("runtime: running WebAssembly goroutine returned without a GC request")
+			return
 		}
 	}
 }
@@ -278,6 +297,9 @@ func releaseWasmContext(gp *g) {
 	}
 	ctx := gp.context
 	platform := &ctx.platform
+	if wasmGCRootEnabled {
+		unregisterWasmGCRoot(&platform.gcRoot)
+	}
 	if platform.stack != nil {
 		FreeRoot(platform.stack)
 		platform.stack = nil
@@ -307,7 +329,10 @@ func finishWasmG(gp *g) {
 	atomic.Add(&wasmMultiSched.active, ^uint32(0))
 	wakeWasmEventWorker()
 	worker := gp.context.platform.owner
-	gp.context.platform.context.Swap(&worker.system, nil)
+	gp.context.platform.context.Swap(
+		&worker.system,
+		wasmWorkerSystemRootPointer(worker),
+	)
 	fatal("runtime: resumed dead WebAssembly goroutine")
 }
 
@@ -316,7 +341,10 @@ func goschedBackend() {
 	worker := currentWasmWorker()
 	casgstatus(gp, _Grunning, _Grunnable)
 	enqueueWasmG(worker, gp)
-	gp.context.platform.context.Swap(&worker.system, nil)
+	gp.context.platform.context.Swap(
+		&worker.system,
+		wasmWorkerSystemRootPointer(worker),
+	)
 }
 
 func gopark() {
@@ -329,7 +357,10 @@ func parkWasmG(gp *g) {
 	atomic.Add(&wasmMultiSched.active, ^uint32(0))
 	wakeWasmEventWorker()
 	worker := gp.context.platform.owner
-	gp.context.platform.context.Swap(&worker.system, nil)
+	gp.context.platform.context.Swap(
+		&worker.system,
+		wasmWorkerSystemRootPointer(worker),
+	)
 }
 
 func goready(gp *g) {
@@ -391,6 +422,7 @@ func wakeWasmEventWorker() {
 
 func waitWasmWorkerRunq(worker *wasmWorker) *g {
 	for {
+		wasmWorkerStopForGC(worker)
 		if gp := popWasmWorkerRunq(worker); gp != nil {
 			return gp
 		}

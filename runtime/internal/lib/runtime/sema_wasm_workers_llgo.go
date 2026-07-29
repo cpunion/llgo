@@ -5,28 +5,20 @@ package runtime
 import (
 	"unsafe"
 
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
 	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 	llruntime "github.com/goplus/llgo/runtime/internal/runtime"
+	"github.com/goplus/llgo/runtime/internal/wasmsync"
 )
 
-var semaQueuesLock = newWasmSemaMutex()
-var notifyQueuesLock = newWasmSemaMutex()
+var semaQueuesLock wasmSemaMutex
+var notifyQueuesLock wasmSemaMutex
 
 type wasmSemaMutex struct {
-	mutex psync.Mutex
-}
-
-func newWasmSemaMutex() wasmSemaMutex {
-	var result wasmSemaMutex
-	if result.mutex.Init(nil) != 0 {
-		panic("runtime: failed to initialize WebAssembly semaphore mutex")
-	}
-	return result
+	mutex wasmsync.Mutex
 }
 
 func (m *wasmSemaMutex) Lock() {
-	m.mutex.Lock()
+	m.mutex.Lock(llruntime.CooperativeSafepoint)
 }
 
 func (m *wasmSemaMutex) Unlock() {

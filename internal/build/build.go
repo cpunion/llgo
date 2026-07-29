@@ -342,7 +342,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	wasmGC, err := configureWasmGC(conf, &export, wasmWorkers.Enabled())
+	wasmGC, err := configureWasmGC(conf, &export)
 	if err != nil {
 		return nil, err
 	}
@@ -416,6 +416,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	prog.EnableGoGlobalDCE(conf.goGlobalDCEEnabled())
 	prog.EnableDeadcodeDrop(conf.deadcodeDropEnabled())
 	prog.EnableGCRoots(wasmGC)
+	prog.EnableThreadLocalGCRoots(wasmGC && wasmWorkers.Enabled())
 	prog.EnableCooperativeSafepoints(wasmGC || wasmWorkers.Enabled())
 	if conf.PthreadStackSize > 0 {
 		prog.SetPthreadStackSize(uint64(conf.PthreadStackSize))
@@ -773,7 +774,7 @@ func configureWasmWorkers(conf *Config, export *crosscompile.Export) (wasmworker
 	return config, nil
 }
 
-func configureWasmGC(conf *Config, export *crosscompile.Export, wasmWorkers bool) (bool, error) {
+func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
 	explicit := hasBuildTag(conf.Tags, "llgo_wasm_gc")
 	if conf.Goarch != "wasm" {
 		if explicit {
@@ -783,12 +784,6 @@ func configureWasmGC(conf *Config, export *crosscompile.Export, wasmWorkers bool
 	}
 	switch conf.Goos {
 	case "js":
-		if wasmWorkers {
-			if explicit {
-				return false, errors.New("llgo_wasm_gc does not yet support multiple WebAssembly workers")
-			}
-			return false, nil
-		}
 		if !slices.Contains(export.LDFLAGS, "-sMALLOC=none") {
 			export.LDFLAGS = append(export.LDFLAGS, "-sMALLOC=none")
 		}

@@ -8,7 +8,7 @@ const wasmSafepointQuantum = uint32(1024)
 
 func CooperativeSafepoint() {
 	worker := currentWasmWorker()
-	if worker == nil || !worker.safepointBudget.Poll() {
+	if worker == nil || (!wasmGCRequestPending(worker) && !worker.safepointBudget.Poll()) {
 		return
 	}
 	cooperativeSafepointSlow()
@@ -18,6 +18,17 @@ func CooperativeSafepoint() {
 func cooperativeSafepointSlow() {
 	worker := currentWasmWorker()
 	if worker == nil {
+		return
+	}
+	if wasmGCRequestPending(worker) {
+		if gp := getg(); gp != nil {
+			gp.context.platform.context.Swap(
+				&worker.system,
+				wasmWorkerSystemRootPointer(worker),
+			)
+		} else {
+			wasmWorkerStopForGC(worker)
+		}
 		return
 	}
 	if worker.index == 0 {
