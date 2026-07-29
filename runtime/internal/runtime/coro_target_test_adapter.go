@@ -20,27 +20,6 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
-// This named-source adapter intentionally exercises the target-neutral
-// scheduler without loading the complete LLGo runtime into the host Go
-// runtime. Logical runtime-G ownership is verified by the linked runtime
-// islands; here an opaque token preserves the scheduler boundary while keeping
-// the adapter independent of runtime2.go and platform getg implementations.
-func coroBindRuntimeContext(task, parent *coro.G, main bool) bool {
-	return task != nil
-}
-
-func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool) {
-	return coroRuntimeContextActivationV1{}, task != nil
-}
-
-func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivationV1) bool {
-	return task != nil
-}
-
-func coroReleaseRuntimeContext(task *coro.G) bool {
-	return task != nil
-}
-
 type coroProgramTestTargetModeV1 uint8
 
 const (

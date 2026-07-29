@@ -611,38 +611,49 @@ func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *
 }
 
 // resolvePublishedEpochStep advances exactly one explicitly charged common
-// resolution action. Passing nil sources selects the scheduler-only path used
-// by unbound PollReady: terminal links remain attached and are requeued for
-// their explicit owner-side detach.
-func resolvePublishedEpochStep(sources *ExecutorSourceSet, p *P, cursor *publishedEpochResolveCursor) (step publishedEpochResolveStep, ok bool) {
+// resolution action. The caller owns step so its scratch storage remains in
+// the caller's activation instead of becoming a heap-backed named result when
+// the phase helpers take its address. Passing nil sources selects the
+// scheduler-only path used by unbound PollReady: terminal links remain
+// attached and are requeued for their explicit owner-side detach.
+func resolvePublishedEpochStep(
+	sources *ExecutorSourceSet,
+	p *P,
+	cursor *publishedEpochResolveCursor,
+	step *publishedEpochResolveStep,
+) (ok bool) {
+	if step == nil {
+		return false
+	}
+	*step = publishedEpochResolveStep{}
 	if cursor == nil || p == nil || !validReadyQueueHeader(p) ||
 		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
-		return publishedEpochResolveStep{}, false
+		return false
 	}
 	if cursor.phase == publishedEpochResolveIdle {
-		if !initializePublishedEpochResolution(sources, p, cursor, &step) {
-			return publishedEpochResolveStep{}, false
+		if !initializePublishedEpochResolution(sources, p, cursor, step) {
+			return false
 		}
 		if step.complete {
-			return step, true
+			return true
 		}
 	} else if !validPublishedEpochResolveCursor(cursor, p) {
-		return publishedEpochResolveStep{}, false
+		return false
 	}
 
 	switch cursor.phase {
 	case publishedEpochResolveDiscover:
-		ok = resolvePublishedEpochDiscoverStep(sources, p, cursor, &step)
+		ok = resolvePublishedEpochDiscoverStep(sources, p, cursor, step)
 	case publishedEpochResolvePark:
-		ok = resolvePublishedEpochParkStep(sources, p, cursor, &step)
+		ok = resolvePublishedEpochParkStep(sources, p, cursor, step)
 	case publishedEpochResolveApply:
-		ok = resolvePublishedEpochApplyStep(sources, p, cursor, &step)
+		ok = resolvePublishedEpochApplyStep(sources, p, cursor, step)
 	case publishedEpochResolveFinish:
-		ok = resolvePublishedEpochFinishStep(cursor, &step)
+		ok = resolvePublishedEpochFinishStep(cursor, step)
 	case publishedEpochResolvePromote:
-		ok = resolvePublishedEpochPromoteStep(sources, p, cursor, &step)
+		ok = resolvePublishedEpochPromoteStep(sources, p, cursor, step)
 	default:
 		ok = false
 	}
-	return step, ok
+	return ok
 }

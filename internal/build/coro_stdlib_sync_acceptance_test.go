@@ -278,6 +278,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_poll_route_default_llgo.go":        false,
 		"coro_ready_distribution_default.go":     false,
 		"coro_setmaxthreads_single_llgo.go":      false,
+		"coro_task_context_test_adapter.go":      false,
 		"coro_target_native_llgo.go":             false,
 		"coro_target_none.go":                    false,
 		"coro_target_test_adapter.go":            false,

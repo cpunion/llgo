@@ -52,9 +52,10 @@ func TestPublishedEpochResolutionHighCardinalityHasExactLinearSteps(t *testing.T
 	// A source set without Channel keeps the original rank-only path. No call
 	// can consume two candidate links.
 	var cursor publishedEpochResolveCursor
+	var step publishedEpochResolveStep
 	initialSteps := 0
 	for {
-		step, ok := resolvePublishedEpochStep(nil, p, &cursor)
+		ok := resolvePublishedEpochStep(nil, p, &cursor, &step)
 		if !ok || step.applyVisits != 0 || step.promoted != 0 {
 			t.Fatalf("initial bounded step %d = (%+v, %t)", initialSteps, step, ok)
 		}
@@ -81,7 +82,7 @@ func TestPublishedEpochResolutionHighCardinalityHasExactLinearSteps(t *testing.T
 	steps := 0
 	resolution := CompletionResolution{}
 	for {
-		step, ok := resolvePublishedEpochStep(nil, p, &cursor)
+		ok := resolvePublishedEpochStep(nil, p, &cursor, &step)
 		if !ok || step.applyVisits != 0 || step.promoted != 0 {
 			t.Fatalf("terminal bounded step %d = (%+v, %t)", steps, step, ok)
 		}
@@ -365,12 +366,13 @@ func TestPublishedEpochAwaitExternalStaysOffWorkQueueUntilNewFact(t *testing.T) 
 		phase:     publishedEpochResolveFinish,
 		waitAwait: true,
 	}
-	step, advanced := resolvePublishedEpochStep(&driver.sources, p, &cursor)
+	var step publishedEpochResolveStep
+	advanced := resolvePublishedEpochStep(&driver.sources, p, &cursor, &step)
 	if !advanced || step.complete || step.retryBudget || !step.awaitExternal ||
 		wait.work != waitSetWorkAwaitingExternal || cursor.phase != publishedEpochResolvePromote {
 		t.Fatalf("finish external-wait action = (%+v, %t), work=%d cursor=%+v", step, advanced, wait.work, cursor)
 	}
-	step, advanced = resolvePublishedEpochStep(&driver.sources, p, &cursor)
+	advanced = resolvePublishedEpochStep(&driver.sources, p, &cursor, &step)
 	if !advanced || !step.complete || p.affectedWaitHead != nil || p.affectedWaitTail != nil || driver.sources.pending(p) {
 		t.Fatalf("park external-wait action = (%+v, %t), affected=(%p,%p) pending=%t",
 			step, advanced, p.affectedWaitHead, p.affectedWaitTail, driver.sources.pending(p))

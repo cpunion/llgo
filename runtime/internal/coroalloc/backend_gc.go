@@ -35,6 +35,8 @@ func backendAllocFrame(size uintptr) unsafe.Pointer {
 	return bdwgc.MallocUncollectable(size)
 }
 
-func backendFreeFrame(ptr unsafe.Pointer) {
+func backendFreeFrame(ptr unsafe.Pointer, size uintptr) bool {
+	_ = size
 	bdwgc.Free(ptr)
+	return true
 }

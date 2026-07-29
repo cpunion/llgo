@@ -39,11 +39,13 @@ func AllocZ(size uintptr) unsafe.Pointer {
 }
 
 func AllocRoot(size uintptr) unsafe.Pointer {
-	return tinygogc.Alloc(size)
+	return tinygogc.AllocOpaqueRooted(size)
 }
 
 func FreeRoot(ptr unsafe.Pointer) {
-	_ = ptr
+	if ptr != nil && !tinygogc.FreeOpaqueRooted(ptr) {
+		coroRuntimeAbort("invalid tinygogc root release")
+	}
 }
 
 // AddCleanupPtr is unavailable until tinygogc owns a finalizer/cleanup queue.

@@ -42,7 +42,7 @@ func main() {
 			panic("corrupt wasm coroutine frame")
 		}
 	}
-	if !coroalloc.FreeFrame(ptr) {
+	if !coroalloc.FreeFrame(ptr, size) {
 		panic("free wasm coroutine frame")
 	}
 }

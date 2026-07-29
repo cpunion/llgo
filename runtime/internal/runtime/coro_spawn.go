@@ -42,7 +42,7 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 	child := (*coroG)(raw)
 	if !coro.BeginSpawn(parent, child, raw, size) {
 		coro.Zero(raw, size)
-		if !coroalloc.FreeTask(raw) {
+		if !coroalloc.FreeTask(raw, size) {
 			return nil, false
 		}
 		return nil, false
@@ -53,7 +53,7 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 			return nil, false
 		}
 		coro.Zero(raw, size)
-		if !coroalloc.FreeTask(raw) {
+		if !coroalloc.FreeTask(raw, size) {
 			return nil, false
 		}
 		return nil, false
@@ -95,7 +95,7 @@ func coroReleaseCompletedTask(g *coroG) bool {
 		return false
 	}
 	coro.Zero(raw, size)
-	return coroalloc.FreeTask(raw)
+	return coroalloc.FreeTask(raw, size)
 }
 
 //export __llgo_coro_spawn_begin_v1

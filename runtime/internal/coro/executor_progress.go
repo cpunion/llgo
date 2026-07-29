@@ -95,6 +95,7 @@ type executorPollTransaction struct {
 	resampleNow   bool
 	_             [2]byte
 	resolve       publishedEpochResolveCursor
+	resolveStep   publishedEpochResolveStep
 }
 
 func executorCatalogScanLimit(sources *ExecutorSourceSet, source executorCatalogSource) (uint32, bool) {
@@ -461,7 +462,8 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 			}
 			used++
 		case executorPollEpochAResolve, executorPollEpochBResolve:
-			step, resolved := resolvePublishedEpochStep(&driver.sources, driver.p, &transaction.resolve)
+			step := &transaction.resolveStep
+			resolved := resolvePublishedEpochStep(&driver.sources, driver.p, &transaction.resolve, step)
 			if !resolved || step.applyVisits < 0 || step.promoted < 0 {
 				return transaction.total, ExecutorPollProgress{}, false
 			}

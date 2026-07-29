@@ -96,12 +96,11 @@ func AllocFrame(size uintptr) unsafe.Pointer {
 // FreeFrame releases a range previously returned by AllocFrame. Backends that
 // reclaim through a tracing collector may deliberately implement physical
 // free as a no-op, but still validate allocator readiness through this API.
-func FreeFrame(ptr unsafe.Pointer) bool {
-	if !Ready() || ptr == nil {
+func FreeFrame(ptr unsafe.Pointer, size uintptr) bool {
+	if !Ready() || ptr == nil || size == 0 {
 		return false
 	}
-	backendFreeFrame(ptr)
-	return true
+	return backendFreeFrame(ptr, size)
 }
 
 // AllocTask allocates pointer-containing scheduler task storage. It uses the
@@ -120,10 +119,9 @@ func AllocTask(size uintptr) unsafe.Pointer {
 // FreeTask performs the physical half of the scheduler's exactly-once task
 // retirement protocol. The caller must first unlink and logically release the
 // G through coro.ReleaseTaskStorage.
-func FreeTask(ptr unsafe.Pointer) bool {
-	if !Ready() || ptr == nil {
+func FreeTask(ptr unsafe.Pointer, size uintptr) bool {
+	if !Ready() || ptr == nil || size == 0 {
 		return false
 	}
-	backendFreeFrame(ptr)
-	return true
+	return backendFreeFrame(ptr, size)
 }

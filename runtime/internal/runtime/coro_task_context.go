@@ -1,4 +1,4 @@
-//go:build !coro_runtime_adapter_test
+//go:build !coro_runtime_adapter_test && !coro_native_fleet_test
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

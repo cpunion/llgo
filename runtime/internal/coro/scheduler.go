@@ -763,9 +763,10 @@ func pollReady(p *P) (int, bool) {
 		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
 	}
 	var cursor publishedEpochResolveCursor
+	var step publishedEpochResolveStep
 	promoted := 0
 	for {
-		step, advanced := resolvePublishedEpochStep(nil, p, &cursor)
+		advanced := resolvePublishedEpochStep(nil, p, &cursor, &step)
 		if !advanced {
 			return promoted, false
 		}
