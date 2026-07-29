@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/goplus/gogen/packages"
-	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -124,13 +123,20 @@ func allocs(p *int) {
 		fn.WriteTo(&dump)
 		t.Fatalf("missing expected allocs: %v\n%s", functionAllocs(fn), dump.String())
 	}
-	if !ctx.shouldClearAlloc(boxAlloc) {
-		t.Fatal("struct containing a pointer should be cleared")
+	if !boxAlloc.Heap {
+		t.Fatal("address-taken box should be marked as a heap allocation")
+	}
+	if ctx.shouldClearAlloc(boxAlloc) {
+		t.Fatal("heap allocation must not be cleared")
 	}
 	if ctx.shouldClearAlloc(intAlloc) {
 		t.Fatal("int alloc should not be cleared")
 	}
 
+	boxAlloc.Heap = false
+	if !ctx.shouldClearAlloc(boxAlloc) {
+		t.Fatal("non-heap stack slot containing a pointer should be cleared")
+	}
 	boxAlloc.Comment = "varargs"
 	if ctx.shouldClearAlloc(boxAlloc) {
 		t.Fatal("varargs alloc should not be cleared")
@@ -166,7 +172,7 @@ func functionAllocs(fn *ssa.Function) []*ssa.Alloc {
 func TestRuntimeSetFinalizerDetection(t *testing.T) {
 	ssapkg := buildSSAPackageWithPath(t, "github.com/goplus/llgo/runtime/livetest", "livetest", `package livetest
 
-import rt "github.com/goplus/llgo/runtime/internal/lib/runtime"
+import rt "runtime"
 
 func direct(p *int) {
 	rt.SetFinalizer(p, func(*int) {})
@@ -213,57 +219,57 @@ func none(p *int) {}
 	if !ctx.packageUsesRuntimeSetFinalizer(ssapkg) {
 		t.Fatal("package should report SetFinalizer use")
 	}
-	if ctx.enableConservativeLivenessClears(direct) {
-		t.Fatal("non command-line-arguments package should not enable conservative clears")
+	if !ctx.enableConservativeLivenessClears(direct) {
+		t.Error("module package with SetFinalizer should enable conservative clears")
 	}
 	ssapkg.Pkg = types.NewPackage("command-line-arguments", "main")
 	if !ctx.enableConservativeLivenessClears(direct) {
 		t.Fatal("command-line-arguments package with SetFinalizer should enable conservative clears")
 	}
-}
 
-func TestRuntimeSetFinalizerLateValueSkips(t *testing.T) {
-	ssapkg := buildSSAPackageWithPath(t, "github.com/goplus/llgo/runtime/livetest", "livetest", `package livetest
+	methodPkg := buildSSAPackageWithPath(t, "github.com/goplus/llgo/runtime/methodlive", "methodlive", `package methodlive
 
-import rt "github.com/goplus/llgo/runtime/internal/lib/runtime"
+import rt "runtime"
 
-func direct(p *int) {
+	type setter struct{}
+
+func (setter) install(p *int) {
 	rt.SetFinalizer(p, func(*int) {})
 }
 `)
-	ctx := &context{}
-	fn := ssapkg.Func("direct")
-	var makeIface *ssa.MakeInterface
-	var deref *ssa.UnOp
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			switch instr := instr.(type) {
-			case *ssa.MakeInterface:
-				makeIface = instr
-			case *ssa.UnOp:
-				if instr.Op == token.MUL {
-					deref = instr
-				}
-			}
+	if !ctx.packageUsesRuntimeSetFinalizer(methodPkg) {
+		t.Error("method-only SetFinalizer use should be detected")
+	}
+
+	genericMethodPkg := buildSSAPackageWithPath(t, "github.com/goplus/llgo/runtime/genericmethodlive", "genericmethodlive", `package genericmethodlive
+
+import rt "runtime"
+
+type setter[T any] struct{}
+
+func (setter[T]) install(p *T) {
+	rt.SetFinalizer(p, func(*T) {})
+}
+
+func use(p *int) {
+	setter[int]{}.install(p)
+}
+`)
+	if !ctx.packageUsesRuntimeSetFinalizer(genericMethodPkg) {
+		t.Error("generic method-only SetFinalizer use should be detected")
+	}
+	var genericMethod *ssa.Function
+	for fn := range ssautil.AllFunctions(genericMethodPkg.Prog) {
+		if origin := fn.Origin(); origin != nil && origin.Name() == "install" {
+			genericMethod = fn
+			break
 		}
 	}
-	if makeIface == nil {
-		t.Fatal("missing MakeInterface for SetFinalizer argument")
+	if genericMethod == nil {
+		t.Fatal("missing instantiated generic method")
 	}
-	if ctx.isRuntimeSetFinalizerCall(nil) {
-		t.Fatal("nil call should not be SetFinalizer")
-	}
-	if !ctx.shouldSkipLateSetFinalizerValue(makeIface) {
-		t.Fatal("SetFinalizer-only MakeInterface should be skipped")
-	}
-	if deref != nil && !ctx.shouldSkipLateSetFinalizerValue(deref) {
-		t.Fatal("SetFinalizer-only deref should be skipped")
-	}
-	if ctx.shouldSkipLateSetFinalizerValue(&ssa.Return{}) {
-		t.Fatal("unrelated instruction should not be skipped")
-	}
-	if ctx.shouldSkipLateSetFinalizerValue(&ssa.UnOp{Op: token.SUB}) {
-		t.Fatal("non-deref unary op should not be skipped")
+	if !ctx.enableConservativeLivenessClears(genericMethod) {
+		t.Error("instantiated generic method should inherit its package liveness setting")
 	}
 }
 
@@ -281,51 +287,69 @@ func linear(p *int) {
 	Sink = 1
 }
 
-func branch(p *int, cond bool) {
+func loop(p *int) {
 	var box Box
 	box.p = p
-	if cond {
+	for i := 0; i < 2; i++ {
 		Sink = box.p
-	} else {
-		Sink = 0
-	}
-	Sink = 1
-}
-
-func branchBoth(p *int, cond bool) {
-	var box Box
-	box.p = p
-	if cond {
-		Sink = box.p
-	} else {
-		Sink = box.p
-	}
-	Sink = 1
-}
-
-func paramUse(p *int) {
-	Sink = p
-	Sink = 1
-}
-
-func splitParam(p *int, cond bool) {
-	if cond {
-		Sink = p
-	} else {
-		Sink = p
 	}
 	Sink = 1
 }
 
 func takes(*int) {}
 
-func callWithPointer(p *int) {
-	takes(p)
+func deferred(p *int) {
+	var box Box
+	box.p = p
+	defer takes(box.p)
 	Sink = 1
 }
 
-func callWithInt(i int) {
-	Sink = i
+func goroutine(p *int) {
+	var box Box
+	box.p = p
+	go takes(box.p)
+	Sink = 1
+}
+
+func takesBox(Box) {}
+
+func callLocal(p *int) {
+	var box Box
+	box.p = p
+	takesBox(box)
+	Sink = 1
+}
+
+func cyclicLocal(p *int, n int) {
+	for n > 0 {
+		var box Box
+		box.p = p
+		Sink = box.p
+		n--
+	}
+}
+
+func slicedLocal(p *int) {
+	var values [1]*int
+	values[0] = p
+	slice := values[:]
+	Sink = slice[0]
+	Sink = 1
+}
+
+func phiLocal(p *int, cond bool) {
+	var left, right Box
+	left.p = p
+	right.p = p
+	var box *Box
+	if cond {
+		box = &left
+	} else {
+		box = &right
+	}
+	Sink = box.p
+	Sink = 1
 }
 `)
 	ctx := &context{}
@@ -340,44 +364,95 @@ func callWithInt(i int) {
 		}
 	}
 
-	entryPlans := ctx.collectEntryClearPlans(ssapkg.Func("branch"))
-	if len(entryPlans) == 0 {
-		t.Fatal("branch should produce entry clear plans for dead successor")
-	}
-	if got := ctx.collectEntryClearPlans(ssapkg.Func("branchBoth")); len(got) != 0 {
-		t.Fatalf("branchBoth should not clear values live in both successors: %v", got)
+	for _, name := range []string{"loop", "deferred", "goroutine"} {
+		if got := ctx.collectStackClearPlans(ssapkg.Func(name)); len(got) != 0 {
+			t.Fatalf("%s should fail closed instead of producing clear plans: %v", name, got)
+		}
 	}
 
-	paramFn := ssapkg.Func("paramUse")
-	if len(ctx.collectParamClobberPlans(paramFn)) == 0 {
-		t.Fatal("paramUse should produce param clobber plans")
+	callLocal := ssapkg.Func("callLocal")
+	callPlans := ctx.collectStackClearPlans(callLocal)
+	if len(callPlans) == 0 {
+		t.Fatal("callLocal should produce a stack clear plan")
 	}
-	if len(ctx.collectParamScanPlans(paramFn)) == 0 {
-		t.Fatal("paramUse should produce param scan plans")
+	for instr := range callPlans {
+		if _, ok := instr.(*ssa.Call); !ok {
+			t.Fatalf("callLocal clear must follow its real final use, got %T", instr)
+		}
 	}
-	splitParam := ssapkg.Func("splitParam")
-	if got := ctx.collectParamClobberPlans(splitParam); len(got) != 0 {
-		t.Fatalf("splitParam has no single last-use block, got clobbers: %v", got)
+
+	cyclicLocal := ssapkg.Func("cyclicLocal")
+	var cyclicAlloc *ssa.Alloc
+	for _, alloc := range functionAllocs(cyclicLocal) {
+		if !alloc.Heap && blockIsCyclic(alloc.Block()) {
+			cyclicAlloc = alloc
+			break
+		}
 	}
-	if got := ctx.collectParamScanPlans(splitParam); len(got) != 0 {
-		t.Fatalf("splitParam has no single last-use block, got scans: %v", got)
+	if cyclicAlloc == nil {
+		var dump strings.Builder
+		cyclicLocal.WriteTo(&dump)
+		t.Fatalf("cyclicLocal should contain a non-heap allocation in a cyclic block:\n%s", dump.String())
 	}
-	if len(ctx.collectCallClobberPlans(ssapkg.Func("callWithPointer"))) == 0 {
-		t.Fatal("pointer call should clobber pointer regs")
+	if got := ctx.collectStackClearPlans(cyclicLocal); len(got) != 0 {
+		t.Fatalf("cyclicLocal should fail closed instead of producing clear plans: %v", got)
 	}
-	if len(ctx.collectCallClobberPlans(ssapkg.Func("callWithInt"))) != 0 {
-		t.Fatal("int-only call should not clobber pointer regs")
+
+	slicedLocal := ssapkg.Func("slicedLocal")
+	var hasSlice bool
+	for _, block := range slicedLocal.Blocks {
+		for _, instr := range block.Instrs {
+			if _, ok := instr.(*ssa.Slice); ok {
+				hasSlice = true
+			}
+		}
+	}
+	if !hasSlice {
+		t.Fatal("slicedLocal should exercise a slice-derived stack reference")
+	}
+	var slicedAlloc *ssa.Alloc
+	for _, alloc := range functionAllocs(slicedLocal) {
+		ptr, ok := alloc.Type().Underlying().(*types.Pointer)
+		if ok {
+			if _, ok := ptr.Elem().Underlying().(*types.Array); ok {
+				slicedAlloc = alloc
+				slicedAlloc.Heap = false
+				break
+			}
+		}
+	}
+	if slicedAlloc == nil {
+		var dump strings.Builder
+		slicedLocal.WriteTo(&dump)
+		t.Fatalf("slicedLocal should contain an array allocation:\n%s", dump.String())
+	}
+	if got := ctx.collectStackClearPlans(slicedLocal); len(got) == 0 {
+		var dump strings.Builder
+		slicedLocal.WriteTo(&dump)
+		t.Fatalf("slicedLocal should produce a stack clear plan:\n%s", dump.String())
+	}
+
+	phiLocal := ssapkg.Func("phiLocal")
+	var hasPhi bool
+	for _, block := range phiLocal.Blocks {
+		for _, instr := range block.Instrs {
+			if _, ok := instr.(*ssa.Phi); ok {
+				hasPhi = true
+			}
+		}
+	}
+	if !hasPhi {
+		t.Fatal("phiLocal should exercise a merged stack reference")
+	}
+	if got := ctx.collectStackClearPlans(phiLocal); len(got) != 0 {
+		t.Fatalf("phiLocal should fail closed instead of producing clear plans: %v", got)
 	}
 }
 
 func TestConservativeLivenessGraphHelpers(t *testing.T) {
 	ssapkg := buildSSAPackageWithPath(t, "example.com/live", "live", `package live
 
-import "unsafe"
-
 var Sink any
-
-type Box struct{ p *int }
 
 func flow(p *int, cond bool) {
 	if cond {
@@ -387,34 +462,16 @@ func flow(p *int, cond bool) {
 	}
 }
 
-func split(p *int, cond bool) {
-	if cond {
-		Sink = p
-	} else {
-		Sink = p
-	}
-}
-
 func target(*int) {}
 
 func withCall(p *int) {
 	target(p)
 }
 
-func refs(p *int, arr *[2]*int, box *Box, cond bool) *int {
-	var q *int
-	if cond {
-		q = p
-	} else {
-		q = box.p
+func loop(p *int) {
+	for i := 0; i < 2; i++ {
+		Sink = p
 	}
-	Sink = arr[0]
-	Sink = q
-	return q
-}
-
-func converted(p *int) unsafe.Pointer {
-	return unsafe.Pointer(p)
 }
 	`)
 	fn := ssapkg.Func("flow")
@@ -424,106 +481,50 @@ func converted(p *int) unsafe.Pointer {
 	if !blockCanReach(fn.Blocks[0], fn.Blocks[0], map[*ssa.BasicBlock]bool{}) {
 		t.Fatal("block should reach itself")
 	}
+	loop := ssapkg.Func("loop")
+	var cyclic int
+	for _, block := range loop.Blocks {
+		if blockIsCyclic(block) {
+			cyclic++
+		}
+	}
+	if cyclic == 0 {
+		t.Fatal("loop should contain at least one cyclic block")
+	}
 	if instructionUsesValue(nil, fn.Params[0]) {
 		t.Fatal("nil instruction should not use values")
 	}
 	if instructionUsesValue(fn.Blocks[0].Instrs[0], nil) {
 		t.Fatal("nil value should not be used")
 	}
-	if isCallLikeInstruction(fn.Blocks[0].Instrs[0]) {
-		t.Fatal("if instruction should not be call-like")
-	}
 	if !isTerminatingInstruction(fn.Blocks[0].Instrs[len(fn.Blocks[0].Instrs)-1]) {
 		t.Fatal("entry block should end with a terminator")
 	}
 
 	ctx := &context{}
-	if blk := refBlock(nil); blk != nil {
-		t.Fatalf("refBlock(nil) = %v", blk)
-	}
-	blocks := make(map[*ssa.BasicBlock]bool)
-	if !ctx.collectValueUseBlocks(nil, blocks, map[ssa.Value]bool{}, false) {
-		t.Fatal("nil collectValueUseBlocks should succeed")
-	}
-	if !ctx.collectValueUseBlocks(fn.Params[0], blocks, map[ssa.Value]bool{fn.Params[0]: true}, false) {
-		t.Fatal("seen collectValueUseBlocks should succeed")
-	}
-	if !ctx.collectValueUseBlocks(fn.Params[0], blocks, map[ssa.Value]bool{}, false) {
-		t.Fatal("collectValueUseBlocks failed")
-	}
-	if len(blocks) == 0 {
-		t.Fatal("expected use blocks for parameter")
-	}
-	if blk, ok := ctx.valueLastUseBlock(fn.Params[0]); !ok || blk == nil {
-		t.Fatalf("valueLastUseBlock = %v, %v", blk, ok)
-	}
-	if blk, ok := ctx.valueLastUseBlock(nil); !ok || blk != nil {
-		t.Fatalf("valueLastUseBlock(nil) = %v, %v", blk, ok)
-	}
 	if last, ok := ctx.lastUseInBlock(nil, fn.Blocks[0], map[ssa.Instruction]int{}, map[ssa.Value]bool{}); !ok || last != nil {
 		t.Fatalf("lastUseInBlock(nil) = %v, %v", last, ok)
 	}
-	split := ssapkg.Func("split")
-	if blk, ok := ctx.valueLastUseBlock(split.Params[0]); ok || blk != nil {
-		t.Fatalf("valueLastUseBlock(split param) = %v, %v; want no single block", blk, ok)
-	}
-	entryOrder := make(map[ssa.Instruction]int, len(split.Blocks[0].Instrs))
-	for i, instr := range split.Blocks[0].Instrs {
-		entryOrder[instr] = i
-	}
-	if last, ok := ctx.lastUseInBlock(split.Params[0], split.Blocks[0], entryOrder, map[ssa.Value]bool{}); ok || last != nil {
-		t.Fatalf("lastUseInBlock(split param in entry) = %v, %v; want failure outside block", last, ok)
-	}
 
-	var callLike int
-	for _, block := range ssapkg.Func("withCall").Blocks {
+	withCall := ssapkg.Func("withCall")
+	var call *ssa.Call
+	for _, block := range withCall.Blocks {
 		for _, instr := range block.Instrs {
-			if isCallLikeInstruction(instr) {
-				callLike++
+			if callInstr, ok := instr.(*ssa.Call); ok {
+				call = callInstr
 			}
 		}
 	}
-	if callLike == 0 {
-		t.Fatal("flow should include at least one call-like instruction")
+	if call == nil {
+		t.Fatal("withCall should include a call-like instruction")
 	}
-
-	refs := ssapkg.Func("refs")
-	var lastUseCount int
-	for _, param := range refs.Params {
-		blocks := make(map[*ssa.BasicBlock]bool)
-		if !ctx.collectValueUseBlocks(param, blocks, map[ssa.Value]bool{}, true) {
-			t.Fatalf("collectValueUseBlocks failed for %s", param.Name())
-		}
-		if len(blocks) == 0 {
-			t.Fatalf("expected use blocks for %s", param.Name())
-		}
-		blk, ok := ctx.valueLastUseBlock(param)
-		if !ok || blk == nil {
-			t.Fatalf("valueLastUseBlock(%s) = %v, %v", param.Name(), blk, ok)
-		}
-		order := make(map[ssa.Instruction]int, len(blk.Instrs))
-		for i, instr := range blk.Instrs {
-			order[instr] = i
-		}
-		if last, ok := ctx.lastUseInBlock(param, blk, order, map[ssa.Value]bool{}); !ok {
-			t.Fatalf("lastUseInBlock(%s) = %v, %v", param.Name(), last, ok)
-		} else if last != nil {
-			lastUseCount++
-		}
+	block := call.Block()
+	order := make(map[ssa.Instruction]int, len(block.Instrs))
+	for i, instr := range block.Instrs {
+		order[instr] = i
 	}
-	if lastUseCount == 0 {
-		t.Fatal("expected at least one parameter with a concrete last use")
-	}
-	phiBlocks := make(map[*ssa.BasicBlock]bool)
-	if !ctx.collectValueUseBlocks(refs.Params[0], phiBlocks, map[ssa.Value]bool{}, false) {
-		t.Fatal("non-following phi use collection failed")
-	}
-	if len(phiBlocks) == 0 {
-		t.Fatal("non-following phi use collection should record predecessor blocks")
-	}
-	converted := ssapkg.Func("converted")
-	if !ctx.collectValueUseBlocks(converted.Params[0], make(map[*ssa.BasicBlock]bool), map[ssa.Value]bool{}, true) {
-		t.Fatal("conversion use collection failed")
+	if last, ok := ctx.lastUseInBlock(withCall.Params[0], block, order, map[ssa.Value]bool{}); !ok || last != call {
+		t.Fatalf("lastUseInBlock(call parameter) = %v, %v; want call", last, ok)
 	}
 }
 
@@ -585,17 +586,7 @@ func derefOnly(p **int) {
 	if instructionUsesValue(useP, useOne.Params[1]) {
 		t.Fatal("instruction using p should not report use of q")
 	}
-	if ctx.isOnlyRuntimeSetFinalizerArg(useOne.Params[1]) {
-		t.Fatal("unused parameter should not be treated as a SetFinalizer-only argument")
-	}
-	if ctx.shouldSkipLateSetFinalizerValue(&ssa.UnOp{Op: token.MUL}) {
-		t.Fatal("deref without a single MakeInterface referrer should not be skipped")
-	}
-
 	global := ssapkg.Members["Sink"].(*ssa.Global)
-	if !ctx.collectValueUseBlocks(global, make(map[*ssa.BasicBlock]bool), map[ssa.Value]bool{}, false) {
-		t.Fatal("global without referrers should be a valid value-use query")
-	}
 	if last, ok := ctx.lastUseInBlock(global, useOne.Blocks[0], map[ssa.Instruction]int{}, map[ssa.Value]bool{}); !ok || last != nil {
 		t.Fatalf("lastUseInBlock(global) = %v, %v", last, ok)
 	}
@@ -616,19 +607,14 @@ func derefOnly(p **int) {
 	if negInstr == nil {
 		t.Fatalf("missing unary negation:\n%s", neg.String())
 	}
-	blocks := make(map[*ssa.BasicBlock]bool)
-	if !ctx.collectValueUseBlocks(neg.Params[0], blocks, map[ssa.Value]bool{}, false) {
-		t.Fatal("non-deref unary use collection failed")
-	}
-	if !blocks[negInstr.Block()] {
-		t.Fatal("non-deref unary use should record its block")
-	}
 	order := make(map[ssa.Instruction]int, len(negInstr.Block().Instrs))
 	for i, instr := range negInstr.Block().Instrs {
 		order[instr] = i
 	}
-	if last, ok := ctx.lastUseInBlock(neg.Params[0], negInstr.Block(), order, map[ssa.Value]bool{}); !ok || last != negInstr {
-		t.Fatalf("lastUseInBlock(neg param) = %v, %v; want unary op", last, ok)
+	if last, ok := ctx.lastUseInBlock(neg.Params[0], negInstr.Block(), order, map[ssa.Value]bool{}); !ok {
+		t.Fatalf("lastUseInBlock(neg param) = %v, %v", last, ok)
+	} else if _, ok := last.(*ssa.Return); !ok {
+		t.Fatalf("lastUseInBlock(neg param) = %T; want return", last)
 	}
 
 	callDeref := ssapkg.Func("callDeref")
@@ -651,8 +637,10 @@ func derefOnly(p **int) {
 	for i, instr := range deref.Block().Instrs {
 		order[instr] = i
 	}
-	if last, ok := ctx.lastUseInBlock(callDeref.Params[0], deref.Block(), order, map[ssa.Value]bool{}); !ok || last != deref {
-		t.Fatalf("lastUseInBlock(call deref param) = %v, %v; want deref", last, ok)
+	if last, ok := ctx.lastUseInBlock(callDeref.Params[0], deref.Block(), order, map[ssa.Value]bool{}); !ok {
+		t.Fatalf("lastUseInBlock(call deref param) = %v, %v", last, ok)
+	} else if _, ok := last.(*ssa.Call); !ok {
+		t.Fatalf("lastUseInBlock(call deref param) = %T; want call", last)
 	}
 
 	derefOnly := ssapkg.Func("derefOnly")
@@ -670,9 +658,6 @@ func derefOnly(p **int) {
 	}
 	if loneDeref == nil {
 		t.Fatalf("missing lone dereference:\n%s", derefOnly.String())
-	}
-	if !ctx.collectValueUseBlocks(derefOnly.Params[0], make(map[*ssa.BasicBlock]bool), map[ssa.Value]bool{}, false) {
-		t.Fatal("lone deref use collection failed")
 	}
 	order = make(map[ssa.Instruction]int, len(loneDeref.Block().Instrs))
 	for i, instr := range loneDeref.Block().Instrs {
@@ -705,12 +690,6 @@ func use(p *int) {
 			*refs = original
 		}()
 
-		if ctx.collectValueUseBlocks(param, make(map[*ssa.BasicBlock]bool), map[ssa.Value]bool{}, true) {
-			t.Fatal("malformed referrer graph should disable liveness clearing")
-		}
-		if block, ok := ctx.valueLastUseBlock(param); ok || block != nil {
-			t.Fatalf("valueLastUseBlock with malformed referrer = %v, %v; want failure", block, ok)
-		}
 		order := make(map[ssa.Instruction]int, len(fn.Blocks[0].Instrs))
 		for i, instr := range fn.Blocks[0].Instrs {
 			order[instr] = i
@@ -747,12 +726,6 @@ func use(p *int) {
 			*refs = original
 		}()
 
-		if ctx.collectValueUseBlocks(param, make(map[*ssa.BasicBlock]bool), map[ssa.Value]bool{}, true) {
-			t.Fatal("malformed derived referrer graph should disable liveness clearing")
-		}
-		if block, ok := ctx.valueLastUseBlock(param); ok || block != nil {
-			t.Fatalf("valueLastUseBlock with malformed derived referrer = %v, %v; want failure", block, ok)
-		}
 		order := make(map[ssa.Instruction]int, len(fn.Blocks[0].Instrs))
 		for i, instr := range fn.Blocks[0].Instrs {
 			order[instr] = i
@@ -787,34 +760,12 @@ func use(p *int) {
 	}
 
 	ctx := &context{}
-	if !ctx.collectValueUseBlocks(fn.Params[0], make(map[*ssa.BasicBlock]bool), map[ssa.Value]bool{}, false) {
-		t.Fatal("DebugRef should be ignored while collecting use blocks")
-	}
 	order := make(map[ssa.Instruction]int, len(fn.Blocks[0].Instrs))
 	for i, instr := range fn.Blocks[0].Instrs {
 		order[instr] = i
 	}
 	if last, ok := ctx.lastUseInBlock(fn.Params[0], fn.Blocks[0], order, map[ssa.Value]bool{}); !ok || last == nil {
 		t.Fatalf("lastUseInBlock with DebugRef = %v, %v", last, ok)
-	}
-}
-
-func TestConservativeLivenessScanAllocPointerSlot(t *testing.T) {
-	prog := newLLSSAProg(t)
-	pkg := prog.NewPackage("live", "live")
-	ptrToInt := types.NewPointer(types.Typ[types.Int])
-	slotType := types.NewPointer(ptrToInt)
-	sig := types.NewSignatureType(nil, nil, nil,
-		types.NewTuple(types.NewParam(token.NoPos, nil, "slot", slotType)), nil, false)
-	fn := pkg.NewFunc("scanPointerSlot", sig, llssa.InGo)
-	b := fn.MakeBody(1)
-	(&context{prog: prog}).scanAllocPointer(b, fn.Param(0))
-	b.Return()
-	b.EndBuild()
-
-	ir := pkg.String()
-	if !strings.Contains(ir, "llgo_clear_stack_ptr") {
-		t.Fatalf("pointer slot scan should emit stack clear helper:\n%s", ir)
 	}
 }
 
@@ -832,30 +783,40 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(pkg.String(), "llgo_clear_stack_ptr") {
-		t.Fatalf("package without SetFinalizer should not emit liveness clear helpers:\n%s", pkg.String())
+	for _, helper := range []string{"llgo_clear_stack_ptr", "llgo_clobber_pointer_regs"} {
+		if strings.Contains(pkg.String(), helper) {
+			t.Fatalf("package without SetFinalizer should not emit %s:\n%s", helper, pkg.String())
+		}
+	}
+	if strings.Contains(pkg.String(), "store volatile") {
+		t.Fatalf("package without SetFinalizer should not emit liveness clears:\n%s", pkg.String())
 	}
 }
 
 func TestCompileConservativeLivenessClears(t *testing.T) {
 	ssapkg, files := buildSSAPackageWithPathAndFiles(t, "github.com/goplus/llgo/runtime/livetest", "main", `package main
 
-import rt "github.com/goplus/llgo/runtime/internal/lib/runtime"
+import rt "runtime"
 
-type Box struct{ p *int }
+type Box struct{ p, q *int }
 
 var Sink any
 
-func main() {
-	x := 1
+func clearLocal(p *int) {
 	var box Box
-	box.p = &x
+	box.p = p
+	box.q = p
 	Sink = box.p
-	rt.SetFinalizer(&box, func(*Box) {})
+	Sink = box.q
 	Sink = 1
 }
+
+func main() {
+	x := new(int)
+	rt.SetFinalizer(x, func(*int) {})
+	clearLocal(x)
+}
 `)
-	ssapkg.Pkg = types.NewPackage("command-line-arguments", "main")
 
 	prog := newLLSSAProg(t)
 	pkg, err := NewPackage(prog, ssapkg, files)
@@ -863,17 +824,20 @@ func main() {
 		t.Fatal(err)
 	}
 	ir := pkg.String()
-	for _, want := range []string{"llgo_clear_stack_ptr", "llgo_clobber_pointer_regs"} {
-		if !strings.Contains(ir, want) {
-			t.Fatalf("compiled liveness module missing %s:\n%s", want, ir)
+	for _, helper := range []string{"llgo_clear_stack_ptr", "llgo_clobber_pointer_regs"} {
+		if strings.Contains(ir, helper) {
+			t.Fatalf("compiled liveness module must not use %s:\n%s", helper, ir)
 		}
 	}
-	if !pkg.NeedRuntime {
-		t.Fatal("liveness clear helpers should mark runtime as needed")
+	if !strings.Contains(ir, `%"github.com/goplus/llgo/runtime/livetest.Box" = type { ptr, ptr }`) {
+		t.Fatalf("compiled liveness module missing two-pointer aggregate type:\n%s", ir)
+	}
+	if !strings.Contains(ir, `store volatile %"github.com/goplus/llgo/runtime/livetest.Box" zeroinitializer`) {
+		t.Fatalf("compiled liveness module missing volatile whole-aggregate clear:\n%s", ir)
 	}
 }
 
-func TestCompileConservativeLivenessStructParamScans(t *testing.T) {
+func TestCompileConservativeLivenessDoesNotScanWholeStack(t *testing.T) {
 	ssapkg, files := buildSSAPackageWithPathAndFiles(t, "github.com/goplus/llgo/runtime/livetest", "main", `package main
 
 import rt "github.com/goplus/llgo/runtime/internal/lib/runtime"
@@ -931,10 +895,9 @@ func main() {
 		t.Fatal(err)
 	}
 	ir := pkg.String()
-	if strings.Count(ir, "llgo_clear_stack_ptr") < 2 {
-		t.Fatalf("expected stack pointer scans for struct param and local:\n%s", ir)
-	}
-	if !strings.Contains(ir, "llgo_clobber_pointer_regs") {
-		t.Fatalf("compiled liveness module missing clobber helper:\n%s", ir)
+	for _, helper := range []string{"llgo_clear_stack_ptr", "llgo_clobber_pointer_regs"} {
+		if strings.Contains(ir, helper) {
+			t.Fatalf("compiled liveness module must not use %s:\n%s", helper, ir)
+		}
 	}
 }
