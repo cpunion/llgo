@@ -70,6 +70,7 @@ func goexitBackend(gp *g) {
 		fatal("no goroutines (main called runtime.Goexit) - deadlock!")
 		c.Exit(2)
 	}
+	leaveCurrentLocalContext()
 	mexit(gp.m)
 	pthread.Exit(nil)
 }
