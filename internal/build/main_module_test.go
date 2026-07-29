@@ -99,6 +99,36 @@ func TestGenMainModuleWASIAsyncifyEntry(t *testing.T) {
 	}
 }
 
+func TestGenMainModuleWasmWorkerEntry(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	ctx := &context{
+		prog: llssa.NewProgram(nil),
+		buildConf: &Config{
+			BuildMode: BuildModeExe,
+			Goos:      "js",
+			Goarch:    "wasm",
+		},
+		crossCompile: crosscompile.Export{
+			WasmRuntime: crosscompile.WasmRuntime{RunMainTask: true},
+		},
+	}
+	pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
+	ir := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{}).LPkg.String()
+	if !strings.Contains(ir, "define hidden i32 @__main_argc_argv(") {
+		t.Fatalf("worker module missing Emscripten host entry:\n%s", ir)
+	}
+	if !strings.Contains(ir, `call void @"github.com/goplus/llgo/runtime/internal/runtime.RunWasmMain"()`) {
+		t.Fatalf("worker host entry does not start the runtime main task:\n%s", ir)
+	}
+	if strings.Contains(ir, "define i32 @main(") {
+		t.Fatalf("worker module should let Emscripten provide main:\n%s", ir)
+	}
+	if strings.Contains(ir, "define weak void @_start()") {
+		t.Fatalf("worker module should let Emscripten provide _start:\n%s", ir)
+	}
+}
+
 func TestGenMainModuleLibrary(t *testing.T) {
 	llvm.InitializeAllTargets()
 	t.Setenv(llgoStdioNobuf, "")
