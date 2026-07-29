@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/heap.h>
@@ -18,6 +19,13 @@ int llgo_test_gc_aligned_alloc(void) {
 		return 0;
 	}
 	emscripten_builtin_free(ptr);
+
+	ptr = NULL;
+	if (posix_memalign(&ptr, 65536, 257) != 0 || ptr == NULL ||
+		(uintptr_t)ptr % 65536 != 0) {
+		return 0;
+	}
+	free(ptr);
 #endif
 	return 1;
 }
