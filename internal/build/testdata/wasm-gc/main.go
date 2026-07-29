@@ -1,6 +1,10 @@
 package main
 
-import "runtime"
+import (
+	"runtime"
+	"sync/atomic"
+	"time"
+)
 
 type payload struct {
 	value uint64
@@ -10,6 +14,7 @@ var (
 	globalRoot *payload
 	garbage    *payload
 	liveChunks [][]byte
+	stopLoop   atomic.Bool
 )
 
 func main() {
@@ -17,11 +22,37 @@ func main() {
 		panic("aligned allocation failed")
 	}
 	testRoots()
+	testCooperativeSafepoint()
 	testSuspendedGRoots()
 	testRecoveredRootChain()
 	testReclamation()
 	testHeapGrowth()
 	println("wasm gc ok")
+}
+
+//go:noinline
+func cooperativeLoopWorker(ready chan<- struct{}, done chan<- uint64) {
+	live := &payload{value: 0x31415926}
+	ready <- struct{}{}
+	for !stopLoop.Load() {
+	}
+	done <- live.value
+}
+
+func testCooperativeSafepoint() {
+	stopLoop.Store(false)
+	ready := make(chan struct{})
+	done := make(chan uint64)
+	go cooperativeLoopWorker(ready, done)
+	<-ready
+
+	time.AfterFunc(10*time.Millisecond, func() {
+		runtime.GC()
+		stopLoop.Store(true)
+	})
+	if value := <-done; value != 0x31415926 {
+		panic("cooperative safepoint lost a live root")
+	}
 }
 
 func testRoots() {
