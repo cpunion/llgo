@@ -3291,10 +3291,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	// final-PC sites for sidecar construction.
 	prog.EnableFuncInfoSites(shouldEnablePCLNSites(conf, funcInfo, emitDebugInfo))
 	sizes := func(sizes types.Sizes, compiler, arch string) types.Sizes {
-		if arch == "wasm" {
-			sizes = &types.StdSizes{WordSize: 4, MaxAlign: 4}
-		}
-		return prog.TypeSizes(sizes)
+		return prog.TypeSizes(llgoTargetTypeSizes(sizes, compiler, arch, export.LLVMTarget))
 	}
 	dedup := packages.NewDeduper()
 	var syntaxErr error
@@ -3574,6 +3571,19 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 
 	return allPkgs, nil
+}
+
+func llgoTargetTypeSizes(sizes types.Sizes, _, arch, llvmTarget string) types.Sizes {
+	if arch == "wasm" || strings.HasPrefix(llvmTarget, "wasm32-") {
+		// LLGo's wasm targets use 32-bit words and pointers, while LLVM's wasm
+		// data layout gives i64/f64 an 8-byte ABI alignment. Named TinyGo-style
+		// targets retain GOARCH=arm for source selection, so the resolved LLVM
+		// triple—not only GOARCH—must select this layout. Keep the frontend
+		// layout identical so unsafe constants and LLVM GEP/alloc sizes cannot
+		// disagree.
+		return &types.StdSizes{WordSize: 4, MaxAlign: 8}
+	}
+	return sizes
 }
 
 func targetGCBuildTags(gc string) ([]string, error) {

@@ -37,7 +37,7 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 			}
 
 			pkgs, err := packages.LoadEx(nil, func(types.Sizes, string, string) types.Sizes {
-				return &types.StdSizes{WordSize: 4, MaxAlign: 4}
+				return &types.StdSizes{WordSize: 4, MaxAlign: 8}
 			}, &packages.Config{
 				Mode:    loadSyntax | packages.NeedDeps | packages.NeedModule | packages.NeedExportFile,
 				Env:     cfgEnv,
