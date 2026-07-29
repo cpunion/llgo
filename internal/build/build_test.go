@@ -208,6 +208,28 @@ func TestIsFuncInfoEnabled(t *testing.T) {
 	}
 }
 
+func TestWASICommandOwnsSingleThreadedMemory(t *testing.T) {
+	t.Setenv(llgoWasiThreads, "1")
+	if wasiThreadsForBuild(&Config{BuildMode: BuildModeExe}) {
+		t.Fatal("WASI command reactor must not select the host threads profile")
+	}
+	for _, mode := range []BuildMode{BuildModeCArchive, BuildModeCShared} {
+		if !wasiThreadsForBuild(&Config{BuildMode: mode}) {
+			t.Fatalf("%s library unexpectedly disabled the configured WASI threads profile", mode)
+		}
+	}
+	if !wasiThreadsForBuild(nil) {
+		t.Fatal("nil build configuration unexpectedly disabled the configured WASI threads profile")
+	}
+
+	t.Setenv(llgoWasiThreads, "0")
+	for _, mode := range []BuildMode{BuildModeExe, BuildModeCArchive, BuildModeCShared} {
+		if wasiThreadsForBuild(&Config{BuildMode: mode}) {
+			t.Fatalf("%s build ignored LLGO_WASI_THREADS=0", mode)
+		}
+	}
+}
+
 func TestLinkedModuleGlobalsSkipsDeclarations(t *testing.T) {
 	prog := llssa.NewProgram(nil)
 	lpkg := prog.NewPackage("example.com/p", "example.com/p")

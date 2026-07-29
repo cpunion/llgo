@@ -151,6 +151,8 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	var coroRunSliceV2 llssa.Function
 	var coroContinueSliceV2 llssa.Function
 	var coroHostPullCallbacks []retainedCoroCallbackV1
+	var coroHostPrepare llssa.Function
+	var coroHostReactor llssa.Function
 	var coroAllocatorBootstrap llssa.Function
 	if coroEntry.manifest.IsNil() || coroEntry.factory == nil {
 		panic("coroutine program bootstrap runtime enabled without a manifest and factory")
@@ -164,6 +166,10 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
 		coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
 		coroHostPullCallbacks = declareCoroHostPullCallbacksV1(mainPkg)
+		if wasiCoroCommandRuntimeABI(ctx.buildConf) {
+			coroHostPrepare = declareCoroWASICommandHookV1(mainPkg, coroWASICommandPrepareSymbolV1)
+			coroHostReactor = declareCoroWASICommandHookV1(mainPkg, coroWASICommandReactorSymbolV1)
+		}
 	} else {
 		coroRun = declareCoroProgramRunV1(mainPkg)
 		coroContinue = declareCoroProgramContinueV1(mainPkg)
@@ -189,6 +195,8 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroRunSliceV2:         coroRunSliceV2,
 		coroContinueSliceV2:    coroContinueSliceV2,
 		coroHostPull:           hostCoroPullRuntimeABI(ctx.buildConf),
+		coroHostPrepare:        coroHostPrepare,
+		coroHostReactor:        coroHostReactor,
 		coroBootstrapVersion:   bootstrapVersion,
 	})
 	if coroContinue != nil {
@@ -479,6 +487,8 @@ type entryFunctions struct {
 	coroRunSliceV2         llssa.Function
 	coroContinueSliceV2    llssa.Function
 	coroHostPull           bool
+	coroHostPrepare        llssa.Function
+	coroHostReactor        llssa.Function
 	coroBootstrapVersion   uint32
 }
 
@@ -523,6 +533,22 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		}
 		b.Call(fns.runtimeStub.Expr)
 	}
+	if fns.coroHostPrepare != nil {
+		prepared := b.Call(fns.coroHostPrepare.Expr)
+		blocks := b.Func.MakeBlocks(2)
+		preparedBlock := blocks[0]
+		failBlock := blocks[1]
+		b.If(
+			b.BinOp(token.NEQ, prepared, prog.Zero(prog.Uint32())),
+			preparedBlock,
+			failBlock,
+		)
+		b.SetBlock(failBlock)
+		abort := declareNoArgFunc(pkg, "abort")
+		b.Call(abort.Expr)
+		b.Unreachable()
+		b = b.SetBlock(preparedBlock)
+	}
 	if fns.coroFactory != nil {
 		sliceV2 := fns.coroRunSliceV2 != nil && fns.coroContinueSliceV2 != nil
 		legacyRunV1 := fns.coroRun != nil && fns.coroRunSliceV2 == nil && fns.coroContinueSliceV2 == nil
@@ -536,7 +562,7 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		g := b.Call(fns.coroBegin.Expr, manifest, factory)
 		handle := b.Call(fns.coroFactory.Expr, g, null, null)
 		if fns.coroHostPull {
-			b = emitCoroHostInitialSliceV2(b, pkg, g, handle, fns.coroRunSliceV2)
+			b = emitCoroHostInitialSliceV2(b, pkg, g, handle, fns.coroRunSliceV2, fns.coroHostReactor)
 		} else if sliceV2 {
 			b = emitCoroNativeRunLoopV2(b, pkg, g, handle, fns.coroRunSliceV2, fns.coroContinueSliceV2)
 		} else {
@@ -604,6 +630,10 @@ func declareCoroProgramContinueSliceV2(pkg llssa.Package) llssa.Function {
 	), llssa.InC)
 }
 
+func declareCoroWASICommandHookV1(pkg llssa.Package, name string) llssa.Function {
+	return pkg.NewFunc(name, newSignature(nil, []types.Type{types.Typ[types.Uint32]}), llssa.InC)
+}
+
 // emitCoroHostInitialSliceV2 performs exactly one bounded startup activation
 // for an embedding-owned reactor. Complete rejoins the ordinary platform
 // return path. Yielded and Suspended transfer only POD obligations to the host
@@ -616,6 +646,7 @@ func emitCoroHostInitialSliceV2(
 	pkg llssa.Package,
 	g, handle llssa.Expr,
 	run llssa.Function,
+	reactor llssa.Function,
 ) llssa.Builder {
 	if b == nil || pkg == nil || run == nil {
 		panic("host coroutine initial slice requires entry builder and exact slice ABI")
@@ -735,10 +766,24 @@ func emitCoroHostInitialSliceV2(
 	b.If(or(hasDeadline, zeroDeadline), detachedBlock, failBlock)
 
 	b.SetBlock(detachedBlock)
-	// Production configuration rejects Python ownership for host-pull entries.
-	// Keeping this as a direct return also ensures a hand-built module can never
-	// run Py_Finalize while the managed program remains suspended.
-	b.Return(prog.IntVal(0, prog.Int32()))
+	if reactor == nil {
+		// Production configuration rejects Python ownership for detached
+		// host-pull entries. Keeping this as a direct return also ensures a
+		// hand-built module can never run Py_Finalize while managed work remains
+		// owned by an external reactor.
+		b.Return(prog.IntVal(0, prog.Int32()))
+	} else {
+		// WASI Preview 1 owns a plain command pump. The initial RunSlice has
+		// fully returned before this call, and every continuation invoked by the
+		// pump also returns before poll_oneoff, so no managed scheduler
+		// activation is retained across the blocking host import.
+		completed := b.Call(reactor.Expr)
+		b.If(
+			b.BinOp(token.NEQ, completed, zero),
+			completeBlock,
+			failBlock,
+		)
+	}
 
 	b.SetBlock(failBlock)
 	abort := declareNoArgFunc(pkg, "abort")
@@ -924,6 +969,8 @@ func declareCoroHostPullCallbacksV1(pkg llssa.Package) []retainedCoroCallbackV1 
 }
 
 const (
+	coroWASICommandPrepareSymbolV1             = "__llgo_coro_wasi_command_prepare_v1"
+	coroWASICommandReactorSymbolV1             = "__llgo_coro_wasi_command_reactor_v1"
 	coroProgramContinueReferenceSymbolV1       = "__llgo_coro_program_continue_reference_v1"
 	coroHostNextActionReferenceSymbolV1        = "__llgo_coro_host_next_action_reference_v1"
 	coroHostProfileReferenceSymbolV1           = "__llgo_coro_host_profile_reference_v1"

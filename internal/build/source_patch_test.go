@@ -58,6 +58,45 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 	}
 }
 
+func TestWASIP1CoroSyscallMetadataSourcePatch(t *testing.T) {
+	goroot := runtime.GOROOT()
+	overlay, err := buildSourcePatchOverlayForGOROOT(
+		nil,
+		env.LLGoRuntimeDir(),
+		goroot,
+		sourcePatchBuildContext{
+			goos:       "wasip1",
+			goarch:     "wasm",
+			goversion:  "go1.26",
+			buildFlags: []string{"-tags=llgo,llgo_coro"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(goroot, "src", "syscall", "fs_wasip1.go")
+	source, ok := overlay[path]
+	if !ok {
+		t.Fatalf("WASI Preview 1 coroutine metadata patch did not update %s", path)
+	}
+	text := string(source)
+	for _, name := range []string{
+		"fd_fdstat_get",
+		"fd_fdstat_set_flags",
+		"fd_prestat_get",
+		"fd_prestat_dir_name",
+	} {
+		if !strings.Contains(text, "//llgo:coro noblock\nfunc "+name+"(") {
+			t.Errorf("WASI Preview 1 metadata import %s lacks exact noblock annotation", name)
+		}
+	}
+	for _, name := range []string{"fd_read", "fd_write", "sock_accept"} {
+		if strings.Contains(text, "//llgo:coro noblock\nfunc "+name+"(") {
+			t.Errorf("blocking WASI Preview 1 import %s acquired noblock annotation", name)
+		}
+	}
+}
+
 func logPackageErrors(t *testing.T, pkg *packages.Package, seen map[string]bool) {
 	t.Helper()
 	if pkg == nil || seen[pkg.ID] {
@@ -873,6 +912,7 @@ func Other() {}
 	mustWriteFile(t, filepath.Join(patchDir, "patch.go"), `package demo
 
 //llgo:annotate Target rawcritical
+//llgo:annotate Other coro noblock
 `)
 
 	changed, overlay, err := applySourcePatchForPkg(
@@ -890,6 +930,9 @@ func Other() {}
 	}
 	if strings.Contains(got, "//llgo:rawcritical\nfunc Other()") {
 		t.Fatalf("annotation leaked to another function:\n%s", got)
+	}
+	if !strings.Contains(got, "//llgo:coro noblock\nfunc Other()") {
+		t.Fatalf("multiword coroutine annotation was not injected exactly:\n%s", got)
 	}
 	injected := filepath.Join(srcDir, "z_llgo_patch_patch.go")
 	if strings.Contains(string(overlay[injected]), "//llgo:annotate") {

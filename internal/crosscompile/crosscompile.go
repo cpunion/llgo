@@ -413,8 +413,10 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 			"-target", targetTriple,
 			"--sysroot=" + sysrootDir,
 			"-resource-dir=" + libclangDir,
-			"-matomics",
 			"-mbulk-memory",
+		}
+		if wasiThreads {
+			export.CCFLAGS = append(export.CCFLAGS, "-matomics", "-pthread")
 		}
 		export.CFLAGS = []string{
 			"-I" + includeDir,
@@ -427,10 +429,11 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 			"-Wno-override-module",
 			"-Wl,--error-limit=0",
 			"-L" + libDir,
+			// LLGo emits the command entry itself. wasi-libc's crt1 owns a
+			// different startup contract and would replace LLGo's weak _start,
+			// leaving the coroutine main and its reactor unreachable.
+			"-nostartfiles",
 			"-Wl,--allow-undefined",
-			"-Wl,--import-memory,", // unknown import: `env::memory` has not been defined
-			"-Wl,--export-memory",
-			"-Wl,--initial-memory=67108864", // 64MB
 			"-mbulk-memory",
 			"-mmultimemory",
 			"-z", "stack-size=10485760", // 10MB
@@ -448,13 +451,9 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 			"-fwasm-exceptions",
 			"-mllvm", "-wasm-enable-sjlj",
 		}...)
+		export.LDFLAGS = append(export.LDFLAGS, wasiMemoryLinkFlags(wasiThreads)...)
 		// Add thread support if enabled
 		if wasiThreads {
-			export.CCFLAGS = append(
-				export.CCFLAGS,
-				"-pthread",
-			)
-			export.LDFLAGS = append(export.LDFLAGS, export.CCFLAGS...)
 			export.LDFLAGS = append(
 				export.LDFLAGS,
 				"-lwasi-emulated-pthread",
@@ -483,9 +482,6 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 			"-Wl,--error-limit=0",
 			"-s", "ALLOW_MEMORY_GROWTH=1",
 			"-Wl,--allow-undefined",
-			// "-Wl,--import-memory,",
-			// "-Wl,--export-memory",
-			// "-Wl,--initial-memory=67108864", // 64MB
 			// "-mbulk-memory",
 			// "-mmultimemory",
 			// "-z", "stack-size=10485760", // 10MB
@@ -509,6 +505,21 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 		return
 	}
 	return
+}
+
+func wasiMemoryLinkFlags(wasiThreads bool) []string {
+	flags := make([]string, 0, 3)
+	if wasiThreads {
+		// A WASI threads launcher supplies the shared memory before
+		// instantiation. A single-threaded command instead defines and exports
+		// its own memory, so importing env::memory there would make an otherwise
+		// ordinary `wasmtime run` command uninstantiable.
+		flags = append(flags, "-Wl,--import-memory")
+	}
+	return append(flags,
+		"-Wl,--export-memory",
+		"-Wl,--initial-memory=67108864", // 64MB
+	)
 }
 
 func resolvedLLVMTargetSpec(goos, goarch string, wasiThreads bool) llvm.TargetSpec {

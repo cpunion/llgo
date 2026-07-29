@@ -2805,10 +2805,13 @@ func validateCoroClosedStaticSpawnRunGate(conf *Config, plan *coro.SSAPlan, fram
 						trace := "unavailable"
 						if targetFunction, found := plan.Function(target.ID); found && targetFunction != nil {
 							targetName = targetFunction.String()
-							trace = plan.OpaqueEffectTrace(targetFunction)
+							trace = plan.SuspensionEffectTrace(targetFunction, effect&^allowed)
+							if trace == "unavailable" && effect.IsOpaque() {
+								trace = plan.OpaqueEffectTrace(targetFunction)
+							}
 						}
 						return fmt.Errorf(
-							"validate coroutine spawn in %q (%s): target %q (%s) effect %s (local=%s declared=%s exec=%s) is outside the production main-return cancellation subset %s; opaque trace: %s",
+							"validate coroutine spawn in %q (%s): target %q (%s) effect %s (local=%s declared=%s exec=%s) is outside the production main-return cancellation subset %s; effect trace: %s",
 							owner.Plan.ID, owner.Function.String(), target.ID, targetName, effect,
 							target.LocalEffect.Normalize(), target.DeclaredEffect.Normalize(), target.Exec, allowed, trace,
 						)
@@ -3174,7 +3177,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	conf.OptLevel = effectiveOptLevel(conf)
 	// Handle crosscompile configuration first to set correct GOOS/GOARCH
 	forceEspClang := conf.ForceEspClang || conf.Target != ""
-	export, err := crosscompile.Use(conf.Goos, conf.Goarch, conf.Target, IsWasiThreadsEnabled(), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
+	export, err := crosscompile.Use(conf.Goos, conf.Goarch, conf.Target, wasiThreadsForBuild(conf), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup crosscompile: %w", err)
 	}
@@ -4355,9 +4358,9 @@ func nativeCoroWorkerRuntimeABI(conf *Config) bool {
 // ABI. It mirrors coro_target_host_llgo.go: wasm architectures, baremetal
 // targets, and targets which explicitly opt into llgo_coro_host use bounded V2
 // slices and export POD pull actions. The test adapter is a separate runtime
-// implementation and remains excluded. This says nothing about an ordinary
-// WASI command providing a reactor; _start may perform only the initial slice,
-// and an embedding must keep the instance alive and consume the pull ABI.
+// implementation and remains excluded. Generic profiles detach after the
+// initial slice and require an embedding to consume the pull ABI; the narrower
+// WASI Preview 1 command selector below owns a built-in consumer.
 func hostCoroPullRuntimeABI(conf *Config) bool {
 	if conf == nil ||
 		nativeCoroDoorbellRuntimeABI(conf) || configHasBuildTag(conf, "coro_runtime_adapter_test") {
@@ -4368,8 +4371,22 @@ func hostCoroPullRuntimeABI(conf *Config) bool {
 		configHasBuildTag(conf, "llgo_coro_host")
 }
 
+// wasiCoroCommandRuntimeABI is the one host-pull profile whose ordinary
+// command entry owns a built-in reactor. WASI Preview 1 has a synchronous
+// poll_oneoff boundary, so the compiler can call a plain platform pump after
+// every managed RunSlice has returned. Preview 2 remains a component/layout
+// target until its pollable bindings and component entry lifecycle exist.
+func wasiCoroCommandRuntimeABI(conf *Config) bool {
+	if conf == nil || conf.BuildMode != BuildModeExe ||
+		(conf.Goos != "wasip1" && conf.Goos != "wasi") ||
+		conf.Goarch != "wasm" || configHasBuildTag(conf, "wasip2") {
+		return false
+	}
+	return hostCoroPullRuntimeABI(conf)
+}
+
 func validateCoroHostPullEntryConfig(conf *Config, pyInit bool) error {
-	if pyInit && hostCoroPullRuntimeABI(conf) {
+	if pyInit && hostCoroPullRuntimeABI(conf) && !wasiCoroCommandRuntimeABI(conf) {
 		return fmt.Errorf("coroutine host-pull executable cannot own Python initialization: asynchronous completion has no compiler-owned Py_Finalize return edge")
 	}
 	return nil
@@ -7905,6 +7922,17 @@ func llvmPassPipeline(level optlevel.Level, ltoMode lto.Mode) string {
 
 func IsWasiThreadsEnabled() bool {
 	return isEnvOn(llgoWasiThreads, true)
+}
+
+// wasiThreadsForBuild keeps the embedding-owned WASI threads profile available
+// to libraries while making an ordinary command self-contained. The built-in
+// Preview 1 command reactor owns one scheduler and one linear memory; it does
+// not provide the host thread launcher required by wasm32-wasip1-threads.
+//
+// crosscompile.Use ignores this value for non-WASI targets, so BuildMode is the
+// only input needed before a named target has resolved GOOS/GOARCH.
+func wasiThreadsForBuild(conf *Config) bool {
+	return IsWasiThreadsEnabled() && (conf == nil || conf.BuildMode != BuildModeExe)
 }
 
 func IsFullRpathEnabled() bool {

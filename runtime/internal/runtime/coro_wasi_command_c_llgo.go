@@ -1,4 +1,4 @@
-//go:build llgo_coro && (wasip1 || wasip2 || wasm_unknown)
+//go:build llgo && llgo_coro && wasip1 && (wasm || tinygo.wasm) && !baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,8 +18,8 @@
 
 package runtime
 
-// A freestanding module has no diagnostic stream, and WASI Preview 1 cannot
-// block the executor on traceback output. The terminal caller traps immediately
-// after this bounded hook; an embedding which wants traceback output must
-// expose it through its own host adapter.
-func traceTerminalPanic(int) {}
+// The Preview 1 command reactor is a plain C/WASI boundary: it is entered only
+// after a managed RunSlice has returned and calls poll_oneoff only while no
+// scheduler activation exists on the machine stack. The Go compiler entry
+// owns the calls to its two fixed symbols.
+const LLGoFiles = "_wrap/coro_wasi_command.c"

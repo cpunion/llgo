@@ -191,3 +191,118 @@ func (p *SSAPlan) OpaqueEffectTrace(start *ssa.Function) string {
 	}
 	return strings.Join(trace, " -> ")
 }
+
+// SuspensionEffectTrace returns one deterministic source-to-leaf explanation
+// for any of the requested non-opaque suspension-effect bits. It complements
+// OpaqueEffectTrace: validation gates commonly reject one precise capability
+// such as WaitForeign, which is propagated through the same immutable call
+// graph but is not an opaque effect.
+//
+// The method is diagnostic only. It never changes the plan and deliberately
+// reports "unavailable" when the requested bits are absent or the frozen call
+// projection cannot explain them.
+func (p *SSAPlan) SuspensionEffectTrace(start *ssa.Function, requested Effect) string {
+	if p == nil || start == nil {
+		return "unavailable"
+	}
+	requested = requested.Normalize() & knownSuspendEffects
+	if requested == NoSuspend {
+		return "unavailable"
+	}
+	visiting := make(map[*ssa.Function]bool)
+	var walk func(*ssa.Function, Effect, int) []string
+	walk = func(fn *ssa.Function, wanted Effect, depth int) []string {
+		if fn == nil || wanted == NoSuspend || depth > 32 || visiting[fn] {
+			return nil
+		}
+		functionPlan, planned := p.FunctionPlan(fn)
+		if !planned {
+			return nil
+		}
+		wanted &= functionPlan.Effect.Normalize()
+		if wanted == NoSuspend {
+			return nil
+		}
+		visiting[fn] = true
+		defer delete(visiting, fn)
+		head := fn.String()
+
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common() == nil {
+					continue
+				}
+				callPlan, planned := p.CallPlan(call)
+				if !planned {
+					continue
+				}
+				if wanted&WaitForeign != 0 &&
+					(callPlan.Kind == CallForeign || callPlan.Open && callPlan.Unresolved == UnknownForeign) {
+					return []string{head, fmt.Sprintf("%s [foreign edge]", call.String())}
+				}
+				switch callPlan.Kind {
+				case CallDirect, CallDefer, CallDirectNoUnwind:
+					for _, targetID := range callPlan.Targets {
+						target, found := p.Function(targetID)
+						if !found || target == nil {
+							continue
+						}
+						targetPlan, planned := p.FunctionPlan(target)
+						if !planned {
+							continue
+						}
+						if wanted&WaitForeign != 0 && targetPlan.LocalExec.Contains(BlockForeign) {
+							return []string{
+								head + " via " + call.String(),
+								fmt.Sprintf("%s [block-foreign]", target.String()),
+							}
+						}
+						next := wanted & targetPlan.Effect.Normalize()
+						if next == NoSuspend {
+							continue
+						}
+						if tail := walk(target, next, depth+1); len(tail) != 0 {
+							return append([]string{head + " via " + call.String()}, tail...)
+						}
+					}
+				}
+			}
+		}
+		for _, lowered := range p.LoweredCalls(fn) {
+			if lowered.Target == nil || lowered.RawPlain || lowered.UnwindOnly || lowered.ExplicitStatusElided {
+				continue
+			}
+			targetPlan, planned := p.FunctionPlan(lowered.Target)
+			if !planned {
+				continue
+			}
+			if wanted&WaitForeign != 0 && targetPlan.LocalExec.Contains(BlockForeign) {
+				return []string{
+					head + " via lowered " + lowered.LogicalName,
+					fmt.Sprintf("%s [block-foreign]", lowered.Target.String()),
+				}
+			}
+			next := wanted & targetPlan.Effect.Normalize()
+			if next == NoSuspend {
+				continue
+			}
+			if tail := walk(lowered.Target, next, depth+1); len(tail) != 0 {
+				return append([]string{head + " via lowered " + lowered.LogicalName}, tail...)
+			}
+		}
+		if local := wanted & functionPlan.LocalEffect.Normalize(); local != NoSuspend {
+			return []string{fmt.Sprintf(
+				"%s [local=%s declared=%s external=%s exec=%s]",
+				head, functionPlan.LocalEffect.Normalize(), functionPlan.DeclaredEffect.Normalize(),
+				functionPlan.External, functionPlan.Exec,
+			)}
+		}
+		return nil
+	}
+	trace := walk(start, requested, 0)
+	if len(trace) == 0 {
+		return "unavailable"
+	}
+	return strings.Join(trace, " -> ")
+}

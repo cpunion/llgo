@@ -1,4 +1,4 @@
-//go:build wasip2 || wasm_unknown
+//go:build wasip1 || wasip2 || wasm_unknown
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -21,8 +21,10 @@ package runtime
 import "unsafe"
 
 // Go's bootstrap print/println operations are implementation diagnostics.
-// Freestanding core modules deliberately have no implicit stderr import; a
-// WASI component or custom embedding can provide output at a higher boundary.
+// Freestanding core modules deliberately have no implicit stderr import, and
+// WASI Preview 1 cannot perform a potentially blocking diagnostic write from
+// the executor stack. A component or custom embedding can provide output at a
+// higher boundary.
 func PrintBool(bool)              {}
 func PrintByte(byte)              {}
 func PrintUint(uint64)            {}

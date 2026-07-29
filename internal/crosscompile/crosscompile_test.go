@@ -632,6 +632,25 @@ func TestResolvedLLVMTargetSpecWASIThreads(t *testing.T) {
 	}
 }
 
+func TestWASIMemoryOwnershipLinkFlags(t *testing.T) {
+	plain := wasiMemoryLinkFlags(false)
+	threaded := wasiMemoryLinkFlags(true)
+	for _, flags := range [][]string{plain, threaded} {
+		if !slices.Contains(flags, "-Wl,--export-memory") {
+			t.Fatalf("WASI profile does not export memory: %v", flags)
+		}
+		if !slices.Contains(flags, "-Wl,--initial-memory=67108864") {
+			t.Fatalf("WASI profile has no bounded initial memory: %v", flags)
+		}
+	}
+	if slices.Contains(plain, "-Wl,--import-memory") {
+		t.Fatalf("single-threaded WASI command imports host memory: %v", plain)
+	}
+	if !slices.Contains(threaded, "-Wl,--import-memory") {
+		t.Fatalf("WASI threads profile does not import launcher-owned memory: %v", threaded)
+	}
+}
+
 func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
 	export, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Off, false)
 	if err != nil {
