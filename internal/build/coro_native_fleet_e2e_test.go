@@ -1845,7 +1845,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		coroNativePipeBuildTag,
 		coroNativeTimerBuildTag,
 	}
-	configureCoroRuntimeIslandPlan(conf)
+	configureCoroRuntimeIslandPlan(conf, "NewChan")
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
 		"github.com/goplus/llgo/runtime/internal/clite/tls":    true,

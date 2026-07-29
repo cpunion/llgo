@@ -1,3 +1,5 @@
+//go:build !coro_runtime_adapter_test
+
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -59,25 +61,32 @@ func validCoroRuntimeContext(ctx *runtimeContext) bool {
 }
 
 // coroEnterRuntimeContext installs task's runtime G only for the physical
-// llvm.coro.resume interval. Nested foreign reentry naturally saves and
-// restores the outer logical G.
-func coroEnterRuntimeContext(task *coro.G) (*g, bool) {
+// llvm.coro.resume interval. A synchronous C-to-Go reentry resumes a child
+// frame of the same logical G while its parent resume remains active below C;
+// that exact nested case borrows the existing install.
+func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool) {
 	ctx := (*runtimeContext)(coro.TaskLocal(task))
 	if !validCoroRuntimeContext(ctx) {
-		return nil, false
+		return coroRuntimeContextActivationV1{}, false
 	}
 	gp, pp := &ctx.g, &ctx.p
-	if readgstatus(gp) != _Grunnable || readpstatus(pp) != _Pidle {
-		return nil, false
+	current := getg()
+	if current == gp {
+		if readgstatus(gp) != _Grunning || readpstatus(pp) != _Prunning {
+			return coroRuntimeContextActivationV1{}, false
+		}
+		return coroRuntimeContextActivationV1{borrowed: true}, true
 	}
-	previous := getg()
+	if readgstatus(gp) != _Grunnable || readpstatus(pp) != _Pidle {
+		return coroRuntimeContextActivationV1{}, false
+	}
 	casgstatus(gp, _Grunnable, _Grunning)
 	setpstatus(pp, _Prunning)
 	setg(gp)
-	return previous, true
+	return coroRuntimeContextActivationV1{previous: unsafe.Pointer(current)}, true
 }
 
-func coroLeaveRuntimeContext(task *coro.G, previous *g) bool {
+func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivationV1) bool {
 	ctx := (*runtimeContext)(coro.TaskLocal(task))
 	if !validCoroRuntimeContext(ctx) {
 		return false
@@ -86,9 +95,12 @@ func coroLeaveRuntimeContext(task *coro.G, previous *g) bool {
 	if getg() != gp || readgstatus(gp) != _Grunning || readpstatus(pp) != _Prunning {
 		return false
 	}
+	if activation.borrowed {
+		return activation.previous == nil
+	}
 	casgstatus(gp, _Grunning, _Grunnable)
 	setpstatus(pp, _Pidle)
-	setg(previous)
+	setg((*g)(activation.previous))
 	return true
 }
 

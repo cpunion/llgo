@@ -331,7 +331,18 @@ jobs:
 
       - name: Test native linked coroutine islands
         if: matrix.lane == 'native-e2e'
-        run: go test ./internal/build -run '^TestCoro(StaticPlainDeferNativeNoStdlibRuntimeE2E|ExplicitPanicNativeNoStdlibRuntimeE2E|ChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E)$' -timeout=10m -count=1
+        # Each fixture builds and optimizes its own LLVM runtime island. Keep
+        # them in separate processes so LLVM state from an earlier fixture
+        # cannot consume the shared 10-minute test timeout.
+        run: |
+          tests=(
+            TestCoroStaticPlainDeferNativeNoStdlibRuntimeE2E
+            TestCoroExplicitPanicNativeNoStdlibRuntimeE2E
+            TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E
+          )
+          for test in "${tests[@]}"; do
+            go test ./internal/build -run "^${test}$" -timeout=10m -count=1
+          done
 
       - name: Test native coroutine fleet
         if: matrix.lane == 'fleet-e2e'

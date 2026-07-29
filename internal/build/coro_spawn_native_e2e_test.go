@@ -785,7 +785,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	// runtime files through the private compiler channel; the public Config.Tags
 	// path must reject this capability as forged.
 	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag}
-	configureCoroRuntimeIslandPlan(conf)
+	configureCoroRuntimeIslandPlan(conf, "NewChan")
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
 		"github.com/goplus/llgo/runtime/internal/coro":         true,
@@ -844,7 +844,11 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 // package identity. Source lists are deliberately loaded as
 // command-line-arguments, so this is fixture provenance rather than a runtime
 // profile or a production feature switch.
-func configureCoroRuntimeIslandPlan(conf *Config) {
+func configureCoroRuntimeIslandPlan(conf *Config, linkedRuntimeEntries ...string) {
+	linkedRuntimeEntry := make(map[string]struct{}, len(linkedRuntimeEntries))
+	for _, name := range linkedRuntimeEntries {
+		linkedRuntimeEntry[name] = struct{}{}
+	}
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		if input.requiredPlain == nil {
 			input.requiredPlain = make(map[*ssa.Function]struct{})
@@ -872,9 +876,11 @@ func configureCoroRuntimeIslandPlan(conf *Config) {
 				}
 				continue
 			}
+			_, linkedRuntimeRoot := linkedRuntimeEntry[fn.Name()]
 			externalRuntimeEntry := pkgPath == "command-line-arguments" &&
 				(strings.HasPrefix(fn.Name(), "__llgo_coro_") ||
-					strings.HasPrefix(fn.Name(), "Coro"))
+					strings.HasPrefix(fn.Name(), "Coro") ||
+					linkedRuntimeRoot)
 			externalCoreEntry := pkgPath == "github.com/goplus/llgo/runtime/internal/coro" &&
 				token.IsExported(fn.Name())
 			if fn.Parent() != nil || fn.Signature == nil || fn.Signature.Recv() != nil ||

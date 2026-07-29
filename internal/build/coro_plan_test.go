@@ -722,9 +722,10 @@ func atomicExchange(*uint32, uint32) uint32
 	defer logicalProg.Dispose()
 	logicalProg.SetLocalityInfo("example.com/state.value", llssa.LocalityInfo{Locality: llssa.GoroutineLocal})
 	logicalProg.SetLocalStorage("example.com/state.value", llssa.LocalStorageNativeTLS)
-	logicalCtx := *ctx
-	logicalCtx.prog = logicalProg
-	logicalRoots, logicalPlain, _, _, err := requiredCoroProgramRuntimePlan(&logicalCtx)
+	plainProg := ctx.prog
+	ctx.prog = logicalProg
+	logicalRoots, logicalPlain, _, _, err := requiredCoroProgramRuntimePlan(ctx)
+	ctx.prog = plainProg
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,7 +760,9 @@ func atomicExchange(*uint32, uint32) uint32
 		types.NewTuple(),
 		false,
 	)
-	_, _, _, _, invalidLocalContextErr := requiredCoroProgramRuntimePlan(&logicalCtx)
+	ctx.prog = logicalProg
+	_, _, _, _, invalidLocalContextErr := requiredCoroProgramRuntimePlan(ctx)
+	ctx.prog = plainProg
 	enterLocalContext.Signature = originalEnterLocalContextSignature
 	if invalidLocalContextErr == nil ||
 		!strings.Contains(invalidLocalContextErr.Error(), "local-context entry ABI") {

@@ -1439,6 +1439,8 @@ func (p *context) compilePhi(b llssa.Builder, v *ssa.Phi) (ret llssa.Expr) {
 	phi := b.Phi(p.type_(v.Type(), llssa.InGo))
 	ret = phi.Expr
 	p.phis = append(p.phis, func() {
+		finishSite := p.beginCoroSemanticInstructionEmission(v)
+		defer finishSite()
 		preds := v.Block().Preds
 		bblks := make([]llssa.BasicBlock, len(preds))
 		for i, pred := range preds {
@@ -1451,6 +1453,17 @@ func (p *context) compilePhi(b llssa.Builder, v *ssa.Phi) (ret llssa.Expr) {
 		})
 	})
 	return
+}
+
+// beginCoroSemanticInstructionEmission is the single source-instruction
+// boundary shared by ordinary instruction emission and Phi incoming-edge
+// materialization. Phi nodes are declared before their operands can be
+// compiled, so their frozen SitePlan must remain active around the deferred
+// incoming-edge lowering rather than the earlier empty declaration.
+func (p *context) beginCoroSemanticInstructionEmission(instr ssa.Instruction) func() {
+	finishSite := p.beginCoroSiteEmission(instr)
+	p.observeCoroSemanticInstruction(instr)
+	return finishSite
 }
 
 func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue bool) (ret llssa.Expr) {
@@ -2302,9 +2315,8 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 	if _, ok := p.staticInitInstrs[instr]; ok {
 		return
 	}
-	finishSite := p.beginCoroSiteEmission(instr)
+	finishSite := p.beginCoroSemanticInstructionEmission(instr)
 	defer finishSite()
-	p.observeCoroSemanticInstruction(instr)
 	if enableDbg && instr.Parent().Origin() == nil {
 		if _, isDebugRef := instr.(*ssa.DebugRef); !isDebugRef {
 			scope := p.getDebugLocScope(instr.Parent(), instr.Pos())

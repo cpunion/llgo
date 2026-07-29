@@ -368,7 +368,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	}
 
 	if fixture.name == "time" || fixture.name == "timer" {
-		const sleepPatch = "z_llgo_patch_sleep_coro_native_llgo.go"
+		const sleepPatch = "sleep_coro_native_llgo.go"
 		selected := false
 		for _, pkg := range packages {
 			if pkg == nil || pkg.PkgPath != "time" {

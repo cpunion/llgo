@@ -4300,7 +4300,10 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 		if aPkg == nil {
 			aPkg = ctx.pkgByID[pkg.ID]
 		}
-		if aPkg == nil || aPkg.SSA == nil || aPkg.SSA.Pkg == nil || llssa.PathOf(aPkg.SSA.Pkg) != pkg.PkgPath {
+		// Package identity must use the source types path. llssa.PathOf is an
+		// ABI-symbol projection and intentionally returns "main" when
+		// RewriteMainPrefix is enabled.
+		if aPkg == nil || aPkg.SSA == nil || aPkg.SSA.Pkg == nil || aPkg.SSA.Pkg.Path() != pkg.PkgPath {
 			return nil, fmt.Errorf("coroutine managed program roots: linked main package %q has no exact SSA package", pkg.ID)
 		}
 		for _, name := range []string{"init", "main"} {

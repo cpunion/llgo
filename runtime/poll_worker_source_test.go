@@ -98,17 +98,22 @@ func requireRuntimeAnnotationFreeCDeclarations(t *testing.T, path string, names 
 	}
 }
 
-func TestRuntimeTerminalStdioUsesExactRawHostUseDomain(t *testing.T) {
+func TestRuntimeTerminalStdioUsesExactPrivateSyncBoundary(t *testing.T) {
 	const abortPath = "internal/runtime/coro_abort_libc.go"
 	const workerPath = "internal/runtime/coro_worker_owner_llgo.go"
 	const clitePath = "internal/clite/c.go"
 
-	requireRuntimeAnnotationFreeCDeclarations(
-		t, abortPath, "coroTerminalFputs", "coroTerminalFputc",
-	)
 	requireRuntimeAnnotationFreeCDeclarations(t, clitePath, "Fputs", "Fputc")
 
 	abort := readRuntimePollFile(t, abortPath)
+	for _, declaration := range []string{
+		"//llgo:coro sync\n//go:linkname coroTerminalFputs C.fputs",
+		"//llgo:coro sync\n//go:linkname coroTerminalFputc C.fputc",
+	} {
+		if !strings.Contains(abort, declaration) {
+			t.Errorf("%s lacks private terminal boundary %q", abortPath, declaration)
+		}
+	}
 	if !strings.Contains(abort, "c.Exit(2)") {
 		t.Errorf("%s lost its terminal exit", abortPath)
 	}
