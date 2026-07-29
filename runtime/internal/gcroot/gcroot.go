@@ -37,35 +37,37 @@ type stackEntry struct {
 
 var (
 	contexts *Context
-	active   *Context
 )
 
 // CurrentChain returns the active execution owner's compiler root chain.
 func CurrentChain() unsafe.Pointer {
-	return currentRootChain
+	return unsafe.Pointer(currentRootChain)
 }
 
 // RestoreChain installs a chain captured before a non-local control transfer.
 func RestoreChain(chain unsafe.Pointer) {
-	currentRootChain = chain
+	currentRootChain = uintptr(chain)
 }
 
 // Register adds a suspended context to root enumeration.
 func Register(ctx *Context) {
-	if ctx == nil || registered(ctx) {
+	lockRegistry()
+	if ctx == nil || registeredLocked(ctx) {
+		unlockRegistry()
 		panic("gcroot: invalid context registration")
 	}
 	ctx.next = contexts
 	contexts = ctx
+	unlockRegistry()
 }
 
 // RegisterActive adds ctx and assigns the existing LLVM root chain to it.
 func RegisterActive(ctx *Context) {
-	if active != nil {
+	if activeContext != 0 {
 		panic("gcroot: active context already registered")
 	}
 	Register(ctx)
-	active = ctx
+	activeContext = uintptr(unsafe.Pointer(ctx))
 }
 
 // Switch saves the active chain and installs next's chain.
@@ -82,37 +84,54 @@ func Switch(next *Context) {
 // the target-specific stack switch. Keep it free of calls and allocations so
 // it cannot acquire a compiler-maintained root frame of its own.
 func SwitchAtBoundary(next *Context) {
+	active := (*Context)(unsafe.Pointer(activeContext))
 	if active == next {
 		return
 	}
 	if active != nil {
-		active.chain = currentRootChain
+		active.chain = unsafe.Pointer(currentRootChain)
 	}
-	active = next
-	currentRootChain = next.chain
+	activeContext = uintptr(unsafe.Pointer(next))
+	if next == nil {
+		currentRootChain = 0
+	} else {
+		currentRootChain = uintptr(next.chain)
+	}
 }
 
 // AdoptCurrent marks next active after a target-specific stack switch has
 // already restored currentRootChain.
 func AdoptCurrent(next *Context) {
-	active = next
+	activeContext = uintptr(unsafe.Pointer(next))
+}
+
+// PublishCurrent saves the calling thread's root chain in its active context.
+// A worker calls this immediately before acknowledging a stop-the-world request.
+func PublishCurrent() {
+	active := (*Context)(unsafe.Pointer(activeContext))
+	if active != nil {
+		active.chain = unsafe.Pointer(currentRootChain)
+	}
 }
 
 // Unregister removes a suspended context from root enumeration.
 func Unregister(ctx *Context) {
-	if ctx == nil || ctx == active {
+	if ctx == nil || uintptr(unsafe.Pointer(ctx)) == activeContext {
 		panic("gcroot: invalid context unregistration")
 	}
+	lockRegistry()
 	link := &contexts
 	for *link != nil && *link != ctx {
 		link = &(*link).next
 	}
 	if *link == nil {
+		unlockRegistry()
 		panic("gcroot: context is not registered")
 	}
 	*link = ctx.next
 	ctx.next = nil
 	ctx.chain = nil
+	unlockRegistry()
 }
 
 // Visit calls visitor for every root slot in every registered context.
@@ -120,16 +139,19 @@ func Visit(visitor func(root *unsafe.Pointer, metadata unsafe.Pointer)) {
 	if visitor == nil {
 		return
 	}
+	lockRegistry()
+	active := (*Context)(unsafe.Pointer(activeContext))
 	for ctx := contexts; ctx != nil; ctx = ctx.next {
 		chain := ctx.chain
 		if ctx == active {
-			chain = currentRootChain
+			chain = unsafe.Pointer(currentRootChain)
 		}
 		visitChain(chain, visitor)
 	}
+	unlockRegistry()
 }
 
-func registered(want *Context) bool {
+func registeredLocked(want *Context) bool {
 	for ctx := contexts; ctx != nil; ctx = ctx.next {
 		if ctx == want {
 			return true

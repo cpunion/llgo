@@ -82,6 +82,36 @@ func TestGCRootFrameIR(t *testing.T) {
 	}
 }
 
+func TestThreadLocalGCRootFrameIR(t *testing.T) {
+	prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "js", GOARCH: "wasm"})
+	if prog.ThreadLocalGCRootsEnabled() {
+		t.Fatal("thread-local GC roots enabled by default")
+	}
+	prog.EnableThreadLocalGCRoots(true)
+	if !prog.ThreadLocalGCRootsEnabled() {
+		t.Fatal("thread-local GC roots were not enabled")
+	}
+	pkg := prog.NewPackage("main", "main")
+
+	fn := pkg.NewFunc("main.keep", ssa.NoArgsNoRet, ssa.InGo)
+	b := fn.MakeBody(1)
+	fn.NewGCRoots(1)
+	b.Return()
+	b.EndBuild()
+
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatal(err)
+	}
+	ir := pkg.String()
+	if !strings.Contains(ir, `thread_local`) ||
+		!strings.Contains(ir, `github.com/goplus/llgo/runtime/internal/gcroot.currentRootChain`) {
+		t.Fatalf("thread-local compiler root chain is missing:\n%s", ir)
+	}
+	if strings.Contains(ir, `@llvm_gc_root_chain`) {
+		t.Fatalf("thread-local roots also emitted the single-worker chain:\n%s", ir)
+	}
+}
+
 func TestGCRootReservationAndClosureContext(t *testing.T) {
 	prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "js", GOARCH: "wasm"})
 	pkg := prog.NewPackage("main", "main")

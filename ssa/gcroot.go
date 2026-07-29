@@ -19,10 +19,14 @@ package ssa
 import (
 	"go/types"
 
+	"github.com/goplus/llgo/internal/env"
 	"github.com/xgo-dev/llvm"
 )
 
-const gcRootChainName = "llvm_gc_root_chain"
+const (
+	gcRootChainName      = "llvm_gc_root_chain"
+	threadLocalRootChain = env.LLGoRuntimePkg + "/internal/gcroot.currentRootChain"
+)
 
 // EnableGCRoots controls compiler-maintained GC roots.
 func (p Program) EnableGCRoots(enable bool) {
@@ -32,6 +36,17 @@ func (p Program) EnableGCRoots(enable bool) {
 // GCRootsEnabled reports whether compiler-maintained GC roots are enabled.
 func (p Program) GCRootsEnabled() bool {
 	return p.enableGCRoots
+}
+
+// EnableThreadLocalGCRoots gives each native thread an independent compiler
+// root chain. The runtime must provide a matching native TLS variable.
+func (p Program) EnableThreadLocalGCRoots(enable bool) {
+	p.threadLocalGCRoots = enable
+}
+
+// ThreadLocalGCRootsEnabled reports whether root chains are thread-local.
+func (p Program) ThreadLocalGCRootsEnabled() bool {
+	return p.threadLocalGCRoots
 }
 
 // NewGCRoots reserves count pointer roots in one compiler-maintained frame.
@@ -59,7 +74,8 @@ func (p Function) NewGCRoots(count int) []Expr {
 	frame := llvm.CreateAlloca(b.impl, frameType)
 
 	chain := p.gcRootChain()
-	prev := llvm.CreateLoad(b.impl, voidPtr, chain)
+	prevWord := llvm.CreateLoad(b.impl, prog.Uintptr().ll, chain)
+	prev := llvm.CreateIntToPtr(b.impl, prevWord, voidPtr)
 	b.impl.CreateStore(prev, llvm.CreateStructGEP(b.impl, frameType, frame, 0))
 
 	frameMap := p.newGCRootMap(count)
@@ -74,8 +90,8 @@ func (p Function) NewGCRoots(count int) []Expr {
 		b.impl.CreateStore(llvm.ConstNull(voidPtr), root)
 		roots[i] = Expr{root, prog.Pointer(prog.VoidPtr())}
 	}
-	b.impl.CreateStore(frame, chain)
-	p.gcRootPrev = Expr{prev, prog.VoidPtr()}
+	b.impl.CreateStore(llvm.CreatePtrToInt(b.impl, frame, prog.Uintptr().ll), chain)
+	p.gcRootPrev = Expr{prevWord, prog.Uintptr()}
 	return roots
 }
 
@@ -85,12 +101,17 @@ func (b Builder) SetGCRoot(root, value Expr) {
 }
 
 func (p Function) gcRootChain() llvm.Value {
-	global := p.Pkg.mod.NamedGlobal(gcRootChainName)
-	if global.IsNil() {
-		global = llvm.AddGlobal(p.Pkg.mod, p.Prog.tyVoidPtr(), gcRootChainName)
+	name := gcRootChainName
+	if p.Prog.threadLocalGCRoots {
+		name = threadLocalRootChain
 	}
-	global.SetInitializer(llvm.ConstNull(p.Prog.tyVoidPtr()))
+	global := p.Pkg.mod.NamedGlobal(name)
+	if global.IsNil() {
+		global = llvm.AddGlobal(p.Pkg.mod, p.Prog.Uintptr().ll, name)
+	}
+	global.SetInitializer(llvm.ConstNull(p.Prog.Uintptr().ll))
 	global.SetLinkage(llvm.LinkOnceAnyLinkage)
+	global.SetThreadLocal(p.Prog.threadLocalGCRoots)
 	global.SetAlignment(p.Prog.PointerSize())
 	return global
 }

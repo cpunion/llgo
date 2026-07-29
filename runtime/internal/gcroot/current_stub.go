@@ -2,6 +2,7 @@
 
 package gcroot
 
-import "unsafe"
-
-var currentRootChain unsafe.Pointer
+var (
+	currentRootChain uintptr
+	activeContext    uintptr
+)

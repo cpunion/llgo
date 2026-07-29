@@ -84,6 +84,29 @@ func keep(p *int) *int { return p }
 	}
 }
 
+func TestCompileThreadLocalGCRoots(t *testing.T) {
+	const src = `package main
+
+func use(*int)
+
+func keep(p *int) *int {
+	use(p)
+	return p
+}
+`
+	ir := cltest.CompileIREx(t, src, "gcroot_tls.go", false, func(prog llssa.Program) {
+		prog.EnableGCRoots(true)
+		prog.EnableThreadLocalGCRoots(true)
+	})
+	if !strings.Contains(ir, `thread_local`) ||
+		!strings.Contains(ir, `github.com/goplus/llgo/runtime/internal/gcroot.currentRootChain`) {
+		t.Fatalf("thread-local compiler root chain is missing:\n%s", ir)
+	}
+	if strings.Contains(ir, `@llvm_gc_root_chain`) {
+		t.Fatalf("thread-local roots also emitted the single-worker chain:\n%s", ir)
+	}
+}
+
 func TestCompileGCRootPlanning(t *testing.T) {
 	const pure = `package main
 func keep(p *int) *int { return p }

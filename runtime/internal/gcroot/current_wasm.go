@@ -1,8 +1,10 @@
-//go:build llgo && wasm && llgo_wasm_gc
+//go:build llgo && wasm && llgo_wasm_gc && !llgo.wasm_workers
 
 package gcroot
 
-import "unsafe"
+import _ "unsafe"
 
 //go:linkname currentRootChain llvm_gc_root_chain
-var currentRootChain unsafe.Pointer
+var currentRootChain uintptr
+
+var activeContext uintptr
