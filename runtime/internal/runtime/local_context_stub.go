@@ -22,21 +22,27 @@ import "unsafe"
 
 type LocalContext struct{}
 
-func EnterLocalContext(ctx *LocalContext) uintptr {
-	return 0
+func EnterLocalContext(ctx *LocalContext) *LocalContext {
+	return nil
 }
 
-func LeaveLocalContext(ctx *LocalContext, previous uintptr) {}
+func LeaveLocalContext(ctx, previous *LocalContext) {}
 
 func leaveCurrentLocalContext() {}
 
-func LocalPackage(cacheSlot *uintptr, size, align uintptr) unsafe.Pointer {
-	if cacheSlot != nil && *cacheSlot != 0 {
-		return unsafe.Pointer(*cacheSlot)
+func releaseLocalBlocks(ctx *LocalContext) {}
+
+func LocalPackage(cacheSlot *unsafe.Pointer, size, align uintptr) unsafe.Pointer {
+	if cacheSlot != nil && *cacheSlot != nil {
+		return *cacheSlot
 	}
 	data := AllocZ(size)
 	if cacheSlot != nil {
-		*cacheSlot = uintptr(data)
+		*cacheSlot = data
 	}
 	return data
+}
+
+func LocalPackageLogical(cacheSlot *unsafe.Pointer, size, align uintptr) unsafe.Pointer {
+	return LocalPackage(cacheSlot, size, align)
 }

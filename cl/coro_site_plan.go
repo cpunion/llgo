@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/goplus/llgo/internal/locality"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -28,26 +29,32 @@ import (
 // the exact pre-analysis SitePlan. It is a compile-time verifier only; no
 // observer state enters generated code or the runtime ABI.
 type coroSiteEmissionObserver struct {
-	instruction                ssa.Instruction
-	placement                  coroRuntimeHelperPlacement
-	expected                   map[string]none
-	seen                       map[string]none
-	expectedIntrinsic          bool
-	seenIntrinsic              bool
-	expectedIntrinsicOpcode    int
-	expectedIntrinsicSemantics CoroIntrinsicCallSemantics
-	expectedElision            CoroCallElisionKind
-	seenElision                bool
-	expectedPhysical           coroPhysicalInstructionPlan
-	hasExpectedPhysical        bool
-	seenSemantic               bool
-	seenPhysical               bool
-	seenPhysicalControl        bool
-	seenPhysicalOperation      bool
-	seenPhysicalOutcome        bool
-	seenPhysicalNilGuard       bool
-	seenPhysicalBoundsGuard    bool
-	observeFrozenSite          bool
+	instruction                 ssa.Instruction
+	function                    *ssa.Function
+	label                       string
+	placement                   coroRuntimeHelperPlacement
+	expected                    map[string]none
+	seen                        map[string]none
+	expectedLocalityGuards      map[locality.Kind]none
+	seenLocalityGuards          map[locality.Kind]none
+	expectedLocalityDispatchers map[*ssa.Function]none
+	seenLocalityDispatchers     map[*ssa.Function]none
+	expectedIntrinsic           bool
+	seenIntrinsic               bool
+	expectedIntrinsicOpcode     int
+	expectedIntrinsicSemantics  CoroIntrinsicCallSemantics
+	expectedElision             CoroCallElisionKind
+	seenElision                 bool
+	expectedPhysical            coroPhysicalInstructionPlan
+	hasExpectedPhysical         bool
+	seenSemantic                bool
+	seenPhysical                bool
+	seenPhysicalControl         bool
+	seenPhysicalOperation       bool
+	seenPhysicalOutcome         bool
+	seenPhysicalNilGuard        bool
+	seenPhysicalBoundsGuard     bool
+	observeFrozenSite           bool
 }
 
 func (p *context) beginCoroSiteEmission(instruction ssa.Instruction) func() {
@@ -71,6 +78,63 @@ func (p *context) beginCoroRelocatedIntrinsicEmission(
 	return p.beginCoroSiteEmissionMode(instruction, placement, false, true)
 }
 
+func (p *context) beginCoroFunctionPreambleEmission() func() {
+	if p == nil || p.goFn == nil || p.compilation == nil || p.emissionUniverse == nil ||
+		!p.hasCoroPhysicalEmission() || p.rawPlainBody {
+		return func() {}
+	}
+	plan := coroFunctionPreamblePlan{}
+	if p.emissionUniverse.CompleteRuntimeABI() {
+		var err error
+		plan, err = p.emissionUniverse.coroProgramIR.functionPreamble(p)
+		if err != nil {
+			panic(fmt.Errorf("coroutine function preamble in %q: %w", p.goFn.Name(), err))
+		}
+	}
+	observer := &coroSiteEmissionObserver{
+		function:                    p.goFn,
+		label:                       "function-preamble",
+		placement:                   coroRuntimeHelperAtSource,
+		expected:                    make(map[string]none, len(plan.managedRuntimeHelpers)),
+		seen:                        make(map[string]none, len(plan.managedRuntimeHelpers)),
+		expectedLocalityGuards:      make(map[locality.Kind]none, len(plan.localityGuards)),
+		seenLocalityGuards:          make(map[locality.Kind]none, len(plan.localityGuards)),
+		expectedLocalityDispatchers: make(map[*ssa.Function]none),
+		seenLocalityDispatchers:     make(map[*ssa.Function]none),
+		observeFrozenSite:           p.emissionUniverse.CompleteRuntimeABI(),
+	}
+	for _, helper := range plan.managedRuntimeHelpers {
+		observer.expected[helper] = none{}
+	}
+	for _, kind := range plan.localityGuards {
+		observer.expectedLocalityGuards[kind] = none{}
+	}
+	previous := p.coroEmissionSite()
+	if previous != nil {
+		panic("coroutine function preamble overlaps another emission SitePlan")
+	}
+	p.setCoroEmissionSite(observer)
+	return func() {
+		recovered := recover()
+		p.setCoroEmissionSite(previous)
+		if recovered != nil {
+			panic(recovered)
+		}
+		if missing := observer.missing(); len(missing) != 0 {
+			panic(fmt.Errorf(
+				"coroutine function preamble in %q omitted frozen runtime helper(s) %s",
+				p.goFn.Name(), strings.Join(missing, ", "),
+			))
+		}
+		if missing := observer.missingLocalityGuards(); len(missing) != 0 {
+			panic(fmt.Errorf(
+				"coroutine function preamble in %q omitted frozen locality guard(s) %s",
+				p.goFn.Name(), strings.Join(missing, ", "),
+			))
+		}
+	}
+}
+
 func (p *context) beginCoroSiteEmissionMode(
 	instruction ssa.Instruction,
 	placement coroRuntimeHelperPlacement,
@@ -83,6 +147,7 @@ func (p *context) beginCoroSiteEmissionMode(
 	}
 	plan := coroEmissionSitePlan{}
 	helpers := []string(nil)
+	localityDispatchers := []*ssa.Function(nil)
 	if p.emissionUniverse.CompleteRuntimeABI() {
 		var err error
 		physical := p.coroEmissionPlan()
@@ -97,6 +162,9 @@ func (p *context) beginCoroSiteEmissionMode(
 		}
 		if observeHelpers {
 			helpers = plan.managedRuntimeHelpersAt(placement)
+			if placement == coroRuntimeHelperAtSource {
+				localityDispatchers = plan.localityDispatchers
+			}
 		}
 	}
 	physical := coroPhysicalInstructionPlan{}
@@ -118,11 +186,17 @@ func (p *context) beginCoroSiteEmissionMode(
 	}
 	helpers = filtered
 	observer := &coroSiteEmissionObserver{
-		instruction:       instruction,
-		placement:         placement,
-		expected:          make(map[string]none, len(helpers)),
-		seen:              make(map[string]none, len(helpers)),
-		observeFrozenSite: p.emissionUniverse.CompleteRuntimeABI(),
+		instruction:                 instruction,
+		function:                    instruction.Parent(),
+		label:                       instruction.String(),
+		placement:                   placement,
+		expected:                    make(map[string]none, len(helpers)),
+		seen:                        make(map[string]none, len(helpers)),
+		expectedLocalityGuards:      make(map[locality.Kind]none),
+		seenLocalityGuards:          make(map[locality.Kind]none),
+		expectedLocalityDispatchers: make(map[*ssa.Function]none, len(localityDispatchers)),
+		seenLocalityDispatchers:     make(map[*ssa.Function]none, len(localityDispatchers)),
+		observeFrozenSite:           p.emissionUniverse.CompleteRuntimeABI(),
 	}
 	if hasPhysical {
 		observer.expectedPhysical = physical
@@ -149,6 +223,9 @@ func (p *context) beginCoroSiteEmissionMode(
 	for _, helper := range helpers {
 		observer.expected[helper] = none{}
 	}
+	for _, dispatcher := range localityDispatchers {
+		observer.expectedLocalityDispatchers[dispatcher] = none{}
+	}
 	previous := p.coroEmissionSite()
 	p.setCoroEmissionSite(observer)
 	return func() {
@@ -169,6 +246,16 @@ func (p *context) beginCoroSiteEmissionMode(
 			panic(fmt.Errorf(
 				"coroutine emission site %q in %q with physical recipe %s omitted frozen runtime helper(s) %s",
 				instruction.String(), function, physical, strings.Join(missing, ", "),
+			))
+		}
+		if missing := observer.missingLocalityDispatchers(); len(missing) != 0 {
+			function := "<unknown>"
+			if instruction.Parent() != nil {
+				function = instruction.Parent().String()
+			}
+			panic(fmt.Errorf(
+				"coroutine emission site %q in %q omitted frozen locality dispatcher(s) %s",
+				instruction.String(), function, strings.Join(missing, ", "),
 			))
 		}
 		if observer.expectedIntrinsic && !observer.seenIntrinsic {
@@ -527,8 +614,8 @@ func (p *context) observeCoroSiteRuntimeHelper(helper string) {
 	}
 	if _, expected := observer.expected[helper]; !expected {
 		function := "<unknown>"
-		if observer.instruction.Parent() != nil {
-			function = observer.instruction.Parent().String()
+		if observer.function != nil {
+			function = observer.function.String()
 		}
 		physical := "none"
 		if observer.hasExpectedPhysical {
@@ -541,10 +628,59 @@ func (p *context) observeCoroSiteRuntimeHelper(helper string) {
 		sort.Strings(expected)
 		panic(fmt.Errorf(
 			"coroutine emission site %q (%T) in %q with physical recipe %s emitted runtime helper %q absent from its frozen SitePlan %v",
-			observer.instruction.String(), observer.instruction, function, physical, helper, expected,
+			observer.label, observer.instruction, function, physical, helper, expected,
 		))
 	}
+	if observer.instruction == nil {
+		if _, duplicate := observer.seen[helper]; duplicate {
+			panic(fmt.Errorf(
+				"coroutine function preamble in %q emitted runtime helper %q more than once",
+				observer.function.Name(), helper,
+			))
+		}
+	}
 	observer.seen[helper] = none{}
+}
+
+func (p *context) observeCoroFunctionPreambleLocalityGuard(kind locality.Kind) {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite {
+		return
+	}
+	if observer.instruction != nil || observer.label != "function-preamble" || observer.function != p.goFn {
+		panic("logical-locality preamble guard escaped its function-level SitePlan")
+	}
+	if _, expected := observer.expectedLocalityGuards[kind]; !expected {
+		panic(fmt.Errorf(
+			"coroutine function preamble in %q emitted unplanned locality guard %s",
+			p.goFn.Name(), kind,
+		))
+	}
+	if _, duplicate := observer.seenLocalityGuards[kind]; duplicate {
+		panic(fmt.Errorf(
+			"coroutine function preamble in %q emitted locality guard %s more than once",
+			p.goFn.Name(), kind,
+		))
+	}
+	observer.seenLocalityGuards[kind] = none{}
+}
+
+func (p *context) observeCoroSiteLocalityDispatcher(dispatcher *ssa.Function) {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite {
+		return
+	}
+	if _, expected := observer.expectedLocalityDispatchers[dispatcher]; !expected {
+		name := "<nil>"
+		if dispatcher != nil {
+			name = dispatcher.String()
+		}
+		panic(fmt.Errorf(
+			"coroutine emission site %q emitted locality dispatcher %q absent from its frozen SitePlan",
+			observer.instruction.String(), name,
+		))
+	}
+	observer.seenLocalityDispatchers[dispatcher] = none{}
 }
 
 func (o *coroSiteEmissionObserver) missing() []string {
@@ -555,6 +691,38 @@ func (o *coroSiteEmissionObserver) missing() []string {
 	for helper := range o.expected {
 		if _, seen := o.seen[helper]; !seen {
 			missing = append(missing, helper)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func (o *coroSiteEmissionObserver) missingLocalityGuards() []string {
+	if o == nil {
+		return nil
+	}
+	missing := make([]string, 0, len(o.expectedLocalityGuards))
+	for kind := range o.expectedLocalityGuards {
+		if _, seen := o.seenLocalityGuards[kind]; !seen {
+			missing = append(missing, kind.String())
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func (o *coroSiteEmissionObserver) missingLocalityDispatchers() []string {
+	if o == nil {
+		return nil
+	}
+	missing := make([]string, 0, len(o.expectedLocalityDispatchers))
+	for dispatcher := range o.expectedLocalityDispatchers {
+		if _, seen := o.seenLocalityDispatchers[dispatcher]; !seen {
+			if dispatcher == nil {
+				missing = append(missing, "<nil>")
+			} else {
+				missing = append(missing, dispatcher.String())
+			}
 		}
 	}
 	sort.Strings(missing)

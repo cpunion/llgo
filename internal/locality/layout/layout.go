@@ -64,6 +64,11 @@ type Package struct {
 	Block     []Variable
 	Thread    []Initializer
 	Goroutine []Initializer
+	// ThreadDispatch and GoroutineDispatch are source-SSA func() bodies that
+	// replay the corresponding initializer list. Coroutine analysis consumes
+	// these exact functions instead of discovering generated LLVM call edges.
+	ThreadDispatch    string
+	GoroutineDispatch string
 
 	byName map[string]int
 }
@@ -80,6 +85,10 @@ func Plan(path string, declarations []Declaration) (Package, error) {
 		locality.Thread:    {},
 		locality.Goroutine: {},
 	}
+	dispatchers := map[locality.Kind]string{
+		locality.Thread:    "",
+		locality.Goroutine: "",
+	}
 	for _, decl := range decls {
 		if decl.Info.Locality == locality.None {
 			continue
@@ -93,8 +102,9 @@ func Plan(path string, declarations []Declaration) (Package, error) {
 		if decl.Info.Locality != locality.Thread && decl.Info.Locality != locality.Goroutine {
 			return Package{}, fmt.Errorf("locality layout: invalid locality for %s", decl.Name)
 		}
-		prepared := decl.Info.InitFunc != "" && decl.Info.InitOrder != 0
-		if decl.Info.HasInitializer != prepared {
+		hasMetadata := decl.Info.InitFunc != "" || decl.Info.InitOrder != 0 || decl.Info.InitDispatch != ""
+		prepared := decl.Info.InitFunc != "" && decl.Info.InitOrder != 0 && decl.Info.InitDispatch != ""
+		if decl.Info.HasInitializer != prepared || !decl.Info.HasInitializer && hasMetadata {
 			return Package{}, fmt.Errorf("locality layout: inconsistent initializer metadata for %s", decl.Name)
 		}
 		variable := Variable{Declaration: decl, Field: -1, Storage: StorageForType(decl.Type)}
@@ -110,10 +120,19 @@ func Plan(path string, declarations []Declaration) (Package, error) {
 				return Package{}, fmt.Errorf("locality layout: initializer order %d names both %s and %s", decl.Info.InitOrder, current, decl.Info.InitFunc)
 			}
 			byOrder[decl.Info.InitOrder] = decl.Info.InitFunc
+			if current := dispatchers[decl.Info.Locality]; current != "" && current != decl.Info.InitDispatch {
+				return Package{}, fmt.Errorf(
+					"locality layout: %s initializers name both dispatchers %s and %s",
+					decl.Info.Locality, current, decl.Info.InitDispatch,
+				)
+			}
+			dispatchers[decl.Info.Locality] = decl.Info.InitDispatch
 		}
 	}
 	ret.Thread = orderedInitializers(initializers[locality.Thread])
 	ret.Goroutine = orderedInitializers(initializers[locality.Goroutine])
+	ret.ThreadDispatch = dispatchers[locality.Thread]
+	ret.GoroutineDispatch = dispatchers[locality.Goroutine]
 	return ret, nil
 }
 
@@ -179,6 +198,18 @@ func (p Package) Initializers(kind locality.Kind) []Initializer {
 		return p.Goroutine
 	}
 	return nil
+}
+
+// Dispatcher returns the exact source-SSA func() that replays kind's
+// initializers, or an empty string when the kind has no initializers.
+func (p Package) Dispatcher(kind locality.Kind) string {
+	if kind == locality.Thread {
+		return p.ThreadDispatch
+	}
+	if kind == locality.Goroutine {
+		return p.GoroutineDispatch
+	}
+	return ""
 }
 
 // BlockName returns the shared package-block accessor symbol.

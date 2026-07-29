@@ -33,12 +33,20 @@ import (
 func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instruction ssa.Instruction) []string {
 	if u.coroProgramIR == nil {
 		shape, _ := prepareCoroEmissionFunctionShape(instruction.Parent())
-		return u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		helpers, err := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		if err != nil {
+			panic(err)
+		}
+		return helpers
 	}
 	helpers, err := u.coroProgramIR.plannedRuntimeHelpers(ctx, instruction)
 	if err != nil {
 		shape, _ := prepareCoroEmissionFunctionShape(instruction.Parent())
-		return u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		helpers, classifyErr := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		if classifyErr != nil {
+			panic(classifyErr)
+		}
+		return helpers
 	}
 	return helpers
 }
@@ -46,13 +54,19 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instruction ssa.I
 func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instruction ssa.Instruction) []string {
 	if u.coroProgramIR == nil {
 		shape, _ := prepareCoroEmissionFunctionShape(instruction.Parent())
-		managed := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		managed, err := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		if err != nil {
+			panic(err)
+		}
 		return u.classifyPlainRuntimeHelpers(ctx, instruction, managed)
 	}
 	plan, err := u.coroProgramIR.sitePlan(ctx, instruction)
 	if err != nil {
 		shape, _ := prepareCoroEmissionFunctionShape(instruction.Parent())
-		managed := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		managed, classifyErr := u.classifyCoroRuntimeHelpers(ctx, shape, instruction)
+		if classifyErr != nil {
+			panic(classifyErr)
+		}
 		return u.classifyPlainRuntimeHelpers(ctx, instruction, managed)
 	}
 	return plan.plainRuntimeHelpers

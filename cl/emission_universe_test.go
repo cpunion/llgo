@@ -97,6 +97,7 @@ type emissionTestPackage struct {
 	ssa   *ssa.Package
 	file  *ast.File
 	types *types.Package
+	info  *types.Info
 }
 
 type emissionTestProgram struct {
@@ -143,7 +144,7 @@ func (p *emissionTestProgram) addPackage(t *testing.T, path, src string) emissio
 	}
 	p.importer.packages[path] = pkg
 	ssaPkg := p.ssa.CreatePackage(pkg, []*ast.File{file}, info, true)
-	return emissionTestPackage{ssa: ssaPkg, file: file, types: pkg}
+	return emissionTestPackage{ssa: ssaPkg, file: file, types: pkg, info: info}
 }
 
 func TestEmissionFunctionSortKeyIgnoresFileSetBaseAndCheckoutRoot(t *testing.T) {

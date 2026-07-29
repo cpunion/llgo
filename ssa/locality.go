@@ -132,7 +132,7 @@ func resolveLocality(lookup func(string) (VariableLocality, bool), linkname func
 }
 
 func hasInitialization(info locality.Info) bool {
-	return info.HasInitializer || info.InitFunc != "" || info.InitOrder != 0
+	return info.HasInitializer || info.InitFunc != "" || info.InitOrder != 0 || info.InitDispatch != ""
 }
 
 func (p Program) ValidateLocalities(pkgPath string) error {
@@ -219,12 +219,39 @@ func (p Program) PackageLocalities(pkgPath string) map[string]VariableLocality {
 }
 
 func (p Program) NeedsLocalContext() bool {
+	return p.needsLocalContext(p.logicalLocality)
+}
+
+// NeedsLogicalLocalContext reports whether enabling logical-G locality would
+// require a LocalContext. Coroutine planning uses this query before it commits
+// Program.LogicalLocality, so source-less program-entry runtime edges can be
+// frozen without prematurely changing code-generation mode.
+func (p Program) NeedsLogicalLocalContext() bool {
+	return p.needsLocalContext(true)
+}
+
+func (p Program) needsLocalContext(logical bool) bool {
 	p.localities.mu.RLock()
 	defer p.localities.mu.RUnlock()
 	for _, info := range p.localities.entries {
-		if info.Locality != locality.None && (info.LocalStorage != LocalStorageNativeTLS || hasInitialization(info.Info)) {
+		if info.Locality != locality.None && (logical ||
+			info.LocalStorage != LocalStorageNativeTLS || hasInitialization(info.Info)) {
 			return true
 		}
 	}
 	return false
+}
+
+// SetLogicalLocality selects logical-G storage for all locality variables.
+// It is frozen by the build after the stackless coroutine plan succeeds and
+// before any package body or program entry is emitted.
+func (p Program) SetLogicalLocality(enabled bool) {
+	if p != nil {
+		p.logicalLocality = enabled
+	}
+}
+
+// LogicalLocality reports whether locality follows the stackless logical G.
+func (p Program) LogicalLocality() bool {
+	return p != nil && p.logicalLocality
 }

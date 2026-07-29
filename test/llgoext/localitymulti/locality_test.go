@@ -31,7 +31,7 @@ import (
 	localityblock7 "github.com/goplus/llgo/test/llgoext/testdata/localityblocks/p7"
 )
 
-var benchmarkSink uintptr
+var benchmarkSink *int
 
 func TestGLSPackageWorkingSet(t *testing.T) {
 	prepare := []func(){
@@ -44,7 +44,7 @@ func TestGLSPackageWorkingSet(t *testing.T) {
 		localityblock6.Prepare,
 		localityblock7.Prepare,
 	}
-	read := []func() uintptr{
+	read := []func() *int{
 		localityblock0.Read,
 		localityblock1.Read,
 		localityblock2.Read,
@@ -56,7 +56,7 @@ func TestGLSPackageWorkingSet(t *testing.T) {
 	}
 	for i := range prepare {
 		prepare[i]()
-		if got := read[i](); got == 0 {
+		if got := read[i](); got == nil {
 			t.Fatalf("package %d GLS pointer is nil", i)
 		}
 	}
@@ -66,10 +66,10 @@ func BenchmarkGLSPackageWorkingSet2(b *testing.B) {
 	localityblock0.Prepare()
 	localityblock1.Prepare()
 	b.ResetTimer()
-	var value uintptr
+	var value *int
 	for i := 0; i < b.N; i++ {
-		value += localityblock0.Read()
-		value += localityblock1.Read()
+		value = localityblock0.Read()
+		value = localityblock1.Read()
 	}
 	benchmarkSink = value
 }
@@ -80,12 +80,12 @@ func BenchmarkGLSPackageWorkingSet4(b *testing.B) {
 	localityblock2.Prepare()
 	localityblock3.Prepare()
 	b.ResetTimer()
-	var value uintptr
+	var value *int
 	for i := 0; i < b.N; i++ {
-		value += localityblock0.Read()
-		value += localityblock1.Read()
-		value += localityblock2.Read()
-		value += localityblock3.Read()
+		value = localityblock0.Read()
+		value = localityblock1.Read()
+		value = localityblock2.Read()
+		value = localityblock3.Read()
 	}
 	benchmarkSink = value
 }
@@ -100,16 +100,16 @@ func BenchmarkGLSPackageWorkingSet8(b *testing.B) {
 	localityblock6.Prepare()
 	localityblock7.Prepare()
 	b.ResetTimer()
-	var value uintptr
+	var value *int
 	for i := 0; i < b.N; i++ {
-		value += localityblock0.Read()
-		value += localityblock1.Read()
-		value += localityblock2.Read()
-		value += localityblock3.Read()
-		value += localityblock4.Read()
-		value += localityblock5.Read()
-		value += localityblock6.Read()
-		value += localityblock7.Read()
+		value = localityblock0.Read()
+		value = localityblock1.Read()
+		value = localityblock2.Read()
+		value = localityblock3.Read()
+		value = localityblock4.Read()
+		value = localityblock5.Read()
+		value = localityblock6.Read()
+		value = localityblock7.Read()
 	}
 	benchmarkSink = value
 }

@@ -25,12 +25,9 @@ import (
 
 var runtimeDeferSink unsafe.Pointer
 
-//go:linkname runtimeGetThreadDefer github.com/goplus/llgo/runtime/internal/runtime.GetThreadDefer
-func runtimeGetThreadDefer() unsafe.Pointer
-
 func BenchmarkRuntimeGetThreadDefer(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		runtimeDeferSink = runtimeGetThreadDefer()
+		runtimeDeferSink = runtimeGetThreadDeferForGTest()
 	}
 }
 

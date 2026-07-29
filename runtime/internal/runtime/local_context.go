@@ -20,31 +20,33 @@ package runtime
 
 import "unsafe"
 
-// LocalContext is rooted by the outer Go entry stack frame. The current
-// one-thread-per-goroutine backend maps both logical locality kinds to this one
-// physical package store.
+// LocalContext owns the package-local blocks of one active Go context. Native
+// entries root it on their outer stack frame; a stackless logical G embeds it
+// in its scanned runtime sidecar.
 type LocalContext struct {
-	// blocks points at the payload of the most recently allocated local block.
-	// The list keeps every block reachable from the outer Go entry stack frame.
-	blocks unsafe.Pointer
+	// blocks owns the most recently allocated local block. The list keeps every
+	// block reachable from the outer Go entry stack frame or logical G sidecar.
+	blocks *localBlock
 }
 
 type localBlock struct {
-	// next points at the next block's payload, not its header.
-	next      unsafe.Pointer
-	cacheSlot *uintptr
+	next      *localBlock
+	data      unsafe.Pointer
+	cacheSlot *unsafe.Pointer
+	cached    bool
 }
 
-// EnterLocalContext installs ctx when the current thread has no local owner.
-// A nonzero result means this is a nested Go entry that inherited the returned
+// EnterLocalContext installs ctx when the current runtime G has no local owner.
+// A non-nil result means this is a nested Go entry that inherited the returned
 // context; in that case ctx is not installed.
-func EnterLocalContext(ctx *LocalContext) uintptr {
-	previous := currentLocalContext
-	if previous == 0 {
+func EnterLocalContext(ctx *LocalContext) *LocalContext {
+	gp := getg()
+	previous := gp.localContext
+	if previous == nil {
 		if ctx == nil {
 			panic("runtime: nil local context")
 		}
-		currentLocalContext = uintptr(unsafe.Pointer(ctx))
+		gp.localContext = ctx
 	}
 	return previous
 }
@@ -52,41 +54,46 @@ func EnterLocalContext(ctx *LocalContext) uintptr {
 // LeaveLocalContext finishes an entry paired with EnterLocalContext. A nested
 // entry verifies and retains its inherited context. An outer entry clears ctx
 // and releases its package-block roots.
-func LeaveLocalContext(ctx *LocalContext, previous uintptr) {
-	if previous != 0 {
-		if currentLocalContext != previous {
+func LeaveLocalContext(ctx, previous *LocalContext) {
+	gp := getg()
+	if previous != nil {
+		if gp.localContext != previous {
 			panic("runtime: local context changed by nested entry")
 		}
 		return
 	}
-	if currentLocalContext != uintptr(unsafe.Pointer(ctx)) {
+	if gp.localContext != ctx {
 		panic("runtime: leaving inactive local context")
 	}
-	currentLocalContext = 0
+	gp.localContext = nil
 	releaseLocalBlocks(ctx)
 }
 
 func leaveCurrentLocalContext() {
-	ctx := (*LocalContext)(unsafe.Pointer(currentLocalContext))
+	gp := getg()
+	ctx := gp.localContext
 	if ctx == nil {
 		return
 	}
-	currentLocalContext = 0
+	gp.localContext = nil
 	releaseLocalBlocks(ctx)
 }
 
 func releaseLocalBlocks(ctx *LocalContext) {
-	data := ctx.blocks
+	block := ctx.blocks
 	ctx.blocks = nil
-	for data != nil {
-		block := localBlockHeader(data)
+	for block != nil {
 		next := block.next
 		// Do not free block here: an address of a local variable may outlive its
 		// owner. Breaking the links lets the GC retain only escaped blocks.
-		*block.cacheSlot = 0
+		if block.cached {
+			*block.cacheSlot = nil
+		}
 		block.next = nil
+		block.data = nil
 		block.cacheSlot = nil
-		data = next
+		block.cached = false
+		block = next
 	}
 }
 
@@ -95,46 +102,79 @@ func releaseLocalBlocks(ctx *LocalContext) {
 // first touch; the block list is retained only as a GC root and teardown list.
 //
 //go:noinline
-func LocalPackage(cacheSlot *uintptr, size, align uintptr) unsafe.Pointer {
-	ctx := (*LocalContext)(unsafe.Pointer(currentLocalContext))
+func LocalPackage(cacheSlot *unsafe.Pointer, size, align uintptr) unsafe.Pointer {
+	ctx := getg().localContext
 	if ctx == nil {
 		panic("runtime: local variable accessed outside a Go entry context")
 	}
 	if cacheSlot == nil {
 		panic("runtime: nil local cache slot")
 	}
-	if data := unsafe.Pointer(*cacheSlot); data != nil {
+	if data := *cacheSlot; data != nil {
 		return data
 	}
 	if align == 0 || align&(align-1) != 0 {
 		panic("runtime: invalid local package alignment")
 	}
-	data := newLocalBlock(cacheSlot, size, align)
-	localBlockHeader(data).next = ctx.blocks
-	ctx.blocks = data
-	*cacheSlot = uintptr(data)
-	return data
+	block := newLocalBlock(cacheSlot, size, align, true)
+	block.next = ctx.blocks
+	ctx.blocks = block
+	*cacheSlot = block.data
+	return block.data
 }
 
-func newLocalBlock(cacheSlot *uintptr, size, align uintptr) unsafe.Pointer {
+// LocalPackageLogical returns one package block from the current stackless
+// logical G. cacheSlot is a stable process-global identity only; no
+// thread-local address cache may survive a task migration.
+//
+//go:noinline
+func LocalPackageLogical(cacheSlot *unsafe.Pointer, size, align uintptr) unsafe.Pointer {
+	ctx := getg().localContext
+	if ctx == nil {
+		coroRuntimeAbort("local variable accessed outside a logical Go context")
+		return nil
+	}
+	if cacheSlot == nil {
+		coroRuntimeAbort("nil logical local package key")
+		return nil
+	}
+	for block := ctx.blocks; block != nil; block = block.next {
+		if block.cacheSlot == cacheSlot {
+			return block.data
+		}
+	}
+	if align == 0 || align&(align-1) != 0 {
+		coroRuntimeAbort("invalid logical local package alignment")
+		return nil
+	}
+	block := newLocalBlock(cacheSlot, size, align, false)
+	block.next = ctx.blocks
+	ctx.blocks = block
+	return block.data
+}
+
+func newLocalBlock(cacheSlot *unsafe.Pointer, size, align uintptr, cached bool) *localBlock {
 	header := unsafe.Sizeof(localBlock{})
 	padding := align - 1
 	if size == 0 {
 		size = 1
 	}
 	if header > ^uintptr(0)-padding || header+padding > ^uintptr(0)-size {
-		panic("runtime: local package size overflow")
+		coroRuntimeAbort("local package size overflow")
+		return nil
 	}
-	allocation := AllocZ(header + padding + size)
+	dataOffset := (header + padding) &^ padding
+	allocation := AllocZ(dataOffset + size)
 	if allocation == nil {
-		panic("runtime: failed to allocate local package")
+		coroRuntimeAbort("failed to allocate local package")
+		return nil
 	}
-	data := unsafe.Pointer((uintptr(allocation) + header + padding) &^ padding)
-	block := localBlockHeader(data)
+	// AllocZ returns storage aligned for every ordinary Go value. Rounding the
+	// header size, rather than the pointer address, keeps the derived payload
+	// inside the same exact pointer-provenance chain under stackless lowering.
+	block := (*localBlock)(allocation)
+	block.data = unsafe.Add(allocation, dataOffset)
 	block.cacheSlot = cacheSlot
-	return data
-}
-
-func localBlockHeader(data unsafe.Pointer) *localBlock {
-	return (*localBlock)(unsafe.Pointer(uintptr(data) - unsafe.Sizeof(localBlock{})))
+	block.cached = cached
+	return block
 }

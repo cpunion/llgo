@@ -18,8 +18,6 @@
 
 package p7
 
-import "unsafe"
-
 var backing int
 
 //llgo:gls
@@ -28,4 +26,4 @@ var pointer *int
 func Prepare() { pointer = &backing }
 
 //go:noinline
-func Read() uintptr { return uintptr(unsafe.Pointer(pointer)) }
+func Read() *int { return pointer }

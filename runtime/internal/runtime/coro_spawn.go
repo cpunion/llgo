@@ -47,6 +47,17 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 		}
 		return nil, false
 	}
+	if !coroBindRuntimeContext(child, parent, false) {
+		rolled, rolledSize, ok := coro.RollbackSpawn(parent, child)
+		if !ok || rolled != raw || rolledSize != size {
+			return nil, false
+		}
+		coro.Zero(raw, size)
+		if !coroalloc.FreeTask(raw) {
+			return nil, false
+		}
+		return nil, false
+	}
 	return raw, true
 }
 
@@ -71,6 +82,9 @@ func coroReleaseCompletedTask(g *coroG) bool {
 	}
 	owned, ok := coro.TaskStorageOwned(g)
 	if !ok {
+		return false
+	}
+	if !coroReleaseRuntimeContext(g) {
 		return false
 	}
 	if !owned {

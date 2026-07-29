@@ -27,7 +27,7 @@ func TestBuildLocalPackageAccessor(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.SetRuntime(localContextTestRuntime())
 	pkg := prog.NewPackage("accessor", "example.com/accessor")
-	cache := pkg.NewThreadLocalVar("example.com/accessor.cache", types.NewPointer(types.Typ[types.Uintptr]), InGo)
+	cache := pkg.NewThreadLocalVar("example.com/accessor.cache", types.NewPointer(types.Typ[types.UnsafePointer]), InGo)
 	cache.InitNil()
 	field := types.NewField(token.NoPos, nil, "pointer", types.NewPointer(types.Typ[types.Int]), false)
 	block := types.NewStruct([]*types.Var{field}, nil)
@@ -42,7 +42,7 @@ func TestBuildLocalPackageAccessor(t *testing.T) {
 	)
 
 	ir := pkg.String()
-	if !strings.Contains(ir, `@"example.com/accessor.cache" = thread_local global i64 0`) {
+	if !strings.Contains(ir, `@"example.com/accessor.cache" = thread_local global ptr null`) {
 		t.Fatalf("direct cache definition not found:\n%s", ir)
 	}
 	if got := strings.Count(ir, "icmp "); got != 1 {
@@ -58,7 +58,7 @@ func localContextTestRuntime() *types.Package {
 	unsafePointer := types.Typ[types.UnsafePointer]
 
 	params := types.NewTuple(
-		types.NewVar(token.NoPos, pkg, "cache", types.NewPointer(types.Typ[types.Uintptr])),
+		types.NewVar(token.NoPos, pkg, "cache", types.NewPointer(types.Typ[types.UnsafePointer])),
 		types.NewVar(token.NoPos, pkg, "size", types.Typ[types.Uintptr]),
 		types.NewVar(token.NoPos, pkg, "align", types.Typ[types.Uintptr]),
 	)

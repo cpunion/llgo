@@ -132,7 +132,14 @@ func coroRunPhysicalActionV1(p *coro.P, g *coro.G, action coro.Action) (coro.Act
 		if !ok || next.Kind != coro.ActionResume || next.Handle != action.Handle {
 			return coro.Action{}, false
 		}
+		previous, entered := coroEnterRuntimeContext(g)
+		if !entered {
+			return coro.Action{}, false
+		}
 		coroHandleResume(next.Handle)
+		if !coroLeaveRuntimeContext(g, previous) {
+			return coro.Action{}, false
+		}
 		return coro.Resumed(p, g, next)
 	case coro.ActionCheckDestroy:
 		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))

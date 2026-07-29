@@ -1794,7 +1794,7 @@ func buildCoroNativeFleetE2EBoundaryObject(t *testing.T, clang, temp string) str
 
 func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	t.Helper()
-	files := []string{
+	files := append(coroNativeTaskContextRuntimeSources(), []string{
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_abort_libc.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
@@ -1835,7 +1835,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro_atomic_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_wait_coro.go"),
-	}
+	}...)
 	files = materializeCoroChannelNativeE2ERuntimeIsland(t, files)
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true

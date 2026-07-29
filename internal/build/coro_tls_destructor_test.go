@@ -545,7 +545,7 @@ func __llgo_coro_frame_free_v1() {}
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, source, nil)
 	prog := llssa.NewProgram(nil)
 	t.Cleanup(prog.Dispose)
-	cl.ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	cl.ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: llssa.PkgRuntime,
 	}})

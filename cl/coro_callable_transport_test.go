@@ -68,7 +68,7 @@ func prepareCoroCallableTransportFixture(t *testing.T) coroCallableTransportFixt
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, coroCallableTransportFixtureSource)
 	prog := newLLSSAProg(t)
-	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()

@@ -23,7 +23,7 @@ import (
 	"unsafe"
 )
 
-const wantSchedulerGSize = 144 + (unsafe.Sizeof(uintptr(0))/4-1)*96
+const wantSchedulerGSize = 144 + unsafe.Sizeof(uintptr(0)) + (unsafe.Sizeof(uintptr(0))/4-1)*96
 
 var (
 	_ [wantSchedulerGSize - unsafe.Sizeof(G{})]byte

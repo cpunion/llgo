@@ -232,8 +232,11 @@ type aProgram struct {
 	linknameMu   sync.RWMutex
 	linkname     map[string]string // pkgPath.nameInPkg => linkname
 	localities   *localityInfos
-	noInterface  map[string]none       // pkgPath.T.method or pkgPath.(*T).method
-	abiSymbol    map[string]*AbiSymbol // abi symbol name => AbiSymbol
+	// logicalLocality makes every llgo:tls/llgo:gls variable follow the
+	// stackless scheduler G instead of a physical executor thread.
+	logicalLocality bool
+	noInterface     map[string]none       // pkgPath.T.method or pkgPath.(*T).method
+	abiSymbol       map[string]*AbiSymbol // abi symbol name => AbiSymbol
 
 	ptrSize int
 

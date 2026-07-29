@@ -29,8 +29,8 @@ func TestPlanSharesPointerStorageAndPreservesKinds(t *testing.T) {
 	plan, err := Plan("example.com/state", []Declaration{
 		{Name: "example.com/state.Ignored", Type: types.Typ[types.Int]},
 		{Name: "example.com/state.Z", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Goroutine}},
-		{Name: "example.com/state.P", Type: types.NewPointer(types.Typ[types.Int]), Info: locality.Info{Locality: locality.Thread, HasInitializer: true, InitFunc: "p.init1", InitOrder: 2}},
-		{Name: "example.com/state.A", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Goroutine, HasInitializer: true, InitFunc: "p.init0", InitOrder: 1}},
+		{Name: "example.com/state.P", Type: types.NewPointer(types.Typ[types.Int]), Info: locality.Info{Locality: locality.Thread, HasInitializer: true, InitFunc: "p.init1", InitOrder: 2, InitDispatch: "p.dispatchTLS"}},
+		{Name: "example.com/state.A", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Goroutine, HasInitializer: true, InitFunc: "p.init0", InitOrder: 1, InitDispatch: "p.dispatchGLS"}},
 		{Name: "example.com/state.Q", Type: types.NewSlice(types.Typ[types.Byte]), Info: locality.Info{Locality: locality.Goroutine}},
 	})
 	if err != nil {
@@ -53,6 +53,10 @@ func TestPlanSharesPointerStorageAndPreservesKinds(t *testing.T) {
 	}
 	if len(plan.Goroutine) != 1 || plan.Goroutine[0].Name != "p.init0" {
 		t.Fatalf("goroutine initializers = %+v", plan.Goroutine)
+	}
+	if plan.Dispatcher(locality.Thread) != "p.dispatchTLS" ||
+		plan.Dispatcher(locality.Goroutine) != "p.dispatchGLS" {
+		t.Fatalf("dispatchers = %q/%q", plan.ThreadDispatch, plan.GoroutineDispatch)
 	}
 	if got := plan.Initializers(locality.Thread); len(got) != 1 || got[0].Name != "p.init1" {
 		t.Fatalf("Initializers(thread) = %+v", got)
@@ -86,7 +90,8 @@ func TestPlanRejectsInvalidDeclarations(t *testing.T) {
 		{"invalid kind", []Declaration{{Name: "p.x", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Kind(99)}}}, "invalid locality"},
 		{"unprepared", []Declaration{{Name: "p.x", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Thread, HasInitializer: true}}}, "inconsistent initializer metadata"},
 		{"unexpected helper", []Declaration{{Name: "p.x", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Thread, InitFunc: "p.a", InitOrder: 1}}}, "inconsistent initializer metadata"},
-		{"order conflict", []Declaration{{Name: "p.x", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Thread, HasInitializer: true, InitFunc: "p.a", InitOrder: 1}}, {Name: "p.y", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Thread, HasInitializer: true, InitFunc: "p.b", InitOrder: 1}}}, "names both"},
+		{"order conflict", []Declaration{{Name: "p.x", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Thread, HasInitializer: true, InitFunc: "p.a", InitOrder: 1, InitDispatch: "p.dispatch"}}, {Name: "p.y", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Thread, HasInitializer: true, InitFunc: "p.b", InitOrder: 1, InitDispatch: "p.dispatch"}}}, "names both"},
+		{"dispatcher conflict", []Declaration{{Name: "p.x", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Thread, HasInitializer: true, InitFunc: "p.a", InitOrder: 1, InitDispatch: "p.first"}}, {Name: "p.y", Type: types.Typ[types.Int], Info: locality.Info{Locality: locality.Thread, HasInitializer: true, InitFunc: "p.b", InitOrder: 2, InitDispatch: "p.second"}}}, "both dispatchers"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

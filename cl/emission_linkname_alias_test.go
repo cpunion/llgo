@@ -198,6 +198,42 @@ func llgoRuntimeHook(value int) int { return value + 1 }
 	}
 }
 
+func TestEmissionUniverseAliasesOpaquePointerGoLinkname(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	declaration := testProg.addPackage(t, "example.com/emission/linkptrdecl", `package linkptrdecl
+import "unsafe"
+//go:linkname runtimeGet
+func runtimeGet() unsafe.Pointer
+func Call() unsafe.Pointer { return runtimeGet() }
+`)
+	definition := testProg.addPackage(t, "example.com/emission/linkptrdef", `package linkptrdef
+type runtimeState struct{ value int }
+//go:linkname implementation example.com/emission/linkptrdecl.runtimeGet
+func implementation() *runtimeState { return nil }
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declared := declaration.ssa.Func("runtimeGet")
+	defined := definition.ssa.Func("implementation")
+	if structuralGoLinknameABITypeKey(declared.Signature) == structuralGoLinknameABITypeKey(defined.Signature) {
+		t.Fatal("strict source signatures unexpectedly match")
+	}
+	if resolved, ok := universe.Resolve(declared); !ok || resolved != defined {
+		t.Fatalf("Resolve(opaque-pointer go:linkname) = %v, %t; want %v, true", resolved, ok, defined)
+	}
+}
+
 func TestEmissionUniverseAliasesBodylessGoLinknameFunctionToExactMethod(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	definition := testProg.addPackage(t, "example.com/emission/linkmethoddef", `package linkmethoddef

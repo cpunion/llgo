@@ -25,15 +25,34 @@ import (
 	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 )
 
-var gKey = newGKey()
+var (
+	gKey      pthread.Key
+	gKeyReady bool
+)
 
-func newGKey() pthread.Key {
+func init() {
+	if !coroRuntimeContextBootstrap() {
+		coroRuntimeAbort("failed to create getg key")
+	}
+}
+
+// coroRuntimeContextBootstrap initializes the executor-thread getg slot before
+// the compiler starts the coroutine scheduler. The ordinary runtime init calls
+// it again idempotently; by then the first logical G may already have crossed
+// coroEnterRuntimeContext and therefore cannot be the operation which creates
+// this key.
+func coroRuntimeContextBootstrap() bool {
+	if gKeyReady {
+		return true
+	}
 	var key pthread.Key
 	if ret := key.Create(pthread.KeyDestructor(destroyG)); ret != 0 {
 		c.Fprintf(c.Stderr, c.Str("runtime: pthread_key_create failed (errno=%d)\n"), ret)
-		panic("runtime: failed to create getg key")
+		return false
 	}
-	return key
+	gKey = key
+	gKeyReady = true
+	return true
 }
 
 func getg() *g {
@@ -44,7 +63,8 @@ func getg() *g {
 	if ret := setgRaw(gp); ret != 0 {
 		destroyG(c.Pointer(unsafe.Pointer(gp)))
 		c.Fprintf(c.Stderr, c.Str("runtime: pthread_setspecific failed (errno=%d)\n"), ret)
-		panic("runtime: failed to install g")
+		coroRuntimeAbort("failed to install runtime g")
+		return nil
 	}
 	return gp
 }
@@ -52,7 +72,7 @@ func getg() *g {
 func setg(gp *g) {
 	if ret := setgRaw(gp); ret != 0 {
 		c.Fprintf(c.Stderr, c.Str("runtime: pthread_setspecific failed (errno=%d)\n"), ret)
-		panic("runtime: failed to install g")
+		coroRuntimeAbort("failed to install runtime g")
 	}
 }
 

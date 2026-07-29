@@ -471,7 +471,7 @@ func compileCoroStaticSpawnTransportFixture(t *testing.T, target *llssa.Target) 
 	}
 	// Mirror production import ordering: //llgo:type metadata must be installed
 	// before the emission universe freezes the C function-value transport.
-	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()

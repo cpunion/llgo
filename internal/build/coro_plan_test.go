@@ -514,6 +514,9 @@ func root(token *WaitToken, ticket WaitTicket) uint32 {
 func TestRequiredCoroProgramRuntimePlanPlainClosureAndConflicts(t *testing.T) {
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
 import "unsafe"
+type LocalContext struct{}
+func EnterLocalContext(*LocalContext) *LocalContext { return nil }
+func LeaveLocalContext(*LocalContext, *LocalContext) {}
 func __llgo_coro_program_begin_v1() { bootstrapHelper() }
 func __llgo_coro_program_run_v1() {}
 func __llgo_coro_program_continue_v1(uint32) {}
@@ -606,6 +609,7 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatal(err)
 	}
 	ctx := &context{
+		prog:            prog,
 		buildConf:       &Config{},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
@@ -713,6 +717,53 @@ func atomicExchange(*uint32, uint32) uint32
 		if root.Function == nil || root.Function.Name() != wantRoots[index] || root.Demand != wantDemand {
 			t.Fatalf("required root %d = %+v, want %s/%s", index, root, wantRoots[index], wantDemand)
 		}
+	}
+	logicalProg := llssa.NewProgram(nil)
+	defer logicalProg.Dispose()
+	logicalProg.SetLocalityInfo("example.com/state.value", llssa.LocalityInfo{Locality: llssa.GoroutineLocal})
+	logicalProg.SetLocalStorage("example.com/state.value", llssa.LocalStorageNativeTLS)
+	logicalCtx := *ctx
+	logicalCtx.prog = logicalProg
+	logicalRoots, logicalPlain, _, _, err := requiredCoroProgramRuntimePlan(&logicalCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLogicalRoots := append(
+		[]string{"init", "EnterLocalContext", "LeaveLocalContext"},
+		wantRoots[1:]...,
+	)
+	if len(logicalRoots) != len(wantLogicalRoots) {
+		t.Fatalf("logical-locality runtime roots = %d, want %d", len(logicalRoots), len(wantLogicalRoots))
+	}
+	for index, root := range logicalRoots {
+		wantDemand := coro.SyncDemand
+		if index == 0 {
+			wantDemand = coro.AsyncDemand
+		}
+		if root.Function == nil || root.Function.Name() != wantLogicalRoots[index] ||
+			root.Demand != wantDemand {
+			t.Fatalf("logical-locality root %d = %+v, want %s/%s",
+				index, root, wantLogicalRoots[index], wantDemand)
+		}
+		if index != 0 {
+			if _, plain := logicalPlain[root.Function]; !plain {
+				t.Fatalf("logical-locality root %q is absent from the direct-plain runtime island", wantLogicalRoots[index])
+			}
+		}
+	}
+	enterLocalContext := ssaPkg.Func("EnterLocalContext")
+	originalEnterLocalContextSignature := enterLocalContext.Signature
+	enterLocalContext.Signature = types.NewSignatureType(
+		nil, nil, nil,
+		originalEnterLocalContextSignature.Params(),
+		types.NewTuple(),
+		false,
+	)
+	_, _, _, _, invalidLocalContextErr := requiredCoroProgramRuntimePlan(&logicalCtx)
+	enterLocalContext.Signature = originalEnterLocalContextSignature
+	if invalidLocalContextErr == nil ||
+		!strings.Contains(invalidLocalContextErr.Error(), "local-context entry ABI") {
+		t.Fatalf("invalid local-context entry ABI error = %v", invalidLocalContextErr)
 	}
 	for _, name := range []string{
 		coroTimerParkSymbolV2,
@@ -2033,7 +2084,7 @@ func __llgo_coro_program_main_return_v1() {}
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, source, nil)
 	prog := llssa.NewProgram(nil)
 	t.Cleanup(prog.Dispose)
-	cl.ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	cl.ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
 		SSA:            ssaPkg,
 		Files:          files,

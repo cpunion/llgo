@@ -24,6 +24,7 @@ const (
 	ThreadDirective    = "//llgo:tls"
 	GoroutineDirective = "//llgo:gls"
 	InitPrefix         = "__llgo_local_init_"
+	DispatchPrefix     = "__llgo_local_dispatch_"
 )
 
 // Kind identifies the execution context that owns a package variable.
@@ -41,6 +42,11 @@ type Info struct {
 	HasInitializer bool
 	InitFunc       string
 	InitOrder      int
+	// InitDispatch names the compiler-generated, replayable func() that invokes
+	// every initializer of this locality kind in package initialization order.
+	// Keeping it in source SSA lets whole-program coroutine analysis see the
+	// complete lazy-initialization call graph before LLVM lowering.
+	InitDispatch string
 }
 
 func (kind Kind) String() string {

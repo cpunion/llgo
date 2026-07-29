@@ -50,6 +50,9 @@ func Root(mode uint32) uint32 {
 	if mode == 3 {
 		panic(InterfacePayload)
 	}
+	if mode == 4 {
+		panic(nil)
+	}
 	panic(&SecondPayload)
 }
 `
@@ -78,7 +81,13 @@ func TestCoroExplicitStatusPanicNativeAndWasm32(t *testing.T) {
 				t.Fatalf("verify explicit-status panic before CoroSplit: %v\n%s", err, module.String())
 			}
 			body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-			assertCoroExplicitStatusPanicBody(t, body, 3)
+			assertCoroExplicitStatusPanicBody(t, body, 4)
+			if !regexp.MustCompile(
+				`call void @` + regexp.QuoteMeta(coroPanicPrepareHookV1) +
+					`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr null, ptr null\)`,
+			).MatchString(body) {
+				t.Fatalf("panic(nil) did not publish two zero interface words:\n%s", body)
+			}
 			assertNoLegacyCoroPanicSymbol(t, module.String())
 
 			runCoroABITestPipeline(t, prog, module)
@@ -86,8 +95,8 @@ func TestCoroExplicitStatusPanicNativeAndWasm32(t *testing.T) {
 			if resume.IsNil() {
 				t.Fatalf("CoroSplit did not create Root resume entry:\n%s", module.String())
 			}
-			if got := strings.Count(resume.String(), "call void @"+coroPanicPrepareHookV1); got != 3 {
-				t.Fatalf("Root.resume panic prepare calls = %d, want 3:\n%s", got, resume.String())
+			if got := strings.Count(resume.String(), "call void @"+coroPanicPrepareHookV1); got != 4 {
+				t.Fatalf("Root.resume panic prepare calls = %d, want 4:\n%s", got, resume.String())
 			}
 			assertNoLegacyCoroPanicSymbol(t, module.String())
 			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend", "llvm.coro.end"} {
@@ -241,13 +250,6 @@ import "unsafe"
 func Root(address uintptr, trigger bool) { if trigger { panic(*(*any)(unsafe.Pointer(address))) } }
 `,
 			want: "uintptr-to-pointer conversion has no traceable exact pointer provenance",
-		},
-		{
-			name: "untyped nil",
-			source: `package foo
-func Root(trigger bool) { if trigger { panic(nil) } }
-`,
-			want: "explicit-status panic",
 		},
 		{
 			name: "boxed scalar",

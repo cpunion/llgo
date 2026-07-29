@@ -30,6 +30,7 @@ import (
 type coroProgramIR struct {
 	sitePlans           map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
 	siteOwners          map[emissionFunctionOwnerKey]none
+	functionPreambles   map[emissionFunctionOwnerKey]coroFunctionPreamblePlan
 	semanticPlans       map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan
 	localBodyFacts      map[*ssa.Function]coro.SSAFunctionBodyFacts
 	callPlans           map[ssa.CallInstruction]coroFrozenCallSitePlan
@@ -40,16 +41,24 @@ type coroProgramIR struct {
 	physicalPlansSealed bool
 }
 
+// coroProgramIRBuilder is the sole mutable construction capability for hidden
+// function- and instruction-level recipes. It reuses the canonical index so
+// planning cannot acquire a second function-identity authority.
+type coroProgramIRBuilder struct {
+	canonical emissionCanonicalIndex
+}
+
 func newCoroProgramIR() *coroProgramIR {
 	return &coroProgramIR{
-		sitePlans:        make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
-		siteOwners:       make(map[emissionFunctionOwnerKey]none),
-		semanticPlans:    make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
-		localBodyFacts:   make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
-		callPlans:        make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
-		wasmImports:      make(map[*ssa.Function]wasmImportSpec),
-		cgoDirectReturns: make(map[*ssa.Return]ssa.Value),
-		physicalPlans:    make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
+		sitePlans:         make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
+		siteOwners:        make(map[emissionFunctionOwnerKey]none),
+		functionPreambles: make(map[emissionFunctionOwnerKey]coroFunctionPreamblePlan),
+		semanticPlans:     make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
+		localBodyFacts:    make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
+		callPlans:         make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
+		wasmImports:       make(map[*ssa.Function]wasmImportSpec),
+		cgoDirectReturns:  make(map[*ssa.Return]ssa.Value),
+		physicalPlans:     make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
 	}
 }
 
@@ -63,6 +72,32 @@ func (ir *coroProgramIR) wasmImport(function *ssa.Function) (wasmImportSpec, boo
 	}
 	spec, present := ir.wasmImports[function]
 	return spec, present, nil
+}
+
+func (ir *coroProgramIR) freezeFunctionPreamble(
+	function *ssa.Function,
+	owner *preparedEmissionPackage,
+	plan coroFunctionPreamblePlan,
+) error {
+	if ir == nil || function == nil || owner == nil {
+		return fmt.Errorf("function preamble requires one exact program IR, function, and owner")
+	}
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if _, sealed := ir.siteOwners[key]; sealed {
+		return fmt.Errorf("function preamble for %q was added after owner freeze", function.Name())
+	}
+	if err := plan.validate(); err != nil {
+		return err
+	}
+	plan = cloneCoroFunctionPreamblePlan(plan)
+	if previous, exists := ir.functionPreambles[key]; exists {
+		if !sameCoroFunctionPreamblePlan(previous, plan) {
+			return fmt.Errorf("function %q acquired conflicting preamble plans", function.Name())
+		}
+		return fmt.Errorf("function preamble for %q was frozen more than once", function.Name())
+	}
+	ir.functionPreambles[key] = plan
+	return nil
 }
 
 func (ir *coroProgramIR) freezeCgoDirectReturns(plan *emissionCgoLoweringPlan) error {
@@ -150,7 +185,8 @@ func (ir *coroProgramIR) freezeSite(function *ssa.Function, owner *preparedEmiss
 		}
 		return nil
 	}
-	if len(plan.managedRuntimeHelpers) != 0 || len(plan.plainRuntimeHelpers) != 0 {
+	if len(plan.managedRuntimeHelpers) != 0 || len(plan.plainRuntimeHelpers) != 0 ||
+		len(plan.localityDispatchers) != 0 {
 		byInstruction[instruction] = plan
 	}
 	return nil
@@ -163,6 +199,9 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 	key := emissionFunctionOwnerKey{function: function, owner: owner}
 	if _, frozen := ir.siteOwners[key]; frozen {
 		return fmt.Errorf("coroutine site plan owner %q was frozen more than once", function.Name())
+	}
+	if _, frozen := ir.functionPreambles[key]; !frozen {
+		return fmt.Errorf("coroutine site plan owner %q has no frozen function preamble", function.Name())
 	}
 	semantic := ir.semanticPlans[key]
 	facts := coro.SSAFunctionBodyFacts{Effect: coro.NoSuspend}
@@ -278,6 +317,65 @@ func (ir *coroProgramIR) sitePlan(ctx *context, instruction ssa.Instruction) (co
 	return ir.sitePlanForOwner(owner, instruction)
 }
 
+func (ir *coroProgramIR) functionPreamble(ctx *context) (coroFunctionPreamblePlan, error) {
+	if ir == nil || ctx == nil || ctx.goFn == nil || ctx.emissionOwner == nil {
+		return coroFunctionPreamblePlan{}, fmt.Errorf("function preamble lookup requires an exact program IR, owner context, and function")
+	}
+	function, owner := ctx.goFn, ctx.emissionOwner
+	if physical := ctx.coroEmissionPlan(); physical != nil {
+		if physical.function != function || physical.owner == nil {
+			return coroFunctionPreamblePlan{}, fmt.Errorf("coroutine physical emission plan does not own the requested function preamble")
+		}
+		owner = physical.owner
+	}
+	return ir.functionPreambleForOwner(function, owner)
+}
+
+func (ir *coroProgramIR) functionPreambleForOwner(
+	function *ssa.Function,
+	owner *preparedEmissionPackage,
+) (coroFunctionPreamblePlan, error) {
+	if ir == nil || function == nil || owner == nil {
+		return coroFunctionPreamblePlan{}, fmt.Errorf("function preamble lookup requires an exact program IR, owner, and function")
+	}
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if _, frozen := ir.siteOwners[key]; !frozen {
+		return coroFunctionPreamblePlan{}, fmt.Errorf("function preamble has no frozen site-plan owner")
+	}
+	plan, frozen := ir.functionPreambles[key]
+	if !frozen {
+		return coroFunctionPreamblePlan{}, fmt.Errorf("function preamble is absent from its frozen owner")
+	}
+	if err := plan.validate(); err != nil {
+		return coroFunctionPreamblePlan{}, err
+	}
+	return cloneCoroFunctionPreamblePlan(plan), nil
+}
+
+// functionPreambleDuringFreeze exposes the already-frozen function-owned
+// operations while source SitePlans for that same owner are still being built.
+// It deliberately does not require siteOwners to be sealed yet.
+func (ir *coroProgramIR) functionPreambleDuringFreeze(
+	function *ssa.Function,
+	owner *preparedEmissionPackage,
+) (coroFunctionPreamblePlan, error) {
+	if ir == nil || function == nil || owner == nil {
+		return coroFunctionPreamblePlan{}, fmt.Errorf("function preamble build lookup requires one exact program IR, owner, and function")
+	}
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if _, sealed := ir.siteOwners[key]; sealed {
+		return coroFunctionPreamblePlan{}, fmt.Errorf("function preamble build lookup for %q occurred after owner freeze", function.Name())
+	}
+	plan, frozen := ir.functionPreambles[key]
+	if !frozen {
+		return coroFunctionPreamblePlan{}, fmt.Errorf("function preamble build lookup for %q occurred before preamble freeze", function.Name())
+	}
+	if err := plan.validate(); err != nil {
+		return coroFunctionPreamblePlan{}, err
+	}
+	return cloneCoroFunctionPreamblePlan(plan), nil
+}
+
 func (ir *coroProgramIR) sitePlanForOwner(
 	owner *preparedEmissionPackage,
 	instruction ssa.Instruction,
@@ -345,11 +443,13 @@ func (plan coroEmissionSitePlan) hasManagedRuntimeHelper(name string) bool {
 func cloneCoroEmissionSitePlan(plan coroEmissionSitePlan) coroEmissionSitePlan {
 	plan.managedRuntimeHelpers = append([]coroPlannedRuntimeHelper(nil), plan.managedRuntimeHelpers...)
 	plan.plainRuntimeHelpers = append([]string(nil), plan.plainRuntimeHelpers...)
+	plan.localityDispatchers = append([]*ssa.Function(nil), plan.localityDispatchers...)
 	return plan
 }
 
 func sameCoroEmissionSitePlan(first, second coroEmissionSitePlan) bool {
 	return slices.Equal(first.managedRuntimeHelpers, second.managedRuntimeHelpers) &&
 		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers) &&
+		slices.Equal(first.localityDispatchers, second.localityDispatchers) &&
 		first.hasCallPlan == second.hasCallPlan && sameCoroFrozenCallSitePlan(first.callPlan, second.callPlan)
 }

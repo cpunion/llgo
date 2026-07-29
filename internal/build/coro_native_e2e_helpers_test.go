@@ -21,9 +21,22 @@ package build
 import (
 	"go/token"
 	"go/types"
+	"path/filepath"
 
 	llssa "github.com/goplus/llgo/ssa"
 )
+
+func coroNativeTaskContextRuntimeSources() []string {
+	root := filepath.Join("..", "..", "runtime", "internal", "runtime")
+	return []string{
+		filepath.Join(root, "coro_task_context.go"),
+		filepath.Join(root, "runtime_context.go"),
+		filepath.Join(root, "runtime2.go"),
+		filepath.Join(root, "proc_atomic.go"),
+		filepath.Join(root, "g_pthread.go"),
+		filepath.Join(root, "local_context.go"),
+	}
+}
 
 // defineCoroNativeE2ENilDerefStubs keeps the deliberately closed native
 // runtime islands independent of the legacy panic/printing closure. Production

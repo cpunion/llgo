@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v27"
+const PlanDigestSchema = "llgo.coro.plan-digest.v28"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -338,6 +338,15 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		id := function.Plan.ID
 		if p.IgnoresBody(fn) {
 			continue
+		}
+		for index, value := range p.managedValueReferences[fn] {
+			if err := p.validateDigestManagedValueReference(id, index, value); err != nil {
+				return planDigestDocument{}, err
+			}
+			site := planDigestValueSite{Function: id, Kind: "managed-value", Index: index, Block: -1, Instruction: -1, Operand: -1}
+			if err := p.appendDigestValue(&document.Values, coveredValues, value, site, true); err != nil {
+				return planDigestDocument{}, err
+			}
 		}
 		for index, value := range fn.Params {
 			site := planDigestValueSite{Function: id, Kind: "param", Index: index, Block: -1, Instruction: -1, Operand: -1}
@@ -951,13 +960,39 @@ func (p *SSAPlan) appendDigestValue(output *[]planDigestValue, covered map[ssa.V
 
 func formatDigestValueSite(site planDigestValueSite) string {
 	switch site.Kind {
-	case "param", "freevar":
+	case "managed-value", "param", "freevar":
 		return fmt.Sprintf("function %q %s %d", site.Function, site.Kind, site.Index)
 	case "instruction":
 		return fmt.Sprintf("function %q block %d instruction %d result", site.Function, site.Block, site.Instruction)
 	default:
 		return fmt.Sprintf("function %q block %d instruction %d operand %d", site.Function, site.Block, site.Instruction, site.Operand)
 	}
+}
+
+func (p *SSAPlan) validateDigestManagedValueReference(owner FunctionID, index int, target *ssa.Function) error {
+	site := planDigestValueSite{
+		Function: owner, Kind: "managed-value", Index: index,
+		Block: -1, Instruction: -1, Operand: -1,
+	}
+	if target == nil {
+		return fmt.Errorf("coro: %s has a nil target", formatDigestValueSite(site))
+	}
+	targetID, planned := p.byFunction[target]
+	if !planned {
+		return fmt.Errorf("coro: %s targets a function outside the plan", formatDigestValueSite(site))
+	}
+	if target.Signature == nil || target.Signature.Recv() != nil ||
+		len(target.FreeVars) != 0 || len(target.Blocks) == 0 {
+		return fmt.Errorf("coro: %s no longer targets one bodyful context-free package function", formatDigestValueSite(site))
+	}
+	plan, valuePlanned := p.valuePlans[target]
+	if !valuePlanned || plan.Value != target || len(plan.Funcs) != 1 ||
+		len(plan.Funcs[0].Path) != 0 || plan.Funcs[0].Rep != Dispatch ||
+		plan.Funcs[0].Transport != ManagedTransport || plan.Funcs[0].MayBeNil ||
+		len(plan.Funcs[0].Targets) != 1 || plan.Funcs[0].Targets[0] != targetID {
+		return fmt.Errorf("coro: %s no longer carries its exact managed Dispatch target", formatDigestValueSite(site))
+	}
+	return nil
 }
 
 func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, call ssa.CallInstruction, plan SSACallPlan) (planDigestCall, error) {

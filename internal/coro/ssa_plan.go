@@ -505,6 +505,18 @@ type SSAConfig struct {
 	// owned, non-ignored bodies and copies the returned slice before use.
 	ClassifyDemandReferences func(owner *ssa.Function) ([]*ssa.Function, error)
 
+	// ClassifyManagedValueReferences supplies exact context-free Go function
+	// values materialized by frontend lowering without a source SSA operand.
+	// Unlike ClassifyDemandReferences these are canonical managed descriptors,
+	// not raw ABI method/code words: they force Dispatch representation and
+	// propagate ordinary managed entry demand, but not a call edge or effects.
+	//
+	// Every returned target must be a non-nil exact canonical member of the
+	// effective emission universe with a receiver-free function signature and no
+	// captures. The classifier is owner scoped and its result is copied before
+	// validation.
+	ClassifyManagedValueReferences func(owner *ssa.Function) ([]*ssa.Function, error)
+
 	// ClassifySyncDemandReferences selects the exact subset of
 	// ClassifyDemandReferences that is consumed only through a synchronous raw
 	// ABI word. Such a reference always contributes SyncDemand, even when its
@@ -610,6 +622,7 @@ type SSAPlan struct {
 	conditionalStores      map[*ssa.Store]*ssa.Function
 	safeFixedArrayIndexes  map[ssa.Instruction]int64
 	loweredCalls           map[*ssa.Function][]SSALoweredCall
+	managedValueReferences map[*ssa.Function][]*ssa.Function
 	foreignNoBlock         map[*ssa.Function]string
 	foreignSync            map[*ssa.Function]string
 	foreignWorker          map[*ssa.Function]string
@@ -1341,9 +1354,16 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	managedValueReferences, managedValues, err := classifySSAManagedValueReferences(
+		bodyFunctions, includedSet, ids, canonicalizer, config,
+	)
+	if err != nil {
+		return nil, err
+	}
 	flow, err := analyzeSSAFunctionFlow(
 		bodyFunctions, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer,
-		allDirectPlainCallArguments, functionAddressCallArguments, closedDynamicCalls, config.ClassifyRawCFunctionType,
+		allDirectPlainCallArguments, functionAddressCallArguments, closedDynamicCalls,
+		managedValues, config.ClassifyRawCFunctionType,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("coro: analyze SSA function-value flow: %w", err)
@@ -1779,6 +1799,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	); err != nil {
 		return nil, err
 	}
+	if err := addSSAManagedValueReferenceEdges(graph, bodyFunctions, managedValueReferences, ids); err != nil {
+		return nil, err
+	}
 	if err := addSSAClassifiedDemandReferences(graph, bodyFunctions, includedSet, ids, canonicalizer, config); err != nil {
 		return nil, err
 	}
@@ -1829,6 +1852,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		conditionalStores:      make(map[*ssa.Store]*ssa.Function, len(conditionalStores)),
 		safeFixedArrayIndexes:  safeFixedArrayIndexes,
 		loweredCalls:           loweredCalls,
+		managedValueReferences: managedValueReferences,
 		foreignNoBlock:         make(map[*ssa.Function]string),
 		foreignSync:            make(map[*ssa.Function]string),
 		foreignWorker:          make(map[*ssa.Function]string),
@@ -2203,6 +2227,107 @@ func addSSAClassifiedDemandReferences(
 			_, syncOnly := synchronous[target]
 			if err := graph.AddReference(ReferenceEdge{Owner: ids[owner], Target: ids[target], SyncOnly: syncOnly}); err != nil {
 				return fmt.Errorf("coro: add demand-only function reference from %q to %q: %w", owner.Name(), target.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
+func classifySSAManagedValueReferences(
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	ids map[*ssa.Function]FunctionID,
+	canonicalizer *ssaFunctionCanonicalizer,
+	config SSAConfig,
+) (map[*ssa.Function][]*ssa.Function, []*ssa.Function, error) {
+	byOwner := make(map[*ssa.Function][]*ssa.Function)
+	if config.ClassifyManagedValueReferences == nil {
+		return byOwner, nil, nil
+	}
+	allSet := make(map[*ssa.Function]struct{})
+	for _, owner := range functions {
+		targets, err := config.ClassifyManagedValueReferences(owner)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"coro: classify managed function-value references in %q: %w",
+				owner.Name(), err,
+			)
+		}
+		targets = append([]*ssa.Function(nil), targets...)
+		seen := make(map[*ssa.Function]struct{}, len(targets))
+		for index, target := range targets {
+			if target == nil {
+				return nil, nil, fmt.Errorf(
+					"coro: managed function-value reference %d in %q has a nil target",
+					index, owner.Name(),
+				)
+			}
+			if target.Prog != owner.Prog {
+				return nil, nil, fmt.Errorf(
+					"coro: managed function-value reference %d in %q targets function %q from another SSA program",
+					index, owner.Name(), target.Name(),
+				)
+			}
+			canonical, resolved, resolveErr := canonicalizer.resolve(target)
+			if resolveErr != nil {
+				return nil, nil, fmt.Errorf(
+					"coro: resolve managed function-value target %q in %q: %w",
+					target.Name(), owner.Name(), resolveErr,
+				)
+			}
+			if !resolved || canonical == nil || !included[canonical] {
+				return nil, nil, fmt.Errorf(
+					"coro: managed function-value target %q in %q is outside the effective emission universe",
+					target.Name(), owner.Name(),
+				)
+			}
+			if canonical != target {
+				return nil, nil, fmt.Errorf(
+					"coro: managed function-value target %q in %q is not the exact canonical function",
+					target.Name(), owner.Name(),
+				)
+			}
+			if target.Signature == nil || target.Signature.Recv() != nil ||
+				len(target.FreeVars) != 0 || len(target.Blocks) == 0 {
+				return nil, nil, fmt.Errorf(
+					"coro: managed function-value target %q in %q is not one bodyful context-free package function",
+					target.Name(), owner.Name(),
+				)
+			}
+			if _, duplicate := seen[target]; duplicate {
+				continue
+			}
+			seen[target] = struct{}{}
+			byOwner[owner] = append(byOwner[owner], target)
+			allSet[target] = struct{}{}
+		}
+		sort.Slice(byOwner[owner], func(i, j int) bool {
+			return ids[byOwner[owner][i]] < ids[byOwner[owner][j]]
+		})
+	}
+	all := make([]*ssa.Function, 0, len(allSet))
+	for target := range allSet {
+		all = append(all, target)
+	}
+	sort.Slice(all, func(i, j int) bool { return ids[all[i]] < ids[all[j]] })
+	return byOwner, all, nil
+}
+
+func addSSAManagedValueReferenceEdges(
+	graph *Graph,
+	functions []*ssa.Function,
+	references map[*ssa.Function][]*ssa.Function,
+	ids map[*ssa.Function]FunctionID,
+) error {
+	for _, owner := range functions {
+		for _, target := range references[owner] {
+			if err := graph.AddReference(ReferenceEdge{
+				Owner: ids[owner], Target: ids[target],
+			}); err != nil {
+				return fmt.Errorf(
+					"coro: add managed function-value reference from %q to %q: %w",
+					owner.Name(), target.Name(), err,
+				)
 			}
 		}
 	}

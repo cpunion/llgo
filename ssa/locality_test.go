@@ -75,6 +75,9 @@ func TestNeedsLocalContext(t *testing.T) {
 	if prog.NeedsLocalContext() {
 		t.Fatal("native TLS required a local context")
 	}
+	if !prog.NeedsLogicalLocalContext() {
+		t.Fatal("native TLS did not require a logical-G local context")
+	}
 	prog.SetLocalityInfo(name, LocalityInfo{Locality: ThreadLocal, HasInitializer: true, InitFunc: "example.com/p.initValue", InitOrder: 1})
 	if !prog.NeedsLocalContext() {
 		t.Fatal("native TLS initializer failure storage did not require a context")
@@ -83,6 +86,10 @@ func TestNeedsLocalContext(t *testing.T) {
 	prog.SetLocalStorage(name, LocalStoragePackage)
 	if !prog.NeedsLocalContext() {
 		t.Fatal("context storage was not detected")
+	}
+	prog.SetLogicalLocality(true)
+	if !prog.NeedsLocalContext() {
+		t.Fatal("enabled logical locality did not use the prospective context decision")
 	}
 }
 

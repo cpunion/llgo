@@ -21,9 +21,12 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"sort"
+	"strings"
 
 	"github.com/goplus/llgo/internal/coro"
+	"github.com/goplus/llgo/internal/locality"
 	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
@@ -36,6 +39,91 @@ import (
 type coroEmissionFunctionShape struct {
 	dynamicCleanup           bool
 	terminalResultAllocation map[*ssa.Alloc]none
+}
+
+type coroLogicalLocalitySite struct {
+	hasLocal    bool
+	dispatchers []*ssa.Function
+}
+
+// coroFunctionPreamblePlan freezes compiler-owned operations which have no
+// source SSA instruction anchor. Package-init locality guard setup is the first
+// such operation: it resolves one logical-G package block, then marks the
+// initializer kinds already executed by the ordinary package initializer.
+//
+// Keeping the helper edge and exact guard kinds together prevents analysis,
+// lowering facts, and emission from independently rediscovering this hidden
+// function-level recipe.
+type coroFunctionPreamblePlan struct {
+	managedRuntimeHelpers []string
+	plainRuntimeHelpers   []string
+	localityGuards        []locality.Kind
+	localContextEntry     bool
+}
+
+func cloneCoroFunctionPreamblePlan(plan coroFunctionPreamblePlan) coroFunctionPreamblePlan {
+	plan.managedRuntimeHelpers = append([]string(nil), plan.managedRuntimeHelpers...)
+	plan.plainRuntimeHelpers = append([]string(nil), plan.plainRuntimeHelpers...)
+	plan.localityGuards = append([]locality.Kind(nil), plan.localityGuards...)
+	return plan
+}
+
+func sameCoroFunctionPreamblePlan(first, second coroFunctionPreamblePlan) bool {
+	return slices.Equal(first.managedRuntimeHelpers, second.managedRuntimeHelpers) &&
+		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers) &&
+		slices.Equal(first.localityGuards, second.localityGuards) &&
+		first.localContextEntry == second.localContextEntry
+}
+
+func (plan coroFunctionPreamblePlan) validate() error {
+	for index, helper := range plan.managedRuntimeHelpers {
+		if helper == "" || index != 0 && plan.managedRuntimeHelpers[index-1] >= helper {
+			return fmt.Errorf("function preamble has noncanonical runtime helpers")
+		}
+	}
+	for index, helper := range plan.plainRuntimeHelpers {
+		if helper == "" || index != 0 && plan.plainRuntimeHelpers[index-1] >= helper {
+			return fmt.Errorf("function preamble has noncanonical plain runtime helpers")
+		}
+	}
+	for index, kind := range plan.localityGuards {
+		if kind != locality.Thread && kind != locality.Goroutine {
+			return fmt.Errorf("function preamble has invalid locality guard kind %d", kind)
+		}
+		if index != 0 && plan.localityGuards[index-1] >= kind {
+			return fmt.Errorf("function preamble has noncanonical locality guard order")
+		}
+	}
+	switch {
+	case len(plan.localityGuards) == 0 && len(plan.managedRuntimeHelpers) != 0:
+		return fmt.Errorf("function preamble has runtime helpers without an operation")
+	case len(plan.localityGuards) != 0 &&
+		!slices.Equal(plan.managedRuntimeHelpers, []string{"LocalPackageLogical"}):
+		return fmt.Errorf("logical-locality function preamble requires exactly LocalPackageLogical")
+	}
+	if plan.localContextEntry !=
+		slices.Equal(plan.plainRuntimeHelpers, []string{"EnterLocalContext"}) {
+		return fmt.Errorf("native local-context entry requires exactly plain EnterLocalContext")
+	}
+	return nil
+}
+
+func (plan coroFunctionPreamblePlan) loweringRecipe() (coro.RecipeID, error) {
+	if err := plan.validate(); err != nil {
+		return "", err
+	}
+	switch {
+	case slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread}):
+		return coro.RecipeID("cl.function-preamble.locality-guards.thread.v0"), nil
+	case slices.Equal(plan.localityGuards, []locality.Kind{locality.Goroutine}):
+		return coro.RecipeID("cl.function-preamble.locality-guards.goroutine.v0"), nil
+	case slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread, locality.Goroutine}):
+		return coro.RecipeID("cl.function-preamble.locality-guards.thread-goroutine.v0"), nil
+	case len(plan.localityGuards) == 0:
+		return "", nil
+	default:
+		return "", fmt.Errorf("function preamble has unsupported locality guard recipe")
+	}
 }
 
 func prepareCoroEmissionFunctionShape(fn *ssa.Function) (coroEmissionFunctionShape, error) {
@@ -81,7 +169,102 @@ func (shape coroEmissionFunctionShape) helperPlacement(instr ssa.Instruction, he
 	return coroRuntimeHelperAtSource
 }
 
-func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerFn *ssa.Function, ownerPkg *preparedEmissionPackage, state emissionFunctionState, shape coroEmissionFunctionShape, instr ssa.Instruction) error {
+func (builder coroProgramIRBuilder) materializeFunctionPreamble(
+	ctx *context,
+	ownerFn *ssa.Function,
+	ownerPkg *preparedEmissionPackage,
+	state emissionFunctionState,
+	ftype int,
+) error {
+	u := builder.canonical.universe
+	if u == nil || u.coroProgramIR == nil || ctx == nil || ownerFn == nil || ownerPkg == nil {
+		return fmt.Errorf("prepare emission universe: function preamble requires one exact program IR, builder, owner, and function")
+	}
+	plan := coroFunctionPreamblePlan{}
+	needsLocalContext := u.prog != nil && u.prog.NeedsLocalContext()
+	if u.prog != nil && u.logicalLocality {
+		needsLocalContext = u.prog.NeedsLogicalLocalContext()
+	}
+	if needsLocalContext && ftype == goFunc {
+		// The complete ABI freezes one exact internal runtime package. Its raw
+		// exports run inside the compiler entry or scheduler handoff context;
+		// they are implementation entries, not independent native-to-Go calls.
+		compilerRuntimeOwnsLocalContext := u.completeRuntimeABI &&
+			!u.pathDup[llssa.PkgRuntime] && u.byPath[llssa.PkgRuntime] == ownerPkg
+		if _, exported := exactLocalCExportSymbol(ownerFn); exported &&
+			!compilerRuntimeOwnsLocalContext {
+			// Native/raw entry setup is deliberately a plain-only operation.
+			// A physical coroutine runs with the scheduler-owned logical G and
+			// its LocalContext already installed.
+			plan.localContextEntry = true
+			plan.plainRuntimeHelpers = []string{"EnterLocalContext"}
+		}
+	}
+	if u.prog != nil && u.logicalLocality && ftype == goFunc &&
+		ownerFn.Name() == "init" && ownerFn.Signature != nil &&
+		ownerFn.Signature.Recv() == nil {
+		localPlan, err := planLocalPackage(ctx.prog, ctx.goTyps)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: function %q locality preamble: %w", ownerFn.Name(), err)
+		}
+		for _, kind := range []locality.Kind{locality.Thread, locality.Goroutine} {
+			if len(localPlan.Initializers(kind)) != 0 {
+				plan.localityGuards = append(plan.localityGuards, kind)
+			}
+		}
+		if len(plan.localityGuards) != 0 {
+			if len(ownerFn.Blocks) < 2 {
+				return fmt.Errorf("prepare emission universe: package initializer %q has no module-init block for locality guards", ownerFn.Name())
+			}
+			plan.managedRuntimeHelpers = []string{"LocalPackageLogical"}
+		}
+	}
+	if err := plan.validate(); err != nil {
+		return fmt.Errorf("prepare emission universe: function %q preamble: %w", ownerFn.Name(), err)
+	}
+	if u.completeRuntimeABI {
+		for _, helper := range plan.managedRuntimeHelpers {
+			target, materialized, err := u.materializeRuntimeHelperReference(ownerFn, ownerPkg, state, helper)
+			if err != nil {
+				return fmt.Errorf("prepare emission universe: function %q preamble helper %q: %w", ownerFn.Name(), helper, err)
+			}
+			if !materialized || target == nil {
+				return fmt.Errorf("prepare emission universe: function %q preamble helper %q was not materialized", ownerFn.Name(), helper)
+			}
+			if err := u.recordCoroLoweredCall(ownerFn, helper, target); err != nil {
+				return err
+			}
+		}
+	}
+	for _, helper := range plan.plainRuntimeHelpers {
+		target, materialized, err := u.materializeRuntimeHelperReference(ownerFn, ownerPkg, state, helper)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: function %q plain preamble helper %q: %w", ownerFn.Name(), helper, err)
+		}
+		if !materialized {
+			continue
+		}
+		if target == nil {
+			return fmt.Errorf("prepare emission universe: function %q plain preamble helper %q was not materialized", ownerFn.Name(), helper)
+		}
+		if err := u.recordCoroPlainLoweredCall(ownerFn, helper, target); err != nil {
+			return err
+		}
+		if err := u.recordABIMethodReferences(ownerFn, []*ssa.Function{target}); err != nil {
+			return err
+		}
+		if err := u.recordABISyncReferences(ownerFn, []*ssa.Function{target}); err != nil {
+			return err
+		}
+	}
+	if err := u.coroProgramIR.freezeFunctionPreamble(ownerFn, ownerPkg, plan); err != nil {
+		return fmt.Errorf("prepare emission universe: function %q preamble plan: %w", ownerFn.Name(), err)
+	}
+	return nil
+}
+
+func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *context, ownerFn *ssa.Function, ownerPkg *preparedEmissionPackage, state emissionFunctionState, shape coroEmissionFunctionShape, instr ssa.Instruction) error {
+	u := builder.canonical.universe
 	if u == nil {
 		return nil
 	}
@@ -90,7 +273,10 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 	}
 	sitePlan := coroEmissionSitePlan{}
 	if u.prog != nil {
-		managed := u.classifyCoroRuntimeHelpers(ctx, shape, instr)
+		managed, err := u.classifyCoroRuntimeHelpers(ctx, shape, instr)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: function %q logical locality site: %w", ownerFn.Name(), err)
+		}
 		for _, helper := range managed {
 			sitePlan.managedRuntimeHelpers = append(sitePlan.managedRuntimeHelpers, coroPlannedRuntimeHelper{
 				name:      helper,
@@ -98,6 +284,32 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 			})
 		}
 		sitePlan.plainRuntimeHelpers = u.classifyPlainRuntimeHelpers(ctx, instr, managed)
+		preamble, err := u.coroProgramIR.functionPreambleDuringFreeze(ownerFn, ownerPkg)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: function %q preamble lookup: %w", ownerFn.Name(), err)
+		}
+		if _, returning := instr.(*ssa.Return); returning && preamble.localContextEntry {
+			sitePlan.plainRuntimeHelpers = append(sitePlan.plainRuntimeHelpers, "LeaveLocalContext")
+			sort.Strings(sitePlan.plainRuntimeHelpers)
+		}
+		localitySite, err := builder.logicalLocalitySite(ctx, instr)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: function %q logical locality site: %w", ownerFn.Name(), err)
+		}
+		for _, dispatcher := range localitySite.dispatchers {
+			canonical, err := u.addResolvedRequired(dispatcher, ownerPkg, ownerFn, state)
+			if err != nil {
+				return fmt.Errorf(
+					"prepare emission universe: function %q locality dispatcher %q: %w",
+					ownerFn.Name(), dispatcher.Name(), err,
+				)
+			}
+			sitePlan.localityDispatchers = append(sitePlan.localityDispatchers, canonical)
+		}
+		sort.Slice(sitePlan.localityDispatchers, func(i, j int) bool {
+			return u.functionSortKey(sitePlan.localityDispatchers[i]) <
+				u.functionSortKey(sitePlan.localityDispatchers[j])
+		})
 	}
 	if err := u.coroProgramIR.freezeSite(ownerFn, ownerPkg, instr, sitePlan); err != nil {
 		return fmt.Errorf("prepare emission universe: function %q site plan: %w", ownerFn.Name(), err)
@@ -107,6 +319,9 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 	}
 	if u.prog == nil {
 		return fmt.Errorf("prepare emission universe: complete runtime ABI requires an LLVM SSA program")
+	}
+	if err := builder.recordManagedValueReferences(ownerFn, sitePlan.localityDispatchers); err != nil {
+		return fmt.Errorf("prepare emission universe: function %q locality dispatcher values: %w", ownerFn.Name(), err)
 	}
 	runtimePkg := u.byPath[llssa.PkgRuntime]
 	if runtimePkg == nil {
@@ -391,7 +606,11 @@ func (u *EmissionUniverse) materializeRuntimeHelperReference(ownerFn *ssa.Functi
 // classifyCoroRuntimeHelpers is the sole raw-SSA helper classifier. Only the
 // ProgramModelBuilder path above may call it; analysis, preflight and emission
 // consume the frozen coroEmissionSitePlan instead.
-func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEmissionFunctionShape, instr ssa.Instruction) []string {
+func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
+	ctx *context,
+	shape coroEmissionFunctionShape,
+	instr ssa.Instruction,
+) ([]string, error) {
 	set := make(map[string]struct{})
 	add := func(names ...string) {
 		for _, name := range names {
@@ -399,6 +618,18 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 				set[name] = struct{}{}
 			}
 		}
+	}
+	localitySite, err := (coroProgramIRBuilder{
+		canonical: emissionCanonicalIndex{universe: u},
+	}).logicalLocalitySite(ctx, instr)
+	if err != nil {
+		return nil, err
+	}
+	if localitySite.hasLocal {
+		add("LocalPackageLogical")
+	}
+	if len(localitySite.dispatchers) != 0 {
+		add("EnsureLogicalLocalInitializer")
 	}
 
 	switch v := instr.(type) {
@@ -649,7 +880,108 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 		ret = append(ret, name)
 	}
 	sort.Strings(ret)
-	return ret
+	return ret, nil
+}
+
+// logicalLocalitySite extracts the exact compiler-owned operations caused by
+// local package globals at one source instruction. The generated dispatcher
+// is already a real source-SSA function, so this projection carries only exact
+// function objects and never reconstructs a call edge from an LLVM symbol.
+func (builder coroProgramIRBuilder) logicalLocalitySite(
+	ctx *context,
+	instr ssa.Instruction,
+) (coroLogicalLocalitySite, error) {
+	u := builder.canonical.universe
+	if u == nil || !u.logicalLocality || ctx == nil || instr == nil {
+		return coroLogicalLocalitySite{}, nil
+	}
+	if _, debug := instr.(*ssa.DebugRef); debug {
+		return coroLogicalLocalitySite{}, nil
+	}
+	ret := coroLogicalLocalitySite{}
+	seen := make(map[*ssa.Function]none)
+	var storage [10]*ssa.Value
+	for _, operand := range instr.Operands(storage[:0]) {
+		global, ok := (*operand).(*ssa.Global)
+		if !ok || global == nil || global.Pkg == nil || global.Pkg.Pkg == nil {
+			continue
+		}
+		fullName := llssa.FullName(global.Pkg.Pkg, global.Name())
+		_, info, found, err := ctx.prog.ResolveLocality(fullName)
+		if err != nil {
+			return coroLogicalLocalitySite{}, fmt.Errorf("resolve %s: %w", fullName, err)
+		}
+		if !found || info.Locality == llssa.LocalityNone {
+			continue
+		}
+		ret.hasLocal = true
+		dispatchers, err := builder.logicalLocalityPackageDispatchers(ctx, global.Pkg)
+		if err != nil {
+			return coroLogicalLocalitySite{}, fmt.Errorf("local variable %s: %w", fullName, err)
+		}
+		dispatcher := dispatchers[info.Locality]
+		if dispatcher == nil {
+			continue
+		}
+		if _, duplicate := seen[dispatcher]; duplicate {
+			continue
+		}
+		seen[dispatcher] = none{}
+		ret.dispatchers = append(ret.dispatchers, dispatcher)
+	}
+	sort.Slice(ret.dispatchers, func(i, j int) bool {
+		return ret.dispatchers[i].String() < ret.dispatchers[j].String()
+	})
+	return ret, nil
+}
+
+// logicalLocalityPackageDispatchers freezes the package/kind initialization
+// boundary once. Any first access to one local variable must run all
+// initializers of the same package and locality kind, even when that particular
+// variable has no initializer of its own.
+func (builder coroProgramIRBuilder) logicalLocalityPackageDispatchers(
+	ctx *context,
+	pkg *ssa.Package,
+) (map[llssa.Locality]*ssa.Function, error) {
+	u := builder.canonical.universe
+	if u == nil || ctx == nil || pkg == nil || pkg.Pkg == nil {
+		return nil, fmt.Errorf("logical locality dispatcher lookup requires one exact package")
+	}
+	if dispatchers, frozen := u.localityDispatchers[pkg]; frozen {
+		return dispatchers, nil
+	}
+	plan, err := planLocalPackage(ctx.prog, pkg.Pkg)
+	if err != nil {
+		return nil, err
+	}
+	dispatchers := make(map[llssa.Locality]*ssa.Function, 2)
+	for _, kind := range []llssa.Locality{llssa.ThreadLocal, llssa.GoroutineLocal} {
+		fullName := plan.Dispatcher(kind)
+		if fullName == "" {
+			continue
+		}
+		prefix := llssa.PathOf(pkg.Pkg) + "."
+		if !strings.HasPrefix(fullName, prefix) {
+			return nil, fmt.Errorf("dispatcher %q is outside package %q", fullName, llssa.PathOf(pkg.Pkg))
+		}
+		dispatcher := pkg.Func(strings.TrimPrefix(fullName, prefix))
+		if dispatcher == nil || dispatcher.Signature == nil ||
+			dispatcher.Signature.Recv() != nil || dispatcher.Signature.Variadic() ||
+			dispatcher.Signature.Params().Len() != 0 ||
+			dispatcher.Signature.Results().Len() != 0 ||
+			len(dispatcher.FreeVars) != 0 || len(dispatcher.Blocks) == 0 {
+			return nil, fmt.Errorf(
+				"dispatcher %q is not one bodyful context-free func()",
+				fullName,
+			)
+		}
+		dispatchers[kind] = dispatcher
+	}
+	if u.localityDispatchers == nil {
+		u.localityDispatchers = make(map[*ssa.Package]map[llssa.Locality]*ssa.Function)
+	}
+	u.localityDispatchers[pkg] = dispatchers
+	return dispatchers, nil
 }
 
 // nextAssignmentRuntimeHelperNames mirrors compileRangeNext's explicit

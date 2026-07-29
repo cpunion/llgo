@@ -174,7 +174,7 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 `, nil)
 	prog := llssa.NewProgram(nil)
 	t.Cleanup(prog.Dispose)
-	cl.ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	cl.ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
 		SSA:      ssaPkg,
 		Files:    files,
@@ -307,7 +307,7 @@ func newCoroLibraryForeignImportFixture(
 	ssaPkg, files := buildCoroPlanTestPackage(t, packagePath, source, nil)
 	prog := llssa.NewProgram(nil)
 	t.Cleanup(prog.Dispose)
-	cl.ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	cl.ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
 		SSA:      ssaPkg,
 		Files:    files,

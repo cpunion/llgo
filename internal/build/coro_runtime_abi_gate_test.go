@@ -32,7 +32,7 @@ func Present() {}
 `, nil)
 	prog := llssa.NewProgram(nil)
 	t.Cleanup(prog.Dispose)
-	cl.ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	cl.ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
 	pkg := &aPackage{
 		Package: &packages.Package{
 			ID:      llssa.PkgRuntime,
@@ -84,7 +84,7 @@ func Present() {}
 `, nil)
 	completeProg := llssa.NewProgram(nil)
 	t.Cleanup(completeProg.Dispose)
-	cl.ParsePkgSyntax(completeProg, completePkg.Pkg, completeFiles)
+	cl.ParsePkgSyntax(completeProg, completePkg.Prog.Fset, completePkg.Pkg, completeFiles)
 	completeCtx := &context{
 		prog: completeProg, progSSA: completePkg.Prog, buildConf: conf,
 	}

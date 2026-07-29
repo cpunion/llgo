@@ -457,6 +457,7 @@ var benchmarkGLS int
 
 var benchmarkSink int
 var benchmarkReadSink uintptr
+var benchmarkPointerSink *int
 
 //go:noinline
 func bumpOrdinaryGlobal() int {
@@ -553,39 +554,39 @@ func TestComparableLocalityReads(t *testing.T) {
 	ordinary := localitybench.ReadOrdinaryGlobal()
 	native := localitybench.ReadNativeTLS()
 	local := localitybench.ReadGLSPackage()
-	if ordinary == 0 || native != ordinary || local != ordinary {
-		t.Fatalf("comparable locality reads = ordinary:%#x native:%#x GLS:%#x", ordinary, native, local)
+	if ordinary == nil || native != ordinary || local != ordinary {
+		t.Fatalf("comparable locality reads = ordinary:%p native:%p GLS:%p", ordinary, native, local)
 	}
 }
 
 func BenchmarkComparableOrdinaryGlobalRead(b *testing.B) {
 	localitybench.PrepareReads()
 	b.ResetTimer()
-	var value uintptr
+	var value *int
 	for i := 0; i < b.N; i++ {
-		value += localitybench.ReadOrdinaryGlobal()
+		value = localitybench.ReadOrdinaryGlobal()
 	}
-	benchmarkReadSink = value
+	benchmarkPointerSink = value
 }
 
 func BenchmarkComparableNativeTLSRead(b *testing.B) {
 	localitybench.PrepareReads()
 	b.ResetTimer()
-	var value uintptr
+	var value *int
 	for i := 0; i < b.N; i++ {
-		value += localitybench.ReadNativeTLS()
+		value = localitybench.ReadNativeTLS()
 	}
-	benchmarkReadSink = value
+	benchmarkPointerSink = value
 }
 
 func BenchmarkComparableGLSPackageRead(b *testing.B) {
 	localitybench.PrepareReads()
 	b.ResetTimer()
-	var value uintptr
+	var value *int
 	for i := 0; i < b.N; i++ {
-		value += localitybench.ReadGLSPackage()
+		value = localitybench.ReadGLSPackage()
 	}
-	benchmarkReadSink = value
+	benchmarkPointerSink = value
 }
 
 func BenchmarkAlternatingGLSPackageRead(b *testing.B) {
@@ -594,11 +595,13 @@ func BenchmarkAlternatingGLSPackageRead(b *testing.B) {
 	benchmarkGLSPackage.value = 1
 	b.ResetTimer()
 	var value uintptr
+	var pointerValue *int
 	for i := 0; i < b.N; i++ {
 		value += readGLSPackageBlock()
-		value += localitybench.ReadGLSPackage()
+		pointerValue = localitybench.ReadGLSPackage()
 	}
 	benchmarkReadSink = value
+	benchmarkPointerSink = pointerValue
 }
 
 func BenchmarkGoroutineEntry(b *testing.B) {

@@ -20,6 +20,9 @@ import "github.com/goplus/llgo/runtime/internal/coroalloc"
 
 //export __llgo_coro_frame_allocator_bootstrap_v1
 func __llgo_coro_frame_allocator_bootstrap_v1() {
+	if !coroRuntimeContextBootstrap() {
+		coroRuntimeAbort("coroutine runtime context bootstrap failed")
+	}
 	if !coroalloc.Bootstrap() {
 		coroRuntimeAbort("coroutine frame allocator bootstrap failed")
 	}

@@ -35,6 +35,40 @@ func TaskStorageSize() uintptr {
 	return unsafe.Sizeof(G{})
 }
 
+// BindTaskLocal attaches one opaque runtime context to a freshly initialized
+// G. The scheduler retains it only as a scanned pointer and never inspects its
+// representation.
+func BindTaskLocal(g *G, local unsafe.Pointer) bool {
+	if !ValidG(g) || g.state != GNew || local == nil || g.taskLocal != nil ||
+		g.root != nil || g.active != nil || g.frames != nil ||
+		g.queued || g.nextReady != nil || g.waiting || g.runP != nil ||
+		!validLiveTaskStorage(g) {
+		return false
+	}
+	g.taskLocal = local
+	return true
+}
+
+// TaskLocal returns the runtime-adapter context attached to g.
+func TaskLocal(g *G) unsafe.Pointer {
+	if !ValidG(g) {
+		return nil
+	}
+	return g.taskLocal
+}
+
+// ReleaseTaskLocal transfers the opaque context of one terminal G back to its
+// runtime adapter. Task storage remains scheduler-owned until the subsequent
+// ReleaseTaskStorage call.
+func ReleaseTaskLocal(g *G) (unsafe.Pointer, bool) {
+	if !ReclaimableG(g) || g.taskLocal == nil {
+		return nil, false
+	}
+	local := g.taskLocal
+	g.taskLocal = nil
+	return local, true
+}
+
 func validLiveTaskStorage(g *G) bool {
 	if g == nil {
 		return false

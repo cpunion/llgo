@@ -714,8 +714,8 @@ func TestPrepareLocalVariables(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := len(file.Decls); got != 1 {
-			t.Fatalf("generated initializer declarations = %d, want 1", got)
+		if got := len(file.Decls); got != 2 {
+			t.Fatalf("generated initializer/dispatcher declarations = %d, want 2", got)
 		}
 	})
 

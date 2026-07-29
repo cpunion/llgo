@@ -88,6 +88,10 @@ type G struct {
 	taskStorage unsafe.Pointer
 	taskSize    uintptr
 	taskState   taskStorageState
+	// taskLocal is one runtime-adapter-owned, scanned logical-task context.
+	// The scheduler never interprets it. Keeping the attachment on G makes
+	// runtime state migrate with the LLVM frame chain without a global map.
+	taskLocal unsafe.Pointer
 
 	// panicRecord is task-local. It must never be discovered through TLS or a
 	// process-global current-G slot. panicUnwind is scheduler-thread-only and is
@@ -337,6 +341,7 @@ func InitG(g *G) bool {
 		g.park != (ParkState{}) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageStatic ||
+		g.taskLocal != nil ||
 		!emptyPanicRecord(&g.panicRecord) || g.panicUnwind {
 		return false
 	}

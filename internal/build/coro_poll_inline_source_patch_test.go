@@ -36,7 +36,7 @@ func TestNativeCoroInternalPollReadWriteSourcePatch(t *testing.T) {
 		t.Skipf("native coroutine internal/poll patch requires Darwin or Linux")
 	}
 	buildFlags := []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc"}
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos: runtime.GOOS, goarch: runtime.GOARCH, buildFlags: buildFlags,
 	})
 	if err != nil {
@@ -144,7 +144,7 @@ func assertPatchedPollMethodsRemoved(t *testing.T, path string, file *ast.File, 
 }
 
 func TestNativeCoroInternalPollPatchIsCapabilityGated(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos: runtime.GOOS, goarch: runtime.GOARCH,
 		buildFlags: []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,nogc"},
 	})
@@ -158,7 +158,7 @@ func TestNativeCoroInternalPollPatchIsCapabilityGated(t *testing.T) {
 }
 
 func TestHostCoroInternalPollAndNetSourcePatch(t *testing.T) {
-	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       "linux",
 		goarch:     "arm",
 		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},

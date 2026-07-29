@@ -69,28 +69,35 @@ func localityRuntimePackage() *types.Package {
 	pkg.Scope().Insert(localContextName)
 
 	localPackageParams := types.NewTuple(
-		types.NewParam(token.NoPos, pkg, "cache", types.NewPointer(types.Typ[types.Uintptr])),
+		types.NewParam(token.NoPos, pkg, "cache", types.NewPointer(types.Typ[types.UnsafePointer])),
 		types.NewParam(token.NoPos, pkg, "size", types.Typ[types.Uintptr]),
 		types.NewParam(token.NoPos, pkg, "align", types.Typ[types.Uintptr]),
 	)
 	localPackageResults := types.NewTuple(types.NewParam(token.NoPos, pkg, "", types.Typ[types.UnsafePointer]))
 	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "LocalPackage", types.NewSignatureType(nil, nil, nil, localPackageParams, localPackageResults, false)))
+	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "LocalPackageLogical", types.NewSignatureType(nil, nil, nil, localPackageParams, localPackageResults, false)))
 
 	callback := types.NewSignatureType(nil, nil, nil, nil, nil, false)
 	ensureParams := types.NewTuple(
 		types.NewParam(token.NoPos, pkg, "state", types.NewPointer(types.Typ[types.Uint8])),
-		types.NewParam(token.NoPos, pkg, "failureCache", types.NewPointer(types.Typ[types.Uintptr])),
+		types.NewParam(token.NoPos, pkg, "failureCache", types.NewPointer(types.Typ[types.UnsafePointer])),
 		types.NewParam(token.NoPos, pkg, "initialize", callback),
 	)
 	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "EnsureLocalInitializer", types.NewSignatureType(nil, nil, nil, ensureParams, nil, false)))
+	logicalEnsureParams := types.NewTuple(
+		types.NewParam(token.NoPos, pkg, "state", types.NewPointer(types.Typ[types.Uint8])),
+		types.NewParam(token.NoPos, pkg, "failure", types.NewPointer(types.NewInterfaceType(nil, nil))),
+		types.NewParam(token.NoPos, pkg, "initialize", callback),
+	)
+	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "EnsureLogicalLocalInitializer", types.NewSignatureType(nil, nil, nil, logicalEnsureParams, nil, false)))
 
 	contextPointer := types.NewPointer(localContext)
 	enterParams := types.NewTuple(types.NewParam(token.NoPos, pkg, "ctx", contextPointer))
-	enterResults := types.NewTuple(types.NewParam(token.NoPos, pkg, "previous", types.Typ[types.Uintptr]))
+	enterResults := types.NewTuple(types.NewParam(token.NoPos, pkg, "previous", contextPointer))
 	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "EnterLocalContext", types.NewSignatureType(nil, nil, nil, enterParams, enterResults, false)))
 	leaveParams := types.NewTuple(
 		types.NewParam(token.NoPos, pkg, "ctx", contextPointer),
-		types.NewParam(token.NoPos, pkg, "previous", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, pkg, "previous", contextPointer),
 	)
 	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "LeaveLocalContext", types.NewSignatureType(nil, nil, nil, leaveParams, nil, false)))
 	return pkg
@@ -105,11 +112,11 @@ var pointer *int
 func value() *int { return pointer }
 `
 	_, ir := compileLocalitySource(t, src)
-	if !strings.Contains(ir, `@"example.com/locality.__llgo_local_cache" = thread_local global i64 0`) {
+	if !strings.Contains(ir, `@"example.com/locality.__llgo_local_cache" = thread_local global ptr null`) {
 		t.Fatalf("package direct cache not found:\n%s", ir)
 	}
 	accessor := llvmFunction(t, ir, "example.com/locality.__llgo_local_block")
-	cacheLoad := `load i64, ptr @"example.com/locality.__llgo_local_cache"`
+	cacheLoad := `load ptr, ptr @"example.com/locality.__llgo_local_cache"`
 	slow := `call ptr @"` + llssa.PkgRuntime + `.LocalPackage"(ptr @"example.com/locality.__llgo_local_cache"`
 	if loadAt, slowAt := strings.Index(accessor, cacheLoad), strings.Index(accessor, slow); loadAt < 0 || slowAt < 0 || loadAt >= slowAt {
 		t.Fatalf("accessor does not load its direct cache before the cold path:\n%s", accessor)
@@ -188,7 +195,7 @@ func values() (int, *int, int, *int) {
 			t.Fatalf("%s retained a pointer-bearing TLS global:\n%s", name, ir)
 		}
 	}
-	if got := strings.Count(ir, `@"example.com/locality.__llgo_local_cache" = thread_local global i64 0`); got != 1 {
+	if got := strings.Count(ir, `@"example.com/locality.__llgo_local_cache" = thread_local global ptr null`); got != 1 {
 		t.Fatalf("package block caches = %d, want 1:\n%s", got, ir)
 	}
 	if got := strings.Count(ir, `call ptr @"github.com/goplus/llgo/runtime/internal/runtime.LocalPackage"`); got != 1 {
@@ -266,6 +273,70 @@ func values() (int, int, int) { return t0, t1, g0 }
 		if !strings.Contains(initBody, `store i8 2, ptr @"example.com/locality.`+guard+`"`) {
 			t.Fatalf("package init does not mark %s ready:\n%s", guard, initBody)
 		}
+	}
+}
+
+func TestLogicalLocalitySiteUsesPackageDispatcherForZeroValueVariable(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/localitysite", `package localitysite
+func initial() *int { return nil }
+//llgo:gls
+var initialized = initial()
+//llgo:gls
+var zero struct{ pointer *int }
+func Read() *int { return zero.pointer }
+`)
+	prog := ssatest.NewProgramEx(t, nil, testProg.importer)
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	prog.SetRuntime(localityRuntimePackage())
+	files := []*ast.File{pkg.file}
+	if err := ParsePkgSyntax(prog, testProg.fset, pkg.types, files); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareLocalVariables(prog, testProg.fset, pkg.types, pkg.info, files); err != nil {
+		t.Fatal(err)
+	}
+	goProg := ssa.NewProgram(testProg.fset, ssa.SanityCheckFunctions)
+	ssaPkg := goProg.CreatePackage(pkg.types, files, pkg.info, true)
+	ssaPkg.Build()
+
+	layout, err := planLocalPackage(prog, pkg.types)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcherName := strings.TrimPrefix(
+		layout.Dispatcher(llssa.GoroutineLocal),
+		llssa.PathOf(pkg.types)+".",
+	)
+	want := ssaPkg.Func(dispatcherName)
+	if want == nil {
+		t.Fatalf("GLS dispatcher %q was not materialized", dispatcherName)
+	}
+	universe := &EmissionUniverse{
+		logicalLocality:     true,
+		localityDispatchers: make(map[*ssa.Package]map[llssa.Locality]*ssa.Function),
+	}
+	ctx := &context{prog: prog}
+	found := false
+	for _, block := range ssaPkg.Func("Read").Blocks {
+		for _, instruction := range block.Instrs {
+			site, err := (coroProgramIRBuilder{
+				canonical: emissionCanonicalIndex{universe: universe},
+			}).logicalLocalitySite(ctx, instruction)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !site.hasLocal {
+				continue
+			}
+			found = true
+			if len(site.dispatchers) != 1 || site.dispatchers[0] != want {
+				t.Fatalf("zero-value GLS site dispatchers = %v, want [%s]", site.dispatchers, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("Read has no logical-locality source site")
 	}
 }
 
@@ -490,7 +561,13 @@ func TestValidateLocalInitializers(t *testing.T) {
 	if err := validateLocalInitializers(prog, pkg); err == nil || !strings.Contains(err.Error(), "inconsistent initializer metadata") {
 		t.Fatalf("validateLocalInitializers error = %v", err)
 	}
-	prog.SetLocalityInfo(name, llssa.LocalityInfo{Locality: llssa.ThreadLocal, HasInitializer: true, InitFunc: "example.com/locality.init", InitOrder: 1})
+	prog.SetLocalityInfo(name, llssa.LocalityInfo{
+		Locality:       llssa.ThreadLocal,
+		HasInitializer: true,
+		InitFunc:       "example.com/locality.init",
+		InitOrder:      1,
+		InitDispatch:   "example.com/locality.dispatch",
+	})
 	if err := validateLocalInitializers(prog, pkg); err != nil {
 		t.Fatal(err)
 	}

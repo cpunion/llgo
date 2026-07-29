@@ -319,7 +319,9 @@ var value = makeValue()
 	declCount := len(file.Decls)
 	scopeCount := len(pkg.Scope().Names())
 	initName := prepared["value"].InitFunc
-	if initName != "example.com/p.__llgo_local_init_0" || prepared["value"].InitOrder != 1 {
+	if initName != "example.com/p.__llgo_local_init_0" ||
+		prepared["value"].InitOrder != 1 ||
+		prepared["value"].InitDispatch != "example.com/p.__llgo_local_dispatch_tls_0" {
 		t.Fatalf("prepared metadata = %+v", prepared["value"])
 	}
 
@@ -348,7 +350,7 @@ func TestPrepareZeroValuePointerAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := prepared["Value"]; got.InitFunc != "" || got.InitOrder != 0 {
+	if got := prepared["Value"]; got.InitFunc != "" || got.InitOrder != 0 || got.InitDispatch != "" {
 		t.Fatalf("zero-value initializer = %+v", got)
 	}
 	if err := ValidatePrepared(pkg.Path(), map[string]Info{"Value": {Locality: Thread, HasInitializer: true}}); err == nil {
@@ -359,7 +361,13 @@ func TestPrepareZeroValuePointerAndValidation(t *testing.T) {
 	}
 	if err := ValidatePrepared(pkg.Path(), map[string]Info{
 		"Ordinary": {},
-		"Value":    {Locality: Thread, HasInitializer: true, InitFunc: "p.init", InitOrder: 1},
+		"Value": {
+			Locality:       Thread,
+			HasInitializer: true,
+			InitFunc:       "p.init",
+			InitOrder:      1,
+			InitDispatch:   "p.dispatch",
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}

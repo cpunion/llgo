@@ -227,7 +227,8 @@ func coroFuncPCBodylessDeclaration(function *ssa.Function, localName string) boo
 func (u *EmissionUniverse) validatePatchedFuncPCABI0AliasLifecycle(owner *preparedEmissionPackage, original, intrinsic *ssa.Function) error {
 	if _, materialized := u.materialized[original]; materialized || len(u.materializedOwners[original]) != 0 ||
 		len(u.abiMethodReferences[original]) != 0 || len(u.abiSyncReferences[original]) != 0 ||
-		len(u.loweredCalls[original]) != 0 || len(u.plainLoweredCalls[original]) != 0 || len(u.normalReturnBlocks[original]) != 0 {
+		len(u.managedValueReferences[original]) != 0 || len(u.loweredCalls[original]) != 0 ||
+		len(u.plainLoweredCalls[original]) != 0 || len(u.normalReturnBlocks[original]) != 0 {
 		return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 original declaration was materialized before exact aliasing")
 	}
 	owners := u.useOwners[original]

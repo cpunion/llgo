@@ -22,6 +22,7 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
+	"strings"
 )
 
 // Prepare rewrites local package initializers into replayable synthetic
@@ -66,6 +67,9 @@ func Prepare(fset *token.FileSet, pkgPath string, pkg *types.Package, typeInfo *
 		}
 		setInitializerNames(initializer, ret, qualify(pkgPath, name), initOrder)
 	}
+	if err := prepareLocalDispatchers(pkgPath, pkg, typeInfo, files, ret); err != nil {
+		return nil, err
+	}
 
 	return ret, nil
 }
@@ -83,8 +87,9 @@ func ValidatePrepared(pkgPath string, vars map[string]Info) error {
 		if info.Locality == None {
 			continue
 		}
-		prepared := info.InitFunc != "" && info.InitOrder != 0
-		if info.HasInitializer != prepared {
+		hasMetadata := info.InitFunc != "" || info.InitOrder != 0 || info.InitDispatch != ""
+		prepared := info.InitFunc != "" && info.InitOrder != 0 && info.InitDispatch != ""
+		if info.HasInitializer != prepared || !info.HasInitializer && hasMetadata {
 			return fmt.Errorf("local variable %s has inconsistent initializer metadata before SSA compilation", qualify(pkgPath, name))
 		}
 	}
@@ -193,6 +198,187 @@ func setInitializerNames(initializer *types.Initializer, vars map[string]Info, i
 		info.InitFunc = initName
 		info.InitOrder = order
 		vars[variable.Name()] = info
+	}
+}
+
+type preparedLocalInitializer struct {
+	name  string
+	order int
+	fn    *types.Func
+}
+
+func prepareLocalDispatchers(
+	pkgPath string,
+	pkg *types.Package,
+	info *types.Info,
+	files []*ast.File,
+	vars map[string]Info,
+) error {
+	for _, kind := range []Kind{Thread, Goroutine} {
+		initializers, err := preparedLocalInitializers(pkgPath, pkg, vars, kind)
+		if err != nil {
+			return err
+		}
+		if len(initializers) == 0 {
+			continue
+		}
+		name := preparedDispatchName(pkgPath, vars, kind)
+		if name == "" {
+			name = findLocalDispatcher(pkg, info, files, kind, initializers)
+		}
+		if name == "" {
+			if len(files) == 0 {
+				return fmt.Errorf("cannot prepare local initializer dispatcher for package %q without syntax files", pkgPath)
+			}
+			prefix := DispatchPrefix + kind.String() + "_"
+			for suffix := 0; ; suffix++ {
+				name = fmt.Sprintf("%s%d", prefix, suffix)
+				if pkg.Scope().Lookup(name) == nil {
+					break
+				}
+			}
+			fnObj, decl := makeLocalDispatcher(pkg, info, name, initializers)
+			pkg.Scope().Insert(fnObj)
+			files[len(files)-1].Decls = append(files[len(files)-1].Decls, decl)
+		}
+		fullName := qualify(pkgPath, name)
+		for variable, local := range vars {
+			if local.Locality == kind && local.HasInitializer {
+				local.InitDispatch = fullName
+				vars[variable] = local
+			}
+		}
+	}
+	return nil
+}
+
+func preparedLocalInitializers(
+	pkgPath string,
+	pkg *types.Package,
+	vars map[string]Info,
+	kind Kind,
+) ([]preparedLocalInitializer, error) {
+	byOrder := make(map[int]preparedLocalInitializer)
+	for _, local := range vars {
+		if local.Locality != kind || !local.HasInitializer {
+			continue
+		}
+		name := strings.TrimPrefix(local.InitFunc, pkgPath+".")
+		object, _ := pkg.Scope().Lookup(name).(*types.Func)
+		if local.InitFunc == "" || local.InitOrder == 0 || object == nil {
+			return nil, fmt.Errorf("local initializer %q has incomplete prepared function metadata", local.InitFunc)
+		}
+		current := preparedLocalInitializer{name: name, order: local.InitOrder, fn: object}
+		if previous, exists := byOrder[local.InitOrder]; exists && previous.fn != object {
+			return nil, fmt.Errorf(
+				"local initializer order %d names both %s and %s",
+				local.InitOrder, previous.name, name,
+			)
+		}
+		byOrder[local.InitOrder] = current
+	}
+	ret := make([]preparedLocalInitializer, 0, len(byOrder))
+	for _, initializer := range byOrder {
+		ret = append(ret, initializer)
+	}
+	sort.Slice(ret, func(i, j int) bool { return ret[i].order < ret[j].order })
+	return ret, nil
+}
+
+func preparedDispatchName(pkgPath string, vars map[string]Info, kind Kind) string {
+	var fullName string
+	for _, local := range vars {
+		if local.Locality != kind || !local.HasInitializer {
+			continue
+		}
+		if local.InitDispatch == "" {
+			return ""
+		}
+		if fullName == "" {
+			fullName = local.InitDispatch
+		} else if fullName != local.InitDispatch {
+			return ""
+		}
+	}
+	return strings.TrimPrefix(fullName, pkgPath+".")
+}
+
+func findLocalDispatcher(
+	pkg *types.Package,
+	info *types.Info,
+	files []*ast.File,
+	kind Kind,
+	initializers []preparedLocalInitializer,
+) string {
+	prefix := DispatchPrefix + kind.String() + "_"
+	for _, file := range files {
+		for _, node := range file.Decls {
+			decl, ok := node.(*ast.FuncDecl)
+			if !ok || !strings.HasPrefix(decl.Name.Name, prefix) || decl.Body == nil ||
+				len(decl.Body.List) != len(initializers) {
+				continue
+			}
+			matches := true
+			for index, statement := range decl.Body.List {
+				expression, ok := statement.(*ast.ExprStmt)
+				if !ok {
+					matches = false
+					break
+				}
+				call, ok := expression.X.(*ast.CallExpr)
+				if !ok {
+					matches = false
+					break
+				}
+				ident, ok := call.Fun.(*ast.Ident)
+				if !ok || len(call.Args) != 0 ||
+					info.Uses[ident] != initializers[index].fn {
+					matches = false
+					break
+				}
+			}
+			if matches && pkg.Scope().Lookup(decl.Name.Name) == info.Defs[decl.Name] {
+				return decl.Name.Name
+			}
+		}
+	}
+	return ""
+}
+
+func makeLocalDispatcher(
+	pkg *types.Package,
+	info *types.Info,
+	name string,
+	initializers []preparedLocalInitializer,
+) (*types.Func, *ast.FuncDecl) {
+	if info.Types == nil {
+		info.Types = make(map[ast.Expr]types.TypeAndValue)
+	}
+	if info.Uses == nil {
+		info.Uses = make(map[*ast.Ident]types.Object)
+	}
+	if info.Defs == nil {
+		info.Defs = make(map[*ast.Ident]types.Object)
+	}
+	body := make([]ast.Stmt, len(initializers))
+	for index, initializer := range initializers {
+		ident := ast.NewIdent(initializer.name)
+		call := &ast.CallExpr{Fun: ident}
+		info.Uses[ident] = initializer.fn
+		info.Types[ident] = types.TypeAndValue{Type: initializer.fn.Type()}
+		info.Types[call] = types.TypeAndValue{
+			Type: initializer.fn.Signature().Results(),
+		}
+		body[index] = &ast.ExprStmt{X: call}
+	}
+	nameIdent := ast.NewIdent(name)
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	fnObj := types.NewFunc(token.NoPos, pkg, name, sig)
+	info.Defs[nameIdent] = fnObj
+	return fnObj, &ast.FuncDecl{
+		Name: nameIdent,
+		Type: &ast.FuncType{Params: &ast.FieldList{}},
+		Body: &ast.BlockStmt{List: body},
 	}
 }
 

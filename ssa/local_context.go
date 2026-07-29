@@ -51,7 +51,7 @@ func (p Function) BuildLocalPackageAccessor(cache, size, align Expr) {
 	hit := p.Block(1)
 	slow := p.Block(2)
 	cached := b.Load(cache)
-	b.If(b.BinOp(token.NEQ, cached, prog.IntVal(0, prog.Uintptr())), hit, slow)
+	b.If(b.BinOp(token.NEQ, cached, prog.Nil(cached.Type)), hit, slow)
 
 	b.SetBlock(hit)
 	result := p.raw.Type.(*types.Signature).Results().At(0).Type()
@@ -60,5 +60,16 @@ func (p Function) BuildLocalPackageAccessor(cache, size, align Expr) {
 	b.SetBlock(slow)
 	raw := b.Call(p.Pkg.rtFunc("LocalPackage"), cache, size, align)
 	b.Return(b.Convert(prog.rawType(result), raw))
+	b.EndBuild()
+}
+
+// BuildLogicalLocalPackageAccessor builds the stackless logical-G lookup. The
+// global cache object is only a stable package identity; every access resolves
+// through the current G so no physical TLS address can leak across migration.
+func (p Function) BuildLogicalLocalPackageAccessor(key, size, align Expr) {
+	b := p.MakeBody(1)
+	raw := b.Call(p.Pkg.rtFunc("LocalPackageLogical"), key, size, align)
+	result := p.raw.Type.(*types.Signature).Results().At(0).Type()
+	b.Return(b.Convert(p.Prog.rawType(result), raw))
 	b.EndBuild()
 }

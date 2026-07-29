@@ -214,6 +214,10 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 	}
 	mainInit := aPkg.SSA.Func("init")
 	mainMain := aPkg.SSA.Func("main")
+	mainSymbolPrefix := aPkg.PkgPath
+	if ctx.buildConf.RewriteMainPrefix && pkg.Types != nil && pkg.Types.Name() == "main" {
+		mainSymbolPrefix = "main"
+	}
 	steps := make([]coroProgramBootstrapStepV1, 0, 5)
 	for _, spec := range []struct {
 		fn     *ssa.Function
@@ -223,8 +227,8 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 		role   uint32
 	}{
 		{runtimeInit, llssa.PkgRuntime + ".init", llssa.PkgRuntime, "internal runtime init", coroProgramStepRoleRuntimeInitV2},
-		{mainInit, aPkg.PkgPath + ".init", aPkg.PkgPath, "main package init", coroProgramStepRolePackageInitV2},
-		{mainMain, aPkg.PkgPath + ".main", aPkg.PkgPath, "main", coroProgramStepRoleMainV2},
+		{mainInit, mainSymbolPrefix + ".init", aPkg.PkgPath, "main package init", coroProgramStepRolePackageInitV2},
+		{mainMain, mainSymbolPrefix + ".main", aPkg.PkgPath, "main", coroProgramStepRoleMainV2},
 	} {
 		step, err := selectCoroProgramManagedStepV2(ctx, spec.fn, spec.target, spec.owner, spec.label, spec.role)
 		if err != nil {
