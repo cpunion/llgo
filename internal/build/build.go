@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"log"
@@ -170,7 +171,10 @@ type Config struct {
 	// go/packages. Callers use internal/goflags to parse supported compiler and
 	// linker semantics into typed Config fields before calling Do.
 	GoBuildFlags []string
-	LinkOptions  LinkOptions
+	// BuildParallelism is the package-level concurrency requested by Go's -p
+	// build flag for llgo test. Zero uses the Go default, GOMAXPROCS.
+	BuildParallelism int
+	LinkOptions      LinkOptions
 	// OmitDWARFByDefault controls linked builds only when -w was not
 	// explicitly specified. Explicit -w and -w=false always win.
 	OmitDWARFByDefault bool
@@ -192,6 +196,11 @@ type Config struct {
 	// when it would otherwise be enabled by full LTO.
 	DisableGoGlobalDCE bool
 
+	// RewriteMainPrefix controls whether symbols in the main package
+	// use "main." as their package path prefix instead of the actual
+	// import path. When true, pkgpath.sym is rewritten to main.sym.
+	RewriteMainPrefix bool
+
 	// GlobalRewrites specifies compile-time overrides for global string variables.
 	// Keys are fully qualified package paths (e.g. "main" or "github.com/user/pkg").
 	// Each Rewrites entry maps variable names to replacement string values. Only
@@ -199,6 +208,7 @@ type Config struct {
 	// packages in the current build.
 	GlobalRewrites map[string]Rewrites
 	ModuleHook     ModuleHook
+	Overlay        map[string][]byte
 }
 
 type Rewrites map[string]string
@@ -367,6 +377,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if conf.Mode == ModeTest {
 		cfg.Mode |= packages.NeedForTest
 	}
+	abi.SetRewriteMainPrefix(conf.RewriteMainPrefix)
 
 	emitDebugInfo := shouldEmitDebugInfo(conf, &export)
 	cl.EnableDebug(emitDebugInfo)
@@ -413,11 +424,27 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		return prog.TypeSizes(sizes)
 	}
 	dedup := packages.NewDeduper()
+	var syntaxErr error
+	var syntaxErrMu sync.Mutex
+	recordSyntaxErr := func(err error) {
+		syntaxErrMu.Lock()
+		defer syntaxErrMu.Unlock()
+		if syntaxErr == nil {
+			syntaxErr = err
+		}
+	}
+	loadSyntaxErr := func() error {
+		syntaxErrMu.Lock()
+		defer syntaxErrMu.Unlock()
+		return syntaxErr
+	}
 	dedup.SetPreload(func(pkg *types.Package, files []*ast.File) {
 		if llruntime.SkipToBuild(pkg.Path()) {
 			return
 		}
-		cl.ParsePkgSyntax(prog, pkg, files)
+		if err := cl.ParsePkgSyntax(prog, cfg.Fset, pkg, files); err != nil {
+			recordSyntaxErr(err)
+		}
 	})
 
 	if patterns == nil {
@@ -427,7 +454,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Overlay, err = buildSourcePatchOverlayForGOROOT(cfg.Overlay, env.LLGoRuntimeDir(), sourcePatchGOROOT, sourcePatchBuildContext{
+	var llgoFiles map[string][]string
+	conf.Overlay, llgoFiles, err = buildSourcePatchOverlayForGOROOT(conf.Overlay, env.LLGoRuntimeDir(), sourcePatchGOROOT, sourcePatchBuildContext{
 		goos:       conf.Goos,
 		goarch:     conf.Goarch,
 		goversion:  sourcePatchGoVersion,
@@ -436,8 +464,21 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
+	dedup.SetLLGoFiles(llgoFiles)
+	cfg.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+		if data, ok := conf.Overlay[filename]; ok {
+			src = data
+		}
+		// We implicitly promise to keep doing ast.Object resolution. :(
+		const mode = parser.AllErrors | parser.ParseComments
+		return parser.ParseFile(fset, filename, src, mode)
+	}
+
 	initial, err := packages.LoadExWithGoVersion(dedup, sizes, cfg, conf.GoVersion, patterns...)
 	if err != nil {
+		return nil, err
+	}
+	if err := loadSyntaxErr(); err != nil {
 		return nil, err
 	}
 	if conf.AllowNoBody {
@@ -445,7 +486,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 	mode := conf.Mode
 	if mode == ModeTest {
-		initial, err = filterTestPackages(initial, conf.OutFile)
+		initial, err = filterTestPackages(initial, conf.OutFile, conf.RewriteMainPrefix)
 		if err != nil {
 			return nil, err
 		}
@@ -474,6 +515,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := loadSyntaxErr(); err != nil {
+		return nil, err
+	}
 
 	prog.SetRuntime(func() *types.Package {
 		return altPkgs[0].Types
@@ -481,7 +525,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	prog.SetPython(func() *types.Package {
 		return dedup.Check(llssa.PkgPython).Types
 	})
-	preCollectRuntimeLinknames(prog, altPkgs)
+	if err := prepareLocalVariables(prog, initial, altPkgs); err != nil {
+		return nil, err
+	}
 
 	buildMode := ssaBuildMode
 	cabiOptimize := true
@@ -674,6 +720,11 @@ func applyBuildModeCompileFlags(mode BuildMode, export *crosscompile.Export) {
 	}
 }
 
+// DefaultBuildTags returns the build tags LLGo always enables for a target.
+func DefaultBuildTags(goarch, target string) string {
+	return defaultBuildTags(goarch, target)
+}
+
 func defaultBuildTags(goarch, target string) string {
 	tags := "llgo,math_big_pure_go,purego"
 	// Raw GOOS/GOARCH wasm builds do not have a target configuration that
@@ -715,11 +766,14 @@ func needLink(pkg *packages.Package, mode Mode) bool {
 	return pkg.Name == "main"
 }
 
-func filterTestPackages(initial []*packages.Package, outFile string) ([]*packages.Package, error) {
+func filterTestPackages(initial []*packages.Package, outFile string, rewriteMainPrefix bool) ([]*packages.Package, error) {
 	filtered := initial[:0]
 	for _, pkg := range initial {
 		if needLink(pkg, ModeTest) {
 			filtered = append(filtered, pkg)
+		}
+		if rewriteMainPrefix && pkg.Types != nil && pkg.Types.Name() == "main" {
+			pkg.Types.SetName("main.test")
 		}
 	}
 	if len(filtered) > 1 && outFile != "" {
@@ -1176,6 +1230,9 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	methodByName := make(map[string]none)
 	allPkgs := []*packages.Package{pkg}
 	for _, v := range pkgs {
+		if v.PkgPath != pkg.PkgPath && v.Types != nil && v.Types.Name() == "main" {
+			continue
+		}
 		allPkgs = append(allPkgs, v.Package)
 	}
 	visitRoots := allPkgs
@@ -1924,13 +1981,22 @@ func altPkgs(initial []*packages.Package, conf *Config, alts ...string) []string
 	return alts
 }
 
-func preCollectRuntimeLinknames(prog llssa.Program, pkgs []*packages.Package) {
-	for _, pkg := range pkgs {
-		if pkg != nil && pkg.PkgPath == llssa.PkgRuntime && len(pkg.Syntax) != 0 {
-			cl.PreCollectLinknames(prog, pkg.PkgPath, pkg.Syntax)
-			return
+func prepareLocalVariables(prog llssa.Program, groups ...[]*packages.Package) error {
+	seen := make(map[*types.Package]bool)
+	var firstErr error
+	for _, roots := range groups {
+		packages.Visit(roots, nil, func(p *packages.Package) {
+			if firstErr != nil || p.Types == nil || p.IllTyped || seen[p.Types] {
+				return
+			}
+			seen[p.Types] = true
+			firstErr = cl.PrepareLocalVariables(prog, p.Fset, p.Types, p.TypesInfo, p.Syntax)
+		})
+		if firstErr != nil {
+			return firstErr
 		}
 	}
+	return nil
 }
 
 func altSSAPkgs(prog *ssa.Program, patches cl.Patches, alts []*packages.Package, conf *Config, verbose bool) {

@@ -24,13 +24,13 @@ import (
 )
 
 var (
-	benchmarkGlobal int64
+	coreBenchmarkGlobal int64
 
 	//llgo:tls
-	benchmarkTLS int64
+	coreBenchmarkTLS int64
 
 	//llgo:gls
-	benchmarkGLS int64
+	coreBenchmarkGLS int64
 
 	benchmarkIntSink int
 	benchmarkI64Sink int64
@@ -38,36 +38,36 @@ var (
 
 //go:noinline
 func benchmarkReadGlobal() int64 {
-	return atomic.LoadInt64(&benchmarkGlobal)
+	return atomic.LoadInt64(&coreBenchmarkGlobal)
 }
 
 //go:noinline
 func benchmarkReadTLS() int64 {
-	return atomic.LoadInt64(&benchmarkTLS)
+	return atomic.LoadInt64(&coreBenchmarkTLS)
 }
 
 //go:noinline
 func benchmarkReadGLS() int64 {
-	return atomic.LoadInt64(&benchmarkGLS)
+	return atomic.LoadInt64(&coreBenchmarkGLS)
 }
 
 //go:noinline
 func benchmarkWriteGlobal(v int64) {
-	atomic.StoreInt64(&benchmarkGlobal, v)
+	atomic.StoreInt64(&coreBenchmarkGlobal, v)
 }
 
 //go:noinline
 func benchmarkWriteTLS(v int64) {
-	atomic.StoreInt64(&benchmarkTLS, v)
+	atomic.StoreInt64(&coreBenchmarkTLS, v)
 }
 
 //go:noinline
 func benchmarkWriteGLS(v int64) {
-	atomic.StoreInt64(&benchmarkGLS, v)
+	atomic.StoreInt64(&coreBenchmarkGLS, v)
 }
 
 func BenchmarkGlobalRead(b *testing.B) {
-	atomic.StoreInt64(&benchmarkGlobal, 1)
+	atomic.StoreInt64(&coreBenchmarkGlobal, 1)
 	var value int64
 	for i := 0; i < b.N; i++ {
 		value += benchmarkReadGlobal()
@@ -76,7 +76,7 @@ func BenchmarkGlobalRead(b *testing.B) {
 }
 
 func BenchmarkTLSRead(b *testing.B) {
-	atomic.StoreInt64(&benchmarkTLS, 1)
+	atomic.StoreInt64(&coreBenchmarkTLS, 1)
 	var value int64
 	for i := 0; i < b.N; i++ {
 		value += benchmarkReadTLS()
@@ -85,7 +85,7 @@ func BenchmarkTLSRead(b *testing.B) {
 }
 
 func BenchmarkGLSRead(b *testing.B) {
-	atomic.StoreInt64(&benchmarkGLS, 1)
+	atomic.StoreInt64(&coreBenchmarkGLS, 1)
 	var value int64
 	for i := 0; i < b.N; i++ {
 		value += benchmarkReadGLS()
