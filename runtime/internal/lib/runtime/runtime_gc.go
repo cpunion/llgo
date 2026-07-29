@@ -36,6 +36,7 @@ func ReadMemStats(m *runtime.MemStats) {
 }
 
 func GC() {
+	// Scrub stale conservative stack roots before each collection cycle.
 	bdwgc.ClearStack(nil)
 	bdwgc.Gcollect()
 	runFinalizers()
