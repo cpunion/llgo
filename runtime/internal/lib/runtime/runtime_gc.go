@@ -47,6 +47,7 @@ func GC() {
 }
 
 func collectAndRunFinalizers() {
+	// Scrub stale conservative stack roots before each collection cycle.
 	bdwgc.ClearStack(nil)
 	bdwgc.Gcollect()
 	// GC_gcollect only discovers unreachable finalizable objects. Explicitly
