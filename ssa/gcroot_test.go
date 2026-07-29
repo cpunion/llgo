@@ -134,6 +134,47 @@ func TestAggregateGCRootPointers(t *testing.T) {
 	}
 }
 
+func TestPatchedNestedGCRootPointers(t *testing.T) {
+	prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "js", GOARCH: "wasm"})
+	pkg := prog.NewPackage("main", "main")
+
+	originalPkg := types.NewPackage("syscall/js", "js")
+	originalName := types.NewTypeName(token.NoPos, originalPkg, "Value", nil)
+	original := types.NewNamed(originalName, types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, originalPkg, "pointer", types.NewPointer(types.Typ[types.Int]), false),
+		types.NewField(token.NoPos, originalPkg, "data", types.Typ[types.UnsafePointer], false),
+	}, nil), nil)
+	patchedName := types.NewTypeName(token.NoPos, originalPkg, "Value", nil)
+	patched := types.NewNamed(patchedName, types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, originalPkg, "ref", types.Typ[types.Int32], false),
+	}, nil), nil)
+	prog.SetPatch(func(typ types.Type) types.Type {
+		if typ == original {
+			return patched
+		}
+		return typ
+	})
+
+	outer := types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, nil, "value", original, false),
+		types.NewField(token.NoPos, nil, "err", types.NewInterfaceType(nil, nil).Complete(), false),
+	}, nil)
+	param := types.NewParam(token.NoPos, nil, "result", outer)
+	sig := types.NewSignatureType(nil, nil, nil, types.NewTuple(param), nil, false)
+	fn := pkg.NewFunc("main.patched", sig, ssa.InGo)
+	b := fn.MakeBody(1)
+
+	roots := b.GCRootPointers(b.Param(0))
+	if len(roots) != 1 {
+		t.Fatalf("GCRootPointers(patched nested struct) returned %d roots, want 1", len(roots))
+	}
+	b.Return()
+	b.EndBuild()
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertPanics(t *testing.T, fn func()) {
 	t.Helper()
 	defer func() {
