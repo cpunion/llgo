@@ -39,7 +39,15 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 		}
 		typ := p.type_(value.Type(), llssa.InGo)
 		return p.prog.GCRootCount(typ) != 0
-	}, gcSafepoint)
+	}, p.isGCSafepoint)
+	if p.safepointEntry {
+		for _, param := range fn.Params {
+			typ := p.type_(param.Type(), llssa.InGo)
+			if p.prog.GCRootCount(typ) != 0 {
+				planned[param] = struct{}{}
+			}
+		}
+	}
 	counts := make(map[ssa.Value]int, len(planned))
 	total := 0
 	count := func(value ssa.Value) {
@@ -62,7 +70,7 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 			}
 		}
 	}
-	hasClosureRoot := hasClosureContext && functionHasGCSafepoint(fn)
+	hasClosureRoot := hasClosureContext && p.functionHasGCSafepoint(fn)
 	if hasClosureRoot {
 		total++
 	}
@@ -115,6 +123,24 @@ func functionHasGCSafepoint(fn *ssa.Function) bool {
 		}
 	}
 	return false
+}
+
+func (p *context) functionHasGCSafepoint(fn *ssa.Function) bool {
+	if p.safepointEntry {
+		return true
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if p.isGCSafepoint(instr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (p *context) isGCSafepoint(instr ssa.Instruction) bool {
+	return gcSafepoint(instr) || p.isCooperativeSafepoint(instr)
 }
 
 // gcSafepoint mirrors the operations whose LLGo lowering can call the runtime.
