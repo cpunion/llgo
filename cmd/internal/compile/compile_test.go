@@ -187,15 +187,18 @@ func TestRunCmdValidationAndVersion(t *testing.T) {
 func TestRunCmdBuildsAndReportsErrors(t *testing.T) {
 	dir := t.TempDir()
 	valid := dir + "/valid.go"
-	if err := os.WriteFile(valid, []byte("package compilecase\nfunc F() {}\n"), 0o644); err != nil {
+	if err := os.WriteFile(valid, []byte("package compilecase\nfunc F(v any) int { return v.(int) }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	previousProcs := runtime.GOMAXPROCS(0)
 	stdout, stderr, code := runCompileCommand(t, []string{
-		"-B", "-c=1", "-C", "-e", "-lang=go1.22", "-N", "-l", "-complete", valid,
+		"-B", "-c=1", "-C", "-d=panic,typeassert", "-e", "-lang=go1.22", "-N", "-l", "-complete", valid,
 	})
 	if code != 0 {
 		t.Fatalf("valid compile exit code = %d; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, valid+":2: type assertion inlined") {
+		t.Fatalf("valid compile stderr = %q; want type assertion diagnostic", stderr)
 	}
 	if got := runtime.GOMAXPROCS(0); got != previousProcs {
 		t.Fatalf("GOMAXPROCS = %d after compile, want restored value %d", got, previousProcs)
