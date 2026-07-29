@@ -347,6 +347,17 @@ func TestWebAssemblyTargetsDeclareLeakingGC(t *testing.T) {
 	}
 }
 
+func TestWASIConservativeGCTargetIsExplicit(t *testing.T) {
+	config, err := NewDefaultResolver().Resolve("wasip1-gc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.GC != "conservative" || config.GOOS != "wasip1" ||
+		config.GOARCH != "wasm" || config.LLVMTarget != "wasm32-unknown-wasi" {
+		t.Fatalf("wasip1-gc target = %+v", config)
+	}
+}
+
 func TestResolverRejectsUnknownGC(t *testing.T) {
 	tempDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tempDir, "bad.json"), []byte(`{"gc":"magic"}`), 0644); err != nil {

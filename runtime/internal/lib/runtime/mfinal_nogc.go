@@ -1,4 +1,4 @@
-//go:build nogc || baremetal
+//go:build nogc || baremetal || ((wasm || tinygo.wasm) && llgo_wasm_gc)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -22,7 +22,7 @@ import "unsafe"
 
 // SetFinalizer is deliberately inert when no finalizer-capable collector is
 // present. Objects are not reclaimed by the leaking/nogc profile, and tinygogc
-// does not implement finalizer queues, so the callback can never run.
+// currently does not implement finalizer queues, so the callback cannot run.
 func SetFinalizer(obj any, finalizer any) {}
 
 // addCleanupPtr mirrors SetFinalizer for the leaking profile. Weak and cleanup

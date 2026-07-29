@@ -3516,7 +3516,36 @@ func targetGCBuildTags(gc string) ([]string, error) {
 const (
 	coroNativePipeBuildTag  = "llgo_coro_native_pipe"
 	coroNativeTimerBuildTag = "llgo_coro_native_timer"
+	coroWasmGCBuildTag      = "llgo_wasm_gc"
 )
+
+func targetWasmGCBuildTags(conf *Config, export crosscompile.Export) ([]string, error) {
+	if !strings.HasPrefix(export.LLVMTarget, "wasm32-") {
+		return nil, nil
+	}
+	target, goos, goarch := "", "", ""
+	var buildMode BuildMode
+	if conf != nil {
+		target = conf.Target
+		goos = conf.Goos
+		goarch = conf.Goarch
+		buildMode = conf.BuildMode
+	}
+	switch export.GC {
+	case "precise":
+		return nil, fmt.Errorf("WebAssembly target %q requests precise GC, but only the non-moving conservative frame profile is implemented", target)
+	case "conservative":
+		if conf != nil && conf.Goos == "wasip1" && conf.Goarch == "wasm" && wasiThreadsForBuild(conf) {
+			return nil, fmt.Errorf("WebAssembly conservative GC requires a serialized executor; WASI threads are enabled for target %q", target)
+		}
+		if conf == nil || goos != "wasip1" || goarch != "wasm" || buildMode != BuildModeExe {
+			return nil, fmt.Errorf("WebAssembly conservative GC is only implemented for the serialized WASI Preview 1 command profile; target %q uses GOOS=%q GOARCH=%q buildmode=%q", target, goos, goarch, buildMode)
+		}
+		return []string{coroWasmGCBuildTag}, nil
+	default:
+		return nil, nil
+	}
+}
 
 // effectiveBuildTags is the single build-tag assembly boundary used by Do.
 // Native coroutine capability tags are compiler/runtime ABI choices, not user
@@ -3577,6 +3606,11 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 		return "", err
 	}
 	tags = append(tags, gcTags...)
+	wasmGCTags, err := targetWasmGCBuildTags(conf, export)
+	if err != nil {
+		return "", err
+	}
+	tags = append(tags, wasmGCTags...)
 	tags = append(tags, splitSourcePatchBuildTags(conf.Tags)...)
 	tags = append(tags, goFlagTags...)
 	tags = append(tags, targetTags...)
@@ -3586,7 +3620,7 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 func rejectCompilerReservedBuildTags(source string, tags []string) error {
 	for _, tag := range tags {
 		switch tag {
-		case coroNativePipeBuildTag, coroNativeTimerBuildTag:
+		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroWasmGCBuildTag:
 			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
 		}
 	}

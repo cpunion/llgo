@@ -652,7 +652,7 @@ type OperationRecipe struct {
 | reflect.Call/MakeFunc | native typed descriptor/libffi原型已运行闭环 | WASM/baremetal AOT trampoline、runtime未知签名、reflect.Select及完整GOROOT矩阵 |
 | cgo/assembly/linkname | 无统一自动转换 | foreign boundary、stack cut、callback/reentry、unwind和summary contract |
 | unsafe pointer | 稳定无栈frame提供基础，必须验证 | 跨suspend address、pin/root/barrier和foreign lifetime |
-| GC | IR有助于表达，当前未闭环 | CoroSplit后frame root map、write barrier、STW和collector adapter |
+| GC | 单executor conservative纵向闭环 | `wasip1-gc`通过static P/G→整块LLVM frame保守扫描及native-stack scrub后的forced-GC suspended child；仍缺precise/moving map、多executor STW/barrier、weak/finalizer |
 | race detector | 必须原型验证工具ABI | scheduler/channel/source happens-before instrumentation |
 | runtime.Caller/Stack/pprof | 必须原型验证logical/native stack合成 | logical frame descriptor和post-CoroSplit debug metadata |
 | LockOSThread/entersyscall | Native exact G→M/P lock、同M foreign call的active-resume detach/restore、generation-bound同P replacement lineage、sticky cancellation、有界standby M、统一`SetMaxThreads`账本、未解锁退出的clean-M succession及main-return blocked-M进程终止已完成 | callback/reentry与完整entersyscall/exitsyscall矩阵 |
@@ -825,6 +825,8 @@ Op(frame-spilled for internal waits, registry-backed for external callbacks)
 它应保留为 LLVM backend，不应把 Go effect、select或cleanup语义塞入其中。新 emitter可减少 feature callback数量，但无需重写 `CoroBuilder`。
 
 LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 GC需要在CoroSplit后取得可靠frame layout/root metadata，或在显式slot层为GC-managed值提供自己的descriptor；这需要LLVM 19–22分别验证，不能仅凭pre-split IR推断最终offset。
+
+非移动保守GC不必等待这项精确metadata：当前`wasip1-gc`把G task和整个LLVM frame allocation都放入tinygogc heap，static P/G与wait链提供owner root，collector递归扫描完整frame block即可观察CoroSplit spill。该路径没有全局current-root chain、函数地址反查或额外sidecar allocation；代价是false-positive retention，并且仅允许stop-the-world单executor。它是精确/移动GC之前的独立可验收profile，不可把通过结果外推到并行STW、weak/finalizer或GC Full。
 
 抢占仍是 compiler safepoint preemption，不是任意PC抢占。CoroOverlay可以更可靠地证明循环、递归SCC和长block的poll上界，但LLVM stackless coroutine不能在signal/ISR中保存普通native activation。
 

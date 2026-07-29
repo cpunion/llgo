@@ -1,4 +1,4 @@
-//go:build !nogc && !baremetal && !llgo_wasm_gc
+//go:build !nogc && (baremetal || ((wasm || tinygo.wasm) && llgo_wasm_gc))
 
 /*
  * Copyright (c) 2025 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,16 +18,9 @@
 
 package runtime
 
-import (
-	"unsafe"
+import "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/bdwgc"
-)
-
-// FreeDeferNode releases a defer argument node allocated from the Boehm heap.
+// FreeDeferNode unlinks a node. tinygogc reclaims its physical storage.
 func FreeDeferNode(ptr unsafe.Pointer) {
-	if ptr != nil {
-		bdwgc.Free(c.Pointer(ptr))
-	}
+	_ = ptr
 }

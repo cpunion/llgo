@@ -1,4 +1,4 @@
-//go:build !nogc && baremetal
+//go:build !nogc && (baremetal || ((wasm || tinygo.wasm) && llgo_wasm_gc))
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -36,6 +36,8 @@ func backendAllocFrame(size uintptr) unsafe.Pointer {
 }
 
 func backendFreeFrame(ptr unsafe.Pointer) {
-	// tinygogc currently reclaims unreachable frames during tracing GC.
+	// Frames and task records are unlinked and cleared exactly once by the
+	// scheduler. The stop-the-world collector reclaims their physical blocks
+	// after the live P/G graph no longer reaches them.
 	_ = ptr
 }

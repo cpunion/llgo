@@ -107,8 +107,9 @@ func FreeFrame(ptr unsafe.Pointer) bool {
 // AllocTask allocates pointer-containing scheduler task storage. It uses the
 // same statically selected scanned/root backend as coroutine frames: BDWGC's
 // uncollectable allocation is conservatively scanned, tinygogc sees the task
-// through the scheduler's static P/parent links, and nogc/WASM profiles have
-// no tracing collector that an ordinary malloc range could hide pointers from.
+// through the scheduler's static P/parent links, and leaking WebAssembly
+// profiles have no tracing collector that an ordinary malloc range could hide
+// pointers from.
 func AllocTask(size uintptr) unsafe.Pointer {
 	if !Ready() || size == 0 {
 		return nil

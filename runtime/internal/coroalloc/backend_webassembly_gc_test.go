@@ -1,7 +1,7 @@
-//go:build baremetal && !nogc
+//go:build !nogc && !baremetal && (wasm || tinygo.wasm) && llgo_wasm_gc
 
 /*
- * Copyright (c) 2025 The XGo Authors (xgo.dev). All rights reserved.
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,12 @@
  * limitations under the License.
  */
 
-package runtime
+package coroalloc
 
-import "unsafe"
+import "testing"
 
-// FreeDeferNode is a no-op in baremetal environment.
-// Defer nodes become unreachable after being unlinked from the chain,
-// and tinygogc will reclaim them in the next GC cycle.
-func FreeDeferNode(ptr unsafe.Pointer) {
-	// no-op: let tinygogc collect
+func TestWasmGCBackendUsesTinyGoCollector(t *testing.T) {
+	if backendKind != "tinygogc" {
+		t.Fatalf("wasm GC frame allocator backend = %q, want tinygogc", backendKind)
+	}
 }
