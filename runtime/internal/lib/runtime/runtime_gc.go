@@ -47,10 +47,10 @@ func GC() {
 }
 
 func collectAndRunFinalizers() {
-	// GC_clear_stack only scrubs the unused stack tail below this frame. It
-	// cannot reach dead slots in active callers; compiler-emitted volatile
-	// clears handle those. This remains useful as best-effort cleanup for
-	// storage vacated before GC was entered.
+	// GC_clear_stack only scrubs some inaccessible stack space below this
+	// frame. It cannot reach dead slots in active callers; compiler-emitted
+	// volatile clears handle those. This remains useful as best-effort cleanup
+	// for storage vacated before GC was entered.
 	bdwgc.ClearStack(nil)
 	bdwgc.Gcollect()
 	// GC_gcollect only discovers unreachable finalizable objects. Explicitly
