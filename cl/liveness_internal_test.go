@@ -997,7 +997,7 @@ func main() {
 		t.Fatal(err)
 	}
 	ir := pkg.String()
-	if !strings.Contains(ir, `store volatile %"github.com/goplus/llgo/runtime/livetest.Box" zeroinitializer`) {
+	if !strings.Contains(ir, "store volatile %main.Box zeroinitializer") {
 		t.Fatalf("compiled liveness module missing volatile whole-aggregate clear:\n%s", ir)
 	}
 }

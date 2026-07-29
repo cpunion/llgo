@@ -1703,6 +1703,10 @@ func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][
 	plans := make(map[ssa.Instruction][]*ssa.Alloc)
 	blockCyclicity := cyclicBlocks(fn.Blocks)
 	for _, blk := range fn.Blocks {
+		if blockCyclicity[blk] {
+			continue
+		}
+		var order map[ssa.Instruction]int
 		for _, instr := range blk.Instrs {
 			alloc, ok := instr.(*ssa.Alloc)
 			if !ok || !p.shouldClearAlloc(alloc) {
@@ -1713,15 +1717,14 @@ func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][
 			// retain stale roots, but it cannot guess across control-flow,
 			// closure, defer, goroutine, or heap-escape boundaries.
 			useBlk := alloc.Block()
-			if useBlk == nil {
+			if useBlk == nil || useBlk != blk {
 				continue
 			}
-			if blockCyclicity[useBlk] {
-				continue
-			}
-			order := make(map[ssa.Instruction]int, len(useBlk.Instrs))
-			for i, useInstr := range useBlk.Instrs {
-				order[useInstr] = i
+			if order == nil {
+				order = make(map[ssa.Instruction]int, len(blk.Instrs))
+				for i, useInstr := range blk.Instrs {
+					order[useInstr] = i
+				}
 			}
 			last, ok := p.lastUseInBlock(alloc, useBlk, order)
 			if ok && last != nil && !isTerminatingInstruction(last) {
