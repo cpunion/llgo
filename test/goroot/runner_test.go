@@ -12,6 +12,7 @@ import (
 	"go/constant"
 	"go/format"
 	"go/parser"
+	"go/scanner"
 	"go/token"
 	"io"
 	"io/fs"
@@ -1185,6 +1186,7 @@ func checkExpectedErrorsForFiles(output string, sources []diagnosticSource) erro
 			continue
 		}
 		matched := false
+		parserRecoveryAuthorized := false
 		for _, candidate := range candidates {
 			diagnostic, ok := parseCompilerDiagnostic(candidate)
 			sourceDiagnostic, sourceOK := parseSourceDiagnostic(candidate, pathResolver)
@@ -1200,12 +1202,14 @@ func checkExpectedErrorsForFiles(output string, sources []diagnosticSource) erro
 				if ok && isScopedLexicalDiagnostic(message) {
 					lexicalLocations[diagnostic.locationKey()] = true
 				}
-				if sourceOK && physicalDiagnosticSources[sourceDiagnostic.file] {
-					for _, secondaries := range parserRecoverySecondaryGroups(message, expected.source) {
+				if !parserRecoveryAuthorized && sourceOK && physicalDiagnosticSources[sourceDiagnostic.file] {
+					groups := parserRecoverySecondaryGroups(message, expected.source)
+					for _, secondaries := range groups {
 						parserRecoveryPairs = append(parserRecoveryPairs, parserRecoveryPair{
 							file: sourceDiagnostic.file, line: sourceDiagnostic.line, secondaries: secondaries,
 						})
 					}
+					parserRecoveryAuthorized = len(groups) != 0
 				}
 				if !ok {
 					diagnostic = compilerDiagnostic{
@@ -1749,18 +1753,22 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 	}
 	source = parserRecoverySourceCode(source)
 	switch primary {
+	// GOROOT/test/fixedbugs/bug228.go
 	case "syntax error: ... is missing type":
 		if source == "func g(x int, y float32) (...)" {
 			return [][]string{{"expected type, found ')'"}}
 		}
+	// GOROOT/test/syntax/chan1.go: channel send in an if condition.
 	case "syntax error: cannot use c <- v as value":
 		if source == "if c <- v {" {
 			return [][]string{{"expected boolean expression, found simple statement (missing parentheses around composite literal?)"}}
 		}
+	// GOROOT/test/syntax/chan1.go: channel send in a top-level declaration.
 	case "syntax error: unexpected <- after top level declaration":
 		if source == "var _ = c <- v" {
 			return [][]string{{"expected ';', found '<-'"}}
 		}
+	// GOROOT/test/fixedbugs/issue11610.go
 	case "invalid character U+003F '?'":
 		if source == "var?" {
 			return [][]string{
@@ -1788,12 +1796,29 @@ func parserRecoverySourceCode(source string) string {
 }
 
 func hasLineDirective(data []byte) bool {
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, "//line") || strings.Contains(line, "/*line") {
+	file := token.NewFileSet().AddFile("", -1, len(data))
+	var sourceScanner scanner.Scanner
+	sourceScanner.Init(file, data, func(token.Position, string) {}, scanner.ScanComments)
+	for {
+		position, kind, literal := sourceScanner.Scan()
+		if kind == token.EOF {
+			return false
+		}
+		if kind != token.COMMENT {
+			continue
+		}
+		if strings.HasPrefix(literal, "/*line ") {
+			return true
+		}
+		if !strings.HasPrefix(literal, "//line ") {
+			continue
+		}
+		offset := file.Offset(position)
+		lineStart := bytes.LastIndexByte(data[:offset], '\n') + 1
+		if len(bytes.TrimSpace(data[lineStart:offset])) == 0 {
 			return true
 		}
 	}
-	return false
 }
 
 func discardPairedParserDiagnostics(lines []string, resolver diagnosticPathResolver, pairs []parserRecoveryPair) []string {

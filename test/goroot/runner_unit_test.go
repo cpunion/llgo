@@ -926,6 +926,27 @@ var? // ERROR "invalid character U\+003F '\?'|invalid character 0x3f in input fi
 }
 
 func TestAdditionalParserRecoveryDiagnosticsFailOpen(t *testing.T) {
+	t.Run("one ERROR authorizes one recovery group", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "case.go")
+		source := `package p
+func f() {
+	if a := 10 { // ERROR "cannot use [ab] := 10 as value"
+	}
+}
+`
+		if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		output := file + ":3: syntax error: cannot use a := 10 as value\n" +
+			file + ":3: syntax error: cannot use b := 10 as value\n" +
+			file + ":3: expected boolean expression, found assignment (missing parentheses around composite literal?)\n" +
+			file + ":3: expected boolean or range expression, found assignment (missing parentheses around composite literal?)\n"
+		err := checkExpectedErrors(output, file, "case.go")
+		if err == nil || !strings.Contains(err.Error(), "expected boolean or range expression") {
+			t.Fatalf("err=%v, want the second matching primary's recovery diagnostic to remain", err)
+		}
+	})
+
 	t.Run("missing primary", func(t *testing.T) {
 		file := filepath.Join(t.TempDir(), "case.go")
 		source := `package p
@@ -1007,6 +1028,27 @@ var? // ERROR "invalid character U\+003F '\?'"
 		}
 	})
 
+	t.Run("wrong channel source shape", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "case.go")
+		source := `package p
+var c chan int
+var v int
+func f() {
+	if (c <- v) { // ERROR "cannot use c <- v as value"
+	}
+}
+`
+		if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		output := file + ":5: syntax error: cannot use c <- v as value\n" +
+			file + ":5: expected boolean expression, found simple statement (missing parentheses around composite literal?)\n"
+		err := checkExpectedErrors(output, file, "case.go")
+		if err == nil || !strings.Contains(err.Error(), "expected boolean expression") {
+			t.Fatalf("err=%v, want recovery for a different source shape to remain", err)
+		}
+	})
+
 	t.Run("wrong file", func(t *testing.T) {
 		dir := t.TempDir()
 		primaryFile := filepath.Join(dir, "primary.go")
@@ -1046,6 +1088,59 @@ var? // ERROR "invalid character U\+003F '\?'"
 			t.Fatalf("err=%v, want line-remapped recovery to remain", err)
 		}
 	})
+}
+
+func TestParserRecoverySourceCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "URL before ERROR comment",
+			source: `var _ = "http://example.com" // ERROR "broken"`,
+			want:   `var _ = "http://example.com"`,
+		},
+		{
+			name:   "URL without ERROR comment",
+			source: `var _ = "http://example.com"`,
+			want:   `var _ = "http://example.com"`,
+		},
+		{
+			name:   "GC ERRORAUTO comment",
+			source: `var _ = "http://example.com" // GC_ERRORAUTO "broken"`,
+			want:   `var _ = "http://example.com"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parserRecoverySourceCode(tt.source); got != tt.want {
+				t.Fatalf("parserRecoverySourceCode(%q)=%q, want %q", tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasLineDirective(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{name: "line comment", data: "\t//line remapped.go:1\n", want: true},
+		{name: "block comment", data: "  /*line remapped.go:1*/\n", want: true},
+		{name: "block comment after source", data: "x /*line remapped.go:1*/\n", want: true},
+		{name: "missing separator", data: "//linefoo.go:1\n", want: false},
+		{name: "after source", data: "x //line remapped.go:1\n", want: false},
+		{name: "inside string", data: `var _ = "/*line remapped.go:1*/"` + "\n", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasLineDirective([]byte(tt.data)); got != tt.want {
+				t.Fatalf("hasLineDirective(%q)=%v, want %v", tt.data, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestCheckExpectedErrorsScopesImportAlias(t *testing.T) {
