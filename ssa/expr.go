@@ -1203,10 +1203,13 @@ func (b Builder) MakeClosure(fn Expr, bindings []Expr) Expr {
 		data = ptr
 	}
 	code := fn.impl
+	resumable := b.wasmResumeFunctionEnabled()
 	if prog.WasmResumeABIEnabled() && closureCtxParam(sig) == nil {
-		code = b.Pkg.closureWrapDecl(fn, sig).impl
+		code = b.Pkg.closureWrapDeclFor(fn, sig, resumable).impl
 	}
-	code = b.Pkg.wasmResumeStart(code)
+	if resumable {
+		code = b.Pkg.wasmResumeStart(code)
+	}
 	return b.aggregateValue(prog.Closure(removeCtx(sig)), code, data)
 }
 
@@ -1751,7 +1754,7 @@ func checkExpr(v Expr, t types.Type, b Builder) Expr {
 				v, data = b.Pkg.closureStub(b, v, sig, origKind)
 			}
 		}
-		if origKind == vkFuncDecl {
+		if origKind == vkFuncDecl && b.wasmResumeFunctionEnabled() {
 			v.impl = b.Pkg.wasmResumeStart(v.impl)
 		}
 		return b.aggregateValue(tclosure, v.impl, data.impl)

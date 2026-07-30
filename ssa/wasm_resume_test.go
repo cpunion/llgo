@@ -22,6 +22,7 @@ import (
 	"go/importer"
 	"go/token"
 	"go/types"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -226,6 +227,124 @@ func TestWasmResumeABILowersSuspendCurrent(t *testing.T) {
 	}
 }
 
+func TestWasmResumeABILowersDeferUnwindState(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+	prog.TypeSizes(types.SizesFor("gc", "wasm"))
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	deferred := pkg.NewFunc("deferred", NoArgsNoRet, InGo)
+	deferred.MakeBody(1).Return()
+	suspend := pkg.NewFunc(wasmresume.SuspendSymbol, NoArgsNoRet, InGo)
+	fn := pkg.NewFunc("withDefer", NoArgsNoRet, InGo)
+	b := fn.MakeBody(1)
+	recoverBlock := fn.MakeBlock()
+	fn.SetRecover(recoverBlock)
+	b.SetBlockEx(recoverBlock, AtEnd, true)
+	b.Return()
+	b.SetBlockEx(fn.Block(0), AtEnd, true)
+	b.Defer(DeferAlways, deferred.Expr, Builder.Call)
+	b.Call(suspend.Expr)
+	b.RunDefers()
+	b.Return()
+	b.EndBuild()
+
+	before := pkg.String()
+	if strings.Contains(before, "setjmp") {
+		t.Fatalf("resumable defer allocated a native jump buffer:\n%s", before)
+	}
+	for _, marker := range []string{
+		wasmresume.RegisterUnwindSymbol,
+		wasmresume.ClearUnwindSymbol,
+	} {
+		if !strings.Contains(before, marker) {
+			t.Fatalf("resumable defer is missing %s:\n%s", marker, before)
+		}
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify defer module before lowering: %v\n%s", err, before)
+	}
+
+	if err := wasmresume.Lower(pkg.Module(), prog.TargetData()); err != nil {
+		t.Fatal(err)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify lowered defer module: %v\n%s", err, pkg.String())
+	}
+	ir := pkg.String()
+	for _, marker := range []string{
+		wasmresume.RegisterUnwindSymbol,
+		wasmresume.ClearUnwindSymbol,
+	} {
+		if strings.Contains(ir, "call void @"+marker) {
+			t.Fatalf("unwind marker %s remains after lowering:\n%s", marker, ir)
+		}
+	}
+	descriptor := regexp.MustCompile(
+		`@__llgo_wasm_resume_desc\.withDefer = constant \{ ptr, i32, i32, i32, i32 \} ` +
+			`\{ ptr @__llgo_wasm_resume\.withDefer, i32 [1-9][0-9]*, i32 [1-9][0-9]*, ` +
+			`i32 [1-9][0-9]*, i32 [1-9][0-9]* \}`,
+	)
+	if !descriptor.MatchString(ir) {
+		t.Fatalf("resumable defer descriptor has no unwind state:\n%s", ir)
+	}
+}
+
+func TestWasmResumeABIGoroutineUsesResumableTarget(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+	prog.TypeSizes(types.SizesFor("gc", "wasm"))
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	worker := pkg.NewFunc("worker", NoArgsNoRet, InGo)
+	worker.MakeBody(1).Return()
+	caller := pkg.NewFunc("caller", NoArgsNoRet, InGo)
+	b := caller.MakeBody(1)
+	workerPointer := worker.Expr
+	workerPointer.kind = vkFuncPtr
+	b.Go(workerPointer, func(b Builder, fn Expr, args ...Expr) Expr {
+		return b.Call(fn, args...)
+	})
+	b.Return()
+
+	ir := pkg.String()
+	if !strings.Contains(ir, "store ptr @"+wasmresume.StartSymbol("worker")) {
+		t.Fatalf("goroutine startup record does not contain the worker start entry:\n%s", ir)
+	}
+	routine := pkg.FuncOf("example.com/p._llgo_routine$1")
+	if routine == nil {
+		t.Fatalf("goroutine wrapper is missing:\n%s", ir)
+	}
+	kind := prog.ctx.MDKindID(wasmresume.CallMetadata)
+	var marked bool
+	for block := routine.impl.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.HasMetadata() && !instruction.Metadata(kind).IsNil() {
+				marked = true
+			}
+		}
+	}
+	if !marked {
+		t.Fatalf("goroutine wrapper call is not resumable:\n%s", ir)
+	}
+}
+
 func TestWasmResumeABIKeepsRuntimeBoundariesSynchronous(t *testing.T) {
 	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
 	defer prog.Dispose()
@@ -242,6 +361,7 @@ func TestWasmResumeABIKeepsRuntimeBoundariesSynchronous(t *testing.T) {
 	)
 	b := boundary.MakeBody(1)
 	b.Call(ordinary.Expr)
+	b.Call(b.MakeClosure(ordinary.Expr, nil))
 	b.Return()
 
 	root := pkg.NewFunc("root", NoArgsNoRet, InC)
@@ -269,6 +389,10 @@ func TestWasmResumeABIKeepsRuntimeBoundariesSynchronous(t *testing.T) {
 	}
 	if !callerMarked {
 		t.Fatalf("ordinary Go caller was not marked resumable:\n%s", pkg.String())
+	}
+	if ir := pkg.String(); !strings.Contains(ir, "@"+closureStub+"sync.ordinary") ||
+		strings.Contains(ir, "@"+wasmresume.StartSymbol(closureStub+"sync.ordinary")) {
+		t.Fatalf("runtime boundary function value does not use its synchronous wrapper:\n%s", ir)
 	}
 	kind := prog.ctx.MDKindID(wasmresume.CallMetadata)
 	for _, function := range []Function{boundary, root, caller} {
