@@ -357,7 +357,29 @@ func (p *context) compileCoroStaticAwait(
 		closureContext = b.Field(closureValue, 1)
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, closureContext, args, nil, keepaliveSlots)
+	result := p.compileCoroTargetAwaitWithContextAndRecoveryResult(
+		b, callee, closureContext, args, nil, keepaliveSlots,
+	)
+	p.recordCoroValueAddress(call, result.address)
+	return result.value
+}
+
+type coroAwaitedValue struct {
+	value   llssa.Expr
+	address llssa.Expr
+}
+
+func (p *context) recordCoroValueAddress(value ssa.Value, address llssa.Expr) {
+	if value == nil || address.IsNil() {
+		return
+	}
+	if p.coroValueAddrs == nil {
+		panic("coroutine value address escaped its active function")
+	}
+	if _, duplicate := p.coroValueAddrs[value]; duplicate {
+		panic("coroutine value address was recorded more than once")
+	}
+	p.coroValueAddrs[value] = address
 }
 
 // compileCoroTargetAwait lowers one already-resolved exact managed target.
@@ -393,7 +415,16 @@ func (p *context) compileCoroTargetAwaitWithContextAndRecovery(
 	b llssa.Builder, callee *ssa.Function, closureContext llssa.Expr, args []llssa.Expr,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
-	return p.compileCoroTargetEntryAwaitWithContextAndRecovery(
+	return p.compileCoroTargetAwaitWithContextAndRecoveryResult(
+		b, callee, closureContext, args, cleanup, keepaliveSlots,
+	).value
+}
+
+func (p *context) compileCoroTargetAwaitWithContextAndRecoveryResult(
+	b llssa.Builder, callee *ssa.Function, closureContext llssa.Expr, args []llssa.Expr,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+) coroAwaitedValue {
+	return p.compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		b, p.mustFunctionSymbol(callee), closureContext, args, cleanup, keepaliveSlots,
 	)
 }
@@ -407,6 +438,15 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 	b llssa.Builder, entry plannedFunctionSymbol, closureContext llssa.Expr, args []llssa.Expr,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
+	return p.compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
+		b, entry, closureContext, args, cleanup, keepaliveSlots,
+	).value
+}
+
+func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
+	b llssa.Builder, entry plannedFunctionSymbol, closureContext llssa.Expr, args []llssa.Expr,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+) coroAwaitedValue {
 	callee := entry.function
 	body := p.coroBody()
 	if body == nil || p.compilation == nil || p.compilation.CoroPlan == nil {
@@ -462,7 +502,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 	}
 
 	resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
-	resultSlot := p.coroFrameAlloca(resultType)
+	resultSlot := p.coroResultSlot(resultType)
 	callArgs := make([]llssa.Expr, 0, len(physicalArgs)+2)
 	callArgs = append(callArgs,
 		body.task,
@@ -480,7 +520,29 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 			callerPlan.ID, targetPlan.ID, childFn.Name(), childType, childFn.Expr.RawType(),
 		))
 	}
-	return p.awaitCoroChildWithRecovery(b, child, resultSlot, sourceSig.Results(), cleanup, keepaliveSlots)
+	value := p.awaitCoroChildWithRecovery(
+		b, child, resultSlot, sourceSig.Results(), cleanup, keepaliveSlots,
+	)
+	return coroAwaitedValue{
+		value:   value,
+		address: p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()),
+	}
+}
+
+func (p *context) coroAwaitResultAddress(
+	b llssa.Builder, resultSlot llssa.Expr, results *types.Tuple,
+) llssa.Expr {
+	if b == nil || resultSlot.IsNil() || results == nil {
+		return llssa.Nil
+	}
+	switch results.Len() {
+	case 0:
+		return llssa.Nil
+	case 1:
+		return b.FieldAddr(resultSlot, 0)
+	default:
+		return resultSlot
+	}
 }
 
 // compileCoroPatchInitAwait lowers the compiler-inserted call from a patch
@@ -530,6 +592,24 @@ func (p *context) coroFrameAlloca(typ llssa.Type) llssa.Expr {
 	return alloc.AllocaT(typ)
 }
 
+// coroResultSlot emits the child-owned result sink in the physical ramp. Small
+// results remain inline CoroSplit frame fields. A target-sized value above the
+// native-stack limit instead uses the separately planned managed-slot helper,
+// so the coroutine frame retains one pointer rather than the whole aggregate.
+func (p *context) coroResultSlot(typ llssa.Type) llssa.Expr {
+	if !p.hasCoroPhysicalBody() || p.fn == nil || typ == nil {
+		panic("coroutine result slot requires an active physical body and type")
+	}
+	entry := p.fn.Block(0)
+	alloc := p.fn.NewBuilder()
+	defer alloc.Dispose()
+	alloc.SetBlockEx(entry, llssa.AtStart, true)
+	if p.prog.LocalAllocExceedsNativeStack(typ) {
+		return alloc.AllocZAs(typ, coroManagedFrameSlotAllocZCall)
+	}
+	return alloc.AllocaT(typ)
+}
+
 // coroFrameAlloc emits zero-initialized function-lifetime storage in the
 // physical ramp entry. Source SSA stack Allocs normally live in source block
 // zero, but that block is no longer the LLVM entry of a physical coroutine:
@@ -546,7 +626,7 @@ func (p *context) coroFrameAlloc(typ llssa.Type) llssa.Expr {
 	alloc := p.fn.NewBuilder()
 	defer alloc.Dispose()
 	alloc.SetBlockEx(entry, llssa.AtStart, true)
-	return alloc.Alloc(typ, false)
+	return alloc.AllocaZeroedT(typ)
 }
 
 // awaitCoroChild completes the scheduler-owned half of one already-created

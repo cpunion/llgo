@@ -43,4 +43,21 @@ func TestAllocLargeLocalOnHeap(t *testing.T) {
 	if !pkg.NeedRuntime {
 		t.Fatal("large local heap allocation did not mark the runtime as needed")
 	}
+
+	framePkg := prog.NewPackage("frame", "frame")
+	frame := framePkg.NewFunc("frame", NoArgsNoRet, InGo)
+	fb := frame.MakeBody(1)
+	fb.AllocaZeroedT(large)
+	fb.Return()
+	fb.EndBuild()
+	frameIR := framePkg.String()
+	if !strings.Contains(frameIR, "alloca [131073 x i8]") {
+		t.Fatalf("explicit frame storage above the native stack limit was not kept local:\n%s", frameIR)
+	}
+	if strings.Contains(frameIR, "runtime.AllocZ") {
+		t.Fatalf("explicit frame storage unexpectedly used runtime.AllocZ:\n%s", frameIR)
+	}
+	if !strings.Contains(frameIR, "llvm.memset") {
+		t.Fatalf("explicit frame storage was not zero-initialized:\n%s", frameIR)
+	}
 }

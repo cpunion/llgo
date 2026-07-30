@@ -72,7 +72,7 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 	resultCount := dispatch.sourceCallSignature.Results().Len()
 	var resultSlot llssa.Expr
 	if resultCount != 0 {
-		resultSlot = p.coroFrameAlloca(p.type_(call.Type(), llssa.InGo))
+		resultSlot = p.coroResultSlot(p.type_(call.Type(), llssa.InGo))
 	}
 	join := p.fn.MakeBlock()
 	next := p.fn.MakeBlock()
@@ -148,5 +148,7 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 	if resultCount == 0 {
 		return llssa.Nil
 	}
-	return b.LoadKnownNonNil(resultSlot)
+	result := b.LoadKnownNonNil(resultSlot)
+	p.recordCoroValueAddress(call, resultSlot)
+	return result
 }

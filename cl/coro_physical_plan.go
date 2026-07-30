@@ -284,6 +284,7 @@ type coroPhysicalInstructionPlan struct {
 	outcome            coroPhysicalOutcomeRecipe
 	outcomeFailure     string
 	elideValue         bool
+	reuseValueAddress  bool
 	valueOperand       ssa.Value
 	container          coroPhysicalContainerKind
 	bound              int64
@@ -306,6 +307,18 @@ func (plan coroPhysicalInstructionPlan) mayFault() bool {
 // selected recipe is the sole authority for whether a call is physically
 // emitted in the live coroutine frame.
 func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool {
+	if helper == coroManagedFrameSlotAllocZCall {
+		switch plan.control {
+		case coroPhysicalControlDirectAwait, coroPhysicalControlDispatchAwait,
+			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait:
+			return false
+		default:
+			// The conservative pre-analysis inventory cannot yet know whether
+			// a large-result call becomes an await. Every non-await recipe
+			// returns directly and therefore owns no managed result slot.
+			return true
+		}
+	}
 	switch plan.recipe {
 	case coroPhysicalInstructionFieldAddr, coroPhysicalInstructionDeref:
 		if helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
@@ -313,6 +326,9 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		}
 	case coroPhysicalInstructionIndexAddr, coroPhysicalInstructionIndex:
 		if helper == "CheckIndexRange" || helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
+			return true
+		}
+		if helper == "AllocZ" && plan.reuseValueAddress {
 			return true
 		}
 	case coroPhysicalInstructionSlice:
@@ -410,6 +426,26 @@ func prepareCoroPhysicalFunctionPlan(
 			if err != nil {
 				return nil, fmt.Errorf("block %d instruction %T: %w", block.Index, instruction, err)
 			}
+			plan.instructions[instruction] = instructionPlan
+		}
+	}
+	for instruction, instructionPlan := range plan.instructions {
+		index, ok := instruction.(*ssa.Index)
+		if !ok {
+			continue
+		}
+		call, ok := index.X.(*ssa.Call)
+		if !ok {
+			continue
+		}
+		producer, ok := plan.instructions[call]
+		if !ok {
+			continue
+		}
+		switch producer.control {
+		case coroPhysicalControlDirectAwait, coroPhysicalControlDispatchAwait,
+			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait:
+			instructionPlan.reuseValueAddress = true
 			plan.instructions[instruction] = instructionPlan
 		}
 	}
@@ -593,6 +629,9 @@ func planCoroPhysicalInstruction(
 			result.recipe = coroPhysicalInstructionTerminalResultAllocation
 		case instruction == exactBitcastAllocation:
 			result.recipe = coroPhysicalInstructionFrameBitcastAllocation
+		case audit.frameRetainsManagedHeapAllocation(instruction):
+			// Preserve AllocZ for semantic escapes and target-layout promotion
+			// of oversized locals. CoroSplit retains the resulting pointer.
 		case !instruction.Heap || audit.frameRetainsAllocation(instruction):
 			result.recipe = coroPhysicalInstructionFrameAllocation
 		}

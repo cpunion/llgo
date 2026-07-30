@@ -171,6 +171,7 @@ type context struct {
 	skips                map[string]none
 	loaded               map[*types.Package]*pkgInfo // loaded packages
 	bvals                map[ssa.Value]llssa.Expr    // block values
+	coroValueAddrs       map[ssa.Value]llssa.Expr    // compiler-owned addresses for awaited aggregate values
 	methodNilDerefChecks map[*ssa.UnOp]none
 	patchOriginalInitIf  *ssa.If                     // exact synthetic guard whose successors are logically inverted
 	unevaluatedSSA       map[ssa.Instruction]none    // values used only by unsafe.Sizeof/Alignof/Offsetof
@@ -753,8 +754,10 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			p.rawPlainBody = rawPlain
 			p.locality.function = localityFunction{}
 			p.state = state // restore pkgState when compiling funcBody
+			oldCoroValueAddrs := p.coroValueAddrs
 			defer func() {
 				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldRawPlainBody
+				p.coroValueAddrs = oldCoroValueAddrs
 				p.locality.function = oldLocalityFunction
 			}()
 			p.phis = nil
@@ -790,6 +793,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 				p.prepareExportedLocalContext(f)
 			}
 			p.bvals = make(map[ssa.Value]llssa.Expr)
+			p.coroValueAddrs = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
 			if p.emissionUniverse != nil {
 				var frozen bool
@@ -2333,7 +2337,16 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		x := p.compileValue(b, v.X)
 		idx := p.compileValue(b, v.Index)
 		p.recordPanicLocation(b, v.Pos())
+		physicalInstruction, physicalPlanned := physicalPlan()
 		takeArrayAddr := func() (addr llssa.Expr, zero bool) {
+			if physicalPlanned && physicalInstruction.reuseValueAddress {
+				var found bool
+				addr, found = p.coroValueAddrs[v.X]
+				if !found || addr.IsNil() {
+					panic("coroutine Index lost its frozen awaited-value address")
+				}
+				return
+			}
 			switch n := v.X.(type) {
 			case *ssa.Const:
 				zero = true
@@ -2342,7 +2355,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 			return
 		}
-		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIndex {
 			observePhysical(coroPhysicalInstructionIndex)
 			ret = p.compileCoroIndexPlanned(b, v, x, idx, takeArrayAddr, physicalInstruction)

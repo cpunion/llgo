@@ -362,17 +362,16 @@ func (a *coroPhysicalPureSSAAudit) validateAlloc(alloc *ssa.Alloc) string {
 		// this frontend-elided node must remain helper-free.
 		return a.requireNoRuntimeHelpers(alloc)
 	}
+	if a.frameRetainsManagedHeapAllocation(alloc) {
+		// The exact capability already proved AllocZ and the suspended-frame
+		// pointer root for either an escape or an oversized local promotion.
+		return ""
+	}
 	if alloc.Heap {
 		if a.frameRetainsAllocation(alloc) {
 			// The complete address-use proof changes this exact lowering from
 			// runtime.AllocZ to an LLVM alloca in the current coroutine frame. Do
 			// not consult the ordinary Heap helper-demand table for that allocation.
-			return ""
-		}
-		if a.frameRetainsManagedHeapAllocation(alloc) {
-			// This remains an ordinary Go heap allocation. The capability proves
-			// both its exact AllocZ lowering and that a live pointer spilled by
-			// CoroSplit is scanned from the current non-moving/no-GC frame profile.
 			return ""
 		}
 		_, reason := a.managedHeapAllocationCapability(alloc)
@@ -391,8 +390,8 @@ func (a *coroPhysicalPureSSAAudit) validateAlloc(alloc *ssa.Alloc) string {
 	return a.requireNoRuntimeHelpers(alloc)
 }
 
-// managedHeapAllocationCapability proves one exact x/tools Heap Alloc without
-// changing its lowering or escape identity. Non-zero objects must lower only
+// managedHeapAllocationCapability proves one exact managed Alloc without
+// changing its final LLSSA storage identity. Non-zero objects must lower only
 // through the owner-scoped frozen AllocZ edge. Zero-sized objects use LLGo's
 // module sentinel and therefore must have no hidden allocator helper at all.
 // The proof is intentionally unavailable under the legacy shadow-stack mode:
@@ -409,8 +408,9 @@ func (a *coroPhysicalPureSSAAudit) managedHeapAllocationCapability(alloc *ssa.Al
 	if !a.universe.CompleteRuntimeABI() {
 		return fact, "requires a complete frozen runtime ABI"
 	}
-	if alloc == nil || alloc.Parent() != a.fn || !alloc.Heap {
-		return fact, "is not one exact owned escaping SSA allocation"
+	if alloc == nil || alloc.Parent() != a.fn ||
+		!coroAllocationUsesManagedStorage(a.ctx, alloc) {
+		return fact, "does not use one exact owned managed allocation"
 	}
 	if a.ctx.skipSyntheticMakeSliceAlloc(alloc) || isEmissionVargsAlloc(a.ctx, alloc) {
 		return fact, "synthetic slice/varargs storage has no standalone managed-allocation capability"
@@ -640,6 +640,11 @@ func (a *coroPhysicalPureSSAAudit) validateIndex(index *ssa.Index) string {
 		// ExplicitStatus codegen consumes these logical helper edges by emitting
 		// a terminal bounds branch (and, for *array, a terminal nil branch)
 		// before an unchecked load.
+		if a.ctx != nil && emissionIndexNeedsManagedArrayTemporary(a.ctx, index) {
+			return a.requireCompilerElidedAndDirectNoSuspendRuntimeHelper(
+				index, "AllocZ", "CheckIndexRange", "AssertNilDeref",
+			)
+		}
 		return a.requireOnlyCompilerElidedRuntimeHelpers(index, "CheckIndexRange", "AssertNilDeref")
 	}
 	array, ok := types.Unalias(a.typeOf(index.X.Type())).Underlying().(*types.Array)
@@ -648,6 +653,9 @@ func (a *coroPhysicalPureSSAAudit) validateIndex(index *ssa.Index) string {
 	}
 	if err := validateCoroPhysicalSSAValueType(a.typeOf(index.Type())); err != nil {
 		return "array index has unsupported result type: " + err.Error()
+	}
+	if a.ctx != nil && emissionIndexNeedsManagedArrayTemporary(a.ctx, index) {
+		return a.requireCompilerElidedAndDirectNoSuspendRuntimeHelper(index, "AllocZ")
 	}
 	return a.requireNoRuntimeHelpers(index)
 }
@@ -3202,10 +3210,10 @@ func (a *coroPhysicalPureSSAAudit) stableAddressAt(value ssa.Value, use ssa.Inst
 		}
 		return coroPhysicalAddressGlobal, ""
 	case *ssa.Alloc:
+		if a.frameRetainsManagedHeapAllocation(value) {
+			return coroPhysicalAddressManagedHeap, ""
+		}
 		if value.Heap {
-			if a.frameRetainsManagedHeapAllocation(value) {
-				return coroPhysicalAddressManagedHeap, ""
-			}
 			if !a.frameRetainsAllocation(value) {
 				return coroPhysicalAddressInvalid, "heap allocation requires managed allocation/root lowering"
 			}
@@ -3295,10 +3303,10 @@ func (a *coroPhysicalPureSSAAudit) provenCoroPhysicalAddressRoot(value ssa.Value
 	case *ssa.Global:
 		return coroPhysicalAddressGlobal, true
 	case *ssa.Alloc:
+		if a.frameRetainsManagedHeapAllocation(value) {
+			return coroPhysicalAddressManagedHeap, true
+		}
 		if value.Heap {
-			if a.frameRetainsManagedHeapAllocation(value) {
-				return coroPhysicalAddressManagedHeap, true
-			}
 			if !a.frameRetainsAllocation(value) {
 				return coroPhysicalAddressInvalid, false
 			}
@@ -3388,6 +3396,51 @@ func (a *coroPhysicalPureSSAAudit) requireOnlyCompilerElidedRuntimeHelpers(
 	}
 	if len(unexpected) != 0 {
 		return "operation lowers through non-elided runtime helper(s) " + strings.Join(unexpected, ", ")
+	}
+	return ""
+}
+
+// requireCompilerElidedAndDirectNoSuspendRuntimeHelper accepts one physical
+// helper that must execute inline between already-evaluated source values,
+// while allowing the remaining named logical helpers to be replaced by the
+// instruction's structured ExplicitStatus branches. The direct helper cannot
+// be a coroutine child: doing so would spill those values into the frame.
+func (a *coroPhysicalPureSSAAudit) requireCompilerElidedAndDirectNoSuspendRuntimeHelper(
+	instr ssa.Instruction,
+	direct string,
+	elided ...string,
+) string {
+	allowed := append(append([]string(nil), elided...), direct)
+	if reason := a.requireOnlyCompilerElidedRuntimeHelpers(instr, allowed...); reason != "" {
+		return reason
+	}
+	helpers, reason := a.plannedRuntimeHelpers(instr)
+	if reason != "" {
+		return reason
+	}
+	count := 0
+	for _, helper := range helpers {
+		if helper == direct {
+			count++
+		}
+	}
+	if count != 1 {
+		return fmt.Sprintf("operation lowers through %d %s helpers, want exactly one", count, direct)
+	}
+	if a == nil || a.plan == nil || a.fn == nil {
+		return "direct no-suspend runtime helper validation requires a whole-build plan"
+	}
+	call, planned := a.plan.ResolveLoweredCallRecord(a.fn, direct)
+	if !planned || call.Target == nil || call.ExplicitStatusElided {
+		return "direct no-suspend runtime helper " + direct + " lacks an exact lowered-call fact"
+	}
+	target, planned := a.plan.FunctionPlan(call.Target)
+	if !planned || target.External != coro.Defined || target.Emission != coro.EmitPlain ||
+		target.Primary != coro.PrimaryPlain || target.FuncRep != coro.DirectPlain ||
+		target.Effect != coro.NoSuspend || target.Demand == coro.NoDemand ||
+		target.Exec&(coro.NeedsPreempt|coro.OpaqueExec) != 0 ||
+		a.allowImplicitNilFault && target.Exec.Contains(coro.MayUnwind) {
+		return "runtime helper " + direct + " is not one demanded direct no-suspend plain body"
 	}
 	return ""
 }

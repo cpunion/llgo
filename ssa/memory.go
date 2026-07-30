@@ -115,7 +115,7 @@ func (b Builder) Alloc(elem Type, heap bool) (ret Expr) {
 	prog := b.Prog
 	pkg := b.Pkg
 	size := SizeOf(prog, elem)
-	if !heap && prog.SizeOf(elem) > llabi.MaxStackVarSize {
+	if !heap && prog.LocalAllocExceedsNativeStack(elem) {
 		heap = true
 	}
 	if heap {
@@ -131,6 +131,31 @@ func (b Builder) Alloc(elem Type, heap bool) (ret Expr) {
 	}
 	ret.Type = prog.Pointer(elem)
 	return
+}
+
+// AllocZAs allocates one zero-initialized runtime-managed value while exposing
+// logicalHelper to the frontend runtime-call resolver. The physical target
+// remains runtime.AllocZ; the distinct logical identity lets whole-program
+// planning account for compiler-owned storage separately from a source Alloc.
+func (b Builder) AllocZAs(elem Type, logicalHelper string) (ret Expr) {
+	if logicalHelper == "" {
+		panic("AllocZAs requires a logical runtime helper identity")
+	}
+	prog := b.Prog
+	if prog.SizeOf(elem) == 0 {
+		return b.Pkg.moduleZeroSizedAlloc(elem)
+	}
+	ret = b.InlineCall(b.Pkg.rtFuncAs(logicalHelper, "AllocZ"), SizeOf(prog, elem))
+	ret.Type = prog.Pointer(elem)
+	return
+}
+
+// LocalAllocExceedsNativeStack is the shared decision used by helper planning
+// and final LLSSA emission. Keeping it here prevents a source-level non-heap
+// Alloc from acquiring an unplanned AllocZ call only after target layout is
+// known.
+func (p Program) LocalAllocExceedsNativeStack(elem Type) bool {
+	return p.SizeOf(elem) > llabi.MaxStackVarSize
 }
 
 // AllocU allocates uninitialized space for n*sizeof(elem) bytes.
@@ -164,6 +189,17 @@ func (b Builder) AllocaT(t Type) (ret Expr) {
 	prog := b.Prog
 	ret.impl = llvm.CreateAlloca(b.impl, t.ll)
 	ret.Type = prog.Pointer(t)
+	return
+}
+
+// AllocaZeroedT reserves zero-initialized typed storage without applying the
+// native-stack size limit used by Alloc. Callers must independently prove that
+// the allocation is not left on a fixed native stack. The stackless coroutine
+// lowering uses it in the ramp entry, before the initial suspend, so CoroSplit
+// necessarily incorporates every live allocation into the coroutine frame.
+func (b Builder) AllocaZeroedT(t Type) (ret Expr) {
+	ret = b.AllocaT(t)
+	b.zeroinit(ret, SizeOf(b.Prog, t))
 	return
 }
 
