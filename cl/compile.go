@@ -2083,6 +2083,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.TypeAssert:
 		options := p.frontendOptions()
 		if options.DebugTypeAssert {
+			// TODO: Inline the closure signature check used by concrete function assertions.
 			kind := "inlined"
 			if intf, ok := v.AssertedType.Underlying().(*types.Interface); ok && intf.NumMethods() != 0 {
 				kind = "not inlined"
