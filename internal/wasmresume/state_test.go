@@ -50,12 +50,22 @@ func TestLowerPrototypeExecutesDirectCallStateMachine(t *testing.T) {
 	builder.SetInsertPointAtEnd(calleeBlock)
 	builder.CreateRet(builder.CreateAdd(callee.Param(0), llvm.ConstInt(i32, 1, false), "sum"))
 
+	middle := llvm.AddFunction(mod, "middle", sig)
+	markFunction(ctx, middle)
+	middleBlock := ctx.AddBasicBlock(middle, "entry")
+	builder.SetInsertPointAtEnd(middleBlock)
+	first := builder.CreateCall(sig, callee, []llvm.Value{middle.Param(0)}, "first")
+	markCall(ctx, first)
+	second := builder.CreateCall(sig, callee, []llvm.Value{first}, "second")
+	markCall(ctx, second)
+	builder.CreateRet(builder.CreateMul(second, llvm.ConstInt(i32, 2, false), "middle.result"))
+
 	caller := llvm.AddFunction(mod, "caller", sig)
 	markFunction(ctx, caller)
 	callerBlock := ctx.AddBasicBlock(caller, "entry")
 	builder.SetInsertPointAtEnd(callerBlock)
 	before := builder.CreateAdd(caller.Param(0), llvm.ConstInt(i32, 2, false), "before")
-	call := builder.CreateCall(sig, callee, []llvm.Value{before}, "called")
+	call := builder.CreateCall(sig, middle, []llvm.Value{before}, "called")
 	markCall(ctx, call)
 	builder.CreateRet(builder.CreateMul(before, call, "result"))
 
@@ -63,10 +73,20 @@ func TestLowerPrototypeExecutesDirectCallStateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lowered) != 1 {
-		t.Fatalf("lowered states = %d, want 1", len(lowered))
+	if len(lowered) != 2 {
+		t.Fatalf("lowered states = %d, want 2", len(lowered))
 	}
-	harness := defineStateMachineHarness(mod, targetData, lowered[0], 5)
+	var root loweredState
+	for _, state := range lowered {
+		if state.layout.plan.function.Name() == "caller" {
+			root = state
+			break
+		}
+	}
+	if root.entry.IsNil() {
+		t.Fatal("caller state machine was not lowered")
+	}
+	harness := defineStateMachineHarness(mod, targetData, root, 5)
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify executable state machine: %v\n%s", err, mod.String())
 	}
@@ -82,8 +102,8 @@ func TestLowerPrototypeExecutesDirectCallStateMachine(t *testing.T) {
 
 	result := engine.RunFunction(harness, nil)
 	defer result.Dispose()
-	if got := result.Int(true); got != 56 {
-		t.Fatalf("state machine result = %d, want 56", got)
+	if got := result.Int(true); got != 126 {
+		t.Fatalf("state machine result = %d, want 126", got)
 	}
 }
 
@@ -223,13 +243,20 @@ func defineStateMachineHarness(
 	childStorage := llvm.AddGlobal(mod, childStorageType, "child.storage")
 	childStorage.SetInitializer(llvm.ConstNull(childStorageType))
 	childStorage.SetAlignment(16)
+	childOffset := llvm.AddGlobal(mod, i32, "child.offset")
+	childOffset.SetInitializer(llvm.ConstInt(i32, 0, false))
 
 	alloc := mod.NamedFunction(frameAllocName)
 	block := ctx.AddBasicBlock(alloc, "entry")
 	builder := ctx.NewBuilder()
 	defer builder.Dispose()
 	builder.SetInsertPointAtEnd(block)
-	builder.CreateRet(childStorage)
+	offset := builder.CreateLoad(i32, childOffset, "offset")
+	builder.CreateStore(
+		builder.CreateAdd(offset, llvm.ConstInt(i32, 256, false), ""),
+		childOffset,
+	)
+	builder.CreateRet(builder.CreateInBoundsGEP(i8, childStorage, []llvm.Value{offset}, "frame"))
 
 	free := mod.NamedFunction(frameFreeName)
 	block = ctx.AddBasicBlock(free, "entry")
