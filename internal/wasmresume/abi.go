@@ -30,6 +30,11 @@ const (
 	actionReturn      = 1
 )
 
+// StartSymbol returns the resumable start entry for a Go function symbol.
+func StartSymbol(function string) string {
+	return startEntryPrefix + function
+}
+
 type resumeABI struct {
 	ctx            llvm.Context
 	ptr            llvm.Type
