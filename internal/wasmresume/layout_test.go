@@ -107,3 +107,42 @@ func TestLayoutFramesKeepsDynamicAllocaAsPointer(t *testing.T) {
 		t.Fatalf("frame fields = %v, want dynamic alloca pointer at field 4", fields)
 	}
 }
+
+func TestLayoutFramesPreservesAllocaAlignment(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("aligned")
+	defer mod.Dispose()
+	targetData := llvm.NewTargetData("e-m:e-p:64:64-i64:64-n32:64-S128")
+	defer targetData.Dispose()
+
+	i32 := ctx.Int32Type()
+	ptr := llvm.PointerType(i32, 0)
+	calleeType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ptr}, false)
+	callee := llvm.AddFunction(mod, "callee", calleeType)
+	fn := llvm.AddFunction(mod, "caller", llvm.FunctionType(ctx.VoidType(), nil, false))
+	markFunction(ctx, fn)
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	local := builder.CreateAlloca(i32, "local")
+	local.SetAlignment(32)
+	call := builder.CreateCall(calleeType, callee, []llvm.Value{local}, "")
+	markCall(ctx, call)
+	builder.CreateRetVoid()
+
+	layouts, err := layoutFrames(mod, targetData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := layouts[0]
+	if layout.alignment != 32 {
+		t.Fatalf("frame alignment = %d, want 32", layout.alignment)
+	}
+	slot := layout.plan.slots[0]
+	offset := targetData.ElementOffset(layout.typ, layout.fieldIndex(slot.id))
+	if offset%32 != 0 {
+		t.Fatalf("aligned alloca offset = %d, want a multiple of 32", offset)
+	}
+}

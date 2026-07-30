@@ -23,6 +23,10 @@ const (
 	runtimeAllocRoot    = "github.com/goplus/llgo/runtime/internal/runtime.AllocRoot"
 	runtimeFreeRoot     = "github.com/goplus/llgo/runtime/internal/runtime.FreeRoot"
 	runtimeRunWasmMain  = "github.com/goplus/llgo/runtime/internal/runtime.RunWasmMain"
+	runtimeFrameAlloc   = "__llgo_wasm_resume_alloc"
+	runtimeDynamicAlloc = "__llgo_wasm_resume_alloc_dynamic"
+	runtimeFrameFree    = "__llgo_wasm_resume_free"
+	runtimeFrameClose   = "__llgo_wasm_resume_close"
 )
 
 // IsRuntimeABIImplementation reports functions which implement the resumable
@@ -34,8 +38,24 @@ func IsRuntimeABIImplementation(name string) bool {
 // IsNonSuspendingBoundary reports leaf runtime entry points which remain
 // callable without allocating a resumable frame.
 func IsNonSuspendingBoundary(name string) bool {
+	switch name {
+	case "github.com/goplus/llgo/runtime/internal/runtime.ClearThreadDefer",
+		"github.com/goplus/llgo/runtime/internal/runtime.FreeDeferNode",
+		"github.com/goplus/llgo/runtime/internal/runtime.GetThreadDefer",
+		"github.com/goplus/llgo/runtime/internal/runtime.Goexit",
+		"github.com/goplus/llgo/runtime/internal/runtime.Panic",
+		"github.com/goplus/llgo/runtime/internal/runtime.Recover",
+		"github.com/goplus/llgo/runtime/internal/runtime.Rethrow",
+		"github.com/goplus/llgo/runtime/internal/runtime.SetThreadDefer",
+		"runtime.Goexit":
+		return true
+	}
 	return (IsRuntimeABIImplementation(name) && name != SuspendSymbol) ||
 		name == runtimeAllocRoot ||
 		name == runtimeFreeRoot ||
-		name == runtimeRunWasmMain
+		name == runtimeRunWasmMain ||
+		name == runtimeFrameAlloc ||
+		name == runtimeDynamicAlloc ||
+		name == runtimeFrameFree ||
+		name == runtimeFrameClose
 }

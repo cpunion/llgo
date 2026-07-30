@@ -22,7 +22,7 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-func spillValue(ctx llvm.Context, targetData llvm.TargetData, value, field llvm.Value) error {
+func spillValue(ctx llvm.Context, value, field llvm.Value) error {
 	if value.IsAInstruction().IsNil() {
 		replaceValueUsesWithLoads(ctx, value, field, llvm.Value{})
 		return nil
@@ -31,17 +31,10 @@ func spillValue(ctx llvm.Context, targetData llvm.TargetData, value, field llvm.
 		if _, dynamic := persistentSlotType(value, slotAlloca); dynamic {
 			return fmt.Errorf("dynamic alloca %q requires separate frame storage", value.Name())
 		}
-		if value.Alignment() > targetData.ABITypeAlignment(value.AllocatedType()) {
-			return fmt.Errorf("over-aligned alloca %q is not supported", value.Name())
-		}
 		value.ReplaceAllUsesWith(field)
 		value.EraseFromParentAsInstruction()
 		return nil
 	}
-	if value.InstructionOpcode() == llvm.Call {
-		return fmt.Errorf("call result %q must be stored by its resume block", value.Name())
-	}
-
 	builder := ctx.NewBuilder()
 	defer builder.Dispose()
 	if value.InstructionOpcode() == llvm.PHI {

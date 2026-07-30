@@ -39,8 +39,8 @@ func TestEmitLeafEntriesLoadsParametersAndStoresResult(t *testing.T) {
 
 	ir := mod.String()
 	for _, want := range []string{
-		`@__llgo_wasm_resume_desc.leaf = constant { ptr, i32, i32 }`,
-		`{ ptr @__llgo_wasm_resume.leaf, i32 20, i32 4 }`,
+		`@__llgo_wasm_resume_desc.leaf = constant { ptr, i32, i32, i32, i32 }`,
+		`{ ptr @__llgo_wasm_resume.leaf, i32 20, i32 4, i32 0, i32 0 }`,
 		`define internal i8 @__llgo_wasm_resume.leaf(ptr %0, ptr %1)`,
 		`load i32, ptr %2`,
 		`call i32 @leaf(i32 %input)`,

@@ -41,7 +41,7 @@ func emitLeafEntriesForLayouts(
 	var lowered []loweredLeaf
 	for _, layout := range layouts {
 		fn := layout.plan.function
-		if fn.IsDeclaration() || len(layout.plan.calls) != 0 {
+		if fn.IsDeclaration() || needsStateMachine(layout) {
 			continue
 		}
 		entry, descriptor, err := abi.defineEntryAndDescriptor(mod, layout)

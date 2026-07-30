@@ -485,7 +485,7 @@ func defineStateMachineHarness(
 	return run
 }
 
-func TestLowerPrototypeRejectsDynamicAlloca(t *testing.T) {
+func TestLowerPrototypeSupportsDynamicAlloca(t *testing.T) {
 	ctx := llvm.NewContext()
 	defer ctx.Dispose()
 	mod := ctx.NewModule("dynamic")
@@ -508,9 +508,12 @@ func TestLowerPrototypeRejectsDynamicAlloca(t *testing.T) {
 	markCall(ctx, call)
 	builder.CreateRetVoid()
 
-	if _, err := lowerPrototype(mod, targetData); err == nil ||
-		!strings.Contains(err.Error(), "dynamic alloca") {
-		t.Fatalf("lowerPrototype error = %v", err)
+	if _, err := lowerPrototype(mod, targetData); err != nil {
+		t.Fatal(err)
+	}
+	if ir := mod.String(); strings.Contains(ir, "%local = alloca") ||
+		!strings.Contains(ir, "@__llgo_wasm_resume_alloc_dynamic") {
+		t.Fatalf("dynamic alloca was not lowered:\n%s", ir)
 	}
 }
 
