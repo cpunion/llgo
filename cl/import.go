@@ -434,6 +434,8 @@ func (p *context) initLink(line string, prefix int, export bool, f func(inPkgNam
 	}
 }
 
+// recvTypeName asserts the post-typecheck receiver invariant. Syntax preload
+// uses recvTypeNameInfo so malformed declarations can be skipped safely.
 func recvTypeName(typ ast.Expr) string {
 	name, _, ok := recvTypeNameInfo(typ)
 	if !ok {
@@ -473,6 +475,8 @@ func recvTypeNameInfo(typ ast.Expr) (name string, pointer bool, ok bool) {
 // fullName:
 // - func: pkg.name
 // - method: pkg.(T).name, pkg.(*T).name
+// astFuncName asserts the post-typecheck declaration invariant. Syntax preload
+// uses astFuncNameOK so malformed declarations can be skipped safely.
 func astFuncName(pkgPath string, fn *ast.FuncDecl) (fullName, inPkgName string) {
 	fullName, inPkgName, ok := astFuncNameOK(pkgPath, fn)
 	if !ok {

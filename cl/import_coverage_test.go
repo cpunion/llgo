@@ -272,6 +272,69 @@ func TestAstAndTypesFuncNameCoverage(t *testing.T) {
 	}
 }
 
+func TestReceiverNameHelpersRejectMalformedSyntax(t *testing.T) {
+	invalidBase := &ast.IndexExpr{
+		X:     &ast.SelectorExpr{X: &ast.Ident{Name: "pkg"}, Sel: &ast.Ident{Name: "T"}},
+		Index: &ast.Ident{Name: "P"},
+	}
+	if name, pointer, ok := recvTypeNameInfo(invalidBase); ok || name != "" || pointer {
+		t.Fatalf("recvTypeNameInfo(invalid indexed base) = (%q, %v, %v), want empty false false", name, pointer, ok)
+	}
+	if name, pointer, ok := recvTypeNameInfo(&ast.ArrayType{Elt: &ast.Ident{Name: "int"}}); ok || name != "" || pointer {
+		t.Fatalf("recvTypeNameInfo(array) = (%q, %v, %v), want empty false false", name, pointer, ok)
+	}
+	indexed := &ast.IndexListExpr{
+		X:       &ast.ParenExpr{X: &ast.Ident{Name: "G"}},
+		Indices: []ast.Expr{&ast.Ident{Name: "P"}, &ast.Ident{Name: "Q"}},
+	}
+	if name, pointer, ok := recvTypeNameInfo(indexed); !ok || name != "G" || pointer {
+		t.Fatalf("recvTypeNameInfo(index list) = (%q, %v, %v), want G false true", name, pointer, ok)
+	}
+
+	invalidDecls := []struct {
+		name string
+		fn   *ast.FuncDecl
+	}{
+		{name: "nil declaration"},
+		{name: "nil name", fn: &ast.FuncDecl{}},
+		{name: "empty receiver list", fn: &ast.FuncDecl{
+			Name: &ast.Ident{Name: "M"}, Recv: &ast.FieldList{},
+		}},
+		{name: "nil receiver field", fn: &ast.FuncDecl{
+			Name: &ast.Ident{Name: "M"}, Recv: &ast.FieldList{List: []*ast.Field{nil}},
+		}},
+		{name: "invalid receiver type", fn: &ast.FuncDecl{
+			Name: &ast.Ident{Name: "M"},
+			Recv: &ast.FieldList{List: []*ast.Field{{Type: &ast.ArrayType{
+				Elt: &ast.Ident{Name: "int"},
+			}}}},
+		}},
+	}
+	for _, tt := range invalidDecls {
+		t.Run(tt.name, func(t *testing.T) {
+			if full, inPkg, ok := astFuncNameOK("example.com/p", tt.fn); ok || full != "" || inPkg != "" {
+				t.Fatalf("astFuncNameOK = (%q, %q, %v), want empty empty false", full, inPkg, ok)
+			}
+		})
+	}
+
+	expectPanic := func(t *testing.T, call func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatal("call did not panic")
+			}
+		}()
+		call()
+	}
+	t.Run("receiver invariant wrapper", func(t *testing.T) {
+		expectPanic(t, func() { recvTypeName(invalidBase) })
+	})
+	t.Run("function invariant wrapper", func(t *testing.T) {
+		expectPanic(t, func() { astFuncName("example.com/p", nil) })
+	})
+}
+
 func TestParsePkgSyntaxCollectsLinknames(t *testing.T) {
 	cases := []struct {
 		name      string
