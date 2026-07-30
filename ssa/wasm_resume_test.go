@@ -21,6 +21,8 @@ package ssa
 import (
 	"strings"
 	"testing"
+
+	"github.com/goplus/llgo/internal/wasmresume"
 )
 
 func TestWasmResumeABIInventoriesGoCalls(t *testing.T) {
@@ -42,15 +44,15 @@ func TestWasmResumeABIInventoriesGoCalls(t *testing.T) {
 	b.Return()
 
 	ir := pkg.String()
-	if got := strings.Count(ir, "!"+wasmResumeCallMetadata); got != 2 {
+	if got := strings.Count(ir, "!"+wasmresume.CallMetadata); got != 2 {
 		t.Fatalf("resumable call marker count = %d, want 2:\n%s", got, ir)
 	}
-	if !strings.Contains(ir, `"`+wasmResumeFunctionAttr+`"="1"`) {
+	if !strings.Contains(ir, `"`+wasmresume.FunctionAttribute+`"="1"`) {
 		t.Fatalf("Go functions are not marked for resumable lowering:\n%s", ir)
 	}
 	var foundCCall bool
 	for _, line := range strings.Split(ir, "\n") {
-		if strings.Contains(line, "call void @cFn") && strings.Contains(line, wasmResumeCallMetadata) {
+		if strings.Contains(line, "call void @cFn") && strings.Contains(line, wasmresume.CallMetadata) {
 			t.Fatalf("C call was marked resumable: %s", line)
 		}
 		if strings.Contains(line, "call void @cFn") {
@@ -91,7 +93,7 @@ func TestWasmResumeABIDoesNotChangeDefaultOrNativeIR(t *testing.T) {
 			b.Return()
 
 			ir := pkg.String()
-			if strings.Contains(ir, wasmResumeFunctionAttr) || strings.Contains(ir, wasmResumeCallMetadata) {
+			if strings.Contains(ir, wasmresume.FunctionAttribute) || strings.Contains(ir, wasmresume.CallMetadata) {
 				t.Fatalf("inactive resumable ABI changed IR:\n%s", ir)
 			}
 		})
