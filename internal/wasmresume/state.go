@@ -1,0 +1,302 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package wasmresume
+
+import (
+	"fmt"
+
+	"github.com/xgo-dev/llvm"
+)
+
+const (
+	frameAllocName = "__llgo_wasm_resume_alloc"
+	frameFreeName  = "__llgo_wasm_resume_free"
+)
+
+type loweredState struct {
+	layout     frameLayout
+	entry      llvm.Value
+	descriptor llvm.Value
+}
+
+func lowerPrototype(mod llvm.Module, targetData llvm.TargetData) ([]loweredState, error) {
+	layouts, err := layoutFrames(mod, targetData)
+	if err != nil {
+		return nil, err
+	}
+	for _, layout := range layouts {
+		if layout.plan.function.IsDeclaration() || len(layout.plan.calls) == 0 {
+			continue
+		}
+		if err := validateStateLayout(layout, targetData); err != nil {
+			return nil, fmt.Errorf("%s: %w", layout.plan.function.Name(), err)
+		}
+	}
+
+	abi := newResumeABI(mod.Context(), targetData)
+	if _, err := emitLeafEntriesForLayouts(mod, abi, layouts); err != nil {
+		return nil, err
+	}
+	var lowered []loweredState
+	for _, layout := range layouts {
+		if layout.plan.function.IsDeclaration() || len(layout.plan.calls) == 0 {
+			continue
+		}
+		entry, descriptor, err := abi.defineEntryAndDescriptor(mod, layout)
+		if err != nil {
+			return nil, err
+		}
+		lowered = append(lowered, loweredState{
+			layout: layout, entry: entry, descriptor: descriptor,
+		})
+	}
+	for i := range lowered {
+		if err := lowerDirectStateMachine(mod, targetData, abi, &lowered[i]); err != nil {
+			return nil, err
+		}
+	}
+	return lowered, nil
+}
+
+func validateStateLayout(layout frameLayout, targetData llvm.TargetData) error {
+	for _, slot := range layout.plan.slots {
+		if slot.kind != slotAlloca {
+			continue
+		}
+		if slot.dynamic {
+			return fmt.Errorf("dynamic alloca %q is not supported", slot.value.Name())
+		}
+		if slot.value.Alignment() > targetData.ABITypeAlignment(slot.value.AllocatedType()) {
+			return fmt.Errorf("over-aligned alloca %q is not supported", slot.value.Name())
+		}
+	}
+	for _, site := range layout.plan.calls {
+		call := site.call
+		if call.CalledValue().IsAFunction().IsNil() {
+			return fmt.Errorf("resume call %d is indirect", site.id)
+		}
+		if call.CalledFunctionType().IsFunctionVarArg() {
+			return fmt.Errorf("resume call %d is variadic", site.id)
+		}
+		if llvm.NextInstruction(call).IsNil() {
+			return fmt.Errorf("resume call %d has no continuation", site.id)
+		}
+	}
+	return nil
+}
+
+func lowerDirectStateMachine(
+	mod llvm.Module, targetData llvm.TargetData, abi resumeABI, lowered *loweredState,
+) error {
+	layout := lowered.layout
+	fn := layout.plan.function
+	ctx := mod.Context()
+
+	var blocks []llvm.BasicBlock
+	var returns []llvm.Value
+	for block := fn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		blocks = append(blocks, block)
+		for instr := block.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
+			if !instr.IsAReturnInst().IsNil() {
+				returns = append(returns, instr)
+			}
+		}
+	}
+	if len(blocks) == 0 {
+		return fmt.Errorf("%s: resumable definition has no body", fn.Name())
+	}
+	originalEntry := blocks[0]
+
+	dispatch := ctx.AddBasicBlock(lowered.entry, "dispatch")
+	for _, block := range blocks {
+		block.RemoveFromParent()
+		llvm.AppendExistingBasicBlock(lowered.entry, block)
+	}
+
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(dispatch)
+	rawFrame := lowered.entry.Param(1)
+	fields := make(map[uint32]llvm.Value, len(layout.plan.slots))
+	for _, slot := range layout.plan.slots {
+		fields[slot.id] = builder.CreateStructGEP(
+			layout.typ, rawFrame, layout.fieldIndex(slot.id), "",
+		)
+	}
+
+	for _, slot := range layout.plan.slots {
+		switch slot.kind {
+		case slotFunctionResult:
+			continue
+		case slotValue:
+			if slot.value.InstructionOpcode() == llvm.Call {
+				continue
+			}
+		}
+		if err := spillValue(ctx, targetData, slot.value, fields[slot.id]); err != nil {
+			return fmt.Errorf("%s: %w", fn.Name(), err)
+		}
+	}
+
+	continuations := make(map[uint32]llvm.BasicBlock, len(layout.plan.calls))
+	for _, site := range layout.plan.calls {
+		continuation, err := splitBlockAfter(ctx, site.call, fmt.Sprintf("resume.%d", site.id))
+		if err != nil {
+			return fmt.Errorf("%s: call %d: %w", fn.Name(), site.id, err)
+		}
+		continuations[site.id] = continuation
+		if err := lowerDirectCall(
+			mod, abi, layout, fields, lowered.entry, site, continuation,
+		); err != nil {
+			return fmt.Errorf("%s: call %d: %w", fn.Name(), site.id, err)
+		}
+	}
+
+	for _, ret := range returns {
+		builder.SetInsertPointBefore(ret)
+		if layout.plan.resultSlot != 0 {
+			builder.CreateStore(ret.Operand(0), fields[layout.plan.resultSlot])
+		}
+		next := builder.CreateRet(llvm.ConstInt(ctx.Int8Type(), actionReturn, false))
+		next.InstructionSetDebugLoc(ret.InstructionDebugLoc())
+		ret.EraseFromParentAsInstruction()
+	}
+
+	invalid := ctx.AddBasicBlock(lowered.entry, "invalid-pc")
+	builder.SetInsertPointAtEnd(invalid)
+	builder.CreateUnreachable()
+	builder.SetInsertPointAtEnd(dispatch)
+	pcField := builder.CreateStructGEP(layout.typ, rawFrame, 2, "")
+	pc := builder.CreateLoad(ctx.Int32Type(), pcField, "pc")
+	switchPC := builder.CreateSwitch(pc, invalid, len(continuations)+1)
+	switchPC.AddCase(llvm.ConstInt(ctx.Int32Type(), 0, false), originalEntry)
+	for _, site := range layout.plan.calls {
+		switchPC.AddCase(
+			llvm.ConstInt(ctx.Int32Type(), uint64(site.id), false),
+			continuations[site.id],
+		)
+	}
+	return nil
+}
+
+func lowerDirectCall(
+	mod llvm.Module,
+	abi resumeABI,
+	parentLayout frameLayout,
+	parentFields map[uint32]llvm.Value,
+	entry llvm.Value,
+	site callSite,
+	continuation llvm.BasicBlock,
+) error {
+	ctx := mod.Context()
+	call := site.call
+	callBlock := call.InstructionParent()
+	callee := call.CalledValue()
+	descriptor := mod.NamedGlobal(descriptorPrefix + callee.Name())
+	if descriptor.IsNil() {
+		descriptor = llvm.AddGlobal(mod, abi.descriptorType, descriptorPrefix+callee.Name())
+	}
+
+	alloc := declareFrameAllocator(mod, abi)
+	free := declareFrameFree(mod, abi)
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointBefore(call)
+
+	sizeField := builder.CreateStructGEP(abi.descriptorType, descriptor, 1, "")
+	alignField := builder.CreateStructGEP(abi.descriptorType, descriptor, 2, "")
+	size := builder.CreateLoad(abi.uintptrType, sizeField, "child.size")
+	align := builder.CreateLoad(abi.uintptrType, alignField, "child.align")
+	child := builder.CreateCall(alloc.GlobalValueType(), alloc, []llvm.Value{size, align}, "child")
+	builder.CreateIntrinsic(ctx.VoidType(), llvm.LookupIntrinsicID("llvm.memset"), []llvm.Value{
+		child,
+		llvm.ConstInt(ctx.Int8Type(), 0, false),
+		size,
+		llvm.ConstInt(ctx.Int1Type(), 0, false),
+	}, "")
+
+	childType := callFramePrefix(ctx, call.CalledFunctionType())
+	builder.CreateStore(entry.Param(1), builder.CreateStructGEP(childType, child, 0, ""))
+	builder.CreateStore(descriptor, builder.CreateStructGEP(childType, child, 1, ""))
+	builder.CreateStore(
+		llvm.ConstInt(ctx.Int32Type(), 0, false),
+		builder.CreateStructGEP(childType, child, 2, ""),
+	)
+	for i := 0; i < call.CalledFunctionType().ParamTypesCount(); i++ {
+		builder.CreateStore(
+			call.Operand(i),
+			builder.CreateStructGEP(childType, child, frameHeaderFields+i, ""),
+		)
+	}
+	builder.CreateStore(
+		llvm.ConstInt(ctx.Int32Type(), uint64(site.id), false),
+		builder.CreateStructGEP(parentLayout.typ, entry.Param(1), 2, ""),
+	)
+	contextTop := builder.CreateStructGEP(abi.contextType, entry.Param(0), 0, "")
+	builder.CreateStore(child, contextTop)
+
+	builder.SetInsertPointBefore(continuation.FirstInstruction())
+	returnedField := builder.CreateStructGEP(abi.contextType, entry.Param(0), 1, "")
+	returned := builder.CreateLoad(abi.ptr, returnedField, "returned")
+	builder.CreateStore(llvm.ConstNull(abi.ptr), returnedField)
+	if site.resultSlot != 0 {
+		resultField := frameHeaderFields + call.CalledFunctionType().ParamTypesCount()
+		result := builder.CreateLoad(
+			call.Type(), builder.CreateStructGEP(childType, returned, resultField, ""), "call.result",
+		)
+		builder.CreateStore(result, parentFields[site.resultSlot])
+		replaceValueUsesWithLoads(ctx, call, parentFields[site.resultSlot], llvm.Value{})
+	}
+	builder.CreateCall(free.GlobalValueType(), free, []llvm.Value{returned}, "")
+
+	call.EraseFromParentAsInstruction()
+	terminator := callBlock.LastInstruction()
+	builder.SetInsertPointBefore(terminator)
+	builder.CreateRet(llvm.ConstInt(ctx.Int8Type(), actionContinue, false))
+	terminator.EraseFromParentAsInstruction()
+	return nil
+}
+
+func callFramePrefix(ctx llvm.Context, typ llvm.Type) llvm.Type {
+	ptr := llvm.PointerType(ctx.Int8Type(), 0)
+	fields := []llvm.Type{ptr, ptr, ctx.Int32Type()}
+	fields = append(fields, typ.ParamTypes()...)
+	if result := typ.ReturnType(); result.TypeKind() != llvm.VoidTypeKind {
+		fields = append(fields, result)
+	}
+	return ctx.StructType(fields, false)
+}
+
+func declareFrameAllocator(mod llvm.Module, abi resumeABI) llvm.Value {
+	fn := mod.NamedFunction(frameAllocName)
+	if fn.IsNil() {
+		fn = llvm.AddFunction(mod, frameAllocName, llvm.FunctionType(
+			abi.ptr, []llvm.Type{abi.uintptrType, abi.uintptrType}, false,
+		))
+	}
+	return fn
+}
+
+func declareFrameFree(mod llvm.Module, abi resumeABI) llvm.Value {
+	fn := mod.NamedFunction(frameFreeName)
+	if fn.IsNil() {
+		fn = llvm.AddFunction(mod, frameFreeName, llvm.FunctionType(
+			abi.ctx.VoidType(), []llvm.Type{abi.ptr}, false,
+		))
+	}
+	return fn
+}
