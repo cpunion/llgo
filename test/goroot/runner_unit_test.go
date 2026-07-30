@@ -1242,6 +1242,62 @@ func TestCheckExpectedErrorsScopesImportAlias(t *testing.T) {
 	}
 }
 
+func TestCheckExpectedErrorsScopesPackageClauseAliases(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		output func(string) string
+		wantOK bool
+	}{
+		{
+			name:   "missing package clause",
+			source: "type MyInt int32 // ERROR \"package statement must be first|package clause\"\n",
+			output: func(file string) string {
+				return file + ":1: expected 'package', found 'type'\n" +
+					file + ":1: expected ';', found int32"
+			},
+			wantOK: true,
+		},
+		{
+			name:   "different declaration",
+			source: "type Other int32 // ERROR \"package statement must be first|package clause\"\n",
+			output: func(file string) string {
+				return file + ":1: expected 'package', found 'type'\n" +
+					file + ":1: expected ';', found int32"
+			},
+		},
+		{
+			name:   "malformed package clause",
+			source: "package% // ERROR \"unexpected %|package name must be an identifier|after package clause|expected declaration\"\n",
+			output: func(file string) string {
+				return file + ":1: expected 'IDENT', found '%'\n" +
+					file + ":1: expected ';', found 'EOF'"
+			},
+			wantOK: true,
+		},
+		{
+			name:   "different malformed token",
+			source: "package@ // ERROR \"unexpected %|package name must be an identifier|after package clause|expected declaration\"\n",
+			output: func(file string) string {
+				return file + ":1: expected 'IDENT', found '%'\n" +
+					file + ":1: expected ';', found 'EOF'"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "case.go")
+			if err := os.WriteFile(file, []byte(tt.source), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := checkExpectedErrors(tt.output(file), file, "case.go")
+			if tt.wantOK && err != nil || !tt.wantOK && err == nil {
+				t.Fatalf("err=%v, wantOK=%v", err, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestDiscardPairedParserDiagnosticsIsExactMultiset(t *testing.T) {
 	dir := t.TempDir()
 	fileA := filepath.Join(dir, "a", "case.go")
