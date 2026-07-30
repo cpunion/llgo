@@ -18,6 +18,13 @@
 // WebAssembly resumable call ABI.
 package wasmresume
 
+// SuspendCurrent yields the active resumable frame to its scheduler. The
+// compiler replaces calls to SuspendCurrent with a frame-PC transition; no
+// function body is linked into the final WebAssembly module.
+func SuspendCurrent() {
+	panic("wasmresume: SuspendCurrent was not lowered")
+}
+
 // Action tells Context what a resume entry did.
 type Action uint8
 

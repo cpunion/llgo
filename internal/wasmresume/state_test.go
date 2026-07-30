@@ -171,7 +171,7 @@ func TestLowerPrototypeBuildsDirectCallStateMachine(t *testing.T) {
 	}
 }
 
-func TestLowerPrototypeEmitsWasmObject(t *testing.T) {
+func TestLowerEmitsWasmObject(t *testing.T) {
 	llvm.InitializeAllTargetInfos()
 	llvm.InitializeAllTargets()
 	llvm.InitializeAllTargetMCs()
@@ -217,7 +217,7 @@ func TestLowerPrototypeEmitsWasmObject(t *testing.T) {
 			markCall(ctx, call)
 			builder.CreateRet(call)
 
-			if _, err := lowerPrototype(mod, targetData); err != nil {
+			if err := Lower(mod, targetData); err != nil {
 				t.Fatal(err)
 			}
 			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
@@ -232,6 +232,21 @@ func TestLowerPrototypeEmitsWasmObject(t *testing.T) {
 				t.Fatalf("%s object does not have the WebAssembly header", triple)
 			}
 		})
+	}
+}
+
+func TestLowerRejectsNonWasmTarget(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("native")
+	defer mod.Dispose()
+	mod.SetTarget("aarch64-unknown-linux-gnu")
+	targetData := llvm.NewTargetData("e-m:e-p:64:64-i64:64-n32:64-S128")
+	defer targetData.Dispose()
+
+	if err := Lower(mod, targetData); err == nil ||
+		!strings.Contains(err.Error(), "is not WebAssembly") {
+		t.Fatalf("Lower error = %v", err)
 	}
 }
 
@@ -281,6 +296,8 @@ func TestLowerPrototypeExecutesIndirectStart(t *testing.T) {
 	ptr := llvm.PointerType(ctx.Int8Type(), 0)
 	startType := llvm.FunctionType(ptr, []llvm.Type{ptr, i32}, false)
 	start := llvm.AddFunction(mod, StartSymbol(callee.Name()), startType)
+	suspend := llvm.AddFunction(mod, SuspendSymbol, llvm.FunctionType(ctx.VoidType(), nil, false))
+	markFunction(ctx, suspend)
 	callerType := llvm.FunctionType(i32, []llvm.Type{ptr, i32}, false)
 	caller := llvm.AddFunction(mod, "caller", callerType)
 	markFunction(ctx, caller)
@@ -290,6 +307,8 @@ func TestLowerPrototypeExecutesIndirectStart(t *testing.T) {
 	markCall(ctx, dynamicCall)
 	constantCall := builder.CreateCall(sig, start, []llvm.Value{dynamicCall}, "constant")
 	markCall(ctx, constantCall)
+	suspendCall := builder.CreateCall(suspend.GlobalValueType(), suspend, nil, "")
+	markCall(ctx, suspendCall)
 	builder.CreateRet(builder.CreateMul(constantCall, llvm.ConstInt(i32, 2, false), "result"))
 
 	lowered, err := lowerPrototype(mod, targetData)
@@ -425,9 +444,10 @@ func defineStateMachineHarness(
 		abi.ptr, builder.CreateStructGEP(abi.descriptorType, descriptor, 0, ""), "resume.entry",
 	)
 	action := builder.CreateCall(abi.entryType, resume, []llvm.Value{context, top}, "action")
-	switchAction := builder.CreateSwitch(action, failedBlock, 2)
+	switchAction := builder.CreateSwitch(action, failedBlock, 3)
 	switchAction.AddCase(llvm.ConstInt(i8, actionContinue, false), loopBlock)
 	switchAction.AddCase(llvm.ConstInt(i8, actionReturn, false), popBlock)
+	switchAction.AddCase(llvm.ConstInt(i8, actionSuspend, false), loopBlock)
 
 	builder.SetInsertPointAtEnd(popBlock)
 	parent := builder.CreateLoad(
