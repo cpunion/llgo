@@ -24,6 +24,7 @@ import (
 
 const (
 	resumeEntryPrefix = "__llgo_wasm_resume."
+	startEntryPrefix  = "__llgo_wasm_start."
 	descriptorPrefix  = "__llgo_wasm_resume_desc."
 	actionContinue    = 0
 	actionReturn      = 1
