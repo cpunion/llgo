@@ -158,6 +158,14 @@ func (p Program) LocalAllocExceedsNativeStack(elem Type) bool {
 	return p.SizeOf(elem) > llabi.MaxStackVarSize
 }
 
+// LocalGoTypeExceedsNativeStack is the pre-LLVM form of
+// LocalAllocExceedsNativeStack. It keeps helper inventory and coroutine
+// planning independent of runtime LLVM type materialization.
+func (p Program) LocalGoTypeExceedsNativeStack(elem types.Type) bool {
+	size := p.PhysicalSizeOfGoType(elem)
+	return size < 0 || uint64(size) > llabi.MaxStackVarSize
+}
+
 // AllocU allocates uninitialized space for n*sizeof(elem) bytes.
 func (b Builder) AllocU(elem Type, n ...int64) (ret Expr) {
 	prog := b.Prog

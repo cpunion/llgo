@@ -25,6 +25,12 @@ func TestAllocLargeLocalOnHeap(t *testing.T) {
 	b := pkg.NewFunc("main", NoArgsNoRet, InGo).MakeBody(1)
 	small := prog.Type(types.NewArray(types.Typ[types.Byte], int64(llabi.MaxStackVarSize)), InGo)
 	large := prog.Type(types.NewArray(types.Typ[types.Byte], int64(llabi.MaxStackVarSize+1)), InGo)
+	if prog.LocalGoTypeExceedsNativeStack(small.RawType()) {
+		t.Fatal("Go-layout local at the explicit stack limit was classified as oversized")
+	}
+	if !prog.LocalGoTypeExceedsNativeStack(large.RawType()) {
+		t.Fatal("Go-layout local above the explicit stack limit was not classified as oversized")
+	}
 	b.Alloc(small, false)
 	b.Alloc(large, false)
 	b.Return()

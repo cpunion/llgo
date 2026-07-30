@@ -1301,7 +1301,7 @@ func coroAllocationUsesManagedStorage(ctx *context, alloc *ssa.Alloc) bool {
 		return false
 	}
 	pointer, ok := types.Unalias(alloc.Type()).(*types.Pointer)
-	return ok && ctx.prog.LocalAllocExceedsNativeStack(ctx.type_(pointer.Elem(), llssa.InGo))
+	return ok && ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(pointer.Elem()))
 }
 
 // emissionIndexNeedsManagedArrayTemporary mirrors Builder.Index's hidden
@@ -1320,7 +1320,7 @@ func emissionIndexNeedsManagedArrayTemporary(ctx *context, index *ssa.Index) boo
 	case *ssa.Const, *ssa.UnOp:
 		return false
 	default:
-		return ctx.prog.LocalAllocExceedsNativeStack(ctx.type_(index.X.Type(), llssa.InGo))
+		return ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(index.X.Type()))
 	}
 }
 
@@ -1330,7 +1330,7 @@ func emissionIndexNeedsManagedArrayTemporary(ctx *context, index *ssa.Index) boo
 // edge and is elided for every non-await control recipe.
 func emissionCallNeedsManagedCoroResultSlot(ctx *context, call *ssa.Call) bool {
 	return ctx != nil && ctx.prog != nil && call != nil && call.Type() != nil &&
-		ctx.prog.LocalAllocExceedsNativeStack(ctx.type_(call.Type(), llssa.InGo))
+		ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(call.Type()))
 }
 
 func coroRuntimeHelperTargetName(logicalName string) string {
