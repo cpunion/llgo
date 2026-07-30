@@ -1033,6 +1033,78 @@ var? // ERROR "invalid character U\+003F '\?'"
 	})
 }
 
+func TestCheckExpectedErrorsScopesMalformedReceiverRecovery(t *testing.T) {
+	const primary = "syntax error: unexpected name u, expected ("
+	secondaries := []string{
+		"expected channel type",
+		"expected '(', found u",
+		"expected '(', found 'EOF'",
+		"expected ')', found 'EOF'",
+		"expected ';', found 'EOF'",
+		"expected 'IDENT', found 'EOF'",
+		"expected ']', found 'EOF'",
+		"expected '}', found 'EOF'",
+		"expected operand, found 'EOF'",
+		"expected type, found 'EOF'",
+		"missing ',' in parameter list",
+		"array length (func() literal) (value of type func()) must be constant",
+		"<-chan [(func() literal)](ast: *ast.BadExpr) (type) is not an expression",
+	}
+	outputFor := func(file string) string {
+		lines := []string{file + ":2: " + primary}
+		for _, secondary := range secondaries {
+			lines = append(lines, file+":2: "+secondary)
+		}
+		return strings.Join(lines, "\n")
+	}
+	tests := []struct {
+		name    string
+		source  string
+		extra   string
+		wantOK  bool
+		wantErr string
+	}{
+		{
+			name: "exact source",
+			source: `package e
+func([<-chan<-[func u){go // ERROR "unexpected name u"
+`,
+			wantOK: true,
+		},
+		{
+			name: "different source",
+			source: `package e
+func([<-chan<-[func v){go // ERROR "unexpected name u"
+`,
+			wantErr: "expected channel type",
+		},
+		{
+			name: "unrelated diagnostic",
+			source: `package e
+func([<-chan<-[func u){go // ERROR "unexpected name u"
+`,
+			extra:   "\ncase.go:2: unrelated diagnostic",
+			wantErr: "unrelated diagnostic",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "case.go")
+			if err := os.WriteFile(file, []byte(tt.source), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			extra := strings.ReplaceAll(tt.extra, "case.go", file)
+			err := checkExpectedErrors(outputFor(file)+extra, file, "case.go")
+			if tt.wantOK && err != nil {
+				t.Fatalf("err=%v, want success", err)
+			}
+			if !tt.wantOK && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("err=%v, want failure containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParserRecoverySourceCode(t *testing.T) {
 	tests := []struct {
 		name   string
