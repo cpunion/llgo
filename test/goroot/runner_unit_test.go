@@ -950,6 +950,65 @@ func foo() {
 	}
 }
 
+func TestCheckExpectedErrorsDiscardsMalformedSelectorRecovery(t *testing.T) {
+	const (
+		primary = "syntax error: unexpected literal .3, expected name or ("
+		source  = `package p
+func f() {
+	g(f..3) // ERROR "unexpected literal \.3, expected name or \("
+}
+`
+	)
+	secondaries := []string{
+		"expected selector or type assertion, found .3",
+		"undefined: g",
+		"f._ undefined (type func() has no field or method _)",
+	}
+	output := func(file string, line int, messages ...string) string {
+		var lines []string
+		for _, message := range messages {
+			lines = append(lines, fmt.Sprintf("%s:%d: %s", file, line, message))
+		}
+		return strings.Join(lines, "\n") + "\n"
+	}
+	writeSource := func(t *testing.T, contents string) string {
+		t.Helper()
+		file := filepath.Join(t.TempDir(), "case.go")
+		if err := os.WriteFile(file, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return file
+	}
+
+	file := writeSource(t, source)
+	messages := append([]string{primary}, secondaries...)
+	if err := checkExpectedErrors(output(file, 3, messages...), file, "case.go"); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("wrong source shape", func(t *testing.T) {
+		wrongFile := writeSource(t, strings.Replace(source, "g(f..3)", "h(f..3)", 1))
+		err := checkExpectedErrors(output(wrongFile, 3, messages...), wrongFile, "case.go")
+		if err == nil || !strings.Contains(err.Error(), secondaries[0]) {
+			t.Fatalf("wrong source shape discarded recovery: %v", err)
+		}
+	})
+
+	t.Run("missing primary", func(t *testing.T) {
+		err := checkExpectedErrors(output(file, 3, secondaries...), file, "case.go")
+		if err == nil || !strings.Contains(err.Error(), secondaries[0]) {
+			t.Fatalf("recovery passed without its primary: %v", err)
+		}
+	})
+
+	t.Run("wrong line", func(t *testing.T) {
+		err := checkExpectedErrors(output(file, 3, primary)+output(file, 4, secondaries...), file, "case.go")
+		if err == nil || !strings.Contains(err.Error(), secondaries[0]) {
+			t.Fatalf("wrong-line recovery was discarded: %v", err)
+		}
+	})
+}
+
 func TestAdditionalParserRecoveryDiagnosticsFailOpen(t *testing.T) {
 	t.Run("one ERROR authorizes one recovery group", func(t *testing.T) {
 		file := filepath.Join(t.TempDir(), "case.go")
