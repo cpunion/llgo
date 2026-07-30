@@ -637,7 +637,7 @@ type OperationRecipe struct {
 | 普通 direct call | 当前plain/coroutine subset可表示 | explicit-status下managed plain与MayUnwind plain edge未闭环；需第9.3节协议 |
 | 递归/SCC | overlay可表示，需原型证明 | 当前physical preflight拒绝recursive lowering；需frame/resource/poll闭环 |
 | `go f(args)` | 当前仅受限静态target slice | closure/method/dynamic descriptor、argument transport |
-| channel send/recv | typed hchan与route-aware operation已有direct vertical slice | channel operation以64槽page按需单调增长，Go 1.26 GOROOT的1万goroutine链已通过；仍需ready-index性能收敛、typed payload precise-GC和完整语言/race矩阵 |
+| channel send/recv | typed hchan与route-aware operation已有direct vertical slice | channel operation以64槽page按需单调增长并由两级durable ready index跳过空page/slot；Go 1.26 GOROOT的1万goroutine链已通过；仍需typed payload precise-GC和完整语言/race矩阵 |
 | 多 case `select` | wait-set overlay适合表示 | dynamic page已保持15-bit local-slot ABI；仍需reflect.Select、uniform selection和完整typed result矩阵 |
 | timer/Sleep | native Sleep source/owner 与 Go 1.26 controlled-timer linkname 已接入 | 冻结标准库E2E已通过；Timer channel完整lazy语义、GC、`asynctimerchan`、synctest、完整race矩阵和dynamic/sharded source仍待完成 |
 | 文件/网络 | native Poll/Worker source、deadline/closing 和 scalar result 已接入统一 operation；冻结regular-file探针已有E2E，TCP已在双owner fleet E2E/压力通过 | 探针之外的cancel/quiescence矩阵、payload/precise GC、parked-result迁移、完整net/resolver矩阵和其他platform backend尚未闭环 |
@@ -752,7 +752,7 @@ recursive plain SCC / unknown cost / overflow = unbounded
 - `ExecutorSourceSet` 已有统一协议，但当前手写 `if source != nil` catalog。按既有设计应由 target profile生成静态 direct-call catalog，避免每加一个source手改executor，又不引入Go interface dispatch。
 - Primitive/hook ABI应由 versioned catalog统一生成 compiler declaration、runtime export、signature validation和digest identity。
 - 完整结构审计应保留在构造、debug、test和terminal边界；热路径只做已认证的O(1) header/local-link校验，继续遵守现有cost certificate方向。
-- fixed small source capacity适合allocation-constrained profile；target-neutral wait/timer/poll/worker/channel/keyed-wait 的默认 page 是64槽。Channel现可由owner在bind期间按需单调发布稳定page，保持既有两字OperationID，最大32,704槽；native按实际park并发增长，embedded/baremetal仍可保留显式静态容量。native Timer当前独立配置64页即4096槽，其他尚未动态化的common source配置16页即1024槽，worker使用4个物理pthread与1024-job ring，task-control仍为8槽。channel/timer/poll的线性scan仍需ready index/heap或sharded catalog收敛；容量策略不改变compiler IR。
+- fixed small source capacity适合allocation-constrained profile；target-neutral wait/timer/poll/worker/channel/keyed-wait 的默认 page 是64槽。Channel现可由owner在bind期间按需单调发布稳定page，保持既有两字OperationID，最大32,704槽；native按实际park并发增长，embedded/baremetal仍可保留显式静态容量。Channel已复用通用64槽leaf + 511页summary的两级ready index，万goroutine逆序唤醒从约53.1秒降到两次fresh运行的1.865–2.501秒；对应Go基线为0.539–0.545秒。native Timer当前独立配置64页即4096槽，其他尚未动态化的common source配置16页即1024槽，worker使用4个物理pthread与1024-job ring，task-control仍为8槽。timer/poll后续可复用同一ready index或deadline heap；容量策略不改变compiler IR。
 - source-specific payload处理应落在 source/operation adapter；compiler只理解slot ownership和reconciliation contract。
 
 ### 10.3 新 IR 与 runtime 的唯一接口

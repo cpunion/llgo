@@ -273,6 +273,40 @@ func TestChannelOperationDynamicCatalogCompletesBeyondStaticProfile(t *testing.T
 	releaseChannelClaimCoreFixture(t, fixture, decision)
 }
 
+func TestChannelReadyIndexSkipsLargeEmptyActivePrefix(t *testing.T) {
+	source := new(ChannelOperationSource)
+	var pages [15]ChannelOperationPage
+	if !ConfigureChannelOperationPages(source, pages[:]) {
+		t.Fatal("configure indexed channel profile")
+	}
+	fixture := newChannelClaimCoreFixtureWithSourceHooks(
+		t, "channel-ready-index", []uint32{1}, true, 0, source,
+		func(fixture *channelClaimCoreFixture) {
+			if !AttachChannelOperationPage(source, fixture.p, new(ChannelOperationPage)) {
+				t.Fatal("attach indexed channel page")
+			}
+		},
+		nil,
+	)
+	id := fixture.ids[0]
+	if id.LocalSlot() != 1025 || source.PostReady(id) != ChannelOperationPosted {
+		t.Fatalf("prepare high indexed channel operation %+v", id)
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	const budget = 32
+	progress, ok := PollExecutorSlice(fixture.driver, budget)
+	if !ok || !progress.Complete || progress.Used >= budget ||
+		progress.Completed != 1 || progress.ApplyVisits != 1 || progress.Promoted != 1 {
+		t.Fatalf("indexed high-slot progress = (%+v, %t)", progress, ok)
+	}
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 1 ||
+		!decision.lease.Valid() || decision.taskCancel != TaskCancelNone {
+		t.Fatalf("take indexed high-slot decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
+
 func TestChannelOperationDynamicPagePublicationIsProducerSafe(t *testing.T) {
 	if ChannelOperationMaximumCapacity != 511*ChannelOperationPageCapacity {
 		t.Fatalf("channel maximum capacity = %d", ChannelOperationMaximumCapacity)

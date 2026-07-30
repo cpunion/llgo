@@ -89,6 +89,7 @@ type channelOperationSlot struct {
 // still resolves it exclusively through the existing two-word OperationID;
 // neither this page pointer nor a frame pointer crosses an ingress ABI.
 type ChannelOperationPage struct {
+	ready operationReadyPage
 	slots [ChannelOperationPageCapacity]channelOperationSlot
 }
 
@@ -104,6 +105,8 @@ type ChannelOperationPage struct {
 // not this scalar protocol.
 type ChannelOperationSource struct {
 	routedProducerSource
+	readyPages    operationReadyPageIndex
+	inlineReady   operationReadyPage
 	slots         [ChannelOperationPageCapacity]channelOperationSlot
 	extraPages    []ChannelOperationPage
 	dynamicPages  operationDynamicPageDirectory
@@ -133,6 +136,35 @@ func channelOperationScanLimit(source *ChannelOperationSource) (uint32, bool) {
 	return source.scanLimit, validSourceScanLimit(source.scanLimit, capacity)
 }
 
+func channelOperationPageAt(source *ChannelOperationSource, page uint32) (*ChannelOperationPage, bool) {
+	if source == nil || page == 0 {
+		return nil, false
+	}
+	extra := page - 1
+	if extra < uint32(len(source.extraPages)) {
+		return &source.extraPages[extra], true
+	}
+	dynamic := source.dynamicPages.page(extra - uint32(len(source.extraPages)))
+	if dynamic == nil {
+		return nil, false
+	}
+	return (*ChannelOperationPage)(dynamic), true
+}
+
+func channelOperationPageReady(source *ChannelOperationSource, page uint32) (*operationReadyPage, bool) {
+	if source == nil || page >= ChannelOperationConfiguredCapacity(source)/ChannelOperationPageCapacity {
+		return nil, false
+	}
+	if page == 0 {
+		return &source.inlineReady, true
+	}
+	catalogPage, ok := channelOperationPageAt(source, page)
+	if !ok {
+		return nil, false
+	}
+	return &catalogPage.ready, true
+}
+
 func channelOperationSlotAt(source *ChannelOperationSource, index uint32) (*channelOperationSlot, bool) {
 	if index >= ChannelOperationConfiguredCapacity(source) {
 		return nil, false
@@ -140,16 +172,118 @@ func channelOperationSlotAt(source *ChannelOperationSource, index uint32) (*chan
 	if index < ChannelOperationPageCapacity {
 		return &source.slots[index], true
 	}
-	page := index/ChannelOperationPageCapacity - 1
+	page := index / ChannelOperationPageCapacity
 	offset := index % ChannelOperationPageCapacity
-	if page < uint32(len(source.extraPages)) {
-		return &source.extraPages[page].slots[offset], true
-	}
-	dynamic := source.dynamicPages.page(page - uint32(len(source.extraPages)))
-	if dynamic == nil {
+	catalogPage, ok := channelOperationPageAt(source, page)
+	if !ok {
 		return nil, false
 	}
-	return &(*ChannelOperationPage)(dynamic).slots[offset], true
+	return &catalogPage.slots[offset], true
+}
+
+func channelOperationReadyAt(source *ChannelOperationSource, index uint32) (bool, bool) {
+	if source == nil || index >= ChannelOperationConfiguredCapacity(source) {
+		return false, false
+	}
+	page := index / ChannelOperationPageCapacity
+	ready, ok := channelOperationPageReady(source, page)
+	if !ok {
+		return false, false
+	}
+	return ready.marked(index % ChannelOperationPageCapacity)
+}
+
+// markChannelOperationReadyAt publishes the durable leaf before the page
+// summary. An owner clears the summary before reading its leaves, so every
+// producer/owner interleaving leaves either a visible leaf in the current pass
+// or a summary bit plus pending hint for a later pass.
+func markChannelOperationReadyAt(source *ChannelOperationSource, index uint32) bool {
+	if source == nil || index >= ChannelOperationConfiguredCapacity(source) {
+		return false
+	}
+	page := index / ChannelOperationPageCapacity
+	ready, ok := channelOperationPageReady(source, page)
+	if !ok {
+		return false
+	}
+	return ready.mark(index%ChannelOperationPageCapacity) && source.readyPages.mark(page)
+}
+
+func clearChannelOperationReadyAt(source *ChannelOperationSource, index uint32) bool {
+	if source == nil || index >= ChannelOperationConfiguredCapacity(source) {
+		return false
+	}
+	ready, ok := channelOperationPageReady(source, index/ChannelOperationPageCapacity)
+	if !ok {
+		return false
+	}
+	return ready.clear(index % ChannelOperationPageCapacity)
+}
+
+func channelOperationPageHasReady(source *ChannelOperationSource, page uint32) (bool, bool) {
+	ready, ok := channelOperationPageReady(source, page)
+	if !ok {
+		return false, false
+	}
+	return !ready.empty(), true
+}
+
+func refreshChannelOperationReadyPage(source *ChannelOperationSource, page uint32) bool {
+	hasReady, ok := channelOperationPageHasReady(source, page)
+	return ok && (!hasReady || source.readyPages.mark(page))
+}
+
+func channelOperationReadyCatalogEmpty(source *ChannelOperationSource) bool {
+	if source == nil || !source.readyPages.empty() {
+		return false
+	}
+	pages := ChannelOperationConfiguredCapacity(source) / ChannelOperationPageCapacity
+	for page := uint32(0); page < pages; page++ {
+		hasReady, ok := channelOperationPageHasReady(source, page)
+		if !ok || hasReady {
+			return false
+		}
+	}
+	return true
+}
+
+func nextChannelOperationReady(
+	source *ChannelOperationSource,
+	start, limit uint32,
+) (uint32, bool, bool) {
+	if source == nil || start > limit || limit > ChannelOperationConfiguredCapacity(source) {
+		return 0, false, false
+	}
+	page := start / ChannelOperationPageCapacity
+	offset := start % ChannelOperationPageCapacity
+	for start < limit {
+		if offset == 0 {
+			pageLimit := (limit + ChannelOperationPageCapacity - 1) / ChannelOperationPageCapacity
+			next, marked, ok := source.readyPages.takeNext(page, pageLimit)
+			if !ok || !marked {
+				return 0, false, ok
+			}
+			page, start = next, next*ChannelOperationPageCapacity
+		}
+		ready, ok := channelOperationPageReady(source, page)
+		if !ok {
+			return 0, false, false
+		}
+		pageEnd := (page + 1) * ChannelOperationPageCapacity
+		if pageEnd > limit {
+			pageEnd = limit
+		}
+		local, marked, nextOK := ready.next(offset, pageEnd-page*ChannelOperationPageCapacity)
+		if !nextOK {
+			return 0, false, false
+		}
+		if marked {
+			return page*ChannelOperationPageCapacity + local, true, true
+		}
+		page++
+		start, offset = page*ChannelOperationPageCapacity, 0
+	}
+	return 0, false, true
 }
 
 // ConfigureChannelOperationPages attaches stable allocation-free catalog
@@ -159,7 +293,8 @@ func channelOperationSlotAt(source *ChannelOperationSource, index uint32) (*chan
 // concurrent producer lookup always observes stable slot addresses.
 func ConfigureChannelOperationPages(source *ChannelOperationSource, pages []ChannelOperationPage) bool {
 	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, nil) ||
-		len(pages) > int(operationLocalMask/ChannelOperationPageCapacity)-1 {
+		len(pages) > int(operationLocalMask/ChannelOperationPageCapacity)-1 ||
+		!channelOperationReadyCatalogEmpty(source) {
 		return false
 	}
 	existing := len(source.extraPages)
@@ -181,6 +316,9 @@ func ConfigureChannelOperationPages(source *ChannelOperationSource, pages []Chan
 		}
 	}
 	for page := existing; page < len(pages); page++ {
+		if !pages[page].ready.empty() {
+			return false
+		}
 		for offset := range pages[page].slots {
 			index := uint32(page+1)*ChannelOperationPageCapacity + uint32(offset)
 			if !channelOperationReusableSlot(source, &pages[page].slots[offset], index) {
@@ -222,6 +360,9 @@ func AttachChannelOperationPage(
 		if source.dynamicPages.page(index) == unsafe.Pointer(page) {
 			return false
 		}
+	}
+	if !page.ready.empty() {
+		return false
 	}
 	for offset := range page.slots {
 		index := oldCapacity + uint32(offset)
@@ -289,7 +430,8 @@ func channelOperationExternalReservable(slot *channelOperationSlot) bool {
 func BindChannelOperationSourceAtRoute(source *ChannelOperationSource, p *P, route RouteID) bool {
 	if source == nil || p == nil || !route.Valid() || source.owner != nil || preemptLoad(&source.pending) != 0 ||
 		p.channelSource != nil || preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
-		source.route != 0 && source.route != route || source.reserveCursor != 0 {
+		source.route != 0 && source.route != route || source.reserveCursor != 0 ||
+		!channelOperationReadyCatalogEmpty(source) {
 		return false
 	}
 	previousRoute := source.route
@@ -590,6 +732,9 @@ func (source *ChannelOperationSource) postReadyAdmitted(slot *channelOperationSl
 		case channelMailboxEmpty:
 			if !preemptCompareAndSwap(&slot.mailbox, uint32(mailbox), uint32(channelMailboxReady)) {
 				continue
+			}
+			if !markChannelOperationReadyAt(source, id.LocalSlot()-1) {
+				return ChannelOperationPostInvalid
 			}
 			preemptStore(&source.pending, 1)
 			return ChannelOperationPosted
@@ -1329,11 +1474,17 @@ func (source *ChannelOperationSource) publishExternallyCommittedHeld(slot *chann
 			if !preemptCompareAndSwap(&slot.mailbox, uint32(mailbox), uint32(channelMailboxForced)) {
 				continue
 			}
+			if !markChannelOperationReadyAt(source, id.LocalSlot()-1) {
+				return ChannelOperationPostInvalid
+			}
 			preemptStore(&source.pending, 1)
 			return ChannelOperationPosted
 		case channelMailboxDrainingReady:
 			if !preemptCompareAndSwap(&slot.mailbox, uint32(mailbox), uint32(channelMailboxForcedBehindReadyDrain)) {
 				continue
+			}
+			if !markChannelOperationReadyAt(source, id.LocalSlot()-1) {
+				return ChannelOperationPostInvalid
 			}
 			preemptStore(&source.pending, 1)
 			return ChannelOperationPosted
@@ -1360,6 +1511,11 @@ func finishChannelMailboxDrain(source *ChannelOperationSource, slot *channelOper
 			return true
 		}
 		if preemptCompareAndSwap(&slot.mailbox, uint32(channelMailboxForcedBehindReadyDrain), uint32(channelMailboxForced)) {
+			id := slot.record.id
+			if !id.Valid() || id.LocalSlot() == 0 ||
+				!markChannelOperationReadyAt(source, id.LocalSlot()-1) {
+				return false
+			}
 			preemptStore(&source.pending, 1)
 			return true
 		}
@@ -1379,6 +1535,11 @@ func restoreChannelMailboxDrain(source *ChannelOperationSource, slot *channelOpe
 		restored = preemptCompareAndSwap(&slot.mailbox, uint32(channelMailboxDrainingForced), uint32(channelMailboxForced))
 	}
 	if restored {
+		id := slot.record.id
+		if !id.Valid() || id.LocalSlot() == 0 ||
+			!markChannelOperationReadyAt(source, id.LocalSlot()-1) {
+			return false
+		}
 		preemptStore(&source.pending, 1)
 	}
 	return restored
@@ -1430,11 +1591,35 @@ func (source *ChannelOperationSource) publishDrainedSlot(
 	p *P,
 	slot *channelOperationSlot,
 	mailbox channelOperationMailbox,
+) (uint32, uint32, bool) {
+	if !validChannelOperationOwner(source, p) || slot == nil ||
+		(mailbox != channelMailboxReady && mailbox != channelMailboxForced) {
+		return 0, 0, false
+	}
+	id := slot.record.id
+	if !id.Valid() || id.LocalSlot() == 0 ||
+		!clearChannelOperationReadyAt(source, id.LocalSlot()-1) {
+		return 0, 0, false
+	}
+	page := (id.LocalSlot() - 1) / ChannelOperationPageCapacity
+	_ = source.readyPages.take(page)
+	published, lost, ok := source.publishDrainedSlotCore(p, slot, mailbox)
+	if !refreshChannelOperationReadyPage(source, page) {
+		return published, lost, false
+	}
+	return published, lost, ok
+}
+
+func (source *ChannelOperationSource) publishDrainedSlotCore(
+	p *P,
+	slot *channelOperationSlot,
+	mailbox channelOperationMailbox,
 ) (published, lost uint32, ok bool) {
 	if !validChannelOperationOwner(source, p) || slot == nil ||
 		(mailbox != channelMailboxReady && mailbox != channelMailboxForced) {
 		return 0, 0, false
 	}
+	id := slot.record.id
 	switch producerSourceLifecycle(preemptLoad(&slot.state)) {
 	case producerSourceActive, producerSourceClosing:
 	default:
@@ -1481,7 +1666,6 @@ func (source *ChannelOperationSource) publishDrainedSlot(
 		return 0, 0, false
 	}
 
-	id := slot.record.id
 	if preemptLoad(&slot.generation) != id.Generation || !slot.record.Matches(id) {
 		_ = restoreChannelMailboxDrain(source, slot, mailbox)
 		_ = releaseChannelPublishClaim(claim, claimHeld)
@@ -1518,8 +1702,24 @@ func (source *ChannelOperationSource) publishDrainedSlot(
 	return published, lost, finished && released
 }
 
+func finishChannelOperationPageVisit(
+	source *ChannelOperationSource,
+	page, published, lost uint32,
+	ok bool,
+) (uint32, uint32, bool) {
+	if !refreshChannelOperationReadyPage(source, page) {
+		ok = false
+	}
+	return published, lost, ok
+}
+
 func (source *ChannelOperationSource) publishSlot(p *P, index uint32) (published, lost uint32, ok bool) {
 	if !validChannelOperationOwner(source, p) || index >= ChannelOperationConfiguredCapacity(source) {
+		return 0, 0, false
+	}
+	page := index / ChannelOperationPageCapacity
+	_ = source.readyPages.take(page)
+	if !clearChannelOperationReadyAt(source, index) {
 		return 0, 0, false
 	}
 	slot, slotOK := channelOperationSlotAt(source, index)
@@ -1528,16 +1728,19 @@ func (source *ChannelOperationSource) publishSlot(p *P, index uint32) (published
 	}
 	state := producerSourceLifecycle(preemptLoad(&slot.state))
 	if state != producerSourceActive && state != producerSourceClosing {
-		return 0, 0, state == producerSourceFree || state == producerSourceQuiesced
+		return finishChannelOperationPageVisit(
+			source, page, 0, 0, state == producerSourceFree || state == producerSourceQuiesced,
+		)
 	}
 	mailbox, drainOK := beginChannelMailboxDrain(slot, channelOperationMailbox(preemptLoad(&slot.mailbox)))
 	if !drainOK {
 		return 0, 0, false
 	}
 	if mailbox == channelMailboxEmpty {
-		return 0, 0, true
+		return finishChannelOperationPageVisit(source, page, 0, 0, true)
 	}
-	return source.publishDrainedSlot(p, slot, mailbox)
+	published, lost, ok = source.publishDrainedSlotCore(p, slot, mailbox)
+	return finishChannelOperationPageVisit(source, page, published, lost, ok)
 }
 
 type selectClaimOwner struct {
@@ -1771,10 +1974,11 @@ func (source *ChannelOperationSource) DiscardResult(p *P, lease OperationResultL
 
 func (source *ChannelOperationSource) Recycle(p *P, id OperationID) bool {
 	slot, ok := channelOperationSlotFor(source, id)
+	ready, readyOK := channelOperationReadyAt(source, id.LocalSlot()-1)
 	if !ok || !validChannelOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
 		preemptLoad(&slot.state) != uint32(producerSourceQuiesced) || !producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
 		preemptLoad(&slot.mailbox) != uint32(channelMailboxEmpty) || preemptLoad(&slot.external) != 0 ||
-		preemptLoad(&slot.externalLease)&1 != 0 || slot.claim != nil ||
+		preemptLoad(&slot.externalLease)&1 != 0 || slot.claim != nil || !readyOK || ready ||
 		!OperationCanRecycle(&slot.record, id) {
 		return false
 	}
@@ -1797,7 +2001,8 @@ func (source *ChannelOperationSource) Recycle(p *P, id OperationID) bool {
 }
 
 func channelOperationSourceEmpty(source *ChannelOperationSource, owner *P) bool {
-	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, owner) {
+	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, owner) ||
+		!channelOperationReadyCatalogEmpty(source) {
 		return false
 	}
 	for index := uint32(0); index < ChannelOperationConfiguredCapacity(source); index++ {
