@@ -28,9 +28,19 @@ import (
 
 const coroTerminalPanicFrameLimit = 4096
 
+// coroPanicTerminalFputc is deliberately a distinct declaration identity from
+// coroTerminalFputc. The latter is a private synchronous leaf used by managed
+// fail-stop adapters; this occurrence exists only in the raw no-return command
+// reporter after scheduler ownership has ended. The closed-use planner can
+// therefore infer its conservative raw-host-only contract without adding a
+// source annotation or mixing the two execution domains.
+//
+//go:linkname coroPanicTerminalFputc C.__llgo_coro_panic_fputc_v1
+func coroPanicTerminalFputc(ch c.Int, fp c.FilePtr) c.Int
+
 func coroTerminalWriteString(text string) {
 	for index := 0; index < len(text); index++ {
-		coroTerminalFputc(c.Int(text[index]), c.Stderr)
+		coroPanicTerminalFputc(c.Int(text[index]), c.Stderr)
 	}
 }
 
@@ -46,7 +56,7 @@ func coroTerminalWriteUint(value uint64) {
 		}
 	}
 	for ; index < len(digits); index++ {
-		coroTerminalFputc(c.Int(digits[index]), c.Stderr)
+		coroPanicTerminalFputc(c.Int(digits[index]), c.Stderr)
 	}
 }
 
@@ -55,7 +65,7 @@ func coroTerminalWriteInt(value int64) {
 		coroTerminalWriteUint(uint64(value))
 		return
 	}
-	coroTerminalFputc(c.Int('-'), c.Stderr)
+	coroPanicTerminalFputc(c.Int('-'), c.Stderr)
 	// -(MinInt64) is not representable. Convert the magnitude without a
 	// signed overflow.
 	coroTerminalWriteUint(uint64(-(value + 1)) + 1)
@@ -75,7 +85,7 @@ func coroTerminalWriteHex(value uintptr) {
 		}
 	}
 	for ; index < len(digits); index++ {
-		coroTerminalFputc(c.Int(digits[index]), c.Stderr)
+		coroPanicTerminalFputc(c.Int(digits[index]), c.Stderr)
 	}
 }
 
@@ -98,7 +108,7 @@ func coroTerminalWriteType(typ *_type) {
 		return
 	}
 	if typ.TFlag&abi.TFlagExtraStar != 0 {
-		coroTerminalFputc(c.Int('*'), c.Stderr)
+		coroPanicTerminalFputc(c.Int('*'), c.Stderr)
 	}
 	coroTerminalWriteString(typ.Str_)
 }
@@ -108,7 +118,7 @@ func coroTerminalWriteTypedPrefix(typ *_type, builtin string) bool {
 		return false
 	}
 	coroTerminalWriteType(typ)
-	coroTerminalFputc(c.Int('('), c.Stderr)
+	coroPanicTerminalFputc(c.Int('('), c.Stderr)
 	return true
 }
 
@@ -237,18 +247,18 @@ func coroTerminalWritePanicValue(record coro.PanicRecordSnapshot) {
 			return
 		}
 		coroTerminalWriteType(typ)
-		coroTerminalFputc(c.Int('('), c.Stderr)
+		coroPanicTerminalFputc(c.Int('('), c.Stderr)
 		coroTerminalWriteHex(uintptr(record.DataWord))
 		closeTyped = true
 	default:
-		coroTerminalFputc(c.Int('('), c.Stderr)
+		coroPanicTerminalFputc(c.Int('('), c.Stderr)
 		coroTerminalWriteType(typ)
 		coroTerminalWriteString(") ")
 		coroTerminalWriteHex(uintptr(record.DataWord))
 		return
 	}
 	if closeTyped {
-		coroTerminalFputc(c.Int(')'), c.Stderr)
+		coroPanicTerminalFputc(c.Int(')'), c.Stderr)
 	}
 }
 
@@ -284,10 +294,10 @@ func coroTerminalWritePanicFrames(g *coro.G, ctx *runtimeContext) {
 			coroTerminalWriteString(frame.File)
 		}
 		if frame.Line > 0 {
-			coroTerminalFputc(c.Int(':'), c.Stderr)
+			coroPanicTerminalFputc(c.Int(':'), c.Stderr)
 			coroTerminalWriteUint(uint64(frame.Line))
 		}
-		coroTerminalFputc(c.Int('\n'), c.Stderr)
+		coroPanicTerminalFputc(c.Int('\n'), c.Stderr)
 	}
 }
 
@@ -317,7 +327,7 @@ func __llgo_coro_program_report_panic_v1(gPointer unsafe.Pointer) {
 	coroTerminalWriteString("panic: ")
 	coroTerminalWritePanicValue(record)
 	coroTerminalWritePanicFrames(g, ctx)
-	coroTerminalFputc(c.Int('\n'), c.Stderr)
+	coroPanicTerminalFputc(c.Int('\n'), c.Stderr)
 	c.Exit(2)
 	for {
 	}

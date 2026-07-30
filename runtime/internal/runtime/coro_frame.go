@@ -130,22 +130,3 @@ func __llgo_coro_frame_free_v1(g, storage unsafe.Pointer, size, align uintptr, d
 		coroRuntimeAbort("coroutine frame release failed")
 	}
 }
-
-func coroReleaseDiscardedPanicTraceV1(task *coro.G) {
-	if !coro.PanicTraceDiscardPending(task) {
-		return
-	}
-	for {
-		raw, total, ok := coro.TakeDiscardedPanicTraceFrame(task)
-		if !ok {
-			coroRuntimeAbort("invalid discarded coroutine panic trace")
-		}
-		if raw == nil {
-			return
-		}
-		coro.Zero(raw, total)
-		if !coroalloc.FreeFrame(raw, total) {
-			coroRuntimeAbort("discarded coroutine panic trace release failed")
-		}
-	}
-}

@@ -571,6 +571,16 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	// path passes false. Keep the test island fail-stop without pulling the
 	// legacy panic/printing closure into the final executable.
 	exit := pkg.NewFunc("exit", newSignature([]types.Type{types.Typ[types.Int32]}, nil), llssa.InC)
+	// These closed scheduler islands verify successful spawn/fleet behavior,
+	// not terminal panic presentation. Keep the production entry relocation
+	// exact and fail-stop; full-runtime caller acceptance separately exercises
+	// the production logical traceback reporter.
+	panicReporter := pkg.NewFunc(coroProgramReportPanicSymbolV1, newSignature(
+		[]types.Type{pointer}, nil,
+	), llssa.InC)
+	panicReporterBody := panicReporter.MakeBody(1)
+	panicReporterBody.Call(exit.Expr, prog.IntVal(71, prog.Int32()))
+	panicReporterBody.Return()
 	abort := pkg.NewFunc("__llgo_coro_channel_e2e_fail", newSignature(nil, nil), llssa.InC)
 	abortBody := abort.MakeBody(1)
 	abortBody.Call(exit.Expr, prog.IntVal(70, prog.Int32()))
@@ -749,6 +759,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_executor_retired_default.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_nil_fault.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_trace_release.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_worker_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_physical_thread_capacity_native_llgo.go"),
@@ -773,6 +784,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_program_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_nil_fault.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_panic_payload.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_panic_trace_release.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_resume_materialize.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_coro.go")

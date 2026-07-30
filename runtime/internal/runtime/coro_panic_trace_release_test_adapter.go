@@ -1,4 +1,4 @@
-//go:build llgo && !baremetal && !wasm && !tinygo.wasm
+//go:build coro_runtime_adapter_test
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,9 +18,23 @@
 
 package runtime
 
-// The descriptor and poll leaf implementation belongs to the compiler runtime
-// package that declares and consumes its scheduler-facing symbols. Keeping the
-// C object here also makes those symbols available in programs which use the
-// lightweight internal runtime without importing the standard-library runtime
-// patch package.
-const LLGoFiles = "../lib/runtime/_wrap/poll.c; _wrap/coro_panic_report.c"
+import "github.com/goplus/llgo/runtime/internal/coro"
+
+// The host runtime-adapter island allocates any synthetic frame backing from
+// the Go test heap rather than coroalloc. It still exercises the exact trace
+// ownership transition, but reclamation belongs to the host GC.
+func coroReleaseDiscardedPanicTraceV1(task *coro.G) {
+	if !coro.PanicTraceDiscardPending(task) {
+		return
+	}
+	for {
+		raw, total, ok := coro.TakeDiscardedPanicTraceFrame(task)
+		if !ok {
+			coroRuntimeAbort("invalid discarded coroutine panic trace")
+		}
+		if raw == nil {
+			return
+		}
+		coro.Zero(raw, total)
+	}
+}

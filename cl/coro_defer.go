@@ -1615,12 +1615,10 @@ func (s *coroStaticCleanupState) replacePanicInline(
 	typeWord, dataWord llssa.Expr,
 	line uint32,
 ) {
-	body := p.coroBody()
-	if s == nil || body == nil || b == nil || b.Func != p.fn ||
-		body.panicTraceReplace.IsNil() {
+	if s == nil || p == nil || b == nil || b.Func != p.fn {
 		panic("inline coroutine panic replacement requires an exact runtime hook")
 	}
-	b.Call(body.panicTraceReplace, body.task, body.coro.Handle())
+	p.emitCoroPanicTraceReplacement(b)
 	s.replacePanic(b, typeWord, dataWord, line)
 }
 

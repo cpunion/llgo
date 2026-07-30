@@ -609,6 +609,9 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			"GC_add_roots":                                   false,
 			"pthread_self":                                   false,
 		}
+		migratedRawHostDeclarations := map[string]string{
+			runtimePath + ".coroPanicTerminalFputc": "__llgo_coro_panic_fputc_v1",
+		}
 		elidedTypedControlSymbols := map[string]bool{
 			"siglongjmp": false,
 		}
@@ -621,6 +624,28 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			migratedRawHostSymbols["clock_gettime_nsec_np"] = false
 		}
 		for _, record := range useDomains.Records {
+			if physical, migrated := migratedRawHostDeclarations[record.Function.String()]; migrated {
+				if physical == "" {
+					return nil, fmt.Errorf(
+						"native target raw-host declaration %q is ambiguous",
+						record.Function,
+					)
+				}
+				if record.PhysicalSymbol != physical {
+					return nil, fmt.Errorf(
+						"native target raw-host declaration %q uses %q, want %q",
+						record.Function,
+						record.PhysicalSymbol,
+						physical,
+					)
+				}
+				if err := validateMigratedRawHost(record, record.Function.String()); err != nil {
+					return nil, err
+				}
+				migratedRawHostDeclarations[record.Function.String()] = ""
+				t.Log("migrated " + record.diagnostic())
+				continue
+			}
 			if _, typedControl := elidedTypedControlSymbols[record.PhysicalSymbol]; typedControl {
 				if elidedTypedControlSymbols[record.PhysicalSymbol] {
 					return nil, fmt.Errorf("native target typed-control declaration %q is ambiguous", record.PhysicalSymbol)
@@ -647,6 +672,14 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 		for symbol, found := range migratedRawHostSymbols {
 			if !found {
 				return nil, fmt.Errorf("native target raw-host declaration %q is absent from the closed report", symbol)
+			}
+		}
+		for declaration, physical := range migratedRawHostDeclarations {
+			if physical != "" {
+				return nil, fmt.Errorf(
+					"native target raw-host declaration %q is absent from the closed report",
+					declaration,
+				)
 			}
 		}
 		for symbol, found := range elidedTypedControlSymbols {

@@ -1,5 +1,3 @@
-//go:build llgo && !baremetal && !wasm && !tinygo.wasm
-
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -16,11 +14,16 @@
  * limitations under the License.
  */
 
-package runtime
+#include <stdio.h>
 
-// The descriptor and poll leaf implementation belongs to the compiler runtime
-// package that declares and consumes its scheduler-facing symbols. Keeping the
-// C object here also makes those symbols available in programs which use the
-// lightweight internal runtime without importing the standard-library runtime
-// patch package.
-const LLGoFiles = "../lib/runtime/_wrap/poll.c; _wrap/coro_panic_report.c"
+/*
+ * The logical-panic reporter runs only after the command scheduler has
+ * returned and released ownership. Keeping this one physical leaf distinct
+ * from ordinary fputc lets the compiler prove that all of its Go occurrences
+ * belong to the raw no-return reporter without assigning fputc a global
+ * non-blocking or synchronous contract.
+ */
+int __llgo_coro_panic_fputc_v1(int ch, FILE *stream)
+{
+    return fputc(ch, stream);
+}

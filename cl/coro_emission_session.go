@@ -154,6 +154,19 @@ func (p *context) coroCleanup() *coroStaticCleanupState {
 	return body.cleanup
 }
 
+// emitCoroPanicTraceReplacement exposes the narrow cleanup capability without
+// giving defer lowering another direct dependency on the complete mutable
+// physical body. The architecture debt gate deliberately keeps coroBody
+// access centralized while this exact runtime transaction remains available
+// to the static cleanup emitter.
+func (p *context) emitCoroPanicTraceReplacement(b llssa.Builder) {
+	body := p.activeCoroEmissionBody()
+	if body == nil || b == nil || b.Func != p.fn || body.panicTraceReplace.IsNil() {
+		panic("inline coroutine panic replacement requires an exact runtime hook")
+	}
+	b.Call(body.panicTraceReplace, body.task, body.coro.Handle())
+}
+
 func (p *context) hasCoroPhysicalEmission() bool {
 	return p != nil && p.coroEmission != nil
 }
