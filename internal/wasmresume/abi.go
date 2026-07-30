@@ -64,6 +64,7 @@ func (abi resumeABI) defineEntryAndDescriptor(
 	entry = llvm.AddFunction(mod, entryName, abi.entryType)
 	entry.SetLinkage(llvm.InternalLinkage)
 	descriptor = llvm.AddGlobal(mod, abi.descriptorType, descriptorName)
+	descriptor.SetLinkage(fn.Linkage())
 	descriptor.SetGlobalConstant(true)
 	descriptor.SetInitializer(abi.ctx.ConstStruct([]llvm.Value{
 		entry,
