@@ -59,10 +59,7 @@ func (p Package) wasmResumeStart(fn llvm.Value) llvm.Value {
 }
 
 func (b Builder) markWasmResumeCall(call llvm.Value, background Background) {
-	if background != InGo || !b.Prog.WasmResumeABIEnabled() ||
-		b.Func == nil || b.Func.background != InGo ||
-		wasmresume.IsRuntimeABIImplementation(b.Func.Name()) ||
-		wasmresume.IsNonSuspendingBoundary(b.Func.Name()) {
+	if background != InGo || !b.wasmResumeFunctionEnabled() {
 		return
 	}
 	callee := call.CalledValue()
@@ -75,8 +72,44 @@ func (b Builder) markWasmResumeCall(call llvm.Value, background Background) {
 	call.SetMetadata(kind, b.Prog.ctx.MDNode([]llvm.Metadata{version}))
 }
 
+func (b Builder) wasmResumeFunctionEnabled() bool {
+	return b != nil && b.Prog.WasmResumeABIEnabled() &&
+		b.Func != nil && b.Func.background == InGo &&
+		!wasmresume.IsRuntimeABIImplementation(b.Func.Name()) &&
+		!wasmresume.IsNonSuspendingBoundary(b.Func.Name())
+}
+
+func (b Builder) registerWasmResumeUnwind(frame Expr, handler BasicBlock) {
+	if !b.wasmResumeFunctionEnabled() {
+		return
+	}
+	ctx := b.Prog.ctx
+	typ := llvm.FunctionType(ctx.VoidType(), []llvm.Type{
+		b.Prog.tyVoidPtr(),
+		b.Prog.tyVoidPtr(),
+	}, false)
+	fn := b.Pkg.mod.NamedFunction(wasmresume.RegisterUnwindSymbol)
+	if fn.IsNil() {
+		fn = llvm.AddFunction(b.Pkg.mod, wasmresume.RegisterUnwindSymbol, typ)
+	}
+	llvm.CreateCall(b.impl, typ, fn, []llvm.Value{frame.impl, handler.Addr().impl})
+}
+
+func (b Builder) clearWasmResumeUnwind() {
+	if !b.wasmResumeFunctionEnabled() {
+		return
+	}
+	ctx := b.Prog.ctx
+	typ := llvm.FunctionType(ctx.VoidType(), nil, false)
+	fn := b.Pkg.mod.NamedFunction(wasmresume.ClearUnwindSymbol)
+	if fn.IsNil() {
+		fn = llvm.AddFunction(b.Pkg.mod, wasmresume.ClearUnwindSymbol, typ)
+	}
+	llvm.CreateCall(b.impl, typ, fn, nil)
+}
+
 func (b Builder) directCallBackground(fn Expr) Background {
-	if fn.kind != vkFuncDecl {
+	if fn.impl.IsNil() || fn.impl.IsAFunction().IsNil() {
 		return inUnknown
 	}
 	if decl := b.Pkg.FuncOf(fn.impl.Name()); decl != nil {
