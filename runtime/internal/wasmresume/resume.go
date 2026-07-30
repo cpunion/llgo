@@ -33,13 +33,17 @@ const (
 	Suspend
 )
 
-// Resume is the common indirect-call signature for generated resume entries.
+// Resume is the non-suspending indirect-call signature for generated entries.
+//
+//llgo:type C
 type Resume func(*Context, *Frame) Action
 
 // Descriptor contains immutable state shared by every invocation of a
 // generated function.
 type Descriptor struct {
-	Resume Resume
+	Resume     Resume
+	FrameSize  uintptr
+	FrameAlign uintptr
 }
 
 // Frame is the common prefix of every generated function frame. Generated

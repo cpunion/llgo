@@ -132,6 +132,18 @@ func TestContextPushInitializesHeader(t *testing.T) {
 	}
 }
 
+func TestDescriptorCarriesFrameLayout(t *testing.T) {
+	descriptor := Descriptor{
+		Resume:     resumeTestAdd,
+		FrameSize:  unsafe.Sizeof(testLeafFrame{}),
+		FrameAlign: unsafe.Alignof(testLeafFrame{}),
+	}
+	if descriptor.Resume == nil || descriptor.FrameSize != unsafe.Sizeof(testLeafFrame{}) ||
+		descriptor.FrameAlign != unsafe.Alignof(testLeafFrame{}) {
+		t.Fatalf("descriptor = %+v", descriptor)
+	}
+}
+
 func TestContextPushClearsCompletedChain(t *testing.T) {
 	var (
 		ctx   Context
