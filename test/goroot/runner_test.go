@@ -1771,6 +1771,16 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 	}
 	source = parserRecoverySourceCode(source)
 	switch primary {
+	// GOROOT/test/syntax/vareq.go
+	case "syntax error: unexpected { at end of statement":
+		if source == `var x map[string]string{"a":"b"}` {
+			return [][]string{
+				{"expected ';', found '{'"},
+				{"expected ';', found 'EOF'"},
+				{"expected '}', found 'EOF'"},
+				{"declared and not used: x"},
+			}
+		}
 	// GOROOT/test/fixedbugs/issue11610.go
 	case "invalid character U+003F '?'":
 		if source == "var?" {
