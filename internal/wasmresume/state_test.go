@@ -86,7 +86,9 @@ func TestLowerPrototypeExecutesDirectCallStateMachine(t *testing.T) {
 	if root.entry.IsNil() {
 		t.Fatal("caller state machine was not lowered")
 	}
-	harness := defineStateMachineHarness(mod, targetData, root, 5)
+	harness := defineStateMachineHarness(
+		mod, targetData, root, []llvm.Value{llvm.ConstInt(i32, 5, false)},
+	)
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify executable state machine: %v\n%s", err, mod.String())
 	}
@@ -205,11 +207,13 @@ func TestLowerPrototypeEmitsWasmObject(t *testing.T) {
 			builder.SetInsertPointAtEnd(calleeBlock)
 			builder.CreateRet(callee.Param(0))
 
-			caller := llvm.AddFunction(mod, "caller", sig)
+			ptr := llvm.PointerType(ctx.Int8Type(), 0)
+			callerType := llvm.FunctionType(i32, []llvm.Type{ptr, i32}, false)
+			caller := llvm.AddFunction(mod, "caller", callerType)
 			markFunction(ctx, caller)
 			callerBlock := ctx.AddBasicBlock(caller, "entry")
 			builder.SetInsertPointAtEnd(callerBlock)
-			call := builder.CreateCall(sig, callee, []llvm.Value{caller.Param(0)}, "called")
+			call := builder.CreateCall(sig, caller.Param(0), []llvm.Value{caller.Param(1)}, "called")
 			markCall(ctx, call)
 			builder.CreateRet(call)
 
@@ -231,8 +235,99 @@ func TestLowerPrototypeEmitsWasmObject(t *testing.T) {
 	}
 }
 
+func TestLowerPrototypeExecutesIndirectStart(t *testing.T) {
+	llvm.LinkInMCJIT()
+	if err := llvm.InitializeNativeTarget(); err != nil {
+		t.Fatal(err)
+	}
+	if err := llvm.InitializeNativeAsmPrinter(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("indirect-execution")
+	moduleOwned := true
+	defer func() {
+		if moduleOwned {
+			mod.Dispose()
+		}
+	}()
+
+	triple := llvm.DefaultTargetTriple()
+	target, err := llvm.GetTargetFromTriple(triple)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := target.CreateTargetMachine(
+		triple, "", "", llvm.CodeGenLevelNone, llvm.RelocDefault, llvm.CodeModelJITDefault,
+	)
+	defer machine.Dispose()
+	targetData := machine.CreateTargetData()
+	defer targetData.Dispose()
+	mod.SetTarget(triple)
+	mod.SetDataLayout(targetData.String())
+
+	i32 := ctx.Int32Type()
+	sig := llvm.FunctionType(i32, []llvm.Type{i32}, false)
+	callee := llvm.AddFunction(mod, "callee", sig)
+	markFunction(ctx, callee)
+	block := ctx.AddBasicBlock(callee, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	builder.CreateRet(builder.CreateAdd(callee.Param(0), llvm.ConstInt(i32, 1, false), "result"))
+
+	ptr := llvm.PointerType(ctx.Int8Type(), 0)
+	callerType := llvm.FunctionType(i32, []llvm.Type{ptr, i32}, false)
+	caller := llvm.AddFunction(mod, "caller", callerType)
+	markFunction(ctx, caller)
+	block = ctx.AddBasicBlock(caller, "entry")
+	builder.SetInsertPointAtEnd(block)
+	call := builder.CreateCall(sig, caller.Param(0), []llvm.Value{caller.Param(1)}, "called")
+	markCall(ctx, call)
+	builder.CreateRet(builder.CreateMul(call, llvm.ConstInt(i32, 2, false), "result"))
+
+	lowered, err := lowerPrototype(mod, targetData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root loweredState
+	for _, state := range lowered {
+		if state.layout.plan.function == caller {
+			root = state
+			break
+		}
+	}
+	start := mod.NamedFunction(startEntryPrefix + callee.Name())
+	if root.entry.IsNil() || start.IsNil() {
+		t.Fatal("indirect state machine entries were not emitted")
+	}
+	harness := defineStateMachineHarness(mod, targetData, root, []llvm.Value{
+		start, llvm.ConstInt(i32, 5, false),
+	})
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify indirect state machine: %v\n%s", err, mod.String())
+	}
+
+	options := llvm.NewMCJITCompilerOptions()
+	options.SetMCJITOptimizationLevel(0)
+	engine, err := llvm.NewMCJITCompiler(mod, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moduleOwned = false
+	defer engine.Dispose()
+
+	result := engine.RunFunction(harness, nil)
+	defer result.Dispose()
+	if got := result.Int(true); got != 12 {
+		t.Fatalf("indirect state machine result = %d, want 12", got)
+	}
+}
+
 func defineStateMachineHarness(
-	mod llvm.Module, targetData llvm.TargetData, lowered loweredState, input uint64,
+	mod llvm.Module, targetData llvm.TargetData, lowered loweredState, params []llvm.Value,
 ) llvm.Value {
 	ctx := mod.Context()
 	abi := newResumeABI(ctx, targetData)
@@ -290,14 +385,16 @@ func defineStateMachineHarness(
 		llvm.ConstInt(i32, 0, false),
 		builder.CreateStructGEP(lowered.layout.typ, root, 2, ""),
 	)
+	param := 0
 	for _, slot := range lowered.layout.plan.slots {
 		if slot.kind == slotParameter {
 			builder.CreateStore(
-				llvm.ConstInt(slot.typ, input, false),
+				params[param],
 				builder.CreateStructGEP(
 					lowered.layout.typ, root, lowered.layout.fieldIndex(slot.id), "",
 				),
 			)
+			param++
 		}
 	}
 	builder.CreateStore(root, builder.CreateStructGEP(abi.contextType, context, 0, ""))
@@ -352,33 +449,6 @@ func defineStateMachineHarness(
 	return run
 }
 
-func TestLowerPrototypeRejectsIndirectCalls(t *testing.T) {
-	ctx := llvm.NewContext()
-	defer ctx.Dispose()
-	mod := ctx.NewModule("indirect")
-	defer mod.Dispose()
-	targetData := llvm.NewTargetData("e-m:e-p:32:32-i64:64-n32:64-S128")
-	defer targetData.Dispose()
-
-	voidFn := llvm.FunctionType(ctx.VoidType(), nil, false)
-	fn := llvm.AddFunction(mod, "caller", llvm.FunctionType(ctx.VoidType(), []llvm.Type{
-		llvm.PointerType(voidFn, 0),
-	}, false))
-	markFunction(ctx, fn)
-	block := ctx.AddBasicBlock(fn, "entry")
-	builder := ctx.NewBuilder()
-	defer builder.Dispose()
-	builder.SetInsertPointAtEnd(block)
-	call := builder.CreateCall(voidFn, fn.Param(0), nil, "")
-	markCall(ctx, call)
-	builder.CreateRetVoid()
-
-	if _, err := lowerPrototype(mod, targetData); err == nil ||
-		!strings.Contains(err.Error(), "indirect") {
-		t.Fatalf("lowerPrototype error = %v", err)
-	}
-}
-
 func TestLowerPrototypeRejectsDynamicAlloca(t *testing.T) {
 	ctx := llvm.NewContext()
 	defer ctx.Dispose()
@@ -404,6 +474,35 @@ func TestLowerPrototypeRejectsDynamicAlloca(t *testing.T) {
 
 	if _, err := lowerPrototype(mod, targetData); err == nil ||
 		!strings.Contains(err.Error(), "dynamic alloca") {
+		t.Fatalf("lowerPrototype error = %v", err)
+	}
+}
+
+func TestLowerPrototypeRejectsVariadicResumeCall(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("variadic")
+	defer mod.Dispose()
+	targetData := llvm.NewTargetData("e-m:e-p:32:32-i64:64-n32:64-S128")
+	defer targetData.Dispose()
+
+	i32 := ctx.Int32Type()
+	variadicType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{i32}, true)
+	callee := llvm.AddFunction(mod, "callee", variadicType)
+	fn := llvm.AddFunction(mod, "caller", llvm.FunctionType(ctx.VoidType(), nil, false))
+	markFunction(ctx, fn)
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	call := builder.CreateCall(
+		variadicType, callee, []llvm.Value{llvm.ConstInt(i32, 1, false)}, "",
+	)
+	markCall(ctx, call)
+	builder.CreateRetVoid()
+
+	if _, err := lowerPrototype(mod, targetData); err == nil ||
+		!strings.Contains(err.Error(), "variadic") {
 		t.Fatalf("lowerPrototype error = %v", err)
 	}
 }
