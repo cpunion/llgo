@@ -16,17 +16,7 @@
 
 package wasmresume
 
-import (
-	"fmt"
-
-	"github.com/xgo-dev/llvm"
-)
-
-const (
-	resumeEntryPrefix = "__llgo_wasm_resume."
-	descriptorPrefix  = "__llgo_wasm_resume_desc."
-	actionReturn      = 1
-)
+import "github.com/xgo-dev/llvm"
 
 type loweredLeaf struct {
 	layout     frameLayout
@@ -41,27 +31,23 @@ func emitLeafEntries(mod llvm.Module, targetData llvm.TargetData) ([]loweredLeaf
 	if err != nil {
 		return nil, err
 	}
+	return emitLeafEntriesForLayouts(mod, newResumeABI(mod.Context(), targetData), layouts)
+}
 
+func emitLeafEntriesForLayouts(
+	mod llvm.Module, abi resumeABI, layouts []frameLayout,
+) ([]loweredLeaf, error) {
 	ctx := mod.Context()
-	ptr := llvm.PointerType(ctx.Int8Type(), 0)
-	uintptrType := ctx.IntType(targetData.PointerSize() * 8)
-	entryType := llvm.FunctionType(ctx.Int8Type(), []llvm.Type{ptr, ptr}, false)
-	descriptorType := ctx.StructType([]llvm.Type{ptr, uintptrType, uintptrType}, false)
-
 	var lowered []loweredLeaf
 	for _, layout := range layouts {
 		fn := layout.plan.function
 		if fn.IsDeclaration() || len(layout.plan.calls) != 0 {
 			continue
 		}
-		entryName := resumeEntryPrefix + fn.Name()
-		descriptorName := descriptorPrefix + fn.Name()
-		if !mod.NamedFunction(entryName).IsNil() || !mod.NamedGlobal(descriptorName).IsNil() {
-			return nil, fmt.Errorf("%s: duplicate resumable descriptor", fn.Name())
+		entry, descriptor, err := abi.defineEntryAndDescriptor(mod, layout)
+		if err != nil {
+			return nil, err
 		}
-
-		entry := llvm.AddFunction(mod, entryName, entryType)
-		entry.SetLinkage(llvm.InternalLinkage)
 		block := ctx.AddBasicBlock(entry, "entry")
 		builder := ctx.NewBuilder()
 		builder.SetInsertPointAtEnd(block)
@@ -85,14 +71,6 @@ func emitLeafEntries(mod llvm.Module, targetData llvm.TargetData) ([]loweredLeaf
 		}
 		builder.CreateRet(llvm.ConstInt(ctx.Int8Type(), actionReturn, false))
 		builder.Dispose()
-
-		descriptor := llvm.AddGlobal(mod, descriptorType, descriptorName)
-		descriptor.SetGlobalConstant(true)
-		descriptor.SetInitializer(ctx.ConstStruct([]llvm.Value{
-			entry,
-			llvm.ConstInt(uintptrType, layout.size, false),
-			llvm.ConstInt(uintptrType, uint64(layout.alignment), false),
-		}, false))
 
 		lowered = append(lowered, loweredLeaf{
 			layout: layout, entry: entry, descriptor: descriptor,
