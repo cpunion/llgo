@@ -34,14 +34,18 @@ func (p Program) WasmResumeABIEnabled() bool {
 }
 
 func (p Program) markWasmResumeFunction(fn llvm.Value) {
-	if !p.WasmResumeABIEnabled() {
+	if !p.WasmResumeABIEnabled() ||
+		wasmresume.IsRuntimeABIImplementation(fn.Name()) ||
+		wasmresume.IsNonSuspendingBoundary(fn.Name()) {
 		return
 	}
 	fn.AddFunctionAttr(p.ctx.CreateStringAttribute(wasmresume.FunctionAttribute, "1"))
 }
 
 func (p Package) wasmResumeStart(fn llvm.Value) llvm.Value {
-	if !p.Prog.WasmResumeABIEnabled() {
+	if !p.Prog.WasmResumeABIEnabled() ||
+		wasmresume.IsRuntimeABIImplementation(fn.Name()) ||
+		wasmresume.IsNonSuspendingBoundary(fn.Name()) {
 		return fn
 	}
 	name := wasmresume.StartSymbol(fn.Name())
@@ -55,7 +59,15 @@ func (p Package) wasmResumeStart(fn llvm.Value) llvm.Value {
 }
 
 func (b Builder) markWasmResumeCall(call llvm.Value, background Background) {
-	if background != InGo || !b.Prog.WasmResumeABIEnabled() {
+	if background != InGo || !b.Prog.WasmResumeABIEnabled() ||
+		b.Func == nil || b.Func.background != InGo ||
+		wasmresume.IsRuntimeABIImplementation(b.Func.Name()) ||
+		wasmresume.IsNonSuspendingBoundary(b.Func.Name()) {
+		return
+	}
+	callee := call.CalledValue()
+	if !callee.IsAFunction().IsNil() &&
+		wasmresume.IsNonSuspendingBoundary(callee.Name()) {
 		return
 	}
 	kind := b.Prog.ctx.MDKindID(wasmresume.CallMetadata)

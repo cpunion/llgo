@@ -83,6 +83,9 @@ func lowerPrototype(mod llvm.Module, targetData llvm.TargetData) ([]loweredState
 		if err := lowerStateMachine(mod, targetData, abi, &lowered[i]); err != nil {
 			return nil, err
 		}
+		if err := emitCompatibilityWrapper(mod, targetData, abi, &lowered[i]); err != nil {
+			return nil, err
+		}
 	}
 	return lowered, nil
 }
@@ -349,6 +352,16 @@ func declareFrameFree(mod llvm.Module, abi resumeABI) llvm.Value {
 	if fn.IsNil() {
 		fn = llvm.AddFunction(mod, frameFreeName, llvm.FunctionType(
 			abi.ctx.VoidType(), []llvm.Type{abi.ptr, abi.ptr}, false,
+		))
+	}
+	return fn
+}
+
+func declareFrameClose(mod llvm.Module, abi resumeABI) llvm.Value {
+	fn := mod.NamedFunction(frameCloseName)
+	if fn.IsNil() {
+		fn = llvm.AddFunction(mod, frameCloseName, llvm.FunctionType(
+			abi.ctx.VoidType(), []llvm.Type{abi.ptr}, false,
 		))
 	}
 	return fn

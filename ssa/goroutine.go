@@ -83,7 +83,11 @@ func (p Package) routineName() string {
 
 func (p Package) routine(t Type, fn Expr, buildCall func(Builder, Expr, ...Expr) Expr, n int) Expr {
 	prog := p.Prog
-	routine := p.NewFunc(p.routineName(), prog.tyRoutine(), InC)
+	background := InC
+	if prog.WasmResumeABIEnabled() {
+		background = InGo
+	}
+	routine := p.NewFunc(p.routineName(), prog.tyRoutine(), background)
 	b := routine.MakeBody(1)
 	var localCtx, previousLocalCtx Expr
 	hasLocalContext := prog.NeedsLocalContext()
@@ -110,7 +114,11 @@ func (p Package) routine(t Type, fn Expr, buildCall func(Builder, Expr, ...Expr)
 		}
 		b.Return(prog.Nil(prog.VoidPtr()))
 	}
-	return routine.Expr
+	ret := routine.Expr
+	if prog.WasmResumeABIEnabled() {
+		ret.impl = p.wasmResumeStart(ret.impl)
+	}
+	return ret
 }
 
 // -----------------------------------------------------------------------------
