@@ -387,6 +387,9 @@ func Build(inv Invocation) ([]Package, error) {
 	if conf.Target != "" && export.GOARCH != "" {
 		conf.Goarch = export.GOARCH
 	}
+	if err := configureWasmResume(conf, &export); err != nil {
+		return nil, err
+	}
 	wasmWorkers, err := configureWasmWorkers(conf, &export)
 	if err != nil {
 		return nil, err
@@ -451,6 +454,7 @@ func Build(inv Invocation) ([]Package, error) {
 	}
 
 	prog := llssa.NewProgram(target)
+	prog.EnableWasmResumeABI(IsWasmResumeEnabled())
 	prog.DisableBoundsChecks(conf.DisableBoundsChecks)
 	if conf.Mode != ModeGen {
 		// ModeGen callers (llgen and the golden suites) read LPkg.String()
@@ -1471,6 +1475,9 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 		pcLineInfo:    pcLineInfo,
 		funcInfoStubs: funcInfoStubs,
 	})
+	if err := lowerWasmResumeModule(ctx, entryPkg.LPkg.Module()); err != nil {
+		return fmt.Errorf("entry main: %w", err)
+	}
 	entryObjFile, err := exportObject(ctx, "entry_main", entryPkg.ExportFile, entryPkg.LPkg)
 	if err != nil {
 		return err
@@ -1874,6 +1881,9 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 		return nil
 	}
 
+	if err := lowerWasmResumeModule(ctx, ret.Module()); err != nil {
+		return fmt.Errorf("%s: %w", pkgPath, err)
+	}
 	ctx.cTransformer.SetSkipFuncs(cabiSkipFuncsForPlan9Asm(ctx, pkgPath, ret.Module()))
 	llabi.LowerLargeAggregates(ctx.prog.TargetData(), ret.Module())
 	ctx.cTransformer.TransformModule(ret.Path(), ret.Module())
@@ -2454,6 +2464,7 @@ const llgoFuncInfoSites = "LLGO_FUNCINFO_SITES"
 const llgoTrace = "LLGO_TRACE"
 const llgoOptimize = "LLGO_OPTIMIZE"
 const llgoWasmRuntime = "LLGO_WASM_RUNTIME"
+const llgoWasmResume = "LLGO_WASM_RESUME"
 const llgoWasiThreads = "LLGO_WASI_THREADS"
 const llgoWasmWorkers = "LLGO_WASM_WORKERS"
 const llgoStdioNobuf = "LLGO_STDIO_NOBUF"
@@ -2534,6 +2545,10 @@ func llvmPassPipeline(level optlevel.Level, ltoMode lto.Mode) string {
 
 func IsWasiThreadsEnabled() bool {
 	return isEnvOn(llgoWasiThreads, false)
+}
+
+func IsWasmResumeEnabled() bool {
+	return isEnvOn(llgoWasmResume, false)
 }
 
 func IsFullRpathEnabled() bool {

@@ -1,4 +1,4 @@
-//go:build !baremetal
+//go:build !baremetal && !(llgo && wasm && llgo.wasm_resume && (js || wasip1) && !(wasip1 && llgo.wasi_threads))
 
 package runtime
 
