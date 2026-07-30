@@ -18,6 +18,7 @@ package wasmresume
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/xgo-dev/llvm"
 )
@@ -213,7 +214,7 @@ func lowerResumeCall(
 
 	childType := callFramePrefix(ctx, call.CalledFunctionType())
 	var child llvm.Value
-	if callee.IsAFunction().IsNil() {
+	if callee.IsAFunction().IsNil() || strings.HasPrefix(callee.Name(), startEntryPrefix) {
 		params := append([]llvm.Type{abi.ptr}, call.CalledFunctionType().ParamTypes()...)
 		startType := llvm.FunctionType(abi.ptr, params, false)
 		args := make([]llvm.Value, call.CalledFunctionType().ParamTypesCount()+1)

@@ -279,14 +279,18 @@ func TestLowerPrototypeExecutesIndirectStart(t *testing.T) {
 	builder.CreateRet(builder.CreateAdd(callee.Param(0), llvm.ConstInt(i32, 1, false), "result"))
 
 	ptr := llvm.PointerType(ctx.Int8Type(), 0)
+	startType := llvm.FunctionType(ptr, []llvm.Type{ptr, i32}, false)
+	start := llvm.AddFunction(mod, StartSymbol(callee.Name()), startType)
 	callerType := llvm.FunctionType(i32, []llvm.Type{ptr, i32}, false)
 	caller := llvm.AddFunction(mod, "caller", callerType)
 	markFunction(ctx, caller)
 	block = ctx.AddBasicBlock(caller, "entry")
 	builder.SetInsertPointAtEnd(block)
-	call := builder.CreateCall(sig, caller.Param(0), []llvm.Value{caller.Param(1)}, "called")
-	markCall(ctx, call)
-	builder.CreateRet(builder.CreateMul(call, llvm.ConstInt(i32, 2, false), "result"))
+	dynamicCall := builder.CreateCall(sig, caller.Param(0), []llvm.Value{caller.Param(1)}, "dynamic")
+	markCall(ctx, dynamicCall)
+	constantCall := builder.CreateCall(sig, start, []llvm.Value{dynamicCall}, "constant")
+	markCall(ctx, constantCall)
+	builder.CreateRet(builder.CreateMul(constantCall, llvm.ConstInt(i32, 2, false), "result"))
 
 	lowered, err := lowerPrototype(mod, targetData)
 	if err != nil {
@@ -299,7 +303,6 @@ func TestLowerPrototypeExecutesIndirectStart(t *testing.T) {
 			break
 		}
 	}
-	start := mod.NamedFunction(startEntryPrefix + callee.Name())
 	if root.entry.IsNil() || start.IsNil() {
 		t.Fatal("indirect state machine entries were not emitted")
 	}
@@ -321,8 +324,8 @@ func TestLowerPrototypeExecutesIndirectStart(t *testing.T) {
 
 	result := engine.RunFunction(harness, nil)
 	defer result.Dispose()
-	if got := result.Int(true); got != 12 {
-		t.Fatalf("indirect state machine result = %d, want 12", got)
+	if got := result.Int(true); got != 14 {
+		t.Fatalf("indirect state machine result = %d, want 14", got)
 	}
 }
 
