@@ -167,6 +167,11 @@ type EmissionUniverse struct {
 	typesDup           map[*types.Package]bool
 	byPath             map[string]*preparedEmissionPackage
 	pathDup            map[string]bool
+	// loadedPackageSnapshot is frozen after every input package has been
+	// registered. Effective-type projection is read-only, so its short-lived
+	// contexts share this map instead of rebuilding the complete package index
+	// once per interface candidate.
+	loadedPackageSnapshot map[*types.Package]*pkgInfo
 
 	// libraryEffects is the narrow immutable producer/consumer view for
 	// cross-archive coroutine facts. Keeping physical ABI and symbol proofs
@@ -233,10 +238,20 @@ type EmissionUniverse struct {
 	globalPhysicalGroups    map[string]CoroGlobalPhysicalIdentity
 	globalPhysicalSeen      map[*ssa.Global]none
 
-	localGenericMu     sync.Mutex
-	localGenericTypes  map[*types.Named]emissionLocalGenericType
-	localGenericOwners map[*types.Named]*ssa.Function
-	genericNamedTypes  map[*types.Named]*types.Named
+	effectiveTypeMu         sync.Mutex
+	effectiveTypeCacheReady bool
+	effectiveTypes          map[emissionEffectiveTypeKey]types.Type
+	localGenericMu          sync.Mutex
+	localGenericTypes       map[*types.Named]emissionLocalGenericType
+	localGenericOwners      map[*types.Named]*ssa.Function
+	genericNamedTypes       map[*types.Named]*types.Named
+}
+
+type emissionEffectiveTypeKey struct {
+	owner                *preparedEmissionPackage
+	function             *ssa.Function
+	typ                  types.Type
+	preservePatchedNamed bool
 }
 
 // emissionCanonicalIndex is the single cross-owner canonicalization boundary
@@ -717,6 +732,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		localGenericTypes:       make(map[*types.Named]emissionLocalGenericType),
 		localGenericOwners:      make(map[*types.Named]*ssa.Function),
 		genericNamedTypes:       make(map[*types.Named]*types.Named),
+		effectiveTypes:          make(map[emissionEffectiveTypeKey]types.Type),
 	}
 	u.libraryEffects.index.universe = u
 	for i, input := range inputs {
@@ -820,6 +836,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			u.byPath[pkgPath] = prepared
 		}
 	}
+	u.loadedPackageSnapshot = u.buildLoadedPackages()
 	if options.CompleteRuntimeABI {
 		if prog == nil {
 			return nil, fmt.Errorf("prepare emission universe: complete runtime ABI requires an LLVM SSA program")
@@ -964,6 +981,10 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	if err := u.coroProgramIR.freezeCallSites(u); err != nil {
 		return nil, fmt.Errorf("prepare emission universe: freeze coroutine call SitePlans: %w", err)
 	}
+	// Every package, local-generic owner, and patch relation is now frozen.
+	// Subsequent preflight/codegen queries may safely reuse exact effective
+	// type projections instead of rebuilding isomorphic go/types graphs.
+	u.effectiveTypeCacheReady = true
 	return u, nil
 }
 
@@ -6555,7 +6576,7 @@ func (u *EmissionUniverse) isIntrinsic(fn *ssa.Function, owner *preparedEmission
 	return ftype == llgoInstr
 }
 
-func (u *EmissionUniverse) loadedPackages() map[*types.Package]*pkgInfo {
+func (u *EmissionUniverse) buildLoadedPackages() map[*types.Package]*pkgInfo {
 	loaded := map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
 	if u == nil || u.goProg == nil {
 		return loaded
@@ -6572,6 +6593,25 @@ func (u *EmissionUniverse) loadedPackages() map[*types.Package]*pkgInfo {
 		if prepared.altTypes != nil {
 			loaded[prepared.altTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
 		}
+	}
+	return loaded
+}
+
+func (u *EmissionUniverse) immutableLoadedPackages() map[*types.Package]*pkgInfo {
+	if u == nil {
+		return map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
+	}
+	if u.loadedPackageSnapshot != nil {
+		return u.loadedPackageSnapshot
+	}
+	return u.buildLoadedPackages()
+}
+
+func (u *EmissionUniverse) loadedPackages() map[*types.Package]*pkgInfo {
+	snapshot := u.immutableLoadedPackages()
+	loaded := make(map[*types.Package]*pkgInfo, len(snapshot))
+	for pkg, info := range snapshot {
+		loaded[pkg] = info
 	}
 	return loaded
 }
@@ -6642,23 +6682,56 @@ func (u *EmissionUniverse) intrinsicWrapper(owner *ssa.Package, fn *ssa.Function
 }
 
 func (u *EmissionUniverse) effectiveType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
-	ctx := u.effectiveTypeContext(owner, fn)
-	if ctx == nil {
-		return typ
-	}
-	return ctx.patchType(typ)
+	return u.cachedEffectiveType(owner, fn, typ, false)
 }
 
 func (u *EmissionUniverse) effectiveGoLinknameType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
+	return u.cachedEffectiveType(owner, fn, typ, true)
+}
+
+func (u *EmissionUniverse) cachedEffectiveType(
+	owner *preparedEmissionPackage,
+	fn *ssa.Function,
+	typ types.Type,
+	preservePatchedNamed bool,
+) types.Type {
+	if owner == nil || u == nil || typ == nil {
+		return typ
+	}
+	key := emissionEffectiveTypeKey{
+		owner: owner, function: fn, typ: typ,
+		preservePatchedNamed: preservePatchedNamed,
+	}
+	if u.effectiveTypeCacheReady {
+		u.effectiveTypeMu.Lock()
+		cached, ok := u.effectiveTypes[key]
+		u.effectiveTypeMu.Unlock()
+		if ok {
+			return cached
+		}
+	}
 	ctx := u.effectiveTypeContext(owner, fn)
 	if ctx == nil {
 		return typ
 	}
-	// Linkname pairing compares both sides after one shared physical
-	// projection. Preserve an alternate package's named replacement until that
-	// projection so recursive edges continue to point at the exact same node.
-	ctx.preservePatchedNamed = true
-	return ctx.patchType(typ)
+	if preservePatchedNamed {
+		// Linkname pairing compares both sides after one shared physical
+		// projection. Preserve an alternate package's named replacement until
+		// that projection so recursive edges continue to point at the exact
+		// same node.
+		ctx.preservePatchedNamed = true
+	}
+	effective := ctx.patchType(typ)
+	if u.effectiveTypeCacheReady {
+		u.effectiveTypeMu.Lock()
+		if cached, ok := u.effectiveTypes[key]; ok {
+			effective = cached
+		} else {
+			u.effectiveTypes[key] = effective
+		}
+		u.effectiveTypeMu.Unlock()
+	}
+	return effective
 }
 
 func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, fn *ssa.Function) *context {
@@ -6673,7 +6746,7 @@ func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, 
 		goTyps:           owner.pkgTypes,
 		goPkg:            owner.ssa,
 		patches:          u.patches,
-		loaded:           u.loadedPackages(),
+		loaded:           u.immutableLoadedPackages(),
 		linkOnceFns:      make(map[*ssa.Function]none),
 		emissionUniverse: u,
 	}

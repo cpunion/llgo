@@ -92,4 +92,17 @@ func Materialize() Type { return rtype{} }
 	if !implements {
 		t.Fatal("effective alternate receiver does not implement effective patched interface")
 	}
+	owner := universe.coroDynamicTypeOwner(receiver)
+	if owner == nil || universe.loadedPackageSnapshot == nil || !universe.effectiveTypeCacheReady {
+		t.Fatal("prepared universe did not freeze effective-type cache inputs")
+	}
+	first := universe.effectiveType(owner, nil, receiver)
+	cacheSize := len(universe.effectiveTypes)
+	second := universe.effectiveType(owner, nil, receiver)
+	if first != second {
+		t.Fatal("repeated effective-type projection did not reuse the frozen type graph")
+	}
+	if len(universe.effectiveTypes) != cacheSize {
+		t.Fatal("repeated effective-type projection grew the frozen cache")
+	}
 }
