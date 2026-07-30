@@ -1170,7 +1170,8 @@ func checkExpectedErrorsForFiles(output string, sources []diagnosticSource) erro
 			} else if _, suffix, found := strings.Cut(message, " "); found {
 				message = suffix
 			}
-			parserAlias := sourceOK && matchesParserDiagnosticAlias(expected.regexp, sourceDiagnostic, expected.source)
+			parserAlias := sourceOK && physicalDiagnosticSources[sourceDiagnostic.file] &&
+				matchesParserDiagnosticAlias(expected.regexp, sourceDiagnostic, expected.source)
 			if matchesExpectedDiagnostic(expected.regexp, message) || parserAlias {
 				matched = true
 				if ok && isScopedLexicalDiagnostic(message) {
