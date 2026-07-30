@@ -16,11 +16,9 @@
 
 package ssa
 
-import "github.com/xgo-dev/llvm"
-
-const (
-	wasmResumeFunctionAttr = "llgo.wasm.resume"
-	wasmResumeCallMetadata = "llgo.wasm.resume.call"
+import (
+	"github.com/goplus/llgo/internal/wasmresume"
+	"github.com/xgo-dev/llvm"
 )
 
 // EnableWasmResumeABI controls emission of the function and call inventory
@@ -39,15 +37,15 @@ func (p Program) markWasmResumeFunction(fn llvm.Value) {
 	if !p.WasmResumeABIEnabled() {
 		return
 	}
-	fn.AddFunctionAttr(p.ctx.CreateStringAttribute(wasmResumeFunctionAttr, "1"))
+	fn.AddFunctionAttr(p.ctx.CreateStringAttribute(wasmresume.FunctionAttribute, "1"))
 }
 
 func (b Builder) markWasmResumeCall(call llvm.Value, background Background) {
 	if background != InGo || !b.Prog.WasmResumeABIEnabled() {
 		return
 	}
-	kind := b.Prog.ctx.MDKindID(wasmResumeCallMetadata)
-	version := llvm.ConstInt(b.Prog.Int32().ll, 1, false).ConstantAsMetadata()
+	kind := b.Prog.ctx.MDKindID(wasmresume.CallMetadata)
+	version := llvm.ConstInt(b.Prog.Int32().ll, wasmresume.MarkerVersion, false).ConstantAsMetadata()
 	call.SetMetadata(kind, b.Prog.ctx.MDNode([]llvm.Metadata{version}))
 }
 
