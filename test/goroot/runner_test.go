@@ -1793,6 +1793,25 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 				{"expected '}', found 'EOF'"},
 			}
 		}
+	// GOROOT/test/fixedbugs/issue20789.go
+	case "syntax error: unexpected name u, expected (":
+		if source == "func([<-chan<-[func u){go" {
+			return [][]string{
+				{"expected channel type"},
+				{"expected '(', found u"},
+				{"expected '(', found 'EOF'"},
+				{"expected ')', found 'EOF'"},
+				{"expected ';', found 'EOF'"},
+				{"expected 'IDENT', found 'EOF'"},
+				{"expected ']', found 'EOF'"},
+				{"expected '}', found 'EOF'"},
+				{"expected operand, found 'EOF'"},
+				{"expected type, found 'EOF'"},
+				{"missing ',' in parameter list"},
+				{"array length (func() literal) (value of type func()) must be constant"},
+				{"<-chan [(func() literal)](ast: *ast.BadExpr) (type) is not an expression"},
+			}
+		}
 	}
 	return nil
 }
