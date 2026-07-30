@@ -99,6 +99,40 @@ func TestGenMainModuleWASIAsyncifyEntry(t *testing.T) {
 	}
 }
 
+func TestGenMainModuleWasmResumeEntry(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode: BuildModeExe,
+			Goos:      "wasip1",
+			Goarch:    "wasm",
+		},
+	}
+	pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
+	mod := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{})
+	if err := lowerWasmResumeModule(ctx, mod.LPkg.Module()); err != nil {
+		t.Fatal(err)
+	}
+	ir := mod.LPkg.String()
+	for _, want := range []string{
+		`define ptr @__llgo_wasm_start.__llgo_wasm_main`,
+		`define internal i8 @__llgo_wasm_resume.__llgo_wasm_main`,
+		`@"__llgo_wasm_resume_desc.example.com/foo.init" = external global`,
+		`@"__llgo_wasm_resume_desc.example.com/foo.main" = external global`,
+		`define hidden ptr @__llgo_wasm_main(ptr %0)`,
+		`call void @"github.com/goplus/llgo/runtime/internal/runtime.RunWasmMain"()`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("resumable main module IR missing %q:\n%s", want, ir)
+		}
+	}
+}
+
 func TestGenMainModuleLibrary(t *testing.T) {
 	llvm.InitializeAllTargets()
 	t.Setenv(llgoStdioNobuf, "")

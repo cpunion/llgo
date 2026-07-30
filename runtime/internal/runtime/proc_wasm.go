@@ -1,4 +1,4 @@
-//go:build llgo && js && wasm
+//go:build llgo && js && wasm && !llgo.wasm_resume
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

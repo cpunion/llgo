@@ -87,8 +87,9 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		pyFinalize = declareNoArgFunc(mainPkg, "Py_Finalize")
 	}
 
+	wasmScheduler := ctx.crossCompile.WasmPostLink.Asyncify || ctx.prog.WasmResumeABIEnabled()
 	var rtInit llssa.Function
-	if cfg.rtInit || ctx.crossCompile.WasmPostLink.Asyncify {
+	if cfg.rtInit || wasmScheduler {
 		rtInit = declareNoArgFunc(mainPkg, rtPkgPath+".init")
 	}
 
@@ -109,8 +110,12 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		pkgPath = pkg.PkgPath
 	}
 
-	mainInit := declareNoArgFunc(mainPkg, pkgPath+".init")
-	mainMain := declareNoArgFunc(mainPkg, pkgPath+".main")
+	mainBackground := llssa.InC
+	if ctx.prog.WasmResumeABIEnabled() {
+		mainBackground = llssa.InGo
+	}
+	mainInit := mainPkg.NewFunc(pkgPath+".init", llssa.NoArgsNoRet, mainBackground)
+	mainMain := mainPkg.NewFunc(pkgPath+".main", llssa.NoArgsNoRet, mainBackground)
 
 	if ctx.buildConf.BuildMode != BuildModeExe {
 		initArraySection := ""
@@ -128,8 +133,8 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 
 	var wasmRunMain llssa.Function
-	if ctx.crossCompile.WasmPostLink.Asyncify {
-		defineWasmMainTask(mainPkg, mainInit, mainMain)
+	if wasmScheduler {
+		defineWasmMainTask(mainPkg, mainInit, mainMain, ctx.prog.WasmResumeABIEnabled())
 		wasmRunMain = declareNoArgFunc(mainPkg, rtPkgPath+".RunWasmMain")
 	}
 	entryFn := defineEntryFunction(ctx, mainPkg, argcVar, argvVar, argvValueType, entryFunctions{
@@ -295,13 +300,17 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 	return fn
 }
 
-func defineWasmMainTask(pkg llssa.Package, mainInit, mainMain llssa.Function) {
+func defineWasmMainTask(pkg llssa.Package, mainInit, mainMain llssa.Function, resumable bool) {
 	prog := pkg.Prog
 	sig := newSignature(
 		[]types.Type{types.Typ[types.UnsafePointer]},
 		[]types.Type{types.Typ[types.UnsafePointer]},
 	)
-	fn := pkg.NewFunc("__llgo_wasm_main", sig, llssa.InC)
+	background := llssa.InC
+	if resumable {
+		background = llssa.InGo
+	}
+	fn := pkg.NewFunc("__llgo_wasm_main", sig, background)
 	fnVal := pkg.Module().NamedFunction("__llgo_wasm_main")
 	fnVal.SetVisibility(llvm.HiddenVisibility)
 	b := fn.MakeBody(1)

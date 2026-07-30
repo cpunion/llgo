@@ -22,12 +22,6 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-// goroutineFunc is the target-independent entry ABI between compiler-generated
-// goroutine wrappers and the runtime scheduler.
-//
-//llgo:type C
-type goroutineFunc func(unsafe.Pointer) unsafe.Pointer
-
 // runtimeContext owns one G and its target-specific suspended execution state.
 // M and P ownership belongs to the selected scheduler backend and can outlive,
 // or be shared by, multiple runtime contexts.
