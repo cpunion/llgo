@@ -2068,9 +2068,17 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
   physical operation selector预算没有上升。使用本次重构后新构建的compiler，两个WASM目标均
   重新通过直接网络`16/2/15`、文件`5/10`、Sleep `4/1`及TCP/DNS
   `594/17/18/651`纵向账本。
+- Channel source已经去掉native profile的1024个同时live operation硬上限。target-neutral
+  core保留64槽inline/static page，并增加owner-only、单调release-publish的稳定page目录；
+  producer仍只携带既有两字`OperationID`，不会观察移动slice header或frame pointer。native
+  runtime只在`BeginParkSet`和hchan锁/queue publication之前按64槽增量分配，因此WASM、
+  embedded和baremetal可继续使用静态page/arena而无需另一套协议。core race测试覆盖动态page
+  publication和跨1024槽的完整select事务；真实Go 1.26 GOROOT `chan/goroutines.go`的一万
+  goroutine链已编译运行通过。当前运行时间仍暴露出大active-prefix线性ready scan，必须用
+  durable ready index收敛后才能把“容量通过”外推为高并发性能通过。
 - Phase 36之后的主要缺口仍是工程闭环而非新的coroutine可行性障碍：零/单source
   `ResumePacket`、Channel/select typed multi-source materialization、单Worker HostOp、Worker+Timer
-  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。owner P现以精确ready计数一次转移约一半、最多8个P-neutral runnable，只发一个target request；其他P从不并发读取victim queue，因此当前不需要第二套lock-free deque。native现在于首个managed resume前创建固定8-route物理topology，route/source/event identity保持到进程关闭；启动环境或online CPU只初始化逻辑execution quota，标准`runtime.GOMAXPROCS(n)`可在运行期查询、增大或缩小该quota，而不销毁P、迁移source或撤销已经开始的resume。single-executor target固定返回1。locked-M阻塞已接通同P replacement owner、嵌套handoff和route-local channel/timer/poll驱动；未解锁退出又以clean successor覆盖program、peer和temporary replacement M，command main-return不会等待不可取消的blocked M。有界pthread standby缓存和覆盖所有runtime M的`SetMaxThreads`账本也已完成。下一步是普通locked park/preempt、完整affinity、callback/reentry与非command shutdown矩阵，以及Linux自动cgroup/affinity默认值刷新；paged/dynamic channel、timer与
+  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。owner P现以精确ready计数一次转移约一半、最多8个P-neutral runnable，只发一个target request；其他P从不并发读取victim queue，因此当前不需要第二套lock-free deque。native现在于首个managed resume前创建固定8-route物理topology，route/source/event identity保持到进程关闭；启动环境或online CPU只初始化逻辑execution quota，标准`runtime.GOMAXPROCS(n)`可在运行期查询、增大或缩小该quota，而不销毁P、迁移source或撤销已经开始的resume。single-executor target固定返回1。locked-M阻塞已接通同P replacement owner、嵌套handoff和route-local channel/timer/poll驱动；未解锁退出又以clean successor覆盖program、peer和temporary replacement M，command main-return不会等待不可取消的blocked M。有界pthread standby缓存和覆盖所有runtime M的`SetMaxThreads`账本也已完成。下一步是普通locked park/preempt、完整affinity、callback/reentry与非command shutdown矩阵，以及Linux自动cgroup/affinity默认值刷新；channel ready index、dynamic timer与
   worker capacity；完整defer/recover/Goexit和precise suspended-frame GC；外部DNS
   server/cgo resolver、Unix/raw socket与ancillary OOB、process/signal；logical stack/tooling；以及
   JS command HostOp/reentry、WASI Preview 2 component/pollable、RTOS及baremetal各自内建

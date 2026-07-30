@@ -805,6 +805,36 @@ func CoroChanSelectTry(ops ...ChanOp) (isel int, recvOK, tryOK, sendClosed bool)
 	return -1, false, false, false
 }
 
+// ensureCoroChannelOperationCapacityV1 grows only the source catalog needed by
+// the current owner P. Each page is retained by the source's monotonic pointer
+// directory, so native, WASM, embedded, and bare-metal targets pay for parked
+// channel concurrency in 64-operation increments instead of reserving a large
+// per-executor table up front.
+//
+// Growth happens before BeginParkSet and before any hchan lock or queue
+// publication. The runtime allocation boundary is synchronous, so no partial
+// park transaction or scheduler lock can survive an allocation failure.
+func ensureCoroChannelOperationCapacityV1(
+	p *coro.P,
+	source *coro.ChannelOperationSource,
+	needed uint32,
+) bool {
+	if p == nil || source == nil || needed == 0 ||
+		needed > coro.ChannelOperationMaximumCapacity {
+		return false
+	}
+	for !coro.CanReserveChannelOperations(p, source, needed) {
+		if coro.ChannelOperationConfiguredCapacity(source) >= coro.ChannelOperationMaximumCapacity {
+			return false
+		}
+		page := new(coro.ChannelOperationPage)
+		if page == nil || !coro.AttachChannelOperationPage(source, p, page) {
+			return false
+		}
+	}
+	return true
+}
+
 func prepareCoroChanSelectV1(
 	g, handle, header, candidates, storage unsafe.Pointer,
 	ops []ChanOp,
@@ -851,7 +881,7 @@ func prepareCoroChanSelectV1(
 	sortCoroChanSelectOrder(candidates, ops)
 	driver, _, route, current := coro.CurrentExecutorChannelDriver(task)
 	p, park, source, ownerOK := coro.CurrentExecutorChannelParkOwner(driver, task)
-	if !current || !ownerOK || !coro.CanReserveChannelOperations(p, source, physical) {
+	if !current || !ownerOK || !ensureCoroChannelOperationCapacityV1(p, source, physical) {
 		coroRuntimeAbort("coroutine channel select source capacity exhausted")
 		return
 	}
@@ -1072,8 +1102,8 @@ func prepareCoroChanParkV1(
 	}
 	task := (*coro.G)(g)
 	driver, _, route, current := coro.CurrentExecutorChannelDriver(task)
-	_, _, source, ownerOK := coro.CurrentExecutorChannelParkOwner(driver, task)
-	if !current || !ownerOK {
+	p, _, source, ownerOK := coro.CurrentExecutorChannelParkOwner(driver, task)
+	if !current || !ownerOK || !ensureCoroChannelOperationCapacityV1(p, source, 1) {
 		coroRuntimeAbort("cannot resolve coroutine channel park owner")
 		return
 	}

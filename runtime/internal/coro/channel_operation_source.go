@@ -20,13 +20,20 @@ import "unsafe"
 
 // ChannelOperationPageCapacity is the allocation-free granularity of the
 // target-neutral channel/select catalog. Every source includes one inline
-// page; a target may attach additional stable pages before binding it.
+// page; a target may configure stable pages before binding and monotonically
+// publish more stable pages from its owner while bound.
 const ChannelOperationPageCapacity = 64
 
 // ChannelOperationSourceCapacity is the default capacity of an unconfigured
 // source. Keep this compatibility name for small, embedded, and bare-metal
 // profiles; it is not the capacity after ConfigureChannelOperationPages.
 const ChannelOperationSourceCapacity = ChannelOperationPageCapacity
+
+// ChannelOperationMaximumCapacity is the largest complete-page catalog
+// representable by OperationID's frozen source-local field. Hosted targets
+// grow toward this bound on demand; allocation-constrained targets may retain
+// any smaller configured profile.
+const ChannelOperationMaximumCapacity = operationCatalogMaximumPageCount * ChannelOperationPageCapacity
 
 type channelOperationMailbox uint32
 
@@ -97,9 +104,11 @@ type ChannelOperationPage struct {
 // not this scalar protocol.
 type ChannelOperationSource struct {
 	routedProducerSource
-	slots      [ChannelOperationPageCapacity]channelOperationSlot
-	extraPages []ChannelOperationPage
-	scanLimit  uint32
+	slots         [ChannelOperationPageCapacity]channelOperationSlot
+	extraPages    []ChannelOperationPage
+	dynamicPages  operationDynamicPageDirectory
+	scanLimit     uint32
+	reserveCursor uint32
 }
 
 // ChannelOperationConfiguredCapacity returns the exact linear slot and scan
@@ -109,7 +118,11 @@ func ChannelOperationConfiguredCapacity(source *ChannelOperationSource) uint32 {
 	if source == nil {
 		return 0
 	}
-	return uint32(1+len(source.extraPages)) * ChannelOperationPageCapacity
+	pages := uint32(1+len(source.extraPages)) + source.dynamicPages.published()
+	if pages > operationCatalogMaximumPageCount {
+		return 0
+	}
+	return pages * ChannelOperationPageCapacity
 }
 
 func channelOperationScanLimit(source *ChannelOperationSource) (uint32, bool) {
@@ -129,7 +142,14 @@ func channelOperationSlotAt(source *ChannelOperationSource, index uint32) (*chan
 	}
 	page := index/ChannelOperationPageCapacity - 1
 	offset := index % ChannelOperationPageCapacity
-	return &source.extraPages[page].slots[offset], true
+	if page < uint32(len(source.extraPages)) {
+		return &source.extraPages[page].slots[offset], true
+	}
+	dynamic := source.dynamicPages.page(page - uint32(len(source.extraPages)))
+	if dynamic == nil {
+		return nil, false
+	}
+	return &(*ChannelOperationPage)(dynamic).slots[offset], true
 }
 
 // ConfigureChannelOperationPages attaches stable allocation-free catalog
@@ -149,6 +169,11 @@ func ConfigureChannelOperationPages(source *ChannelOperationSource, pages []Chan
 	if len(pages) == existing {
 		return true
 	}
+	if source.dynamicPages.published() != 0 {
+		// Inserting static pages before already-issued dynamic local slots
+		// would change their OperationID mapping.
+		return false
+	}
 	for index := uint32(0); index < ChannelOperationConfiguredCapacity(source); index++ {
 		slot, ok := channelOperationSlotAt(source, index)
 		if !ok || !channelOperationReusableSlot(source, slot, index) {
@@ -164,6 +189,53 @@ func ConfigureChannelOperationPages(source *ChannelOperationSource, pages []Chan
 		}
 	}
 	source.extraPages = pages
+	return true
+}
+
+// AttachChannelOperationPage monotonically publishes one target-owned stable
+// page while the source is bound. It is an owner-P operation and performs all
+// validation before the release publication, so producer lookup sees either
+// the old complete catalog or the old catalog plus one pristine page.
+//
+// The source retains the pointer for its process lifetime. That is deliberate:
+// routes and their OperationID tombstones are not reused, and hosted allocators
+// may therefore grow channel concurrency in page-sized increments without a
+// moving slice header or a global fixed slot reservation.
+func AttachChannelOperationPage(
+	source *ChannelOperationSource,
+	p *P,
+	page *ChannelOperationPage,
+) bool {
+	if !validChannelOperationOwner(source, p) || page == nil {
+		return false
+	}
+	oldCapacity := ChannelOperationConfiguredCapacity(source)
+	if oldCapacity == 0 || oldCapacity > ChannelOperationMaximumCapacity-ChannelOperationPageCapacity {
+		return false
+	}
+	for index := range source.extraPages {
+		if &source.extraPages[index] == page {
+			return false
+		}
+	}
+	for index := uint32(0); index < source.dynamicPages.published(); index++ {
+		if source.dynamicPages.page(index) == unsafe.Pointer(page) {
+			return false
+		}
+	}
+	for offset := range page.slots {
+		index := oldCapacity + uint32(offset)
+		if !channelOperationReusableSlot(source, &page.slots[offset], index) {
+			return false
+		}
+	}
+	if !source.dynamicPages.publish(unsafe.Pointer(page)) {
+		return false
+	}
+	// Callers attach only after an availability preflight failed. Begin the
+	// next reservation at the newly published page instead of rescanning a
+	// known-insufficient prefix.
+	source.reserveCursor = oldCapacity
 	return true
 }
 
@@ -217,7 +289,7 @@ func channelOperationExternalReservable(slot *channelOperationSlot) bool {
 func BindChannelOperationSourceAtRoute(source *ChannelOperationSource, p *P, route RouteID) bool {
 	if source == nil || p == nil || !route.Valid() || source.owner != nil || preemptLoad(&source.pending) != 0 ||
 		p.channelSource != nil || preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
-		source.route != 0 && source.route != route {
+		source.route != 0 && source.route != route || source.reserveCursor != 0 {
 		return false
 	}
 	previousRoute := source.route
@@ -234,6 +306,7 @@ func BindChannelOperationSourceAtRoute(source *ChannelOperationSource, p *P, rou
 		return false
 	}
 	source.scanLimit = 0
+	source.reserveCursor = 0
 	p.channelSource = source
 	return true
 }
@@ -300,7 +373,16 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 		!channelOperationCommitDomainCompatible(source, state, ticket, wait, claim) {
 		return OperationID{}, false
 	}
-	for index := uint32(0); index < ChannelOperationConfiguredCapacity(source); index++ {
+	capacity := ChannelOperationConfiguredCapacity(source)
+	start := source.reserveCursor
+	if start >= capacity {
+		start = 0
+	}
+	for offset := uint32(0); offset < capacity; offset++ {
+		index := start + offset
+		if index >= capacity {
+			index -= capacity
+		}
 		slot, slotOK := channelOperationSlotAt(source, index)
 		if !slotOK || !channelOperationReusableSlot(source, slot, index) || preemptLoad(&slot.generation) == ^uint32(0) ||
 			claim != nil && !channelOperationExternalReservable(slot) {
@@ -332,6 +414,10 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 		}
 		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
 			return OperationID{}, false
+		}
+		source.reserveCursor = index + 1
+		if source.reserveCursor == capacity {
+			source.reserveCursor = 0
 		}
 		return id, true
 	}
@@ -1700,7 +1786,14 @@ func (source *ChannelOperationSource) Recycle(p *P, id OperationID) bool {
 		return false
 	}
 	preemptStore(&slot.physical, uint32(channelPhysicalIdle))
-	return recycleProducerSourceSlot(&slot.producerSourceSlot)
+	if !recycleProducerSourceSlot(&slot.producerSourceSlot) {
+		return false
+	}
+	// Preserve the historical lowest-reusable-slot behavior after a lifecycle
+	// completes. The circular cursor is an allocation-burst optimization, not
+	// a change to generation reuse or external-lease retirement semantics.
+	source.reserveCursor = 0
+	return true
 }
 
 func channelOperationSourceEmpty(source *ChannelOperationSource, owner *P) bool {
@@ -1725,6 +1818,7 @@ func UnbindChannelOperationSource(source *ChannelOperationSource, p *P) bool {
 	}
 	p.channelSource = nil
 	source.scanLimit = 0
+	source.reserveCursor = 0
 	return true
 }
 
