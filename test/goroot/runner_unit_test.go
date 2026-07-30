@@ -1262,8 +1262,16 @@ func TestCheckExpectedErrorsScopesPackageClauseAliases(t *testing.T) {
 			name:   "different declaration",
 			source: "type Other int32 // ERROR \"package statement must be first|package clause\"\n",
 			output: func(file string) string {
-				return file + ":1: expected 'package', found 'type'\n" +
-					file + ":1: expected ';', found int32"
+				return file + ":1: expected 'package', found 'type'"
+			},
+		},
+		{
+			name: "line directive physical logical collision",
+			source: "type MyInt int32 // ERROR \"package statement must be first|package clause\"\n" +
+				"//line case.go:1\n" +
+				"type Other int32\n",
+			output: func(file string) string {
+				return file + ":1: expected 'package', found 'type'"
 			},
 		},
 		{
@@ -1279,8 +1287,7 @@ func TestCheckExpectedErrorsScopesPackageClauseAliases(t *testing.T) {
 			name:   "different malformed token",
 			source: "package@ // ERROR \"unexpected %|package name must be an identifier|after package clause|expected declaration\"\n",
 			output: func(file string) string {
-				return file + ":1: expected 'IDENT', found '%'\n" +
-					file + ":1: expected ';', found 'EOF'"
+				return file + ":1: expected 'IDENT', found '%'"
 			},
 		},
 	}
