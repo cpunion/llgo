@@ -1698,6 +1698,9 @@ func parserRecoverySecondaries(primary string) []string {
 // unrelated malformed programs. Exact source matching keeps those allowances
 // scoped to the GOROOT cases that require them.
 func parserRecoverySourceSecondaries(primary, source string) []string {
+	if _, secondaries := packageClauseParserMapping(primary, source); len(secondaries) != 0 {
+		return secondaries
+	}
 	source = parserRecoverySourceCode(source)
 	switch primary {
 	// GOROOT/test/fixedbugs/bug050.go. go/parser omits the "syntax error:"
@@ -1751,18 +1754,27 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 				{"illegal character U+003F '?'"},
 			}
 		}
+	}
+	return nil
+}
+
+// packageClauseParserMapping keeps each diagnostic alias and its recovery
+// secondary under one exact source-shape guard.
+func packageClauseParserMapping(primary, source string) (canonical string, secondaries []string) {
+	source = parserRecoverySourceCode(source)
+	switch primary {
 	// GOROOT/test/fixedbugs/issue4776.go
 	case "expected 'package', found 'type'":
 		if source == "type MyInt int32" {
-			return [][]string{{"expected ';', found int32"}}
+			return "syntax error: package statement must be first", []string{"expected ';', found int32"}
 		}
 	// GOROOT/test/fixedbugs/issue13266.go
 	case "expected 'IDENT', found '%'":
 		if source == "package%" {
-			return [][]string{{"expected ';', found 'EOF'"}}
+			return "syntax error: unexpected %, expected name", []string{"expected ';', found 'EOF'"}
 		}
 	}
-	return nil
+	return "", nil
 }
 
 func parserRecoverySourceCode(source string) string {
@@ -1832,16 +1844,10 @@ nextLine:
 }
 
 func matchesParserDiagnosticAlias(expected *regexp.Regexp, diagnostic sourceDiagnostic, source string) bool {
-	source = parserRecoverySourceCode(source)
+	if canonical, _ := packageClauseParserMapping(diagnostic.message, source); canonical != "" {
+		return expected.MatchString(canonical)
+	}
 	switch diagnostic.message {
-	// GOROOT/test/fixedbugs/issue4776.go
-	case "expected 'package', found 'type'":
-		return source == "type MyInt int32" &&
-			expected.MatchString("syntax error: package statement must be first")
-	// GOROOT/test/fixedbugs/issue13266.go
-	case "expected 'IDENT', found '%'":
-		return source == "package%" &&
-			expected.MatchString("syntax error: unexpected %, expected name")
 	case "expected ';', found ','":
 		return expected.MatchString("unexpected comma") &&
 			isParenthesizedImportLine(diagnostic.file, diagnostic.line)
