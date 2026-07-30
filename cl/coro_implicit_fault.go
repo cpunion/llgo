@@ -26,10 +26,11 @@ import (
 )
 
 const (
-	coroFaultPrepareHookV1 = "__llgo_coro_fault_prepare_v1"
-	coroFaultPayloadHookV1 = "__llgo_coro_fault_payload_v1"
-	coroFaultPrepareHookV2 = "__llgo_coro_fault_prepare_v2"
-	coroFaultPayloadHookV2 = "__llgo_coro_fault_payload_v2"
+	coroFaultPrepareHookV1   = "__llgo_coro_fault_prepare_v1"
+	coroFaultPayloadHookV1   = "__llgo_coro_fault_payload_v1"
+	coroFaultPrepareHookV2   = "__llgo_coro_fault_prepare_v2"
+	coroFaultPayloadHookV2   = "__llgo_coro_fault_payload_v2"
+	coroWrapNilPayloadHookV1 = "__llgo_coro_wrap_nil_payload_v1"
 )
 
 const (
@@ -124,6 +125,20 @@ func coroFaultPayloadSignatureV2() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
+func coroWrapNilPayloadSignatureV1() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	uintptrType := types.Typ[types.Uintptr]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "recvData", pointer),
+		types.NewParam(token.NoPos, nil, "recvLen", uintptrType),
+		types.NewParam(token.NoPos, nil, "methodData", pointer),
+		types.NewParam(token.NoPos, nil, "methodLen", uintptrType),
+		types.NewParam(token.NoPos, nil, "typeOut", pointer),
+		types.NewParam(token.NoPos, nil, "dataOut", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
 // coroFaultOperands are the exact scalar words accepted by the parameterized
 // V2 fault ABI. arg0 is a 64-bit integer bit pattern so uint64 bounds remain
 // observable on wasm32; arg1 is a non-negative target-width len/cap/bound.
@@ -181,8 +196,12 @@ func (p *context) compileCoroPlannedNilAccessGuard(
 	instruction ssa.Instruction,
 	base llssa.Expr,
 ) llssa.Expr {
-	p.observeCoroPhysicalNilGuard(instruction)
+	p.beginCoroPlannedNilGuard(instruction)
 	return p.compileCoroImplicitNilAccessGuard(b, base)
+}
+
+func (p *context) beginCoroPlannedNilGuard(instruction ssa.Instruction) {
+	p.observeCoroPhysicalNilGuard(instruction)
 }
 
 func (p *context) compileCoroImplicitNilAccessGuard(b llssa.Builder, base llssa.Expr) llssa.Expr {
@@ -197,6 +216,54 @@ func (p *context) compileCoroImplicitNilAccessGuard(b llssa.Builder, base llssa.
 
 	isNil := b.BinOp(token.EQL, base, b.Prog.Nil(base.Type))
 	p.compileCoroFaultConditionGuard(b, isNil, coroFaultNilV1)
+	return base
+}
+
+// compileCoroPlannedWrapNilGuard preserves the source-specific panic value of
+// ssa:wrapnilchk while keeping stackless control flow explicit. The fault arm
+// asks the runtime only to construct persistent interface words, then feeds
+// those words through the same cleanup/recover and terminal-panic machinery
+// used by an explicit Go panic.
+func (p *context) compileCoroPlannedWrapNilGuard(
+	b llssa.Builder,
+	instruction ssa.Instruction,
+	base, recvType, methodName llssa.Expr,
+) llssa.Expr {
+	if !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn || instruction == nil {
+		panic("value-method nil guard escaped its physical coroutine body")
+	}
+	if !p.coroEmissionExplicitStatus() {
+		panic("value-method nil guard requires the PhysicalABIV1 explicit-status panic ABI")
+	}
+	p.beginCoroPlannedNilGuard(instruction)
+	isNil := b.BinOp(token.EQL, base, b.Prog.Nil(base.Type))
+	fault := b.Func.MakeBlock()
+	normal := b.Func.MakeBlock()
+	b.If(isNil, fault, normal)
+
+	b.SetBlockEx(fault, llssa.AtEnd, false)
+	typeSlot := p.coroFrameAlloca(p.prog.VoidPtr())
+	dataSlot := p.coroFrameAlloca(p.prog.VoidPtr())
+	b.Store(typeSlot, p.prog.Nil(p.prog.VoidPtr()))
+	b.Store(dataSlot, p.prog.Nil(p.prog.VoidPtr()))
+	payload := p.pkg.NewFunc(
+		coroWrapNilPayloadHookV1,
+		coroWrapNilPayloadSignatureV1(),
+		llssa.InC,
+	)
+	b.Call(
+		payload.Expr,
+		b.Convert(p.prog.VoidPtr(), b.StringData(recvType)),
+		b.Convert(p.prog.Uintptr(), b.StringLen(recvType)),
+		b.Convert(p.prog.VoidPtr(), b.StringData(methodName)),
+		b.Convert(p.prog.Uintptr(), b.StringLen(methodName)),
+		b.Convert(p.prog.VoidPtr(), typeSlot),
+		b.Convert(p.prog.VoidPtr(), dataSlot),
+	)
+	typeWord, dataWord := b.Load(typeSlot), b.Load(dataSlot)
+	p.compileCoroTerminalPanicPair(b, typeWord, dataWord)
+
+	b.SetBlockContinuation(normal)
 	return base
 }
 
@@ -604,7 +671,13 @@ func (c *coroBodyContext) implicitFaultWithOperands(
 	if c == nil || p == nil || b == nil || c.abi.version < coroPhysicalABIVersionV1 || c.finalSuspend == nil {
 		panic("implicit nil fault requires a PhysicalABIV1 body and shared final suspend")
 	}
-	c.publishState(b, coroSuspendPanic, coroLifecycleFinalSuspended, c.terminalStateID())
+	c.publishState(
+		b,
+		coroSuspendPanic,
+		coroLifecycleFinalSuspended,
+		c.terminalStateID(),
+		p.coroCurrentSourceLine(),
+	)
 	args := []llssa.Expr{
 		c.task,
 		c.coro.Handle(),
@@ -692,7 +765,7 @@ func (s *coroStaticCleanupState) enterFaultWithOperands(
 		panic("implicit nil fault cleanup has no active coroutine state")
 	}
 	typeWord, dataWord := p.materializeCoroFaultPayloadWithOperands(b, kind, operands)
-	s.enterPanic(b, typeWord, dataWord)
+	s.enterPanic(b, typeWord, dataWord, p.coroCurrentSourceLine())
 }
 
 // replaceFault is the cleanup-internal counterpart used by operations such as
@@ -704,5 +777,5 @@ func (s *coroStaticCleanupState) replaceFault(p *context, b llssa.Builder, kind 
 		panic("implicit cleanup fault has no active coroutine state")
 	}
 	typeWord, dataWord := p.materializeCoroFaultPayload(b, kind)
-	s.replacePanic(b, typeWord, dataWord)
+	s.replacePanicInline(p, b, typeWord, dataWord, p.coroCurrentSourceLine())
 }

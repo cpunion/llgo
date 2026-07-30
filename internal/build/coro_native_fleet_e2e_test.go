@@ -1808,6 +1808,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_timer_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_nil_fault.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_trace_release.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_atomic_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet.go"),
@@ -1882,20 +1883,22 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	if len(pkgs) == 0 || pkgs[0].LPkg == nil {
 		t.Fatal("native fleet production runtime island produced no root package")
 	}
-	pkgs[0].LPkg.Prog.Dispose()
+	prog := pkgs[0].LPkg.Prog
 	for id := range allowed {
 		if !seen[id] {
 			t.Fatalf("native fleet runtime did not emit required module %q", id)
 		}
 	}
 	objects = append(objects,
+		buildCoroRuntimeIslandFaultStringStubs(t, prog, temp),
 		buildCoroNativeWorkerCallObject(t, temp),
 		buildCoroNativeDoorbellObject(t, temp),
 		buildCoroNativePollObject(t, temp),
 		buildCoroNativeFleetOwnerObject(t, temp),
 	)
-	if len(objects) != len(allowed)+4 {
-		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus worker, doorbell, poll, and fleet-owner leaves", len(objects), len(allowed))
+	prog.Dispose()
+	if len(objects) != len(allowed)+5 {
+		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus fault-string, worker, doorbell, poll, and fleet-owner leaves", len(objects), len(allowed))
 	}
 	return objects
 }

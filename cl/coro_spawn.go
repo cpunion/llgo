@@ -91,10 +91,11 @@ func resolveCoroDirectStaticSpawn(
 	targetPlan, found = plan.FunctionPlan(target)
 	if !found || targetPlan.ID != callPlan.Targets[0] || targetPlan.External != coro.Defined ||
 		targetPlan.Emission != coro.EmitCoroutine || targetPlan.Primary != coro.PrimaryCoroutine ||
-		targetPlan.FuncRep != coro.DirectCoro || targetPlan.Demand != coro.AsyncDemand ||
+		(targetPlan.FuncRep != coro.DirectCoro && targetPlan.FuncRep != coro.Dispatch) ||
+		targetPlan.Demand != coro.AsyncDemand ||
 		!targetPlan.Effect.Contains(coro.YieldOnly) {
 		return nil, coro.FunctionPlan{}, fmt.Errorf(
-			"spawn method target %q is not one demanded preemptible direct coroutine (external=%s emission=%s primary=%s representation=%s demand=%s effect=%s)",
+			"spawn method target %q is not one demanded preemptible direct-callable coroutine (external=%s emission=%s primary=%s representation=%s demand=%s effect=%s)",
 			callPlan.Targets[0], targetPlan.External, targetPlan.Emission, targetPlan.Primary,
 			targetPlan.FuncRep, targetPlan.Demand, targetPlan.Effect,
 		)
@@ -218,7 +219,6 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 		panic("closed static spawn has an incomplete frozen physical control recipe")
 	}
 
-	p.recordCallerLocationForCall(b, &spawn.Call)
 	p.emitPCLineLabel(b, spawn.Pos())
 	// Go SSA already sequences argument-producing instructions. Re-materialize
 	// every exact operand here, in source order, before the begin transaction.
@@ -255,19 +255,57 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 // and HasCoro checks; plain-only or corrupt values never fall back to a native
 // callback, TLS, or a synchronous adapter.
 func (p *context) compileCoroManagedDispatchSpawn(b llssa.Builder, spawn *ssa.Go) {
-	body := p.coroBody()
-	if body == nil {
-		panic("managed dispatch spawn requires an active physical coroutine body")
+	if spawn == nil || spawn.Common() == nil {
+		panic("managed dispatch spawn requires an exact goroutine call")
 	}
-	p.recordCallerLocationForCall(b, &spawn.Call)
+	if spawn.Common().IsInvoke() {
+		p.compileCoroManagedInterfaceDispatchSpawn(b, spawn)
+		return
+	}
 	p.emitPCLineLabel(b, spawn.Pos())
 	// Preserve Go's evaluation order at the scheduler transaction boundary:
 	// first the function value, then every explicit argument left-to-right.
 	fn := p.compileValue(b, spawn.Call.Value)
 	args := p.compileValues(b, spawn.Call.Args, fnNormal)
-	abi, err := newCoroPlainDispatchABI(p, spawn.Call.Signature())
+	p.compileCoroDispatchSpawnTransaction(b, fn, args, spawn.Call.Signature(), "managed descriptor spawn")
+}
+
+// compileCoroManagedInterfaceDispatchSpawn extracts the universal method
+// descriptor and receiver environment from the itab, then enters the same
+// scheduler transaction used by receiver-free function values. No interface
+// adapter goroutine or second runtime path is required.
+func (p *context) compileCoroManagedInterfaceDispatchSpawn(b llssa.Builder, spawn *ssa.Go) {
+	if p.compilation == nil || p.compilation.coroManagedInterface == nil ||
+		!p.compilation.coroManagedInterface.acceptsCall(spawn) {
+		panic("managed interface spawn escaped its frozen receiver-aware descriptor capability")
+	}
+	signature, err := coroInterfaceDispatchSourceSignature(spawn.Common())
 	if err != nil {
-		panic(fmt.Errorf("managed descriptor spawn: %w", err))
+		panic(fmt.Errorf("managed interface spawn: %w", err))
+	}
+	method, args := p.compileCoroManagedInterfaceOperands(b, spawn)
+	p.compileCoroDispatchSpawnTransaction(b, method, args, signature, "managed interface spawn")
+}
+
+// compileCoroDispatchSpawnTransaction is the sole descriptor-based goroutine
+// transaction. The caller has already evaluated the callee and all arguments
+// in Go order. The descriptor supplies either a receiver-free closure
+// environment or an interface receiver environment; both share the universal
+// coroutine entry ABI.
+func (p *context) compileCoroDispatchSpawnTransaction(
+	b llssa.Builder,
+	fn llssa.Expr,
+	args []llssa.Expr,
+	signature *types.Signature,
+	operation string,
+) {
+	body := p.coroBody()
+	if body == nil {
+		panic(operation + " requires an active physical coroutine body")
+	}
+	abi, err := newCoroPlainDispatchABI(p, signature)
+	if err != nil {
+		panic(fmt.Errorf("%s: %w", operation, err))
 	}
 	opts := llssa.CoroDispatchCallOptions{
 		Version: coroPlainDispatchVersion,

@@ -95,6 +95,7 @@ jobs:
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_executor.go \
             ./internal/runtime/coro_panic_payload.go \
+            ./internal/runtime/coro_panic_trace_release_test_adapter.go \
             ./internal/runtime/coro_executor_driver_legacy.go \
             ./internal/runtime/coro_ready_distribution_default.go \
             ./internal/runtime/coro_target_executor_retired_default.go \
@@ -124,6 +125,7 @@ jobs:
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_executor.go \
             ./internal/runtime/coro_panic_payload.go \
+            ./internal/runtime/coro_panic_trace_release_test_adapter.go \
             ./internal/runtime/coro_executor_driver_legacy.go \
             ./internal/runtime/coro_ready_distribution_default.go \
             ./internal/runtime/coro_target_executor_retired_default.go \

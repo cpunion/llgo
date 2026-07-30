@@ -23,6 +23,8 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
     llvm.trap
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init$guard
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.c1fec53a20109572cb1b7e70a80a5499
 
 [UseIfaceMethod]
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:

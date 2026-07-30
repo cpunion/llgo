@@ -747,15 +747,22 @@ func (l *selectChanList) insert(pos int, ch *Chan) {
 	l.set(pos, ch)
 }
 
+// selectChanAddressLess keeps the forward-only pointer address observation in
+// one non-suspending leaf. selectChanList.add may be preempted while walking a
+// large select set, so it must retain real *Chan values across that walk rather
+// than a uintptr that no longer keeps its source pointer live.
+func selectChanAddressLess(left, right *Chan) bool {
+	return uintptr(unsafe.Pointer(left)) < uintptr(unsafe.Pointer(right))
+}
+
 func (l *selectChanList) add(ch *Chan) {
-	addr := uintptr(unsafe.Pointer(ch))
 	pos := 0
 	for pos < l.len {
-		cur := uintptr(unsafe.Pointer(l.get(pos)))
-		if cur == addr {
+		cur := l.get(pos)
+		if cur == ch {
 			return
 		}
-		if cur > addr {
+		if selectChanAddressLess(ch, cur) {
 			break
 		}
 		pos++

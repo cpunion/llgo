@@ -39,14 +39,15 @@ func TestHeaderV1TargetNeutralLayout(t *testing.T) {
 		{"SuspendReason", unsafe.Offsetof(header.SuspendReason), 5 * pointerSize},
 		{"Lifecycle", unsafe.Offsetof(header.Lifecycle), 5*pointerSize + 2},
 		{"StateID", unsafe.Offsetof(header.StateID), 5*pointerSize + 4},
-		{"Flags", unsafe.Offsetof(header.Flags), 5*pointerSize + 8},
+		{"Line", unsafe.Offsetof(header.Line), 5*pointerSize + 8},
+		{"Flags", unsafe.Offsetof(header.Flags), 5*pointerSize + 12},
 	}
 	for _, field := range wants {
 		if field.got != field.want {
 			t.Fatalf("HeaderV1.%s offset = %d, want %d", field.name, field.got, field.want)
 		}
 	}
-	rawSize := 5*pointerSize + 12
+	rawSize := 5*pointerSize + 16
 	wantSize := (rawSize + pointerSize - 1) &^ (pointerSize - 1)
 	if got := unsafe.Sizeof(header); got != wantSize {
 		t.Fatalf("HeaderV1 size = %d, want %d", got, wantSize)
@@ -109,7 +110,11 @@ func newTestFrame(t *testing.T, g *G, handle, parent unsafe.Pointer) *testFrame 
 		t.Fatal("compute test frame allocation")
 	}
 	memory := make([]byte, total)
-	descriptor := new(byte)
+	descriptor := &FrameDescriptorV1{
+		Version:     1,
+		ResultAlign: 1,
+		Function:    "test.frame",
+	}
 	storage, ok := RegisterFrame(g, unsafe.Pointer(&memory[0]), total, size, align, unsafe.Pointer(descriptor))
 	if !ok {
 		t.Fatal("register test frame")
@@ -144,6 +149,37 @@ func releaseTestFrame(t *testing.T, g *G, frame *testFrame) {
 	if raw != unsafe.Pointer(&frame.memory[0]) || total != uintptr(len(frame.memory)) {
 		t.Fatalf("release range = (%p, %d), want (%p, %d)", raw, total, &frame.memory[0], len(frame.memory))
 	}
+	if metadata := (*Frame)(raw); metadata.retainPanicTrace &&
+		!RetainPendingPanicTraceFrame(g, raw, total) {
+		t.Fatal("retain pending panic trace frame")
+	}
+}
+
+func retainDetachedTestPanicTrace(
+	t *testing.T,
+	g *G,
+	carrier *Frame,
+	typeWord, dataWord unsafe.Pointer,
+) (memory []byte, descriptor *FrameDescriptorV1) {
+	t.Helper()
+	descriptor = &FrameDescriptorV1{
+		Version:  1,
+		Function: "test.oldPanic",
+	}
+	memory = make([]byte, unsafe.Sizeof(Frame{}))
+	raw := unsafe.Pointer(&memory[0])
+	*(*Frame)(raw) = Frame{
+		owner:          g,
+		rawBase:        raw,
+		allocationSize: uintptr(len(memory)),
+		descriptor:     unsafe.Pointer(descriptor),
+		state:          FrameDestroyed,
+		parent:         carrier,
+	}
+	if !retainPanicTraceFrame(g, raw, uintptr(len(memory)), typeWord, dataWord) {
+		t.Fatal("retain detached test panic trace")
+	}
+	return memory, descriptor
 }
 
 func TestFramePublishAndHandoffState(t *testing.T) {

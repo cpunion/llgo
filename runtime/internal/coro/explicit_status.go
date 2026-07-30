@@ -129,6 +129,14 @@ func PrepareExplicitStatus(
 	if frame := findFrame(g, handle); frame != nil && frame.parent != nil && hasAwaitCompletionTransaction(frame) {
 		return prepareChildPanic(g, frame, header, status, typeWord, dataWord)
 	}
+	if !canStagePanicTraceDiscard(g) {
+		return false
+	}
+	if activePanicTrace(g) {
+		if _, _, ok := panicTraceIdentity(g.panicTraceHead); !ok {
+			return false
+		}
+	}
 	record := &g.panicRecord
 	if !preemptCompareAndSwap(&record.status, uint32(ExplicitStatusNone), explicitStatusPublishing) {
 		return false
@@ -151,6 +159,16 @@ func PrepareExplicitStatus(
 		header.SuspendReason != uint16(SuspendPanic) ||
 		header.Lifecycle != uint16(FrameFinalSuspended) || !validPanicAncestry(g, frame) {
 		return reject()
+	}
+	if activePanicTrace(g) {
+		traceType, traceData, ok := panicTraceIdentity(g.panicTraceHead)
+		if !ok || panicTraceCarrier(g) != frame ||
+			traceType != typeWord || traceData != dataWord {
+			// A cleanup-local replacement must first use ReplacePanicTrace.
+			// Payload inequality is not a sound substitute for that exact
+			// compiler semantic operation.
+			return reject()
+		}
 	}
 
 	// The winner is the only writer. Publish pending ownership before the

@@ -2187,8 +2187,57 @@ func dynamic(callback func()) { callback() }
 			return UnknownManaged, nil
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "requires an ordinary interface invoke") {
+	if err == nil || !strings.Contains(err.Error(), "requires an interface invoke") {
 		t.Fatalf("interface certificate on function-value call error = %v", err)
+	}
+}
+
+func TestSSAPlanResolvesManagedInterfaceDispatchSpawn(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_interface_spawn.go", `package coroid
+type closer interface { Close() error }
+func launch(value closer) { go value.Close() }
+`)
+	launch := packageFunction(t, pkg, "launch")
+	var spawn *ssa.Go
+	for _, block := range launch.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.Go); ok {
+				spawn = candidate
+			}
+		}
+	}
+	if spawn == nil || !spawn.Common().IsInvoke() {
+		t.Fatal("managed interface spawn is absent from SSA")
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: launch, Demand: AsyncDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == launch {
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+			if call == spawn {
+				return UnknownManagedInterfaceDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, err := plan.ResolveManagedSpawn(spawn)
+	if err != nil {
+		t.Fatalf("resolve managed interface spawn: %v", err)
+	}
+	if callPlan.Kind != CallSpawn || callPlan.Rep != Dispatch || !callPlan.Open ||
+		callPlan.Unresolved != UnknownManagedInterfaceDispatch || !callPlan.MayBeNil {
+		t.Fatalf("managed interface spawn CallPlan = %+v", callPlan)
+	}
+	if _, err := plan.ResolveManagedDispatchSpawn(spawn); err == nil ||
+		!strings.Contains(err.Error(), "receiver-aware") {
+		t.Fatalf("receiver-free resolver accepted interface spawn: %v", err)
 	}
 }
 

@@ -224,6 +224,34 @@ func publishAwaitCompletion(parent *Frame, status CompletionStatus, typeWord, da
 // resume transaction as a normal child return.  It deliberately does not
 // publish G.panicRecord: the parent still owns Go cleanup/recover semantics and
 // may either handle the outcome or republish it to its own parent later.
+func panicTraceRecoveryOwner(frame *Frame) (owner *Frame, valid bool) {
+	if frame == nil {
+		return nil, false
+	}
+	for child := frame; child.parent != nil; child = child.parent {
+		record := &child.parent.completion
+		// Bootstrap/legacy root awaits do not transport a managed child
+		// outcome and cannot own a recover scope. An exactly empty record is a
+		// valid boundary; any non-empty record for another child is corruption.
+		if emptyCompletionRecord(record) {
+			return nil, true
+		}
+		if record.child != child.handle {
+			return nil, false
+		}
+		switch record.status {
+		case completionArmed:
+			// An ordinary nested managed call may still run inside an outer
+			// deferred-call recovery scope. Continue to that ancestor.
+		case completionRecoverArmed, completionRecoverTaken:
+			return child.parent, true
+		default:
+			return nil, false
+		}
+	}
+	return nil, true
+}
+
 func prepareChildPanic(
 	g *G,
 	frame *Frame,
@@ -246,9 +274,40 @@ func prepareChildPanic(
 		!validAwaitCompletionPublisher(g, frame, CompletionPanic) {
 		return false
 	}
+	recoveryOwner, validScope := panicTraceRecoveryOwner(frame)
+	if !validScope {
+		return false
+	}
+	replacesPanic := recoveryOwner != nil
+	if frame.retainPanicTrace ||
+		replacesPanic && !canStagePanicTraceDiscard(g) {
+		return false
+	}
+	if activePanicTrace(g) {
+		carrier := panicTraceCarrier(g)
+		existingType, existingData, ok := panicTraceIdentity(g.panicTraceHead)
+		switch {
+		case !ok:
+			return false
+		case carrier == frame:
+			// This frame is forwarding the exact child panic whose retained
+			// trace it owns. A deferred-call recovery scope further out does
+			// not turn propagation into another replacement.
+			if existingType != typeWord || existingData != dataWord {
+				return false
+			}
+			replacesPanic = false
+		case recoveryOwner == nil || carrier != recoveryOwner:
+			return false
+		}
+	}
 	if !publishAwaitCompletion(frame.parent, CompletionPanic, typeWord, dataWord) {
 		return false
 	}
+	if replacesPanic && !stagePanicTraceDiscard(g) {
+		return false
+	}
+	frame.retainPanicTrace = true
 	g.pending = pendingTransition{kind: pendingComplete, from: frame}
 	return true
 }
@@ -301,7 +360,8 @@ func ConsumeAwaitCompletion(g *G, parentHandle unsafe.Pointer) (CompletionSnapsh
 			return CompletionSnapshot{}, false
 		}
 	case CompletionPanic:
-		if record.typeWord == nil {
+		if record.typeWord == nil || !activePanicTrace(g) ||
+			panicTraceCarrier(g) != parent {
 			return CompletionSnapshot{}, false
 		}
 	case CompletionAbort, CompletionShutdown, CompletionGoexit:
@@ -310,6 +370,20 @@ func ConsumeAwaitCompletion(g *G, parentHandle unsafe.Pointer) (CompletionSnapsh
 		}
 	default:
 		return CompletionSnapshot{}, false
+	}
+	if record.status == CompletionReturnRecovered || record.status == CompletionGoexit {
+		if activePanicTrace(g) {
+			carrier := panicTraceCarrier(g)
+			if carrier != parent {
+				recoveryOwner, valid := panicTraceRecoveryOwner(parent)
+				if !valid || recoveryOwner == nil || carrier != recoveryOwner {
+					return CompletionSnapshot{}, false
+				}
+			}
+		}
+		if !stagePanicTraceDiscard(g) {
+			return CompletionSnapshot{}, false
+		}
 	}
 	*record = CompletionRecord{}
 	return snapshot, true

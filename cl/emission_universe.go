@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/token"
 	"go/types"
 	"path"
 	"path/filepath"
@@ -139,6 +140,12 @@ type preparedEmissionPackage struct {
 	metadataOnly      bool
 	assemblyNoSuspend map[string]CoroAssemblyNoSuspendProof
 	rawDataSymbols    CoroRawDataSymbolProfile
+	// Source-only lowering facts are package invariants. Emission planning
+	// creates a lightweight context for every reachable function; rescanning
+	// the complete package AST in each context is quadratic on standard-library
+	// packages.
+	addrOfFieldAddrs        map[token.Pos]none
+	sourceUsesRuntimeCaller bool
 }
 
 // EmissionUniverse is an immutable set of canonical exact SSA functions and
@@ -152,6 +159,7 @@ type EmissionUniverse struct {
 	completeRuntimeABI bool
 	logicalLocality    bool
 	coroCapabilities   coro.TargetCapabilities
+	callerTracking     *CallerTracking
 	packages           map[*ssa.Package]*preparedEmissionPackage
 	byTypes            map[*types.Package]*preparedEmissionPackage
 	typeOwners         map[*types.Package]map[*preparedEmissionPackage]none
@@ -159,6 +167,11 @@ type EmissionUniverse struct {
 	typesDup           map[*types.Package]bool
 	byPath             map[string]*preparedEmissionPackage
 	pathDup            map[string]bool
+	// loadedPackageSnapshot is frozen after every input package has been
+	// registered. Effective-type projection is read-only, so its short-lived
+	// contexts share this map instead of rebuilding the complete package index
+	// once per interface candidate.
+	loadedPackageSnapshot map[*types.Package]*pkgInfo
 
 	// libraryEffects is the narrow immutable producer/consumer view for
 	// cross-archive coroutine facts. Keeping physical ABI and symbol proofs
@@ -225,10 +238,20 @@ type EmissionUniverse struct {
 	globalPhysicalGroups    map[string]CoroGlobalPhysicalIdentity
 	globalPhysicalSeen      map[*ssa.Global]none
 
-	localGenericMu     sync.Mutex
-	localGenericTypes  map[*types.Named]emissionLocalGenericType
-	localGenericOwners map[*types.Named]*ssa.Function
-	genericNamedTypes  map[*types.Named]*types.Named
+	effectiveTypeMu         sync.Mutex
+	effectiveTypeCacheReady bool
+	effectiveTypes          map[emissionEffectiveTypeKey]types.Type
+	localGenericMu          sync.Mutex
+	localGenericTypes       map[*types.Named]emissionLocalGenericType
+	localGenericOwners      map[*types.Named]*ssa.Function
+	genericNamedTypes       map[*types.Named]*types.Named
+}
+
+type emissionEffectiveTypeKey struct {
+	owner                *preparedEmissionPackage
+	function             *ssa.Function
+	typ                  types.Type
+	preservePatchedNamed bool
 }
 
 // emissionCanonicalIndex is the single cross-owner canonicalization boundary
@@ -647,6 +670,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		completeRuntimeABI:      options.CompleteRuntimeABI,
 		logicalLocality:         options.LogicalLocality,
 		coroCapabilities:        options.CoroTargetCapabilities,
+		callerTracking:          NewCallerTracking(),
 		packages:                make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
 		byTypes:                 make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
 		typeOwners:              make(map[*types.Package]map[*preparedEmissionPackage]none, len(inputs)*3),
@@ -708,6 +732,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		localGenericTypes:       make(map[*types.Named]emissionLocalGenericType),
 		localGenericOwners:      make(map[*types.Named]*ssa.Function),
 		genericNamedTypes:       make(map[*types.Named]*types.Named),
+		effectiveTypes:          make(map[emissionEffectiveTypeKey]types.Type),
 	}
 	u.libraryEffects.index.universe = u
 	for i, input := range inputs {
@@ -740,7 +765,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			return nil, fmt.Errorf("prepare emission universe: duplicate stable package identity %q", identity)
 		}
 		identities[identity] = input.SSA
-		scan := &context{prog: prog, skips: make(map[string]none)}
+		scan := &context{prog: prog, goTyps: input.SSA.Pkg, skips: make(map[string]none)}
 		scan.initFiles(pkgPath, input.Files, input.SSA.Pkg.Name() == "C")
 		assemblyNoSuspend, err := cloneCoroAssemblyNoSuspendProofs(input.AssemblyNoSuspendProofs)
 		if err != nil {
@@ -751,21 +776,23 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			return nil, fmt.Errorf("prepare emission universe: package %q: %w", identity, err)
 		}
 		prepared := &preparedEmissionPackage{
-			order:             i,
-			identity:          identity,
-			ssa:               input.SSA,
-			files:             append([]*ast.File(nil), input.Files...),
-			pkgPath:           pkgPath,
-			oldTypes:          input.SSA.Pkg,
-			pkgTypes:          input.SSA.Pkg,
-			skips:             cloneNoneMap(scan.skips),
-			skipall:           scan.skipall,
-			winners:           make(map[string]*ssa.Function),
-			selected:          make(map[*ssa.Function]none),
-			fromPatch:         make(map[*ssa.Function]bool),
-			metadataOnly:      input.MetadataOnly,
-			assemblyNoSuspend: assemblyNoSuspend,
-			rawDataSymbols:    rawDataSymbols,
+			order:                   i,
+			identity:                identity,
+			ssa:                     input.SSA,
+			files:                   append([]*ast.File(nil), input.Files...),
+			pkgPath:                 pkgPath,
+			oldTypes:                input.SSA.Pkg,
+			pkgTypes:                input.SSA.Pkg,
+			skips:                   cloneNoneMap(scan.skips),
+			skipall:                 scan.skipall,
+			winners:                 make(map[string]*ssa.Function),
+			selected:                make(map[*ssa.Function]none),
+			fromPatch:               make(map[*ssa.Function]bool),
+			metadataOnly:            input.MetadataOnly,
+			assemblyNoSuspend:       assemblyNoSuspend,
+			rawDataSymbols:          rawDataSymbols,
+			addrOfFieldAddrs:        collectAddrOfFieldSelectors(input.Files),
+			sourceUsesRuntimeCaller: filesUseRuntimeCaller(input.Files),
 		}
 		if patch, ok := patches[pkgPath]; ok {
 			if patch.Alt == nil || patch.Types == nil {
@@ -809,6 +836,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			u.byPath[pkgPath] = prepared
 		}
 	}
+	u.loadedPackageSnapshot = u.loadedPackages(false)
 	if options.CompleteRuntimeABI {
 		if prog == nil {
 			return nil, fmt.Errorf("prepare emission universe: complete runtime ABI requires an LLVM SSA program")
@@ -953,6 +981,10 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	if err := u.coroProgramIR.freezeCallSites(u); err != nil {
 		return nil, fmt.Errorf("prepare emission universe: freeze coroutine call SitePlans: %w", err)
 	}
+	// Every package, local-generic owner, and patch relation is now frozen.
+	// Subsequent preflight/codegen queries may safely reuse exact effective
+	// type projections instead of rebuilding isomorphic go/types graphs.
+	u.effectiveTypeCacheReady = true
 	return u, nil
 }
 
@@ -1090,6 +1122,7 @@ func (u *EmissionUniverse) freezeCoroPatchInitEntries() error {
 		if owner == nil {
 			continue
 		}
+		redirectedTargets := make(map[*ssa.Function]ssa.CallInstruction)
 		for _, block := range owner.Blocks {
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(*ssa.Call)
@@ -1107,15 +1140,23 @@ func (u *EmissionUniverse) freezeCoroPatchInitEntries() error {
 					call.Common().Signature().Results().Len() != 0 {
 					return fmt.Errorf("prepare emission universe: patched initializer call in %q has an invalid direct func() occurrence", owner.Name())
 				}
-				semanticOrdinal, ordinalErr := coro.SemanticInstructionOrdinal(call)
-				if ordinalErr != nil {
-					return fmt.Errorf("prepare emission universe: patched initializer call in %q has no stable semantic ordinal: %w", owner.Name(), ordinalErr)
+				if previous := redirectedTargets[redirect.target]; previous != nil {
+					return fmt.Errorf(
+						"prepare emission universe: patched initializer %q occurs more than once in %q",
+						redirect.target.Name(), owner.Name(),
+					)
 				}
+				redirectedTargets[redirect.target] = call
+				// A Go package initializer contains exactly one dependency call
+				// for each imported package. The owner-local target identity is
+				// therefore the complete logical occurrence key. Do not include
+				// the raw SSA instruction ordinal here: x/tools may insert
+				// unrelated initializer bookkeeping before this call depending
+				// on package-loading/cache state. The exact source occurrence is
+				// already retained by patchInitRedirects for code generation.
 				logicalName := framedEmissionKey(
-					"$llgo.patch.public-init-v1",
+					"$llgo.patch.public-init-v2",
 					emissionDigest(u.finalIdentity(redirect.target)),
-					strconv.Itoa(block.Index),
-					strconv.Itoa(semanticOrdinal),
 				)
 				redirect.logicalName = logicalName
 				if !u.patchInitRedirects.record(call, redirect) {
@@ -1890,6 +1931,18 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	}
+	if shape, shaped := coroExactIntrinsicShapeForOpcode(opcode); shaped {
+		if err := verifyCoroExactIntrinsicCallShape(
+			direct,
+			shape.name,
+			shape.signature,
+			shape.parameters,
+			shape.result,
+		); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return semantics, true, nil
+	}
 	switch opcode {
 	case llgoCstr:
 		args := direct.Common().Args
@@ -2171,69 +2224,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
-	case llgoCoroPark:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroPark",
-			"func(pointer, uint32)",
-			[]coroIntrinsicTypeShape{
-				{anyPointer: true},
-				{basic: types.Uint32},
-			},
-			nil,
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
 	case llgoCoroYield:
 		if err := verifyCoroExactVoidIntrinsicCallSite(direct, "llgo.coroYield"); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineYield, true, nil
-	case llgoCoroTimerSleep:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroTimerSleep",
-			"func(int64)",
-			[]coroIntrinsicTypeShape{{basic: types.Int64}},
-			nil,
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
-	case llgoCoroPollWait:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroPollWait",
-			"func(uintptr, int32, uint32, int64) uint32",
-			[]coroIntrinsicTypeShape{
-				{basic: types.Uintptr},
-				{basic: types.Int32},
-				{basic: types.Uint32},
-				{basic: types.Int64},
-			},
-			&coroIntrinsicTypeShape{basic: types.Uint32},
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
-	case llgoCoroControlledTimerWait:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroControlledTimerWait",
-			"func(unsafe.Pointer, *uint32, *uint32, uint32, int64) uint32",
-			[]coroIntrinsicTypeShape{
-				{basic: types.UnsafePointer},
-				{pointerElement: types.Uint32},
-				{pointerElement: types.Uint32},
-				{basic: types.Uint32},
-				{basic: types.Int64},
-			},
-			&coroIntrinsicTypeShape{basic: types.Uint32},
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
 	case llgoCoroCriticalEnter, llgoCoroCriticalExit:
 		if err := verifyCoroExactVoidIntrinsicCallSite(direct, "llgo coroutine critical marker"); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
@@ -2256,23 +2251,6 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		// been reselected. Unlock likewise exposes already queued peers at one
 		// explicit scheduler boundary.
 		return CoroIntrinsicCallInlineYield, true, nil
-	case llgoCoroFFICall:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroFFICall",
-			"func(pointer, unsafe.Pointer, unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer)",
-			[]coroIntrinsicTypeShape{
-				{anyPointer: true},
-				{anyPointer: true},
-				{anyPointer: true},
-				{anyPointer: true},
-				{anyPointer: true},
-			},
-			nil,
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
 	case llgoCoroHostOperation:
 		if !u.coroCapabilities.HostOperation() {
 			return CoroIntrinsicCallUnsupported, true, nil
@@ -2771,6 +2749,10 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// stringData projects the already-rooted source string data word. It
 		// emits no call and owns no scheduler state.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoBoolToUint8:
+		// boolToUint8 lowers to one select between the constant byte values
+		// zero and one. The compiler consumes the declaration completely.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoAllocaCStr, llgoAllocaCStrs:
 		// The C-string allocation intrinsics lower their size arithmetic and
 		// storage directly, then call runtime.AllocU/CStrCopy in a physical
@@ -3028,6 +3010,83 @@ type coroIntrinsicTypeShape struct {
 	pointerDepth   uint8
 	sliceElement   types.BasicKind
 	anyPointer     bool
+}
+
+type coroExactIntrinsicShape struct {
+	name       string
+	signature  string
+	parameters []coroIntrinsicTypeShape
+	result     *coroIntrinsicTypeShape
+}
+
+// coroExactIntrinsicShapeForOpcode is the single data-driven boundary for
+// intrinsics whose complete recipe is their exact scalar/pointer signature.
+// Intrinsics with constant operands, runtime-helper requirements, target
+// capabilities, or other semantic facts retain their dedicated verifier.
+func coroExactIntrinsicShapeForOpcode(opcode int) (coroExactIntrinsicShape, bool) {
+	switch opcode {
+	case llgoBoolToUint8:
+		return coroExactIntrinsicShape{
+			name:       "llgo.boolToUint8",
+			signature:  "func(bool) uint8",
+			parameters: []coroIntrinsicTypeShape{{basic: types.Bool}},
+			result:     &coroIntrinsicTypeShape{basic: types.Uint8},
+		}, true
+	case llgoCoroPark:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroPark",
+			signature: "func(pointer, uint32)",
+			parameters: []coroIntrinsicTypeShape{
+				{anyPointer: true},
+				{basic: types.Uint32},
+			},
+		}, true
+	case llgoCoroTimerSleep:
+		return coroExactIntrinsicShape{
+			name:       "llgo.coroTimerSleep",
+			signature:  "func(int64)",
+			parameters: []coroIntrinsicTypeShape{{basic: types.Int64}},
+		}, true
+	case llgoCoroPollWait:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroPollWait",
+			signature: "func(uintptr, int32, uint32, int64) uint32",
+			parameters: []coroIntrinsicTypeShape{
+				{basic: types.Uintptr},
+				{basic: types.Int32},
+				{basic: types.Uint32},
+				{basic: types.Int64},
+			},
+			result: &coroIntrinsicTypeShape{basic: types.Uint32},
+		}, true
+	case llgoCoroControlledTimerWait:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroControlledTimerWait",
+			signature: "func(unsafe.Pointer, *uint32, *uint32, uint32, int64) uint32",
+			parameters: []coroIntrinsicTypeShape{
+				{basic: types.UnsafePointer},
+				{pointerElement: types.Uint32},
+				{pointerElement: types.Uint32},
+				{basic: types.Uint32},
+				{basic: types.Int64},
+			},
+			result: &coroIntrinsicTypeShape{basic: types.Uint32},
+		}, true
+	case llgoCoroFFICall:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroFFICall",
+			signature: "func(pointer, unsafe.Pointer, unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer)",
+			parameters: []coroIntrinsicTypeShape{
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+			},
+		}, true
+	default:
+		return coroExactIntrinsicShape{}, false
+	}
 }
 
 func (shape coroIntrinsicTypeShape) matches(typ types.Type) bool {
@@ -4221,6 +4280,19 @@ func functionNeedsLinkOnce(fn *ssa.Function) bool {
 	return false
 }
 
+// functionHasCoalesciblePhysicalDefinition is strictly an LLVM symbol/linkage
+// rule. Generic instances may be emitted by several importing packages.
+// Syntax-free SSA wrappers may likewise be embedded beside ABI descriptors in
+// several independently-built archives. Both therefore need one
+// owner-independent physical symbol.
+//
+// This does not merge logical FunctionIDs: separately loaded package variants
+// can contain equivalent wrappers which link to one coalesced definition while
+// retaining distinct analysis provenance.
+func functionHasCoalesciblePhysicalDefinition(fn *ssa.Function) bool {
+	return functionNeedsLinkOnce(fn) || isEmissionGeneratedWrapper(fn)
+}
+
 func (u *EmissionUniverse) samePromotedWrapperLinkIdentity(owner *preparedEmissionPackage, left, right *ssa.Function) bool {
 	leftKind, rightKind := wrapperKind(left), wrapperKind(right)
 	if leftKind == "" || leftKind != rightKind {
@@ -4238,9 +4310,9 @@ func (u *EmissionUniverse) samePromotedWrapperLinkIdentity(owner *preparedEmissi
 }
 
 func (u *EmissionUniverse) structuralWrapperABIKey(owner *preparedEmissionPackage, fn *ssa.Function) string {
-	fields := []string{"wrapper-abi-v1", structuralEmissionTypeKey(u.effectiveType(owner, fn, fn.Signature))}
+	fields := []string{"wrapper-abi-v1", structuralEmissionTypeKey(u.effectiveType(owner, fn, fn.Signature, false))}
 	for _, free := range fn.FreeVars {
-		fields = append(fields, structuralEmissionTypeKey(u.effectiveType(owner, fn, free.Type())))
+		fields = append(fields, structuralEmissionTypeKey(u.effectiveType(owner, fn, free.Type(), false)))
 	}
 	return framedEmissionKey(fields...)
 }
@@ -5012,7 +5084,7 @@ func (index emissionCanonicalIndex) managedGoLinknamePairKeyWithPointerFacade(
 		fields := make([]string, 0, len(typeArgs)+2)
 		fields = append(fields, "go-linkname-callable-instance-v1", signature)
 		for _, argument := range typeArgs {
-			fields = append(fields, structuralGoLinknameABITypeKey(u.effectiveType(owner, function, argument)))
+			fields = append(fields, structuralGoLinknameABITypeKey(u.effectiveType(owner, function, argument, false)))
 		}
 		signature = framedEmissionKey(fields...)
 	}
@@ -5589,7 +5661,7 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 		goTyps:           prepared.pkgTypes,
 		goPkg:            prepared.ssa,
 		patches:          u.patches,
-		loaded:           u.loadedPackages(),
+		loaded:           u.loadedPackages(true),
 		linkOnceFns:      make(map[*ssa.Function]none),
 		state:            state,
 		emissionUniverse: u,
@@ -5646,8 +5718,16 @@ func managedKeyFunctionType(key string) int {
 
 func (u *EmissionUniverse) promotedWrapperPhysicalName(prepared *preparedEmissionPackage, fn *ssa.Function, state pkgState, legacyName, patchedSignature string) (string, error) {
 	ownerIdentity := prepared.identity
-	if functionNeedsLinkOnce(fn) {
+	physicalBase := legacyName
+	coalescible := functionHasCoalesciblePhysicalDefinition(fn)
+	if coalescible {
 		ownerIdentity = "linkonce"
+		// funcName prefixes a Pkg-nil structural wrapper with the current
+		// compilation package. That spelling is useful only as a diagnostic and
+		// necessarily differs between independent descriptor users. Put
+		// coalescible wrappers in a compiler-private namespace; the complete
+		// structural digest below remains the collision-resistant identity.
+		physicalBase = "__llgo$generated$" + wrapperKind(fn) + "$" + fn.Name()
 	}
 	physicalKey := emissionFunctionOwnerKey{function: fn, owner: prepared}
 	if frozen := u.physicalNames[physicalKey]; frozen != "" {
@@ -5670,9 +5750,9 @@ func (u *EmissionUniverse) promotedWrapperPhysicalName(prepared *preparedEmissio
 		structuralSignature,
 		deterministicSSABody(fn),
 	)
-	name := legacyName + "$llgo$promoted$v1$" + emissionDigest(discriminator)
+	name := physicalBase + "$llgo$promoted$v1$" + emissionDigest(discriminator)
 	u.physicalNames[physicalKey] = name
-	if functionNeedsLinkOnce(fn) {
+	if coalescible {
 		if previous := u.linkOnceNames[fn]; previous != "" && previous != name {
 			return "", fmt.Errorf("prepare emission universe: linkonce wrapper %q has owner-dependent physical names %q and %q", fn.Name(), previous, name)
 		}
@@ -5736,8 +5816,8 @@ func (u *EmissionUniverse) wrapperCallIdentity(prepared *preparedEmissionPackage
 			"invoke-method-v1",
 			pkgPath,
 			method.Name(),
-			structuralEmissionTypeKey(u.effectiveType(prepared, fn, method.Type())),
-			structuralEmissionTypeKey(u.effectiveType(prepared, fn, common.Value.Type())),
+			structuralEmissionTypeKey(u.effectiveType(prepared, fn, method.Type(), false)),
+			structuralEmissionTypeKey(u.effectiveType(prepared, fn, common.Value.Type(), false)),
 		), false, nil
 	}
 	return "", false, nil
@@ -6498,30 +6578,41 @@ func (u *EmissionUniverse) isIntrinsic(fn *ssa.Function, owner *preparedEmission
 		goTyps:      owner.pkgTypes,
 		goPkg:       owner.ssa,
 		patches:     u.patches,
-		loaded:      u.loadedPackages(),
+		loaded:      u.loadedPackages(true),
 		linkOnceFns: make(map[*ssa.Function]none),
 	}
 	_, _, ftype := ctx.funcName(fn)
 	return ftype == llgoInstr
 }
 
-func (u *EmissionUniverse) loadedPackages() map[*types.Package]*pkgInfo {
-	loaded := map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
-	if u == nil || u.goProg == nil {
-		return loaded
-	}
-	for _, pkg := range u.goProg.AllPackages() {
-		if pkg == nil || pkg.Pkg == nil {
-			continue
+// loadedPackages returns the frozen package index, cloning it only for legacy
+// context paths which may extend their local view. Keeping both views behind
+// one entry point prevents cache mechanics from expanding universe authority.
+func (u *EmissionUniverse) loadedPackages(writable bool) map[*types.Package]*pkgInfo {
+	snapshot := map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
+	if u != nil && u.loadedPackageSnapshot != nil {
+		snapshot = u.loadedPackageSnapshot
+	} else if u != nil && u.goProg != nil {
+		for _, pkg := range u.goProg.AllPackages() {
+			if pkg == nil || pkg.Pkg == nil {
+				continue
+			}
+			snapshot[pkg.Pkg] = &pkgInfo{kind: pkgKindByPath(llssa.PathOf(pkg.Pkg))}
 		}
-		loaded[pkg.Pkg] = &pkgInfo{kind: pkgKindByPath(llssa.PathOf(pkg.Pkg))}
-	}
-	for _, prepared := range u.packages {
-		loaded[prepared.oldTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
-		loaded[prepared.pkgTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
-		if prepared.altTypes != nil {
-			loaded[prepared.altTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+		for _, prepared := range u.packages {
+			snapshot[prepared.oldTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+			snapshot[prepared.pkgTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+			if prepared.altTypes != nil {
+				snapshot[prepared.altTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+			}
 		}
+	}
+	if !writable {
+		return snapshot
+	}
+	loaded := make(map[*types.Package]*pkgInfo, len(snapshot))
+	for pkg, info := range snapshot {
+		loaded[pkg] = info
 	}
 	return loaded
 }
@@ -6591,24 +6682,53 @@ func (u *EmissionUniverse) intrinsicWrapper(owner *ssa.Package, fn *ssa.Function
 	return wrapper, ok
 }
 
-func (u *EmissionUniverse) effectiveType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
+func (u *EmissionUniverse) effectiveType(
+	owner *preparedEmissionPackage,
+	fn *ssa.Function,
+	typ types.Type,
+	preservePatchedNamed bool,
+) types.Type {
+	if owner == nil || u == nil || typ == nil {
+		return typ
+	}
+	key := emissionEffectiveTypeKey{
+		owner: owner, function: fn, typ: typ,
+		preservePatchedNamed: preservePatchedNamed,
+	}
+	if u.effectiveTypeCacheReady {
+		u.effectiveTypeMu.Lock()
+		cached, ok := u.effectiveTypes[key]
+		u.effectiveTypeMu.Unlock()
+		if ok {
+			return cached
+		}
+	}
 	ctx := u.effectiveTypeContext(owner, fn)
 	if ctx == nil {
 		return typ
 	}
-	return ctx.patchType(typ)
+	if preservePatchedNamed {
+		// Linkname pairing compares both sides after one shared physical
+		// projection. Preserve an alternate package's named replacement until
+		// that projection so recursive edges continue to point at the exact
+		// same node.
+		ctx.preservePatchedNamed = true
+	}
+	effective := ctx.patchType(typ)
+	if u.effectiveTypeCacheReady {
+		u.effectiveTypeMu.Lock()
+		if cached, ok := u.effectiveTypes[key]; ok {
+			effective = cached
+		} else {
+			u.effectiveTypes[key] = effective
+		}
+		u.effectiveTypeMu.Unlock()
+	}
+	return effective
 }
 
 func (u *EmissionUniverse) effectiveGoLinknameType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
-	ctx := u.effectiveTypeContext(owner, fn)
-	if ctx == nil {
-		return typ
-	}
-	// Linkname pairing compares both sides after one shared physical
-	// projection. Preserve an alternate package's named replacement until that
-	// projection so recursive edges continue to point at the exact same node.
-	ctx.preservePatchedNamed = true
-	return ctx.patchType(typ)
+	return u.effectiveType(owner, fn, typ, true)
 }
 
 func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, fn *ssa.Function) *context {
@@ -6623,7 +6743,7 @@ func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, 
 		goTyps:           owner.pkgTypes,
 		goPkg:            owner.ssa,
 		patches:          u.patches,
-		loaded:           u.loadedPackages(),
+		loaded:           u.loadedPackages(false),
 		linkOnceFns:      make(map[*ssa.Function]none),
 		emissionUniverse: u,
 	}
@@ -7139,7 +7259,7 @@ func (u *EmissionUniverse) checkPackage(pkg *ssa.Package, files []*ast.File, pat
 	if hasPatch != prepared.hasPatch || hasPatch && (patch.Alt != prepared.patch.Alt || patch.Types != prepared.patch.Types) {
 		return nil, fmt.Errorf("package %q patch changed after emission-universe preparation", prepared.pkgPath)
 	}
-	scan := &context{prog: u.prog, skips: make(map[string]none)}
+	scan := &context{prog: u.prog, goTyps: prepared.pkgTypes, skips: make(map[string]none)}
 	scan.initFiles(prepared.pkgPath, files, prepared.pkgTypes.Name() == "C")
 	if scan.skipall != prepared.skipall || !sameNoneMap(scan.skips, prepared.skips) {
 		return nil, fmt.Errorf("package %q skip directives changed after emission-universe preparation", prepared.pkgPath)
@@ -7297,7 +7417,7 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 			goTyps:           prepared.pkgTypes,
 			goPkg:            prepared.ssa,
 			patches:          u.patches,
-			loaded:           u.loadedPackages(),
+			loaded:           u.loadedPackages(true),
 			linkOnceFns:      make(map[*ssa.Function]none),
 			state:            state,
 			emissionUniverse: u,
@@ -8207,7 +8327,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 			goTyps:      owner.pkgTypes,
 			goPkg:       owner.ssa,
 			patches:     u.patches,
-			loaded:      u.loadedPackages(),
+			loaded:      u.loadedPackages(true),
 			linkOnceFns: make(map[*ssa.Function]none),
 		}
 		_, name, ftype := ctx.funcName(fn)

@@ -342,7 +342,6 @@ func (p *context) compileCoroStaticAwait(
 	if callee == nil || instructionPlan.controlTargetID == "" {
 		panic("coroutine child await has an incomplete frozen physical control recipe")
 	}
-	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 
 	// Preserve Go's left-to-right argument evaluation before publishing any
@@ -585,7 +584,8 @@ func (p *context) awaitCoroChildWithRecovery(
 	if cleanup != nil {
 		recoverMode, recoverType, recoverData = cleanup.recoverAwaitArguments(p, b)
 	}
-	body.suspendForChild(b)
+	line := p.coroCurrentSourceLine()
+	body.suspendForChild(b, line)
 
 	if body.abi.awaitPrepareHook == "" {
 		panic("coroutine child await has no scheduler handoff hook")
@@ -663,7 +663,12 @@ func (p *context) awaitCoroChildWithRecovery(
 		cancelBuilder.SetBlockEx(returnedCancel, llssa.AtEnd, false)
 		cancelBuilder.Jump(drainCancel)
 		cancelBuilder.SetBlockEx(panickedCancel, llssa.AtEnd, false)
-		ownerCleanup.setPanicOverlay(cancelBuilder, cancelBuilder.Load(typeWord), cancelBuilder.Load(dataWord))
+		ownerCleanup.setPanicOverlay(
+			cancelBuilder,
+			cancelBuilder.Load(typeWord),
+			cancelBuilder.Load(dataWord),
+			line,
+		)
 		cancelBuilder.Jump(drainCancel)
 		cancelBuilder.SetBlockEx(abortedCancel, llssa.AtEnd, false)
 		cancelBuilder.Jump(drainCancel)
@@ -721,11 +726,11 @@ func (p *context) awaitCoroChildWithRecovery(
 		// instead of falling back to legacy stack unwinding.
 		b.Unreachable()
 	} else if body.cleanup == nil {
-		body.panic(b, b.Load(typeWord), b.Load(dataWord))
+		body.panic(b, b.Load(typeWord), b.Load(dataWord), line)
 	} else if cleanup != nil {
-		cleanup.replacePanic(b, b.Load(typeWord), b.Load(dataWord))
+		cleanup.replacePanic(b, b.Load(typeWord), b.Load(dataWord), line)
 	} else {
-		body.cleanup.enterPanic(b, b.Load(typeWord), b.Load(dataWord))
+		body.cleanup.enterPanic(b, b.Load(typeWord), b.Load(dataWord), line)
 	}
 
 	b.SetBlockEx(aborted, llssa.AtEnd, false)

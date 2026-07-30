@@ -130,7 +130,13 @@ func (c *coroBodyContext) emitCoroParkOperation(p *context, b llssa.Builder, ope
 			stateID := c.nextState
 			c.nextState++
 			c.instructions = 0
-			c.publishState(suspend, coroSuspendPark, coroLifecycleSuspended, stateID)
+			c.publishState(
+				suspend,
+				coroSuspendPark,
+				coroLifecycleSuspended,
+				stateID,
+				p.coroCurrentSourceLine(),
+			)
 			operation.park(suspend)
 		},
 		func(resume llssa.Builder, normal llssa.BasicBlock) {

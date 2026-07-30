@@ -63,15 +63,41 @@ func MakeLauncher(callback func(int), base int) func(int) {
 }
 `
 
+const coroManagedInterfaceSpawnTestSource = `package foo
+
+var Sink int
+
+type Closer interface { Close() error }
+type Resource struct{}
+
+func (*Resource) Close() error {
+	Sink++
+	return nil
+}
+
+func Parent(value Closer) {
+	go value.Close()
+}
+
+func Keep(value *Resource) Closer { return value }
+`
+
 const coroClosedStaticMethodSpawnTestSource = `package foo
 
 var Sink int
 
 type Worker int
+type Runner interface {
+	Run(func(int), int)
+}
 
 func (receiver Worker) Run(callback func(int), value int) {
 	Sink = int(receiver) + value
 	_ = callback
+}
+
+func Invoke(runner Runner, callback func(int), value int) {
+	runner.Run(callback, value)
 }
 
 func Receiver(value int) Worker { return Worker(value + 1) }
@@ -307,6 +333,80 @@ func TestCoroManagedDispatchSpawnNativeAndWasm32CoroSplit(t *testing.T) {
 	}
 }
 
+func TestCoroManagedInterfaceSpawnNativeAndWasm32CoroSplit(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg, plan, ssaPkg, method, spawn := compileCoroManagedInterfaceSpawnFixture(t, test.target)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify managed interface spawn before CoroSplit: %v\n%s", err, module.String())
+			}
+			callPlan, err := plan.ResolveManagedInterfaceDispatchSpawn(spawn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if callPlan.Kind != coro.CallSpawn || callPlan.Rep != coro.Dispatch ||
+				callPlan.Open || !callPlan.MayBeNil || len(callPlan.Targets) != 1 {
+				t.Fatalf("managed interface spawn CallPlan = %+v", callPlan)
+			}
+			methodPlan, _ := plan.FunctionPlan(method)
+			if methodPlan.Emission != coro.EmitCoroutine ||
+				methodPlan.Primary != coro.PrimaryCoroutine ||
+				methodPlan.FuncRep != coro.Dispatch ||
+				methodPlan.Demand != coro.AsyncDemand ||
+				!methodPlan.Effect.Contains(coro.YieldOnly) {
+				t.Fatalf("interface spawn method plan = %+v", methodPlan)
+			}
+
+			parentIR := requireCoroPhysicalFunction(t, module, ssaPkg.Func("Parent").String()).String()
+			begin := strings.Index(parentIR, "call ptr @"+coroSpawnBeginHookV1)
+			indirect := regexp.MustCompile(`call ptr %[-a-zA-Z$._0-9]+\(ptr [^,]+, ptr null, ptr [^)]+\)`).FindStringIndex(parentIR)
+			commit := strings.Index(parentIR, "call void @"+coroSpawnCommitHookV1)
+			poll := strings.Index(parentIR, "call i1 @"+coroPreemptPollHookV1)
+			if begin < 0 || indirect == nil || commit < 0 || poll < 0 ||
+				!(begin < indirect[0] && indirect[0] < commit && commit < poll) {
+				t.Fatalf("interface descriptor begin/call/commit/poll order is invalid:\n%s", parentIR)
+			}
+			if got := strings.Count(parentIR, "call ptr @"+coroSpawnBeginHookV1); got != 1 {
+				t.Fatalf("interface spawn begin calls = %d, want one:\n%s", got, parentIR)
+			}
+			if got := strings.Count(parentIR, "call void @"+coroSpawnCommitHookV1); got != 1 {
+				t.Fatalf("interface spawn commit calls = %d, want one:\n%s", got, parentIR)
+			}
+			if !strings.Contains(module.String(), coroPlainDispatchDescriptorPrefix+"method.") ||
+				!strings.Contains(module.String(), coroCoroDispatchThunkPrefix+"method.") {
+				t.Fatalf("interface method did not publish its coroutine descriptor:\n%s", module.String())
+			}
+			for _, forbidden := range []string{"CreateThread", "pthread", "._llgo_routine$", "@llvm.coro.promise"} {
+				if strings.Contains(parentIR, forbidden) {
+					t.Fatalf("managed interface spawn leaked forbidden path %q:\n%s", forbidden, parentIR)
+				}
+			}
+
+			runCoroABITestPipeline(t, prog, module)
+			methodName := "foo.(*Resource).Close" + coroPrimarySuffix
+			for _, suffix := range []string{".resume", ".destroy"} {
+				if module.NamedFunction(methodName + suffix).IsNil() {
+					t.Fatalf("CoroSplit did not create %s%s:\n%s", methodName, suffix, module.String())
+				}
+			}
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify managed interface spawn after CoroSplit: %v\n%s", err, module.String())
+			}
+		})
+	}
+}
+
 func TestCoroClosedStaticMethodSpawnNativeAndWasm32CoroSplit(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
@@ -329,10 +429,14 @@ func TestCoroClosedStaticMethodSpawnNativeAndWasm32CoroSplit(t *testing.T) {
 			methodPlan, _ := plan.FunctionPlan(method)
 			for name, function := range map[string]coro.FunctionPlan{"Parent": parentPlan, "Run": methodPlan} {
 				if function.Emission != coro.EmitCoroutine || function.Primary != coro.PrimaryCoroutine ||
-					function.FuncRep != coro.DirectCoro || function.Demand != coro.AsyncDemand ||
+					function.Demand != coro.AsyncDemand ||
 					!function.Effect.Contains(coro.YieldOnly) {
 					t.Fatalf("%s plan = %+v", name, function)
 				}
+			}
+			if parentPlan.FuncRep != coro.DirectCoro || methodPlan.FuncRep != coro.Dispatch {
+				t.Fatalf("direct spawn owner/method representations = %s/%s, want direct-coro/dispatch",
+					parentPlan.FuncRep, methodPlan.FuncRep)
 			}
 			if _, _, err := resolveCoroDirectStaticSpawn(plan, spawn, false); err == nil ||
 				!strings.Contains(err.Error(), "universal descriptor transport") {
@@ -616,9 +720,13 @@ func compileCoroClosedStaticMethodSpawnFixture(t *testing.T, target *llssa.Targe
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
-	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: parent, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: parent, Demand: coro.AsyncDemand},
+		{Function: ssaPkg.Func("Invoke"), Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
+		DynamicResolution:    coro.DynamicCHAClosed,
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			if fn == parent || fn == method {
@@ -749,6 +857,91 @@ func compileCoroManagedDispatchSpawnFixture(t *testing.T, target *llssa.Target) 
 		t.Fatal(err)
 	}
 	return prog, pkg, plan, ssaPkg, launcherTarget, callbackTarget
+}
+
+func compileCoroManagedInterfaceSpawnFixture(t *testing.T, target *llssa.Target) (
+	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Package, *ssa.Function, *ssa.Go,
+) {
+	t.Helper()
+	ssaPkg, _, files := buildGoSSAPkg(t, coroManagedInterfaceSpawnTestSource)
+	var prog llssa.Program
+	if target == nil {
+		prog = newLLSSAProg(t)
+	} else {
+		prog = newLLSSAProgForTarget(t, target)
+	}
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	parent := ssaPkg.Func("Parent")
+	var method *ssa.Function
+	for _, function := range universe.Functions() {
+		if function != nil && function.Name() == "Close" &&
+			function.Signature != nil && function.Signature.Recv() != nil {
+			method = function
+			break
+		}
+	}
+	var spawn *ssa.Go
+	for _, block := range parent.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.Go); ok {
+				spawn = candidate
+			}
+		}
+	}
+	if method == nil || spawn == nil || !spawn.Common().IsInvoke() {
+		prog.Dispose()
+		t.Fatal("managed interface spawn fixture is incomplete")
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{
+			{Function: parent, Demand: coro.AsyncDemand},
+			{Function: ssaPkg.Func("Keep"), Demand: coro.SyncDemand},
+		},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			DynamicResolution:    coro.DynamicCHAClosed,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == parent || fn == method {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		},
+	)
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	if _, err := plan.ResolveManagedInterfaceDispatchSpawn(spawn); err != nil {
+		prog.Dispose()
+		t.Fatalf("resolve managed interface spawn: %v", err)
+	}
+	compilation := coroClosedInterfacePlainCompilation(plan, universe)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	return prog, pkg, plan, ssaPkg, method, spawn
 }
 
 func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (

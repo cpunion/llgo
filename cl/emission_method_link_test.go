@@ -168,8 +168,15 @@ func Value() any { return methoddecl.Error("value") }
 	if physical == "" {
 		t.Fatal("declaring package did not freeze the pointer Error wrapper symbol")
 	}
-	if unexpected := universe.physicalNames[emissionFunctionOwnerKey{function: wrapper, owner: consumerOwner}]; unexpected != "" {
-		t.Fatalf("consumer unexpectedly owns wrapper symbol %q", unexpected)
+	consumerPhysical := universe.physicalNames[emissionFunctionOwnerKey{function: wrapper, owner: consumerOwner}]
+	if consumerPhysical == "" {
+		t.Fatal("ABI descriptor consumer did not freeze a use-site wrapper definition")
+	}
+	if consumerPhysical != physical {
+		t.Fatalf("consumer wrapper symbol = %q; want coalescible declaring symbol %q", consumerPhysical, physical)
+	}
+	if _, frozen := universe.coroProgramIR.siteOwners[emissionFunctionOwnerKey{function: wrapper, owner: consumerOwner}]; !frozen {
+		t.Fatal("ABI descriptor consumer did not freeze the wrapper's ProgramIR owner")
 	}
 	ctx, err := universe.functionABIContext(wrapper, declaringOwner)
 	if err != nil {
@@ -525,10 +532,10 @@ func UseString() int { return Generic[string]() }
 		if !owned {
 			continue
 		}
-		variant := variantOf(universe.effectiveType(owner, fn, fn.Signature))
+		variant := variantOf(universe.effectiveType(owner, fn, fn.Signature, false))
 		if variant == "" {
 			for _, free := range fn.FreeVars {
-				variant = variantOf(universe.effectiveType(owner, fn, free.Type()))
+				variant = variantOf(universe.effectiveType(owner, fn, free.Type(), false))
 				if variant != "" {
 					break
 				}

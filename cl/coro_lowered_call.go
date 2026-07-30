@@ -45,6 +45,11 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	if b.Func != p.fn {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q escaped into another LLVM function", helper, p.goFn.Name()))
 	}
+	// Every production compiler-inserted runtime call reaches this resolver
+	// through Package.RuntimeFunc's private expression marker, including a
+	// declaration which was already materialized in the package. Keep the
+	// exact SitePlan observation at this one shared boundary so individual
+	// instrumentation and lowering helpers cannot become new authorities.
 	p.observeCoroSiteRuntimeHelper(helper)
 
 	frozenCall, ok, err := p.emissionUniverse.ResolveCoroLoweredCallRecord(p.goFn, helper)

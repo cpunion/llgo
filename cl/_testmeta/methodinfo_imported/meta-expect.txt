@@ -370,13 +370,61 @@ __llgo_coro_func_descriptor_v1.method.2f95704f57cb02d3.03b183a61ec5112a0c2ca62c6
     __llgo_coro_func_coro_v1.method.2f95704f57cb02d3.03b183a61ec5112a0c2ca62c6769aa13
 __llgo_coro_func_descriptor_v1.method.e88237c34bd43ab6.03b183a61ec5112a0c2ca62c6769aa13:
     __llgo_coro_func_coro_v1.method.e88237c34bd43ab6.03b183a61ec5112a0c2ca62c6769aa13
+__llgo_coro_method_raw_trap_v1.00347708c1c98dbeb9a18c52161d7897:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.0d7b99461014fd5801d21ffcb7b7475f:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.1c4db374732acbeb5d67e0fc04c8910c:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.2289c6f12be70f7264151a3d82e43e81:
+    llvm.trap
 __llgo_coro_method_raw_trap_v1.231878b42d64d4baec9a383ce5735a59:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.2ad705bb0106230001569f47f0d88a9a:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.3376d06b2bd4a3f6245c520264ab7ea3:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.378e34a0f4193cc201b5a1c751a5fb36:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.3982655570e3d81bfaef941567372100:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.3cdbb18b6b9aedeb9c4e98b6c887493e:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.49fe96d9dcb5001dba276cf66917e452:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.513760fe3f25b6bd9b47ff60e6cbdcc6:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.5cb2c91128407a8f341035f90734119d:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.6a54547fa7c6b51dcce1a3e3bec4399c:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.7d08527d9416e3133030c404a0c91fe5:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.8429d689689f3ff85b271808b5d20f0f:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.9858155ba73bcaf69e46662fe7e34731:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.9dab9262acbfe8e0103cb1f617240f30:
     llvm.trap
 __llgo_coro_method_raw_trap_v1.a3d5c03284b006a6c875695d86512359:
     llvm.trap
 __llgo_coro_method_raw_trap_v1.a6b612581aae291f4610c6a5aa8539e6:
     llvm.trap
+__llgo_coro_method_raw_trap_v1.ae3dff0a47576930d1de2dc0f7af17a4:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.c2c48815fb90a8b56331528a91f83d08:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.cdb659bc04cd493fb8035ccf32fa2853:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.d3005c6672bfeb3c3d0bc73c18ba9cee:
+    llvm.trap
 __llgo_coro_method_raw_trap_v1.e0443b6e94b691a5a125bce785b5f2b4:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.f0e1484719090fec755249976b2f5b5e:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.f62119cbae7c38562cb4aaea91a359aa:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.ff36e746ee306bc2150c253aa0dbe8bc:
     llvm.trap
 __llgo_coro_root_factory_descriptor_v1.0d627411dc9078404821003a96e96444:
     __llgo_coro_root_factory_v1.0d627411dc9078404821003a96e96444
@@ -386,9 +434,9 @@ __llgo_coro_root_factory_v1.0d627411dc9078404821003a96e96444:
     github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.main$coro
 __llgo_coro_root_factory_v1.b5a3a94c213082b6a7ac87bea5641b40:
     github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.init$coro
-__llgo_coro_root_package_v1.ed5a45b226b064d95de16d3eb4ba2903:
-    __llgo_coro_root_package_v1.ed5a45b226b064d95de16d3eb4ba2903.entries
-__llgo_coro_root_package_v1.ed5a45b226b064d95de16d3eb4ba2903.entries:
+__llgo_coro_root_package_v1.9238afed41d81a4c3a0430160472dbd9:
+    __llgo_coro_root_package_v1.9238afed41d81a4c3a0430160472dbd9.entries
+__llgo_coro_root_package_v1.9238afed41d81a4c3a0430160472dbd9.entries:
     __llgo_coro_root_factory_descriptor_v1.0d627411dc9078404821003a96e96444
     __llgo_coro_root_factory_descriptor_v1.b5a3a94c213082b6a7ac87bea5641b40
 _llgo_bool:
@@ -642,10 +690,12 @@ github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.main$coro:
     llvm.fake.use
     llvm.memset.p0.i64
     llvm.trap
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.3c1456fd23cf54ffad1e80231752b10d
 llvm.used:
     __llgo_coro_root_factory_descriptor_v1.0d627411dc9078404821003a96e96444
     __llgo_coro_root_factory_descriptor_v1.b5a3a94c213082b6a7ac87bea5641b40
-    __llgo_coro_root_package_v1.ed5a45b226b064d95de16d3eb4ba2903
+    __llgo_coro_root_package_v1.9238afed41d81a4c3a0430160472dbd9
 
 [UseIface]
 github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.main$coro:

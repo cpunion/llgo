@@ -14,11 +14,12 @@ import (
 	"github.com/goplus/llgo/runtime/abi"
 	"github.com/goplus/llgo/runtime/internal/clite/bdwgc"
 	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+	"github.com/goplus/llgo/runtime/internal/ffi"
 )
 
 type finalizerClosure struct {
-	fn  unsafe.Pointer
-	env unsafe.Pointer
+	descriptor unsafe.Pointer
+	env        unsafe.Pointer
 }
 
 type finalizerEntry struct {
@@ -73,11 +74,36 @@ var finalizerState struct {
 	draining  uint32
 }
 
+var (
+	finalizerPlainCIF *ffi.Signature
+	finalizerCoroCIF  *ffi.Signature
+)
+
 func initFinalizerState() {
 	finalizerState.m = make(map[uintptr]*finalizerEntry)
 	stub := &finalizerState.queueStub
 	finalizerState.queueHead = unsafe.Pointer(stub)
 	finalizerState.queueTail = stub
+
+	var err error
+	finalizerPlainCIF, err = ffi.NewSignature(
+		ffi.TypeVoid,
+		ffi.TypePointer, // closure environment
+		ffi.TypePointer, // finalizer argument
+	)
+	if err != nil {
+		panic("runtime: cannot prepare plain finalizer signature")
+	}
+	finalizerCoroCIF, err = ffi.NewSignature(
+		ffi.TypePointer, // initially suspended child handle
+		ffi.TypePointer, // current G
+		ffi.TypePointer, // result slot
+		ffi.TypePointer, // closure environment
+		ffi.TypePointer, // finalizer argument
+	)
+	if err != nil {
+		panic("runtime: cannot prepare coroutine finalizer signature")
+	}
 }
 
 func init() {
@@ -172,9 +198,24 @@ func finalizerFuncType(t *abi.Type) *abi.FuncType {
 }
 
 func callFinalizer(fn any, ptr unsafe.Pointer) {
-	c := (*finalizerClosure)((*eface)(unsafe.Pointer(&fn)).data)
-	f := *(*func(unsafe.Pointer))(unsafe.Pointer(c))
-	f(ptr)
+	face := (*eface)(unsafe.Pointer(&fn))
+	closure := (*finalizerClosure)(face.data)
+	ft := finalizerFuncType(face._type)
+	if closure == nil || closure.descriptor == nil || ft == nil {
+		throw("runtime: invalid finalizer function value")
+	}
+	arg := ptr
+	ffi.CallLLGo(
+		finalizerPlainCIF,
+		finalizerCoroCIF,
+		closure.descriptor,
+		closure.env,
+		unsafe.Pointer(ft),
+		nil,
+		0,
+		1,
+		unsafe.Pointer(&arg),
+	)
 }
 
 // enqueueFinalizerEntry is the complete raw-callback publication path. It is

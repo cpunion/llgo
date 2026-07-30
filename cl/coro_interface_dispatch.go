@@ -55,18 +55,22 @@ type coroInterfaceDispatchCandidate struct {
 }
 
 // resolveCoroInterfaceDispatchPlan freezes one interface operation recipe for
-// frontend code generation. Ordinary calls and defers share the exact
-// receiver-aware candidate proof; their carrier alone determines whether the
-// recipe executes now or from the frame-resident cleanup drainer. The returned
-// candidates are sorted by FunctionID, independent of SSA or map enumeration
-// order. The source signature is receiver-free and shared by every candidate.
+// frontend code generation. Ordinary calls, defers, and goroutine spawns share
+// the exact receiver-aware candidate proof; their carrier alone determines
+// whether the recipe executes now, from the frame-resident cleanup drainer, or
+// as an independent scheduler root. The returned candidates are sorted by
+// FunctionID, independent of SSA or map enumeration order. The source
+// signature is receiver-free and shared by every candidate.
 func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, universe *EmissionUniverse, call ssa.CallInstruction) (*coroInterfaceDispatchPlan, error) {
 	if plan == nil || coroInterfaceDispatchCallIsNil(call) || call.Common() == nil {
 		return nil, fmt.Errorf("coroutine interface dispatch requires an exact call and compilation plan")
 	}
 	kind := coro.CallDirect
-	if _, deferred := call.(*ssa.Defer); deferred {
+	switch call.(type) {
+	case *ssa.Defer:
 		kind = coro.CallDefer
+	case *ssa.Go:
+		kind = coro.CallSpawn
 	}
 	common := call.Common()
 	if !common.IsInvoke() || common.StaticCallee() != nil || common.Method == nil {
@@ -195,7 +199,11 @@ func validateCoroInterfaceDispatchCandidate(
 	plan coro.FunctionPlan,
 ) (types.Type, types.Type, *ssa.Function, error) {
 	fail := func(format string, args ...any) (types.Type, types.Type, *ssa.Function, error) {
-		return nil, nil, nil, fmt.Errorf("coroutine interface dispatch target %q: %s", id, fmt.Sprintf(format, args...))
+		name := "<nil>"
+		if target != nil {
+			name = target.String()
+		}
+		return nil, nil, nil, fmt.Errorf("coroutine interface dispatch target %q (%s): %s", id, name, fmt.Sprintf(format, args...))
 	}
 	if common == nil || common.Method == nil || iface == nil || sourceSignature == nil || target == nil || target.Signature == nil {
 		return fail("missing method, receiver interface, source signature, or target signature")
@@ -373,7 +381,7 @@ func coroInterfaceDispatchEffectiveCallableSignature(
 		if owner == nil {
 			return nil, fmt.Errorf("function %q is absent from the emission universe", caller.Name())
 		}
-		typ = universe.effectiveType(owner, caller, typ)
+		typ = universe.effectiveType(owner, caller, typ, false)
 	}
 	signature, _ := types.Unalias(typ).(*types.Signature)
 	return coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(signature)), nil

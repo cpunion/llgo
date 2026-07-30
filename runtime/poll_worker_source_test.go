@@ -135,15 +135,20 @@ func TestRuntimeTerminalStdioUsesExactPrivateSyncBoundary(t *testing.T) {
 
 func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
 	core := readRuntimePollFile(t, runtimeCoroChannelSource)
+	normalizedCore := strings.Join(strings.Fields(core), " ")
 	for _, required := range []string{
 		"const ChannelOperationPageCapacity = 64",
 		"const ChannelOperationSourceCapacity = ChannelOperationPageCapacity",
 		"extraPages []ChannelOperationPage",
+		"dynamicPages operationDynamicPageDirectory",
+		"readyPages operationReadyPageIndex",
 		"func ConfigureChannelOperationPages(",
+		"func AttachChannelOperationPage(",
 		"func ChannelOperationConfiguredCapacity(",
+		"func nextChannelOperationReady(",
 		"ChannelOperationConfiguredCapacity(source)",
 	} {
-		if !strings.Contains(core, required) {
+		if !strings.Contains(normalizedCore, required) {
 			t.Errorf("%s lacks paged channel marker %q", runtimeCoroChannelSource, required)
 		}
 	}

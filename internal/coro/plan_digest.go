@@ -17,6 +17,7 @@
 package coro
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -31,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v28"
+const PlanDigestSchema = "llgo.coro.plan-digest.v29"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -365,6 +366,13 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 			if block == nil {
 				return planDigestDocument{}, fmt.Errorf("coro: function %q has nil SSA block %d", id, blockIndex)
 			}
+			canonicalOrdinals, err := p.canonicalDigestPackageInitDependencyOrdinals(fn, block)
+			if err != nil {
+				return planDigestDocument{}, fmt.Errorf(
+					"coro: function %q block %d canonical dependency-init ordinals: %w",
+					id, blockIndex, err,
+				)
+			}
 			semanticIndex := 0
 			for _, instruction := range block.Instrs {
 				if instruction == nil {
@@ -373,8 +381,12 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 				if _, debug := instruction.(*ssa.DebugRef); debug {
 					continue
 				}
+				digestInstruction := semanticIndex
+				if canonical, ok := canonicalOrdinals[instruction]; ok {
+					digestInstruction = canonical
+				}
 				if value, ok := instruction.(ssa.Value); ok {
-					site := planDigestValueSite{Function: id, Kind: "instruction", Index: -1, Block: blockIndex, Instruction: semanticIndex, Operand: -1}
+					site := planDigestValueSite{Function: id, Kind: "instruction", Index: -1, Block: blockIndex, Instruction: digestInstruction, Operand: -1}
 					if err := p.appendDigestValue(&document.Values, coveredValues, value, site, true); err != nil {
 						return planDigestDocument{}, err
 					}
@@ -383,27 +395,27 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 					if _, builtin := call.Common().Value.(*ssa.Builtin); !builtin {
 						if p.ElidesCall(call) {
 							if _, planned := p.callPlans[call]; planned {
-								return planDigestDocument{}, fmt.Errorf("coro: function %q block %d instruction %d is both elided and assigned a CallPlan", id, blockIndex, semanticIndex)
+								return planDigestDocument{}, fmt.Errorf("coro: function %q block %d instruction %d is both elided and assigned a CallPlan", id, blockIndex, digestInstruction)
 							}
 							if _, duplicate := seenElidedCalls[call]; duplicate {
-								return planDigestDocument{}, fmt.Errorf("coro: duplicate elided SSA call occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+								return planDigestDocument{}, fmt.Errorf("coro: duplicate elided SSA call occurrence for function %q block %d instruction %d", id, blockIndex, digestInstruction)
 							}
 							seenElidedCalls[call] = struct{}{}
 							document.ElidedCalls = append(document.ElidedCalls, planDigestElidedCall{
-								Function: id, Block: blockIndex, Instruction: semanticIndex, Elided: true,
+								Function: id, Block: blockIndex, Instruction: digestInstruction, Elided: true,
 								Certificate: p.elidedCallCertificates[call],
 							})
 						} else {
 							plan, ok := p.callPlans[call]
 							if !ok {
-								return planDigestDocument{}, fmt.Errorf("coro: missing CallPlan for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+								return planDigestDocument{}, fmt.Errorf("coro: missing CallPlan for function %q block %d instruction %d", id, blockIndex, digestInstruction)
 							}
-							entry, err := p.canonicalDigestCall(id, blockIndex, semanticIndex, call, plan)
+							entry, err := p.canonicalDigestCall(id, blockIndex, digestInstruction, call, plan)
 							if err != nil {
 								return planDigestDocument{}, err
 							}
 							if _, duplicate := seenCalls[call]; duplicate {
-								return planDigestDocument{}, fmt.Errorf("coro: duplicate SSA call occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+								return planDigestDocument{}, fmt.Errorf("coro: duplicate SSA call occurrence for function %q block %d instruction %d", id, blockIndex, digestInstruction)
 							}
 							seenCalls[call] = struct{}{}
 							document.Calls = append(document.Calls, entry)
@@ -413,25 +425,25 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 				if store, ok := instruction.(*ssa.Store); ok {
 					if target, conditional := p.conditionalStores[store]; conditional {
 						if store.Parent() != fn || target == nil {
-							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d has no exact owner/target", id, blockIndex, semanticIndex)
+							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d has no exact owner/target", id, blockIndex, digestInstruction)
 						}
 						targetID, planned := p.byFunction[target]
 						if !planned {
-							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d targets a function outside the plan", id, blockIndex, semanticIndex)
+							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d targets a function outside the plan", id, blockIndex, digestInstruction)
 						}
 						value, valuePlanned := p.valuePlans[store.Val]
 						if !valuePlanned || value.Value != store.Val || len(value.Funcs) != 1 ||
 							len(value.Funcs[0].Path) != 0 || value.Funcs[0].Rep != Dispatch ||
 							value.Funcs[0].MayBeNil || len(value.Funcs[0].Targets) != 1 ||
 							value.Funcs[0].Targets[0] != targetID {
-							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d no longer carries its exact target", id, blockIndex, semanticIndex)
+							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d no longer carries its exact target", id, blockIndex, digestInstruction)
 						}
 						if _, duplicate := seenConditionalStores[store]; duplicate {
-							return planDigestDocument{}, fmt.Errorf("coro: duplicate conditional managed Store occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+							return planDigestDocument{}, fmt.Errorf("coro: duplicate conditional managed Store occurrence for function %q block %d instruction %d", id, blockIndex, digestInstruction)
 						}
 						seenConditionalStores[store] = struct{}{}
 						document.ConditionalStores = append(document.ConditionalStores, planDigestConditionalStore{
-							Function: id, Block: blockIndex, Instruction: semanticIndex,
+							Function: id, Block: blockIndex, Instruction: digestInstruction,
 							Target: targetID, Elided: p.ElidesConditionalManagedStore(store),
 						})
 					}
@@ -444,18 +456,18 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 					case *ssa.IndexAddr:
 						base, index = operation.X, operation.Index
 					default:
-						return planDigestDocument{}, fmt.Errorf("coro: safe fixed-array index at function %q block %d instruction %d has type %T", id, blockIndex, semanticIndex, instruction)
+						return planDigestDocument{}, fmt.Errorf("coro: safe fixed-array index at function %q block %d instruction %d has type %T", id, blockIndex, digestInstruction, instruction)
 					}
 					actualBound, _, fixed := ssaExactFixedArrayBound(base)
 					if !fixed || bound != actualBound || !ProveSSAExactSafeFixedArrayIndex(fn, index, bound, instruction) {
-						return planDigestDocument{}, fmt.Errorf("coro: safe fixed-array index at function %q block %d instruction %d no longer has its exact bound proof", id, blockIndex, semanticIndex)
+						return planDigestDocument{}, fmt.Errorf("coro: safe fixed-array index at function %q block %d instruction %d no longer has its exact bound proof", id, blockIndex, digestInstruction)
 					}
 					if _, duplicate := seenSafeArrayIndexes[instruction]; duplicate {
-						return planDigestDocument{}, fmt.Errorf("coro: duplicate safe fixed-array index occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+						return planDigestDocument{}, fmt.Errorf("coro: duplicate safe fixed-array index occurrence for function %q block %d instruction %d", id, blockIndex, digestInstruction)
 					}
 					seenSafeArrayIndexes[instruction] = struct{}{}
 					document.SafeArrayIndexes = append(document.SafeArrayIndexes, planDigestSafeArrayIndex{
-						Function: id, Block: blockIndex, Instruction: semanticIndex, Bound: bound,
+						Function: id, Block: blockIndex, Instruction: digestInstruction, Bound: bound,
 					})
 				}
 
@@ -468,7 +480,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 					if _, defined := definitions[value]; defined {
 						continue
 					}
-					site := planDigestValueSite{Function: id, Kind: "operand", Index: -1, Block: blockIndex, Instruction: semanticIndex, Operand: operandIndex}
+					site := planDigestValueSite{Function: id, Kind: "operand", Index: -1, Block: blockIndex, Instruction: digestInstruction, Operand: operandIndex}
 					if err := p.appendDigestValue(&document.Values, coveredValues, value, site, true); err != nil {
 						return planDigestDocument{}, err
 					}
@@ -516,7 +528,137 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 			len(coveredValues), len(p.valuePlans), strings.Join(uncovered, "; "),
 		)
 	}
+	sort.Slice(document.Calls, func(i, j int) bool {
+		return comparePlanDigestInstructionSite(
+			document.Calls[i].Function, document.Calls[i].Block, document.Calls[i].Instruction,
+			document.Calls[j].Function, document.Calls[j].Block, document.Calls[j].Instruction,
+		) < 0
+	})
+	sort.Slice(document.ElidedCalls, func(i, j int) bool {
+		return comparePlanDigestInstructionSite(
+			document.ElidedCalls[i].Function, document.ElidedCalls[i].Block, document.ElidedCalls[i].Instruction,
+			document.ElidedCalls[j].Function, document.ElidedCalls[j].Block, document.ElidedCalls[j].Instruction,
+		) < 0
+	})
 	return document, nil
+}
+
+// canonicalDigestPackageInitDependencyOrdinals maps x/tools' unordered direct
+// dependency-init calls back onto their existing semantic-instruction slots in
+// canonical package-key and source-import-path order. The canonical key covers
+// test and patched package variants; the source path distinguishes separate Go
+// packages deliberately emitted into one replacement package. Both facts also
+// exist for calls intentionally excluded from the plan, unlike a final link
+// identity. x/tools may emit these calls by ranging an import set, so their
+// physical order can vary between otherwise identical builds. The mapping
+// changes only pointer-free cache identity; source SSA and codegen retain their
+// exact execution order.
+func (p *SSAPlan) canonicalDigestPackageInitDependencyOrdinals(
+	owner *ssa.Function,
+	block *ssa.BasicBlock,
+) (map[ssa.Instruction]int, error) {
+	if !isDigestPackageInitializer(owner) || block == nil {
+		return nil, nil
+	}
+	type dependency struct {
+		instruction ssa.Instruction
+		orderKey    string
+		target      string
+		slot        int
+	}
+	dependencies := make([]dependency, 0)
+	identity := functionIDBuilder{config: p.functionIDs}
+	ownerPackageKey, err := identity.packageKey(owner.Pkg.Pkg)
+	if err != nil {
+		return nil, fmt.Errorf("identify owner initializer %q package: %w", owner.String(), err)
+	}
+	ownerSourcePath := owner.Pkg.Pkg.Path()
+	ownerOrderKey := identityNode(
+		"package-init-dependency",
+		identityPair{"canonical-package", ownerPackageKey},
+		identityPair{"source-package", ownerSourcePath},
+	)
+	semantic := 0
+	for _, instruction := range block.Instrs {
+		if _, debug := instruction.(*ssa.DebugRef); debug {
+			continue
+		}
+		call, direct := instruction.(*ssa.Call)
+		if direct && call.Common() != nil && !call.Common().IsInvoke() {
+			target := call.Common().StaticCallee()
+			if isDigestPackageInitializer(target) {
+				packageKey, err := identity.packageKey(target.Pkg.Pkg)
+				if err != nil {
+					return nil, fmt.Errorf("identify dependency initializer %q package: %w", target.String(), err)
+				}
+				sourcePath := target.Pkg.Pkg.Path()
+				orderKey := identityNode(
+					"package-init-dependency",
+					identityPair{"canonical-package", packageKey},
+					identityPair{"source-package", sourcePath},
+				)
+				if orderKey != ownerOrderKey {
+					dependencies = append(dependencies, dependency{
+						instruction: instruction,
+						orderKey:    orderKey,
+						target:      target.String(),
+						slot:        semantic,
+					})
+				}
+			}
+		}
+		semantic++
+	}
+	if len(dependencies) < 2 {
+		return nil, nil
+	}
+	slots := make([]int, len(dependencies))
+	for index := range dependencies {
+		slots[index] = dependencies[index].slot
+	}
+	sort.Ints(slots)
+	sort.Slice(dependencies, func(i, j int) bool {
+		return dependencies[i].orderKey < dependencies[j].orderKey
+	})
+	ret := make(map[ssa.Instruction]int, len(dependencies))
+	var previous dependency
+	for index, dependency := range dependencies {
+		if index != 0 && dependency.orderKey == previous.orderKey {
+			return nil, fmt.Errorf(
+				"owner initializer %q calls dependency initializer identity %q more than once at semantic slots %d and %d (%q, %q)",
+				owner.String(), dependency.orderKey,
+				previous.slot, dependency.slot, previous.target, dependency.target,
+			)
+		}
+		previous = dependency
+		ret[dependency.instruction] = slots[index]
+	}
+	return ret, nil
+}
+
+func isDigestPackageInitializer(function *ssa.Function) bool {
+	if function == nil || function.Name() != "init" || function.Synthetic != "package initializer" ||
+		function.Pkg == nil || function.Pkg.Pkg == nil ||
+		function.Signature == nil || function.Signature.Recv() != nil {
+		return false
+	}
+	params, results := function.Signature.Params(), function.Signature.Results()
+	return (params == nil || params.Len() == 0) && (results == nil || results.Len() == 0)
+}
+
+func comparePlanDigestInstructionSite(
+	leftFunction FunctionID,
+	leftBlock, leftInstruction int,
+	rightFunction FunctionID,
+	rightBlock, rightInstruction int,
+) int {
+	if order := cmp.Compare(leftFunction, rightFunction); order != 0 {
+		return order
+	}
+	if order := cmp.Compare(leftBlock, rightBlock); order != 0 {
+		return order
+	}
+	return cmp.Compare(leftInstruction, rightInstruction)
 }
 
 func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error) {

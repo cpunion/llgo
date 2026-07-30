@@ -42,14 +42,14 @@ func (u *EmissionUniverse) CoroDynamicImplements(candidate types.Type, iface *ty
 		// replacement. Preserve the ordinary exact go/types relation.
 		return types.Implements(candidate, iface), nil
 	}
-	effectiveCandidate := u.effectiveType(owner, nil, candidate)
+	effectiveCandidate := u.effectiveType(owner, nil, candidate, false)
 	effectiveInterfaceType := types.Type(iface)
 	if namedInterface, found, err := u.coroExactNamedInterface(owner, iface); err != nil {
 		return false, err
 	} else if found {
 		effectiveInterfaceType = namedInterface
 	} else {
-		effectiveInterfaceType = u.effectiveType(owner, nil, iface)
+		effectiveInterfaceType = u.effectiveType(owner, nil, iface, false)
 	}
 	effectiveInterface, ok := types.Unalias(effectiveInterfaceType).Underlying().(*types.Interface)
 	if !ok {
@@ -74,7 +74,7 @@ func (u *EmissionUniverse) coroExactNamedInterface(owner *preparedEmissionPackag
 		if !ok || types.Unalias(object.Type()).Underlying() != iface {
 			continue
 		}
-		candidate := u.effectiveType(owner, nil, object.Type())
+		candidate := u.effectiveType(owner, nil, object.Type(), false)
 		if _, ok := types.Unalias(candidate).Underlying().(*types.Interface); !ok {
 			return nil, false, fmt.Errorf("coroutine dynamic implementation relation: effective named invoke type %q is %T, not an interface", name, candidate)
 		}

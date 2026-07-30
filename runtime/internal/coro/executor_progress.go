@@ -234,10 +234,10 @@ func beginExecutorPollEpoch(transaction *executorPollTransaction, sources *Execu
 	return true
 }
 
-// executorMinPollBudget counts every slot in each binding-local active prefix,
-// plus one common resolve action per epoch and the single request
-// acknowledgement between A and B. Configured-but-never-allocated tail slots
-// remain covered by full-capacity structural audits, not routine service.
+// executorMinPollBudget returns a conservative full-transaction budget. Most
+// catalogs charge every slot in their binding-local active prefix; indexed
+// catalogs may skip empty regions and finish earlier. Configured-but-never-
+// allocated tails remain covered by structural audits, not routine service.
 func executorMinPollBudget(sources *ExecutorSourceSet) (uint32, bool) {
 	if sources == nil {
 		return 0, false
@@ -253,10 +253,11 @@ func executorMinPollBudget(sources *ExecutorSourceSet) (uint32, bool) {
 	return epoch*2 + 1, true // A + acknowledge + B
 }
 
-// MinExecutorPollBudget is the exact base budget for one idle driver's fixed
-// A/ack/B catalog and two empty common-resolution actions. Non-empty affected
-// waits and legacy waiters add explicitly charged reductions; smaller budgets
-// are valid and retain exact source and resolution cursors for a later entry.
+// MinExecutorPollBudget is a sufficient base budget for one idle driver's
+// fixed A/ack/B catalog and two empty common-resolution actions. An indexed
+// catalog can complete below this bound. Non-empty affected waits and legacy
+// waiters add explicitly charged reductions; smaller budgets retain exact
+// source and resolution cursors for a later entry.
 func MinExecutorPollBudget(driver *ExecutorDriver) (uint32, bool) {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || driver.poll.phase != executorPollIdle {
 		return 0, false
@@ -279,11 +280,11 @@ func (transaction *executorPollTransaction) advanceCatalogSource(sources *Execut
 	return transaction.source == executorCatalogDone
 }
 
-// publishExecutorCatalogEntry visits one real source slot and advances the
-// durable cursor exactly once. pending is cleared only immediately before slot
-// zero of each source. A producer arriving behind the cursor leaves a sticky
-// source fact/pending bit for the next epoch and cannot delay this epoch's
-// resolve boundary.
+// publishExecutorCatalogEntry visits one concrete catalog entry and advances
+// the durable cursor exactly once. An indexed source may skip an empty prefix
+// before that visit. pending is cleared only at the start of each source. A
+// producer arriving behind the cursor leaves a sticky source fact/pending bit
+// for the next epoch and cannot delay this epoch's resolve boundary.
 func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 	transaction, sources, p := &driver.poll, &driver.sources, driver.p
 	index := uint32(transaction.cursor)
@@ -357,16 +358,27 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 		if index == 0 && !sources.channel.beginPublishPass(p) {
 			return false
 		}
-		published, lost, ok := sources.channel.publishSlot(p, index)
+		readyIndex, ready, readyOK := nextChannelOperationReady(sources.channel, index, limit)
+		if !readyOK {
+			return false
+		}
+		if !ready {
+			return transaction.advanceCatalogSource(sources)
+		}
+		published, lost, ok := sources.channel.publishSlot(p, readyIndex)
 		transaction.total.channel += int(published)
 		transaction.total.channelLost += int(lost)
 		transaction.total.completed += int(published + lost)
 		if !ok {
 			return false
 		}
-		transaction.cursor++
-		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
-			return false
+		next := readyIndex + 1
+		if next == limit {
+			if !transaction.advanceCatalogSource(sources) {
+				return false
+			}
+		} else {
+			transaction.cursor = uint16(next)
 		}
 	case executorCatalogControl:
 		if index == 0 && !sources.control.beginPublishPass(p) {

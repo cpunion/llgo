@@ -62,6 +62,21 @@ func newChannelClaimCoreFixtureWithSourceBeforeResume(
 	source *ChannelOperationSource,
 	beforeResume func(*channelClaimCoreFixture),
 ) *channelClaimCoreFixture {
+	return newChannelClaimCoreFixtureWithSourceHooks(
+		t, name, caseIDs, withClaim, defaultCase, source, nil, beforeResume,
+	)
+}
+
+func newChannelClaimCoreFixtureWithSourceHooks(
+	t *testing.T,
+	name string,
+	caseIDs []uint32,
+	withClaim bool,
+	defaultCase uint32,
+	source *ChannelOperationSource,
+	afterBind func(*channelClaimCoreFixture),
+	beforeResume func(*channelClaimCoreFixture),
+) *channelClaimCoreFixture {
 	t.Helper()
 	fixture := &channelClaimCoreFixture{
 		p:        new(P),
@@ -74,6 +89,9 @@ func newChannelClaimCoreFixtureWithSourceBeforeResume(
 		Channel: fixture.source,
 	}) {
 		t.Fatal("bind channel claim-core executor")
+	}
+	if afterBind != nil {
+		afterBind(fixture)
 	}
 	fixture.task = newYieldingTestG(t, name)
 	if !Enqueue(fixture.p, fixture.task.g) {
@@ -197,8 +215,148 @@ func TestChannelOperationConfiguredCapacityPreflightsSelectBeyondFourCases(t *te
 		CanReserveChannelOperations(p, source, 1025) {
 		t.Fatalf("configured channel select preflight: capacity=%d", ChannelOperationConfiguredCapacity(source))
 	}
+	dynamic := new(ChannelOperationPage)
+	if !AttachChannelOperationPage(source, p, dynamic) ||
+		ChannelOperationConfiguredCapacity(source) != 17*ChannelOperationPageCapacity ||
+		!CanReserveChannelOperations(p, source, 1025) ||
+		AttachChannelOperationPage(source, p, dynamic) ||
+		AttachChannelOperationPage(source, p, &pages[0]) {
+		t.Fatalf("dynamic channel page publication: capacity=%d", ChannelOperationConfiguredCapacity(source))
+	}
 	if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
 		t.Fatal("release configured channel source")
+	}
+	if !ConfigureChannelOperationPages(source, pages[:]) ||
+		ConfigureChannelOperationPages(source, pages[:14]) {
+		t.Fatal("dynamic channel catalog allowed static local-slot remapping")
+	}
+}
+
+func TestChannelOperationDynamicCatalogCompletesBeyondStaticProfile(t *testing.T) {
+	const count = 1025
+	source := new(ChannelOperationSource)
+	var pages [15]ChannelOperationPage
+	if !ConfigureChannelOperationPages(source, pages[:]) {
+		t.Fatal("configure static channel profile")
+	}
+	caseIDs := make([]uint32, count)
+	for index := range caseIDs {
+		caseIDs[index] = uint32(index + 1)
+	}
+	fixture := newChannelClaimCoreFixtureWithSourceHooks(
+		t, "channel-dynamic-profile", caseIDs, true, 0, source,
+		func(fixture *channelClaimCoreFixture) {
+			if !AttachChannelOperationPage(source, fixture.p, new(ChannelOperationPage)) {
+				t.Fatal("attach dynamic channel page")
+			}
+		},
+		nil,
+	)
+	if first := fixture.ids[0]; first.LocalSlot() != count {
+		t.Fatalf("first dynamic channel local slot = %d, want %d", first.LocalSlot(), count)
+	}
+	for index, id := range fixture.ids {
+		if result := source.PostReady(id); result != ChannelOperationPosted {
+			t.Fatalf("post dynamic channel operation %d = %d", index, result)
+		}
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	progress := pollChannelClaimCoreComplete(t, fixture)
+	if progress.Completed != count || progress.ApplyVisits != count || progress.Promoted != 1 {
+		t.Fatalf("resolve dynamic channel operations = %+v", progress)
+	}
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID == 0 ||
+		!decision.lease.Valid() || decision.taskCancel != TaskCancelNone {
+		t.Fatalf("take dynamic channel decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
+
+func TestChannelReadyIndexSkipsLargeEmptyActivePrefix(t *testing.T) {
+	source := new(ChannelOperationSource)
+	var pages [15]ChannelOperationPage
+	if !ConfigureChannelOperationPages(source, pages[:]) {
+		t.Fatal("configure indexed channel profile")
+	}
+	fixture := newChannelClaimCoreFixtureWithSourceHooks(
+		t, "channel-ready-index", []uint32{1}, true, 0, source,
+		func(fixture *channelClaimCoreFixture) {
+			if !AttachChannelOperationPage(source, fixture.p, new(ChannelOperationPage)) {
+				t.Fatal("attach indexed channel page")
+			}
+		},
+		nil,
+	)
+	id := fixture.ids[0]
+	if id.LocalSlot() != 1025 || source.PostReady(id) != ChannelOperationPosted {
+		t.Fatalf("prepare high indexed channel operation %+v", id)
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	const budget = 32
+	progress, ok := PollExecutorSlice(fixture.driver, budget)
+	if !ok || !progress.Complete || progress.Used >= budget ||
+		progress.Completed != 1 || progress.ApplyVisits != 1 || progress.Promoted != 1 {
+		t.Fatalf("indexed high-slot progress = (%+v, %t)", progress, ok)
+	}
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 1 ||
+		!decision.lease.Valid() || decision.taskCancel != TaskCancelNone {
+		t.Fatalf("take indexed high-slot decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
+
+func TestChannelOperationDynamicPagePublicationIsProducerSafe(t *testing.T) {
+	if ChannelOperationMaximumCapacity != 511*ChannelOperationPageCapacity {
+		t.Fatalf("channel maximum capacity = %d", ChannelOperationMaximumCapacity)
+	}
+	source := new(ChannelOperationSource)
+	p := new(P)
+	if !BindChannelOperationSource(source, p) {
+		t.Fatal("bind dynamic channel source")
+	}
+	stop := make(chan struct{})
+	failed := make(chan string, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			capacity := ChannelOperationConfiguredCapacity(source)
+			slot, ok := channelOperationSlotAt(source, capacity-1)
+			if capacity < ChannelOperationPageCapacity || !ok || slot == nil {
+				select {
+				case failed <- "producer observed a partial dynamic page":
+				default:
+				}
+				return
+			}
+			runtime.Gosched()
+		}
+	}()
+	for page := 0; page < 32; page++ {
+		if !AttachChannelOperationPage(source, p, new(ChannelOperationPage)) {
+			t.Fatalf("attach dynamic channel page %d", page)
+		}
+		runtime.Gosched()
+	}
+	close(stop)
+	<-done
+	select {
+	case message := <-failed:
+		t.Fatal(message)
+	default:
+	}
+	if got := ChannelOperationConfiguredCapacity(source); got != 33*ChannelOperationPageCapacity {
+		t.Fatalf("dynamic channel capacity = %d", got)
+	}
+	if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
+		t.Fatal("release dynamically grown channel source")
 	}
 }
 

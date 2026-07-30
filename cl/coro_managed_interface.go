@@ -190,7 +190,7 @@ func coroManagedInterfaceInvokeMethodKey(
 	}
 	common := call.Common()
 	if common.StaticCallee() != nil || !common.IsInvoke() || common.Method == nil {
-		return "", fmt.Errorf("managed interface descriptor requires an ordinary interface invoke")
+		return "", fmt.Errorf("managed interface descriptor requires an interface invoke")
 	}
 	signature, err := coroInterfaceDispatchEffectiveCallableSignature(universe, owner, common.Signature())
 	if err != nil {
@@ -257,6 +257,8 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 					case *ssa.Call:
 						dispatch, err = resolveCoroInterfaceDispatchPlan(plan, universe, call)
 					case *ssa.Defer:
+						dispatch, err = resolveCoroInterfaceDispatchPlan(plan, universe, call)
+					case *ssa.Go:
 						dispatch, err = resolveCoroInterfaceDispatchPlan(plan, universe, call)
 					default:
 						return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
@@ -384,6 +386,8 @@ func validateCoroManagedInterfaceDispatchCall(
 		}
 		kind = coro.CallDefer
 		cleanup = true
+	case *ssa.Go:
+		kind = coro.CallSpawn
 	default:
 		return fail("interface invoke has no %T carrier", call)
 	}
@@ -470,17 +474,16 @@ func (p *context) compileCoroManagedInterfaceAwait(
 }
 
 func (p *context) compileCoroManagedInterfaceOperands(
-	b llssa.Builder, call *ssa.Call,
+	b llssa.Builder, call ssa.CallInstruction,
 ) (llssa.Expr, []llssa.Expr) {
 	common := call.Common()
-	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 	// Evaluate the interface receiver before arguments, exactly as the ordinary
 	// LLGo invoke path does. Imethod preserves the nil-interface panic and pairs
 	// the descriptor Ifn_ word with IfacePtrData as its receiver environment.
 	intf := p.compileValue(b, common.Value)
 	method := b.Imethod(intf, common.Method)
-	args := p.compileValues(b, call.Call.Args, fnNormal)
+	args := p.compileValues(b, common.Args, fnNormal)
 	return method, args
 }
 
@@ -521,19 +524,21 @@ func (p *context) resolveInterfaceMethodDescriptor(
 	return descriptor, true
 }
 
-// resolveManagedInterfaceRawMethodSymbol preserves the independent raw-method
-// address domain while a method family's Ifn_ uses universal descriptor
-// transport. A real RawPlainEntry selects its separately planned legacy body.
-// Without that capability, Tfn_ receives a signature-correct trap stub rather
-// than an invalid call to the coroutine primary.
-func (p *context) resolveManagedInterfaceRawMethodSymbol(
+// resolveCoroRawMethodSymbol preserves the independent raw-method address
+// domain for every method whose primary is a physical coroutine. ABI type
+// construction may materialize an Ifn_ raw slot even when no live managed
+// interface call selected that method. A real RawPlainEntry selects its
+// separately planned legacy body; without that capability the slot receives a
+// signature-correct trap rather than claiming the coroutine primary's symbol
+// with a plain signature.
+func (p *context) resolveCoroRawMethodSymbol(
 	method *types.Func, signature *types.Signature,
 ) (string, bool) {
-	if p.compilation == nil || p.compilation.coroManagedInterface == nil || signature == nil {
+	if p.compilation.immutablePlan() == nil || signature == nil {
 		return "", false
 	}
 	patched, ok := p.patchType(signature).(*types.Signature)
-	if !ok || !p.compilation.coroManagedInterface.acceptsMethod(method, patched) {
+	if !ok {
 		return "", false
 	}
 	target := p.resolveInterfaceMethodSSA(method, signature)

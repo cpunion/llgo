@@ -1,4 +1,4 @@
-//go:build tinygo.wasm && !wasm
+//go:build coro_runtime_adapter_test
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -16,13 +16,25 @@
  * limitations under the License.
  */
 
-package chacha8rand
+package runtime
 
-//llgo:skip block
+import "github.com/goplus/llgo/runtime/internal/coro"
 
-// The named wasm32 targets use a 32-bit ARM Go frontend only for source-level
-// layout. Do not retain its assembly trampoline in a WebAssembly module: call
-// the standard pure-Go implementation directly and preserve the package API.
-func block(seed *[4]uint64, blocks *[32]uint64, counter uint32) {
-	block_generic(seed, blocks, counter)
+// The host runtime-adapter island allocates any synthetic frame backing from
+// the Go test heap rather than coroalloc. It still exercises the exact trace
+// ownership transition, but reclamation belongs to the host GC.
+func coroReleaseDiscardedPanicTraceV1(task *coro.G) {
+	if !coro.PanicTraceDiscardPending(task) {
+		return
+	}
+	for {
+		raw, total, ok := coro.TakeDiscardedPanicTraceFrame(task)
+		if !ok {
+			coroRuntimeAbort("invalid discarded coroutine panic trace")
+		}
+		if raw == nil {
+			return
+		}
+		coro.Zero(raw, total)
+	}
 }

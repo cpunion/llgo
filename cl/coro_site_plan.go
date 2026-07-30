@@ -78,9 +78,19 @@ func (p *context) beginCoroRelocatedIntrinsicEmission(
 	return p.beginCoroSiteEmissionMode(instruction, placement, false, true)
 }
 
-func (p *context) beginCoroFunctionPreambleEmission() func() {
+type coroFunctionPreambleEmissionPhase uint8
+
+const (
+	coroFunctionPreambleEntry coroFunctionPreambleEmissionPhase = iota
+	coroFunctionPreambleLocalityGuards
+)
+
+func (p *context) beginCoroFunctionPreambleEmission(
+	phase coroFunctionPreambleEmissionPhase,
+) func() {
 	if p == nil || p.goFn == nil || p.compilation == nil || p.emissionUniverse == nil ||
-		!p.hasCoroPhysicalEmission() || p.rawPlainBody {
+		p.rawPlainBody ||
+		!p.emissionUniverse.CompleteRuntimeABI() && !p.hasCoroPhysicalEmission() {
 		return func() {}
 	}
 	plan := coroFunctionPreamblePlan{}
@@ -91,22 +101,42 @@ func (p *context) beginCoroFunctionPreambleEmission() func() {
 			panic(fmt.Errorf("coroutine function preamble in %q: %w", p.goFn.Name(), err))
 		}
 	}
+	var helpers []string
+	var localityGuards []locality.Kind
+	switch phase {
+	case coroFunctionPreambleEntry:
+		if plan.logicalCallerEntry {
+			helpers = append(helpers, "PushCallerLocationFrame")
+		}
+		if !p.hasCoroPhysicalEmission() && plan.localContextEntry {
+			// A plain primary consumes its legacy-stack entry operation. A
+			// physical coroutine already runs with scheduler-owned context.
+			helpers = append(helpers, "EnterLocalContext")
+		}
+	case coroFunctionPreambleLocalityGuards:
+		if len(plan.localityGuards) != 0 {
+			helpers = append(helpers, "LocalPackageLogical")
+			localityGuards = plan.localityGuards
+		}
+	default:
+		panic("coroutine function preamble has an invalid emission phase")
+	}
 	observer := &coroSiteEmissionObserver{
 		function:                    p.goFn,
 		label:                       "function-preamble",
 		placement:                   coroRuntimeHelperAtSource,
-		expected:                    make(map[string]none, len(plan.managedRuntimeHelpers)),
-		seen:                        make(map[string]none, len(plan.managedRuntimeHelpers)),
-		expectedLocalityGuards:      make(map[locality.Kind]none, len(plan.localityGuards)),
-		seenLocalityGuards:          make(map[locality.Kind]none, len(plan.localityGuards)),
+		expected:                    make(map[string]none, len(helpers)),
+		seen:                        make(map[string]none, len(helpers)),
+		expectedLocalityGuards:      make(map[locality.Kind]none, len(localityGuards)),
+		seenLocalityGuards:          make(map[locality.Kind]none, len(localityGuards)),
 		expectedLocalityDispatchers: make(map[*ssa.Function]none),
 		seenLocalityDispatchers:     make(map[*ssa.Function]none),
 		observeFrozenSite:           p.emissionUniverse.CompleteRuntimeABI(),
 	}
-	for _, helper := range plan.managedRuntimeHelpers {
+	for _, helper := range helpers {
 		observer.expected[helper] = none{}
 	}
-	for _, kind := range plan.localityGuards {
+	for _, kind := range localityGuards {
 		observer.expectedLocalityGuards[kind] = none{}
 	}
 	previous := p.coroEmissionSite()
@@ -142,7 +172,8 @@ func (p *context) beginCoroSiteEmissionMode(
 	observeCall bool,
 ) func() {
 	if p == nil || instruction == nil || p.compilation == nil || p.emissionUniverse == nil ||
-		!p.hasCoroPhysicalEmission() || p.rawPlainBody {
+		p.rawPlainBody ||
+		!p.emissionUniverse.CompleteRuntimeABI() && !p.hasCoroPhysicalEmission() {
 		return func() {}
 	}
 	plan := coroEmissionSitePlan{}
@@ -161,7 +192,11 @@ func (p *context) beginCoroSiteEmissionMode(
 			panic(fmt.Errorf("coroutine emission site %q: %w", instruction.String(), err))
 		}
 		if observeHelpers {
-			helpers = plan.managedRuntimeHelpersAt(placement)
+			if p.hasCoroPhysicalEmission() {
+				helpers = plan.managedRuntimeHelpersAt(placement)
+			} else if placement == coroRuntimeHelperAtSource {
+				helpers = append([]string(nil), plan.plainRuntimeHelpers...)
+			}
 			if placement == coroRuntimeHelperAtSource {
 				localityDispatchers = plan.localityDispatchers
 			}
@@ -320,7 +355,17 @@ func (p *context) observeCoroSemanticInstruction(instruction ssa.Instruction) {
 	if observer == nil {
 		return
 	}
-	if !observer.hasExpectedPhysical || observer.instruction != instruction || observer.expectedPhysical.semantic.recipe == "" {
+	if observer.instruction != instruction {
+		panic("coroutine semantic recipe emission escaped its exact source SitePlan")
+	}
+	// Complete ProgramIR observes managed helpers for both plain and physical
+	// functions. Only physical coroutine bodies carry a semantic/physical
+	// instruction recipe; the plain function's source SitePlan remains the
+	// authority for its helper edges without inventing one.
+	if !observer.hasExpectedPhysical {
+		return
+	}
+	if observer.expectedPhysical.semantic.recipe == "" {
 		panic("coroutine semantic recipe emission has no exact physical SitePlan")
 	}
 	if observer.seenSemantic {

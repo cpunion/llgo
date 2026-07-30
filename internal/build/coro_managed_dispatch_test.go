@@ -67,7 +67,7 @@ func deferred(fn func()) { defer fn() }
 		want := coro.UnknownManaged
 		if name == "call" || name == "variadic" {
 			want = coro.UnknownManagedDispatch
-		} else if name == "invoke" {
+		} else if name == "invoke" || name == "invokeDeferred" {
 			want = coro.UnknownManagedInterfaceDispatch
 		}
 		if callPlan.Unresolved != want {

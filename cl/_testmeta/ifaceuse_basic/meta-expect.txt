@@ -10,9 +10,9 @@ __llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b:
     __llgo_coro_root_factory_v1.d8d862b15239d9fd7afbe10db509ec2b
 __llgo_coro_root_factory_v1.d8d862b15239d9fd7afbe10db509ec2b:
     github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro
-__llgo_coro_root_package_v1.e76fda7918556a7b3cf5d8752e57849d:
-    __llgo_coro_root_package_v1.e76fda7918556a7b3cf5d8752e57849d.entries
-__llgo_coro_root_package_v1.e76fda7918556a7b3cf5d8752e57849d.entries:
+__llgo_coro_root_package_v1.44710f50c0995e8f7f729f47c81f6464:
+    __llgo_coro_root_package_v1.44710f50c0995e8f7f729f47c81f6464.entries
+__llgo_coro_root_package_v1.44710f50c0995e8f7f729f47c81f6464.entries:
     __llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b
 _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T:
     *_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
@@ -38,9 +38,11 @@ github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro:
     llvm.coro.size.i64
     llvm.coro.suspend
     llvm.trap
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.238905f6c44cc79552060bcab51b23a8
 llvm.used:
     __llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b
-    __llgo_coro_root_package_v1.e76fda7918556a7b3cf5d8752e57849d
+    __llgo_coro_root_package_v1.44710f50c0995e8f7f729f47c81f6464
 
 [UseIface]
 github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro:

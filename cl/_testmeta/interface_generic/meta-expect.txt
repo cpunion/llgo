@@ -39,9 +39,9 @@ __llgo_coro_root_factory_descriptor_v1.2ccc926028efa17fe81032a2a6b882d7:
     __llgo_coro_root_factory_v1.2ccc926028efa17fe81032a2a6b882d7
 __llgo_coro_root_factory_v1.2ccc926028efa17fe81032a2a6b882d7:
     github.com/goplus/llgo/cl/_testmeta/interface_generic.main$coro
-__llgo_coro_root_package_v1.f725c4a245a8a9ef1d78731b8e83e379:
-    __llgo_coro_root_package_v1.f725c4a245a8a9ef1d78731b8e83e379.entries
-__llgo_coro_root_package_v1.f725c4a245a8a9ef1d78731b8e83e379.entries:
+__llgo_coro_root_package_v1.32836f39d4a0cb9ffc4a51814a86f73f:
+    __llgo_coro_root_package_v1.32836f39d4a0cb9ffc4a51814a86f73f.entries
+__llgo_coro_root_package_v1.32836f39d4a0cb9ffc4a51814a86f73f.entries:
     __llgo_coro_root_factory_descriptor_v1.2ccc926028efa17fe81032a2a6b882d7
 _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
     *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
@@ -129,9 +129,11 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic.useInt$coro:
     llvm.coro.size.i64
     llvm.coro.suspend
     llvm.trap
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.9de3d95ff323616f0e7ac72051aca5e2
 llvm.used:
     __llgo_coro_root_factory_descriptor_v1.2ccc926028efa17fe81032a2a6b882d7
-    __llgo_coro_root_package_v1.f725c4a245a8a9ef1d78731b8e83e379
+    __llgo_coro_root_package_v1.32836f39d4a0cb9ffc4a51814a86f73f
 
 [UseIface]
 github.com/goplus/llgo/cl/_testmeta/interface_generic.main$coro:

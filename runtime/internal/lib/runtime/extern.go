@@ -24,6 +24,10 @@ func callerLocation(file string, line int) (string, int) {
 //go:noinline
 func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 	ensureRuntimePCLN()
+	if frame, ok := rtdebug.Caller(skip); ok {
+		file, line = callerLocation(frame.File, frame.Line)
+		return frame.PC, file, line, true
+	}
 	if fpUnwindAvailable() {
 		var pcs [1]uintptr
 		if fpCallers(skip+1, pcs[:]) >= 1 {
@@ -35,10 +39,6 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 			file, line = callerLocation(sym.file, sym.line)
 			return pc, file, line, true
 		}
-	}
-	if frame, ok := rtdebug.Caller(skip); ok {
-		file, line = callerLocation(frame.File, frame.Line)
-		return frame.PC, file, line, true
 	}
 	var pcs [1]uintptr
 	if Callers(skip+2, pcs[:]) < 1 {
@@ -52,13 +52,13 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 //go:noinline
 func Callers(skip int, pc []uintptr) int {
 	ensureRuntimePCLN()
+	if n := rtdebug.Callers(skip, pc); n > 0 {
+		return n
+	}
 	if fpUnwindAvailable() {
 		if n := fpCallers(skip, pc); n > 0 {
 			return n
 		}
-	}
-	if n := rtdebug.Callers(skip, pc); n > 0 {
-		return n
 	}
 	return callers(skip+1, pc)
 }

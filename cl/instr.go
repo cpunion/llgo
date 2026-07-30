@@ -1078,7 +1078,7 @@ func (p *context) sourceLine(filename string, line int) (string, bool) {
 }
 
 func (p *context) shouldTrackCallerFrames() bool {
-	if p == nil || p.pkg == nil || p.fn == nil || p.goFn == nil || !p.trackCallerFrames {
+	if p == nil || p.goFn == nil || !p.trackCallerFrames {
 		return false
 	}
 	if !p.runtimeCallerFuncs[p.goFn] {
@@ -1087,7 +1087,13 @@ func (p *context) shouldTrackCallerFrames() bool {
 	if target := p.prog.Target(); target != nil && (target.Target != "" || target.GOARCH == "wasm") {
 		return false
 	}
-	return canTrackCallerFramesForPackage(p.pkg.Path())
+	pkgPath := ""
+	if p.pkg != nil {
+		pkgPath = p.pkg.Path()
+	} else if p.goTyps != nil {
+		pkgPath = llssa.PathOf(p.goTyps)
+	}
+	return pkgPath != "" && canTrackCallerFramesForPackage(pkgPath)
 }
 
 // canTrackCallerFramesForPackage excludes only the runtime core, whose
@@ -1186,6 +1192,49 @@ func runtimeCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function
 	return out
 }
 
+// runtimeLogicalCallerFuncSet is the demand closure needed to preserve
+// runtime.Caller/Callers semantics across stackless suspension. It deliberately
+// excludes the broader FP-only panic-quality additions (program-unique and
+// already-noinline functions): panic traceback uses coroutine frame/state
+// metadata and must not turn this targeted caller stack into whole-program
+// per-call instrumentation.
+func runtimeLogicalCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function]bool {
+	if pkg == nil {
+		return nil
+	}
+	if set, ok := c.logical[pkg]; ok {
+		return set
+	}
+	base := runtimeCallerBaseSet(c, pkg)
+	out := make(map[*ssa.Function]bool, len(base))
+	for fn := range base {
+		out[fn] = true
+	}
+	_, trackable := collectRuntimeCallerFunctions(pkg)
+	for fn := range trackable {
+		if out[fn] {
+			continue
+		}
+		forEachCall(fn, func(call *ssa.CallCommon) {
+			callee := call.StaticCallee()
+			if callee == nil || callee.Pkg == nil || callee.Pkg == pkg {
+				return
+			}
+			if !canTrackCallerFramesForPackage(callee.Pkg.Pkg.Path()) {
+				return
+			}
+			if runtimeCallerBaseSet(c, callee.Pkg)[callee] {
+				out[fn] = true
+			}
+		})
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	c.logical[pkg] = out
+	return out
+}
+
 // CallerTracking memoizes the per-package caller-tracking sets for one
 // compilation. Like Patches, it is compilation-scoped state owned by the
 // driver: create one per compilation and pass it to every
@@ -1199,6 +1248,7 @@ func runtimeCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function
 type CallerTracking struct {
 	base     map[*ssa.Package]map[*ssa.Function]bool
 	extended map[*ssa.Package]map[*ssa.Function]bool
+	logical  map[*ssa.Package]map[*ssa.Function]bool
 }
 
 // NewCallerTracking creates the caller-tracking memoization for one
@@ -1207,6 +1257,7 @@ func NewCallerTracking() *CallerTracking {
 	return &CallerTracking{
 		base:     make(map[*ssa.Package]map[*ssa.Function]bool),
 		extended: make(map[*ssa.Package]map[*ssa.Function]bool),
+		logical:  make(map[*ssa.Package]map[*ssa.Function]bool),
 	}
 }
 
@@ -1697,24 +1748,62 @@ func (p *context) runtimeCallerFrameName() string {
 	return ""
 }
 
-// emitShadowStackInstrumentation gates the legacy shadow-stack calls
-// (PushCallerLocationFrame / RecordCallerLocation / RecordPanicLocation).
-// The FP-chain unwinder supersedes them: physical pcs resolve through the
-// prebuilt ftab and pcline labels, so tracked functions keep only noinline,
-// no-tail-call and the label records. The emitters stay for one release as
-// an escape hatch (LLGO_SHADOW_STACK=1).
-var emitShadowStackInstrumentation = os.Getenv("LLGO_SHADOW_STACK") == "1"
+// emitShadowStackInstrumentation is a focused-test override for report-only
+// compilation, which has no complete runtime ABI. Production selects the
+// demand-driven logical caller stack from its frozen emission universe.
+var emitShadowStackInstrumentation bool
+
+func (p *context) shouldEmitLogicalCallerFrames() bool {
+	if !p.shouldTrackCallerFrames() {
+		return false
+	}
+	if emitShadowStackInstrumentation {
+		return true
+	}
+	return p.logicalCallerFuncs[p.goFn] &&
+		p.emissionUniverse != nil && p.emissionUniverse.CompleteRuntimeABI()
+}
+
+// plannedLogicalCallerRuntimeHelper is the sole emission-time decision for
+// logical caller instrumentation. Production lowering consumes the exact
+// function/source SitePlan frozen by CoroProgramIR; it must never recompute
+// caller reachability from the package currently being emitted. Incomplete
+// report universes retain the focused-test override above.
+func (p *context) plannedLogicalCallerRuntimeHelper(helper string) bool {
+	switch helper {
+	case "PushCallerLocationFrame", "RecordCallerLocation",
+		"RecordPanicLocation", "PopCallerLocationFrame":
+	default:
+		panic(fmt.Sprintf("invalid logical caller runtime helper %q", helper))
+	}
+	if p != nil && p.rawPlainBody {
+		return false
+	}
+	if p != nil && p.emissionUniverse != nil &&
+		p.emissionUniverse.CompleteRuntimeABI() {
+		observer := p.coroEmissionSite()
+		if observer == nil || !observer.observeFrozenSite {
+			panic(fmt.Sprintf(
+				"logical caller runtime helper %q has no active frozen SitePlan",
+				helper,
+			))
+		}
+		_, planned := observer.expected[helper]
+		return planned
+	}
+	return p.shouldEmitLogicalCallerFrames()
+}
 
 func (p *context) pushCallerLocationFrame(b llssa.Builder, fn *ssa.Function) {
-	if !emitShadowStackInstrumentation {
+	if fn == nil {
 		return
 	}
-	if fn == nil {
+	if !p.plannedLogicalCallerRuntimeHelper("PushCallerLocationFrame") {
 		return
 	}
 	pos := p.fset.Position(fn.Pos())
 	entry := b.Convert(p.prog.Uintptr(), p.fn.Expr)
-	p.callerFrameMark = b.Call(
+	b.Call(
 		p.runtimeFunc("PushCallerLocationFrame", pushCallerLocationFrameSig()),
 		entry,
 		b.Str(p.runtimeCallerFrameName()),
@@ -1732,11 +1821,11 @@ func (p *context) recordPanicLocation(b llssa.Builder, pos token.Pos) {
 }
 
 func (p *context) recordRuntimeLocation(b llssa.Builder, pos token.Pos, fn string) {
-	if !emitShadowStackInstrumentation || !p.shouldTrackCallerFrames() {
+	if !p.plannedLogicalCallerRuntimeHelper(fn) {
 		return
 	}
-	position := p.fset.Position(pos)
-	if position.Line <= 0 || position.Filename == "" {
+	position, recordable := runtimeLocationPosition(p.fset, pos)
+	if !recordable {
 		return
 	}
 	b.Call(
@@ -1748,8 +1837,34 @@ func (p *context) recordRuntimeLocation(b llssa.Builder, pos token.Pos, fn strin
 	)
 }
 
+func runtimeLocationPosition(fset *token.FileSet, pos token.Pos) (token.Position, bool) {
+	if fset == nil {
+		return token.Position{}, false
+	}
+	position := fset.Position(pos)
+	return position, position.Filename != "" && position.Line > 0
+}
+
+// coroCurrentSourceLine returns the immutable source line owned by the active
+// CoroProgramIR site. It is embedded as a constant store at a scheduler or
+// terminal transition; it does not enable the logical-caller shadow stack.
+func (p *context) coroCurrentSourceLine() uint32 {
+	if p == nil {
+		return 0
+	}
+	site := p.coroEmissionSite()
+	if site == nil || site.instruction == nil {
+		return 0
+	}
+	position, ok := runtimeLocationPosition(p.fset, site.instruction.Pos())
+	if !ok || uint64(position.Line) > uint64(^uint32(0)) {
+		return 0
+	}
+	return uint32(position.Line)
+}
+
 func (p *context) recordCallerLocationForCall(b llssa.Builder, call *ssa.CallCommon) {
-	if !p.shouldTrackCallerFrames() {
+	if call == nil {
 		return
 	}
 	callee := call.StaticCallee()
@@ -1899,14 +2014,27 @@ func asmQuoteSymbol(symbol string) string {
 }
 
 func (p *context) popCallerLocationFrame(b llssa.Builder) {
-	if p.callerFrameMark.IsNil() {
+	if p == nil || p.fn == nil || b == nil {
 		return
 	}
-	b.Call(p.runtimeFunc("PopCallerLocationFrame", popCallerLocationFrameSig()), p.callerFrameMark)
+	if !p.plannedLogicalCallerRuntimeHelper("PopCallerLocationFrame") {
+		return
+	}
+	entry := b.Convert(p.prog.Uintptr(), p.fn.Expr)
+	b.Call(p.runtimeFunc("PopCallerLocationFrame", popCallerLocationFrameSig()), entry)
 }
 
 func (p *context) runtimeFunc(name string, sig *types.Signature) llssa.Expr {
 	p.pkg.NeedRuntime = true
+	if p.compilation != nil && p.emissionUniverse != nil &&
+		p.emissionUniverse.CompleteRuntimeABI() {
+		// Production hidden helper calls must use the rtFunc marker so the
+		// package RuntimeCallResolver can select the frozen plain/coroutine/raw
+		// physical entry. Creating an ordinary declaration here bypasses that
+		// resolver and leaves a legacy synchronous symbol call even when the
+		// whole-program plan selected EmitCoroutine.
+		return p.pkg.RuntimeFunc(name)
+	}
 	fullName := llssa.PkgRuntime + "." + name
 	if fn := p.pkg.FuncOf(fullName); fn != nil {
 		return fn.Expr
@@ -1922,7 +2050,7 @@ func pushCallerLocationFrameSig() *types.Signature {
 			types.NewVar(token.NoPos, nil, "file", types.Typ[types.String]),
 			types.NewVar(token.NoPos, nil, "startLine", types.Typ[types.Int]),
 		),
-		types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Int])),
+		nil,
 		false,
 	)
 }
@@ -1942,7 +2070,7 @@ func recordRuntimeLocationSig() *types.Signature {
 
 func popCallerLocationFrameSig() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil,
-		types.NewTuple(types.NewVar(token.NoPos, nil, "mark", types.Typ[types.Int])),
+		types.NewTuple(types.NewVar(token.NoPos, nil, "entry", types.Typ[types.Uintptr])),
 		nil,
 		false,
 	)
@@ -2245,8 +2373,14 @@ func (p *context) callEx(
 	ds *explicitDeferStack,
 	source ssa.CallInstruction,
 ) (ret llssa.Expr) {
-	p.recordCallerLocationForCall(b, call)
 	p.emitPCLineLabel(b, call.Pos())
+	// Record runtime type-registry semantics from the immutable Go call
+	// identity before coroutine lowering replaces the logical callee with its
+	// physical $coro entry. LLVM symbol names are not a semantic source of
+	// truth: the ordinary llssa call hook cannot recognize a renamed physical
+	// entry, while reflect APIs such as Value.Addr still need the exact linked
+	// pointer descriptors at run time.
+	p.pkg.NeedAbiInit |= reflectStaticCallABIInitKind(call)
 	cv := call.Value
 	if mthd := call.Method; mthd != nil {
 		reflectCheck := p.reflectTypeMethodCheck(call, mthd)
@@ -2314,7 +2448,11 @@ func (p *context) callEx(
 				// coroutine frame. ExplicitStatus owns the branch and returns the
 				// original pointer on its non-nil continuation.
 				observePhysicalInstruction(coroPhysicalInstructionBuiltinNilGuard)
-				ret = p.compileCoroPlannedNilAccessGuard(b, sourceCall, ptr)
+				recvType := p.compileValue(b, args[1])
+				methodName := p.compileValue(b, args[2])
+				ret = p.compileCoroPlannedWrapNilGuard(
+					b, sourceCall, ptr, recvType, methodName,
+				)
 				return
 			}
 			if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
@@ -2637,6 +2775,59 @@ func (p *context) callEx(
 		ret = p.emitDo(b, act, ds, fn, llssa.Builder.Call, args...)
 	}
 	return
+}
+
+func reflectStaticCallABIInitKind(call *ssa.CallCommon) int {
+	if call == nil {
+		return 0
+	}
+	target := call.StaticCallee()
+	if target == nil {
+		return 0
+	}
+	object, ok := target.Object().(*types.Func)
+	if !ok || object == nil || object.Pkg() == nil || object.Pkg().Path() != "reflect" {
+		return 0
+	}
+	signature, ok := object.Type().(*types.Signature)
+	if !ok {
+		return 0
+	}
+	if signature.Recv() == nil {
+		switch object.Name() {
+		case "ArrayOf":
+			return llssa.ReflectArrayOf
+		case "ChanOf":
+			return llssa.ReflectChanOf
+		case "FuncOf":
+			return llssa.ReflectFuncOf
+		case "MapOf":
+			return llssa.ReflectMapOf
+		case "PointerTo", "PtrTo", "New", "NewAt":
+			return llssa.ReflectPointerTo
+		case "SliceOf":
+			return llssa.ReflectSliceOf
+		case "StructOf":
+			return llssa.ReflectStructOf
+		}
+		return 0
+	}
+	receiver := types.Unalias(signature.Recv().Type())
+	if pointer, ok := receiver.(*types.Pointer); ok {
+		receiver = types.Unalias(pointer.Elem())
+	}
+	named, ok := receiver.(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil ||
+		named.Obj().Pkg().Path() != "reflect" || named.Obj().Name() != "Value" {
+		return 0
+	}
+	switch object.Name() {
+	case "Addr":
+		return llssa.ReflectPointerTo
+	case "Slice", "Slice3":
+		return llssa.ReflectSliceOf
+	}
+	return 0
 }
 
 func (p *context) reflectTypeMethodCheck(call *ssa.CallCommon, method *types.Func) (check llssa.ReflectMethodCheck) {

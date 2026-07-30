@@ -182,14 +182,19 @@ type context struct {
 	anonDefers           map[*ssa.Function]bool
 	debugDIVars          map[*types.Var]llssa.DIVar
 	debugAllocVars       map[*ssa.Alloc]*types.Var
+	stackClears          map[ssa.Instruction][]*ssa.Alloc
+	finalizerPkgUses     map[*ssa.Package]bool
 	runtimeCallerFuncs   map[*ssa.Function]bool
+	logicalCallerFuncs   map[*ssa.Function]bool
 	compilation          *Compilation
 	emissionUniverse     *EmissionUniverse
 	emissionOwner        *preparedEmissionPackage
 	cacheRegistration    bool // cached archive: skip observers; emitted IR is transient
 	pcLineSeq            uint64
 	coroEmission         *coroPhysicalEmissionSession
+	coroPlainSite        *coroSiteEmissionObserver
 	rawPlainBody         bool // compiling the legacy ABI variant of a managed function
+	coroOwnerBodySymbols map[string]none
 	// preservePatchedNamed keeps an alternate package's named type intact
 	// while constructing source-level ABI certificates. Ordinary codegen
 	// immediately lowers that replacement to its physical raw shape.
@@ -222,8 +227,6 @@ type context struct {
 	embedInits  []embedInit
 
 	trackCallerFrames bool
-	callerFrameMark   llssa.Expr
-
 	staticGlobalInits map[*ssa.Global]llssa.Expr
 	staticInitStores  map[*ssa.Store]none
 	staticInitInstrs  map[ssa.Instruction]none
@@ -742,17 +745,16 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		dbgEnabled := enableDbg
 		dbgSymsEnabled := enableDbgSyms && (f == nil || f.Origin() == nil)
 		p.inits = append(p.inits, func() {
-			oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldCallerFrameMark, oldRawPlainBody := p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.callerFrameMark, p.rawPlainBody
+			oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldRawPlainBody := p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.rawPlainBody
 			oldLocalityFunction := p.locality.function
 			p.fn = fn
 			p.goFn = f
 			p.patchOriginalInitIf = patchOriginalInitIf
 			p.rawPlainBody = rawPlain
-			p.callerFrameMark = llssa.Nil
 			p.locality.function = localityFunction{}
 			p.state = state // restore pkgState when compiling funcBody
 			defer func() {
-				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.callerFrameMark, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldCallerFrameMark, oldRawPlainBody
+				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldRawPlainBody
 				p.locality.function = oldLocalityFunction
 			}()
 			p.phis = nil
@@ -798,6 +800,11 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			} else {
 				// Legacy one-package compilation has no whole-program inventory.
 				p.unevaluatedSSA = collectUnsafeLayoutUnevaluatedSSA(f)
+			}
+			if p.enableConservativeLivenessClears(f) {
+				p.stackClears = p.collectStackClearPlans(f)
+			} else {
+				p.stackClears = nil
 			}
 			if physicalABI != nil {
 				p.compileCoroPhysicalBody(b, f, *physicalABI, isInit)
@@ -1041,10 +1048,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	var ret = p.sourceBlock(block.Index)
 	b.SetBlock(ret)
 	if block.Index == 0 {
-		p.enterExportedLocalContext(b)
-	}
-	if block.Index == 0 && p.shouldTrackCallerFrames() {
-		p.pushCallerLocationFrame(b, block.Parent())
+		p.emitFunctionPreambleWithCoroPlan(b, block.Parent())
 	}
 	if block.Index == 0 && enableCallTracing && !strings.HasPrefix(fn.Name(), "github.com/goplus/llgo/runtime/internal/runtime.Print") {
 		b.Printf("call " + fn.Name() + "\n\x00")
@@ -1154,6 +1158,10 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 		} else {
 			p.compileInstr(b, instr)
 		}
+		if isTerminatingInstruction(instr) {
+			continue
+		}
+		p.clearDeadAllocs(b, instr)
 	}
 	// is cgo cfunc but not return yet, some funcs has multiple blocks
 	if (isCgoCfunc || isCgoC2 || isCgoCmacro) && !cgoReturned {
@@ -1400,6 +1408,468 @@ func isAllocVargs(ctx *context, v *ssa.Alloc) bool {
 	return false
 }
 
+func (p *context) enableConservativeLivenessClears(fn *ssa.Function) bool {
+	if fn == nil || isCgoExternSymbol(fn) {
+		return false
+	}
+	pkg := declaredSSAPackage(fn)
+	if pkg == nil {
+		return false
+	}
+	return p.packageUsesRuntimeSetFinalizer(pkg)
+}
+
+func (p *context) packageUsesRuntimeSetFinalizer(pkg *ssa.Package) bool {
+	if pkg == nil {
+		return false
+	}
+	if uses, ok := p.finalizerPkgUses[pkg]; ok {
+		return uses
+	}
+	if p.finalizerPkgUses == nil {
+		p.finalizerPkgUses = make(map[*ssa.Package]bool)
+	}
+	uses := false
+	seen := make(map[*ssa.Function]bool)
+	check := func(fn *ssa.Function) bool {
+		return p.functionUsesRuntimeSetFinalizer(fn, seen)
+	}
+	for _, member := range pkg.Members {
+		if fn, ok := member.(*ssa.Function); ok && check(fn) {
+			uses = true
+			break
+		}
+	}
+	if !uses && pkg.Prog != nil {
+		for _, member := range pkg.Members {
+			typ, ok := member.(*ssa.Type)
+			if !ok {
+				continue
+			}
+			for _, recv := range []types.Type{typ.Type(), types.NewPointer(typ.Type())} {
+				methods := pkg.Prog.MethodSets.MethodSet(recv)
+				for i := 0; i < methods.Len(); i++ {
+					obj, ok := methods.At(i).Obj().(*types.Func)
+					if !ok {
+						continue
+					}
+					if check(pkg.Prog.FuncValue(obj.Origin())) {
+						uses = true
+						break
+					}
+				}
+				if uses {
+					break
+				}
+			}
+			if uses {
+				break
+			}
+		}
+	}
+	p.finalizerPkgUses[pkg] = uses
+	return uses
+}
+
+func declaredSSAPackage(fn *ssa.Function) *ssa.Package {
+	for fn != nil {
+		if fn.Pkg != nil {
+			return fn.Pkg
+		}
+		if origin := fn.Origin(); origin != nil && origin != fn {
+			fn = origin
+			continue
+		}
+		fn = fn.Parent()
+	}
+	return nil
+}
+
+func (p *context) functionUsesRuntimeSetFinalizer(fn *ssa.Function, seen map[*ssa.Function]bool) bool {
+	if fn == nil || seen[fn] {
+		return false
+	}
+	seen[fn] = true
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			switch instr := instr.(type) {
+			case *ssa.Call:
+				if p.isRuntimeSetFinalizerCall(&instr.Call) {
+					return true
+				}
+			case *ssa.Defer:
+				if p.isRuntimeSetFinalizerCall(&instr.Call) {
+					return true
+				}
+			case *ssa.Go:
+				if p.isRuntimeSetFinalizerCall(&instr.Call) {
+					return true
+				}
+			}
+		}
+	}
+	for _, anon := range fn.AnonFuncs {
+		if p.functionUsesRuntimeSetFinalizer(anon, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasConservativeGCPointers(t types.Type, seen map[types.Type]bool) bool {
+	if t == nil {
+		return false
+	}
+	t = types.Unalias(t)
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch t := t.Underlying().(type) {
+	case *types.Pointer, *types.Slice, *types.Map, *types.Chan, *types.Signature, *types.Interface:
+		return true
+	case *types.Basic:
+		return t.Kind() == types.String || t.Kind() == types.UnsafePointer
+	case *types.Array:
+		return hasConservativeGCPointers(t.Elem(), seen)
+	case *types.Struct:
+		for i := 0; i < t.NumFields(); i++ {
+			if hasConservativeGCPointers(t.Field(i).Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (p *context) shouldClearAlloc(v *ssa.Alloc) bool {
+	if v == nil || v.Heap || v.Comment == "varargs" || v.Comment == "makeslice" {
+		return false
+	}
+	ptr, ok := v.Type().Underlying().(*types.Pointer)
+	return ok && hasConservativeGCPointers(ptr.Elem(), map[types.Type]bool{})
+}
+
+func cyclicBlocks(blocks []*ssa.BasicBlock) map[*ssa.BasicBlock]bool {
+	// Compute strongly connected components once per function so liveness
+	// candidates do not repeat reachability walks over the same CFG.
+	cyclic := make(map[*ssa.BasicBlock]bool)
+	indices := make(map[*ssa.BasicBlock]int, len(blocks))
+	lowlinks := make(map[*ssa.BasicBlock]int, len(blocks))
+	onStack := make(map[*ssa.BasicBlock]bool, len(blocks))
+	stack := make([]*ssa.BasicBlock, 0, len(blocks))
+	nextIndex := 1
+
+	var visit func(*ssa.BasicBlock)
+	visit = func(block *ssa.BasicBlock) {
+		if block == nil {
+			return
+		}
+		index := nextIndex
+		nextIndex++
+		indices[block] = index
+		lowlinks[block] = index
+		stack = append(stack, block)
+		onStack[block] = true
+
+		for _, succ := range block.Succs {
+			if succ == nil {
+				continue
+			}
+			if indices[succ] == 0 {
+				visit(succ)
+				lowlinks[block] = min(lowlinks[block], lowlinks[succ])
+			} else if onStack[succ] {
+				lowlinks[block] = min(lowlinks[block], indices[succ])
+			}
+		}
+		if lowlinks[block] != index {
+			return
+		}
+
+		var component []*ssa.BasicBlock
+		for {
+			last := len(stack) - 1
+			member := stack[last]
+			stack = stack[:last]
+			onStack[member] = false
+			component = append(component, member)
+			if member == block {
+				break
+			}
+		}
+		if len(component) > 1 {
+			for _, member := range component {
+				cyclic[member] = true
+			}
+			return
+		}
+		for _, succ := range block.Succs {
+			if succ == block {
+				cyclic[block] = true
+				return
+			}
+		}
+	}
+
+	for _, block := range blocks {
+		if block != nil && indices[block] == 0 {
+			visit(block)
+		}
+	}
+	return cyclic
+}
+
+type instructionOperandScratch struct {
+	inline   [8]*ssa.Value
+	operands []*ssa.Value
+}
+
+type stackLivenessState struct {
+	value       ssa.Value
+	slotAddress bool
+}
+
+func (s *instructionOperandScratch) uses(instr ssa.Instruction, v ssa.Value) bool {
+	if instr == nil || v == nil {
+		return false
+	}
+	if s.operands == nil {
+		s.operands = s.inline[:0]
+	} else {
+		s.operands = s.operands[:0]
+	}
+	// Referrer lists are mutable in x/tools. Re-scan operands deliberately so
+	// stale entries that no longer name v make the liveness proof fail closed.
+	s.operands = instr.Operands(s.operands)
+	for _, operand := range s.operands {
+		if operand != nil && *operand == v {
+			return true
+		}
+	}
+	return false
+}
+
+func instructionUsesValue(instr ssa.Instruction, v ssa.Value) bool {
+	var scratch instructionOperandScratch
+	return scratch.uses(instr, v)
+}
+
+func instructionRetainsAddress(instr ssa.Instruction, v ssa.Value) bool {
+	// Side-effecting instructions can hide a stack address from the SSA
+	// referrer graph, so the liveness walk cannot follow later aliases.
+	//
+	// This switch deliberately defaults to retaining: every known instruction
+	// must either identify its non-retaining destination operand below or be a
+	// pure value instruction whose uses the recursive walk can follow. A new
+	// SSA instruction therefore fails closed until it is classified here.
+	switch instr := instr.(type) {
+	case *ssa.Store:
+		if instr.Val == v {
+			return true
+		}
+		return instr.Addr != v
+	case *ssa.MapUpdate:
+		if instr.Key == v || instr.Value == v {
+			return true
+		}
+		return instr.Map != v
+	case *ssa.Send:
+		if instr.X == v {
+			return true
+		}
+		return instr.Chan != v
+	case *ssa.Call:
+		// Calls may retain any operand, including invoke receivers.
+		return true
+	case *ssa.Select:
+		channelOperand := false
+		for _, state := range instr.States {
+			if state.Dir == types.SendOnly && state.Send == v {
+				return true
+			}
+			if state.Chan == v {
+				channelOperand = true
+			}
+		}
+		return !channelOperand
+	case *ssa.Alloc, *ssa.BinOp, *ssa.UnOp, *ssa.ChangeType,
+		*ssa.Convert, *ssa.MultiConvert, *ssa.ChangeInterface,
+		*ssa.SliceToArrayPointer, *ssa.MakeInterface, *ssa.MakeMap,
+		*ssa.MakeChan, *ssa.MakeSlice, *ssa.Slice, *ssa.FieldAddr,
+		*ssa.Field, *ssa.IndexAddr, *ssa.Index, *ssa.Lookup, *ssa.Range,
+		*ssa.Next, *ssa.TypeAssert, *ssa.Extract:
+		// These instructions only produce values. Recursively walking the
+		// result's referrers preserves address provenance until a load.
+		return false
+	}
+	return true
+}
+
+func isTerminatingInstruction(instr ssa.Instruction) bool {
+	switch instr.(type) {
+	case *ssa.Jump, *ssa.Return, *ssa.If, *ssa.Panic:
+		return true
+	}
+	return false
+}
+
+func (p *context) isRuntimeSetFinalizerCall(call *ssa.CallCommon) bool {
+	if call == nil {
+		return false
+	}
+	fn, ok := call.Value.(*ssa.Function)
+	if !ok || fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
+		return false
+	}
+	if fn.Name() != "SetFinalizer" {
+		return false
+	}
+	switch fn.Pkg.Pkg.Path() {
+	case "runtime", "github.com/goplus/llgo/runtime/internal/lib/runtime":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *context) lastUseInBlock(v ssa.Value, blk *ssa.BasicBlock, order map[ssa.Instruction]int) (ssa.Instruction, bool) {
+	var scratch instructionOperandScratch
+	states := make(map[stackLivenessState]bool)
+	_, slotAddress := v.(*ssa.Alloc)
+	return p.lastUseInBlockValue(v, blk, order, states, slotAddress, &scratch)
+}
+
+func (p *context) lastUseInBlockValue(
+	v ssa.Value,
+	blk *ssa.BasicBlock,
+	order map[ssa.Instruction]int,
+	seen map[stackLivenessState]bool,
+	slotAddress bool,
+	scratch *instructionOperandScratch,
+) (ssa.Instruction, bool) {
+	state := stackLivenessState{value: v, slotAddress: slotAddress}
+	if v == nil || seen[state] {
+		return nil, true
+	}
+	seen[state] = true
+	refs := v.Referrers()
+	if refs == nil {
+		return nil, true
+	}
+	// x/tools defines Referrers for function-local values as the inverse of
+	// Instruction.Operands. Rely on that builder contract for completeness,
+	// but reject stale entries that no longer name v or are no longer
+	// scheduled in this block.
+	var last ssa.Instruction
+	updateLast := func(instr ssa.Instruction) {
+		if instr == nil {
+			return
+		}
+		if last == nil || order[instr] > order[last] {
+			last = instr
+		}
+	}
+	for _, ref := range *refs {
+		switch ref := ref.(type) {
+		case *ssa.DebugRef:
+			continue
+		case *ssa.Defer, *ssa.Go, *ssa.MakeClosure, *ssa.Phi:
+			return nil, false
+		default:
+			instr, ok := ref.(ssa.Instruction)
+			if !ok || !scratch.uses(instr, v) {
+				return nil, false
+			}
+			if instr.Block() != blk {
+				return nil, false
+			}
+			if _, ok := order[instr]; !ok {
+				return nil, false
+			}
+			if slotAddress && instructionRetainsAddress(instr, v) {
+				return nil, false
+			}
+			if refVal, ok := ref.(ssa.Value); ok {
+				nextSlotAddress := slotAddress
+				if unop, ok := refVal.(*ssa.UnOp); ok && unop.Op == token.MUL {
+					// A load copies the slot contents; the result no longer
+					// aliases the stack storage that will be cleared.
+					nextSlotAddress = false
+				}
+				use, ok := p.lastUseInBlockValue(refVal, blk, order, seen, nextSlotAddress, scratch)
+				if !ok {
+					return nil, false
+				}
+				if use != nil {
+					updateLast(use)
+					continue
+				}
+			}
+			updateLast(instr)
+		}
+	}
+	return last, true
+}
+
+func (p *context) collectStackClearPlans(fn *ssa.Function) map[ssa.Instruction][]*ssa.Alloc {
+	plans := make(map[ssa.Instruction][]*ssa.Alloc)
+	blockCyclicity := cyclicBlocks(fn.Blocks)
+	for _, blk := range fn.Blocks {
+		if blockCyclicity[blk] {
+			continue
+		}
+		var order map[ssa.Instruction]int
+		for _, instr := range blk.Instrs {
+			alloc, ok := instr.(*ssa.Alloc)
+			if !ok || !p.shouldClearAlloc(alloc) {
+				continue
+			}
+			// Deliberately limit clearing to exact, non-escaping slots whose
+			// complete use graph stays in one acyclic basic block. This can
+			// retain stale roots, but it cannot guess across control-flow,
+			// closure, defer, goroutine, or heap-escape boundaries.
+			useBlk := alloc.Block()
+			if useBlk == nil || useBlk != blk {
+				continue
+			}
+			if order == nil {
+				order = make(map[ssa.Instruction]int, len(blk.Instrs))
+				for i, useInstr := range blk.Instrs {
+					order[useInstr] = i
+				}
+			}
+			last, ok := p.lastUseInBlock(alloc, useBlk, order)
+			if ok && last != nil && !isTerminatingInstruction(last) {
+				plans[last] = append(plans[last], alloc)
+			}
+		}
+	}
+	return plans
+}
+
+func (p *context) clearAlloc(b llssa.Builder, alloc *ssa.Alloc) {
+	// Eligible allocs are lowered before their later clear sites. Reuse that
+	// exact stack pointer; rematerializing the alloc here would clear unrelated
+	// storage and invalidate the liveness proof.
+	ptr, ok := p.bvals[alloc]
+	if !ok {
+		log.Panicln("stack clear for unmaterialized alloc:", alloc)
+	}
+	elem := b.Prog.Elem(ptr.Type)
+	b.StoreVolatile(ptr, p.prog.Zero(elem))
+}
+
+func (p *context) clearDeadAllocs(b llssa.Builder, instr ssa.Instruction) {
+	allocs := p.stackClears[instr]
+	if len(allocs) == 0 {
+		return
+	}
+	for _, alloc := range allocs {
+		p.clearAlloc(b, alloc)
+	}
+}
+
 func isPhi(i ssa.Instruction) bool {
 	_, ok := i.(*ssa.Phi)
 	return ok
@@ -1497,6 +1967,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	}
 	switch v := iv.(type) {
 	case *ssa.Call:
+		p.recordCallerLocationForCall(b, &v.Call)
 		if value, handled := p.tryCompileCoroPatchInitRedirect(b, v); handled {
 			ret = value
 		} else if value, handled := p.tryCompileCoroRawPlainCall(b, v); handled {
@@ -1596,8 +2067,21 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.BinOp(v.Op, x, y)
 		}
 	case *ssa.UnOp:
+		if v.Op != token.ARROW {
+			p.recordPanicLocation(b, v.Pos())
+		}
 		physicalInstruction, physicalPlanned := physicalPlan()
 		if v.Op == token.MUL {
+			if physicalPlanned &&
+				physicalInstruction.recipe == coroPhysicalInstructionStaticArrayRangeDerefElided {
+				// ProgramIR has already proved that this is the type-only
+				// single-index range form. Preserve the legacy operand
+				// materialization contract (its pure SSA producers may already
+				// have been emitted), but form neither a load nor a nil fault.
+				observePhysical(coroPhysicalInstructionStaticArrayRangeDerefElided)
+				p.compileValue(b, v.X)
+				return
+			}
 			plannedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 			if _, ok := p.methodNilDerefChecks[v]; ok && !ssaValueProvenNonNilAt(v.X, v) {
 				if physicalPlanned && p.coroUsesExplicitStatusFaults() {
@@ -1620,7 +2104,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 			if isEffectfulArrayPointerDeref(v) && !plannedDeref {
 				x := p.compileValue(b, v.X)
-				p.recordPanicLocation(b, v.Pos())
 				b.AssertNilDeref(x)
 			}
 			if refs, ok := nonDebugReferrers(v); plannedDeref && ok && len(refs) == 0 {
@@ -1629,7 +2112,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				// memory effect. Let the frozen physical recipe either publish
 				// that fault or consume its checked address exactly once.
 				x := p.compileValue(b, v.X)
-				p.recordPanicLocation(b, v.Pos())
 				p.compileCoroPlannedDeref(b, v, x, physicalInstruction)
 				return
 			}
@@ -1637,7 +2119,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil {
 					if p.isLargeNonPointerValue(t) {
 						x := p.compileValue(b, v.X)
-						p.recordPanicLocation(b, v.Pos())
 						p.assertNilDerefBase(b, v.X)
 						b.AssertNilDeref(x)
 						return
@@ -1651,7 +2132,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					// Zero-length slice-to-array conversions can leave only
 					// an unused slice deref; preserve its required nil check.
 					x := p.compileValue(b, v.X)
-					p.recordPanicLocation(b, v.Pos())
 					p.assertNilDerefBase(b, v.X)
 					b.AssertNilDeref(x)
 					return
@@ -1677,9 +2157,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 		}
 		x := p.compileValue(b, v.X)
-		if v.Op != token.ARROW {
-			p.recordPanicLocation(b, v.Pos())
-		}
 		plannedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 		if plannedDeref {
 			x = p.compileCoroPlannedDeref(b, v, x, physicalInstruction)
@@ -1815,13 +2292,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		ret = b.Alloc(elem, heap)
 		p.debugAlloc(b, v, ret)
 	case *ssa.IndexAddr:
+		p.recordPanicLocation(b, v.Pos())
 		vx := v.X
 		if _, ok := p.isVArgs(vx); ok { // varargs: this is a varargs index
 			return
 		}
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
-		p.recordPanicLocation(b, v.Pos())
 		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIndexAddr {
 			observePhysical(coroPhysicalInstructionIndexAddr)
@@ -1899,6 +2376,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		idx := p.compileValue(b, v.Index)
 		ret = b.Lookup(x, idx, v.CommaOk)
 	case *ssa.Slice:
+		p.recordPanicLocation(b, v.Pos())
 		if makeSlice, ok := p.compileSyntheticMakeSlice(b, v); ok {
 			ret = makeSlice
 			break
@@ -1918,7 +2396,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if v.Max != nil {
 			max = p.compileValue(b, v.Max)
 		}
-		p.recordPanicLocation(b, v.Pos())
 		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSlice {
 			observePhysical(coroPhysicalInstructionSlice)
@@ -2098,6 +2575,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			panic(fmt.Sprintf("channel select selected incompatible frozen physical operation recipe %s", operation.operation))
 		}
 	case *ssa.SliceToArrayPointer:
+		p.recordPanicLocation(b, v.Pos())
 		t := p.type_(v.Type(), llssa.InGo)
 		x := p.compileValue(b, v.X)
 		physicalInstruction, physicalPlanned := physicalPlan()
@@ -2107,7 +2585,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				ret = b.SliceToArrayPointerUnchecked(x, t)
 				break
 			}
-			p.recordPanicLocation(b, v.Pos())
 			ret = p.compileCoroSliceToArrayPointer(b, v, x, t, physicalInstruction)
 			break
 		}
@@ -2122,7 +2599,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.SliceToArrayPointerUnchecked(x, t)
 			break
 		}
-		p.recordPanicLocation(b, v.Pos())
 		ret = b.SliceToArrayPointer(x, t)
 	default:
 		panic(fmt.Sprintf("compileInstrAndValue: unknown instr - %T\n", iv))
@@ -2407,9 +2883,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 				results[i] = p.compileValue(b, r)
 			}
 		}
-		if p.shouldTrackCallerFrames() {
-			p.popCallerLocationFrame(b)
-		}
+		p.popCallerLocationFrame(b)
 		p.leaveExportedLocalContext(b)
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
@@ -2441,6 +2915,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.recordPanicLocation(b, v.Pos())
 		b.MapUpdate(m, key, val)
 	case *ssa.Defer:
+		p.recordCallerLocationForCall(b, &v.Call)
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			if outcome.outcome != coroPhysicalOutcomeDeferRegister {
@@ -2456,11 +2931,13 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.callInstruction(b, p.blkInfos[v.Block().Index].Kind, v)
 	case *ssa.Go:
+		p.recordCallerLocationForCall(b, &v.Call)
 		if p.tryCompileCoroClosedStaticSpawn(b, v) {
 			return
 		}
 		p.callInstruction(b, llssa.Go, v)
 	case *ssa.RunDefers:
+		p.recordPanicLocation(b, v.Pos())
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			if outcome.outcome != coroPhysicalOutcomeRunDefers {
@@ -2470,9 +2947,9 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 			p.compileCoroRunDefers(b, v)
 			return
 		}
-		p.recordPanicLocation(b, v.Pos())
 		b.RunDefers()
 	case *ssa.Panic:
+		p.recordPanicLocation(b, v.Pos())
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			p.observeCoroPhysicalOutcome(v, outcome.outcome)
@@ -2487,7 +2964,6 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 			return
 		}
 		arg := p.compileValue(b, v.X)
-		p.recordPanicLocation(b, v.Pos())
 		b.Panic(arg)
 	case *ssa.Send:
 		ch := p.compileValue(b, v.Chan)
@@ -2558,7 +3034,31 @@ func (p *context) ownsFunctionEmission(v *ssa.Function) bool {
 	if v == nil {
 		return false
 	}
-	if v.Pkg == p.goPkg || v.Pkg == nil {
+	if p.emissionUniverse != nil && p.emissionOwner != nil &&
+		p.emissionUniverse.CompleteRuntimeABI() {
+		// The complete ProgramIR freezes one exact body owner key for every
+		// emitted instance (and multiple keys for intentional multi-owner
+		// generic/linkonce instances). x/tools' synthetic wrapper Pkg may name
+		// the consumer rather than the receiver's declaring package, so neither
+		// fn.Pkg nor receiver provenance is authoritative at emission time.
+		_, owns := p.emissionUniverse.coroProgramIR.siteOwners[emissionFunctionOwnerKey{
+			function: v,
+			owner:    p.emissionOwner,
+		}]
+		return owns
+	}
+	if v.Pkg == p.goPkg {
+		return true
+	}
+	if v.Pkg == nil {
+		// x/tools promoted wrappers and compiler-generated adapters have no
+		// SSA package even though the frozen universe assigns exactly one body
+		// owner. A consumer may reference their linkonce symbol, but must emit
+		// only a declaration; otherwise its body would consume the declaring
+		// package's ProgramIR under the consumer owner.
+		if p.emissionUniverse != nil && p.emissionOwner != nil {
+			return p.emissionUniverse.ownerOf(v) == p.emissionOwner
+		}
 		return true
 	}
 	// A patched package's original and alternate SSA packages share one LLVM
@@ -2700,7 +3200,11 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
 			return value
 		}
-		return p.compileRawFunctionValue(v)
+		value := p.compileRawFunctionValue(v)
+		if facade, handled := p.compileGoLinknameFunctionValueFacade(b, v, value); handled {
+			return facade
+		}
+		return value
 	case *ssa.Global:
 		varName := v.Name()
 		val := p.varOf(b, v)
@@ -3058,6 +3562,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 
 		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg),
 		runtimeCallerFuncs: runtimeCallerFuncSet(ct, pkg),
+		logicalCallerFuncs: runtimeLogicalCallerFuncSet(ct, pkg),
 	}
 	if opts.Compilation != nil {
 		ctx.emissionUniverse = opts.Compilation.EmissionUniverse
@@ -3099,12 +3604,18 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	if !ctx.skipall {
 		processPkg(ctx, ret, pkg)
 	}
+	if err := ctx.emitCoroFrozenOwnerBodies(ret); err != nil {
+		return nil, nil, err
+	}
 	for len(ctx.inits) > 0 {
 		inits := ctx.inits
 		ctx.inits = nil
 		for _, ini := range inits {
 			ini()
 		}
+	}
+	if err := ctx.validateCoroFrozenOwnerBodies(ret); err != nil {
+		return nil, nil, err
 	}
 	if fn := ctx.initAfter; fn != nil {
 		ctx.initAfter = nil
@@ -3161,6 +3672,78 @@ func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
 		return aFn.Expr
 	}
 	return pyFn.Expr
+}
+
+// compileGoLinknameFunctionValueFacade preserves the declared Go type when a
+// bodyless go:linkname function is used as a value. The exact paired
+// definition owns the executable symbol and may use typed pointers (or a
+// flattened method receiver) where the declaration deliberately exposes an
+// unsafe.Pointer facade. Direct calls can consume that ABI-compatible symbol
+// immediately, but boxing the implementation's type would publish the wrong
+// reflect.Type and recursively materialize implementation-only ABI metadata.
+//
+// The first ChangeType treats the already-proven symbol as an opaque function
+// pointer with the declaration's physical signature. The second constructs the
+// ordinary {code, env} Go function value. No adapter body or second callable
+// entry is introduced.
+func (p *context) compileGoLinknameFunctionValueFacade(
+	b llssa.Builder, source *ssa.Function, value llssa.Expr,
+) (llssa.Expr, bool) {
+	if source == nil || value.IsNil() {
+		return llssa.Expr{}, false
+	}
+	signature, paired, err := p.goLinknameFunctionValueSignature(source)
+	if !paired {
+		return llssa.Expr{}, false
+	}
+	if err != nil {
+		panic(err)
+	}
+	physical := p.prog.PhysicalFuncDecl(signature, llssa.InGo)
+	code := b.ChangeType(p.prog.Type(physical, llssa.InC), value)
+	closure := p.prog.Type(signature, llssa.InGo)
+	return b.ChangeType(closure, code), true
+}
+
+// goLinknameFunctionValueSignature returns the exact declared signature whose
+// Go value semantics survive an active bodyless go:linkname alias. Calls use
+// the paired definition's symbol; values retain this source-side type facade.
+func (p *context) goLinknameFunctionValueSignature(
+	source *ssa.Function,
+) (*types.Signature, bool, error) {
+	universe := p.immutableEmissionUniverse()
+	if universe == nil || source == nil {
+		return nil, false, nil
+	}
+	pair, paired := universe.goLinknameDefinitions[source]
+	if !paired {
+		return nil, false, nil
+	}
+	canonical, resolved := universe.Resolve(source)
+	if !resolved || canonical == nil || canonical != pair.definition {
+		return nil, true, fmt.Errorf(
+			"go:linkname function-value facade %q has no exact active definition",
+			source.String(),
+		)
+	}
+	if pair.declarationOwner == nil {
+		return nil, true, fmt.Errorf(
+			"go:linkname function-value facade %q has no frozen declaration owner",
+			source.String(),
+		)
+	}
+	sourceContext, err := universe.functionABIContext(source, pair.declarationOwner)
+	if err != nil {
+		return nil, true, fmt.Errorf("go:linkname function-value facade %q: %w", source.String(), err)
+	}
+	signature, ok := sourceContext.patchType(source.Signature).(*types.Signature)
+	if !ok {
+		return nil, true, fmt.Errorf(
+			"go:linkname function-value facade %q has a non-signature declared type",
+			source.String(),
+		)
+	}
+	return signature, true, nil
 }
 
 func initFnNameOfHasPatch(name string) string {
@@ -3672,11 +4255,26 @@ func (p *context) resolveLinkname(name string) string {
 // for method-table references and compileFuncDecl definitions. The ordinary
 // SetResolveLinkname path remains unchanged for report-only codegen.
 func (p *context) resolveMethodLinkname(_ string, method *types.Func, sig *types.Signature) string {
-	if name, managed := p.resolveManagedInterfaceRawMethodSymbol(method, sig); managed {
+	if name, planned := p.resolveCoroRawMethodSymbol(method, sig); planned {
 		return name
 	}
 	fn := p.resolveInterfaceMethodSSA(method, sig)
-	return p.mustFunctionSymbol(fn).name
+	entry, err := p.resolveFunctionSymbol(fn)
+	if err == nil {
+		err = entry.checkSupported()
+	}
+	if err != nil {
+		owner := "<no function>"
+		if p.goFn != nil {
+			owner = p.goFn.String()
+		}
+		panic(fmt.Errorf(
+			"resolve ABI method linkname %q with signature %s while compiling %q through target %q (demand sources: %s): %w",
+			method.FullName(), sig, owner, fn.String(),
+			coroDemandReferenceTrace(p.immutableEmissionUniverse(), fn), err,
+		))
+	}
+	return entry.name
 }
 
 // checkCompileMethods ensures that methods referenced from ABI method tables

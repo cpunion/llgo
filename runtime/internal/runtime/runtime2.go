@@ -60,6 +60,10 @@ type g struct {
 	// stack-owned context at its outer Go entry; the stackless scheduler points
 	// this field at the context embedded in the task's runtime sidecar.
 	localContext *LocalContext
+	// callerLocations is the lazily allocated logical caller stack. Keeping it
+	// on g rather than in pthread TLS makes runtime.Caller/Callers follow a
+	// stackless task when the scheduler resumes it on another physical M.
+	callerLocations *callerLocationStore
 
 	goexit       bool
 	isMain       bool

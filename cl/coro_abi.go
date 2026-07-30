@@ -136,6 +136,7 @@ const (
 	coroRunDecisionTakeHookV1            = "__llgo_coro_run_decision_take_v1"
 	coroRunDecisionTakeZeroHookV1        = "__llgo_coro_run_decision_take_zero_v1"
 	coroPanicPrepareHookV1               = "__llgo_coro_panic_prepare_v1"
+	coroPanicTraceReplaceHookV1          = "__llgo_coro_panic_trace_replace_v1"
 	coroRecoverTakeHookV1                = "__llgo_coro_recover_take_v1"
 	coroSpawnBeginHookV1                 = "__llgo_coro_spawn_begin_v1"
 	coroSpawnCommitHookV1                = "__llgo_coro_spawn_commit_v1"
@@ -159,6 +160,7 @@ const (
 	coroHeaderSuspendReason
 	coroHeaderLifecycle
 	coroHeaderStateID
+	coroHeaderLine
 	coroHeaderFlags
 )
 
@@ -190,6 +192,8 @@ type coroPhysicalABI struct {
 	version                 uint32
 	hash                    [16]byte
 	descriptorName          string
+	traceFunction           string
+	traceFile               string
 	frameAllocHook          string
 	frameFreeHook           string
 	framePublishHook        string
@@ -202,6 +206,7 @@ type coroPhysicalABI struct {
 	runDecisionTakeHook     string
 	runDecisionTakeZeroHook string
 	panicPrepareHook        string
+	panicTraceReplaceHook   string
 	recoverTakeHook         string
 	completePrepareHook     string
 	physicalSig             *types.Signature
@@ -233,6 +238,7 @@ type coroBodyContext struct {
 	abortRunDecision       llssa.BasicBlock
 	shutdownRunDecision    llssa.BasicBlock
 	panicPrepare           llssa.Expr
+	panicTraceReplace      llssa.Expr
 	completePrepare        llssa.Expr
 	terminalStatus         llssa.Expr
 	nextState              uint32
@@ -265,6 +271,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	runDecisionTakeHook := coroRunDecisionTakeHookV1
 	runDecisionTakeZeroHook := coroRunDecisionTakeZeroHookV1
 	panicPrepareHook := coroPanicPrepareHookV1
+	panicTraceReplaceHook := coroPanicTraceReplaceHookV1
 	recoverTakeHook := coroRecoverTakeHookV1
 	faultPrepareHook := coroFaultPrepareHookV1
 	faultPayloadHook := coroFaultPayloadHookV1
@@ -294,6 +301,24 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		return llssa.PathOf(pkg)
 	}
 	target := p.prog.TargetSpec()
+	traceFunction := ""
+	traceFile := ""
+	if entry.function != nil {
+		if entry.function.Pkg != nil && entry.function.Pkg.Pkg != nil {
+			traceFunction = runtimeFrameName(
+				funcName(entry.function.Pkg.Pkg, entry.function, false),
+			)
+		}
+		if p.fset != nil {
+			traceFile = p.fset.Position(entry.function.Pos()).Filename
+		}
+	}
+	if traceFunction == "" {
+		traceFunction = p.runtimeCallerFrameName()
+	}
+	if traceFunction == "" {
+		traceFunction = entry.name
+	}
 	coroABI := coro.PhysicalABIV1
 	schedulerABI := coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	panicABI := coro.PanicExplicitStatusABIV0
@@ -313,13 +338,16 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00await-prepare=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00await-prepare=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
+		traceFunction,
+		traceFile,
 		coroABI,
 		schedulerABI,
 		panicABI,
 		panicPrepareHook,
+		panicTraceReplaceHook,
 		recoverTakeHook,
 		faultPrepareHook,
 		faultPayloadHook,
@@ -350,6 +378,8 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		version:                 version,
 		hash:                    hash,
 		descriptorName:          descriptorPrefix + hex.EncodeToString(hash[:]),
+		traceFunction:           traceFunction,
+		traceFile:               traceFile,
 		frameAllocHook:          frameAllocHook,
 		frameFreeHook:           frameFreeHook,
 		framePublishHook:        framePublishHook,
@@ -362,6 +392,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		runDecisionTakeHook:     runDecisionTakeHook,
 		runDecisionTakeZeroHook: runDecisionTakeZeroHook,
 		panicPrepareHook:        panicPrepareHook,
+		panicTraceReplaceHook:   panicTraceReplaceHook,
 		recoverTakeHook:         recoverTakeHook,
 		completePrepareHook:     completePrepareHook,
 		physicalSig:             physicalSig,
@@ -380,6 +411,7 @@ func coroHeaderType(prog llssa.Program) llssa.Type {
 		prog.Uint16(),  // suspend reason
 		prog.Uint16(),  // lifecycle state
 		prog.Uint32(),  // state ID
+		prog.Uint32(),  // source line
 		prog.Uint32(),  // flags
 	)
 }
@@ -392,9 +424,11 @@ func (p *context) beginCoroBody(
 	prog := p.prog
 	resultType := prog.Type(abi.resultSlotType, llssa.InGo)
 	descriptor := p.pkg.NewCoroFrameDescriptor(abi.descriptorName, llssa.CoroFrameDescriptorOptions{
-		Version: abi.version,
-		ABIHash: abi.hash,
-		Result:  resultType,
+		Version:  abi.version,
+		ABIHash:  abi.hash,
+		Result:   resultType,
+		Function: abi.traceFunction,
+		File:     abi.traceFile,
 	})
 	descriptorPtr := b.Convert(prog.VoidPtr(), descriptor)
 	task := p.fn.PhysicalParam(0)
@@ -414,6 +448,7 @@ func (p *context) beginCoroBody(
 		resultSlot,
 		prog.IntVal(coroSuspendNone, prog.Uint16()),
 		prog.IntVal(initialLifecycle, prog.Uint16()),
+		prog.IntVal(0, prog.Uint32()),
 		prog.IntVal(0, prog.Uint32()),
 		prog.IntVal(0, prog.Uint32()),
 	}
@@ -476,6 +511,11 @@ func (p *context) beginCoroBody(
 	}
 	if abi.panicPrepareHook != "" {
 		body.panicPrepare = p.pkg.NewFunc(abi.panicPrepareHook, coroPanicPrepareSignature(), llssa.InC).Expr
+	}
+	if abi.panicTraceReplaceHook != "" {
+		body.panicTraceReplace = p.pkg.NewFunc(
+			abi.panicTraceReplaceHook, coroPanicTraceReplaceSignature(), llssa.InC,
+		).Expr
 	}
 	if abi.preemptPollHook != "" {
 		body.preemptPoll = p.pkg.NewFunc(abi.preemptPollHook, coroPreemptPollSignature(), llssa.InC).Expr
@@ -669,11 +709,25 @@ func coroPanicPrepareSignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
-func (c *coroBodyContext) publishState(b llssa.Builder, reason, lifecycle uint64, stateID uint32) {
+func coroPanicTraceReplaceSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func (c *coroBodyContext) publishState(
+	b llssa.Builder,
+	reason, lifecycle uint64,
+	stateID, line uint32,
+) {
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(reason, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(lifecycle, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderStateID), prog.IntVal(uint64(stateID), prog.Uint32()))
+	b.Store(b.FieldAddr(c.header, coroHeaderLine), prog.IntVal(uint64(line), prog.Uint32()))
 }
 
 func (c *coroBodyContext) activate(b llssa.Builder) {
@@ -779,14 +833,14 @@ func (c *coroBodyContext) enterCancellation(b llssa.Builder, status uint64) {
 	}
 }
 
-func (c *coroBodyContext) suspendForChild(b llssa.Builder) uint32 {
+func (c *coroBodyContext) suspendForChild(b llssa.Builder, line uint32) uint32 {
 	if c.abi.version < coroPhysicalABIVersionV1 {
 		panic("coroutine child suspension requires PhysicalABIV1")
 	}
 	stateID := c.nextState
 	c.nextState++
 	c.instructions = 0
-	c.publishState(b, coroSuspendCall, coroLifecycleSuspended, stateID)
+	c.publishState(b, coroSuspendCall, coroLifecycleSuspended, stateID, line)
 	return stateID
 }
 
@@ -809,7 +863,7 @@ func (c *coroBodyContext) suspendCurrentFrameIfYieldRequested(b llssa.Builder, r
 	c.nextState++
 	c.instructions = 0
 	c.coro.SuspendCurrentBlockIf(requested, func(suspend llssa.Builder) {
-		c.publishState(suspend, coroSuspendYield, coroLifecycleSuspended, stateID)
+		c.publishState(suspend, coroSuspendYield, coroLifecycleSuspended, stateID, 0)
 		suspend.Call(c.yieldPrepare, c.task, c.coro.Handle(), suspend.Convert(suspend.Prog.VoidPtr(), c.header))
 	})
 	// The false edge is already active. The CoroBuilder AfterResume callback
@@ -825,7 +879,7 @@ func (c *coroBodyContext) yieldCurrentFrame(b llssa.Builder) uint32 {
 	stateID := c.nextState
 	c.nextState++
 	c.instructions = 0
-	c.publishState(b, coroSuspendYield, coroLifecycleSuspended, stateID)
+	c.publishState(b, coroSuspendYield, coroLifecycleSuspended, stateID, 0)
 	b.Call(c.yieldPrepare, c.task, c.coro.Handle(), b.Convert(b.Prog.VoidPtr(), c.header))
 	c.coro.SuspendCurrentBlock()
 	c.activate(b)
@@ -894,7 +948,7 @@ func (c *coroBodyContext) complete(b llssa.Builder) {
 		b.Jump(c.finalSuspend)
 		return
 	}
-	c.publishState(b, coroSuspendFrameComplete, coroLifecycleFinalSuspended, c.terminalStateID())
+	c.publishState(b, coroSuspendFrameComplete, coroLifecycleFinalSuspended, c.terminalStateID(), 0)
 	if !c.completePrepare.IsNil() {
 		if c.terminalStatus.IsNil() {
 			panic("coroutine completion has no frame-local terminal status")
@@ -910,11 +964,30 @@ func (c *coroBodyContext) complete(b llssa.Builder) {
 	b.Jump(c.finalSuspend)
 }
 
-func (c *coroBodyContext) panic(b llssa.Builder, typeWord, dataWord llssa.Expr) {
+func (c *coroBodyContext) panic(b llssa.Builder, typeWord, dataWord llssa.Expr, line uint32) {
+	c.panicWithLine(
+		b,
+		typeWord,
+		dataWord,
+		b.Prog.IntVal(uint64(line), b.Prog.Uint32()),
+	)
+}
+
+func (c *coroBodyContext) panicWithLine(
+	b llssa.Builder,
+	typeWord, dataWord, line llssa.Expr,
+) {
 	if c.abi.version < coroPhysicalABIVersionV1 || c.panicPrepare.IsNil() || c.finalSuspend == nil {
 		panic("explicit-status panic requires a PhysicalABIV1 prepare hook and shared final suspend")
 	}
-	c.publishState(b, coroSuspendPanic, coroLifecycleFinalSuspended, c.terminalStateID())
+	if line.IsNil() || line.Type != b.Prog.Uint32() {
+		panic("explicit-status panic requires a uint32 source line")
+	}
+	prog := b.Prog
+	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(coroSuspendPanic, prog.Uint16()))
+	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(coroLifecycleFinalSuspended, prog.Uint16()))
+	b.Store(b.FieldAddr(c.header, coroHeaderStateID), prog.IntVal(uint64(c.terminalStateID()), prog.Uint32()))
+	b.Store(b.FieldAddr(c.header, coroHeaderLine), line)
 	b.Call(
 		c.panicPrepare,
 		c.task,
@@ -1077,10 +1150,11 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 		b.SetBlock(physical.cleanup.complete)
 		physical.complete(b)
 		b.SetBlock(physical.cleanup.panic)
-		physical.panic(
+		physical.panicWithLine(
 			b,
 			b.Load(physical.cleanup.panicType),
 			b.Load(physical.cleanup.panicData),
+			b.Load(physical.cleanup.panicLine),
 		)
 	}
 	b.SetBlock(physical.finalSuspend)
@@ -1174,7 +1248,7 @@ func validateCoroPhysicalABIForOwner(
 		return fail("requires one defined SSA body")
 	}
 	if emitShadowStackInstrumentation {
-		return fail("legacy thread-local shadow-stack instrumentation is incompatible with stackless coroutine suspension")
+		return fail("unfrozen caller instrumentation is incompatible with stackless coroutine suspension")
 	}
 	managedDispatchTarget := managedDispatch && plan.FuncRep == coro.Dispatch &&
 		fn.Signature != nil && fn.Signature.Recv() == nil
@@ -1249,7 +1323,7 @@ func validateCoroPhysicalABIForOwner(
 	programEntry := programRun && isCoroProgramManagedEntry(fn)
 	genericInstance := coroMaterializedGenericCallable(fn)
 	boundMethodWrapper := false
-	if managedDispatchTarget && strings.HasPrefix(fn.Synthetic, "bound method wrapper for ") {
+	if strings.HasPrefix(fn.Synthetic, "bound method wrapper for ") {
 		if err := validateCoroExactBoundMethodWrapper(fn); err != nil {
 			return fail("invalid bound method wrapper: %v", err)
 		}
@@ -2683,7 +2757,7 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 		return fail("requires one defined SSA body")
 	}
 	if emitShadowStackInstrumentation {
-		return fail("legacy thread-local shadow-stack instrumentation is incompatible with stackless coroutine suspension")
+		return fail("unfrozen caller instrumentation is incompatible with stackless coroutine suspension")
 	}
 	if plan.Emission != coro.EmitCoroutine || plan.FuncRep != coro.DirectCoro {
 		return fail("requires a direct coroutine emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
@@ -3164,6 +3238,9 @@ func coroLeafABIDirective(fn *ssa.Function) string {
 	}
 	for _, comment := range decl.Doc.List {
 		text := strings.TrimSpace(comment.Text)
+		if detachedPackageGoLinknameDirective(fn, decl, text) {
+			continue
+		}
 		for _, prefix := range []string{
 			"//go:linkname", "//llgo:link", "// llgo:link", "//export", "//go:wasmexport", "//go:wasmimport",
 		} {
@@ -3218,6 +3295,9 @@ func coroRawABIDirective(fn *ssa.Function, universe *EmissionUniverse) (string, 
 		}
 		text := strings.TrimSpace(comment.Text)
 		if text == "//go:linkname" || strings.HasPrefix(text, "//go:linkname ") {
+			if detachedPackageGoLinknameDirective(fn, decl, text) {
+				continue
+			}
 			if exactManagedSyntax && (managedDefinition || managedLinkname) && text == managedDirective {
 				continue
 			}
@@ -3235,6 +3315,39 @@ func coroRawABIDirective(fn *ssa.Function, universe *EmissionUniverse) (string, 
 		}
 	}
 	return "", nil
+}
+
+// detachedPackageGoLinknameDirective reports the Go source form whose first
+// operand names another exact package-scope function or variable. Directives
+// are assigned by that operand even when their comment group is attached to a
+// method for documentation, as used by current GOROOT compatibility aliases.
+// A missing or ambiguous package object remains attached/fail-closed.
+func detachedPackageGoLinknameDirective(
+	fn *ssa.Function,
+	decl *ast.FuncDecl,
+	text string,
+) bool {
+	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || decl == nil {
+		return false
+	}
+	fields := strings.Fields(text)
+	if len(fields) != 3 || fields[0] != "//go:linkname" {
+		return false
+	}
+	_, attachedName := astFuncName("", decl)
+	if fields[1] == attachedName {
+		return false
+	}
+	object := fn.Pkg.Pkg.Scope().Lookup(fields[1])
+	switch object := object.(type) {
+	case *types.Func:
+		signature, _ := object.Type().(*types.Signature)
+		return signature != nil && signature.Recv() == nil
+	case *types.Var:
+		return true
+	default:
+		return false
+	}
 }
 
 func attachedManagedGoLinknameDirective(decl *ast.FuncDecl) (string, bool) {
@@ -3309,7 +3422,7 @@ func validateCoroPhysicalConsumersCapabilities(
 						if !managedDispatch {
 							return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor spawn requires the v1 descriptor dispatch capability")
 						}
-						if _, err := plan.ResolveManagedDispatchSpawn(spawn); err != nil {
+						if _, err := plan.ResolveManagedSpawn(spawn); err != nil {
 							return coroLeafInstructionError(fn, function.Plan, instr, "unsupported managed descriptor spawn: "+err.Error())
 						}
 					default:
@@ -3592,15 +3705,13 @@ func validateCoroPhysicalConsumersCapabilities(
 						}
 						if closure, exactClosure := instr.(*ssa.MakeClosure); exactClosure && closure.Fn == target &&
 							childAwait && function.Plan.Emission == coro.EmitCoroutine && len(target.FreeVars) != 0 &&
-							targetPlan.Primary == coro.PrimaryCoroutine && targetPlan.FuncRep == coro.DirectCoro {
-							value, exactValue := plan.ValuePlan(closure)
-							if exactValue && len(value.Funcs) == 1 && len(value.Funcs[0].Path) == 0 &&
-								value.Funcs[0].Rep == coro.DirectCoro && !value.Funcs[0].MayBeNil &&
-								len(value.Funcs[0].Targets) == 1 && value.Funcs[0].Targets[0] == targetPlan.ID {
-								// compileValue retags the physical (g,out,ctx,args)
-								// entry solely as a canonical (ctx,args) closure carrier;
-								// the exact static await consumes its env word and never
-								// calls through that temporary code word.
+							targetPlan.Primary == coro.PrimaryCoroutine {
+							if err := validateCoroCapturedClosureProducer(plan, closure, targetPlan); err == nil {
+								// DirectCoro producers retag the physical
+								// (g,out,ctx,args) entry as a (ctx,args) carrier.
+								// Escaping producers instead publish a Dispatch
+								// descriptor. Exact static await/defer sites consume
+								// only the common environment word and frozen target.
 								continue
 							}
 						}

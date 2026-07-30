@@ -313,12 +313,72 @@ func collectLinknameByDoc(prog llssa.Program, doc *ast.CommentGroup, fullName, i
 	}
 }
 
+// collectDetachedPackageLinknameByDoc handles the standard-library form in
+// which a //go:linkname directive is documented beside one declaration but
+// names a different package-scope symbol in its first operand. Go assigns the
+// directive by that operand, not by AST attachment. The exact types.Scope
+// lookup keeps this source-driven and avoids any function-name policy.
+func collectDetachedPackageLinknameByDoc(
+	prog llssa.Program,
+	pkg *types.Package,
+	doc *ast.CommentGroup,
+	attachedName string,
+) {
+	if prog == nil || pkg == nil || doc == nil {
+		return
+	}
+	directives := directive.ParseGroup(doc)
+	for n := len(directives) - 1; n >= 0; n-- {
+		item := directives[n]
+		if item.Name != "go:linkname" && item.Name != "llgo:link" {
+			continue
+		}
+		fields := strings.Fields(item.Args)
+		if len(fields) < 2 || fields[0] == attachedName {
+			continue
+		}
+		fullName, _, ok := packageLinknameObject(pkg, fields[0])
+		if !ok {
+			continue
+		}
+		prog.SetLinkname(fullName, strings.Join(fields[1:], " "))
+		return
+	}
+}
+
+func packageLinknameObject(pkg *types.Package, name string) (fullName string, isVar, ok bool) {
+	if pkg == nil || name == "" || strings.Contains(name, ".") {
+		return "", false, false
+	}
+	object := pkg.Scope().Lookup(name)
+	switch object := object.(type) {
+	case *types.Func:
+		signature, _ := object.Type().(*types.Signature)
+		if signature == nil || signature.Recv() != nil {
+			return "", false, false
+		}
+		return llssa.PathOf(pkg) + "." + object.Name(), false, true
+	case *types.Var:
+		return llssa.PathOf(pkg) + "." + object.Name(), true, true
+	default:
+		return "", false, false
+	}
+}
+
 func (p *context) processLinknameByDoc(doc *ast.CommentGroup, fullName, inPkgName string, isVar, allowExport bool) bool {
 	if doc != nil {
 		for n := len(doc.List) - 1; n >= 0; n-- {
 			line := doc.List[n].Text
 			ret := p.initLinkname(line, allowExport, func(name string, isExport bool) (_ string, _, ok bool) {
-				return fullName, isVar, name == inPkgName || (isExport && enableExportRename)
+				if name == inPkgName || isExport && enableExportRename {
+					return fullName, isVar, true
+				}
+				if !isExport {
+					if detachedFullName, detachedIsVar, detached := packageLinknameObject(p.goTyps, name); detached {
+						return detachedFullName, detachedIsVar, true
+					}
+				}
+				return fullName, isVar, false
 			})
 			if ret != unknownDirective {
 				return ret == hasLinkname
@@ -1159,6 +1219,7 @@ func ParsePkgSyntax(prog llssa.Program, fset *token.FileSet, pkg *types.Package,
 				}
 				fullName, inPkgName := astFuncName(pkgPath, decl)
 				collectLinknameByDoc(prog, decl.Doc, fullName, inPkgName)
+				collectDetachedPackageLinknameByDoc(prog, pkg, decl.Doc, inPkgName)
 				ctx.processNoInterfaceByDoc(decl.Doc, fullName)
 			case *ast.GenDecl:
 				if decl.Tok == token.VAR {

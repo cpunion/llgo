@@ -76,6 +76,73 @@ func Interface(reader Reader) func() int { return reader.Read }
 	concrete.Synthetic = original
 }
 
+func TestCoroDirectBoundMethodWrapperWithGenericResultPhysicalABI(t *testing.T) {
+	const source = `package foo
+type Seq[T any] func(func(T) bool)
+type Value struct{}
+func (Value) Seq() Seq[Value] { return nil }
+func Capture(value Value) { _ = value.Seq }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	var wrapper *ssa.Function
+	for function := range ssautil.AllFunctions(ssaPkg.Prog) {
+		if function != nil && strings.HasPrefix(function.Synthetic, "bound method wrapper for ") {
+			wrapper = function
+			break
+		}
+	}
+	if wrapper == nil {
+		t.Fatal("Capture has no bound method wrapper")
+	}
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: wrapper, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == wrapper {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionPlan, ok := plan.FunctionPlan(wrapper)
+	if !ok {
+		t.Fatal("bound method wrapper has no FunctionPlan")
+	}
+	if functionPlan.FuncRep != coro.DirectCoro || functionPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("bound method wrapper plan = %+v, want direct coroutine", functionPlan)
+	}
+	if err := validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
+		wrapper, functionPlan, plan, universe,
+		true, true, false, false, "", false, false, false,
+	); err != nil {
+		t.Fatalf("direct bound method wrapper with generic result rejected: %v", err)
+	}
+}
+
 func TestCoroExactMethodExpressionThunkShape(t *testing.T) {
 	const source = `package foo
 type Counter struct{}

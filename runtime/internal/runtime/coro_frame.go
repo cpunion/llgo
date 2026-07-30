@@ -69,10 +69,12 @@ func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) ui
 	if typeOut == nil || dataOut == nil {
 		coroRuntimeAbort("invalid coroutine child outcome output")
 	}
-	snapshot, ok := coro.ConsumeAwaitCompletion((*coro.G)(g), parent)
+	task := (*coro.G)(g)
+	snapshot, ok := coro.ConsumeAwaitCompletion(task, parent)
 	if !ok {
 		coroRuntimeAbort("invalid coroutine child outcome consume")
 	}
+	coroReleaseDiscardedPanicTraceV1(task)
 	*(*unsafe.Pointer)(typeOut) = snapshot.TypeWord
 	*(*unsafe.Pointer)(dataOut) = snapshot.DataWord
 	return uint32(snapshot.Status)
@@ -111,9 +113,17 @@ func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status ui
 
 //export __llgo_coro_frame_free_v1
 func __llgo_coro_frame_free_v1(g, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {
-	raw, total, ok := coro.ReleaseFrame((*coro.G)(g), storage, size, align, descriptor)
+	task := (*coro.G)(g)
+	raw, total, ok := coro.ReleaseFrame(task, storage, size, align, descriptor)
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame destruction")
+	}
+	// A managed child panic remains recoverable by its parent, so every logical
+	// G may retain that pending frame. Only the static command G may retain a
+	// terminal frame chain because its native entry owns the no-return report.
+	if coro.RetainPendingPanicTraceFrame(task, raw, total) ||
+		task == &coroProgramGV1State && coro.RetainPanicTraceFrame(task, raw, total) {
+		return
 	}
 	coro.Zero(raw, total)
 	if !coroalloc.FreeFrame(raw, total) {

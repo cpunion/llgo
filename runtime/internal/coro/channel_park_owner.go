@@ -137,8 +137,16 @@ func CanReserveChannelOperations(p *P, source *ChannelOperationSource, needed ui
 	if !validChannelOperationOwner(source, p) || needed == 0 || needed > capacity {
 		return false
 	}
+	start := source.reserveCursor
+	if start >= capacity {
+		start = 0
+	}
 	available := uint32(0)
-	for index := uint32(0); index < capacity; index++ {
+	for offset := uint32(0); offset < capacity; offset++ {
+		index := start + offset
+		if index >= capacity {
+			index -= capacity
+		}
 		slot, ok := channelOperationSlotAt(source, index)
 		if !ok {
 			return false

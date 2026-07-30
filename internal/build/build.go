@@ -290,16 +290,32 @@ func isCoroManagedDescriptorCall(call ssa.CallInstruction) bool {
 }
 
 // isCoroManagedInterfaceDescriptorCall recognizes the one source shape whose
-// ABI Method.Ifn_ word cl replaces with the universal method descriptor. It is
-// deliberately narrower than an arbitrary interface operation: defer/go
-// invokes, foreign classifications, raw method addresses, and generic or
-// variadic methods retain their independent fail-closed domains.
+// ABI Method.Ifn_ word cl replaces with the universal method descriptor.
+// Ordinary calls, defers, and goroutine spawns share that receiver-aware
+// transport; their carrier selects only the call operation. Foreign
+// classifications, raw method addresses, and generic or variadic methods
+// retain their independent fail-closed domains.
 func isCoroManagedInterfaceDescriptorCall(call ssa.CallInstruction) bool {
-	direct, ok := call.(*ssa.Call)
-	if !ok || direct == nil || direct.Common() == nil {
+	switch carrier := call.(type) {
+	case *ssa.Call:
+		if carrier == nil {
+			return false
+		}
+	case *ssa.Defer:
+		if carrier == nil {
+			return false
+		}
+	case *ssa.Go:
+		if carrier == nil {
+			return false
+		}
+	default:
 		return false
 	}
-	common := direct.Common()
+	if call.Common() == nil {
+		return false
+	}
+	common := call.Common()
 	if common.StaticCallee() != nil || !common.IsInvoke() || common.Method == nil {
 		return false
 	}
@@ -948,7 +964,8 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					if target, err := in.closedStaticSpawnTarget(fn, spawn); err == nil {
 						spawnSeeded[target] = struct{}{}
 					} else {
-						if !isCoroManagedDescriptorSpawn(spawn) {
+						if !isCoroManagedDescriptorSpawn(spawn) &&
+							!isCoroManagedInterfaceDescriptorCall(spawn) {
 							return nil, fmt.Errorf("coroutine spawn in %q: %w", fn.Name(), err)
 						}
 					}
@@ -2625,7 +2642,11 @@ func requiredCoroManagedSpawnTargets(plan *coro.SSAPlan) (map[*ssa.Function]stru
 				if callPlan.Rep != coro.Dispatch {
 					continue
 				}
-				if callPlan.Open && callPlan.Unresolved != coro.UnknownManagedDispatch {
+				expectedOpen := coro.UnknownManagedDispatch
+				if spawn.Common() != nil && spawn.Common().IsInvoke() {
+					expectedOpen = coro.UnknownManagedInterfaceDispatch
+				}
+				if callPlan.Open && callPlan.Unresolved != expectedOpen {
 					return nil, fmt.Errorf(
 						"coroutine descriptor spawn in %q has uncertified open target domain %v",
 						owner.Plan.ID, callPlan.Unresolved,
@@ -2671,7 +2692,7 @@ func validateCoroSpawnPlan(plan *coro.SSAPlan) error {
 						)
 					}
 				case coro.Dispatch:
-					if _, err := plan.ResolveManagedDispatchSpawn(spawn); err != nil {
+					if _, err := plan.ResolveManagedSpawn(spawn); err != nil {
 						return fmt.Errorf(
 							"managed descriptor spawn in %q (%s) at %s, operand %q: %w",
 							owner.Plan.ID, owner.Function.String(), owner.Function.Prog.Fset.Position(spawn.Pos()), spawn.Common().Value.String(), err,
@@ -2729,10 +2750,11 @@ func resolveCoroDirectStaticSpawnPlan(
 	targetPlan, found = plan.FunctionPlan(target)
 	if !found || targetPlan.ID != callPlan.Targets[0] || targetPlan.External != coro.Defined ||
 		targetPlan.Emission != coro.EmitCoroutine || targetPlan.Primary != coro.PrimaryCoroutine ||
-		targetPlan.FuncRep != coro.DirectCoro || targetPlan.Demand != coro.AsyncDemand ||
+		(targetPlan.FuncRep != coro.DirectCoro && targetPlan.FuncRep != coro.Dispatch) ||
+		targetPlan.Demand != coro.AsyncDemand ||
 		!targetPlan.Effect.Contains(coro.YieldOnly) {
 		return nil, coro.FunctionPlan{}, fmt.Errorf(
-			"spawn method target %q is not one demanded preemptible direct coroutine (external=%s emission=%s primary=%s representation=%s demand=%s effect=%s)",
+			"spawn method target %q is not one demanded preemptible direct-callable coroutine (external=%s emission=%s primary=%s representation=%s demand=%s effect=%s)",
 			callPlan.Targets[0], targetPlan.External, targetPlan.Emission, targetPlan.Primary,
 			targetPlan.FuncRep, targetPlan.Demand, targetPlan.Effect,
 		)
@@ -2813,7 +2835,7 @@ func validateCoroClosedStaticSpawnRunGate(conf *Config, plan *coro.SSAPlan, fram
 					}
 					targets = append(targets, target)
 				case coro.Dispatch:
-					if _, err := plan.ResolveManagedDispatchSpawn(spawn); err != nil {
+					if _, err := plan.ResolveManagedSpawn(spawn); err != nil {
 						return fmt.Errorf("validate coroutine descriptor spawn in %q: %w", owner.Plan.ID, err)
 					}
 					for _, targetID := range callPlan.Targets {
@@ -2837,9 +2859,14 @@ func validateCoroClosedStaticSpawnRunGate(conf *Config, plan *coro.SSAPlan, fram
 						trace := "unavailable"
 						if targetFunction, found := plan.Function(target.ID); found && targetFunction != nil {
 							targetName = targetFunction.String()
-							trace = plan.SuspensionEffectTrace(targetFunction, effect&^allowed)
-							if trace == "unavailable" && effect.IsOpaque() {
+							if effect.IsOpaque() {
 								trace = plan.OpaqueEffectTrace(targetFunction)
+								if target.Exec.Contains(coro.OpaqueExec) {
+									trace += "; opaque exec path: " +
+										coroProgramOpaqueExecPath(plan, targetFunction)
+								}
+							} else {
+								trace = plan.SuspensionEffectTrace(targetFunction, effect&^allowed)
 							}
 						}
 						return fmt.Errorf(
@@ -4802,6 +4829,9 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	)
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) || hostCoroPullRuntimeABI(ctx.buildConf) {
 		names = append(names, coroProgramRunSliceSymbolV2, coroProgramContinueSliceSymbolV2)
+		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+			names = append(names, coroProgramReportPanicSymbolV1)
+		}
 	} else {
 		names = append(names, coroProgramRunSymbolV1, coroProgramContinueSymbolV1)
 	}
@@ -4911,6 +4941,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	)
 	names = append(names,
 		"__llgo_coro_panic_prepare_v1",
+		coroPanicTraceReplaceSymbolV1,
 		"__llgo_coro_recover_take_v1",
 		"__llgo_coro_fault_payload_v1",
 		"__llgo_coro_fault_payload_v2",
@@ -5150,6 +5181,28 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine program continue-slice ABI %q must have exact func(uint32, uint32, uint32, uint32, *{8 x uint32}) uint32 signature", name)
 				}
+			}
+		}
+		if name == coroProgramReportPanicSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 1 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine program panic reporter ABI %q must have exact func(unsafe.Pointer) signature", name)
+			}
+		}
+		if name == coroPanicTraceReplaceSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 2 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine panic trace replacement ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) signature",
+					name,
+				)
 			}
 		}
 		if name == coroNativeWorkerCompleteSymbolV1 {

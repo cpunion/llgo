@@ -50,16 +50,6 @@ func reflect_mapaccess(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	return elem
 }
 
-//go:linkname reflect_mapiterinit reflect.mapiterinit
-func reflect_mapiterinit(t *maptype, h *hmap, it *hiter) {
-	mapiterinit(t, h, it)
-}
-
-//go:linkname reflect_mapiternext reflect.mapiternext
-func reflect_mapiternext(it *hiter) {
-	mapiternext(it)
-}
-
 //go:linkname reflect_ifaceE2I reflect.ifaceE2I
 func reflect_ifaceE2I(t *interfacetype, src any, dst unsafe.Pointer) {
 	IfaceE2I(t, *(*eface)(unsafe.Pointer(&src)), (*iface)(dst))

@@ -699,6 +699,101 @@ var Ready = true
 	}
 }
 
+func TestEmissionUniversePatchInitRedirectIdentityIgnoresUnrelatedInitInstructions(t *testing.T) {
+	type result struct {
+		logicalName     string
+		semanticOrdinal int
+	}
+	build := func(withUnrelatedImport bool) result {
+		t.Helper()
+		testProg := newEmissionTestProgram()
+		const patchedPath = "example.com/emission/redirect-stable"
+		original := testProg.addPackage(t, patchedPath, `package redirected
+var Original = 1
+`)
+		alt := testProg.addPackage(t, abi.PatchPathPrefix+patchedPath, `package redirected
+var Patched = 2
+`)
+		var unrelated emissionTestPackage
+		importerSource := `package importer
+import _ "example.com/emission/redirect-stable"
+var Ready = true
+`
+		if withUnrelatedImport {
+			unrelated = testProg.addPackage(t, "example.com/emission/aaa-init", `package aaainit
+var Ready = func() bool { return true }()
+`)
+			importerSource = `package importer
+import (
+	_ "example.com/emission/aaa-init"
+	_ "example.com/emission/redirect-stable"
+)
+var Ready = true
+`
+		}
+		importer := testProg.addPackage(t, "example.com/emission/redirect-stable-importer", importerSource)
+		testProg.ssa.Build()
+
+		prog := llssa.NewProgram(nil)
+		defer prog.Dispose()
+		inputs := []EmissionPackage{
+			{SSA: original.ssa, Files: []*ast.File{original.file, alt.file}},
+		}
+		if withUnrelatedImport {
+			inputs = append(inputs, EmissionPackage{SSA: unrelated.ssa, Files: []*ast.File{unrelated.file}})
+		}
+		inputs = append(inputs, EmissionPackage{SSA: importer.ssa, Files: []*ast.File{importer.file}})
+		universe, err := PrepareEmissionUniverse(prog, Patches{
+			patchedPath: {
+				Alt:   alt.ssa,
+				Types: typepatch.Clone(alt.types),
+			},
+		}, inputs)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		owner := importer.ssa.Func("init")
+		originalInit := original.ssa.Func("init")
+		var occurrence *ssa.Call
+		for _, block := range owner.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(*ssa.Call)
+				if ok && call.Common().StaticCallee() == originalInit {
+					occurrence = call
+				}
+			}
+		}
+		if occurrence == nil {
+			t.Fatal("importer SSA has no exact call to the original package initializer")
+		}
+		logicalName, target, redirected, err := universe.CoroPatchInitRedirect(occurrence)
+		if err != nil || !redirected || target != alt.ssa.Func("init") {
+			t.Fatalf("patch init redirect = %q, %v, %v, %v; want exact public init", logicalName, target, redirected, err)
+		}
+		semanticOrdinal, err := coro.SemanticInstructionOrdinal(occurrence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result{logicalName: logicalName, semanticOrdinal: semanticOrdinal}
+	}
+
+	baseline := build(false)
+	withUnrelated := build(true)
+	if baseline.semanticOrdinal == withUnrelated.semanticOrdinal {
+		t.Fatalf(
+			"test setup produced equal raw semantic ordinals %d; want unrelated initializer bookkeeping to shift the source occurrence",
+			baseline.semanticOrdinal,
+		)
+	}
+	if baseline.logicalName != withUnrelated.logicalName {
+		t.Fatalf(
+			"patch redirect logical identity depends on unrelated SSA instructions:\nwithout %q\nwith    %q",
+			baseline.logicalName, withUnrelated.logicalName,
+		)
+	}
+}
+
 func TestEmissionUniversePatchIntrinsicWinnerTransfersFrozenOpcode(t *testing.T) {
 	universe, original, alt, dispose := preparePatchedEmissionTest(t, `package p
 //llgo:link Intrinsic llgo.cstr
@@ -1319,12 +1414,14 @@ var Value any = struct{ sharedwrapperbase.Base }{}
 	}
 	oneName := universe.physicalNames[emissionFunctionOwnerKey{function: shared, owner: oneOwner}]
 	twoName := universe.physicalNames[emissionFunctionOwnerKey{function: shared, owner: twoOwner}]
-	if oneName == "" || twoName == "" || oneName == twoName {
-		t.Fatalf("owner-scoped physical names = %q, %q; want two frozen names", oneName, twoName)
+	if oneName == "" || twoName == "" || oneName != twoName {
+		t.Fatalf("coalescible physical names = %q, %q; want one owner-independent name", oneName, twoName)
 	}
 	linkIdentity := universe.linkIdentities[shared]
-	if !strings.Contains(linkIdentity, oneOwner.identity) || !strings.Contains(linkIdentity, twoOwner.identity) {
-		t.Fatalf("multi-owner link identity %q omits an owner", linkIdentity)
+	if !strings.Contains(linkIdentity, "cl-emission-multi-owner-link-v1") ||
+		!strings.Contains(linkIdentity, oneOwner.identity) ||
+		!strings.Contains(linkIdentity, twoOwner.identity) {
+		t.Fatalf("exact wrapper logical link identity %q omits its use owners", linkIdentity)
 	}
 }
 

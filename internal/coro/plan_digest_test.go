@@ -23,7 +23,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"go/types"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -146,9 +150,171 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestCanonicalizesSyntheticDependencyInitOrder(t *testing.T) {
+	prog, pkg := buildPlanDigestDependencyInitSSA(t)
+	root := packageFunction(t, pkg, "init")
+	config := planDigestSSAConfig()
+	config.MaxPlainInstructions = -1
+	config.FunctionIDs.ResolveLinkIdentity = func(fn *ssa.Function) (string, error) {
+		if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Name() == "" {
+			return "", fmt.Errorf("missing dependency-init test link identity")
+		}
+		return fn.Pkg.Pkg.Path() + "." + fn.Name(), nil
+	}
+	canonicalPackageKey := config.FunctionIDs.CanonicalPackageKey
+	config.FunctionIDs.CanonicalPackageKey = func(pkg *types.Package) (string, error) {
+		if strings.HasPrefix(pkg.Path(), "example.test/dependency/") {
+			return "example.test/shared-emission-package", nil
+		}
+		return canonicalPackageKey(pkg)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var block *ssa.BasicBlock
+	var slots []int
+	for _, candidate := range root.Blocks {
+		var candidateSlots []int
+		for index, instruction := range candidate.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Common() == nil || call.Common().IsInvoke() {
+				continue
+			}
+			target := call.Common().StaticCallee()
+			if isDigestPackageInitializer(target) && target.Pkg != root.Pkg {
+				candidateSlots = append(candidateSlots, index)
+			}
+		}
+		if len(candidateSlots) >= 2 {
+			block, slots = candidate, candidateSlots
+			break
+		}
+	}
+	if block == nil {
+		t.Fatal("fixture has fewer than two direct dependency initializer calls")
+	}
+
+	metadata := validPlanDigestMetadata()
+	baselineDigest, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineDocument, err := plan.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, second := slots[0], slots[len(slots)-1]
+	originalFirst, originalSecond := block.Instrs[first], block.Instrs[second]
+	block.Instrs[first], block.Instrs[second] = block.Instrs[second], block.Instrs[first]
+	t.Cleanup(func() {
+		block.Instrs[first], block.Instrs[second] = originalFirst, originalSecond
+	})
+	permutedDigest, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permutedDocument, err := plan.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if permutedDigest != baselineDigest {
+		t.Fatalf("dependency initializer order changed plan digest:\nbaseline %s\npermuted %s", baselineDigest, permutedDigest)
+	}
+	if !reflect.DeepEqual(permutedDocument, baselineDocument) {
+		t.Fatal("dependency initializer order changed canonical plan document")
+	}
+
+	block.Instrs[first], block.Instrs[second] = originalFirst, originalSecond
+	firstCall, firstOK := originalFirst.(*ssa.Call)
+	secondCall, secondOK := originalSecond.(*ssa.Call)
+	if !firstOK || !secondOK {
+		t.Fatalf("dependency initializer instructions have types %T and %T, want *ssa.Call", originalFirst, originalSecond)
+	}
+	originalSecondTarget := secondCall.Common().Value
+	t.Cleanup(func() { secondCall.Common().Value = originalSecondTarget })
+	secondCall.Common().Value = firstCall.Common().Value
+	if _, err := plan.CoroPlanDigest(metadata); err == nil ||
+		!strings.Contains(err.Error(), "more than once") {
+		t.Fatalf("duplicate dependency initializer digest error = %v", err)
+	}
+	secondCall.Common().Value = originalSecondTarget
+}
+
+type planDigestPackageImporter map[string]*types.Package
+
+func (p planDigestPackageImporter) Import(path string) (*types.Package, error) {
+	pkg, ok := p[path]
+	if !ok {
+		return nil, fmt.Errorf("unexpected test import %q", path)
+	}
+	return pkg, nil
+}
+
+func buildPlanDigestDependencyInitSSA(t *testing.T) (*ssa.Program, *ssa.Package) {
+	t.Helper()
+	fset := token.NewFileSet()
+	mode := ssa.SanityCheckFunctions | ssa.InstantiateGenerics
+	type checkedPackage struct {
+		pkg   *types.Package
+		files []*ast.File
+		info  *types.Info
+	}
+	check := func(path, filename, source string, imports planDigestPackageImporter) checkedPackage {
+		t.Helper()
+		file, err := parser.ParseFile(fset, filename, source, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := &types.Info{
+			Types:      make(map[ast.Expr]types.TypeAndValue),
+			Defs:       make(map[*ast.Ident]types.Object),
+			Uses:       make(map[*ast.Ident]types.Object),
+			Implicits:  make(map[ast.Node]types.Object),
+			Instances:  make(map[*ast.Ident]types.Instance),
+			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+			Scopes:     make(map[ast.Node]*types.Scope),
+		}
+		pkg, err := (&types.Config{Importer: imports}).Check(path, fset, []*ast.File{file}, info)
+		if err != nil {
+			t.Fatalf("check %s: %v", path, err)
+		}
+		return checkedPackage{pkg: pkg, files: []*ast.File{file}, info: info}
+	}
+
+	first := check("example.test/dependency/first", "first.go", `package first
+var Value int
+func init() { Value = 1 }
+`, nil)
+	second := check("example.test/dependency/second", "second.go", `package second
+var Value int
+func init() { Value = 2 }
+`, nil)
+	root := check("example.test/coroid", "root.go", `package coroid
+import (
+	_ "example.test/dependency/first"
+	_ "example.test/dependency/second"
+)
+`, planDigestPackageImporter{
+		first.pkg.Path():  first.pkg,
+		second.pkg.Path(): second.pkg,
+	})
+
+	prog := ssa.NewProgram(fset, mode)
+	firstSSA := prog.CreatePackage(first.pkg, first.files, first.info, true)
+	secondSSA := prog.CreatePackage(second.pkg, second.files, second.info, true)
+	rootSSA := prog.CreatePackage(root.pkg, root.files, root.info, true)
+	firstSSA.Build()
+	secondSSA.Build()
+	rootSSA.Build()
+	return prog, rootSSA
+}
+
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v28" {
-		t.Fatalf("plan digest schema = %q, want hidden managed-value reference schema v28", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v29" {
+		t.Fatalf("plan digest schema = %q, want canonical dependency-init site schema v29", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {

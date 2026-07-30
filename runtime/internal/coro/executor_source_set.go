@@ -303,7 +303,14 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 		if !valid {
 			return scan, false
 		}
-		for index := uint32(0); index < limit; index++ {
+		for cursor := uint32(0); cursor < limit; {
+			index, ready, readyOK := nextChannelOperationReady(sources.channel, cursor, limit)
+			if !readyOK {
+				return scan, false
+			}
+			if !ready {
+				break
+			}
 			published, lost, channelOK := sources.channel.publishSlot(p, index)
 			scan.channel += int(published)
 			scan.channelLost += int(lost)
@@ -311,6 +318,7 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 			if !channelOK {
 				return scan, false
 			}
+			cursor = index + 1
 		}
 	}
 	if sources.control != nil {
@@ -683,7 +691,15 @@ func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, 
 		if !sources.channel.beginPublishPass(p) {
 			return scan, false
 		}
-		for index := uint32(0); index < ChannelOperationConfiguredCapacity(sources.channel); index++ {
+		limit := ChannelOperationConfiguredCapacity(sources.channel)
+		for cursor := uint32(0); cursor < limit; {
+			index, ready, readyOK := nextChannelOperationReady(sources.channel, cursor, limit)
+			if !readyOK {
+				return scan, false
+			}
+			if !ready {
+				break
+			}
 			published, lost, channelOK := sources.channel.publishSlot(p, index)
 			scan.channel += int(published)
 			scan.channelLost += int(lost)
@@ -691,6 +707,7 @@ func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, 
 			if !channelOK {
 				return scan, false
 			}
+			cursor = index + 1
 		}
 	}
 	if sources.control != nil {

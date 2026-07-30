@@ -59,6 +59,7 @@ type coroFunctionPreamblePlan struct {
 	plainRuntimeHelpers   []string
 	localityGuards        []locality.Kind
 	localContextEntry     bool
+	logicalCallerEntry    bool
 }
 
 func cloneCoroFunctionPreamblePlan(plan coroFunctionPreamblePlan) coroFunctionPreamblePlan {
@@ -72,7 +73,8 @@ func sameCoroFunctionPreamblePlan(first, second coroFunctionPreamblePlan) bool {
 	return slices.Equal(first.managedRuntimeHelpers, second.managedRuntimeHelpers) &&
 		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers) &&
 		slices.Equal(first.localityGuards, second.localityGuards) &&
-		first.localContextEntry == second.localContextEntry
+		first.localContextEntry == second.localContextEntry &&
+		first.logicalCallerEntry == second.logicalCallerEntry
 }
 
 func (plan coroFunctionPreamblePlan) validate() error {
@@ -94,12 +96,16 @@ func (plan coroFunctionPreamblePlan) validate() error {
 			return fmt.Errorf("function preamble has noncanonical locality guard order")
 		}
 	}
-	switch {
-	case len(plan.localityGuards) == 0 && len(plan.managedRuntimeHelpers) != 0:
-		return fmt.Errorf("function preamble has runtime helpers without an operation")
-	case len(plan.localityGuards) != 0 &&
-		!slices.Equal(plan.managedRuntimeHelpers, []string{"LocalPackageLogical"}):
-		return fmt.Errorf("logical-locality function preamble requires exactly LocalPackageLogical")
+	expectedManaged := make([]string, 0, 2)
+	if len(plan.localityGuards) != 0 {
+		expectedManaged = append(expectedManaged, "LocalPackageLogical")
+	}
+	if plan.logicalCallerEntry {
+		expectedManaged = append(expectedManaged, "PushCallerLocationFrame")
+	}
+	sort.Strings(expectedManaged)
+	if !slices.Equal(plan.managedRuntimeHelpers, expectedManaged) {
+		return fmt.Errorf("function preamble runtime helpers do not match its frozen operations")
 	}
 	if plan.localContextEntry !=
 		slices.Equal(plan.plainRuntimeHelpers, []string{"EnterLocalContext"}) {
@@ -113,6 +119,14 @@ func (plan coroFunctionPreamblePlan) loweringRecipe() (coro.RecipeID, error) {
 		return "", err
 	}
 	switch {
+	case plan.logicalCallerEntry && slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread}):
+		return coro.RecipeID("cl.function-preamble.logical-caller-locality.thread.v0"), nil
+	case plan.logicalCallerEntry && slices.Equal(plan.localityGuards, []locality.Kind{locality.Goroutine}):
+		return coro.RecipeID("cl.function-preamble.logical-caller-locality.goroutine.v0"), nil
+	case plan.logicalCallerEntry && slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread, locality.Goroutine}):
+		return coro.RecipeID("cl.function-preamble.logical-caller-locality.thread-goroutine.v0"), nil
+	case plan.logicalCallerEntry && len(plan.localityGuards) == 0:
+		return coro.RecipeID("cl.function-preamble.logical-caller.v0"), nil
 	case slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread}):
 		return coro.RecipeID("cl.function-preamble.locality-guards.thread.v0"), nil
 	case slices.Equal(plan.localityGuards, []locality.Kind{locality.Goroutine}):
@@ -200,6 +214,10 @@ func (builder coroProgramIRBuilder) materializeFunctionPreamble(
 			plan.plainRuntimeHelpers = []string{"EnterLocalContext"}
 		}
 	}
+	if ftype == goFunc && ctx.shouldEmitLogicalCallerFrames() {
+		plan.logicalCallerEntry = true
+		plan.managedRuntimeHelpers = append(plan.managedRuntimeHelpers, "PushCallerLocationFrame")
+	}
 	if u.prog != nil && u.logicalLocality && ftype == goFunc &&
 		ownerFn.Name() == "init" && ownerFn.Signature != nil &&
 		ownerFn.Signature.Recv() == nil {
@@ -216,9 +234,10 @@ func (builder coroProgramIRBuilder) materializeFunctionPreamble(
 			if len(ownerFn.Blocks) < 2 {
 				return fmt.Errorf("prepare emission universe: package initializer %q has no module-init block for locality guards", ownerFn.Name())
 			}
-			plan.managedRuntimeHelpers = []string{"LocalPackageLogical"}
+			plan.managedRuntimeHelpers = append(plan.managedRuntimeHelpers, "LocalPackageLogical")
 		}
 	}
+	sort.Strings(plan.managedRuntimeHelpers)
 	if err := plan.validate(); err != nil {
 		return fmt.Errorf("prepare emission universe: function %q preamble: %w", ownerFn.Name(), err)
 	}
@@ -431,6 +450,20 @@ func coroCompilerRawPlainLoweredRuntimeHelper(u *EmissionUniverse, helper string
 	}
 }
 
+// coroLogicalCallerRuntimeHelper identifies demand-driven diagnostic
+// instrumentation. These helpers are frozen and analyzed as ordinary lowered
+// calls, but they are orthogonal to the source operation's semantic helper
+// inventory used by physical-SSA capability proofs.
+func coroLogicalCallerRuntimeHelper(helper string) bool {
+	switch helper {
+	case "PushCallerLocationFrame", "PopCallerLocationFrame",
+		"RecordCallerLocation", "RecordPanicLocation":
+		return true
+	default:
+		return false
+	}
+}
+
 // coroLoweredCallExplicitStatusElided identifies an exact frontend recipe,
 // not a runtime symbol-name exception.  compileInstr owns a non-synthetic
 // source Panic in a physical ExplicitStatus body and publishes its already
@@ -630,6 +663,36 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 	}
 	if len(localitySite.dispatchers) != 0 {
 		add("EnsureLogicalLocalInitializer")
+	}
+	if ctx.shouldEmitLogicalCallerFrames() {
+		_, recordableLocation := runtimeLocationPosition(ctx.fset, instr.Pos())
+		addLocation := func(helper string) {
+			if recordableLocation {
+				add(helper)
+			}
+		}
+		switch v := instr.(type) {
+		case ssa.CallInstruction:
+			if common := v.Common(); common != nil &&
+				isRuntimeCallerLookupFunc(common.StaticCallee()) {
+				addLocation("RecordCallerLocation")
+			} else {
+				addLocation("RecordPanicLocation")
+			}
+		case *ssa.UnOp:
+			if v.Op != token.ARROW {
+				addLocation("RecordPanicLocation")
+			}
+		case *ssa.FieldAddr, *ssa.IndexAddr, *ssa.Index, *ssa.Slice,
+			*ssa.TypeAssert, *ssa.SliceToArrayPointer, *ssa.MapUpdate,
+			*ssa.RunDefers, *ssa.Panic, *ssa.Send:
+			addLocation("RecordPanicLocation")
+		case *ssa.Return:
+			if ctx.returnNeedsImplicitRunDefers(v) {
+				addLocation("RecordPanicLocation")
+			}
+			add("PopCallerLocationFrame")
+		}
 	}
 
 	switch v := instr.(type) {

@@ -64,8 +64,6 @@ var expectedGoBenchmarks = []string{
 	"BenchmarkChannelHandoff",
 	"BenchmarkDefer",
 	"BenchmarkDirectCall",
-	"BenchmarkGLSRead",
-	"BenchmarkGLSWrite",
 	"BenchmarkGlobalRead",
 	"BenchmarkGlobalWrite",
 	"BenchmarkGoroutine",
@@ -74,8 +72,6 @@ var expectedGoBenchmarks = []string{
 	"BenchmarkMergeCompilerFlags",
 	"BenchmarkMergeLinkerFlags",
 	"BenchmarkRuntimeGetG",
-	"BenchmarkTLSRead",
-	"BenchmarkTLSWrite",
 }
 
 type footprint struct {
@@ -97,19 +93,12 @@ func main() {
 func runCLI(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("llgo-baseline", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	mode := flags.String("mode", "collect", "collect, validate, export, or report")
+	mode := flags.String("mode", "collect", "collect, validate, or export")
 	root := flags.String("root", ".", "LLGo repository root")
 	llgo := flags.String("llgo", "llgo", "LLGo command")
 	out := flags.String("out", filepath.Join("benchmark", "baseline", "out"), "result directory")
 	buildRuns := flags.Int("build-runs", 3, "build repetitions per workload")
 	runRuns := flags.Int("run-runs", 7, "process repetitions per workload")
-	currentData := flags.String("current-data", "", "current benchmark-action data.js")
-	mainData := flags.String("main-data", "", "main benchmark-action data.js")
-	report := flags.String("report", "", "Markdown report output")
-	seriesURL := flags.String("series-url", "", "published benchmark series URL")
-	sourceURL := flags.String("source-url", "", "source commit URL")
-	runURL := flags.String("run-url", "", "source workflow run URL")
-	sourceSHA := flags.String("source-sha", "", "source commit SHA")
 	benchmarkOutput := flags.String(
 		"benchmark-output",
 		"",
@@ -126,16 +115,6 @@ func runCLI(ctx context.Context, args []string) error {
 		return validateArtifact(*out)
 	case "export":
 		return exportBenchmarks(*out, *benchmarkOutput)
-	case "report":
-		return writeBenchmarkReport(reportOptions{
-			currentData: *currentData,
-			mainData:    *mainData,
-			output:      *report,
-			seriesURL:   *seriesURL,
-			sourceURL:   *sourceURL,
-			runURL:      *runURL,
-			sourceSHA:   *sourceSHA,
-		})
 	default:
 		return fmt.Errorf("unknown mode %q", *mode)
 	}
@@ -299,15 +278,20 @@ func run(ctx context.Context, env []string, output io.Writer, name string, args 
 }
 
 func durationMetric(name string, values []time.Duration) metric {
-	slices.Sort(values)
-	mid := values[len(values)/2]
+	ordered := slices.Clone(values)
+	slices.Sort(ordered)
+	middle := len(ordered) / 2
+	median := float64(ordered[middle].Nanoseconds())
+	if len(ordered)%2 == 0 {
+		median = (float64(ordered[middle-1].Nanoseconds()) + median) / 2
+	}
 	return metric{
 		Name:  name,
 		Unit:  "ns",
-		Value: float64(mid.Nanoseconds()),
-		Range: strconv.FormatInt(values[0].Nanoseconds(), 10) + ".." +
-			strconv.FormatInt(values[len(values)-1].Nanoseconds(), 10),
-		Extra: fmt.Sprintf("median of %d consecutive runs", len(values)),
+		Value: median,
+		Range: strconv.FormatInt(ordered[0].Nanoseconds(), 10) + ".." +
+			strconv.FormatInt(ordered[len(ordered)-1].Nanoseconds(), 10),
+		Extra: fmt.Sprintf("median of %d consecutive runs", len(ordered)),
 	}
 }
 

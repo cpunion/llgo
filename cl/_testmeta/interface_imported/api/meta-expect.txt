@@ -1,12 +1,14 @@
 [OrdinaryEdges]
-github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Close$llgo$promoted$v1$d9d16704fd4b513ad5cc5ca05e5313d21569cf64028767237294838230bc1d05$coro:
+__llgo$generated$promoted$Close$llgo$promoted$v1$77575336b69e7eac563cd474c1c4b6cfce8992a2ca19cdb50fb669058dfbb395$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.71225ffef2b652f8285d03c281059fc4
+    __llgo_coro_frame_descriptor_v1.42304734eb035d98c365fd74b1e10106
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
+    __llgo_coro_wrap_nil_payload_v1
     github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Close
     llvm.coro.align.i64
     llvm.coro.alloc
@@ -17,14 +19,16 @@ github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Close$llgo$
     llvm.coro.size.i64
     llvm.coro.suspend
     llvm.trap
-github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Read$llgo$promoted$v1$7bdad60d478825b41555c1c694bb0b22cdf3a6e2bf922a31265f2a0621d52b08$coro:
+__llgo$generated$promoted$Read$llgo$promoted$v1$dfcfeef340532e0df942cabc1157784ab1bd8f8bcab83246687af39fe0d8a164$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.48d8064c06d05bd6c73d65b945a0c008
+    __llgo_coro_frame_descriptor_v1.a02e3569696ddd309b2ee314e7c02434
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
+    __llgo_coro_wrap_nil_payload_v1
     github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Read
     llvm.coro.align.i64
     llvm.coro.alloc
@@ -37,4 +41,6 @@ github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Read$llgo$p
     llvm.trap
 github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init:
     github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init$guard
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.94c65b112070b506e2d5ab4f88968504
 

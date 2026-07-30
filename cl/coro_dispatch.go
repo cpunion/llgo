@@ -43,9 +43,10 @@ const (
 // the same hash, while its FunctionID digest is used only to make the descriptor
 // and thunk symbols target-specific.
 type coroPlainDispatchABI struct {
-	hash           [16]byte
-	signature      *types.Signature
-	resultSlotType types.Type
+	hash                     [16]byte
+	signature                *types.Signature
+	resultSlotType           types.Type
+	goLinknameFunctionFacade bool
 }
 
 // validateCoroDynamicDispatchTarget validates the single primary published by
@@ -383,7 +384,7 @@ func coroCallableEffectiveType(universe *EmissionUniverse, owner *ssa.Function, 
 	if prepared == nil {
 		return typ
 	}
-	return universe.effectiveType(prepared, owner, typ)
+	return universe.effectiveType(prepared, owner, typ, false)
 }
 
 func coroCallableTransportSchema(typ types.Type) []coroCallableTransportLeaf {
@@ -580,7 +581,7 @@ func validateCoroPlainDispatchConsumers(
 					continue
 				}
 				if spawn, ok := call.(*ssa.Go); ok {
-					if _, err := plan.ResolveManagedDispatchSpawn(spawn); err != nil {
+					if _, err := plan.ResolveManagedSpawn(spawn); err != nil {
 						return coroPlainDispatchInstructionError(fn, instr, "invalid managed descriptor spawn: "+err.Error())
 					}
 					continue
@@ -1058,7 +1059,21 @@ func (p *context) emitCoroDynamicDispatchValue(
 	if err := validateCoroDynamicDispatchTarget(entry.function, entry.plan, p.compilation.EmissionUniverse); err != nil {
 		panic(err)
 	}
-	abi, err := newCoroPlainDispatchABI(p, entry.function.Signature)
+	var (
+		abi coroPlainDispatchABI
+		err error
+	)
+	sourceSignature, goLinknameFacade, sourceErr :=
+		p.goLinknameFunctionValueSignature(target)
+	if sourceErr != nil {
+		panic(sourceErr)
+	}
+	if goLinknameFacade {
+		abi, err = newCoroPlainDispatchEffectiveABI(p, sourceSignature)
+		abi.goLinknameFunctionFacade = true
+	} else {
+		abi, err = newCoroPlainDispatchABI(p, entry.function.Signature)
+	}
 	if err != nil {
 		panic(err)
 	}
@@ -1206,7 +1221,10 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 	thunkSourceBase := 1
 	if emission == coro.EmitCoroutine {
 		if targetSig.Results().Len() != 1 || !types.Identical(targetSig.Results().At(0).Type(), types.Typ[types.UnsafePointer]) {
-			panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target does not return one handle", name))
+			panic(fmt.Errorf(
+				"coroutine dynamic dispatch ABI: thunk %q target %q does not return one handle (signature=%s)",
+				name, target.Name(), types.TypeString(targetSig, nil),
+			))
 		}
 		for i := 0; i < 2; i++ {
 			if targetSig.Params().Len() <= targetParam || !types.Identical(targetSig.Params().At(targetParam).Type(), types.Typ[types.UnsafePointer]) {
@@ -1215,7 +1233,9 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 			targetParam++
 		}
 		thunkSourceBase = 3
-	} else if !types.Identical(targetSig.Results(), source.Results()) {
+	} else if !coroDispatchTargetTupleCompatible(
+		targetSig.Results(), source.Results(), abi.goLinknameFunctionFacade,
+	) {
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target result signature does not match the source ABI", name))
 	}
 	if closureCtx != nil {
@@ -1228,7 +1248,11 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target has %d source parameters, want %d", name, targetSig.Params().Len()-targetParam, source.Params().Len()))
 	}
 	for i := 0; i < source.Params().Len(); i++ {
-		if !types.Identical(targetSig.Params().At(targetParam+i).Type(), source.Params().At(i).Type()) {
+		if !coroDispatchTargetTypeCompatible(
+			targetSig.Params().At(targetParam+i).Type(),
+			source.Params().At(i).Type(),
+			abi.goLinknameFunctionFacade,
+		) {
 			panic(fmt.Errorf(
 				"coroutine dynamic dispatch ABI: thunk %q target %q source parameter %d has type %s, want %s (target signature %s; source signature %s)",
 				name,
@@ -1254,17 +1278,78 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		physicalArgs = append(physicalArgs, b.Convert(p.prog.Type(closureCtx, llssa.InC), thunk.PhysicalParam(envIndex)))
 	}
 	for i := 0; i < source.Params().Len(); i++ {
-		physicalArgs = append(physicalArgs, thunk.PhysicalParam(thunkSourceBase+i))
+		argument := thunk.PhysicalParam(thunkSourceBase + i)
+		targetType := targetSig.Params().At(targetParam + i).Type()
+		if !types.Identical(argument.RawType(), targetType) {
+			// An exact bodyless go:linkname pair may connect private mirror
+			// types with distinct Go identity but one frozen structural ABI.
+			// Rebuild/retag the value at this thin adapter boundary so LLVM
+			// receives the target definition's precise physical type.
+			argument = b.ChangeType(p.prog.Type(targetType, llssa.InC), argument)
+		}
+		physicalArgs = append(physicalArgs, argument)
 	}
 	ret := b.Call(target, physicalArgs...)
-	if targetSig.Results().Len() == 0 {
-		b.Return()
-	} else {
+	if emission == coro.EmitCoroutine {
+		// The coroutine entry returns only its scheduler handle. Source results
+		// are written through the structurally compatible opaque out slot.
 		b.Return(ret)
+	} else {
+		switch targetSig.Results().Len() {
+		case 0:
+			b.Return()
+		case 1:
+			result := ret
+			sourceType := source.Results().At(0).Type()
+			if !types.Identical(result.RawType(), sourceType) {
+				result = b.ChangeType(p.prog.Type(sourceType, llssa.InC), result)
+			}
+			b.Return(result)
+		default:
+			results := make([]llssa.Expr, targetSig.Results().Len())
+			for index := range results {
+				result := b.Extract(ret, index)
+				sourceType := source.Results().At(index).Type()
+				if !types.Identical(result.RawType(), sourceType) {
+					result = b.ChangeType(p.prog.Type(sourceType, llssa.InC), result)
+				}
+				results[index] = result
+			}
+			b.Return(results...)
+		}
 	}
 	b.EndBuild()
 	b.Dispose()
 	return thunk.Expr
+}
+
+func coroDispatchTargetTupleCompatible(target, source *types.Tuple, goLinknameFacade bool) bool {
+	if target == nil || source == nil {
+		return target == source
+	}
+	if target.Len() != source.Len() {
+		return false
+	}
+	for index := 0; index < target.Len(); index++ {
+		if !coroDispatchTargetTypeCompatible(
+			target.At(index).Type(), source.At(index).Type(), goLinknameFacade,
+		) {
+			return false
+		}
+	}
+	return true
+}
+
+func coroDispatchTargetTypeCompatible(target, source types.Type, goLinknameFacade bool) bool {
+	if types.Identical(target, source) {
+		return true
+	}
+	// This flag is set only after goLinknameFunctionValueSignature has consumed
+	// the frozen declaration/definition pair. That certificate compares the
+	// complete physical signature while erasing only private named identity,
+	// struct field decoration, and the explicit direct-pointer facade. The
+	// thunk above performs the corresponding per-value physical retag.
+	return goLinknameFacade
 }
 
 func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
@@ -1311,7 +1396,6 @@ func (p *context) compileCoroPhysicalNilDispatchFault(
 		instructionPlan.control != coroPhysicalControlNilDispatchFault {
 		panic("coroutine nil-only dispatch fault escaped its frozen physical control recipe")
 	}
-	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 	fn := p.compileValue(b, call.Call.Value)
 	_ = p.compileValues(b, call.Call.Args, fnNormal)
@@ -1322,7 +1406,6 @@ func (p *context) compileCoroPhysicalNilDispatchFault(
 }
 
 func (p *context) emitCoroPlainDispatchCall(b llssa.Builder, call *ssa.Call, physical bool) llssa.Expr {
-	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 	fn := p.compileValue(b, call.Call.Value)
 	args := p.compileValues(b, call.Call.Args, fnNormal)

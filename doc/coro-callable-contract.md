@@ -1047,7 +1047,7 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
    canonical/link identity、callable/typed ABI、physical symbol/ABI、origin和evidence；generic
    contract只是同一identity上的可选behavior certificate。identity和contract通过
    `CoroPlanInput -> SSAFunctionPolicy -> SSAPlan -> CoroPlanDigest` 传递，当前
-   `PlanDigestSchema` 当前为 `llgo.coro.plan-digest.v28`。同一physical `(symbol, ABI)`可以对应多个
+   `PlanDigestSchema` 当前为 `llgo.coro.plan-digest.v29`。同一physical `(symbol, ABI)`可以对应多个
    exact DeclarationRef；不同declaration的ABI差异不会触发无关的全局冲突。显式generic contract
    必须与其identity certificate逐字段匹配；builder伪造、替换或漏传frontend certificate均失败关闭。
    identity本身不改变execution policy，wrapper metadata也不会屏蔽Go body分析。
@@ -1110,7 +1110,7 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
 - contract parser、四维behavior digest、content-addressed ID、freeze identity/ABI与冲突检查；
 - build不能伪造或替换frontend certificate，declaration/wrapper的SSA语义投影；
 - total callable identity、generic callable certificate和exact TrustedInline invocation进入
-  当前 `PlanDigestSchema v28`，事实变化会改变digest；
+  当前 `PlanDigestSchema v29`，事实变化会改变digest；
 - TrustedInline的closed static call、foreign target和physical resolver正/负例；
 - producer-forward shadow的direct/private-carrier、条件incoming inventory及
   arithmetic/open/escape/unannotated拒绝用例。
@@ -1184,7 +1184,7 @@ contract，compile-only不能替代production platform E2E。
   content-addressed generic contract；两类不可变certificate都绑定function/link identity、
   callable/typed ABI和physical C symbol/ABI，contract另绑定scope与behavior；
 - EmissionUniverse freeze、`internal/build`分类、SSAFunctionPolicy/SSAPlan与
-  当前 `PlanDigestSchema v28` 的端到端传递；
+  当前 `PlanDigestSchema v29` 的端到端传递；
 - declaration的progress/affinity/reentry/memory保守投影、wrapper全body分析，以及与
   `noblock/sync/worker/workeraddr`和assembly certificate的冲突拒绝；`schedulerwait`
   已从声明级词汇删除，可阻塞raw-host调用改由编译器根据exact host root及closed closure

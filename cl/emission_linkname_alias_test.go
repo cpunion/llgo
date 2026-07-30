@@ -234,6 +234,93 @@ func implementation() *runtimeState { return nil }
 	}
 }
 
+func TestBodylessGoLinknameFunctionValuePreservesDeclaredTypeFacade(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	declaration := testProg.addPackage(t, "example.com/emission/linkvaluefacade", `package linkvaluefacade
+import "unsafe"
+type record struct{ value int }
+//go:linkname hook
+func hook(unsafe.Pointer, []record) []record
+func Box() any { return hook }
+`)
+	definition := testProg.addPackage(t, "example.com/emission/linkvalueimpl", `package linkvalueimpl
+type state struct{}
+func (*state) keys() {}
+type record struct{ value int }
+//go:linkname implementation example.com/emission/linkvaluefacade.hook
+func implementation(*state, []record) []record { return nil }
+`)
+	testProg.ssa.Build()
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declared := declaration.ssa.Func("hook")
+	defined := definition.ssa.Func("implementation")
+	if resolved, ok := universe.Resolve(declared); !ok || resolved != defined {
+		t.Fatalf("Resolve(bodyless function-value facade) = %v, %t; want %v, true", resolved, ok, defined)
+	}
+	stateType := definition.types.Scope().Lookup("state").Type()
+	keysSelection := testProg.ssa.MethodSets.MethodSet(types.NewPointer(stateType)).Lookup(definition.types, "keys")
+	if keysSelection == nil {
+		t.Fatal("implementation-only state.keys selection is missing")
+	}
+	keys := testProg.ssa.MethodValue(keysSelection)
+	keys, ok := universe.Resolve(keys)
+	if !ok || keys == nil {
+		t.Fatal("implementation-only state.keys method is outside the frozen universe")
+	}
+
+	box := declaration.ssa.Func("Box")
+	references, err := universe.CoroDemandReferences(box)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reference := range references {
+		if reference == keys {
+			t.Fatal("declared unsafe.Pointer function value imported implementation-only state.keys ABI metadata")
+		}
+	}
+
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: box, Demand: coro.SyncDemand}}, coro.SSAConfig{
+		EmissionUniverse: ssaUniverse,
+		ResolveFunction: func(fn *ssa.Function) (*ssa.Function, bool, error) {
+			canonical, ok := universe.Resolve(fn)
+			return canonical, ok, nil
+		},
+		FunctionIDs:                  universe.FunctionIDConfig(),
+		ClassifyDemandReferences:     universe.CoroDemandReferences,
+		ClassifySyncDemandReferences: universe.CoroSyncDemandReferences,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if methodPlan, ok := plan.FunctionPlan(keys); !ok || methodPlan.Emission != coro.EmitNone {
+		t.Fatalf("implementation-only state.keys plan = %+v, present=%t; want EmitNone", methodPlan, ok)
+	}
+	if _, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, declaration.ssa, []*ast.File{declaration.file}, nil,
+		PackageOptions{Compilation: &Compilation{
+			CoroPlan:         plan,
+			EmissionUniverse: universe,
+		}},
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEmissionUniverseAliasesBodylessGoLinknameFunctionToExactMethod(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	definition := testProg.addPackage(t, "example.com/emission/linkmethoddef", `package linkmethoddef
@@ -281,6 +368,50 @@ func Call(value target.Value) *target.ABI { return valueABIType(value) }
 	call := exactStaticCallTo(t, declaration.ssa.Func("Call"), declared)
 	if err := validateCoroStaticMethodCallOperands(call, defined, universe); err != nil {
 		t.Fatalf("validate bodyless method linkname await operands: %v", err)
+	}
+}
+
+func TestEmissionUniverseAliasesDetachedBodylessLinknameToAdjacentMethod(t *testing.T) {
+	const path = "example.com/emission/detachedmethod"
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, path, `package detachedmethod
+type handler struct{}
+//go:linkname badServeHTTP example.com/emission/detachedmethod.handler.ServeHTTP
+func (handler) ServeHTTP(value int) int { return value + 1 }
+func badServeHTTP(handler, int) int
+func Call(receiver handler, value int) int {
+	return badServeHTTP(receiver, value)
+}
+`)
+	testProg.ssa.Build()
+
+	handlerType := pkg.types.Scope().Lookup("handler").Type()
+	selection := testProg.ssa.MethodSets.MethodSet(handlerType).Lookup(pkg.types, "ServeHTTP")
+	if selection == nil {
+		t.Fatal("fixture method selection is missing")
+	}
+	method := testProg.ssa.MethodValue(selection)
+	declaration := pkg.ssa.Func("badServeHTTP")
+	if method == nil || declaration == nil {
+		t.Fatal("fixture method or detached declaration is missing")
+	}
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: pkg.ssa, Files: []*ast.File{pkg.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, ok := universe.Resolve(declaration); !ok || resolved != method {
+		t.Fatalf("Resolve(detached bodyless method linkname) = %v, %t; want %v, true", resolved, ok, method)
+	}
+	if directive, err := universe.CoroRawABIDirective(method); err != nil || directive != "" {
+		t.Fatalf("adjacent method raw ABI directive = %q, %v; want empty, nil", directive, err)
+	}
+	if directive := coroLeafABIDirective(method); directive != "" {
+		t.Fatalf("adjacent method leaf ABI directive = %q, want empty", directive)
 	}
 }
 

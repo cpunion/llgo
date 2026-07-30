@@ -218,6 +218,12 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		return nil, fmt.Errorf("ABI type demand requires an emission universe, function, and exact owner")
 	}
 	unevaluated, _ := u.frozenUnsafeLayoutUnevaluatedSSA(fn)
+	callerTracking := u.callerTracking
+	if callerTracking == nil {
+		// Focused report tests may construct a minimal universe literal. A
+		// production universe always owns one compilation-scoped cache.
+		callerTracking = NewCallerTracking()
+	}
 	return &context{
 		prog:                 u.prog,
 		goFn:                 fn,
@@ -226,13 +232,16 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		goTyps:               owner.pkgTypes,
 		goPkg:                owner.ssa,
 		patches:              u.patches,
-		loaded:               u.loadedPackages(),
+		loaded:               u.loadedPackages(true),
 		linkOnceFns:          make(map[*ssa.Function]none),
 		methodNilDerefChecks: collectMethodNilDerefChecks(fn),
 		unevaluatedSSA:       unevaluated,
-		addrOfFieldAddrs:     collectAddrOfFieldSelectors(owner.files),
+		addrOfFieldAddrs:     owner.addrOfFieldAddrs,
 		emissionUniverse:     u,
 		emissionOwner:        owner,
+		trackCallerFrames:    owner.sourceUsesRuntimeCaller || packageUsesRuntimeCaller(callerTracking, owner.ssa),
+		runtimeCallerFuncs:   runtimeCallerFuncSet(callerTracking, owner.ssa),
+		logicalCallerFuncs:   runtimeLogicalCallerFuncSet(callerTracking, owner.ssa),
 	}, nil
 }
 
@@ -273,6 +282,25 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 			methods, err := u.selectABITypeMethods(owner, typ, methodState, methodFromPatch)
 			if err != nil {
 				return err
+			}
+			// A generated method wrapper is part of the descriptor's physical
+			// definition, not merely an external symbol reference. Archives are
+			// compiled independently, so the module which emits this descriptor
+			// must also emit the deterministic linkonce wrapper body. Recording
+			// the exact use owner here keeps ProgramIR sufficient for codegen and
+			// lets the linker coalesce identical definitions across packages.
+			for index, method := range methods {
+				if !isEmissionGeneratedWrapper(method) {
+					continue
+				}
+				method, err = u.addResolvedRequired(method, owner, fn, state)
+				if err != nil {
+					return fmt.Errorf(
+						"ABI type %v generated method wrapper %q for owner %q: %w",
+						typ, methods[index].Name(), owner.identity, err,
+					)
+				}
+				methods[index] = method
 			}
 			references = append(references, methods...)
 		}
