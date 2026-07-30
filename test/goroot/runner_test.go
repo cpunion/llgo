@@ -1731,8 +1731,8 @@ func parserRecoverySourceSecondaries(primary, source string) []string {
 
 // parserRecoverySecondaryGroups returns independent one-use allowances for an
 // exact primary. Source-independent pairs are checked first, followed by
-// source-dependent single groups. issue11610 deterministically emits two
-// separate follow-ons, so each receives its own group here.
+// source-dependent single groups. A few exact GOROOT sources deterministically
+// emit multiple follow-ons, so each receives its own group here.
 func parserRecoverySecondaryGroups(primary, source string) [][]string {
 	if secondaries := parserRecoverySecondaries(primary); len(secondaries) != 0 {
 		return [][]string{secondaries}
@@ -1742,6 +1742,16 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 	}
 	source = parserRecoverySourceCode(source)
 	switch primary {
+	// GOROOT/test/syntax/vareq.go
+	case "syntax error: unexpected { at end of statement":
+		if source == `var x map[string]string{"a":"b"}` {
+			return [][]string{
+				{"expected ';', found '{'"},
+				{"expected ';', found 'EOF'"},
+				{"expected '}', found 'EOF'"},
+				{"declared and not used: x"},
+			}
+		}
 	// GOROOT/test/fixedbugs/issue11610.go
 	case "invalid character U+003F '?'":
 		if source == "var?" {

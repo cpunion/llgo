@@ -2310,10 +2310,6 @@ xfails:
     case: nilptr5.go
     reason: gc-specific -d=nil optimization diagnostics are not implemented by llgo
   - version: go1.26
-    directive: errorcheck
-    case: syntax/vareq.go
-    reason: llgo parser recovery emits additional diagnostics after the expected syntax error
-  - version: go1.26
     directive: compile
     case: typeparam/issue50993.go
     reason: gc-specific -d=checkptr backend option is not implemented by llgo

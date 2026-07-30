@@ -868,6 +868,88 @@ var? // ERROR "invalid character U\+003F '\?'|invalid character 0x3f in input fi
 	}
 }
 
+func TestCheckExpectedErrorsScopesVareqRecovery(t *testing.T) {
+	const (
+		source = `package main
+func main() {
+	var x map[string]string{"a":"b"} // ERROR "unexpected { at end of statement|expected ';' or '}' or newline"`
+		primary = "syntax error: unexpected { at end of statement"
+	)
+	secondaries := []string{
+		"expected ';', found '{'",
+		"expected ';', found 'EOF'",
+		"expected '}', found 'EOF'",
+		"declared and not used: x",
+	}
+	check := func(t *testing.T, source string, includePrimary bool, secondaryLine int, extras ...string) error {
+		t.Helper()
+		file := filepath.Join(t.TempDir(), "case.go")
+		if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var output []string
+		if includePrimary {
+			output = append(output, file+":3: "+primary)
+		}
+		for _, secondary := range secondaries {
+			output = append(output, fmt.Sprintf("%s:%d: %s", file, secondaryLine, secondary))
+		}
+		for _, extra := range extras {
+			output = append(output, fmt.Sprintf("%s:%d: %s", file, secondaryLine, extra))
+		}
+		return checkExpectedErrors(strings.Join(output, "\n"), file, "case.go")
+	}
+
+	t.Run("exact source primary and line", func(t *testing.T) {
+		if err := check(t, source, true, 3); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("wrong source", func(t *testing.T) {
+		wrong := strings.Replace(source, `"a":"b"`, `"a":"c"`, 1)
+		if err := check(t, wrong, true, 3); err == nil || !strings.Contains(err.Error(), secondaries[0]) {
+			t.Fatalf("err=%v, want recovery diagnostics to remain", err)
+		}
+	})
+	t.Run("missing primary", func(t *testing.T) {
+		if err := check(t, source, false, 3); err == nil || !strings.Contains(err.Error(), "no match") {
+			t.Fatalf("err=%v, want missing primary to fail", err)
+		}
+	})
+	t.Run("wrong line", func(t *testing.T) {
+		if err := check(t, source, true, 4); err == nil || !strings.Contains(err.Error(), secondaries[0]) {
+			t.Fatalf("err=%v, want wrong-line recovery diagnostics to remain", err)
+		}
+	})
+	t.Run("unrelated type diagnostic", func(t *testing.T) {
+		const extra = "undefined: still_reported"
+		if err := check(t, source, true, 3, extra); err == nil || !strings.Contains(err.Error(), extra) {
+			t.Fatalf("err=%v, want unrelated diagnostic to remain", err)
+		}
+	})
+	t.Run("duplicate secondary", func(t *testing.T) {
+		// The complete pipeline deduplicates exact diagnostics before pairing,
+		// so exercise the one-use recovery matcher directly.
+		file := filepath.Join(t.TempDir(), "case.go")
+		pairs := make([]parserRecoveryPair, 0, len(secondaries))
+		sourceLine := strings.Split(source, "\n")[2]
+		for _, group := range parserRecoverySecondaryGroups(primary, sourceLine) {
+			pairs = append(pairs, parserRecoveryPair{
+				file: canonicalDiagnosticPath(file), line: 3, secondaries: group,
+			})
+		}
+		duplicate := file + ":3: declared and not used: x"
+		got := discardPairedParserDiagnostics(
+			[]string{duplicate, duplicate},
+			newDiagnosticPathResolver([]diagnosticSource{{full: file, short: "case.go"}}),
+			pairs,
+		)
+		if want := []string{duplicate}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("duplicate recovery diagnostics=%v, want %v", got, want)
+		}
+	})
+}
+
 func TestAdditionalParserRecoveryDiagnosticsFailOpen(t *testing.T) {
 	t.Run("one ERROR authorizes one recovery group", func(t *testing.T) {
 		file := filepath.Join(t.TempDir(), "case.go")
