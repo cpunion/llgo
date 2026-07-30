@@ -158,11 +158,11 @@ func TestLowerPrototypeBuildsDirectCallStateMachine(t *testing.T) {
 		`switch i32 %pc, label %invalid-pc [`,
 		`i32 0, label %entry`,
 		`i32 1, label %resume.1`,
-		`call ptr @__llgo_wasm_resume_alloc`,
+		`call ptr @__llgo_wasm_resume_alloc(ptr %0,`,
 		`call void @llvm.memset`,
 		`ret i8 0`,
 		`%returned = load ptr`,
-		`call void @__llgo_wasm_resume_free`,
+		`call void @__llgo_wasm_resume_free(ptr %0, ptr %returned)`,
 		`ret i8 1`,
 	} {
 		if !strings.Contains(ir, want) {

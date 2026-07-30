@@ -55,6 +55,7 @@ func emitStartEntriesForLayouts(
 		builder := ctx.NewBuilder()
 		builder.SetInsertPointAtEnd(block)
 		child := builder.CreateCall(alloc.GlobalValueType(), alloc, []llvm.Value{
+			start.Param(0),
 			llvm.ConstInt(abi.uintptrType, layout.size, false),
 			llvm.ConstInt(abi.uintptrType, uint64(layout.alignment), false),
 		}, "child")

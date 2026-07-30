@@ -18,6 +18,8 @@
 // WebAssembly resumable call ABI.
 package wasmresume
 
+import "unsafe"
+
 // SuspendCurrent yields the active resumable frame to its scheduler. The
 // compiler replaces calls to SuspendCurrent with a frame-PC transition; no
 // function body is linked into the final WebAssembly module.
@@ -65,6 +67,29 @@ type Frame struct {
 type Context struct {
 	top      *Frame
 	returned *Frame
+	storage  frameStorage
+}
+
+// AllocateFrame allocates stable, root-scanned storage for a generated frame.
+func (c *Context) AllocateFrame(
+	size, align uintptr, allocate func(uintptr) unsafe.Pointer,
+) unsafe.Pointer {
+	return c.storage.allocate(size, align, allocate)
+}
+
+// ReleaseFrame reclaims the most recently completed generated frame.
+func (c *Context) ReleaseFrame(frame *Frame, release func(unsafe.Pointer)) {
+	if frame == nil || frame.Descriptor == nil {
+		panic("wasmresume: invalid completed frame")
+	}
+	c.storage.release(unsafe.Pointer(frame), frame.Descriptor.FrameSize, release)
+}
+
+// Close releases every frame storage segment owned by the context.
+func (c *Context) Close(release func(unsafe.Pointer)) {
+	c.storage.close(release)
+	c.top = nil
+	c.returned = nil
 }
 
 // Top returns the active frame.
