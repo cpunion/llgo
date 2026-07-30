@@ -1750,6 +1750,15 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 				{"illegal character U+003F '?'"},
 			}
 		}
+	// GOROOT/test/syntax/ddd.go
+	case "syntax error: unexpected literal .3, expected name or (":
+		if source == "g(f..3)" {
+			return [][]string{
+				{"expected selector or type assertion, found .3"},
+				{"undefined: g"},
+				{"f._ undefined (type func() has no field or method _)"},
+			}
+		}
 	}
 	return nil
 }

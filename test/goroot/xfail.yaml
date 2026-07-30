@@ -2159,10 +2159,6 @@ xfails:
     reason: gc-specific -m optimization diagnostics are not implemented by llgo
   - version: go1.26
     directive: errorcheck
-    case: syntax/ddd.go
-    reason: llgo parser recovery emits additional malformed-selector diagnostics
-  - version: go1.26
-    directive: errorcheck
     case: escape_hash_maphash.go
     reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
   - version: go1.26
