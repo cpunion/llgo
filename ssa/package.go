@@ -381,6 +381,14 @@ func (p Program) DataLayout() string {
 	return p.td.String()
 }
 
+// ParseBitcodeFile loads one staged module into this program's LLVM context.
+// Build orchestration uses a fresh Program per module during detached backend
+// emission so context-wide LLVM caches cannot overlap whole-program frontend
+// analysis or accumulate across packages.
+func (p Program) ParseBitcodeFile(name string) (llvm.Module, error) {
+	return p.ctx.ParseBitcodeFile(name)
+}
+
 func (p Program) SetPatch(patchType func(types.Type) types.Type) {
 	p.patchType = patchType
 }

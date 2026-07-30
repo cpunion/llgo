@@ -42,17 +42,25 @@ func (c *context) writeCoroLibraryEffectObject(path string, records []byte) erro
 	if c == nil || c.prog == nil {
 		return fmt.Errorf("missing LLGo program for coroutine library metadata object")
 	}
+	var targetTriple, dataLayout string
+	if c.stagedBackendDetached {
+		targetTriple = c.stagedTargetTriple
+		dataLayout = c.stagedDataLayout
+	} else {
+		targetTriple = c.prog.TargetSpec().Triple
+		dataLayout = c.prog.DataLayout()
+	}
 	llvmContext := gllvm.NewContext()
 	defer llvmContext.Dispose()
 	module := llvmContext.NewModule("llgo.coro.library-effect.archive.v1")
 	defer module.Dispose()
-	if err := populateCoroLibraryEffectObjectModule(c.prog, module, records); err != nil {
+	if err := populateCoroLibraryEffectObjectModuleForTarget(dataLayout, targetTriple, module, records); err != nil {
 		return err
 	}
 	if err := gllvm.VerifyModule(module, gllvm.ReturnStatusAction); err != nil {
 		return fmt.Errorf("verify coroutine library metadata object: %w", err)
 	}
-	if useInMemoryNativeCodegen(c) {
+	if useInMemoryNativeCodegen(c) && !c.stagedBackendDetached {
 		object, err := c.prog.TargetMachine().EmitToMemoryBuffer(module, gllvm.ObjectFile)
 		if err != nil {
 			return fmt.Errorf("emit coroutine library metadata object: %w", err)
@@ -95,13 +103,25 @@ func populateCoroLibraryEffectObjectModule(
 	if prog == nil || module.IsNil() {
 		return fmt.Errorf("missing LLVM program or module for coroutine library metadata object")
 	}
+	return populateCoroLibraryEffectObjectModuleForTarget(prog.DataLayout(), prog.TargetSpec().Triple, module, records)
+}
+
+func populateCoroLibraryEffectObjectModuleForTarget(
+	dataLayout string,
+	targetTriple string,
+	module gllvm.Module,
+	records []byte,
+) error {
+	if module.IsNil() || dataLayout == "" || targetTriple == "" {
+		return fmt.Errorf("missing LLVM target or module for coroutine library metadata object")
+	}
 	if len(records) == 0 {
 		return fmt.Errorf("empty coroutine library metadata record")
 	}
-	module.SetDataLayout(prog.DataLayout())
-	module.SetTarget(prog.TargetSpec().Triple)
+	module.SetDataLayout(dataLayout)
+	module.SetTarget(targetTriple)
 	llvmContext := module.Context()
-	if strings.HasPrefix(strings.ToLower(prog.TargetSpec().Triple), "wasm") {
+	if strings.HasPrefix(strings.ToLower(targetTriple), "wasm") {
 		// LLVM's ordinary global section attribute creates a Wasm data segment,
 		// which would consume runtime linear memory. The backend's documented
 		// wasm.custom_sections metadata emits the producer record directly as
@@ -119,7 +139,7 @@ func populateCoroLibraryEffectObjectModule(
 	global.SetLinkage(gllvm.InternalLinkage)
 	global.SetUnnamedAddr(true)
 	global.SetAlignment(1)
-	global.SetSection(coroLibraryEffectObjectSection(prog.TargetSpec().Triple))
+	global.SetSection(coroLibraryEffectObjectSection(targetTriple))
 
 	usedInitial := gllvm.ConstArray(global.Type(), []gllvm.Value{global})
 	used := gllvm.AddGlobal(module, usedInitial.Type(), "llvm.compiler.used")
