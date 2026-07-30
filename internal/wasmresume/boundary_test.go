@@ -17,7 +17,22 @@ func TestRuntimeBoundaries(t *testing.T) {
 	if IsNonSuspendingBoundary(SuspendSymbol) {
 		t.Fatal("SuspendCurrent was classified as non-suspending")
 	}
-	for _, name := range []string{runtimeAllocRoot, runtimeFreeRoot, runtimeRunWasmMain} {
+	for _, name := range []string{
+		runtimeAllocRoot,
+		runtimeFreeRoot,
+		runtimeRunWasmMain,
+		runtimeFrameAlloc,
+		runtimeDynamicAlloc,
+		runtimeFrameFree,
+		runtimeFrameClose,
+		"github.com/goplus/llgo/runtime/internal/runtime.GetThreadDefer",
+		"github.com/goplus/llgo/runtime/internal/runtime.SetThreadDefer",
+		"github.com/goplus/llgo/runtime/internal/runtime.Panic",
+		"github.com/goplus/llgo/runtime/internal/runtime.Recover",
+		"github.com/goplus/llgo/runtime/internal/runtime.Rethrow",
+		"github.com/goplus/llgo/runtime/internal/runtime.Goexit",
+		"runtime.Goexit",
+	} {
 		if !IsNonSuspendingBoundary(name) {
 			t.Fatalf("%q is not a non-suspending boundary", name)
 		}

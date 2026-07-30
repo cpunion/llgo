@@ -11,6 +11,11 @@ type testFrameRoots struct {
 	frees  int
 }
 
+type testUnwindFrame struct {
+	Frame
+	deferFrame unsafe.Pointer
+}
+
 func (r *testFrameRoots) allocate(size uintptr) unsafe.Pointer {
 	block := make([]byte, size)
 	if len(block) == 0 {
@@ -50,13 +55,13 @@ func TestFrameStorageAlignsAndReusesFrames(t *testing.T) {
 		t.Fatalf("root block allocations = %d, want 1", roots.allocs)
 	}
 
-	storage.release(second, 64, roots.release)
+	storage.releaseFrame(second, 64, roots.release)
 	reused := storage.allocate(64, 64, roots.allocate)
 	if reused != second {
 		t.Fatalf("frame was not reused: got %p, want %p", reused, second)
 	}
-	storage.release(reused, 64, roots.release)
-	storage.release(first, 31, roots.release)
+	storage.releaseFrame(reused, 64, roots.release)
+	storage.releaseFrame(first, 31, roots.release)
 	storage.close(roots.release)
 	if roots.frees != 1 || len(roots.blocks) != 0 {
 		t.Fatalf("released roots = %d, remaining = %d", roots.frees, len(roots.blocks))
@@ -73,11 +78,11 @@ func TestFrameStorageAddsAndReleasesSegments(t *testing.T) {
 	if first == nil || second == nil || roots.allocs != 2 {
 		t.Fatalf("allocations = %d, first=%p second=%p", roots.allocs, first, second)
 	}
-	storage.release(second, 128, roots.release)
+	storage.releaseFrame(second, 128, roots.release)
 	if roots.frees != 1 {
 		t.Fatalf("released child segments = %d, want 1", roots.frees)
 	}
-	storage.release(first, defaultFrameBlockSize, roots.release)
+	storage.releaseFrame(first, defaultFrameBlockSize, roots.release)
 	storage.close(roots.release)
 	if roots.frees != 2 || len(roots.blocks) != 0 {
 		t.Fatalf("released roots = %d, remaining = %d", roots.frees, len(roots.blocks))
@@ -103,6 +108,91 @@ func TestContextOwnsGeneratedFrameStorage(t *testing.T) {
 	}
 }
 
+func TestContextReleaseFrameDiscardsDynamicStorage(t *testing.T) {
+	var (
+		ctx   Context
+		roots testFrameRoots
+	)
+	const frameSize = uintptr(32)
+	raw := ctx.AllocateFrame(frameSize, 8, roots.allocate)
+	frame := (*Frame)(raw)
+	frame.Descriptor = &Descriptor{FrameSize: frameSize}
+	if ctx.AllocateFrame(64, 16, roots.allocate) == nil ||
+		ctx.AllocateFrame(defaultFrameBlockSize, 16, roots.allocate) == nil {
+		t.Fatal("dynamic frame storage allocation failed")
+	}
+
+	ctx.ReleaseFrame(frame, roots.release)
+	reused := ctx.AllocateFrame(frameSize, 8, roots.allocate)
+	if reused != raw {
+		t.Fatalf("frame storage was not rewound: got %p, want %p", reused, raw)
+	}
+	ctx.Close(roots.release)
+	if roots.allocs != roots.frees || len(roots.blocks) != 0 {
+		t.Fatalf("root lifecycle = %d allocs, %d frees, %d remaining",
+			roots.allocs, roots.frees, len(roots.blocks))
+	}
+}
+
+func TestContextUnwindReclaimsChildrenAndRedirectsOwner(t *testing.T) {
+	var (
+		ctx   Context
+		roots testFrameRoots
+		token byte
+	)
+	size := unsafe.Sizeof(testUnwindFrame{})
+	align := unsafe.Alignof(testUnwindFrame{})
+	owner := (*testUnwindFrame)(ctx.AllocateFrame(size, align, roots.allocate))
+	child := (*testUnwindFrame)(ctx.AllocateFrame(size, align, roots.allocate))
+	ownerDescriptor := &Descriptor{
+		FrameSize:    size,
+		UnwindOffset: unsafe.Offsetof(testUnwindFrame{}.deferFrame),
+		UnwindPC:     7,
+	}
+	childDescriptor := &Descriptor{FrameSize: size}
+	owner.Descriptor = ownerDescriptor
+	owner.deferFrame = unsafe.Pointer(&token)
+	child.Parent = &owner.Frame
+	child.Descriptor = childDescriptor
+	ctx.top = &child.Frame
+
+	if !ctx.Unwind(unsafe.Pointer(&token), roots.release) {
+		t.Fatal("Context.Unwind did not find the defer owner")
+	}
+	if ctx.top != &owner.Frame || owner.PC != ownerDescriptor.UnwindPC {
+		t.Fatalf("unwind result: top=%p PC=%d", ctx.top, owner.PC)
+	}
+	reused := ctx.AllocateFrame(size, align, roots.allocate)
+	if reused != unsafe.Pointer(child) {
+		t.Fatalf("discarded child storage was not reused: got %p, want %p", reused, child)
+	}
+	ctx.Close(roots.release)
+}
+
+func TestContextUnwindRejectsMissingOwner(t *testing.T) {
+	var ctx Context
+	if ctx.Unwind(nil, nil) || ctx.Unwind(unsafe.Pointer(new(byte)), nil) {
+		t.Fatal("Context.Unwind accepted a missing defer owner")
+	}
+}
+
+func TestContextUnwindIgnoresIncompleteDescriptor(t *testing.T) {
+	var (
+		ctx   Context
+		token byte
+		frame testUnwindFrame
+	)
+	frame.deferFrame = unsafe.Pointer(&token)
+	frame.Descriptor = &Descriptor{
+		FrameSize:    unsafe.Sizeof(frame),
+		UnwindOffset: unsafe.Offsetof(frame.deferFrame),
+	}
+	ctx.top = &frame.Frame
+	if ctx.Unwind(unsafe.Pointer(&token), nil) {
+		t.Fatal("Context.Unwind accepted a descriptor without an unwind PC")
+	}
+}
+
 func TestContextKeepsGeneratedABIPrefix(t *testing.T) {
 	if got, want := unsafe.Offsetof(Context{}.storage), 2*unsafe.Sizeof(uintptr(0)); got != want {
 		t.Fatalf("Context storage offset = %d, want %d", got, want)
@@ -124,15 +214,7 @@ func TestFrameStorageRejectsInvalidOperations(t *testing.T) {
 		t.Fatal("failed root allocation returned a frame")
 	}
 
-	first := storage.allocate(8, 8, roots.allocate)
-	storage.allocate(8, 8, roots.allocate)
-	defer func() {
-		if recover() == nil {
-			t.Fatal("out-of-order frame release did not panic")
-		}
-		storage.close(roots.release)
-	}()
-	storage.release(first, 8, roots.release)
+	storage.close(roots.release)
 }
 
 func TestFrameStorageRejectsInvalidReleaseState(t *testing.T) {
@@ -150,7 +232,7 @@ func TestFrameStorageRejectsInvalidReleaseState(t *testing.T) {
 
 	assertPanic("empty", func() {
 		var storage frameStorage
-		storage.release(unsafe.Pointer(new(byte)), 1, nil)
+		storage.releaseFrame(unsafe.Pointer(new(byte)), 1, nil)
 	})
 
 	var (
@@ -159,15 +241,18 @@ func TestFrameStorageRejectsInvalidReleaseState(t *testing.T) {
 	)
 	frame := storage.allocate(8, 8, roots.allocate)
 	assertPanic("nil frame", func() {
-		storage.release(nil, 8, roots.release)
+		storage.releaseFrame(nil, 8, roots.release)
 	})
 	assertPanic("zero size", func() {
-		storage.release(frame, 0, roots.release)
+		storage.releaseFrame(frame, 0, roots.release)
+	})
+	assertPanic("foreign frame", func() {
+		storage.releaseFrame(unsafe.Pointer(new(byte)), 1, roots.release)
 	})
 	assertPanic("invalid header", func() {
 		header := unsafe.Pointer(uintptr(frame) - unsafe.Sizeof(uintptr(0)))
 		*(*uintptr)(header) = 0
-		storage.release(frame, 8, roots.release)
+		storage.releaseFrame(frame, 8, roots.release)
 	})
 	storage.close(roots.release)
 
@@ -195,11 +280,11 @@ func BenchmarkFrameStorageHotAllocateRelease(b *testing.B) {
 		roots   testFrameRoots
 	)
 	frame := storage.allocate(64, 16, roots.allocate)
-	storage.release(frame, 64, roots.release)
+	storage.releaseFrame(frame, 64, roots.release)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		frame = storage.allocate(64, 16, roots.allocate)
-		storage.release(frame, 64, roots.release)
+		storage.releaseFrame(frame, 64, roots.release)
 	}
 }

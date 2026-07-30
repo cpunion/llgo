@@ -25,11 +25,13 @@ import (
 )
 
 const (
-	FunctionAttribute = "llgo.wasm.resume"
-	CallMetadata      = "llgo.wasm.resume.call"
-	SuspendSymbol     = "github.com/goplus/llgo/runtime/internal/wasmresume.SuspendCurrent"
-	MarkerVersion     = 1
-	maxResumeID       = 1<<16 - 1
+	FunctionAttribute    = "llgo.wasm.resume"
+	CallMetadata         = "llgo.wasm.resume.call"
+	SuspendSymbol        = "github.com/goplus/llgo/runtime/internal/wasmresume.SuspendCurrent"
+	RegisterUnwindSymbol = "github.com/goplus/llgo/runtime/internal/wasmresume.RegisterUnwind"
+	ClearUnwindSymbol    = "github.com/goplus/llgo/runtime/internal/wasmresume.ClearUnwind"
+	MarkerVersion        = 1
+	maxResumeID          = 1<<16 - 1
 )
 
 // Function describes the resumable calls in one generated Go function.

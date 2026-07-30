@@ -125,6 +125,31 @@ func TestSuspendCurrentRequiresCompilerLowering(t *testing.T) {
 	SuspendCurrent()
 }
 
+func TestContextStart(t *testing.T) {
+	descriptor := &Descriptor{}
+	root := &Frame{Descriptor: descriptor}
+	var context Context
+	context.Start(root)
+	if context.Top() != root {
+		t.Fatalf("Top() = %p, want %p", context.Top(), root)
+	}
+	for _, frame := range []*Frame{
+		nil,
+		{Descriptor: descriptor},
+		{Parent: root, Descriptor: descriptor},
+		{},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("Start(%+v) did not panic", frame)
+				}
+			}()
+			context.Start(frame)
+		}()
+	}
+}
+
 func TestContextPushInitializesHeader(t *testing.T) {
 	parent := Frame{}
 	child := Frame{Parent: &parent, Descriptor: &testMulDescriptor, PC: 9}
@@ -143,12 +168,15 @@ func TestContextPushInitializesHeader(t *testing.T) {
 
 func TestDescriptorCarriesFrameLayout(t *testing.T) {
 	descriptor := Descriptor{
-		Resume:     resumeTestAdd,
-		FrameSize:  unsafe.Sizeof(testLeafFrame{}),
-		FrameAlign: unsafe.Alignof(testLeafFrame{}),
+		Resume:       resumeTestAdd,
+		FrameSize:    unsafe.Sizeof(testLeafFrame{}),
+		FrameAlign:   unsafe.Alignof(testLeafFrame{}),
+		UnwindOffset: unsafe.Sizeof(Frame{}),
+		UnwindPC:     3,
 	}
 	if descriptor.Resume == nil || descriptor.FrameSize != unsafe.Sizeof(testLeafFrame{}) ||
-		descriptor.FrameAlign != unsafe.Alignof(testLeafFrame{}) {
+		descriptor.FrameAlign != unsafe.Alignof(testLeafFrame{}) ||
+		descriptor.UnwindOffset != unsafe.Sizeof(Frame{}) || descriptor.UnwindPC != 3 {
 		t.Fatalf("descriptor = %+v", descriptor)
 	}
 }

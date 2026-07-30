@@ -31,7 +31,7 @@ type frameStorage struct {
 }
 
 func (s *frameStorage) allocate(
-	size, align uintptr, allocate func(uintptr) unsafe.Pointer,
+	size, align uintptr, allocate Allocator,
 ) unsafe.Pointer {
 	if size == 0 || align == 0 || align&(align-1) != 0 || allocate == nil {
 		return nil
@@ -99,21 +99,36 @@ func allocateFromBlock(block *frameBlock, size, align uintptr) (unsafe.Pointer, 
 	return unsafe.Pointer(frame), true
 }
 
-func (s *frameStorage) release(
-	frame unsafe.Pointer, size uintptr, release func(unsafe.Pointer),
+func (s *frameStorage) releaseFrame(
+	frame unsafe.Pointer, size uintptr, release Releaser,
 ) {
-	block := s.current
-	if block == nil || frame == nil || size == 0 {
+	if s.current == nil || frame == nil || size == 0 {
 		panic("wasmresume: invalid frame release")
 	}
 	address := uintptr(frame)
 	end, ok := addUintptr(address, size)
-	if !ok || address < block.begin || end != block.stackPointer {
-		panic("wasmresume: frames must be released in LIFO order")
+	if !ok {
+		panic("wasmresume: invalid frame release")
+	}
+
+	block := s.current
+	for block != nil && (address < block.begin || end > block.stackPointer) {
+		block = block.prev
+	}
+	if block == nil {
+		panic("wasmresume: frame is not owned by this context")
 	}
 	previous := *(*uintptr)(unsafe.Pointer(address - unsafe.Sizeof(uintptr(0))))
 	if previous < block.begin || previous >= address {
 		panic("wasmresume: invalid frame allocation header")
+	}
+	if block != s.current && release == nil {
+		panic("wasmresume: missing frame block reclaimer")
+	}
+	for s.current != block {
+		current := s.current
+		s.current = current.prev
+		release(unsafe.Pointer(current))
 	}
 	block.stackPointer = previous
 	if previous == block.begin && block.prev != nil {
@@ -125,7 +140,7 @@ func (s *frameStorage) release(
 	}
 }
 
-func (s *frameStorage) close(release func(unsafe.Pointer)) {
+func (s *frameStorage) close(release Releaser) {
 	if s.current != nil && release == nil {
 		panic("wasmresume: missing frame block reclaimer")
 	}

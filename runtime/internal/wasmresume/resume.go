@@ -47,12 +47,24 @@ const (
 //llgo:type C
 type Resume func(*Context, *Frame) Action
 
+// Allocator allocates one GC-scanned root block.
+//
+//llgo:type C
+type Allocator func(uintptr) unsafe.Pointer
+
+// Releaser releases one block previously returned by Allocator.
+//
+//llgo:type C
+type Releaser func(unsafe.Pointer)
+
 // Descriptor contains immutable state shared by every invocation of a
 // generated function.
 type Descriptor struct {
-	Resume     Resume
-	FrameSize  uintptr
-	FrameAlign uintptr
+	Resume       Resume
+	FrameSize    uintptr
+	FrameAlign   uintptr
+	UnwindOffset uintptr
+	UnwindPC     uint32
 }
 
 // Frame is the common prefix of every generated function frame. Generated
@@ -70,23 +82,64 @@ type Context struct {
 	storage  frameStorage
 }
 
+// Start installs the root frame of a new logical goroutine.
+func (c *Context) Start(frame *Frame) {
+	if frame == nil || frame.Parent != nil || frame.Descriptor == nil || c.top != nil {
+		panic("wasmresume: invalid root frame")
+	}
+	c.returned = nil
+	c.top = frame
+}
+
 // AllocateFrame allocates stable, root-scanned storage for a generated frame.
 func (c *Context) AllocateFrame(
-	size, align uintptr, allocate func(uintptr) unsafe.Pointer,
+	size, align uintptr, allocate Allocator,
 ) unsafe.Pointer {
 	return c.storage.allocate(size, align, allocate)
 }
 
 // ReleaseFrame reclaims the most recently completed generated frame.
-func (c *Context) ReleaseFrame(frame *Frame, release func(unsafe.Pointer)) {
+func (c *Context) ReleaseFrame(frame *Frame, release Releaser) {
 	if frame == nil || frame.Descriptor == nil {
 		panic("wasmresume: invalid completed frame")
 	}
-	c.storage.release(unsafe.Pointer(frame), frame.Descriptor.FrameSize, release)
+	c.storage.releaseFrame(unsafe.Pointer(frame), frame.Descriptor.FrameSize, release)
+}
+
+// Unwind discards frames above the defer owner and redirects that owner to its
+// generated panic/defer state.
+func (c *Context) Unwind(deferFrame unsafe.Pointer, release Releaser) bool {
+	if deferFrame == nil {
+		return false
+	}
+	var owner *Frame
+	for frame := c.top; frame != nil; frame = frame.Parent {
+		descriptor := frame.Descriptor
+		if descriptor == nil || descriptor.UnwindOffset == 0 ||
+			descriptor.UnwindPC == 0 {
+			continue
+		}
+		slot := (*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(frame), descriptor.UnwindOffset))
+		if *slot == deferFrame {
+			owner = frame
+			break
+		}
+	}
+	if owner == nil {
+		return false
+	}
+	for c.top != owner {
+		frame := c.top
+		c.top = frame.Parent
+		c.storage.releaseFrame(unsafe.Pointer(frame), frame.Descriptor.FrameSize, release)
+	}
+	c.returned = nil
+	owner.PC = owner.Descriptor.UnwindPC
+	return true
 }
 
 // Close releases every frame storage segment owned by the context.
-func (c *Context) Close(release func(unsafe.Pointer)) {
+func (c *Context) Close(release Releaser) {
 	c.storage.close(release)
 	c.top = nil
 	c.returned = nil
