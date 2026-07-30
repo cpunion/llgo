@@ -3705,15 +3705,13 @@ func validateCoroPhysicalConsumersCapabilities(
 						}
 						if closure, exactClosure := instr.(*ssa.MakeClosure); exactClosure && closure.Fn == target &&
 							childAwait && function.Plan.Emission == coro.EmitCoroutine && len(target.FreeVars) != 0 &&
-							targetPlan.Primary == coro.PrimaryCoroutine && targetPlan.FuncRep == coro.DirectCoro {
-							value, exactValue := plan.ValuePlan(closure)
-							if exactValue && len(value.Funcs) == 1 && len(value.Funcs[0].Path) == 0 &&
-								value.Funcs[0].Rep == coro.DirectCoro && !value.Funcs[0].MayBeNil &&
-								len(value.Funcs[0].Targets) == 1 && value.Funcs[0].Targets[0] == targetPlan.ID {
-								// compileValue retags the physical (g,out,ctx,args)
-								// entry solely as a canonical (ctx,args) closure carrier;
-								// the exact static await consumes its env word and never
-								// calls through that temporary code word.
+							targetPlan.Primary == coro.PrimaryCoroutine {
+							if err := validateCoroCapturedClosureProducer(plan, closure, targetPlan); err == nil {
+								// DirectCoro producers retag the physical
+								// (g,out,ctx,args) entry as a (ctx,args) carrier.
+								// Escaping producers instead publish a Dispatch
+								// descriptor. Exact static await/defer sites consume
+								// only the common environment word and frozen target.
 								continue
 							}
 						}

@@ -60,6 +60,24 @@ func Root(value uint32) {
 }
 `
 
+const coroEscapingCapturedStaticCleanupIRFixture = `package foo
+var Sink uint32
+
+func Observe(callback func(uint32)) {
+	if callback == nil {
+		Sink++
+	}
+}
+
+func Root(value uint32) {
+	cleanup := func(add uint32) { Sink = value + add }
+	if value != 0 {
+		Observe(cleanup)
+	}
+	defer cleanup(7)
+}
+`
+
 const coroDynamicCleanupIRFixture = `package foo
 var Sink uint32
 
@@ -251,6 +269,78 @@ func TestCoroCapturedStaticCleanupIRNativeAndWasm32(t *testing.T) {
 			resume := module.NamedFunction("foo.Root$coro.resume")
 			if resume.IsNil() {
 				t.Fatalf("CoroSplit did not create captured cleanup resume entry:\n%s", module.String())
+			}
+			assertCoroCapturedCleanupCall(t, resume, target.String(), false)
+		})
+	}
+}
+
+func TestCoroEscapingCapturedStaticCleanupRetainsDirectDeferIRNativeAndWasm32(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg, plan, root, closure, target := compileCoroCapturedStaticCleanupFixtureSource(
+				t, test.target, coroEscapingCapturedStaticCleanupIRFixture,
+			)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			targetPlan, targetOK := plan.FunctionPlan(target)
+			valuePlan, valueOK := plan.ValuePlan(closure)
+			var deferred *ssa.Defer
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Defer)
+					if ok && candidate.Common().Value == closure {
+						deferred = candidate
+						break
+					}
+				}
+			}
+			callPlan, callOK := plan.CallPlan(deferred)
+			if !targetOK || targetPlan.Emission != coro.EmitCoroutine ||
+				targetPlan.FuncRep != coro.Dispatch {
+				t.Fatalf("escaping cleanup target plan = %+v, present=%t", targetPlan, targetOK)
+			}
+			if !valueOK || len(valuePlan.Funcs) != 1 ||
+				valuePlan.Funcs[0].Rep != coro.Dispatch ||
+				valuePlan.Funcs[0].Transport != coro.ManagedTransport {
+				t.Fatalf("escaping cleanup value plan = %+v, present=%t", valuePlan, valueOK)
+			}
+			if deferred == nil || !callOK || callPlan.Rep != coro.DirectCoro ||
+				callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 ||
+				callPlan.Targets[0] != targetPlan.ID {
+				t.Fatalf("escaping cleanup defer call plan = %+v, present=%t", callPlan, callOK)
+			}
+			cleanup, err := prepareCoroStaticCleanupPlan(root, plan, nil, "", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cleanup == nil || len(cleanup.sites) != 1 ||
+				cleanup.sites[0].closure != closure ||
+				cleanup.sites[0].kind != coroStaticCleanupCoroutine {
+				t.Fatalf("escaping captured cleanup plan = %+v", cleanup)
+			}
+			if !strings.Contains(module.String(), coroPlainDispatchDescriptorPrefix) {
+				t.Fatalf("escaping captured cleanup did not publish its descriptor:\n%s", module.String())
+			}
+			assertCoroCapturedCleanupCall(
+				t, requireCoroPhysicalFunction(t, module, "foo.Root"), target.String(), true,
+			)
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify escaping captured cleanup before CoroSplit: %v\n%s", err, module.String())
+			}
+			runCoroABITestPipeline(t, prog, module)
+			resume := module.NamedFunction("foo.Root$coro.resume")
+			if resume.IsNil() {
+				t.Fatalf("CoroSplit did not create escaping cleanup resume entry:\n%s", module.String())
 			}
 			assertCoroCapturedCleanupCall(t, resume, target.String(), false)
 		})
@@ -783,6 +873,16 @@ func compileCoroCapturedStaticCleanupFixture(
 	t *testing.T,
 	targetMachine *llssa.Target,
 ) (llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.MakeClosure, *ssa.Function) {
+	return compileCoroCapturedStaticCleanupFixtureSource(
+		t, targetMachine, coroCapturedStaticCleanupIRFixture,
+	)
+}
+
+func compileCoroCapturedStaticCleanupFixtureSource(
+	t *testing.T,
+	targetMachine *llssa.Target,
+	source string,
+) (llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.MakeClosure, *ssa.Function) {
 	t.Helper()
 	testProgram := newEmissionTestProgram()
 	testProgram.ssa.CreatePackage(types.Unsafe, nil, nil, true)
@@ -797,7 +897,7 @@ func AllocZ(size uintptr) unsafe.Pointer {
 	return nil
 }
 `)
-	fooPackage := testProgram.addPackage(t, "foo", coroCapturedStaticCleanupIRFixture)
+	fooPackage := testProgram.addPackage(t, "foo", source)
 	testProgram.ssa.Build()
 	ssaPkg := fooPackage.ssa
 	files := []*ast.File{fooPackage.file}
@@ -1054,7 +1154,7 @@ func Root() { defer cleanup() }
 func Root(value uint32) { defer func() { _ = value }() }
 `,
 			explicit: true,
-			want:     "direct coroutine",
+			want:     "unsupported value representation direct-plain",
 		},
 		{
 			name: "dynamic plain closure without no-unwind proof",

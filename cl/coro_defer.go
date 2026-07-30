@@ -1032,11 +1032,8 @@ func resolveCoroStaticCleanupTarget(
 	// the source-only variadic marker for the eventual plain/coroutine call.
 	// validateCoroStaticCleanupOperands below freezes the exact packed shape.
 	if closure != nil {
-		valuePlan, exact := whole.ValuePlan(closure)
-		if !exact || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 ||
-			valuePlan.Funcs[0].Rep != coro.DirectCoro || valuePlan.Funcs[0].MayBeNil ||
-			len(valuePlan.Funcs[0].Targets) != 1 || valuePlan.Funcs[0].Targets[0] != targetPlan.ID {
-			return nil, coro.FunctionPlan{}, 0, fmt.Errorf("captured coroutine defer has no exact direct coroutine closure plan")
+		if err := validateCoroCapturedClosureProducer(whole, closure, targetPlan); err != nil {
+			return nil, coro.FunctionPlan{}, 0, fmt.Errorf("captured coroutine defer: %w", err)
 		}
 		if callPlan.Rep != coro.DirectCoro {
 			return nil, coro.FunctionPlan{}, 0, fmt.Errorf("captured MakeClosure defer requires direct coroutine representation, got %s", callPlan.Rep)
@@ -1075,6 +1072,64 @@ func resolveCoroStaticCleanupTarget(
 	default:
 		return nil, coro.FunctionPlan{}, 0, fmt.Errorf("defer target uses unsupported representation %s", callPlan.Rep)
 	}
+}
+
+// validateCoroCapturedClosureProducer separates the representation of one
+// closure value from the representation selected at an exact call site. A
+// MakeClosure that also escapes through storage must publish the canonical
+// Dispatch descriptor, while a defer whose operand is that exact producer
+// still has a closed DirectCoro CallPlan. Both physical closure carriers are
+// two words and retain the same environment in field one; the static
+// await/cleanup lowerer consumes only that environment and the frozen target,
+// never the producer's code word.
+func validateCoroCapturedClosureProducer(
+	whole *coro.SSAPlan,
+	closure *ssa.MakeClosure,
+	targetPlan coro.FunctionPlan,
+) error {
+	if whole == nil || closure == nil {
+		return fmt.Errorf("requires an exact MakeClosure producer")
+	}
+	target, exactTarget := closure.Fn.(*ssa.Function)
+	if !exactTarget || target == nil || len(target.FreeVars) == 0 ||
+		len(closure.Bindings) != len(target.FreeVars) {
+		return fmt.Errorf("requires its exact captured target and environment")
+	}
+	plannedTarget, planned := whole.FunctionPlan(target)
+	if !planned || plannedTarget.ID != targetPlan.ID {
+		return fmt.Errorf("producer target has no matching canonical function plan")
+	}
+	for index, binding := range closure.Bindings {
+		if binding == nil || target.FreeVars[index] == nil ||
+			!types.Identical(binding.Type(), target.FreeVars[index].Type()) {
+			return fmt.Errorf("environment binding %d does not match its target free variable", index)
+		}
+	}
+	valuePlan, exactValue := whole.ValuePlan(closure)
+	if !exactValue || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 {
+		return fmt.Errorf("has no exact scalar callable value plan")
+	}
+	leaf := valuePlan.Funcs[0]
+	if leaf.Transport != coro.ManagedTransport {
+		return fmt.Errorf("uses non-managed transport %s", leaf.Transport)
+	}
+	if leaf.Rep != coro.DirectCoro && leaf.Rep != coro.Dispatch {
+		return fmt.Errorf("uses unsupported value representation %s", leaf.Rep)
+	}
+	if leaf.Rep == coro.Dispatch && targetPlan.FuncRep != coro.Dispatch {
+		return fmt.Errorf("descriptor producer target uses non-dispatch representation %s", targetPlan.FuncRep)
+	}
+	targetPresent := false
+	for _, candidate := range leaf.Targets {
+		if candidate == targetPlan.ID {
+			targetPresent = true
+			break
+		}
+	}
+	if !targetPresent {
+		return fmt.Errorf("exact target %q is absent from its callable value plan", targetPlan.ID)
+	}
+	return nil
 }
 
 func validateCoroStaticCleanupOperands(common *ssa.CallCommon, target *ssa.Function) error {
