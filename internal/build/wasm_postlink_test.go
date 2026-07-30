@@ -33,7 +33,10 @@ func wasmPostLinkTestContext() *context {
 	return &context{
 		buildConf: &Config{LinkOptions: LinkOptions{DWARF: DWARFOmit}},
 		crossCompile: crosscompile.Export{
-			WasmPostLink: crosscompile.WasmPostLink{Asyncify: true},
+			WasmPostLink: crosscompile.WasmPostLink{
+				Asyncify:          true,
+				TranslateToExnref: true,
+			},
 		},
 	}
 }
@@ -51,7 +54,10 @@ func writeWasmOptTestTool(t *testing.T, dir, script string) string {
 }
 
 func TestWasmPostLinkArgs(t *testing.T) {
-	target := &crosscompile.Export{WasmPostLink: crosscompile.WasmPostLink{Asyncify: true}}
+	target := &crosscompile.Export{WasmPostLink: crosscompile.WasmPostLink{
+		Asyncify:          true,
+		TranslateToExnref: true,
+	}}
 	if got, want := wasmPostLinkArgs(target, "in.wasm", "out.wasm", false),
 		[]string{"--asyncify", "--translate-to-exnref", "in.wasm", "-o", "out.wasm"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("wasmPostLinkArgs() = %v, want %v", got, want)
@@ -62,6 +68,11 @@ func TestWasmPostLinkArgs(t *testing.T) {
 	}
 	if got := wasmPostLinkArgs(&crosscompile.Export{}, "in", "out", false); got != nil {
 		t.Fatalf("wasmPostLinkArgs(disabled) = %v, want nil", got)
+	}
+	target.WasmPostLink.Asyncify = false
+	if got, want := wasmPostLinkArgs(target, "in.wasm", "out.wasm", false),
+		[]string{"--translate-to-exnref", "in.wasm", "-o", "out.wasm"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("wasmPostLinkArgs(translate only) = %v, want %v", got, want)
 	}
 }
 
@@ -86,6 +97,11 @@ func TestNeedsWasmPostLink(t *testing.T) {
 	}
 	if needsWasmPostLink(&Config{BuildMode: BuildModeExe}, nil) {
 		t.Fatal("needsWasmPostLink() enabled for a nil target")
+	}
+	target.WasmPostLink.Asyncify = false
+	target.WasmPostLink.TranslateToExnref = true
+	if !needsWasmPostLink(&Config{BuildMode: BuildModeExe}, target) {
+		t.Fatal("needsWasmPostLink() disabled for exnref translation")
 	}
 }
 
@@ -196,7 +212,7 @@ func TestPostLinkWasmReportsToolFailure(t *testing.T) {
 
 	ctx := wasmPostLinkTestContext()
 	err := postLinkWasm(ctx, input, output, false)
-	if err == nil || !strings.Contains(err.Error(), "wasm-opt Asyncify failed") {
+	if err == nil || !strings.Contains(err.Error(), "wasm-opt post-link failed") {
 		t.Fatalf("postLinkWasm() error = %v", err)
 	}
 	if data, err := os.ReadFile(output); err != nil || string(data) != "old" {
@@ -223,7 +239,7 @@ func TestPostLinkWasmReportsPublishFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("postLinkWasm succeeded when the final output was a directory")
 	}
-	if strings.Contains(err.Error(), "wasm-opt Asyncify failed") {
+	if strings.Contains(err.Error(), "wasm-opt post-link failed") {
 		t.Fatalf("postLinkWasm failed before publishing output: %v", err)
 	}
 }

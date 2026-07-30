@@ -29,17 +29,25 @@ import (
 
 func needsWasmPostLink(conf *Config, target *crosscompile.Export) bool {
 	return conf != nil && conf.BuildMode == BuildModeExe &&
-		target != nil && target.WasmPostLink.Asyncify
+		target != nil &&
+		(target.WasmPostLink.Asyncify || target.WasmPostLink.TranslateToExnref)
 }
 
 func wasmPostLinkArgs(target *crosscompile.Export, input, output string, debug bool) []string {
-	if target == nil || !target.WasmPostLink.Asyncify {
+	if target == nil ||
+		(!target.WasmPostLink.Asyncify && !target.WasmPostLink.TranslateToExnref) {
 		return nil
 	}
-	// LLVM 19 lowers Wasm SjLj through the legacy EH encoding. Asyncify
-	// understands that form; translate it only after instrumentation so the
-	// final module uses the standardized exnref-based EH instructions.
-	args := []string{"--asyncify", "--translate-to-exnref"}
+	var args []string
+	if target.WasmPostLink.Asyncify {
+		args = append(args, "--asyncify")
+	}
+	// LLVM 19 lowers Wasm SjLj through the legacy EH encoding. When Asyncify
+	// is enabled, translate only after instrumentation so the final module
+	// uses the standardized exnref-based EH instructions.
+	if target.WasmPostLink.TranslateToExnref {
+		args = append(args, "--translate-to-exnref")
+	}
 	if debug {
 		args = append(args, "-g")
 	}
@@ -89,7 +97,7 @@ func postLinkWasm(ctx *context, input, output string, verbose bool) error {
 	}
 	resolved, err := exec.LookPath(wasmOpt)
 	if err != nil {
-		return fmt.Errorf("WebAssembly Asyncify requires wasm-opt; install Binaryen or set WASMOPT: %w", err)
+		return fmt.Errorf("WebAssembly post-link requires wasm-opt; install Binaryen or set WASMOPT: %w", err)
 	}
 
 	tmpName, err := createClosedTemp(
@@ -114,7 +122,7 @@ func postLinkWasm(ctx *context, input, output string, verbose bool) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("wasm-opt Asyncify failed: %w", err)
+		return fmt.Errorf("wasm-opt post-link failed: %w", err)
 	}
 	if err := os.Rename(tmpName, output); err != nil {
 		return err

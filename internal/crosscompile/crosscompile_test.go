@@ -132,6 +132,9 @@ func TestUseCrossCompileSDK(t *testing.T) {
 						if !export.WasmPostLink.Asyncify {
 							t.Error("WASI target does not request Asyncify post-link processing")
 						}
+						if !export.WasmPostLink.TranslateToExnref {
+							t.Error("WASI target does not request standardized exception encoding")
+						}
 						if slices.Contains(export.LDFLAGS, "-Wl,--import-memory") {
 							t.Errorf("single-worker WASI imports host memory: %v", export.LDFLAGS)
 						}
