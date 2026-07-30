@@ -243,6 +243,7 @@ type aProgram struct {
 
 	enableFuncInfoMetadata bool
 	enableFuncInfoSites    bool
+	enableWasmResumeABI    bool
 	debugInfoOptimized     bool
 }
 

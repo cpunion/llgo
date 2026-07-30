@@ -1,0 +1,62 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package ssa
+
+import "github.com/xgo-dev/llvm"
+
+const (
+	wasmResumeFunctionAttr = "llgo.wasm.resume"
+	wasmResumeCallMetadata = "llgo.wasm.resume.call"
+)
+
+// EnableWasmResumeABI controls emission of the function and call inventory
+// consumed by the experimental WebAssembly resumable ABI lowering.
+func (p Program) EnableWasmResumeABI(enable bool) {
+	p.enableWasmResumeABI = enable
+}
+
+// WasmResumeABIEnabled reports whether resumable ABI lowering is enabled for a
+// WebAssembly target.
+func (p Program) WasmResumeABIEnabled() bool {
+	return p.enableWasmResumeABI && p.target != nil && p.target.GOARCH == "wasm"
+}
+
+func (p Program) markWasmResumeFunction(fn llvm.Value) {
+	if !p.WasmResumeABIEnabled() {
+		return
+	}
+	fn.AddFunctionAttr(p.ctx.CreateStringAttribute(wasmResumeFunctionAttr, "1"))
+}
+
+func (b Builder) markWasmResumeCall(call llvm.Value, background Background) {
+	if background != InGo || !b.Prog.WasmResumeABIEnabled() {
+		return
+	}
+	kind := b.Prog.ctx.MDKindID(wasmResumeCallMetadata)
+	version := llvm.ConstInt(b.Prog.Int32().ll, 1, false).ConstantAsMetadata()
+	call.SetMetadata(kind, b.Prog.ctx.MDNode([]llvm.Metadata{version}))
+}
+
+func (b Builder) directCallBackground(fn Expr) Background {
+	if fn.kind != vkFuncDecl {
+		return inUnknown
+	}
+	if decl := b.Pkg.FuncOf(fn.impl.Name()); decl != nil {
+		return decl.background
+	}
+	return inUnknown
+}
