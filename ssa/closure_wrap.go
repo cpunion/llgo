@@ -70,14 +70,21 @@ func closureWrapReturn(b Builder, sig *types.Signature, ret Expr) {
 // closureWrapDecl wraps a function declaration that lacks __llgo_ctx.
 // It directly calls the target symbol and ignores the ctx parameter.
 func (p Package) closureWrapDecl(fn Expr, sig *types.Signature) Function {
+	return p.closureWrapDeclFor(fn, sig, p.Prog.WasmResumeABIEnabled())
+}
+
+func (p Package) closureWrapDeclFor(fn Expr, sig *types.Signature, resumable bool) Function {
 	name := closureStub + fn.impl.Name()
+	if p.Prog.WasmResumeABIEnabled() && !resumable {
+		name = closureStub + "sync." + fn.impl.Name()
+	}
 	if wrap := p.FuncOf(name); wrap != nil {
 		return wrap
 	}
 	ctx := types.NewParam(token.NoPos, nil, closureCtx, types.Typ[types.UnsafePointer])
 	sigCtx := FuncAddCtx(ctx, sig)
 	background := InC
-	if p.Prog.WasmResumeABIEnabled() {
+	if resumable {
 		background = InGo
 	}
 	wrap := p.NewFunc(name, sigCtx, background)

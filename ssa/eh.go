@@ -202,14 +202,14 @@ func (b Builder) getDefer(kind DoAction) *aDefer {
 
 		blks := self.MakeBlocks(2)
 		procBlk, rethrowBlk := blks[0], blks[1]
-		deferState, link, retval := b.initDeferState(procBlk, rethrowBlk)
-		czero := b.Prog.IntVal(0, b.Prog.CInt())
 		if kind != DeferAlways {
 			panicBlk = self.MakeBlock()
 		} else {
 			blks = self.MakeBlocks(2)
 			next, panicBlk = blks[0], blks[1]
 		}
+		deferState, link, retval := b.initDeferState(procBlk, rethrowBlk, panicBlk)
+		czero := b.Prog.IntVal(0, b.Prog.CInt())
 		b.If(b.BinOp(token.EQL, retval, czero), next, panicBlk)
 		deferState.panicBlk = panicBlk
 
@@ -244,7 +244,7 @@ func (b Builder) getDeferInCurrentBlock() *aDefer {
 	logicalBlk := b.blk
 	blks := self.MakeBlocks(4)
 	procBlk, rethrowBlk, next, panicBlk := blks[0], blks[1], blks[2], blks[3]
-	deferState, link, retval := b.initDeferState(procBlk, rethrowBlk)
+	deferState, link, retval := b.initDeferState(procBlk, rethrowBlk, panicBlk)
 	czero := b.Prog.IntVal(0, b.Prog.CInt())
 	b.If(b.BinOp(token.EQL, retval, czero), next, panicBlk)
 	deferState.panicBlk = panicBlk
@@ -261,15 +261,21 @@ func (b Builder) getDeferInCurrentBlock() *aDefer {
 	return self.defer_
 }
 
-func (b Builder) initDeferState(procBlk, rethrowBlk BasicBlock) (*aDefer, Expr, Expr) {
+func (b Builder) initDeferState(
+	procBlk, rethrowBlk, panicBlk BasicBlock,
+) (*aDefer, Expr, Expr) {
 	self := b.Func
 	prog := b.Prog
 	zero := prog.Val(uintptr(0))
 	link := b.Call(b.Pkg.rtFunc("GetThreadDefer"))
-	jb := b.AllocaSigjmpBuf()
+	jb := prog.Nil(prog.VoidPtr())
+	if !b.wasmResumeFunctionEnabled() {
+		jb = b.AllocaSigjmpBuf()
+	}
 	ptr := b.aggregateAllocU(prog.Defer(), jb.impl, zero.impl, link.impl, procBlk.Addr().impl)
 	deferData := Expr{ptr, prog.DeferPtr()}
 	b.Call(b.Pkg.rtFunc("SetThreadDefer"), deferData)
+	b.registerWasmResumeUnwind(deferData, panicBlk)
 	bitsPtr := b.FieldAddr(deferData, deferBits)
 	rethPtr := b.FieldAddr(deferData, deferRethrow)
 	rundPtr := b.FieldAddr(deferData, deferRunDefers)
@@ -279,7 +285,10 @@ func (b Builder) initDeferState(procBlk, rethrowBlk BasicBlock) (*aDefer, Expr, 
 	b.Store(argsPtr, prog.Nil(prog.VoidPtr()))
 
 	czero := prog.IntVal(0, prog.CInt())
-	retval := b.Sigsetjmp(jb, czero)
+	retval := czero
+	if !b.wasmResumeFunctionEnabled() {
+		retval = b.Sigsetjmp(jb, czero)
+	}
 
 	self.defer_ = &aDefer{
 		data:      deferData,
@@ -619,6 +628,7 @@ func (p Function) endDefer(b Builder) {
 	}
 	link := b.getField(b.Load(self.data), deferLink)
 	b.Call(b.Pkg.rtFunc("SetThreadDefer"), link)
+	b.clearWasmResumeUnwind()
 	b.jumpRunDefersTarget(rundPtr, nexts)
 
 	b.SetBlockEx(panicBlk, AtEnd, false) // panicBlk: exec runDefers and rethrow
