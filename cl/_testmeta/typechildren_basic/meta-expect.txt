@@ -30,9 +30,9 @@ __llgo_coro_root_factory_descriptor_v1.6b2931c67867c742cf7ff02b52ee0401:
     __llgo_coro_root_factory_v1.6b2931c67867c742cf7ff02b52ee0401
 __llgo_coro_root_factory_v1.6b2931c67867c742cf7ff02b52ee0401:
     github.com/goplus/llgo/cl/_testmeta/typechildren_basic.main$coro
-__llgo_coro_root_package_v1.f6632fceaf1f713854c4929570d8e85f:
-    __llgo_coro_root_package_v1.f6632fceaf1f713854c4929570d8e85f.entries
-__llgo_coro_root_package_v1.f6632fceaf1f713854c4929570d8e85f.entries:
+__llgo_coro_root_package_v1.0de3bbc4ff38c306c9ceee03c55b25cc:
+    __llgo_coro_root_package_v1.0de3bbc4ff38c306c9ceee03c55b25cc.entries
+__llgo_coro_root_package_v1.0de3bbc4ff38c306c9ceee03c55b25cc.entries:
     __llgo_coro_root_factory_descriptor_v1.6b2931c67867c742cf7ff02b52ee0401
 _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner:
     *_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner
@@ -74,9 +74,11 @@ github.com/goplus/llgo/cl/_testmeta/typechildren_basic.main$coro:
     llvm.coro.size.i64
     llvm.coro.suspend
     llvm.trap
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.e258dc4edc0e0eabcd6c10bb9a56bced
 llvm.used:
     __llgo_coro_root_factory_descriptor_v1.6b2931c67867c742cf7ff02b52ee0401
-    __llgo_coro_root_package_v1.f6632fceaf1f713854c4929570d8e85f
+    __llgo_coro_root_package_v1.0de3bbc4ff38c306c9ceee03c55b25cc
 
 [UseIface]
 github.com/goplus/llgo/cl/_testmeta/typechildren_basic.main$coro:

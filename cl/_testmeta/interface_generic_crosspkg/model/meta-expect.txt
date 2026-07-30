@@ -52,4 +52,6 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.UseStringBo
     llvm.trap
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init$guard
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.0311309216aea88afe924f1edcd88e2e
 

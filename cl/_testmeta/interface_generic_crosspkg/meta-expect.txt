@@ -66,13 +66,19 @@ __llgo_coro_func_descriptor_v1.method.4a794b448ada5e7e.3c1baa11c05cc96de3b33ee3f
     __llgo_coro_func_coro_v1.method.4a794b448ada5e7e.3c1baa11c05cc96de3b33ee3f4f5036f
 __llgo_coro_method_raw_trap_v1.20cb3bf8c1ddb3f52381e9cad2ffdbfa:
     llvm.trap
+__llgo_coro_method_raw_trap_v1.a004b111b9a7caef2ec1e2c43c7ddf88:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.a551e081876916393b495942515ada43:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.edebc1e42fd6c8885c32b3db61eb66f7:
+    llvm.trap
 __llgo_coro_root_factory_descriptor_v1.f2373c09ff129b9dc44482fcd34a5583:
     __llgo_coro_root_factory_v1.f2373c09ff129b9dc44482fcd34a5583
 __llgo_coro_root_factory_v1.f2373c09ff129b9dc44482fcd34a5583:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg.main$coro
-__llgo_coro_root_package_v1.720f762cc220565760d2c3a925a803a5:
-    __llgo_coro_root_package_v1.720f762cc220565760d2c3a925a803a5.entries
-__llgo_coro_root_package_v1.720f762cc220565760d2c3a925a803a5.entries:
+__llgo_coro_root_package_v1.157a731ddf523778844e39653ab73093:
+    __llgo_coro_root_package_v1.157a731ddf523778844e39653ab73093.entries
+__llgo_coro_root_package_v1.157a731ddf523778844e39653ab73093.entries:
     __llgo_coro_root_factory_descriptor_v1.f2373c09ff129b9dc44482fcd34a5583
 _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
     *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
@@ -217,9 +223,11 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.struct$XNpH
     _llgo_string
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.struct$lOhriNu2BrWBR2Mh8k-KggMYlAw0Wx-2ftE2_gNyubg$fields:
     _llgo_int
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.a766bacafeac08eb4945dff71fc35bc3
 llvm.used:
     __llgo_coro_root_factory_descriptor_v1.f2373c09ff129b9dc44482fcd34a5583
-    __llgo_coro_root_package_v1.720f762cc220565760d2c3a925a803a5
+    __llgo_coro_root_package_v1.157a731ddf523778844e39653ab73093
 
 [UseIface]
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg.main$coro:
