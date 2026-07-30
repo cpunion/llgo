@@ -85,6 +85,14 @@ func TestLowerExecutesRequiredWasmProfiles(t *testing.T) {
 			}
 			output, err := test.run(t, wasmPath)
 			if err != nil {
+				if test.name == "J64" &&
+					strings.Contains(string(output), "invalid table elements limits flags") {
+					version, _ := exec.Command(node, "--version").CombinedOutput()
+					t.Skipf(
+						"node %s does not support LLVM wasm64 table limits",
+						strings.TrimSpace(string(version)),
+					)
+				}
 				t.Fatalf("execute %s: %v\n%s", test.name, err, output)
 			}
 			fields := strings.Fields(string(output))
