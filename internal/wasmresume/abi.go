@@ -28,6 +28,7 @@ const (
 	descriptorPrefix  = "__llgo_wasm_resume_desc."
 	actionContinue    = 0
 	actionReturn      = 1
+	actionSuspend     = 2
 )
 
 // StartSymbol returns the resumable start entry for a Go function symbol.

@@ -34,6 +34,17 @@ type loweredState struct {
 	descriptor llvm.Value
 }
 
+// Lower replaces marked Go functions and calls with the experimental
+// WebAssembly resumable ABI.
+func Lower(mod llvm.Module, targetData llvm.TargetData) error {
+	triple := mod.Target()
+	if !strings.HasPrefix(triple, "wasm32-") && !strings.HasPrefix(triple, "wasm64-") {
+		return fmt.Errorf("wasmresume: target %q is not WebAssembly", triple)
+	}
+	_, err := lowerPrototype(mod, targetData)
+	return err
+}
+
 func lowerPrototype(mod llvm.Module, targetData llvm.TargetData) ([]loweredState, error) {
 	layouts, err := layoutFrames(mod, targetData)
 	if err != nil {
@@ -160,6 +171,10 @@ func lowerStateMachine(
 			return fmt.Errorf("%s: call %d: %w", fn.Name(), site.id, err)
 		}
 		continuations[site.id] = continuation
+		if site.call.CalledValue().Name() == SuspendSymbol {
+			lowerSuspendCall(ctx, layout, lowered.entry, site)
+			continue
+		}
 		if err := lowerResumeCall(
 			mod, abi, layout, fields, lowered.entry, site, continuation,
 		); err != nil {
@@ -192,6 +207,28 @@ func lowerStateMachine(
 		)
 	}
 	return nil
+}
+
+func lowerSuspendCall(
+	ctx llvm.Context,
+	parentLayout frameLayout,
+	entry llvm.Value,
+	site callSite,
+) {
+	call := site.call
+	callBlock := call.InstructionParent()
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointBefore(call)
+	builder.CreateStore(
+		llvm.ConstInt(ctx.Int32Type(), uint64(site.id), false),
+		builder.CreateStructGEP(parentLayout.typ, entry.Param(1), 2, ""),
+	)
+	call.EraseFromParentAsInstruction()
+	terminator := callBlock.LastInstruction()
+	builder.SetInsertPointBefore(terminator)
+	builder.CreateRet(llvm.ConstInt(ctx.Int8Type(), actionSuspend, false))
+	terminator.EraseFromParentAsInstruction()
 }
 
 func lowerResumeCall(
