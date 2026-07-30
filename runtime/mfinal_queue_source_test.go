@@ -97,6 +97,31 @@ func TestMfinalRegistrationPublishesPreviousChainAtomically(t *testing.T) {
 	}
 }
 
+func TestMfinalManagedCallUsesCanonicalDescriptor(t *testing.T) {
+	file := parseMfinalQueueSource(t)
+	call := mfinalSourceFunc(t, file, "callFinalizer")
+	if mfinalCallCount(call.Body, "ffi.CallLLGo") != 1 {
+		t.Fatal("managed finalizer call does not use exactly one canonical descriptor bridge")
+	}
+	if mfinalCallCount(call.Body, "finalizerFuncType") != 1 {
+		t.Fatal("managed finalizer call does not preserve the exact runtime function type")
+	}
+
+	source, err := os.ReadFile(mfinalQueueSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(source), "func callFinalizer(")
+	end := strings.Index(string(source)[start:], "\n}\n")
+	if start < 0 || end < 0 {
+		t.Fatal("cannot isolate callFinalizer source")
+	}
+	body := string(source)[start : start+end]
+	if strings.Contains(body, "*(*func(") {
+		t.Fatal("managed finalizer call still retypes a descriptor-backed function value")
+	}
+}
+
 func mfinalCallCount(node ast.Node, path string) int {
 	count := 0
 	ast.Inspect(node, func(node ast.Node) bool {

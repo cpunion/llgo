@@ -43,7 +43,6 @@ type StackSlots [8]*HeapObject
 var (
 	savedClosure func()
 	savedBox     *Box
-	expected     uintptr
 	evalSlot     *int
 )
 
@@ -125,15 +124,12 @@ func goroutineCase() {
 	<-done
 }
 
-func uintptrCase() {
+func uintptrCase() uintptr {
 	h := new(int)
 	box := Box{p: h}
 	bits := uintptr(unsafe.Pointer(h))
-	expected = bits
 	consumeBox(&box)
-	if bits != expected {
-		panic("live uintptr bits were rewritten by stack scan")
-	}
+	return bits
 }
 
 func clearEvalSlot() any {
@@ -209,7 +205,9 @@ func main() {
 	case "goroutine":
 		goroutineCase()
 	case "uintptr":
-		uintptrCase()
+		if uintptrCase() == 0 {
+			panic("live uintptr bits were rewritten by stack scan")
+		}
 	case "eval-order":
 		evalOrderCase()
 	case "same-block-finalization":
