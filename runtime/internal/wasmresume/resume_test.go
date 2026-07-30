@@ -116,6 +116,15 @@ func TestContextRunEmpty(t *testing.T) {
 	}
 }
 
+func TestSuspendCurrentRequiresCompilerLowering(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("SuspendCurrent fallback did not panic")
+		}
+	}()
+	SuspendCurrent()
+}
+
 func TestContextPushInitializesHeader(t *testing.T) {
 	parent := Frame{}
 	child := Frame{Parent: &parent, Descriptor: &testMulDescriptor, PC: 9}

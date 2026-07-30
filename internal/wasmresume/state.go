@@ -270,7 +270,9 @@ func lowerResumeCall(
 		alignField := builder.CreateStructGEP(abi.descriptorType, descriptor, 2, "")
 		size := builder.CreateLoad(abi.uintptrType, sizeField, "child.size")
 		align := builder.CreateLoad(abi.uintptrType, alignField, "child.align")
-		child = builder.CreateCall(alloc.GlobalValueType(), alloc, []llvm.Value{size, align}, "child")
+		child = builder.CreateCall(
+			alloc.GlobalValueType(), alloc, []llvm.Value{entry.Param(0), size, align}, "child",
+		)
 		builder.CreateIntrinsic(ctx.VoidType(), llvm.LookupIntrinsicID("llvm.memset"), []llvm.Value{
 			child,
 			llvm.ConstInt(ctx.Int8Type(), 0, false),
@@ -310,7 +312,9 @@ func lowerResumeCall(
 		builder.CreateStore(result, parentFields[site.resultSlot])
 		replaceValueUsesWithLoads(ctx, call, parentFields[site.resultSlot], llvm.Value{})
 	}
-	builder.CreateCall(free.GlobalValueType(), free, []llvm.Value{returned}, "")
+	builder.CreateCall(
+		free.GlobalValueType(), free, []llvm.Value{entry.Param(0), returned}, "",
+	)
 
 	call.EraseFromParentAsInstruction()
 	terminator := callBlock.LastInstruction()
@@ -334,7 +338,7 @@ func declareFrameAllocator(mod llvm.Module, abi resumeABI) llvm.Value {
 	fn := mod.NamedFunction(frameAllocName)
 	if fn.IsNil() {
 		fn = llvm.AddFunction(mod, frameAllocName, llvm.FunctionType(
-			abi.ptr, []llvm.Type{abi.uintptrType, abi.uintptrType}, false,
+			abi.ptr, []llvm.Type{abi.ptr, abi.uintptrType, abi.uintptrType}, false,
 		))
 	}
 	return fn
@@ -344,7 +348,7 @@ func declareFrameFree(mod llvm.Module, abi resumeABI) llvm.Value {
 	fn := mod.NamedFunction(frameFreeName)
 	if fn.IsNil() {
 		fn = llvm.AddFunction(mod, frameFreeName, llvm.FunctionType(
-			abi.ctx.VoidType(), []llvm.Type{abi.ptr}, false,
+			abi.ctx.VoidType(), []llvm.Type{abi.ptr, abi.ptr}, false,
 		))
 	}
 	return fn
