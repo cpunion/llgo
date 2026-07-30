@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/goplus/llgo/internal/wasmresume"
+	"github.com/xgo-dev/llvm"
 )
 
 func TestWasmResumeABIInventoriesGoCalls(t *testing.T) {
@@ -189,6 +190,38 @@ func TestWasmResumeABIMethodMetadataUsesStartEntries(t *testing.T) {
 	} {
 		if !strings.Contains(ir, want) {
 			t.Fatalf("method metadata does not reference %s:\n%s", want, ir)
+		}
+	}
+}
+
+func TestWasmResumeABILowersSuspendCurrent(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	suspend := pkg.NewFunc(wasmresume.SuspendSymbol, NoArgsNoRet, InGo)
+	caller := pkg.NewFunc("caller", NoArgsNoRet, InGo)
+	b := caller.MakeBody(1)
+	b.Call(suspend.Expr)
+	b.Return()
+
+	if err := wasmresume.Lower(pkg.Module(), prog.TargetData()); err != nil {
+		t.Fatal(err)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify lowered suspend module: %v\n%s", err, pkg.String())
+	}
+	ir := pkg.String()
+	if strings.Contains(ir, "call void @"+wasmresume.SuspendSymbol) {
+		t.Fatalf("SuspendCurrent call remains after lowering:\n%s", ir)
+	}
+	for _, want := range []string{
+		"ret i8 2",
+		"i32 1, label %resume.1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("lowered suspend module is missing %q:\n%s", want, ir)
 		}
 	}
 }
