@@ -107,6 +107,14 @@ func TestLowerPrototypeExecutesDirectCallStateMachine(t *testing.T) {
 	if got := result.Int(true); got != 126 {
 		t.Fatalf("state machine result = %d, want 126", got)
 	}
+
+	arg := llvm.NewGenericValueFromInt(i32, 5, true)
+	defer arg.Dispose()
+	result = engine.RunFunction(caller, []llvm.GenericValue{arg})
+	defer result.Dispose()
+	if got := result.Int(true); got != 126 {
+		t.Fatalf("compatibility wrapper result = %d, want 126", got)
+	}
 }
 
 func TestLowerPrototypeBuildsDirectCallStateMachine(t *testing.T) {
@@ -356,7 +364,7 @@ func defineStateMachineHarness(
 	i8 := ctx.Int8Type()
 	i32 := ctx.Int32Type()
 
-	childStorageType := llvm.ArrayType(i8, 1024)
+	childStorageType := llvm.ArrayType(i8, 4096)
 	childStorage := llvm.AddGlobal(mod, childStorageType, "child.storage")
 	childStorage.SetInitializer(llvm.ConstNull(childStorageType))
 	childStorage.SetAlignment(16)
@@ -377,6 +385,11 @@ func defineStateMachineHarness(
 
 	free := mod.NamedFunction(frameFreeName)
 	block = ctx.AddBasicBlock(free, "entry")
+	builder.SetInsertPointAtEnd(block)
+	builder.CreateRetVoid()
+
+	close := mod.NamedFunction(frameCloseName)
+	block = ctx.AddBasicBlock(close, "entry")
 	builder.SetInsertPointAtEnd(block)
 	builder.CreateRetVoid()
 

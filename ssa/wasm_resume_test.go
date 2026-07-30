@@ -225,3 +225,59 @@ func TestWasmResumeABILowersSuspendCurrent(t *testing.T) {
 		}
 	}
 }
+
+func TestWasmResumeABIKeepsRuntimeBoundariesSynchronous(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	ordinary := pkg.NewFunc("ordinary", NoArgsNoRet, InGo)
+	ordinary.MakeBody(1).Return()
+
+	boundary := pkg.NewFunc(
+		"github.com/goplus/llgo/runtime/internal/wasmresume.Context.Run",
+		NoArgsNoRet,
+		InGo,
+	)
+	b := boundary.MakeBody(1)
+	b.Call(ordinary.Expr)
+	b.Return()
+
+	root := pkg.NewFunc("root", NoArgsNoRet, InC)
+	b = root.MakeBody(1)
+	b.Call(ordinary.Expr)
+	b.Return()
+
+	caller := pkg.NewFunc("caller", NoArgsNoRet, InGo)
+	b = caller.MakeBody(1)
+	b.Call(boundary.Expr)
+	b.Return()
+
+	for _, function := range []Function{boundary, root} {
+		for _, attr := range function.impl.GetFunctionAttributes() {
+			if attr.IsString() && attr.GetStringKind() == wasmresume.FunctionAttribute {
+				t.Fatalf("%s was marked resumable:\n%s", function.Name(), pkg.String())
+			}
+		}
+	}
+	var callerMarked bool
+	for _, attr := range caller.impl.GetFunctionAttributes() {
+		if attr.IsString() && attr.GetStringKind() == wasmresume.FunctionAttribute {
+			callerMarked = true
+		}
+	}
+	if !callerMarked {
+		t.Fatalf("ordinary Go caller was not marked resumable:\n%s", pkg.String())
+	}
+	kind := prog.ctx.MDKindID(wasmresume.CallMetadata)
+	for _, function := range []Function{boundary, root, caller} {
+		for block := function.impl.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+			for instr := block.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
+				if instr.HasMetadata() && !instr.Metadata(kind).IsNil() {
+					t.Fatalf("%s contains a resumable boundary call:\n%s", function.Name(), pkg.String())
+				}
+			}
+		}
+	}
+}

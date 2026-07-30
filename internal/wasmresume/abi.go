@@ -26,6 +26,7 @@ const (
 	resumeEntryPrefix = "__llgo_wasm_resume."
 	startEntryPrefix  = "__llgo_wasm_start."
 	descriptorPrefix  = "__llgo_wasm_resume_desc."
+	frameCloseName    = "__llgo_wasm_resume_close"
 	actionContinue    = 0
 	actionReturn      = 1
 	actionSuspend     = 2
@@ -54,7 +55,9 @@ func newResumeABI(ctx llvm.Context, targetData llvm.TargetData) resumeABI {
 		uintptrType:    uintptrType,
 		entryType:      llvm.FunctionType(ctx.Int8Type(), []llvm.Type{ptr, ptr}, false),
 		descriptorType: ctx.StructType([]llvm.Type{ptr, uintptrType, uintptrType}, false),
-		contextType:    ctx.StructType([]llvm.Type{ptr, ptr}, false),
+		// The first two fields are the public dispatch ABI. The trailing pointer
+		// is runtime-owned per-context frame storage.
+		contextType: ctx.StructType([]llvm.Type{ptr, ptr, ptr}, false),
 	}
 }
 
