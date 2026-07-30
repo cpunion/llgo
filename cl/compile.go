@@ -870,14 +870,20 @@ func funcInfoDisplayName(pkgTypes *types.Package, goName string) string {
 }
 
 func hasNoInlineDirective(f *ssa.Function) bool {
-	decl, _ := f.Syntax().(*ast.FuncDecl)
-	if decl == nil || decl.Doc == nil {
-		return false
-	}
-	for _, c := range decl.Doc.List {
-		if c.Text == "//go:noinline" {
-			return true
+	for f != nil {
+		decl, _ := f.Syntax().(*ast.FuncDecl)
+		if decl != nil && decl.Doc != nil {
+			for _, c := range decl.Doc.List {
+				if c.Text == "//go:noinline" {
+					return true
+				}
+			}
 		}
+		origin := f.Origin()
+		if origin == nil || origin == f {
+			break
+		}
+		f = origin
 	}
 	return false
 }

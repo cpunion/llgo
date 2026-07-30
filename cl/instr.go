@@ -1414,7 +1414,16 @@ func functionBelongsToPackage(pkg *ssa.Package, fn *ssa.Function) bool {
 	if fn.Pkg == pkg {
 		return true
 	}
-	return fn.Pkg == nil && fn.Parent() != nil && functionBelongsToPackage(pkg, fn.Parent())
+	if fn.Pkg != nil {
+		return false
+	}
+	if parent := fn.Parent(); parent != nil && functionBelongsToPackage(pkg, parent) {
+		return true
+	}
+	if origin := fn.Origin(); origin != nil && origin != fn {
+		return functionBelongsToPackage(pkg, origin)
+	}
+	return false
 }
 
 func typeBelongsToPackage(typ types.Type, pkg *types.Package) bool {
