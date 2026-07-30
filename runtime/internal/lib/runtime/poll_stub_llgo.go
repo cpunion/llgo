@@ -1,11 +1,10 @@
-//go:build baremetal
+//go:build baremetal || wasm
 
 package runtime
 
 import _ "unsafe"
 
-// Minimal internal/poll hooks for baremetal target smoke builds.
-// Embedded targets in this path do not provide a runtime poller.
+// Minimal internal/poll hooks for targets without a runtime fd poller.
 
 const (
 	pollNoError        = 0

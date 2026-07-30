@@ -490,6 +490,7 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 
 			for _, name := range []string{
 				"mfinal_wasm.go",
+				"poll_stub_llgo.go",
 				"runtime_baremetal.go",
 				"runtime_gc_nonmoving.go",
 				"signal_baremetal_llgo.go",
@@ -499,6 +500,17 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 				if !selected[name] {
 					t.Errorf("wasm runtime did not select %s", name)
 				}
+			}
+			argsFile := "link_wasm_js_llgo.go"
+			otherArgsFile := "link_wasip1_llgo.go"
+			if goos == "wasip1" {
+				argsFile, otherArgsFile = otherArgsFile, argsFile
+			}
+			if !selected[argsFile] {
+				t.Errorf("%s runtime did not select %s", goos, argsFile)
+			}
+			if selected[otherArgsFile] {
+				t.Errorf("%s runtime selected host-specific %s", goos, otherArgsFile)
 			}
 		})
 	}
