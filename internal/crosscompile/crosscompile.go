@@ -57,7 +57,8 @@ type WasmRuntime struct {
 // WasmPostLink describes transformations required after the core module is
 // linked. Build orchestration owns tool discovery and atomic output handling.
 type WasmPostLink struct {
-	Asyncify bool
+	Asyncify          bool
+	TranslateToExnref bool
 }
 
 // DebugInfoPolicy describes how a selected linker handles debug information.
@@ -440,6 +441,7 @@ func useWithJSWasm32(goos, goarch string, wasiThreads, forceEspClang bool, level
 			)
 		} else {
 			export.WasmPostLink.Asyncify = true
+			export.WasmPostLink.TranslateToExnref = true
 		}
 
 	case "js":
