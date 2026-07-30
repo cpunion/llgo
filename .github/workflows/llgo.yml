@@ -400,6 +400,13 @@ jobs:
           # Run the wasm binary using llgo_wasm
           iwasm --stack-size=819200000 --heap-size=800000000 hello.wasm
 
+          LLGO_WASI_THREADS=1 GOOS=wasip1 GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-blocking-threads.wasm" \
+            ../../internal/build/testdata/wasm-blocking
+          output=$(iwasm --stack-size=819200000 --heap-size=800000000 \
+            "$RUNNER_TEMP/wasm-blocking-threads.wasm" 2>&1)
+          test "$output" = "wasm blocking primitives ok"
+
   wasm-runtime:
     timeout-minutes: 30
     strategy:
@@ -491,6 +498,14 @@ jobs:
             grep -Fxq "$expected" <<<"$output"
           }
 
+          run_wasm_hardening() {
+            local module="$1"
+            local argument="$2"
+            local output
+            output=$(node -e "import('$module').then(async imported => { const config = { arguments: ['$argument'], preRun: [() => { config.ENV.LLGO_WASM_EXPECT_ARG = '$argument'; config.ENV.LLGO_WASM_BLOCKED_G = '1000'; }] }; await imported.default(config); }).catch(error => { console.error(error); process.exit(1); });" 2>&1)
+            grep -Fxq "wasm hardening ok" <<<"$output"
+          }
+
           run_wasi_timers() {
             local output
             wasm-tools validate --features all "$1"
@@ -527,6 +542,18 @@ jobs:
           LLGO_WASM_WORKERS=2 llgo build -target wasm \
             -o "$RUNNER_TEMP/wasm-gc-workers.mjs" ./internal/build/testdata/wasm-gc
           run_wasm_workers "$RUNNER_TEMP/wasm-gc-workers.mjs" "wasm gc ok"
+          GOOS=js GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-hardening-go.mjs" ./internal/build/testdata/wasm-hardening
+          run_wasm_hardening "$RUNNER_TEMP/wasm-hardening-go.mjs" "hardening-j64"
+          llgo build -target wasm \
+            -o "$RUNNER_TEMP/wasm-hardening.mjs" ./internal/build/testdata/wasm-hardening
+          run_wasm_hardening "$RUNNER_TEMP/wasm-hardening.mjs" "hardening-j32"
+          LLGO_WASM_WORKERS=2 GOOS=js GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-hardening-workers-go.mjs" ./internal/build/testdata/wasm-hardening
+          run_wasm_hardening "$RUNNER_TEMP/wasm-hardening-workers-go.mjs" "hardening-workers-j64"
+          LLGO_WASM_WORKERS=2 llgo build -target wasm \
+            -o "$RUNNER_TEMP/wasm-hardening-workers.mjs" ./internal/build/testdata/wasm-hardening
+          run_wasm_hardening "$RUNNER_TEMP/wasm-hardening-workers.mjs" "hardening-workers-j32"
           cp ./internal/build/testdata/wasm-workers/browser.html "$RUNNER_TEMP/browser.html"
           node ./internal/build/testdata/wasm-workers/server.mjs "$RUNNER_TEMP" 8123 &
           browser_server=$!
@@ -541,7 +568,8 @@ jobs:
           browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
           test -n "$browser"
           for module in wasm-timers.mjs wasm-workers.mjs wasm-workers-go.mjs \
-            wasm-gc-workers.mjs wasm-gc-workers-go.mjs; do
+            wasm-gc-workers.mjs wasm-gc-workers-go.mjs wasm-hardening-workers.mjs \
+            wasm-hardening-workers-go.mjs; do
             html=$("$browser" --headless=new --no-sandbox --disable-gpu \
               --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom \
               "http://127.0.0.1:8123/browser.html?module=$module")
@@ -557,6 +585,14 @@ jobs:
           GOOS=wasip1 GOARCH=wasm LLGO_WASI_THREADS=0 llgo build -o "$RUNNER_TEMP/wasm-gc-wasip1.wasm" ./internal/build/testdata/wasm-gc
           wasm-tools validate --features all "$RUNNER_TEMP/wasm-gc-wasip1.wasm"
           test "$(wasmtime run -W exceptions=y "$RUNNER_TEMP/wasm-gc-wasip1.wasm" 2>&1)" = "wasm gc ok"
+          GOOS=wasip1 GOARCH=wasm LLGO_WASI_THREADS=0 llgo build \
+            -o "$RUNNER_TEMP/wasm-hardening-wasip1.wasm" ./internal/build/testdata/wasm-hardening
+          wasm-tools validate --features all "$RUNNER_TEMP/wasm-hardening-wasip1.wasm"
+          output=$(wasmtime run -W exceptions=y \
+            --env LLGO_WASM_EXPECT_ARG=hardening-p1 \
+            --env LLGO_WASM_BLOCKED_G=1000 \
+            "$RUNNER_TEMP/wasm-hardening-wasip1.wasm" hardening-p1 2>&1)
+          grep -Fxq "wasm hardening ok" <<<"$output"
           file "$RUNNER_TEMP/runtime-js.wasm" \
             "$RUNNER_TEMP/runtime-wasip1.wasm" \
             "$RUNNER_TEMP/runtime-wasip1-threads.wasm" \
