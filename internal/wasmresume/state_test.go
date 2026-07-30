@@ -1,0 +1,382 @@
+package wasmresume
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/xgo-dev/llvm"
+)
+
+func TestLowerPrototypeExecutesDirectCallStateMachine(t *testing.T) {
+	llvm.LinkInMCJIT()
+	if err := llvm.InitializeNativeTarget(); err != nil {
+		t.Fatal(err)
+	}
+	if err := llvm.InitializeNativeAsmPrinter(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("state-execution")
+	moduleOwned := true
+	defer func() {
+		if moduleOwned {
+			mod.Dispose()
+		}
+	}()
+
+	triple := llvm.DefaultTargetTriple()
+	target, err := llvm.GetTargetFromTriple(triple)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := target.CreateTargetMachine(
+		triple, "", "", llvm.CodeGenLevelNone, llvm.RelocDefault, llvm.CodeModelJITDefault,
+	)
+	defer machine.Dispose()
+	targetData := machine.CreateTargetData()
+	defer targetData.Dispose()
+	mod.SetTarget(triple)
+	mod.SetDataLayout(targetData.String())
+
+	i32 := ctx.Int32Type()
+	sig := llvm.FunctionType(i32, []llvm.Type{i32}, false)
+	callee := llvm.AddFunction(mod, "callee", sig)
+	markFunction(ctx, callee)
+	calleeBlock := ctx.AddBasicBlock(callee, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(calleeBlock)
+	builder.CreateRet(builder.CreateAdd(callee.Param(0), llvm.ConstInt(i32, 1, false), "sum"))
+
+	caller := llvm.AddFunction(mod, "caller", sig)
+	markFunction(ctx, caller)
+	callerBlock := ctx.AddBasicBlock(caller, "entry")
+	builder.SetInsertPointAtEnd(callerBlock)
+	before := builder.CreateAdd(caller.Param(0), llvm.ConstInt(i32, 2, false), "before")
+	call := builder.CreateCall(sig, callee, []llvm.Value{before}, "called")
+	markCall(ctx, call)
+	builder.CreateRet(builder.CreateMul(before, call, "result"))
+
+	lowered, err := lowerPrototype(mod, targetData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lowered) != 1 {
+		t.Fatalf("lowered states = %d, want 1", len(lowered))
+	}
+	harness := defineStateMachineHarness(mod, targetData, lowered[0], 5)
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify executable state machine: %v\n%s", err, mod.String())
+	}
+
+	options := llvm.NewMCJITCompilerOptions()
+	options.SetMCJITOptimizationLevel(0)
+	engine, err := llvm.NewMCJITCompiler(mod, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moduleOwned = false
+	defer engine.Dispose()
+
+	result := engine.RunFunction(harness, nil)
+	defer result.Dispose()
+	if got := result.Int(true); got != 56 {
+		t.Fatalf("state machine result = %d, want 56", got)
+	}
+}
+
+func TestLowerPrototypeBuildsDirectCallStateMachine(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("state")
+	defer mod.Dispose()
+	mod.SetDataLayout("e-m:e-p:32:32-i64:64-n32:64-S128")
+	targetData := llvm.NewTargetData(mod.DataLayout())
+	defer targetData.Dispose()
+
+	i32 := ctx.Int32Type()
+	sig := llvm.FunctionType(i32, []llvm.Type{i32}, false)
+	callee := llvm.AddFunction(mod, "callee", sig)
+	markFunction(ctx, callee)
+	calleeBlock := ctx.AddBasicBlock(callee, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(calleeBlock)
+	builder.CreateRet(builder.CreateAdd(callee.Param(0), llvm.ConstInt(i32, 1, false), "sum"))
+
+	caller := llvm.AddFunction(mod, "caller", sig)
+	markFunction(ctx, caller)
+	caller.Param(0).SetName("input")
+	callerBlock := ctx.AddBasicBlock(caller, "entry")
+	builder.SetInsertPointAtEnd(callerBlock)
+	before := builder.CreateAdd(caller.Param(0), llvm.ConstInt(i32, 2, false), "before")
+	call := builder.CreateCall(sig, callee, []llvm.Value{before}, "called")
+	markCall(ctx, call)
+	result := builder.CreateMul(before, call, "result")
+	builder.CreateRet(result)
+
+	lowered, err := lowerPrototype(mod, targetData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lowered) != 1 || lowered[0].layout.plan.function != caller {
+		t.Fatalf("lowered states = %+v", lowered)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify state machine: %v\n%s", err, mod.String())
+	}
+
+	ir := mod.String()
+	for _, want := range []string{
+		`@__llgo_wasm_resume_desc.callee = constant`,
+		`@__llgo_wasm_resume_desc.caller = constant`,
+		`define internal i8 @__llgo_wasm_resume.caller`,
+		`switch i32 %pc, label %invalid-pc [`,
+		`i32 0, label %entry`,
+		`i32 1, label %resume.1`,
+		`call ptr @__llgo_wasm_resume_alloc`,
+		`call void @llvm.memset`,
+		`ret i8 0`,
+		`%returned = load ptr`,
+		`call void @__llgo_wasm_resume_free`,
+		`ret i8 1`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("state machine is missing %q:\n%s", want, ir)
+		}
+	}
+}
+
+func TestLowerPrototypeEmitsWasmObject(t *testing.T) {
+	llvm.InitializeAllTargetInfos()
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllAsmPrinters()
+
+	for _, triple := range []string{"wasm32-unknown-unknown", "wasm64-unknown-unknown"} {
+		t.Run(triple, func(t *testing.T) {
+			ctx := llvm.NewContext()
+			defer ctx.Dispose()
+			mod := ctx.NewModule(triple)
+			defer mod.Dispose()
+
+			target, err := llvm.GetTargetFromTriple(triple)
+			if err != nil {
+				t.Fatal(err)
+			}
+			machine := target.CreateTargetMachine(
+				triple, "", "", llvm.CodeGenLevelNone, llvm.RelocDefault, llvm.CodeModelDefault,
+			)
+			defer machine.Dispose()
+			targetData := machine.CreateTargetData()
+			defer targetData.Dispose()
+			mod.SetTarget(triple)
+			mod.SetDataLayout(targetData.String())
+
+			i32 := ctx.Int32Type()
+			sig := llvm.FunctionType(i32, []llvm.Type{i32}, false)
+			callee := llvm.AddFunction(mod, "callee", sig)
+			markFunction(ctx, callee)
+			calleeBlock := ctx.AddBasicBlock(callee, "entry")
+			builder := ctx.NewBuilder()
+			defer builder.Dispose()
+			builder.SetInsertPointAtEnd(calleeBlock)
+			builder.CreateRet(callee.Param(0))
+
+			caller := llvm.AddFunction(mod, "caller", sig)
+			markFunction(ctx, caller)
+			callerBlock := ctx.AddBasicBlock(caller, "entry")
+			builder.SetInsertPointAtEnd(callerBlock)
+			call := builder.CreateCall(sig, callee, []llvm.Value{caller.Param(0)}, "called")
+			markCall(ctx, call)
+			builder.CreateRet(call)
+
+			if _, err := lowerPrototype(mod, targetData); err != nil {
+				t.Fatal(err)
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify %s state machine: %v\n%s", triple, err, mod.String())
+			}
+			object, err := machine.EmitToMemoryBuffer(mod, llvm.ObjectFile)
+			if err != nil {
+				t.Fatalf("emit %s state machine: %v\n%s", triple, err, mod.String())
+			}
+			defer object.Dispose()
+			if data := object.Bytes(); len(data) < 4 || string(data[:4]) != "\x00asm" {
+				t.Fatalf("%s object does not have the WebAssembly header", triple)
+			}
+		})
+	}
+}
+
+func defineStateMachineHarness(
+	mod llvm.Module, targetData llvm.TargetData, lowered loweredState, input uint64,
+) llvm.Value {
+	ctx := mod.Context()
+	abi := newResumeABI(ctx, targetData)
+	i8 := ctx.Int8Type()
+	i32 := ctx.Int32Type()
+
+	childStorageType := llvm.ArrayType(i8, 1024)
+	childStorage := llvm.AddGlobal(mod, childStorageType, "child.storage")
+	childStorage.SetInitializer(llvm.ConstNull(childStorageType))
+	childStorage.SetAlignment(16)
+
+	alloc := mod.NamedFunction(frameAllocName)
+	block := ctx.AddBasicBlock(alloc, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	builder.CreateRet(childStorage)
+
+	free := mod.NamedFunction(frameFreeName)
+	block = ctx.AddBasicBlock(free, "entry")
+	builder.SetInsertPointAtEnd(block)
+	builder.CreateRetVoid()
+
+	root := llvm.AddGlobal(mod, lowered.layout.typ, "root.frame")
+	root.SetInitializer(llvm.ConstNull(lowered.layout.typ))
+	root.SetAlignment(lowered.layout.alignment)
+	context := llvm.AddGlobal(mod, abi.contextType, "resume.context")
+	context.SetInitializer(llvm.ConstNull(abi.contextType))
+
+	run := llvm.AddFunction(mod, "run.state.machine", llvm.FunctionType(i32, nil, false))
+	entryBlock := ctx.AddBasicBlock(run, "entry")
+	loopBlock := ctx.AddBasicBlock(run, "loop")
+	resumeBlock := ctx.AddBasicBlock(run, "resume")
+	popBlock := ctx.AddBasicBlock(run, "pop")
+	doneBlock := ctx.AddBasicBlock(run, "done")
+	failedBlock := ctx.AddBasicBlock(run, "failed")
+
+	builder.SetInsertPointAtEnd(entryBlock)
+	builder.CreateStore(
+		llvm.ConstNull(abi.ptr),
+		builder.CreateStructGEP(lowered.layout.typ, root, 0, ""),
+	)
+	builder.CreateStore(
+		lowered.descriptor,
+		builder.CreateStructGEP(lowered.layout.typ, root, 1, ""),
+	)
+	builder.CreateStore(
+		llvm.ConstInt(i32, 0, false),
+		builder.CreateStructGEP(lowered.layout.typ, root, 2, ""),
+	)
+	for _, slot := range lowered.layout.plan.slots {
+		if slot.kind == slotParameter {
+			builder.CreateStore(
+				llvm.ConstInt(slot.typ, input, false),
+				builder.CreateStructGEP(
+					lowered.layout.typ, root, lowered.layout.fieldIndex(slot.id), "",
+				),
+			)
+		}
+	}
+	builder.CreateStore(root, builder.CreateStructGEP(abi.contextType, context, 0, ""))
+	builder.CreateStore(
+		llvm.ConstNull(abi.ptr),
+		builder.CreateStructGEP(abi.contextType, context, 1, ""),
+	)
+	builder.CreateBr(loopBlock)
+
+	builder.SetInsertPointAtEnd(loopBlock)
+	topField := builder.CreateStructGEP(abi.contextType, context, 0, "")
+	top := builder.CreateLoad(abi.ptr, topField, "top")
+	builder.CreateCondBr(
+		builder.CreateICmp(llvm.IntNE, top, llvm.ConstNull(abi.ptr), ""),
+		resumeBlock,
+		doneBlock,
+	)
+
+	framePrefix := ctx.StructType([]llvm.Type{abi.ptr, abi.ptr, i32}, false)
+	builder.SetInsertPointAtEnd(resumeBlock)
+	descriptor := builder.CreateLoad(
+		abi.ptr, builder.CreateStructGEP(framePrefix, top, 1, ""), "descriptor",
+	)
+	resume := builder.CreateLoad(
+		abi.ptr, builder.CreateStructGEP(abi.descriptorType, descriptor, 0, ""), "resume.entry",
+	)
+	action := builder.CreateCall(abi.entryType, resume, []llvm.Value{context, top}, "action")
+	switchAction := builder.CreateSwitch(action, failedBlock, 2)
+	switchAction.AddCase(llvm.ConstInt(i8, actionContinue, false), loopBlock)
+	switchAction.AddCase(llvm.ConstInt(i8, actionReturn, false), popBlock)
+
+	builder.SetInsertPointAtEnd(popBlock)
+	parent := builder.CreateLoad(
+		abi.ptr, builder.CreateStructGEP(framePrefix, top, 0, ""), "parent",
+	)
+	builder.CreateStore(parent, topField)
+	builder.CreateStore(top, builder.CreateStructGEP(abi.contextType, context, 1, ""))
+	builder.CreateBr(loopBlock)
+
+	builder.SetInsertPointAtEnd(doneBlock)
+	builder.CreateRet(builder.CreateLoad(
+		i32,
+		builder.CreateStructGEP(
+			lowered.layout.typ, root,
+			lowered.layout.fieldIndex(lowered.layout.plan.resultSlot), "",
+		),
+		"result",
+	))
+
+	builder.SetInsertPointAtEnd(failedBlock)
+	builder.CreateRet(llvm.ConstInt(i32, ^uint64(0), true))
+	return run
+}
+
+func TestLowerPrototypeRejectsIndirectCalls(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("indirect")
+	defer mod.Dispose()
+	targetData := llvm.NewTargetData("e-m:e-p:32:32-i64:64-n32:64-S128")
+	defer targetData.Dispose()
+
+	voidFn := llvm.FunctionType(ctx.VoidType(), nil, false)
+	fn := llvm.AddFunction(mod, "caller", llvm.FunctionType(ctx.VoidType(), []llvm.Type{
+		llvm.PointerType(voidFn, 0),
+	}, false))
+	markFunction(ctx, fn)
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	call := builder.CreateCall(voidFn, fn.Param(0), nil, "")
+	markCall(ctx, call)
+	builder.CreateRetVoid()
+
+	if _, err := lowerPrototype(mod, targetData); err == nil ||
+		!strings.Contains(err.Error(), "indirect") {
+		t.Fatalf("lowerPrototype error = %v", err)
+	}
+}
+
+func TestLowerPrototypeRejectsDynamicAlloca(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("dynamic")
+	defer mod.Dispose()
+	targetData := llvm.NewTargetData("e-m:e-p:32:32-i64:64-n32:64-S128")
+	defer targetData.Dispose()
+
+	i32 := ctx.Int32Type()
+	ptr := llvm.PointerType(i32, 0)
+	calleeType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{ptr}, false)
+	callee := llvm.AddFunction(mod, "callee", calleeType)
+	fn := llvm.AddFunction(mod, "caller", llvm.FunctionType(ctx.VoidType(), []llvm.Type{i32}, false))
+	markFunction(ctx, fn)
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	local := builder.CreateArrayAlloca(i32, fn.Param(0), "local")
+	call := builder.CreateCall(calleeType, callee, []llvm.Value{local}, "")
+	markCall(ctx, call)
+	builder.CreateRetVoid()
+
+	if _, err := lowerPrototype(mod, targetData); err == nil ||
+		!strings.Contains(err.Error(), "dynamic alloca") {
+		t.Fatalf("lowerPrototype error = %v", err)
+	}
+}
