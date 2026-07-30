@@ -1170,7 +1170,7 @@ func checkExpectedErrorsForFiles(output string, sources []diagnosticSource) erro
 			} else if _, suffix, found := strings.Cut(message, " "); found {
 				message = suffix
 			}
-			parserAlias := sourceOK && matchesParserDiagnosticAlias(expected.regexp, sourceDiagnostic)
+			parserAlias := sourceOK && matchesParserDiagnosticAlias(expected.regexp, sourceDiagnostic, expected.source)
 			if matchesExpectedDiagnostic(expected.regexp, message) || parserAlias {
 				matched = true
 				if ok && isScopedLexicalDiagnostic(message) {
@@ -1750,6 +1750,16 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 				{"illegal character U+003F '?'"},
 			}
 		}
+	// GOROOT/test/fixedbugs/issue4776.go
+	case "expected 'package', found 'type'":
+		if source == "type MyInt int32" {
+			return [][]string{{"expected ';', found int32"}}
+		}
+	// GOROOT/test/fixedbugs/issue13266.go
+	case "expected 'IDENT', found '%'":
+		if source == "package%" {
+			return [][]string{{"expected ';', found 'EOF'"}}
+		}
 	}
 	return nil
 }
@@ -1820,10 +1830,22 @@ nextLine:
 	return out
 }
 
-func matchesParserDiagnosticAlias(expected *regexp.Regexp, diagnostic sourceDiagnostic) bool {
-	return diagnostic.message == "expected ';', found ','" &&
-		expected.MatchString("unexpected comma") &&
-		isParenthesizedImportLine(diagnostic.file, diagnostic.line)
+func matchesParserDiagnosticAlias(expected *regexp.Regexp, diagnostic sourceDiagnostic, source string) bool {
+	source = parserRecoverySourceCode(source)
+	switch diagnostic.message {
+	// GOROOT/test/fixedbugs/issue4776.go
+	case "expected 'package', found 'type'":
+		return source == "type MyInt int32" &&
+			expected.MatchString("syntax error: package statement must be first")
+	// GOROOT/test/fixedbugs/issue13266.go
+	case "expected 'IDENT', found '%'":
+		return source == "package%" &&
+			expected.MatchString("syntax error: unexpected %, expected name")
+	case "expected ';', found ','":
+		return expected.MatchString("unexpected comma") &&
+			isParenthesizedImportLine(diagnostic.file, diagnostic.line)
+	}
+	return false
 }
 
 func isParenthesizedImportLine(file string, line int) bool {

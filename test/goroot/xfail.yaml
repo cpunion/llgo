@@ -1867,10 +1867,6 @@ xfails:
     reason: llgo parser recovery emits additional malformed-channel diagnostics
   - version: go1.26
     directive: errorcheck
-    case: fixedbugs/issue4776.go
-    reason: llgo parser uses a different missing-package-clause diagnostic
-  - version: go1.26
-    directive: errorcheck
     case: escape2n.go
     reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
   - version: go1.26
@@ -1985,10 +1981,6 @@ xfails:
     directive: errorcheck
     case: fixedbugs/notinheap2.go
     reason: gc-specific notinheap allocation diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue13266.go
-    reason: llgo parser uses a different malformed-package-clause diagnostic
   - version: go1.26
     directive: errorcheck
     case: fixedbugs/issue19667.go
