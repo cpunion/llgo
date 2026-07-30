@@ -1710,15 +1710,29 @@ func parserRecoverySourceSecondaries(primary, source string) []string {
 		if source == `var x map[string]string{"a":"b"}` {
 			return []string{"expected ';', found '{'"}
 		}
+	// GOROOT/test/fixedbugs/bug228.go
+	case "syntax error: ... is missing type":
+		if source == "func g(x int, y float32) (...)" {
+			return []string{"expected type, found ')'"}
+		}
+	// GOROOT/test/syntax/chan1.go: channel send in an if condition.
+	case "syntax error: cannot use c <- v as value":
+		if source == "if c <- v {" {
+			return []string{"expected boolean expression, found simple statement (missing parentheses around composite literal?)"}
+		}
+	// GOROOT/test/syntax/chan1.go: channel send in a top-level declaration.
+	case "syntax error: unexpected <- after top level declaration":
+		if source == "var _ = c <- v" {
+			return []string{"expected ';', found '<-'"}
+		}
 	}
 	return nil
 }
 
 // parserRecoverySecondaryGroups returns independent one-use allowances for an
-// exact primary. Source-independent pairs are checked first; all other pairs
-// require an exact ERROR source shape. Most recovery spellings are alternatives
-// in one group; issue11610 deterministically emits two separate follow-ons, so
-// each receives its own group.
+// exact primary. Source-independent pairs are checked first, followed by
+// source-dependent single groups. issue11610 deterministically emits two
+// separate follow-ons, so each receives its own group here.
 func parserRecoverySecondaryGroups(primary, source string) [][]string {
 	if secondaries := parserRecoverySecondaries(primary); len(secondaries) != 0 {
 		return [][]string{secondaries}
@@ -1728,21 +1742,6 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 	}
 	source = parserRecoverySourceCode(source)
 	switch primary {
-	// GOROOT/test/fixedbugs/bug228.go
-	case "syntax error: ... is missing type":
-		if source == "func g(x int, y float32) (...)" {
-			return [][]string{{"expected type, found ')'"}}
-		}
-	// GOROOT/test/syntax/chan1.go: channel send in an if condition.
-	case "syntax error: cannot use c <- v as value":
-		if source == "if c <- v {" {
-			return [][]string{{"expected boolean expression, found simple statement (missing parentheses around composite literal?)"}}
-		}
-	// GOROOT/test/syntax/chan1.go: channel send in a top-level declaration.
-	case "syntax error: unexpected <- after top level declaration":
-		if source == "var _ = c <- v" {
-			return [][]string{{"expected ';', found '<-'"}}
-		}
 	// GOROOT/test/fixedbugs/issue11610.go
 	case "invalid character U+003F '?'":
 		if source == "var?" {
@@ -1782,7 +1781,7 @@ func hasLineDirective(data []byte) bool {
 		if kind != token.COMMENT {
 			continue
 		}
-		if strings.HasPrefix(literal, "/*line ") {
+		if strings.HasPrefix(literal, "/*line ") && strings.Contains(literal[len("/*line "):], ":") {
 			return true
 		}
 		if !strings.HasPrefix(literal, "//line ") {
@@ -1790,7 +1789,8 @@ func hasLineDirective(data []byte) bool {
 		}
 		offset := file.Offset(position)
 		lineStart := bytes.LastIndexByte(data[:offset], '\n') + 1
-		if len(bytes.TrimSpace(data[lineStart:offset])) == 0 {
+		if len(bytes.TrimSpace(data[lineStart:offset])) == 0 &&
+			strings.Contains(literal[len("//line "):], ":") {
 			return true
 		}
 	}
