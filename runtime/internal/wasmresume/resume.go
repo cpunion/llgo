@@ -52,7 +52,8 @@ type Frame struct {
 
 // Context owns the active frame chain for one logical goroutine.
 type Context struct {
-	top *Frame
+	top      *Frame
+	returned *Frame
 }
 
 // Top returns the active frame.
@@ -62,10 +63,21 @@ func (c *Context) Top() *Frame {
 
 // Push links frame as the active child of the current frame.
 func (c *Context) Push(frame *Frame, descriptor *Descriptor) {
+	if c.top == nil {
+		c.returned = nil
+	}
 	frame.Parent = c.top
 	frame.Descriptor = descriptor
 	frame.PC = 0
 	c.top = frame
+}
+
+// TakeReturned returns the child frame that completed immediately before the
+// active frame resumed. It also transfers ownership back to the caller.
+func (c *Context) TakeReturned() *Frame {
+	frame := c.returned
+	c.returned = nil
+	return frame
 }
 
 // Run resumes the active frame chain until it completes or suspends.
@@ -76,6 +88,7 @@ func (c *Context) Run() Action {
 		case Continue:
 		case Return:
 			c.top = frame.Parent
+			c.returned = frame
 		case Suspend:
 			return Suspend
 		default:
