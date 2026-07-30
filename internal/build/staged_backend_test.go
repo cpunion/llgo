@@ -120,11 +120,13 @@ func TestStagedNativeBackendGateIsExact(t *testing.T) {
 	}
 	checkDisabled := func(name string, mutate func(*context)) {
 		t.Helper()
-		ctxCopy := *base
 		confCopy := *base.buildConf
-		ctxCopy.buildConf = &confCopy
-		mutate(&ctxCopy)
-		if shouldStageNativeExecutableBackend(&ctxCopy) {
+		ctxCopy := &context{
+			mode:      base.mode,
+			buildConf: &confCopy,
+		}
+		mutate(ctxCopy)
+		if shouldStageNativeExecutableBackend(ctxCopy) {
 			t.Errorf("%s unexpectedly selected staged backend", name)
 		}
 	}
