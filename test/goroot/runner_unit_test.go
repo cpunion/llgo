@@ -1131,6 +1131,8 @@ func TestHasLineDirective(t *testing.T) {
 		{name: "block comment", data: "  /*line remapped.go:1*/\n", want: true},
 		{name: "block comment after source", data: "x /*line remapped.go:1*/\n", want: true},
 		{name: "missing separator", data: "//linefoo.go:1\n", want: false},
+		{name: "line comment without line number", data: "//line remapped\n", want: false},
+		{name: "block comment without line number", data: "/*line remapped*/\n", want: false},
 		{name: "after source", data: "x //line remapped.go:1\n", want: false},
 		{name: "inside string", data: `var _ = "/*line remapped.go:1*/"` + "\n", want: false},
 	}
