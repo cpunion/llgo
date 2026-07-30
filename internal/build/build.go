@@ -32,6 +32,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -3485,6 +3486,12 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err := buildCoroPlan(ctx, allPkgs...); err != nil {
 		return nil, err
 	}
+	// Whole-program planning deliberately stays live through package emission,
+	// but package loading, canonicalization fixed points, and identity sorting
+	// leave substantial temporary Go storage behind. Return those dead pages
+	// before LLVM starts its per-package peak rather than overlapping both
+	// phases in standard-library-sized builds.
+	debug.FreeOSMemory()
 	allPkgs, err = buildAllPkgs(ctx, allPkgs, verbose)
 	if err != nil {
 		return nil, err
