@@ -64,8 +64,11 @@ func lowerPrototype(mod llvm.Module, targetData llvm.TargetData) ([]loweredState
 			layout: layout, entry: entry, descriptor: descriptor,
 		})
 	}
+	if err := emitStartEntriesForLayouts(mod, abi, layouts); err != nil {
+		return nil, err
+	}
 	for i := range lowered {
-		if err := lowerDirectStateMachine(mod, targetData, abi, &lowered[i]); err != nil {
+		if err := lowerStateMachine(mod, targetData, abi, &lowered[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -86,9 +89,6 @@ func validateStateLayout(layout frameLayout, targetData llvm.TargetData) error {
 	}
 	for _, site := range layout.plan.calls {
 		call := site.call
-		if call.CalledValue().IsAFunction().IsNil() {
-			return fmt.Errorf("resume call %d is indirect", site.id)
-		}
 		if call.CalledFunctionType().IsFunctionVarArg() {
 			return fmt.Errorf("resume call %d is variadic", site.id)
 		}
@@ -99,7 +99,7 @@ func validateStateLayout(layout frameLayout, targetData llvm.TargetData) error {
 	return nil
 }
 
-func lowerDirectStateMachine(
+func lowerStateMachine(
 	mod llvm.Module, targetData llvm.TargetData, abi resumeABI, lowered *loweredState,
 ) error {
 	layout := lowered.layout
@@ -159,7 +159,7 @@ func lowerDirectStateMachine(
 			return fmt.Errorf("%s: call %d: %w", fn.Name(), site.id, err)
 		}
 		continuations[site.id] = continuation
-		if err := lowerDirectCall(
+		if err := lowerResumeCall(
 			mod, abi, layout, fields, lowered.entry, site, continuation,
 		); err != nil {
 			return fmt.Errorf("%s: call %d: %w", fn.Name(), site.id, err)
@@ -193,7 +193,7 @@ func lowerDirectStateMachine(
 	return nil
 }
 
-func lowerDirectCall(
+func lowerResumeCall(
 	mod llvm.Module,
 	abi resumeABI,
 	parentLayout frameLayout,
@@ -206,41 +206,52 @@ func lowerDirectCall(
 	call := site.call
 	callBlock := call.InstructionParent()
 	callee := call.CalledValue()
-	descriptor := mod.NamedGlobal(descriptorPrefix + callee.Name())
-	if descriptor.IsNil() {
-		descriptor = llvm.AddGlobal(mod, abi.descriptorType, descriptorPrefix+callee.Name())
-	}
-
-	alloc := declareFrameAllocator(mod, abi)
 	free := declareFrameFree(mod, abi)
 	builder := ctx.NewBuilder()
 	defer builder.Dispose()
 	builder.SetInsertPointBefore(call)
 
-	sizeField := builder.CreateStructGEP(abi.descriptorType, descriptor, 1, "")
-	alignField := builder.CreateStructGEP(abi.descriptorType, descriptor, 2, "")
-	size := builder.CreateLoad(abi.uintptrType, sizeField, "child.size")
-	align := builder.CreateLoad(abi.uintptrType, alignField, "child.align")
-	child := builder.CreateCall(alloc.GlobalValueType(), alloc, []llvm.Value{size, align}, "child")
-	builder.CreateIntrinsic(ctx.VoidType(), llvm.LookupIntrinsicID("llvm.memset"), []llvm.Value{
-		child,
-		llvm.ConstInt(ctx.Int8Type(), 0, false),
-		size,
-		llvm.ConstInt(ctx.Int1Type(), 0, false),
-	}, "")
-
 	childType := callFramePrefix(ctx, call.CalledFunctionType())
-	builder.CreateStore(entry.Param(1), builder.CreateStructGEP(childType, child, 0, ""))
-	builder.CreateStore(descriptor, builder.CreateStructGEP(childType, child, 1, ""))
-	builder.CreateStore(
-		llvm.ConstInt(ctx.Int32Type(), 0, false),
-		builder.CreateStructGEP(childType, child, 2, ""),
-	)
-	for i := 0; i < call.CalledFunctionType().ParamTypesCount(); i++ {
+	var child llvm.Value
+	if callee.IsAFunction().IsNil() {
+		params := append([]llvm.Type{abi.ptr}, call.CalledFunctionType().ParamTypes()...)
+		startType := llvm.FunctionType(abi.ptr, params, false)
+		args := make([]llvm.Value, call.CalledFunctionType().ParamTypesCount()+1)
+		args[0] = entry.Param(0)
+		for i := 1; i < len(args); i++ {
+			args[i] = call.Operand(i - 1)
+		}
+		child = builder.CreateCall(startType, callee, args, "child")
+	} else {
+		alloc := declareFrameAllocator(mod, abi)
+		descriptor := mod.NamedGlobal(descriptorPrefix + callee.Name())
+		if descriptor.IsNil() {
+			descriptor = llvm.AddGlobal(mod, abi.descriptorType, descriptorPrefix+callee.Name())
+		}
+		sizeField := builder.CreateStructGEP(abi.descriptorType, descriptor, 1, "")
+		alignField := builder.CreateStructGEP(abi.descriptorType, descriptor, 2, "")
+		size := builder.CreateLoad(abi.uintptrType, sizeField, "child.size")
+		align := builder.CreateLoad(abi.uintptrType, alignField, "child.align")
+		child = builder.CreateCall(alloc.GlobalValueType(), alloc, []llvm.Value{size, align}, "child")
+		builder.CreateIntrinsic(ctx.VoidType(), llvm.LookupIntrinsicID("llvm.memset"), []llvm.Value{
+			child,
+			llvm.ConstInt(ctx.Int8Type(), 0, false),
+			size,
+			llvm.ConstInt(ctx.Int1Type(), 0, false),
+		}, "")
+
+		builder.CreateStore(entry.Param(1), builder.CreateStructGEP(childType, child, 0, ""))
+		builder.CreateStore(descriptor, builder.CreateStructGEP(childType, child, 1, ""))
 		builder.CreateStore(
-			call.Operand(i),
-			builder.CreateStructGEP(childType, child, frameHeaderFields+i, ""),
+			llvm.ConstInt(ctx.Int32Type(), 0, false),
+			builder.CreateStructGEP(childType, child, 2, ""),
 		)
+		for i := 0; i < call.CalledFunctionType().ParamTypesCount(); i++ {
+			builder.CreateStore(
+				call.Operand(i),
+				builder.CreateStructGEP(childType, child, frameHeaderFields+i, ""),
+			)
+		}
 	}
 	builder.CreateStore(
 		llvm.ConstInt(ctx.Int32Type(), uint64(site.id), false),

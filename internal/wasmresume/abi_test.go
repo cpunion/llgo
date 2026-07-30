@@ -47,6 +47,13 @@ func TestDescriptorLinksAcrossModules(t *testing.T) {
 			defer builder.Dispose()
 			builder.SetInsertPointAtEnd(block)
 			builder.CreateRet(callee.Param(0))
+			abi := newResumeABI(ctx, targetData)
+			startType := llvm.FunctionType(
+				abi.ptr, []llvm.Type{abi.ptr, i32}, false,
+			)
+			startDeclaration := llvm.AddFunction(
+				producer, startEntryPrefix+callee.Name(), startType,
+			)
 
 			if _, err := lowerPrototype(producer, targetData); err != nil {
 				t.Fatal(err)
@@ -58,6 +65,10 @@ func TestDescriptorLinksAcrossModules(t *testing.T) {
 			}
 			if got := definedDescriptor.Linkage(); got != llvm.LinkOnceAnyLinkage {
 				t.Fatalf("producer descriptor linkage = %v, want linkonce", got)
+			}
+			if startDeclaration.IsDeclaration() ||
+				startDeclaration.Linkage() != llvm.LinkOnceAnyLinkage {
+				t.Fatal("producer did not define its predeclared start entry")
 			}
 
 			consumer := ctx.NewModule("consumer")
