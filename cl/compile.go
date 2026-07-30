@@ -562,7 +562,8 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	}
 	if target := p.prog.Target(); target.GOARCH == "wasm" {
 		if decl, ok := f.Syntax().(*ast.FuncDecl); ok {
-			if module, importName, ok := wasmImportByDoc(decl.Doc); ok {
+			fullName, _ := astFuncName(llssa.PathOf(pkgTypes), decl)
+			if module, importName, ok := p.prog.WasmImport(fullName); ok {
 				fn.SetWasmImport(module, importName)
 			}
 		}

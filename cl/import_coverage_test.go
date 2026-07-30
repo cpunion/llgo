@@ -66,13 +66,6 @@ func (A) StackedHidden() {}
 		t.Fatal(err)
 	}
 
-	ctx := &context{prog: prog}
-	ctx.processNoInterfaceByDoc(nil, "example.com/p.NilDoc")
-	ctx.processNoInterfaceByDoc(&ast.CommentGroup{List: []*ast.Comment{
-		{Text: "// not a directive"},
-		{Text: "//go:nointerface"},
-	}}, "example.com/p.NonDirectiveStops")
-
 	if !prog.PackageSyntaxParsed(pkg) {
 		t.Fatal("package syntax was not marked as parsed")
 	}
@@ -127,24 +120,41 @@ func TestParsePkgSyntaxReportsLocalityErrors(t *testing.T) {
 	}
 }
 
-func TestWasmImportByDoc(t *testing.T) {
-	module, name, ok := wasmImportByDoc(&ast.CommentGroup{List: []*ast.Comment{
+func TestCollectDeclarationDirectives(t *testing.T) {
+	prog := llssa.NewProgram(nil)
+	t.Cleanup(prog.Dispose)
+	const fullName = "example.com/p.fdRead"
+	collectDeclarationDirectives(prog, &ast.CommentGroup{List: []*ast.Comment{
 		{Text: "//go:noescape"},
 		{Text: "//go:wasmimport wasi_snapshot_preview1 fd_read"},
-	}})
+	}}, fullName, "fdRead", true)
+	module, name, ok := prog.WasmImport(fullName)
 	if !ok || module != "wasi_snapshot_preview1" || name != "fd_read" {
 		t.Fatalf("wasm import = (%q, %q, %v)", module, name, ok)
 	}
 
-	for _, doc := range []*ast.CommentGroup{
-		nil,
-		{List: []*ast.Comment{{Text: "// ordinary comment"}}},
-		{List: []*ast.Comment{{Text: "//go:noescape"}}},
-		{List: []*ast.Comment{{Text: "//go:wasmimport missing-name"}}},
-	} {
-		if _, _, ok := wasmImportByDoc(doc); ok {
-			t.Fatalf("unexpected wasm import from %#v", doc)
-		}
+	const alias = "example.com/p.alias"
+	collectDeclarationDirectives(prog, &ast.CommentGroup{List: []*ast.Comment{
+		{Text: "//go:linkname alias C.old"},
+		{Text: "//go:linkname alias C.new"},
+	}}, alias, "alias", false)
+	if got, ok := prog.Linkname(alias); !ok || got != "C.new" {
+		t.Fatalf("linkname = (%q, %v), want C.new", got, ok)
+	}
+
+	collectDeclarationDirectives(prog, &ast.CommentGroup{List: []*ast.Comment{
+		{Text: "//go:wasmimport env old"},
+		{Text: "//go:wasmimport missing-name"},
+	}}, "example.com/p.invalid", "invalid", true)
+	if _, _, ok := prog.WasmImport("example.com/p.invalid"); ok {
+		t.Fatal("invalid wasm import was collected")
+	}
+
+	collectDeclarationDirectives(prog, &ast.CommentGroup{List: []*ast.Comment{
+		{Text: "//go:wasmimport env value"},
+	}}, "example.com/p.value", "value", false)
+	if _, _, ok := prog.WasmImport("example.com/p.value"); ok {
+		t.Fatal("variable wasm import was collected")
 	}
 }
 
@@ -272,7 +282,7 @@ func TestParsePkgSyntaxCollectsLinknames(t *testing.T) {
 		})
 	}
 	prog := llssa.NewProgram(nil)
-	collectLinknameByDoc(prog, &ast.CommentGroup{List: []*ast.Comment{{Text: "//go:linkname Other C.other"}}}, llssa.PkgRuntime+".Sigsetjmp", "Sigsetjmp")
+	collectDeclarationDirectives(prog, &ast.CommentGroup{List: []*ast.Comment{{Text: "//go:linkname Other C.other"}}}, llssa.PkgRuntime+".Sigsetjmp", "Sigsetjmp", false)
 	if _, ok := prog.Linkname(llssa.PkgRuntime + ".Sigsetjmp"); ok {
 		t.Fatal("mismatched linkname was collected")
 	}
@@ -285,7 +295,7 @@ func TestCollectLinknameByDocIgnoresOtherDirectives(t *testing.T) {
 		{Text: "//llgo:tls"},
 	}}
 	const fullName = "example.com/p.Value"
-	collectLinknameByDoc(prog, doc, fullName, "Value")
+	collectDeclarationDirectives(prog, doc, fullName, "Value", false)
 	if _, ok := prog.Linkname(fullName); ok {
 		t.Fatal("non-link directives installed a linkname")
 	}
