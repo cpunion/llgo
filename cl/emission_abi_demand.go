@@ -232,7 +232,7 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		goTyps:               owner.pkgTypes,
 		goPkg:                owner.ssa,
 		patches:              u.patches,
-		loaded:               u.loadedPackages(),
+		loaded:               u.loadedPackages(true),
 		linkOnceFns:          make(map[*ssa.Function]none),
 		methodNilDerefChecks: collectMethodNilDerefChecks(fn),
 		unevaluatedSSA:       unevaluated,

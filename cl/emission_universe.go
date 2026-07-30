@@ -836,7 +836,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			u.byPath[pkgPath] = prepared
 		}
 	}
-	u.loadedPackageSnapshot = u.buildLoadedPackages()
+	u.loadedPackageSnapshot = u.loadedPackages(false)
 	if options.CompleteRuntimeABI {
 		if prog == nil {
 			return nil, fmt.Errorf("prepare emission universe: complete runtime ABI requires an LLVM SSA program")
@@ -1122,6 +1122,7 @@ func (u *EmissionUniverse) freezeCoroPatchInitEntries() error {
 		if owner == nil {
 			continue
 		}
+		redirectedTargets := make(map[*ssa.Function]ssa.CallInstruction)
 		for _, block := range owner.Blocks {
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(*ssa.Call)
@@ -1139,15 +1140,23 @@ func (u *EmissionUniverse) freezeCoroPatchInitEntries() error {
 					call.Common().Signature().Results().Len() != 0 {
 					return fmt.Errorf("prepare emission universe: patched initializer call in %q has an invalid direct func() occurrence", owner.Name())
 				}
-				semanticOrdinal, ordinalErr := coro.SemanticInstructionOrdinal(call)
-				if ordinalErr != nil {
-					return fmt.Errorf("prepare emission universe: patched initializer call in %q has no stable semantic ordinal: %w", owner.Name(), ordinalErr)
+				if previous := redirectedTargets[redirect.target]; previous != nil {
+					return fmt.Errorf(
+						"prepare emission universe: patched initializer %q occurs more than once in %q",
+						redirect.target.Name(), owner.Name(),
+					)
 				}
+				redirectedTargets[redirect.target] = call
+				// A Go package initializer contains exactly one dependency call
+				// for each imported package. The owner-local target identity is
+				// therefore the complete logical occurrence key. Do not include
+				// the raw SSA instruction ordinal here: x/tools may insert
+				// unrelated initializer bookkeeping before this call depending
+				// on package-loading/cache state. The exact source occurrence is
+				// already retained by patchInitRedirects for code generation.
 				logicalName := framedEmissionKey(
-					"$llgo.patch.public-init-v1",
+					"$llgo.patch.public-init-v2",
 					emissionDigest(u.finalIdentity(redirect.target)),
-					strconv.Itoa(block.Index),
-					strconv.Itoa(semanticOrdinal),
 				)
 				redirect.logicalName = logicalName
 				if !u.patchInitRedirects.record(call, redirect) {
@@ -4301,9 +4310,9 @@ func (u *EmissionUniverse) samePromotedWrapperLinkIdentity(owner *preparedEmissi
 }
 
 func (u *EmissionUniverse) structuralWrapperABIKey(owner *preparedEmissionPackage, fn *ssa.Function) string {
-	fields := []string{"wrapper-abi-v1", structuralEmissionTypeKey(u.effectiveType(owner, fn, fn.Signature))}
+	fields := []string{"wrapper-abi-v1", structuralEmissionTypeKey(u.effectiveType(owner, fn, fn.Signature, false))}
 	for _, free := range fn.FreeVars {
-		fields = append(fields, structuralEmissionTypeKey(u.effectiveType(owner, fn, free.Type())))
+		fields = append(fields, structuralEmissionTypeKey(u.effectiveType(owner, fn, free.Type(), false)))
 	}
 	return framedEmissionKey(fields...)
 }
@@ -5075,7 +5084,7 @@ func (index emissionCanonicalIndex) managedGoLinknamePairKeyWithPointerFacade(
 		fields := make([]string, 0, len(typeArgs)+2)
 		fields = append(fields, "go-linkname-callable-instance-v1", signature)
 		for _, argument := range typeArgs {
-			fields = append(fields, structuralGoLinknameABITypeKey(u.effectiveType(owner, function, argument)))
+			fields = append(fields, structuralGoLinknameABITypeKey(u.effectiveType(owner, function, argument, false)))
 		}
 		signature = framedEmissionKey(fields...)
 	}
@@ -5652,7 +5661,7 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 		goTyps:           prepared.pkgTypes,
 		goPkg:            prepared.ssa,
 		patches:          u.patches,
-		loaded:           u.loadedPackages(),
+		loaded:           u.loadedPackages(true),
 		linkOnceFns:      make(map[*ssa.Function]none),
 		state:            state,
 		emissionUniverse: u,
@@ -5807,8 +5816,8 @@ func (u *EmissionUniverse) wrapperCallIdentity(prepared *preparedEmissionPackage
 			"invoke-method-v1",
 			pkgPath,
 			method.Name(),
-			structuralEmissionTypeKey(u.effectiveType(prepared, fn, method.Type())),
-			structuralEmissionTypeKey(u.effectiveType(prepared, fn, common.Value.Type())),
+			structuralEmissionTypeKey(u.effectiveType(prepared, fn, method.Type(), false)),
+			structuralEmissionTypeKey(u.effectiveType(prepared, fn, common.Value.Type(), false)),
 		), false, nil
 	}
 	return "", false, nil
@@ -6569,46 +6578,38 @@ func (u *EmissionUniverse) isIntrinsic(fn *ssa.Function, owner *preparedEmission
 		goTyps:      owner.pkgTypes,
 		goPkg:       owner.ssa,
 		patches:     u.patches,
-		loaded:      u.loadedPackages(),
+		loaded:      u.loadedPackages(true),
 		linkOnceFns: make(map[*ssa.Function]none),
 	}
 	_, _, ftype := ctx.funcName(fn)
 	return ftype == llgoInstr
 }
 
-func (u *EmissionUniverse) buildLoadedPackages() map[*types.Package]*pkgInfo {
-	loaded := map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
-	if u == nil || u.goProg == nil {
-		return loaded
-	}
-	for _, pkg := range u.goProg.AllPackages() {
-		if pkg == nil || pkg.Pkg == nil {
-			continue
+// loadedPackages returns the frozen package index, cloning it only for legacy
+// context paths which may extend their local view. Keeping both views behind
+// one entry point prevents cache mechanics from expanding universe authority.
+func (u *EmissionUniverse) loadedPackages(writable bool) map[*types.Package]*pkgInfo {
+	snapshot := map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
+	if u != nil && u.loadedPackageSnapshot != nil {
+		snapshot = u.loadedPackageSnapshot
+	} else if u != nil && u.goProg != nil {
+		for _, pkg := range u.goProg.AllPackages() {
+			if pkg == nil || pkg.Pkg == nil {
+				continue
+			}
+			snapshot[pkg.Pkg] = &pkgInfo{kind: pkgKindByPath(llssa.PathOf(pkg.Pkg))}
 		}
-		loaded[pkg.Pkg] = &pkgInfo{kind: pkgKindByPath(llssa.PathOf(pkg.Pkg))}
-	}
-	for _, prepared := range u.packages {
-		loaded[prepared.oldTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
-		loaded[prepared.pkgTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
-		if prepared.altTypes != nil {
-			loaded[prepared.altTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+		for _, prepared := range u.packages {
+			snapshot[prepared.oldTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+			snapshot[prepared.pkgTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+			if prepared.altTypes != nil {
+				snapshot[prepared.altTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+			}
 		}
 	}
-	return loaded
-}
-
-func (u *EmissionUniverse) immutableLoadedPackages() map[*types.Package]*pkgInfo {
-	if u == nil {
-		return map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
+	if !writable {
+		return snapshot
 	}
-	if u.loadedPackageSnapshot != nil {
-		return u.loadedPackageSnapshot
-	}
-	return u.buildLoadedPackages()
-}
-
-func (u *EmissionUniverse) loadedPackages() map[*types.Package]*pkgInfo {
-	snapshot := u.immutableLoadedPackages()
 	loaded := make(map[*types.Package]*pkgInfo, len(snapshot))
 	for pkg, info := range snapshot {
 		loaded[pkg] = info
@@ -6681,15 +6682,7 @@ func (u *EmissionUniverse) intrinsicWrapper(owner *ssa.Package, fn *ssa.Function
 	return wrapper, ok
 }
 
-func (u *EmissionUniverse) effectiveType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
-	return u.cachedEffectiveType(owner, fn, typ, false)
-}
-
-func (u *EmissionUniverse) effectiveGoLinknameType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
-	return u.cachedEffectiveType(owner, fn, typ, true)
-}
-
-func (u *EmissionUniverse) cachedEffectiveType(
+func (u *EmissionUniverse) effectiveType(
 	owner *preparedEmissionPackage,
 	fn *ssa.Function,
 	typ types.Type,
@@ -6734,6 +6727,10 @@ func (u *EmissionUniverse) cachedEffectiveType(
 	return effective
 }
 
+func (u *EmissionUniverse) effectiveGoLinknameType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
+	return u.effectiveType(owner, fn, typ, true)
+}
+
 func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, fn *ssa.Function) *context {
 	if owner == nil {
 		return nil
@@ -6746,7 +6743,7 @@ func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, 
 		goTyps:           owner.pkgTypes,
 		goPkg:            owner.ssa,
 		patches:          u.patches,
-		loaded:           u.immutableLoadedPackages(),
+		loaded:           u.loadedPackages(false),
 		linkOnceFns:      make(map[*ssa.Function]none),
 		emissionUniverse: u,
 	}
@@ -7420,7 +7417,7 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 			goTyps:           prepared.pkgTypes,
 			goPkg:            prepared.ssa,
 			patches:          u.patches,
-			loaded:           u.loadedPackages(),
+			loaded:           u.loadedPackages(true),
 			linkOnceFns:      make(map[*ssa.Function]none),
 			state:            state,
 			emissionUniverse: u,
@@ -8330,7 +8327,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 			goTyps:      owner.pkgTypes,
 			goPkg:       owner.ssa,
 			patches:     u.patches,
-			loaded:      u.loadedPackages(),
+			loaded:      u.loadedPackages(true),
 			linkOnceFns: make(map[*ssa.Function]none),
 		}
 		_, name, ftype := ctx.funcName(fn)

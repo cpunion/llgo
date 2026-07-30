@@ -384,7 +384,7 @@ func coroCallableEffectiveType(universe *EmissionUniverse, owner *ssa.Function, 
 	if prepared == nil {
 		return typ
 	}
-	return universe.effectiveType(prepared, owner, typ)
+	return universe.effectiveType(prepared, owner, typ, false)
 }
 
 func coroCallableTransportSchema(typ types.Type) []coroCallableTransportLeaf {

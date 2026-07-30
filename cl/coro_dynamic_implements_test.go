@@ -96,9 +96,9 @@ func Materialize() Type { return rtype{} }
 	if owner == nil || universe.loadedPackageSnapshot == nil || !universe.effectiveTypeCacheReady {
 		t.Fatal("prepared universe did not freeze effective-type cache inputs")
 	}
-	first := universe.effectiveType(owner, nil, receiver)
+	first := universe.effectiveType(owner, nil, receiver, false)
 	cacheSize := len(universe.effectiveTypes)
-	second := universe.effectiveType(owner, nil, receiver)
+	second := universe.effectiveType(owner, nil, receiver, false)
 	if first != second {
 		t.Fatal("repeated effective-type projection did not reuse the frozen type graph")
 	}
