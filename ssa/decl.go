@@ -246,10 +246,11 @@ type aFunction struct {
 	nextDeferID      uintptr
 	recov            BasicBlock
 
-	params   []Type
-	freeVars Expr
-	base     int // base = 1 if hasFreeVars; base = 0 otherwise
-	hasVArg  bool
+	params     []Type
+	freeVars   Expr
+	base       int // base = 1 if hasFreeVars; base = 0 otherwise
+	hasVArg    bool
+	background Background
 
 	fakeUses   []llvm.Value
 	fakeUseSet map[llvm.Value]struct{}
@@ -277,6 +278,7 @@ func (p Package) NewFuncEx(name string, sig *types.Signature, bg Background, has
 	fn := llvm.AddFunction(p.mod, name, t.ll)
 	if bg == InGo {
 		fn.AddFunctionAttr(p.nullPointerIsValidAttr)
+		p.Prog.markWasmResumeFunction(fn)
 		// Keep frame pointers so the runtime can walk real stacks (FP chain)
 		// for Callers/panic tracebacks instead of shadow-stack bookkeeping.
 		// Only where that unwinder exists: on embedded targets the attribute
@@ -292,7 +294,7 @@ func (p Package) NewFuncEx(name string, sig *types.Signature, bg Background, has
 	if p.isPreservedName(name) {
 		p.markLLVMUsed(fn)
 	}
-	ret := newFunction(fn, t, p, p.Prog, hasFreeVars)
+	ret := newFunction(fn, t, p, p.Prog, bg, hasFreeVars)
 	p.fns[name] = ret
 	return ret
 }
@@ -302,7 +304,7 @@ func (p Package) FuncOf(name string) Function {
 	return p.fns[name]
 }
 
-func newFunction(fn llvm.Value, t Type, pkg Package, prog Program, hasFreeVars bool) Function {
+func newFunction(fn llvm.Value, t Type, pkg Package, prog Program, bg Background, hasFreeVars bool) Function {
 	params, hasVArg := newParams(t, prog)
 	base := 0
 	if hasFreeVars {
@@ -315,6 +317,7 @@ func newFunction(fn llvm.Value, t Type, pkg Package, prog Program, hasFreeVars b
 		params:     params,
 		base:       base,
 		hasVArg:    hasVArg,
+		background: bg,
 		fakeUses:   make([]llvm.Value, 0, 4),
 		fakeUseSet: make(map[llvm.Value]struct{}),
 	}
