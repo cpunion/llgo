@@ -78,7 +78,16 @@ func (p *context) beginCoroRelocatedIntrinsicEmission(
 	return p.beginCoroSiteEmissionMode(instruction, placement, false, true)
 }
 
-func (p *context) beginCoroFunctionPreambleEmission() func() {
+type coroFunctionPreambleEmissionPhase uint8
+
+const (
+	coroFunctionPreambleEntry coroFunctionPreambleEmissionPhase = iota
+	coroFunctionPreambleLocalityGuards
+)
+
+func (p *context) beginCoroFunctionPreambleEmission(
+	phase coroFunctionPreambleEmissionPhase,
+) func() {
 	if p == nil || p.goFn == nil || p.compilation == nil || p.emissionUniverse == nil ||
 		p.rawPlainBody ||
 		!p.emissionUniverse.CompleteRuntimeABI() && !p.hasCoroPhysicalEmission() {
@@ -92,13 +101,25 @@ func (p *context) beginCoroFunctionPreambleEmission() func() {
 			panic(fmt.Errorf("coroutine function preamble in %q: %w", p.goFn.Name(), err))
 		}
 	}
-	helpers := plan.managedRuntimeHelpers
-	if !p.hasCoroPhysicalEmission() {
-		// A plain primary consumes its legacy-stack operations plus the
-		// managed helpers shared by both representations. The latter retain
-		// their managed call records, so keep the two frozen inventories
-		// separate in ProgramIR and join them only for this emission domain.
-		helpers = append(append([]string(nil), helpers...), plan.plainRuntimeHelpers...)
+	var helpers []string
+	var localityGuards []locality.Kind
+	switch phase {
+	case coroFunctionPreambleEntry:
+		if plan.logicalCallerEntry {
+			helpers = append(helpers, "PushCallerLocationFrame")
+		}
+		if !p.hasCoroPhysicalEmission() && plan.localContextEntry {
+			// A plain primary consumes its legacy-stack entry operation. A
+			// physical coroutine already runs with scheduler-owned context.
+			helpers = append(helpers, "EnterLocalContext")
+		}
+	case coroFunctionPreambleLocalityGuards:
+		if len(plan.localityGuards) != 0 {
+			helpers = append(helpers, "LocalPackageLogical")
+			localityGuards = plan.localityGuards
+		}
+	default:
+		panic("coroutine function preamble has an invalid emission phase")
 	}
 	observer := &coroSiteEmissionObserver{
 		function:                    p.goFn,
@@ -106,8 +127,8 @@ func (p *context) beginCoroFunctionPreambleEmission() func() {
 		placement:                   coroRuntimeHelperAtSource,
 		expected:                    make(map[string]none, len(helpers)),
 		seen:                        make(map[string]none, len(helpers)),
-		expectedLocalityGuards:      make(map[locality.Kind]none, len(plan.localityGuards)),
-		seenLocalityGuards:          make(map[locality.Kind]none, len(plan.localityGuards)),
+		expectedLocalityGuards:      make(map[locality.Kind]none, len(localityGuards)),
+		seenLocalityGuards:          make(map[locality.Kind]none, len(localityGuards)),
 		expectedLocalityDispatchers: make(map[*ssa.Function]none),
 		seenLocalityDispatchers:     make(map[*ssa.Function]none),
 		observeFrozenSite:           p.emissionUniverse.CompleteRuntimeABI(),
@@ -115,7 +136,7 @@ func (p *context) beginCoroFunctionPreambleEmission() func() {
 	for _, helper := range helpers {
 		observer.expected[helper] = none{}
 	}
-	for _, kind := range plan.localityGuards {
+	for _, kind := range localityGuards {
 		observer.expectedLocalityGuards[kind] = none{}
 	}
 	previous := p.coroEmissionSite()

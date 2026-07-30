@@ -1048,7 +1048,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	var ret = p.sourceBlock(block.Index)
 	b.SetBlock(ret)
 	if block.Index == 0 {
-		p.emitFunctionPreambleWithCoroPlan(b, block.Parent(), doModInit)
+		p.emitFunctionPreambleWithCoroPlan(b, block.Parent())
 	}
 	if block.Index == 0 && enableCallTracing && !strings.HasPrefix(fn.Name(), "github.com/goplus/llgo/runtime/internal/runtime.Print") {
 		b.Printf("call " + fn.Name() + "\n\x00")
@@ -1059,6 +1059,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	}
 
 	if doModInit {
+		p.initializeLocalGuardsWithCoroPlan(b)
 		if p.state != pkgInPatch {
 			p.applyEmbedInits(b)
 		}
