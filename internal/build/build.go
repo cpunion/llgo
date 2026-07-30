@@ -7931,22 +7931,27 @@ func releaseCoroPlanningScratchBeforeEmission(ctx *context) {
 // releaseBuiltPackageSource removes source-only ownership as soon as a staged
 // package has been serialized. Link traversal needs only the package identity
 // and Imports graph; all AST/type-checking inputs would otherwise accumulate
-// behind the final, usually largest, package.
+// behind the final, usually largest, package. A compact basename-only receipt
+// preserves target source-selection evidence without retaining either source
+// package graph.
 func releaseBuiltPackageSource(pkg *aPackage) {
 	if pkg == nil {
 		return
 	}
+	if pkg.sourceSelection == nil {
+		pkg.sourceSelection = freezePackageSourceSelection(pkg)
+	}
 	pkg.SSA = nil
-	pkg.AltPkg = nil
 	pkg.rewriteVars = nil
+	releaseLoadedPackageAnalysis(pkg.Package)
+	if alt := pkg.AltPkg; alt != nil {
+		alt.Types = nil
+		alt.TypesInfo = nil
+		alt.Syntax = nil
+		releaseLoadedPackageAnalysis(alt.Package)
+	}
+	pkg.AltPkg = nil
 	if source := pkg.Package; source != nil {
-		source.Syntax = nil
-		source.TypesInfo = nil
-		source.TypesSizes = nil
-		source.Types = nil
-		source.Fset = nil
-		source.Errors = nil
-		source.TypeErrors = nil
 		source.GoFiles = nil
 		source.CompiledGoFiles = nil
 		source.OtherFiles = nil
@@ -7954,6 +7959,54 @@ func releaseBuiltPackageSource(pkg *aPackage) {
 		source.EmbedPatterns = nil
 		source.IgnoredFiles = nil
 	}
+}
+
+func releaseLoadedPackageAnalysis(source *packages.Package) {
+	if source == nil {
+		return
+	}
+	source.Syntax = nil
+	source.TypesInfo = nil
+	source.TypesSizes = nil
+	source.Types = nil
+	source.Fset = nil
+	source.Errors = nil
+	source.TypeErrors = nil
+}
+
+type packageSourceSelection struct {
+	goFiles    []string
+	altGoFiles []string
+}
+
+func freezePackageSourceSelection(pkg *aPackage) *packageSourceSelection {
+	if pkg == nil {
+		return nil
+	}
+	selection := &packageSourceSelection{}
+	if source := pkg.Package; source != nil {
+		selection.goFiles = selectedSourceBasenames(source.GoFiles, source.CompiledGoFiles)
+	}
+	if alt := pkg.AltPkg; alt != nil && alt.Package != nil {
+		selection.altGoFiles = selectedSourceBasenames(alt.GoFiles, alt.CompiledGoFiles)
+	}
+	return selection
+}
+
+func selectedSourceBasenames(groups ...[]string) []string {
+	unique := make(map[string]none)
+	for _, paths := range groups {
+		for _, path := range paths {
+			name := filepath.Base(path)
+			if name == "." || name == string(filepath.Separator) || name == "" {
+				continue
+			}
+			unique[strings.Clone(name)] = none{}
+		}
+	}
+	names := slices.Collect(maps.Keys(unique))
+	slices.Sort(names)
+	return names
 }
 
 func releaseCoroFrontendForStagedBackend(ctx *context, pkgs []*aPackage) {
@@ -8266,8 +8319,9 @@ type aPackage struct {
 	// LinkSnapshot survives disposal of the package LLVM module. StagedBitcode
 	// is the verified presplit frontend result; coroutine/default lowering
 	// consumes it only after compilation-wide SSA state has been released.
-	LinkSnapshot  *packageLinkSnapshot
-	StagedBitcode string
+	LinkSnapshot    *packageLinkSnapshot
+	sourceSelection *packageSourceSelection
+	StagedBitcode   string
 
 	// CoroLibraryEffectRecords is producer-owned package metadata copied from
 	// cl before object emission. The package archiver publishes it through a

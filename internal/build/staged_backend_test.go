@@ -155,7 +155,28 @@ func TestReleaseBuiltPackageSourcePreservesLinkGraph(t *testing.T) {
 		GoFiles:         []string{"root.go"},
 		CompiledGoFiles: []string{"root.go"},
 	}
-	pkg := &aPackage{Package: source, rewriteVars: map[string]string{"v": "x"}}
+	altSource := &llpackages.Package{
+		ID:              "alt-root",
+		Name:            "main",
+		PkgPath:         "example.com/root",
+		Syntax:          []*ast.File{{}},
+		TypesInfo:       &types.Info{},
+		TypesSizes:      types.SizesFor("gc", runtime.GOARCH),
+		Types:           types.NewPackage("example.com/root", "main"),
+		Fset:            token.NewFileSet(),
+		GoFiles:         []string{"root_llgo.go"},
+		CompiledGoFiles: []string{"root_llgo.go"},
+	}
+	pkg := &aPackage{
+		Package: source,
+		AltPkg: &llpackages.Cached{
+			Package:   altSource,
+			Types:     altSource.Types,
+			TypesInfo: altSource.TypesInfo,
+			Syntax:    altSource.Syntax,
+		},
+		rewriteVars: map[string]string{"v": "x"},
+	}
 	releaseBuiltPackageSource(pkg)
 	if source.Syntax != nil || source.TypesInfo != nil || source.TypesSizes != nil || source.Types != nil || source.Fset != nil {
 		t.Fatalf("source-only state survived release: %+v", source)
@@ -163,6 +184,18 @@ func TestReleaseBuiltPackageSourcePreservesLinkGraph(t *testing.T) {
 	if source.ID != "root" || source.Name != "main" || source.PkgPath != "example.com/root" ||
 		source.ExportFile != "/root.a" || source.Imports["example.com/dep"] != dependency {
 		t.Fatalf("link identity/import graph changed: %+v", source)
+	}
+	if source.GoFiles != nil || source.CompiledGoFiles != nil {
+		t.Fatalf("selected source paths survived release: %+v", source)
+	}
+	if pkg.AltPkg != nil || altSource.Syntax != nil || altSource.TypesInfo != nil ||
+		altSource.TypesSizes != nil || altSource.Types != nil || altSource.Fset != nil {
+		t.Fatalf("alternate source graph survived release: %+v", pkg.AltPkg)
+	}
+	if pkg.sourceSelection == nil ||
+		!slices.Equal(pkg.sourceSelection.goFiles, []string{"root.go"}) ||
+		!slices.Equal(pkg.sourceSelection.altGoFiles, []string{"root_llgo.go"}) {
+		t.Fatalf("selected source receipt = %+v", pkg.sourceSelection)
 	}
 }
 

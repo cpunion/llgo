@@ -305,8 +305,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	if runtimePkg == nil {
 		t.Fatalf("%s acceptance build has no production runtime package %q", fixture.name, runtimePackage)
 	}
-	for _, path := range append(append([]string(nil), runtimePkg.GoFiles...), runtimePkg.CompiledGoFiles...) {
-		name := filepath.Base(path)
+	for _, name := range selectedPackageSourceBasenames(runtimePkg) {
 		if _, ok := required[name]; ok {
 			required[name] = true
 		}
@@ -329,7 +328,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	// and semaphore adapters. Merely retaining the owner-side symbols is not
 	// enough: selecting either legacy pthread adapter would hide a blocking
 	// native stack below the synchronous Go API.
-	if stdlibRuntimePkg == nil || stdlibRuntimePkg.AltPkg == nil {
+	if stdlibRuntimePkg == nil || len(selectedPackageAltSourceBasenames(stdlibRuntimePkg)) == 0 {
 		t.Fatalf("%s acceptance runtime has no selected llgo runtime patch package", fixture.name)
 	}
 	altRequired := map[string]bool{
@@ -348,8 +347,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"signal_llgo.go":        false,
 		"time_llgo_go123.go":    false,
 	}
-	for _, path := range stdlibRuntimePkg.AltPkg.GoFiles {
-		name := filepath.Base(path)
+	for _, name := range selectedPackageAltSourceBasenames(stdlibRuntimePkg) {
 		if _, ok := altRequired[name]; ok {
 			altRequired[name] = true
 		}
@@ -375,8 +373,8 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 			if pkg == nil || pkg.PkgPath != "time" {
 				continue
 			}
-			for _, path := range append(append([]string(nil), pkg.GoFiles...), pkg.CompiledGoFiles...) {
-				if filepath.Base(path) == sleepPatch {
+			for _, name := range selectedPackageSourceBasenames(pkg) {
+				if name == sleepPatch {
 					selected = true
 				}
 			}
@@ -517,6 +515,29 @@ func TestCoroStdlibSyncAcceptance(t *testing.T) {
 			}
 		})
 	}
+}
+
+func selectedPackageSourceBasenames(pkg Package) []string {
+	if pkg == nil {
+		return nil
+	}
+	if pkg.sourceSelection != nil {
+		return pkg.sourceSelection.goFiles
+	}
+	return selectedSourceBasenames(pkg.GoFiles, pkg.CompiledGoFiles)
+}
+
+func selectedPackageAltSourceBasenames(pkg Package) []string {
+	if pkg == nil {
+		return nil
+	}
+	if pkg.sourceSelection != nil {
+		return pkg.sourceSelection.altGoFiles
+	}
+	if pkg.AltPkg == nil {
+		return nil
+	}
+	return selectedSourceBasenames(pkg.AltPkg.GoFiles, pkg.AltPkg.CompiledGoFiles)
 }
 
 func parseCoroStdlibAcceptanceSelection(t *testing.T) map[string]bool {
