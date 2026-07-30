@@ -127,6 +127,57 @@ func TestParsePkgSyntaxReportsLocalityErrors(t *testing.T) {
 	}
 }
 
+func TestParsePkgSyntaxSkipsInvalidReceiver(t *testing.T) {
+	const source = `package p
+//go:linkname m C.invalid
+func ([]int) m() {}
+
+type T struct{}
+
+//go:linkname (*T).ParenPointer C.parenPointer
+func ((*T)) ParenPointer() {}
+
+//go:linkname (*T).InnerParenPointer C.innerParenPointer
+func (*(T)) InnerParenPointer() {}
+
+type G[P any] struct{}
+
+//go:linkname G.Value C.genericValue
+func (G[P]) Value() {}
+
+//go:linkname (*G).Pointer C.genericPointer
+func ((*G[P])) Pointer() {}
+
+//go:linkname F C.f
+func F()
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", source, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+	prog := llssa.NewProgram(nil)
+	pkg := types.NewPackage("example.com/p", "p")
+	if err := ParsePkgSyntax(prog, fset, pkg, []*ast.File{file}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := prog.Linkname(pkg.Path() + ".m"); ok {
+		t.Fatal("linkname was collected for an invalid receiver")
+	}
+	want := map[string]string{
+		pkg.Path() + ".(*T).ParenPointer":      "C.parenPointer",
+		pkg.Path() + ".(*T).InnerParenPointer": "C.innerParenPointer",
+		pkg.Path() + ".G.Value":                "C.genericValue",
+		pkg.Path() + ".(*G).Pointer":           "C.genericPointer",
+		pkg.Path() + ".F":                      "C.f",
+	}
+	for fullName, target := range want {
+		if got, ok := prog.Linkname(fullName); !ok || got != target {
+			t.Errorf("linkname %q = (%q,%v), want (%q,%v)", fullName, got, ok, target, true)
+		}
+	}
+}
+
 func TestPkgSymInfoAddSymAndInitLinknamesCoverage(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "p.go")
