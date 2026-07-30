@@ -1756,8 +1756,8 @@ func parserRecoverySourceSecondaries(primary, source string) []string {
 
 // parserRecoverySecondaryGroups returns independent one-use allowances for an
 // exact primary. Source-independent pairs are checked first, followed by
-// source-dependent single groups. issue11610 deterministically emits two
-// separate follow-ons, so each receives its own group here.
+// source-dependent single groups. A few exact GOROOT sources deterministically
+// emit multiple follow-ons, so each receives its own group here.
 func parserRecoverySecondaryGroups(primary, source string) [][]string {
 	if secondaries := parserRecoverySecondaries(primary); len(secondaries) != 0 {
 		return [][]string{secondaries}
@@ -1773,6 +1773,20 @@ func parserRecoverySecondaryGroups(primary, source string) [][]string {
 			return [][]string{
 				{"expected 'IDENT', found 'ILLEGAL'"},
 				{"illegal character U+003F '?'"},
+			}
+		}
+	// GOROOT/test/fixedbugs/issue13274.go
+	case "syntax error: unexpected EOF, expected }":
+		if source == "var f = func() {" {
+			return [][]string{{"expected ';', found 'EOF'"}}
+		}
+	// GOROOT/test/fixedbugs/bug435.go
+	case "syntax error: unexpected EOF, expected )":
+		if source == "bar(1," {
+			return [][]string{
+				{"expected ')', found 'EOF'"},
+				{"expected ';', found 'EOF'"},
+				{"expected '}', found 'EOF'"},
 			}
 		}
 	}

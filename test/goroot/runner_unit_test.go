@@ -911,6 +911,31 @@ var? // ERROR "invalid character U\+003F '\?'|invalid character 0x3f in input fi
 					file + ":2: illegal character U+003F '?'\n"
 			},
 		},
+		{
+			name: "function literal at EOF",
+			source: `package p
+var f = func() { // ERROR "unexpected EOF|expected .*}.*"
+`,
+			output: func(file string) string {
+				return file + ":2: syntax error: unexpected EOF, expected }\n" +
+					file + ":2: expected ';', found 'EOF'\n" +
+					file + ":2: expected '}', found 'EOF'\n"
+			},
+		},
+		{
+			name: "call at EOF",
+			source: `package p
+func foo() {
+	bar(1, // ERROR "unexpected|missing|undefined"
+`,
+			output: func(file string) string {
+				return file + ":3: syntax error: unexpected EOF, expected )\n" +
+					file + ":3: expected ')', found 'EOF'\n" +
+					file + ":3: expected ';', found 'EOF'\n" +
+					file + ":3: expected '}', found 'EOF'\n" +
+					file + ":3: undefined: bar\n"
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1046,6 +1071,56 @@ func f() {
 		err := checkExpectedErrors(output, file, "case.go")
 		if err == nil || !strings.Contains(err.Error(), "expected boolean expression") {
 			t.Fatalf("err=%v, want recovery for a different source shape to remain", err)
+		}
+	})
+
+	t.Run("wrong EOF source shape", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "case.go")
+		source := `package p
+var g = func() { // ERROR "unexpected EOF"
+`
+		if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		output := file + ":2: syntax error: unexpected EOF, expected }\n" +
+			file + ":2: expected ';', found 'EOF'\n"
+		err := checkExpectedErrors(output, file, "case.go")
+		if err == nil || !strings.Contains(err.Error(), "expected ';', found 'EOF'") {
+			t.Fatalf("err=%v, want recovery for a different EOF source shape to remain", err)
+		}
+	})
+
+	t.Run("wrong EOF call source shape", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "case.go")
+		source := `package p
+func foo() {
+	baz(1, // ERROR "unexpected EOF"
+`
+		if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		output := file + ":3: syntax error: unexpected EOF, expected )\n" +
+			file + ":3: expected ')', found 'EOF'\n"
+		err := checkExpectedErrors(output, file, "case.go")
+		if err == nil || !strings.Contains(err.Error(), "expected ')', found 'EOF'") {
+			t.Fatalf("err=%v, want recovery for a different EOF call shape to remain", err)
+		}
+	})
+
+	t.Run("near-match EOF recovery diagnostic", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "case.go")
+		source := `package p
+var f = func() { // ERROR "unexpected EOF"
+`
+		if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		output := file + ":2: syntax error: unexpected EOF, expected }\n" +
+			file + ":2: expected ';', found 'EOF'\n" +
+			file + ":2: expected ';', found 'EOF'.\n"
+		err := checkExpectedErrors(output, file, "case.go")
+		if err == nil || !strings.Contains(err.Error(), "expected ';', found 'EOF'.") {
+			t.Fatalf("err=%v, want the near-match EOF recovery diagnostic to remain", err)
 		}
 	})
 
