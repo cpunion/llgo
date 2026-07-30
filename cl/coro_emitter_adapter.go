@@ -104,6 +104,11 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 	if call == nil {
 		panic("physical coroutine call dispatcher received a nil source call")
 	}
+	// Direct-await and descriptor-await recipes bypass the ordinary callEx
+	// path completely. Preserve source-level reflect registry requirements at
+	// this sole physical call dispatcher, before the logical target becomes a
+	// renamed coroutine entry.
+	p.pkg.NeedAbiInit |= reflectStaticCallABIInitKind(call.Common())
 	instructionPlan, planned := p.plannedCoroPhysicalControl(call)
 	if !planned {
 		panic("physical coroutine call has no frozen instruction plan")

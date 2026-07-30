@@ -37,12 +37,13 @@ import (
 
 func newEmissionABIDemandTestUniverse(testProg *emissionTestProgram, pkg emissionTestPackage) (*EmissionUniverse, *preparedEmissionPackage) {
 	owner := &preparedEmissionPackage{
-		identity: pkg.types.Path(),
-		ssa:      pkg.ssa,
-		files:    []*ast.File{pkg.file},
-		pkgPath:  pkg.types.Path(),
-		oldTypes: pkg.types,
-		pkgTypes: pkg.types,
+		identity:         pkg.types.Path(),
+		ssa:              pkg.ssa,
+		files:            []*ast.File{pkg.file},
+		pkgPath:          pkg.types.Path(),
+		oldTypes:         pkg.types,
+		pkgTypes:         pkg.types,
+		addrOfFieldAddrs: collectAddrOfFieldSelectors([]*ast.File{pkg.file}),
 	}
 	u := &EmissionUniverse{
 		goProg:   testProg.ssa,
@@ -52,6 +53,42 @@ func newEmissionABIDemandTestUniverse(testProg *emissionTestProgram, pkg emissio
 		aliases:  make(map[*ssa.Function]*ssa.Function),
 	}
 	return u, owner
+}
+
+func TestEmissionUniverseFunctionABIContextReusesOwnerSourceFacts(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/sourcefacts", `package sourcefacts
+type T struct{ Field int }
+func Address(value *T) *int { return &value.Field }
+`)
+	testProg.ssa.Build()
+	prog := ssatest.NewProgram(t, nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := universe.packages[pkg.ssa]
+	if len(owner.addrOfFieldAddrs) == 0 {
+		t.Fatal("package did not freeze address-of-field source facts")
+	}
+	// The immutable package fact, rather than owner.files, must be sufficient
+	// for every later per-function planning context.
+	owner.files = nil
+	ctx, err := universe.functionABIContext(pkg.ssa.Func("Address"), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctx.addrOfFieldAddrs) != len(owner.addrOfFieldAddrs) {
+		t.Fatalf("context address-of-field facts = %d; want frozen package facts %d", len(ctx.addrOfFieldAddrs), len(owner.addrOfFieldAddrs))
+	}
+	for position := range owner.addrOfFieldAddrs {
+		if _, ok := ctx.addrOfFieldAddrs[position]; !ok {
+			t.Fatalf("context omitted frozen address-of-field position %v", position)
+		}
+	}
 }
 
 func emissionABIDemandContains(typesList []types.Type, want types.Type) bool {

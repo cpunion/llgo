@@ -64,6 +64,9 @@ func (p *context) beginCoroPhysicalEmission(
 	if p.coroEmission != nil {
 		panic("nested coroutine physical emission session")
 	}
+	if p.coroPlainSite != nil {
+		panic("coroutine physical emission overlaps a plain source SitePlan observer")
+	}
 	session := &coroPhysicalEmissionSession{
 		phase:           coroPhysicalEmissionPrologue,
 		plan:            plan,
@@ -185,15 +188,22 @@ func (p *context) coroEmissionSourceBlock(index int) (llssa.BasicBlock, bool) {
 }
 
 func (p *context) coroEmissionSite() *coroSiteEmissionObserver {
-	if p == nil || p.coroEmission == nil {
+	if p == nil {
 		return nil
 	}
-	return p.coroEmission.site
+	if p.coroEmission != nil {
+		return p.coroEmission.site
+	}
+	return p.coroPlainSite
 }
 
 func (p *context) setCoroEmissionSite(site *coroSiteEmissionObserver) {
-	if p == nil || p.coroEmission == nil {
-		panic("coroutine source SitePlan observer escaped its physical emission session")
+	if p == nil {
+		panic("coroutine source SitePlan observer requires a compiler context")
 	}
-	p.coroEmission.site = site
+	if p.coroEmission != nil {
+		p.coroEmission.site = site
+		return
+	}
+	p.coroPlainSite = site
 }

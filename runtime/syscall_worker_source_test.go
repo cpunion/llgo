@@ -532,6 +532,32 @@ func TestDarwinInternalSyscallNetResolverWorkerTargetsAreExact(t *testing.T) {
 	}
 }
 
+func TestDarwinInternalSyscallARC4RandomWorkerTargetIsExact(t *testing.T) {
+	path := "internal/lib/internal/syscall/unix/arc4random_darwin_coro.go"
+	sourceBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(sourceBytes)
+	for _, required := range []string{
+		"//go:build darwin",
+		"//go:linkname libc_arc4random_buf_trampoline C.arc4random_buf",
+		"func libc_arc4random_buf_trampoline()",
+		"derive the worker ABI and caller coloring from the",
+		"exact sink without a source-level coroutine directive",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("%s lacks exact ARC4Random worker target marker %q", path, required)
+		}
+	}
+	if strings.Contains(source, "//llgo:coro") {
+		t.Errorf("%s retains a derivable coroutine directive", path)
+	}
+	if got := strings.Count(source, "//go:linkname "); got != 1 {
+		t.Errorf("%s linkname count = %d, want one exact target", path, got)
+	}
+}
+
 func TestDarwinReaddirWorkerTargetUsesArchitectureSymbol(t *testing.T) {
 	for path, symbol := range map[string]string{
 		"internal/lib/syscall/syscall_darwin_readdir_arm64_go126.go": "C.readdir_r",

@@ -285,6 +285,39 @@ func TestCollectLinknameByDocIgnoresOtherDirectives(t *testing.T) {
 	}
 }
 
+func TestParsePkgSyntaxAssignsDetachedLinknameByPackageScopeOperand(t *testing.T) {
+	const (
+		path = "example.com/detachedlink"
+		src  = `package detachedlink
+type handler struct{}
+//go:linkname badServeHTTP example.com/detachedlink.handler.ServeHTTP
+func (handler) ServeHTTP(int) int { return 1 }
+func badServeHTTP(handler, int) int
+`
+	)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "detached.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := (&types.Config{}).Check(path, fset, []*ast.File{file}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	if err := ParsePkgSyntax(prog, fset, pkg, []*ast.File{file}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := prog.Linkname(path + ".badServeHTTP"); !ok ||
+		got != path+".handler.ServeHTTP" {
+		t.Fatalf("detached package linkname = (%q,%t)", got, ok)
+	}
+	if _, attached := prog.Linkname(path + ".(handler).ServeHTTP"); attached {
+		t.Fatal("detached package linkname was incorrectly assigned to its adjacent method")
+	}
+}
+
 func TestBoolToUint8InvalidArgs(t *testing.T) {
 	ctx := &context{}
 	defer func() {

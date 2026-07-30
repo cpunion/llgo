@@ -311,6 +311,14 @@ func (p *context) omitUnemittedFunction(fn *ssa.Function) bool {
 			// for the canonical owner's package to emit the one physical body.
 			return true
 		}
+		if universe.CompleteRuntimeABI() && !p.ownsFunctionEmission(canonical) {
+			// Eager method-set enumeration can surface a promoted wrapper in
+			// every consumer package even though ProgramIR froze its one body
+			// under the declaring owner. The consumer still materializes an
+			// external declaration lazily at its actual reference; it must not
+			// schedule a second body initializer here.
+			return true
+		}
 	}
 	entry, err := p.resolveFunctionSymbol(fn)
 	if err != nil {

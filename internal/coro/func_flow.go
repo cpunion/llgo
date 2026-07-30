@@ -189,10 +189,11 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 			targetPlan.ID, targetPlan.External, targetPlan.Demand,
 		)
 	}
-	if targetPlan.Emission != EmitCoroutine || targetPlan.Primary != PrimaryCoroutine || targetPlan.FuncRep != DirectCoro ||
+	if targetPlan.Emission != EmitCoroutine || targetPlan.Primary != PrimaryCoroutine ||
+		(targetPlan.FuncRep != DirectCoro && targetPlan.FuncRep != Dispatch) ||
 		!targetPlan.Effect.Contains(YieldOnly) || callPlan.Rep != DirectCoro {
 		return nil, FunctionPlan{}, fmt.Errorf(
-			"target %q is not one preemptible direct coroutine primary (emission=%s primary=%s representation=%s effect=%s call-representation=%s)",
+			"target %q is not one preemptible direct-callable coroutine primary (emission=%s primary=%s representation=%s effect=%s call-representation=%s)",
 			targetPlan.ID, targetPlan.Emission, targetPlan.Primary, targetPlan.FuncRep, targetPlan.Effect, callPlan.Rep,
 		)
 	}
@@ -306,6 +307,87 @@ func (p *SSAPlan) ResolveManagedDispatchSpawn(call *ssa.Go) (SSACallPlan, error)
 		)
 	}
 	return callPlan, nil
+}
+
+// ResolveManagedInterfaceDispatchSpawn proves the receiver-aware counterpart
+// of ResolveManagedDispatchSpawn. The source callee is an interface value
+// rather than a scalar function descriptor; its itab Ifn_ word carries the
+// universal method descriptor and its interface data word is the descriptor
+// environment. Every exact target is still required to publish a coroutine
+// capability, while an open tail must carry the distinct managed-interface
+// certificate.
+func (p *SSAPlan) ResolveManagedInterfaceDispatchSpawn(call *ssa.Go) (SSACallPlan, error) {
+	if p == nil || call == nil || call.Common() == nil {
+		return SSACallPlan{}, fmt.Errorf("requires a compilation CallPlan")
+	}
+	common := call.Common()
+	if common.StaticCallee() != nil || !common.IsInvoke() || common.Method == nil {
+		return SSACallPlan{}, fmt.Errorf("managed interface spawn requires an interface invoke")
+	}
+	if _, ok := types.Unalias(common.Value.Type()).Underlying().(*types.Interface); !ok {
+		return SSACallPlan{}, fmt.Errorf("managed interface spawn receiver is not an interface")
+	}
+	sig := common.Signature()
+	if sig == nil || sig.Variadic() ||
+		typeParamListLen(sig.TypeParams()) != 0 || typeParamListLen(sig.RecvTypeParams()) != 0 {
+		return SSACallPlan{}, fmt.Errorf("managed interface spawn requires a non-variadic, non-generic method signature")
+	}
+	callPlan, ok := p.CallPlan(call)
+	if !ok {
+		return SSACallPlan{}, fmt.Errorf("spawn has no compilation CallPlan")
+	}
+	if callPlan.Kind != CallSpawn || callPlan.Rep != Dispatch {
+		return SSACallPlan{}, fmt.Errorf("requires a Dispatch spawn CallPlan, got kind=%v representation=%s", callPlan.Kind, callPlan.Rep)
+	}
+	if callPlan.Open && callPlan.Unresolved != UnknownManagedInterfaceDispatch {
+		return SSACallPlan{}, fmt.Errorf(
+			"open interface spawn is not certified as UnknownManagedInterfaceDispatch (unresolved=%v)",
+			callPlan.Unresolved,
+		)
+	}
+	for _, targetID := range callPlan.Targets {
+		target, found := p.Function(targetID)
+		if !found || target == nil {
+			return SSACallPlan{}, fmt.Errorf("interface spawn target %q is absent from the compilation plan", targetID)
+		}
+		targetPlan, found := p.FunctionPlan(target)
+		if !found || targetPlan.ID != targetID {
+			return SSACallPlan{}, fmt.Errorf("interface spawn target %q has no canonical function plan", targetID)
+		}
+		if targetPlan.External != Defined || targetPlan.Emission != EmitCoroutine ||
+			targetPlan.Primary != PrimaryCoroutine ||
+			(targetPlan.FuncRep != DirectCoro && targetPlan.FuncRep != Dispatch) ||
+			!targetPlan.Effect.Contains(YieldOnly) || !targetPlan.Demand.Contains(AsyncDemand) {
+			return SSACallPlan{}, fmt.Errorf(
+				"interface spawn target %q is not one demanded preemptible coroutine method (external=%s emission=%s primary=%s representation=%s effect=%s demand=%s)",
+				targetID, targetPlan.External, targetPlan.Emission, targetPlan.Primary,
+				targetPlan.FuncRep, targetPlan.Effect, targetPlan.Demand,
+			)
+		}
+		if target.Signature == nil || target.Signature.Recv() == nil {
+			return SSACallPlan{}, fmt.Errorf("interface spawn target %q is not a method", targetID)
+		}
+	}
+	owner := call.Parent()
+	ownerPlan, ok := p.FunctionPlan(owner)
+	if !ok || ownerPlan.Emission != EmitCoroutine || ownerPlan.Primary != PrimaryCoroutine ||
+		!ownerPlan.Effect.Contains(YieldOnly) || ownerPlan.Demand != AsyncDemand {
+		return SSACallPlan{}, fmt.Errorf(
+			"interface spawn owner is not one demanded preemptible coroutine primary (emission=%s primary=%s representation=%s demand=%s effect=%s)",
+			ownerPlan.Emission, ownerPlan.Primary, ownerPlan.FuncRep, ownerPlan.Demand, ownerPlan.Effect,
+		)
+	}
+	return callPlan, nil
+}
+
+// ResolveManagedSpawn selects the only descriptor domain admitted by the
+// source operand: receiver-aware itab descriptors for interface invokes, or
+// receiver-free function-value descriptors for every other managed spawn.
+func (p *SSAPlan) ResolveManagedSpawn(call *ssa.Go) (SSACallPlan, error) {
+	if call != nil && call.Common() != nil && call.Common().IsInvoke() {
+		return p.ResolveManagedInterfaceDispatchSpawn(call)
+	}
+	return p.ResolveManagedDispatchSpawn(call)
 }
 
 func typeParamListLen(params *types.TypeParamList) int {

@@ -100,6 +100,15 @@ func PointerEqual(first, second *Box) bool { return first == second }
 type ValueReceiver struct { Value uint32 }
 func (value ValueReceiver) Touch() { Sink += value.Value }
 func ValueReceiverCall(value *ValueReceiver) { value.Touch() }
+
+func StaticArrayRange(value *[3]int) {
+	for index := range *value { Sink += uint32(index) }
+}
+
+func NextArray() *[3]int { return nil }
+func EffectfulArrayRange() {
+	for index := range *NextArray() { Sink += uint32(index) }
+}
 `
 
 func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
@@ -127,9 +136,9 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s plan = %+v, present=%t; want may-unwind coroutine", name, functionPlan, ok)
 				}
 				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
-				wantPrepare, wantPayload := 1, 0
+				wantPrepare, wantPayload, wantWrapPayload, wantPanicPrepare := 1, 0, 0, 0
 				if name == "WithCleanup" {
-					wantPrepare, wantPayload = 0, 1
+					wantPrepare, wantPayload, wantPanicPrepare = 0, 1, 1
 				}
 				if got := strings.Count(body, "call void @"+coroFaultPrepareHookV1); got != wantPrepare {
 					t.Fatalf("%s nil-fault prepare calls = %d, want %d:\n%s", name, got, wantPrepare, body)
@@ -137,15 +146,33 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 				if got := strings.Count(body, "call void @"+coroFaultPayloadHookV1); got != wantPayload {
 					t.Fatalf("%s nil-fault payload calls = %d, want %d:\n%s", name, got, wantPayload, body)
 				}
+				if got := strings.Count(body, "call void @"+coroWrapNilPayloadHookV1); got != wantWrapPayload {
+					t.Fatalf("%s value-method payload calls = %d, want %d:\n%s", name, got, wantWrapPayload, body)
+				}
+				if got := strings.Count(body, "call void @"+coroPanicPrepareHookV1); got != wantPanicPrepare {
+					t.Fatalf("%s explicit panic prepare calls = %d, want %d:\n%s", name, got, wantPanicPrepare, body)
+				}
 				if !strings.Contains(body, "icmp eq ptr") || strings.Contains(body, "AssertNilDeref") {
 					t.Fatalf("%s did not use an inline pointer guard exclusively:\n%s", name, body)
 				}
 				if name != "WithCleanup" {
-					if hook := strings.Index(body, "call void @"+coroFaultPrepareHookV1); hook < 0 ||
+					hookName := coroFaultPrepareHookV1
+					if hook := strings.Index(body, "call void @"+hookName); hook < 0 ||
 						!strings.Contains(body[:hook], "store i16 5") || !strings.Contains(body[:hook], "store i16 4") {
 						t.Fatalf("%s did not publish Panic/FinalSuspended before its hook:\n%s", name, body)
 					}
 				}
+			}
+
+			staticRange := requireCoroPhysicalFunction(t, module, "foo.StaticArrayRange").String()
+			if strings.Contains(staticRange, coroFaultPrepareHookV1) ||
+				strings.Contains(staticRange, "AssertNilDeref") {
+				t.Fatalf("static array range evaluated its type-only pointer dereference:\n%s", staticRange)
+			}
+			effectfulRange := requireCoroPhysicalFunction(t, module, "foo.EffectfulArrayRange").String()
+			if strings.Count(effectfulRange, "call void @"+coroFaultPrepareHookV1) != 1 ||
+				strings.Contains(effectfulRange, "AssertNilDeref") {
+				t.Fatalf("effectful array range lost its structured pointer fault:\n%s", effectfulRange)
 			}
 
 			interfaceCompare := functions["InterfaceCompare"]
@@ -219,12 +246,14 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 			runCoroABITestPipeline(t, prog, module)
 			for _, name := range []string{"Nullable", "EmptyLoad", "WithCleanup", "ValueReceiverCall"} {
 				resume := module.NamedFunction("foo." + name + "$coro.resume")
-				wantPrepare, wantPayload := 1, 0
+				wantPrepare, wantPayload, wantWrapPayload, wantPanicPrepare := 1, 0, 0, 0
 				if name == "WithCleanup" {
-					wantPrepare, wantPayload = 0, 1
+					wantPrepare, wantPayload, wantPanicPrepare = 0, 1, 1
 				}
 				if resume.IsNil() || strings.Count(resume.String(), "call void @"+coroFaultPrepareHookV1) != wantPrepare ||
-					strings.Count(resume.String(), "call void @"+coroFaultPayloadHookV1) != wantPayload {
+					strings.Count(resume.String(), "call void @"+coroFaultPayloadHookV1) != wantPayload ||
+					strings.Count(resume.String(), "call void @"+coroWrapNilPayloadHookV1) != wantWrapPayload ||
+					strings.Count(resume.String(), "call void @"+coroPanicPrepareHookV1) != wantPanicPrepare {
 					t.Fatalf("post-split %s resume lost its nil-fault edge:\n%s", name, module.String())
 				}
 			}
@@ -570,6 +599,9 @@ func compileCoroImplicitNilFaultFixture(
 		"SliceFullLow":         ssaPkg.Func("SliceFullLow"),
 		"PointerEqual":         ssaPkg.Func("PointerEqual"),
 		"ValueReceiverCall":    ssaPkg.Func("ValueReceiverCall"),
+		"StaticArrayRange":     ssaPkg.Func("StaticArrayRange"),
+		"NextArray":            ssaPkg.Func("NextArray"),
+		"EffectfulArrayRange":  ssaPkg.Func("EffectfulArrayRange"),
 	}
 	roots := make(coro.Roots, 0, len(functions))
 	for _, function := range functions {

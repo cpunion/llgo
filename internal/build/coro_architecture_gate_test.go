@@ -121,7 +121,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	rawNoInitPlan:             2,
 	rawIntrinsicPlan:          2,
 	rawIntrinsicOpcode:        7,
-	rawIntrinsicShape:         12,
+	rawIntrinsicShape:         8,
 	rawWorkerCertificateStore: 5,
 	rawWorkerGraphStore:       10,
 	rawPatchRedirectStore:     6,

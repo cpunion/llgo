@@ -413,7 +413,7 @@ func TestNamedWebAssemblyChacha8UsesPureGoSourcePatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	chachaDir := filepath.Join(runtime.GOROOT(), "src", "internal", "chacha8rand")
-	patchFile := filepath.Join(chachaDir, "z_llgo_patch_block_freestanding_webassembly_llgo.go")
+	patchFile := filepath.Join(chachaDir, "z_llgo_patch_block_generic_llgo.go")
 	patch, ok := overlay[patchFile]
 	if !ok {
 		t.Fatalf("missing named WebAssembly chacha8rand source patch %s", patchFile)
@@ -458,13 +458,43 @@ func TestNativeWasmFrontendDoesNotDuplicateChacha8SourcePatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	chachaDir := filepath.Join(runtime.GOROOT(), "src", "internal", "chacha8rand")
-	patchFile := filepath.Join(chachaDir, "z_llgo_patch_block_freestanding_webassembly_llgo.go")
+	patchFile := filepath.Join(chachaDir, "z_llgo_patch_block_generic_llgo.go")
 	if _, ok := overlay[patchFile]; ok {
 		t.Fatalf("native wasm frontend selected the freestanding non-wasm chacha8rand patch %s", patchFile)
 	}
 	wasmSource := filepath.Join(chachaDir, "chacha8_wasm.go")
 	if replacement, ok := overlay[wasmSource]; ok {
 		t.Fatalf("native wasm frontend unexpectedly filtered its standard chacha8rand body:\n%s", replacement)
+	}
+}
+
+func TestNativeChacha8UsesPureGoSourcePatch(t *testing.T) {
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+		goos:   runtime.GOOS,
+		goarch: runtime.GOARCH,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chachaDir := filepath.Join(runtime.GOROOT(), "src", "internal", "chacha8rand")
+	patchFile := filepath.Join(chachaDir, "z_llgo_patch_block_generic_llgo.go")
+	patch, ok := overlay[patchFile]
+	if !ok {
+		t.Fatalf("missing native chacha8rand source patch %s", patchFile)
+	}
+	if !strings.Contains(string(patch), "block_generic(seed, blocks, counter)") {
+		t.Fatalf("native chacha8rand source patch does not call the standard generic implementation:\n%s", patch)
+	}
+	original := filepath.Join(chachaDir, "chacha8.go")
+	filtered := overlay[original]
+	parsed, err := parser.ParseFile(token.NewFileSet(), original, filtered, 0)
+	if err != nil {
+		t.Fatalf("parse native filtered chacha8rand source: %v", err)
+	}
+	for _, declaration := range parsed.Decls {
+		if function, ok := declaration.(*ast.FuncDecl); ok && function.Name.Name == "block" {
+			t.Fatalf("native chacha8rand source patch retained the original block declaration:\n%s", filtered)
+		}
 	}
 }
 

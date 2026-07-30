@@ -22,35 +22,27 @@ func kubeReflectTypeData(t reflect.Type) unsafe.Pointer {
 	return (*kubeReflectTypeInterface)(unsafe.Pointer(&t)).data
 }
 
-//llgo:coro noblock
 //go:linkname kubeReflectUnsafeNew reflect.unsafe_New
 func kubeReflectUnsafeNew(unsafe.Pointer) unsafe.Pointer
 
-//llgo:coro noblock
 //go:linkname kubeReflectTypedmemmove reflect.typedmemmove
 func kubeReflectTypedmemmove(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer)
 
-//llgo:coro noblock
 //go:linkname kubeReflectUnsafeNewArray reflect.unsafe_NewArray
 func kubeReflectUnsafeNewArray(unsafe.Pointer, int) unsafe.Pointer
 
-//llgo:coro noblock
 //go:linkname kubeReflectMakeMap reflect.makemap
 func kubeReflectMakeMap(unsafe.Pointer, int) unsafe.Pointer
 
-//llgo:coro noblock
 //go:linkname kubeReflectMapAccess reflect.mapaccess
 func kubeReflectMapAccess(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) unsafe.Pointer
 
-//llgo:coro noblock
 //go:linkname kubeReflectMapIterInit reflect.mapiterinit
 func kubeReflectMapIterInit(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer)
 
-//llgo:coro noblock
 //go:linkname kubeReflectMapIterNext reflect.mapiternext
 func kubeReflectMapIterNext(unsafe.Pointer)
 
-//llgo:coro noblock
 //go:linkname kubeReflectIfaceE2I reflect.ifaceE2I
 func kubeReflectIfaceE2I(unsafe.Pointer, any, unsafe.Pointer)
 

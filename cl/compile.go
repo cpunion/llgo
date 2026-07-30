@@ -183,13 +183,16 @@ type context struct {
 	debugDIVars          map[*types.Var]llssa.DIVar
 	debugAllocVars       map[*ssa.Alloc]*types.Var
 	runtimeCallerFuncs   map[*ssa.Function]bool
+	logicalCallerFuncs   map[*ssa.Function]bool
 	compilation          *Compilation
 	emissionUniverse     *EmissionUniverse
 	emissionOwner        *preparedEmissionPackage
 	cacheRegistration    bool // cached archive: skip observers; emitted IR is transient
 	pcLineSeq            uint64
 	coroEmission         *coroPhysicalEmissionSession
+	coroPlainSite        *coroSiteEmissionObserver
 	rawPlainBody         bool // compiling the legacy ABI variant of a managed function
+	coroOwnerBodySymbols map[string]none
 	// preservePatchedNamed keeps an alternate package's named type intact
 	// while constructing source-level ABI certificates. Ordinary codegen
 	// immediately lowers that replacement to its physical raw shape.
@@ -222,8 +225,6 @@ type context struct {
 	embedInits  []embedInit
 
 	trackCallerFrames bool
-	callerFrameMark   llssa.Expr
-
 	staticGlobalInits map[*ssa.Global]llssa.Expr
 	staticInitStores  map[*ssa.Store]none
 	staticInitInstrs  map[ssa.Instruction]none
@@ -742,17 +743,16 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		dbgEnabled := enableDbg
 		dbgSymsEnabled := enableDbgSyms && (f == nil || f.Origin() == nil)
 		p.inits = append(p.inits, func() {
-			oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldCallerFrameMark, oldRawPlainBody := p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.callerFrameMark, p.rawPlainBody
+			oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldRawPlainBody := p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.rawPlainBody
 			oldLocalityFunction := p.locality.function
 			p.fn = fn
 			p.goFn = f
 			p.patchOriginalInitIf = patchOriginalInitIf
 			p.rawPlainBody = rawPlain
-			p.callerFrameMark = llssa.Nil
 			p.locality.function = localityFunction{}
 			p.state = state // restore pkgState when compiling funcBody
 			defer func() {
-				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.callerFrameMark, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldCallerFrameMark, oldRawPlainBody
+				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldRawPlainBody
 				p.locality.function = oldLocalityFunction
 			}()
 			p.phis = nil
@@ -1041,10 +1041,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	var ret = p.sourceBlock(block.Index)
 	b.SetBlock(ret)
 	if block.Index == 0 {
-		p.enterExportedLocalContext(b)
-	}
-	if block.Index == 0 && p.shouldTrackCallerFrames() {
-		p.pushCallerLocationFrame(b, block.Parent())
+		p.emitFunctionPreambleWithCoroPlan(b, block.Parent(), doModInit)
 	}
 	if block.Index == 0 && enableCallTracing && !strings.HasPrefix(fn.Name(), "github.com/goplus/llgo/runtime/internal/runtime.Print") {
 		b.Printf("call " + fn.Name() + "\n\x00")
@@ -1055,7 +1052,6 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	}
 
 	if doModInit {
-		p.initializeLocalGuardsWithCoroPlan(b)
 		if p.state != pkgInPatch {
 			p.applyEmbedInits(b)
 		}
@@ -1497,6 +1493,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	}
 	switch v := iv.(type) {
 	case *ssa.Call:
+		p.recordCallerLocationForCall(b, &v.Call)
 		if value, handled := p.tryCompileCoroPatchInitRedirect(b, v); handled {
 			ret = value
 		} else if value, handled := p.tryCompileCoroRawPlainCall(b, v); handled {
@@ -1596,8 +1593,21 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.BinOp(v.Op, x, y)
 		}
 	case *ssa.UnOp:
+		if v.Op != token.ARROW {
+			p.recordPanicLocation(b, v.Pos())
+		}
 		physicalInstruction, physicalPlanned := physicalPlan()
 		if v.Op == token.MUL {
+			if physicalPlanned &&
+				physicalInstruction.recipe == coroPhysicalInstructionStaticArrayRangeDerefElided {
+				// ProgramIR has already proved that this is the type-only
+				// single-index range form. Preserve the legacy operand
+				// materialization contract (its pure SSA producers may already
+				// have been emitted), but form neither a load nor a nil fault.
+				observePhysical(coroPhysicalInstructionStaticArrayRangeDerefElided)
+				p.compileValue(b, v.X)
+				return
+			}
 			plannedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 			if _, ok := p.methodNilDerefChecks[v]; ok && !ssaValueProvenNonNilAt(v.X, v) {
 				if physicalPlanned && p.coroUsesExplicitStatusFaults() {
@@ -1620,7 +1630,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 			if isEffectfulArrayPointerDeref(v) && !plannedDeref {
 				x := p.compileValue(b, v.X)
-				p.recordPanicLocation(b, v.Pos())
 				b.AssertNilDeref(x)
 			}
 			if refs, ok := nonDebugReferrers(v); plannedDeref && ok && len(refs) == 0 {
@@ -1629,7 +1638,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				// memory effect. Let the frozen physical recipe either publish
 				// that fault or consume its checked address exactly once.
 				x := p.compileValue(b, v.X)
-				p.recordPanicLocation(b, v.Pos())
 				p.compileCoroPlannedDeref(b, v, x, physicalInstruction)
 				return
 			}
@@ -1637,7 +1645,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil {
 					if p.isLargeNonPointerValue(t) {
 						x := p.compileValue(b, v.X)
-						p.recordPanicLocation(b, v.Pos())
 						p.assertNilDerefBase(b, v.X)
 						b.AssertNilDeref(x)
 						return
@@ -1651,7 +1658,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					// Zero-length slice-to-array conversions can leave only
 					// an unused slice deref; preserve its required nil check.
 					x := p.compileValue(b, v.X)
-					p.recordPanicLocation(b, v.Pos())
 					p.assertNilDerefBase(b, v.X)
 					b.AssertNilDeref(x)
 					return
@@ -1677,9 +1683,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 		}
 		x := p.compileValue(b, v.X)
-		if v.Op != token.ARROW {
-			p.recordPanicLocation(b, v.Pos())
-		}
 		plannedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 		if plannedDeref {
 			x = p.compileCoroPlannedDeref(b, v, x, physicalInstruction)
@@ -1815,13 +1818,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		ret = b.Alloc(elem, heap)
 		p.debugAlloc(b, v, ret)
 	case *ssa.IndexAddr:
+		p.recordPanicLocation(b, v.Pos())
 		vx := v.X
 		if _, ok := p.isVArgs(vx); ok { // varargs: this is a varargs index
 			return
 		}
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
-		p.recordPanicLocation(b, v.Pos())
 		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIndexAddr {
 			observePhysical(coroPhysicalInstructionIndexAddr)
@@ -1899,6 +1902,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		idx := p.compileValue(b, v.Index)
 		ret = b.Lookup(x, idx, v.CommaOk)
 	case *ssa.Slice:
+		p.recordPanicLocation(b, v.Pos())
 		if makeSlice, ok := p.compileSyntheticMakeSlice(b, v); ok {
 			ret = makeSlice
 			break
@@ -1918,7 +1922,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if v.Max != nil {
 			max = p.compileValue(b, v.Max)
 		}
-		p.recordPanicLocation(b, v.Pos())
 		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSlice {
 			observePhysical(coroPhysicalInstructionSlice)
@@ -2098,6 +2101,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			panic(fmt.Sprintf("channel select selected incompatible frozen physical operation recipe %s", operation.operation))
 		}
 	case *ssa.SliceToArrayPointer:
+		p.recordPanicLocation(b, v.Pos())
 		t := p.type_(v.Type(), llssa.InGo)
 		x := p.compileValue(b, v.X)
 		physicalInstruction, physicalPlanned := physicalPlan()
@@ -2107,7 +2111,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				ret = b.SliceToArrayPointerUnchecked(x, t)
 				break
 			}
-			p.recordPanicLocation(b, v.Pos())
 			ret = p.compileCoroSliceToArrayPointer(b, v, x, t, physicalInstruction)
 			break
 		}
@@ -2122,7 +2125,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.SliceToArrayPointerUnchecked(x, t)
 			break
 		}
-		p.recordPanicLocation(b, v.Pos())
 		ret = b.SliceToArrayPointer(x, t)
 	default:
 		panic(fmt.Sprintf("compileInstrAndValue: unknown instr - %T\n", iv))
@@ -2407,9 +2409,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 				results[i] = p.compileValue(b, r)
 			}
 		}
-		if p.shouldTrackCallerFrames() {
-			p.popCallerLocationFrame(b)
-		}
+		p.popCallerLocationFrame(b)
 		p.leaveExportedLocalContext(b)
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
@@ -2441,6 +2441,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.recordPanicLocation(b, v.Pos())
 		b.MapUpdate(m, key, val)
 	case *ssa.Defer:
+		p.recordCallerLocationForCall(b, &v.Call)
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			if outcome.outcome != coroPhysicalOutcomeDeferRegister {
@@ -2456,11 +2457,13 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.callInstruction(b, p.blkInfos[v.Block().Index].Kind, v)
 	case *ssa.Go:
+		p.recordCallerLocationForCall(b, &v.Call)
 		if p.tryCompileCoroClosedStaticSpawn(b, v) {
 			return
 		}
 		p.callInstruction(b, llssa.Go, v)
 	case *ssa.RunDefers:
+		p.recordPanicLocation(b, v.Pos())
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			if outcome.outcome != coroPhysicalOutcomeRunDefers {
@@ -2470,9 +2473,9 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 			p.compileCoroRunDefers(b, v)
 			return
 		}
-		p.recordPanicLocation(b, v.Pos())
 		b.RunDefers()
 	case *ssa.Panic:
+		p.recordPanicLocation(b, v.Pos())
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			p.observeCoroPhysicalOutcome(v, outcome.outcome)
@@ -2487,7 +2490,6 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 			return
 		}
 		arg := p.compileValue(b, v.X)
-		p.recordPanicLocation(b, v.Pos())
 		b.Panic(arg)
 	case *ssa.Send:
 		ch := p.compileValue(b, v.Chan)
@@ -2558,7 +2560,31 @@ func (p *context) ownsFunctionEmission(v *ssa.Function) bool {
 	if v == nil {
 		return false
 	}
-	if v.Pkg == p.goPkg || v.Pkg == nil {
+	if p.emissionUniverse != nil && p.emissionOwner != nil &&
+		p.emissionUniverse.CompleteRuntimeABI() {
+		// The complete ProgramIR freezes one exact body owner key for every
+		// emitted instance (and multiple keys for intentional multi-owner
+		// generic/linkonce instances). x/tools' synthetic wrapper Pkg may name
+		// the consumer rather than the receiver's declaring package, so neither
+		// fn.Pkg nor receiver provenance is authoritative at emission time.
+		_, owns := p.emissionUniverse.coroProgramIR.siteOwners[emissionFunctionOwnerKey{
+			function: v,
+			owner:    p.emissionOwner,
+		}]
+		return owns
+	}
+	if v.Pkg == p.goPkg {
+		return true
+	}
+	if v.Pkg == nil {
+		// x/tools promoted wrappers and compiler-generated adapters have no
+		// SSA package even though the frozen universe assigns exactly one body
+		// owner. A consumer may reference their linkonce symbol, but must emit
+		// only a declaration; otherwise its body would consume the declaring
+		// package's ProgramIR under the consumer owner.
+		if p.emissionUniverse != nil && p.emissionOwner != nil {
+			return p.emissionUniverse.ownerOf(v) == p.emissionOwner
+		}
 		return true
 	}
 	// A patched package's original and alternate SSA packages share one LLVM
@@ -2700,7 +2726,11 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
 			return value
 		}
-		return p.compileRawFunctionValue(v)
+		value := p.compileRawFunctionValue(v)
+		if facade, handled := p.compileGoLinknameFunctionValueFacade(b, v, value); handled {
+			return facade
+		}
+		return value
 	case *ssa.Global:
 		varName := v.Name()
 		val := p.varOf(b, v)
@@ -3058,6 +3088,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 
 		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg),
 		runtimeCallerFuncs: runtimeCallerFuncSet(ct, pkg),
+		logicalCallerFuncs: runtimeLogicalCallerFuncSet(ct, pkg),
 	}
 	if opts.Compilation != nil {
 		ctx.emissionUniverse = opts.Compilation.EmissionUniverse
@@ -3099,12 +3130,18 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	if !ctx.skipall {
 		processPkg(ctx, ret, pkg)
 	}
+	if err := ctx.emitCoroFrozenOwnerBodies(ret); err != nil {
+		return nil, nil, err
+	}
 	for len(ctx.inits) > 0 {
 		inits := ctx.inits
 		ctx.inits = nil
 		for _, ini := range inits {
 			ini()
 		}
+	}
+	if err := ctx.validateCoroFrozenOwnerBodies(ret); err != nil {
+		return nil, nil, err
 	}
 	if fn := ctx.initAfter; fn != nil {
 		ctx.initAfter = nil
@@ -3161,6 +3198,78 @@ func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
 		return aFn.Expr
 	}
 	return pyFn.Expr
+}
+
+// compileGoLinknameFunctionValueFacade preserves the declared Go type when a
+// bodyless go:linkname function is used as a value. The exact paired
+// definition owns the executable symbol and may use typed pointers (or a
+// flattened method receiver) where the declaration deliberately exposes an
+// unsafe.Pointer facade. Direct calls can consume that ABI-compatible symbol
+// immediately, but boxing the implementation's type would publish the wrong
+// reflect.Type and recursively materialize implementation-only ABI metadata.
+//
+// The first ChangeType treats the already-proven symbol as an opaque function
+// pointer with the declaration's physical signature. The second constructs the
+// ordinary {code, env} Go function value. No adapter body or second callable
+// entry is introduced.
+func (p *context) compileGoLinknameFunctionValueFacade(
+	b llssa.Builder, source *ssa.Function, value llssa.Expr,
+) (llssa.Expr, bool) {
+	if source == nil || value.IsNil() {
+		return llssa.Expr{}, false
+	}
+	signature, paired, err := p.goLinknameFunctionValueSignature(source)
+	if !paired {
+		return llssa.Expr{}, false
+	}
+	if err != nil {
+		panic(err)
+	}
+	physical := p.prog.PhysicalFuncDecl(signature, llssa.InGo)
+	code := b.ChangeType(p.prog.Type(physical, llssa.InC), value)
+	closure := p.prog.Type(signature, llssa.InGo)
+	return b.ChangeType(closure, code), true
+}
+
+// goLinknameFunctionValueSignature returns the exact declared signature whose
+// Go value semantics survive an active bodyless go:linkname alias. Calls use
+// the paired definition's symbol; values retain this source-side type facade.
+func (p *context) goLinknameFunctionValueSignature(
+	source *ssa.Function,
+) (*types.Signature, bool, error) {
+	universe := p.immutableEmissionUniverse()
+	if universe == nil || source == nil {
+		return nil, false, nil
+	}
+	pair, paired := universe.goLinknameDefinitions[source]
+	if !paired {
+		return nil, false, nil
+	}
+	canonical, resolved := universe.Resolve(source)
+	if !resolved || canonical == nil || canonical != pair.definition {
+		return nil, true, fmt.Errorf(
+			"go:linkname function-value facade %q has no exact active definition",
+			source.String(),
+		)
+	}
+	if pair.declarationOwner == nil {
+		return nil, true, fmt.Errorf(
+			"go:linkname function-value facade %q has no frozen declaration owner",
+			source.String(),
+		)
+	}
+	sourceContext, err := universe.functionABIContext(source, pair.declarationOwner)
+	if err != nil {
+		return nil, true, fmt.Errorf("go:linkname function-value facade %q: %w", source.String(), err)
+	}
+	signature, ok := sourceContext.patchType(source.Signature).(*types.Signature)
+	if !ok {
+		return nil, true, fmt.Errorf(
+			"go:linkname function-value facade %q has a non-signature declared type",
+			source.String(),
+		)
+	}
+	return signature, true, nil
 }
 
 func initFnNameOfHasPatch(name string) string {
@@ -3672,11 +3781,26 @@ func (p *context) resolveLinkname(name string) string {
 // for method-table references and compileFuncDecl definitions. The ordinary
 // SetResolveLinkname path remains unchanged for report-only codegen.
 func (p *context) resolveMethodLinkname(_ string, method *types.Func, sig *types.Signature) string {
-	if name, managed := p.resolveManagedInterfaceRawMethodSymbol(method, sig); managed {
+	if name, planned := p.resolveCoroRawMethodSymbol(method, sig); planned {
 		return name
 	}
 	fn := p.resolveInterfaceMethodSSA(method, sig)
-	return p.mustFunctionSymbol(fn).name
+	entry, err := p.resolveFunctionSymbol(fn)
+	if err == nil {
+		err = entry.checkSupported()
+	}
+	if err != nil {
+		owner := "<no function>"
+		if p.goFn != nil {
+			owner = p.goFn.String()
+		}
+		panic(fmt.Errorf(
+			"resolve ABI method linkname %q with signature %s while compiling %q through target %q (demand sources: %s): %w",
+			method.FullName(), sig, owner, fn.String(),
+			coroDemandReferenceTrace(p.immutableEmissionUniverse(), fn), err,
+		))
+	}
+	return entry.name
 }
 
 // checkCompileMethods ensures that methods referenced from ABI method tables

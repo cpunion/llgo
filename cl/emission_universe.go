@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/token"
 	"go/types"
 	"path"
 	"path/filepath"
@@ -139,6 +140,12 @@ type preparedEmissionPackage struct {
 	metadataOnly      bool
 	assemblyNoSuspend map[string]CoroAssemblyNoSuspendProof
 	rawDataSymbols    CoroRawDataSymbolProfile
+	// Source-only lowering facts are package invariants. Emission planning
+	// creates a lightweight context for every reachable function; rescanning
+	// the complete package AST in each context is quadratic on standard-library
+	// packages.
+	addrOfFieldAddrs        map[token.Pos]none
+	sourceUsesRuntimeCaller bool
 }
 
 // EmissionUniverse is an immutable set of canonical exact SSA functions and
@@ -152,6 +159,7 @@ type EmissionUniverse struct {
 	completeRuntimeABI bool
 	logicalLocality    bool
 	coroCapabilities   coro.TargetCapabilities
+	callerTracking     *CallerTracking
 	packages           map[*ssa.Package]*preparedEmissionPackage
 	byTypes            map[*types.Package]*preparedEmissionPackage
 	typeOwners         map[*types.Package]map[*preparedEmissionPackage]none
@@ -647,6 +655,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		completeRuntimeABI:      options.CompleteRuntimeABI,
 		logicalLocality:         options.LogicalLocality,
 		coroCapabilities:        options.CoroTargetCapabilities,
+		callerTracking:          NewCallerTracking(),
 		packages:                make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
 		byTypes:                 make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
 		typeOwners:              make(map[*types.Package]map[*preparedEmissionPackage]none, len(inputs)*3),
@@ -740,7 +749,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			return nil, fmt.Errorf("prepare emission universe: duplicate stable package identity %q", identity)
 		}
 		identities[identity] = input.SSA
-		scan := &context{prog: prog, skips: make(map[string]none)}
+		scan := &context{prog: prog, goTyps: input.SSA.Pkg, skips: make(map[string]none)}
 		scan.initFiles(pkgPath, input.Files, input.SSA.Pkg.Name() == "C")
 		assemblyNoSuspend, err := cloneCoroAssemblyNoSuspendProofs(input.AssemblyNoSuspendProofs)
 		if err != nil {
@@ -751,21 +760,23 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			return nil, fmt.Errorf("prepare emission universe: package %q: %w", identity, err)
 		}
 		prepared := &preparedEmissionPackage{
-			order:             i,
-			identity:          identity,
-			ssa:               input.SSA,
-			files:             append([]*ast.File(nil), input.Files...),
-			pkgPath:           pkgPath,
-			oldTypes:          input.SSA.Pkg,
-			pkgTypes:          input.SSA.Pkg,
-			skips:             cloneNoneMap(scan.skips),
-			skipall:           scan.skipall,
-			winners:           make(map[string]*ssa.Function),
-			selected:          make(map[*ssa.Function]none),
-			fromPatch:         make(map[*ssa.Function]bool),
-			metadataOnly:      input.MetadataOnly,
-			assemblyNoSuspend: assemblyNoSuspend,
-			rawDataSymbols:    rawDataSymbols,
+			order:                   i,
+			identity:                identity,
+			ssa:                     input.SSA,
+			files:                   append([]*ast.File(nil), input.Files...),
+			pkgPath:                 pkgPath,
+			oldTypes:                input.SSA.Pkg,
+			pkgTypes:                input.SSA.Pkg,
+			skips:                   cloneNoneMap(scan.skips),
+			skipall:                 scan.skipall,
+			winners:                 make(map[string]*ssa.Function),
+			selected:                make(map[*ssa.Function]none),
+			fromPatch:               make(map[*ssa.Function]bool),
+			metadataOnly:            input.MetadataOnly,
+			assemblyNoSuspend:       assemblyNoSuspend,
+			rawDataSymbols:          rawDataSymbols,
+			addrOfFieldAddrs:        collectAddrOfFieldSelectors(input.Files),
+			sourceUsesRuntimeCaller: filesUseRuntimeCaller(input.Files),
 		}
 		if patch, ok := patches[pkgPath]; ok {
 			if patch.Alt == nil || patch.Types == nil {
@@ -1890,6 +1901,18 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	}
+	if shape, shaped := coroExactIntrinsicShapeForOpcode(opcode); shaped {
+		if err := verifyCoroExactIntrinsicCallShape(
+			direct,
+			shape.name,
+			shape.signature,
+			shape.parameters,
+			shape.result,
+		); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return semantics, true, nil
+	}
 	switch opcode {
 	case llgoCstr:
 		args := direct.Common().Args
@@ -2171,69 +2194,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
-	case llgoCoroPark:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroPark",
-			"func(pointer, uint32)",
-			[]coroIntrinsicTypeShape{
-				{anyPointer: true},
-				{basic: types.Uint32},
-			},
-			nil,
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
 	case llgoCoroYield:
 		if err := verifyCoroExactVoidIntrinsicCallSite(direct, "llgo.coroYield"); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineYield, true, nil
-	case llgoCoroTimerSleep:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroTimerSleep",
-			"func(int64)",
-			[]coroIntrinsicTypeShape{{basic: types.Int64}},
-			nil,
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
-	case llgoCoroPollWait:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroPollWait",
-			"func(uintptr, int32, uint32, int64) uint32",
-			[]coroIntrinsicTypeShape{
-				{basic: types.Uintptr},
-				{basic: types.Int32},
-				{basic: types.Uint32},
-				{basic: types.Int64},
-			},
-			&coroIntrinsicTypeShape{basic: types.Uint32},
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
-	case llgoCoroControlledTimerWait:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroControlledTimerWait",
-			"func(unsafe.Pointer, *uint32, *uint32, uint32, int64) uint32",
-			[]coroIntrinsicTypeShape{
-				{basic: types.UnsafePointer},
-				{pointerElement: types.Uint32},
-				{pointerElement: types.Uint32},
-				{basic: types.Uint32},
-				{basic: types.Int64},
-			},
-			&coroIntrinsicTypeShape{basic: types.Uint32},
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
 	case llgoCoroCriticalEnter, llgoCoroCriticalExit:
 		if err := verifyCoroExactVoidIntrinsicCallSite(direct, "llgo coroutine critical marker"); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
@@ -2256,23 +2221,6 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		// been reselected. Unlock likewise exposes already queued peers at one
 		// explicit scheduler boundary.
 		return CoroIntrinsicCallInlineYield, true, nil
-	case llgoCoroFFICall:
-		if err := verifyCoroExactIntrinsicCallShape(
-			direct,
-			"llgo.coroFFICall",
-			"func(pointer, unsafe.Pointer, unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer)",
-			[]coroIntrinsicTypeShape{
-				{anyPointer: true},
-				{anyPointer: true},
-				{anyPointer: true},
-				{anyPointer: true},
-				{anyPointer: true},
-			},
-			nil,
-		); err != nil {
-			return CoroIntrinsicCallUnsupported, true, err
-		}
-		return CoroIntrinsicCallInlineSuspend, true, nil
 	case llgoCoroHostOperation:
 		if !u.coroCapabilities.HostOperation() {
 			return CoroIntrinsicCallUnsupported, true, nil
@@ -2771,6 +2719,10 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// stringData projects the already-rooted source string data word. It
 		// emits no call and owns no scheduler state.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoBoolToUint8:
+		// boolToUint8 lowers to one select between the constant byte values
+		// zero and one. The compiler consumes the declaration completely.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoAllocaCStr, llgoAllocaCStrs:
 		// The C-string allocation intrinsics lower their size arithmetic and
 		// storage directly, then call runtime.AllocU/CStrCopy in a physical
@@ -3028,6 +2980,83 @@ type coroIntrinsicTypeShape struct {
 	pointerDepth   uint8
 	sliceElement   types.BasicKind
 	anyPointer     bool
+}
+
+type coroExactIntrinsicShape struct {
+	name       string
+	signature  string
+	parameters []coroIntrinsicTypeShape
+	result     *coroIntrinsicTypeShape
+}
+
+// coroExactIntrinsicShapeForOpcode is the single data-driven boundary for
+// intrinsics whose complete recipe is their exact scalar/pointer signature.
+// Intrinsics with constant operands, runtime-helper requirements, target
+// capabilities, or other semantic facts retain their dedicated verifier.
+func coroExactIntrinsicShapeForOpcode(opcode int) (coroExactIntrinsicShape, bool) {
+	switch opcode {
+	case llgoBoolToUint8:
+		return coroExactIntrinsicShape{
+			name:       "llgo.boolToUint8",
+			signature:  "func(bool) uint8",
+			parameters: []coroIntrinsicTypeShape{{basic: types.Bool}},
+			result:     &coroIntrinsicTypeShape{basic: types.Uint8},
+		}, true
+	case llgoCoroPark:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroPark",
+			signature: "func(pointer, uint32)",
+			parameters: []coroIntrinsicTypeShape{
+				{anyPointer: true},
+				{basic: types.Uint32},
+			},
+		}, true
+	case llgoCoroTimerSleep:
+		return coroExactIntrinsicShape{
+			name:       "llgo.coroTimerSleep",
+			signature:  "func(int64)",
+			parameters: []coroIntrinsicTypeShape{{basic: types.Int64}},
+		}, true
+	case llgoCoroPollWait:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroPollWait",
+			signature: "func(uintptr, int32, uint32, int64) uint32",
+			parameters: []coroIntrinsicTypeShape{
+				{basic: types.Uintptr},
+				{basic: types.Int32},
+				{basic: types.Uint32},
+				{basic: types.Int64},
+			},
+			result: &coroIntrinsicTypeShape{basic: types.Uint32},
+		}, true
+	case llgoCoroControlledTimerWait:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroControlledTimerWait",
+			signature: "func(unsafe.Pointer, *uint32, *uint32, uint32, int64) uint32",
+			parameters: []coroIntrinsicTypeShape{
+				{basic: types.UnsafePointer},
+				{pointerElement: types.Uint32},
+				{pointerElement: types.Uint32},
+				{basic: types.Uint32},
+				{basic: types.Int64},
+			},
+			result: &coroIntrinsicTypeShape{basic: types.Uint32},
+		}, true
+	case llgoCoroFFICall:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroFFICall",
+			signature: "func(pointer, unsafe.Pointer, unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer)",
+			parameters: []coroIntrinsicTypeShape{
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+			},
+		}, true
+	default:
+		return coroExactIntrinsicShape{}, false
+	}
 }
 
 func (shape coroIntrinsicTypeShape) matches(typ types.Type) bool {
@@ -4219,6 +4248,19 @@ func functionNeedsLinkOnce(fn *ssa.Function) bool {
 		}
 	}
 	return false
+}
+
+// functionHasCoalesciblePhysicalDefinition is strictly an LLVM symbol/linkage
+// rule. Generic instances may be emitted by several importing packages.
+// Syntax-free SSA wrappers may likewise be embedded beside ABI descriptors in
+// several independently-built archives. Both therefore need one
+// owner-independent physical symbol.
+//
+// This does not merge logical FunctionIDs: separately loaded package variants
+// can contain equivalent wrappers which link to one coalesced definition while
+// retaining distinct analysis provenance.
+func functionHasCoalesciblePhysicalDefinition(fn *ssa.Function) bool {
+	return functionNeedsLinkOnce(fn) || isEmissionGeneratedWrapper(fn)
 }
 
 func (u *EmissionUniverse) samePromotedWrapperLinkIdentity(owner *preparedEmissionPackage, left, right *ssa.Function) bool {
@@ -5646,8 +5688,16 @@ func managedKeyFunctionType(key string) int {
 
 func (u *EmissionUniverse) promotedWrapperPhysicalName(prepared *preparedEmissionPackage, fn *ssa.Function, state pkgState, legacyName, patchedSignature string) (string, error) {
 	ownerIdentity := prepared.identity
-	if functionNeedsLinkOnce(fn) {
+	physicalBase := legacyName
+	coalescible := functionHasCoalesciblePhysicalDefinition(fn)
+	if coalescible {
 		ownerIdentity = "linkonce"
+		// funcName prefixes a Pkg-nil structural wrapper with the current
+		// compilation package. That spelling is useful only as a diagnostic and
+		// necessarily differs between independent descriptor users. Put
+		// coalescible wrappers in a compiler-private namespace; the complete
+		// structural digest below remains the collision-resistant identity.
+		physicalBase = "__llgo$generated$" + wrapperKind(fn) + "$" + fn.Name()
 	}
 	physicalKey := emissionFunctionOwnerKey{function: fn, owner: prepared}
 	if frozen := u.physicalNames[physicalKey]; frozen != "" {
@@ -5670,9 +5720,9 @@ func (u *EmissionUniverse) promotedWrapperPhysicalName(prepared *preparedEmissio
 		structuralSignature,
 		deterministicSSABody(fn),
 	)
-	name := legacyName + "$llgo$promoted$v1$" + emissionDigest(discriminator)
+	name := physicalBase + "$llgo$promoted$v1$" + emissionDigest(discriminator)
 	u.physicalNames[physicalKey] = name
-	if functionNeedsLinkOnce(fn) {
+	if coalescible {
 		if previous := u.linkOnceNames[fn]; previous != "" && previous != name {
 			return "", fmt.Errorf("prepare emission universe: linkonce wrapper %q has owner-dependent physical names %q and %q", fn.Name(), previous, name)
 		}
@@ -7139,7 +7189,7 @@ func (u *EmissionUniverse) checkPackage(pkg *ssa.Package, files []*ast.File, pat
 	if hasPatch != prepared.hasPatch || hasPatch && (patch.Alt != prepared.patch.Alt || patch.Types != prepared.patch.Types) {
 		return nil, fmt.Errorf("package %q patch changed after emission-universe preparation", prepared.pkgPath)
 	}
-	scan := &context{prog: u.prog, skips: make(map[string]none)}
+	scan := &context{prog: u.prog, goTyps: prepared.pkgTypes, skips: make(map[string]none)}
 	scan.initFiles(prepared.pkgPath, files, prepared.pkgTypes.Name() == "C")
 	if scan.skipall != prepared.skipall || !sameNoneMap(scan.skips, prepared.skips) {
 		return nil, fmt.Errorf("package %q skip directives changed after emission-universe preparation", prepared.pkgPath)

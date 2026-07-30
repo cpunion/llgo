@@ -60,7 +60,6 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 	if dispatch == nil || !coroInterfaceDispatchNeedsAwait(dispatch) {
 		panic("coroutine interface dispatch has an incomplete frozen physical control recipe")
 	}
-	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 	// Preserve source evaluation order and the existing nil-interface check.
 	intf := p.compileValue(b, dispatch.receiver)

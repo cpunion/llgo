@@ -3552,10 +3552,25 @@ func classifyUnknownCall(config SSAConfig, caller *ssa.Function, call ssa.CallIn
 		return 0, fmt.Errorf("coro: unknown call in %q: interface invoke requires the distinct UnknownManagedInterfaceDispatch transport certificate", caller.Name())
 	}
 	if target == UnknownManagedInterfaceDispatch {
-		direct, ordinary := call.(*ssa.Call)
-		if !ordinary || direct == nil || common == nil || common.StaticCallee() != nil ||
+		switch carrier := call.(type) {
+		case *ssa.Call:
+			if carrier == nil {
+				return 0, fmt.Errorf("coro: unknown call in %q: UnknownManagedInterfaceDispatch has a nil call carrier", caller.Name())
+			}
+		case *ssa.Defer:
+			if carrier == nil {
+				return 0, fmt.Errorf("coro: unknown call in %q: UnknownManagedInterfaceDispatch has a nil defer carrier", caller.Name())
+			}
+		case *ssa.Go:
+			if carrier == nil {
+				return 0, fmt.Errorf("coro: unknown call in %q: UnknownManagedInterfaceDispatch has a nil spawn carrier", caller.Name())
+			}
+		default:
+			return 0, fmt.Errorf("coro: unknown call in %q: UnknownManagedInterfaceDispatch requires an interface call, defer, or spawn", caller.Name())
+		}
+		if common == nil || common.StaticCallee() != nil ||
 			!common.IsInvoke() || common.Method == nil {
-			return 0, fmt.Errorf("coro: unknown call in %q: UnknownManagedInterfaceDispatch requires an ordinary interface invoke", caller.Name())
+			return 0, fmt.Errorf("coro: unknown call in %q: UnknownManagedInterfaceDispatch requires an interface invoke", caller.Name())
 		}
 		sig := common.Signature()
 		if sig == nil || sig.Variadic() ||

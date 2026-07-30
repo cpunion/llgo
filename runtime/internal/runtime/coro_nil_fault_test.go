@@ -123,10 +123,14 @@ func appendTestBoundsInt(out []byte, value int64, signed bool) []byte {
 }
 
 func AllocZ(size uintptr) unsafe.Pointer {
-	if size != unsafe.Sizeof(boundsError{}) {
+	switch size {
+	case unsafe.Sizeof(boundsError{}):
+		return unsafe.Pointer(new(boundsError))
+	case unsafe.Sizeof(plainError("")):
+		return unsafe.Pointer(new(plainError))
+	default:
 		panic("unexpected parameterized fault allocation size")
 	}
-	return unsafe.Pointer(new(boundsError))
 }
 
 type _type struct{}
@@ -322,6 +326,35 @@ func TestCoroFaultPayloadV1KindsAreStableDistinctAndAllocationFree(t *testing.T)
 	if got, want := coroSliceConvertErrorV1.Error(),
 		"runtime error: cannot convert slice to array or pointer to array: length too short"; got != want {
 		t.Fatalf("static slice-conversion message = %q, want %q", got, want)
+	}
+}
+
+func TestCoroPanicWrapPayloadV1PreservesExactMessage(t *testing.T) {
+	recvType := "example.org/pair.Box[int, example.org/item.Value]"
+	methodName := "Read"
+	var typeWord, dataWord unsafe.Pointer
+	__llgo_coro_wrap_nil_payload_v1(
+		unsafe.Pointer(unsafe.StringData(recvType)),
+		uintptr(len(recvType)),
+		unsafe.Pointer(unsafe.StringData(methodName)),
+		uintptr(len(methodName)),
+		unsafe.Pointer(&typeWord),
+		unsafe.Pointer(&dataWord),
+	)
+	if typeWord == nil || dataWord == nil {
+		t.Fatalf("value-method nil payload = (%p, %p)", typeWord, dataWord)
+	}
+	got := *(*plainError)(dataWord)
+	want := plainError(
+		"value method example.org/pair.Box[int, example.org/item.Value].Read " +
+			"called using nil *Box[int, example.org/item.Value] pointer",
+	)
+	if got != want {
+		t.Fatalf("value-method nil payload = %q, want %q", got, want)
+	}
+	wantType, _ := coroErrorFaultPayloadV1(&coroPanicWrapErrorTypeV1)
+	if typeWord != wantType {
+		t.Fatalf("value-method nil type word = %p, want %p", typeWord, wantType)
 	}
 }
 

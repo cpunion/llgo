@@ -103,7 +103,6 @@ func (p *context) compileCoroRawPlainTargetCall(
 	if function == nil || kind != goFunc {
 		panic(fmt.Errorf("raw/plain invocation target %q did not resolve to a Go raw body", target.Name()))
 	}
-	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 	args := p.compileValues(b, call.Call.Args, fnNormal)
 	return b.Call(function.Expr, args...)

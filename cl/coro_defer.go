@@ -1847,6 +1847,11 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		if !siteEmissionActive {
 			finishSite = s.beginRelocatedSiteEmission(p, site)
 		}
+		deferred := site.plan.instruction
+		if deferred == nil {
+			panic("coroutine deferred builtin lost its source Defer instruction")
+		}
+		p.recordCallerLocationForCall(b, &deferred.Call)
 		switch site.plan.builtin {
 		case "delete", "copy", "clear", "print", "println":
 			b.Call(llssa.Builtin(site.plan.builtin), args...)

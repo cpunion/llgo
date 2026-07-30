@@ -64,6 +64,12 @@ func TestShouldSkipPlan9AsmSFilesForTarget(t *testing.T) {
 	if shouldSkipPlan9AsmSFilesForTarget(&Config{Target: "cortex-m-qemu", Goarch: "arm"}, "internal/bytealg") {
 		t.Fatal("only syscall asm should be skipped by embedded arm rule")
 	}
+	if !shouldSkipPlan9AsmSFilesForTarget(&Config{Goarch: "arm64"}, "internal/chacha8rand") {
+		t.Fatal("native chacha8rand assembly should be replaced by its pure-Go source patch")
+	}
+	if shouldSkipPlan9AsmSFilesForTarget(&Config{Goarch: "wasm"}, "internal/chacha8rand") {
+		t.Fatal("native wasm chacha8rand should retain its standard Go implementation")
+	}
 	wasip2 := &Config{
 		Target:                  "wasip2",
 		Goarch:                  "arm",
@@ -154,7 +160,7 @@ printf '{"Dir":"%s","SFiles":["asm_amd64.s"]}\n' "$PACKAGE_DIR"
 	}
 }
 
-func TestPkgSFilesNamedWebAssemblySkipsChachaStubBeforeGenericFallback(t *testing.T) {
+func TestPkgSFilesNonWasmChachaUsesSourcePatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses a shell script as a fake go command")
 	}
@@ -174,24 +180,29 @@ printf '{"Dir":"%s","SFiles":["chacha8_stub.s"]}\n' "$PACKAGE_DIR"
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PACKAGE_DIR", pkgDir)
 
-	ctx := &context{
-		conf: &packages.Config{Env: os.Environ()},
-		buildConf: &Config{
+	for _, conf := range []*Config{
+		{
 			Target:                  "wasip2",
 			Goos:                    "linux",
 			Goarch:                  "arm",
 			resolvedTargetBuildTags: []string{"tinygo.wasm", "wasip2"},
 		},
-	}
-	got, err := pkgSFiles(ctx, &packages.Package{
-		ID:      "internal/chacha8rand",
-		PkgPath: "internal/chacha8rand",
-		Dir:     pkgDir,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("named WebAssembly chacha8rand SFiles = %v, want none", got)
+		{Goos: runtime.GOOS, Goarch: runtime.GOARCH},
+	} {
+		ctx := &context{
+			conf:      &packages.Config{Env: os.Environ()},
+			buildConf: conf,
+		}
+		got, err := pkgSFiles(ctx, &packages.Package{
+			ID:      "internal/chacha8rand",
+			PkgPath: "internal/chacha8rand",
+			Dir:     pkgDir,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("%s/%s chacha8rand SFiles = %v, want none", conf.Goos, conf.Goarch, got)
+		}
 	}
 }

@@ -52,6 +52,12 @@ var coroSliceConvertErrorV1 = error(errorString("cannot convert slice to array o
 // scalar payload object; the interface type word is shared and immutable.
 var coroBoundsErrorTypeV2 = error(boundsError{})
 
+// coroPanicWrapErrorTypeV1 roots the dynamic interface type used by the
+// operand-carrying value-method nil panic below. Unlike the fixed V1 faults,
+// each occurrence has source-specific receiver and method text, so only its
+// type word can be shared.
+var coroPanicWrapErrorTypeV1 = error(plainError(""))
+
 const (
 	coroFaultNilV1 uint32 = iota + 1
 	coroFaultIndexBoundsV1
@@ -86,6 +92,62 @@ func coroErrorFaultPayloadV1(value *error) (typeWord, dataWord unsafe.Pointer) {
 		return nil, nil
 	}
 	return unsafe.Pointer(payload.tab._type), payload.data
+}
+
+func panicWrapNilPointerError(recvType, methodName string) plainError {
+	recvType = panicWrapRecvType(recvType)
+	return plainError("value method " + recvType + "." + methodName +
+		" called using nil *" + panicWrapTypeName(recvType) + " pointer")
+}
+
+func panicWrapRecvType(recvType string) string {
+	const commandLineArguments = "command-line-arguments."
+	if len(recvType) > len(commandLineArguments) && recvType[:len(commandLineArguments)] == commandLineArguments {
+		return "main." + recvType[len(commandLineArguments):]
+	}
+	return recvType
+}
+
+func panicWrapTypeName(recvType string) string {
+	depth := 0
+	for i := len(recvType) - 1; i >= 0; i-- {
+		switch recvType[i] {
+		case ']':
+			depth++
+		case '[':
+			if depth > 0 {
+				depth--
+			}
+		case '.':
+			if depth == 0 {
+				return recvType[i+1:]
+			}
+		}
+	}
+	return recvType
+}
+
+func coroFaultStringV1(data unsafe.Pointer, length uintptr) (string, bool) {
+	if length == 0 {
+		return "", true
+	}
+	if data == nil || length > uintptr(^uint(0)>>1) {
+		return "", false
+	}
+	return unsafe.String((*byte)(data), length), true
+}
+
+func coroPanicWrapPayloadV1(recvType, methodName string) (typeWord, dataWord unsafe.Pointer) {
+	typeWord, _ = coroErrorFaultPayloadV1(&coroPanicWrapErrorTypeV1)
+	if typeWord == nil {
+		return nil, nil
+	}
+	payload := (*plainError)(AllocZ(unsafe.Sizeof(plainError(""))))
+	if payload == nil {
+		return nil, nil
+	}
+	*payload = panicWrapNilPointerError(recvType, methodName)
+	return typeWord, unsafe.Pointer(payload)
 }
 
 func coroFaultPayloadV1(kind uint32) (typeWord, dataWord unsafe.Pointer) {
@@ -206,6 +268,37 @@ func __llgo_coro_fault_payload_v2(kind uint32, arg0 uint64, arg1 uintptr, typeOu
 	typeWord, dataWord := coroFaultPayloadV2(kind, arg0, arg1)
 	if typeWord == nil {
 		coroRuntimeAbort("invalid parameterized coroutine fault payload")
+	}
+	*(*unsafe.Pointer)(typeOut) = typeWord
+	*(*unsafe.Pointer)(dataOut) = dataWord
+}
+
+// __llgo_coro_wrap_nil_payload_v1 materializes the exact panic value required
+// by a value-method wrapper without unwinding through a live LLVM coroutine
+// frame. The compiler passes the two already evaluated string descriptors as
+// scalar words; this hook owns the persistent plainError object subsequently
+// transported by the ordinary explicit-panic ABI and direct recover path.
+//
+//export __llgo_coro_wrap_nil_payload_v1
+func __llgo_coro_wrap_nil_payload_v1(
+	recvData unsafe.Pointer,
+	recvLen uintptr,
+	methodData unsafe.Pointer,
+	methodLen uintptr,
+	typeOut unsafe.Pointer,
+	dataOut unsafe.Pointer,
+) {
+	if typeOut == nil || dataOut == nil {
+		coroRuntimeAbort("invalid coroutine value-method nil payload output")
+	}
+	recvType, recvOK := coroFaultStringV1(recvData, recvLen)
+	methodName, methodOK := coroFaultStringV1(methodData, methodLen)
+	if !recvOK || !methodOK {
+		coroRuntimeAbort("invalid coroutine value-method nil metadata")
+	}
+	typeWord, dataWord := coroPanicWrapPayloadV1(recvType, methodName)
+	if typeWord == nil || dataWord == nil {
+		coroRuntimeAbort("invalid coroutine value-method nil payload")
 	}
 	*(*unsafe.Pointer)(typeOut) = typeWord
 	*(*unsafe.Pointer)(dataOut) = dataWord

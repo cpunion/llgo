@@ -1174,7 +1174,7 @@ func validateCoroPhysicalABIForOwner(
 		return fail("requires one defined SSA body")
 	}
 	if emitShadowStackInstrumentation {
-		return fail("legacy thread-local shadow-stack instrumentation is incompatible with stackless coroutine suspension")
+		return fail("unfrozen caller instrumentation is incompatible with stackless coroutine suspension")
 	}
 	managedDispatchTarget := managedDispatch && plan.FuncRep == coro.Dispatch &&
 		fn.Signature != nil && fn.Signature.Recv() == nil
@@ -1249,7 +1249,7 @@ func validateCoroPhysicalABIForOwner(
 	programEntry := programRun && isCoroProgramManagedEntry(fn)
 	genericInstance := coroMaterializedGenericCallable(fn)
 	boundMethodWrapper := false
-	if managedDispatchTarget && strings.HasPrefix(fn.Synthetic, "bound method wrapper for ") {
+	if strings.HasPrefix(fn.Synthetic, "bound method wrapper for ") {
 		if err := validateCoroExactBoundMethodWrapper(fn); err != nil {
 			return fail("invalid bound method wrapper: %v", err)
 		}
@@ -2683,7 +2683,7 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 		return fail("requires one defined SSA body")
 	}
 	if emitShadowStackInstrumentation {
-		return fail("legacy thread-local shadow-stack instrumentation is incompatible with stackless coroutine suspension")
+		return fail("unfrozen caller instrumentation is incompatible with stackless coroutine suspension")
 	}
 	if plan.Emission != coro.EmitCoroutine || plan.FuncRep != coro.DirectCoro {
 		return fail("requires a direct coroutine emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
@@ -3164,6 +3164,9 @@ func coroLeafABIDirective(fn *ssa.Function) string {
 	}
 	for _, comment := range decl.Doc.List {
 		text := strings.TrimSpace(comment.Text)
+		if detachedPackageGoLinknameDirective(fn, decl, text) {
+			continue
+		}
 		for _, prefix := range []string{
 			"//go:linkname", "//llgo:link", "// llgo:link", "//export", "//go:wasmexport", "//go:wasmimport",
 		} {
@@ -3218,6 +3221,9 @@ func coroRawABIDirective(fn *ssa.Function, universe *EmissionUniverse) (string, 
 		}
 		text := strings.TrimSpace(comment.Text)
 		if text == "//go:linkname" || strings.HasPrefix(text, "//go:linkname ") {
+			if detachedPackageGoLinknameDirective(fn, decl, text) {
+				continue
+			}
 			if exactManagedSyntax && (managedDefinition || managedLinkname) && text == managedDirective {
 				continue
 			}
@@ -3235,6 +3241,39 @@ func coroRawABIDirective(fn *ssa.Function, universe *EmissionUniverse) (string, 
 		}
 	}
 	return "", nil
+}
+
+// detachedPackageGoLinknameDirective reports the Go source form whose first
+// operand names another exact package-scope function or variable. Directives
+// are assigned by that operand even when their comment group is attached to a
+// method for documentation, as used by current GOROOT compatibility aliases.
+// A missing or ambiguous package object remains attached/fail-closed.
+func detachedPackageGoLinknameDirective(
+	fn *ssa.Function,
+	decl *ast.FuncDecl,
+	text string,
+) bool {
+	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || decl == nil {
+		return false
+	}
+	fields := strings.Fields(text)
+	if len(fields) != 3 || fields[0] != "//go:linkname" {
+		return false
+	}
+	_, attachedName := astFuncName("", decl)
+	if fields[1] == attachedName {
+		return false
+	}
+	object := fn.Pkg.Pkg.Scope().Lookup(fields[1])
+	switch object := object.(type) {
+	case *types.Func:
+		signature, _ := object.Type().(*types.Signature)
+		return signature != nil && signature.Recv() == nil
+	case *types.Var:
+		return true
+	default:
+		return false
+	}
 }
 
 func attachedManagedGoLinknameDirective(decl *ast.FuncDecl) (string, bool) {
@@ -3309,7 +3348,7 @@ func validateCoroPhysicalConsumersCapabilities(
 						if !managedDispatch {
 							return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor spawn requires the v1 descriptor dispatch capability")
 						}
-						if _, err := plan.ResolveManagedDispatchSpawn(spawn); err != nil {
+						if _, err := plan.ResolveManagedSpawn(spawn); err != nil {
 							return coroLeafInstructionError(fn, function.Plan, instr, "unsupported managed descriptor spawn: "+err.Error())
 						}
 					default:

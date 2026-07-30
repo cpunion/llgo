@@ -30,8 +30,8 @@ import (
 // with any other shape is a compiler-plan violation, never permission to fall
 // back to the legacy runtime.Panic call.
 func (p *context) compileCoroExplicitStatusPanic(b llssa.Builder, instruction *ssa.Panic) {
-	body := p.coroBody()
-	if instruction == nil || body == nil || !p.coroEmissionExplicitStatus() || b == nil || b.Func != p.fn {
+	if instruction == nil || !p.hasCoroPhysicalBody() ||
+		!p.coroEmissionExplicitStatus() || b == nil || b.Func != p.fn {
 		goName, llvmName := "<nil>", "<nil>"
 		if p.goFn != nil {
 			goName = p.goFn.String()
@@ -41,12 +41,28 @@ func (p *context) compileCoroExplicitStatusPanic(b llssa.Builder, instruction *s
 		}
 		panic(fmt.Errorf(
 			"explicit-status panic in %q (%s) escaped its exact physical coroutine body (active=%t builder-matches=%t)",
-			llvmName, goName, body != nil, b != nil && b.Func == p.fn,
+			llvmName, goName, p.hasCoroPhysicalBody(), b != nil && b.Func == p.fn,
 		))
 	}
 	value := p.compileValue(b, instruction.X)
 	typeWord := b.EfaceType(value)
 	dataWord := b.InterfaceData(value)
+	p.compileCoroTerminalPanicPair(b, typeWord, dataWord)
+}
+
+// compileCoroTerminalPanicPair is the single physical-body capability
+// boundary for an already materialized Go panic pair. Explicit panic,
+// parameterized language faults, and compiler/runtime payload adapters all
+// share the same cleanup/recover and terminal publication behavior.
+func (p *context) compileCoroTerminalPanicPair(
+	b llssa.Builder,
+	typeWord, dataWord llssa.Expr,
+) {
+	body := p.coroBody()
+	if body == nil || !p.coroEmissionExplicitStatus() ||
+		b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {
+		panic("terminal coroutine panic pair escaped its explicit-status physical body")
+	}
 	if body.cleanup == nil {
 		body.panic(b, typeWord, dataWord)
 	} else {

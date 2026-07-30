@@ -1319,12 +1319,14 @@ var Value any = struct{ sharedwrapperbase.Base }{}
 	}
 	oneName := universe.physicalNames[emissionFunctionOwnerKey{function: shared, owner: oneOwner}]
 	twoName := universe.physicalNames[emissionFunctionOwnerKey{function: shared, owner: twoOwner}]
-	if oneName == "" || twoName == "" || oneName == twoName {
-		t.Fatalf("owner-scoped physical names = %q, %q; want two frozen names", oneName, twoName)
+	if oneName == "" || twoName == "" || oneName != twoName {
+		t.Fatalf("coalescible physical names = %q, %q; want one owner-independent name", oneName, twoName)
 	}
 	linkIdentity := universe.linkIdentities[shared]
-	if !strings.Contains(linkIdentity, oneOwner.identity) || !strings.Contains(linkIdentity, twoOwner.identity) {
-		t.Fatalf("multi-owner link identity %q omits an owner", linkIdentity)
+	if !strings.Contains(linkIdentity, "cl-emission-multi-owner-link-v1") ||
+		!strings.Contains(linkIdentity, oneOwner.identity) ||
+		!strings.Contains(linkIdentity, twoOwner.identity) {
+		t.Fatalf("exact wrapper logical link identity %q omits its use owners", linkIdentity)
 	}
 }
 

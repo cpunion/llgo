@@ -36,6 +36,7 @@ const (
 	coroPhysicalInstructionOrdinary coroPhysicalInstructionRecipe = iota
 	coroPhysicalInstructionFieldAddr
 	coroPhysicalInstructionDeref
+	coroPhysicalInstructionStaticArrayRangeDerefElided
 	coroPhysicalInstructionStore
 	coroPhysicalInstructionIndexAddr
 	coroPhysicalInstructionIndex
@@ -61,6 +62,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "fieldaddr"
 	case coroPhysicalInstructionDeref:
 		return "deref"
+	case coroPhysicalInstructionStaticArrayRangeDerefElided:
+		return "static-array-range-deref-elided"
 	case coroPhysicalInstructionStore:
 		return "store"
 	case coroPhysicalInstructionIndexAddr:
@@ -604,6 +607,17 @@ func planCoroPhysicalInstruction(
 		}
 	case *ssa.UnOp:
 		if instruction.Op == token.MUL {
+			// A single-index range over an array or *array uses only the
+			// statically known length. When its operand contains no call or
+			// receive, Go does not evaluate the dereference at all. Freeze that
+			// source-language decision before the frame-retention proof can
+			// conservatively turn every nullable pointer load into a faulting
+			// physical Deref.
+			if skipUnusedArrayDeref(instruction) &&
+				!isEffectfulArrayPointerDeref(instruction) {
+				result.recipe = coroPhysicalInstructionStaticArrayRangeDerefElided
+				break
+			}
 			if audit.derefRequiresImplicitNilFault(instruction) {
 				result.recipe = coroPhysicalInstructionDeref
 				result.nilGuard = true
@@ -1326,7 +1340,13 @@ func planCoroPhysicalControlInstruction(
 				result.controlFailure = "managed descriptor spawn requires the v1 descriptor dispatch capability"
 				return
 			}
-			if _, err := whole.ResolveManagedDispatchSpawn(instruction); err != nil {
+			if instruction.Common() != nil && instruction.Common().IsInvoke() &&
+				(capabilities.managedInterface == nil ||
+					!capabilities.managedInterface.acceptsCall(instruction)) {
+				result.controlFailure = "managed interface spawn requires the receiver-aware descriptor capability"
+				return
+			}
+			if _, err := whole.ResolveManagedSpawn(instruction); err != nil {
 				result.controlFailure = "unsupported managed descriptor spawn: " + err.Error()
 				return
 			}

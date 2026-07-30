@@ -542,24 +542,11 @@ func pkgSFiles(ctx *context, pkg *packages.Package) ([]string, error) {
 		return nil, fmt.Errorf("go list -json %s: parse: %w", pkg.PkgPath, err)
 	}
 
-	// Target-specific source islands own the decision before the generic
-	// chacha8 fallback below. In particular, named WebAssembly replaces block
-	// with a pure-Go source patch and must not re-admit chacha8_stub.s merely
-	// because that file exists in GOROOT.
+	// Target-specific source islands own the decision before selecting a
+	// translated assembly file.
 	if shouldSkipPlan9AsmSFilesForTarget(ctx.buildConf, pkg.PkgPath) {
 		ctx.sfilesCache[pkg.ID] = nil
 		return nil, nil
-	}
-	// internal/chacha8rand has highly optimized arch asm on amd64/arm64.
-	// Until full vector lowering lands, force the generic stub entry, which
-	// tail-jumps to block_generic and preserves package behavior.
-	if pkg.PkgPath == "internal/chacha8rand" && lp.Dir != "" {
-		stub := filepath.Join(lp.Dir, "chacha8_stub.s")
-		if _, err := os.Stat(stub); err == nil {
-			paths := []string{stub}
-			ctx.sfilesCache[pkg.ID] = paths
-			return paths, nil
-		}
 	}
 	paths := selectedSFiles(lp.Dir, lp.SFiles)
 	ctx.sfilesCache[pkg.ID] = paths
@@ -597,7 +584,16 @@ func plan9AsmSFiles(files []string) []string {
 }
 
 func shouldSkipPlan9AsmSFilesForTarget(conf *Config, pkgPath string) bool {
-	if conf == nil || conf.Target == "" || conf.Goarch != "arm" {
+	if conf == nil {
+		return false
+	}
+	// LLGo's source patch exposes the standard pure-Go block_generic call to
+	// SSA on every non-wasm frontend. This avoids both unsupported vector
+	// lowering and an opaque assembly-to-Go tail-call boundary.
+	if pkgPath == "internal/chacha8rand" && conf.Goarch != "wasm" {
+		return true
+	}
+	if conf.Target == "" || conf.Goarch != "arm" {
 		return false
 	}
 	if pkgPath == "syscall" {
@@ -606,9 +602,7 @@ func shouldSkipPlan9AsmSFilesForTarget(conf *Config, pkgPath string) bool {
 	if !configHasBuildTag(conf, "tinygo.wasm") {
 		return false
 	}
-	// Named WebAssembly source patches replace both selected ARM assembly
-	// islands: chacha8rand uses its upstream pure-Go block implementation,
-	// while internal/runtime/syscall/linux fails closed with ENOSYS instead of
-	// emitting a Linux SWI into a freestanding WebAssembly module.
-	return pkgPath == "internal/chacha8rand" || pkgPath == "internal/runtime/syscall/linux"
+	// The internal/runtime/syscall/linux patch fails closed with ENOSYS instead
+	// of emitting a Linux SWI into a freestanding WebAssembly module.
+	return pkgPath == "internal/runtime/syscall/linux"
 }

@@ -19,6 +19,7 @@ package cl
 import (
 	"fmt"
 	"slices"
+	"sort"
 
 	"github.com/goplus/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
@@ -328,7 +329,25 @@ func (ir *coroProgramIR) functionPreamble(ctx *context) (coroFunctionPreamblePla
 		}
 		owner = physical.owner
 	}
-	return ir.functionPreambleForOwner(function, owner)
+	plan, err := ir.functionPreambleForOwner(function, owner)
+	if err == nil {
+		return plan, nil
+	}
+	available := make([]string, 0)
+	for key := range ir.siteOwners {
+		if key.function == function && key.owner != nil {
+			available = append(available, key.owner.identity)
+		}
+	}
+	sort.Strings(available)
+	current := "<nil>"
+	if owner != nil {
+		current = owner.identity
+	}
+	return coroFunctionPreamblePlan{}, fmt.Errorf(
+		"%w (function=%s, current owner=%q, frozen owners=%v)",
+		err, coroEntryFunctionDiagnostic(function), current, available,
+	)
 }
 
 func (ir *coroProgramIR) functionPreambleForOwner(

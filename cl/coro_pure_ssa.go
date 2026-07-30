@@ -2557,10 +2557,11 @@ func (a *coroPhysicalPureSSAAudit) validateBuiltin(call *ssa.Call) string {
 		}
 		if a.allowImplicitNilFault {
 			// ExplicitStatus codegen owns this exact synthetic guard: it emits an
-			// inline pointer test and publishes the nil branch through the same
-			// structured panic handoff as an implicit dereference fault. The legacy
-			// PanicWrapNilPointer helper is therefore not called from this physical
-			// coroutine body and needs no hidden unwind contract here.
+			// inline pointer test, materializes the source-specific plainError
+			// payload through the compiler/runtime ABI, and publishes it through
+			// the ordinary structured panic handoff. The legacy
+			// PanicWrapNilPointer helper is therefore not called from this
+			// physical coroutine body and needs no hidden unwind contract here.
 			return ""
 		}
 		// LLSSA lowers this synthetic wrapper guard to a pointer comparison and
@@ -3345,7 +3346,14 @@ func (a *coroPhysicalPureSSAAudit) plannedRuntimeHelpers(instr ssa.Instruction) 
 	if err != nil {
 		return nil, "load frozen runtime helper site plan: " + err.Error()
 	}
-	return helpers, ""
+	semantic := helpers[:0]
+	for _, helper := range helpers {
+		if coroLogicalCallerRuntimeHelper(helper) {
+			continue
+		}
+		semantic = append(semantic, helper)
+	}
+	return semantic, ""
 }
 
 func (a *coroPhysicalPureSSAAudit) requireNoRuntimeHelpers(instr ssa.Instruction) string {

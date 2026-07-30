@@ -1,4 +1,4 @@
-//go:build tinygo.wasm && !wasm
+//go:build darwin
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -16,13 +16,14 @@
  * limitations under the License.
  */
 
-package chacha8rand
+package unix
 
-//llgo:skip block
+import _ "unsafe"
 
-// The named wasm32 targets use a 32-bit ARM Go frontend only for source-level
-// layout. Do not retain its assembly trampoline in a WebAssembly module: call
-// the standard pure-Go implementation directly and preserve the package API.
-func block(seed *[4]uint64, blocks *[32]uint64, counter uint32) {
-	block_generic(seed, blocks, counter)
-}
+// ARC4Random passes this fixed FuncPCABI0 target through syscall's private
+// three-word carrier. Publishing its physical identity before conversion to
+// uintptr lets the compiler derive the worker ABI and caller coloring from the
+// exact sink without a source-level coroutine directive.
+//
+//go:linkname libc_arc4random_buf_trampoline C.arc4random_buf
+func libc_arc4random_buf_trampoline()

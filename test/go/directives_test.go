@@ -29,7 +29,7 @@ import (
 //go:linkname directiveSqrt C.sqrt
 func directiveSqrt(x c.Double) c.Double
 
-//llgo:coro worker
+//llgo:coro noblock
 //llgo:link directiveAbs C.abs
 func directiveAbs(x c.Int) c.Int { return 0 }
 

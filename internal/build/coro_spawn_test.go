@@ -187,13 +187,58 @@ func launchDynamic(fn func()) { go fn() }
 	}
 }
 
+func TestCoroPlanInputManagedInterfaceSpawnUsesReceiverAwareDescriptor(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/interfacespawn", `package interfacespawn
+type closer interface { Close() error }
+func launch(value closer) { go value.Close() }
+`, nil)
+	launch := ssaPkg.Func("launch")
+	input := CoroPlanInput{Program: ssaPkg.Prog}
+	plan, err := input.Analyze(
+		coro.Roots{{Function: launch, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var spawn *ssa.Go
+	for _, call := range coroPlanTestCalls(launch) {
+		if candidate, ok := call.(*ssa.Go); ok {
+			spawn = candidate
+			break
+		}
+	}
+	if spawn == nil || !spawn.Common().IsInvoke() {
+		t.Fatal("launch has no interface spawn")
+	}
+	callPlan, err := plan.ResolveManagedSpawn(spawn)
+	if err != nil {
+		t.Fatalf("resolve managed interface spawn: %v", err)
+	}
+	if callPlan.Kind != coro.CallSpawn || callPlan.Rep != coro.Dispatch || !callPlan.Open ||
+		callPlan.Unresolved != coro.UnknownManagedInterfaceDispatch || !callPlan.MayBeNil {
+		t.Fatalf("interface spawn CallPlan = %+v", callPlan)
+	}
+	if err := validateCoroSpawnPlan(plan); err != nil {
+		t.Fatalf("validate managed interface spawn: %v", err)
+	}
+	if err := validateCoroClosedStaticSpawnRunGate(&Config{}, plan, ""); err != nil {
+		t.Fatalf("run gate rejected managed interface spawn: %v", err)
+	}
+}
+
 func TestCoroPlanInputClosedStaticMethodSpawnUsesDescriptorArgument(t *testing.T) {
 	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/methodspawn", `package methodspawn
 var sink int
 type worker int
+type runner interface { run(func(int), int) }
 func (receiver worker) run(callback func(int), value int) {
 	sink = int(receiver) + value
 	_ = callback
+}
+func invoke(receiver runner, callback func(int), value int) {
+	receiver.run(callback, value)
 }
 func receiver(value int) worker { return worker(value + 1) }
 func argument(value int) int { return value + 2 }
@@ -206,8 +251,14 @@ func launch(callback func(int), value int) {
 		Program: ssaPkg.Prog,
 	}
 	plan, err := input.Analyze(
-		coro.Roots{{Function: launch, Demand: coro.AsyncDemand}},
-		coro.SSAConfig{MaxPlainInstructions: -1},
+		coro.Roots{
+			{Function: launch, Demand: coro.AsyncDemand},
+			{Function: ssaPkg.Func("invoke"), Demand: coro.AsyncDemand},
+		},
+		coro.SSAConfig{
+			DynamicResolution:    coro.DynamicCHAClosed,
+			MaxPlainInstructions: -1,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +282,7 @@ func launch(callback func(int), value int) {
 		t.Fatalf("spawn target %q is not a method", target.Name())
 	}
 	if targetPlan.Emission != coro.EmitCoroutine || targetPlan.Primary != coro.PrimaryCoroutine ||
-		targetPlan.FuncRep != coro.DirectCoro || targetPlan.Demand != coro.AsyncDemand ||
+		targetPlan.FuncRep != coro.Dispatch || targetPlan.Demand != coro.AsyncDemand ||
 		!targetPlan.Effect.Contains(coro.YieldOnly) {
 		t.Fatalf("method spawn target = %+v", targetPlan)
 	}

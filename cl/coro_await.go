@@ -342,7 +342,6 @@ func (p *context) compileCoroStaticAwait(
 	if callee == nil || instructionPlan.controlTargetID == "" {
 		panic("coroutine child await has an incomplete frozen physical control recipe")
 	}
-	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 
 	// Preserve Go's left-to-right argument evaluation before publishing any

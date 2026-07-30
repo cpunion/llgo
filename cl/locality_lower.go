@@ -568,8 +568,16 @@ func (p *context) initializeLocalGuards(b llssa.Builder) {
 	}
 }
 
-func (p *context) initializeLocalGuardsWithCoroPlan(b llssa.Builder) {
+func (p *context) emitFunctionPreambleWithCoroPlan(
+	b llssa.Builder,
+	fn *ssa.Function,
+	initializeLocalGuards bool,
+) {
 	finish := p.beginCoroFunctionPreambleEmission()
 	defer finish()
-	p.initializeLocalGuards(b)
+	p.enterExportedLocalContext(b)
+	p.pushCallerLocationFrame(b, fn)
+	if initializeLocalGuards {
+		p.initializeLocalGuards(b)
+	}
 }

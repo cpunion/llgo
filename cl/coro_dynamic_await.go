@@ -38,7 +38,6 @@ func (p *context) compileCoroManagedDispatchAwait(
 		panic("coroutine managed dispatch await escaped its frozen physical control recipe")
 	}
 
-	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 	// Evaluate the callee before arguments and every argument left-to-right,
 	// before probing capabilities or publishing scheduler state.
