@@ -12,9 +12,6 @@ func TestSpillValueStoresDefinitionAndReloadsUses(t *testing.T) {
 	defer ctx.Dispose()
 	mod := ctx.NewModule("spill")
 	defer mod.Dispose()
-	targetData := llvm.NewTargetData("e-m:e-p:64:64-i64:64-n32:64-S128")
-	defer targetData.Dispose()
-
 	i32 := ctx.Int32Type()
 	frameType := ctx.StructType([]llvm.Type{i32}, false)
 	fn := llvm.AddFunction(mod, "function", llvm.FunctionType(i32, []llvm.Type{
@@ -30,7 +27,7 @@ func TestSpillValueStoresDefinitionAndReloadsUses(t *testing.T) {
 	result := builder.CreateMul(value, value, "result")
 	builder.CreateRet(result)
 
-	if err := spillValue(ctx, targetData, value, field); err != nil {
+	if err := spillValue(ctx, value, field); err != nil {
 		t.Fatal(err)
 	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
@@ -49,9 +46,6 @@ func TestSpillValueReloadsParameter(t *testing.T) {
 	defer ctx.Dispose()
 	mod := ctx.NewModule("spill-parameter")
 	defer mod.Dispose()
-	targetData := llvm.NewTargetData("e-m:e-p:64:64-i64:64-n32:64-S128")
-	defer targetData.Dispose()
-
 	i32 := ctx.Int32Type()
 	frameType := ctx.StructType([]llvm.Type{i32}, false)
 	fn := llvm.AddFunction(mod, "function", llvm.FunctionType(i32, []llvm.Type{
@@ -65,7 +59,7 @@ func TestSpillValueReloadsParameter(t *testing.T) {
 	field := builder.CreateStructGEP(frameType, fn.Param(0), 0, "field")
 	builder.CreateRet(fn.Param(1))
 
-	if err := spillValue(ctx, targetData, fn.Param(1), field); err != nil {
+	if err := spillValue(ctx, fn.Param(1), field); err != nil {
 		t.Fatal(err)
 	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
@@ -81,9 +75,6 @@ func TestSpillValueStoresPhiAfterPhiGroup(t *testing.T) {
 	defer ctx.Dispose()
 	mod := ctx.NewModule("spill-phi-definition")
 	defer mod.Dispose()
-	targetData := llvm.NewTargetData("e-m:e-p:64:64-i64:64-n32:64-S128")
-	defer targetData.Dispose()
-
 	i1 := ctx.Int1Type()
 	i32 := ctx.Int32Type()
 	frameType := ctx.StructType([]llvm.Type{i32}, false)
@@ -112,7 +103,7 @@ func TestSpillValueStoresPhiAfterPhiGroup(t *testing.T) {
 	result := builder.CreateAdd(phi, llvm.ConstInt(i32, 1, false), "result")
 	builder.CreateRet(result)
 
-	if err := spillValue(ctx, targetData, phi, field); err != nil {
+	if err := spillValue(ctx, phi, field); err != nil {
 		t.Fatal(err)
 	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
@@ -174,9 +165,6 @@ func TestSpillValueReplacesAllocaWithFrameAddress(t *testing.T) {
 	defer ctx.Dispose()
 	mod := ctx.NewModule("spill-alloca")
 	defer mod.Dispose()
-	targetData := llvm.NewTargetData("e-m:e-p:64:64-i64:64-n32:64-S128")
-	defer targetData.Dispose()
-
 	i32 := ctx.Int32Type()
 	frameType := ctx.StructType([]llvm.Type{i32}, false)
 	fn := llvm.AddFunction(mod, "function", llvm.FunctionType(i32, []llvm.Type{
@@ -191,7 +179,7 @@ func TestSpillValueReplacesAllocaWithFrameAddress(t *testing.T) {
 	builder.CreateStore(llvm.ConstInt(i32, 9, false), local)
 	builder.CreateRet(builder.CreateLoad(i32, local, "result"))
 
-	if err := spillValue(ctx, targetData, local, field); err != nil {
+	if err := spillValue(ctx, local, field); err != nil {
 		t.Fatal(err)
 	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
@@ -207,31 +195,81 @@ func TestSpillValueRejectsUnsupportedDefinitions(t *testing.T) {
 	defer ctx.Dispose()
 	mod := ctx.NewModule("spill-errors")
 	defer mod.Dispose()
-	targetData := llvm.NewTargetData("e-m:e-p:64:64-i64:64-n32:64-S128")
-	defer targetData.Dispose()
-
 	i32 := ctx.Int32Type()
 	frameType := ctx.StructType([]llvm.Type{i32}, false)
-	callee := llvm.AddFunction(mod, "callee", llvm.FunctionType(i32, nil, false))
 	fn := llvm.AddFunction(mod, "function", llvm.FunctionType(ctx.VoidType(), []llvm.Type{i32}, false))
 	block := ctx.AddBasicBlock(fn, "entry")
 	builder := ctx.NewBuilder()
 	defer builder.Dispose()
 	builder.SetInsertPointAtEnd(block)
 	field := builder.CreateStructGEP(frameType, builder.CreateAlloca(frameType, "frame"), 0, "field")
-	call := builder.CreateCall(callee.GlobalValueType(), callee, nil, "call")
-	local := builder.CreateAlloca(i32, "aligned")
-	local.SetAlignment(16)
 	dynamic := builder.CreateArrayAlloca(i32, fn.Param(0), "dynamic")
 	builder.CreateRetVoid()
 
-	if err := spillValue(ctx, targetData, call, field); err == nil || !strings.Contains(err.Error(), "resume block") {
-		t.Fatalf("call spill error = %v", err)
-	}
-	if err := spillValue(ctx, targetData, local, field); err == nil || !strings.Contains(err.Error(), "over-aligned") {
-		t.Fatalf("alloca spill error = %v", err)
-	}
-	if err := spillValue(ctx, targetData, dynamic, field); err == nil || !strings.Contains(err.Error(), "separate frame storage") {
+	if err := spillValue(ctx, dynamic, field); err == nil || !strings.Contains(err.Error(), "separate frame storage") {
 		t.Fatalf("dynamic alloca spill error = %v", err)
+	}
+}
+
+func TestSpillValueStoresOrdinaryCallResult(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("spill-call")
+	defer mod.Dispose()
+	i32 := ctx.Int32Type()
+	frameType := ctx.StructType([]llvm.Type{i32}, false)
+	callee := llvm.AddFunction(mod, "callee", llvm.FunctionType(i32, nil, false))
+	fn := llvm.AddFunction(mod, "function", llvm.FunctionType(i32, []llvm.Type{
+		llvm.PointerType(frameType, 0),
+	}, false))
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	field := builder.CreateStructGEP(frameType, fn.Param(0), 0, "field")
+	call := builder.CreateCall(callee.GlobalValueType(), callee, nil, "call")
+	builder.CreateRet(call)
+
+	if err := spillValue(ctx, call, field); err != nil {
+		t.Fatal(err)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify spilled call result: %v\n%s", err, mod.String())
+	}
+	ir := mod.String()
+	if !strings.Contains(ir, "store i32 %call, ptr %field") ||
+		!strings.Contains(ir, "ret i32 %call.reload") {
+		t.Fatalf("ordinary call result was not stored in the frame:\n%s", ir)
+	}
+}
+
+func TestSpillValueReplacesOverAlignedAlloca(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("spill-aligned-alloca")
+	defer mod.Dispose()
+	i32 := ctx.Int32Type()
+	frameType := ctx.StructType([]llvm.Type{i32}, false)
+	fn := llvm.AddFunction(mod, "function", llvm.FunctionType(ctx.VoidType(), nil, false))
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	frame := builder.CreateAlloca(frameType, "frame")
+	frame.SetAlignment(32)
+	field := builder.CreateStructGEP(frameType, frame, 0, "field")
+	local := builder.CreateAlloca(i32, "local")
+	local.SetAlignment(32)
+	builder.CreateStore(llvm.ConstInt(i32, 9, false), local)
+	builder.CreateRetVoid()
+
+	if err := spillValue(ctx, local, field); err != nil {
+		t.Fatal(err)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify aligned alloca frame address: %v\n%s", err, mod.String())
+	}
+	if strings.Contains(mod.String(), "%local = alloca") {
+		t.Fatalf("over-aligned alloca remains after frame replacement:\n%s", mod.String())
 	}
 }

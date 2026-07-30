@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	frameAllocName = "__llgo_wasm_resume_alloc"
-	frameFreeName  = "__llgo_wasm_resume_free"
+	frameAllocName        = "__llgo_wasm_resume_alloc"
+	frameDynamicAllocName = "__llgo_wasm_resume_alloc_dynamic"
+	frameFreeName         = "__llgo_wasm_resume_free"
 )
 
 type loweredState struct {
@@ -51,21 +52,20 @@ func lowerPrototype(mod llvm.Module, targetData llvm.TargetData) ([]loweredState
 		return nil, err
 	}
 	for _, layout := range layouts {
-		if layout.plan.function.IsDeclaration() || len(layout.plan.calls) == 0 {
+		if layout.plan.function.IsDeclaration() || !needsStateMachine(layout) {
 			continue
 		}
-		if err := validateStateLayout(layout, targetData); err != nil {
+		if err := validateStateLayout(layout); err != nil {
 			return nil, fmt.Errorf("%s: %w", layout.plan.function.Name(), err)
 		}
 	}
-
 	abi := newResumeABI(mod.Context(), targetData)
 	if _, err := emitLeafEntriesForLayouts(mod, abi, layouts); err != nil {
 		return nil, err
 	}
 	var lowered []loweredState
 	for _, layout := range layouts {
-		if layout.plan.function.IsDeclaration() || len(layout.plan.calls) == 0 {
+		if layout.plan.function.IsDeclaration() || !needsStateMachine(layout) {
 			continue
 		}
 		entry, descriptor, err := abi.defineEntryAndDescriptor(mod, layout)
@@ -90,18 +90,11 @@ func lowerPrototype(mod llvm.Module, targetData llvm.TargetData) ([]loweredState
 	return lowered, nil
 }
 
-func validateStateLayout(layout frameLayout, targetData llvm.TargetData) error {
-	for _, slot := range layout.plan.slots {
-		if slot.kind != slotAlloca {
-			continue
-		}
-		if slot.dynamic {
-			return fmt.Errorf("dynamic alloca %q is not supported", slot.value.Name())
-		}
-		if slot.value.Alignment() > targetData.ABITypeAlignment(slot.value.AllocatedType()) {
-			return fmt.Errorf("over-aligned alloca %q is not supported", slot.value.Name())
-		}
-	}
+func needsStateMachine(layout frameLayout) bool {
+	return len(layout.plan.calls) != 0 || layout.plan.unwindSlot != 0
+}
+
+func validateStateLayout(layout frameLayout) error {
 	for _, site := range layout.plan.calls {
 		call := site.call
 		if call.CalledFunctionType().IsFunctionVarArg() {
@@ -135,12 +128,14 @@ func lowerStateMachine(
 		return fmt.Errorf("%s: resumable definition has no body", fn.Name())
 	}
 	originalEntry := blocks[0]
+	blockAddresses := collectMovedBlockAddresses(fn, blocks)
 
 	dispatch := ctx.AddBasicBlock(lowered.entry, "dispatch")
 	for _, block := range blocks {
 		block.RemoveFromParent()
 		llvm.AppendExistingBasicBlock(lowered.entry, block)
 	}
+	remapMovedBlockAddresses(lowered.entry, blockAddresses)
 
 	builder := ctx.NewBuilder()
 	defer builder.Dispose()
@@ -154,17 +149,40 @@ func lowerStateMachine(
 	}
 
 	for _, slot := range layout.plan.slots {
+		if slot.kind == slotUnwind {
+			continue
+		}
+		if isStackSave(slot.value) {
+			if err := lowerPersistentStackSave(slot.value); err != nil {
+				return fmt.Errorf("%s: %w", fn.Name(), err)
+			}
+			continue
+		}
+		if slot.kind == slotAlloca && slot.dynamic {
+			if err := lowerDynamicAlloca(
+				mod, targetData, abi, lowered.entry, slot.value, fields[slot.id],
+			); err != nil {
+				return fmt.Errorf("%s: %w", fn.Name(), err)
+			}
+			continue
+		}
 		switch slot.kind {
 		case slotFunctionResult:
 			continue
 		case slotValue:
-			if slot.value.InstructionOpcode() == llvm.Call {
+			if slot.value.InstructionOpcode() == llvm.Call &&
+				isResumeCallResult(layout.plan, slot.id) {
 				continue
 			}
 		}
-		if err := spillValue(ctx, targetData, slot.value, fields[slot.id]); err != nil {
+		if err := spillValue(ctx, slot.value, fields[slot.id]); err != nil {
 			return fmt.Errorf("%s: %w", fn.Name(), err)
 		}
+	}
+	if err := lowerUnwindMarkers(
+		ctx, lowered.entry, layout.plan, fields[layout.plan.unwindSlot],
+	); err != nil {
+		return fmt.Errorf("%s: %w", fn.Name(), err)
 	}
 
 	continuations := make(map[uint32]llvm.BasicBlock, len(layout.plan.calls))
@@ -209,7 +227,22 @@ func lowerStateMachine(
 			continuations[site.id],
 		)
 	}
+	if layout.plan.unwindPC != 0 {
+		switchPC.AddCase(
+			llvm.ConstInt(ctx.Int32Type(), uint64(layout.plan.unwindPC), false),
+			layout.plan.unwindBlock,
+		)
+	}
 	return nil
+}
+
+func isResumeCallResult(plan framePlan, slotID uint32) bool {
+	for _, site := range plan.calls {
+		if site.resultSlot == slotID {
+			return true
+		}
+	}
+	return false
 }
 
 func lowerSuspendCall(

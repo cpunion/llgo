@@ -50,11 +50,17 @@ func newResumeABI(ctx llvm.Context, targetData llvm.TargetData) resumeABI {
 	ptr := llvm.PointerType(ctx.Int8Type(), 0)
 	uintptrType := ctx.IntType(targetData.PointerSize() * 8)
 	return resumeABI{
-		ctx:            ctx,
-		ptr:            ptr,
-		uintptrType:    uintptrType,
-		entryType:      llvm.FunctionType(ctx.Int8Type(), []llvm.Type{ptr, ptr}, false),
-		descriptorType: ctx.StructType([]llvm.Type{ptr, uintptrType, uintptrType}, false),
+		ctx:         ctx,
+		ptr:         ptr,
+		uintptrType: uintptrType,
+		entryType:   llvm.FunctionType(ctx.Int8Type(), []llvm.Type{ptr, ptr}, false),
+		descriptorType: ctx.StructType([]llvm.Type{
+			ptr,
+			uintptrType,
+			uintptrType,
+			uintptrType,
+			ctx.Int32Type(),
+		}, false),
 		// The first two fields are the public dispatch ABI. The trailing pointer
 		// is runtime-owned per-context frame storage.
 		contextType: ctx.StructType([]llvm.Type{ptr, ptr, ptr}, false),
@@ -80,6 +86,8 @@ func (abi resumeABI) defineEntryAndDescriptor(
 		entry,
 		llvm.ConstInt(abi.uintptrType, layout.size, false),
 		llvm.ConstInt(abi.uintptrType, uint64(layout.alignment), false),
+		llvm.ConstInt(abi.uintptrType, layout.unwindOffset, false),
+		llvm.ConstInt(abi.ctx.Int32Type(), uint64(layout.plan.unwindPC), false),
 	}, false))
 	return entry, descriptor, nil
 }

@@ -30,6 +30,7 @@ const (
 	slotFunctionResult
 	slotAlloca
 	slotValue
+	slotUnwind
 )
 
 type frameSlot struct {
@@ -48,10 +49,13 @@ type callSite struct {
 }
 
 type framePlan struct {
-	function   llvm.Value
-	slots      []frameSlot
-	resultSlot uint32
-	calls      []callSite
+	function    llvm.Value
+	slots       []frameSlot
+	resultSlot  uint32
+	calls       []callSite
+	unwindSlot  uint32
+	unwindPC    uint32
+	unwindBlock llvm.BasicBlock
 }
 
 type blockLiveness struct {
@@ -76,6 +80,9 @@ func planFrames(mod llvm.Module) ([]framePlan, error) {
 		if !hasFunctionMarker(fn) {
 			continue
 		}
+		if err := llvm.VerifyFunction(fn, llvm.ReturnStatusAction); err != nil {
+			return nil, fmt.Errorf("%s: invalid resumable function: %w", fn.Name(), err)
+		}
 		plan, err := planFunctionFrame(fn, kind)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", fn.Name(), err)
@@ -86,6 +93,10 @@ func planFrames(mod llvm.Module) ([]framePlan, error) {
 }
 
 func planFunctionFrame(fn llvm.Value, metadataKind int) (framePlan, error) {
+	unwind, err := findUnwindPlan(fn)
+	if err != nil {
+		return framePlan{}, err
+	}
 	values, candidates, kinds := frameCandidates(fn)
 	blocks, liveness := analyzeLiveness(fn, candidates)
 
@@ -96,6 +107,9 @@ func planFunctionFrame(fn llvm.Value, metadataKind int) (framePlan, error) {
 		result llvm.Value
 	}
 	needed := make(valueSet)
+	if !unwind.block.IsNil() {
+		unionInto(needed, liveness[unwind.block].liveIn)
+	}
 	for _, block := range blocks {
 		live := cloneSet(liveness[block].liveOut)
 		for instr := block.LastInstruction(); !instr.IsNil(); instr = llvm.PrevInstruction(instr) {
@@ -164,6 +178,17 @@ func planFunctionFrame(fn llvm.Value, metadataKind int) (framePlan, error) {
 		typ, dynamic := persistentSlotType(value, kinds[value])
 		addSlot(kinds[value], typ, value, dynamic)
 	}
+	if !unwind.block.IsNil() {
+		plan.unwindSlot = addSlot(slotUnwind, unwind.typ, llvm.Value{}, false)
+		plan.unwindPC = 1
+		if len(rawCalls) != 0 {
+			plan.unwindPC = rawCalls[len(rawCalls)-1].id + 1
+		}
+		if plan.unwindPC > maxResumeID {
+			return framePlan{}, fmt.Errorf("unwind state exceeds maximum resume ID")
+		}
+		plan.unwindBlock = unwind.block
+	}
 
 	for _, raw := range rawCalls {
 		site := callSite{id: raw.id, call: raw.call}
@@ -176,6 +201,38 @@ func planFunctionFrame(fn llvm.Value, metadataKind int) (framePlan, error) {
 			site.resultSlot = slots[raw.result]
 		}
 		plan.calls = append(plan.calls, site)
+	}
+	return plan, nil
+}
+
+type unwindPlan struct {
+	block llvm.BasicBlock
+	typ   llvm.Type
+}
+
+func findUnwindPlan(fn llvm.Value) (unwindPlan, error) {
+	var plan unwindPlan
+	for block := fn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		for instr := block.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
+			if instr.InstructionOpcode() != llvm.Call ||
+				instr.CalledValue().Name() != RegisterUnwindSymbol {
+				continue
+			}
+			if !plan.block.IsNil() {
+				return unwindPlan{}, fmt.Errorf("multiple unwind registrations")
+			}
+			if instr.OperandsCount() < 3 {
+				return unwindPlan{}, fmt.Errorf("invalid unwind registration")
+			}
+			address := instr.Operand(1)
+			if address.OperandsCount() != 2 ||
+				address.Operand(0) != fn ||
+				!address.Operand(1).IsBasicBlock() {
+				return unwindPlan{}, fmt.Errorf("invalid unwind handler")
+			}
+			plan.block = address.Operand(1).AsBasicBlock()
+			plan.typ = instr.Operand(0).Type()
+		}
 	}
 	return plan, nil
 }

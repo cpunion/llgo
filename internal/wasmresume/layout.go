@@ -21,10 +21,12 @@ import "github.com/xgo-dev/llvm"
 const frameHeaderFields = 3
 
 type frameLayout struct {
-	plan      framePlan
-	typ       llvm.Type
-	size      uint64
-	alignment int
+	plan         framePlan
+	typ          llvm.Type
+	size         uint64
+	alignment    int
+	fields       []int
+	unwindOffset uint64
 }
 
 func layoutFrames(mod llvm.Module, targetData llvm.TargetData) ([]frameLayout, error) {
@@ -38,25 +40,52 @@ func layoutFrames(mod llvm.Module, targetData llvm.TargetData) ([]frameLayout, e
 
 	layouts := make([]frameLayout, len(plans))
 	for i, plan := range plans {
-		fields := make([]llvm.Type, frameHeaderFields, frameHeaderFields+len(plan.slots))
-		copy(fields, header)
+		fields := append([]llvm.Type(nil), header...)
+		fieldIndices := make([]int, len(plan.slots)+1)
+		headerType := ctx.StructType(header, false)
+		frameAlign := targetData.ABITypeAlignment(headerType)
 		for _, slot := range plan.slots {
+			align := targetData.ABITypeAlignment(slot.typ)
+			if slot.kind == slotAlloca && slot.value.Alignment() > align {
+				align = slot.value.Alignment()
+			}
+			if align > frameAlign {
+				frameAlign = align
+			}
+			withSlot := append(append([]llvm.Type(nil), fields...), slot.typ)
+			naturalOffset := targetData.ElementOffset(
+				ctx.StructType(withSlot, false), len(withSlot)-1,
+			)
+			if padding := alignmentPadding(naturalOffset, uint64(align)); padding != 0 {
+				fields = append(fields, llvm.ArrayType(ctx.Int8Type(), int(padding)))
+			}
+			fieldIndices[slot.id] = len(fields)
 			fields = append(fields, slot.typ)
 		}
 		typ := ctx.StructType(fields, false)
+		var unwindOffset uint64
+		if plan.unwindSlot != 0 {
+			unwindOffset = targetData.ElementOffset(typ, fieldIndices[plan.unwindSlot])
+		}
 		layouts[i] = frameLayout{
-			plan:      plan,
-			typ:       typ,
-			size:      targetData.TypeAllocSize(typ),
-			alignment: targetData.ABITypeAlignment(typ),
+			plan:         plan,
+			typ:          typ,
+			size:         targetData.TypeAllocSize(typ),
+			alignment:    frameAlign,
+			fields:       fieldIndices,
+			unwindOffset: unwindOffset,
 		}
 	}
 	return layouts, nil
 }
 
 func (l frameLayout) fieldIndex(slotID uint32) int {
-	if slotID == 0 || int(slotID) > len(l.plan.slots) {
+	if slotID == 0 || int(slotID) >= len(l.fields) {
 		return -1
 	}
-	return frameHeaderFields + int(slotID) - 1
+	return l.fields[slotID]
+}
+
+func alignmentPadding(offset, align uint64) uint64 {
+	return -offset & (align - 1)
 }
