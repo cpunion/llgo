@@ -454,19 +454,17 @@ func recvTypeNameInfo(typ ast.Expr) (name string, pointer bool, ok bool) {
 	case *ast.Ident:
 		return t.Name, pointer, true
 	case *ast.IndexExpr:
-		base, valid := ast.Unparen(t.X).(*ast.Ident)
-		if !valid {
-			return "", false, false
-		}
-		return base.Name, pointer, true
+		typ = t.X
 	case *ast.IndexListExpr:
-		base, valid := ast.Unparen(t.X).(*ast.Ident)
-		if !valid {
-			return "", false, false
-		}
-		return base.Name, pointer, true
+		typ = t.X
+	default:
+		return "", false, false
 	}
-	return "", false, false
+	base, valid := ast.Unparen(typ).(*ast.Ident)
+	if !valid {
+		return "", false, false
+	}
+	return base.Name, pointer, true
 }
 
 // inPkgName:
