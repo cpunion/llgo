@@ -19,6 +19,9 @@
 package ssa
 
 import (
+	"go/importer"
+	"go/token"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -44,11 +47,14 @@ func TestWasmResumeABIInventoriesGoCalls(t *testing.T) {
 	b.Return()
 
 	ir := pkg.String()
-	if got := strings.Count(ir, "!"+wasmresume.CallMetadata); got != 2 {
-		t.Fatalf("resumable call marker count = %d, want 2:\n%s", got, ir)
+	if got := strings.Count(ir, "!"+wasmresume.CallMetadata); got != 3 {
+		t.Fatalf("resumable call marker count = %d, want 3:\n%s", got, ir)
 	}
 	if !strings.Contains(ir, `"`+wasmresume.FunctionAttribute+`"="1"`) {
 		t.Fatalf("Go functions are not marked for resumable lowering:\n%s", ir)
+	}
+	if !strings.Contains(ir, "@"+wasmresume.StartSymbol("__llgo_stub.goFn")) {
+		t.Fatalf("closure does not reference its resumable start entry:\n%s", ir)
 	}
 	var foundCCall bool
 	for _, line := range strings.Split(ir, "\n") {
@@ -90,12 +96,99 @@ func TestWasmResumeABIDoesNotChangeDefaultOrNativeIR(t *testing.T) {
 			caller := pkg.NewFunc("caller", NoArgsNoRet, InGo)
 			b := caller.MakeBody(1)
 			b.Call(callee.Expr)
+			b.Call(b.MakeClosure(callee.Expr, nil))
 			b.Return()
 
 			ir := pkg.String()
-			if strings.Contains(ir, wasmresume.FunctionAttribute) || strings.Contains(ir, wasmresume.CallMetadata) {
+			if strings.Contains(ir, wasmresume.FunctionAttribute) ||
+				strings.Contains(ir, wasmresume.CallMetadata) ||
+				strings.Contains(ir, wasmresume.StartSymbol("")) {
 				t.Fatalf("inactive resumable ABI changed IR:\n%s", ir)
 			}
 		})
+	}
+}
+
+func TestWasmResumeABIClosureWithContextUsesStartEntry(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+	prog.TypeSizes(types.SizesFor("gc", "wasm"))
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	fields := []*types.Var{
+		types.NewField(token.NoPos, nil, "value", types.Typ[types.Int], false),
+	}
+	ctxType := types.NewStruct(fields, nil)
+	ctx := types.NewParam(token.NoPos, nil, closureCtx, types.NewPointer(ctxType))
+	sig := types.NewSignatureType(
+		nil, nil, nil, types.NewTuple(ctx), nil, false,
+	)
+	inner := pkg.NewFunc("inner", sig, InGo)
+	inner.MakeBody(1).Return()
+
+	outer := pkg.NewFunc("outer", NoArgsNoRet, InGo)
+	b := outer.MakeBody(1)
+	b.Call(b.MakeClosure(inner.Expr, []Expr{prog.Val(42)}))
+	b.Return()
+
+	ir := pkg.String()
+	if !strings.Contains(ir, "@"+wasmresume.StartSymbol("inner")) {
+		t.Fatalf("capturing closure does not reference its start entry:\n%s", ir)
+	}
+	if strings.Contains(ir, wasmresume.StartSymbol(closureStub+"inner")) {
+		t.Fatalf("capturing closure was wrapped unnecessarily:\n%s", ir)
+	}
+}
+
+func TestWasmResumeABIMethodMetadataUsesStartEntries(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+	prog.TypeSizes(types.SizesFor("gc", "wasm"))
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	goPkg := types.NewPackage("example.com/p", "p")
+	named := types.NewNamed(
+		types.NewTypeName(token.NoPos, goPkg, "S", nil),
+		types.NewStruct(nil, nil),
+		nil,
+	)
+	recv := types.NewVar(token.NoPos, goPkg, "", named)
+	method := types.NewFunc(
+		token.NoPos,
+		goPkg,
+		"M",
+		types.NewSignatureType(recv, nil, nil, nil, nil, false),
+	)
+	named.AddMethod(method)
+
+	use := pkg.NewFunc("use", NoArgsNoRet, InGo)
+	b := use.MakeBody(1)
+	b.abiType(named)
+	b.Return()
+
+	ir := pkg.String()
+	for _, want := range []string{
+		wasmresume.StartSymbol("example.com/p.(*S).M"),
+		wasmresume.StartSymbol(closureStub + "example.com/p.S.M"),
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("method metadata does not reference %s:\n%s", want, ir)
+		}
 	}
 }

@@ -40,6 +40,20 @@ func (p Program) markWasmResumeFunction(fn llvm.Value) {
 	fn.AddFunctionAttr(p.ctx.CreateStringAttribute(wasmresume.FunctionAttribute, "1"))
 }
 
+func (p Package) wasmResumeStart(fn llvm.Value) llvm.Value {
+	if !p.Prog.WasmResumeABIEnabled() {
+		return fn
+	}
+	name := wasmresume.StartSymbol(fn.Name())
+	if start := p.mod.NamedFunction(name); !start.IsNil() {
+		return start
+	}
+	fnType := fn.GlobalValueType()
+	params := append([]llvm.Type{p.Prog.tyVoidPtr()}, fnType.ParamTypes()...)
+	startType := llvm.FunctionType(p.Prog.tyVoidPtr(), params, false)
+	return llvm.AddFunction(p.mod, name, startType)
+}
+
 func (b Builder) markWasmResumeCall(call llvm.Value, background Background) {
 	if background != InGo || !b.Prog.WasmResumeABIEnabled() {
 		return

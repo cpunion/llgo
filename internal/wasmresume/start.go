@@ -39,7 +39,7 @@ func emitStartEntriesForLayouts(
 
 		params := append([]llvm.Type{abi.ptr}, fn.GlobalValueType().ParamTypes()...)
 		startType := llvm.FunctionType(abi.ptr, params, false)
-		startName := startEntryPrefix + fn.Name()
+		startName := StartSymbol(fn.Name())
 		start := mod.NamedFunction(startName)
 		if start.IsNil() {
 			start = llvm.AddFunction(mod, startName, startType)

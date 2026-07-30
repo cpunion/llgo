@@ -76,7 +76,11 @@ func (p Package) closureWrapDecl(fn Expr, sig *types.Signature) Function {
 	}
 	ctx := types.NewParam(token.NoPos, nil, closureCtx, types.Typ[types.UnsafePointer])
 	sigCtx := FuncAddCtx(ctx, sig)
-	wrap := p.NewFunc(name, sigCtx, InC)
+	background := InC
+	if p.Prog.WasmResumeABIEnabled() {
+		background = InGo
+	}
+	wrap := p.NewFunc(name, sigCtx, background)
 	wrap.impl.SetLinkage(llvm.LinkOnceAnyLinkage)
 	b := wrap.MakeBody(1)
 	args := closureWrapArgs(wrap)

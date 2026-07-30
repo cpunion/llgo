@@ -1202,7 +1202,12 @@ func (b Builder) MakeClosure(fn Expr, bindings []Expr) Expr {
 		ptr := b.aggregateAllocU(prog.rawType(tctx), llvmFields(bindings, tctx, b)...)
 		data = ptr
 	}
-	return b.aggregateValue(prog.Closure(removeCtx(sig)), fn.impl, data)
+	code := fn.impl
+	if prog.WasmResumeABIEnabled() && closureCtxParam(sig) == nil {
+		code = b.Pkg.closureWrapDecl(fn, sig).impl
+	}
+	code = b.Pkg.wasmResumeStart(code)
+	return b.aggregateValue(prog.Closure(removeCtx(sig)), code, data)
 }
 
 // -----------------------------------------------------------------------------
@@ -1745,6 +1750,9 @@ func checkExpr(v Expr, t types.Type, b Builder) Expr {
 			if sig, ok := fnType.raw.Type.(*types.Signature); ok && closureCtxParam(sig) == nil {
 				v, data = b.Pkg.closureStub(b, v, sig, origKind)
 			}
+		}
+		if origKind == vkFuncDecl {
+			v.impl = b.Pkg.wasmResumeStart(v.impl)
 		}
 		return b.aggregateValue(tclosure, v.impl, data.impl)
 	}
