@@ -43,6 +43,8 @@ const (
 	coroProgramContinueSymbolV1                                 = "__llgo_coro_program_continue_v1"
 	coroProgramRunSliceSymbolV2                                 = "__llgo_coro_program_run_slice_v2"
 	coroProgramContinueSliceSymbolV2                            = "__llgo_coro_program_continue_slice_v2"
+	coroProgramReportPanicSymbolV1                              = "__llgo_coro_program_report_panic_v1"
+	coroPanicTraceReplaceSymbolV1                               = "__llgo_coro_panic_trace_replace_v1"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 	coroNativeWorkerCompleteSymbolV1                            = "__llgo_coro_native_worker_complete_v1"
 	coroNativeFleetOwnerSymbolV2                                = "__llgo_coro_native_fleet_owner_v2"
@@ -106,6 +108,7 @@ const (
 	coroProgramDriveCompleteV2  uint32 = 1
 	coroProgramDriveSuspendedV2 uint32 = 2
 	coroProgramDriveYieldedV2   uint32 = 3
+	coroProgramDrivePanicV2     uint32 = 4
 
 	coroProgramRunMoreV2          uint32 = 1 << 0
 	coroProgramRunBlockedV2       uint32 = 1 << 1
@@ -647,10 +650,12 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			coroProgramBeginSymbolV1 + ":" +
 			coroProgramRunSliceSymbolV2 + "(g:ptr,handle:ptr,budget:u32,out:*run-result-v2)->u32:" +
 			coroProgramContinueSliceSymbolV2 + "(executor-slot:u32,executor-generation:u32,epoch:u32,budget:u32,out:*run-result-v2)->u32:" +
+			coroProgramReportPanicSymbolV1 + "(g:ptr)->noreturn:" +
 			"budget=" + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10) + ":" +
 			"run-result-v2={flags:u32,used:u32,executor-slot:u32,executor-generation:u32,epoch:u32,deadline-lo:u32,deadline-hi:u32,reserved:u32}:" +
 			"complete=" + strconv.FormatUint(uint64(coroProgramDriveCompleteV2), 10) + ":" +
 			"yielded=" + strconv.FormatUint(uint64(coroProgramDriveYieldedV2), 10) + ":" +
+			"panic=" + strconv.FormatUint(uint64(coroProgramDrivePanicV2), 10) + ":" +
 			"inline-flags=" + strconv.FormatUint(uint64(coroProgramRunMoreV2|coroProgramRunRequestInlineV2), 10))
 	} else if hostCoroPullRuntimeABI(ctx.buildConf) {
 		write("driver=runtime-static-single-p-host-pull-v1:" +
@@ -720,7 +725,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			coroHostNextOperationSymbolV1 + "(out:*host-operation-v1)->u32;" +
 			coroHostCompleteOperationSymbolV1 + "(source-slot:u32,generation:u32,flags:u32,count:u32,r1-lo:u32,r1-hi:u32,r2-lo:u32,r2-hi:u32,errno-lo:u32,errno-hi:u32)->u32")
 	}
-	write("header=physical-abi-v1")
+	write("header=physical-abi-v1-line-u32;descriptor=trace-v1")
 	write(ctx.coroPlanDigest)
 	write(metadata.CoroABI)
 	write(metadata.SchedulerABI)

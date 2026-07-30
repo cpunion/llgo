@@ -185,6 +185,9 @@ type eface struct {
 
 type Defer struct{}
 type mOS struct{}
+// The closed runtime island never calls runtime.Caller. Keep only the opaque
+// per-G field target required by the production runtime2 layout.
+type callerLocationStore struct{}
 
 type PanicNilError struct {
 	_ [0]*PanicNilError
@@ -823,20 +826,87 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	if len(pkgs) == 0 || pkgs[0].LPkg == nil {
 		t.Fatal("production coroutine runtime island produced no root package")
 	}
-	pkgs[0].LPkg.Prog.Dispose()
+	prog := pkgs[0].LPkg.Prog
 	for id := range allowed {
 		if !seen[id] {
 			t.Fatalf("production coroutine runtime island did not emit required module %q", id)
 		}
 	}
 	objects = append(objects,
+		buildCoroRuntimeIslandFaultStringStubs(t, prog, temp),
 		buildCoroNativeWorkerCallObject(t, temp),
 		buildCoroNativeDoorbellObject(t, temp),
 	)
-	if len(objects) != len(allowed)+2 {
-		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus worker and doorbell leaves", len(objects), len(allowed))
+	prog.Dispose()
+	if len(objects) != len(allowed)+3 {
+		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus fault-string, worker, and doorbell leaves", len(objects), len(allowed))
 	}
 	return objects
+}
+
+func buildCoroRuntimeIslandFaultStringStubs(
+	t *testing.T,
+	prog llssa.Program,
+	temp string,
+) string {
+	t.Helper()
+	pkg := prog.NewPackage("coro-runtime-island-fault-string-stubs", "coro-runtime-island-fault-string-stubs")
+	defer pkg.Module().Dispose()
+
+	// The V2 fault ABI source remains present for exported-hook link auditing,
+	// but these closed scheduler islands never execute its private
+	// parameterized nil-wrapper string paths. Supply only their final physical
+	// symbols instead of importing z_string/z_error or forging source-level
+	// metadata for the named internal/runtime.String type.
+	boolType := types.Typ[types.Bool]
+	stringType := types.Typ[types.String]
+	internalRuntime := llssa.PkgRuntime + "."
+	symbols := []string{
+		internalRuntime + "AssertRuntimeError",
+		internalRuntime + "StringCat",
+		internalRuntime + "StringEqual",
+		internalRuntime + "StringSlice2",
+	}
+	for _, symbol := range symbols {
+		pkg.SetExport(symbol, symbol)
+	}
+
+	assertRuntimeError := pkg.NewFunc(symbols[0], newSignature(
+		[]types.Type{boolType, stringType}, nil,
+	), llssa.InGo)
+	assertRuntimeError.MakeBody(1).Return()
+	stringCat := pkg.NewFunc(symbols[1], newSignature(
+		[]types.Type{stringType, stringType}, []types.Type{stringType},
+	), llssa.InGo)
+	stringCat.MakeBody(1).Return(pkg.ConstString(""))
+	stringEqual := pkg.NewFunc(symbols[2], newSignature(
+		[]types.Type{stringType, stringType}, []types.Type{boolType},
+	), llssa.InGo)
+	stringEqual.MakeBody(1).Return(prog.BoolVal(false))
+	stringSlice2 := pkg.NewFunc(symbols[3], newSignature(
+		[]types.Type{
+			stringType,
+			types.Typ[types.Int64],
+			types.Typ[types.Int64],
+			boolType,
+			boolType,
+		},
+		[]types.Type{stringType},
+	), llssa.InGo)
+	stringSlice2.MakeBody(1).Return(pkg.ConstString(""))
+	pkg.MaterializePreserveSyms()
+	for _, symbol := range symbols {
+		function := pkg.Module().NamedFunction(symbol)
+		if function.IsNil() || function.IsDeclaration() {
+			t.Fatalf("runtime island fault-string stub %q is not defined", symbol)
+		}
+	}
+	return emitCoroSpawnNativeE2EObject(
+		t,
+		prog,
+		pkg.Module(),
+		filepath.Join(temp, "runtime-fault-string-stubs.o"),
+	)
 }
 
 // configureCoroRuntimeIslandPlan gives source-list E2E fixtures the exact raw

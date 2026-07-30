@@ -252,7 +252,7 @@ func assertCoroProgramBootstrapFactoryPresplitV2(t *testing.T, ir, uintptrIR str
 		t.Fatalf("mixed v2 bootstrap frame descriptor is missing:\n%s", ir)
 	}
 	for _, want := range []string{
-		"i32 1, i32 0",
+		"i32 1, i32 1",
 		"i64 72623859790382856, i64 651345242494996240",
 		uintptrIR + " 0, " + uintptrIR + " 1",
 	} {

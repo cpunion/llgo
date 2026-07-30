@@ -765,16 +765,18 @@ Go→foreign/host→Go的同步重入是唯一一类不创建新G的入口：C c
         suspendReason  uint16
         lifecycleState uint16
         stateID         uint32
+        line            uint32
         flags          uint32
     }
 
 `CoroHandle`、allocation base和promise地址不保证相同。Compiler生成 `coroHeader(handle)` accessor：pre-split语义使用 `llvm.coro.promise`，post-split pass把它固定为该target/frame layout的正确映射；runtime绝不把handle直接cast成header，也不读取LLVM frame第一个机器字判断resume/destroy状态。
 
-每个suspend edge在publish状态前写入稳定 `stateID`。Pre/post-CoroSplit metadata都维护 `FunctionID + stateID -> source PC/GC map`，verifier检查每个可达suspend state恰有一个映射。Trailing storage由具体函数决定。
+每个suspend/terminal edge在publish状态前写入稳定 `stateID` 和该逻辑frame当前的source `line`。Pre/post-CoroSplit metadata都维护 `FunctionID + stateID -> source PC/GC map`，verifier检查每个可达suspend state恰有一个映射。Trailing storage由具体函数决定。
 
 `FrameDescriptor` 至少包含：
 
 - FunctionID 和 ABI version。
+- 不依赖runtime命名类型的target-width `{data ptr, length uintptr}` function/file文本。
 - frame size/alignment 获取方式。
 - logical stack/debug state map。
 - `scanMode = ConservativeWholeFrame | PrecisePerState`；前者给出可扫描range，后者才要求per-state live pointer map。
@@ -1599,12 +1601,12 @@ Frame completion 至少有：
 2. 当前 active frame 进入编译器生成的 async unwind/cleanup path。
 3. 该 frame 依次执行 defer。
 4. 若 recover 成功，清除对应 panic，当前 panicking function 按 Go 语义正常返回。
-5. 若未recover，frame在final suspend前把 `CompletionRecord{kind, panicID, result}` 和该frame的logical trace segment复制到parent/G-owned storage，release publish；record不能位于即将destroy的child frame。
-6. Scheduler acquire completion并保存nested-panic trace snapshot，先把activeFrame切回parent并将child放入DestroyPending root，再destroy child。
+5. 若未recover，frame在final suspend前把 `CompletionRecord{kind, panic identity}` 发布到parent/G-owned storage；record不能位于即将destroy的child frame。
+6. Scheduler acquire completion，先把activeFrame切回parent并将child放入DestroyPending root，再destroy child。当前V1不另行分配trace node，而把已经destroy/unlink的frame allocation按destroy顺序转移到G-owned trace chain；只读取其稳定descriptor和销毁前复制出的line，不再读取LLVM handle/header。
 7. Parent await从稳定CompletionRecord观察Panic，进入自己的unwind path。
 8. 逐 frame 传播到 root；未恢复 panic 打印 logical stack 后终止程序。
 
-Recovered panic可释放对应snapshot；未恢复或defer中再次panic时，G-owned `PanicRecord` 保留各代panic chain和已销毁inner frame的trace segment，直到最终打印/终止。不能在destroy child后再从handle/header读取panic，也不能因为逐层destroy而丢失最内层栈。
+Recover、Goexit或新panic替换旧panic时，runtime先把旧trace chain切成adapter-owned discard状态，再在同一compiler hook返回前逐frame清零并释放；未恢复panic则由G-owned `PanicRecord`和retained destroyed-frame chain一直保留到最终打印/终止。Trace tail保留其尚存logical parent作为唯一carrier：同一panic继续向外传播时，下一个destroyed frame必须正好等于该carrier；新panic替换旧panic时则必须先detach旧chain。这个不变量不增加每G指针，同时避免same-payload嵌套panic把新trace误删或把两代trace误拼接。普通child replacement通过完整await祖先链中的recover scope自动推导，并在精确空CompletionRecord的bootstrap/root边界停止；非空但child identity不匹配必须fail closed。cleanup内联的`panic(x)`/language fault在新旧interface words可能完全相同时，仅由编译器注入一次无payload的`__llgo_coro_panic_trace_replace_v1(g, handle)`语义钩子，不能靠payload比较猜测。不能在destroy child后再从handle/header读取panic，也不能因为逐层destroy而丢失最内层栈。
 
 Native `siglongjmp` buffer 不能跨 suspension 保存。Async frame 的 panic transport 必须满足“任何 jump/exception 只在一次 resume episode 内有效”。
 
@@ -1872,9 +1874,9 @@ Logical traceback：
 4. 沿 parent handle 到 root。
 5. 若G正在Running，先展开完整active native/shadow Go chain，去掉scheduler/adapter frame，再接最深coroutine parent；若已suspend则不拼接M stack。
 
-需要逐步支持：
+当前native command的未恢复panic已能从retained descriptor chain输出最深frame到root的function/file/line，并隐藏compiler bootstrap frame；它不依赖native unwind或全局shadow stack。仍需逐步支持：
 
-- panic traceback。
+- plain activation与用户Error/String格式化的完整panic traceback。
 - `runtime.Caller/Callers`。
 - goroutine dump。
 - scheduler trace：spawn、resume、park、wake、preempt、steal、destroy。
@@ -1969,7 +1971,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 验收：纯 sync chain 只有 `F`；纯 async chain 只有 `F$coro`；动态 escape 才出现 descriptor/adapter；所有 `go` root和可挂起call都以LLVM-coro frame表示。
 
-当前落地状态（2026-07-17，实验 physical ABI v0/v1；scheduler ABI 已扩展到 `llgo.coro.scheduler.program-bootstrap.v2.closed-static-spawn.v0`）：
+当前落地状态（2026-07-29，实验 physical ABI v0/v1；scheduler ABI 已扩展到 `llgo.coro.scheduler.program-bootstrap.v2.closed-static-spawn.v0`）：
 
 - 全程序 SSA 的 Effect、Demand、FuncRep、稳定 FunctionID、精确 emission universe、单 primary symbol 选择和 `CoroPlanDigest` 已落地。明确 plain 或 coro 的函数仍只有一个主体；仅真正动态的 func/`any`/interface consumer 才进入 descriptor/dispatch。缺失、过期或目标布局不匹配的计划与 cache manifest 均 fail closed。
 - LLGo 已固定使用 `cpunion/llvm` PR #5 的 LLVM 19–22 绑定。该分支吸收上游 LLVM 22 的完整 switch API 变更，并保留 LLGo 所需的 switched-resume builder/CoroSplit API；19、20、21、22 CI 均通过。LLGo 不再覆盖 LLVM 19 以下版本。
@@ -1982,7 +1984,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - 多基本块 CFG、聚合值、PHI 和抢占 lowering 已完成。自然循环、循环入口及每 64 条有效指令的长直线块插入 poll；scheduler 的 P 级原子 request 只有在 slow path 才执行 publish/yield/`llvm.coro.suspend`，fast path 不切换。LLVM 19–22 上均有 native64/wasm32 pre-/post-CoroSplit 与 object 测试。
 - 第一条 production `go` 路径已经落地：严格限定为 closed static、top-level、非捕获、非泛型、非变参、零返回的 `go f(args)`。编译器先按 Go 顺序完整求值参数，再以显式 parent G 执行 begin，调用 target 唯一的 `DirectCoro` primary 到 LLVM initial suspend，commit 后在 parent 上 poll/yield；runtime 不接收用户 callback，也不依赖 TLS。owner 与 target 都由精确 `YieldOnly` seed 进入 effect 传播，因此 target 即使当前很短也保留抢占点，普通同步 caller 则透明 await 同一主体。
 - Command `main` 的正常 continuation 现在显式通知 runtime。main root 完成后，single-P shutdown 先整体校验 ready/wait/current/action 状态，再封闭调度 gate，按 FIFO 取 ready G、按 active-child 到 root 顺序直接 `llvm.coro.destroy`，最后每个 task storage 只释放一次。该 v1 路径只接收 `YieldOnly|AwaitStructured` target 且拒绝非空 wait set；panic/Goexit 不经过正常 main-return hook。
-- terminal-only ExplicitStatus runtime core 已有 task-local 两字 `PanicRecord`、原子 once publication和无 TLS 的 `__llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord)`。compiler 对精确 cleanup-free PhysicalABIV1 body 生成 `SuspendPanic`/`FinalSuspended`，panic 与 normal return branch 到同一个 LLVM final suspend；active panic frame 先经过 `coro.done` 验证并 destroy，之后 suspended-await ancestor 不再 resume，而是从深到 root 直接 destroy，最终保留 record 并返回独立 `PanicComplete`。后续hard-cutover已把implicit language fault接入同一显式结果：无操作数的nil、bounds、channel和unsafe fault使用allocation-free V1静态payload；需要现场值的slice-to-array失败使用V2的两个target-width operand，由异常路径分配可跨LLVM frame destroy存活的GC可见`boundsError`，从而保持Go 1.26的动态类型、`runtime.Error`和逐值文本。V1/V2 hook均为required raw/plain runtime root并进入bootstrap/physical ABI identity；尚未定义的parameterized kind或不匹配的operand必须fail closed，不能静默退回无参数错误。更宽的dynamic explicit-panic payload、所有cleanup/recover/Goexit组合和最终进程报告仍分别由其专门验收矩阵约束，不能由本条fault ABI证据外推。
+- ExplicitStatus runtime core 已有 task-local 两字 `PanicRecord`、原子 once publication和无 TLS 的 `__llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord)`。compiler 对PhysicalABIV1 body生成 `SuspendPanic`/`FinalSuspended`，panic与normal return共享LLVM final suspend；managed child先发布parent-owned completion并destroy，parent再执行显式cleanup/recover，最终未恢复路径从深到root直接destroy。每个descriptor现携带逻辑function/file，header携带source line；destroyed frame allocation被无新增分配地转移到G-owned trace chain，recover/Goexit/replacement同步清零释放。普通嵌套child replacement由await祖先recover scope推导，只有cleanup内联且same-payload不可判别的替换使用一次compiler语义钩子。Native V2 entry验证canonical Panic tuple后调用no-return reporter，真实LLGo用例已输出`inner -> outer -> main`并以状态2退出；四种O0/O2×DWARF on/off caller acceptance均通过。implicit language fault也接入同一显式结果：无操作数的nil、bounds、channel和unsafe fault使用allocation-free V1静态payload；需要现场值的slice-to-array失败使用V2的两个target-width operand，由异常路径分配可跨LLVM frame destroy存活的GC可见`boundsError`。V1/V2及trace replacement hook都是required raw/plain runtime root并进入bootstrap/physical ABI identity；尚未定义的parameterized kind或不匹配operand必须fail closed。当前证据仍只覆盖coroutine-frame logical trace；plain activation、用户`Error/String`完整格式、WASM/embedded terminal presentation及完整GOROOT panic矩阵仍是后续门槛。
 - park/wake handshake 已落地 32-bit 原子 `WaitToken`、generation ticket、early/late completion、park 前后 cancellation、唯一 waiter claim、ABA 范围校验及 terminal gate。完成/取消 outcome 在 scheduler consume 后仍保持到下一次 Arm，恢复后的同步风格 continuation 可用 exact ticket 查询赢家；精确 intrinsic `llgo.coroPark(token, ticket)` 被 Effect 分析识别为 `MayPark`，并在调用者当前 LLVM frame 中生成 park prepare、stateID、`coro.suspend` 和恢复路径，没有隐藏在普通同步 helper 中。channel/timer/syscall 的 submit/retry producer 尚未接入。
 - 固定容量 `WaitRegistrationTable` 已实现 POD `{slot,generation}` handle、producer admission seal/refcount、`Active→Posting→Posted→Draining→Delivered` one-shot mailbox、scheduler-side Drain、strong unregister/quiescence handoff、cancel-vs-complete winner、silent late callback、generation reuse 和 capacity fail-closed。平台 Post 不接触 P/G/token/LLVM handle；Phase 17 绑定后 table 固定归一个 `P`，只有 driver drain 可解引用 waiter，standalone drain 和错误 owner registration 均 fail closed。race+shuffle 已覆盖 concurrent post、post-vs-close、旧 producer pin/reuse、pre-park cancel 和 exactly-once promotion。真实 backend 的 strong unregister/join 与 result payload 仍需各 target adapter 证明。
 - 固定容量 `ExecutorRegistry` 已实现 POD `{slot,generation}` handle、`Requested|IdleArmed|Closed` gate、producer admission seal/refcount、exact idle commit、request/close 线性化、strong join/quiescence、generation reuse 和 capacity fail-closed。Phase 17 的 target-neutral `ExecutorDriver` 已把 gate 绑定单 P；当前统一语义是`PollPreempt` observe-only，scheduler run-step独占drain→ack→无条件重扫，idle执行ArmIdle→完整事实源重扫→exact CommitSleep，prepare/commit竞争失败与wake都只执行LeaveIdle→`sourceMore`，再返回同一run-step reducer，close执行seal→外部strong join→confirm/retire/unbind。旧 `P.schedule` 只保留给 unbound internal path，wait drain/cancel 不再发布 legacy request。

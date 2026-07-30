@@ -90,10 +90,12 @@ type CoroResumeDispatch func(b Builder, normal BasicBlock)
 // frontend from the complete logical/physical function ABI. Result is the
 // external result-slot payload type and must be non-nil.
 type CoroFrameDescriptorOptions struct {
-	Version uint32
-	ABIHash [16]byte
-	Flags   uint32
-	Result  Type
+	Version  uint32
+	ABIHash  [16]byte
+	Flags    uint32
+	Result   Type
+	Function string
+	File     string
 }
 
 // CoroRootFactoryDescriptorOptions describes the target-specific constant
@@ -200,10 +202,16 @@ type CoroProgramBootstrapOptions struct {
 // NewCoroFrameDescriptor defines a link-once constant descriptor with layout:
 //
 //	{ version i32, flags i32, hashLo i64, hashHi i64,
-//	  resultSize uintptr, resultAlign uintptr }
+//	  resultSize uintptr, resultAlign uintptr,
+//	  function { data ptr, length uintptr },
+//	  file { data ptr, length uintptr } }
 //
 // The returned expression points at the descriptor. The hash words use big
 // endian byte order so their textual IR form is deterministic across hosts.
+// Trace text deliberately uses the target-neutral two-word Go string layout
+// directly instead of asking Program.String for the runtime's named string
+// type. Compiler-owned bootstrap modules and closed ABI fixtures do not import
+// runtime, yet their descriptors must have exactly the same byte layout.
 func (p Package) NewCoroFrameDescriptor(name string, opts CoroFrameDescriptorOptions) Expr {
 	if name == "" {
 		panic("ssa: coroutine frame descriptor requires a name")
@@ -211,7 +219,11 @@ func (p Package) NewCoroFrameDescriptor(name string, opts CoroFrameDescriptorOpt
 	if opts.Result == nil {
 		panic("ssa: coroutine frame descriptor requires a result type")
 	}
+	if opts.Function == "" {
+		panic("ssa: coroutine frame descriptor requires a logical function name")
+	}
 	prog := p.Prog
+	traceTextType := prog.Struct(prog.VoidPtr(), prog.Uintptr())
 	descriptorType := prog.Struct(
 		prog.Uint32(),
 		prog.Uint32(),
@@ -219,8 +231,16 @@ func (p Package) NewCoroFrameDescriptor(name string, opts CoroFrameDescriptorOpt
 		prog.Uint64(),
 		prog.Uintptr(),
 		prog.Uintptr(),
+		traceTextType,
+		traceTextType,
 	)
 	descriptor := p.NewVarEx(name, prog.Pointer(descriptorType))
+	traceText := func(value string) llvm.Value {
+		return prog.ctx.ConstStruct([]llvm.Value{
+			p.createGlobalStr(value),
+			prog.IntVal(uint64(len(value)), prog.Uintptr()).impl,
+		}, false)
+	}
 	fields := []llvm.Value{
 		prog.IntVal(uint64(opts.Version), prog.Uint32()).impl,
 		prog.IntVal(uint64(opts.Flags), prog.Uint32()).impl,
@@ -228,6 +248,8 @@ func (p Package) NewCoroFrameDescriptor(name string, opts CoroFrameDescriptorOpt
 		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), prog.Uint64()).impl,
 		prog.IntVal(prog.SizeOf(opts.Result), prog.Uintptr()).impl,
 		prog.IntVal(uint64(prog.td.ABITypeAlignment(opts.Result.ll)), prog.Uintptr()).impl,
+		traceText(opts.Function),
+		traceText(opts.File),
 	}
 	descriptor.impl.SetInitializer(prog.ctx.ConstStruct(fields, false))
 	descriptor.impl.SetGlobalConstant(true)

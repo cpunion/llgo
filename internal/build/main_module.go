@@ -154,6 +154,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	var coroContinue llssa.Function
 	var coroRunSliceV2 llssa.Function
 	var coroContinueSliceV2 llssa.Function
+	var coroReportPanicV1 llssa.Function
 	var coroHostPullCallbacks []retainedCoroCallbackV1
 	var coroHostPrepare llssa.Function
 	var coroHostReactor llssa.Function
@@ -166,6 +167,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 		coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
 		coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
+		coroReportPanicV1 = declareCoroProgramReportPanicV1(mainPkg)
 	} else if hostCoroPullRuntimeABI(ctx.buildConf) {
 		coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
 		coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
@@ -198,6 +200,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroRun:                coroRun,
 		coroRunSliceV2:         coroRunSliceV2,
 		coroContinueSliceV2:    coroContinueSliceV2,
+		coroReportPanicV1:      coroReportPanicV1,
 		coroHostPull:           hostCoroPullRuntimeABI(ctx.buildConf),
 		coroHostPrepare:        coroHostPrepare,
 		coroHostReactor:        coroHostReactor,
@@ -490,6 +493,7 @@ type entryFunctions struct {
 	coroRun                llssa.Function
 	coroRunSliceV2         llssa.Function
 	coroContinueSliceV2    llssa.Function
+	coroReportPanicV1      llssa.Function
 	coroHostPull           bool
 	coroHostPrepare        llssa.Function
 	coroHostReactor        llssa.Function
@@ -577,7 +581,15 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		if fns.coroHostPull {
 			b = emitCoroHostInitialSliceV2(b, pkg, g, handle, fns.coroRunSliceV2, fns.coroHostReactor)
 		} else if sliceV2 {
-			b = emitCoroNativeRunLoopV2(b, pkg, g, handle, fns.coroRunSliceV2, fns.coroContinueSliceV2)
+			b = emitCoroNativeRunLoopV2(
+				b,
+				pkg,
+				g,
+				handle,
+				fns.coroRunSliceV2,
+				fns.coroContinueSliceV2,
+				fns.coroReportPanicV1,
+			)
 		} else {
 			b.Call(fns.coroRun.Expr, g, handle)
 		}
@@ -643,6 +655,13 @@ func declareCoroProgramContinueSliceV2(pkg llssa.Package) llssa.Function {
 	return pkg.NewFunc(coroProgramContinueSliceSymbolV2, newSignature(
 		[]types.Type{word, word, word, word, resultPointer},
 		[]types.Type{word},
+	), llssa.InC)
+}
+
+func declareCoroProgramReportPanicV1(pkg llssa.Package) llssa.Function {
+	return pkg.NewFunc(coroProgramReportPanicSymbolV1, newSignature(
+		[]types.Type{types.Typ[types.UnsafePointer]},
+		nil,
 	), llssa.InC)
 }
 
@@ -815,16 +834,18 @@ func emitCoroHostInitialSliceV2(
 // after the public ABI call has returned, so target requestRun cannot recurse
 // through the scheduler stack. Used counts only certified RunSlice reductions;
 // it may be zero when target compatibility or fleet-transfer bookkeeping asks
-// for an immediate retry without consuming one. Queued, blocked, stale, panic,
-// or malformed results fail closed at this native-only boundary.
+// for an immediate retry without consuming one. A canonical panic tuple enters
+// the native terminal reporter only after the scheduler call has returned.
+// Queued, blocked, stale, or malformed results fail closed at this native-only
+// boundary.
 func emitCoroNativeRunLoopV2(
 	b llssa.Builder,
 	pkg llssa.Package,
 	g, handle llssa.Expr,
-	run, continueRun llssa.Function,
+	run, continueRun, reportPanic llssa.Function,
 ) llssa.Builder {
-	if b == nil || pkg == nil || run == nil || continueRun == nil {
-		panic("native coroutine run loop requires entry builder and exact slice ABI")
+	if b == nil || pkg == nil || run == nil || continueRun == nil || reportPanic == nil {
+		panic("native coroutine run loop requires entry builder, exact slice ABI, and terminal panic reporter")
 	}
 	prog := pkg.Prog
 	word := prog.Uint32()
@@ -834,13 +855,16 @@ func emitCoroNativeRunLoopV2(
 	initialStatus := b.Call(run.Expr, g, handle, budget, result)
 	initialBlock := b.Func.Block(0)
 
-	blocks := b.Func.MakeBlocks(6)
+	blocks := b.Func.MakeBlocks(9)
 	inspectBlock := blocks[0]
 	completeCheckBlock := blocks[1]
-	yieldedCheckBlock := blocks[2]
-	continueBlock := blocks[3]
-	completeBlock := blocks[4]
-	failBlock := blocks[5]
+	panicStatusBlock := blocks[2]
+	panicCheckBlock := blocks[3]
+	panicReportBlock := blocks[4]
+	yieldedCheckBlock := blocks[5]
+	continueBlock := blocks[6]
+	completeBlock := blocks[7]
+	failBlock := blocks[8]
 	b.Jump(inspectBlock)
 
 	b.SetBlock(inspectBlock)
@@ -848,7 +872,7 @@ func emitCoroNativeRunLoopV2(
 	b.If(
 		b.BinOp(token.EQL, status.Expr, prog.IntVal(uint64(coroProgramDriveCompleteV2), word)),
 		completeCheckBlock,
-		yieldedCheckBlock,
+		panicStatusBlock,
 	)
 
 	and := func(left, right llssa.Expr) llssa.Expr {
@@ -861,24 +885,42 @@ func emitCoroNativeRunLoopV2(
 		return b.BinOp(token.NEQ, b.Load(b.FieldAddr(result, index)), zero)
 	}
 
-	b.SetBlock(completeCheckBlock)
-	validComplete := equalField(coroProgramRunResultFlagsV2, zero)
-	validComplete = and(validComplete, b.BinOp(
-		token.LEQ,
-		b.Load(b.FieldAddr(result, coroProgramRunResultUsedV2)),
-		budget,
-	))
-	for _, index := range []int{
-		coroProgramRunResultExecutorSlotV2,
-		coroProgramRunResultExecutorGenerationV2,
-		coroProgramRunResultEpochV2,
-		coroProgramRunResultDeadlineLoV2,
-		coroProgramRunResultDeadlineHiV2,
-		coroProgramRunResultReservedV2,
-	} {
-		validComplete = and(validComplete, equalField(index, zero))
+	validTerminalResult := func() llssa.Expr {
+		valid := equalField(coroProgramRunResultFlagsV2, zero)
+		valid = and(valid, b.BinOp(
+			token.LEQ,
+			b.Load(b.FieldAddr(result, coroProgramRunResultUsedV2)),
+			budget,
+		))
+		for _, index := range []int{
+			coroProgramRunResultExecutorSlotV2,
+			coroProgramRunResultExecutorGenerationV2,
+			coroProgramRunResultEpochV2,
+			coroProgramRunResultDeadlineLoV2,
+			coroProgramRunResultDeadlineHiV2,
+			coroProgramRunResultReservedV2,
+		} {
+			valid = and(valid, equalField(index, zero))
+		}
+		return valid
 	}
-	b.If(validComplete, completeBlock, failBlock)
+
+	b.SetBlock(completeCheckBlock)
+	b.If(validTerminalResult(), completeBlock, failBlock)
+
+	b.SetBlock(panicStatusBlock)
+	b.If(
+		b.BinOp(token.EQL, status.Expr, prog.IntVal(uint64(coroProgramDrivePanicV2), word)),
+		panicCheckBlock,
+		yieldedCheckBlock,
+	)
+
+	b.SetBlock(panicCheckBlock)
+	b.If(validTerminalResult(), panicReportBlock, failBlock)
+
+	b.SetBlock(panicReportBlock)
+	b.Call(reportPanic.Expr, g)
+	b.Unreachable()
 
 	b.SetBlock(yieldedCheckBlock)
 	validYielded := b.BinOp(

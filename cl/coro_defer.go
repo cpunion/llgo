@@ -1204,6 +1204,7 @@ type coroStaticCleanupState struct {
 	panicActive   llssa.Expr
 	panicType     llssa.Expr
 	panicData     llssa.Expr
+	panicLine     llssa.Expr
 	entry         llssa.BasicBlock
 	complete      llssa.BasicBlock
 	panic         llssa.BasicBlock
@@ -1234,8 +1235,10 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 		b.Store(state.panicActive, p.prog.BoolVal(false))
 		state.panicType = b.AllocaT(p.prog.VoidPtr())
 		state.panicData = b.AllocaT(p.prog.VoidPtr())
+		state.panicLine = b.AllocaT(p.prog.Uint32())
 		b.Store(state.panicType, p.prog.Nil(p.prog.VoidPtr()))
 		b.Store(state.panicData, p.prog.Nil(p.prog.VoidPtr()))
+		b.Store(state.panicLine, p.prog.IntVal(0, p.prog.Uint32()))
 	}
 	if state.dynamic {
 		if state.dynamicAlloc == nil || state.dynamicFree == nil {
@@ -1527,6 +1530,7 @@ func (s *coroStaticCleanupState) enter(b llssa.Builder, continuation uint32) {
 	b.Store(s.panicActive, b.Prog.BoolVal(false))
 	b.Store(s.panicType, b.Prog.Nil(b.Prog.VoidPtr()))
 	b.Store(s.panicData, b.Prog.Nil(b.Prog.VoidPtr()))
+	b.Store(s.panicLine, b.Prog.IntVal(0, b.Prog.Uint32()))
 	b.Jump(s.entry)
 }
 
@@ -1555,6 +1559,7 @@ func (s *coroStaticCleanupState) enterGoexit(b llssa.Builder) {
 	b.Store(s.panicActive, b.Prog.BoolVal(false))
 	b.Store(s.panicType, b.Prog.Nil(b.Prog.VoidPtr()))
 	b.Store(s.panicData, b.Prog.Nil(b.Prog.VoidPtr()))
+	b.Store(s.panicLine, b.Prog.IntVal(0, b.Prog.Uint32()))
 	b.Jump(s.entry)
 }
 
@@ -1577,28 +1582,60 @@ func (s *coroStaticCleanupState) resume(b llssa.Builder) {
 	b.Jump(s.entry)
 }
 
-func (s *coroStaticCleanupState) enterPanic(b llssa.Builder, typeWord, dataWord llssa.Expr) {
+func (s *coroStaticCleanupState) enterPanic(
+	b llssa.Builder,
+	typeWord, dataWord llssa.Expr,
+	line uint32,
+) {
 	// A panic reached from source execution has no earlier cleanup base. A
 	// successful recover returns through x/tools' canonical Recover block.
 	b.Store(s.continuation, b.Prog.IntVal(uint64(coroStaticCleanupContinueRecover), b.Prog.Uint32()))
-	s.replacePanic(b, typeWord, dataWord)
+	s.replacePanic(b, typeWord, dataWord, line)
 }
 
-// replacePanic is used only when a deferred child itself panics. Preserve the
-// cleanup base (normal return, Recover, RunDefers, and future cancel/Goexit)
-// while replacing the active panic overlay with the child's newer payload.
-func (s *coroStaticCleanupState) replacePanic(b llssa.Builder, typeWord, dataWord llssa.Expr) {
-	s.setPanicOverlay(b, typeWord, dataWord)
+// replacePanic overlays either the first source panic or a child outcome whose
+// runtime handoff has already reconciled trace replacement. Preserve the
+// cleanup base (normal return, Recover, RunDefers, and future cancel/Goexit).
+func (s *coroStaticCleanupState) replacePanic(
+	b llssa.Builder,
+	typeWord, dataWord llssa.Expr,
+	line uint32,
+) {
+	s.setPanicOverlay(b, typeWord, dataWord, line)
 	s.resume(b)
 }
 
-func (s *coroStaticCleanupState) setPanicOverlay(b llssa.Builder, typeWord, dataWord llssa.Expr) {
+// replacePanicInline marks an exact cleanup-local language replacement before
+// changing the overlay. Runtime cannot infer this case from payload identity:
+// a deferred panic(x) is a new panic even when x has the same two interface
+// words as the panic currently being propagated.
+func (s *coroStaticCleanupState) replacePanicInline(
+	p *context,
+	b llssa.Builder,
+	typeWord, dataWord llssa.Expr,
+	line uint32,
+) {
+	body := p.coroBody()
+	if s == nil || body == nil || b == nil || b.Func != p.fn ||
+		body.panicTraceReplace.IsNil() {
+		panic("inline coroutine panic replacement requires an exact runtime hook")
+	}
+	b.Call(body.panicTraceReplace, body.task, body.coro.Handle())
+	s.replacePanic(b, typeWord, dataWord, line)
+}
+
+func (s *coroStaticCleanupState) setPanicOverlay(
+	b llssa.Builder,
+	typeWord, dataWord llssa.Expr,
+	line uint32,
+) {
 	if s == nil {
 		panic("coroutine cleanup panic overlay has no state")
 	}
 	b.Store(s.panicActive, b.Prog.BoolVal(true))
 	b.Store(s.panicType, b.Convert(b.Prog.VoidPtr(), typeWord))
 	b.Store(s.panicData, b.Convert(b.Prog.VoidPtr(), dataWord))
+	b.Store(s.panicLine, b.Prog.IntVal(uint64(line), b.Prog.Uint32()))
 }
 
 // recoverAwaitArguments encodes the current panic overlay into the unified V3
@@ -1638,6 +1675,7 @@ func (s *coroStaticCleanupState) reconcileDeferredChildReturn(
 	b.Store(s.panicActive, b.Prog.BoolVal(false))
 	b.Store(s.panicType, b.Prog.Nil(b.Prog.VoidPtr()))
 	b.Store(s.panicData, b.Prog.Nil(b.Prog.VoidPtr()))
+	b.Store(s.panicLine, b.Prog.IntVal(0, b.Prog.Uint32()))
 	merged := p.fn.MakeBlock()
 	b.Jump(merged)
 	b.SetBlockEx(invalid, llssa.AtEnd, false)
@@ -1871,7 +1909,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 			typeWord := b.EfaceType(args[0])
 			dataWord := b.InterfaceData(args[0])
 			finishSite()
-			s.replacePanic(b, typeWord, dataWord)
+			s.replacePanicInline(p, b, typeWord, dataWord, p.coroCurrentSourceLine())
 			return false
 		case "recover":
 			if len(args) != 0 {

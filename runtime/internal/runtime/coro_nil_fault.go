@@ -314,8 +314,9 @@ func __llgo_coro_wrap_nil_payload_v1(
 //export __llgo_coro_fault_prepare_v1
 func __llgo_coro_fault_prepare_v1(g, handle, header unsafe.Pointer, kind uint32) {
 	typeWord, dataWord := coroFaultPayloadV1(kind)
+	task := (*coro.G)(g)
 	if typeWord == nil || !coro.PreparePanic(
-		(*coro.G)(g),
+		task,
 		handle,
 		(*coro.HeaderV1)(header),
 		typeWord,
@@ -323,6 +324,7 @@ func __llgo_coro_fault_prepare_v1(g, handle, header unsafe.Pointer, kind uint32)
 	) {
 		coroRuntimeAbort("invalid coroutine fault panic handoff")
 	}
+	coroReleaseDiscardedPanicTraceV1(task)
 }
 
 // __llgo_coro_fault_prepare_v2 is the immediate-publication counterpart of
@@ -336,8 +338,9 @@ func __llgo_coro_fault_prepare_v2(
 	arg1 uintptr,
 ) {
 	typeWord, dataWord := coroFaultPayloadV2(kind, arg0, arg1)
+	task := (*coro.G)(g)
 	if typeWord == nil || !coro.PreparePanic(
-		(*coro.G)(g),
+		task,
 		handle,
 		(*coro.HeaderV1)(header),
 		typeWord,
@@ -345,4 +348,5 @@ func __llgo_coro_fault_prepare_v2(
 	) {
 		coroRuntimeAbort("invalid parameterized coroutine fault panic handoff")
 	}
+	coroReleaseDiscardedPanicTraceV1(task)
 }

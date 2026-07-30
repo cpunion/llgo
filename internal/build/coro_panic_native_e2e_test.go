@@ -78,13 +78,15 @@ func main() {
 // links the production native-nogc scheduler/core and panic prepare hook, and
 // runs without the legacy panic printer/runtime closure.
 //
-// Production ActionPanicComplete returns the explicit V2 drive-panic status;
-// the native entry loop fail-stops that status until the production printer/
-// exit owner exists. This fixture retargets only the initial run-slice
-// declaration to a test report ABI. The report still calls the production
-// internal V2 runner, validates the terminal panic, then returns a canonical
-// Complete POD so the compiler-owned loop can exit normally. It accepts only
-// the exact drive status, a
+// Production ActionPanicComplete returns the explicit V2 drive-panic status
+// and the native entry now owns a no-return production reporter edge. This
+// closed island retargets only the initial run-slice declaration to a test
+// report ABI; the report still calls the production internal V2 runner,
+// validates the terminal panic, then returns a canonical Complete POD so the
+// compiler-owned loop can exit normally. A fail-stop reporter definition keeps
+// the required relocation exact but must remain unreachable here; the
+// full-runtime caller acceptance test exercises production presentation. The
+// report accepts only the exact drive status, a
 // published record on a dead, non-reclaimable G, the original package-global
 // payload word, and exactly one destroy of each distinct handle in the child
 // -> main -> bootstrap chain. It does not turn panic into production success
@@ -310,6 +312,17 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 
 	abort := pkg.NewFunc("abort", newSignature(nil, nil), llssa.InC)
 	exit := pkg.NewFunc("exit", newSignature([]types.Type{types.Typ[types.Int32]}, nil), llssa.InC)
+	// This closed scheduler-island test retargets the production RunSlice to a
+	// verifier which converts the observed Panic result into Complete. Keep the
+	// newly required terminal-report relocation exact and fail-stop if that
+	// conversion ever regresses; the full-runtime acceptance test exercises the
+	// production reporter itself.
+	panicReporter := pkg.NewFunc(coroProgramReportPanicSymbolV1, newSignature(
+		[]types.Type{pointer}, nil,
+	), llssa.InC)
+	panicReporterBody := panicReporter.MakeBody(1)
+	panicReporterBody.Call(exit.Expr, prog.IntVal(20, prog.Int32()))
+	panicReporterBody.Return()
 	require := pkg.NewFunc("__llgo_coro_panic_e2e_require", newSignature(
 		[]types.Type{types.Typ[types.Bool], types.Typ[types.Int32]}, nil,
 	), llssa.InC)
@@ -509,8 +522,10 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	symbols := string(output)
 	for _, required := range []string{
 		"__llgo_coro_panic_prepare_v1",
+		coroPanicTraceReplaceSymbolV1,
 		coroProgramContinueSliceSymbolV2,
 		coroPanicNativeE2ERunReport,
+		coroProgramReportPanicSymbolV1,
 		"command-line-arguments.coroProgramRunSliceV2",
 		coroPanicNativeE2EDestroyObserve,
 		"github.com/goplus/llgo/runtime/internal/coro.PreparePanic",

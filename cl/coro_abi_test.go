@@ -211,7 +211,10 @@ func TestCoroLeafPhysicalABIUsesTargetPointerWidth(t *testing.T) {
 			t.Fatalf("wasm coroutine uses non-i32 %s intrinsic:\n%s", intrinsic, ir)
 		}
 	}
-	if !regexp.MustCompile(`@__llgo_coro_frame_descriptor_v1\.[0-9a-f]+ = linkonce_odr unnamed_addr constant \{ i32, i32, i64, i64, i32, i32 \}`).MatchString(ir) {
+	if !regexp.MustCompile(
+		`@__llgo_coro_frame_descriptor_v1\.[0-9a-f]+ = linkonce_odr unnamed_addr constant ` +
+			`\{ i32, i32, i64, i64, i32, i32, \{ ptr, i32 \}, \{ ptr, i32 \} \}`,
+	).MatchString(ir) {
 		t.Fatalf("wasm descriptor does not use target-width size/alignment fields:\n%s", ir)
 	}
 }
@@ -293,7 +296,7 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	assertCoroStaticChildAwait(t, parentIR)
 
 	descriptor := regexp.MustCompile(
-		`@__llgo_coro_frame_descriptor_v1\.[0-9a-f]+ = linkonce_odr unnamed_addr constant \{ [^}]+ \} \{ i32 1,`,
+		`(?m)^@__llgo_coro_frame_descriptor_v1\.[0-9a-f]+ = linkonce_odr unnamed_addr constant `,
 	)
 	if got := len(descriptor.FindAllString(ir, -1)); got != 2 {
 		t.Fatalf("PhysicalABIV1 descriptors = %d, want Parent + Child:\n%s", got, ir)
@@ -1081,7 +1084,8 @@ func TestCoroChildAwaitPhysicalABIV1Wasm32(t *testing.T) {
 		}
 	}
 	if !regexp.MustCompile(
-		`@__llgo_coro_frame_descriptor_v1\.[0-9a-f]+ = linkonce_odr unnamed_addr constant \{ i32, i32, i64, i64, i32, i32 \} \{ i32 1, i32 [^,]+, i64 [^,]+, i64 [^,]+, i32 [^,]+, i32 [^}]+ \}`,
+		`@__llgo_coro_frame_descriptor_v1\.[0-9a-f]+ = linkonce_odr unnamed_addr constant ` +
+			`\{ i32, i32, i64, i64, i32, i32, \{ ptr, i32 \}, \{ ptr, i32 \} \}`,
 	).MatchString(ir) {
 		t.Fatalf("wasm PhysicalABIV1 descriptor does not use i32 size/alignment fields:\n%s", ir)
 	}
@@ -2027,7 +2031,7 @@ func assertCoroV0HeaderStateZero(t *testing.T, body string) {
 		{index: coroHeaderStateID, type_: "i32", name: "state ID"},
 	} {
 		addresses := regexp.MustCompile(
-			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr[^\n{]* \{ ptr, ptr, ptr, ptr, ptr, i16, i16, i32, i32 \}, ptr [^,]+, i32 0, i32 `+strconv.Itoa(field.index)+`\s*$`,
+			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr[^\n{]* \{ ptr, ptr, ptr, ptr, ptr, i16, i16, i32, i32, i32 \}, ptr [^,]+, i32 0, i32 `+strconv.Itoa(field.index)+`\s*$`,
 		).FindAllStringSubmatch(body, -1)
 		if len(addresses) == 0 {
 			t.Fatalf("v0 coroutine has no header %s store:\n%s", field.name, body)
@@ -2231,6 +2235,7 @@ func compileCoroDecisionFrameProbe(t *testing.T, target *llssa.Target, scalarGat
 	}
 	sourceSignature := types.NewSignatureType(nil, nil, nil, nil, nil, false)
 	abi := newCoroPhysicalABI(ctx, plannedFunctionSymbol{
+		name: "llgo.test.coro-decision-frame-probe",
 		plan: coro.FunctionPlan{ID: "llgo.test.coro-decision-frame-probe"},
 	}, sourceSignature)
 	if !scalarGate {
@@ -2825,7 +2830,10 @@ func assertCoroRootFactoryV1Descriptor(t *testing.T, ir, hash, parentHash string
 	}
 	framePattern := regexp.MustCompile(
 		`@` + regexp.QuoteMeta(coroDescriptorPrefixV1+parentHash) +
-			` = linkonce_odr unnamed_addr constant \{ [^}]+ \} \{ i32 1, i32 0, i64 ([^,]+), i64 ([^,]+),`,
+			` = linkonce_odr unnamed_addr constant ` +
+			`\{ i32, i32, i64, i64, ` + uintptrType + `, ` + uintptrType +
+			`, \{ ptr, ` + uintptrType + ` \}, \{ ptr, ` + uintptrType + ` \} \} ` +
+			`\{ i32 1, i32 0, i64 ([^,]+), i64 ([^,]+),`,
 	)
 	frame := framePattern.FindStringSubmatch(ir)
 	if len(frame) != 3 {

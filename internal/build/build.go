@@ -4829,6 +4829,9 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	)
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) || hostCoroPullRuntimeABI(ctx.buildConf) {
 		names = append(names, coroProgramRunSliceSymbolV2, coroProgramContinueSliceSymbolV2)
+		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+			names = append(names, coroProgramReportPanicSymbolV1)
+		}
 	} else {
 		names = append(names, coroProgramRunSymbolV1, coroProgramContinueSymbolV1)
 	}
@@ -4938,6 +4941,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	)
 	names = append(names,
 		"__llgo_coro_panic_prepare_v1",
+		coroPanicTraceReplaceSymbolV1,
 		"__llgo_coro_recover_take_v1",
 		"__llgo_coro_fault_payload_v1",
 		"__llgo_coro_fault_payload_v2",
@@ -5177,6 +5181,28 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine program continue-slice ABI %q must have exact func(uint32, uint32, uint32, uint32, *{8 x uint32}) uint32 signature", name)
 				}
+			}
+		}
+		if name == coroProgramReportPanicSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 1 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine program panic reporter ABI %q must have exact func(unsafe.Pointer) signature", name)
+			}
+		}
+		if name == coroPanicTraceReplaceSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 2 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine panic trace replacement ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) signature",
+					name,
+				)
 			}
 		}
 		if name == coroNativeWorkerCompleteSymbolV1 {

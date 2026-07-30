@@ -421,6 +421,247 @@ func TestAwaitCompletionPanicConsumedAfterChildDestroy(t *testing.T) {
 	fixture.keepAlive()
 }
 
+func TestRecoveredCompletionStagesRetainedPanicTraceForRelease(t *testing.T) {
+	fixture := newAwaitCompletionFixture(t)
+	typeWord := unsafe.Pointer(new(byte))
+	dataWord := unsafe.Pointer(new(byte))
+	fixture.child.header.SuspendReason = uint16(SuspendPanic)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(fixture.g, fixture.child.handle, fixture.child.header, typeWord, dataWord) {
+		t.Fatal("publish retained child panic")
+	}
+	fixture.destroyChildAndResumeParent(t)
+	if snapshot, ok := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle); !ok ||
+		snapshot != (CompletionSnapshot{
+			Status: CompletionPanic, TypeWord: typeWord, DataWord: dataWord,
+		}) {
+		t.Fatalf("consume retained child panic = (%+v, %t)", snapshot, ok)
+	}
+	if !activePanicTrace(fixture.g) || fixture.g.panicTraceCount != 1 {
+		t.Fatalf("retained child trace = head:%p tail:%p count:%d",
+			fixture.g.panicTraceHead, fixture.g.panicTraceTail, fixture.g.panicTraceCount)
+	}
+
+	// CompletionReturnRecovered is normally published by the direct deferred
+	// child after TakeRecover. The child has already been destroyed when its
+	// parent consumes this record, so use an absent opaque identity here.
+	fixture.parentFrame().completion = CompletionRecord{
+		status: CompletionReturnRecovered,
+		child:  unsafe.Pointer(new(byte)),
+	}
+	snapshot, ok := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle)
+	if !ok || snapshot != (CompletionSnapshot{Status: CompletionReturnRecovered}) ||
+		!PanicTraceDiscardPending(fixture.g) {
+		t.Fatalf("consume recovered completion = (%+v, %t), discard=%t",
+			snapshot, ok, PanicTraceDiscardPending(fixture.g))
+	}
+	raw, total, ok := TakeDiscardedPanicTraceFrame(fixture.g)
+	if !ok || raw != unsafe.Pointer(&fixture.child.memory[0]) ||
+		total != uintptr(len(fixture.child.memory)) {
+		t.Fatalf("discarded trace range = (%p, %d, %t), want (%p, %d)",
+			raw, total, ok, &fixture.child.memory[0], len(fixture.child.memory))
+	}
+	if raw, total, ok = TakeDiscardedPanicTraceFrame(fixture.g); !ok || raw != nil || total != 0 ||
+		!emptyPanicTrace(fixture.g) {
+		t.Fatalf("completed trace drain = (%p, %d, %t), state=(%p,%p,%d)",
+			raw, total, ok,
+			fixture.g.panicTraceHead, fixture.g.panicTraceTail, fixture.g.panicTraceCount)
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	fixture.keepAlive()
+}
+
+func TestInlineSamePayloadReplacementStagesRetainedPanicTraceForRelease(t *testing.T) {
+	fixture := newAwaitCompletionFixture(t)
+	typeWord := unsafe.Pointer(new(byte))
+	dataWord := unsafe.Pointer(new(byte))
+	fixture.child.header.SuspendReason = uint16(SuspendPanic)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(fixture.g, fixture.child.handle, fixture.child.header, typeWord, dataWord) {
+		t.Fatal("publish retained child panic")
+	}
+	fixture.destroyChildAndResumeParent(t)
+	if snapshot, ok := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle); !ok ||
+		snapshot != (CompletionSnapshot{
+			Status: CompletionPanic, TypeWord: typeWord, DataWord: dataWord,
+		}) {
+		t.Fatalf("consume retained child panic = (%+v, %t)", snapshot, ok)
+	}
+	if !activePanicTrace(fixture.g) || fixture.g.panicTraceCount != 1 {
+		t.Fatalf("retained child trace = head:%p tail:%p count:%d",
+			fixture.g.panicTraceHead, fixture.g.panicTraceTail, fixture.g.panicTraceCount)
+	}
+
+	// A cleanup-local panic with these exact same interface words is still a
+	// replacement. The compiler semantic hook has no payload dependency and
+	// must detach the old trace deterministically.
+	if !ReplacePanicTrace(fixture.g, fixture.parent.handle) ||
+		!PanicTraceDiscardPending(fixture.g) {
+		t.Fatalf("same-payload replacement discard = %t",
+			PanicTraceDiscardPending(fixture.g))
+	}
+	raw, total, ok := TakeDiscardedPanicTraceFrame(fixture.g)
+	if !ok || raw != unsafe.Pointer(&fixture.child.memory[0]) ||
+		total != uintptr(len(fixture.child.memory)) {
+		t.Fatalf("discarded trace range = (%p, %d, %t), want (%p, %d)",
+			raw, total, ok, &fixture.child.memory[0], len(fixture.child.memory))
+	}
+	if raw, total, ok = TakeDiscardedPanicTraceFrame(fixture.g); !ok ||
+		raw != nil || total != 0 || !emptyPanicTrace(fixture.g) {
+		t.Fatalf("completed trace drain = (%p, %d, %t), state=(%p,%p,%d)",
+			raw, total, ok,
+			fixture.g.panicTraceHead, fixture.g.panicTraceTail, fixture.g.panicTraceCount)
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	fixture.keepAlive()
+}
+
+func TestNestedChildPanicInfersOuterRecoveryReplacementScope(t *testing.T) {
+	typeWord := unsafe.Pointer(new(byte))
+	dataWord := unsafe.Pointer(new(byte))
+	fixture := newAwaitCompletionFixtureConfigured(t, nil, typeWord, dataWord)
+
+	traceMemory, descriptor := retainDetachedTestPanicTrace(
+		t, fixture.g, fixture.parentFrame(), typeWord, dataWord,
+	)
+	traceRaw := unsafe.Pointer(&traceMemory[0])
+
+	leaf := newTestFrame(
+		t, fixture.g, unsafe.Pointer(new(byte)), fixture.child.handle,
+	)
+	fixture.child.header.SuspendReason = uint16(SuspendCall)
+	fixture.child.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareAwaitCompletion(fixture.g, fixture.child.handle, leaf.handle) {
+		t.Fatal("prepare ordinary nested child inside deferred recovery scope")
+	}
+	action, ok := Resumed(fixture.p, fixture.g, fixture.action)
+	if !ok || action.Kind != ActionCheckResume || action.Handle != leaf.handle {
+		t.Fatalf("dispatch nested child = (%+v, %t)", action, ok)
+	}
+	action, ok = checkedTestAction(fixture.p, fixture.g, action, false)
+	if !ok || action.Kind != ActionResume || action.Handle != leaf.handle {
+		t.Fatalf("activate nested child = (%+v, %t)", action, ok)
+	}
+	leaf.header.SuspendReason = uint16(SuspendPanic)
+	leaf.header.Lifecycle = uint16(FrameFinalSuspended)
+
+	// The nested child uses an ordinary immediate await record, but an ancestor
+	// still owns the direct deferred-call recovery transaction. Even identical
+	// payload words therefore start a new panic and detach the old trace.
+	if !PreparePanic(fixture.g, leaf.handle, leaf.header, typeWord, dataWord) {
+		t.Fatal("publish nested same-payload replacement panic")
+	}
+	if !PanicTraceDiscardPending(fixture.g) ||
+		!FrameFromStorage(leaf.storage).retainPanicTrace {
+		t.Fatalf("nested replacement state = discard:%t retain:%t",
+			PanicTraceDiscardPending(fixture.g),
+			FrameFromStorage(leaf.storage).retainPanicTrace)
+	}
+	raw, total, ok := TakeDiscardedPanicTraceFrame(fixture.g)
+	if !ok || raw != traceRaw || total != uintptr(len(traceMemory)) {
+		t.Fatalf("nested replacement discarded trace = (%p, %d, %t), want (%p, %d)",
+			raw, total, ok, traceRaw, len(traceMemory))
+	}
+	if raw, total, ok = TakeDiscardedPanicTraceFrame(fixture.g); !ok ||
+		raw != nil || total != 0 || !emptyPanicTrace(fixture.g) {
+		t.Fatalf("nested replacement trace drain = (%p, %d, %t)", raw, total, ok)
+	}
+
+	// Destroying the nested leaf transfers the new trace carrier to its direct
+	// parent. When that deferred parent republishes the same panic to the outer
+	// recovery transaction, the runtime must append rather than discard the
+	// just-retained leaf.
+	action, ok = Resumed(fixture.p, fixture.g, action)
+	if !ok || action.Kind != ActionCheckDestroy || action.Handle != leaf.handle {
+		t.Fatalf("dispatch nested panic destroy = (%+v, %t)", action, ok)
+	}
+	action, ok = checkedTestAction(fixture.p, fixture.g, action, true)
+	if !ok || action.Kind != ActionDestroy || action.Handle != leaf.handle {
+		t.Fatalf("activate nested panic destroy = (%+v, %t)", action, ok)
+	}
+	releaseTestFrame(t, fixture.g, leaf)
+	action, ok = Destroyed(fixture.p, fixture.g, action)
+	if !ok || action.Kind != ActionCheckResume || action.Handle != fixture.child.handle {
+		t.Fatalf("resume deferred parent = (%+v, %t)", action, ok)
+	}
+	action, ok = checkedTestAction(fixture.p, fixture.g, action, false)
+	if !ok || action.Kind != ActionResume || action.Handle != fixture.child.handle {
+		t.Fatalf("activate deferred parent = (%+v, %t)", action, ok)
+	}
+	fixture.child.header.SuspendReason = uint16(SuspendNone)
+	fixture.child.header.Lifecycle = uint16(FrameActive)
+	snapshot, consumed := ConsumeAwaitCompletion(fixture.g, fixture.child.handle)
+	if !consumed || snapshot != (CompletionSnapshot{
+		Status: CompletionPanic, TypeWord: typeWord, DataWord: dataWord,
+	}) || panicTraceCarrier(fixture.g) != FrameFromStorage(fixture.child.storage) {
+		t.Fatalf("consume nested panic = (%+v, %t), carrier=%p",
+			snapshot, consumed, panicTraceCarrier(fixture.g))
+	}
+	fixture.child.header.SuspendReason = uint16(SuspendPanic)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(
+		fixture.g, fixture.child.handle, fixture.child.header, typeWord, dataWord,
+	) || PanicTraceDiscardPending(fixture.g) {
+		t.Fatalf("propagated deferred panic = discard:%t carrier:%p",
+			PanicTraceDiscardPending(fixture.g), panicTraceCarrier(fixture.g))
+	}
+	action, ok = Resumed(fixture.p, fixture.g, action)
+	if !ok || action.Kind != ActionCheckDestroy || action.Handle != fixture.child.handle {
+		t.Fatalf("dispatch deferred panic destroy = (%+v, %t)", action, ok)
+	}
+	action, ok = checkedTestAction(fixture.p, fixture.g, action, true)
+	if !ok || action.Kind != ActionDestroy || action.Handle != fixture.child.handle {
+		t.Fatalf("activate deferred panic destroy = (%+v, %t)", action, ok)
+	}
+	releaseTestFrame(t, fixture.g, fixture.child)
+	if fixture.g.panicTraceCount != 2 ||
+		fixture.g.panicTraceHead != FrameFromStorage(leaf.storage) ||
+		fixture.g.panicTraceTail != FrameFromStorage(fixture.child.storage) ||
+		panicTraceCarrier(fixture.g) != fixture.parentFrame() {
+		t.Fatalf("propagated trace = head:%p tail:%p count:%d carrier:%p",
+			fixture.g.panicTraceHead, fixture.g.panicTraceTail,
+			fixture.g.panicTraceCount, panicTraceCarrier(fixture.g))
+	}
+	runtime.KeepAlive(descriptor)
+	runtime.KeepAlive(traceMemory)
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	runtime.KeepAlive(leaf.memory)
+	fixture.keepAlive()
+}
+
+func TestPanicTraceRecoveryScopeStopsAtExactEmptyRootBoundary(t *testing.T) {
+	root := &Frame{}
+	parent := &Frame{
+		handle: unsafe.Pointer(new(byte)),
+		parent: root,
+	}
+	child := &Frame{
+		handle: unsafe.Pointer(new(byte)),
+		parent: parent,
+	}
+	parent.completion = CompletionRecord{
+		status: completionArmed,
+		child:  child.handle,
+	}
+	if owner, valid := panicTraceRecoveryOwner(child); !valid || owner != nil {
+		t.Fatalf("empty root boundary recovery owner = (%p, %t), want (nil, true)",
+			owner, valid)
+	}
+	root.completion = CompletionRecord{
+		status: completionArmed,
+		child:  unsafe.Pointer(new(byte)),
+	}
+	if owner, valid := panicTraceRecoveryOwner(child); valid || owner != nil {
+		t.Fatalf("mismatched non-empty root record = (%p, %t), want invalid",
+			owner, valid)
+	}
+	runtime.KeepAlive(parent.handle)
+	runtime.KeepAlive(child.handle)
+}
+
 func TestAwaitCompletionDuplicatePanicPublicationFailsClosed(t *testing.T) {
 	fixture := newAwaitCompletionFixture(t)
 	typeWord := unsafe.Pointer(new(byte))

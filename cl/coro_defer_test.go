@@ -47,6 +47,7 @@ func Root(guard *Guard, mode uint32, values []uint32) {
 	defer Second(mode + 2)
 	defer guard.Third(mode + 3)
 	defer Variadic(values...)
+	if mode == 10 { defer panic(&PanicPayload) }
 	if mode == 9 { panic(&PanicPayload) }
 }
 `
@@ -183,6 +184,9 @@ func TestCoroStaticCleanupIRNativeAndWasm32(t *testing.T) {
 				strings.Count(body, "call void @"+coroCompletePrepareHookV2) != 1 {
 				t.Fatalf("panic and completion do not share the cleanup drainer:\n%s", body)
 			}
+			if got := strings.Count(body, "call void @"+coroPanicTraceReplaceHookV1); got != 1 {
+				t.Fatalf("cleanup-local panic trace replacement calls = %d, want one:\n%s", got, body)
+			}
 
 			runCoroABITestPipeline(t, prog, module)
 			resume := module.NamedFunction("foo.Root$coro.resume")
@@ -194,6 +198,9 @@ func TestCoroStaticCleanupIRNativeAndWasm32(t *testing.T) {
 				if got := strings.Count(post, symbol); got != 1 {
 					t.Fatalf("post-split cleanup references %s = %d, want one:\n%s", symbol, got, post)
 				}
+			}
+			if got := strings.Count(post, "call void @"+coroPanicTraceReplaceHookV1); got != 1 {
+				t.Fatalf("post-split cleanup-local panic trace replacement calls = %d, want one:\n%s", got, post)
 			}
 		})
 	}

@@ -33,6 +33,7 @@ type HeaderV1 struct {
 	SuspendReason  uint16
 	Lifecycle      uint16
 	StateID        uint32
+	Line           uint32
 	Flags          uint32
 }
 
@@ -47,7 +48,11 @@ type FrameDescriptorV1 struct {
 	HashHi      uint64
 	ResultSize  uintptr
 	ResultAlign uintptr
+	Function    string
+	File        string
 }
+
+const FrameDescriptorTraceHiddenV1 uint32 = 1 << 0
 
 // SuspendReason describes why a coroutine returned control to its scheduler.
 type SuspendReason uint16
@@ -129,9 +134,14 @@ type Frame struct {
 	size           uintptr
 	align          uintptr
 	allocationSize uintptr
+	panicLine      uint32
 	state          FrameState
-	parent         *Frame
-	next           *Frame
+	// retainPanicTrace is set only after a managed child publishes
+	// CompletionPanic. It occupies the padding before parent on pointer-aligned
+	// targets and transfers the destroyed allocation to the task trace chain.
+	retainPanicTrace bool
+	parent           *Frame
+	next             *Frame
 }
 
 // ValidG reports whether g has been initialized as a coroutine task.
@@ -454,7 +464,260 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 		return nil, 0, false
 	}
 	frame.state = FrameDestroyed
+	frame.panicLine = frame.header.Line
 	frame.header.Lifecycle = uint16(FrameDestroyed)
 	g.destroyTarget = nil
 	return raw, total, true
+}
+
+// PanicTraceFrameSnapshot is the allocation-free diagnostic prefix retained
+// from one destroyed physical frame. Function and File point into immutable
+// descriptor storage emitted by the compiler.
+type PanicTraceFrameSnapshot struct {
+	Function string
+	File     string
+	Line     uint32
+	Hidden   bool
+}
+
+func emptyPanicTrace(g *G) bool {
+	return g != nil && g.panicTraceHead == nil && g.panicTraceTail == nil &&
+		g.panicTraceCount == 0
+}
+
+func activePanicTrace(g *G) bool {
+	return g != nil && g.panicTraceHead != nil && g.panicTraceTail != nil &&
+		g.panicTraceCount != 0
+}
+
+// panicTraceCarrier is the still-live frame which owns continued propagation
+// of the retained trace. A retained frame preserves its logical parent, so the
+// tail carries this fact without adding another pointer to every G.
+func panicTraceCarrier(g *G) *Frame {
+	if !activePanicTrace(g) {
+		return nil
+	}
+	return g.panicTraceTail.parent
+}
+
+// A staged discard reuses the active head while tail=nil/count=0. The runtime
+// adapter drains it synchronously before the compiler hook returns, so no
+// second G pointer or target allocator dependency enters the scheduler core.
+func stagedPanicTraceDiscard(g *G) bool {
+	return g != nil && g.panicTraceHead != nil && g.panicTraceTail == nil &&
+		g.panicTraceCount == 0
+}
+
+func panicTraceIdentity(frame *Frame) (typeWord, dataWord unsafe.Pointer, ok bool) {
+	if frame == nil {
+		return nil, nil, false
+	}
+	record := &frame.completion
+	return record.typeWord, record.dataWord,
+		record.status == CompletionPanic && record.child == nil && record.typeWord != nil
+}
+
+func canStagePanicTraceDiscard(g *G) bool {
+	return emptyPanicTrace(g) || activePanicTrace(g)
+}
+
+func stagePanicTraceDiscard(g *G) bool {
+	if !canStagePanicTraceDiscard(g) {
+		return false
+	}
+	if emptyPanicTrace(g) {
+		return true
+	}
+	g.panicTraceTail = nil
+	g.panicTraceCount = 0
+	return true
+}
+
+// ReplacePanicTrace applies the compiler's exact language-semantic signal that
+// cleanup is about to replace the currently propagated panic. Payload identity
+// is deliberately absent: panic(x) may replace an older panic(x) with identical
+// interface words, which cannot be inferred after publication. The detached
+// trace is released synchronously by the runtime adapter before it returns to
+// generated code.
+func ReplacePanicTrace(g *G, handle unsafe.Pointer) bool {
+	if !ValidG(g) || !resumeGateTaken(g) || handle == nil ||
+		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroyRoot ||
+		g.queued || g.nextReady != nil || g.waiting ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		!releasableParkState(&g.park) || g.panicUnwind ||
+		!emptyPanicRecord(&g.panicRecord) {
+		return false
+	}
+	frame := findFrame(g, handle)
+	if frame == nil || frame != g.active || frame.owner != g ||
+		frame.header == nil || frame.state != FrameActive ||
+		frame.header.G != unsafe.Pointer(g) ||
+		frame.header.SuspendReason != uint16(SuspendNone) ||
+		frame.header.Lifecycle != uint16(FrameActive) {
+		return false
+	}
+	if activePanicTrace(g) && panicTraceCarrier(g) != frame {
+		return false
+	}
+	return stagePanicTraceDiscard(g)
+}
+
+func retainPanicTraceFrame(
+	g *G,
+	raw unsafe.Pointer,
+	total uintptr,
+	typeWord, dataWord unsafe.Pointer,
+) bool {
+	if !ValidG(g) || raw == nil || total == 0 || typeWord == nil ||
+		g.destroyTarget != nil || g.panicTraceCount == ^uint32(0) ||
+		!emptyPanicTrace(g) && !activePanicTrace(g) {
+		return false
+	}
+	frame := (*Frame)(raw)
+	if frame.owner != g || frame.rawBase != raw || frame.allocationSize != total ||
+		frame.state != FrameDestroyed || frame.next != nil || frame.descriptor == nil ||
+		!emptyCompletionRecord(&frame.completion) {
+		return false
+	}
+	descriptor := (*FrameDescriptorV1)(frame.descriptor)
+	if descriptor.Version != 1 ||
+		descriptor.Flags & ^FrameDescriptorTraceHiddenV1 != 0 ||
+		len(descriptor.Function) == 0 {
+		return false
+	}
+	if activePanicTrace(g) {
+		existingType, existingData, ok := panicTraceIdentity(g.panicTraceHead)
+		if !ok || existingType != typeWord || existingData != dataWord {
+			return false
+		}
+		// Destroy order must extend the exact logical ancestry of the current
+		// panic. A replacement trace is detached before its first new frame is
+		// retained, so silently joining unrelated frame chains is never valid.
+		if panicTraceCarrier(g) != frame {
+			return false
+		}
+	}
+	frame.header = nil
+	frame.retainPanicTrace = false
+	if emptyPanicTrace(g) {
+		frame.completion = CompletionRecord{
+			status:   CompletionPanic,
+			typeWord: typeWord,
+			dataWord: dataWord,
+		}
+		g.panicTraceHead = frame
+	} else {
+		g.panicTraceTail.next = frame
+	}
+	g.panicTraceTail = frame
+	g.panicTraceCount++
+	return true
+}
+
+// RetainPendingPanicTraceFrame transfers one managed child frame whose panic
+// remains owned by its resumed parent. The parent CompletionRecord supplies
+// the stable panic identity; later propagation appends ancestors, while an
+// exact recover/replacement stages the chain for adapter-owned release.
+func RetainPendingPanicTraceFrame(g *G, raw unsafe.Pointer, total uintptr) bool {
+	if !ValidG(g) || raw == nil {
+		return false
+	}
+	frame := (*Frame)(raw)
+	if !frame.retainPanicTrace || frame.parent == nil ||
+		frame.parent.completion.status != CompletionPanic ||
+		frame.parent.completion.child != frame.handle ||
+		frame.parent.completion.typeWord == nil {
+		return false
+	}
+	record := frame.parent.completion
+	return retainPanicTraceFrame(g, raw, total, record.typeWord, record.dataWord)
+}
+
+// RetainPanicTraceFrame transfers one terminal command-root frame allocation
+// to the same trace chain. The LLVM handle is already destroyed and the frame
+// is no longer schedulable; a caller which receives true must not clear or free
+// raw. Runtime adapters must call this terminal form only when they own a
+// no-return panic reporter.
+func RetainPanicTraceFrame(g *G, raw unsafe.Pointer, total uintptr) bool {
+	if !ValidG(g) || !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) {
+		return false
+	}
+	record := &g.panicRecord
+	return retainPanicTraceFrame(g, raw, total, record.typeWord, record.dataWord)
+}
+
+// PanicTraceDiscardPending reports the transient adapter-owned drain state.
+// It is true only between a successful recovery/replacement transaction and
+// the synchronous runtime hook that releases the detached allocations.
+func PanicTraceDiscardPending(g *G) bool {
+	return ValidG(g) && stagedPanicTraceDiscard(g)
+}
+
+// TakeDiscardedPanicTraceFrame pops one allocation from a trace staged by an
+// exact recovery or panic replacement. A nil raw with ok=true means the drain
+// is complete. The adapter owns zeroing/freeing each returned range.
+func TakeDiscardedPanicTraceFrame(g *G) (raw unsafe.Pointer, total uintptr, ok bool) {
+	if !ValidG(g) {
+		return nil, 0, false
+	}
+	if emptyPanicTrace(g) {
+		return nil, 0, true
+	}
+	if !stagedPanicTraceDiscard(g) {
+		return nil, 0, false
+	}
+	frame := g.panicTraceHead
+	if frame.owner != g || frame.rawBase != unsafe.Pointer(frame) ||
+		frame.allocationSize == 0 || frame.state != FrameDestroyed ||
+		frame.header != nil || frame.descriptor == nil {
+		return nil, 0, false
+	}
+	g.panicTraceHead = frame.next
+	frame.next = nil
+	frame.parent = nil
+	frame.completion = CompletionRecord{}
+	return frame.rawBase, frame.allocationSize, true
+}
+
+// FirstPanicTraceFrame returns the opaque cursor for the deepest retained
+// physical frame. Frames are appended in llvm.coro.destroy order, so following
+// Next walks from the panic site toward the command root.
+func FirstPanicTraceFrame(g *G) unsafe.Pointer {
+	if !ValidG(g) || !publishedPanicRecord(&g.panicRecord) ||
+		!activePanicTrace(g) {
+		return nil
+	}
+	return unsafe.Pointer(g.panicTraceHead)
+}
+
+// LoadPanicTraceFrame validates and snapshots one cursor retained by
+// RetainPanicTraceFrame. next is nil only for the exact tail.
+func LoadPanicTraceFrame(g *G, cursor unsafe.Pointer) (snapshot PanicTraceFrameSnapshot, next unsafe.Pointer, ok bool) {
+	if !ValidG(g) || cursor == nil || !publishedPanicRecord(&g.panicRecord) {
+		return PanicTraceFrameSnapshot{}, nil, false
+	}
+	frame := (*Frame)(cursor)
+	if frame.owner != g || frame.rawBase != cursor || frame.allocationSize == 0 ||
+		frame.state != FrameDestroyed || frame.header != nil || frame.descriptor == nil {
+		return PanicTraceFrameSnapshot{}, nil, false
+	}
+	descriptor := (*FrameDescriptorV1)(frame.descriptor)
+	if descriptor.Version != 1 ||
+		descriptor.Flags & ^FrameDescriptorTraceHiddenV1 != 0 ||
+		len(descriptor.Function) == 0 {
+		return PanicTraceFrameSnapshot{}, nil, false
+	}
+	if frame == g.panicTraceTail {
+		if frame.next != nil {
+			return PanicTraceFrameSnapshot{}, nil, false
+		}
+	} else if frame.next == nil || frame.parent != frame.next {
+		return PanicTraceFrameSnapshot{}, nil, false
+	}
+	return PanicTraceFrameSnapshot{
+		Function: descriptor.Function,
+		File:     descriptor.File,
+		Line:     frame.panicLine,
+		Hidden:   descriptor.Flags&FrameDescriptorTraceHiddenV1 != 0,
+	}, unsafe.Pointer(frame.next), true
 }

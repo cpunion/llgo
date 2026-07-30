@@ -555,6 +555,10 @@ func assertCoroProgramNativeSliceV2(t *testing.T, module llvm.Module, entryName 
 	if continueRun.IsNil() || !continueRun.IsDeclaration() || continueRun.GlobalValueType().String() != "i32 (i32, i32, i32, i32, ptr)" {
 		t.Fatalf("native program continue-slice declaration has the wrong ABI: %v\n%s", continueRun, module.String())
 	}
+	reportPanic := module.NamedFunction(coroProgramReportPanicSymbolV1)
+	if reportPanic.IsNil() || !reportPanic.IsDeclaration() || reportPanic.GlobalValueType().String() != "void (ptr)" {
+		t.Fatalf("native program panic reporter declaration has the wrong ABI: %v\n%s", reportPanic, module.String())
+	}
 	if legacy := module.NamedFunction(coroProgramRunSymbolV1); !legacy.IsNil() {
 		t.Fatalf("native V2 entry retained the legacy whole-program run ABI: %v\n%s", legacy, module.String())
 	}
@@ -576,6 +580,7 @@ func assertCoroProgramNativeSliceV2(t *testing.T, module llvm.Module, entryName 
 		"phi i32",
 		"icmp eq i32",
 		"call i32 @" + coroProgramContinueSliceSymbolV2 + "(i32",
+		"call void @" + coroProgramReportPanicSymbolV1 + "(ptr",
 		"call void @abort()",
 		"unreachable",
 	} {
@@ -589,9 +594,13 @@ func assertCoroProgramNativeSliceV2(t *testing.T, module llvm.Module, entryName 
 	if got := strings.Count(body, "call i32 @"+coroProgramContinueSliceSymbolV2); got != 1 {
 		t.Fatalf("native V2 continuation calls = %d, want one fixed-stack loop edge:\n%s", got, body)
 	}
+	if got := strings.Count(body, "call void @"+coroProgramReportPanicSymbolV1); got != 1 {
+		t.Fatalf("native V2 panic reporter calls = %d, want one terminal edge:\n%s", got, body)
+	}
 	for label, pattern := range map[string]string{
 		"complete status": `icmp eq i32 [^,\n]+, 1`,
 		"yielded status":  `icmp eq i32 [^,\n]+, 3`,
+		"panic status":    `icmp eq i32 [^,\n]+, 4`,
 		"inline flags":    `icmp eq i32 [^,\n]+, 9`,
 		"bounded used":    `icmp ule i32 [^,\n]+, 1024`,
 	} {
@@ -603,8 +612,8 @@ func assertCoroProgramNativeSliceV2(t *testing.T, module llvm.Module, entryName 
 	// bookkeeping may legitimately request another inline pass with zero Used;
 	// every budget-checked Used SSA value must therefore remain zero-admissible.
 	boundedUses := regexp.MustCompile(`icmp ule i32 ([^,\n]+), 1024`).FindAllStringSubmatch(body, -1)
-	if len(boundedUses) < 2 {
-		t.Fatalf("native V2 entry has %d bounded Used checks, want complete and yielded:\n%s", len(boundedUses), body)
+	if len(boundedUses) < 3 {
+		t.Fatalf("native V2 entry has %d bounded Used checks, want complete, panic, and yielded:\n%s", len(boundedUses), body)
 	}
 	for _, match := range boundedUses {
 		if strings.Contains(body, "icmp ne i32 "+match[1]+", 0") {

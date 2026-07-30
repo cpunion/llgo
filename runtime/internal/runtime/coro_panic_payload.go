@@ -56,8 +56,9 @@ func coroNormalizePanicPayloadV1(typeWord, dataWord unsafe.Pointer) (unsafe.Poin
 //export __llgo_coro_panic_prepare_v1
 func __llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord unsafe.Pointer) {
 	typeWord, dataWord = coroNormalizePanicPayloadV1(typeWord, dataWord)
+	task := (*coro.G)(g)
 	if typeWord == nil || !coro.PreparePanic(
-		(*coro.G)(g),
+		task,
 		handle,
 		(*coro.HeaderV1)(header),
 		typeWord,
@@ -65,6 +66,21 @@ func __llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord unsafe.P
 	) {
 		coroRuntimeAbort("invalid coroutine panic handoff")
 	}
+	coroReleaseDiscardedPanicTraceV1(task)
+}
+
+// __llgo_coro_panic_trace_replace_v1 is emitted only for a cleanup-local
+// language operation which starts a new panic. It carries no payload because
+// its purpose is to distinguish replacement even when both panic interface
+// words are bit-identical.
+//
+//export __llgo_coro_panic_trace_replace_v1
+func __llgo_coro_panic_trace_replace_v1(g, handle unsafe.Pointer) {
+	task := (*coro.G)(g)
+	if !coro.ReplacePanicTrace(task, handle) {
+		coroRuntimeAbort("invalid coroutine panic trace replacement")
+	}
+	coroReleaseDiscardedPanicTraceV1(task)
 }
 
 // __llgo_coro_await_prepare_v3 is the unified managed-child handoff. Mode zero

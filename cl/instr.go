@@ -1845,6 +1845,24 @@ func runtimeLocationPosition(fset *token.FileSet, pos token.Pos) (token.Position
 	return position, position.Filename != "" && position.Line > 0
 }
 
+// coroCurrentSourceLine returns the immutable source line owned by the active
+// CoroProgramIR site. It is embedded as a constant store at a scheduler or
+// terminal transition; it does not enable the logical-caller shadow stack.
+func (p *context) coroCurrentSourceLine() uint32 {
+	if p == nil {
+		return 0
+	}
+	site := p.coroEmissionSite()
+	if site == nil || site.instruction == nil {
+		return 0
+	}
+	position, ok := runtimeLocationPosition(p.fset, site.instruction.Pos())
+	if !ok || uint64(position.Line) > uint64(^uint32(0)) {
+		return 0
+	}
+	return uint32(position.Line)
+}
+
 func (p *context) recordCallerLocationForCall(b llssa.Builder, call *ssa.CallCommon) {
 	if call == nil {
 		return

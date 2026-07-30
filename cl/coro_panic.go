@@ -64,8 +64,8 @@ func (p *context) compileCoroTerminalPanicPair(
 		panic("terminal coroutine panic pair escaped its explicit-status physical body")
 	}
 	if body.cleanup == nil {
-		body.panic(b, typeWord, dataWord)
+		body.panic(b, typeWord, dataWord, p.coroCurrentSourceLine())
 	} else {
-		body.cleanup.enterPanic(b, typeWord, dataWord)
+		body.cleanup.enterPanic(b, typeWord, dataWord, p.coroCurrentSourceLine())
 	}
 }

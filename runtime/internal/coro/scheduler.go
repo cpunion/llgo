@@ -94,9 +94,16 @@ type G struct {
 	taskLocal unsafe.Pointer
 
 	// panicRecord is task-local. It must never be discovered through TLS or a
-	// process-global current-G slot. panicUnwind is scheduler-thread-only and is
-	// set only after the published active frame returns from llvm.coro.resume.
+	// process-global current-G slot.
 	panicRecord PanicRecord
+	// A command-root panic retains already-destroyed frame allocations in
+	// deepest-to-root order until its terminal boundary prints and exits.
+	panicTraceHead  *Frame
+	panicTraceTail  *Frame
+	panicTraceCount uint32
+	// panicUnwind is scheduler-thread-only and is set only after the published
+	// active frame returns from llvm.coro.resume. Keep it next to the other
+	// byte-sized task state so trace metadata adds no avoidable pointer padding.
 	panicUnwind bool
 	// osThreadLockDepth occupies existing tail padding. A non-zero depth binds
 	// this logical G to one P/M ownership island through P.osThreadLockOwner.
@@ -342,7 +349,8 @@ func InitG(g *G) bool {
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageStatic ||
 		g.taskLocal != nil ||
-		!emptyPanicRecord(&g.panicRecord) || g.panicUnwind {
+		!emptyPanicRecord(&g.panicRecord) || g.panicUnwind ||
+		g.panicTraceHead != nil || g.panicTraceTail != nil || g.panicTraceCount != 0 {
 		return false
 	}
 	g.magic = gMagic
@@ -1469,5 +1477,6 @@ func TerminalG(p *P, g *G) bool {
 		!g.waiting && g.runP == nil &&
 		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validTerminalTaskStorage(g) &&
-		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind
+		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind &&
+		g.panicTraceHead == nil && g.panicTraceTail == nil && g.panicTraceCount == 0
 }

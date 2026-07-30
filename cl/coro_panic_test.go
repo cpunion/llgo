@@ -82,6 +82,16 @@ func TestCoroExplicitStatusPanicNativeAndWasm32(t *testing.T) {
 			}
 			body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
 			assertCoroExplicitStatusPanicBody(t, body, 4)
+			ir := module.String()
+			descriptor := regexp.MustCompile(
+				`(?m)^@` + regexp.QuoteMeta(coroDescriptorPrefixV1) + `[^\n]+`,
+			).FindString(ir)
+			if descriptor == "" ||
+				!strings.Contains(ir, `c"foo.Root"`) ||
+				!strings.Contains(ir, `c"foo.go"`) ||
+				strings.Contains(ir, `c"foo.Root$coro"`) {
+				t.Fatalf("panic frame descriptor lacks logical function/file trace metadata: %s\n%s", descriptor, ir)
+			}
 			if !regexp.MustCompile(
 				`call void @` + regexp.QuoteMeta(coroPanicPrepareHookV1) +
 					`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr null, ptr null\)`,
@@ -97,6 +107,9 @@ func TestCoroExplicitStatusPanicNativeAndWasm32(t *testing.T) {
 			}
 			if got := strings.Count(resume.String(), "call void @"+coroPanicPrepareHookV1); got != 4 {
 				t.Fatalf("Root.resume panic prepare calls = %d, want 4:\n%s", got, resume.String())
+			}
+			if got := strings.Count(resume.String(), "call void @"+coroPanicTraceReplaceHookV1); got != 0 {
+				t.Fatalf("ordinary Root.resume panic trace replacement calls = %d, want none:\n%s", got, resume.String())
 			}
 			assertNoLegacyCoroPanicSymbol(t, module.String())
 			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend", "llvm.coro.end"} {
@@ -122,6 +135,9 @@ func assertCoroExplicitStatusPanicBody(t *testing.T, body string, panicSites int
 	if got := strings.Count(body, "call void @"+coroPanicPrepareHookV1); got != panicSites {
 		t.Fatalf("panic prepare calls = %d, want %d:\n%s", got, panicSites, body)
 	}
+	if got := strings.Count(body, "call void @"+coroPanicTraceReplaceHookV1); got != 0 {
+		t.Fatalf("ordinary panic trace replacement calls = %d, want none:\n%s", got, body)
+	}
 	if got := strings.Count(body, "call void @"+coroCompletePrepareHookV2); got != 1 {
 		t.Fatalf("completion prepare calls = %d, want one shared normal completion:\n%s", got, body)
 	}
@@ -132,11 +148,11 @@ func assertCoroExplicitStatusPanicBody(t *testing.T, body string, panicSites int
 		t.Fatalf("final coro.suspend calls = %d, want exactly one shared final suspend:\n%s", got, body)
 	}
 	stateAndHook := regexp.MustCompile(
-		`(?s)store i16 5,.*?store i16 4,.*?store i32 [1-9][0-9]*,.*?call void @` + regexp.QuoteMeta(coroPanicPrepareHookV1) +
+		`(?s)store i16 5,.*?store i16 4,.*?store i32 [1-9][0-9]*,.*?store i32 [1-9][0-9]*,.*?call void @` + regexp.QuoteMeta(coroPanicPrepareHookV1) +
 			`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^)]+\)`,
 	)
 	if got := len(stateAndHook.FindAllStringIndex(body, -1)); got != panicSites {
-		t.Fatalf("Panic/FinalSuspended/stateID publication followed by the five-pointer hook = %d, want %d:\n%s", got, panicSites, body)
+		t.Fatalf("Panic/FinalSuspended/stateID/source-line publication followed by the five-pointer hook = %d, want %d:\n%s", got, panicSites, body)
 	}
 	hookBranch := regexp.MustCompile(
 		`call void @`+regexp.QuoteMeta(coroPanicPrepareHookV1)+`\([^\n]+\)\n\s+br label (%[-a-zA-Z$._0-9]+)`,

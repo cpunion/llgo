@@ -671,7 +671,13 @@ func (c *coroBodyContext) implicitFaultWithOperands(
 	if c == nil || p == nil || b == nil || c.abi.version < coroPhysicalABIVersionV1 || c.finalSuspend == nil {
 		panic("implicit nil fault requires a PhysicalABIV1 body and shared final suspend")
 	}
-	c.publishState(b, coroSuspendPanic, coroLifecycleFinalSuspended, c.terminalStateID())
+	c.publishState(
+		b,
+		coroSuspendPanic,
+		coroLifecycleFinalSuspended,
+		c.terminalStateID(),
+		p.coroCurrentSourceLine(),
+	)
 	args := []llssa.Expr{
 		c.task,
 		c.coro.Handle(),
@@ -759,7 +765,7 @@ func (s *coroStaticCleanupState) enterFaultWithOperands(
 		panic("implicit nil fault cleanup has no active coroutine state")
 	}
 	typeWord, dataWord := p.materializeCoroFaultPayloadWithOperands(b, kind, operands)
-	s.enterPanic(b, typeWord, dataWord)
+	s.enterPanic(b, typeWord, dataWord, p.coroCurrentSourceLine())
 }
 
 // replaceFault is the cleanup-internal counterpart used by operations such as
@@ -771,5 +777,5 @@ func (s *coroStaticCleanupState) replaceFault(p *context, b llssa.Builder, kind 
 		panic("implicit cleanup fault has no active coroutine state")
 	}
 	typeWord, dataWord := p.materializeCoroFaultPayload(b, kind)
-	s.replacePanic(b, typeWord, dataWord)
+	s.replacePanicInline(p, b, typeWord, dataWord, p.coroCurrentSourceLine())
 }

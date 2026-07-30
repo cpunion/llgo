@@ -1801,6 +1801,12 @@ func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	mustPanicContains(t, "requires a result type", func() {
 		pkg.NewCoroFrameDescriptor("bad_descriptor", CoroFrameDescriptorOptions{})
 	})
+	mustPanicContains(t, "requires a logical function name", func() {
+		pkg.NewCoroFrameDescriptor(
+			"bad_trace_descriptor",
+			CoroFrameDescriptorOptions{Result: prog.Byte()},
+		)
+	})
 	b := fn.MakeBody(1)
 	defer b.Dispose()
 	invalidHandles := []struct {

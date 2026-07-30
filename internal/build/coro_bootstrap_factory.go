@@ -38,6 +38,7 @@ const (
 	coroProgramLifecycleActiveV1      = 2
 	coroProgramLifecycleSuspendedV1   = 3
 	coroProgramLifecycleFinalV1       = 4
+	coroProgramFrameTraceHiddenV1     = 1 << 0
 )
 
 const (
@@ -49,6 +50,7 @@ const (
 	coroProgramHeaderSuspendReasonV1
 	coroProgramHeaderLifecycleV1
 	coroProgramHeaderStateIDV1
+	coroProgramHeaderLineV1
 	coroProgramHeaderFlagsV1
 )
 
@@ -127,9 +129,11 @@ func emitCoroProgramBootstrapFactoryV2(
 	descriptor := pkg.NewCoroFrameDescriptor(
 		coroProgramBootstrapFrameDescriptorPrefixV2+hex.EncodeToString(finalHash[:]),
 		llssa.CoroFrameDescriptorOptions{
-			Version: coroProgramPhysicalABIVersionV1,
-			ABIHash: finalHash,
-			Result:  emptyPayload,
+			Version:  coroProgramPhysicalABIVersionV1,
+			ABIHash:  finalHash,
+			Flags:    coroProgramFrameTraceHiddenV1,
+			Result:   emptyPayload,
+			Function: "runtime.__llgo_coro_program_bootstrap",
 		},
 	)
 
@@ -190,6 +194,7 @@ func emitCoroProgramBootstrapFactoryV2(
 				prog.IntVal(coroProgramLifecycleInitialV1, prog.Uint16()),
 				prog.IntVal(0, prog.Uint32()),
 				prog.IntVal(0, prog.Uint32()),
+				prog.IntVal(0, prog.Uint32()),
 			}
 			for index, value := range values {
 				b.Store(b.FieldAddr(header, index), value)
@@ -238,6 +243,7 @@ func emitCoroProgramBootstrapFactoryV2(
 			b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendCallV1, prog.Uint16()))
 			b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleSuspendedV1, prog.Uint16()))
 			b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(stateID, prog.Uint32()))
+			b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
 			b.Call(await.Expr, g, coroBuilder.Handle(), child)
 			coroBuilder.SuspendCurrentBlock()
 			b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()))
@@ -255,6 +261,7 @@ func emitCoroProgramBootstrapFactoryV2(
 	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendFrameCompleteV1, prog.Uint16()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(uint64(len(bootstrap.Steps)+1), prog.Uint32()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
 	b.Call(complete.Expr, g, coroBuilder.Handle(), b.Convert(prog.VoidPtr(), header))
 	coroBuilder.Finish()
 	b.Dispose()
@@ -314,6 +321,7 @@ func coroProgramBootstrapHeaderTypeV1(prog llssa.Program) llssa.Type {
 		prog.Uint16(),  // SuspendReason
 		prog.Uint16(),  // Lifecycle
 		prog.Uint32(),  // StateID
+		prog.Uint32(),  // Line
 		prog.Uint32(),  // Flags
 	)
 }

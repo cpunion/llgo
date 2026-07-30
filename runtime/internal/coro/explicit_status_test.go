@@ -276,6 +276,162 @@ func TestExplicitPanicDestroysDeepestToRootAcrossFrameListShuffle(t *testing.T) 
 	}
 }
 
+func TestExplicitPanicRetainsDescriptorTraceDeepestToRoot(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 3)
+	descriptors := []*FrameDescriptorV1{
+		{
+			Version:  1,
+			Flags:    FrameDescriptorTraceHiddenV1,
+			Function: "runtime.__llgo_coro_program_bootstrap",
+		},
+		{
+			Version:  1,
+			Function: "main.outer",
+			File:     "/src/main.go",
+		},
+		{
+			Version:  1,
+			Function: "main.inner",
+			File:     "/src/main.go",
+		},
+	}
+	lines := []uint32{0, 20, 11}
+	for index, frame := range fixture.frames {
+		descriptor := unsafe.Pointer(descriptors[index])
+		metadata := FrameFromStorage(frame.storage)
+		metadata.descriptor = descriptor
+		frame.descriptor = descriptor
+		frame.header.Descriptor = descriptor
+		frame.header.Line = lines[index]
+	}
+
+	typeWord, dataWord := new(byte), new(byte)
+	fixture.publish(t, unsafe.Pointer(typeWord), unsafe.Pointer(dataWord))
+	action := fixture.beginPanicDestroy(t)
+	for action.Kind == ActionDestroy || action.Kind == ActionPanicDestroy {
+		frame := fixture.byHandle[action.Handle]
+		if frame == nil {
+			t.Fatalf("retain unknown panic handle %p", action.Handle)
+		}
+		raw, total, ok := ReleaseFrame(
+			fixture.g,
+			frame.storage,
+			frame.size,
+			frame.align,
+			frame.descriptor,
+		)
+		if !ok {
+			t.Fatalf("release trace frame %p", action.Handle)
+		}
+		if !RetainPanicTraceFrame(fixture.g, raw, total) {
+			t.Fatalf("retain trace frame %p", action.Handle)
+		}
+		action, ok = fixture.commitDestroyed(action)
+		if !ok {
+			t.Fatalf("commit retained panic frame = (%+v, %t)", action, ok)
+		}
+	}
+	if action.Kind != ActionPanicComplete {
+		t.Fatalf("retained panic terminal action = %+v", action)
+	}
+
+	wants := []PanicTraceFrameSnapshot{
+		{Function: "main.inner", File: "/src/main.go", Line: 11},
+		{Function: "main.outer", File: "/src/main.go", Line: 20},
+		{Function: "runtime.__llgo_coro_program_bootstrap", Hidden: true},
+	}
+	cursor := FirstPanicTraceFrame(fixture.g)
+	for index, want := range wants {
+		if cursor == nil {
+			t.Fatalf("trace ended before frame %d", index)
+		}
+		got, next, ok := LoadPanicTraceFrame(fixture.g, cursor)
+		if !ok || got != want {
+			t.Fatalf("trace frame %d = (%+v, %t), want %+v", index, got, ok, want)
+		}
+		cursor = next
+	}
+	if cursor != nil {
+		t.Fatal("trace contains an unexpected frame after the hidden root")
+	}
+	runtime.KeepAlive(descriptors)
+	for _, frame := range fixture.frames {
+		runtime.KeepAlive(frame.memory)
+	}
+}
+
+func TestTerminalReplacementStagesDifferentPayloadTraceForRelease(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 1)
+	oldType, oldData := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	traceMemory, descriptor := retainDetachedTestPanicTrace(
+		t, fixture.g, FrameFromStorage(fixture.frames[0].storage), oldType, oldData,
+	)
+	traceRaw := unsafe.Pointer(&traceMemory[0])
+
+	newType, newData := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	leaf := fixture.frames[0]
+	if !ReplacePanicTrace(fixture.g, leaf.handle) ||
+		!PanicTraceDiscardPending(fixture.g) {
+		t.Fatalf("terminal replacement hook discard = %t",
+			PanicTraceDiscardPending(fixture.g))
+	}
+	raw, total, ok := TakeDiscardedPanicTraceFrame(fixture.g)
+	if !ok || raw != traceRaw || total != uintptr(len(traceMemory)) {
+		t.Fatalf("terminal replacement discarded trace = (%p, %d, %t), want (%p, %d)",
+			raw, total, ok, traceRaw, len(traceMemory))
+	}
+	if raw, total, ok = TakeDiscardedPanicTraceFrame(fixture.g); !ok ||
+		raw != nil || total != 0 || !emptyPanicTrace(fixture.g) {
+		t.Fatalf("terminal replacement trace drain = (%p, %d, %t)", raw, total, ok)
+	}
+	leaf.header.SuspendReason = uint16(SuspendPanic)
+	leaf.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(fixture.g, leaf.handle, leaf.header, newType, newData) {
+		t.Fatal("publish terminal replacement panic after exact hook")
+	}
+	record, published := LoadPanicRecord(fixture.g)
+	if !published || record.TypeWord != newType || record.DataWord != newData {
+		t.Fatalf("terminal replacement record = (%+v, %t)", record, published)
+	}
+	runtime.KeepAlive(descriptor)
+	runtime.KeepAlive(traceMemory)
+	runtime.KeepAlive(oldType)
+	runtime.KeepAlive(oldData)
+	runtime.KeepAlive(newType)
+	runtime.KeepAlive(newData)
+	runtime.KeepAlive(leaf.memory)
+}
+
+func TestTerminalReplacementRequiresExactCompilerHook(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 1)
+	leaf := fixture.frames[0]
+	oldType, oldData := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	traceMemory, descriptor := retainDetachedTestPanicTrace(
+		t, fixture.g, FrameFromStorage(leaf.storage), oldType, oldData,
+	)
+
+	newType, newData := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	leaf.header.SuspendReason = uint16(SuspendPanic)
+	leaf.header.Lifecycle = uint16(FrameFinalSuspended)
+	if PreparePanic(fixture.g, leaf.handle, leaf.header, newType, newData) {
+		t.Fatal("terminal replacement without compiler semantic hook was accepted")
+	}
+	if !activePanicTrace(fixture.g) || PanicTraceDiscardPending(fixture.g) {
+		t.Fatalf("rejected replacement mutated trace ownership: active=%t discard=%t",
+			activePanicTrace(fixture.g), PanicTraceDiscardPending(fixture.g))
+	}
+	if _, published := LoadPanicRecord(fixture.g); published {
+		t.Fatal("rejected replacement published a terminal panic record")
+	}
+	runtime.KeepAlive(descriptor)
+	runtime.KeepAlive(traceMemory)
+	runtime.KeepAlive(oldType)
+	runtime.KeepAlive(oldData)
+	runtime.KeepAlive(newType)
+	runtime.KeepAlive(newData)
+	runtime.KeepAlive(leaf.memory)
+}
+
 func TestExplicitStatusUnsupportedShapesFailClosed(t *testing.T) {
 	tests := []struct {
 		name     string
