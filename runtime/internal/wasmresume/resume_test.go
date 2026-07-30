@@ -32,6 +32,9 @@ func resumeTestRoot(ctx *Context, raw *Frame) Action {
 		ctx.Push(&frame.direct.Frame, &testAddDescriptor)
 		return Continue
 	case 1:
+		if returned := ctx.TakeReturned(); returned != &frame.direct.Frame {
+			panic("unexpected direct child frame")
+		}
 		frame.value = frame.direct.value
 		frame.PC = 2
 		frame.indirect.value = frame.value
@@ -42,6 +45,9 @@ func resumeTestRoot(ctx *Context, raw *Frame) Action {
 		ctx.Push(&frame.indirect.Frame, descriptor)
 		return Continue
 	case 2:
+		if returned := ctx.TakeReturned(); returned != &frame.indirect.Frame {
+			panic("unexpected indirect child frame")
+		}
 		frame.value = frame.indirect.value
 		return Return
 	default:
@@ -92,6 +98,9 @@ func TestContextRunDirectAndIndirectCalls(t *testing.T) {
 	if ctx.Top() != nil {
 		t.Fatal("completed frame chain remains active")
 	}
+	if returned := ctx.TakeReturned(); returned != &frame.Frame {
+		t.Fatal("completed root frame was not returned to its owner")
+	}
 	if frame.value != 14 {
 		t.Fatalf("result = %d, want 14", frame.value)
 	}
@@ -101,6 +110,9 @@ func TestContextRunEmpty(t *testing.T) {
 	var ctx Context
 	if action := ctx.Run(); action != Return {
 		t.Fatalf("empty Run action = %d, want Return", action)
+	}
+	if returned := ctx.TakeReturned(); returned != nil {
+		t.Fatalf("empty Run returned frame %p", returned)
 	}
 }
 
@@ -117,6 +129,22 @@ func TestContextPushInitializesHeader(t *testing.T) {
 	}
 	if child.PC != 0 {
 		t.Fatalf("Push PC = %d, want 0", child.PC)
+	}
+}
+
+func TestContextPushClearsCompletedChain(t *testing.T) {
+	var (
+		ctx   Context
+		first Frame
+		next  Frame
+	)
+	ctx.Push(&first, &testAddDescriptor)
+	if action := ctx.Run(); action != Return {
+		t.Fatalf("first Run action = %d, want Return", action)
+	}
+	ctx.Push(&next, &testAddDescriptor)
+	if returned := ctx.TakeReturned(); returned != nil {
+		t.Fatalf("new root retained completed frame %p", returned)
 	}
 }
 
