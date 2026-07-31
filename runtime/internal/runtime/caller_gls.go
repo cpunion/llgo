@@ -1,4 +1,4 @@
-//go:build llgo && !baremetal && !wasm && !tinygo.wasm
+//go:build llgo && !baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,9 +18,9 @@
 
 package runtime
 
-// The descriptor and poll leaf implementation belongs to the compiler runtime
-// package that declares and consumes its scheduler-facing symbols. Keeping the
-// C object here also makes those symbols available in programs which use the
-// lightweight internal runtime without importing the standard-library runtime
-// patch package.
-const LLGoFiles = "_wrap/fp.c; ../lib/runtime/_wrap/poll.c; _wrap/coro_panic_report.c"
+// callerLocationStoreCurrent follows the logical goroutine: its shadow stack
+// and synthetic PCs must move with that goroutine when the backend eventually
+// permits migration between OS threads.
+//
+//llgo:gls
+var callerLocationStoreCurrent *callerLocationStore

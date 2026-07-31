@@ -20,3 +20,7 @@ func fpCallers(skip int, pc []uintptr) int {
 func fpUnwindAvailable() bool {
 	return false
 }
+
+func callersWithPanicSplice(_ int, _ []uintptr) int {
+	return 0
+}

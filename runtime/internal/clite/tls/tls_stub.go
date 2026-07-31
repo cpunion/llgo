@@ -21,8 +21,12 @@ package tls
 // Handle is a no-op TLS handle used when building without the llgo tag.
 type Handle[T any] struct{}
 
+type StaticHandle[T any] struct{}
+
 // Alloc returns a stub TLS handle that ignores all operations.
 func Alloc[T any](func(*T)) Handle[T] { return Handle[T]{} }
+
+func AllocStatic[T any]() StaticHandle[T] { return StaticHandle[T]{} }
 
 // Get always returns the zero value.
 func (Handle[T]) Get() (zero T) { return zero }
@@ -32,3 +36,9 @@ func (Handle[T]) Set(T) {}
 
 // Clear is a no-op.
 func (Handle[T]) Clear() {}
+
+func (StaticHandle[T]) Get() (zero T) { return zero }
+
+func (StaticHandle[T]) Set(T) {}
+
+func (StaticHandle[T]) Clear() {}

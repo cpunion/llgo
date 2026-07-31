@@ -50,7 +50,7 @@ type coroNativeForeignBoundaryV1 struct {
 }
 
 var (
-	coroNativeForeignBoundaryTLSV1      tls.Handle[*coroNativeForeignBoundaryV1]
+	coroNativeForeignBoundaryTLSV1      tls.StaticHandle[*coroNativeForeignBoundaryV1]
 	coroNativeForeignBoundaryTLSReadyV1 bool
 )
 
@@ -68,7 +68,7 @@ func coroNativeForeignBoundaryTLSStartV1() bool {
 		return true
 	}
 	coroNativeForeignBoundaryTLSV1 =
-		tls.Alloc[*coroNativeForeignBoundaryV1](nil)
+		tls.AllocStatic[*coroNativeForeignBoundaryV1]()
 	coroNativeForeignBoundaryTLSReadyV1 = true
 	return true
 }

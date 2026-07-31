@@ -91,7 +91,7 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		)
 	}
 	sort.Strings(manifest)
-	const wantManifestSHA256 = "4df958c15de2b58820336069f3069a74abff8bb5f796671f8be6917820f7dbc1"
+	const wantManifestSHA256 = "a1773b45067110dc275caee403ab26bf6a69b167f3df40439b2e0c4f7298e26f"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)
