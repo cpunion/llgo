@@ -58,6 +58,15 @@ type Handle[T any] struct {
 	destructor func(*T)
 }
 
+// StaticHandle is a TLS handle whose thread-exit cleanup has no dynamic Go
+// callback. It is suitable for caches and runtime bookkeeping that only need
+// their GC root and slot allocation released. Keeping it distinct from Handle
+// also lets the compiler prove its C callback closure without function-value
+// dispatch.
+type StaticHandle[T any] struct {
+	key pthread.Key
+}
+
 // Alloc creates a TLS handle backed by pthread TLS.
 func Alloc[T any](destructor func(*T)) Handle[T] {
 	var key pthread.Key
@@ -67,24 +76,57 @@ func Alloc[T any](destructor func(*T)) Handle[T] {
 	return Handle[T]{key: key, destructor: destructor}
 }
 
+// AllocStatic creates a TLS handle with fixed, callback-free cleanup.
+func AllocStatic[T any]() StaticHandle[T] {
+	var key pthread.Key
+	if ret := key.Create(pthread.KeyDestructor(staticSlotDestructor[T])); ret != 0 {
+		panic("tls: pthread_key_create failed")
+	}
+	return StaticHandle[T]{key: key}
+}
+
 // Get returns the value stored in the current thread's slot.
 func (h Handle[T]) Get() T {
-	if ptr := h.key.Get(); ptr != nil {
+	return get[T](h.key)
+}
+
+// Set stores v in the current thread's slot, creating it if necessary.
+func (h Handle[T]) Set(v T) {
+	set(h.key, h.destructor, v)
+}
+
+// Clear zeroes the current thread's slot value without freeing the slot.
+func (h Handle[T]) Clear() {
+	clear[T](h.key)
+}
+
+func (h StaticHandle[T]) Get() T {
+	return get[T](h.key)
+}
+
+func (h StaticHandle[T]) Set(v T) {
+	set(h.key, nil, v)
+}
+
+func (h StaticHandle[T]) Clear() {
+	clear[T](h.key)
+}
+
+func get[T any](key pthread.Key) T {
+	if ptr := key.Get(); ptr != nil {
 		return (*slot[T])(ptr).value
 	}
 	var zero T
 	return zero
 }
 
-// Set stores v in the current thread's slot, creating it if necessary.
-func (h Handle[T]) Set(v T) {
-	s := h.ensureSlot()
-	s.value = v
+func set[T any](key pthread.Key, destructor func(*T), value T) {
+	s := ensureSlot(key, destructor)
+	s.value = value
 }
 
-// Clear zeroes the current thread's slot value without freeing the slot.
-func (h Handle[T]) Clear() {
-	if ptr := h.key.Get(); ptr != nil {
+func clear[T any](key pthread.Key) {
+	if ptr := key.Get(); ptr != nil {
 		s := (*slot[T])(ptr)
 		var zero T
 		s.value = zero
@@ -92,7 +134,11 @@ func (h Handle[T]) Clear() {
 }
 
 func (h Handle[T]) ensureSlot() *slot[T] {
-	if ptr := h.key.Get(); ptr != nil {
+	return ensureSlot(h.key, h.destructor)
+}
+
+func ensureSlot[T any](key pthread.Key, destructor func(*T)) *slot[T] {
+	if ptr := key.Get(); ptr != nil {
 		return (*slot[T])(ptr)
 	}
 	size := unsafe.Sizeof(slot[T]{})
@@ -101,12 +147,12 @@ func (h Handle[T]) ensureSlot() *slot[T] {
 		panic("tls: failed to allocate thread slot")
 	}
 	s := (*slot[T])(mem)
-	s.destructor = h.destructor
-	if existing := h.key.Get(); existing != nil {
+	s.destructor = destructor
+	if existing := key.Get(); existing != nil {
 		c.Free(mem)
 		return (*slot[T])(existing)
 	}
-	if ret := h.key.Set(mem); ret != 0 {
+	if ret := key.Set(mem); ret != 0 {
 		c.Free(mem)
 		panic("tls: pthread_setspecific failed")
 	}
@@ -122,6 +168,18 @@ func slotDestructor[T any](ptr c.Pointer) {
 	if s.destructor != nil {
 		s.destructor(&s.value)
 	}
+	releaseSlot(ptr, s)
+}
+
+func staticSlotDestructor[T any](ptr c.Pointer) {
+	s := (*slot[T])(ptr)
+	if s == nil {
+		return
+	}
+	releaseSlot(ptr, s)
+}
+
+func releaseSlot[T any](ptr c.Pointer, s *slot[T]) {
 	deregisterSlot(s)
 	var zero T
 	s.value = zero

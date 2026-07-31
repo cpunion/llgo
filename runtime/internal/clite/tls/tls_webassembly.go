@@ -28,8 +28,16 @@ type Handle[T any] struct {
 	cell *T
 }
 
+type StaticHandle[T any] struct {
+	cell *T
+}
+
 func Alloc[T any](func(*T)) Handle[T] {
 	return Handle[T]{cell: new(T)}
+}
+
+func AllocStatic[T any]() StaticHandle[T] {
+	return StaticHandle[T]{cell: new(T)}
 }
 
 func (h Handle[T]) Get() (zero T) {
@@ -46,6 +54,26 @@ func (h Handle[T]) Set(value T) {
 }
 
 func (h Handle[T]) Clear() {
+	if h.cell != nil {
+		var zero T
+		*h.cell = zero
+	}
+}
+
+func (h StaticHandle[T]) Get() (zero T) {
+	if h.cell == nil {
+		return zero
+	}
+	return *h.cell
+}
+
+func (h StaticHandle[T]) Set(value T) {
+	if h.cell != nil {
+		*h.cell = value
+	}
+}
+
+func (h StaticHandle[T]) Clear() {
 	if h.cell != nil {
 		var zero T
 		*h.cell = zero

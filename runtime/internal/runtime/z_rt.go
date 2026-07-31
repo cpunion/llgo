@@ -46,9 +46,24 @@ func Recover() (ret any) {
 		if PanicRecovered != nil {
 			PanicRecovered()
 		}
+		// The deferred function that recovers keeps observing the panic
+		// stack until it returns (gc runs defers on top of it). The public
+		// runtime marks its frame so the pc snapshot stays spliceable that
+		// long; the mark reads the frame-pointer chain, which after
+		// siglongjmp can reach a stale/unmapped slot, so the guarded read
+		// lives in the package that has a page probe (RecoverMark). Nil
+		// when lib/runtime is not linked — no snapshot machinery, nothing
+		// to mark.
+		if RecoverMark != nil {
+			RecoverMark()
+		}
 	}
 	return
 }
+
+// RecoverMark, set by the public runtime package, records the recovering
+// frame for panic-snapshot splicing.
+var RecoverMark func()
 
 // Panic panics with a value.
 func Panic(v any) {

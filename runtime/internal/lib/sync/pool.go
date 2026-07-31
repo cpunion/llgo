@@ -52,8 +52,11 @@ import (
 type Pool struct {
 	noCopy noCopy
 
-	local     *tls.Handle[*poolLocal]
-	localSize uintptr // size of the local array
+	// Keep the standard-library field sequence: the overlay is compiled
+	// against the exported sync.Pool type data even though LLGo's 1:1 backend
+	// uses one dynamically allocated TLS local rather than a [P] array.
+	local     unsafe.Pointer // local fixed-size per-P pool, actual type is [P]poolLocal
+	localSize uintptr        // size of the local array
 
 	victim     unsafe.Pointer // local from previous cycle
 	victimSize uintptr        // size of victims array
@@ -116,15 +119,25 @@ func (p *Pool) Get() any {
 	return x
 }
 
-// pin pins the current goroutine to P, disables preemption and
-// returns poolLocal pool for the P and the P's id.
-// Caller must call runtime_procUnpin() when done with the pool.
+// pin returns the Pool cache for the current execution resource. LLGo's
+// current 1:1 P/M/thread binding lets the dynamic pthread TLS slot model the
+// per-P lifetime; the returned P id is therefore always zero.
 func (p *Pool) pin() (*poolLocal, int) {
 	// Check whether p is nil to get a panic.
 	// Otherwise the nil dereference happens while the m is pinned,
 	// causing a fatal error rather than a panic.
 	if p == nil {
 		panic("nil Pool")
+	}
+
+	if ptr := atomic.LoadPointer(&p.local); ptr != nil {
+		handle := (*tls.StaticHandle[*poolLocal])(ptr)
+		l := handle.Get()
+		if l == nil {
+			l = &poolLocal{}
+			handle.Set(l)
+		}
+		return l, 0
 	}
 
 	return p.pinSlow()
@@ -136,10 +149,10 @@ func (p *Pool) pinSlow() (*poolLocal, int) {
 		// drop this thread's local cache on exit instead of installing a captured
 		// Go closure as a foreign-thread destructor. A later thread lazily creates
 		// its own local value through the same process-wide TLS key.
-		handle := tls.Alloc[*poolLocal](nil)
-		p.local = &handle
+		handle := tls.AllocStatic[*poolLocal]()
+		atomic.StorePointer(&p.local, unsafe.Pointer(&handle))
 	})
-	handle := p.local
+	handle := (*tls.StaticHandle[*poolLocal])(atomic.LoadPointer(&p.local))
 	l := handle.Get()
 	if l == nil {
 		l = &poolLocal{}

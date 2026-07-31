@@ -38,15 +38,29 @@ const (
 	_Pdead    = 4
 )
 
+// panicPCStore is part of a logical G's state. Keep the storage shape next to
+// g rather than in caller.go so minimal scheduler/runtime islands that do not
+// link the public stack-inspection implementation still retain the complete G
+// layout.
+type panicPCStore struct {
+	n      int32
+	armed  int32
+	fault  int32
+	recFP1 uintptr
+	recFP2 uintptr
+	pcs    [64]uintptr
+}
+
 // g holds state owned by one LLGo goroutine.
 //
 // The current pthread backend gives every G its own M and P. Fields that only
 // make sense once LLGo can suspend and resume a G (saved registers, wait state,
 // and stack roots) belong here when those facilities are added.
 type g struct {
-	defer_ *Defer
-	panic_ unsafe.Pointer
-	m      *m
+	defer_   *Defer
+	panic_   unsafe.Pointer
+	panicPCs panicPCStore
+	m        *m
 
 	atomicstatus uint32
 	goid         uint64
@@ -60,10 +74,6 @@ type g struct {
 	// stack-owned context at its outer Go entry; the stackless scheduler points
 	// this field at the context embedded in the task's runtime sidecar.
 	localContext *LocalContext
-	// callerLocations is the lazily allocated logical caller stack. Keeping it
-	// on g rather than in pthread TLS makes runtime.Caller/Callers follow a
-	// stackless task when the scheduler resumes it on another physical M.
-	callerLocations *callerLocationStore
 
 	goexit       bool
 	isMain       bool

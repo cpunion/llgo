@@ -1234,7 +1234,7 @@ func ParsePkgSyntax(prog llssa.Program, fset *token.FileSet, pkg *types.Package,
 						return err
 					}
 					for _, variable := range vars {
-						prog.SetLocalityInfo(llssa.FullName(pkg, variable.Name), variable.Info)
+						prog.DeclareLocality(pkg, variable.Name, variable.Info)
 					}
 					continue
 				}
