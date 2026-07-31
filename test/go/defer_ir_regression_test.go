@@ -61,7 +61,7 @@ func TestRecoverThenDeferredPanicIRTerminatesBlocks(t *testing.T) {
 	assertNoInstructionsAfterUnreachable(t, ir)
 }
 
-func TestCgoDeferredFreeReleasesNodeBeforeCall(t *testing.T) {
+func TestCgoDeferredFreeUsesFrameOwnedWorkerCleanup(t *testing.T) {
 	if strings.TrimSpace(runGoCmd(t, "", "env", "CGO_ENABLED")) != "1" {
 		t.Skip("cgo is disabled")
 	}
@@ -70,16 +70,33 @@ func TestCgoDeferredFreeReleasesNodeBeforeCall(t *testing.T) {
 	}
 
 	ir := llgoIRFromProbe(t, "cgo-deferred-free", cgoDeferredFreeProbe)
-	freeDefer := indexLineContaining(ir, "call void @", "FreeDeferNode")
-	deferredCall := indexLineContaining(ir, "call void %")
-	if freeDefer < 0 {
-		t.Fatalf("missing FreeDeferNode call in IR:\n%s", ir)
+	freeThunk := llvmFunctionBodyContaining(ir, "call [0 x i8] @\"")
+	if freeThunk == "" || !strings.Contains(freeThunk, "._Cfunc_free\"") {
+		t.Fatalf("missing deferred C.free worker thunk in IR:\n%s", ir)
 	}
-	if deferredCall < 0 {
-		t.Fatalf("missing deferred indirect call in IR:\n%s", ir)
+	freeThunkSymbol := llvmDefinedFunctionSymbol(freeThunk)
+	if freeThunkSymbol == "" {
+		t.Fatalf("cannot identify deferred C.free worker thunk:\n%s", freeThunk)
 	}
-	if freeDefer > deferredCall {
-		t.Fatalf("FreeDeferNode must run before deferred call, got FreeDeferNode line %d after call line %d", freeDefer, deferredCall)
+	cleanup := llvmFunctionBodyContainingExcluding(
+		ir,
+		"ptrtoint (ptr "+freeThunkSymbol+" to ",
+		freeThunkSymbol,
+	)
+	if cleanup == "" {
+		t.Fatalf("missing coroutine cleanup that submits %s:\n%s", freeThunkSymbol, ir)
+	}
+	park := indexLineContaining(cleanup, "call void @__llgo_coro_worker_park_v1")
+	resume := indexLineContaining(cleanup, "call i32 @__llgo_coro_worker_resume_v1")
+	retain := indexLineContaining(cleanup, "call void (...) @llvm.fake.use")
+	if park < 0 || resume < 0 || retain < 0 {
+		t.Fatalf(
+			"deferred C.free cleanup lacks frame-owned worker lifecycle (park=%d resume=%d retain=%d):\n%s",
+			park, resume, retain, cleanup,
+		)
+	}
+	if indexLineContaining(ir, "call void @", "FreeDeferNode") >= 0 {
+		t.Fatalf("static coroutine cleanup unexpectedly allocated a legacy defer node:\n%s", ir)
 	}
 }
 
@@ -153,4 +170,41 @@ func indexLineContaining(s string, parts ...string) int {
 		}
 	}
 	return -1
+}
+
+func llvmFunctionBodyContaining(ir, marker string) string {
+	return llvmFunctionBodyContainingExcluding(ir, marker, "")
+}
+
+func llvmFunctionBodyContainingExcluding(ir, marker, excludedSymbol string) string {
+	lines := strings.Split(ir, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "define ") {
+			start = i
+		}
+		if start < 0 || strings.TrimSpace(line) != "}" {
+			continue
+		}
+		body := strings.Join(lines[start:i+1], "\n")
+		if strings.Contains(body, marker) &&
+			(excludedSymbol == "" || llvmDefinedFunctionSymbol(body) != excludedSymbol) {
+			return body
+		}
+		start = -1
+	}
+	return ""
+}
+
+func llvmDefinedFunctionSymbol(body string) string {
+	header, _, _ := strings.Cut(body, "\n")
+	at := strings.IndexByte(header, '@')
+	if at < 0 {
+		return ""
+	}
+	end := strings.IndexByte(header[at:], '(')
+	if end < 0 {
+		return ""
+	}
+	return header[at : at+end]
 }

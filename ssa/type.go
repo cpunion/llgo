@@ -19,6 +19,7 @@ package ssa
 import (
 	"fmt"
 	"go/types"
+	"runtime"
 	"unsafe"
 
 	"github.com/goplus/llgo/ssa/abi"
@@ -300,6 +301,32 @@ func (t Type) RawType() types.Type {
 func (p Program) TypeSizes(sizes types.Sizes) types.Sizes {
 	p.sizes = sizes
 	return (*goProgram)(unsafe.Pointer(p))
+}
+
+// PhysicalSizeOfGoType returns the target Go-layout size without constructing
+// an LLVM type. Whole-program planning uses this before the runtime LLVM
+// package is necessarily available, so layout queries cannot depend on
+// Program.Type or runtime named-type materialization.
+func (p Program) PhysicalSizeOfGoType(typ types.Type) int64 {
+	if p == nil || typ == nil {
+		return -1
+	}
+	layout := (*goProgram)(unsafe.Pointer(p))
+	if layout.sizes == nil {
+		arch := ""
+		if p.target != nil {
+			arch = p.target.GOARCH
+		}
+		if arch == "" {
+			arch = runtime.GOARCH
+		}
+		layout.sizes = types.SizesFor("gc", arch)
+		if layout.sizes == nil {
+			word := int64(p.PointerSize())
+			layout.sizes = &types.StdSizes{WordSize: word, MaxAlign: word}
+		}
+	}
+	return layout.Sizeof(typ)
 }
 
 // TODO(xsw):

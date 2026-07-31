@@ -215,6 +215,23 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 
 新 IR 必须延续这条 fail-closed 边界。不能只给 in-memory object 增加字段而不更新 cache identity、archive summary 和 descriptor ABI。
 
+Native、非 LTO 的 executable 构建现在进一步使用强制的两阶段物理流水线，避免标准库规模编译把全程序 frontend 与 LLVM backend 的峰值叠加：
+
+```text
+whole-program plan + package frontend emission
+  -> 每包 presplit bitcode + immutable link snapshot
+  -> 预生成 entry bitcode
+  -> 释放 AST/type-checking scratch、SSA construction indexes、package modules
+     和原 LLVM context
+  -> 每包独立 LLVM context:
+       parse bitcode -> CoroSplit -> default<O*> -> fake.use cleanup -> object
+  -> archive/link
+```
+
+`link snapshot`只保存 entry/link 仍需要的 reflect method 集、ABI init、funcinfo/pcline、closure stub、defined global 和 export symbol；它不复制函数体、CFG、plan 或 lowering facts。CoroSplit/default pipeline仍使用与原路径相同的 pass 字符串，并在 split 后执行同一个`llvm.fake.use`清理，因此这是生命周期隔离，不是第二套 backend 语义。entry bitcode必须在释放旧 context 前生成；package backend必须在其后才启动。源码 gate固定了这个顺序，cache publication则消费释放前已经完成的资格判定，不能为复查 cache 条件而重新保留全程序 plan。
+
+完整`./test/go`测试包已在3 GiB aggregate RSS硬限制下完成compile/link，优化后的观测峰值为2827 MiB；同一输入在旧的同进程lowering/object emission路径会越过3072 MiB并被终止。LTO、cross/wasm、`ModeGen`和C library build仍保留各自原有发射路径，不从这个native内存治理结论推导其他target的行为。
+
 ### 3.8 代码量事实
 
 以下是Phase R开始前、相对PR基线`897d251f8`的2026-07-22审计快照：worktree共有64个提交、530个tracked变更文件，约

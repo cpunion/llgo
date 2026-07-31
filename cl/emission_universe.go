@@ -915,9 +915,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		u.functions = filterRequiredFunctions(u.functions, u.required)
 		progress := false
 		functions := stableUniqueFunctions(append([]*ssa.Function(nil), u.functions...))
-		sort.SliceStable(functions, func(i, j int) bool {
-			return u.functionSortKey(functions[i]) < u.functionSortKey(functions[j])
-		})
+		sortEmissionFunctionsByFrozenKey(functions, u.functionSortKey)
 		for _, fn := range functions {
 			materialized, err := u.materializeFunction(fn)
 			if err != nil {
@@ -933,9 +931,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		}
 	}
 	u.functions = stableUniqueFunctions(filterRequiredFunctions(u.functions, u.required))
-	sort.SliceStable(u.functions, func(i, j int) bool {
-		return u.functionSortKey(u.functions[i]) < u.functionSortKey(u.functions[j])
-	})
+	sortEmissionFunctionsByFrozenKey(u.functions, u.functionSortKey)
 	if err := u.freezeReferencedTypePackageOwners(); err != nil {
 		return nil, err
 	}
@@ -1343,9 +1339,7 @@ func (u *EmissionUniverse) coroFrozenABIReferences(
 		}
 		targets = append(targets, target)
 	}
-	sort.SliceStable(targets, func(i, j int) bool {
-		return u.functionSortKey(targets[i]) < u.functionSortKey(targets[j])
-	})
+	sortEmissionFunctionsByFrozenKey(targets, u.functionSortKey)
 	return targets, nil
 }
 
@@ -7928,9 +7922,7 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		declarations = append(declarations, alias)
 	}
 	declarations = stableUniqueFunctions(declarations)
-	sort.SliceStable(declarations, func(i, j int) bool {
-		return u.functionSortKey(declarations[i]) < u.functionSortKey(declarations[j])
-	})
+	sortEmissionFunctionsByFrozenKey(declarations, u.functionSortKey)
 	for _, fn := range declarations {
 		directive, err := coroForeignCallDirectiveFor(fn)
 		if err != nil {
@@ -8347,6 +8339,33 @@ func (u *EmissionUniverse) functionSortKey(fn *ssa.Function) string {
 		ownerIDs = append(ownerIDs, owner.identity)
 	}
 	return framedEmissionKey(u.finalIdentity(fn), strings.Join(ownerIDs, "\x00"), emissionFunctionSortKey(fn))
+}
+
+// sortEmissionFunctionsByFrozenKey snapshots the structural key once per
+// function for one sort operation. finalIdentity deliberately derives patched
+// ownership, signatures, and source positions rather than relying on pointer
+// order; doing that work from the comparison callback rebuilt the same large
+// strings O(n log n) times for standard-library-sized universes.
+//
+// Callers must invoke this only while the identity inputs are frozen for the
+// duration of the sort. The materialization fixed point recomputes a fresh
+// snapshot on its next iteration after it adds functions or aliases.
+func sortEmissionFunctionsByFrozenKey(
+	functions []*ssa.Function,
+	key func(*ssa.Function) string,
+) {
+	if len(functions) < 2 {
+		return
+	}
+	keys := make(map[*ssa.Function]string, len(functions))
+	for _, fn := range functions {
+		if _, exists := keys[fn]; !exists {
+			keys[fn] = key(fn)
+		}
+	}
+	sort.SliceStable(functions, func(i, j int) bool {
+		return keys[functions[i]] < keys[functions[j]]
+	})
 }
 
 func framedEmissionKey(fields ...string) string {

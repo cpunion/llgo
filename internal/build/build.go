@@ -32,6 +32,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -3422,11 +3423,17 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		return nil, err
 	}
 
+	runtimeTypes := altPkgs[0].Types
+	pythonPkg := dedup.Check(llssa.PkgPython)
+	var pythonTypes *types.Package
+	if pythonPkg != nil {
+		pythonTypes = pythonPkg.Types
+	}
 	prog.SetRuntime(func() *types.Package {
-		return altPkgs[0].Types
+		return runtimeTypes
 	})
 	prog.SetPython(func() *types.Package {
-		return dedup.Check(llssa.PkgPython).Types
+		return pythonTypes
 	})
 	if err := prepareLocalVariables(prog, initial, altPkgs); err != nil {
 		return nil, err
@@ -3467,6 +3474,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		cTransformer:   cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, cabiOptimize),
 	}
 	defer ctx.closePackageMetas()
+	defer ctx.cleanupStagedBitcodeFiles()
 
 	// default runtime globals must be registered before packages are built
 	addGlobalString(conf, "runtime.defaultGOROOT="+runtime.GOROOT(), nil)
@@ -3485,9 +3493,43 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err := buildCoroPlan(ctx, allPkgs...); err != nil {
 		return nil, err
 	}
+	if shouldStageNativeExecutableBackend(ctx) {
+		releaseCoroPlanningScratchBeforeEmission(ctx)
+		progSSA = nil
+		dedup = nil
+		altPkgs = nil
+		pkgs = nil
+	}
+	// Whole-program planning deliberately stays live through package emission,
+	// but package loading, canonicalization fixed points, and identity sorting
+	// leave substantial temporary Go storage behind. Return those dead pages
+	// before LLVM starts its per-package peak rather than overlapping both
+	// phases in standard-library-sized builds.
+	debug.FreeOSMemory()
 	allPkgs, err = buildAllPkgs(ctx, allPkgs, verbose)
 	if err != nil {
 		return nil, err
+	}
+	if shouldStageNativeExecutableBackend(ctx) {
+		if err := stageMainEntryBitcodes(ctx, initial, allPkgs); err != nil {
+			return nil, err
+		}
+		releaseCoroFrontendForStagedBackend(ctx, allPkgs)
+		progSSA = nil
+		patches = nil
+		dedup = nil
+		altPkgs = nil
+		pkgs = nil
+		cfg = nil
+		// Package and entry bitcode are now complete and self-describing.
+		// Disposing the compilation context releases LLVM's context-wide type,
+		// constant, and metadata uniquing tables before any backend process is
+		// allowed to start.
+		prog.Dispose()
+		debug.FreeOSMemory()
+		if err := materializeStagedPackageBackends(ctx, allPkgs, verbose); err != nil {
+			return nil, err
+		}
 	}
 
 	if mode == ModeGen {
@@ -6365,6 +6407,27 @@ type context struct {
 	// pclnExternal is populated while generating the synthetic main module
 	// and completed with final linked PCs by the post-link externalizer.
 	pclnExternal *pclnmap.Data
+
+	// stagedBitcodeFiles owns temporary package bitcode until the isolated
+	// backend phase consumes it. It is also the error-path cleanup authority.
+	stagedBitcodeFiles    map[string]none
+	stagedCacheAuthorized bool
+	stagedMainEntries     map[string]*stagedMainEntry
+	stagedBackendDetached bool
+	stagedTargetTriple    string
+	stagedDataLayout      string
+	stagedFuncInfoSites   bool
+	stagedFuncInfoMeta    bool
+	stagedPointerSize     int
+	stagedMachOSites      bool
+}
+
+type stagedMainEntry struct {
+	pkgPath      string
+	exportFile   string
+	bitcode      string
+	object       string
+	pclnExternal *pclnmap.Data
 }
 
 // closePackageMetas releases metadata mappings owned by this build. Metadata
@@ -6377,6 +6440,13 @@ func (c *context) closePackageMetas() {
 		_ = pkg.Meta.Close()
 		pkg.Meta = nil
 	}
+}
+
+func (c *context) cleanupStagedBitcodeFiles() {
+	for file := range c.stagedBitcodeFiles {
+		_ = os.Remove(file)
+	}
+	c.stagedBitcodeFiles = nil
 }
 
 func (c *context) compiler() *clang.Cmd {
@@ -6489,15 +6559,19 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 					return err
 				}
 				if !aPkg.CacheHit {
-					if err := normalizeToArchive(ctx, aPkg, verbose); err != nil {
-						return err
-					}
 					if kind == cl.PkgLinkExtern {
 						appendExternalLinkArgs(ctx, aPkg, param)
 					}
-					if usePackageCache {
-						if err := ctx.saveToCache(aPkg); err != nil && verbose {
-							fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+					if aPkg.StagedBitcode != "" {
+						aPkg.PendingCacheSave = usePackageCache
+					} else {
+						if err := normalizeToArchive(ctx, aPkg, verbose); err != nil {
+							return err
+						}
+						if usePackageCache {
+							if err := ctx.saveToCache(aPkg); err != nil && verbose {
+								fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+							}
 						}
 					}
 				}
@@ -6526,21 +6600,28 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 			if err := buildPkg(ctx, aPkg, verbose); err != nil {
 				return err
 			}
-			if !aPkg.CacheHit {
+			if !aPkg.CacheHit && aPkg.LPkg != nil {
 				aPkg.setNeedRuntimeOrPyInit(aPkg.LPkg.NeedRuntime, aPkg.LPkg.NeedPyInit)
 			}
 			needRuntime = needRuntime || aPkg.NeedRt
 			needPyInit = needPyInit || aPkg.NeedPyInit
 			if !aPkg.CacheHit {
-				if err := normalizeToArchive(ctx, aPkg, verbose); err != nil {
-					return err
-				}
-				if usePackageCache {
-					if err := ctx.saveToCache(aPkg); err != nil && verbose {
-						fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+				if aPkg.StagedBitcode != "" {
+					aPkg.PendingCacheSave = usePackageCache
+				} else {
+					if err := normalizeToArchive(ctx, aPkg, verbose); err != nil {
+						return err
+					}
+					if usePackageCache {
+						if err := ctx.saveToCache(aPkg); err != nil && verbose {
+							fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+						}
 					}
 				}
 			}
+		}
+		if shouldStageNativeExecutableBackend(ctx) {
+			releaseBuiltPackageSource(aPkg)
 		}
 		return nil
 	}
@@ -6780,16 +6861,10 @@ func rewritePrebuiltFuncTab(ctx *context, out string, verbose bool) {
 	}
 }
 
-func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPath string, verbose bool) error {
-	ctx.pclnExternal = nil
-	needRuntime := false
-	needPyInit := false
-	var needAbiInit int
-	methodByIndex := make(map[int]none)
-	methodByName := make(map[string]none)
+func linkedPackagesForMain(ctx *context, pkg *packages.Package, pkgs []*aPackage) []Package {
 	allPkgs := []*packages.Package{pkg}
 	for _, v := range pkgs {
-		if v.PkgPath != pkg.PkgPath && v.Types != nil && v.Types.Name() == "main" {
+		if v.PkgPath != pkg.PkgPath && v.Name == "main" {
 			continue
 		}
 		allPkgs = append(allPkgs, v.Package)
@@ -6803,12 +6878,6 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 			}
 		}
 	}
-	// archiveInputs contains package .a files. Object files are prepended later so
-	// archive extraction can see their undefined references in a single linker pass.
-	var archiveInputs []string
-	var linkArgs []string
-	var rtLinkInputs []string
-	var rtLinkArgs []string
 	linkedPkgs := make(map[string]bool) // Track linked packages by ID to avoid duplicates
 	var linkedOrder []Package
 	packages.Visit(visitRoots, nil, func(p *packages.Package) {
@@ -6826,9 +6895,142 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 			linkedOrder = append(linkedOrder, aPkg)
 		}
 	})
+	return linkedOrder
+}
+
+type mainEntryRequirements struct {
+	needRuntime   bool
+	needPyInit    bool
+	linkRuntime   bool
+	needAbiInit   int
+	methodByIndex map[int]none
+	methodByName  map[string]none
+}
+
+func collectMainEntryRequirements(ctx *context, linkedOrder []Package) (mainEntryRequirements, error) {
+	req := mainEntryRequirements{
+		methodByIndex: make(map[int]none),
+		methodByName:  make(map[string]none),
+	}
+	for _, pkg := range linkedOrder {
+		if pkg == nil || isRuntimePkg(pkg.PkgPath) {
+			continue
+		}
+		needRuntime, needPyInit := pkg.isNeedRuntimeOrPyInit()
+		req.needRuntime = req.needRuntime || needRuntime
+		req.needPyInit = req.needPyInit || needPyInit
+		req.needAbiInit |= packageNeedAbiInit(pkg)
+		for _, index := range packageMethodIndexes(pkg) {
+			req.methodByIndex[index] = none{}
+		}
+		for _, name := range packageMethodNames(pkg) {
+			req.methodByName[name] = none{}
+		}
+	}
+	req.needRuntime, req.linkRuntime = runtimeLinkRequirements(ctx.buildConf, req.needRuntime, req.needPyInit)
+	if err := validateCoroHostPullEntryConfig(ctx.buildConf, req.needPyInit); err != nil {
+		return mainEntryRequirements{}, err
+	}
+	return req, nil
+}
+
+func generateMainEntryPackage(ctx *context, pkg *packages.Package, linkedOrder []Package, req mainEntryRequirements) (Package, error) {
+	var funcInfo []funcInfoRecord
+	var pcLineInfo []pcLineRecord
+	var funcInfoStubs []funcInfoStubRecord
+	if ctx.buildConf.PCLNMode != PCLNNone {
+		funcInfo = prepareFuncInfoTableRecords(collectFuncInfo(linkedOrder), nil)
+		pcLineInfo = collectPCLineInfo(linkedOrder)
+		funcInfoStubs = collectFuncInfoStubRecords(linkedOrder, funcInfo)
+	}
+	coroRootAnchors, err := collectLinkedCoroRootAnchors(linkedOrder)
+	if err != nil {
+		return nil, err
+	}
+	var coroBootstrap *coroProgramBootstrapV1
+	if ctx.buildConf.BuildMode == BuildModeExe {
+		coroBootstrap = ctx.coroProgramBootstraps[pkg.ID]
+		if coroBootstrap == nil {
+			return nil, fmt.Errorf("coroutine program bootstrap: no pre-codegen table was frozen for linked package %q", pkg.ID)
+		}
+		coroBootstrap, err = bindCoroProgramBootstrapV2(coroBootstrap, linkedOrder)
+		if err != nil {
+			return nil, fmt.Errorf("bind coroutine program bootstrap: %w", err)
+		}
+	}
+	coroManifestHash, err := coroProgramManifestHashV1(ctx, coroRootAnchors, coroBootstrap)
+	if err != nil {
+		return nil, err
+	}
+	entryPkg := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
+		rtInit:           req.needRuntime,
+		pyInit:           req.needPyInit,
+		abiInit:          req.needAbiInit,
+		coroRootAnchors:  coroRootAnchors,
+		coroManifestHash: coroManifestHash,
+		coroBootstrap:    coroBootstrap,
+		methodByIndex:    req.methodByIndex,
+		methodByName:     req.methodByName,
+		abiSymbols:       linkedModuleGlobals(linkedOrder),
+		funcInfo:         funcInfo,
+		pcLineInfo:       pcLineInfo,
+		funcInfoStubs:    funcInfoStubs,
+	})
+	if err := lowerCoroControlWrappers(ctx, entryPkg.LPkg); err != nil {
+		return nil, err
+	}
+	return entryPkg, nil
+}
+
+func stageMainEntryBitcodes(ctx *context, roots []*packages.Package, pkgs []*aPackage) error {
+	if !shouldStageNativeExecutableBackend(ctx) {
+		return nil
+	}
+	ctx.stagedMainEntries = make(map[string]*stagedMainEntry)
+	for _, root := range roots {
+		if !needLink(root, ctx.mode) {
+			continue
+		}
+		linkedOrder := linkedPackagesForMain(ctx, root, pkgs)
+		req, err := collectMainEntryRequirements(ctx, linkedOrder)
+		if err != nil {
+			return err
+		}
+		ctx.pclnExternal = nil
+		entryPkg, err := generateMainEntryPackage(ctx, root, linkedOrder, req)
+		if err != nil {
+			return err
+		}
+		if err := stagePackageBitcode(ctx, entryPkg); err != nil {
+			return err
+		}
+		entryPkg.LPkg.Module().Dispose()
+		entryPkg.LPkg = nil
+		ctx.stagedMainEntries[root.ID] = &stagedMainEntry{
+			pkgPath:      "entry_main",
+			exportFile:   entryPkg.ExportFile,
+			bitcode:      entryPkg.StagedBitcode,
+			pclnExternal: ctx.pclnExternal,
+		}
+	}
+	ctx.pclnExternal = nil
+	return nil
+}
+
+func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPath string, verbose bool) error {
+	ctx.pclnExternal = nil
+	linkedOrder := linkedPackagesForMain(ctx, pkg, pkgs)
+	req, err := collectMainEntryRequirements(ctx, linkedOrder)
+	if err != nil {
+		return err
+	}
 
 	// packages.Visit with a post callback yields dependencies before importers.
 	// Reverse that order so static archives are linked after the objects that use them.
+	var archiveInputs []string
+	var linkArgs []string
+	var rtLinkInputs []string
+	var rtLinkArgs []string
 	for i := len(linkedOrder) - 1; i >= 0; i-- {
 		aPkg := linkedOrder[i]
 		p := aPkg.Package
@@ -6840,38 +7042,16 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 			}
 			continue
 		}
-		// Only let non-runtime packages influence whether runtime is needed.
-		need1, need2 := aPkg.isNeedRuntimeOrPyInit()
-		needRuntime = needRuntime || need1
-		needPyInit = needPyInit || need2
-		needAbiInit |= aPkg.LPkg.NeedAbiInit
-		for k, _ := range aPkg.LPkg.MethodByIndex {
-			methodByIndex[k] = none{}
-		}
-		for k, _ := range aPkg.LPkg.MethodByName {
-			methodByName[k] = none{}
-		}
-
 		linkArgs = append(linkArgs, aPkg.LinkArgs...)
 		if aPkg.ArchiveFile != "" {
 			archiveInputs = append(archiveInputs, aPkg.ArchiveFile)
 		}
 	}
 
-	// The v1 frame hooks and scheduler adapter live in the runtime tree. Their
-	// references originate in compiler-generated coroutine ramps, so they do
-	// not pass through the ordinary runtimeFunc path that sets NeedRuntime.
-	// Force runtime initialization before any root factory can allocate a frame.
-	var linkRuntime bool
-	needRuntime, linkRuntime = runtimeLinkRequirements(ctx.buildConf, needRuntime, needPyInit)
-	if err := validateCoroHostPullEntryConfig(ctx.buildConf, needPyInit); err != nil {
-		return err
-	}
-
 	// Only link runtime objects when needed (or for host builds where runtime is
 	// always required). The child-await requirement above participates through
 	// the same NeedRuntime path as ordinary runtime calls.
-	if linkRuntime {
+	if req.linkRuntime {
 		linkArgs = append(linkArgs, rtLinkArgs...)
 		archiveInputs = append(archiveInputs, rtLinkInputs...)
 	}
@@ -6879,56 +7059,22 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	// Generate main module file (needed for global variables even in library modes)
 	// This is compiled directly to .o and added to linkInputs (not cached)
 	// Use a stable synthetic name to avoid confusing it with the real main package in traces/logs.
-	var funcInfo []funcInfoRecord
-	var pcLineInfo []pcLineRecord
-	var funcInfoStubs []funcInfoStubRecord
-	if ctx.buildConf.PCLNMode != PCLNNone {
-		funcInfo = prepareFuncInfoTableRecords(collectFuncInfo(linkedOrder), nil)
-		pcLineInfo = collectPCLineInfo(linkedOrder)
-		funcInfoStubs = collectFuncInfoStubRecords(linkedOrder, funcInfo)
-	}
-	var coroRootAnchors []string
-	var coroManifestHash [16]byte
-	var coroBootstrap *coroProgramBootstrapV1
-	var err error
-	coroRootAnchors, err = collectLinkedCoroRootAnchors(linkedOrder)
-	if err != nil {
-		return err
-	}
-	if ctx.buildConf.BuildMode == BuildModeExe {
-		coroBootstrap = ctx.coroProgramBootstraps[pkg.ID]
-		if coroBootstrap == nil {
-			return fmt.Errorf("coroutine program bootstrap: no pre-codegen table was frozen for linked package %q", pkg.ID)
+	var entryObjFile string
+	if staged := ctx.stagedMainEntries[pkg.ID]; staged != nil {
+		if staged.object == "" {
+			return fmt.Errorf("staged main entry for %q has no materialized object", pkg.ID)
 		}
-		coroBootstrap, err = bindCoroProgramBootstrapV2(coroBootstrap, linkedOrder)
+		entryObjFile = staged.object
+		ctx.pclnExternal = staged.pclnExternal
+	} else {
+		entryPkg, err := generateMainEntryPackage(ctx, pkg, linkedOrder, req)
 		if err != nil {
-			return fmt.Errorf("bind coroutine program bootstrap: %w", err)
+			return err
 		}
-	}
-	coroManifestHash, err = coroProgramManifestHashV1(ctx, coroRootAnchors, coroBootstrap)
-	if err != nil {
-		return err
-	}
-	entryPkg := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
-		rtInit:           needRuntime,
-		pyInit:           needPyInit,
-		abiInit:          needAbiInit,
-		coroRootAnchors:  coroRootAnchors,
-		coroManifestHash: coroManifestHash,
-		coroBootstrap:    coroBootstrap,
-		methodByIndex:    methodByIndex,
-		methodByName:     methodByName,
-		abiSymbols:       linkedModuleGlobals(linkedOrder),
-		funcInfo:         funcInfo,
-		pcLineInfo:       pcLineInfo,
-		funcInfoStubs:    funcInfoStubs,
-	})
-	if err := lowerCoroControlWrappers(ctx, entryPkg.LPkg); err != nil {
-		return err
-	}
-	entryObjFile, err := exportObject(ctx, "entry_main", entryPkg.ExportFile, entryPkg.LPkg)
-	if err != nil {
-		return err
+		entryObjFile, err = exportObject(ctx, "entry_main", entryPkg.ExportFile, entryPkg.LPkg)
+		if err != nil {
+			return err
+		}
 	}
 	linkInputs := []string{entryObjFile}
 
@@ -6972,14 +7118,8 @@ func linkedModuleGlobals(pkgs []Package) map[string]none {
 	}
 	seen := make(map[string]none)
 	for _, pkg := range pkgs {
-		if pkg == nil || pkg.LPkg == nil {
-			continue
-		}
-		for g := pkg.LPkg.Module().FirstGlobal(); !g.IsNil(); g = gllvm.NextGlobal(g) {
-			if g.IsDeclaration() {
-				continue
-			}
-			seen[g.Name()] = none{}
+		for _, name := range packageDefinedGlobals(pkg) {
+			seen[name] = none{}
 		}
 	}
 	return seen
@@ -7058,10 +7198,7 @@ func cSharedExportArgs(ctx *context, pkgs []*aPackage) []string {
 	}
 	exports := make(map[string]none)
 	for _, pkg := range pkgs {
-		if pkg == nil || pkg.LPkg == nil {
-			continue
-		}
-		for _, name := range pkg.LPkg.ExportFuncs() {
+		for _, name := range packageExportFunctionNames(pkg) {
 			if name != "" {
 				exports[name] = none{}
 			}
@@ -7385,6 +7522,7 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 	// the archived module already owns C ABI transformation, optimization, and
 	// object emission, so discard this transient frontend module here.
 	if aPkg.CacheHit {
+		freezePackageLinkSnapshot(aPkg)
 		return nil
 	}
 
@@ -7418,19 +7556,20 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 	mod := ret.Module()
 	mod.SetDataLayout(ctx.prog.DataLayout())
 	mod.SetTarget(ctx.prog.TargetSpec().Triple)
+	stageBackend := shouldStageNativeExecutableBackend(ctx)
 	// Coroutine splitting is a mandatory correctness pass, not an optimization.
 	// In particular, native debug builds intentionally skip the default
 	// optimization pipeline, but TargetMachine cannot select unresolved
 	// llvm.coro.* operators. ModeGen deliberately retains frontend coroutine IR
 	// for golden/LIT inspection and never reaches object emission here.
-	if ctx.mode != ModeGen {
+	if ctx.mode != ModeGen && !stageBackend {
 		if err := lowerCoroPackageModule(ctx, pkgPath, mod); err != nil {
 			return err
 		}
 	}
 
 	// Run the default LLVM optimization pipeline selected by the requested -O level.
-	if ctx.passOpt {
+	if ctx.passOpt && !stageBackend {
 		pbo := gllvm.NewPassBuilderOptions()
 		defer pbo.Dispose()
 		if err = gllvm.VerifyModule(mod, gllvm.ReturnStatusAction); err != nil {
@@ -7446,8 +7585,11 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 			return fmt.Errorf("run LLVM passes failed for %v: %w", pkgPath, err)
 		}
 	}
-	emitFuncInfoEntrySites(ctx, ret)
-	emitFuncInfoStubSites(ctx, ret)
+	if !stageBackend {
+		emitFuncInfoEntrySites(ctx, ret)
+		emitFuncInfoStubSites(ctx, ret)
+	}
+	freezePackageLinkSnapshot(aPkg)
 
 	printCmds := ctx.shouldPrintCommands(verbose)
 	cgoLLFiles, cgoLdflags, err := buildCgo(ctx, aPkg, aPkg.Package.Syntax, externs, printCmds)
@@ -7493,14 +7635,23 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 	// ModeGen transfers the live frontend module to its caller for IR/LIT
 	// inspection. It neither links nor consumes a package archive, and emitting
 	// that presplit module as native code would hand llvm.coro.* operators to
-	// instruction selection. Executable/object-producing modes cross the
-	// mandatory lowering boundary above and retain the normal archive path.
+	// instruction selection. Object-producing modes cross the mandatory
+	// lowering boundary either above or in the detached staged backend before
+	// entering the common archive path.
 	if pkg.ExportFile != "" && ctx.mode != ModeGen {
-		exportFile, err := exportObject(ctx, pkg.PkgPath, pkg.ExportFile, ret)
-		if err != nil {
-			return fmt.Errorf("export object of %v failed: %v", pkgPath, err)
+		if shouldStageNativeExecutableBackend(ctx) {
+			if err := stagePackageBitcode(ctx, aPkg); err != nil {
+				return err
+			}
+			ret.Module().Dispose()
+			aPkg.LPkg = nil
+		} else {
+			exportFile, err := exportObject(ctx, pkg.PkgPath, pkg.ExportFile, ret)
+			if err != nil {
+				return fmt.Errorf("export object of %v failed: %v", pkgPath, err)
+			}
+			aPkg.ObjFiles = append(aPkg.ObjFiles, exportFile)
 		}
-		aPkg.ObjFiles = append(aPkg.ObjFiles, exportFile)
 		if debugBuild || verbose {
 			fmt.Fprintf(os.Stderr, "==> Export %s: %s\n", aPkg.PkgPath, pkg.ExportFile)
 		}
@@ -7514,6 +7665,13 @@ func lowerCoroPackageModule(ctx *context, pkgPath string, mod gllvm.Module) erro
 	if ctx == nil || ctx.prog == nil || mod.IsNil() {
 		return fmt.Errorf("lower package coroutine IR for %s: missing build context or module", pkgPath)
 	}
+	return lowerCoroPackageModuleWithProgram(ctx.prog, pkgPath, mod)
+}
+
+func lowerCoroPackageModuleWithProgram(prog llssa.Program, pkgPath string, mod gllvm.Module) error {
+	if prog == nil || mod.IsNil() {
+		return fmt.Errorf("lower package coroutine IR for %s: missing program or module", pkgPath)
+	}
 	if err := gllvm.VerifyModule(mod, gllvm.ReturnStatusAction); err != nil {
 		return fmt.Errorf("verify package %s before coroutine lowering: %w", pkgPath, err)
 	}
@@ -7522,7 +7680,7 @@ func lowerCoroPackageModule(ctx *context, pkgPath string, mod gllvm.Module) erro
 	}
 	options := gllvm.NewPassBuilderOptions()
 	defer options.Dispose()
-	if err := mod.RunPasses(coroPackageLoweringPipeline, ctx.prog.TargetMachine(), options); err != nil {
+	if err := mod.RunPasses(coroPackageLoweringPipeline, prog.TargetMachine(), options); err != nil {
 		return fmt.Errorf("lower package coroutine IR for %s: %w", pkgPath, err)
 	}
 	llssa.RemoveKeepAliveCallsAfterCoroSplit(mod)
@@ -7570,6 +7728,328 @@ func printCompiledPackage(conf *Config, pkg *aPackage) {
 	if conf.PrintPackages && !pkg.CacheHit {
 		fmt.Fprintln(os.Stderr, pkg.PkgPath)
 	}
+}
+
+// shouldStageNativeExecutableBackend selects the memory-bounded native
+// executable pipeline. LTO already emits bitcode rather than machine objects,
+// while cross/wasm builds already use an external backend, so neither needs
+// this native instruction-selection isolation.
+func shouldStageNativeExecutableBackend(ctx *context) bool {
+	return ctx != nil &&
+		ctx.mode != ModeGen &&
+		ctx.buildConf != nil &&
+		ctx.buildConf.BuildMode == BuildModeExe &&
+		ctx.buildConf.ltoMode() == lto.Off &&
+		useInMemoryNativeCodegen(ctx)
+}
+
+func stagePackageBitcode(ctx *context, pkg *aPackage) error {
+	if ctx == nil || pkg == nil || pkg.LPkg == nil {
+		return fmt.Errorf("stage package bitcode: missing build context or package module")
+	}
+	base := filepath.Base(pkg.ExportFile)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		base = "pkg"
+	}
+	file, err := os.CreateTemp("", base+"-*.bc")
+	if err != nil {
+		return fmt.Errorf("create staged bitcode for %s: %w", pkg.PkgPath, err)
+	}
+	name := file.Name()
+	keep := false
+	defer func() {
+		_ = file.Close()
+		if !keep {
+			_ = os.Remove(name)
+		}
+	}()
+	if err := gllvm.WriteBitcodeToFile(pkg.LPkg.Module(), file); err != nil {
+		return fmt.Errorf("write staged bitcode for %s: %w", pkg.PkgPath, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close staged bitcode for %s: %w", pkg.PkgPath, err)
+	}
+	if ctx.stagedBitcodeFiles == nil {
+		ctx.stagedBitcodeFiles = make(map[string]none)
+	}
+	ctx.stagedBitcodeFiles[name] = none{}
+	pkg.StagedBitcode = name
+	keep = true
+	return nil
+}
+
+func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
+	if ctx == nil || pkg == nil || pkg.StagedBitcode == "" {
+		return "", fmt.Errorf("emit staged package: missing build context or bitcode")
+	}
+	backend := llssa.NewProgram(newLLSSATarget(ctx.buildConf, ctx.crossCompile))
+	defer backend.Dispose()
+	mod, err := backend.ParseBitcodeFile(pkg.StagedBitcode)
+	if err != nil {
+		return "", fmt.Errorf("parse staged bitcode for %s: %w", pkg.PkgPath, err)
+	}
+	if err := lowerCoroPackageModuleWithProgram(backend, pkg.PkgPath, mod); err != nil {
+		return "", err
+	}
+	if ctx.passOpt {
+		options := gllvm.NewPassBuilderOptions()
+		defer options.Dispose()
+		if err := mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), backend.TargetMachine(), options); err != nil {
+			return "", fmt.Errorf("run detached LLVM passes for %s: %w", pkg.PkgPath, err)
+		}
+	}
+	if ctx.stagedFuncInfoSites && ctx.stagedFuncInfoMeta {
+		emitFuncInfoEntrySitesForModule(mod, ctx.stagedPointerSize, ctx.stagedMachOSites)
+		emitFuncInfoStubSitesForModule(mod, ctx.stagedPointerSize, ctx.stagedMachOSites)
+	}
+	if ctx.buildConf.CheckLLFiles {
+		if err := dumpLLVMIRIfNeeded(ctx, pkg.PkgPath, pkg.ExportFile, mod.String()); err != nil {
+			return "", err
+		}
+	}
+	object, err := backend.TargetMachine().EmitToMemoryBuffer(mod, gllvm.ObjectFile)
+	if err != nil {
+		return "", err
+	}
+	defer object.Dispose()
+	base := filepath.Base(pkg.ExportFile)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		base = "pkg"
+	}
+	file, err := os.CreateTemp("", base+"-*.o")
+	if err != nil {
+		return "", err
+	}
+	name := file.Name()
+	if ctx.shouldPrintCommands(false) {
+		fmt.Fprintf(os.Stderr, "# detached LLVM object emission %s for pkg: %s\n", name, pkg.PkgPath)
+	}
+	if _, err := file.Write(object.Bytes()); err != nil {
+		file.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
+func exportStagedBitcodePathWithClang(ctx *context, pkgPath, exportFile, bitcode string) (string, error) {
+	if ctx == nil || bitcode == "" {
+		return "", fmt.Errorf("compile staged bitcode: missing build context or artifact")
+	}
+	base := filepath.Base(exportFile)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		base = "pkg"
+	}
+	object, err := os.CreateTemp("", base+"-*.o")
+	if err != nil {
+		return "", err
+	}
+	objectName := object.Name()
+	if err := object.Close(); err != nil {
+		_ = os.Remove(objectName)
+		return "", err
+	}
+	args := []string{"-o", objectName, "-c", bitcode, "-Wno-override-module"}
+	if ctx.shouldPrintCommands(false) {
+		fmt.Fprintf(os.Stderr, "# compiling staged bitcode %s for pkg: %s\n", bitcode, pkgPath)
+		fmt.Fprintln(os.Stderr, "clang", args)
+	}
+	if err := ctx.compiler().Compile(args...); err != nil {
+		_ = os.Remove(objectName)
+		return "", err
+	}
+	return objectName, nil
+}
+
+func materializeStagedPackageBackends(ctx *context, pkgs []*aPackage, verbose bool) error {
+	if !shouldStageNativeExecutableBackend(ctx) {
+		return nil
+	}
+	for _, pkg := range pkgs {
+		if pkg == nil || pkg.StagedBitcode == "" {
+			continue
+		}
+		object, err := exportStagedPackageObject(ctx, pkg)
+		if err != nil {
+			return fmt.Errorf("export staged object of %s failed: %w", pkg.PkgPath, err)
+		}
+		pkg.ObjFiles = append(pkg.ObjFiles, object)
+		_ = os.Remove(pkg.StagedBitcode)
+		delete(ctx.stagedBitcodeFiles, pkg.StagedBitcode)
+		pkg.StagedBitcode = ""
+		if err := normalizeToArchive(ctx, pkg, verbose); err != nil {
+			return err
+		}
+		if pkg.PendingCacheSave {
+			if err := ctx.saveToCache(pkg); err != nil && verbose {
+				fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+			}
+			pkg.PendingCacheSave = false
+		}
+	}
+	entryIDs := make([]string, 0, len(ctx.stagedMainEntries))
+	for id := range ctx.stagedMainEntries {
+		entryIDs = append(entryIDs, id)
+	}
+	slices.Sort(entryIDs)
+	for _, id := range entryIDs {
+		entry := ctx.stagedMainEntries[id]
+		if entry == nil || entry.bitcode == "" {
+			return fmt.Errorf("staged main entry %q has no bitcode", id)
+		}
+		object, err := exportStagedBitcodePathWithClang(ctx, entry.pkgPath, entry.exportFile, entry.bitcode)
+		if err != nil {
+			return fmt.Errorf("export staged main entry %q failed: %w", id, err)
+		}
+		entry.object = object
+		_ = os.Remove(entry.bitcode)
+		delete(ctx.stagedBitcodeFiles, entry.bitcode)
+		entry.bitcode = ""
+	}
+	ctx.stagedCacheAuthorized = false
+	return nil
+}
+
+// releaseCoroPlanningScratchBeforeEmission drops construction-only indexes.
+// The immutable plan and cl emission universe remain the sole codegen inputs;
+// none of these auxiliary authorities may survive into package emission.
+func releaseCoroPlanningScratchBeforeEmission(ctx *context) {
+	if ctx == nil {
+		return
+	}
+	ctx.progSSA = nil
+	ctx.dedup = nil
+	ctx.coroSSAEmission = nil
+	ctx.coroRawGlobalSymbols = nil
+	ctx.coroGlobalFunctionSlots = nil
+}
+
+// releaseBuiltPackageSource removes source-only ownership as soon as a staged
+// package has been serialized. Link traversal needs only the package identity
+// and Imports graph; all AST/type-checking inputs would otherwise accumulate
+// behind the final, usually largest, package. A compact basename-only receipt
+// preserves target source-selection evidence without retaining either source
+// package graph.
+func releaseBuiltPackageSource(pkg *aPackage) {
+	if pkg == nil {
+		return
+	}
+	if pkg.sourceSelection == nil {
+		pkg.sourceSelection = freezePackageSourceSelection(pkg)
+	}
+	pkg.SSA = nil
+	pkg.rewriteVars = nil
+	releaseLoadedPackageAnalysis(pkg.Package)
+	if alt := pkg.AltPkg; alt != nil {
+		alt.Types = nil
+		alt.TypesInfo = nil
+		alt.Syntax = nil
+		releaseLoadedPackageAnalysis(alt.Package)
+	}
+	pkg.AltPkg = nil
+	if source := pkg.Package; source != nil {
+		source.GoFiles = nil
+		source.CompiledGoFiles = nil
+		source.OtherFiles = nil
+		source.EmbedFiles = nil
+		source.EmbedPatterns = nil
+		source.IgnoredFiles = nil
+	}
+}
+
+func releaseLoadedPackageAnalysis(source *packages.Package) {
+	if source == nil {
+		return
+	}
+	source.Syntax = nil
+	source.TypesInfo = nil
+	source.TypesSizes = nil
+	source.Types = nil
+	source.Fset = nil
+	source.Errors = nil
+	source.TypeErrors = nil
+}
+
+type packageSourceSelection struct {
+	goFiles    []string
+	altGoFiles []string
+}
+
+func freezePackageSourceSelection(pkg *aPackage) *packageSourceSelection {
+	if pkg == nil {
+		return nil
+	}
+	selection := &packageSourceSelection{}
+	if source := pkg.Package; source != nil {
+		selection.goFiles = selectedSourceBasenames(source.GoFiles, source.CompiledGoFiles)
+	}
+	if alt := pkg.AltPkg; alt != nil && alt.Package != nil {
+		selection.altGoFiles = selectedSourceBasenames(alt.GoFiles, alt.CompiledGoFiles)
+	}
+	return selection
+}
+
+func selectedSourceBasenames(groups ...[]string) []string {
+	unique := make(map[string]none)
+	for _, paths := range groups {
+		for _, path := range paths {
+			name := filepath.Base(path)
+			if name == "." || name == string(filepath.Separator) || name == "" {
+				continue
+			}
+			unique[strings.Clone(name)] = none{}
+		}
+	}
+	names := slices.Collect(maps.Keys(unique))
+	slices.Sort(names)
+	return names
+}
+
+func releaseCoroFrontendForStagedBackend(ctx *context, pkgs []*aPackage) {
+	if !shouldStageNativeExecutableBackend(ctx) {
+		return
+	}
+	// Cache eligibility is proven only while the complete immutable plan is
+	// still resident. Preserve that verdict for publication after object
+	// emission; do not retain the plan merely to repeat the same proof.
+	ctx.stagedCacheAuthorized = ctx.canUsePackageCache()
+	ctx.stagedTargetTriple = ctx.prog.TargetSpec().Triple
+	ctx.stagedDataLayout = ctx.prog.DataLayout()
+	ctx.stagedFuncInfoSites = shouldEmitRuntimeSites(ctx)
+	ctx.stagedFuncInfoMeta = ctx.prog.FuncInfoMetadataEnabled()
+	ctx.stagedPointerSize = ctx.prog.PointerSize()
+	ctx.stagedMachOSites = shouldEmitRuntimeMachOSites(ctx)
+	ctx.stagedBackendDetached = true
+	for _, pkg := range pkgs {
+		if pkg == nil {
+			continue
+		}
+		if pkg.LPkg != nil {
+			pkg.LPkg.Module().Dispose()
+			pkg.LPkg = nil
+		}
+		releaseBuiltPackageSource(pkg)
+	}
+	ctx.conf = nil
+	ctx.progSSA = nil
+	ctx.dedup = nil
+	ctx.patches = nil
+	ctx.callerTracking = nil
+	ctx.built = nil
+	ctx.fingerprinting = nil
+	ctx.initial = nil
+	ctx.cTransformer = nil
+	ctx.coroPlan = nil
+	ctx.coroEmission = nil
+	ctx.coroSSAEmission = nil
+	ctx.coroRawGlobalSymbols = nil
+	ctx.coroGlobalFunctionSlots = nil
+	ctx.coroLoweringFacts = coro.LoweringFacts{}
+	ctx.clCompilation = nil
 }
 
 func exportObject(ctx *context, pkgPath string, exportFile string, pkg llssa.Package) (string, error) {
@@ -7836,6 +8316,13 @@ type aPackage struct {
 	Meta        *meta.PackageMeta
 	rewriteVars map[string]string
 
+	// LinkSnapshot survives disposal of the package LLVM module. StagedBitcode
+	// is the verified presplit frontend result; coroutine/default lowering
+	// consumes it only after compilation-wide SSA state has been released.
+	LinkSnapshot    *packageLinkSnapshot
+	sourceSelection *packageSourceSelection
+	StagedBitcode   string
+
 	// CoroLibraryEffectRecords is producer-owned package metadata copied from
 	// cl before object emission. The package archiver publishes it through a
 	// metadata-only native member even when ObjFiles contain LTO bitcode.
@@ -7846,6 +8333,7 @@ type aPackage struct {
 	Manifest         string // manifest text content
 	CoroRootAnchorV1 string // linker-visible coroutine root package anchor
 	CacheHit         bool   // whether cache was hit
+	PendingCacheSave bool   // staged backend must archive before publishing cache
 }
 
 type Package = *aPackage

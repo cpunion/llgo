@@ -88,10 +88,7 @@ type funcInfoSymbolIndexRecord struct {
 func collectFuncInfo(pkgs []Package) []funcInfoRecord {
 	seen := make(map[string]funcInfoRecord)
 	for _, pkg := range pkgs {
-		if pkg == nil || pkg.LPkg == nil {
-			continue
-		}
-		for _, rec := range readFuncInfo(pkg.LPkg.Module()) {
+		for _, rec := range packageFuncInfo(pkg) {
 			if rec.symbol == "" {
 				continue
 			}
@@ -117,10 +114,7 @@ func collectPCLineInfo(pkgs []Package) []pcLineRecord {
 	var out []pcLineRecord
 	seen := make(map[uint64]none)
 	for _, pkg := range pkgs {
-		if pkg == nil || pkg.LPkg == nil {
-			continue
-		}
-		for _, rec := range readPCLineInfo(pkg.LPkg.Module()) {
+		for _, rec := range packagePCLineInfo(pkg) {
 			if rec.id == 0 || rec.symbol == "" {
 				continue
 			}
@@ -155,22 +149,12 @@ func collectFuncInfoStubRecords(pkgs []Package, records []funcInfoRecord) []func
 	}
 	seen := make(map[string]funcInfoStubRecord)
 	for _, pkg := range pkgs {
-		if pkg == nil || pkg.LPkg == nil {
-			continue
-		}
-		fn := pkg.LPkg.Module().FirstFunction()
-		for !fn.IsNil() {
-			if fn.IsDeclaration() || fn.BasicBlocksCount() == 0 {
-				fn = llvm.NextFunction(fn)
-				continue
-			}
-			name := fn.Name()
+		for _, name := range packageClosureStubNames(pkg) {
 			if target, ok := strings.CutPrefix(name, closureStubPrefix); ok {
 				if idx := recordBySymbol[target]; idx != 0 {
 					seen[name] = funcInfoStubRecord{symbol: name, funcIndex: idx}
 				}
 			}
-			fn = llvm.NextFunction(fn)
 		}
 	}
 	if len(seen) == 0 {
@@ -856,7 +840,13 @@ func emitFuncInfoEntrySites(ctx *context, pkg llssa.Package) {
 	if !shouldEmitRuntimeEntryELFSites(ctx) || pkg == nil || !ctx.prog.FuncInfoMetadataEnabled() {
 		return
 	}
-	mod := pkg.Module()
+	emitFuncInfoEntrySitesForModule(pkg.Module(), ctx.prog.PointerSize(), shouldEmitRuntimeMachOSites(ctx))
+}
+
+func emitFuncInfoEntrySitesForModule(mod llvm.Module, pointerSize int, machO bool) {
+	if mod.IsNil() {
+		return
+	}
 	records := readFuncInfo(mod)
 	if len(records) == 0 {
 		return
@@ -889,14 +879,13 @@ func emitFuncInfoEntrySites(ctx *context, pkg llssa.Package) {
 	// initializers pin dead functions alive; and noduplicate on the asm call
 	// blocks inlining outright. Deduplicating the section is therefore
 	// link-phase work and lands together with the final ftab generation.
-	machO := shouldEmitRuntimeMachOSites(ctx)
 	llvmCtx := mod.Context()
 	builder := llvmCtx.NewBuilder()
 	defer builder.Dispose()
 	asmType := llvm.FunctionType(llvmCtx.VoidType(), nil, false)
 	ptrDirective := ".quad"
 	align := "3"
-	if ctx.prog.PointerSize() == 4 {
+	if pointerSize == 4 {
 		ptrDirective = ".long"
 		align = "2"
 	}
@@ -936,15 +925,20 @@ func emitFuncInfoStubSites(ctx *context, pkg llssa.Package) {
 	if !shouldEmitRuntimeStubELFSites(ctx) || pkg == nil || !ctx.prog.FuncInfoMetadataEnabled() {
 		return
 	}
-	machO := shouldEmitRuntimeMachOSites(ctx)
-	mod := pkg.Module()
+	emitFuncInfoStubSitesForModule(pkg.Module(), ctx.prog.PointerSize(), shouldEmitRuntimeMachOSites(ctx))
+}
+
+func emitFuncInfoStubSitesForModule(mod llvm.Module, pointerSize int, machO bool) {
+	if mod.IsNil() {
+		return
+	}
 	llvmCtx := mod.Context()
 	builder := llvmCtx.NewBuilder()
 	defer builder.Dispose()
 	asmType := llvm.FunctionType(llvmCtx.VoidType(), nil, false)
 	ptrDirective := ".quad"
 	align := "3"
-	if ctx.prog.PointerSize() == 4 {
+	if pointerSize == 4 {
 		ptrDirective = ".long"
 		align = "2"
 	}

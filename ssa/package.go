@@ -381,6 +381,14 @@ func (p Program) DataLayout() string {
 	return p.td.String()
 }
 
+// ParseBitcodeFile loads one staged module into this program's LLVM context.
+// Build orchestration uses a fresh Program per module during detached backend
+// emission so context-wide LLVM caches cannot overlap whole-program frontend
+// analysis or accumulate across packages.
+func (p Program) ParseBitcodeFile(name string) (llvm.Module, error) {
+	return p.ctx.ParseBitcodeFile(name)
+}
+
 func (p Program) SetPatch(patchType func(types.Type) types.Type) {
 	p.patchType = patchType
 }
@@ -1039,6 +1047,14 @@ func (p Package) materializeLLVMUsed(name string, values []llvm.Value) {
 }
 
 func (p Package) rtFunc(fnName string) Expr {
+	return p.rtFuncAs(fnName, fnName)
+}
+
+// rtFuncAs returns the declaration for fnName while tagging the private
+// compiler-inserted call marker with logicalName. This lets a frontend give
+// two independently planned lowering recipes distinct identities even when
+// both recipes intentionally target the same runtime function.
+func (p Package) rtFuncAs(logicalName, fnName string) Expr {
 	p.NeedRuntime = true
 	fn := p.Prog.runtime().Scope().Lookup(fnName).(*types.Func)
 	name := FullName(fn.Pkg(), fnName)
@@ -1057,7 +1073,7 @@ func (p Package) rtFunc(fnName string) Expr {
 	// table. The raw and LLVM function types remain unchanged.
 	typ := *ret.Type
 	ret.Type = &typ
-	p.runtimeFuncs[ret.Type] = fnName
+	p.runtimeFuncs[ret.Type] = logicalName
 	return ret
 }
 

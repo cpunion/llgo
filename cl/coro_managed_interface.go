@@ -468,9 +468,11 @@ func (p *context) compileCoroManagedInterfaceAwait(
 	}
 	method, args := p.compileCoroManagedInterfaceOperands(b, call)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	return p.compileCoroManagedDispatchAwaitValue(
-		b, method, args, instructionPlan.controlSignature, keepaliveSlots,
+	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
+		b, method, args, instructionPlan.controlSignature, nil, keepaliveSlots,
 	)
+	p.recordCoroValueAddress(call, result.address)
+	return result.value
 }
 
 func (p *context) compileCoroManagedInterfaceOperands(

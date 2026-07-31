@@ -31,6 +31,11 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+// coroManagedFrameSlotAllocZCall is the logical identity of a compiler-owned
+// oversized coroutine slot. It deliberately resolves to runtime.AllocZ but is
+// distinct from source and LLSSA-temporary AllocZ edges in every SitePlan.
+const coroManagedFrameSlotAllocZCall = "$llgo.coro.frame-slot.allocz"
+
 // materializeLoweredRuntimeHelpers freezes the runtime calls that LLGo's
 // instruction lowering inserts without an x/tools SSA CallInstruction. An
 // explicitly complete runtime ABI is required. Report-only/unit-test
@@ -358,7 +363,7 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 			// child would manufacture an await on the successful access path.
 			continue
 		}
-		target := runtimePkg.ssa.Func(helper)
+		target := runtimePkg.ssa.Func(coroRuntimeHelperTargetName(helper))
 		if target == nil {
 			return fmt.Errorf("prepare emission universe: function %q lowers to missing runtime helper %q", ownerFn.Name(), helper)
 		}
@@ -404,7 +409,7 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 		if _, shared := managed[helper]; shared && !coroCompilerElidesImplicitFaultRuntimeHelper(instr, helper) {
 			continue
 		}
-		target := runtimePkg.ssa.Func(helper)
+		target := runtimePkg.ssa.Func(coroRuntimeHelperTargetName(helper))
 		if target == nil {
 			return fmt.Errorf("prepare emission universe: function %q lowers its plain representation to missing runtime helper %q", ownerFn.Name(), helper)
 		}
@@ -505,6 +510,11 @@ func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.I
 		plainStackCStr = intrinsic && (opcode == llgoAllocaCStr || opcode == llgoAllocaCStrs)
 	}
 	for _, helper := range managed {
+		if helper == coroManagedFrameSlotAllocZCall {
+			// This slot exists only in a stackless child-await recipe. A plain
+			// source call returns its value directly and allocates no slot.
+			continue
+		}
 		if plainStackCStr && helper == "AllocU" {
 			continue
 		}
@@ -625,7 +635,7 @@ func (u *EmissionUniverse) materializeRuntimeHelperReference(ownerFn *ssa.Functi
 	if u.pathDup[llssa.PkgRuntime] {
 		return nil, false, fmt.Errorf("runtime helper resolution has ambiguous package path %q", llssa.PkgRuntime)
 	}
-	target := u.byPath[llssa.PkgRuntime].ssa.Func(helper)
+	target := u.byPath[llssa.PkgRuntime].ssa.Func(coroRuntimeHelperTargetName(helper))
 	if target == nil {
 		return nil, false, fmt.Errorf("missing runtime helper %q", helper)
 	}
@@ -734,8 +744,9 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 	case *ssa.Alloc:
 		bitcast, scalarBitcast := coro.ProveSSAExactScalarBitcast(v.Parent())
 		scalarBitcast = scalarBitcast && bitcast.Allocation == v
-		if v.Heap && !scalarBitcast && !ctx.skipSyntheticMakeSliceAlloc(v) && !isEmissionVargsAlloc(ctx, v) {
-			elem := types.Unalias(v.Type()).(*types.Pointer).Elem()
+		elem := types.Unalias(v.Type()).(*types.Pointer).Elem()
+		if coroAllocationUsesManagedStorage(ctx, v) && !scalarBitcast &&
+			!ctx.skipSyntheticMakeSliceAlloc(v) && !isEmissionVargsAlloc(ctx, v) {
 			if !emissionZeroSizedType(ctx.patchType(elem), ctx.prog.PointerSize()) {
 				add("AllocZ")
 			}
@@ -759,6 +770,9 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		if !emissionBoundsChecksDisabled(ctx) &&
 			emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v) {
 			add("CheckIndexRange")
+		}
+		if emissionIndexNeedsManagedArrayTemporary(ctx, v) {
+			add("AllocZ")
 		}
 	case *ssa.IndexAddr:
 		// compileValue consumes varargs IndexAddr nodes in the enclosing varargs
@@ -887,6 +901,9 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 	case *ssa.Send:
 		add("CoroChanTrySend")
 	case *ssa.Call:
+		if emissionCallNeedsManagedCoroResultSlot(ctx, v) {
+			add(coroManagedFrameSlotAllocZCall)
+		}
 		if v.Call.IsInvoke() {
 			// Builder.Imethod extracts the receiver through this runtime helper
 			// before issuing the physical closure call.
@@ -1266,6 +1283,61 @@ func emissionStringIntrinsicHelper(ctx *context, call *ssa.Call) (string, error)
 		return "StringFrom", nil
 	}
 	return "", fmt.Errorf("llgo.string call %q has an unsupported variadic lowering shape %T", call.String(), common.Args[1])
+}
+
+// coroAllocationUsesManagedStorage is the single source-level projection of
+// Builder.Alloc's target-layout decision. x/tools marks semantic escapes in
+// Alloc.Heap; LLSSA additionally promotes an explicitly local value that would
+// exceed the fixed native stack. Physical coroutine planning consumes the same
+// answer so it retains only the pointer, not an oversized inline frame value.
+func coroAllocationUsesManagedStorage(ctx *context, alloc *ssa.Alloc) bool {
+	if alloc == nil {
+		return false
+	}
+	if alloc.Heap {
+		return true
+	}
+	if ctx == nil || ctx.prog == nil || alloc.Type() == nil {
+		return false
+	}
+	pointer, ok := types.Unalias(alloc.Type()).(*types.Pointer)
+	return ok && ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(pointer.Elem()))
+}
+
+// emissionIndexNeedsManagedArrayTemporary mirrors Builder.Index's hidden
+// aggregate-address path. Constants need no storage and a loaded array can
+// reuse its source address; every other array value is stored to a temporary.
+// If target layout puts that temporary above the native-stack limit, AllocZ
+// must be present in the frozen helper inventory before physical planning.
+func emissionIndexNeedsManagedArrayTemporary(ctx *context, index *ssa.Index) bool {
+	if ctx == nil || ctx.prog == nil || index == nil || index.X == nil {
+		return false
+	}
+	if _, array := types.Unalias(ctx.patchType(index.X.Type())).Underlying().(*types.Array); !array {
+		return false
+	}
+	switch index.X.(type) {
+	case *ssa.Const, *ssa.UnOp:
+		return false
+	default:
+		return ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(index.X.Type()))
+	}
+}
+
+// emissionCallNeedsManagedCoroResultSlot projects the target layout of one
+// source call result. Physical planning later decides whether the call is an
+// await; until then the distinct helper remains a conservative managed-only
+// edge and is elided for every non-await control recipe.
+func emissionCallNeedsManagedCoroResultSlot(ctx *context, call *ssa.Call) bool {
+	return ctx != nil && ctx.prog != nil && call != nil && call.Type() != nil &&
+		ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(call.Type()))
+}
+
+func coroRuntimeHelperTargetName(logicalName string) string {
+	if logicalName == coroManagedFrameSlotAllocZCall {
+		return "AllocZ"
+	}
+	return logicalName
 }
 
 // emissionIndexNeedsRangeCheck mirrors ssa.Builder.checkRange for the source

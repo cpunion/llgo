@@ -984,6 +984,56 @@ func helper() {}
 	}
 }
 
+func TestNoInlineDirectiveFollowsGenericOrigin(t *testing.T) {
+	ssapkg, _ := buildCallerFrameSSAPackage(t, "example.com/generic", `package generic
+
+import "runtime"
+
+//go:noinline
+func identity[T any](value T) T {
+	runtime.Caller(0)
+	return value
+}
+
+func Root() int { return identity(1) }
+`)
+	origin := ssapkg.Func("identity")
+	if origin == nil || !hasNoInlineDirective(origin) {
+		t.Fatal("generic origin lost its //go:noinline directive")
+	}
+	var instance *gossa.Function
+	for function := range ssautil.AllFunctions(ssapkg.Prog) {
+		if function != nil && function != origin && function.Origin() == origin {
+			instance = function
+			break
+		}
+	}
+	if instance == nil {
+		t.Fatal("generic //go:noinline fixture has no materialized instance")
+	}
+	if !hasNoInlineDirective(instance) {
+		t.Fatalf("generic instance %q did not inherit its origin //go:noinline directive", instance.String())
+	}
+	functions, trackable := collectRuntimeCallerFunctions(ssapkg)
+	if !functions[instance] || !trackable[instance] {
+		t.Fatalf(
+			"generic instance %q collector membership functions=%t trackable=%t pkg=%p want=%p",
+			instance.String(), functions[instance], trackable[instance], instance.Pkg, ssapkg,
+		)
+	}
+	if !fnHasDirectRuntimeCaller(instance) {
+		t.Fatalf("generic instance %q lost its direct runtime.Caller edge", instance.String())
+	}
+	tracking := NewCallerTracking()
+	if base := runtimeCallerBaseSet(tracking, ssapkg); !base[instance] {
+		t.Fatalf("generic instance %q is absent from base caller tracking", instance.String())
+	}
+	logical := runtimeLogicalCallerFuncSet(tracking, ssapkg)
+	if !logical[instance] {
+		t.Fatalf("generic instance %q that calls runtime.Caller is absent from logical caller tracking", instance.String())
+	}
+}
+
 // Display names follow gc's reporting conventions regardless of the module
 // path; linker symbols are untouched.
 func TestFuncInfoDisplayName(t *testing.T) {

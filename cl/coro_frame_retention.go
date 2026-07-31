@@ -450,11 +450,11 @@ func (a *coroPhysicalPureSSAAudit) coroParkBorrowPrepare(allocation *ssa.Alloc, 
 	return prepare, prepare != nil
 }
 
-// proveManagedHeapAllocations freezes the exact ordinary Go heap allocations
-// whose managed allocator edge and suspended-frame root profile are both
-// proven. Unlike proveParkFrameRetention, this never changes code generation
-// to an alloca: escape identity and heap lifetime remain those of the source
-// *ssa.Alloc.
+// proveManagedHeapAllocations freezes the exact allocations whose managed
+// allocator edge and suspended-frame root profile are both proven. This
+// includes semantic escapes and target-layout promotion of an oversized local.
+// Unlike proveParkFrameRetention, it never changes code generation to an
+// alloca: managed identity and lifetime remain those of final LLSSA lowering.
 func (a *coroPhysicalPureSSAAudit) proveManagedHeapAllocations(proof *coroFrameRetentionProof) {
 	if a == nil || a.fn == nil || proof == nil {
 		return
@@ -462,7 +462,7 @@ func (a *coroPhysicalPureSSAAudit) proveManagedHeapAllocations(proof *coroFrameR
 	for _, block := range a.fn.Blocks {
 		for _, instruction := range block.Instrs {
 			alloc, ok := instruction.(*ssa.Alloc)
-			if !ok || !alloc.Heap {
+			if !ok || !coroAllocationUsesManagedStorage(a.ctx, alloc) {
 				continue
 			}
 			if _, frameLocal := proof.allocations[alloc]; frameLocal {
@@ -812,10 +812,10 @@ func (b *coroFrameRetentionRootBuilder) traceAddress(value ssa.Value, use ssa.In
 		return trace, true
 	case *ssa.Alloc:
 		kind := coroFrameRetentionRootLocalAddress
-		if value.Heap {
-			if _, managed := b.proof.managedHeapAllocations[value]; managed {
-				kind = coroFrameRetentionRootManagedHeapAllocation
-			} else if _, retained := b.proof.allocations[value]; !retained {
+		if _, managed := b.proof.managedHeapAllocations[value]; managed {
+			kind = coroFrameRetentionRootManagedHeapAllocation
+		} else if value.Heap {
+			if _, retained := b.proof.allocations[value]; !retained {
 				return trace, false
 			}
 		}

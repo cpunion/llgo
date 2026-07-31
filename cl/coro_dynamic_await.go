@@ -55,7 +55,11 @@ func (p *context) compileCoroManagedDispatchAwait(
 	}
 	args := p.compileValues(b, call.Call.Args, fnNormal)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	return p.compileCoroManagedDispatchAwaitValue(b, fn, args, call.Call.Signature(), keepaliveSlots)
+	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
+		b, fn, args, call.Call.Signature(), nil, keepaliveSlots,
+	)
+	p.recordCoroValueAddress(call, result.address)
+	return result.value
 }
 
 // compileCoroManagedDispatchAwaitValue is the one capability probe and child
@@ -65,7 +69,9 @@ func (p *context) compileCoroManagedDispatchAwait(
 func (p *context) compileCoroManagedDispatchAwaitValue(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
-	return p.compileCoroManagedDispatchAwaitValueWithRecovery(b, fn, args, signature, nil, keepaliveSlots)
+	return p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
+		b, fn, args, signature, nil, keepaliveSlots,
+	).value
 }
 
 // compileCoroManagedDispatchAwaitValueWithRecovery is the cleanup-aware core
@@ -77,6 +83,15 @@ func (p *context) compileCoroManagedDispatchAwaitValueWithRecovery(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
+	return p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
+		b, fn, args, signature, cleanup, keepaliveSlots,
+	).value
+}
+
+func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
+	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+) coroAwaitedValue {
 	body := p.coroBody()
 	if body == nil {
 		panic("managed dispatch await requires an active physical coroutine body")
@@ -86,7 +101,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueWithRecovery(
 		panic(fmt.Errorf("coroutine managed dispatch await: %w", err))
 	}
 	resultLayout := p.prog.Type(abi.resultSlotType, llssa.InC)
-	resultSlot := p.coroFrameAlloca(p.prog.Type(abi.resultSlotType, llssa.InGo))
+	resultSlot := p.coroResultSlot(p.prog.Type(abi.resultSlotType, llssa.InGo))
 	opts := llssa.CoroDispatchCallOptions{
 		Version: coroPlainDispatchVersion,
 		ABIHash: abi.hash,
@@ -137,7 +152,10 @@ func (p *context) compileCoroManagedDispatchAwaitValueWithRecovery(
 	b.Jump(join)
 
 	b.SetBlockContinuation(join)
-	return p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results())
+	return coroAwaitedValue{
+		value:   p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results()),
+		address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
+	}
 }
 
 func validateCoroManagedDispatchAwaitShape(
