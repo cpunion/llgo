@@ -565,7 +565,11 @@ func (p *context) compileCoroManagedInterfaceAwait(
 		b, call, instructionPlan.rawInterfaceReceiver,
 	)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
+	plan := p.compilation.immutablePlan()
+	if plan == nil {
+		panic("managed interface await has no immutable compilation plan")
+	}
+	callPlan, found := plan.CallPlan(call)
 	if !found || callPlan.Rep != coro.Dispatch {
 		panic("managed interface await lost its frozen Dispatch CallPlan")
 	}

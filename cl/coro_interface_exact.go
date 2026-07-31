@@ -88,8 +88,12 @@ func (p *context) compileCoroExactInterfaceCall(
 		instructionPlan.controlReceiver == nil {
 		panic("exact interface invocation escaped its frozen physical control recipe")
 	}
+	plan := p.compilation.immutablePlan()
+	if plan == nil {
+		panic("exact interface invocation has no immutable compilation plan")
+	}
 	receiver, target, targetPlan, exact, err :=
-		p.compilation.CoroPlan.ResolveExactInterfaceCall(call)
+		plan.ResolveExactInterfaceCall(call)
 	if err != nil {
 		panic(err)
 	}
@@ -128,8 +132,12 @@ func (p *context) compileCoroExactInterfaceAwait(
 		instructionPlan.controlReceiver == nil {
 		panic("exact interface await escaped its frozen physical control recipe")
 	}
+	plan := p.compilation.immutablePlan()
+	if plan == nil {
+		panic("exact interface await has no immutable compilation plan")
+	}
 	receiver, target, targetPlan, exact, err :=
-		p.compilation.CoroPlan.ResolveExactInterfaceCall(call)
+		plan.ResolveExactInterfaceCall(call)
 	if err != nil {
 		panic(err)
 	}
