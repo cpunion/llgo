@@ -564,7 +564,8 @@ func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.I
 	// panic instructions, so retain only those plain-only helper edges here.
 	switch instruction := instr.(type) {
 	case *ssa.MakeInterface:
-		if coroSyntheticSelectNoCaseBox(instruction) {
+		_, exactManagedInvoke := coroExactInterfaceMakeInvoke(instruction)
+		if coroSyntheticSelectNoCaseBox(instruction) || exactManagedInvoke {
 			u.makeInterfaceRuntimeHelpers(ctx, instruction, add)
 		}
 	case *ssa.Panic:
@@ -835,6 +836,10 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		}
 	case *ssa.MakeInterface:
 		if !coroSyntheticSelectNoCaseBox(v) {
+			// Helper closure is frozen before whole-program coroutine planning
+			// can certify the exact target and physical call protocol. Keep the
+			// conservative dependency here; a later physical plan may still
+			// elide both this value and every helper call at the occurrence.
 			u.makeInterfaceRuntimeHelpers(ctx, v, add)
 		}
 	case *ssa.MakeSlice:

@@ -131,6 +131,65 @@ func (p *SSAPlan) CallPlan(call ssa.CallInstruction) (SSACallPlan, bool) {
 	return plan, true
 }
 
+// ResolveExactInterfaceCall returns the one concrete SSA receiver and method
+// target proven for an occurrence-local interface invoke. The certificate is
+// deliberately narrower than a closed CHA CallPlan: it exists only when the
+// interface payload traces to one exact MakeInterface source value, possibly
+// through representation-preserving ChangeInterface nodes.
+//
+// A frontend may use this fact to bypass interface transport when the final
+// target plan has a compatible direct execution protocol. Calls without this
+// proof return exact=false and retain ordinary closed/open interface lowering.
+func (p *SSAPlan) ResolveExactInterfaceCall(
+	call *ssa.Call,
+) (receiver ssa.Value, target *ssa.Function, targetPlan FunctionPlan, exact bool, err error) {
+	if p == nil || call == nil {
+		return nil, nil, FunctionPlan{}, false, nil
+	}
+	receiver, exact = p.exactInterfaceReceivers[call]
+	if !exact {
+		return nil, nil, FunctionPlan{}, false, nil
+	}
+	common := call.Common()
+	parent := "<unknown>"
+	if call.Parent() != nil {
+		parent = call.Parent().Name()
+	}
+	plan, planned := p.callPlans[call]
+	if receiver == nil || common == nil || !common.IsInvoke() ||
+		common.StaticCallee() != nil || common.Method == nil ||
+		!planned || plan.Call != call || plan.Kind != CallDirect ||
+		plan.Rep != Dispatch || plan.Open || len(plan.Targets) != 1 {
+		return nil, nil, FunctionPlan{}, false, fmt.Errorf(
+			"coro: exact interface invoke in %q has a malformed frozen CallPlan",
+			parent,
+		)
+	}
+	if receiver.Type() == nil {
+		return nil, nil, FunctionPlan{}, false, fmt.Errorf(
+			"coro: exact interface invoke in %q has an untyped concrete receiver",
+			parent,
+		)
+	}
+	target, found := p.byID[plan.Targets[0]]
+	if !found || target == nil || target.Signature == nil ||
+		target.Signature.Recv() == nil ||
+		!types.Identical(target.Signature.Recv().Type(), receiver.Type()) {
+		return nil, nil, FunctionPlan{}, false, fmt.Errorf(
+			"coro: exact interface invoke in %q lost its receiver-identical target %q",
+			parent, plan.Targets[0],
+		)
+	}
+	targetPlan, found = p.plan.Lookup(plan.Targets[0])
+	if !found {
+		return nil, nil, FunctionPlan{}, false, fmt.Errorf(
+			"coro: exact interface invoke in %q targets absent function %q",
+			parent, plan.Targets[0],
+		)
+	}
+	return receiver, target, targetPlan, true, nil
+}
+
 // ResolveClosedStaticSpawn proves the exact source and whole-plan shape used
 // by the first stackless goroutine-spawn lowering. The target is selected by
 // the immutable CallPlan, never by a display name or a runtime callback. The
@@ -514,6 +573,7 @@ type ssaFuncFlow struct {
 	rawAddressBoxes   map[*ssa.MakeInterface]ssaCallArgumentUse
 	closedValues      map[ssa.Value]SSAClosedDynamicCallCertificate
 	closedCalls       map[ssa.CallInstruction]SSAClosedDynamicCallCertificate
+	exactInterface    map[*ssa.Call]ssa.Value
 }
 
 type ssaCallArgumentUse struct {
@@ -531,6 +591,7 @@ func analyzeSSAFunctionFlow(
 	directPlainArgs []ssaCallArgumentUse,
 	rawAddressArgs []ssaCallArgumentUse,
 	closedDynamicCalls map[ssa.CallInstruction]SSAClosedDynamicCallCertificate,
+	exactInterfaceCalls map[*ssa.Call]ssa.Value,
 	managedValueReferences []*ssa.Function,
 	classifyRawCFunctionType func(types.Type) (bool, error),
 ) (*ssaFuncFlow, error) {
@@ -564,6 +625,7 @@ func analyzeSSAFunctionFlow(
 		rawAddressBoxes:   rawAddressBoxes,
 		closedValues:      make(map[ssa.Value]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
 		closedCalls:       make(map[ssa.CallInstruction]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
+		exactInterface:    exactInterfaceCalls,
 	}
 	for call, certificate := range closedDynamicCalls {
 		flow.closedCalls[call] = SSAClosedDynamicCallCertificate{
@@ -1431,7 +1493,10 @@ func (f *ssaFuncFlow) finalize(
 			}
 		} else {
 			plan.Open = !f.dynamicCallClosed(call)
-			plan.MayBeNil = true
+			// A MakeInterface-backed occurrence is itself non-nil even when
+			// its exact concrete payload is a nil pointer. Any resulting
+			// wrapper fault belongs to the selected target plan.
+			plan.MayBeNil = !f.exactInterfaceCall(call)
 		}
 		if candidates := f.dynamicCandidates[call]; candidates != nil {
 			for target := range candidates {
@@ -1472,7 +1537,10 @@ func ssaSpawnNeedsDispatch(call ssa.CallInstruction) bool {
 
 func (f *ssaFuncFlow) dynamicCallClosed(call ssa.CallInstruction) bool {
 	candidates := f.dynamicCandidates[call]
-	if f.dynamicResolution != DynamicCHAClosed || len(candidates) == 0 {
+	if len(candidates) == 0 {
+		return false
+	}
+	if !f.exactInterfaceCall(call) && f.dynamicResolution != DynamicCHAClosed {
 		return false
 	}
 	for target := range candidates {
@@ -1481,6 +1549,15 @@ func (f *ssaFuncFlow) dynamicCallClosed(call ssa.CallInstruction) bool {
 		}
 	}
 	return true
+}
+
+func (f *ssaFuncFlow) exactInterfaceCall(call ssa.CallInstruction) bool {
+	direct, ordinary := call.(*ssa.Call)
+	if !ordinary {
+		return false
+	}
+	_, exact := f.exactInterface[direct]
+	return exact
 }
 
 func (f *ssaFuncFlow) sortedTargetIDs(targets map[*ssa.Function]struct{}) []FunctionID {

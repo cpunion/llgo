@@ -121,6 +121,8 @@ const (
 	coroPhysicalControlDispatchAwait
 	coroPhysicalControlClosedInterfaceAwait
 	coroPhysicalControlManagedInterfaceAwait
+	coroPhysicalControlExactInterfaceCall
+	coroPhysicalControlExactInterfaceAwait
 	coroPhysicalControlPlainDispatch
 	coroPhysicalControlNilDispatchFault
 	coroPhysicalControlRawPlainCall
@@ -140,6 +142,10 @@ func (recipe coroPhysicalControlRecipe) String() string {
 		return "closed-interface-await"
 	case coroPhysicalControlManagedInterfaceAwait:
 		return "managed-interface-await"
+	case coroPhysicalControlExactInterfaceCall:
+		return "exact-interface-call"
+	case coroPhysicalControlExactInterfaceAwait:
+		return "exact-interface-await"
 	case coroPhysicalControlPlainDispatch:
 		return "plain-dispatch"
 	case coroPhysicalControlNilDispatchFault:
@@ -265,32 +271,34 @@ type coroPhysicalLoweringCapabilities struct {
 // frozen safe array index removes only the range edge, never a nullable
 // pointer-to-array dereference.
 type coroPhysicalInstructionPlan struct {
-	semantic           coroSemanticInstructionPlan
-	recipe             coroPhysicalInstructionRecipe
-	control            coroPhysicalControlRecipe
-	controlTarget      *ssa.Function
-	controlTargetID    coro.FunctionID
-	controlInterface   *coroInterfaceDispatchPlan
-	controlSignature   *types.Signature
-	controlFailure     string
-	controlFailureHard bool
-	operation          coroPhysicalOperationRecipe
-	operationFailure   string
-	operationWorker    *coroWorkerForeignCallShape
-	operationCgo       *coroWorkerCgoCallShape
-	operationCgoErrno  *coroWorkerCgoErrnoCallShape
-	operationHost      coroHostOperationCallShape
-	operationControl   CoroControlOperation
-	outcome            coroPhysicalOutcomeRecipe
-	outcomeFailure     string
-	elideValue         bool
-	reuseValueAddress  bool
-	valueOperand       ssa.Value
-	container          coroPhysicalContainerKind
-	bound              int64
-	nilGuard           bool
-	boundsGuard        bool
-	boundsDisabled     bool
+	semantic             coroSemanticInstructionPlan
+	recipe               coroPhysicalInstructionRecipe
+	control              coroPhysicalControlRecipe
+	controlTarget        *ssa.Function
+	controlTargetID      coro.FunctionID
+	controlReceiver      ssa.Value
+	controlInterface     *coroInterfaceDispatchPlan
+	controlSignature     *types.Signature
+	controlFailure       string
+	controlFailureHard   bool
+	operation            coroPhysicalOperationRecipe
+	operationFailure     string
+	operationWorker      *coroWorkerForeignCallShape
+	operationCgo         *coroWorkerCgoCallShape
+	operationCgoErrno    *coroWorkerCgoErrnoCallShape
+	operationHost        coroHostOperationCallShape
+	operationControl     CoroControlOperation
+	outcome              coroPhysicalOutcomeRecipe
+	outcomeFailure       string
+	elideValue           bool
+	reuseValueAddress    bool
+	valueOperand         ssa.Value
+	container            coroPhysicalContainerKind
+	bound                int64
+	nilGuard             bool
+	boundsGuard          bool
+	boundsDisabled       bool
+	rawInterfaceReceiver bool
 }
 
 func (plan coroPhysicalInstructionPlan) mayFault() bool {
@@ -307,10 +315,17 @@ func (plan coroPhysicalInstructionPlan) mayFault() bool {
 // selected recipe is the sole authority for whether a call is physically
 // emitted in the live coroutine frame.
 func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool {
+	if plan.elideValue {
+		return true
+	}
+	if plan.rawInterfaceReceiver && helper == "IfacePtrData" {
+		return true
+	}
 	if helper == coroManagedFrameSlotAllocZCall {
 		switch plan.control {
 		case coroPhysicalControlDirectAwait, coroPhysicalControlDispatchAwait,
-			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait:
+			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait,
+			coroPhysicalControlExactInterfaceAwait:
 			return false
 		default:
 			// The conservative pre-analysis inventory cannot yet know whether
@@ -383,6 +398,7 @@ type coroPhysicalFunctionPlan struct {
 	cleanup           *coroStaticCleanupPlan
 	frameRetentionABI string
 	needsPreempt      bool
+	preempt           *coroPhysicalPreemptPlan
 	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
 }
 
@@ -414,6 +430,13 @@ func prepareCoroPhysicalFunctionPlan(
 		}
 		plan.needsPreempt = function.Exec.Contains(coro.NeedsPreempt)
 	}
+	preempt, err := planCoroPhysicalPreemption(
+		audit, critical, plan.needsPreempt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	plan.preempt = preempt
 	var exactBitcastAllocation *ssa.Alloc
 	if proof, exact := coro.ProveSSAExactScalarBitcast(audit.fn); exact {
 		exactBitcastAllocation = proof.Allocation
@@ -444,7 +467,8 @@ func prepareCoroPhysicalFunctionPlan(
 		}
 		switch producer.control {
 		case coroPhysicalControlDirectAwait, coroPhysicalControlDispatchAwait,
-			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait:
+			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait,
+			coroPhysicalControlExactInterfaceAwait:
 			instructionPlan.reuseValueAddress = true
 			plan.instructions[instruction] = instructionPlan
 		}
@@ -833,6 +857,14 @@ func planCoroPhysicalInstruction(
 			result.elideValue = true
 		}
 	case *ssa.MakeInterface:
+		elided, err := coroPlannedExactInterfaceMakeElision(whole, instruction)
+		if err != nil {
+			return result, fmt.Errorf("exact interface construction elision: %w", err)
+		}
+		if elided {
+			result.elideValue = true
+			break
+		}
 		if coroSyntheticSelectNoCaseBox(instruction) {
 			result.recipe = coroPhysicalInstructionSyntheticSelectNoCaseBox
 			break
@@ -1228,6 +1260,30 @@ func planCoroPhysicalControlInstruction(
 		}
 		if common != nil && common.IsInvoke() {
 			result.controlFailureHard = true
+			receiver, target, targetPlan, exact, err :=
+				whole.ResolveExactInterfaceCall(instruction)
+			if err != nil {
+				result.controlFailure = "invalid exact interface call: " + err.Error()
+				return
+			}
+			if exact && coroExactInterfaceTargetDirectPlain(targetPlan) {
+				result.control = coroPhysicalControlExactInterfaceCall
+				result.controlTarget = target
+				result.controlTargetID = targetPlan.ID
+				result.controlReceiver = receiver
+				// The direct occurrence consumes the concrete SSA value and never
+				// emits the logical IfacePtrData normalization helper.
+				result.rawInterfaceReceiver = true
+				return
+			}
+			if exact && coroExactInterfaceTargetDirectAwait(targetPlan) {
+				result.control = coroPhysicalControlExactInterfaceAwait
+				result.controlTarget = target
+				result.controlTargetID = targetPlan.ID
+				result.controlReceiver = receiver
+				result.rawInterfaceReceiver = true
+				return
+			}
 			if capabilities.managedInterface.acceptsCall(instruction) {
 				if !callPlanned || callPlan.Rep != coro.Dispatch {
 					result.controlFailure = "managed interface descriptor call lost its frozen Dispatch CallPlan"
@@ -1248,6 +1304,8 @@ func planCoroPhysicalControlInstruction(
 				}
 				result.control = coroPhysicalControlManagedInterfaceAwait
 				result.controlSignature = signature
+				result.rawInterfaceReceiver =
+					capabilities.managedInterface.acceptsRawReceiverCall(instruction)
 				return
 			}
 			if !capabilities.explicitPanic {
@@ -1398,6 +1456,26 @@ func planCoroPhysicalControlInstruction(
 			result.controlFailure = "goroutine spawn has unsupported representation " + callPlan.Rep.String()
 		}
 	}
+}
+
+func coroExactInterfaceTargetDirectPlain(plan coro.FunctionPlan) bool {
+	return plan.External == coro.Defined &&
+		plan.Emission == coro.EmitPlain &&
+		plan.Primary == coro.PrimaryPlain &&
+		plan.Demand != coro.NoDemand &&
+		plan.Effect == coro.NoSuspend &&
+		!plan.Exec.Contains(coro.MayUnwind|coro.NeedsPreempt|coro.OpaqueExec|coro.BlockForeign|coro.ThreadAffine)
+}
+
+func coroExactInterfaceTargetDirectAwait(plan coro.FunctionPlan) bool {
+	return plan.External == coro.Defined &&
+		plan.Emission == coro.EmitCoroutine &&
+		plan.Primary == coro.PrimaryCoroutine &&
+		plan.ManagedDemand.Contains(coro.AsyncDemand) &&
+		(plan.FuncRep == coro.DirectCoro || plan.FuncRep == coro.Dispatch) &&
+		plan.Effect.MaySuspend() &&
+		!plan.Effect.IsOpaque() &&
+		!plan.Exec.IsOpaque()
 }
 
 func coroPhysicalContainerPlan(audit *coroPhysicalPureSSAAudit, value ssa.Value) (coroPhysicalContainerKind, int64, error) {

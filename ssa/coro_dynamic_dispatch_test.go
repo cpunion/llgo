@@ -214,6 +214,59 @@ func TestCoroDispatchDescriptorNonNilSuppressesImplicitLoadNilCheck(t *testing.T
 	}
 }
 
+func TestCoroDispatchTrustedDescriptorSkipsRepeatedContractValidation(t *testing.T) {
+	fixture := newCoroDynamicDispatchTestFixture(t)
+	callOptions := CoroDispatchCallOptions{
+		Version:           CoroDispatchVersionV1,
+		ABIHash:           fixture.hash,
+		Result:            fixture.result,
+		TrustedDescriptor: true,
+	}
+
+	plainSignature := coroPlainDispatchTestSignature(
+		[]types.Type{fixture.signature, types.Typ[types.Uint32]},
+		[]types.Type{types.Typ[types.Uint32]},
+	)
+	plain := fixture.pkg.NewFunc("trusted_dynamic_plain_call", plainSignature, InGo)
+	plainBuilder := plain.MakeBody(1)
+	plainBuilder.Return(plainBuilder.CallCoroDispatchPlain(
+		plain.Param(0), []Expr{plain.Param(1)}, callOptions,
+	))
+	plainBuilder.EndBuild()
+	plainBuilder.Dispose()
+
+	probeSignature := coroPlainDispatchTestSignature(
+		[]types.Type{fixture.signature},
+		[]types.Type{types.Typ[types.Bool]},
+	)
+	probe := fixture.pkg.NewFunc("trusted_dynamic_has_coro", probeSignature, InGo)
+	probeBuilder := probe.MakeBody(1)
+	probeBuilder.Return(probeBuilder.CoroDispatchHasCoro(probe.Param(0), callOptions))
+	probeBuilder.EndBuild()
+	probeBuilder.Dispose()
+
+	ir := fixture.pkg.String()
+	for _, name := range []string{"trusted_dynamic_plain_call", "trusted_dynamic_has_coro"} {
+		body := coroPlainDispatchIRFunction(ir, name)
+		if body == "" {
+			t.Fatalf("missing trusted descriptor fixture %q:\n%s", name, ir)
+		}
+		for _, forbidden := range []string{
+			"coro.dispatch.version.invalid",
+			"coro.dispatch.flags.unknown",
+			"coro.dispatch.hash.invalid",
+			"coro.dispatch.result.size.invalid",
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("trusted descriptor fixture %q retained %q:\n%s", name, forbidden, body)
+			}
+		}
+	}
+	if err := llvm.VerifyModule(fixture.pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify trusted descriptor module: %v\n%s", err, ir)
+	}
+}
+
 func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
 	Initialize(InitAll)
 	prog := NewProgram(nil)

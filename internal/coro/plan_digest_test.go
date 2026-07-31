@@ -313,8 +313,8 @@ import (
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v29" {
-		t.Fatalf("plan digest schema = %q, want canonical dependency-init site schema v29", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v30" {
+		t.Fatalf("plan digest schema = %q, want exact-interface-receiver schema v30", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {
@@ -371,6 +371,81 @@ func root(seed int) int {
 	}
 	if !found {
 		t.Fatalf("canonical digest did not record captured internal raw variant: %+v", document.Functions)
+	}
+}
+
+func TestCoroPlanDigestFreezesExactInterfaceReceiver(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "exact_interface_digest.go", `package coroid
+type Interface interface { Method() int }
+type Concrete struct{}
+func (Concrete) Method() int { return 1 }
+func root() int {
+	var value Interface = Concrete{}
+	return value.Method()
+}
+`)
+	root := packageFunction(t, pkg, "root")
+	config := planDigestSSAConfig()
+	config.DynamicResolution = DynamicCHAClosed
+	config.MaxPlainInstructions = -1
+	config.OutcomeMode = OutcomeExplicitStatus
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var invoke *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common() != nil && call.Common().IsInvoke() {
+				invoke = call
+			}
+		}
+	}
+	if invoke == nil {
+		t.Fatal("fixture has no interface invoke")
+	}
+	if _, _, _, exact, err := plan.ResolveExactInterfaceCall(invoke); err != nil || !exact {
+		t.Fatalf("exact interface receiver = %t, err = %v", exact, err)
+	}
+
+	metadata := validPlanDigestMetadata()
+	baseline, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := plan.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := false
+	for _, call := range document.Calls {
+		if call.ExactInterfaceReceiver {
+			frozen = true
+			break
+		}
+	}
+	if !frozen {
+		t.Fatal("canonical plan digest omitted the exact interface receiver")
+	}
+
+	receiver := plan.exactInterfaceReceivers[invoke]
+	delete(plan.exactInterfaceReceivers, invoke)
+	without, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if without == baseline {
+		t.Fatal("removing the exact interface receiver did not change CoroPlanDigest")
+	}
+	plan.exactInterfaceReceivers[invoke] = receiver
+	restored, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != baseline {
+		t.Fatalf("restored exact interface digest = %s, want %s", restored, baseline)
 	}
 }
 

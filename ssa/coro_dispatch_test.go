@@ -239,6 +239,71 @@ func TestCoroPlainDispatchV1RejectsNonExactContract(t *testing.T) {
 	})
 }
 
+func TestABIPointerReceiverInterfaceEntryDoesNotReuseMethodDescriptor(t *testing.T) {
+	Initialize(InitAll)
+	fixture := newCoroPlainDispatchTestFixture(t, nil)
+
+	typesPkg := types.NewPackage("example.com/coro/method", "method")
+	named := types.NewNamed(
+		types.NewTypeName(token.NoPos, typesPkg, "Receiver", nil),
+		types.NewStruct(nil, nil),
+		nil,
+	)
+	receiverType := types.NewPointer(named)
+	signature := types.NewSignature(
+		types.NewVar(token.NoPos, typesPkg, "", receiverType),
+		nil,
+		types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Bool])),
+		false,
+	)
+	method := types.NewFunc(token.NoPos, typesPkg, "Ready", signature)
+	named.AddMethod(method)
+	selection := types.NewMethodSet(receiverType).Lookup(typesPkg, method.Name())
+	if selection == nil {
+		t.Fatal("pointer receiver method is absent from its method set")
+	}
+
+	builder := &aBuilder{Prog: fixture.prog, Pkg: fixture.pkg}
+	const rawName = "method_ready_raw"
+	ifn, name, gotSignature := builder.abiInterfaceMethodEntry(
+		false,
+		typesPkg,
+		method,
+		selection,
+		signature,
+		rawName,
+		fixture.descriptor,
+	)
+	if ifn.impl.IsAFunction().IsNil() ||
+		!coroPlainDispatchGlobal(ifn.impl).IsNil() ||
+		name != rawName ||
+		gotSignature != signature {
+		t.Fatalf(
+			"descriptor-backed pointer method Ifn = %v, name=%q, signature=%p; want raw function %q, %p",
+			ifn.impl, name, gotSignature, rawName, signature,
+		)
+	}
+
+	ordinary := fixture.pkg.NewFunc("ordinary_pointer_method", signature, InGo).Expr
+	reused, name, gotSignature := builder.abiInterfaceMethodEntry(
+		false,
+		typesPkg,
+		method,
+		selection,
+		signature,
+		ordinary.Name(),
+		ordinary,
+	)
+	if reused.impl.C != ordinary.impl.C ||
+		name != ordinary.Name() ||
+		gotSignature != signature {
+		t.Fatalf(
+			"ordinary pointer method Ifn = %v, name=%q, signature=%p; want exact Tfn reuse %v, %q, %p",
+			reused.impl, name, gotSignature, ordinary.impl, ordinary.Name(), signature,
+		)
+	}
+}
+
 func newCoroPlainDispatchTestFixture(t *testing.T, target *Target) *coroPlainDispatchTestFixture {
 	t.Helper()
 	prog := NewProgram(target)

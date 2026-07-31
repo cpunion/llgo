@@ -283,7 +283,7 @@ func (p *context) compileCoroManagedInterfaceDispatchSpawn(b llssa.Builder, spaw
 	if err != nil {
 		panic(fmt.Errorf("managed interface spawn: %w", err))
 	}
-	method, args := p.compileCoroManagedInterfaceOperands(b, spawn)
+	method, args := p.compileCoroManagedInterfaceOperands(b, spawn, false)
 	p.compileCoroDispatchSpawnTransaction(b, method, args, signature, "managed interface spawn")
 }
 

@@ -850,6 +850,11 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	if box == nil || box.X == nil {
 		return "incomplete interface construction"
 	}
+	if elided, err := coroPlannedExactInterfaceMakeElision(a.plan, box); err != nil {
+		return "exact interface construction elision: " + err.Error()
+	} else if elided {
+		return ""
+	}
 	target, ok := types.Unalias(a.typeOf(box.Type())).Underlying().(*types.Interface)
 	if !ok {
 		return "MakeInterface target is not an interface"

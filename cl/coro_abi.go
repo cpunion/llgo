@@ -1109,14 +1109,16 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 				panic("coroutine critical proof has no source-block entry depth")
 			}
 		}
-		if physical.needsPreempt && entryDepth == 0 {
+		pollAtEntry := physical.needsPreempt && entryDepth == 0
+		if physicalPlan.preempt != nil {
+			pollAtEntry = physicalPlan.preempt.pollsAtBlock(block)
+		}
+		if pollAtEntry {
 			physical.instructions = 0
-			// Every source block, including block zero, begins with a poll. A
-			// child initial suspend is a scheduler boundary but not necessarily
-			// a fairness boundary: pendingAwait can immediately resume a long
-			// static child chain on the same G without returning to ready-queue
-			// selection. Polling block zero therefore bounds that chain as well
-			// as ordinary CFG paths and block-zero backedges.
+			// Block zero bounds immediately resumed static child chains. The
+			// frozen graph plan selects a feedback set plus bounded acyclic
+			// path cuts; structured-critical functions retain the conservative
+			// depth-aware every-block fallback.
 			b.SetBlock(p.sourceBlock(i))
 			physical.pollAndSuspendForPreempt(b)
 			physical.sourceBlockPollFresh = true
@@ -1790,8 +1792,11 @@ func validateCoroPhysicalABIForOwner(
 				}
 				if instr.Common().IsInvoke() {
 					switch instructionPlan.control {
-					case coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait:
+					case coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait,
+						coroPhysicalControlExactInterfaceAwait:
 						awaits++
+						continue
+					case coroPhysicalControlExactInterfaceCall:
 						continue
 					case coroPhysicalControlNone:
 						if instructionPlan.controlFailureHard {

@@ -539,17 +539,9 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 			tfn = b.Pkg.closureWrapDecl(tfnFn.Expr, tfnSig).impl
 			tfnExpr = tfnFn.Expr
 		}
-		ifnExpr := tfnExpr
-		ifnName := tfnName
-		ifnSig := mSig
-		if _, ok := m.Recv().Underlying().(*types.Pointer); !ok {
-			pRecv := types.NewVar(token.NoPos, pkg, "", types.NewPointer(mSig.Recv().Type()))
-			pSig := types.NewSignature(pRecv, mSig.Params(), mSig.Results(), mSig.Variadic())
-			ifnSig = pSig
-			ifnFn := b.abiMethodFunc(anonymous, pkg, obj, ifnSig)
-			ifnExpr = ifnFn.Expr
-			ifnName = ifnFn.Name()
-		}
+		ifnExpr, ifnName, ifnSig := b.abiInterfaceMethodEntry(
+			anonymous, pkg, obj, m, mSig, tfnName, tfnExpr,
+		)
 		ifn = ifnExpr.impl
 		if b.Pkg.interfaceMethodDescriptor != nil {
 			if descriptor, ok := b.Pkg.interfaceMethodDescriptor(ifnName, obj, ifnSig); ok {
@@ -574,6 +566,42 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		}
 	}
 	return llvm.ConstArray(ft.ll, fields)
+}
+
+func (b Builder) abiInterfaceMethodEntry(
+	anonymous bool,
+	pkg *types.Package,
+	method *types.Func,
+	selection *types.Selection,
+	methodSignature *types.Signature,
+	tfnName string,
+	tfn Expr,
+) (ifn Expr, ifnName string, ifnSignature *types.Signature) {
+	ifn, ifnName, ifnSignature = tfn, tfnName, methodSignature
+	if _, pointerReceiver := selection.Recv().Underlying().(*types.Pointer); !pointerReceiver {
+		pointerReceiver := types.NewVar(
+			token.NoPos, pkg, "", types.NewPointer(methodSignature.Recv().Type()),
+		)
+		ifnSignature = types.NewSignature(
+			pointerReceiver,
+			methodSignature.Params(),
+			methodSignature.Results(),
+			methodSignature.Variadic(),
+		)
+		function := b.abiMethodFunc(anonymous, pkg, method, ifnSignature)
+		return function.Expr, function.Name(), ifnSignature
+	}
+	if !coroPlainDispatchGlobal(tfn.impl).IsNil() {
+		// A coroutine frontend may publish Method.Tfn_ as a function descriptor
+		// because reflection reconstructs it as a Go func value. Pointer-receiver
+		// methods normally share Tfn_ and Ifn_, but an interface call still
+		// requires either the ordinary receiver-aware code entry or an explicit
+		// interfaceMethodDescriptor replacement. Never let the Tfn_ descriptor
+		// leak into the legacy Ifn_ slot.
+		function := b.Pkg.NewFunc(ifnName, ifnSignature, InGo)
+		return function.Expr, function.Name(), ifnSignature
+	}
+	return
 }
 
 func (b Builder) abiInterfaceMethods(mset *types.MethodSet) []*types.Selection {

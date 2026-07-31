@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v29"
+const PlanDigestSchema = "llgo.coro.plan-digest.v30"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -179,23 +179,24 @@ type planDigestFunction struct {
 }
 
 type planDigestCall struct {
-	Function              FunctionID       `json:"function"`
-	Block                 int              `json:"block"`
-	Instruction           int              `json:"instruction"`
-	Kind                  uint8            `json:"kind"`
-	Rep                   uint8            `json:"rep"`
-	Transport             uint8            `json:"transport"`
-	Targets               []FunctionID     `json:"targets"`
-	Open                  bool             `json:"open"`
-	Unresolved            uint8            `json:"unresolved"`
-	MayBeNil              bool             `json:"may_be_nil"`
-	SyncDispatch          bool             `json:"sync_dispatch"`
-	RawPlain              bool             `json:"raw_plain"`
-	RawPlainCertificate   string           `json:"raw_plain_certificate,omitempty"`
-	InvocationPolicy      InvocationPolicy `json:"invocation_policy,omitempty"`
-	InvocationContract    ContractID       `json:"invocation_contract,omitempty"`
-	InvocationABI         string           `json:"invocation_abi,omitempty"`
-	InvocationCertificate string           `json:"invocation_certificate,omitempty"`
+	Function               FunctionID       `json:"function"`
+	Block                  int              `json:"block"`
+	Instruction            int              `json:"instruction"`
+	Kind                   uint8            `json:"kind"`
+	Rep                    uint8            `json:"rep"`
+	Transport              uint8            `json:"transport"`
+	Targets                []FunctionID     `json:"targets"`
+	Open                   bool             `json:"open"`
+	Unresolved             uint8            `json:"unresolved"`
+	MayBeNil               bool             `json:"may_be_nil"`
+	ExactInterfaceReceiver bool             `json:"exact_interface_receiver,omitempty"`
+	SyncDispatch           bool             `json:"sync_dispatch"`
+	RawPlain               bool             `json:"raw_plain"`
+	RawPlainCertificate    string           `json:"raw_plain_certificate,omitempty"`
+	InvocationPolicy       InvocationPolicy `json:"invocation_policy,omitempty"`
+	InvocationContract     ContractID       `json:"invocation_contract,omitempty"`
+	InvocationABI          string           `json:"invocation_abi,omitempty"`
+	InvocationCertificate  string           `json:"invocation_certificate,omitempty"`
 }
 
 type planDigestLoweredCall struct {
@@ -470,7 +471,6 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 						Function: id, Block: blockIndex, Instruction: digestInstruction, Bound: bound,
 					})
 				}
-
 				operands = instruction.Operands(operands[:0])
 				for operandIndex, operand := range operands {
 					if operand == nil || *operand == nil || skipDigestOperand(instruction, operand) {
@@ -491,6 +491,14 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 	}
 	if len(seenCalls) != len(p.callPlans) {
 		return planDigestDocument{}, fmt.Errorf("coro: CallPlan coverage mismatch: projected %d of %d plans", len(seenCalls), len(p.callPlans))
+	}
+	for call := range p.exactInterfaceReceivers {
+		if _, covered := seenCalls[call]; !covered {
+			return planDigestDocument{}, fmt.Errorf(
+				"coro: exact interface receiver belongs to an uncovered call in %q",
+				call.Parent().Name(),
+			)
+		}
 	}
 	if len(seenElidedCalls) != len(p.elidedCalls) {
 		return planDigestDocument{}, fmt.Errorf("coro: elided-call coverage mismatch: projected %d of %d calls", len(seenElidedCalls), len(p.elidedCalls))
@@ -1208,24 +1216,36 @@ func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, cal
 	if err != nil {
 		return planDigestCall{}, fmt.Errorf("coro: CallPlan at function %q block %d instruction %d: %w", id, block, instruction, err)
 	}
+	exactInterfaceReceiver := false
+	if direct, ok := call.(*ssa.Call); ok {
+		_, _, _, exact, resolveErr := p.ResolveExactInterfaceCall(direct)
+		if resolveErr != nil {
+			return planDigestCall{}, fmt.Errorf(
+				"coro: CallPlan at function %q block %d instruction %d: %w",
+				id, block, instruction, resolveErr,
+			)
+		}
+		exactInterfaceReceiver = exact
+	}
 	return planDigestCall{
-		Function:              id,
-		Block:                 block,
-		Instruction:           instruction,
-		Kind:                  uint8(plan.Kind),
-		Rep:                   uint8(plan.Rep),
-		Transport:             uint8(plan.Transport),
-		Targets:               targets,
-		Open:                  plan.Open,
-		Unresolved:            uint8(plan.Unresolved),
-		MayBeNil:              plan.MayBeNil,
-		SyncDispatch:          plan.SyncDispatch,
-		RawPlain:              plan.RawPlain,
-		RawPlainCertificate:   plan.RawPlainCertificate,
-		InvocationPolicy:      plan.InvocationPolicy,
-		InvocationContract:    plan.InvocationContract,
-		InvocationABI:         plan.InvocationABI,
-		InvocationCertificate: plan.InvocationCertificate,
+		Function:               id,
+		Block:                  block,
+		Instruction:            instruction,
+		Kind:                   uint8(plan.Kind),
+		Rep:                    uint8(plan.Rep),
+		Transport:              uint8(plan.Transport),
+		Targets:                targets,
+		Open:                   plan.Open,
+		Unresolved:             uint8(plan.Unresolved),
+		MayBeNil:               plan.MayBeNil,
+		ExactInterfaceReceiver: exactInterfaceReceiver,
+		SyncDispatch:           plan.SyncDispatch,
+		RawPlain:               plan.RawPlain,
+		RawPlainCertificate:    plan.RawPlainCertificate,
+		InvocationPolicy:       plan.InvocationPolicy,
+		InvocationContract:     plan.InvocationContract,
+		InvocationABI:          plan.InvocationABI,
+		InvocationCertificate:  plan.InvocationCertificate,
 	}, nil
 }
 

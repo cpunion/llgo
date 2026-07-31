@@ -495,6 +495,12 @@ func Loop(limit uint32) uint32 {
 		t.Fatalf("Loop coroutine suspends = %d, want initial + yield + final:\n%s", got, body)
 	}
 	polls := strings.Count(body, "call i1 @"+coroPreemptPollHookV1)
+	if polls != 2 {
+		t.Fatalf(
+			"Loop preemption polls = %d, want block-zero chain boundary plus one cycle feedback cut:\n%s",
+			polls, body,
+		)
+	}
 	assertCoroScalarRunDecisionCalls(t, "Loop", body, polls+1)
 	initialDecision := strings.Index(body, "call i32 @"+coroRunDecisionTakeZeroHookV1)
 	yieldSuspend := strings.Index(body[handoff:], "call i8 @llvm.coro.suspend")
@@ -518,6 +524,71 @@ func Loop(limit uint32) uint32 {
 		}
 	}
 	assertCoroRunDecisionResumeOnly(t, module, "foo.Loop$coro", polls+1)
+}
+
+func TestCoroPreemptiveIrreducibleCFGPhysicalABIV1(t *testing.T) {
+	const source = `package foo
+func Irreducible(turn, loop bool) uint32 {
+	var value uint32
+	if turn {
+		goto left
+	}
+right:
+	value++
+	if loop {
+		goto left
+	}
+	return value
+left:
+	value++
+	if turn {
+		turn = false
+		goto right
+	}
+	if loop {
+		goto left
+	}
+	return value
+}
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroPreemptTestPlan(
+		t,
+		source,
+		[]coroRootFactoryTestRoot{{name: "Irreducible", demand: coro.AsyncDemand}},
+		nil,
+		-1,
+	)
+	defer prog.Dispose()
+	function := ssaPkg.Func("Irreducible")
+	functionPlan, ok := plan.FunctionPlan(function)
+	if !ok || functionPlan.Emission != coro.EmitCoroutine ||
+		!functionPlan.Exec.Contains(coro.NeedsPreempt) {
+		t.Fatalf("Irreducible plan = %+v, present=%t; want preemptible coroutine", functionPlan, ok)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	body := requireCoroPhysicalFunction(t, module, "foo.Irreducible").String()
+	polls := strings.Count(body, "call i1 @"+coroPreemptPollHookV1)
+	if polls < 2 {
+		t.Fatalf("irreducible CFG preemption polls = %d, want entry plus cycle cut:\n%s", polls, body)
+	}
+	if polls >= len(function.Blocks) {
+		t.Fatalf(
+			"irreducible CFG preemption polls = %d for %d blocks; graph plan did not reduce block polling:\n%s",
+			polls, len(function.Blocks), body,
+		)
+	}
+	runCoroABITestPipeline(t, prog, module)
+	assertCoroRunDecisionResumeOnly(t, module, "foo.Irreducible$coro", polls+1)
 }
 
 func TestCoroProgramInitPhysicalABIV2(t *testing.T) {

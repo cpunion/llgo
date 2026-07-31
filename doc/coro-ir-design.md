@@ -899,7 +899,8 @@ VirtualStoragePlan已经实现。随后声明级`schedulerwait`证书被完整�
 exact host root及closed call closure上的调用场景事实；对应字段从plan/digest移除，当前schema为
 `llgo.coro.plan-digest.v28`。随后将x/tools无序生成的直接依赖package initializer调用按
 canonical emission package key与Go source import path映射到稳定SSA坐标，当前schema为
-`llgo.coro.plan-digest.v29`；该映射只稳定cache identity，不改变initializer执行顺序。
+`llgo.coro.plan-digest.v30`；该映射只稳定cache identity，不改变initializer执行顺序；v30
+另外冻结exact interface receiver occurrence，使其direct lowering进入cache identity。
 
 后续不预留空v22/v23字段，也不沿用历史v9/v10标号。只在某一层的canonical事实真正进入
 production plan/cache identity时，从届时当前schema递增一次。每次升级都验证：任一相关fact
@@ -1460,6 +1461,10 @@ gate应解析Go AST/build constraints或检查冻结catalog，不依赖容易被
 - 提前自行分配所有frame value会与CoroSplit重复并可能降低优化质量。
 
 必须测量而不是预先承诺性能提升。
+
+当前native、WASI、core-call、channel与goroutine的可复现对比，以及
+`outcome-plain` emission候选和验收边界，见
+[LLVM coroutine performance baseline](coro-performance-baseline.md)。
 
 ## 16. 验证与CI
 
