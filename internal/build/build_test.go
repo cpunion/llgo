@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -42,6 +43,180 @@ func TestMain(m *testing.M) {
 	cacheRootFunc = old
 	_ = os.RemoveAll(td)
 	os.Exit(code)
+}
+
+func TestConfigCloneDoesNotAliasInput(t *testing.T) {
+	input := &Config{
+		RunArgs:      []string{"run"},
+		GoBuildFlags: []string{"-tags=custom"},
+		Overlay:      map[string][]byte{"input.go": []byte("package input")},
+		GlobalRewrites: map[string]Rewrites{
+			"example.com/p": {"value": "input"},
+			"nil":           nil,
+		},
+	}
+	cloned := input.clone()
+	cloned.RunArgs[0] = "changed"
+	cloned.GoBuildFlags[0] = "-tags=changed"
+	cloned.Overlay["input.go"][0] = 'P'
+	cloned.GlobalRewrites["example.com/p"]["value"] = "changed"
+	cloned.GlobalRewrites["new"] = Rewrites{"value": "new"}
+
+	if got := input.RunArgs[0]; got != "run" {
+		t.Fatalf("input RunArgs changed to %q", got)
+	}
+	if got := input.GoBuildFlags[0]; got != "-tags=custom" {
+		t.Fatalf("input GoBuildFlags changed to %q", got)
+	}
+	if got := string(input.Overlay["input.go"]); got != "package input" {
+		t.Fatalf("input overlay changed to %q", got)
+	}
+	if got := input.GlobalRewrites["example.com/p"]["value"]; got != "input" {
+		t.Fatalf("input rewrite changed to %q", got)
+	}
+	if _, ok := input.GlobalRewrites["new"]; ok {
+		t.Fatal("cloned rewrite map aliases input map")
+	}
+	if rewrites, ok := cloned.GlobalRewrites["nil"]; !ok || rewrites != nil {
+		t.Fatalf("nil rewrite entry was not preserved: %#v", rewrites)
+	}
+	if got := (*Config)(nil).clone(); got != nil {
+		t.Fatalf("nil Config clone = %#v", got)
+	}
+}
+
+func TestResolveBuildConfigDefaultsAndValidation(t *testing.T) {
+	resolved, err := resolveBuildConfig(&Config{
+		BuildMode:    BuildModeCArchive,
+		DeadcodeDrop: true,
+		SizeReport:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.DeadcodeDrop {
+		t.Fatal("non-executable build retained dead-code dropping")
+	}
+	if resolved.SizeFormat != "text" || resolved.SizeLevel != "module" {
+		t.Fatalf("size report defaults = %q, %q", resolved.SizeFormat, resolved.SizeLevel)
+	}
+	if _, err := resolveBuildConfig(&Config{SizeReport: true, SizeLevel: "invalid"}); err == nil {
+		t.Fatal("invalid size-reporting level succeeded")
+	}
+	if _, err := resolveBuildConfig(nil); err == nil {
+		t.Fatal("nil build config succeeded")
+	}
+}
+
+func TestNewDefaultConfDoesNotCreateBinDir(t *testing.T) {
+	binDir := filepath.Join(t.TempDir(), "not-created", "bin")
+	t.Setenv("GOBIN", binDir)
+	conf := NewDefaultConf(ModeBuild)
+	if conf.BinPath != binDir {
+		t.Fatalf("BinPath = %q, want %q", conf.BinPath, binDir)
+	}
+	if _, err := os.Stat(binDir); !os.IsNotExist(err) {
+		t.Fatalf("NewDefaultConf created bin directory: %v", err)
+	}
+}
+
+func TestDoDoesNotModifyConfigOnValidationError(t *testing.T) {
+	input := &Config{
+		RunArgs: []string{"arg"},
+		GlobalRewrites: map[string]Rewrites{
+			"example.com/p": {"value": "input"},
+		},
+		LinkOptions: LinkOptions{DWARF: DWARFMode(255)},
+	}
+	before := input.clone()
+	if _, err := Do(nil, input); err == nil {
+		t.Fatal("Do() succeeded with invalid DWARF mode")
+	}
+	if !reflect.DeepEqual(input, before) {
+		t.Fatalf("Do() modified input config:\n got: %#v\nwant: %#v", input, before)
+	}
+	if _, err := Do(nil, nil); err == nil {
+		t.Fatal("Do() succeeded with nil config")
+	}
+}
+
+func TestInvocationUsesExplicitWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/requestdir\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "requestdir.go"), []byte("package requestdir\n\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conf := NewDefaultConf(ModeGen)
+	t.Setenv(llgoBuildCache, "0")
+	ambientPath := os.Getenv("PATH")
+	pkgs, err := Build(Invocation{
+		Args:   []string{"."},
+		Config: conf,
+		Dir:    dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 1 || pkgs[0].PkgPath != "example.com/requestdir" {
+		t.Fatalf("Build returned packages = %+v, want example.com/requestdir", pkgs)
+	}
+	if got := os.Getenv("PATH"); got != ambientPath {
+		t.Fatalf("Build changed process PATH from %q to %q", ambientPath, got)
+	}
+	pkgs[0].LPkg.Prog.Dispose()
+}
+
+func TestResolveOutputsUsesInvocationDirectory(t *testing.T) {
+	dir := t.TempDir()
+	out := &OutFmtDetails{
+		Out: "app",
+		Bin: filepath.Join("firmware", "app.bin"),
+		Hex: filepath.Join(dir, "app.hex"),
+	}
+	resolveOutputs(dir, out)
+	if out.Out != filepath.Join(dir, "app") {
+		t.Fatalf("Out = %q", out.Out)
+	}
+	if out.Bin != filepath.Join(dir, "firmware", "app.bin") {
+		t.Fatalf("Bin = %q", out.Bin)
+	}
+	if out.Hex != filepath.Join(dir, "app.hex") {
+		t.Fatalf("absolute Hex changed to %q", out.Hex)
+	}
+}
+
+func TestConfigureCommandUsesBuildSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	commands := commandEnv{dir: dir, environ: []string{"BUILD_MARKER=before"}}
+	cmd := commands.configure(exec.Command("unused"))
+	commands.environ[0] = "BUILD_MARKER=after"
+	if cmd.Dir != dir {
+		t.Fatalf("command Dir = %q, want %q", cmd.Dir, dir)
+	}
+	if got, want := cmd.Env, []string{"BUILD_MARKER=before"}; !slices.Equal(got, want) {
+		t.Fatalf("command Env = %q, want %q", got, want)
+	}
+}
+
+func TestLinkObjFilesReportsOutputDirectoryError(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &context{buildConf: &Config{BuildMode: BuildModeExe}}
+	if err := linkObjFiles(ctx, filepath.Join(parent, "app"), nil, nil, false); err == nil {
+		t.Fatal("linkObjFiles succeeded below a regular file")
+	}
+}
+
+func TestWithEnvLastValueWins(t *testing.T) {
+	got := withEnv([]string{"A=old", "B=keep", "malformed", "A=older"}, "A=new", "C=value")
+	want := []string{"B=keep", "A=new", "C=value"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("withEnv = %q, want %q", got, want)
+	}
 }
 
 func TestClosePackageMetas(t *testing.T) {
@@ -161,6 +336,32 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 			} {
 				if !selected[name] {
 					t.Errorf("wasm runtime did not select %s", name)
+				}
+			}
+		})
+	}
+}
+
+func TestBaremetalRuntimeAvoidsLocalityDirectives(t *testing.T) {
+	for _, relative := range []string{
+		filepath.Join("internal", "runtime"),
+		filepath.Join("internal", "lib", "runtime"),
+	} {
+		t.Run(relative, func(t *testing.T) {
+			dir := filepath.Join(env.LLGoRuntimeDir(), relative)
+			ctx := gobuild.Default
+			ctx.BuildTags = []string{"llgo", "baremetal"}
+			pkg, err := ctx.ImportDir(dir, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range append(pkg.GoFiles, pkg.CgoFiles...) {
+				content, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bytes.Contains(content, []byte("//llgo:tls")) || bytes.Contains(content, []byte("//llgo:gls")) {
+					t.Fatalf("bare-metal runtime selected locality directive in %s", name)
 				}
 			}
 		})
@@ -679,6 +880,12 @@ func TestPrepareLocalVariables(t *testing.T) {
 		return loaded, file
 	}
 
+	t.Run("accepts no package groups", func(t *testing.T) {
+		if err := prepareLocalVariables(llssa.NewProgram(nil)); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("filters and deduplicates packages", func(t *testing.T) {
 		prog := llssa.NewProgram(nil)
 		loaded, file := newLocalPackage("example.com/local", true)
@@ -711,6 +918,78 @@ func TestPrepareLocalVariables(t *testing.T) {
 			t.Fatalf("prepareLocalVariables error = %v", err)
 		}
 	})
+
+	t.Run("skips inactive alternate roots", func(t *testing.T) {
+		prog := llssa.NewProgram(nil)
+		active := &packages.Package{Types: types.NewPackage("example.com/active", "active")}
+		inactive := &packages.Package{Types: types.NewPackage("example.com/inactive", "inactive")}
+		err := prepareLocalVariables(prog,
+			[]*packages.Package{active},
+			[]*packages.Package{{}, inactive},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestPrepareLocalVariablesKeepsAltDeclarationOwners(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "runtime.go", `package runtime
+
+//llgo:gls
+var goroutineState *uint32
+
+//llgo:tls
+var threadState uintptr
+`, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Uses:       make(map[*ast.Ident]types.Object),
+		Implicits:  make(map[ast.Node]types.Object),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Scopes:     make(map[ast.Node]*types.Scope),
+		Instances:  make(map[*ast.Ident]types.Instance),
+	}
+	alt, err := (&types.Config{}).Check(altPkgPathPrefix+"runtime", fset, []*ast.File{file}, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prog := llssa.NewProgram(nil)
+	if err := cl.ParsePkgSyntax(prog, fset, alt, []*ast.File{file}); err != nil {
+		t.Fatal(err)
+	}
+	std := types.NewPackage("runtime", "runtime")
+	err = prepareLocalVariables(prog,
+		[]*packages.Package{{Types: std, TypesInfo: &types.Info{}}},
+		[]*packages.Package{{Types: alt, TypesInfo: info, Syntax: []*ast.File{file}, Fset: fset}},
+	)
+	if err != nil {
+		t.Fatalf("prepareLocalVariables confused standard and alternate runtime packages: %v", err)
+	}
+	for name, want := range map[string]llssa.VariableLocality{
+		"runtime.goroutineState": {
+			Info:         llssa.LocalityInfo{Locality: llssa.GoroutineLocal},
+			LocalStorage: llssa.LocalStoragePackage,
+		},
+		"runtime.threadState": {
+			Info:         llssa.LocalityInfo{Locality: llssa.ThreadLocal},
+			LocalStorage: llssa.LocalStorageNativeTLS,
+		},
+	} {
+		got, ok := prog.VariableLocality(name)
+		if !ok || got.Locality != want.Locality || got.LocalStorage != want.LocalStorage {
+			t.Fatalf("%s locality = %+v, %v", name, got, ok)
+		}
+	}
+	if !prog.NeedsLocalContext() {
+		t.Fatal("active alternate runtime package did not require a local context")
+	}
 }
 
 func TestLTOEnabledDefault(t *testing.T) {
