@@ -1279,10 +1279,6 @@ flakes:
 xfails:
   - version: go1.26
     directive: errorcheck
-    case: fixedbugs/issue4776.go
-    reason: llgo parser uses a different missing-package-clause diagnostic
-  - version: go1.26
-    directive: errorcheck
     case: fixedbugs/issue4405.go
     reason: llgo parser recovery emits additional malformed-statement diagnostics
   - version: go1.26
