@@ -10,14 +10,12 @@ import (
 // cCallerFrameMark returns the caller's native frame as an opaque scalar. The
 // mark is never reconstructed as a Go pointer.
 //
-//llgo:coro sync
 //go:linkname cCallerFrameMark C.llgo_caller_frame_mark
 func cCallerFrameMark() uintptr
 
 // cFrameChainContains performs the complete native-frame liveness walk on the
 // current stack and exposes only the boolean result to Go.
 //
-//llgo:coro sync
 //go:linkname cFrameChainContains C.llgo_frame_chain_contains
 func cFrameChainContains(mark uintptr) int32
 
