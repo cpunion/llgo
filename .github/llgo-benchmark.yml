@@ -6,7 +6,7 @@ include:
   - "^BenchmarkProgram/"
   - "^Benchmark(MergeCompilerFlags|MergeLinkerFlags|LookupPCRandom)$"
   - "^Benchmark(RuntimeGetG|Global(Read|Write))$"
-  - "^Benchmark(DirectCall|InterfaceCall|Defer|Goroutine)$"
+  - "^Benchmark((DirectCall|InterfaceCall)(Batch16)?|Defer|Goroutine)$"
   - "^BenchmarkChannel(Buffered|Handoff)$"
 groups:
   programs: "^Program/"
@@ -14,7 +14,7 @@ groups:
   core:
     match:
       - "^(RuntimeGetG|Global(Read|Write))$"
-      - "^(DirectCall|InterfaceCall|Defer|Goroutine)$"
+      - "^((DirectCall|InterfaceCall)(Batch16)?|Defer|Goroutine)$"
       - "^Channel(Buffered|Handoff)$"
 views:
   programs:

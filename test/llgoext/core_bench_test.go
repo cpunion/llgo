@@ -89,6 +89,56 @@ func BenchmarkInterfaceCall(b *testing.B) {
 	benchmarkIntSink = value
 }
 
+// The batch variants amortize a coroutine loop's backedge safepoint over
+// several calls. Keep the calls expanded so the benchmark measures the same
+// direct and exact-interface source occurrences as the single-call variants.
+func BenchmarkDirectCallBatch16(b *testing.B) {
+	value := 0
+	for i := 0; i < b.N; i++ {
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+		value = benchmarkDirectCall(value)
+	}
+	benchmarkIntSink = value
+}
+
+func BenchmarkInterfaceCallBatch16(b *testing.B) {
+	var caller benchmarkCaller = benchmarkCallImpl{}
+	value := 0
+	for i := 0; i < b.N; i++ {
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+		value = caller.call(value)
+	}
+	benchmarkIntSink = value
+}
+
 //go:noinline
 func benchmarkDefer() {
 	defer func() {}()
