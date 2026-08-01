@@ -1,4 +1,4 @@
-//go:build !llgo || baremetal
+//go:build llgo && linux && !baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,17 +18,20 @@
 
 package runtime
 
-// Host builds and single-context targets share one process-wide current G.
-var currentG *g
+import (
+	_ "unsafe"
 
-func getg() *g {
-	if currentG == nil {
-		setg(initRuntimeContext(new(runtimeContext), nil, _Grunning))
+	c "github.com/goplus/llgo/runtime/internal/clite"
+	"github.com/goplus/llgo/runtime/internal/clite/syscall"
+)
+
+//go:linkname cSyscall C.syscall
+func cSyscall(number c.Long, args ...any) c.Long
+
+func currentThreadID() uint64 {
+	threadID := cSyscall(c.Long(syscall.SYS_GETTID))
+	if threadID <= 0 {
+		return 0
 	}
-	return currentG
-}
-
-func setg(gp *g) {
-	currentG = gp
-	setMProcID(gp)
+	return uint64(threadID)
 }

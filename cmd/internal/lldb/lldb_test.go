@@ -194,10 +194,12 @@ func TestEmbeddedPluginIdentity(t *testing.T) {
 		"ChannelSyntheticProvider",
 		"LLGO_GOROUTINE_LAYOUTS",
 		"print_goroutines",
+		"print_goroutine",
 		"llgo status",
 		"llgo print",
 		"llgo vars",
 		"llgo goroutines",
+		"llgo goroutine",
 	} {
 		if !strings.Contains(source, want) {
 			t.Errorf("embedded plugin is missing %q", want)

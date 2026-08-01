@@ -63,10 +63,11 @@ type g struct {
 // thread handle is deliberately confined to mOS so other backends do not leak
 // pthread types into the scheduler core.
 type m struct {
-	curg *g
-	p    *p
-	id   int64
-	os   mOS
+	curg   *g
+	p      *p
+	id     int64
+	procid uint64 // OS thread ID used by debuggers.
+	os     mOS
 }
 
 // p represents the scheduling resources attached to an M. The pthread backend

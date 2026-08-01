@@ -272,8 +272,10 @@ TEST_CASES = [
     test_case("goroutine_values", [
         ("goroutineReadySum", "3"),
         ("goroutines",
-         "count=3 roots=1 children=2 running=3 linked=3 unique-m=3 unique-p=3",
+         "count=3 roots=1 children=2 running=3 linked=3 mapped=3 "
+         "unique-m=3 unique-p=3 unique-threads=3",
          "goroutines"),
+        ("goroutine stacks", "root=1 children=2", "goroutine-stacks"),
     ]),
     test_case("struct_values_initial", STRUCT_VALUES_INITIAL),
     test_case("struct_values_updated", STRUCT_VALUES_UPDATED),
@@ -482,7 +484,7 @@ class LLDBDebugger:
                 f"llgo print {expression!r} did not fail with {expected!r}: "
                 f"{result.GetOutput()!r} {result.GetError()!r}")
 
-    def get_goroutine_summary(self) -> Optional[str]:
+    def get_goroutines(self) -> Optional[List[Dict[str, Any]]]:
         result = lldb.SBCommandReturnObject()
         self.debugger.GetCommandInterpreter().HandleCommand(
             "llgo goroutines", result)
@@ -492,7 +494,8 @@ class LLDBDebugger:
                  if line.strip()]
         pattern = re.compile(
             r"^goroutine ([0-9]+) \[([^]]+)\] parent=([0-9]+) "
-            r"m=(-?[0-9]+) p=(-?[0-9]+) ownership=(linked|invalid)$")
+            r"m=(-?[0-9]+) p=(-?[0-9]+) "
+            r"thread=(unavailable|[0-9]+) ownership=(linked|invalid)$")
         goroutines = []
         for line in lines:
             match = pattern.fullmatch(line)
@@ -504,8 +507,15 @@ class LLDBDebugger:
                 "parent": int(match.group(3)),
                 "mid": int(match.group(4)),
                 "pid": int(match.group(5)),
-                "ownership": match.group(6),
+                "thread": match.group(6),
+                "ownership": match.group(7),
             })
+        return goroutines
+
+    def get_goroutine_summary(self) -> Optional[str]:
+        goroutines = self.get_goroutines()
+        if goroutines is None:
+            return None
         ids = {goroutine["goid"] for goroutine in goroutines}
         roots = sum(goroutine["parent"] == 0 for goroutine in goroutines)
         children = sum(
@@ -515,12 +525,46 @@ class LLDBDebugger:
             goroutine["status"] == "running" for goroutine in goroutines)
         linked = sum(
             goroutine["ownership"] == "linked" for goroutine in goroutines)
+        mapped = sum(
+            goroutine["thread"] != "unavailable" for goroutine in goroutines)
         unique_m = len({goroutine["mid"] for goroutine in goroutines})
         unique_p = len({goroutine["pid"] for goroutine in goroutines})
+        unique_threads = len({goroutine["thread"] for goroutine in goroutines
+                              if goroutine["thread"] != "unavailable"})
         return (
             f"count={len(goroutines)} roots={roots} children={children} "
-            f"running={running} linked={linked} unique-m={unique_m} "
-            f"unique-p={unique_p}")
+            f"running={running} linked={linked} mapped={mapped} "
+            f"unique-m={unique_m} unique-p={unique_p} "
+            f"unique-threads={unique_threads}")
+
+    def get_goroutine_stack_summary(self) -> Optional[str]:
+        goroutines = self.get_goroutines()
+        if goroutines is None:
+            return None
+        roots = [goroutine for goroutine in goroutines
+                 if goroutine["parent"] == 0]
+        if len(roots) != 1:
+            return None
+        children = [goroutine for goroutine in goroutines
+                    if goroutine["parent"] == roots[0]["goid"]]
+        if len(children) != 2:
+            return None
+
+        expected_functions = [(roots[0], "main.InspectGoroutineValues")]
+        expected_functions.extend(
+            (goroutine, "main.RuntimeGoroutineValues")
+            for goroutine in children)
+        for goroutine, expected_function in expected_functions:
+            result = lldb.SBCommandReturnObject()
+            self.debugger.GetCommandInterpreter().HandleCommand(
+                f"llgo goroutine {goroutine['goid']} bt", result)
+            output = result.GetOutput() or ""
+            if (not result.Succeeded() or
+                    expected_function not in output or
+                    f"goroutine {goroutine['goid']} [running] thread "
+                    not in output):
+                return None
+        return f"root={len(roots)} children={len(children)}"
 
     def cleanup(self) -> None:
         if self.process and self.process.IsValid():
@@ -711,6 +755,8 @@ def execute_single_variable_test(debugger: LLDBDebugger, test: Test) -> TestResu
                 "settings set target.max-children-count 256")
     elif test.mode == "goroutines":
         actual_value = debugger.get_goroutine_summary()
+    elif test.mode == "goroutine-stacks":
+        actual_value = debugger.get_goroutine_stack_summary()
     else:
         actual_value = debugger.get_variable_value(test.variable)
     if actual_value is None:
