@@ -263,6 +263,33 @@ instruction latency, target-specific library calls/assembly, final machine
 stack bytes, interrupts, and scheduler overhead still require the target cost
 model and final-code certificate described in the runtime design.
 
+### Compact emission type-graph cohort
+
+Whole-program `go:linkname` pairing previously expanded named/private-mirror
+types as recursive strings. A type DAG with one shared child used twice per
+level therefore became a complete binary tree even though the source contained
+only a linear number of unique type nodes. The resulting multi-megabyte keys
+were immediately hashed, but only after the exponential allocation and copy
+cost had already occurred; standard-library `mapzero` and `abimethod` builds
+could spend minutes in emission-universe preparation before LLVM emission.
+
+The pairing key now freezes a compact ordered type graph. Non-recursive SCCs
+contribute Merkle child digests, eliminating irrelevant pointer sharing;
+recursive SCCs use a deterministic root-local DFS numbering, retaining exact
+cycle topology instead of merging a one-node self-cycle with a two-node cycle.
+Named identity and struct-field source metadata remain erased exactly as the
+private-mirror ABI requires, while field order, scalar attributes, interface
+method identity and all child types remain bound by the digest. Other emission
+and C ABI type keys retain their existing representation.
+
+On the deterministic depth-18 shared-child fixture (19 unique type nodes), one
+key changed from about 106.5 ms, 405 MB and 2.31 million allocations to about
+21 us, 52 KB and 457 allocations on an Apple M4 Max. This microbenchmark is
+an algorithmic regression gate, not a cross-machine performance promise. The
+previously blocked `mapzero` and `abimethod` package builds now reach FileCheck
+in about 54 seconds; their remaining golden-IR differences belong to the
+separate coroutine LIT compatibility audit rather than emission analysis.
+
 ### Remaining outcome-plain expansion
 
 The original 574-body opportunity is not yet claimed. The current cohorts do
