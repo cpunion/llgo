@@ -212,6 +212,7 @@ type context struct {
 	loaded               map[*types.Package]*pkgInfo // loaded packages
 	bvals                map[ssa.Value]llssa.Expr    // block values
 	methodNilDerefChecks map[*ssa.UnOp]none
+	methodReceiverBases  map[ssa.Value]none
 	vargs                map[*ssa.Alloc][]llssa.Expr // varargs
 	funcs                map[*ssa.Function]llssa.Function
 	linkOnceFns          map[*ssa.Function]none
@@ -721,7 +722,9 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		dbgEnabled := p.frontendOptions().Debug
 		dbgSymsEnabled := p.frontendOptions().DebugSymbols && (f == nil || f.Origin() == nil)
 		p.inits = append(p.inits, func() {
-			oldFn, oldGoFn, oldMethodNilDerefChecks, oldCallerFrameMark := p.fn, p.goFn, p.methodNilDerefChecks, p.callerFrameMark
+			oldFn, oldGoFn := p.fn, p.goFn
+			oldMethodNilDerefChecks, oldMethodReceiverBases := p.methodNilDerefChecks, p.methodReceiverBases
+			oldCallerFrameMark := p.callerFrameMark
 			oldLocalityFunction := p.locality.function
 			oldRecoverSlots := p.recoverSlots
 			p.fn = fn
@@ -735,7 +738,9 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 				p.recoverSlots = nil
 			}
 			defer func() {
-				p.fn, p.goFn, p.methodNilDerefChecks, p.callerFrameMark = oldFn, oldGoFn, oldMethodNilDerefChecks, oldCallerFrameMark
+				p.fn, p.goFn = oldFn, oldGoFn
+				p.methodNilDerefChecks, p.methodReceiverBases = oldMethodNilDerefChecks, oldMethodReceiverBases
+				p.callerFrameMark = oldCallerFrameMark
 				p.locality.function = oldLocalityFunction
 				p.recoverSlots = oldRecoverSlots
 			}()
@@ -758,6 +763,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			p.prepareExportedLocalContext(f)
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
+			p.methodReceiverBases = collectMethodReceiverBases(f)
 			if p.enableConservativeLivenessClears(f) {
 				p.stackClears = p.collectStackClearPlans(f)
 			} else {
@@ -1128,14 +1134,30 @@ func skipUnusedArrayDeref(v *ssa.UnOp) bool {
 }
 
 func shouldAssertDirectNilDeref(v *ssa.UnOp) bool {
-	if v.Op != token.MUL {
+	if v.Op != token.MUL || isKnownNonNilAddr(v.X) || isWrapNilCheckCall(v.X) {
 		return false
 	}
-	if _, ok := v.X.(*ssa.Parameter); !ok {
+	if isInterfaceCompareDeref(v) {
 		return false
 	}
-	switch types.Unalias(v.Type()).Underlying().(type) {
-	case *types.Basic, *types.Pointer, *types.Chan, *types.Map, *types.Slice, *types.Interface:
+	if _, ok := v.X.(*ssa.Parameter); ok {
+		switch types.Unalias(v.Type()).Underlying().(type) {
+		case *types.Basic, *types.Pointer, *types.Chan, *types.Map, *types.Slice, *types.Interface:
+			return true
+		}
+	}
+	switch typ := types.Unalias(v.Type()).Underlying().(type) {
+	case *types.Basic:
+		return typ.Kind() == types.String || typ.Kind() == types.Complex64 || typ.Kind() == types.Complex128
+	case *types.Array, *types.Struct, *types.Slice, *types.Interface, *types.Signature:
+		return true
+	}
+	return false
+}
+
+func isDerivedDerefAddress(v ssa.Value) bool {
+	switch v.(type) {
+	case *ssa.FieldAddr, *ssa.IndexAddr:
 		return true
 	}
 	return false
@@ -1856,14 +1878,16 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		y := p.compileValueAs(b, v.Y, v.X.Type())
 		ret = b.BinOp(v.Op, x, y)
 	case *ssa.UnOp:
+		effectfulArrayDeref := false
 		if v.Op == token.MUL {
 			if _, ok := p.methodNilDerefChecks[v]; ok {
 				return p.compileCheckedDeref(b, v)
 			}
-			effectfulArrayDeref := isEffectfulArrayPointerDeref(v)
+			effectfulArrayDeref = isEffectfulArrayPointerDeref(v)
 			if effectfulArrayDeref {
 				x := p.compileValue(b, v.X)
 				p.recordPanicLocation(b, v.Pos())
+				p.emitNilDerefBaseCheck(b, v.X)
 				b.AssertNilDeref(x)
 			}
 			if refs, ok := nonDebugReferrers(v); ok && len(refs) == 0 {
@@ -1914,8 +1938,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if v.Op != token.ARROW {
 			p.recordPanicLocation(b, v.Pos())
 		}
-		if shouldAssertDirectNilDeref(v) {
-			b.AssertNilDeref(x)
+		if !effectfulArrayDeref && v.Op == token.MUL {
+			p.emitNilDerefBaseCheck(b, v.X)
+			if shouldAssertDirectNilDeref(v) && !isDerivedDerefAddress(v.X) {
+				b.AssertNilDeref(x)
+			}
 		}
 		if v.Op == token.ARROW {
 			ret = b.Recv(x, v.CommaOk)
@@ -1953,6 +1980,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.FieldAddr:
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
+		if _, ok := p.methodReceiverBases[v]; ok {
+			x = b.NilDerefCheck(x)
+		}
 		if p.isAddressOfFieldAddr(v) {
 			b.AssertNilDeref(x)
 		}
@@ -1987,6 +2017,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
 		p.recordPanicLocation(b, v.Pos())
+		if _, ok := p.methodReceiverBases[v]; ok {
+			x = b.NilDerefCheck(x)
+		}
 		ret = b.IndexAddr(x, idx)
 	case *ssa.Index:
 		x := p.compileValue(b, v.X)
@@ -2280,6 +2313,8 @@ func (p *context) assertNilDerefBase(b llssa.Builder, addr ssa.Value) {
 			base = b.NilDerefCheck(base)
 		}
 		p.bvals[addr] = b.FieldAddr(base, addr.Field)
+	case *ssa.IndexAddr:
+		p.emitNilDerefBaseCheck(b, addr)
 	}
 }
 
