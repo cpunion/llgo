@@ -36,6 +36,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -384,6 +385,9 @@ func Build(inv Invocation) ([]Package, error) {
 	}
 	if conf.Target != "" && export.GOARCH != "" {
 		conf.Goarch = export.GOARCH
+	}
+	if err := configureWasmGC(conf, &export); err != nil {
+		return nil, err
 	}
 	if conf.AppExt == "" {
 		conf.AppExt = defaultAppExt(conf)
@@ -776,6 +780,36 @@ func defaultBuildTags(goarch, target string) string {
 		tags += ",nogc"
 	}
 	return tags
+}
+
+func configureWasmGC(conf *Config, export *crosscompile.Export) error {
+	if conf.Goarch != "wasm" || !hasBuildTag(conf.Tags, "llgo_wasm_gc") {
+		return nil
+	}
+	switch conf.Goos {
+	case "js":
+		if !slices.Contains(export.LDFLAGS, "-sMALLOC=none") {
+			export.LDFLAGS = append(export.LDFLAGS, "-sMALLOC=none")
+		}
+	case "wasip1":
+		if IsWasiThreadsEnabled() {
+			return errors.New("llgo_wasm_gc requires single-worker WASI (set LLGO_WASI_THREADS=0)")
+		}
+	default:
+		return fmt.Errorf("llgo_wasm_gc does not support GOOS=%s", conf.Goos)
+	}
+	return nil
+}
+
+func hasBuildTag(tags, want string) bool {
+	for _, tag := range strings.FieldsFunc(tags, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	}) {
+		if tag == want {
+			return true
+		}
+	}
+	return false
 }
 
 func effectiveTypeSizes(sizes types.Sizes, goos, goarch, target string) types.Sizes {
