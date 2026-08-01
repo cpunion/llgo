@@ -164,6 +164,44 @@ func TestRuntimeGMPLinks(t *testing.T) {
 	}
 }
 
+//go:linkname runtimeAllGForTesting github.com/goplus/llgo/runtime/internal/runtime.AllGForTesting
+func runtimeAllGForTesting() (count int, linked bool)
+
+func TestRuntimeAllGLifecycle(t *testing.T) {
+	runtimeGetGForTest()
+	baseline, linked := runtimeAllGForTesting()
+	if !linked || baseline < 1 {
+		t.Fatalf("initial allg = (%d, %v), want a linked non-empty list", baseline, linked)
+	}
+
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	done := make(chan struct{}, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			ready <- struct{}{}
+			<-release
+			done <- struct{}{}
+		}()
+	}
+	<-ready
+	<-ready
+	if count, linked := runtimeAllGForTesting(); count != baseline+2 || !linked {
+		t.Fatalf("live allg = (%d, %v), want (%d, true)", count, linked, baseline+2)
+	}
+
+	close(release)
+	<-done
+	<-done
+	for attempts := 0; attempts < 1<<20; attempts++ {
+		if count, linked := runtimeAllGForTesting(); count == baseline && linked {
+			return
+		}
+	}
+	count, linked := runtimeAllGForTesting()
+	t.Fatalf("final allg = (%d, %v), want (%d, true)", count, linked, baseline)
+}
+
 type runtimeDeferProbeResult struct {
 	before unsafe.Pointer
 	inside unsafe.Pointer

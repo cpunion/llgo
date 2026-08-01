@@ -102,6 +102,7 @@ func destroyG(ptr c.Pointer) {
 	if gp == nil {
 		return
 	}
+	unregisterG(gp)
 	if gp.panic_ != nil {
 		c.Free(gp.panic_)
 	}

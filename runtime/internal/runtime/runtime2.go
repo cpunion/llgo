@@ -42,6 +42,8 @@ type g struct {
 	panic_   unsafe.Pointer
 	panicPCs panicPCStore
 	m        *m
+	alllink  *g
+	allprev  *g
 
 	atomicstatus uint32
 	goid         uint64
