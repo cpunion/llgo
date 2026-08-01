@@ -2689,10 +2689,6 @@ xfails:
     directive: run
     case: fixedbugs/issue19246.go
     reason: current main goroot run failure on darwin/arm64
-  - platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue26094.go
-    reason: current main goroot run failure on darwin/arm64
   - version: go1.24
     platform: darwin/arm64
     directive: run
@@ -2774,10 +2770,6 @@ xfails:
   - platform: linux/amd64
     directive: run
     case: fixedbugs/issue19246.go
-    reason: current main goroot run failure on linux/amd64
-  - platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue26094.go
     reason: current main goroot run failure on linux/amd64
   - platform: linux/amd64
     directive: run
