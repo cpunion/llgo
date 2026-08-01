@@ -99,7 +99,7 @@ func RunWasmMain() {
 			releaseWasmContext(gp)
 		}
 
-		gp = wasmSched.runq.Pop()
+		gp = waitWasmRunq()
 		if gp == nil {
 			if wasmSched.mainExited {
 				fatal("no goroutines (main called runtime.Goexit) - deadlock!")

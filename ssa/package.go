@@ -224,6 +224,7 @@ type aProgram struct {
 	paramObjPtr_ *types.Var
 	linknameMu   sync.RWMutex
 	linkname     map[string]string // pkgPath.nameInPkg => linkname
+	wasmImports  sync.Map          // pkgPath.nameInPkg => [2]string{module, name}
 	localities   *localityInfos
 	noInterface  map[string]none       // pkgPath.T.method or pkgPath.(*T).method
 	abiSymbol    map[string]*AbiSymbol // abi symbol name => AbiSymbol
@@ -424,6 +425,21 @@ func (p Program) Linkname(name string) (link string, ok bool) {
 	link, ok = p.linkname[name]
 	p.linknameMu.RUnlock()
 	return
+}
+
+// SetWasmImport records the WebAssembly host import attached to a Go function.
+func (p Program) SetWasmImport(name, module, importName string) {
+	p.wasmImports.Store(name, [2]string{module, importName})
+}
+
+// WasmImport returns the WebAssembly host import attached to a Go function.
+func (p Program) WasmImport(name string) (module, importName string, ok bool) {
+	value, ok := p.wasmImports.Load(name)
+	if !ok {
+		return "", "", false
+	}
+	parts := value.([2]string)
+	return parts[0], parts[1], true
 }
 
 func (p Program) runtime() *types.Package {

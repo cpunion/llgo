@@ -182,7 +182,6 @@ func (p *context) initFiles(pkgPath string, files []*ast.File, cPkg bool) {
 			switch decl := decl.(type) {
 			case *ast.FuncDecl:
 				fullName, inPkgName := astFuncName(pkgPath, decl)
-				p.processNoInterfaceByDoc(decl.Doc, fullName)
 				if !p.processLinknameByDoc(decl.Doc, fullName, inPkgName, false, true) && cPkg {
 					// package C (https://github.com/goplus/llgo/issues/1165)
 					if decl.Recv == nil && token.IsExported(inPkgName) {
@@ -276,17 +275,34 @@ func (p *context) collectSkip(line string, prefix int) {
 	}
 }
 
-func collectLinknameByDoc(prog llssa.Program, doc *ast.CommentGroup, fullName, inPkgName string) {
+func collectDeclarationDirectives(prog llssa.Program, doc *ast.CommentGroup, fullName, inPkgName string, isFunc bool) {
 	directives := directive.ParseGroup(doc)
+	linkCollected := false
+	wasmImportSeen := false
 	for n := len(directives) - 1; n >= 0; n-- {
-		directive := directives[n]
-		if directive.Name != "go:linkname" && directive.Name != "llgo:link" {
-			continue
-		}
-		fields := strings.Fields(directive.Args)
-		if len(fields) >= 2 && fields[0] == inPkgName {
-			prog.SetLinkname(fullName, strings.Join(fields[1:], " "))
-			return
+		item := directives[n]
+		switch item.Name {
+		case "go:linkname", "llgo:link":
+			if linkCollected {
+				continue
+			}
+			fields := strings.Fields(item.Args)
+			if len(fields) >= 2 && fields[0] == inPkgName {
+				prog.SetLinkname(fullName, strings.Join(fields[1:], " "))
+				linkCollected = true
+			}
+		case "go:nointerface":
+			if isFunc && item.Args == "" {
+				prog.SetNoInterfaceMethod(fullName)
+			}
+		case "go:wasmimport":
+			if isFunc && !wasmImportSeen {
+				wasmImportSeen = true
+				fields := strings.Fields(item.Args)
+				if len(fields) == 2 {
+					prog.SetWasmImport(fullName, fields[0], fields[1])
+				}
+			}
 		}
 	}
 }
@@ -304,22 +320,6 @@ func (p *context) processLinknameByDoc(doc *ast.CommentGroup, fullName, inPkgNam
 		}
 	}
 	return false
-}
-
-func (p *context) processNoInterfaceByDoc(doc *ast.CommentGroup, fullName string) {
-	if doc == nil {
-		return
-	}
-	for n := len(doc.List) - 1; n >= 0; n-- {
-		line := doc.List[n].Text
-		if line == "//go:nointerface" {
-			p.prog.SetNoInterfaceMethod(fullName)
-			return
-		}
-		if !strings.HasPrefix(line, "//go:") {
-			return
-		}
-	}
 }
 
 const (
@@ -760,7 +760,6 @@ func ParsePkgSyntax(prog llssa.Program, fset *token.FileSet, pkg *types.Package,
 	if prog.PackageSyntaxParsed(pkg) {
 		return nil
 	}
-	ctx := &context{prog: prog}
 	pkgPath := llssa.PathOf(pkg)
 	for _, file := range files {
 		for _, decl := range file.Decls {
@@ -773,14 +772,13 @@ func ParsePkgSyntax(prog llssa.Program, fset *token.FileSet, pkg *types.Package,
 					return err
 				}
 				fullName, inPkgName := astFuncName(pkgPath, decl)
-				collectLinknameByDoc(prog, decl.Doc, fullName, inPkgName)
-				ctx.processNoInterfaceByDoc(decl.Doc, fullName)
+				collectDeclarationDirectives(prog, decl.Doc, fullName, inPkgName, true)
 			case *ast.GenDecl:
 				if decl.Tok == token.VAR {
 					if len(decl.Specs) == 1 {
 						if names := decl.Specs[0].(*ast.ValueSpec).Names; len(names) == 1 {
 							inPkgName := names[0].Name
-							collectLinknameByDoc(prog, decl.Doc, pkgPath+"."+inPkgName, inPkgName)
+							collectDeclarationDirectives(prog, decl.Doc, pkgPath+"."+inPkgName, inPkgName, false)
 						}
 					}
 					vars, err := locality.ScanPackageVar(fset, decl)
