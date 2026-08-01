@@ -82,6 +82,7 @@ func cleanMainPkg(pkg *packages.Package, conf *Config, verbose bool) {
 func removeExecutableArtifacts(executable string, verbose bool) {
 	removeFile(executable, verbose)
 	removeFile(pclnSidecarPath(executable), verbose)
+	removeFile(dwarfSidecarPath(executable), verbose)
 }
 
 func cleanPkgs(initial []*packages.Package, verbose bool) {

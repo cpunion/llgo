@@ -10,7 +10,7 @@ import (
 	"github.com/goplus/llgo/internal/packages"
 )
 
-func TestCleanMainPkgRemovesPCLNSidecars(t *testing.T) {
+func TestCleanMainPkgRemovesSidecars(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
 	sourceDir := filepath.Join(root, "source")
@@ -30,7 +30,7 @@ func TestCleanMainPkgRemovesPCLNSidecars(t *testing.T) {
 		filepath.Join(sourceDir, "demo.exe"),
 	}
 	for _, executable := range outputs {
-		for _, artifact := range []string{executable, pclnSidecarPath(executable)} {
+		for _, artifact := range []string{executable, pclnSidecarPath(executable), dwarfSidecarPath(executable)} {
 			if err := os.WriteFile(artifact, []byte("artifact"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -44,7 +44,7 @@ func TestCleanMainPkgRemovesPCLNSidecars(t *testing.T) {
 	cleanMainPkg(pkg, conf, false)
 
 	for _, executable := range outputs {
-		for _, artifact := range []string{executable, pclnSidecarPath(executable)} {
+		for _, artifact := range []string{executable, pclnSidecarPath(executable), dwarfSidecarPath(executable)} {
 			if _, err := os.Stat(artifact); !os.IsNotExist(err) {
 				t.Errorf("artifact %q still exists (stat error %v)", artifact, err)
 			}

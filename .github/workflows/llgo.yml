@@ -393,3 +393,19 @@ jobs:
           GOOS=js GOARCH=wasm llgo build -o "$RUNNER_TEMP/runtime-js.wasm" ./internal/build/testdata/wasm-runtime
           GOOS=wasip1 GOARCH=wasm llgo build -o "$RUNNER_TEMP/runtime-wasip1.wasm" ./internal/build/testdata/wasm-runtime
           file "$RUNNER_TEMP/runtime-js.wasm" "$RUNNER_TEMP/runtime-wasip1.wasm"
+
+      - name: Validate embedded and external Wasm DWARF
+        if: matrix.go == '1.26.5'
+        shell: bash
+        run: |
+          GOOS=wasip1 GOARCH=wasm llgo build -debug-artifact=embedded -o "$RUNNER_TEMP/runtime-debug.wasm" ./internal/build/testdata/wasm-runtime
+          llvm-objdump -h "$RUNNER_TEMP/runtime-debug.wasm" > "$RUNNER_TEMP/runtime-debug.sections"
+          grep -q '\.debug_info' "$RUNNER_TEMP/runtime-debug.sections"
+
+          GOOS=wasip1 GOARCH=wasm llgo build -debug-artifact=external -o "$RUNNER_TEMP/runtime-external.wasm" ./internal/build/testdata/wasm-runtime
+          test -s "$RUNNER_TEMP/runtime-external.debug.wasm"
+          llvm-objdump -h "$RUNNER_TEMP/runtime-external.wasm" > "$RUNNER_TEMP/runtime-external.sections"
+          llvm-objdump -h "$RUNNER_TEMP/runtime-external.debug.wasm" > "$RUNNER_TEMP/runtime-external-debug.sections"
+          grep -q 'external_debug_info' "$RUNNER_TEMP/runtime-external.sections"
+          ! grep -q '\.debug_info' "$RUNNER_TEMP/runtime-external.sections"
+          grep -q '\.debug_info' "$RUNNER_TEMP/runtime-external-debug.sections"

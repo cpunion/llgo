@@ -408,6 +408,29 @@ func TestBuildOutFmtsPCLN(t *testing.T) {
 	}
 }
 
+func TestBuildOutFmtsExternalDWARF(t *testing.T) {
+	tests := []struct {
+		out  string
+		want string
+	}{
+		{out: "app.wasm", want: "app.debug.wasm"},
+		{out: "dist/app", want: "dist/app.debug.wasm"},
+	}
+	for _, tt := range tests {
+		conf := &Config{Mode: ModeBuild, BuildMode: BuildModeExe, OutFile: tt.out, PCLNMode: PCLNExternal, DebugArtifactMode: DebugArtifactExternal}
+		got, err := buildOutFmts("app", conf, false, &crosscompile.Export{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.DWARF != tt.want || got.ToEnvMap()["dwarf"] != tt.want {
+			t.Fatalf("external DWARF path = %q/%q, want %q", got.DWARF, got.ToEnvMap()["dwarf"], tt.want)
+		}
+		if wantPCLN := got.Out + pclnSidecarSuffix; got.PCLN != wantPCLN || got.ToEnvMap()["pclntab"] != wantPCLN {
+			t.Fatalf("external pclntab path = %q/%q, want %q", got.PCLN, got.ToEnvMap()["pclntab"], wantPCLN)
+		}
+	}
+}
+
 func TestOutFmtDetailsToEnvMapIncludesPCLN(t *testing.T) {
 	details := &OutFmtDetails{Out: "app", PCLN: "app.pclntab"}
 	if got := details.ToEnvMap()["pclntab"]; got != details.PCLN {
