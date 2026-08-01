@@ -5,7 +5,7 @@ import (
 	"github.com/goplus/lib/c"
 )
 
-// CHECK-LABEL: define void @"{{.*}}/cl/_testrt/unreachable.foo"(){{.*}} {
+// CHECK-LABEL: define void @main.foo(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   unreachable
 // CHECK-EMPTY:
@@ -28,12 +28,17 @@ func unreachableMerge(cond bool, value int) int {
 	return result
 }
 
-// CHECK-LABEL: define void @"{{.*}}/cl/_testrt/unreachable.main"(){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   call void @"{{.*}}/cl/_testrt/unreachable.foo"()
-// CHECK-NEXT:   %0 = call i32 (ptr, ...) @printf(ptr @0)
-// CHECK-NEXT:   ret void
-// CHECK-NEXT: }
+// printf is conservatively may-block. The source main therefore becomes a
+// coroutine and the C call is isolated behind the bounded worker transaction;
+// the compiler intrinsic in foo remains a direct plain terminal operation.
+// CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK: call void @main.foo()
+// CHECK: call void @__llgo_coro_worker_park_v1
+// CHECK: call i8 @llvm.coro.suspend
+// CHECK: call i32 @__llgo_coro_worker_resume_v1
+
+// CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_foreign_thunk_v1_{{[0-9a-f]+}}(i64 %0){{.*}} {
+// CHECK: call i32 (ptr, ...) @printf
 func main() {
 	foo()
 	c.Printf(c.Str("Hello\n"))

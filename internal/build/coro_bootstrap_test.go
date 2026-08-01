@@ -37,12 +37,9 @@ import (
 )
 
 func TestCoroProgramSourcePackagePathIgnoresMainABISymbolRewrite(t *testing.T) {
-	abi.SetRewriteMainPrefix(true)
-	t.Cleanup(func() { abi.SetRewriteMainPrefix(false) })
-
 	mainPkg := types.NewPackage("example.com/bootstrap-main", "main")
 	if got := llssa.PathOf(mainPkg); got != "main" {
-		t.Fatalf("rewritten main ABI path = %q, want main", got)
+		t.Fatalf("main ABI path = %q, want main", got)
 	}
 	if got := coroProgramSourcePackagePath(mainPkg); got != mainPkg.Path() {
 		t.Fatalf("main source owner = %q, want %q", got, mainPkg.Path())
@@ -93,11 +90,11 @@ func TestSelectCoroProgramBootstrapV2ExactMixedFiveStageProgram(t *testing.T) {
 		},
 		{
 			kind: coroProgramStepCoroRootV1, role: coroProgramStepRolePackageInitV2,
-			target: fixture.mainPackage.PkgPath + ".init$coro", owner: fixture.mainPackage.PkgPath, aux: mainInitIndex,
+			target: "main.init$coro", owner: fixture.mainPackage.PkgPath, aux: mainInitIndex,
 		},
 		{
 			kind: coroProgramStepCoroRootV1, role: coroProgramStepRoleMainV2,
-			target: fixture.mainPackage.PkgPath + ".main$coro", owner: fixture.mainPackage.PkgPath, aux: mainIndex,
+			target: "main.main$coro", owner: fixture.mainPackage.PkgPath, aux: mainIndex,
 		},
 	}
 	for index, want := range wants {

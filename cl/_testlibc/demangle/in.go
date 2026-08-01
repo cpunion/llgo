@@ -7,10 +7,10 @@ import (
 )
 
 // CHECK: @0 = private unnamed_addr constant [29 x i8] c"__ZNK9INIReader10ParseErrorEv", align 1
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibc/demangle.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	mangledName := "__ZNK9INIReader10ParseErrorEv"
-	// CHECK: store %"{{.*}}/runtime/internal/runtime.String" { ptr @0, i64 29 }
+	// CHECK: store %"{{.*}}/runtime/internal/runtime.String" { ptr @{{[0-9]+}}, i64 29 }
 	// CHECK: call void @__llgo_coro_worker_park_v1
 	if name := llvm.ItaniumDemangle(mangledName, true); name != nil {
 		c.Printf(c.Str("%s\n"), name)

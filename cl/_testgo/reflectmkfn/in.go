@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflectmkfn.main$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @{{.*}}reflect.FuncOf$coro{{.*}}(ptr %0, ptr %{{.*}},
 // CHECK: call ptr @{{.*}}reflect.MakeFunc$coro{{.*}}(ptr %0, ptr %{{.*}},
 // CHECK: call ptr @{{.*}}reflect.Value.Interface$coro{{.*}}(ptr %0, ptr %{{.*}},
@@ -25,7 +25,7 @@ func main() {
 	}
 }
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflectmkfn.main$1$coro"(ptr %0, ptr %1, %"{{.*}}Slice" %2){{.*}} {
+// CHECK-LABEL: define ptr @"main.main$1$coro"(ptr %0, ptr %1, %"{{.*}}Slice" %2){{.*}} {
 // CHECK: call void @__llgo_coro_complete_prepare_v2
 // CHECK: call ptr @{{.*}}reflect.Value.String$coro{{.*}}(
 // CHECK: call ptr @{{.*}}reflect.Value.Int$coro{{.*}}(

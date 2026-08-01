@@ -10,25 +10,25 @@ import (
 // temporary SSA instruction number. Runtime output remains checked by
 // expect.txt.
 // CHECK: @__llgo_coro_func_descriptor_v1.method-value.{{.*}} = linkonce_odr unnamed_addr constant
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflect.(*T).Add$coro"(ptr %0, ptr %1, ptr %2, i64 %3){{.*}} {
+// CHECK-LABEL: define ptr @"main.(*T).Add$coro"(ptr %0, ptr %1, ptr %2, i64 %3){{.*}} {
 // CHECK: call void @__llgo_coro_complete_prepare_v2
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflect.callClosure$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK-LABEL: define ptr @"main.callClosure$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @"reflect.Value.Call$coro"(
 // CHECK: call ptr %{{.*}}(ptr %0, ptr %{{.*}}, ptr %{{.*}}, i64 100)
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflect.callFunc$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK-LABEL: define ptr @"main.callFunc$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: store { ptr, ptr } { ptr @__llgo_coro_func_descriptor_v1.{{.*}}, ptr null }
 // CHECK: call ptr @"reflect.Value.Call$coro"(
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflect.callIMethod$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK-LABEL: define ptr @"main.callIMethod$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @"reflect.Value.Call$coro"(
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflect.callMethod$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK-LABEL: define ptr @"main.callMethod$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @"reflect.Value.Call$coro"(
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflect.callSlice$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK-LABEL: define ptr @"main.callSlice$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @"reflect.Value.Call$coro"(
 // CHECK: call ptr @"reflect.Value.CallSlice$coro"(
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflect.main$coro"(ptr %0, ptr %1){{.*}} {
-// CHECK: call ptr @"{{.*}}/cl/_testgo/reflect.callSlice$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK: call ptr @"main.callSlice$coro"(
 // CHECK-LABEL: define linkonce ptr @__llgo_coro_func_coro_v1.method-value.{{.*}}(ptr %0, ptr %1, ptr %2, ptr %3, i64 %4) {
-// CHECK: call ptr @"{{.*}}/cl/_testgo/reflect.(*T).Add$coro"(ptr %0, ptr %1, ptr %3, i64 %4)
+// CHECK: call ptr @"main.(*T).Add$coro"(ptr %0, ptr %1, ptr %3, i64 %4)
 // CHECK-NOT: __llgo_stub.
 
 func main() {

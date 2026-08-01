@@ -65,7 +65,6 @@ import (
 	"github.com/goplus/llgo/internal/typepatch"
 	"github.com/goplus/llgo/ssa/abi"
 	xenv "github.com/goplus/llgo/xtool/env"
-	"github.com/goplus/llgo/xtool/env/llvm"
 	gllvm "github.com/xgo-dev/llvm"
 
 	llruntime "github.com/goplus/llgo/runtime"
@@ -3072,11 +3071,6 @@ type Config struct {
 	// when it would otherwise be enabled by full LTO.
 	DisableGoGlobalDCE bool
 
-	// RewriteMainPrefix controls whether symbols in the main package
-	// use "main." as their package path prefix instead of the actual
-	// import path. When true, pkgpath.sym is rewritten to main.sym.
-	RewriteMainPrefix bool
-
 	// GlobalRewrites specifies compile-time overrides for global string variables.
 	// Keys are fully qualified package paths (e.g. "main" or "github.com/user/pkg").
 	// Each Rewrites entry maps variable names to replacement string values. Only
@@ -3125,6 +3119,78 @@ func (conf *Config) coroTargetCapabilities() coro.TargetCapabilities {
 
 type Rewrites map[string]string
 
+// clone returns an independent copy of c for use by a single build. Do
+// resolves defaults and target-specific values on this copy so callers can
+// safely reuse their input configuration after Do returns.
+func (c *Config) clone() *Config {
+	if c == nil {
+		return nil
+	}
+	cloned := *c
+	cloned.RunArgs = slices.Clone(c.RunArgs)
+	cloned.GoBuildFlags = slices.Clone(c.GoBuildFlags)
+	cloned.Overlay = cloneOverlay(c.Overlay)
+	if c.GlobalRewrites != nil {
+		cloned.GlobalRewrites = make(map[string]Rewrites, len(c.GlobalRewrites))
+		for pkgPath, rewrites := range c.GlobalRewrites {
+			if rewrites == nil {
+				cloned.GlobalRewrites[pkgPath] = nil
+				continue
+			}
+			copied := make(Rewrites, len(rewrites))
+			for name, value := range rewrites {
+				copied[name] = value
+			}
+			cloned.GlobalRewrites[pkgPath] = copied
+		}
+	}
+	return &cloned
+}
+
+// resolveBuildConfig validates and fills build-local defaults without
+// modifying the caller's Config. Target-derived GOOS/GOARCH values are
+// resolved later, after crosscompile.Use has selected the toolchain.
+func resolveBuildConfig(input *Config) (*Config, error) {
+	if input == nil {
+		return nil, errors.New("build config must not be nil")
+	}
+	conf := input.clone()
+	if conf.Goos == "" {
+		conf.Goos = runtime.GOOS
+	}
+	if conf.Goarch == "" {
+		conf.Goarch = runtime.GOARCH
+	}
+	if conf.AppExt == "" {
+		conf.AppExt = defaultAppExt(conf)
+	}
+	if conf.BuildMode == "" {
+		conf.BuildMode = BuildModeExe
+	}
+	if conf.BuildMode != BuildModeExe {
+		conf.DeadcodeDrop = false
+	}
+	conf.PCLNMode = effectivePCLNMode(conf)
+	conf.PCLNModeSet = true
+	if conf.SizeReport && conf.SizeFormat == "" {
+		conf.SizeFormat = "text"
+	}
+	if conf.SizeReport && conf.SizeLevel == "" {
+		conf.SizeLevel = "module"
+	}
+	if err := validatePCLNMode(conf); err != nil {
+		return nil, err
+	}
+	if err := ensureSizeReporting(conf); err != nil {
+		return nil, err
+	}
+	if err := conf.LinkOptions.validate(); err != nil {
+		return nil, err
+	}
+	conf.OptLevel = effectiveOptLevel(conf)
+	return conf, nil
+}
+
 func NewDefaultConf(mode Mode) *Config {
 	bin := os.Getenv("GOBIN")
 	if bin == "" {
@@ -3133,9 +3199,6 @@ func NewDefaultConf(mode Mode) *Config {
 			panic(fmt.Errorf("cannot get GOPATH: %v", err))
 		}
 		bin = filepath.Join(gopath, "bin")
-	}
-	if err := os.MkdirAll(bin, 0755); err != nil {
-		panic(fmt.Errorf("cannot create bin directory: %v", err))
 	}
 	goos, goarch := os.Getenv("GOOS"), os.Getenv("GOARCH")
 	if goos == "" {
@@ -3204,43 +3267,29 @@ const (
 )
 
 func Do(args []string, conf *Config) ([]Package, error) {
-	if conf.Goos == "" {
-		conf.Goos = runtime.GOOS
+	return Build(Invocation{Args: args, Config: conf})
+}
+
+// Build executes one build invocation.
+func Build(inv Invocation) ([]Package, error) {
+	dir := inv.Dir
+	if dir == "" {
+		var err error
+		dir, err = os.Getwd()
+		if err != nil {
+			return nil, err
+		}
 	}
-	if conf.Goarch == "" {
-		conf.Goarch = runtime.GOARCH
-	}
-	if conf.AppExt == "" {
-		conf.AppExt = defaultAppExt(conf)
-	}
-	if conf.BuildMode == "" {
-		conf.BuildMode = BuildModeExe
-	}
-	if conf.BuildMode != BuildModeExe {
-		conf.DeadcodeDrop = false
-	}
-	conf.PCLNMode = effectivePCLNMode(conf)
-	conf.PCLNModeSet = true
-	if conf.SizeReport && conf.SizeFormat == "" {
-		conf.SizeFormat = "text"
-	}
-	if conf.SizeReport && conf.SizeLevel == "" {
-		conf.SizeLevel = "module"
-	}
-	if err := validatePCLNMode(conf); err != nil {
-		return nil, err
-	}
-	if err := ensureSizeReporting(conf); err != nil {
-		return nil, err
-	}
-	if err := conf.LinkOptions.validate(); err != nil {
+	environ := os.Environ()
+	commands := commandEnv{dir: dir, environ: environ}
+	conf, err := resolveBuildConfig(inv.Config)
+	if err != nil {
 		return nil, err
 	}
 	llgoRuntimeDir := env.LLGoRuntimeDir()
 	if llgoRuntimeDir == "" {
 		return nil, fmt.Errorf("cannot locate the LLGo runtime source tree; set LLGO_ROOT to an LLGo checkout or installation root")
 	}
-	conf.OptLevel = effectiveOptLevel(conf)
 	// Handle crosscompile configuration first to set correct GOOS/GOARCH
 	forceEspClang := conf.ForceEspClang || conf.Target != ""
 	export, err := crosscompile.Use(conf.Goos, conf.Goarch, conf.Target, wasiThreadsForBuild(conf), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
@@ -3268,7 +3317,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 
 	verbose := conf.Verbose
-	patterns := args
+	patterns := slices.Clone(inv.Args)
 	tags, err := effectiveBuildTags(conf, export)
 	if err != nil {
 		return nil, err
@@ -3279,15 +3328,14 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	cfg := &packages.Config{
 		Mode:       loadSyntax | packages.NeedDeps | packages.NeedModule | packages.NeedExportFile,
 		BuildFlags: goBuildFlags,
+		Dir:        dir,
 		Fset:       token.NewFileSet(),
 		Tests:      conf.Mode == ModeTest,
-		Env:        append(slices.Clone(os.Environ()), "GOOS="+conf.Goos, "GOARCH="+conf.Goarch),
+		Env:        withEnv(environ, "GOOS="+conf.Goos, "GOARCH="+conf.Goarch),
 	}
 	if conf.Mode == ModeTest {
 		cfg.Mode |= packages.NeedForTest
 	}
-	abi.SetRewriteMainPrefix(conf.RewriteMainPrefix)
-
 	emitDebugInfo := shouldEmitDebugInfo(conf, &export)
 	cl.EnableDebug(emitDebugInfo)
 	cl.EnableDbgSyms(emitDebugInfo)
@@ -3384,7 +3432,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 	mode := conf.Mode
 	if mode == ModeTest {
-		initial, err = filterTestPackages(initial, conf.OutFile, conf.RewriteMainPrefix)
+		initial, err = filterTestPackages(initial, conf.OutFile)
 		if err != nil {
 			return nil, err
 		}
@@ -3456,11 +3504,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	patches := make(cl.Patches, len(altPkgPaths))
 	altSSAPkgs(progSSA, patches, altPkgs[1:], conf, verbose)
 
-	env := llvm.New("")
-	os.Setenv("PATH", env.BinDir()+":"+os.Getenv("PATH")) // TODO(xsw): check windows
-
 	output := conf.OutFile != ""
-	ctx := &context{env: env, conf: cfg, progSSA: progSSA, prog: prog, dedup: dedup,
+	ctx := &context{conf: cfg, progSSA: progSSA, prog: prog, dedup: dedup,
 		patches: patches, callerTracking: cl.NewCallerTracking(),
 		goRoot: sourcePatchGOROOT,
 		built:  make(map[string]none), initial: initial, mode: mode,
@@ -3471,6 +3516,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		passOpt:        passOpt,
 		buildConf:      conf,
 		crossCompile:   export,
+		commands:       commands,
 		cTransformer:   cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, cabiOptimize),
 	}
 	defer ctx.closePackageMetas()
@@ -3558,6 +3604,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 			if err != nil {
 				return nil, err
 			}
+			resolveOutputs(ctx.commands.dir, outFmts)
 
 			// Link main package using the output path from buildOutFmts
 			err = linkMainPkg(ctx, pkg, allPkgs, outFmts.Out, verbose)
@@ -3613,7 +3660,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 				if conf.Target == "" {
 					err = runNative(ctx, outFmts.Out, pkg.Dir, pkg.PkgPath, conf, mode)
 				} else if conf.Emulator {
-					err = runInEmulator(ctx.crossCompile.Emulator, envMap, pkg.Dir, pkg.PkgPath, conf, mode, verbose)
+					err = runInEmulator(ctx.commands, ctx.crossCompile.Emulator, envMap, pkg.Dir, pkg.PkgPath, conf, mode, verbose)
 				} else {
 					err = flash.FlashDevice(ctx.crossCompile.Device, envMap, ctx.buildConf.Port, verbose)
 					if err != nil {
@@ -4380,8 +4427,8 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 			aPkg = ctx.pkgByID[pkg.ID]
 		}
 		// Package identity must use the source types path. llssa.PathOf is an
-		// ABI-symbol projection and intentionally returns "main" when
-		// RewriteMainPrefix is enabled.
+		// ABI-symbol projection and intentionally returns "main" for a main
+		// package.
 		if aPkg == nil || aPkg.SSA == nil || aPkg.SSA.Pkg == nil || aPkg.SSA.Pkg.Path() != pkg.PkgPath {
 			return nil, fmt.Errorf("coroutine managed program roots: linked main package %q has no exact SSA package", pkg.ID)
 		}
@@ -6306,13 +6353,13 @@ func needLink(pkg *packages.Package, mode Mode) bool {
 	return pkg.Name == "main"
 }
 
-func filterTestPackages(initial []*packages.Package, outFile string, rewriteMainPrefix bool) ([]*packages.Package, error) {
+func filterTestPackages(initial []*packages.Package, outFile string) ([]*packages.Package, error) {
 	filtered := initial[:0]
 	for _, pkg := range initial {
 		if needLink(pkg, ModeTest) {
 			filtered = append(filtered, pkg)
 		}
-		if rewriteMainPrefix && pkg.Types != nil && pkg.Types.Name() == "main" {
+		if pkg.Types != nil && pkg.Types.Name() == "main" {
 			pkg.Types.SetName("main.test")
 		}
 	}
@@ -6338,7 +6385,6 @@ const (
 )
 
 type context struct {
-	env            *llvm.Env
 	conf           *packages.Config
 	progSSA        *ssa.Program
 	prog           llssa.Program
@@ -6358,6 +6404,7 @@ type context struct {
 
 	buildConf    *Config
 	crossCompile crosscompile.Export
+	commands     commandEnv
 
 	cTransformer *cabi.Transformer
 
@@ -6458,6 +6505,8 @@ func (c *context) compiler() *clang.Cmd {
 		c.crossCompile.Linker,
 	)
 	cmd := clang.NewCompiler(config)
+	cmd.Dir = c.commands.dir
+	cmd.Env = slices.Clone(c.commands.environ)
 	cmd.Verbose = c.shouldPrintCommands(false)
 	return cmd
 }
@@ -6471,6 +6520,8 @@ func (c *context) linker() *clang.Cmd {
 		c.crossCompile.Linker,
 	)
 	cmd := clang.NewLinker(config)
+	cmd.Dir = c.commands.dir
+	cmd.Env = slices.Clone(c.commands.environ)
 	cmd.Verbose = c.shouldPrintCommands(false)
 	return cmd
 }
@@ -7133,6 +7184,11 @@ func isRuntimePkg(pkgPath string) bool {
 
 func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose bool) error {
 	printCmds := ctx.shouldPrintCommands(verbose)
+	if dir := filepath.Dir(app); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create output directory %s: %w", dir, err)
+		}
+	}
 	// Handle c-archive mode differently - use ar tool instead of linker
 	if ctx.buildConf.BuildMode == BuildModeCArchive {
 		return ctx.createMergedArchiveFile(app, objFiles, printCmds)
@@ -7333,7 +7389,7 @@ func (c *context) createMergedArchiveFile(archivePath string, inputs []string, v
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(arCmd, "-M")
+	cmd := c.commands.configure(exec.Command(arCmd, "-M"))
 	cmd.Stdin = strings.NewReader(script.String())
 	printCmds := c.shouldPrintCommands(len(verbose) > 0 && verbose[0])
 	if printCmds {
@@ -7417,7 +7473,7 @@ func (c *context) createArchiveFile(archivePath string, objFiles []string, verbo
 
 	args := append([]string{"rcs", tmpName}, objFiles...)
 	arCmd := c.archiver()
-	cmd := exec.Command(arCmd, args...)
+	cmd := c.commands.configure(exec.Command(arCmd, args...))
 	printCmds := c.shouldPrintCommands(len(verbose) > 0 && verbose[0])
 	if printCmds {
 		fmt.Fprintf(os.Stderr, "%s %s\n", filepath.Base(arCmd), strings.Join(args, " "))
@@ -8091,7 +8147,7 @@ func dumpLLVMIRIfNeeded(ctx *context, pkgPath string, exportFile string, data st
 		return err
 	}
 	if ctx.buildConf.CheckLLFiles {
-		if msg, err := llcCheck(ctx.env, f.Name()); err != nil {
+		if msg, err := llcCheck(ctx.commands, f.Name()); err != nil {
 			fmt.Fprintf(os.Stderr, "==> llc %v: %v\n%v\n", pkgPath, f.Name(), msg)
 		}
 	}
@@ -8175,7 +8231,7 @@ func exportObjectWithClang(ctx *context, pkgPath string, exportFile string, data
 		return exportFile, err
 	}
 	if ctx.buildConf.CheckLLFiles {
-		if msg, err := llcCheck(ctx.env, f.Name()); err != nil {
+		if msg, err := llcCheck(ctx.commands, f.Name()); err != nil {
 			fmt.Fprintf(os.Stderr, "==> llc %v: %v\n%v\n", pkgPath, f.Name(), msg)
 		}
 	}
@@ -8203,9 +8259,8 @@ func exportObjectWithClang(ctx *context, pkgPath string, exportFile string, data
 	return objFile.Name(), cmd.Compile(args...)
 }
 
-func llcCheck(env *llvm.Env, exportFile string) (msg string, err error) {
-	bin := filepath.Join(env.BinDir(), "llc")
-	cmd := exec.Command(bin, "-filetype=null", exportFile)
+func llcCheck(commands commandEnv, exportFile string) (msg string, err error) {
+	cmd := commands.configure(exec.Command("llc", "-filetype=null", exportFile))
 	var buf bytes.Buffer
 	cmd.Stderr = &buf
 	if err = cmd.Run(); err != nil {

@@ -7,7 +7,7 @@ import (
 )
 
 // CHECK: @__llgo_coro_func_descriptor_v1.{{.*}} = {{.*}}ptr @__llgo_coro_func_coro_v1.{{.*}}
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibgo/strings.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 32)
 	// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.StringToBytes$coro"

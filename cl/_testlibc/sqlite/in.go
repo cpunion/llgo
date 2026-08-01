@@ -6,7 +6,7 @@ import (
 	"github.com/goplus/lib/c/sqlite"
 )
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibc/sqlite.check$coro"(
+// CHECK-LABEL: define ptr @"main.check$coro"(
 func check(err sqlite.Errno) {
 	if err != sqlite.OK {
 		// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1
@@ -15,9 +15,9 @@ func check(err sqlite.Errno) {
 	}
 }
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibc/sqlite.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
-	// CHECK: [[OPEN:%[0-9]+]] = call ptr @"github.com/goplus/lib/c/sqlite.OpenV2$coro"({{.*}}ptr @1, i32 130, ptr null)
+	// CHECK: [[OPEN:%[0-9]+]] = call ptr @"github.com/goplus/lib/c/sqlite.OpenV2$coro"({{.*}}ptr @{{[0-9]+}}, i32 130, ptr null)
 	// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[OPEN]]
 	db, err := sqlite.OpenV2(c.Str(":memory:"), sqlite.OpenReadWrite|sqlite.OpenMemory, nil)
 	check(err)

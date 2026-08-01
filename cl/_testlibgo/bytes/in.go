@@ -5,7 +5,7 @@ import (
 	"bytes"
 )
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibgo/bytes.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 40)
 // CHECK: [[S2B:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.StringToBytes$coro"
 // CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[S2B]]

@@ -219,7 +219,7 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 	mainInit := aPkg.SSA.Func("init")
 	mainMain := aPkg.SSA.Func("main")
 	mainSymbolPrefix := aPkg.PkgPath
-	if ctx.buildConf.RewriteMainPrefix && pkg.Types != nil && pkg.Types.Name() == "main" {
+	if pkg.Types != nil && pkg.Types.Name() == "main" {
 		mainSymbolPrefix = "main"
 	}
 	steps := make([]coroProgramBootstrapStepV1, 0, 5)

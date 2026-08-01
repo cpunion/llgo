@@ -3,7 +3,7 @@ package main
 
 import "github.com/goplus/lib/c"
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibc/allocacstrs.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	// The C vector and each C string outlive an await, so neither may be a
 	// dynamic native-stack allocation in the physical coroutine.

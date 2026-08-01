@@ -5,7 +5,7 @@ import (
 	"github.com/goplus/lib/c"
 )
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibc/argv.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	// CHECK: load i32, ptr @__llgo_argc, align 4
 	// CHECK: load ptr, ptr @__llgo_argv, align 8

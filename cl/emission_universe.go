@@ -1985,6 +1985,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoUnreachable:
+		if err := verifyCoroExactVoidIntrinsicCallSite(direct, "llgo.unreachable"); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoAdvance:
 		args := direct.Common().Args
 		if len(args) != 2 {
@@ -2729,6 +2734,12 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// It is useful to synchronous runtime islands such as tinygogc's stack
 		// scanner. Physical coroutine bodies reject it separately because an
 		// address in the native resume stack cannot survive coro suspension.
+		return CoroIntrinsicCallInlineNoSuspend
+	case llgoUnreachable:
+		// unreachable is a compiler-owned terminal instruction. The frontend
+		// declaration has no callable body or scheduler edge; lowering emits the
+		// LLVM terminator and moves x/tools' synthetic source tail to a dead
+		// continuation solely to keep successor PHIs structurally valid.
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoAdvance:
 		// advance lowers directly to one LLVM GEP after its exact operand and

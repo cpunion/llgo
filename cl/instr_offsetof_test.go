@@ -492,8 +492,12 @@ func buildPackageWithFiles(t *testing.T, src string) (*gossa.Package, *token.Fil
 
 func offsetOfArg(t *testing.T, ctx *context, arg gossa.Value) int {
 	t.Helper()
-	if _, ok := ctx.offsetOfBuiltinArg(arg); !ok {
+	value, ok := ctx.offsetOfBuiltinArg(arg)
+	if !ok {
 		t.Fatal("offsetOfBuiltinArg returned false")
+	}
+	if !types.Identical(value.RawType(), types.Typ[types.Uintptr]) {
+		t.Fatalf("offsetOfBuiltinArg result type = %v, want uintptr", value.RawType())
 	}
 	load := arg.(*gossa.UnOp)
 	field := load.X.(*gossa.FieldAddr)

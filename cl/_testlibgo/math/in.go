@@ -5,7 +5,7 @@ import (
 	"math"
 )
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibgo/math.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	// CHECK: [[SQRT:%[0-9]+]] = call ptr @"math.Sqrt$coro"({{.*}}double 2.000000e+00)
 	// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[SQRT]]

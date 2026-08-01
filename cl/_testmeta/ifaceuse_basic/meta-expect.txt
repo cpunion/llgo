@@ -1,33 +1,37 @@
 [TypeChildren]
-*_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T:
-    _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+*_llgo_main.T:
+    _llgo_main.T
 
 [OrdinaryEdges]
-*_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T:
-    _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+*_llgo_main.T:
+    _llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.memequalptr
-__llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b:
-    __llgo_coro_root_factory_v1.d8d862b15239d9fd7afbe10db509ec2b
-__llgo_coro_root_factory_v1.d8d862b15239d9fd7afbe10db509ec2b:
-    github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro
-__llgo_coro_root_package_v1.44710f50c0995e8f7f729f47c81f6464:
-    __llgo_coro_root_package_v1.44710f50c0995e8f7f729f47c81f6464.entries
-__llgo_coro_root_package_v1.44710f50c0995e8f7f729f47c81f6464.entries:
-    __llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b
-_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T:
-    *_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+__llgo_coro_root_factory_descriptor_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce:
+    __llgo_coro_root_factory_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce
+__llgo_coro_root_factory_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce:
+    main.main$coro
+__llgo_coro_root_package_v1.40c00691b4dcf83a1e689933ffadb18d:
+    __llgo_coro_root_package_v1.40c00691b4dcf83a1e689933ffadb18d.entries
+__llgo_coro_root_package_v1.40c00691b4dcf83a1e689933ffadb18d.entries:
+    __llgo_coro_root_factory_descriptor_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce
+_llgo_main.T:
+    *_llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.memequal0
-github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.init:
-    github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.init$guard
-github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro:
+llvm.compiler.used:
+    __llgo_coro_library_effect_v2.55666711ba08f50baee4b49b3b5b61a0
+llvm.used:
+    __llgo_coro_root_factory_descriptor_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce
+    __llgo_coro_root_package_v1.40c00691b4dcf83a1e689933ffadb18d
+main.init:
+    main.init$guard
+main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b
+    __llgo_coro_frame_descriptor_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1
-    _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
-    github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.sink
+    _llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.AllocU
     llvm.coro.align.i64
     llvm.coro.alloc
@@ -38,13 +42,9 @@ github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro:
     llvm.coro.size.i64
     llvm.coro.suspend
     llvm.trap
-llvm.compiler.used:
-    __llgo_coro_library_effect_v2.238905f6c44cc79552060bcab51b23a8
-llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b
-    __llgo_coro_root_package_v1.44710f50c0995e8f7f729f47c81f6464
+    main.sink
 
 [UseIface]
-github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro:
-    _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+main.main$coro:
+    _llgo_main.T
 
