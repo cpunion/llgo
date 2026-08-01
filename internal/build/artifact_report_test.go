@@ -104,6 +104,28 @@ func TestCollectArtifactsValidation(t *testing.T) {
 	); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("directory artifact error = %v", err)
 	}
+
+	main := filepath.Join(t.TempDir(), "app")
+	if err := os.WriteFile(main, []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name string
+		mode DebugArtifactMode
+		out  OutFmtDetails
+		role ArtifactRole
+	}{
+		{name: "missing DWARF", mode: DebugArtifactExternal, out: OutFmtDetails{Out: main, DWARF: main + ".debug.wasm"}, role: ArtifactRoleDebug},
+		{name: "missing runtime symbols", mode: DebugArtifactNone, out: OutFmtDetails{Out: main, PCLN: main + ".pclntab"}, role: ArtifactRoleRuntimeSymbols},
+		{name: "missing deployment format", mode: DebugArtifactNone, out: OutFmtDetails{Out: main, Bin: main + ".bin"}, role: ArtifactRoleDeployment},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := CollectArtifacts(&Config{DebugArtifactMode: tt.mode}, &tt.out)
+			if err == nil || !strings.Contains(err.Error(), "stat "+string(tt.role)+" artifact") {
+				t.Fatalf("CollectArtifacts() error = %v", err)
+			}
+		})
+	}
 }
 
 func TestPrimaryArtifactFormat(t *testing.T) {
@@ -150,6 +172,10 @@ func TestReportBuildArtifacts(t *testing.T) {
 	conf.DebugArtifactModeSet = false
 	if err := reportBuildArtifacts(conf, &OutFmtDetails{Out: path}, &report); err != nil || report.Len() != 0 {
 		t.Fatalf("implicit artifact report = %q, %v", report.String(), err)
+	}
+	conf.DebugArtifactModeSet = true
+	if err := reportBuildArtifacts(conf, &OutFmtDetails{Out: path + ".missing"}, &report); err == nil {
+		t.Fatal("reportBuildArtifacts() succeeded with a missing artifact")
 	}
 
 	conf.Target = "cortex-m-qemu"
