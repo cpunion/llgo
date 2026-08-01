@@ -25,7 +25,10 @@ jobs:
             id: macos
             display: macOS
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # A cold coroutine footprint build currently spends about 16 minutes in
+    # Measure programs on hosted runners. Leave enough time for the benchmark
+    # binaries, validation, and artifact publication without reducing coverage.
+    timeout-minutes: 40
     env:
       GOMAXPROCS: "2"
       LLGO_ROOT: ${{ github.workspace }}
