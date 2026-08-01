@@ -31,6 +31,7 @@ type Target struct {
 	GOARCH   string
 	GOARM    string // "5", "6", "7" (default)
 	Target   string // target name from -target flag (e.g., "esp32", "arm7tdmi", "wasi")
+	ABIMode  uint8  // LLGo C ABI mode recorded for debugger consumers
 	OptLevel optlevel.Level
 }
 

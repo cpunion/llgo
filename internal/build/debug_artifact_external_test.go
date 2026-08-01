@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/goplus/llgo/internal/wasmdebug"
 )
 
@@ -35,7 +36,7 @@ func TestFinalizeExternalWasmDWARF(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := finalizeDebugArtifact(
-		&Config{DebugArtifactMode: DebugArtifactExternal},
+		&Config{Goarch: "wasm", AbiMode: 2, DebugArtifactMode: DebugArtifactExternal},
 		&OutFmtDetails{Out: module, DWARF: sidecar},
 		false,
 	); err != nil {
@@ -45,8 +46,13 @@ func TestFinalizeExternalWasmDWARF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(debugModule, original) {
-		t.Fatal("external DWARF sidecar differs from the linked debug module")
+	wantRecord := debugabi.NewRecord(2, 4, debugabi.ByteOrderLittle)
+	wantDebugModule, err := wasmdebug.SetDebuggerRecord(original, wantRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(debugModule, wantDebugModule) {
+		t.Fatal("external DWARF sidecar differs from the recorded debug module")
 	}
 	main, err := os.ReadFile(module)
 	if err != nil {
@@ -62,6 +68,30 @@ func TestFinalizeExternalWasmDWARF(t *testing.T) {
 	if err != nil || !ok || url != "app%20debug.wasm" {
 		t.Fatalf("main external URL = %q, %v, %v", url, ok, err)
 	}
+	for name, contents := range map[string][]byte{"main": main, "sidecar": debugModule} {
+		if got, ok, err := wasmdebug.DebuggerRecord(contents); err != nil || !ok || got != wantRecord {
+			t.Fatalf("%s DebuggerRecord = %+v, %v, %v", name, got, ok, err)
+		}
+	}
+
+	embedded := filepath.Join(dir, "embedded.wasm")
+	if err := os.WriteFile(embedded, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeDebugArtifact(
+		&Config{Goarch: "wasm", AbiMode: 1, DebugArtifactMode: DebugArtifactEmbedded},
+		&OutFmtDetails{Out: embedded},
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	embeddedModule, err := os.ReadFile(embedded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := wasmdebug.DebuggerRecord(embeddedModule); err != nil || !ok || got.CABIMode != 1 {
+		t.Fatalf("embedded DebuggerRecord = %+v, %v, %v", got, ok, err)
+	}
 }
 
 func TestFinalizeDebugArtifactValidation(t *testing.T) {
@@ -73,6 +103,25 @@ func TestFinalizeDebugArtifactValidation(t *testing.T) {
 	}
 	if err := finalizeDebugArtifact(&Config{DebugArtifactMode: DebugArtifactExternal}, &OutFmtDetails{}, false); err == nil {
 		t.Fatal("external mode accepted an empty executable path")
+	}
+	if err := finalizeDebugArtifact(
+		&Config{DebugArtifactMode: DebugArtifactExternal},
+		&OutFmtDetails{Out: "app.wasm"}, false,
+	); err == nil {
+		t.Fatal("external mode accepted an empty sidecar path")
+	}
+	if err := finalizeDebugArtifact(
+		&Config{Goarch: "wasm", DebugArtifactMode: DebugArtifactEmbedded},
+		&OutFmtDetails{}, false,
+	); err == nil {
+		t.Fatal("embedded Wasm mode accepted an empty executable path")
+	}
+	missing := filepath.Join(t.TempDir(), "missing.wasm")
+	if err := finalizeDebugArtifact(
+		&Config{Goarch: "wasm", DebugArtifactMode: DebugArtifactEmbedded},
+		&OutFmtDetails{Out: missing}, false,
+	); err == nil {
+		t.Fatal("embedded Wasm mode accepted a missing executable")
 	}
 }
 

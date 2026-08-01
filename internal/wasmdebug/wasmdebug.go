@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/goplus/llgo/internal/debugabi"
 )
 
 const externalDebugInfo = "external_debug_info"
@@ -146,6 +148,52 @@ func HasDWARF(module []byte) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// SetDebuggerRecord replaces the LLGo debugger ABI custom section with the
+// canonical encoding of record. Other custom and standard sections retain
+// their original bytes and order.
+func SetDebuggerRecord(module []byte, record debugabi.Record) ([]byte, error) {
+	raw, err := record.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	sections, err := parse(module)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]byte(nil), wasmHeader...)
+	for _, section := range sections {
+		if section.id == 0 && section.name == debugabi.WasmSectionName {
+			continue
+		}
+		out = append(out, section.raw...)
+	}
+	return appendCustomSection(out, debugabi.WasmSectionName, raw), nil
+}
+
+// DebuggerRecord returns the unique LLGo debugger ABI record, if present.
+func DebuggerRecord(module []byte) (debugabi.Record, bool, error) {
+	sections, err := parse(module)
+	if err != nil {
+		return debugabi.Record{}, false, err
+	}
+	var record debugabi.Record
+	found := false
+	for _, section := range sections {
+		if section.id != 0 || section.name != debugabi.WasmSectionName {
+			continue
+		}
+		if found {
+			return debugabi.Record{}, false, errors.New("multiple LLGo debugger ABI sections")
+		}
+		record, err = debugabi.ParseRecord(section.content)
+		if err != nil {
+			return debugabi.Record{}, false, fmt.Errorf("invalid LLGo debugger ABI section: %w", err)
+		}
+		found = true
+	}
+	return record, found, nil
 }
 
 // Externalize removes embedded DWARF custom sections and appends the standard

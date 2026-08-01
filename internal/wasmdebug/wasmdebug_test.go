@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/goplus/llgo/internal/debugabi"
 )
 
 func appendSection(dst []byte, id byte, payload []byte) []byte {
@@ -24,7 +26,11 @@ func debugFixture() []byte {
 }
 
 func TestExternalize(t *testing.T) {
-	sidecar := debugFixture()
+	record := debugabi.NewRecord(2, 4, debugabi.ByteOrderLittle)
+	sidecar, err := SetDebuggerRecord(debugFixture(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
 	url := strings.Repeat("debug-", 24) + ".wasm"
 	main, err := Externalize(sidecar, url)
 	if err != nil {
@@ -68,6 +74,12 @@ func TestExternalize(t *testing.T) {
 	}
 	if countCustom(mainSections, "producers") != 1 {
 		t.Fatal("externalization removed an unrelated custom section")
+	}
+	if got, ok, err := DebuggerRecord(main); err != nil || !ok || got != record {
+		t.Fatalf("main DebuggerRecord = %+v, %v, %v", got, ok, err)
+	}
+	if got, ok, err := DebuggerRecord(sidecar); err != nil || !ok || got != record {
+		t.Fatalf("sidecar DebuggerRecord = %+v, %v, %v", got, ok, err)
 	}
 }
 
@@ -141,5 +153,49 @@ func TestHasDWARFRejectsMalformedCustomSection(t *testing.T) {
 	module = appendSection(module, 0, []byte{2, 'x'})
 	if _, err := HasDWARF(module); err == nil {
 		t.Fatal("HasDWARF accepted a truncated custom-section name")
+	}
+}
+
+func TestDebuggerRecordValidation(t *testing.T) {
+	base := append([]byte(nil), wasmHeader...)
+	record := debugabi.NewRecord(1, 4, debugabi.ByteOrderLittle)
+	module, err := SetDebuggerRecord(base, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := SetDebuggerRecord(module, debugabi.NewRecord(2, 4, debugabi.ByteOrderLittle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sections, err := parse(replaced); err != nil || countCustom(sections, debugabi.WasmSectionName) != 1 {
+		t.Fatalf("replacement custom sections = %v, %v", sections, err)
+	}
+	if got, ok, err := DebuggerRecord(replaced); err != nil || !ok || got.CABIMode != 2 {
+		t.Fatalf("DebuggerRecord = %+v, %v, %v", got, ok, err)
+	}
+	if got, ok, err := DebuggerRecord(base); err != nil || ok || got != (debugabi.Record{}) {
+		t.Fatalf("absent DebuggerRecord = %+v, %v, %v", got, ok, err)
+	}
+
+	invalid := appendCustomSection(base, debugabi.WasmSectionName, []byte("invalid"))
+	if _, _, err := DebuggerRecord(invalid); err == nil {
+		t.Fatal("DebuggerRecord accepted invalid content")
+	}
+	valid, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := appendCustomSection(appendCustomSection(base, debugabi.WasmSectionName, valid), debugabi.WasmSectionName, valid)
+	if _, _, err := DebuggerRecord(duplicate); err == nil {
+		t.Fatal("DebuggerRecord accepted duplicate sections")
+	}
+	if _, err := SetDebuggerRecord([]byte("not wasm"), record); err == nil {
+		t.Fatal("SetDebuggerRecord accepted an invalid module")
+	}
+	if _, _, err := DebuggerRecord([]byte("not wasm")); err == nil {
+		t.Fatal("DebuggerRecord accepted an invalid module")
+	}
+	if _, err := SetDebuggerRecord(base, debugabi.Record{}); err == nil {
+		t.Fatal("SetDebuggerRecord accepted an invalid record")
 	}
 }

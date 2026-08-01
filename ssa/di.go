@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/goplus/llgo/internal/debuginfo"
 	"github.com/xgo-dev/llvm"
 )
@@ -24,10 +25,15 @@ type aDIBuilder struct {
 type diBuilder = *aDIBuilder
 
 func newDIBuilder(prog Program, pkg Package, positioner Positioner) diBuilder {
+	byteOrder := debugabi.ByteOrderLittle
+	if prog.TargetData().ByteOrder() == llvm.BigEndian {
+		byteOrder = debugabi.ByteOrderBig
+	}
 	return &aDIBuilder{
 		di: debuginfo.New(pkg.mod, debuginfo.Config{
-			Producer:  "LLGo",
-			Optimized: prog.debugInfoOptimized,
+			Producer:       "LLGo",
+			Optimized:      prog.debugInfoOptimized,
+			DebuggerRecord: debugabi.NewRecord(prog.Target().ABIMode, uint8(prog.PointerSize()), byteOrder),
 		}),
 		prog:       prog,
 		types:      make(map[*aType]DIType),

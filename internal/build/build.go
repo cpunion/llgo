@@ -450,6 +450,7 @@ func Build(inv Invocation) ([]Package, error) {
 		GOOS:     conf.Goos,
 		GOARCH:   conf.Goarch,
 		Target:   conf.Target,
+		ABIMode:  uint8(conf.AbiMode),
 		OptLevel: conf.OptLevel,
 	}
 
