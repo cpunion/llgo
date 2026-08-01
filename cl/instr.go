@@ -1766,7 +1766,7 @@ func (p *context) shouldEmitLogicalCallerFrames() bool {
 	if !p.shouldTrackCallerFrames() {
 		return false
 	}
-	if emitShadowStackInstrumentation {
+	if emitShadowStackInstrumentation || p.frontendOptions().ShadowStack {
 		return true
 	}
 	return p.logicalCallerFuncs[p.goFn] &&

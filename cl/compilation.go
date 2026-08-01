@@ -248,6 +248,12 @@ func (c *Compilation) validateStacklessCoroABIIdentity(required bool) error {
 type PackageOptions struct {
 	Compilation *Compilation
 
+	// FrontendOptions carries request-local debug, tracing, export, and legacy
+	// shadow-stack policy. FrontendOptionsSet distinguishes an explicit all-zero
+	// request from older callers which still consume the process-wide defaults.
+	FrontendOptions    Options
+	FrontendOptionsSet bool
+
 	// MetaCollect enables package-level global metadata collection. Cache-hit
 	// reconstruction keeps it disabled and restores the persisted metadata
 	// alongside the archive manifest.
