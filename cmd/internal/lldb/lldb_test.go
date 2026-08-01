@@ -186,6 +186,8 @@ func TestEmbeddedPluginIdentity(t *testing.T) {
 		"string_summary",
 		"slice_summary",
 		"SliceSyntheticProvider",
+		"interface_summary",
+		"function_summary",
 		"llgo status",
 		"llgo print",
 		"llgo vars",
