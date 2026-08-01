@@ -270,7 +270,9 @@ func TestCoroWorkerSyscallConditionalIncomingPlanNarrowing(t *testing.T) {
 }
 
 func TestCoroLinuxSyscallTrapPolicyNarrowsActiveConstantCallers(t *testing.T) {
-	testProg := newEmissionTestProgram()
+	testProg := newEmissionTestProgramWithMode(
+		ssa.SanityCheckFunctions | ssa.InstantiateGenerics | ssa.GlobalDebug,
+	)
 	testProg.addPackage(t, "syscall", `package syscall
 type Errno uintptr
 const (
@@ -324,6 +326,17 @@ func Dynamic(trap uintptr) uintptr {
 }
 `)
 	testProg.ssa.Build()
+	debugRefs := 0
+	for _, block := range pkg.ssa.Func("Safe").Blocks {
+		for _, instruction := range block.Instrs {
+			if _, debug := instruction.(*ssa.DebugRef); debug {
+				debugRefs++
+			}
+		}
+	}
+	if debugRefs == 0 {
+		t.Fatal("GlobalDebug SSA did not retain a DebugRef beside a constant syscall carrier")
+	}
 	prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "linux", GOARCH: "amd64"})
 	defer prog.Dispose()
 	prog.SetLinkname(packagePath+".libc___llgo_linux_syscall3_v1_trampoline", "C.__llgo_linux_syscall3_v1")

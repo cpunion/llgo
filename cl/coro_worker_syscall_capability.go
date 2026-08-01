@@ -628,6 +628,9 @@ func coroWorkerStaticIncomingCalls(analysis *coroLinuxSyscallTrapAnalysis, targe
 		}
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
 				direct, directCall := instruction.(*ssa.Call)
 				exactDirect := false
 				if directCall && direct.Common() != nil && !direct.Common().IsInvoke() {
