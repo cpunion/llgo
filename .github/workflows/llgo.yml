@@ -494,6 +494,8 @@ jobs:
           llgo build -target wasm -tags=llgo_wasm_gc -o "$RUNNER_TEMP/wasm-gc.mjs" ./internal/build/testdata/wasm-gc
           node --input-type=module -e "import Module from '$RUNNER_TEMP/wasm-gc.mjs'; await Module();"
           GOOS=wasip1 GOARCH=wasm LLGO_WASI_THREADS=0 llgo build -tags=llgo_wasm_gc -o "$RUNNER_TEMP/wasm-gc-wasip1.wasm" ./internal/build/testdata/wasm-gc
+          wasm-tools validate --features all "$RUNNER_TEMP/wasm-gc-wasip1.wasm"
+          test "$(wasmtime run -W exceptions=y "$RUNNER_TEMP/wasm-gc-wasip1.wasm" 2>&1)" = "wasm gc ok"
           file "$RUNNER_TEMP/runtime-js.wasm" \
             "$RUNNER_TEMP/runtime-wasip1.wasm" \
             "$RUNNER_TEMP/runtime-wasip1-threads.wasm" \
