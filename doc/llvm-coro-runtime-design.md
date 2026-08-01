@@ -490,11 +490,11 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - `CoroPlanDigest` 绑定某次最终程序分析、consumer demand、精确 call/value site 和私有 lowering facts，只用于本次 codegen/cache；
 - `LibraryEffectSummary` 嵌入每个实际产出 package object/archive，发布下游继续染色所需、且该产物确实提供的事实。它不能携带或复用最终程序 demand，也不能把未发射的 entry 声称为可用。
 
-当前 `llgo.coro.library-effect-summary.v4` 已硬切并实现以下producer闭环：
+当前 `llgo.coro.library-effect-summary.v5` 已硬切并实现以下producer闭环：
 
 - canonical JSON 记录 package identity、FunctionID、最终 SuspendEffect/ExecFlags、FuncRep、
   primary kind/physical symbol、精确 managed entry、可选 raw-plain symbol、结构 ABI hash，
-  以及仅对有界 outcome-plain entry 有效的 atomic cost/proof；
+  以及仅对有界 outcome-plain entry 有效的 atomic cost/proof/content-addressed path certificate；
 - `foreign_callables`记录精确C声明的identity、物理符号、typed ABI和可选target-neutral contract certificate，不包含worker/same-M/event等consumer选择；
 - `export_bindings`记录物理C符号及ABI hash到精确managed FunctionID/primary的声明绑定；绑定本身不授予raw entry或ingress adapter能力；
 - metadata 精确绑定 Coro/Scheduler/Panic/FuncRep ABI、target triple/CPU/features/ABI、pointer width、endianness、LLVM data layout和 target capabilities；
@@ -506,13 +506,13 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - managed命中项投影成`ExternalKnown` effect/exec seed；foreign命中项把producer identity和可选target-neutral contract附着到exact C declaration，只允许替换consumer自动生成的保守default，显式本地generic/legacy契约不一致则失败，identity-only记录不授予任何operation；
 - 命中后，其所有Go caller仍通过原有SSA固定点自动染色；direct coroutine caller已验证会生成对producer发布的`$coro` declaration的structured await，不生成同步副本；typed foreign caller已验证继续得到`WaitForeign`，并在完整physical ABI/callback/frame-retention gate后由consumer选择worker或same-M；
 - consumer再次产出archive时会逐字段重发producer foreign fact，不会把本地临时default写回摘要；
-- outcome-plain managed function只能携带非零、已验证的leaf或direct-call DAG total cost；consumer在启用有限
+- outcome-plain managed function只能携带非零、已验证的leaf或direct-call DAG最长路径成本与证书；consumer在启用有限
   `MaxAtomicCost`时重新校验该producer cost，缺失proof或超预算均fail closed，不会退化成
-  无界同步执行；imported DAG proof可以作为本地bottom-up DAG的已证明callee，但每个call site仍完整计入
-  producer total cost；
+  无界同步执行；imported DAG proof可以作为本地bottom-up DAG的已证明callee，并把producer证书绑定到
+  每个精确call occurrence；
 - 缺失metadata继续保持opaque，损坏、ABI错配、重复ID或有fact但物理能力不匹配均fail closed，绝不能解释成`NoSuspend`。
 
-v4 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
+v5 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
 
 后续版本仍需补充producer capability，而不是consumer最终计划：
 
@@ -524,7 +524,7 @@ v4 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 
 - method dispatch descriptor。
 - 高阶参数 effect constraint，例如 `effect(Apply) = localEffect ∪ effect(param0)`。
 
-`Demand`、root集合、call-site选择和`CoroPlanDigest`永远不进入producer摘要；它们属于最终consumer。当前v4的managed crossing只放行已精确预检的direct plain/direct coro/outcome-plain静态调用；外部`Dispatch` producer和raw-plain consumer均明确拒绝，export binding也不授予ingress能力，直到descriptor、递归function-value layout及外部adapter lowering成为版本化archive ABI。独立library构建还必须把所有ABI-reachable API作为publication roots；不能仅发布本次构建中恰好被内部caller demand的函数。
+`Demand`、root集合、call-site选择和`CoroPlanDigest`永远不进入producer摘要；它们属于最终consumer。当前v5的managed crossing只放行已精确预检的direct plain/direct coro/outcome-plain静态调用；外部`Dispatch` producer和raw-plain consumer均明确拒绝，export binding也不授予ingress能力，直到descriptor、递归function-value layout及外部adapter lowering成为版本化archive ABI。独立library构建还必须把所有ABI-reachable API作为publication roots；不能仅发布本次构建中恰好被内部caller demand的函数。
 
 未知摘要或 ABI 版本不匹配时：
 
@@ -2022,6 +2022,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - 当前 Phase 35 已实现普通Go blocking/nonblocking多事件`select`的可编译运行版本。编译器按源码语义先求值并物化所有`ChanOp`，fast probe随机起点；blocking slow path在同一LLVM frame中保存typed candidate array和共享state，只创建一个logical wait/claim并在真正`suspend`前发布所有非nil case。runtime按channel地址用candidate内置heap-sort顺序加锁，不创建临时slice/接口对象；winner与所有loser经过exact detach、claim reset、result lease Take/Discard和slot recycle。receive/send、nil case、empty `select{}`取消、closed send显式panic、普通Try操作互操作、physical select与physical direct sender配对、select后立即再次park、TaskCancelAbort均有定向覆盖。nonblocking select只调用Try，不产生select park/resume。
 - Phase 35 的native+nogc最终链接E2E实际执行两case select、后续direct rendezvous和buffer fast path，正常约3秒内完成；host adapter通过`-race -shuffle`，JS/Wasm adapter实际运行通过，native64/wasm32均通过pre/post-CoroSplit verify和object emission。开发中同时修复了direct receive resume status block错误跳回logical block首部、重放receive前副作用的问题；status现在进入compiler-owned physical continuation。
 - Phase 35 仍是有界可运行原型而不是完整Go channel/select：`ChannelOperationSource`仍为每个single-P executor固定4个同时live physical slot，因此超过4个非nil case或高并发占满slot会fail-stop；尚无stable paged catalog、P-neutral packet/multi-P迁移、`reflect.Select`动态descriptor端到端、完整GC precise root或标准库`sync`slow path。本阶段冻结范围只保证当前direct channel与普通源码select可编译、链接、运行和确定性清理，不把这些后续能力混入同一PR。
+- outcome-plain leaf/direct-call DAG现已冻结path-sensitive ProgramIR projection和transitive SHA-256 certificate；physical planner从direct-outcome recipe重建同一证明，library-effect-summary v5跨archive传递。实际LLVM CFG/call DAG在CoroSplit前后各验证一次，未知helper、间接call、循环、dynamic alloca/EH及变量长度memory intrinsic均fail closed，常量长度memory intrinsic计入abstract LLVM work report。该证据只关闭无切换outcome body的结构成本，不代表scheduler/runtime所有source路径或最终机器周期已经获得post-LLVM证书。
 - 当前Phase 36 / PR #45把实验性多入口路径收敛为唯一stackless profile和冻结的
   `ProgramIR -> physical operation recipe -> emitter`事实流。普通函数仍只有一个primary；
   只有进入func value、interface、reflect或其他开放动态边界的callable才发布descriptor。
@@ -2116,7 +2117,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - terminal panic 的独立 native+nogc scheduler-island 已真实编译并运行 `panic(&GlobalPayload)`。production internal runner返回精确`DrivePanic`状态，导出的void program-run ABI随后执行fatal abort；bootstrap、main、panicChild三个不同LLVM handle各destroy一次，两个祖先均不resume，task-local record在三层frame销毁后仍保持exact type/data word，且G为Dead/non-Reclaimable。最终二进制要求production `PreparePanic`/`PanicDestroyed`/`LoadPanicRecord`并禁止legacy panic/print链；测试report只观察internal drive-panic与record，不代替production printer/exit owner。
 - 完整真实 `entry → allocator → v2 factory → runtime/package init → main → scheduler` linked smoke 仍受上述 runtime/Panic/foreign blockers 限制；scheduler-island、runtime adapter 和 freestanding wasm CLI fixture 各自证明的边界不能合并表述为完整 Go runtime 已经端到端运行。
 - 当前 cache digest 只解决同一完整程序计划下的内部 package cache；未知未来 caller 可复用的预编译 archive/标准库仍需 producer summary、canonical boundary Dispatch 和 linker ABI 校验。
-- hchan typed materialization的buffer/closed peer循环已拆成显式runtime子游标，每个runner reduction至多处理一个peer且不跨返回持锁；同一固定枚举typed plan已接入单Worker HostOp、Worker+Timer deadline和keyed park：runtime-private adapter/control/key registry先在旧owner退休，各物理source再由common core逐个确认、取结果和回收，packet物化后resume不回访旧P。plan把runtime step数量与source数量分开，worker scalar只写已有packet，不增加callback/interface或重复payload。keyed `Posting`退休也已改成exact generation终态协议：producer先发布private Delivered再Post Manual fact，取消先胜时producer跳过或由Manual source admission/quiescence吸收stale Post，不再busy loop或增加runner wait状态；真实`Mutex + Cond + WaitGroup`同步程序和WASM32布局已验证。固定2048槽key registry的线性FIFO选择仍是后续高争用性能项。后续cost工作继续覆盖park preparation/sort、普通try discard scan、同步close drain、单element copy上限，以及Phase 31 physical resume内部的frame/ancestry/link scan。再把idle prepare/wake、terminal/command close、shutdown、frame scan/Zero与source-specific隐藏工作纳入同一账本，并在已完成JS command与WASI Preview 1 command adapter的基础上补齐JS HostOp/reentry、WASI Preview 2、RTOS和baremetal的queued/blocked/deadline adapter，完成post-LLVM cost certificate。其后把当前64槽native timer升级为dynamic/sharded heap，补齐`Sleep(0)` fast path、Timer/Ticker/AfterFunc和dynamic callable descriptor，并实现有界blocking worker、registration unregister和异步syscall source。各target复用同一core并分别证明完整ingress join边界。多P开放前还必须为每一种composite park完成P-neutral packet和parkable capacity permit；未物化packet的G不可steal。随后补suspended-frame GC、完整defer/recover/Goexit、dynamic/closure/method `go`及平台tooling。所有阶段保持无栈、单primary、静态source catalog和未证明即fail closed，不引入其他语言的Task/Future对象层。
+- hchan typed materialization的buffer/closed peer循环已拆成显式runtime子游标，每个runner reduction至多处理一个peer且不跨返回持锁；同一固定枚举typed plan已接入单Worker HostOp、Worker+Timer deadline和keyed park：runtime-private adapter/control/key registry先在旧owner退休，各物理source再由common core逐个确认、取结果和回收，packet物化后resume不回访旧P。plan把runtime step数量与source数量分开，worker scalar只写已有packet，不增加callback/interface或重复payload。keyed `Posting`退休也已改成exact generation终态协议：producer先发布private Delivered再Post Manual fact，取消先胜时producer跳过或由Manual source admission/quiescence吸收stale Post，不再busy loop或增加runner wait状态；真实`Mutex + Cond + WaitGroup`同步程序和WASM32布局已验证。固定2048槽key registry的线性FIFO选择仍是后续高争用性能项。后续cost工作继续覆盖park preparation/sort、普通try discard scan、同步close drain、单element copy上限，以及Phase 31 physical resume内部的frame/ancestry/link scan。再把idle prepare/wake、terminal/command close、shutdown、frame scan/Zero与source-specific隐藏工作纳入同一账本，并在已完成JS command与WASI Preview 1 command adapter的基础上补齐JS HostOp/reentry、WASI Preview 2、RTOS和baremetal的queued/blocked/deadline adapter，把当前outcome-plain结构证书扩展为这些runtime路径的post-LLVM cost certificate。其后把当前64槽native timer升级为dynamic/sharded heap，补齐`Sleep(0)` fast path、Timer/Ticker/AfterFunc和dynamic callable descriptor，并实现有界blocking worker、registration unregister和异步syscall source。各target复用同一core并分别证明完整ingress join边界。多P开放前还必须为每一种composite park完成P-neutral packet和parkable capacity permit；未物化packet的G不可steal。随后补suspended-frame GC、完整defer/recover/Goexit、dynamic/closure/method `go`及平台tooling。所有阶段保持无栈、单primary、静态source catalog和未证明即fail closed，不引入其他语言的Task/Future对象层。
 - 标准host-Go下`self` pointer导致的逃逸只是Phase 32 C0 test artifact，不是production allocation contract。C1需由compiler提供caller-owned pair storage，并用noescape/frame certificate证明它位于不移动coroutine frame且无heap allocation，同时单独证明`hchan` critical section NoSuspend/NoPanic。
 
 ### Phase 1：单 P deterministic scheduler

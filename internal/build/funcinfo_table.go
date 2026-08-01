@@ -847,6 +847,7 @@ func emitFuncInfoEntrySitesForModule(mod llvm.Module, pointerSize int, machO boo
 	if mod.IsNil() {
 		return
 	}
+	atomicSymbols, _ := llssa.CoroAtomicCostLocalSymbols(mod)
 	records := readFuncInfo(mod)
 	if len(records) == 0 {
 		return
@@ -917,7 +918,10 @@ func emitFuncInfoEntrySitesForModule(mod llvm.Module, pointerSize int, machO boo
 			".quad " + uint64Hex(symbolID) + "\n" +
 			".popsection"
 		asm := llvm.InlineAsm(asmType, instruction, "", true, false, llvm.InlineAsmDialectATT, false)
-		builder.CreateCall(asmType, asm, nil, "")
+		call := builder.CreateCall(asmType, asm, nil, "")
+		if _, bounded := atomicSymbols[symbol]; bounded {
+			llssa.MarkCoroAtomicBoundedCompilerCall(llvmCtx, call, llssa.CoroAtomicCompilerDataAnchorV1)
+		}
 	}
 }
 
@@ -932,6 +936,7 @@ func emitFuncInfoStubSitesForModule(mod llvm.Module, pointerSize int, machO bool
 	if mod.IsNil() {
 		return
 	}
+	atomicSymbols, _ := llssa.CoroAtomicCostLocalSymbols(mod)
 	llvmCtx := mod.Context()
 	builder := llvmCtx.NewBuilder()
 	defer builder.Dispose()
@@ -970,7 +975,10 @@ func emitFuncInfoStubSitesForModule(mod llvm.Module, pointerSize int, machO bool
 			".quad " + uint64Hex(funcInfoSymbolID(target)) + "\n" +
 			".popsection"
 		asm := llvm.InlineAsm(asmType, instruction, "", true, false, llvm.InlineAsmDialectATT, false)
-		builder.CreateCall(asmType, asm, nil, "")
+		call := builder.CreateCall(asmType, asm, nil, "")
+		if _, bounded := atomicSymbols[symbol]; bounded {
+			llssa.MarkCoroAtomicBoundedCompilerCall(llvmCtx, call, llssa.CoroAtomicCompilerDataAnchorV1)
+		}
 	}
 }
 

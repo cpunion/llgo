@@ -408,6 +408,9 @@ type coroPhysicalFunctionPlan struct {
 	frameRetentionABI string
 	needsPreempt      bool
 	preempt           *coroPhysicalPreemptPlan
+	atomicCost        uint64
+	atomicCostProof   coro.AtomicCostProof
+	atomicCertificate string
 	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
 }
 
@@ -432,11 +435,13 @@ func prepareCoroPhysicalFunctionPlan(
 		frameRetentionABI: audit.frameRetentionABI,
 		instructions:      make(map[ssa.Instruction]coroPhysicalInstructionPlan),
 	}
+	var logical coro.FunctionPlan
 	if whole != nil {
 		function, planned := whole.FunctionPlan(audit.fn)
 		if !planned {
 			return nil, fmt.Errorf("physical function planning requires a frozen function plan")
 		}
+		logical = function
 		plan.needsPreempt = function.Exec.Contains(coro.NeedsPreempt)
 	}
 	preempt, err := planCoroPhysicalPreemption(
@@ -481,6 +486,43 @@ func prepareCoroPhysicalFunctionPlan(
 			instructionPlan.reuseValueAddress = true
 			plan.instructions[instruction] = instructionPlan
 		}
+	}
+	if logical.AtomicCostProof.ProvesOutcomePlain() {
+		if audit.universe == nil || audit.universe.coroProgramIR == nil {
+			return nil, fmt.Errorf("atomic-cost physical proof requires one frozen ProgramIR")
+		}
+		facts, err := audit.universe.coroProgramIR.functionLocalBodyFacts(audit.fn)
+		if err != nil {
+			return nil, fmt.Errorf("atomic-cost physical proof: %w", err)
+		}
+		callees := make(map[ssa.CallInstruction]coro.SSAAtomicCalleeCertificate)
+		for instruction, instructionPlan := range plan.instructions {
+			if instructionPlan.control != coroPhysicalControlDirectOutcome {
+				continue
+			}
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok || instructionPlan.controlTarget == nil || instructionPlan.controlTargetID == "" {
+				return nil, fmt.Errorf("atomic-cost physical proof contains an incomplete direct outcome edge")
+			}
+			targetPlan, planned := whole.FunctionPlan(instructionPlan.controlTarget)
+			if !planned || targetPlan.ID != instructionPlan.controlTargetID ||
+				targetPlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+				!targetPlan.AtomicCostProof.ProvesOutcomePlain() {
+				return nil, fmt.Errorf("atomic-cost physical proof target %q has no exact outcome capability", instructionPlan.controlTargetID)
+			}
+			callees[call] = coro.SSAAtomicCalleeCertificate{
+				Function: targetPlan.ID, Cost: targetPlan.AtomicCost, Certificate: targetPlan.AtomicCostCertificate,
+			}
+		}
+		if err := coro.VerifySSAAtomicCostCertificate(
+			logical.ID, logical.AtomicCostProof, logical.AtomicCost, logical.AtomicCostCertificate,
+			facts.AtomicPath, callees,
+		); err != nil {
+			return nil, fmt.Errorf("atomic-cost physical proof: %w", err)
+		}
+		plan.atomicCost = logical.AtomicCost
+		plan.atomicCostProof = logical.AtomicCostProof
+		plan.atomicCertificate = logical.AtomicCostCertificate
 	}
 	return plan, nil
 }

@@ -33,9 +33,9 @@ const (
 	// package objects and archives. It is deliberately independent from the
 	// whole-program Summary and PlanDigest schemas: consumer demand may change,
 	// while these producer effects and physically available entries may not.
-	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v4"
+	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v5"
 
-	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v4"
+	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v5"
 
 	// LibraryEffectSummarySection is the portable object-section identity.
 	// Mach-O emission uses the same leaf name in an explicit segment.
@@ -53,7 +53,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 4,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 5,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -88,17 +88,18 @@ type LibraryEffectMetadata struct {
 // not recovered from a symbol address. A RawPlainSymbol is an additional exact
 // legacy crossing, never a second managed source implementation.
 type LibraryEffectFunction struct {
-	ID              FunctionID       `json:"id"`
-	ABIHash         string           `json:"abi_hash"`
-	Effect          Effect           `json:"effect"`
-	Exec            ExecFlags        `json:"exec"`
-	FuncRep         FuncRep          `json:"func_rep"`
-	Primary         PrimaryKind      `json:"primary"`
-	ManagedEntry    ManagedEntryKind `json:"managed_entry"`
-	AtomicCost      uint64           `json:"atomic_cost"`
-	AtomicCostProof AtomicCostProof  `json:"atomic_cost_proof"`
-	PrimarySymbol   string           `json:"primary_symbol"`
-	RawPlainSymbol  string           `json:"raw_plain_symbol,omitempty"`
+	ID                    FunctionID       `json:"id"`
+	ABIHash               string           `json:"abi_hash"`
+	Effect                Effect           `json:"effect"`
+	Exec                  ExecFlags        `json:"exec"`
+	FuncRep               FuncRep          `json:"func_rep"`
+	Primary               PrimaryKind      `json:"primary"`
+	ManagedEntry          ManagedEntryKind `json:"managed_entry"`
+	AtomicCost            uint64           `json:"atomic_cost"`
+	AtomicCostProof       AtomicCostProof  `json:"atomic_cost_proof"`
+	AtomicCostCertificate string           `json:"atomic_cost_certificate"`
+	PrimarySymbol         string           `json:"primary_symbol"`
+	RawPlainSymbol        string           `json:"raw_plain_symbol,omitempty"`
 }
 
 // LibraryEffectForeignCallable publishes one exact producer-side C
@@ -340,7 +341,10 @@ func (function LibraryEffectFunction) validate() error {
 		if !function.AtomicCostProof.ProvesOutcomePlain() || function.AtomicCost == 0 {
 			return fmt.Errorf("coro: library function %q has an outcome entry without an atomic-cost proof", function.ID)
 		}
-	} else if function.AtomicCostProof != AtomicCostUnproven || function.AtomicCost != 0 {
+		if err := validateSHA256Hex("library function atomic-cost certificate", function.AtomicCostCertificate); err != nil {
+			return err
+		}
+	} else if function.AtomicCostProof != AtomicCostUnproven || function.AtomicCost != 0 || function.AtomicCostCertificate != "" {
 		return fmt.Errorf("coro: library function %q has atomic-cost metadata without an outcome entry", function.ID)
 	}
 	if err := validateStableIdentityText("library function primary symbol", function.PrimarySymbol); err != nil {
@@ -656,15 +660,16 @@ func (function LibraryEffectFunction) ImportedPolicy() (SSAFunctionPolicy, error
 		return SSAFunctionPolicy{}, err
 	}
 	return SSAFunctionPolicy{
-		Effect:           function.Effect,
-		Exec:             function.Exec,
-		ManagedEntry:     function.ManagedEntry,
-		AtomicCost:       function.AtomicCost,
-		AtomicCostProof:  function.AtomicCostProof,
-		IgnoreBody:       true,
-		External:         ExternalKnown,
-		OverrideExternal: true,
-		NeedsDispatch:    function.FuncRep == Dispatch,
+		Effect:                function.Effect,
+		Exec:                  function.Exec,
+		ManagedEntry:          function.ManagedEntry,
+		AtomicCost:            function.AtomicCost,
+		AtomicCostProof:       function.AtomicCostProof,
+		AtomicCostCertificate: function.AtomicCostCertificate,
+		IgnoreBody:            true,
+		External:              ExternalKnown,
+		OverrideExternal:      true,
+		NeedsDispatch:         function.FuncRep == Dispatch,
 	}, nil
 }
 

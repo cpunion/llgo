@@ -108,6 +108,10 @@ func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("verify outcome-plain module before CoroSplit: %v\n%s", err, module.String())
 			}
+			preCertificate := requireCoroAtomicCostReport(t, module, 1)
+			if preCertificate.Functions[0].Certificate != leafPlan.AtomicCostCertificate {
+				t.Fatalf("leaf post-LLVM certificate = %+v, plan=%+v", preCertificate.Functions[0], leafPlan)
+			}
 			leafBody := module.NamedFunction("foo.Leaf$outcome")
 			if leafBody.IsNil() {
 				t.Fatalf("outcome-plain leaf symbol is absent:\n%s", module.String())
@@ -127,6 +131,10 @@ func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 			}
 
 			runCoroABITestPipeline(t, prog, module)
+			postCertificate := requireCoroAtomicCostReport(t, module, 1)
+			if postCertificate.Digest != preCertificate.Digest {
+				t.Fatalf("leaf atomic-cost report changed across CoroSplit: pre=%+v post=%+v", preCertificate, postCertificate)
+			}
 			for _, name := range []string{"foo.Leaf$outcome.resume", "foo.Leaf$outcome.destroy"} {
 				if !module.NamedFunction(name).IsNil() {
 					t.Fatalf("CoroSplit manufactured outcome-plain helper %q:\n%s", name, module.String())
@@ -136,6 +144,7 @@ func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 			if resume.IsNil() || !strings.Contains(resume.String(), "foo.Leaf$outcome") {
 				t.Fatalf("post-split parent lost direct outcome-plain call:\n%s", module.String())
 			}
+			runCoroAtomicCostOptimization(t, prog, module, 1)
 		})
 	}
 }
@@ -172,6 +181,7 @@ func TestCoroOutcomePlainDAGNativeAndWasm32(t *testing.T) {
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("verify outcome-plain DAG before CoroSplit: %v\n%s", err, module.String())
 			}
+			preCertificate := requireCoroAtomicCostReport(t, module, 2)
 			middleBody := module.NamedFunction("foo.Middle$outcome")
 			if middleBody.IsNil() {
 				t.Fatalf("outcome-plain DAG symbol is absent:\n%s", module.String())
@@ -196,6 +206,10 @@ func TestCoroOutcomePlainDAGNativeAndWasm32(t *testing.T) {
 			}
 
 			runCoroABITestPipeline(t, prog, module)
+			postCertificate := requireCoroAtomicCostReport(t, module, 2)
+			if postCertificate.Digest != preCertificate.Digest {
+				t.Fatalf("DAG atomic-cost report changed across CoroSplit: pre=%+v post=%+v", preCertificate, postCertificate)
+			}
 			for _, base := range []string{"foo.Leaf$outcome", "foo.Middle$outcome"} {
 				for _, suffix := range []string{".resume", ".destroy"} {
 					if !module.NamedFunction(base + suffix).IsNil() {
@@ -207,6 +221,7 @@ func TestCoroOutcomePlainDAGNativeAndWasm32(t *testing.T) {
 			if resume.IsNil() || !strings.Contains(resume.String(), "foo.Middle$outcome") {
 				t.Fatalf("post-split Parent lost direct Middle outcome call:\n%s", module.String())
 			}
+			runCoroAtomicCostOptimization(t, prog, module, 2)
 		})
 	}
 }
@@ -427,8 +442,11 @@ func optimizeCoroOutcomeCostModule(t *testing.T, prog llssa.Program, module llvm
 func TestCoroImportedOutcomePlainUsesPublishedPhysicalABI(t *testing.T) {
 	const source = `package foo
 func Imported(value uint32, payload any, fail bool) uint32
-func Caller(value uint32, payload any, fail bool) uint32 {
+func Middle(value uint32, payload any, fail bool) uint32 {
 	return Imported(value, payload, fail)
+}
+func Caller(value uint32, payload any, fail bool) uint32 {
+	return Middle(value, payload, fail)
 }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
@@ -482,7 +500,7 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 	functionIDs.CoroABI = libraryMetadata.CoroABI
 	functionIDs.SchedulerABI = libraryMetadata.SchedulerABI
 	functionIDs.ArchiveReady = true
-	imported, caller := ssaPkg.Func("Imported"), ssaPkg.Func("Caller")
+	imported, middle, caller := ssaPkg.Func("Imported"), ssaPkg.Func("Middle"), ssaPkg.Func("Caller")
 	importedID, err := coro.StableFunctionID(imported, functionIDs)
 	if err != nil {
 		t.Fatal(err)
@@ -496,16 +514,17 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 		t.Fatal(err)
 	}
 	fact := coro.LibraryEffectFunction{
-		ID:              importedID,
-		ABIHash:         abiHash,
-		Effect:          coro.OutcomeStructured,
-		Exec:            coro.MayUnwind,
-		FuncRep:         coro.DirectCoro,
-		Primary:         coro.PrimaryCoroutine,
-		ManagedEntry:    coro.ManagedEntryOutcomePlain,
-		AtomicCost:      3,
-		AtomicCostProof: coro.AtomicCostLeaf,
-		PrimarySymbol:   baseSymbol + coroOutcomePlainPrimarySuffix,
+		ID:                    importedID,
+		ABIHash:               abiHash,
+		Effect:                coro.OutcomeStructured,
+		Exec:                  coro.MayUnwind,
+		FuncRep:               coro.DirectCoro,
+		Primary:               coro.PrimaryCoroutine,
+		ManagedEntry:          coro.ManagedEntryOutcomePlain,
+		AtomicCost:            3,
+		AtomicCostProof:       coro.AtomicCostLeaf,
+		AtomicCostCertificate: strings.Repeat("a", 64),
+		PrimarySymbol:         baseSymbol + coroOutcomePlainPrimarySuffix,
 	}
 	plan, err := coro.AnalyzeSSA(
 		ssaPkg.Prog,
@@ -513,8 +532,9 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 		coro.SSAConfig{
 			EmissionUniverse:     ssaUniverse,
 			FunctionIDs:          functionIDs,
-			MaxPlainInstructions: -1,
+			MaxPlainInstructions: 128,
 			OutcomeMode:          coro.OutcomeExplicitStatus,
+			ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
 				if function == imported {
 					return fact.ImportedPolicy()
@@ -529,8 +549,13 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 	importedPlan, found := plan.FunctionPlan(imported)
 	if !found || importedPlan.Emission != coro.EmitExternal ||
 		importedPlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
-		importedPlan.AtomicCost != fact.AtomicCost || importedPlan.AtomicCostProof != fact.AtomicCostProof {
+		importedPlan.AtomicCost != fact.AtomicCost || importedPlan.AtomicCostProof != fact.AtomicCostProof ||
+		importedPlan.AtomicCostCertificate != fact.AtomicCostCertificate {
 		t.Fatalf("imported outcome plan = %+v, present=%t", importedPlan, found)
+	}
+	middlePlan, found := plan.FunctionPlan(middle)
+	if !found || middlePlan.Emission != coro.EmitOutcomePlain || middlePlan.AtomicCostProof != coro.AtomicCostDAG {
+		t.Fatalf("local imported-callee DAG plan = %+v, present=%t", middlePlan, found)
 	}
 	compilation := &Compilation{
 		CoroPlan:                  plan,
@@ -553,21 +578,64 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify imported outcome-plain consumer: %v\n%s", err, module.String())
 	}
+	requireCoroAtomicCostReport(t, module, 1)
 	declaration := module.NamedFunction(fact.PrimarySymbol)
 	if declaration.IsNil() || !declaration.IsDeclaration() ||
 		!regexp.MustCompile(`declare void @`).MatchString(declaration.String()) {
 		t.Fatalf("imported outcome-plain declaration has the wrong physical ABI:\n%s", module.String())
 	}
-	callerIR := requireCoroPhysicalFunction(t, module, "foo.Caller").String()
-	if !strings.Contains(callerIR, fact.PrimarySymbol) || strings.Contains(callerIR, baseSymbol+coroPrimarySuffix) {
-		t.Fatalf("imported outcome call did not use the published entry:\n%s", callerIR)
+	middleBody := module.NamedFunction("foo.Middle$outcome")
+	if middleBody.IsNil() {
+		t.Fatalf("local imported-callee outcome body is absent:\n%s", module.String())
 	}
+	middleIR := middleBody.String()
+	if !strings.Contains(middleIR, fact.PrimarySymbol) || strings.Contains(middleIR, baseSymbol+coroPrimarySuffix) {
+		t.Fatalf("local outcome DAG did not use the imported published entry:\n%s", middleIR)
+	}
+	callerIR := requireCoroPhysicalFunction(t, module, "foo.Caller").String()
+	if !strings.Contains(callerIR, "foo.Middle$outcome") || strings.Contains(callerIR, fact.PrimarySymbol) {
+		t.Fatalf("root did not consume only the local collapsed outcome boundary:\n%s", callerIR)
+	}
+	runCoroABITestPipeline(t, prog, module)
+	requireCoroAtomicCostReport(t, module, 1)
+	runCoroAtomicCostOptimization(t, prog, module, 1)
 }
 
 func compileCoroOutcomePlainFixture(t *testing.T, target *llssa.Target) (
 	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.Function,
 ) {
 	return compileCoroOutcomePlainFixtureWithBudget(t, target, 64)
+}
+
+func requireCoroAtomicCostReport(t *testing.T, module llvm.Module, functions int) llssa.CoroAtomicCostReport {
+	t.Helper()
+	report, err := llssa.VerifyCoroAtomicCostModule(module)
+	if err != nil {
+		t.Fatalf("verify outcome post-LLVM atomic-cost certificate: %v\n%s", err, module.String())
+	}
+	if len(report.Functions) != functions || len(report.Digest) != 64 {
+		t.Fatalf("post-LLVM atomic-cost report = %+v, want %d functions and one digest", report, functions)
+	}
+	for _, function := range report.Functions {
+		if !function.Local || function.SemanticCost == 0 || function.LLVMMaxCost == 0 || len(function.Certificate) != 64 {
+			t.Fatalf("incomplete post-LLVM atomic-cost function report: %+v", function)
+		}
+	}
+	return report
+}
+
+func runCoroAtomicCostOptimization(t *testing.T, prog llssa.Program, module llvm.Module, functions int) {
+	t.Helper()
+	options := llvm.NewPassBuilderOptions()
+	defer options.Dispose()
+	options.SetVerifyEach(true)
+	if err := module.RunPasses("default<O2>", prog.TargetMachine(), options); err != nil {
+		t.Fatalf("optimize atomic-cost fixture: %v\n%s", err, module.String())
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify optimized atomic-cost fixture: %v\n%s", err, module.String())
+	}
+	requireCoroAtomicCostReport(t, module, functions)
 }
 
 func compileCoroOutcomePlainFixtureWithBudget(t *testing.T, target *llssa.Target, maxPlainInstructions int) (

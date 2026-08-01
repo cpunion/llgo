@@ -120,9 +120,10 @@ type FunctionSpec struct {
 	// ManagedEntry is supplied only for an ExternalKnown producer. Defined
 	// bodies derive it from their final emission; unknown external declarations
 	// have no trusted managed entry ABI.
-	ManagedEntry    ManagedEntryKind
-	AtomicCost      uint64
-	AtomicCostProof AtomicCostProof
+	ManagedEntry          ManagedEntryKind
+	AtomicCost            uint64
+	AtomicCostProof       AtomicCostProof
+	AtomicCostCertificate string
 	// TrustedBoundedRecursion is a frontend proof that this function's
 	// recursion depth is bounded independently of scheduler preemption. It
 	// suppresses the automatic recursive-SCC preemption seed only when every
@@ -229,8 +230,8 @@ type FunctionPlan struct {
 	// ManagedEntry is the exact physical ABI invoked by managed callers. Unlike
 	// Emission it remains meaningful for an imported EmitExternal declaration.
 	ManagedEntry ManagedEntryKind
-	// AtomicCost is a conservative instruction-cost upper bound from the last
-	// scheduler cut to terminal completion. It is meaningful only when
+	// AtomicCost is the longest path-sensitive semantic work bound from the
+	// last scheduler cut to terminal completion. It is meaningful only when
 	// AtomicCostProof is not AtomicCostUnproven.
 	AtomicCost uint64
 	// AtomicCostProof records the closed-world proof class which authorized the
@@ -238,6 +239,9 @@ type FunctionPlan struct {
 	// unchanged; the final effect may drop AwaitStructured after every such edge
 	// has been replaced by a proven synchronous outcome call.
 	AtomicCostProof AtomicCostProof
+	// AtomicCostCertificate is the content-addressed path proof. Imported and
+	// local outcome entries require it; unproven functions must leave it empty.
+	AtomicCostCertificate string
 	// FuncRep is direct unless value-flow requested an open dispatch boundary.
 	FuncRep   FuncRep
 	External  ExternalKind
@@ -346,13 +350,16 @@ func validateManagedEntryPlan(plan FunctionPlan) error {
 
 	switch plan.AtomicCostProof {
 	case AtomicCostUnproven:
-		if plan.AtomicCost != 0 || plan.ManagedEntry == ManagedEntryOutcomePlain {
+		if plan.AtomicCost != 0 || plan.AtomicCostCertificate != "" || plan.ManagedEntry == ManagedEntryOutcomePlain {
 			return fmt.Errorf("coro: function %q has outcome entry/cost without an atomic-cost proof", plan.ID)
 		}
 	case AtomicCostLeaf, AtomicCostDAG:
 		if plan.AtomicCost == 0 || plan.ManagedEntry != ManagedEntryOutcomePlain ||
 			(plan.External != Defined && plan.External != ExternalKnown) {
 			return fmt.Errorf("coro: function %q has an invalid atomic-cost capability", plan.ID)
+		}
+		if err := validateSHA256Hex("atomic-cost certificate", plan.AtomicCostCertificate); err != nil {
+			return fmt.Errorf("coro: function %q: %w", plan.ID, err)
 		}
 	}
 	return nil

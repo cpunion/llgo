@@ -240,7 +240,7 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 	}
 	switch spec.AtomicCostProof {
 	case AtomicCostUnproven:
-		if spec.AtomicCost != 0 || spec.ManagedEntry == ManagedEntryOutcomePlain {
+		if spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" || spec.ManagedEntry == ManagedEntryOutcomePlain {
 			return fmt.Errorf("coro: function %q: outcome entry/cost requires an atomic-cost proof", spec.ID)
 		}
 	case AtomicCostLeaf, AtomicCostDAG:
@@ -248,6 +248,9 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 			spec.ManagedEntry != ManagedEntryOutcomePlain || spec.Seed != OutcomeStructured ||
 			spec.Exec&^MayUnwind != 0 {
 			return fmt.Errorf("coro: function %q: invalid imported outcome-plain capability", spec.ID)
+		}
+		if err := validateSHA256Hex("atomic-cost certificate", spec.AtomicCostCertificate); err != nil {
+			return fmt.Errorf("coro: function %q: %w", spec.ID, err)
 		}
 	}
 	if spec.RawPlainEntry && spec.External != Defined {
@@ -962,7 +965,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 		}
 		emission := bodyEmissionFor(managedDemands[id], rawPlainDemands[id], effects[id], spec.External)
 		managedEntry := ManagedEntryNone
-		atomicCost, atomicCostProof := uint64(0), AtomicCostUnproven
+		atomicCost, atomicCostProof, atomicCostCertificate := uint64(0), AtomicCostUnproven, ""
 		if spec.External == ExternalKnown {
 			managedEntry = spec.ManagedEntry
 			if managedEntry == ManagedEntryNone {
@@ -974,7 +977,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 					managedEntry = ManagedEntryCoroutine
 				}
 			}
-			atomicCost, atomicCostProof = spec.AtomicCost, spec.AtomicCostProof
+			atomicCost, atomicCostProof, atomicCostCertificate = spec.AtomicCost, spec.AtomicCostProof, spec.AtomicCostCertificate
 		} else {
 			switch emission {
 			case EmitPlain, EmitRawPlain:
@@ -998,6 +1001,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 			ManagedEntry:            managedEntry,
 			AtomicCost:              atomicCost,
 			AtomicCostProof:         atomicCostProof,
+			AtomicCostCertificate:   atomicCostCertificate,
 			FuncRep:                 rep,
 			External:                spec.External,
 			Recursive:               recursive[id],

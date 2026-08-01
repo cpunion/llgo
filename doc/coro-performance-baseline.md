@@ -202,8 +202,8 @@ a second SSA scanner or coroutine CFG builder. A local candidate may add only
 ordinary `Call` and `Extract` recipes to the V0 leaf language. Bottom-up
 selection requires every counted call to be one exact, closed, static managed
 edge whose target already publishes a proven local or imported outcome entry.
-The conservative `AtomicCostDAG` is the local evaluated-instruction count plus
-the complete callee cost once per source call site. Roots, references,
+`AtomicCostDAG` is the longest path over the frozen ProgramIR CFG, with the
+complete transitive callee cost added at each exact source call occurrence. Roots, references,
 compiler-lowered incoming calls, open/dynamic targets, recursion, CFG cycles,
 cost overflow and budget excess retain the full coroutine.
 
@@ -212,9 +212,9 @@ completion storage, and republishes child Panic or Goexit without scheduling.
 A target-layout check rejects the optimization before plan selection when a
 call result would exceed the native-stack single-object bound; the full
 coroutine fallback continues to use managed result storage. The same proof
-class is carried by plan digest v32, diagnostic summary v6 and library-effect
-summary v4, so an imported DAG proof can close a local DAG and contributes its
-full producer cost.
+class and its content-addressed certificate are carried by plan digest v33,
+diagnostic summary v7 and library-effect summary v5, so an imported DAG proof
+can close a local DAG and contributes its full producer path certificate.
 
 For the exact `Parent -> Middle -> Leaf` native/wasm fixture, disabling the
 budget retains three coroutines while the DAG cohort retains only the root:
@@ -229,15 +229,48 @@ and wasm32 verify before and after CoroSplit; the middle outcome body directly
 calls the leaf outcome body, contains no coroutine intrinsic or scheduler
 await hook, and republishes Panic/Goexit statuses to its parent.
 
+### Path and post-LLVM certificate cohort
+
+ProgramIR now freezes one minimal block projection per defined function:
+canonical block/successor indexes, non-debug semantic work per block, and each
+ordinary call at its exact source-instruction coordinate. Outcome selection
+computes the longest entry-to-terminal path, takes the maximum rather than the
+sum across mutually exclusive branches, rejects CFG/call cycles and overflow,
+and hashes the projection together with FunctionID, proof class, cost, and the
+complete transitive callee certificates. Physical planning reconstructs that
+same certificate from the frozen direct-outcome recipes; any logical/physical
+edge disagreement fails before emission.
+
+Each emitted local outcome body publishes compiler-only
+`llgo.coro.atomic_cost` metadata. Imported outcome callees publish dependency
+rows containing their already ABI-checked producer certificate. A fail-closed
+LLVM verifier runs both before and after CoroSplit, walks the actual LLVM CFG
+and certified direct-call DAG, and rejects cycles, indirect calls, coroutine
+intrinsics, unknown helpers, dynamic allocas, unsupported EH/control, and
+variable-length memory intrinsics. Constant-length `memset`, `memcpy`, and
+`memmove` are accepted with their byte count included in the abstract work
+bound. The final funcinfo/pclntab data-only inline-assembly anchor is admitted
+only through compiler-injected identity plus a digest of its complete assembly
+payload; unmarked inline assembly remains rejected. The deterministic
+`llgo.coro.post-llvm-atomic-cost.v1` report binds each semantic certificate to
+the observed LLVM maximum before/after CoroSplit and after final optimization
+and compiler-owned site insertion.
+
+This closes the structural no-cut certificate used by outcome-plain selection;
+it is not yet a target-cycle or wall-clock preemption-latency proof. LLVM work
+units are deliberately reported separately from semantic work units. Machine
+instruction latency, target-specific library calls/assembly, final machine
+stack bytes, interrupts, and scheduler overhead still require the target cost
+model and final-code certificate described in the runtime design.
+
 ### Remaining outcome-plain expansion
 
 The original 574-body opportunity is not yet claimed. The current cohorts do
 not accept defer/recover bodies, a Goexit producer, function values/interfaces,
 or recursive/open-world paths. The next cohorts are:
 
-1. replace the conservative DAG sum with the complete path-sensitive
-   `MaxAtomicCost`/runtime/post-LLVM certificate needed for a strict preemption
-   latency claim;
+1. add a target-machine cost/stack model if the structural bound is to become
+   a strict wall-clock preemption-latency claim;
 2. add exact panic source/trace ownership, Goexit, cleanup/defer and recover
    outcome transactions without cloning source bodies;
 3. add descriptor/interface dispatch only after entry-kind metadata and every

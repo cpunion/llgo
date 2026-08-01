@@ -488,6 +488,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			e.plan.ManagedEntry != e.libraryEffect.ManagedEntry ||
 			e.plan.AtomicCost != e.libraryEffect.AtomicCost ||
 			e.plan.AtomicCostProof != e.libraryEffect.AtomicCostProof ||
+			e.plan.AtomicCostCertificate != e.libraryEffect.AtomicCostCertificate ||
 			e.libraryEffect.PrimarySymbol == "" {
 			return fmt.Errorf(
 				"external coroutine emission %q disagrees with its producer library fact",

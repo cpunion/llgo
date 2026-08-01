@@ -164,11 +164,97 @@ func root(value any, fail bool) int {
 	})
 
 	t.Run("incomplete source-call accounting", func(t *testing.T) {
-		mismatch := analyze(t, 128, 2)
-		if got := functionPlanFor(t, mismatch, middle); got.Emission == EmitOutcomePlain || got.AtomicCostProof != AtomicCostUnproven {
-			t.Fatalf("mismatched-call middle plan = %+v, DAG must fail closed", got)
+		_, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, SSAConfig{
+			OutcomeMode:          OutcomeExplicitStatus,
+			MaxPlainInstructions: 128,
+			ClassifyLocalBody:    classify(2),
+		})
+		if err == nil || !strings.Contains(err.Error(), "atomic path call occurrences") {
+			t.Fatalf("mismatched ProgramIR call ledger error = %v", err)
 		}
 	})
+}
+
+func TestAnalyzeSSAOutcomePlainDAGUsesLongestMutuallyExclusivePath(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "outcome_plain_branch.go", `package coroid
+
+func left(value any, fail bool) int {
+	if fail { panic(value) }
+	return 1
+}
+func right(value any, fail bool) int {
+	if fail { panic(value) }
+	return 2
+}
+
+func choose(value any, fail, useLeft bool) int {
+	if useLeft {
+		return left(value, fail)
+	}
+	return right(value, fail)
+}
+
+func root(value any, fail, useLeft bool) int { return choose(value, fail, useLeft) }
+`)
+	left := packageFunction(t, pkg, "left")
+	right := packageFunction(t, pkg, "right")
+	choose := packageFunction(t, pkg, "choose")
+	root := packageFunction(t, pkg, "root")
+	classify := func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		facts.OutcomePlainLeaf = fn == left || fn == right
+		facts.OutcomePlainDAG = facts.OutcomePlainLeaf || fn == choose
+		if fn == choose {
+			facts.OutcomePlainCallCount = 2
+		}
+		return facts, nil
+	}
+	config := planDigestSSAConfig()
+	config.OutcomeMode = OutcomeExplicitStatus
+	config.MaxPlainInstructions = 128
+	config.ClassifyLocalBody = classify
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftPlan := functionPlanFor(t, plan, left)
+	rightPlan := functionPlanFor(t, plan, right)
+	choosePlan := functionPlanFor(t, plan, choose)
+	if leftPlan.AtomicCostProof != AtomicCostLeaf || rightPlan.AtomicCostProof != AtomicCostLeaf ||
+		choosePlan.Emission != EmitOutcomePlain || choosePlan.AtomicCostProof != AtomicCostDAG {
+		t.Fatalf("branch plans = left=%+v right=%+v choose=%+v", leftPlan, rightPlan, choosePlan)
+	}
+	conservativeSum := uint64(scanSSAFunctionBody(choose).InstructionCount) + leftPlan.AtomicCost + rightPlan.AtomicCost
+	if choosePlan.AtomicCost >= conservativeSum {
+		t.Fatalf("path-sensitive cost = %d, want less than branch-summed cost %d", choosePlan.AtomicCost, conservativeSum)
+	}
+	if len(choosePlan.AtomicCostCertificate) != 64 {
+		t.Fatalf("atomic certificate length = %d, want 64", len(choosePlan.AtomicCostCertificate))
+	}
+	before, err := plan.CoroPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutatedCertificate := strings.Repeat("c", 64)
+	for index := range plan.functions {
+		if plan.functions[index].Plan.ID == choosePlan.ID {
+			plan.functions[index].Plan.AtomicCostCertificate = mutatedCertificate
+			break
+		}
+	}
+	for index := range plan.plan.functions {
+		if plan.plan.functions[index].ID == choosePlan.ID {
+			plan.plan.functions[index].AtomicCostCertificate = mutatedCertificate
+			break
+		}
+	}
+	after, err := plan.CoroPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("atomic certificate mutation did not change plan digest")
+	}
 }
 
 func TestAnalyzeSSAOutcomePlainDAGRejectsRecursiveCycle(t *testing.T) {
@@ -274,14 +360,15 @@ func caller(value any, fail bool) int {
 			return SSAFunctionPolicy{}, nil
 		}
 		return SSAFunctionPolicy{
-			Effect:           OutcomeStructured,
-			Exec:             MayUnwind,
-			ManagedEntry:     ManagedEntryOutcomePlain,
-			AtomicCost:       8,
-			AtomicCostProof:  AtomicCostLeaf,
-			IgnoreBody:       true,
-			External:         ExternalKnown,
-			OverrideExternal: true,
+			Effect:                OutcomeStructured,
+			Exec:                  MayUnwind,
+			ManagedEntry:          ManagedEntryOutcomePlain,
+			AtomicCost:            8,
+			AtomicCostProof:       AtomicCostLeaf,
+			AtomicCostCertificate: testAtomicCostCertificate,
+			IgnoreBody:            true,
+			External:              ExternalKnown,
+			OverrideExternal:      true,
 		}, nil
 	}
 	for _, test := range []struct {
@@ -332,14 +419,15 @@ func root(value any, fail bool) int { return middle(value, fail) }
 			return SSAFunctionPolicy{}, nil
 		}
 		return SSAFunctionPolicy{
-			Effect:           OutcomeStructured,
-			Exec:             MayUnwind,
-			ManagedEntry:     ManagedEntryOutcomePlain,
-			AtomicCost:       8,
-			AtomicCostProof:  AtomicCostDAG,
-			IgnoreBody:       true,
-			External:         ExternalKnown,
-			OverrideExternal: true,
+			Effect:                OutcomeStructured,
+			Exec:                  MayUnwind,
+			ManagedEntry:          ManagedEntryOutcomePlain,
+			AtomicCost:            8,
+			AtomicCostProof:       AtomicCostDAG,
+			AtomicCostCertificate: testAtomicCostCertificate,
+			IgnoreBody:            true,
+			External:              ExternalKnown,
+			OverrideExternal:      true,
 		}, nil
 	}
 	classifyBody := func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
