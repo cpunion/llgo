@@ -301,15 +301,19 @@ func TestEffectiveWasmTypeSizes(t *testing.T) {
 		goos   string
 		target string
 		want   int64
+		align  int64
 	}{
-		{name: "Go js wasm", goos: "js", want: 8},
-		{name: "configured wasm", goos: "js", target: "wasm", want: 4},
-		{name: "WASI compatibility", goos: "wasip1", want: 4},
+		{name: "Go js wasm", goos: "js", want: 8, align: 8},
+		{name: "configured wasm", goos: "js", target: "wasm", want: 4, align: 8},
+		{name: "WASI compatibility", goos: "wasip1", want: 4, align: 8},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := effectiveTypeSizes(goSizes, test.goos, "wasm", test.target)
 			if size := got.Sizeof(types.Typ[types.Uintptr]); size != test.want {
 				t.Fatalf("uintptr size = %d, want %d", size, test.want)
+			}
+			if align := got.Alignof(types.Typ[types.Uint64]); align != test.align {
+				t.Fatalf("uint64 alignment = %d, want %d", align, test.align)
 			}
 		})
 	}

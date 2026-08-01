@@ -782,7 +782,8 @@ func effectiveTypeSizes(sizes types.Sizes, goos, goarch, target string) types.Si
 	// Named wasm targets use the native wasm32 data model. The raw js/wasm
 	// entry point keeps Go's 64-bit word model and is emitted as Memory64.
 	if goarch == "wasm" && (target != "" || goos != "js") {
-		return &types.StdSizes{WordSize: 4, MaxAlign: 4}
+		// LLVM's wasm32 data layout gives 64-bit scalars 8-byte alignment.
+		return &types.StdSizes{WordSize: 4, MaxAlign: 8}
 	}
 	return sizes
 }

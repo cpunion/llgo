@@ -59,6 +59,7 @@ func checkCurrentG() {
 }
 
 func main() {
+	checkWasmStructLayout()
 	checkWasmModel()
 	if schedulerDeadlockMode() != 0 {
 		testParkedMainDeadlock()
