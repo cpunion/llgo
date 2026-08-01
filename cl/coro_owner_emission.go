@@ -80,7 +80,7 @@ func (p *context) coroFrozenOwnerBodies() ([]coroFrozenOwnerBody, error) {
 		switch functionPlan.Emission {
 		case coro.EmitNone:
 			continue
-		case coro.EmitPlain, coro.EmitCoroutine, coro.EmitRawPlain:
+		case coro.EmitPlain, coro.EmitCoroutine, coro.EmitRawPlain, coro.EmitOutcomePlain:
 			bodies = append(bodies, coroFrozenOwnerBody{function: function, state: state})
 		case coro.EmitExternal:
 			return nil, fmt.Errorf(

@@ -27,7 +27,7 @@ import (
 func TestCoroPhysicalEmissionSessionCommitsOneCompleteBody(t *testing.T) {
 	ctx := &context{}
 	plan := &coroPhysicalFunctionPlan{}
-	session, finish := ctx.beginCoroPhysicalEmission(plan, 3, true)
+	session, finish := ctx.beginCoroManagedPhysicalEmission(plan, 3, true)
 	if !ctx.hasCoroPhysicalEmission() || ctx.hasCoroPhysicalBody() {
 		t.Fatal("prologue must expose the session but not a partial physical body")
 	}
@@ -42,8 +42,9 @@ func TestCoroPhysicalEmissionSessionCommitsOneCompleteBody(t *testing.T) {
 	}
 
 	body := &coroBodyContext{}
+	bodyCapability := newCoroPhysicalBodyCapability(body)
 	blocks := make([]llssa.BasicBlock, 1)
-	session.bindCoroPhysicalBody(body, blocks)
+	session.bindManagedPhysicalBody(bodyCapability, blocks)
 	if got := ctx.coroBody(); got != body {
 		t.Fatalf("bound body = %p, want %p", got, body)
 	}
@@ -51,19 +52,19 @@ func TestCoroPhysicalEmissionSessionCommitsOneCompleteBody(t *testing.T) {
 		t.Fatal("bound source-block projection is not visible with the body")
 	}
 	if message := captureCoroEmissionSessionPanic(func() {
-		session.bindCoroPhysicalBody(&coroBodyContext{}, blocks)
+		session.bindManagedPhysicalBody(newCoroPhysicalBodyCapability(&coroBodyContext{}), blocks)
 	}); !strings.Contains(message, "exactly once") {
 		t.Fatalf("second body bind panic = %q", message)
 	}
 
 	session.site = &coroSiteEmissionObserver{}
 	if message := captureCoroEmissionSessionPanic(func() {
-		session.completeCoroPhysicalBody(body)
+		session.completeManagedPhysicalBody(bodyCapability)
 	}); !strings.Contains(message, "no active source SitePlan") {
 		t.Fatalf("completion with active SitePlan panic = %q", message)
 	}
 	session.site = nil
-	session.completeCoroPhysicalBody(body)
+	session.completeManagedPhysicalBody(bodyCapability)
 	if ctx.hasCoroPhysicalBody() {
 		t.Fatal("completed body remained available to ordinary lowering")
 	}
@@ -76,9 +77,9 @@ func TestCoroPhysicalEmissionSessionCommitsOneCompleteBody(t *testing.T) {
 func TestCoroPhysicalEmissionSessionRejectsPartialAndNestedState(t *testing.T) {
 	ctx := &context{}
 	plan := &coroPhysicalFunctionPlan{}
-	session, finish := ctx.beginCoroPhysicalEmission(plan, 2, false)
+	session, finish := ctx.beginCoroManagedPhysicalEmission(plan, 2, false)
 	if message := captureCoroEmissionSessionPanic(func() {
-		ctx.beginCoroPhysicalEmission(plan, 2, false)
+		ctx.beginCoroManagedPhysicalEmission(plan, 2, false)
 	}); !strings.Contains(message, "nested") {
 		t.Fatalf("nested session panic = %q", message)
 	}
@@ -93,10 +94,29 @@ func TestCoroPhysicalEmissionSessionRejectsPartialAndNestedState(t *testing.T) {
 	}
 }
 
+func TestCoroPhysicalEmissionSessionPublishesExclusiveOutcomeBody(t *testing.T) {
+	ctx := &context{}
+	session, finish := ctx.beginCoroManagedPhysicalEmission(&coroPhysicalFunctionPlan{}, 3, true)
+	body := &outcomePlainBodyContext{}
+	capability := newOutcomePlainBodyCapability(body)
+	session.bindManagedPhysicalBody(capability, make([]llssa.BasicBlock, 1))
+	if got := ctx.outcomePlainBody(); got != body {
+		t.Fatalf("bound outcome body = %p, want %p", got, body)
+	}
+	if ctx.hasCoroPhysicalBody() || !ctx.hasStructuredOutcomePhysicalBody() {
+		t.Fatal("outcome body must not publish the full-coroutine capability")
+	}
+	if (&coroPhysicalBodyCapability{coroutine: &coroBodyContext{}, outcome: body}).valid() {
+		t.Fatal("physical body capability accepted both exclusive arms")
+	}
+	session.completeManagedPhysicalBody(capability)
+	finish()
+}
+
 func TestCoroPhysicalEmissionSessionPreservesEmissionPanicAndClearsState(t *testing.T) {
 	ctx := &context{}
 	message := captureCoroEmissionSessionPanic(func() {
-		_, finish := ctx.beginCoroPhysicalEmission(&coroPhysicalFunctionPlan{}, 2, false)
+		_, finish := ctx.beginCoroManagedPhysicalEmission(&coroPhysicalFunctionPlan{}, 2, false)
 		defer finish()
 		panic("sentinel emission failure")
 	})

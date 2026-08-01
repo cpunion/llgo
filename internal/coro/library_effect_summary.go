@@ -33,9 +33,9 @@ const (
 	// package objects and archives. It is deliberately independent from the
 	// whole-program Summary and PlanDigest schemas: consumer demand may change,
 	// while these producer effects and physically available entries may not.
-	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v2"
+	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v3"
 
-	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v2"
+	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v3"
 
 	// LibraryEffectSummarySection is the portable object-section identity.
 	// Mach-O emission uses the same leaf name in an explicit segment.
@@ -53,7 +53,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 2,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 3,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -88,14 +88,17 @@ type LibraryEffectMetadata struct {
 // not recovered from a symbol address. A RawPlainSymbol is an additional exact
 // legacy crossing, never a second managed source implementation.
 type LibraryEffectFunction struct {
-	ID             FunctionID  `json:"id"`
-	ABIHash        string      `json:"abi_hash"`
-	Effect         Effect      `json:"effect"`
-	Exec           ExecFlags   `json:"exec"`
-	FuncRep        FuncRep     `json:"func_rep"`
-	Primary        PrimaryKind `json:"primary"`
-	PrimarySymbol  string      `json:"primary_symbol"`
-	RawPlainSymbol string      `json:"raw_plain_symbol,omitempty"`
+	ID              FunctionID       `json:"id"`
+	ABIHash         string           `json:"abi_hash"`
+	Effect          Effect           `json:"effect"`
+	Exec            ExecFlags        `json:"exec"`
+	FuncRep         FuncRep          `json:"func_rep"`
+	Primary         PrimaryKind      `json:"primary"`
+	ManagedEntry    ManagedEntryKind `json:"managed_entry"`
+	AtomicCost      uint64           `json:"atomic_cost"`
+	AtomicCostProof AtomicCostProof  `json:"atomic_cost_proof"`
+	PrimarySymbol   string           `json:"primary_symbol"`
+	RawPlainSymbol  string           `json:"raw_plain_symbol,omitempty"`
 }
 
 // LibraryEffectForeignCallable publishes one exact producer-side C
@@ -290,8 +293,17 @@ func (function LibraryEffectFunction) validate() error {
 	if err := function.Primary.validate(); err != nil {
 		return err
 	}
+	if err := function.ManagedEntry.Validate(); err != nil {
+		return err
+	}
+	if err := function.AtomicCostProof.Validate(); err != nil {
+		return err
+	}
 	if function.Primary == PrimaryExternal {
 		return fmt.Errorf("coro: library function %q has no producer-owned primary", function.ID)
+	}
+	if function.ManagedEntry == ManagedEntryNone {
+		return fmt.Errorf("coro: library function %q has no producer managed entry", function.ID)
 	}
 	if function.Effect.MaySuspend() != (function.Primary == PrimaryCoroutine) {
 		return fmt.Errorf(
@@ -308,6 +320,28 @@ func (function LibraryEffectFunction) validate() error {
 		if function.Primary != PrimaryCoroutine {
 			return fmt.Errorf("coro: library function %q has direct-coro representation with %s primary", function.ID, function.Primary)
 		}
+	}
+	switch function.ManagedEntry {
+	case ManagedEntryPlain:
+		if function.Primary != PrimaryPlain {
+			return fmt.Errorf("coro: library function %q has a plain entry with %s primary", function.ID, function.Primary)
+		}
+	case ManagedEntryCoroutine:
+		if function.Primary != PrimaryCoroutine {
+			return fmt.Errorf("coro: library function %q has a coroutine entry with %s primary", function.ID, function.Primary)
+		}
+	case ManagedEntryOutcomePlain:
+		if function.Primary != PrimaryCoroutine || function.FuncRep != DirectCoro ||
+			function.Effect != OutcomeStructured || function.Exec&^MayUnwind != 0 {
+			return fmt.Errorf("coro: library function %q has an invalid outcome-plain entry capability", function.ID)
+		}
+	}
+	if function.ManagedEntry == ManagedEntryOutcomePlain {
+		if function.AtomicCostProof != AtomicCostLeaf || function.AtomicCost == 0 {
+			return fmt.Errorf("coro: library function %q has an outcome entry without a leaf atomic-cost proof", function.ID)
+		}
+	} else if function.AtomicCostProof != AtomicCostUnproven || function.AtomicCost != 0 {
+		return fmt.Errorf("coro: library function %q has atomic-cost metadata without an outcome entry", function.ID)
 	}
 	if err := validateStableIdentityText("library function primary symbol", function.PrimarySymbol); err != nil {
 		return err
@@ -624,6 +658,9 @@ func (function LibraryEffectFunction) ImportedPolicy() (SSAFunctionPolicy, error
 	return SSAFunctionPolicy{
 		Effect:           function.Effect,
 		Exec:             function.Exec,
+		ManagedEntry:     function.ManagedEntry,
+		AtomicCost:       function.AtomicCost,
+		AtomicCostProof:  function.AtomicCostProof,
 		IgnoreBody:       true,
 		External:         ExternalKnown,
 		OverrideExternal: true,

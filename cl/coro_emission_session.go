@@ -34,26 +34,53 @@ const (
 	coroPhysicalEmissionComplete
 )
 
+// coroPhysicalBodyCapability is the one body capability installed by a
+// physical-emission transaction. Exactly one arm is present: a full LLVM
+// coroutine or a synchronous outcome-publishing leaf. Keeping this union here
+// prevents each physical ABI from growing its own lowering session.
+type coroPhysicalBodyCapability struct {
+	coroutine *coroBodyContext
+	outcome   *outcomePlainBodyContext
+}
+
+func newCoroPhysicalBodyCapability(body *coroBodyContext) *coroPhysicalBodyCapability {
+	if body == nil {
+		panic("physical coroutine body capability is nil")
+	}
+	return &coroPhysicalBodyCapability{coroutine: body}
+}
+
+func newOutcomePlainBodyCapability(body *outcomePlainBodyContext) *coroPhysicalBodyCapability {
+	if body == nil {
+		panic("outcome-plain body capability is nil")
+	}
+	return &coroPhysicalBodyCapability{outcome: body}
+}
+
+func (body *coroPhysicalBodyCapability) valid() bool {
+	return body != nil && (body.coroutine == nil) != (body.outcome == nil)
+}
+
 // coroPhysicalEmissionSession is the sole mutable owner of state that exists
-// only while one physical coroutine body is emitted. Keeping the plan, body,
-// nested site ledger, source-block projection, and physical parameter layout in
-// one session prevents independently installed context fields from describing
-// different functions after a failed or nested emission.
+// only while one managed physical body is emitted. Keeping the plan, exclusive
+// body capability, nested site ledger, source-block projection, and physical
+// parameter layout in one session prevents independently installed context
+// fields from describing different functions after a failed or nested emission.
 type coroPhysicalEmissionSession struct {
 	phase           coroPhysicalEmissionPhase
 	plan            *coroPhysicalFunctionPlan
-	body            *coroBodyContext
+	body            *coroPhysicalBodyCapability
 	site            *coroSiteEmissionObserver
 	sourceBlocks    []llssa.BasicBlock
 	sourceParamBase int
 	explicitStatus  bool
 }
 
-// beginCoroPhysicalEmission installs the complete prologue-visible portion of
-// a session in one operation. Physical emission is deliberately non-nestable:
-// deferred function bodies use their own later initializer and must not borrow
-// the caller's body, plan, or site observer.
-func (p *context) beginCoroPhysicalEmission(
+// beginCoroManagedPhysicalEmission installs the complete prologue-visible
+// portion of a session in one operation. Physical emission is deliberately
+// non-nestable: deferred function bodies use their own later initializer and
+// must not borrow the caller's body, plan, or site observer.
+func (p *context) beginCoroManagedPhysicalEmission(
 	plan *coroPhysicalFunctionPlan,
 	sourceParamBase int,
 	explicitStatus bool,
@@ -92,23 +119,26 @@ func (p *context) beginCoroPhysicalEmission(
 	}
 }
 
-// bindCoroPhysicalBody publishes the body and source-block projection together.
-// No ordinary lowering consumer can observe one without the other.
-func (s *coroPhysicalEmissionSession) bindCoroPhysicalBody(
-	body *coroBodyContext,
+// bindManagedPhysicalBody publishes the exclusive body capability and
+// source-block projection together. No ordinary lowering consumer can observe
+// one without the other.
+func (s *coroPhysicalEmissionSession) bindManagedPhysicalBody(
+	body *coroPhysicalBodyCapability,
 	sourceBlocks []llssa.BasicBlock,
 ) {
-	if s == nil || s.phase != coroPhysicalEmissionPrologue || s.plan == nil || s.body != nil || body == nil || len(sourceBlocks) == 0 {
-		panic("coroutine physical body may be bound exactly once after a complete prologue")
+	if s == nil || s.phase != coroPhysicalEmissionPrologue || s.plan == nil ||
+		s.body != nil || !body.valid() || len(sourceBlocks) == 0 {
+		panic("managed physical body may be bound exactly once after a complete prologue")
 	}
 	s.body = body
 	s.sourceBlocks = sourceBlocks
 	s.phase = coroPhysicalEmissionBody
 }
 
-func (s *coroPhysicalEmissionSession) completeCoroPhysicalBody(body *coroBodyContext) {
-	if s == nil || s.phase != coroPhysicalEmissionBody || s.body == nil || s.body != body || s.site != nil {
-		panic("coroutine physical body may complete exactly once with no active source SitePlan observer")
+func (s *coroPhysicalEmissionSession) completeManagedPhysicalBody(body *coroPhysicalBodyCapability) {
+	if s == nil || s.phase != coroPhysicalEmissionBody || !s.body.valid() ||
+		s.body != body || s.site != nil {
+		panic("managed physical body may complete exactly once with no active source SitePlan observer")
 	}
 	s.phase = coroPhysicalEmissionComplete
 }
@@ -121,6 +151,14 @@ func (p *context) coroBody() *coroBodyContext {
 }
 
 func (p *context) activeCoroEmissionBody() *coroBodyContext {
+	body := p.activeCoroPhysicalBodyCapability()
+	if body == nil {
+		return nil
+	}
+	return body.coroutine
+}
+
+func (p *context) activeCoroPhysicalBodyCapability() *coroPhysicalBodyCapability {
 	if p == nil {
 		return nil
 	}
@@ -128,11 +166,30 @@ func (p *context) activeCoroEmissionBody() *coroBodyContext {
 	if session == nil || session.phase != coroPhysicalEmissionBody {
 		return nil
 	}
+	if !session.body.valid() {
+		panic("active managed physical body has an invalid exclusive capability")
+	}
 	return session.body
 }
 
 func (p *context) hasCoroPhysicalBody() bool {
 	return p.coroBody() != nil
+}
+
+func (p *context) outcomePlainBody() *outcomePlainBodyContext {
+	body := p.activeCoroPhysicalBodyCapability()
+	if body == nil {
+		return nil
+	}
+	return body.outcome
+}
+
+func (p *context) hasOutcomePlainPhysicalBody() bool {
+	return p.outcomePlainBody() != nil
+}
+
+func (p *context) hasStructuredOutcomePhysicalBody() bool {
+	return p.activeCoroPhysicalBodyCapability() != nil
 }
 
 // coroTask and coroCleanup expose narrow capabilities owned by the active

@@ -307,15 +307,23 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 	}
 	defined := target.External == coro.Defined &&
 		target.Emission == coro.EmitCoroutine &&
+		target.ManagedEntry == coro.ManagedEntryCoroutine &&
 		target.Primary == coro.PrimaryCoroutine
+	definedOutcome := target.External == coro.Defined &&
+		target.Emission == coro.EmitOutcomePlain &&
+		target.ManagedEntry == coro.ManagedEntryOutcomePlain &&
+		target.Primary == coro.PrimaryCoroutine &&
+		target.AtomicCostProof == coro.AtomicCostLeaf && target.AtomicCost != 0
 	imported := target.External == coro.ExternalKnown &&
 		target.Emission == coro.EmitExternal &&
-		target.Primary == coro.PrimaryExternal
-	if !defined && !imported ||
+		target.Primary == coro.PrimaryExternal &&
+		(target.ManagedEntry == coro.ManagedEntryCoroutine ||
+			target.ManagedEntry == coro.ManagedEntryOutcomePlain)
+	if !defined && !definedOutcome && !imported ||
 		(target.FuncRep != coro.DirectCoro && target.FuncRep != coro.Dispatch) ||
 		!target.Demand.Contains(coro.AsyncDemand) {
 		return fmt.Errorf(
-			"target %q has no defined or preflighted imported coroutine entry with async demand (external=%s emission=%s primary=%s representation=%s demand=%s)",
+			"target %q has no defined outcome/coroutine or preflighted imported coroutine entry with async demand (external=%s emission=%s primary=%s representation=%s demand=%s)",
 			target.ID, target.External, target.Emission, target.Primary, target.FuncRep, target.Demand,
 		)
 	}
@@ -829,6 +837,34 @@ func (p *context) awaitCoroChildWithRecovery(
 	}
 	b.SetBlockContinuation(returned)
 	return p.loadCoroAwaitResult(b, resultSlot, results)
+}
+
+// enterCoroPropagatedPanic and enterCoroPropagatedGoexit are the narrow parent
+// capabilities shared by scheduler-owned child completion and synchronous
+// outcome-plain completion. Call-site lowerers do not inspect the complete
+// coroutine body or duplicate cleanup ownership decisions.
+func (p *context) enterCoroPropagatedPanic(
+	b llssa.Builder,
+	typeWord, dataWord llssa.Expr,
+	line uint32,
+) {
+	body := p.activeCoroEmissionBody()
+	if body == nil || b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {
+		panic("propagated panic escaped its parent coroutine body")
+	}
+	if body.cleanup == nil {
+		body.panic(b, typeWord, dataWord, line)
+		return
+	}
+	body.cleanup.enterPanic(b, typeWord, dataWord, line)
+}
+
+func (p *context) enterCoroPropagatedGoexit(b llssa.Builder) {
+	body := p.activeCoroEmissionBody()
+	if body == nil || b == nil || b.Func != p.fn {
+		panic("propagated Goexit escaped its parent coroutine body")
+	}
+	body.enterGoexit(b)
 }
 
 // loadCoroAwaitResult reconstructs the exact source call value after the

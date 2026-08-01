@@ -82,7 +82,9 @@ func TestDemandFuncRepAndBodyEmissionText(t *testing.T) {
 			t.Fatalf("function transport round trip = %s, want %s", parsed, transport)
 		}
 	}
-	for _, emission := range []BodyEmission{EmitNone, EmitPlain, EmitCoroutine, EmitExternal} {
+	for _, emission := range []BodyEmission{
+		EmitNone, EmitPlain, EmitCoroutine, EmitExternal, EmitRawPlain, EmitOutcomePlain,
+	} {
 		text, err := emission.MarshalText()
 		if err != nil {
 			t.Fatal(err)
@@ -95,8 +97,34 @@ func TestDemandFuncRepAndBodyEmissionText(t *testing.T) {
 			t.Fatalf("body emission round trip = %s, want %s", parsed, emission)
 		}
 	}
+	for _, entry := range []ManagedEntryKind{
+		ManagedEntryNone, ManagedEntryPlain, ManagedEntryCoroutine, ManagedEntryOutcomePlain,
+	} {
+		text, err := entry.MarshalText()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed ManagedEntryKind
+		if err := parsed.UnmarshalText(text); err != nil {
+			t.Fatal(err)
+		}
+		if parsed != entry {
+			t.Fatalf("managed entry round trip = %s, want %s", parsed, entry)
+		}
+	}
+	for _, proof := range []AtomicCostProof{AtomicCostUnproven, AtomicCostLeaf} {
+		if err := proof.Validate(); err != nil {
+			t.Fatalf("atomic proof %s: %v", proof, err)
+		}
+	}
 	if err := (BodyEmission(255)).Validate(); err == nil {
 		t.Fatal("invalid body emission unexpectedly accepted")
+	}
+	if err := (ManagedEntryKind(255)).Validate(); err == nil {
+		t.Fatal("invalid managed entry unexpectedly accepted")
+	}
+	if err := (AtomicCostProof(255)).Validate(); err == nil {
+		t.Fatal("invalid atomic proof unexpectedly accepted")
 	}
 	if err := (FuncTransport(255)).Validate(); err == nil {
 		t.Fatal("invalid function transport unexpectedly accepted")
@@ -147,10 +175,12 @@ func TestDemandAndFuncRepTextWhitespace(t *testing.T) {
 	}
 
 	for text, want := range map[string]BodyEmission{
-		"  none\n":       EmitNone,
-		"\tplain ":       EmitPlain,
-		" coroutine\r\n": EmitCoroutine,
-		"\nexternal\t":   EmitExternal,
+		"  none\n":         EmitNone,
+		"\tplain ":         EmitPlain,
+		" coroutine\r\n":   EmitCoroutine,
+		"\nexternal\t":     EmitExternal,
+		" raw-plain ":      EmitRawPlain,
+		" outcome-plain\n": EmitOutcomePlain,
 	} {
 		var got BodyEmission
 		if err := got.UnmarshalText([]byte(text)); err != nil {

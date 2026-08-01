@@ -185,7 +185,7 @@ func Address(value reflect.Value) reflect.Value { return value.Addr() }
 		pkg: pkg,
 		coroEmission: &coroPhysicalEmissionSession{
 			phase: coroPhysicalEmissionBody,
-			body:  &coroBodyContext{},
+			body:  newCoroPhysicalBodyCapability(&coroBodyContext{}),
 		},
 	}
 	func() {

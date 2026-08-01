@@ -205,7 +205,10 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 		return fmt.Errorf("coroutine site plan owner %q has no frozen function preamble", function.Name())
 	}
 	semantic := ir.semanticPlans[key]
-	facts := coro.SSAFunctionBodyFacts{Effect: coro.NoSuspend}
+	facts := coro.SSAFunctionBodyFacts{
+		Effect:           coro.NoSuspend,
+		OutcomePlainLeaf: function.Blocks != nil,
+	}
 	if function.Blocks != nil {
 		facts.Exec = coro.MayUnwind
 	}
@@ -216,7 +219,11 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 				return fmt.Errorf("coroutine semantic SitePlan owner %q omitted source instruction %q", function.Name(), instruction.String())
 			}
 			if !plan.evaluated {
+				facts.OutcomePlainLeaf = false
 				continue
+			}
+			if !coroOutcomePlainLeafSemanticRecipe(plan) {
+				facts.OutcomePlainLeaf = false
 			}
 			facts.Effect = facts.Effect.Join(plan.effect)
 			facts.Exec = facts.Exec.Join(plan.exec)
@@ -233,6 +240,27 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 	ir.localBodyFacts[function] = facts
 	ir.siteOwners[key] = none{}
 	return nil
+}
+
+// coroOutcomePlainLeafSemanticRecipe is the complete local allowlist for the
+// first outcome-plain cohort. It consumes the already-frozen semantic recipe,
+// not raw SSA, so analysis and emission cannot independently reinterpret a
+// source operation. Calls, allocation, implicit-fault-capable values, defer,
+// spawn, waits and every platform operation fail closed.
+func coroOutcomePlainLeafSemanticRecipe(plan coroSemanticInstructionPlan) bool {
+	if plan.debug {
+		return true
+	}
+	switch plan.recipe {
+	case coro.RecipeID("cl.ssa.phi.v1"),
+		coro.RecipeID("cl.ssa.jump.v1"),
+		coro.RecipeID("cl.ssa.if.v1"),
+		coro.RecipeID("cl.ssa.return.v1"),
+		coro.RecipeID("cl.ssa.panic.v0"):
+		return true
+	default:
+		return false
+	}
 }
 
 func coroSemanticEvaluatedCFGHasCycle(

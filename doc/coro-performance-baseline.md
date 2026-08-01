@@ -117,7 +117,7 @@ those native libraries; it is not yet evidence of bare-metal completion.
 RP2040 still lacks board hooks plus required atomic/compiler-rt/libc support in
 both compared configurations.
 
-## Next emission optimization
+## Outcome-plain V0 emission result
 
 The full-program plan exposed a higher-leverage opportunity than more local
 no-unwind pattern matching. After the narrow index experiment, 571 emitted
@@ -125,36 +125,88 @@ coroutines still had exactly `OutcomeStructured` and no real wait, park, or
 yield effect. Reverting the three locally proven functions restores that count
 to 574 in the final baseline.
 
-These functions should not be reclassified as `NoSuspend`: they may still
-panic, recover, run defers, or propagate Goexit. The safe optimization is a
-separate physical `outcome-plain` entry:
+These functions must not be reclassified as logically `NoSuspend`: they may
+still panic, recover, run defers, or propagate Goexit. The first
+`outcome-plain` replacement cohort now implements the separate physical entry
+without changing those logical facts:
 
 1. Preserve logical `OutcomeStructured` and `MayUnwind` facts.
 2. Select `outcome-plain` only when the function has no `YieldOnly`,
    `AwaitStructured`, `MayPark`, platform/host/foreign wait, recursion, or
    `NeedsPreempt`.
-3. Require a whole-call-path atomic-cost proof before removing the coroutine
-   poll capability.
-4. Pass caller-owned result and completion storage through a hidden physical
-   ABI. Normal return, panic, recover, and Goexit publish one terminal outcome
-   and return synchronously; no LLVM frame, ramp, resume, or destroy entry is
+3. V0 accepts only source-call-free, acyclic leaves whose frozen semantic
+   recipes are `Debug/Phi/Jump/If/Return/Panic` and whose instruction cost is
+   within `MaxPlainInstructions`. Roots, spawn/address/dynamic uses, recursion,
+   raw or lowered incoming calls, and all external operations fail closed.
+4. The hidden V0 ABI is `(g, out, completion, args...) -> void`.
+   `completion` is `{status uint32, typeWord unsafe.Pointer, dataWord
+   unsafe.Pointer}`; normal return and panic publish exactly one terminal
+   outcome and return synchronously. The status space reserves Goexit for the
+   next capability cohort. No LLVM frame, ramp, resume, or destroy entry is
    created.
-5. Let an exact coroutine caller reconcile that immediate outcome inline.
-   Dynamic descriptors and archive metadata gain an explicit entry kind; they
-   must not infer it from a code pointer.
+5. An exact coroutine caller reconciles the immediate return/panic/Goexit
+   status inline. `ManagedEntryOutcomePlain` is an explicit frozen plan and
+   archive-summary dimension; consumers never infer it from a code pointer.
+   An active importer also rejects a producer cost above its own finite
+   `MaxPlainInstructions` budget instead of silently extending the no-poll gap.
 6. Keep one source body. A boundary adapter may translate the logical outcome,
    but it must not clone the body or fall back to native unwind across a
    stackless boundary.
 
-This must be a separate replacement cohort. Its acceptance gate is:
+The implementation is issued by `ProgramIR` from frozen semantic recipes and
+uses the same exclusive physical-emission transaction as a full coroutine.
+The architecture debt gate records no second plan lookup, body session, or
+body-state field. It fixes the legacy coroutine-only lifecycle entry counts at
+zero, the shared managed begin/bind/complete consumers at exactly two, and the
+exclusive capability arms at exactly `coroutine/outcome`; a renamed or second
+session therefore cannot bypass the gate. Plan digest, plan summary and
+library-effect schemas were advanced together, and an imported exact call
+consumes the producer's published `$outcome` entry.
 
-- native and wasm32 panic/recover/defer/Goexit matrices pass;
-- no eligible function retains ramp/resume/destroy symbols;
-- the representative standard-library fixture reduces text materially;
-- direct/interface/channel regressions remain within an explicit threshold;
-- unsupported dynamic/archive cases fail closed rather than silently choosing
-  a legacy plain call.
+This cohort also crossed the design document's approximately 1,000-line
+production review stop. Relative to `cpunion/llgo:llvm-coro` after PR #110
+(`09ecca3bd`), the audited diff is production `+1,173/-125` (net `+1,048`),
+tests `+806/-32` (net `+774`) and documentation `+131/-44` (net `+87`). The
+review accepted the narrow overage
+because the new volume closes one physical capability through graph planning,
+canonical digest/summary, archive metadata, owner preflight, ABI emission and
+caller reconciliation; it does not add another raw-SSA scan, fixed point,
+source-body clone, LLVM-coroutine CFG builder, or emission session. The next
+direct-call-DAG cohort must extend these same dimensions and transaction. A
+second analysis/emission path is a failed architecture gate, not justified by
+another 1,000-line allowance.
 
-Until that ABI exists, the current comparison remains valid and the 574
-outcome-only bodies are an identified size opportunity, not an already claimed
-optimization.
+The exact native/wasm fixture compares V0 with the previous all-coroutine
+emission by setting the leaf budget to `-1` for the baseline and `64` for V0.
+Both variants compile the same source and run the same CoroSplit and LLVM O2
+pipelines:
+
+| Target | Post-split IR baseline | Post-split IR V0 | O2 object baseline | O2 object V0 |
+| --- | ---: | ---: | ---: | ---: |
+| Darwin arm64 | 80,833 B | 39,326 B | 4,600 B | 3,008 B (-34.6%) |
+| wasm32/WASI | 80,797 B | 39,308 B | 3,485 B | 2,390 B (-31.4%) |
+
+For this one-leaf fixture V0 also removes one frame allocation, one resume
+entry, one destroy entry and three parent await-hook references. This is a
+deterministic physical-cost gate, not yet a wall-clock throughput claim. The
+native return-and-panic E2E additionally compiles, links and executes both
+terminal payload/control-flow paths; it does not yet claim traceback-frame
+fidelity for the removed leaf. Native and wasm structural tests verify that
+CoroSplit cannot manufacture `$outcome.resume` or `$outcome.destroy`.
+
+### Remaining outcome-plain expansion
+
+The original 574-body opportunity is not yet claimed. V0 intentionally does
+not accept direct-call DAGs, defer/recover bodies, a Goexit producer, function
+values/interfaces, or recursive/open-world paths. The next cohorts are:
+
+1. compute whole-call-path `MaxAtomicCost` over exact acyclic direct-call DAGs
+   and admit a callee only when every incoming physical edge can consume its
+   published entry;
+2. add exact panic source/trace ownership, Goexit, cleanup/defer and recover
+   outcome transactions without cloning source bodies;
+3. add descriptor/interface dispatch only after entry-kind metadata and every
+   boundary adapter are closed across archives;
+4. rerun representative standard-library executable size, direct/interface/
+   channel throughput, and parked-frame memory baselines before broadening the
+   default cohort.

@@ -127,6 +127,8 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 	switch instructionPlan.control {
 	case coroPhysicalControlDirectAwait:
 		return p.compileCoroStaticAwait(b, call, instructionPlan), true
+	case coroPhysicalControlDirectOutcome:
+		return p.compileCoroStaticOutcomeCall(b, call, instructionPlan), true
 	case coroPhysicalControlDispatchAwait:
 		return p.compileCoroManagedDispatchAwait(b, call, instructionPlan), true
 	case coroPhysicalControlClosedInterfaceAwait:
@@ -236,6 +238,13 @@ func (p *context) compileCoroTerminalOutcome(
 	outcome coroPhysicalOutcomeRecipe,
 	results []llssa.Expr,
 ) {
+	if p.hasOutcomePlainPhysicalBody() {
+		if outcome != coroPhysicalOutcomeReturn {
+			panic(fmt.Sprintf("unsupported outcome-plain terminal outcome recipe %s", outcome))
+		}
+		p.compileOutcomePlainReturn(b, results)
+		return
+	}
 	body := p.coroBody()
 	if body == nil || body.completion == nil || b == nil || b.Func != p.fn {
 		panic("terminal outcome escaped its planned physical coroutine body")

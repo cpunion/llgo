@@ -63,7 +63,18 @@ func (e plannedFunctionSymbol) usesCoroPhysicalABI() bool {
 	}
 	return e.importedLibrary &&
 		e.plan.Emission == coro.EmitExternal &&
-		e.libraryEffect.Primary == coro.PrimaryCoroutine
+		e.libraryEffect.ManagedEntry == coro.ManagedEntryCoroutine
+}
+
+func (e plannedFunctionSymbol) usesOutcomePlainPhysicalABI() bool {
+	if !e.planned || !e.physical {
+		return false
+	}
+	if e.plan.Emission == coro.EmitOutcomePlain {
+		return true
+	}
+	return e.importedLibrary && e.plan.Emission == coro.EmitExternal &&
+		e.libraryEffect.ManagedEntry == coro.ManagedEntryOutcomePlain
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -160,6 +171,8 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 		}
 	} else if plan.Emission == coro.EmitCoroutine {
 		entry.name += coroPrimarySuffix
+	} else if plan.Emission == coro.EmitOutcomePlain {
+		entry.name += coroOutcomePlainPrimarySuffix
 	}
 	return entry, nil
 }
@@ -227,13 +240,14 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmitte
 		}
 		return nil
 	case coro.EmitPlain:
-		if plan.External != coro.Defined || !hasEmittedBody {
+		if plan.External != coro.Defined || !hasEmittedBody || plan.ManagedEntry != coro.ManagedEntryPlain {
 			return fmt.Errorf("coroutine entry resolution: plain emission %q (%s) has external kind %s and emitted-body=%t", plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody)
 		}
 	case coro.EmitRawPlain:
 		if plan.External != coro.Defined || !hasEmittedBody || !plan.RawPlainOnly ||
 			plan.ManagedDemand != coro.NoDemand || !plan.RawPlainDemand ||
-			plan.Primary != coro.PrimaryPlain || plan.FuncRep != coro.DirectPlain {
+			plan.Primary != coro.PrimaryPlain || plan.FuncRep != coro.DirectPlain ||
+			plan.ManagedEntry != coro.ManagedEntryPlain {
 			return fmt.Errorf(
 				"coroutine entry resolution: raw-only emission %q (%s) has external=%s emitted-body=%t raw-only=%t managed=%s raw=%t primary=%s representation=%s",
 				plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody, plan.RawPlainOnly, plan.ManagedDemand,
@@ -241,8 +255,18 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmitte
 			)
 		}
 	case coro.EmitCoroutine:
-		if plan.External != coro.Defined || !hasEmittedBody {
+		if plan.External != coro.Defined || !hasEmittedBody || plan.ManagedEntry != coro.ManagedEntryCoroutine {
 			return fmt.Errorf("coroutine entry resolution: coroutine emission %q (%s) has external kind %s and emitted-body=%t", plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody)
+		}
+	case coro.EmitOutcomePlain:
+		if plan.External != coro.Defined || !hasEmittedBody || plan.Primary != coro.PrimaryCoroutine ||
+			plan.FuncRep != coro.DirectCoro || plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+			plan.AtomicCostProof != coro.AtomicCostLeaf || plan.AtomicCost == 0 {
+			return fmt.Errorf(
+				"coroutine entry resolution: outcome-plain emission %q (%s) has external=%s emitted-body=%t primary=%s representation=%s atomic-proof=%s cost=%d",
+				plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody, plan.Primary,
+				plan.FuncRep, plan.AtomicCostProof, plan.AtomicCost,
+			)
 		}
 	case coro.EmitExternal:
 		if plan.External == coro.Defined || hasEmittedBody {
@@ -402,7 +426,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			e.managedInterface.acceptsTarget(e.function, e.plan)
 		if accept == nil && e.emission != nil && e.emission.coroProgramIR != nil &&
 			e.emission.coroProgramIR.physicalPlansSealed {
-			_, err := e.emission.coroProgramIR.physicalFunctionPlan(e.function, e.physicalOwner)
+			_, err := e.sealedPhysicalFunctionPlan()
 			return err
 		}
 		return validateCoroPhysicalABIForOwner(
@@ -412,8 +436,48 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			e.libraryForeign, accept,
 		)
 	}
+	if e.plan.Emission == coro.EmitOutcomePlain {
+		if !e.physical || e.importedLibrary {
+			return fmt.Errorf("outcome-plain emission %q requires one owned physical ABI body", e.plan.ID)
+		}
+		sourceSig := coroPhysicalNormalizeSourceSignature(e.function.Signature)
+		if e.emission != nil {
+			var err error
+			sourceSig, err = e.emission.coroPhysicalEntrySourceSignature(e.function)
+			if err != nil {
+				return err
+			}
+		}
+		if err := validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, true); err != nil {
+			return err
+		}
+		if accept == nil && e.emission != nil && e.emission.coroProgramIR != nil &&
+			e.emission.coroProgramIR.physicalPlansSealed {
+			physical, err := e.sealedPhysicalFunctionPlan()
+			if err != nil {
+				return err
+			}
+			return validateOutcomePlainFrozenPlan(physical)
+		}
+		return validateCoroPhysicalABIForOwner(
+			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, true, false,
+			false, true, e.frameRetentionABI, false, false, false,
+			e.interfacePlain, e.managedInterface, e.libraryForeign,
+			func(plan *coroPhysicalFunctionPlan) error {
+				if err := validateOutcomePlainFrozenPlan(plan); err != nil {
+					return err
+				}
+				if accept != nil {
+					return accept(plan)
+				}
+				return nil
+			},
+		)
+	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
-		if !e.importedLibrary || e.libraryEffect.Primary != coro.PrimaryCoroutine {
+		if !e.importedLibrary || e.libraryEffect.Primary != coro.PrimaryCoroutine ||
+			(e.libraryEffect.ManagedEntry != coro.ManagedEntryCoroutine &&
+				e.libraryEffect.ManagedEntry != coro.ManagedEntryOutcomePlain) {
 			return fmt.Errorf("external coroutine emission %q requires a preflighted library coroutine entry", e.plan.ID)
 		}
 		if e.plan.External != coro.ExternalKnown ||
@@ -421,6 +485,9 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			e.plan.Effect != e.libraryEffect.Effect ||
 			e.plan.Exec != e.libraryEffect.Exec ||
 			e.plan.FuncRep != e.libraryEffect.FuncRep ||
+			e.plan.ManagedEntry != e.libraryEffect.ManagedEntry ||
+			e.plan.AtomicCost != e.libraryEffect.AtomicCost ||
+			e.plan.AtomicCostProof != e.libraryEffect.AtomicCostProof ||
 			e.libraryEffect.PrimarySymbol == "" {
 			return fmt.Errorf(
 				"external coroutine emission %q disagrees with its producer library fact",
@@ -438,9 +505,26 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 		if err := validateCoroLeafPhysicalSignature(e.plan, sourceSig); err != nil {
 			return err
 		}
+		if e.libraryEffect.ManagedEntry == coro.ManagedEntryOutcomePlain {
+			if e.plan.AtomicCostProof != coro.AtomicCostLeaf || e.plan.AtomicCost == 0 ||
+				e.plan.Effect != coro.OutcomeStructured || e.plan.Exec&^coro.MayUnwind != 0 {
+				return fmt.Errorf("external outcome-plain emission %q has an invalid producer capability", e.plan.ID)
+			}
+		}
 		return validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, true)
 	}
 	return nil
+}
+
+// sealedPhysicalFunctionPlan is the single post-freeze lookup authority shared
+// by every managed physical entry ABI. Entry variants may validate different
+// capabilities, but none may create a second ProgramIR access path.
+func (e plannedFunctionSymbol) sealedPhysicalFunctionPlan() (*coroPhysicalFunctionPlan, error) {
+	if e.emission == nil || e.emission.coroProgramIR == nil ||
+		!e.emission.coroProgramIR.physicalPlansSealed {
+		return nil, fmt.Errorf("physical plan for %q is not sealed", e.plan.ID)
+	}
+	return e.emission.coroProgramIR.physicalFunctionPlan(e.function, e.physicalOwner)
 }
 
 // preflightCoroPlan rejects every unsupported or inconsistent entry before cl
@@ -538,7 +622,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				libraryForeign:    c.CoroLibraryForeignCallables,
 			}
 			entry.libraryEffect, entry.importedLibrary = c.importedCoroLibraryEffect(function.Function)
-			if function.Plan.Emission == coro.EmitCoroutine {
+			if function.Plan.Emission == coro.EmitCoroutine || function.Plan.Emission == coro.EmitOutcomePlain {
 				owners := universe.sortedUseOwners(function.Function)
 				if len(owners) == 0 {
 					c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: function %q has no exact emission owner", function.Plan.ID)
@@ -560,7 +644,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				c.coroPreflightErr = err
 				return
 			}
-			if function.Plan.Emission == coro.EmitCoroutine {
+			if function.Plan.Emission == coro.EmitCoroutine || function.Plan.Emission == coro.EmitOutcomePlain {
 				sig, err := universe.coroPhysicalEntrySourceSignature(function.Function)
 				if err == nil {
 					err = validateCoroLeafPhysicalSignature(function.Plan, sig)

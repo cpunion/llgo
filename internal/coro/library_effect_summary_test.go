@@ -102,6 +102,7 @@ func testLibraryEffectSummary(t *testing.T, pkg string, reverse bool) LibraryEff
 			Exec:          IRQUnsafe,
 			FuncRep:       DirectPlain,
 			Primary:       PrimaryPlain,
+			ManagedEntry:  ManagedEntryPlain,
 			PrimarySymbol: pkg + ".Alpha",
 		},
 		{
@@ -111,6 +112,7 @@ func testLibraryEffectSummary(t *testing.T, pkg string, reverse bool) LibraryEff
 			Exec:           MayUnwind | NeedsCleanupFrame,
 			FuncRep:        Dispatch,
 			Primary:        PrimaryCoroutine,
+			ManagedEntry:   ManagedEntryCoroutine,
 			PrimarySymbol:  pkg + ".Beta$coro",
 			RawPlainSymbol: pkg + ".Beta",
 		},
@@ -201,6 +203,7 @@ func TestLibraryEffectSummaryCanonicalRecordAndImportPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if policy.Effect != function.Effect || policy.Exec != function.Exec ||
+		policy.ManagedEntry != function.ManagedEntry ||
 		!policy.IgnoreBody || !policy.OverrideExternal ||
 		policy.External != ExternalKnown || !policy.NeedsDispatch {
 		t.Fatalf("imported policy = %+v", policy)
@@ -216,6 +219,54 @@ func TestLibraryEffectSummaryCanonicalRecordAndImportPolicy(t *testing.T) {
 	export := first.ExportBindings[0]
 	if importedExport, ok := index.LookupExport(export.Symbol); !ok || importedExport != export {
 		t.Fatalf("imported export binding = %+v, want %+v", importedExport, export)
+	}
+}
+
+func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
+	summary := testLibraryEffectSummary(t, "example/outcome", false)
+	summary.Functions = []LibraryEffectFunction{{
+		ID:              "llgo.function.v0:outcome",
+		ABIHash:         strings.Repeat("4", 64),
+		Effect:          OutcomeStructured,
+		Exec:            MayUnwind,
+		FuncRep:         DirectCoro,
+		Primary:         PrimaryCoroutine,
+		ManagedEntry:    ManagedEntryOutcomePlain,
+		AtomicCost:      7,
+		AtomicCostProof: AtomicCostLeaf,
+		PrimarySymbol:   "example/outcome.Leaf$outcome",
+	}}
+	summary.ForeignCallables = nil
+	summary.ExportBindings = nil
+	data, err := summary.MarshalStable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseLibraryEffectSummary(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	function := parsed.Functions[0]
+	policy, err := function.ImportedPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.ManagedEntry != ManagedEntryOutcomePlain ||
+		policy.AtomicCost != function.AtomicCost || policy.AtomicCostProof != AtomicCostLeaf {
+		t.Fatalf("imported outcome policy = %+v", policy)
+	}
+
+	for _, mutate := range []func(*LibraryEffectFunction){
+		func(function *LibraryEffectFunction) { function.AtomicCost = 0 },
+		func(function *LibraryEffectFunction) { function.AtomicCostProof = AtomicCostUnproven },
+		func(function *LibraryEffectFunction) { function.ManagedEntry = ManagedEntryCoroutine },
+	} {
+		invalid := summary
+		invalid.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
+		mutate(&invalid.Functions[0])
+		if _, err := invalid.MarshalStable(); err == nil {
+			t.Fatalf("invalid outcome library capability was accepted: %+v", invalid.Functions[0])
+		}
 	}
 }
 

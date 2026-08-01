@@ -490,9 +490,11 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - `CoroPlanDigest` 绑定某次最终程序分析、consumer demand、精确 call/value site 和私有 lowering facts，只用于本次 codegen/cache；
 - `LibraryEffectSummary` 嵌入每个实际产出 package object/archive，发布下游继续染色所需、且该产物确实提供的事实。它不能携带或复用最终程序 demand，也不能把未发射的 entry 声称为可用。
 
-当前 `llgo.coro.library-effect-summary.v2` 已硬切并实现以下producer闭环：
+当前 `llgo.coro.library-effect-summary.v3` 已硬切并实现以下producer闭环：
 
-- canonical JSON 记录 package identity、FunctionID、最终 SuspendEffect/ExecFlags、FuncRep、primary kind/physical symbol、可选 raw-plain symbol及结构 ABI hash；
+- canonical JSON 记录 package identity、FunctionID、最终 SuspendEffect/ExecFlags、FuncRep、
+  primary kind/physical symbol、精确 managed entry、可选 raw-plain symbol、结构 ABI hash，
+  以及仅对有界 outcome-plain entry 有效的 atomic cost/proof；
 - `foreign_callables`记录精确C声明的identity、物理符号、typed ABI和可选target-neutral contract certificate，不包含worker/same-M/event等consumer选择；
 - `export_bindings`记录物理C符号及ABI hash到精确managed FunctionID/primary的声明绑定；绑定本身不授予raw entry或ingress adapter能力；
 - metadata 精确绑定 Coro/Scheduler/Panic/FuncRep ABI、target triple/CPU/features/ABI、pointer width、endianness、LLVM data layout和 target capabilities；
@@ -504,9 +506,12 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - managed命中项投影成`ExternalKnown` effect/exec seed；foreign命中项把producer identity和可选target-neutral contract附着到exact C declaration，只允许替换consumer自动生成的保守default，显式本地generic/legacy契约不一致则失败，identity-only记录不授予任何operation；
 - 命中后，其所有Go caller仍通过原有SSA固定点自动染色；direct coroutine caller已验证会生成对producer发布的`$coro` declaration的structured await，不生成同步副本；typed foreign caller已验证继续得到`WaitForeign`，并在完整physical ABI/callback/frame-retention gate后由consumer选择worker或same-M；
 - consumer再次产出archive时会逐字段重发producer foreign fact，不会把本地临时default写回摘要；
+- outcome-plain managed function只能携带非零、已验证的leaf cost；consumer在启用有限
+  `MaxAtomicCost`时重新校验该producer cost，缺失proof或超预算均fail closed，不会退化成
+  无界同步执行；
 - 缺失metadata继续保持opaque，损坏、ABI错配、重复ID或有fact但物理能力不匹配均fail closed，绝不能解释成`NoSuspend`。
 
-v2 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
+v3 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
 
 后续版本仍需补充producer capability，而不是consumer最终计划：
 
@@ -518,7 +523,7 @@ v2 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 
 - method dispatch descriptor。
 - 高阶参数 effect constraint，例如 `effect(Apply) = localEffect ∪ effect(param0)`。
 
-`Demand`、root集合、call-site选择和`CoroPlanDigest`永远不进入producer摘要；它们属于最终consumer。当前v2的managed crossing只放行已精确预检的direct plain/direct coro静态调用；外部`Dispatch` producer和raw-plain consumer均明确拒绝，export binding也不授予ingress能力，直到descriptor、递归function-value layout及外部adapter lowering成为版本化archive ABI。独立library构建还必须把所有ABI-reachable API作为publication roots；不能仅发布本次构建中恰好被内部caller demand的函数。
+`Demand`、root集合、call-site选择和`CoroPlanDigest`永远不进入producer摘要；它们属于最终consumer。当前v3的managed crossing只放行已精确预检的direct plain/direct coro/outcome-plain静态调用；外部`Dispatch` producer和raw-plain consumer均明确拒绝，export binding也不授予ingress能力，直到descriptor、递归function-value layout及外部adapter lowering成为版本化archive ABI。独立library构建还必须把所有ABI-reachable API作为publication roots；不能仅发布本次构建中恰好被内部caller demand的函数。
 
 未知摘要或 ABI 版本不匹配时：
 

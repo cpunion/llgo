@@ -81,6 +81,9 @@ type coroArchitectureDebtBudget struct {
 	emissionSessionBegin      int
 	emissionBodyBind          int
 	emissionBodyComplete      int
+	managedSessionBegin       int
+	managedBodyBind           int
+	managedBodyComplete       int
 	legacyContextState        int
 	contextSessionField       int
 	parkProtocolTemplate      int
@@ -145,9 +148,18 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	legacySplitEmissionState:  0,
 	emissionSessionAccess:     20,
 	bodyCapabilityAccess:      39,
-	emissionSessionBegin:      1,
-	emissionBodyBind:          1,
-	emissionBodyComplete:      1,
+	// The outcome-plain cohort replaced the coroutine-only begin/bind/complete
+	// entry points with one exclusive managed-body transaction. Keep the legacy
+	// names at zero so a second physical-emission lifecycle cannot grow back.
+	emissionSessionBegin: 0,
+	emissionBodyBind:     0,
+	emissionBodyComplete: 0,
+	// Exactly two physical ABI emitters consume the one managed transaction:
+	// the full LLVM coroutine and outcome-plain. A new independent lifecycle or
+	// an unreviewed third ABI must update this gate explicitly.
+	managedSessionBegin:       2,
+	managedBodyBind:           2,
+	managedBodyComplete:       2,
 	legacyContextState:        0,
 	contextSessionField:       1,
 	parkProtocolTemplate:      1,
@@ -206,6 +218,11 @@ var allowedPhysicalEmissionSessionFields = map[string]bool{
 	"sourceBlocks":    true,
 	"sourceParamBase": true,
 	"explicitStatus":  true,
+}
+
+var allowedPhysicalBodyCapabilityFields = map[string]bool{
+	"coroutine": true,
+	"outcome":   true,
 }
 
 var allowedStagedCoroFeatureNames = map[string]bool{}
@@ -501,6 +518,7 @@ type coroArchitectureDebtInventory struct {
 	emissionSessionAccessFiles     map[string]bool
 	bodyCapabilityAccessFiles      map[string]bool
 	emissionSessionFields          map[string]bool
+	physicalBodyCapabilityFields   map[string]bool
 	parkProtocolTemplateFiles      map[string]bool
 	parkProtocolEmissionFiles      map[string]bool
 	parkProtocolEmissionFunctions  map[string]bool
@@ -578,6 +596,9 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("physical emission session begin", inventory.emissionSessionBegin, budget.emissionSessionBegin)
 	check("physical body bind", inventory.emissionBodyBind, budget.emissionBodyBind)
 	check("physical body completion", inventory.emissionBodyComplete, budget.emissionBodyComplete)
+	check("managed physical emission session begin", inventory.managedSessionBegin, budget.managedSessionBegin)
+	check("managed physical body bind", inventory.managedBodyBind, budget.managedBodyBind)
+	check("managed physical body completion", inventory.managedBodyComplete, budget.managedBodyComplete)
 	check("legacy context physical-emission fields", inventory.legacyContextState, budget.legacyContextState)
 	check("context physical-emission session field", inventory.contextSessionField, budget.contextSessionField)
 	check("Park protocol template", inventory.parkProtocolTemplate, budget.parkProtocolTemplate)
@@ -633,6 +654,7 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	checkExactCoroArchitectureSet(t, "physical emission session field access files", inventory.emissionSessionAccessFiles, allowedEmissionSessionAccessFiles)
 	checkExactCoroArchitectureSet(t, "physical body capability access files", inventory.bodyCapabilityAccessFiles, allowedCoroBodyCapabilityFiles)
 	checkExactCoroArchitectureSet(t, "physical emission session fields", inventory.emissionSessionFields, allowedPhysicalEmissionSessionFields)
+	checkExactCoroArchitectureSet(t, "physical body capability fields", inventory.physicalBodyCapabilityFields, allowedPhysicalBodyCapabilityFields)
 	checkExactCoroArchitectureSet(t, "Park protocol template files", inventory.parkProtocolTemplateFiles, allowedParkProtocolTemplateFiles)
 	checkExactCoroArchitectureSet(t, "Park protocol emission files", inventory.parkProtocolEmissionFiles, migratedParkProtocolFiles)
 	checkExactCoroArchitectureSet(t, "Park protocol emission functions", inventory.parkProtocolEmissionFunctions, migratedParkProtocolFunctions)
@@ -702,6 +724,7 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 		emissionSessionAccessFiles:     make(map[string]bool),
 		bodyCapabilityAccessFiles:      make(map[string]bool),
 		emissionSessionFields:          make(map[string]bool),
+		physicalBodyCapabilityFields:   make(map[string]bool),
 		parkProtocolTemplateFiles:      make(map[string]bool),
 		parkProtocolEmissionFiles:      make(map[string]bool),
 		parkProtocolEmissionFunctions:  make(map[string]bool),
@@ -875,6 +898,12 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 						inventory.emissionBodyBind++
 					case "completeCoroPhysicalBody":
 						inventory.emissionBodyComplete++
+					case "beginCoroManagedPhysicalEmission":
+						inventory.managedSessionBegin++
+					case "bindManagedPhysicalBody":
+						inventory.managedBodyBind++
+					case "completeManagedPhysicalBody":
+						inventory.managedBodyComplete++
 					case "type_":
 						if rel == "cl/emission_runtime_helpers.go" {
 							inventory.rawHelperPhysicalType++
@@ -1032,6 +1061,8 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 								}
 							case "coroPhysicalEmissionSession":
 								inventory.emissionSessionFields[name.Name] = true
+							case "coroPhysicalBodyCapability":
+								inventory.physicalBodyCapabilityFields[name.Name] = true
 							case "coroParkOperation":
 								inventory.parkProtocolFields[name.Name] = true
 							case "coroParkFaultRoute":

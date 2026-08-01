@@ -330,11 +330,16 @@ const (
 	// Effect and Exec facts are deliberately retained for diagnostics and for a
 	// later mixed-demand fixed point; they do not describe this physical body.
 	EmitRawPlain
+	// EmitOutcomePlain selects a synchronous hidden ABI which returns one
+	// explicit Return/Panic/Goexit outcome through caller-owned storage. The
+	// logical function remains PrimaryCoroutine and retains OutcomeStructured;
+	// this choice removes only an otherwise unnecessary LLVM coroutine frame.
+	EmitOutcomePlain
 )
 
 // Validate reports whether e names a defined physical-emission choice.
 func (e BodyEmission) Validate() error {
-	if e > EmitRawPlain {
+	if e > EmitOutcomePlain {
 		return fmt.Errorf("coro: invalid body emission %d", uint8(e))
 	}
 	return nil
@@ -352,6 +357,8 @@ func (e BodyEmission) String() string {
 		return "external"
 	case EmitRawPlain:
 		return "raw-plain"
+	case EmitOutcomePlain:
+		return "outcome-plain"
 	default:
 		return fmt.Sprintf("body-emission(%d)", uint8(e))
 	}
@@ -381,8 +388,103 @@ func (e *BodyEmission) UnmarshalText(text []byte) error {
 		*e = EmitExternal
 	case "raw-plain":
 		*e = EmitRawPlain
+	case "outcome-plain":
+		*e = EmitOutcomePlain
 	default:
 		return fmt.Errorf("coro: unknown body emission %q", text)
 	}
 	return nil
+}
+
+// ManagedEntryKind is the exact physical managed-call ABI exported by one
+// planned function. It is separate from BodyEmission because an imported
+// declaration emits no body in the consumer while still naming one producer
+// entry. It is also separate from PrimaryKind: coroutine and outcome-plain
+// entries have the same logical PrimaryCoroutine semantics but incompatible
+// hidden parameter/result ABIs.
+type ManagedEntryKind uint8
+
+const (
+	ManagedEntryNone ManagedEntryKind = iota
+	ManagedEntryPlain
+	ManagedEntryCoroutine
+	ManagedEntryOutcomePlain
+)
+
+func (k ManagedEntryKind) Validate() error {
+	if k > ManagedEntryOutcomePlain {
+		return fmt.Errorf("coro: invalid managed entry kind %d", uint8(k))
+	}
+	return nil
+}
+
+func (k ManagedEntryKind) String() string {
+	switch k {
+	case ManagedEntryNone:
+		return "none"
+	case ManagedEntryPlain:
+		return "plain"
+	case ManagedEntryCoroutine:
+		return "coroutine"
+	case ManagedEntryOutcomePlain:
+		return "outcome-plain"
+	default:
+		return fmt.Sprintf("managed-entry-kind(%d)", uint8(k))
+	}
+}
+
+func (k ManagedEntryKind) MarshalText() ([]byte, error) {
+	if err := k.Validate(); err != nil {
+		return nil, err
+	}
+	return []byte(k.String()), nil
+}
+
+func (k *ManagedEntryKind) UnmarshalText(text []byte) error {
+	if k == nil {
+		return fmt.Errorf("coro: cannot unmarshal managed entry kind into nil receiver")
+	}
+	switch strings.TrimSpace(string(text)) {
+	case "none":
+		*k = ManagedEntryNone
+	case "plain":
+		*k = ManagedEntryPlain
+	case "coroutine":
+		*k = ManagedEntryCoroutine
+	case "outcome-plain":
+		*k = ManagedEntryOutcomePlain
+	default:
+		return fmt.Errorf("coro: unknown managed entry kind %q", text)
+	}
+	return nil
+}
+
+// AtomicCostProof identifies why a physical body may execute to its next
+// scheduler cut without a preemption poll. It is deliberately independent
+// from the numeric cost so an absent proof cannot be confused with a zero-cost
+// body. The first replacement cohort accepts only source-call-free acyclic
+// leaves; later DAG/archive proofs must use distinct values and validation.
+type AtomicCostProof uint8
+
+const (
+	AtomicCostUnproven AtomicCostProof = iota
+	AtomicCostLeaf
+)
+
+func (p AtomicCostProof) Validate() error {
+	if p > AtomicCostLeaf {
+		return fmt.Errorf("coro: invalid atomic cost proof %d", uint8(p))
+	}
+	return nil
+}
+
+func (p AtomicCostProof) String() string {
+	switch p {
+	case AtomicCostUnproven:
+		return "unproven"
+	case AtomicCostLeaf:
+		return "leaf"
+	default:
+		return fmt.Sprintf("atomic-cost-proof(%d)", uint8(p))
+	}
 }

@@ -80,6 +80,12 @@ type Roots []Root
 type SSAFunctionPolicy struct {
 	Effect Effect
 	Exec   ExecFlags
+	// ManagedEntry and its optional atomic-cost proof are producer-owned
+	// physical capabilities for an ExternalKnown library declaration. Local Go
+	// bodies derive these fields after the complete fixed point instead.
+	ManagedEntry    ManagedEntryKind
+	AtomicCost      uint64
+	AtomicCostProof AtomicCostProof
 	// CallableIdentityCertificate is the execution-policy-neutral identity of
 	// one exact managed C declaration. It may coexist with either a generic
 	// behavior contract, a legacy physical capability, or neither.
@@ -569,6 +575,13 @@ type SSAFunctionBodyFacts struct {
 	Exec             ExecFlags
 	InstructionCount int
 	HasCycle         bool
+	// OutcomePlainLeaf is a frontend-owned proof that every evaluated source
+	// instruction belongs to the initial return/explicit-panic leaf cohort. It
+	// proves no source call, defer, implicit-fault adapter, wait, spawn, or other
+	// physical operation is hidden behind InstructionCount. Whole-program
+	// analysis still rejects roots, dynamic references, recursion, raw entries,
+	// and compiler-inserted calls before selecting EmitOutcomePlain.
+	OutcomePlainLeaf bool
 }
 
 func (facts SSAFunctionBodyFacts) validate() error {
@@ -583,6 +596,9 @@ func (facts SSAFunctionBodyFacts) validate() error {
 	}
 	if facts.InstructionCount < 0 {
 		return fmt.Errorf("local body instruction count is negative")
+	}
+	if facts.OutcomePlainLeaf && facts.HasCycle {
+		return fmt.Errorf("outcome-plain leaf proof has a source CFG cycle")
 	}
 	return nil
 }
@@ -1448,6 +1464,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		return nil, err
 	}
 	needsDispatch := flow.descriptorTargets(unknownTargets)
+	localBodyFacts := make(map[*ssa.Function]SSAFunctionBodyFacts, len(bodyFunctions))
 	buildPolicies := func(exactNoUnwind map[*ssa.Function]bool) (map[*ssa.Function]SSAFunctionPolicy, error) {
 		policies := make(map[*ssa.Function]SSAFunctionPolicy, len(included))
 		for _, fn := range included {
@@ -1458,18 +1475,21 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 			trusted := trustedPolicies[fn]
 			if _, ignored := ignoredBodies[fn]; !ignored {
-				bodyFacts := SSAFunctionBodyFacts{}
-				if config.ClassifyLocalBody != nil {
-					var bodyErr error
-					bodyFacts, bodyErr = config.ClassifyLocalBody(fn)
-					if bodyErr != nil {
-						return nil, fmt.Errorf("coro: classify local SSA body %q: %w", fn.Name(), bodyErr)
+				bodyFacts, classified := localBodyFacts[fn]
+				if !classified {
+					if config.ClassifyLocalBody != nil {
+						var bodyErr error
+						bodyFacts, bodyErr = config.ClassifyLocalBody(fn)
+						if bodyErr != nil {
+							return nil, fmt.Errorf("coro: classify local SSA body %q: %w", fn.Name(), bodyErr)
+						}
+					} else {
+						bodyFacts = scanSSAFunctionBody(fn)
 					}
-				} else {
-					bodyFacts = scanSSAFunctionBody(fn)
-				}
-				if err := bodyFacts.validate(); err != nil {
-					return nil, fmt.Errorf("coro: local SSA body %q: %w", fn.Name(), err)
+					if err := bodyFacts.validate(); err != nil {
+						return nil, fmt.Errorf("coro: local SSA body %q: %w", fn.Name(), err)
+					}
+					localBodyFacts[fn] = bodyFacts
 				}
 				bodyEffect, bodyExec := bodyFacts.Effect, bodyFacts.Exec
 				if bodyFacts.HasCycle || maxPlain >= 0 && bodyFacts.InstructionCount > maxPlain {
@@ -1489,6 +1509,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			// seed above. An explicit trusted NeedsPreempt declaration remains
 			// authoritative and is joined only after that suppression.
 			policy.Exec = policy.Exec.Join(trusted.Exec)
+			policy.ManagedEntry = trusted.ManagedEntry
+			policy.AtomicCost = trusted.AtomicCost
+			policy.AtomicCostProof = trusted.AtomicCostProof
 			policy.NeedsDispatch = policy.NeedsDispatch || trusted.NeedsDispatch
 			policy.TrustedBoundedRecursion = trusted.TrustedBoundedRecursion
 			_, rawFunctionAddressEntry := rawFunctionAddressEntries[fn]
@@ -1564,6 +1587,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			ManagedDemand:           root.managed,
 			RawPlainDemand:          root.raw,
 			External:                policy.External,
+			ManagedEntry:            policy.ManagedEntry,
+			AtomicCost:              policy.AtomicCost,
+			AtomicCostProof:         policy.AtomicCostProof,
 			TrustedBoundedRecursion: policy.TrustedBoundedRecursion,
 			NeedsDispatch:           policy.NeedsDispatch,
 			RawPlainEntry:           policy.RawPlainEntry,
@@ -1853,6 +1879,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	if err := validateSSAImportedOutcomePlainCosts(base, maxPlain); err != nil {
+		return nil, err
+	}
 	if err := validateSSACallableContractPlans(base, policies, ids); err != nil {
 		return nil, err
 	}
@@ -1867,6 +1896,11 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		return nil, err
 	}
 	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids); err != nil {
+		return nil, err
+	}
+	if err := applySSAOutcomePlainLeafPlans(
+		base, graph, canonicalRoots, byID, localBodyFacts, callPlans, loweredCalls, maxPlain,
+	); err != nil {
 		return nil, err
 	}
 	elidedCallSet := make(map[ssa.CallInstruction]struct{}, len(elidedCalls))
@@ -1942,6 +1976,129 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		})
 	}
 	return result, nil
+}
+
+// validateSSAImportedOutcomePlainCosts applies the consumer's scheduler-gap
+// budget to producer-owned synchronous outcome entries. A producer cannot
+// offer a coroutine fallback under the same primary symbol, so an active
+// crossing which exceeds the consumer budget must fail closed rather than
+// silently lengthen its no-poll interval. A negative budget remains the
+// existing explicit unlimited mode.
+func validateSSAImportedOutcomePlainCosts(plan *Plan, maxAtomicCost int) error {
+	if plan == nil {
+		return fmt.Errorf("coro: imported outcome-plain cost validation requires a complete plan")
+	}
+	if maxAtomicCost < 0 {
+		return nil
+	}
+	for _, function := range plan.functions {
+		if function.External != ExternalKnown || function.ManagedEntry != ManagedEntryOutcomePlain ||
+			function.ManagedDemand == NoDemand {
+			continue
+		}
+		if function.AtomicCost > uint64(maxAtomicCost) {
+			return fmt.Errorf(
+				"coro: imported outcome-plain function %q atomic cost %d exceeds consumer budget %d",
+				function.ID, function.AtomicCost, maxAtomicCost,
+			)
+		}
+	}
+	return nil
+}
+
+// applySSAOutcomePlainLeafPlans performs the first deliberately narrow
+// outcome-plain replacement cohort after the complete call/value plan has been
+// frozen. A local frontend proof is necessary but insufficient: only one
+// source-call-free, acyclic body reached exclusively by exact static managed
+// calls is accepted. Roots, spawns, compiler-lowered callers, first-class
+// references, raw entries, recursion and open execution remain ordinary LLVM
+// coroutines. For this cohort InstructionCount is a conservative whole-path
+// bound because the source body contains no call and no CFG cycle.
+func applySSAOutcomePlainLeafPlans(
+	base *Plan,
+	graph *Graph,
+	roots []SSARootPlan,
+	byID map[FunctionID]*ssa.Function,
+	localBodyFacts map[*ssa.Function]SSAFunctionBodyFacts,
+	callPlans map[ssa.CallInstruction]SSACallPlan,
+	loweredCalls map[*ssa.Function][]SSALoweredCall,
+	maxAtomicCost int,
+) error {
+	if base == nil || graph == nil {
+		return fmt.Errorf("coro: outcome-plain leaf planning requires a complete graph plan")
+	}
+	// A disabled instruction budget cannot prove a finite target/profile bound.
+	if maxAtomicCost < 0 {
+		return nil
+	}
+	blocked := make(map[FunctionID]bool)
+	direct := make(map[FunctionID]bool)
+	ids := make(map[*ssa.Function]FunctionID, len(byID))
+	for id, function := range byID {
+		ids[function] = id
+	}
+	for _, root := range roots {
+		blocked[root.ID] = true
+	}
+	for reference := range graph.references {
+		blocked[reference.target] = true
+	}
+	for call, plan := range callPlans {
+		exactStatic := call != nil && call.Common() != nil && call.Common().StaticCallee() != nil &&
+			plan.Kind == CallDirect && plan.Rep == DirectCoro && plan.Transport == ManagedTransport &&
+			!plan.Open && !plan.MayBeNil && !plan.SyncDispatch && !plan.RawPlain && len(plan.Targets) == 1
+		for _, target := range plan.Targets {
+			if exactStatic {
+				direct[target] = true
+			} else {
+				blocked[target] = true
+			}
+		}
+	}
+	for _, calls := range loweredCalls {
+		for _, call := range calls {
+			if call.Target == nil {
+				continue
+			}
+			if id, ok := ids[call.Target]; ok {
+				blocked[id] = true
+			}
+		}
+	}
+	for index := range base.functions {
+		plan := base.functions[index]
+		function := byID[plan.ID]
+		facts, classified := localBodyFacts[function]
+		if function == nil || len(function.FreeVars) != 0 || !classified || !facts.OutcomePlainLeaf || facts.HasCycle ||
+			facts.InstructionCount <= 0 || facts.InstructionCount > maxAtomicCost ||
+			blocked[plan.ID] || !direct[plan.ID] {
+			continue
+		}
+		loweredSafe := true
+		for _, lowered := range loweredCalls[function] {
+			if !lowered.ExplicitStatusElided {
+				loweredSafe = false
+				break
+			}
+		}
+		if !loweredSafe || plan.External != Defined || plan.Emission != EmitCoroutine ||
+			plan.ManagedEntry != ManagedEntryCoroutine ||
+			plan.Primary != PrimaryCoroutine || plan.FuncRep != DirectCoro ||
+			plan.ManagedDemand == NoDemand || plan.RawPlainDemand || plan.RawPlainEntry ||
+			plan.RawPlainOnly || plan.Recursive || plan.Effect != OutcomeStructured ||
+			plan.Exec&^MayUnwind != 0 || plan.AtomicCostProof != AtomicCostUnproven || plan.AtomicCost != 0 {
+			continue
+		}
+		plan.Emission = EmitOutcomePlain
+		plan.ManagedEntry = ManagedEntryOutcomePlain
+		plan.AtomicCost = uint64(facts.InstructionCount)
+		plan.AtomicCostProof = AtomicCostLeaf
+		if err := validateManagedEntryPlan(plan); err != nil {
+			return fmt.Errorf("coro: select outcome-plain leaf %q: %w", plan.ID, err)
+		}
+		base.functions[index] = plan
+	}
+	return nil
 }
 
 // validateSSACallableContractPlans prevents wrapper metadata from becoming a

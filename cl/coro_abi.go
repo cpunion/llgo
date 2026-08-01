@@ -1044,7 +1044,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	frameRetention := physicalPlan.frameRetention
 	critical := physicalPlan.critical
 	cleanupPlan := physicalPlan.cleanup
-	emission, finishEmission := p.beginCoroPhysicalEmission(
+	emission, finishEmission := p.beginCoroManagedPhysicalEmission(
 		physicalPlan, sourceParamBase, abi.panicPrepareHook != "",
 	)
 	defer finishEmission()
@@ -1082,7 +1082,8 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	physical.completion = p.fn.MakeBlock()
 	physical.finalSuspend = p.fn.MakeBlock()
 	physical.bindCancellationCompletion(b)
-	emission.bindCoroPhysicalBody(physical, sourceBlocks)
+	bodyCapability := newCoroPhysicalBodyCapability(physical)
+	emission.bindManagedPhysicalBody(bodyCapability, sourceBlocks)
 	b.SetBlock(physical.coro.InitialResumeBlock())
 	physical.activate(b)
 	b.Jump(sourceBlocks[0])
@@ -1161,7 +1162,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	}
 	b.SetBlock(physical.finalSuspend)
 	physical.finish(b)
-	emission.completeCoroPhysicalBody(physical)
+	emission.completeManagedPhysicalBody(bodyCapability)
 }
 
 func validateCoroPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, childAwait, programRun bool) error {
@@ -1256,9 +1257,13 @@ func validateCoroPhysicalABIForOwner(
 		fn.Signature != nil && fn.Signature.Recv() == nil
 	rawMethodDispatchToken := rawMethodToken && plan.FuncRep == coro.Dispatch &&
 		fn.Signature != nil && fn.Signature.Recv() != nil
-	if plan.Emission != coro.EmitCoroutine ||
+	outcomePlain := plan.Emission == coro.EmitOutcomePlain && plan.ManagedEntry == coro.ManagedEntryOutcomePlain &&
+		plan.AtomicCostProof == coro.AtomicCostLeaf &&
+		plan.AtomicCost != 0 && plan.FuncRep == coro.DirectCoro && !plan.Recursive &&
+		plan.Effect == coro.OutcomeStructured && plan.Exec&^coro.MayUnwind == 0
+	if plan.Emission != coro.EmitCoroutine && !outcomePlain ||
 		plan.FuncRep != coro.DirectCoro && !managedDispatchTarget && !rawMethodDispatchToken {
-		return fail("requires a direct coroutine or capability-certified Dispatch emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
+		return fail("requires a direct coroutine/outcome or capability-certified Dispatch emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
 	}
 	if !plan.ManagedDemand.Contains(coro.AsyncDemand) {
 		return fail(
@@ -1278,6 +1283,9 @@ func validateCoroPhysicalABIForOwner(
 	)
 	if cleanupErr != nil {
 		return fail("static cleanup: %v", cleanupErr)
+	}
+	if outcomePlain && cleanupPlan != nil {
+		return fail("outcome-plain leaf acquired a static cleanup plan")
 	}
 	if err := validateCoroDynamicCleanupHelpers(cleanupPlan, whole); err != nil {
 		return fail("dynamic cleanup: %v", err)
@@ -1810,6 +1818,8 @@ func validateCoroPhysicalABIForOwner(
 				}
 				switch instructionPlan.control {
 				case coroPhysicalControlPlainDispatch:
+					continue
+				case coroPhysicalControlDirectOutcome:
 					continue
 				case coroPhysicalControlNilDispatchFault:
 					continue
@@ -3388,7 +3398,9 @@ func validateCoroPhysicalConsumersCapabilities(
 ) error {
 	coroutineIDs := make(map[coro.FunctionID]struct{})
 	for _, function := range plan.Functions() {
-		if function.Plan.Emission == coro.EmitCoroutine {
+		if function.Plan.Emission != coro.EmitNone &&
+			(function.Plan.ManagedEntry == coro.ManagedEntryCoroutine ||
+				function.Plan.ManagedEntry == coro.ManagedEntryOutcomePlain) {
 			coroutineIDs[function.Plan.ID] = struct{}{}
 		}
 	}

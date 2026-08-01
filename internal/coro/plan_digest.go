@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v30"
+const PlanDigestSchema = "llgo.coro.plan-digest.v31"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -168,6 +168,9 @@ type planDigestFunction struct {
 	ManagedDemand                uint8                        `json:"managed_demand"`
 	RawPlainDemand               bool                         `json:"raw_plain_demand"`
 	Emission                     uint8                        `json:"emission"`
+	ManagedEntry                 uint8                        `json:"managed_entry"`
+	AtomicCost                   uint64                       `json:"atomic_cost"`
+	AtomicCostProof              uint8                        `json:"atomic_cost_proof"`
 	FuncRep                      uint8                        `json:"func_rep"`
 	External                     uint8                        `json:"external"`
 	Recursive                    bool                         `json:"recursive"`
@@ -884,6 +887,9 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 			ManagedDemand:           uint8(plan.ManagedDemand),
 			RawPlainDemand:          plan.RawPlainDemand,
 			Emission:                uint8(plan.Emission),
+			ManagedEntry:            uint8(plan.ManagedEntry),
+			AtomicCost:              plan.AtomicCost,
+			AtomicCostProof:         uint8(plan.AtomicCostProof),
 			FuncRep:                 uint8(plan.FuncRep),
 			External:                uint8(plan.External),
 			Recursive:               plan.Recursive,
@@ -982,7 +988,16 @@ func validateDigestFunctionPlan(plan FunctionPlan) error {
 	if plan.TrustedBoundedRecursion && !plan.Recursive {
 		return fmt.Errorf("coro: non-recursive function %q has a trusted bounded-recursion proof", plan.ID)
 	}
+	if err := validateManagedEntryPlan(plan); err != nil {
+		return err
+	}
 	expectedEmission := bodyEmissionFor(plan.ManagedDemand, plan.RawPlainDemand, plan.Effect, plan.External)
+	if plan.External == Defined && plan.ManagedEntry == ManagedEntryOutcomePlain {
+		if plan.ManagedDemand == NoDemand || plan.Primary != PrimaryCoroutine {
+			return fmt.Errorf("coro: owned outcome-plain function %q lacks managed demand/coroutine primary", plan.ID)
+		}
+		expectedEmission = EmitOutcomePlain
+	}
 	if plan.Emission != expectedEmission {
 		return fmt.Errorf("coro: function %q emission %s does not match managed demand %s, raw demand %t, effect %s, and external kind %s (want %s)", plan.ID, plan.Emission, plan.ManagedDemand, plan.RawPlainDemand, plan.Effect, plan.External, expectedEmission)
 	}

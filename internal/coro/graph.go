@@ -229,6 +229,27 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 	if err := spec.External.validate(); err != nil {
 		return fmt.Errorf("coro: function %q: %w", spec.ID, err)
 	}
+	if err := spec.ManagedEntry.Validate(); err != nil {
+		return fmt.Errorf("coro: function %q: %w", spec.ID, err)
+	}
+	if err := spec.AtomicCostProof.Validate(); err != nil {
+		return fmt.Errorf("coro: function %q: %w", spec.ID, err)
+	}
+	if spec.ManagedEntry != ManagedEntryNone && spec.External != ExternalKnown {
+		return fmt.Errorf("coro: function %q: managed entry %s requires an external-known producer", spec.ID, spec.ManagedEntry)
+	}
+	switch spec.AtomicCostProof {
+	case AtomicCostUnproven:
+		if spec.AtomicCost != 0 || spec.ManagedEntry == ManagedEntryOutcomePlain {
+			return fmt.Errorf("coro: function %q: outcome entry/cost requires an atomic-cost proof", spec.ID)
+		}
+	case AtomicCostLeaf:
+		if spec.AtomicCost == 0 || spec.External != ExternalKnown ||
+			spec.ManagedEntry != ManagedEntryOutcomePlain || spec.Seed != OutcomeStructured ||
+			spec.Exec&^MayUnwind != 0 {
+			return fmt.Errorf("coro: function %q: invalid imported outcome-plain leaf capability", spec.ID)
+		}
+	}
 	if spec.RawPlainEntry && spec.External != Defined {
 		return fmt.Errorf("coro: function %q: raw plain entry requires a defined body", spec.ID)
 	}
@@ -940,8 +961,29 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 			}
 		}
 		emission := bodyEmissionFor(managedDemands[id], rawPlainDemands[id], effects[id], spec.External)
-		plan.byID[id] = len(plan.functions)
-		plan.functions = append(plan.functions, FunctionPlan{
+		managedEntry := ManagedEntryNone
+		atomicCost, atomicCostProof := uint64(0), AtomicCostUnproven
+		if spec.External == ExternalKnown {
+			managedEntry = spec.ManagedEntry
+			if managedEntry == ManagedEntryNone {
+				// Preserve the pre-entry-dimension behavior for trusted external
+				// policies which are not imported library summaries. New archive
+				// producers always publish the exact entry explicitly.
+				managedEntry = ManagedEntryPlain
+				if effects[id].MaySuspend() {
+					managedEntry = ManagedEntryCoroutine
+				}
+			}
+			atomicCost, atomicCostProof = spec.AtomicCost, spec.AtomicCostProof
+		} else {
+			switch emission {
+			case EmitPlain, EmitRawPlain:
+				managedEntry = ManagedEntryPlain
+			case EmitCoroutine:
+				managedEntry = ManagedEntryCoroutine
+			}
+		}
+		functionPlan := FunctionPlan{
 			ID:                      id,
 			DeclaredEffect:          spec.Seed,
 			LocalEffect:             local[id],
@@ -953,6 +995,9 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 			ManagedDemand:           managedDemands[id],
 			RawPlainDemand:          rawPlainDemands[id],
 			Emission:                emission,
+			ManagedEntry:            managedEntry,
+			AtomicCost:              atomicCost,
+			AtomicCostProof:         atomicCostProof,
 			FuncRep:                 rep,
 			External:                spec.External,
 			Recursive:               recursive[id],
@@ -960,7 +1005,12 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 			Primary:                 primary,
 			RawPlainOnly:            rawPlainOnly,
 			RawPlainEntry:           spec.RawPlainEntry,
-		})
+		}
+		if err := validateManagedEntryPlan(functionPlan); err != nil {
+			return nil, err
+		}
+		plan.byID[id] = len(plan.functions)
+		plan.functions = append(plan.functions, functionPlan)
 	}
 	return plan, nil
 }
