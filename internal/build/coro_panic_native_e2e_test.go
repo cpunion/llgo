@@ -241,7 +241,7 @@ func buildCoroPanicNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "panic-e2e-package-init", Target: "__llgo_coro_panic_e2e_package_init"},
 			{
 				Kind: coroProgramStepCoroRootV1, Role: coroProgramStepRoleMainV2,
-				FunctionID: "panic-e2e-main", Target: coroPanicNativeE2EPackage + ".main$coro",
+				FunctionID: "panic-e2e-main", Target: coroNativeE2EMainPhysicalSymbol("main$coro"),
 				Owner: coroPanicNativeE2EPackage, CatalogTarget: anchor, Aux: 0,
 			},
 		},
@@ -384,9 +384,9 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	reclaimableG := pkg.NewFunc("github.com/goplus/llgo/runtime/internal/coro.ReclaimableG", newSignature(
 		[]types.Type{pointer}, []types.Type{types.Typ[types.Bool]},
 	), llssa.InGo)
-	payload := pkg.NewVar(coroPanicNativeE2EPackage+".GlobalPayload", types.NewPointer(types.Typ[types.Byte]), llssa.InGo)
-	before := pkg.NewVar(coroPanicNativeE2EPackage+".Before", types.NewPointer(uint32Type), llssa.InGo)
-	after := pkg.NewVar(coroPanicNativeE2EPackage+".After", types.NewPointer(uint32Type), llssa.InGo)
+	payload := pkg.NewVar(coroNativeE2EMainPhysicalSymbol("GlobalPayload"), types.NewPointer(types.Typ[types.Byte]), llssa.InGo)
+	before := pkg.NewVar(coroNativeE2EMainPhysicalSymbol("Before"), types.NewPointer(uint32Type), llssa.InGo)
+	after := pkg.NewVar(coroNativeE2EMainPhysicalSymbol("After"), types.NewPointer(uint32Type), llssa.InGo)
 
 	report := pkg.NewFunc(coroPanicNativeE2ERunReport, newSignature(
 		[]types.Type{pointer, pointer, uint32Type, runResultPointer}, []types.Type{uint32Type},
@@ -531,7 +531,7 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"github.com/goplus/llgo/runtime/internal/coro.PreparePanic",
 		"github.com/goplus/llgo/runtime/internal/coro.PanicDestroyed",
 		"github.com/goplus/llgo/runtime/internal/coro.LoadPanicRecord",
-		coroPanicNativeE2EPackage + ".panicChild$coro",
+		coroNativeE2EMainPhysicalSymbol("panicChild$coro"),
 	} {
 		if !strings.Contains(symbols, required) {
 			t.Fatalf("linked coroutine panic island is missing production/test-boundary symbol %q:\n%s", required, symbols)

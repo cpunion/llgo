@@ -47,7 +47,7 @@ const (
 	coroSpawnNativeE2EEntry   = "__llgo_coro_spawn_e2e_entry"
 )
 
-func coroSpawnNativeE2EPhysicalSymbol(name string) string {
+func coroNativeE2EMainPhysicalSymbol(name string) string {
 	// A package named main keeps its source import path for ownership metadata,
 	// but its final Go ABI symbols always use the canonical main prefix.
 	return "main." + name
@@ -497,11 +497,11 @@ func buildCoroSpawnNativeE2EUserSource(
 	if len(match) != 2 {
 		t.Fatalf("compiled E2E user module has no root package anchor:\n%s", ir)
 	}
-	checkSymbol = coroSpawnNativeE2EPhysicalSymbol("Check")
+	checkSymbol = coroNativeE2EMainPhysicalSymbol("Check")
 	if module.NamedFunction(checkSymbol).IsNil() {
 		t.Fatalf("compiled E2E user module has no plain checker %q:\n%s", checkSymbol, ir)
 	}
-	setupSymbol = coroSpawnNativeE2EPhysicalSymbol("Setup")
+	setupSymbol = coroNativeE2EMainPhysicalSymbol("Setup")
 	if module.NamedFunction(setupSymbol).IsNil() {
 		t.Fatalf("compiled E2E user module has no plain setup %q:\n%s", setupSymbol, ir)
 	}
@@ -524,7 +524,7 @@ func buildCoroSpawnNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "e2e-package-init", Target: "__llgo_coro_e2e_package_init"},
 			{
 				Kind: coroProgramStepCoroRootV1, Role: coroProgramStepRoleMainV2,
-				FunctionID: "e2e-main", Target: coroSpawnNativeE2EPhysicalSymbol("main$coro"),
+				FunctionID: "e2e-main", Target: coroNativeE2EMainPhysicalSymbol("main$coro"),
 				Owner: coroSpawnNativeE2EPackage, CatalogTarget: anchor, Aux: 0,
 			},
 		},

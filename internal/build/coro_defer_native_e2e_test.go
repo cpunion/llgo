@@ -265,7 +265,7 @@ func buildCoroStaticDeferNativeE2EEntry(t *testing.T, prog llssa.Program, temp, 
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "static-defer-e2e-package-init", Target: "__llgo_coro_static_defer_e2e_package_init"},
 			{
 				Kind: coroProgramStepCoroRootV1, Role: coroProgramStepRoleMainV2,
-				FunctionID: "static-defer-e2e-main", Target: coroSpawnNativeE2EPhysicalSymbol("main$coro"),
+				FunctionID: "static-defer-e2e-main", Target: coroNativeE2EMainPhysicalSymbol("main$coro"),
 				Owner: coroSpawnNativeE2EPackage, CatalogTarget: anchor,
 			},
 		},
@@ -330,7 +330,7 @@ func buildCoroStaticDeferNativeE2EChecks(
 	int32Type := types.Typ[types.Int32]
 	global := func(name string) llssa.Expr {
 		return pkg.NewVar(
-			coroSpawnNativeE2EPhysicalSymbol(name),
+			coroNativeE2EMainPhysicalSymbol(name),
 			types.NewPointer(uint32Type),
 			llssa.InGo,
 		).Expr
@@ -440,10 +440,10 @@ func buildCoroStaticDeferNativeE2EChecks(
 	continueBody.Call(maybeCancel.Expr)
 	continueBody.Return(continueStatus)
 
-	setupSymbol = coroSpawnNativeE2EPhysicalSymbol("Setup")
+	setupSymbol = coroNativeE2EMainPhysicalSymbol("Setup")
 	setup := pkg.NewFunc(setupSymbol, newSignature(nil, nil), llssa.InGo)
 	setup.MakeBody(1).Return()
-	checkSymbol = coroSpawnNativeE2EPhysicalSymbol("Check")
+	checkSymbol = coroNativeE2EMainPhysicalSymbol("Check")
 	check := pkg.NewFunc(checkSymbol, newSignature(nil, []types.Type{int32Type}), llssa.InGo)
 	body := check.MakeBody(16)
 	normalCountBlock, registeredBlock := check.Block(1), check.Block(2)
@@ -517,8 +517,8 @@ func assertCoroStaticDeferNativeE2ELinkedSymbols(t *testing.T, executable string
 		coroStaticDeferNativeE2EContinue,
 		"__llgo_coro_spawn_begin_v1",
 		"github.com/goplus/llgo/runtime/internal/coro.RequestTaskCancellation",
-		coroSpawnNativeE2EPhysicalSymbol("main$coro"),
-		coroSpawnNativeE2EPhysicalSymbol("canceledChild$coro"),
+		coroNativeE2EMainPhysicalSymbol("main$coro"),
+		coroNativeE2EMainPhysicalSymbol("canceledChild$coro"),
 	} {
 		if !strings.Contains(symbols, required) {
 			t.Fatalf("linked coroutine static-defer E2E is missing %q:\n%s", required, symbols)
