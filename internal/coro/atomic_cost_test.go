@@ -25,8 +25,6 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-var testAtomicCostCertificate = strings.Repeat("a", 64)
-
 func TestSSAAtomicCostCertificateBindsCFGAndCallees(t *testing.T) {
 	_, pkg := buildCoroTestSSA(t, "atomic_certificate.go", `package coroid
 

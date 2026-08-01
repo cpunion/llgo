@@ -24,6 +24,8 @@ import (
 	"testing"
 )
 
+var testAtomicCostCertificate = strings.Repeat("a", 64)
+
 func testLibraryEffectMetadata() LibraryEffectMetadata {
 	return LibraryEffectMetadata{
 		FunctionIDSchema:   FunctionIDSchema,
