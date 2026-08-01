@@ -112,6 +112,21 @@ func TestSchemaV1Contract(t *testing.T) {
 			t.Errorf("runtime layout is missing %q", category)
 		}
 	}
+	var mapLayout struct {
+		SameSizeGrowFlag    int `json:"same_size_grow_flag"`
+		EvacuatedTophashMin int `json:"evacuated_tophash_min"`
+		EvacuatedTophashMax int `json:"evacuated_tophash_max"`
+		OccupiedTophashMin  int `json:"occupied_tophash_min"`
+	}
+	if err := json.Unmarshal(categories["map"], &mapLayout); err != nil {
+		t.Fatal(err)
+	}
+	if mapLayout.SameSizeGrowFlag != 8 ||
+		mapLayout.EvacuatedTophashMin != 2 ||
+		mapLayout.EvacuatedTophashMax != 4 ||
+		mapLayout.OccupiedTophashMin != 5 {
+		t.Fatalf("map state constants = %+v", mapLayout)
+	}
 
 	first := SchemaV1()
 	first[0] = 0

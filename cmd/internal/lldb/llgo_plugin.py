@@ -97,6 +97,7 @@ class LLGoRuntimeLayout:
     map_type_pattern: str
     map_count: str
     map_flags: str
+    map_same_size_grow_flag: int
     map_bucket_bits: str
     map_buckets: str
     map_old_buckets: str
@@ -106,6 +107,9 @@ class LLGoRuntimeLayout:
     map_bucket_values: str
     map_bucket_indirect_values: str
     map_bucket_overflow: str
+    map_evacuated_tophash_min: int
+    map_evacuated_tophash_max: int
+    map_occupied_tophash_min: int
     channel_type_pattern: str
     channel_count: str
     channel_capacity: str
@@ -179,6 +183,8 @@ def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
                 map_type_pattern=map_layout["type_pattern"],
                 map_count=map_layout["count"],
                 map_flags=map_layout["flags"],
+                map_same_size_grow_flag=map_layout[
+                    "same_size_grow_flag"],
                 map_bucket_bits=map_layout["bucket_bits"],
                 map_buckets=map_layout["buckets"],
                 map_old_buckets=map_layout["old_buckets"],
@@ -190,6 +196,12 @@ def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
                 map_bucket_indirect_values=(
                     map_layout["bucket_indirect_values"]),
                 map_bucket_overflow=map_layout["bucket_overflow"],
+                map_evacuated_tophash_min=map_layout[
+                    "evacuated_tophash_min"],
+                map_evacuated_tophash_max=map_layout[
+                    "evacuated_tophash_max"],
+                map_occupied_tophash_min=map_layout[
+                    "occupied_tophash_min"],
                 channel_type_pattern=channel_layout["type_pattern"],
                 channel_count=channel_layout["count"],
                 channel_capacity=channel_layout["capacity"],
@@ -1089,7 +1101,9 @@ def _map_bucket_evacuated(target: lldb.SBTarget, address: int,
     tophash = bucket.GetChildMemberWithName(layout.map_bucket_tophash)
     first = tophash.GetChildAtIndex(0)
     value = _value_as_int(first)
-    return value is not None and 1 < value < 5
+    return (value is not None and
+            layout.map_evacuated_tophash_min <= value <=
+            layout.map_evacuated_tophash_max)
 
 
 def _map_entries(value: lldb.SBValue, layout: LLGoRuntimeLayout,
@@ -1125,7 +1139,9 @@ def _map_entries(value: lldb.SBValue, layout: LLGoRuntimeLayout,
     target = value.GetTarget()
     logical_buckets = 1 << bucket_bits
     scan_buckets = min(logical_buckets, LLGO_MAX_CONTAINER_SCAN_BUCKETS)
-    old_count = logical_buckets if flags & 8 else logical_buckets >> 1
+    old_count = (logical_buckets
+                 if flags & layout.map_same_size_grow_flag
+                 else logical_buckets >> 1)
     entries: List[lldb.SBValue] = []
 
     def append_chain(address: int) -> None:
@@ -1156,7 +1172,8 @@ def _map_entries(value: lldb.SBValue, layout: LLGoRuntimeLayout,
                         values.GetNumChildren())
             for slot in range(slots):
                 top = _value_as_int(tophash.GetChildAtIndex(slot))
-                if top is None or top < 5:
+                if (top is None or
+                        top < layout.map_occupied_tophash_min):
                     continue
                 key = keys.GetChildAtIndex(slot)
                 element = values.GetChildAtIndex(slot)

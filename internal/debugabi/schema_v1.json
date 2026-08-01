@@ -74,6 +74,7 @@
         "type_pattern": "^map\\[.+\\].+$",
         "count": "count",
         "flags": "flags",
+        "same_size_grow_flag": 8,
         "bucket_bits": "B",
         "buckets": "buckets",
         "old_buckets": "oldbuckets",
@@ -82,7 +83,10 @@
         "bucket_indirect_keys": "indirectkeys",
         "bucket_values": "values",
         "bucket_indirect_values": "indirectvalues",
-        "bucket_overflow": "overflow"
+        "bucket_overflow": "overflow",
+        "evacuated_tophash_min": 2,
+        "evacuated_tophash_max": 4,
+        "occupied_tophash_min": 5
       },
       "channel": {
         "type_pattern": "^(chan |chan<- |<-chan ).+",
