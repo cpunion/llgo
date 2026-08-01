@@ -224,6 +224,135 @@ func TestCoroWorkerForeignPointerResultProjectsAcrossExactWrapperCall(t *testing
 	}
 }
 
+func TestCoroWorkerForeignPointerResultMeetsClosedDynamicTargets(t *testing.T) {
+	const prefix = `package dynamicworkerresult
+
+import "unsafe"
+
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+
+//llgo:link raw llgo.syscall
+func raw(fn, a0 uintptr) (uintptr, uintptr, uintptr)
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/1+foreign-pointer-result=r1
+func pointer_trampoline()
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/1
+func scalar_trampoline()
+
+func pointerA(a0 uintptr) uintptr {
+	r1, _, _ := raw(funcPCABI0(pointer_trampoline), a0)
+	return r1
+}
+`
+	for _, test := range []struct {
+		name   string
+		extra  string
+		second string
+		want   bool
+	}{
+		{
+			name: "all pointer results",
+			extra: `func pointerB(a0 uintptr) uintptr {
+	r1, _, _ := raw(funcPCABI0(pointer_trampoline), a0)
+	return r1
+}
+`,
+			second: "pointerB",
+			want:   true,
+		},
+		{
+			name: "mixed scalar result",
+			extra: `func scalar(a0 uintptr) uintptr {
+	r1, _, _ := raw(funcPCABI0(scalar_trampoline), a0)
+	return r1
+}
+`,
+			second: "scalar",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := prefix + test.extra + `func Root(second bool, a0 uintptr) unsafe.Pointer {
+	fn := pointerA
+	if second {
+		fn = ` + test.second + `
+	}
+	return unsafe.Pointer(fn(a0))
+}
+`
+			pkg, _, files := buildGoSSAPkg(t, source)
+			prog := newLLSSAProg(t)
+			defer prog.Dispose()
+			universe, err := prepareStacklessEmissionUniverseWithOptions(
+				prog, nil, []EmissionPackage{{SSA: pkg, Files: files}},
+				EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ssaUniverse, err := coro.NewSSAEmissionUniverse(pkg.Prog, universe.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := pkg.Func("Root")
+			plan, err := coro.AnalyzeSSA(pkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+				EmissionUniverse:  ssaUniverse,
+				FunctionIDs:       universe.FunctionIDConfig(),
+				DynamicResolution: coro.DynamicCHAClosed,
+				ClassifyElidedCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (bool, error) {
+					semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(candidate)
+					return intrinsic && semantics.ElidesManagedCall(), err
+				},
+				ClassifyElidedCallCertificate: func(_ *ssa.Function, candidate ssa.CallInstruction) (string, error) {
+					certificate, certified, err := universe.CoroWorkerSyscallCertificate(candidate)
+					if err != nil || !certified {
+						return "", err
+					}
+					return certificate.ID, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var conversion *ssa.Convert
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Convert)
+					if ok && coroFrameRetentionUintptrLike(candidate.X.Type()) && coroFrameRetentionPointerLike(candidate.Type()) {
+						conversion = candidate
+					}
+				}
+			}
+			if conversion == nil {
+				t.Fatal("fixture has no uintptr-to-pointer conversion")
+			}
+			call, ok := conversion.X.(*ssa.Call)
+			if !ok {
+				t.Fatalf("conversion source = %T; want dynamic call", conversion.X)
+			}
+			callPlan, planned := plan.CallPlan(call)
+			if !planned || callPlan.Open || len(callPlan.Targets) < 2 {
+				t.Fatalf("dynamic call plan = %+v, %t; want closed multi-target plan", callPlan, planned)
+			}
+			if got := audit.provesWorkerForeignPointerResult(conversion.X); got != test.want {
+				t.Fatalf("closed dynamic pointer-result proof = %t; want %t (plan=%+v)", got, test.want, callPlan)
+			}
+			reason := audit.validateConvert(conversion)
+			if test.want && reason != "" {
+				t.Fatalf("closed all-pointer result rejected: %s", reason)
+			}
+			if !test.want && !strings.Contains(reason, "has no traceable exact pointer provenance") {
+				t.Fatalf("closed mixed result rejection = %q; want provenance failure", reason)
+			}
+		})
+	}
+}
+
 func TestCoroWorkerForeignPointerResultCertificateMask(t *testing.T) {
 	prog, pkg, universe := prepareCoroWorkerResultProvenanceFixture(t)
 	defer prog.Dispose()
