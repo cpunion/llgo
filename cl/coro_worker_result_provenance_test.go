@@ -353,6 +353,158 @@ func pointerA(a0 uintptr) uintptr {
 	}
 }
 
+func TestCoroWorkerForeignPointerResultThroughLinuxMmapWrapper(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.addPackage(t, "syscall", `package syscall
+const (
+	SYS_READ = 0
+	SYS_MMAP = 9
+)
+`)
+	const packagePath = "example.com/emission/linuxmmapresult"
+	prepared := testProg.addPackage(t, packagePath, `package linuxmmapresult
+
+import (
+	stdsyscall "syscall"
+)
+
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+
+//llgo:link raw llgo.syscall
+func raw(fn, trap, a1, a2, a3, a4, a5, a6 uintptr) (uintptr, uintptr, uintptr)
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/7
+func libc___llgo_linux_syscall6_v1_trampoline()
+
+type errno uintptr
+func (errno) Error() string { return "errno" }
+
+func syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err error) {
+	r1, r2, e1 := raw(funcPCABI0(libc___llgo_linux_syscall6_v1_trampoline), trap, a1, a2, a3, a4, a5, a6)
+	if e1 != 0 {
+		err = errno(e1)
+	}
+	return
+}
+
+func mmap(a0 uintptr) (xaddr uintptr, err error) {
+	r0, _, e1 := syscall6(stdsyscall.SYS_MMAP, a0, 0, 0, 0, 0, 0)
+	xaddr = uintptr(r0)
+	if e1 != nil {
+		err = e1
+	}
+	return
+}
+
+func read(a0 uintptr) (value uintptr, err error) {
+	r0, _, e1 := syscall6(stdsyscall.SYS_READ, a0, 0, 0, 0, 0, 0)
+	if e1 != nil {
+		err = e1
+	}
+	return r0, err
+}
+
+type mmapper struct {
+	mmap func(uintptr) (uintptr, error)
+}
+
+var mapper = &mmapper{mmap: mmap}
+
+func Root(a0 uintptr) uintptr {
+	addr, errno := mapper.mmap(a0)
+	if errno != nil {
+		return 0
+	}
+	return addr
+}
+
+func ReadRoot(a0 uintptr) uintptr {
+	value, errno := read(a0)
+	if errno != nil {
+		return 0
+	}
+	return value
+}
+`)
+	testProg.ssa.Build()
+	pkg := prepared.ssa
+	prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "linux", GOARCH: "amd64"})
+	defer prog.Dispose()
+	prog.SetLinkname(packagePath+".libc___llgo_linux_syscall6_v1_trampoline", "C.__llgo_linux_syscall6_v1")
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{SSA: pkg, Files: []*ast.File{prepared.file}}},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(pkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		root string
+		want bool
+	}{
+		{root: "Root", want: true},
+		{root: "ReadRoot"},
+	} {
+		t.Run(test.root, func(t *testing.T) {
+			root := pkg.Func(test.root)
+			plan, err := coro.AnalyzeSSA(pkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+				EmissionUniverse:  ssaUniverse,
+				FunctionIDs:       universe.FunctionIDConfig(),
+				DynamicResolution: coro.DynamicCHAClosed,
+				ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					if fn == pkg.Func("syscall6") {
+						return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
+					}
+					return coro.SSAFunctionPolicy{}, nil
+				},
+				ClassifyElidedCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (bool, error) {
+					semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(candidate)
+					return intrinsic && semantics.ElidesManagedCall(), err
+				},
+				ClassifyElidedCallCertificate: func(_ *ssa.Function, candidate ssa.CallInstruction) (string, error) {
+					certificate, certified, err := universe.CoroWorkerSyscallCertificate(candidate)
+					if err != nil || !certified {
+						return "", err
+					}
+					return certificate.ID, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result *ssa.Extract
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Extract)
+					if ok && candidate.Index == 0 && coroFrameRetentionUintptrLike(candidate.Type()) {
+						if _, call := candidate.Tuple.(*ssa.Call); call {
+							result = candidate
+						}
+					}
+				}
+			}
+			if result == nil {
+				t.Fatal("fixture has no uintptr call result")
+			}
+			if _, ok := result.Tuple.(*ssa.Call); !ok {
+				t.Fatalf("tuple = %T %q; want wrapper call", result.Tuple, result.Tuple)
+			}
+			if got := audit.provesWorkerForeignPointerResult(result); got != test.want {
+				t.Fatalf("Linux trap pointer proof = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCoroWorkerForeignPointerResultCertificateMask(t *testing.T) {
 	prog, pkg, universe := prepareCoroWorkerResultProvenanceFixture(t)
 	defer prog.Dispose()
