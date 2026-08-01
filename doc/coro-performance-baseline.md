@@ -256,7 +256,11 @@ and certified direct-call DAG, and rejects cycles, indirect calls, coroutine
 intrinsics, unknown helpers, dynamic allocas, unsupported EH/control, and
 variable-length memory intrinsics. Constant-length `memset`, `memcpy`, and
 `memmove` are accepted with their byte count included in the abstract work
-bound. The final funcinfo/pclntab data-only inline-assembly anchor is admitted
+bound. LLVM's scalar integer `umin`, `umax`, `smin`, and `smax` intrinsics are
+also accepted as one work unit only when the intrinsic identity, canonical
+name, two equal operands, equal result, and at-most-64-bit width all match;
+this covers InstCombine's compare/select folding without admitting arbitrary
+`llvm.*` declarations. The final funcinfo/pclntab data-only inline-assembly anchor is admitted
 only through compiler-injected identity plus a digest of its complete assembly
 payload; unmarked inline assembly remains rejected. The deterministic
 `llgo.coro.post-llvm-atomic-cost.v1` report binds each semantic certificate to
@@ -293,6 +297,13 @@ cost gate catches an accidental helper edge rather than silently accepting it.
 Because this adds a terminal status to the hidden outcome vocabulary, the
 archive producer/importer schema is hard-cut from v5 to v6; old libraries fail
 schema validation instead of being reinterpreted.
+
+The same physical ABI is now selected when a consumer module first declares an
+outcome entry owned by another package. A cross-package pointer-receiver method
+with narrow integer input/output gates the exact
+`(g, out, completion, receiver, args...) -> void` declaration; this prevents an
+ordinary Go declaration from being cached under the outcome symbol before its
+call is emitted.
 
 An exact cold-cache A/B used the same compiler toolchain and source
 (`fmt.Printf("Hello, world\\n")`) on Darwin arm64 with LLVM 22.1.8. The baseline

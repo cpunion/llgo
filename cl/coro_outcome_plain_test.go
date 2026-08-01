@@ -19,6 +19,7 @@
 package cl
 
 import (
+	"go/ast"
 	"go/token"
 	"regexp"
 	"strconv"
@@ -182,6 +183,104 @@ func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 			}
 			runCoroAtomicCostOptimization(t, prog, module, 1)
 		})
+	}
+}
+
+func TestCoroOutcomePlainCrossPackageMethodDeclarationUsesPhysicalABI(t *testing.T) {
+	const producerPath = "example.com/outcome/producer"
+	testProg := newEmissionTestProgram()
+	producer := testProg.addPackage(t, producerPath, `package producer
+
+type Code uint16
+type Header struct { Class uint16 }
+
+func (header *Header) Extended(code Code) Code {
+	return Code(header.Class<<4) | code
+}
+`)
+	consumer := testProg.addPackage(t, "example.com/outcome/consumer", `package consumer
+
+import "example.com/outcome/producer"
+
+func Root(header *producer.Header, code producer.Code) producer.Code {
+	return header.Extended(code)
+}
+`)
+	testProg.ssa.Build()
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: producer.ssa, Files: []*ast.File{producer.file}},
+		{SSA: consumer.ssa, Files: []*ast.File{consumer.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var method *ssa.Function
+	for _, function := range universe.Functions() {
+		if function != nil && function.Pkg == producer.ssa && function.Name() == "Extended" &&
+			function.Signature != nil && function.Signature.Recv() != nil {
+			method = function
+			break
+		}
+	}
+	if method == nil {
+		t.Fatal("producer method Extended is absent")
+	}
+	root := consumer.ssa.Func("Root")
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: 64,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	methodPlan, found := plan.FunctionPlan(method)
+	if !found || methodPlan.Emission != coro.EmitOutcomePlain {
+		t.Fatalf("Extended plan = %+v, present=%t; want outcome-plain", methodPlan, found)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	compilation.PanicABI = coro.PanicExplicitStatusABIV0
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, consumer.ssa, []*ast.File{consumer.file}, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify cross-package outcome method consumer: %v\n%s", err, module.String())
+	}
+	symbol := funcName(producer.types, method, false) + coroOutcomePlainPrimarySuffix
+	declaration := module.NamedFunction(symbol)
+	sourceSignature, err := universe.coroPhysicalSourceSignature(method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if declaration.IsNil() || !declaration.IsDeclaration() ||
+		declaration.ParamsCount() != sourceSignature.Params().Len()+3 ||
+		declaration.GlobalValueType().ReturnType().TypeKind() != llvm.VoidTypeKind {
+		t.Fatalf("cross-package outcome declaration %q has the wrong physical ABI:\n%s", symbol, module.String())
+	}
+	rootBody := requireCoroPhysicalFunction(t, module, "example.com/outcome/consumer.Root").String()
+	if !strings.Contains(rootBody, symbol) {
+		t.Fatalf("consumer root does not call cross-package outcome method %q:\n%s", symbol, rootBody)
 	}
 }
 
