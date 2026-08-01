@@ -184,6 +184,74 @@ func TestVerifyCoroAtomicCostModuleAcceptsConstantMemoryIntrinsic(t *testing.T) 
 	}
 }
 
+func TestVerifyCoroAtomicCostModuleAcceptsFixedIntegerMinMaxIntrinsics(t *testing.T) {
+	ctx, module := newCoroAtomicCostTestModule(t)
+	integerType := ctx.Int64Type()
+	functionType := llvm.FunctionType(integerType, []llvm.Type{integerType, integerType}, false)
+	function := llvm.AddFunction(module, "pkg.atomic", functionType)
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	entry := ctx.AddBasicBlock(function, "entry")
+	builder.SetInsertPointAtEnd(entry)
+	value := function.Param(0)
+	for _, name := range []string{"llvm.umin", "llvm.umax", "llvm.smin", "llvm.smax"} {
+		value = builder.CreateIntrinsic(integerType, llvm.LookupIntrinsicID(name), []llvm.Value{
+			value, function.Param(1),
+		}, "")
+	}
+	builder.CreateRet(value)
+	addCoroAtomicCostTestMetadata(ctx, module, function.Name())
+
+	report, err := VerifyCoroAtomicCostModule(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Functions) != 1 || report.Functions[0].LLVMMaxCost < 4 {
+		t.Fatalf("fixed integer min/max report = %+v", report)
+	}
+}
+
+func TestVerifyCoroAtomicCostModuleRejectsCounterfeitIntegerMinMaxIntrinsic(t *testing.T) {
+	ctx, module := newCoroAtomicCostTestModule(t)
+	integerType := ctx.Int64Type()
+	functionType := llvm.FunctionType(integerType, []llvm.Type{integerType, integerType}, false)
+	function := llvm.AddFunction(module, "pkg.atomic", functionType)
+	counterfeit := llvm.AddFunction(module, "llvm.umin.i64.fake", functionType)
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	entry := ctx.AddBasicBlock(function, "entry")
+	builder.SetInsertPointAtEnd(entry)
+	value := builder.CreateCall(functionType, counterfeit, []llvm.Value{function.Param(0), function.Param(1)}, "")
+	builder.CreateRet(value)
+	addCoroAtomicCostTestMetadata(ctx, module, function.Name())
+
+	_, err := VerifyCoroAtomicCostModule(module)
+	if err == nil || !strings.Contains(err.Error(), "calls uncertified helper") {
+		t.Fatalf("counterfeit integer min/max error = %v", err)
+	}
+}
+
+func TestVerifyCoroAtomicCostModuleRejectsMalformedIntegerMinMaxIntrinsic(t *testing.T) {
+	ctx, module := newCoroAtomicCostTestModule(t)
+	i64 := ctx.Int64Type()
+	i32 := ctx.Int32Type()
+	functionType := llvm.FunctionType(i64, []llvm.Type{i64, i32}, false)
+	function := llvm.AddFunction(module, "pkg.atomic", functionType)
+	malformed := llvm.AddFunction(module, "llvm.umin.i64", functionType)
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	entry := ctx.AddBasicBlock(function, "entry")
+	builder.SetInsertPointAtEnd(entry)
+	value := builder.CreateCall(functionType, malformed, []llvm.Value{function.Param(0), function.Param(1)}, "")
+	builder.CreateRet(value)
+	addCoroAtomicCostTestMetadata(ctx, module, function.Name())
+
+	_, err := VerifyCoroAtomicCostModule(module)
+	if err == nil || !strings.Contains(err.Error(), "calls uncertified helper") {
+		t.Fatalf("malformed integer min/max error = %v", err)
+	}
+}
+
 func newCoroAtomicCostTestModule(t *testing.T) (llvm.Context, llvm.Module) {
 	t.Helper()
 	ctx := llvm.NewContext()
