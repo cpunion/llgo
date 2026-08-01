@@ -377,10 +377,10 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 
 			for _, name := range []string{
 				"mfinal_nogc.go",
-				"runtime_baremetal.go",
-				"signal_baremetal_llgo.go",
-				"time_wasm_llgo.go",
-				"unwind_wasm_llgo.go",
+				"runtime_webassembly.go",
+				"signal_webassembly_llgo.go",
+				"nanotime_webassembly_llgo.go",
+				"unwind_webassembly_llgo.go",
 			} {
 				if !selected[name] {
 					t.Errorf("wasm runtime did not select %s", name)
