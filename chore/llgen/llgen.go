@@ -23,18 +23,19 @@ import (
 
 	"github.com/goplus/llgo/internal/build"
 	"github.com/goplus/llgo/internal/llgen"
+	"github.com/goplus/llgo/xtool/env/llvm"
 )
 
 var (
-	abi               = flag.Int("abi", 0, "ABI mode (default 0). 0 = none, 1 = cfunc, 2 = allfunc.")
-	rewriteMainPrefix = flag.Bool("rewrite-main-prefix", false, "Rewrite symbol names in the main package from 'pkgpath.sym' to 'main.sym'.")
+	abi = flag.Int("abi", 0, "ABI mode (default 0). 0 = none, 1 = cfunc, 2 = allfunc.")
 )
 
 func main() {
+	llvm.SetupPath()
 	flag.Parse()
 	if len(flag.Args()) != 1 {
 		fmt.Fprintln(os.Stderr, "Usage: llgen [flags] <pkg>")
 		return
 	}
-	llgen.SmartDoFileEx(flag.Args()[0], build.AbiMode(*abi), *rewriteMainPrefix)
+	llgen.SmartDoFileEx(flag.Args()[0], build.AbiMode(*abi))
 }
