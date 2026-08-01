@@ -1912,6 +1912,7 @@ func install() {}
 			Exec:          coro.MayUnwind,
 			FuncRep:       coro.DirectCoro,
 			Primary:       coro.PrimaryCoroutine,
+			ManagedEntry:  coro.ManagedEntryCoroutine,
 			PrimarySymbol: "example.com/library.imported$coro",
 		},
 	}

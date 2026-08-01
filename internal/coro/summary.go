@@ -28,14 +28,14 @@ import (
 )
 
 // SummarySchema is the experimental wire schema for deterministic plan
-// snapshots. Version v4 is intentionally not an archive ABI: producer
+// snapshots. Version v5 is intentionally not an archive ABI: producer
 // artifacts use the separate LibraryEffectSummarySchema, and cache identity
 // uses PlanDigestSchema.
-const SummarySchema = "llgo.coro.plan.v4"
+const SummarySchema = "llgo.coro.plan.v5"
 
 // SummaryMetadata identifies ABI and target properties that affect an
 // experimental plan snapshot. Empty fields are permitted during early
-// analysis. This v4 type must not be used as an archive compatibility record;
+// analysis. This v5 type must not be used as an archive compatibility record;
 // LibraryEffectMetadata owns that strict target/ABI contract.
 type SummaryMetadata struct {
 	CoroABI      string `json:"coro_abi"`
@@ -46,27 +46,30 @@ type SummaryMetadata struct {
 
 // FunctionSummary is the stable, pointer-free form of FunctionPlan.
 type FunctionSummary struct {
-	ID                      FunctionID   `json:"id"`
-	DeclaredEffect          Effect       `json:"declared_effect"`
-	LocalEffect             Effect       `json:"local_effect"`
-	Effect                  Effect       `json:"effect"`
-	DeclaredExec            ExecFlags    `json:"declared_exec"`
-	LocalExec               ExecFlags    `json:"local_exec"`
-	Exec                    ExecFlags    `json:"exec"`
-	Demand                  Demand       `json:"demand"`
-	ManagedDemand           Demand       `json:"managed_demand"`
-	RawPlainDemand          bool         `json:"raw_plain_demand"`
-	Emission                BodyEmission `json:"emission"`
-	FuncRep                 FuncRep      `json:"func_rep"`
-	External                ExternalKind `json:"external"`
-	Recursive               bool         `json:"recursive"`
-	TrustedBoundedRecursion bool         `json:"trusted_bounded_recursion"`
-	Primary                 PrimaryKind  `json:"primary"`
-	RawPlainOnly            bool         `json:"raw_plain_only"`
-	RawPlainEntry           bool         `json:"raw_plain_entry"`
+	ID                      FunctionID       `json:"id"`
+	DeclaredEffect          Effect           `json:"declared_effect"`
+	LocalEffect             Effect           `json:"local_effect"`
+	Effect                  Effect           `json:"effect"`
+	DeclaredExec            ExecFlags        `json:"declared_exec"`
+	LocalExec               ExecFlags        `json:"local_exec"`
+	Exec                    ExecFlags        `json:"exec"`
+	Demand                  Demand           `json:"demand"`
+	ManagedDemand           Demand           `json:"managed_demand"`
+	RawPlainDemand          bool             `json:"raw_plain_demand"`
+	Emission                BodyEmission     `json:"emission"`
+	ManagedEntry            ManagedEntryKind `json:"managed_entry"`
+	AtomicCost              uint64           `json:"atomic_cost"`
+	AtomicCostProof         AtomicCostProof  `json:"atomic_cost_proof"`
+	FuncRep                 FuncRep          `json:"func_rep"`
+	External                ExternalKind     `json:"external"`
+	Recursive               bool             `json:"recursive"`
+	TrustedBoundedRecursion bool             `json:"trusted_bounded_recursion"`
+	Primary                 PrimaryKind      `json:"primary"`
+	RawPlainOnly            bool             `json:"raw_plain_only"`
+	RawPlainEntry           bool             `json:"raw_plain_entry"`
 }
 
-// Summary is a stable v4 snapshot used to test the target-independent graph
+// Summary is a stable v5 snapshot used to test the target-independent graph
 // plan. It intentionally contains no maps or pointer identities and is neither
 // LibraryEffectSummary nor the separate CoroPlanDigest wire format. Exact
 // whole-build SSA capabilities such as RawPlainVariant therefore live only in
@@ -93,24 +96,27 @@ type summaryMetadataWire struct {
 }
 
 type functionSummaryWire struct {
-	ID                      *FunctionID   `json:"id"`
-	DeclaredEffect          *Effect       `json:"declared_effect"`
-	LocalEffect             *Effect       `json:"local_effect"`
-	Effect                  *Effect       `json:"effect"`
-	DeclaredExec            *ExecFlags    `json:"declared_exec"`
-	LocalExec               *ExecFlags    `json:"local_exec"`
-	Exec                    *ExecFlags    `json:"exec"`
-	Demand                  *Demand       `json:"demand"`
-	ManagedDemand           *Demand       `json:"managed_demand"`
-	RawPlainDemand          *bool         `json:"raw_plain_demand"`
-	Emission                *BodyEmission `json:"emission"`
-	FuncRep                 *FuncRep      `json:"func_rep"`
-	External                *ExternalKind `json:"external"`
-	Recursive               *bool         `json:"recursive"`
-	TrustedBoundedRecursion *bool         `json:"trusted_bounded_recursion"`
-	Primary                 *PrimaryKind  `json:"primary"`
-	RawPlainOnly            *bool         `json:"raw_plain_only"`
-	RawPlainEntry           *bool         `json:"raw_plain_entry"`
+	ID                      *FunctionID       `json:"id"`
+	DeclaredEffect          *Effect           `json:"declared_effect"`
+	LocalEffect             *Effect           `json:"local_effect"`
+	Effect                  *Effect           `json:"effect"`
+	DeclaredExec            *ExecFlags        `json:"declared_exec"`
+	LocalExec               *ExecFlags        `json:"local_exec"`
+	Exec                    *ExecFlags        `json:"exec"`
+	Demand                  *Demand           `json:"demand"`
+	ManagedDemand           *Demand           `json:"managed_demand"`
+	RawPlainDemand          *bool             `json:"raw_plain_demand"`
+	Emission                *BodyEmission     `json:"emission"`
+	ManagedEntry            *ManagedEntryKind `json:"managed_entry"`
+	AtomicCost              *uint64           `json:"atomic_cost"`
+	AtomicCostProof         *AtomicCostProof  `json:"atomic_cost_proof"`
+	FuncRep                 *FuncRep          `json:"func_rep"`
+	External                *ExternalKind     `json:"external"`
+	Recursive               *bool             `json:"recursive"`
+	TrustedBoundedRecursion *bool             `json:"trusted_bounded_recursion"`
+	Primary                 *PrimaryKind      `json:"primary"`
+	RawPlainOnly            *bool             `json:"raw_plain_only"`
+	RawPlainEntry           *bool             `json:"raw_plain_entry"`
 }
 
 // Summary creates a stable summary of p.
@@ -137,6 +143,9 @@ func (p *Plan) Summary(metadata SummaryMetadata) Summary {
 			ManagedDemand:           fn.ManagedDemand,
 			RawPlainDemand:          fn.RawPlainDemand,
 			Emission:                fn.Emission,
+			ManagedEntry:            fn.ManagedEntry,
+			AtomicCost:              fn.AtomicCost,
+			AtomicCostProof:         fn.AtomicCostProof,
 			FuncRep:                 fn.FuncRep,
 			External:                fn.External,
 			Recursive:               fn.Recursive,
@@ -289,6 +298,15 @@ func (w functionSummaryWire) summary(index int) (FunctionSummary, error) {
 	if w.Emission == nil {
 		return missing("emission")
 	}
+	if w.ManagedEntry == nil {
+		return missing("managed_entry")
+	}
+	if w.AtomicCost == nil {
+		return missing("atomic_cost")
+	}
+	if w.AtomicCostProof == nil {
+		return missing("atomic_cost_proof")
+	}
 	if w.FuncRep == nil {
 		return missing("func_rep")
 	}
@@ -322,6 +340,9 @@ func (w functionSummaryWire) summary(index int) (FunctionSummary, error) {
 		ManagedDemand:           *w.ManagedDemand,
 		RawPlainDemand:          *w.RawPlainDemand,
 		Emission:                *w.Emission,
+		ManagedEntry:            *w.ManagedEntry,
+		AtomicCost:              *w.AtomicCost,
+		AtomicCostProof:         *w.AtomicCostProof,
 		FuncRep:                 *w.FuncRep,
 		External:                *w.External,
 		Recursive:               *w.Recursive,
@@ -522,7 +543,24 @@ func (s Summary) canonical() (Summary, error) {
 		if err := fn.External.validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
 		}
+		plan := FunctionPlan{
+			ID: fn.ID, Effect: fn.Effect, Exec: fn.Exec, Demand: fn.Demand,
+			ManagedDemand: fn.ManagedDemand, RawPlainDemand: fn.RawPlainDemand,
+			Emission: fn.Emission, ManagedEntry: fn.ManagedEntry,
+			AtomicCost: fn.AtomicCost, AtomicCostProof: fn.AtomicCostProof,
+			FuncRep: fn.FuncRep, External: fn.External, Recursive: fn.Recursive,
+			Primary: fn.Primary, RawPlainOnly: fn.RawPlainOnly, RawPlainEntry: fn.RawPlainEntry,
+		}
+		if err := validateManagedEntryPlan(plan); err != nil {
+			return Summary{}, err
+		}
 		expectedEmission := bodyEmissionFor(fn.ManagedDemand, fn.RawPlainDemand, fn.Effect, fn.External)
+		if fn.External == Defined && fn.ManagedEntry == ManagedEntryOutcomePlain {
+			if fn.ManagedDemand == NoDemand || fn.Primary != PrimaryCoroutine {
+				return Summary{}, fmt.Errorf("coro: owned outcome-plain function %q lacks managed demand/coroutine primary", fn.ID)
+			}
+			expectedEmission = EmitOutcomePlain
+		}
 		if fn.Emission != expectedEmission {
 			return Summary{}, fmt.Errorf("coro: function %q emission %s does not match demand %s, effect %s, and external kind %s (want %s)", fn.ID, fn.Emission, fn.Demand, fn.Effect, fn.External, expectedEmission)
 		}

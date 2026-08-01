@@ -30,7 +30,7 @@ import (
 // with any other shape is a compiler-plan violation, never permission to fall
 // back to the legacy runtime.Panic call.
 func (p *context) compileCoroExplicitStatusPanic(b llssa.Builder, instruction *ssa.Panic) {
-	if instruction == nil || !p.hasCoroPhysicalBody() ||
+	if instruction == nil || !p.hasStructuredOutcomePhysicalBody() ||
 		!p.coroEmissionExplicitStatus() || b == nil || b.Func != p.fn {
 		goName, llvmName := "<nil>", "<nil>"
 		if p.goFn != nil {
@@ -41,7 +41,7 @@ func (p *context) compileCoroExplicitStatusPanic(b llssa.Builder, instruction *s
 		}
 		panic(fmt.Errorf(
 			"explicit-status panic in %q (%s) escaped its exact physical coroutine body (active=%t builder-matches=%t)",
-			llvmName, goName, p.hasCoroPhysicalBody(), b != nil && b.Func == p.fn,
+			llvmName, goName, p.hasStructuredOutcomePhysicalBody(), b != nil && b.Func == p.fn,
 		))
 	}
 	value := p.compileValue(b, instruction.X)
@@ -58,6 +58,13 @@ func (p *context) compileCoroTerminalPanicPair(
 	b llssa.Builder,
 	typeWord, dataWord llssa.Expr,
 ) {
+	if p.hasOutcomePlainPhysicalBody() {
+		if !p.coroEmissionExplicitStatus() || b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {
+			panic("terminal outcome-plain panic pair escaped its explicit-status physical body")
+		}
+		p.compileOutcomePlainPanicPair(b, typeWord, dataWord)
+		return
+	}
 	body := p.coroBody()
 	if body == nil || !p.coroEmissionExplicitStatus() ||
 		b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {

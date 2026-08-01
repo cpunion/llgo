@@ -63,6 +63,7 @@ func coroArchiveTestSummary(t *testing.T, pkg string) coro.LibraryEffectSummary 
 			Exec:          coro.IRQUnsafe,
 			FuncRep:       coro.DirectPlain,
 			Primary:       coro.PrimaryPlain,
+			ManagedEntry:  coro.ManagedEntryPlain,
 			PrimarySymbol: pkg + ".F",
 		}},
 		ExportBindings: []coro.LibraryEffectExportBinding{{

@@ -253,6 +253,7 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 		Effect:        coro.MayPark,
 		FuncRep:       coro.DirectCoro,
 		Primary:       coro.PrimaryCoroutine,
+		ManagedEntry:  coro.ManagedEntryCoroutine,
 		PrimarySymbol: baseSymbol + coroPrimarySuffix,
 	}
 	plan, err := coro.AnalyzeSSA(
@@ -366,6 +367,7 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 		Effect:        coro.NoSuspend,
 		FuncRep:       coro.DirectPlain,
 		Primary:       coro.PrimaryPlain,
+		ManagedEntry:  coro.ManagedEntryPlain,
 		PrimarySymbol: plainBaseSymbol,
 	}
 	plainPlan, err := coro.AnalyzeSSA(

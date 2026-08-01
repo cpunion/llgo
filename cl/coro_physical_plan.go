@@ -128,6 +128,7 @@ const (
 	coroPhysicalControlRawPlainCall
 	coroPhysicalControlDirectSpawn
 	coroPhysicalControlDispatchSpawn
+	coroPhysicalControlDirectOutcome
 )
 
 func (recipe coroPhysicalControlRecipe) String() string {
@@ -156,6 +157,8 @@ func (recipe coroPhysicalControlRecipe) String() string {
 		return "direct-spawn"
 	case coroPhysicalControlDispatchSpawn:
 		return "dispatch-spawn"
+	case coroPhysicalControlDirectOutcome:
+		return "direct-outcome"
 	default:
 		return fmt.Sprintf("physical-control-recipe(%d)", uint8(recipe))
 	}
@@ -323,7 +326,7 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 	}
 	if helper == coroManagedFrameSlotAllocZCall {
 		switch plan.control {
-		case coroPhysicalControlDirectAwait, coroPhysicalControlDispatchAwait,
+		case coroPhysicalControlDirectAwait, coroPhysicalControlDirectOutcome, coroPhysicalControlDispatchAwait,
 			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait,
 			coroPhysicalControlExactInterfaceAwait:
 			return false
@@ -466,7 +469,7 @@ func prepareCoroPhysicalFunctionPlan(
 			continue
 		}
 		switch producer.control {
-		case coroPhysicalControlDirectAwait, coroPhysicalControlDispatchAwait,
+		case coroPhysicalControlDirectAwait, coroPhysicalControlDirectOutcome, coroPhysicalControlDispatchAwait,
 			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait,
 			coroPhysicalControlExactInterfaceAwait:
 			instructionPlan.reuseValueAddress = true
@@ -1393,7 +1396,11 @@ func planCoroPhysicalControlInstruction(
 			result.controlFailureHard = true
 			return
 		}
-		result.control = coroPhysicalControlDirectAwait
+		if targetPlan.ManagedEntry == coro.ManagedEntryOutcomePlain {
+			result.control = coroPhysicalControlDirectOutcome
+		} else {
+			result.control = coroPhysicalControlDirectAwait
+		}
 		result.controlTarget = callee
 		result.controlTargetID = targetPlan.ID
 	case *ssa.Go:

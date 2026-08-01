@@ -117,6 +117,12 @@ type FunctionSpec struct {
 	// reference. RawPlainEntry also seeds this provenance.
 	RawPlainDemand bool
 	External       ExternalKind
+	// ManagedEntry is supplied only for an ExternalKnown producer. Defined
+	// bodies derive it from their final emission; unknown external declarations
+	// have no trusted managed entry ABI.
+	ManagedEntry    ManagedEntryKind
+	AtomicCost      uint64
+	AtomicCostProof AtomicCostProof
 	// TrustedBoundedRecursion is a frontend proof that this function's
 	// recursion depth is bounded independently of scheduler preemption. It
 	// suppresses the automatic recursive-SCC preemption seed only when every
@@ -220,6 +226,17 @@ type FunctionPlan struct {
 	// NoDemand functions use EmitNone without changing their logical Primary,
 	// External, or FuncRep selection.
 	Emission BodyEmission
+	// ManagedEntry is the exact physical ABI invoked by managed callers. Unlike
+	// Emission it remains meaningful for an imported EmitExternal declaration.
+	ManagedEntry ManagedEntryKind
+	// AtomicCost is a conservative instruction-cost upper bound from the last
+	// scheduler cut to terminal completion. It is meaningful only when
+	// AtomicCostProof is not AtomicCostUnproven.
+	AtomicCost uint64
+	// AtomicCostProof records the closed-world proof class which authorized the
+	// bound. EmitOutcomePlain requires a proof; logical effect/exec facts remain
+	// unchanged.
+	AtomicCostProof AtomicCostProof
 	// FuncRep is direct unless value-flow requested an open dispatch boundary.
 	FuncRep   FuncRep
 	External  ExternalKind
@@ -266,6 +283,78 @@ func aggregateDemand(managed Demand, rawPlain bool) Demand {
 		return managed.Join(SyncDemand)
 	}
 	return managed
+}
+
+// validateManagedEntryPlan keeps the physical entry/cost capability orthogonal
+// to logical primary selection. In particular an imported outcome-plain
+// declaration remains EmitExternal/PrimaryExternal in the consumer while its
+// ManagedEntry records the producer ABI exactly.
+func validateManagedEntryPlan(plan FunctionPlan) error {
+	if err := plan.ManagedEntry.Validate(); err != nil {
+		return err
+	}
+	if err := plan.AtomicCostProof.Validate(); err != nil {
+		return err
+	}
+	if plan.External == Defined {
+		expected := ManagedEntryNone
+		switch plan.Emission {
+		case EmitPlain, EmitRawPlain:
+			expected = ManagedEntryPlain
+		case EmitCoroutine:
+			expected = ManagedEntryCoroutine
+		case EmitOutcomePlain:
+			expected = ManagedEntryOutcomePlain
+		}
+		if plan.ManagedEntry != expected {
+			return fmt.Errorf(
+				"coro: function %q managed entry %s does not match owned emission %s (want %s)",
+				plan.ID, plan.ManagedEntry, plan.Emission, expected,
+			)
+		}
+	} else if plan.External == ExternalKnown {
+		if plan.ManagedEntry == ManagedEntryNone {
+			return fmt.Errorf("coro: external-known function %q has no producer managed entry", plan.ID)
+		}
+	} else if plan.ManagedEntry != ManagedEntryNone {
+		return fmt.Errorf(
+			"coro: function %q has managed entry %s with external kind %s",
+			plan.ID, plan.ManagedEntry, plan.External,
+		)
+	}
+
+	switch plan.ManagedEntry {
+	case ManagedEntryPlain:
+		if plan.Effect.MaySuspend() && !plan.RawPlainOnly {
+			return fmt.Errorf("coro: function %q exports a plain managed entry for suspend effect %s", plan.ID, plan.Effect)
+		}
+	case ManagedEntryCoroutine:
+		if !plan.Effect.MaySuspend() {
+			return fmt.Errorf("coro: function %q exports a coroutine managed entry without a suspend effect", plan.ID)
+		}
+	case ManagedEntryOutcomePlain:
+		if plan.Effect != OutcomeStructured || plan.Exec&^MayUnwind != 0 ||
+			plan.FuncRep != DirectCoro || plan.Recursive || plan.RawPlainDemand ||
+			plan.RawPlainEntry || plan.RawPlainOnly {
+			return fmt.Errorf(
+				"coro: function %q has invalid outcome-plain managed entry (effect=%s exec=%s representation=%s recursive=%t raw=%t)",
+				plan.ID, plan.Effect, plan.Exec, plan.FuncRep, plan.Recursive, plan.RawPlainDemand,
+			)
+		}
+	}
+
+	switch plan.AtomicCostProof {
+	case AtomicCostUnproven:
+		if plan.AtomicCost != 0 || plan.ManagedEntry == ManagedEntryOutcomePlain {
+			return fmt.Errorf("coro: function %q has outcome entry/cost without an atomic-cost proof", plan.ID)
+		}
+	case AtomicCostLeaf:
+		if plan.AtomicCost == 0 || plan.ManagedEntry != ManagedEntryOutcomePlain ||
+			(plan.External != Defined && plan.External != ExternalKnown) {
+			return fmt.Errorf("coro: function %q has an invalid leaf atomic-cost capability", plan.ID)
+		}
+	}
+	return nil
 }
 
 // Plan is an immutable, deterministically ordered collection of function

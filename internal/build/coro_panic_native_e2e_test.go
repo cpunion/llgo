@@ -58,25 +58,33 @@ const coroPanicNativeE2ESource = `package main
 
 var Before uint32
 var After uint32
+var Result uint32
 var GlobalPayload byte
+
+func panicLeaf(payload any, doPanic bool) uint32 {
+	if doPanic {
+		panic(payload)
+	}
+	return 37
+}
 
 func panicChild(doPanic bool) {
 	Before = 1
-	if doPanic {
-		panic(&GlobalPayload)
-	}
+	panicLeaf(&GlobalPayload, doPanic)
 }
 
 func main() {
+	Result = panicLeaf(nil, false)
 	panicChild(true)
 	After = 1
 }
 `
 
 // TestCoroExplicitPanicNativeNoStdlibRuntimeE2E is a deliberately closed
-// scheduler island. It compiles a real source panic in a physical child frame,
-// links the production native-nogc scheduler/core and panic prepare hook, and
-// runs without the legacy panic printer/runtime closure.
+// scheduler island. It compiles a real source panic in an outcome-plain leaf,
+// reconciles that payload in its physical-coroutine caller, links the
+// production native-nogc scheduler/core and panic prepare hook, and runs
+// without the legacy panic printer/runtime closure.
 //
 // Production ActionPanicComplete returns the explicit V2 drive-panic status
 // and the native entry now owns a no-return production reporter edge. This
@@ -166,7 +174,7 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mainFn, childFn := ssaPkg.Func("main"), ssaPkg.Func("panicChild")
+	mainFn, childFn, leafFn := ssaPkg.Func("main"), ssaPkg.Func("panicChild"), ssaPkg.Func("panicLeaf")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
@@ -176,7 +184,10 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
-		MaxPlainInstructions: -1,
+		MaxPlainInstructions: 64,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			switch fn {
 			case mainFn, childFn:
@@ -188,6 +199,12 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	leafPlan, found := plan.FunctionPlan(leafFn)
+	if !found || leafPlan.Emission != coro.EmitOutcomePlain ||
+		leafPlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+		leafPlan.AtomicCostProof != coro.AtomicCostLeaf {
+		t.Fatalf("panic leaf plan = %+v, present=%t; want outcome-plain", leafPlan, found)
 	}
 	compilation := &cl.Compilation{
 		CoroPlan: plan,
@@ -206,15 +223,18 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	}
 	module := pkg.Module()
 	presplit := module.String()
-	// The child publishes the source panic and the awaiting parent republishes
-	// the consumed explicit-status payload into its own frame. Together with the
-	// declaration this produces three symbol references and exactly two calls.
+	// Both direct outcome call sites retain a fail-closed panic arm and the
+	// awaiting parent republishes the consumed child payload. Together with the
+	// declaration this produces four symbol references and exactly three calls.
 	if references, calls := strings.Count(presplit, "@__llgo_coro_panic_prepare_v1"),
-		strings.Count(presplit, "call void @__llgo_coro_panic_prepare_v1"); references != 3 || calls != 2 {
-		t.Fatalf("compiled explicit panic prepare-hook references/calls = %d/%d, want 3/2:\n%s", references, calls, presplit)
+		strings.Count(presplit, "call void @__llgo_coro_panic_prepare_v1"); references != 4 || calls != 3 {
+		t.Fatalf("compiled explicit panic prepare-hook references/calls = %d/%d, want 4/3:\n%s", references, calls, presplit)
 	}
 	if strings.Contains(presplit, llssa.PkgRuntime+".Panic") {
 		t.Fatalf("compiled explicit panic retained the legacy runtime.Panic edge:\n%s", presplit)
+	}
+	if !strings.Contains(presplit, "panicLeaf$outcome") || strings.Contains(presplit, "panicLeaf$coro") {
+		t.Fatalf("compiled explicit panic did not use the outcome-plain leaf ABI:\n%s", presplit)
 	}
 	runCoroSpawnNativeE2EPasses(t, prog, module)
 	ir := module.String()
@@ -387,6 +407,7 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	payload := pkg.NewVar(coroNativeE2EMainPhysicalSymbol("GlobalPayload"), types.NewPointer(types.Typ[types.Byte]), llssa.InGo)
 	before := pkg.NewVar(coroNativeE2EMainPhysicalSymbol("Before"), types.NewPointer(uint32Type), llssa.InGo)
 	after := pkg.NewVar(coroNativeE2EMainPhysicalSymbol("After"), types.NewPointer(uint32Type), llssa.InGo)
+	result := pkg.NewVar(coroNativeE2EMainPhysicalSymbol("Result"), types.NewPointer(uint32Type), llssa.InGo)
 
 	report := pkg.NewFunc(coroPanicNativeE2ERunReport, newSignature(
 		[]types.Type{pointer, pointer, uint32Type, runResultPointer}, []types.Type{uint32Type},
@@ -442,6 +463,11 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	requireCondition(reportBody.BinOp(token.NEQ, second, third))
 	requireCondition(reportBody.BinOp(token.EQL, reportBody.Load(before.Expr), one32))
 	requireCondition(reportBody.BinOp(token.EQL, reportBody.Load(after.Expr), zero32))
+	requireCondition(reportBody.BinOp(
+		token.EQL,
+		reportBody.Load(result.Expr),
+		prog.IntVal(37, prog.Uint32()),
+	))
 	for index := range runResultFields {
 		reportBody.Store(reportBody.FieldAddr(report.Param(3), index), zero32)
 	}
@@ -532,6 +558,7 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"github.com/goplus/llgo/runtime/internal/coro.PanicDestroyed",
 		"github.com/goplus/llgo/runtime/internal/coro.LoadPanicRecord",
 		coroNativeE2EMainPhysicalSymbol("panicChild$coro"),
+		coroNativeE2EMainPhysicalSymbol("panicLeaf$outcome"),
 	} {
 		if !strings.Contains(symbols, required) {
 			t.Fatalf("linked coroutine panic island is missing production/test-boundary symbol %q:\n%s", required, symbols)

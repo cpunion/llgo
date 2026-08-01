@@ -45,6 +45,7 @@ func caller() { imported() }
 		Exec:          MayUnwind,
 		FuncRep:       DirectCoro,
 		Primary:       PrimaryCoroutine,
+		ManagedEntry:  ManagedEntryCoroutine,
 		PrimarySymbol: "example/library.imported$coro",
 	}}
 	summary.ForeignCallables = nil

@@ -670,6 +670,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		dbgInstrln("==> NewFunc", name, "type:", sig.Recv(), sig, "ftype:", ftype)
 	}
 	var physicalABI *coroPhysicalABI
+	var outcomePlainABI *outcomePlainPhysicalABI
 	if entry.usesCoroPhysicalABI() {
 		// x/tools exposes a declared method receiver as fn.Params[0]. Normalize
 		// the callable source ABI before adding the two coroutine-owned hidden
@@ -680,7 +681,14 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		physicalABI = &abi
 		sig = abi.physicalSig
 		hasCtx = false
+	} else if entry.usesOutcomePlainPhysicalABI() {
+		sourceSig = coroPhysicalNormalizeSourceSignature(sig)
+		abi := newOutcomePlainPhysicalABI(sourceSig)
+		outcomePlainABI = &abi
+		sig = abi.physicalSig
+		hasCtx = false
 	}
+	managedPhysicalABI := physicalABI != nil || outcomePlainABI != nil
 	// Always revisit an existing declaration when materializing its body.
 	// NewFuncEx promotes that declaration to linkonce when required; declarations
 	// themselves must retain external linkage because LLVM rejects a bodyless
@@ -735,12 +743,14 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		p.cgoErrno = llssa.Nil
 		if physicalABI != nil {
 			fn.MakeBlocks(1) // dedicated coroutine ramp entry
+		} else if outcomePlainABI != nil {
+			fn.MakeBlocks(nblk) // synchronous source CFG plus hidden completion ABI
 		} else if isCgo {
 			fn.MakeBlocks(1)
 		} else {
 			fn.MakeBlocks(nblk) // to set fn.HasBody() = true
 		}
-		if f.Recover != nil && physicalABI == nil { // set recover block
+		if f.Recover != nil && !managedPhysicalABI { // set recover block
 			fn.SetRecover(fn.Block(f.Recover.Index))
 		}
 		dbgEnabled := enableDbg
@@ -789,7 +799,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			// runtime G installed, whose sidecar already owns LocalContext.
 			// Enter/LeaveLocalContext belongs only to a synchronous native ABI
 			// entry (including the separately emitted raw/plain twin).
-			if physicalABI == nil {
+			if !managedPhysicalABI {
 				p.prepareExportedLocalContext(f)
 			}
 			p.bvals = make(map[ssa.Value]llssa.Expr)
@@ -816,6 +826,14 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 				// declared, but their deferred initializers still have to run after
 				// the owner's symbols and frame recipe exist. Returning here without
 				// them leaves captured coroutine targets as empty LLVM declarations.
+				for _, childInit := range childInits {
+					childInit()
+				}
+				b.EndBuild()
+				return
+			}
+			if outcomePlainABI != nil {
+				p.compileOutcomePlainPhysicalBody(b, f, *outcomePlainABI, isInit)
 				for _, childInit := range childInits {
 					childInit()
 				}

@@ -92,6 +92,7 @@ func TestLoadCoroLibraryEffectIndexFromImportCfg(t *testing.T) {
 			Effect:        coro.NoSuspend,
 			FuncRep:       coro.DirectPlain,
 			Primary:       coro.PrimaryPlain,
+			ManagedEntry:  coro.ManagedEntryPlain,
 			PrimarySymbol: "example/library.F",
 		}},
 		ExportBindings: []coro.LibraryEffectExportBinding{{
@@ -226,6 +227,7 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 			Exec:          coro.MayUnwind,
 			FuncRep:       coro.DirectCoro,
 			Primary:       coro.PrimaryCoroutine,
+			ManagedEntry:  coro.ManagedEntryCoroutine,
 			PrimarySymbol: baseSymbol + "$coro",
 		}},
 	}
