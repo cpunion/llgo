@@ -1941,7 +1941,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if !effectfulArrayDeref && v.Op == token.MUL {
 			p.emitNilDerefBaseCheck(b, v.X)
 			if shouldAssertDirectNilDeref(v) && !isDerivedDerefAddress(v.X) {
-				b.AssertNilDeref(x)
+				b.AssertNilDerefBranch(x)
 			}
 		}
 		if v.Op == token.ARROW {
@@ -1980,8 +1980,8 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.FieldAddr:
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
-		if _, ok := p.methodReceiverBases[v]; ok {
-			x = b.NilDerefCheck(x)
+		if _, ok := p.methodReceiverBases[v]; ok && !isKnownNonNilAt(v.X, v) {
+			b.AssertNilDerefBranch(x)
 		}
 		if p.isAddressOfFieldAddr(v) {
 			b.AssertNilDeref(x)
@@ -2017,8 +2017,8 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
 		p.recordPanicLocation(b, v.Pos())
-		if _, ok := p.methodReceiverBases[v]; ok {
-			x = b.NilDerefCheck(x)
+		if _, ok := p.methodReceiverBases[v]; ok && !isKnownNonNilAt(v.X, v) {
+			b.AssertNilDerefBranch(x)
 		}
 		ret = b.IndexAddr(x, idx)
 	case *ssa.Index:
