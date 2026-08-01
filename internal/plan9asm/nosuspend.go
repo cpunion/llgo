@@ -158,9 +158,14 @@ func plan9AsmNoSuspendOpcode(opcode gllvm.Opcode) bool {
 		gllvm.PtrToInt, gllvm.IntToPtr, gllvm.BitCast,
 		gllvm.ICmp, gllvm.FCmp, gllvm.PHI, gllvm.Call, gllvm.Select,
 		gllvm.ExtractElement, gllvm.InsertElement, gllvm.ShuffleVector,
-		gllvm.ExtractValue, gllvm.InsertValue:
+		gllvm.ExtractValue, gllvm.InsertValue,
+		llvmFNegOpcode:
 		return true
 	default:
 		return false
 	}
 }
+
+// LLVMFNeg is part of LLVMOpcode's stable C API, but the Go binding currently
+// exposes only Builder.CreateFNeg and not the matching opcode constant.
+const llvmFNegOpcode gllvm.Opcode = 66

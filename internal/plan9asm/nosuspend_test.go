@@ -42,6 +42,19 @@ attributes #0 = { nocallback nofree nosync nounwind speculatable willreturn memo
 	}
 }
 
+func TestProveNoSuspendLeafFloatingNegation(t *testing.T) {
+	translation := parseNoSuspendTestModule(t, `
+define double @"example.com/asm.Leaf"(double %value) {
+entry:
+  %result = fneg double %value
+  ret double %result
+}
+`)
+	if _, err := ProveNoSuspendLeaf(translation, "example.com/asm.Leaf"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProveNoSuspendLeafFailsClosed(t *testing.T) {
 	tests := []struct {
 		name string
