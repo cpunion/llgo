@@ -157,6 +157,10 @@ func wasmWorkerStart(arg unsafe.Pointer) unsafe.Pointer {
 		fatal("runtime: invalid WebAssembly worker entry")
 		return nil
 	}
+	// Goroutines interleave on this native worker, so their entry calls need
+	// one long-lived locality owner instead of relying on strict nesting.
+	var localContext LocalContext
+	EnterLocalContext(&localContext)
 	setCurrentWasmWorker(worker)
 	setg(nil)
 	initWasmWorkerSystem(worker)

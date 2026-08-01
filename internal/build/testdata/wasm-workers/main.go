@@ -17,12 +17,16 @@ type workerIdentity struct {
 	thread uintptr
 }
 
+//llgo:gls
+var workerLocalState *int
+
 func main() {
 	testParallelWorkers()
 	testPinnedGoroutine()
 	testBoundedWorkerLifecycle()
 	testCrossWorkerChannelHandoffs()
 	testCrossWorkerSynchronization()
+	testInterleavedWorkerLocality()
 	testCrossWorkerTimerWake()
 	println("wasm workers ok")
 }
@@ -172,6 +176,57 @@ func testCrossWorkerSynchronization() {
 		if count < 2 {
 			panic("worker did not execute multiple goroutines")
 		}
+	}
+}
+
+type localityWaiter struct {
+	mid     int64
+	release chan struct{}
+	done    chan struct{}
+}
+
+func testInterleavedWorkerLocality() {
+	workerCount := int(configuredWorkerCount())
+	ready := make(chan localityWaiter, workerCount*2)
+	startBatch := func() {
+		for range workerCount {
+			release := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				if workerLocalState == nil {
+					value := 1
+					workerLocalState = &value
+				}
+				if *workerLocalState != 1 {
+					panic("worker-local state was corrupted")
+				}
+				_, _, mid, _, _, _, _ := gmpForTesting()
+				ready <- localityWaiter{mid: mid, release: release, done: done}
+				<-release
+				close(done)
+			}()
+		}
+	}
+
+	byWorker := make(map[int64][]localityWaiter, workerCount)
+	for range 2 {
+		startBatch()
+		for range workerCount {
+			waiter := <-ready
+			byWorker[waiter.mid] = append(byWorker[waiter.mid], waiter)
+		}
+	}
+	if len(byWorker) != workerCount {
+		panic("locality test did not cover every worker")
+	}
+	for _, waiters := range byWorker {
+		if len(waiters) != 2 {
+			panic("locality test did not interleave two goroutines per worker")
+		}
+		close(waiters[0].release)
+		<-waiters[0].done
+		close(waiters[1].release)
+		<-waiters[1].done
 	}
 }
 
