@@ -4406,10 +4406,11 @@ func structuralEmissionABITypeKey(typ types.Type) string {
 // //go:linkname. The Go runtime deliberately connects private mirror types
 // across package boundaries (for example sync.notifyList and
 // runtime.notifyList), so package-level named identity and struct field source
-// metadata cannot participate in this one pairing key. Field order and type,
-// along with all other conservative type structure, remain exact.
+// metadata cannot participate in this one pairing key. The compact graph
+// digest preserves field order, type and recursive topology without expanding
+// shared type DAGs into exponential strings.
 func structuralGoLinknameABITypeKey(typ types.Type) string {
-	return structuralNamedIdentityFreeABITypeKey(typ)
+	return compactStructuralGoLinknameABITypeKey(typ)
 }
 
 // structuralCFunctionABITypeKey models the physical callable ABI of a C
@@ -5140,12 +5141,9 @@ func managedGoLinknameDirectPointerFacade(signature *types.Signature) *types.Sig
 }
 
 // managedGoLinknameABISignatureKey keeps the complete structural ABI
-// comparison while bounding the retained group key. Whole-program standard
-// library builds contain thousands of private mirror signatures; retaining
-// every recursively expanded spelling here can otherwise consume gigabytes
-// before alias groups are released. SHA-256 is already the compiler's
-// canonical identity primitive, and the domain separator prevents this digest
-// from being confused with any other structural certificate.
+// comparison while bounding the retained group key. Its input is already the
+// compact type-graph digest; the second domain-separated hash identifies this
+// exact use as a managed symbol-group key rather than a type certificate.
 func managedGoLinknameABISignatureKey(signature string) string {
 	return "sha256-v1:" + emissionDigest(framedEmissionKey(
 		"managed-go-linkname-abi-signature-v1",
