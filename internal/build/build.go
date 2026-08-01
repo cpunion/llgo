@@ -3266,6 +3266,8 @@ const (
 	loadSyntax  = loadTypes | packages.NeedSyntax | packages.NeedTypesInfo
 )
 
+var llssaInitOnce sync.Once
+
 func Do(args []string, conf *Config) ([]Package, error) {
 	return Build(Invocation{Args: args, Config: conf})
 }
@@ -3311,11 +3313,6 @@ func Build(inv Invocation) ([]Package, error) {
 	if err := validateLinkOptions(conf, &export); err != nil {
 		return nil, err
 	}
-	// Enable different export names for TinyGo compatibility when using -target
-	if conf.Target != "" {
-		cl.EnableExportRename(true)
-	}
-
 	verbose := conf.Verbose
 	patterns := slices.Clone(inv.Args)
 	tags, err := effectiveBuildTags(conf, export)
@@ -3337,10 +3334,16 @@ func Build(inv Invocation) ([]Package, error) {
 		cfg.Mode |= packages.NeedForTest
 	}
 	emitDebugInfo := shouldEmitDebugInfo(conf, &export)
-	cl.EnableDebug(emitDebugInfo)
-	cl.EnableDbgSyms(emitDebugInfo)
-	cl.EnableTrace(IsTraceEnabled())
-	llssa.Initialize(llssa.InitAll)
+	frontendOptions := cl.Options{
+		Debug:        emitDebugInfo,
+		DebugSymbols: emitDebugInfo,
+		Trace:        IsTraceEnabled(),
+		ExportRename: conf.Target != "",
+		ShadowStack:  isEnvOn(llgoShadowStack, false),
+	}
+	llssaInitOnce.Do(func() {
+		llssa.Initialize(llssa.InitAll)
+	})
 
 	target := newLLSSATarget(conf, export)
 
@@ -3509,15 +3512,16 @@ func Build(inv Invocation) ([]Package, error) {
 		patches: patches, callerTracking: cl.NewCallerTracking(),
 		goRoot: sourcePatchGOROOT,
 		built:  make(map[string]none), initial: initial, mode: mode,
-		fingerprinting: make(map[string]bool),
-		pkgs:           map[*packages.Package]Package{},
-		pkgByID:        map[string]Package{},
-		output:         output,
-		passOpt:        passOpt,
-		buildConf:      conf,
-		crossCompile:   export,
-		commands:       commands,
-		cTransformer:   cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, cabiOptimize),
+		fingerprinting:  make(map[string]bool),
+		pkgs:            map[*packages.Package]Package{},
+		pkgByID:         map[string]Package{},
+		output:          output,
+		passOpt:         passOpt,
+		buildConf:       conf,
+		crossCompile:    export,
+		commands:        commands,
+		frontendOptions: frontendOptions,
+		cTransformer:    cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, cabiOptimize),
 	}
 	defer ctx.closePackageMetas()
 	defer ctx.cleanupStagedBitcodeFiles()
@@ -6402,9 +6406,10 @@ type context struct {
 	output         bool
 	passOpt        bool
 
-	buildConf    *Config
-	crossCompile crosscompile.Export
-	commands     commandEnv
+	buildConf       *Config
+	crossCompile    crosscompile.Export
+	commands        commandEnv
+	frontendOptions cl.Options
 
 	cTransformer *cabi.Transformer
 
@@ -7528,25 +7533,20 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 		syntax = append(syntax, altPkg.Syntax...)
 	}
 	showDetail := verbose && pkgExists(ctx.initial, pkg)
+	needMeta := !aPkg.CacheHit && ctx.buildConf.packageMetaEnabled()
 	if showDetail {
-		llssa.SetDebug(llssa.DbgFlagAll)
-		cl.SetDebug(cl.DbgFlagAll)
-		defer func() {
-			llssa.SetDebug(0)
-			cl.SetDebug(0)
-		}()
+		fmt.Fprintf(os.Stderr, "==> Compile %s\n", pkgPath)
 	}
-
 	embedMap, err := goembed.LoadDirectives(ctx.conf.Fset, syntax)
 	if err != nil {
 		return fmt.Errorf("load go:embed directives for %s failed: %w", pkgPath, err)
 	}
-
-	needMeta := !aPkg.CacheHit && ctx.buildConf.packageMetaEnabled()
 	ret, externs, err := cl.NewPackageExWithEmbedOptions(ctx.prog, ctx.callerTracking, ctx.patches, aPkg.rewriteVars, aPkg.SSA, syntax, embedMap, cl.PackageOptions{
-		Compilation: ctx.clCompilation,
-		CacheHit:    aPkg.CacheHit,
-		MetaCollect: needMeta,
+		Compilation:        ctx.clCompilation,
+		CacheHit:           aPkg.CacheHit,
+		MetaCollect:        needMeta,
+		FrontendOptions:    ctx.frontendOptions,
+		FrontendOptionsSet: true,
 	})
 	if err != nil {
 		return fmt.Errorf("compile package %s: %w", pkgPath, err)
@@ -8653,6 +8653,7 @@ const llgoWasiThreads = "LLGO_WASI_THREADS"
 const llgoStdioNobuf = "LLGO_STDIO_NOBUF"
 const llgoFullRpath = "LLGO_FULL_RPATH"
 const llgoBuildCache = "LLGO_BUILD_CACHE"
+const llgoShadowStack = "LLGO_SHADOW_STACK"
 
 // for Plan9 asm translation debug
 const llgoPlan9ASMPkgs = "LLGO_PLAN9ASM_PKGS"
