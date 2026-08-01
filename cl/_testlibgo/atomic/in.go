@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 )
 
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibgo/atomic.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	var v int64
 

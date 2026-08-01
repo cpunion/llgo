@@ -9,15 +9,15 @@ import "fmt"
 
 // The generated adapter remains one synchronous raw/native-stack body.
 //
-// CHECK-LABEL: define i32 @"{{.*}}/cl/_testgo/cgocfiles._Cfunc_test_structs"
+// CHECK-LABEL: define i32 @main._Cfunc_test_structs
 // CHECK: call i32 %
 //
 // The managed main is stackless and publishes the typed five-pointer record
 // to a bounded worker instead of executing the C body on the executor.
 //
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/cgocfiles.init$coro"
+// CHECK-LABEL: define ptr @"main.init$coro"
 // CHECK: call token @llvm.coro.id
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/cgocfiles.main$coro"
+// CHECK-LABEL: define ptr @"main.main$coro"
 // CHECK: call token @llvm.coro.id
 // CHECK: call void @__llgo_coro_worker_park_v1
 // CHECK: ptr @__llgo_coro_worker_cgo_thunk_v1_
@@ -25,7 +25,7 @@ import "fmt"
 // CHECK: call i32 @__llgo_coro_worker_resume_v1
 //
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
-// CHECK: call i32 @"{{.*}}/cl/_testgo/cgocfiles._Cfunc_test_structs"
+// CHECK: call i32 @main._Cfunc_test_structs
 func main() {
 	r := C.test_structs(
 		&C.s4{a: 1},

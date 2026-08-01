@@ -12,11 +12,11 @@ import "runtime"
 // Generated C adapters remain synchronous native-stack entries. Their managed
 // caller chooses the physical execution domain.
 //
-// CHECK-LABEL: define i32 @"{{.*}}/cl/_testgo/cgopython._Cfunc_PyRun_SimpleString"
+// CHECK-LABEL: define i32 @main._Cfunc_PyRun_SimpleString
 // CHECK: call i32 %
-// CHECK-LABEL: define [0 x i8] @"{{.*}}/cl/_testgo/cgopython._Cfunc_Py_Finalize"
+// CHECK-LABEL: define [0 x i8] @main._Cfunc_Py_Finalize
 // CHECK: call [0 x i8] %
-// CHECK-LABEL: define [0 x i8] @"{{.*}}/cl/_testgo/cgopython._Cfunc_Py_Initialize"
+// CHECK-LABEL: define [0 x i8] @main._Cfunc_Py_Initialize
 // CHECK: call [0 x i8] %
 //
 // The source main keeps standard synchronous Go syntax. LockOSThread is an
@@ -25,7 +25,7 @@ import "runtime"
 // thunk on this executor M, while the unlocked edge retains the normal bounded
 // worker transaction.
 //
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/cgopython.main$coro"
+// CHECK-LABEL: define ptr @"main.main$coro"
 // CHECK: call token @llvm.coro.id
 // CHECK: call ptr @"runtime.LockOSThread$coro"
 // CHECK: call i1 @__llgo_coro_os_thread_locked_v1

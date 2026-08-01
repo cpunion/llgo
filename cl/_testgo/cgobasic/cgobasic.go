@@ -14,20 +14,20 @@ import (
 
 // Generated C adapters remain synchronous raw/native-stack entries.
 //
-// CHECK-LABEL: define double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_cos"
+// CHECK-LABEL: define double @main._Cfunc_cos
 // CHECK: call double %
-// CHECK-LABEL: define [0 x i8] @"{{.*}}/cl/_testgo/cgobasic._Cfunc_free"
+// CHECK-LABEL: define [0 x i8] @main._Cfunc_free
 // CHECK: call [0 x i8] %
-// CHECK-LABEL: define double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sqrt"
+// CHECK-LABEL: define double @main._Cfunc_sqrt
 // CHECK: call double %
 //
 // Package initialization and source main use the default stackless ABI; C
 // calls park the logical task and execute through exact typed worker thunks.
 //
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/cgobasic.init$coro"
+// CHECK-LABEL: define ptr @"main.init$coro"
 // CHECK: call token @llvm.coro.id
 // CHECK: call i8 @llvm.coro.suspend
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/cgobasic.main$coro"
+// CHECK-LABEL: define ptr @"main.main$coro"
 // CHECK: call token @llvm.coro.id
 // CHECK: call void @__llgo_coro_worker_park_v1
 // CHECK: ptr @__llgo_coro_worker_cgo_thunk_v1_
@@ -35,17 +35,17 @@ import (
 // CHECK: call i32 @__llgo_coro_worker_resume_v1
 //
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
-// CHECK: call i32 @"{{.*}}/cl/_testgo/cgobasic._Cfunc_puts"
+// CHECK: call i32 @main._Cfunc_puts
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
-// CHECK: call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sqrt"
+// CHECK: call double @main._Cfunc_sqrt
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
-// CHECK: call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sin"
+// CHECK: call double @main._Cfunc_sin
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
-// CHECK: call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_cos"
+// CHECK: call double @main._Cfunc_cos
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
-// CHECK: call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_log"
+// CHECK: call double @main._Cfunc_log
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
-// CHECK: call [0 x i8] @"{{.*}}/cl/_testgo/cgobasic._Cfunc_free"
+// CHECK: call [0 x i8] @main._Cfunc_free
 func main() {
 	// C.CString example
 	cstr := C.CString("Hello, World!")

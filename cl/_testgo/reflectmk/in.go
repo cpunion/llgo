@@ -11,13 +11,13 @@ import (
 // runtime failure; these checks cover the descriptor/coroutine representation.
 // CHECK: @__llgo_coro_func_descriptor_v1.method-value.{{.*}} = linkonce_odr unnamed_addr constant
 // CHECK: @__llgo_coro_func_descriptor_v1.method.{{.*}} = linkonce_odr unnamed_addr constant
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflectmk.Point.String$coro"(ptr %0, ptr %1, %"{{.*}}Point" %2){{.*}} {
+// CHECK-LABEL: define ptr @"main.Point.String$coro"(ptr %0, ptr %1, %"{{.*}}Point" %2){{.*}} {
 // CHECK: call ptr @"fmt.Sprintf$coro"(
 // CHECK: call void @__llgo_coro_await_prepare_v3
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflectmk.(*Point).Set$coro"(ptr %0, ptr %1, ptr %2, i64 %3, i64 %4){{.*}} {
+// CHECK-LABEL: define ptr @"main.(*Point).Set$coro"(ptr %0, ptr %1, ptr %2, i64 %3, i64 %4){{.*}} {
 // CHECK: store i64 %3
 // CHECK: store i64 %4
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflectmk.main$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK-DAG: call ptr @"reflect.ArrayOf$coro"(
 // CHECK-DAG: call ptr @"reflect.ChanOf$coro"(
 // CHECK-DAG: call ptr @"reflect.FuncOf$coro"(
@@ -28,13 +28,13 @@ import (
 // CHECK-DAG: call ptr @"reflect.Value.Method$coro"(
 // CHECK-DAG: call ptr @"reflect.Value.MethodByName$coro"(
 // CHECK-DAG: call ptr @"reflect.Value.Call$coro"(
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflectmk.method$coro"(ptr %0, ptr %1, i64 %2){{.*}} {
+// CHECK-LABEL: define ptr @"main.method$coro"(ptr %0, ptr %1, i64 %2){{.*}} {
 // CHECK: call ptr @"reflect.Value.Call$coro"(
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/reflectmk.methodByName$coro"(ptr %0, ptr %1, %"{{.*}}String" %2){{.*}} {
+// CHECK-LABEL: define ptr @"main.methodByName$coro"(ptr %0, ptr %1, %"{{.*}}String" %2){{.*}} {
 // CHECK: call ptr @"reflect.Value.MethodByName$coro"(
 // CHECK: call ptr @"reflect.Value.Call$coro"(
 // CHECK-LABEL: define linkonce ptr @__llgo_coro_func_coro_v1.method-value.{{.*}}(ptr %0, ptr %1, ptr %2, %"{{.*}}Point" %3) {
-// CHECK: call ptr @"{{.*}}/cl/_testgo/reflectmk.Point.String$coro"(ptr %0, ptr %1, %"{{.*}}Point" %3)
+// CHECK: call ptr @"main.Point.String$coro"(ptr %0, ptr %1, %"{{.*}}Point" %3)
 // CHECK-NOT: __llgo_stub.
 
 type Point struct {

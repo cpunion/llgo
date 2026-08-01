@@ -1,7 +1,7 @@
 // LITTEST
 package main
 
-// CHECK-LABEL: define ptr @"{{.*}}/deferpanic.main$coro"(
+// CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	defer func() {
 		e := recover()

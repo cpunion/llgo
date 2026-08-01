@@ -1717,8 +1717,8 @@ func Closure() func() { return func() {} }
 			t.Errorf("FunctionBackground(%s) = %v, %v, %v; want %v, %v, nil", test.name, got, classified, err, test.background, test.classified)
 		}
 	}
-	if semantics, intrinsic, err := universe.CoroIntrinsicSemantics(pkg.ssa.Func("Instr")); err != nil || !intrinsic || semantics != CoroIntrinsicCallUnsupported {
-		t.Fatalf("unreachable intrinsic semantics = %v, %v, %v; want unsupported, true, nil", semantics, intrinsic, err)
+	if semantics, intrinsic, err := universe.CoroIntrinsicSemantics(pkg.ssa.Func("Instr")); err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineNoSuspend {
+		t.Fatalf("unreachable intrinsic semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
 	}
 	cstr, cstrOK := universe.Resolve(pkg.ssa.Func("CStr"))
 	cstrAlias, cstrAliasOK := universe.Resolve(pkg.ssa.Func("CStrAlias"))

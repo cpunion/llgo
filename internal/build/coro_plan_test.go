@@ -1959,7 +1959,6 @@ func TestCoroPlanInputRejectsUnprovenBodylessRequiredDeclarations(t *testing.T) 
 	}{
 		{name: "Go"},
 		{name: "Python", directive: "//llgo:link bad py.bad\n"},
-		{name: "intrinsic", directive: "//llgo:link bad llgo.unreachable\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := buildRequiredCoroRuntimeFixture(t, test.directive+`func bad()
@@ -1981,7 +1980,6 @@ func TestCoroPlanInputRejectsBodyfulNonGoRequiredDeclarations(t *testing.T) {
 		directive string
 	}{
 		{name: "Python", directive: "//llgo:link bad py.bad\n"},
-		{name: "intrinsic", directive: "//llgo:link bad llgo.unreachable\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := buildRequiredCoroRuntimeFixture(t, test.directive+`func bad() {}
@@ -1992,6 +1990,39 @@ func install() { bad() }
 			}
 			if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "has no frozen frontend C ABI proof") {
 				t.Fatalf("bodyful %s required declaration error = %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestCoroPlanInputElidesCompilerIntrinsicFromRequiredPlain(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "bodyless", body: "func bad()\n"},
+		{name: "bodyful", body: "func bad() {}\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := buildRequiredCoroRuntimeFixture(t, "//llgo:link bad llgo.unreachable\n"+test.body+`func install() { bad() }
+`)
+			bad := fixture.pkg.Func("bad")
+			if _, ok := fixture.requiredPlain[bad]; ok {
+				t.Fatal("compiler-inline intrinsic entered the static required-plain closure")
+			}
+			if semantics, intrinsic, err := fixture.ctx.coroEmission.CoroIntrinsicSemantics(bad); err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineNoSuspend {
+				t.Fatalf("intrinsic semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
+			}
+			plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := onlyBuildTestCall(t, fixture.pkg.Func("install"))
+			if !plan.ElidesCall(call) {
+				t.Fatal("compiler-inline intrinsic call was not frozen as an elided call site")
+			}
+			if _, ok := plan.CallPlan(call); ok {
+				t.Fatal("compiler-inline intrinsic unexpectedly has a managed CallPlan")
 			}
 		})
 	}
