@@ -147,7 +147,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	legacyPhysicalSelector:    0,
 	legacySplitEmissionState:  0,
 	emissionSessionAccess:     20,
-	bodyCapabilityAccess:      39,
+	bodyCapabilityAccess:      35,
 	// The outcome-plain cohort replaced the coroutine-only begin/bind/complete
 	// entry points with one exclusive managed-body transaction. Keep the legacy
 	// names at zero so a second physical-emission lifecycle cannot grow back.

@@ -29,7 +29,7 @@ import (
 const (
 	coroLibraryFunctionABIDigestDomain = "llgo.coro.library-function-abi.v1"
 	coroLibraryExportABIDigestDomain   = "llgo.coro.library-export-abi.v1"
-	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v5."
+	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v6."
 )
 
 // CoroLibraryEffectView is the immutable archive-facing projection of a

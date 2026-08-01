@@ -158,13 +158,11 @@ func (p *context) compileCoroImplicitNilFieldAddrGuard(
 	field *ssa.FieldAddr,
 	base llssa.Expr,
 ) llssa.Expr {
-	body := p.coroBody()
-	if body == nil || field == nil || field.X == nil || b == nil || b.Func != p.fn {
-		panic("implicit nil FieldAddr guard escaped its physical coroutine body")
+	if !p.hasStructuredOutcomePhysicalBody() || field == nil || field.X == nil || b == nil || b.Func != p.fn {
+		panic("implicit nil FieldAddr guard escaped its structured physical body")
 	}
-	if !p.coroEmissionExplicitStatus() ||
-		body.abi.version < coroPhysicalABIVersionV1 {
-		panic("implicit nil FieldAddr guard requires the PhysicalABIV1 explicit-status panic ABI")
+	if !p.coroEmissionExplicitStatus() {
+		panic("implicit nil FieldAddr guard requires the explicit-status panic ABI")
 	}
 	if _, ok := types.Unalias(field.X.Type()).Underlying().(*types.Pointer); !ok {
 		panic(fmt.Sprintf("implicit nil FieldAddr base %T is not pointer-shaped", field.X.Type()))
@@ -181,9 +179,9 @@ func (p *context) compileCoroImplicitNilDerefGuard(
 	deref *ssa.UnOp,
 	base llssa.Expr,
 ) llssa.Expr {
-	if p == nil || p.coroBody() == nil || deref == nil || deref.Op != token.MUL || deref.X == nil ||
+	if p == nil || !p.hasStructuredOutcomePhysicalBody() || deref == nil || deref.Op != token.MUL || deref.X == nil ||
 		b == nil || b.Func != p.fn {
-		panic("implicit nil typed-load guard escaped its physical coroutine body")
+		panic("implicit nil typed-load guard escaped its structured physical body")
 	}
 	if _, ok := types.Unalias(deref.X.Type()).Underlying().(*types.Pointer); !ok {
 		panic(fmt.Sprintf("implicit nil typed-load base %T is not pointer-shaped", deref.X.Type()))
@@ -205,13 +203,11 @@ func (p *context) beginCoroPlannedNilGuard(instruction ssa.Instruction) {
 }
 
 func (p *context) compileCoroImplicitNilAccessGuard(b llssa.Builder, base llssa.Expr) llssa.Expr {
-	body := p.coroBody()
-	if body == nil || b == nil || b.Func != p.fn {
-		panic("implicit nil access guard escaped its physical coroutine body")
+	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn {
+		panic("implicit nil access guard escaped its structured physical body")
 	}
-	if !p.coroEmissionExplicitStatus() ||
-		body.abi.version < coroPhysicalABIVersionV1 {
-		panic("implicit nil access guard requires the PhysicalABIV1 explicit-status panic ABI")
+	if !p.coroEmissionExplicitStatus() {
+		panic("implicit nil access guard requires the explicit-status panic ABI")
 	}
 
 	isNil := b.BinOp(token.EQL, base, b.Prog.Nil(base.Type))
@@ -272,9 +268,9 @@ func (p *context) compileCoroImplicitNilStoreGuard(
 	store *ssa.Store,
 	base llssa.Expr,
 ) llssa.Expr {
-	if p == nil || !p.hasCoroPhysicalBody() || store == nil || store.Addr == nil ||
+	if p == nil || !p.hasStructuredOutcomePhysicalBody() || store == nil || store.Addr == nil ||
 		b == nil || b.Func != p.fn {
-		panic("implicit nil Store guard escaped its physical coroutine body")
+		panic("implicit nil Store guard escaped its structured physical body")
 	}
 	if _, ok := types.Unalias(store.Addr.Type()).Underlying().(*types.Pointer); !ok {
 		panic(fmt.Sprintf("implicit nil Store address %T is not pointer-shaped", store.Addr.Type()))
@@ -610,8 +606,8 @@ func (p *context) compileCoroFaultConditionGuardWithOperands(
 	kind uint32,
 	operands *coroFaultOperands,
 ) {
-	if p == nil || p.coroBody() == nil || b == nil || b.Func != p.fn || condition.IsNil() {
-		panic("structured coroutine fault guard escaped its physical body")
+	if p == nil || !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn || condition.IsNil() {
+		panic("structured fault guard escaped its physical body")
 	}
 	if operands != nil && (operands.arg0.IsNil() || operands.arg1.IsNil()) {
 		panic("parameterized coroutine fault guard has an incomplete operand pair")
@@ -647,6 +643,16 @@ func (p *context) compileCoroTerminalFaultWithOperands(
 	kind uint32,
 	operands *coroFaultOperands,
 ) {
+	if p.hasOutcomePlainPhysicalBody() {
+		if b == nil || b.Func != p.fn {
+			panic("outcome-plain terminal fault escaped its physical body")
+		}
+		if kind != coroFaultNilV1 || operands != nil {
+			panic("outcome-plain v0 admitted a parameterized or non-nil language fault")
+		}
+		p.outcomePlainBody().publishNilFault(b)
+		return
+	}
 	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn {
 		panic("coroutine terminal fault escaped its physical body")
@@ -719,8 +725,7 @@ func (p *context) materializeCoroFaultPayloadWithOperands(
 ) (typeWord, dataWord llssa.Expr) {
 	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn ||
-		!p.coroEmissionExplicitStatus() ||
-		body.abi.version < coroPhysicalABIVersionV1 {
+		!p.coroEmissionExplicitStatus() || body.abi.version < coroPhysicalABIVersionV1 {
 		panic("coroutine fault payload materialization requires an explicit-status PhysicalABIV1 body")
 	}
 	typeSlot := p.coroFrameAlloca(p.prog.VoidPtr())
@@ -745,6 +750,21 @@ func (p *context) materializeCoroFaultPayloadWithOperands(
 	payload := p.pkg.NewFunc(payloadHook, payloadSignature, llssa.InC)
 	b.Call(payload.Expr, args...)
 	return b.Load(typeSlot), b.Load(dataSlot)
+}
+
+// enterCoroPropagatedNilFault transports the allocation-free nil-fault status
+// through synchronous outcome bodies. The first full coroutine parent uses
+// its existing V1 terminal-fault path, so certified outcome functions contain
+// no hidden helper call and do not pull parameterized V2 runtime support.
+func (p *context) enterCoroPropagatedNilFault(b llssa.Builder) {
+	if p == nil || !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn {
+		panic("propagated nil fault escaped its structured parent body")
+	}
+	if outcome := p.outcomePlainBody(); outcome != nil {
+		outcome.publishNilFault(b)
+		return
+	}
+	p.compileCoroTerminalFault(b, coroFaultNilV1)
 }
 
 // enterFault turns a source-body implicit fault into the same recoverable

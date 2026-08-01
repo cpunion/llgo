@@ -32,6 +32,7 @@ const (
 	coroAwaitCompletionShutdown        uint64 = 4
 	coroAwaitCompletionReturnRecovered uint64 = 5
 	coroAwaitCompletionGoexit          uint64 = 6
+	coroAwaitCompletionFaultNil        uint64 = 7
 
 	coroAwaitRecoverNone   uint64 = 0
 	coroAwaitRecoverDirect uint64 = 1

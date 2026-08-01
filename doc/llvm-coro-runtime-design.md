@@ -490,7 +490,7 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - `CoroPlanDigest` 绑定某次最终程序分析、consumer demand、精确 call/value site 和私有 lowering facts，只用于本次 codegen/cache；
 - `LibraryEffectSummary` 嵌入每个实际产出 package object/archive，发布下游继续染色所需、且该产物确实提供的事实。它不能携带或复用最终程序 demand，也不能把未发射的 entry 声称为可用。
 
-当前 `llgo.coro.library-effect-summary.v5` 已硬切并实现以下producer闭环：
+当前 `llgo.coro.library-effect-summary.v6` 已硬切并实现以下producer闭环：
 
 - canonical JSON 记录 package identity、FunctionID、最终 SuspendEffect/ExecFlags、FuncRep、
   primary kind/physical symbol、精确 managed entry、可选 raw-plain symbol、结构 ABI hash，
@@ -510,9 +510,10 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
   `MaxAtomicCost`时重新校验该producer cost，缺失proof或超预算均fail closed，不会退化成
   无界同步执行；imported DAG proof可以作为本地bottom-up DAG的已证明callee，并把producer证书绑定到
   每个精确call occurrence；
+- v6同时硬切outcome completion状态词汇，包含不在原子body内分配panic payload的`FaultNil`；旧schema不能把未知状态解释为普通panic或return；
 - 缺失metadata继续保持opaque，损坏、ABI错配、重复ID或有fact但物理能力不匹配均fail closed，绝不能解释成`NoSuspend`。
 
-v5 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
+v6 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
 
 后续版本仍需补充producer capability，而不是consumer最终计划：
 
@@ -2022,7 +2023,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - 当前 Phase 35 已实现普通Go blocking/nonblocking多事件`select`的可编译运行版本。编译器按源码语义先求值并物化所有`ChanOp`，fast probe随机起点；blocking slow path在同一LLVM frame中保存typed candidate array和共享state，只创建一个logical wait/claim并在真正`suspend`前发布所有非nil case。runtime按channel地址用candidate内置heap-sort顺序加锁，不创建临时slice/接口对象；winner与所有loser经过exact detach、claim reset、result lease Take/Discard和slot recycle。receive/send、nil case、empty `select{}`取消、closed send显式panic、普通Try操作互操作、physical select与physical direct sender配对、select后立即再次park、TaskCancelAbort均有定向覆盖。nonblocking select只调用Try，不产生select park/resume。
 - Phase 35 的native+nogc最终链接E2E实际执行两case select、后续direct rendezvous和buffer fast path，正常约3秒内完成；host adapter通过`-race -shuffle`，JS/Wasm adapter实际运行通过，native64/wasm32均通过pre/post-CoroSplit verify和object emission。开发中同时修复了direct receive resume status block错误跳回logical block首部、重放receive前副作用的问题；status现在进入compiler-owned physical continuation。
 - Phase 35 仍是有界可运行原型而不是完整Go channel/select：`ChannelOperationSource`仍为每个single-P executor固定4个同时live physical slot，因此超过4个非nil case或高并发占满slot会fail-stop；尚无stable paged catalog、P-neutral packet/multi-P迁移、`reflect.Select`动态descriptor端到端、完整GC precise root或标准库`sync`slow path。本阶段冻结范围只保证当前direct channel与普通源码select可编译、链接、运行和确定性清理，不把这些后续能力混入同一PR。
-- outcome-plain leaf/direct-call DAG现已冻结path-sensitive ProgramIR projection和transitive SHA-256 certificate；physical planner从direct-outcome recipe重建同一证明，library-effect-summary v5跨archive传递。实际LLVM CFG/call DAG在CoroSplit前后各验证一次，未知helper、间接call、循环、dynamic alloca/EH及变量长度memory intrinsic均fail closed，常量长度memory intrinsic计入abstract LLVM work report。该证据只关闭无切换outcome body的结构成本，不代表scheduler/runtime所有source路径或最终机器周期已经获得post-LLVM证书。
+- outcome-plain leaf/direct-call DAG现已冻结path-sensitive ProgramIR projection和transitive SHA-256 certificate；physical planner从direct-outcome recipe重建同一证明，library-effect-summary v6跨archive传递。实际LLVM CFG/call DAG在CoroSplit前后各验证一次，未知helper、间接call、循环、dynamic alloca/EH及变量长度memory intrinsic均fail closed，常量长度memory intrinsic计入abstract LLVM work report；InstCombine可能由整数compare/select形成的标量`umin/umax/smin/smax`仅在LLVM intrinsic identity、canonical name、两个同型参数、同型返回及不超过64位全部匹配时按一个work unit接纳。该证据只关闭无切换outcome body的结构成本，不代表scheduler/runtime所有source路径或最终机器周期已经获得post-LLVM证书。
 - 当前Phase 36 / PR #45把实验性多入口路径收敛为唯一stackless profile和冻结的
   `ProgramIR -> physical operation recipe -> emitter`事实流。普通函数仍只有一个primary；
   只有进入func value、interface、reflect或其他开放动态边界的callable才发布descriptor。

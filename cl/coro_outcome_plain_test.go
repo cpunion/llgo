@@ -19,6 +19,8 @@
 package cl
 
 import (
+	"go/ast"
+	"go/token"
 	"regexp"
 	"strconv"
 	"strings"
@@ -79,6 +81,41 @@ func Leaf(value Huge, payload any, fail bool) Huge {
 }
 func Middle(value Huge, payload any, fail bool) Huge { return Leaf(value, payload, fail) }
 func Parent(value Huge, payload any, fail bool) Huge { return Middle(value, payload, fail) }
+`
+
+const coroOutcomePlainMemoryFixture = `package foo
+
+type cell struct { value uint32 }
+
+func Leaf(target *cell, raw *uint32, value uint32, write bool) uint32 {
+	scaled := uint32((uint64(value) << 1) / 2)
+	if raw == nil {
+		return target.value + scaled
+	}
+	if write {
+		target.value = scaled
+		*raw = scaled + 1
+	}
+	if target.value > *raw {
+		return target.value
+	}
+	return *raw
+}
+
+func Parent(target *cell, raw *uint32, value uint32, write bool) uint32 {
+	return Leaf(target, raw, value, write)
+}
+`
+
+const coroOutcomePlainUnprovenFaultFixture = `package foo
+
+func Leaf(value, divisor, shift int) int {
+	return (value / divisor) << shift
+}
+
+func Parent(value, divisor, shift int) int {
+	return Leaf(value, divisor, shift)
+}
 `
 
 func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
@@ -146,6 +183,179 @@ func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 			}
 			runCoroAtomicCostOptimization(t, prog, module, 1)
 		})
+	}
+}
+
+func TestCoroOutcomePlainCrossPackageMethodDeclarationUsesPhysicalABI(t *testing.T) {
+	const producerPath = "example.com/outcome/producer"
+	testProg := newEmissionTestProgram()
+	producer := testProg.addPackage(t, producerPath, `package producer
+
+type Code uint16
+type Header struct { Class uint16 }
+
+func (header *Header) Extended(code Code) Code {
+	return Code(header.Class<<4) | code
+}
+`)
+	consumer := testProg.addPackage(t, "example.com/outcome/consumer", `package consumer
+
+import "example.com/outcome/producer"
+
+func Root(header *producer.Header, code producer.Code) producer.Code {
+	return header.Extended(code)
+}
+`)
+	testProg.ssa.Build()
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: producer.ssa, Files: []*ast.File{producer.file}},
+		{SSA: consumer.ssa, Files: []*ast.File{consumer.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var method *ssa.Function
+	for _, function := range universe.Functions() {
+		if function != nil && function.Pkg == producer.ssa && function.Name() == "Extended" &&
+			function.Signature != nil && function.Signature.Recv() != nil {
+			method = function
+			break
+		}
+	}
+	if method == nil {
+		t.Fatal("producer method Extended is absent")
+	}
+	root := consumer.ssa.Func("Root")
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: 64,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	methodPlan, found := plan.FunctionPlan(method)
+	if !found || methodPlan.Emission != coro.EmitOutcomePlain {
+		t.Fatalf("Extended plan = %+v, present=%t; want outcome-plain", methodPlan, found)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	compilation.PanicABI = coro.PanicExplicitStatusABIV0
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, consumer.ssa, []*ast.File{consumer.file}, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify cross-package outcome method consumer: %v\n%s", err, module.String())
+	}
+	symbol := funcName(producer.types, method, false) + coroOutcomePlainPrimarySuffix
+	declaration := module.NamedFunction(symbol)
+	sourceSignature, err := universe.coroPhysicalSourceSignature(method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if declaration.IsNil() || !declaration.IsDeclaration() ||
+		declaration.ParamsCount() != sourceSignature.Params().Len()+3 ||
+		declaration.GlobalValueType().ReturnType().TypeKind() != llvm.VoidTypeKind {
+		t.Fatalf("cross-package outcome declaration %q has the wrong physical ABI:\n%s", symbol, module.String())
+	}
+	rootBody := requireCoroPhysicalFunction(t, module, "example.com/outcome/consumer.Root").String()
+	if !strings.Contains(rootBody, symbol) {
+		t.Fatalf("consumer root does not call cross-package outcome method %q:\n%s", symbol, rootBody)
+	}
+}
+
+func TestCoroOutcomePlainMemoryAndNilFaultNativeAndWasm32(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg, plan, ssaPkg := compileCoroOutcomePlainSource(
+				t, test.target, coroOutcomePlainMemoryFixture, "Parent", 64,
+			)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			leaf := ssaPkg.Func("Leaf")
+			leafPlan, found := plan.FunctionPlan(leaf)
+			if !found || leafPlan.Emission != coro.EmitOutcomePlain ||
+				leafPlan.AtomicCostProof != coro.AtomicCostLeaf {
+				t.Fatalf("memory Leaf plan = %+v, present=%t; want proven outcome-plain leaf", leafPlan, found)
+			}
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify outcome-plain memory module before CoroSplit: %v\n%s", err, module.String())
+			}
+			leafBody := module.NamedFunction("foo.Leaf$outcome")
+			if leafBody.IsNil() {
+				t.Fatalf("outcome-plain memory leaf symbol is absent:\n%s", module.String())
+			}
+			leafIR := leafBody.String()
+			if strings.Contains(leafIR, coroFaultPayloadHookV1) ||
+				strings.Contains(leafIR, coroFaultPayloadHookV2) ||
+				strings.Contains(leafIR, "llvm.coro.") || strings.Contains(leafIR, "$coro") ||
+				!coroFunctionStoresI32(leafBody, coroAwaitCompletionFaultNil) {
+				t.Fatalf("outcome-plain memory leaf lost its helper-free nil-fault completion:\n%s", leafIR)
+			}
+			parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
+			if !strings.Contains(parent.String(), coroFaultPrepareHookV1) ||
+				strings.Contains(parent.String(), coroFaultPrepareHookV2) {
+				t.Fatalf("coroutine parent did not materialize the propagated fault:\n%s", parent.String())
+			}
+			runCoroABITestPipeline(t, prog, module)
+		})
+	}
+}
+
+func TestCoroOutcomePlainUnprovenFaultRecipesFailClosed(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, coroOutcomePlainUnprovenFaultFixture)
+	leaf := ssaPkg.Func("Leaf")
+	if leaf == nil {
+		t.Fatal("unproven-fault fixture has no Leaf")
+	}
+	seen := make(map[token.Token]bool)
+	for _, block := range leaf.Blocks {
+		for _, instruction := range block.Instrs {
+			binary, ok := instruction.(*ssa.BinOp)
+			if !ok || binary.Op != token.QUO && binary.Op != token.SHL {
+				continue
+			}
+			semantic, err := planCoroSemanticInstruction(binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if semantic.outcomePlainLeaf {
+				t.Fatalf("unproven %s acquired outcome-plain capability: %+v", binary.Op, semantic)
+			}
+			seen[binary.Op] = true
+		}
+	}
+	if !seen[token.QUO] || !seen[token.SHL] {
+		t.Fatalf("unproven-fault fixture recipes = %v; want division and signed shift", seen)
 	}
 }
 

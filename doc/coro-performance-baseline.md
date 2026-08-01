@@ -6,9 +6,10 @@ baseline, not a cross-machine performance claim.
 
 ## Compared revisions and environment
 
-- LLGo `main`: `ab2fe9c81523`
-- coroutine base: `15feb5690677`, plus exact-interface devirtualization,
+- original LLGo `main` baseline: `ab2fe9c81523`
+- original coroutine baseline: `15feb5690677`, plus exact-interface devirtualization,
   CFG-based preemption safepoints, and the `Tfn`/`Ifn` ABI correction
+- incremental emission baseline: `b372ef10d024` (`cpunion/llgo:llvm-coro`)
 - Go 1.26.5, LLVM 22.1.8, Darwin arm64, Apple M4 Max, 16 logical CPUs
 - cold compiler processes were limited to 4 GiB; generated programs were
   limited to 1 or 2 GiB depending on the workload
@@ -18,6 +19,12 @@ The same source fixtures were compiled by both compilers. Native executable
 footprints use Mach-O section sizes. A benchmark loop is itself a coroutine
 preemption boundary, so the single-call and 16-call batch results are reported
 separately.
+
+The runtime currently ignores the requested argument to `GOMAXPROCS`; this is
+tracked independently as xgo-dev/llgo#2261 with a minimal reproducer. Therefore
+the original throughput table is a 16-P directional comparison, not a strict
+single-P scheduler measurement. Emission size and structural lifecycle counts
+are unaffected by that issue.
 
 When comparing uncommitted compiler variants, give each variant an independent
 empty `GOCACHE`. The development compiler identity is revision-based, so `-a`
@@ -249,7 +256,11 @@ and certified direct-call DAG, and rejects cycles, indirect calls, coroutine
 intrinsics, unknown helpers, dynamic allocas, unsupported EH/control, and
 variable-length memory intrinsics. Constant-length `memset`, `memcpy`, and
 `memmove` are accepted with their byte count included in the abstract work
-bound. The final funcinfo/pclntab data-only inline-assembly anchor is admitted
+bound. LLVM's scalar integer `umin`, `umax`, `smin`, and `smax` intrinsics are
+also accepted as one work unit only when the intrinsic identity, canonical
+name, two equal operands, equal result, and at-most-64-bit width all match;
+this covers InstCombine's compare/select folding without admitting arbitrary
+`llvm.*` declarations. The final funcinfo/pclntab data-only inline-assembly anchor is admitted
 only through compiler-injected identity plus a digest of its complete assembly
 payload; unmarked inline assembly remains rejected. The deterministic
 `llgo.coro.post-llvm-atomic-cost.v1` report binds each semantic certificate to
@@ -262,6 +273,66 @@ units are deliberately reported separately from semantic work units. Machine
 instruction latency, target-specific library calls/assembly, final machine
 stack bytes, interrupts, and scheduler overhead still require the target cost
 model and final-code certificate described in the runtime design.
+
+### Scalar and memory recipe cohort
+
+The next incremental cohort broadens the same frozen semantic recipe and
+outcome-plain physical transaction; it does not introduce another SSA scan or
+emitter. The sole raw-SSA classifier now records whether an instruction can be
+executed as bounded, helper-free outcome work. It accepts integer/floating
+arithmetic and comparisons, representation-preserving conversions, plus
+`FieldAddr`, typed load and store. Integer division/remainder requires the existing dominance
+proof that the divisor is non-zero, and a signed shift count must either be an
+unsigned value or a non-negative constant. Strings, interfaces, allocations,
+dynamic indexing and helper-backed operations remain fail-closed.
+
+Pointer memory access retains Go's recoverable nil-panic semantics without
+calling a runtime helper from the certified outcome body. A nil access
+publishes a dedicated allocation-free completion status through synchronous
+outcome parents; the first full coroutine parent constructs the existing V1
+fault payload and runs its normal cleanup/recover path. The completion record
+remains three words. A full `fmt.Printf` build initially rejected a direct
+fault-payload helper as uncertified, demonstrating that the pre/post-LLVM atomic
+cost gate catches an accidental helper edge rather than silently accepting it.
+Because this adds a terminal status to the hidden outcome vocabulary, the
+archive producer/importer schema is hard-cut from v5 to v6; old libraries fail
+schema validation instead of being reinterpreted.
+
+The same physical ABI is now selected when a consumer module first declares an
+outcome entry owned by another package. A cross-package pointer-receiver method
+with narrow integer input/output gates the exact
+`(g, out, completion, receiver, args...) -> void` declaration; this prevents an
+ordinary Go declaration from being cached under the outcome symbol before its
+call is emitted.
+
+An exact cold-cache A/B used the same compiler toolchain and source
+(`fmt.Printf("Hello, world\\n")`) on Darwin arm64 with LLVM 22.1.8. The baseline
+was rebuilt from `b372ef10d024`; both executables run successfully.
+
+| Metric | `b372ef10d024` | scalar/memory cohort | Delta |
+| --- | ---: | ---: | ---: |
+| file bytes | 7,735,328 | 7,714,240 | -21,088 |
+| `__text` bytes | 3,669,376 | 3,656,680 | -12,696 |
+| read-only const bytes | 1,135,864 | 1,134,200 | -1,664 |
+| linked resume entries | 2,318 | 2,307 | -11 |
+| linked destroy entries | 2,318 | 2,307 | -11 |
+
+The full plan contains 7,291 functions. This cohort selects seven local leaves
+as outcome-plain and leaves 2,531 full coroutines. Six selected leaves were
+linked as coroutine bodies in the baseline; their lifecycle pairs disappear.
+The changed reachability also lets optimization remove five poll-related
+coroutine bodies, for eleven fewer linked lifecycle pairs in total. The seven
+selected leaves are `reflect.mapiterelem`, `reflect.mapiterkey`,
+`reflect.overflowFloat32`, `io.Size`, `os.sameFile`, `syscall.SetControllen` and
+`time.rest`.
+
+There are 116 remaining pure-outcome candidates that fail the current proof.
+Their common blockers include 26 allocations, 26 interface constructions, 92
+calls, 81 index-address operations and 21 index operations across the candidate
+set; only two index-address occurrences have a statically fixed in-range index.
+The next useful cohort should therefore freeze target-dependent direct-interface
+representation and bounded native-stack allocation facts in ProgramIR. It
+should not speculate a larger completion ABI or add a second lowering path.
 
 ### Compact emission type-graph cohort
 

@@ -939,16 +939,16 @@ digest/Merkle汇总，避免把所有普通operand/type再次序列化进全局d
 
 不能用仅供诊断的 summary代替独立archive ABI，也不能让linker重新解释未知producer的function-value物理布局。
 
-当前已硬切到`llgo.coro.library-effect-summary.v5`。每个package
+当前已硬切到`llgo.coro.library-effect-summary.v6`。每个package
 object保留一份compiler-only section，package archive另外加入保留名`__.LLGOCORO`的最小native/Wasm
 sidecar；因此importer不需要解析Full/Thin LTO bitcode。`importcfg packagefile`导入路径会先精确校验
 target/runtime ABI、稳定FunctionID、结构函数ABI和物理符号，再把命中的bodyless managed-Go declaration
 作为Effect/Exec seed送回同一SSA fixed point，所有普通Go caller由分析自动染色，不要求源码注释。
 
-v5在v4的精确C declaration identity/typed ABI/可选contract、C export绑定及Go outcome capability之外，
-继续发布`AtomicCostCertificate`。因此bodyless importer能精确声明并调用`$outcome`，而不从
+v6保留v5的精确C declaration identity/typed ABI/可选contract、C export绑定、Go outcome capability及
+`AtomicCostCertificate`，并硬切新增的`FaultNil` completion状态词汇。因此bodyless importer能精确声明并调用`$outcome`，而不从
 `PrimaryCoroutine`或代码地址猜测它与`$coro`共享物理签名；active consumer的有限
-`MaxPlainInstructions`小于producer cost时直接拒绝，不能跨archive静默扩大no-poll gap。v5允许
+`MaxPlainInstructions`小于producer cost时直接拒绝，不能跨archive静默扩大no-poll gap。v6允许
 `AtomicCostLeaf`和`AtomicCostDAG`，imported DAG也可作为本地bottom-up DAG的已证明callee。C export symbol到managed primary的
 声明绑定。它们不包含consumer选择，也不通过代码地址反查；export binding本身不授予ingress adapter或raw
 entry能力。该summary不发布consumer Demand、root、call-site选择或`CoroPlanDigest`。缺失记录保持opaque；

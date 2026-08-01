@@ -387,6 +387,9 @@ func projectCoroAtomicLLVMFunction(
 				if strings.HasPrefix(callee, "llvm.dbg.") || strings.HasPrefix(callee, "llvm.lifetime.") || callee == "llvm.assume" {
 					continue
 				}
+				if isCoroAtomicFixedIntegerMinMaxIntrinsic(instruction) {
+					continue
+				}
 				if isCoroAtomicConstantMemoryIntrinsic(callee) {
 					if instruction.OperandsCount() < 3 || instruction.Operand(2).IsAConstantInt().IsNil() ||
 						instruction.Operand(2).Type().IntTypeWidth() > 64 {
@@ -451,6 +454,37 @@ func isCoroAtomicConstantMemoryIntrinsic(name string) bool {
 	return strings.HasPrefix(name, "llvm.memset.") ||
 		strings.HasPrefix(name, "llvm.memcpy.") ||
 		strings.HasPrefix(name, "llvm.memmove.")
+}
+
+// isCoroAtomicFixedIntegerMinMaxIntrinsic admits the scalar, fixed-width
+// intrinsics which InstCombine may form from an ordinary integer compare and
+// select. Check both LLVM's intrinsic identity and its complete canonical
+// signature: a source declaration with a suggestive llvm.* name must not gain
+// an atomic-cost capability.
+func isCoroAtomicFixedIntegerMinMaxIntrinsic(call llvm.Value) bool {
+	callee := call.CalledValue()
+	if callee.IsNil() {
+		return false
+	}
+	functionType := call.CalledFunctionType()
+	if functionType.IsNil() || functionType.TypeKind() != llvm.FunctionTypeKind ||
+		functionType.IsFunctionVarArg() {
+		return false
+	}
+	parameters := functionType.ParamTypes()
+	resultType := functionType.ReturnType()
+	if len(parameters) != 2 || resultType.TypeKind() != llvm.IntegerTypeKind ||
+		resultType.IntTypeWidth() == 0 || resultType.IntTypeWidth() > 64 ||
+		parameters[0] != resultType || parameters[1] != resultType {
+		return false
+	}
+	for _, base := range []string{"llvm.umin", "llvm.umax", "llvm.smin", "llvm.smax"} {
+		if callee.IntrinsicID() == llvm.LookupIntrinsicID(base) &&
+			callee.Name() == fmt.Sprintf("%s.i%d", base, resultType.IntTypeWidth()) {
+			return true
+		}
+	}
+	return false
 }
 
 func isCoroAtomicBoundedCompilerCall(call llvm.Value, metadataKind int) (bool, error) {

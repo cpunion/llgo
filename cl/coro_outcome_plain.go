@@ -66,10 +66,11 @@ func newOutcomePlainPhysicalABI(sourceSig *types.Signature) outcomePlainPhysical
 	}
 }
 
-// outcomePlainCompletionType is compiler/runtime ABI data. V0 deliberately
-// contains only terminal status and one concrete interface pair; recovery and
-// trace ownership will extend this record under a new ABI version rather than
-// infer state from a code pointer.
+// outcomePlainCompletionType is compiler-owned ABI data. It carries one
+// terminal status and a concrete interface pair. The allocation-free nil-fault
+// cohort uses its own status and does not need payload words; future
+// parameterized fault cohorts must extend the ABI only together with exact
+// cross-package capability metadata.
 func outcomePlainCompletionType(prog llssa.Program) llssa.Type {
 	return prog.Struct(
 		prog.Uint32(), // CompletionStatus
@@ -117,6 +118,10 @@ func (body *outcomePlainBodyContext) publish(
 	b.Return()
 }
 
+func (body *outcomePlainBodyContext) publishNilFault(b llssa.Builder) {
+	body.publish(b, coroAwaitCompletionFaultNil, llssa.Nil, llssa.Nil)
+}
+
 func validateOutcomePlainFrozenPlan(
 	plan *coroPhysicalFunctionPlan,
 	logical coro.FunctionPlan,
@@ -138,9 +143,26 @@ func validateOutcomePlainFrozenPlan(
 	}
 	directCalls := 0
 	for instruction, physical := range plan.instructions {
-		if physical.recipe != coroPhysicalInstructionOrdinary ||
-			physical.operation != coroPhysicalOperationNone || physical.nilGuard || physical.boundsGuard {
+		switch physical.recipe {
+		case coroPhysicalInstructionOrdinary,
+			coroPhysicalInstructionFieldAddr,
+			coroPhysicalInstructionDeref,
+			coroPhysicalInstructionStaticArrayRangeDerefElided,
+			coroPhysicalInstructionStore:
+		default:
+			return fmt.Errorf("outcome-plain instruction %T escaped the bounded value recipe %s", instruction, physical.recipe)
+		}
+		if physical.operation != coroPhysicalOperationNone || physical.boundsGuard {
 			return fmt.Errorf("outcome-plain instruction %T escaped the bounded recipe", instruction)
+		}
+		if physical.nilGuard {
+			switch physical.recipe {
+			case coroPhysicalInstructionFieldAddr,
+				coroPhysicalInstructionDeref,
+				coroPhysicalInstructionStore:
+			default:
+				return fmt.Errorf("outcome-plain instruction %T acquired an unsupported nil guard", instruction)
+			}
 		}
 		if call, ok := instruction.(*ssa.Call); ok &&
 			physical.semantic.recipe == coro.RecipeID("cl.ssa.call.v1") {
@@ -327,11 +349,13 @@ func (p *context) compileCoroStaticOutcomeCall(
 	returned := p.fn.MakeBlock()
 	panicked := p.fn.MakeBlock()
 	goexited := p.fn.MakeBlock()
+	faulted := p.fn.MakeBlock()
 	invalid := p.fn.MakeBlock()
 	dispatch := b.Switch(status, invalid)
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()), returned)
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionPanic, p.prog.Uint32()), panicked)
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionGoexit, p.prog.Uint32()), goexited)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionFaultNil, p.prog.Uint32()), faulted)
 	dispatch.End(b)
 
 	line := p.coroCurrentSourceLine()
@@ -341,6 +365,8 @@ func (p *context) compileCoroStaticOutcomeCall(
 	p.enterCoroPropagatedPanic(b, typeWord, dataWord, line)
 	b.SetBlockEx(goexited, llssa.AtEnd, false)
 	p.enterCoroPropagatedGoexit(b)
+	b.SetBlockEx(faulted, llssa.AtEnd, false)
+	p.enterCoroPropagatedNilFault(b)
 	b.SetBlockEx(invalid, llssa.AtEnd, false)
 	b.Unreachable()
 	b.SetBlockContinuation(returned)

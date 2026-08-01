@@ -876,6 +876,9 @@ func (p *context) funcOfEntry(entry plannedFunctionSymbol) (aFn llssa.Function, 
 			if entry.usesCoroPhysicalABI() {
 				abi := newCoroPhysicalABI(p, entry, sig)
 				sig = abi.physicalSig
+			} else if entry.usesOutcomePlainPhysicalABI() {
+				abi := newOutcomePlainPhysicalABI(sig)
+				sig = abi.physicalSig
 			}
 			// Cross-package references are declarations, including references to
 			// generated/generic linkonce definitions. LLVM requires declarations to
