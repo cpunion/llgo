@@ -1642,17 +1642,18 @@ type coroWorkerPointerResultVisit struct {
 // call result. That is the minimum operation-level propagation needed by
 // standard-library wrappers such as syscall.mmap and mmapper.Mmap.
 //
-// Integer arithmetic, storage, Phi merging, parameters, open calls, and
-// multiple-target calls still destroy the fact. The callable shadow injects
-// metadata at FuncPCABI0 formation; the worker-result projection binds a
-// private carrier result to one incoming producer; and the immutable CallPlan
-// selects every wrapper target before physical lowering consumes the fact.
+// Integer arithmetic, storage, Phi merging, parameters, open calls, and any
+// closed target that cannot prove the same result still destroy the fact. The
+// callable shadow injects metadata at FuncPCABI0 formation; target-owned trap
+// facts and worker-result projections bind it to exact incoming edges; and the
+// immutable CallPlan selects every wrapper target before physical lowering
+// consumes the fact.
 func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerResult(value ssa.Value) bool {
 	if a == nil || a.plan == nil || a.universe == nil || value == nil {
 		return false
 	}
 	return a.provesWorkerForeignPointerValue(
-		a.fn, value, make(map[coroWorkerPointerResultVisit]bool),
+		a.fn, value, make(map[coroWorkerPointerResultVisit]bool), make(map[*ssa.Call]int),
 	)
 }
 
@@ -1660,6 +1661,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerValue(
 	owner *ssa.Function,
 	value ssa.Value,
 	visiting map[coroWorkerPointerResultVisit]bool,
+	path map[*ssa.Call]int,
 ) bool {
 	switch value := value.(type) {
 	case *ssa.Extract:
@@ -1670,7 +1672,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerValue(
 		if !ok || call == nil || call.Parent() != owner {
 			return false
 		}
-		return a.provesWorkerForeignPointerCallResult(owner, call, value.Index, visiting)
+		return a.provesWorkerForeignPointerCallResult(owner, call, value.Index, visiting, path)
 	case *ssa.Call:
 		// SSA represents a single-result call as the call value itself rather
 		// than as Extract(call, 0). Treat both encodings identically so an
@@ -1682,7 +1684,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerValue(
 			common.Signature().Results().Len() != 1 {
 			return false
 		}
-		return a.provesWorkerForeignPointerCallResult(owner, value, 0, visiting)
+		return a.provesWorkerForeignPointerCallResult(owner, value, 0, visiting, path)
 	default:
 		return false
 	}
@@ -1693,6 +1695,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 	call *ssa.Call,
 	result int,
 	visiting map[coroWorkerPointerResultVisit]bool,
+	path map[*ssa.Call]int,
 ) bool {
 	if owner == nil || call == nil || call.Parent() != owner ||
 		result < 0 || result >= coroWorkerResultProjectionWidthV1 {
@@ -1702,6 +1705,9 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 		certificate, certified, err := a.universe.CoroWorkerSyscallCertificate(call)
 		if err == nil && certified && certificate.ID != "" &&
 			certificate.ForeignPointerResultMask&(uint8(1)<<uint(result)) != 0 {
+			return true
+		}
+		if a.provesWorkerForeignPointerTrapPath(call, result, path) {
 			return true
 		}
 	}
@@ -1739,6 +1745,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 			return false
 		}
 		visiting[visit] = true
+		path[call]++
 
 		reachable := coroPhysicalConstantReachableBlocks(target)
 		returns := 0
@@ -1754,7 +1761,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 				}
 				returns++
 				if result >= len(returned.Results) ||
-					!a.provesWorkerForeignPointerValue(target, returned.Results[result], visiting) {
+					!a.provesWorkerForeignPointerValue(target, returned.Results[result], visiting, path) {
 					proved = false
 					break
 				}
@@ -1763,12 +1770,44 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 				break
 			}
 		}
+		path[call]--
+		if path[call] == 0 {
+			delete(path, call)
+		}
 		delete(visiting, visit)
 		if !proved || returns == 0 {
 			return false
 		}
 	}
 	return true
+}
+
+// provesWorkerForeignPointerTrapPath consumes only target-owned, ProgramIR
+// facts on the exact wrapper-call path currently being checked. Return SSA is
+// still traversed above, so a wrapper that substitutes, derives, stores, or
+// merges the worker result cannot inherit this fact merely by forwarding an
+// address-returning Linux trap number.
+func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerTrapPath(
+	worker *ssa.Call,
+	result int,
+	path map[*ssa.Call]int,
+) bool {
+	if a == nil || a.universe == nil || a.universe.coroProgramIR == nil ||
+		worker == nil || result < 0 || result >= coroWorkerResultProjectionWidthV1 || len(path) == 0 {
+		return false
+	}
+	frozen, found, err := a.universe.coroProgramIR.callSitePlan(worker)
+	if err != nil || !found || frozen.failure != "" || !frozen.workerCertified {
+		return false
+	}
+	mask := uint8(1) << uint(result)
+	for _, edge := range frozen.workerIncoming {
+		if edge.certified && edge.trapPolicyIdentity != "" && path[edge.call] != 0 &&
+			edge.foreignPointerResultMask&mask != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // coroRuntimeConversionHelper mirrors Builder.Convert's complete allocating
