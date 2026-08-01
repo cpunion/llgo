@@ -741,19 +741,24 @@ recursive plain SCC / unknown cost / overflow = unbounded
 4. coroutine caller在site-local reconciliation处理return/panic/Goexit；defer cursor按LIFO执行并允许deferred managed call挂起。
 5. hard-sync/native/host `BoundaryDriverPlan` 把logical outcome转换成该边界允许的panic/error/trap/Promise rejection；foreign LLVM EH只在有明确personality和reentry contract的边界使用。
 
-当前`outcome-plain V0`已经完成第一个status-return primary原型：逻辑事实仍是
+当前`outcome-plain`已经完成status-return primary及第一个direct-call DAG cohort：逻辑事实仍是
 `OutcomeStructured + MayUnwind + PrimaryCoroutine`，物理入口由独立的
 `ManagedEntryOutcomePlain`能力选择，使用`(g, out, completion, args...) -> void`，其中V0 completion为
-`{status uint32, typeWord unsafe.Pointer, dataWord unsafe.Pointer}`。ProgramIR只给source-call-free、无环、
+`{status uint32, typeWord unsafe.Pointer, dataWord unsafe.Pointer}`。ProgramIR首先给source-call-free、无环、
 无引用/动态/递归/lowered incoming edge且在instruction budget内的
-`Debug/Phi/Jump/If/Return/Panic` leaf发放`AtomicCostLeaf`证明。native真实return/panic执行、native/wasm32
-CoroSplit、跨archive精确入口消费均已通过；叶函数不生成frame/ramp/resume/destroy。当前panic验收覆盖
+`Debug/Phi/Jump/If/Return/Panic` leaf发放`AtomicCostLeaf`证明；随后同一SSA CallPlan和同一固定点按
+bottom-up顺序接受只增加普通`Call/Extract`的精确静态DAG。每个DAG节点的`AtomicCostDAG`为本地
+evaluated instruction count加每个call site的callee total cost；所有target必须已发布leaf/DAG或imported
+outcome entry，call count必须与ProgramIR一致，超预算、大result native slot、CFG/call cycle及任何开放边
+均在仍可保留完整coroutine时失败关闭。native真实return/panic执行、native/wasm32 CoroSplit、跨archive
+精确入口消费均已通过；leaf和DAG节点都不生成frame/ramp/resume/destroy。当前panic验收覆盖
 payload和控制流，不宣称被删除leaf的traceback frame已保真；这需要下一版outcome record携带精确的
 source/trace ownership，不能从callee地址反推。
 
-这个原型消除了“status-return primary是否能工作”的不确定性，但不等于任意managed plain call或完整
-panic/recover已经闭环。direct-call DAG仍需要whole-program `MaxAtomicCost`；defer/recover/Goexit producer
-需要统一cleanup transaction；function value/interface需要entry-kind dispatch和开放archive能力；未知或不兼容
+这个cohort消除了“status-return primary和有界静态调用链是否能工作”的不确定性，但不等于任意managed
+plain call或完整panic/recover已经闭环。当前DAG cost是保守的instruction/callee总和，只用于replacement
+budget；完整抢占保证仍需要whole-program path-sensitive `MaxAtomicCost`、runtime/post-LLVM certificate。
+defer/recover/主动Goexit producer需要统一cleanup transaction；function value/interface需要entry-kind dispatch和开放archive能力；未知或不兼容
 边界继续fail closed。因此它是Phase G的窄replacement cohort，不能被用于放宽其余plain/unwind边界。
 
 ## 10. Runtime 全面审查与边界
@@ -915,7 +920,8 @@ canonical emission package key与Go source import path映射到稳定SSA坐标�
 `llgo.coro.plan-digest.v30`；该映射只稳定cache identity，不改变initializer执行顺序；v30
 另外冻结exact interface receiver occurrence，使其direct lowering进入cache identity。2026-08-01的
 `outcome-plain V0`把物理managed entry kind和atomic cost/proof纳入FunctionPlan、canonical digest与摘要，
-当前`PlanDigestSchema`为`llgo.coro.plan-digest.v31`，诊断/传输plan summary为v5。
+当前`PlanDigestSchema`为`llgo.coro.plan-digest.v32`，诊断/传输plan summary为v6；v32新增
+`AtomicCostDAG`证明类别并把相应物理entry选择纳入cache identity。
 
 后续不预留空v22/v23字段，也不沿用历史v9/v10标号。只在某一层的canonical事实真正进入
 production plan/cache identity时，从届时当前schema递增一次。每次升级都验证：任一相关fact
@@ -931,16 +937,17 @@ digest/Merkle汇总，避免把所有普通operand/type再次序列化进全局d
 
 不能用仅供诊断的 summary代替独立archive ABI，也不能让linker重新解释未知producer的function-value物理布局。
 
-当前已硬切到`llgo.coro.library-effect-summary.v3`。每个package
+当前已硬切到`llgo.coro.library-effect-summary.v4`。每个package
 object保留一份compiler-only section，package archive另外加入保留名`__.LLGOCORO`的最小native/Wasm
 sidecar；因此importer不需要解析Full/Thin LTO bitcode。`importcfg packagefile`导入路径会先精确校验
 target/runtime ABI、稳定FunctionID、结构函数ABI和物理符号，再把命中的bodyless managed-Go declaration
 作为Effect/Exec seed送回同一SSA fixed point，所有普通Go caller由分析自动染色，不要求源码注释。
 
-v3在v2的精确C declaration identity/typed ABI/可选contract及C export绑定之外，还发布Go producer的
+v4在v3的精确C declaration identity/typed ABI/可选contract及C export绑定之外，继续发布Go producer的
 `ManagedEntry`、`AtomicCost`与`AtomicCostProof`。因此bodyless importer能精确声明并调用`$outcome`，而不从
 `PrimaryCoroutine`或代码地址猜测它与`$coro`共享物理签名；active consumer的有限
-`MaxPlainInstructions`小于producer cost时直接拒绝，不能跨archive静默扩大no-poll gap。C export symbol到managed primary的
+`MaxPlainInstructions`小于producer cost时直接拒绝，不能跨archive静默扩大no-poll gap。v4允许
+`AtomicCostLeaf`和`AtomicCostDAG`，imported DAG也可作为本地bottom-up DAG的已证明callee。C export symbol到managed primary的
 声明绑定。它们不包含consumer选择，也不通过代码地址反查；export binding本身不授予ingress adapter或raw
 entry能力。该summary不发布consumer Demand、root、call-site选择或`CoroPlanDigest`。缺失记录保持opaque；
 损坏、重复或ABI不匹配均fail closed。当前consumer把managed record用于自动染色并放行静态direct
@@ -1565,14 +1572,15 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 11. 新旧backend按完整函数cohort切换，绝不在一个coroutine body内混拼CFG。
 12. hard-sync/host入口区分thin thunk与有状态BoundaryDriver；Go源码同步风格不强迫所有host ABI同步。
 13. panic/unwind采用logical outcome方向，但先以NoUnwind plain island和focused原型证明。
-14. whole-program MaxAtomicCost在等价迁移后单独启用，并补runtime/post-LLVM cost certificate。
+14. outcome-plain已先启用保守direct-call DAG total cost；完整whole-program path-sensitive MaxAtomicCost
+    仍在等价迁移后单独启用，并补runtime/post-LLVM cost certificate。
 15. runtime确定性瘦身与Park V3实验独立于compiler IR迁移，只删replacement matrix已证明可删的路径。
 
 ## 18. 建议的下一步
 
 Phase A 与 Phase B 的十一个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
 identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻结的EmissionUniverse和SSAPlan
-生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入当前`CoroPlanDigest v31`、
+生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入当前`CoroPlanDigest v32`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
 2026-07-22复审最初把LoweringFacts定义为“已建立观测点”，而不是已完成架构层。随后hidden runtime

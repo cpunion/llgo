@@ -22,6 +22,7 @@ import (
 	"go/types"
 
 	"github.com/goplus/llgo/cl/blocks"
+	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
@@ -29,8 +30,9 @@ import (
 const coroOutcomePlainPrimarySuffix = "$outcome"
 
 // outcomePlainPhysicalABI is the synchronous hidden ABI for a logically
-// outcome-structured leaf. The caller owns both result and completion storage;
-// the callee returns normally after publishing exactly one terminal status.
+// outcome-structured bounded body. The caller owns both result and completion
+// storage; the callee returns normally after publishing exactly one terminal
+// status.
 // No parameter is an LLVM coroutine handle and this ABI emits no coro
 // intrinsic, ramp, resume, or destroy symbol.
 type outcomePlainPhysicalABI struct {
@@ -84,6 +86,7 @@ const (
 
 type outcomePlainBodyContext struct {
 	abi        outcomePlainPhysicalABI
+	task       llssa.Expr
 	resultSlot llssa.Expr
 	completion llssa.Expr
 }
@@ -114,26 +117,57 @@ func (body *outcomePlainBodyContext) publish(
 	b.Return()
 }
 
-func validateOutcomePlainFrozenPlan(plan *coroPhysicalFunctionPlan) error {
+func validateOutcomePlainFrozenPlan(
+	plan *coroPhysicalFunctionPlan,
+	logical coro.FunctionPlan,
+) error {
 	if plan == nil || plan.function == nil {
 		return fmt.Errorf("outcome-plain emission requires one frozen physical plan")
 	}
-	if plan.cleanup != nil || plan.critical != nil || plan.needsPreempt || plan.preempt != nil {
-		return fmt.Errorf("outcome-plain leaf acquired cleanup, critical, or preemption state")
+	if logical.Emission != coro.EmitOutcomePlain ||
+		logical.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+		!logical.AtomicCostProof.ProvesOutcomePlain() {
+		return fmt.Errorf("outcome-plain physical plan disagrees with its logical capability")
 	}
+	if plan.cleanup != nil || plan.critical != nil || plan.needsPreempt || plan.preempt != nil {
+		return fmt.Errorf("outcome-plain body acquired cleanup, critical, or preemption state")
+	}
+	directCalls := 0
 	for instruction, physical := range plan.instructions {
-		if !coroOutcomePlainLeafSemanticRecipe(physical.semantic) ||
-			physical.recipe != coroPhysicalInstructionOrdinary ||
-			physical.control != coroPhysicalControlNone ||
-			physical.operation != coroPhysicalOperationNone ||
-			physical.nilGuard || physical.boundsGuard {
-			return fmt.Errorf("outcome-plain instruction %T escaped the leaf recipe", instruction)
+		if physical.recipe != coroPhysicalInstructionOrdinary ||
+			physical.operation != coroPhysicalOperationNone || physical.nilGuard || physical.boundsGuard {
+			return fmt.Errorf("outcome-plain instruction %T escaped the bounded recipe", instruction)
+		}
+		if call, ok := instruction.(*ssa.Call); ok &&
+			physical.semantic.recipe == coro.RecipeID("cl.ssa.call.v1") {
+			directCalls++
+			if logical.AtomicCostProof != coro.AtomicCostDAG ||
+				physical.control != coroPhysicalControlDirectOutcome ||
+				physical.controlTarget == nil || physical.controlTargetID == "" ||
+				!physical.directOutcomeNativeResult {
+				return fmt.Errorf("outcome-plain call %q lacks an exact native-safe outcome target", call.String())
+			}
+		} else if physical.control != coroPhysicalControlNone {
+			return fmt.Errorf("outcome-plain instruction %T selected unsupported control %s", instruction, physical.control)
+		}
+		allowedSemantic := coroOutcomePlainLeafSemanticRecipe(physical.semantic)
+		if logical.AtomicCostProof == coro.AtomicCostDAG {
+			allowedSemantic = coroOutcomePlainDAGSemanticRecipe(physical.semantic)
+		}
+		if !allowedSemantic {
+			return fmt.Errorf("outcome-plain instruction %T escaped the %s recipe", instruction, logical.AtomicCostProof)
 		}
 		switch physical.outcome {
 		case coroPhysicalOutcomeNone, coroPhysicalOutcomeReturn, coroPhysicalOutcomePanic:
 		default:
 			return fmt.Errorf("outcome-plain instruction %T selected unsupported outcome %s", instruction, physical.outcome)
 		}
+	}
+	if logical.AtomicCostProof == coro.AtomicCostLeaf && directCalls != 0 {
+		return fmt.Errorf("outcome-plain leaf contains %d direct outcome calls", directCalls)
+	}
+	if logical.AtomicCostProof == coro.AtomicCostDAG && directCalls == 0 {
+		return fmt.Errorf("outcome-plain DAG contains no direct outcome call")
 	}
 	return nil
 }
@@ -142,6 +176,7 @@ func (p *context) compileOutcomePlainPhysicalBody(
 	b llssa.Builder,
 	fn *ssa.Function,
 	abi outcomePlainPhysicalABI,
+	logical coro.FunctionPlan,
 	isInit bool,
 ) {
 	if p.emissionUniverse == nil || p.emissionUniverse.coroProgramIR == nil {
@@ -151,7 +186,7 @@ func (p *context) compileOutcomePlainPhysicalBody(
 	if err != nil {
 		panic(fmt.Errorf("load frozen outcome-plain physical plan: %w", err))
 	}
-	if err := validateOutcomePlainFrozenPlan(physicalPlan); err != nil {
+	if err := validateOutcomePlainFrozenPlan(physicalPlan, logical); err != nil {
 		panic(err)
 	}
 	emission, finishEmission := p.beginCoroManagedPhysicalEmission(physicalPlan, 3, true)
@@ -161,6 +196,7 @@ func (p *context) compileOutcomePlainPhysicalBody(
 	completionType := outcomePlainCompletionType(p.prog)
 	body := &outcomePlainBodyContext{
 		abi:        abi,
+		task:       p.fn.PhysicalParam(0),
 		resultSlot: p.fn.PhysicalParam(1),
 		completion: b.Convert(p.prog.Pointer(completionType), p.fn.PhysicalParam(2)),
 	}
@@ -226,7 +262,7 @@ func (p *context) compileCoroStaticOutcomeCall(
 	call *ssa.Call,
 	instructionPlan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if !p.hasCoroPhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlDirectOutcome {
+	if !p.hasStructuredOutcomePhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlDirectOutcome {
 		panic("outcome-plain call escaped its frozen direct control recipe")
 	}
 	callee := instructionPlan.controlTarget
@@ -247,16 +283,24 @@ func (p *context) compileCoroStaticOutcomeCall(
 	}
 	resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
 	// Reuse the coroutine result-slot policy even though this exact call cannot
-	// suspend. In particular, a source-call-free leaf may still return a very
+	// suspend. In particular, an outcome target may still return a very
 	// large parameter; it must not turn into an unbounded alloca on a resume
 	// function's fixed native stack.
-	resultSlot := p.coroResultSlot(resultType)
+	var resultSlot llssa.Expr
+	if p.hasCoroPhysicalBody() {
+		resultSlot = p.coroResultSlot(resultType)
+	} else {
+		if !p.hasOutcomePlainPhysicalBody() || !instructionPlan.directOutcomeNativeResult {
+			panic("outcome-plain DAG call result escaped its frozen native-stack bound")
+		}
+		resultSlot = b.AllocaT(resultType)
+	}
 	// The completion record is three fixed words and is consumed before the next
 	// suspension, so this site-local alloca is independently bounded.
 	completion := b.AllocaZeroedT(outcomePlainCompletionType(p.prog))
 	physicalArgs := make([]llssa.Expr, 0, len(args)+3)
 	physicalArgs = append(physicalArgs,
-		p.coroTask(),
+		p.managedPhysicalTask(),
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 		b.Convert(p.prog.VoidPtr(), completion),
 	)

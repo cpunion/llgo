@@ -696,16 +696,16 @@ when its environment may be released.  The binding generator supplies only
 this bottom timing/lifetime fact; callback positions, ABIs, adapters, and
 managed target identities remain compiler-derived.
 
-### 7.4 Library summary v3
+### 7.4 Library summary v4
 
-`llgo.coro.library-effect-summary.v3` is now the hard-cut producer schema.
+`llgo.coro.library-effect-summary.v4` is now the hard-cut producer schema.
 `CallableContractFacts` is not embedded unchanged because it also contains
-consumer call-site invocations.  v3 has three collections:
+consumer call-site invocations.  v4 has three collections:
 
 1. **Managed functions**: the existing FunctionID, ABI hash, inferred effect,
    execution flags, representation, physically emitted primary entries, exact
-   managed-entry kind, and the optional atomic cost/proof owned by a bounded
-   outcome-plain producer.
+   managed-entry kind, and the optional leaf or direct-call-DAG atomic
+   cost/proof owned by a bounded outcome-plain producer.
 2. **Foreign callables**: exact declaration identity, physical symbol, typed
    ABI hash, target-neutral behavior contract, proof kind/digest, and any
    trusted refinement.

@@ -22,6 +22,7 @@ import (
 	"sort"
 
 	"github.com/goplus/llgo/internal/coro"
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -193,8 +194,12 @@ func (ir *coroProgramIR) freezeSite(function *ssa.Function, owner *preparedEmiss
 	return nil
 }
 
-func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *preparedEmissionPackage) error {
-	if ir == nil || function == nil || owner == nil {
+func (ir *coroProgramIR) freezeSiteOwner(
+	prog llssa.Program,
+	function *ssa.Function,
+	owner *preparedEmissionPackage,
+) error {
+	if ir == nil || prog == nil || function == nil || owner == nil {
 		return fmt.Errorf("coroutine site plan owner requires an exact program IR, function, and owner")
 	}
 	key := emissionFunctionOwnerKey{function: function, owner: owner}
@@ -208,6 +213,7 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 	facts := coro.SSAFunctionBodyFacts{
 		Effect:           coro.NoSuspend,
 		OutcomePlainLeaf: function.Blocks != nil,
+		OutcomePlainDAG:  function.Blocks != nil,
 	}
 	if function.Blocks != nil {
 		facts.Exec = coro.MayUnwind
@@ -220,10 +226,28 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 			}
 			if !plan.evaluated {
 				facts.OutcomePlainLeaf = false
+				facts.OutcomePlainDAG = false
 				continue
 			}
 			if !coroOutcomePlainLeafSemanticRecipe(plan) {
 				facts.OutcomePlainLeaf = false
+			}
+			if !coroOutcomePlainDAGSemanticRecipe(plan) {
+				facts.OutcomePlainDAG = false
+			}
+			if plan.recipe == coro.RecipeID("cl.ssa.call.v1") {
+				facts.OutcomePlainCallCount++
+				call, ok := instruction.(*ssa.Call)
+				if !ok || call.Common() == nil || call.Common().Signature() == nil ||
+					prog.LocalGoTypeExceedsNativeStack(
+						newOutcomePlainPhysicalABI(call.Common().Signature()).resultSlotType,
+					) {
+					// A full coroutine caller can move a large child result into
+					// managed frame storage. A synchronous DAG body cannot acquire
+					// that hidden allocation, so reject the optimization while the
+					// ordinary coroutine fallback is still available.
+					facts.OutcomePlainDAG = false
+				}
 			}
 			facts.Effect = facts.Effect.Join(plan.effect)
 			facts.Exec = facts.Exec.Join(plan.exec)
@@ -257,6 +281,22 @@ func coroOutcomePlainLeafSemanticRecipe(plan coroSemanticInstructionPlan) bool {
 		coro.RecipeID("cl.ssa.if.v1"),
 		coro.RecipeID("cl.ssa.return.v1"),
 		coro.RecipeID("cl.ssa.panic.v0"):
+		return true
+	default:
+		return false
+	}
+}
+
+// coroOutcomePlainDAGSemanticRecipe is the deliberately small extension of the
+// V0 leaf language. Call target/transport semantics are not inferred here;
+// AnalyzeSSA must match every counted call against its frozen CallPlan before
+// this local candidate can acquire a physical outcome entry.
+func coroOutcomePlainDAGSemanticRecipe(plan coroSemanticInstructionPlan) bool {
+	if coroOutcomePlainLeafSemanticRecipe(plan) {
+		return true
+	}
+	switch plan.recipe {
+	case coro.RecipeID("cl.ssa.call.v1"), coro.RecipeID("cl.ssa.extract.v1"):
 		return true
 	default:
 		return false

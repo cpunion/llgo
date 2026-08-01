@@ -313,8 +313,8 @@ import (
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v31" {
-		t.Fatalf("plan digest schema = %q, want managed-entry schema v31", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v32" {
+		t.Fatalf("plan digest schema = %q, want outcome-DAG schema v32", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {

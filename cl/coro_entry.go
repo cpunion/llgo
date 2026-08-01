@@ -261,7 +261,7 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmitte
 	case coro.EmitOutcomePlain:
 		if plan.External != coro.Defined || !hasEmittedBody || plan.Primary != coro.PrimaryCoroutine ||
 			plan.FuncRep != coro.DirectCoro || plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
-			plan.AtomicCostProof != coro.AtomicCostLeaf || plan.AtomicCost == 0 {
+			!plan.AtomicCostProof.ProvesOutcomePlain() || plan.AtomicCost == 0 {
 			return fmt.Errorf(
 				"coroutine entry resolution: outcome-plain emission %q (%s) has external=%s emitted-body=%t primary=%s representation=%s atomic-proof=%s cost=%d",
 				plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody, plan.Primary,
@@ -457,14 +457,14 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			if err != nil {
 				return err
 			}
-			return validateOutcomePlainFrozenPlan(physical)
+			return validateOutcomePlainFrozenPlan(physical, e.plan)
 		}
 		return validateCoroPhysicalABIForOwner(
 			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, true, false,
 			false, true, e.frameRetentionABI, false, false, false,
 			e.interfacePlain, e.managedInterface, e.libraryForeign,
 			func(plan *coroPhysicalFunctionPlan) error {
-				if err := validateOutcomePlainFrozenPlan(plan); err != nil {
+				if err := validateOutcomePlainFrozenPlan(plan, e.plan); err != nil {
 					return err
 				}
 				if accept != nil {
@@ -506,7 +506,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			return err
 		}
 		if e.libraryEffect.ManagedEntry == coro.ManagedEntryOutcomePlain {
-			if e.plan.AtomicCostProof != coro.AtomicCostLeaf || e.plan.AtomicCost == 0 ||
+			if !e.plan.AtomicCostProof.ProvesOutcomePlain() || e.plan.AtomicCost == 0 ||
 				e.plan.Effect != coro.OutcomeStructured || e.plan.Exec&^coro.MayUnwind != 0 {
 				return fmt.Errorf("external outcome-plain emission %q has an invalid producer capability", e.plan.ID)
 			}

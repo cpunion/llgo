@@ -112,7 +112,7 @@ func TestDemandFuncRepAndBodyEmissionText(t *testing.T) {
 			t.Fatalf("managed entry round trip = %s, want %s", parsed, entry)
 		}
 	}
-	for _, proof := range []AtomicCostProof{AtomicCostUnproven, AtomicCostLeaf} {
+	for _, proof := range []AtomicCostProof{AtomicCostUnproven, AtomicCostLeaf, AtomicCostDAG} {
 		if err := proof.Validate(); err != nil {
 			t.Fatalf("atomic proof %s: %v", proof, err)
 		}

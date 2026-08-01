@@ -194,15 +194,50 @@ terminal payload/control-flow paths; it does not yet claim traceback-frame
 fidelity for the removed leaf. Native and wasm structural tests verify that
 CoroSplit cannot manufacture `$outcome.resume` or `$outcome.destroy`.
 
+### Direct-call DAG cohort
+
+The next cohort extends the same ProgramIR, SSA call plan, fixed point,
+physical-emission session, completion ABI and archive metadata; it does not add
+a second SSA scanner or coroutine CFG builder. A local candidate may add only
+ordinary `Call` and `Extract` recipes to the V0 leaf language. Bottom-up
+selection requires every counted call to be one exact, closed, static managed
+edge whose target already publishes a proven local or imported outcome entry.
+The conservative `AtomicCostDAG` is the local evaluated-instruction count plus
+the complete callee cost once per source call site. Roots, references,
+compiler-lowered incoming calls, open/dynamic targets, recursion, CFG cycles,
+cost overflow and budget excess retain the full coroutine.
+
+An outcome DAG forwards the scheduler-owned G, uses caller-owned result and
+completion storage, and republishes child Panic or Goexit without scheduling.
+A target-layout check rejects the optimization before plan selection when a
+call result would exceed the native-stack single-object bound; the full
+coroutine fallback continues to use managed result storage. The same proof
+class is carried by plan digest v32, diagnostic summary v6 and library-effect
+summary v4, so an imported DAG proof can close a local DAG and contributes its
+full producer cost.
+
+For the exact `Parent -> Middle -> Leaf` native/wasm fixture, disabling the
+budget retains three coroutines while the DAG cohort retains only the root:
+
+| Target | Post-split IR baseline | Post-split IR DAG | O2 object baseline | O2 object DAG |
+| --- | ---: | ---: | ---: | ---: |
+| Darwin arm64 | 125,975 B | 41,778 B | 6,240 B | 3,104 B (-50.3%) |
+| wasm32/WASI | 125,921 B | 41,760 B | 4,720 B | 2,487 B (-47.3%) |
+
+This removes two frames, two resume entries and two destroy entries. Native
+and wasm32 verify before and after CoroSplit; the middle outcome body directly
+calls the leaf outcome body, contains no coroutine intrinsic or scheduler
+await hook, and republishes Panic/Goexit statuses to its parent.
+
 ### Remaining outcome-plain expansion
 
-The original 574-body opportunity is not yet claimed. V0 intentionally does
-not accept direct-call DAGs, defer/recover bodies, a Goexit producer, function
-values/interfaces, or recursive/open-world paths. The next cohorts are:
+The original 574-body opportunity is not yet claimed. The current cohorts do
+not accept defer/recover bodies, a Goexit producer, function values/interfaces,
+or recursive/open-world paths. The next cohorts are:
 
-1. compute whole-call-path `MaxAtomicCost` over exact acyclic direct-call DAGs
-   and admit a callee only when every incoming physical edge can consume its
-   published entry;
+1. replace the conservative DAG sum with the complete path-sensitive
+   `MaxAtomicCost`/runtime/post-LLVM certificate needed for a strict preemption
+   latency claim;
 2. add exact panic source/trace ownership, Goexit, cleanup/defer and recover
    outcome transactions without cloning source bodies;
 3. add descriptor/interface dispatch only after entry-kind metadata and every

@@ -106,7 +106,7 @@ func (p *context) coroCurrentSourceCall() *ssa.Call {
 // specialized emitters never re-read CallPlan, feature flags, or raw call
 // shape to decide whether they own the site.
 func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if !p.hasCoroPhysicalBody() {
+	if !p.hasStructuredOutcomePhysicalBody() {
 		return llssa.Expr{}, false
 	}
 	if call == nil {
@@ -123,6 +123,9 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 	}
 	if instructionPlan.control != coroPhysicalControlNone {
 		p.observeCoroPhysicalControl(call, instructionPlan.control)
+	}
+	if p.hasOutcomePlainPhysicalBody() && instructionPlan.control != coroPhysicalControlDirectOutcome {
+		panic(fmt.Sprintf("outcome-plain DAG call selected incompatible frozen control recipe %s", instructionPlan.control))
 	}
 	switch instructionPlan.control {
 	case coroPhysicalControlDirectAwait:

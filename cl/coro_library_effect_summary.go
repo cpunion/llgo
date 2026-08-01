@@ -29,7 +29,7 @@ import (
 const (
 	coroLibraryFunctionABIDigestDomain = "llgo.coro.library-function-abi.v1"
 	coroLibraryExportABIDigestDomain   = "llgo.coro.library-export-abi.v1"
-	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v3."
+	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v4."
 )
 
 // CoroLibraryEffectView is the immutable archive-facing projection of a
@@ -390,7 +390,7 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 			)
 		}
 		// RawPlainSymbol is retained in the producer record so a later lowering
-		// can bind exact legacy crossings without rediscovering symbols. The v2
+		// can bind exact legacy crossings without rediscovering symbols. The v4
 		// managed-function consumer does not yet own an external raw-body capability,
 		// however: mustRawPlainFunctionSymbol deliberately accepts only a
 		// locally defined variant. Reject every imported raw demand here even
@@ -398,18 +398,18 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 		// a later emitter cannot honor.
 		if functionPlan.RawPlainDemand {
 			return fmt.Errorf(
-				"coroutine library effect %q has consumer raw-plain demand, which library summary v3 does not lower",
+				"coroutine library effect %q has consumer raw-plain demand, which library summary v4 does not lower",
 				fact.ID,
 			)
 		}
-		// The v3 managed-function record publishes the primary entry only.
+		// The v4 managed-function record publishes the primary entry only.
 		// Descriptor construction is an
 		// independently versioned ABI and cannot be inferred from FuncRep width.
 		// An undemanded declaration emits nothing and therefore needs no
 		// descriptor in this consumer; reject only an active crossing.
 		if fact.FuncRep == coro.Dispatch && functionPlan.Emission != coro.EmitNone {
 			return fmt.Errorf(
-				"coroutine library effect %q requires an external Dispatch producer, which library summary v3 does not publish",
+				"coroutine library effect %q requires an external Dispatch producer, which library summary v4 does not publish",
 				fact.ID,
 			)
 		}

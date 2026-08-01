@@ -462,20 +462,30 @@ func (k *ManagedEntryKind) UnmarshalText(text []byte) error {
 // AtomicCostProof identifies why a physical body may execute to its next
 // scheduler cut without a preemption poll. It is deliberately independent
 // from the numeric cost so an absent proof cannot be confused with a zero-cost
-// body. The first replacement cohort accepts only source-call-free acyclic
-// leaves; later DAG/archive proofs must use distinct values and validation.
+// body. Leaf and direct-call-DAG proofs use distinct values and validation so
+// consumers never infer a proof class from the numeric cost alone.
 type AtomicCostProof uint8
 
 const (
 	AtomicCostUnproven AtomicCostProof = iota
 	AtomicCostLeaf
+	// AtomicCostDAG proves a finite whole-call-path bound over an exact,
+	// acyclic direct-call graph whose callees all publish outcome-plain entries.
+	AtomicCostDAG
 )
 
 func (p AtomicCostProof) Validate() error {
-	if p > AtomicCostLeaf {
+	if p > AtomicCostDAG {
 		return fmt.Errorf("coro: invalid atomic cost proof %d", uint8(p))
 	}
 	return nil
+}
+
+// ProvesOutcomePlain reports whether this proof authorizes the synchronous
+// explicit-outcome physical ABI. Callers must still validate the non-zero cost
+// and the complete logical function plan.
+func (p AtomicCostProof) ProvesOutcomePlain() bool {
+	return p == AtomicCostLeaf || p == AtomicCostDAG
 }
 
 func (p AtomicCostProof) String() string {
@@ -484,6 +494,8 @@ func (p AtomicCostProof) String() string {
 		return "unproven"
 	case AtomicCostLeaf:
 		return "leaf"
+	case AtomicCostDAG:
+		return "dag"
 	default:
 		return fmt.Sprintf("atomic-cost-proof(%d)", uint8(p))
 	}

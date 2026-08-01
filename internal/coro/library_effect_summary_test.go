@@ -255,6 +255,24 @@ func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 		policy.AtomicCost != function.AtomicCost || policy.AtomicCostProof != AtomicCostLeaf {
 		t.Fatalf("imported outcome policy = %+v", policy)
 	}
+	dag := summary
+	dag.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
+	dag.Functions[0].AtomicCostProof = AtomicCostDAG
+	dagData, err := dag.MarshalStable()
+	if err != nil {
+		t.Fatalf("marshal outcome DAG capability: %v", err)
+	}
+	dagParsed, err := ParseLibraryEffectSummary(dagData)
+	if err != nil {
+		t.Fatalf("parse outcome DAG capability: %v", err)
+	}
+	dagPolicy, err := dagParsed.Functions[0].ImportedPolicy()
+	if err != nil {
+		t.Fatalf("import outcome DAG capability: %v", err)
+	}
+	if dagPolicy.AtomicCostProof != AtomicCostDAG || dagPolicy.AtomicCost != function.AtomicCost {
+		t.Fatalf("imported outcome DAG policy = %+v", dagPolicy)
+	}
 
 	for _, mutate := range []func(*LibraryEffectFunction){
 		func(function *LibraryEffectFunction) { function.AtomicCost = 0 },

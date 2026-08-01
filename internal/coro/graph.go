@@ -243,11 +243,11 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 		if spec.AtomicCost != 0 || spec.ManagedEntry == ManagedEntryOutcomePlain {
 			return fmt.Errorf("coro: function %q: outcome entry/cost requires an atomic-cost proof", spec.ID)
 		}
-	case AtomicCostLeaf:
+	case AtomicCostLeaf, AtomicCostDAG:
 		if spec.AtomicCost == 0 || spec.External != ExternalKnown ||
 			spec.ManagedEntry != ManagedEntryOutcomePlain || spec.Seed != OutcomeStructured ||
 			spec.Exec&^MayUnwind != 0 {
-			return fmt.Errorf("coro: function %q: invalid imported outcome-plain leaf capability", spec.ID)
+			return fmt.Errorf("coro: function %q: invalid imported outcome-plain capability", spec.ID)
 		}
 	}
 	if spec.RawPlainEntry && spec.External != Defined {

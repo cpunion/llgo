@@ -33,9 +33,9 @@ const (
 	// package objects and archives. It is deliberately independent from the
 	// whole-program Summary and PlanDigest schemas: consumer demand may change,
 	// while these producer effects and physically available entries may not.
-	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v3"
+	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v4"
 
-	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v3"
+	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v4"
 
 	// LibraryEffectSummarySection is the portable object-section identity.
 	// Mach-O emission uses the same leaf name in an explicit segment.
@@ -53,7 +53,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 3,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 4,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -337,8 +337,8 @@ func (function LibraryEffectFunction) validate() error {
 		}
 	}
 	if function.ManagedEntry == ManagedEntryOutcomePlain {
-		if function.AtomicCostProof != AtomicCostLeaf || function.AtomicCost == 0 {
-			return fmt.Errorf("coro: library function %q has an outcome entry without a leaf atomic-cost proof", function.ID)
+		if !function.AtomicCostProof.ProvesOutcomePlain() || function.AtomicCost == 0 {
+			return fmt.Errorf("coro: library function %q has an outcome entry without an atomic-cost proof", function.ID)
 		}
 	} else if function.AtomicCostProof != AtomicCostUnproven || function.AtomicCost != 0 {
 		return fmt.Errorf("coro: library function %q has atomic-cost metadata without an outcome entry", function.ID)

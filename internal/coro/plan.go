@@ -234,8 +234,9 @@ type FunctionPlan struct {
 	// AtomicCostProof is not AtomicCostUnproven.
 	AtomicCost uint64
 	// AtomicCostProof records the closed-world proof class which authorized the
-	// bound. EmitOutcomePlain requires a proof; logical effect/exec facts remain
-	// unchanged.
+	// bound. EmitOutcomePlain requires a proof. Declared/local effects remain
+	// unchanged; the final effect may drop AwaitStructured after every such edge
+	// has been replaced by a proven synchronous outcome call.
 	AtomicCostProof AtomicCostProof
 	// FuncRep is direct unless value-flow requested an open dispatch boundary.
 	FuncRep   FuncRep
@@ -348,10 +349,10 @@ func validateManagedEntryPlan(plan FunctionPlan) error {
 		if plan.AtomicCost != 0 || plan.ManagedEntry == ManagedEntryOutcomePlain {
 			return fmt.Errorf("coro: function %q has outcome entry/cost without an atomic-cost proof", plan.ID)
 		}
-	case AtomicCostLeaf:
+	case AtomicCostLeaf, AtomicCostDAG:
 		if plan.AtomicCost == 0 || plan.ManagedEntry != ManagedEntryOutcomePlain ||
 			(plan.External != Defined && plan.External != ExternalKnown) {
-			return fmt.Errorf("coro: function %q has an invalid leaf atomic-cost capability", plan.ID)
+			return fmt.Errorf("coro: function %q has an invalid atomic-cost capability", plan.ID)
 		}
 	}
 	return nil

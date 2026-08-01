@@ -5935,7 +5935,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 	if ftype != goFunc {
 		// compileFuncDecl retains the declaration/symbol classification but
 		// returns before compiling anonymous children, operands, or ABI roots.
-		if err := u.coroProgramIR.freezeSiteOwner(fn, owner); err != nil {
+		if err := u.coroProgramIR.freezeSiteOwner(u.prog, fn, owner); err != nil {
 			return fmt.Errorf("prepare emission universe: non-Go function %q: %w", fn.Name(), err)
 		}
 		return nil
@@ -6027,7 +6027,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				}
 			}
 		}
-		if err := u.coroProgramIR.freezeSiteOwner(fn, owner); err != nil {
+		if err := u.coroProgramIR.freezeSiteOwner(u.prog, fn, owner); err != nil {
 			return fmt.Errorf("prepare emission universe: cgo function %q: %w", fn.Name(), err)
 		}
 		return u.materializeABITypeDemandsOfFunction(fn, owner, emissionState)
@@ -6100,7 +6100,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 			}
 		}
 	}
-	if err := u.coroProgramIR.freezeSiteOwner(fn, owner); err != nil {
+	if err := u.coroProgramIR.freezeSiteOwner(u.prog, fn, owner); err != nil {
 		return fmt.Errorf("prepare emission universe: function %q: %w", fn.Name(), err)
 	}
 	return u.materializeABITypeDemandsOfFunction(fn, owner, emissionState)
