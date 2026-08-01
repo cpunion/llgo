@@ -1713,48 +1713,62 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 
 	callPlan, planned := a.plan.CallPlan(call)
 	if !planned || callPlan.Kind != coro.CallDirect || callPlan.Open ||
-		len(callPlan.Targets) != 1 {
+		len(callPlan.Targets) == 0 {
 		return false
 	}
-	target, found := a.plan.Function(callPlan.Targets[0])
-	if !found || target == nil || len(target.Blocks) == 0 ||
-		a.universe.canonicalAlias(target) != target {
-		return false
-	}
-	targetPlan, targetPlanned := a.plan.FunctionPlan(target)
-	if !targetPlanned || targetPlan.ID != callPlan.Targets[0] ||
-		targetPlan.External != coro.Defined || target.Signature == nil ||
-		target.Signature.Results() == nil || result >= target.Signature.Results().Len() ||
-		!coroWorkerUintptrType(target.Signature.Results().At(result).Type()) {
-		return false
-	}
-
-	visit := coroWorkerPointerResultVisit{function: target, result: result}
-	if visiting[visit] {
-		return false
-	}
-	visiting[visit] = true
-	defer delete(visiting, visit)
-
-	reachable := coroPhysicalConstantReachableBlocks(target)
-	returns := 0
-	for _, block := range target.Blocks {
-		if !reachable[block] {
-			continue
+	// A function-value call can have several closed-world candidates even when
+	// every candidate preserves the same foreign-pointer result contract (the
+	// Go syscall mmapper field is the canonical example). Pointer provenance is
+	// a meet: accept the result only when every frozen target proves it.
+	for _, targetID := range callPlan.Targets {
+		target, found := a.plan.Function(targetID)
+		if !found || target == nil || len(target.Blocks) == 0 ||
+			a.universe.canonicalAlias(target) != target {
+			return false
 		}
-		for _, instruction := range block.Instrs {
-			returned, ok := instruction.(*ssa.Return)
-			if !ok {
+		targetPlan, targetPlanned := a.plan.FunctionPlan(target)
+		if !targetPlanned || targetPlan.ID != targetID ||
+			targetPlan.External != coro.Defined || target.Signature == nil ||
+			target.Signature.Results() == nil || result >= target.Signature.Results().Len() ||
+			!coroWorkerUintptrType(target.Signature.Results().At(result).Type()) {
+			return false
+		}
+
+		visit := coroWorkerPointerResultVisit{function: target, result: result}
+		if visiting[visit] {
+			return false
+		}
+		visiting[visit] = true
+
+		reachable := coroPhysicalConstantReachableBlocks(target)
+		returns := 0
+		proved := true
+		for _, block := range target.Blocks {
+			if !reachable[block] {
 				continue
 			}
-			returns++
-			if result >= len(returned.Results) ||
-				!a.provesWorkerForeignPointerValue(target, returned.Results[result], visiting) {
-				return false
+			for _, instruction := range block.Instrs {
+				returned, ok := instruction.(*ssa.Return)
+				if !ok {
+					continue
+				}
+				returns++
+				if result >= len(returned.Results) ||
+					!a.provesWorkerForeignPointerValue(target, returned.Results[result], visiting) {
+					proved = false
+					break
+				}
+			}
+			if !proved {
+				break
 			}
 		}
+		delete(visiting, visit)
+		if !proved || returns == 0 {
+			return false
+		}
 	}
-	return returns != 0
+	return true
 }
 
 // coroRuntimeConversionHelper mirrors Builder.Convert's complete allocating
