@@ -55,6 +55,64 @@ entry:
 	}
 }
 
+func TestProveNoSuspendLeafBoundedInlineAssembly(t *testing.T) {
+	translation := parseNoSuspendTestModule(t, `
+define i64 @"example.com/asm.mrs"() {
+entry:
+  %counter = call i64 asm "mrs $0, CNTVCT_EL0", "=r"()
+  %thread = call i64 asm sideeffect "mrs $0, TPIDR_EL0", "=r,~{memory}"()
+  %result = xor i64 %counter, %thread
+  ret i64 %result
+}
+
+define i32 @"example.com/asm.Leaf"(i32 %eax, i32 %ecx) {
+entry:
+  %cpuid = call { i32, i32, i32, i32 } asm sideeffect "cpuid", "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{flags}"(i32 %eax, i32 %ecx)
+  %xgetbv = call { i32, i32 } asm sideeffect "xgetbv", "={ax},={dx},{cx},~{dirflag},~{fpsr},~{flags}"(i32 %ecx)
+  %mrs = call i64 @"example.com/asm.mrs"()
+  %cpuid.eax = extractvalue { i32, i32, i32, i32 } %cpuid, 0
+  %xgetbv.eax = extractvalue { i32, i32 } %xgetbv, 0
+  %mrs.i32 = trunc i64 %mrs to i32
+  %x86 = xor i32 %cpuid.eax, %xgetbv.eax
+  %result = xor i32 %x86, %mrs.i32
+  ret i32 %result
+}
+`)
+	if _, err := ProveNoSuspendLeaf(translation, "example.com/asm.Leaf"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProveNoSuspendLeafInlineAssemblyFailsClosed(t *testing.T) {
+	tests := []struct {
+		name        string
+		constraints string
+		sideEffects bool
+		alignStack  bool
+		dialect     llvm.InlineAsmDialect
+		canThrow    bool
+		asm         string
+		wideResult  bool
+		want        string
+	}{
+		{name: "constraints", constraints: "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{memory}", sideEffects: true, dialect: llvm.InlineAsmDialectATT, want: "has constraints"},
+		{name: "side effects", constraints: "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{flags}", dialect: llvm.InlineAsmDialectATT, want: "side-effects flag"},
+		{name: "aligned stack", constraints: "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{flags}", sideEffects: true, alignStack: true, dialect: llvm.InlineAsmDialectATT, want: "aligned-stack"},
+		{name: "dialect", constraints: "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{flags}", sideEffects: true, dialect: llvm.InlineAsmDialectIntel, want: "is not AT&T"},
+		{name: "can throw", constraints: "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{flags}", sideEffects: true, dialect: llvm.InlineAsmDialectATT, canThrow: true, want: "can-throw"},
+		{name: "unknown template", asm: "pause", constraints: "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{flags}", sideEffects: true, dialect: llvm.InlineAsmDialectATT, want: "not a bounded translator emission"},
+		{name: "signature", constraints: "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{flags}", sideEffects: true, dialect: llvm.InlineAsmDialectATT, wideResult: true, want: "return fields[0]"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			translation := newInlineAsmNoSuspendTestModule(t, test.asm, test.constraints, test.sideEffects, test.alignStack, test.dialect, test.canThrow, test.wideResult)
+			if _, err := ProveNoSuspendLeaf(translation, "example.com/asm.Leaf"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ProveNoSuspendLeaf error = %v; want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestProveNoSuspendLeafFailsClosed(t *testing.T) {
 	tests := []struct {
 		name string
@@ -78,7 +136,7 @@ entry:
   %result = call i64 %fn(i64 %value)
   ret i64 %result
 }`,
-			want: "indirect or inline-assembly",
+			want: "indirect call",
 		},
 		{
 			name: "unproved intrinsic",
@@ -107,6 +165,39 @@ entry:
 				t.Fatalf("ProveNoSuspendLeaf error = %v; want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func newInlineAsmNoSuspendTestModule(t *testing.T, asm, constraints string, sideEffects, alignStack bool, dialect llvm.InlineAsmDialect, canThrow, wideResult bool) *ModuleTranslation {
+	t.Helper()
+	if asm == "" {
+		asm = "cpuid"
+	}
+	context := llvm.NewContext()
+	module := context.NewModule("nosuspend-inline-asm")
+	i32 := context.Int32Type()
+	returnTypes := []llvm.Type{i32, i32, i32, i32}
+	if wideResult {
+		returnTypes[0] = context.Int64Type()
+	}
+	returnType := context.StructType(returnTypes, false)
+	functionType := llvm.FunctionType(returnType, []llvm.Type{i32, i32}, false)
+	function := llvm.AddFunction(module, "example.com/asm.Leaf", functionType)
+	builder := context.NewBuilder()
+	builder.SetInsertPointAtEnd(context.AddBasicBlock(function, "entry"))
+	inlineAsm := llvm.InlineAsm(functionType, asm, constraints, sideEffects, alignStack, dialect, canThrow)
+	result := builder.CreateCall(functionType, inlineAsm, []llvm.Value{function.Param(0), function.Param(1)}, "result")
+	builder.CreateRet(result)
+	builder.Dispose()
+	t.Cleanup(func() {
+		module.Dispose()
+		context.Dispose()
+	})
+	return &ModuleTranslation{
+		Module: module,
+		Signatures: map[string]extplan9asm.FuncSig{
+			"example.com/asm.Leaf": {Name: "example.com/asm.Leaf"},
+		},
 	}
 }
 

@@ -27,4 +27,4 @@ require (
 
 replace github.com/goplus/llgo/runtime => ./runtime
 
-replace github.com/xgo-dev/llvm => github.com/cpunion/llvm v0.9.4-0.20260724133556-6dccb7285597
+replace github.com/xgo-dev/llvm => github.com/cpunion/llvm v0.9.4-0.20260801090257-a37656e95932
