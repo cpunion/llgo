@@ -14,6 +14,7 @@ LLGO_TYPE_CATEGORY = "LLGo"
 LLGO_MAX_STRING_SUMMARY_BYTES = 256
 LLGO_MAX_TYPE_NAME_BYTES = 4096
 LLGO_DEFAULT_MAX_CHILDREN = 256
+LLGO_MAX_CONTAINER_SCAN_BUCKETS = 65536
 _TARGET_INFO_CACHE: Dict[Tuple[Any, ...], "LLGoTargetInfo"] = {}
 
 
@@ -93,6 +94,27 @@ class LLGoRuntimeLayout:
     function_data: str
     function_closure_symbol_pattern: str
     function_bound_symbol_suffix: str
+    map_type_pattern: str
+    map_count: str
+    map_flags: str
+    map_bucket_bits: str
+    map_buckets: str
+    map_old_buckets: str
+    map_bucket_tophash: str
+    map_bucket_keys: str
+    map_bucket_indirect_keys: str
+    map_bucket_values: str
+    map_bucket_indirect_values: str
+    map_bucket_overflow: str
+    channel_type_pattern: str
+    channel_count: str
+    channel_capacity: str
+    channel_buffer: str
+    channel_closed: str
+    channel_receive_index: str
+    channel_receive_queue: str
+    channel_queue_first: str
+    channel_waiter_element: str
 
 
 @dataclass(frozen=True)
@@ -100,6 +122,17 @@ class LLGoSliceValue:
     address: int
     length: int
     capacity: int
+    element_type: lldb.SBType
+    element_size: int
+
+
+@dataclass(frozen=True)
+class LLGoChannelValue:
+    length: int
+    capacity: int
+    buffer: int
+    receive_index: int
+    closed: bool
     element_type: lldb.SBType
     element_size: int
 
@@ -113,6 +146,8 @@ def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
         interface_layout = raw.get("interface", {})
         runtime_type_layout = raw.get("runtime_type", {})
         function_layout = raw.get("function", {})
+        map_layout = raw.get("map", {})
+        channel_layout = raw.get("channel", {})
         try:
             layouts[int(version)] = LLGoRuntimeLayout(
                 string_type=string_layout["type_name"],
@@ -141,6 +176,29 @@ def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
                     function_layout["closure_symbol_pattern"]),
                 function_bound_symbol_suffix=(
                     function_layout["bound_symbol_suffix"]),
+                map_type_pattern=map_layout["type_pattern"],
+                map_count=map_layout["count"],
+                map_flags=map_layout["flags"],
+                map_bucket_bits=map_layout["bucket_bits"],
+                map_buckets=map_layout["buckets"],
+                map_old_buckets=map_layout["old_buckets"],
+                map_bucket_tophash=map_layout["bucket_tophash"],
+                map_bucket_keys=map_layout["bucket_keys"],
+                map_bucket_indirect_keys=(
+                    map_layout["bucket_indirect_keys"]),
+                map_bucket_values=map_layout["bucket_values"],
+                map_bucket_indirect_values=(
+                    map_layout["bucket_indirect_values"]),
+                map_bucket_overflow=map_layout["bucket_overflow"],
+                channel_type_pattern=channel_layout["type_pattern"],
+                channel_count=channel_layout["count"],
+                channel_capacity=channel_layout["capacity"],
+                channel_buffer=channel_layout["buffer"],
+                channel_closed=channel_layout["closed"],
+                channel_receive_index=channel_layout["receive_index"],
+                channel_receive_queue=channel_layout["receive_queue"],
+                channel_queue_first=channel_layout["queue_first"],
+                channel_waiter_element=channel_layout["waiter_element"],
             )
         except (KeyError, TypeError, ValueError):
             continue
@@ -241,6 +299,30 @@ def register_type_formatters(debugger: lldb.SBDebugger) -> None:
                 layout.function_type_pattern, True),
             lldb.SBTypeSummary.CreateWithFunctionName(
                 "llgo_plugin.function_summary", _type_options()),
+        )
+        map_specifier = lldb.SBTypeNameSpecifier(
+            layout.map_type_pattern, True)
+        category.AddTypeSummary(
+            map_specifier,
+            lldb.SBTypeSummary.CreateWithFunctionName(
+                "llgo_plugin.map_summary", _type_options()),
+        )
+        category.AddTypeSynthetic(
+            map_specifier,
+            lldb.SBTypeSynthetic.CreateWithClassName(
+                "llgo_plugin.MapSyntheticProvider", _type_options()),
+        )
+        channel_specifier = lldb.SBTypeNameSpecifier(
+            layout.channel_type_pattern, True)
+        category.AddTypeSummary(
+            channel_specifier,
+            lldb.SBTypeSummary.CreateWithFunctionName(
+                "llgo_plugin.channel_summary", _type_options()),
+        )
+        category.AddTypeSynthetic(
+            channel_specifier,
+            lldb.SBTypeSynthetic.CreateWithClassName(
+                "llgo_plugin.ChannelSyntheticProvider", _type_options()),
         )
     category.SetEnabled(True)
 
@@ -547,7 +629,10 @@ def _value_as_int(value: lldb.SBValue) -> Optional[int]:
     try:
         return int(raw, 0)
     except (TypeError, ValueError):
-        return None
+        error = value.GetError()
+        if error and error.Fail():
+            return None
+        return value.GetValueAsUnsigned()
 
 
 def _raw_value(value: lldb.SBValue) -> lldb.SBValue:
@@ -562,6 +647,17 @@ def _canonical_type_name(value: lldb.SBValue) -> str:
     while value_type and value_type.IsValid() and value_type.IsTypedefType():
         value_type = value_type.GetTypedefedType()
     return value_type.GetName() if value_type and value_type.IsValid() else ""
+
+
+def _matches_type_pattern(value: lldb.SBValue, pattern: str) -> bool:
+    value_type = _raw_value(value).GetType()
+    while value_type and value_type.IsValid():
+        if re.fullmatch(pattern, value_type.GetName() or ""):
+            return True
+        if not value_type.IsTypedefType():
+            return False
+        value_type = value_type.GetTypedefedType()
+    return False
 
 
 def _runtime_layout(value: lldb.SBValue) -> Optional[LLGoRuntimeLayout]:
@@ -856,6 +952,333 @@ def function_summary(value: lldb.SBValue,
     return name
 
 
+def _pointer_runtime_value(value: lldb.SBValue, pattern: str
+                           ) -> Tuple[Optional[int], Optional[lldb.SBValue]]:
+    raw = _raw_value(value)
+    if not _matches_type_pattern(raw, pattern):
+        return None, None
+    address = _value_as_int(raw)
+    if address is None or address == 0:
+        return address, None
+    pointee = raw.Dereference()
+    if not pointee or not pointee.IsValid():
+        return address, None
+    pointee = pointee.GetNonSyntheticValue()
+    return address, pointee if pointee and pointee.IsValid() else None
+
+
+def map_summary(value: lldb.SBValue,
+                _internal_dict: Dict[str, Any]) -> Optional[str]:
+    layout = _runtime_layout(value)
+    if layout is None:
+        return None
+    address, hash_value = _pointer_runtime_value(
+        value, layout.map_type_pattern)
+    if address is None:
+        return None
+    if address == 0:
+        return "nil"
+    if hash_value is None:
+        return None
+    length = _value_as_int(hash_value.GetChildMemberWithName(
+        layout.map_count))
+    return f"len={length}" if length is not None and length >= 0 else None
+
+
+def _type_field(value_type: lldb.SBType, name: str) -> Optional[lldb.SBType]:
+    while value_type and value_type.IsValid() and value_type.IsTypedefType():
+        value_type = value_type.GetTypedefedType()
+    if not value_type or not value_type.IsValid():
+        return None
+    for index in range(value_type.GetNumberOfFields()):
+        field = value_type.GetFieldAtIndex(index)
+        if field.GetName() == name:
+            field_type = field.GetType()
+            return field_type if field_type and field_type.IsValid() else None
+    return None
+
+
+def _channel_fields(value: lldb.SBValue,
+                    layout: LLGoRuntimeLayout) -> Optional[LLGoChannelValue]:
+    address, channel = _pointer_runtime_value(
+        value, layout.channel_type_pattern)
+    if address is None or address == 0 or channel is None:
+        return None
+    length = _value_as_int(channel.GetChildMemberWithName(
+        layout.channel_count))
+    capacity = _value_as_int(channel.GetChildMemberWithName(
+        layout.channel_capacity))
+    buffer = _value_as_int(channel.GetChildMemberWithName(
+        layout.channel_buffer))
+    receive_index = _value_as_int(channel.GetChildMemberWithName(
+        layout.channel_receive_index))
+    closed_value = channel.GetChildMemberWithName(layout.channel_closed)
+    if (length is None or capacity is None or buffer is None or
+            receive_index is None or length < 0 or capacity < length or
+            (capacity != 0 and receive_index >= capacity) or
+            not closed_value or not closed_value.IsValid()):
+        return None
+
+    channel_type = channel.GetType()
+    queue_type = _type_field(channel_type, layout.channel_receive_queue)
+    first_type = (_type_field(queue_type, layout.channel_queue_first)
+                  if queue_type else None)
+    waiter_type = (first_type.GetPointeeType()
+                   if first_type and first_type.IsPointerType() else None)
+    element_pointer = (_type_field(
+        waiter_type, layout.channel_waiter_element)
+        if waiter_type else None)
+    element_type = (element_pointer.GetPointeeType()
+                    if element_pointer and element_pointer.IsPointerType()
+                    else None)
+    if not element_type or not element_type.IsValid():
+        return None
+    element_size = element_type.GetByteSize()
+    if element_size <= 0 or (length != 0 and buffer == 0):
+        return None
+    return LLGoChannelValue(
+        length=length,
+        capacity=capacity,
+        buffer=buffer,
+        receive_index=receive_index,
+        closed=closed_value.GetValueAsUnsigned(0) != 0,
+        element_type=element_type,
+        element_size=element_size,
+    )
+
+
+def channel_summary(value: lldb.SBValue,
+                    _internal_dict: Dict[str, Any]) -> Optional[str]:
+    layout = _runtime_layout(value)
+    if layout is None:
+        return None
+    address, _ = _pointer_runtime_value(value, layout.channel_type_pattern)
+    if address is None:
+        return None
+    if address == 0:
+        return "nil"
+    fields = _channel_fields(value, layout)
+    if fields is None:
+        return None
+    suffix = " closed" if fields.closed else ""
+    return f"len={fields.length} cap={fields.capacity}{suffix}"
+
+
+def _renamed_value(value: lldb.SBValue, name: str) -> Optional[lldb.SBValue]:
+    if not value or not value.IsValid():
+        return None
+    renamed = value.Clone(name)
+    return renamed if renamed and renamed.IsValid() else None
+
+
+def _map_bucket_value(target: lldb.SBTarget, address: int,
+                      bucket_type: lldb.SBType) -> Optional[lldb.SBValue]:
+    if address == 0:
+        return None
+    bucket = target.CreateValueFromAddress(
+        "__llgo_bucket", lldb.SBAddress(address, target), bucket_type)
+    return bucket if bucket and bucket.IsValid() else None
+
+
+def _map_bucket_evacuated(target: lldb.SBTarget, address: int,
+                          bucket_type: lldb.SBType,
+                          layout: LLGoRuntimeLayout) -> bool:
+    bucket = _map_bucket_value(target, address, bucket_type)
+    if bucket is None:
+        return False
+    tophash = bucket.GetChildMemberWithName(layout.map_bucket_tophash)
+    first = tophash.GetChildAtIndex(0)
+    value = _value_as_int(first)
+    return value is not None and 1 < value < 5
+
+
+def _map_entries(value: lldb.SBValue, layout: LLGoRuntimeLayout,
+                 max_entries: int) -> Optional[List[lldb.SBValue]]:
+    _, hash_value = _pointer_runtime_value(value, layout.map_type_pattern)
+    if hash_value is None:
+        return []
+    length = _value_as_int(hash_value.GetChildMemberWithName(
+        layout.map_count))
+    flags = _value_as_int(hash_value.GetChildMemberWithName(
+        layout.map_flags))
+    bucket_bits = _value_as_int(hash_value.GetChildMemberWithName(
+        layout.map_bucket_bits))
+    buckets = hash_value.GetChildMemberWithName(layout.map_buckets)
+    old_buckets = hash_value.GetChildMemberWithName(layout.map_old_buckets)
+    buckets_address = _value_as_int(buckets)
+    old_buckets_address = _value_as_int(old_buckets)
+    if (length is None or flags is None or bucket_bits is None or
+            buckets_address is None or old_buckets_address is None or
+            length < 0 or bucket_bits < 0 or bucket_bits >= 63):
+        return None
+    if length == 0:
+        return []
+    if buckets_address == 0:
+        return None
+    bucket_type = buckets.GetType().GetPointeeType()
+    if not bucket_type or not bucket_type.IsValid():
+        return None
+    bucket_size = bucket_type.GetByteSize()
+    if bucket_size <= 0:
+        return None
+
+    target = value.GetTarget()
+    logical_buckets = 1 << bucket_bits
+    scan_buckets = min(logical_buckets, LLGO_MAX_CONTAINER_SCAN_BUCKETS)
+    old_count = logical_buckets if flags & 8 else logical_buckets >> 1
+    entries: List[lldb.SBValue] = []
+
+    def append_chain(address: int) -> None:
+        visited = set()
+        while (address and address not in visited and
+               len(entries) < max_entries * 2):
+            visited.add(address)
+            bucket = _map_bucket_value(target, address, bucket_type)
+            if bucket is None:
+                return
+            tophash = bucket.GetChildMemberWithName(
+                layout.map_bucket_tophash)
+            keys = bucket.GetChildMemberWithName(layout.map_bucket_keys)
+            indirect_keys = not keys or not keys.IsValid()
+            if indirect_keys:
+                keys = bucket.GetChildMemberWithName(
+                    layout.map_bucket_indirect_keys)
+            values = bucket.GetChildMemberWithName(
+                layout.map_bucket_values)
+            indirect_values = not values or not values.IsValid()
+            if indirect_values:
+                values = bucket.GetChildMemberWithName(
+                    layout.map_bucket_indirect_values)
+            if (not tophash.IsValid() or not keys.IsValid() or
+                    not values.IsValid()):
+                return
+            slots = min(tophash.GetNumChildren(), keys.GetNumChildren(),
+                        values.GetNumChildren())
+            for slot in range(slots):
+                top = _value_as_int(tophash.GetChildAtIndex(slot))
+                if top is None or top < 5:
+                    continue
+                key = keys.GetChildAtIndex(slot)
+                element = values.GetChildAtIndex(slot)
+                if indirect_keys:
+                    key = key.Dereference()
+                if indirect_values:
+                    element = element.Dereference()
+                pair_index = len(entries) // 2
+                key = _renamed_value(key, f"key[{pair_index}]")
+                element = _renamed_value(element, f"value[{pair_index}]")
+                if key is None or element is None:
+                    return
+                entries.extend((key, element))
+                if len(entries) >= max_entries * 2:
+                    return
+            address = _value_as_int(bucket.GetChildMemberWithName(
+                layout.map_bucket_overflow)) or 0
+
+    for bucket_index in range(scan_buckets):
+        bucket_address = buckets_address + bucket_index * bucket_size
+        if old_buckets_address and old_count:
+            old_index = bucket_index & (old_count - 1)
+            old_address = old_buckets_address + old_index * bucket_size
+            if not _map_bucket_evacuated(
+                    target, old_address, bucket_type, layout):
+                if bucket_index >= old_count:
+                    continue
+                bucket_address = old_address
+        append_chain(bucket_address)
+        if len(entries) >= min(length, max_entries) * 2:
+            break
+    return entries
+
+
+class MapSyntheticProvider:
+    def __init__(self, value: lldb.SBValue,
+                 _internal_dict: Dict[str, Any]) -> None:
+        self.value = value
+        self.raw = _raw_value(value)
+        self.layout = _runtime_layout(self.raw)
+        self.entries: Optional[List[lldb.SBValue]] = None
+        self.update()
+
+    def update(self) -> bool:
+        self.raw = _raw_value(self.value)
+        self.entries = (_map_entries(
+            self.raw, self.layout, LLGO_DEFAULT_MAX_CHILDREN // 2)
+            if self.layout else None)
+        return False
+
+    def num_children(self, max_children: Optional[int] = None) -> int:
+        count = (len(self.entries) if self.entries is not None
+                 else self.raw.GetNumChildren())
+        if max_children is not None and max_children >= 0:
+            count = min(count, max_children)
+        return count
+
+    def get_child_at_index(self, index: int) -> Optional[lldb.SBValue]:
+        if self.entries is None:
+            return self.raw.GetChildAtIndex(index)
+        return self.entries[index] if 0 <= index < len(self.entries) else None
+
+    def get_child_index(self, name: str) -> int:
+        if self.entries is None:
+            return -1
+        for index, child in enumerate(self.entries):
+            if child.GetName() == name:
+                return index
+        return -1
+
+    def has_children(self) -> bool:
+        return self.num_children() != 0
+
+
+class ChannelSyntheticProvider:
+    def __init__(self, value: lldb.SBValue,
+                 _internal_dict: Dict[str, Any]) -> None:
+        self.value = value
+        self.raw = _raw_value(value)
+        self.layout = _runtime_layout(self.raw)
+        self.fields: Optional[LLGoChannelValue] = None
+        self.update()
+
+    def update(self) -> bool:
+        self.raw = _raw_value(self.value)
+        self.fields = (_channel_fields(self.raw, self.layout)
+                       if self.layout else None)
+        return False
+
+    def num_children(self, max_children: Optional[int] = None) -> int:
+        count = (self.fields.length if self.fields is not None
+                 else self.raw.GetNumChildren())
+        if max_children is not None and max_children >= 0:
+            count = min(count, max_children)
+        return count
+
+    def get_child_at_index(self, index: int) -> Optional[lldb.SBValue]:
+        if self.fields is None:
+            return self.raw.GetChildAtIndex(index)
+        if (index < 0 or index >= self.fields.length or
+                self.fields.capacity == 0 or self.fields.buffer == 0):
+            return None
+        buffer_index = (self.fields.receive_index + index) % self.fields.capacity
+        address = self.fields.buffer + buffer_index * self.fields.element_size
+        target = self.raw.GetTarget()
+        return target.CreateValueFromAddress(
+            f"[{index}]", lldb.SBAddress(address, target),
+            self.fields.element_type)
+
+    def get_child_index(self, name: str) -> int:
+        if self.fields is None:
+            return -1
+        match = re.fullmatch(r"\[([0-9]+)\]", name or "")
+        if match is None:
+            return -1
+        index = int(match.group(1))
+        return index if index < self.num_children() else -1
+
+    def has_children(self) -> bool:
+        return self.num_children() != 0
+
+
 class SliceSyntheticProvider:
     def __init__(self, value: lldb.SBValue, _internal_dict: Dict[str, Any]) -> None:
         self.value = value
@@ -1043,6 +1466,13 @@ def format_value(var: lldb.SBValue, debugger: lldb.SBDebugger, include_type: boo
         type_class = var_type.GetTypeClass()
 
     if var_type.IsPointerType():
+        layout = _runtime_layout(var)
+        if (layout and
+                (_matches_type_pattern(var, layout.map_type_pattern) or
+                 _matches_type_pattern(var, layout.channel_type_pattern))):
+            summary = var.GetSummary()
+            if summary is not None:
+                return summary
         return format_pointer(var, debugger, indent, original_type_name)
 
     if type_name.startswith('[]'):  # Slice
