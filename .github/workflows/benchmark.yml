@@ -25,7 +25,10 @@ jobs:
             id: macos
             display: macOS
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # A cold coroutine footprint build currently spends about 16 minutes in
+    # Measure programs on hosted runners. Leave enough time for the benchmark
+    # binaries, validation, and artifact publication without reducing coverage.
+    timeout-minutes: 40
     env:
       GOMAXPROCS: "2"
       LLGO_ROOT: ${{ github.workspace }}
@@ -68,7 +71,7 @@ jobs:
 
           GOMAXPROCS=1 "$GITHUB_WORKSPACE/.benchmark/llgo" test \
             -run '^$' \
-            -bench '^(BenchmarkRuntimeGetG|BenchmarkGlobal(Read|Write)|Benchmark(DirectCall|InterfaceCall|Defer|ChannelBuffered|ChannelHandoff))$' \
+            -bench '^(BenchmarkRuntimeGetG|BenchmarkGlobal(Read|Write)|Benchmark(DirectCall|InterfaceCall)(Batch16)?|Benchmark(Defer|ChannelBuffered|ChannelHandoff))$' \
             -benchtime=250ms \
             -count=1 \
             ./test/llgoext \

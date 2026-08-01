@@ -606,30 +606,31 @@ type SSARootPlan struct {
 // SSAPlan is the compilation-scoped whole-program result. Its maps remain
 // private so consumers cannot reconstruct identities from display strings.
 type SSAPlan struct {
-	plan                   *Plan
-	roots                  []SSARootPlan
-	functions              []SSAFunctionPlan
-	byFunction             map[*ssa.Function]FunctionID
-	byID                   map[FunctionID]*ssa.Function
-	ignoredBodies          map[*ssa.Function]struct{}
-	rawPlainVariants       map[*ssa.Function]struct{}
-	valuePlans             map[ssa.Value]SSAValuePlan
-	callPlans              map[ssa.CallInstruction]SSACallPlan
-	elidedCalls            map[ssa.CallInstruction]struct{}
-	elidedCallCertificates map[ssa.CallInstruction]string
-	rawAddressArgs         map[ssaCallArgumentUse]struct{}
-	codeAddressArgs        map[ssaCallArgumentUse]struct{}
-	conditionalStores      map[*ssa.Store]*ssa.Function
-	safeFixedArrayIndexes  map[ssa.Instruction]int64
-	loweredCalls           map[*ssa.Function][]SSALoweredCall
-	managedValueReferences map[*ssa.Function][]*ssa.Function
-	foreignNoBlock         map[*ssa.Function]string
-	foreignSync            map[*ssa.Function]string
-	foreignWorker          map[*ssa.Function]string
-	callableIdentities     map[*ssa.Function]CallableIdentityCertificate
-	callableContracts      map[*ssa.Function]CallableContractCertificate
-	assemblyNoSuspend      map[*ssa.Function]string
-	functionIDs            FunctionIDConfig
+	plan                    *Plan
+	roots                   []SSARootPlan
+	functions               []SSAFunctionPlan
+	byFunction              map[*ssa.Function]FunctionID
+	byID                    map[FunctionID]*ssa.Function
+	ignoredBodies           map[*ssa.Function]struct{}
+	rawPlainVariants        map[*ssa.Function]struct{}
+	valuePlans              map[ssa.Value]SSAValuePlan
+	callPlans               map[ssa.CallInstruction]SSACallPlan
+	exactInterfaceReceivers map[*ssa.Call]ssa.Value
+	elidedCalls             map[ssa.CallInstruction]struct{}
+	elidedCallCertificates  map[ssa.CallInstruction]string
+	rawAddressArgs          map[ssaCallArgumentUse]struct{}
+	codeAddressArgs         map[ssaCallArgumentUse]struct{}
+	conditionalStores       map[*ssa.Store]*ssa.Function
+	safeFixedArrayIndexes   map[ssa.Instruction]int64
+	loweredCalls            map[*ssa.Function][]SSALoweredCall
+	managedValueReferences  map[*ssa.Function][]*ssa.Function
+	foreignNoBlock          map[*ssa.Function]string
+	foreignSync             map[*ssa.Function]string
+	foreignWorker           map[*ssa.Function]string
+	callableIdentities      map[*ssa.Function]CallableIdentityCertificate
+	callableContracts       map[*ssa.Function]CallableContractCertificate
+	assemblyNoSuspend       map[*ssa.Function]string
+	functionIDs             FunctionIDConfig
 }
 
 type ssaFunctionResolution struct {
@@ -1350,6 +1351,12 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	exactInterfaceReceivers, err := refineSSAExactInterfaceCallCandidates(
+		prog, bodyFunctions, includedSet, dynamicCandidates, canonicalizer,
+	)
+	if err != nil {
+		return nil, err
+	}
 	closedDynamicCalls, err := classifySSAClosedDynamicCalls(bodyFunctions, includedSet, bodyFunctionSet, trustedPolicies, canonicalizer, config)
 	if err != nil {
 		return nil, err
@@ -1363,7 +1370,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	flow, err := analyzeSSAFunctionFlow(
 		bodyFunctions, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer,
 		allDirectPlainCallArguments, functionAddressCallArguments, closedDynamicCalls,
-		managedValues, config.ClassifyRawCFunctionType,
+		exactInterfaceReceivers, managedValues, config.ClassifyRawCFunctionType,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("coro: analyze SSA function-value flow: %w", err)
@@ -1660,6 +1667,39 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 					continue
 				}
 
+				if direct, exact := call.(*ssa.Call); exact {
+					if receiver := exactInterfaceReceivers[direct]; receiver != nil {
+						if kind != CallDirect || !common.IsInvoke() {
+							return nil, fmt.Errorf(
+								"coro: exact interface receiver in %q is not one ordinary invoke",
+								caller.Name(),
+							)
+						}
+						candidates := sortedSSACandidates(dynamicCandidates[call], ids, includedSet)
+						if len(candidates) != 1 {
+							return nil, fmt.Errorf(
+								"coro: exact interface receiver in %q has %d canonical targets",
+								caller.Name(), len(candidates),
+							)
+						}
+						callee := candidates[0]
+						edgeKind := staticCallKind(kind, policies[callee])
+						if edgeKind != CallDirect {
+							return nil, fmt.Errorf(
+								"coro: exact interface receiver in %q targets non-Go edge %v",
+								caller.Name(), edgeKind,
+							)
+						}
+						callKinds[call] = CallDirect
+						if err := graph.AddCall(CallEdge{
+							Caller: ids[caller], Callee: ids[callee], Kind: CallDirect,
+						}); err != nil {
+							return nil, err
+						}
+						continue
+					}
+				}
+
 				flowTargets, flowComplete := flow.scalarCallTargets(call)
 				if flowComplete {
 					candidates := sortedSSACandidates(flowTargets, ids, includedSet)
@@ -1836,30 +1876,31 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 	}
 	result := &SSAPlan{
-		plan:                   base,
-		roots:                  canonicalRoots,
-		functions:              make([]SSAFunctionPlan, 0, len(included)),
-		byFunction:             ids,
-		byID:                   byID,
-		ignoredBodies:          ignoredBodies,
-		rawPlainVariants:       make(map[*ssa.Function]struct{}),
-		valuePlans:             valuePlans,
-		callPlans:              callPlans,
-		elidedCalls:            elidedCallSet,
-		elidedCallCertificates: elidedCallCertificates,
-		rawAddressArgs:         make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)),
-		codeAddressArgs:        make(map[ssaCallArgumentUse]struct{}, len(staticCodeAddressCallArguments)),
-		conditionalStores:      make(map[*ssa.Store]*ssa.Function, len(conditionalStores)),
-		safeFixedArrayIndexes:  safeFixedArrayIndexes,
-		loweredCalls:           loweredCalls,
-		managedValueReferences: managedValueReferences,
-		foreignNoBlock:         make(map[*ssa.Function]string),
-		foreignSync:            make(map[*ssa.Function]string),
-		foreignWorker:          make(map[*ssa.Function]string),
-		callableIdentities:     make(map[*ssa.Function]CallableIdentityCertificate),
-		callableContracts:      make(map[*ssa.Function]CallableContractCertificate),
-		assemblyNoSuspend:      make(map[*ssa.Function]string),
-		functionIDs:            config.FunctionIDs,
+		plan:                    base,
+		roots:                   canonicalRoots,
+		functions:               make([]SSAFunctionPlan, 0, len(included)),
+		byFunction:              ids,
+		byID:                    byID,
+		ignoredBodies:           ignoredBodies,
+		rawPlainVariants:        make(map[*ssa.Function]struct{}),
+		valuePlans:              valuePlans,
+		callPlans:               callPlans,
+		exactInterfaceReceivers: exactInterfaceReceivers,
+		elidedCalls:             elidedCallSet,
+		elidedCallCertificates:  elidedCallCertificates,
+		rawAddressArgs:          make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)),
+		codeAddressArgs:         make(map[ssaCallArgumentUse]struct{}, len(staticCodeAddressCallArguments)),
+		conditionalStores:       make(map[*ssa.Store]*ssa.Function, len(conditionalStores)),
+		safeFixedArrayIndexes:   safeFixedArrayIndexes,
+		loweredCalls:            loweredCalls,
+		managedValueReferences:  managedValueReferences,
+		foreignNoBlock:          make(map[*ssa.Function]string),
+		foreignSync:             make(map[*ssa.Function]string),
+		foreignWorker:           make(map[*ssa.Function]string),
+		callableIdentities:      make(map[*ssa.Function]CallableIdentityCertificate),
+		callableContracts:       make(map[*ssa.Function]CallableContractCertificate),
+		assemblyNoSuspend:       make(map[*ssa.Function]string),
+		functionIDs:             config.FunctionIDs,
 	}
 	for fn, policy := range policies {
 		functionPlan, planned := base.Lookup(ids[fn])

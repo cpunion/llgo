@@ -57,6 +57,13 @@ type CoroDispatchCallOptions struct {
 	// It suppresses only AssertNilDeref; every descriptor contract check below
 	// remains mandatory.
 	DescriptorNonNil bool
+	// TrustedDescriptor records that the frontend's frozen whole-program plan
+	// (or an already validated library/runtime publication boundary) proves the
+	// descriptor schema, ABI hash, result layout, environment contract, and
+	// advertised entries. The call still performs the language-level nil check
+	// unless DescriptorNonNil is also set, but it does not repeat those invariant
+	// checks on every invocation.
+	TrustedDescriptor bool
 }
 
 // NewCoroDispatchDescriptor defines one link-once eight-field descriptor. It
@@ -280,6 +287,19 @@ func (b Builder) prepareCoroDispatchCall(
 	fields := make([]Expr, 8)
 	for i := range fields {
 		fields[i] = b.Field(descriptor, i)
+	}
+	if opts.TrustedDescriptor {
+		prepared := coroDispatchPreparedCall{
+			env:       env,
+			flags:     fields[1],
+			signature: sig,
+		}
+		if capability == CoroDispatchFlagHasPlain {
+			prepared.entry = fields[4]
+		} else if capability == CoroDispatchFlagHasCoro {
+			prepared.entry = fields[5]
+		}
+		return prepared
 	}
 
 	var invalid llvm.Value

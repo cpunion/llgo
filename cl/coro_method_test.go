@@ -193,10 +193,16 @@ func Root(waiter Waiter) uint32 { <-gate; return waiter.Wait() }
 	}
 	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
 	waitName := funcName(ssaPkg.Pkg, wait, false) + coroPrimarySuffix
-	for _, required := range []string{"coro.dispatch", "call void @" + coroAwaitPrepareHookV1} {
-		if !strings.Contains(rootIR, required) {
-			t.Fatalf("pointer-receiver interface await lacks %q:\n%s", required, rootIR)
+	if required := "call void @" + coroAwaitPrepareHookV1; !strings.Contains(rootIR, required) {
+		t.Fatalf("pointer-receiver interface await lacks %q:\n%s", required, rootIR)
+	}
+	for _, forbidden := range []string{"coro.dispatch.version.invalid", "coro.dispatch.hash.invalid"} {
+		if strings.Contains(rootIR, forbidden) {
+			t.Fatalf("closed pointer-receiver interface await retained %q:\n%s", forbidden, rootIR)
 		}
+	}
+	if strings.Contains(rootIR, "IfacePtrData") {
+		t.Fatalf("pointer-receiver interface await retained redundant receiver normalization:\n%s", rootIR)
 	}
 
 	runCoroABITestPipeline(t, prog, module)

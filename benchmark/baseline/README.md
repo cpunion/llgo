@@ -59,7 +59,7 @@ GOMAXPROCS=1 go test \
   ./internal/clang ./internal/build/funcinfo | tee "$results"
 GOMAXPROCS=1 .benchmark/llgo test \
   -run '^$' \
-  -bench '^(BenchmarkRuntimeGetG|BenchmarkGlobal(Read|Write)|Benchmark(DirectCall|InterfaceCall|Defer|ChannelBuffered|ChannelHandoff))$' \
+  -bench '^(BenchmarkRuntimeGetG|BenchmarkGlobal(Read|Write)|Benchmark(DirectCall|InterfaceCall)(Batch16)?|Benchmark(Defer|ChannelBuffered|ChannelHandoff))$' \
   -benchtime=250ms -count=1 \
   ./test/llgoext | tee -a "$results"
 GOMAXPROCS=1 .benchmark/llgo test \

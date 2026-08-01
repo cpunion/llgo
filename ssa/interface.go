@@ -64,6 +64,20 @@ func iMethodOf(rawIntf *types.Interface, name string) int {
 
 // Imethod returns closure of an interface method.
 func (b Builder) Imethod(intf Expr, method *types.Func) Expr {
+	return b.imethod(intf, method, false)
+}
+
+// ImethodRawDataKnownNonNil returns an interface method closure whose
+// environment is the interface's unmodified data word. The caller must prove
+// both that the interface is non-nil and that its dynamic representation
+// already is the stable receiver pointer expected by the selected method
+// entry. This is the zero-copy transport used by target-proven coroutine
+// interface dispatch; ordinary interface calls continue to use Imethod.
+func (b Builder) ImethodRawDataKnownNonNil(intf Expr, method *types.Func) Expr {
+	return b.imethod(intf, method, true)
+}
+
+func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil bool) Expr {
 	prog := b.Prog
 	intfType := types.Unalias(intf.raw.Type)
 	patchedIntfType := prog.patch(intfType)
@@ -83,7 +97,12 @@ func (b Builder) Imethod(intf Expr, method *types.Func) Expr {
 	tclosure := prog.Type(sig, InGo)
 	i := iMethodOf(rawIntf, method.Name())
 	b.recordUseIfaceMethod(rawIntf, i)
-	data := b.InlineCall(b.Pkg.rtFunc("IfacePtrData"), intf)
+	var data Expr
+	if rawDataKnownNonNil {
+		data = b.InterfaceData(intf)
+	} else {
+		data = b.InlineCall(b.Pkg.rtFunc("IfacePtrData"), intf)
+	}
 	var fn Expr
 	impl := intf.impl
 	itab := Expr{b.faceItab(impl), prog.VoidPtrPtr()}

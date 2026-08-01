@@ -56,7 +56,7 @@ func (p *context) compileCoroManagedDispatchAwait(
 	args := p.compileValues(b, call.Call.Args, fnNormal)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, call.Call.Signature(), nil, keepaliveSlots,
+		b, fn, args, call.Call.Signature(), nil, keepaliveSlots, false,
 	)
 	p.recordCoroValueAddress(call, result.address)
 	return result.value
@@ -70,7 +70,7 @@ func (p *context) compileCoroManagedDispatchAwaitValue(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	return p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, signature, nil, keepaliveSlots,
+		b, fn, args, signature, nil, keepaliveSlots, false,
 	).value
 }
 
@@ -84,13 +84,13 @@ func (p *context) compileCoroManagedDispatchAwaitValueWithRecovery(
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	return p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, signature, cleanup, keepaliveSlots,
+		b, fn, args, signature, cleanup, keepaliveSlots, false,
 	).value
 }
 
 func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
-	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr, trustedDescriptor bool,
 ) coroAwaitedValue {
 	body := p.coroBody()
 	if body == nil {
@@ -103,9 +103,10 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	resultLayout := p.prog.Type(abi.resultSlotType, llssa.InC)
 	resultSlot := p.coroResultSlot(p.prog.Type(abi.resultSlotType, llssa.InGo))
 	opts := llssa.CoroDispatchCallOptions{
-		Version: coroPlainDispatchVersion,
-		ABIHash: abi.hash,
-		Result:  resultLayout,
+		Version:           coroPlainDispatchVersion,
+		ABIHash:           abi.hash,
+		Result:            resultLayout,
+		TrustedDescriptor: trustedDescriptor,
 	}
 	// Descriptor validation would otherwise introduce a hidden
 	// runtime.AssertNilDeref call after the whole-program helper closure was

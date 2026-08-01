@@ -89,11 +89,12 @@ type coroWorkerSyscallIncomingEdge struct {
 // intentional: the final plan join already rejects roots, escaped/raw managed
 // carriers, inactive-versus-active uncertified edges, and forged CallPlans.
 type coroWorkerSyscallTrapPolicy struct {
-	required  bool
-	certified bool
-	identity  string
-	owners    map[*ssa.Function]none
-	incoming  []coroWorkerSyscallIncomingEdge
+	required                 bool
+	certified                bool
+	foreignPointerResultMask uint8
+	identity                 string
+	owners                   map[*ssa.Function]none
+	incoming                 []coroWorkerSyscallIncomingEdge
 }
 
 // coroLinuxSyscallTrapAnalysis is the read-only fact surface injected by the
@@ -428,14 +429,20 @@ func freezeCoroWorkerSyscallTrapPolicy(
 	if err != nil {
 		return policy, err
 	}
+	pointerResultValues, err := coroLinuxPointerResultSyscallValues(analysis)
+	if err != nil {
+		return policy, err
+	}
 	trap := call.Common().Args[1]
 	if value, exact := coroWorkerSyscallConstantWord(trap); exact {
 		safe, reason := coroLinuxSyscallTrapWorkerSafe(value, unsafeValues)
 		policy.certified = safe
+		policy.foreignPointerResultMask = pointerResultValues[value]
 		policy.identity = framedEmissionKey(
 			"llgo-coro-linux-syscall-trap-v1",
 			"constant", strconv.FormatUint(value, 10),
 			strconv.FormatBool(safe), reason,
+			strconv.FormatUint(uint64(policy.foreignPointerResultMask), 10),
 		)
 		return policy, nil
 	}
@@ -448,7 +455,7 @@ func freezeCoroWorkerSyscallTrapPolicy(
 		return policy, nil
 	}
 	incoming, owners, certified, reason, err := coroLinuxSyscallTrapParameterInventory(
-		analysis, parameter, unsafeValues, make(map[*ssa.Parameter]bool),
+		analysis, parameter, unsafeValues, pointerResultValues, make(map[*ssa.Parameter]bool),
 	)
 	if err != nil {
 		return policy, err
@@ -515,6 +522,7 @@ func coroLinuxSyscallTrapParameterInventory(
 	analysis *coroLinuxSyscallTrapAnalysis,
 	parameter *ssa.Parameter,
 	unsafeValues map[uint64]string,
+	pointerResultValues map[uint64]uint8,
 	visiting map[*ssa.Parameter]bool,
 ) (incoming []coroWorkerSyscallIncomingEdge, owners map[*ssa.Function]none, certified bool, reason string, err error) {
 	owners = make(map[*ssa.Function]none)
@@ -562,15 +570,17 @@ func coroLinuxSyscallTrapParameterInventory(
 			safe, unsafeReason := false, "linux-syscall-non-word-trap"
 			if exact {
 				safe, unsafeReason = coroLinuxSyscallTrapWorkerSafe(value, unsafeValues)
+				edge.foreignPointerResultMask = pointerResultValues[value]
 			}
 			edge.certified = safe
 			edge.reason = unsafeReason
 			edge.trapPolicyIdentity = coroLinuxSyscallTrapEdgeIdentity(
 				analysis, edge, "constant", strconv.FormatUint(value, 10),
+				"foreign-pointer-mask", strconv.FormatUint(uint64(edge.foreignPointerResultMask), 10),
 			)
 		case *ssa.Parameter:
 			nested, nestedOwners, nestedCertified, nestedReason, nestedErr :=
-				coroLinuxSyscallTrapParameterInventory(analysis, source, unsafeValues, visiting)
+				coroLinuxSyscallTrapParameterInventory(analysis, source, unsafeValues, pointerResultValues, visiting)
 			if nestedErr != nil {
 				return nil, nil, false, "", nestedErr
 			}
@@ -618,6 +628,9 @@ func coroWorkerStaticIncomingCalls(analysis *coroLinuxSyscallTrapAnalysis, targe
 		}
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
 				direct, directCall := instruction.(*ssa.Call)
 				exactDirect := false
 				if directCall && direct.Common() != nil && !direct.Common().IsInvoke() {
@@ -729,7 +742,10 @@ func coroLinuxSyscallTrapWorkerSafe(value uint64, unsafeValues map[uint64]string
 	return true, ""
 }
 
-func coroLinuxUnsafeSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[uint64]string, error) {
+func coroLinuxSyscallConstantPackage(analysis *coroLinuxSyscallTrapAnalysis) (*types.Package, error) {
+	if analysis == nil {
+		return nil, fmt.Errorf("Linux syscall trap policy has no target syscall constant package")
+	}
 	var syscallPackage *types.Package
 	for _, function := range analysis.functions {
 		if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil {
@@ -752,6 +768,41 @@ func coroLinuxUnsafeSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[u
 	}
 	if syscallPackage == nil {
 		return nil, fmt.Errorf("Linux syscall trap policy has no target syscall constant package")
+	}
+	return syscallPackage, nil
+}
+
+// coroLinuxPointerResultSyscallValues records kernel operations whose first
+// result word is an address rather than an ordinary integer. The target
+// syscall package supplies the architecture-specific numbers; callers never
+// maintain per-architecture tables or source annotations.
+func coroLinuxPointerResultSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[uint64]uint8, error) {
+	syscallPackage, err := coroLinuxSyscallConstantPackage(analysis)
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[uint64]uint8)
+	for _, name := range []string{
+		"SYS_MMAP", "SYS_MMAP2", "SYS_MREMAP", "SYS_SHMAT", "SYS_BRK",
+	} {
+		object := syscallPackage.Scope().Lookup(name)
+		constantObject, ok := object.(*types.Const)
+		if !ok || constantObject == nil {
+			continue
+		}
+		value, exact := constant.Uint64Val(constantObject.Val())
+		if !exact {
+			return nil, fmt.Errorf("Linux syscall constant %s is not a target word", name)
+		}
+		values[value] |= 1
+	}
+	return values, nil
+}
+
+func coroLinuxUnsafeSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[uint64]string, error) {
+	syscallPackage, err := coroLinuxSyscallConstantPackage(analysis)
+	if err != nil {
+		return nil, err
 	}
 	// These operations are no-return, process-control, or observe/mutate the
 	// calling kernel thread. They need the RawCritical/target-M protocol and
@@ -874,6 +925,12 @@ func freezeCoroWorkerSyscallShadowCertificate(
 	}
 	if compatibleTargets == 0 {
 		return CoroWorkerSyscallCertificate{}, nil, nil, fmt.Errorf("producer-forward callable shadow has no compatible result contract")
+	}
+	if trapPolicy.required {
+		// An exact constant trap may refine the generic Linux adapter's result
+		// semantics. Parameter-carried traps keep this global mask empty and
+		// attach their facts to the exact frozen incoming edge below.
+		foreignPointerResultMask |= trapPolicy.foreignPointerResultMask
 	}
 
 	owners := make(map[*ssa.Function]none)

@@ -107,6 +107,33 @@ func Root(value Value, direct concrete) uint32 {
 	assertCoroManagedClosedInterfaceIR(t, requireCoroPhysicalFunction(t, module, "foo.Root").String())
 }
 
+func TestCoroManagedDirectInterfaceReceiverRetainsStableBox(t *testing.T) {
+	const source = `package foo
+var gate chan uint32
+type Value interface { Value() uint32 }
+type concrete struct { pointer *uint32 }
+func (value concrete) Value() uint32 {
+	<-gate
+	return *value.pointer
+}
+func Root(value Value) uint32 {
+	<-gate
+	return value.Value()
+}
+`
+	prog, pkg, _, _, _, _ := compileCoroClosedInterfacePlainFixture(t, source, coro.DynamicCHAClosed)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify direct interface receiver: %v\n%s", err, module.String())
+	}
+	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	if !strings.Contains(rootIR, "IfacePtrData") {
+		t.Fatalf("direct one-word value receiver lost its stable boxing path:\n%s", rootIR)
+	}
+}
+
 func TestCoroDormantInterfaceInvokeDoesNotTurnStaticMethodIntoFunctionValue(t *testing.T) {
 	const source = `package foo
 var gate chan struct{}
@@ -434,6 +461,151 @@ func TestCoroClosedInterfaceInvokeUsesExplicitStatusABI(t *testing.T) {
 	}
 }
 
+func TestCoroClosedPointerReceiverNoUnwindUsesPlainItab(t *testing.T) {
+	const source = `package foo
+
+var gate chan uint32
+
+type Value interface { Value() uint32 }
+type concrete struct{}
+
+func (*concrete) Value() uint32 { return 1 }
+
+func Root(value Value) uint32 {
+	<-gate
+	return value.Value()
+}
+`
+	prog, pkg, plan, _, method, invoke := compileCoroClosedInterfacePlainFixture(t, source, coro.DynamicCHAClosed)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok || methodPlan.Emission != coro.EmitPlain || methodPlan.Exec != 0 {
+		t.Fatalf("pointer receiver method plan = %+v, present=%t", methodPlan, ok)
+	}
+	if !coroClosedInterfaceExplicitStatusPlainSafe(plan, invoke) {
+		targets, err := resolveCoroClosedInterfacePlainCall(plan, invoke)
+		t.Fatalf("closed no-unwind pointer receiver was not certified for the plain itab path: targets=%+v err=%v", targets, err)
+	}
+	assertCoroClosedInterfacePlainIR(t, requireCoroPhysicalFunction(t, module, "foo.Root").String())
+}
+
+func TestCoroExactLocalInterfaceInvokeDevirtualizesInPhysicalBody(t *testing.T) {
+	const source = `package foo
+
+var gate chan uint32
+
+type Value interface { Value() uint32 }
+type concrete struct{}
+var instance concrete
+
+func (*concrete) Value() uint32 { return 1 }
+
+func Root() uint32 {
+	<-gate
+	var value Value = &instance
+	return value.Value()
+}
+`
+	prog, pkg, plan, root, _, invoke := compileCoroClosedInterfacePlainFixture(
+		t, source, coro.DynamicCHAClosed,
+	)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	receiver, target, targetPlan, exact, err := plan.ResolveExactInterfaceCall(invoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exact || receiver == nil || target == nil ||
+		!coroExactInterfaceTargetDirectPlain(targetPlan) {
+		t.Fatalf(
+			"exact interface call = receiver:%v target:%v target-plan:%+v exact:%t",
+			receiver, target, targetPlan, exact,
+		)
+	}
+	rootPlan, ok := plan.FunctionPlan(root)
+	if !ok || rootPlan.Emission != coro.EmitCoroutine ||
+		!rootPlan.Effect.Contains(coro.MayPark) ||
+		rootPlan.Effect.Contains(coro.AwaitStructured) {
+		t.Fatalf(
+			"devirtualized interface owner plan = %+v, present=%t; want channel park without child await",
+			rootPlan, ok,
+		)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify exact interface call: %v\n%s", err, module.String())
+	}
+	ir := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	assertCoroClosedInterfacePlainIR(t, ir)
+	if strings.Contains(ir, "IfacePtrData") {
+		t.Fatalf("exact interface call retained receiver normalization:\n%s", ir)
+	}
+	if !strings.Contains(ir, `@"foo.(*concrete).Value"`) {
+		t.Fatalf("exact interface call did not select the declared method directly:\n%s", ir)
+	}
+}
+
+func TestCoroExactTypedNilInterfaceInvokeRetainsWrapperFault(t *testing.T) {
+	const source = `package foo
+
+var gate chan uint32
+
+type Value interface { Value() uint32 }
+type concrete struct{}
+
+func (concrete) Value() uint32 { return 1 }
+
+func Root() uint32 {
+	<-gate
+	var pointer *concrete
+	var value Value = pointer
+	return value.Value()
+}
+`
+	prog, pkg, plan, root, _, invoke := compileCoroClosedInterfacePlainFixture(
+		t, source, coro.DynamicCHAClosed,
+	)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	receiver, target, targetPlan, exact, err := plan.ResolveExactInterfaceCall(invoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exact || receiver == nil || target == nil ||
+		!strings.Contains(target.Synthetic, "wrapper") ||
+		!targetPlan.Exec.Contains(coro.MayUnwind) ||
+		!coroExactInterfaceTargetDirectAwait(targetPlan) {
+		t.Fatalf(
+			"typed-nil exact call = receiver:%v target:%v synthetic:%q target-plan:%+v exact:%t",
+			receiver, target, target.Synthetic, targetPlan, exact,
+		)
+	}
+	rootPlan, ok := plan.FunctionPlan(root)
+	if !ok || rootPlan.Emission != coro.EmitCoroutine ||
+		!rootPlan.Effect.Contains(coro.MayPark|coro.AwaitStructured) {
+		t.Fatalf(
+			"typed-nil interface owner plan = %+v, present=%t; want channel park and wrapper await",
+			rootPlan, ok,
+		)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify typed-nil exact interface call: %v\n%s", err, module.String())
+	}
+	ir := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	assertCoroManagedClosedInterfaceIR(t, ir)
+	for _, forbidden := range []string{"IfacePtrData", "NewItab", "AllocU"} {
+		if strings.Contains(ir, forbidden) {
+			t.Fatalf("typed-nil exact interface call retained %s:\n%s", forbidden, ir)
+		}
+	}
+}
+
 func TestCoroMethodValueDescriptorUsesPatchedReceiverABI(t *testing.T) {
 	const patchedPath = "example.com/emission/patchedmethod"
 	testProg := newEmissionTestProgram()
@@ -581,11 +753,14 @@ func prepareCoroClosedInterfacePlainPlan(t *testing.T, prog llssa.Program, ssaPk
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
-		EmissionUniverse:     ssaUniverse,
-		FunctionIDs:          functionIDs,
-		DynamicResolution:    resolution,
-		MaxPlainInstructions: -1,
-		OutcomeMode:          coro.OutcomeExplicitStatus,
+		EmissionUniverse:               ssaUniverse,
+		FunctionIDs:                    functionIDs,
+		DynamicResolution:              resolution,
+		MaxPlainInstructions:           -1,
+		OutcomeMode:                    coro.OutcomeExplicitStatus,
+		ClassifyDemandReferences:       universe.CoroDemandReferences,
+		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
+		ClassifyManagedValueReferences: universe.CoroManagedValueReferences,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -609,11 +784,21 @@ func assertCoroManagedClosedInterfaceIR(t *testing.T, ir string) {
 	if !strings.Contains(ir, "llvm.coro.suspend") && !strings.Contains(ir, ".resume") {
 		t.Fatalf("coroutine body has no suspension/resume marker:\n%s", ir)
 	}
-	if !strings.Contains(ir, "coro.dispatch") {
-		t.Fatalf("coroutine body does not use the managed descriptor protocol:\n%s", ir)
-	}
 	if !strings.Contains(ir, coroAwaitPrepareHookV1) {
 		t.Fatalf("coroutine body does not await the managed interface child:\n%s", ir)
+	}
+	if strings.Contains(ir, "IfacePtrData") {
+		t.Fatalf("target-proven indirect interface receiver retained IfacePtrData normalization:\n%s", ir)
+	}
+}
+
+func assertCoroClosedInterfacePlainIR(t *testing.T, ir string) {
+	t.Helper()
+	if !strings.Contains(ir, "llvm.coro.suspend") && !strings.Contains(ir, ".resume") {
+		t.Fatalf("coroutine body has no suspension/resume marker:\n%s", ir)
+	}
+	if strings.Contains(ir, coroAwaitPrepareHookV1) {
+		t.Fatalf("closed no-unwind interface invoke retained a managed child transaction:\n%s", ir)
 	}
 }
 

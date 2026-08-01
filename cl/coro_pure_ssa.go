@@ -850,6 +850,11 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	if box == nil || box.X == nil {
 		return "incomplete interface construction"
 	}
+	if elided, err := coroPlannedExactInterfaceMakeElision(a.plan, box); err != nil {
+		return "exact interface construction elision: " + err.Error()
+	} else if elided {
+		return ""
+	}
 	target, ok := types.Unalias(a.typeOf(box.Type())).Underlying().(*types.Interface)
 	if !ok {
 		return "MakeInterface target is not an interface"
@@ -1568,8 +1573,9 @@ func (a *coroPhysicalPureSSAAudit) coroPointerUintptrScalarTerminal(value ssa.Va
 	plan, planned := a.plan.FunctionPlan(a.fn)
 	if planned && a.frameRetentionABI == CoroFrameRetentionParkABIV2 &&
 		plan.Emission == coro.EmitCoroutine && !plan.Exec.IsOpaque() {
-		// Return, map-key, comparison, remainder, affine comparison, and exact
-		// pointer-distance terminals are all forward-only scalar observations.
+		// Return, map-key, comparison, remainder, bounded low-bit masking,
+		// affine comparison, and exact pointer-distance terminals are all
+		// forward-only scalar observations.
 		// None grants uintptr-to-pointer reconstruction authority. A future
 		// precise or moving collector must introduce a different retention ABI
 		// and explicit pin/relocation rules before reusing this branch.
@@ -1637,17 +1643,18 @@ type coroWorkerPointerResultVisit struct {
 // call result. That is the minimum operation-level propagation needed by
 // standard-library wrappers such as syscall.mmap and mmapper.Mmap.
 //
-// Integer arithmetic, storage, Phi merging, parameters, open calls, and
-// multiple-target calls still destroy the fact. The callable shadow injects
-// metadata at FuncPCABI0 formation; the worker-result projection binds a
-// private carrier result to one incoming producer; and the immutable CallPlan
-// selects every wrapper target before physical lowering consumes the fact.
+// Integer arithmetic, storage, Phi merging, parameters, open calls, and any
+// closed target that cannot prove the same result still destroy the fact. The
+// callable shadow injects metadata at FuncPCABI0 formation; target-owned trap
+// facts and worker-result projections bind it to exact incoming edges; and the
+// immutable CallPlan selects every wrapper target before physical lowering
+// consumes the fact.
 func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerResult(value ssa.Value) bool {
 	if a == nil || a.plan == nil || a.universe == nil || value == nil {
 		return false
 	}
 	return a.provesWorkerForeignPointerValue(
-		a.fn, value, make(map[coroWorkerPointerResultVisit]bool),
+		a.fn, value, make(map[coroWorkerPointerResultVisit]bool), make(map[*ssa.Call]int),
 	)
 }
 
@@ -1655,6 +1662,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerValue(
 	owner *ssa.Function,
 	value ssa.Value,
 	visiting map[coroWorkerPointerResultVisit]bool,
+	path map[*ssa.Call]int,
 ) bool {
 	switch value := value.(type) {
 	case *ssa.Extract:
@@ -1665,7 +1673,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerValue(
 		if !ok || call == nil || call.Parent() != owner {
 			return false
 		}
-		return a.provesWorkerForeignPointerCallResult(owner, call, value.Index, visiting)
+		return a.provesWorkerForeignPointerCallResult(owner, call, value.Index, visiting, path)
 	case *ssa.Call:
 		// SSA represents a single-result call as the call value itself rather
 		// than as Extract(call, 0). Treat both encodings identically so an
@@ -1677,7 +1685,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerValue(
 			common.Signature().Results().Len() != 1 {
 			return false
 		}
-		return a.provesWorkerForeignPointerCallResult(owner, value, 0, visiting)
+		return a.provesWorkerForeignPointerCallResult(owner, value, 0, visiting, path)
 	default:
 		return false
 	}
@@ -1688,6 +1696,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 	call *ssa.Call,
 	result int,
 	visiting map[coroWorkerPointerResultVisit]bool,
+	path map[*ssa.Call]int,
 ) bool {
 	if owner == nil || call == nil || call.Parent() != owner ||
 		result < 0 || result >= coroWorkerResultProjectionWidthV1 {
@@ -1699,6 +1708,9 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 			certificate.ForeignPointerResultMask&(uint8(1)<<uint(result)) != 0 {
 			return true
 		}
+		if a.provesWorkerForeignPointerTrapPath(call, result, path) {
+			return true
+		}
 	}
 	if validateCoroWorkerProjectedForeignPointerResult(
 		a.plan, a.universe, call, result,
@@ -1708,48 +1720,95 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 
 	callPlan, planned := a.plan.CallPlan(call)
 	if !planned || callPlan.Kind != coro.CallDirect || callPlan.Open ||
-		len(callPlan.Targets) != 1 {
+		len(callPlan.Targets) == 0 {
 		return false
 	}
-	target, found := a.plan.Function(callPlan.Targets[0])
-	if !found || target == nil || len(target.Blocks) == 0 ||
-		a.universe.canonicalAlias(target) != target {
-		return false
-	}
-	targetPlan, targetPlanned := a.plan.FunctionPlan(target)
-	if !targetPlanned || targetPlan.ID != callPlan.Targets[0] ||
-		targetPlan.External != coro.Defined || target.Signature == nil ||
-		target.Signature.Results() == nil || result >= target.Signature.Results().Len() ||
-		!coroWorkerUintptrType(target.Signature.Results().At(result).Type()) {
-		return false
-	}
-
-	visit := coroWorkerPointerResultVisit{function: target, result: result}
-	if visiting[visit] {
-		return false
-	}
-	visiting[visit] = true
-	defer delete(visiting, visit)
-
-	reachable := coroPhysicalConstantReachableBlocks(target)
-	returns := 0
-	for _, block := range target.Blocks {
-		if !reachable[block] {
-			continue
+	// A function-value call can have several closed-world candidates even when
+	// every candidate preserves the same foreign-pointer result contract (the
+	// Go syscall mmapper field is the canonical example). Pointer provenance is
+	// a meet: accept the result only when every frozen target proves it.
+	for _, targetID := range callPlan.Targets {
+		target, found := a.plan.Function(targetID)
+		if !found || target == nil || len(target.Blocks) == 0 ||
+			a.universe.canonicalAlias(target) != target {
+			return false
 		}
-		for _, instruction := range block.Instrs {
-			returned, ok := instruction.(*ssa.Return)
-			if !ok {
+		targetPlan, targetPlanned := a.plan.FunctionPlan(target)
+		if !targetPlanned || targetPlan.ID != targetID ||
+			targetPlan.External != coro.Defined || target.Signature == nil ||
+			target.Signature.Results() == nil || result >= target.Signature.Results().Len() ||
+			!coroWorkerUintptrType(target.Signature.Results().At(result).Type()) {
+			return false
+		}
+
+		visit := coroWorkerPointerResultVisit{function: target, result: result}
+		if visiting[visit] {
+			return false
+		}
+		visiting[visit] = true
+		path[call]++
+
+		reachable := coroPhysicalConstantReachableBlocks(target)
+		returns := 0
+		proved := true
+		for _, block := range target.Blocks {
+			if !reachable[block] {
 				continue
 			}
-			returns++
-			if result >= len(returned.Results) ||
-				!a.provesWorkerForeignPointerValue(target, returned.Results[result], visiting) {
-				return false
+			for _, instruction := range block.Instrs {
+				returned, ok := instruction.(*ssa.Return)
+				if !ok {
+					continue
+				}
+				returns++
+				if result >= len(returned.Results) ||
+					!a.provesWorkerForeignPointerValue(target, returned.Results[result], visiting, path) {
+					proved = false
+					break
+				}
+			}
+			if !proved {
+				break
 			}
 		}
+		path[call]--
+		if path[call] == 0 {
+			delete(path, call)
+		}
+		delete(visiting, visit)
+		if !proved || returns == 0 {
+			return false
+		}
 	}
-	return returns != 0
+	return true
+}
+
+// provesWorkerForeignPointerTrapPath consumes only target-owned, ProgramIR
+// facts on the exact wrapper-call path currently being checked. Return SSA is
+// still traversed above, so a wrapper that substitutes, derives, stores, or
+// merges the worker result cannot inherit this fact merely by forwarding an
+// address-returning Linux trap number.
+func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerTrapPath(
+	worker *ssa.Call,
+	result int,
+	path map[*ssa.Call]int,
+) bool {
+	if a == nil || a.universe == nil || a.universe.coroProgramIR == nil ||
+		worker == nil || result < 0 || result >= coroWorkerResultProjectionWidthV1 || len(path) == 0 {
+		return false
+	}
+	frozen, found, err := a.universe.coroProgramIR.callSitePlan(worker)
+	if err != nil || !found || frozen.failure != "" || !frozen.workerCertified {
+		return false
+	}
+	mask := uint8(1) << uint(result)
+	for _, edge := range frozen.workerIncoming {
+		if edge.certified && edge.trapPolicyIdentity != "" && path[edge.call] != 0 &&
+			edge.foreignPointerResultMask&mask != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // coroRuntimeConversionHelper mirrors Builder.Convert's complete allocating
@@ -1804,14 +1863,17 @@ func coroRuntimeConversionHelper(source, target types.Type) string {
 }
 
 // coroPointerUintptrScalarTerminal recognizes an address word whose complete
-// semantic lifetime ends in an integer comparison, as one operand of an exact
-// pointer-distance expression, uintptr(end)-uintptr(start), as a scalar map
-// key, or at a direct Go return. None of these terminals authorizes pointer
-// reconstruction. If a safepoint splits a map-key/return observation, the
-// address word itself is retained in LLVM's conservatively scanned/non-GC
-// coroutine frame; the active frame profile explicitly excludes precise or
-// moving collectors. General storage, call transport, pointer reconstruction,
-// and unbounded arithmetic remain fail-closed.
+// semantic lifetime ends in an integer comparison, a bounded low-bit alignment
+// mask, as one operand of an exact pointer-distance expression,
+// uintptr(end)-uintptr(start), as a scalar map key, or at a direct Go return.
+// None of these terminals authorizes pointer reconstruction. A low-bit mask
+// destroys the address identity and its result is an ordinary integer; the
+// source address word must have no other semantic use. If a safepoint splits
+// an observation, the address word itself is retained in LLVM's conservatively
+// scanned/non-GC coroutine frame; the active frame profile explicitly excludes
+// precise or moving collectors. General storage, call transport, pointer
+// reconstruction, and unbounded arithmetic on the unmasked address remain
+// fail-closed.
 func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 	root, rootIsInstruction := value.(ssa.Instruction)
 	if value == nil || !rootIsInstruction || root.Block() == nil || value.Referrers() == nil {
@@ -1837,6 +1899,11 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 					return false
 				}
 				affine = true
+				uses++
+			case token.AND:
+				if !coroPointerUintptrLowBitMaskResult(value, instruction) {
+					return false
+				}
 				uses++
 			case token.REM:
 				// Alignment tests commonly lower as uintptr(pointer)%C == 0.
@@ -1878,6 +1945,42 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 		return uses == 1
 	}
 	return uses != 0
+}
+
+// coroPointerUintptrLowBitMaskResult recognizes the alignment-class
+// scalarization used by packages such as hash/crc32:
+//
+//	uintptr(unsafe.Pointer(&p[0])) & 7
+//
+// The constant must be a non-zero contiguous low-bit mask, and is deliberately
+// capped at one byte. The bound keeps this proof independent of target pointer
+// width (including embedded targets) while covering ordinary ABI alignment
+// observations. AND_NOT, sparse or dynamic masks, and masks that may preserve
+// an address remain outside this proof. Uses of the masked result need no
+// pointer retention; any later uintptr-to-pointer conversion is independently
+// rejected by the exact-provenance audit.
+func coroPointerUintptrLowBitMaskResult(address ssa.Value, operation *ssa.BinOp) bool {
+	addressInstruction, ok := address.(ssa.Instruction)
+	if !ok || addressInstruction.Block() == nil || operation == nil ||
+		operation.Block() != addressInstruction.Block() || operation.Op != token.AND ||
+		!coroFrameRetentionUintptrLike(address.Type()) ||
+		!coroFrameRetentionUintptrLike(operation.Type()) {
+		return false
+	}
+	xAddress, yAddress := operation.X == address, operation.Y == address
+	if xAddress == yAddress {
+		return false
+	}
+	maskValue := operation.Y
+	if yAddress {
+		maskValue = operation.X
+	}
+	mask, ok := maskValue.(*ssa.Const)
+	if !ok || mask.Value == nil {
+		return false
+	}
+	bits, exact := constant.Uint64Val(mask.Value)
+	return exact && bits != 0 && bits <= 0xff && bits&(bits+1) == 0
 }
 
 // coroPointerUintptrMapKeyTerminal accepts a forward-only integer expression

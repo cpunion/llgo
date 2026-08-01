@@ -233,7 +233,7 @@ func analyzeCoroClosedInterfacePlainPlan(
 					}
 					targets, err := resolveCoroClosedInterfacePlainCall(plan, call)
 					if err == nil {
-						if explicitStatusPanic {
+						if explicitStatusPanic && !coroClosedInterfacePlainTargetsNoUnwind(targets) {
 							return nil, coroLeafInstructionError(fn, owner.Plan, instruction, "closed interface plain invoke requires the legacy panic ABI")
 						}
 						result.calls[call] = struct{}{}
@@ -543,6 +543,18 @@ func resolveCoroClosedInterfacePlainCall(plan *coro.SSAPlan, call ssa.CallInstru
 		targets = append(targets, coroClosedInterfacePlainTarget{function: target, plan: targetPlan})
 	}
 	return targets, nil
+}
+
+func coroClosedInterfacePlainTargetsNoUnwind(targets []coroClosedInterfacePlainTarget) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	for _, target := range targets {
+		if target.plan.Exec.Contains(coro.MayUnwind) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCoroClosedInterfacePlainCandidate(common *ssa.CallCommon, iface *types.Interface, id coro.FunctionID, target *ssa.Function, plan coro.FunctionPlan) error {

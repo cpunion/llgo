@@ -52,23 +52,31 @@ func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Inst
 	}
 	outerCriticalEnter := criticalRole == coroCriticalCallEnter && criticalDepth == 0
 	if criticalDepth == 0 && !outerCriticalEnter {
-		body.countInstructionAndMaybeYield(b)
+		physical := p.coroEmissionPlan()
+		if physical != nil && physical.preempt != nil {
+			if physical.preempt.pollsBefore(instr) {
+				body.pollAndSuspendForPreempt(b)
+			}
+		} else {
+			body.countInstructionAndMaybeYield(b)
+		}
 	}
 	if !outerCriticalEnter {
 		body.sourceBlockPollFresh = false
 	}
-	if change, ok := instr.(*ssa.ChangeType); ok {
+	switch instr := instr.(type) {
+	case *ssa.ChangeType, *ssa.MakeInterface:
 		plan := p.coroEmissionPlan()
 		if plan == nil {
-			panic("coroutine ChangeType prologue has no frozen physical plan")
+			panic("coroutine value-elision prologue has no frozen physical plan")
 		}
-		physical, err := plan.instructionPlan(change)
+		physical, err := plan.instructionPlan(instr)
 		if err != nil {
-			panic(fmt.Errorf("coroutine ChangeType prologue: %w", err))
+			panic(fmt.Errorf("coroutine value-elision prologue: %w", err))
 		}
 		if physical.elideValue {
-			// Direct-await lowering owns every executable consumer. Do not
-			// materialize an invalid temporary {coroutine-entry, nil} funcval.
+			// A direct-await/function-value adapter or exact devirtualized
+			// interface call owns every executable consumer.
 			return true
 		}
 	}
@@ -125,6 +133,10 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		return p.compileCoroInterfaceDispatchAwait(b, call, instructionPlan), true
 	case coroPhysicalControlManagedInterfaceAwait:
 		return p.compileCoroManagedInterfaceAwait(b, call, instructionPlan), true
+	case coroPhysicalControlExactInterfaceCall:
+		return p.compileCoroExactInterfaceCall(b, call, instructionPlan), true
+	case coroPhysicalControlExactInterfaceAwait:
+		return p.compileCoroExactInterfaceAwait(b, call, instructionPlan), true
 	case coroPhysicalControlPlainDispatch:
 		return p.compileCoroPhysicalPlainDispatch(b, call, instructionPlan), true
 	case coroPhysicalControlNilDispatchFault:

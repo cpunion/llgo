@@ -137,14 +137,16 @@ func (p *context) emitCoroMethodValueDescriptor(
 
 // coroManagedInterfaceDispatchPlan freezes the exact method families whose
 // ABI Method.Ifn_ word uses the universal {descriptor, receiver-environment}
-// transport. The stackless architecture uses this transport for both closed and
-// open managed invokes: ABI type data has one Ifn_ word per concrete method,
-// independent of the source call site, and a second receiver-aware plain path
-// would split panic/outcome semantics.
+// transport. A family keeps the existing receiver-aware plain Ifn_ only when
+// every emitted use is an ordinary closed invoke and every exact target is a
+// bounded no-unwind plain body. Any other use selects the descriptor transport
+// for the whole family: ABI type data has one Ifn_ word per concrete method, so
+// selecting a representation per call site would split panic/outcome semantics.
 type coroManagedInterfaceDispatchPlan struct {
-	calls   map[ssa.CallInstruction]struct{}
-	methods map[string]struct{}
-	targets map[coro.FunctionID]*ssa.Function
+	calls            map[ssa.CallInstruction]struct{}
+	rawReceiverCalls map[ssa.CallInstruction]struct{}
+	methods          map[string]struct{}
+	targets          map[coro.FunctionID]*ssa.Function
 }
 
 func (p *coroManagedInterfaceDispatchPlan) acceptsCall(call ssa.CallInstruction) bool {
@@ -152,6 +154,14 @@ func (p *coroManagedInterfaceDispatchPlan) acceptsCall(call ssa.CallInstruction)
 		return false
 	}
 	_, ok := p.calls[call]
+	return ok
+}
+
+func (p *coroManagedInterfaceDispatchPlan) acceptsRawReceiverCall(call ssa.CallInstruction) bool {
+	if p == nil || call == nil {
+		return false
+	}
+	_, ok := p.rawReceiverCalls[call]
 	return ok
 }
 
@@ -207,17 +217,21 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	plan *coro.SSAPlan, universe *EmissionUniverse, enabled bool,
 ) (*coroManagedInterfaceDispatchPlan, error) {
 	result := &coroManagedInterfaceDispatchPlan{
-		calls:   make(map[ssa.CallInstruction]struct{}),
-		methods: make(map[string]struct{}),
-		targets: make(map[coro.FunctionID]*ssa.Function),
+		calls:            make(map[ssa.CallInstruction]struct{}),
+		rawReceiverCalls: make(map[ssa.CallInstruction]struct{}),
+		methods:          make(map[string]struct{}),
+		targets:          make(map[coro.FunctionID]*ssa.Function),
 	}
 	if plan == nil {
 		return nil, fmt.Errorf("managed interface descriptor requires a compilation plan")
 	}
-	// First freeze every emitted managed method family. Open families retain
-	// their explicit UnknownManagedInterfaceDispatch proof. Closed families are
-	// resolved to exact candidates and publish the same universal descriptor
-	// transport, so plain and coroutine targets share one receiver-aware path.
+
+	// Decide the transport per method family before recording any call or
+	// target. One open, suspending, unwinding, deferred, or spawned use forces
+	// every use of that Ifn_ family onto the universal descriptor. Conversely,
+	// an all-plain family can retain LLGo's ordinary itab call without paying a
+	// per-invocation descriptor capability/ABI validation cost.
+	managedFamilies := make(map[string]struct{})
 	for _, owner := range plan.Functions() {
 		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine) {
 			continue
@@ -232,15 +246,48 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 				if !found || call.Common() == nil || !call.Common().IsInvoke() || callPlan.Rep != coro.Dispatch {
 					continue
 				}
-				if !enabled {
-					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
-						"managed interface descriptor transport is disabled")
+				key, err := coroManagedInterfaceInvokeMethodKey(universe, owner.Function, call)
+				if err != nil {
+					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction, err.Error())
+				}
+				if !coroClosedInterfaceExplicitStatusPlainSafe(plan, call) {
+					managedFamilies[key] = struct{}{}
+				}
+			}
+		}
+	}
+
+	// First freeze every emitted managed method family. Open families retain
+	// their explicit UnknownManagedInterfaceDispatch proof. Closed families are
+	// resolved to exact candidates. Families proven all-plain above are omitted
+	// so their ordinary receiver-aware itab path remains intact.
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine) {
+			continue
+		}
+		for _, block := range owner.Function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || plan.ElidesCall(call) {
+					continue
+				}
+				callPlan, found := plan.CallPlan(call)
+				if !found || call.Common() == nil || !call.Common().IsInvoke() || callPlan.Rep != coro.Dispatch {
+					continue
 				}
 				common := call.Common()
 				key, err := coroManagedInterfaceInvokeMethodKey(universe, owner.Function, call)
 				if err != nil {
 					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction, err.Error())
 				}
+				if _, managed := managedFamilies[key]; !managed {
+					continue
+				}
+				if !enabled {
+					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
+						"managed interface descriptor transport is disabled")
+				}
+				var dispatch *coroInterfaceDispatchPlan
 				if callPlan.Open {
 					if callPlan.Unresolved != coro.UnknownManagedInterfaceDispatch {
 						continue
@@ -251,7 +298,6 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 						return nil, err
 					}
 				} else {
-					var dispatch *coroInterfaceDispatchPlan
 					var err error
 					switch call := call.(type) {
 					case *ssa.Call:
@@ -274,6 +320,9 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 								fmt.Sprintf("managed interface target %q resolves to both %q and %q", candidate.id, previous.Name(), candidate.function.Name()))
 						}
 						result.targets[candidate.id] = candidate.function
+					}
+					if coroManagedInterfaceRawReceiverSafe(dispatch) {
+						result.rawReceiverCalls[call] = struct{}{}
 					}
 				}
 				result.methods[key] = struct{}{}
@@ -363,6 +412,51 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	return result, nil
 }
 
+// coroManagedInterfaceRawReceiverSafe proves that iface.data already has the
+// stable pointer shape expected by every possible method-table entry. Ordinary
+// indirect interface values store a pointer to their boxed concrete value, and
+// concrete pointer values store the receiver pointer itself. Direct one-word
+// non-pointer values (for example a one-pointer struct, map, chan, or func)
+// still require receiver boxing and deliberately retain IfacePtrData.
+func coroManagedInterfaceRawReceiverSafe(dispatch *coroInterfaceDispatchPlan) bool {
+	if dispatch == nil || len(dispatch.candidates) == 0 {
+		return false
+	}
+	for _, candidate := range dispatch.candidates {
+		receiver := types.Unalias(candidate.receiver)
+		if !emissionDirectIfaceType(receiver) {
+			continue
+		}
+		if _, pointer := receiver.Underlying().(*types.Pointer); !pointer {
+			return false
+		}
+	}
+	return true
+}
+
+// coroClosedInterfaceExplicitStatusPlainSafe proves that one invoke can use
+// the ordinary itab ABI inside an explicit-status coroutine. No child outcome
+// adapter is needed because every possible callee is both non-suspending and
+// non-unwinding. The family prepass above deliberately applies this predicate
+// to every emitted use before selecting the shared Ifn_ representation.
+func coroClosedInterfaceExplicitStatusPlainSafe(
+	plan *coro.SSAPlan, call ssa.CallInstruction,
+) bool {
+	if _, ordinary := call.(*ssa.Call); !ordinary {
+		return false
+	}
+	targets, err := resolveCoroClosedInterfacePlainCall(plan, call)
+	if err != nil || len(targets) == 0 {
+		return false
+	}
+	for _, target := range targets {
+		if target.plan.Exec.Contains(coro.MayUnwind) {
+			return false
+		}
+	}
+	return true
+}
+
 func validateCoroManagedInterfaceDispatchCall(
 	plan *coro.SSAPlan,
 	universe *EmissionUniverse,
@@ -444,7 +538,7 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 	if err != nil {
 		panic(err)
 	}
-	method, args := p.compileCoroManagedInterfaceOperands(b, call)
+	method, args := p.compileCoroManagedInterfaceOperands(b, call, false)
 	if callPlan.Open || coroDispatchCallHasCoroutineTarget(p.compilation.CoroPlan, callPlan) {
 		panic("managed interface descriptor requires a coroutine owner for an open or coroutine-capable target")
 	}
@@ -453,9 +547,10 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 		panic(fmt.Errorf("managed interface plain dispatch: %w", err))
 	}
 	return b.CallCoroDispatchPlain(method, args, llssa.CoroDispatchCallOptions{
-		Version: coroPlainDispatchVersion,
-		ABIHash: abi.hash,
-		Result:  p.prog.Type(abi.resultSlotType, llssa.InC),
+		Version:           coroPlainDispatchVersion,
+		ABIHash:           abi.hash,
+		Result:            p.prog.Type(abi.resultSlotType, llssa.InC),
+		TrustedDescriptor: !callPlan.Open,
 	}), true
 }
 
@@ -466,25 +561,42 @@ func (p *context) compileCoroManagedInterfaceAwait(
 		instructionPlan.control != coroPhysicalControlManagedInterfaceAwait || instructionPlan.controlSignature == nil {
 		panic("managed interface await escaped its frozen physical control recipe")
 	}
-	method, args := p.compileCoroManagedInterfaceOperands(b, call)
+	method, args := p.compileCoroManagedInterfaceOperands(
+		b, call, instructionPlan.rawInterfaceReceiver,
+	)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
+	plan := p.compilation.immutablePlan()
+	if plan == nil {
+		panic("managed interface await has no immutable compilation plan")
+	}
+	callPlan, found := plan.CallPlan(call)
+	if !found || callPlan.Rep != coro.Dispatch {
+		panic("managed interface await lost its frozen Dispatch CallPlan")
+	}
 	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, method, args, instructionPlan.controlSignature, nil, keepaliveSlots,
+		b, method, args, instructionPlan.controlSignature, nil, keepaliveSlots, !callPlan.Open,
 	)
 	p.recordCoroValueAddress(call, result.address)
 	return result.value
 }
 
 func (p *context) compileCoroManagedInterfaceOperands(
-	b llssa.Builder, call ssa.CallInstruction,
+	b llssa.Builder, call ssa.CallInstruction, rawReceiver bool,
 ) (llssa.Expr, []llssa.Expr) {
 	common := call.Common()
 	p.emitPCLineLabel(b, call.Pos())
 	// Evaluate the interface receiver before arguments, exactly as the ordinary
-	// LLGo invoke path does. Imethod preserves the nil-interface panic and pairs
-	// the descriptor Ifn_ word with IfacePtrData as its receiver environment.
+	// LLGo invoke path does. A target-proven raw receiver path owns the
+	// nil-interface edge in the physical coroutine before it loads Ifn_; every
+	// other path retains Imethod and its IfacePtrData receiver normalization.
 	intf := p.compileValue(b, common.Value)
-	method := b.Imethod(intf, common.Method)
+	var method llssa.Expr
+	if rawReceiver {
+		p.compileCoroImplicitNilAccessGuard(b, b.InterfaceTypeWord(intf))
+		method = b.ImethodRawDataKnownNonNil(intf, common.Method)
+	} else {
+		method = b.Imethod(intf, common.Method)
+	}
 	args := p.compileValues(b, common.Args, fnNormal)
 	return method, args
 }
