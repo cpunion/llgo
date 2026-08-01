@@ -281,6 +281,11 @@ func useWithJSWasm32(goos, goarch string, wasiThreads, forceEspClang bool, level
 			"-target", targetTriple,
 			"-Qunused-arguments",
 			"-Wno-unused-command-line-argument",
+			// Keep frame pointers in C code too: the runtime's physical
+			// unwinder walks fault-site chains through C frames (Go keeps
+			// them via the "frame-pointer"="non-leaf" attribute; x86-64 C
+			// would omit them at -O by default).
+			"-fno-omit-frame-pointer",
 		}
 		if ltoMode.Enabled() {
 			export.CCFLAGS = append(export.CCFLAGS, ltoMode.ClangFlag())
