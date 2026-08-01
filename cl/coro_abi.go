@@ -1258,7 +1258,7 @@ func validateCoroPhysicalABIForOwner(
 	rawMethodDispatchToken := rawMethodToken && plan.FuncRep == coro.Dispatch &&
 		fn.Signature != nil && fn.Signature.Recv() != nil
 	outcomePlain := plan.Emission == coro.EmitOutcomePlain && plan.ManagedEntry == coro.ManagedEntryOutcomePlain &&
-		plan.AtomicCostProof == coro.AtomicCostLeaf &&
+		plan.AtomicCostProof.ProvesOutcomePlain() &&
 		plan.AtomicCost != 0 && plan.FuncRep == coro.DirectCoro && !plan.Recursive &&
 		plan.Effect == coro.OutcomeStructured && plan.Exec&^coro.MayUnwind == 0
 	if plan.Emission != coro.EmitCoroutine && !outcomePlain ||
@@ -1285,7 +1285,7 @@ func validateCoroPhysicalABIForOwner(
 		return fail("static cleanup: %v", cleanupErr)
 	}
 	if outcomePlain && cleanupPlan != nil {
-		return fail("outcome-plain leaf acquired a static cleanup plan")
+		return fail("outcome-plain body acquired a static cleanup plan")
 	}
 	if err := validateCoroDynamicCleanupHelpers(cleanupPlan, whole); err != nil {
 		return fail("dynamic cleanup: %v", err)

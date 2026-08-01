@@ -870,7 +870,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 				return
 			}
 			if outcomePlainABI != nil {
-				p.compileOutcomePlainPhysicalBody(b, f, *outcomePlainABI, isInit)
+				p.compileOutcomePlainPhysicalBody(b, f, *outcomePlainABI, entry.plan, isInit)
 				for _, childInit := range childInits {
 					childInit()
 				}
@@ -2070,7 +2070,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				}
 				ret = p.callInstruction(b, llssa.Call, v)
 			}
-		} else if p.hasCoroPhysicalBody() {
+		} else if p.hasStructuredOutcomePhysicalBody() {
 			if coroDeferStackBuiltinCall(v) {
 				ret = p.compileCoroDeferStack(b, v)
 			} else if value, handled := p.tryCompileCoroPhysicalCall(b, v); handled {

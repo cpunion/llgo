@@ -89,6 +89,175 @@ func caller(value any, fail bool) int {
 	})
 }
 
+func TestAnalyzeSSASelectsProvenOutcomePlainDAG(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "outcome_plain_dag.go", `package coroid
+
+func leaf(value any, fail bool) int {
+	if fail {
+		panic(value)
+	}
+	return 7
+}
+
+func middle(value any, fail bool) int {
+	return leaf(value, fail)
+}
+
+func root(value any, fail bool) int {
+	return middle(value, fail)
+}
+`)
+	leaf := packageFunction(t, pkg, "leaf")
+	middle := packageFunction(t, pkg, "middle")
+	root := packageFunction(t, pkg, "root")
+	classify := func(callCount int) func(*ssa.Function) (SSAFunctionBodyFacts, error) {
+		return func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+			facts := scanSSAFunctionBody(fn)
+			facts.OutcomePlainLeaf = fn == leaf
+			facts.OutcomePlainDAG = fn == leaf || fn == middle
+			if fn == middle {
+				facts.OutcomePlainCallCount = callCount
+			}
+			return facts, nil
+		}
+	}
+	analyze := func(t *testing.T, budget int, callCount int) *SSAPlan {
+		t.Helper()
+		plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, SSAConfig{
+			OutcomeMode:          OutcomeExplicitStatus,
+			MaxPlainInstructions: budget,
+			ClassifyLocalBody:    classify(callCount),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	plan := analyze(t, 128, 1)
+	leafPlan := functionPlanFor(t, plan, leaf)
+	middlePlan := functionPlanFor(t, plan, middle)
+	rootPlan := functionPlanFor(t, plan, root)
+	if leafPlan.Emission != EmitOutcomePlain || leafPlan.AtomicCostProof != AtomicCostLeaf {
+		t.Fatalf("leaf plan = %+v, want outcome-plain leaf", leafPlan)
+	}
+	wantMiddleCost := uint64(scanSSAFunctionBody(middle).InstructionCount) + leafPlan.AtomicCost
+	if middlePlan.Emission != EmitOutcomePlain || middlePlan.ManagedEntry != ManagedEntryOutcomePlain ||
+		middlePlan.AtomicCostProof != AtomicCostDAG || middlePlan.AtomicCost != wantMiddleCost {
+		t.Fatalf("middle plan = %+v, want outcome-plain DAG cost %d", middlePlan, wantMiddleCost)
+	}
+	if rootPlan.Emission != EmitCoroutine || rootPlan.AtomicCostProof != AtomicCostUnproven {
+		t.Fatalf("root plan = %+v, want ordinary coroutine root", rootPlan)
+	}
+
+	t.Run("consumer budget", func(t *testing.T) {
+		if middlePlan.AtomicCost <= leafPlan.AtomicCost {
+			t.Fatalf("middle cost %d must exceed leaf cost %d", middlePlan.AtomicCost, leafPlan.AtomicCost)
+		}
+		low := analyze(t, int(middlePlan.AtomicCost)-1, 1)
+		if got := functionPlanFor(t, low, leaf); got.Emission != EmitOutcomePlain || got.AtomicCostProof != AtomicCostLeaf {
+			t.Fatalf("low-budget leaf plan = %+v, want retained leaf proof", got)
+		}
+		if got := functionPlanFor(t, low, middle); got.Emission == EmitOutcomePlain || got.AtomicCostProof != AtomicCostUnproven {
+			t.Fatalf("low-budget middle plan = %+v, DAG must fail closed", got)
+		}
+	})
+
+	t.Run("incomplete source-call accounting", func(t *testing.T) {
+		mismatch := analyze(t, 128, 2)
+		if got := functionPlanFor(t, mismatch, middle); got.Emission == EmitOutcomePlain || got.AtomicCostProof != AtomicCostUnproven {
+			t.Fatalf("mismatched-call middle plan = %+v, DAG must fail closed", got)
+		}
+	})
+}
+
+func TestAnalyzeSSAOutcomePlainDAGRejectsRecursiveCycle(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "outcome_plain_cycle.go", `package coroid
+
+func left(n int) int {
+	if n == 0 { return 0 }
+	return right(n - 1)
+}
+
+func right(n int) int {
+	if n == 0 { return 0 }
+	return left(n - 1)
+}
+
+func root(n int) int { return left(n) }
+`)
+	left := packageFunction(t, pkg, "left")
+	right := packageFunction(t, pkg, "right")
+	root := packageFunction(t, pkg, "root")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, SSAConfig{
+		OutcomeMode:          OutcomeExplicitStatus,
+		MaxPlainInstructions: 128,
+		ClassifyLocalBody: func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+			facts := scanSSAFunctionBody(fn)
+			if fn == left || fn == right {
+				facts.OutcomePlainDAG = true
+				facts.OutcomePlainCallCount = 1
+			}
+			return facts, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fn := range []*ssa.Function{left, right} {
+		if got := functionPlanFor(t, plan, fn); got.Emission == EmitOutcomePlain ||
+			got.AtomicCostProof != AtomicCostUnproven || !got.Recursive {
+			t.Fatalf("recursive plan %q = %+v, DAG must fail closed", fn.Name(), got)
+		}
+	}
+}
+
+func TestAnalyzeSSAOutcomePlainDAGRejectsSourceCFGCycle(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "outcome_plain_cfg_cycle.go", `package coroid
+
+func leaf(value any, fail bool) int {
+	if fail { panic(value) }
+	return 7
+}
+
+func loop(value any, fail bool, count int) int {
+	for count > 0 {
+		count--
+		leaf(value, fail)
+	}
+	return 0
+}
+
+func root(value any, fail bool, count int) int { return loop(value, fail, count) }
+`)
+	leaf := packageFunction(t, pkg, "leaf")
+	loop := packageFunction(t, pkg, "loop")
+	root := packageFunction(t, pkg, "root")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, SSAConfig{
+		OutcomeMode:          OutcomeExplicitStatus,
+		MaxPlainInstructions: 128,
+		ClassifyLocalBody: func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+			facts := scanSSAFunctionBody(fn)
+			facts.OutcomePlainLeaf = fn == leaf
+			facts.OutcomePlainDAG = fn == leaf || fn == loop
+			if fn == loop {
+				facts.OutcomePlainCallCount = 1
+			}
+			return facts, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, plan, leaf); got.Emission != EmitOutcomePlain {
+		t.Fatalf("CFG-cycle fixture leaf = %+v, want independent outcome leaf", got)
+	}
+	if got := functionPlanFor(t, plan, loop); got.Emission == EmitOutcomePlain ||
+		got.AtomicCostProof != AtomicCostUnproven || !scanSSAFunctionBody(loop).HasCycle {
+		t.Fatalf("CFG-cycle plan = %+v, want coroutine fallback", got)
+	}
+}
+
 func TestAnalyzeSSAImportedOutcomePlainHonorsConsumerBudget(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "imported_outcome_plain.go", `package coroid
 
@@ -143,6 +312,77 @@ func caller(value any, fail bool) int {
 			if got.Emission != EmitExternal || got.ManagedEntry != ManagedEntryOutcomePlain ||
 				got.AtomicCost != 8 || got.AtomicCostProof != AtomicCostLeaf {
 				t.Fatalf("imported outcome plan = %+v", got)
+			}
+		})
+	}
+}
+
+func TestAnalyzeSSAOutcomePlainDAGConsumesImportedProof(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "imported_outcome_plain_dag.go", `package coroid
+
+func imported(value any, fail bool) int
+func middle(value any, fail bool) int { return imported(value, fail) }
+func root(value any, fail bool) int { return middle(value, fail) }
+`)
+	imported := packageFunction(t, pkg, "imported")
+	middle := packageFunction(t, pkg, "middle")
+	root := packageFunction(t, pkg, "root")
+	classifyFunction := func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+		if fn != imported {
+			return SSAFunctionPolicy{}, nil
+		}
+		return SSAFunctionPolicy{
+			Effect:           OutcomeStructured,
+			Exec:             MayUnwind,
+			ManagedEntry:     ManagedEntryOutcomePlain,
+			AtomicCost:       8,
+			AtomicCostProof:  AtomicCostDAG,
+			IgnoreBody:       true,
+			External:         ExternalKnown,
+			OverrideExternal: true,
+		}, nil
+	}
+	classifyBody := func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		if fn == middle {
+			facts.OutcomePlainDAG = true
+			facts.OutcomePlainCallCount = 1
+		}
+		return facts, nil
+	}
+	localCost := scanSSAFunctionBody(middle).InstructionCount
+	wantCost := 8 + localCost
+	for _, test := range []struct {
+		name       string
+		budget     int
+		wantMiddle bool
+	}{
+		{name: "exact transitive cost", budget: wantCost, wantMiddle: true},
+		{name: "transitive cost too large", budget: wantCost - 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, SSAConfig{
+				OutcomeMode:          OutcomeExplicitStatus,
+				MaxPlainInstructions: test.budget,
+				ClassifyFunction:     classifyFunction,
+				ClassifyLocalBody:    classifyBody,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			importedPlan := functionPlanFor(t, plan, imported)
+			if importedPlan.ManagedEntry != ManagedEntryOutcomePlain ||
+				importedPlan.AtomicCostProof != AtomicCostDAG || importedPlan.AtomicCost != 8 {
+				t.Fatalf("imported DAG plan = %+v", importedPlan)
+			}
+			middlePlan := functionPlanFor(t, plan, middle)
+			if test.wantMiddle {
+				if middlePlan.Emission != EmitOutcomePlain || middlePlan.AtomicCostProof != AtomicCostDAG ||
+					middlePlan.AtomicCost != uint64(wantCost) {
+					t.Fatalf("middle imported-DAG plan = %+v, want cost %d", middlePlan, wantCost)
+				}
+			} else if middlePlan.Emission == EmitOutcomePlain || middlePlan.AtomicCostProof != AtomicCostUnproven {
+				t.Fatalf("over-budget imported-DAG consumer = %+v, want coroutine fallback", middlePlan)
 			}
 		})
 	}

@@ -20,6 +20,7 @@ package cl
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -45,6 +46,39 @@ func Leaf(first, second uint32, choose bool, payload any, fail bool) uint32 {
 func Parent(first, second uint32, choose bool, payload any, fail bool) uint32 {
 	return Leaf(first, second, choose, payload, fail)
 }
+`
+
+const coroOutcomePlainDAGFixture = `package foo
+
+func Leaf(first, second uint32, choose bool, payload any, fail bool) uint32 {
+	if fail {
+		panic(payload)
+	}
+	if choose {
+		return second
+	}
+	return first
+}
+
+func Middle(first, second uint32, choose bool, payload any, fail bool) uint32 {
+	return Leaf(first, second, choose, payload, fail)
+}
+
+func Parent(first, second uint32, choose bool, payload any, fail bool) uint32 {
+	return Middle(first, second, choose, payload, fail)
+}
+`
+
+const coroOutcomePlainLargeDAGFixture = `package foo
+
+type Huge [131073]byte
+
+func Leaf(value Huge, payload any, fail bool) Huge {
+	if fail { panic(payload) }
+	return value
+}
+func Middle(value Huge, payload any, fail bool) Huge { return Leaf(value, payload, fail) }
+func Parent(value Huge, payload any, fail bool) Huge { return Middle(value, payload, fail) }
 `
 
 func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
@@ -104,6 +138,105 @@ func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCoroOutcomePlainDAGNativeAndWasm32(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg, plan, parent, middle, leaf := compileCoroOutcomePlainDAGFixture(t, test.target, 128)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			parentPlan, parentFound := plan.FunctionPlan(parent)
+			middlePlan, middleFound := plan.FunctionPlan(middle)
+			leafPlan, leafFound := plan.FunctionPlan(leaf)
+			if !parentFound || parentPlan.Emission != coro.EmitCoroutine {
+				t.Fatalf("Parent plan = %+v, present=%t; want coroutine root", parentPlan, parentFound)
+			}
+			if !middleFound || middlePlan.Emission != coro.EmitOutcomePlain ||
+				middlePlan.AtomicCostProof != coro.AtomicCostDAG || middlePlan.AtomicCost <= leafPlan.AtomicCost {
+				t.Fatalf("Middle plan = %+v, present=%t; want proven outcome-plain DAG above leaf cost %d", middlePlan, middleFound, leafPlan.AtomicCost)
+			}
+			if !leafFound || leafPlan.Emission != coro.EmitOutcomePlain ||
+				leafPlan.AtomicCostProof != coro.AtomicCostLeaf || leafPlan.AtomicCost == 0 {
+				t.Fatalf("Leaf plan = %+v, present=%t; want proven outcome-plain leaf", leafPlan, leafFound)
+			}
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify outcome-plain DAG before CoroSplit: %v\n%s", err, module.String())
+			}
+			middleBody := module.NamedFunction("foo.Middle$outcome")
+			if middleBody.IsNil() {
+				t.Fatalf("outcome-plain DAG symbol is absent:\n%s", module.String())
+			}
+			middleIR := middleBody.String()
+			if !strings.Contains(middleIR, "foo.Leaf$outcome") || !strings.Contains(middleIR, "switch i32") {
+				t.Fatalf("Middle did not synchronously consume Leaf outcome:\n%s", middleIR)
+			}
+			for _, status := range []uint64{coroAwaitCompletionPanic, coroAwaitCompletionGoexit} {
+				if !strings.Contains(middleIR, "store i32 "+strconv.FormatUint(status, 10)+", ptr") {
+					t.Fatalf("Middle did not propagate child completion status %d into its parent record:\n%s", status, middleIR)
+				}
+			}
+			for _, forbidden := range []string{"llvm.coro.", "$coro", ".resume", ".destroy", coroAwaitPrepareHookV1, coroAwaitConsumeHookV1} {
+				if strings.Contains(middleIR, forbidden) {
+					t.Fatalf("outcome-plain DAG retained coroutine artifact %q:\n%s", forbidden, middleIR)
+				}
+			}
+			parentIR := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
+			if !strings.Contains(parentIR, "foo.Middle$outcome") || strings.Contains(parentIR, "foo.Leaf$outcome") {
+				t.Fatalf("Parent did not consume only the collapsed Middle outcome boundary:\n%s", parentIR)
+			}
+
+			runCoroABITestPipeline(t, prog, module)
+			for _, base := range []string{"foo.Leaf$outcome", "foo.Middle$outcome"} {
+				for _, suffix := range []string{".resume", ".destroy"} {
+					if !module.NamedFunction(base + suffix).IsNil() {
+						t.Fatalf("CoroSplit manufactured outcome-plain helper %q:\n%s", base+suffix, module.String())
+					}
+				}
+			}
+			resume := module.NamedFunction("foo.Parent$coro.resume")
+			if resume.IsNil() || !strings.Contains(resume.String(), "foo.Middle$outcome") {
+				t.Fatalf("post-split Parent lost direct Middle outcome call:\n%s", module.String())
+			}
+		})
+	}
+}
+
+func TestCoroOutcomePlainDAGLargeResultFallsBackBeforeEmission(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	prog, pkg, plan, ssaPkg := compileCoroOutcomePlainSource(
+		t, nil, coroOutcomePlainLargeDAGFixture, "Parent", 128,
+	)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	leafPlan, leafFound := plan.FunctionPlan(ssaPkg.Func("Leaf"))
+	middlePlan, middleFound := plan.FunctionPlan(ssaPkg.Func("Middle"))
+	if !leafFound || leafPlan.Emission != coro.EmitOutcomePlain || leafPlan.AtomicCostProof != coro.AtomicCostLeaf {
+		t.Fatalf("large-result Leaf plan = %+v, present=%t; caller-owned result must not reject the leaf", leafPlan, leafFound)
+	}
+	if !middleFound || middlePlan.Emission != coro.EmitCoroutine ||
+		middlePlan.AtomicCostProof != coro.AtomicCostUnproven {
+		t.Fatalf("large-result Middle plan = %+v, present=%t; DAG optimization must fall back", middlePlan, middleFound)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify large-result fallback before CoroSplit: %v\n%s", err, module.String())
+	}
+	middleIR := requireCoroPhysicalFunction(t, module, "foo.Middle").String()
+	if !strings.Contains(middleIR, "foo.Leaf$outcome") || !strings.Contains(middleIR, "runtime.AllocZ") {
+		t.Fatalf("full coroutine fallback did not use managed storage for the large Leaf result:\n%s", middleIR)
+	}
+	runCoroABITestPipeline(t, prog, module)
 }
 
 func TestCoroOutcomePlainPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
@@ -196,6 +329,83 @@ func TestCoroOutcomePlainPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 			t.Logf(
 				"post-split fixture: IR baseline=%d optimized=%d; O2 object baseline=%d optimized=%d; eliminated Leaf frame=1 resume=1 destroy=1 await-hook-refs=%d",
 				len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes, baselineAwaitCalls,
+			)
+		})
+	}
+}
+
+func TestCoroOutcomePlainDAGPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			baselineProg, baselinePkg, baselinePlan, _, baselineMiddle, baselineLeaf :=
+				compileCoroOutcomePlainDAGFixture(t, test.target, -1)
+			defer baselineProg.Dispose()
+			baselineModule := baselinePkg.Module()
+			defer baselineModule.Dispose()
+			optimizedProg, optimizedPkg, optimizedPlan, _, optimizedMiddle, optimizedLeaf :=
+				compileCoroOutcomePlainDAGFixture(t, test.target, 128)
+			defer optimizedProg.Dispose()
+			optimizedModule := optimizedPkg.Module()
+			defer optimizedModule.Dispose()
+
+			for _, fn := range []*ssa.Function{baselineMiddle, baselineLeaf} {
+				if got, found := baselinePlan.FunctionPlan(fn); !found || got.Emission != coro.EmitCoroutine {
+					t.Fatalf("baseline %s plan = %+v, present=%t; want coroutine", fn.Name(), got, found)
+				}
+			}
+			if got, found := optimizedPlan.FunctionPlan(optimizedMiddle); !found ||
+				got.Emission != coro.EmitOutcomePlain || got.AtomicCostProof != coro.AtomicCostDAG {
+				t.Fatalf("optimized Middle plan = %+v, present=%t; want outcome DAG", got, found)
+			}
+			if got, found := optimizedPlan.FunctionPlan(optimizedLeaf); !found ||
+				got.Emission != coro.EmitOutcomePlain || got.AtomicCostProof != coro.AtomicCostLeaf {
+				t.Fatalf("optimized Leaf plan = %+v, present=%t; want outcome leaf", got, found)
+			}
+
+			runCoroABITestPipeline(t, baselineProg, baselineModule)
+			runCoroABITestPipeline(t, optimizedProg, optimizedModule)
+			llssa.RemoveKeepAliveCallsAfterCoroSplit(baselineModule)
+			llssa.RemoveKeepAliveCallsAfterCoroSplit(optimizedModule)
+			for _, name := range []string{"foo.Middle", "foo.Leaf"} {
+				for _, suffix := range []string{".resume", ".destroy"} {
+					if baselineModule.NamedFunction(name + "$coro" + suffix).IsNil() {
+						t.Fatalf("baseline is missing %s%s", name+"$coro", suffix)
+					}
+					if !optimizedModule.NamedFunction(name + "$outcome" + suffix).IsNil() {
+						t.Fatalf("optimized module retained %s%s", name+"$outcome", suffix)
+					}
+				}
+			}
+			baselineIR, optimizedIR := baselineModule.String(), optimizedModule.String()
+			optimizeCoroOutcomeCostModule(t, baselineProg, baselineModule)
+			optimizeCoroOutcomeCostModule(t, optimizedProg, optimizedModule)
+			baselineObject, err := baselineProg.TargetMachine().EmitToMemoryBuffer(baselineModule, llvm.ObjectFile)
+			if err != nil {
+				t.Fatalf("emit DAG baseline object: %v", err)
+			}
+			defer baselineObject.Dispose()
+			optimizedObject, err := optimizedProg.TargetMachine().EmitToMemoryBuffer(optimizedModule, llvm.ObjectFile)
+			if err != nil {
+				t.Fatalf("emit DAG outcome object: %v", err)
+			}
+			defer optimizedObject.Dispose()
+			baselineBytes, optimizedBytes := len(baselineObject.Bytes()), len(optimizedObject.Bytes())
+			if len(optimizedIR) >= len(baselineIR) || optimizedBytes >= baselineBytes {
+				t.Fatalf(
+					"outcome DAG did not reduce the exact fixture: IR baseline=%d optimized=%d object baseline=%d optimized=%d",
+					len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes,
+				)
+			}
+			t.Logf(
+				"post-split DAG fixture: IR baseline=%d optimized=%d; O2 object baseline=%d optimized=%d; eliminated frames/resume/destroy=2/2/2",
+				len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes,
 			)
 		})
 	}
@@ -364,7 +574,32 @@ func compileCoroOutcomePlainFixtureWithBudget(t *testing.T, target *llssa.Target
 	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.Function,
 ) {
 	t.Helper()
-	ssaPkg, _, files := buildGoSSAPkg(t, coroOutcomePlainFixture)
+	prog, pkg, plan, ssaPkg := compileCoroOutcomePlainSource(
+		t, target, coroOutcomePlainFixture, "Parent", maxPlainInstructions,
+	)
+	parent, leaf := ssaPkg.Func("Parent"), ssaPkg.Func("Leaf")
+	return prog, pkg, plan, parent, leaf
+}
+
+func compileCoroOutcomePlainDAGFixture(t *testing.T, target *llssa.Target, maxPlainInstructions int) (
+	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.Function, *ssa.Function,
+) {
+	t.Helper()
+	prog, pkg, plan, ssaPkg := compileCoroOutcomePlainSource(
+		t, target, coroOutcomePlainDAGFixture, "Parent", maxPlainInstructions,
+	)
+	parent, middle, leaf := ssaPkg.Func("Parent"), ssaPkg.Func("Middle"), ssaPkg.Func("Leaf")
+	return prog, pkg, plan, parent, middle, leaf
+}
+
+func compileCoroOutcomePlainSource(
+	t *testing.T,
+	target *llssa.Target,
+	source, rootName string,
+	maxPlainInstructions int,
+) (llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Package) {
+	t.Helper()
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	var prog llssa.Program
 	if target == nil {
 		prog = newLLSSAProg(t)
@@ -387,8 +622,12 @@ func compileCoroOutcomePlainFixtureWithBudget(t *testing.T, target *llssa.Target
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
-	parent, leaf := ssaPkg.Func("Parent"), ssaPkg.Func("Leaf")
-	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: parent, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+	root := ssaPkg.Func(rootName)
+	if root == nil {
+		prog.Dispose()
+		t.Fatalf("outcome-plain fixture root %q is absent", rootName)
+	}
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: maxPlainInstructions,
@@ -411,5 +650,5 @@ func compileCoroOutcomePlainFixtureWithBudget(t *testing.T, target *llssa.Target
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	return prog, pkg, plan, parent, leaf
+	return prog, pkg, plan, ssaPkg
 }

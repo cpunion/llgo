@@ -302,8 +302,13 @@ func validateCoroStaticMethodCallOperands(call ssa.CallInstruction, target *ssa.
 }
 
 func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
-	if caller.Emission != coro.EmitCoroutine {
-		return fmt.Errorf("caller emission is %s, want coroutine", caller.Emission)
+	callerCoroutine := caller.Emission == coro.EmitCoroutine &&
+		caller.ManagedEntry == coro.ManagedEntryCoroutine
+	callerOutcome := caller.Emission == coro.EmitOutcomePlain &&
+		caller.ManagedEntry == coro.ManagedEntryOutcomePlain &&
+		caller.AtomicCostProof.ProvesOutcomePlain() && caller.AtomicCost != 0
+	if !callerCoroutine && !callerOutcome {
+		return fmt.Errorf("caller emission is %s, want a structured physical entry", caller.Emission)
 	}
 	defined := target.External == coro.Defined &&
 		target.Emission == coro.EmitCoroutine &&
@@ -313,7 +318,7 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 		target.Emission == coro.EmitOutcomePlain &&
 		target.ManagedEntry == coro.ManagedEntryOutcomePlain &&
 		target.Primary == coro.PrimaryCoroutine &&
-		target.AtomicCostProof == coro.AtomicCostLeaf && target.AtomicCost != 0
+		target.AtomicCostProof.ProvesOutcomePlain() && target.AtomicCost != 0
 	imported := target.External == coro.ExternalKnown &&
 		target.Emission == coro.EmitExternal &&
 		target.Primary == coro.PrimaryExternal &&
@@ -325,6 +330,12 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 		return fmt.Errorf(
 			"target %q has no defined outcome/coroutine or preflighted imported coroutine entry with async demand (external=%s emission=%s primary=%s representation=%s demand=%s)",
 			target.ID, target.External, target.Emission, target.Primary, target.FuncRep, target.Demand,
+		)
+	}
+	if callerOutcome && target.ManagedEntry != coro.ManagedEntryOutcomePlain {
+		return fmt.Errorf(
+			"outcome-plain caller %q targets non-atomic managed entry %s",
+			caller.ID, target.ManagedEntry,
 		)
 	}
 	return nil
@@ -848,6 +859,13 @@ func (p *context) enterCoroPropagatedPanic(
 	typeWord, dataWord llssa.Expr,
 	line uint32,
 ) {
+	if outcome := p.outcomePlainBody(); outcome != nil {
+		if b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {
+			panic("propagated panic escaped its parent outcome-plain body")
+		}
+		outcome.publish(b, coroAwaitCompletionPanic, typeWord, dataWord)
+		return
+	}
 	body := p.activeCoroEmissionBody()
 	if body == nil || b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {
 		panic("propagated panic escaped its parent coroutine body")
@@ -860,6 +878,13 @@ func (p *context) enterCoroPropagatedPanic(
 }
 
 func (p *context) enterCoroPropagatedGoexit(b llssa.Builder) {
+	if outcome := p.outcomePlainBody(); outcome != nil {
+		if b == nil || b.Func != p.fn {
+			panic("propagated Goexit escaped its parent outcome-plain body")
+		}
+		outcome.publish(b, coroAwaitCompletionGoexit, llssa.Nil, llssa.Nil)
+		return
+	}
 	body := p.activeCoroEmissionBody()
 	if body == nil || b == nil || b.Func != p.fn {
 		panic("propagated Goexit escaped its parent coroutine body")

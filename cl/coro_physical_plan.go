@@ -274,34 +274,40 @@ type coroPhysicalLoweringCapabilities struct {
 // frozen safe array index removes only the range edge, never a nullable
 // pointer-to-array dereference.
 type coroPhysicalInstructionPlan struct {
-	semantic             coroSemanticInstructionPlan
-	recipe               coroPhysicalInstructionRecipe
-	control              coroPhysicalControlRecipe
-	controlTarget        *ssa.Function
-	controlTargetID      coro.FunctionID
-	controlReceiver      ssa.Value
-	controlInterface     *coroInterfaceDispatchPlan
-	controlSignature     *types.Signature
-	controlFailure       string
-	controlFailureHard   bool
-	operation            coroPhysicalOperationRecipe
-	operationFailure     string
-	operationWorker      *coroWorkerForeignCallShape
-	operationCgo         *coroWorkerCgoCallShape
-	operationCgoErrno    *coroWorkerCgoErrnoCallShape
-	operationHost        coroHostOperationCallShape
-	operationControl     CoroControlOperation
-	outcome              coroPhysicalOutcomeRecipe
-	outcomeFailure       string
-	elideValue           bool
-	reuseValueAddress    bool
-	valueOperand         ssa.Value
-	container            coroPhysicalContainerKind
-	bound                int64
-	nilGuard             bool
-	boundsGuard          bool
-	boundsDisabled       bool
-	rawInterfaceReceiver bool
+	semantic           coroSemanticInstructionPlan
+	recipe             coroPhysicalInstructionRecipe
+	control            coroPhysicalControlRecipe
+	controlTarget      *ssa.Function
+	controlTargetID    coro.FunctionID
+	controlReceiver    ssa.Value
+	controlInterface   *coroInterfaceDispatchPlan
+	controlSignature   *types.Signature
+	controlFailure     string
+	controlFailureHard bool
+	// directOutcomeNativeResult proves that this exact target's result-slot
+	// struct fits the target's native-stack single-object limit. Full LLVM
+	// coroutine callers may use managed frame storage instead; an outcome-plain
+	// DAG caller has no suspension-capable allocator fallback and must require
+	// this frozen target-layout fact.
+	directOutcomeNativeResult bool
+	operation                 coroPhysicalOperationRecipe
+	operationFailure          string
+	operationWorker           *coroWorkerForeignCallShape
+	operationCgo              *coroWorkerCgoCallShape
+	operationCgoErrno         *coroWorkerCgoErrnoCallShape
+	operationHost             coroHostOperationCallShape
+	operationControl          CoroControlOperation
+	outcome                   coroPhysicalOutcomeRecipe
+	outcomeFailure            string
+	elideValue                bool
+	reuseValueAddress         bool
+	valueOperand              ssa.Value
+	container                 coroPhysicalContainerKind
+	bound                     int64
+	nilGuard                  bool
+	boundsGuard               bool
+	boundsDisabled            bool
+	rawInterfaceReceiver      bool
 }
 
 func (plan coroPhysicalInstructionPlan) mayFault() bool {
@@ -1398,6 +1404,11 @@ func planCoroPhysicalControlInstruction(
 		}
 		if targetPlan.ManagedEntry == coro.ManagedEntryOutcomePlain {
 			result.control = coroPhysicalControlDirectOutcome
+			if audit.ctx != nil && audit.ctx.prog != nil {
+				result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(
+					newOutcomePlainPhysicalABI(calleeSignature).resultSlotType,
+				)
+			}
 		} else {
 			result.control = coroPhysicalControlDirectAwait
 		}

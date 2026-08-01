@@ -68,21 +68,25 @@ func panicLeaf(payload any, doPanic bool) uint32 {
 	return 37
 }
 
+func panicMiddle(payload any, doPanic bool) uint32 {
+	return panicLeaf(payload, doPanic)
+}
+
 func panicChild(doPanic bool) {
 	Before = 1
-	panicLeaf(&GlobalPayload, doPanic)
+	panicMiddle(&GlobalPayload, doPanic)
 }
 
 func main() {
-	Result = panicLeaf(nil, false)
+	Result = panicMiddle(nil, false)
 	panicChild(true)
 	After = 1
 }
 `
 
 // TestCoroExplicitPanicNativeNoStdlibRuntimeE2E is a deliberately closed
-// scheduler island. It compiles a real source panic in an outcome-plain leaf,
-// reconciles that payload in its physical-coroutine caller, links the
+// scheduler island. It compiles a real source panic through an outcome-plain
+// direct-call DAG, reconciles that payload in its physical-coroutine caller, links the
 // production native-nogc scheduler/core and panic prepare hook, and runs
 // without the legacy panic printer/runtime closure.
 //
@@ -174,7 +178,8 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mainFn, childFn, leafFn := ssaPkg.Func("main"), ssaPkg.Func("panicChild"), ssaPkg.Func("panicLeaf")
+	mainFn, childFn := ssaPkg.Func("main"), ssaPkg.Func("panicChild")
+	middleFn, leafFn := ssaPkg.Func("panicMiddle"), ssaPkg.Func("panicLeaf")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
@@ -206,6 +211,12 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		leafPlan.AtomicCostProof != coro.AtomicCostLeaf {
 		t.Fatalf("panic leaf plan = %+v, present=%t; want outcome-plain", leafPlan, found)
 	}
+	middlePlan, found := plan.FunctionPlan(middleFn)
+	if !found || middlePlan.Emission != coro.EmitOutcomePlain ||
+		middlePlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+		middlePlan.AtomicCostProof != coro.AtomicCostDAG || middlePlan.AtomicCost <= leafPlan.AtomicCost {
+		t.Fatalf("panic middle plan = %+v, present=%t; want outcome-plain DAG above leaf cost %d", middlePlan, found, leafPlan.AtomicCost)
+	}
 	compilation := &cl.Compilation{
 		CoroPlan: plan,
 
@@ -233,8 +244,9 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	if strings.Contains(presplit, llssa.PkgRuntime+".Panic") {
 		t.Fatalf("compiled explicit panic retained the legacy runtime.Panic edge:\n%s", presplit)
 	}
-	if !strings.Contains(presplit, "panicLeaf$outcome") || strings.Contains(presplit, "panicLeaf$coro") {
-		t.Fatalf("compiled explicit panic did not use the outcome-plain leaf ABI:\n%s", presplit)
+	if !strings.Contains(presplit, "panicMiddle$outcome") || !strings.Contains(presplit, "panicLeaf$outcome") ||
+		strings.Contains(presplit, "panicMiddle$coro") || strings.Contains(presplit, "panicLeaf$coro") {
+		t.Fatalf("compiled explicit panic did not collapse the outcome-plain DAG:\n%s", presplit)
 	}
 	runCoroSpawnNativeE2EPasses(t, prog, module)
 	ir := module.String()

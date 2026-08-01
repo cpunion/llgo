@@ -582,6 +582,12 @@ type SSAFunctionBodyFacts struct {
 	// analysis still rejects roots, dynamic references, recursion, raw entries,
 	// and compiler-inserted calls before selecting EmitOutcomePlain.
 	OutcomePlainLeaf bool
+	// OutcomePlainDAG admits the leaf recipes plus an ordinary source Call and
+	// Extract. It is only a local syntax/semantic projection: whole-program
+	// planning must match every counted call to one exact outcome-plain target,
+	// prove an acyclic call graph, and include every callee cost.
+	OutcomePlainDAG       bool
+	OutcomePlainCallCount int
 }
 
 func (facts SSAFunctionBodyFacts) validate() error {
@@ -597,8 +603,11 @@ func (facts SSAFunctionBodyFacts) validate() error {
 	if facts.InstructionCount < 0 {
 		return fmt.Errorf("local body instruction count is negative")
 	}
-	if facts.OutcomePlainLeaf && facts.HasCycle {
-		return fmt.Errorf("outcome-plain leaf proof has a source CFG cycle")
+	if facts.OutcomePlainCallCount < 0 {
+		return fmt.Errorf("outcome-plain source call count is negative")
+	}
+	if facts.OutcomePlainLeaf && facts.OutcomePlainCallCount != 0 {
+		return fmt.Errorf("outcome-plain leaf proof contains source calls")
 	}
 	return nil
 }
@@ -1898,7 +1907,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids); err != nil {
 		return nil, err
 	}
-	if err := applySSAOutcomePlainLeafPlans(
+	if err := applySSAOutcomePlainPlans(
 		base, graph, canonicalRoots, byID, localBodyFacts, callPlans, loweredCalls, maxPlain,
 	); err != nil {
 		return nil, err
@@ -2006,15 +2015,20 @@ func validateSSAImportedOutcomePlainCosts(plan *Plan, maxAtomicCost int) error {
 	return nil
 }
 
-// applySSAOutcomePlainLeafPlans performs the first deliberately narrow
-// outcome-plain replacement cohort after the complete call/value plan has been
-// frozen. A local frontend proof is necessary but insufficient: only one
-// source-call-free, acyclic body reached exclusively by exact static managed
-// calls is accepted. Roots, spawns, compiler-lowered callers, first-class
-// references, raw entries, recursion and open execution remain ordinary LLVM
-// coroutines. For this cohort InstructionCount is a conservative whole-path
-// bound because the source body contains no call and no CFG cycle.
-func applySSAOutcomePlainLeafPlans(
+// applySSAOutcomePlainPlans selects the source-call-free V0 leaves and then a
+// closed direct-call DAG over those leaves and imported producer proofs. The
+// local ProgramIR projection is necessary but insufficient: every counted call
+// must be one exact static managed edge, every target must already publish a
+// proven outcome entry, and the conservative local-plus-callee cost must fit
+// the consumer budget. Bottom-up selection is also the call-graph acyclicity
+// proof: no member of a cycle can become available to its predecessor.
+//
+// Roots, spawns, compiler-lowered incoming calls, first-class references, raw
+// entries, recursion and open execution remain ordinary LLVM coroutines. Local
+// InstructionCount counts every evaluated instruction and the DAG sum counts a
+// callee once per exact source call site; branch exclusivity is intentionally
+// ignored, making the bound conservative without rebuilding a second CFG.
+func applySSAOutcomePlainPlans(
 	base *Plan,
 	graph *Graph,
 	roots []SSARootPlan,
@@ -2025,7 +2039,7 @@ func applySSAOutcomePlainLeafPlans(
 	maxAtomicCost int,
 ) error {
 	if base == nil || graph == nil {
-		return fmt.Errorf("coro: outcome-plain leaf planning requires a complete graph plan")
+		return fmt.Errorf("coro: outcome-plain planning requires a complete graph plan")
 	}
 	// A disabled instruction budget cannot prove a finite target/profile bound.
 	if maxAtomicCost < 0 {
@@ -2033,6 +2047,7 @@ func applySSAOutcomePlainLeafPlans(
 	}
 	blocked := make(map[FunctionID]bool)
 	direct := make(map[FunctionID]bool)
+	outgoing := make(map[FunctionID][]FunctionID)
 	ids := make(map[*ssa.Function]FunctionID, len(byID))
 	for id, function := range byID {
 		ids[function] = id
@@ -2047,6 +2062,11 @@ func applySSAOutcomePlainLeafPlans(
 		exactStatic := call != nil && call.Common() != nil && call.Common().StaticCallee() != nil &&
 			plan.Kind == CallDirect && plan.Rep == DirectCoro && plan.Transport == ManagedTransport &&
 			!plan.Open && !plan.MayBeNil && !plan.SyncDispatch && !plan.RawPlain && len(plan.Targets) == 1
+		if exactStatic {
+			if owner, ok := ids[call.Parent()]; ok {
+				outgoing[owner] = append(outgoing[owner], plan.Targets[0])
+			}
+		}
 		for _, target := range plan.Targets {
 			if exactStatic {
 				direct[target] = true
@@ -2065,38 +2085,98 @@ func applySSAOutcomePlainLeafPlans(
 			}
 		}
 	}
-	for index := range base.functions {
-		plan := base.functions[index]
-		function := byID[plan.ID]
-		facts, classified := localBodyFacts[function]
-		if function == nil || len(function.FreeVars) != 0 || !classified || !facts.OutcomePlainLeaf || facts.HasCycle ||
-			facts.InstructionCount <= 0 || facts.InstructionCount > maxAtomicCost ||
-			blocked[plan.ID] || !direct[plan.ID] {
-			continue
+	eligible := func(plan FunctionPlan, function *ssa.Function, facts SSAFunctionBodyFacts, classified bool) bool {
+		if function == nil || len(function.FreeVars) != 0 || !classified || facts.HasCycle ||
+			facts.InstructionCount <= 0 || blocked[plan.ID] || !direct[plan.ID] {
+			return false
 		}
-		loweredSafe := true
 		for _, lowered := range loweredCalls[function] {
 			if !lowered.ExplicitStatusElided {
-				loweredSafe = false
-				break
+				return false
 			}
 		}
-		if !loweredSafe || plan.External != Defined || plan.Emission != EmitCoroutine ||
-			plan.ManagedEntry != ManagedEntryCoroutine ||
-			plan.Primary != PrimaryCoroutine || plan.FuncRep != DirectCoro ||
-			plan.ManagedDemand == NoDemand || plan.RawPlainDemand || plan.RawPlainEntry ||
-			plan.RawPlainOnly || plan.Recursive || plan.Effect != OutcomeStructured ||
-			plan.Exec&^MayUnwind != 0 || plan.AtomicCostProof != AtomicCostUnproven || plan.AtomicCost != 0 {
-			continue
-		}
+		return plan.External == Defined && plan.Emission == EmitCoroutine &&
+			plan.ManagedEntry == ManagedEntryCoroutine &&
+			plan.Primary == PrimaryCoroutine && plan.FuncRep == DirectCoro &&
+			plan.ManagedDemand != NoDemand && !plan.RawPlainDemand && !plan.RawPlainEntry &&
+			!plan.RawPlainOnly && !plan.Recursive && plan.Effect.Contains(OutcomeStructured) &&
+			plan.Effect&^(AwaitStructured|OutcomeStructured) == 0 &&
+			plan.LocalEffect&^OutcomeStructured == 0 && plan.DeclaredEffect&^OutcomeStructured == 0 &&
+			plan.Exec&^MayUnwind == 0 && plan.AtomicCostProof == AtomicCostUnproven && plan.AtomicCost == 0
+	}
+	selectPlan := func(index int, cost uint64, proof AtomicCostProof) error {
+		plan := base.functions[index]
 		plan.Emission = EmitOutcomePlain
 		plan.ManagedEntry = ManagedEntryOutcomePlain
-		plan.AtomicCost = uint64(facts.InstructionCount)
-		plan.AtomicCostProof = AtomicCostLeaf
+		// Every AwaitStructured dependency was proven to be a synchronous
+		// outcome entry before selection. Retain terminal outcome semantics but
+		// remove the now-elided physical await capability from this body.
+		plan.Effect = OutcomeStructured
+		plan.AtomicCost = cost
+		plan.AtomicCostProof = proof
 		if err := validateManagedEntryPlan(plan); err != nil {
-			return fmt.Errorf("coro: select outcome-plain leaf %q: %w", plan.ID, err)
+			return fmt.Errorf("coro: select outcome-plain %s %q: %w", proof, plan.ID, err)
 		}
 		base.functions[index] = plan
+		return nil
+	}
+
+	available := make(map[FunctionID]uint64)
+	for _, plan := range base.functions {
+		if plan.External == ExternalKnown && plan.ManagedEntry == ManagedEntryOutcomePlain &&
+			plan.AtomicCostProof.ProvesOutcomePlain() && plan.AtomicCost != 0 {
+			available[plan.ID] = plan.AtomicCost
+		}
+	}
+	for index, plan := range base.functions {
+		function := byID[plan.ID]
+		facts, classified := localBodyFacts[function]
+		if !facts.OutcomePlainLeaf || facts.OutcomePlainCallCount != 0 ||
+			!eligible(plan, function, facts, classified) {
+			continue
+		}
+		cost := uint64(facts.InstructionCount)
+		if cost > uint64(maxAtomicCost) {
+			continue
+		}
+		if err := selectPlan(index, cost, AtomicCostLeaf); err != nil {
+			return err
+		}
+		available[plan.ID] = cost
+	}
+
+	for changed := true; changed; {
+		changed = false
+		for index, plan := range base.functions {
+			if _, selected := available[plan.ID]; selected {
+				continue
+			}
+			function := byID[plan.ID]
+			facts, classified := localBodyFacts[function]
+			calls := outgoing[plan.ID]
+			if !facts.OutcomePlainDAG || facts.OutcomePlainCallCount <= 0 ||
+				len(calls) != facts.OutcomePlainCallCount || !eligible(plan, function, facts, classified) {
+				continue
+			}
+			cost := uint64(facts.InstructionCount)
+			proven := true
+			for _, target := range calls {
+				calleeCost, ok := available[target]
+				if !ok || ^uint64(0)-cost < calleeCost {
+					proven = false
+					break
+				}
+				cost += calleeCost
+			}
+			if !proven || cost > uint64(maxAtomicCost) {
+				continue
+			}
+			if err := selectPlan(index, cost, AtomicCostDAG); err != nil {
+				return err
+			}
+			available[plan.ID] = cost
+			changed = true
+		}
 	}
 	return nil
 }

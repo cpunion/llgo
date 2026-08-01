@@ -36,7 +36,7 @@ const (
 
 // coroPhysicalBodyCapability is the one body capability installed by a
 // physical-emission transaction. Exactly one arm is present: a full LLVM
-// coroutine or a synchronous outcome-publishing leaf. Keeping this union here
+// coroutine or a synchronous outcome-publishing body. Keeping this union here
 // prevents each physical ABI from growing its own lowering session.
 type coroPhysicalBodyCapability struct {
 	coroutine *coroBodyContext
@@ -192,9 +192,23 @@ func (p *context) hasStructuredOutcomePhysicalBody() bool {
 	return p.activeCoroPhysicalBodyCapability() != nil
 }
 
+// managedPhysicalTask is the scheduler-owned G passed to either structured
+// physical ABI. Outcome-plain DAG calls forward it unchanged; only a full LLVM
+// coroutine body may consume the coroutine and cleanup capabilities below.
+func (p *context) managedPhysicalTask() llssa.Expr {
+	body := p.activeCoroPhysicalBodyCapability()
+	if body == nil {
+		return llssa.Expr{}
+	}
+	if body.coroutine != nil {
+		return body.coroutine.task
+	}
+	return body.outcome.task
+}
+
 // coroTask and coroCleanup expose narrow capabilities owned by the active
-// physical-emission session. Lowerers that need only one capability must not
-// retain or inspect the complete mutable body.
+// full-coroutine emission session. Lowerers that need only one capability must
+// not retain or inspect the complete mutable body.
 func (p *context) coroTask() llssa.Expr {
 	body := p.activeCoroEmissionBody()
 	if body == nil {
