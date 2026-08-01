@@ -30,10 +30,12 @@ import (
 	"strings"
 
 	"github.com/goplus/llgo/cmd/internal/base"
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/goplus/llgo/internal/mockable"
 )
 
 const minimumUpstreamLLDBVersion = 18
+const debuggerSchemaFilename = "llgo_debugger_schema_v1.json"
 
 var (
 	//go:embed llgo_plugin.py
@@ -90,6 +92,10 @@ func run(configuredPath string, args []string, stdin io.Reader, stdout, stderr i
 	pluginPath := filepath.Join(pluginDir, "llgo_plugin.py")
 	if err := os.WriteFile(pluginPath, pluginSource, 0600); err != nil {
 		return fmt.Errorf("llgo lldb: write plugin: %w", err)
+	}
+	schemaPath := filepath.Join(pluginDir, debuggerSchemaFilename)
+	if err := os.WriteFile(schemaPath, debugabi.SchemaV1(), 0600); err != nil {
+		return fmt.Errorf("llgo lldb: write debugger schema: %w", err)
 	}
 
 	lldbArgs := make([]string, 0, len(args)+2)
