@@ -225,16 +225,17 @@ func TestLibraryEffectSummaryCanonicalRecordAndImportPolicy(t *testing.T) {
 func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 	summary := testLibraryEffectSummary(t, "example/outcome", false)
 	summary.Functions = []LibraryEffectFunction{{
-		ID:              "llgo.function.v0:outcome",
-		ABIHash:         strings.Repeat("4", 64),
-		Effect:          OutcomeStructured,
-		Exec:            MayUnwind,
-		FuncRep:         DirectCoro,
-		Primary:         PrimaryCoroutine,
-		ManagedEntry:    ManagedEntryOutcomePlain,
-		AtomicCost:      7,
-		AtomicCostProof: AtomicCostLeaf,
-		PrimarySymbol:   "example/outcome.Leaf$outcome",
+		ID:                    "llgo.function.v0:outcome",
+		ABIHash:               strings.Repeat("4", 64),
+		Effect:                OutcomeStructured,
+		Exec:                  MayUnwind,
+		FuncRep:               DirectCoro,
+		Primary:               PrimaryCoroutine,
+		ManagedEntry:          ManagedEntryOutcomePlain,
+		AtomicCost:            7,
+		AtomicCostProof:       AtomicCostLeaf,
+		AtomicCostCertificate: testAtomicCostCertificate,
+		PrimarySymbol:         "example/outcome.Leaf$outcome",
 	}}
 	summary.ForeignCallables = nil
 	summary.ExportBindings = nil
@@ -252,7 +253,8 @@ func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	if policy.ManagedEntry != ManagedEntryOutcomePlain ||
-		policy.AtomicCost != function.AtomicCost || policy.AtomicCostProof != AtomicCostLeaf {
+		policy.AtomicCost != function.AtomicCost || policy.AtomicCostProof != AtomicCostLeaf ||
+		policy.AtomicCostCertificate != function.AtomicCostCertificate {
 		t.Fatalf("imported outcome policy = %+v", policy)
 	}
 	dag := summary
@@ -277,6 +279,7 @@ func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 	for _, mutate := range []func(*LibraryEffectFunction){
 		func(function *LibraryEffectFunction) { function.AtomicCost = 0 },
 		func(function *LibraryEffectFunction) { function.AtomicCostProof = AtomicCostUnproven },
+		func(function *LibraryEffectFunction) { function.AtomicCostCertificate = "" },
 		func(function *LibraryEffectFunction) { function.ManagedEntry = ManagedEntryCoroutine },
 	} {
 		invalid := summary

@@ -29,7 +29,7 @@ import (
 const (
 	coroLibraryFunctionABIDigestDomain = "llgo.coro.library-function-abi.v1"
 	coroLibraryExportABIDigestDomain   = "llgo.coro.library-export-abi.v1"
-	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v4."
+	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v5."
 )
 
 // CoroLibraryEffectView is the immutable archive-facing projection of a
@@ -383,6 +383,7 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 			functionPlan.ManagedEntry != fact.ManagedEntry ||
 			functionPlan.AtomicCost != fact.AtomicCost ||
 			functionPlan.AtomicCostProof != fact.AtomicCostProof ||
+			functionPlan.AtomicCostCertificate != fact.AtomicCostCertificate ||
 			functionPlan.Emission != coro.EmitNone && functionPlan.Emission != coro.EmitExternal {
 			return fmt.Errorf(
 				"coroutine library effect %q disagrees with final consumer plan: plan=%+v producer=%+v ignored=%t",
@@ -390,7 +391,7 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 			)
 		}
 		// RawPlainSymbol is retained in the producer record so a later lowering
-		// can bind exact legacy crossings without rediscovering symbols. The v4
+		// can bind exact legacy crossings without rediscovering symbols. The v5
 		// managed-function consumer does not yet own an external raw-body capability,
 		// however: mustRawPlainFunctionSymbol deliberately accepts only a
 		// locally defined variant. Reject every imported raw demand here even
@@ -398,18 +399,18 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 		// a later emitter cannot honor.
 		if functionPlan.RawPlainDemand {
 			return fmt.Errorf(
-				"coroutine library effect %q has consumer raw-plain demand, which library summary v4 does not lower",
+				"coroutine library effect %q has consumer raw-plain demand, which library summary v5 does not lower",
 				fact.ID,
 			)
 		}
-		// The v4 managed-function record publishes the primary entry only.
+		// The v5 managed-function record publishes the primary entry only.
 		// Descriptor construction is an
 		// independently versioned ABI and cannot be inferred from FuncRep width.
 		// An undemanded declaration emits nothing and therefore needs no
 		// descriptor in this consumer; reject only an active crossing.
 		if fact.FuncRep == coro.Dispatch && functionPlan.Emission != coro.EmitNone {
 			return fmt.Errorf(
-				"coroutine library effect %q requires an external Dispatch producer, which library summary v4 does not publish",
+				"coroutine library effect %q requires an external Dispatch producer, which library summary v5 does not publish",
 				fact.ID,
 			)
 		}
@@ -661,17 +662,18 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			rawPlainSymbol = entry.baseName
 		}
 		fact := coro.LibraryEffectFunction{
-			ID:              functionPlan.ID,
-			ABIHash:         abiHash,
-			Effect:          functionPlan.Effect,
-			Exec:            functionPlan.Exec,
-			FuncRep:         functionPlan.FuncRep,
-			Primary:         functionPlan.Primary,
-			ManagedEntry:    functionPlan.ManagedEntry,
-			AtomicCost:      functionPlan.AtomicCost,
-			AtomicCostProof: functionPlan.AtomicCostProof,
-			PrimarySymbol:   entry.name,
-			RawPlainSymbol:  rawPlainSymbol,
+			ID:                    functionPlan.ID,
+			ABIHash:               abiHash,
+			Effect:                functionPlan.Effect,
+			Exec:                  functionPlan.Exec,
+			FuncRep:               functionPlan.FuncRep,
+			Primary:               functionPlan.Primary,
+			ManagedEntry:          functionPlan.ManagedEntry,
+			AtomicCost:            functionPlan.AtomicCost,
+			AtomicCostProof:       functionPlan.AtomicCostProof,
+			AtomicCostCertificate: functionPlan.AtomicCostCertificate,
+			PrimarySymbol:         entry.name,
+			RawPlainSymbol:        rawPlainSymbol,
 		}
 		if err := universe.CoroLibraryEffects().ValidateFunction(function, metadata, fact); err != nil {
 			return fmt.Errorf("coroutine library summary: preflight %q: %w", functionPlan.ID, err)

@@ -129,6 +129,10 @@ func validateOutcomePlainFrozenPlan(
 		!logical.AtomicCostProof.ProvesOutcomePlain() {
 		return fmt.Errorf("outcome-plain physical plan disagrees with its logical capability")
 	}
+	if plan.atomicCost != logical.AtomicCost || plan.atomicCostProof != logical.AtomicCostProof ||
+		plan.atomicCertificate != logical.AtomicCostCertificate {
+		return fmt.Errorf("outcome-plain physical plan lost its exact atomic-cost certificate")
+	}
 	if plan.cleanup != nil || plan.critical != nil || plan.needsPreempt || plan.preempt != nil {
 		return fmt.Errorf("outcome-plain body acquired cleanup, critical, or preemption state")
 	}
@@ -220,6 +224,11 @@ func (p *context) compileOutcomePlainPhysicalBody(
 		phi()
 	}
 	emission.completeManagedPhysicalBody(bodyCapability)
+	if err := p.pkg.EmitCoroAtomicCostCertificate(
+		p.fn.Name(), logical.AtomicCost, uint8(logical.AtomicCostProof), logical.AtomicCostCertificate,
+	); err != nil {
+		panic(fmt.Errorf("publish outcome-plain atomic-cost certificate: %w", err))
+	}
 }
 
 func (p *context) storeOutcomePlainResult(
@@ -280,6 +289,13 @@ func (p *context) compileCoroStaticOutcomeCall(
 	calleeFn, _, kind := p.compileFunctionEntry(entry)
 	if kind != goFunc {
 		panic(fmt.Sprintf("outcome-plain target %q did not resolve to a Go entry", entry.plan.ID))
+	}
+	if p.hasOutcomePlainPhysicalBody() && entry.plan.External == coro.ExternalKnown {
+		if err := p.pkg.EmitCoroAtomicCostDependency(
+			calleeFn.Name(), entry.plan.AtomicCost, uint8(entry.plan.AtomicCostProof), entry.plan.AtomicCostCertificate,
+		); err != nil {
+			panic(fmt.Errorf("publish imported outcome atomic-cost dependency: %w", err))
+		}
 	}
 	resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
 	// Reuse the coroutine result-slot policy even though this exact call cannot

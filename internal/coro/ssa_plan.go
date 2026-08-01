@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"math"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -86,6 +87,9 @@ type SSAFunctionPolicy struct {
 	ManagedEntry    ManagedEntryKind
 	AtomicCost      uint64
 	AtomicCostProof AtomicCostProof
+	// AtomicCostCertificate binds a producer-owned path proof to its exact
+	// FunctionID, CFG projection and transitive callee certificates.
+	AtomicCostCertificate string
 	// CallableIdentityCertificate is the execution-policy-neutral identity of
 	// one exact managed C declaration. It may coexist with either a generic
 	// behavior contract, a legacy physical capability, or neither.
@@ -575,6 +579,12 @@ type SSAFunctionBodyFacts struct {
 	Exec             ExecFlags
 	InstructionCount int
 	HasCycle         bool
+	// AtomicPath is the ProgramIR-owned block/call projection used for the
+	// path-sensitive no-cut cost proof. It is present for defined body facts
+	// even when the body is not an outcome-plain candidate, so later whole-
+	// program cost analysis can reuse the same projection without rescanning
+	// raw SSA.
+	AtomicPath *SSAAtomicPathFacts
 	// OutcomePlainLeaf is a frontend-owned proof that every evaluated source
 	// instruction belongs to the initial return/explicit-panic leaf cohort. It
 	// proves no source call, defer, implicit-fault adapter, wait, spawn, or other
@@ -590,7 +600,7 @@ type SSAFunctionBodyFacts struct {
 	OutcomePlainCallCount int
 }
 
-func (facts SSAFunctionBodyFacts) validate() error {
+func (facts SSAFunctionBodyFacts) validate(function *ssa.Function) error {
 	if err := facts.Effect.Validate(); err != nil {
 		return fmt.Errorf("local body effect: %w", err)
 	}
@@ -606,11 +616,55 @@ func (facts SSAFunctionBodyFacts) validate() error {
 	if facts.OutcomePlainCallCount < 0 {
 		return fmt.Errorf("outcome-plain source call count is negative")
 	}
+	if facts.AtomicPath != nil {
+		if err := facts.AtomicPath.validate(function); err != nil {
+			return err
+		}
+		var instructionCost uint64
+		callCount := 0
+		for _, block := range facts.AtomicPath.Blocks {
+			if math.MaxUint64-instructionCost < block.LocalCost {
+				return fmt.Errorf("atomic path local instruction cost overflows")
+			}
+			instructionCost += block.LocalCost
+			callCount += len(block.Calls)
+		}
+		if instructionCost != uint64(facts.InstructionCount) {
+			return fmt.Errorf(
+				"atomic path local instruction cost %d disagrees with body count %d",
+				instructionCost, facts.InstructionCount,
+			)
+		}
+		if callCount != facts.OutcomePlainCallCount {
+			return fmt.Errorf(
+				"atomic path call occurrences %d disagree with outcome-plain call count %d",
+				callCount, facts.OutcomePlainCallCount,
+			)
+		}
+	} else if facts.OutcomePlainLeaf || facts.OutcomePlainDAG {
+		return fmt.Errorf("outcome-plain candidate has no atomic path projection")
+	}
 	if facts.OutcomePlainLeaf && facts.OutcomePlainCallCount != 0 {
 		return fmt.Errorf("outcome-plain leaf proof contains source calls")
 	}
 	return nil
 }
+
+// Same reports structural equality without exposing the mutable slice backing
+// of AtomicPath. ProgramIR uses it to reject owner-dependent semantic facts.
+func (facts SSAFunctionBodyFacts) Same(other SSAFunctionBodyFacts) bool {
+	left, right := facts.AtomicPath, other.AtomicPath
+	facts.AtomicPath, other.AtomicPath = nil, nil
+	return facts == other && left.equal(right)
+}
+
+// Clone returns an immutable-copy boundary for a ProgramIR projection.
+func (facts SSAFunctionBodyFacts) Clone() SSAFunctionBodyFacts {
+	facts.AtomicPath = facts.AtomicPath.clone()
+	return facts
+}
+
+func (facts SSAFunctionBodyFacts) clone() SSAFunctionBodyFacts { return facts.Clone() }
 
 // SSAFunctionPlan binds an immutable FunctionPlan back to its SSA function.
 type SSAFunctionPlan struct {
@@ -1495,9 +1549,10 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 					} else {
 						bodyFacts = scanSSAFunctionBody(fn)
 					}
-					if err := bodyFacts.validate(); err != nil {
+					if err := bodyFacts.validate(fn); err != nil {
 						return nil, fmt.Errorf("coro: local SSA body %q: %w", fn.Name(), err)
 					}
+					bodyFacts = bodyFacts.clone()
 					localBodyFacts[fn] = bodyFacts
 				}
 				bodyEffect, bodyExec := bodyFacts.Effect, bodyFacts.Exec
@@ -1521,6 +1576,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			policy.ManagedEntry = trusted.ManagedEntry
 			policy.AtomicCost = trusted.AtomicCost
 			policy.AtomicCostProof = trusted.AtomicCostProof
+			policy.AtomicCostCertificate = trusted.AtomicCostCertificate
 			policy.NeedsDispatch = policy.NeedsDispatch || trusted.NeedsDispatch
 			policy.TrustedBoundedRecursion = trusted.TrustedBoundedRecursion
 			_, rawFunctionAddressEntry := rawFunctionAddressEntries[fn]
@@ -1599,6 +1655,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			ManagedEntry:            policy.ManagedEntry,
 			AtomicCost:              policy.AtomicCost,
 			AtomicCostProof:         policy.AtomicCostProof,
+			AtomicCostCertificate:   policy.AtomicCostCertificate,
 			TrustedBoundedRecursion: policy.TrustedBoundedRecursion,
 			NeedsDispatch:           policy.NeedsDispatch,
 			RawPlainEntry:           policy.RawPlainEntry,
@@ -2019,15 +2076,16 @@ func validateSSAImportedOutcomePlainCosts(plan *Plan, maxAtomicCost int) error {
 // closed direct-call DAG over those leaves and imported producer proofs. The
 // local ProgramIR projection is necessary but insufficient: every counted call
 // must be one exact static managed edge, every target must already publish a
-// proven outcome entry, and the conservative local-plus-callee cost must fit
-// the consumer budget. Bottom-up selection is also the call-graph acyclicity
-// proof: no member of a cycle can become available to its predecessor.
+// proven outcome entry, and the longest path over the frozen ProgramIR block
+// projection must fit the consumer budget. Each exact call occurrence carries
+// its callee's complete transitive certificate. Bottom-up selection is also the
+// call-graph acyclicity proof: no member of a cycle can become available to its
+// predecessor.
 //
 // Roots, spawns, compiler-lowered incoming calls, first-class references, raw
 // entries, recursion and open execution remain ordinary LLVM coroutines. Local
-// InstructionCount counts every evaluated instruction and the DAG sum counts a
-// callee once per exact source call site; branch exclusivity is intentionally
-// ignored, making the bound conservative without rebuilding a second CFG.
+// The path proof consumes ProgramIR's block-local costs and successor indexes;
+// analysis does not rescan raw SSA or build a second CFG.
 func applySSAOutcomePlainPlans(
 	base *Plan,
 	graph *Graph,
@@ -2047,7 +2105,11 @@ func applySSAOutcomePlainPlans(
 	}
 	blocked := make(map[FunctionID]bool)
 	direct := make(map[FunctionID]bool)
-	outgoing := make(map[FunctionID][]FunctionID)
+	type outcomeCall struct {
+		instruction ssa.CallInstruction
+		target      FunctionID
+	}
+	outgoing := make(map[FunctionID][]outcomeCall)
 	ids := make(map[*ssa.Function]FunctionID, len(byID))
 	for id, function := range byID {
 		ids[function] = id
@@ -2064,7 +2126,7 @@ func applySSAOutcomePlainPlans(
 			!plan.Open && !plan.MayBeNil && !plan.SyncDispatch && !plan.RawPlain && len(plan.Targets) == 1
 		if exactStatic {
 			if owner, ok := ids[call.Parent()]; ok {
-				outgoing[owner] = append(outgoing[owner], plan.Targets[0])
+				outgoing[owner] = append(outgoing[owner], outcomeCall{instruction: call, target: plan.Targets[0]})
 			}
 		}
 		for _, target := range plan.Targets {
@@ -2086,7 +2148,7 @@ func applySSAOutcomePlainPlans(
 		}
 	}
 	eligible := func(plan FunctionPlan, function *ssa.Function, facts SSAFunctionBodyFacts, classified bool) bool {
-		if function == nil || len(function.FreeVars) != 0 || !classified || facts.HasCycle ||
+		if function == nil || len(function.FreeVars) != 0 || !classified || facts.HasCycle || facts.AtomicPath == nil ||
 			facts.InstructionCount <= 0 || blocked[plan.ID] || !direct[plan.ID] {
 			return false
 		}
@@ -2102,9 +2164,10 @@ func applySSAOutcomePlainPlans(
 			!plan.RawPlainOnly && !plan.Recursive && plan.Effect.Contains(OutcomeStructured) &&
 			plan.Effect&^(AwaitStructured|OutcomeStructured) == 0 &&
 			plan.LocalEffect&^OutcomeStructured == 0 && plan.DeclaredEffect&^OutcomeStructured == 0 &&
-			plan.Exec&^MayUnwind == 0 && plan.AtomicCostProof == AtomicCostUnproven && plan.AtomicCost == 0
+			plan.Exec&^MayUnwind == 0 && plan.AtomicCostProof == AtomicCostUnproven &&
+			plan.AtomicCost == 0 && plan.AtomicCostCertificate == ""
 	}
-	selectPlan := func(index int, cost uint64, proof AtomicCostProof) error {
+	selectPlan := func(index int, cost uint64, proof AtomicCostProof, certificate string) error {
 		plan := base.functions[index]
 		plan.Emission = EmitOutcomePlain
 		plan.ManagedEntry = ManagedEntryOutcomePlain
@@ -2114,6 +2177,7 @@ func applySSAOutcomePlainPlans(
 		plan.Effect = OutcomeStructured
 		plan.AtomicCost = cost
 		plan.AtomicCostProof = proof
+		plan.AtomicCostCertificate = certificate
 		if err := validateManagedEntryPlan(plan); err != nil {
 			return fmt.Errorf("coro: select outcome-plain %s %q: %w", proof, plan.ID, err)
 		}
@@ -2121,11 +2185,13 @@ func applySSAOutcomePlainPlans(
 		return nil
 	}
 
-	available := make(map[FunctionID]uint64)
+	available := make(map[FunctionID]SSAAtomicCalleeCertificate)
 	for _, plan := range base.functions {
 		if plan.External == ExternalKnown && plan.ManagedEntry == ManagedEntryOutcomePlain &&
 			plan.AtomicCostProof.ProvesOutcomePlain() && plan.AtomicCost != 0 {
-			available[plan.ID] = plan.AtomicCost
+			available[plan.ID] = SSAAtomicCalleeCertificate{
+				Function: plan.ID, Cost: plan.AtomicCost, Certificate: plan.AtomicCostCertificate,
+			}
 		}
 	}
 	for index, plan := range base.functions {
@@ -2135,14 +2201,14 @@ func applySSAOutcomePlainPlans(
 			!eligible(plan, function, facts, classified) {
 			continue
 		}
-		cost := uint64(facts.InstructionCount)
-		if cost > uint64(maxAtomicCost) {
+		cost, certificate, proven := proveSSAAtomicPath(plan.ID, AtomicCostLeaf, facts.AtomicPath, nil)
+		if !proven || cost > uint64(maxAtomicCost) {
 			continue
 		}
-		if err := selectPlan(index, cost, AtomicCostLeaf); err != nil {
+		if err := selectPlan(index, cost, AtomicCostLeaf, certificate); err != nil {
 			return err
 		}
-		available[plan.ID] = cost
+		available[plan.ID] = SSAAtomicCalleeCertificate{Function: plan.ID, Cost: cost, Certificate: certificate}
 	}
 
 	for changed := true; changed; {
@@ -2158,23 +2224,31 @@ func applySSAOutcomePlainPlans(
 				len(calls) != facts.OutcomePlainCallCount || !eligible(plan, function, facts, classified) {
 				continue
 			}
-			cost := uint64(facts.InstructionCount)
+			callees := make(map[ssa.CallInstruction]SSAAtomicCalleeCertificate, len(calls))
 			proven := true
-			for _, target := range calls {
-				calleeCost, ok := available[target]
-				if !ok || ^uint64(0)-cost < calleeCost {
+			for _, call := range calls {
+				callee, ok := available[call.target]
+				if !ok {
 					proven = false
 					break
 				}
-				cost += calleeCost
+				if _, duplicate := callees[call.instruction]; duplicate {
+					proven = false
+					break
+				}
+				callees[call.instruction] = callee
 			}
+			if !proven {
+				continue
+			}
+			cost, certificate, proven := proveSSAAtomicPath(plan.ID, AtomicCostDAG, facts.AtomicPath, callees)
 			if !proven || cost > uint64(maxAtomicCost) {
 				continue
 			}
-			if err := selectPlan(index, cost, AtomicCostDAG); err != nil {
+			if err := selectPlan(index, cost, AtomicCostDAG, certificate); err != nil {
 				return err
 			}
-			available[plan.ID] = cost
+			available[plan.ID] = SSAAtomicCalleeCertificate{Function: plan.ID, Cost: cost, Certificate: certificate}
 			changed = true
 		}
 	}
@@ -3729,12 +3803,27 @@ func scanSSAFunctionBody(fn *ssa.Function) SSAFunctionBodyFacts {
 	// independent execution flag. It does not itself force coroutine lowering.
 	exec := MayUnwind
 	instructions := 0
+	callCount := 0
+	atomicBlocks := make([]SSAAtomicBlockFacts, len(fn.Blocks))
 	for _, block := range fn.Blocks {
-		for _, instruction := range block.Instrs {
+		blockFacts := SSAAtomicBlockFacts{Index: block.Index}
+		for _, successor := range block.Succs {
+			blockFacts.Successors = append(blockFacts.Successors, successor.Index)
+		}
+		sort.Ints(blockFacts.Successors)
+		for instructionIndex, instruction := range block.Instrs {
 			if _, debug := instruction.(*ssa.DebugRef); debug {
 				continue
 			}
 			instructions++
+			blockFacts.LocalCost++
+			if call, ordinary := instruction.(*ssa.Call); ordinary {
+				callCount++
+				blockFacts.Calls = append(blockFacts.Calls, SSAAtomicCallSiteFacts{
+					Instruction:      call,
+					InstructionIndex: instructionIndex,
+				})
+			}
 			switch instruction := instruction.(type) {
 			case *ssa.Send:
 				effect = effect.Join(MayPark)
@@ -3756,12 +3845,16 @@ func scanSSAFunctionBody(fn *ssa.Function) SSAFunctionBodyFacts {
 				}
 			}
 		}
+		atomicBlocks[block.Index] = blockFacts
 	}
+	atomicPath, _ := NewSSAAtomicPathFacts(fn, atomicBlocks)
 	return SSAFunctionBodyFacts{
-		Effect:           effect.Normalize(),
-		Exec:             exec,
-		InstructionCount: instructions,
-		HasCycle:         cfgHasCycle(fn.Blocks),
+		Effect:                effect.Normalize(),
+		Exec:                  exec,
+		InstructionCount:      instructions,
+		HasCycle:              cfgHasCycle(fn.Blocks),
+		AtomicPath:            atomicPath,
+		OutcomePlainCallCount: callCount,
 	}
 }
 

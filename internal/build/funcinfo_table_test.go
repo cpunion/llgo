@@ -181,6 +181,26 @@ func TestFuncInfoTableMaterializesEntrySites(t *testing.T) {
 	}
 }
 
+func TestFuncInfoEntrySiteCarriesAtomicBoundedCompilerCapability(t *testing.T) {
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("example.com/atomic", "example.com/atomic")
+	pkg.EmitFuncInfo("example.com/atomic.body", "example.com/atomic.Body", "body.go", 1, 1)
+	function := pkg.NewFunc("example.com/atomic.body", llssa.NoArgsNoRet, llssa.InC)
+	function.MakeBody(1).Return()
+	if err := pkg.EmitCoroAtomicCostCertificate(
+		"example.com/atomic.body", 1, 1, strings.Repeat("a", 64),
+	); err != nil {
+		t.Fatal(err)
+	}
+	prog.EnableFuncInfoMetadata(true)
+	prog.EnableFuncInfoSites(true)
+	emitFuncInfoEntrySitesForModule(pkg.Module(), prog.PointerSize(), false)
+	if _, err := llssa.VerifyCoroAtomicCostModule(pkg.Module()); err != nil {
+		t.Fatalf("verify atomic-cost body after funcinfo entry insertion: %v\n%s", err, pkg.String())
+	}
+}
+
 func TestFuncInfoTableSitesDisabledKeepsTables(t *testing.T) {
 	prog := llssa.NewProgram(nil)
 	src := prog.NewPackage("example.com/p", "example.com/p")

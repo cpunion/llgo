@@ -7644,6 +7644,11 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 	if !stageBackend {
 		emitFuncInfoEntrySites(ctx, ret)
 		emitFuncInfoStubSites(ctx, ret)
+		if ctx.mode != ModeGen {
+			if _, err := llssa.VerifyCoroAtomicCostModule(mod); err != nil {
+				return fmt.Errorf("verify package %s final atomic-cost certificates: %w", pkgPath, err)
+			}
+		}
 	}
 	freezePackageLinkSnapshot(aPkg)
 
@@ -7734,6 +7739,9 @@ func lowerCoroPackageModuleWithProgram(prog llssa.Program, pkgPath string, mod g
 	if err := validateCoroPackageStaticAllocas(pkgPath, mod); err != nil {
 		return err
 	}
+	if _, err := llssa.VerifyCoroAtomicCostModule(mod); err != nil {
+		return fmt.Errorf("verify package %s atomic-cost certificates before coroutine lowering: %w", pkgPath, err)
+	}
 	options := gllvm.NewPassBuilderOptions()
 	defer options.Dispose()
 	if err := mod.RunPasses(coroPackageLoweringPipeline, prog.TargetMachine(), options); err != nil {
@@ -7742,6 +7750,9 @@ func lowerCoroPackageModuleWithProgram(prog llssa.Program, pkgPath string, mod g
 	llssa.RemoveKeepAliveCallsAfterCoroSplit(mod)
 	if err := gllvm.VerifyModule(mod, gllvm.ReturnStatusAction); err != nil {
 		return fmt.Errorf("verify package %s after coroutine lowering: %w", pkgPath, err)
+	}
+	if _, err := llssa.VerifyCoroAtomicCostModule(mod); err != nil {
+		return fmt.Errorf("verify package %s atomic-cost certificates after coroutine lowering: %w", pkgPath, err)
 	}
 	for function := mod.FirstFunction(); !function.IsNil(); function = gllvm.NextFunction(function) {
 		if strings.HasPrefix(function.Name(), "llvm.coro.") && !function.FirstUse().IsNil() {
@@ -7857,6 +7868,9 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	if ctx.stagedFuncInfoSites && ctx.stagedFuncInfoMeta {
 		emitFuncInfoEntrySitesForModule(mod, ctx.stagedPointerSize, ctx.stagedMachOSites)
 		emitFuncInfoStubSitesForModule(mod, ctx.stagedPointerSize, ctx.stagedMachOSites)
+	}
+	if _, err := llssa.VerifyCoroAtomicCostModule(mod); err != nil {
+		return "", fmt.Errorf("verify package %s final detached atomic-cost certificates: %w", pkg.PkgPath, err)
 	}
 	if ctx.buildConf.CheckLLFiles {
 		if err := dumpLLVMIRIfNeeded(ctx, pkg.PkgPath, pkg.ExportFile, mod.String()); err != nil {

@@ -696,16 +696,17 @@ when its environment may be released.  The binding generator supplies only
 this bottom timing/lifetime fact; callback positions, ABIs, adapters, and
 managed target identities remain compiler-derived.
 
-### 7.4 Library summary v4
+### 7.4 Library summary v5
 
-`llgo.coro.library-effect-summary.v4` is now the hard-cut producer schema.
+`llgo.coro.library-effect-summary.v5` is now the hard-cut producer schema.
 `CallableContractFacts` is not embedded unchanged because it also contains
-consumer call-site invocations.  v4 has three collections:
+consumer call-site invocations.  v5 has three collections:
 
 1. **Managed functions**: the existing FunctionID, ABI hash, inferred effect,
    execution flags, representation, physically emitted primary entries, exact
    managed-entry kind, and the optional leaf or direct-call-DAG atomic
-   cost/proof owned by a bounded outcome-plain producer.
+   cost/proof/content-addressed path certificate owned by a bounded
+   outcome-plain producer.
 2. **Foreign callables**: exact declaration identity, physical symbol, typed
    ABI hash, target-neutral behavior contract, proof kind/digest, and any
    trusted refinement.
@@ -736,11 +737,12 @@ reconstructed from a code address or silently replaced by the consumer's
 default.
 
 An imported outcome-plain entry is usable only when the producer publishes a
-non-zero leaf proof and the consumer's finite `MaxAtomicCost` budget contains
-its recorded cost.  A negative budget is the existing explicit unlimited mode;
-otherwise a missing proof or over-budget value fails planning closed.  Because
-the producer publishes one exact primary ABI, a consumer cannot silently
-substitute an unavailable coroutine entry.
+non-zero leaf or direct-call-DAG proof, its content-addressed path certificate,
+and the consumer's finite `MaxAtomicCost` budget contains its recorded cost. A
+negative budget is the existing explicit unlimited mode; otherwise a missing
+certificate/proof or over-budget value fails planning closed. Because the
+producer publishes one exact primary ABI, a consumer cannot silently substitute
+an unavailable coroutine entry.
 
 Export bindings remain serialized and indexed but non-authorizing.  They do
 not permit a raw entry, global alias, or C-to-Go ingress adapter until the

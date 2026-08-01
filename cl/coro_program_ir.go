@@ -218,8 +218,14 @@ func (ir *coroProgramIR) freezeSiteOwner(
 	if function.Blocks != nil {
 		facts.Exec = coro.MayUnwind
 	}
+	atomicBlocks := make([]coro.SSAAtomicBlockFacts, len(function.Blocks))
 	for _, block := range function.Blocks {
-		for _, instruction := range block.Instrs {
+		blockFacts := coro.SSAAtomicBlockFacts{Index: block.Index}
+		for _, successor := range block.Succs {
+			blockFacts.Successors = append(blockFacts.Successors, successor.Index)
+		}
+		sort.Ints(blockFacts.Successors)
+		for instructionIndex, instruction := range block.Instrs {
 			plan, ok := semantic[instruction]
 			if !ok {
 				return fmt.Errorf("coroutine semantic SitePlan owner %q omitted source instruction %q", function.Name(), instruction.String())
@@ -238,7 +244,14 @@ func (ir *coroProgramIR) freezeSiteOwner(
 			if plan.recipe == coro.RecipeID("cl.ssa.call.v1") {
 				facts.OutcomePlainCallCount++
 				call, ok := instruction.(*ssa.Call)
-				if !ok || call.Common() == nil || call.Common().Signature() == nil ||
+				if !ok {
+					return fmt.Errorf("coroutine call recipe in %q is attached to %T", function.Name(), instruction)
+				}
+				blockFacts.Calls = append(blockFacts.Calls, coro.SSAAtomicCallSiteFacts{
+					Instruction:      call,
+					InstructionIndex: instructionIndex,
+				})
+				if call.Common() == nil || call.Common().Signature() == nil ||
 					prog.LocalGoTypeExceedsNativeStack(
 						newOutcomePlainPhysicalABI(call.Common().Signature()).resultSlotType,
 					) {
@@ -253,12 +266,24 @@ func (ir *coroProgramIR) freezeSiteOwner(
 			facts.Exec = facts.Exec.Join(plan.exec)
 			if !plan.debug {
 				facts.InstructionCount++
+				blockFacts.LocalCost++
 			}
 		}
+		atomicBlocks[block.Index] = blockFacts
 	}
 	facts.Effect = facts.Effect.Normalize()
 	facts.HasCycle = coroSemanticEvaluatedCFGHasCycle(function.Blocks, semantic)
-	if previous, exists := ir.localBodyFacts[function]; exists && previous != facts {
+	if len(function.Blocks) != 0 {
+		atomicPath, err := coro.NewSSAAtomicPathFacts(function, atomicBlocks)
+		if err != nil {
+			return fmt.Errorf("function %q atomic path projection: %w", function.Name(), err)
+		}
+		facts.AtomicPath = atomicPath
+	} else {
+		facts.OutcomePlainLeaf = false
+		facts.OutcomePlainDAG = false
+	}
+	if previous, exists := ir.localBodyFacts[function]; exists && !previous.Same(facts) {
 		return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
 	}
 	ir.localBodyFacts[function] = facts
@@ -369,7 +394,7 @@ func (ir *coroProgramIR) functionLocalBodyFacts(function *ssa.Function) (coro.SS
 	if !ok {
 		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("function %q has no frozen local body facts", function.Name())
 	}
-	return facts, nil
+	return facts.Clone(), nil
 }
 
 func (ir *coroProgramIR) sitePlan(ctx *context, instruction ssa.Instruction) (coroEmissionSitePlan, error) {
