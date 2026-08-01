@@ -488,10 +488,10 @@ func prepareCoroPhysicalFunctionPlan(
 		}
 	}
 	if logical.AtomicCostProof.ProvesOutcomePlain() {
-		if audit.universe == nil {
-			return nil, fmt.Errorf("atomic-cost physical proof requires one prepared emission universe")
+		if audit.universe == nil || audit.universe.coroProgramIR == nil {
+			return nil, fmt.Errorf("atomic-cost physical proof requires one frozen ProgramIR")
 		}
-		facts, err := audit.universe.CoroLocalBodyFacts(audit.fn)
+		facts, err := audit.universe.coroProgramIR.functionLocalBodyFacts(audit.fn)
 		if err != nil {
 			return nil, fmt.Errorf("atomic-cost physical proof: %w", err)
 		}
