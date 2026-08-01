@@ -159,7 +159,8 @@ def register_commands(debugger: lldb.SBDebugger) -> None:
         'command script add -f llgo_plugin.print_go_expression llgo print')
     debugger.HandleCommand(
         'command script add -f llgo_plugin.print_all_variables llgo vars')
-    register_type_formatters(debugger)
+    if inspect_target(debugger.GetSelectedTarget()).supported:
+        register_type_formatters(debugger)
 
 
 def _type_options(hide_children: bool = False) -> int:

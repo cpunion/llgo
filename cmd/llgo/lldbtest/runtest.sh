@@ -102,7 +102,7 @@ printf 'typedef struct { const char *data; unsigned long len; } string; string c
     "${CC:-cc}" -x c -g -o "$non_llgo_dir/non-llgo" -
 run_checked_lldb llgo lldb -lldb "$LLDB_PATH" -- --batch "$non_llgo_dir/non-llgo" \
     -o 'script info = llgo_plugin.inspect_target(lldb.target); assert not info.marker_versions and not info.supported' \
-    -o 'script value = lldb.target.FindFirstGlobalVariable("cstring"); assert value.IsValid() and value.GetSummary() in (None, "None") and value.GetNumChildren() == 2' \
+    -o 'script value = lldb.target.FindFirstGlobalVariable("cstring"); assert value.IsValid() and value.GetSummary() is None and value.GetNumChildren() == 2' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo status", result); assert result.Succeeded() and "Not an LLGo target" in result.GetOutput()' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("p 1+1", result); assert result.Succeeded() and "2" in result.GetOutput()'
 
@@ -111,7 +111,7 @@ printf 'typedef struct { const char *data; unsigned long len; } string; string c
     "${CC:-cc}" -x c -g -o "$non_llgo_dir/unsupported-llgo" -
 run_checked_lldb llgo lldb -lldb "$LLDB_PATH" -- --batch "$non_llgo_dir/unsupported-llgo" \
     -o 'script info = llgo_plugin.inspect_target(lldb.target); assert info.marker_versions == (2,) and not info.supported' \
-    -o 'script value = lldb.target.FindFirstGlobalVariable("cstring"); assert value.IsValid() and value.GetSummary() in (None, "None") and value.GetNumChildren() == 2' \
+    -o 'script value = lldb.target.FindFirstGlobalVariable("cstring"); assert value.IsValid() and value.GetSummary() is None and value.GetNumChildren() == 2' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo status", result); assert result.Succeeded() and "Unsupported LLGo debugger marker version(s): v2" in result.GetOutput()' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo vars", result); assert not result.Succeeded() and "Unsupported LLGo debugger marker version(s): v2" in result.GetError()' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("p 1+1", result); assert result.Succeeded() and "2" in result.GetOutput()'
@@ -121,7 +121,7 @@ printf 'typedef struct { const char *data; unsigned long len; } string; string c
     "${CC:-cc}" -x c -g -o "$non_llgo_dir/ambiguous-llgo" -
 run_checked_lldb llgo lldb -lldb "$LLDB_PATH" -- --batch "$non_llgo_dir/ambiguous-llgo" \
     -o 'script info = llgo_plugin.inspect_target(lldb.target); assert info.marker_versions == (1, 2) and not info.supported' \
-    -o 'script value = lldb.target.FindFirstGlobalVariable("cstring"); assert value.IsValid() and value.GetSummary() in (None, "None") and value.GetNumChildren() == 2' \
+    -o 'script value = lldb.target.FindFirstGlobalVariable("cstring"); assert value.IsValid() and value.GetSummary() is None and value.GetNumChildren() == 2' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo status", result); assert result.Succeeded() and "Unsupported LLGo debugger marker version(s): v1, v2" in result.GetOutput()'
 
 # A structured record is authoritative and must reject unsupported schemas or
@@ -137,5 +137,5 @@ printf 'typedef struct { const char *data; unsigned long len; } string; string c
     "${CC:-cc}" -x c -g -o "$non_llgo_dir/mismatched-record" -
 run_checked_lldb llgo lldb -lldb "$LLDB_PATH" -- --batch "$non_llgo_dir/mismatched-record" \
     -o 'script info = llgo_plugin.inspect_target(lldb.target); assert info.compatibility_error and "pointer size" in info.compatibility_error and not info.supported' \
-    -o 'script value = lldb.target.FindFirstGlobalVariable("cstring"); assert value.IsValid() and value.GetSummary() in (None, "None") and value.GetNumChildren() == 2' \
+    -o 'script value = lldb.target.FindFirstGlobalVariable("cstring"); assert value.IsValid() and value.GetSummary() is None and value.GetNumChildren() == 2' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("p 1+1", result); assert result.Succeeded() and "2" in result.GetOutput()'

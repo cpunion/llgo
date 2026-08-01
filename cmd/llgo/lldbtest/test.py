@@ -304,12 +304,13 @@ class LLDBDebugger:
 
     def setup(self) -> None:
         plugin_path = self.plugin_path or llgo_plugin.__file__
-        self.debugger.HandleCommand(
-            f'command script import "{plugin_path}"')
         self.target = self.debugger.CreateTarget(self.executable_path)
         if not self.target:
             raise LLDBTestException(
                 f"Failed to create target for {self.executable_path}")
+        self.debugger.SetSelectedTarget(self.target)
+        self.debugger.HandleCommand(
+            f'command script import "{plugin_path}"')
 
         target_info = llgo_plugin.inspect_target(self.target)
         if not target_info.supported:

@@ -99,7 +99,9 @@ func run(configuredPath string, args []string, stdin io.Reader, stdout, stderr i
 	}
 
 	lldbArgs := make([]string, 0, len(args)+2)
-	lldbArgs = append(lldbArgs, "-O", lldbImportCommand(pluginPath))
+	// Import after LLDB creates the target so the plugin can enable runtime
+	// formatters only for binaries that advertise a supported LLGo schema.
+	lldbArgs = append(lldbArgs, "-o", lldbImportCommand(pluginPath))
 	lldbArgs = append(lldbArgs, args...)
 
 	command := exec.Command(path, lldbArgs...)

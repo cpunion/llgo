@@ -132,7 +132,10 @@ grep -q __llgo_debugger_marker_v1 "$schema"
 		t.Fatal(err)
 	}
 	got := string(data)
-	for _, want := range []string{"-O\n", "command script import \"", "--batch\n", "./program\n", "-o\n", "run\n"} {
+	if !strings.HasPrefix(got, "-o\ncommand script import \"") {
+		t.Fatalf("LLDB arguments %q do not import the plugin after target creation", got)
+	}
+	for _, want := range []string{"--batch\n", "./program\n", "-o\n", "run\n"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("LLDB arguments %q do not contain %q", got, want)
 		}
