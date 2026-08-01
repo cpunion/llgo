@@ -61,24 +61,28 @@ var After uint32
 var Result uint32
 var GlobalPayload byte
 
-func panicLeaf(payload any, doPanic bool) uint32 {
+type Cell struct { Value uint32 }
+var GlobalCell Cell
+
+func panicLeaf(payload any, cell *Cell, delta uint32, doPanic bool) uint32 {
 	if doPanic {
 		panic(payload)
 	}
-	return 37
+	cell.Value = ((cell.Value + delta) << 1) / 2
+	return cell.Value
 }
 
-func panicMiddle(payload any, doPanic bool) uint32 {
-	return panicLeaf(payload, doPanic)
+func panicMiddle(payload any, cell *Cell, delta uint32, doPanic bool) uint32 {
+	return panicLeaf(payload, cell, delta, doPanic)
 }
 
 func panicChild(doPanic bool) {
 	Before = 1
-	panicMiddle(&GlobalPayload, doPanic)
+	panicMiddle(&GlobalPayload, &GlobalCell, 0, doPanic)
 }
 
 func main() {
-	Result = panicMiddle(nil, false)
+	Result = panicMiddle(nil, &GlobalCell, 37, false)
 	panicChild(true)
 	After = 1
 }

@@ -490,7 +490,7 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - `CoroPlanDigest` 绑定某次最终程序分析、consumer demand、精确 call/value site 和私有 lowering facts，只用于本次 codegen/cache；
 - `LibraryEffectSummary` 嵌入每个实际产出 package object/archive，发布下游继续染色所需、且该产物确实提供的事实。它不能携带或复用最终程序 demand，也不能把未发射的 entry 声称为可用。
 
-当前 `llgo.coro.library-effect-summary.v5` 已硬切并实现以下producer闭环：
+当前 `llgo.coro.library-effect-summary.v6` 已硬切并实现以下producer闭环：
 
 - canonical JSON 记录 package identity、FunctionID、最终 SuspendEffect/ExecFlags、FuncRep、
   primary kind/physical symbol、精确 managed entry、可选 raw-plain symbol、结构 ABI hash，
@@ -510,9 +510,10 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
   `MaxAtomicCost`时重新校验该producer cost，缺失proof或超预算均fail closed，不会退化成
   无界同步执行；imported DAG proof可以作为本地bottom-up DAG的已证明callee，并把producer证书绑定到
   每个精确call occurrence；
+- v6同时硬切outcome completion状态词汇，包含不在原子body内分配panic payload的`FaultNil`；旧schema不能把未知状态解释为普通panic或return；
 - 缺失metadata继续保持opaque，损坏、ABI错配、重复ID或有fact但物理能力不匹配均fail closed，绝不能解释成`NoSuspend`。
 
-v5 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
+v6 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
 
 后续版本仍需补充producer capability，而不是consumer最终计划：
 

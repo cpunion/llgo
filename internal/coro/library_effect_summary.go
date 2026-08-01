@@ -33,9 +33,9 @@ const (
 	// package objects and archives. It is deliberately independent from the
 	// whole-program Summary and PlanDigest schemas: consumer demand may change,
 	// while these producer effects and physically available entries may not.
-	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v5"
+	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v6"
 
-	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v5"
+	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v6"
 
 	// LibraryEffectSummarySection is the portable object-section identity.
 	// Mach-O emission uses the same leaf name in an explicit segment.
@@ -53,7 +53,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 5,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 6,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size

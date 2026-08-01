@@ -19,6 +19,7 @@
 package cl
 
 import (
+	"go/token"
 	"regexp"
 	"strconv"
 	"strings"
@@ -79,6 +80,41 @@ func Leaf(value Huge, payload any, fail bool) Huge {
 }
 func Middle(value Huge, payload any, fail bool) Huge { return Leaf(value, payload, fail) }
 func Parent(value Huge, payload any, fail bool) Huge { return Middle(value, payload, fail) }
+`
+
+const coroOutcomePlainMemoryFixture = `package foo
+
+type cell struct { value uint32 }
+
+func Leaf(target *cell, raw *uint32, value uint32, write bool) uint32 {
+	scaled := uint32((uint64(value) << 1) / 2)
+	if raw == nil {
+		return target.value + scaled
+	}
+	if write {
+		target.value = scaled
+		*raw = scaled + 1
+	}
+	if target.value > *raw {
+		return target.value
+	}
+	return *raw
+}
+
+func Parent(target *cell, raw *uint32, value uint32, write bool) uint32 {
+	return Leaf(target, raw, value, write)
+}
+`
+
+const coroOutcomePlainUnprovenFaultFixture = `package foo
+
+func Leaf(value, divisor, shift int) int {
+	return (value / divisor) << shift
+}
+
+func Parent(value, divisor, shift int) int {
+	return Leaf(value, divisor, shift)
+}
 `
 
 func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
@@ -146,6 +182,81 @@ func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 			}
 			runCoroAtomicCostOptimization(t, prog, module, 1)
 		})
+	}
+}
+
+func TestCoroOutcomePlainMemoryAndNilFaultNativeAndWasm32(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg, plan, ssaPkg := compileCoroOutcomePlainSource(
+				t, test.target, coroOutcomePlainMemoryFixture, "Parent", 64,
+			)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			leaf := ssaPkg.Func("Leaf")
+			leafPlan, found := plan.FunctionPlan(leaf)
+			if !found || leafPlan.Emission != coro.EmitOutcomePlain ||
+				leafPlan.AtomicCostProof != coro.AtomicCostLeaf {
+				t.Fatalf("memory Leaf plan = %+v, present=%t; want proven outcome-plain leaf", leafPlan, found)
+			}
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify outcome-plain memory module before CoroSplit: %v\n%s", err, module.String())
+			}
+			leafBody := module.NamedFunction("foo.Leaf$outcome")
+			if leafBody.IsNil() {
+				t.Fatalf("outcome-plain memory leaf symbol is absent:\n%s", module.String())
+			}
+			leafIR := leafBody.String()
+			if strings.Contains(leafIR, coroFaultPayloadHookV1) ||
+				strings.Contains(leafIR, coroFaultPayloadHookV2) ||
+				strings.Contains(leafIR, "llvm.coro.") || strings.Contains(leafIR, "$coro") ||
+				!coroFunctionStoresI32(leafBody, coroAwaitCompletionFaultNil) {
+				t.Fatalf("outcome-plain memory leaf lost its helper-free nil-fault completion:\n%s", leafIR)
+			}
+			parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
+			if !strings.Contains(parent.String(), coroFaultPrepareHookV1) ||
+				strings.Contains(parent.String(), coroFaultPrepareHookV2) {
+				t.Fatalf("coroutine parent did not materialize the propagated fault:\n%s", parent.String())
+			}
+			runCoroABITestPipeline(t, prog, module)
+		})
+	}
+}
+
+func TestCoroOutcomePlainUnprovenFaultRecipesFailClosed(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, coroOutcomePlainUnprovenFaultFixture)
+	leaf := ssaPkg.Func("Leaf")
+	if leaf == nil {
+		t.Fatal("unproven-fault fixture has no Leaf")
+	}
+	seen := make(map[token.Token]bool)
+	for _, block := range leaf.Blocks {
+		for _, instruction := range block.Instrs {
+			binary, ok := instruction.(*ssa.BinOp)
+			if !ok || binary.Op != token.QUO && binary.Op != token.SHL {
+				continue
+			}
+			semantic, err := planCoroSemanticInstruction(binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if semantic.outcomePlainLeaf {
+				t.Fatalf("unproven %s acquired outcome-plain capability: %+v", binary.Op, semantic)
+			}
+			seen[binary.Op] = true
+		}
+	}
+	if !seen[token.QUO] || !seen[token.SHL] {
+		t.Fatalf("unproven-fault fixture recipes = %v; want division and signed shift", seen)
 	}
 }
 

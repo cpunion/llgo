@@ -18,7 +18,9 @@ package cl
 
 import (
 	"fmt"
+	"go/constant"
 	"go/token"
+	"go/types"
 
 	"github.com/goplus/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
@@ -37,6 +39,126 @@ type coroSemanticInstructionPlan struct {
 	materialized bool
 	debug        bool
 	evaluated    bool
+	// outcomePlainLeaf records that this exact semantic recipe can execute in
+	// a bounded synchronous outcome body without allocating, calling a helper,
+	// parking, or introducing an unmodelled implicit panic edge. It is decided
+	// only here, while classifying raw SSA, and is consumed from the frozen
+	// ProgramIR by analysis and physical emission.
+	outcomePlainLeaf bool
+}
+
+func coroOutcomePlainBasicInfo(typ types.Type) types.BasicInfo {
+	if typ == nil {
+		return 0
+	}
+	basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+	if !ok {
+		return 0
+	}
+	return basic.Info()
+}
+
+func coroOutcomePlainPointerLike(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	switch underlying := types.Unalias(typ).Underlying().(type) {
+	case *types.Pointer, *types.Chan, *types.Map, *types.Signature, *types.Slice:
+		return true
+	case *types.Basic:
+		return underlying.Kind() == types.UnsafePointer
+	default:
+		return false
+	}
+}
+
+// coroOutcomePlainScalarBinOp admits only operators whose LLSSA lowering is a
+// closed scalar LLVM expression. String/interface/aggregate comparison and
+// unproven division/shift operations are intentionally excluded: those
+// recipes can introduce runtime helpers or source-language panic edges.
+func coroOutcomePlainScalarBinOp(instruction *ssa.BinOp) bool {
+	if instruction == nil {
+		return false
+	}
+	info := coroOutcomePlainBasicInfo(instruction.X.Type())
+	switch instruction.Op {
+	case token.ADD, token.SUB, token.MUL:
+		return info&(types.IsInteger|types.IsFloat) != 0
+	case token.QUO:
+		return info&types.IsFloat != 0 ||
+			(info&types.IsInteger != 0 && ssaIntegerValueProvenNonZeroAt(instruction.Y, instruction))
+	case token.REM:
+		return info&types.IsInteger != 0 && ssaIntegerValueProvenNonZeroAt(instruction.Y, instruction)
+	case token.AND, token.OR, token.XOR, token.AND_NOT:
+		return info&types.IsInteger != 0
+	case token.SHL, token.SHR:
+		return info&types.IsInteger != 0 && coroOutcomePlainNonNegativeShiftCount(instruction.Y)
+	case token.EQL, token.NEQ:
+		return info&(types.IsBoolean|types.IsInteger|types.IsFloat) != 0 ||
+			coroOutcomePlainPointerLike(instruction.X.Type())
+	case token.LSS, token.LEQ, token.GTR, token.GEQ:
+		return info&(types.IsInteger|types.IsFloat) != 0
+	default:
+		return false
+	}
+}
+
+func coroOutcomePlainNonNegativeShiftCount(value ssa.Value) bool {
+	if value == nil {
+		return false
+	}
+	if coroOutcomePlainBasicInfo(value.Type())&types.IsUnsigned != 0 {
+		return true
+	}
+	literal, ok := value.(*ssa.Const)
+	return ok && literal.Value != nil && constant.Sign(literal.Value) >= 0
+}
+
+func coroOutcomePlainScalarUnOp(instruction *ssa.UnOp) bool {
+	if instruction == nil {
+		return false
+	}
+	info := coroOutcomePlainBasicInfo(instruction.X.Type())
+	switch instruction.Op {
+	case token.MUL:
+		// The physical SitePlan owns the exact non-nil proof or the
+		// allocation-free explicit-status nil-fault edge.
+		_, ok := types.Unalias(instruction.X.Type()).Underlying().(*types.Pointer)
+		return ok
+	case token.SUB:
+		return info&(types.IsInteger|types.IsFloat) != 0
+	case token.XOR:
+		return info&types.IsInteger != 0
+	case token.NOT:
+		return info&types.IsBoolean != 0
+	default:
+		return false
+	}
+}
+
+func coroOutcomePlainScalarChangeType(instruction *ssa.ChangeType) bool {
+	if instruction == nil {
+		return false
+	}
+	return (coroOutcomePlainBasicInfo(instruction.X.Type()) != 0 &&
+		coroOutcomePlainBasicInfo(instruction.Type()) != 0) ||
+		(coroOutcomePlainPointerLike(instruction.X.Type()) &&
+			coroOutcomePlainPointerLike(instruction.Type()))
+}
+
+func coroOutcomePlainScalarConvert(instruction *ssa.Convert) bool {
+	if instruction == nil {
+		return false
+	}
+	from := coroOutcomePlainBasicInfo(instruction.X.Type())
+	to := coroOutcomePlainBasicInfo(instruction.Type())
+	if from&(types.IsInteger|types.IsFloat) != 0 &&
+		to&(types.IsInteger|types.IsFloat) != 0 {
+		return true
+	}
+	fromInline := from&types.IsInteger != 0 || coroOutcomePlainPointerLike(instruction.X.Type())
+	toInline := to&types.IsInteger != 0 || coroOutcomePlainPointerLike(instruction.Type())
+	return fromInline && toInline
 }
 
 // planCoroSemanticInstruction is the only raw-SSA semantic recipe classifier.
@@ -61,6 +183,11 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 			effect: coro.NoSuspend,
 		}, nil
 	}
+	leaf := func(recipe string, safe bool) (coroSemanticInstructionPlan, error) {
+		plan, err := ordinary(recipe)
+		plan.outcomePlainLeaf = safe
+		return plan, err
+	}
 	control := func(recipe string, exec coro.ExecFlags) (coroSemanticInstructionPlan, error) {
 		return coroSemanticInstructionPlan{
 			class:        coro.OpControl,
@@ -77,7 +204,7 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 	case *ssa.Alloc:
 		return ordinary("cl.ssa.alloc.v1")
 	case *ssa.Phi:
-		return ordinary("cl.ssa.phi.v1")
+		return leaf("cl.ssa.phi.v1", true)
 	case *ssa.Call:
 		plan, err := ordinary("cl.ssa.call.v1")
 		if err != nil {
@@ -93,7 +220,7 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 		}
 		return plan, nil
 	case *ssa.BinOp:
-		return ordinary("cl.ssa.binop.v1")
+		return leaf("cl.ssa.binop.v1", coroOutcomePlainScalarBinOp(instruction))
 	case *ssa.UnOp:
 		if instruction.Op == token.ARROW {
 			return coroSemanticInstructionPlan{
@@ -103,11 +230,11 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 				materialized: true,
 			}, nil
 		}
-		return ordinary("cl.ssa.unop.v1")
+		return leaf("cl.ssa.unop.v1", coroOutcomePlainScalarUnOp(instruction))
 	case *ssa.ChangeType:
-		return ordinary("cl.ssa.change-type.v1")
+		return leaf("cl.ssa.change-type.v1", coroOutcomePlainScalarChangeType(instruction))
 	case *ssa.Convert:
-		return ordinary("cl.ssa.convert.v1")
+		return leaf("cl.ssa.convert.v1", coroOutcomePlainScalarConvert(instruction))
 	case *ssa.MultiConvert:
 		return ordinary("cl.ssa.multi-convert.v1")
 	case *ssa.ChangeInterface:
@@ -127,9 +254,9 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 	case *ssa.Slice:
 		return ordinary("cl.ssa.slice.v1")
 	case *ssa.FieldAddr:
-		return ordinary("cl.ssa.field-addr.v1")
+		return leaf("cl.ssa.field-addr.v1", true)
 	case *ssa.Field:
-		return ordinary("cl.ssa.field.v1")
+		return leaf("cl.ssa.field.v1", true)
 	case *ssa.IndexAddr:
 		return ordinary("cl.ssa.index-addr.v1")
 	case *ssa.Index:
@@ -155,19 +282,22 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 	case *ssa.TypeAssert:
 		return ordinary("cl.ssa.type-assert.v1")
 	case *ssa.Extract:
-		return ordinary("cl.ssa.extract.v1")
+		return leaf("cl.ssa.extract.v1", true)
 	case *ssa.Jump:
-		return ordinary("cl.ssa.jump.v1")
+		return leaf("cl.ssa.jump.v1", true)
 	case *ssa.If:
-		return ordinary("cl.ssa.if.v1")
+		return leaf("cl.ssa.if.v1", true)
 	case *ssa.Return:
 		plan, err := control("cl.ssa.return.v1", 0)
 		plan.materialized = false
+		plan.outcomePlainLeaf = true
 		return plan, err
 	case *ssa.RunDefers:
 		return control("cl.ssa.run-defers.v0", coro.NeedsCleanupFrame)
 	case *ssa.Panic:
-		return control("cl.ssa.panic.v0", coro.MayUnwind)
+		plan, err := control("cl.ssa.panic.v0", coro.MayUnwind)
+		plan.outcomePlainLeaf = true
+		return plan, err
 	case *ssa.Go:
 		return coroSemanticInstructionPlan{
 			class:        coro.OpSpawn,
@@ -185,7 +315,7 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 			materialized: true,
 		}, nil
 	case *ssa.Store:
-		return ordinary("cl.ssa.store.v1")
+		return leaf("cl.ssa.store.v1", true)
 	case *ssa.MapUpdate:
 		return ordinary("cl.ssa.map-update.v1")
 	case *ssa.DebugRef:

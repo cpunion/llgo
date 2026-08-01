@@ -291,25 +291,13 @@ func (ir *coroProgramIR) freezeSiteOwner(
 	return nil
 }
 
-// coroOutcomePlainLeafSemanticRecipe is the complete local allowlist for the
-// first outcome-plain cohort. It consumes the already-frozen semantic recipe,
-// not raw SSA, so analysis and emission cannot independently reinterpret a
-// source operation. Calls, allocation, implicit-fault-capable values, defer,
-// spawn, waits and every platform operation fail closed.
+// coroOutcomePlainLeafSemanticRecipe consumes the capability already frozen by
+// the sole raw-SSA semantic classifier. Analysis and emission therefore cannot
+// independently reinterpret a source operation. Calls, allocation,
+// implicit-fault-capable values, defer, spawn, waits and every platform
+// operation fail closed.
 func coroOutcomePlainLeafSemanticRecipe(plan coroSemanticInstructionPlan) bool {
-	if plan.debug {
-		return true
-	}
-	switch plan.recipe {
-	case coro.RecipeID("cl.ssa.phi.v1"),
-		coro.RecipeID("cl.ssa.jump.v1"),
-		coro.RecipeID("cl.ssa.if.v1"),
-		coro.RecipeID("cl.ssa.return.v1"),
-		coro.RecipeID("cl.ssa.panic.v0"):
-		return true
-	default:
-		return false
-	}
+	return plan.debug || plan.outcomePlainLeaf
 }
 
 // coroOutcomePlainDAGSemanticRecipe is the deliberately small extension of the
@@ -321,7 +309,7 @@ func coroOutcomePlainDAGSemanticRecipe(plan coroSemanticInstructionPlan) bool {
 		return true
 	}
 	switch plan.recipe {
-	case coro.RecipeID("cl.ssa.call.v1"), coro.RecipeID("cl.ssa.extract.v1"):
+	case coro.RecipeID("cl.ssa.call.v1"):
 		return true
 	default:
 		return false

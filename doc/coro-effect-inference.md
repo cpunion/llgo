@@ -696,11 +696,13 @@ when its environment may be released.  The binding generator supplies only
 this bottom timing/lifetime fact; callback positions, ABIs, adapters, and
 managed target identities remain compiler-derived.
 
-### 7.4 Library summary v5
+### 7.4 Library summary v6
 
-`llgo.coro.library-effect-summary.v5` is now the hard-cut producer schema.
+`llgo.coro.library-effect-summary.v6` is now the hard-cut producer schema.
 `CallableContractFacts` is not embedded unchanged because it also contains
-consumer call-site invocations.  v5 has three collections:
+consumer call-site invocations.  v6 retains the three v5 collections and also
+hard-cuts the outcome completion vocabulary so an older importer cannot accept
+the allocation-free `FaultNil` status as an unknown terminal result:
 
 1. **Managed functions**: the existing FunctionID, ABI hash, inferred effect,
    execution flags, representation, physically emitted primary entries, exact
