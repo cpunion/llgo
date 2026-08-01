@@ -13,10 +13,10 @@ func Foo(s string) int {
 // polling without turning its per-iteration scalar work into heap allocation.
 // CHECK-LABEL: define ptr @"main.Test$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call i1 @__llgo_coro_preempt_poll_v1(ptr %0)
-// CHECK: icmp slt i64 {{.*}}, 10000000
-// CHECK: call i64 @"main.Foo"(%"{{.*}}String" { ptr @{{[0-9]+}}, i64 5 })
+// CHECK: call i64 @main.Foo(%"{{.*}}String" { ptr @{{[0-9]+}}, i64 5 })
 // CHECK: call ptr @"{{.*}}PrintInt$coro"
 // CHECK: call void @__llgo_coro_await_prepare_v3
+// CHECK: icmp slt i64 {{.*}}, 10000000
 // CHECK: call ptr @"{{.*}}PrintByte$coro"({{.*}}i8 10)
 // CHECK: call void @__llgo_coro_await_prepare_v3
 // CHECK-NOT: call ptr @"{{.*}}AllocZ"

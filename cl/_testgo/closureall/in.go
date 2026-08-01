@@ -9,7 +9,7 @@ import "github.com/goplus/lib/c"
 // instead of numbered SSA values or the exact instruction layout.
 //
 // A statically synchronous function keeps its ordinary ABI.
-// CHECK-LABEL: define i64 @"main.S.Inc"
+// CHECK-LABEL: define i64 @main.S.Inc
 // CHECK: add i64
 // CHECK: ret i64
 //
@@ -22,7 +22,7 @@ import "github.com/goplus/lib/c"
 // CHECK: call void @__llgo_coro_complete_prepare_v2
 //
 // A statically synchronous free function also keeps its ordinary ABI.
-// CHECK-LABEL: define i64 @"main.globalAdd"
+// CHECK-LABEL: define i64 @main.globalAdd
 // CHECK: add i64
 // CHECK: ret i64
 //
