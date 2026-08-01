@@ -863,6 +863,85 @@ func TestCoroPointerUintptrAlignmentObservationIsScalarTerminal(t *testing.T) {
 	}
 }
 
+func TestCoroPointerUintptrLowBitMaskIsScalarTerminal(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "low mask", body: "return uintptr(pointer) & 7", want: true},
+		{name: "commuted low mask", body: "return 7 & uintptr(pointer)", want: true},
+		{name: "and not preserves address", body: "return uintptr(pointer) &^ 7"},
+		{name: "dynamic mask", body: "return uintptr(pointer) & mask"},
+		{name: "sparse mask", body: "return uintptr(pointer) & 5"},
+		{name: "unbounded mask", body: "return uintptr(pointer) & 0x1ff"},
+		{name: "second address use", body: "word := uintptr(pointer); return (word & 7) | (word >> 8)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+import "unsafe"
+func Root(pointer unsafe.Pointer, mask uintptr) uintptr { `+test.body+` }
+`)
+			root := ssaPkg.Func("Root")
+			var conversion *ssa.Convert
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Convert)
+					if !ok || !coroFrameRetentionPointerToUintptr(candidate) {
+						continue
+					}
+					if conversion != nil {
+						t.Fatal("fixture has more than one pointer-to-uintptr conversion")
+					}
+					conversion = candidate
+				}
+			}
+			if conversion == nil {
+				t.Fatal("fixture has no pointer-to-uintptr conversion")
+			}
+			if got := coroPointerUintptrScalarTerminal(conversion); got != test.want {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, root)
+				t.Fatalf("low-bit-mask scalar terminal = %t, want %t\n%s", got, test.want, dump.String())
+			}
+		})
+	}
+}
+
+func TestCoroPointerUintptrLowBitMaskDoesNotAuthorizeReconstruction(t *testing.T) {
+	prog, _, _, root, audit, _ := prepareCoroFrameRootAudit(t, `package foo
+import "unsafe"
+func Root(pointer unsafe.Pointer) unsafe.Pointer {
+	return unsafe.Pointer(uintptr(pointer) & 7)
+}
+`, "Root", EmissionUniverseOptions{})
+	defer prog.Dispose()
+	foundMask, foundReconstruction := false, false
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			conversion, ok := instruction.(*ssa.Convert)
+			if !ok {
+				continue
+			}
+			if coroFrameRetentionPointerToUintptr(conversion) {
+				foundMask = coroPointerUintptrScalarTerminal(conversion)
+				continue
+			}
+			if coroFrameRetentionUintptrLike(conversion.X.Type()) && coroFrameRetentionPointerLike(conversion.Type()) {
+				foundReconstruction = true
+				if reason := audit.validateConvert(conversion); !strings.Contains(reason, "has no traceable exact pointer provenance") {
+					t.Fatalf("masked pointer reconstruction rejection = %q", reason)
+				}
+			}
+		}
+	}
+	if !foundMask || !foundReconstruction {
+		var dump bytes.Buffer
+		ssa.WriteFunction(&dump, root)
+		t.Fatalf("mask proof=%t reconstruction=%t, want true/true\n%s", foundMask, foundReconstruction, dump.String())
+	}
+}
+
 func TestCoroPointerUintptrReflectHeaderStoreTerminal(t *testing.T) {
 	pkg, _, _ := buildGoSSAPkg(t, `package foo
 import (

@@ -1573,8 +1573,9 @@ func (a *coroPhysicalPureSSAAudit) coroPointerUintptrScalarTerminal(value ssa.Va
 	plan, planned := a.plan.FunctionPlan(a.fn)
 	if planned && a.frameRetentionABI == CoroFrameRetentionParkABIV2 &&
 		plan.Emission == coro.EmitCoroutine && !plan.Exec.IsOpaque() {
-		// Return, map-key, comparison, remainder, affine comparison, and exact
-		// pointer-distance terminals are all forward-only scalar observations.
+		// Return, map-key, comparison, remainder, bounded low-bit masking,
+		// affine comparison, and exact pointer-distance terminals are all
+		// forward-only scalar observations.
 		// None grants uintptr-to-pointer reconstruction authority. A future
 		// precise or moving collector must introduce a different retention ABI
 		// and explicit pin/relocation rules before reusing this branch.
@@ -1862,14 +1863,17 @@ func coroRuntimeConversionHelper(source, target types.Type) string {
 }
 
 // coroPointerUintptrScalarTerminal recognizes an address word whose complete
-// semantic lifetime ends in an integer comparison, as one operand of an exact
-// pointer-distance expression, uintptr(end)-uintptr(start), as a scalar map
-// key, or at a direct Go return. None of these terminals authorizes pointer
-// reconstruction. If a safepoint splits a map-key/return observation, the
-// address word itself is retained in LLVM's conservatively scanned/non-GC
-// coroutine frame; the active frame profile explicitly excludes precise or
-// moving collectors. General storage, call transport, pointer reconstruction,
-// and unbounded arithmetic remain fail-closed.
+// semantic lifetime ends in an integer comparison, a bounded low-bit alignment
+// mask, as one operand of an exact pointer-distance expression,
+// uintptr(end)-uintptr(start), as a scalar map key, or at a direct Go return.
+// None of these terminals authorizes pointer reconstruction. A low-bit mask
+// destroys the address identity and its result is an ordinary integer; the
+// source address word must have no other semantic use. If a safepoint splits
+// an observation, the address word itself is retained in LLVM's conservatively
+// scanned/non-GC coroutine frame; the active frame profile explicitly excludes
+// precise or moving collectors. General storage, call transport, pointer
+// reconstruction, and unbounded arithmetic on the unmasked address remain
+// fail-closed.
 func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 	root, rootIsInstruction := value.(ssa.Instruction)
 	if value == nil || !rootIsInstruction || root.Block() == nil || value.Referrers() == nil {
@@ -1895,6 +1899,11 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 					return false
 				}
 				affine = true
+				uses++
+			case token.AND:
+				if !coroPointerUintptrLowBitMaskResult(value, instruction) {
+					return false
+				}
 				uses++
 			case token.REM:
 				// Alignment tests commonly lower as uintptr(pointer)%C == 0.
@@ -1936,6 +1945,42 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 		return uses == 1
 	}
 	return uses != 0
+}
+
+// coroPointerUintptrLowBitMaskResult recognizes the alignment-class
+// scalarization used by packages such as hash/crc32:
+//
+//	uintptr(unsafe.Pointer(&p[0])) & 7
+//
+// The constant must be a non-zero contiguous low-bit mask, and is deliberately
+// capped at one byte. The bound keeps this proof independent of target pointer
+// width (including embedded targets) while covering ordinary ABI alignment
+// observations. AND_NOT, sparse or dynamic masks, and masks that may preserve
+// an address remain outside this proof. Uses of the masked result need no
+// pointer retention; any later uintptr-to-pointer conversion is independently
+// rejected by the exact-provenance audit.
+func coroPointerUintptrLowBitMaskResult(address ssa.Value, operation *ssa.BinOp) bool {
+	addressInstruction, ok := address.(ssa.Instruction)
+	if !ok || addressInstruction.Block() == nil || operation == nil ||
+		operation.Block() != addressInstruction.Block() || operation.Op != token.AND ||
+		!coroFrameRetentionUintptrLike(address.Type()) ||
+		!coroFrameRetentionUintptrLike(operation.Type()) {
+		return false
+	}
+	xAddress, yAddress := operation.X == address, operation.Y == address
+	if xAddress == yAddress {
+		return false
+	}
+	maskValue := operation.Y
+	if yAddress {
+		maskValue = operation.X
+	}
+	mask, ok := maskValue.(*ssa.Const)
+	if !ok || mask.Value == nil {
+		return false
+	}
+	bits, exact := constant.Uint64Val(mask.Value)
+	return exact && bits != 0 && bits <= 0xff && bits&(bits+1) == 0
 }
 
 // coroPointerUintptrMapKeyTerminal accepts a forward-only integer expression

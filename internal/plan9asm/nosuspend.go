@@ -42,9 +42,10 @@ type NoSuspendLeafProof struct {
 // ProveNoSuspendLeaf accepts the deliberately small LLVM instruction/call
 // language emitted for bounded Plan9 assembly leaves. Every call must resolve
 // either to another defined function in this module or to an LLVM intrinsic
-// carrying nofree+nosync+nounwind+willreturn. Unknown opcodes, indirect calls,
-// declarations, inline asm, invoke/callbr, and synchronization primitives all
-// fail closed.
+// carrying nofree+nosync+nounwind+willreturn, or to one of the exact bounded
+// inline-assembly forms emitted by the pinned Plan9 assembly translator.
+// Unknown opcodes, indirect calls, declarations, other inline asm,
+// invoke/callbr, and synchronization primitives all fail closed.
 func ProveNoSuspendLeaf(translation *ModuleTranslation, symbol string) (NoSuspendLeafProof, error) {
 	if translation == nil || translation.Module.IsNil() || symbol == "" {
 		return NoSuspendLeafProof{}, fmt.Errorf("plan9asm no-suspend proof requires a translated module and symbol")
@@ -83,9 +84,17 @@ func ProveNoSuspendLeaf(translation *ModuleTranslation, symbol string) (NoSuspen
 				if opcode != gllvm.Call {
 					continue
 				}
-				callee := instruction.CalledValue().IsAFunction()
+				calledValue := instruction.CalledValue()
+				callee := calledValue.IsAFunction()
 				if callee.IsNil() {
-					return fmt.Errorf("function %q contains an indirect or inline-assembly call", function.Name())
+					inlineAsm := calledValue.IsAInlineAsm()
+					if inlineAsm.IsNil() {
+						return fmt.Errorf("function %q contains an indirect call", function.Name())
+					}
+					if err := validateNoSuspendPlan9AsmInlineAsm(instruction, inlineAsm); err != nil {
+						return fmt.Errorf("function %q contains unsupported inline assembly: %w", function.Name(), err)
+					}
+					continue
 				}
 				if callee.IntrinsicID() != 0 {
 					if err := validateNoSuspendLLVMIntrinsic(callee); err != nil {
@@ -135,6 +144,115 @@ func ProveNoSuspendLeaf(translation *ModuleTranslation, symbol string) (NoSuspen
 		CallClosure:   names,
 		ClosureSHA256: hex.EncodeToString(sum[:]),
 	}, nil
+}
+
+type noSuspendInlineAsmSpec struct {
+	constraints     string
+	hasSideEffects  bool
+	returnAggregate bool
+	returnWidths    []int
+	parameterWidths []int
+}
+
+func validateNoSuspendPlan9AsmInlineAsm(call, inlineAsm gllvm.Value) error {
+	if inlineAsm.InlineAsmNeedsAlignedStack() {
+		return fmt.Errorf("aligned-stack flag is not allowed")
+	}
+	if inlineAsm.InlineAsmCanThrow() {
+		return fmt.Errorf("can-throw flag is not allowed")
+	}
+	if dialect := inlineAsm.InlineAsmDialect(); dialect != gllvm.InlineAsmDialectATT {
+		return fmt.Errorf("dialect %d is not AT&T", dialect)
+	}
+
+	asm := inlineAsm.InlineAsmString()
+	var spec noSuspendInlineAsmSpec
+	switch asm {
+	case "cpuid":
+		spec = noSuspendInlineAsmSpec{
+			constraints:     "={ax},={bx},={cx},={dx},{ax},{cx},~{dirflag},~{fpsr},~{flags}",
+			hasSideEffects:  true,
+			returnAggregate: true,
+			returnWidths:    []int{32, 32, 32, 32},
+			parameterWidths: []int{32, 32},
+		}
+	case "xgetbv":
+		spec = noSuspendInlineAsmSpec{
+			constraints:     "={ax},={dx},{cx},~{dirflag},~{fpsr},~{flags}",
+			hasSideEffects:  true,
+			returnAggregate: true,
+			returnWidths:    []int{32, 32},
+			parameterWidths: []int{32},
+		}
+	default:
+		if !isPlan9AsmMRS(asm) {
+			return fmt.Errorf("template %q is not a bounded translator emission", asm)
+		}
+		spec = noSuspendInlineAsmSpec{
+			constraints:    "=r",
+			returnWidths:   []int{64},
+			hasSideEffects: false,
+		}
+		if inlineAsm.InlineAsmConstraintString() == "=r,~{memory}" {
+			spec.constraints = "=r,~{memory}"
+			spec.hasSideEffects = true
+		}
+	}
+
+	if constraints := inlineAsm.InlineAsmConstraintString(); constraints != spec.constraints {
+		return fmt.Errorf("template %q has constraints %q, want %q", asm, constraints, spec.constraints)
+	}
+	if sideEffects := inlineAsm.InlineAsmHasSideEffects(); sideEffects != spec.hasSideEffects {
+		return fmt.Errorf("template %q side-effects flag is %t, want %t", asm, sideEffects, spec.hasSideEffects)
+	}
+	if err := validateNoSuspendInlineAsmSignature(call.CalledFunctionType(), spec); err != nil {
+		return fmt.Errorf("template %q: %w", asm, err)
+	}
+	return nil
+}
+
+func isPlan9AsmMRS(asm string) bool {
+	const prefix = "mrs $0, "
+	if !strings.HasPrefix(asm, prefix) || len(asm) == len(prefix) {
+		return false
+	}
+	for _, char := range asm[len(prefix):] {
+		if char != '_' && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateNoSuspendInlineAsmSignature(functionType gllvm.Type, spec noSuspendInlineAsmSpec) error {
+	if functionType.TypeKind() != gllvm.FunctionTypeKind || functionType.IsFunctionVarArg() {
+		return fmt.Errorf("call does not have a fixed function type")
+	}
+	parameters := functionType.ParamTypes()
+	if err := validateNoSuspendIntegerTypes("parameters", parameters, spec.parameterWidths); err != nil {
+		return err
+	}
+
+	returnType := functionType.ReturnType()
+	if spec.returnAggregate {
+		if returnType.TypeKind() != gllvm.StructTypeKind || returnType.IsStructPacked() {
+			return fmt.Errorf("return type is not an unpacked struct")
+		}
+		return validateNoSuspendIntegerTypes("return fields", returnType.StructElementTypes(), spec.returnWidths)
+	}
+	return validateNoSuspendIntegerTypes("return values", []gllvm.Type{returnType}, spec.returnWidths)
+}
+
+func validateNoSuspendIntegerTypes(kind string, types []gllvm.Type, widths []int) error {
+	if len(types) != len(widths) {
+		return fmt.Errorf("%s count is %d, want %d", kind, len(types), len(widths))
+	}
+	for index, typ := range types {
+		if typ.TypeKind() != gllvm.IntegerTypeKind || typ.IntTypeWidth() != widths[index] {
+			return fmt.Errorf("%s[%d] is %s, want i%d", kind, index, typ.String(), widths[index])
+		}
+	}
+	return nil
 }
 
 func validateNoSuspendLLVMIntrinsic(function gllvm.Value) error {
