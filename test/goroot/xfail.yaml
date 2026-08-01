@@ -1559,14 +1559,6 @@ xfails:
     directive: run
     case: fixedbugs/issue57823.go
     reason: go1.26 goroot run failure on linux/amd64
-  - platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue38496.go
-    reason: current main goroot run failure on darwin/arm64
-  - platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue38496.go
-    reason: current main goroot run failure on linux/amd64
   - platform: linux/amd64
     directive: run
     case: nilptr.go
