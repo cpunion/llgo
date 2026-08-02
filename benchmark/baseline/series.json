@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "series": [
+    {
+      "kind": "branch",
+      "id": "0925a687fec25091",
+      "label": "Branch codex/closure-env-ffi-call-go",
+      "path": "series/branch/0925a687fec25091/history.json",
+      "configPath": "series/branch/0925a687fec25091/config.json",
+      "sha": "3d73ab8dad1794f9b352a6a3c9758b74199129ca",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/3d73ab8dad1794f9b352a6a3c9758b74199129ca",
+      "updatedAt": "2026-08-02T14:30:50.405Z"
+    },
+    {
+      "kind": "pull",
+      "id": "136",
+      "label": "PR #136",
+      "path": "series/pull/136/history.json",
+      "configPath": "series/pull/136/config.json",
+      "sha": "3d73ab8dad1794f9b352a6a3c9758b74199129ca",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/3d73ab8dad1794f9b352a6a3c9758b74199129ca",
+      "updatedAt": "2026-08-02T14:30:50.402Z"
+    }
+  ]
+}
