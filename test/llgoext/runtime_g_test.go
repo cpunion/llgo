@@ -19,6 +19,7 @@
 package llgoext
 
 import (
+	goruntime "runtime"
 	"testing"
 	"unsafe"
 )
@@ -79,10 +80,15 @@ func TestRuntimeGetGIsolation(t *testing.T) {
 //go:linkname runtimeGMPForTesting github.com/goplus/llgo/runtime/internal/runtime.GMPForTesting
 func runtimeGMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, pstatus uint32, linked bool)
 
+//go:linkname runtimeProcIDForTesting github.com/goplus/llgo/runtime/internal/runtime.ProcIDForTesting
+func runtimeProcIDForTesting() uint64
+
 const (
 	runtimeGRunning = 2
 	runtimePRunning = 1
 )
+
+var runtimeHasDebuggerThreadID = goruntime.GOOS == "darwin" || goruntime.GOOS == "linux"
 
 type runtimeGMPState struct {
 	goid       uint64
@@ -91,6 +97,7 @@ type runtimeGMPState struct {
 	pid        int32
 	gstatus    uint32
 	pstatus    uint32
+	procid     uint64
 	linked     bool
 }
 
@@ -103,6 +110,7 @@ func currentRuntimeGMPState() runtimeGMPState {
 		pid:        pid,
 		gstatus:    gstatus,
 		pstatus:    pstatus,
+		procid:     runtimeProcIDForTesting(),
 		linked:     linked,
 	}
 }
@@ -117,6 +125,9 @@ func checkRunningRuntimeGMP(t *testing.T, state runtimeGMPState) {
 	}
 	if state.pid < 0 {
 		t.Fatalf("current G has invalid P id %d", state.pid)
+	}
+	if runtimeHasDebuggerThreadID && state.procid == 0 {
+		t.Fatal("current M has no debugger thread ID")
 	}
 	if state.gstatus != runtimeGRunning {
 		t.Fatalf("G status = %d, want running (%d)", state.gstatus, runtimeGRunning)
@@ -143,6 +154,10 @@ func TestRuntimeGMPLinks(t *testing.T) {
 	seenG := map[uint64]bool{parent.goid: true}
 	seenM := map[int64]bool{parent.mid: true}
 	seenP := map[int32]bool{parent.pid: true}
+	seenProcID := map[uint64]bool{}
+	if runtimeHasDebuggerThreadID {
+		seenProcID[parent.procid] = true
+	}
 	for i := 0; i < cap(results); i++ {
 		state := <-results
 		checkRunningRuntimeGMP(t, state)
@@ -158,9 +173,15 @@ func TestRuntimeGMPLinks(t *testing.T) {
 		if seenP[state.pid] {
 			t.Fatalf("duplicate P id %d", state.pid)
 		}
+		if runtimeHasDebuggerThreadID && seenProcID[state.procid] {
+			t.Fatalf("duplicate debugger thread ID %d", state.procid)
+		}
 		seenG[state.goid] = true
 		seenM[state.mid] = true
 		seenP[state.pid] = true
+		if runtimeHasDebuggerThreadID {
+			seenProcID[state.procid] = true
+		}
 	}
 }
 

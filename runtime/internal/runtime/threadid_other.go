@@ -1,4 +1,4 @@
-//go:build !llgo || baremetal
+//go:build !llgo || baremetal || (!darwin && !linux)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,17 +18,6 @@
 
 package runtime
 
-// Host builds and single-context targets share one process-wide current G.
-var currentG *g
-
-func getg() *g {
-	if currentG == nil {
-		setg(initRuntimeContext(new(runtimeContext), nil, _Grunning))
-	}
-	return currentG
-}
-
-func setg(gp *g) {
-	currentG = gp
-	setMProcID(gp)
+func currentThreadID() uint64 {
+	return 0
 }

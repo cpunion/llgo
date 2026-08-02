@@ -16,6 +16,7 @@ LLGO_MAX_TYPE_NAME_BYTES = 4096
 LLGO_DEFAULT_MAX_CHILDREN = 256
 LLGO_MAX_CONTAINER_SCAN_BUCKETS = 65536
 LLGO_MAX_GOROUTINES = 65536
+LLGO_MAX_STACK_FRAMES = 256
 _TARGET_INFO_CACHE: Dict[Tuple[Any, ...], "LLGoTargetInfo"] = {}
 
 
@@ -154,6 +155,7 @@ class LLGoGoroutineLayout:
     m_current_goroutine: str
     m_p: str
     m_id: str
+    m_procid: str
     p_m: str
     p_id: str
     status_names: Tuple[Tuple[int, str], ...]
@@ -168,6 +170,7 @@ class LLGoGoroutineValue:
     status_name: str
     mid: int
     pid: int
+    procid: int
     ownership_linked: bool
 
 
@@ -271,6 +274,7 @@ def _goroutine_layouts() -> Dict[int, LLGoGoroutineLayout]:
                 m_current_goroutine=goroutine["m_current_goroutine"],
                 m_p=goroutine["m_p"],
                 m_id=goroutine["m_id"],
+                m_procid=goroutine["m_procid"],
                 p_m=goroutine["p_m"],
                 p_id=goroutine["p_id"],
                 status_names=status_names,
@@ -332,6 +336,8 @@ def register_commands(debugger: lldb.SBDebugger) -> None:
         'command script add -f llgo_plugin.print_all_variables llgo vars')
     debugger.HandleCommand(
         'command script add -f llgo_plugin.print_goroutines llgo goroutines')
+    debugger.HandleCommand(
+        'command script add -f llgo_plugin.print_goroutine llgo goroutine')
     if inspect_target(debugger.GetSelectedTarget()).supported:
         register_type_formatters(debugger)
 
@@ -773,6 +779,9 @@ def _goroutine_values(target: lldb.SBTarget, process: lldb.SBProcess,
         if not m_value or not m_value.IsValid():
             raise ValueError(f"cannot read M for goroutine {goid}")
         mid = _required_integer_field(m_value, layout.m_id)
+        procid_value = _value_as_int(
+            m_value.GetChildMemberWithName(layout.m_procid))
+        procid = procid_value if procid_value is not None else 0
         current_g = _required_integer_field(
             m_value, layout.m_current_goroutine)
         p_address = _required_integer_field(m_value, layout.m_p)
@@ -792,12 +801,25 @@ def _goroutine_values(target: lldb.SBTarget, process: lldb.SBProcess,
             status_name=status_names.get(status, f"status-{status}"),
             mid=mid,
             pid=pid,
+            procid=procid,
             ownership_linked=(current_g == address and p_m == m_address),
         ))
         address = next_address
 
     values.sort(key=lambda value: value.goid)
     return values
+
+
+def _goroutine_thread(process: lldb.SBProcess,
+                      goroutine: LLGoGoroutineValue) -> Optional[lldb.SBThread]:
+    if goroutine.procid == 0:
+        return None
+    for index in range(process.GetNumThreads()):
+        thread = process.GetThreadAtIndex(index)
+        if (thread and thread.IsValid() and
+                thread.GetThreadID() == goroutine.procid):
+            return thread
+    return None
 
 
 def print_goroutines(debugger: lldb.SBDebugger, command: str,
@@ -827,13 +849,81 @@ def print_goroutines(debugger: lldb.SBDebugger, command: str,
     if not goroutines:
         result.AppendMessage("No live LLGo goroutines.")
         return
-    result.AppendMessage("\n".join(
-        f"goroutine {goroutine.goid} [{goroutine.status_name}] "
-        f"parent={goroutine.parent_goid} m={goroutine.mid} "
-        f"p={goroutine.pid} ownership="
-        f"{'linked' if goroutine.ownership_linked else 'invalid'}"
-        for goroutine in goroutines
-    ))
+    lines = []
+    for goroutine in goroutines:
+        thread = _goroutine_thread(process, goroutine)
+        thread_index = (str(thread.GetIndexID())
+                        if thread is not None else "unavailable")
+        lines.append(
+            f"goroutine {goroutine.goid} [{goroutine.status_name}] "
+            f"parent={goroutine.parent_goid} m={goroutine.mid} "
+            f"p={goroutine.pid} thread={thread_index} ownership="
+            f"{'linked' if goroutine.ownership_linked else 'invalid'}")
+    result.AppendMessage("\n".join(lines))
+
+
+def _frame_description(frame: lldb.SBFrame, index: int) -> str:
+    name = frame.GetFunctionName() or frame.GetSymbol().GetName() or "<unknown>"
+    description = f"frame #{index}: {name}"
+    line_entry = frame.GetLineEntry()
+    if line_entry and line_entry.IsValid():
+        file_spec = line_entry.GetFileSpec()
+        filename = file_spec.GetFilename() if file_spec else None
+        line = line_entry.GetLine()
+        if filename and line:
+            description += f" at {filename}:{line}"
+    return description
+
+
+def print_goroutine(debugger: lldb.SBDebugger, command: str,
+                    result: lldb.SBCommandReturnObject,
+                    _internal_dict: Dict[str, Any]) -> None:
+    if not _require_supported_target(debugger, result):
+        return
+    match = re.fullmatch(r"\s*([0-9]+)\s+(?:bt|backtrace)\s*", command)
+    if match is None:
+        result.SetError("usage: llgo goroutine <id> bt")
+        return
+    process = _stopped_process(debugger, result)
+    if process is None:
+        return
+
+    target = debugger.GetSelectedTarget()
+    info = inspect_target(target)
+    layout = LLGO_GOROUTINE_LAYOUTS.get(info.runtime_layout_version)
+    if layout is None:
+        result.SetError("LLGo goroutine metadata is unavailable for this runtime.")
+        return
+    try:
+        goroutines = _goroutine_values(target, process, layout)
+    except ValueError as error:
+        result.SetError(str(error))
+        return
+
+    goid = int(match.group(1))
+    goroutine = next(
+        (candidate for candidate in goroutines if candidate.goid == goid),
+        None)
+    if goroutine is None:
+        result.SetError(f"LLGo goroutine {goid} is not live.")
+        return
+    thread = _goroutine_thread(process, goroutine)
+    if thread is None:
+        result.SetError(
+            f"LLGo goroutine {goid} has no matching debugger thread.")
+        return
+
+    frame_count = min(thread.GetNumFrames(), LLGO_MAX_STACK_FRAMES)
+    lines = [
+        f"goroutine {goid} [{goroutine.status_name}] "
+        f"thread {thread.GetIndexID()}:"
+    ]
+    lines.extend(_frame_description(thread.GetFrameAtIndex(index), index)
+                 for index in range(frame_count))
+    if thread.GetNumFrames() > frame_count:
+        lines.append(
+            f"... ({thread.GetNumFrames() - frame_count} more frames)")
+    result.AppendMessage("\n".join(lines))
 
 
 def _value_as_int(value: lldb.SBValue) -> Optional[int]:

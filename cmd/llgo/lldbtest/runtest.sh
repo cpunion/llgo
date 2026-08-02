@@ -94,7 +94,8 @@ run_checked_lldb llgo lldb -lldb "$LLDB_PATH" -- --batch "./debug.out" \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo status", result); assert result.Succeeded() and "LLGo debugger schema v1 (runtime layout v1); LLGo ABI v1; C ABI mode 2 (allfunc)" in result.GetOutput()' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo vars", result); assert not result.Succeeded() and "requires a stopped process" in result.GetError()' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo print s", result); assert not result.Succeeded() and "requires a stopped process" in result.GetError()' \
-    -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo goroutines", result); assert not result.Succeeded() and "requires a stopped process" in result.GetError()'
+    -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo goroutines", result); assert not result.Succeeded() and "requires a stopped process" in result.GetError()' \
+    -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo goroutine 1 bt", result); assert not result.Succeeded() and "requires a stopped process" in result.GetError()'
 
 # The LLGo formatter must not attach itself to an ordinary C target.
 non_llgo_dir="$test_tmp_dir/non-llgo"
@@ -116,6 +117,7 @@ run_checked_lldb llgo lldb -lldb "$LLDB_PATH" -- --batch "$non_llgo_dir/unsuppor
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo status", result); assert result.Succeeded() and "Unsupported LLGo debugger marker version(s): v2" in result.GetOutput()' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo vars", result); assert not result.Succeeded() and "Unsupported LLGo debugger marker version(s): v2" in result.GetError()' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo goroutines", result); assert not result.Succeeded() and "Unsupported LLGo debugger marker version(s): v2" in result.GetError()' \
+    -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("llgo goroutine 1 bt", result); assert not result.Succeeded() and "Unsupported LLGo debugger marker version(s): v2" in result.GetError()' \
     -o 'script result = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("p 1+1", result); assert result.Succeeded() and "2" in result.GetOutput()'
 
 # Multiple marker versions are ambiguous even when one version is supported.

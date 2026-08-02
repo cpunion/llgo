@@ -182,6 +182,12 @@ func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	return gp
 }
 
+func setMProcID(gp *g) {
+	if gp != nil && gp.m != nil {
+		gp.m.procid = currentThreadID()
+	}
+}
+
 func registerG(gp *g) {
 	lockAllg()
 	gp.alllink = debuggerAllgV1
@@ -254,6 +260,15 @@ func GInAllGForTesting(target unsafe.Pointer) (found, linked bool) {
 	}
 	unlockAllg()
 	return found, true
+}
+
+// ProcIDForTesting reports the OS thread identity used by debuggers.
+func ProcIDForTesting() uint64 {
+	gp := getg()
+	if gp == nil || gp.m == nil {
+		return 0
+	}
+	return gp.m.procid
 }
 
 // GMPForTesting reports the current runtime ownership graph. It is kept

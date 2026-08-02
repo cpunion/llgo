@@ -86,6 +86,7 @@ func setg(gp *g) {
 		}
 	}
 	currentG = uintptr(unsafe.Pointer(gp))
+	setMProcID(gp)
 }
 
 func setAutoG(gp *g) c.Int {
@@ -94,6 +95,7 @@ func setAutoG(gp *g) c.Int {
 	}
 	currentG = uintptr(unsafe.Pointer(gp))
 	currentGHasLifecycle = true
+	setMProcID(gp)
 	return 0
 }
 
