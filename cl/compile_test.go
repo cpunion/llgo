@@ -417,6 +417,10 @@ func TestBuildAndCheckSymbolsFromTestltoLTOPluginDWARF(t *testing.T) {
 	t.Setenv("LLGO_BUILD_CACHE", "off")
 	buildConf := testltoLTOPluginConf(t, build.ModeBuild)
 	buildConf.LinkOptions.DWARF = build.DWARFPreserve
+	// Match the non-DWARF symbol gate: Linux's embedded pclntab exports main.*
+	// dynamically, which retains the very methods this test expects LTO to
+	// remove and is independent of whether DWARF is enabled.
+	buildConf.PCLNMode = build.PCLNNone
 	cltest.BuildAndCheckSymbolsFromDir(t, "", "./_testlto", testltoLTOPluginDWARFTests,
 		cltest.WithRunConfig(buildConf),
 	)

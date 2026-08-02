@@ -91,9 +91,9 @@ jobs:
         run: |
           set -euo pipefail
           package=./internal/debugabi/testdata/fixture
-          GOOS=js GOARCH=wasm llgo build -debug-artifact=embedded \
+          GOOS=js GOARCH=wasm llgo build -O0 -debug-artifact=embedded \
             -o "${RUNNER_TEMP}/browser-embedded.wasm" "${package}"
-          GOOS=js GOARCH=wasm llgo build -debug-artifact=external \
+          GOOS=js GOARCH=wasm llgo build -O0 -debug-artifact=external \
             -o "${RUNNER_TEMP}/browser-external.wasm" "${package}"
           test -s "${RUNNER_TEMP}/browser-embedded.wasm"
           test -s "${RUNNER_TEMP}/browser-external.wasm"
