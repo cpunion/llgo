@@ -141,3 +141,14 @@ func dwarfPreserveLinkerArgs(conf *Config, target *crosscompile.Export) []string
 	}
 	return slices.Clone(target.DebugInfo.PreserveLinkFlags)
 }
+
+// dwarfCompilerArgs keeps source information from C, C++, cgo preambles, and
+// LLGoFiles under the same typed policy as Go-generated LLVM modules. Put the
+// flag after package CFLAGS so a preserve decision cannot be undone by an
+// earlier -g0.
+func dwarfCompilerArgs(conf *Config, target *crosscompile.Export) []string {
+	if !shouldEmitDebugInfo(conf, target) {
+		return nil
+	}
+	return []string{"-gdwarf-4"}
+}

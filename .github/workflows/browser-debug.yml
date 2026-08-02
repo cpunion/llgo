@@ -47,6 +47,29 @@ jobs:
         with:
           version: "4.0.21"
 
+      - name: Build Binaryen with final-DWARF repair
+        shell: bash
+        env:
+          BINARYEN_REVISION: 0c439cce601d5812209df1fc1188afe90100fca6
+        run: |
+          set -euo pipefail
+          source_dir="${GITHUB_WORKSPACE}/.tools/binaryen"
+          build_dir="${GITHUB_WORKSPACE}/.tools/binaryen-build"
+          git init "${source_dir}"
+          git -C "${source_dir}" remote add origin \
+            https://github.com/cpunion/binaryen.git
+          git -C "${source_dir}" fetch --depth=1 origin \
+            "${BINARYEN_REVISION}"
+          git -C "${source_dir}" checkout --detach FETCH_HEAD
+          test "$(git -C "${source_dir}" rev-parse HEAD)" = \
+            "${BINARYEN_REVISION}"
+          cmake -S "${source_dir}" -B "${build_dir}" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
+          cmake --build "${build_dir}" \
+            --target wasm-opt wasm-emscripten-finalize --parallel 2
+          "${build_dir}/bin/wasm-opt" --version
+          echo "EM_BINARYEN_ROOT=${build_dir}" >> "${GITHUB_ENV}"
+
       - name: Set up Go
         uses: ./.github/actions/setup-go
 
@@ -99,6 +122,19 @@ jobs:
           test -s "${RUNNER_TEMP}/browser-external.wasm"
           test -s "${RUNNER_TEMP}/browser-external.debug.wasm"
           ls -lh "${RUNNER_TEMP}"/browser-*.wasm
+
+      - name: Verify final browser DWARF
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in \
+            "${RUNNER_TEMP}/browser-embedded.wasm" \
+            "${RUNNER_TEMP}/browser-external.debug.wasm"
+          do
+            log="${artifact}.verify.log"
+            llvm-dwarfdump --verify "${artifact}" 2>&1 | tee "${log}"
+            grep -Fxq 'No errors.' "${log}"
+          done
 
       - name: Test headless Chrome Language Extension
         shell: bash

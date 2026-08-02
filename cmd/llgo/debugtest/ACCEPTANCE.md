@@ -24,13 +24,20 @@ compatibility target. Exact commands live in these focused fixtures:
 - WASI: `cmd/llgo/debugtest/wasi`;
 - browser: `cmd/internal/browser` and `internal/browserdebug`.
 
+The browser lane uses Emscripten 4.0.21 and temporarily pins Binaryen commit
+`0c439cce601d5812209df1fc1188afe90100fca6`, which contains the DWARF range
+repair proposed in
+[WebAssembly/binaryen#8964](https://github.com/WebAssembly/binaryen/pull/8964).
+The pin can move back to an Emscripten-provided Binaryen release once that
+repair is upstream and included in the supported SDK.
+
 ## CI baseline
 
 | Gate | Workflow | What must be observed |
 | --- | --- | --- |
-| Native Darwin/Linux | `llgo.yml` | source breakpoints, scopes, locals/globals, runtime values, goroutine ownership/stacks, and raw non-LLGo fallback |
+| Native Darwin/Linux | `llgo.yml` | source breakpoints, scopes, locals/globals, runtime values, goroutine ownership/stacks, panic/fault source locations, optimized inline stepping, Go/C/Go frames, and raw non-LLGo fallback |
 | Emulated embedded | `targets.yml` | host ELF, GDB Remote and LLDB `gdb-remote`, source values/backtrace, identical flashed bytes with/without host DWARF, and verified retained DWARF |
-| WASI | `wasi-debug.yml` | final Wasm DWARF, Wasmtime guest stub, source breakpoint, parameter/local, call stack, and clean exit |
+| WASI | `wasi-debug.yml`, `llgo.yml` | strict final embedded/external Wasm DWARF verification, Wasmtime guest stub, source breakpoint, parameter/local, call stack, and clean exit |
 | Browser | `browser-debug.yml` | embedded and external DWARF, standard build identity, escaped sidecar URL, source remapping, all common runtime-layout categories, real LLGo Wasm registration, and no-extension fallback |
 
 Physical hardware is deliberately outside required PR CI. Its guarded script
@@ -58,21 +65,23 @@ Platform-specific limits remain explicit:
 - A missing external Wasm sidecar and a mismatched `build_id` fail before the
   browser launches. A consumer without the LLGo extension keeps raw/name
   section symbolication but does not get Go runtime presentation.
-- The current Asyncify-transformed browser runtime is accepted by Go's DWARF
-  reader and Chrome, but LLVM's final `llvm-dwarfdump --verify` still reports
-  overlapping/range-containment diagnostics. With Emscripten 4.0.21 and
-  Binaryen 125, relinking the exact same objects without Asyncify passes the
-  verifier across all compile units; Asyncify alone introduces invalid ranges
-  in both LLGo and Emscripten C-library DIEs. This matches Binaryen issue
-  [#6406](https://github.com/WebAssembly/binaryen/issues/6406). A source map
-  can recover source lines but cannot repair Wasm-local variable locations, so
-  it is not a substitute for this gate. This is a final-artifact blocker, not a
-  condition that the acceptance lane may suppress.
+- Binaryen updates DWARF after Asyncify with a conservative range-topology
+  repair. Representable parent scopes are rebuilt from surviving children;
+  lost, reversed, or ambiguous scopes are reported as unavailable instead of
+  being assigned unrelated code. The browser lane runs
+  `llvm-dwarfdump --verify` against both the final embedded module and the
+  external DWARF sidecar after all post-link transforms. A verifier diagnostic
+  remains a hard failure; source maps are not accepted as a substitute for
+  variable, scope, or type DWARF.
 
-Panic/trap source stops, optimized inline stepping, Go/host boundary frames,
-and clean final DWARF after every LTO/post-link transform remain required
-before the umbrella issue itself can be closed. Keep those failures visible in
-focused fixtures rather than weakening the validators.
+The native lane additionally stops explicit panic, integer division by zero,
+invalid memory, and a real host trap at their exact source locations. Its
+optimized fixture must preserve nested LLVM inline frames and step back to the
+physical caller, while its callback fixture preserves ordered Go/C/Go frames.
+Equivalent boundary coverage remains platform-specific. Clean final DWARF
+after every LTO/post-link transform is still required before the umbrella
+issue itself can be closed; keep transform failures visible in focused
+fixtures rather than weakening the validators.
 
 ## Artifact-size accounting
 
