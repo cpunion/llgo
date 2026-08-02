@@ -21,15 +21,194 @@ preemption boundary, so the single-call and 16-call batch results are reported
 separately.
 
 The runtime currently ignores the requested argument to `GOMAXPROCS`; this is
-tracked independently as xgo-dev/llgo#2261 with a minimal reproducer. Therefore
-the original throughput table is a 16-P directional comparison, not a strict
-single-P scheduler measurement. Emission size and structural lifecycle counts
-are unaffected by that issue.
+tracked independently as
+[xgo-dev/llgo#2261](https://github.com/xgo-dev/llgo/issues/2261) with a minimal
+reproducer. Therefore the original throughput table is a 16-P directional
+comparison, not a strict single-P scheduler measurement. Emission size and
+structural lifecycle counts are unaffected by that issue.
 
 When comparing uncommitted compiler variants, give each variant an independent
 empty `GOCACHE`. The development compiler identity is revision-based, so `-a`
 alone can still reuse package artifacts produced by a different dirty-tree
 variant and invalidate a code-size comparison.
+
+## Exact same-source checkpoint before the main sync
+
+The current comparison uses the bounded standard-Go fixtures under
+`benchmark/coro_core`, exact upstream `xgo-dev/llgo` main `60c30f2ff`, and
+`cpunion/llgo:llvm-coro` `b573dad03`. Both compiler binaries were rebuilt from
+their clean worktrees and used independent caches. The host was Darwin arm64
+on an Apple M4 Max with Go 1.26.5 and LLVM 19.1.7. Both native binaries compile
+and run the same source. Compiler RSS is deliberately not a decision metric in
+this checkpoint.
+
+### Native artifact cost
+
+| Metric | exact `main` | coroutine | Ratio |
+| --- | ---: | ---: | ---: |
+| File bytes | 1,363,680 | 5,020,960 | 3.68x |
+| `__text` bytes | 344,376 | 2,159,512 | 6.27x |
+| zero-fill bytes | 284,971 | 11,380,814 | 39.94x |
+| linked resume entries | 0 | 1,498 | — |
+
+The coroutine zero-fill total is `__common + __bss`; the main total also
+contains 32 bytes of `__thread_bss`. The coroutine binary's 11.27 MB
+`__common` is primarily fixed native fleet/event storage. It is not stored in
+the executable and is not a stackless frame cost, but it is a real native
+process and embedded-profile deficit.
+
+### Fixed-iteration native behavior
+
+All runs started with `GOMAXPROCS=1`. Each cell below is the median of five
+complete process runs, using the workload's internal elapsed time.
+
+| Workload | exact `main` | coroutine | Result |
+| --- | ---: | ---: | ---: |
+| spawn 100 x 100 rounds (10,000 G) | 8.336 s | 0.776 s | coroutine 10.74x faster |
+| 5,000 unbuffered handoff round trips | 235.4 ms | 1.213 s | coroutine 5.15x slower |
+| 100 concurrent 1 ms timers x 10 rounds | 92.79 ms | 136.09 ms | coroutine 1.47x slower |
+
+The spawn case exposes the main backend's thread-per-goroutine cost and the
+stackless backend's intended scaling advantage. The handoff result identifies
+channel wake/schedule transfer as the largest measured runtime hotspot. Timer
+registration and wakeup are already within the same order of magnitude; the
+batch contains concurrent 1 ms lower bounds, so dividing the total into a
+synthetic per-timer latency would be misleading.
+
+### Parked-frame memory slope
+
+Peak RSS is the median of three `/usr/bin/time -l` process runs. Bytes are
+reported directly so the fixed-cost subtraction is reproducible.
+
+| Live parked G | exact `main` RSS | coroutine RSS |
+| ---: | ---: | ---: |
+| 0 | 3,801,088 | 22,822,912 |
+| 100 | 6,766,592 | 22,921,216 |
+| 500 | 15,663,104 | 24,608,768 |
+| 1,000 | 26,345,472 | 26,853,376 |
+
+Using the 0-to-1,000 endpoint, main grows by about 22,544 bytes/G and the
+coroutine runtime by about 4,030 bytes/G: stackless frames use 5.59x less
+incremental resident memory. The approximately 19 MB higher fixed native cost
+puts the observed crossover near 1,027 live G. These two facts must remain
+separate: stackless storage is working, while the default native fleet is too
+large for low-concurrency and embedded deployments.
+
+### WASI portability and current limits
+
+The fixed portable fixture builds and exits successfully under Wasmtime using
+the coroutine compiler without libuv or BDWGC. Its artifact has:
+
+- 1,626,053 file bytes;
+- 13 imports and 3,173 functions;
+- a 1,193,025-byte code section and 423,208-byte data section;
+- 1,024 initial memory pages, or 64 MiB.
+
+The measured Wasmtime process peak RSS was 131,907,584 bytes. That number is
+dominated by the Wasmtime process and the compiler-selected 64 MiB linear
+memory reservation, so it is not evidence of application-frame memory usage.
+Target-configurable initial memory and stack sizing is tracked by
+[xgo-dev/llgo#2262](https://github.com/xgo-dev/llgo/issues/2262).
+
+Exact main currently cannot provide a valid like-for-like WASI artifact:
+`llgo build -target=wasip1` silently emits native arm64, tracked by
+[xgo-dev/llgo#2263](https://github.com/xgo-dev/llgo/issues/2263); forcing
+`GOOS=wasip1 GOARCH=wasm` reaches WebAssembly lowering but LLVM 19 crashes
+during instruction selection of a standard-library generic map method.
+
+The parameterized native fixture is intentionally not claimed as WASI-clean.
+Its `os.Args` closure reaches an exact managed-interface rejection around
+`(*io.OffsetWriter).WriteAt` and `(*os.fileWithoutReadFrom).WriteAt`. This is a
+general interface/effect transport gap, not a dependency on libuv or BDWGC.
+
+### Promoted-wrapper emission audit
+
+The native coroutine artifact links 440 compiler-generated promoted-method
+resume entries, 29.4% of its 1,498 total resume entries. A temporary whole-plan
+observer over the same clean build found 457 emitted promoted wrappers:
+
+- 7 are already `NoSuspend`, plain, and have no coroutine ramp;
+- 450 carry structured outcome/await, preemption yield, park, or foreign-wait
+  semantics and are emitted as coroutines;
+- link-time reachability retains 440 of those coroutine wrappers.
+
+ABI type materialization records promoted wrappers because method tables need
+stable physical definitions. For an async receiver method the ordinary itab
+word is only a validated discriminator; the managed entry performs the actual
+structured call. Consequently, treating every method-table reference as a
+synchronous function address or dropping its demand would be incorrect.
+
+There is no safe one-line emission relaxation here: the existing planner
+already keeps the only seven no-suspend wrappers plain. Reducing the remaining
+cohort requires descriptor/archive entry-kind metadata plus complete adapters
+for closed and open interface dispatch, raw method tokens, reflection, panic /
+Goexit outcomes, and cross-package consumers. Until those gates close, these
+440 ramps remain a quantified next architecture optimization rather than an
+unsafe partial change.
+
+### Checkpoint conclusion
+
+The stackless design now has concrete value in two places: 5.59x lower parked-G
+incremental RSS and 10.74x faster bounded goroutine creation than exact main.
+It also runs the portable goroutine/channel/select/timer fixture on WASI without
+the old native runtime libraries. The value is not yet sufficient for a default
+replacement: native file/text/fixed-memory costs remain high, unbuffered
+handoff is 5.15x slower, general interface effect transport is incomplete, and
+WASI reserves 64 MiB by default. The next runtime optimization target is
+channel handoff; the next compiler emission target is descriptor-aware managed
+entry selection, not another local SSA pattern.
+
+## Post-main-sync verification
+
+The coroutine branch was subsequently synchronized with exact upstream main
+`2310ff87f` and merged as `cpunion/llgo:llvm-coro` `48c3119ea`. The coroutine
+compiler used for the measurements below was built from the PR tree
+`d5d98c75e`; that tree is identical to the merge commit. The same
+`benchmark/coro_core` sources and fresh, revision-specific compiler caches were
+used again.
+
+The native artifact structure did not grow during the sync:
+
+| Metric | main `2310ff87f` | coroutine `d5d98c75e` | Ratio |
+| --- | ---: | ---: | ---: |
+| File bytes | 1,363,680 | 5,020,960 | 3.68x |
+| `__text` bytes | 344,376 | 2,159,512 | 6.27x |
+| zero-fill bytes | 284,971 | 11,380,814 | 39.94x |
+| linked resume entries | 0 | 1,498 | — |
+
+Every value is identical to the pre-sync artifact. This is expected: the sync
+added method-DCE integration and coroutine correctness adapters, but changed no
+runtime source, and method dropping remains a development opt-in.
+
+Peak RSS was remeasured with three complete process runs per point; the table
+reports the median:
+
+| Live parked G | main RSS | coroutine RSS |
+| ---: | ---: | ---: |
+| 0 | 3,817,472 | 22,904,832 |
+| 100 | 6,995,968 | 22,937,600 |
+| 500 | 15,466,496 | 25,001,984 |
+| 1,000 | 25,788,416 | 26,918,912 |
+
+The 0-to-1,000 slopes are about 21,971 bytes/G for main and 4,014 bytes/G for
+the coroutine runtime, so stackless frames retain a 5.47x incremental RSS
+advantage. The approximately 19.1 MB fixed native scheduler cost moves the
+observed crossover to roughly 1,063 live G. This small movement is ordinary
+process-RSS noise rather than an architecture change.
+
+The post-sync host had unrelated OrbStack and QEMU processes continuously using
+more than six CPU cores. Absolute throughput samples from that interval were
+therefore rejected rather than replacing the quiet-host checkpoint above. A
+bounded five-run smoke test still preserved all three directions—coroutine
+spawn faster, unbuffered handoff slower, and concurrent timers slower—but a new
+absolute timing table requires a quiet-host paired run.
+
+The fixed WASI fixture still builds and exits successfully. Its post-sync
+artifact has 13 imports, 3,173 functions, a 1,193,025-byte code section, a
+422,964-byte data section, and 1,024 initial memory pages. The file is
+1,625,809 bytes, 244 bytes smaller than the previous artifact. Exact main still
+emits an arm64 Mach-O executable for `-target=wasip1`, so xgo-dev/llgo#2263
+remains reproducible.
 
 ## Compiler analysis and emission
 
