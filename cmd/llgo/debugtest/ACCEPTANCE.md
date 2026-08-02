@@ -28,7 +28,7 @@ compatibility target. Exact commands live in these focused fixtures:
 
 | Gate | Workflow | What must be observed |
 | --- | --- | --- |
-| Native Darwin/Linux | `llgo.yml` | source breakpoints, scopes, locals/globals, runtime values, goroutine ownership/stacks, and raw non-LLGo fallback |
+| Native Darwin/Linux | `llgo.yml` | source breakpoints, scopes, locals/globals, runtime values, goroutine ownership/stacks, panic/fault source locations, optimized inline stepping, Go/C/Go frames, and raw non-LLGo fallback |
 | Emulated embedded | `targets.yml` | host ELF, GDB Remote and LLDB `gdb-remote`, source values/backtrace, identical flashed bytes with/without host DWARF, and verified retained DWARF |
 | WASI | `wasi-debug.yml` | final Wasm DWARF, Wasmtime guest stub, source breakpoint, parameter/local, call stack, and clean exit |
 | Browser | `browser-debug.yml` | embedded and external DWARF, standard build identity, escaped sidecar URL, source remapping, all common runtime-layout categories, real LLGo Wasm registration, and no-extension fallback |
@@ -69,10 +69,14 @@ Platform-specific limits remain explicit:
   it is not a substitute for this gate. This is a final-artifact blocker, not a
   condition that the acceptance lane may suppress.
 
-Panic/trap source stops, optimized inline stepping, Go/host boundary frames,
-and clean final DWARF after every LTO/post-link transform remain required
-before the umbrella issue itself can be closed. Keep those failures visible in
-focused fixtures rather than weakening the validators.
+The native lane additionally stops explicit panic, integer division by zero,
+invalid memory, and a real host trap at their exact source locations. Its
+optimized fixture must preserve nested LLVM inline frames and step back to the
+physical caller, while its callback fixture preserves ordered Go/C/Go frames.
+Equivalent boundary coverage remains platform-specific. Clean final DWARF
+after every LTO/post-link transform is still required before the umbrella
+issue itself can be closed; keep transform failures visible in focused
+fixtures rather than weakening the validators.
 
 ## Artifact-size accounting
 

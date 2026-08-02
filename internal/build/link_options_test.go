@@ -83,6 +83,29 @@ func TestDwarfPreserveLinkerArgs(t *testing.T) {
 	}
 }
 
+func TestDwarfCompilerArgs(t *testing.T) {
+	tests := []struct {
+		name   string
+		conf   Config
+		target crosscompile.Export
+		want   []string
+	}{
+		{name: "linked default", conf: Config{Mode: ModeBuild}, want: []string{"-gdwarf-4"}},
+		{name: "explicit preserve", conf: Config{Mode: ModeBuild, LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: configurableDebugInfo(), want: []string{"-gdwarf-4"}},
+		{name: "explicit omit", conf: Config{Mode: ModeBuild, LinkOptions: LinkOptions{DWARF: DWARFOmit}}, target: configurableDebugInfo()},
+		{name: "generation default", conf: Config{Mode: ModeGen}},
+		{name: "generation preserve", conf: Config{Mode: ModeGen, LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, want: []string{"-gdwarf-4"}},
+		{name: "unsupported target", conf: Config{Mode: ModeBuild}, target: unavailableDebugInfo()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dwarfCompilerArgs(&tt.conf, &tt.target); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("dwarfCompilerArgs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveOmitDWARF(t *testing.T) {
 	tests := []struct {
 		name   string
