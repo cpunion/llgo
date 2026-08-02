@@ -19,6 +19,8 @@
 package runtime
 
 import (
+	"unsafe"
+
 	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 	"github.com/goplus/llgo/runtime/internal/coro"
@@ -26,11 +28,16 @@ import (
 )
 
 const (
-	// Match Go's initial runtime/debug.SetMaxThreads contract. Entries are BSS
-	// storage, not eagerly created pthreads; the fixed directory makes every
-	// C-to-Go owner edge scalar-only and allocation-free.
+	// Match Go's initial runtime/debug.SetMaxThreads contract without reserving
+	// one process-lifetime owner object for every theoretical M. The complete
+	// initial fleet remains inline and allocation-free; replacement identities
+	// attach stable 64-owner pages on first use. C-to-Go edges still carry only
+	// the unchanged scalar slot.
 	coroNativeMDirectoryCapacityV1 uint32 = 10_000
-	coroNativeProgramOwnerEpochV1  uint32 = 1
+	coroNativeMPageCapacityV1      uint32 = 64
+	coroNativeMPageCountV1                = (coroNativeMDirectoryCapacityV1 - coroNativeFleetDomainCapacityV1 +
+		coroNativeMPageCapacityV1 - 1) / coroNativeMPageCapacityV1
+	coroNativeProgramOwnerEpochV1 uint32 = 1
 )
 
 type coroNativeMOwnerLifecycleV1 uint32
@@ -84,8 +91,18 @@ type coroNativeMOwnerV1 struct {
 	lifecycle       uint32
 }
 
+type coroNativeMOwnerPageV1 struct {
+	owners [coroNativeMPageCapacityV1]coroNativeMOwnerV1
+}
+
 type coroNativeMDirectoryV1 struct {
-	owners [coroNativeMDirectoryCapacityV1]coroNativeMOwnerV1
+	owners [coroNativeFleetDomainCapacityV1]coroNativeMOwnerV1
+	// pages are immutable after release publication. unsafe.Pointer keeps each
+	// target-allocated page visible to the non-moving runtime collector while
+	// allowing one lock-free CAS to choose a winner between concurrent M
+	// replacement requests. A losing candidate is ordinary collectable Go
+	// storage and no C code ever observes either pointer.
+	pages  [coroNativeMPageCountV1]unsafe.Pointer
 	active [coroNativeFleetDomainCapacityV1]uint32
 	state  uint32
 }
@@ -96,7 +113,46 @@ func coroNativeMOwnerForSlotV1(slot uint32) (*coroNativeMOwnerV1, bool) {
 	if slot == 0 || slot > coroNativeMDirectoryCapacityV1 {
 		return nil, false
 	}
-	return &coroNativeMDirectoryV1State.owners[slot-1], true
+	if slot <= coroNativeFleetDomainCapacityV1 {
+		return &coroNativeMDirectoryV1State.owners[slot-1], true
+	}
+	index := slot - coroNativeFleetDomainCapacityV1 - 1
+	page := coroNativeAtomicLoadPointerV1(
+		&coroNativeMDirectoryV1State.pages[index/coroNativeMPageCapacityV1],
+	)
+	if page == nil {
+		return nil, false
+	}
+	return &(*coroNativeMOwnerPageV1)(page).owners[index%coroNativeMPageCapacityV1], true
+}
+
+// coroNativeMEnsureOwnerForSlotV1 is allocation-capable and therefore belongs
+// only to scheduler-owner allocation paths. Readers never allocate: once a
+// page wins publication, its address and slot mapping remain stable for the
+// process lifetime even though individual replacement owners are recycled.
+func coroNativeMEnsureOwnerForSlotV1(slot uint32) (*coroNativeMOwnerV1, bool) {
+	if slot == 0 || slot > coroNativeMDirectoryCapacityV1 {
+		return nil, false
+	}
+	if slot <= coroNativeFleetDomainCapacityV1 {
+		return &coroNativeMDirectoryV1State.owners[slot-1], true
+	}
+	index := slot - coroNativeFleetDomainCapacityV1 - 1
+	pageAddress := &coroNativeMDirectoryV1State.pages[index/coroNativeMPageCapacityV1]
+	page := coroNativeAtomicLoadPointerV1(pageAddress)
+	if page == nil {
+		candidate := new(coroNativeMOwnerPageV1)
+		candidatePointer := unsafe.Pointer(candidate)
+		if coroNativeAtomicCASPointerV1(pageAddress, nil, candidatePointer) {
+			page = candidatePointer
+		} else {
+			page = coroNativeAtomicLoadPointerV1(pageAddress)
+			if page == nil {
+				return nil, false
+			}
+		}
+	}
+	return &(*coroNativeMOwnerPageV1)(page).owners[index%coroNativeMPageCapacityV1], true
 }
 
 func coroNativeMOwnerLifecycleLoadV1(owner *coroNativeMOwnerV1) coroNativeMOwnerLifecycleV1 {
@@ -342,7 +398,10 @@ func coroNativeMAllocateSuccessorV1(
 		return 0, nil, false
 	}
 	for slot := uint32(coroNativeFleetDomainCapacityV1 + 1); slot <= coroNativeMDirectoryCapacityV1; slot++ {
-		owner := &coroNativeMDirectoryV1State.owners[slot-1]
+		owner, ownerOK := coroNativeMEnsureOwnerForSlotV1(slot)
+		if !ownerOK {
+			return 0, nil, false
+		}
 		if !coroNativeMOwnerLifecycleCASV1(
 			owner,
 			coroNativeMOwnerUnusedV1,
@@ -487,7 +546,10 @@ func coroNativeMAllocateReplacementV1(
 		return 0, nil, false
 	}
 	for slot := uint32(coroNativeFleetDomainCapacityV1 + 1); slot <= coroNativeMDirectoryCapacityV1; slot++ {
-		owner := &coroNativeMDirectoryV1State.owners[slot-1]
+		owner, ownerOK := coroNativeMEnsureOwnerForSlotV1(slot)
+		if !ownerOK {
+			return 0, nil, false
+		}
 		if !coroNativeMOwnerLifecycleCASV1(
 			owner,
 			coroNativeMOwnerUnusedV1,

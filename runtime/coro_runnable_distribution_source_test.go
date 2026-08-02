@@ -146,10 +146,15 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	directory := readRuntimePollFile(t, "internal/runtime/coro_native_m_owner_llgo.go")
 	for _, required := range []string{
 		"coroNativeMDirectoryCapacityV1 uint32 = 10_000",
+		"coroNativeMPageCapacityV1      uint32 = 64",
 		"handoff coro.ExecutionDomainHandoff",
 		"resume  coro.ExecutorResumeHandoff",
 		"token  uint32",
+		"owners [coroNativeFleetDomainCapacityV1]coroNativeMOwnerV1",
+		"pages  [coroNativeMPageCountV1]unsafe.Pointer",
 		"active [coroNativeFleetDomainCapacityV1]uint32",
+		"func coroNativeMEnsureOwnerForSlotV1(slot uint32)",
+		"coroNativeAtomicCASPointerV1(pageAddress, nil, candidatePointer)",
 		"corofleet.TryReuseOwner(&owner.thread, &owner.token, slot)",
 		"corofleet.ReleaseOwner(",
 		"coroNativeMAllocateReplacementV1(",
@@ -159,6 +164,9 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		if !strings.Contains(directory, required) {
 			t.Errorf("native M directory lacks replacement-owner marker %q", required)
 		}
+	}
+	if strings.Contains(directory, "owners [coroNativeMDirectoryCapacityV1]coroNativeMOwnerV1") {
+		t.Error("native M directory still reserves every logical owner in BSS")
 	}
 
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")

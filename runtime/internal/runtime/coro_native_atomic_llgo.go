@@ -18,7 +18,11 @@
 
 package runtime
 
-import catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+import (
+	"unsafe"
+
+	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+)
 
 func coroNativeAtomicLoadV1(word *uint32) uint32 {
 	return catomic.Load(word)
@@ -29,6 +33,15 @@ func coroNativeAtomicStoreV1(word *uint32, value uint32) {
 }
 
 func coroNativeAtomicCASV1(word *uint32, old, next uint32) bool {
+	_, swapped := catomic.CompareAndExchange(word, old, next)
+	return swapped
+}
+
+func coroNativeAtomicLoadPointerV1(word *unsafe.Pointer) unsafe.Pointer {
+	return catomic.Load(word)
+}
+
+func coroNativeAtomicCASPointerV1(word *unsafe.Pointer, old, next unsafe.Pointer) bool {
 	_, swapped := catomic.CompareAndExchange(word, old, next)
 	return swapped
 }
