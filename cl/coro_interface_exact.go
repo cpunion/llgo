@@ -120,6 +120,49 @@ func (p *context) compileCoroExactInterfaceCall(
 	return b.Call(function.Expr, arguments...)
 }
 
+// tryCompileCoroRawPlainExactInterfaceCall reuses the same occurrence-local
+// receiver proof for a legacy-stack twin. The target is selected through the
+// frozen raw/plain plan, so this path neither calls a coroutine entry with a
+// native ABI nor authorizes an open interface dispatch on the raw stack.
+func (p *context) tryCompileCoroRawPlainExactInterfaceCall(
+	b llssa.Builder,
+	call *ssa.Call,
+) (llssa.Expr, bool) {
+	if p == nil || !p.rawPlainBody || call == nil || p.compilation == nil {
+		return llssa.Expr{}, false
+	}
+	plan := p.compilation.immutablePlan()
+	if plan == nil {
+		panic("raw plain exact interface invocation has no immutable compilation plan")
+	}
+	receiver, target, targetPlan, exact, err := plan.ResolveExactInterfaceCall(call)
+	if err != nil {
+		panic(err)
+	}
+	if !exact {
+		return llssa.Expr{}, false
+	}
+	if receiver == nil || target == nil {
+		panic("raw plain exact interface invocation lost its receiver or target")
+	}
+	if err := validateCoroRawPlainCallTarget(plan, target); err != nil {
+		panic(fmt.Errorf("raw plain exact interface target %q: %w", targetPlan.ID, err))
+	}
+	function, _, kind := p.compileRawPlainFunction(target)
+	if function == nil || kind != goFunc {
+		panic(fmt.Errorf(
+			"raw plain exact interface target %q did not resolve to one Go entry",
+			targetPlan.ID,
+		))
+	}
+
+	p.emitPCLineLabel(b, call.Pos())
+	arguments := make([]llssa.Expr, 0, len(call.Common().Args)+1)
+	arguments = append(arguments, p.compileValue(b, receiver))
+	arguments = append(arguments, p.compileValues(b, call.Common().Args, fnNormal)...)
+	return b.Call(function.Expr, arguments...), true
+}
+
 func (p *context) compileCoroExactInterfaceAwait(
 	b llssa.Builder,
 	call *ssa.Call,

@@ -29,6 +29,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/internal/buildenv"
 	"github.com/goplus/llgo/internal/lto"
 	llpackages "github.com/goplus/llgo/internal/packages"
 	llssa "github.com/goplus/llgo/ssa"
@@ -133,6 +134,9 @@ func TestStagedNativeBackendGateIsExact(t *testing.T) {
 	checkDisabled("ModeGen", func(ctx *context) { ctx.mode = ModeGen })
 	checkDisabled("C shared", func(ctx *context) { ctx.buildConf.BuildMode = BuildModeCShared })
 	checkDisabled("LTO", func(ctx *context) { ctx.buildConf.LTO = lto.Full })
+	if buildenv.Dev {
+		checkDisabled("deadcode drop", func(ctx *context) { ctx.buildConf.DeadcodeDrop = true })
+	}
 	checkDisabled("GenLL", func(ctx *context) { ctx.buildConf.GenLL = true })
 	checkDisabled("named target", func(ctx *context) { ctx.buildConf.Target = "fixture" })
 	checkDisabled("cross GOOS", func(ctx *context) { ctx.buildConf.Goos = runtime.GOOS + "-other" })

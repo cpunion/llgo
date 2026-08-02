@@ -7,11 +7,17 @@
     _llgo_main.Outer
 *_llgo_string:
     _llgo_string
+_llgo_int:
+    *_llgo_int
 _llgo_main.Inner:
+    *_llgo_main.Inner
     _llgo_string
 _llgo_main.Outer:
+    *_llgo_main.Outer
     _llgo_int
     _llgo_main.Inner
+_llgo_string:
+    *_llgo_string
 
 [OrdinaryEdges]
 *_llgo_int:
@@ -26,14 +32,14 @@ _llgo_main.Outer:
 *_llgo_string:
     _llgo_string
     github.com/goplus/llgo/runtime/internal/runtime.memequalptr
-__llgo_coro_root_factory_descriptor_v1.a65c444fbf7b91bc782a7d3687dae0de:
-    __llgo_coro_root_factory_v1.a65c444fbf7b91bc782a7d3687dae0de
-__llgo_coro_root_factory_v1.a65c444fbf7b91bc782a7d3687dae0de:
+__llgo_coro_root_factory_descriptor_v1.3b075c97321b0f180d585b8164c6f875:
+    __llgo_coro_root_factory_v1.3b075c97321b0f180d585b8164c6f875
+__llgo_coro_root_factory_v1.3b075c97321b0f180d585b8164c6f875:
     main.main$coro
-__llgo_coro_root_package_v1.7855ad1b93ec2ce1958a629841b0d996:
-    __llgo_coro_root_package_v1.7855ad1b93ec2ce1958a629841b0d996.entries
-__llgo_coro_root_package_v1.7855ad1b93ec2ce1958a629841b0d996.entries:
-    __llgo_coro_root_factory_descriptor_v1.a65c444fbf7b91bc782a7d3687dae0de
+__llgo_coro_root_package_v1.41a13055792baeb946715aa4f7baa88d:
+    __llgo_coro_root_package_v1.41a13055792baeb946715aa4f7baa88d.entries
+__llgo_coro_root_package_v1.41a13055792baeb946715aa4f7baa88d.entries:
+    __llgo_coro_root_factory_descriptor_v1.3b075c97321b0f180d585b8164c6f875
 _llgo_int:
     *_llgo_int
     github.com/goplus/llgo/runtime/internal/runtime.memequal64
@@ -54,16 +60,16 @@ _llgo_struct$Z-8Mj1VAYg5xS_jUvJKfmUcA_2fP_OEHpanbgA_46rE$fields:
     _llgo_int
     _llgo_main.Inner
 llvm.compiler.used:
-    __llgo_coro_library_effect_v2.1b15e1c8efeba89a62b0f648789f49d4
+    __llgo_coro_library_effect_v6.3915b734a7ca075d21cecdc003bb6b58
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.a65c444fbf7b91bc782a7d3687dae0de
-    __llgo_coro_root_package_v1.7855ad1b93ec2ce1958a629841b0d996
+    __llgo_coro_root_factory_descriptor_v1.3b075c97321b0f180d585b8164c6f875
+    __llgo_coro_root_package_v1.41a13055792baeb946715aa4f7baa88d
 main.init:
     main.init$guard
 main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.a65c444fbf7b91bc782a7d3687dae0de
+    __llgo_coro_frame_descriptor_v1.3b075c97321b0f180d585b8164c6f875
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1

@@ -2031,6 +2031,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		} else if value, handled := p.tryCompileCoroRawPlainCall(b, v); handled {
 			ret = value
 		} else if p.rawPlainBody {
+			if value, handled := p.tryCompileCoroRawPlainExactInterfaceCall(b, v); handled {
+				ret = value
+				break
+			}
 			// A compiler-frozen closed SyncDispatch (currently the TLS destructor
 			// callback) has a complete singleton target and plain descriptor ABI.
 			// Preserve that exact path before the general raw-body dynamic-call

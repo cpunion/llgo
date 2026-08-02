@@ -14,13 +14,21 @@
 *_llgo_string:
     _llgo_string
 _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
+    *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
     _llgo_int
 _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    *_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
     _llgo_string
 _llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[int]:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[int]
     _llgo_int
 _llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[string]:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[string]
     _llgo_string
+_llgo_int:
+    *_llgo_int
+_llgo_string:
+    *_llgo_string
 
 [OrdinaryEdges]
 *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
@@ -72,14 +80,14 @@ __llgo_coro_method_raw_trap_v1.a551e081876916393b495942515ada43:
     llvm.trap
 __llgo_coro_method_raw_trap_v1.edebc1e42fd6c8885c32b3db61eb66f7:
     llvm.trap
-__llgo_coro_root_factory_descriptor_v1.9ff0425f444de56a74ee6b730806999d:
-    __llgo_coro_root_factory_v1.9ff0425f444de56a74ee6b730806999d
-__llgo_coro_root_factory_v1.9ff0425f444de56a74ee6b730806999d:
+__llgo_coro_root_factory_descriptor_v1.a76cd3936549595acf9870c19862247a:
+    __llgo_coro_root_factory_v1.a76cd3936549595acf9870c19862247a
+__llgo_coro_root_factory_v1.a76cd3936549595acf9870c19862247a:
     main.main$coro
-__llgo_coro_root_package_v1.6d317f5ba7ab1d1f6139df983cbb843d:
-    __llgo_coro_root_package_v1.6d317f5ba7ab1d1f6139df983cbb843d.entries
-__llgo_coro_root_package_v1.6d317f5ba7ab1d1f6139df983cbb843d.entries:
-    __llgo_coro_root_factory_descriptor_v1.9ff0425f444de56a74ee6b730806999d
+__llgo_coro_root_package_v1.18768445509374bdc78549ed06193d27:
+    __llgo_coro_root_package_v1.18768445509374bdc78549ed06193d27.entries
+__llgo_coro_root_package_v1.18768445509374bdc78549ed06193d27.entries:
+    __llgo_coro_root_factory_descriptor_v1.a76cd3936549595acf9870c19862247a
 _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
     *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
     _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA$out
@@ -113,7 +121,7 @@ _llgo_string:
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.bfef045bdcbf38945ce84602d7edf588
+    __llgo_coro_frame_descriptor_v1.fce1e2558da91230201a6ac2965c8e05
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -133,7 +141,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int])
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.1c7e01645e830c5a6d16c9da142cd4a4
+    __llgo_coro_frame_descriptor_v1.613b44856e4261c3c6371520b4b9c6d2
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1
@@ -149,7 +157,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int])
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.4382ac8352ddca1c860b7178aef96385
+    __llgo_coro_frame_descriptor_v1.11f2fcfffd29db3022fc45873006ccab
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -169,7 +177,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[strin
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.4b889dc94b5a83fadf61963f34ada4e9
+    __llgo_coro_frame_descriptor_v1.9336739c4920413b1c605255c69d761a
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1
@@ -187,10 +195,10 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.struct$XNpH
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.struct$lOhriNu2BrWBR2Mh8k-KggMYlAw0Wx-2ftE2_gNyubg$fields:
     _llgo_int
 llvm.compiler.used:
-    __llgo_coro_library_effect_v2.193e407b2387d073c552e8089337b3d4
+    __llgo_coro_library_effect_v6.c63a04e0f0f5ba44b461a7ccfc25e00c
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.9ff0425f444de56a74ee6b730806999d
-    __llgo_coro_root_package_v1.6d317f5ba7ab1d1f6139df983cbb843d
+    __llgo_coro_root_factory_descriptor_v1.a76cd3936549595acf9870c19862247a
+    __llgo_coro_root_package_v1.18768445509374bdc78549ed06193d27
 main.init:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init
@@ -202,7 +210,7 @@ main.main$coro:
     __llgo_coro_await_prepare_v3
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.9ff0425f444de56a74ee6b730806999d
+    __llgo_coro_frame_descriptor_v1.a76cd3936549595acf9870c19862247a
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1

@@ -20,15 +20,27 @@
 *_llgo_uint8:
     _llgo_uint8
 []_llgo_uint8:
+    *[]_llgo_uint8
     _llgo_uint8
 _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    *_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w
     _llgo_error
 _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    *_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
     []_llgo_uint8
     _llgo_error
     _llgo_int
 _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    *_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
     _llgo_string
+_llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source
+_llgo_int:
+    *_llgo_int
+_llgo_string:
+    *_llgo_string
+_llgo_uint8:
+    *_llgo_uint8
 
 [OrdinaryEdges]
 *[]_llgo_uint8:
@@ -68,7 +80,7 @@ __llgo$generated$promoted$Close$llgo$promoted$v1$77575336b69e7eac563cd474c1c4b6c
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.2cd2f24f80ee5220ea666b8f5999202b
+    __llgo_coro_frame_descriptor_v1.58d53ebc24c31592642adb21b4feed24
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -88,7 +100,7 @@ __llgo$generated$promoted$Read$llgo$promoted$v1$dfcfeef340532e0df942cabc1157784a
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.3e09f88b4edb356a56d2740d12cf84bf
+    __llgo_coro_frame_descriptor_v1.90e596b7b1b225f7d285970f6127679e
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -128,14 +140,14 @@ __llgo_coro_method_raw_trap_v1.688751ef13194b3436ea9621d266ddb8:
     llvm.trap
 __llgo_coro_method_raw_trap_v1.9805988801d4f3e11bf64357a7ca8d0b:
     llvm.trap
-__llgo_coro_root_factory_descriptor_v1.2b9434d3ee2beee7cdac25b4de176924:
-    __llgo_coro_root_factory_v1.2b9434d3ee2beee7cdac25b4de176924
-__llgo_coro_root_factory_v1.2b9434d3ee2beee7cdac25b4de176924:
+__llgo_coro_root_factory_descriptor_v1.c362e88d2948e10bae7940c0943afa75:
+    __llgo_coro_root_factory_v1.c362e88d2948e10bae7940c0943afa75
+__llgo_coro_root_factory_v1.c362e88d2948e10bae7940c0943afa75:
     main.main$coro
-__llgo_coro_root_package_v1.fec4f1b9a771f1d63677b12ad3bb66e8:
-    __llgo_coro_root_package_v1.fec4f1b9a771f1d63677b12ad3bb66e8.entries
-__llgo_coro_root_package_v1.fec4f1b9a771f1d63677b12ad3bb66e8.entries:
-    __llgo_coro_root_factory_descriptor_v1.2b9434d3ee2beee7cdac25b4de176924
+__llgo_coro_root_package_v1.6ba863d3f97e3d78ef06adf68d67e030:
+    __llgo_coro_root_package_v1.6ba863d3f97e3d78ef06adf68d67e030.entries
+__llgo_coro_root_package_v1.6ba863d3f97e3d78ef06adf68d67e030.entries:
+    __llgo_coro_root_factory_descriptor_v1.c362e88d2948e10bae7940c0943afa75
 _llgo_error:
     *_llgo_error
     _llgo_iface$Fh8eUJ-Gw4e6TYuajcFIOSCuqSPKAt5nS4ow7xeGXEU$imethods
@@ -180,10 +192,10 @@ _llgo_uint8:
     *_llgo_uint8
     github.com/goplus/llgo/runtime/internal/runtime.memequal8
 llvm.compiler.used:
-    __llgo_coro_library_effect_v2.ee8cf662848e817e1ebdcab7f147d0c3
+    __llgo_coro_library_effect_v6.b26fda3f8a23c5987edada4dfa74d5cd
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.2b9434d3ee2beee7cdac25b4de176924
-    __llgo_coro_root_package_v1.fec4f1b9a771f1d63677b12ad3bb66e8
+    __llgo_coro_root_factory_descriptor_v1.c362e88d2948e10bae7940c0943afa75
+    __llgo_coro_root_package_v1.6ba863d3f97e3d78ef06adf68d67e030
 main.init:
     github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init
     main.init$guard
@@ -192,7 +204,7 @@ main.main$coro:
     __llgo_coro_await_prepare_v3
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.2b9434d3ee2beee7cdac25b4de176924
+    __llgo_coro_frame_descriptor_v1.c362e88d2948e10bae7940c0943afa75
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -218,7 +230,7 @@ main.use$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.5d9dfa945c4e57a3c7348e9b853f27a7
+    __llgo_coro_frame_descriptor_v1.96586af8327f710d3b7c77070239094a
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1

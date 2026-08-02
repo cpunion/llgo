@@ -557,6 +557,35 @@ func (view CoroLibraryEffectView) FunctionBaseSymbol(function *ssa.Function) (st
 	return base, nil
 }
 
+// FunctionEmittedPrimarySymbol returns the exact physical symbol which owns
+// the semantic body facts for one locally emitted managed function. Keeping
+// this projection beside FunctionBaseSymbol makes every whole-program
+// consumer use the same frozen link identity and emission suffix as codegen.
+// Raw/plain entry roots use FunctionBaseSymbol directly because a dual-entry
+// function can publish both that legacy ABI and this managed primary.
+func (view CoroLibraryEffectView) FunctionEmittedPrimarySymbol(
+	function *ssa.Function, emission coro.BodyEmission,
+) (string, error) {
+	base, err := view.FunctionBaseSymbol(function)
+	if err != nil {
+		return "", err
+	}
+	switch emission {
+	case coro.EmitPlain:
+		return base, nil
+	case coro.EmitCoroutine:
+		return base + coroPrimarySuffix, nil
+	case coro.EmitOutcomePlain:
+		return base + coroOutcomePlainPrimarySuffix, nil
+	case coro.EmitRawPlain:
+		return "", fmt.Errorf("raw-only function %q has no managed primary", function.Name())
+	case coro.EmitNone, coro.EmitExternal:
+		return "", fmt.Errorf("function %q has no locally emitted primary (%s)", function.Name(), emission)
+	default:
+		return "", fmt.Errorf("function %q has unknown body emission %d", function.Name(), uint8(emission))
+	}
+}
+
 func (p *context) emitCoroLibraryEffectSummary() error {
 	if p == nil || p.cacheRegistration || p.compilation == nil ||
 		p.emissionOwner == nil || p.compilation.CoroPlanDigest == "" {

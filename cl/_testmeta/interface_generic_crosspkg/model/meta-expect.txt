@@ -2,7 +2,7 @@
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.a8e6fab771643b2982f59f4f9f92a552
+    __llgo_coro_frame_descriptor_v1.7526887472e3e3f4991e94e8259b25be
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1
@@ -19,7 +19,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$c
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewStringBox$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.dda4a83f2b9a9bde36ad407600ac4e86
+    __llgo_coro_frame_descriptor_v1.00d2cd558d61a76cc9680ac236e4318e
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1
@@ -37,7 +37,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.UseStringBo
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.e4d671563f9569e8017d0e12d4c590e8
+    __llgo_coro_frame_descriptor_v1.b9b16e3bf25663a9b6d4294293503fb2
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1
@@ -53,5 +53,5 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.UseStringBo
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v2.0311309216aea88afe924f1edcd88e2e
+    __llgo_coro_library_effect_v6.ac84e08d25f9c252f9569bc27031da97
 

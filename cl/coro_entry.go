@@ -392,6 +392,10 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			if e.plan.Emission == coro.EmitPlain {
 				return nil
 			}
+			if e.plan.Emission == coro.EmitRawPlain {
+				variant := e.coroPlan != nil && e.coroPlan.HasRawPlainVariant(e.function)
+				return validatePlannedRawPlainVariant(e.function, e.plan, variant)
+			}
 			if e.plan.Emission != coro.EmitCoroutine {
 				return fmt.Errorf("coroutine entry resolution: raw/interface target %q has unsupported emission %s", e.plan.ID, e.plan.Emission)
 			}

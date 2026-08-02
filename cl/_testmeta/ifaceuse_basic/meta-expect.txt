@@ -1,33 +1,35 @@
 [TypeChildren]
 *_llgo_main.T:
     _llgo_main.T
+_llgo_main.T:
+    *_llgo_main.T
 
 [OrdinaryEdges]
 *_llgo_main.T:
     _llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.memequalptr
-__llgo_coro_root_factory_descriptor_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce:
-    __llgo_coro_root_factory_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce
-__llgo_coro_root_factory_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce:
+__llgo_coro_root_factory_descriptor_v1.ea18e55c08d842155bceedbb4a9b0877:
+    __llgo_coro_root_factory_v1.ea18e55c08d842155bceedbb4a9b0877
+__llgo_coro_root_factory_v1.ea18e55c08d842155bceedbb4a9b0877:
     main.main$coro
-__llgo_coro_root_package_v1.40c00691b4dcf83a1e689933ffadb18d:
-    __llgo_coro_root_package_v1.40c00691b4dcf83a1e689933ffadb18d.entries
-__llgo_coro_root_package_v1.40c00691b4dcf83a1e689933ffadb18d.entries:
-    __llgo_coro_root_factory_descriptor_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce
+__llgo_coro_root_package_v1.c1f332eb52d1965d65e85f8c644b6a1b:
+    __llgo_coro_root_package_v1.c1f332eb52d1965d65e85f8c644b6a1b.entries
+__llgo_coro_root_package_v1.c1f332eb52d1965d65e85f8c644b6a1b.entries:
+    __llgo_coro_root_factory_descriptor_v1.ea18e55c08d842155bceedbb4a9b0877
 _llgo_main.T:
     *_llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
-    __llgo_coro_library_effect_v2.55666711ba08f50baee4b49b3b5b61a0
+    __llgo_coro_library_effect_v6.6e13a20588277ad1732abfdfc51410f8
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce
-    __llgo_coro_root_package_v1.40c00691b4dcf83a1e689933ffadb18d
+    __llgo_coro_root_factory_descriptor_v1.ea18e55c08d842155bceedbb4a9b0877
+    __llgo_coro_root_package_v1.c1f332eb52d1965d65e85f8c644b6a1b
 main.init:
     main.init$guard
 main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.b02a8c32bdfb5f6b2b6b19d0c027a1ce
+    __llgo_coro_frame_descriptor_v1.ea18e55c08d842155bceedbb4a9b0877
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1

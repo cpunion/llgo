@@ -103,7 +103,7 @@ func analyzeCoroClosedInterfacePlainPlan(
 	// references before scanning SSA consumers so they are not mistaken for
 	// descriptor-backed Go function values.
 	for _, owner := range plan.Functions() {
-		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine) {
+		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine && !plan.HasRawPlainVariant(owner.Function)) {
 			continue
 		}
 		references, err := universe.CoroDemandReferences(owner.Function)
@@ -176,7 +176,7 @@ func analyzeCoroClosedInterfacePlainPlan(
 	}
 
 	for _, owner := range plan.Functions() {
-		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine) {
+		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine && !plan.HasRawPlainVariant(owner.Function)) {
 			continue
 		}
 		fn := owner.Function
@@ -218,6 +218,26 @@ func analyzeCoroClosedInterfacePlainPlan(
 				}
 
 				if common.IsInvoke() {
+					if direct, ordinary := call.(*ssa.Call); ordinary && plan.HasRawPlainVariant(fn) {
+						receiver, target, targetPlan, exact, err := plan.ResolveExactInterfaceCall(direct)
+						if err != nil {
+							return nil, coroLeafInstructionError(fn, owner.Plan, instruction,
+								"invalid exact raw interface invoke: "+err.Error())
+						}
+						if exact {
+							if receiver == nil || target == nil {
+								return nil, coroLeafInstructionError(fn, owner.Plan, instruction,
+									"exact raw interface invoke lost its receiver or target")
+							}
+							if err := validateCoroRawPlainCallTarget(plan, target); err != nil {
+								return nil, coroLeafInstructionError(fn, owner.Plan, instruction,
+									"invalid exact raw interface target: "+err.Error())
+							}
+							result.calls[call] = struct{}{}
+							result.targets[targetPlan.ID] = target
+							continue
+						}
+					}
 					if managed.acceptsCall(call) {
 						continue
 					}

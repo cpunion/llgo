@@ -49,6 +49,8 @@ import (
 	"github.com/goplus/llgo/internal/clang"
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/crosscompile"
+	"github.com/goplus/llgo/internal/dcepass"
+	"github.com/goplus/llgo/internal/deadcode"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/firmware"
 	"github.com/goplus/llgo/internal/flash"
@@ -2089,7 +2091,7 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 					}
 				}
 				call, ok := instruction.(ssa.CallInstruction)
-				if !ok || call.Common() == nil || call.Common().StaticCallee() == nil {
+				if !ok || call.Common() == nil {
 					continue
 				}
 				if _, rawSynchronous := closure.rawSyncIntrinsics[call]; rawSynchronous {
@@ -2099,6 +2101,32 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 				if !planned {
 					// Frontend-elided intrinsics have no physical direct edge;
 					// their replacement helpers, if any, are covered above.
+					continue
+				}
+				if direct, ordinary := call.(*ssa.Call); ordinary && call.Common().IsInvoke() {
+					receiver, target, _, exact, err := preliminary.ResolveExactInterfaceCall(direct)
+					if err != nil {
+						return nil, fmt.Errorf("resolve exact raw interface call %q in %q: %w", call.String(), fn.Name(), err)
+					}
+					if exact {
+						if receiver == nil || target == nil {
+							return nil, fmt.Errorf("exact raw interface call %q in %q lost its receiver or target", call.String(), fn.Name())
+						}
+						targetNormal := normal && !closure.instructionUnwindOnly(fn, instruction)
+						if err := enqueueGoBody(target, targetNormal, hostStack, coroRawABIPlainProvenance{
+							parent: fn,
+							site:   "exact interface " + call.String(),
+						}); err != nil {
+							return nil, err
+						}
+						// The raw/plain fixed point must preserve the exact method twin.
+						// Ordinary SSA interface edges carry managed demand; this frozen
+						// occurrence-local reference supplies the independent raw demand.
+						closure.recordRawReference(fn, target)
+						continue
+					}
+				}
+				if call.Common().StaticCallee() == nil {
 					continue
 				}
 				if callPlan.Kind == coro.CallForeign {
@@ -2458,6 +2486,22 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 				if call.Common().StaticCallee() == nil || call.Common().IsInvoke() || call.Common().Method != nil {
 					if _, rawC := rawCForeignCalls[call]; rawC {
 						continue
+					}
+					if direct, ordinary := call.(*ssa.Call); ordinary && call.Common().IsInvoke() {
+						receiver, target, _, exact, err := plan.ResolveExactInterfaceCall(direct)
+						if err != nil {
+							return fmt.Errorf("live raw ABI plain closure function %q exact interface call %q: %w", functionPlan.ID, call.String(), err)
+						}
+						if exact {
+							if receiver == nil || target == nil {
+								return fmt.Errorf("live raw ABI plain closure function %q exact interface call %q lost its receiver or target", functionPlan.ID, call.String())
+							}
+							targetTerminalOnly := terminalOnly || raw.instructionUnwindOnly(fn, instruction)
+							if err := validateTarget(fn, target, targetTerminalOnly, "exact interface "+call.String()); err != nil {
+								return err
+							}
+							continue
+						}
 					}
 					certificate, closed := raw.closedDynamic[call]
 					if !closed || call.Common().IsInvoke() || call.Common().Method != nil || callPlan.Open || !callPlan.SyncDispatch ||
@@ -7032,6 +7076,15 @@ func generateMainEntryPackage(ctx *context, pkg *packages.Package, linkedOrder [
 		pcLineInfo:       pcLineInfo,
 		funcInfoStubs:    funcInfoStubs,
 	})
+	// Native coroutine builds stage the entry module before releasing the
+	// frontend and LLVM context. Apply method-liveness overrides at this shared
+	// generation boundary so staged and direct backends both freeze the same
+	// entry bitcode before it is exported exactly once.
+	if ctx.buildConf.deadcodeDropEnabled() {
+		if err := applyDeadcodeDropOverrides(ctx, linkedOrder, entryPkg, req.needRuntime, ctx.buildConf.Verbose); err != nil {
+			return nil, err
+		}
+	}
 	if err := lowerCoroControlWrappers(ctx, entryPkg.LPkg); err != nil {
 		return nil, err
 	}
@@ -7166,6 +7219,142 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	}
 
 	return nil
+}
+
+func linkedPackageMetas(pkgs []Package) ([]*meta.PackageMeta, error) {
+	metas := make([]*meta.PackageMeta, 0, len(pkgs))
+	for _, pkg := range pkgs {
+		if pkg == nil || pkg.Meta == nil {
+			pkgPath := "<nil>"
+			if pkg != nil && pkg.Package != nil {
+				pkgPath = pkg.PkgPath
+			}
+			return nil, fmt.Errorf("deadcode drop: linked package %q has no semantic metadata", pkgPath)
+		}
+		metas = append(metas, pkg.Meta)
+	}
+	return metas, nil
+}
+
+func applyDeadcodeDropOverrides(ctx *context, pkgs []Package, entryPkg Package, needRuntime bool, verbose bool) error {
+	metas, err := linkedPackageMetas(pkgs)
+	if err != nil {
+		return err
+	}
+	summary, err := meta.NewGlobalSummary(metas)
+	if err != nil {
+		return err
+	}
+
+	roots, err := dceEntryRootCandidates(ctx, pkgs, needRuntime)
+	if err != nil {
+		return err
+	}
+	liveSlots := deadcode.Analyze(summary, roots)
+	sourceModules, err := dceSourceModules(pkgs)
+	if err != nil {
+		return err
+	}
+	dcepass.EmitStrongTypeOverrides(entryPkg.LPkg.Module(), sourceModules, liveSlots, verbose)
+	return nil
+}
+
+func dceSourceModules(pkgs []Package) ([]gllvm.Module, error) {
+	mods := make([]gllvm.Module, 0, len(pkgs))
+	for _, pkg := range pkgs {
+		if pkg == nil || pkg.LPkg == nil {
+			pkgPath := "<nil>"
+			if pkg != nil && pkg.Package != nil {
+				pkgPath = pkg.PkgPath
+			}
+			return nil, fmt.Errorf("deadcode drop: linked package %q has no live LLVM module", pkgPath)
+		}
+		mods = append(mods, pkg.LPkg.Module())
+	}
+	return mods, nil
+}
+
+func dceEntryRootCandidates(ctx *context, pkgs []Package, needRuntime bool) ([]string, error) {
+	roots := []string{"main.init", "main.main"}
+	physical, err := coroDCEEntryRootCandidates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	roots = append(roots, physical...)
+	// C code can call //export functions without an ordinary edge from a Go
+	// root, so their final linker names must seed the analysis explicitly.
+	var exports []string
+	for _, pkg := range pkgs {
+		exports = append(exports, packageExportFunctionNames(pkg)...)
+	}
+	slices.Sort(exports)
+	roots = append(roots, exports...)
+	if needRuntime {
+		roots = append(roots, llssa.PkgRuntime+".init")
+	}
+	return roots, nil
+}
+
+// coroDCEEntryRootCandidates projects the already-frozen coroutine entry
+// capabilities into the physical symbols used as metadata fact owners. SSA
+// metadata is collected after physical lowering, so logical roots such as
+// main.main cannot reach facts owned by main.main$coro. Raw ABI roots are
+// independent: a dual-entry function may need both its managed primary and its
+// ordinary base symbol rooted.
+func coroDCEEntryRootCandidates(ctx *context) ([]string, error) {
+	if ctx == nil || ctx.coroPlan == nil && ctx.coroEmission == nil {
+		return nil, nil
+	}
+	if ctx.coroPlan == nil || ctx.coroEmission == nil {
+		return nil, fmt.Errorf("deadcode drop: coroutine roots require a complete frozen plan and emission universe")
+	}
+	view := ctx.coroEmission.CoroLibraryEffects()
+	seen := make(map[string]none)
+	var roots []string
+	add := func(symbol string) {
+		if symbol == "" {
+			return
+		}
+		if _, duplicate := seen[symbol]; duplicate {
+			return
+		}
+		seen[symbol] = none{}
+		roots = append(roots, symbol)
+	}
+	for _, root := range ctx.coroPlan.Roots() {
+		if root.Function == nil {
+			return nil, fmt.Errorf("deadcode drop: coroutine root %q has no SSA function", root.ID)
+		}
+		plan, ok := ctx.coroPlan.FunctionPlan(root.Function)
+		if !ok || plan.ID != root.ID {
+			return nil, fmt.Errorf("deadcode drop: coroutine root %q has no matching frozen function plan", root.ID)
+		}
+		if root.ManagedDemand != coro.NoDemand {
+			switch plan.Emission {
+			case coro.EmitPlain, coro.EmitCoroutine, coro.EmitOutcomePlain:
+				symbol, err := view.FunctionEmittedPrimarySymbol(root.Function, plan.Emission)
+				if err != nil {
+					return nil, fmt.Errorf("deadcode drop: resolve managed coroutine root %q: %w", root.ID, err)
+				}
+				add(symbol)
+			case coro.EmitNone, coro.EmitExternal:
+				// No local metadata owner exists for an omitted or imported body.
+			case coro.EmitRawPlain:
+				return nil, fmt.Errorf("deadcode drop: managed coroutine root %q has raw-only emission", root.ID)
+			default:
+				return nil, fmt.Errorf("deadcode drop: coroutine root %q has unknown emission %d", root.ID, uint8(plan.Emission))
+			}
+		}
+		if root.RawPlainDemand {
+			symbol, err := view.FunctionBaseSymbol(root.Function)
+			if err != nil {
+				return nil, fmt.Errorf("deadcode drop: resolve raw coroutine root %q: %w", root.ID, err)
+			}
+			add(symbol)
+		}
+	}
+	slices.Sort(roots)
+	return roots, nil
 }
 
 func linkedModuleGlobals(pkgs []Package) map[string]none {
@@ -7800,12 +7989,15 @@ func printCompiledPackage(conf *Config, pkg *aPackage) {
 // shouldStageNativeExecutableBackend selects the memory-bounded native
 // executable pipeline. LTO already emits bitcode rather than machine objects,
 // while cross/wasm builds already use an external backend, so neither needs
-// this native instruction-selection isolation.
+// this native instruction-selection isolation. Development-only method DCE
+// needs every source module live while it constructs strong type overrides;
+// keep that opt-in mode on the direct upstream-compatible path.
 func shouldStageNativeExecutableBackend(ctx *context) bool {
 	return ctx != nil &&
 		ctx.mode != ModeGen &&
 		ctx.buildConf != nil &&
 		ctx.buildConf.BuildMode == BuildModeExe &&
+		!ctx.buildConf.deadcodeDropEnabled() &&
 		ctx.buildConf.ltoMode() == lto.Off &&
 		useInMemoryNativeCodegen(ctx)
 }

@@ -122,6 +122,13 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		panic("physical coroutine call has no frozen instruction plan")
 	}
 	if instructionPlan.control != coroPhysicalControlNone {
+		// Direct/descriptor awaits bypass callEx and llssa.Builder.Call, where
+		// source-level reflect method demands are normally recorded. Attach the
+		// semantic fact to the physical owner before selecting the lowering
+		// recipe; DCE must never rediscover it from a renamed $coro target.
+		p.recordReflectValueMethodCall(p.fn.Name(), call.Common())
+	}
+	if instructionPlan.control != coroPhysicalControlNone {
 		p.observeCoroPhysicalControl(call, instructionPlan.control)
 	}
 	if p.hasOutcomePlainPhysicalBody() && instructionPlan.control != coroPhysicalControlDirectOutcome {

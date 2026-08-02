@@ -5,12 +5,11 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.ec4324cc0836d98d083bc7547627fe3b
+    __llgo_coro_frame_descriptor_v1.81fc010426b315c933be084e5d6f39e7
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
-    github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData$coro
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
@@ -24,7 +23,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v2.c1fec53a20109572cb1b7e70a80a5499
+    __llgo_coro_library_effect_v6.7307013433e53503159643ed7558d35d
 
 [UseIfaceMethod]
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:

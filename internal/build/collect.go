@@ -377,6 +377,14 @@ func (c *context) canUsePackageCache() bool {
 	if c.buildConf == nil || c.mode == ModeGen {
 		return false
 	}
+	// Method-table pruning currently scans each package's LLVM type globals.
+	// The package cache stores final archives and semantic metadata, but not the
+	// presplit bitcode needed to clone those globals into the entry override.
+	// Keep this development-only mode fail-closed until that artifact becomes
+	// part of the cache contract.
+	if c.buildConf.deadcodeDropEnabled() {
+		return false
+	}
 	if c.clCompilation == nil || c.coroPlan == nil || c.clCompilation.CoroPlan != c.coroPlan ||
 		c.coroEmission == nil || c.clCompilation.EmissionUniverse != c.coroEmission || c.coroPlanDigest == "" ||
 		c.clCompilation.CoroPlanDigest != c.coroPlanDigest {
