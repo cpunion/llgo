@@ -605,6 +605,39 @@ jobs:
           LLGO_WASM_RESUME=1 GOOS=wasip1 GOARCH=wasm llgo build \
             -o "$RUNNER_TEMP/wasm-resume-scheduler-wasip1.wasm" ./internal/build/testdata/wasm-scheduler
           run_wasi_scheduler "$RUNNER_TEMP/wasm-resume-scheduler-wasip1.wasm"
+          LLGO_WASM_RESUME=1 GOOS=js GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-resume-timers-go.mjs" ./internal/build/testdata/wasm-timers
+          run_wasm_timers "$RUNNER_TEMP/wasm-resume-timers-go.mjs"
+          LLGO_WASM_RESUME=1 llgo build -target wasm \
+            -o "$RUNNER_TEMP/wasm-resume-timers.mjs" ./internal/build/testdata/wasm-timers
+          run_wasm_timers "$RUNNER_TEMP/wasm-resume-timers.mjs"
+          LLGO_WASM_RESUME=1 GOOS=wasip1 GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-resume-timers-wasip1.wasm" ./internal/build/testdata/wasm-timers
+          run_wasi_timers "$RUNNER_TEMP/wasm-resume-timers-wasip1.wasm"
+          LLGO_WASM_RESUME=1 GOOS=js GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-resume-gc-go.mjs" ./internal/build/testdata/wasm-gc
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-gc-go.mjs" "wasm gc ok"
+          LLGO_WASM_RESUME=1 llgo build -target wasm \
+            -o "$RUNNER_TEMP/wasm-resume-gc.mjs" ./internal/build/testdata/wasm-gc
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-gc.mjs" "wasm gc ok"
+          LLGO_WASM_RESUME=1 GOOS=wasip1 GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-resume-gc-wasip1.wasm" ./internal/build/testdata/wasm-gc
+          wasm-tools validate --features all "$RUNNER_TEMP/wasm-resume-gc-wasip1.wasm"
+          test "$(wasmtime run -W exceptions=y "$RUNNER_TEMP/wasm-resume-gc-wasip1.wasm" 2>&1)" = "wasm gc ok"
+          LLGO_WASM_RESUME=1 GOOS=js GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-resume-hardening-go.mjs" ./internal/build/testdata/wasm-hardening
+          run_wasm_hardening "$RUNNER_TEMP/wasm-resume-hardening-go.mjs" "resume-hardening-j64"
+          LLGO_WASM_RESUME=1 llgo build -target wasm \
+            -o "$RUNNER_TEMP/wasm-resume-hardening.mjs" ./internal/build/testdata/wasm-hardening
+          run_wasm_hardening "$RUNNER_TEMP/wasm-resume-hardening.mjs" "resume-hardening-j32"
+          LLGO_WASM_RESUME=1 GOOS=wasip1 GOARCH=wasm llgo build \
+            -o "$RUNNER_TEMP/wasm-resume-hardening-wasip1.wasm" ./internal/build/testdata/wasm-hardening
+          wasm-tools validate --features all "$RUNNER_TEMP/wasm-resume-hardening-wasip1.wasm"
+          output=$(wasmtime run -W exceptions=y \
+            --env LLGO_WASM_EXPECT_ARG=resume-hardening-p1 \
+            --env LLGO_WASM_BLOCKED_G=1000 \
+            "$RUNNER_TEMP/wasm-resume-hardening-wasip1.wasm" resume-hardening-p1 2>&1)
+          grep -Fxq "wasm hardening ok" <<<"$output"
           file "$RUNNER_TEMP/runtime-js.wasm" \
             "$RUNNER_TEMP/runtime-wasip1.wasm" \
             "$RUNNER_TEMP/runtime-wasip1-threads.wasm" \
