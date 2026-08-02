@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -16,7 +17,11 @@ func TestBuilderLifecycleAndModuleMetadata(t *testing.T) {
 	module := ctx.NewModule("debug-test")
 	defer module.Dispose()
 
-	builder := New(module, Config{Producer: "LLGo", Optimized: true})
+	builder := New(module, Config{
+		Producer:       "LLGo",
+		Optimized:      true,
+		DebuggerRecord: debugabi.NewRecord(2, 8, debugabi.ByteOrderLittle),
+	})
 	cu := builder.CompileUnit("main.go", "/src/example")
 	file := builder.File("/src/example/main.go")
 	if got := builder.File("/src/example/dir/../main.go"); got != file {
@@ -54,13 +59,28 @@ func TestBuilderLifecycleAndModuleMetadata(t *testing.T) {
 		`producer: "LLGo"`,
 		`isOptimized: true`,
 		`@__llgo_debugger_marker_v1 = linkonce_odr hidden constant i8 1`,
-		`@llvm.used = appending global [1 x ptr] [ptr @__llgo_debugger_marker_v1], section "llvm.metadata"`,
+		`@__llgo_debugger_abi_v1 = linkonce_odr hidden constant [16 x i8]`,
+		`@llvm.used = appending global [2 x ptr] [ptr @__llgo_debugger_marker_v1, ptr @__llgo_debugger_abi_v1], section "llvm.metadata"`,
 		`!{i32 7, !"Dwarf Version", i32 4}`,
 	} {
 		if !strings.Contains(ir, want) {
 			t.Errorf("module is missing %q:\n%s", want, ir)
 		}
 	}
+}
+
+func TestBuilderRejectsInvalidDebuggerRecord(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	module := ctx.NewModule("invalid-debugger-record")
+	defer module.Dispose()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("New accepted an invalid debugger record")
+		}
+	}()
+	New(module, Config{DebuggerRecord: debugabi.Record{RecordVersion: 2}})
 }
 
 func TestBuilderMetadataOperations(t *testing.T) {

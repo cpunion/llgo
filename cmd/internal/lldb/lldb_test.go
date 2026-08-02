@@ -117,7 +117,10 @@ func TestRunImportsEmbeddedPluginAndPassesArguments(t *testing.T) {
 printf '%s\n' "$@" > "$LLGO_LLDB_TEST_CAPTURE"
 plugin=$(printf '%s\n' "$2" | sed 's/^command script import "//; s/"$//')
 test -s "$plugin"
-grep -q __llgo_debugger_marker_v1 "$plugin"
+schema=$(dirname "$plugin")/llgo_debugger_schema_v1.json
+test -s "$schema"
+grep -q '"contract": "llgo.debugger"' "$schema"
+grep -q __llgo_debugger_marker_v1 "$schema"
 `)
 
 	var stdout, stderr bytes.Buffer
@@ -129,7 +132,10 @@ grep -q __llgo_debugger_marker_v1 "$plugin"
 		t.Fatal(err)
 	}
 	got := string(data)
-	for _, want := range []string{"-O\n", "command script import \"", "--batch\n", "./program\n", "-o\n", "run\n"} {
+	if !strings.HasPrefix(got, "-o\ncommand script import \"") {
+		t.Fatalf("LLDB arguments %q do not import the plugin after target creation", got)
+	}
+	for _, want := range []string{"--batch\n", "./program\n", "-o\n", "run\n"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("LLDB arguments %q do not contain %q", got, want)
 		}
@@ -170,11 +176,13 @@ func TestEmbeddedPluginIdentity(t *testing.T) {
 	source := string(pluginSource)
 	for _, want := range []string{
 		"__lldb_init_module",
-		"__llgo_debugger_marker_v1",
+		"LLGO_DEBUGGER_MARKER_PREFIX",
 		"is_llgo_compiler",
 		"inspect_target",
 		"LLGO_DEBUGGER_SCHEMAS",
 		"LLGO_RUNTIME_LAYOUTS",
+		"LLGO_DEBUGGER_RECORD_SYMBOL",
+		"llgo_debugger_schema_v1.json",
 		"string_summary",
 		"slice_summary",
 		"SliceSyntheticProvider",

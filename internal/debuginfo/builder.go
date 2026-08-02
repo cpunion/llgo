@@ -3,8 +3,10 @@
 package debuginfo
 
 import (
+	"fmt"
 	"path/filepath"
 
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -15,15 +17,14 @@ const (
 	// inspection for DW_LANG_Go. Use its C language path for interoperable
 	// access to LLGo's otherwise Go-shaped DWARF.
 	dwarfSourceLanguageC llvm.DwarfLang = 1
-
-	debuggerMarkerSymbol = "__llgo_debugger_marker_v1"
 )
 
 // Config describes properties of the generated debug information. Optimized
 // reports what the compilation pipeline does; it does not select any pass.
 type Config struct {
-	Producer  string
-	Optimized bool
+	Producer       string
+	Optimized      bool
+	DebuggerRecord debugabi.Record
 }
 
 // Builder is a package-local owner of an LLVM DIBuilder. Finalize must be
@@ -54,7 +55,7 @@ func New(module llvm.Module, config Config) *Builder {
 	b.addModuleFlag(8, "PIC Level", 2)
 	b.addModuleFlag(7, "uwtable", 1)
 	b.addModuleFlag(7, "frame-pointer", 1)
-	b.addDebuggerMarker()
+	b.addDebuggerMarkers()
 
 	ctx := module.Context()
 	module.AddNamedMetadataOperand("llvm.ident", ctx.MDNode([]llvm.Metadata{
@@ -63,17 +64,35 @@ func New(module llvm.Module, config Config) *Builder {
 	return b
 }
 
-func (b *Builder) addDebuggerMarker() {
+func (b *Builder) addDebuggerMarkers() {
 	ctx := b.module.Context()
 	i8 := ctx.Int8Type()
-	marker := llvm.AddGlobal(b.module, i8, debuggerMarkerSymbol)
+	marker := llvm.AddGlobal(b.module, i8, debugabi.LegacyMarkerSymbol)
 	marker.SetInitializer(llvm.ConstInt(i8, 1, false))
 	marker.SetGlobalConstant(true)
 	marker.SetLinkage(llvm.LinkOnceODRLinkage)
 	marker.SetVisibility(llvm.HiddenVisibility)
 
 	ptr := llvm.PointerType(i8, 0)
-	usedInit := llvm.ConstArray(ptr, []llvm.Value{llvm.ConstBitCast(marker, ptr)})
+	retained := []llvm.Value{llvm.ConstBitCast(marker, ptr)}
+	if b.config.DebuggerRecord.RecordVersion != 0 {
+		raw, err := b.config.DebuggerRecord.MarshalBinary()
+		if err != nil {
+			panic(fmt.Sprintf("debuginfo: invalid debugger ABI record: %v", err))
+		}
+		values := make([]llvm.Value, len(raw))
+		for index, value := range raw {
+			values[index] = llvm.ConstInt(i8, uint64(value), false)
+		}
+		initializer := llvm.ConstArray(i8, values)
+		record := llvm.AddGlobal(b.module, initializer.Type(), debugabi.NativeRecordSymbol)
+		record.SetInitializer(initializer)
+		record.SetGlobalConstant(true)
+		record.SetLinkage(llvm.LinkOnceODRLinkage)
+		record.SetVisibility(llvm.HiddenVisibility)
+		retained = append(retained, llvm.ConstBitCast(record, ptr))
+	}
+	usedInit := llvm.ConstArray(ptr, retained)
 	used := llvm.AddGlobal(b.module, usedInit.Type(), "llvm.used")
 	used.SetInitializer(usedInit)
 	used.SetLinkage(llvm.AppendingLinkage)

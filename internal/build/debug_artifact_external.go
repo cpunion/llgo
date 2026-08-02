@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/goplus/llgo/internal/wasmdebug"
 )
 
@@ -35,6 +36,9 @@ func finalizeDebugArtifact(conf *Config, out *OutFmtDetails, verbose bool) error
 			// path and must not leave a stale optional artifact behind.
 			_ = os.Remove(dwarfSidecarPath(out.Out))
 		}
+		if conf.DebugArtifactMode == DebugArtifactEmbedded && conf.Goarch == "wasm" {
+			return finalizeEmbeddedWasmDebuggerRecord(conf, out)
+		}
 		return nil
 	}
 	if out.Out == "" {
@@ -46,6 +50,12 @@ func finalizeDebugArtifact(conf *Config, out *OutFmtDetails, verbose bool) error
 	raw, err := os.ReadFile(out.Out)
 	if err != nil {
 		return err
+	}
+	if conf.Goarch == "wasm" {
+		raw, err = wasmdebug.SetDebuggerRecord(raw, wasmDebuggerRecord(conf))
+		if err != nil {
+			return fmt.Errorf("add WebAssembly debugger ABI record: %w", err)
+		}
 	}
 	// external_debug_info stores a URL, not a filesystem path. Keep the
 	// sidecar adjacent to the module and escape its filename for URL lookup.
@@ -68,6 +78,29 @@ func finalizeDebugArtifact(conf *Config, out *OutFmtDetails, verbose bool) error
 		fmt.Fprintf(os.Stderr, "llgo: external DWARF: %d bytes -> %s\n", len(raw), out.DWARF)
 	}
 	return nil
+}
+
+func finalizeEmbeddedWasmDebuggerRecord(conf *Config, out *OutFmtDetails) error {
+	if out.Out == "" {
+		return fmt.Errorf("embedded WebAssembly debugger artifact path is empty")
+	}
+	raw, err := os.ReadFile(out.Out)
+	if err != nil {
+		return err
+	}
+	raw, err = wasmdebug.SetDebuggerRecord(raw, wasmDebuggerRecord(conf))
+	if err != nil {
+		return fmt.Errorf("add WebAssembly debugger ABI record: %w", err)
+	}
+	info, err := os.Stat(out.Out)
+	if err != nil {
+		return err
+	}
+	return writeDebugArtifactFile(out.Out, raw, info.Mode())
+}
+
+func wasmDebuggerRecord(conf *Config) debugabi.Record {
+	return debugabi.NewRecord(uint8(conf.AbiMode), 4, debugabi.ByteOrderLittle)
 }
 
 func writeDebugArtifactFile(path string, data []byte, mode os.FileMode) (err error) {

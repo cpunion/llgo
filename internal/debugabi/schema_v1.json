@@ -1,0 +1,120 @@
+{
+  "contract": "llgo.debugger",
+  "schema_version": 1,
+  "runtime_layout_version": 1,
+  "llgo_abi_version": 1,
+  "record": {
+    "version": 1,
+    "size": 16,
+    "magic_hex": "4c4c474f44424700",
+    "native_symbol": "__llgo_debugger_abi_v1",
+    "legacy_symbols": {
+      "__llgo_debugger_marker_v1": {
+        "schema_version": 1,
+        "runtime_layout_version": 1,
+        "llgo_abi_version": 1
+      }
+    },
+    "wasm_custom_section": "llgo.debugger",
+    "fields": [
+      {"name": "record_version", "offset": 8, "size": 1},
+      {"name": "schema_version", "offset": 9, "size": 1},
+      {"name": "runtime_layout_version", "offset": 10, "size": 1},
+      {"name": "llgo_abi_version", "offset": 11, "size": 1},
+      {"name": "cabi_mode", "offset": 12, "size": 1},
+      {"name": "pointer_size", "offset": 13, "size": 1},
+      {"name": "byte_order", "offset": 14, "size": 1},
+      {"name": "reserved", "offset": 15, "size": 1}
+    ]
+  },
+  "byte_orders": {
+    "1": "little",
+    "2": "big"
+  },
+  "cabi_modes": {
+    "0": "none",
+    "1": "cfunc",
+    "2": "allfunc"
+  },
+  "runtime_layouts": {
+    "1": {
+      "string": {
+        "type_name": "string",
+        "data": "data",
+        "length": "len"
+      },
+      "slice": {
+        "type_pattern": "^\\[\\].+",
+        "data": "data",
+        "length": "len",
+        "capacity": "cap"
+      },
+      "interface": {
+        "type_pattern": "^interface\\{.*\\}$",
+        "type": "type",
+        "data": "data",
+        "empty_type": "interface{}",
+        "itab_type": "github.com/goplus/llgo/runtime/internal/runtime.itab",
+        "itab_concrete_type": "_type"
+      },
+      "runtime_type": {
+        "type_name": "github.com/goplus/llgo/runtime/abi.Type",
+        "tflag": "TFlag",
+        "extra_star_flag": 2,
+        "string": "Str_"
+      },
+      "function": {
+        "type_pattern": "^struct\\{\\$f func.*; \\$data unsafe\\.Pointer\\}$",
+        "code": "$f",
+        "data": "$data",
+        "closure_symbol_pattern": "\\$[0-9]+(?:\\$[0-9]+)*$",
+        "bound_symbol_suffix": "$bound"
+      },
+      "map": {
+        "type_pattern": "^map\\[.+\\].+$",
+        "count": "count",
+        "flags": "flags",
+        "bucket_bits": "B",
+        "buckets": "buckets",
+        "old_buckets": "oldbuckets",
+        "bucket_tophash": "tophash",
+        "bucket_keys": "keys",
+        "bucket_indirect_keys": "indirectkeys",
+        "bucket_values": "values",
+        "bucket_indirect_values": "indirectvalues",
+        "bucket_overflow": "overflow"
+      },
+      "channel": {
+        "type_pattern": "^(chan |chan<- |<-chan ).+",
+        "count": "qcount",
+        "capacity": "dataqsiz",
+        "buffer": "buf",
+        "closed": "closed",
+        "receive_index": "recvx",
+        "receive_queue": "recvq",
+        "queue_first": "first",
+        "waiter_element": "elem"
+      },
+      "goroutine": {
+        "head_symbol": "github.com/goplus/llgo/runtime/internal/runtime.debuggerAllgV1",
+        "goroutine_type": "github.com/goplus/llgo/runtime/internal/runtime.g",
+        "next": "alllink",
+        "status": "atomicstatus",
+        "id": "goid",
+        "parent_id": "parentGoid",
+        "m": "m",
+        "m_current_goroutine": "curg",
+        "m_p": "p",
+        "m_id": "id",
+        "m_procid": "procid",
+        "p_m": "m",
+        "p_id": "id",
+        "status_names": {
+          "1": "runnable",
+          "2": "running",
+          "6": "dead"
+        }
+      }
+    }
+  }
+}

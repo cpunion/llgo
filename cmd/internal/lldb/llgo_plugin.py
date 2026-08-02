@@ -1,19 +1,71 @@
 # pylint: disable=missing-module-docstring,missing-class-docstring,missing-function-docstring
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 import re
 import lldb
 
 
 LLGO_DEBUGGER_MARKER_PREFIX = "__llgo_debugger_marker_v"
-LLGO_DEBUGGER_SCHEMAS = {
-    "__llgo_debugger_marker_v1": (1, 1),
-}
+LLGO_DEBUGGER_SCHEMA_FILENAME = "llgo_debugger_schema_v1.json"
 LLGO_TYPE_CATEGORY = "LLGo"
 LLGO_MAX_STRING_SUMMARY_BYTES = 256
 LLGO_DEFAULT_MAX_CHILDREN = 256
 _TARGET_INFO_CACHE: Dict[Tuple[Any, ...], "LLGoTargetInfo"] = {}
+
+
+def _load_debugger_schema() -> Tuple[Dict[str, Any], Optional[str]]:
+    source = Path(__file__).resolve()
+    candidates = [source.with_name(LLGO_DEBUGGER_SCHEMA_FILENAME)]
+    if len(source.parents) > 3:
+        candidates.append(
+            source.parents[3] / "internal" / "debugabi" / "schema_v1.json")
+    errors = []
+    for path in candidates:
+        try:
+            with path.open("r", encoding="utf-8") as schema_file:
+                schema = json.load(schema_file)
+            if schema.get("contract") != "llgo.debugger":
+                raise ValueError("unexpected debugger schema contract")
+            return schema, None
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            errors.append(f"{path}: {error}")
+    return {}, "; ".join(errors)
+
+
+LLGO_DEBUGGER_SCHEMA, LLGO_DEBUGGER_SCHEMA_ERROR = _load_debugger_schema()
+_RECORD_SCHEMA = LLGO_DEBUGGER_SCHEMA.get("record", {})
+LLGO_DEBUGGER_RECORD_SYMBOL = _RECORD_SCHEMA.get("native_symbol", "")
+LLGO_DEBUGGER_RECORD_SIZE = int(_RECORD_SCHEMA.get("size", 0))
+try:
+    LLGO_DEBUGGER_RECORD_MAGIC = bytes.fromhex(
+        _RECORD_SCHEMA.get("magic_hex", ""))
+except ValueError:
+    LLGO_DEBUGGER_RECORD_MAGIC = b""
+LLGO_DEBUGGER_RECORD_FIELDS = {
+    field.get("name"): field
+    for field in _RECORD_SCHEMA.get("fields", [])
+    if isinstance(field, dict) and field.get("name")
+}
+LLGO_DEBUGGER_SCHEMAS = {
+    symbol: (
+        int(contract.get("schema_version", 0)),
+        int(contract.get("runtime_layout_version", 0)),
+        int(contract.get("llgo_abi_version", 0)),
+    )
+    for symbol, contract in _RECORD_SCHEMA.get("legacy_symbols", {}).items()
+    if isinstance(contract, dict)
+}
+LLGO_BYTE_ORDERS = {
+    int(value): name
+    for value, name in LLGO_DEBUGGER_SCHEMA.get("byte_orders", {}).items()
+}
+LLGO_CABI_MODES = {
+    int(value): name
+    for value, name in LLGO_DEBUGGER_SCHEMA.get("cabi_modes", {}).items()
+}
 
 
 @dataclass(frozen=True)
@@ -36,17 +88,39 @@ class LLGoSliceValue:
     element_size: int
 
 
-LLGO_RUNTIME_LAYOUTS = {
-    1: LLGoRuntimeLayout(
-        string_type="string",
-        string_data="data",
-        string_len="len",
-        slice_type_pattern=r"^\[\].+",
-        slice_data="data",
-        slice_len="len",
-        slice_cap="cap",
-    ),
-}
+def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
+    layouts = {}
+    for version, raw in LLGO_DEBUGGER_SCHEMA.get(
+            "runtime_layouts", {}).items():
+        string_layout = raw.get("string", {})
+        slice_layout = raw.get("slice", {})
+        try:
+            layouts[int(version)] = LLGoRuntimeLayout(
+                string_type=string_layout["type_name"],
+                string_data=string_layout["data"],
+                string_len=string_layout["length"],
+                slice_type_pattern=slice_layout["type_pattern"],
+                slice_data=slice_layout["data"],
+                slice_len=slice_layout["length"],
+                slice_cap=slice_layout["capacity"],
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return layouts
+
+
+LLGO_RUNTIME_LAYOUTS = _runtime_layouts()
+
+
+@dataclass(frozen=True)
+class LLGoDebuggerRecord:
+    record_version: int
+    schema_version: int
+    runtime_layout_version: int
+    llgo_abi_version: int
+    cabi_mode: int
+    pointer_size: int
+    byte_order: int
 
 
 @dataclass(frozen=True)
@@ -57,10 +131,16 @@ class LLGoTargetInfo:
     triple: str
     pointer_size: int
     byte_order: str
+    record_version: Optional[int] = None
+    llgo_abi_version: Optional[int] = None
+    cabi_mode: Optional[int] = None
+    cabi_name: Optional[str] = None
+    compatibility_error: Optional[str] = None
 
     @property
     def supported(self) -> bool:
-        return self.schema_version is not None
+        return (self.schema_version is not None and
+                self.compatibility_error is None)
 
 
 def log(*args: Any, **kwargs: Any) -> None:
@@ -79,7 +159,8 @@ def register_commands(debugger: lldb.SBDebugger) -> None:
         'command script add -f llgo_plugin.print_go_expression llgo print')
     debugger.HandleCommand(
         'command script add -f llgo_plugin.print_all_variables llgo vars')
-    register_type_formatters(debugger)
+    if inspect_target(debugger.GetSelectedTarget()).supported:
+        register_type_formatters(debugger)
 
 
 def _type_options(hide_children: bool = False) -> int:
@@ -131,6 +212,91 @@ def _marker_versions(target: lldb.SBTarget) -> Tuple[int, ...]:
     return tuple(sorted(versions))
 
 
+def _sbdata_bytes(data: lldb.SBData, size: int) -> Optional[bytes]:
+    if not data or not data.IsValid() or data.GetByteSize() < size:
+        return None
+    error = lldb.SBError()
+    raw = bytes(data.GetUnsignedInt8(error, offset) for offset in range(size))
+    return raw if error.Success() else None
+
+
+def _read_debugger_record(target: lldb.SBTarget) -> Optional[bytes]:
+    if not LLGO_DEBUGGER_RECORD_SYMBOL or LLGO_DEBUGGER_RECORD_SIZE <= 0:
+        return None
+
+    values = target.FindGlobalVariables(LLGO_DEBUGGER_RECORD_SYMBOL, 256)
+    records = []
+    if values and values.IsValid():
+        for index in range(values.GetSize()):
+            raw = _sbdata_bytes(
+                values.GetValueAtIndex(index).GetData(),
+                LLGO_DEBUGGER_RECORD_SIZE)
+            if raw is not None:
+                records.append(raw)
+
+    if not records:
+        for module_index in range(target.GetNumModules()):
+            module = target.GetModuleAtIndex(module_index)
+            for symbol_index in range(module.GetNumSymbols()):
+                symbol = module.GetSymbolAtIndex(symbol_index)
+                if symbol.GetName() != LLGO_DEBUGGER_RECORD_SYMBOL:
+                    continue
+                error = lldb.SBError()
+                raw = target.ReadMemory(
+                    symbol.GetStartAddress(), LLGO_DEBUGGER_RECORD_SIZE, error)
+                if error.Success() and raw is not None:
+                    records.append(bytes(raw))
+
+    if not records:
+        return None
+    first = records[0]
+    return first if all(record == first for record in records) else b""
+
+
+def _record_field(raw: bytes, name: str) -> Optional[int]:
+    field = LLGO_DEBUGGER_RECORD_FIELDS.get(name)
+    if not isinstance(field, dict):
+        return None
+    try:
+        offset = int(field["offset"])
+        size = int(field["size"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if offset < 0 or size <= 0 or offset + size > len(raw):
+        return None
+    return int.from_bytes(raw[offset:offset + size], "little")
+
+
+def _decode_debugger_record(
+        raw: bytes) -> Tuple[Optional[LLGoDebuggerRecord], Optional[str]]:
+    if len(raw) != LLGO_DEBUGGER_RECORD_SIZE:
+        return None, "conflicting or incorrectly sized native records"
+    if not LLGO_DEBUGGER_RECORD_MAGIC or not raw.startswith(
+            LLGO_DEBUGGER_RECORD_MAGIC):
+        return None, "invalid record magic"
+    values = {
+        name: _record_field(raw, name)
+        for name in (
+            "record_version", "schema_version", "runtime_layout_version",
+            "llgo_abi_version", "cabi_mode", "pointer_size", "byte_order",
+            "reserved",
+        )
+    }
+    if any(value is None for value in values.values()):
+        return None, "record fields do not match the loaded schema"
+    if values["reserved"] != 0:
+        return None, "record reserved byte is non-zero"
+    return LLGoDebuggerRecord(
+        record_version=values["record_version"],
+        schema_version=values["schema_version"],
+        runtime_layout_version=values["runtime_layout_version"],
+        llgo_abi_version=values["llgo_abi_version"],
+        cabi_mode=values["cabi_mode"],
+        pointer_size=values["pointer_size"],
+        byte_order=values["byte_order"],
+    ), None
+
+
 def _byte_order_name(byte_order: int) -> str:
     return {
         lldb.eByteOrderBig: "big",
@@ -167,32 +333,100 @@ def inspect_target(target: lldb.SBTarget) -> LLGoTargetInfo:
     marker_versions = _marker_versions(target)
     schema_version: Optional[int] = None
     runtime_layout_version: Optional[int] = None
+    llgo_abi_version: Optional[int] = None
+    record_version: Optional[int] = None
+    cabi_mode: Optional[int] = None
+    cabi_name: Optional[str] = None
+    compatibility_error: Optional[str] = None
+    pointer_size = target.GetAddressByteSize()
+    byte_order = _byte_order_name(target.GetByteOrder())
+
+    raw_record = _read_debugger_record(target)
+    if raw_record is not None:
+        record, compatibility_error = _decode_debugger_record(raw_record)
+        if record is not None:
+            record_version = record.record_version
+            schema_version = record.schema_version
+            runtime_layout_version = record.runtime_layout_version
+            llgo_abi_version = record.llgo_abi_version
+            cabi_mode = record.cabi_mode
+            cabi_name = LLGO_CABI_MODES.get(cabi_mode)
+            record_byte_order = LLGO_BYTE_ORDERS.get(record.byte_order)
+            expected = (
+                int(_RECORD_SCHEMA.get("version", 0)),
+                int(LLGO_DEBUGGER_SCHEMA.get("schema_version", 0)),
+                int(LLGO_DEBUGGER_SCHEMA.get("runtime_layout_version", 0)),
+                int(LLGO_DEBUGGER_SCHEMA.get("llgo_abi_version", 0)),
+            )
+            actual = (
+                record.record_version,
+                record.schema_version,
+                record.runtime_layout_version,
+                record.llgo_abi_version,
+            )
+            if actual != expected:
+                compatibility_error = (
+                    "unsupported record/schema/runtime/ABI versions "
+                    f"{actual}, want {expected}")
+            elif cabi_name is None:
+                compatibility_error = f"unsupported C ABI mode {cabi_mode}"
+            elif record.pointer_size != pointer_size:
+                compatibility_error = (
+                    f"record pointer size {record.pointer_size} does not match "
+                    f"target pointer size {pointer_size}")
+            elif record_byte_order != byte_order:
+                compatibility_error = (
+                    f"record byte order {record_byte_order or record.byte_order} "
+                    f"does not match target byte order {byte_order}")
+            elif marker_versions and marker_versions != (record.schema_version,):
+                compatibility_error = (
+                    f"record schema v{record.schema_version} conflicts with "
+                    f"legacy marker version(s) {marker_versions}")
+
     # Multiple markers are ambiguous: do not select a runtime layout merely
     # because one of the advertised schema versions happens to be supported.
-    if len(marker_versions) == 1:
+    if raw_record is None and len(marker_versions) == 1:
         candidate = marker_versions[0]
-        for supported_schema, supported_runtime_layout in (
+        for (supported_schema, supported_runtime_layout,
+             supported_llgo_abi) in (
                 LLGO_DEBUGGER_SCHEMAS.values()):
             if candidate == supported_schema:
                 schema_version = supported_schema
                 runtime_layout_version = supported_runtime_layout
+                llgo_abi_version = supported_llgo_abi
                 break
+
+    if ((marker_versions or raw_record is not None) and
+            not LLGO_DEBUGGER_SCHEMA and compatibility_error is None):
+        compatibility_error = (
+            "debugger schema could not be loaded: " +
+            (LLGO_DEBUGGER_SCHEMA_ERROR or "unknown error"))
 
     info = LLGoTargetInfo(
         marker_versions=marker_versions,
         schema_version=schema_version,
         runtime_layout_version=runtime_layout_version,
         triple=target.GetTriple() or "",
-        pointer_size=target.GetAddressByteSize(),
-        byte_order=_byte_order_name(target.GetByteOrder()),
+        pointer_size=pointer_size,
+        byte_order=byte_order,
+        record_version=record_version,
+        llgo_abi_version=llgo_abi_version,
+        cabi_mode=cabi_mode,
+        cabi_name=cabi_name,
+        compatibility_error=compatibility_error,
     )
     _TARGET_INFO_CACHE[cache_key] = info
     return info
 
 
 def target_status(info: LLGoTargetInfo) -> str:
-    if not info.marker_versions:
+    if not info.marker_versions and info.record_version is None:
         return "Not an LLGo target; raw LLDB debugging remains available."
+    if info.compatibility_error:
+        return (
+            f"Unsupported LLGo debugger ABI: {info.compatibility_error}; "
+            "raw LLDB debugging remains available."
+        )
     if not info.supported:
         versions = ", ".join(f"v{version}"
                              for version in info.marker_versions)
@@ -200,9 +434,14 @@ def target_status(info: LLGoTargetInfo) -> str:
             f"Unsupported LLGo debugger marker version(s): {versions}; "
             "raw LLDB debugging remains available."
         )
+    abi = (f"LLGo ABI v{info.llgo_abi_version}; "
+           if info.llgo_abi_version is not None else "")
+    cabi = (f"C ABI mode {info.cabi_mode} ({info.cabi_name}); "
+            if info.cabi_mode is not None else "")
     return (
         f"LLGo debugger schema v{info.schema_version} "
         f"(runtime layout v{info.runtime_layout_version}); "
+        f"{abi}{cabi}"
         f"target {info.triple}; pointer size {info.pointer_size}; "
         f"byte order {info.byte_order}."
     )
