@@ -1,0 +1,128 @@
+name: Browser Debug
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/browser-debug.yml"
+      - "cmd/internal/browser/**"
+      - "cmd/internal/debug/**"
+      - "cmd/llgo/debugtest/**"
+      - "internal/browserdebug/**"
+      - "internal/build/debug_artifact*"
+      - "internal/debugabi/**"
+      - "internal/wasmdebug/**"
+  pull_request:
+    branches: ["**"]
+    paths:
+      - ".github/workflows/browser-debug.yml"
+      - "cmd/internal/browser/**"
+      - "cmd/internal/debug/**"
+      - "cmd/llgo/debugtest/**"
+      - "internal/browserdebug/**"
+      - "internal/build/debug_artifact*"
+      - "internal/debugabi/**"
+      - "internal/wasmdebug/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  language-extension:
+    name: Chrome 151 / embedded and external DWARF
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install LLGo dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 19
+
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: "4.0.21"
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Install LLGo
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install ./...
+          echo "LLGO_ROOT=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+
+      - name: Install pinned Chrome for Testing
+        shell: bash
+        run: |
+          set -euo pipefail
+          chrome_version=151.0.7922.71
+          mkdir -p .tools/chrome
+          curl -fL --retry 3 \
+            "https://storage.googleapis.com/chrome-for-testing-public/${chrome_version}/linux64/chrome-linux64.zip" \
+            -o .tools/chrome/chrome.zip
+          unzip -q .tools/chrome/chrome.zip -d .tools/chrome
+          chrome="${GITHUB_WORKSPACE}/.tools/chrome/chrome-linux64/chrome"
+          version_output="$("${chrome}" --version)"
+          [[ "${version_output}" == *"${chrome_version}"* ]]
+          echo "${version_output}"
+          echo "LLGO_BROWSER_CHROME=${chrome}" >> "${GITHUB_ENV}"
+          echo "LLGO_BROWSER_CHROME_NO_SANDBOX=1" >> "${GITHUB_ENV}"
+
+      - name: Test browser debugger contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test cmd/internal/browser/extension/plugin_test.js
+          go test -timeout 10m \
+            ./internal/debugabi \
+            ./internal/wasmdebug \
+            ./internal/browserdebug \
+            ./cmd/internal/browser \
+            ./cmd/internal/debug
+
+      - name: Build real LLGo browser artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=./internal/debugabi/testdata/fixture
+          GOOS=js GOARCH=wasm llgo build -debug-artifact=embedded \
+            -o "${RUNNER_TEMP}/browser-embedded.wasm" "${package}"
+          GOOS=js GOARCH=wasm llgo build -debug-artifact=external \
+            -o "${RUNNER_TEMP}/browser-external.wasm" "${package}"
+          test -s "${RUNNER_TEMP}/browser-embedded.wasm"
+          test -s "${RUNNER_TEMP}/browser-external.wasm"
+          test -s "${RUNNER_TEMP}/browser-external.debug.wasm"
+          ls -lh "${RUNNER_TEMP}"/browser-*.wasm
+
+      - name: Test headless Chrome Language Extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in \
+            fixture \
+            fixture-external \
+            "${RUNNER_TEMP}/browser-embedded.wasm" \
+            "${RUNNER_TEMP}/browser-external.wasm"
+          do
+            LLGO_BROWSER_DEBUG_ARTIFACT="${artifact}" \
+              go test -timeout 5m ./cmd/internal/browser \
+                -run '^TestChromeLanguageExtension$' -count=1 -v
+          done
+
+      - name: Test source remapping and browser fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          LLGO_BROWSER_DEBUG_ARTIFACT="${RUNNER_TEMP}/browser-embedded.wasm" \
+          LLGO_BROWSER_DEBUG_RUNTIME_ARTIFACT="${RUNNER_TEMP}/browser-embedded.wasm" \
+            go test -timeout 5m ./internal/browserdebug \
+              -run '^(TestLoadLLGoArtifact|TestLoadLLGoRuntimeFixture|TestLoadUsesLongestSourcePathMapping)$' \
+              -count=1 -v
+          go test -timeout 5m ./cmd/internal/browser \
+            -run '^TestChromeWithoutLanguageExtension$' -count=1 -v

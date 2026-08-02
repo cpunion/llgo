@@ -51,6 +51,10 @@ func TestFinalizeExternalWasmDWARF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantDebugModule, _, err = wasmdebug.EnsureBuildID(wantDebugModule)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(debugModule, wantDebugModule) {
 		t.Fatal("external DWARF sidecar differs from the recorded debug module")
 	}
@@ -73,6 +77,14 @@ func TestFinalizeExternalWasmDWARF(t *testing.T) {
 			t.Fatalf("%s DebuggerRecord = %+v, %v, %v", name, got, ok, err)
 		}
 	}
+	mainID, mainHasID, err := wasmdebug.BuildID(main)
+	if err != nil || !mainHasID {
+		t.Fatalf("main BuildID = %x, %v, %v", mainID, mainHasID, err)
+	}
+	sidecarID, sidecarHasID, err := wasmdebug.BuildID(debugModule)
+	if err != nil || !sidecarHasID || !bytes.Equal(mainID, sidecarID) {
+		t.Fatalf("sidecar BuildID = %x, %v, %v; main = %x", sidecarID, sidecarHasID, err, mainID)
+	}
 
 	embedded := filepath.Join(dir, "embedded.wasm")
 	if err := os.WriteFile(embedded, original, 0o755); err != nil {
@@ -91,6 +103,9 @@ func TestFinalizeExternalWasmDWARF(t *testing.T) {
 	}
 	if got, ok, err := wasmdebug.DebuggerRecord(embeddedModule); err != nil || !ok || got.CABIMode != 1 {
 		t.Fatalf("embedded DebuggerRecord = %+v, %v, %v", got, ok, err)
+	}
+	if id, ok, err := wasmdebug.BuildID(embeddedModule); err != nil || !ok || len(id) == 0 {
+		t.Fatalf("embedded BuildID = %x, %v, %v", id, ok, err)
 	}
 }
 

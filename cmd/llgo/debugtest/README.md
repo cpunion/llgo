@@ -20,7 +20,7 @@ The automatic backend depends on the selected target:
 | Native Darwin/Linux | LLDB | Local process |
 | Non-Wasm embedded | GDB | Target `debug-server`, OpenOCD, or `-remote` |
 | WASI | Wasmtime guest-debug + Wasm-aware LLDB | Built in |
-| Browser Wasm | Browser DevTools | Added by the browser debugger task |
+| Browser Wasm | Chrome DevTools + LLGo Language Extension | Built in |
 
 Use `-backend=gdb` or `-backend=lldb` to override a native or GDB Remote
 session, and `-gdb` or `-lldb` to select a debugger executable. For an already
@@ -54,8 +54,8 @@ RSP memory map, so globals and runtime-backed formatters remain gated by
 This does not affect source breakpoints or stack/parameter/local inspection.
 
 An embedded-DWARF module is currently required for the automated Wasmtime
-session. External Wasm DWARF remains a valid build artifact, but debugger-side
-resolution is part of the external/browser acceptance work.
+session. Browser sessions support embedded DWARF and an adjacent external
+sidecar.
 
 Run the focused fixture with:
 
@@ -64,3 +64,44 @@ LLGO_WASMTIME=/path/to/wasmtime \
 LLGO_LLDB=/path/to/wasm-aware/lldb \
 bash cmd/llgo/debugtest/wasi/runtest.sh
 ```
+
+## Browser WebAssembly
+
+Browser source debugging requires Chromium 123 or newer. The headless
+acceptance lane pins Chrome for Testing 151.0.7922.71 and validates embedded
+DWARF, external DWARF, and a real LLGo browser module. Select another Chromium
+binary with `-chrome` or `LLGO_CHROME`.
+
+Launch a development session with:
+
+```sh
+llgo debug -target=wasm ./path/to/main
+```
+
+`llgo debug` opens an isolated Chrome profile and DevTools, waits for the LLGo
+WebAssembly Language Extension to register, and leaves execution behind a Run
+button so source breakpoints can be set first. Use
+`-debug-artifact=external` to keep DWARF in the adjacent `.debug.wasm`
+sidecar. The main module and sidecar carry the same standard WebAssembly
+`build_id`; a missing or stale sidecar is rejected before launch.
+
+Build paths can be relocated without rewriting DWARF by repeating a
+longest-prefix mapping:
+
+```sh
+llgo debug -target=wasm \
+  -source-map=/build/checkout=/home/me/checkout \
+  ./path/to/main
+```
+
+Source paths that remain unavailable are retained for symbolication but are
+not advertised as local source files. Optimized builds can omit variable
+locations according to DWARF; use `-O0` (the `llgo debug` default) when stable
+local inspection is more important than optimized code shape.
+
+When the LLGo extension is unavailable, the launch page still instantiates
+and runs the module. DevTools or another consumer can then use the standard
+Wasm name section and any separately produced source map for lower-level
+symbolication, but Go expressions, scopes, and runtime-value presentation are
+unavailable. Pass `-browser-devtools=false` to exercise this fallback without
+opening DevTools.

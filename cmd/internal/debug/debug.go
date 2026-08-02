@@ -46,9 +46,21 @@ var (
 	lldbPath      string
 	gdbPath       string
 	wasmtimePath  string
+	chromePath    string
+	browserTools  bool
 	remoteAddress string
 	serverCommand string
+	sourceMapFlag stringListFlag
 )
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string { return strings.Join(*values, ",") }
+
+func (values *stringListFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
 
 func init() {
 	Cmd.Run = runCmd
@@ -62,8 +74,11 @@ func init() {
 	Cmd.Flag.StringVar(&lldbPath, "lldb", "", "path to LLDB (default $LLGO_LLDB or auto-detect)")
 	Cmd.Flag.StringVar(&gdbPath, "gdb", "", "path to GDB (default $LLGO_GDB, target candidates, or auto-detect)")
 	Cmd.Flag.StringVar(&wasmtimePath, "wasmtime", "", "path to Wasmtime (default $LLGO_WASMTIME or auto-detect)")
+	Cmd.Flag.StringVar(&chromePath, "chrome", "", "path to Chromium (default $LLGO_CHROME or auto-detect)")
+	Cmd.Flag.BoolVar(&browserTools, "browser-devtools", true, "open Chrome DevTools for a browser debug session")
 	Cmd.Flag.StringVar(&remoteAddress, "remote", "", "connect to an existing debug server at host:port")
 	Cmd.Flag.StringVar(&serverCommand, "server", "", "debug-server command template; {} is the artifact and {debug-port} is the allocated port")
+	Cmd.Flag.Var(&sourceMapFlag, "source-map", "browser source path mapping FROM=TO (repeatable)")
 }
 
 func runCmd(cmd *base.Command, args []string) {
@@ -73,12 +88,15 @@ func runCmd(cmd *base.Command, args []string) {
 		return
 	}
 	if err := run(cmd.Flag.Args(), debuggerArgs, options{
-		backend:  backend(backendFlag),
-		lldb:     lldbPath,
-		gdb:      gdbPath,
-		wasmtime: wasmtimePath,
-		remote:   remoteAddress,
-		server:   serverCommand,
+		backend:      backend(backendFlag),
+		lldb:         lldbPath,
+		gdb:          gdbPath,
+		wasmtime:     wasmtimePath,
+		chrome:       chromePath,
+		browserTools: browserTools,
+		remote:       remoteAddress,
+		server:       serverCommand,
+		sourceMap:    append([]string(nil), sourceMapFlag...),
 	}, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		mockable.Exit(1)
@@ -131,8 +149,8 @@ func run(packageArgs, debuggerArgs []string, opts options, stdin io.Reader, stdo
 	if err != nil {
 		return err
 	}
-	if selected == backendBrowser {
-		return errors.New("llgo debug: the browser DevTools backend is not available yet")
+	if selected == backendBrowser && (opts.remote != "" || opts.server != "") {
+		return errors.New("llgo debug: the browser backend does not use -remote or -server")
 	}
 	if target == nil && opts.remote == "" && (conf.Goos != runtime.GOOS || conf.Goarch != runtime.GOARCH) {
 		return fmt.Errorf("llgo debug: cannot launch a %s/%s program on %s/%s without -remote", conf.Goos, conf.Goarch, runtime.GOOS, runtime.GOARCH)

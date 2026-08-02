@@ -2,11 +2,61 @@ package wasmdebug
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"strings"
 	"testing"
 
 	"github.com/goplus/llgo/internal/debugabi"
 )
+
+func TestBuildIDAndDWARFSections(t *testing.T) {
+	base := append([]byte(nil), wasmHeader...)
+	base = appendCustomSection(base, ".debug_info", []byte{1, 2, 3})
+	base = appendCustomSection(base, ".debug_line", []byte{4, 5})
+
+	sections, err := DWARFSections(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sections[".debug_info"], []byte{1, 2, 3}) ||
+		!bytes.Equal(sections[".debug_line"], []byte{4, 5}) {
+		t.Fatalf("DWARF sections = %#v", sections)
+	}
+	sections[".debug_info"][0] = 9
+	again, err := DWARFSections(base)
+	if err != nil || again[".debug_info"][0] != 1 {
+		t.Fatalf("DWARFSections returned aliased data: %#v, %v", again, err)
+	}
+
+	withID, id, err := EnsureBuildID(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(base)
+	if !bytes.Equal(id, want[:]) {
+		t.Fatalf("generated build ID = %x, want %x", id, want)
+	}
+	got, ok, err := BuildID(withID)
+	if err != nil || !ok || !bytes.Equal(got, id) {
+		t.Fatalf("BuildID = %x, %v, %v; want %x, true, nil", got, ok, err, id)
+	}
+	againModule, againID, err := EnsureBuildID(withID)
+	if err != nil || !bytes.Equal(againModule, withID) || !bytes.Equal(againID, id) {
+		t.Fatalf("EnsureBuildID did not preserve the ID: %x, %x, %v", againModule, againID, err)
+	}
+
+	replaced, err := SetBuildID(withID, []byte{0, 0xff, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err = BuildID(replaced)
+	if err != nil || !ok || !bytes.Equal(got, []byte{0, 0xff, 1}) {
+		t.Fatalf("replaced BuildID = %x, %v, %v", got, ok, err)
+	}
+	if _, err := SetBuildID(base, nil); err == nil {
+		t.Fatal("SetBuildID accepted an empty ID")
+	}
+}
 
 func appendSection(dst []byte, id byte, payload []byte) []byte {
 	dst = append(dst, id)
