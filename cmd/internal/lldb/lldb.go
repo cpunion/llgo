@@ -114,6 +114,11 @@ func run(configuredPath string, args []string, stdin io.Reader, stdout, stderr i
 	return nil
 }
 
+// Run starts LLDB with the LLGo adapter for a higher-level debug session.
+func Run(configuredPath string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	return run(configuredPath, args, stdin, stdout, stderr)
+}
+
 func findLLDB(configuredPath string) (string, error) {
 	return findLLDBFrom(configuredPath, os.Getenv("LLGO_LLDB"), []string{
 		"/opt/homebrew/bin/lldb",
