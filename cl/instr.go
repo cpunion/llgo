@@ -2842,6 +2842,57 @@ func reflectStaticCallABIInitKind(call *ssa.CallCommon) int {
 	return 0
 }
 
+// recordReflectValueMethodCall records source-level reflect.Value method
+// selection independently from its physical call representation. Coroutine
+// direct awaits replace the logical callee before llssa.Builder.Call can run
+// checkReflect, but the DCE demand still belongs to the emitted physical owner.
+func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommon) {
+	if p == nil || p.pkg == nil || owner == "" || call == nil {
+		return
+	}
+	target := call.StaticCallee()
+	if target == nil {
+		return
+	}
+	object, ok := target.Object().(*types.Func)
+	if !ok || object == nil || object.Pkg() == nil || object.Pkg().Path() != "reflect" {
+		return
+	}
+	signature, ok := object.Type().(*types.Signature)
+	if !ok || signature.Recv() == nil {
+		return
+	}
+	receiver := types.Unalias(signature.Recv().Type())
+	if pointer, ok := receiver.(*types.Pointer); ok {
+		receiver = types.Unalias(pointer.Elem())
+	}
+	named, ok := receiver.(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil ||
+		named.Obj().Pkg().Path() != "reflect" || named.Obj().Name() != "Value" ||
+		len(call.Args) != 2 {
+		return
+	}
+
+	switch object.Name() {
+	case "Method":
+		if index, ok := constInt(call.Args[1]); ok {
+			p.pkg.RecordReflectMethodByIndex(owner, index)
+			p.pkg.NeedAbiInit |= llssa.ReflectMethodByIndex
+			return
+		}
+		p.pkg.MarkReflectMethod(owner)
+		p.pkg.NeedAbiInit |= llssa.ReflectMethodDynamic
+	case "MethodByName":
+		if name, ok := constStr(call.Args[1]); ok {
+			p.pkg.RecordReflectMethodByName(owner, name)
+			p.pkg.NeedAbiInit |= llssa.ReflectMethodByName
+			return
+		}
+		p.pkg.MarkReflectMethod(owner)
+		p.pkg.NeedAbiInit |= llssa.ReflectMethodDynamic | llssa.ReflectMethodByName
+	}
+}
+
 func (p *context) reflectTypeMethodCheck(call *ssa.CallCommon, method *types.Func) (check llssa.ReflectMethodCheck) {
 	if !isReflectType(call.Value.Type()) {
 		return

@@ -119,6 +119,24 @@ func validateCoroRawPlainConsumers(plan *coro.SSAPlan, universe *EmissionUnivers
 
 				static := common.StaticCallee()
 				if static == nil || common.IsInvoke() || common.Method != nil {
+					if direct, ordinary := call.(*ssa.Call); ordinary && common.IsInvoke() {
+						receiver, target, _, exact, err := plan.ResolveExactInterfaceCall(direct)
+						if err != nil {
+							return coroLeafInstructionError(fn, functionPlan, instruction,
+								"invalid exact raw interface call: "+err.Error())
+						}
+						if exact {
+							if receiver == nil || target == nil {
+								return coroLeafInstructionError(fn, functionPlan, instruction,
+									"exact raw interface call lost its receiver or target")
+							}
+							if err := validateCoroRawPlainCallTarget(plan, target); err != nil {
+								return coroLeafInstructionError(fn, functionPlan, instruction,
+									"invalid exact raw interface target: "+err.Error())
+							}
+							continue
+						}
+					}
 					if callPlan.Transport == coro.RawCCodePointer {
 						if _, ordinary := call.(*ssa.Call); !ordinary || common.IsInvoke() || common.Method != nil ||
 							callPlan.Kind != coro.CallForeign || callPlan.Rep != coro.DirectPlain || !callPlan.Open ||

@@ -3,7 +3,7 @@ __llgo$generated$promoted$Close$llgo$promoted$v1$77575336b69e7eac563cd474c1c4b6c
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.42304734eb035d98c365fd74b1e10106
+    __llgo_coro_frame_descriptor_v1.58d53ebc24c31592642adb21b4feed24
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -23,7 +23,7 @@ __llgo$generated$promoted$Read$llgo$promoted$v1$dfcfeef340532e0df942cabc1157784a
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.a02e3569696ddd309b2ee314e7c02434
+    __llgo_coro_frame_descriptor_v1.90e596b7b1b225f7d285970f6127679e
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -42,5 +42,5 @@ __llgo$generated$promoted$Read$llgo$promoted$v1$dfcfeef340532e0df942cabc1157784a
 github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init:
     github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v2.94c65b112070b506e2d5ab4f88968504
+    __llgo_coro_library_effect_v6.00cd9083226ff505e874b69adef84218
 

@@ -4,6 +4,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"strings"
 	"testing"
 
 	llssa "github.com/goplus/llgo/ssa"
@@ -198,5 +199,62 @@ func Address(value reflect.Value) reflect.Value { return value.Addr() }
 	}()
 	if pkg.NeedAbiInit&llssa.ReflectPointerTo == 0 {
 		t.Fatalf("physical Addr call ABI-init demand = %d, want ReflectPointerTo", pkg.NeedAbiInit)
+	}
+}
+
+func TestRecordReflectValueMethodCallUsesPhysicalOwner(t *testing.T) {
+	const source = `package foo
+import "reflect"
+func Named(value reflect.Value) { _ = value.MethodByName("Keep") }
+func Dynamic(value reflect.Value, name string) { _ = value.MethodByName(name) }
+`
+	ssaPkg, _, _ := buildGoSSAPkg(t, source)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackageEx("foo", "foo", true)
+	ctx := &context{pkg: pkg}
+
+	for _, test := range []struct {
+		function string
+		owner    string
+	}{
+		{function: "Named", owner: "foo.Named$coro"},
+		{function: "Dynamic", owner: "foo.Dynamic$coro"},
+	} {
+		fn := ssaPkg.Func(test.function)
+		var found bool
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(*ssa.Call)
+				if !ok || call.Common().StaticCallee() == nil ||
+					call.Common().StaticCallee().Name() != "MethodByName" {
+					continue
+				}
+				ctx.recordReflectValueMethodCall(test.owner, call.Common())
+				// The physical dispatcher and a future shared semantic pass may
+				// both observe the same source call. Metadata demands are sets.
+				ctx.recordReflectValueMethodCall(test.owner, call.Common())
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s has no exact reflect.Value.MethodByName call", test.function)
+		}
+	}
+
+	if err := pkg.FinishMetaCollection(); err != nil {
+		t.Fatal(err)
+	}
+	got := pkg.Meta.String()
+	for _, want := range []string{
+		"[UseNamedMethod]\nfoo.Named$coro:\n    Keep\n",
+		"[Reflect]\n    foo.Dynamic$coro\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("metadata missing %q:\n%s", want, got)
+		}
+		if strings.Count(got, want) != 1 {
+			t.Fatalf("metadata duplicated %q:\n%s", want, got)
+		}
 	}
 }

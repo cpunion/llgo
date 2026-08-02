@@ -139,6 +139,11 @@ func (b *Builder) AddIfaceMethodUse(src, iface Symbol, methodIndex uint32) {
 // call. The method name is stored as a string-table reference.
 func (b *Builder) AddNamedMethodUse(src Symbol, methodName string) {
 	ref := b.internName(methodName)
+	for _, demand := range b.funcDemands[src] {
+		if demand.kind == DemandNamedMethod && demand.target == ref.Off && demand.extra == ref.Len {
+			return
+		}
+	}
 	b.funcDemands[src] = append(b.funcDemands[src], bFuncDemand{
 		kind:   DemandNamedMethod,
 		target: ref.Off,
@@ -187,6 +192,11 @@ func (b *Builder) AddIfaceMethod(iface Symbol, methodName string, mtype Symbol) 
 
 // MarkReflect marks sym as triggering conservative reflection handling.
 func (b *Builder) MarkReflect(sym Symbol) {
+	for _, demand := range b.funcDemands[sym] {
+		if demand.kind == DemandReflectMethod {
+			return
+		}
+	}
 	b.funcDemands[sym] = append(b.funcDemands[sym], bFuncDemand{
 		kind: DemandReflectMethod,
 	})

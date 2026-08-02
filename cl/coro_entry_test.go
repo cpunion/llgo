@@ -92,6 +92,7 @@ func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 		useOwners:     make(map[*ssa.Function]map[*preparedEmissionPackage]none),
 		ownerStates:   make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
 	}
+	u.libraryEffects.index.universe = u
 	if plan == nil {
 		return u
 	}
@@ -174,6 +175,47 @@ func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 	defer otherDispose()
 	if _, err := otherCtx.resolveFunctionSymbol(otherPkg.Func("Plain")); err == nil || !strings.Contains(err.Error(), "absent") {
 		t.Fatalf("other-program resolution error = %v, want exact-pointer plan miss", err)
+	}
+}
+
+func TestCoroFunctionEmittedPrimarySymbolUsesFrozenEmission(t *testing.T) {
+	pkg, plan := buildCoroEntryTestPlan(t)
+	view := coroEntryPreflightUniverse(plan).CoroLibraryEffects()
+
+	for _, test := range []struct {
+		name   string
+		suffix string
+	}{
+		{name: "Plain"},
+		{name: "Coroutine", suffix: coroPrimarySuffix},
+	} {
+		fn := pkg.Func(test.name)
+		functionPlan, ok := plan.FunctionPlan(fn)
+		if !ok {
+			t.Fatalf("%s has no function plan", test.name)
+		}
+		got, err := view.FunctionEmittedPrimarySymbol(fn, functionPlan.Emission)
+		if err != nil {
+			t.Fatalf("%s primary: %v", test.name, err)
+		}
+		base, err := view.FunctionBaseSymbol(fn)
+		if err != nil {
+			t.Fatalf("%s base: %v", test.name, err)
+		}
+		want := base + test.suffix
+		if got != want {
+			t.Fatalf("%s primary = %q, want %q", test.name, got, want)
+		}
+	}
+
+	external := pkg.Func("External")
+	externalPlan, ok := plan.FunctionPlan(external)
+	if !ok {
+		t.Fatal("External has no function plan")
+	}
+	if _, err := view.FunctionEmittedPrimarySymbol(external, externalPlan.Emission); err == nil ||
+		!strings.Contains(err.Error(), "no locally emitted primary") {
+		t.Fatalf("external primary error = %v", err)
 	}
 }
 
