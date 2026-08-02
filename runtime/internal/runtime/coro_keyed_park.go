@@ -120,20 +120,6 @@ type coroKeyedRegistrySnapshotV2 struct {
 	operation coro.OperationID
 }
 
-func coroKeyedRegistryLoadOperationV2(
-	slot *coroKeyedRegistrySlotV2,
-	control uint32,
-) (coro.OperationID, bool) {
-	if slot == nil || coroKeyedAtomicLoadUint32(&slot.control) != control {
-		return coro.OperationID{}, false
-	}
-	operation := coro.OperationID{
-		SourceSlot: coroKeyedAtomicLoadUint32(&slot.operation.SourceSlot),
-		Generation: coroKeyedAtomicLoadUint32(&slot.operation.Generation),
-	}
-	return operation, coroKeyedAtomicLoadUint32(&slot.control) == control
-}
-
 func coroKeyedRegistryLoadSnapshotV2(
 	slot *coroKeyedRegistrySlotV2,
 	control uint32,

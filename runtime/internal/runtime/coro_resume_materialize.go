@@ -187,6 +187,20 @@ func coroKeyedRegistrySlotV2For(
 	return &registry.slots[handle.Slot-1], true
 }
 
+func coroKeyedRegistryLoadOperationV2(
+	slot *coroKeyedRegistrySlotV2,
+	control uint32,
+) (coro.OperationID, bool) {
+	if slot == nil || coroKeyedAtomicLoadUint32(&slot.control) != control {
+		return coro.OperationID{}, false
+	}
+	operation := coro.OperationID{
+		SourceSlot: coroKeyedAtomicLoadUint32(&slot.operation.SourceSlot),
+		Generation: coroKeyedAtomicLoadUint32(&slot.operation.Generation),
+	}
+	return operation, coroKeyedAtomicLoadUint32(&slot.control) == control
+}
+
 // retire detaches the exact private registry identity with a generation-bound
 // CAS. It may be preempted or race claim/finish without owning a runtime lock.
 // Posting may be cleared because its producer owns only the POD handle and
