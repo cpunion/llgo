@@ -166,13 +166,15 @@ func TestLowerPrototypeBuildsDirectCallStateMachine(t *testing.T) {
 		`switch i32 %pc, label %invalid-pc [`,
 		`i32 0, label %entry`,
 		`i32 1, label %resume.1`,
-		`call ptr @__llgo_wasm_resume_alloc(ptr %0,`,
+		`define internal ptr @__llgo_wasm_resume_alloc.fast`,
+		`call ptr @__llgo_wasm_resume_alloc.fast(ptr %0,`,
 		`call void @llvm.memset`,
 		`call ptr @__llgo_wasm_resume_compat_enter(`,
 		`call void @__llgo_wasm_resume_compat_leave(`,
 		`ret i8 0`,
 		`%returned = load ptr`,
-		`call void @__llgo_wasm_resume_free(ptr %0, ptr %returned)`,
+		`define internal void @__llgo_wasm_resume_free.fast`,
+		`call void @__llgo_wasm_resume_free.fast(ptr %0, ptr %returned)`,
 		`ret i8 1`,
 	} {
 		if !strings.Contains(ir, want) {
@@ -372,6 +374,9 @@ func defineStateMachineHarness(
 	childStorage.SetAlignment(16)
 	childOffset := llvm.AddGlobal(mod, i32, "child.offset")
 	childOffset.SetInitializer(llvm.ConstInt(i32, 0, false))
+	storageBlockType := frameBlockType(abi)
+	storageBlock := llvm.AddGlobal(mod, storageBlockType, "child.storage.block")
+	storageBlock.SetInitializer(llvm.ConstNull(storageBlockType))
 
 	alloc := mod.NamedFunction(frameAllocName)
 	block := ctx.AddBasicBlock(alloc, "entry")
@@ -415,6 +420,28 @@ func defineStateMachineHarness(
 	failedBlock := ctx.AddBasicBlock(run, "failed")
 
 	builder.SetInsertPointAtEnd(entryBlock)
+	storageBegin := builder.CreatePtrToInt(childStorage, abi.uintptrType, "storage.begin")
+	builder.CreateStore(
+		llvm.ConstNull(abi.ptr), builder.CreateStructGEP(storageBlockType, storageBlock, 0, ""),
+	)
+	builder.CreateStore(
+		llvm.ConstNull(abi.ptr), builder.CreateStructGEP(storageBlockType, storageBlock, 1, ""),
+	)
+	builder.CreateStore(
+		storageBegin, builder.CreateStructGEP(storageBlockType, storageBlock, 2, ""),
+	)
+	builder.CreateStore(
+		builder.CreateAdd(
+			storageBegin, llvm.ConstInt(abi.uintptrType, 4096, false), "storage.end",
+		),
+		builder.CreateStructGEP(storageBlockType, storageBlock, 3, ""),
+	)
+	builder.CreateStore(
+		storageBegin, builder.CreateStructGEP(storageBlockType, storageBlock, 4, ""),
+	)
+	builder.CreateStore(
+		storageBlock, builder.CreateStructGEP(abi.contextType, context, 2, ""),
+	)
 	builder.CreateStore(
 		llvm.ConstNull(abi.ptr),
 		builder.CreateStructGEP(lowered.layout.typ, root, 0, ""),

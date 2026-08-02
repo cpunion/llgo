@@ -16,6 +16,28 @@ type testUnwindFrame struct {
 	deferFrame unsafe.Pointer
 }
 
+func TestFrameArenaABILayout(t *testing.T) {
+	pointerSize := unsafe.Sizeof(uintptr(0))
+	if got, want := unsafe.Offsetof(Context{}.storage), 2*pointerSize; got != want {
+		t.Fatalf("Context storage offset = %d, want %d", got, want)
+	}
+	if got, want := unsafe.Sizeof(frameBlock{}), 5*pointerSize; got != want {
+		t.Fatalf("frameBlock size = %d, want %d", got, want)
+	}
+	offsets := [...]uintptr{
+		unsafe.Offsetof(frameBlock{}.prev),
+		unsafe.Offsetof(frameBlock{}.next),
+		unsafe.Offsetof(frameBlock{}.begin),
+		unsafe.Offsetof(frameBlock{}.end),
+		unsafe.Offsetof(frameBlock{}.stackPointer),
+	}
+	for field, got := range offsets {
+		if want := uintptr(field) * pointerSize; got != want {
+			t.Fatalf("frameBlock field %d offset = %d, want %d", field, got, want)
+		}
+	}
+}
+
 func (r *testFrameRoots) allocate(size uintptr) unsafe.Pointer {
 	block := make([]byte, size)
 	if len(block) == 0 {

@@ -162,6 +162,7 @@ func buildExecutableWasmResumeObject(t *testing.T, triple string) []byte {
 	defineStateMachineHarness(mod, targetData, root, []llvm.Value{
 		llvm.ConstInt(i32, 6, false),
 	})
+	defineExecutableMemset(mod, targetData)
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify %s executable: %v\n%s", triple, err, mod.String())
 	}
@@ -176,4 +177,37 @@ func buildExecutableWasmResumeObject(t *testing.T, triple string) []byte {
 	}
 	defer buffer.Dispose()
 	return append([]byte(nil), buffer.Bytes()...)
+}
+
+func defineExecutableMemset(mod llvm.Module, targetData llvm.TargetData) {
+	ctx := mod.Context()
+	ptr := llvm.PointerType(ctx.Int8Type(), 0)
+	uintptrType := ctx.IntType(targetData.PointerSize() * 8)
+	fn := llvm.AddFunction(mod, "memset", llvm.FunctionType(
+		ptr, []llvm.Type{ptr, ctx.Int32Type(), uintptrType}, false,
+	))
+	entry := ctx.AddBasicBlock(fn, "entry")
+	loop := ctx.AddBasicBlock(fn, "loop")
+	done := ctx.AddBasicBlock(fn, "done")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+
+	zero := llvm.ConstNull(uintptrType)
+	builder.SetInsertPointAtEnd(entry)
+	builder.CreateCondBr(
+		builder.CreateICmp(llvm.IntEQ, fn.Param(2), zero, ""), done, loop,
+	)
+
+	builder.SetInsertPointAtEnd(loop)
+	index := builder.CreatePHI(uintptrType, "index")
+	address := builder.CreateInBoundsGEP(ctx.Int8Type(), fn.Param(0), []llvm.Value{index}, "")
+	builder.CreateStore(builder.CreateTrunc(fn.Param(1), ctx.Int8Type(), ""), address)
+	next := builder.CreateAdd(index, llvm.ConstInt(uintptrType, 1, false), "next")
+	builder.CreateCondBr(
+		builder.CreateICmp(llvm.IntULT, next, fn.Param(2), ""), loop, done,
+	)
+	index.AddIncoming([]llvm.Value{zero, next}, []llvm.BasicBlock{entry, loop})
+
+	builder.SetInsertPointAtEnd(done)
+	builder.CreateRet(fn.Param(0))
 }

@@ -370,26 +370,6 @@ func callFramePrefix(ctx llvm.Context, typ llvm.Type) llvm.Type {
 	return ctx.StructType(fields, false)
 }
 
-func declareFrameAllocator(mod llvm.Module, abi resumeABI) llvm.Value {
-	fn := mod.NamedFunction(frameAllocName)
-	if fn.IsNil() {
-		fn = llvm.AddFunction(mod, frameAllocName, llvm.FunctionType(
-			abi.ptr, []llvm.Type{abi.ptr, abi.uintptrType, abi.uintptrType}, false,
-		))
-	}
-	return fn
-}
-
-func declareFrameFree(mod llvm.Module, abi resumeABI) llvm.Value {
-	fn := mod.NamedFunction(frameFreeName)
-	if fn.IsNil() {
-		fn = llvm.AddFunction(mod, frameFreeName, llvm.FunctionType(
-			abi.ctx.VoidType(), []llvm.Type{abi.ptr, abi.ptr}, false,
-		))
-	}
-	return fn
-}
-
 func declareCompatEnter(mod llvm.Module, abi resumeABI) llvm.Value {
 	fn := mod.NamedFunction(compatEnterName)
 	if fn.IsNil() {

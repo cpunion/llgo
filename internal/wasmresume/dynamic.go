@@ -111,13 +111,3 @@ func isCallToIntrinsic(value llvm.Value, name string) bool {
 	return !callee.IsAFunction().IsNil() &&
 		(callee.Name() == name || strings.HasPrefix(callee.Name(), name+"."))
 }
-
-func declareDynamicAllocator(mod llvm.Module, abi resumeABI) llvm.Value {
-	fn := mod.NamedFunction(frameDynamicAllocName)
-	if fn.IsNil() {
-		fn = llvm.AddFunction(mod, frameDynamicAllocName, llvm.FunctionType(
-			abi.ptr, []llvm.Type{abi.ptr, abi.uintptrType, abi.uintptrType}, false,
-		))
-	}
-	return fn
-}
