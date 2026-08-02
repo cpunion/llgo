@@ -16,6 +16,8 @@
 
 package coro
 
+import "unsafe"
+
 // PollOperationPageCapacity is the allocation-free granularity of the
 // target-neutral readiness catalog. Every source includes one inline page; a
 // target may attach additional stable pages before binding the source.
@@ -25,6 +27,11 @@ const PollOperationPageCapacity = 64
 // source. Keep this compatibility name for small and embedded profiles; it is
 // not the capacity after ConfigurePollOperationPages succeeds.
 const PollOperationSourceCapacity = PollOperationPageCapacity
+
+// PollOperationMaximumCapacity is the largest complete-page catalog encoded
+// by the existing OperationID ABI. A target may impose a smaller physical
+// reactor limit while still growing its stable scheduler catalog on demand.
+const PollOperationMaximumCapacity = operationCatalogMaximumPageCount * PollOperationPageCapacity
 
 // PollInterest is one independently serialized internal/poll direction.
 // internal/poll already prevents two simultaneous readers or two simultaneous
@@ -163,12 +170,13 @@ type PollOperationPage struct {
 // Active slots participate in the ExecutorSourceSet deadline minimum, so fd
 // readiness and timers share one retained target wait.
 type PollOperationSource struct {
-	pending    uint32
-	scanLimit  uint32
-	slots      [PollOperationPageCapacity]pollOperationSlot
-	extraPages []PollOperationPage
-	owner      *P
-	route      RouteID
+	pending      uint32
+	scanLimit    uint32
+	slots        [PollOperationPageCapacity]pollOperationSlot
+	extraPages   []PollOperationPage
+	dynamicPages operationDynamicPageDirectory
+	owner        *P
+	route        RouteID
 }
 
 // PollOperationConfiguredCapacity returns the exact linear slot capacity. It
@@ -177,7 +185,11 @@ func PollOperationConfiguredCapacity(source *PollOperationSource) uint32 {
 	if source == nil {
 		return 0
 	}
-	return uint32(1+len(source.extraPages)) * PollOperationPageCapacity
+	pages := uint32(1+len(source.extraPages)) + source.dynamicPages.published()
+	if pages > operationCatalogMaximumPageCount {
+		return 0
+	}
+	return pages * PollOperationPageCapacity
 }
 
 // PollOperationScanLimit returns the scheduler-owned active-prefix bound for
@@ -199,9 +211,28 @@ func pollOperationSlotAt(source *PollOperationSource, index uint32) (*pollOperat
 	if index < PollOperationPageCapacity {
 		return &source.slots[index], true
 	}
-	page := index/PollOperationPageCapacity - 1
+	page := index / PollOperationPageCapacity
 	offset := index % PollOperationPageCapacity
-	return &source.extraPages[page].slots[offset], true
+	catalog, ok := pollOperationPageAt(source, page)
+	if !ok {
+		return nil, false
+	}
+	return &catalog.slots[offset], true
+}
+
+func pollOperationPageAt(source *PollOperationSource, page uint32) (*PollOperationPage, bool) {
+	if source == nil || page == 0 {
+		return nil, false
+	}
+	extra := page - 1
+	if extra < uint32(len(source.extraPages)) {
+		return &source.extraPages[extra], true
+	}
+	dynamic := source.dynamicPages.page(extra - uint32(len(source.extraPages)))
+	if dynamic == nil {
+		return nil, false
+	}
+	return (*PollOperationPage)(dynamic), true
 }
 
 // ConfigurePollOperationPages attaches stable allocation-free catalog pages
@@ -222,6 +253,9 @@ func ConfigurePollOperationPages(source *PollOperationSource, pages []PollOperat
 	if len(pages) == existing {
 		return true
 	}
+	if source.dynamicPages.published() != 0 {
+		return false
+	}
 	for index := uint32(0); index < PollOperationConfiguredCapacity(source); index++ {
 		slot, ok := pollOperationSlotAt(source, index)
 		if !ok || !reusablePollOperationSlot(source, slot, index) {
@@ -238,6 +272,35 @@ func ConfigurePollOperationPages(source *PollOperationSource, pages []PollOperat
 	}
 	source.extraPages = pages
 	return true
+}
+
+// AttachPollOperationPage publishes one pristine stable page from the owner P.
+// Reactor producers continue to resolve only the existing scalar OperationID;
+// the page pointer remains rooted in the scheduler-owned directory.
+func AttachPollOperationPage(
+	source *PollOperationSource,
+	p *P,
+	page *PollOperationPage,
+	directoryBlock *OperationPageDirectoryBlock,
+) bool {
+	if !pollOperationSourceOwner(source, p) || page == nil {
+		return false
+	}
+	oldCapacity := PollOperationConfiguredCapacity(source)
+	if oldCapacity == 0 || oldCapacity > PollOperationMaximumCapacity-PollOperationPageCapacity {
+		return false
+	}
+	for index := range source.extraPages {
+		if &source.extraPages[index] == page {
+			return false
+		}
+	}
+	for offset := range page.slots {
+		if !reusablePollOperationSlot(source, &page.slots[offset], oldCapacity+uint32(offset)) {
+			return false
+		}
+	}
+	return source.dynamicPages.publish(unsafe.Pointer(page), directoryBlock)
 }
 
 func pollOperationSlotFor(source *PollOperationSource, handle PollOperationHandle) (*pollOperationSlot, bool) {

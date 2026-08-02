@@ -129,6 +129,86 @@ func TestCoroKeyedRegistryConcurrentClaimIsSingleOwnerV2(t *testing.T) {
 	}
 }
 
+func TestCoroKeyedRegistryConcurrentFIFOClaimsRemainLockFreeV2(t *testing.T) {
+	const contenders = 600
+	registry := new(coroKeyedRegistryV2)
+	operations := make([]coro.OperationID, contenders)
+	for index := range operations {
+		operations[index] = keyedRegistryOperation(t, uint32(index+1), 1)
+		if _, ok := registry.register(coroKeyedParkSemaphoreV2, 0x35, 0, operations[index]); !ok {
+			t.Fatalf("register concurrent FIFO contender %d", index)
+		}
+	}
+
+	var claimed [contenders]atomic.Uint32
+	var failures atomic.Uint32
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	group.Add(contenders)
+	for range contenders {
+		go func() {
+			defer group.Done()
+			<-start
+			handle, operation, ok := registry.claimOne(coroKeyedParkSemaphoreV2, 0x35, 0, false)
+			if !ok || handle.Slot == 0 || handle.Slot > contenders {
+				failures.Add(1)
+				return
+			}
+			if claimed[handle.Slot-1].Add(1) != 1 ||
+				registry.finishPost(handle, operation) != coroKeyedRegistryPublishReadyV2 ||
+				!registry.retire(handle, operation) {
+				failures.Add(1)
+			}
+		}()
+	}
+	close(start)
+	group.Wait()
+	if failures.Load() != 0 {
+		t.Fatalf("concurrent FIFO claim failures = %d", failures.Load())
+	}
+	for index := range claimed {
+		if claimed[index].Load() != 1 {
+			t.Fatalf("registry slot %d claim count = %d, want 1", index+1, claimed[index].Load())
+		}
+	}
+}
+
+func TestCoroKeyedRegistrySequenceWrapPreservesFIFOAndGenerationBoundV2(t *testing.T) {
+	registry := new(coroKeyedRegistryV2)
+	coroKeyedAtomicStoreUint32(
+		&registry.slots[0].control,
+		coroKeyedRegistryControlV2(coroKeyedRegistryMaxGenerationV2, coroKeyedRegistryFreeV2),
+	)
+	coroKeyedAtomicStoreUint32(&registry.sequence, ^uint32(0)-1)
+
+	operations := []coro.OperationID{
+		keyedRegistryOperation(t, 1, 1),
+		keyedRegistryOperation(t, 2, 1),
+		keyedRegistryOperation(t, 3, 1),
+	}
+	handles := make([]coroKeyedRegistryHandleV2, len(operations))
+	for index, operation := range operations {
+		var ok bool
+		handles[index], ok = registry.register(coroKeyedParkSemaphoreV2, 0x36, 0, operation)
+		if !ok {
+			t.Fatalf("register sequence-wrap contender %d", index)
+		}
+		if handles[index].Slot == 1 {
+			t.Fatal("registry reused an exhausted generation slot")
+		}
+	}
+	for index, want := range handles {
+		handle, operation, ok := registry.claimOne(coroKeyedParkSemaphoreV2, 0x36, 0, false)
+		if !ok || handle != want || operation != operations[index] {
+			t.Fatalf("sequence-wrap claim %d = %+v/%+v/%t, want %+v/%+v", index, handle, operation, ok, want, operations[index])
+		}
+		if registry.finishPost(handle, operation) != coroKeyedRegistryPublishReadyV2 ||
+			!registry.retire(handle, operation) {
+			t.Fatalf("finish sequence-wrap contender %d", index)
+		}
+	}
+}
+
 func TestCoroKeyedRegistryPostingRetireIsBoundedAndProducerNeutralV2(t *testing.T) {
 	registry := new(coroKeyedRegistryV2)
 	id := keyedRegistryOperation(t, 1, 1)

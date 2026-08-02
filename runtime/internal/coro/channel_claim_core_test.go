@@ -22,6 +22,17 @@ import (
 	"unsafe"
 )
 
+func attachChannelOperationPageForTest(
+	source *ChannelOperationSource,
+	p *P,
+	page *ChannelOperationPage,
+) bool {
+	if AttachChannelOperationPage(source, p, page, nil) {
+		return true
+	}
+	return AttachChannelOperationPage(source, p, page, new(OperationPageDirectoryBlock))
+}
+
 type channelClaimCoreFixture struct {
 	p        *P
 	driver   *ExecutorDriver
@@ -216,11 +227,11 @@ func TestChannelOperationConfiguredCapacityPreflightsSelectBeyondFourCases(t *te
 		t.Fatalf("configured channel select preflight: capacity=%d", ChannelOperationConfiguredCapacity(source))
 	}
 	dynamic := new(ChannelOperationPage)
-	if !AttachChannelOperationPage(source, p, dynamic) ||
+	if !attachChannelOperationPageForTest(source, p, dynamic) ||
 		ChannelOperationConfiguredCapacity(source) != 17*ChannelOperationPageCapacity ||
 		!CanReserveChannelOperations(p, source, 1025) ||
-		AttachChannelOperationPage(source, p, dynamic) ||
-		AttachChannelOperationPage(source, p, &pages[0]) {
+		AttachChannelOperationPage(source, p, dynamic, nil) ||
+		AttachChannelOperationPage(source, p, &pages[0], nil) {
 		t.Fatalf("dynamic channel page publication: capacity=%d", ChannelOperationConfiguredCapacity(source))
 	}
 	if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
@@ -246,7 +257,7 @@ func TestChannelOperationDynamicCatalogCompletesBeyondStaticProfile(t *testing.T
 	fixture := newChannelClaimCoreFixtureWithSourceHooks(
 		t, "channel-dynamic-profile", caseIDs, true, 0, source,
 		func(fixture *channelClaimCoreFixture) {
-			if !AttachChannelOperationPage(source, fixture.p, new(ChannelOperationPage)) {
+			if !attachChannelOperationPageForTest(source, fixture.p, new(ChannelOperationPage)) {
 				t.Fatal("attach dynamic channel page")
 			}
 		},
@@ -282,7 +293,7 @@ func TestChannelReadyIndexSkipsLargeEmptyActivePrefix(t *testing.T) {
 	fixture := newChannelClaimCoreFixtureWithSourceHooks(
 		t, "channel-ready-index", []uint32{1}, true, 0, source,
 		func(fixture *channelClaimCoreFixture) {
-			if !AttachChannelOperationPage(source, fixture.p, new(ChannelOperationPage)) {
+			if !attachChannelOperationPageForTest(source, fixture.p, new(ChannelOperationPage)) {
 				t.Fatal("attach indexed channel page")
 			}
 		},
@@ -339,8 +350,8 @@ func TestChannelOperationDynamicPagePublicationIsProducerSafe(t *testing.T) {
 			runtime.Gosched()
 		}
 	}()
-	for page := 0; page < 32; page++ {
-		if !AttachChannelOperationPage(source, p, new(ChannelOperationPage)) {
+	for page := 0; page < 96; page++ {
+		if !attachChannelOperationPageForTest(source, p, new(ChannelOperationPage)) {
 			t.Fatalf("attach dynamic channel page %d", page)
 		}
 		runtime.Gosched()
@@ -352,7 +363,7 @@ func TestChannelOperationDynamicPagePublicationIsProducerSafe(t *testing.T) {
 		t.Fatal(message)
 	default:
 	}
-	if got := ChannelOperationConfiguredCapacity(source); got != 33*ChannelOperationPageCapacity {
+	if got := ChannelOperationConfiguredCapacity(source); got != 97*ChannelOperationPageCapacity {
 		t.Fatalf("dynamic channel capacity = %d", got)
 	}
 	if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {

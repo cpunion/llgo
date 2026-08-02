@@ -138,6 +138,7 @@ jobs:
           go test -race -shuffle=on -tags='coro_channel_adapter_test,coro_channel_owner_test' \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \
+            ./internal/runtime/coro_keyed_registry_atomic_host.go \
             ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/z_chan_lock_coro.go \
             ./internal/runtime/z_chan_lock_coro_atomic_host.go \
@@ -149,6 +150,7 @@ jobs:
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \
+            ./internal/runtime/coro_keyed_registry_atomic_host.go \
             ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/z_chan_lock_coro.go \
             ./internal/runtime/z_chan_lock_coro_atomic_host.go \
@@ -156,12 +158,13 @@ jobs:
             ./internal/runtime/coro_channel_owner_lock_test.go \
             -run '^TestCoroChannelAdapter' -count=1
           # Semaphore and notify waits share one POD-only keyed registry. Race
-          # the exact production registry source to lock FIFO selection,
-          # generation reuse, cancellation, and single-owner posting.
+          # the exact lock-free production source to lock FIFO selection,
+          # generation reuse, cancellation, and single-owner posting without
+          # silently restoring the old channel spin gate dependency.
           go test -race -shuffle=on -tags=coro_sema_owner_test \
-            ./internal/runtime/z_chan_lock_coro.go \
-            ./internal/runtime/z_chan_lock_coro_atomic_host.go \
+            ./internal/runtime/coro_keyed_registry_atomic_host.go \
             ./internal/runtime/coro_resume_materialize.go \
+            ./internal/runtime/coro_operation_capacity.go \
             ./internal/runtime/coro_keyed_park.go \
             ./internal/runtime/coro_keyed_post_test.go \
             ./internal/runtime/coro_keyed_registry_test.go \
@@ -169,9 +172,9 @@ jobs:
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_sema_owner_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
-            ./internal/runtime/z_chan_lock_coro.go \
-            ./internal/runtime/z_chan_lock_coro_atomic_host.go \
+            ./internal/runtime/coro_keyed_registry_atomic_host.go \
             ./internal/runtime/coro_resume_materialize.go \
+            ./internal/runtime/coro_operation_capacity.go \
             ./internal/runtime/coro_keyed_park.go \
             ./internal/runtime/coro_keyed_post_test.go \
             ./internal/runtime/coro_keyed_registry_test.go \

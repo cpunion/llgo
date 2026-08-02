@@ -35,8 +35,6 @@ const (
 	coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity
 )
 
-var coroProgramWorkerExtraPagesV1State [coroNativeWorkerPageCountV1 - 1]coro.WorkerOperationPage
-
 type coroNativeWorkerJobV1 struct {
 	id       coro.OperationID
 	function uintptr

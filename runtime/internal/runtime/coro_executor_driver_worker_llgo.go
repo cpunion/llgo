@@ -26,8 +26,8 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 // managed blocking foreign call always parks its G and completes through the
 // pipe; it must never fall back to running on the executor thread.
 func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle) bool {
-	if !coro.ConfigureWorkerOperationPages(&coroProgramWorkerSourceV1State, coroProgramWorkerExtraPagesV1State[:]) ||
-		coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coroNativeWorkerCapacityV1 ||
+	if coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coro.WorkerOperationPageCapacity ||
+		coroNativeWorkerCapacityV1 != coroRuntimeWorkerCapacityV1 ||
 		coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1 {
 		return false
 	}

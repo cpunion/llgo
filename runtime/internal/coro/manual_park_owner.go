@@ -55,7 +55,7 @@ func PrepareSingleManualPark(
 ) (ParkTicket, OperationID, bool) {
 	if !ValidG(g) || handle == nil || header == nil || source == nil || wait == nil ||
 		*wait != (WaitSetRecord{}) || caseID == 0 || !resumeGateTaken(g) || g.runP == nil ||
-		!validManualOperationOwner(source, g.runP) {
+		!CanReserveManualOperation(g.runP, source) {
 		return ParkTicket{}, OperationID{}, false
 	}
 	ticket, ok := BeginParkSet(&g.park, 1, seed)

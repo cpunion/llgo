@@ -81,24 +81,32 @@ type coroKeyedRegistrySlotStateV2 uint32
 
 const (
 	coroKeyedRegistryFreeV2 coroKeyedRegistrySlotStateV2 = iota
+	coroKeyedRegistryRegisteringV2
 	coroKeyedRegistryActiveV2
 	coroKeyedRegistryPostingV2
 	coroKeyedRegistryDeliveredV2
 )
 
+const (
+	coroKeyedRegistryStateBitsV2     = 3
+	coroKeyedRegistryStateMaskV2     = 1<<coroKeyedRegistryStateBitsV2 - 1
+	coroKeyedRegistryMaxGenerationV2 = ^uint32(0) >> coroKeyedRegistryStateBitsV2
+)
+
 type coroKeyedRegistrySlotV2 struct {
-	generation uint32
-	state      coroKeyedRegistrySlotStateV2
-	kind       coroKeyedParkKindV2
-	logical    uint32
-	key        uintptr
-	sequence   uint64
-	operation  coro.OperationID
+	// control atomically binds the slot generation and lifecycle state. Keeping
+	// both in one 32-bit word prevents an Active -> Free -> Active ABA on
+	// 32-bit, WASM, and bare-metal targets without requiring 64-bit atomics.
+	control   uint32
+	kind      coroKeyedParkKindV2
+	logical   uint32
+	key       uintptr
+	sequence  uint32
+	operation coro.OperationID
 }
 
 type coroKeyedRegistryV2 struct {
-	mutex    channelMutex
-	sequence uint64
+	sequence uint32
 	slots    [coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
 }
 
@@ -156,10 +164,16 @@ func validMaterializedCoroKeyedParkV2(state *CoroKeyedParkV2) bool {
 		state.packet != (coro.ResumePacket{}) && state.cleanup == (coro.ResumeCleanupPlan{})
 }
 
-func coroKeyedRegistryReusableSlotV2(slot *coroKeyedRegistrySlotV2) bool {
-	return slot != nil && slot.state == coroKeyedRegistryFreeV2 &&
-		slot.kind == coroKeyedParkInvalidV2 && slot.logical == 0 && slot.key == 0 &&
-		slot.sequence == 0 && slot.operation == (coro.OperationID{})
+func coroKeyedRegistryControlV2(generation uint32, state coroKeyedRegistrySlotStateV2) uint32 {
+	return generation<<coroKeyedRegistryStateBitsV2 | uint32(state)
+}
+
+func coroKeyedRegistryControlGenerationV2(control uint32) uint32 {
+	return control >> coroKeyedRegistryStateBitsV2
+}
+
+func coroKeyedRegistryControlStateV2(control uint32) coroKeyedRegistrySlotStateV2 {
+	return coroKeyedRegistrySlotStateV2(control & coroKeyedRegistryStateMaskV2)
 }
 
 func coroKeyedRegistrySlotV2For(
@@ -173,28 +187,61 @@ func coroKeyedRegistrySlotV2For(
 	return &registry.slots[handle.Slot-1], true
 }
 
-// retire detaches the exact private registry identity in one bounded critical
-// section. Posting may be cleared because its producer owns only the POD
-// handle and OperationID: finishPost observes the retired generation and skips
+func coroKeyedRegistryLoadOperationV2(
+	slot *coroKeyedRegistrySlotV2,
+	control uint32,
+) (coro.OperationID, bool) {
+	if slot == nil || coroKeyedAtomicLoadUint32(&slot.control) != control {
+		return coro.OperationID{}, false
+	}
+	operation := coro.OperationID{
+		SourceSlot: coroKeyedAtomicLoadUint32(&slot.operation.SourceSlot),
+		Generation: coroKeyedAtomicLoadUint32(&slot.operation.Generation),
+	}
+	return operation, coroKeyedAtomicLoadUint32(&slot.control) == control
+}
+
+// retire detaches the exact private registry identity with a generation-bound
+// CAS. It may be preempted or race claim/finish without owning a runtime lock.
+// Posting may be cleared because its producer owns only the POD handle and
+// OperationID: finishPost observes the retired generation and skips
 // publication. Once Delivered is visible, any concurrent source Post is
 // protected independently by ManualOperationSource admission/quiescence.
 func (registry *coroKeyedRegistryV2) retire(
 	handle coroKeyedRegistryHandleV2,
 	operation coro.OperationID,
 ) bool {
-	registry.mutex.Lock()
 	slot, ok := coroKeyedRegistrySlotV2For(registry, handle)
-	if !ok || slot.generation != handle.Generation || slot.operation != operation ||
-		(slot.state != coroKeyedRegistryActiveV2 &&
-			slot.state != coroKeyedRegistryPostingV2 &&
-			slot.state != coroKeyedRegistryDeliveredV2) {
-		registry.mutex.Unlock()
+	if !ok {
 		return false
 	}
-	generation := slot.generation
-	*slot = coroKeyedRegistrySlotV2{generation: generation}
-	registry.mutex.Unlock()
-	return true
+	for {
+		control := coroKeyedAtomicLoadUint32(&slot.control)
+		if coroKeyedRegistryControlGenerationV2(control) != handle.Generation {
+			return false
+		}
+		switch coroKeyedRegistryControlStateV2(control) {
+		case coroKeyedRegistryActiveV2, coroKeyedRegistryPostingV2, coroKeyedRegistryDeliveredV2:
+			loaded, stable := coroKeyedRegistryLoadOperationV2(slot, control)
+			if !stable {
+				continue
+			}
+			if loaded != operation {
+				return false
+			}
+			free := coroKeyedRegistryControlV2(handle.Generation, coroKeyedRegistryFreeV2)
+			if coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, free) {
+				return true
+			}
+		case coroKeyedRegistryRegisteringV2:
+			// A published handle cannot name Registering in the same generation.
+			// Fail closed instead of making this required cleanup path wait for a
+			// registrar which cannot legitimately own the handle.
+			return false
+		default:
+			return false
+		}
+	}
 }
 
 var coroHostOperationAdapterV1State coro.HostOperationAdapter

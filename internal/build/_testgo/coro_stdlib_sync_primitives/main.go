@@ -21,12 +21,20 @@ var (
 	ready bool
 )
 
+const demandPageContenders = 600
+
 func publish() {
 	mutex.Lock()
 	ready = true
 	cond.Signal()
 	mutex.Unlock()
 	group.Done()
+}
+
+func awaitDemandGate(gate, ready, done *sync.WaitGroup) {
+	ready.Done()
+	gate.Wait()
+	done.Done()
 }
 
 func main() {
@@ -54,4 +62,21 @@ func main() {
 	}
 	mutex.Unlock()
 	group.Wait()
+
+	// More than eight inline 64-slot Manual sources can represent in aggregate.
+	// Independent gates exercise concurrent standard semaphore waits without
+	// turning this correctness gate into hundreds of serialized Mutex handoffs.
+	demandGates := make([]sync.WaitGroup, demandPageContenders)
+	var demandReady, demandDone sync.WaitGroup
+	demandReady.Add(demandPageContenders)
+	demandDone.Add(demandPageContenders)
+	for index := range demandGates {
+		demandGates[index].Add(1)
+		go awaitDemandGate(&demandGates[index], &demandReady, &demandDone)
+	}
+	demandReady.Wait()
+	for index := range demandGates {
+		demandGates[index].Done()
+	}
+	demandDone.Wait()
 }

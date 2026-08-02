@@ -37,6 +37,7 @@ const (
 	runtimeCoroPollGoSource                  = "internal/lib/runtime/poll_linkname_coro_llgo.go"
 	runtimePollCSource                       = "internal/lib/runtime/_wrap/poll.c"
 	runtimeCoroChannelSource                 = "internal/coro/channel_operation_source.go"
+	runtimeCoroOperationDirectorySource      = "internal/coro/operation_page_directory.go"
 	runtimeCoroWorkerSource                  = "internal/coro/worker_operation_source.go"
 	runtimeCoroNativeWorkerSource            = "internal/runtime/coro_worker_native_llgo.go"
 	runtimeCoroWorkerProgramCompletionSource = "internal/runtime/coro_worker_completion_program_llgo.go"
@@ -134,6 +135,22 @@ func TestRuntimeTerminalStdioUsesExactPrivateSyncBoundary(t *testing.T) {
 }
 
 func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
+	directory := readRuntimePollFile(t, runtimeCoroOperationDirectorySource)
+	normalizedDirectory := strings.Join(strings.Fields(directory), " ")
+	for _, required := range []string{
+		"operationPageDirectoryBlockCapacity = uint32(64)",
+		"type OperationPageDirectoryBlock struct",
+		"blocks [operationPageDirectoryBlockCount]*OperationPageDirectoryBlock",
+		"newBlock *OperationPageDirectoryBlock",
+	} {
+		if !strings.Contains(normalizedDirectory, required) {
+			t.Errorf("%s lacks sparse directory marker %q", runtimeCoroOperationDirectorySource, required)
+		}
+	}
+	if strings.Contains(normalizedDirectory, "pages [operationDynamicPageCapacity]unsafe.Pointer") {
+		t.Errorf("%s restored a full per-source pointer catalog", runtimeCoroOperationDirectorySource)
+	}
+
 	core := readRuntimePollFile(t, runtimeCoroChannelSource)
 	normalizedCore := strings.Join(strings.Fields(core), " ")
 	for _, required := range []string{
@@ -155,11 +172,7 @@ func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
 
 	driver := readRuntimePollFile(t, runtimeCoroNativeDriverSource)
 	for _, required := range []string{
-		"coroNativeChannelCapacityV1 = coroNativeSourcePageCountV1 * coro.ChannelOperationPageCapacity",
-		"coroProgramChannelExtraPagesV1State",
-		"coro.ConfigureChannelOperationPages(&coroProgramChannelSourceV1State",
-		"coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coroNativeChannelCapacityV1",
-		"coroNativeChannelCapacityV1 != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity",
+		"coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coro.ChannelOperationPageCapacity",
 	} {
 		if !strings.Contains(driver, required) {
 			t.Errorf("%s lacks native channel capacity marker %q", runtimeCoroNativeDriverSource, required)
@@ -167,27 +180,39 @@ func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
 	}
 	fleet := readRuntimePollFile(t, runtimeCoroNativeFleetSource)
 	for _, required := range []string{
-		"channelPages [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
-		"coro.ConfigureChannelOperationPages(&domain.channel, domain.channelPages[:])",
-		"coro.ChannelOperationConfiguredCapacity(&domain.channel)",
+		"coro.ChannelOperationConfiguredCapacity(&domain.channel) == coro.ChannelOperationPageCapacity",
 	} {
 		if !strings.Contains(fleet, required) {
 			t.Errorf("%s lacks owned-P channel capacity marker %q", runtimeCoroNativeFleetSource, required)
+		}
+	}
+	for path, source := range map[string]string{
+		runtimeCoroNativeDriverSource: driver,
+		runtimeCoroNativeFleetSource:  fleet,
+	} {
+		for _, forbidden := range []string{"coroProgramChannelExtraPagesV1State", "channelPages [", "ConfigureChannelOperationPages(&domain.channel"} {
+			if strings.Contains(source, forbidden) {
+				t.Errorf("%s eagerly reserves channel pages through %q", path, forbidden)
+			}
 		}
 	}
 }
 
 func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *testing.T) {
 	core := readRuntimePollFile(t, runtimeCoroWorkerSource)
+	normalizedCore := strings.Join(strings.Fields(core), " ")
 	for _, required := range []string{
 		"const WorkerOperationPageCapacity = 64",
 		"const WorkerOperationSourceCapacity = WorkerOperationPageCapacity",
 		"extraPages []WorkerOperationPage",
+		"dynamicPages operationDynamicPageDirectory",
 		"func ConfigureWorkerOperationPages(",
+		"func AttachWorkerOperationPage(",
+		"func CanReserveWorkerOperation(",
 		"func WorkerOperationConfiguredCapacity(",
 		"WorkerOperationConfiguredCapacity(source)",
 	} {
-		if !strings.Contains(core, required) {
+		if !strings.Contains(normalizedCore, required) {
 			t.Errorf("%s lacks paged worker marker %q", runtimeCoroWorkerSource, required)
 		}
 	}
@@ -368,9 +393,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 
 	driver := readRuntimePollFile(t, runtimeCoroNativeDriverSource)
 	for _, required := range []string{
-		"coroProgramWorkerExtraPagesV1State",
-		"coro.ConfigureWorkerOperationPages(&coroProgramWorkerSourceV1State",
-		"coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coroNativeWorkerCapacityV1",
+		"coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coro.WorkerOperationPageCapacity",
+		"coroNativeWorkerCapacityV1 != coroRuntimeWorkerCapacityV1",
 		"coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1",
 	} {
 		if !strings.Contains(driver, required) {
@@ -379,12 +403,24 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	}
 	fleet := readRuntimePollFile(t, runtimeCoroNativeFleetSource)
 	for _, required := range []string{
-		"workerPages  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage",
-		"coro.ConfigureWorkerOperationPages(&domain.worker, domain.workerPages[:])",
-		"coro.WorkerOperationConfiguredCapacity(&domain.worker)",
+		"coro.WorkerOperationConfiguredCapacity(&domain.worker) == coro.WorkerOperationPageCapacity",
 	} {
 		if !strings.Contains(fleet, required) {
 			t.Errorf("%s lacks owned-P worker capacity marker %q", runtimeCoroNativeFleetSource, required)
+		}
+	}
+	if !strings.Contains(owner, "ensureCoroWorkerOperationCapacityV1(driver, task, coroRuntimeWorkerCapacityV1)") {
+		t.Errorf("%s does not demand-grow the current worker catalog", runtimeCoroWorkerOwnerSource)
+	}
+	for path, source := range map[string]string{
+		runtimeCoroNativeWorkerSource: native,
+		runtimeCoroNativeDriverSource: driver,
+		runtimeCoroNativeFleetSource:  fleet,
+	} {
+		for _, forbidden := range []string{"coroProgramWorkerExtraPagesV1State", "workerPages  [", "ConfigureWorkerOperationPages(&domain.worker"} {
+			if strings.Contains(source, forbidden) {
+				t.Errorf("%s eagerly reserves worker pages through %q", path, forbidden)
+			}
 		}
 	}
 }

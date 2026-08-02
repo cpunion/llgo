@@ -241,7 +241,7 @@ func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 	}
 }
 
-func TestCoroKeyedResumeIsPNeutralAndRegistryRetireIsBounded(t *testing.T) {
+func TestCoroKeyedResumeIsPNeutralAndRegistryIsPreemptibleLockFree(t *testing.T) {
 	const (
 		parkPath        = "internal/runtime/coro_keyed_park.go"
 		materializePath = "internal/runtime/coro_resume_materialize.go"
@@ -280,7 +280,8 @@ func TestCoroKeyedResumeIsPNeutralAndRegistryRetireIsBounded(t *testing.T) {
 		"coroProgramKeyedRegistryV2State.retire(state.registry, state.operation)",
 		"state.magic = coroKeyedParkMaterializedMagicV2",
 		"return coro.CommitResumeCleanupStep(step, coro.ResumeSmallInvalid)",
-		"slot.state != coroKeyedRegistryPostingV2",
+		"coroKeyedRegistryControlStateV2(control)",
+		"coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, free)",
 	} {
 		if !strings.Contains(materialize, marker) {
 			t.Errorf("%s lacks keyed old-owner materialization marker %q", materializePath, marker)
@@ -292,9 +293,21 @@ func TestCoroKeyedResumeIsPNeutralAndRegistryRetireIsBounded(t *testing.T) {
 	}
 	retireEnd := strings.Index(materialize[retireStart:], "var coroHostOperationAdapterV1State")
 	if retireEnd < 0 {
-		t.Fatalf("%s lacks bounded keyed retire span", materializePath)
+		t.Fatalf("%s lacks keyed retire span", materializePath)
 	}
-	if strings.Contains(materialize[retireStart:retireStart+retireEnd], "for {") {
-		t.Errorf("%s keyed registry retire retains a busy loop", materializePath)
+	retire := materialize[retireStart : retireStart+retireEnd]
+	for _, marker := range []string{
+		"for {",
+		"coroKeyedAtomicLoadUint32(&slot.control)",
+		"coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, free)",
+	} {
+		if !strings.Contains(retire, marker) {
+			t.Errorf("%s keyed registry retire lacks lock-free retry marker %q", materializePath, marker)
+		}
+	}
+	for _, forbidden := range []string{"registry.mutex", "channelMutex", ".Lock()", ".Unlock()"} {
+		if strings.Contains(park, forbidden) || strings.Contains(retire, forbidden) {
+			t.Errorf("keyed registry retains non-preemptible owner gate %q", forbidden)
+		}
 	}
 }

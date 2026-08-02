@@ -260,6 +260,49 @@ func TestManualOperationSourceLateAdmittedLoserRequiresDrainBeforeQuiescence(t *
 	}
 }
 
+func TestManualOperationSourceRecycleRetiresConsumedPendingHint(t *testing.T) {
+	p := new(P)
+	source := new(ManualOperationSource)
+	if !BindManualOperationSource(source, p) {
+		t.Fatal("bind manual source")
+	}
+	state, ticket, ids := reserveManualWaitSet(t, source, p, 57, []uint32{1})
+	id := ids[0]
+
+	// Model a completion published after the source cleared its advisory hint
+	// but before this slot's cursor. The current pass consumes the durable
+	// mailbox, while pending intentionally remains sticky for a later pass.
+	if !source.beginPublishPass(p) {
+		t.Fatal("begin manual publish pass")
+	}
+	if result := source.Post(id); result != ManualOperationPosted {
+		t.Fatalf("post manual completion behind cursor = %d", result)
+	}
+	if published, lost, ok := source.publishSlot(p, 0); !ok || published != 1 || lost != 0 || !source.Pending() {
+		t.Fatalf("publish manual completion behind cursor = (%d, %d, %t), pending=%t",
+			published, lost, ok, source.Pending())
+	}
+	resolution, duplicates, ok := source.ResolveAffectedPublishedEpoch(p)
+	if !ok || duplicates != 0 || resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}) {
+		t.Fatalf("resolve manual completion behind cursor = (%+v, %d, %t)", resolution, duplicates, ok)
+	}
+	if applied, detached, ok := source.ApplyAndDetach(p); !ok || applied != 1 || detached != 1 || !ParkReady(state, ticket) {
+		t.Fatalf("apply manual completion behind cursor = (%d, %d, %t), ready=%t",
+			applied, detached, ok, ParkReady(state, ticket))
+	}
+	outcome, _, lease, consumed := ConsumeParkSet(state, ticket)
+	if !consumed || outcome != ParkOutcomeCompleted || !lease.Valid() {
+		t.Fatalf("consume manual completion behind cursor = (%d, %+v, %t)", outcome, lease, consumed)
+	}
+	finishManualOperations(t, source, p, ids, lease)
+	if source.scanLimit != 0 || source.Pending() {
+		t.Fatalf("recycled manual source retained hint = (scan=%d pending=%t)", source.scanLimit, source.Pending())
+	}
+	if !UnbindManualOperationSource(source, p) || !source.CanRelease() {
+		t.Fatal("release manual source after consumed pending hint")
+	}
+}
+
 func TestManualOperationSourceConcurrentProducerCoalescing(t *testing.T) {
 	p := new(P)
 	source := new(ManualOperationSource)

@@ -45,6 +45,7 @@ type coroStdlibSyncFixture struct {
 	wantGo           bool
 	wantChannel      bool
 	requireGoStmt    bool
+	runTimeout       time.Duration
 	args             func(*testing.T) []string
 	check            func(*testing.T, time.Duration)
 }
@@ -77,10 +78,13 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			dir:  "./_testgo/coro_stdlib_timer",
 			wantSource: []string{
 				"time.NewTimer(", ".Stop()", ".Reset(", "time.After(", "time.NewTicker(", "time.AfterFunc(",
+				"demandPageConcurrency = 600", "demandReady.Wait()", "close(demandStart)",
 			},
 			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			wantGo:           true,
 			wantChannel:      true,
+			requireGoStmt:    true,
+			runTimeout:       30 * time.Second,
 		},
 		{
 			// Deterministically force both keyed standard-library paths. main
@@ -91,6 +95,7 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			dir:  "./_testgo/coro_stdlib_sync_primitives",
 			wantSource: []string{
 				"sync.NewCond(", "sync.WaitGroup", "mutex.Lock()",
+				"demandPageContenders = 600", "go awaitDemandGate(", "demandReady.Wait()",
 				"runtime.GOMAXPROCS(1)", "runtime.GOMAXPROCS(0)",
 				"runtime.SetDefaultGOMAXPROCS()",
 				"debug.SetMaxThreads(64)",
@@ -99,6 +104,7 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			wantGo:           true,
 			requireGoStmt:    true,
+			runTimeout:       30 * time.Second,
 		},
 		{
 			// P0 regular-file worker probe: exactly one small blocking
@@ -252,12 +258,14 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	required := map[string]bool{
 		"coro_execution_quota_native_llgo.go":          false,
 		"coro_executor_driver_timer_llgo.go":           false,
+		"coro_keyed_registry_atomic_llgo.go":           false,
 		"coro_native_fleet.go":                         false,
 		"coro_native_fleet_owner_llgo.go":              false,
 		"coro_native_fleet_program_llgo.go":            false,
 		"coro_native_fleet_reactor.go":                 false,
 		"coro_physical_thread_capacity_native_llgo.go": false,
 		"coro_notify_owner_llgo.go":                    false,
+		"coro_operation_capacity.go":                   false,
 		"coro_poll_descriptor_llgo.go":                 false,
 		"coro_poll_owner_llgo.go":                      false,
 		"coro_poll_route_native_fleet_llgo.go":         false,
@@ -499,7 +507,11 @@ func TestCoroStdlibSyncAcceptance(t *testing.T) {
 				args = fixture.args(t)
 			}
 			started := time.Now()
-			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
+			runTimeout := fixture.runTimeout
+			if runTimeout == 0 {
+				runTimeout = 10 * time.Second
+			}
+			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), runTimeout)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, bin, args...)
 			output, err := cmd.CombinedOutput()

@@ -147,19 +147,7 @@ func PrepareCurrentExecutorWorkerTimerPark(
 		hasTimer && !CanReserveTimerV2(g.runP, timerTable) {
 		return ParkTicket{}, OperationID{}, TimerRegistrationHandle{}, OperationID{}, ExecutorHandle{}, false
 	}
-	workerCapacity := false
-	for index := uint32(0); index < WorkerOperationConfiguredCapacity(workerSource); index++ {
-		slot, slotOK := workerOperationSlotAt(workerSource, index)
-		if !slotOK {
-			return ParkTicket{}, OperationID{}, TimerRegistrationHandle{}, OperationID{}, ExecutorHandle{}, false
-		}
-		if preemptLoad(&slot.generation) != ^uint32(0) &&
-			workerOperationReusableSlot(workerSource, slot, index) {
-			workerCapacity = true
-			break
-		}
-	}
-	if !workerCapacity {
+	if !CanReserveWorkerOperation(g.runP, workerSource) {
 		return ParkTicket{}, OperationID{}, TimerRegistrationHandle{}, OperationID{}, ExecutorHandle{}, false
 	}
 	expected := uint32(1)
@@ -265,7 +253,7 @@ func PrepareSingleWorkerPark(
 ) (ParkTicket, OperationID, bool) {
 	if !ValidG(g) || handle == nil || header == nil || source == nil || wait == nil ||
 		*wait != (WaitSetRecord{}) || caseID == 0 || !resumeGateTaken(g) || g.runP == nil ||
-		!validWorkerOperationOwner(source, g.runP) {
+		!CanReserveWorkerOperation(g.runP, source) {
 		return ParkTicket{}, OperationID{}, false
 	}
 	ticket, ok := BeginParkSet(&g.park, 1, seed)

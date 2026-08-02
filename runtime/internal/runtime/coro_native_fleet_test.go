@@ -890,23 +890,23 @@ func TestCoroNativeFleetAdoptsBoundProgramStorageV1(t *testing.T) {
 		t.Fatalf("native adopted/owned domains = program:%+v peer:%+v", program.handle, peer.handle)
 	}
 	if got := coro.TimerRegistrationConfiguredCapacity(&peer.timers); got !=
-		coroNativeTimerPageCountV1*coro.TimerRegistrationPageCapacity {
+		coro.TimerRegistrationPageCapacity {
 		t.Fatalf("owned peer timer capacity = %d", got)
 	}
 	if got := coro.PollOperationConfiguredCapacity(&peer.poll); got !=
-		coroNativeSourcePageCountV1*coro.PollOperationPageCapacity {
+		coro.PollOperationPageCapacity {
 		t.Fatalf("owned peer poll capacity = %d", got)
 	}
 	if got := coro.ManualOperationConfiguredCapacity(&peer.manual); got !=
-		coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity {
+		coro.ManualOperationPageCapacity {
 		t.Fatalf("owned peer manual capacity = %d", got)
 	}
 	if got := coro.WorkerOperationConfiguredCapacity(&peer.worker); got !=
-		coroNativeSourcePageCountV1*coro.WorkerOperationPageCapacity {
+		coro.WorkerOperationPageCapacity {
 		t.Fatalf("owned peer worker capacity = %d", got)
 	}
 	if got := coro.ChannelOperationConfiguredCapacity(&peer.channel); got !=
-		coroNativeSourcePageCountV1*coro.ChannelOperationPageCapacity {
+		coro.ChannelOperationPageCapacity {
 		t.Fatalf("owned peer channel capacity = %d", got)
 	}
 	if !coroNativeFleetAbortActiveDomainV1(&state, peer) ||

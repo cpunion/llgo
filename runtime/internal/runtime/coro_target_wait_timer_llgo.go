@@ -57,7 +57,7 @@ func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadli
 	entries[0] = corodoorbell.PollFD{FD: doorbellFD, Events: corodoorbell.PollRead}
 	count := uint32(1)
 	configuredCapacity := coro.PollOperationConfiguredCapacity(&coroProgramPollSourceV1State)
-	if configuredCapacity != coroNativePollCapacityV1 {
+	if configuredCapacity == 0 || configuredCapacity > coroNativePollCapacityV1 {
 		return false
 	}
 	scanLimit, scanOK := coro.PollOperationScanLimit(&coroProgramPollSourceV1State)

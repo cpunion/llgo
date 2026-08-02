@@ -43,7 +43,9 @@ func __llgo_coro_host_operation_deadline_park_v1(
 		*state != (CoroHostOperationDeadlineParkV1{}) || opcode == 0 ||
 		argc > coro.HostOperationMaxArgsV1 || timeoutErrno == 0 ||
 		uintptr(lane) != controlLane || uintptr(expectedEpoch) != controlEpoch ||
-		!controlOK || !deadlineOK || !current {
+		!controlOK || !deadlineOK || !current ||
+		!ensureCoroWorkerOperationCapacityV1(driver, task, coro.HostOperationCapacityV1) ||
+		deadline != 0 && !ensureCoroTimerOperationCapacityV1(driver, task, coroRuntimeTimerCapacityV1) {
 		coroHostOperationAbortV1("invalid deadline coroutine host operation park ABI")
 		return
 	}

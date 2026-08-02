@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"os"
+	"sync"
 	"time"
 )
+
+const demandPageConcurrency = 600
 
 func fail(code int) {
 	os.Exit(code)
@@ -146,4 +149,24 @@ func main() {
 	if cancelTimer.Stop() {
 		fail(34)
 	}
+
+	// Exceed eight executors' aggregate inline source capacity. Every child
+	// first parks on the same channel, then installs an independent timer after
+	// close wakes the cohort. Hosted runtimes must grow both catalogs in stable
+	// 64-operation pages without changing ordinary Go call style.
+	var demandReady, demandDone sync.WaitGroup
+	demandReady.Add(demandPageConcurrency)
+	demandDone.Add(demandPageConcurrency)
+	demandStart := make(chan struct{})
+	for range demandPageConcurrency {
+		go func() {
+			demandReady.Done()
+			<-demandStart
+			time.Sleep(time.Millisecond)
+			demandDone.Done()
+		}()
+	}
+	demandReady.Wait()
+	close(demandStart)
+	demandDone.Wait()
 }

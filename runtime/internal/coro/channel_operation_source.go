@@ -343,6 +343,7 @@ func AttachChannelOperationPage(
 	source *ChannelOperationSource,
 	p *P,
 	page *ChannelOperationPage,
+	directoryBlock *OperationPageDirectoryBlock,
 ) bool {
 	if !validChannelOperationOwner(source, p) || page == nil {
 		return false
@@ -356,11 +357,6 @@ func AttachChannelOperationPage(
 			return false
 		}
 	}
-	for index := uint32(0); index < source.dynamicPages.published(); index++ {
-		if source.dynamicPages.page(index) == unsafe.Pointer(page) {
-			return false
-		}
-	}
 	if !page.ready.empty() {
 		return false
 	}
@@ -370,7 +366,7 @@ func AttachChannelOperationPage(
 			return false
 		}
 	}
-	if !source.dynamicPages.publish(unsafe.Pointer(page)) {
+	if !source.dynamicPages.publish(unsafe.Pointer(page), directoryBlock) {
 		return false
 	}
 	// Callers attach only after an availability preflight failed. Begin the
