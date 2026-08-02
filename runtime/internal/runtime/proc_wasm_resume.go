@@ -176,7 +176,7 @@ func runWasmResumeContext(gp *g) wasmresume.Action {
 	platform.unwind = unwind
 	platform.unwindRoot = captureWasmResumeGCRoot()
 	if c.Sigsetjmp(unwind, 0) != 0 {
-		if !platform.context.Unwind(unsafe.Pointer(gp.defer_), FreeRoot) {
+		if !platform.context.Unwind(unsafe.Pointer(gp.defer_)) {
 			platform.unwind = previous
 			platform.unwindRoot = previousRoot
 			if gp.goexit {
@@ -282,7 +282,7 @@ func wasmResumeAllocDynamic(ctx *wasmresume.Context, size, align uintptr) unsafe
 
 //go:linkname wasmResumeFree __llgo_wasm_resume_free
 func wasmResumeFree(ctx *wasmresume.Context, frame *wasmresume.Frame) {
-	ctx.ReleaseFrame(frame, FreeRoot)
+	ctx.ReleaseFrame(frame)
 }
 
 //go:linkname wasmResumeClose __llgo_wasm_resume_close

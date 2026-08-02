@@ -21,7 +21,7 @@ import "unsafe"
 const defaultFrameBlockSize = uintptr(2 << 10)
 
 type frameBlock struct {
-	prev         *frameBlock
+	prev, next   *frameBlock
 	begin, end   uintptr
 	stackPointer uintptr
 }
@@ -37,6 +37,9 @@ func (s *frameStorage) allocate(
 		return nil
 	}
 	if frame, ok := allocateFromBlock(s.current, size, align); ok {
+		return frame
+	}
+	if frame, ok := s.allocateFromRetainedBlock(size, align); ok {
 		return frame
 	}
 
@@ -61,6 +64,14 @@ func (s *frameStorage) allocate(
 	}
 	block := (*frameBlock)(raw)
 	block.prev = s.current
+	block.next = nil
+	if s.current != nil {
+		block.next = s.current.next
+		s.current.next = block
+		if block.next != nil {
+			block.next.prev = block
+		}
+	}
 	block.begin, ok = addUintptr(uintptr(raw), unsafe.Sizeof(frameBlock{}))
 	if !ok {
 		panic("wasmresume: frame block address overflow")
@@ -69,6 +80,7 @@ func (s *frameStorage) allocate(
 	if !ok {
 		panic("wasmresume: frame block address overflow")
 	}
+	clearFrameStorage(block.begin, block.end)
 	block.stackPointer = block.begin
 	s.current = block
 	frame, ok := allocateFromBlock(block, size, align)
@@ -78,20 +90,45 @@ func (s *frameStorage) allocate(
 	return frame
 }
 
+func (s *frameStorage) allocateFromRetainedBlock(
+	size, align uintptr,
+) (unsafe.Pointer, bool) {
+	if s.current == nil {
+		return nil, false
+	}
+	for block := s.current.next; block != nil; block = block.next {
+		if block.stackPointer != block.begin {
+			panic("wasmresume: active frame block follows current block")
+		}
+		if _, _, ok := frameBounds(block, size, align); !ok {
+			continue
+		}
+		if block != s.current.next {
+			block.prev.next = block.next
+			if block.next != nil {
+				block.next.prev = block.prev
+			}
+			block.prev = s.current
+			block.next = s.current.next
+			s.current.next.prev = block
+			s.current.next = block
+		}
+		s.current = block
+		frame, ok := allocateFromBlock(block, size, align)
+		if !ok {
+			panic("wasmresume: retained frame block became too small")
+		}
+		return frame, true
+	}
+	return nil, false
+}
+
 func allocateFromBlock(block *frameBlock, size, align uintptr) (unsafe.Pointer, bool) {
 	if block == nil {
 		return nil, false
 	}
-	header, ok := addUintptr(block.stackPointer, unsafe.Sizeof(uintptr(0)))
+	frame, next, ok := frameBounds(block, size, align)
 	if !ok {
-		return nil, false
-	}
-	frame, ok := alignUintptr(header, align)
-	if !ok {
-		return nil, false
-	}
-	next, ok := addUintptr(frame, size)
-	if !ok || next > block.end {
 		return nil, false
 	}
 	*(*uintptr)(unsafe.Pointer(frame - unsafe.Sizeof(uintptr(0)))) = block.stackPointer
@@ -99,8 +136,24 @@ func allocateFromBlock(block *frameBlock, size, align uintptr) (unsafe.Pointer, 
 	return unsafe.Pointer(frame), true
 }
 
+func frameBounds(block *frameBlock, size, align uintptr) (frame, next uintptr, ok bool) {
+	header, ok := addUintptr(block.stackPointer, unsafe.Sizeof(uintptr(0)))
+	if !ok {
+		return 0, 0, false
+	}
+	frame, ok = alignUintptr(header, align)
+	if !ok {
+		return 0, 0, false
+	}
+	next, ok = addUintptr(frame, size)
+	if !ok || next > block.end {
+		return 0, 0, false
+	}
+	return frame, next, true
+}
+
 func (s *frameStorage) releaseFrame(
-	frame unsafe.Pointer, size uintptr, release Releaser,
+	frame unsafe.Pointer, size uintptr,
 ) {
 	if s.current == nil || frame == nil || size == 0 {
 		panic("wasmresume: invalid frame release")
@@ -122,32 +175,34 @@ func (s *frameStorage) releaseFrame(
 	if previous < block.begin || previous >= address {
 		panic("wasmresume: invalid frame allocation header")
 	}
-	if block != s.current && release == nil {
-		panic("wasmresume: missing frame block reclaimer")
-	}
 	for s.current != block {
 		current := s.current
 		s.current = current.prev
-		release(unsafe.Pointer(current))
+		clearFrameStorage(current.begin, current.stackPointer)
+		current.stackPointer = current.begin
 	}
+	clearFrameStorage(previous, block.stackPointer)
 	block.stackPointer = previous
 	if previous == block.begin && block.prev != nil {
-		if release == nil {
-			panic("wasmresume: missing frame block reclaimer")
-		}
 		s.current = block.prev
-		release(unsafe.Pointer(block))
 	}
 }
 
 func (s *frameStorage) close(release Releaser) {
-	if s.current != nil && release == nil {
+	if s.current == nil {
+		return
+	}
+	if release == nil {
 		panic("wasmresume: missing frame block reclaimer")
 	}
-	for block := s.current; block != nil; {
-		previous := block.prev
+	block := s.current
+	for block.prev != nil {
+		block = block.prev
+	}
+	for block != nil {
+		next := block.next
 		release(unsafe.Pointer(block))
-		block = previous
+		block = next
 	}
 	s.current = nil
 }

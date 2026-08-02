@@ -99,16 +99,16 @@ func (c *Context) AllocateFrame(
 }
 
 // ReleaseFrame reclaims the most recently completed generated frame.
-func (c *Context) ReleaseFrame(frame *Frame, release Releaser) {
+func (c *Context) ReleaseFrame(frame *Frame) {
 	if frame == nil || frame.Descriptor == nil {
 		panic("wasmresume: invalid completed frame")
 	}
-	c.storage.releaseFrame(unsafe.Pointer(frame), frame.Descriptor.FrameSize, release)
+	c.storage.releaseFrame(unsafe.Pointer(frame), frame.Descriptor.FrameSize)
 }
 
 // Unwind discards frames above the defer owner and redirects that owner to its
 // generated panic/defer state.
-func (c *Context) Unwind(deferFrame unsafe.Pointer, release Releaser) bool {
+func (c *Context) Unwind(deferFrame unsafe.Pointer) bool {
 	if deferFrame == nil {
 		return false
 	}
@@ -131,7 +131,7 @@ func (c *Context) Unwind(deferFrame unsafe.Pointer, release Releaser) bool {
 	for c.top != owner {
 		frame := c.top
 		c.top = frame.Parent
-		c.storage.releaseFrame(unsafe.Pointer(frame), frame.Descriptor.FrameSize, release)
+		c.storage.releaseFrame(unsafe.Pointer(frame), frame.Descriptor.FrameSize)
 	}
 	c.returned = nil
 	owner.PC = owner.Descriptor.UnwindPC
