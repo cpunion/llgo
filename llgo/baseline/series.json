@@ -43,6 +43,16 @@
     },
     {
       "kind": "branch",
+      "id": "37de8a1acdb1f2eb",
+      "label": "Branch codex/debug-fault-boundary-2164-20260802",
+      "path": "series/branch/37de8a1acdb1f2eb/history.json",
+      "configPath": "series/branch/37de8a1acdb1f2eb/config.json",
+      "sha": "6d97e91d04777fbec6a4bff049df5785329cfe9c",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/6d97e91d04777fbec6a4bff049df5785329cfe9c",
+      "updatedAt": "2026-08-02T13:47:50.412Z"
+    },
+    {
+      "kind": "branch",
       "id": "0d13d036a7f0a264",
       "label": "Branch coro/sync-main-20260729",
       "path": "series/branch/0d13d036a7f0a264/history.json",
@@ -70,6 +80,16 @@
       "sha": "5336d7074219df332fb6301e88816f636d5c9bc0",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/5336d7074219df332fb6301e88816f636d5c9bc0",
       "updatedAt": "2026-08-02T13:23:14.751Z"
+    },
+    {
+      "kind": "pull",
+      "id": "140",
+      "label": "PR #140",
+      "path": "series/pull/140/history.json",
+      "configPath": "series/pull/140/config.json",
+      "sha": "6d97e91d04777fbec6a4bff049df5785329cfe9c",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/6d97e91d04777fbec6a4bff049df5785329cfe9c",
+      "updatedAt": "2026-08-02T13:47:50.407Z"
     },
     {
       "kind": "pull",
