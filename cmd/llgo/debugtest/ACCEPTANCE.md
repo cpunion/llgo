@@ -60,8 +60,14 @@ Platform-specific limits remain explicit:
   section symbolication but does not get Go runtime presentation.
 - The current Asyncify-transformed browser runtime is accepted by Go's DWARF
   reader and Chrome, but LLVM's final `llvm-dwarfdump --verify` still reports
-  overlapping/range-containment diagnostics. This is a final-artifact blocker,
-  not a condition that the acceptance lane may suppress.
+  overlapping/range-containment diagnostics. With Emscripten 4.0.21 and
+  Binaryen 125, relinking the exact same objects without Asyncify passes the
+  verifier across all compile units; Asyncify alone introduces invalid ranges
+  in both LLGo and Emscripten C-library DIEs. This matches Binaryen issue
+  [#6406](https://github.com/WebAssembly/binaryen/issues/6406). A source map
+  can recover source lines but cannot repair Wasm-local variable locations, so
+  it is not a substitute for this gate. This is a final-artifact blocker, not a
+  condition that the acceptance lane may suppress.
 
 Panic/trap source stops, optimized inline stepping, Go/host boundary frames,
 and clean final DWARF after every LTO/post-link transform remain required
