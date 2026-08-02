@@ -410,3 +410,13 @@ jobs:
           grep -q 'external_debug_info' "$RUNNER_TEMP/runtime-external.sections"
           ! grep -q '\.debug_info' "$RUNNER_TEMP/runtime-external.sections"
           grep -q '\.debug_info' "$RUNNER_TEMP/runtime-external-debug.sections"
+
+          for artifact in \
+            "$RUNNER_TEMP/runtime-debug.wasm" \
+            "$RUNNER_TEMP/runtime-external.debug.wasm"
+          do
+            log="${artifact}.verify.log"
+            llvm-dwarfdump --verify --error-display=quiet \
+              "${artifact}" 2>&1 | tee "${log}"
+            grep -Fxq 'No errors.' "${log}"
+          done

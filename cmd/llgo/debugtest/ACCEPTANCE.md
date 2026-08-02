@@ -37,7 +37,7 @@ repair is upstream and included in the supported SDK.
 | --- | --- | --- |
 | Native Darwin/Linux | `llgo.yml` | source breakpoints, scopes, locals/globals, runtime values, goroutine ownership/stacks, panic/fault source locations, optimized inline stepping, Go/C/Go frames, and raw non-LLGo fallback |
 | Emulated embedded | `targets.yml` | host ELF, GDB Remote and LLDB `gdb-remote`, source values/backtrace, identical flashed bytes with/without host DWARF, and verified retained DWARF |
-| WASI | `wasi-debug.yml` | final Wasm DWARF, Wasmtime guest stub, source breakpoint, parameter/local, call stack, and clean exit |
+| WASI | `wasi-debug.yml`, `llgo.yml` | strict final embedded/external Wasm DWARF verification, Wasmtime guest stub, source breakpoint, parameter/local, call stack, and clean exit |
 | Browser | `browser-debug.yml` | embedded and external DWARF, standard build identity, escaped sidecar URL, source remapping, all common runtime-layout categories, real LLGo Wasm registration, and no-extension fallback |
 
 Physical hardware is deliberately outside required PR CI. Its guarded script
