@@ -689,6 +689,9 @@ func Build(inv Invocation) ([]Package, error) {
 				if headerErr != nil {
 					return nil, headerErr
 				}
+				if err := reportBuildArtifacts(conf, outFmts, os.Stderr); err != nil {
+					return nil, err
+				}
 				continue
 			}
 
@@ -701,6 +704,9 @@ func Build(inv Invocation) ([]Package, error) {
 				if err != nil {
 					return nil, err
 				}
+			}
+			if err := reportBuildArtifacts(conf, outFmts, os.Stderr); err != nil {
+				return nil, err
 			}
 
 			switch mode {
