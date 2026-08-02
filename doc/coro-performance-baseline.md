@@ -268,8 +268,50 @@ and after the lock-free registry gave these medians with `GOMAXPROCS=1`:
 These samples establish no observed throughput regression; the host had heavy
 unrelated VM load, so the apparent improvements are not treated as a portable
 performance claim. Fresh standard-library `file` and full TCP/UDP/deadline/DNS
-fixtures also pass. The next fixed-memory target is the unchanged 1.12 MB
-native M directory; it is independent of operation-catalog paging.
+fixtures also pass. At that checkpoint the remaining fixed-memory target was
+the unchanged 1.12 MB native M directory; it is independent of
+operation-catalog paging and is measured separately below.
+
+## Demand-paged native M ownership
+
+The paired checkpoint uses the same standard-library `sync` acceptance source,
+Go 1.26.5 and LLVM 19.1.7 on Darwin arm64. Both artifacts include the managed
+keyed-ingress shutdown fix and pass a fresh LLGo compile, link and run. The only
+candidate differences are demand-paged Go logical-M storage and demand-allocated
+C physical-thread records.
+
+| Metric | fixed 10,000-record storage | demand-allocated storage | Delta |
+| --- | ---: | ---: | ---: |
+| File bytes | 7,698,880 | 7,255,936 | -442,944 (-5.753%) |
+| `__text` bytes | 3,584,428 | 3,585,460 | +1,032 (+0.029%) |
+| zero-fill bytes | 2,076,278 | 958,430 | -1,117,848 (-53.839%) |
+| `coroNativeMDirectoryV1State` | 1,120,040 | 2,192 | -1,117,848 (-99.804%) |
+| C `llgo_coro_fleet_factory_v1` span | 440,160 | 176 | -439,984 (-99.960%) |
+| median maximum RSS, 12 interleaved runs | 14,802,944 | 13,271,040 | -1,531,904 (-10.349%) |
+
+The logical limit remains 10,000. The eight initial fleet owners stay inline
+and allocation-free. Slots above eight use immutable, CAS-published pages of 64
+owners; the static directory holds only 157 page roots, and a reader never
+allocates. Each attached 64-owner page is 7,168 bytes and remains stable for the
+process lifetime, so memory follows the high-water logical replacement depth
+rather than the theoretical limit. C still receives only the scalar slot ABI.
+
+The C factory now allocates one 48-byte record only for an actual pthread,
+keeps actual records in a mutex-owned intrusive list, and frees a record after
+join or self-retirement. The bounded eight-thread standby cache retains its
+records while parked. A monotonic nonzero 32-bit physical token is never reused;
+exhaustion fails closed. Linear scans are restricted to exceptional physical-M
+lifecycle operations and are bounded by the number of actual threads, not the
+10,000 logical slots.
+
+Twelve AB/BA-interleaved direct runs at `GOMAXPROCS=2` measured median wall time
+0.17 s versus 0.16 s, median user time 0.24 s for both, retired instructions
+-0.673%, and cycles -0.239%. These small deltas establish no observed throughput
+regression and are not treated as a portable speedup claim. The independently
+built candidate also completed 250 consecutive `GOMAXPROCS=8` sync acceptance
+runs. Native replacement, nested replacement, timer, poll and retirement E2E,
+plus repeated C factory lifecycle tests, cover the allocation and reclamation
+paths.
 
 ## Compiler analysis and emission
 
