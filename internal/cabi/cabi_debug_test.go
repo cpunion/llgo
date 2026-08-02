@@ -10,7 +10,7 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-func TestReplaceAllocaInstrsUpdatesDebugDeclare(t *testing.T) {
+func TestReplaceAllocaInstrsPreservesInitializedDebugHome(t *testing.T) {
 	ctx := llvm.NewContext()
 	defer ctx.Dispose()
 	mod := ctx.NewModule("cabi-debug")
@@ -57,9 +57,12 @@ func TestReplaceAllocaInstrsUpdatesDebugDeclare(t *testing.T) {
 	builder.CreateStore(param, home)
 	loaded := builder.CreateLoad(int64Type, home, "loaded")
 	builder.CreateStore(loaded, replacement)
+	builder.CreateStore(llvm.ConstInt(int64Type, 42, false), home)
+	updated := builder.CreateLoad(int64Type, home, "updated")
+	builder.CreateStore(updated, replacement)
 	builder.CreateRetVoid()
 
-	replaceAllocaInstrs(param, replacement)
+	replaceAllocaInstrs(param, replacement, true)
 	di.Finalize()
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("rewritten module is invalid: %v\n%s", err, mod.String())
@@ -68,10 +71,17 @@ func TestReplaceAllocaInstrsUpdatesDebugDeclare(t *testing.T) {
 		t.Fatalf("setup operand was rewritten to the ABI home:\n%s", mod.String())
 	}
 	ir := mod.String()
-	if !strings.Contains(ir, "#dbg_declare(ptr %replacement") {
-		t.Fatalf("dbg.declare did not follow the ABI home:\n%s", ir)
+	if !strings.Contains(ir, "#dbg_declare(ptr %home") {
+		t.Fatalf("dbg.declare did not retain the local home:\n%s", ir)
 	}
-	if !strings.Contains(ir, "%loaded = load i64, ptr %replacement") {
-		t.Fatalf("executable alloca use did not follow the ABI home:\n%s", ir)
+	if !strings.Contains(ir, "store i64 %param, ptr %home") {
+		t.Fatalf("debug home is not initialized by the parameter store:\n%s", ir)
+	}
+	if !strings.Contains(ir, "%loaded = load i64, ptr %home") {
+		t.Fatalf("debug home is not authoritative for executable uses:\n%s", ir)
+	}
+	if !strings.Contains(ir, "store i64 42, ptr %home") ||
+		!strings.Contains(ir, "%updated = load i64, ptr %home") {
+		t.Fatalf("debug home does not track later assignments:\n%s", ir)
 	}
 }

@@ -411,6 +411,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 	b.SetInsertPointBefore(nfn.EntryBasicBlock().FirstInstruction())
 
 	params := nfn.Params()
+	preserveDebugHomes := !nfn.Subprogram().IsNil()
 	index := 0
 	if info.Return.Kind == AttrPointer {
 		index++
@@ -439,7 +440,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			nv = b.CreateLoad(ti.Type, params[index], "")
 			// replace %0 to %2
 			if p.optimize {
-				replaceAllocaInstrs(fn.Param(i), params[index])
+				replaceAllocaInstrs(fn.Param(i), params[index], preserveDebugHomes)
 			}
 		case AttrWidthType:
 			iptr := llvm.CreateAlloca(b, ti.Type1)
@@ -447,7 +448,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			ptr := b.CreateBitCast(iptr, llvm.PointerType(ti.Type, 0), "")
 			nv = b.CreateLoad(ti.Type, ptr, "")
 			if p.optimize {
-				replaceAllocaInstrs(fn.Param(i), ptr)
+				replaceAllocaInstrs(fn.Param(i), ptr, preserveDebugHomes)
 			}
 		case AttrWidthType2:
 			typ := ctx.StructType([]llvm.Type{ti.Type1, ti.Type2}, false)
@@ -458,7 +459,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			ptr := b.CreateBitCast(iptr, llvm.PointerType(ti.Type, 0), "")
 			nv = b.CreateLoad(ti.Type, ptr, "")
 			if p.optimize {
-				replaceAllocaInstrs(fn.Param(i), ptr)
+				replaceAllocaInstrs(fn.Param(i), ptr, preserveDebugHomes)
 			}
 		case AttrExtract:
 			nsubs := ti.Type.StructElementTypesCount()
@@ -765,7 +766,15 @@ func (p *Transformer) callMemcpy(_ llvm.Module, ctx llvm.Context, b llvm.Builder
 	}, "")
 }
 
-func replaceAllocaInstrs(param llvm.Value, nv llvm.Value) {
+func replaceAllocaInstrs(param llvm.Value, nv llvm.Value, preserveDebugHome bool) {
+	// A debug home must remain the single source of truth for both reads and
+	// writes. Moving only executable uses would leave the declared location
+	// stale after an assignment, while moving dbg.declare to a byval parameter
+	// makes LLVM emit an extra dereference for the aggregate.
+	if preserveDebugHome {
+		return
+	}
+
 	u := param.FirstUse()
 	var storeInstrs []llvm.Value
 	for !u.IsNil() {
