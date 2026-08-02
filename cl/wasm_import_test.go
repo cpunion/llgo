@@ -33,3 +33,25 @@ func read(buf *byte) uint32 {
 		}
 	}
 }
+
+func TestWasmImportDirectiveIgnoredForDefinition(t *testing.T) {
+	const src = `package foo
+
+//go:wasmimport gojs runtime.nanotime1
+func nanotime1() int64 {
+	return 1
+}
+`
+	ir := cltest.CompileIREx(t, src, "foo.go", false, func(prog llssa.Program) {
+		prog.Target().GOOS = "js"
+		prog.Target().GOARCH = "wasm"
+	})
+	for _, unwanted := range []string{
+		`"wasm-import-module"="gojs"`,
+		`"wasm-import-name"="runtime.nanotime1"`,
+	} {
+		if strings.Contains(ir, unwanted) {
+			t.Fatalf("unexpected %s on WebAssembly function definition:\n%s", unwanted, ir)
+		}
+	}
+}

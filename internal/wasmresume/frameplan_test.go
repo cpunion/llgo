@@ -130,6 +130,93 @@ func TestPlanFramesKeepsAllocaReferencedOnlyByCallArgument(t *testing.T) {
 	}
 }
 
+func TestPlanFramesKeepsAllocaBehindDerivedPointer(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("derived-alloca")
+	defer mod.Dispose()
+
+	i32 := ctx.Int32Type()
+	voidFn := llvm.FunctionType(ctx.VoidType(), nil, false)
+	callee := llvm.AddFunction(mod, "callee", voidFn)
+	fn := llvm.AddFunction(mod, "caller", llvm.FunctionType(i32, nil, false))
+	markFunction(ctx, fn)
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	local := builder.CreateAlloca(ctx.StructType([]llvm.Type{i32}, false), "local")
+	derived := builder.CreateStructGEP(local.AllocatedType(), local, 0, "derived")
+	call := builder.CreateCall(voidFn, callee, nil, "")
+	markCall(ctx, call)
+	builder.CreateRet(builder.CreateLoad(i32, derived, "loaded"))
+
+	plans, err := planFrames(mod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := onlyFramePlan(t, plans)
+	assertSlots(t, plan, []slotWant{
+		{kind: slotFunctionResult},
+		{name: "local", kind: slotAlloca},
+		{name: "derived", kind: slotValue},
+	})
+}
+
+func TestReferencedAllocasHandlesNonCallValues(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("non-call")
+	defer mod.Dispose()
+
+	fn := llvm.AddFunction(mod, "f", llvm.FunctionType(ctx.VoidType(), nil, false))
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	local := builder.CreateAlloca(ctx.Int32Type(), "local")
+	derived := builder.CreateBitCast(local, llvm.PointerType(ctx.Int8Type(), 0), "derived")
+	builder.CreateRetVoid()
+
+	got := referencedAllocas(derived, valueSet{local: {}, derived: {}})
+	if _, ok := got[local]; !ok || len(got) != 1 {
+		t.Fatalf("referenced allocas = %v, want only local", got)
+	}
+}
+
+func TestPlanFramesAlwaysKeepsCompilerRootFrame(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("compiler-root")
+	defer mod.Dispose()
+
+	ptr := llvm.PointerType(ctx.Int8Type(), 0)
+	uintptrType := ctx.Int64Type()
+	rootType := ctx.StructType([]llvm.Type{ptr, ptr, llvm.ArrayType(ptr, 1)}, false)
+	rootChain := llvm.AddGlobal(mod, uintptrType, "llvm_gc_root_chain")
+	rootChain.SetInitializer(llvm.ConstNull(uintptrType))
+	voidFn := llvm.FunctionType(ctx.VoidType(), nil, false)
+	callee := llvm.AddFunction(mod, "callee", voidFn)
+	fn := llvm.AddFunction(mod, "caller", voidFn)
+	markFunction(ctx, fn)
+	block := ctx.AddBasicBlock(fn, "entry")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(block)
+	root := builder.CreateAlloca(rootType, "compiler.root")
+	builder.CreateStore(builder.CreatePtrToInt(root, uintptrType, "root.address"), rootChain)
+	call := builder.CreateCall(voidFn, callee, nil, "")
+	markCall(ctx, call)
+	builder.CreateRetVoid()
+
+	plans, err := planFrames(mod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := onlyFramePlan(t, plans)
+	assertSlots(t, plan, []slotWant{{name: "compiler.root", kind: slotAlloca}})
+}
+
 func TestPlanFramesMarksDynamicAllocaStorage(t *testing.T) {
 	ctx := llvm.NewContext()
 	defer ctx.Dispose()

@@ -565,7 +565,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	if fn == nil {
 		fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), hasCtx, p.needsLinkOnce(f))
 	}
-	if target := p.prog.Target(); target.GOARCH == "wasm" {
+	if target := p.prog.Target(); target.GOARCH == "wasm" && len(f.Blocks) == 0 {
 		if decl, ok := f.Syntax().(*ast.FuncDecl); ok {
 			fullName, _ := astFuncName(llssa.PathOf(pkgTypes), decl)
 			if module, importName, ok := p.prog.WasmImport(fullName); ok {

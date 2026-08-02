@@ -118,7 +118,8 @@ func (b Builder) abiCommonFields(t types.Type, name string, hasUncommon bool, gl
 		equal = b.Pkg.rtFunc(name)
 		b.Pkg.recordAbiTypeFakeUse(global, equal.impl)
 		env := b.abiType(t)
-		equal = b.aggregateValue(prog.Type(equalFunc, InGo), equal.impl, env.impl)
+		code := b.Pkg.wasmResumeStart(equal.impl)
+		equal = b.aggregateValue(prog.Type(equalFunc, InGo), code, env.impl)
 	default:
 		equal = b.Pkg.rtFunc(name)
 		b.Pkg.recordAbiTypeFakeUse(global, equal.impl)
@@ -296,7 +297,8 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 		hash := b.Pkg.rtFunc("typehash")
 		b.Pkg.recordAbiTypeFakeUse(global, hash.impl)
 		env := b.abiType(t.Key())
-		hasher := b.aggregateValue(prog.Type(hashFunc, InGo), hash.impl, env.impl)
+		code := b.Pkg.wasmResumeStart(hash.impl)
+		hasher := b.aggregateValue(prog.Type(hashFunc, InGo), code, env.impl)
 		fields = []llvm.Value{
 			b.abiType(abi.PublicType(t.Key())).impl,
 			b.abiType(abi.PublicType(t.Elem())).impl,

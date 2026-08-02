@@ -42,10 +42,29 @@ func (p Program) markWasmResumeFunction(fn llvm.Value) {
 	fn.AddFunctionAttr(p.ctx.CreateStringAttribute(wasmresume.FunctionAttribute, "1"))
 }
 
+func (p Program) markWasmResumeImport(fn llvm.Value) {
+	if p.WasmResumeABIEnabled() {
+		fn.RemoveStringAttributeAtIndex(-1, wasmresume.FunctionAttribute)
+	}
+}
+
+func isWasmImport(fn llvm.Value) bool {
+	if fn.IsAFunction().IsNil() {
+		return false
+	}
+	for _, attr := range fn.GetFunctionAttributes() {
+		if attr.IsString() && attr.GetStringKind() == "wasm-import-module" {
+			return true
+		}
+	}
+	return false
+}
+
 func (p Package) wasmResumeStart(fn llvm.Value) llvm.Value {
 	if !p.Prog.WasmResumeABIEnabled() ||
 		wasmresume.IsRuntimeABIImplementation(fn.Name()) ||
-		wasmresume.IsNonSuspendingBoundary(fn.Name()) {
+		wasmresume.IsNonSuspendingBoundary(fn.Name()) ||
+		isWasmImport(fn) {
 		return fn
 	}
 	name := wasmresume.StartSymbol(fn.Name())
@@ -64,7 +83,7 @@ func (b Builder) markWasmResumeCall(call llvm.Value, background Background) {
 	}
 	callee := call.CalledValue()
 	if !callee.IsAFunction().IsNil() &&
-		wasmresume.IsNonSuspendingBoundary(callee.Name()) {
+		(wasmresume.IsNonSuspendingBoundary(callee.Name()) || isWasmImport(callee)) {
 		return
 	}
 	kind := b.Prog.ctx.MDKindID(wasmresume.CallMetadata)

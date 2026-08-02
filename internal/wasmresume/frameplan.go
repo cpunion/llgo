@@ -19,6 +19,7 @@ package wasmresume
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/xgo-dev/llvm"
 )
@@ -108,7 +109,14 @@ func planFunctionFrame(fn llvm.Value, metadataKind int) (framePlan, error) {
 	}
 	needed := make(valueSet)
 	if !unwind.block.IsNil() {
-		unionInto(needed, liveness[unwind.block].liveIn)
+		live := cloneSet(liveness[unwind.block].liveIn)
+		includeReferencedAllocas(live, candidates)
+		unionInto(needed, live)
+	}
+	for _, value := range values {
+		if kinds[value] == slotAlloca && isCompilerRootFrame(value) {
+			needed[value] = struct{}{}
+		}
 	}
 	for _, block := range blocks {
 		live := cloneSet(liveness[block].liveOut)
@@ -126,6 +134,7 @@ func planFunctionFrame(fn llvm.Value, metadataKind int) (framePlan, error) {
 					needed[instr] = struct{}{}
 				}
 				unionInto(across, referencedAllocas(instr, candidates))
+				includeReferencedAllocas(across, candidates)
 				for value := range across {
 					needed[value] = struct{}{}
 				}
@@ -366,7 +375,7 @@ func addLocalOperands(dst valueSet, instr llvm.Value, candidates valueSet) {
 	}
 }
 
-func referencedAllocas(call llvm.Value, candidates valueSet) valueSet {
+func referencedAllocas(value llvm.Value, candidates valueSet) valueSet {
 	allocas := make(valueSet)
 	visited := make(valueSet)
 	var visit func(llvm.Value)
@@ -394,14 +403,47 @@ func referencedAllocas(call llvm.Value, candidates valueSet) valueSet {
 		}
 	}
 
-	callee := call.CalledValue()
-	for i := 0; i < call.OperandsCount(); i++ {
-		operand := call.Operand(i)
-		if operand != callee {
-			visit(operand)
+	if call := value.IsACallInst(); !call.IsNil() {
+		callee := call.CalledValue()
+		for i := 0; i < call.OperandsCount(); i++ {
+			operand := call.Operand(i)
+			if operand != callee {
+				visit(operand)
+			}
 		}
+	} else {
+		visit(value)
 	}
 	return allocas
+}
+
+func includeReferencedAllocas(values valueSet, candidates valueSet) {
+	for value := range values {
+		unionInto(values, referencedAllocas(value, candidates))
+	}
+}
+
+func isCompilerRootFrame(value llvm.Value) bool {
+	if value.IsAAllocaInst().IsNil() {
+		return false
+	}
+	for use := value.FirstUse(); !use.IsNil(); use = use.NextUse() {
+		conversion := use.User()
+		if conversion.InstructionOpcode() != llvm.PtrToInt {
+			continue
+		}
+		for convertedUse := conversion.FirstUse(); !convertedUse.IsNil(); convertedUse = convertedUse.NextUse() {
+			store := convertedUse.User()
+			if store.InstructionOpcode() != llvm.Store || store.OperandsCount() < 2 {
+				continue
+			}
+			name := store.Operand(1).Name()
+			if name == "llvm_gc_root_chain" || strings.HasSuffix(name, "/internal/gcroot.currentRootChain") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func resumeID(marker llvm.Value) (uint32, error) {

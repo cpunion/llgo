@@ -469,6 +469,7 @@ func (p Function) SetWasmImport(module, name string) {
 	ctx := p.Pkg.mod.Context()
 	p.impl.AddFunctionAttr(ctx.CreateStringAttribute("wasm-import-module", module))
 	p.impl.AddFunctionAttr(ctx.CreateStringAttribute("wasm-import-name", name))
+	p.Prog.markWasmResumeImport(p.impl)
 }
 
 // -----------------------------------------------------------------------------

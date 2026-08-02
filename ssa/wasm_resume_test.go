@@ -111,6 +111,36 @@ func TestWasmResumeABIDoesNotChangeDefaultOrNativeIR(t *testing.T) {
 	}
 }
 
+func TestWasmResumeABILeavesWasmImportsSynchronous(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	imported := pkg.NewFunc("fdRead", NoArgsNoRet, InGo)
+	imported.SetWasmImport("wasi_snapshot_preview1", "fd_read")
+	caller := pkg.NewFunc("caller", NoArgsNoRet, InGo)
+	b := caller.MakeBody(1)
+	b.Call(imported.Expr)
+	b.Return()
+
+	ir := pkg.String()
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.Contains(line, "call void @fdRead") &&
+			strings.Contains(line, wasmresume.CallMetadata) {
+			t.Fatalf("wasm import call was marked resumable: %s", line)
+		}
+	}
+	if strings.Contains(ir, wasmresume.StartSymbol("fdRead")) {
+		t.Fatalf("wasm import has a resumable start entry:\n%s", ir)
+	}
+	for _, attr := range imported.impl.GetFunctionAttributes() {
+		if attr.IsString() && attr.GetStringKind() == wasmresume.FunctionAttribute {
+			t.Fatalf("wasm import was marked resumable:\n%s", ir)
+		}
+	}
+}
+
 func TestWasmResumeABIClosureWithContextUsesStartEntry(t *testing.T) {
 	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
 	defer prog.Dispose()
@@ -191,6 +221,40 @@ func TestWasmResumeABIMethodMetadataUsesStartEntries(t *testing.T) {
 	} {
 		if !strings.Contains(ir, want) {
 			t.Fatalf("method metadata does not reference %s:\n%s", want, ir)
+		}
+	}
+}
+
+func TestWasmResumeABITypeMetadataUsesStartEntries(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableWasmResumeABI(true)
+	prog.TypeSizes(types.SizesFor("gc", "wasm"))
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	use := pkg.NewFunc("use", NoArgsNoRet, InGo)
+	b := use.MakeBody(1)
+	b.abiType(types.NewMap(types.Typ[types.String], types.Typ[types.Int]))
+	b.abiType(types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, nil, "value", types.Typ[types.Int], false),
+	}, nil))
+	b.Return()
+
+	ir := pkg.String()
+	for _, name := range []string{
+		PkgRuntime + ".typehash",
+		PkgRuntime + ".structequal",
+	} {
+		want := wasmresume.StartSymbol(name)
+		if !strings.Contains(ir, want) {
+			t.Fatalf("ABI type metadata does not reference %s:\n%s", want, ir)
 		}
 	}
 }
