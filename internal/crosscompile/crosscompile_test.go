@@ -181,6 +181,7 @@ func TestUseTarget(t *testing.T) {
 		expectLLVM  string
 		expectCPU   string
 		expectMarch string
+		expectGDB   []string
 	}{
 		// FIXME(MeteorsLiu): wasi in useTarget
 		// {
@@ -196,6 +197,7 @@ func TestUseTarget(t *testing.T) {
 			expectError: false,
 			expectLLVM:  "thumbv6m-unknown-unknown-eabi",
 			expectCPU:   "cortex-m0plus",
+			expectGDB:   []string{"gdb-multiarch", "arm-none-eabi-gdb", "gdb"},
 		},
 		{
 			name:        "Cortex-M Target",
@@ -256,6 +258,9 @@ func TestUseTarget(t *testing.T) {
 			}
 			if !slices.Equal(export.DebugInfo.OmitLinkFlags, []string{"-S"}) {
 				t.Fatalf("target %s debug omission flags = %v, want [-S]", tc.targetName, export.DebugInfo.OmitLinkFlags)
+			}
+			if tc.expectGDB != nil && !slices.Equal(export.GDB, tc.expectGDB) {
+				t.Fatalf("target %s GDB candidates = %v, want %v", tc.targetName, export.GDB, tc.expectGDB)
 			}
 
 			// Check if LLVM target is in CCFLAGS

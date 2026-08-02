@@ -36,11 +36,12 @@ type Export struct {
 	ClangRoot    string   // Root directory of custom clang installation
 	ClangBinPath string   // Path to clang binary directory
 
-	LLVMTarget   string // LLVM Target
-	TargetABI    string // RISC-V Target ABI (e.g., "lp64", "lp64d")
-	BinaryFormat string // Binary format (e.g., "elf", "esp", "uf2")
-	FormatDetail string // For uf2, it's uf2FamilyID
-	Emulator     string // Emulator command template (e.g., "qemu-system-arm -M {} -kernel {}")
+	LLVMTarget   string   // LLVM Target
+	TargetABI    string   // RISC-V Target ABI (e.g., "lp64", "lp64d")
+	BinaryFormat string   // Binary format (e.g., "elf", "esp", "uf2")
+	FormatDetail string   // For uf2, it's uf2FamilyID
+	Emulator     string   // Emulator command template (e.g., "qemu-system-arm -M {} -kernel {}")
+	GDB          []string // GDB command candidates in preference order
 	DebugInfo    DebugInfoPolicy
 
 	// Flashing/Debugging configuration
@@ -536,6 +537,7 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	export.BinaryFormat = config.BinaryFormat
 	export.FormatDetail = config.FormatDetail()
 	export.Emulator = config.Emulator
+	export.GDB = append([]string(nil), config.GDB...)
 	export.DebugInfo = targetDebugInfoPolicy(config.Linker, config.LLVMTarget)
 
 	// Set flashing/debugging configuration

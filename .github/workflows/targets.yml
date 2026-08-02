@@ -27,6 +27,9 @@ jobs:
         with:
           llvm-version: ${{matrix.llvm}}
 
+      - name: Install embedded debugger dependencies
+        run: sudo apt-get install -y gdb-multiarch lldb-${{matrix.llvm}} qemu-system-arm
+
       - name: Set up Go for build
         uses: ./.github/actions/setup-go
 
@@ -44,3 +47,6 @@ jobs:
         run: |
           cd _demo/embed/targetsbuild
           bash build.sh defer
+
+      - name: Test embedded debugger transports
+        run: bash cmd/llgo/debugtest/embedded/runtest.sh
