@@ -23,6 +23,16 @@
     },
     {
       "kind": "branch",
+      "id": "c2e30957e255a1d9",
+      "label": "Branch codex/debug-dwarf-integration-2164-20260802",
+      "path": "series/branch/c2e30957e255a1d9/history.json",
+      "configPath": "series/branch/c2e30957e255a1d9/config.json",
+      "sha": "5336d7074219df332fb6301e88816f636d5c9bc0",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/5336d7074219df332fb6301e88816f636d5c9bc0",
+      "updatedAt": "2026-08-02T13:23:14.758Z"
+    },
+    {
+      "kind": "branch",
       "id": "0d13d036a7f0a264",
       "label": "Branch coro/sync-main-20260729",
       "path": "series/branch/0d13d036a7f0a264/history.json",
@@ -30,6 +40,16 @@
       "sha": "df66a728a09e12c96d85fc3837532c94908a5d9a",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/df66a728a09e12c96d85fc3837532c94908a5d9a",
       "updatedAt": "2026-07-29T06:09:30.571Z"
+    },
+    {
+      "kind": "pull",
+      "id": "139",
+      "label": "PR #139",
+      "path": "series/pull/139/history.json",
+      "configPath": "series/pull/139/config.json",
+      "sha": "5336d7074219df332fb6301e88816f636d5c9bc0",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/5336d7074219df332fb6301e88816f636d5c9bc0",
+      "updatedAt": "2026-08-02T13:23:14.751Z"
     },
     {
       "kind": "pull",
