@@ -192,6 +192,9 @@ func TestChromeLanguageExtension(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		chromeArgs = append([]string{"--use-mock-keychain"}, chromeArgs...)
 	}
+	if os.Getenv("LLGO_BROWSER_CHROME_NO_SANDBOX") == "1" {
+		chromeArgs = append([]string{"--no-sandbox"}, chromeArgs...)
+	}
 	if os.Getenv("LLGO_BROWSER_CHROME_GUI") == "" {
 		chromeArgs = append([]string{"--headless=new"}, chromeArgs...)
 	}
@@ -257,6 +260,9 @@ func TestChromeWithoutLanguageExtension(t *testing.T) {
 	}
 	if runtime.GOOS == "darwin" {
 		args = append([]string{"--use-mock-keychain"}, args...)
+	}
+	if os.Getenv("LLGO_BROWSER_CHROME_NO_SANDBOX") == "1" {
+		args = append([]string{"--no-sandbox"}, args...)
 	}
 	var output bytes.Buffer
 	command := exec.Command(chrome, args...)

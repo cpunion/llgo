@@ -72,6 +72,7 @@ jobs:
           [[ "${version_output}" == *"${chrome_version}"* ]]
           echo "${version_output}"
           echo "LLGO_BROWSER_CHROME=${chrome}" >> "${GITHUB_ENV}"
+          echo "LLGO_BROWSER_CHROME_NO_SANDBOX=1" >> "${GITHUB_ENV}"
 
       - name: Test browser debugger contracts
         shell: bash
