@@ -12,6 +12,16 @@
       "updatedAt": "2026-08-02T14:30:50.405Z"
     },
     {
+      "kind": "branch",
+      "id": "0d6e4079e36703eb",
+      "label": "Branch main",
+      "path": "series/branch/0d6e4079e36703eb/history.json",
+      "configPath": "series/branch/0d6e4079e36703eb/config.json",
+      "sha": "6d08b60bc81e97c2bd0b4afe952be2a9bd2767d4",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/6d08b60bc81e97c2bd0b4afe952be2a9bd2767d4",
+      "updatedAt": "2026-08-02T15:44:57.557Z"
+    },
+    {
       "kind": "pull",
       "id": "136",
       "label": "PR #136",
