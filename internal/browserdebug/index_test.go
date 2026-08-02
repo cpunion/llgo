@@ -179,6 +179,27 @@ func TestLoadLLGoArtifact(t *testing.T) {
 	}
 }
 
+func TestLoadLLGoRuntimeFixture(t *testing.T) {
+	path := os.Getenv("LLGO_BROWSER_DEBUG_RUNTIME_ARTIFACT")
+	if path == "" {
+		t.Skip("LLGO_BROWSER_DEBUG_RUNTIME_ARTIFACT is unset")
+	}
+	bundle, err := Load(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"text", "values", "mapping", "queue", "greeter", "closure"} {
+		if !hasVariable(bundle.Index.Variables, name) {
+			t.Errorf("LLGo browser runtime fixture does not contain variable %q", name)
+		}
+	}
+	for _, pattern := range []string{"string", "[]", "map[", "chan ", "interface{"} {
+		if !hasTypePattern(bundle.Index.Types, pattern) {
+			t.Errorf("LLGo browser runtime fixture does not contain a type matching %q", pattern)
+		}
+	}
+}
+
 func compileWasmFixture(t *testing.T, source, output string) {
 	t.Helper()
 	clang, err := exec.LookPath("clang")
@@ -206,6 +227,24 @@ func hasSourceSuffix(sources []Source, suffix string) bool {
 func hasFunction(functions []Function, name string) bool {
 	for _, function := range functions {
 		if function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVariable(variables []Variable, name string) bool {
+	for _, variable := range variables {
+		if variable.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTypePattern(types []Type, pattern string) bool {
+	for _, item := range types {
+		if strings.Contains(item.Name, pattern) {
 			return true
 		}
 	}

@@ -9,6 +9,7 @@
   const RECORD_MAGIC = [0x4c, 0x4c, 0x47, 0x4f, 0x44, 0x42, 0x47, 0x00];
   const RECORD_SIZE = 16;
   const MAX_CHILDREN = 100;
+  const MAX_CONTAINER_SCAN_BUCKETS = 4096;
 
   function readULEB(bytes, cursor) {
     let value = 0n;
@@ -191,10 +192,14 @@
         sourceByURL.set(resolved.resolvedURL, resolved);
       }
       const types = new Map(index.types.map(type => [type.id, type]));
+      const typesByName = new Map();
+      for (const type of index.types) {
+        if (type.name && !typesByName.has(type.name)) typesByName.set(type.name, type);
+      }
       const runtimeLayouts = schema.runtime_layouts || {};
       const layout = runtimeLayouts[String(record.runtime_layout_version)] || null;
       this.modules.set(rawModuleId, {
-        rawModuleId, rawModule, symbolsURL, record, index, sources, sourceByURL, types, layout,
+        rawModuleId, rawModule, symbolsURL, record, index, sources, sourceByURL, types, typesByName, layout,
       });
       const ready = await this.fetcher(new URL('/__llgo/plugin-ready', rawModule.url).href, {
         cache: 'no-store',
@@ -277,11 +282,15 @@
 
     async listVariablesInScope(location) {
       const module = this.module(location.rawModuleId);
-      return this.activeVariables(module, location.codeOffset).map(variable => ({
+      const result = this.activeVariables(module, location.codeOffset).map(variable => ({
         scope: variable.scope,
         name: variable.name,
         type: module.types.get(variable.type)?.name || '<unknown>',
       }));
+      if (this.goroutineSeed(module, location.codeOffset)) {
+        result.push({scope: 'GLOBAL', name: '$goroutines', type: '[]goroutine'});
+      }
+      return result;
     }
 
     async getFunctionInfo(location) {
@@ -295,23 +304,23 @@
     async getInlinedCalleesRanges() { return []; }
 
     async evaluate(expression, context, stopId) {
-      const path = expression.trim().split('.').filter(Boolean);
-      if (path.length === 0) return null;
+      const trimmed = expression.trim();
+      if (!trimmed) return null;
       const module = this.module(context.rawModuleId);
-      const variable = this.activeVariables(module, context.codeOffset).find(item => item.name === path[0]);
+      if (trimmed === '$goroutines') {
+        return this.goroutinesRemote(module, context.codeOffset, stopId);
+      }
+      const variables = this.activeVariables(module, context.codeOffset);
+      const variable = variables.filter(item => trimmed === item.name || trimmed.startsWith(item.name + '.'))
+          .sort((left, right) => right.name.length - left.name.length)[0];
       if (!variable) return null;
+      const suffix = trimmed.slice(variable.name.length);
+      const path = suffix ? suffix.slice(1).split('.').filter(Boolean) : [];
       let type = module.types.get(variable.type);
       if (!type) return null;
-      let located;
-      if (variable.constant) {
-        located = {kind: 'value', value: constantToValue(variable.constant)};
-      } else {
-        const location = variable.locations.find(item => inRanges(context.codeOffset, [item]));
-        if (!location) return null;
-        located = await this.evaluateDWARF(bytesFromHex(location.expression), module, stopId);
-        if (!located) return null;
-      }
-      for (const fieldName of path.slice(1)) {
+      let located = await this.variableLocation(variable, context.codeOffset, module, stopId);
+      if (!located) return null;
+      for (const fieldName of path) {
         const resolved = resolveType(module, type);
         if (located.kind !== 'address' || !resolved.fields) return null;
         const field = resolved.fields.find(item => item.name === fieldName);
@@ -321,6 +330,19 @@
         if (!type) return null;
       }
       return this.remoteObject(module, type, located, stopId);
+    }
+
+    async variableLocation(variable, codeOffset, module, stopId) {
+      if (variable.constant) return {kind: 'value', value: constantToValue(variable.constant)};
+      const location = variable.locations.find(item => inRanges(codeOffset, [item]));
+      if (!location) return null;
+      return this.evaluateDWARF(bytesFromHex(location.expression), module, stopId);
+    }
+
+    goroutineSeed(module, codeOffset) {
+      const name = module.layout?.goroutine?.head_symbol;
+      if (!name) return null;
+      return this.activeVariables(module, codeOffset).find(variable => variable.name === name) || null;
     }
 
     async evaluateDWARF(bytes, module, stopId) {
@@ -399,27 +421,46 @@
         const value = await this.readScalar(type, address, stopId);
         return scalarRemote(type, value);
       }
+      const stringSpec = module.layout?.string;
+      if (stringSpec && runtimeTypeMatches(originalType, type, stringSpec.type_name)) {
+        return this.stringRemote(module, type, address, stopId, stringSpec);
+      }
+      const sliceSpec = module.layout?.slice;
+      if (sliceSpec && runtimeTypeMatches(originalType, type, sliceSpec.type_pattern, true)) {
+        return this.sliceRemote(module, type, address, stopId, sliceSpec);
+      }
+      const interfaceSpec = module.layout?.interface;
+      if (interfaceSpec && runtimeTypeMatches(originalType, type, interfaceSpec.type_pattern, true)) {
+        return this.interfaceRemote(module, originalType, type, address, stopId, interfaceSpec);
+      }
+      const functionSpec = module.layout?.function;
+      if (functionSpec && runtimeTypeMatches(originalType, type, functionSpec.type_pattern, true)) {
+        return this.functionRemote(module, originalType, type, address, stopId, functionSpec);
+      }
+      const mapSpec = module.layout?.map;
+      if (mapSpec && (runtimeTypeMatches(originalType, type, mapSpec.type_pattern, true) ||
+          resolvePointee(module, type)?.name?.startsWith('hash<'))) {
+        return this.mapRemote(module, originalType, type, located, stopId, mapSpec);
+      }
+      const channelSpec = module.layout?.channel;
+      if (channelSpec && (runtimeTypeMatches(originalType, type, channelSpec.type_pattern, true) ||
+          resolvePointee(module, type)?.name?.startsWith('hchan<'))) {
+        return this.channelRemote(module, originalType, type, located, stopId, channelSpec);
+      }
       if (type.kind === 'pointer') {
         const pointer = located.kind === 'value' ? address : await this.readUnsigned(address, type.size, stopId);
         const object = this.storeObject(module, type, pointer, stopId, 'pointer');
         return {
-          type: 'object', className: type.name, description: pointer === 0n ? 'nil' : `0x${pointer.toString(16)}`,
+          type: 'object', className: originalType.name || type.name,
+          description: pointer === 0n ? 'nil' : `0x${pointer.toString(16)}`,
           objectId: object, hasChildren: pointer !== 0n,
           linearMemoryAddress: numberAddress(pointer), linearMemorySize: 0,
         };
       }
-      const stringSpec = module.layout?.string;
-      if (stringSpec && type.name === stringSpec.type_name) {
-        return this.stringRemote(module, type, address, stopId, stringSpec);
-      }
-      const sliceSpec = module.layout?.slice;
-      if (sliceSpec && new RegExp(sliceSpec.type_pattern).test(type.name)) {
-        return this.sliceRemote(module, type, address, stopId, sliceSpec);
-      }
       const objectId = this.storeObject(module, type, address, stopId, 'aggregate');
       return {
-        type: type.kind === 'array' ? 'array' : 'object', className: type.name,
-        description: type.name, objectId, hasChildren: true,
+        type: type.kind === 'array' ? 'array' : 'object', className: originalType.name || type.name,
+        description: originalType.name || type.name, objectId, hasChildren: true,
         linearMemoryAddress: numberAddress(address), linearMemorySize: Math.max(0, type.size),
       };
     }
@@ -457,6 +498,195 @@
       };
     }
 
+    async interfaceRemote(module, originalType, type, address, stopId, spec) {
+      const typeField = fieldByName(type, spec.type);
+      const dataField = fieldByName(type, spec.data);
+      if (!typeField || !dataField) return null;
+      let typePointer = await this.readUnsigned(
+          address + BigInt(typeField.offset), module.record.pointer_size, stopId);
+      const dataPointer = await this.readUnsigned(
+          address + BigInt(dataField.offset), module.record.pointer_size, stopId);
+      if (typePointer === 0n) {
+        return {type: 'null', value: null, description: 'nil', hasChildren: false};
+      }
+      const displayType = originalType.name || type.name;
+      if (displayType !== spec.empty_type) {
+        const itabType = lookupType(module, spec.itab_type);
+        const concreteField = fieldByName(resolveType(module, itabType), spec.itab_concrete_type);
+        if (!concreteField) return null;
+        typePointer = await this.readUnsigned(
+            typePointer + BigInt(concreteField.offset), module.record.pointer_size, stopId);
+        if (typePointer === 0n) return null;
+      }
+      const dynamicName = await this.runtimeTypeName(module, typePointer, stopId);
+      const dynamicType = dynamicName ? lookupType(module, dynamicName) : null;
+      const objectId = this.storeObject(module, type, address, stopId, 'interface', {
+        dataPointer, dynamicType,
+      });
+      return {
+        type: 'object', className: displayType,
+        description: `type=${dynamicName || `0x${typePointer.toString(16)}`}`,
+        objectId, hasChildren: dataPointer !== 0n,
+        linearMemoryAddress: numberAddress(address), linearMemorySize: Math.max(0, type.size),
+      };
+    }
+
+    async runtimeTypeName(module, address, stopId) {
+      if (!address) return null;
+      const spec = module.layout?.runtime_type;
+      if (!spec) return null;
+      const runtimeType = resolveType(module, lookupType(module, spec.type_name));
+      const stringField = fieldByName(runtimeType, spec.string);
+      if (!runtimeType || !stringField) return null;
+      const stringType = resolveType(module, module.types.get(stringField.type));
+      const name = await this.readGoString(module, stringType, address + BigInt(stringField.offset), stopId, 4096);
+      if (name === null) return null;
+      const flagField = fieldByName(runtimeType, spec.tflag);
+      if (!flagField) return name;
+      const flagType = resolveType(module, module.types.get(flagField.type));
+      const flags = await this.readUnsigned(
+          address + BigInt(flagField.offset), Math.max(1, flagType?.size || 1), stopId);
+      return (flags & BigInt(spec.extra_star_flag)) !== 0n ? `*${name}` : name;
+    }
+
+    async readGoString(module, type, address, stopId, limit) {
+      const spec = module.layout?.string;
+      const dataField = fieldByName(type, spec?.data);
+      const lengthField = fieldByName(type, spec?.length);
+      if (!spec || !dataField || !lengthField) return null;
+      const pointer = await this.readUnsigned(
+          address + BigInt(dataField.offset), module.record.pointer_size, stopId);
+      const length = await this.readUnsigned(
+          address + BigInt(lengthField.offset), module.record.pointer_size, stopId);
+      if (length > BigInt(limit) || (length !== 0n && pointer === 0n)) return null;
+      const raw = length === 0n ? new ArrayBuffer(0) : await this.languageServices.getWasmLinearMemory(
+          numberAddress(pointer), Number(length), stopId);
+      return new TextDecoder().decode(raw);
+    }
+
+    async functionRemote(module, originalType, type, address, stopId, spec) {
+      const codeField = fieldByName(type, spec.code);
+      const dataField = fieldByName(type, spec.data);
+      if (!codeField || !dataField) return null;
+      const code = await this.readUnsigned(
+          address + BigInt(codeField.offset), module.record.pointer_size, stopId);
+      const data = await this.readUnsigned(
+          address + BigInt(dataField.offset), module.record.pointer_size, stopId);
+      if (code === 0n) return {type: 'null', value: null, description: 'nil', hasChildren: false};
+      let name = functionNameAt(module, code);
+      if (!name) name = `func[${code}]`;
+      if (spec.bound_symbol_suffix && name.endsWith(spec.bound_symbol_suffix)) name += ' (bound method)';
+      else if (spec.closure_symbol_pattern && new RegExp(spec.closure_symbol_pattern).test(name)) name += ' (closure)';
+      else if (data !== 0n && name.startsWith('func[')) name += ` data=0x${data.toString(16)}`;
+      const objectId = this.storeObject(module, type, address, stopId, 'aggregate');
+      return {
+        type: 'object', className: originalType.name || type.name, description: name,
+        objectId, hasChildren: true,
+        linearMemoryAddress: numberAddress(address), linearMemorySize: Math.max(0, type.size),
+      };
+    }
+
+    async mapRemote(module, originalType, type, located, stopId, spec) {
+      const pointer = await this.runtimePointerValue(module, type, located, stopId);
+      if (pointer === null) return null;
+      if (pointer === 0n) return {type: 'null', value: null, description: 'nil', hasChildren: false};
+      const hashType = resolvePointee(module, type);
+      const count = await this.readNamedUnsigned(module, hashType, pointer, spec.count, stopId);
+      if (count === null) return null;
+      const objectId = this.storeObject(module, type, pointer, stopId, 'map', {
+        hashType, length: count, spec,
+      });
+      return {
+        type: 'object', className: originalType.name || type.name, description: `len=${count}`,
+        objectId, hasChildren: count !== 0n,
+        linearMemoryAddress: numberAddress(pointer), linearMemorySize: Math.max(0, hashType?.size || 0),
+      };
+    }
+
+    async channelRemote(module, originalType, type, located, stopId, spec) {
+      const pointer = await this.runtimePointerValue(module, type, located, stopId);
+      if (pointer === null) return null;
+      if (pointer === 0n) return {type: 'null', value: null, description: 'nil', hasChildren: false};
+      const channelType = resolvePointee(module, type);
+      const length = await this.readNamedUnsigned(module, channelType, pointer, spec.count, stopId);
+      const capacity = await this.readNamedUnsigned(module, channelType, pointer, spec.capacity, stopId);
+      const buffer = await this.readNamedUnsigned(module, channelType, pointer, spec.buffer, stopId);
+      const receiveIndex = await this.readNamedUnsigned(module, channelType, pointer, spec.receive_index, stopId);
+      const closed = await this.readNamedUnsigned(module, channelType, pointer, spec.closed, stopId);
+      if ([length, capacity, buffer, receiveIndex, closed].some(value => value === null)) return null;
+      const elementType = channelElementType(module, channelType, spec);
+      const objectId = this.storeObject(module, type, pointer, stopId, 'channel', {
+        length, capacity, buffer, receiveIndex, elementType,
+      });
+      return {
+        type: 'array', className: originalType.name || type.name,
+        description: `len=${length} cap=${capacity}${closed !== 0n ? ' closed' : ''}`,
+        objectId, hasChildren: length !== 0n && buffer !== 0n && !!elementType,
+        linearMemoryAddress: numberAddress(buffer), linearMemorySize: 0,
+      };
+    }
+
+    async runtimePointerValue(module, type, located, stopId) {
+      if (located.kind === 'value') return located.value;
+      return type.kind === 'pointer' ?
+        this.readUnsigned(located.value, Math.max(1, type.size || module.record.pointer_size), stopId) : located.value;
+    }
+
+    async readNamedUnsigned(module, type, address, name, stopId) {
+      const field = fieldByName(type, name);
+      if (!field) return null;
+      const fieldType = resolveType(module, module.types.get(field.type));
+      const size = fieldType?.kind === 'pointer' ? module.record.pointer_size : fieldType?.size;
+      if (!size || size < 1 || size > 8) return null;
+      return this.readUnsigned(address + BigInt(field.offset), size, stopId);
+    }
+
+    async goroutinesRemote(module, codeOffset, stopId) {
+      const spec = module.layout?.goroutine;
+      const seed = this.goroutineSeed(module, codeOffset);
+      if (!spec || !seed) return null;
+      const located = await this.variableLocation(seed, codeOffset, module, stopId);
+      const seedType = resolveType(module, module.types.get(seed.type));
+      if (!located || !seedType) return null;
+      let current = located.value;
+      if (located.kind === 'address' && seedType.kind === 'pointer') {
+        current = await this.readUnsigned(current, module.record.pointer_size, stopId);
+      }
+      const goroutineType = resolveType(module, lookupType(module, spec.goroutine_type)) ||
+          resolvePointee(module, seedType);
+      if (!goroutineType) return null;
+      const addresses = [];
+      const seen = new Set();
+      while (current !== 0n && addresses.length < MAX_CHILDREN && !seen.has(current.toString())) {
+        addresses.push(current);
+        seen.add(current.toString());
+        current = await this.readNamedUnsigned(module, goroutineType, current, spec.next, stopId) || 0n;
+      }
+      const objectId = this.storeObject(module, goroutineType, 0n, stopId, 'goroutines', {
+        goroutineType, addresses,
+      });
+      return {
+        type: 'array', className: '[]goroutine', description: `goroutines len=${addresses.length}`,
+        objectId, hasChildren: addresses.length !== 0,
+      };
+    }
+
+    async goroutineRemote(module, type, address, stopId) {
+      const spec = module.layout.goroutine;
+      const id = await this.readNamedUnsigned(module, type, address, spec.id, stopId);
+      const parent = await this.readNamedUnsigned(module, type, address, spec.parent_id, stopId);
+      const status = await this.readNamedUnsigned(module, type, address, spec.status, stopId);
+      const statusName = status === null ? 'unknown' :
+        (spec.status_names?.[String(status)] || `status=${status}`);
+      const objectId = this.storeObject(module, type, address, stopId, 'aggregate');
+      return {
+        type: 'object', className: 'goroutine',
+        description: `goroutine ${id ?? '?'} [${statusName}] parent=${parent ?? '?'}`,
+        objectId, hasChildren: true,
+        linearMemoryAddress: numberAddress(address), linearMemorySize: Math.max(0, type.size),
+      };
+    }
+
     storeObject(module, type, address, stopId, kind, extra = {}) {
       const id = `llgo:${this.nextObject++}`;
       this.objects.set(id, {rawModuleId: module.rawModuleId, type, address, stopId, kind, ...extra});
@@ -490,6 +720,21 @@
         }
         return result;
       }
+      if (object.kind === 'interface') {
+        if (!object.dynamicType || object.dataPointer === 0n) return [];
+        return [{name: 'value', value: await this.remoteObject(
+          module, object.dynamicType, {kind: 'address', value: object.dataPointer}, object.stopId)}];
+      }
+      if (object.kind === 'map') return this.mapProperties(module, object);
+      if (object.kind === 'channel') return this.channelProperties(module, object);
+      if (object.kind === 'goroutines') {
+        const result = [];
+        for (let index = 0; index < object.addresses.length; ++index) {
+          result.push({name: String(index), value: await this.goroutineRemote(
+            module, object.goroutineType, object.addresses[index], object.stopId)});
+        }
+        return result;
+      }
       if (type.kind === 'array') {
         const elem = module.types.get(type.elem);
         if (!elem || elem.size <= 0) return [];
@@ -513,6 +758,117 @@
       return result;
     }
 
+    async channelProperties(module, object) {
+      const {length, capacity, buffer, receiveIndex, elementType} = object;
+      if (!elementType || elementType.size <= 0 || capacity === 0n || buffer === 0n) return [];
+      const count = Number(length > BigInt(MAX_CHILDREN) ? BigInt(MAX_CHILDREN) : length);
+      const result = [];
+      for (let index = 0; index < count; ++index) {
+        const slot = (receiveIndex + BigInt(index)) % capacity;
+        result.push({name: String(index), value: await this.remoteObject(module, elementType, {
+          kind: 'address', value: buffer + slot * BigInt(elementType.size),
+        }, object.stopId)});
+      }
+      return result;
+    }
+
+    async mapProperties(module, object) {
+      const {hashType, spec, length} = object;
+      if (!hashType || length === 0n) return [];
+      const flags = await this.readNamedUnsigned(module, hashType, object.address, spec.flags, object.stopId);
+      const bits = await this.readNamedUnsigned(module, hashType, object.address, spec.bucket_bits, object.stopId);
+      const buckets = await this.readNamedUnsigned(module, hashType, object.address, spec.buckets, object.stopId);
+      const oldBuckets = await this.readNamedUnsigned(module, hashType, object.address, spec.old_buckets, object.stopId);
+      if ([flags, bits, buckets, oldBuckets].some(value => value === null) || bits >= 63n || buckets === 0n) return [];
+      const bucketsField = fieldByName(hashType, spec.buckets);
+      const bucketsPointer = resolveType(module, module.types.get(bucketsField?.type));
+      const bucketType = resolvePointee(module, bucketsPointer);
+      if (!bucketType || bucketType.size <= 0) return [];
+      const logical = 1n << bits;
+      const scan = Number(logical > BigInt(MAX_CONTAINER_SCAN_BUCKETS) ?
+        BigInt(MAX_CONTAINER_SCAN_BUCKETS) : logical);
+      const oldCount = (flags & BigInt(spec.same_size_grow_flag)) !== 0n ? logical : logical >> 1n;
+      const result = [];
+      for (let bucketIndex = 0; bucketIndex < scan && result.length < MAX_CHILDREN * 2; ++bucketIndex) {
+        let bucketAddress = buckets + BigInt(bucketIndex) * BigInt(bucketType.size);
+        if (oldBuckets !== 0n && oldCount !== 0n) {
+          const oldIndex = BigInt(bucketIndex) & (oldCount - 1n);
+          const oldAddress = oldBuckets + oldIndex * BigInt(bucketType.size);
+          if (!(await this.bucketEvacuated(module, bucketType, oldAddress, object.stopId, spec))) {
+            if (BigInt(bucketIndex) >= oldCount) continue;
+            bucketAddress = oldAddress;
+          }
+        }
+        const visited = new Set();
+        while (bucketAddress !== 0n && !visited.has(bucketAddress.toString()) &&
+               result.length < MAX_CHILDREN * 2) {
+          visited.add(bucketAddress.toString());
+          const entries = await this.bucketEntries(module, bucketType, bucketAddress, object.stopId, spec);
+          if (!entries) return result;
+          for (const entry of entries) {
+            const index = result.length / 2;
+            result.push({name: `key[${index}]`, value: await this.remoteObject(
+              module, entry.keyType, {kind: 'address', value: entry.key}, object.stopId)});
+            result.push({name: `value[${index}]`, value: await this.remoteObject(
+              module, entry.valueType, {kind: 'address', value: entry.value}, object.stopId)});
+            if (result.length >= MAX_CHILDREN * 2 || BigInt(result.length / 2) >= length) return result;
+          }
+          bucketAddress = await this.readNamedUnsigned(
+              module, bucketType, bucketAddress, spec.bucket_overflow, object.stopId) || 0n;
+        }
+      }
+      return result;
+    }
+
+    async bucketEvacuated(module, bucketType, address, stopId, spec) {
+      const field = fieldByName(bucketType, spec.bucket_tophash);
+      const array = resolveType(module, module.types.get(field?.type));
+      const element = array?.kind === 'array' ? resolveType(module, module.types.get(array.elem)) : null;
+      if (!field || !element || element.size <= 0) return false;
+      const value = await this.readUnsigned(address + BigInt(field.offset), element.size, stopId);
+      return value >= BigInt(spec.evacuated_tophash_min) && value <= BigInt(spec.evacuated_tophash_max);
+    }
+
+    async bucketEntries(module, bucketType, address, stopId, spec) {
+      const topField = fieldByName(bucketType, spec.bucket_tophash);
+      const keyField = fieldByName(bucketType, spec.bucket_keys) ||
+          fieldByName(bucketType, spec.bucket_indirect_keys);
+      const valueField = fieldByName(bucketType, spec.bucket_values) ||
+          fieldByName(bucketType, spec.bucket_indirect_values);
+      if (!topField || !keyField || !valueField) return null;
+      const topArray = resolveType(module, module.types.get(topField.type));
+      const keyArray = resolveType(module, module.types.get(keyField.type));
+      const valueArray = resolveType(module, module.types.get(valueField.type));
+      if (topArray?.kind !== 'array' || keyArray?.kind !== 'array' || valueArray?.kind !== 'array') return null;
+      const topType = resolveType(module, module.types.get(topArray.elem));
+      const keyStorageType = resolveType(module, module.types.get(keyArray.elem));
+      const valueStorageType = resolveType(module, module.types.get(valueArray.elem));
+      if (!topType || !keyStorageType || !valueStorageType || topType.size <= 0 ||
+          keyStorageType.size <= 0 || valueStorageType.size <= 0) return null;
+      const indirectKey = keyField.name === spec.bucket_indirect_keys;
+      const indirectValue = valueField.name === spec.bucket_indirect_values;
+      const keyType = indirectKey ? resolvePointee(module, keyStorageType) : keyStorageType;
+      const valueType = indirectValue ? resolvePointee(module, valueStorageType) : valueStorageType;
+      if (!keyType || !valueType) return null;
+      const slots = Math.min(topArray.count, keyArray.count, valueArray.count);
+      const result = [];
+      for (let slot = 0; slot < slots; ++slot) {
+        const top = await this.readUnsigned(
+            address + BigInt(topField.offset + slot * topType.size), topType.size, stopId);
+        if (top < BigInt(spec.occupied_tophash_min)) continue;
+        let key = address + BigInt(keyField.offset + slot * keyStorageType.size);
+        let value = address + BigInt(valueField.offset + slot * valueStorageType.size);
+        if (indirectKey) {
+          key = await this.readUnsigned(key, module.record.pointer_size, stopId);
+        }
+        if (indirectValue) {
+          value = await this.readUnsigned(value, module.record.pointer_size, stopId);
+        }
+        if (key !== 0n && value !== 0n && keyType && valueType) result.push({key, value, keyType, valueType});
+      }
+      return result;
+    }
+
     async releaseObject(objectId) { this.objects.delete(objectId); }
 
     async readUnsigned(address, size, stopId) {
@@ -532,6 +888,47 @@
       for (let index = 0; index < bytes.length; ++index) value |= BigInt(bytes[index]) << BigInt(index * 8);
       return signedValue(type, value);
     }
+  }
+
+  function runtimeTypeMatches(originalType, resolvedType, pattern, regexp = false) {
+    if (!pattern) return false;
+    const names = new Set([originalType?.name, resolvedType?.name].filter(Boolean));
+    if (!regexp) return names.has(pattern);
+    const expression = new RegExp(pattern);
+    return [...names].some(name => expression.test(name));
+  }
+
+  function lookupType(module, name) {
+    if (!name) return null;
+    return module.typesByName.get(name) || module.typesByName.get(`struct ${name}`) || null;
+  }
+
+  function resolvePointee(module, type) {
+    type = resolveType(module, type);
+    return type?.kind === 'pointer' ? resolveType(module, module.types.get(type.elem)) : null;
+  }
+
+  function fieldByName(type, name) {
+    return name && type?.fields ? type.fields.find(field => field.name === name) || null : null;
+  }
+
+  function channelElementType(module, channelType, spec) {
+    const queueField = fieldByName(channelType, spec.receive_queue);
+    const queueType = resolveType(module, module.types.get(queueField?.type));
+    const firstField = fieldByName(queueType, spec.queue_first);
+    const waiterPointer = resolveType(module, module.types.get(firstField?.type));
+    const waiterType = resolvePointee(module, waiterPointer);
+    const elementField = fieldByName(waiterType, spec.waiter_element);
+    const elementPointer = resolveType(module, module.types.get(elementField?.type));
+    return resolvePointee(module, elementPointer);
+  }
+
+  function functionNameAt(module, address) {
+    if (address < 0n || address > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    const offset = Number(address);
+    const match = module.index.functions.find(fn => (fn.ranges || []).some(range =>
+      offset >= range.start && offset < range.end));
+    return match?.name || null;
   }
 
   function resolveType(module, type) {

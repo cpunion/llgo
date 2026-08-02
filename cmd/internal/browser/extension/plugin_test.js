@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const debuggerSchema = require('../../../../internal/debugabi/schema_v1.json');
 
 require('./plugin.js');
 
@@ -202,4 +203,128 @@ test('LLGo language extension rejects stale browser indexes', async () => {
   await assert.rejects(plugin.addRawModule('stale', undefined, {
     url: 'http://host/program.wasm', code: moduleBytes().buffer,
   }), /build_id mismatch/);
+});
+
+test('LLGo language extension consumes common interface, function, map, channel, and goroutine layouts', async () => {
+  const index = fixtureIndex();
+  index.types.push(
+      {id: 'u8', name: 'uint8', kind: 'integer', size: 1, complete: true},
+      {id: 'u32', name: 'uint32', kind: 'integer', size: 4, complete: true},
+      {id: 'u64', name: 'uint64', kind: 'integer', size: 8, complete: true},
+      {id: 'ptrInt', name: '*int32', kind: 'pointer', size: 4, elem: 'int32', complete: true},
+      {id: 'string', name: 'string', kind: 'struct', size: 8, complete: true,
+       fields: [{name: 'data', type: 'ptrInt', offset: 0}, {name: 'len', type: 'u32', offset: 4}]},
+      {id: 'runtimeType', name: 'github.com/goplus/llgo/runtime/abi.Type', kind: 'struct', size: 12,
+       complete: true, fields: [{name: 'TFlag', type: 'u8', offset: 0}, {name: 'Str_', type: 'string', offset: 4}]},
+      {id: 'ptrRuntimeType', name: '*github.com/goplus/llgo/runtime/abi.Type', kind: 'pointer', size: 4,
+       elem: 'runtimeType', complete: true},
+      {id: 'itab', name: 'github.com/goplus/llgo/runtime/internal/runtime.itab', kind: 'struct', size: 4,
+       complete: true, fields: [{name: '_type', type: 'ptrRuntimeType', offset: 0}]},
+      {id: 'ptrItab', name: '*github.com/goplus/llgo/runtime/internal/runtime.itab', kind: 'pointer', size: 4,
+       elem: 'itab', complete: true},
+      {id: 'emptyInterface', name: 'interface{}', kind: 'struct', size: 8, complete: true,
+       fields: [{name: 'type', type: 'ptrRuntimeType', offset: 0}, {name: 'data', type: 'ptrInt', offset: 4}]},
+      {id: 'nonemptyInterface', name: 'interface{Value() int32}', kind: 'struct', size: 8, complete: true,
+       fields: [{name: 'type', type: 'ptrItab', offset: 0}, {name: 'data', type: 'ptrInt', offset: 4}]},
+      {id: 'funcval', name: 'struct{$f func(); $data unsafe.Pointer}', kind: 'struct', size: 8,
+       complete: true, fields: [{name: '$f', type: 'u32', offset: 0}, {name: '$data', type: 'ptrInt', offset: 4}]},
+      {id: 'topArray', name: '[8]uint8', kind: 'array', size: 8, elem: 'u8', count: 8, complete: true},
+      {id: 'keyArray', name: '[8]int32', kind: 'array', size: 32, elem: 'int32', count: 8, complete: true},
+      {id: 'valueArray', name: '[8]int32', kind: 'array', size: 32, elem: 'int32', count: 8, complete: true},
+      {id: 'bucket', name: 'bucket<int32,int32>', kind: 'struct', size: 76, complete: true,
+       fields: [{name: 'tophash', type: 'topArray', offset: 0}, {name: 'keys', type: 'keyArray', offset: 8},
+                {name: 'values', type: 'valueArray', offset: 40}, {name: 'overflow', type: 'ptrBucket', offset: 72}]},
+      {id: 'ptrBucket', name: '*bucket<int32,int32>', kind: 'pointer', size: 4, elem: 'bucket', complete: true},
+      {id: 'hash', name: 'hash<int32,int32>', kind: 'struct', size: 16, complete: true,
+       fields: [{name: 'count', type: 'u32', offset: 0}, {name: 'flags', type: 'u8', offset: 4},
+                {name: 'B', type: 'u8', offset: 5}, {name: 'buckets', type: 'ptrBucket', offset: 8},
+                {name: 'oldbuckets', type: 'ptrBucket', offset: 12}]},
+      {id: 'map', name: 'map[int32]int32', kind: 'pointer', size: 4, elem: 'hash', complete: true},
+      {id: 'waiter', name: 'sudog<int32>', kind: 'struct', size: 4, complete: true,
+       fields: [{name: 'elem', type: 'ptrInt', offset: 0}]},
+      {id: 'ptrWaiter', name: '*sudog<int32>', kind: 'pointer', size: 4, elem: 'waiter', complete: true},
+      {id: 'waitq', name: 'waitq<int32>', kind: 'struct', size: 4, complete: true,
+       fields: [{name: 'first', type: 'ptrWaiter', offset: 0}]},
+      {id: 'hchan', name: 'hchan<int32>', kind: 'struct', size: 24, complete: true,
+       fields: [{name: 'qcount', type: 'u32', offset: 0}, {name: 'dataqsiz', type: 'u32', offset: 4},
+                {name: 'buf', type: 'ptrInt', offset: 8}, {name: 'closed', type: 'u32', offset: 12},
+                {name: 'recvx', type: 'u32', offset: 16}, {name: 'recvq', type: 'waitq', offset: 20}]},
+      {id: 'chan', name: 'chan int32', kind: 'pointer', size: 4, elem: 'hchan', complete: true},
+      {id: 'g', name: 'github.com/goplus/llgo/runtime/internal/runtime.g', kind: 'struct', size: 24,
+       complete: true, fields: [{name: 'alllink', type: 'ptrG', offset: 0},
+                               {name: 'atomicstatus', type: 'u32', offset: 4},
+                               {name: 'goid', type: 'u64', offset: 8},
+                               {name: 'parentGoid', type: 'u64', offset: 16}]},
+      {id: 'ptrG', name: '*github.com/goplus/llgo/runtime/internal/runtime.g', kind: 'pointer', size: 4,
+       elem: 'g', complete: true},
+  );
+  index.variables.push(
+      {name: 'mapping', scope: 'LOCAL', type: 'map', depth: 2, ranges: [{start: 10, end: 20}],
+       locations: [{expression: '0350000000'}]},
+      {name: 'queue', scope: 'LOCAL', type: 'chan', depth: 2, ranges: [{start: 10, end: 20}],
+       locations: [{expression: '0354000000'}]},
+      {name: 'dynamic', scope: 'LOCAL', type: 'emptyInterface', depth: 2, ranges: [{start: 10, end: 20}],
+       locations: [{expression: '0358000000'}]},
+      {name: 'callback', scope: 'LOCAL', type: 'funcval', depth: 2, ranges: [{start: 10, end: 20}],
+       locations: [{expression: '0360000000'}]},
+      {name: 'nonempty', scope: 'LOCAL', type: 'nonemptyInterface', depth: 2, ranges: [{start: 10, end: 20}],
+       locations: [{expression: '0370000000'}]},
+      {name: 'github.com/goplus/llgo/runtime/internal/runtime.debuggerAllgV1', scope: 'GLOBAL', type: 'ptrG', depth: 0,
+       locations: [{expression: '0368000000'}]},
+  );
+
+  const memory = new Uint8Array(800);
+  const view = new DataView(memory.buffer);
+  const u32 = (address, value) => view.setUint32(address, value, true);
+  const u64 = (address, value) => view.setBigUint64(address, BigInt(value), true);
+  u32(80, 160); // map header pointer
+  u32(84, 300); // channel header pointer
+  u32(88, 500); u32(92, 520); // empty interface type/data
+  u32(96, 10); u32(100, 123); // function code/data
+  u32(104, 600); // debuggerAllgV1
+  u32(112, 560); u32(116, 520); // non-empty interface itab/data
+  u32(160, 2); u32(168, 200); // hmap count, buckets
+  memory[200] = 5; memory[201] = 6;
+  view.setInt32(208, 1, true); view.setInt32(212, 2, true);
+  view.setInt32(240, 11, true); view.setInt32(244, 22, true);
+  u32(300, 2); u32(304, 3); u32(308, 400); u32(312, 0); u32(316, 1);
+  view.setInt32(400, 10, true); view.setInt32(404, 11, true); view.setInt32(408, 12, true);
+  u32(504, 550); u32(508, 5); memory.set(new TextEncoder().encode('int32'), 550);
+  view.setInt32(520, 42, true);
+  u32(560, 500);
+  u32(600, 640); u32(604, 2); u64(608, 1); u64(616, 0);
+  u32(640, 0); u32(644, 1); u64(648, 2); u64(656, 1);
+
+  const services = {
+    getWasmLinearMemory: async (offset, length) => memory.slice(offset, offset + length).buffer,
+  };
+  const fetcher = async url => {
+    if (String(url).endsWith('/__llgo/debug-index.json')) return response(index);
+    if (String(url).endsWith('/__llgo/debug-schema.json')) return response(debuggerSchema);
+    if (String(url).endsWith('/__llgo/plugin-ready')) return new Response(null, {status: 204});
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const plugin = new LLGoLanguageExtensionPlugin(services, fetcher);
+  const context = {rawModuleId: 'module', codeOffset: 12};
+  await plugin.addRawModule('module', undefined, {
+    url: 'http://127.0.0.1:1234/program.wasm', code: moduleBytes().buffer,
+  });
+
+  const dynamic = await plugin.evaluate('dynamic', context, 'stop');
+  assert.equal(dynamic.description, 'type=int32');
+  assert.equal((await plugin.getProperties(dynamic.objectId))[0].value.value, 42);
+  assert.equal((await plugin.evaluate('nonempty', context, 'stop')).description, 'type=int32');
+  assert.equal((await plugin.evaluate('callback', context, 'stop')).description, 'main.main');
+  const mapping = await plugin.evaluate('mapping', context, 'stop');
+  assert.equal(mapping.description, 'len=2');
+  assert.deepEqual((await plugin.getProperties(mapping.objectId)).map(item => [item.name, item.value.value]),
+                   [['key[0]', 1], ['value[0]', 11], ['key[1]', 2], ['value[1]', 22]]);
+  const queue = await plugin.evaluate('queue', context, 'stop');
+  assert.equal(queue.description, 'len=2 cap=3');
+  assert.deepEqual((await plugin.getProperties(queue.objectId)).map(item => item.value.value), [11, 12]);
+  assert.ok((await plugin.listVariablesInScope(context)).some(variable => variable.name === '$goroutines'));
+  const goroutines = await plugin.evaluate('$goroutines', context, 'stop');
+  assert.equal(goroutines.description, 'goroutines len=2');
+  assert.deepEqual((await plugin.getProperties(goroutines.objectId)).map(item => item.value.description),
+                   ['goroutine 1 [running] parent=0', 'goroutine 2 [runnable] parent=1']);
 });

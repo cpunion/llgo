@@ -89,7 +89,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          package=./internal/build/testdata/wasm-runtime
+          package=./internal/debugabi/testdata/fixture
           GOOS=js GOARCH=wasm llgo build -debug-artifact=embedded \
             -o "${RUNNER_TEMP}/browser-embedded.wasm" "${package}"
           GOOS=js GOARCH=wasm llgo build -debug-artifact=external \
@@ -119,8 +119,9 @@ jobs:
         run: |
           set -euo pipefail
           LLGO_BROWSER_DEBUG_ARTIFACT="${RUNNER_TEMP}/browser-embedded.wasm" \
+          LLGO_BROWSER_DEBUG_RUNTIME_ARTIFACT="${RUNNER_TEMP}/browser-embedded.wasm" \
             go test -timeout 5m ./internal/browserdebug \
-              -run '^(TestLoadLLGoArtifact|TestLoadUsesLongestSourcePathMapping)$' \
+              -run '^(TestLoadLLGoArtifact|TestLoadLLGoRuntimeFixture|TestLoadUsesLongestSourcePathMapping)$' \
               -count=1 -v
           go test -timeout 5m ./cmd/internal/browser \
             -run '^TestChromeWithoutLanguageExtension$' -count=1 -v
