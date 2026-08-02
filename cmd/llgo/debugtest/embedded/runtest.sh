@@ -5,13 +5,8 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "$0")" && pwd)
 repo_root=$(cd "$script_dir/../../../.." && pwd)
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/llgo-embedded-debug.XXXXXX")
-qemu_pid=
 
 cleanup() {
-	if [[ -n "$qemu_pid" ]]; then
-		kill "$qemu_pid" 2>/dev/null || true
-		wait "$qemu_pid" 2>/dev/null || true
-	fi
 	rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
@@ -48,43 +43,13 @@ assert_contains() {
 	fi
 }
 
-free_port() {
-	python3 - <<'PY'
-import socket
-
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-}
-
-start_qemu() {
-	local port=$1
-	"$qemu" -machine lm3s6965evb -nographic -kernel "$debug_elf" \
-		-S -gdb "tcp::$port" >"$tmp_dir/qemu-$port.log" 2>&1 &
-	qemu_pid=$!
-	sleep 1
-	if ! kill -0 "$qemu_pid" 2>/dev/null; then
-		cat "$tmp_dir/qemu-$port.log" >&2
-		exit 1
-	fi
-}
-
-stop_qemu() {
-	if [[ -n "$qemu_pid" ]]; then
-		kill "$qemu_pid" 2>/dev/null || true
-		wait "$qemu_pid" 2>/dev/null || true
-		qemu_pid=
-	fi
-}
-
 llgo=$(require_tool llgo "${LLGO:-}" llgo)
 objcopy=$(require_tool llvm-objcopy "${LLVM_OBJCOPY:-}" llvm-objcopy llvm-objcopy-19)
 dwarfutil=$(require_tool llvm-dwarfutil "${LLVM_DWARFUTIL:-}" llvm-dwarfutil llvm-dwarfutil-19)
 dwarfdump=$(require_tool llvm-dwarfdump "${LLVM_DWARFDUMP:-}" llvm-dwarfdump llvm-dwarfdump-19)
 gdb=$(require_tool GDB "${LLGO_GDB:-}" gdb-multiarch arm-none-eabi-gdb gdb)
 lldb=$(require_tool LLDB "${LLGO_LLDB:-}" lldb-19 lldb)
-qemu=$(require_tool qemu-system-arm "${LLGO_QEMU_SYSTEM_ARM:-}" qemu-system-arm)
+require_tool qemu-system-arm qemu-system-arm >/dev/null
 
 debug_elf="$tmp_dir/embedded-debug.elf"
 stripped_elf="$tmp_dir/embedded-stripped.elf"
@@ -98,32 +63,11 @@ if [[ -z "$break_line" ]]; then
 	exit 1
 fi
 
-(
-	cd "$script_dir"
-	LLGO_ROOT="$repo_root" "$llgo" build -O0 -target=cortex-m-qemu \
-		-debug-artifact=host -ldflags=-w=false -o "$debug_elf" .
-)
-
-# Debug sections are host-only. Stripping them from the same final ELF must not
-# alter the bytes that are loaded into target flash.
-"$objcopy" --strip-debug "$debug_elf" "$stripped_elf"
-"$objcopy" -O binary "$debug_elf" "$debug_bin"
-"$objcopy" -O binary "$stripped_elf" "$stripped_bin"
-cmp "$debug_bin" "$stripped_bin"
-
-# LLD section GC leaves tombstone DIEs for discarded functions. Verify a
-# garbage-collected copy because LLVM 19 dwarfutil drops live global-variable
-# DIEs as well; the original artifact below remains the debugger input.
-"$dwarfutil" --garbage-collection --verify "$debug_elf" "$verified_elf"
-"$dwarfdump" --verify "$verified_elf"
-
-gdb_port=$(free_port)
-start_qemu "$gdb_port"
-if ! gdb_output=$("$gdb" --nx --quiet --batch "$debug_elf" \
+if ! gdb_output=$(cd "$script_dir" && LLGO_ROOT="$repo_root" "$llgo" debug \
+	-backend=gdb -gdb "$gdb" -target=cortex-m-qemu -o "$debug_elf" . -- \
+	--nx --batch \
 	-ex "set pagination off" \
 	-ex "set confirm off" \
-	-ex "source $repo_root/cmd/internal/gdb/llgo_plugin.py" \
-	-ex "target remote 127.0.0.1:$gdb_port" \
 	-ex "break $source_file:$break_line" \
 	-ex "continue" \
 	-ex "llgo status" \
@@ -138,7 +82,6 @@ if ! gdb_output=$("$gdb" --nx --quiet --batch "$debug_elf" \
 	printf '%s\n' "$gdb_output" >&2
 	exit 1
 fi
-stop_qemu
 assert_contains "$gdb_output" "LLGo debugger schema v1 (runtime layout v1)"
 assert_contains "$gdb_output" '= "embedded"'
 assert_contains "$gdb_output" "LLGO_SEED=7"
@@ -150,11 +93,9 @@ assert_contains "$gdb_output" "LLGO_SINK=33"
 assert_contains "$gdb_output" "Reset_Handler"
 assert_contains "$gdb_output" "C/c.go:$break_line"
 
-lldb_port=$(free_port)
-start_qemu "$lldb_port"
-if ! lldb_output=$("$lldb" --batch "$debug_elf" \
-	-o "gdb-remote 127.0.0.1:$lldb_port" \
-	-o "target modules load --file $debug_elf --slide 0" \
+if ! lldb_output=$(cd "$script_dir" && LLGO_ROOT="$repo_root" "$llgo" debug \
+	-backend=lldb -lldb "$lldb" -target=cortex-m-qemu -o "$debug_elf" . -- \
+	--batch \
 	-o "breakpoint set --file c.go --line $break_line" \
 	-o "continue" \
 	-o "frame variable seed pair values text result" \
@@ -163,7 +104,6 @@ if ! lldb_output=$("$lldb" --batch "$debug_elf" \
 	printf '%s\n' "$lldb_output" >&2
 	exit 1
 fi
-stop_qemu
 if [[ "$lldb_output" == *"Traceback (most recent call last)"* ]]; then
 	printf '%s\n' "$lldb_output" >&2
 	exit 1
@@ -176,4 +116,17 @@ assert_contains "$lldb_output" "DebugSink = 33"
 assert_contains "$lldb_output" "Reset_Handler"
 assert_contains "$lldb_output" "c.go:$break_line"
 
-echo "embedded GDB Remote and LLDB gdb-remote checks passed"
+# Debug sections are host-only. Stripping them from the same final ELF must not
+# alter the bytes that are loaded into target flash.
+"$objcopy" --strip-debug "$debug_elf" "$stripped_elf"
+"$objcopy" -O binary "$debug_elf" "$debug_bin"
+"$objcopy" -O binary "$stripped_elf" "$stripped_bin"
+cmp "$debug_bin" "$stripped_bin"
+
+# LLD section GC leaves tombstone DIEs for discarded functions. Verify a
+# garbage-collected copy because LLVM 19 dwarfutil drops live global-variable
+# DIEs as well; the original artifact above remains the debugger input.
+"$dwarfutil" --garbage-collection --verify "$debug_elf" "$verified_elf"
+"$dwarfdump" --verify "$verified_elf"
+
+echo "llgo debug embedded GDB Remote and LLDB gdb-remote checks passed"

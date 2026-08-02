@@ -23,7 +23,16 @@ requires an RFC and a long-term maintainer before restoring native Go language
 support, so LLGo keeps its language-specific adapter external; the decision is
 recorded in [issue #2154](https://github.com/xgo-dev/llgo/issues/2154).
 
-### Debug with lldb
+### Build and debug with LLDB
+
+For a source package, use the target-aware command. It enables DWARF and
+defaults to `-O0` for reliable variable inspection:
+
+```shell
+llgo debug ./cl/_testdata/debug
+```
+
+### Open an existing artifact with LLDB
 
 ```shell
 llgo lldb ./cl/_testdata/debug/out

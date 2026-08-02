@@ -36,9 +36,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Build the project
-build_project "$package_path" || exit 1
-
 # Set up private paths for test results and auxiliary fixtures.
 test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/llgo-lldbtest.XXXXXX")
 trap 'rm -rf "$test_tmp_dir"' EXIT
@@ -73,8 +70,9 @@ for cmd in "${lldb_commands[@]}"; do
 done
 
 cd "$package_path"
-# Run LLDB with the embedded LLGo plugin and the test script.
-llgo lldb -lldb "$LLDB_PATH" -- "${lldb_args[@]}"
+# Build a debug artifact and run LLDB with the embedded LLGo plugin and the
+# test script through the cross-platform session entry point.
+llgo debug -backend=lldb -lldb "$LLDB_PATH" -o debug.out . -- "${lldb_args[@]}"
 
 # Read the exit code from the result file
 if [ -f "$result_file" ]; then

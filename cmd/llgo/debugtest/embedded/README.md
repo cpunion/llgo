@@ -1,8 +1,8 @@
 # Embedded debugger transport fixture
 
-This fixture is the manual protocol baseline for LLGo embedded debugging. It
-builds a host-side Cortex-M ELF with DWARF, derives unchanged flash bytes, and
-uses the original ELF in two independent QEMU sessions:
+This fixture validates the automated embedded path of `llgo debug`. It builds
+a host-side Cortex-M ELF with DWARF, starts and stops the target-configured QEMU
+GDB server, derives unchanged flash bytes, and runs two independent sessions:
 
 - `gdb-multiarch` through GDB Remote;
 - LLDB through `gdb-remote` with an explicit zero slide.
@@ -14,14 +14,16 @@ LLVM 19 tools on `PATH`:
 bash cmd/llgo/debugtest/embedded/runtest.sh
 ```
 
-For a physical OpenOCD target, keep the same host ELF and connect the GDB
-listed by the target configuration to the server's default port:
+For a physical target with OpenOCD configuration, `llgo debug` starts OpenOCD,
+loads the image, and connects the GDB listed by the target configuration:
 
-```text
-target extended-remote :3333
-monitor reset halt
-load
+```sh
+llgo debug -target=rp2040 .
 ```
 
-The automated `llgo debug` process/server orchestration is intentionally built
-on top of this artifact and transport contract rather than changing it.
+To use an externally managed OpenOCD session instead, keep the same host ELF
+and connect to its GDB port:
+
+```sh
+llgo debug -target=rp2040 -remote=:3333 .
+```
