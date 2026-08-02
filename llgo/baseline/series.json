@@ -63,6 +63,16 @@
     },
     {
       "kind": "branch",
+      "id": "04f1bd79fa543ca4",
+      "label": "Branch codex/fork-wasm-resumable-workers-20260802",
+      "path": "series/branch/04f1bd79fa543ca4/history.json",
+      "configPath": "series/branch/04f1bd79fa543ca4/config.json",
+      "sha": "11fed5f4ee5b520af2a6da5f2a8759a2195cfbd2",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/11fed5f4ee5b520af2a6da5f2a8759a2195cfbd2",
+      "updatedAt": "2026-08-02T20:51:55.908Z"
+    },
+    {
+      "kind": "branch",
       "id": "0d13d036a7f0a264",
       "label": "Branch coro/sync-main-20260729",
       "path": "series/branch/0d13d036a7f0a264/history.json",
@@ -110,6 +120,16 @@
       "sha": "86d59afe4b35a22692629c80f36113d7b820fc5b",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/86d59afe4b35a22692629c80f36113d7b820fc5b",
       "updatedAt": "2026-08-02T14:33:49.297Z"
+    },
+    {
+      "kind": "pull",
+      "id": "143",
+      "label": "PR #143",
+      "path": "series/pull/143/history.json",
+      "configPath": "series/pull/143/config.json",
+      "sha": "11fed5f4ee5b520af2a6da5f2a8759a2195cfbd2",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/11fed5f4ee5b520af2a6da5f2a8759a2195cfbd2",
+      "updatedAt": "2026-08-02T20:51:55.903Z"
     },
     {
       "kind": "pull",
