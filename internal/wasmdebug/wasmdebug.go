@@ -20,6 +20,7 @@ package wasmdebug
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,7 +29,10 @@ import (
 	"github.com/goplus/llgo/internal/debugabi"
 )
 
-const externalDebugInfo = "external_debug_info"
+const (
+	externalDebugInfo = "external_debug_info"
+	buildIDSection    = "build_id"
+)
 
 var wasmHeader = []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 
@@ -336,6 +340,95 @@ func appendCustomSection(dst []byte, name string, content []byte) []byte {
 	dst = append(dst, 0)
 	dst = appendULEB32(dst, uint32(len(payload)))
 	return append(dst, payload...)
+}
+
+// DWARFSections returns the unique embedded DWARF custom sections keyed by
+// their standard section names. Returned contents do not alias module.
+func DWARFSections(module []byte) (map[string][]byte, error) {
+	sections, err := parse(module)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string][]byte)
+	for _, section := range sections {
+		if section.id != 0 || !isDWARFSection(section.name) {
+			continue
+		}
+		if _, exists := result[section.name]; exists {
+			return nil, fmt.Errorf("multiple %s WebAssembly custom sections", section.name)
+		}
+		result[section.name] = bytes.Clone(section.content)
+	}
+	return result, nil
+}
+
+// BuildID returns the unique WebAssembly tool-conventions build_id, if
+// present. Build IDs are arbitrary bytes and are not interpreted as UTF-8.
+func BuildID(module []byte) ([]byte, bool, error) {
+	sections, err := parse(module)
+	if err != nil {
+		return nil, false, err
+	}
+	var id []byte
+	found := false
+	for _, section := range sections {
+		if section.id != 0 || section.name != buildIDSection {
+			continue
+		}
+		if found {
+			return nil, false, errors.New("multiple WebAssembly build_id sections")
+		}
+		off := 0
+		size, err := readULEB32(section.content, &off)
+		if err != nil {
+			return nil, false, fmt.Errorf("invalid WebAssembly build_id section: %w", err)
+		}
+		if int(size) != len(section.content)-off {
+			return nil, false, errors.New("invalid WebAssembly build_id length")
+		}
+		id = bytes.Clone(section.content[off:])
+		found = true
+	}
+	return id, found, nil
+}
+
+// SetBuildID replaces the WebAssembly tool-conventions build_id section.
+func SetBuildID(module, id []byte) ([]byte, error) {
+	if len(id) == 0 {
+		return nil, errors.New("WebAssembly build ID must not be empty")
+	}
+	sections, err := parse(module)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]byte(nil), wasmHeader...)
+	for _, section := range sections {
+		if section.id == 0 && section.name == buildIDSection {
+			continue
+		}
+		out = append(out, section.raw...)
+	}
+	payload := appendULEB32(nil, uint32(len(id)))
+	payload = append(payload, id...)
+	return appendCustomSection(out, buildIDSection, payload), nil
+}
+
+// EnsureBuildID preserves an existing valid build ID or installs a
+// deterministic SHA-256 ID over the complete module without a build_id
+// section. Calling it before externalization gives the main module and DWARF
+// sidecar the same identity for stale-sidecar checks.
+func EnsureBuildID(module []byte) ([]byte, []byte, error) {
+	if id, ok, err := BuildID(module); err != nil {
+		return nil, nil, err
+	} else if ok {
+		return bytes.Clone(module), id, nil
+	}
+	digest := sha256.Sum256(module)
+	result, err := SetBuildID(module, digest[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	return result, bytes.Clone(digest[:]), nil
 }
 
 // HasDWARF reports whether module contains at least one DWARF custom section.

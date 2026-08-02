@@ -56,6 +56,10 @@ func finalizeDebugArtifact(conf *Config, out *OutFmtDetails, verbose bool) error
 		if err != nil {
 			return fmt.Errorf("add WebAssembly debugger ABI record: %w", err)
 		}
+		raw, _, err = wasmdebug.EnsureBuildID(raw)
+		if err != nil {
+			return fmt.Errorf("add WebAssembly build ID: %w", err)
+		}
 	}
 	// external_debug_info stores a URL, not a filesystem path. Keep the
 	// sidecar adjacent to the module and escape its filename for URL lookup.
@@ -91,6 +95,10 @@ func finalizeEmbeddedWasmDebuggerRecord(conf *Config, out *OutFmtDetails) error 
 	raw, err = wasmdebug.SetDebuggerRecord(raw, wasmDebuggerRecord(conf))
 	if err != nil {
 		return fmt.Errorf("add WebAssembly debugger ABI record: %w", err)
+	}
+	raw, _, err = wasmdebug.EnsureBuildID(raw)
+	if err != nil {
+		return fmt.Errorf("add WebAssembly build ID: %w", err)
 	}
 	info, err := os.Stat(out.Out)
 	if err != nil {

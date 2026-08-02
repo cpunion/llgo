@@ -28,9 +28,11 @@ import (
 	"strings"
 	"time"
 
+	browsertool "github.com/goplus/llgo/cmd/internal/browser"
 	"github.com/goplus/llgo/cmd/internal/gdb"
 	"github.com/goplus/llgo/cmd/internal/lldb"
 	wasmtimetool "github.com/goplus/llgo/cmd/internal/wasmtime"
+	"github.com/goplus/llgo/internal/browserdebug"
 	"github.com/goplus/llgo/internal/build"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/shellparse"
@@ -57,12 +59,15 @@ const (
 )
 
 type options struct {
-	backend  backend
-	lldb     string
-	gdb      string
-	wasmtime string
-	remote   string
-	server   string
+	backend      backend
+	lldb         string
+	gdb          string
+	wasmtime     string
+	chrome       string
+	browserTools bool
+	remote       string
+	server       string
+	sourceMap    []string
 }
 
 func (o options) validate() error {
@@ -133,7 +138,9 @@ func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
 	cleanup := func() {}
 	var plan *serverPlan
 	var err error
-	if s.backend == backendWasmtime {
+	if s.backend == backendBrowser {
+		plan = nil
+	} else if s.backend == backendWasmtime {
 		plan, cleanup, err = makeWASIServerPlan(s.artifact, s.options)
 	} else {
 		plan, err = makeServerPlan(s.target, s.artifact, s.options)
@@ -172,6 +179,24 @@ func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
 	case backendWasmtime:
 		if err := lldb.RunWasm(s.options.lldb, args, stdin, stdout, stderr); err != nil {
 			debugErr = fmt.Errorf("llgo debug: %w", err)
+		}
+	case backendBrowser:
+		mappings := make([]browserdebug.PathMapping, 0, len(s.options.sourceMap))
+		for _, value := range s.options.sourceMap {
+			mapping, err := browserdebug.ParsePathMapping(value)
+			if err != nil {
+				debugErr = fmt.Errorf("llgo debug: %w", err)
+				break
+			}
+			mappings = append(mappings, mapping)
+		}
+		if debugErr == nil {
+			if err := browsertool.Run(s.artifact, browsertool.Options{
+				Chrome: s.options.chrome, ChromeArgs: s.debuggerArgs, SourceMaps: mappings,
+				DisableTools: !s.options.browserTools,
+			}, stdin, stdout, stderr); err != nil {
+				debugErr = err
+			}
 		}
 	default:
 		debugErr = fmt.Errorf("llgo debug: backend %s is not implemented", s.backend)
@@ -426,6 +451,9 @@ func (s *debugServer) logSuffix() string {
 
 func debuggerArguments(selected backend, artifact string, extra []string, server *serverPlan) ([]string, error) {
 	if server == nil {
+		if selected == backendBrowser {
+			return append([]string(nil), extra...), nil
+		}
 		return append([]string{artifact}, extra...), nil
 	}
 	if server.address == "" {
