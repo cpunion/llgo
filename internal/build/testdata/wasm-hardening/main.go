@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"runtime"
-	"strconv"
 	"time"
 )
 
@@ -100,8 +99,18 @@ func blockedGCount() int {
 	if value == "" {
 		return defaultCount
 	}
-	count, err := strconv.Atoi(value)
-	if err != nil || count < 1 || count > 10_000 {
+	count := 0
+	for i := range len(value) {
+		digit := value[i]
+		if digit < '0' || digit > '9' {
+			panic("invalid LLGO_WASM_BLOCKED_G")
+		}
+		count = count*10 + int(digit-'0')
+		if count > 10_000 {
+			panic("invalid LLGO_WASM_BLOCKED_G")
+		}
+	}
+	if count < 1 {
 		panic("invalid LLGO_WASM_BLOCKED_G")
 	}
 	return count
