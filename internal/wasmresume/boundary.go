@@ -29,7 +29,8 @@ const (
 	runtimeFrameAlloc           = "__llgo_wasm_resume_alloc"
 	runtimeDynamicAlloc         = "__llgo_wasm_resume_alloc_dynamic"
 	runtimeFrameFree            = "__llgo_wasm_resume_free"
-	runtimeFrameClose           = "__llgo_wasm_resume_close"
+	runtimeCompatEnter          = "__llgo_wasm_resume_compat_enter"
+	runtimeCompatLeave          = "__llgo_wasm_resume_compat_leave"
 )
 
 // IsRuntimeABIImplementation reports functions which implement the resumable
@@ -71,5 +72,6 @@ func IsNonSuspendingBoundary(name string) bool {
 		name == runtimeFrameAlloc ||
 		name == runtimeDynamicAlloc ||
 		name == runtimeFrameFree ||
-		name == runtimeFrameClose
+		name == runtimeCompatEnter ||
+		name == runtimeCompatLeave
 }

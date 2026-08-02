@@ -390,11 +390,21 @@ func declareFrameFree(mod llvm.Module, abi resumeABI) llvm.Value {
 	return fn
 }
 
-func declareFrameClose(mod llvm.Module, abi resumeABI) llvm.Value {
-	fn := mod.NamedFunction(frameCloseName)
+func declareCompatEnter(mod llvm.Module, abi resumeABI) llvm.Value {
+	fn := mod.NamedFunction(compatEnterName)
 	if fn.IsNil() {
-		fn = llvm.AddFunction(mod, frameCloseName, llvm.FunctionType(
-			abi.ctx.VoidType(), []llvm.Type{abi.ptr}, false,
+		fn = llvm.AddFunction(mod, compatEnterName, llvm.FunctionType(
+			abi.ptr, []llvm.Type{abi.ptr}, false,
+		))
+	}
+	return fn
+}
+
+func declareCompatLeave(mod llvm.Module, abi resumeABI) llvm.Value {
+	fn := mod.NamedFunction(compatLeaveName)
+	if fn.IsNil() {
+		fn = llvm.AddFunction(mod, compatLeaveName, llvm.FunctionType(
+			abi.ctx.VoidType(), []llvm.Type{abi.ptr, abi.ptr}, false,
 		))
 	}
 	return fn

@@ -56,6 +56,12 @@ func emitCompatibilityWrapper(
 		llvm.ConstInt(abi.uintptrType, targetData.TypeAllocSize(abi.contextType), false),
 		llvm.ConstInt(ctx.Int1Type(), 0, false),
 	}, "")
+	owner := builder.CreateCall(
+		declareCompatEnter(mod, abi).GlobalValueType(),
+		declareCompatEnter(mod, abi),
+		[]llvm.Value{context},
+		"resume.arena.owner",
+	)
 	builder.CreateIntrinsic(ctx.VoidType(), llvm.LookupIntrinsicID("llvm.memset"), []llvm.Value{
 		root,
 		llvm.ConstInt(ctx.Int8Type(), 0, false),
@@ -123,9 +129,9 @@ func emitCompatibilityWrapper(
 
 	builder.SetInsertPointAtEnd(finished)
 	builder.CreateCall(
-		declareFrameClose(mod, abi).GlobalValueType(),
-		declareFrameClose(mod, abi),
-		[]llvm.Value{context},
+		declareCompatLeave(mod, abi).GlobalValueType(),
+		declareCompatLeave(mod, abi),
+		[]llvm.Value{context, owner},
 		"",
 	)
 	if lowered.layout.plan.resultSlot == 0 {

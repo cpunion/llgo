@@ -168,6 +168,8 @@ func TestLowerPrototypeBuildsDirectCallStateMachine(t *testing.T) {
 		`i32 1, label %resume.1`,
 		`call ptr @__llgo_wasm_resume_alloc(ptr %0,`,
 		`call void @llvm.memset`,
+		`call ptr @__llgo_wasm_resume_compat_enter(`,
+		`call void @__llgo_wasm_resume_compat_leave(`,
 		`ret i8 0`,
 		`%returned = load ptr`,
 		`call void @__llgo_wasm_resume_free(ptr %0, ptr %returned)`,
@@ -388,8 +390,13 @@ func defineStateMachineHarness(
 	builder.SetInsertPointAtEnd(block)
 	builder.CreateRetVoid()
 
-	close := mod.NamedFunction(frameCloseName)
-	block = ctx.AddBasicBlock(close, "entry")
+	enter := mod.NamedFunction(compatEnterName)
+	block = ctx.AddBasicBlock(enter, "entry")
+	builder.SetInsertPointAtEnd(block)
+	builder.CreateRet(enter.Param(0))
+
+	leave := mod.NamedFunction(compatLeaveName)
+	block = ctx.AddBasicBlock(leave, "entry")
 	builder.SetInsertPointAtEnd(block)
 	builder.CreateRetVoid()
 

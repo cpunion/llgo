@@ -26,7 +26,8 @@ const (
 	resumeEntryPrefix = "__llgo_wasm_resume."
 	startEntryPrefix  = "__llgo_wasm_start."
 	descriptorPrefix  = "__llgo_wasm_resume_desc."
-	frameCloseName    = "__llgo_wasm_resume_close"
+	compatEnterName   = "__llgo_wasm_resume_compat_enter"
+	compatLeaveName   = "__llgo_wasm_resume_compat_leave"
 	actionContinue    = 0
 	actionReturn      = 1
 	actionSuspend     = 2

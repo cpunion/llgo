@@ -38,6 +38,7 @@ type runtimeContextPlatform struct {
 var wasmSched struct {
 	m           m
 	p           p
+	compat      wasmresume.Context
 	gcRoot      wasmGCRootContext
 	runq        runqueue.Queue[*g]
 	started     bool
@@ -45,6 +46,13 @@ var wasmSched struct {
 	running     bool
 	mainExited  bool
 }
+
+var (
+	// The frame owner stays on runtime-owned storage while the compatibility
+	// owner follows nested stack-local wrappers.
+	wasmResumeFrameOwner  *wasmresume.Context
+	wasmResumeCompatOwner *wasmresume.Context
+)
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	gp := initG(ctx, callergp, status)
@@ -138,6 +146,7 @@ func RunWasmMain() {
 			if gp.isMain {
 				releaseWasmContext(gp)
 				stopWasmResumeHost()
+				wasmSched.compat.Close(FreeRoot)
 				wasmSched.running = false
 				return
 			}
@@ -175,7 +184,13 @@ func runWasmResumeContext(gp *g) wasmresume.Action {
 	previousRoot := platform.unwindRoot
 	platform.unwind = unwind
 	platform.unwindRoot = captureWasmResumeGCRoot()
+	previousFrameOwner := wasmResumeFrameOwner
+	previousCompatOwner := wasmResumeCompatOwner
+	wasmResumeFrameOwner = &platform.context
+	wasmResumeCompatOwner = &platform.context
 	if c.Sigsetjmp(unwind, 0) != 0 {
+		wasmResumeFrameOwner = previousFrameOwner
+		wasmResumeCompatOwner = previousCompatOwner
 		if !platform.context.Unwind(unsafe.Pointer(gp.defer_)) {
 			platform.unwind = previous
 			platform.unwindRoot = previousRoot
@@ -197,6 +212,8 @@ func runWasmResumeContext(gp *g) wasmresume.Action {
 		}
 	}
 	action := platform.context.Run()
+	wasmResumeFrameOwner = previousFrameOwner
+	wasmResumeCompatOwner = previousCompatOwner
 	platform.unwind = previous
 	platform.unwindRoot = previousRoot
 	if wasmGCRootEnabled {
@@ -272,22 +289,51 @@ func goexitBackend(gp *g) {
 
 //go:linkname wasmResumeAlloc __llgo_wasm_resume_alloc
 func wasmResumeAlloc(ctx *wasmresume.Context, size, align uintptr) unsafe.Pointer {
+	if ctx == wasmResumeCompatOwner && wasmResumeFrameOwner != nil {
+		ctx = wasmResumeFrameOwner
+	}
 	return ctx.AllocateFrame(size, align, AllocRoot)
 }
 
 //go:linkname wasmResumeAllocDynamic __llgo_wasm_resume_alloc_dynamic
 func wasmResumeAllocDynamic(ctx *wasmresume.Context, size, align uintptr) unsafe.Pointer {
+	if ctx == wasmResumeCompatOwner && wasmResumeFrameOwner != nil {
+		ctx = wasmResumeFrameOwner
+	}
 	return ctx.AllocateFrame(size, align, AllocRoot)
 }
 
 //go:linkname wasmResumeFree __llgo_wasm_resume_free
 func wasmResumeFree(ctx *wasmresume.Context, frame *wasmresume.Frame) {
+	if ctx == wasmResumeCompatOwner && wasmResumeFrameOwner != nil {
+		ctx = wasmResumeFrameOwner
+	}
 	ctx.ReleaseFrame(frame)
 }
 
-//go:linkname wasmResumeClose __llgo_wasm_resume_close
-func wasmResumeClose(ctx *wasmresume.Context) {
-	ctx.Close(FreeRoot)
+//go:linkname wasmResumeCompatEnter __llgo_wasm_resume_compat_enter
+func wasmResumeCompatEnter(ctx *wasmresume.Context) unsafe.Pointer {
+	if ctx == nil {
+		fatal("runtime: invalid WebAssembly compatibility arena entry")
+		return nil
+	}
+	owner := wasmResumeCompatOwner
+	if owner == nil {
+		owner = &wasmSched.compat
+		wasmResumeFrameOwner = owner
+	}
+	wasmResumeCompatOwner = ctx
+	return unsafe.Pointer(owner)
+}
+
+//go:linkname wasmResumeCompatLeave __llgo_wasm_resume_compat_leave
+func wasmResumeCompatLeave(ctx *wasmresume.Context, rawOwner unsafe.Pointer) {
+	owner := (*wasmresume.Context)(rawOwner)
+	if owner == nil || wasmResumeCompatOwner != ctx {
+		fatal("runtime: invalid WebAssembly compatibility arena exit")
+		return
+	}
+	wasmResumeCompatOwner = owner
 }
 
 // CurrentGForTesting returns an opaque handle suitable for ReadyForTesting.
