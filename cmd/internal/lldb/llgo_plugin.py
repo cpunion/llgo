@@ -12,6 +12,7 @@ LLGO_DEBUGGER_MARKER_PREFIX = "__llgo_debugger_marker_v"
 LLGO_DEBUGGER_SCHEMA_FILENAME = "llgo_debugger_schema_v1.json"
 LLGO_TYPE_CATEGORY = "LLGo"
 LLGO_MAX_STRING_SUMMARY_BYTES = 256
+LLGO_MAX_TYPE_NAME_BYTES = 4096
 LLGO_DEFAULT_MAX_CHILDREN = 256
 _TARGET_INFO_CACHE: Dict[Tuple[Any, ...], "LLGoTargetInfo"] = {}
 
@@ -77,6 +78,21 @@ class LLGoRuntimeLayout:
     slice_data: str
     slice_len: str
     slice_cap: str
+    interface_type_pattern: str
+    interface_type: str
+    interface_data: str
+    empty_interface_type: str
+    runtime_itab_type: str
+    runtime_itab_concrete_type: str
+    runtime_type: str
+    runtime_type_tflag: str
+    runtime_type_extra_star_flag: int
+    runtime_type_string: str
+    function_type_pattern: str
+    function_code: str
+    function_data: str
+    function_closure_symbol_pattern: str
+    function_bound_symbol_suffix: str
 
 
 @dataclass(frozen=True)
@@ -94,6 +110,9 @@ def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
             "runtime_layouts", {}).items():
         string_layout = raw.get("string", {})
         slice_layout = raw.get("slice", {})
+        interface_layout = raw.get("interface", {})
+        runtime_type_layout = raw.get("runtime_type", {})
+        function_layout = raw.get("function", {})
         try:
             layouts[int(version)] = LLGoRuntimeLayout(
                 string_type=string_layout["type_name"],
@@ -103,6 +122,25 @@ def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
                 slice_data=slice_layout["data"],
                 slice_len=slice_layout["length"],
                 slice_cap=slice_layout["capacity"],
+                interface_type_pattern=interface_layout["type_pattern"],
+                interface_type=interface_layout["type"],
+                interface_data=interface_layout["data"],
+                empty_interface_type=interface_layout["empty_type"],
+                runtime_itab_type=interface_layout["itab_type"],
+                runtime_itab_concrete_type=(
+                    interface_layout["itab_concrete_type"]),
+                runtime_type=runtime_type_layout["type_name"],
+                runtime_type_tflag=runtime_type_layout["tflag"],
+                runtime_type_extra_star_flag=(
+                    runtime_type_layout["extra_star_flag"]),
+                runtime_type_string=runtime_type_layout["string"],
+                function_type_pattern=function_layout["type_pattern"],
+                function_code=function_layout["code"],
+                function_data=function_layout["data"],
+                function_closure_symbol_pattern=(
+                    function_layout["closure_symbol_pattern"]),
+                function_bound_symbol_suffix=(
+                    function_layout["bound_symbol_suffix"]),
             )
         except (KeyError, TypeError, ValueError):
             continue
@@ -191,6 +229,18 @@ def register_type_formatters(debugger: lldb.SBDebugger) -> None:
             slice_specifier,
             lldb.SBTypeSynthetic.CreateWithClassName(
                 "llgo_plugin.SliceSyntheticProvider", _type_options()),
+        )
+        category.AddTypeSummary(
+            lldb.SBTypeNameSpecifier(
+                layout.interface_type_pattern, True),
+            lldb.SBTypeSummary.CreateWithFunctionName(
+                "llgo_plugin.interface_summary", _type_options()),
+        )
+        category.AddTypeSummary(
+            lldb.SBTypeNameSpecifier(
+                layout.function_type_pattern, True),
+            lldb.SBTypeSummary.CreateWithFunctionName(
+                "llgo_plugin.function_summary", _type_options()),
         )
     category.SetEnabled(True)
 
@@ -676,6 +726,136 @@ def slice_summary(value: lldb.SBValue, _internal_dict: Dict[str, Any]) -> Option
     return f"len={fields.length} cap={fields.capacity}"
 
 
+def _value_from_address(target: lldb.SBTarget, name: str, address: int,
+                        type_name: str) -> Optional[lldb.SBValue]:
+    value_type = target.FindFirstType(type_name)
+    if not value_type or not value_type.IsValid():
+        return None
+    value = target.CreateValueFromAddress(
+        name, lldb.SBAddress(address, target), value_type)
+    return value if value and value.IsValid() else None
+
+
+def _runtime_type_name(value: lldb.SBValue, address: int,
+                       layout: LLGoRuntimeLayout) -> Optional[str]:
+    runtime_type = _value_from_address(
+        value.GetTarget(), "__llgo_runtime_type", address,
+        layout.runtime_type)
+    if runtime_type is None:
+        return None
+
+    name_value = runtime_type.GetChildMemberWithName(
+        layout.runtime_type_string)
+    fields = _string_fields(name_value, layout)
+    if fields is None:
+        return None
+    data, length = fields
+    if length > LLGO_MAX_TYPE_NAME_BYTES:
+        return None
+    data_address = _value_as_int(data)
+    process = value.GetProcess()
+    if (data_address is None or length < 0 or
+            (length != 0 and data_address == 0) or not process or
+            not process.IsValid()):
+        return None
+
+    error = lldb.SBError()
+    contents = process.ReadMemory(data_address, length, error)
+    if not error.Success() or contents is None:
+        return None
+    if isinstance(contents, str):
+        contents = contents.encode("latin-1", errors="surrogateescape")
+    try:
+        name = bytes(contents).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    tflag = runtime_type.GetChildMemberWithName(layout.runtime_type_tflag)
+    if (tflag and tflag.IsValid() and
+            tflag.GetValueAsUnsigned(0) & layout.runtime_type_extra_star_flag):
+        name = "*" + name
+    return name
+
+
+def _interface_type_address(value: lldb.SBValue,
+                            layout: LLGoRuntimeLayout) -> Optional[int]:
+    raw = _raw_value(value)
+    if not re.fullmatch(layout.interface_type_pattern,
+                        _canonical_type_name(raw)):
+        return None
+    type_word = raw.GetChildMemberWithName(layout.interface_type)
+    data_word = raw.GetChildMemberWithName(layout.interface_data)
+    if not data_word or not data_word.IsValid():
+        return None
+    type_address = _value_as_int(type_word)
+    if type_address is None or type_address == 0:
+        return type_address
+    if _canonical_type_name(raw) == layout.empty_interface_type:
+        return type_address
+
+    itab = _value_from_address(
+        value.GetTarget(), "__llgo_itab", type_address,
+        layout.runtime_itab_type)
+    if itab is None:
+        return None
+    return _value_as_int(itab.GetChildMemberWithName(
+        layout.runtime_itab_concrete_type))
+
+
+def interface_summary(value: lldb.SBValue,
+                      _internal_dict: Dict[str, Any]) -> Optional[str]:
+    layout = _runtime_layout(value)
+    if layout is None:
+        return None
+    type_address = _interface_type_address(value, layout)
+    if type_address is None:
+        return None
+    if type_address == 0:
+        return "nil"
+    type_name = _runtime_type_name(value, type_address, layout)
+    return f"type={type_name}" if type_name else None
+
+
+def _symbol_name(target: lldb.SBTarget, address: int) -> Optional[str]:
+    if address == 0:
+        return None
+    resolved = target.ResolveLoadAddress(address)
+    if not resolved or not resolved.IsValid():
+        return None
+    function = resolved.GetFunction()
+    if function and function.IsValid():
+        return function.GetName()
+    symbol = resolved.GetSymbol()
+    return symbol.GetName() if symbol and symbol.IsValid() else None
+
+
+def function_summary(value: lldb.SBValue,
+                     _internal_dict: Dict[str, Any]) -> Optional[str]:
+    layout = _runtime_layout(value)
+    raw = _raw_value(value)
+    if (layout is None or
+            not re.fullmatch(layout.function_type_pattern,
+                             _canonical_type_name(raw))):
+        return None
+    code = _value_as_int(raw.GetChildMemberWithName(layout.function_code))
+    data = _value_as_int(raw.GetChildMemberWithName(layout.function_data))
+    if code is None or data is None:
+        return None
+    if code == 0:
+        return "nil"
+
+    name = _symbol_name(value.GetTarget(), code)
+    if name and name.startswith("__llgo_stub."):
+        name = name[len("__llgo_stub."):]
+    if not name:
+        name = f"0x{code:x}"
+    if name.endswith(layout.function_bound_symbol_suffix):
+        return f"{name} (bound method)"
+    if re.search(layout.function_closure_symbol_pattern, name):
+        return f"{name} (closure)"
+    return name
+
+
 class SliceSyntheticProvider:
     def __init__(self, value: lldb.SBValue, _internal_dict: Dict[str, Any]) -> None:
         self.value = value
@@ -872,6 +1052,9 @@ def format_value(var: lldb.SBValue, debugger: lldb.SBDebugger, include_type: boo
     elif type_name == 'string':  # String
         return format_string(var)
     elif type_class in [lldb.eTypeClassStruct, lldb.eTypeClassClass]:
+        summary = var.GetSummary()
+        if summary is not None:
+            return summary
         return format_struct(var, debugger, include_type, indent, original_type_name)
     else:
         value = var.GetValue()

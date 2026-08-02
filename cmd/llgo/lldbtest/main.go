@@ -58,6 +58,63 @@ func (s *Struct) Foo(a []int, b string) int {
 	return 1
 }
 
+type Counter struct {
+	base int
+}
+
+func (c *Counter) Add(value int) int {
+	return c.base + value
+}
+
+func Plain(value int) int {
+	return value + 1
+}
+
+type IntFunc func(int) int
+
+type InterfaceResults struct {
+	intResult  int
+	textResult string
+	fooResult  int
+	errResult  string
+}
+
+func RuntimeInterfaceValues() {
+	var nilAny any
+	anyInt := any(42)
+	anyText := any("interface")
+	var nilFoo Interface
+	foo := Interface(&Struct{})
+	err := errors.New("interface error")
+	results := &InterfaceResults{
+		intResult:  anyInt.(int) + 1,
+		textResult: anyText.(string) + "!",
+		fooResult:  foo.Foo([]int{1, 2}, "x"),
+		errResult:  err.Error(),
+	}
+	InspectInterfaceValues(nilAny, anyInt, anyText, nilFoo, foo, err, results)
+}
+
+func InspectInterfaceValues(nilAny, anyInt, anyText any, nilFoo, foo Interface, err error, results *InterfaceResults) {
+	println(nilAny, anyInt, anyText, nilFoo, foo, err,
+		results.intResult, results.textResult, results.fooResult, results.errResult) // LLDB_BREAK: interface_values
+}
+
+func RuntimeFunctionValues() {
+	plain := Plain
+	named := IntFunc(Plain)
+	base := 5
+	closure := func(value int) int { return base + value }
+	counter := &Counter{base: 10}
+	bound := counter.Add
+	var nilFunc func(int) int
+	plainResult := plain(1)
+	namedResult := named(2)
+	closureResult := closure(2)
+	boundResult := bound(3)
+	println(plain, named, closure, bound, nilFunc, plainResult, namedResult, closureResult, boundResult) // LLDB_BREAK: function_values
+}
+
 func RuntimeValues() {
 	text := "hello"
 	empty := ""
@@ -340,6 +397,8 @@ func main() {
 	println("s:", &s) // LLDB_BREAK: main_globals
 	FuncWithAllTypeStructParam(s)
 	RuntimeValues()
+	RuntimeInterfaceValues()
+	RuntimeFunctionValues()
 	println("called function with struct")
 	i, err := FuncWithAllTypeParams(
 		s.i8, s.i16, s.i32, s.i64, s.i, s.u8, s.u16, s.u32, s.u64, s.u,
