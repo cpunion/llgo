@@ -19,18 +19,32 @@ package wasmresume
 import "strings"
 
 const (
-	runtimeResumePrefix         = "github.com/goplus/llgo/runtime/internal/wasmresume."
-	runtimeGCRootPrefix         = "github.com/goplus/llgo/runtime/internal/gcroot."
-	runtimeTinyGCPrefix         = "github.com/goplus/llgo/runtime/internal/runtime/tinygogc."
-	runtimeAllocRoot            = "github.com/goplus/llgo/runtime/internal/runtime.AllocRoot"
-	runtimeFreeRoot             = "github.com/goplus/llgo/runtime/internal/runtime.FreeRoot"
-	runtimeRunWasmMain          = "github.com/goplus/llgo/runtime/internal/runtime.RunWasmMain"
-	runtimeRunWasmResumeContext = "github.com/goplus/llgo/runtime/internal/runtime.runWasmResumeContext"
-	runtimeFrameAlloc           = "__llgo_wasm_resume_alloc"
-	runtimeDynamicAlloc         = "__llgo_wasm_resume_alloc_dynamic"
-	runtimeFrameFree            = "__llgo_wasm_resume_free"
-	runtimeCompatEnter          = "__llgo_wasm_resume_compat_enter"
-	runtimeCompatLeave          = "__llgo_wasm_resume_compat_leave"
+	runtimeResumePrefix          = "github.com/goplus/llgo/runtime/internal/wasmresume."
+	runtimeGCRootPrefix          = "github.com/goplus/llgo/runtime/internal/gcroot."
+	runtimeTinyGCPrefix          = "github.com/goplus/llgo/runtime/internal/runtime/tinygogc."
+	runtimeWasmWorkersPrefix     = "github.com/goplus/llgo/runtime/internal/wasmworkers."
+	runtimeAllocRoot             = "github.com/goplus/llgo/runtime/internal/runtime.AllocRoot"
+	runtimeFreeRoot              = "github.com/goplus/llgo/runtime/internal/runtime.FreeRoot"
+	runtimeCurrentWasmWorker     = "github.com/goplus/llgo/runtime/internal/runtime.currentWasmWorker"
+	runtimeCurrentResumeOwners   = "github.com/goplus/llgo/runtime/internal/runtime.currentWasmResumeOwners"
+	runtimeRunWasmG              = "github.com/goplus/llgo/runtime/internal/runtime.runWasmG"
+	runtimeRunWasmMain           = "github.com/goplus/llgo/runtime/internal/runtime.RunWasmMain"
+	runtimeRunWasmResumeContext  = "github.com/goplus/llgo/runtime/internal/runtime.runWasmResumeContext"
+	runtimeRunWasmWorker         = "github.com/goplus/llgo/runtime/internal/runtime.runWasmWorker"
+	runtimeRunWasmWorkerContext  = "github.com/goplus/llgo/runtime/internal/runtime.runWasmWorkerContext"
+	runtimeSetCurrentWasmWorker  = "github.com/goplus/llgo/runtime/internal/runtime.setCurrentWasmWorker"
+	runtimeWasmWorkerStart       = "github.com/goplus/llgo/runtime/internal/runtime.wasmWorkerStart"
+	runtimeWasmGCAllocatorYield  = "github.com/goplus/llgo/runtime/internal/runtime.wasmGCAllocatorYield"
+	runtimeWasmGCWorldOwner      = "github.com/goplus/llgo/runtime/internal/runtime.wasmGCWorldOwner"
+	runtimeWasmPublishGCRoot     = "github.com/goplus/llgo/runtime/internal/runtime.publishWasmGCRoot"
+	runtimeWasmWorkerStopForGC   = "github.com/goplus/llgo/runtime/internal/runtime.wasmWorkerStopForGC"
+	runtimeWasmSyncLockNoSuspend = "github.com/goplus/llgo/runtime/internal/wasmsync.(*Mutex).LockNoSuspend"
+	runtimeWasmSyncUnlock        = "github.com/goplus/llgo/runtime/internal/wasmsync.(*Mutex).Unlock"
+	runtimeFrameAlloc            = "__llgo_wasm_resume_alloc"
+	runtimeDynamicAlloc          = "__llgo_wasm_resume_alloc_dynamic"
+	runtimeFrameFree             = "__llgo_wasm_resume_free"
+	runtimeCompatEnter           = "__llgo_wasm_resume_compat_enter"
+	runtimeCompatLeave           = "__llgo_wasm_resume_compat_leave"
 )
 
 // IsRuntimeABIImplementation reports functions which implement the resumable
@@ -43,7 +57,8 @@ func IsRuntimeABIImplementation(name string) bool {
 // callable without allocating a resumable frame.
 func IsNonSuspendingBoundary(name string) bool {
 	if strings.HasPrefix(name, runtimeGCRootPrefix) ||
-		strings.HasPrefix(name, runtimeTinyGCPrefix) {
+		strings.HasPrefix(name, runtimeTinyGCPrefix) ||
+		strings.HasPrefix(name, runtimeWasmWorkersPrefix) {
 		return true
 	}
 	switch name {
@@ -67,8 +82,21 @@ func IsNonSuspendingBoundary(name string) bool {
 	return (IsRuntimeABIImplementation(name) && name != SuspendSymbol) ||
 		name == runtimeAllocRoot ||
 		name == runtimeFreeRoot ||
+		name == runtimeCurrentWasmWorker ||
+		name == runtimeCurrentResumeOwners ||
+		name == runtimeRunWasmG ||
 		name == runtimeRunWasmMain ||
 		name == runtimeRunWasmResumeContext ||
+		name == runtimeRunWasmWorker ||
+		name == runtimeRunWasmWorkerContext ||
+		name == runtimeSetCurrentWasmWorker ||
+		name == runtimeWasmWorkerStart ||
+		name == runtimeWasmGCAllocatorYield ||
+		name == runtimeWasmGCWorldOwner ||
+		name == runtimeWasmPublishGCRoot ||
+		name == runtimeWasmWorkerStopForGC ||
+		name == runtimeWasmSyncLockNoSuspend ||
+		name == runtimeWasmSyncUnlock ||
 		name == runtimeFrameAlloc ||
 		name == runtimeDynamicAlloc ||
 		name == runtimeFrameFree ||

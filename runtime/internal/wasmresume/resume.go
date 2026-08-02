@@ -18,7 +18,11 @@
 // WebAssembly resumable call ABI.
 package wasmresume
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/gcroot"
+)
 
 // SuspendCurrent yields the active resumable frame to its scheduler. The
 // compiler replaces calls to SuspendCurrent with a frame-PC transition; no
@@ -77,9 +81,10 @@ type Frame struct {
 
 // Context owns the active frame chain for one logical goroutine.
 type Context struct {
-	top      *Frame
-	returned *Frame
-	storage  frameStorage
+	top       *Frame
+	returned  *Frame
+	storage   frameStorage
+	rootChain unsafe.Pointer
 }
 
 // Start installs the root frame of a new logical goroutine.
@@ -88,6 +93,7 @@ func (c *Context) Start(frame *Frame) {
 		panic("wasmresume: invalid root frame")
 	}
 	c.returned = nil
+	c.rootChain = nil
 	c.top = frame
 }
 
@@ -143,6 +149,12 @@ func (c *Context) Close(release Releaser) {
 	c.storage.close(release)
 	c.top = nil
 	c.returned = nil
+	c.rootChain = nil
+}
+
+// RootChain returns the compiler root chain owned by the resumable frames.
+func (c *Context) RootChain() unsafe.Pointer {
+	return c.rootChain
 }
 
 // Top returns the active frame.
@@ -171,9 +183,14 @@ func (c *Context) TakeReturned() *Frame {
 
 // Run resumes the active frame chain until it completes or suspends.
 func (c *Context) Run() Action {
+	// The caller's host frame is temporary. Resume entries instead link their
+	// persistent root records to the logical chain retained by this context.
+	gcroot.RestoreChain(c.rootChain)
 	for c.top != nil {
 		frame := c.top
-		switch frame.Descriptor.Resume(c, frame) {
+		action := frame.Descriptor.Resume(c, frame)
+		c.rootChain = gcroot.CurrentChain()
+		switch action {
 		case Continue:
 		case Return:
 			c.top = frame.Parent

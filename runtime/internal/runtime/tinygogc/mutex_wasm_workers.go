@@ -11,7 +11,7 @@ import (
 type mutex = wasmsync.Mutex
 
 func lock(m *mutex) {
-	m.Lock(gcAllocatorYield)
+	m.LockNoSuspend(gcAllocatorYield)
 }
 
 func unlock(m *mutex) {

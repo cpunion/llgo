@@ -3,6 +3,8 @@ package wasmresume
 import (
 	"testing"
 	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/gcroot"
 )
 
 type testRootFrame struct {
@@ -113,6 +115,49 @@ func TestContextRunEmpty(t *testing.T) {
 	}
 	if returned := ctx.TakeReturned(); returned != nil {
 		t.Fatalf("empty Run returned frame %p", returned)
+	}
+}
+
+func TestContextRunRetainsLogicalRootChain(t *testing.T) {
+	outer := unsafe.Pointer(uintptr(0x11))
+	logical := unsafe.Pointer(uintptr(0x22))
+	gcroot.RestoreChain(outer)
+	t.Cleanup(func() { gcroot.RestoreChain(nil) })
+
+	var calls int
+	descriptor := Descriptor{Resume: func(*Context, *Frame) Action {
+		calls++
+		switch calls {
+		case 1:
+			if got := gcroot.CurrentChain(); got != nil {
+				t.Fatalf("initial logical chain = %p, want nil", got)
+			}
+			gcroot.RestoreChain(logical)
+			return Suspend
+		case 2:
+			if got := gcroot.CurrentChain(); got != logical {
+				t.Fatalf("resumed logical chain = %p, want %p", got, logical)
+			}
+			gcroot.RestoreChain(nil)
+			return Return
+		default:
+			t.Fatalf("resume call = %d, want at most 2", calls)
+			return Return
+		}
+	}}
+	var (
+		ctx   Context
+		frame Frame
+	)
+	ctx.Push(&frame, &descriptor)
+	if action := ctx.Run(); action != Suspend || ctx.RootChain() != logical {
+		t.Fatalf("first Run = (%d, %p), want (%d, %p)", action, ctx.RootChain(), Suspend, logical)
+	}
+
+	// LLGo's caller epilogue restores its host chain after Context.Run.
+	gcroot.RestoreChain(outer)
+	if action := ctx.Run(); action != Return || ctx.RootChain() != nil {
+		t.Fatalf("second Run = (%d, %p), want (%d, nil)", action, ctx.RootChain(), Return)
 	}
 }
 

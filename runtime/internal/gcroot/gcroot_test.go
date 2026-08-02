@@ -131,6 +131,23 @@ func TestPublishAndSwitchToSystem(t *testing.T) {
 	}
 }
 
+func TestClearSuspendedChain(t *testing.T) {
+	resetForTest()
+	t.Cleanup(resetForTest)
+
+	var active, suspended Context
+	RegisterActive(&active)
+	Register(&suspended)
+	chain := unsafe.Pointer(uintptr(0x55))
+	suspended.chain = chain
+	ClearSuspendedChain(&suspended)
+	if suspended.chain != nil {
+		t.Fatalf("suspended chain = %p, want nil", suspended.chain)
+	}
+	assertPanics(t, func() { ClearSuspendedChain(nil) })
+	assertPanics(t, func() { ClearSuspendedChain(&active) })
+}
+
 func assertPanics(t *testing.T, fn func()) {
 	t.Helper()
 	defer func() {

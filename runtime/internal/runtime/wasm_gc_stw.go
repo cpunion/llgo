@@ -106,11 +106,7 @@ func wasmGCAllocatorYield() {
 	if worker == nil {
 		return
 	}
-	if getg() == nil {
-		wasmWorkerStopForGC(worker)
-		return
-	}
-	CooperativeSafepoint()
+	wasmWorkerStopForGC(worker)
 }
 
 func wasmGCWorldOwner(worker *wasmWorker) uint32 {

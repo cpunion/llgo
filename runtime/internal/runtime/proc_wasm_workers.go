@@ -22,11 +22,11 @@ import (
 	"unsafe"
 
 	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
 	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/goplus/llgo/runtime/internal/pollbudget"
 	"github.com/goplus/llgo/runtime/internal/runqueue"
 	"github.com/goplus/llgo/runtime/internal/wasmevent"
+	"github.com/goplus/llgo/runtime/internal/wasmsync"
 	"github.com/goplus/llgo/runtime/internal/wasmworkers"
 )
 
@@ -43,7 +43,7 @@ type wasmWorker struct {
 	m m
 	p p
 
-	lock sync.Mutex
+	lock wasmsync.Mutex
 	runq runqueue.Queue[*g]
 	wake uint32
 
@@ -96,10 +96,6 @@ func initWasmScheduler(gp *g) {
 		worker := &wasmMultiSched.workers[i]
 		worker.index = i
 		worker.safepointBudget = pollbudget.New(wasmSafepointQuantum)
-		if worker.lock.Init(nil) != 0 {
-			fatal("runtime: failed to initialize WebAssembly worker queue")
-			return
-		}
 		worker.m.id = nextMid(&worker.m)
 		worker.m.p = &worker.p
 		worker.p.id = nextPid(&worker.p)
@@ -147,9 +143,9 @@ func wasmWorkerStart(arg unsafe.Pointer) unsafe.Pointer {
 	}
 	// Goroutines interleave on this native worker, so their entry calls need
 	// one long-lived locality owner instead of relying on strict nesting.
+	setCurrentWasmWorker(worker)
 	var localContext LocalContext
 	EnterLocalContext(&localContext)
-	setCurrentWasmWorker(worker)
 	setg(nil)
 	initWasmWorkerSystem(worker)
 	runWasmWorker(worker, false)
@@ -297,7 +293,7 @@ func enqueueWasmG(worker *wasmWorker, gp *g) {
 		fatal("runtime: enqueue on nil WebAssembly worker")
 		return
 	}
-	worker.lock.Lock()
+	worker.lock.LockNoSuspend(nil)
 	ok := worker.runq.Push(gp)
 	worker.lock.Unlock()
 	if !ok {
@@ -308,14 +304,14 @@ func enqueueWasmG(worker *wasmWorker, gp *g) {
 }
 
 func popWasmWorkerRunq(worker *wasmWorker) *g {
-	worker.lock.Lock()
+	worker.lock.LockNoSuspend(nil)
 	gp := worker.runq.Pop()
 	worker.lock.Unlock()
 	return gp
 }
 
 func wasmWorkerRunqLen(worker *wasmWorker) uintptr {
-	worker.lock.Lock()
+	worker.lock.LockNoSuspend(nil)
 	size := worker.runq.Len()
 	worker.lock.Unlock()
 	return size

@@ -35,9 +35,7 @@ type stackEntry struct {
 	m    *frameMap
 }
 
-var (
-	contexts *Context
-)
+var contexts *Context
 
 // CurrentChain returns the active execution owner's compiler root chain.
 func CurrentChain() unsafe.Pointer {
@@ -97,6 +95,15 @@ func SwitchAtBoundary(next *Context) {
 	} else {
 		currentRootChain = uintptr(next.chain)
 	}
+}
+
+// ClearSuspendedChain drops the saved chain of an inactive context when its
+// target-specific backend owns that context's root lifetime separately.
+func ClearSuspendedChain(ctx *Context) {
+	if ctx == nil || uintptr(unsafe.Pointer(ctx)) == activeContext {
+		panic("gcroot: invalid suspended context")
+	}
+	ctx.chain = nil
 }
 
 // AdoptCurrent marks next active after a target-specific stack switch has

@@ -30,6 +30,20 @@ func (m *Mutex) Lock(yield func()) {
 	}
 }
 
+// LockNoSuspend acquires m without allowing a logical goroutine suspension.
+// The callback must only participate in host-level stop-the-world waits.
+func (m *Mutex) LockNoSuspend(yield func()) {
+	for {
+		if _, ok := atomic.CompareAndExchange(&m.state, uint32(0), uint32(1)); ok {
+			return
+		}
+		if yield != nil {
+			yield()
+		}
+		wasmworkers.Wait(&m.state, 1, mutexWaitNanoseconds)
+	}
+}
+
 // Unlock releases m and wakes all waiters.
 func (m *Mutex) Unlock() {
 	atomic.Store(&m.state, uint32(0))
