@@ -229,6 +229,33 @@ func AllGForTesting() (count int, linked bool) {
 	return count, true
 }
 
+// GInAllGForTesting reports whether target is present in the live goroutine
+// list and whether all links traversed while looking for it are consistent.
+// It is linked only by LLGo execution tests.
+func GInAllGForTesting(target unsafe.Pointer) (found, linked bool) {
+	lockAllg()
+	want := (*g)(target)
+	var previous *g
+	count := 0
+	for gp := debuggerAllgV1; gp != nil; gp = gp.alllink {
+		if gp.allprev != previous {
+			unlockAllg()
+			return false, false
+		}
+		if gp == want {
+			found = true
+		}
+		previous = gp
+		count++
+		if count > 1<<20 {
+			unlockAllg()
+			return false, false
+		}
+	}
+	unlockAllg()
+	return found, true
+}
+
 // GMPForTesting reports the current runtime ownership graph. It is kept
 // internal to the compiler runtime and linked only by LLGo execution tests.
 func GMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, pstatus uint32, linked bool) {

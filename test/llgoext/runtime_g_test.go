@@ -167,6 +167,9 @@ func TestRuntimeGMPLinks(t *testing.T) {
 //go:linkname runtimeAllGForTesting github.com/goplus/llgo/runtime/internal/runtime.AllGForTesting
 func runtimeAllGForTesting() (count int, linked bool)
 
+//go:linkname runtimeGInAllGForTesting github.com/goplus/llgo/runtime/internal/runtime.GInAllGForTesting
+func runtimeGInAllGForTesting(gp unsafe.Pointer) (found, linked bool)
+
 func TestRuntimeAllGLifecycle(t *testing.T) {
 	runtimeGetGForTest()
 	baseline, linked := runtimeAllGForTesting()
@@ -174,32 +177,40 @@ func TestRuntimeAllGLifecycle(t *testing.T) {
 		t.Fatalf("initial allg = (%d, %v), want a linked non-empty list", baseline, linked)
 	}
 
-	ready := make(chan struct{}, 2)
+	ready := make(chan unsafe.Pointer, 2)
 	release := make(chan struct{})
 	done := make(chan struct{}, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			ready <- struct{}{}
+			ready <- runtimeGetGForTest()
 			<-release
 			done <- struct{}{}
 		}()
 	}
-	<-ready
-	<-ready
-	if count, linked := runtimeAllGForTesting(); count != baseline+2 || !linked {
-		t.Fatalf("live allg = (%d, %v), want (%d, true)", count, linked, baseline+2)
+	workers := [2]unsafe.Pointer{<-ready, <-ready}
+	if workers[0] == nil || workers[1] == nil || workers[0] == workers[1] {
+		t.Fatalf("worker G pointers = (%p, %p), want distinct non-nil values", workers[0], workers[1])
+	}
+	for index, gp := range workers {
+		if found, linked := runtimeGInAllGForTesting(gp); !found || !linked {
+			t.Fatalf("live worker %d in allg = (%v, %v), want (true, true)", index, found, linked)
+		}
 	}
 
 	close(release)
 	<-done
 	<-done
 	for attempts := 0; attempts < 1<<20; attempts++ {
-		if count, linked := runtimeAllGForTesting(); count == baseline && linked {
+		first, firstLinked := runtimeGInAllGForTesting(workers[0])
+		second, secondLinked := runtimeGInAllGForTesting(workers[1])
+		if !first && !second && firstLinked && secondLinked {
 			return
 		}
 	}
-	count, linked := runtimeAllGForTesting()
-	t.Fatalf("final allg = (%d, %v), want (%d, true)", count, linked, baseline)
+	first, firstLinked := runtimeGInAllGForTesting(workers[0])
+	second, secondLinked := runtimeGInAllGForTesting(workers[1])
+	t.Fatalf("finished workers in allg = (%v, %v, %v, %v), want (false, true, false, true)",
+		first, firstLinked, second, secondLinked)
 }
 
 type runtimeDeferProbeResult struct {
