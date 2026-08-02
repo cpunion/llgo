@@ -23,6 +23,16 @@
     },
     {
       "kind": "branch",
+      "id": "0925a687fec25091",
+      "label": "Branch codex/closure-env-ffi-call-go",
+      "path": "series/branch/0925a687fec25091/history.json",
+      "configPath": "series/branch/0925a687fec25091/config.json",
+      "sha": "edfaf10e9f5078632a12a8b2e6db1919bef506d7",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/edfaf10e9f5078632a12a8b2e6db1919bef506d7",
+      "updatedAt": "2026-08-02T13:25:13.677Z"
+    },
+    {
+      "kind": "branch",
       "id": "c2e30957e255a1d9",
       "label": "Branch codex/debug-dwarf-integration-2164-20260802",
       "path": "series/branch/c2e30957e255a1d9/history.json",
@@ -40,6 +50,16 @@
       "sha": "df66a728a09e12c96d85fc3837532c94908a5d9a",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/df66a728a09e12c96d85fc3837532c94908a5d9a",
       "updatedAt": "2026-07-29T06:09:30.571Z"
+    },
+    {
+      "kind": "pull",
+      "id": "136",
+      "label": "PR #136",
+      "path": "series/pull/136/history.json",
+      "configPath": "series/pull/136/config.json",
+      "sha": "edfaf10e9f5078632a12a8b2e6db1919bef506d7",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/edfaf10e9f5078632a12a8b2e6db1919bef506d7",
+      "updatedAt": "2026-08-02T13:25:13.673Z"
     },
     {
       "kind": "pull",
