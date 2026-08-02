@@ -726,6 +726,16 @@ func (source *ManualOperationSource) Recycle(p *P, id OperationID) bool {
 			}
 			source.scanLimit--
 		}
+		if source.scanLimit == 0 {
+			// Post publishes pending after its mailbox. A producer which arrives
+			// after beginPublishPass but before this slot's cursor may therefore
+			// leave a conservative pending hint even though that same pass consumed
+			// the mailbox. Reaching a zero live prefix after admission quiescence
+			// proves that no producer can still publish for this source. Retire the
+			// hint here; otherwise the zero scan limit would skip the next manual
+			// pass forever and keep an idle executor artificially runnable.
+			preemptStore(&source.pending, 0)
+		}
 	}
 	return true
 }
