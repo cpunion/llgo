@@ -30,14 +30,11 @@ const (
 	// monotonic tombstones and are never reused.
 	coroNativeFleetDomainCapacityV1 = coro.ExecutorFleetCapacity
 
-	// Every owned native P needs the same production catalog capacity as the
-	// adopted program P. Keeping the page policy here gives the program and
-	// fleet adapters one source of truth; embedded/bare-metal profiles still
-	// retain the target-neutral inline page because they do not compile this
-	// native fleet.
+	// These are the hosted profile's logical capacity limits in 64-slot pages,
+	// not eager reservations. Every P starts with the target-neutral inline page
+	// and grows one stable page at a time before an irreversible park transaction.
 	coroNativeSourcePageCountV1 = 16
 	coroNativeTimerPageCountV1  = 64
-	coroNativeManualPageCountV2 = coroNativeSourcePageCountV1
 )
 
 type coroNativeFleetLifecycleV1 uint8
@@ -67,19 +64,14 @@ const (
 // stay route-local. The fixed physical coroworker pool is process-shared: its
 // POD jobs carry OperationID routes and never become part of this domain.
 type coroNativeFleetDomainV1 struct {
-	p            coro.P
-	driver       coro.ExecutorDriver
-	timers       coro.TimerRegistrationTable
-	timerPages   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage
-	poll         coro.PollOperationSource
-	pollPages    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage
-	manual       coro.ManualOperationSource
-	manualPages  [coroNativeManualPageCountV2 - 1]coro.ManualOperationPage
-	worker       coro.WorkerOperationSource
-	workerPages  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage
-	channel      coro.ChannelOperationSource
-	channelPages [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage
-	control      coro.TaskControlSource
+	p       coro.P
+	driver  coro.ExecutorDriver
+	timers  coro.TimerRegistrationTable
+	poll    coro.PollOperationSource
+	manual  coro.ManualOperationSource
+	worker  coro.WorkerOperationSource
+	channel coro.ChannelOperationSource
+	control coro.TaskControlSource
 
 	ingress   coro.TargetIngress
 	doorbell  corodoorbell.Pipe
@@ -307,25 +299,15 @@ func coroNativeFleetAbortActiveDomainV1(
 	return true
 }
 
-func coroNativeFleetConfigureOwnedDomainSourcesV1(domain *coroNativeFleetDomainV1) bool {
+func coroNativeFleetValidateOwnedDomainSourcesV1(domain *coroNativeFleetDomainV1) bool {
 	if domain == nil || domain.adopted {
 		return false
 	}
-	return coro.ConfigureTimerRegistrationPages(&domain.timers, domain.timerPages[:]) &&
-		coro.ConfigurePollOperationPages(&domain.poll, domain.pollPages[:]) &&
-		coro.ConfigureManualOperationPages(&domain.manual, domain.manualPages[:]) &&
-		coro.ConfigureWorkerOperationPages(&domain.worker, domain.workerPages[:]) &&
-		coro.ConfigureChannelOperationPages(&domain.channel, domain.channelPages[:]) &&
-		coro.TimerRegistrationConfiguredCapacity(&domain.timers) ==
-			coroNativeTimerPageCountV1*coro.TimerRegistrationPageCapacity &&
-		coro.PollOperationConfiguredCapacity(&domain.poll) ==
-			coroNativeSourcePageCountV1*coro.PollOperationPageCapacity &&
-		coro.ManualOperationConfiguredCapacity(&domain.manual) ==
-			coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity &&
-		coro.WorkerOperationConfiguredCapacity(&domain.worker) ==
-			coroNativeSourcePageCountV1*coro.WorkerOperationPageCapacity &&
-		coro.ChannelOperationConfiguredCapacity(&domain.channel) ==
-			coroNativeSourcePageCountV1*coro.ChannelOperationPageCapacity
+	return coro.TimerRegistrationConfiguredCapacity(&domain.timers) == coro.TimerRegistrationPageCapacity &&
+		coro.PollOperationConfiguredCapacity(&domain.poll) == coro.PollOperationPageCapacity &&
+		coro.ManualOperationConfiguredCapacity(&domain.manual) == coro.ManualOperationPageCapacity &&
+		coro.WorkerOperationConfiguredCapacity(&domain.worker) == coro.WorkerOperationPageCapacity &&
+		coro.ChannelOperationConfiguredCapacity(&domain.channel) == coro.ChannelOperationPageCapacity
 }
 
 func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bool {
@@ -334,7 +316,7 @@ func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bo
 	}
 	domain := &state.domains[index]
 	if !coroNativeFleetDomainCandidateV1(domain) ||
-		!coroNativeFleetConfigureOwnedDomainSourcesV1(domain) ||
+		!coroNativeFleetValidateOwnedDomainSourcesV1(domain) ||
 		!domain.doorbell.Open() {
 		return false
 	}

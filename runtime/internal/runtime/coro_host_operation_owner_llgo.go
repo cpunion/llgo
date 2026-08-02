@@ -42,7 +42,8 @@ func __llgo_coro_host_operation_park_v1(
 	driver, _, _, current := coro.CurrentExecutorWorkerDriver(task)
 	if g == nil || handle == nil || header == nil || state == nil ||
 		*state != (CoroHostOperationParkV1{}) || opcode == 0 ||
-		argc > coro.HostOperationMaxArgsV1 || !current {
+		argc > coro.HostOperationMaxArgsV1 || !current ||
+		!ensureCoroWorkerOperationCapacityV1(driver, task, coro.HostOperationCapacityV1) {
 		coroHostOperationAbortV1("invalid coroutine host operation park ABI")
 		return
 	}

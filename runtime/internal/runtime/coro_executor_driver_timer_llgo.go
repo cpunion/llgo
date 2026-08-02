@@ -23,23 +23,13 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coroclock"
 )
 
-// Native keeps the target-neutral 64-slot page granularity. Poll, manual,
-// worker, and channel sources reserve 1024 simultaneous entries.
-// Timers have an independent 4096-entry reservation because ordinary Go code
-// can create substantially more live Timer/Ticker values than blocking file or
-// synchronization operations. Embedded and bare-metal profiles do not compile
-// this file and retain the inline page unless they provide their own storage.
+// Native keeps the target-neutral 64-slot page granularity. These are logical
+// limits reached through demand-paged growth, not process-global reservations.
+// Timers retain a larger limit because ordinary Go code can create more live
+// Timer/Ticker values than blocking file operations.
 const (
-	coroNativeTimerCapacityV1   = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity
-	coroNativePollCapacityV1    = coroNativeSourcePageCountV1 * coro.PollOperationPageCapacity
-	coroNativeChannelCapacityV1 = coroNativeSourcePageCountV1 * coro.ChannelOperationPageCapacity
-)
-
-var (
-	coroProgramTimerExtraPagesV1State   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage
-	coroProgramPollExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage
-	coroProgramManualExtraPagesV2State  [coroNativeManualPageCountV2 - 1]coro.ManualOperationPage
-	coroProgramChannelExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage
+	coroNativeTimerCapacityV1 = coroRuntimeTimerCapacityV1
+	coroNativePollCapacityV1  = coroRuntimePollCapacityV1
 )
 
 // CoroMonotonicNano is the target-neutral clock consumed by Timer/Park and the
@@ -50,18 +40,14 @@ func CoroMonotonicNano() (int64, bool) {
 }
 
 func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle) bool {
-	if !coro.ConfigureTimerRegistrationPages(&coroProgramTimerTableV1State, coroProgramTimerExtraPagesV1State[:]) ||
-		!coro.ConfigurePollOperationPages(&coroProgramPollSourceV1State, coroProgramPollExtraPagesV1State[:]) ||
-		!coro.ConfigureManualOperationPages(&coroProgramManualSourceV2State, coroProgramManualExtraPagesV2State[:]) ||
-		!coro.ConfigureWorkerOperationPages(&coroProgramWorkerSourceV1State, coroProgramWorkerExtraPagesV1State[:]) ||
-		!coro.ConfigureChannelOperationPages(&coroProgramChannelSourceV1State, coroProgramChannelExtraPagesV1State[:]) ||
-		coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coroNativeTimerCapacityV1 ||
-		coro.PollOperationConfiguredCapacity(&coroProgramPollSourceV1State) != coroNativePollCapacityV1 ||
-		coro.ManualOperationConfiguredCapacity(&coroProgramManualSourceV2State) != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity ||
-		coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coroNativeWorkerCapacityV1 ||
-		coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coroNativeChannelCapacityV1 ||
-		coroNativeWorkerCapacityV1 != coroNativeWorkerPageCountV1*coro.ManualOperationPageCapacity ||
-		coroNativeChannelCapacityV1 != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity ||
+	if coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coro.TimerRegistrationPageCapacity ||
+		coro.PollOperationConfiguredCapacity(&coroProgramPollSourceV1State) != coro.PollOperationPageCapacity ||
+		coro.ManualOperationConfiguredCapacity(&coroProgramManualSourceV2State) != coro.ManualOperationPageCapacity ||
+		coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coro.WorkerOperationPageCapacity ||
+		coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coro.ChannelOperationPageCapacity ||
+		coroNativeTimerCapacityV1 != coroNativeTimerPageCountV1*coro.TimerRegistrationPageCapacity ||
+		coroNativePollCapacityV1 != coroNativeSourcePageCountV1*coro.PollOperationPageCapacity ||
+		coroNativeWorkerCapacityV1 != coroRuntimeWorkerCapacityV1 ||
 		coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1 {
 		return false
 	}

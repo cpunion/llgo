@@ -83,7 +83,7 @@ func __llgo_coro_worker_park_v1(
 	driver, executor, route, current := coro.CurrentExecutorWorkerDriver(task)
 	if g == nil || handle == nil || header == nil || state == nil ||
 		*state != (CoroWorkerParkV1{}) || function == 0 || argc > coroworker.MaxArgs ||
-		!current {
+		!current || !ensureCoroWorkerOperationCapacityV1(driver, task, coroRuntimeWorkerCapacityV1) {
 		coroWorkerAbortV1("invalid coroutine worker park ABI")
 		return
 	}

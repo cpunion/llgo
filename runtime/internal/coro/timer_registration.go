@@ -16,6 +16,8 @@
 
 package coro
 
+import "unsafe"
+
 // TimerRegistrationPageCapacity is the allocation-free granularity of the
 // target-neutral timer catalog. Every table includes one inline page; a target
 // may attach additional stable pages before binding the table.
@@ -25,6 +27,11 @@ const TimerRegistrationPageCapacity = 64
 // Keep this compatibility name for small and embedded profiles; it is not the
 // capacity of a table after ConfigureTimerRegistrationPages succeeds.
 const TimerRegistrationCapacity = TimerRegistrationPageCapacity
+
+// TimerRegistrationMaximumCapacity is the largest complete-page catalog
+// representable by OperationID's frozen source-local field. Hosted targets
+// may grow toward this bound; constrained targets may retain the inline page.
+const TimerRegistrationMaximumCapacity = operationCatalogMaximumPageCount * TimerRegistrationPageCapacity
 
 // TimerRegistrationHandle identifies one exact timer slot generation. It is
 // scheduler-owned: no platform thread or callback retains this handle, a Go
@@ -89,11 +96,12 @@ type TimerRegistrationPage struct {
 // lease release. The physical generation is retained until typed recycle
 // clears owner pointers.
 type TimerRegistrationTable struct {
-	slots      [TimerRegistrationPageCapacity]timerRegistrationSlot
-	extraPages []TimerRegistrationPage
-	owner      *P
-	route      RouteID
-	scanLimit  uint32
+	slots        [TimerRegistrationPageCapacity]timerRegistrationSlot
+	extraPages   []TimerRegistrationPage
+	dynamicPages operationDynamicPageDirectory
+	owner        *P
+	route        RouteID
+	scanLimit    uint32
 }
 
 // TimerRegistrationConfiguredCapacity returns the exact number of addressable
@@ -103,7 +111,11 @@ func TimerRegistrationConfiguredCapacity(table *TimerRegistrationTable) uint32 {
 	if table == nil {
 		return 0
 	}
-	return uint32(1+len(table.extraPages)) * TimerRegistrationPageCapacity
+	pages := uint32(1+len(table.extraPages)) + table.dynamicPages.published()
+	if pages > operationCatalogMaximumPageCount {
+		return 0
+	}
+	return pages * TimerRegistrationPageCapacity
 }
 
 func timerRegistrationScanLimit(table *TimerRegistrationTable) (uint32, bool) {
@@ -122,9 +134,28 @@ func timerRegistrationSlotAt(table *TimerRegistrationTable, index uint32) (*time
 	if index < TimerRegistrationPageCapacity {
 		return &table.slots[index], true
 	}
-	page := index/TimerRegistrationPageCapacity - 1
+	page := index / TimerRegistrationPageCapacity
 	offset := index % TimerRegistrationPageCapacity
-	return &table.extraPages[page].slots[offset], true
+	catalog, ok := timerRegistrationPageAt(table, page)
+	if !ok {
+		return nil, false
+	}
+	return &catalog.slots[offset], true
+}
+
+func timerRegistrationPageAt(table *TimerRegistrationTable, page uint32) (*TimerRegistrationPage, bool) {
+	if table == nil || page == 0 {
+		return nil, false
+	}
+	extra := page - 1
+	if extra < uint32(len(table.extraPages)) {
+		return &table.extraPages[extra], true
+	}
+	dynamic := table.dynamicPages.page(extra - uint32(len(table.extraPages)))
+	if dynamic == nil {
+		return nil, false
+	}
+	return (*TimerRegistrationPage)(dynamic), true
 }
 
 // ConfigureTimerRegistrationPages attaches stable allocation-free catalog
@@ -144,6 +175,9 @@ func ConfigureTimerRegistrationPages(table *TimerRegistrationTable, pages []Time
 	if len(pages) == existing {
 		return true
 	}
+	if table.dynamicPages.published() != 0 {
+		return false
+	}
 	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
 		slot, ok := timerRegistrationSlotAt(table, index)
 		if !ok || !reusableTimerRegistrationSlot(slot, table.route, index) {
@@ -160,6 +194,35 @@ func ConfigureTimerRegistrationPages(table *TimerRegistrationTable, pages []Time
 	}
 	table.extraPages = pages
 	return true
+}
+
+// AttachTimerRegistrationPage monotonically publishes one target-owned stable
+// page while the table is bound. The owner validates a pristine page before
+// release publication; existing handles and slot addresses never move.
+func AttachTimerRegistrationPage(
+	table *TimerRegistrationTable,
+	p *P,
+	page *TimerRegistrationPage,
+	directoryBlock *OperationPageDirectoryBlock,
+) bool {
+	if table == nil || p == nil || table.owner != p || !table.route.Valid() || page == nil {
+		return false
+	}
+	oldCapacity := TimerRegistrationConfiguredCapacity(table)
+	if oldCapacity == 0 || oldCapacity > TimerRegistrationMaximumCapacity-TimerRegistrationPageCapacity {
+		return false
+	}
+	for index := range table.extraPages {
+		if &table.extraPages[index] == page {
+			return false
+		}
+	}
+	for offset := range page.slots {
+		if !reusableTimerRegistrationSlot(&page.slots[offset], table.route, oldCapacity+uint32(offset)) {
+			return false
+		}
+	}
+	return table.dynamicPages.publish(unsafe.Pointer(page), directoryBlock)
 }
 
 func timerRegistrationSlotFor(table *TimerRegistrationTable, handle TimerRegistrationHandle) (*timerRegistrationSlot, bool) {

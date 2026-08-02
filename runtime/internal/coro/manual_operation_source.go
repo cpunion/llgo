@@ -16,6 +16,8 @@
 
 package coro
 
+import "unsafe"
+
 // ManualOperationPageCapacity matches the other paged operation catalogs. The
 // inline page keeps small/embedded executors allocation-free; native targets
 // may attach stable extra pages without changing OperationID or ParkState.
@@ -25,6 +27,11 @@ const ManualOperationPageCapacity = 64
 // compatibility. Configured capacity may be larger when extra pages are
 // attached before bind.
 const ManualOperationSourceCapacity = ManualOperationPageCapacity
+
+// ManualOperationMaximumCapacity is the complete-page limit of the frozen
+// OperationID local field. Hosted targets may grow toward it without changing
+// the producer ABI; small targets keep the inline page.
+const ManualOperationMaximumCapacity = operationCatalogMaximumPageCount * ManualOperationPageCapacity
 
 type ManualOperationPostResult uint8
 
@@ -90,8 +97,9 @@ type ManualOperationSource struct {
 	slots [ManualOperationSourceCapacity]manualOperationSlot
 	// extraPages and scanLimit are owner-only. Producer ingress resolves an
 	// exact slot from OperationID while an admission lease prevents reuse.
-	extraPages []ManualOperationPage
-	scanLimit  uint32
+	extraPages   []ManualOperationPage
+	dynamicPages operationDynamicPageDirectory
+	scanLimit    uint32
 
 	affectedHead uint32
 	affectedTail uint32
@@ -101,7 +109,11 @@ func ManualOperationConfiguredCapacity(source *ManualOperationSource) uint32 {
 	if source == nil {
 		return 0
 	}
-	return uint32(1+len(source.extraPages)) * ManualOperationPageCapacity
+	pages := uint32(1+len(source.extraPages)) + source.dynamicPages.published()
+	if pages > operationCatalogMaximumPageCount {
+		return 0
+	}
+	return pages * ManualOperationPageCapacity
 }
 
 func manualOperationSlotAt(source *ManualOperationSource, index uint32) (*manualOperationSlot, bool) {
@@ -111,9 +123,28 @@ func manualOperationSlotAt(source *ManualOperationSource, index uint32) (*manual
 	if index < ManualOperationPageCapacity {
 		return &source.slots[index], true
 	}
-	page := index/ManualOperationPageCapacity - 1
+	page := index / ManualOperationPageCapacity
 	offset := index % ManualOperationPageCapacity
-	return &source.extraPages[page].slots[offset], true
+	catalog, ok := manualOperationPageAt(source, page)
+	if !ok {
+		return nil, false
+	}
+	return &catalog.slots[offset], true
+}
+
+func manualOperationPageAt(source *ManualOperationSource, page uint32) (*ManualOperationPage, bool) {
+	if source == nil || page == 0 {
+		return nil, false
+	}
+	extra := page - 1
+	if extra < uint32(len(source.extraPages)) {
+		return &source.extraPages[extra], true
+	}
+	dynamic := source.dynamicPages.page(extra - uint32(len(source.extraPages)))
+	if dynamic == nil {
+		return nil, false
+	}
+	return (*ManualOperationPage)(dynamic), true
 }
 
 func ManualOperationScanLimit(source *ManualOperationSource) (uint32, bool) {
@@ -161,6 +192,9 @@ func ConfigureManualOperationPages(source *ManualOperationSource, pages []Manual
 	if len(pages) == existing {
 		return true
 	}
+	if source.dynamicPages.published() != 0 {
+		return false
+	}
 	if source.route.Valid() || source.owner != nil || source.pending != 0 || source.scanLimit != 0 ||
 		source.affectedHead != 0 || source.affectedTail != 0 {
 		return false
@@ -174,6 +208,52 @@ func ConfigureManualOperationPages(source *ManualOperationSource, pages []Manual
 	}
 	source.extraPages = pages
 	return true
+}
+
+// CanReserveManualOperation is the allocation-free owner preflight used before
+// BeginParkSet mutates a logical wait transaction.
+func CanReserveManualOperation(p *P, source *ManualOperationSource) bool {
+	if !validManualOperationOwner(source, p) {
+		return false
+	}
+	for index := uint32(0); index < ManualOperationConfiguredCapacity(source); index++ {
+		slot, ok := manualOperationSlotAt(source, index)
+		if !ok {
+			return false
+		}
+		if preemptLoad(&slot.generation) != ^uint32(0) && manualOperationReusableSlot(source, slot, index) {
+			return true
+		}
+	}
+	return false
+}
+
+// AttachManualOperationPage publishes one pristine target-owned page while
+// the source is bound. Producer admission pins an exact immutable slot address.
+func AttachManualOperationPage(
+	source *ManualOperationSource,
+	p *P,
+	page *ManualOperationPage,
+	directoryBlock *OperationPageDirectoryBlock,
+) bool {
+	if !validManualOperationOwner(source, p) || page == nil {
+		return false
+	}
+	oldCapacity := ManualOperationConfiguredCapacity(source)
+	if oldCapacity == 0 || oldCapacity > ManualOperationMaximumCapacity-ManualOperationPageCapacity {
+		return false
+	}
+	for index := range source.extraPages {
+		if &source.extraPages[index] == page {
+			return false
+		}
+	}
+	for offset := range page.slots {
+		if !manualOperationReusableSlot(source, &page.slots[offset], oldCapacity+uint32(offset)) {
+			return false
+		}
+	}
+	return source.dynamicPages.publish(unsafe.Pointer(page), directoryBlock)
 }
 
 func validManualOperationOwner(source *ManualOperationSource, p *P) bool {

@@ -16,6 +16,8 @@
 
 package coro
 
+import "unsafe"
+
 // WorkerOperationPageCapacity is the allocation-free granularity of the
 // target-neutral worker catalog. Every source includes one inline page; a
 // target may attach additional stable pages before binding the source.
@@ -25,6 +27,11 @@ const WorkerOperationPageCapacity = 64
 // source. Keep this compatibility name for small, embedded, and bare-metal
 // profiles; it is not the capacity after ConfigureWorkerOperationPages.
 const WorkerOperationSourceCapacity = WorkerOperationPageCapacity
+
+// WorkerOperationMaximumCapacity is the largest complete-page catalog encoded
+// by the existing OperationID local field. Physical worker queues may keep a
+// smaller target-specific limit.
+const WorkerOperationMaximumCapacity = operationCatalogMaximumPageCount * WorkerOperationPageCapacity
 
 type WorkerOperationPostResult uint8
 
@@ -85,9 +92,10 @@ type WorkerOperationPage struct {
 // Post is producer-concurrent; other mutating methods are owner-P-only.
 type WorkerOperationSource struct {
 	routedProducerSource
-	slots      [WorkerOperationPageCapacity]workerOperationSlot
-	extraPages []WorkerOperationPage
-	scanLimit  uint32
+	slots        [WorkerOperationPageCapacity]workerOperationSlot
+	extraPages   []WorkerOperationPage
+	dynamicPages operationDynamicPageDirectory
+	scanLimit    uint32
 
 	affectedHead uint32
 	affectedTail uint32
@@ -100,7 +108,11 @@ func WorkerOperationConfiguredCapacity(source *WorkerOperationSource) uint32 {
 	if source == nil {
 		return 0
 	}
-	return uint32(1+len(source.extraPages)) * WorkerOperationPageCapacity
+	pages := uint32(1+len(source.extraPages)) + source.dynamicPages.published()
+	if pages > operationCatalogMaximumPageCount {
+		return 0
+	}
+	return pages * WorkerOperationPageCapacity
 }
 
 func workerOperationScanLimit(source *WorkerOperationSource) (uint32, bool) {
@@ -118,9 +130,28 @@ func workerOperationSlotAt(source *WorkerOperationSource, index uint32) (*worker
 	if index < WorkerOperationPageCapacity {
 		return &source.slots[index], true
 	}
-	page := index/WorkerOperationPageCapacity - 1
+	page := index / WorkerOperationPageCapacity
 	offset := index % WorkerOperationPageCapacity
-	return &source.extraPages[page].slots[offset], true
+	catalog, ok := workerOperationPageAt(source, page)
+	if !ok {
+		return nil, false
+	}
+	return &catalog.slots[offset], true
+}
+
+func workerOperationPageAt(source *WorkerOperationSource, page uint32) (*WorkerOperationPage, bool) {
+	if source == nil || page == 0 {
+		return nil, false
+	}
+	extra := page - 1
+	if extra < uint32(len(source.extraPages)) {
+		return &source.extraPages[extra], true
+	}
+	dynamic := source.dynamicPages.page(extra - uint32(len(source.extraPages)))
+	if dynamic == nil {
+		return nil, false
+	}
+	return (*WorkerOperationPage)(dynamic), true
 }
 
 // ConfigureWorkerOperationPages attaches stable allocation-free catalog pages
@@ -141,6 +172,9 @@ func ConfigureWorkerOperationPages(source *WorkerOperationSource, pages []Worker
 	if len(pages) == existing {
 		return true
 	}
+	if source.dynamicPages.published() != 0 {
+		return false
+	}
 	for index := uint32(0); index < WorkerOperationConfiguredCapacity(source); index++ {
 		slot, ok := workerOperationSlotAt(source, index)
 		if !ok || !workerOperationReusableSlot(source, slot, index) {
@@ -157,6 +191,52 @@ func ConfigureWorkerOperationPages(source *WorkerOperationSource, pages []Worker
 	}
 	source.extraPages = pages
 	return true
+}
+
+// CanReserveWorkerOperation is the allocation-free source-capacity preflight.
+// Physical queue capacity remains an independent target responsibility.
+func CanReserveWorkerOperation(p *P, source *WorkerOperationSource) bool {
+	if !validWorkerOperationOwner(source, p) {
+		return false
+	}
+	for index := uint32(0); index < WorkerOperationConfiguredCapacity(source); index++ {
+		slot, ok := workerOperationSlotAt(source, index)
+		if !ok {
+			return false
+		}
+		if preemptLoad(&slot.generation) != ^uint32(0) && workerOperationReusableSlot(source, slot, index) {
+			return true
+		}
+	}
+	return false
+}
+
+// AttachWorkerOperationPage publishes one pristine stable page from the owner
+// P. A backend still retains only OperationID and never observes this pointer.
+func AttachWorkerOperationPage(
+	source *WorkerOperationSource,
+	p *P,
+	page *WorkerOperationPage,
+	directoryBlock *OperationPageDirectoryBlock,
+) bool {
+	if !validWorkerOperationOwner(source, p) || page == nil {
+		return false
+	}
+	oldCapacity := WorkerOperationConfiguredCapacity(source)
+	if oldCapacity == 0 || oldCapacity > WorkerOperationMaximumCapacity-WorkerOperationPageCapacity {
+		return false
+	}
+	for index := range source.extraPages {
+		if &source.extraPages[index] == page {
+			return false
+		}
+	}
+	for offset := range page.slots {
+		if !workerOperationReusableSlot(source, &page.slots[offset], oldCapacity+uint32(offset)) {
+			return false
+		}
+	}
+	return source.dynamicPages.publish(unsafe.Pointer(page), directoryBlock)
 }
 
 func workerOperationSlotFor(source *WorkerOperationSource, id OperationID) (*workerOperationSlot, bool) {

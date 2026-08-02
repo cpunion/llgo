@@ -287,7 +287,7 @@ func TestSleepTimerV2OwnerUsesExactCurrentSource(t *testing.T) {
 	}
 }
 
-func TestNativeTimerCapacityIsIndependentAndAdmitsStandardLibraryStress(t *testing.T) {
+func TestNativeTimerCapacityIsDemandPagedAndAdmitsStandardLibraryStress(t *testing.T) {
 	policyData, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_native_fleet.go"))
 	if err != nil {
 		t.Fatal(err)
@@ -296,11 +296,9 @@ func TestNativeTimerCapacityIsIndependentAndAdmitsStandardLibraryStress(t *testi
 	for _, contract := range []string{
 		"coroNativeSourcePageCountV1 = 16",
 		"coroNativeTimerPageCountV1  = 64",
-		"timerPages   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage",
-		"pollPages    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage",
-		"workerPages  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage",
-		"channelPages [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
-		"coroNativeFleetConfigureOwnedDomainSourcesV1(domain)",
+		"not eager reservations",
+		"coroNativeFleetValidateOwnedDomainSourcesV1(domain)",
+		"coro.TimerRegistrationConfiguredCapacity(&domain.timers) == coro.TimerRegistrationPageCapacity",
 	} {
 		if !strings.Contains(policy, contract) {
 			t.Errorf("native fleet capacity policy lacks %q", contract)
@@ -313,20 +311,42 @@ func TestNativeTimerCapacityIsIndependentAndAdmitsStandardLibraryStress(t *testi
 	}
 	source := string(data)
 	for _, contract := range []string{
-		"coroNativeTimerCapacityV1   = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity",
-		"coroProgramTimerExtraPagesV1State   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage",
-		"coroProgramPollExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage",
-		"coroProgramManualExtraPagesV2State  [coroNativeManualPageCountV2 - 1]coro.ManualOperationPage",
-		"coroProgramChannelExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
-		"coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coroNativeTimerCapacityV1",
+		"coroNativeTimerCapacityV1 = coroRuntimeTimerCapacityV1",
+		"coroNativePollCapacityV1  = coroRuntimePollCapacityV1",
+		"coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coro.TimerRegistrationPageCapacity",
+		"coroNativeTimerCapacityV1 != coroNativeTimerPageCountV1*coro.TimerRegistrationPageCapacity",
 	} {
 		if !strings.Contains(source, contract) {
 			t.Errorf("native timer capacity source lacks %q", contract)
 		}
 	}
-	if strings.Contains(source, "coroNativeTimerCapacityV1 = coroNativeSourcePageCountV1") ||
-		strings.Contains(source, "coroProgramTimerExtraPagesV1State [coroNativeSourcePageCountV1 - 1]") {
-		t.Error("native timer storage is still coupled to the 1024-entry common-source page count")
+	for _, forbidden := range []string{"coroProgramTimerExtraPagesV1State", "coroProgramPollExtraPagesV1State", "coroProgramManualExtraPagesV2State", "coroProgramChannelExtraPagesV1State", "timerPages   [", "pollPages    ["} {
+		if strings.Contains(source, forbidden) || strings.Contains(policy, forbidden) {
+			t.Errorf("native timer profile eagerly reserves source storage through %q", forbidden)
+		}
+	}
+	capacityData, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_operation_capacity.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capacity := string(capacityData)
+	for _, contract := range []string{
+		"coroRuntimeTimerCapacityV1  = 64 * coro.TimerRegistrationPageCapacity",
+		"func ensureCoroTimerOperationCapacityV1(",
+		"page := new(coro.TimerRegistrationPage)",
+		"coro.AttachTimerRegistrationPage(sources.Timers, p, page, nil)",
+		"block := new(coro.OperationPageDirectoryBlock)",
+	} {
+		if !strings.Contains(capacity, contract) {
+			t.Errorf("demand-paged timer capacity lacks %q", contract)
+		}
+	}
+	timerOwner, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_timer_owner_llgo.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(timerOwner), "ensureCoroTimerOperationCapacityV1(driver, task, coroRuntimeTimerCapacityV1)") {
+		t.Error("timer park owner does not demand-grow before its ParkSet transaction")
 	}
 }
 

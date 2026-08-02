@@ -210,6 +210,67 @@ artifact has 13 imports, 3,173 functions, a 1,193,025-byte code section, a
 emits an arm64 Mach-O executable for `-target=wasip1`, so xgo-dev/llgo#2263
 remains reproducible.
 
+## Demand-paged native operation catalogs
+
+The next fixed-cost checkpoint is based on `cpunion/llgo:llvm-coro`
+`d4e96df25` plus the demand-page change. It uses the same
+`benchmark/coro_core/testdata/workload` source, Go 1.26.5, LLVM 19.1.7 and a
+fresh compiler cache on Darwin arm64. The pre-change values are the exact
+post-main-sync artifact above; both executables run successfully.
+
+| Metric | eager native catalogs | demand-paged catalogs | Delta |
+| --- | ---: | ---: | ---: |
+| File bytes | 5,020,960 | 5,021,648 | +688 (+0.014%) |
+| `__text` bytes | 2,159,512 | 2,159,492 | -20 |
+| zero-fill bytes | 11,380,814 | 2,070,270 | -9,310,544 (-81.81%) |
+| `coroNativeFleetV1State` | 8,632,560 | 356,528 | -8,276,032 (-95.87%) |
+| `coroNativeMDirectoryV1State` | 1,120,040 | 1,120,040 | unchanged |
+
+Zero-fill remains `__common + __bss`. The reduction does not shrink logical
+capacity or change the two-word `OperationID` producer ABI. Every P retains one
+allocation-free 64-slot inline page. Timer, poll, manual, worker and channel
+catalogs then attach stable pages immediately before an irreversible park.
+Each source embeds eight directory root pointers rather than all 510 possible
+page pointers; one 64-pointer directory block is allocated only when a source
+crosses another 64 dynamic pages. Native profile limits remain 4,096 timers,
+1,024 poll operations, 2,048 manual operations, 1,024 worker operations and
+1,024 channel operations. Embedded, WASM and bare-metal profiles may keep only
+the inline page or supply their own stable allocation policy.
+
+The 600-way standard-library timer and independent `sync.WaitGroup` fixtures
+deterministically exceed the aggregate eight-P inline capacity and both pass a
+fresh compile, link and run. The latter exposed an older keyed-registry defect:
+its linear scan could be preempted while holding a required-plain spin gate,
+leaving another owner spinning forever. The registry now uses one 32-bit
+generation/state CAS word per slot and atomic immutable snapshots. Scans may be
+preempted safely, no new coroutine annotation is required, and the protocol
+does not depend on 64-bit atomics on WASM32 or bare-metal targets. Host race and
+JS/WASM tests cover 600 concurrent claims, FIFO sequence wrap, generation
+exhaustion, cancellation and producer publication races.
+
+The actual coroutine compiler also builds the portable WASI fixture with this
+runtime, not merely its host-Go test adapter. The 1,631,004-byte module has 13
+imports, 3,189 functions, a 1,195,693-byte code section and a 425,471-byte data
+section, and exits successfully under Wasmtime. This directly covers the LLGo
+32-bit atomic lowering selected by the lock-free registry.
+
+Direct runs of the linked 600-way sync and timer fixtures completed in 0.35 s
+at 14.7 MB maximum RSS and 0.57 s at 12.9 MB maximum RSS respectively. A noisy
+but paired five-run smoke comparison between the demand-page candidate before
+and after the lock-free registry gave these medians with `GOMAXPROCS=1`:
+
+| Workload | before lock-free registry | final candidate |
+| --- | ---: | ---: |
+| spawn 100 x 100 rounds | 188.43 ms | 176.57 ms |
+| 5,000 unbuffered handoffs | 147.49 ms | 138.08 ms |
+| 100 timers x 10 rounds | 63.06 ms | 61.06 ms |
+
+These samples establish no observed throughput regression; the host had heavy
+unrelated VM load, so the apparent improvements are not treated as a portable
+performance claim. Fresh standard-library `file` and full TCP/UDP/deadline/DNS
+fixtures also pass. The next fixed-memory target is the unchanged 1.12 MB
+native M directory; it is independent of operation-catalog paging.
+
 ## Compiler analysis and emission
 
 The final native `syncbench` executable has:

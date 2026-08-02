@@ -828,7 +828,15 @@ func ensureCoroChannelOperationCapacityV1(
 			return false
 		}
 		page := new(coro.ChannelOperationPage)
-		if page == nil || !coro.AttachChannelOperationPage(source, p, page) {
+		if page == nil {
+			return false
+		}
+		attached := coro.AttachChannelOperationPage(source, p, page, nil)
+		if !attached {
+			block := new(coro.OperationPageDirectoryBlock)
+			attached = block != nil && coro.AttachChannelOperationPage(source, p, page, block)
+		}
+		if !attached {
 			return false
 		}
 	}

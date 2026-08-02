@@ -81,7 +81,8 @@ func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay 
 	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorTimerDriver(task)
 	now, clockOK := CoroMonotonicNano()
 	deadline, deadlineOK := corotimer.DeadlineAfter(now, delay)
-	if !ok || !clockOK || !deadlineOK {
+	if !ok || !clockOK || !deadlineOK ||
+		!ensureCoroTimerOperationCapacityV1(driver, task, coroRuntimeTimerCapacityV1) {
 		coroTimerAbortV2("cannot resolve coroutine Timer V2 owner or deadline")
 		return
 	}
@@ -132,7 +133,7 @@ func __llgo_coro_timer_park_controlled_v2(
 	}
 	task := (*coro.G)(g)
 	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorTimerDriver(task)
-	if !ok {
+	if !ok || !ensureCoroTimerOperationCapacityV1(driver, task, coroRuntimeTimerCapacityV1) {
 		coroTimerAbortV2("cannot resolve controlled coroutine Timer V2 owner")
 		return
 	}

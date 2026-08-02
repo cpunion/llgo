@@ -166,6 +166,30 @@ func currentExecutorParkDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, 
 	return driver, driver.handle, driver.route, true
 }
 
+// CurrentExecutorSourceCatalog returns the exact owner P and direct-call source
+// catalog during the compiler park/resume-hook window. Target adapters use this
+// narrow capability to grow stable source storage before beginning an
+// irreversible ParkSet transaction. The returned pointers must not cross the
+// subsequent llvm.coro.suspend or any producer ABI.
+func CurrentExecutorSourceCatalog(
+	driver *ExecutorDriver,
+	g *G,
+) (*P, ExecutorSourceCatalog, bool) {
+	current, _, route, ok := currentExecutorParkDriver(g)
+	if !ok || current != driver || driver.sources.owner != g.runP ||
+		driver.sources.route != route || !validExecutorSourceSet(&driver.sources, g.runP) {
+		return nil, ExecutorSourceCatalog{}, false
+	}
+	return g.runP, ExecutorSourceCatalog{
+		Timers:  driver.sources.timers,
+		Poll:    driver.sources.poll,
+		Manual:  driver.sources.manual,
+		Worker:  driver.sources.worker,
+		Channel: driver.sources.channel,
+		Control: driver.sources.control,
+	}, true
+}
+
 // RegisterCurrentExecutorTaskControl exports one generation-stable,
 // pointer-free cancellation endpoint for the task which is executing on this
 // exact driver. The returned OperationID is the only task identity a foreign

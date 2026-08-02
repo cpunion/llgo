@@ -91,7 +91,7 @@ func __llgo_coro_poll_park_v2(
 	}
 	task := (*coro.G)(g)
 	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorPollDriver(task)
-	if !ok {
+	if !ok || !ensureCoroPollOperationCapacityV1(driver, task, coroRuntimePollCapacityV1) {
 		coroPollAbortV2("cannot resolve coroutine Poll V2 owner")
 		return
 	}

@@ -41,33 +41,31 @@ func (registry *coroKeyedRegistryV2) register(
 		key == 0 || !operation.Valid() || operation.Source() != coro.OperationSourceManual {
 		return coroKeyedRegistryHandleV2{}, false
 	}
-	registry.mutex.Lock()
-	if registry.sequence == ^uint64(0) {
-		registry.mutex.Unlock()
-		return coroKeyedRegistryHandleV2{}, false
-	}
 	for index := range registry.slots {
 		slot := &registry.slots[index]
-		if !coroKeyedRegistryReusableSlotV2(slot) || slot.generation == ^uint32(0) {
+		control := coroKeyedAtomicLoadUint32(&slot.control)
+		generation := coroKeyedRegistryControlGenerationV2(control)
+		if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryFreeV2 ||
+			generation == coroKeyedRegistryMaxGenerationV2 {
 			continue
 		}
-		generation := slot.generation + 1
-		registry.sequence++
-		if generation == 0 || registry.sequence == 0 {
-			registry.mutex.Unlock()
-			return coroKeyedRegistryHandleV2{}, false
+		generation++
+		registering := coroKeyedRegistryControlV2(generation, coroKeyedRegistryRegisteringV2)
+		if !coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, registering) {
+			continue
 		}
-		slot.generation = generation
-		slot.kind = kind
-		slot.logical = logical
-		slot.key = key
-		slot.sequence = registry.sequence
-		slot.operation = operation
-		slot.state = coroKeyedRegistryActiveV2
-		registry.mutex.Unlock()
+		sequence := coroKeyedAtomicAddUint32(&registry.sequence, 1)
+		coroKeyedAtomicStoreUint32((*uint32)(unsafe.Pointer(&slot.kind)), uint32(kind))
+		coroKeyedAtomicStoreUint32(&slot.logical, logical)
+		coroKeyedAtomicStoreUintptr(&slot.key, key)
+		coroKeyedAtomicStoreUint32(&slot.sequence, sequence)
+		coroKeyedAtomicStoreUint32(&slot.operation.SourceSlot, operation.SourceSlot)
+		coroKeyedAtomicStoreUint32(&slot.operation.Generation, operation.Generation)
+		coroKeyedAtomicStoreUint32(
+			&slot.control, coroKeyedRegistryControlV2(generation, coroKeyedRegistryActiveV2),
+		)
 		return coroKeyedRegistryHandleV2{Slot: uint32(index) + 1, Generation: generation}, true
 	}
-	registry.mutex.Unlock()
 	return coroKeyedRegistryHandleV2{}, false
 }
 
@@ -83,24 +81,82 @@ func (registry *coroKeyedRegistryV2) claimExact(
 	handle coroKeyedRegistryHandleV2,
 	operation coro.OperationID,
 ) coroKeyedRegistryClaimV2 {
-	registry.mutex.Lock()
 	slot, ok := coroKeyedRegistrySlotV2For(registry, handle)
-	if !ok || slot.generation != handle.Generation || slot.operation != operation {
-		registry.mutex.Unlock()
+	if !ok {
 		return coroKeyedRegistryClaimInvalidV2
 	}
-	var result coroKeyedRegistryClaimV2
-	switch slot.state {
-	case coroKeyedRegistryActiveV2:
-		slot.state = coroKeyedRegistryPostingV2
-		result = coroKeyedRegistryClaimOwnerV2
-	case coroKeyedRegistryPostingV2, coroKeyedRegistryDeliveredV2:
-		result = coroKeyedRegistryClaimAlreadyV2
-	default:
-		result = coroKeyedRegistryClaimInvalidV2
+	for {
+		control := coroKeyedAtomicLoadUint32(&slot.control)
+		if coroKeyedRegistryControlGenerationV2(control) != handle.Generation {
+			return coroKeyedRegistryClaimInvalidV2
+		}
+		loaded, stable := coroKeyedRegistryLoadOperationV2(slot, control)
+		if !stable {
+			continue
+		}
+		if loaded != operation {
+			return coroKeyedRegistryClaimInvalidV2
+		}
+		switch coroKeyedRegistryControlStateV2(control) {
+		case coroKeyedRegistryActiveV2:
+			posting := coroKeyedRegistryControlV2(handle.Generation, coroKeyedRegistryPostingV2)
+			if coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, posting) {
+				return coroKeyedRegistryClaimOwnerV2
+			}
+		case coroKeyedRegistryPostingV2, coroKeyedRegistryDeliveredV2:
+			return coroKeyedRegistryClaimAlreadyV2
+		default:
+			return coroKeyedRegistryClaimInvalidV2
+		}
 	}
-	registry.mutex.Unlock()
-	return result
+}
+
+type coroKeyedRegistrySnapshotV2 struct {
+	control   uint32
+	kind      coroKeyedParkKindV2
+	logical   uint32
+	key       uintptr
+	sequence  uint32
+	operation coro.OperationID
+}
+
+func coroKeyedRegistryLoadOperationV2(
+	slot *coroKeyedRegistrySlotV2,
+	control uint32,
+) (coro.OperationID, bool) {
+	if slot == nil || coroKeyedAtomicLoadUint32(&slot.control) != control {
+		return coro.OperationID{}, false
+	}
+	operation := coro.OperationID{
+		SourceSlot: coroKeyedAtomicLoadUint32(&slot.operation.SourceSlot),
+		Generation: coroKeyedAtomicLoadUint32(&slot.operation.Generation),
+	}
+	return operation, coroKeyedAtomicLoadUint32(&slot.control) == control
+}
+
+func coroKeyedRegistryLoadSnapshotV2(
+	slot *coroKeyedRegistrySlotV2,
+	control uint32,
+) (coroKeyedRegistrySnapshotV2, bool) {
+	if slot == nil || coroKeyedAtomicLoadUint32(&slot.control) != control {
+		return coroKeyedRegistrySnapshotV2{}, false
+	}
+	snapshot := coroKeyedRegistrySnapshotV2{
+		control:  control,
+		kind:     coroKeyedParkKindV2(coroKeyedAtomicLoadUint32((*uint32)(unsafe.Pointer(&slot.kind)))),
+		logical:  coroKeyedAtomicLoadUint32(&slot.logical),
+		key:      coroKeyedAtomicLoadUintptr(&slot.key),
+		sequence: coroKeyedAtomicLoadUint32(&slot.sequence),
+		operation: coro.OperationID{
+			SourceSlot: coroKeyedAtomicLoadUint32(&slot.operation.SourceSlot),
+			Generation: coroKeyedAtomicLoadUint32(&slot.operation.Generation),
+		},
+	}
+	return snapshot, coroKeyedAtomicLoadUint32(&slot.control) == control
+}
+
+func coroKeyedRegistrySequenceLessV2(a, b uint32) bool {
+	return int32(a-b) < 0
 }
 
 func (registry *coroKeyedRegistryV2) claimOne(
@@ -109,29 +165,40 @@ func (registry *coroKeyedRegistryV2) claimOne(
 	logical uint32,
 	exact bool,
 ) (coroKeyedRegistryHandleV2, coro.OperationID, bool) {
-	registry.mutex.Lock()
-	selected := -1
-	var sequence uint64
-	for index := range registry.slots {
-		slot := &registry.slots[index]
-		if slot.state != coroKeyedRegistryActiveV2 || slot.kind != kind || slot.key != key ||
-			exact && slot.logical != logical {
-			continue
-		}
-		if selected < 0 || slot.sequence < sequence {
-			selected, sequence = index, slot.sequence
-		}
-	}
-	if selected < 0 {
-		registry.mutex.Unlock()
+	if registry == nil || (kind != coroKeyedParkSemaphoreV2 && kind != coroKeyedParkNotifyV2) || key == 0 {
 		return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 	}
-	slot := &registry.slots[selected]
-	slot.state = coroKeyedRegistryPostingV2
-	handle := coroKeyedRegistryHandleV2{Slot: uint32(selected) + 1, Generation: slot.generation}
-	operation := slot.operation
-	registry.mutex.Unlock()
-	return handle, operation, true
+	for {
+		selected := -1
+		var candidate coroKeyedRegistrySnapshotV2
+		for index := range registry.slots {
+			slot := &registry.slots[index]
+			control := coroKeyedAtomicLoadUint32(&slot.control)
+			if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryActiveV2 {
+				continue
+			}
+			snapshot, stable := coroKeyedRegistryLoadSnapshotV2(slot, control)
+			if !stable || snapshot.kind != kind || snapshot.key != key ||
+				exact && snapshot.logical != logical {
+				continue
+			}
+			if selected < 0 || coroKeyedRegistrySequenceLessV2(snapshot.sequence, candidate.sequence) {
+				selected, candidate = index, snapshot
+			}
+		}
+		if selected < 0 {
+			return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
+		}
+		generation := coroKeyedRegistryControlGenerationV2(candidate.control)
+		posting := coroKeyedRegistryControlV2(generation, coroKeyedRegistryPostingV2)
+		if coroKeyedAtomicCompareAndSwapUint32(
+			&registry.slots[selected].control, candidate.control, posting,
+		) {
+			return coroKeyedRegistryHandleV2{
+				Slot: uint32(selected) + 1, Generation: generation,
+			}, candidate.operation, true
+		}
+	}
 }
 
 type coroKeyedRegistryPublishV2 uint8
@@ -143,14 +210,16 @@ const (
 )
 
 func coroKeyedRegistryPublicationRetiredV2(
-	slot *coroKeyedRegistrySlotV2,
+	control uint32,
 	handle coroKeyedRegistryHandleV2,
 ) bool {
-	if slot == nil || slot.generation < handle.Generation {
+	generation := coroKeyedRegistryControlGenerationV2(control)
+	if generation < handle.Generation {
 		return false
 	}
-	return slot.generation > handle.Generation ||
-		slot.generation == handle.Generation && coroKeyedRegistryReusableSlotV2(slot)
+	return generation > handle.Generation ||
+		generation == handle.Generation &&
+			coroKeyedRegistryControlStateV2(control) == coroKeyedRegistryFreeV2
 }
 
 // finishPost publishes the private registry terminal state before the Manual
@@ -161,34 +230,40 @@ func (registry *coroKeyedRegistryV2) finishPost(
 	handle coroKeyedRegistryHandleV2,
 	operation coro.OperationID,
 ) coroKeyedRegistryPublishV2 {
-	registry.mutex.Lock()
 	slot, ok := coroKeyedRegistrySlotV2For(registry, handle)
 	if !ok {
-		registry.mutex.Unlock()
 		return coroKeyedRegistryPublishInvalidV2
 	}
-	if slot.generation == handle.Generation && slot.operation == operation &&
-		slot.state == coroKeyedRegistryPostingV2 {
-		slot.state = coroKeyedRegistryDeliveredV2
-		registry.mutex.Unlock()
-		return coroKeyedRegistryPublishReadyV2
+	for {
+		control := coroKeyedAtomicLoadUint32(&slot.control)
+		if coroKeyedRegistryPublicationRetiredV2(control, handle) {
+			return coroKeyedRegistryPublishRetiredV2
+		}
+		if coroKeyedRegistryControlGenerationV2(control) != handle.Generation ||
+			coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryPostingV2 {
+			return coroKeyedRegistryPublishInvalidV2
+		}
+		loaded, stable := coroKeyedRegistryLoadOperationV2(slot, control)
+		if !stable {
+			continue
+		}
+		if loaded != operation {
+			return coroKeyedRegistryPublishInvalidV2
+		}
+		delivered := coroKeyedRegistryControlV2(handle.Generation, coroKeyedRegistryDeliveredV2)
+		if coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, delivered) {
+			return coroKeyedRegistryPublishReadyV2
+		}
 	}
-	retired := coroKeyedRegistryPublicationRetiredV2(slot, handle)
-	registry.mutex.Unlock()
-	if retired {
-		return coroKeyedRegistryPublishRetiredV2
-	}
-	return coroKeyedRegistryPublishInvalidV2
 }
 
 func (registry *coroKeyedRegistryV2) publicationRetired(
 	handle coroKeyedRegistryHandleV2,
 ) bool {
-	registry.mutex.Lock()
 	slot, ok := coroKeyedRegistrySlotV2For(registry, handle)
-	retired := ok && coroKeyedRegistryPublicationRetiredV2(slot, handle)
-	registry.mutex.Unlock()
-	return retired
+	return ok && coroKeyedRegistryPublicationRetiredV2(
+		coroKeyedAtomicLoadUint32(&slot.control), handle,
+	)
 }
 
 func coroKeyedTicketLessV2(a, b uint32) bool {
@@ -259,7 +334,7 @@ func __llgo_coro_keyed_park_v2(g, handle, header, storage unsafe.Pointer) {
 	}
 	task := (*coro.G)(g)
 	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorManualDriver(task)
-	if !ok {
+	if !ok || !ensureCoroManualOperationCapacityV1(driver, task, coroRuntimeManualCapacityV1) {
 		coroKeyedAbortV2("cannot resolve coroutine keyed Park V2 owner")
 		return
 	}
