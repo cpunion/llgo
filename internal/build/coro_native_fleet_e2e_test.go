@@ -1806,6 +1806,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_timer_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_operation_capacity.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_nil_fault.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_trace_release.go"),
@@ -1830,6 +1831,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_fleet_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_keyed_registry_atomic_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_resume_materialize.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_coro.go"),
@@ -1837,6 +1839,8 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro_atomic_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_wait_coro.go"),
 	}...)
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_operation_capacity.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_keyed_registry_atomic_llgo.go")
 	files = materializeCoroChannelNativeE2ERuntimeIsland(t, files)
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
