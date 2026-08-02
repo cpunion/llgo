@@ -1,4 +1,4 @@
-//go:build wasm && llgo_wasm_gc
+//go:build wasm && llgo_wasm_gc && !(llgo && llgo.wasm_resume && (js || wasip1) && !(wasip1 && llgo.wasi_threads))
 
 package runtime
 

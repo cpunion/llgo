@@ -28,21 +28,29 @@ import (
 
 type runtimeContextPlatform struct {
 	context    wasmresume.Context
+	gcRoot     wasmGCRootContext
 	runqNext   *g
 	runqQueued bool
 	unwind     unsafe.Pointer
+	unwindRoot unsafe.Pointer
 }
 
 var wasmSched struct {
-	m          m
-	p          p
-	runq       runqueue.Queue[*g]
-	started    bool
-	mainExited bool
+	m           m
+	p           p
+	gcRoot      wasmGCRootContext
+	runq        runqueue.Queue[*g]
+	started     bool
+	mainStarted bool
+	running     bool
+	mainExited  bool
 }
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	gp := initG(ctx, callergp, status)
+	if wasmGCRootEnabled {
+		registerWasmGCRoot(&ctx.platform.gcRoot, false)
+	}
 	if status == _Grunning {
 		initWasmScheduler(gp)
 	}
@@ -55,6 +63,9 @@ func initWasmScheduler(gp *g) {
 		return
 	}
 	wasmSched.started = true
+	if wasmGCRootEnabled {
+		registerWasmGCRoot(&wasmSched.gcRoot, true)
+	}
 	mp := &wasmSched.m
 	pp := &wasmSched.p
 	mp.curg = gp
@@ -72,20 +83,53 @@ func wasmMainStart(*wasmresume.Context, unsafe.Pointer) *wasmresume.Frame
 // RunWasmMain runs package initialization and main.main through the resumable
 // ABI while the host entry remains on its original stack.
 func RunWasmMain() {
-	gp := getg()
-	if gp == nil || !gp.isMain {
+	if wasmSched.running {
+		fatal("runtime: concurrent WebAssembly scheduler entry")
+		return
+	}
+	wasmSched.running = true
+
+	var gp *g
+	if !wasmSched.mainStarted {
+		gp = getg()
+	}
+	if !wasmSched.mainStarted && (gp == nil || !gp.isMain) {
+		wasmSched.running = false
 		fatal("runtime: invalid WebAssembly main goroutine")
 		return
 	}
-	gp.context.platform.context.Start(
-		wasmMainStart(&gp.context.platform.context, nil),
-	)
+	if !wasmSched.mainStarted {
+		gp.context.platform.context.Start(
+			wasmMainStart(&gp.context.platform.context, nil),
+		)
+		wasmSched.mainStarted = true
+		initWasmResumeHost()
+	}
 
 	for {
+		if gp == nil {
+			var yieldHost bool
+			gp, yieldHost = waitWasmResumeRunq()
+			if gp == nil {
+				wasmSched.running = false
+				if yieldHost {
+					return
+				}
+				stopWasmResumeHost()
+				if wasmSched.mainExited {
+					fatal("no goroutines (main called runtime.Goexit) - deadlock!")
+				} else {
+					fatal("all goroutines are asleep - deadlock!")
+				}
+				return
+			}
+		}
+
 		action := runWasmResumeContext(gp)
 		status := readgstatus(gp)
 		if action == wasmresume.Return {
 			if status != _Grunning {
+				wasmSched.running = false
 				fatal("runtime: invalid completed WebAssembly goroutine")
 				return
 			}
@@ -93,9 +137,12 @@ func RunWasmMain() {
 			status = _Gdead
 			if gp.isMain {
 				releaseWasmContext(gp)
+				stopWasmResumeHost()
+				wasmSched.running = false
 				return
 			}
 		} else if action != wasmresume.Suspend || status == _Grunning {
+			wasmSched.running = false
 			fatal("runtime: invalid WebAssembly resume action")
 			return
 		}
@@ -104,16 +151,7 @@ func RunWasmMain() {
 		if status == _Gdead {
 			releaseWasmContext(gp)
 		}
-
-		gp = wasmSched.runq.Pop()
-		if gp == nil {
-			if wasmSched.mainExited {
-				fatal("no goroutines (main called runtime.Goexit) - deadlock!")
-			} else {
-				fatal("all goroutines are asleep - deadlock!")
-			}
-			return
-		}
+		gp = nil
 	}
 }
 
@@ -129,25 +167,41 @@ func runWasmResumeContext(gp *g) wasmresume.Action {
 	setg(gp)
 
 	platform := &gp.context.platform
+	if wasmGCRootEnabled {
+		switchWasmGCRoot(&platform.gcRoot)
+	}
 	unwind := c.AllocaSigjmpBuf()
 	previous := platform.unwind
+	previousRoot := platform.unwindRoot
 	platform.unwind = unwind
+	platform.unwindRoot = captureWasmResumeGCRoot()
 	if c.Sigsetjmp(unwind, 0) != 0 {
 		if !platform.context.Unwind(unsafe.Pointer(gp.defer_), FreeRoot) {
 			platform.unwind = previous
+			platform.unwindRoot = previousRoot
 			if gp.goexit {
 				casgstatus(gp, _Grunning, _Gdead)
 				if gp.isMain {
 					wasmSched.mainExited = true
 				}
+				if wasmGCRootEnabled {
+					switchWasmGCRoot(&wasmSched.gcRoot)
+				}
 				return wasmresume.Suspend
 			}
 			Rethrow(nil)
+			if wasmGCRootEnabled {
+				switchWasmGCRoot(&wasmSched.gcRoot)
+			}
 			return wasmresume.Return
 		}
 	}
 	action := platform.context.Run()
 	platform.unwind = previous
+	platform.unwindRoot = previousRoot
+	if wasmGCRootEnabled {
+		switchWasmGCRoot(&wasmSched.gcRoot)
+	}
 	return action
 }
 
@@ -174,6 +228,9 @@ func releaseWasmContext(gp *g) {
 	}
 	ctx := gp.context
 	ctx.platform.context.Close(FreeRoot)
+	if wasmGCRootEnabled {
+		unregisterWasmGCRoot(&ctx.platform.gcRoot)
+	}
 	freeRuntimeContext(ctx)
 }
 

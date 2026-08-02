@@ -20,8 +20,6 @@ package wasmevent
 
 import _ "unsafe"
 
-const LLGoFiles = "_wrap/event_wasm.c"
-
 var runtimeQueue queue
 
 func Reset(timer *Timer, when, period int64, callback Callback, arg any) bool {
@@ -46,6 +44,11 @@ func waitRuntimeQueue() bool {
 
 func Now() int64 {
 	return hostNow()
+}
+
+// NextDeadline reports the earliest active host-event deadline.
+func NextDeadline() (int64, bool) {
+	return runtimeQueue.deadline()
 }
 
 //go:linkname hostNow C.llgo_wasm_event_now

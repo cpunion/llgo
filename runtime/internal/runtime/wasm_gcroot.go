@@ -28,6 +28,9 @@ func adoptWasmGCRoot(ctx *wasmGCRootContext) {
 	gcroot.AdoptCurrent(ctx)
 }
 
+//go:linkname switchWasmGCRoot github.com/goplus/llgo/runtime/internal/gcroot.SwitchAtBoundary
+func switchWasmGCRoot(*wasmGCRootContext)
+
 func publishWasmGCRoot() {
 	gcroot.PublishCurrent()
 }
