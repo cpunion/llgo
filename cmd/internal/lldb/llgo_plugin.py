@@ -1,5 +1,7 @@
 # pylint: disable=missing-module-docstring,missing-class-docstring,missing-function-docstring
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -42,6 +44,7 @@ def _load_debugger_schema() -> Tuple[Dict[str, Any], Optional[str]]:
 LLGO_DEBUGGER_SCHEMA, LLGO_DEBUGGER_SCHEMA_ERROR = _load_debugger_schema()
 _RECORD_SCHEMA = LLGO_DEBUGGER_SCHEMA.get("record", {})
 LLGO_DEBUGGER_RECORD_SYMBOL = _RECORD_SCHEMA.get("native_symbol", "")
+LLGO_DEBUGGER_WASM_SECTION = _RECORD_SCHEMA.get("wasm_custom_section", "")
 LLGO_DEBUGGER_RECORD_SIZE = int(_RECORD_SCHEMA.get("size", 0))
 try:
     LLGO_DEBUGGER_RECORD_MAGIC = bytes.fromhex(
@@ -435,6 +438,76 @@ def _sbdata_bytes(data: lldb.SBData, size: int) -> Optional[bytes]:
     return raw if error.Success() else None
 
 
+def _read_uleb(raw: bytes, offset: int,
+               maximum_bits: int = 32) -> Tuple[int, int]:
+    value = 0
+    shift = 0
+    maximum_bytes = (maximum_bits + 6) // 7
+    for _ in range(maximum_bytes):
+        if offset >= len(raw):
+            raise ValueError("truncated WebAssembly unsigned LEB128")
+        byte = raw[offset]
+        offset += 1
+        payload = byte & 0x7f
+        if shift + 7 > maximum_bits and payload >= (1 << (maximum_bits - shift)):
+            raise ValueError("WebAssembly unsigned LEB128 overflows")
+        value |= payload << shift
+        if byte & 0x80 == 0:
+            return value, offset
+        shift += 7
+    raise ValueError("invalid WebAssembly unsigned LEB128")
+
+
+def _wasm_debugger_records(path: Path) -> List[bytes]:
+    if not LLGO_DEBUGGER_WASM_SECTION:
+        return []
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    if len(raw) < 8 or raw[:8] != b"\x00asm\x01\x00\x00\x00":
+        return []
+
+    records = []
+    offset = 8
+    try:
+        while offset < len(raw):
+            section_id = raw[offset]
+            offset += 1
+            size, offset = _read_uleb(raw, offset)
+            end = offset + size
+            if end > len(raw):
+                raise ValueError("truncated WebAssembly section")
+            if section_id == 0:
+                name_size, payload = _read_uleb(raw, offset)
+                name_end = payload + name_size
+                if name_end > end:
+                    raise ValueError(
+                        "truncated WebAssembly custom-section name")
+                name = raw[payload:name_end].decode("utf-8")
+                if name == LLGO_DEBUGGER_WASM_SECTION:
+                    records.append(raw[name_end:end])
+            offset = end
+    except (UnicodeDecodeError, ValueError):
+        return [b""]
+    if len(records) > 1:
+        return [b""]
+    return records
+
+
+def _module_file_path(module: lldb.SBModule) -> Optional[Path]:
+    if not module or not module.IsValid():
+        return None
+    file_spec = module.GetFileSpec()
+    if not file_spec or not file_spec.IsValid():
+        return None
+    directory = file_spec.GetDirectory() or ""
+    filename = file_spec.GetFilename() or ""
+    if not filename:
+        return None
+    return Path(directory) / filename if directory else Path(filename)
+
+
 def _read_debugger_record(target: lldb.SBTarget) -> Optional[bytes]:
     if not LLGO_DEBUGGER_RECORD_SYMBOL or LLGO_DEBUGGER_RECORD_SIZE <= 0:
         return None
@@ -462,6 +535,20 @@ def _read_debugger_record(target: lldb.SBTarget) -> Optional[bytes]:
                 if error.Success() and raw is not None:
                     records.append(bytes(raw))
 
+    paths = set()
+    for module_index in range(target.GetNumModules()):
+        path = _module_file_path(target.GetModuleAtIndex(module_index))
+        if path is None:
+            continue
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if key in paths:
+            continue
+        paths.add(key)
+        records.extend(_wasm_debugger_records(path))
+
     if not records:
         return None
     first = records[0]
@@ -485,7 +572,7 @@ def _record_field(raw: bytes, name: str) -> Optional[int]:
 def _decode_debugger_record(
         raw: bytes) -> Tuple[Optional[LLGoDebuggerRecord], Optional[str]]:
     if len(raw) != LLGO_DEBUGGER_RECORD_SIZE:
-        return None, "conflicting or incorrectly sized native records"
+        return None, "conflicting or incorrectly sized debugger records"
     if not LLGO_DEBUGGER_RECORD_MAGIC or not raw.startswith(
             LLGO_DEBUGGER_RECORD_MAGIC):
         return None, "invalid record magic"

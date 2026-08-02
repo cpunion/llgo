@@ -30,6 +30,7 @@ import (
 
 	"github.com/goplus/llgo/cmd/internal/gdb"
 	"github.com/goplus/llgo/cmd/internal/lldb"
+	wasmtimetool "github.com/goplus/llgo/cmd/internal/wasmtime"
 	"github.com/goplus/llgo/internal/build"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/shellparse"
@@ -56,11 +57,12 @@ const (
 )
 
 type options struct {
-	backend backend
-	lldb    string
-	gdb     string
-	remote  string
-	server  string
+	backend  backend
+	lldb     string
+	gdb      string
+	wasmtime string
+	remote   string
+	server   string
 }
 
 func (o options) validate() error {
@@ -128,10 +130,18 @@ type session struct {
 }
 
 func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
-	plan, err := makeServerPlan(s.target, s.artifact, s.options)
+	cleanup := func() {}
+	var plan *serverPlan
+	var err error
+	if s.backend == backendWasmtime {
+		plan, cleanup, err = makeWASIServerPlan(s.artifact, s.options)
+	} else {
+		plan, err = makeServerPlan(s.target, s.artifact, s.options)
+	}
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	args, err := debuggerArguments(s.backend, s.artifact, s.debuggerArgs, plan)
 	if err != nil {
 		return err
@@ -159,6 +169,10 @@ func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
 		if err := gdb.Run(s.options.gdb, candidates, args, stdin, stdout, stderr); err != nil {
 			debugErr = err
 		}
+	case backendWasmtime:
+		if err := lldb.RunWasm(s.options.lldb, args, stdin, stdout, stderr); err != nil {
+			debugErr = fmt.Errorf("llgo debug: %w", err)
+		}
 	default:
 		debugErr = fmt.Errorf("llgo debug: backend %s is not implemented", s.backend)
 	}
@@ -171,9 +185,58 @@ func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
 }
 
 type serverPlan struct {
-	command []string
-	address string
-	load    bool
+	command  []string
+	address  string
+	load     bool
+	readyLog string
+}
+
+func makeWASIServerPlan(artifact string, opts options) (*serverPlan, func(), error) {
+	memory, err := validateWASIDebugArtifact(artifact)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	if opts.remote != "" {
+		if opts.server != "" {
+			return nil, func() {}, errors.New("llgo debug: -remote and -server are mutually exclusive")
+		}
+		return &serverPlan{address: normalizeRemoteAddress(opts.remote)}, func() {}, nil
+	}
+
+	port, err := freeTCPPort()
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("llgo debug: allocate Wasmtime guest-debug port: %w", err)
+	}
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	if opts.server != "" {
+		command, err := parseServerCommand(opts.server, artifact, port)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return &serverPlan{command: command, address: address}, func() {}, nil
+	}
+
+	wasmtimePath, err := wasmtimetool.Find(opts.wasmtime)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	environment, cleanup, err := writeWASIEnvironment(memory)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	command := []string{
+		wasmtimePath,
+		"run",
+		"-g", strconv.Itoa(port),
+		"-W", "threads=y,shared-memory=y",
+		"--preload", "env=" + environment,
+		artifact,
+	}
+	return &serverPlan{
+		command:  command,
+		address:  address,
+		readyLog: "Debugger listening on",
+	}, cleanup, nil
 }
 
 func makeServerPlan(target *targets.Config, artifact string, opts options) (*serverPlan, error) {
@@ -294,31 +357,38 @@ func startServer(plan serverPlan) (*debugServer, error) {
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
 	server := &debugServer{cmd: command, done: done, log: log, logPath: log.Name()}
-	if err := server.waitReady(plan.address, 10*time.Second); err != nil {
+	if err := server.waitReady(plan, 10*time.Second); err != nil {
 		server.stop()
 		return nil, err
 	}
 	return server, nil
 }
 
-func (s *debugServer) waitReady(address string, timeout time.Duration) error {
+func (s *debugServer) waitReady(plan serverPlan, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-s.done:
 			s.finished = true
-			return fmt.Errorf("llgo debug: debug server exited before listening at %s: %v%s", address, err, s.logSuffix())
+			return fmt.Errorf("llgo debug: debug server exited before listening at %s: %v%s", plan.address, err, s.logSuffix())
 		default:
 		}
-		connection, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
-		if err == nil {
-			connection.Close()
-			time.Sleep(50 * time.Millisecond)
-			return nil
+		if plan.readyLog != "" {
+			data, _ := os.ReadFile(s.logPath)
+			if strings.Contains(string(data), plan.readyLog) {
+				return nil
+			}
+		} else {
+			connection, err := net.DialTimeout("tcp", plan.address, 100*time.Millisecond)
+			if err == nil {
+				connection.Close()
+				time.Sleep(50 * time.Millisecond)
+				return nil
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	return fmt.Errorf("llgo debug: timed out waiting for debug server at %s%s", address, s.logSuffix())
+	return fmt.Errorf("llgo debug: timed out waiting for debug server at %s%s", plan.address, s.logSuffix())
 }
 
 func (s *debugServer) stop() {
@@ -381,6 +451,12 @@ func debuggerArguments(selected backend, artifact string, extra []string, server
 			artifact,
 			"-o", "gdb-remote " + server.address,
 			"-o", "target modules load --file " + quoteLLDBArgument(artifact) + " --slide 0",
+		}
+		return append(args, extra...), nil
+	case backendWasmtime:
+		args := []string{
+			artifact,
+			"-o", "process connect --plugin wasm connect://" + server.address,
 		}
 		return append(args, extra...), nil
 	default:
