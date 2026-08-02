@@ -46,12 +46,14 @@ debugger schema, runtime-layout version, target triple, pointer size, and byte
 order. Unknown marker versions disable only the LLGo-specific commands; raw
 LLDB debugging remains available.
 
-For recognized LLGo targets, the adapter also gives strings length-bounded
-quoted summaries and slices `len`/`cap` summaries with indexed synthetic
-children. These views cover named string and slice types as well as the
-predeclared types. Explicit `llgo print` slice views respect LLDB's
-`target.max-children-count` setting. Ordinary C targets and targets with
-unknown or ambiguous LLGo markers retain LLDB's raw presentation.
+For recognized LLGo targets, the adapter provides runtime-aware views for
+strings, slices, interfaces, function values, maps, and channels. Maps expose
+their length and typed key/value children, including indirect large entries;
+channels expose length, capacity, closed state, and buffered values in receive
+order. Named container types are covered as well as predeclared types. Explicit
+`llgo print` slice views respect LLDB's `target.max-children-count` setting.
+Ordinary C targets and targets with unknown or ambiguous LLGo markers retain
+LLDB's raw presentation.
 
 The integration fixture follows LLDB's API-test style: `main.go` marks
 executable breakpoint lines with `LLDB_BREAK`, while `test.py` keeps the
