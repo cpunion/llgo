@@ -1,0 +1,77 @@
+name: WASI Debug
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/wasi-debug.yml"
+      - "cmd/internal/debug/**"
+      - "cmd/internal/lldb/**"
+      - "cmd/internal/wasmtime/**"
+      - "cmd/llgo/debugtest/wasi/**"
+      - "internal/debugabi/**"
+      - "internal/wasmdebug/**"
+  pull_request:
+    branches: ["**"]
+    paths:
+      - ".github/workflows/wasi-debug.yml"
+      - "cmd/internal/debug/**"
+      - "cmd/internal/lldb/**"
+      - "cmd/internal/wasmtime/**"
+      - "cmd/llgo/debugtest/wasi/**"
+      - "internal/debugabi/**"
+      - "internal/wasmdebug/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guest-debug:
+    name: Wasmtime 47 / LLDB 22 guest debug
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install LLGo dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 19
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Cache WASI crosscompile toolchain
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/llgo/crosscompile
+          key: wasi-debug-${{ runner.os }}-${{ runner.arch }}-v25
+
+      - name: Install guest-debug tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tools
+          curl -fL --retry 3 \
+            https://github.com/bytecodealliance/wasmtime/releases/download/v47.0.3/wasmtime-v47.0.3-x86_64-linux.tar.xz \
+            | tar -xJ -C .tools
+          curl -fL --retry 3 \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-x86_64-linux.tar.gz \
+            | tar -xz -C .tools
+          echo "LLGO_WASMTIME=${GITHUB_WORKSPACE}/.tools/wasmtime-v47.0.3-x86_64-linux/wasmtime" >> "${GITHUB_ENV}"
+          echo "LLGO_LLDB=${GITHUB_WORKSPACE}/.tools/wasi-sdk-33.0-x86_64-linux/bin/lldb" >> "${GITHUB_ENV}"
+          echo "LLGO_ROOT=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+
+      - name: Test session planning and debugger contracts
+        run: |
+          go test -timeout 10m \
+            ./internal/debugabi \
+            ./internal/wasmdebug \
+            ./cmd/internal/wasmtime \
+            ./cmd/internal/lldb \
+            ./cmd/internal/debug
+
+      - name: Test WASI source-debug session
+        run: bash cmd/llgo/debugtest/wasi/runtest.sh

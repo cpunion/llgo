@@ -20,14 +20,18 @@ package lldb
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/goplus/llgo/cmd/internal/base"
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/goplus/llgo/internal/mockable"
+	"github.com/goplus/llgo/internal/wasmdebug"
 )
 
 func TestParseLLDBVersion(t *testing.T) {
@@ -104,6 +108,62 @@ func TestFindLLDBPrecedenceAndFallback(t *testing.T) {
 	}
 	if _, err := findLLDBFrom("", "", []string{oldLLDB, filepath.Join(t.TempDir(), "missing")}); err == nil {
 		t.Fatal("findLLDBFrom() succeeded without a supported LLDB")
+	}
+}
+
+func TestFindWasmLLDBCapabilities(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell")
+	}
+	wasmWithScript := writeFakeWasmLLDB(t, "lldb version 22.1.0", true, true, "")
+	wasmWithoutScript := writeFakeWasmLLDB(t, "lldb version 22.1.0-wasi-sdk", true, false, "")
+	withoutWasm := writeFakeWasmLLDB(t, "lldb version 22.1.0", false, true, "")
+	old := writeFakeWasmLLDB(t, "lldb version 21.1.0", true, true, "")
+
+	path, capabilities, err := findWasmLLDBFrom(wasmWithScript, "", nil)
+	if err != nil || path != wasmWithScript || !capabilities.wasm || !capabilities.scripting {
+		t.Fatalf("scripted Wasm LLDB = (%q, %+v, %v)", path, capabilities, err)
+	}
+	path, capabilities, err = findWasmLLDBFrom("", wasmWithoutScript, nil)
+	if err != nil || path != wasmWithoutScript || !capabilities.wasm || capabilities.scripting {
+		t.Fatalf("non-scripted Wasm LLDB = (%q, %+v, %v)", path, capabilities, err)
+	}
+	if _, _, err := findWasmLLDBFrom(withoutWasm, "", nil); err == nil || !strings.Contains(err.Error(), "WebAssembly process plugin") {
+		t.Fatalf("non-Wasm LLDB error = %v", err)
+	}
+	if _, _, err := findWasmLLDBFrom(old, "", nil); err == nil || !strings.Contains(err.Error(), "version 22 or newer") {
+		t.Fatalf("old Wasm LLDB error = %v", err)
+	}
+	if !hasWasmProcessPlugin("process\n  [+] wasm  WebAssembly process\nplatform\n") {
+		t.Fatal("hasWasmProcessPlugin did not recognize the process plugin")
+	}
+	if hasWasmProcessPlugin("object-file\n  [+] wasm  WebAssembly object file\n") {
+		t.Fatal("hasWasmProcessPlugin confused the object-file plugin with the process plugin")
+	}
+}
+
+func TestRunWasmAdapterDowngrade(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell")
+	}
+	capture := filepath.Join(t.TempDir(), "arguments")
+	t.Setenv("LLGO_LLDB_TEST_CAPTURE", capture)
+	fake := writeFakeWasmLLDB(t, "lldb version 22.1.0-wasi-sdk", true, false,
+		`printf '%s\n' "$@" > "$LLGO_LLDB_TEST_CAPTURE"`)
+
+	var stdout, stderr bytes.Buffer
+	if err := RunWasm(fake, []string{"program.wasm", "-o", "process connect --plugin wasm connect://127.0.0.1:1234"}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "command script import") {
+		t.Fatalf("non-scripted LLDB arguments unexpectedly import the adapter: %q", string(data))
+	}
+	if !strings.Contains(stderr.String(), "runtime presentation is disabled") {
+		t.Fatalf("downgrade warning = %q", stderr.String())
 	}
 }
 
@@ -215,6 +275,49 @@ func TestEmbeddedPluginIdentity(t *testing.T) {
 	}
 }
 
+func TestEmbeddedPluginReadsWasmDebuggerRecord(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	dir := t.TempDir()
+	pluginPath := filepath.Join(dir, "llgo_plugin.py")
+	if err := os.WriteFile(pluginPath, pluginSource, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, debuggerSchemaFilename), debugabi.SchemaV1(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	record := debugabi.NewRecord(2, 4, debugabi.ByteOrderLittle)
+	recordBytes, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := wasmdebug.SetDebuggerRecord([]byte{0, 'a', 's', 'm', 1, 0, 0, 0}, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modulePath := filepath.Join(dir, "program.wasm")
+	if err := os.WriteFile(modulePath, module, 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`
+import importlib.util
+from pathlib import Path
+import sys
+import types
+sys.modules["lldb"] = types.ModuleType("lldb")
+spec = importlib.util.spec_from_file_location("llgo_plugin", %q)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules["llgo_plugin"] = plugin
+spec.loader.exec_module(plugin)
+assert plugin._wasm_debugger_records(Path(%q)) == [bytes.fromhex(%q)]
+`, pluginPath, modulePath, fmt.Sprintf("%x", recordBytes))
+	if output, err := exec.Command(python, "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("Wasm record parser failed: %v\n%s", err, output)
+	}
+}
+
 func writeFakeLLDB(t *testing.T, version, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "lldb")
@@ -223,6 +326,40 @@ func writeFakeLLDB(t *testing.T, version, body string) string {
 		"  printf '%s\\n' '" + version + "'\n" +
 		"  exit 0\n" +
 		"fi\n" + body
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeFakeWasmLLDB(t *testing.T, version string, wasm, scripting bool, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "lldb")
+	wasmPlugin := ""
+	if wasm {
+		wasmPlugin = "  [+] wasm  GDB Remote protocol based WebAssembly debugging plug-in."
+	}
+	scriptStatus := "exit 1"
+	if scripting {
+		scriptStatus = "echo LLGO_SCRIPT_OK; exit 0"
+	}
+	script := `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\n' '` + version + `'
+  exit 0
+fi
+if [ "$1" = "--batch" ] && [ "$2" = "-o" ] && [ "$3" = "plugin list" ]; then
+  echo process
+  echo '` + wasmPlugin + `'
+  echo platform
+  exit 0
+fi
+if [ "$1" = "--batch" ] && [ "$2" = "-o" ]; then
+  case "$3" in
+    script*) ` + scriptStatus + ` ;;
+  esac
+fi
+` + body + "\n"
 	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

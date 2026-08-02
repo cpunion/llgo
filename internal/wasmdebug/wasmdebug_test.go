@@ -14,6 +14,11 @@ func appendSection(dst []byte, id byte, payload []byte) []byte {
 	return append(dst, payload...)
 }
 
+func appendName(dst []byte, name string) []byte {
+	dst = appendULEB32(dst, uint32(len(name)))
+	return append(dst, name...)
+}
+
 func debugFixture() []byte {
 	module := append([]byte(nil), wasmHeader...)
 	module = appendCustomSection(module, "producers", []byte("LLGo"))
@@ -197,5 +202,71 @@ func TestDebuggerRecordValidation(t *testing.T) {
 	}
 	if _, err := SetDebuggerRecord(base, debugabi.Record{}); err == nil {
 		t.Fatal("SetDebuggerRecord accepted an invalid record")
+	}
+}
+
+func TestImportedMemories(t *testing.T) {
+	imports := appendULEB32(nil, 3)
+	imports = appendName(imports, "wasi_snapshot_preview1")
+	imports = appendName(imports, "fd_write")
+	imports = append(imports, 0)
+	imports = appendULEB32(imports, 7)
+	imports = appendName(imports, "env")
+	imports = appendName(imports, "memory")
+	imports = append(imports, 2)
+	imports = appendULEB32(imports, 3) // maximum + shared, wasm32
+	imports = appendULEB32(imports, 1024)
+	imports = appendULEB32(imports, 1024)
+	imports = appendName(imports, "host")
+	imports = appendName(imports, "memory64")
+	imports = append(imports, 2)
+	imports = appendULEB32(imports, 5)                      // maximum + memory64
+	imports = append(imports, 0x80, 0x80, 0x80, 0x80, 0x10) // 2^32
+	imports = append(imports, 0x81, 0x80, 0x80, 0x80, 0x10) // 2^32 + 1
+
+	module := appendSection(append([]byte(nil), wasmHeader...), 2, imports)
+	got, err := ImportedMemories(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []MemoryImport{
+		{Module: "env", Name: "memory", Minimum: 1024, Maximum: 1024, HasMax: true, Shared: true},
+		{Module: "host", Name: "memory64", Minimum: 1 << 32, Maximum: 1<<32 + 1, HasMax: true, Memory64: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ImportedMemories() = %+v, want %+v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Errorf("ImportedMemories()[%d] = %+v, want %+v", index, got[index], want[index])
+		}
+	}
+}
+
+func TestImportedMemoriesValidation(t *testing.T) {
+	valid := appendULEB32(nil, 1)
+	valid = appendName(valid, "env")
+	valid = appendName(valid, "memory")
+	valid = append(valid, 2)
+	valid = appendULEB32(valid, 3)
+	valid = appendULEB32(valid, 1)
+	valid = appendULEB32(valid, 2)
+
+	tests := [][]byte{
+		append(valid, 0),
+		append(append([]byte(nil), valid[:len(valid)-1]...), 0),
+		append(append([]byte(nil), valid[:len(valid)-2]...), 1, 0),
+	}
+	for index, imports := range tests {
+		module := appendSection(append([]byte(nil), wasmHeader...), 2, imports)
+		if _, err := ImportedMemories(module); err == nil {
+			t.Errorf("ImportedMemories accepted malformed fixture %d", index)
+		}
+	}
+
+	duplicate := appendSection(append([]byte(nil), wasmHeader...), 2, []byte{0})
+	duplicate = appendSection(duplicate, 2, []byte{0})
+	if _, err := ImportedMemories(duplicate); err == nil {
+		t.Fatal("ImportedMemories accepted duplicate import sections")
 	}
 }

@@ -58,6 +58,25 @@ func readULEB32(raw []byte, off *int) (uint32, error) {
 	return 0, errors.New("invalid WebAssembly varuint32")
 }
 
+func readULEB64(raw []byte, off *int) (uint64, error) {
+	var value uint64
+	for shift := uint(0); shift < 70; shift += 7 {
+		if *off >= len(raw) {
+			return 0, errors.New("truncated WebAssembly varuint64")
+		}
+		b := raw[*off]
+		(*off)++
+		if shift == 63 && b > 0x01 {
+			return 0, errors.New("WebAssembly varuint64 overflows")
+		}
+		value |= uint64(b&0x7f) << shift
+		if b&0x80 == 0 {
+			return value, nil
+		}
+	}
+	return 0, errors.New("invalid WebAssembly varuint64")
+}
+
 func appendULEB32(dst []byte, value uint32) []byte {
 	for {
 		b := byte(value & 0x7f)
@@ -105,7 +124,7 @@ func parse(raw []byte) ([]section, error) {
 			return nil, errors.New("truncated WebAssembly section")
 		}
 		end := off + int(size)
-		entry := section{raw: raw[start:end], id: id}
+		entry := section{raw: raw[start:end], id: id, content: raw[off:end]}
 		if id == 0 {
 			payloadOff := off
 			entry.name, err = readName(raw[:end], &payloadOff)
@@ -118,6 +137,189 @@ func parse(raw []byte) ([]section, error) {
 		off = end
 	}
 	return sections, nil
+}
+
+// MemoryImport describes one memory in the WebAssembly import section. Page
+// counts are expressed in the memory type's native 64-KiB WebAssembly pages.
+type MemoryImport struct {
+	Module   string
+	Name     string
+	Minimum  uint64
+	Maximum  uint64
+	HasMax   bool
+	Shared   bool
+	Memory64 bool
+}
+
+// ImportedMemories returns every memory import in declaration order. It is
+// deliberately independent of a runtime so debug-session setup can construct
+// an exact provider for an imported LLGo linear memory.
+func ImportedMemories(module []byte) ([]MemoryImport, error) {
+	sections, err := parse(module)
+	if err != nil {
+		return nil, err
+	}
+	var importSection []byte
+	for _, section := range sections {
+		if section.id != 2 {
+			continue
+		}
+		if importSection != nil {
+			return nil, errors.New("multiple WebAssembly import sections")
+		}
+		importSection = section.content
+	}
+	if importSection == nil {
+		return nil, nil
+	}
+
+	off := 0
+	count, err := readULEB32(importSection, &off)
+	if err != nil {
+		return nil, fmt.Errorf("invalid WebAssembly import count: %w", err)
+	}
+	memories := make([]MemoryImport, 0, 1)
+	for index := uint32(0); index < count; index++ {
+		moduleName, err := readName(importSection, &off)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WebAssembly import %d module: %w", index, err)
+		}
+		fieldName, err := readName(importSection, &off)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WebAssembly import %d name: %w", index, err)
+		}
+		if off >= len(importSection) {
+			return nil, errors.New("truncated WebAssembly import descriptor")
+		}
+		kind := importSection[off]
+		off++
+		switch kind {
+		case 0: // function type index
+			if _, err := readULEB32(importSection, &off); err != nil {
+				return nil, fmt.Errorf("invalid WebAssembly function import: %w", err)
+			}
+		case 1: // table type
+			if err := skipReferenceType(importSection, &off); err != nil {
+				return nil, fmt.Errorf("invalid WebAssembly table import: %w", err)
+			}
+			if _, err := readLimits(importSection, &off); err != nil {
+				return nil, fmt.Errorf("invalid WebAssembly table limits: %w", err)
+			}
+		case 2: // memory type
+			limits, err := readLimits(importSection, &off)
+			if err != nil {
+				return nil, fmt.Errorf("invalid WebAssembly memory import: %w", err)
+			}
+			memories = append(memories, MemoryImport{
+				Module:   moduleName,
+				Name:     fieldName,
+				Minimum:  limits.minimum,
+				Maximum:  limits.maximum,
+				HasMax:   limits.hasMax,
+				Shared:   limits.shared,
+				Memory64: limits.memory64,
+			})
+		case 3: // global type
+			if err := skipValueType(importSection, &off); err != nil {
+				return nil, fmt.Errorf("invalid WebAssembly global import: %w", err)
+			}
+			if off >= len(importSection) {
+				return nil, errors.New("truncated WebAssembly global mutability")
+			}
+			off++
+		case 4: // tag attribute and function type index
+			if off >= len(importSection) {
+				return nil, errors.New("truncated WebAssembly tag attribute")
+			}
+			off++
+			if _, err := readULEB32(importSection, &off); err != nil {
+				return nil, fmt.Errorf("invalid WebAssembly tag import: %w", err)
+			}
+		default:
+			return nil, fmt.Errorf("unsupported WebAssembly import kind %d", kind)
+		}
+	}
+	if off != len(importSection) {
+		return nil, errors.New("trailing data in WebAssembly import section")
+	}
+	return memories, nil
+}
+
+type limits struct {
+	minimum  uint64
+	maximum  uint64
+	hasMax   bool
+	shared   bool
+	memory64 bool
+}
+
+func readLimits(raw []byte, off *int) (limits, error) {
+	flags, err := readULEB32(raw, off)
+	if err != nil {
+		return limits{}, err
+	}
+	if flags&^uint32(7) != 0 {
+		return limits{}, fmt.Errorf("unsupported limits flags %#x", flags)
+	}
+	result := limits{
+		hasMax:   flags&1 != 0,
+		shared:   flags&2 != 0,
+		memory64: flags&4 != 0,
+	}
+	if result.shared && !result.hasMax {
+		return limits{}, errors.New("shared memory limits have no maximum")
+	}
+	read := func() (uint64, error) {
+		if result.memory64 {
+			return readULEB64(raw, off)
+		}
+		value, err := readULEB32(raw, off)
+		return uint64(value), err
+	}
+	result.minimum, err = read()
+	if err != nil {
+		return limits{}, err
+	}
+	if result.hasMax {
+		result.maximum, err = read()
+		if err != nil {
+			return limits{}, err
+		}
+		if result.maximum < result.minimum {
+			return limits{}, errors.New("memory maximum is smaller than its minimum")
+		}
+	}
+	return result, nil
+}
+
+func skipValueType(raw []byte, off *int) error {
+	if *off >= len(raw) {
+		return errors.New("truncated WebAssembly value type")
+	}
+	typeCode := raw[*off]
+	(*off)++
+	if typeCode == 0x63 || typeCode == 0x64 {
+		return skipSignedLEB33(raw, off)
+	}
+	return nil
+}
+
+func skipReferenceType(raw []byte, off *int) error {
+	return skipValueType(raw, off)
+}
+
+func skipSignedLEB33(raw []byte, off *int) error {
+	for index := 0; index < 5; index++ {
+		if *off >= len(raw) {
+			return errors.New("truncated WebAssembly heap type")
+		}
+		b := raw[*off]
+		(*off)++
+		if b&0x80 == 0 {
+			return nil
+		}
+	}
+	return errors.New("invalid WebAssembly heap type")
 }
 
 func isDWARFSection(name string) bool {

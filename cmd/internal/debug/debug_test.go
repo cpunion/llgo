@@ -31,8 +31,10 @@ import (
 
 	"github.com/goplus/llgo/cmd/internal/flags"
 	"github.com/goplus/llgo/internal/build"
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/goplus/llgo/internal/optlevel"
 	"github.com/goplus/llgo/internal/targets"
+	"github.com/goplus/llgo/internal/wasmdebug"
 )
 
 func TestBackendRouting(t *testing.T) {
@@ -231,6 +233,131 @@ func TestArtifactAndArgumentHandling(t *testing.T) {
 	}
 	if target, err := resolveTarget("cortex-m-qemu"); err != nil || target.DebugServer == "" {
 		t.Fatalf("resolveTarget(cortex-m-qemu) = (%+v, %v)", target, err)
+	}
+}
+
+func TestResolvedWasmTargetConfig(t *testing.T) {
+	conf := &build.Config{Goos: runtime.GOOS, Goarch: runtime.GOARCH, Target: "wasip1"}
+	applyResolvedTarget(conf, &targets.Config{GOOS: "wasip1", GOARCH: "wasm"})
+	if conf.Goos != "wasip1" || conf.Goarch != "wasm" || conf.Target != "" {
+		t.Fatalf("resolved target config = %s/%s target=%q, want wasip1/wasm GOOS path", conf.Goos, conf.Goarch, conf.Target)
+	}
+
+	native := &build.Config{Goos: runtime.GOOS, Goarch: runtime.GOARCH, Target: "board"}
+	applyResolvedTarget(native, &targets.Config{GOOS: "none", GOARCH: "arm"})
+	if native.Goos != runtime.GOOS || native.Goarch != runtime.GOARCH {
+		t.Fatalf("non-Wasm target unexpectedly changed config to %s/%s", native.Goos, native.Goarch)
+	}
+}
+
+func TestWASIDebugArtifactAndEnvironment(t *testing.T) {
+	raw := wasiDebugFixture(t)
+	artifact := filepath.Join(t.TempDir(), "program.wasm")
+	if err := os.WriteFile(artifact, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	memory, err := validateWASIDebugArtifact(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if memory == nil || memory.Module != "env" || memory.Name != "memory" || memory.Minimum != 1024 || memory.Maximum != 1024 || !memory.HasMax || !memory.Shared {
+		t.Fatalf("validated memory = %+v", memory)
+	}
+
+	environment, cleanup, err := writeWASIEnvironment(memory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`(memory (export "memory") 1024 1024 shared)`, `export "longjmp"`, `export "pthread_exit"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("environment WAT %q does not contain %q", string(data), want)
+		}
+	}
+	cleanup()
+	if _, err := os.Stat(environment); !os.IsNotExist(err) {
+		t.Fatalf("environment cleanup error = %v", err)
+	}
+	withoutMemory := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}
+	debug := appendTestName(nil, ".debug_info")
+	debug = append(debug, 1)
+	withoutMemory = appendTestSection(withoutMemory, 0, debug)
+	withoutMemory, err = wasmdebug.SetDebuggerRecord(withoutMemory, debugabi.NewRecord(2, 4, debugabi.ByteOrderLittle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutMemoryPath := filepath.Join(t.TempDir(), "self-contained.wasm")
+	if err := os.WriteFile(withoutMemoryPath, withoutMemory, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if memory, err := validateWASIDebugArtifact(withoutMemoryPath); err != nil || memory != nil {
+		t.Fatalf("self-contained WASI artifact = (%+v, %v), want (nil, nil)", memory, err)
+	}
+
+	plan, planCleanup, err := makeWASIServerPlan(artifact, options{remote: ":1234"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer planCleanup()
+	if plan.address != "127.0.0.1:1234" || len(plan.command) != 0 {
+		t.Fatalf("remote WASI plan = %+v", plan)
+	}
+	args, err := debuggerArguments(backendWasmtime, artifact, []string{"--batch"}, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "process connect --plugin wasm connect://127.0.0.1:1234") || !strings.Contains(joined, "--batch") {
+		t.Fatalf("Wasmtime LLDB arguments = %q", joined)
+	}
+}
+
+func wasiDebugFixture(t *testing.T) []byte {
+	t.Helper()
+	imports := appendTestULEB(nil, 1)
+	imports = appendTestName(imports, "env")
+	imports = appendTestName(imports, "memory")
+	imports = append(imports, 2)
+	imports = appendTestULEB(imports, 3)
+	imports = appendTestULEB(imports, 1024)
+	imports = appendTestULEB(imports, 1024)
+	raw := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}
+	raw = appendTestSection(raw, 2, imports)
+	debug := appendTestName(nil, ".debug_info")
+	debug = append(debug, 1, 2, 3)
+	raw = appendTestSection(raw, 0, debug)
+	result, err := wasmdebug.SetDebuggerRecord(raw, debugabi.NewRecord(2, 4, debugabi.ByteOrderLittle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func appendTestName(dst []byte, name string) []byte {
+	dst = appendTestULEB(dst, uint32(len(name)))
+	return append(dst, name...)
+}
+
+func appendTestSection(dst []byte, id byte, payload []byte) []byte {
+	dst = append(dst, id)
+	dst = appendTestULEB(dst, uint32(len(payload)))
+	return append(dst, payload...)
+}
+
+func appendTestULEB(dst []byte, value uint32) []byte {
+	for {
+		current := byte(value & 0x7f)
+		value >>= 7
+		if value != 0 {
+			current |= 0x80
+		}
+		dst = append(dst, current)
+		if value == 0 {
+			return dst
+		}
 	}
 }
 

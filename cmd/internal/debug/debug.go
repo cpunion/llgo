@@ -45,6 +45,7 @@ var (
 	backendFlag   string
 	lldbPath      string
 	gdbPath       string
+	wasmtimePath  string
 	remoteAddress string
 	serverCommand string
 )
@@ -60,6 +61,7 @@ func init() {
 	Cmd.Flag.StringVar(&backendFlag, "backend", string(backendAuto), "debug backend: auto, lldb, gdb, wasmtime, or browser")
 	Cmd.Flag.StringVar(&lldbPath, "lldb", "", "path to LLDB (default $LLGO_LLDB or auto-detect)")
 	Cmd.Flag.StringVar(&gdbPath, "gdb", "", "path to GDB (default $LLGO_GDB, target candidates, or auto-detect)")
+	Cmd.Flag.StringVar(&wasmtimePath, "wasmtime", "", "path to Wasmtime (default $LLGO_WASMTIME or auto-detect)")
 	Cmd.Flag.StringVar(&remoteAddress, "remote", "", "connect to an existing debug server at host:port")
 	Cmd.Flag.StringVar(&serverCommand, "server", "", "debug-server command template; {} is the artifact and {debug-port} is the allocated port")
 }
@@ -71,11 +73,12 @@ func runCmd(cmd *base.Command, args []string) {
 		return
 	}
 	if err := run(cmd.Flag.Args(), debuggerArgs, options{
-		backend: backend(backendFlag),
-		lldb:    lldbPath,
-		gdb:     gdbPath,
-		remote:  remoteAddress,
-		server:  serverCommand,
+		backend:  backend(backendFlag),
+		lldb:     lldbPath,
+		gdb:      gdbPath,
+		wasmtime: wasmtimePath,
+		remote:   remoteAddress,
+		server:   serverCommand,
 	}, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		mockable.Exit(1)
@@ -123,12 +126,10 @@ func run(packageArgs, debuggerArgs []string, opts options, stdin io.Reader, stdo
 	if err != nil {
 		return err
 	}
+	applyResolvedTarget(conf, target)
 	selected, err := selectBackend(opts.backend, classifyTarget(conf, target))
 	if err != nil {
 		return err
-	}
-	if selected == backendWasmtime {
-		return errors.New("llgo debug: the WASI/Wasmtime backend is not available yet")
 	}
 	if selected == backendBrowser {
 		return errors.New("llgo debug: the browser DevTools backend is not available yet")
@@ -156,6 +157,21 @@ func run(packageArgs, debuggerArgs []string, opts options, stdin io.Reader, stdo
 		target:       target,
 		options:      opts,
 	}, stdin, stdout, stderr)
+}
+
+func applyResolvedTarget(conf *build.Config, target *targets.Config) {
+	if conf == nil || target == nil {
+		return
+	}
+	// The existing wasm/wasi target names intentionally use the GOOS/GOARCH
+	// crosscompile path instead of the generic target-libc builder. Resolve
+	// those values before build.Do so debug-artifact selection and the
+	// crosscompiler agree on the target from the start.
+	if target.GOARCH == "wasm" {
+		conf.Goos = target.GOOS
+		conf.Goarch = target.GOARCH
+		conf.Target = ""
+	}
 }
 
 func resolveTarget(name string) (*targets.Config, error) {
