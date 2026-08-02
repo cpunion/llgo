@@ -32,6 +32,9 @@ OpenOCD interface/transport/target fields need no additional command.
 `llgo lldb` remains the explicit compatibility command for opening an existing
 artifact without building it.
 
+The cross-platform tool pins, CI gates, artifact-size policy, and known
+completion blockers are maintained in [ACCEPTANCE.md](ACCEPTANCE.md).
+
 ## WASI tool matrix
 
 WASI guest debugging uses Wasmtime's built-in gdbstub and LLDB's WebAssembly

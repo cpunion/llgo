@@ -27,3 +27,7 @@ and connect to its GDB port:
 ```sh
 llgo debug -target=rp2040 -remote=:3333 .
 ```
+
+The guarded, repeatable probe acceptance and its explicit flash confirmation
+are documented in [`../hardware`](../hardware/README.md). Ordinary CI never
+claims ownership of a physical probe.
