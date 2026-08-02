@@ -26,15 +26,13 @@ import (
 	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/goplus/llgo/runtime/internal/pollbudget"
 	"github.com/goplus/llgo/runtime/internal/runqueue"
-	"github.com/goplus/llgo/runtime/internal/wasmcontext"
 	"github.com/goplus/llgo/runtime/internal/wasmevent"
 	"github.com/goplus/llgo/runtime/internal/wasmworkers"
 )
 
 const maxWasmWorkers = 16
 
-type runtimeContextPlatform struct {
-	context    wasmcontext.Context
+type wasmWorkerContextState struct {
 	gcRoot     wasmGCRootContext
 	runqNext   *g
 	runqQueued bool
@@ -49,7 +47,7 @@ type wasmWorker struct {
 	runq runqueue.Queue[*g]
 	wake uint32
 
-	system          wasmcontext.Context
+	platform        wasmWorkerPlatform
 	index           int
 	safepointBudget pollbudget.Budget
 	gc              wasmWorkerGCState
@@ -125,9 +123,6 @@ func initWasmScheduler(gp *g) {
 	}
 }
 
-//go:linkname wasmMainTask __llgo_wasm_main
-func wasmMainTask(unsafe.Pointer) unsafe.Pointer
-
 func RunWasmMain() {
 	gp := getg()
 	worker := currentWasmWorker()
@@ -135,24 +130,13 @@ func RunWasmMain() {
 		fatal("runtime: invalid WebAssembly main goroutine")
 		return
 	}
-	initWasmFiber(gp, wasmcontext.Entry(wasmMainStart), unsafe.Pointer(gp), 0)
+	initWasmWorkerMain(gp)
 	initWasmWorkerSystem(worker)
 	releaseWasmWorkerG(worker, gp)
 	casgstatus(gp, _Grunning, _Grunnable)
 	enqueueWasmG(worker, gp)
 	runWasmWorker(worker, true)
 	c.Exit(0)
-}
-
-func wasmMainStart(arg unsafe.Pointer) {
-	gp := (*g)(arg)
-	if gp == nil || getg() != gp {
-		fatal("runtime: invalid WebAssembly main entry")
-		return
-	}
-	wasmMainTask(nil)
-	wasmMultiSched.mainReturned = true
-	finishWasmG(gp)
 }
 
 func wasmWorkerStart(arg unsafe.Pointer) unsafe.Pointer {
@@ -173,13 +157,9 @@ func wasmWorkerStart(arg unsafe.Pointer) unsafe.Pointer {
 }
 
 func initWasmWorkerSystem(worker *wasmWorker) {
-	if worker.system.Ready() {
-		return
+	if initWasmWorkerBackendSystem(worker) {
+		initWasmWorkerGCSystem(worker)
 	}
-	if !worker.system.InitCurrent(AllocRoot) {
-		panic("runtime: failed to allocate WebAssembly system context")
-	}
-	initWasmWorkerGCSystem(worker)
 }
 
 func runWasmWorker(worker *wasmWorker, stopAtMain bool) {
@@ -213,10 +193,7 @@ func runWasmG(worker *wasmWorker, gp *g) {
 	for {
 		bindWasmWorkerG(worker, gp)
 		setg(gp)
-		worker.system.Swap(
-			&gp.context.platform.context,
-			wasmGCRootPointer(&gp.context.platform.gcRoot),
-		)
+		runWasmWorkerContext(worker, gp)
 		setg(nil)
 		releaseWasmWorkerG(worker, gp)
 		if readgstatus(gp) != _Grunning {
@@ -245,7 +222,7 @@ func newprocBackend(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr, cal
 	gp := newproc1(fn, arg, callergp)
 	worker := nextWasmWorker()
 	gp.context.platform.owner = worker
-	initWasmFiber(gp, wasmcontext.Entry(wasmGStart), unsafe.Pointer(gp), stackSize)
+	initWasmWorkerG(gp, fn, arg, stackSize)
 	atomic.Add(&wasmMultiSched.active, uint32(1))
 	enqueueWasmG(worker, gp)
 }
@@ -253,19 +230,6 @@ func newprocBackend(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr, cal
 func nextWasmWorker() *wasmWorker {
 	index := atomic.Add(&wasmMultiSched.nextWorker, uint32(1))
 	return &wasmMultiSched.workers[int(index%uint32(wasmMultiSched.count))]
-}
-
-func initWasmFiber(gp *g, entry wasmcontext.Entry, arg unsafe.Pointer, stackSize uintptr) {
-	platform := &gp.context.platform
-	if !platform.context.Init(
-		entry,
-		arg,
-		stackSize,
-		AllocRoot,
-		FreeRoot,
-	) {
-		panic("runtime: failed to allocate WebAssembly goroutine stack")
-	}
 }
 
 func releaseWasmContext(gp *g) {
@@ -277,21 +241,8 @@ func releaseWasmContext(gp *g) {
 	if wasmGCRootEnabled {
 		unregisterWasmGCRoot(&platform.gcRoot)
 	}
-	platform.context.Close(FreeRoot)
+	closeWasmWorkerContext(platform)
 	freeRuntimeContext(ctx)
-}
-
-func wasmGStart(arg unsafe.Pointer) {
-	gp := (*g)(arg)
-	if gp == nil || getg() != gp {
-		fatal("runtime: invalid WebAssembly goroutine entry")
-		return
-	}
-	fn, fnarg := gp.startfn, gp.startarg
-	gp.startfn = nil
-	gp.startarg = nil
-	fn(fnarg)
-	finishWasmG(gp)
 }
 
 func finishWasmG(gp *g) {
@@ -299,10 +250,7 @@ func finishWasmG(gp *g) {
 	atomic.Add(&wasmMultiSched.active, ^uint32(0))
 	wakeWasmEventWorker()
 	worker := gp.context.platform.owner
-	gp.context.platform.context.Swap(
-		&worker.system,
-		wasmWorkerSystemRootPointer(worker),
-	)
+	suspendWasmWorkerG(worker, gp)
 	fatal("runtime: resumed dead WebAssembly goroutine")
 }
 
@@ -311,10 +259,7 @@ func goschedBackend() {
 	worker := currentWasmWorker()
 	casgstatus(gp, _Grunning, _Grunnable)
 	enqueueWasmG(worker, gp)
-	gp.context.platform.context.Swap(
-		&worker.system,
-		wasmWorkerSystemRootPointer(worker),
-	)
+	suspendWasmWorkerG(worker, gp)
 }
 
 func gopark() {
@@ -327,10 +272,7 @@ func parkWasmG(gp *g) {
 	atomic.Add(&wasmMultiSched.active, ^uint32(0))
 	wakeWasmEventWorker()
 	worker := gp.context.platform.owner
-	gp.context.platform.context.Swap(
-		&worker.system,
-		wasmWorkerSystemRootPointer(worker),
-	)
+	suspendWasmWorkerG(worker, gp)
 }
 
 func goready(gp *g) {

@@ -22,10 +22,7 @@ func cooperativeSafepointSlow() {
 	}
 	if wasmGCRequestPending(worker) {
 		if gp := getg(); gp != nil {
-			gp.context.platform.context.Swap(
-				&worker.system,
-				wasmWorkerSystemRootPointer(worker),
-			)
+			suspendWasmWorkerG(worker, gp)
 		} else {
 			wasmWorkerStopForGC(worker)
 		}
