@@ -50,3 +50,6 @@ jobs:
 
       - name: Test embedded debugger transports
         run: bash cmd/llgo/debugtest/embedded/runtest.sh
+
+      - name: Test LLGo GDB adapter
+        run: LLGO_GDB_INTEGRATION=1 go test ./cmd/internal/gdb -run '^TestGDBIntegration$' -count=1

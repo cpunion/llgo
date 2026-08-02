@@ -90,6 +90,10 @@ func (b *Builder) addDebuggerMarkers() {
 		record.SetGlobalConstant(true)
 		record.SetLinkage(llvm.LinkOnceODRLinkage)
 		record.SetVisibility(llvm.HiddenVisibility)
+		// Bare-metal linker scripts commonly fold read-only constants into a
+		// Thumb .text output section. Keep the record address even so GDB does
+		// not clear bit zero as if this object symbol were a Thumb function.
+		record.SetAlignment(len(raw))
 		retained = append(retained, llvm.ConstBitCast(record, ptr))
 	}
 	usedInit := llvm.ConstArray(ptr, retained)

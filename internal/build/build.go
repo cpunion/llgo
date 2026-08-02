@@ -47,6 +47,7 @@ import (
 	"github.com/goplus/llgo/internal/crosscompile"
 	"github.com/goplus/llgo/internal/dcepass"
 	"github.com/goplus/llgo/internal/deadcode"
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/firmware"
 	"github.com/goplus/llgo/internal/flash"
@@ -1438,6 +1439,7 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 			}
 		}
 	}
+	linkArgs = append(linkArgs, debuggerABIRootArgs(ctx)...)
 	linkArgs = append(linkArgs, cSharedExportArgs(ctx, linkedOrder)...)
 
 	err = linkObjFiles(ctx, outputPath, linkInputs, linkArgs, verbose)
@@ -1579,6 +1581,32 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	cmd := ctx.linker()
 	cmd.Verbose = printCmds
 	return cmd.Link(buildArgs...)
+}
+
+// debuggerABIRootArgs keeps the native marker and structured record in the
+// final debug artifact. llvm.used prevents compiler elimination, but a final
+// ELF/Mach-O section-GC link still needs explicit roots. Wasm records are
+// installed as a custom section by final debug-artifact processing instead.
+func debuggerABIRootArgs(ctx *context) []string {
+	if ctx == nil || ctx.buildConf == nil || !ctx.frontendOptions.Debug || ctx.buildConf.Goarch == "wasm" {
+		return nil
+	}
+	symbols := []string{debugabi.LegacyMarkerSymbol, debugabi.NativeRecordSymbol}
+	args := make([]string, 0, len(symbols)*2)
+	for _, symbol := range symbols {
+		if ctx.buildConf.Goos == "darwin" {
+			if ctx.crossCompile.Linker != "" {
+				args = append(args, "-u", "_"+symbol)
+			} else {
+				args = append(args, "-Wl,-u,_"+symbol)
+			}
+		} else if ctx.crossCompile.Linker != "" {
+			args = append(args, "--undefined="+symbol)
+		} else {
+			args = append(args, "-Wl,--undefined="+symbol)
+		}
+	}
+	return args
 }
 
 // cSharedExportArgs keeps //export functions and synthetic test entry points as
