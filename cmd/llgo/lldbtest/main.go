@@ -104,6 +104,7 @@ type ContainerResults struct {
 }
 
 var containerResults *ContainerResults
+var goroutineReadySum int
 
 func RuntimeInterfaceValues() {
 	var nilAny any
@@ -210,6 +211,31 @@ func InspectContainerValues(
 		containerResults.channelLen, containerResults.channelCap,
 		containerResults.closedHead, containerResults.closedOK,
 	)
+}
+
+func RuntimeGoroutineValues() {
+	ready := make(chan int, 2)
+	release := make(chan struct{})
+	results := make(chan int, 2)
+	for worker := 1; worker <= 2; worker++ {
+		go func(value int) {
+			ready <- value
+			<-release
+			results <- value * value
+		}(worker)
+	}
+	readySum := <-ready + <-ready
+	goroutineReadySum = readySum
+	InspectGoroutineValues(readySum)
+	close(release)
+	resultSum := <-results + <-results
+	if resultSum != 5 {
+		panic("goroutine result mismatch")
+	}
+}
+
+func InspectGoroutineValues(readySum int) {
+	println(readySum) // LLDB_BREAK: goroutine_values
 }
 
 func RuntimeValues() {
@@ -497,6 +523,7 @@ func main() {
 	RuntimeInterfaceValues()
 	RuntimeFunctionValues()
 	RuntimeContainerValues()
+	RuntimeGoroutineValues()
 	println("called function with struct")
 	i, err := FuncWithAllTypeParams(
 		s.i8, s.i16, s.i32, s.i64, s.i, s.u8, s.u16, s.u32, s.u64, s.u,

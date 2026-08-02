@@ -3,6 +3,7 @@
 import os
 import sys
 import argparse
+import re
 import signal
 from dataclasses import dataclass, field
 from typing import List, Optional, Set, Dict, Any
@@ -268,6 +269,12 @@ TEST_CASES = [
         ("containerResults.closedHead", '"first"'),
         ("containerResults.closedOK", "true"),
     ]),
+    test_case("goroutine_values", [
+        ("goroutineReadySum", "3"),
+        ("goroutines",
+         "count=3 roots=1 children=2 running=3 linked=3 unique-m=3 unique-p=3",
+         "goroutines"),
+    ]),
     test_case("struct_values_initial", STRUCT_VALUES_INITIAL),
     test_case("struct_values_updated", STRUCT_VALUES_UPDATED),
     test_case("struct_ptrs_initial", STRUCT_VALUES_INITIAL),
@@ -475,6 +482,46 @@ class LLDBDebugger:
                 f"llgo print {expression!r} did not fail with {expected!r}: "
                 f"{result.GetOutput()!r} {result.GetError()!r}")
 
+    def get_goroutine_summary(self) -> Optional[str]:
+        result = lldb.SBCommandReturnObject()
+        self.debugger.GetCommandInterpreter().HandleCommand(
+            "llgo goroutines", result)
+        if not result.Succeeded():
+            return None
+        lines = [line.strip() for line in (result.GetOutput() or "").splitlines()
+                 if line.strip()]
+        pattern = re.compile(
+            r"^goroutine ([0-9]+) \[([^]]+)\] parent=([0-9]+) "
+            r"m=(-?[0-9]+) p=(-?[0-9]+) ownership=(linked|invalid)$")
+        goroutines = []
+        for line in lines:
+            match = pattern.fullmatch(line)
+            if match is None:
+                return None
+            goroutines.append({
+                "goid": int(match.group(1)),
+                "status": match.group(2),
+                "parent": int(match.group(3)),
+                "mid": int(match.group(4)),
+                "pid": int(match.group(5)),
+                "ownership": match.group(6),
+            })
+        ids = {goroutine["goid"] for goroutine in goroutines}
+        roots = sum(goroutine["parent"] == 0 for goroutine in goroutines)
+        children = sum(
+            goroutine["parent"] in ids and goroutine["parent"] != 0
+            for goroutine in goroutines)
+        running = sum(
+            goroutine["status"] == "running" for goroutine in goroutines)
+        linked = sum(
+            goroutine["ownership"] == "linked" for goroutine in goroutines)
+        unique_m = len({goroutine["mid"] for goroutine in goroutines})
+        unique_p = len({goroutine["pid"] for goroutine in goroutines})
+        return (
+            f"count={len(goroutines)} roots={roots} children={children} "
+            f"running={running} linked={linked} unique-m={unique_m} "
+            f"unique-p={unique_p}")
+
     def cleanup(self) -> None:
         if self.process and self.process.IsValid():
             self.process.Kill()
@@ -662,6 +709,8 @@ def execute_single_variable_test(debugger: LLDBDebugger, test: Test) -> TestResu
         finally:
             debugger.debugger.HandleCommand(
                 "settings set target.max-children-count 256")
+    elif test.mode == "goroutines":
+        actual_value = debugger.get_goroutine_summary()
     else:
         actual_value = debugger.get_variable_value(test.variable)
     if actual_value is None:

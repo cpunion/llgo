@@ -15,6 +15,7 @@ LLGO_MAX_STRING_SUMMARY_BYTES = 256
 LLGO_MAX_TYPE_NAME_BYTES = 4096
 LLGO_DEFAULT_MAX_CHILDREN = 256
 LLGO_MAX_CONTAINER_SCAN_BUCKETS = 65536
+LLGO_MAX_GOROUTINES = 65536
 _TARGET_INFO_CACHE: Dict[Tuple[Any, ...], "LLGoTargetInfo"] = {}
 
 
@@ -141,6 +142,35 @@ class LLGoChannelValue:
     element_size: int
 
 
+@dataclass(frozen=True)
+class LLGoGoroutineLayout:
+    head_symbol: str
+    goroutine_type: str
+    goroutine_next: str
+    goroutine_status: str
+    goroutine_id: str
+    goroutine_parent_id: str
+    goroutine_m: str
+    m_current_goroutine: str
+    m_p: str
+    m_id: str
+    p_m: str
+    p_id: str
+    status_names: Tuple[Tuple[int, str], ...]
+
+
+@dataclass(frozen=True)
+class LLGoGoroutineValue:
+    address: int
+    goid: int
+    parent_goid: int
+    status: int
+    status_name: str
+    mid: int
+    pid: int
+    ownership_linked: bool
+
+
 def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
     layouts = {}
     for version, raw in LLGO_DEBUGGER_SCHEMA.get(
@@ -220,6 +250,39 @@ def _runtime_layouts() -> Dict[int, LLGoRuntimeLayout]:
 LLGO_RUNTIME_LAYOUTS = _runtime_layouts()
 
 
+def _goroutine_layouts() -> Dict[int, LLGoGoroutineLayout]:
+    layouts = {}
+    for version, raw in LLGO_DEBUGGER_SCHEMA.get(
+            "runtime_layouts", {}).items():
+        goroutine = raw.get("goroutine", {})
+        try:
+            status_names = tuple(sorted(
+                (int(status), str(name))
+                for status, name in goroutine["status_names"].items()
+            ))
+            layouts[int(version)] = LLGoGoroutineLayout(
+                head_symbol=goroutine["head_symbol"],
+                goroutine_type=goroutine["goroutine_type"],
+                goroutine_next=goroutine["next"],
+                goroutine_status=goroutine["status"],
+                goroutine_id=goroutine["id"],
+                goroutine_parent_id=goroutine["parent_id"],
+                goroutine_m=goroutine["m"],
+                m_current_goroutine=goroutine["m_current_goroutine"],
+                m_p=goroutine["m_p"],
+                m_id=goroutine["m_id"],
+                p_m=goroutine["p_m"],
+                p_id=goroutine["p_id"],
+                status_names=status_names,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    return layouts
+
+
+LLGO_GOROUTINE_LAYOUTS = _goroutine_layouts()
+
+
 @dataclass(frozen=True)
 class LLGoDebuggerRecord:
     record_version: int
@@ -267,6 +330,8 @@ def register_commands(debugger: lldb.SBDebugger) -> None:
         'command script add -f llgo_plugin.print_go_expression llgo print')
     debugger.HandleCommand(
         'command script add -f llgo_plugin.print_all_variables llgo vars')
+    debugger.HandleCommand(
+        'command script add -f llgo_plugin.print_goroutines llgo goroutines')
     if inspect_target(debugger.GetSelectedTarget()).supported:
         register_type_formatters(debugger)
 
@@ -608,7 +673,7 @@ def _require_supported_target(debugger: lldb.SBDebugger, result: lldb.SBCommandR
     return False
 
 
-def _selected_stopped_frame(debugger: lldb.SBDebugger, result: lldb.SBCommandReturnObject) -> Optional[lldb.SBFrame]:
+def _stopped_process(debugger: lldb.SBDebugger, result: lldb.SBCommandReturnObject) -> Optional[lldb.SBProcess]:
     target = debugger.GetSelectedTarget()
     if not target or not target.IsValid():
         result.SetError("LLGo command requires a valid target.")
@@ -618,6 +683,13 @@ def _selected_stopped_frame(debugger: lldb.SBDebugger, result: lldb.SBCommandRet
     if (not process or not process.IsValid() or
             process.GetState() != lldb.eStateStopped):
         result.SetError("LLGo command requires a stopped process.")
+        return None
+    return process
+
+
+def _selected_stopped_frame(debugger: lldb.SBDebugger, result: lldb.SBCommandReturnObject) -> Optional[lldb.SBFrame]:
+    process = _stopped_process(debugger, result)
+    if process is None:
         return None
 
     thread = process.GetSelectedThread()
@@ -630,6 +702,138 @@ def _selected_stopped_frame(debugger: lldb.SBDebugger, result: lldb.SBCommandRet
         result.SetError("LLGo command requires a selected frame.")
         return None
     return frame
+
+
+def _symbol_load_address(target: lldb.SBTarget, name: str) -> Optional[int]:
+    contexts = target.FindSymbols(name)
+    addresses = set()
+    for index in range(contexts.GetSize()):
+        symbol = contexts.GetContextAtIndex(index).GetSymbol()
+        if not symbol or not symbol.IsValid() or symbol.GetName() != name:
+            continue
+        address = symbol.GetStartAddress().GetLoadAddress(target)
+        if address != getattr(lldb, "LLDB_INVALID_ADDRESS", (1 << 64) - 1):
+            addresses.add(address)
+    if len(addresses) != 1:
+        return None
+    return next(iter(addresses))
+
+
+def _required_integer_field(value: lldb.SBValue, name: str) -> int:
+    field = value.GetChildMemberWithName(name)
+    result = _value_as_int(field)
+    if result is None:
+        raise ValueError(f"cannot read runtime field {name!r}")
+    return result
+
+
+def _goroutine_values(target: lldb.SBTarget, process: lldb.SBProcess,
+                      layout: LLGoGoroutineLayout) -> List[LLGoGoroutineValue]:
+    head_address = _symbol_load_address(target, layout.head_symbol)
+    if head_address is None:
+        raise ValueError(
+            "LLGo goroutine metadata is unavailable for this runtime.")
+
+    error = lldb.SBError()
+    address = process.ReadPointerFromMemory(head_address, error)
+    if not error.Success():
+        raise ValueError("cannot read the LLGo goroutine list")
+
+    goroutine_type = target.FindFirstType(layout.goroutine_type)
+    if not goroutine_type or not goroutine_type.IsValid():
+        raise ValueError("LLGo goroutine type metadata is unavailable")
+
+    status_names = dict(layout.status_names)
+    visited = set()
+    values: List[LLGoGoroutineValue] = []
+    while address != 0:
+        if address in visited:
+            raise ValueError("LLGo goroutine list contains a cycle")
+        if len(values) >= LLGO_MAX_GOROUTINES:
+            raise ValueError("LLGo goroutine list exceeds the safety limit")
+        visited.add(address)
+
+        goroutine = target.CreateValueFromAddress(
+            "__llgo_g", lldb.SBAddress(address, target), goroutine_type)
+        if not goroutine or not goroutine.IsValid():
+            raise ValueError("cannot read an LLGo goroutine")
+
+        next_address = _required_integer_field(
+            goroutine, layout.goroutine_next)
+        status = _required_integer_field(goroutine, layout.goroutine_status)
+        goid = _required_integer_field(goroutine, layout.goroutine_id)
+        parent_goid = _required_integer_field(
+            goroutine, layout.goroutine_parent_id)
+        m_address = _required_integer_field(goroutine, layout.goroutine_m)
+        if m_address == 0:
+            raise ValueError(f"goroutine {goid} has no M")
+
+        m_value = goroutine.GetChildMemberWithName(
+            layout.goroutine_m).Dereference()
+        if not m_value or not m_value.IsValid():
+            raise ValueError(f"cannot read M for goroutine {goid}")
+        mid = _required_integer_field(m_value, layout.m_id)
+        current_g = _required_integer_field(
+            m_value, layout.m_current_goroutine)
+        p_address = _required_integer_field(m_value, layout.m_p)
+        if p_address == 0:
+            raise ValueError(f"goroutine {goid} has no P")
+
+        p_value = m_value.GetChildMemberWithName(layout.m_p).Dereference()
+        if not p_value or not p_value.IsValid():
+            raise ValueError(f"cannot read P for goroutine {goid}")
+        pid = _required_integer_field(p_value, layout.p_id)
+        p_m = _required_integer_field(p_value, layout.p_m)
+        values.append(LLGoGoroutineValue(
+            address=address,
+            goid=goid,
+            parent_goid=parent_goid,
+            status=status,
+            status_name=status_names.get(status, f"status-{status}"),
+            mid=mid,
+            pid=pid,
+            ownership_linked=(current_g == address and p_m == m_address),
+        ))
+        address = next_address
+
+    values.sort(key=lambda value: value.goid)
+    return values
+
+
+def print_goroutines(debugger: lldb.SBDebugger, command: str,
+                     result: lldb.SBCommandReturnObject,
+                     _internal_dict: Dict[str, Any]) -> None:
+    if not _require_supported_target(debugger, result):
+        return
+    if command.strip():
+        result.SetError("usage: llgo goroutines")
+        return
+    process = _stopped_process(debugger, result)
+    if process is None:
+        return
+
+    target = debugger.GetSelectedTarget()
+    info = inspect_target(target)
+    layout = LLGO_GOROUTINE_LAYOUTS.get(info.runtime_layout_version)
+    if layout is None:
+        result.SetError("LLGo goroutine metadata is unavailable for this runtime.")
+        return
+    try:
+        goroutines = _goroutine_values(target, process, layout)
+    except ValueError as error:
+        result.SetError(str(error))
+        return
+
+    if not goroutines:
+        result.AppendMessage("No live LLGo goroutines.")
+        return
+    result.AppendMessage("\n".join(
+        f"goroutine {goroutine.goid} [{goroutine.status_name}] "
+        f"parent={goroutine.parent_goid} m={goroutine.mid} "
+        f"p={goroutine.pid} ownership="
+        f"{'linked' if goroutine.ownership_linked else 'invalid'}"
+        for goroutine in goroutines
+    ))
 
 
 def _value_as_int(value: lldb.SBValue) -> Optional[int]:

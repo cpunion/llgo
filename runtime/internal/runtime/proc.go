@@ -42,10 +42,16 @@ type runtimeContext struct {
 }
 
 var sched struct {
-	goidgen uint64
-	midgen  int64
-	pidgen  int32
+	goidgen  uint64
+	midgen   int64
+	pidgen   int32
+	allglock uint32
 }
+
+// debuggerAllgV1 is the head of the live goroutine list consumed by the LLGo
+// debugger adapter. The versioned Go symbol name is the stable contract; the
+// runtime g layout remains selected through the debugger schema version.
+var debuggerAllgV1 *g
 
 // NewProc creates a new G running fn.
 //
@@ -56,8 +62,11 @@ func NewProc(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr) {
 	gp := newproc1(fn, arg, getg())
 	if errno := newm(gp.m, stackSize); errno != 0 {
 		ctx := gp.context
+		root := ctx.root
+		unregisterG(gp)
 		FreeRoot(arg)
-		FreeRoot(ctx.root)
+		ctx.root = nil
+		FreeRoot(root)
 		panic("runtime: failed to create new OS thread")
 	}
 }
@@ -131,6 +140,7 @@ func mexit(mp *m) {
 
 	casgstatus(gp, _Grunning, _Gdead)
 	setpstatus(pp, _Pdead)
+	unregisterG(gp)
 
 	pp.m = nil
 	mp.p = nil
@@ -168,7 +178,82 @@ func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	}
 	setpstatus(pp, pstatus)
 	pp.m = mp
+	registerG(gp)
 	return gp
+}
+
+func registerG(gp *g) {
+	lockAllg()
+	gp.alllink = debuggerAllgV1
+	gp.allprev = nil
+	if debuggerAllgV1 != nil {
+		debuggerAllgV1.allprev = gp
+	}
+	debuggerAllgV1 = gp
+	unlockAllg()
+}
+
+func unregisterG(gp *g) {
+	lockAllg()
+	if gp.allprev != nil {
+		gp.allprev.alllink = gp.alllink
+	} else if debuggerAllgV1 == gp {
+		debuggerAllgV1 = gp.alllink
+	}
+	if gp.alllink != nil {
+		gp.alllink.allprev = gp.allprev
+	}
+	gp.alllink = nil
+	gp.allprev = nil
+	unlockAllg()
+}
+
+// AllGForTesting reports the live goroutine-list size and whether its forward
+// and backward links agree. It is linked only by LLGo execution tests.
+func AllGForTesting() (count int, linked bool) {
+	lockAllg()
+	var previous *g
+	for gp := debuggerAllgV1; gp != nil; gp = gp.alllink {
+		if gp.allprev != previous {
+			unlockAllg()
+			return count, false
+		}
+		previous = gp
+		count++
+		if count > 1<<20 {
+			unlockAllg()
+			return count, false
+		}
+	}
+	unlockAllg()
+	return count, true
+}
+
+// GInAllGForTesting reports whether target is present in the live goroutine
+// list and whether all links traversed while looking for it are consistent.
+// It is linked only by LLGo execution tests.
+func GInAllGForTesting(target unsafe.Pointer) (found, linked bool) {
+	lockAllg()
+	want := (*g)(target)
+	var previous *g
+	count := 0
+	for gp := debuggerAllgV1; gp != nil; gp = gp.alllink {
+		if gp.allprev != previous {
+			unlockAllg()
+			return false, false
+		}
+		if gp == want {
+			found = true
+		}
+		previous = gp
+		count++
+		if count > 1<<20 {
+			unlockAllg()
+			return false, false
+		}
+	}
+	unlockAllg()
+	return found, true
 }
 
 // GMPForTesting reports the current runtime ownership graph. It is kept
