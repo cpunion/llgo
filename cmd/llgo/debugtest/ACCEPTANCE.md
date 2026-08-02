@@ -63,7 +63,11 @@ Platform-specific limits remain explicit:
   overlapping/range-containment diagnostics. With Emscripten 4.0.21 and
   Binaryen 125, relinking the exact same objects without Asyncify passes the
   verifier across all compile units; Asyncify alone introduces invalid ranges
-  in both LLGo and Emscripten C-library DIEs. This matches Binaryen issue
+  in both LLGo and Emscripten C-library DIEs. Reapplying `--asyncify -g` to
+  that verifier-clean 71-CU input with the current Binaryen 131 release gives
+  the same aggregate failures as version 125: 136 parent-range violations, 22
+  overlapping `DW_AT_ranges`, and 59 overlaps between DIEs. This matches
+  Binaryen issue
   [#6406](https://github.com/WebAssembly/binaryen/issues/6406). A source map
   can recover source lines but cannot repair Wasm-local variable locations, so
   it is not a substitute for this gate. This is a final-artifact blocker, not a
