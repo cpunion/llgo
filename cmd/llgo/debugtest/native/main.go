@@ -12,15 +12,14 @@ func explicitPanic() {
 	panic("native debugger panic") // LLDB_STOP: explicit_panic
 }
 
+// Keep the generated-check operation on the declaration line: debuggers may
+// attribute the caller return PC to either side of the runtime helper call.
+//
 //go:noinline
-func divideByZero(divisor int) int {
-	return 42 / divisor // LLDB_STOP: divide_by_zero
-}
+func divideByZero(divisor int) int { return 42 / divisor } // LLDB_STOP: divide_by_zero
 
 //go:noinline
-func invalidMemory(pointer *int) int {
-	return *pointer // LLDB_STOP: invalid_memory
-}
+func invalidMemory(pointer *int) int { return *pointer } // LLDB_STOP: invalid_memory
 
 //go:noinline
 func hostTrap() {
