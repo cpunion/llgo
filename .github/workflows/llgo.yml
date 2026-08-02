@@ -557,6 +557,36 @@ jobs:
           LLGO_WASM_WORKERS=2 llgo build -target wasm \
             -o "$RUNNER_TEMP/wasm-hardening-workers.mjs" ./internal/build/testdata/wasm-hardening
           run_wasm_hardening "$RUNNER_TEMP/wasm-hardening-workers.mjs" "hardening-workers-j32"
+          LLGO_WASM_RESUME=1 LLGO_WASM_WORKERS=2 GOOS=js GOARCH=wasm llgo build -p=1 \
+            -o "$RUNNER_TEMP/wasm-resume-workers-go.mjs" ./internal/build/testdata/wasm-workers
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-workers-go.mjs" "wasm workers ok"
+          LLGO_WASM_RESUME=1 LLGO_WASM_WORKERS=2 llgo build -p=1 -target wasm \
+            -o "$RUNNER_TEMP/wasm-resume-workers.mjs" ./internal/build/testdata/wasm-workers
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-workers.mjs" "wasm workers ok"
+          LLGO_WASM_RESUME=1 LLGO_WASM_WORKERS=2 GOOS=js GOARCH=wasm llgo build -p=1 \
+            -o "$RUNNER_TEMP/wasm-resume-gc-workers-go.mjs" ./internal/build/testdata/wasm-gc
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-gc-workers-go.mjs" "wasm gc ok"
+          LLGO_WASM_RESUME=1 LLGO_WASM_WORKERS=2 llgo build -p=1 -target wasm \
+            -o "$RUNNER_TEMP/wasm-resume-gc-workers.mjs" ./internal/build/testdata/wasm-gc
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-gc-workers.mjs" "wasm gc ok"
+          LLGO_WASM_RESUME=1 LLGO_WASM_WORKERS=2 GOOS=js GOARCH=wasm llgo build -p=1 \
+            -o "$RUNNER_TEMP/wasm-resume-hardening-workers-go.mjs" ./internal/build/testdata/wasm-hardening
+          run_wasm_hardening "$RUNNER_TEMP/wasm-resume-hardening-workers-go.mjs" "resume-hardening-workers-j64"
+          LLGO_WASM_RESUME=1 LLGO_WASM_WORKERS=2 llgo build -p=1 -target wasm \
+            -o "$RUNNER_TEMP/wasm-resume-hardening-workers.mjs" ./internal/build/testdata/wasm-hardening
+          run_wasm_hardening "$RUNNER_TEMP/wasm-resume-hardening-workers.mjs" "resume-hardening-workers-j32"
+          for module in \
+            "$RUNNER_TEMP/wasm-resume-workers-go.wasm" \
+            "$RUNNER_TEMP/wasm-resume-workers.wasm" \
+            "$RUNNER_TEMP/wasm-resume-gc-workers-go.wasm" \
+            "$RUNNER_TEMP/wasm-resume-gc-workers.wasm" \
+            "$RUNNER_TEMP/wasm-resume-hardening-workers-go.wasm" \
+            "$RUNNER_TEMP/wasm-resume-hardening-workers.wasm"; do
+            if strings "$module" | grep -Eiq 'asyncify|emscripten_fiber|runtime/internal/wasmcontext'; then
+              echo "resumable worker artifact retained Asyncify/Fiber code: $module"
+              exit 1
+            fi
+          done
           cp ./internal/build/testdata/wasm-workers/browser.html "$RUNNER_TEMP/browser.html"
           node ./internal/build/testdata/wasm-workers/server.mjs "$RUNNER_TEMP" 8123 &
           browser_server=$!
@@ -572,7 +602,10 @@ jobs:
           test -n "$browser"
           for module in wasm-timers.mjs wasm-workers.mjs wasm-workers-go.mjs \
             wasm-gc-workers.mjs wasm-gc-workers-go.mjs wasm-hardening-workers.mjs \
-            wasm-hardening-workers-go.mjs; do
+            wasm-hardening-workers-go.mjs wasm-resume-workers.mjs \
+            wasm-resume-workers-go.mjs wasm-resume-gc-workers.mjs \
+            wasm-resume-gc-workers-go.mjs wasm-resume-hardening-workers.mjs \
+            wasm-resume-hardening-workers-go.mjs; do
             html=$("$browser" --headless=new --no-sandbox --disable-gpu \
               --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom \
               "http://127.0.0.1:8123/browser.html?module=$module")

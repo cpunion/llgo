@@ -48,6 +48,45 @@ func TestConfigureWasmResume(t *testing.T) {
 	}
 }
 
+func TestConfigureWasmResumeWorkers(t *testing.T) {
+	t.Setenv(llgoWasmResume, "1")
+	t.Setenv(llgoWasmWorkers, "2")
+	t.Setenv(llgoWasiThreads, "")
+	conf := &Config{Goos: "js", Goarch: "wasm"}
+	export := crosscompile.Export{
+		LDFLAGS: []string{"-sASYNCIFY=1"},
+		WasmPostLink: crosscompile.WasmPostLink{
+			Asyncify: true,
+		},
+	}
+	if err := configureWasmResume(conf, &export); err != nil {
+		t.Fatal(err)
+	}
+	workers, err := configureWasmWorkers(conf, &export)
+	if err != nil || workers.Count != 2 {
+		t.Fatalf("worker configuration = %+v, %v", workers, err)
+	}
+	if enabled, err := configureWasmGC(conf, &export); err != nil || !enabled {
+		t.Fatalf("GC configuration = %v, %v", enabled, err)
+	}
+	for _, tag := range []string{wasmResumeBuildTag, "llgo.wasm_workers"} {
+		if !slices.Contains(export.BuildTags, tag) {
+			t.Fatalf("build tags do not contain %q: %v", tag, export.BuildTags)
+		}
+	}
+	if !hasBuildTag(conf.Tags, "llgo_wasm_gc") {
+		t.Fatalf("GC build tag is missing from %q", conf.Tags)
+	}
+	for _, flag := range []string{"-pthread", "-sPTHREAD_POOL_SIZE=2", "-sMALLOC=none"} {
+		if !slices.Contains(export.LDFLAGS, flag) {
+			t.Fatalf("linker flags do not contain %q: %v", flag, export.LDFLAGS)
+		}
+	}
+	if export.WasmPostLink.Asyncify || slices.Contains(export.LDFLAGS, "-sASYNCIFY=1") {
+		t.Fatalf("resumable worker build retained Asyncify: %+v", export)
+	}
+}
+
 func TestConfigureWasmResumeRejectsUnsupportedModes(t *testing.T) {
 	t.Setenv(llgoWasmResume, "1")
 	for _, test := range []struct {

@@ -28,6 +28,7 @@ func main() {
 	testCrossWorkerSynchronization()
 	testInterleavedWorkerLocality()
 	testCrossWorkerTimerWake()
+	testGoroutineGoexit()
 	println("wasm workers ok")
 }
 
@@ -241,4 +242,14 @@ func testCrossWorkerTimerWake() {
 	case <-time.After(time.Second):
 		panic("timer did not wake a worker")
 	}
+}
+
+func testGoroutineGoexit() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.Goexit()
+		panic("Goexit returned")
+	}()
+	<-done
 }
