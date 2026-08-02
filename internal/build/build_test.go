@@ -26,6 +26,7 @@ import (
 	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/buildenv"
 	"github.com/goplus/llgo/internal/crosscompile"
+	"github.com/goplus/llgo/internal/debugabi"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/lto"
 	"github.com/goplus/llgo/internal/meta"
@@ -319,6 +320,77 @@ func TestNeedsLinuxNoPIE(t *testing.T) {
 	ctx.buildConf.Target = "wasi"
 	if needsLinuxNoPIE(ctx, nil) {
 		t.Fatal("named targets should not force host linux -no-pie")
+	}
+}
+
+func TestDebuggerABIRootArgs(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ctx  *context
+		want []string
+	}{
+		{name: "nil context"},
+		{name: "no debug", ctx: &context{buildConf: &Config{Goos: "linux", Goarch: "arm64"}}},
+		{
+			name: "wasm custom section",
+			ctx: &context{
+				buildConf:       &Config{Goos: "wasip1", Goarch: "wasm"},
+				frontendOptions: cl.Options{Debug: true},
+			},
+		},
+		{
+			name: "ELF compiler driver",
+			ctx: &context{
+				buildConf:       &Config{Goos: "linux", Goarch: "arm64"},
+				frontendOptions: cl.Options{Debug: true},
+			},
+			want: []string{
+				"-Wl,--undefined=" + debugabi.LegacyMarkerSymbol,
+				"-Wl,--undefined=" + debugabi.NativeRecordSymbol,
+			},
+		},
+		{
+			name: "ELF direct linker",
+			ctx: &context{
+				buildConf:       &Config{Goos: "linux", Goarch: "arm"},
+				crossCompile:    crosscompile.Export{Linker: "ld.lld"},
+				frontendOptions: cl.Options{Debug: true},
+			},
+			want: []string{
+				"--undefined=" + debugabi.LegacyMarkerSymbol,
+				"--undefined=" + debugabi.NativeRecordSymbol,
+			},
+		},
+		{
+			name: "Mach-O compiler driver",
+			ctx: &context{
+				buildConf:       &Config{Goos: "darwin", Goarch: "arm64"},
+				frontendOptions: cl.Options{Debug: true},
+			},
+			want: []string{
+				"-Wl,-u,_" + debugabi.LegacyMarkerSymbol,
+				"-Wl,-u,_" + debugabi.NativeRecordSymbol,
+			},
+		},
+		{
+			name: "Mach-O direct linker",
+			ctx: &context{
+				buildConf:       &Config{Goos: "darwin", Goarch: "arm64"},
+				crossCompile:    crosscompile.Export{Linker: "ld64.lld"},
+				frontendOptions: cl.Options{Debug: true},
+			},
+			want: []string{
+				"-u", "_" + debugabi.LegacyMarkerSymbol,
+				"-u", "_" + debugabi.NativeRecordSymbol,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := debuggerABIRootArgs(test.ctx)
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("debuggerABIRootArgs = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

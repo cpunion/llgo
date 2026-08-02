@@ -122,9 +122,12 @@ start_qemu "$gdb_port"
 if ! gdb_output=$("$gdb" --nx --quiet --batch "$debug_elf" \
 	-ex "set pagination off" \
 	-ex "set confirm off" \
+	-ex "source $repo_root/cmd/internal/gdb/llgo_plugin.py" \
 	-ex "target remote 127.0.0.1:$gdb_port" \
 	-ex "break $source_file:$break_line" \
 	-ex "continue" \
+	-ex "llgo status" \
+	-ex "p text" \
 	-ex 'printf "LLGO_SEED=%d\\n", seed' \
 	-ex 'printf "LLGO_PAIR=%d,%d\\n", pair.Left, pair.Right' \
 	-ex 'printf "LLGO_VALUES=%d,%d,%d\\n", values[0], values[1], values[2]' \
@@ -136,6 +139,8 @@ if ! gdb_output=$("$gdb" --nx --quiet --batch "$debug_elf" \
 	exit 1
 fi
 stop_qemu
+assert_contains "$gdb_output" "LLGo debugger schema v1 (runtime layout v1)"
+assert_contains "$gdb_output" '= "embedded"'
 assert_contains "$gdb_output" "LLGO_SEED=7"
 assert_contains "$gdb_output" "LLGO_PAIR=7,8"
 assert_contains "$gdb_output" "LLGO_VALUES=9,10,11"
