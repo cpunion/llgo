@@ -495,11 +495,11 @@ func emitFuncInfoTable(ctx *context, pkg llssa.Package, records []funcInfoRecord
 		}
 	}
 	machOSites := shouldEmitRuntimeMachOSites(ctx)
-	emitSites := shouldEmitRuntimePCLineSites(ctx)
+	emitPCLineSites := shouldEmitRuntimePCLineSites(ctx)
 	emitAddressSites := shouldEmitRuntimeAddressSites(ctx)
 	emitEntrySites := emitAddressSites && len(encoded.Records) != 0
 	emitStubSites := emitAddressSites
-	emitRuntimeFuncInfoSites(mod, ctx.prog.PointerSize(), machOSites, emitSites && len(pcLineValues) != 0, emitEntrySites, emitStubSites && len(stubRecords) != 0)
+	emitRuntimeFuncInfoSites(mod, ctx.prog.PointerSize(), machOSites, emitPCLineSites && len(pcLineValues) != 0, emitEntrySites, emitStubSites && len(stubRecords) != 0)
 	if emitEntrySites {
 		startName, endName := entrySiteSectionInfo.boundary(machOSites)
 		entryStart := llvm.AddGlobal(mod, funcEntryRecordType, startName)
@@ -715,9 +715,9 @@ func emitExternalFuncInfoTable(ctx *context, mod llvm.Module, records []funcInfo
 	used.SetSection("llvm.metadata")
 
 	machO := shouldEmitRuntimeMachOSites(ctx)
-	emitSites := shouldEmitRuntimePCLineSites(ctx)
+	emitPCLineSites := shouldEmitRuntimePCLineSites(ctx)
 	emitAddressSites := shouldEmitRuntimeAddressSites(ctx)
-	emitPCSites := emitSites && len(encoded.PCLines) != 0
+	emitPCSites := emitPCLineSites && len(encoded.PCLines) != 0
 	emitEntrySites := emitAddressSites && len(encoded.Records) != 0
 	emitStubSites := emitAddressSites && len(stubRecords) != 0
 	emitRuntimeFuncInfoSites(mod, ctx.prog.PointerSize(), machO, emitPCSites, emitEntrySites, emitStubSites)

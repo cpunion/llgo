@@ -75,9 +75,9 @@ func isWasmDebugTarget(conf *Config, target *crosscompile.Export) bool {
 }
 
 // resolveDebugArtifactMode validates an explicit artifact request, translates
-// it into typed -w intent, and records the effective packaging mode. The
-// existing safe DWARF default remains authoritative when no mode was supplied;
-// restoring Go's default is owned by the optimized-DWARF dependency chain.
+// it into typed -w intent, and records the effective packaging mode. When no
+// mode is supplied, linked builds follow Go's DWARF-preserving default and
+// target builds select host or embedded packaging from target capabilities.
 func resolveDebugArtifactMode(conf *Config, target *crosscompile.Export) error {
 	if !conf.DebugArtifactMode.IsValid() {
 		return fmt.Errorf("invalid debug artifact mode %d", conf.DebugArtifactMode)

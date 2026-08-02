@@ -182,7 +182,7 @@ type Config struct {
 	// DebugArtifactModeSet distinguishes an explicit command request from the
 	// effective mode derived from -w and the current build default.
 	DebugArtifactModeSet bool
-	PCLNMode PCLNMode
+	PCLNMode             PCLNMode
 	// PCLNModeSet marks PCLNMode as authoritative. Command flags set it for
 	// explicit requests; Do sets it after resolving the legacy environment
 	// default.
@@ -612,7 +612,7 @@ func Build(inv Invocation) ([]Package, error) {
 		crossCompile:    export,
 		commands:        commands,
 		frontendOptions: frontendOptions,
-		cTransformer:   cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, true),
+		cTransformer:    cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, true),
 	}
 	defer ctx.closePackageMetas()
 

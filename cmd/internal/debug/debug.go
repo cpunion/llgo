@@ -131,7 +131,6 @@ func run(packageArgs, debuggerArgs []string, opts options, stdin io.Reader, stdo
 		return fmt.Errorf("llgo debug: %w", err)
 	}
 	conf.BuildMode = build.BuildModeExe
-	conf.OmitDWARFByDefault = false
 	if conf.LinkOptions.EffectiveOmitDWARF() ||
 		(conf.DebugArtifactModeSet && conf.DebugArtifactMode == build.DebugArtifactNone) {
 		return errors.New("llgo debug: debug information is required; remove -ldflags=-w or -debug-artifact=none")

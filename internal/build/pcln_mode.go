@@ -70,7 +70,7 @@ func effectivePCLNMode(conf *Config) PCLNMode {
 }
 
 // shouldEnablePCLNSites reports whether compiler-emitted PC anchor records are
-// required for this build.
+// enabled after the global funcinfo and site controls are applied.
 func shouldEnablePCLNSites(conf *Config, funcInfo bool) bool {
 	if conf == nil || !funcInfo || !IsFuncInfoSitesEnabled() {
 		return false

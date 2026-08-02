@@ -46,11 +46,11 @@ func TestResolveDebugArtifactMode(t *testing.T) {
 		wantDWARF DWARFMode
 		wantErr   bool
 	}{
-		{name: "safe default", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, OmitDWARFByDefault: true}, target: native, wantMode: DebugArtifactNone},
-		{name: "native explicit preserve overrides safe default", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, OmitDWARFByDefault: true, LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: native, wantMode: DebugArtifactEmbedded, wantDWARF: DWARFPreserve},
+		{name: "s implies no artifact", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, LinkOptions: LinkOptions{OmitSymbolTable: true}}, target: native, wantMode: DebugArtifactNone},
+		{name: "native explicit preserve overrides s", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, LinkOptions: LinkOptions{OmitSymbolTable: true, DWARF: DWARFPreserve}}, target: native, wantMode: DebugArtifactEmbedded, wantDWARF: DWARFPreserve},
 		{name: "native default with DWARF", conf: base(), target: native, wantMode: DebugArtifactEmbedded},
 		{name: "fixed default with DWARF", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "rp2040"}, target: fixed, wantMode: DebugArtifactHost},
-		{name: "fixed explicit preserve overrides safe default", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "rp2040", OmitDWARFByDefault: true, LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: fixed, wantMode: DebugArtifactHost, wantDWARF: DWARFPreserve},
+		{name: "fixed explicit preserve overrides s", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "rp2040", LinkOptions: LinkOptions{OmitSymbolTable: true, DWARF: DWARFPreserve}}, target: fixed, wantMode: DebugArtifactHost, wantDWARF: DWARFPreserve},
 		{name: "wasm default with DWARF", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "wasi", Goarch: "wasm"}, target: wasm, wantMode: DebugArtifactEmbedded},
 		{name: "explicit none", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, DebugArtifactMode: DebugArtifactNone, DebugArtifactModeSet: true}, target: native, wantMode: DebugArtifactNone, wantDWARF: DWARFOmit},
 		{name: "none conflicts preserve", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, DebugArtifactMode: DebugArtifactNone, DebugArtifactModeSet: true, LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: native, wantErr: true},
