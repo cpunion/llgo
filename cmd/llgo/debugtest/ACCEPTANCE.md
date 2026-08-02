@@ -24,6 +24,13 @@ compatibility target. Exact commands live in these focused fixtures:
 - WASI: `cmd/llgo/debugtest/wasi`;
 - browser: `cmd/internal/browser` and `internal/browserdebug`.
 
+The browser lane uses Emscripten 4.0.21 and temporarily pins Binaryen commit
+`0c439cce601d5812209df1fc1188afe90100fca6`, which contains the DWARF range
+repair proposed in
+[WebAssembly/binaryen#8964](https://github.com/WebAssembly/binaryen/pull/8964).
+The pin can move back to an Emscripten-provided Binaryen release once that
+repair is upstream and included in the supported SDK.
+
 ## CI baseline
 
 | Gate | Workflow | What must be observed |
@@ -58,20 +65,14 @@ Platform-specific limits remain explicit:
 - A missing external Wasm sidecar and a mismatched `build_id` fail before the
   browser launches. A consumer without the LLGo extension keeps raw/name
   section symbolication but does not get Go runtime presentation.
-- The current Asyncify-transformed browser runtime is accepted by Go's DWARF
-  reader and Chrome, but LLVM's final `llvm-dwarfdump --verify` still reports
-  overlapping/range-containment diagnostics. With Emscripten 4.0.21 and
-  Binaryen 125, relinking the exact same objects without Asyncify passes the
-  verifier across all compile units; Asyncify alone introduces invalid ranges
-  in both LLGo and Emscripten C-library DIEs. Reapplying `--asyncify -g` to
-  that verifier-clean 71-CU input with the current Binaryen 131 release gives
-  the same aggregate failures as version 125: 136 parent-range violations, 22
-  overlapping `DW_AT_ranges`, and 59 overlaps between DIEs. This matches
-  Binaryen issue
-  [#6406](https://github.com/WebAssembly/binaryen/issues/6406). A source map
-  can recover source lines but cannot repair Wasm-local variable locations, so
-  it is not a substitute for this gate. This is a final-artifact blocker, not a
-  condition that the acceptance lane may suppress.
+- Binaryen updates DWARF after Asyncify with a conservative range-topology
+  repair. Representable parent scopes are rebuilt from surviving children;
+  lost, reversed, or ambiguous scopes are reported as unavailable instead of
+  being assigned unrelated code. The browser lane runs
+  `llvm-dwarfdump --verify` against both the final embedded module and the
+  external DWARF sidecar after all post-link transforms. A verifier diagnostic
+  remains a hard failure; source maps are not accepted as a substitute for
+  variable, scope, or type DWARF.
 
 The native lane additionally stops explicit panic, integer division by zero,
 invalid memory, and a real host trap at their exact source locations. Its
