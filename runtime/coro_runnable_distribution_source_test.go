@@ -233,7 +233,13 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"LLGO_CORO_FLEET_OWNER_STANDBY_CAPACITY_V1 = 8",
 		"__llgo_coro_fleet_factory_stop_v2(uint32_t terminal_owner_token)",
 		"pthread_cond_wait(&factory->changed, &factory->mutex)",
-		"slot_records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1]",
+		"struct llgo_coro_fleet_owner_record_v1 *records;",
+		"struct llgo_coro_fleet_owner_record_v1 *standby_head;",
+		"struct llgo_coro_fleet_owner_record_v1 *all_next;",
+		"struct llgo_coro_fleet_owner_record_v1 *standby_next;",
+		"calloc(1, sizeof(*record))",
+		"free(record)",
+		"factory->next_token == UINT32_MAX",
 	} {
 		if !strings.Contains(leaf, required) {
 			t.Errorf("native fleet C leaf lacks scalar startup-policy marker %q", required)
@@ -243,6 +249,10 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"__llgo_coro_native_fleet_owner_v1",
 		"__llgo_coro_fleet_owner_create_v1",
 		"__llgo_coro_fleet_owner_create_v2",
+		"records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1]",
+		"slot_records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1]",
+		"LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_BITS_V1",
+		"LLGO_CORO_FLEET_OWNER_TOKEN_GENERATION_MASK_V1",
 		"malloc(",
 		"void (*callback",
 	} {

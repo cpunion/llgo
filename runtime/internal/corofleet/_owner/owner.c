@@ -17,7 +17,6 @@
 #include "owner.h"
 
 #include <sched.h>
-#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -42,11 +41,6 @@ extern uint32_t __llgo_coro_native_fleet_owner_v2(uint32_t slot);
 enum {
     LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1 = 10000,
     LLGO_CORO_FLEET_OWNER_STANDBY_CAPACITY_V1 = 8,
-    LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_BITS_V1 = 14,
-    LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_MASK_V1 =
-        (1u << LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_BITS_V1) - 1u,
-    LLGO_CORO_FLEET_OWNER_TOKEN_GENERATION_MASK_V1 =
-        (1u << (32u - LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_BITS_V1)) - 1u,
 };
 
 enum llgo_coro_fleet_owner_state_v1 {
@@ -66,12 +60,12 @@ struct llgo_coro_fleet_owner_record_v1 {
     pthread_t thread;
     uint32_t slot;
     uint32_t token;
-    uint32_t generation;
-    uint32_t next;
     uint32_t acknowledged;
     uint32_t published;
     uint32_t joining;
     enum llgo_coro_fleet_owner_state_v1 state;
+    struct llgo_coro_fleet_owner_record_v1 *all_next;
+    struct llgo_coro_fleet_owner_record_v1 *standby_next;
 };
 
 enum llgo_coro_fleet_factory_state_v1 {
@@ -86,9 +80,12 @@ enum llgo_coro_fleet_factory_state_v1 {
 
 /*
  * One mutex owns both the clean-thread creation rendezvous and the raw standby
- * cache. Request serialization is intentional: replacement creation is
- * exceptional, while a single fixed rendezvous avoids a second scheduler,
- * allocator, callback queue, and inherited tainted-thread state.
+ * cache. Only actual physical threads have records; lifecycle-only list scans
+ * avoid reserving storage for all 10,000 logical M slots. Tokens are monotonic
+ * and never reused, so a stale pthread/token pair cannot name a later record.
+ * Request serialization is intentional: replacement creation is exceptional,
+ * while a single fixed rendezvous avoids a second scheduler, allocator,
+ * callback queue, and inherited tainted-thread state.
  */
 struct llgo_coro_fleet_factory_v1 {
     pthread_mutex_t mutex;
@@ -97,15 +94,13 @@ struct llgo_coro_fleet_factory_v1 {
     pthread_t result_thread;
     uint32_t slot;
     uint32_t result_token;
-    uint32_t allocation_cursor;
+    uint32_t next_token;
     uint32_t active_records;
-    uint32_t standby_head;
     uint32_t standby_count;
     int result;
     enum llgo_coro_fleet_factory_state_v1 state;
-    struct llgo_coro_fleet_owner_record_v1
-        records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1];
-    uint32_t slot_records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1];
+    struct llgo_coro_fleet_owner_record_v1 *records;
+    struct llgo_coro_fleet_owner_record_v1 *standby_head;
 };
 
 static struct llgo_coro_fleet_factory_v1 llgo_coro_fleet_factory_v1 = {
@@ -139,64 +134,67 @@ static int llgo_coro_fleet_thread_detach_self_v1(void) {
 #endif
 }
 
-static uint32_t llgo_coro_fleet_record_index_v1(
-        const struct llgo_coro_fleet_owner_record_v1 *record) {
-    ptrdiff_t index = record - llgo_coro_fleet_factory_v1.records;
-    return index >= 0 &&
-            index < LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1
-        ? (uint32_t)index + 1u
-        : 0;
+static int llgo_coro_fleet_find_record_for_token_locked_v1(
+        uint32_t token,
+        struct llgo_coro_fleet_owner_record_v1 **match) {
+    struct llgo_coro_fleet_factory_v1 *factory =
+        &llgo_coro_fleet_factory_v1;
+    if (token == 0 || match == 0 ||
+        factory->active_records > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
+        return -1;
+    }
+    *match = 0;
+    struct llgo_coro_fleet_owner_record_v1 *record = factory->records;
+    uint32_t count = 0;
+    while (record != 0 && count < LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
+        if (record->token == token) {
+            if (*match != 0) {
+                return -1;
+            }
+            *match = record;
+        }
+        record = record->all_next;
+        count++;
+    }
+    return record == 0 && count == factory->active_records ? 0 : -1;
 }
 
-static uint32_t llgo_coro_fleet_owner_token_v1(
-        uint32_t index, uint32_t generation) {
-    if (index == 0 ||
-        index > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1 ||
-        index > LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_MASK_V1 ||
-        generation == 0 ||
-        generation > LLGO_CORO_FLEET_OWNER_TOKEN_GENERATION_MASK_V1) {
-        return 0;
+static int llgo_coro_fleet_find_record_for_slot_locked_v1(
+        uint32_t slot,
+        struct llgo_coro_fleet_owner_record_v1 **match) {
+    struct llgo_coro_fleet_factory_v1 *factory =
+        &llgo_coro_fleet_factory_v1;
+    if (slot == 0 || slot > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1 ||
+        match == 0 ||
+        factory->active_records > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
+        return -1;
     }
-    return (generation << LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_BITS_V1) |
-        index;
-}
-
-static struct llgo_coro_fleet_owner_record_v1 *
-llgo_coro_fleet_record_for_token_locked_v1(uint32_t token) {
-    uint32_t index = token & LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_MASK_V1;
-    if (token == 0 || index == 0 ||
-        index > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
-        return 0;
+    *match = 0;
+    struct llgo_coro_fleet_owner_record_v1 *record = factory->records;
+    uint32_t count = 0;
+    while (record != 0 && count < LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
+        if (record->slot == slot) {
+            if (*match != 0) {
+                return -1;
+            }
+            *match = record;
+        }
+        record = record->all_next;
+        count++;
     }
-    struct llgo_coro_fleet_owner_record_v1 *record =
-        &llgo_coro_fleet_factory_v1.records[index - 1u];
-    return record->token == token ? record : 0;
-}
-
-static struct llgo_coro_fleet_owner_record_v1 *
-llgo_coro_fleet_record_for_slot_locked_v1(uint32_t slot) {
-    if (slot == 0 || slot > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
-        return 0;
-    }
-    uint32_t index = llgo_coro_fleet_factory_v1.slot_records[slot - 1u];
-    if (index == 0 || index > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
-        return 0;
-    }
-    struct llgo_coro_fleet_owner_record_v1 *record =
-        &llgo_coro_fleet_factory_v1.records[index - 1u];
-    return record->slot == slot ? record : 0;
+    return record == 0 && count == factory->active_records ? 0 : -1;
 }
 
 static void llgo_coro_fleet_clear_slot_locked_v1(
         struct llgo_coro_fleet_owner_record_v1 *record) {
+    struct llgo_coro_fleet_owner_record_v1 *match = 0;
     if (record != 0 && record->slot != 0 &&
-        record->slot <= LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
-        uint32_t index = llgo_coro_fleet_record_index_v1(record);
-        if (llgo_coro_fleet_factory_v1
-                .slot_records[record->slot - 1u] == index) {
-            llgo_coro_fleet_factory_v1
-                .slot_records[record->slot - 1u] = 0;
-        }
+        (llgo_coro_fleet_find_record_for_slot_locked_v1(
+             record->slot, &match) != 0 ||
+         match != record)) {
+        record->state = LLGO_CORO_FLEET_OWNER_FAILED_V1;
+        llgo_coro_fleet_factory_v1.state =
+            LLGO_CORO_FLEET_FACTORY_FAILED_V1;
     }
 }
 
@@ -205,7 +203,7 @@ static void llgo_coro_fleet_clear_record_locked_v1(
     struct llgo_coro_fleet_factory_v1 *factory =
         &llgo_coro_fleet_factory_v1;
     if (record == 0 || record->state == LLGO_CORO_FLEET_OWNER_UNUSED_V1 ||
-        factory->active_records == 0) {
+        record->standby_next != 0 || factory->active_records == 0) {
         if (record != 0) {
             record->state = LLGO_CORO_FLEET_OWNER_FAILED_V1;
         }
@@ -213,11 +211,21 @@ static void llgo_coro_fleet_clear_record_locked_v1(
         return;
     }
     llgo_coro_fleet_clear_slot_locked_v1(record);
-    uint32_t generation = record->generation;
-    *record = (struct llgo_coro_fleet_owner_record_v1){
-        .generation = generation,
-    };
+    struct llgo_coro_fleet_owner_record_v1 **link = &factory->records;
+    uint32_t count = 0;
+    while (*link != 0 && *link != record &&
+           count < LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
+        link = &(*link)->all_next;
+        count++;
+    }
+    if (*link != record) {
+        record->state = LLGO_CORO_FLEET_OWNER_FAILED_V1;
+        factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
+        return;
+    }
+    *link = record->all_next;
     factory->active_records--;
+    free(record);
     (void)pthread_cond_broadcast(&factory->changed);
 }
 
@@ -225,48 +233,27 @@ static struct llgo_coro_fleet_owner_record_v1 *
 llgo_coro_fleet_allocate_record_locked_v1(uint32_t slot) {
     struct llgo_coro_fleet_factory_v1 *factory =
         &llgo_coro_fleet_factory_v1;
+    struct llgo_coro_fleet_owner_record_v1 *existing = 0;
     if (slot == 0 || slot > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1 ||
-        factory->slot_records[slot - 1u] != 0 ||
-        factory->active_records >= LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
+        llgo_coro_fleet_find_record_for_slot_locked_v1(
+            slot, &existing) != 0 || existing != 0 ||
+        factory->active_records >= LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1 ||
+        factory->next_token == UINT32_MAX) {
         return 0;
     }
-    for (uint32_t offset = 0;
-         offset < LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1;
-         offset++) {
-        uint32_t index =
-            (factory->allocation_cursor + offset) %
-            LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1;
-        struct llgo_coro_fleet_owner_record_v1 *record =
-            &factory->records[index];
-        if (record->state != LLGO_CORO_FLEET_OWNER_UNUSED_V1 ||
-            record->thread != (pthread_t)0 || record->slot != 0 ||
-            record->token != 0 || record->next != 0 ||
-            record->acknowledged != 0 || record->published != 0 ||
-            record->joining != 0) {
-            continue;
-        }
-        uint32_t generation =
-            (record->generation + 1u) &
-            LLGO_CORO_FLEET_OWNER_TOKEN_GENERATION_MASK_V1;
-        if (generation == 0) {
-            generation = 1;
-        }
-        uint32_t token =
-            llgo_coro_fleet_owner_token_v1(index + 1u, generation);
-        if (token == 0) {
-            return 0;
-        }
-        record->slot = slot;
-        record->token = token;
-        record->generation = generation;
-        record->state = LLGO_CORO_FLEET_OWNER_STARTING_V1;
-        factory->slot_records[slot - 1u] = index + 1u;
-        factory->allocation_cursor =
-            (index + 1u) % LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1;
-        factory->active_records++;
-        return record;
+    struct llgo_coro_fleet_owner_record_v1 *record =
+        (struct llgo_coro_fleet_owner_record_v1 *)calloc(1, sizeof(*record));
+    if (record == 0) {
+        return 0;
     }
-    return 0;
+    factory->next_token++;
+    record->slot = slot;
+    record->token = factory->next_token;
+    record->state = LLGO_CORO_FLEET_OWNER_STARTING_V1;
+    record->all_next = factory->records;
+    factory->records = record;
+    factory->active_records++;
+    return record;
 }
 
 static int llgo_coro_fleet_wait_owner_ack_locked_v1(
@@ -349,10 +336,13 @@ static void *llgo_coro_fleet_owner_run_v1(
         if (pthread_mutex_lock(&factory->mutex) != 0) {
             return (void *)(uintptr_t)1;
         }
+        struct llgo_coro_fleet_owner_record_v1 *slot_record = 0;
         if (record->state != LLGO_CORO_FLEET_OWNER_RUNNING_V1 ||
             record->slot != slot || record->acknowledged != 1 ||
             record->published != 1 ||
-            llgo_coro_fleet_record_for_slot_locked_v1(slot) != record) {
+            llgo_coro_fleet_find_record_for_slot_locked_v1(
+                slot, &slot_record) != 0 ||
+            slot_record != record) {
             record->state = LLGO_CORO_FLEET_OWNER_FAILED_V1;
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
             (void)pthread_cond_broadcast(&factory->changed);
@@ -555,6 +545,7 @@ int __llgo_coro_fleet_factory_start_v1(void) {
         factory->factory != (pthread_t)0 ||
         factory->result_thread != (pthread_t)0 ||
         factory->result_token != 0 || factory->active_records != 0 ||
+        factory->records != 0 ||
         factory->standby_head != 0 || factory->standby_count != 0) {
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
@@ -591,8 +582,10 @@ int __llgo_coro_fleet_owner_create_v3(
             return -1;
         }
     }
+    struct llgo_coro_fleet_owner_record_v1 *existing = 0;
     if (factory->state != LLGO_CORO_FLEET_FACTORY_IDLE_V1 ||
-        factory->slot_records[slot - 1u] != 0) {
+        llgo_coro_fleet_find_record_for_slot_locked_v1(
+            slot, &existing) != 0 || existing != 0) {
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
     }
@@ -618,10 +611,10 @@ int __llgo_coro_fleet_owner_create_v3(
     }
     int result = factory->result;
     if (result == 0) {
-        struct llgo_coro_fleet_owner_record_v1 *record =
-            llgo_coro_fleet_record_for_token_locked_v1(
-                factory->result_token);
-        if (record == 0 || record->thread == (pthread_t)0 ||
+        struct llgo_coro_fleet_owner_record_v1 *record = 0;
+        if (llgo_coro_fleet_find_record_for_token_locked_v1(
+                factory->result_token, &record) != 0 ||
+            record == 0 || record->thread == (pthread_t)0 ||
             pthread_equal(record->thread, factory->result_thread) == 0 ||
             record->slot != slot ||
             record->state != LLGO_CORO_FLEET_OWNER_RUNNING_V1 ||
@@ -657,10 +650,12 @@ int __llgo_coro_fleet_owner_try_reuse_v1(
     }
     *thread = (pthread_t)0;
     *token = 0;
+    struct llgo_coro_fleet_owner_record_v1 *existing = 0;
     if (factory->state == LLGO_CORO_FLEET_FACTORY_UNUSED_V1 ||
         factory->state == LLGO_CORO_FLEET_FACTORY_STOPPING_V1 ||
         factory->state == LLGO_CORO_FLEET_FACTORY_FAILED_V1 ||
-        factory->slot_records[slot - 1u] != 0) {
+        llgo_coro_fleet_find_record_for_slot_locked_v1(
+            slot, &existing) != 0 || existing != 0) {
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
     }
@@ -673,15 +668,13 @@ int __llgo_coro_fleet_owner_try_reuse_v1(
         (void)pthread_mutex_unlock(&factory->mutex);
         return 1;
     }
-    uint32_t index = factory->standby_head;
-    if (index > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1 ||
-        factory->standby_count == 0) {
+    struct llgo_coro_fleet_owner_record_v1 *record =
+        factory->standby_head;
+    if (factory->standby_count == 0) {
         factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
     }
-    struct llgo_coro_fleet_owner_record_v1 *record =
-        &factory->records[index - 1u];
     if (record->state != LLGO_CORO_FLEET_OWNER_STANDBY_V1 ||
         record->thread == (pthread_t)0 || record->slot != 0 ||
         record->token == 0 || record->acknowledged != 0 ||
@@ -690,12 +683,11 @@ int __llgo_coro_fleet_owner_try_reuse_v1(
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
     }
-    factory->standby_head = record->next;
+    factory->standby_head = record->standby_next;
     factory->standby_count--;
-    record->next = 0;
+    record->standby_next = 0;
     record->slot = slot;
     record->state = LLGO_CORO_FLEET_OWNER_STARTING_V1;
-    factory->slot_records[slot - 1u] = index;
     if (pthread_cond_broadcast(&factory->changed) != 0 ||
         llgo_coro_fleet_wait_owner_ack_locked_v1(record) != 0) {
         factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
@@ -719,8 +711,12 @@ int __llgo_coro_fleet_owner_ready_v1(uint32_t slot) {
         pthread_mutex_lock(&factory->mutex) != 0) {
         return -1;
     }
-    struct llgo_coro_fleet_owner_record_v1 *record =
-        llgo_coro_fleet_record_for_slot_locked_v1(slot);
+    struct llgo_coro_fleet_owner_record_v1 *record = 0;
+    if (llgo_coro_fleet_find_record_for_slot_locked_v1(
+            slot, &record) != 0) {
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
     while (record != 0 && record->thread == (pthread_t)0 &&
            record->state == LLGO_CORO_FLEET_OWNER_STARTING_V1 &&
            factory->state != LLGO_CORO_FLEET_FACTORY_FAILED_V1) {
@@ -771,8 +767,12 @@ int __llgo_coro_fleet_owner_join_v1(
         pthread_mutex_lock(&factory->mutex) != 0) {
         return -1;
     }
-    struct llgo_coro_fleet_owner_record_v1 *record =
-        llgo_coro_fleet_record_for_token_locked_v1(token);
+    struct llgo_coro_fleet_owner_record_v1 *record = 0;
+    if (llgo_coro_fleet_find_record_for_token_locked_v1(
+            token, &record) != 0) {
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
     if (record == 0 || record->thread == (pthread_t)0 ||
         pthread_equal(record->thread, thread) == 0 ||
         record->joining != 0 ||
@@ -793,9 +793,11 @@ int __llgo_coro_fleet_owner_join_v1(
     if (pthread_mutex_lock(&factory->mutex) != 0) {
         return -1;
     }
-    record = llgo_coro_fleet_record_for_token_locked_v1(token);
+    record = 0;
+    int found = llgo_coro_fleet_find_record_for_token_locked_v1(
+        token, &record);
     int valid = joined == 0 && thread_result == 0 &&
-        record != 0 && record->thread != (pthread_t)0 &&
+        found == 0 && record != 0 && record->thread != (pthread_t)0 &&
         pthread_equal(record->thread, thread) != 0 &&
         record->joining == 1 &&
         record->state == LLGO_CORO_FLEET_OWNER_EXITED_V1;
@@ -818,8 +820,12 @@ int __llgo_coro_fleet_owner_release_v1(
         pthread_mutex_lock(&factory->mutex) != 0) {
         return -1;
     }
-    struct llgo_coro_fleet_owner_record_v1 *record =
-        llgo_coro_fleet_record_for_token_locked_v1(token);
+    struct llgo_coro_fleet_owner_record_v1 *record = 0;
+    if (llgo_coro_fleet_find_record_for_token_locked_v1(
+            token, &record) != 0) {
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
     while (record != 0 &&
            record->state == LLGO_CORO_FLEET_OWNER_RUNNING_V1) {
         if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
@@ -828,13 +834,16 @@ int __llgo_coro_fleet_owner_release_v1(
             return -1;
         }
     }
+    struct llgo_coro_fleet_owner_record_v1 *slot_record = 0;
     if (record == 0 || record->thread == (pthread_t)0 ||
         pthread_equal(record->thread, thread) == 0 ||
         record->slot != slot ||
         record->state != LLGO_CORO_FLEET_OWNER_RETURNED_V1 ||
         record->acknowledged != 1 || record->published != 1 ||
         record->joining != 0 ||
-        llgo_coro_fleet_record_for_slot_locked_v1(slot) != record) {
+        llgo_coro_fleet_find_record_for_slot_locked_v1(
+            slot, &slot_record) != 0 ||
+        slot_record != record) {
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
     }
@@ -846,12 +855,6 @@ int __llgo_coro_fleet_owner_release_v1(
             LLGO_CORO_FLEET_OWNER_STANDBY_CAPACITY_V1 &&
         factory->state != LLGO_CORO_FLEET_FACTORY_STOPPING_V1 &&
         factory->state != LLGO_CORO_FLEET_FACTORY_FAILED_V1) {
-        uint32_t index = llgo_coro_fleet_record_index_v1(record);
-        if (index == 0) {
-            factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
-            (void)pthread_mutex_unlock(&factory->mutex);
-            return -1;
-        }
         record->state = LLGO_CORO_FLEET_OWNER_PARKING_V1;
         if (pthread_cond_broadcast(&factory->changed) != 0) {
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
@@ -870,8 +873,8 @@ int __llgo_coro_fleet_owner_release_v1(
             (void)pthread_mutex_unlock(&factory->mutex);
             return -1;
         }
-        record->next = factory->standby_head;
-        factory->standby_head = index;
+        record->standby_next = factory->standby_head;
+        factory->standby_head = record;
         factory->standby_count++;
         if (pthread_mutex_unlock(&factory->mutex) != 0) {
             return -1;
@@ -892,8 +895,12 @@ int __llgo_coro_fleet_owner_retire_self_v1(uint32_t slot) {
     if (slot == 0 || pthread_mutex_lock(&factory->mutex) != 0) {
         return -1;
     }
-    struct llgo_coro_fleet_owner_record_v1 *record =
-        llgo_coro_fleet_record_for_slot_locked_v1(slot);
+    struct llgo_coro_fleet_owner_record_v1 *record = 0;
+    if (llgo_coro_fleet_find_record_for_slot_locked_v1(
+            slot, &record) != 0) {
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
     if (record == 0 || record->thread == (pthread_t)0 ||
         pthread_equal(record->thread, pthread_self()) == 0 ||
         record->state != LLGO_CORO_FLEET_OWNER_RUNNING_V1 ||
@@ -931,18 +938,16 @@ int __llgo_coro_fleet_owner_stop_standby_v1(uint32_t *joined) {
         return -1;
     }
     uint32_t count = factory->standby_count;
-    uint32_t index = factory->standby_head;
+    struct llgo_coro_fleet_owner_record_v1 *record =
+        factory->standby_head;
     factory->standby_head = 0;
     factory->standby_count = 0;
     for (uint32_t offset = 0; offset < count; offset++) {
-        if (index == 0 ||
-            index > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1) {
+        if (record == 0) {
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
             (void)pthread_mutex_unlock(&factory->mutex);
             return -1;
         }
-        struct llgo_coro_fleet_owner_record_v1 *record =
-            &factory->records[index - 1u];
         if (record->state != LLGO_CORO_FLEET_OWNER_STANDBY_V1 ||
             record->thread == (pthread_t)0 || record->token == 0 ||
             record->slot != 0 || record->joining != 0) {
@@ -952,11 +957,13 @@ int __llgo_coro_fleet_owner_stop_standby_v1(uint32_t *joined) {
         }
         threads[offset] = record->thread;
         tokens[offset] = record->token;
-        index = record->next;
-        record->next = 0;
+        struct llgo_coro_fleet_owner_record_v1 *next =
+            record->standby_next;
+        record->standby_next = 0;
         record->state = LLGO_CORO_FLEET_OWNER_STOPPING_V1;
+        record = next;
     }
-    if (index != 0 || pthread_cond_broadcast(&factory->changed) != 0 ||
+    if (record != 0 || pthread_cond_broadcast(&factory->changed) != 0 ||
         pthread_mutex_unlock(&factory->mutex) != 0) {
         return -1;
     }
@@ -991,9 +998,9 @@ int __llgo_coro_fleet_factory_stop_v2(uint32_t terminal_owner_token) {
     struct llgo_coro_fleet_owner_record_v1 *terminal = 0;
     uint32_t retained_records = 0;
     if (terminal_owner_token != 0) {
-        terminal = llgo_coro_fleet_record_for_token_locked_v1(
-            terminal_owner_token);
-        if (terminal == 0 || terminal->thread == (pthread_t)0 ||
+        if (llgo_coro_fleet_find_record_for_token_locked_v1(
+                terminal_owner_token, &terminal) != 0 ||
+            terminal == 0 || terminal->thread == (pthread_t)0 ||
             pthread_equal(terminal->thread, pthread_self()) == 0 ||
             terminal->state != LLGO_CORO_FLEET_OWNER_RUNNING_V1 ||
             terminal->acknowledged != 1 || terminal->published != 1 ||
@@ -1010,10 +1017,13 @@ int __llgo_coro_fleet_factory_stop_v2(uint32_t terminal_owner_token) {
             return -1;
         }
     }
+    struct llgo_coro_fleet_owner_record_v1 *retained = 0;
     if (factory->active_records != retained_records ||
+        (retained_records == 0 && factory->records != 0) ||
         (terminal != 0 &&
-         (llgo_coro_fleet_record_for_token_locked_v1(
-              terminal_owner_token) != terminal ||
+         (llgo_coro_fleet_find_record_for_token_locked_v1(
+              terminal_owner_token, &retained) != 0 ||
+          retained != terminal ||
           terminal->state != LLGO_CORO_FLEET_OWNER_RUNNING_V1))) {
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
