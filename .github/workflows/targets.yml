@@ -51,5 +51,15 @@ jobs:
       - name: Test embedded debugger transports
         run: bash cmd/llgo/debugtest/embedded/runtest.sh
 
+      - name: Test physical-probe opt-in guard
+        shell: bash
+        run: |
+          set +e
+          output="$(bash cmd/llgo/debugtest/hardware/runtest.sh 2>&1)"
+          result=$?
+          set -e
+          test "${result}" -eq 2
+          grep -F 'LLGO_HARDWARE_CONFIRM=flash' <<<"${output}"
+
       - name: Test LLGo GDB adapter
         run: LLGO_GDB_INTEGRATION=1 go test ./cmd/internal/gdb -run '^TestGDBIntegration$' -count=1
