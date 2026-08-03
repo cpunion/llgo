@@ -413,12 +413,14 @@ func TestCallerFrameTrackingEligibility(t *testing.T) {
 		track      bool
 		targetName string
 		goarch     string
+		wasmResume bool
 		want       bool
 	}{
 		{name: "enabled user package", pkgPath: "example.com/foo", track: true, want: true},
 		{name: "disabled flag", pkgPath: "example.com/foo", want: false},
 		{name: "named target", pkgPath: "example.com/foo", track: true, targetName: "esp32", want: false},
-		{name: "wasm", pkgPath: "example.com/foo", track: true, goarch: "wasm", want: true},
+		{name: "wasm", pkgPath: "example.com/foo", track: true, goarch: "wasm", want: false},
+		{name: "resumable wasm", pkgPath: "example.com/foo", track: true, goarch: "wasm", wasmResume: true, want: true},
 		{name: "stdlib", pkgPath: "fmt", track: true, want: true},
 		{name: "runtime", pkgPath: "runtime", track: true, want: false},
 		{name: "llgo runtime", pkgPath: llssa.PkgRuntime, track: true, want: false},
@@ -438,6 +440,7 @@ func f() { runtime.Caller(0) }
 			if tt.goarch != "" {
 				prog.Target().GOARCH = tt.goarch
 			}
+			prog.EnableWasmResumeABI(tt.wasmResume)
 			pkg := prog.NewPackage("foo", tt.pkgPath)
 			fn := pkg.NewFunc("f", llssa.NoArgsNoRet, llssa.InGo)
 			goFn := ssapkg.Func("f")
@@ -832,18 +835,30 @@ func f() {
 	runtime.Caller(0)
 }
 `)
-	prog := newLLSSAProg(t)
-	prog.Target().GOOS = "js"
-	prog.Target().GOARCH = "wasm"
-	pkg, err := NewPackage(prog, ssapkg, files)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ir := pkg.Module().String()
-	for _, want := range []string{"PushCallerLocationFrame", "RecordCallerLocation", "PopCallerLocationFrame"} {
-		if !strings.Contains(ir, want) {
-			t.Fatalf("wasm runtime.Caller should emit %s:\n%s", want, ir)
-		}
+	for _, tt := range []struct {
+		name         string
+		wasmResume   bool
+		wantTracking bool
+	}{
+		{name: "default"},
+		{name: "resumable", wasmResume: true, wantTracking: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prog := newLLSSAProg(t)
+			prog.Target().GOOS = "js"
+			prog.Target().GOARCH = "wasm"
+			prog.EnableWasmResumeABI(tt.wasmResume)
+			pkg, err := NewPackage(prog, ssapkg, files)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ir := pkg.Module().String()
+			for _, symbol := range []string{"PushCallerLocationFrame", "RecordCallerLocation", "PopCallerLocationFrame"} {
+				if got := strings.Contains(ir, symbol); got != tt.wantTracking {
+					t.Fatalf("wasm runtime.Caller tracking %s = %v, want %v:\n%s", symbol, got, tt.wantTracking, ir)
+				}
+			}
+		})
 	}
 }
 

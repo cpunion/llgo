@@ -868,8 +868,10 @@ func (p *context) shouldTrackCallerFrames() bool {
 	if !p.runtimeCallerFuncs[p.goFn] {
 		return false
 	}
-	if target := p.prog.Target(); target != nil && target.Target != "" && target.GOARCH != "wasm" {
-		return false
+	if target := p.prog.Target(); target != nil && (target.Target != "" || target.GOARCH == "wasm") {
+		if !p.prog.WasmResumeABIEnabled() {
+			return false
+		}
 	}
 	return canTrackCallerFramesForPackage(p.pkg.Path())
 }
@@ -1485,16 +1487,15 @@ func (p *context) runtimeCallerFrameName() string {
 // (PushCallerLocationFrame / RecordCallerLocation / RecordPanicLocation).
 // The FP-chain unwinder supersedes them: physical pcs resolve through the
 // prebuilt ftab and pcline labels, so tracked functions keep only noinline,
-// no-tail-call and the label records. Wasm has no FP unwinder, so packages
-// that use runtime stack APIs retain this fallback automatically.
+// no-tail-call and the label records. The resumable wasm ABI has no FP
+// unwinder, so packages that use runtime stack APIs retain this fallback.
 var emitShadowStackInstrumentation = os.Getenv("LLGO_SHADOW_STACK") == "1"
 
 func (p *context) shouldEmitShadowStackInstrumentation() bool {
 	if emitShadowStackInstrumentation {
 		return true
 	}
-	target := p.prog.Target()
-	return target != nil && target.GOARCH == "wasm"
+	return p.prog.WasmResumeABIEnabled()
 }
 
 func (p *context) pushCallerLocationFrame(b llssa.Builder, fn *ssa.Function) {
