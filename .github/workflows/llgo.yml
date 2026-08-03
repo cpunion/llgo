@@ -671,6 +671,33 @@ jobs:
             --env LLGO_WASM_BLOCKED_G=1000 \
             "$RUNNER_TEMP/wasm-resume-hardening-wasip1.wasm" resume-hardening-p1 2>&1)
           grep -Fxq "wasm hardening ok" <<<"$output"
+          LLGO_WASM_RESUME=1 GOOS=js GOARCH=wasm llgo build -p=1 \
+            -o "$RUNNER_TEMP/wasm-resume-acceptance-go.mjs" ./internal/build/testdata/wasm-resume-acceptance
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-acceptance-go.mjs" "wasm resume acceptance ok"
+          LLGO_WASM_RESUME=1 llgo build -p=1 -target wasm \
+            -o "$RUNNER_TEMP/wasm-resume-acceptance.mjs" ./internal/build/testdata/wasm-resume-acceptance
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-acceptance.mjs" "wasm resume acceptance ok"
+          LLGO_WASM_RESUME=1 GOOS=wasip1 GOARCH=wasm llgo build -p=1 \
+            -o "$RUNNER_TEMP/wasm-resume-acceptance-wasip1.wasm" ./internal/build/testdata/wasm-resume-acceptance
+          wasm-tools validate --features all "$RUNNER_TEMP/wasm-resume-acceptance-wasip1.wasm"
+          test "$(wasmtime run -W exceptions=y "$RUNNER_TEMP/wasm-resume-acceptance-wasip1.wasm" 2>&1)" = \
+            "wasm resume acceptance ok"
+          LLGO_WASM_RESUME=1 GOOS=js GOARCH=wasm llgo build -p=1 -O0 -ldflags=-w=false \
+            -o "$RUNNER_TEMP/wasm-resume-debug-go.mjs" ./internal/build/testdata/wasm-resume-debug
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-debug-go.mjs" "wasm resume debug ok"
+          llvm-dwarfdump --verify "$RUNNER_TEMP/wasm-resume-debug-go.wasm"
+          LLGO_WASM_RESUME=1 llgo build -p=1 -O0 -ldflags=-w=false -target wasm \
+            -o "$RUNNER_TEMP/wasm-resume-debug.mjs" ./internal/build/testdata/wasm-resume-debug
+          run_wasm_workers "$RUNNER_TEMP/wasm-resume-debug.mjs" "wasm resume debug ok"
+          llvm-dwarfdump --verify "$RUNNER_TEMP/wasm-resume-debug.wasm"
+          LLGO_WASM_RESUME=1 GOOS=wasip1 GOARCH=wasm llgo build -p=1 -O0 -ldflags=-w=false \
+            -o "$RUNNER_TEMP/wasm-resume-debug-wasip1.wasm" ./internal/build/testdata/wasm-resume-debug
+          wasm-tools validate --features all "$RUNNER_TEMP/wasm-resume-debug-wasip1.wasm"
+          test "$(wasmtime run -W exceptions=y "$RUNNER_TEMP/wasm-resume-debug-wasip1.wasm" 2>&1)" = \
+            "wasm resume debug ok"
+          wasm_headers=$(wasm-objdump -h "$RUNNER_TEMP/wasm-resume-debug-wasip1.wasm")
+          grep -Fq '.debug_info' <<<"$wasm_headers"
+          grep -Fq '.debug_line' <<<"$wasm_headers"
           file "$RUNNER_TEMP/runtime-js.wasm" \
             "$RUNNER_TEMP/runtime-wasip1.wasm" \
             "$RUNNER_TEMP/runtime-wasip1-threads.wasm" \
