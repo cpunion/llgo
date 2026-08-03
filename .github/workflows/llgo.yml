@@ -695,9 +695,9 @@ jobs:
           wasm-tools validate --features all "$RUNNER_TEMP/wasm-resume-debug-wasip1.wasm"
           test "$(wasmtime run -W exceptions=y "$RUNNER_TEMP/wasm-resume-debug-wasip1.wasm" 2>&1)" = \
             "wasm resume debug ok"
-          wasm_headers=$(wasm-objdump -h "$RUNNER_TEMP/wasm-resume-debug-wasip1.wasm")
-          grep -Fq '.debug_info' <<<"$wasm_headers"
-          grep -Fq '.debug_line' <<<"$wasm_headers"
+          wasm_sections=$(llvm-readobj --sections "$RUNNER_TEMP/wasm-resume-debug-wasip1.wasm")
+          grep -Fq '.debug_info' <<<"$wasm_sections"
+          grep -Fq '.debug_line' <<<"$wasm_sections"
           file "$RUNNER_TEMP/runtime-js.wasm" \
             "$RUNNER_TEMP/runtime-wasip1.wasm" \
             "$RUNNER_TEMP/runtime-wasip1-threads.wasm" \
