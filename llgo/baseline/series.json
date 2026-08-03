@@ -53,6 +53,16 @@
     },
     {
       "kind": "branch",
+      "id": "f79364765b4ad988",
+      "label": "Branch codex/fork-wasm-resumable-acceptance-20260802",
+      "path": "series/branch/f79364765b4ad988/history.json",
+      "configPath": "series/branch/f79364765b4ad988/config.json",
+      "sha": "f9feaa5c30f0f89c7e9765b802ddc6bb713593b7",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/f9feaa5c30f0f89c7e9765b802ddc6bb713593b7",
+      "updatedAt": "2026-08-03T00:18:16.619Z"
+    },
+    {
+      "kind": "branch",
       "id": "648e2ddd849ffd5a",
       "label": "Branch codex/fork-wasm-resumable-arena-20260802",
       "path": "series/branch/648e2ddd849ffd5a/history.json",
@@ -130,6 +140,16 @@
       "sha": "11fed5f4ee5b520af2a6da5f2a8759a2195cfbd2",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/11fed5f4ee5b520af2a6da5f2a8759a2195cfbd2",
       "updatedAt": "2026-08-02T20:51:55.903Z"
+    },
+    {
+      "kind": "pull",
+      "id": "144",
+      "label": "PR #144",
+      "path": "series/pull/144/history.json",
+      "configPath": "series/pull/144/config.json",
+      "sha": "f9feaa5c30f0f89c7e9765b802ddc6bb713593b7",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/f9feaa5c30f0f89c7e9765b802ddc6bb713593b7",
+      "updatedAt": "2026-08-03T00:18:16.616Z"
     },
     {
       "kind": "pull",
