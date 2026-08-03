@@ -37,8 +37,7 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 		case *ssa.FreeVar:
 			return false
 		}
-		typ := p.type_(value.Type(), llssa.InGo)
-		return p.prog.GCRootCount(typ) != 0
+		return p.gcRootCount(value) != 0
 	}, p.isGCSafepoint)
 	if p.safepointEntry {
 		for _, param := range fn.Params {
@@ -54,8 +53,7 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 		if _, ok := planned[value]; !ok {
 			return
 		}
-		typ := p.type_(value.Type(), llssa.InGo)
-		if n := p.prog.GCRootCount(typ); n != 0 {
+		if n := p.gcRootCount(value); n != 0 {
 			counts[value] = n
 			total += n
 		}
@@ -97,6 +95,31 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 	if hasClosureRoot {
 		p.gcClosureRoot = allSlots[next]
 	}
+}
+
+func (p *context) gcRootCount(value ssa.Value) int {
+	if call, ok := value.(*ssa.Call); ok {
+		if fn, ok := call.Call.Value.(*ssa.Function); ok {
+			_, name, kind := p.funcName(fn)
+			if kind == llgoInstr && llgoInstrs[name] == llgoFuncAddr {
+				return 0
+			}
+		}
+	}
+	if next, ok := value.(*ssa.Next); ok {
+		if next.IsString {
+			return 0
+		}
+		if iter, ok := next.Iter.(*ssa.Range); ok {
+			if typ, ok := types.Unalias(iter.X.Type()).Underlying().(*types.Map); ok {
+				key := p.type_(typ.Key(), llssa.InGo)
+				elem := p.type_(typ.Elem(), llssa.InGo)
+				return p.prog.GCRootCount(key) + p.prog.GCRootCount(elem)
+			}
+		}
+	}
+	typ := p.type_(value.Type(), llssa.InGo)
+	return p.prog.GCRootCount(typ)
 }
 
 func (p *context) initGCRoots(b llssa.Builder, fn *ssa.Function) {

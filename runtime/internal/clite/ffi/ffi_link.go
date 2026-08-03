@@ -6,11 +6,6 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-const (
-	LLGoPackage = "link: $(pkg-config --libs libffi); -lffi"
-	LLGoFiles   = "$(pkg-config --cflags libffi): _wrap/libffi.c"
-)
-
 /*
 ffi_status
 ffi_prep_cif(ffi_cif *cif,

@@ -418,7 +418,7 @@ func TestCallerFrameTrackingEligibility(t *testing.T) {
 		{name: "enabled user package", pkgPath: "example.com/foo", track: true, want: true},
 		{name: "disabled flag", pkgPath: "example.com/foo", want: false},
 		{name: "named target", pkgPath: "example.com/foo", track: true, targetName: "esp32", want: false},
-		{name: "wasm", pkgPath: "example.com/foo", track: true, goarch: "wasm", want: false},
+		{name: "wasm", pkgPath: "example.com/foo", track: true, goarch: "wasm", want: true},
 		{name: "stdlib", pkgPath: "fmt", track: true, want: true},
 		{name: "runtime", pkgPath: "runtime", track: true, want: false},
 		{name: "llgo runtime", pkgPath: llssa.PkgRuntime, track: true, want: false},
@@ -821,6 +821,29 @@ func f() { _ = runtime.FuncForPC(0) }
 	}
 	if !strings.Contains(ir, `!llgo.funcinfo = !{!`) {
 		t.Fatalf("FuncForPC-only packages should still emit funcinfo metadata:\n%s", ir)
+	}
+}
+
+func TestCompileRuntimeCallerFrameInstrumentationForWasm(t *testing.T) {
+	ssapkg, files := buildCallerFrameSSAPackage(t, "example.com/foo", `package foo
+import "runtime"
+
+func f() {
+	runtime.Caller(0)
+}
+`)
+	prog := newLLSSAProg(t)
+	prog.Target().GOOS = "js"
+	prog.Target().GOARCH = "wasm"
+	pkg, err := NewPackage(prog, ssapkg, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir := pkg.Module().String()
+	for _, want := range []string{"PushCallerLocationFrame", "RecordCallerLocation", "PopCallerLocationFrame"} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("wasm runtime.Caller should emit %s:\n%s", want, ir)
+		}
 	}
 }
 

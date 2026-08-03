@@ -84,8 +84,8 @@ func logPackageErrors(t *testing.T, pkg *packages.Package, seen map[string]bool)
 	}
 }
 
-func TestWasmBytealgSourcePatchReplacesAsm(t *testing.T) {
-	for _, pkgPath := range []string{"internal/bytealg", "internal/chacha8rand", "internal/runtime/atomic"} {
+func TestWasmSourcePatchReplacesAsm(t *testing.T) {
+	for _, pkgPath := range []string{"internal/bytealg", "internal/chacha8rand", "internal/runtime/atomic", "math"} {
 		if !llruntime.HasSourcePatchPkg(pkgPath) {
 			t.Fatalf("%s should be registered as a source patch package", pkgPath)
 		}
@@ -111,6 +111,7 @@ func TestWasmBytealgSourcePatchReplacesAsm(t *testing.T) {
 		"internal/bytealg/indexbyte_wasm.s",
 		"internal/chacha8rand/chacha8_stub.s",
 		"internal/runtime/atomic/atomic_wasm.s",
+		"math/floor_wasm.s",
 	} {
 		path := filepath.Join(runtime.GOROOT(), "src", filepath.FromSlash(file))
 		if got := string(overlay[path]); got != "// replaced by LLGo source patch\n" {

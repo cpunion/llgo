@@ -8,8 +8,10 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"runtime"
 	"testing"
 
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -130,6 +132,73 @@ func classify(p *int) *int { return p }
 	if functionHasGCSafepoint(pure) {
 		t.Error("pure function has a GC safepoint")
 	}
+}
+
+func TestGCRootCountUsesConcreteRangeNextType(t *testing.T) {
+	fn := buildGCRootSSAFunction(t, `package p
+func classify(values map[int]*int, text string, pointer *int) {
+	for range values {}
+	for range text {}
+}`)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	ctx := context{prog: prog}
+	if got := ctx.gcRootCount(fn.Params[2]); got != 1 {
+		t.Fatalf("pointer parameter root count = %d, want 1", got)
+	}
+
+	seenMap, seenString := false, false
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			next, ok := instr.(*ssa.Next)
+			if !ok {
+				continue
+			}
+			got := ctx.gcRootCount(next)
+			if next.IsString {
+				seenString = true
+				if got != 0 {
+					t.Fatalf("string range Next root count = %d, want 0", got)
+				}
+			} else {
+				seenMap = true
+				if got != 1 {
+					t.Fatalf("map range Next root count = %d, want 1", got)
+				}
+			}
+		}
+	}
+	if !seenMap || !seenString {
+		t.Fatalf("range Next instructions: map=%v string=%v", seenMap, seenString)
+	}
+}
+
+func TestGCRootCountExcludesFunctionAddressIntrinsic(t *testing.T) {
+	fn := buildGCRootSSAFunction(t, `package p
+import "unsafe"
+func intrinsic(any) unsafe.Pointer
+func classify(fn func()) unsafe.Pointer { return intrinsic(fn) }
+`)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	prog.SetLinkname("gcroot.intrinsic", "llgo.funcAddr")
+	ctx := context{prog: prog, goTyps: fn.Pkg.Pkg}
+
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			call, ok := instr.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			if got := ctx.gcRootCount(call); got != 0 {
+				t.Fatalf("function address root count = %d, want 0", got)
+			}
+			return
+		}
+	}
+	t.Fatal("function address call not found")
 }
 
 func buildGCRootSSAFunction(t *testing.T, src string) *ssa.Function {
