@@ -34,6 +34,11 @@ func inspect(items [2]item, seed int) int {
 	return items[0].value + local[0].value
 }
 
+func inspectDefer(seed int) (result int) {
+	defer func() { result++ }()
+	return seed
+}
+
 var anonymous = func(seed int) int {
 	value := seed + 1
 	return value

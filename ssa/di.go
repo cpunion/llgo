@@ -798,6 +798,15 @@ func (b Builder) DISetCurrentDebugLocation(diScope DIScope, pos token.Position) 
 	)
 }
 
+func (b Builder) ensureCallDebugLocation(call llvm.Value) {
+	if b.Func.diFunc == nil || !call.InstructionDebugLoc().IsNil() {
+		return
+	}
+	b.impl.SetCurrentDebugLocation(0, 0, b.Func.diFunc.ll, llvm.Metadata{})
+	b.impl.SetInstDebugLocation(call)
+	b.impl.SetCurrentDebugLocation(0, 0, llvm.Metadata{}, llvm.Metadata{})
+}
+
 func (b Builder) DebugFunction(f Function, funcScope *types.Scope, pos token.Position, bodyPos token.Position) {
 	b.diFuncScope = funcScope
 	p := f

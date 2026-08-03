@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/internal/debuginfo"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -180,6 +181,75 @@ func TestLowerPrototypeBuildsDirectCallStateMachine(t *testing.T) {
 		if !strings.Contains(ir, want) {
 			t.Errorf("state machine is missing %q:\n%s", want, ir)
 		}
+	}
+}
+
+func TestLowerPrototypeRemapsParameterDebugValue(t *testing.T) {
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("state-debug")
+	defer mod.Dispose()
+	mod.SetTarget("wasm32-unknown-unknown")
+	mod.SetDataLayout("e-m:e-p:32:32-i64:64-n32:64-S128")
+	targetData := llvm.NewTargetData(mod.DataLayout())
+	defer targetData.Dispose()
+
+	i32 := ctx.Int32Type()
+	sig := llvm.FunctionType(i32, []llvm.Type{i32}, false)
+	callee := llvm.AddFunction(mod, "callee", sig)
+	markFunction(ctx, callee)
+	calleeBlock := ctx.AddBasicBlock(callee, "entry")
+	irBuilder := ctx.NewBuilder()
+	defer irBuilder.Dispose()
+	irBuilder.SetInsertPointAtEnd(calleeBlock)
+	irBuilder.CreateRet(callee.Param(0))
+
+	caller := llvm.AddFunction(mod, "caller", sig)
+	markFunction(ctx, caller)
+	caller.Param(0).SetName("input")
+	callerBlock := ctx.AddBasicBlock(caller, "entry")
+
+	di := debuginfo.New(mod, debuginfo.Config{Producer: "LLGo"})
+	cu := di.CompileUnit("debug.go", "/src")
+	file := di.File("/src/debug.go")
+	intType := di.CreateBasicType(llvm.DIBasicType{
+		Name: "int32", SizeInBits: 32, Encoding: llvm.DW_ATE_signed,
+	})
+	subroutine := di.CreateSubroutineType(llvm.DISubroutineType{
+		File: file, Parameters: []llvm.Metadata{intType, intType},
+	})
+	subprogram := di.CreateFunction(cu, llvm.DIFunction{
+		Name: "caller", LinkageName: "caller", File: file, Line: 1,
+		ScopeLine: 1, Type: subroutine, IsDefinition: true,
+	})
+	caller.SetSubprogram(subprogram)
+	parameter := di.CreateParameterVariable(subprogram, llvm.DIParameterVariable{
+		Name: "input", File: file, Line: 1, Type: intType,
+		AlwaysPreserve: true, ArgNo: 1,
+	})
+	di.InsertValueAtEnd(
+		caller.Param(0), parameter, di.CreateExpression(nil),
+		llvm.DebugLoc{Line: 1, Scope: subprogram}, callerBlock,
+	)
+	irBuilder.SetInsertPointAtEnd(callerBlock)
+	call := irBuilder.CreateCall(sig, callee, []llvm.Value{caller.Param(0)}, "called")
+	markCall(ctx, call)
+	irBuilder.CreateRet(call)
+	di.Finalize()
+
+	lowered, err := lowerPrototype(mod, targetData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lowered) != 1 || lowered[0].entry.Subprogram().IsNil() || !caller.Subprogram().IsNil() {
+		t.Fatal("source subprogram was not transferred to the resumable entry")
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify debug state machine: %v\n%s", err, mod.String())
+	}
+	ir := mod.String()
+	if !strings.Contains(ir, "#dbg_value(i32 %input.reload") {
+		t.Fatalf("parameter debug value was not remapped to its frame reload:\n%s", ir)
 	}
 }
 

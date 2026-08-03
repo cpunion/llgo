@@ -171,6 +171,35 @@ func TestDIGlobalIgnoresStorageLessFrontendVariable(t *testing.T) {
 	builder.DIGlobal(pyVarExpr(Nil, "attribute"), "module.attribute", token.Position{})
 }
 
+func TestCallGetsFunctionScopeDebugFallback(t *testing.T) {
+	fset := token.NewFileSet()
+	file := fset.AddFile("fallback.go", -1, 32)
+	file.SetLines([]int{0, 8})
+
+	prog := NewProgram(&Target{OptLevel: optlevel.O0})
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	pkg := prog.NewPackage("p", "example.com/p")
+	pkg.InitDebug("p", "example.com/p", fset)
+	callee := pkg.NewFunc("example.com/p.callee", NoArgsNoRet, InGo)
+	caller := pkg.NewFunc("example.com/p.caller", NoArgsNoRet, InGo)
+	builder := caller.MakeBody(1)
+	defer builder.Dispose()
+	pos := fset.Position(file.Pos(1))
+	builder.DebugFunction(caller, nil, pos, pos)
+	builder.impl.SetCurrentDebugLocation(0, 0, llvm.Metadata{}, llvm.Metadata{})
+	call := builder.Call(callee.Expr)
+	builder.Return()
+	pkg.FinalizeDebug()
+
+	if call.impl.InstructionDebugLoc().IsNil() {
+		t.Fatalf("call has no function-scope debug fallback:\n%s", pkg.Module().String())
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("debug fallback module is invalid: %v\n%s", err, pkg.Module().String())
+	}
+}
+
 func newDebugRuntimePackage() *types.Package {
 	pkg := types.NewPackage(PkgRuntime, "runtime")
 	unsafePointer := types.Typ[types.UnsafePointer]

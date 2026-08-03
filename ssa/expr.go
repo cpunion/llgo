@@ -1253,6 +1253,7 @@ func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
 		}
 		ll = b.Prog.FuncDecl(sigCtx, InC).ll
 		ret.impl = llvm.CreateCall(b.impl, ll, fn.impl, llvmParamsEx(data, args, sigCtx.Params(), b))
+		b.ensureCallDebugLocation(ret.impl)
 		b.markWasmResumeCall(ret.impl, InGo)
 		return ret
 	case vkFuncPtr:
@@ -1273,6 +1274,7 @@ func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
 	}
 	ret.Type = b.Prog.retType(sig)
 	ret.impl = llvm.CreateCall(b.impl, ll, fn.impl, llvmParamsEx(data, args, sig.Params(), b))
+	b.ensureCallDebugLocation(ret.impl)
 	b.markWasmResumeCall(ret.impl, b.directCallBackground(fn))
 	if reflectCheck.Kind&ReflectMethodByName != 0 && reflectCheck.Name == "" {
 		nameArgIndex := len(args) - 1

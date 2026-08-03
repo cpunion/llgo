@@ -129,6 +129,10 @@ func lowerStateMachine(
 	}
 	originalEntry := blocks[0]
 	blockAddresses := collectMovedBlockAddresses(fn, blocks)
+	if subprogram := fn.Subprogram(); !subprogram.IsNil() {
+		lowered.entry.SetSubprogram(subprogram)
+		fn.SetSubprogram(llvm.Metadata{})
+	}
 
 	dispatch := ctx.AddBasicBlock(lowered.entry, "dispatch")
 	for _, block := range blocks {
@@ -150,6 +154,11 @@ func lowerStateMachine(
 
 	for _, slot := range layout.plan.slots {
 		if slot.kind == slotUnwind {
+			continue
+		}
+		if slot.kind == slotParameter {
+			loaded := builder.CreateLoad(slot.typ, fields[slot.id], slot.value.Name()+".reload")
+			slot.value.ReplaceAllUsesWith(loaded)
 			continue
 		}
 		if isStackSave(slot.value) {
