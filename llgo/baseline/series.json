@@ -57,9 +57,9 @@
       "label": "Branch codex/fork-wasm-resumable-acceptance-20260802",
       "path": "series/branch/f79364765b4ad988/history.json",
       "configPath": "series/branch/f79364765b4ad988/config.json",
-      "sha": "2280ed37aa05fe27eb9680dbca89d5186d8709cb",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/2280ed37aa05fe27eb9680dbca89d5186d8709cb",
-      "updatedAt": "2026-08-03T00:25:38.636Z"
+      "sha": "ee519ab23efe93f88126aefb6759a09178f09652",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/ee519ab23efe93f88126aefb6759a09178f09652",
+      "updatedAt": "2026-08-03T00:53:52.063Z"
     },
     {
       "kind": "branch",
@@ -147,9 +147,9 @@
       "label": "PR #144",
       "path": "series/pull/144/history.json",
       "configPath": "series/pull/144/config.json",
-      "sha": "2280ed37aa05fe27eb9680dbca89d5186d8709cb",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/2280ed37aa05fe27eb9680dbca89d5186d8709cb",
-      "updatedAt": "2026-08-03T00:25:38.631Z"
+      "sha": "ee519ab23efe93f88126aefb6759a09178f09652",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/ee519ab23efe93f88126aefb6759a09178f09652",
+      "updatedAt": "2026-08-03T00:53:52.057Z"
     },
     {
       "kind": "pull",
