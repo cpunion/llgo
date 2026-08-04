@@ -157,8 +157,8 @@ Run native tests on the host platform whenever possible. Cross-compilation alone
 
 | Development host | Practical local coverage |
 | --- | --- |
-| macOS arm64 | Native macOS arm64; macOS amd64 with Rosetta and a matching x86_64 Go/LLVM toolchain; Linux amd64/arm64 with Docker Desktop |
-| macOS amd64 | Native macOS amd64; Linux amd64/arm64 with Docker Desktop; use a remote arm64 Mac for native macOS arm64 behavior |
+| macOS arm64 | Native macOS arm64; macOS amd64 with Rosetta and a matching x86_64 Go/LLVM toolchain; Linux amd64/arm64 with Docker Desktop or OrbStack |
+| macOS amd64 | Native macOS amd64; Linux amd64/arm64 with Docker Desktop or OrbStack; use a remote arm64 Mac for native macOS arm64 behavior |
 | Linux amd64/arm64 | Native matching Linux architecture; the other Linux architecture with containers plus QEMU/binfmt |
 | Windows amd64/arm64 | Linux validation through WSL2 or Docker; do not claim native Windows validation |
 
@@ -169,7 +169,7 @@ Reusable Linux environments are provided for both main architectures:
 ./dev/docker.sh arm64 bash -lc './dev/llgo.sh test ./test/...'
 ```
 
-Docker Desktop provides emulation on macOS. Linux hosts must enable QEMU/binfmt before running a container for the other architecture. The primary CI source-build/test lanes cover macOS arm64 and Linux amd64; release artifact smoke tests additionally cover macOS amd64 and Linux arm64. Linux and Windows hosts cannot validate native macOS behavior.
+On macOS, use Docker Desktop or [OrbStack](https://docs.orbstack.dev/) for the Linux container lanes. Both expose Docker Compose, so the `dev/docker.sh` commands stay the same. Linux hosts must enable QEMU/binfmt before running a container for the other architecture. The primary CI source-build/test lanes cover macOS arm64 and Linux amd64; release artifact smoke tests additionally cover macOS amd64 and Linux arm64. Linux and Windows hosts cannot validate native macOS behavior.
 
 ### WebAssembly
 
