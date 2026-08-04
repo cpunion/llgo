@@ -1,122 +1,29 @@
-# LLGo Contributor Guide
+# LLGo Agent Guide
 
-LLGo is an LLVM-based Go compiler with C, Python, JavaScript, WebAssembly, and embedded integrations. This guide covers repository-specific contribution rules; see the [README](README.md) for installation and usage.
+Automated contributors must read and follow the shared [contribution guide](CONTRIBUTING.md). It defines the development environment, testing expectations, platform validation, code quality rules, and pull request record required for every contributor.
 
-## Project Structure
+The rules below are additional safeguards for AI agents and other repository automation.
 
-- `cmd/llgo` - Main compiler command
-- `cl/` - Go package to LLVM IR compilation
-- `ssa/` - LLVM IR generation with Go SSA semantics
-- `internal/build/` - Build orchestration
-- `runtime/` - LLGo runtime library
-- `chore/` - Development tools (litgen, llpyg, ssadump, etc.)
-- `_demo/` - C/C++, Python, and other integration examples
-- `_cmptest/` - Go/LLGo output comparison tests
+## Scope and working tree safety
 
-## Development Environment
+- Keep changes within the requested scope and preserve unrelated edits, untracked files, and active worktrees.
+- Inspect the complete diff against upstream before submission. Do not overwrite or discard existing work unless explicitly authorized.
+- Use focused edits and tests first. Do not rewrite unrelated files, regenerate unrelated fixtures, or broaden a change merely to make validation pass.
+- Diagnose baseline failures instead of hiding them with skips, exclusions, weakened checks, or undocumented environment changes.
 
-For detailed dependency requirements and installation instructions, see the [Dependencies](README.md#dependencies) and [How to install](README.md#how-to-install) sections in the README.
-
-CI uses LLVM 19 and pinned Go patch releases; check [`.github/workflows/llgo.yml`](.github/workflows/llgo.yml) and [`.github/workflows/goroot.yml`](.github/workflows/goroot.yml) for exact versions. Native development supports macOS and Linux; use WSL2 or Linux containers on Windows.
-
-## Repository and GitHub Safety
+## Repository and GitHub safety
 
 - Treat `xgo-dev/*` as upstream. Do not push branches or tags directly to an `xgo-dev` repository, and do not merge its pull requests.
-- Push code to your fork, then create or update a pull request against `xgo-dev/llgo:main`. Bug reports and proposals may be submitted as upstream issues.
-- Do not publish upstream releases or change upstream repository settings. Inspect remotes before any write operation when ownership is unclear.
-- Prefer `gh issue view`, `gh pr view`, and `gh pr checks` for GitHub state. Use `gh api` for review threads, inline comments, check-run details, or fields not exposed by the higher-level commands; avoid scraping the website.
-- Keep changes scoped, preserve unrelated worktree edits, and review the complete diff against upstream before submission. Diagnose baseline failures instead of hiding them with skips, exclusions, or weakened checks.
+- Push code to the contributor's fork, then create or update a pull request against `xgo-dev/llgo:main`. Upstream issues may be created when requested.
+- Do not publish upstream releases or change upstream repository settings. Inspect remotes and exact refs before any write operation when ownership is unclear.
+- Prefer `gh issue view`, `gh pr view`, and `gh pr checks` for GitHub state. Use `gh api` for review threads, inline comments, check-run details, or fields not exposed by higher-level commands; do not scrape the website.
+- Use explicit force-with-lease protection when a requested rebase requires rewriting a fork branch. Stop if the remote head changed unexpectedly.
 
-## Testing & Validation
+## Validation and reporting
 
-Behavior changes require focused regression tests; documentation-only and mechanical changes do not need artificial tests. Start with the affected package, then broaden validation:
+- Follow [CONTRIBUTING.md](CONTRIBUTING.md#testing-and-validation) for the affected package, nested runtime module, GOROOT cases, and target-specific validation.
+- Report the exact commands and platforms exercised. Distinguish execution from build-only checks and state every omitted test with its reason; omission is not a pass.
+- Do not claim repository-wide success from a focused test. When a required check cannot run locally, leave it to CI and say so explicitly.
+- For generated IR, use the repository's `// LITTEST` and `chore/litgen` workflow described in the contribution guide; do not hand-edit or bulk-regenerate unrelated expectations.
 
-```bash
-go test ./path/to/package
-go test ./...
-```
-
-The nested `runtime` Go module is not covered by root-level `go test`, `go build`, or `go vet`; run the corresponding command there when it is affected, for example `(cd runtime && go test ./...)`.
-
-Install the [documented dependencies](README.md#dependencies), including development libraries for Python and other integrations. If one is unavailable, report the exact omitted tests and reason; omission is not a pass.
-
-Prefer the development wrapper for LLGo execution tests; it builds the current checkout and selects its runtime tree:
-
-```bash
-./dev/llgo.sh test ./path/to/package
-```
-
-After focused tests pass, `./dev/local_ci.sh` runs the main local checks when dependencies are available. See [`dev/README.md`](dev/README.md) for details.
-
-### Coverage
-
-- The Codecov patch check must pass; new deterministic logic and error paths should normally be covered.
-- From the module containing the target package, check focused coverage with `go test -coverprofile=coverage.out ./path/to/package` and `go tool cover -func=coverage.out`.
-- Linux and macOS coverage is combined; validate host-specific changes on the matching host when possible.
-- [`.github/codecov.yml`](.github/codecov.yml) lists paths excluded from coverage. Add an exclusion only for generated, tooling, fixture, or otherwise non-meaningful code; never exclude production logic merely to make a PR pass, and explain every ignore change in the PR.
-
-### Update IR test expectations
-
-When `ssa/` or `cl/` changes generated IR, refresh only the affected expectations and review every generated diff:
-
-```bash
-go run ./chore/litgen path/to/LITTEST/in.go
-```
-
-Do not regenerate unrelated output. Supported scopes and the marker format are documented in [`dev/README.md`](dev/README.md#6-refresh-ir-checks).
-
-### Compatibility and target validation
-
-- Go compatibility covers source and observable behavior, not gc's internal ABI. Run standard-library tests with both `go test ./test/std/...` and `./dev/llgo.sh test ./test/std/...`.
-- Run official Go cases with `bash ./dev/test_goroot.sh -- -directive-mode ci`; see [`test/goroot/README.md`](test/goroot/README.md) for filtering, multiple toolchains, full coverage, and sharding.
-- Run native tests on the matching host. Use `dev/docker.sh` for Linux amd64/arm64 validation, `dev/test_wasm.sh` for Wasm, and `dev/test_embed.sh` for embedded build plus emulator smoke.
-- Cross-compilation is not execution validation. Do not weaken failures to make a change pass, and state any target that could not be run.
-- Changes to runtime ABI, archive/link metadata, target selection, or generated IR need focused multi-target tests. Use `// LITTEST` checks where IR shape matters and describe compatibility implications in the pull request.
-
-The host matrix, CI coverage, dependencies, and target-specific follow-up commands are in [`dev/README.md`](dev/README.md#platform-and-target-validation).
-
-### Performance, size, and validation record
-
-- For compiler, runtime, linker, ABI, or hot-path changes, run focused benchmarks and inspect the paired Linux/macOS results. Repeat material differences because small changes may be runner noise. See [`benchmark/baseline/README.md`](benchmark/baseline/README.md).
-- For changes that may affect binary layout or size, use `llgo build -size` as described in [`doc/size-report.md`](doc/size-report.md).
-- In the pull request, record commands and targets, distinguish execution from build-only checks, and identify gaps. Required Linux/macOS checks must pass; a `continue-on-error` lane is not authoritative.
-
-## Code Quality
-
-### Format code
-
-```bash
-gofmt -w path/to/changed.go
-```
-
-**Important:** Format every changed Go file before committing, but do not rewrite unrelated files in a shared or dirty worktree.
-
-For changed shell scripts, run `bash -n path/to/changed.sh` and `shellcheck path/to/changed.sh` when ShellCheck is available.
-
-### Run static analysis
-
-Run `go vet ./path/to/package` for affected packages. Repository-wide vet currently reports lock-copy diagnostics in `ssa/type_cvt.go` and possible `unsafe.Pointer` misuse in `cl/builtin_test.go`; do not claim a clean run, suppress new diagnostics, or silently expand this baseline.
-
-## Common Development Tasks
-
-Use `./dev/llgo.sh version` to build the current checkout with the development configuration and check the resulting command. Installation and tool-building commands are maintained in the [README](README.md#how-to-install).
-
-## Debugging
-
-### Disable Garbage Collection
-
-The `nogc` build tag is a targeted diagnostic mode that changes runtime semantics; it does not replace validation with the default GC configuration:
-
-```bash
-./dev/llgo.sh run -tags nogc .
-```
-
-See [Garbage Collection](README.md#garbage-collection-gc) and [`doc/defer-tls-gc.md`](doc/defer-tls-gc.md) for the supported modes and runtime design.
-
-### `LLGO_ROOT`
-
-Do not set `LLGO_ROOT` unconditionally. Development wrappers derive it for the current checkout, and an installed `llgo` does not necessarily require it. Set it explicitly only to select a non-standard source/runtime tree.
-
-## Important Notes
-
-Examples live under `_demo/`, whose underscore keeps ordinary `go` package discovery from including them. C and C++ integration uses LLGo directives and target ABIs, including `go:linkname` where appropriate; follow [`doc/How-to-support-a-C&C++-Library.md`](doc/How-to-support-a-C&C++-Library.md) instead of assuming every binding uses the same mechanism.
+`AGENTS.md` links to this file so supported agents receive the same automation-specific rules.

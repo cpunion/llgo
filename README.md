@@ -9,6 +9,8 @@ llgo - A Go compiler based on LLVM
 
 LLGo is a Go compiler based on LLVM in order to better integrate Go with the C ecosystem including Python and JavaScript. It's a subproject of [the XGo project](https://github.com/goplus/gop).
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development, testing, and pull request workflow.
+
 LLGo aims to expand the boundaries of Go/XGo, providing limitless possibilities such as:
 
 * Game development
