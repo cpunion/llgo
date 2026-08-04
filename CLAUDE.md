@@ -9,7 +9,7 @@ LLGo is an LLVM-based Go compiler with C, Python, JavaScript, WebAssembly, and e
 - `ssa/` - LLVM IR generation with Go SSA semantics
 - `internal/build/` - Build orchestration
 - `runtime/` - LLGo runtime library
-- `chore/` - Development tools (llgen, llpyg, ssadump, etc.)
+- `chore/` - Development tools (litgen, llpyg, ssadump, etc.)
 - `_demo/` - C/C++, Python, and other integration examples
 - `_cmptest/` - Go/LLGo output comparison tests
 
@@ -60,11 +60,10 @@ After focused tests pass, `./dev/local_ci.sh` runs the main local checks when de
 When `ssa/` or `cl/` changes generated IR, refresh only the affected expectations and review every generated diff:
 
 ```bash
-go run ./chore/litgen path/to/LITTEST/in.go  # default
-go run ./chore/llgen path/to/legacy/case     # remaining out.ll cases only
+go run ./chore/litgen path/to/LITTEST/in.go
 ```
 
-Do not regenerate unrelated output. The legacy batch tooling, supported scopes, and marker format are documented in [`dev/README.md`](dev/README.md#6-refresh-test-goldens).
+Do not regenerate unrelated output. Supported scopes and the marker format are documented in [`dev/README.md`](dev/README.md#6-refresh-ir-checks).
 
 ### Compatibility and target validation
 

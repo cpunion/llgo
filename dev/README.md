@@ -122,30 +122,9 @@ After installing SDL2 and, on Linux, libslirp as shown in [the CI setup action](
 
 The script caches the pinned ESP QEMU binaries outside the worktree, then builds and runs the ESP32/ESP32-C3 serial smoke tests. Target-table changes should also run `(cd _demo/embed/targetsbuild && bash build.sh empty)`. Startup/linker changes should additionally run `_demo/embed/test_esp32c3_startup.sh` with `esptool==5.1.0`. If a target has no emulator, report build-only validation explicitly.
 
-## 6) Refresh test goldens
+## 6) Refresh IR checks
 
-Use source-embedded `// LITTEST` checks and `litgen` for new and migrated IR tests. The remaining `out.ll` cases use `llgen`; `gentests` exists only for intentional legacy batch maintenance.
-
-- `litgen` is the default for source-embedded FileCheck directives.
-- `llgen` refreshes an individual legacy `out.ll` case.
-- `gentests` batch-refreshes legacy `out.ll` and `expect.txt`; do not use it for routine focused changes.
-
-### `gentests` (legacy batch only)
-
-Run:
-
-```bash
-go run ./chore/gentests
-```
-
-Behavior:
-
-- Refreshes `out.ll` for the built-in test suites under `cl/_testlibc`, `cl/_testlibgo`, `cl/_testrt`, `cl/_testgo`, `cl/_testpy`, and `cl/_testdata`.
-- Refreshes `expect.txt` for the same directories using the existing runtime execution flow.
-- Preserves the existing skip convention where `out.ll` or `expect.txt` containing only `;` means "do not refresh".
-- New behavior: if a test case directory contains a non-test Go source file whose first line is exactly `// LITTEST`, `gentests` skips `llgen` for that directory and does not regenerate `out.ll` there.
-
-Use `gentests` only when an intentional change requires a repository-wide refresh of legacy `out.ll` or `expect.txt`. For one `out.ll` case, use `go run ./chore/llgen path/to/case` instead.
+Use source-embedded `// LITTEST` FileCheck directives and `litgen` for IR tests. Refresh only the affected files and review every generated change.
 
 ### `litgen`
 
@@ -168,9 +147,9 @@ Behavior:
 - If the path is a `.go` file, it refreshes only that file. The file must start with `// LITTEST`.
 - If the path is a directory, it walks that directory recursively, finds marked source files, and refreshes each marked test in place.
 - Rewrites embedded `CHECK-LABEL`, `CHECK-NEXT`, `CHECK-EMPTY`, and referenced constant `CHECK-LINE` directives from the current generated IR.
-- Does not update `expect.txt` and does not write `out.ll`.
+- Does not update runtime-output expectations in `expect.txt`.
 
-Use `litgen` when the test case stores its IR expectations directly in the Go source instead of `out.ll`.
+Use `litgen` when a test case needs LLVM IR expectations.
 
 ### Marker convention
 
