@@ -114,7 +114,7 @@ The script builds the pinned WAMR runner through `dev/build_iwasm.sh` when it is
 
 ### Embedded
 
-After installing SDL2 and libslirp as shown in [the CI setup action](../.github/actions/setup-embed-deps/action.yml), run:
+After installing SDL2 and, on Linux, libslirp as shown in [the CI setup action](../.github/actions/setup-embed-deps/action.yml), run:
 
 ```bash
 ./dev/test_embed.sh
