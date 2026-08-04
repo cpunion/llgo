@@ -60,6 +60,13 @@ Prefer the development wrapper for LLGo execution tests; it builds the current c
 
 After focused tests pass, `./dev/local_ci.sh` runs the main local build, test, LLGo, demo, target-build, and cache checks when the optional dependencies are available. See [`dev/README.md`](dev/README.md) for the maintained commands.
 
+### Coverage
+
+- The Codecov patch check must pass; new deterministic logic and error paths should normally be fully covered.
+- Check focused coverage with `go test -coverprofile=coverage.out ./path/to/package` and `go tool cover -func=coverage.out`. Run it inside `runtime/` for that nested module.
+- Coverage from Linux and macOS is combined because each has platform-specific paths. Validate host-specific changes on the matching host when possible.
+- [`.github/codecov.yml`](.github/codecov.yml) lists paths excluded from coverage. Add an exclusion only for generated, tooling, fixture, or otherwise non-meaningful code; never exclude production logic merely to make a PR pass, and explain every ignore change in the PR.
+
 ### Write and run tests for your changes
 
 When adding new functionality or fixing bugs, create appropriate test cases:
