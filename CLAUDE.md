@@ -1,27 +1,23 @@
-# LLGo Contributor and AI Assistant Guide
+# LLGo Contributor Guide
 
-This document provides essential information for contributors and AI assistants fixing bugs or implementing features in the LLGo project.
-
-## About LLGo
-
-LLGo is a Go compiler based on LLVM designed to better integrate Go with the C ecosystem, including Python and JavaScript. It's a subproject of the XGo project that aims to expand the boundaries of Go/XGo for game development, AI and data science, WebAssembly, and embedded development.
+LLGo is an LLVM-based Go compiler with C, Python, JavaScript, WebAssembly, and embedded integrations. This guide covers repository-specific contribution rules; see the [README](README.md) for installation and usage.
 
 ## Project Structure
 
-- `cmd/llgo` - Main llgo compiler command (usage similar to `go` command)
-- `cl/` - Core compiler logic that converts Go packages to LLVM IR
-- `ssa/` - LLVM IR file generation using Go SSA semantics
-- `internal/build/` - Build process orchestration
+- `cmd/llgo` - Main compiler command
+- `cl/` - Go package to LLVM IR compilation
+- `ssa/` - LLVM IR generation with Go SSA semantics
+- `internal/build/` - Build orchestration
 - `runtime/` - LLGo runtime library
 - `chore/` - Development tools (llgen, llpyg, ssadump, etc.)
-- `_demo/` - Example programs demonstrating C/C++ interop (`c/hello`, `c/qsort`) and Python integration (`py/callpy`, `py/numpy`)
-- `_cmptest/` - Comparison tests to verify the same program gets the same output with Go and LLGo
+- `_demo/` - C/C++, Python, and other integration examples
+- `_cmptest/` - Go/LLGo output comparison tests
 
 ## Development Environment
 
 For detailed dependency requirements and installation instructions, see the [Dependencies](README.md#dependencies) and [How to install](README.md#how-to-install) sections in the README.
 
-CI uses LLVM 19 and pins exact Go patch releases; check [`.github/workflows/llgo.yml`](.github/workflows/llgo.yml) and [`.github/workflows/goroot.yml`](.github/workflows/goroot.yml) instead of guessing versions. Native development is supported on macOS and Linux. Native Windows support is still TODO; use WSL2 or Linux containers on Windows.
+CI uses LLVM 19 and pinned Go patch releases; check [`.github/workflows/llgo.yml`](.github/workflows/llgo.yml) and [`.github/workflows/goroot.yml`](.github/workflows/goroot.yml) for exact versions. Native development supports macOS and Linux; use WSL2 or Linux containers on Windows.
 
 ## Repository and GitHub Safety
 
@@ -33,54 +29,31 @@ CI uses LLVM 19 and pins exact Go patch releases; check [`.github/workflows/llgo
 
 ## Testing & Validation
 
-The following commands and workflows are essential when fixing bugs or implementing features in the LLGo project:
+Behavior changes require focused regression tests; documentation-only and mechanical changes do not need artificial tests. Start with the affected package, then broaden validation:
 
-### Run all tests
 ```bash
+go test ./path/to/package
 go test ./...
 ```
 
-**Note:** Some tests may fail if optional dependencies (like Python) are not properly configured. The test suite includes comprehensive tests for:
-- Compiler functionality
-- SSA generation
-- C interop
-- Python integration (requires Python development headers)
+The nested `runtime` Go module is not covered by root-level `go test`, `go build`, or `go vet`; run the corresponding command there when it is affected, for example `(cd runtime && go test ./...)`.
 
-The root command does not enter the nested `runtime` Go module. Test it separately when runtime code changes:
+Install the [documented dependencies](README.md#dependencies), including development libraries for Python and other integrations. If one is unavailable, report the exact omitted tests and reason; omission is not a pass.
 
-```bash
-(cd runtime && go test ./...)
-```
-
-Prefer the development wrapper for LLGo execution tests; it builds the current checkout and sets `LLGO_ROOT`:
+Prefer the development wrapper for LLGo execution tests; it builds the current checkout and selects its runtime tree:
 
 ```bash
 ./dev/llgo.sh test ./path/to/package
 ```
 
-After focused tests pass, `./dev/local_ci.sh` runs the main local build, test, LLGo, demo, target-build, and cache checks when the optional dependencies are available. See [`dev/README.md`](dev/README.md) for the maintained commands.
+After focused tests pass, `./dev/local_ci.sh` runs the main local checks when dependencies are available. See [`dev/README.md`](dev/README.md) for details.
 
 ### Coverage
 
-- The Codecov patch check must pass; new deterministic logic and error paths should normally be fully covered.
+- The Codecov patch check must pass; new deterministic logic and error paths should normally be covered.
 - From the module containing the target package, check focused coverage with `go test -coverprofile=coverage.out ./path/to/package` and `go tool cover -func=coverage.out`.
-- Coverage from Linux and macOS is combined because each has platform-specific paths. Validate host-specific changes on the matching host when possible.
+- Linux and macOS coverage is combined; validate host-specific changes on the matching host when possible.
 - [`.github/codecov.yml`](.github/codecov.yml) lists paths excluded from coverage. Add an exclusion only for generated, tooling, fixture, or otherwise non-meaningful code; never exclude production logic merely to make a PR pass, and explain every ignore change in the PR.
-
-### Write and run tests for your changes
-
-When adding new functionality or fixing bugs, create appropriate test cases:
-
-```bash
-# Add your test to the relevant package's *_test.go file
-# Then run tests for that package
-go test ./path/to/package
-
-# Or run all tests
-go test ./...
-```
-
-**Important:** The `LLGO_ROOT` environment variable must be set to the repository root when running llgo commands during development.
 
 ### Update IR test expectations
 
@@ -95,88 +68,56 @@ Do not regenerate unrelated output. The legacy batch tooling, supported scopes, 
 
 ### Compatibility and target validation
 
-- Go compatibility covers source and observable behavior, not the gc compiler's internal ABI. Run standard-library tests with both `go test ./test/std/...` and `./dev/llgo.sh test ./test/std/...`.
+- Go compatibility covers source and observable behavior, not gc's internal ABI. Run standard-library tests with both `go test ./test/std/...` and `./dev/llgo.sh test ./test/std/...`.
 - Run official Go cases with `bash ./dev/test_goroot.sh -- -directive-mode ci`; see [`test/goroot/README.md`](test/goroot/README.md) for filtering, multiple toolchains, full coverage, and sharding.
 - Run native tests on the matching host. Use `dev/docker.sh` for Linux amd64/arm64 validation, `dev/test_wasm.sh` for Wasm, and `dev/test_embed.sh` for embedded build plus emulator smoke.
-- Cross-compilation alone is not execution validation. Do not weaken or reclassify failures to make a change pass, and state any target that could not be run.
+- Cross-compilation is not execution validation. Do not weaken failures to make a change pass, and state any target that could not be run.
+- Changes to runtime ABI, archive/link metadata, target selection, or generated IR need focused multi-target tests. Use `// LITTEST` checks where IR shape matters and describe compatibility implications in the pull request.
 
 The host matrix, CI coverage, dependencies, and target-specific follow-up commands are in [`dev/README.md`](dev/README.md#platform-and-target-validation).
 
+### Performance, size, and validation record
+
+- For compiler, runtime, linker, ABI, or hot-path changes, run focused benchmarks and inspect the paired Linux/macOS results. Repeat material differences because small changes may be runner noise. See [`benchmark/baseline/README.md`](benchmark/baseline/README.md).
+- For changes that may affect binary layout or size, use `llgo build -size` as described in [`doc/size-report.md`](doc/size-report.md).
+- In the pull request, record commands and targets, distinguish execution from build-only checks, and identify gaps. Required Linux/macOS checks must pass; a `continue-on-error` lane is not authoritative.
+
 ## Code Quality
 
-Before submitting any code updates, you must run the following formatting and validation commands:
-
 ### Format code
+
 ```bash
 gofmt -w path/to/changed.go
 ```
 
 **Important:** Format every changed Go file before committing, but do not rewrite unrelated files in a shared or dirty worktree.
 
+For changed shell scripts, run `bash -n path/to/changed.sh` and `shellcheck path/to/changed.sh` when ShellCheck is available.
+
 ### Run static analysis
-```bash
-go vet ./...
-```
 
-**Note:** Currently reports some issues related to lock passing by value in `ssa/type_cvt.go` and a possible unsafe.Pointer misuse in `cl/builtin_test.go`. These are known issues.
-
+Run `go vet ./path/to/package` for affected packages. Repository-wide vet currently reports lock-copy diagnostics in `ssa/type_cvt.go` and possible `unsafe.Pointer` misuse in `cl/builtin_test.go`; do not claim a clean run, suppress new diagnostics, or silently expand this baseline.
 
 ## Common Development Tasks
 
-### Build the entire project
-```bash
-go build -v ./...
-```
-
-### Build llgo command specifically
-```bash
-go build -o llgo ./cmd/llgo
-```
-
-### Check llgo version
-```bash
-llgo version
-```
-
-### Install llgo for system-wide use
-```bash
-./install.sh
-```
-
-### Build development tools
-```bash
-go install -v ./cmd/...
-go install -v ./chore/...
-```
-
-## Key Modules for Understanding
-
-- `ssa` - Generates LLVM IR using Go SSA semantics
-- `cl` - Core compiler converting Go to LLVM IR
-- `internal/build` - Orchestrates the compilation process
+Use `./dev/llgo.sh version` to build the current checkout with the development configuration and check the resulting command. Installation and tool-building commands are maintained in the [README](README.md#how-to-install).
 
 ## Debugging
 
 ### Disable Garbage Collection
-For testing purposes, you can disable GC:
-```bash
-LLGO_ROOT=/path/to/llgo llgo run -tags nogc .
-```
 
-## LLGO_ROOT Environment Variable
-
-**CRITICAL:** Always set `LLGO_ROOT` to the repository root when running llgo during development:
+The `nogc` build tag is a targeted diagnostic mode that changes runtime semantics; it does not replace validation with the default GC configuration:
 
 ```bash
-export LLGO_ROOT=/path/to/llgo
-# or
-LLGO_ROOT=/path/to/llgo llgo run .
+./dev/llgo.sh run -tags nogc .
 ```
+
+See [Garbage Collection](README.md#garbage-collection-gc) and [`doc/defer-tls-gc.md`](doc/defer-tls-gc.md) for the supported modes and runtime design.
+
+### `LLGO_ROOT`
+
+Do not set `LLGO_ROOT` unconditionally. Development wrappers derive it for the current checkout, and an installed `llgo` does not necessarily require it. Set it explicitly only to select a non-standard source/runtime tree.
 
 ## Important Notes
 
-1. **Testing Requirement:** All bug fixes and features MUST include tests
-2. **Demo Directory:** Examples in `_demo` are prefixed with `_` to prevent standard `go` command from trying to compile them
-3. **Defer in Loops:** LLGo now supports `defer` within loops, matching Go's semantics of executing defers in LIFO order for every iteration. Be mindful of loop-heavy defer usage as it allocates per iteration.
-4. **C Ecosystem Integration:** LLGo uses `go:linkname` directive to link external symbols through ABI
-5. **Python Integration:** Third-party Python libraries require separate installation of library files
+Examples live under `_demo/`, whose underscore keeps ordinary `go` package discovery from including them. C and C++ integration uses LLGo directives and target ABIs, including `go:linkname` where appropriate; follow [`doc/How-to-support-a-C&C++-Library.md`](doc/How-to-support-a-C&C++-Library.md) instead of assuming every binding uses the same mechanism.
