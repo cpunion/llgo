@@ -38,8 +38,8 @@ func (p Program) FuncInfoMetadataEnabled() bool {
 }
 
 // EnableFuncInfoSites controls emission of per-function site records. The build
-// layer may apply a narrower target policy to function-entry address records while
-// retaining PC-line records.
+// layer may apply a narrower target policy to function-entry address records
+// while retaining PC-line records.
 func (p Program) EnableFuncInfoSites(enable bool) {
 	p.enableFuncInfoSites = enable
 }

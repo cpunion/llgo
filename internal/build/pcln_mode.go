@@ -70,7 +70,8 @@ func effectivePCLNMode(conf *Config) PCLNMode {
 }
 
 // shouldEnablePCLNSites reports whether compiler-emitted PC anchor records are
-// required for this build.
+// globally enabled for this build. Target-specific filtering of address-site
+// categories happens when the runtime tables are emitted.
 func shouldEnablePCLNSites(conf *Config, funcInfo bool) bool {
 	if conf == nil || !funcInfo || !IsFuncInfoSitesEnabled() {
 		return false
