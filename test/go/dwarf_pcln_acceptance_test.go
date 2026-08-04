@@ -86,7 +86,7 @@ func TestDWARFPCLNLineSites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repoRoot := findStringConversionRepoRoot(t)
+	repoRoot := findRepoRoot(t)
 	t.Setenv("LLGO_ROOT", repoRoot)
 	cmd := exec.Command("go", "run", "-p=1", "./cmd/llgo", "run", "-a", "-ldflags=-w=false", file)
 	cmd.Dir = repoRoot
