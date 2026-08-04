@@ -1,6 +1,6 @@
-# LLGo Project AI Assistant Guide
+# LLGo Contributor and AI Assistant Guide
 
-This document provides essential information for AI assistants to help fix bugs and implement features in the LLGo project.
+This document provides essential information for contributors and AI assistants fixing bugs or implementing features in the LLGo project. `AGENTS.md` links to this file so every tool uses the same repository guidance.
 
 ## About LLGo
 
@@ -21,6 +21,16 @@ LLGo is a Go compiler based on LLVM designed to better integrate Go with the C e
 
 For detailed dependency requirements and installation instructions, see the [Dependencies](README.md#dependencies) and [How to install](README.md#how-to-install) sections in the README.
 
+CI uses LLVM 19 and pins exact Go patch releases; check [`.github/workflows/llgo.yml`](.github/workflows/llgo.yml) and [`.github/workflows/goroot.yml`](.github/workflows/goroot.yml) instead of guessing versions. Native development is supported on macOS and Linux. Native Windows support is still TODO; use WSL2 or Linux containers on Windows.
+
+## Repository and GitHub Safety
+
+- Treat `xgo-dev/*` as upstream. Do not push branches or tags directly to an `xgo-dev` repository, and do not merge its pull requests.
+- Push code to your fork, then create or update a pull request against `xgo-dev/llgo:main`. Bug reports and proposals may be submitted as upstream issues.
+- Do not publish upstream releases or change upstream repository settings. Inspect remotes before any write operation when ownership is unclear.
+- Prefer `gh issue view`, `gh pr view`, and `gh pr checks` for GitHub state. Use `gh api` for review threads, inline comments, check-run details, or fields not exposed by the higher-level commands; avoid scraping the website.
+- Keep changes scoped, preserve unrelated worktree edits, and review the complete diff against upstream before submission. Diagnose baseline failures instead of hiding them with skips, exclusions, or weakened checks.
+
 ## Testing & Validation
 
 The following commands and workflows are essential when fixing bugs or implementing features in the LLGo project:
@@ -35,6 +45,20 @@ go test ./...
 - SSA generation
 - C interop
 - Python integration (requires Python development headers)
+
+The root command does not enter the nested `runtime` Go module. Test it separately when runtime code changes:
+
+```bash
+(cd runtime && go test ./...)
+```
+
+Prefer the development wrapper for LLGo execution tests; it builds the current checkout and sets `LLGO_ROOT`:
+
+```bash
+./dev/llgo.sh test ./path/to/package
+```
+
+After focused tests pass, `./dev/local_ci.sh` runs the main local build, test, LLGo, demo, target-build, and cache checks when the optional dependencies are available. See [`dev/README.md`](dev/README.md) for the maintained commands.
 
 ### Write and run tests for your changes
 
@@ -53,7 +77,7 @@ go test ./...
 
 ### Update out.ll files after modifying compiler IR generation
 
-**CRITICAL:** When you modify the compiler's IR generation logic (especially in `ssa/` or `cl/` packages), you MUST update all out.ll test files under the `cl/` directory.
+**CRITICAL:** When you modify compiler IR generation (especially in `ssa/` or `cl/`), update the affected expectations and review every generated diff. Do not regenerate or commit unrelated test output.
 
 #### Understanding out.ll files
 
@@ -72,7 +96,7 @@ The `out.ll` files under the `cl/` directory are comparison IR files that serve 
 
 2. **Regenerate out.ll files**:
    
-   **For batch updates (recommended)** - Use `gentests` to regenerate all test files:
+   **For intentional batch updates** - Use `gentests` to regenerate all test files:
    ```bash
    gentests
    ```
@@ -94,6 +118,14 @@ The `out.ll` files under the `cl/` directory are comparison IR files that serve 
 
 4. **Commit the updated out.ll files** along with your compiler changes
 
+Tests whose first line is `// LITTEST` keep FileCheck expectations in the Go source instead of `out.ll`. Refresh only the affected file or directory:
+
+```bash
+go run ./chore/litgen cl/_testrt/litdemo/in.go
+```
+
+See [`dev/README.md`](dev/README.md#6-refresh-test-goldens) for the `gentests`/`litgen` split and marker rules.
+
 #### Why this matters
 
 This process ensures that:
@@ -101,16 +133,89 @@ This process ensures that:
 - Changes to IR generation are properly documented and reviewed
 - Future regressions can be detected by comparing against the reference output
 
+### Go compatibility
+
+Compatibility means matching Go source and observable behavior; do not assume compatibility with the gc compiler's internal ABI. Tests under `test/std` should normally run with both compilers:
+
+```bash
+go test ./test/std/...
+./dev/llgo.sh test ./test/std/...
+```
+
+Use the external-GOROOT runner for official Go test cases. Start with the relevant case, then expand to the CI directive set:
+
+```bash
+bash ./dev/test_goroot.sh -- -directive-mode ci -dirs . -case '^helloworld\.go$'
+bash ./dev/test_goroot.sh -- -directive-mode ci
+```
+
+Pass multiple GOROOT paths before `--` to validate the supported Go generations. The full `coverage` mode is resource-intensive; its limits, sharding options, and classification rules are documented in [`test/goroot/README.md`](test/goroot/README.md). Do not skip, weaken, or reclassify a failing test merely to make a change pass.
+
+### Host and cross-platform validation
+
+Run native tests on the host platform whenever possible. Cross-compilation alone proves only that an artifact was produced; execute it on real hardware, a container, or an emulator when behavior is affected.
+
+| Development host | Practical local coverage |
+| --- | --- |
+| macOS arm64 | Native macOS arm64; macOS amd64 with Rosetta and a matching x86_64 Go/LLVM toolchain; Linux amd64/arm64 with Docker Desktop |
+| macOS amd64 | Native macOS amd64; Linux amd64/arm64 with Docker Desktop; use a remote arm64 Mac for native macOS arm64 behavior |
+| Linux amd64/arm64 | Native matching Linux architecture; the other Linux architecture with containers plus QEMU/binfmt |
+| Windows amd64/arm64 | Linux validation through WSL2 or Docker; do not claim native Windows validation |
+
+Reusable Linux environments are provided for both main architectures:
+
+```bash
+./dev/docker.sh amd64 bash -lc './dev/llgo.sh test ./test/...'
+./dev/docker.sh arm64 bash -lc './dev/llgo.sh test ./test/...'
+```
+
+Docker Desktop provides emulation on macOS. Linux hosts must enable QEMU/binfmt before running a container for the other architecture. The primary CI source-build/test lanes cover macOS arm64 and Linux amd64; release artifact smoke tests additionally cover macOS amd64 and Linux arm64. Linux and Windows hosts cannot validate native macOS behavior.
+
+### WebAssembly
+
+Use the maintained wrapper for a build smoke test:
+
+```bash
+./dev/llgo_wasm.sh build ./...
+```
+
+For execution, build the CI-compatible WAMR runner with `./dev/build_iwasm.sh`, add the printed directory to `PATH`, then compile and run a focused fixture:
+
+```bash
+(cd _demo/c && ../../dev/llgo_wasm.sh build -o hello -tags=nogc ./helloc)
+iwasm --stack-size=819200000 --heap-size=800000000 _demo/c/hello.wasm
+```
+
+Changes specific to `GOOS=js` should also compile an explicit `GOOS=js GOARCH=wasm` fixture. Validate Wasm output with a runtime (WAMR, Wasmtime, Node, or a browser as appropriate), not only LLVM IR generation.
+
+### Embedded targets
+
+Build smoke coverage for all configured targets is available through:
+
+```bash
+(cd _demo/embed/targetsbuild && bash build.sh empty)
+```
+
+For ESP32 and ESP32-C3 execution tests, install the QEMU packages used by CI and run the existing fixtures:
+
+```bash
+.github/workflows/install-esp-qemu.sh .cache/qemu
+export PATH="$PWD/.cache/qemu/bin:$PATH"
+bash _demo/embed/test-esp-serial-startup.sh
+```
+
+Install SDL2 and libslirp as shown in [`.github/actions/setup-embed-deps/action.yml`](.github/actions/setup-embed-deps/action.yml). ESP32-C3 startup/linker changes should also run `_demo/embed/test_esp32c3_startup.sh` with `esptool==5.1.0`. When no emulator exists, build a focused `-target=<name>` fixture and state clearly that execution was not validated.
+
 ## Code Quality
 
 Before submitting any code updates, you must run the following formatting and validation commands:
 
 ### Format code
 ```bash
-go fmt ./...
+gofmt -w path/to/changed.go
 ```
 
-**Important:** Always run `go fmt ./...` before committing code changes. This ensures consistent code formatting across the project.
+**Important:** Format every changed Go file before committing, but do not rewrite unrelated files in a shared or dirty worktree.
 
 ### Run static analysis
 ```bash
@@ -179,4 +284,3 @@ LLGO_ROOT=/path/to/llgo llgo run .
 3. **Defer in Loops:** LLGo now supports `defer` within loops, matching Go's semantics of executing defers in LIFO order for every iteration. Be mindful of loop-heavy defer usage as it allocates per iteration.
 4. **C Ecosystem Integration:** LLGo uses `go:linkname` directive to link external symbols through ABI
 5. **Python Integration:** Third-party Python libraries require separate installation of library files
-
