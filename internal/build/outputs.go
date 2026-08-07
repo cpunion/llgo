@@ -29,6 +29,13 @@ func pclnSidecarPath(executable string) string {
 	return executable + pclnSidecarSuffix
 }
 
+func dwarfSidecarPath(executable string) string {
+	if strings.HasSuffix(executable, ".wasm") {
+		return strings.TrimSuffix(executable, ".wasm") + ".debug.wasm"
+	}
+	return executable + ".debug.wasm"
+}
+
 func genTempOutputFile(prefix, ext string) (string, error) {
 	tmpFile, err := os.CreateTemp("", prefix+"-*"+ext)
 	if err != nil {
@@ -176,6 +183,9 @@ func buildOutFmts(pkgName string, conf *Config, multiPkg bool, crossCompile *cro
 	if conf.PCLNMode == PCLNExternal {
 		details.PCLN = pclnSidecarPath(details.Out)
 	}
+	if conf.DebugArtifactMode == DebugArtifactExternal {
+		details.DWARF = dwarfSidecarPath(details.Out)
+	}
 
 	if conf.Target == "" {
 		// Native target - we're done
@@ -259,6 +269,9 @@ func (details *OutFmtDetails) ToEnvMap() map[string]string {
 	}
 	if details.PCLN != "" {
 		envMap["pclntab"] = details.PCLN
+	}
+	if details.DWARF != "" {
+		envMap["dwarf"] = details.DWARF
 	}
 
 	return envMap

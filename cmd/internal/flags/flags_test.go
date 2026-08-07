@@ -245,6 +245,52 @@ func TestBuildPCLNFlagInvalid(t *testing.T) {
 	}
 }
 
+func TestBuildDebugArtifactFlags(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		want      build.DebugArtifactMode
+		specified bool
+	}{
+		{name: "default", want: build.DebugArtifactDefault},
+		{name: "embedded", args: []string{"-debug-artifact=embedded"}, want: build.DebugArtifactEmbedded, specified: true},
+		{name: "external", args: []string{"-debug-artifact=external"}, want: build.DebugArtifactExternal, specified: true},
+		{name: "host", args: []string{"-debug-artifact=host"}, want: build.DebugArtifactHost, specified: true},
+		{name: "none", args: []string{"-debug-artifact=none"}, want: build.DebugArtifactNone, specified: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := flag.NewFlagSet(tt.name, flag.ContinueOnError)
+			fs.SetOutput(new(bytes.Buffer))
+			AddBuildFlags(fs)
+			if err := fs.Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			if DebugArtifact.Specified != tt.specified || DebugArtifact.Mode != tt.want {
+				t.Fatalf("DebugArtifact = %+v, want mode=%v specified=%v", DebugArtifact, tt.want, tt.specified)
+			}
+			conf := &build.Config{}
+			if err := UpdateConfig(conf); err != nil {
+				t.Fatal(err)
+			}
+			if conf.DebugArtifactMode != tt.want || conf.DebugArtifactModeSet != tt.specified {
+				t.Fatalf("Config debug artifact = %v/%v, want %v/%v", conf.DebugArtifactMode, conf.DebugArtifactModeSet, tt.want, tt.specified)
+			}
+		})
+	}
+}
+
+func TestBuildDebugArtifactFlagInvalid(t *testing.T) {
+	for _, args := range [][]string{{"-debug-artifact"}, {"-debug-artifact="}, {"-debug-artifact=default"}, {"-debug-artifact=EXTERNAL"}} {
+		fs := flag.NewFlagSet("invalid-debug-artifact", flag.ContinueOnError)
+		fs.SetOutput(new(bytes.Buffer))
+		AddBuildFlags(fs)
+		if err := fs.Parse(args); err == nil {
+			t.Fatalf("Parse(%v) succeeded", args)
+		}
+	}
+}
+
 func TestUpdateConfigPreservesPCLNModeWhenUnspecified(t *testing.T) {
 	fs := flag.NewFlagSet("pclntab-unspecified", flag.ContinueOnError)
 	fs.SetOutput(new(bytes.Buffer))

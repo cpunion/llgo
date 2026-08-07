@@ -115,13 +115,14 @@ type OutFmts struct {
 
 // OutFmtDetails contains detailed output file paths for each format
 type OutFmtDetails struct {
-	Out  string // Base output file path
-	PCLN string // PCLN sidecar output file path (.pclntab)
-	Bin  string // Binary output file path (.bin)
-	Hex  string // Intel hex output file path (.hex)
-	Img  string // Image output file path (.img)
-	Uf2  string // UF2 output file path (.uf2)
-	Zip  string // ZIP/DFU output file path (.zip)
+	Out   string // Base output file path
+	PCLN  string // PCLN sidecar output file path (.pclntab)
+	DWARF string // External debugger-owned DWARF container (.debug.wasm)
+	Bin   string // Binary output file path (.bin)
+	Hex   string // Intel hex output file path (.hex)
+	Img   string // Image output file path (.img)
+	Uf2   string // UF2 output file path (.uf2)
+	Zip   string // ZIP/DFU output file path (.zip)
 }
 
 // ModuleHook observes a package module immediately after it is generated and
@@ -174,8 +175,12 @@ type Config struct {
 	GoBuildFlags []string
 	// BuildParallelism is the package-level concurrency requested by Go's -p
 	// build flag for llgo test. Zero uses the Go default, GOMAXPROCS.
-	BuildParallelism int
-	LinkOptions      LinkOptions
+	BuildParallelism  int
+	LinkOptions       LinkOptions
+	DebugArtifactMode DebugArtifactMode
+	// DebugArtifactModeSet distinguishes an explicit command request from the
+	// effective mode derived from -w and the current build default.
+	DebugArtifactModeSet bool
 	// OmitDWARFByDefault controls linked builds only when -w was not
 	// explicitly specified. Explicit -w and -w=false always win.
 	OmitDWARFByDefault bool
@@ -391,6 +396,9 @@ func Build(inv Invocation) ([]Package, error) {
 	}
 	if conf.Target != "" && export.GOARCH != "" {
 		conf.Goarch = export.GOARCH
+	}
+	if err := resolveDebugArtifactMode(conf, &export); err != nil {
+		return nil, err
 	}
 	if err := validateLinkOptions(conf, &export); err != nil {
 		return nil, err
@@ -661,6 +669,9 @@ func Build(inv Invocation) ([]Package, error) {
 				return nil, err
 			}
 			if err := finalizeRuntimePCLN(ctx, outFmts, verbose); err != nil {
+				return nil, err
+			}
+			if err := finalizeDebugArtifact(conf, outFmts, verbose); err != nil {
 				return nil, err
 			}
 			if conf.Mode == ModeBuild && conf.SizeReport {

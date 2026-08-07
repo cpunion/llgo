@@ -33,6 +33,7 @@ func (e commandEnv) configure(cmd *exec.Cmd) *exec.Cmd {
 func resolveOutputs(dir string, out *OutFmtDetails) {
 	out.Out = resolvePath(dir, out.Out)
 	out.PCLN = resolvePath(dir, out.PCLN)
+	out.DWARF = resolvePath(dir, out.DWARF)
 	out.Bin = resolvePath(dir, out.Bin)
 	out.Hex = resolvePath(dir, out.Hex)
 	out.Img = resolvePath(dir, out.Img)
