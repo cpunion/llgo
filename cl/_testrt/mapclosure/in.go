@@ -1,23 +1,14 @@
 // LITTEST
 package main
 
+// CHECK: {{^}}@20 = private unnamed_addr constant [4 x i8] c"demo", align 1{{$}}
+// CHECK: {{^}}@21 = private unnamed_addr constant [5 x i8] c"hello", align 1{{$}}
+// CHECK: {{^}}@25 = private unnamed_addr constant [5 x i8] c"error", align 1{{$}}
+
 type Type interface {
 	String() string
 }
 
-// CHECK-LABEL: define %"{{.*}}/runtime/internal/runtime.String" @main.demo(%"{{.*}}/runtime/internal/runtime.iface" %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.IfacePtrData"(%"{{.*}}/runtime/internal/runtime.iface" %0)
-// CHECK-NEXT:   %2 = extractvalue %"{{.*}}/runtime/internal/runtime.iface" %0, 0
-// CHECK-NEXT:   %3 = getelementptr ptr, ptr %2, i64 3
-// CHECK-NEXT:   %4 = load ptr, ptr %3, align 8
-// CHECK-NEXT:   %5 = insertvalue { ptr, ptr } undef, ptr %4, 0
-// CHECK-NEXT:   %6 = insertvalue { ptr, ptr } %5, ptr %1, 1
-// CHECK-NEXT:   %7 = extractvalue { ptr, ptr } %6, 1
-// CHECK-NEXT:   %8 = extractvalue { ptr, ptr } %6, 0
-// CHECK-NEXT:   %9 = call %"{{.*}}/runtime/internal/runtime.String" %8(ptr %7)
-// CHECK-NEXT:   ret %"{{.*}}/runtime/internal/runtime.String" %9
-// CHECK-NEXT: }
 func demo(t Type) string {
 	return t.String()
 }
@@ -33,6 +24,59 @@ var (
 	list = []func(Type) string{demo}
 )
 
+func main() {
+	t := &typ{"hello"}
+	fn1 := op["demo"]
+	fn2 := list[0]
+	if fn1(t) != fn2(t) {
+		panic("error")
+	}
+}
+
+func (t *typ) String() string {
+	return t.s
+}
+
+// CHECK-LABEL: define %"{{.*}}/runtime/internal/runtime.String" @main.demo(%"{{.*}}/runtime/internal/runtime.iface" %0){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.IfacePtrData"(%"{{.*}}/runtime/internal/runtime.iface" %0)
+// CHECK-NEXT:   %2 = extractvalue %"{{.*}}/runtime/internal/runtime.iface" %0, 0
+// CHECK-NEXT:   %3 = getelementptr ptr, ptr %2, i64 3
+// CHECK-NEXT:   %4 = load ptr, ptr %3, align 8
+// CHECK-NEXT:   %5 = insertvalue { ptr, ptr } undef, ptr %4, 0
+// CHECK-NEXT:   %6 = insertvalue { ptr, ptr } %5, ptr %1, 1
+// CHECK-NEXT:   %7 = extractvalue { ptr, ptr } %6, 1
+// CHECK-NEXT:   %8 = extractvalue { ptr, ptr } %6, 0
+// CHECK-NEXT:   %9 = call %"{{.*}}/runtime/internal/runtime.String" %8(ptr %7)
+// CHECK-NEXT:   ret %"{{.*}}/runtime/internal/runtime.String" %9
+// CHECK-NEXT: }
+
+// CHECK-LABEL: define void @main.init(){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %0 = load i1, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br i1 %0, label %_llgo_2, label %_llgo_1
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_0
+// CHECK-NEXT:   store i1 true, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.MakeMap"(ptr @"map[_llgo_string]_llgo_closure$08RNOi8oGohPa1E010ap-RCUSrLcRZnNA0gN6pKSkWs", i64 1)
+// CHECK-NEXT:   %2 = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 16)
+// CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.String" { ptr @20, i64 4 }, ptr %2, align 8
+// CHECK-NEXT:   %3 = call ptr @"{{.*}}/runtime/internal/runtime.MapAssign"(ptr @"map[_llgo_string]_llgo_closure$08RNOi8oGohPa1E010ap-RCUSrLcRZnNA0gN6pKSkWs", ptr %1, ptr %2)
+// CHECK-NEXT:   store { ptr, ptr } { ptr @main.demo, ptr null }, ptr %3, align 8
+// CHECK-NEXT:   store ptr %1, ptr @main.op, align 8
+// CHECK-NEXT:   %4 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 16)
+// CHECK-NEXT:   %5 = getelementptr inbounds { ptr, ptr }, ptr %4, i64 0
+// CHECK-NEXT:   store { ptr, ptr } { ptr @main.demo, ptr null }, ptr %5, align 8
+// CHECK-NEXT:   %6 = insertvalue %"{{.*}}/runtime/internal/runtime.Slice" undef, ptr %4, 0
+// CHECK-NEXT:   %7 = insertvalue %"{{.*}}/runtime/internal/runtime.Slice" %6, i64 1, 1
+// CHECK-NEXT:   %8 = insertvalue %"{{.*}}/runtime/internal/runtime.Slice" %7, i64 1, 2
+// CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.Slice" %8, ptr @main.list, align 8
+// CHECK-NEXT:   br label %_llgo_2
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
+
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %0 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 16)
@@ -41,13 +85,13 @@ var (
 // CHECK-NEXT:   %2 = load ptr, ptr @main.op, align 8
 // CHECK-NEXT:   %3 = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 16)
 // CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.String" { ptr @20, i64 4 }, ptr %3, align 8
-// CHECK-NEXT:   %4 = call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1"(ptr @"map[_llgo_string]_llgo_closure${{[-A-Za-z0-9_]+}}", ptr %2, ptr %3)
+// CHECK-NEXT:   %4 = call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1"(ptr @"map[_llgo_string]_llgo_closure$08RNOi8oGohPa1E010ap-RCUSrLcRZnNA0gN6pKSkWs", ptr %2, ptr %3)
 // CHECK-NEXT:   %5 = load { ptr, ptr }, ptr %4, align 8
 // CHECK-NEXT:   %6 = load %"{{.*}}/runtime/internal/runtime.Slice", ptr @main.list, align 8
 // CHECK-NEXT:   %7 = extractvalue %"{{.*}}/runtime/internal/runtime.Slice" %6, 0
 // CHECK-NEXT:   %8 = extractvalue %"{{.*}}/runtime/internal/runtime.Slice" %6, 1
 // CHECK-NEXT:   %9 = icmp uge i64 0, %8
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.CheckIndexRange"(i1 %9, {{.*}})
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.CheckIndexRange"(i1 %9, i64 0, i1 true, i64 %8)
 // CHECK-NEXT:   %10 = getelementptr inbounds { ptr, ptr }, ptr %7, i64 0
 // CHECK-NEXT:   %11 = load { ptr, ptr }, ptr %10, align 8
 // CHECK-NEXT:   %12 = call ptr @"{{.*}}/runtime/internal/runtime.NewItab"(ptr @"_llgo_iface$O6rEVxIuA5O1E0KWpQBCgGx26X5gYhJ_nnJnHVL8_7U", ptr @"*_llgo_main.typ")
@@ -78,14 +122,6 @@ var (
 // CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_0
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
-func main() {
-	t := &typ{"hello"}
-	fn1 := op["demo"]
-	fn2 := list[0]
-	if fn1(t) != fn2(t) {
-		panic("error")
-	}
-}
 
 // CHECK-LABEL: define %"{{.*}}/runtime/internal/runtime.String" @"main.(*typ).String"(ptr %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -101,7 +137,3 @@ func main() {
 // CHECK-NEXT:   %5 = load %"{{.*}}/runtime/internal/runtime.String", ptr %1, align 8
 // CHECK-NEXT:   ret %"{{.*}}/runtime/internal/runtime.String" %5
 // CHECK-NEXT: }
-
-func (t *typ) String() string {
-	return t.s
-}

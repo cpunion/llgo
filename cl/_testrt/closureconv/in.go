@@ -9,6 +9,60 @@ type Call struct {
 	n  int
 }
 
+func (c *Call) add(a int, b int) int {
+	return a + b + c.n
+}
+
+func add(a int, b int) int {
+	return a + b
+}
+
+func demo1(n int) Func {
+	m := &Call{n: n}
+	m.fn = m.add
+	return m.fn
+}
+
+func demo2() Func {
+	m := &Call{}
+	return m.add
+}
+
+func demo3() Func {
+	return add
+}
+
+func demo4() Func {
+	return func(a, b int) int { return a + b }
+}
+
+func demo5(n int) Func {
+	return func(a, b int) int { return a + b + n }
+}
+
+func main() {
+	n1 := demo1(1)(99, 200)
+	println(n1)
+
+	n2 := demo2()(100, 200)
+	println(n2)
+
+	n3 := demo3()(100, 200)
+	println(n3)
+
+	n4 := demo4()(100, 200)
+	println(n4)
+
+	n5 := demo5(1)(99, 200)
+	println(n5)
+
+	var fn func(a int, b int) int = demo5(1)
+	println(fn(99, 200))
+
+	var fn2 Func2 = (Func2)(demo5(1))
+	println(fn2(99, 200))
+}
+
 // CHECK-LABEL: define i64 @"main.(*Call).add"(ptr %0, i64 %1, i64 %2){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %3 = add i64 %1, %2
@@ -25,18 +79,12 @@ type Call struct {
 // CHECK-NEXT:   %9 = add i64 %3, %8
 // CHECK-NEXT:   ret i64 %9
 // CHECK-NEXT: }
-func (c *Call) add(a int, b int) int {
-	return a + b + c.n
-}
 
 // CHECK-LABEL: define i64 @main.add(i64 %0, i64 %1){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %2 = add i64 %0, %1
 // CHECK-NEXT:   ret i64 %2
 // CHECK-NEXT: }
-func add(a int, b int) int {
-	return a + b
-}
 
 // CHECK-LABEL: define %main.Func @main.demo1(i64 %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -56,11 +104,6 @@ func add(a int, b int) int {
 // CHECK-NEXT:   %10 = load %main.Func, ptr %9, align 8
 // CHECK-NEXT:   ret %main.Func %10
 // CHECK-NEXT: }
-func demo1(n int) Func {
-	m := &Call{n: n}
-	m.fn = m.add
-	return m.fn
-}
 
 // CHECK-LABEL: define %main.Func @main.demo2(){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -75,19 +118,10 @@ func demo1(n int) Func {
 // CHECK-NEXT:   ret %main.Func %5
 // CHECK-NEXT: }
 
-func demo2() Func {
-	m := &Call{}
-	return m.add
-}
-
 // CHECK-LABEL: define %main.Func @main.demo3(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   ret %main.Func { ptr @main.add, ptr null }
 // CHECK-NEXT: }
-
-func demo3() Func {
-	return add
-}
 
 // CHECK-LABEL: define %main.Func @main.demo4(){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -99,9 +133,6 @@ func demo3() Func {
 // CHECK-NEXT:   %2 = add i64 %0, %1
 // CHECK-NEXT:   ret i64 %2
 // CHECK-NEXT: }
-func demo4() Func {
-	return func(a, b int) int { return a + b }
-}
 
 // CHECK-LABEL: define %main.Func @main.demo5(i64 %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -126,9 +157,19 @@ func demo4() Func {
 // CHECK-NEXT:   %7 = add i64 %3, %6
 // CHECK-NEXT:   ret i64 %7
 // CHECK-NEXT: }
-func demo5(n int) Func {
-	return func(a, b int) int { return a + b + n }
-}
+
+// CHECK-LABEL: define void @main.init(){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %0 = load i1, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br i1 %0, label %_llgo_2, label %_llgo_1
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_0
+// CHECK-NEXT:   store i1 true, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br label %_llgo_2
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
 
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -190,29 +231,6 @@ func demo5(n int) Func {
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
-
-func main() {
-	n1 := demo1(1)(99, 200)
-	println(n1)
-
-	n2 := demo2()(100, 200)
-	println(n2)
-
-	n3 := demo3()(100, 200)
-	println(n3)
-
-	n4 := demo4()(100, 200)
-	println(n4)
-
-	n5 := demo5(1)(99, 200)
-	println(n5)
-
-	var fn func(a int, b int) int = demo5(1)
-	println(fn(99, 200))
-
-	var fn2 Func2 = (Func2)(demo5(1))
-	println(fn2(99, 200))
-}
 
 // CHECK-LABEL: define i64 @"main.(*Call).add$bound"(ptr {{(nest|swiftself)}} %0, i64 %1, i64 %2){{.*}} {
 // CHECK-NEXT: _llgo_0:

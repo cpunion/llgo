@@ -1,6 +1,8 @@
 // LITTEST
 package main
 
+// CHECK: {{^}}@17 = private unnamed_addr constant [47 x i8] c"type assertion should have failed but succeeded", align 1{{$}}
+
 type inner struct {
 	x int
 }
@@ -9,6 +11,35 @@ type outer struct {
 	y int
 	inner
 }
+
+func (*inner) M() {}
+
+type InnerInt struct {
+	X int
+}
+
+type OuterInt struct {
+	Y int
+	InnerInt
+}
+
+func (i *InnerInt) M() int {
+	return i.X
+}
+
+func main() {
+	var v1 any = (*outer).M
+	var v2 any = (*InnerInt).M
+	f1, ok := v1.(func(*outer))
+	println(f1, ok)
+	f2, ok := v2.(func(*outer))
+	println(f2, ok)
+	if ok {
+		panic("type assertion should have failed but succeeded")
+	}
+}
+
+func (m *outer) M() {}
 
 // CHECK-LABEL: define i64 @"main.(*InnerInt).M"(ptr %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -24,11 +55,6 @@ type outer struct {
 // CHECK-NEXT:   %5 = load i64, ptr %1, align 8
 // CHECK-NEXT:   ret i64 %5
 // CHECK-NEXT: }
-func (*inner) M() {}
-
-type InnerInt struct {
-	X int
-}
 
 // CHECK-LABEL: define i64 @"main.(*OuterInt).M"(ptr %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -44,25 +70,35 @@ type InnerInt struct {
 // CHECK-NEXT:   %5 = call i64 @"main.(*InnerInt).M"(ptr %4)
 // CHECK-NEXT:   ret i64 %5
 // CHECK-NEXT: }
-type OuterInt struct {
-	Y int
-	InnerInt
-}
 
-func (i *InnerInt) M() int {
-	return i.X
-}
+// CHECK-LABEL: define void @main.init(){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %0 = load i1, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br i1 %0, label %_llgo_2, label %_llgo_1
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_0
+// CHECK-NEXT:   store i1 true, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br label %_llgo_2
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
+
+// CHECK-LABEL: define void @"main.(*inner).M"(ptr %0){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
 
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %0 = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 16)
 // CHECK-NEXT:   store { ptr, ptr } { ptr @"main.(*outer).M$thunk", ptr null }, ptr %0, align 8
-// CHECK-NEXT:   %1 = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @"_llgo_closure${{[-A-Za-z0-9_]+}}", ptr undef }, ptr %0, 1
+// CHECK-NEXT:   %1 = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @"_llgo_closure$p06T23YeLPAu3v8p2hFtiY7Rlq6V9sr5dXePfqXtx6M", ptr undef }, ptr %0, 1
 // CHECK-NEXT:   %2 = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 16)
 // CHECK-NEXT:   store { ptr, ptr } { ptr @"main.(*InnerInt).M$thunk", ptr null }, ptr %2, align 8
-// CHECK-NEXT:   %3 = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @"_llgo_closure${{[-A-Za-z0-9_]+}}", ptr undef }, ptr %2, 1
+// CHECK-NEXT:   %3 = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @"_llgo_closure$WmZDdXg-2mo-o0lqY2QOZoNsd6Ks2TbzdX4upfVJ3j8", ptr undef }, ptr %2, 1
 // CHECK-NEXT:   %4 = extractvalue %"{{.*}}/runtime/internal/runtime.eface" %1, 0
-// CHECK-NEXT:   %5 = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @"_llgo_closure${{[-A-Za-z0-9_]+}}", ptr %4)
+// CHECK-NEXT:   %5 = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @"_llgo_closure$p06T23YeLPAu3v8p2hFtiY7Rlq6V9sr5dXePfqXtx6M", ptr %4)
 // CHECK-NEXT:   br i1 %5, label %_llgo_3, label %_llgo_4
 // CHECK-EMPTY:
 // CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_8
@@ -95,7 +131,7 @@ func (i *InnerInt) M() int {
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %14)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
 // CHECK-NEXT:   %16 = extractvalue %"{{.*}}/runtime/internal/runtime.eface" %3, 0
-// CHECK-NEXT:   %17 = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @"_llgo_closure${{[-A-Za-z0-9_]+}}", ptr %16)
+// CHECK-NEXT:   %17 = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @"_llgo_closure$p06T23YeLPAu3v8p2hFtiY7Rlq6V9sr5dXePfqXtx6M", ptr %16)
 // CHECK-NEXT:   br i1 %17, label %_llgo_6, label %_llgo_7
 // CHECK-EMPTY:
 // CHECK-NEXT: _llgo_6:                                          ; preds = %_llgo_5
@@ -119,23 +155,11 @@ func (i *InnerInt) M() int {
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
 // CHECK-NEXT:   br i1 %24, label %_llgo_1, label %_llgo_2
 // CHECK-NEXT: }
-func main() {
-	var v1 any = (*outer).M
-	var v2 any = (*InnerInt).M
-	f1, ok := v1.(func(*outer))
-	println(f1, ok)
-	f2, ok := v2.(func(*outer))
-	println(f2, ok)
-	if ok {
-		panic("type assertion should have failed but succeeded")
-	}
-}
 
 // CHECK-LABEL: define void @"main.(*outer).M"(ptr %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
-func (m *outer) M() {}
 
 // CHECK-LABEL: define void @"main.(*outer).M$thunk"(ptr %0){{.*}} {
 // CHECK-NEXT: _llgo_0:

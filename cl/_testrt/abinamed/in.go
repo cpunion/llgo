@@ -7,6 +7,76 @@ import (
 	"github.com/goplus/llgo/runtime/abi"
 )
 
+// CHECK: {{^}}@121 = private unnamed_addr constant [13 x i8] c"error field 0", align 1{{$}}
+// CHECK: {{^}}@122 = private unnamed_addr constant [18 x i8] c"error field 0 elem", align 1{{$}}
+// CHECK: {{^}}@123 = private unnamed_addr constant [13 x i8] c"error field 1", align 1{{$}}
+// CHECK: {{^}}@124 = private unnamed_addr constant [18 x i8] c"error field 1 elem", align 1{{$}}
+// CHECK: {{^}}@125 = private unnamed_addr constant [13 x i8] c"error field 2", align 1{{$}}
+// CHECK: {{^}}@126 = private unnamed_addr constant [13 x i8] c"error field 3", align 1{{$}}
+
+type T struct {
+	p *T
+	t *abi.Type
+	n uintptr
+	a []T
+}
+
+type eface struct {
+	typ  *abi.Type
+	data unsafe.Pointer
+}
+
+func main() {
+	e := toEface(T{})
+	e2 := toEface(abi.Type{})
+
+	println(e.typ)
+	println(e.typ.PtrToThis_)
+	println(e2.typ)
+	println(e2.typ.PtrToThis_)
+
+	f0 := e.typ.StructType().Fields[0]
+	if f0.Typ != e.typ.PtrToThis_ {
+		panic("error field 0")
+	}
+	if f0.Typ.Elem() != e.typ {
+		panic("error field 0 elem")
+	}
+	f1 := e.typ.StructType().Fields[1]
+	if f1.Typ != e2.typ.PtrToThis_ {
+		panic("error field 1")
+	}
+	if f1.Typ.Elem() != e2.typ {
+		panic("error field 1 elem")
+	}
+	f2 := e.typ.StructType().Fields[2]
+	if f2.Typ != e2.typ.StructType().Fields[0].Typ {
+		panic("error field 2")
+	}
+	f3 := e.typ.StructType().Fields[3]
+	if f3.Typ.Elem() != e.typ {
+		panic("error field 3")
+	}
+}
+
+func toEface(i any) *eface {
+	return (*eface)(unsafe.Pointer(&i))
+}
+
+// CHECK-LABEL: define void @main.init(){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %0 = load i1, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br i1 %0, label %_llgo_2, label %_llgo_1
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_0
+// CHECK-NEXT:   store i1 true, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   call void @"{{.*}}/runtime/abi.init"()
+// CHECK-NEXT:   br label %_llgo_2
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
+
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %0 = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 48)
@@ -485,57 +555,9 @@ import (
 // CHECK-NEXT:   br i1 %227, label %_llgo_11, label %_llgo_12
 // CHECK-NEXT: }
 
-type T struct {
-	p *T
-	t *abi.Type
-	n uintptr
-	a []T
-}
-
-type eface struct {
-	typ  *abi.Type
-	data unsafe.Pointer
-}
-
-func main() {
-	e := toEface(T{})
-	e2 := toEface(abi.Type{})
-
-	println(e.typ)
-	println(e.typ.PtrToThis_)
-	println(e2.typ)
-	println(e2.typ.PtrToThis_)
-
-	f0 := e.typ.StructType().Fields[0]
-	if f0.Typ != e.typ.PtrToThis_ {
-		panic("error field 0")
-	}
-	if f0.Typ.Elem() != e.typ {
-		panic("error field 0 elem")
-	}
-	f1 := e.typ.StructType().Fields[1]
-	if f1.Typ != e2.typ.PtrToThis_ {
-		panic("error field 1")
-	}
-	if f1.Typ.Elem() != e2.typ {
-		panic("error field 1 elem")
-	}
-	f2 := e.typ.StructType().Fields[2]
-	if f2.Typ != e2.typ.StructType().Fields[0].Typ {
-		panic("error field 2")
-	}
-	f3 := e.typ.StructType().Fields[3]
-	if f3.Typ.Elem() != e.typ {
-		panic("error field 3")
-	}
-}
-
 // CHECK-LABEL: define ptr @main.toEface(%"{{.*}}/runtime/internal/runtime.eface" %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 16)
 // CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.eface" %0, ptr %1, align 8
 // CHECK-NEXT:   ret ptr %1
 // CHECK-NEXT: }
-func toEface(i any) *eface {
-	return (*eface)(unsafe.Pointer(&i))
-}

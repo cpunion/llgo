@@ -5,6 +5,30 @@ import (
 	"unsafe"
 )
 
+type Func func(*int)
+
+//llgo:type C
+type CFunc func(*int)
+
+//llgo:type C
+type Callback[T any] func(*T)
+
+func main() {
+
+	var fn1 Func = func(v *int) {
+		println(*v)
+	}
+
+	var fn2 CFunc = func(v *int) {
+		println(*v)
+	}
+
+	var fn3 Callback[int] = func(v *int) {
+		println(*v)
+	}
+	println(unsafe.Sizeof(fn1), unsafe.Sizeof(fn2), unsafe.Sizeof(fn3))
+}
+
 // CHECK-LABEL: define void @main.init(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %0 = load i1, ptr @"main.init$guard", align 1
@@ -18,14 +42,6 @@ import (
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
 
-type Func func(*int)
-
-//llgo:type C
-type CFunc func(*int)
-
-//llgo:type C
-type Callback[T any] func(*T)
-
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintUint"(i64 16)
@@ -37,65 +53,50 @@ type Callback[T any] func(*T)
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
 
-func main() {
-	// CHECK-LABEL: define void @"main.main$1"(ptr %0){{.*}} {
-	// CHECK-NEXT: _llgo_0:
-	// CHECK-NEXT:   %1 = icmp eq ptr %0, null
-	// CHECK-NEXT:   br i1 %1, label %2, label %3
-	// CHECK-EMPTY:
-	// CHECK-NEXT: 2:                                                ; preds = %_llgo_0
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"(i1 true)
-	// CHECK-NEXT:   unreachable
-	// CHECK-EMPTY:
-	// CHECK-NEXT: 3:                                                ; preds = %_llgo_0
-	// CHECK-NEXT:   %4 = load i64, ptr %0, align 8
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintInt"(i64 %4)
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
-	// CHECK-NEXT:   ret void
-	// CHECK-NEXT: }
+// CHECK-LABEL: define void @"main.main$1"(ptr %0){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %1 = icmp eq ptr %0, null
+// CHECK-NEXT:   br i1 %1, label %2, label %3
+// CHECK-EMPTY:
+// CHECK-NEXT: 2:                                                ; preds = %_llgo_0
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"(i1 true)
+// CHECK-NEXT:   unreachable
+// CHECK-EMPTY:
+// CHECK-NEXT: 3:                                                ; preds = %_llgo_0
+// CHECK-NEXT:   %4 = load i64, ptr %0, align 8
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintInt"(i64 %4)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
 
-	var fn1 Func = func(v *int) {
-		println(*v)
-	}
+// CHECK-LABEL: define void @"main.main$2"(ptr %0){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %1 = icmp eq ptr %0, null
+// CHECK-NEXT:   br i1 %1, label %2, label %3
+// CHECK-EMPTY:
+// CHECK-NEXT: 2:                                                ; preds = %_llgo_0
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"(i1 true)
+// CHECK-NEXT:   unreachable
+// CHECK-EMPTY:
+// CHECK-NEXT: 3:                                                ; preds = %_llgo_0
+// CHECK-NEXT:   %4 = load i64, ptr %0, align 8
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintInt"(i64 %4)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
 
-	// CHECK-LABEL: define void @"main.main$2"(ptr %0){{.*}} {
-	// CHECK-NEXT: _llgo_0:
-	// CHECK-NEXT:   %1 = icmp eq ptr %0, null
-	// CHECK-NEXT:   br i1 %1, label %2, label %3
-	// CHECK-EMPTY:
-	// CHECK-NEXT: 2:                                                ; preds = %_llgo_0
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"(i1 true)
-	// CHECK-NEXT:   unreachable
-	// CHECK-EMPTY:
-	// CHECK-NEXT: 3:                                                ; preds = %_llgo_0
-	// CHECK-NEXT:   %4 = load i64, ptr %0, align 8
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintInt"(i64 %4)
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
-	// CHECK-NEXT:   ret void
-	// CHECK-NEXT: }
-
-	var fn2 CFunc = func(v *int) {
-		println(*v)
-	}
-
-	// CHECK-LABEL: define void @"main.main$3"(ptr %0){{.*}} {
-	// CHECK-NEXT: _llgo_0:
-	// CHECK-NEXT:   %1 = icmp eq ptr %0, null
-	// CHECK-NEXT:   br i1 %1, label %2, label %3
-	// CHECK-EMPTY:
-	// CHECK-NEXT: 2:                                                ; preds = %_llgo_0
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"(i1 true)
-	// CHECK-NEXT:   unreachable
-	// CHECK-EMPTY:
-	// CHECK-NEXT: 3:                                                ; preds = %_llgo_0
-	// CHECK-NEXT:   %4 = load i64, ptr %0, align 8
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintInt"(i64 %4)
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
-	// CHECK-NEXT:   ret void
-	// CHECK-NEXT: }
-
-	var fn3 Callback[int] = func(v *int) {
-		println(*v)
-	}
-	println(unsafe.Sizeof(fn1), unsafe.Sizeof(fn2), unsafe.Sizeof(fn3))
-}
+// CHECK-LABEL: define void @"main.main$3"(ptr %0){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %1 = icmp eq ptr %0, null
+// CHECK-NEXT:   br i1 %1, label %2, label %3
+// CHECK-EMPTY:
+// CHECK-NEXT: 2:                                                ; preds = %_llgo_0
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"(i1 true)
+// CHECK-NEXT:   unreachable
+// CHECK-EMPTY:
+// CHECK-NEXT: 3:                                                ; preds = %_llgo_0
+// CHECK-NEXT:   %4 = load i64, ptr %0, align 8
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintInt"(i64 %4)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }

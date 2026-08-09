@@ -5,11 +5,10 @@ package main
 // struct.  In particular, this test exercises that the correct
 // method is called.
 
-// CHECK: @0 = private unnamed_addr constant [3 x i8] c"two", align 1
-// CHECK: @1 = private unnamed_addr constant [48 x i8] c"{{.*}}/cl/_testgo/ifaceprom.impl", align 1
-// CHECK: @2 = private unnamed_addr constant [3 x i8] c"one", align 1
-// CHECK: @12 = private unnamed_addr constant [6 x i8] c"main.I", align 1
-// CHECK: @13 = private unnamed_addr constant [4 x i8] c"pass", align 1
+// CHECK: {{^}}@0 = private unnamed_addr constant [3 x i8] c"two", align 1{{$}}
+// CHECK: {{^}}@1 = private unnamed_addr constant [48 x i8] c"{{.*}}/cl/_testgo/ifaceprom.impl", align 1{{$}}
+// CHECK: {{^}}@2 = private unnamed_addr constant [3 x i8] c"one", align 1{{$}}
+// CHECK: {{^}}@13 = private unnamed_addr constant [4 x i8] c"pass", align 1{{$}}
 
 type I interface {
 	one() int
@@ -202,7 +201,7 @@ func main() {
 // CHECK-NEXT:   %1 = getelementptr inbounds %main.S, ptr %0, i32 0, i32 0
 // CHECK-NEXT:   %2 = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 0)
 // CHECK-NEXT:   store %main.impl zeroinitializer, ptr %2, align 1
-// CHECK-NEXT:   %3 = call ptr @"{{.*}}/runtime/internal/runtime.NewItab"(ptr @"{{.*}}/cl/_testgo/ifaceprom.iface${{[-A-Za-z0-9_]+}}", ptr @_llgo_main.impl)
+// CHECK-NEXT:   %3 = call ptr @"{{.*}}/runtime/internal/runtime.NewItab"(ptr @"{{.*}}/cl/_testgo/ifaceprom.iface$zZ89tENb5h_KNjvpxf1TXPfaWFYn0IZrZwyVf42lRtA", ptr @_llgo_main.impl)
 // CHECK-NEXT:   %4 = insertvalue %"{{.*}}/runtime/internal/runtime.iface" undef, ptr %3, 0
 // CHECK-NEXT:   %5 = insertvalue %"{{.*}}/runtime/internal/runtime.iface" %4, ptr %2, 1
 // CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.iface" %5, ptr %1, align 8

@@ -7,6 +7,51 @@ import (
 	"github.com/goplus/lib/c"
 )
 
+//llgo:link (*T).Printf C.printf
+// CHECK: {{^}}@0 = private unnamed_addr constant [9 x i8] c"%s (%d)\0A\00", align 1{{$}}
+// CHECK: {{^}}@1 = private unnamed_addr constant [6 x i8] c"hello\00", align 1{{$}}
+// CHECK: {{^}}@2 = private unnamed_addr constant [9 x i8] c"(%d) %s\0A\00", align 1{{$}}
+// CHECK: {{^}}@3 = private unnamed_addr constant [6 x i8] c"world\00", align 1{{$}}
+// CHECK: {{^}}@18 = private unnamed_addr constant [12 x i8] c"%s (%d,%d)\0A\00", align 1{{$}}
+// CHECK: {{^}}@19 = private unnamed_addr constant [5 x i8] c"ifmt\00", align 1{{$}}
+// CHECK: {{^}}@20 = private unnamed_addr constant [5 x i8] c"error", align 1{{$}}
+
+func (*T) Printf(__llgo_va_list ...any) c.Int { return 0 }
+
+type T c.Char
+
+//go:linkname Printf C.printf
+func Printf(format *c.Char, __llgo_va_list ...any) c.Int
+
+type CFmt struct {
+	*T
+}
+
+func (f *CFmt) SetFormat(fmt *c.Char) {
+	f.T = (*T)(unsafe.Pointer(fmt))
+}
+
+type IFmt interface {
+	SetFormat(fmt *c.Char)
+	Printf(__llgo_va_list ...any) c.Int
+}
+
+func main() {
+	cfmt := &CFmt{}
+	cfmt.SetFormat(c.Str("%s (%d)\n"))
+	cfmt.Printf(c.Str("hello"), 100)
+	cfmt.SetFormat(c.Str("(%d) %s\n"))
+	cfmt.Printf(200, c.Str("world"))
+
+	var i any = &CFmt{}
+	ifmt, ok := i.(IFmt)
+	if !ok {
+		panic("error")
+	}
+	ifmt.SetFormat(c.Str("%s (%d,%d)\n"))
+	ifmt.Printf(c.Str("ifmt"), 100, 200)
+}
+
 // CHECK-LABEL: define i32 @main.CFmt.Printf(%main.CFmt %0, ...){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %1 = alloca %main.CFmt, align 8
@@ -41,26 +86,18 @@ import (
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
 
-//llgo:link (*T).Printf C.printf
-func (*T) Printf(__llgo_va_list ...any) c.Int { return 0 }
-
-type T c.Char
-
-//go:linkname Printf C.printf
-func Printf(format *c.Char, __llgo_va_list ...any) c.Int
-
-type CFmt struct {
-	*T
-}
-
-func (f *CFmt) SetFormat(fmt *c.Char) {
-	f.T = (*T)(unsafe.Pointer(fmt))
-}
-
-type IFmt interface {
-	SetFormat(fmt *c.Char)
-	Printf(__llgo_va_list ...any) c.Int
-}
+// CHECK-LABEL: define void @main.init(){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %0 = load i1, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br i1 %0, label %_llgo_2, label %_llgo_1
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_0
+// CHECK-NEXT:   store i1 true, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br label %_llgo_2
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
 
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -125,18 +162,3 @@ type IFmt interface {
 // CHECK-NEXT:   %38 = extractvalue { %"{{.*}}/runtime/internal/runtime.iface", i1 } %36, 1
 // CHECK-NEXT:   br i1 %38, label %_llgo_2, label %_llgo_1
 // CHECK-NEXT: }
-func main() {
-	cfmt := &CFmt{}
-	cfmt.SetFormat(c.Str("%s (%d)\n"))
-	cfmt.Printf(c.Str("hello"), 100)
-	cfmt.SetFormat(c.Str("(%d) %s\n"))
-	cfmt.Printf(200, c.Str("world"))
-
-	var i any = &CFmt{}
-	ifmt, ok := i.(IFmt)
-	if !ok {
-		panic("error")
-	}
-	ifmt.SetFormat(c.Str("%s (%d,%d)\n"))
-	ifmt.Printf(c.Str("ifmt"), 100, 200)
-}

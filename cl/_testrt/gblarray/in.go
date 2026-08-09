@@ -6,26 +6,49 @@ import (
 	"github.com/goplus/llgo/runtime/abi"
 )
 
-// CHECK: @main.sizeBasicTypes = global [25 x i64] [i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0, i64 16], align 8
+// CHECK: {{^}}@0 = private unnamed_addr constant [20 x i8] c"Kind: %d, Size: %d\0A\00", align 1{{$}}
+
+func Basic(kind abi.Kind) *abi.Type {
+	return basicTypes[kind]
+}
+
+func basicType(kind abi.Kind) *abi.Type {
+	return &abi.Type{
+		Size_: sizeBasicTypes[kind],
+		Hash:  uint32(kind),
+		Kind_: uint8(kind),
+	}
+}
+
+var (
+	basicTypes = [...]*abi.Type{
+		abi.String: basicType(abi.String),
+	}
+	sizeBasicTypes = [...]uintptr{
+		abi.String: 16,
+	}
+)
+
+func main() {
+	t := Basic(abi.String)
+	c.Printf(c.Str("Kind: %d, Size: %d\n"), int(t.Kind_), t.Size_)
+}
 
 // CHECK-LABEL: define ptr @main.Basic(i64 %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %1 = icmp uge i64 %0, 25
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.CheckIndexRange"(i1 %1, {{.*}})
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.CheckIndexRange"(i1 %1, i64 %0, i1 false, i64 25)
 // CHECK-NEXT:   %2 = getelementptr inbounds ptr, ptr @main.basicTypes, i64 %0
 // CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
 // CHECK-NEXT:   ret ptr %3
 // CHECK-NEXT: }
-func Basic(kind abi.Kind) *abi.Type {
-	return basicTypes[kind]
-}
 
 // CHECK-LABEL: define ptr @main.basicType(i64 %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 72)
 // CHECK-NEXT:   %2 = getelementptr inbounds %"{{.*}}/runtime/abi.Type", ptr %1, i32 0, i32 0
 // CHECK-NEXT:   %3 = icmp uge i64 %0, 25
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.CheckIndexRange"(i1 %3, {{.*}})
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.CheckIndexRange"(i1 %3, i64 %0, i1 false, i64 25)
 // CHECK-NEXT:   %4 = getelementptr inbounds i64, ptr @main.sizeBasicTypes, i64 %0
 // CHECK-NEXT:   %5 = load i64, ptr %4, align 8
 // CHECK-NEXT:   %6 = getelementptr inbounds %"{{.*}}/runtime/abi.Type", ptr %1, i32 0, i32 2
@@ -37,13 +60,6 @@ func Basic(kind abi.Kind) *abi.Type {
 // CHECK-NEXT:   store i8 %9, ptr %8, align 1
 // CHECK-NEXT:   ret ptr %1
 // CHECK-NEXT: }
-func basicType(kind abi.Kind) *abi.Type {
-	return &abi.Type{
-		Size_: sizeBasicTypes[kind],
-		Hash:  uint32(kind),
-		Kind_: uint8(kind),
-	}
-}
 
 // CHECK-LABEL: define void @main.init(){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -60,14 +76,6 @@ func basicType(kind abi.Kind) *abi.Type {
 // CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
-var (
-	basicTypes = [...]*abi.Type{
-		abi.String: basicType(abi.String),
-	}
-	sizeBasicTypes = [...]uintptr{
-		abi.String: 16,
-	}
-)
 
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -96,7 +104,3 @@ var (
 // CHECK-NEXT:   %12 = call i32 (ptr, ...) @printf(ptr @0, i64 %6, i64 %11)
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
-func main() {
-	t := Basic(abi.String)
-	c.Printf(c.Str("Kind: %d, Size: %d\n"), int(t.Kind_), t.Size_)
-}

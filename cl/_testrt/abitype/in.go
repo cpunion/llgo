@@ -7,6 +7,43 @@ import (
 	"github.com/goplus/llgo/runtime/abi"
 )
 
+// CHECK: {{^}}@0 = private unnamed_addr constant [5 x i8] c"int32", align 1{{$}}
+// CHECK: {{^}}@1 = private unnamed_addr constant [14 x i8] c"abi rune error", align 1{{$}}
+// CHECK: {{^}}@3 = private unnamed_addr constant [5 x i8] c"uint8", align 1{{$}}
+// CHECK: {{^}}@4 = private unnamed_addr constant [14 x i8] c"abi byte error", align 1{{$}}
+
+type eface struct {
+	typ  *abi.Type
+	data unsafe.Pointer
+}
+
+func main() {
+	var v any = rune(0)
+	t := (*eface)(unsafe.Pointer(&v)).typ
+	if t.String() != "int32" {
+		panic("abi rune error")
+	}
+	v = byte(0)
+	t = (*eface)(unsafe.Pointer(&v)).typ
+	if t.String() != "uint8" {
+		panic("abi byte error")
+	}
+}
+
+// CHECK-LABEL: define void @main.init(){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %0 = load i1, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br i1 %0, label %_llgo_2, label %_llgo_1
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_0
+// CHECK-NEXT:   store i1 true, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   call void @"{{.*}}/runtime/abi.init"()
+// CHECK-NEXT:   br label %_llgo_2
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
+
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %0 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 16)
@@ -66,21 +103,3 @@ import (
 // CHECK-NEXT:   %24 = xor i1 %23, true
 // CHECK-NEXT:   br i1 %24, label %_llgo_3, label %_llgo_4
 // CHECK-NEXT: }
-
-type eface struct {
-	typ  *abi.Type
-	data unsafe.Pointer
-}
-
-func main() {
-	var v any = rune(0)
-	t := (*eface)(unsafe.Pointer(&v)).typ
-	if t.String() != "int32" {
-		panic("abi rune error")
-	}
-	v = byte(0)
-	t = (*eface)(unsafe.Pointer(&v)).typ
-	if t.String() != "uint8" {
-		panic("abi byte error")
-	}
-}

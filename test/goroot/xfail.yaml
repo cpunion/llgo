@@ -579,7 +579,6 @@ timeouts:
     case: fixedbugs/issue40367.go
     timeout: 2m
     reason: issue40367 run exceeds the default timeout on darwin/arm64
-    reason: issue4066 run exceeds the default timeout on darwin/arm64
   - version: go1.24
     platform: darwin/arm64
     directive: run
@@ -946,7 +945,6 @@ timeouts:
     case: fixedbugs/issue40367.go
     timeout: 2m
     reason: issue40367 run exceeds the default timeout on darwin/arm64
-    reason: issue4066 run exceeds the default timeout on darwin/arm64
   - version: go1.25
     platform: darwin/arm64
     directive: run
@@ -1313,7 +1311,6 @@ timeouts:
     case: fixedbugs/issue40367.go
     timeout: 2m
     reason: issue40367 run exceeds the default timeout on darwin/arm64
-    reason: issue4066 run exceeds the default timeout on darwin/arm64
   - version: go1.26
     platform: darwin/arm64
     directive: run

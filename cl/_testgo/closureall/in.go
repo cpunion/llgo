@@ -5,12 +5,11 @@ import _ "unsafe" // for go:linkname
 
 import "github.com/goplus/lib/c"
 
-// CHECK: @0 = private unnamed_addr constant [46 x i8] c"{{.*}}/cl/_testgo/closureall.S", align 1
-// CHECK: @1 = private unnamed_addr constant [3 x i8] c"Inc", align 1
-// CHECK: @7 = private unnamed_addr constant [3 x i8] c"Add", align 1
-// CHECK: @8 = private unnamed_addr constant [26 x i8] c"interface { Add(int) int }", align 1
-
 //go:linkname cSqrt C.sqrt
+// CHECK: {{^}}@0 = private unnamed_addr constant [46 x i8] c"{{.*}}/cl/_testgo/closureall.S", align 1{{$}}
+// CHECK: {{^}}@1 = private unnamed_addr constant [3 x i8] c"Inc", align 1{{$}}
+// CHECK: {{^}}@7 = private unnamed_addr constant [3 x i8] c"Add", align 1{{$}}
+
 func cSqrt(x c.Double) c.Double
 
 // llgo:link cAbs C.abs
@@ -30,36 +29,9 @@ type S struct {
 	v int
 }
 
-// CHECK-LABEL: define i64 @main.S.Inc(%main.S %0, i64 %1){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %2 = alloca %main.S, align 8
-// CHECK-NEXT:   call void @llvm.memset.p0.i64(ptr %2, i8 0, i64 8, i1 false)
-// CHECK-NEXT:   store %main.S %0, ptr %2, align 8
-// CHECK-NEXT:   %3 = getelementptr inbounds %main.S, ptr %2, i32 0, i32 0
-// CHECK-NEXT:   %4 = load i64, ptr %3, align 8
-// CHECK-NEXT:   %5 = add i64 %4, %1
-// CHECK-NEXT:   ret i64 %5
-// CHECK-NEXT: }
-
 func (s S) Inc(x int) int {
 	return s.v + x
 }
-
-// CHECK-LABEL: define i64 @"main.(*S).Add"(ptr %0, i64 %1){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %2 = getelementptr inbounds %main.S, ptr %0, i32 0, i32 0
-// CHECK-NEXT:   %3 = icmp eq ptr %0, null
-// CHECK-NEXT:   br i1 %3, label %4, label %5
-// CHECK-EMPTY:
-// CHECK-NEXT: 4:                                                ; preds = %_llgo_0
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"(i1 true)
-// CHECK-NEXT:   unreachable
-// CHECK-EMPTY:
-// CHECK-NEXT: 5:                                                ; preds = %_llgo_0
-// CHECK-NEXT:   %6 = load i64, ptr %2, align 8
-// CHECK-NEXT:   %7 = add i64 %6, %1
-// CHECK-NEXT:   ret i64 %7
-// CHECK-NEXT: }
 
 func (s *S) Add(x int) int {
 	return s.v + x
@@ -107,6 +79,33 @@ func makeNoFree() Fn {
 func makeWithFree(base int) Fn {
 	return func(x int) int { return x + base }
 }
+
+// CHECK-LABEL: define i64 @main.S.Inc(%main.S %0, i64 %1){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %2 = alloca %main.S, align 8
+// CHECK-NEXT:   call void @llvm.memset.p0.i64(ptr %2, i8 0, i64 8, i1 false)
+// CHECK-NEXT:   store %main.S %0, ptr %2, align 8
+// CHECK-NEXT:   %3 = getelementptr inbounds %main.S, ptr %2, i32 0, i32 0
+// CHECK-NEXT:   %4 = load i64, ptr %3, align 8
+// CHECK-NEXT:   %5 = add i64 %4, %1
+// CHECK-NEXT:   ret i64 %5
+// CHECK-NEXT: }
+
+// CHECK-LABEL: define i64 @"main.(*S).Add"(ptr %0, i64 %1){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %2 = getelementptr inbounds %main.S, ptr %0, i32 0, i32 0
+// CHECK-NEXT:   %3 = icmp eq ptr %0, null
+// CHECK-NEXT:   br i1 %3, label %4, label %5
+// CHECK-EMPTY:
+// CHECK-NEXT: 4:                                                ; preds = %_llgo_0
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"(i1 true)
+// CHECK-NEXT:   unreachable
+// CHECK-EMPTY:
+// CHECK-NEXT: 5:                                                ; preds = %_llgo_0
+// CHECK-NEXT:   %6 = load i64, ptr %2, align 8
+// CHECK-NEXT:   %7 = add i64 %6, %1
+// CHECK-NEXT:   ret i64 %7
+// CHECK-NEXT: }
 
 // CHECK-LABEL: define i64 @"main.(*S).Inc"(ptr %0, i64 %1){{.*}} {
 // CHECK-NEXT: _llgo_0:
@@ -176,7 +175,7 @@ func makeWithFree(base int) Fn {
 // CHECK-NEXT:   %__llgo_funcval_code2 = call ptr asm "", "=r,0"(ptr %15)
 // CHECK-NEXT:   %16 = call i64 %__llgo_funcval_code2(ptr {{(nest|swiftself)}} %14, i64 7)
 // CHECK-NEXT:   %17 = call i64 @"main.(*S).Add$thunk"(ptr %9, i64 8)
-// CHECK-NEXT:   %18 = call ptr @"{{.*}}/runtime/internal/runtime.NewItab"(ptr @"_llgo_iface${{[-A-Za-z0-9_]+}}", ptr @"*_llgo_main.S")
+// CHECK-NEXT:   %18 = call ptr @"{{.*}}/runtime/internal/runtime.NewItab"(ptr @"_llgo_iface$VdBKYV8-gcMjZtZfcf-u2oKoj9Lu3VXwuG8TGCW2S4A", ptr @"*_llgo_main.S")
 // CHECK-NEXT:   %19 = insertvalue %"{{.*}}/runtime/internal/runtime.iface" undef, ptr %18, 0
 // CHECK-NEXT:   %20 = insertvalue %"{{.*}}/runtime/internal/runtime.iface" %19, ptr %9, 1
 // CHECK-NEXT:   %21 = call ptr @"{{.*}}/runtime/internal/runtime.IfaceType"(%"{{.*}}/runtime/internal/runtime.iface" %20)
@@ -198,7 +197,7 @@ func makeWithFree(base int) Fn {
 // CHECK-NEXT:   ret void
 // CHECK-EMPTY:
 // CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_0
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PanicTypeAssert"(ptr @"_llgo_iface$[[ASSERT_IFACE:[-A-Za-z0-9_]+]]", ptr %21, ptr @"_llgo_iface$[[ASSERT_IFACE]]", %"{{.*}}/runtime/internal/runtime.String" { ptr @7, i64 3 })
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PanicTypeAssert"(ptr @"_llgo_iface$VdBKYV8-gcMjZtZfcf-u2oKoj9Lu3VXwuG8TGCW2S4A", ptr %21, ptr @"_llgo_iface$VdBKYV8-gcMjZtZfcf-u2oKoj9Lu3VXwuG8TGCW2S4A", %"{{.*}}/runtime/internal/runtime.String" { ptr @7, i64 3 })
 // CHECK-NEXT:   unreachable
 // CHECK-NEXT: }
 

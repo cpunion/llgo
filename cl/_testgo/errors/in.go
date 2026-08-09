@@ -3,15 +3,8 @@ package main
 
 // New returns an error that formats as the given text.
 // Each call to New returns a distinct error value even if the text is identical.
-// CHECK-LABEL: define %"{{.*}}iface" @main.New(%"{{.*}}String" %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = call ptr @"{{.*}}AllocZ"(i64 16)
-// CHECK-NEXT:   %2 = getelementptr inbounds %main.errorString, ptr %1, i32 0, i32 0
-// CHECK-NEXT:   store %"{{.*}}String" %0, ptr %2, align 8
-// CHECK-NEXT:   %3 = call ptr @"{{.*}}NewItab"(ptr @"{{.*}}iface{{.*}}", ptr @"*_llgo_main.errorString")
-// CHECK-NEXT:   %4 = insertvalue %"{{.*}}iface" undef, ptr %3, 0
-// CHECK-NEXT:   %5 = insertvalue %"{{.*}}iface" %4, ptr %1, 1
-// CHECK-NEXT:   ret %"{{.*}}iface" %5
+// CHECK: {{^}}@7 = private unnamed_addr constant [8 x i8] c"an error", align 1{{$}}
+
 func New(text string) error {
 	return &errorString{text}
 }
@@ -21,7 +14,28 @@ type errorString struct {
 	s string
 }
 
-// CHECK-LABEL: define %"{{.*}}String" @"main.(*errorString).Error"(ptr %0){{.*}} {
+func (e *errorString) Error() string {
+	return e.s
+}
+
+func main() {
+	err := New("an error")
+	println(err)
+	println(err.Error())
+}
+
+// CHECK-LABEL: define %"{{.*}}/runtime/internal/runtime.iface" @main.New(%"{{.*}}/runtime/internal/runtime.String" %0){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 16)
+// CHECK-NEXT:   %2 = getelementptr inbounds %main.errorString, ptr %1, i32 0, i32 0
+// CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.String" %0, ptr %2, align 8
+// CHECK-NEXT:   %3 = call ptr @"{{.*}}/runtime/internal/runtime.NewItab"(ptr @"_llgo_iface$Fh8eUJ-Gw4e6TYuajcFIOSCuqSPKAt5nS4ow7xeGXEU", ptr @"*_llgo_main.errorString")
+// CHECK-NEXT:   %4 = insertvalue %"{{.*}}/runtime/internal/runtime.iface" undef, ptr %3, 0
+// CHECK-NEXT:   %5 = insertvalue %"{{.*}}/runtime/internal/runtime.iface" %4, ptr %1, 1
+// CHECK-NEXT:   ret %"{{.*}}/runtime/internal/runtime.iface" %5
+// CHECK-NEXT: }
+
+// CHECK-LABEL: define %"{{.*}}/runtime/internal/runtime.String" @"main.(*errorString).Error"(ptr %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %1 = getelementptr inbounds %main.errorString, ptr %0, i32 0, i32 0
 // CHECK-NEXT:   %2 = icmp eq ptr %0, null
@@ -35,20 +49,35 @@ type errorString struct {
 // CHECK-NEXT:   %5 = load %"{{.*}}/runtime/internal/runtime.String", ptr %1, align 8
 // CHECK-NEXT:   ret %"{{.*}}/runtime/internal/runtime.String" %5
 // CHECK-NEXT: }
-func (e *errorString) Error() string {
-	return e.s
-}
+
+// CHECK-LABEL: define void @main.init(){{.*}} {
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %0 = load i1, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br i1 %0, label %_llgo_2, label %_llgo_1
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_0
+// CHECK-NEXT:   store i1 true, ptr @"main.init$guard", align 1
+// CHECK-NEXT:   br label %_llgo_2
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
 
 // CHECK-LABEL: define void @main.main(){{.*}} {
-func main() {
-	// CHECK: call %"{{.*}}iface" @main.New(%"{{.*}}String" { ptr @7, i64 8 })
-	// CHECK: call void @"{{.*}}PrintIface"(%"{{.*}}iface" %0)
-	// CHECK: call ptr @"{{.*}}IfacePtrData"(%"{{.*}}iface" %0)
-	// CHECK: call %"{{.*}}String" %8(ptr %7)
-	// CHECK: call void @"{{.*}}PrintString"(%"{{.*}}String" %9)
-	// CHECK: call void @"{{.*}}PrintByte"(i8 10)
-	// CHECK: ret void
-	err := New("an error")
-	println(err)
-	println(err.Error())
-}
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT:   %0 = call %"{{.*}}/runtime/internal/runtime.iface" @main.New(%"{{.*}}/runtime/internal/runtime.String" { ptr @7, i64 8 })
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintIface"(%"{{.*}}/runtime/internal/runtime.iface" %0)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
+// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.IfacePtrData"(%"{{.*}}/runtime/internal/runtime.iface" %0)
+// CHECK-NEXT:   %2 = extractvalue %"{{.*}}/runtime/internal/runtime.iface" %0, 0
+// CHECK-NEXT:   %3 = getelementptr ptr, ptr %2, i64 3
+// CHECK-NEXT:   %4 = load ptr, ptr %3, align 8
+// CHECK-NEXT:   %5 = insertvalue { ptr, ptr } undef, ptr %4, 0
+// CHECK-NEXT:   %6 = insertvalue { ptr, ptr } %5, ptr %1, 1
+// CHECK-NEXT:   %7 = extractvalue { ptr, ptr } %6, 1
+// CHECK-NEXT:   %8 = extractvalue { ptr, ptr } %6, 0
+// CHECK-NEXT:   %9 = call %"{{.*}}/runtime/internal/runtime.String" %8(ptr %7)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintString"(%"{{.*}}/runtime/internal/runtime.String" %9)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
