@@ -638,7 +638,17 @@ func (b Builder) constructDebugAddr(v Expr) Expr {
 	return b.doConstructDebugAddr(v, t)
 }
 
+func (b Builder) constructDebugAddrWithStore(v Expr) (Expr, Expr) {
+	t := v.Type.RawType().Underlying()
+	return b.doConstructDebugAddrWithStore(v, t)
+}
+
 func (b Builder) doConstructDebugAddr(v Expr, t types.Type) (dbgPtr Expr) {
+	dbgPtr, _ = b.doConstructDebugAddrWithStore(v, t)
+	return dbgPtr
+}
+
+func (b Builder) doConstructDebugAddrWithStore(v Expr, t types.Type) (dbgPtr, store Expr) {
 	var ty Type
 	switch t := t.(type) {
 	case *types.Basic:
@@ -668,8 +678,8 @@ func (b Builder) doConstructDebugAddr(v Expr, t types.Type) (dbgPtr Expr) {
 	}
 	dbgPtr = b.AllocaT(ty)
 	dbgPtr.Type = b.Prog.Pointer(v.Type)
-	b.Store(dbgPtr, v)
-	return dbgPtr
+	store = b.Store(dbgPtr, v)
+	return dbgPtr, store
 }
 
 func (b Builder) di() diBuilder {
@@ -690,26 +700,16 @@ func (b Builder) diParam(variable *types.Var, v Expr, dv DIVar, scope DIScope, p
 		b.DIValue(variable, v, dv, scope, pos, blk)
 		return Nil
 	}
-	var dbgPtr Expr
-	b.withoutDebugLocation(func() {
-		dbgPtr = b.constructDebugAddr(v)
-	})
+	dbgPtr, store := b.constructDebugAddrWithStore(v)
+	store.impl.InstructionSetDebugLoc(llvm.Metadata{})
 	b.DIDeclare(variable, dbgPtr, dv, scope, pos, blk)
 	return dbgPtr
 }
 
-// DIStore updates debug-only storage without creating a source line site.
+// DIStore updates the stable debug-only storage for an O0 parameter.
 func (b Builder) DIStore(ptr, value Expr) {
-	b.withoutDebugLocation(func() {
-		b.Store(ptr, value)
-	})
-}
-
-func (b Builder) withoutDebugLocation(fn func()) {
-	loc := b.impl.GetCurrentDebugLocation()
-	b.impl.SetCurrentDebugLocation(0, 0, llvm.Metadata{}, llvm.Metadata{})
-	defer b.impl.SetCurrentDebugLocation(loc.Line, loc.Col, loc.Scope, loc.InlinedAt)
-	fn()
+	store := b.Store(ptr, value)
+	store.impl.InstructionSetDebugLoc(llvm.Metadata{})
 }
 
 func (b Builder) DIDeclare(variable *types.Var, v Expr, dv DIVar, scope DIScope, pos token.Position, blk BasicBlock) {

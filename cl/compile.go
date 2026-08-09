@@ -897,7 +897,7 @@ func (p *context) debugRef(b llssa.Builder, v *ssa.DebugRef) {
 		// avoid generate local variable debug info of global variable in function
 		return
 	}
-	if p.debugAllocObjects[variable] {
+	if !p.prog.DebugInfoOptimized() && p.debugAllocObjects[variable] {
 		// The variable already has a declaration tied to its real storage.
 		// A value DebugRef for an aggregate would replace it with a snapshot.
 		return

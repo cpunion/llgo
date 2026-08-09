@@ -99,6 +99,14 @@ var anonymous = func(seed int) int {
 		t.Fatal(err)
 	}
 
+	oldDebug, oldDebugSyms := enableDbg, enableDbgSyms
+	EnableDebug(true)
+	EnableDbgSyms(true)
+	defer func() {
+		EnableDebug(oldDebug)
+		EnableDbgSyms(oldDebugSyms)
+	}()
+
 	prog := newLLSSAProgForTarget(t, &llssa.Target{
 		GOOS:     runtime.GOOS,
 		GOARCH:   runtime.GOARCH,
