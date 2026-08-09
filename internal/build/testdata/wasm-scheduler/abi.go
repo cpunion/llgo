@@ -9,3 +9,6 @@ func cLongSize() uintptr
 
 //go:linkname schedulerDeadlockMode C.llgo_test_scheduler_deadlock
 func schedulerDeadlockMode() int32
+
+//go:linkname schedulerMainGoexitMode C.llgo_test_scheduler_main_goexit
+func schedulerMainGoexitMode() int32

@@ -60,6 +60,10 @@ func checkCurrentG() {
 
 func main() {
 	checkWasmModel()
+	if schedulerMainGoexitMode() != 0 {
+		testMainGoexit()
+		return
+	}
 	if schedulerDeadlockMode() != 0 {
 		testParkedMainDeadlock()
 		return
@@ -137,6 +141,13 @@ func main() {
 	}
 	testGoroutineLifecycle()
 	println("wasm scheduler ok")
+}
+
+func testMainGoexit() {
+	go func() {
+		println("WORKER_RETURNING")
+	}()
+	runtime.Goexit()
 }
 
 func testGoroutineLifecycle() {

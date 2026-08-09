@@ -420,6 +420,12 @@ jobs:
               return 1
             fi
             grep -Fq "fatal error: all goroutines are asleep - deadlock!" <<<"$output"
+            if output=$(node --input-type=module -e "import Module from '$module'; await Module({preRun: [module => { module.ENV.LLGO_WASM_SCHEDULER_MAIN_GOEXIT = '1'; }]});" 2>&1); then
+              echo "main Goexit scheduler fixture unexpectedly succeeded"
+              return 1
+            fi
+            grep -Fq "WORKER_RETURNING" <<<"$output"
+            grep -Fq "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" <<<"$output"
           }
 
           run_wasi_scheduler() {
@@ -434,6 +440,13 @@ jobs:
               return 1
             fi
             grep -Fq "fatal error: all goroutines are asleep - deadlock!" <<<"$output"
+            if output=$(wasmtime run -W exceptions=y \
+              --env LLGO_WASM_SCHEDULER_MAIN_GOEXIT=1 "$module" 2>&1); then
+              echo "main Goexit scheduler fixture unexpectedly succeeded"
+              return 1
+            fi
+            grep -Fq "WORKER_RETURNING" <<<"$output"
+            grep -Fq "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" <<<"$output"
           }
 
           GOOS=js GOARCH=wasm llgo build -o "$RUNNER_TEMP/runtime-js.wasm" ./internal/build/testdata/wasm-runtime

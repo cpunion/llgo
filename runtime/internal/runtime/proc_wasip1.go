@@ -32,11 +32,10 @@ type runtimeContextPlatform struct {
 }
 
 var wasmSched struct {
-	m          m
-	p          p
-	runq       runqueue.Queue[*g]
-	started    bool
-	mainExited bool
+	m       m
+	p       p
+	runq    runqueue.Queue[*g]
+	started bool
 }
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
@@ -84,6 +83,7 @@ func RunWasmMain() {
 		status := readgstatus(gp)
 		if gp.isMain && status == _Grunning {
 			casgstatus(gp, _Grunning, _Gdead)
+			releaseG()
 			releaseWasmContext(gp)
 			return
 		}
@@ -94,7 +94,8 @@ func RunWasmMain() {
 
 		gp = wasmSched.runq.Pop()
 		if gp == nil {
-			if wasmSched.mainExited {
+			_, mainExited := gStateForTesting()
+			if mainExited {
 				fatal("no goroutines (main called runtime.Goexit) - deadlock!")
 			} else {
 				fatal("all goroutines are asleep - deadlock!")
@@ -127,6 +128,7 @@ func releaseWasmOwnership(gp *g) {
 func newprocBackend(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr, callergp *g) {
 	gp := newproc1(fn, arg, callergp)
 	if !initWasmContext(gp, wasmcontext.Entry(wasmGStart), unsafe.Pointer(gp), stackSize) {
+		releaseG()
 		FreeRoot(arg)
 		freeRuntimeContext(gp.context)
 		panic("runtime: failed to allocate WebAssembly goroutine stack")
@@ -198,9 +200,7 @@ func goready(gp *g) {
 
 func goexitBackend(gp *g) {
 	casgstatus(gp, _Grunning, _Gdead)
-	if gp.isMain {
-		wasmSched.mainExited = true
-	}
+	releaseGAndCheckDeadlock()
 	gp.context.platform.context.Suspend()
 	fatal("runtime: resumed dead WebAssembly goroutine")
 }
