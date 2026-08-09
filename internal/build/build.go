@@ -608,6 +608,8 @@ func Build(inv Invocation) ([]Package, error) {
 	frontendOptions.PreloadedSyntax = true
 
 	output := conf.OutFile != ""
+	cTransformer := cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, true)
+	cTransformer.SetPreserveDebugPointerHomes(emitDebugInfo)
 	ctx := &context{conf: cfg, progSSA: progSSA, prog: prog, dedup: dedup,
 		patches: patches, callerTracking: cl.NewCallerTracking(),
 		built: make(map[string]none), initial: initial, mode: mode,
@@ -620,7 +622,7 @@ func Build(inv Invocation) ([]Package, error) {
 		crossCompile:    export,
 		commands:        commands,
 		frontendOptions: frontendOptions,
-		cTransformer:    cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, true),
+		cTransformer:    cTransformer,
 	}
 	defer ctx.closePackageMetas()
 	defer ctx.closePackageArchiveBuffers()

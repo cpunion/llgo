@@ -63,7 +63,12 @@ type Transformer struct {
 	sys      TypeInfoSys
 	mode     Mode
 	optimize bool
-	skipFns  map[string]struct{}
+	// preserveDebugPointerHomes keeps addressable homes for aggregate
+	// parameters whose debug location is represented by a dereferenced
+	// address. LLVM 19's Linux LLDB cannot reliably materialize such values
+	// from a by-reference ABI parameter after the home is RAUW'd.
+	preserveDebugPointerHomes bool
+	skipFns                   map[string]struct{}
 }
 
 func (p *Transformer) isCFunc(name string) bool {
@@ -79,6 +84,14 @@ func (p *Transformer) SetSkipFuncs(names []string) {
 		name = strings.TrimSpace(name)
 		p.skipFns[name] = struct{}{}
 	}
+}
+
+// SetPreserveDebugPointerHomes keeps aggregate parameter homes when debug
+// information is emitted. Scalar/short aggregate lowering remains optimized;
+// pointer-shaped ABI parameters retain their source home so all supported
+// LLDB targets can evaluate composite values consistently.
+func (p *Transformer) SetPreserveDebugPointerHomes(enabled bool) {
+	p.preserveDebugPointerHomes = enabled
 }
 
 func (p *Transformer) shouldSkipFunc(name string) bool {
@@ -447,7 +460,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			// store %typ %1, ptr %2, align 4
 			nv = b.CreateLoad(ti.Type, params[index], "")
 			// replace %0 to %2
-			if p.optimize {
+			if p.optimize && !p.preserveDebugPointerHomes {
 				replaceAllocaInstrs(fn.Param(i), params[index])
 			}
 		case AttrWidthType:
