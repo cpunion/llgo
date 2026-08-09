@@ -70,11 +70,22 @@ func (p DebugInfoPolicy) CanRetain() bool {
 	return p.Capability == DebugInfoRetainable
 }
 
+// driverDebugInfoPolicy describes a link performed through a clang-compatible
+// driver. The driver needs an explicit DWARF version while its linker flag
+// spelling uses -Wl,-S.
+func driverDebugInfoPolicy() DebugInfoPolicy {
+	return DebugInfoPolicy{
+		PreserveLinkFlags: []string{"-gdwarf-4"},
+		OmitLinkFlags:     []string{"-Wl,-S"},
+	}
+}
+
 func nativeDebugInfoPolicy(goos string) DebugInfoPolicy {
-	policy := DebugInfoPolicy{PreserveLinkFlags: []string{"-gdwarf-4"}}
-	switch goos {
-	case "darwin", "linux":
-		policy.OmitLinkFlags = []string{"-Wl,-S"}
+	policy := driverDebugInfoPolicy()
+	if goos != "darwin" && goos != "linux" {
+		// The driver still accepts the preserve flag, but these native targets
+		// do not have a supported omit-DWARF spelling.
+		policy.OmitLinkFlags = nil
 	}
 	return policy
 }
@@ -86,10 +97,14 @@ func targetDebugInfoPolicy(linker, llvmTarget string) DebugInfoPolicy {
 			return DebugInfoPolicy{OmitLinkFlags: []string{"-S"}}
 		}
 	case "wasm-ld":
+		// Use routes wasm/wasi names through the clang-driver path. Keep this
+		// direct wasm-ld policy for target-policy callers and tests.
 		if strings.HasPrefix(llvmTarget, "wasm") {
 			return DebugInfoPolicy{OmitLinkFlags: []string{"-S"}}
 		}
 	}
+	// Unknown linker/target pairs intentionally fail closed: without a known
+	// retention policy, generated DWARF must not be promised to callers.
 	return DebugInfoPolicy{Capability: DebugInfoUnavailable}
 }
 
@@ -362,10 +377,7 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 	if goarch != "wasm" {
 		return
 	}
-	export.DebugInfo = DebugInfoPolicy{
-		PreserveLinkFlags: []string{"-gdwarf-4"},
-		OmitLinkFlags:     []string{"-Wl,-S"},
-	}
+	export.DebugInfo = driverDebugInfoPolicy()
 
 	// Configure based on GOOS
 	switch goos {

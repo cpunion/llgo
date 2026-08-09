@@ -131,9 +131,10 @@ func dwarfLinkerArgs(conf *Config, target *crosscompile.Export) []string {
 	return slices.Clone(target.DebugInfo.OmitLinkFlags)
 }
 
-// dwarfPreserveLinkerArgs returns compiler-driver options needed while linking
-// a debug artifact. Direct linkers such as ld.lld retain input DWARF without a
-// corresponding flag, while clang-compatible drivers accept -gdwarf-4.
+// dwarfPreserveLinkerArgs returns options needed while linking a debug
+// artifact. Direct linker invocations retain input DWARF without a preserve
+// flag, while clang-driver invocations need -gdwarf-4; the invocation path,
+// rather than the linker executable name, determines the option.
 func dwarfPreserveLinkerArgs(conf *Config, target *crosscompile.Export) []string {
 	if !shouldEmitDebugInfo(conf, target) {
 		return nil
