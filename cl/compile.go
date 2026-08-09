@@ -74,6 +74,9 @@ type Options struct {
 	Trace        bool
 	ExportRename bool
 	ShadowStack  bool
+	// PreloadedSyntax means all Program-side source metadata was collected
+	// before lowering and is now shared read-only by backend Programs.
+	PreloadedSyntax bool
 }
 
 func legacyOptions() Options {
@@ -463,7 +466,40 @@ func makeClosureCtx(pkg *types.Package, vars []*ssa.FreeVar) *types.Var {
 		flds[i] = types.NewField(token.NoPos, pkg, name, v.Type(), false)
 	}
 	t := types.NewPointer(types.NewStruct(flds, nil))
-	return types.NewParam(token.NoPos, pkg, "__llgo_ctx", t)
+	return types.NewParam(token.NoPos, pkg, "$env", t)
+}
+
+// canElideZeroSizedClosureEnv reports whether a source closure can recreate
+// all of its captured variables from the module's zero-sized sentinel. Go SSA
+// represents a lexical capture as a pointer to the captured variable. Captured
+// zero-sized variables are heap allocated, and LLGo already gives every such
+// allocation the same permitted non-nil sentinel address.
+//
+// A non-synthetic function with a lexical parent is a source closure.
+// Synthetic wrappers are deliberately excluded: a zero-sized method receiver
+// can still carry a semantically significant nil/non-nil pointer value.
+func (p *context) canElideZeroSizedClosureEnv(f *ssa.Function) bool {
+	if f == nil || f.Parent() == nil || f.Synthetic != "" || len(f.FreeVars) == 0 {
+		return false
+	}
+	for _, freeVar := range f.FreeVars {
+		if !p.isElidableZeroSizedFreeVar(freeVar) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *context) isElidableZeroSizedFreeVar(freeVar *ssa.FreeVar) bool {
+	ptr, ok := types.Unalias(p.patchType(freeVar.Type())).Underlying().(*types.Pointer)
+	return ok && p.prog.SizeOf(p.type_(ptr.Elem(), llssa.InGo)) == 0
+}
+
+func (p *context) elidedZeroSizedFreeVar(b llssa.Builder, freeVar *ssa.FreeVar) llssa.Expr {
+	typ := p.type_(freeVar.Type(), llssa.InGo)
+	ptr := types.Unalias(p.patchType(freeVar.Type())).Underlying().(*types.Pointer)
+	addr := b.Alloc(p.type_(ptr.Elem(), llssa.InGo), true)
+	return b.Convert(typ, addr)
 }
 
 func isCgoExternSymbol(f *ssa.Function) bool {
@@ -582,20 +618,42 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	}
 
 	fn := pkg.FuncOf(name)
-	if fn != nil && fn.HasBody() {
-		return fn, nil, goFunc
+	hasFreeVars := len(f.FreeVars) > 0
+	elideFreeVarEnv := p.canElideZeroSizedClosureEnv(f)
+	hasExplicitEnv := false
+	// ParsePkgSyntax is the sole //llgo:env extractor. Lowering only consumes
+	// its source-declaration cache; imported env entries use NewEnvFunc.
+	if decl, ok := f.Syntax().(*ast.FuncDecl); ok {
+		fullName, _ := astFuncName(llssa.PathOf(pkgTypes), decl)
+		hasExplicitEnv = p.prog.HasClosureEnvDirective(p.goProg.Fset, fullName, decl.Pos())
 	}
-
-	var hasCtx = len(f.FreeVars) > 0
-	if hasCtx {
+	hasCtx := hasFreeVars && !elideFreeVarEnv || hasExplicitEnv
+	var ctx *types.Var
+	if elideFreeVarEnv {
+		dbgInstrln("==> NewZeroSizedClosure", name, "type:", sig)
+	} else if hasFreeVars {
 		dbgInstrln("==> NewClosure", name, "type:", sig)
-		ctx := makeClosureCtx(pkgTypes, f.FreeVars)
-		sig = llssa.FuncAddCtx(ctx, sig)
+		ctx = makeClosureCtx(pkgTypes, f.FreeVars)
+	} else if hasExplicitEnv {
+		dbgInstrln("==> NewEnvFunc", name, "type:", sig)
+		ctx = types.NewVar(token.NoPos, nil, "$env", types.Typ[types.UnsafePointer])
 	} else {
 		dbgInstrln("==> NewFunc", name, "type:", sig.Recv(), sig, "ftype:", ftype)
 	}
+	if fn != nil {
+		if fn.NeedsEnv() != hasCtx {
+			panic("conflicting closure environment ABI for " + name)
+		}
+		if fn.HasBody() {
+			return fn, nil, goFunc
+		}
+	}
 	if fn == nil {
-		fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), hasCtx, p.needsLinkOnce(f))
+		if hasCtx {
+			fn = pkg.NewEnvFunc(name, sig, llssa.Background(ftype), ctx, p.needsLinkOnce(f))
+		} else {
+			fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), false, p.needsLinkOnce(f))
+		}
 	}
 	noInlineDirective := hasNoInlineDirective(f)
 	runtimeStackNoInline := needsRuntimeStackNoInline(pkgTypes, f)
@@ -1254,6 +1312,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			b.DeferStackDrain()
 		}
 	case *ssa.BinOp:
+		if value, ok := foldConstComparison(v); ok {
+			ret = p.prog.BoolVal(value)
+			break
+		}
 		if isUntypedNilConst(v.X) && isUntypedNilConst(v.Y) {
 			switch v.Op {
 			case token.EQL:
@@ -1481,7 +1543,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		ret = b.MakeMap(t, nReserve)
 	case *ssa.MakeClosure:
 		fn := p.compileValue(b, v.Fn)
-		bindings := p.compileValues(b, v.Bindings, 0)
+		var bindings []llssa.Expr
+		goFn, _ := v.Fn.(*ssa.Function)
+		if !p.canElideZeroSizedClosureEnv(goFn) {
+			bindings = p.compileValues(b, v.Bindings, 0)
+		}
 		ret = b.MakeClosure(fn, bindings)
 	case *ssa.TypeAssert:
 		x := p.compileValue(b, v.X)
@@ -1623,6 +1689,20 @@ func isUntypedNilConst(v ssa.Value) bool {
 	}
 	basic, ok := c.Type().Underlying().(*types.Basic)
 	return ok && basic.Kind() == types.UntypedNil
+}
+
+func foldConstComparison(v *ssa.BinOp) (bool, bool) {
+	switch v.Op {
+	case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+	default:
+		return false, false
+	}
+	x, xok := v.X.(*ssa.Const)
+	y, yok := v.Y.(*ssa.Const)
+	if !xok || !yok || x.Value == nil || y.Value == nil {
+		return false, false
+	}
+	return constant.Compare(x.Value, v.Op, y.Value), true
 }
 
 func (p *context) nilOf(typ types.Type) llssa.Expr {
@@ -1873,6 +1953,9 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		fn := v.Parent()
 		for idx, freeVar := range fn.FreeVars {
 			if freeVar == v {
+				if p.canElideZeroSizedClosureEnv(fn) {
+					return p.elidedZeroSizedFreeVar(b, v)
+				}
 				return p.fn.FreeVar(b, idx)
 			}
 		}
@@ -2151,8 +2234,10 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		pkg.Pkg = pkgTypes
 		patch.Alt.Pkg = pkgTypes
 	}
-	if err = ParsePkgSyntax(prog, pkgProg.Fset, pkgTypes, files); err != nil {
-		return nil, nil, err
+	if !options.PreloadedSyntax {
+		if err = ParsePkgSyntaxWithOptions(prog, pkgProg.Fset, pkgTypes, files, options); err != nil {
+			return nil, nil, err
+		}
 	}
 	if err = prog.ValidateLocalitiesFor(pkgTypes); err != nil {
 		return nil, nil, err

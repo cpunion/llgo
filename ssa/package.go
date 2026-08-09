@@ -23,7 +23,6 @@ import (
 	"log"
 	"runtime"
 	"strconv"
-	"sync"
 	"unsafe"
 
 	"github.com/goplus/llgo/internal/env"
@@ -221,12 +220,10 @@ type aProgram struct {
 
 	printfTy *types.Signature
 
-	paramObjPtr_ *types.Var
-	linknameMu   sync.RWMutex
-	linkname     map[string]string // pkgPath.nameInPkg => linkname
-	localities   *localityInfos
-	noInterface  map[string]none       // pkgPath.T.method or pkgPath.(*T).method
-	abiSymbol    map[string]*AbiSymbol // abi symbol name => AbiSymbol
+	paramObjPtr_  *types.Var
+	packageSyntax *packageSyntaxData
+	localities    *localityInfos
+	abiSymbol     map[string]*AbiSymbol // abi symbol name => AbiSymbol
 
 	ptrSize int
 
@@ -311,16 +308,45 @@ func NewProgram(target *Target) Program {
 		ctx.Finalize()
 	*/
 	is32Bits := (td.PointerSize() == 4 || is32Bits(target.GOARCH))
+	packageSyntax := newPackageSyntaxData()
 	prog := &aProgram{
-		ctx: ctx, gocvt: newGoTypes(),
+		ctx: ctx, gocvt: newGoTypes(packageSyntax),
 		target: target, td: td, tm: tm, is32Bits: is32Bits,
 		ptrSize: td.PointerSize(), named: make(map[string]Type), fnnamed: make(map[string]int),
-		linkname: make(map[string]string), localities: newLocalityInfos(),
-		noInterface: make(map[string]none), abiSymbol: make(map[string]*AbiSymbol),
+		packageSyntax: packageSyntax, localities: newLocalityInfos(),
+		abiSymbol:          make(map[string]*AbiSymbol),
 		debugInfoOptimized: target.effectiveOptLevel() != optlevel.O0,
 	}
 	prog.abi.Init(uintptr(prog.ptrSize), (*goProgram)(unsafe.Pointer(prog)))
 	return prog
+}
+
+// NewBackendProgram creates a Program with fresh LLVM-owned state and the same
+// build configuration as p. Go-side package syntax and locality metadata are
+// shared directly; callers must finish preparing them before backend Programs
+// are created and use them read-only afterwards.
+func (p Program) NewBackendProgram() Program {
+	var target *Target
+	if p.target != nil {
+		targetCopy := *p.target
+		target = &targetCopy
+	}
+	backend := NewProgram(target)
+	backend.sizes = p.sizes
+	backend.rt, backend.rtget = p.rt, p.rtget
+	backend.py, backend.pyget = p.py, p.pyget
+	backend.packageSyntax = p.packageSyntax
+	backend.gocvt.packageSyntax = p.packageSyntax
+	backend.localities = p.localities
+	backend.enableGoGlobalDCE = p.enableGoGlobalDCE
+	backend.enableDeadcodeDrop = p.enableDeadcodeDrop
+	backend.disableBoundsChecks = p.disableBoundsChecks
+	backend.pthreadStackSize = p.pthreadStackSize
+	backend.enableLTOPluginMarker = p.enableLTOPluginMarker
+	backend.enableFuncInfoMetadata = p.enableFuncInfoMetadata
+	backend.enableFuncInfoSites = p.enableFuncInfoSites
+	backend.debugInfoOptimized = p.debugInfoOptimized
+	return backend
 }
 
 func (p Program) Target() *Target {
@@ -381,8 +407,16 @@ func (p Program) EnableLTOPluginMarkers(enable bool) {
 	p.enableLTOPluginMarker = enable
 }
 
+// SetDebugInfoOptimized records whether DWARF should mark generated code as
+// optimized. It never selects compiler passes.
+func (p Program) SetDebugInfoOptimized(enable bool) {
+	p.debugInfoOptimized = enable
+}
+
 func (p Program) SetNoInterfaceMethod(fullName string) {
-	p.noInterface[fullName] = none{}
+	p.packageSyntax.mu.Lock()
+	p.packageSyntax.noInterface[fullName] = none{}
+	p.packageSyntax.mu.Unlock()
 }
 
 func (p Program) isNoInterfaceMethod(fn *types.Func) bool {
@@ -393,7 +427,9 @@ func (p Program) isNoInterfaceMethod(fn *types.Func) bool {
 	if !ok || sig.Recv() == nil {
 		return false
 	}
-	_, ok = p.noInterface[FuncName(fn.Pkg(), fn.Name(), sig.Recv(), true)]
+	p.packageSyntax.mu.RLock()
+	_, ok = p.packageSyntax.noInterface[FuncName(fn.Pkg(), fn.Name(), sig.Recv(), true)]
+	p.packageSyntax.mu.RUnlock()
 	return ok
 }
 
@@ -409,20 +445,48 @@ func (p Program) SetRuntime(runtime any) {
 }
 
 func (p Program) SetTypeBackground(fullName string, bg Background) {
-	p.gocvt.typbg.Store(fullName, bg)
+	p.packageSyntax.mu.Lock()
+	p.packageSyntax.typeBackgrounds[fullName] = bg
+	p.packageSyntax.mu.Unlock()
 }
 
 func (p Program) SetLinkname(name, link string) {
-	p.linknameMu.Lock()
-	p.linkname[name] = link
-	p.linknameMu.Unlock()
+	p.packageSyntax.mu.Lock()
+	p.packageSyntax.linknames[name] = link
+	p.packageSyntax.mu.Unlock()
 }
 
 func (p Program) Linkname(name string) (link string, ok bool) {
-	p.linknameMu.RLock()
-	link, ok = p.linkname[name]
-	p.linknameMu.RUnlock()
+	p.packageSyntax.mu.RLock()
+	link, ok = p.packageSyntax.linknames[name]
+	p.packageSyntax.mu.RUnlock()
 	return
+}
+
+type closureEnvDirectiveKey struct {
+	fset *token.FileSet
+	name string
+	pos  token.Pos
+}
+
+// SetClosureEnvDirective records that a source function declaration has the
+// llgo:env directive. name and pos identify the source declaration rather
+// than its resolved linker symbol, so aliases retain independent ABI metadata.
+func (p Program) SetClosureEnvDirective(fset *token.FileSet, name string, pos token.Pos) {
+	key := closureEnvDirectiveKey{fset: fset, name: name, pos: pos}
+	p.packageSyntax.mu.Lock()
+	p.packageSyntax.closureEnvDirectives[key] = none{}
+	p.packageSyntax.mu.Unlock()
+}
+
+// HasClosureEnvDirective reports whether a source function declaration has the
+// cached llgo:env directive.
+func (p Program) HasClosureEnvDirective(fset *token.FileSet, name string, pos token.Pos) bool {
+	key := closureEnvDirectiveKey{fset: fset, name: name, pos: pos}
+	p.packageSyntax.mu.RLock()
+	_, ok := p.packageSyntax.closureEnvDirectives[key]
+	p.packageSyntax.mu.RUnlock()
+	return ok
 }
 
 func (p Program) runtime() *types.Package {
@@ -900,6 +964,21 @@ func (p Package) rtFunc(fnName string) Expr {
 	return p.NewFunc(name, sig, InGo).Expr
 }
 
+// rtEnvFunc returns a runtime entry whose source-level signature excludes its
+// compiler-owned environment. Runtime type algorithms use this form when a
+// type descriptor supplies the hidden type context.
+func (p Package) rtEnvFunc(fnName string) Expr {
+	p.NeedRuntime = true
+	fn := p.Prog.runtime().Scope().Lookup(fnName).(*types.Func)
+	name := FullName(fn.Pkg(), fnName)
+	if p.fnlink != nil {
+		name = p.fnlink(name)
+	}
+	sig := fn.Type().(*types.Signature)
+	env := types.NewVar(token.NoPos, nil, "$env", types.Typ[types.UnsafePointer])
+	return p.NewEnvFunc(name, sig, InGo, env, false).Expr
+}
+
 // RuntimeFunc returns a declaration for a function in LLGo's internal runtime.
 func (p Package) RuntimeFunc(fnName string) Expr {
 	return p.rtFunc(fnName)
@@ -907,30 +986,6 @@ func (p Package) RuntimeFunc(fnName string) Expr {
 
 func (p Package) cFunc(fullName string, sig *types.Signature) Expr {
 	return p.NewFunc(fullName, sig, InC).Expr
-}
-
-const (
-	closureCtx  = "__llgo_ctx"
-	closureStub = "__llgo_stub."
-)
-
-// closureStub creates or reuses a wrapper for function values that lack closure ctx.
-// It stays on Package to match the original placement of closure stubs.
-func (p Package) closureStub(b Builder, fn Expr, sig *types.Signature, origKind valueKind) (Expr, Expr) {
-	prog := b.Prog
-	switch origKind {
-	case vkFuncDecl:
-		wrap := p.closureWrapDecl(fn, sig)
-		return wrap.Expr, prog.Nil(prog.VoidPtr())
-	case vkFuncPtr:
-		wrap := p.closureWrapPtr(sig)
-		ptr := b.AllocU(prog.rawType(sig))
-		b.Store(ptr, fn)
-		data := b.Convert(prog.VoidPtr(), ptr)
-		return wrap.Expr, data
-	default:
-		return fn, prog.Nil(prog.VoidPtr())
-	}
 }
 
 // -----------------------------------------------------------------------------

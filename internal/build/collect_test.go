@@ -135,6 +135,52 @@ func TestCollectFingerprintDeterminism(t *testing.T) {
 	}
 }
 
+func TestDisablePackageCache(t *testing.T) {
+	ctx := &context{}
+	ctx.disablePackageCache(map[string]bool{
+		"example.com/a": true,
+		"example.com/b": false,
+	})
+
+	for _, id := range []string{"example.com/a", "example.com/b"} {
+		if !ctx.packageCacheDisabled(id) {
+			t.Fatalf("package cache for %q remains enabled", id)
+		}
+	}
+	if ctx.packageCacheDisabled("example.com/c") {
+		t.Fatal("unlisted package cache was disabled")
+	}
+}
+
+func TestDisabledPackageCacheSkipsLoadAndSave(t *testing.T) {
+	t.Setenv(llgoBuildCache, "1")
+	pkg := &aPackage{Package: &packages.Package{ID: "example.com/disabled", PkgPath: "example.com/disabled"}}
+	ctx := &context{buildConf: &Config{}, cacheDisabled: map[string]none{pkg.ID: {}}}
+	if ctx.tryLoadFromCache(pkg) {
+		t.Fatal("tryLoadFromCache loaded a disabled package")
+	}
+	if err := ctx.saveToCache(pkg); err != nil {
+		t.Fatalf("saveToCache disabled package: %v", err)
+	}
+
+	ctx.cacheDisabled = nil
+	ctx.buildConf.BuildMode = BuildModeCArchive
+	if ctx.tryLoadFromCache(pkg) {
+		t.Fatal("tryLoadFromCache loaded a C archive package")
+	}
+}
+
+func TestCollectFingerprintDisablesCycles(t *testing.T) {
+	pkg := &aPackage{Package: &packages.Package{ID: "example.com/cycle", PkgPath: "example.com/cycle"}}
+	ctx := &context{fingerprinting: map[string]bool{pkg.ID: true}}
+	if err := ctx.collectFingerprint(pkg); err != nil {
+		t.Fatal(err)
+	}
+	if !ctx.packageCacheDisabled(pkg.ID) {
+		t.Fatal("fingerprint cycle did not disable package cache")
+	}
+}
+
 func TestCollectFingerprintIncludesEmitDWARF(t *testing.T) {
 	td := t.TempDir()
 	goFile := filepath.Join(td, "main.go")
@@ -186,7 +232,7 @@ func TestCollectFingerprintIncludesEmitDWARF(t *testing.T) {
 	}
 
 	targetWithoutDWARF := newPkg()
-	if err := newContext(LinkOptions{}, crosscompile.DebugInfoPolicy{AlwaysOmit: true}).collectFingerprint(targetWithoutDWARF); err != nil {
+	if err := newContext(LinkOptions{}, crosscompile.DebugInfoPolicy{Capability: crosscompile.DebugInfoUnavailable}).collectFingerprint(targetWithoutDWARF); err != nil {
 		t.Fatal(err)
 	}
 	if withDWARF.Fingerprint == targetWithoutDWARF.Fingerprint {
@@ -197,7 +243,7 @@ func TestCollectFingerprintIncludesEmitDWARF(t *testing.T) {
 		t.Fatal(err)
 	}
 	if targetData.Common != nil && targetData.Common.EmitDWARF {
-		t.Fatalf("always-omit target manifest unexpectedly contains EMIT_DWARF=true:\n%s", targetWithoutDWARF.Manifest)
+		t.Fatalf("target without DWARF support unexpectedly contains EMIT_DWARF=true:\n%s", targetWithoutDWARF.Manifest)
 	}
 }
 

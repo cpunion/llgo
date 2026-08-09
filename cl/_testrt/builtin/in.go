@@ -9,9 +9,7 @@ import (
 // CHECK: {{^}}@1 = private unnamed_addr constant [3 x i8] c"def", align 1{{$}}
 // CHECK: {{^}}@3 = private unnamed_addr constant [4 x i8] c"ABCD", align 1{{$}}
 // CHECK: {{^}}@4 = private unnamed_addr constant [7 x i8] c"\E4\B8\ADabcd", align 1{{$}}
-// CHECK: {{^}}@5 = private unnamed_addr constant [3 x i8] c"abc", align 1{{$}}
-// CHECK: {{^}}@6 = private unnamed_addr constant [3 x i8] c"abd", align 1{{$}}
-// CHECK: {{^}}@7 = private unnamed_addr constant [2 x i8] c"fn", align 1{{$}}
+// CHECK: {{^}}@5 = private unnamed_addr constant [2 x i8] c"fn", align 1{{$}}
 
 var a int64 = 1<<63 - 1
 var b int64 = -1 << 63
@@ -266,7 +264,7 @@ func demo() {
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
 // CHECK-NEXT:   %89 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 16)
 // CHECK-NEXT:   %90 = getelementptr inbounds { ptr, ptr }, ptr %89, i64 0
-// CHECK-NEXT:   store { ptr, ptr } { ptr @"__llgo_stub.main.main$1", ptr null }, ptr %90, align 8
+// CHECK-NEXT:   store { ptr, ptr } { ptr @"main.main$1", ptr null }, ptr %90, align 8
 // CHECK-NEXT:   %91 = insertvalue %"{{.*}}/runtime/internal/runtime.Slice" undef, ptr %89, 0
 // CHECK-NEXT:   %92 = insertvalue %"{{.*}}/runtime/internal/runtime.Slice" %91, i64 1, 1
 // CHECK-NEXT:   %93 = insertvalue %"{{.*}}/runtime/internal/runtime.Slice" %92, i64 1, 2
@@ -432,29 +430,19 @@ func demo() {
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 32)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintString"(%"{{.*}}/runtime/internal/runtime.String" %165)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
-// CHECK-NEXT:   %166 = call i1 @"{{.*}}/runtime/internal/runtime.StringEqual"(%"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 3 }, %"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 3 })
-// CHECK-NEXT:   %167 = call i1 @"{{.*}}/runtime/internal/runtime.StringEqual"(%"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 3 }, %"{{.*}}/runtime/internal/runtime.String" { ptr @6, i64 3 })
-// CHECK-NEXT:   %168 = call i1 @"{{.*}}/runtime/internal/runtime.StringEqual"(%"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 3 }, %"{{.*}}/runtime/internal/runtime.String" { ptr @6, i64 3 })
-// CHECK-NEXT:   %169 = xor i1 %168, true
-// CHECK-NEXT:   %170 = call i1 @"{{.*}}/runtime/internal/runtime.StringLess"(%"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 3 }, %"{{.*}}/runtime/internal/runtime.String" { ptr @6, i64 3 })
-// CHECK-NEXT:   %171 = call i1 @"{{.*}}/runtime/internal/runtime.StringLess"(%"{{.*}}/runtime/internal/runtime.String" { ptr @6, i64 3 }, %"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 3 })
-// CHECK-NEXT:   %172 = xor i1 %171, true
-// CHECK-NEXT:   %173 = call i1 @"{{.*}}/runtime/internal/runtime.StringLess"(%"{{.*}}/runtime/internal/runtime.String" { ptr @6, i64 3 }, %"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 3 })
-// CHECK-NEXT:   %174 = call i1 @"{{.*}}/runtime/internal/runtime.StringLess"(%"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 3 }, %"{{.*}}/runtime/internal/runtime.String" { ptr @6, i64 3 })
-// CHECK-NEXT:   %175 = xor i1 %174, true
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %166)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 true)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 32)
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %167)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 false)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 32)
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %169)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 true)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 32)
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %170)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 true)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 32)
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %172)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 true)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 32)
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %173)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 false)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 32)
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %175)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 false)
 // CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
@@ -496,7 +484,7 @@ func main() {
 
 	// CHECK-LABEL: define void @"main.main$2"(){{.*}} {
 	// CHECK-NEXT: _llgo_0:
-	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintString"(%"{{.*}}/runtime/internal/runtime.String" { ptr @7, i64 2 })
+	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintString"(%"{{.*}}/runtime/internal/runtime.String" { ptr @5, i64 2 })
 	// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
 	// CHECK-NEXT:   ret void
 	// CHECK-NEXT: }
@@ -505,7 +493,7 @@ func main() {
 		println("fn")
 	}
 
-	// CHECK-LABEL: define void @"main.main$3"(ptr %0){{.*}} {
+	// CHECK-LABEL: define void @"main.main$3"(ptr {{(nest|swiftself)}} %0){{.*}} {
 	// CHECK-NEXT: _llgo_0:
 	// CHECK-NEXT:   %1 = load { ptr }, ptr %0, align 8
 	// CHECK-NEXT:   %2 = extractvalue { ptr } %1, 0
@@ -534,15 +522,3 @@ func main() {
 	s2 := "abd"
 	println(s1 == "abc", s1 == s2, s1 != s2, s1 < s2, s1 <= s2, s1 > s2, s1 >= s2)
 }
-
-// CHECK-LABEL: define linkonce void @"__llgo_stub.main.main$1"(ptr %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   tail call void @"main.main$1"()
-// CHECK-NEXT:   ret void
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define linkonce i1 @"__llgo_stub.{{.*}}/runtime/internal/runtime.memequal64"(ptr %0, ptr %1, ptr %2){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %3 = tail call i1 @"{{.*}}/runtime/internal/runtime.memequal64"(ptr %1, ptr %2)
-// CHECK-NEXT:   ret i1 %3
-// CHECK-NEXT: }

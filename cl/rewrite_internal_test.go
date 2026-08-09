@@ -27,6 +27,19 @@ func init() {
 }
 
 func compileWithRewrites(t *testing.T, src string, rewrites map[string]string) string {
+	return compileWithRewritesTarget(t, src, rewrites, nil)
+}
+
+func compileWithRewritesTarget(t *testing.T, src string, rewrites map[string]string, target *llssa.Target) string {
+	return compileWithRewritesModeTarget(t, src, rewrites,
+		ssa.SanityCheckFunctions|ssa.InstantiateGenerics, target)
+}
+
+func compileWithRewritesMode(t *testing.T, src string, rewrites map[string]string, mode ssa.BuilderMode) string {
+	return compileWithRewritesModeTarget(t, src, rewrites, mode, nil)
+}
+
+func compileWithRewritesModeTarget(t *testing.T, src string, rewrites map[string]string, mode ssa.BuilderMode, target *llssa.Target) string {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "rewrite.go", src, parser.ParseComments)
@@ -34,19 +47,93 @@ func compileWithRewrites(t *testing.T, src string, rewrites map[string]string) s
 		t.Fatalf("parse failed: %v", err)
 	}
 	importer := gpackages.NewImporter(fset)
-	mode := ssa.SanityCheckFunctions | ssa.InstantiateGenerics
 	pkg, _, err := ssautil.BuildPackage(&types.Config{Importer: importer}, fset,
 		types.NewPackage(file.Name.Name, file.Name.Name), []*ast.File{file}, mode)
 	if err != nil {
 		t.Fatalf("build package failed: %v", err)
 	}
-	prog := ssatest.NewProgramEx(t, nil, importer)
-	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	prog := ssatest.NewProgramEx(t, target, importer)
+	goarch := runtime.GOARCH
+	if target != nil && target.GOARCH != "" {
+		goarch = target.GOARCH
+	}
+	prog.TypeSizes(types.SizesFor("gc", goarch))
 	ret, _, err := NewPackageEx(prog, nil, rewrites, pkg, []*ast.File{file})
 	if err != nil {
 		t.Fatalf("NewPackageEx failed: %v", err)
 	}
 	return ret.String()
+}
+
+func TestClosureEnvIntrinsicRequiresEnvBearingEntry(t *testing.T) {
+	valid := `package closureenv
+
+import "unsafe"
+
+//go:linkname closureEnv llgo.closureEnv
+func closureEnv() unsafe.Pointer
+
+DIRECTIVE
+func use() unsafe.Pointer { return closureEnv() }
+`
+	for _, spelling := range []string{"//llgo:env", "// llgo:env"} {
+		t.Run(spelling, func(t *testing.T) {
+			ir := compileWithRewrites(t, strings.Replace(valid, "DIRECTIVE", spelling, 1), nil)
+			if !strings.Contains(ir, `define ptr @closureenv.use(ptr `) ||
+				!strings.Contains(ir, `ret ptr %0`) ||
+				(!strings.Contains(ir, `ptr nest %0`) && !strings.Contains(ir, `ptr swiftself %0`)) {
+				t.Fatalf("closureEnv intrinsic did not return the physical environment:\n%s", ir)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "plain entry",
+			src: `package closureenv
+import "unsafe"
+//go:linkname closureEnv llgo.closureEnv
+func closureEnv() unsafe.Pointer
+func use() unsafe.Pointer { return closureEnv() }
+`,
+		},
+		{
+			name: "arguments",
+			src: `package closureenv
+import "unsafe"
+//go:linkname closureEnv llgo.closureEnv
+func closureEnv(int) unsafe.Pointer
+//llgo:env
+func use() unsafe.Pointer { return closureEnv(1) }
+`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mustPanic(t, "invalid closureEnv intrinsic", func() {
+				compileWithRewrites(t, test.src, nil)
+			})
+		})
+	}
+}
+
+func TestClosureEnvRejectsConflictingEntryABI(t *testing.T) {
+	const src = `package closureenv
+
+import _ "unsafe"
+
+//go:linkname plain closureenv.entry
+func plain() {}
+
+//go:linkname withEnv closureenv.entry
+//llgo:env
+func withEnv() {}
+`
+	mustPanic(t, "conflicting closure environment ABI", func() {
+		compileWithRewrites(t, src, nil)
+	})
 }
 
 func assertNoStoreToGlobal(t *testing.T, ir, global string) {
@@ -152,6 +239,75 @@ func Use() callbackType { return CallbackTypes[1] }
 	assertNoStoreToGlobal(t, ir, "@staticinit.CallbackTypes")
 	if strings.Contains(ir, "runtime.AllocZ") {
 		t.Fatalf("static slice initializer still allocates at runtime:\n%s", ir)
+	}
+}
+
+func TestStaticGlobalSliceLiteralInitWithDebugRefs(t *testing.T) {
+	const src = `package staticinit
+
+var CallbackTypes = []string{"BeforeCreate", "AfterCreate"}
+
+func Use() string { return CallbackTypes[1] }
+`
+	ir := compileWithRewritesMode(t, src, nil,
+		ssa.SanityCheckFunctions|ssa.InstantiateGenerics|ssa.GlobalDebug)
+	for _, want := range []string{
+		`@"staticinit.CallbackTypes$data" = global [2 x %"github.com/goplus/llgo/runtime/internal/runtime.String"]`,
+		`@staticinit.CallbackTypes = global %"github.com/goplus/llgo/runtime/internal/runtime.Slice" { ptr @"staticinit.CallbackTypes$data", i64 2, i64 2 }`,
+		`c"BeforeCreate"`,
+		`c"AfterCreate"`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("missing static slice initializer %q with debug refs:\n%s", want, ir)
+		}
+	}
+	assertNoStoreToGlobal(t, ir, "@staticinit.CallbackTypes")
+	if strings.Contains(ir, "runtime.AllocZ") {
+		t.Fatalf("static slice initializer allocates at runtime with debug refs:\n%s", ir)
+	}
+}
+
+func TestStaticSliceInitRejectsExecutableReferrers(t *testing.T) {
+	const src = `package foo
+
+var Values []int
+
+func useSlice([]int) {}
+func usePointer(*int) {}
+
+func sliceUser() {
+	backing := [2]int{1, 2}
+	values := backing[:]
+	Values = values
+	useSlice(values)
+}
+
+func elementUser() {
+	var backing [2]int
+	elem := &backing[0]
+	*elem = 1
+	usePointer(elem)
+	Values = backing[:]
+}
+`
+	ssapkg := buildSSAPackage(t, src)
+	global := ssapkg.Members["Values"].(*ssa.Global)
+	for _, name := range []string{"sliceUser", "elementUser"} {
+		fn := ssapkg.Func(name)
+		var globalStore *ssa.Store
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if store, ok := instr.(*ssa.Store); ok && store.Addr == global {
+					globalStore = store
+				}
+			}
+		}
+		if globalStore == nil {
+			t.Fatalf("%s: store to Values not found", name)
+		}
+		if _, ok := staticSliceInitOf(globalStore); ok {
+			t.Fatalf("%s: static slice init accepted an executable referrer", name)
+		}
 	}
 }
 
