@@ -94,6 +94,10 @@ func (p *Transformer) SetPreserveDebugPointerHomes(enabled bool) {
 	p.preserveDebugPointerHomes = enabled
 }
 
+func (p *Transformer) shouldReplaceParameterHome(kind AttrKind) bool {
+	return p.optimize && !(p.preserveDebugPointerHomes && kind == AttrPointer)
+}
+
 func (p *Transformer) shouldSkipFunc(name string) bool {
 	if name == "" || len(p.skipFns) == 0 {
 		return false
@@ -460,7 +464,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			// store %typ %1, ptr %2, align 4
 			nv = b.CreateLoad(ti.Type, params[index], "")
 			// replace %0 to %2
-			if p.optimize && !p.preserveDebugPointerHomes {
+			if p.shouldReplaceParameterHome(ti.Kind) {
 				replaceAllocaInstrs(fn.Param(i), params[index])
 			}
 		case AttrWidthType:

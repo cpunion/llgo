@@ -75,3 +75,25 @@ func TestReplaceAllocaInstrsUpdatesDebugDeclare(t *testing.T) {
 		t.Fatalf("executable alloca use did not follow the ABI home:\n%s", ir)
 	}
 }
+
+func TestPreserveDebugPointerHomesPolicy(t *testing.T) {
+	tr := &Transformer{optimize: true}
+	tests := []struct {
+		name      string
+		preserve  bool
+		kind      AttrKind
+		replaceOK bool
+	}{
+		{name: "optimized pointer", kind: AttrPointer, replaceOK: true},
+		{name: "debug pointer", preserve: true, kind: AttrPointer},
+		{name: "debug scalar", preserve: true, kind: AttrWidthType, replaceOK: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tr.SetPreserveDebugPointerHomes(tc.preserve)
+			if got := tr.shouldReplaceParameterHome(tc.kind); got != tc.replaceOK {
+				t.Fatalf("shouldReplaceParameterHome(%v) = %v, want %v", tc.kind, got, tc.replaceOK)
+			}
+		})
+	}
+}
