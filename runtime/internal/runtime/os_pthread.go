@@ -66,6 +66,7 @@ func initThreadAttr(attr *pthread.Attr, stackSize uintptr) c.Int {
 }
 
 func goexitBackend(gp *g) {
+	leaveCurrentLocalContext()
 	mexit(gp.m)
 	pthread.Exit(nil)
 }

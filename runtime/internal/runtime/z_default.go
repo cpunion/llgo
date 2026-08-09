@@ -36,7 +36,6 @@ func Rethrow(link *Defer) {
 		if gp.isMain {
 			markMainExited()
 		}
-		leaveCurrentLocalContext()
 		goexitBackend(gp)
 	}
 }
