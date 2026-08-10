@@ -2464,7 +2464,13 @@ func validateCoroExplicitStatusPanicInterfaceCallResult(
 }
 
 func isCoroProgramManagedEntry(fn *ssa.Function) bool {
-	if fn == nil {
+	// A source method may legally be named init (container/ring has one), but
+	// only package-owned top-level functions participate in program bootstrap.
+	// Bind this classification to the SSA owner and receiver shape before using
+	// the reserved source spelling; name-only classification turns an ordinary
+	// library method into a scheduler root when that package is compiled alone.
+	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Parent() != nil ||
+		fn.Signature == nil || fn.Signature.Recv() != nil {
 		return false
 	}
 	name := fn.Name()
