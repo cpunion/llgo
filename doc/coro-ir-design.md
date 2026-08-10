@@ -68,6 +68,7 @@ ProgramModelBuilder fixed point
 - 重写 runtime 或 `internal/coro` 固定点不会解决上述问题，风险反而更大。
 - 新设计可以成为后续 defer/panic/recover、dynamic coroutine descriptor、syscall/IO、精确 GC metadata 和多平台 adapter 的公共编译器底座；但它本身不会自动补齐这些尚未实现的能力。
 - 当前代码已从native single-P vertical slice推进到Linux/Darwin固定8-route owner fleet：command M驱动route 1，其余7个route由独立pthread M驱动；C边界只传稳定`uint32` M slot。环境/online CPU初始化逻辑execution quota，标准`runtime.GOMAXPROCS`可在运行期调整managed resume并行上限而不重建route/source identity。1/4/8 route core生命周期、固定topology下单配额channel progress、8 P真实peer start/distribute/stop/join及1→4→1并发上限变化已通过。`LockOSThread`同M阻塞使用8-byte无指针`ExecutionDomainHandoff`、M-local `ExecutorResumeHandoff`、初始8项inline、其余64项稳定分页的10,000 logical-slot M目录和每route active slot完成同P replacement；replacement复用原P/driver/source及公共reducer，原M在C返回后确认exact current lineage已Returned，再把raw M放入有界8项standby缓存或在溢出时strong join；C factory仅为实际pthread分配record并使用永不复用的单调token，最后精确restore。统一physical-thread ledger覆盖program、factory、worker、peer、replacement/successor及standby，标准`runtime/debug.SetMaxThreads`已按Go返回旧值、MaxInt32 clamp和低于live即fatal语义接入。未解锁G退出又以Action retire bit、clean factory和scalar successor lineage覆盖program/peer/replacement M，main-return遇不可取消locked C会按进程语义退出。单配额同route channel、timer、真实socket poll、M0→M1→M2 nested、三类retirement、14线程上限连续replacement及标准库`SetMaxThreads` E2E均通过，且不增加G/P布局。Command root又以不增加G大小的一字节mobility保持program-P边界，peer→program反向spawn/main-return E2E通过。此前双owner配置上的loopback TCP已fresh compile-link-run并完成10,000次压力；普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP也在同一fleet acceptance中通过。2026-07-25扩展后的网络门又在native、`wasm-unknown`和`wasip2`运行通过动态read/write/accept deadline、Close取消、Dial timeout/context cancel、UDP RecvFrom/SendTo和RecvMsg/SendMsg，以及pure-Go hosts/DNS解析。新增网络verb没有修改compiler effect、executor或source状态机。重复启动跨route channel/select fixture仍暴露既有generic reducer invalid-stop竞态：未修改基线与本实现各直跑1,000次的失败率分别为5.8%和5.3%，因此它不是standby/线程账本回归，但仍是下一项必须关闭的core gate。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：callback/reentry shutdown矩阵、panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、完整affinity、自动cgroup/affinity默认值刷新、外部DNS/cgo resolver、Unix/raw socket和其他平台内建driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
+- 2026-08-10补充：普通locked G的`Yield`、channel/timer `Park`和compiler-poll preempt均已走pinned queue与同P replacement；长循环peer被poll打断后，原G在同一物理M恢复。该证据关闭native普通locked suspend缺口，但不外推为跨target affinity或callback/reentry完整语义。
 - 2026-07-27更新：上一条的5.8%/5.3% gate及随后捕获的低概率`coroRunSlice` Invalid均已关闭。
   第一处根因是strong shutdown可保留已commit的channel物理效果、同时把Go continuation逻辑
   取消；typed cleanup现将physical status与logical delivery正交表示，并只为Canceled决议开放
@@ -672,7 +673,7 @@ type OperationRecipe struct {
 | GC | 单executor conservative纵向闭环 | `wasip1-gc`通过static P/G→整块LLVM frame保守扫描及native-stack scrub后的forced-GC suspended child；仍缺precise/moving map、多executor STW/barrier、weak/finalizer |
 | race detector | 必须原型验证工具ABI | scheduler/channel/source happens-before instrumentation |
 | runtime.Caller/Stack/pprof | 必须原型验证logical/native stack合成 | logical frame descriptor和post-CoroSplit debug metadata |
-| LockOSThread/entersyscall | Native exact G→M/P lock、同M foreign call的active-resume detach/restore、generation-bound同P replacement lineage、sticky cancellation、有界standby M、统一`SetMaxThreads`账本、未解锁退出的clean-M succession及main-return blocked-M进程终止已完成 | callback/reentry与完整entersyscall/exitsyscall矩阵 |
+| LockOSThread/entersyscall | Native exact G→M/P lock、同M foreign call的active-resume detach/restore、generation-bound同P replacement lineage、普通locked Yield/Park/compiler-preempt、sticky cancellation、有界standby M、统一`SetMaxThreads`账本、未解锁退出的clean-M succession及main-return blocked-M进程终止已完成 | 跨target affinity、callback/reentry与完整entersyscall/exitsyscall矩阵 |
 | init/main/host export | 当前仅受限bootstrap | versioned root/boundary lifecycle与各平台driver |
 
 这张表只说明窄 IR 有位置表达问题，不能证明所有语言特性最终可行。当前没有发现“无栈 coroutine + Go 源码同步调用风格”本身的否定证据，但 panic/unwind、logical stack/tooling、GC、cgo reentry 和 affinity 必须由独立原型验证。最重的剩余工作集中在：
@@ -681,7 +682,7 @@ type OperationRecipe struct {
 - open-world archive下的完整动态 function descriptor、interface 与跨平台 reflect；
 - 精确 GC frame metadata；
 - syscall/netpoll/worker已在native双owner TCP链闭环，仍需更广`os`/`net`/syscall、容量/取消/GC合同和高连接数backend；
-- 零/单Timer、Manual、Poll、Worker以及Channel/select、HostOp deadline、keyed/private-registry parked-result已能物化到pointer-free frame-local packet并跨P resume；无指针demand + exact mailbox也已支持固定8-route topology的通用P-neutral注入/工作共享，动态逻辑execution quota、标准`runtime.GOMAXPROCS`、locked-M同P replacement、standby M、`SetMaxThreads`和未解锁owner succession已接入，仍需批量/local-deque steal、callback/reentry shutdown矩阵和完整affinity；
+- 零/单Timer、Manual、Poll、Worker以及Channel/select、HostOp deadline、keyed/private-registry parked-result已能物化到pointer-free frame-local packet并跨P resume；无指针demand + exact mailbox也已支持固定8-route topology的通用P-neutral注入/工作共享，动态逻辑execution quota、标准`runtime.GOMAXPROCS`、locked-M同P replacement、普通locked Yield/Park/compiler-preempt、standby M、`SetMaxThreads`和未解锁owner succession已接入，仍需批量/local-deque steal、callback/reentry shutdown矩阵和跨target完整affinity；
 - WASM/WASI/RTOS/baremetal production host adapter。
 
 ### 9.1 syscall 自动染色
@@ -870,7 +871,7 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 
 | 平台 | 核心模型判断 | 当前实现现实 |
 | --- | --- | --- |
-| Native Linux/Darwin | layout/ownership无已知冲突 | opt-in fleet已接入程序target：固定8个真实M/P route，每route有独立doorbell/POSIX `poll`/timer shard；环境/CPU初始化逻辑execution quota，标准`runtime.GOMAXPROCS`可动态调整managed resume并行上限。Timer/Poll/Worker/Channel exact route、共享bounded worker及start/stop/all-peer-join已闭环；TCP标准库探针fresh E2E与10,000次压力、quota race和真实1→4→1并发验证通过。已验证P-neutral initial/yield/materialized-park的demand injection与跨P执行；locked-M replacement、nested handoff、有界standby cache、统一`SetMaxThreads`物理线程账本、未解锁owner succession及main-return blocked-M终止已有真实E2E。仍缺批量/local-deque steal、callback/reentry shutdown矩阵、完整affinity、GC/cleanup与GOROOT矩阵 |
+| Native Linux/Darwin | layout/ownership无已知冲突 | opt-in fleet已接入程序target：固定8个真实M/P route，每route有独立doorbell/POSIX `poll`/timer shard；环境/CPU初始化逻辑execution quota，标准`runtime.GOMAXPROCS`可动态调整managed resume并行上限。Timer/Poll/Worker/Channel exact route、共享bounded worker及start/stop/all-peer-join已闭环；TCP标准库探针fresh E2E与10,000次压力、quota race和真实1→4→1并发验证通过。已验证P-neutral initial/yield/materialized-park的demand injection与跨P执行；locked-M replacement、普通locked Yield/channel/timer Park/compiler-preempt、nested handoff、有界standby cache、统一`SetMaxThreads`物理线程账本、未解锁owner succession及main-return blocked-M终止已有真实E2E。仍缺批量/local-deque steal、callback/reentry shutdown矩阵、跨target完整affinity、GC/cleanup与GOROOT矩阵 |
 | 其他native OS | 尚未审查 | Windows/BSD/mobile production adapter、thread/IO/ABI均未验证 |
 | JS/WASM | layout/ownership无已知冲突，可映射为1P host `RunSlice` | 32-bit layout、pre/post-CoroSplit/object和test adapter有覆盖；production queued run/timer/Promise/IO adapter未实现，仍走fail-closed fallback |
 | WASI | operation模型可映射，未验证 | pollable/poll_oneoff、filesystem/socket/clock production adapter未完成 |
