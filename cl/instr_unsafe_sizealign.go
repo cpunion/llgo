@@ -91,7 +91,9 @@ func unsafeLayoutStorageRoot(value ssa.Value, candidates map[ssa.Instruction]non
 }
 
 // collectUnsafeLayoutUnevaluatedSSA returns the SSA instructions that only
-// exist to form an operand of unsafe.Sizeof, unsafe.Alignof, or unsafe.Offsetof.
+// exist to form an operand of unsafe.Sizeof, unsafe.Alignof, or unsafe.Offsetof,
+// plus representation-only ChangeType values left with no executable consumer
+// after x/tools has folded one of those builtins to a constant.
 // x/tools/go/ssa deliberately retains those value-producing instructions (for
 // example *p or a composite-literal field), even though the Go specification
 // says that the operand is not evaluated.
@@ -201,6 +203,47 @@ func collectUnsafeLayoutUnevaluatedSSA(fn *ssa.Function) map[ssa.Instruction]non
 				delete(candidates, instruction)
 				changed = true
 				break
+			}
+		}
+	}
+
+	// x/tools may fold unsafe.Sizeof(local) before SSA construction while
+	// retaining the local's ChangeType solely for DebugRef metadata. Recover
+	// that erased tail (and a chain of representation-only retags) from the
+	// executable use graph. ChangeType is pure and cannot own evaluation of its
+	// operand, so omitting only the dead conversion preserves every source
+	// effect while preventing physical ABI consumers from inventing transport
+	// demand for a value that code generation never materializes.
+	for changed := true; changed; {
+		changed = false
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				change, ok := instruction.(*ssa.ChangeType)
+				if !ok {
+					continue
+				}
+				if _, omitted := candidates[change]; omitted {
+					continue
+				}
+				referrers := change.Referrers()
+				if referrers == nil {
+					continue
+				}
+				dead := true
+				for _, referrer := range *referrers {
+					if _, debug := referrer.(*ssa.DebugRef); debug {
+						continue
+					}
+					if _, omitted := candidates[referrer]; omitted {
+						continue
+					}
+					dead = false
+					break
+				}
+				if dead {
+					candidates[change] = none{}
+					changed = true
+				}
 			}
 		}
 	}

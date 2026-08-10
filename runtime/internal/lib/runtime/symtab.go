@@ -181,12 +181,6 @@ var runtimeFuncInfoSymbolIndex *runtimeFuncInfoSymbolIndexRecord
 //go:linkname runtimeFuncInfoSymbolIndexCount __llgo_funcinfo_symbol_index_count
 var runtimeFuncInfoSymbolIndexCount uintptr
 
-//go:linkname runtimeFuncInfoStubIndexes __llgo_funcinfo_stub_indexes
-var runtimeFuncInfoStubIndexes *uint32
-
-//go:linkname runtimeFuncInfoStubCount __llgo_funcinfo_stub_count
-var runtimeFuncInfoStubCount uintptr
-
 type runtimeFuncInfoEntryRecord struct {
 	pc       uintptr
 	symbolID uint64
@@ -197,17 +191,6 @@ var runtimeFuncInfoEntryStart *runtimeFuncInfoEntryRecord
 
 //go:linkname runtimeFuncInfoEntryEnd __llgo_funcinfo_entry_end
 var runtimeFuncInfoEntryEnd *runtimeFuncInfoEntryRecord
-
-type runtimeFuncInfoStubSiteRecord struct {
-	pc       uintptr
-	symbolID uint64
-}
-
-//go:linkname runtimeFuncInfoStubSiteStart __llgo_funcinfo_stubsite_start
-var runtimeFuncInfoStubSiteStart *runtimeFuncInfoStubSiteRecord
-
-//go:linkname runtimeFuncInfoStubSiteEnd __llgo_funcinfo_stubsite_end
-var runtimeFuncInfoStubSiteEnd *runtimeFuncInfoStubSiteRecord
 
 type runtimePCLineRecord struct {
 	id        uint64
@@ -288,8 +271,6 @@ const (
 	runtimeFuncInfoInitUninit uint32 = iota
 	runtimeFuncInfoInitDone
 	runtimeFuncInfoInitBusy
-	runtimeClosureStubPrefix       = "__llgo_stub."
-	runtimePublicClosureStubPrefix = "_llgo_stub."
 )
 
 func hasStringPrefix(s, prefix string) bool {
@@ -395,11 +376,6 @@ func funcInfoAt(i uintptr) *runtimeFuncInfoRecord {
 func pcLineAt(i uintptr) *runtimePCLineRecord {
 	size := unsafe.Sizeof(*runtimePCLineTable)
 	return (*runtimePCLineRecord)(unsafe.Add(unsafe.Pointer(runtimePCLineTable), i*size))
-}
-
-func funcInfoStubIndexAt(i uintptr) uint32 {
-	size := unsafe.Sizeof(*runtimeFuncInfoStubIndexes)
-	return *(*uint32)(unsafe.Add(unsafe.Pointer(runtimeFuncInfoStubIndexes), i*size))
 }
 
 func funcInfoHashString(s string) uintptr {
@@ -519,12 +495,6 @@ func symbolPCFuncInfoName(buf []byte, pkgID, nameID uint32) uintptr {
 	return symbolPCBytes(name)
 }
 
-func symbolPCPrefixedFuncInfoName(buf []byte, prefix string, pkgID, nameID uint32) uintptr {
-	name := append(buf[:0], prefix...)
-	name = appendFuncInfoName(name, pkgID, nameID)
-	return symbolPCBytes(name)
-}
-
 func funcInfoFunctionName(fn *runtimeFuncInfoRecord) string {
 	if fn == nil {
 		return ""
@@ -576,16 +546,7 @@ func funcInfoForSymbol(symbol string) *runtimeFuncInfoRecord {
 }
 
 func funcInfoForRuntimeSymbol(symbol string) *runtimeFuncInfoRecord {
-	if rec := funcInfoForSymbol(symbol); rec != nil {
-		return rec
-	}
-	if hasStringPrefix(symbol, runtimeClosureStubPrefix) {
-		return funcInfoForSymbol(symbol[len(runtimeClosureStubPrefix):])
-	}
-	if hasStringPrefix(symbol, runtimePublicClosureStubPrefix) {
-		return funcInfoForSymbol(symbol[len(runtimePublicClosureStubPrefix):])
-	}
-	return nil
+	return funcInfoForSymbol(symbol)
 }
 
 func applyFuncInfo(sym *pcSymbol, rawFunction string) {
@@ -681,7 +642,6 @@ func runtimeFuncPCFramesBuilt() bool {
 var runtimeFuncInfoDebugState uint32
 
 var runtimeFuncPCFramesFromSites bool
-var runtimeFuncPCStubsFromSites bool
 
 func runtimeFuncInfoDebugSource(fromSites bool) string {
 	if fromSites {
@@ -702,10 +662,8 @@ func reportRuntimeFuncPCDebug() {
 		return
 	}
 	entrySrc := runtimeFuncInfoDebugSource(runtimeFuncPCFramesFromSites)
-	stubSrc := runtimeFuncInfoDebugSource(runtimeFuncPCStubsFromSites)
 	if runtimeFuncPCFramesPrebuilt {
 		entrySrc = "prebuilt"
-		stubSrc = "prebuilt"
 	}
 	frameCount := len(runtimeFuncPCFrames)
 	if runtimeFuncPCFramesPrebuilt {
@@ -714,8 +672,7 @@ func reportRuntimeFuncPCDebug() {
 	println("llgo funcinfo: func table frames=", frameCount,
 		" buckets=", len(runtimeFuncPCIndex.buckets),
 		" index=", runtimeFuncInfoDebugIndex(runtimeFuncPCIndex),
-		" entries=", entrySrc,
-		" stubs=", stubSrc)
+		" entries=", entrySrc)
 }
 
 func reportRuntimePCLineDebug() {
@@ -765,7 +722,7 @@ func initRuntimeFuncPCFramesSlow() {
 //
 // The tool sorts, deduplicates LTO inline copies against the symbol table,
 // and normalizes entries to true symbol starts, so adopting the table also
-// retires first-use sorting and the dlsym/stub fallbacks.
+// retires first-use sorting and the dlsym fallback.
 type runtimePrebuiltHeader struct {
 	magic        uint64
 	linkSectAddr uint64
@@ -775,10 +732,6 @@ type runtimePrebuiltHeader struct {
 }
 
 const runtimePrebuiltMagic = uint64(0x314254464F474C4C) // "LLGOFTB1" little-endian
-// "LLGOFTB2": the entry section holds only a 32-byte redirect whose third
-// word is the runtime address of the real blob, written into the (larger)
-// stub section when the table outgrew the entry section.
-const runtimePrebuiltRedirectMagic = uint64(0x324254464F474C4C)
 const runtimePrebuiltHeaderSize = unsafe.Sizeof(runtimePrebuiltHeader{})
 
 type runtimePrebuiltFtabEntry struct {
@@ -845,23 +798,6 @@ func parsePrebuiltFuncPCTable() (
 		return 0, nil, 0, nil, 0, false
 	}
 	header := entryHeader
-	if entryHeader.magic == runtimePrebuiltRedirectMagic {
-		// Blob spilled into the stub section; the pointer slot is a live
-		// relocation, so it already holds the runtime address.
-		blob := uintptr(entryHeader.base)
-		stubStartPointer := runtimeFuncInfoStubSiteStart
-		stubEndPointer := runtimeFuncInfoStubSiteEnd
-		if blob == 0 || stubStartPointer == nil || stubEndPointer == nil {
-			return 0, nil, 0, nil, 0, false
-		}
-		stubStart := uintptr(unsafe.Pointer(stubStartPointer))
-		stubEnd := uintptr(unsafe.Pointer(stubEndPointer))
-		if blob != stubStart || stubEnd < stubStart+runtimePrebuiltHeaderSize {
-			return 0, nil, 0, nil, 0, false
-		}
-		header = (*runtimePrebuiltHeader)(unsafe.Pointer(stubStartPointer))
-		end = stubEnd
-	}
 	// Keep the merged typed pointer guard explicit. Besides documenting the
 	// dereference contract, this gives the generic no-unwind analysis one exact
 	// dominating non-nil SSA value without any symbol-specific exception.
@@ -898,7 +834,6 @@ func adoptPrebuiltFuncPCTable() bool {
 	}
 	runtimeFuncPCFramesPrebuilt = true
 	runtimeFuncPCFramesFromSites = true
-	runtimeFuncPCStubsFromSites = true
 	runtimePrebuiltFuncs = make([]unsafe.Pointer, count)
 	return true
 }
@@ -971,7 +906,7 @@ func initRuntimeFuncPCFramesOnce() {
 		frameSize := unsafe.Sizeof(frames[0])
 		entryBase := unsafe.Pointer(&entries[0])
 		nframes := 0
-		symbolBuf = make([]byte, 0, maxFuncInfoSymbolLen()+len(runtimeClosureStubPrefix)+1)
+		symbolBuf = make([]byte, 0, maxFuncInfoSymbolLen()+1)
 		for i := uintptr(0); i < runtimeFuncInfoCount; i++ {
 			fn := funcInfoAt(i)
 			pc := symbolPCFuncInfoName(symbolBuf, fn.symbolPkg, fn.symbolName)
@@ -991,49 +926,12 @@ func initRuntimeFuncPCFramesOnce() {
 		}
 		frames = frames[:nframes]
 	}
-	frames, usedStubSites := appendRuntimeFuncInfoStubSiteFrames(frames)
-	// Closure stubs are an ABI adapter and may go away in a future closure
-	// lowering. Keep the fallback compatibility table light: it stores only
-	// target funcinfo record indexes. When the stub-site section is present it
-	// is authoritative (linkers do not expose local stubs through dlsym), and
-	// skipping the dlsym loop below matters: each dlsym is a dynamic-loader
-	// query, and one query per stub used to dominate first-use latency.
-	if !usedStubSites && runtimeFuncInfoStubIndexes != nil && runtimeFuncInfoStubCount != 0 && runtimeFuncInfoStubCount <= runtimeFuncInfoCount {
-		if symbolBuf == nil {
-			symbolBuf = make([]byte, 0, maxFuncInfoSymbolLen()+len(runtimeClosureStubPrefix)+1)
-		}
-		base := len(frames)
-		grown := make([]runtimeFuncPCFrame, base+int(runtimeFuncInfoStubCount))
-		copy(grown, frames)
-		frames = grown
-		frameBase := unsafe.Pointer(&frames[0])
-		frameSize := unsafe.Sizeof(frames[0])
-		nframes := base
-		for i := uintptr(0); i < runtimeFuncInfoStubCount; i++ {
-			index := funcInfoStubIndexAt(i)
-			if index == 0 || uintptr(index) > runtimeFuncInfoCount {
-				continue
-			}
-			fn := funcInfoAt(uintptr(index) - 1)
-			pc := symbolPCPrefixedFuncInfoName(symbolBuf, runtimeClosureStubPrefix, fn.symbolPkg, fn.symbolName)
-			if pc == 0 {
-				continue
-			}
-			*(*runtimeFuncPCFrame)(unsafe.Add(frameBase, uintptr(nframes)*frameSize)) = runtimeFuncPCFrame{
-				entry:     pc,
-				funcIndex: index,
-			}
-			nframes++
-		}
-		frames = frames[:nframes]
-	}
 	sortRuntimeFuncPCFrames(frames)
 	frames = uniqueRuntimeFuncPCFrames(frames)
 	runtimeFuncPCFrames = frames
 	runtimeFuncPCEntries = entries
 	runtimeFuncPCIndex = buildRuntimeFuncPCIndex(frames)
 	runtimeFuncPCFramesFromSites = usedEntrySites
-	runtimeFuncPCStubsFromSites = usedStubSites
 }
 
 func appendRuntimeFuncInfoEntryFrames(frames []runtimeFuncPCFrame, entries []uintptr) ([]runtimeFuncPCFrame, bool) {
@@ -1081,51 +979,6 @@ func appendRuntimeFuncInfoEntryFrames(frames []runtimeFuncPCFrame, entries []uin
 		if *entry == 0 || site.pc < *entry {
 			*entry = site.pc
 		}
-		used = true
-	}
-	return frames[:nframes], used
-}
-
-func appendRuntimeFuncInfoStubSiteFrames(frames []runtimeFuncPCFrame) ([]runtimeFuncPCFrame, bool) {
-	startPointer := runtimeFuncInfoStubSiteStart
-	endPointer := runtimeFuncInfoStubSiteEnd
-	if startPointer == nil || endPointer == nil {
-		return frames, false
-	}
-	span, ok := staticSectionSpan(unsafe.Pointer(startPointer), unsafe.Pointer(endPointer))
-	size := unsafe.Sizeof(*startPointer)
-	if !ok || size == 0 || span%size != 0 {
-		return frames, false
-	}
-	nsite := span / size
-	if nsite > runtimeFuncInfoCount*16 || nsite > 1<<20 {
-		return frames, false
-	}
-	if nsite == 0 {
-		return frames, false
-	}
-	base := len(frames)
-	grown := make([]runtimeFuncPCFrame, base+int(nsite))
-	copy(grown, frames)
-	frames = grown
-	frameBase := unsafe.Pointer(&frames[0])
-	frameSize := unsafe.Sizeof(frames[0])
-	nframes := base
-	used := false
-	for i := uintptr(0); i < nsite; i++ {
-		site := (*runtimeFuncInfoStubSiteRecord)(unsafe.Add(unsafe.Pointer(startPointer), i*size))
-		if site == nil || site.pc == 0 || site.symbolID == 0 {
-			continue
-		}
-		funcIndex := funcInfoIndexForSymbolID(site.symbolID)
-		if funcIndex == 0 || uintptr(funcIndex) > runtimeFuncInfoCount {
-			continue
-		}
-		*(*runtimeFuncPCFrame)(unsafe.Add(frameBase, uintptr(nframes)*frameSize)) = runtimeFuncPCFrame{
-			entry:     site.pc,
-			funcIndex: funcIndex,
-		}
-		nframes++
 		used = true
 	}
 	return frames[:nframes], used
@@ -1454,11 +1307,9 @@ func funcEntryForIndex(index uint32) uintptr {
 }
 
 // coldFuncInfoEntryLookup resolves an exact function-entry PC by scanning the
-// raw entry-site and stub-site sections, without building the sorted frame
-// table and without any dynamic-loader query. Function values can point at
-// either a real function entry or its closure stub, so both sections are
-// scanned. The scan is linear, so it is capped: for larger binaries the
-// dladdr cold path is cheaper than streaming the whole section.
+// raw entry-site section, without building the sorted frame table and without
+// any dynamic-loader query. The scan is linear, so it is capped: for larger
+// binaries the dladdr cold path is cheaper than streaming the whole section.
 const coldFuncInfoEntryScanLimit = 4096
 
 // coldFuncInfoScanRange scans one {pc, symbolID} record section for the
@@ -1527,7 +1378,7 @@ func prebuiltFuncPCTablePresent() bool {
 		return false
 	}
 	m := *(*uint64)(startPointer)
-	return m == runtimePrebuiltMagic || m == runtimePrebuiltRedirectMagic
+	return m == runtimePrebuiltMagic
 }
 
 // runtimeFuncInfoWarmSink keeps the warm-up loads observable.
@@ -1563,8 +1414,7 @@ func init() {
 		sink += *(*byte)(unsafe.Add(base, n-1))
 		runtimeFuncInfoWarmSink = sink
 	}
-	// The adopted blob may live in the entry section or (spilled) in the
-	// stub section; derive its range from the adopted views.
+	// Derive the adopted blob's range from its zero-copy views.
 	prebuiltFtab := runtimePrebuiltFtab
 	if n := len(prebuiltFtab); n > 0 {
 		touch(unsafe.Pointer(&prebuiltFtab[0]), uintptr(n)*8)
@@ -1617,16 +1467,6 @@ func coldFuncInfoEntryLookup(pc uintptr) (pcSymbol, bool) {
 		bestIndex, bestDelta = coldFuncInfoScanRange(
 			unsafe.Pointer(entryStart), span,
 			unsafe.Sizeof(*entryStart), pc, bestDelta)
-	}
-	stubStart := runtimeFuncInfoStubSiteStart
-	stubEnd := runtimeFuncInfoStubSiteEnd
-	if bestDelta != 0 && stubStart != nil && stubEnd != nil {
-		span, _ := staticSectionSpan(unsafe.Pointer(stubStart), unsafe.Pointer(stubEnd))
-		if idx, _ := coldFuncInfoScanRange(
-			unsafe.Pointer(stubStart), span,
-			unsafe.Sizeof(*stubStart), pc, bestDelta); idx != 0 {
-			bestIndex = idx
-		}
 	}
 	if bestIndex == 0 {
 		return pcSymbol{}, false

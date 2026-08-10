@@ -37,6 +37,10 @@ func NoReturn(a int) {
 func Pair(value int) (int, string) {
 	return value, "value"
 }
+
+func Print(value string) {
+	println(value)
+}
 `
 
 // buildTestProgram builds an SSA program for testing
@@ -310,6 +314,47 @@ func TestMakeCallWrapperNamed(t *testing.T) {
 	wrapper := MakeCallWrapperNamed(prog, ssapkg.Func("Add"), "Add$wrapper$owner$key")
 	if got, want := wrapper.Name(), "Add$wrapper$owner$key"; got != want {
 		t.Fatalf("wrapper name = %q, want %q", got, want)
+	}
+}
+
+func TestMakeValueCallWrapperNamed_Builtin(t *testing.T) {
+	prog, ssapkg := buildTestProgram(t)
+	printFn := ssapkg.Func("Print")
+	var builtin *ssa.Builtin
+	for _, block := range printFn.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			builtin, _ = call.Common().Value.(*ssa.Builtin)
+			if builtin != nil {
+				break
+			}
+		}
+	}
+	if builtin == nil || builtin.Name() != "println" {
+		t.Fatalf("println builtin not found in %v", printFn)
+	}
+	parameter := types.NewVar(token.NoPos, nil, "value", types.Typ[types.String])
+	signature := types.NewSignatureType(
+		nil, nil, nil, types.NewTuple(parameter), types.NewTuple(), false,
+	)
+	wrapper := MakeValueCallWrapperNamed(prog, builtin, signature, "println$typed$carrier")
+	if wrapper.Synthetic != "wrapper" || wrapper.Name() != "println$typed$carrier" ||
+		!types.Identical(wrapper.Signature, signature) {
+		t.Fatalf("wrapper identity = name %q synthetic %q signature %v", wrapper.Name(), wrapper.Synthetic, wrapper.Signature)
+	}
+	if len(wrapper.Blocks) != 1 || len(wrapper.Blocks[0].Instrs) != 2 || len(wrapper.Params) != 1 {
+		t.Fatalf("wrapper shape = blocks %d params %d instructions %v", len(wrapper.Blocks), len(wrapper.Params), wrapper.Blocks[0].Instrs)
+	}
+	call, ok := wrapper.Blocks[0].Instrs[0].(*ssa.Call)
+	if !ok || call.Common().Value != builtin || len(call.Common().Args) != 1 || call.Common().Args[0] != wrapper.Params[0] {
+		t.Fatalf("forwarding call = %#v", wrapper.Blocks[0].Instrs[0])
+	}
+	ret, ok := wrapper.Blocks[0].Instrs[1].(*ssa.Return)
+	if !ok || len(ret.Results) != 0 {
+		t.Fatalf("terminal instruction = %#v", wrapper.Blocks[0].Instrs[1])
 	}
 }
 

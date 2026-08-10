@@ -366,8 +366,23 @@ func (p *context) stringData(b llssa.Builder, args []ssa.Value) (ret llssa.Expr)
 func (p *context) funcAddr(b llssa.Builder, args []ssa.Value) llssa.Expr {
 	if len(args) == 1 {
 		if fn, ok := args[0].(*ssa.MakeInterface); ok {
-			switch f := fn.X.(type) {
-			case *ssa.Function:
+			f, exact := coroFuncAddrExactContextFreeTarget(fn.X)
+			if p.compilation != nil {
+				if sourceCall := p.coroCurrentSourceCall(); sourceCall != nil {
+					planned, ok := p.immutablePlan().RawFunctionAddressTarget(sourceCall, 0)
+					if !ok || planned == nil {
+						panic("funcAddr raw function publication has no frozen target")
+					}
+					if exact {
+						canonical, resolved := p.emissionUniverse.Resolve(f)
+						if !resolved || canonical != planned {
+							panic("funcAddr raw function publication disagrees with its frozen target")
+						}
+					}
+					f, exact = planned, true
+				}
+			}
+			if exact {
 				compile := p.compileFunction
 				if p.compilation != nil {
 					entry := p.mustFunctionSymbol(f)
@@ -383,11 +398,20 @@ func (p *context) funcAddr(b llssa.Builder, args []ssa.Value) llssa.Expr {
 				if aFn, _, _ := compile(f); aFn != nil {
 					return aFn.Expr
 				}
-			default:
-				v := p.compileValue(b, f)
-				if _, ok := v.Type.RawType().Underlying().(*types.Signature); ok {
-					return v
+			}
+			v := p.compileValue(b, fn.X)
+			switch physical := types.Unalias(v.Type.RawType()).Underlying().(type) {
+			case *types.Struct:
+				if llssa.IsClosure(physical) {
+					// Go function values use the fixed {code, environment}
+					// carrier. funcAddr publishes only its first word; the
+					// stackless analyzer admits this fallback only when the
+					// value is context-free.
+					return b.PtrCast(p.prog.VoidPtr(), b.Extract(v, 0))
 				}
+			case *types.Signature:
+				// A raw-C function value already is one code pointer.
+				return b.PtrCast(p.prog.VoidPtr(), v)
 			}
 		}
 	}
@@ -783,6 +807,7 @@ var llgoInstrs = map[string]int{
 	"syscall32":               llgoSyscall32,
 	"syscallPtr":              llgoSyscallPtr,
 	"boolToUint8":             llgoBoolToUint8,
+	"closureEnv":              llgoClosureEnv,
 	"coroPark":                llgoCoroPark,
 	"coroYield":               llgoCoroYield,
 	"coroTimerSleep":          llgoCoroTimerSleep,
@@ -874,7 +899,14 @@ func (p *context) funcOfEntry(entry plannedFunctionSymbol) (aFn llssa.Function, 
 			}
 			sig := p.patchType(fn.Signature).(*types.Signature)
 			if entry.usesCoroPhysicalABI() {
-				abi := newCoroPhysicalABI(p, entry, sig)
+				if p.emissionUniverse == nil {
+					panic("coroutine physical declaration requires a prepared emission universe")
+				}
+				entrySig, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(fn)
+				if err != nil {
+					panic(fmt.Errorf("derive coroutine physical declaration for %q: %w", entry.plan.ID, err))
+				}
+				abi := newCoroPhysicalABI(p, entry, entrySig)
 				sig = abi.physicalSig
 			} else if entry.usesOutcomePlainPhysicalABI() {
 				abi := newOutcomePlainPhysicalABI(sig)
@@ -924,7 +956,7 @@ func (p *context) funcKind(vfn ssa.Value) int {
 func (p *context) pkgNoInit(pkg *types.Package) bool {
 	p.ensureLoaded(pkg)
 	if i, ok := p.loaded[pkg]; ok {
-		return i.kind >= PkgNoInit
+		return PkgSkipsInit(i.kind)
 	}
 	return false
 }
@@ -1245,13 +1277,31 @@ func runtimeLogicalCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.F
 // queries (criterion 2 below) hit the memoization. It must not outlive
 // the compilation — the maps are keyed by *ssa.Package with
 // *ssa.Function values, so anything longer-lived would pin every
-// compiled package's go/types and go/ssa graphs. Plain maps are enough:
-// packages of one compilation are compiled sequentially (the LLVM
-// context is not thread-safe).
+// compiled package's go/types and go/ssa graphs. Concurrent drivers call
+// Precompute before workers start and then share the plain maps read-only.
 type CallerTracking struct {
 	base     map[*ssa.Package]map[*ssa.Function]bool
 	extended map[*ssa.Package]map[*ssa.Function]bool
 	logical  map[*ssa.Package]map[*ssa.Function]bool
+}
+
+// Precompute resolves caller-tracking data before package backends start.
+// Once it returns, callers may share c for concurrent read-only lookups as long
+// as pkgs contains every package that can be passed to this compilation.
+func (c *CallerTracking) Precompute(pkgs []*ssa.Package) {
+	if c == nil {
+		return
+	}
+	for _, pkg := range pkgs {
+		if pkg != nil {
+			runtimeCallerBaseSet(c, pkg)
+		}
+	}
+	for _, pkg := range pkgs {
+		if pkg != nil {
+			runtimeCallerFuncSet(c, pkg)
+		}
+	}
 }
 
 // NewCallerTracking creates the caller-tracking memoization for one
@@ -2437,6 +2487,12 @@ func (p *context) callEx(
 			cv = target
 		}
 	}
+	var linknameSource, linknameTarget *ssa.Function
+	if raw, exact := call.Value.(*ssa.Function); exact && p.emissionUniverse != nil {
+		if canonical, frozen := p.emissionUniverse.Resolve(raw); frozen && canonical != nil {
+			linknameSource, linknameTarget = raw, canonical
+		}
+	}
 	kind := p.funcKind(cv)
 	if kind == fnIgnore {
 		p.observeCoroCallElision(CoroCallElidedNoInit)
@@ -2540,7 +2596,13 @@ func (p *context) callEx(
 			ret = p.emitDo(b, act, ds, aFn.Expr, llssa.Builder.Call, args...)
 		case goFunc:
 			args := p.compileValues(b, args, kind)
+			args = p.compileManagedGoLinknameCallArguments(
+				b, linknameSource, linknameTarget, args,
+			)
 			ret = p.emitDo(b, act, ds, aFn.Expr, llssa.Builder.Call, args...)
+			ret, _ = p.compileManagedGoLinknameCallResult(
+				b, linknameSource, linknameTarget, ret,
+			)
 		case pyFunc:
 			args := p.compileValues(b, args, kind)
 			ret = p.emitDo(b, act, ds, pyFn.Expr, llssa.Builder.Call, args...)
@@ -2577,7 +2639,18 @@ func (p *context) callEx(
 		case llgoIndex:
 			ret = p.index(b, args)
 		case llgoAlloca:
-			ret = p.alloca(b, args)
+			if physicalPlanned {
+				if physicalInstruction.recipe != coroPhysicalInstructionFrameAllocaBytes {
+					panic(fmt.Sprintf(
+						"llgo.alloca selected incompatible frozen physical recipe %s",
+						physicalInstruction.recipe,
+					))
+				}
+				observePhysicalInstruction(coroPhysicalInstructionFrameAllocaBytes)
+				ret = p.coroFrameByteAlloca(b, physicalInstruction.bound)
+			} else {
+				ret = p.alloca(b, args)
+			}
 		case llgoAllocaCStr:
 			if physicalPlanned {
 				if physicalInstruction.recipe != coroPhysicalInstructionHeapCStr {
@@ -2667,6 +2740,11 @@ func (p *context) callEx(
 			ret = b.Do(act, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
 				return p.boolToUint8(b, args)
 			}, args...)
+		case llgoClosureEnv:
+			if len(args) != 0 {
+				panic("closureEnv(): called outside an env-bearing function")
+			}
+			ret = p.compileClosureEnvironment()
 		case llgoCoroPark:
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroPark requires an exact direct call")
@@ -2780,7 +2858,7 @@ func (p *context) callEx(
 			p.inCFunc = true
 		}
 		fn := p.compileValue(b, cv)
-		args := p.compileValues(b, args, kind)
+		args := p.compileDynamicCallValues(b, call, kind)
 		if rawC {
 			p.inCFunc = false
 		}
@@ -2891,6 +2969,28 @@ func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommo
 		p.pkg.MarkReflectMethod(owner)
 		p.pkg.NeedAbiInit |= llssa.ReflectMethodDynamic | llssa.ReflectMethodByName
 	}
+}
+
+func (p *context) compileDynamicCallValues(b llssa.Builder, call *ssa.CallCommon, hasVArg int) []llssa.Expr {
+	args := p.compileValues(b, call.Args, hasVArg)
+	params := call.Signature().Params()
+	n := min(len(call.Args)-hasVArg, params.Len())
+	for i, arg := range call.Args[:n] {
+		want := params.At(i).Type()
+		if needsNamedClosureChange(arg.Type(), want) {
+			args[i] = b.ChangeType(p.type_(want, llssa.InGo), args[i])
+		}
+	}
+	return args
+}
+
+func needsNamedClosureChange(got, want types.Type) bool {
+	if types.Identical(got, want) {
+		return false
+	}
+	_, gotIsFunc := got.Underlying().(*types.Signature)
+	_, wantIsFunc := want.Underlying().(*types.Signature)
+	return gotIsFunc && wantIsFunc && types.Identical(got.Underlying(), want.Underlying())
 }
 
 func (p *context) reflectTypeMethodCheck(call *ssa.CallCommon, method *types.Func) (check llssa.ReflectMethodCheck) {

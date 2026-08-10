@@ -241,6 +241,13 @@ func (a *coroPhysicalPureSSAAudit) validateMakeClosure(closure *ssa.MakeClosure)
 		}
 		target = resolved
 	}
+	elideEnvironment := a.universe != nil && a.universe.canElideZeroSizedClosureEnvironment(target)
+	requireEnvironment := func() string {
+		if elideEnvironment {
+			return a.requireNoRuntimeHelpers(closure)
+		}
+		return a.requireFrozenCoroSafeRuntimeHelpers(closure, "AllocU")
+	}
 	targetID, ok := a.plan.FunctionID(target)
 	if !ok {
 		return "closure target has no FunctionID"
@@ -282,7 +289,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeClosure(closure *ssa.MakeClosure)
 		// {code,environment} value. Value-flow upgrades it to Dispatch whenever
 		// it can reach a dynamic consumer, so retaining DirectPlain here means
 		// only the environment allocation is needed in the physical body.
-		return a.requireFrozenCoroSafeRuntimeHelpers(closure, "AllocU")
+		return requireEnvironment()
 	}
 	if len(target.FreeVars) != 0 && leaf.Rep == coro.DirectCoro {
 		targetPlan, planned := a.plan.FunctionPlan(target)
@@ -291,7 +298,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeClosure(closure *ssa.MakeClosure)
 			(targetPlan.FuncRep != coro.DirectCoro && targetPlan.FuncRep != coro.Dispatch) {
 			return "captured direct coroutine target has no canonical physical context plan"
 		}
-		return a.requireFrozenCoroSafeRuntimeHelpers(closure, "AllocU")
+		return requireEnvironment()
 	}
 	if leaf.Rep != coro.Dispatch {
 		return "captured or descriptor-backed closure has no exact Dispatch representation"
@@ -304,7 +311,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeClosure(closure *ssa.MakeClosure)
 		return "descriptor-backed closure target: " + err.Error()
 	}
 	if len(target.FreeVars) != 0 {
-		return a.requireFrozenCoroSafeRuntimeHelpers(closure, "AllocU")
+		return requireEnvironment()
 	}
 	return a.requireNoRuntimeHelpers(closure)
 }
@@ -1057,13 +1064,34 @@ func coroTypeAssertUsesManagedClosure(ctx *context, assertion *ssa.TypeAssert) b
 }
 
 // validateCompilerElidedFunctionInterface accepts no ordinary function box.
-// It certifies the transient MakeInterface node that x/tools SSA inserts for
-// the exact func(any) operand of llgo.funcAddr/llgo.funcPCABI0. Those
-// intrinsics inspect the static SSA function and emit its address/PC directly;
+// It certifies either the transient func(any) operand of a function-address
+// intrinsic or a frozen Python function stored in LLGo's synthetic varargs
+// side table. Both lowerings consume the concrete operand directly;
 // compileValue never materializes the interface representation.
 func (a *coroPhysicalPureSSAAudit) validateCompilerElidedFunctionInterface(box *ssa.MakeInterface) string {
-	if a == nil || a.universe == nil || a.ctx == nil || box == nil ||
-		!a.universe.makeInterfaceConsumedByFuncAddress(box, a.ctx) {
+	if a == nil || a.universe == nil || a.ctx == nil || box == nil {
+		return "function interface is not an exact compiler-elided address operand"
+	}
+	erasedPython, err := a.universe.CoroErasedFunctionInterface(box)
+	if err != nil {
+		return "erased Python function interface: " + err.Error()
+	}
+	if erasedPython {
+		refs := box.Referrers()
+		if refs == nil || len(*refs) != 1 {
+			return "erased Python function interface does not have one exact consumer"
+		}
+		store, ok := (*refs)[0].(*ssa.Store)
+		if !ok || store.Parent() != a.fn || store.Val != box {
+			return "erased Python function interface is not consumed by its owning synthetic store"
+		}
+		address, ok := store.Addr.(*ssa.IndexAddr)
+		if !ok || !emissionIsVargsAlloc(a.ctx, address.X) {
+			return "erased Python function interface is not stored in one synthetic varargs allocation"
+		}
+		return a.requireNoRuntimeHelpers(box)
+	}
+	if !a.universe.makeInterfaceConsumedByFuncAddress(box, a.ctx) {
 		return "function interface is not an exact compiler-elided address operand"
 	}
 	refs := box.Referrers()
@@ -2209,6 +2237,12 @@ func (a *coroPhysicalPureSSAAudit) validatePhi(phi *ssa.Phi) string {
 func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 	if op == nil || op.X == nil || op.Y == nil {
 		return "incomplete binary operation"
+	}
+	if _, folded := foldConstComparison(op); folded {
+		if err := validateCoroPhysicalSSAValueType(a.typeOf(op.Type())); err != nil {
+			return "constant comparison has unsupported result type: " + err.Error()
+		}
+		return a.requireNoRuntimeHelpers(op)
 	}
 	if op.Op == token.ADD &&
 		coroPureStringType(a.typeOf(op.X.Type())) &&
@@ -3958,7 +3992,11 @@ func coroPureBasicScalar(typ types.Type) bool {
 	if !ok {
 		return false
 	}
-	return basic.Info()&(types.IsBoolean|types.IsInteger|types.IsFloat) != 0
+	// Complex values are LLVM aggregates, but their supported arithmetic and
+	// negation lower to a closed sequence of extract/insert and floating-point
+	// operations. They are therefore just as helper-free as scalar numerics for
+	// the pure physical-instruction audit.
+	return basic.Info()&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) != 0
 }
 
 func coroPureConversion(source, target types.Type) bool {

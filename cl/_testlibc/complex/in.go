@@ -1,3 +1,4 @@
+// LITTEST
 package main
 
 import (
@@ -19,3 +20,14 @@ func main() {
 	x := complex(re, im)
 	f(x, z, c.Func(f))
 }
+
+// The C callback address keeps the raw synchronous entry while the managed
+// call path awaits the automatically coloured coroutine variant.
+// CHECK-LABEL: define ptr @"main.f$coro"(
+// CHECK: call void @__llgo_coro_worker_park_v1
+// CHECK-LABEL: define void @main.f(
+// CHECK: call float @cabsf(
+// CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK: store ptr @main.f
+// CHECK: call ptr @"main.f$coro"(
+// CHECK: call void @__llgo_coro_await_prepare_v3

@@ -4,7 +4,7 @@ import (
 	"github.com/goplus/lib/c"
 )
 
-func F(a, b *c.Char) {
+func F(a, b, _, _ *c.Char) {
 	c.Printf(c.Str("a: %s, b: %s\n"), a, b)
 }
 

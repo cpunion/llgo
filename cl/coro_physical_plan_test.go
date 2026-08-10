@@ -356,6 +356,15 @@ func Root(value int) int { return value + 1 }
 	if err != nil || loaded != physical {
 		t.Fatalf("cross-owner wrapper physical plan = %p, %v; want %p", loaded, err, physical)
 	}
+	entry := plannedFunctionSymbol{
+		function:      wrapper,
+		emission:      universe,
+		physicalOwner: consumer,
+	}
+	loaded, err = entry.sealedPhysicalFunctionPlan()
+	if err != nil || loaded != physical {
+		t.Fatalf("cross-owner wrapper sealed entry plan = %p, %v; want %p", loaded, err, physical)
+	}
 	ctx := &context{
 		emissionOwner: consumer,
 		coroEmission: &coroPhysicalEmissionSession{

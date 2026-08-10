@@ -170,9 +170,29 @@ const (
 	CoroProgramStepInternalRuntimeInitV2 uint32 = 1 << iota
 	CoroProgramStepCompilerABIInitV2
 	CoroProgramStepPublicRuntimeInitV2
-	CoroProgramStepMainPackageInitV2
+	CoroProgramStepPackageInitV2
 	CoroProgramStepMainV2
 )
+
+const coroProgramStepMinimumV2 = 5
+
+func coroProgramStepRoleV2(index, count int) (uint32, bool) {
+	if count < coroProgramStepMinimumV2 || index < 0 || index >= count {
+		return 0, false
+	}
+	switch index {
+	case 0:
+		return CoroProgramStepInternalRuntimeInitV2, true
+	case 1:
+		return CoroProgramStepCompilerABIInitV2, true
+	case 2:
+		return CoroProgramStepPublicRuntimeInitV2, true
+	case count - 1:
+		return CoroProgramStepMainV2, true
+	default:
+		return CoroProgramStepPackageInitV2, true
+	}
+}
 
 // CoroProgramStep describes one entry in a versioned program startup table.
 // Flags is the exact role required at the entry's canonical position for that
@@ -597,11 +617,11 @@ func (p Package) CoroProgramManifest() string {
 //
 //	{ kind i32, flags i32, target ptr, aux uintptr }
 //
-// Version one requires exactly Init, Main. Version two requires exactly
-// InternalRuntimeInit, CompilerABIInit, PublicRuntimeInit, MainPackageInit,
-// Main. Factory is null when omitted. Both the table and each step use target
-// uintptr width and alignment. Each entry module may define at most one program
-// bootstrap descriptor.
+// Version one requires exactly Init, Main. Version two requires
+// InternalRuntimeInit, CompilerABIInit, PublicRuntimeInit, one or more
+// PackageInit steps in Go initialization order, and Main. Factory is null when
+// omitted. Both the table and each step use target uintptr width and alignment.
+// Each entry module may define at most one program bootstrap descriptor.
 func (p Package) NewCoroProgramBootstrap(
 	name string, opts CoroProgramBootstrapOptions,
 ) Expr {
@@ -619,24 +639,21 @@ func (p Package) NewCoroProgramBootstrap(
 	case 1:
 		roles = []uint32{CoroProgramStepInit, CoroProgramStepMain}
 	case 2:
-		roles = []uint32{
-			CoroProgramStepInternalRuntimeInitV2,
-			CoroProgramStepCompilerABIInitV2,
-			CoroProgramStepPublicRuntimeInitV2,
-			CoroProgramStepMainPackageInitV2,
-			CoroProgramStepMainV2,
+		if len(opts.Steps) < coroProgramStepMinimumV2 {
+			panic(fmt.Sprintf(
+				"ssa: coroutine program bootstrap version %d requires at least %d steps, got %d",
+				opts.Version, coroProgramStepMinimumV2, len(opts.Steps),
+			))
+		}
+		roles = make([]uint32, len(opts.Steps))
+		for index := range roles {
+			roles[index], _ = coroProgramStepRoleV2(index, len(roles))
 		}
 	default:
 		panic(fmt.Sprintf("ssa: coroutine program bootstrap has unsupported version %d", opts.Version))
 	}
 	if len(opts.Steps) != len(roles) {
-		if opts.Version == 1 {
-			panic(fmt.Sprintf("ssa: coroutine program bootstrap requires exactly two steps, got %d", len(opts.Steps)))
-		}
-		panic(fmt.Sprintf(
-			"ssa: coroutine program bootstrap version %d requires exactly %d steps, got %d",
-			opts.Version, len(roles), len(opts.Steps),
-		))
+		panic(fmt.Sprintf("ssa: coroutine program bootstrap requires exactly two steps, got %d", len(opts.Steps)))
 	}
 	if !coroProgramFitsUintptr(p.Prog, uint64(len(opts.Steps))) {
 		panic("ssa: coroutine program bootstrap step count overflows target uintptr")

@@ -43,6 +43,11 @@ var sched struct {
 	goidgen uint64
 	midgen  int64
 	pidgen  int32
+
+	// gstate packs the live/registered logical-context count with the
+	// main-exited bit. One atomic word makes the native main-Goexit decision
+	// independent of release order.
+	gstate uint64
 }
 
 func allocRuntimeContext() *runtimeContext {
@@ -59,6 +64,16 @@ func allocRuntimeContext() *runtimeContext {
 }
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
+	gp := initRuntimeContextUntracked(ctx, callergp, status)
+	retainG()
+	return gp
+}
+
+// initRuntimeContextUntracked initializes the executor-thread placeholder
+// installed in pthread TLS. It is a physical context used only while no
+// stackless logical G is active, so it must not participate in the logical-G
+// count or the main-Goexit deadlock decision.
+func initRuntimeContextUntracked(ctx *runtimeContext, callergp *g, status uint32) *g {
 	gp := &ctx.g
 	mp := &ctx.m
 	pp := &ctx.p

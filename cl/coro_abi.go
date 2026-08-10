@@ -210,6 +210,7 @@ type coroPhysicalABI struct {
 	recoverTakeHook         string
 	completePrepareHook     string
 	physicalSig             *types.Signature
+	hasEnv                  bool
 	resultSlotType          types.Type
 	resultCount             int
 }
@@ -257,6 +258,17 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	// hash, ramp parameters, result slot, and child-await call all see the same
 	// physical source ABI.
 	sourceSig = coroPhysicalNormalizeSourceSignature(sourceSig)
+	hasEnv := false
+	if entry.function != nil {
+		hidden := sourceSig.Params().Len() - len(entry.function.Params)
+		if hidden < 0 || hidden > 1 {
+			panic(fmt.Sprintf(
+				"coroutine physical ABI: function %q source parameters=%d disagree with SSA parameters=%d",
+				entry.function.String(), sourceSig.Params().Len(), len(entry.function.Params),
+			))
+		}
+		hasEnv = hidden == 1
+	}
 	version := coroPhysicalABIVersionV1
 	frameAllocHook := coroFrameAllocHookV1
 	frameFreeHook := coroFrameFreeHookV1
@@ -396,6 +408,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		recoverTakeHook:         recoverTakeHook,
 		completePrepareHook:     completePrepareHook,
 		physicalSig:             physicalSig,
+		hasEnv:                  hasEnv,
 		resultSlotType:          resultSlotType,
 		resultCount:             sourceSig.Results().Len(),
 	}
@@ -1027,10 +1040,10 @@ func (p *context) storeCoroLeafResult(b llssa.Builder, abi coroPhysicalABI, resu
 
 func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi coroPhysicalABI, isInit bool) {
 	sourceParamBase := 2
-	if len(fn.FreeVars) != 0 {
-		// Captured descriptor entries are (g,out,ctx,args...). The context is an
-		// explicit physical parameter rather than aFunction's legacy implicit
-		// closure parameter, so SSA source parameters begin after all three words.
+	if abi.hasEnv {
+		// Environment-bearing entries are (g,out,env,args...). The environment
+		// is an explicit physical parameter rather than Function's legacy
+		// implicit context, so SSA source parameters begin after all three words.
 		sourceParamBase = 3
 	}
 
@@ -1163,6 +1176,65 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	b.SetBlock(physical.finalSuspend)
 	physical.finish(b)
 	emission.completeManagedPhysicalBody(bodyCapability)
+}
+
+// validateCoroExactSyntheticForwarder proves the complete SSA body shared by
+// compiler-owned spawn carriers. The caller remains responsible for proving
+// why this exact value may be wrapped; this helper proves only that the
+// synthetic function is a context-free, argument-identical forwarder with no
+// hidden instructions before its terminal return.
+func validateCoroExactSyntheticForwarder(fn *ssa.Function, value ssa.Value) (*ssa.Call, error) {
+	if fn == nil || value == nil || fn.Signature == nil || len(fn.Blocks) != 1 || len(fn.Blocks[0].Succs) != 0 {
+		return nil, fmt.Errorf("requires one exact single-block forwarding body")
+	}
+	instructions := fn.Blocks[0].Instrs
+	if len(instructions) < 2 {
+		return nil, fmt.Errorf("has no forwarding call and terminal return")
+	}
+	forward, ok := instructions[0].(*ssa.Call)
+	if !ok || forward.Common() == nil || forward.Common().Value != value ||
+		forward.Common().IsInvoke() || forward.Common().Method != nil ||
+		len(forward.Common().Args) != len(fn.Params) {
+		return nil, fmt.Errorf("has no exact forwarding call")
+	}
+	for index, argument := range forward.Common().Args {
+		if argument != fn.Params[index] {
+			return nil, fmt.Errorf("forwarding argument %d is not its exact parameter", index)
+		}
+	}
+	resultCount := fn.Signature.Results().Len()
+	returned := make([]ssa.Value, 0, resultCount)
+	cursor := 1
+	switch resultCount {
+	case 0:
+	case 1:
+		returned = append(returned, forward)
+	default:
+		for index := 0; index < resultCount; index++ {
+			if cursor >= len(instructions)-1 {
+				return nil, fmt.Errorf("omits result extract %d", index)
+			}
+			extract, ok := instructions[cursor].(*ssa.Extract)
+			if !ok || extract.Tuple != forward || extract.Index != index {
+				return nil, fmt.Errorf("result extract %d is not exact", index)
+			}
+			returned = append(returned, extract)
+			cursor++
+		}
+	}
+	if cursor != len(instructions)-1 {
+		return nil, fmt.Errorf("contains an extra forwarding instruction")
+	}
+	ret, ok := instructions[cursor].(*ssa.Return)
+	if !ok || len(ret.Results) != len(returned) {
+		return nil, fmt.Errorf("has no exact terminal return")
+	}
+	for index := range returned {
+		if ret.Results[index] != returned[index] {
+			return nil, fmt.Errorf("return value %d is not exact", index)
+		}
+	}
+	return forward, nil
 }
 
 func validateCoroPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, childAwait, programRun bool) error {
@@ -1397,24 +1469,12 @@ func validateCoroPhysicalABIForOwner(
 					fn.Origin() != nil || len(fn.TypeArgs()) != 0 || fn.Signature == nil ||
 					fn.Signature.Recv() != nil || fn.Signature.Variadic() ||
 					!types.Identical(fn.Signature, wrapperInfo.intrinsic.Signature) ||
-					universe.syntheticKeys[fn] != structuralKey ||
-					len(fn.Blocks) != 1 || len(fn.Blocks[0].Succs) != 0 {
+					universe.syntheticKeys[fn] != structuralKey {
 					return fail("compiler intrinsic spawn carrier lost its exact wrapper identity or signature")
 				}
-				instructions := fn.Blocks[0].Instrs
-				if len(instructions) < 2 {
-					return fail("compiler intrinsic spawn carrier has no exact forwarding body")
-				}
-				forward, ok := instructions[0].(*ssa.Call)
-				if !ok || forward.Common() == nil || forward.Common().StaticCallee() != wrapperInfo.intrinsic ||
-					forward.Common().IsInvoke() || len(forward.Common().Args) != len(fn.Params) ||
-					!whole.ElidesCall(forward) {
-					return fail("compiler intrinsic spawn carrier has no exact elided forwarding call")
-				}
-				for index, argument := range forward.Common().Args {
-					if argument != fn.Params[index] {
-						return fail("compiler intrinsic spawn carrier forwarding argument %d is not its exact parameter", index)
-					}
+				forward, err := validateCoroExactSyntheticForwarder(fn, wrapperInfo.intrinsic)
+				if err != nil || forward.Common().StaticCallee() != wrapperInfo.intrinsic || !whole.ElidesCall(forward) {
+					return fail("compiler intrinsic spawn carrier forwarding body is invalid: %v", err)
 				}
 				frozenForward, found, err := universe.coroProgramIR.callSitePlan(forward)
 				if err != nil || !found || frozenForward.failure != "" ||
@@ -1428,44 +1488,88 @@ func validateCoroPhysicalABIForOwner(
 					}
 					return fail("compiler intrinsic spawn carrier forwarding recipe is invalid: %v", err)
 				}
-				resultCount := fn.Signature.Results().Len()
-				returned := make([]ssa.Value, 0, resultCount)
-				cursor := 1
-				switch resultCount {
-				case 0:
-				case 1:
-					returned = append(returned, forward)
-				default:
-					for index := 0; index < resultCount; index++ {
-						if cursor >= len(instructions)-1 {
-							return fail("compiler intrinsic spawn carrier omits result extract %d", index)
-						}
-						extract, ok := instructions[cursor].(*ssa.Extract)
-						if !ok || extract.Tuple != forward || extract.Index != index {
-							return fail("compiler intrinsic spawn carrier result extract %d is not exact", index)
-						}
-						returned = append(returned, extract)
-						cursor++
-					}
-				}
-				if cursor != len(instructions)-1 {
-					return fail("compiler intrinsic spawn carrier contains an extra forwarding instruction")
-				}
-				ret, ok := instructions[cursor].(*ssa.Return)
-				if !ok || len(ret.Results) != len(returned) {
-					return fail("compiler intrinsic spawn carrier has no exact terminal return")
-				}
-				for index := range returned {
-					if ret.Results[index] != returned[index] {
-						return fail("compiler intrinsic spawn carrier return value %d is not exact", index)
-					}
-				}
 			}
+		}
+	}
+	builtinSpawnCarrier := false
+	if universe != nil && whole != nil {
+		if wrapperInfo, compilerWrapper := universe.builtinSpawnWrapInfo[fn]; compilerWrapper {
+			spawn := wrapperInfo.spawn
+			if spawn == nil || spawn.Common() == nil || spawn.Parent() == nil {
+				return fail("compiler builtin spawn carrier has no exact source call")
+			}
+			sourcePlan, found, err := universe.CoroCallSitePlan(spawn)
+			builtin, builtinSource := spawn.Common().Value.(*ssa.Builtin)
+			if err != nil || !found || !builtinSource || builtin == nil ||
+				sourcePlan.Elision != CoroCallNotElided || sourcePlan.Intrinsic ||
+				sourcePlan.StaticSpawnTarget != fn || sourcePlan.ManagedStaticTarget != nil ||
+				sourcePlan.CgoWorkerTarget != nil || sourcePlan.RawPlain {
+				if err == nil && !found {
+					err = fmt.Errorf("source spawn is absent from ProgramIR")
+				}
+				return fail("compiler builtin spawn carrier has an invalid frozen source recipe: %v", err)
+			}
+			target, targetPlan, err := whole.ResolveClosedStaticSpawn(spawn)
+			if err != nil || target != fn || targetPlan.ID != plan.ID {
+				if err == nil {
+					err = fmt.Errorf("resolved target=%v plan=%q", target, targetPlan.ID)
+				}
+				return fail("compiler builtin spawn carrier source is not exact: %v", err)
+			}
+			signature, err := builtinSpawnCarrierSignature(spawn.Common())
+			if err != nil {
+				return fail("compiler builtin spawn carrier signature: %v", err)
+			}
+			wrapperOwner := universe.packages[wrapperInfo.owner]
+			structuralKey, err := builtinSpawnWrapperStructuralKey(
+				wrapperInfo,
+				wrapperOwner,
+				universe.finalIdentity(spawn.Parent()),
+				universe.effectiveType(wrapperOwner, spawn.Parent(), signature, false),
+			)
+			if err != nil {
+				return fail("compiler builtin spawn carrier identity: %v", err)
+			}
+			if fn.Synthetic != "wrapper" || fn.Parent() != nil || len(fn.FreeVars) != 0 ||
+				fn.Origin() != nil || len(fn.TypeArgs()) != 0 || fn.Signature == nil ||
+				fn.Signature.Recv() != nil || fn.Signature.Variadic() ||
+				!types.Identical(fn.Signature, signature) || universe.syntheticKeys[fn] != structuralKey {
+				return fail("compiler builtin spawn carrier lost its exact wrapper identity or signature")
+			}
+			forward, err := validateCoroExactSyntheticForwarder(fn, builtin)
+			if err != nil {
+				return fail("compiler builtin spawn carrier forwarding body is invalid: %v", err)
+			}
+			if whole.ElidesCall(forward) {
+				return fail("compiler builtin spawn carrier forwarding call was unexpectedly elided")
+			}
+			if _, planned := whole.CallPlan(forward); planned {
+				return fail("compiler builtin spawn carrier forwarding call acquired a callable edge")
+			}
+			forwardPlan, found, err := universe.CoroCallSitePlan(forward)
+			if err != nil || !found || forwardPlan.Elision != CoroCallNotElided || forwardPlan.Intrinsic ||
+				forwardPlan.StaticSpawnTarget != nil || forwardPlan.ManagedStaticTarget != nil ||
+				forwardPlan.CgoWorkerTarget != nil || forwardPlan.RawPlain {
+				if err == nil && !found {
+					err = fmt.Errorf("forwarding call is absent from ProgramIR")
+				}
+				return fail("compiler builtin spawn carrier forwarding recipe is invalid: %v", err)
+			}
+			builtinSpawnCarrier = true
+		}
+	}
+	managedForeignValueWrapper := false
+	if universe != nil {
+		if _, compilerWrapper := universe.managedForeignWrapInfo[fn]; compilerWrapper {
+			if err := universe.validateManagedForeignFunctionValueWrapper(fn); err != nil {
+				return fail("compiler managed foreign function-value adapter: %v", err)
+			}
+			managedForeignValueWrapper = true
 		}
 	}
 	capturedRawVariant := rawVariant && len(fn.FreeVars) != 0
 	if fn.Synthetic != "" && !genericInstance && !boundMethodWrapper && !methodExpressionThunk && !methodWrapper && !methodTokenWrapper &&
-		!intrinsicSpawnCarrier && !rangeYield && !capturedRawVariant &&
+		!intrinsicSpawnCarrier && !builtinSpawnCarrier && !managedForeignValueWrapper && !rangeYield && !capturedRawVariant &&
 		!(programEntry && fn.Name() == "init" && fn.Synthetic == "package initializer") {
 		return fail("synthetic function %q is outside the leaf ABI", fn.Synthetic)
 	}
@@ -1565,6 +1669,11 @@ func validateCoroPhysicalABIForOwner(
 			case coroStaticCleanupCgoWorker:
 				if site.cgoWorker == nil {
 					return fail("deferred cgo worker cleanup has no frozen typed operation")
+				}
+				foreignWaits++
+			case coroStaticCleanupForeignWorker:
+				if site.foreignWorker == nil || site.foreignWorker.mode != coroForeignCallModeWorker {
+					return fail("deferred foreign worker cleanup has no frozen typed operation")
 				}
 				foreignWaits++
 			}
@@ -1715,6 +1824,7 @@ func validateCoroPhysicalABIForOwner(
 						callPlan := frozen.plan
 						semantics, intrinsic := callPlan.IntrinsicSemantics, callPlan.Intrinsic
 						cgoWorker := callPlan.Elision == CoroCallElidedCgoWorker
+						pythonOperation := callPlan.Elision == CoroCallElidedPython
 						if intrinsic && callPlan.ControlOperation.NativeActivationBound() {
 							return coroLeafInstructionError(fn, plan, instr,
 								"native setjmp/longjmp control cannot retain a stackless coroutine resume activation; isolate it in a plain native-stack adapter")
@@ -1727,7 +1837,7 @@ func validateCoroPhysicalABIForOwner(
 						// child handoff. Only the erased intrinsic declaration
 						// itself disappears.
 						if cleanupPlan != nil && callPlan.Elision != CoroCallElidedNoInit &&
-							!cgoWorker && (!intrinsic || !semantics.ElidesManagedCall()) {
+							!cgoWorker && !pythonOperation && (!intrinsic || !semantics.ElidesManagedCall()) {
 							return coroLeafInstructionError(fn, plan, instr, "elided intrinsic has no cleanup-safe no-unwind contract")
 						}
 						if cgoWorker {
@@ -1736,6 +1846,23 @@ func validateCoroPhysicalABIForOwner(
 							}
 							if instructionPlan.operation != coroPhysicalOperationWorkerCgo || instructionPlan.operationCgo == nil {
 								return coroLeafInstructionError(fn, plan, instr, "generated cgo worker call has no frozen typed operation recipe")
+							}
+							foreignWaits++
+							continue
+						}
+						if pythonOperation {
+							if intrinsic || callPlan.ElisionCertificate == "" {
+								return coroLeafInstructionError(fn, plan, instr, "Python operation has an invalid frozen elision identity")
+							}
+							if instructionPlan.operation != coroPhysicalOperationSameMPython {
+								return coroLeafInstructionError(fn, plan, instr, "Python operation has no frozen same-M physical recipe")
+							}
+							if callPlan.PythonTarget != instructionPlan.operationPythonTarget {
+								return coroLeafInstructionError(fn, plan, instr, "Python operation physical target differs from ProgramIR")
+							}
+							if callPlan.PythonTarget == nil &&
+								instructionPlan.operationPythonOpcode != frozen.opcode {
+								return coroLeafInstructionError(fn, plan, instr, "Python intrinsic physical opcode differs from ProgramIR")
 							}
 							foreignWaits++
 							continue
@@ -1779,8 +1906,10 @@ func validateCoroPhysicalABIForOwner(
 									"elided worker llgo.syscall has no frozen function-word capability")
 							}
 							if frozen.opcode == llgoAlloca {
-								return coroLeafInstructionError(fn, plan, instr,
-									"dynamic llgo.alloca is valid only in a no-suspend plain island; a physical coroutine requires an exact resume-local lifetime proof")
+								if instructionPlan.recipe != coroPhysicalInstructionFrameAllocaBytes {
+									return coroLeafInstructionError(fn, plan, instr,
+										"llgo.alloca in a physical coroutine requires one exact constant frame allocation recipe")
+								}
 							}
 							if (frozen.opcode == llgoAllocaCStr || frozen.opcode == llgoAllocaCStrs) &&
 								instructionPlan.recipe != coroPhysicalInstructionHeapCStr {
@@ -2257,7 +2386,7 @@ func validateCoroExplicitStatusPanicInterfaceCallResult(
 	if !planned {
 		return "interface call result owner has no function plan"
 	}
-	if _, _, err := resolveCoroStaticAwait(audit.plan, callerPlan, call, audit.universe); err == nil {
+	if _, _, _, err := resolveCoroStaticAwait(audit.plan, callerPlan, call, audit.universe); err == nil {
 		// The child writes its Go result into parent-owned result storage before
 		// the parent resumes and destroys the child. Go escape semantics keep any
 		// backing cell referenced by the returned interface alive; copying the
@@ -2919,24 +3048,22 @@ func (u *EmissionUniverse) coroPhysicalSourceSignature(fn *ssa.Function) (*types
 	return coroPhysicalNormalizeSourceSignature(sig), nil
 }
 
-// coroPhysicalEntrySourceSignature adds the one typed closure environment that
-// belongs to a captured physical entry. It is deliberately separate from
-// coroPhysicalSourceSignature: source call sites and lowered helper markers see
-// only explicit Go parameters, while the descriptor thunk supplies this
-// compiler-owned context between (g,out) and those parameters.
+// coroPhysicalEntrySourceSignature adds the one compiler-owned environment
+// parameter required by a physical entry. Lexical closures use their exact
+// typed capture structure; //llgo:env declarations use unsafe.Pointer. It is
+// deliberately separate from coroPhysicalSourceSignature: source call sites
+// and lowered helper markers see only explicit Go parameters, while a closure
+// or descriptor thunk supplies this context between (g,out) and those params.
 func (u *EmissionUniverse) coroPhysicalEntrySourceSignature(fn *ssa.Function) (*types.Signature, error) {
 	sig, err := u.coroPhysicalSourceSignature(fn)
-	if err != nil || fn == nil || len(fn.FreeVars) == 0 {
+	if err != nil || fn == nil {
 		return sig, err
 	}
-	if fn.Signature == nil || fn.Signature.Recv() != nil {
-		return nil, fmt.Errorf("coroutine physical ABI: captured function %q must be a receiver-free closure body", fn.Name())
+	env, hasEnv, err := u.closureEnvironments.entryEnvironment(fn)
+	if err != nil || !hasEnv {
+		return sig, err
 	}
-	owner := u.ownerOf(fn)
-	if owner == nil || owner.pkgTypes == nil {
-		return nil, fmt.Errorf("coroutine physical ABI: captured function %q has no emission owner", fn.Name())
-	}
-	return llssa.FuncAddCtx(makeClosureCtx(owner.pkgTypes, fn.FreeVars), sig), nil
+	return llssa.FuncAddCtx(env, sig), nil
 }
 
 // coroPhysicalNormalizeSourceSignature maps a declared receiver to the exact
@@ -2973,10 +3100,31 @@ func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Funct
 	if source.Params().Len() != len(fn.Params) {
 		return fail("normalized source parameters=%d do not match SSA parameters=%d", source.Params().Len(), len(fn.Params))
 	}
-	offset := 0
-	if len(fn.FreeVars) != 0 {
-		offset = 1
-		if effective.Params().Len() == 0 || !coroPhysicalClosureContextMatches(fn, effective.Params().At(0).Type()) {
+	offset := effective.Params().Len() - len(fn.Params)
+	if offset < 0 || offset > 1 {
+		return fail("effective entry parameters=%d have invalid hidden-context offset from SSA parameters=%d", effective.Params().Len(), len(fn.Params))
+	}
+	wantEnv := len(fn.FreeVars) != 0
+	explicitEnv := false
+	if universe != nil {
+		var envErr error
+		_, wantEnv, envErr = universe.closureEnvironments.entryEnvironment(fn)
+		if envErr != nil {
+			return fail("derive hidden environment: %v", envErr)
+		}
+		explicitEnv = universe.closureEnvironments.hasExplicitEnvironment(fn)
+	}
+	if wantEnv != (offset == 1) {
+		return fail("effective hidden-context=%t does not match required environment=%t", offset == 1, wantEnv)
+	}
+	if offset == 1 {
+		contextType := effective.Params().At(0).Type()
+		switch {
+		case explicitEnv:
+			if !types.Identical(contextType, types.Typ[types.UnsafePointer]) {
+				return fail("effective //llgo:env entry context is %v, want unsafe.Pointer", contextType)
+			}
+		case !coroPhysicalClosureContextMatches(fn, contextType):
 			return fail("effective captured entry has no exact typed closure context")
 		}
 	}
@@ -3649,7 +3797,7 @@ func validateCoroPhysicalConsumersCapabilities(
 						}
 						direct, ordinary := call.(*ssa.Call)
 						if childAwait && ordinary && function.Plan.Emission == coro.EmitCoroutine {
-							if _, _, err := resolveCoroStaticAwait(plan, function.Plan, direct, universe); err == nil {
+							if _, _, _, err := resolveCoroStaticAwait(plan, function.Plan, direct, universe); err == nil {
 								// The static callee operand is represented by this exact
 								// CallPlan and is not an escaped function value.
 								continue
@@ -3673,7 +3821,7 @@ func validateCoroPhysicalConsumersCapabilities(
 					continue
 				}
 				if boxed, ok := instr.(*ssa.MakeInterface); ok &&
-					coroCompilerElidedFunctionAddressBox(plan, universe, fn, boxed) {
+					coroCompilerElidedFunctionBox(plan, universe, fn, boxed) {
 					// funcAddr/funcPCABI0 consume the exact static function
 					// operand as a code address. No interface or callable value
 					// reaches physical emission, so the target's coroutine
@@ -3764,7 +3912,10 @@ func coroLeafScalar(typ types.Type) bool {
 		return false
 	}
 	info := basic.Info()
-	return info&(types.IsBoolean|types.IsInteger|types.IsFloat) != 0
+	// Complex is aggregate-shaped in LLVM but remains a closed by-value leaf in
+	// the coroutine ABI. The leaf instruction allowlist separately restricts it
+	// to Go-valid helper-free operations.
+	return info&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) != 0
 }
 
 func coroLeafInstructionError(fn *ssa.Function, plan coro.FunctionPlan, instr ssa.Instruction, reason string) error {

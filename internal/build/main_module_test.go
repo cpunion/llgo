@@ -4,9 +4,11 @@
 package build
 
 import (
+	"go/constant"
 	"go/token"
 	"go/types"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/goplus/llgo/internal/packages"
 	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 func init() {
@@ -39,12 +42,18 @@ func TestGenMainModuleExecutable(t *testing.T) {
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleRuntimeInitV2, FunctionID: "runtime-init", Target: llssa.PkgRuntime + ".init"},
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleABIInitV2, FunctionID: "abi-init", Target: "init$abitypes"},
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePublicRuntimeInitV2, FunctionID: coroProgramPublicRuntimeNoopIDV2, Target: coroProgramPublicRuntimeNoopSymbolV2},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "b-init", Target: "example.com/b.init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "z-init", Target: "example.com/z.init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "a-init", Target: "example.com/a.init"},
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "package-init", Target: pkg.PkgPath + ".init"},
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV2, FunctionID: "main", Target: pkg.PkgPath + ".main"},
 		},
 	}
 	mod := genMainModule(ctx, llssa.PkgRuntime, pkg,
-		&genConfig{rtInit: true, pyInit: true, coroBootstrap: bootstrap})
+		&genConfig{
+			rtInit: true, pyInit: true, coroBootstrap: bootstrap,
+			packageInits: []string{"example.com/b.init", "example.com/z.init", "example.com/a.init"},
+		})
 	if mod.ExportFile != "foo.a-main" {
 		t.Fatalf("unexpected export file: %s", mod.ExportFile)
 	}
@@ -54,6 +63,7 @@ func TestGenMainModuleExecutable(t *testing.T) {
 		"call void @Py_Initialize()",
 		"call void @Py_Finalize()",
 		"call void @\"example.com/foo.init\"()",
+		`@"example.com/foo..inittask" = global { i32, i32 } zeroinitializer`,
 		"define weak void @_start()",
 	}
 	for _, want := range checks {
@@ -63,6 +73,9 @@ func TestGenMainModuleExecutable(t *testing.T) {
 	}
 	factory := mod.LPkg.Module().NamedFunction(coroProgramBootstrapFactorySymbolV2).String()
 	assertInOrder(t, factory,
+		`call void @"example.com/b.init"()`,
+		`call void @"example.com/z.init"()`,
+		`call void @"example.com/a.init"()`,
 		"call void @\"example.com/foo.init\"()",
 		"call void @\"example.com/foo.main\"()",
 	)
@@ -72,6 +85,137 @@ func TestGenMainModuleExecutable(t *testing.T) {
 		"call ptr @"+coroProgramBeginSymbolV1,
 		"call void @Py_Finalize()",
 	)
+}
+
+func TestPackageInitOrderUsesLexicalReadyPackage(t *testing.T) {
+	newPackage := func(path string, imports ...*packages.Package) *packages.Package {
+		pkg := &packages.Package{ID: path, PkgPath: path, Imports: make(map[string]*packages.Package)}
+		for _, imported := range imports {
+			pkg.Imports[imported.PkgPath] = imported
+		}
+		return pkg
+	}
+	z := newPackage("example.com/z")
+	a := newPackage("example.com/a", z)
+	b := newPackage("example.com/b")
+	root := newPackage("example.com/main", a, b)
+
+	order, err := packageInitOrder(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(order))
+	for i, pkg := range order {
+		got[i] = pkg.PkgPath
+	}
+	want := []string{"example.com/b", "example.com/z", "example.com/a", "example.com/main"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("package init order = %v, want %v", got, want)
+	}
+}
+
+func TestPackageInitOrderEdgeCases(t *testing.T) {
+	if order, err := packageInitOrder(nil); err != nil || order != nil {
+		t.Fatalf("nil root order = %v, %v, want nil, nil", order, err)
+	}
+
+	first := &packages.Package{ID: "first", PkgPath: "example.com/same"}
+	second := &packages.Package{ID: "second", PkgPath: "example.com/same"}
+	root := &packages.Package{
+		ID:      "root",
+		PkgPath: "example.com/root",
+		Imports: map[string]*packages.Package{
+			"alias/first": first,
+			"first":       first,
+			"nil":         nil,
+			"second":      second,
+		},
+	}
+	order, err := packageInitOrder(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(order))
+	for i, pkg := range order {
+		got[i] = pkg.ID
+	}
+	if want := []string{"first", "second", "root"}; !slices.Equal(got, want) {
+		t.Fatalf("package init order = %v, want %v", got, want)
+	}
+
+	a := &packages.Package{ID: "a", PkgPath: "example.com/a", Imports: make(map[string]*packages.Package)}
+	b := &packages.Package{ID: "b", PkgPath: "example.com/b", Imports: map[string]*packages.Package{"a": a}}
+	a.Imports["b"] = b
+	if _, err := packageInitOrder(a); err == nil || !strings.Contains(err.Error(), "contains a cycle") {
+		t.Fatalf("cyclic package order error = %v, want cycle error", err)
+	}
+}
+
+func TestLinkedPackageInitNamesFiltersUnavailablePackages(t *testing.T) {
+	newPackage := func(id string) *packages.Package {
+		path := "example.com/" + id
+		return &packages.Package{ID: id, PkgPath: path, Types: types.NewPackage(path, id)}
+	}
+	root := newPackage("root")
+	normal := newPackage("normal")
+	noinit := newPackage("noinit")
+	noinit.Types.Scope().Insert(types.NewConst(token.NoPos, noinit.Types, "LLGoPackage", types.Typ[types.String], constant.MakeString("noinit")))
+	missingBuilt := newPackage("missing-built")
+	missingSSA := newPackage("missing-ssa")
+	missingInit := newPackage("missing-init")
+	missingTypes := &packages.Package{ID: "missing-types", PkgPath: "example.com/missing-types"}
+	root.Imports = map[string]*packages.Package{
+		"normal":        normal,
+		"noinit":        noinit,
+		"missing-built": missingBuilt,
+		"missing-ssa":   missingSSA,
+		"missing-init":  missingInit,
+		"missing-types": missingTypes,
+	}
+
+	ssaProg := ssa.NewProgram(token.NewFileSet(), 0)
+	normalSSA := ssaProg.CreatePackage(normal.Types, nil, nil, true)
+	noinitSSA := ssaProg.CreatePackage(noinit.Types, nil, nil, true)
+	if normalSSA.Func("init") == nil || noinitSSA.Func("init") == nil {
+		t.Fatal("test SSA packages are missing synthetic init functions")
+	}
+	missingInitSSA := &ssa.Package{Members: make(map[string]ssa.Member)}
+
+	linked := []Package{
+		nil,
+		&aPackage{},
+		{Package: normal, SSA: normalSSA},
+		{Package: noinit, SSA: noinitSSA},
+		{Package: missingSSA},
+		{Package: missingInit, SSA: missingInitSSA},
+		{Package: missingTypes, SSA: normalSSA},
+	}
+	names, err := linkedPackageInitNames(root, linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"example.com/normal.init"}; !slices.Equal(names, want) {
+		t.Fatalf("linked init names = %v, want %v", names, want)
+	}
+
+	cycle := &packages.Package{ID: "cycle", PkgPath: "example.com/cycle", Imports: make(map[string]*packages.Package)}
+	cycle.Imports["self"] = cycle
+	if _, err := linkedPackageInitNames(cycle, nil); err == nil {
+		t.Fatal("linkedPackageInitNames accepted an import cycle")
+	}
+}
+
+func TestLinkMainPkgRejectsPackageInitCycle(t *testing.T) {
+	cycle := &packages.Package{ID: "cycle", PkgPath: "example.com/cycle", Imports: make(map[string]*packages.Package)}
+	cycle.Imports["self"] = cycle
+	ctx := &context{
+		buildConf: &Config{},
+		pkgs:      make(map[*packages.Package]Package),
+		pkgByID:   make(map[string]Package),
+	}
+	if err := linkMainPkg(ctx, cycle, nil, "", false); err == nil || !strings.Contains(err.Error(), "contains a cycle") {
+		t.Fatalf("linkMainPkg cycle error = %v, want cycle error", err)
+	}
 }
 
 func TestGenMainModuleLibrary(t *testing.T) {
@@ -113,11 +257,15 @@ func TestGenMainModuleLibraryInitializesRuntime(t *testing.T) {
 				},
 			}
 			pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
-			mod := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{rtInit: true})
+			mod := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
+				rtInit:       true,
+				packageInits: []string{"example.com/dep.init"},
+			})
 			ir := mod.LPkg.String()
 			checks := []string{
 				"define internal void @__llgo_runtime_ctor()",
 				"call void @\"github.com/goplus/llgo/runtime/internal/runtime.init\"()",
+				"call void @\"example.com/dep.init\"()",
 				"call void @\"example.com/foo.init\"()",
 			}
 			if mode == BuildModeCShared {
@@ -226,13 +374,19 @@ func TestGenMainModuleTestLibraryDefersMainInit(t *testing.T) {
 				},
 			}
 			pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
-			mod := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{rtInit: true})
+			mod := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
+				rtInit:       true,
+				packageInits: []string{"example.com/dep.init"},
+			})
 			ir := mod.LPkg.String()
 			if !strings.Contains(ir, "call void @\"github.com/goplus/llgo/runtime/internal/runtime.init\"()") {
 				t.Fatalf("test library constructor missing runtime init:\n%s", ir)
 			}
 			if strings.Contains(ir, "call void @\"example.com/foo.init\"()") {
 				t.Fatalf("test library constructor initialized test main before the C runner supplied argc/argv:\n%s", ir)
+			}
+			if strings.Contains(ir, "call void @\"example.com/dep.init\"()") {
+				t.Fatalf("test library constructor initialized a test dependency before the C runner supplied argc/argv:\n%s", ir)
 			}
 		})
 	}

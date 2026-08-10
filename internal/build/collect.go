@@ -24,7 +24,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -45,7 +44,11 @@ func (c *context) collectFingerprint(pkg *aPackage) error {
 		c.fingerprinting = make(map[string]bool)
 	}
 	if c.fingerprinting[pkg.ID] {
-		return fmt.Errorf("fingerprint cycle detected for %s", pkg.ID)
+		// Alternate runtime replacements can close a cycle after the complete
+		// SSA graph is registered. Such a cycle has no stable per-package key,
+		// so rebuild its members instead of reporting a false cache hit.
+		c.disablePackageCache(c.fingerprinting)
+		return nil
 	}
 	c.fingerprinting[pkg.ID] = true
 	defer delete(c.fingerprinting, pkg.ID)
@@ -71,6 +74,20 @@ func (c *context) collectFingerprint(pkg *aPackage) error {
 	pkg.Manifest = m.Build()
 	pkg.Fingerprint = m.Fingerprint()
 	return nil
+}
+
+func (c *context) disablePackageCache(pkgs map[string]bool) {
+	if c.cacheDisabled == nil {
+		c.cacheDisabled = make(map[string]none, len(pkgs))
+	}
+	for id := range pkgs {
+		c.cacheDisabled[id] = none{}
+	}
+}
+
+func (c *context) packageCacheDisabled(id string) bool {
+	_, disabled := c.cacheDisabled[id]
+	return disabled
 }
 
 // collectEnvInputs collects environment-related inputs.
@@ -225,21 +242,7 @@ func (c *context) collectPackageInputs(m *manifestBuilder, pkg *aPackage) error 
 
 // collectDependencyInputs adds dependency fingerprints/versions into manifest.
 func (c *context) collectDependencyInputs(m *manifestBuilder, pkg *aPackage) error {
-	if len(pkg.Imports) == 0 {
-		return nil
-	}
-
-	deps := make([]*packages.Package, 0, len(pkg.Imports))
-	for _, dep := range pkg.Imports {
-		if dep == nil || dep.ID == pkg.ID {
-			continue
-		}
-		deps = append(deps, dep)
-	}
-
-	sort.Slice(deps, func(i, j int) bool { return deps[i].ID < deps[j].ID })
-
-	for _, dep := range deps {
+	for _, dep := range effectiveDependencies(pkg) {
 		depEntry, err := c.dependencyFingerprint(dep)
 		if err != nil {
 			return err
@@ -443,6 +446,9 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 	if !c.canUsePackageCache() || !cacheEnabled() {
 		return false
 	}
+	if c.packageCacheDisabled(pkg.ID) {
+		return false
+	}
 
 	// Main packages are intentionally not written to the build cache because
 	// each executable's entry module is linked against the current main archive.
@@ -576,6 +582,9 @@ func (c *context) saveToCache(pkg *aPackage) error {
 	if (!c.canUsePackageCache() && !c.stagedCacheAuthorized) || !cacheEnabled() {
 		return nil
 	}
+	if c.packageCacheDisabled(pkg.ID) {
+		return nil
+	}
 
 	if pkg.Fingerprint == "" || pkg.Manifest == "" {
 		return nil
@@ -599,11 +608,10 @@ func (c *context) saveToCache(pkg *aPackage) error {
 		if err := copyFileAtomic(pkg.ArchiveFile, paths.Archive); err != nil {
 			return err
 		}
-	} else if len(pkg.ObjFiles) > 0 {
-		// Otherwise, create archive from object files
-		if err := c.createPackageArchiveFile(
-			paths.Archive, pkg.ObjFiles, pkg.CoroLibraryEffectRecords,
-		); err != nil {
+	} else if len(pkg.ObjFiles) > 0 || len(pkg.ObjBuffers) > 0 {
+		// Otherwise, create the archive from all package-owned members and its
+		// compiler metadata.
+		if err := c.createPackageArchiveFile(paths.Archive, pkg, false); err != nil {
 			return err
 		}
 	} else {

@@ -130,7 +130,7 @@ func (b Builder) abiCommonFields(t types.Type, name string, hasUncommon bool, gl
 	case "":
 		equal = prog.Nil(prog.Type(equalFunc, InGo))
 	case "structequal", "arrayequal":
-		equal = b.Pkg.rtFunc(name)
+		equal = b.Pkg.rtEnvFunc(name)
 		b.Pkg.recordAbiTypeFakeUse(global, equal.impl)
 		env := b.abiType(t)
 		equal = b.aggregateValue(prog.Type(equalFunc, InGo), equal.impl, env.impl)
@@ -309,7 +309,7 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 		bucket := prog.abi.MapBucket(t)
 		flags := prog.abi.MapFlags(t)
 		keySize, elemSize := prog.abi.MapBucketSlotSizes(t)
-		hash := b.Pkg.rtFunc("typehash")
+		hash := b.Pkg.rtEnvFunc("typehash")
 		b.Pkg.recordAbiTypeFakeUse(global, hash.impl)
 		env := b.abiType(t.Key())
 		hasher := b.aggregateValue(prog.Type(hashFunc, InGo), hash.impl, env.impl)
@@ -534,7 +534,6 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		mSig := m.Type().(*types.Signature)
 		var tfn, ifn llvm.Value
 		tfnName := b.abiMethodName(anonymous, pkg, obj, mSig)
-		tfnSig := funcType(prog, methodExprSignature(mSig)).(*types.Signature)
 		var tfnExpr Expr
 		if b.Pkg.methodEntry != nil {
 			if entry, ok := b.Pkg.methodEntry(tfnName, obj, mSig); ok {
@@ -549,7 +548,7 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		}
 		if tfn.IsNil() {
 			tfnFn := b.Pkg.NewFunc(tfnName, mSig, InGo)
-			tfn = b.Pkg.closureWrapDecl(tfnFn.Expr, tfnSig).impl
+			tfn = tfnFn.impl
 			tfnExpr = tfnFn.Expr
 		}
 		ifnExpr, ifnName, ifnSig := b.abiInterfaceMethodEntry(

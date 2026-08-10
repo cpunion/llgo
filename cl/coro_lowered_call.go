@@ -39,7 +39,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		// owner-scoped mapping remains a hard compiler-plan error below.
 		return llssa.Nil, false
 	}
-	if p.goFn == nil || p.emissionUniverse == nil || p.compilation.CoroPlan == nil {
+	if p.goFn == nil || p.emissionUniverse == nil || p.immutablePlan() == nil {
 		panic("coroutine lowered runtime call requires an exact owner, emission universe, and SSA plan")
 	}
 	if b.Func != p.fn {
@@ -70,7 +70,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q is absent from the frozen emission universe", helper, p.goFn.Name()))
 	}
 	if !plainOnly {
-		plannedCall, planned := p.compilation.CoroPlan.ResolveLoweredCallRecord(p.goFn, helper)
+		plannedCall, planned := p.immutablePlan().ResolveLoweredCallRecord(p.goFn, helper)
 		if !planned || plannedCall.Target != target || plannedCall.RawPlain != rawPlainOccurrence ||
 			plannedCall.NoUnwind != frozenCall.NoUnwind ||
 			plannedCall.UnwindOnly != frozenCall.UnwindOnly ||
@@ -84,7 +84,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	if err != nil {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
 	}
-	targetPlan, planned := p.compilation.CoroPlan.FunctionPlan(target)
+	targetPlan, planned := p.immutablePlan().FunctionPlan(target)
 	if !planned {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q targets an unplanned function", helper, p.goFn.Name()))
 	}
@@ -118,7 +118,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		))
 	}
 	if plainOnly || rawPlainOccurrence || explicitStatusLegacyPlain {
-		if !targetPlan.RawPlainDemand || !p.compilation.CoroPlan.HasRawPlainVariant(target) {
+		if !targetPlan.RawPlainDemand || !p.immutablePlan().HasRawPlainVariant(target) {
 			panic(fmt.Errorf("coroutine raw/plain lowered runtime call %q in %q targets %q without an exact raw-plain variant", helper, p.goFn.Name(), targetPlan.ID))
 		}
 		fn, _, kind := p.compileRawPlainFunction(target)
@@ -128,7 +128,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		return b.Call(fn.Expr, args...), true
 	}
 	if p.rawPlainBody {
-		if targetPlan.Emission == coro.EmitCoroutine && !p.compilation.CoroPlan.HasRawPlainVariant(target) {
+		if targetPlan.Emission == coro.EmitCoroutine && !p.immutablePlan().HasRawPlainVariant(target) {
 			panic(fmt.Errorf("coroutine lowered runtime call %q in raw plain body %q targets managed coroutine %q without a raw plain variant", helper, p.goFn.Name(), targetPlan.ID))
 		}
 		fn, _, kind := p.compileRawPlainFunction(target)

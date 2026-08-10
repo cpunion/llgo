@@ -212,6 +212,46 @@ func validateSSACallableContractPolicy(fn *ssa.Function, policy SSAFunctionPolic
 // refer to the replaced SSA declaration.
 type SSAFunctionResolver func(fn *ssa.Function) (canonical *ssa.Function, ok bool, err error)
 
+// SSAManagedFunctionValueResolver maps one exact source declaration to the
+// compiler-owned Go body used when that declaration is materialized as a
+// managed function value. It is deliberately separate from
+// SSAFunctionResolver: static calls and raw C/code-address publications must
+// continue to name the original declaration.
+//
+// A false result preserves the ordinary canonical target. A true result must
+// return a same-program, signature-identical function in the emission universe.
+type SSAManagedFunctionValueResolver func(fn *ssa.Function) (adapter *ssa.Function, ok bool, err error)
+
+func resolveSSAManagedFunctionValueTarget(
+	resolver SSAManagedFunctionValueResolver,
+	target *ssa.Function,
+) (*ssa.Function, error) {
+	if resolver == nil || target == nil {
+		return target, nil
+	}
+	adapter, adapted, err := resolver(target)
+	if err != nil {
+		return nil, fmt.Errorf("resolve managed function-value adapter for %q: %w", target.Name(), err)
+	}
+	if !adapted {
+		return target, nil
+	}
+	if adapter == nil {
+		return nil, fmt.Errorf("managed function-value adapter for %q is nil", target.Name())
+	}
+	if adapter.Prog != target.Prog {
+		return nil, fmt.Errorf("managed function-value adapter for %q belongs to another SSA program", target.Name())
+	}
+	if target.Signature == nil || adapter.Signature == nil ||
+		!types.Identical(target.Signature, adapter.Signature) {
+		return nil, fmt.Errorf(
+			"managed function-value adapter for %q has signature %v, want %v",
+			target.Name(), adapter.Signature, target.Signature,
+		)
+	}
+	return adapter, nil
+}
+
 // SSASyncOnlyCallArgument identifies one exact ordinary static-call argument
 // whose function value is published solely for a certified synchronous
 // descriptor consumer. The physical value still crosses canonical storage and
@@ -328,6 +368,11 @@ type SSAConfig struct {
 	// Nil is the identity resolver. With EmissionUniverse, successful results
 	// must be exact universe members.
 	ResolveFunction SSAFunctionResolver
+
+	// ResolveManagedFunctionValue redirects only managed function-value
+	// producers. It never changes static calls, raw C callbacks, or code-address
+	// observations.
+	ResolveManagedFunctionValue SSAManagedFunctionValueResolver
 
 	// MaxPlainInstructions seeds NeedsPreempt on a longer body. Zero selects
 	// DefaultMaxPlainInstructions; a negative value disables the cost seed.
@@ -471,12 +516,13 @@ type SSAConfig struct {
 	ClassifyRawDirectPlainCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
 
 	// ClassifyRawFunctionAddressCallArgument identifies an exact direct static
-	// call argument whose frontend lowering consumes a transient
-	// MakeInterface{X:*ssa.Function} structurally and emits only X's raw entry
-	// address. The interface value is never materialized, so this one use must
-	// not force X into Dispatch representation. AnalyzeSSA validates the exact
-	// SSA shape and sole-consumer relationship; all ordinary interface uses keep
-	// their canonical descriptor boundary.
+	// call argument whose frontend lowering consumes a transient MakeInterface
+	// structurally and emits only the enclosed context-free function value's raw
+	// entry address. AnalyzeSSA accepts a static function, representation-only
+	// conversions of one, or a zero-binding closure, then proves a closed non-nil
+	// singleton flow and sole-consumer relationship. The interface value is never
+	// materialized, so this one use must not force the target into Dispatch
+	// representation; all ordinary uses keep their canonical descriptor boundary.
 	ClassifyRawFunctionAddressCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
 
 	// ClassifyStaticCodeAddressCallArgument identifies the same exact transient
@@ -488,6 +534,13 @@ type SSAConfig struct {
 	// Dispatch representation; ordinary uses of the same value remain canonical
 	// descriptor boundaries.
 	ClassifyStaticCodeAddressCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
+
+	// ClassifyErasedFunctionInterface identifies one exact MakeInterface whose
+	// frontend lowering consumes the concrete function operand and emits no Go
+	// interface value. AnalyzeSSA preserves the ordinary reference demand but
+	// does not force the function into Dispatch representation merely because
+	// x/tools inserted this transient box. Every other use remains canonical.
+	ClassifyErasedFunctionInterface func(owner *ssa.Function, box *ssa.MakeInterface) (bool, error)
 
 	// ClassifyClosedDynamicCall supplies a frozen whole-program proof for one
 	// exact ordinary dynamic *ssa.Call or owner-local *ssa.Defer whose callee value crosses descriptor
@@ -698,6 +751,7 @@ type SSAPlan struct {
 	elidedCalls             map[ssa.CallInstruction]struct{}
 	elidedCallCertificates  map[ssa.CallInstruction]string
 	rawAddressArgs          map[ssaCallArgumentUse]struct{}
+	rawAddressTargets       map[ssaCallArgumentUse]FunctionID
 	codeAddressArgs         map[ssaCallArgumentUse]struct{}
 	conditionalStores       map[*ssa.Store]*ssa.Function
 	safeFixedArrayIndexes   map[ssa.Instruction]int64
@@ -1346,6 +1400,15 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	dynamicCandidates, err = resolveSSAManagedDynamicCandidates(
+		dynamicCandidates,
+		canonicalizer,
+		config.ResolveManagedFunctionValue,
+		config.ClassifyRawCFunctionType,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	ids := make(map[*ssa.Function]FunctionID, len(included))
 	byID := make(map[FunctionID]*ssa.Function, len(included))
@@ -1412,6 +1475,10 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	erasedFunctionInterfaces, err := classifySSAErasedFunctionInterfaces(bodyFunctions, config)
+	if err != nil {
+		return nil, err
+	}
 	functionAddressCallArguments := append([]ssaCallArgumentUse(nil), rawFunctionAddressCallArguments...)
 	addressKinds := make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)+len(staticCodeAddressCallArguments))
 	for _, use := range rawFunctionAddressCallArguments {
@@ -1448,8 +1515,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	flow, err := analyzeSSAFunctionFlow(
 		bodyFunctions, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer,
-		allDirectPlainCallArguments, functionAddressCallArguments, closedDynamicCalls,
-		exactInterfaceReceivers, managedValues, config.ClassifyRawCFunctionType,
+		config.ResolveManagedFunctionValue,
+		allDirectPlainCallArguments, rawDirectPlainCallArguments, functionAddressCallArguments, closedDynamicCalls,
+		exactInterfaceReceivers, erasedFunctionInterfaces, managedValues, config.ClassifyRawCFunctionType,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("coro: analyze SSA function-value flow: %w", err)
@@ -1461,24 +1529,22 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		return nil, fmt.Errorf("coro: validate trusted raw function-address call arguments: %w", err)
 	}
 	rawFunctionAddressEntries := make(map[*ssa.Function]struct{}, len(rawFunctionAddressCallArguments))
+	rawFunctionAddressTargets := make(map[ssaCallArgumentUse]*ssa.Function, len(rawFunctionAddressCallArguments))
 	for _, use := range rawFunctionAddressCallArguments {
-		boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface)
-		if !ok {
-			return nil, fmt.Errorf("coro: validated raw function-address argument lost its MakeInterface shape")
-		}
-		target, ok := boxed.X.(*ssa.Function)
-		if !ok {
-			return nil, fmt.Errorf("coro: validated raw function-address argument lost its static function target")
-		}
-		canonical, resolved, resolveErr := canonicalizer.resolve(target)
+		canonical, resolveErr := flow.rawFunctionAddressTarget(use)
 		if resolveErr != nil {
-			return nil, fmt.Errorf("coro: resolve raw function-address entry %q: %w", target.Name(), resolveErr)
+			return nil, fmt.Errorf("coro: resolve raw function-address entry: %w", resolveErr)
 		}
-		if !resolved || canonical == nil || !includedSet[canonical] || canonical.Signature == nil ||
+		if canonical == nil || !includedSet[canonical] || canonical.Signature == nil ||
 			len(canonical.FreeVars) != 0 || canonical.Blocks == nil {
-			return nil, fmt.Errorf("coro: raw function-address entry %q is not one owned non-capturing Go body", target.Name())
+			name := "<nil>"
+			if canonical != nil {
+				name = canonical.Name()
+			}
+			return nil, fmt.Errorf("coro: raw function-address entry %q is not one owned non-capturing Go body", name)
 		}
 		rawFunctionAddressEntries[canonical] = struct{}{}
+		rawFunctionAddressTargets[use] = canonical
 	}
 	conditionalStores, err := classifySSAConditionalManagedStoreReferences(
 		bodyFunctions, includedSet, canonicalizer, flow, config,
@@ -1677,6 +1743,19 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 				}
 				common := call.Common()
 				if _, builtin := common.Value.(*ssa.Builtin); builtin {
+					spawn, spawned := call.(*ssa.Go)
+					target := staticSpawnTargets[spawn]
+					if !spawned || target == nil {
+						continue
+					}
+					targetID, included := ids[target]
+					if !included {
+						return nil, fmt.Errorf("coro: builtin spawn carrier %q in %q is outside the compilation plan", target.Name(), caller.Name())
+					}
+					callKinds[call] = CallSpawn
+					if err := graph.AddCall(CallEdge{Caller: ids[caller], Callee: targetID, Kind: CallSpawn}); err != nil {
+						return nil, err
+					}
 					continue
 				}
 				kind := ssaCallKind(call)
@@ -1989,6 +2068,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		elidedCalls:             elidedCallSet,
 		elidedCallCertificates:  elidedCallCertificates,
 		rawAddressArgs:          make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)),
+		rawAddressTargets:       make(map[ssaCallArgumentUse]FunctionID, len(rawFunctionAddressCallArguments)),
 		codeAddressArgs:         make(map[ssaCallArgumentUse]struct{}, len(staticCodeAddressCallArguments)),
 		conditionalStores:       make(map[*ssa.Store]*ssa.Function, len(conditionalStores)),
 		safeFixedArrayIndexes:   safeFixedArrayIndexes,
@@ -2028,6 +2108,12 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	for _, use := range rawFunctionAddressCallArguments {
 		result.rawAddressArgs[use] = struct{}{}
+		target := rawFunctionAddressTargets[use]
+		id, identified := ids[target]
+		if target == nil || !identified {
+			return nil, fmt.Errorf("coro: validated raw function-address target is absent from the FunctionID table")
+		}
+		result.rawAddressTargets[use] = id
 	}
 	for _, use := range staticCodeAddressCallArguments {
 		result.codeAddressArgs[use] = struct{}{}
@@ -2620,6 +2706,13 @@ func classifySSAManagedValueReferences(
 					index, owner.Name(), target.Name(),
 				)
 			}
+			target, err = resolveSSAManagedFunctionValueTarget(config.ResolveManagedFunctionValue, target)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"coro: resolve managed function-value reference %d in %q: %w",
+					index, owner.Name(), err,
+				)
+			}
 			canonical, resolved, resolveErr := canonicalizer.resolve(target)
 			if resolveErr != nil {
 				return nil, nil, fmt.Errorf(
@@ -2758,6 +2851,10 @@ func classifySSAConditionalManagedStoreReferences(
 				if target == nil || store.Parent() != owner || store.Val == nil || !isScalarFuncType(store.Val.Type()) {
 					return nil, fmt.Errorf("coro: conditional managed Store reference in %q is not one exact scalar function publication", owner.Name())
 				}
+				target, err = resolveSSAManagedFunctionValueTarget(config.ResolveManagedFunctionValue, target)
+				if err != nil {
+					return nil, fmt.Errorf("coro: resolve conditional managed Store adapter in %q: %w", owner.Name(), err)
+				}
 				canonical, resolved, resolveErr := canonicalizer.resolve(target)
 				if resolveErr != nil {
 					return nil, fmt.Errorf("coro: resolve conditional managed Store target %q in %q: %w", target.Name(), owner.Name(), resolveErr)
@@ -2833,13 +2930,16 @@ func addSSAReferenceEdges(
 		syncOnlyDescriptorArguments[use] = struct{}{}
 	}
 	syncOnlyRoots := make(map[int]struct{}, len(syncOnlyArguments)+len(rawPlainArguments))
-	// A source-level Go function converted to one exact raw-C callback type is
-	// an ABI adapter, not a managed publication. Raw and managed transports do
-	// not union in ssaFuncFlow (their physical layouts differ), so remember the
-	// exact conversion edge separately. The classified call argument below owns
-	// the target's RawPlainDemand; suppressing only this operand prevents the
-	// conversion instruction from manufacturing an unrelated managed consumer
-	// while leaving every other use of the source value visible.
+	// A source-level function crossing between an ordinary Go func type and one
+	// exact raw-C callback type at a certified raw callback argument is an ABI
+	// adapter, not a managed publication. This includes both Go -> raw-C and the
+	// inverse named-raw-C -> unnamed-func assignment accepted by Go's type rules.
+	// Raw and managed transports do not union in ssaFuncFlow (their physical
+	// layouts differ), so remember each exact conversion edge separately. The
+	// classified call argument below owns the target's RawPlainDemand;
+	// suppressing only these operands prevents the conversion instructions from
+	// manufacturing unrelated managed consumers while leaving every other use
+	// of the source value visible.
 	rawPlainAdapterOperands := make(map[ssa.Value]ssa.Value, len(rawPlainArguments))
 	allExactPlainArguments := make(map[ssaCallArgumentUse]struct{}, len(syncOnlyArguments)+len(rawPlainArguments))
 	for use := range syncOnlyArguments {
@@ -2872,9 +2972,6 @@ func addSSAReferenceEdges(
 				default:
 					current = nil
 					continue
-				}
-				if !flow.rawCValue(current) || flow.rawCValue(source) {
-					break
 				}
 				if _, exact := exactSSAContextFreeFunctionValue(source); !exact {
 					break
@@ -2947,8 +3044,8 @@ func addSSAReferenceEdges(
 						}
 					}
 					if value, ok := instruction.(ssa.Value); ok && rawPlainAdapterOperands[value] == *operand {
-						// This exact Go -> raw-C conversion is consumed by a
-						// compiler-certified callback boundary. The classified
+						// This exact managed/raw-C transport conversion is consumed
+						// by a compiler-certified callback boundary. The classified
 						// argument already retained its target as RawPlainDemand.
 						continue
 					}
@@ -3047,21 +3144,73 @@ func classifySSAExactDirectPlainCallArguments(
 }
 
 func classifySSARawFunctionAddressCallArguments(functions []*ssa.Function, config SSAConfig) ([]ssaCallArgumentUse, error) {
-	return classifySSAStaticFunctionAddressCallArguments(
-		functions, config.ClassifyRawFunctionAddressCallArgument, "raw function-address",
+	return classifySSAFunctionAddressCallArguments(
+		functions, config.ClassifyRawFunctionAddressCallArgument, "raw function-address", false,
 	)
 }
 
 func classifySSAStaticCodeAddressCallArguments(functions []*ssa.Function, config SSAConfig) ([]ssaCallArgumentUse, error) {
-	return classifySSAStaticFunctionAddressCallArguments(
-		functions, config.ClassifyStaticCodeAddressCallArgument, "static code-address",
+	return classifySSAFunctionAddressCallArguments(
+		functions, config.ClassifyStaticCodeAddressCallArgument, "static code-address", true,
 	)
 }
 
-func classifySSAStaticFunctionAddressCallArguments(
+func classifySSAErasedFunctionInterfaces(
+	functions []*ssa.Function,
+	config SSAConfig,
+) (map[*ssa.MakeInterface]struct{}, error) {
+	result := make(map[*ssa.MakeInterface]struct{})
+	if config.ClassifyErasedFunctionInterface == nil {
+		return result, nil
+	}
+	for _, owner := range functions {
+		for _, block := range owner.Blocks {
+			for _, instruction := range block.Instrs {
+				box, ok := instruction.(*ssa.MakeInterface)
+				if !ok {
+					continue
+				}
+				erased, err := config.ClassifyErasedFunctionInterface(owner, box)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"coro: classify erased function interface in %q: %w",
+						owner.Name(), err,
+					)
+				}
+				if !erased {
+					continue
+				}
+				if box.Parent() != owner || box.X == nil || !isScalarFuncType(box.X.Type()) {
+					return nil, fmt.Errorf(
+						"coro: erased function interface in %q has no exact scalar function operand",
+						owner.Name(),
+					)
+				}
+				if _, exact := box.X.(*ssa.Function); !exact {
+					return nil, fmt.Errorf(
+						"coro: erased function interface in %q is not one static function value",
+						owner.Name(),
+					)
+				}
+				refs := box.Referrers()
+				if refs == nil || len(*refs) != 1 {
+					return nil, fmt.Errorf(
+						"coro: erased function interface in %q does not have one exact consumer",
+						owner.Name(),
+					)
+				}
+				result[box] = struct{}{}
+			}
+		}
+	}
+	return result, nil
+}
+
+func classifySSAFunctionAddressCallArguments(
 	functions []*ssa.Function,
 	classify func(*ssa.Function, ssa.CallInstruction, int) (bool, error),
 	kind string,
+	staticOnly bool,
 ) ([]ssaCallArgumentUse, error) {
 	var result []ssaCallArgumentUse
 	if classify == nil {
@@ -3093,9 +3242,15 @@ func classifySSAStaticFunctionAddressCallArguments(
 					if !ok {
 						return nil, fmt.Errorf("coro: trusted %s argument %d in %q must be a MakeInterface", kind, argument, caller.Name())
 					}
-					target, ok := boxed.X.(*ssa.Function)
-					if !ok || len(target.FreeVars) != 0 {
+					if boxed.X == nil || !isScalarFuncType(boxed.X.Type()) {
 						return nil, fmt.Errorf("coro: trusted %s argument %d in %q must contain a static function without captured state", kind, argument, caller.Name())
+					}
+					if staticOnly {
+						if target, ok := boxed.X.(*ssa.Function); !ok || len(target.FreeVars) != 0 {
+							return nil, fmt.Errorf("coro: trusted %s argument %d in %q must contain a static function without captured state", kind, argument, caller.Name())
+						}
+					} else if _, exact := exactSSAContextFreeFunctionValue(boxed.X); !exact {
+						return nil, fmt.Errorf("coro: trusted %s argument %d in %q must contain one exact context-free function value", kind, argument, caller.Name())
 					}
 					refs := boxed.Referrers()
 					if refs == nil || len(*refs) != 1 || (*refs)[0] != direct {
@@ -3209,6 +3364,10 @@ func classifySSAClosedDynamicCalls(
 					}
 					if target.Prog != caller.Prog {
 						return nil, fmt.Errorf("coro: closed dynamic call certificate in %q targets function %q from another SSA program", caller.Name(), target.Name())
+					}
+					target, err = resolveSSAManagedFunctionValueTarget(config.ResolveManagedFunctionValue, target)
+					if err != nil {
+						return nil, fmt.Errorf("coro: resolve closed dynamic managed adapter in %q: %w", caller.Name(), err)
 					}
 					canonical, resolved, resolveErr := canonicalizer.resolve(target)
 					if resolveErr != nil {
@@ -3338,11 +3497,12 @@ func classifySSAStaticSpawnTargets(
 					return nil, fmt.Errorf("coro: redirected spawn in %q has no call operands", caller.Name())
 				}
 				raw, direct := common.Value.(*ssa.Function)
-				if spawn.Parent() != caller || !direct || raw == nil ||
-					common.StaticCallee() != raw || common.IsInvoke() || common.Method != nil {
-					return nil, fmt.Errorf("coro: redirected spawn in %q is not one exact direct static function call", caller.Name())
+				_, builtin := common.Value.(*ssa.Builtin)
+				if spawn.Parent() != caller || common.IsInvoke() || common.Method != nil ||
+					direct && (raw == nil || common.StaticCallee() != raw) || !direct && !builtin {
+					return nil, fmt.Errorf("coro: redirected spawn in %q is not one exact direct static call or builtin operation", caller.Name())
 				}
-				if target == nil || target == raw || target.Prog != caller.Prog {
+				if target == nil || direct && target == raw || target.Prog != caller.Prog {
 					return nil, fmt.Errorf("coro: redirected spawn in %q has no distinct same-program target", caller.Name())
 				}
 				canonical, resolved, resolveErr := canonicalizer.resolve(target)
@@ -3360,7 +3520,7 @@ func classifySSAStaticSpawnTargets(
 				if signature == nil || signature.Recv() != nil || signature.Variadic() ||
 					typeParamListLen(signature.TypeParams()) != 0 ||
 					typeParamListLen(signature.RecvTypeParams()) != 0 ||
-					!types.Identical(common.Signature(), signature) {
+					direct && !types.Identical(common.Signature(), signature) {
 					return nil, fmt.Errorf("coro: redirected spawn target %q in %q does not preserve the exact source signature", target.Name(), caller.Name())
 				}
 				if len(common.Args) != signature.Params().Len() {
@@ -3573,6 +3733,80 @@ func canonicalizeSSADynamicCandidates(
 		}
 		if len(canonicalTargets) != 0 {
 			result[call] = canonicalTargets
+		}
+	}
+	return result, nil
+}
+
+// resolveSSAManagedDynamicCandidates projects CHA's source-declaration set
+// into the physical managed function-value domain. A foreign declaration can
+// be called statically and can also appear as a raw C code pointer, but it is
+// not itself a Go descriptor target: the frontend-provided Go adapter is.
+//
+// Raw-C callee values deliberately retain their declarations. Their transport
+// is one code pointer and their invocation belongs to the foreign boundary,
+// not to the managed descriptor ABI.
+func resolveSSAManagedDynamicCandidates(
+	candidates map[ssa.CallInstruction]map[*ssa.Function]struct{},
+	canonicalizer *ssaFunctionCanonicalizer,
+	resolver SSAManagedFunctionValueResolver,
+	classifyRawCFunctionType func(types.Type) (bool, error),
+) (map[ssa.CallInstruction]map[*ssa.Function]struct{}, error) {
+	if len(candidates) == 0 || resolver == nil {
+		return candidates, nil
+	}
+	result := make(map[ssa.CallInstruction]map[*ssa.Function]struct{}, len(candidates))
+	for call, sourceTargets := range candidates {
+		managed := true
+		if call != nil && call.Common() != nil && !call.Common().IsInvoke() &&
+			classifyRawCFunctionType != nil {
+			rawC, err := classifyRawCFunctionType(call.Common().Value.Type())
+			if err != nil {
+				caller := "<unknown>"
+				if call.Parent() != nil {
+					caller = call.Parent().Name()
+				}
+				return nil, fmt.Errorf(
+					"coro: classify dynamic callee transport in %q while resolving managed candidates: %w",
+					caller, err,
+				)
+			}
+			managed = !rawC
+		}
+		resolvedTargets := make(map[*ssa.Function]struct{}, len(sourceTargets))
+		for source := range sourceTargets {
+			target := source
+			if managed {
+				var err error
+				target, err = resolveSSAManagedFunctionValueTarget(resolver, source)
+				if err != nil {
+					caller := "<unknown>"
+					if call != nil && call.Parent() != nil {
+						caller = call.Parent().Name()
+					}
+					return nil, fmt.Errorf(
+						"coro: resolve managed dynamic candidate %q for call in %q: %w",
+						source.Name(), caller, err,
+					)
+				}
+			}
+			canonical, ok, err := canonicalizer.resolve(target)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"coro: canonicalize resolved dynamic candidate %q: %w",
+					target.Name(), err,
+				)
+			}
+			if ok {
+				resolvedTargets[canonical] = struct{}{}
+			} else {
+				// Preserve an excluded sentinel so DynamicCHAClosed cannot turn a
+				// partially unresolved set into a closed call.
+				resolvedTargets[target] = struct{}{}
+			}
+		}
+		if len(resolvedTargets) != 0 {
+			result[call] = resolvedTargets
 		}
 	}
 	return result, nil

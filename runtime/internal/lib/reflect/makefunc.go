@@ -43,17 +43,9 @@ type funcData struct {
 }
 
 func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
-	return makeFunc(typ, false, fn)
-}
-
-func makeFunc(typ Type, method bool, fn func(args []Value) (results []Value)) Value {
 	if typ.Kind() != Func {
 		panic("reflect: call of MakeFunc with non-Func type")
 	}
-	if method {
-		panic("reflect: internal error: MakeFunc method bridge is unsupported")
-	}
-
 	t := typ.common()
 	ftyp := (*funcType)(unsafe.Pointer(t))
 	entryArgs := make([]*ffi.Type, 0, len(ftyp.In)+3)

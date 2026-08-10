@@ -21,6 +21,7 @@ package cl
 import (
 	"bytes"
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"regexp"
@@ -661,6 +662,25 @@ func TestCoroPureSSAStringComparisonsUseExactHelperInventory(t *testing.T) {
 	}
 }
 
+func TestCoroPureSSAConstantStringComparisonElidesRuntimeHelper(t *testing.T) {
+	value := ssa.NewConst(constant.MakeString("darwin"), types.Typ[types.String])
+	comparison := &ssa.BinOp{Op: token.EQL, X: value, Y: value}
+	var helpers []string
+	(&EmissionUniverse{}).binOpRuntimeHelpers(&context{}, comparison, func(names ...string) {
+		helpers = append(helpers, names...)
+	})
+	if len(helpers) != 0 {
+		t.Fatalf("constant string comparison helpers = %v, want none", helpers)
+	}
+	semantic, err := planCoroSemanticInstruction(comparison)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !semantic.outcomePlainLeaf {
+		t.Fatal("constant string comparison was not classified as an outcome-plain leaf")
+	}
+}
+
 func TestCoroPureSSASignedShiftUsesExplicitStatusOutcome(t *testing.T) {
 	prog, _, universe, root, audit, _ := prepareCoroFrameRootAudit(t, `package foo
 func Root(value uint64, count int) uint64 { return value >> count }
@@ -734,6 +754,37 @@ func TestCoroPureSSAComplexArithmeticUsesExactDivisionHelper(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestCoroPureSSAComplexNegationIsInline(t *testing.T) {
+	prog, _, universe, root, audit, _ := prepareCoroFrameRootAudit(
+		t, "package foo\nfunc Root(value complex128) complex128 { return -value }\n", "Root", EmissionUniverseOptions{},
+	)
+	defer prog.Dispose()
+	var operation *ssa.UnOp
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.UnOp); ok && candidate.Op == token.SUB {
+				operation = candidate
+			}
+		}
+	}
+	if operation == nil {
+		t.Fatal("fixture has no complex negation")
+	}
+	if helpers := universe.loweredRuntimeHelpers(audit.ctx, operation); len(helpers) != 0 {
+		t.Fatalf("complex negation helpers = %v, want none", helpers)
+	}
+	if handled, reason := audit.validate(operation); !handled || reason != "" {
+		t.Fatalf("complex negation validation = handled %t, reason %q; want true, empty", handled, reason)
+	}
+	semantic, err := planCoroSemanticInstruction(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !semantic.outcomePlainLeaf {
+		t.Fatal("complex negation was not classified as an outcome-plain leaf")
 	}
 }
 

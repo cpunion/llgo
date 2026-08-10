@@ -155,24 +155,30 @@ attributes #1 = { noinline }
 	}
 }
 
-func TestLowerLargeAggregatePreservesClosureContextAttribute(t *testing.T) {
+func TestLowerLargeAggregatePreservesClosureEnvAttribute(t *testing.T) {
 	const testIR = `
 %Large = type [65537 x i8]
 
-define %Large @callee(ptr nest %ctx) {
+define %Large @callee(ptr nest %env) {
 entry:
   ret %Large zeroinitializer
 }
 
-define void @caller(ptr %ctx) {
+define %Large @calleeSwift(ptr swiftself %env) {
 entry:
-  %unused = call %Large @callee(ptr nest %ctx)
+  ret %Large zeroinitializer
+}
+
+define void @caller(ptr %env) {
+entry:
+  %unused = call %Large @callee(ptr nest %env)
+  %unusedSwift = call %Large @calleeSwift(ptr swiftself %env)
   ret void
 }
 `
 	ctx := llvm.NewContext()
 	defer ctx.Dispose()
-	path := filepath.Join(t.TempDir(), "large_closure_context.ll")
+	path := filepath.Join(t.TempDir(), "large_closure_env.ll")
 	if err := os.WriteFile(path, []byte(testIR), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -198,13 +204,23 @@ entry:
 	if attr := callee.GetEnumAttributeAtIndex(1, nest); !attr.IsNil() {
 		t.Fatalf("large return lowering left nest on the new sret parameter:\n%s", callee.String())
 	}
+	swiftself := llvm.AttributeKindID("swiftself")
+	calleeSwift := mod.NamedFunction("calleeSwift")
+	if attr := calleeSwift.GetEnumAttributeAtIndex(2, swiftself); attr.IsNil() {
+		t.Fatalf("large return lowering lost swiftself after inserting sret:\n%s", calleeSwift.String())
+	}
 
 	caller := mod.NamedFunction("caller")
-	var nestedCall llvm.Value
+	var nestedCall, swiftselfCall llvm.Value
 	for block := caller.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
 		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
-			if call := instruction.IsACallInst(); !call.IsNil() && call.CalledValue().Name() == "callee" {
-				nestedCall = call
+			if call := instruction.IsACallInst(); !call.IsNil() {
+				switch call.CalledValue().Name() {
+				case "callee":
+					nestedCall = call
+				case "calleeSwift":
+					swiftselfCall = call
+				}
 			}
 		}
 	}
@@ -214,7 +230,10 @@ entry:
 	if attr := nestedCall.GetCallSiteEnumAttribute(2, nest); attr.IsNil() {
 		t.Fatalf("large return call lowering lost nest after inserting sret:\n%s", caller.String())
 	}
+	if swiftselfCall.IsNil() || swiftselfCall.GetCallSiteEnumAttribute(2, swiftself).IsNil() {
+		t.Fatalf("large return call lowering lost swiftself after inserting sret:\n%s", caller.String())
+	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
-		t.Fatalf("large-return closure-context module is invalid: %v\n%s", err, mod.String())
+		t.Fatalf("large-return closure-env module is invalid: %v\n%s", err, mod.String())
 	}
 }

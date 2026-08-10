@@ -192,6 +192,10 @@ type EmissionUniverse struct {
 	linkOnceNames          map[*ssa.Function]string
 	callWraps              map[intrinsicWrapperKey]*ssa.Function
 	callWrapInfo           map[*ssa.Function]intrinsicWrapperKey
+	builtinSpawnWraps      map[builtinSpawnWrapperKey]*ssa.Function
+	builtinSpawnWrapInfo   map[*ssa.Function]builtinSpawnWrapperKey
+	managedForeignWraps    map[*ssa.Function]*ssa.Function
+	managedForeignWrapInfo map[*ssa.Function]*ssa.Function
 	syntheticKeys          map[*ssa.Function]string
 	linkIdentities         map[*ssa.Function]string
 	excluded               map[*ssa.Function]none
@@ -207,6 +211,7 @@ type EmissionUniverse struct {
 	plainLoweredCalls      map[*ssa.Function]map[string]*ssa.Function
 	localityDispatchers    map[*ssa.Package]map[llssa.Locality]*ssa.Function
 	coroProgramIR          *coroProgramIR
+	closureEnvironments    coroClosureEnvironmentProjection
 	patchInitEntries       []*ssa.Function
 	patchInitRedirects     coroPatchInitRedirectIndex
 	normalReturnBlocks     map[*ssa.Function]map[*ssa.BasicBlock]none
@@ -477,6 +482,11 @@ type intrinsicWrapperKey struct {
 	intrinsic *ssa.Function
 }
 
+type builtinSpawnWrapperKey struct {
+	owner *ssa.Package
+	spawn *ssa.Go
+}
+
 type emissionFunctionOwnerKey struct {
 	function *ssa.Function
 	owner    *preparedEmissionPackage
@@ -511,6 +521,10 @@ const (
 	// caller owns the suspension and never invokes that implementation on an
 	// executor thread.
 	CoroCallElidedCgoWorker
+	// CoroCallElidedPython replaces one exact compiler-recognized Python call
+	// or Python value-construction intrinsic with an owner-preserving same-M
+	// episode. The source declaration has no managed Go body.
+	CoroCallElidedPython
 )
 
 // CoroCallSitePlan is the immutable ProgramIR projection for one exact SSA
@@ -539,6 +553,10 @@ type CoroCallSitePlan struct {
 	// frozen edge directly; it must not recover the target from a symbol name
 	// or from the source call after ProgramIR construction.
 	CgoWorkerTarget *ssa.Function
+	// PythonTarget is the exact frontend InPython declaration selected by a
+	// Python operation. It is nil for compiler-owned pyList/pyTuple/pyStr
+	// intrinsics and every non-Python call.
+	PythonTarget *ssa.Function
 	// RawPlain selects the exact target's separately planned native-stack body.
 	// It is reserved for a source-certified RawCritical call and is orthogonal
 	// to intrinsic elision: the source call remains visible, but contributes
@@ -690,6 +708,10 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		linkOnceNames:           make(map[*ssa.Function]string),
 		callWraps:               make(map[intrinsicWrapperKey]*ssa.Function),
 		callWrapInfo:            make(map[*ssa.Function]intrinsicWrapperKey),
+		builtinSpawnWraps:       make(map[builtinSpawnWrapperKey]*ssa.Function),
+		builtinSpawnWrapInfo:    make(map[*ssa.Function]builtinSpawnWrapperKey),
+		managedForeignWraps:     make(map[*ssa.Function]*ssa.Function),
+		managedForeignWrapInfo:  make(map[*ssa.Function]*ssa.Function),
 		syntheticKeys:           make(map[*ssa.Function]string),
 		abiMethodReferences:     make(map[*ssa.Function]map[*ssa.Function]none),
 		abiSyncReferences:       make(map[*ssa.Function]map[*ssa.Function]none),
@@ -698,6 +720,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		plainLoweredCalls:       make(map[*ssa.Function]map[string]*ssa.Function),
 		localityDispatchers:     make(map[*ssa.Package]map[llssa.Locality]*ssa.Function),
 		coroProgramIR:           newCoroProgramIR(),
+		closureEnvironments:     newCoroClosureEnvironmentProjection(),
 		patchInitRedirects:      make(coroPatchInitRedirectIndex),
 		normalReturnBlocks:      make(map[*ssa.Function]map[*ssa.BasicBlock]none),
 		unsafeLayoutUnevaluated: make(map[*ssa.Function]map[ssa.Instruction]none),
@@ -1710,10 +1733,14 @@ func (u *EmissionUniverse) FunctionBackground(fn *ssa.Function) (background llss
 				return 0, false, fmt.Errorf("emission universe function background: canonical intrinsic %q has no frozen compiler opcode for owner %q", canonical.Name(), owner.identity)
 			}
 		} else if kind != ignoredFunc {
-			// Intrinsic function-value wrappers are exact synthetic Go functions.
-			// Their frozen synthetic provenance replaces a managed declaration key.
+			// Compiler-owned intrinsic, builtin-spawn, and managed-foreign
+			// wrappers are exact
+			// synthetic Go functions. Their frozen synthetic provenance replaces a
+			// managed declaration key.
 			_, intrinsicWrapper := u.callWrapInfo[canonical]
-			if kind != goFunc || !intrinsicWrapper || u.syntheticKeys[canonical] == "" {
+			_, builtinSpawnWrapper := u.builtinSpawnWrapInfo[canonical]
+			_, managedForeignWrapper := u.managedForeignWrapInfo[canonical]
+			if kind != goFunc || !intrinsicWrapper && !builtinSpawnWrapper && !managedForeignWrapper || u.syntheticKeys[canonical] == "" {
 				return 0, false, fmt.Errorf("emission universe function background: canonical function %q has no frozen managed-symbol metadata for owner %q", canonical.Name(), owner.identity)
 			}
 		}
@@ -1952,6 +1979,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			)
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoAsm:
+		if err := verifyCoroAsmCallSite(direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoAlloca:
 		args := direct.Common().Args
 		signature := direct.Common().Signature()
@@ -2058,6 +2090,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoStringData:
 		if err := verifyCoroStringDataShape(direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoClosureEnv:
+		if err := verifyCoroClosureEnvShape(direct); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
@@ -2260,6 +2297,140 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			"emission universe intrinsic call semantics: inline intrinsic %q has no exact call-site verifier", callee.Name(),
 		)
 	}
+}
+
+func verifyCoroAsmCallSite(call *ssa.Call) error {
+	const (
+		plainShape = "func(string)"
+		fullShape  = "func(string, map[string]any) uintptr"
+	)
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+		call.Common().Method != nil {
+		return fmt.Errorf("llgo.asm requires an exact direct call")
+	}
+	common := call.Common()
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		signature.Params() == nil || signature.Params().Len() != len(common.Args) ||
+		(len(common.Args) != 1 && len(common.Args) != 2) {
+		return fmt.Errorf(
+			"llgo.asm call %q requires the exact %s or %s shape",
+			call.String(), plainShape, fullShape,
+		)
+	}
+	stringType := func(typ types.Type) bool {
+		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+		return ok && basic.Kind() == types.String
+	}
+	if !stringType(signature.Params().At(0).Type()) ||
+		common.Args[0] == nil || !stringType(common.Args[0].Type()) ||
+		!types.Identical(signature.Params().At(0).Type(), common.Args[0].Type()) {
+		return fmt.Errorf("llgo.asm call %q first argument is not string-shaped", call.String())
+	}
+	asmString, constantInstruction := constStr(common.Args[0])
+	if !constantInstruction {
+		return fmt.Errorf("llgo.asm call %q requires a compile-time instruction string", call.String())
+	}
+	results := signature.Results()
+	if len(common.Args) == 1 {
+		if results != nil && results.Len() != 0 {
+			return fmt.Errorf("llgo.asm call %q requires the exact %s shape", call.String(), plainShape)
+		}
+		return nil
+	}
+
+	registerMapType, ok := types.Unalias(signature.Params().At(1).Type()).Underlying().(*types.Map)
+	if !ok || !types.Identical(signature.Params().At(1).Type(), common.Args[1].Type()) {
+		return fmt.Errorf("llgo.asm call %q requires the exact %s shape", call.String(), fullShape)
+	}
+	key, ok := types.Unalias(registerMapType.Key()).Underlying().(*types.Basic)
+	if !ok || key.Kind() != types.String {
+		return fmt.Errorf("llgo.asm call %q requires the exact %s shape", call.String(), fullShape)
+	}
+	element, ok := types.Unalias(registerMapType.Elem()).Underlying().(*types.Interface)
+	if !ok || !element.Empty() || results == nil || results.Len() != 1 {
+		return fmt.Errorf("llgo.asm call %q requires the exact %s shape", call.String(), fullShape)
+	}
+	result, ok := types.Unalias(results.At(0).Type()).Underlying().(*types.Basic)
+	if !ok || result.Kind() != types.Uintptr || !types.Identical(call.Type(), results.At(0).Type()) {
+		return fmt.Errorf("llgo.asm call %q requires the exact %s shape", call.String(), fullShape)
+	}
+
+	if nilMap, ok := common.Args[1].(*ssa.Const); ok && nilMap.IsNil() {
+		if asmRegisterRegex.MatchString(asmString) {
+			return fmt.Errorf("llgo.asm call %q references named registers but has a nil register map", call.String())
+		}
+		return nil
+	}
+	registerMap, ok := common.Args[1].(*ssa.MakeMap)
+	if !ok {
+		return fmt.Errorf("llgo.asm call %q register map is not an exact map literal", call.String())
+	}
+	refs := registerMap.Referrers()
+	if refs == nil {
+		return fmt.Errorf("llgo.asm call %q register map has no exact SSA uses", call.String())
+	}
+	registers := make(map[string]ssa.Value)
+	for _, reference := range *refs {
+		switch reference := reference.(type) {
+		case *ssa.DebugRef:
+			continue
+		case *ssa.Call:
+			if reference != call {
+				return fmt.Errorf("llgo.asm call %q register map escapes to another call", call.String())
+			}
+		case *ssa.MapUpdate:
+			if reference.Block() != registerMap.Block() {
+				return fmt.Errorf("llgo.asm call %q register map update is outside its creation block", call.String())
+			}
+			name, constantName := constStr(reference.Key)
+			if !constantName {
+				return fmt.Errorf("llgo.asm call %q register name is not a compile-time string", call.String())
+			}
+			boxed, exactBox := reference.Value.(*ssa.MakeInterface)
+			if !exactBox || boxed.X == nil {
+				return fmt.Errorf("llgo.asm call %q register %q is not an exact interface value", call.String(), name)
+			}
+			registers[name] = boxed.X
+		default:
+			return fmt.Errorf(
+				"llgo.asm call %q register map has unsupported SSA use %T",
+				call.String(), reference,
+			)
+		}
+	}
+	for _, placeholder := range asmRegisterRegex.FindAllString(asmString, -1) {
+		name := placeholder[1 : len(placeholder)-1]
+		value, found := registers[name]
+		if !found {
+			return fmt.Errorf("llgo.asm call %q has no value for register %q", call.String(), name)
+		}
+		basic, ok := types.Unalias(value.Type()).Underlying().(*types.Basic)
+		if !ok || basic.Info()&types.IsInteger == 0 {
+			return fmt.Errorf("llgo.asm call %q register %q is not integer-shaped", call.String(), name)
+		}
+	}
+	return nil
+}
+
+func verifyCoroClosureEnvShape(call *ssa.Call) error {
+	const shape = "func() unsafe.Pointer"
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+		call.Common().Method != nil || len(call.Common().Args) != 0 {
+		return fmt.Errorf("llgo.closureEnv requires an exact direct %s call", shape)
+	}
+	signature := call.Common().Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		signature.Params() != nil && signature.Params().Len() != 0 ||
+		signature.Results() == nil || signature.Results().Len() != 1 {
+		return fmt.Errorf("llgo.closureEnv call %q requires the exact %s shape", call.String(), shape)
+	}
+	result, ok := types.Unalias(signature.Results().At(0).Type()).Underlying().(*types.Basic)
+	if !ok || result.Kind() != types.UnsafePointer ||
+		!types.Identical(call.Type(), signature.Results().At(0).Type()) {
+		return fmt.Errorf("llgo.closureEnv call %q requires the exact %s shape", call.String(), shape)
+	}
+	return nil
 }
 
 func verifyCoroExactVoidIntrinsicCallSite(call *ssa.Call, name string) error {
@@ -2616,6 +2787,28 @@ func (u *EmissionUniverse) CoroStaticCodeAddressCallArgument(call ssa.CallInstru
 	return true, nil
 }
 
+func coroFuncAddrExactContextFreeTarget(value ssa.Value) (*ssa.Function, bool) {
+	for value != nil {
+		switch current := value.(type) {
+		case *ssa.Function:
+			return current, len(current.FreeVars) == 0
+		case *ssa.MakeClosure:
+			if len(current.Bindings) != 0 {
+				return nil, false
+			}
+			target, ok := current.Fn.(*ssa.Function)
+			return target, ok && target != nil && len(target.FreeVars) == 0
+		case *ssa.ChangeType:
+			value = current.X
+		case *ssa.Convert:
+			value = current.X
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
 func (u *EmissionUniverse) validateCoroFuncAddrCallSite(direct *ssa.Call) (*ssa.MakeInterface, *ssa.Function, error) {
 	if direct == nil || direct.Common() == nil || direct.Common().IsInvoke() {
 		return nil, nil, fmt.Errorf("emission universe intrinsic call semantics: llgo.funcAddr must be an exact direct call")
@@ -2656,10 +2849,14 @@ func (u *EmissionUniverse) validateCoroFuncAddrCallSite(direct *ssa.Call) (*ssa.
 			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires a direct MakeInterface function operand", direct.String(),
 		)
 	}
-	target, ok := boxed.X.(*ssa.Function)
-	if !ok || len(target.FreeVars) != 0 {
+	if boxed.X == nil {
 		return nil, nil, fmt.Errorf(
-			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires MakeInterface{X:*ssa.Function} without captured state", direct.String(),
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires one exact context-free function value", direct.String(),
+		)
+	}
+	if _, functionValue := types.Unalias(boxed.X.Type()).Underlying().(*types.Signature); !functionValue {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires one exact context-free function value", direct.String(),
 		)
 	}
 	refs := boxed.Referrers()
@@ -2668,10 +2865,13 @@ func (u *EmissionUniverse) validateCoroFuncAddrCallSite(direct *ssa.Call) (*ssa.
 			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires its MakeInterface operand to have this exact sole consumer", direct.String(),
 		)
 	}
-	if canonical, resolved := u.Resolve(target); !resolved || canonical == nil {
-		return nil, nil, fmt.Errorf(
-			"emission universe intrinsic call semantics: llgo.funcAddr call %q targets function %q outside the frozen emission universe", direct.String(), target.Name(),
-		)
+	target, exact := coroFuncAddrExactContextFreeTarget(boxed.X)
+	if exact {
+		if canonical, resolved := u.Resolve(target); !resolved || canonical == nil {
+			return nil, nil, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.funcAddr call %q targets function %q outside the frozen emission universe", direct.String(), target.Name(),
+			)
+		}
 	}
 	return boxed, target, nil
 }
@@ -2722,6 +2922,13 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// cstr accepts only a compile-time string literal and lowers directly
 		// to an LLVM constant C string pointer.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoAsm:
+		// asm is an explicit compiler intrinsic: the declaration call disappears
+		// and cl emits the constant instruction plus its literal register map as
+		// LLVM inline assembly. It owns no scheduler edge. Arbitrary assembly can
+		// still consume CPU indefinitely, just like arbitrary straight-line
+		// computation; preemption remains the surrounding function's concern.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoAlloca:
 		// alloca has no callable edge. It remains an ordinary synchronous
 		// intrinsic so callers that use it entirely inside a plain island do not
@@ -2758,6 +2965,10 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// boolToUint8 lowers to one select between the constant byte values
 		// zero and one. The compiler consumes the declaration completely.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoClosureEnv:
+		// closureEnv projects the compiler-owned environment parameter of the
+		// current entry. It emits neither a call nor scheduler state.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoAllocaCStr, llgoAllocaCStrs:
 		// The C-string allocation intrinsics lower their size arithmetic and
 		// storage directly, then call runtime.AllocU/CStrCopy in a physical
@@ -2789,8 +3000,9 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// are selected only by LLSSA lowering, never by effect inference.
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoFuncAddr:
-		// funcAddr structurally unwraps one exact MakeInterface{X:*ssa.Function}
-		// and emits the selected raw function entry address directly.
+		// funcAddr structurally unwraps one exact MakeInterface containing a
+		// closed context-free singleton and emits the selected raw function entry
+		// address directly. No runtime function-pointer introspection is needed.
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoFuncPCABI0:
 		// funcPCABI0 selects the raw entry PC from a static function operand or
@@ -5889,7 +6101,46 @@ func (u *EmissionUniverse) materializeFunction(fn *ssa.Function) (bool, error) {
 	return progress, nil
 }
 
+func builtinSpawnCarrierSignature(common *ssa.CallCommon) (*types.Signature, error) {
+	if common == nil || common.Value == nil {
+		return nil, fmt.Errorf("builtin spawn carrier requires one exact call")
+	}
+	if _, ok := common.Value.(*ssa.Builtin); !ok || common.IsInvoke() || common.Method != nil {
+		return nil, fmt.Errorf("builtin spawn carrier requires one receiver-free builtin call")
+	}
+	source := common.Signature()
+	if source == nil || source.Recv() != nil ||
+		typeParamCount(source.TypeParams()) != 0 || typeParamCount(source.RecvTypeParams()) != 0 {
+		return nil, fmt.Errorf("builtin spawn carrier has an unsupported effective signature")
+	}
+	parameters := make([]*types.Var, len(common.Args))
+	for index, argument := range common.Args {
+		if argument == nil || argument.Type() == nil {
+			return nil, fmt.Errorf("builtin spawn carrier argument %d has no exact type", index)
+		}
+		name := ""
+		if index < source.Params().Len() {
+			name = source.Params().At(index).Name()
+		}
+		parameters[index] = types.NewVar(token.NoPos, nil, name, argument.Type())
+	}
+	return types.NewSignatureType(
+		nil,
+		nil,
+		nil,
+		types.NewTuple(parameters...),
+		source.Results(),
+		false,
+	), nil
+}
+
 func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *preparedEmissionPackage, emissionState emissionFunctionState) error {
+	freezeClosureEnvironment := func(target *ssa.Function, targetOwner *preparedEmissionPackage) error {
+		return u.freezeCoroClosureEnvironment(target, targetOwner)
+	}
+	if err := freezeClosureEnvironment(fn, owner); err != nil {
+		return fmt.Errorf("prepare emission universe: function %q closure environment: %w", fn.Name(), err)
+	}
 	u.freezeUnsafeLayoutUnevaluatedSSA(fn)
 	ctx, err := u.functionABIContext(fn, owner)
 	if err != nil {
@@ -5942,8 +6193,16 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		return err
 	}
 	for _, child := range fn.AnonFuncs {
-		if _, err := u.addResolvedRequired(child, owner, fn, emissionState); err != nil {
+		child, err := u.addResolvedRequired(child, owner, fn, emissionState)
+		if err != nil {
 			return err
+		}
+		childOwner := u.ownerOf(child)
+		if childOwner == nil {
+			childOwner = owner
+		}
+		if err := freezeClosureEnvironment(child, childOwner); err != nil {
+			return fmt.Errorf("prepare emission universe: child function %q closure environment: %w", child.Name(), err)
 		}
 	}
 	materializeTarget := func(target *ssa.Function, directCall bool) error {
@@ -5954,7 +6213,15 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		if err != nil {
 			return err
 		}
-		if directCall || !u.isIntrinsic(canonicalTarget, owner) {
+		if directCall {
+			return nil
+		}
+		if adapted, err := u.materializeManagedForeignFunctionValueAdapter(canonicalTarget, owner); err != nil {
+			return err
+		} else if adapted {
+			return nil
+		}
+		if !u.isIntrinsic(canonicalTarget, owner) {
 			return nil
 		}
 		if opcode, exact, opcodeErr := u.coroIntrinsicOpcode(canonicalTarget); opcodeErr != nil {
@@ -5990,6 +6257,44 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		u.fnOwners[wrapper] = owner
 		u.fnStates[wrapper] = emissionState
 		u.addRequired(wrapper, owner)
+		return nil
+	}
+	materializeBuiltinSpawn := func(spawn *ssa.Go) error {
+		if owner == nil || spawn == nil || spawn.Common() == nil {
+			return fmt.Errorf("builtin spawn wrapper requires one exact owner and source call")
+		}
+		builtin, ok := spawn.Common().Value.(*ssa.Builtin)
+		if !ok || builtin == nil {
+			return fmt.Errorf("builtin spawn wrapper source is not a builtin call")
+		}
+		key := builtinSpawnWrapperKey{owner: owner.ssa, spawn: spawn}
+		wrapper := u.builtinSpawnWraps[key]
+		if wrapper == nil {
+			signature, err := builtinSpawnCarrierSignature(spawn.Common())
+			if err != nil {
+				return err
+			}
+			effectiveSignature := u.effectiveType(owner, spawn.Parent(), signature, false)
+			structuralKey, err := builtinSpawnWrapperStructuralKey(
+				key, owner, u.finalIdentity(spawn.Parent()), effectiveSignature,
+			)
+			if err != nil {
+				return err
+			}
+			wrapperName := builtin.Name() + "$wrapper$llgo$builtin-spawn$v1$" + emissionDigest(structuralKey)
+			wrapper = ssawrap.MakeValueCallWrapperNamed(u.goProg, builtin, signature, wrapperName)
+			u.builtinSpawnWraps[key] = wrapper
+			u.builtinSpawnWrapInfo[wrapper] = key
+			u.syntheticKeys[wrapper] = structuralKey
+		}
+		if err := u.recordFunctionKind(wrapper, owner, goFunc); err != nil {
+			return err
+		}
+		if u.fnOwners[wrapper] == nil {
+			u.fnOwners[wrapper] = owner
+		}
+		u.fnStates[wrapper] = emissionState
+		u.addRequiredWithState(wrapper, owner, emissionState)
 		return nil
 	}
 	if isCgo {
@@ -6043,6 +6348,16 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				return err
 			}
 			if call, ok := instr.(ssa.CallInstruction); ok {
+				if spawn, spawned := call.(*ssa.Go); spawned {
+					if _, builtin := spawn.Common().Value.(*ssa.Builtin); builtin {
+						if err := materializeBuiltinSpawn(spawn); err != nil {
+							return fmt.Errorf(
+								"materialize builtin spawn %q in %q: %w",
+								spawn.Common().String(), fn.String(), err,
+							)
+						}
+					}
+				}
 				roots, err := u.callValueRoots(ctx, call.Common())
 				if err != nil {
 					return fmt.Errorf("prepare emission universe: function %q: %w", fn.Name(), err)
@@ -6089,10 +6404,15 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				if !ok || target == nil {
 					continue
 				}
-				if err := materializeTarget(target, false); err != nil {
+				directFunction := false
+				if change, converted := instr.(*ssa.ChangeType); converted && change.X == target {
+					effective := u.effectiveType(owner, fn, change.Type(), false)
+					directFunction = u.prog.TypeBackground(effective) == llssa.InC
+				}
+				if err := materializeTarget(target, directFunction); err != nil {
 					return fmt.Errorf(
-						"materialize %T %q operand function %q: %w",
-						instr, instr.String(), target.String(), err,
+						"materialize %T %q operand function %q (direct=%t): %w",
+						instr, instr.String(), target.String(), directFunction, err,
 					)
 				}
 			}
@@ -7369,6 +7689,38 @@ func (u *EmissionUniverse) intrinsicWrapperStructuralKey(info intrinsicWrapperKe
 	), nil
 }
 
+func builtinSpawnWrapperStructuralKey(
+	info builtinSpawnWrapperKey,
+	owner *preparedEmissionPackage,
+	parentIdentity string,
+	effectiveSignature types.Type,
+) (string, error) {
+	if info.owner == nil || info.spawn == nil || info.spawn.Common() == nil ||
+		info.spawn.Parent() == nil || info.spawn.Block() == nil {
+		return "", fmt.Errorf("builtin spawn wrapper has no exact owner and source call")
+	}
+	if owner == nil || owner.ssa != info.owner || parentIdentity == "" || effectiveSignature == nil {
+		return "", fmt.Errorf("builtin spawn wrapper owner is absent from the emission universe")
+	}
+	builtin, ok := info.spawn.Common().Value.(*ssa.Builtin)
+	if !ok || builtin == nil {
+		return "", fmt.Errorf("builtin spawn wrapper source is not an exact builtin call")
+	}
+	ordinal, err := coro.SemanticInstructionOrdinal(info.spawn)
+	if err != nil {
+		return "", fmt.Errorf("identify builtin spawn wrapper source: %w", err)
+	}
+	return framedEmissionKey(
+		"llgo-builtin-spawn-wrapper-v1",
+		owner.identity,
+		parentIdentity,
+		strconv.Itoa(info.spawn.Block().Index),
+		strconv.Itoa(ordinal),
+		builtin.Name(),
+		structuralEmissionTypeKey(effectiveSignature),
+	), nil
+}
+
 type emissionGlobalPhysicalCandidate struct {
 	global         *ssa.Global
 	owner          *preparedEmissionPackage
@@ -7668,6 +8020,30 @@ func (u *EmissionUniverse) freezeFunctionIdentities() error {
 	}
 	for wrapper, info := range u.callWrapInfo {
 		key, err := u.intrinsicWrapperStructuralKey(info)
+		if err != nil {
+			return err
+		}
+		u.syntheticKeys[wrapper] = key
+	}
+	for wrapper, info := range u.builtinSpawnWrapInfo {
+		owner := u.packages[info.owner]
+		signature, err := builtinSpawnCarrierSignature(info.spawn.Common())
+		if err != nil {
+			return err
+		}
+		key, err := builtinSpawnWrapperStructuralKey(
+			info,
+			owner,
+			u.finalIdentity(info.spawn.Parent()),
+			u.effectiveType(owner, info.spawn.Parent(), signature, false),
+		)
+		if err != nil {
+			return err
+		}
+		u.syntheticKeys[wrapper] = key
+	}
+	for wrapper, target := range u.managedForeignWrapInfo {
+		key, err := u.managedForeignFunctionValueWrapperStructuralKey(target, u.ownerOf(wrapper))
 		if err != nil {
 			return err
 		}
@@ -8318,6 +8694,44 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 			ownerPath = owner.identity
 		}
 		return framedEmissionKey("llgo-intrinsic-call-wrapper-v1", ownerPath, emissionFunctionSortKey(info.intrinsic))
+	}
+	if info, ok := u.builtinSpawnWrapInfo[fn]; ok {
+		if key := u.syntheticKeys[fn]; key != "" {
+			return key
+		}
+		owner := u.packages[info.owner]
+		if signature, err := builtinSpawnCarrierSignature(info.spawn.Common()); err == nil {
+			if key, err := builtinSpawnWrapperStructuralKey(
+				info,
+				owner,
+				u.finalIdentity(info.spawn.Parent()),
+				u.effectiveType(owner, info.spawn.Parent(), signature, false),
+			); err == nil {
+				return key
+			}
+		}
+		ownerPath := ""
+		if owner != nil {
+			ownerPath = owner.identity
+		}
+		return framedEmissionKey(
+			"llgo-builtin-spawn-wrapper-v1",
+			ownerPath,
+			emissionFunctionSortKey(info.spawn.Parent()),
+			info.spawn.String(),
+		)
+	}
+	if target, ok := u.managedForeignWrapInfo[fn]; ok {
+		if key := u.syntheticKeys[fn]; key != "" {
+			return key
+		}
+		if key, err := u.managedForeignFunctionValueWrapperStructuralKey(target, u.ownerOf(fn)); err == nil {
+			return key
+		}
+		return framedEmissionKey(
+			"llgo-managed-foreign-function-value-wrapper-v1",
+			emissionFunctionSortKey(target),
+		)
 	}
 	owner := u.ownerOf(fn)
 	if owner != nil {

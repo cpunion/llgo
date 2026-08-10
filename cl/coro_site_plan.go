@@ -523,6 +523,8 @@ func (p *context) observeCoroPhysicalOperation(instruction ssa.Instruction, actu
 	observer.seenPhysicalOperation = true
 	if actual == coroPhysicalOperationWorkerCgo {
 		p.recordCoroCallElision(CoroCallElidedCgoWorker)
+	} else if actual == coroPhysicalOperationSameMPython {
+		p.recordCoroCallElision(CoroCallElidedPython)
 	}
 }
 

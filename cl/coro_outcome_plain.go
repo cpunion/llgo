@@ -302,6 +302,8 @@ func (p *context) compileCoroStaticOutcomeCall(
 	}
 	p.emitPCLineLabel(b, call.Pos())
 	args := p.compileValues(b, call.Call.Args, p.funcKind(call.Call.Value))
+	source, _ := call.Call.Value.(*ssa.Function)
+	args = p.compileManagedGoLinknameCallArguments(b, source, callee, args)
 	entry := p.mustFunctionSymbol(callee)
 	sourceSig, err := p.emissionUniverse.coroPhysicalSourceSignature(callee)
 	if err != nil {
@@ -371,6 +373,9 @@ func (p *context) compileCoroStaticOutcomeCall(
 	b.Unreachable()
 	b.SetBlockContinuation(returned)
 	value := p.loadCoroAwaitResult(b, resultSlot, sourceSig.Results())
-	p.recordCoroValueAddress(call, p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()))
+	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, value)
+	if !retagged {
+		p.recordCoroValueAddress(call, p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()))
+	}
 	return value
 }

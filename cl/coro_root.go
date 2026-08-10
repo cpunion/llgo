@@ -211,10 +211,10 @@ func coroRootSuspendingEdges(plan *coro.SSAPlan, fn *ssa.Function) string {
 // runtime and outlive this native wrapper invocation; the factory merely loads
 // scalar arguments and calls the root's unique coroutine ramp.
 func (p *context) emitCoroRootFactory(pkg llssa.Package, entry plannedFunctionSymbol, abi coroPhysicalABI, sourceSig *types.Signature, ramp llssa.Function) {
-	if p.compilation == nil || p.compilation.CoroPlan == nil {
+	if p.compilation == nil || p.immutablePlan() == nil {
 		panic("coroutine root factory requires a compilation CoroPlan")
 	}
-	root, ok := explicitCoroFactoryRoot(p.compilation.CoroPlan, entry.function)
+	root, ok := explicitCoroFactoryRoot(p.immutablePlan(), entry.function)
 	if !ok {
 		return
 	}

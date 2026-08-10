@@ -44,17 +44,17 @@ func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Cal
 			p.observeCoroCallElision(CoroCallElidedPatchRedirect)
 		}
 	}()
-	if p.goFn == nil || call.Parent() != p.goFn || p.compilation.CoroPlan == nil || b.Func != p.fn {
+	if p.goFn == nil || call.Parent() != p.goFn || p.immutablePlan() == nil || b.Func != p.fn {
 		panic("coroutine patch initializer replacement requires its exact active owner and SSA plan")
 	}
-	if !p.compilation.CoroPlan.ElidesCall(call) {
+	if !p.immutablePlan().ElidesCall(call) {
 		panic("coroutine patch initializer replacement source occurrence is not frontend-elided in the SSA plan")
 	}
-	frozen, planned := p.compilation.CoroPlan.ResolveLoweredCallRecord(p.goFn, logicalName)
+	frozen, planned := p.immutablePlan().ResolveLoweredCallRecord(p.goFn, logicalName)
 	if !planned || frozen.Target != target || frozen.NoUnwind || frozen.RawPlain || frozen.UnwindOnly || frozen.ExplicitStatusElided {
 		panic("coroutine patch initializer replacement disagrees between the emission universe and SSA plan")
 	}
-	targetPlan, planned := p.compilation.CoroPlan.FunctionPlan(target)
+	targetPlan, planned := p.immutablePlan().FunctionPlan(target)
 	if !planned || targetPlan.External != coro.Defined || targetPlan.Demand == coro.NoDemand {
 		panic("coroutine patch initializer replacement targets an unavailable function")
 	}
@@ -70,7 +70,7 @@ func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Cal
 		case coro.EmitPlain:
 			fn, _, kind = p.compileManagedFunction(target)
 		case coro.EmitCoroutine:
-			if !p.compilation.CoroPlan.HasRawPlainVariant(target) {
+			if !p.immutablePlan().HasRawPlainVariant(target) {
 				panic("raw plain patch initializer replacement has no exact raw target variant")
 			}
 			fn, _, kind = p.compileRawPlainFunction(target)

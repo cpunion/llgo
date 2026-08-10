@@ -59,7 +59,7 @@ const (
 	ProgramStepFlagInternalRuntimeInitV2 uint32 = 1 << iota
 	ProgramStepFlagCompilerABIInitV2
 	ProgramStepFlagPublicRuntimeInitV2
-	ProgramStepFlagMainPackageInitV2
+	ProgramStepFlagPackageInitV2
 	ProgramStepFlagMainV2
 )
 
@@ -100,7 +100,7 @@ type ProgramStepV1 struct {
 
 // ProgramBootstrapV2 and ProgramStepV2 reuse the pointer-size-neutral v1
 // physical layouts. ProgramBootstrapV2 is distinguished by Version == 2 and
-// by its exact five-role step program.
+// by its ordered startup program.
 type ProgramBootstrapV2 = ProgramBootstrapV1
 type ProgramStepV2 = ProgramStepV1
 
@@ -404,20 +404,40 @@ type ResolvedProgramStepV2 struct {
 
 const validatedProgramMagicV2 uint32 = 0x42535432 // "BST2"
 
-// ProgramViewV2 is an immutable, allocation-free snapshot of the five startup
-// actions. Its contents are private so only successful validation can produce
-// a resolvable value.
+// ProgramViewV2 is an allocation-free identity and digest of a validated
+// startup program. Compiler-emitted tables are immutable. Resolve nevertheless
+// revalidates and compares the digest so a synthetic mutable table fails closed
+// instead of silently changing the action represented by an existing view.
 type ProgramViewV2 struct {
-	magic               uint32
-	factory             unsafe.Pointer
-	internalRuntimeInit ResolvedProgramStepV2
-	compilerABIInit     ResolvedProgramStepV2
-	publicRuntimeInit   ResolvedProgramStepV2
-	mainPackageInit     ResolvedProgramStepV2
-	main                ResolvedProgramStepV2
+	magic     uint32
+	manifest  *ProgramManifestV1
+	bootstrap *ProgramBootstrapV1
+	factory   unsafe.Pointer
+	steps     unsafe.Pointer
+	stepCount uintptr
+	digestLo  uint64
+	digestHi  uint64
 }
 
-const programStepCountV2 uintptr = 5
+const programStepMinimumV2 uintptr = 5
+
+func programStepRoleV2(index, count uintptr) (uint32, bool) {
+	if count < programStepMinimumV2 || index >= count {
+		return 0, false
+	}
+	switch index {
+	case 0:
+		return ProgramStepFlagInternalRuntimeInitV2, true
+	case 1:
+		return ProgramStepFlagCompilerABIInitV2, true
+	case 2:
+		return ProgramStepFlagPublicRuntimeInitV2, true
+	case count - 1:
+		return ProgramStepFlagMainV2, true
+	default:
+		return ProgramStepFlagPackageInitV2, true
+	}
+}
 
 // programCatalogValidationV2 translates validation of the shared v1 physical
 // package/descriptor catalog into the independent v2 result namespace.
@@ -507,9 +527,60 @@ func resolveValidatedProgramStepV2(
 	}
 }
 
+// mixProgramDigestV2 is a small non-cryptographic mixer for compiler-owned
+// constant startup data. The two independent words make accidental equality
+// across a changed raw step or resolved descriptor extremely unlikely without
+// adding a hash dependency or allocation to process entry.
+func mixProgramDigestV2(lo, hi, value uint64) (uint64, uint64) {
+	lo ^= value
+	lo *= 1099511628211
+	hi ^= value + 0x9e3779b97f4a7c15 + hi<<6 + hi>>2
+	hi = hi<<31 | hi>>33
+	hi *= 0x9ddfea08eb382d69
+	return lo, hi
+}
+
+func programStepsDigestV2(
+	manifest *ProgramManifestV1, bootstrap *ProgramBootstrapV1,
+) (uint64, uint64, ProgramValidationCodeV2) {
+	lo := uint64(14695981039346656037)
+	hi := uint64(0x6eed0e9da4d94a4f)
+	lo, hi = mixProgramDigestV2(lo, hi, uint64(bootstrap.StepCount))
+	lo, hi = mixProgramDigestV2(lo, hi, bootstrap.HashLo)
+	lo, hi = mixProgramDigestV2(lo, hi, bootstrap.HashHi)
+	lo, hi = mixProgramDigestV2(lo, hi, uint64(uintptr(bootstrap.Factory)))
+	for index := uintptr(0); index < bootstrap.StepCount; index++ {
+		role, ok := programStepRoleV2(index, bootstrap.StepCount)
+		if !ok {
+			return 0, 0, ProgramValidationStepCountV2
+		}
+		raw := programStepAtV1(bootstrap.Steps, index)
+		resolved, code := resolveValidatedProgramStepV2(manifest, raw, role)
+		if code != ProgramValidationOKV2 {
+			return 0, 0, code
+		}
+		values := [...]uint64{
+			uint64(index),
+			uint64(raw.Kind),
+			uint64(raw.Flags),
+			uint64(uintptr(raw.Target)),
+			uint64(raw.Aux),
+			uint64(resolved.Kind),
+			uint64(resolved.Flags),
+			uint64(uintptr(resolved.Plain)),
+			uint64(uintptr(unsafe.Pointer(resolved.Descriptor))),
+			uint64(uintptr(resolved.Factory)),
+		}
+		for _, value := range values {
+			lo, hi = mixProgramDigestV2(lo, hi, value)
+		}
+	}
+	return lo, hi, ProgramValidationOKV2
+}
+
 // ValidateRunnableProgramV2 validates the shared manifest and package catalog,
-// then the exact five-role heterogeneous startup program. It binds the table to
-// expectedFactory by pointer identity and snapshots every resolved action.
+// then the variable-length heterogeneous startup program. It binds the table
+// to expectedFactory by pointer identity and records its resolved digest.
 // Validation performs no allocation and never invokes a target or factory.
 func ValidateRunnableProgramV2(
 	manifest *ProgramManifestV1, expectedFactory unsafe.Pointer,
@@ -557,7 +628,7 @@ func ValidateRunnableProgramV2(
 	if bootstrap.HashLo != manifest.HashLo || bootstrap.HashHi != manifest.HashHi {
 		return ProgramViewV2{}, ProgramValidationBootstrapHashV2
 	}
-	if bootstrap.StepCount != programStepCountV2 {
+	if bootstrap.StepCount < programStepMinimumV2 {
 		return ProgramViewV2{}, ProgramValidationStepCountV2
 	}
 	switch checkedProgramArrayV1(
@@ -581,42 +652,20 @@ func ValidateRunnableProgramV2(
 		return ProgramViewV2{}, ProgramValidationBootstrapFactoryIdentityV2
 	}
 
-	program := ProgramViewV2{
-		magic:   validatedProgramMagicV2,
-		factory: bootstrap.Factory,
-	}
-	var code ProgramValidationCodeV2
-	program.internalRuntimeInit, code = resolveValidatedProgramStepV2(
-		manifest, programStepAtV1(bootstrap.Steps, 0), ProgramStepFlagInternalRuntimeInitV2,
-	)
+	digestLo, digestHi, code := programStepsDigestV2(manifest, bootstrap)
 	if code != ProgramValidationOKV2 {
 		return ProgramViewV2{}, code
 	}
-	program.compilerABIInit, code = resolveValidatedProgramStepV2(
-		manifest, programStepAtV1(bootstrap.Steps, 1), ProgramStepFlagCompilerABIInitV2,
-	)
-	if code != ProgramValidationOKV2 {
-		return ProgramViewV2{}, code
-	}
-	program.publicRuntimeInit, code = resolveValidatedProgramStepV2(
-		manifest, programStepAtV1(bootstrap.Steps, 2), ProgramStepFlagPublicRuntimeInitV2,
-	)
-	if code != ProgramValidationOKV2 {
-		return ProgramViewV2{}, code
-	}
-	program.mainPackageInit, code = resolveValidatedProgramStepV2(
-		manifest, programStepAtV1(bootstrap.Steps, 3), ProgramStepFlagMainPackageInitV2,
-	)
-	if code != ProgramValidationOKV2 {
-		return ProgramViewV2{}, code
-	}
-	program.main, code = resolveValidatedProgramStepV2(
-		manifest, programStepAtV1(bootstrap.Steps, 4), ProgramStepFlagMainV2,
-	)
-	if code != ProgramValidationOKV2 {
-		return ProgramViewV2{}, code
-	}
-	return program, ProgramValidationOKV2
+	return ProgramViewV2{
+		magic:     validatedProgramMagicV2,
+		manifest:  manifest,
+		bootstrap: bootstrap,
+		factory:   bootstrap.Factory,
+		steps:     bootstrap.Steps,
+		stepCount: bootstrap.StepCount,
+		digestLo:  digestLo,
+		digestHi:  digestHi,
+	}, ProgramValidationOKV2
 }
 
 // ResolveProgramStepV2 returns one action from an opaque validated view. It
@@ -625,18 +674,20 @@ func ResolveProgramStepV2(program ProgramViewV2, index uintptr) (ResolvedProgram
 	if program.magic != validatedProgramMagicV2 {
 		return ResolvedProgramStepV2{}, ProgramValidationInvalidViewV2
 	}
-	switch index {
-	case 0:
-		return program.internalRuntimeInit, ProgramValidationOKV2
-	case 1:
-		return program.compilerABIInit, ProgramValidationOKV2
-	case 2:
-		return program.publicRuntimeInit, ProgramValidationOKV2
-	case 3:
-		return program.mainPackageInit, ProgramValidationOKV2
-	case 4:
-		return program.main, ProgramValidationOKV2
-	default:
+	if index >= program.stepCount {
 		return ResolvedProgramStepV2{}, ProgramValidationStepIndexV2
 	}
+	current, code := ValidateRunnableProgramV2(program.manifest, program.factory)
+	if code != ProgramValidationOKV2 || current.bootstrap != program.bootstrap ||
+		current.steps != program.steps || current.stepCount != program.stepCount ||
+		current.digestLo != program.digestLo || current.digestHi != program.digestHi {
+		return ResolvedProgramStepV2{}, ProgramValidationInvalidViewV2
+	}
+	role, ok := programStepRoleV2(index, program.stepCount)
+	if !ok {
+		return ResolvedProgramStepV2{}, ProgramValidationInvalidViewV2
+	}
+	return resolveValidatedProgramStepV2(
+		program.manifest, programStepAtV1(program.steps, index), role,
+	)
 }

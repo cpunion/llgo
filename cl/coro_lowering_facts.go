@@ -46,13 +46,15 @@ func (c *Compilation) BuildCoroLoweringFactsReport() (CoroLoweringFactsReport, e
 		}
 		return CoroLoweringFactsReport{Facts: c.CoroLoweringFacts, Digest: c.CoroLoweringFactsDigest}, nil
 	}
-	if c.CoroPlan == nil {
+	plan := c.immutablePlan()
+	if plan == nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts require a frozen CoroPlan")
 	}
-	if c.EmissionUniverse == nil {
+	universe := c.immutableEmissionUniverse()
+	if universe == nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts require a frozen emission universe")
 	}
-	return c.EmissionUniverse.BuildCoroLoweringFactsReport(c.CoroPlan)
+	return universe.BuildCoroLoweringFactsReport(plan)
 }
 
 // BuildCoroLoweringFactsReport scans only exact functions and owner contexts
@@ -367,6 +369,19 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 			effect = coro.WaitForeign
 			contract = coro.ContractID("llgo.coro.cgo-worker-call.v1")
 		}
+		if found && frozenCall.plan.Elision == CoroCallElidedPython {
+			if frozenCall.failure != "" {
+				return coro.LoweringFact{}, false, fmt.Errorf("invalid frozen Python operation: %s", frozenCall.failure)
+			}
+			if !plan.ElidesCall(call) || frozenCall.plan.ElisionCertificate == "" {
+				return coro.LoweringFact{}, false, fmt.Errorf("Python operation lost its exact frozen elision certificate")
+			}
+			materialized = true
+			class = coro.OpLowered
+			recipe = coro.RecipeID("cl.python.same-m.v1")
+			effect = coro.WaitForeign
+			contract = coro.ContractID("llgo.coro.python-same-m.v1")
+		}
 		if callee := call.Common().StaticCallee(); callee != nil {
 			if _, frozen := u.Resolve(callee); frozen {
 				semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(u, call)
@@ -394,8 +409,9 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 						Targets: []coro.FunctionID{targetID}, Open: false, MayBeNil: false,
 					}}
 				} else if intrinsic && semantics.ElidesManagedCall() {
-					if found && frozenCall.plan.Elision == CoroCallElidedCgoWorker {
-						return coro.LoweringFact{}, false, fmt.Errorf("cgo worker call is also classified as an intrinsic")
+					if found && (frozenCall.plan.Elision == CoroCallElidedCgoWorker ||
+						frozenCall.plan.Elision == CoroCallElidedPython) {
+						return coro.LoweringFact{}, false, fmt.Errorf("foreign operation is also classified as an intrinsic")
 					}
 					if !plan.ElidesCall(call) {
 						return coro.LoweringFact{}, false, fmt.Errorf("elided intrinsic call is not elided by the frozen plan")

@@ -1926,6 +1926,74 @@ var Global struct{ *Base }
 	}
 }
 
+func TestEmissionUniverseManagedFunctionValueIgnoresExcludedFallbackOperand(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	selected := testProg.addPackage(t, "example.com/emission/selected", `package selected
+func Kept() {}
+`)
+	excluded := testProg.addPackage(t, "example.com/emission/excluded", `package excluded
+func FallbackOperand() {}
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: selected.ssa, Files: []*ast.File{selected.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := excluded.ssa.Func("FallbackOperand")
+	target, adapted, err := universe.CoroManagedFunctionValueTarget(source)
+	if err != nil || adapted || target != source {
+		t.Fatalf(
+			"excluded fallback managed function-value target = %v, %t, %v; want original, false, nil",
+			target, adapted, err,
+		)
+	}
+}
+
+func TestEmissionUniverseBoundMethodValueUsesFrozenUseOwnerKind(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	producer := testProg.addPackage(t, "example.com/emission/boundproducer", `package boundproducer
+type Counter struct{}
+func (*Counter) Load() {}
+`)
+	consumer := testProg.addPackage(t, "example.com/emission/boundconsumer", `package boundconsumer
+import producer "example.com/emission/boundproducer"
+func Root(counter *producer.Counter) func() { return counter.Load }
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: producer.ssa, Files: []*ast.File{producer.file}},
+		{SSA: consumer.ssa, Files: []*ast.File{consumer.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for function, owners := range universe.useOwners {
+		if function == nil || function.Name() != "Load$bound" ||
+			!strings.HasPrefix(function.Synthetic, "bound method wrapper for ") {
+			continue
+		}
+		found = true
+		for owner := range owners {
+			kind, frozen := universe.functionKinds[emissionFunctionOwnerKey{function: function, owner: owner}]
+			if !frozen || kind != goFunc {
+				t.Fatalf("bound method wrapper owner %q kind = %d, %t; want goFunc, true", owner.identity, kind, frozen)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("cross-package bound method value produced no exact SSA wrapper")
+	}
+}
+
 func TestEmissionUniverseRejectsPackageMutation(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	pkg := testProg.addPackage(t, "example.com/emission/frozen", `package frozen; func F() {}`)

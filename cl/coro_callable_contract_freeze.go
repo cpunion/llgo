@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	"github.com/goplus/llgo/internal/coro"
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -203,6 +204,13 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 			continue
 		}
 		parsed := defaultCoroForeignDeclarationContract()
+		if isCoroPythonBindingDeclaration(canonical) {
+			// The base Python binding package's C declarations share CPython's
+			// caller-thread interpreter state. This compiler-owned binding catalog
+			// selects the generic same-M mechanism; no symbol/address lookup is
+			// performed by the runtime or propagated through Go callers.
+			parsed = defaultCoroPythonDeclarationContract()
+		}
 		u.callableDefaults[canonical] = none{}
 		annotatedCanonical[canonical] = canonical
 		annotations = append(annotations, exactAnnotation{
@@ -355,6 +363,25 @@ func defaultCoroForeignDeclarationContract() coroCallableContractCertificate {
 		},
 		Scope:     coroCallableContractScopeDeclaration,
 		Canonical: "llgo:coro default foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete",
+	}
+}
+
+func isCoroPythonBindingDeclaration(fn *ssa.Function) bool {
+	return fn != nil && fn.Pkg != nil && fn.Pkg.Pkg != nil &&
+		fn.Pkg.Pkg.Path() == llssa.PkgPython
+}
+
+func defaultCoroPythonDeclarationContract() coroCallableContractCertificate {
+	return coroCallableContractCertificate{
+		Contract: coro.CallableContract{
+			ID:       coroCallableContractIDForeignV1,
+			Progress: coro.ProgressMayBlock,
+			Affinity: coro.AffinityCallerThread,
+			Reentry:  coro.ReentryNone,
+			Memory:   coro.MemoryBorrowUntilReturn,
+		},
+		Scope:     coroCallableContractScopeDeclaration,
+		Canonical: "llgo:coro python binding.v1 scope=declaration progress=may-block affinity=caller-thread reentry=none memory=borrow-until-return",
 	}
 }
 

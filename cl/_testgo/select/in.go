@@ -1,4 +1,29 @@
+// LITTEST
 package main
+
+// A default select needs only the atomic try operation. A blocking select uses
+// the same case set through try, park, suspension, and resume. Spawned case
+// partners are committed as scheduler tasks, never native NewProc wrappers.
+//
+// CHECK-NOT: NewProc
+// CHECK-NOT: _llgo_routine
+// CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK: call ptr @"main.send$coro"(
+// CHECK: call ptr @"main.recv$coro"(
+// CHECK-LABEL: define ptr @"main.recv$coro"(
+// CHECK-DAG: call { i64, i1, i1, i1 } @"{{.*}}CoroChanSelectTry"(
+// CHECK-DAG: call ptr @__llgo_coro_spawn_begin_v1(
+// CHECK-DAG: call void @__llgo_coro_spawn_commit_v1(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK-LABEL: define ptr @"main.send$coro"(
+// CHECK: call ptr @__llgo_coro_spawn_begin_v1(
+// CHECK: call void @__llgo_coro_spawn_commit_v1(
+// CHECK: call { i64, i1, i1, i1 } @"{{.*}}CoroChanSelectTry"(
+// CHECK: call void @"{{.*}}CoroChanSelectPark"(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK: call { i64, i1, i32 } @"{{.*}}CoroChanSelectResume"(
+// CHECK-NOT: NewProc
+// CHECK-NOT: _llgo_routine
 
 func main() {
 	send()

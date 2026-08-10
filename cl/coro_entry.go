@@ -311,7 +311,8 @@ func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error)
 			fn.Name(),
 		)
 	}
-	frozenIgnored := classified && background == llssa.InC || assemblyCertified || managedBodylessNoBlock || importedLibrary
+	frozenIgnored := classified && (background == llssa.InC || background == llssa.InPython) ||
+		assemblyCertified || managedBodylessNoBlock || importedLibrary
 	if ignored != frozenIgnored {
 		return false, fmt.Errorf("coroutine entry resolution: function %q ignored-body=%t conflicts with frozen frontend background classified=%t kind=%d", fn.Name(), ignored, classified, background)
 	}
@@ -401,7 +402,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			}
 		} else {
 			if err := validateCoroDynamicDispatchTarget(e.function, e.plan, e.emission); err != nil {
-				return err
+				return fmt.Errorf("coroutine entry resolution: validate descriptor target: %w", err)
 			}
 			if e.plan.Emission == coro.EmitPlain {
 				return nil
@@ -529,7 +530,13 @@ func (e plannedFunctionSymbol) sealedPhysicalFunctionPlan() (*coroPhysicalFuncti
 		!e.emission.coroProgramIR.physicalPlansSealed {
 		return nil, fmt.Errorf("physical plan for %q is not sealed", e.plan.ID)
 	}
-	return e.emission.coroProgramIR.physicalFunctionPlan(e.function, e.physicalOwner)
+	// Entry validation and body lowering must resolve the same definition
+	// projection. In particular, syntax-free generated wrappers may publish one
+	// linkonce body from a different use owner while retaining an identical,
+	// already-frozen physical symbol.
+	return (emissionCanonicalIndex{universe: e.emission}).physicalFunctionPlanForEmission(
+		e.function, e.physicalOwner,
+	)
 }
 
 // preflightCoroPlan rejects every unsupported or inconsistent entry before cl

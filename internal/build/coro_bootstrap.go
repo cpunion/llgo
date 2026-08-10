@@ -185,10 +185,11 @@ func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootst
 	return bootstraps, nil
 }
 
-// selectCoroProgramBootstrapV2 freezes the managed five-stage startup program:
-// internal runtime init, compiler ABI init, public runtime init, main-package
-// init, and main. Go bodies retain exactly one primary selected by the plan;
-// compiler-owned stages are bounded direct-plain calls.
+// selectCoroProgramBootstrapV2 freezes the managed startup program: internal
+// runtime init, compiler ABI init, public runtime init, every dependency init
+// in Go initialization order, the main-package init, and main. Go bodies retain
+// exactly one primary selected by the plan; compiler-owned stages are bounded
+// direct-plain calls.
 func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroProgramBootstrapV1, error) {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil, nil
@@ -216,30 +217,38 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 	if err != nil {
 		return nil, err
 	}
-	mainInit := aPkg.SSA.Func("init")
-	mainMain := aPkg.SSA.Func("main")
 	mainSymbolPrefix := aPkg.PkgPath
 	if pkg.Types != nil && pkg.Types.Name() == "main" {
 		mainSymbolPrefix = "main"
 	}
-	steps := make([]coroProgramBootstrapStepV1, 0, 5)
-	for _, spec := range []struct {
-		fn     *ssa.Function
-		target string
-		owner  string
-		label  string
-		role   uint32
-	}{
-		{runtimeInit, llssa.PkgRuntime + ".init", llssa.PkgRuntime, "internal runtime init", coroProgramStepRoleRuntimeInitV2},
-		{mainInit, mainSymbolPrefix + ".init", aPkg.PkgPath, "main package init", coroProgramStepRolePackageInitV2},
-		{mainMain, mainSymbolPrefix + ".main", aPkg.PkgPath, "main", coroProgramStepRoleMainV2},
-	} {
-		step, err := selectCoroProgramManagedStepV2(ctx, spec.fn, spec.target, spec.owner, spec.label, spec.role)
+	packageInits, err := packageInitEntries(pkg, func(imported *packages.Package) Package {
+		return contextPackage(ctx, imported)
+	})
+	if err != nil {
+		return nil, err
+	}
+	patchInits, err := coroProgramPatchInitializersByOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
+	steps := make([]coroProgramBootstrapStepV1, 0, len(packageInits)+5)
+	appendManaged := func(fn *ssa.Function, target, owner, label string, role uint32) error {
+		step, err := selectCoroProgramManagedStepV2(ctx, fn, target, owner, label, role)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		steps = append(steps, step)
+		return nil
 	}
+	if err := appendManaged(runtimeInit, llssa.PkgRuntime+".init", llssa.PkgRuntime, "internal runtime init", coroProgramStepRoleRuntimeInitV2); err != nil {
+		return nil, err
+	}
+	steps = append(steps, coroProgramBootstrapStepV1{
+		Kind:       coroProgramStepDirectPlainV1,
+		Role:       coroProgramStepRoleABIInitV2,
+		FunctionID: "llgo.bootstrap.v2.compiler-abi-init",
+		Target:     "init$abitypes",
+	})
 	publicRuntimeStep := coroProgramBootstrapStepV1{
 		Kind:       coroProgramStepDirectPlainV1,
 		Role:       coroProgramStepRolePublicRuntimeInitV2,
@@ -254,19 +263,37 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 			return nil, err
 		}
 	}
-	// Insert the compiler-owned ABI stage between the internal and public
-	// runtime initializers. It always exists in the entry module; profiles with
-	// no work receive a canonical no-op body. Public runtime initialization is
-	// an exact managed Go body above, never an assumed plain weak stub.
-	steps = append(steps[:1], append([]coroProgramBootstrapStepV1{
-		{
-			Kind:       coroProgramStepDirectPlainV1,
-			Role:       coroProgramStepRoleABIInitV2,
-			FunctionID: "llgo.bootstrap.v2.compiler-abi-init",
-			Target:     "init$abitypes",
-		},
-		publicRuntimeStep,
-	}, steps[1:]...)...)
+	steps = append(steps, publicRuntimeStep)
+	scheduled := map[*ssa.Function]struct{}{runtimeInit: {}}
+	if hasPublicRuntimeInit {
+		scheduled[publicRuntimeInit] = struct{}{}
+	}
+	for _, entry := range packageInits {
+		function, err := canonicalCoroProgramPackageInit(ctx, entry, patchInits)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := scheduled[function]; duplicate {
+			continue
+		}
+		scheduled[function] = struct{}{}
+		owner := coroProgramSourcePackagePath(function.Pkg.Pkg)
+		if err := appendManaged(
+			function,
+			entry.name,
+			owner,
+			"package initializer "+entry.pkg.PkgPath,
+			coroProgramStepRolePackageInitV2,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := appendManaged(aPkg.SSA.Func("init"), mainSymbolPrefix+".init", aPkg.PkgPath, "main package init", coroProgramStepRolePackageInitV2); err != nil {
+		return nil, err
+	}
+	if err := appendManaged(aPkg.SSA.Func("main"), mainSymbolPrefix+".main", aPkg.PkgPath, "main", coroProgramStepRoleMainV2); err != nil {
+		return nil, err
+	}
 	hash, err := coroProgramBootstrapHash(ctx, coroProgramBootstrapVersionV2, steps)
 	if err != nil {
 		return nil, err
@@ -323,6 +350,65 @@ func findCoroProgramFunction(ctx *context, pkgPath, name, label string) (*ssa.Fu
 		return nil, false, fmt.Errorf("coroutine program bootstrap %s %q selected a non-Go body in %q", label, name, pkgPath)
 	}
 	return found, true, nil
+}
+
+// coroProgramPatchInitializersByOwner indexes the exact public initializer of
+// every active patch package. x/tools keeps dependency-init calls pointed at
+// the original package's synthetic init, while the frontend replaces that
+// occurrence with this public patch initializer. Bootstrap selection must
+// consume the same frozen mapping instead of rediscovering it from names.
+func coroProgramPatchInitializersByOwner(ctx *context) (map[string]*ssa.Function, error) {
+	if ctx == nil || ctx.coroEmission == nil {
+		return nil, fmt.Errorf("coroutine package initializer resolution requires a frozen emission universe")
+	}
+	entries, err := ctx.coroEmission.CoroPatchInitEntries()
+	if err != nil {
+		return nil, err
+	}
+	byOwner := make(map[string]*ssa.Function, len(entries))
+	for _, function := range entries {
+		if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil {
+			return nil, fmt.Errorf("coroutine patch initializer has no exact package owner")
+		}
+		owner := coroProgramSourcePackagePath(function.Pkg.Pkg)
+		if owner == "" || function.Name() != "init" {
+			return nil, fmt.Errorf("coroutine patch initializer %q has invalid owner %q or function name", function.Name(), owner)
+		}
+		if previous := byOwner[owner]; previous != nil && previous != function {
+			return nil, fmt.Errorf("coroutine patch package %q has multiple public initializers", owner)
+		}
+		byOwner[owner] = function
+	}
+	return byOwner, nil
+}
+
+func canonicalCoroProgramPackageInit(
+	ctx *context, entry packageInitEntry, patchInits map[string]*ssa.Function,
+) (*ssa.Function, error) {
+	if ctx == nil || ctx.coroEmission == nil || entry.pkg == nil || entry.function == nil {
+		return nil, fmt.Errorf("coroutine package initializer has incomplete frozen identity")
+	}
+	function := patchInits[entry.pkg.PkgPath]
+	if function == nil {
+		var ok bool
+		function, ok = ctx.coroEmission.Resolve(entry.function)
+		if !ok || function == nil {
+			return nil, fmt.Errorf(
+				"coroutine package initializer %s is absent from the frozen emission universe",
+				entry.pkg.PkgPath,
+			)
+		}
+	}
+	if function.Pkg == nil || function.Pkg.Pkg == nil ||
+		coroProgramSourcePackagePath(function.Pkg.Pkg) != entry.pkg.PkgPath ||
+		function.Name() != "init" || function.Parent() != nil || function.Origin() != nil ||
+		len(function.TypeArgs()) != 0 {
+		return nil, fmt.Errorf(
+			"coroutine package initializer %s did not resolve to its exact canonical top-level init",
+			entry.pkg.PkgPath,
+		)
+	}
+	return function, nil
 }
 
 func selectCoroProgramManagedStepV2(

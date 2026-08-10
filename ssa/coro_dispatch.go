@@ -124,7 +124,7 @@ func (p Package) NewCoroPlainDispatchDescriptor(
 	if opts.ThunkName == name {
 		panic("ssa: coroutine plain dispatch descriptor and thunk require distinct symbols")
 	}
-	if strings.HasPrefix(opts.ThunkName, closureStub) {
+	if strings.HasPrefix(opts.ThunkName, legacyClosureStubPrefix) {
 		panic("ssa: coroutine plain dispatch thunk must not reuse the legacy closure stub namespace")
 	}
 	if opts.Result == nil || opts.Result.kind == vkInvalid ||
@@ -137,7 +137,7 @@ func (p Package) NewCoroPlainDispatchDescriptor(
 		panic("ssa: coroutine plain dispatch requires a plain target from the same package module")
 	}
 	targetFn := p.FuncOf(target.Name())
-	if targetFn == nil || targetFn.impl.C != target.C || targetFn.base != 0 {
+	if targetFn == nil || targetFn.impl.C != target.C || targetFn.NeedsEnv() {
 		panic("ssa: coroutine plain dispatch requires a no-capture plain target")
 	}
 	physicalSig := p.Prog.PhysicalFuncDecl(opts.Signature, InGo)
@@ -199,8 +199,8 @@ func (b Builder) CallCoroPlainDispatch(
 	fn Expr, args []Expr, opts CoroPlainDispatchCallOptions,
 ) (ret Expr) {
 	validateCoroPlainDispatchContract(opts.Version, opts.Flags)
-	if fn.IsNil() || fn.kind != vkClosure {
-		panic("ssa: coroutine plain dispatch call requires a closure value")
+	if fn.IsNil() || fn.kind != vkClosure && fn.kind != vkIfaceMethod {
+		panic("ssa: coroutine plain dispatch call requires a function or interface-method pair")
 	}
 	sig, ok := b.Prog.Field(fn.Type, 0).RawType().(*types.Signature)
 	if !ok {
@@ -317,11 +317,34 @@ func (p Package) newCoroPlainDispatchThunk(
 	thunk.impl.SetLinkage(llvm.LinkOnceODRLinkage)
 	thunk.impl.SetUnnamedAddr(true)
 	b := thunk.MakeBody(1)
-	ret := b.Call(target, closureWrapArgs(thunk)...)
-	closureWrapReturn(b, physicalSig, ret)
+	ret := b.Call(target, coroPlainDispatchArgs(thunk)...)
+	coroPlainDispatchReturn(b, physicalSig, ret)
 	b.EndBuild()
 	b.Dispose()
 	return thunk
+}
+
+func coroPlainDispatchArgs(fn Function) []Expr {
+	if len(fn.params) <= 1 {
+		return nil
+	}
+	args := make([]Expr, len(fn.params)-1)
+	for index := 1; index < len(fn.params); index++ {
+		args[index-1] = fn.Param(index)
+	}
+	return args
+}
+
+func coroPlainDispatchReturn(b Builder, sig *types.Signature, ret Expr) {
+	if sig.Results().Len() == 0 {
+		if !ret.impl.IsNil() {
+			ret.impl.SetTailCall(true)
+		}
+		b.impl.CreateRetVoid()
+		return
+	}
+	ret.impl.SetTailCall(true)
+	b.impl.CreateRet(ret.impl)
 }
 
 func (p Package) isCoroPlainDispatchDescriptor(descriptor Expr) bool {

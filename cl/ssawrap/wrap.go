@@ -71,34 +71,79 @@ func MakeCallWrapper(prog *ssa.Program, f *ssa.Function) *ssa.Function {
 // with an explicit SSA/linker name. Frontends use it when multiple distinct
 // callees with the same short Go name need owner-scoped wrappers.
 func MakeCallWrapperNamed(prog *ssa.Program, f *ssa.Function, name string) *ssa.Function {
-	fn := prog.NewFunction(name, f.Signature, "wrapper")
+	parameters := make([]wrapperParameter, len(f.Params))
+	for i, original := range f.Params {
+		parameters[i] = wrapperParameter{
+			name:   original.Name(),
+			object: original.Object(),
+			typ:    original.Type(),
+		}
+	}
+	return makeValueCallWrapperNamed(prog, f, f.Signature, parameters, name)
+}
+
+// MakeValueCallWrapperNamed creates a forwarding wrapper for a callable SSA
+// value whose effective signature is known at one exact call site. It is used
+// for inline-only builtins that must become independently schedulable `go`
+// roots; ordinary function wrappers should continue to use
+// MakeCallWrapperNamed so parameter object identity is preserved.
+func MakeValueCallWrapperNamed(prog *ssa.Program, value ssa.Value, signature *types.Signature, name string) *ssa.Function {
+	parameters := make([]wrapperParameter, 0, signature.Params().Len()+1)
+	if receiver := signature.Recv(); receiver != nil {
+		parameters = append(parameters, wrapperParameter{
+			name: receiver.Name(), object: receiver, typ: receiver.Type(),
+		})
+	}
+	for i := 0; i < signature.Params().Len(); i++ {
+		parameter := signature.Params().At(i)
+		parameters = append(parameters, wrapperParameter{
+			name: parameter.Name(), object: parameter, typ: parameter.Type(),
+		})
+	}
+	return makeValueCallWrapperNamed(prog, value, signature, parameters, name)
+}
+
+type wrapperParameter struct {
+	name   string
+	object types.Object
+	typ    types.Type
+}
+
+func makeValueCallWrapperNamed(
+	prog *ssa.Program,
+	value ssa.Value,
+	signature *types.Signature,
+	parameters []wrapperParameter,
+	name string,
+) *ssa.Function {
+	fn := prog.NewFunction(name, signature, "wrapper")
 	entry := &ssa.BasicBlock{
 		Index:   0,
 		Comment: "entry",
 	}
 	(*_BasicBlock)(unsafe.Pointer(entry)).parent = fn
 	fn.Blocks = append(fn.Blocks, entry)
-	args := make([]ssa.Value, 0, len(f.Params))
-	fn.Params = make([]*ssa.Parameter, len(f.Params))
-	for i, original := range f.Params {
+	args := make([]ssa.Value, 0, len(parameters))
+	fn.Params = make([]*ssa.Parameter, len(parameters))
+	for i, original := range parameters {
 		param := &ssa.Parameter{}
 		parameter := (*_Parameter)(unsafe.Pointer(param))
-		parameter.name = original.Name()
-		parameter.object, _ = original.Object().(*types.Var)
-		parameter.typ = original.Type()
+		parameter.name = original.name
+		parameter.object, _ = original.object.(*types.Var)
+		parameter.typ = original.typ
 		parameter.parent = fn
 		fn.Params[i] = param
 		args = append(args, param)
 	}
 	call := &ssa.Call{
 		Call: ssa.CallCommon{
-			Value: f,
+			Value: value,
 			Args:  args,
 		},
 	}
 	callImpl := (*_Call)(unsafe.Pointer(call))
 	callImpl.block = entry
-	results := f.Signature.Results()
+	results := signature.Results()
 	resultCount := 0
 	if results != nil {
 		resultCount = results.Len()

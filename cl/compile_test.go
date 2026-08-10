@@ -114,6 +114,8 @@ var embedTargetConfigs = []embedTargetConfig{
 				"./_testrt/tpfunc",      // unexpected output: type size mismatch (got 8 4 4, expected 16 8 8)
 				"./_testrt/typalias",    // fast fail: build constraints exclude all Go files
 				"./_testrt/unreachable", // timeout: emulator panic (Instruction access fault), no auto-exit
+
+				"./_testrt/reflectclosureenv", // baseline embedded runtime cannot build this reflect path
 			},
 			"./_testdata": {
 				"./_testdata/debug", // llgo panic: unsatisfied import internal/runtime/sys
@@ -156,6 +158,8 @@ var embedTargetConfigs = []embedTargetConfig{
 				"./_testrt/struct",   // panic: runtime index out of range
 				"./_testrt/tpfunc",   // unexpected output
 				"./_testrt/typalias", // panic: runtime index out of range
+
+				"./_testrt/reflectclosureenv", // baseline embedded runtime cannot build this reflect path
 			},
 			"./_testdata": {
 				"./_testdata/cpkgimp", // unexpected output
@@ -567,11 +571,17 @@ func TestRunAndTestFromTestlibgo(t *testing.T) {
 }
 
 func TestRunAndTestFromTestlibc(t *testing.T) {
-	var ignore []string
+	ignore := []string{
+		// setjmp captures one native stack activation and cannot legally retain
+		// an LLVM stackless coroutine resume point. The physical compiler keeps
+		// this fail-closed in TestNativeSigjmpControlFailsClosedInPhysicalCoroutine;
+		// it is not a Go source/standard-library compatibility requirement.
+		"./_testlibc/setjmp",
+	}
 	if runtime.GOOS == "linux" {
-		ignore = []string{
+		ignore = append(ignore,
 			"./_testlibc/demangle", // Linux demangle symbol differs (itaniumDemangle linkage mismatch).
-		}
+		)
 	}
 	cltest.RunAndTestFromDir(t, "", "./_testlibc", ignore)
 }

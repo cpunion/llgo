@@ -75,6 +75,9 @@ type Options struct {
 	Trace        bool
 	ExportRename bool
 	ShadowStack  bool
+	// PreloadedSyntax means all Program-side source metadata was collected
+	// before lowering and is now shared read-only by backend Programs.
+	PreloadedSyntax bool
 }
 
 func legacyOptions() Options {
@@ -244,7 +247,10 @@ type context struct {
 
 	state   pkgState
 	inCFunc bool
-	skipall bool
+	// inCoroPythonThunk prevents the package-level Python C-API resolver from
+	// recursively wrapping the direct call inside its own typed same-M thunk.
+	inCoroPythonThunk bool
+	skipall           bool
 
 	cgoCalled   bool
 	cgoReturned bool
@@ -496,7 +502,55 @@ func makeClosureCtx(pkg *types.Package, vars []*ssa.FreeVar) *types.Var {
 		flds[i] = types.NewField(token.NoPos, pkg, name, v.Type(), false)
 	}
 	t := types.NewPointer(types.NewStruct(flds, nil))
-	return types.NewParam(token.NoPos, pkg, "__llgo_ctx", t)
+	return types.NewParam(token.NoPos, pkg, "$env", t)
+}
+
+// canElideZeroSizedClosureEnv reports whether a source closure can recreate
+// all of its captured variables from the module's zero-sized sentinel. Go SSA
+// represents a lexical capture as a pointer to the captured variable. Captured
+// zero-sized variables are heap allocated, and LLGo already gives every such
+// allocation the same permitted non-nil sentinel address.
+//
+// A non-synthetic function with a lexical parent is a source closure.
+// Synthetic wrappers are deliberately excluded: a zero-sized method receiver
+// can still carry a semantically significant nil/non-nil pointer value.
+func (p *context) canElideZeroSizedClosureEnv(f *ssa.Function) bool {
+	if p != nil && p.emissionUniverse != nil {
+		return p.emissionUniverse.canElideZeroSizedClosureEnvironment(f)
+	}
+	if f == nil || len(f.FreeVars) == 0 {
+		return false
+	}
+	sourceClosure := f.Parent() != nil && f.Synthetic == ""
+	for _, freeVar := range f.FreeVars {
+		if !p.isElidableZeroSizedFreeVar(freeVar, sourceClosure) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *context) isElidableZeroSizedFreeVar(freeVar *ssa.FreeVar, sourceClosure bool) bool {
+	typ := p.patchType(freeVar.Type())
+	if sourceClosure {
+		ptr, ok := types.Unalias(typ).Underlying().(*types.Pointer)
+		return ok && p.prog.SizeOf(p.type_(ptr.Elem(), llssa.InGo)) == 0
+	}
+	return p.prog.SizeOf(p.type_(typ, llssa.InGo)) == 0
+}
+
+func (p *context) elidedZeroSizedFreeVar(b llssa.Builder, freeVar *ssa.FreeVar) llssa.Expr {
+	patched := p.patchType(freeVar.Type())
+	typ := p.type_(patched, llssa.InGo)
+	if ptr, ok := types.Unalias(patched).Underlying().(*types.Pointer); ok &&
+		p.prog.SizeOf(p.type_(ptr.Elem(), llssa.InGo)) == 0 {
+		addr := b.Alloc(p.type_(ptr.Elem(), llssa.InGo), true)
+		return b.Convert(typ, addr)
+	}
+	if p.prog.SizeOf(typ) != 0 {
+		panic("elided closure free variable is not zero-sized")
+	}
+	return p.prog.Zero(typ)
 }
 
 func isCgoExternSymbol(f *ssa.Function) bool {
@@ -613,7 +667,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	fn, py, kind := p.compileFuncDeclVariant(pkg, f, false)
 	var needsRawTwin bool
 	if entry.planned && entry.plan.Emission == coro.EmitCoroutine && p.compilation != nil {
-		plan := p.compilation.CoroPlan
+		plan := p.immutablePlan()
 		needsRawTwin = plan != nil && plan.HasRawPlainVariant(entry.function)
 	}
 	if needsRawTwin {
@@ -694,26 +748,43 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 	}
 
 	fn := pkg.FuncOf(name)
-	if fn != nil && fn.HasBody() {
-		return fn, nil, goFunc
+	hasFreeVars := len(f.FreeVars) > 0
+	elideFreeVarEnv := p.canElideZeroSizedClosureEnv(f)
+	hasExplicitEnv := false
+	// ParsePkgSyntax is the sole //llgo:env extractor. Lowering only consumes
+	// its source-declaration cache; imported env entries use NewEnvFunc.
+	if decl, ok := f.Syntax().(*ast.FuncDecl); ok {
+		fullName, _ := astFuncName(llssa.PathOf(pkgTypes), decl)
+		hasExplicitEnv = p.prog.HasClosureEnvDirective(p.goProg.Fset, fullName, decl.Pos())
 	}
-
-	var hasCtx = len(f.FreeVars) > 0
-	if hasCtx {
+	hasCtx := hasFreeVars && !elideFreeVarEnv || hasExplicitEnv
+	var ctx *types.Var
+	if elideFreeVarEnv {
+		dbgInstrln("==> NewZeroSizedClosure", name, "type:", sig)
+	} else if hasFreeVars {
 		dbgInstrln("==> NewClosure", name, "type:", sig)
-		ctx := makeClosureCtx(pkgTypes, f.FreeVars)
-		sig = llssa.FuncAddCtx(ctx, sig)
+		ctx = makeClosureCtx(pkgTypes, f.FreeVars)
+	} else if hasExplicitEnv {
+		dbgInstrln("==> NewEnvFunc", name, "type:", sig)
+		ctx = types.NewVar(token.NoPos, nil, "$env", types.Typ[types.UnsafePointer])
 	} else {
 		dbgInstrln("==> NewFunc", name, "type:", sig.Recv(), sig, "ftype:", ftype)
 	}
 	var physicalABI *coroPhysicalABI
 	var outcomePlainABI *outcomePlainPhysicalABI
 	if entry.usesCoroPhysicalABI() {
-		// x/tools exposes a declared method receiver as fn.Params[0]. Normalize
-		// the callable source ABI before adding the two coroutine-owned hidden
-		// parameters so compileValue's sourceParamBase maps every SSA parameter
-		// to the same physical position.
-		sourceSig = coroPhysicalNormalizeSourceSignature(sig)
+		if p.emissionUniverse == nil {
+			panic("coroutine physical entry requires a prepared emission universe")
+		}
+		// The frozen entry signature is the sole authority for both lexical and
+		// explicit closure environments. It also normalizes declared receivers
+		// to x/tools' leading SSA parameter before the coroutine-owned (g,out)
+		// prefix is added.
+		var err error
+		sourceSig, err = p.emissionUniverse.coroPhysicalEntrySourceSignature(f)
+		if err != nil {
+			panic(fmt.Errorf("derive coroutine physical entry signature for %q: %w", entry.plan.ID, err))
+		}
 		abi := newCoroPhysicalABI(p, entry, sourceSig)
 		physicalABI = &abi
 		sig = abi.physicalSig
@@ -726,11 +797,23 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		hasCtx = false
 	}
 	managedPhysicalABI := physicalABI != nil || outcomePlainABI != nil
+	if fn != nil {
+		if fn.NeedsEnv() != hasCtx {
+			panic("conflicting closure environment ABI for " + name)
+		}
+		if fn.HasBody() {
+			return fn, nil, goFunc
+		}
+	}
 	// Always revisit an existing declaration when materializing its body.
-	// NewFuncEx promotes that declaration to linkonce when required; declarations
-	// themselves must retain external linkage because LLVM rejects a bodyless
-	// linkonce global.
-	fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), hasCtx, p.needsLinkOnce(f))
+	// NewFuncEx/NewEnvFunc promote that declaration to linkonce when required;
+	// declarations themselves must retain external linkage because LLVM rejects
+	// a bodyless linkonce global.
+	if hasCtx {
+		fn = pkg.NewEnvFunc(name, sig, llssa.Background(ftype), ctx, p.needsLinkOnce(f))
+	} else {
+		fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), false, p.needsLinkOnce(f))
+	}
 	if entry.hasWasmImport {
 		fn.SetWasmImport(entry.wasmImport.module, entry.wasmImport.name)
 	}
@@ -2039,7 +2122,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			// callback) has a complete singleton target and plain descriptor ABI.
 			// Preserve that exact path before the general raw-body dynamic-call
 			// rejection; open/invoke/method dispatch remains fail-closed.
-			callPlan, planned := p.compilation.CoroPlan.CallPlan(v)
+			callPlan, planned := p.immutablePlan().CallPlan(v)
 			handled := false
 			if planned {
 				switch {
@@ -2107,6 +2190,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("BinOp selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		}
+		if value, ok := foldConstComparison(v); ok {
+			ret = p.prog.BoolVal(value)
+			break
 		}
 		if isUntypedNilConst(v.X) && isUntypedNilConst(v.Y) {
 			switch v.Op {
@@ -2562,32 +2649,39 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		var fn llssa.Expr
 		if target, ok := v.Fn.(*ssa.Function); ok && p.compilation != nil {
+			// Promoted and other link-once wrappers can be represented by more
+			// than one SSA function while the emission universe deliberately
+			// owns only one canonical body.  MakeClosure must use that same
+			// canonical target for both its code word and its frozen environment
+			// plan; resolving only inside compileRawFunctionValue would leave the
+			// environment path looking at the discarded alias.
+			if universe := p.immutableEmissionUniverse(); universe != nil {
+				canonical, required := universe.Resolve(target)
+				if !required || canonical == nil {
+					panic(fmt.Errorf(
+						"coroutine closure target %q is absent from the prepared emission universe",
+						target.Name(),
+					))
+				}
+				target = canonical
+			}
 			// The target's own ValuePlan may require a descriptor at another
 			// producer. MakeClosure still needs the raw body entry; feeding a
 			// descriptor-backed closure to Builder.MakeClosure would reinterpret
 			// the descriptor pointer as executable code.
 			fn = p.compileRawFunctionValue(target)
-			if !p.rawPlainBody && len(target.FreeVars) != 0 && p.compilation.CoroPlan != nil {
-				targetPlan, planned := p.compilation.CoroPlan.FunctionPlan(target)
-				if planned && targetPlan.Emission == coro.EmitCoroutine {
-					if p.emissionUniverse == nil {
-						panic("captured coroutine closure requires a prepared emission universe")
-					}
-					entrySig, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(target)
-					if err != nil {
-						panic(fmt.Errorf("captured coroutine closure %q: %w", targetPlan.ID, err))
-					}
-					// MakeClosure owns only the canonical {code,env} allocation. Retag
-					// the managed (g,out,ctx,args) entry as an opaque (ctx,args)
-					// carrier; no call is emitted through this temporary code word.
-					carrierSig := p.prog.PhysicalFuncDecl(entrySig, llssa.InGo)
-					fn = b.ChangeType(p.prog.Type(carrierSig, llssa.InC), fn)
-				}
+			if value, handled := p.tryCompileCoroDirectClosureValue(b, v, target, fn); handled {
+				ret = value
+				break
 			}
 		} else {
 			fn = p.compileValue(b, v.Fn)
 		}
-		bindings := p.compileValues(b, v.Bindings, 0)
+		var bindings []llssa.Expr
+		goFn, _ := v.Fn.(*ssa.Function)
+		if !p.canElideZeroSizedClosureEnv(goFn) {
+			bindings = p.compileValues(b, v.Bindings, 0)
+		}
 		ret = b.MakeClosure(fn, bindings)
 	case *ssa.TypeAssert:
 		x := p.compileValue(b, v.X)
@@ -2766,6 +2860,20 @@ func isUntypedNilConst(v ssa.Value) bool {
 	return ok && basic.Kind() == types.UntypedNil
 }
 
+func foldConstComparison(v *ssa.BinOp) (bool, bool) {
+	switch v.Op {
+	case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+	default:
+		return false, false
+	}
+	x, xok := v.X.(*ssa.Const)
+	y, yok := v.Y.(*ssa.Const)
+	if !xok || !yok || x.Value == nil || y.Value == nil {
+		return false, false
+	}
+	return constant.Compare(x.Value, v.Op, y.Value), true
+}
+
 func (p *context) nilOf(typ types.Type) llssa.Expr {
 	return p.prog.Nil(p.type_(typ, llssa.InGo))
 }
@@ -2883,7 +2991,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 			return
 		}
 		if p.compilation != nil {
-			plan := p.compilation.CoroPlan
+			plan := p.immutablePlan()
 			if plan != nil && plan.ElidesConditionalManagedStore(v) {
 				// Whole-program analysis proved this exact direct descriptor
 				// publication has no live reader or other target consumer. Avoid
@@ -3149,12 +3257,12 @@ func (p *context) ownsFunctionEmission(v *ssa.Function) bool {
 
 func (p *context) compileManagedFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
 	if p.compilation != nil &&
-		p.compilation.CoroPlan != nil && p.compilation.EmissionUniverse != nil {
-		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
+		p.immutablePlan() != nil && p.immutableEmissionUniverse() != nil {
+		canonical, ok := p.immutableEmissionUniverse().Resolve(v)
 		if !ok || canonical == nil {
 			panic(fmt.Errorf("managed function resolution: function %q is absent from the prepared emission universe", v.Name()))
 		}
-		if plan, planned := p.compilation.CoroPlan.FunctionPlan(canonical); planned && plan.Emission == coro.EmitRawPlain {
+		if plan, planned := p.immutablePlan().FunctionPlan(canonical); planned && plan.Emission == coro.EmitRawPlain {
 			owner := "<unknown>"
 			if p.goFn != nil {
 				owner = p.goFn.String()
@@ -3198,10 +3306,10 @@ func (p *context) compileFunctionEntry(entry plannedFunctionSymbol) (goFn llssa.
 }
 
 func (p *context) compileRawPlainFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
-	if v == nil || p.compilation == nil || p.compilation.CoroPlan == nil || p.compilation.EmissionUniverse == nil {
+	if v == nil || p.compilation == nil || p.immutablePlan() == nil || p.immutableEmissionUniverse() == nil {
 		panic("raw plain function resolution requires an exact function, emission universe, and coroutine plan")
 	}
-	canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
+	canonical, ok := p.immutableEmissionUniverse().Resolve(v)
 	if !ok || canonical == nil {
 		panic(fmt.Errorf("raw plain function resolution: function %q is absent from the prepared emission universe", v.Name()))
 	}
@@ -3217,7 +3325,7 @@ func (p *context) compileRawPlainFunction(v *ssa.Function) (goFn llssa.Function,
 		// emission plan, exactly as managed function resolution does.
 		return p.funcOfEntry(entry)
 	}
-	plan, planned := p.compilation.CoroPlan.FunctionPlan(v)
+	plan, planned := p.immutablePlan().FunctionPlan(v)
 	if !planned {
 		panic(fmt.Errorf("raw plain function resolution: function %q is absent from the compilation plan", v.Name()))
 	}
@@ -3227,7 +3335,7 @@ func (p *context) compileRawPlainFunction(v *ssa.Function) (goFn llssa.Function,
 		// already has the only physical ABI this raw caller needs.
 		return p.compileManagedFunction(v)
 	case coro.EmitRawPlain:
-		if !p.compilation.CoroPlan.HasRawPlainVariant(v) {
+		if !p.immutablePlan().HasRawPlainVariant(v) {
 			panic(fmt.Errorf("raw plain function resolution: raw-only function %q has no planned raw plain body", plan.ID))
 		}
 		if p.ownsFunctionEmission(v) {
@@ -3241,7 +3349,7 @@ func (p *context) compileRawPlainFunction(v *ssa.Function) (goFn llssa.Function,
 		caller := "<none>"
 		if p.goFn != nil {
 			caller = p.goFn.String()
-			if callerPlan, ok := p.compilation.CoroPlan.FunctionPlan(p.goFn); ok {
+			if callerPlan, ok := p.immutablePlan().FunctionPlan(p.goFn); ok {
 				caller = fmt.Sprintf("%s [%s]", caller, callerPlan.ID)
 			}
 		}
@@ -3252,7 +3360,7 @@ func (p *context) compileRawPlainFunction(v *ssa.Function) (goFn llssa.Function,
 	default:
 		panic(fmt.Errorf("raw plain function resolution: function %q has unsupported emission %s", plan.ID, plan.Emission))
 	}
-	if !p.compilation.CoroPlan.HasRawPlainVariant(v) {
+	if !p.immutablePlan().HasRawPlainVariant(v) {
 		panic(fmt.Errorf("raw plain function resolution: managed coroutine %q has no planned raw plain variant", plan.ID))
 	}
 	if p.ownsFunctionEmission(v) {
@@ -3276,6 +3384,9 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 	case *ssa.Function:
 		if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
 			return value
+		}
+		if target, adapted := p.managedFunctionValueTarget(v); adapted {
+			return p.compileRawFunctionValue(target)
 		}
 		value := p.compileRawFunctionValue(v)
 		if facade, handled := p.compileGoLinknameFunctionValueFacade(b, v, value); handled {
@@ -3306,6 +3417,9 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 			if freeVar == v {
 				if value, handled := p.tryCompileCoroFreeVar(b, fn, idx); handled {
 					return value
+				}
+				if p.canElideZeroSizedClosureEnv(fn) {
+					return p.elidedZeroSizedFreeVar(b, v)
 				}
 				return p.fn.FreeVar(b, idx)
 			}
@@ -3595,6 +3709,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	}
 	var prepared *preparedEmissionPackage
 	if opts.Compilation != nil {
+		universe := opts.Compilation.immutableEmissionUniverse()
 		if err := opts.Compilation.preflightCoroPlan(); err != nil {
 			return nil, nil, err
 		}
@@ -3606,8 +3721,8 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 				return nil, nil, err
 			}
 		}
-		if opts.Compilation.EmissionUniverse != nil {
-			prepared, err = opts.Compilation.EmissionUniverse.checkPackage(pkg, files, patches)
+		if universe != nil {
+			prepared, err = universe.checkPackage(pkg, files, patches)
 			if err != nil {
 				return nil, nil, fmt.Errorf("coroutine entry resolution: %w", err)
 			}
@@ -3629,8 +3744,10 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		pkg.Pkg = pkgTypes
 		patch.Alt.Pkg = pkgTypes
 	}
-	if err = ParsePkgSyntax(prog, pkgProg.Fset, pkgTypes, files); err != nil {
-		return nil, nil, err
+	if !options.PreloadedSyntax {
+		if err = ParsePkgSyntaxWithOptions(prog, pkgProg.Fset, pkgTypes, files, options); err != nil {
+			return nil, nil, err
+		}
 	}
 	if err = prog.ValidateLocalitiesFor(pkgTypes); err != nil {
 		return nil, nil, err
@@ -3680,7 +3797,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		logicalCallerFuncs: runtimeLogicalCallerFuncSet(ct, pkg),
 	}
 	if opts.Compilation != nil {
-		ctx.emissionUniverse = opts.Compilation.EmissionUniverse
+		ctx.emissionUniverse = opts.Compilation.immutableEmissionUniverse()
 		ctx.emissionOwner = prepared
 	}
 	ctx.observeCoroPlan()
@@ -3702,6 +3819,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		ret.SetResolveMethodEntry(ctx.resolveMethodEntry)
 		ret.SetResolveInterfaceMethodDescriptor(ctx.resolveInterfaceMethodDescriptor)
 		ret.SetResolveRuntimeCall(ctx.resolveCoroLoweredRuntimeCall)
+		ret.SetResolvePythonCall(ctx.resolveCoroPythonCall)
 	}
 
 	if hasPatch {
@@ -3751,11 +3869,11 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 }
 
 func (p *context) observeCoroPlan() {
-	if p.cacheRegistration || p.compilation == nil || p.compilation.CoroPlan == nil {
+	if p.cacheRegistration || p.compilation == nil || p.immutablePlan() == nil {
 		return
 	}
 	if observer := p.compilation.CoroPlanObserver; observer != nil {
-		observer(p.goPkg, p.compilation.CoroPlan)
+		observer(p.goPkg, p.immutablePlan())
 	}
 }
 
@@ -3764,16 +3882,16 @@ func (p *context) observeCoroPlan() {
 // this path even when a different exact producer for the same SSA target is
 // descriptor-backed.
 func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
-	if p.compilation != nil && p.compilation.EmissionUniverse != nil {
-		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
+	if p.compilation != nil && p.immutableEmissionUniverse() != nil {
+		canonical, ok := p.immutableEmissionUniverse().Resolve(v)
 		if !ok {
 			panic(fmt.Errorf("coroutine entry resolution: function value %q is absent from the prepared emission universe", v.Name()))
 		}
 		v = canonical
 	}
 	if _, _, ftype := p.funcName(v); ftype == llgoInstr {
-		if p.compilation != nil && p.compilation.EmissionUniverse != nil {
-			wrapper, ok := p.compilation.EmissionUniverse.intrinsicWrapper(p.goPkg, v)
+		if p.compilation != nil && p.immutableEmissionUniverse() != nil {
+			wrapper, ok := p.immutableEmissionUniverse().intrinsicWrapper(p.goPkg, v)
 			if !ok {
 				panic(fmt.Errorf("coroutine entry resolution: intrinsic function value %q was not materialized before codegen", v.Name()))
 			}
@@ -4069,6 +4187,13 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 		}
 	}
 	return typ, typ != original
+}
+
+func (p *context) immutablePlan() *coro.SSAPlan {
+	if p == nil || p.compilation == nil {
+		return nil
+	}
+	return p.compilation.immutablePlan()
 }
 
 func (p *context) immutableEmissionUniverse() *EmissionUniverse {

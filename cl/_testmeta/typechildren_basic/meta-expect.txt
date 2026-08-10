@@ -32,14 +32,14 @@ _llgo_string:
 *_llgo_string:
     _llgo_string
     github.com/goplus/llgo/runtime/internal/runtime.memequalptr
-__llgo_coro_root_factory_descriptor_v1.3b075c97321b0f180d585b8164c6f875:
-    __llgo_coro_root_factory_v1.3b075c97321b0f180d585b8164c6f875
-__llgo_coro_root_factory_v1.3b075c97321b0f180d585b8164c6f875:
+__llgo_coro_root_factory_descriptor_v1.8e7286d3fb2e877452a71a7e8e142afc:
+    __llgo_coro_root_factory_v1.8e7286d3fb2e877452a71a7e8e142afc
+__llgo_coro_root_factory_v1.8e7286d3fb2e877452a71a7e8e142afc:
     main.main$coro
-__llgo_coro_root_package_v1.41a13055792baeb946715aa4f7baa88d:
-    __llgo_coro_root_package_v1.41a13055792baeb946715aa4f7baa88d.entries
-__llgo_coro_root_package_v1.41a13055792baeb946715aa4f7baa88d.entries:
-    __llgo_coro_root_factory_descriptor_v1.3b075c97321b0f180d585b8164c6f875
+__llgo_coro_root_package_v1.02e5ae238854b66dc913581f9da6ff18:
+    __llgo_coro_root_package_v1.02e5ae238854b66dc913581f9da6ff18.entries
+__llgo_coro_root_package_v1.02e5ae238854b66dc913581f9da6ff18.entries:
+    __llgo_coro_root_factory_descriptor_v1.8e7286d3fb2e877452a71a7e8e142afc
 _llgo_int:
     *_llgo_int
     github.com/goplus/llgo/runtime/internal/runtime.memequal64
@@ -62,14 +62,14 @@ _llgo_struct$Z-8Mj1VAYg5xS_jUvJKfmUcA_2fP_OEHpanbgA_46rE$fields:
 llvm.compiler.used:
     __llgo_coro_library_effect_v6.3915b734a7ca075d21cecdc003bb6b58
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.3b075c97321b0f180d585b8164c6f875
-    __llgo_coro_root_package_v1.41a13055792baeb946715aa4f7baa88d
+    __llgo_coro_root_factory_descriptor_v1.8e7286d3fb2e877452a71a7e8e142afc
+    __llgo_coro_root_package_v1.02e5ae238854b66dc913581f9da6ff18
 main.init:
     main.init$guard
 main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.3b075c97321b0f180d585b8164c6f875
+    __llgo_coro_frame_descriptor_v1.8e7286d3fb2e877452a71a7e8e142afc
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1

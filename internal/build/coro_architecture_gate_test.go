@@ -109,7 +109,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// Filled from the 2026-07-22 executable fleet checkpoint. These values may
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
 	currentCoro:               0,
-	planAuthority:             351,
+	planAuthority:             296,
 	stagedFeatureGate:         0,
 	legacyWait:                0,
 	nativeFork:                0,
@@ -138,7 +138,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	physicalPlanBuild:         2,
 	physicalPlanFreeze:        1,
 	physicalPlanCommit:        1,
-	physicalPlanLookup:        1,
+	physicalPlanLookup:        0,
 	physicalRecipeSelection:   3,
 	physicalRecipeObservation: 4,
 	physicalGuardObservation:  3,
@@ -346,9 +346,7 @@ var allowedPhysicalPlanCommitFiles = map[string]bool{
 	"cl/coro_entry.go": true,
 }
 
-var allowedPhysicalPlanLookupFiles = map[string]bool{
-	"cl/coro_entry.go": true,
-}
+var allowedPhysicalPlanLookupFiles = map[string]bool{}
 
 var allowedPhysicalRecipeSelectionFiles = map[string]bool{
 	"cl/compile.go": true,

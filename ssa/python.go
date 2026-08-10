@@ -73,7 +73,7 @@ func (p Program) SetPython(py any) {
 
 func (p Package) pyFunc(fullName string, sig *types.Signature) Expr {
 	p.NeedPyInit = true
-	return p.NewFunc(fullName, sig, InC).Expr
+	return p.NewFunc(fullName, sig, InPython).Expr
 }
 
 func (p Program) paramObjPtr() *types.Var {

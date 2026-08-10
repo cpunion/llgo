@@ -245,9 +245,15 @@ func testFrom(t *testing.T, pkgDir, sel string) {
 	if sel != "" && !strings.Contains(pkgDir, sel) {
 		return
 	}
-	spec, err := littest.LoadSpec(pkgDir)
+	spec, checkIR, err := readIRSpec(pkgDir)
 	if err != nil {
 		t.Fatal("LoadSpec failed:", err)
+	}
+	// Runtime-golden fixtures may intentionally omit a coroutine IR spec. They
+	// are exercised by RunAndTestFromDir in cl; the ssa-only FromDir suite has
+	// no additional assertion to make for them.
+	if !checkIR {
+		return
 	}
 	if spec.Mode == littest.ModeSkip {
 		return
@@ -705,7 +711,10 @@ func readIRSpec(pkgDir string) (littest.Spec, bool, error) {
 	spec, err := littest.LoadSpec(pkgDir)
 	if err != nil {
 		var pathErr *os.PathError
-		if errors.Is(err, os.ErrNotExist) && errors.As(err, &pathErr) && filepath.Clean(pathErr.Path) == filepath.Join(pkgDir, "out.ll") {
+		// Callers may pass a relative package directory while os.Open reports an
+		// absolute path (or vice versa). A missing legacy out.ll means this is a
+		// runtime-only fixture; compare the basename rather than path spelling.
+		if errors.Is(err, os.ErrNotExist) && errors.As(err, &pathErr) && filepath.Base(pathErr.Path) == "out.ll" {
 			return littest.Spec{}, false, nil
 		}
 		return littest.Spec{}, false, err

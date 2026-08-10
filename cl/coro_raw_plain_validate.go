@@ -252,7 +252,7 @@ func validateCoroRawPlainLocalDescriptorProducer(plan *coro.SSAPlan, universe *E
 	if plan == nil || owner == nil || instruction == nil {
 		return nil
 	}
-	if box, ok := instruction.(*ssa.MakeInterface); ok && coroCompilerElidedFunctionAddressBox(plan, universe, owner, box) {
+	if box, ok := instruction.(*ssa.MakeInterface); ok && coroCompilerElidedFunctionBox(plan, universe, owner, box) {
 		return nil
 	}
 	if closure, ok := instruction.(*ssa.MakeClosure); ok {
@@ -297,12 +297,17 @@ func validateCoroRawPlainLocalDescriptorProducer(plan *coro.SSAPlan, universe *E
 		if !dispatch {
 			continue
 		}
-		targetPlan, planned := plan.FunctionPlan(function)
+		target, err := coroManagedFunctionValuePlanTarget(plan, universe, function)
+		if err != nil {
+			return coroPlainDispatchInstructionError(owner, instruction,
+				"resolve raw plain descriptor value target: "+err.Error())
+		}
+		targetPlan, planned := plan.FunctionPlan(target)
 		if !planned {
 			return coroPlainDispatchInstructionError(owner, instruction,
-				fmt.Sprintf("raw plain descriptor value target %q has no function plan", function.Name()))
+				fmt.Sprintf("raw plain descriptor value target %q has no function plan", target.Name()))
 		}
-		if err := validateCoroDynamicDispatchTarget(function, targetPlan, universe); err != nil {
+		if err := validateCoroDynamicDispatchTarget(target, targetPlan, universe); err != nil {
 			return coroPlainDispatchInstructionError(owner, instruction,
 				"raw plain descriptor value target: "+err.Error())
 		}
@@ -334,8 +339,40 @@ func coroCompilerElidedFunctionAddressBox(plan *coro.SSAPlan, universe *Emission
 	if !plan.RawFunctionAddressArgument(direct, 0) {
 		return false
 	}
-	validatedBox, target, err := universe.validateCoroFuncAddrCallSite(direct)
-	return err == nil && validatedBox == box && target == box.X
+	validatedBox, _, err := universe.validateCoroFuncAddrCallSite(direct)
+	plannedTarget, planned := plan.RawFunctionAddressTarget(direct, 0)
+	return err == nil && planned && plannedTarget != nil && validatedBox == box
+}
+
+// coroCompilerElidedFunctionBox additionally admits a frozen Python function
+// operand in the synthetic __llgo_va_list side table. The source signature is
+// logically a Go function type, but no Go interface or callable descriptor is
+// emitted: compileVArg passes the frontend's Python object reference directly.
+func coroCompilerElidedFunctionBox(plan *coro.SSAPlan, universe *EmissionUniverse, owner *ssa.Function, box *ssa.MakeInterface) bool {
+	if coroCompilerElidedFunctionAddressBox(plan, universe, owner, box) {
+		return true
+	}
+	if plan == nil || universe == nil || owner == nil || box == nil || box.Parent() != owner {
+		return false
+	}
+	erased, err := universe.CoroErasedFunctionInterface(box)
+	if err != nil || !erased {
+		return false
+	}
+	target, exact := box.X.(*ssa.Function)
+	if !exact || target == nil {
+		return false
+	}
+	canonical, frozen := universe.Resolve(target)
+	if !frozen || canonical == nil {
+		return false
+	}
+	targetID, identified := plan.FunctionID(canonical)
+	value, planned := plan.ValuePlan(box.X)
+	return identified && planned && len(value.Funcs) == 1 &&
+		len(value.Funcs[0].Path) == 0 && value.Funcs[0].Rep == coro.DirectPlain &&
+		!value.Funcs[0].MayBeNil && len(value.Funcs[0].Targets) == 1 &&
+		value.Funcs[0].Targets[0] == targetID
 }
 
 func coroValueIsScalarManagedDispatch(plan *coro.SSAPlan, value ssa.Value) (bool, error) {

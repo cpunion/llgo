@@ -1954,43 +1954,33 @@ func install() {}
 }
 
 func TestCoroPlanInputRejectsUnprovenBodylessRequiredDeclarations(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		directive string
-	}{
-		{name: "Go"},
-		{name: "Python", directive: "//llgo:link bad py.bad\n"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := buildRequiredCoroRuntimeFixture(t, test.directive+`func bad()
+	fixture := buildRequiredCoroRuntimeFixture(t, `func bad()
 func install() { bad() }
 `)
-			if _, ok := fixture.requiredPlain[fixture.pkg.Func("bad")]; !ok {
-				t.Fatalf("bodyless %s declaration did not enter the static required closure", test.name)
-			}
-			if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "has no frozen frontend C ABI proof") {
-				t.Fatalf("bodyless %s required declaration error = %v", test.name, err)
-			}
-		})
+	if _, ok := fixture.requiredPlain[fixture.pkg.Func("bad")]; !ok {
+		t.Fatal("bodyless Go declaration did not enter the static required closure")
+	}
+	if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "has no frozen frontend C ABI proof") {
+		t.Fatalf("bodyless Go required declaration error = %v", err)
 	}
 }
 
-func TestCoroPlanInputRejectsBodyfulNonGoRequiredDeclarations(t *testing.T) {
+func TestRequiredCoroProgramRuntimePlanRejectsPythonOutsideProgramRoot(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		directive string
+		name string
+		body string
 	}{
-		{name: "Python", directive: "//llgo:link bad py.bad\n"},
+		{name: "bodyless", body: "func bad()\n"},
+		{name: "bodyful", body: "func bad() {}\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := buildRequiredCoroRuntimeFixture(t, test.directive+`func bad() {}
-func install() { bad() }
-`)
-			if _, ok := fixture.requiredPlain[fixture.pkg.Func("bad")]; !ok {
-				t.Fatalf("bodyful %s declaration did not enter the exact static required closure", test.name)
-			}
-			if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "has no frozen frontend C ABI proof") {
-				t.Fatalf("bodyful %s required declaration error = %v", test.name, err)
+			fixture := buildRequiredCoroRuntimeFixtureSource(t,
+				requiredCoroPhysicalRuntimeFixture+"//llgo:link bad py.bad\n"+test.body+"func install() { bad() }\n",
+				false,
+			)
+			if _, _, _, _, err := requiredCoroProgramRuntimePlan(fixture.ctx); err == nil ||
+				!strings.Contains(err.Error(), "has no compiler-owned program-root owner realm") {
+				t.Fatalf("Python %s required runtime error = %v", test.name, err)
 			}
 		})
 	}

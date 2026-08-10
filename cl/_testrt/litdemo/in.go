@@ -28,14 +28,10 @@ func add(x, y int) int {
 	return x + y
 }
 
-// CHECK-LABEL: define void @main.main(){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %0 = load i64, ptr @main.seed, align 8
-// CHECK-NEXT:   %1 = call i64 @"main.main$1"(i64 %0)
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintInt"(i64 %1)
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintByte"(i8 10)
-// CHECK-NEXT:   ret void
-// CHECK-NEXT: }
+// CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK: call i64 @"main.main$1"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintInt$coro"
+// CHECK: call i8 @llvm.coro.suspend
 
 func main() {
 

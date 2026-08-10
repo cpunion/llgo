@@ -1,3 +1,4 @@
+// LITTEST
 package main
 
 /*
@@ -172,3 +173,31 @@ func runPy() {
 	// test _Cgo_use
 	C.PyObject_Print((*C.PyObject)(unsafe.Pointer(C.PyComplex_FromDoubles(C.double(1.23), C.double(4.56)))), C.stdout, 0)
 }
+
+// This is a structural cgo/coro boundary test. Exact worker thunk hashes and
+// LLVM block numbering are deliberately not part of the contract.
+// CHECK-LABEL: define ptr @"main.Bar$coro"(
+// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1(
+// CHECK: call void @__llgo_coro_worker_park_v1(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK: call i32 @__llgo_coro_worker_resume_v1(
+// CHECK-LABEL: define ptr @"main._C2func_test_structs$coro"(
+// CHECK: call void @__llgo_coro_worker_park_v1(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK: call i32 @__llgo_coro_worker_resume_v1(
+// CHECK-LABEL: define i32 @go_callback(i32
+// CHECK: EnterLocalContext
+// CHECK: LeaveLocalContext
+// CHECK-LABEL: define i32 @go_callback_not_use_in_go(i32
+// CHECK: EnterLocalContext
+// CHECK: LeaveLocalContext
+// CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK: call void @__llgo_coro_worker_park_v1(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK: call i32 @__llgo_coro_worker_resume_v1(
+// CHECK-LABEL: define ptr @"main.triggerC2func$coro"(
+// CHECK: call ptr @"main._C2func_test_structs$coro"(
+// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
+// CHECK: call {{.*}} @main._Cfunc_

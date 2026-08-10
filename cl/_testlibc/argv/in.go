@@ -7,8 +7,8 @@ import (
 
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
-	// CHECK: load i32, ptr @__llgo_argc, align 4
-	// CHECK: load ptr, ptr @__llgo_argv, align 8
+	// CHECK-DAG: load i32, ptr @__llgo_argc, align 4
+	// CHECK-DAG: load ptr, ptr @__llgo_argv, align 8
 	// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1
 	// CHECK: call void @__llgo_coro_worker_park_v1
 	// CHECK: call i32 (ptr, ...) @printf(ptr {{%.*}}, ptr {{%.*}})

@@ -32,15 +32,15 @@ func TestClosureContextABIForTarget(t *testing.T) {
 	}{
 		{"amd64", "x86_64-unknown-linux-gnu", "linux", 19, closureContextNest},
 		{"386", "i386-unknown-linux-gnu", "linux", 22, closureContextNest},
-		{"arm", "thumbv7em-none-eabi", "linux", 19, closureContextNest},
+		{"arm", "thumbv7em-none-eabi", "linux", 19, closureContextSwiftSelf},
 		{"riscv32", "riscv32-unknown-none", "linux", 20, closureContextNest},
 		{"riscv64", "riscv64-unknown-linux-gnu", "linux", 22, closureContextNest},
 		{"arm64 linux llvm19", "aarch64-unknown-linux-gnu", "linux", 19, closureContextNest},
 		{"arm64 darwin llvm19", "arm64-apple-darwin", "darwin", 19, closureContextSwiftSelf},
 		{"arm64 windows llvm20", "aarch64-pc-windows-msvc", "windows", 20, closureContextSwiftSelf},
 		{"arm64 android llvm20", "aarch64-linux-android", "android", 20, closureContextSwiftSelf},
-		{"arm64 darwin llvm21", "arm64-apple-darwin", "darwin", 21, closureContextNest},
-		{"arm64 windows llvm22", "aarch64-pc-windows-msvc", "windows", 22, closureContextNest},
+		{"arm64 darwin llvm21", "arm64-apple-darwin", "darwin", 21, closureContextSwiftSelf},
+		{"arm64 windows llvm22", "aarch64-pc-windows-msvc", "windows", 22, closureContextSwiftSelf},
 		{"wasm", "wasm32-unknown-wasip1", "wasip1", 22, closureContextExplicit},
 		{"xtensa", "xtensa-esp32-none-elf", "linux", 22, closureContextExplicit},
 		{"avr", "avr-unknown-unknown", "linux", 22, closureContextExplicit},
@@ -102,7 +102,43 @@ func TestClosureContextAttributeUsesPhysicalParameterIndex(t *testing.T) {
 	}
 }
 
-func TestClosureExplicitFallbackRetainsAdapter(t *testing.T) {
+func TestClosureContextAttributeRecognizesCoroutinePhysicalEnvironment(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(&Target{GOOS: "darwin", GOARCH: "arm64"})
+	defer prog.Dispose()
+	pkg := prog.NewPackage("corophysicalenv", "test/corophysicalenv")
+
+	voidPtr := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "__llgo_g", voidPtr),
+		types.NewParam(token.NoPos, nil, "__llgo_out", voidPtr),
+		types.NewParam(token.NoPos, nil, "$env", voidPtr),
+		types.NewParam(token.NoPos, nil, "value", types.Typ[types.Int]),
+	)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "", voidPtr))
+	sig := types.NewSignatureType(nil, nil, nil, params, results, false)
+	target := pkg.NewFunc("target$coro", sig, InGo)
+
+	swiftself := llvm.AttributeKindID("swiftself")
+	if attr := target.impl.GetEnumAttributeAtIndex(3, swiftself); attr.IsNil() {
+		t.Fatalf("coroutine environment parameter has no swiftself attribute:\n%s", target.impl.String())
+	}
+
+	caller := pkg.NewFunc("caller", types.NewSignatureType(nil, nil, nil, nil, results, false), InGo)
+	b := caller.MakeBody(1)
+	nilPtr := prog.Nil(prog.VoidPtr())
+	ret := b.Call(target.Expr, nilPtr, nilPtr, nilPtr, prog.IntVal(7, prog.Int()))
+	b.Return(ret)
+	call := caller.impl.EntryBasicBlock().FirstInstruction()
+	if call.InstructionOpcode() != llvm.Call || call.GetCallSiteEnumAttribute(3, swiftself).IsNil() {
+		t.Fatalf("coroutine environment call argument has no swiftself attribute:\n%s", caller.impl.String())
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("coroutine environment module is invalid: %v\n%s", err, pkg.String())
+	}
+}
+
+func TestClosureExplicitFallbackUsesFixedFuncval(t *testing.T) {
 	Initialize(InitAll)
 	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
 	defer prog.Dispose()
@@ -123,9 +159,8 @@ func TestClosureExplicitFallbackRetainsAdapter(t *testing.T) {
 	hb.Return()
 
 	ir := pkg.String()
-	if !strings.Contains(ir, "ptr @__llgo_stub.target") ||
-		!strings.Contains(ir, "define linkonce") {
-		t.Fatalf("explicit-context target lost its adapter:\n%s", ir)
+	if !strings.Contains(ir, "ptr @target") || strings.Contains(ir, legacyClosureStubPrefix) {
+		t.Fatalf("explicit-context target did not retain its direct code pointer:\n%s", ir)
 	}
 	if got, want := prog.SizeOf(prog.Closure(sig)), uint64(2*prog.PointerSize()); got != want {
 		t.Fatalf("fallback funcval size = %d, want two pointers (%d)", got, want)

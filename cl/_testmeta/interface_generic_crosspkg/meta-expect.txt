@@ -80,14 +80,14 @@ __llgo_coro_method_raw_trap_v1.a551e081876916393b495942515ada43:
     llvm.trap
 __llgo_coro_method_raw_trap_v1.edebc1e42fd6c8885c32b3db61eb66f7:
     llvm.trap
-__llgo_coro_root_factory_descriptor_v1.a76cd3936549595acf9870c19862247a:
-    __llgo_coro_root_factory_v1.a76cd3936549595acf9870c19862247a
-__llgo_coro_root_factory_v1.a76cd3936549595acf9870c19862247a:
+__llgo_coro_root_factory_descriptor_v1.9e4639ed80ff6ac79e8ba81bc0e1a711:
+    __llgo_coro_root_factory_v1.9e4639ed80ff6ac79e8ba81bc0e1a711
+__llgo_coro_root_factory_v1.9e4639ed80ff6ac79e8ba81bc0e1a711:
     main.main$coro
-__llgo_coro_root_package_v1.18768445509374bdc78549ed06193d27:
-    __llgo_coro_root_package_v1.18768445509374bdc78549ed06193d27.entries
-__llgo_coro_root_package_v1.18768445509374bdc78549ed06193d27.entries:
-    __llgo_coro_root_factory_descriptor_v1.a76cd3936549595acf9870c19862247a
+__llgo_coro_root_package_v1.92fd3e62ca218ce8a1969cd2b5ce1639:
+    __llgo_coro_root_package_v1.92fd3e62ca218ce8a1969cd2b5ce1639.entries
+__llgo_coro_root_package_v1.92fd3e62ca218ce8a1969cd2b5ce1639.entries:
+    __llgo_coro_root_factory_descriptor_v1.9e4639ed80ff6ac79e8ba81bc0e1a711
 _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
     *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
     _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA$out
@@ -121,7 +121,7 @@ _llgo_string:
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.fce1e2558da91230201a6ac2965c8e05
+    __llgo_coro_frame_descriptor_v1.070ba4e409232ef4bfb7874ae908f2d4
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -141,7 +141,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int])
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.613b44856e4261c3c6371520b4b9c6d2
+    __llgo_coro_frame_descriptor_v1.3ef233a8323b674d280cf87e646ef91f
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1
@@ -157,7 +157,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int])
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.11f2fcfffd29db3022fc45873006ccab
+    __llgo_coro_frame_descriptor_v1.94d797f8dee4f1fa3148e39f7c26b6b4
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -177,7 +177,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[strin
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.9336739c4920413b1c605255c69d761a
+    __llgo_coro_frame_descriptor_v1.fb46e76d942af7ea61be5f6f0caef166
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1
@@ -197,8 +197,8 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.struct$lOhr
 llvm.compiler.used:
     __llgo_coro_library_effect_v6.c63a04e0f0f5ba44b461a7ccfc25e00c
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.a76cd3936549595acf9870c19862247a
-    __llgo_coro_root_package_v1.18768445509374bdc78549ed06193d27
+    __llgo_coro_root_factory_descriptor_v1.9e4639ed80ff6ac79e8ba81bc0e1a711
+    __llgo_coro_root_package_v1.92fd3e62ca218ce8a1969cd2b5ce1639
 main.init:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init
@@ -210,7 +210,7 @@ main.main$coro:
     __llgo_coro_await_prepare_v3
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.a76cd3936549595acf9870c19862247a
+    __llgo_coro_frame_descriptor_v1.9e4639ed80ff6ac79e8ba81bc0e1a711
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1

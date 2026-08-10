@@ -3,22 +3,33 @@ package main
 
 import "fmt"
 
+// A call in a return list is evaluated before the sibling variable is loaded.
+// The call itself uses the structured outcome path and its caller awaits the
+// coroutine result rather than falling back to a native goroutine wrapper.
+//
+// CHECK-NOT: NewProc
+// CHECK-NOT: _llgo_routine
+// CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK: call ptr @"main.returnStateAndMut$coro"(
+// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK-LABEL: define ptr @"main.returnStateAndMut$coro"(
+// CHECK: store i64 1
+// CHECK: call void @"main.(*state).mutate$outcome"(
+// CHECK: call void @__llgo_coro_complete_prepare_v2(
+// CHECK: load %main.state
+// CHECK: store %main.state
+// CHECK-LABEL: define void @"main.(*state).mutate$outcome"(
+// CHECK: store i64 %4
+// CHECK: load i64
+// CHECK-NOT: NewProc
+// CHECK-NOT: _llgo_routine
+
 type state struct {
 	v int
 }
 
-// CHECK-LABEL: define void @main.main(){{.*}} {
 func main() {
-	// CHECK: call { %main.state, i64 } @main.returnStateAndMut()
-	// CHECK: extractvalue { %main.state, i64 } %1, 0
-	// CHECK: extractvalue { %main.state, i64 } %1, 1
-	// CHECK: icmp ne i64 %5, 2
-	// CHECK: call %"{{.*}}String" @fmt.Sprintf
-	// CHECK: call void @"{{.*}}Panic"
-	// CHECK: call void @"{{.*}}PrintString"(%"{{.*}}String" { ptr @3, i64 2 })
-	// CHECK-NEXT: call void @"{{.*}}PrintByte"(i8 10)
-	// CHECK-NEXT: ret void
-	// CHECK: icmp ne i64 %3, 2
 	a, b := returnStateAndMut()
 	if a.v != 2 || b != 2 {
 		panic(fmt.Sprintf("return order mismatch: got (%d,%d), want (2,2)", a.v, b))
@@ -26,28 +37,11 @@ func main() {
 	println("ok")
 }
 
-// CHECK-LABEL: define { %main.state, i64 } @main.returnStateAndMut(){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %0 = call ptr @"{{.*}}AllocZ"(i64 8)
-// CHECK-NEXT:   %1 = getelementptr inbounds %main.state, ptr %0, i32 0, i32 0
-// CHECK-NEXT:   store i64 1, ptr %1, align 8
-// CHECK-NEXT:   %2 = call i64 @"main.(*state).mutate"(ptr %0, i64 2)
-// CHECK-NEXT:   %3 = load %main.state, ptr %0, align 8
-// CHECK-NEXT:   %4 = insertvalue { %main.state, i64 } undef, %main.state %3, 0
-// CHECK-NEXT:   %5 = insertvalue { %main.state, i64 } %4, i64 %2, 1
-// CHECK-NEXT:   ret { %main.state, i64 } %5
 func returnStateAndMut() (state, int) {
 	x := state{v: 1}
 	return x, x.mutate(2)
 }
 
-// CHECK-LABEL: define i64 @"main.(*state).mutate"(ptr %0, i64 %1){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %2 = getelementptr inbounds %main.state, ptr %0, i32 0, i32 0
-// CHECK-NEXT:   store i64 %1, ptr %2, align 8
-// CHECK-NEXT:   %3 = getelementptr inbounds %main.state, ptr %0, i32 0, i32 0
-// CHECK-NEXT:   %4 = load i64, ptr %3, align 8
-// CHECK-NEXT:   ret i64 %4
 func (s *state) mutate(next int) int {
 	s.v = next
 	return s.v

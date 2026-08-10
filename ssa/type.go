@@ -46,8 +46,14 @@ const (
 	vkBool
 	vkPtr
 	vkFuncDecl
+	// vkPyAPIFuncDecl identifies one compiler-generated Python C-API
+	// declaration.  Its physical ABI is still an ordinary C function ABI, but
+	// a coroutine frontend may route the call through an owner-preserving
+	// foreign episode instead of invoking it on the managed executor stack.
+	vkPyAPIFuncDecl
 	vkFuncPtr
 	vkClosure
+	vkIfaceMethod
 	vkBuiltin
 	vkPyFuncRef
 	vkPyVarRef
@@ -133,8 +139,8 @@ func (p *goProgram) layoutType(typ types.Type) types.Type {
 	case *types.Alias:
 		return p.layoutType(types.Unalias(typ))
 	case *types.Named:
-		if background, ok := p.gocvt.typbg.Load(namedLinkname(typ)); ok &&
-			background.(Background) == InC {
+		prog := Program(unsafe.Pointer(p))
+		if background, ok := prog.packageTypeBackground(namedLinkname(typ)); ok && background == InC {
 			return typ
 		}
 		return p.layoutType(typ.Underlying())

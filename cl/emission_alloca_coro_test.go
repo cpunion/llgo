@@ -86,63 +86,79 @@ func Use() { _ = Alloca(1) }
 	}
 }
 
-func TestAllocaIntrinsicFailsClosedInPhysicalCoroutine(t *testing.T) {
-	testProg := newEmissionTestProgram()
-	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
-	pkg := testProg.addPackage(t, "example.com/emission/allocacoroutine", `package allocacoroutine
+func TestAllocaIntrinsicUsesOnlyConstantFrameStorageInPhysicalCoroutine(t *testing.T) {
+	tests := []struct {
+		name string
+		root string
+		want string
+	}{
+		{name: "constant", root: `func Root() { _ = Alloca(16); Child() }`},
+		{name: "dynamic", root: `func Root(size uintptr) { _ = Alloca(size); Child() }`, want: "exact constant frame size"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testProg := newEmissionTestProgram()
+			testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+			pkg := testProg.addPackage(t, "example.com/emission/allocacoroutine"+test.name, `package allocacoroutine
 import "unsafe"
 //llgo:link Alloca llgo.alloca
 func Alloca(uintptr) unsafe.Pointer
 func Child() {}
-func Root() { _ = Alloca(16); Child() }
-`)
-	testProg.ssa.Build()
-	prog := newLLSSAProg(t)
-	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
-	functionIDs.ArchiveReady = true
-	root := pkg.ssa.Func("Root")
-	child := pkg.ssa.Func("Child")
-	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
-		EmissionUniverse: ssaUniverse,
-		FunctionIDs:      functionIDs,
-		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
-			if fn == child {
-				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+
+`+test.root)
+			testProg.ssa.Build()
+			prog := newLLSSAProg(t)
+			defer prog.Dispose()
+			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+			if err != nil {
+				t.Fatal(err)
 			}
-			return coro.SSAFunctionPolicy{}, nil
-		},
-		ClassifyElidedCall: func(_ *ssa.Function, site ssa.CallInstruction) (bool, error) {
-			if site == nil || site.Common() == nil {
-				return false, nil
+			ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+			if err != nil {
+				t.Fatal(err)
 			}
-			callee := site.Common().StaticCallee()
-			if _, frozen := universe.Resolve(callee); callee == nil || !frozen {
-				return false, nil
+			functionIDs := universe.FunctionIDConfig()
+			functionIDs.CoroABI = coro.PhysicalABIV1
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+			functionIDs.ArchiveReady = true
+			root := pkg.ssa.Func("Root")
+			child := pkg.ssa.Func("Child")
+			plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+				EmissionUniverse: ssaUniverse,
+				FunctionIDs:      functionIDs,
+				ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					if fn == child {
+						return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+					}
+					return coro.SSAFunctionPolicy{}, nil
+				},
+				ClassifyElidedCall: func(_ *ssa.Function, site ssa.CallInstruction) (bool, error) {
+					if site == nil || site.Common() == nil {
+						return false, nil
+					}
+					callee := site.Common().StaticCallee()
+					if _, frozen := universe.Resolve(callee); callee == nil || !frozen {
+						return false, nil
+					}
+					semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(site)
+					return intrinsic && semantics.ElidesManagedCall(), err
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
-			semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(site)
-			return intrinsic && semantics.ElidesManagedCall(), err
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootPlan, ok := plan.FunctionPlan(root)
-	if !ok || rootPlan.Emission != coro.EmitCoroutine {
-		t.Fatalf("Root plan = %+v, present=%t; want physical coroutine", rootPlan, ok)
-	}
-	err = validateCoroPhysicalABIWithUniverseCapabilities(root, rootPlan, plan, universe, true, true, false, false)
-	if err == nil || !strings.Contains(err.Error(), "exact resume-local lifetime proof") {
-		t.Fatalf("physical Alloca preflight error = %v; want resume-local lifetime rejection", err)
+			rootPlan, ok := plan.FunctionPlan(root)
+			if !ok || rootPlan.Emission != coro.EmitCoroutine {
+				t.Fatalf("Root plan = %+v, present=%t; want physical coroutine", rootPlan, ok)
+			}
+			err = validateCoroPhysicalABIWithUniverseCapabilities(root, rootPlan, plan, universe, true, true, false, false)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("constant physical Alloca preflight: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("dynamic physical Alloca preflight error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }

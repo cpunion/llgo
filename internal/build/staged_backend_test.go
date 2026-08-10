@@ -55,16 +55,6 @@ func TestPackageLinkSnapshotSurvivesModuleDisposal(t *testing.T) {
 	llvmContext := mod.Context()
 	global := llvm.AddGlobal(mod, llvmContext.Int8Type(), "example.com/p.global")
 	global.SetInitializer(llvm.ConstInt(llvmContext.Int8Type(), 1, false))
-	stub := llvm.AddFunction(
-		mod,
-		closureStubPrefix+"example.com/p.live",
-		llvm.FunctionType(llvmContext.VoidType(), nil, false),
-	)
-	block := llvmContext.AddBasicBlock(stub, "entry")
-	builder := llvmContext.NewBuilder()
-	builder.SetInsertPointAtEnd(block)
-	builder.CreateRetVoid()
-	builder.Dispose()
 
 	pkg := &aPackage{
 		Package: &llpackages.Package{ID: "example.com/p", Name: "p", PkgPath: "example.com/p"},
@@ -95,9 +85,6 @@ func TestPackageLinkSnapshotSurvivesModuleDisposal(t *testing.T) {
 	funcInfo := collectFuncInfo([]Package{pkg})
 	if len(funcInfo) != 1 || funcInfo[0].symbol != "example.com/p.live" {
 		t.Fatalf("snapshot funcinfo = %+v", funcInfo)
-	}
-	if stubs := collectFuncInfoStubRecords([]Package{pkg}, funcInfo); len(stubs) != 1 || stubs[0].symbol != closureStubPrefix+"example.com/p.live" {
-		t.Fatalf("snapshot closure stubs = %+v", stubs)
 	}
 	if pc := collectPCLineInfo([]Package{pkg}); len(pc) != 1 || pc[0].id != 0x1234 {
 		t.Fatalf("snapshot pcline = %+v", pc)

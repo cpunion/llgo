@@ -64,10 +64,6 @@ func resolveCoroRawCChangeType(
 			"coroutine raw C function adapter in %q: %s", owner.Name(), fmt.Sprintf(format, args...),
 		)
 	}
-	if sourceTransport == coro.RawCCodePointer && resultTransport == coro.ManagedTransport {
-		return fail("RawC-to-Managed ChangeType has no descriptor construction recipe")
-	}
-
 	sourcePlan, sourceFound := plan.ValuePlan(change.X)
 	resultPlan, resultFound := plan.ValuePlan(change)
 	if !sourceFound || sourcePlan.Value != change.X || len(sourcePlan.Funcs) != 1 || len(sourcePlan.Funcs[0].Path) != 0 {
@@ -77,11 +73,30 @@ func resolveCoroRawCChangeType(
 		return fail("result %q has no exact scalar ValuePlan", change.Name())
 	}
 	sourceLeaf, resultLeaf := sourcePlan.Funcs[0], resultPlan.Funcs[0]
-	if sourceLeaf.Transport != sourceTransport || resultLeaf.Transport != resultTransport {
+	rawBoundaryRetag := sourceTransport == coro.RawCCodePointer &&
+		resultTransport == coro.ManagedTransport &&
+		sourceLeaf.Transport == coro.RawCCodePointer &&
+		resultLeaf.Transport == coro.RawCCodePointer
+	if sourceLeaf.Transport != sourceTransport ||
+		resultLeaf.Transport != resultTransport && !rawBoundaryRetag {
 		return fail(
 			"frozen ValuePlan transport disagrees with frontend metadata (source=%s/%s result=%s/%s)",
 			sourceLeaf.Transport, sourceTransport, resultLeaf.Transport, resultTransport,
 		)
+	}
+	if sourceTransport == coro.RawCCodePointer && resultTransport == coro.ManagedTransport {
+		if !rawBoundaryRetag {
+			return fail("RawC-to-Managed ChangeType has no descriptor construction recipe")
+		}
+		if sourceLeaf.Rep != coro.DirectPlain || resultLeaf.Rep != coro.DirectPlain ||
+			sourceLeaf.MayBeNil != resultLeaf.MayBeNil ||
+			!equalCoroFunctionTargets(sourceLeaf.Targets, resultLeaf.Targets) {
+			return fail("certified raw callback retag changes representation, nilability, or targets")
+		}
+		if !types.Identical(types.Unalias(sourceType).Underlying(), types.Unalias(resultType).Underlying()) {
+			return fail("certified raw callback source and result signatures are not identical")
+		}
+		return coroRawCChangeTypePlan{resultType: resultType, rawRetag: true}, true, nil
 	}
 	if resultLeaf.Transport != coro.RawCCodePointer || resultLeaf.Rep != coro.DirectPlain {
 		return fail("raw result requires RawCCodePointer/DirectPlain, got %s/%s", resultLeaf.Transport, resultLeaf.Rep)
@@ -181,8 +196,16 @@ func validateCoroRawCFunctionAdapters(plan *coro.SSAPlan, universe *EmissionUniv
 		if function.Function == nil || function.Plan.Emission == coro.EmitNone {
 			continue
 		}
+		unevaluated, _ := universe.frozenUnsafeLayoutUnevaluatedSSA(function.Function)
 		for _, block := range function.Function.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, typeOnly := unevaluated[instruction]; typeOnly {
+					// unsafe.Sizeof/Alignof/Offsetof consume only the operand's
+					// static type. Emission and every physical audit use this same
+					// universe-frozen set, so the erased conversion neither needs a
+					// raw callback body nor carries runtime transport semantics.
+					continue
+				}
 				change, ok := instruction.(*ssa.ChangeType)
 				if !ok {
 					continue
@@ -198,11 +221,11 @@ func validateCoroRawCFunctionAdapters(plan *coro.SSAPlan, universe *EmissionUniv
 
 func (p *context) tryCompileCoroRawCChangeType(b llssa.Builder, change *ssa.ChangeType) (llssa.Expr, bool) {
 	if p == nil || p.compilation == nil ||
-		p.compilation.CoroPlan == nil || p.compilation.EmissionUniverse == nil || p.goFn == nil {
+		p.immutablePlan() == nil || p.immutableEmissionUniverse() == nil || p.goFn == nil {
 		return llssa.Expr{}, false
 	}
 	adapter, recognized, err := resolveCoroRawCChangeType(
-		p.compilation.CoroPlan, p.compilation.EmissionUniverse, p.goFn, change,
+		p.immutablePlan(), p.immutableEmissionUniverse(), p.goFn, change,
 	)
 	if err != nil {
 		panic(err)

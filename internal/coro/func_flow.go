@@ -18,6 +18,7 @@ package coro
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 	"sort"
 
@@ -204,8 +205,8 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 	}
 	common := call.Common()
 	raw, direct := common.Value.(*ssa.Function)
-	if !direct || raw == nil || common.IsInvoke() || common.Method != nil || common.StaticCallee() != raw {
-		return nil, FunctionPlan{}, fmt.Errorf("requires an exact static top-level function operand")
+	if common.IsInvoke() || common.Method != nil || direct && (raw == nil || common.StaticCallee() != raw) {
+		return nil, FunctionPlan{}, fmt.Errorf("requires an exact static function operand or compiler-certified inline-operation carrier")
 	}
 	callPlan, ok := p.CallPlan(call)
 	if !ok {
@@ -225,7 +226,10 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 	if !ok || targetPlan.ID != callPlan.Targets[0] {
 		return nil, FunctionPlan{}, fmt.Errorf("spawn target %q has no canonical function plan", callPlan.Targets[0])
 	}
-	redirected := target != raw
+	redirected := !direct || target != raw
+	if !direct && target.Synthetic == "" {
+		return nil, FunctionPlan{}, fmt.Errorf("inline-only spawn target %q is not a compiler-owned synthetic carrier", targetPlan.ID)
+	}
 	if len(target.FreeVars) != 0 || !redirected && target.Synthetic != "" ||
 		target.Origin() != nil || len(target.TypeArgs()) != 0 {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q is not an exact non-capturing context-free function", targetPlan.ID)
@@ -239,8 +243,19 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 		(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() != 0) {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-variadic, non-generic signature", targetPlan.ID)
 	}
-	if redirected && !types.Identical(common.Signature(), sig) {
+	if redirected && direct && !types.Identical(common.Signature(), sig) {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q does not preserve the source spawn signature", targetPlan.ID)
+	}
+	if len(common.Args) != sig.Params().Len() {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"target %q spawn arguments=%d do not match parameters=%d",
+			targetPlan.ID, len(common.Args), sig.Params().Len(),
+		)
+	}
+	for index, argument := range common.Args {
+		if argument == nil || !types.Identical(argument.Type(), sig.Params().At(index).Type()) {
+			return nil, FunctionPlan{}, fmt.Errorf("target %q spawn argument %d does not preserve its exact type", targetPlan.ID, index)
+		}
 	}
 	if targetPlan.External != Defined || targetPlan.Demand != AsyncDemand {
 		return nil, FunctionPlan{}, fmt.Errorf(
@@ -480,14 +495,30 @@ func (p *SSAPlan) ElidedCallCertificate(call ssa.CallInstruction) (certificate s
 }
 
 // RawFunctionAddressArgument reports whether the exact call argument is
-// lowered as a raw static function entry rather than as a Go interface or
-// descriptor value.
+// lowered as a raw context-free function entry rather than as a Go interface
+// or descriptor value.
 func (p *SSAPlan) RawFunctionAddressArgument(call ssa.CallInstruction, argument int) bool {
 	if p == nil || call == nil || argument < 0 {
 		return false
 	}
 	_, ok := p.rawAddressArgs[ssaCallArgumentUse{call: call, argument: argument}]
 	return ok
+}
+
+// RawFunctionAddressTarget returns the compile-time-selected raw entry target
+// for one funcAddr argument. The target is occurrence-local: an independent
+// ordinary publication may still give the same source function a Dispatch
+// representation while this use selects its separately demanded raw variant.
+func (p *SSAPlan) RawFunctionAddressTarget(call ssa.CallInstruction, argument int) (*ssa.Function, bool) {
+	if p == nil || call == nil || argument < 0 {
+		return nil, false
+	}
+	id, ok := p.rawAddressTargets[ssaCallArgumentUse{call: call, argument: argument}]
+	if !ok {
+		return nil, false
+	}
+	target, ok := p.byID[id]
+	return target, ok && target != nil
 }
 
 // StaticCodeAddressArgument reports whether the exact call argument is lowered
@@ -550,30 +581,33 @@ func cloneFuncRepMap(reps FuncRepMap) FuncRepMap {
 }
 
 type ssaFuncFlow struct {
-	values            []ssa.Value
-	allValues         map[ssa.Value]struct{}
-	index             map[ssa.Value]int
-	parent            []int
-	rank              []uint8
-	canonical         []bool
-	unknown           []bool
-	mayBeNil          []bool
-	rawC              []bool
-	targets           []map[*ssa.Function]struct{}
-	typePaths         map[types.Type][][]FuncPathStep
-	rawCTypes         map[types.Type]bool
-	included          map[*ssa.Function]bool
-	ids               map[*ssa.Function]FunctionID
-	dynamicCandidates map[ssa.CallInstruction]map[*ssa.Function]struct{}
-	dynamicResolution DynamicResolution
-	canonicalizer     *ssaFunctionCanonicalizer
-	directPlainArgs   map[ssaCallArgumentUse]struct{}
-	directPlainOrder  []ssaCallArgumentUse
-	rawAddressArgs    map[ssaCallArgumentUse]struct{}
-	rawAddressBoxes   map[*ssa.MakeInterface]ssaCallArgumentUse
-	closedValues      map[ssa.Value]SSAClosedDynamicCallCertificate
-	closedCalls       map[ssa.CallInstruction]SSAClosedDynamicCallCertificate
-	exactInterface    map[*ssa.Call]ssa.Value
+	values              []ssa.Value
+	allValues           map[ssa.Value]struct{}
+	index               map[ssa.Value]int
+	parent              []int
+	rank                []uint8
+	canonical           []bool
+	unknown             []bool
+	mayBeNil            []bool
+	rawC                []bool
+	targets             []map[*ssa.Function]struct{}
+	typePaths           map[types.Type][][]FuncPathStep
+	rawCTypes           map[types.Type]bool
+	included            map[*ssa.Function]bool
+	ids                 map[*ssa.Function]FunctionID
+	dynamicCandidates   map[ssa.CallInstruction]map[*ssa.Function]struct{}
+	dynamicResolution   DynamicResolution
+	canonicalizer       *ssaFunctionCanonicalizer
+	managedResolver     SSAManagedFunctionValueResolver
+	directPlainArgs     map[ssaCallArgumentUse]struct{}
+	directPlainOrder    []ssaCallArgumentUse
+	rawDirectPlainArgs  map[ssaCallArgumentUse]struct{}
+	rawAddressArgs      map[ssaCallArgumentUse]struct{}
+	rawAddressBoxes     map[*ssa.MakeInterface]ssaCallArgumentUse
+	erasedFunctionBoxes map[*ssa.MakeInterface]struct{}
+	closedValues        map[ssa.Value]SSAClosedDynamicCallCertificate
+	closedCalls         map[ssa.CallInstruction]SSAClosedDynamicCallCertificate
+	exactInterface      map[*ssa.Call]ssa.Value
 }
 
 type ssaCallArgumentUse struct {
@@ -588,16 +622,23 @@ func analyzeSSAFunctionFlow(
 	dynamicCandidates map[ssa.CallInstruction]map[*ssa.Function]struct{},
 	dynamicResolution DynamicResolution,
 	canonicalizer *ssaFunctionCanonicalizer,
+	managedResolver SSAManagedFunctionValueResolver,
 	directPlainArgs []ssaCallArgumentUse,
+	rawDirectPlainArgs []ssaCallArgumentUse,
 	rawAddressArgs []ssaCallArgumentUse,
 	closedDynamicCalls map[ssa.CallInstruction]SSAClosedDynamicCallCertificate,
 	exactInterfaceCalls map[*ssa.Call]ssa.Value,
+	erasedFunctionBoxes map[*ssa.MakeInterface]struct{},
 	managedValueReferences []*ssa.Function,
 	classifyRawCFunctionType func(types.Type) (bool, error),
 ) (*ssaFuncFlow, error) {
 	directPlainSet := make(map[ssaCallArgumentUse]struct{}, len(directPlainArgs))
 	for _, use := range directPlainArgs {
 		directPlainSet[use] = struct{}{}
+	}
+	rawDirectPlainSet := make(map[ssaCallArgumentUse]struct{}, len(rawDirectPlainArgs))
+	for _, use := range rawDirectPlainArgs {
+		rawDirectPlainSet[use] = struct{}{}
 	}
 	rawAddressSet := make(map[ssaCallArgumentUse]struct{}, len(rawAddressArgs))
 	rawAddressBoxes := make(map[*ssa.MakeInterface]ssaCallArgumentUse, len(rawAddressArgs))
@@ -610,22 +651,25 @@ func analyzeSSAFunctionFlow(
 		}
 	}
 	flow := &ssaFuncFlow{
-		allValues:         make(map[ssa.Value]struct{}),
-		index:             make(map[ssa.Value]int),
-		typePaths:         make(map[types.Type][][]FuncPathStep),
-		rawCTypes:         make(map[types.Type]bool),
-		included:          included,
-		ids:               ids,
-		dynamicCandidates: dynamicCandidates,
-		dynamicResolution: dynamicResolution,
-		canonicalizer:     canonicalizer,
-		directPlainArgs:   directPlainSet,
-		directPlainOrder:  append([]ssaCallArgumentUse(nil), directPlainArgs...),
-		rawAddressArgs:    rawAddressSet,
-		rawAddressBoxes:   rawAddressBoxes,
-		closedValues:      make(map[ssa.Value]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
-		closedCalls:       make(map[ssa.CallInstruction]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
-		exactInterface:    exactInterfaceCalls,
+		allValues:           make(map[ssa.Value]struct{}),
+		index:               make(map[ssa.Value]int),
+		typePaths:           make(map[types.Type][][]FuncPathStep),
+		rawCTypes:           make(map[types.Type]bool),
+		included:            included,
+		ids:                 ids,
+		dynamicCandidates:   dynamicCandidates,
+		dynamicResolution:   dynamicResolution,
+		canonicalizer:       canonicalizer,
+		managedResolver:     managedResolver,
+		directPlainArgs:     directPlainSet,
+		directPlainOrder:    append([]ssaCallArgumentUse(nil), directPlainArgs...),
+		rawDirectPlainArgs:  rawDirectPlainSet,
+		rawAddressArgs:      rawAddressSet,
+		rawAddressBoxes:     rawAddressBoxes,
+		erasedFunctionBoxes: erasedFunctionBoxes,
+		closedValues:        make(map[ssa.Value]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
+		closedCalls:         make(map[ssa.CallInstruction]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
+		exactInterface:      exactInterfaceCalls,
 	}
 	for call, certificate := range closedDynamicCalls {
 		flow.closedCalls[call] = SSAClosedDynamicCallCertificate{
@@ -721,6 +765,19 @@ func analyzeSSAFunctionFlow(
 			flow.rawC[index] = flow.rawCTypes[value.Type()]
 		}
 	}
+	// A compiler-certified raw direct-plain argument is physically one C code
+	// pointer even when Go assignment rules inserted an unnamed func view at
+	// the call site. Freeze that occurrence-local transport before joining SSA
+	// values, so an exact RawC -> func ChangeType remains a raw retag instead of
+	// manufacturing a managed closure descriptor.
+	for _, use := range rawDirectPlainArgs {
+		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) {
+			continue
+		}
+		if index, scalar := flow.ensureScalar(use.call.Common().Args[use.argument]); scalar {
+			flow.rawC[flow.root(index)] = true
+		}
+	}
 
 	// First join representation-preserving SSA transfers. Seeding boundaries
 	// afterwards makes the result independent of instruction enumeration order.
@@ -745,6 +802,14 @@ func analyzeSSAFunctionFlow(
 		}
 		if flow.rawCValue(value) {
 			switch value := value.(type) {
+			case *ssa.Function, *ssa.MakeClosure:
+				if target, exact := exactSSAContextFreeFunctionValue(value); exact {
+					if err := flow.addTarget(value, target); err != nil {
+						return nil, fmt.Errorf("resolve exact raw-C function-value target %q: %w", target.Name(), err)
+					}
+				} else {
+					flow.markUnknown(value)
+				}
 			case *ssa.Const:
 				if value.IsNil() {
 					flow.markMayBeNil(value)
@@ -773,6 +838,14 @@ func analyzeSSAFunctionFlow(
 						flow.markUnknown(value)
 					}
 				}
+			case *ssa.UnOp:
+				if target, exact := exactSSAContextFreeFunctionValue(value); exact {
+					if err := flow.addTarget(value, target); err != nil {
+						return nil, fmt.Errorf("resolve immutable local raw-C function-cell target %q: %w", target.Name(), err)
+					}
+				} else {
+					flow.markUnknown(value)
+				}
 			default:
 				// Parameters, loads, results, and foreign outputs are opaque raw
 				// code pointers. They never acquire managed descriptor targets.
@@ -782,7 +855,7 @@ func analyzeSSAFunctionFlow(
 		}
 		if certificate, certified := flow.closedValues[value]; certified {
 			for _, target := range certificate.Targets {
-				if err := flow.addTarget(value, target); err != nil {
+				if err := flow.addManagedTarget(value, target); err != nil {
 					return nil, fmt.Errorf("resolve certified function-value target %q: %w", target.Name(), err)
 				}
 			}
@@ -796,13 +869,21 @@ func analyzeSSAFunctionFlow(
 		}
 		switch value := value.(type) {
 		case *ssa.Function:
-			if err := flow.addTarget(value, value); err != nil {
+			if err := flow.addManagedTarget(value, value); err != nil {
 				return nil, fmt.Errorf("resolve function-value target %q: %w", value.Name(), err)
 			}
 		case *ssa.MakeClosure:
 			if target, ok := value.Fn.(*ssa.Function); ok {
-				if err := flow.addTarget(value, target); err != nil {
+				if err := flow.addManagedTarget(value, target); err != nil {
 					return nil, fmt.Errorf("resolve closure target %q: %w", target.Name(), err)
+				}
+			} else {
+				flow.markUnknown(value)
+			}
+		case *ssa.UnOp:
+			if target, exact := exactSSAContextFreeFunctionValue(value); exact {
+				if err := flow.addManagedTarget(value, target); err != nil {
+					return nil, fmt.Errorf("resolve immutable local function-cell target %q: %w", target.Name(), err)
 				}
 			} else {
 				flow.markUnknown(value)
@@ -820,6 +901,25 @@ func analyzeSSAFunctionFlow(
 			// results, and aggregate extracts are open until interprocedural
 			// or memory flow proves otherwise.
 			flow.markUnknown(value)
+		}
+	}
+	// A compiler-certified direct-plain callback occurrence may cross the
+	// physical transport boundary between a named raw-C function type and an
+	// ordinary Go func type. That ChangeType must not union the two value-flow
+	// components: one is a code pointer and the other is a managed callable.
+	// Recover only the exact context-free target at the certified argument
+	// occurrence. This is intentionally not a general raw-C-to-managed
+	// conversion rule; open, captured, nullable, or mutable values remain
+	// unseeded and fail the validation below.
+	for _, use := range flow.directPlainOrder {
+		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) {
+			continue
+		}
+		value := use.call.Common().Args[use.argument]
+		if target, exact := exactSSAContextFreeFunctionValue(value); exact {
+			if err := flow.addTarget(value, target); err != nil {
+				return nil, fmt.Errorf("resolve exact direct-plain callback target %q: %w", target.Name(), err)
+			}
 		}
 	}
 	for _, target := range managedValueReferences {
@@ -846,25 +946,128 @@ func analyzeSSAFunctionFlow(
 }
 
 func exactSSAContextFreeFunctionValue(value ssa.Value) (*ssa.Function, bool) {
-	for value != nil {
-		switch current := value.(type) {
-		case *ssa.Function:
-			return current, len(current.FreeVars) == 0
-		case *ssa.MakeClosure:
-			if len(current.Bindings) != 0 {
+	return exactSSAContextFreeFunctionValueSeen(value, make(map[ssa.Value]bool))
+}
+
+func exactSSAContextFreeFunctionValueSeen(value ssa.Value, seen map[ssa.Value]bool) (*ssa.Function, bool) {
+	if value == nil || seen[value] {
+		return nil, false
+	}
+	seen[value] = true
+	switch current := value.(type) {
+	case *ssa.Function:
+		return current, len(current.FreeVars) == 0
+	case *ssa.MakeClosure:
+		if len(current.Bindings) != 0 {
+			return nil, false
+		}
+		function, ok := current.Fn.(*ssa.Function)
+		return function, ok && function != nil && len(function.FreeVars) == 0
+	case *ssa.ChangeType:
+		return exactSSAContextFreeFunctionValueSeen(current.X, seen)
+	case *ssa.Convert:
+		return exactSSAContextFreeFunctionValueSeen(current.X, seen)
+	case *ssa.UnOp:
+		if current.Op != token.MUL {
+			return nil, false
+		}
+		cell, ok := current.X.(*ssa.Alloc)
+		if !ok {
+			return nil, false
+		}
+		return exactSSAContextFreeFunctionCell(cell, current, seen)
+	default:
+		return nil, false
+	}
+}
+
+func exactSSAContextFreeFunctionCell(
+	cell *ssa.Alloc,
+	observation *ssa.UnOp,
+	seen map[ssa.Value]bool,
+) (*ssa.Function, bool) {
+	if cell == nil || observation == nil || observation.X != cell ||
+		cell.Parent() == nil || observation.Parent() != cell.Parent() || cell.Referrers() == nil {
+		return nil, false
+	}
+	var store *ssa.Store
+	for _, reference := range *cell.Referrers() {
+		switch reference := reference.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Store:
+			if reference.Addr != cell || store != nil {
 				return nil, false
 			}
-			function, ok := current.Fn.(*ssa.Function)
-			return function, ok && function != nil && len(function.FreeVars) == 0
+			store = reference
+		case *ssa.UnOp:
+			if reference.Op != token.MUL || reference.X != cell {
+				return nil, false
+			}
 		case *ssa.ChangeType:
-			value = current.X
+			if reference.X != cell || !ssaFunctionCellReadOnlyAddress(reference, make(map[ssa.Value]bool)) {
+				return nil, false
+			}
 		case *ssa.Convert:
-			value = current.X
+			if reference.X != cell || !ssaFunctionCellReadOnlyAddress(reference, make(map[ssa.Value]bool)) {
+				return nil, false
+			}
 		default:
 			return nil, false
 		}
 	}
-	return nil, false
+	if store == nil || !ssaInstructionDominates(store, observation) {
+		return nil, false
+	}
+	return exactSSAContextFreeFunctionValueSeen(store.Val, seen)
+}
+
+// ssaFunctionCellReadOnlyAddress admits only pointer-representation changes
+// followed by loads. Calls, returns, stores through an alias, interface boxes,
+// and aggregate publication all fail closed, so an address-taken local remains
+// an immutable compiler-known function cell rather than an inferred heap slot.
+func ssaFunctionCellReadOnlyAddress(value ssa.Value, seen map[ssa.Value]bool) bool {
+	if value == nil || seen[value] || value.Referrers() == nil {
+		return false
+	}
+	seen[value] = true
+	for _, reference := range *value.Referrers() {
+		switch reference := reference.(type) {
+		case *ssa.DebugRef:
+		case *ssa.UnOp:
+			if reference.Op != token.MUL || reference.X != value {
+				return false
+			}
+		case *ssa.ChangeType:
+			if reference.X != value || !ssaFunctionCellReadOnlyAddress(reference, seen) {
+				return false
+			}
+		case *ssa.Convert:
+			if reference.X != value || !ssaFunctionCellReadOnlyAddress(reference, seen) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func ssaInstructionDominates(definition, use ssa.Instruction) bool {
+	if definition == nil || use == nil || definition.Block() == nil || use.Block() == nil {
+		return false
+	}
+	if definition.Block() != use.Block() {
+		return definition.Block().Dominates(use.Block())
+	}
+	for _, instruction := range definition.Block().Instrs {
+		if instruction == definition {
+			return true
+		}
+		if instruction == use {
+			return false
+		}
+	}
+	return false
 }
 
 func sameSSAClosedDynamicCallCertificate(left, right SSAClosedDynamicCallCertificate) bool {
@@ -999,6 +1202,15 @@ func (f *ssaFuncFlow) addTarget(value ssa.Value, target *ssa.Function) error {
 	return nil
 }
 
+func (f *ssaFuncFlow) addManagedTarget(value ssa.Value, target *ssa.Function) error {
+	var err error
+	target, err = resolveSSAManagedFunctionValueTarget(f.managedResolver, target)
+	if err != nil {
+		return err
+	}
+	return f.addTarget(value, target)
+}
+
 func (f *ssaFuncFlow) resolveTarget(target *ssa.Function) (*ssa.Function, bool, error) {
 	if f.canonicalizer == nil {
 		return target, target != nil, nil
@@ -1049,7 +1261,9 @@ func (f *ssaFuncFlow) seedInstruction(instruction ssa.Instruction) {
 			}
 		}
 	case *ssa.MakeInterface:
-		if _, rawAddress := f.rawAddressBoxes[instruction]; !rawAddress {
+		_, rawAddress := f.rawAddressBoxes[instruction]
+		_, erased := f.erasedFunctionBoxes[instruction]
+		if !rawAddress && !erased {
 			f.markBoundary(instruction.X)
 		}
 	case *ssa.MakeClosure:
@@ -1150,6 +1364,13 @@ func (f *ssaFuncFlow) validateDirectPlainCallArguments() error {
 			return fmt.Errorf("call argument %d in %q has no scalar function-value flow component", use.argument, use.call.Parent().Name())
 		}
 		root := f.root(index)
+		_, rawDirectPlain := f.rawDirectPlainArgs[use]
+		if rawDirectPlain != f.rawC[root] {
+			return fmt.Errorf(
+				"call argument %d in %q has conflicting managed/raw direct-plain transport (classified-raw=%t flow-raw=%t)",
+				use.argument, use.call.Parent().Name(), rawDirectPlain, f.rawC[root],
+			)
+		}
 		if f.unknown[root] || f.mayBeNil[root] || len(f.targets[root]) != 1 || f.requiresDispatch(root) {
 			return fmt.Errorf("call argument %d in %q is not a closed non-nil singleton without another canonical boundary (unknown=%t nil=%t targets=%d canonical=%t)",
 				use.argument, use.call.Parent().Name(), f.unknown[root], f.mayBeNil[root], len(f.targets[root]), f.canonical[root])
@@ -1167,11 +1388,11 @@ func (f *ssaFuncFlow) validateRawFunctionAddressCallArguments(uses []ssaCallArgu
 		if !ok {
 			return fmt.Errorf("raw function-address call argument %d in %q is not a MakeInterface", use.argument, use.call.Parent().Name())
 		}
-		target, ok := boxed.X.(*ssa.Function)
-		if !ok {
-			return fmt.Errorf("raw function-address call argument %d in %q does not contain a static function", use.argument, use.call.Parent().Name())
+		target, exact := exactSSAContextFreeFunctionValue(boxed.X)
+		if !exact {
+			return fmt.Errorf("raw function-address call argument %d in %q does not contain one exact context-free function value", use.argument, use.call.Parent().Name())
 		}
-		index, ok := f.index[target]
+		index, ok := f.index[boxed.X]
 		if !ok {
 			return fmt.Errorf("raw function-address target %q in %q has no function-value flow component", target.Name(), use.call.Parent().Name())
 		}
@@ -1181,13 +1402,40 @@ func (f *ssaFuncFlow) validateRawFunctionAddressCallArguments(uses []ssaCallArgu
 			return fmt.Errorf("resolve raw function-address target %q in %q: %w", target.Name(), use.call.Parent().Name(), err)
 		}
 		if !resolved || canonical == nil || !f.included[canonical] || f.unknown[root] || f.mayBeNil[root] || len(f.targets[root]) != 1 {
-			return fmt.Errorf("raw function-address target %q in %q is not a closed non-nil singleton in the emission universe", target.Name(), use.call.Parent().Name())
+			return fmt.Errorf(
+				"raw function-address target %q in %q is not a closed non-nil singleton in the emission universe (resolved=%t included=%t unknown=%t nil=%t targets=%d)",
+				target.Name(), use.call.Parent().Name(), resolved, canonical != nil && f.included[canonical],
+				f.unknown[root], f.mayBeNil[root], len(f.targets[root]),
+			)
 		}
 		if _, present := f.targets[root][canonical]; !present {
 			return fmt.Errorf("raw function-address target %q in %q disagrees with canonical function-value flow", target.Name(), use.call.Parent().Name())
 		}
 	}
 	return nil
+}
+
+func (f *ssaFuncFlow) rawFunctionAddressTarget(use ssaCallArgumentUse) (*ssa.Function, error) {
+	if f == nil || use.call == nil || use.call.Common() == nil ||
+		use.argument < 0 || use.argument >= len(use.call.Common().Args) {
+		return nil, fmt.Errorf("invalid raw function-address call argument index %d", use.argument)
+	}
+	boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface)
+	if !ok || boxed.X == nil {
+		return nil, fmt.Errorf("raw function-address call argument %d is not an exact MakeInterface function value", use.argument)
+	}
+	target, exact := exactSSAContextFreeFunctionValue(boxed.X)
+	if !exact {
+		return nil, fmt.Errorf("raw function-address call argument %d does not contain one exact context-free function value", use.argument)
+	}
+	canonical, resolved, err := f.resolveTarget(target)
+	if err != nil {
+		return nil, fmt.Errorf("resolve raw function-address target %q: %w", target.Name(), err)
+	}
+	if !resolved || canonical == nil {
+		return nil, fmt.Errorf("raw function-address target %q has no canonical target", target.Name())
+	}
+	return canonical, nil
 }
 
 func (f *ssaFuncFlow) validateSyncOnlyDescriptorCallArguments(
@@ -1399,6 +1647,18 @@ func (f *ssaFuncFlow) finalize(
 	for call, kind := range callKinds {
 		common := call.Common()
 		if _, builtin := common.Value.(*ssa.Builtin); builtin {
+			target := staticCallTargets[call]
+			id, redirected := f.ids[target]
+			if !redirected || kind != CallSpawn {
+				continue
+			}
+			plan := SSACallPlan{
+				Call:    call,
+				Kind:    CallSpawn,
+				Rep:     directRepForTargets(base, []FunctionID{id}),
+				Targets: []FunctionID{id},
+			}
+			callPlans[call] = plan
 			continue
 		}
 		plan := SSACallPlan{Call: call, Kind: kind, Rep: Dispatch}

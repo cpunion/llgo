@@ -1,3 +1,4 @@
+// LITTEST
 package main
 
 import (
@@ -6,6 +7,33 @@ import (
 
 	dep "github.com/goplus/llgo/cl/_testgo/rewrite/dep"
 )
+
+// Rewritten globals and runtime strings keep their ordinary data ABI, while
+// package initialization and formatting calls participate in structured
+// coroutine sequencing.
+//
+// CHECK: @main.VarName = global
+// CHECK: @main.VarPlain = global
+// CHECK-NOT: NewProc
+// CHECK-NOT: _llgo_routine
+// CHECK-LABEL: define ptr @"main.init$coro"(
+// CHECK: call ptr @"fmt.init$coro"(
+// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call ptr @"github.com/goplus/llgo/cl/_testgo/rewrite/dep.init$coro"(
+// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK: call ptr @"main.printLine$coro"(
+// CHECK: call ptr @"github.com/goplus/llgo/cl/_testgo/rewrite/dep.PrintVar$coro"(
+// CHECK: call %"{{.*}}String" @runtime.GOROOT()
+// CHECK: call ptr @"main.printLine$coro"(
+// CHECK: call %"{{.*}}String" @runtime.Version()
+// CHECK: call ptr @"main.printLine$coro"(
+// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK-LABEL: define ptr @"main.printLine$coro"(
+// CHECK: call ptr @"fmt.Printf$coro"(
+// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK-NOT: NewProc
+// CHECK-NOT: _llgo_routine
 
 var VarName = "main-default"
 var VarPlain string

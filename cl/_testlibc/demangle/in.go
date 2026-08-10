@@ -6,7 +6,7 @@ import (
 	"github.com/goplus/lib/cpp/llvm"
 )
 
-// CHECK: @0 = private unnamed_addr constant [29 x i8] c"__ZNK9INIReader10ParseErrorEv", align 1
+// CHECK: @{{[0-9]+}} = private unnamed_addr constant [29 x i8] c"__ZNK9INIReader10ParseErrorEv", align 1
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	mangledName := "__ZNK9INIReader10ParseErrorEv"

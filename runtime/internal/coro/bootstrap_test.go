@@ -119,31 +119,33 @@ func TestCheckedProgramArrayV1RejectsCountAndAddressOverflow(t *testing.T) {
 }
 
 type programBootstrapTestFixtureV2 struct {
-	plainTargets     [5]byte
+	plainTargets     [7]byte
 	bootstrapFactory byte
-	rootFactories    [5]byte
-	descriptors      [5]RootFactoryDescriptorV1
-	anchorEntries    [5]unsafe.Pointer
+	rootFactories    [7]byte
+	descriptors      [7]RootFactoryDescriptorV1
+	anchorEntries    [7]unsafe.Pointer
 	anchor           RootPackageAnchorV1
 	packages         [1]unsafe.Pointer
-	steps            [5]ProgramStepV1
+	steps            [7]ProgramStepV1
 	bootstrap        ProgramBootstrapV1
 	manifest         ProgramManifestV1
 }
 
-var programStepRolesForTestV2 = [5]uint32{
+var programStepRolesForTestV2 = [7]uint32{
 	ProgramStepFlagInternalRuntimeInitV2,
 	ProgramStepFlagCompilerABIInitV2,
 	ProgramStepFlagPublicRuntimeInitV2,
-	ProgramStepFlagMainPackageInitV2,
+	ProgramStepFlagPackageInitV2,
+	ProgramStepFlagPackageInitV2,
+	ProgramStepFlagPackageInitV2,
 	ProgramStepFlagMainV2,
 }
 
 func newProgramBootstrapTestFixtureV2(coroMask uint32) *programBootstrapTestFixtureV2 {
 	f := new(programBootstrapTestFixtureV2)
-	f.plainTargets = [5]byte{0x31, 0x32, 0x33, 0x34, 0x35}
+	f.plainTargets = [7]byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37}
 	f.bootstrapFactory = 0x41
-	f.rootFactories = [5]byte{0x51, 0x52, 0x53, 0x54, 0x55}
+	f.rootFactories = [7]byte{0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57}
 	for index := range f.descriptors {
 		f.descriptors[index] = RootFactoryDescriptorV1{
 			Version:      RootFactoryVersionV1,
@@ -208,7 +210,7 @@ func requireProgramViewV2(t *testing.T, f *programBootstrapTestFixtureV2) Progra
 }
 
 func TestValidateAndResolveEveryHeterogeneousProgramV2(t *testing.T) {
-	for mask := uint32(0); mask < 1<<5; mask++ {
+	for mask := uint32(0); mask < 1<<len(programStepRolesForTestV2); mask++ {
 		f := newProgramBootstrapTestFixtureV2(mask)
 		view := requireProgramViewV2(t, f)
 		for index, role := range programStepRolesForTestV2 {
@@ -230,8 +232,8 @@ func TestValidateAndResolveEveryHeterogeneousProgramV2(t *testing.T) {
 				}
 			}
 		}
-		if f.plainTargets != [5]byte{0x31, 0x32, 0x33, 0x34, 0x35} ||
-			f.rootFactories != [5]byte{0x51, 0x52, 0x53, 0x54, 0x55} || f.bootstrapFactory != 0x41 {
+		if f.plainTargets != [7]byte{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37} ||
+			f.rootFactories != [7]byte{0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57} || f.bootstrapFactory != 0x41 {
 			t.Fatalf("mask %#x validation or resolution invoked a target/factory", mask)
 		}
 	}
@@ -251,7 +253,6 @@ func TestValidateRunnableProgramV2RejectsMalformedTable(t *testing.T) {
 		{"bootstrap flags", ProgramValidationBootstrapFlagsV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.Flags = 1 }},
 		{"bootstrap hash", ProgramValidationBootstrapHashV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.HashHi++ }},
 		{"four steps", ProgramValidationStepCountV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.StepCount = 4 }},
-		{"six steps", ProgramValidationStepCountV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.StepCount = 6 }},
 		{"nil steps", ProgramValidationStepCountPointerV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.Steps = nil }},
 		{"nil package anchor", ProgramValidationNilPackageAnchorV2, func(f *programBootstrapTestFixtureV2) { f.packages[0] = nil }},
 		{"anchor version", ProgramValidationPackageAnchorVersionV2, func(f *programBootstrapTestFixtureV2) { f.anchor.Version = 2 }},
@@ -288,10 +289,18 @@ func TestValidateRunnableProgramV2RejectsMalformedTable(t *testing.T) {
 	}
 
 	for index := range programStepRolesForTestV2 {
+		wrong := ProgramStepFlagMainV2
+		if programStepRolesForTestV2[index] == wrong {
+			wrong = ProgramStepFlagPackageInitV2
+		}
+		other := ProgramStepFlagInternalRuntimeInitV2
+		if programStepRolesForTestV2[index] == other {
+			other = ProgramStepFlagCompilerABIInitV2
+		}
 		for name, role := range map[string]uint32{
 			"zero":     0,
-			"wrong":    programStepRolesForTestV2[(index+1)%len(programStepRolesForTestV2)],
-			"multiple": programStepRolesForTestV2[index] | programStepRolesForTestV2[(index+1)%len(programStepRolesForTestV2)],
+			"wrong":    wrong,
+			"multiple": programStepRolesForTestV2[index] | other,
 			"unknown":  1 << 12,
 		} {
 			t.Run(name+" role", func(t *testing.T) {
@@ -321,25 +330,19 @@ func TestValidateRunnableProgramV2BindsExactFactory(t *testing.T) {
 	}
 }
 
-func TestResolvedProgramViewV2IsImmutableSnapshot(t *testing.T) {
+func TestResolvedProgramViewV2RejectsMutation(t *testing.T) {
 	f := newProgramBootstrapTestFixtureV2(0b01010)
 	view := requireProgramViewV2(t, f)
-	wantPlain := f.steps[0].Target
-	wantDescriptor := &f.descriptors[1]
-	wantFactory := f.descriptors[1].Factory
-	f.steps = [5]ProgramStepV1{}
+	f.steps = [7]ProgramStepV1{}
 	f.descriptors[1].Factory = nil
 
-	plain, plainCode := ResolveProgramStepV2(view, 0)
-	root, rootCode := ResolveProgramStepV2(view, 1)
-	if plainCode != ProgramValidationOKV2 || plain.Plain != wantPlain ||
-		rootCode != ProgramValidationOKV2 || root.Descriptor != wantDescriptor || root.Factory != wantFactory {
-		t.Fatalf("snapshot changed: plain=(%+v,%d) root=(%+v,%d)", plain, plainCode, root, rootCode)
+	if _, code := ResolveProgramStepV2(view, 0); code != ProgramValidationInvalidViewV2 {
+		t.Fatalf("mutated table code = %d, want invalid view", code)
 	}
 	if _, code := ResolveProgramStepV2(ProgramViewV2{}, 0); code != ProgramValidationInvalidViewV2 {
 		t.Fatalf("zero view code = %d, want invalid view", code)
 	}
-	if _, code := ResolveProgramStepV2(view, 5); code != ProgramValidationStepIndexV2 {
+	if _, code := ResolveProgramStepV2(view, uintptr(len(programStepRolesForTestV2))); code != ProgramValidationStepIndexV2 {
 		t.Fatalf("out-of-range code = %d, want step index", code)
 	}
 }
