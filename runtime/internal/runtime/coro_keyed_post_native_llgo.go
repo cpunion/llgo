@@ -21,7 +21,22 @@ package runtime
 import "github.com/goplus/llgo/runtime/internal/coro"
 
 func coroTargetPostKeyedOperationV2(id coro.OperationID) bool {
-	result := coroNativeFleetPostManualV1(id)
+	if !id.Valid() || id.Source() != coro.OperationSourceManual {
+		return false
+	}
+	domain, ok := coroNativeFleetActiveDomainForRouteV1(id.Route())
+	if !ok {
+		return false
+	}
+	// A keyed semaphore/notify completion is committed by a currently running
+	// managed G. Physical-owner stop joins that execution before route teardown,
+	// so it must not acquire the external callback ingress: task cancellation at
+	// main return could otherwise destroy the G between Enter and Leave and make
+	// backend retirement wait forever. Raw C/host producers continue to use the
+	// exported coroNativeFleetPostV1 path and its strong ingress join.
+	result := coroNativeFleetV1State.fleet.PostManualAndRequest(id)
+	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result.Executor) ||
+		domain.doorbell.Ring()
 	return result.Route == coro.OperationRoutePosted &&
-		coro.ExecutorRequestAccepted(result.Executor)
+		coro.ExecutorRequestAccepted(result.Executor) && ringOK
 }

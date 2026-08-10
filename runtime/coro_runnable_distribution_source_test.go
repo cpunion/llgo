@@ -191,6 +191,25 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		}
 	}
 
+	keyed := readRuntimePollFile(t, "internal/runtime/coro_keyed_post_native_llgo.go")
+	for _, required := range []string{
+		"coroNativeFleetActiveDomainForRouteV1(id.Route())",
+		"coroNativeFleetV1State.fleet.PostManualAndRequest(id)",
+		"coroNativeFleetRequestNeedsRingV1(domain, result.Executor)",
+	} {
+		if !strings.Contains(keyed, required) {
+			t.Errorf("managed keyed completion lacks owner-joined post marker %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"coroNativeFleetPostManualV1(id)",
+		"domain.ingress.Enter()",
+	} {
+		if strings.Contains(keyed, forbidden) {
+			t.Errorf("managed keyed completion retained external ingress path %q", forbidden)
+		}
+	}
+
 	leaf := readRuntimePollFile(t, "internal/corofleet/_owner/owner.c")
 	for _, required := range []string{
 		"getenv(\"GOMAXPROCS\")",
