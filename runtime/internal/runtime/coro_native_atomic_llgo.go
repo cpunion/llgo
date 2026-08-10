@@ -41,6 +41,10 @@ func coroNativeAtomicLoadPointerV1(word *unsafe.Pointer) unsafe.Pointer {
 	return catomic.Load(word)
 }
 
+func coroNativeAtomicStorePointerV1(word *unsafe.Pointer, value unsafe.Pointer) {
+	catomic.Store(word, value)
+}
+
 func coroNativeAtomicCASPointerV1(word *unsafe.Pointer, old, next unsafe.Pointer) bool {
 	_, swapped := catomic.CompareAndExchange(word, old, next)
 	return swapped

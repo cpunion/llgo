@@ -39,6 +39,10 @@ func coroNativeAtomicLoadPointerV1(word *unsafe.Pointer) unsafe.Pointer {
 	return atomic.LoadPointer(word)
 }
 
+func coroNativeAtomicStorePointerV1(word *unsafe.Pointer, value unsafe.Pointer) {
+	atomic.StorePointer(word, value)
+}
+
 func coroNativeAtomicCASPointerV1(word *unsafe.Pointer, old, next unsafe.Pointer) bool {
 	return atomic.CompareAndSwapPointer(word, old, next)
 }

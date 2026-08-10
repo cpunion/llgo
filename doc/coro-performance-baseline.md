@@ -282,19 +282,21 @@ C physical-thread records.
 
 | Metric | fixed 10,000-record storage | demand-allocated storage | Delta |
 | --- | ---: | ---: | ---: |
-| File bytes | 7,698,880 | 7,255,936 | -442,944 (-5.753%) |
-| `__text` bytes | 3,584,428 | 3,585,460 | +1,032 (+0.029%) |
-| zero-fill bytes | 2,076,278 | 958,430 | -1,117,848 (-53.839%) |
+| File bytes | 7,698,896 | 7,256,064 | -442,832 (-5.752%) |
+| `__text` bytes | 3,584,424 | 3,585,472 | +1,048 (+0.029%) |
+| zero-fill bytes | 2,076,278 | 958,438 | -1,117,840 (-53.839%) |
 | `coroNativeMDirectoryV1State` | 1,120,040 | 2,192 | -1,117,848 (-99.804%) |
 | C `llgo_coro_fleet_factory_v1` span | 440,160 | 176 | -439,984 (-99.960%) |
-| median maximum RSS, 12 interleaved runs | 14,802,944 | 13,271,040 | -1,531,904 (-10.349%) |
+| median maximum RSS, 12 interleaved runs | 14,794,752 | 13,262,848 | -1,531,904 (-10.354%) |
 
 The logical limit remains 10,000. The eight initial fleet owners stay inline
 and allocation-free. Slots above eight use immutable, CAS-published pages of 64
 owners; the static directory holds only 157 page roots, and a reader never
-allocates. Each attached 64-owner page is 7,168 bytes and remains stable for the
-process lifetime, so memory follows the high-water logical replacement depth
-rather than the theoretical limit. C still receives only the scalar slot ABI.
+allocates. A one-byte marker claims the page root before allocation, so
+concurrent first users allocate exactly one page even in `nogc` builds. Each
+attached 64-owner page is 7,168 bytes and remains stable for the process
+lifetime, so memory follows the high-water logical replacement depth rather
+than the theoretical limit. C still receives only the scalar slot ABI.
 
 The C factory now allocates one 48-byte record only for an actual pthread,
 keeps actual records in a mutex-owned intrusive list, and frees a record after
@@ -305,11 +307,11 @@ lifecycle operations and are bounded by the number of actual threads, not the
 10,000 logical slots.
 
 Twelve AB/BA-interleaved direct runs at `GOMAXPROCS=2` measured median wall time
-0.17 s versus 0.16 s, median user time 0.24 s for both, retired instructions
--0.673%, and cycles -0.239%. These small deltas establish no observed throughput
-regression and are not treated as a portable speedup claim. The independently
-built candidate also completed 250 consecutive `GOMAXPROCS=8` sync acceptance
-runs. Native replacement, nested replacement, timer, poll and retirement E2E,
+0.16 s and median user time 0.24 s for both, retired instructions -0.029%, and
+cycles +0.130%. These small deltas establish no observed throughput regression
+and are not treated as a portable speedup claim. The independently built
+candidate also completed 250 consecutive `GOMAXPROCS=8` sync acceptance runs.
+Native replacement, nested replacement, timer, poll and retirement E2E,
 plus repeated C factory lifecycle tests, cover the allocation and reclamation
 paths.
 

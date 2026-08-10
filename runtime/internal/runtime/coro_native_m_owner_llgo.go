@@ -97,17 +97,23 @@ type coroNativeMOwnerPageV1 struct {
 
 type coroNativeMDirectoryV1 struct {
 	owners [coroNativeFleetDomainCapacityV1]coroNativeMOwnerV1
-	// pages are immutable after release publication. unsafe.Pointer keeps each
-	// target-allocated page visible to the non-moving runtime collector while
-	// allowing one lock-free CAS to choose a winner between concurrent M
-	// replacement requests. A losing candidate is ordinary collectable Go
-	// storage and no C code ever observes either pointer.
+	// pages are immutable after release publication. A one-byte process-global
+	// marker may occupy one root while its unique winning allocator constructs
+	// that page; this claims publication before allocation, so a concurrent
+	// loser cannot leak a page in nogc builds. unsafe.Pointer keeps each final
+	// target-allocated page visible to the non-moving runtime collector. No C
+	// code observes the marker or a final page pointer.
 	pages  [coroNativeMPageCountV1]unsafe.Pointer
 	active [coroNativeFleetDomainCapacityV1]uint32
 	state  uint32
 }
 
 var coroNativeMDirectoryV1State coroNativeMDirectoryV1
+var coroNativeMPagePublishingV1State byte
+
+func coroNativeMPagePublishingV1() unsafe.Pointer {
+	return unsafe.Pointer(&coroNativeMPagePublishingV1State)
+}
 
 func coroNativeMOwnerForSlotV1(slot uint32) (*coroNativeMOwnerV1, bool) {
 	if slot == 0 || slot > coroNativeMDirectoryCapacityV1 {
@@ -120,7 +126,7 @@ func coroNativeMOwnerForSlotV1(slot uint32) (*coroNativeMOwnerV1, bool) {
 	page := coroNativeAtomicLoadPointerV1(
 		&coroNativeMDirectoryV1State.pages[index/coroNativeMPageCapacityV1],
 	)
-	if page == nil {
+	if page == nil || page == coroNativeMPagePublishingV1() {
 		return nil, false
 	}
 	return &(*coroNativeMOwnerPageV1)(page).owners[index%coroNativeMPageCapacityV1], true
@@ -140,17 +146,26 @@ func coroNativeMEnsureOwnerForSlotV1(slot uint32) (*coroNativeMOwnerV1, bool) {
 	index := slot - coroNativeFleetDomainCapacityV1 - 1
 	pageAddress := &coroNativeMDirectoryV1State.pages[index/coroNativeMPageCapacityV1]
 	page := coroNativeAtomicLoadPointerV1(pageAddress)
+	publishing := coroNativeMPagePublishingV1()
 	if page == nil {
-		candidate := new(coroNativeMOwnerPageV1)
-		candidatePointer := unsafe.Pointer(candidate)
-		if coroNativeAtomicCASPointerV1(pageAddress, nil, candidatePointer) {
-			page = candidatePointer
+		if coroNativeAtomicCASPointerV1(pageAddress, nil, publishing) {
+			page = unsafe.Pointer(new(coroNativeMOwnerPageV1))
+			coroNativeAtomicStorePointerV1(pageAddress, page)
 		} else {
 			page = coroNativeAtomicLoadPointerV1(pageAddress)
-			if page == nil {
-				return nil, false
-			}
 		}
+	}
+	// A page is claimed only by another physical scheduler owner. Yielding the
+	// host thread here lets that bounded allocation finish without consuming a
+	// managed execution permit or turning this publication gate into a lock.
+	for page == publishing {
+		if corofleet.Yield() != 0 {
+			return nil, false
+		}
+		page = coroNativeAtomicLoadPointerV1(pageAddress)
+	}
+	if page == nil {
+		return nil, false
 	}
 	return &(*coroNativeMOwnerPageV1)(page).owners[index%coroNativeMPageCapacityV1], true
 }

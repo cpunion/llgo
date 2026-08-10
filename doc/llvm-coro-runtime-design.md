@@ -2,9 +2,9 @@
 
 状态：实现中（可验证无栈原型；尚非完整 Go runtime）
 
-更新：2026-08-02
+更新：2026-08-10
 
-当前审查基线：`cpunion/llgo:llvm-coro` @ `98268dab4`，加本节记录的按需M存储提交
+当前审查基线：`cpunion/llgo:llvm-coro` @ `0ec7bf52d`，加本节记录的按需M存储提交
 
 集成状态：Phase 36 hard-cutover、P-neutral result materialization 与 demand-driven
 work sharing、native 固定有界物理 topology、动态 managed-execution quota 和标准

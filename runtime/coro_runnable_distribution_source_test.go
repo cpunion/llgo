@@ -154,7 +154,10 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"pages  [coroNativeMPageCountV1]unsafe.Pointer",
 		"active [coroNativeFleetDomainCapacityV1]uint32",
 		"func coroNativeMEnsureOwnerForSlotV1(slot uint32)",
-		"coroNativeAtomicCASPointerV1(pageAddress, nil, candidatePointer)",
+		"coroNativeAtomicCASPointerV1(pageAddress, nil, publishing)",
+		"page = unsafe.Pointer(new(coroNativeMOwnerPageV1))",
+		"coroNativeAtomicStorePointerV1(pageAddress, page)",
+		"for page == publishing",
 		"corofleet.TryReuseOwner(&owner.thread, &owner.token, slot)",
 		"corofleet.ReleaseOwner(",
 		"coroNativeMAllocateReplacementV1(",
@@ -167,6 +170,10 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	}
 	if strings.Contains(directory, "owners [coroNativeMDirectoryCapacityV1]coroNativeMOwnerV1") {
 		t.Error("native M directory still reserves every logical owner in BSS")
+	}
+	if strings.Index(directory, "new(coroNativeMOwnerPageV1)") <
+		strings.Index(directory, "coroNativeAtomicCASPointerV1(pageAddress, nil, publishing)") {
+		t.Error("native M page allocation occurs before exclusive publication claim")
 	}
 
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
