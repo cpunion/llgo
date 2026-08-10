@@ -34,6 +34,11 @@ import (
 // Reaching materialization without that adapter is therefore invalid.
 func coroMaterializeResumeCleanupStepV1(coro.ResumeCleanupStep) bool { return false }
 
+// The named-source fleet test includes the production slice reducer without
+// linking the complete LLGo runtime abort backend into the host Go runtime.
+// Valid paths never call this non-returning test-island stand-in.
+func coroRuntimeAbort(message string) { panic(message) }
+
 type coroNativeFleetTestTask struct {
 	g           *coro.G
 	handle      unsafe.Pointer
