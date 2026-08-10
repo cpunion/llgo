@@ -672,6 +672,41 @@ func init() {
 	runCoroABITestPipeline(t, prog, module)
 }
 
+func TestCoroProgramManagedEntryRejectsMethodNamedInit(t *testing.T) {
+	const source = `package foo
+
+type Ring struct{}
+
+func (*Ring) init() {}
+func init() {}
+`
+	ssaPkg, _, _ := buildGoSSAPkg(t, source)
+	ring := ssaPkg.Pkg.Scope().Lookup("Ring")
+	if ring == nil {
+		t.Fatal("fixture Ring type is absent")
+	}
+	selection := ssaPkg.Prog.MethodSets.MethodSet(types.NewPointer(ring.Type())).Lookup(ssaPkg.Pkg, "init")
+	if selection == nil {
+		t.Fatal("fixture init method selection is absent")
+	}
+	method := ssaPkg.Prog.MethodValue(selection)
+	if method == nil || method.Signature == nil || method.Signature.Recv() == nil {
+		t.Fatalf("fixture init method has unexpected SSA shape: %v", method)
+	}
+	if isCoroProgramManagedEntry(method) {
+		t.Fatalf("receiver method %q was classified as a program bootstrap entry", method.String())
+	}
+	for _, name := range []string{"init", "init#1"} {
+		function := ssaPkg.Func(name)
+		if function == nil {
+			t.Fatalf("fixture top-level %s is absent", name)
+		}
+		if !isCoroProgramManagedEntry(function) {
+			t.Fatalf("top-level %q lost its program bootstrap classification", function.String())
+		}
+	}
+}
+
 func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
