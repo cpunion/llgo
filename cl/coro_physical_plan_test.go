@@ -46,6 +46,8 @@ func TestCoroPhysicalPlanRuntimeHelperElisionIsRecipeOwned(t *testing.T) {
 		{name: "checked interface pointer keeps allocation", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionInterfaceFromCheckedPtr}, helper: "AllocU"},
 		{name: "unsafe slice", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionUnsafeSlice}, helper: "AssertRuntimeError", want: true},
 		{name: "interface nil", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionInterfaceNilCompare}, helper: "EfaceEqual", want: true},
+		{name: "integer divide by zero", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIntegerDivideByZeroGuard}, helper: "AssertDivideByZero", want: true},
+		{name: "integer divide keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIntegerDivideByZeroGuard}, helper: "AssertNegativeShift"},
 		{name: "frame allocation", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionFrameAllocation}, helper: "AllocZ", want: true},
 		{name: "frame allocation keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionFrameAllocation}, helper: "AllocU"},
 		{name: "panic outcome", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomePanic}, helper: "Panic", want: true},

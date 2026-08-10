@@ -95,6 +95,21 @@ func ArrayFullMax(values *Array4, low, high, max int) []uint32 {
 func SliceFullHigh(values []uint32, high, max int) []uint32 { return values[:high:max] }
 func SliceFullLow(values []uint32, low, high, max int) []uint32 { return values[low:high:max] }
 
+func Divide(value, divisor int64) int64 { return value / divisor }
+func Remainder(value, divisor int64) int64 { return value % divisor }
+func GuardedDivide(value, divisor int64) int64 {
+	if divisor == 0 { return 0 }
+	return value / divisor
+}
+func DivideWithCleanup(value, divisor int64) int64 {
+	defer Cleanup()
+	return value / divisor
+}
+func DivideWithRecover(value, divisor int64) (result int64) {
+	defer RecoverFault()
+	return value / divisor
+}
+
 func PointerEqual(first, second *Box) bool { return first == second }
 
 type ValueReceiver struct { Value uint32 }
@@ -278,6 +293,67 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 	}
 }
 
+func TestCoroIntegerDivideByZeroUsesStructuredFaultNativeAndWasm32(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg, plan, functions := compileCoroImplicitNilFaultFixture(t, test.target)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify structured integer division before CoroSplit: %v\n%s", err, module.String())
+			}
+			for _, name := range []string{"Divide", "Remainder"} {
+				functionPlan, ok := plan.FunctionPlan(functions[name])
+				if !ok || functionPlan.Emission != coro.EmitCoroutine ||
+					!functionPlan.Exec.Contains(coro.MayUnwind) {
+					t.Fatalf("%s plan = %+v, present=%t; want may-unwind coroutine", name, functionPlan, ok)
+				}
+				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
+				if strings.Contains(body, "AssertDivideByZero") ||
+					strings.Contains(body, "call void @"+coroAwaitPrepareHookV1) ||
+					strings.Count(body, "call void @"+coroFaultPrepareHookV1) != 1 ||
+					!strings.Contains(body, fmt.Sprintf("i32 %d", coroFaultIntegerDivideByZeroV1)) {
+					t.Fatalf("%s did not exclusively use one structured divide-by-zero fault:\n%s", name, body)
+				}
+			}
+
+			guarded := requireCoroPhysicalFunction(t, module, "foo.GuardedDivide").String()
+			if strings.Contains(guarded, "AssertDivideByZero") ||
+				strings.Contains(guarded, coroFaultPrepareHookV1) {
+				t.Fatalf("dominated non-zero division retained a helper or fault edge:\n%s", guarded)
+			}
+
+			for _, name := range []string{"DivideWithCleanup", "DivideWithRecover"} {
+				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
+				if strings.Contains(body, "AssertDivideByZero") ||
+					strings.Contains(body, "call void @"+coroFaultPrepareHookV1) ||
+					strings.Count(body, "call void @"+coroFaultPayloadHookV1) != 1 ||
+					!strings.Contains(body, fmt.Sprintf("i32 %d", coroFaultIntegerDivideByZeroV1)) {
+					t.Fatalf("%s did not route divide-by-zero through cleanup/recover payload:\n%s", name, body)
+				}
+			}
+
+			runCoroABITestPipeline(t, prog, module)
+			for _, name := range []string{"Divide", "Remainder"} {
+				resume := module.NamedFunction("foo." + name + "$coro.resume")
+				if resume.IsNil() || strings.Contains(resume.String(), "AssertDivideByZero") ||
+					strings.Count(resume.String(), "call void @"+coroFaultPrepareHookV1) != 1 {
+					t.Fatalf("post-split %s lost its structured divide-by-zero fault:\n%s", name, module.String())
+				}
+			}
+		})
+	}
+}
+
 func TestCoroImplicitIndexAddrBoundsNativeAndWasm32(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
@@ -309,7 +385,7 @@ func TestCoroImplicitIndexAddrBoundsNativeAndWasm32(t *testing.T) {
 				t.Fatalf("SliceAt retained a native-stack bounds helper:\n%s", body)
 			}
 			hook := strings.Index(body, "call void @"+coroFaultPrepareHookV2)
-			if hook < 0 || !strings.Contains(body[hook:], "i32 11") ||
+			if hook < 0 || !strings.Contains(body[hook:], fmt.Sprintf("i32 %d", coroBoundsFaultKind(coroBoundsFaultIndex, true))) ||
 				!strings.Contains(body[hook:], "i64 ") {
 				t.Fatalf("SliceAt did not select the index-bounds fault kind:\n%s", body)
 			}
@@ -597,6 +673,11 @@ func compileCoroImplicitNilFaultFixture(
 		"ArrayFullMax":         ssaPkg.Func("ArrayFullMax"),
 		"SliceFullHigh":        ssaPkg.Func("SliceFullHigh"),
 		"SliceFullLow":         ssaPkg.Func("SliceFullLow"),
+		"Divide":               ssaPkg.Func("Divide"),
+		"Remainder":            ssaPkg.Func("Remainder"),
+		"GuardedDivide":        ssaPkg.Func("GuardedDivide"),
+		"DivideWithCleanup":    ssaPkg.Func("DivideWithCleanup"),
+		"DivideWithRecover":    ssaPkg.Func("DivideWithRecover"),
 		"PointerEqual":         ssaPkg.Func("PointerEqual"),
 		"ValueReceiverCall":    ssaPkg.Func("ValueReceiverCall"),
 		"StaticArrayRange":     ssaPkg.Func("StaticArrayRange"),

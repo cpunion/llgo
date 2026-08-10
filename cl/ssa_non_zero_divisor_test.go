@@ -132,7 +132,7 @@ func Divide(x, divisor float64) float64 { return x / divisor }
 	}
 }
 
-func TestSSAUnprovenIntegerDivisionRequiresExplicitStatusHelper(t *testing.T) {
+func TestSSAUnprovenIntegerDivisionRequiresExplicitStatusFault(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 func Divide(x, divisor int64) int64 { return x / divisor }
 `)
@@ -146,8 +146,8 @@ func Divide(x, divisor int64) int64 { return x / divisor }
 		t.Fatalf("unproven integer division without explicit status reason = %q", reason)
 	}
 	audit.allowImplicitNilFault = true
-	if reason := audit.validateBinOp(division); !strings.Contains(reason, "runtime helper capability validation requires a frozen emission universe") {
-		t.Fatalf("unproven integer division helper gate reason = %q", reason)
+	if reason := audit.validateBinOp(division); reason != "" {
+		t.Fatalf("unproven integer division explicit-status fault rejected: %s", reason)
 	}
 }
 
