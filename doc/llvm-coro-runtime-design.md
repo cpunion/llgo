@@ -989,7 +989,8 @@ create/join现已升级为有界8项standby-M缓存：wrapper只在Go入口返�
 10,000开始，覆盖program/factory/worker/peer/replacement/successor/standby，创建前reserve，
 join或永久pthread exit后release；标准`runtime/debug.SetMaxThreads`直接操作该账本。C并发、
 缓存溢出与terminal-owner stop、14线程上限连续replacement和普通stdlib入口均已通过。
-剩余生产化项是普通locked park/preempt、callback/reentry、非command shutdown和异常路径的完整矩阵；
+普通locked `Yield`、channel/timer `Park`与compiler-poll preempt已通过同P replacement和同物理M恢复的linked E2E；
+剩余生产化项是跨target thread-affinity、callback/reentry、非command shutdown和异常路径的完整矩阵；
 这些不能由当前成功路径外推。
 
 ### 11.2 G 状态机
@@ -1234,8 +1235,12 @@ Runtime 提供 nesting counter：
 managed-execution quota，并在exact returned-owner确认及standby release后恢复exact resume。`GOMAXPROCS=1`同route
 channel、timer、socket poll及nested replacement的linked对抗测试已通过；未解锁G退出的
 program、peer和temporary replacement M会由clean successor替换，command main-return也不会
-等待不可取消的blocked M。standby M和`SetMaxThreads`已按上述统一物理线程生命周期接入；这里仍未完成的是任意locked G普通park/preempt后的pinned queue、
-完整callback/reentry/`entersyscall`/`exitsyscall`矩阵，因此不能把foreign子路径等同于全部
+等待不可取消的blocked M。普通locked G的`Yield`、channel/timer `Park`已复用pinned queue和
+同P replacement；long-running replacement peer又由compiler loop poll打断，原locked G随后在
+同一物理M恢复。replacement的route drain把`more`、`settled`和invalid正交返回：有界
+`RunSlice`边界仍保留current G或producer短暂持有mailbox时禁止`FinishReturn`，但会继续下一
+slice/普通wait，不把`OwnerUnstable`误作可自旋解决的pending数据。standby M和`SetMaxThreads`已按上述统一物理线程生命周期接入；这里仍未完成的是
+跨target thread-affinity策略和完整callback/reentry/`entersyscall`/`exitsyscall`矩阵，因此不能把当前native成功路径等同于全部
 `LockOSThread`语义。
 
 Full语义要求locked G使用固定M，且该M在G park/preempt期间不运行其他G；因此还需要replacement M维持其他P进展。单M JS/WASM、WASI和baremetal不能同时满足“该线程不运行其他G”和“locked G park时其他G继续”：
@@ -2090,7 +2095,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
   0.539–0.545秒）。
 - Phase 36之后的主要缺口仍是工程闭环而非新的coroutine可行性障碍：零/单source
   `ResumePacket`、Channel/select typed multi-source materialization、单Worker HostOp、Worker+Timer
-  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。owner P现以精确ready计数一次转移约一半、最多8个P-neutral runnable，只发一个target request；其他P从不并发读取victim queue，因此当前不需要第二套lock-free deque。native现在于首个managed resume前创建固定8-route物理topology，route/source/event identity保持到进程关闭；启动环境或online CPU只初始化逻辑execution quota，标准`runtime.GOMAXPROCS(n)`可在运行期查询、增大或缩小该quota，而不销毁P、迁移source或撤销已经开始的resume。single-executor target固定返回1。locked-M阻塞已接通同P replacement owner、嵌套handoff和route-local channel/timer/poll驱动；未解锁退出又以clean successor覆盖program、peer和temporary replacement M，command main-return不会等待不可取消的blocked M。有界pthread standby缓存和覆盖所有runtime M的`SetMaxThreads`账本也已完成。下一步是普通locked park/preempt、完整affinity、callback/reentry与非command shutdown矩阵，以及Linux自动cgroup/affinity默认值刷新；dynamic timer与
+  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。owner P现以精确ready计数一次转移约一半、最多8个P-neutral runnable，只发一个target request；其他P从不并发读取victim queue，因此当前不需要第二套lock-free deque。native现在于首个managed resume前创建固定8-route物理topology，route/source/event identity保持到进程关闭；启动环境或online CPU只初始化逻辑execution quota，标准`runtime.GOMAXPROCS(n)`可在运行期查询、增大或缩小该quota，而不销毁P、迁移source或撤销已经开始的resume。single-executor target固定返回1。locked-M阻塞已接通同P replacement owner、嵌套handoff和route-local channel/timer/poll驱动；未解锁退出又以clean successor覆盖program、peer和temporary replacement M，command main-return不会等待不可取消的blocked M。有界pthread standby缓存和覆盖所有runtime M的`SetMaxThreads`账本也已完成。普通locked `Yield`、channel/timer `Park`与compiler-poll preempt已经通过同物理M恢复门。下一步是跨target完整affinity、callback/reentry与非command shutdown矩阵，以及Linux自动cgroup/affinity默认值刷新；dynamic timer与
   worker capacity；完整defer/recover/Goexit和precise suspended-frame GC；外部DNS
   server/cgo resolver、Unix/raw socket与ancillary OOB、process/signal；logical stack/tooling；以及
   JS command HostOp/reentry、WASI Preview 2 component/pollable、RTOS及baremetal各自内建
@@ -2171,7 +2176,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 ### Phase 5：Native 多 P
 
-- P-neutral `ResumePacket/ResultCell`物化和source-affine ready边界完成后，使用无指针demand + exact mailbox启用按需global injection/work sharing；该层及owner-assisted bounded half-batch已完成。Native固定创建8个有界route，C线程叶只传递`uint32` M slot，不传函数地址、G、P或coroutine handle；启动环境/CPU初始化逻辑execution quota，`runtime.GOMAXPROCS`在固定identity上动态调整managed resume并行上限。locked-M阻塞已用`ExecutionDomainHandoff + ExecutorResumeHandoff + active M slot`完成同P ready/source handoff；replacement复用公共reducer，支持嵌套并受同一execution quota约束。有界pthread standby cache和`runtime/debug.SetMaxThreads` physical ledger已完成，不改变transfer ownership协议。下一步完成普通locked park/preempt和完整affinity；并发local deque仅在profiling证明owner-assisted queue不足时引入。
+- P-neutral `ResumePacket/ResultCell`物化和source-affine ready边界完成后，使用无指针demand + exact mailbox启用按需global injection/work sharing；该层及owner-assisted bounded half-batch已完成。Native固定创建8个有界route，C线程叶只传递`uint32` M slot，不传函数地址、G、P或coroutine handle；启动环境/CPU初始化逻辑execution quota，`runtime.GOMAXPROCS`在固定identity上动态调整managed resume并行上限。locked-M阻塞已用`ExecutionDomainHandoff + ExecutorResumeHandoff + active M slot`完成同P ready/source handoff；replacement复用公共reducer，支持嵌套并受同一execution quota约束。普通locked `Yield`、channel/timer `Park`与compiler-poll preempt的同M恢复已经通过linked E2E。有界pthread standby cache和`runtime/debug.SetMaxThreads` physical ledger已完成，不改变transfer ownership协议。下一步完成跨target完整affinity和callback/reentry shutdown矩阵；并发local deque仅在profiling证明owner-assisted queue不足时引入。
 - Worker pool及其他有限source使用generation capacity permit/backpressure，不按operation增生线程或对象。
 - ForeignOp worker/locked-M clean-stack execution、P release/reacquire和ForeignReentry。
 - `Syscall*`/`RawSyscall*`的single-call ForeignOp、PollWait wrapper event lowering、pointer provenance/pin和thread-affine thunk。
@@ -2939,7 +2944,7 @@ socket readiness和nested blocking linked E2E均已通过。raw replacement pthr
 standby cache复用，缓存溢出strong join；统一physical-thread ledger与标准
 `runtime/debug.SetMaxThreads`覆盖program/factory/worker/peer/replacement/successor/standby。
 未解锁退出的program、peer和temporary replacement owner已有clean succession，command
-main-return blocked-M也已闭环。普通locked park/preempt、callback/reentry、非command shutdown和完整
+main-return blocked-M也已闭环。普通locked `Yield`、channel/timer `Park`与compiler-poll preempt已经通过同M恢复门；跨target完整affinity、callback/reentry、非command shutdown和完整
 `entersyscall`/`exitsyscall`矩阵仍未完成，因此仍不能标成
 完整Go `entersyscall/exitsyscall`实现。
 
