@@ -44,6 +44,7 @@ const (
 	coroStaticCleanupIntrinsic
 	coroStaticCleanupBuiltin
 	coroStaticCleanupCgoWorker
+	coroStaticCleanupForeignWorker
 )
 
 type coroStaticCleanupSitePlan struct {
@@ -60,6 +61,8 @@ type coroStaticCleanupSitePlan struct {
 	intrinsic         int
 	builtin           string
 	cgoWorker         *coroWorkerCgoCallShape
+	foreignWorker     *coroWorkerForeignCallShape
+	arguments         []ssa.Value
 	tag               uint32
 }
 
@@ -283,19 +286,36 @@ func prepareCoroStaticCleanupPlan(
 					}
 					var cgoWorkerShape coroWorkerCgoCallShape
 					var cgoWorker bool
+					var foreignWorkerShape coroWorkerForeignCallShape
+					var foreignWorker bool
 					var err error
 					if universe != nil {
 						cgoWorkerShape, cgoWorker, err = validateCoroWorkerCgoCall(
 							whole, universe, instruction,
 						)
+						if err == nil && !cgoWorker {
+							pointerSize := 0
+							if universe.prog != nil {
+								pointerSize = universe.prog.PointerSize()
+							}
+							foreignWorkerShape, foreignWorker, err = validateCoroWorkerForeignCall(
+								whole, universe, instruction, pointerSize,
+							)
+						}
 					}
 					if err != nil {
-						return nil, fmt.Errorf("defer in block %d: cgo worker cleanup: %w", block.Index, err)
+						return nil, fmt.Errorf("defer in block %d: foreign worker cleanup: %w", block.Index, err)
+					}
+					if foreignWorker && foreignWorkerShape.mode != coroForeignCallModeWorker {
+						return nil, fmt.Errorf(
+							"defer in block %d: foreign cleanup requires bounded-worker execution, got %v",
+							block.Index, foreignWorkerShape.mode,
+						)
 					}
 					var intrinsicOpcode int
 					var intrinsic bool
 					if universe != nil {
-						if !cgoWorker {
+						if !cgoWorker && !foreignWorker {
 							intrinsicOpcode, intrinsic, err = universe.coroProgramIR.deferredIntrinsicCleanupRecipe(instruction)
 						}
 					}
@@ -314,6 +334,14 @@ func prepareCoroStaticCleanupPlan(
 							return nil, fmt.Errorf("defer in block %d: cgo worker target has no function plan", block.Index)
 						}
 						kind = coroStaticCleanupCgoWorker
+					} else if foreignWorker {
+						target = foreignWorkerShape.target
+						var planned bool
+						targetPlan, planned = whole.FunctionPlan(target)
+						if !planned {
+							return nil, fmt.Errorf("defer in block %d: foreign worker target has no function plan", block.Index)
+						}
+						kind = coroStaticCleanupForeignWorker
 					} else if !intrinsic {
 						if builtin, ok := instruction.Call.Value.(*ssa.Builtin); ok {
 							builtinName, err = validateCoroDeferredBuiltinCleanup(instruction, dynamicCleanup)
@@ -354,10 +382,16 @@ func prepareCoroStaticCleanupPlan(
 						closure:     closure,
 						intrinsic:   intrinsicOpcode,
 						builtin:     builtinName,
+						arguments:   append([]ssa.Value(nil), instruction.Call.Args...),
 					}
 					if cgoWorker {
 						shape := cgoWorkerShape
 						site.cgoWorker = &shape
+					}
+					if foreignWorker {
+						shape := foreignWorkerShape
+						site.foreignWorker = &shape
+						site.arguments = append([]ssa.Value(nil), shape.arguments...)
 					}
 					if kind == coroStaticCleanupDispatch {
 						callPlan, planned := whole.CallPlan(instruction)
@@ -1359,7 +1393,7 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 			}
 		}
 		site.argsField = len(nodeFields)
-		for _, argument := range sitePlan.instruction.Call.Args {
+		for _, argument := range sitePlan.arguments {
 			argumentType := p.type_(argument.Type(), llssa.InGo)
 			slot := llssa.Nil
 			if !state.external {
@@ -1499,7 +1533,30 @@ func (s *coroStaticCleanupState) registerAt(
 	if site.plan.kind == coroStaticCleanupDispatch {
 		functionKind = fnNormal
 	}
-	args := p.compileValues(b, instruction.Call.Args, functionKind)
+	var args []llssa.Expr
+	if site.plan.kind == coroStaticCleanupForeignWorker {
+		shape := site.plan.foreignWorker
+		if shape == nil || len(site.plan.arguments) != shape.argc {
+			panic("coroutine deferred foreign worker lost its frozen typed arguments")
+		}
+		oldInCFunc := p.inCFunc
+		p.inCFunc = true
+		args = make([]llssa.Expr, shape.argc)
+		for index, argument := range site.plan.arguments {
+			if callback := shape.rawCallbacks[index]; callback != nil {
+				entry, _, kind := p.compileRawPlainFunction(callback)
+				if entry == nil || kind != goFunc {
+					panic("coroutine deferred foreign worker lost a raw/plain C callback entry")
+				}
+				args[index] = entry.Expr
+				continue
+			}
+			args[index] = p.compileValue(b, argument)
+		}
+		p.inCFunc = oldInCFunc
+	} else {
+		args = p.compileValues(b, site.plan.arguments, functionKind)
+	}
 	if len(args) != len(site.args) {
 		panic(fmt.Sprintf("coroutine defer arguments=%d do not match cleanup slots=%d", len(args), len(site.args)))
 	}
@@ -1985,6 +2042,19 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		}
 		p.compileCoroWorkerCgoTransaction(
 			b, *site.plan.cgoWorker, args, site.keepalives,
+		)
+		finishSite()
+		return true
+	case coroStaticCleanupForeignWorker:
+		if site.plan.foreignWorker == nil {
+			panic("coroutine deferred foreign worker lost its frozen typed shape")
+		}
+		finishSite := func() {}
+		if !siteEmissionActive {
+			finishSite = s.beginRelocatedSiteEmission(p, site)
+		}
+		p.compileCoroWorkerForeignTransaction(
+			b, *site.plan.foreignWorker, llssa.Nil, args, site.keepalives,
 		)
 		finishSite()
 		return true

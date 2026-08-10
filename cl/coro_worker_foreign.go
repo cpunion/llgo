@@ -255,7 +255,7 @@ func coroWorkerForeignRawCallbackCompatibility(
 
 func coroWorkerForeignStaticSignaturesCompatible(
 	plan *coro.SSAPlan,
-	call *ssa.Call,
+	call ssa.CallInstruction,
 	callSignature, targetSignature *types.Signature,
 	allowRawCallbackFacade bool,
 ) bool {
@@ -346,7 +346,7 @@ func coroWorkerForeignRecordLayout(
 // recover their dynamic ABI safely.
 func coroWorkerForeignVariadicValues(
 	ctx *context,
-	call *ssa.Call,
+	call ssa.CallInstruction,
 	value ssa.Value,
 ) ([]ssa.Value, error) {
 	switch value := value.(type) {
@@ -419,7 +419,7 @@ func coroWorkerForeignVariadicValues(
 
 func coroWorkerForeignSpecializedSignature(
 	ctx *context,
-	call *ssa.Call,
+	call ssa.CallInstruction,
 	target *ssa.Function,
 	signature *types.Signature,
 ) (*types.Signature, []ssa.Value, bool, error) {
@@ -766,15 +766,17 @@ unwrapped:
 }
 
 // validateCoroWorkerForeignCall recognizes either an ordinary closed
-// CallForeign edge to one exact frontend C declaration or an ordinary dynamic
-// RawCCodePointer call. Both use the same typed record and bounded worker
-// protocol. A dynamic raw pointer carries no declaration to authorize; its
-// frontend-frozen //llgo:type C transport is the exact capability, and its
-// conservative WaitForeign effect remains unchanged.
+// CallForeign edge to one exact frontend C declaration, an ordinary dynamic
+// RawCCodePointer call, or a deferred exact frontend C declaration. All use the
+// same typed record and bounded worker protocol. A dynamic raw pointer carries
+// no declaration to authorize; its frontend-frozen //llgo:type C transport is
+// the exact capability, and its conservative WaitForeign effect remains
+// unchanged. Deferring a dynamic raw pointer remains fail-closed because the
+// cleanup frame does not yet freeze a separately typed callee slot.
 func validateCoroWorkerForeignCall(
 	plan *coro.SSAPlan,
 	universe *EmissionUniverse,
-	call *ssa.Call,
+	call ssa.CallInstruction,
 	pointerSize int,
 ) (shape coroWorkerForeignCallShape, recognized bool, err error) {
 	return validateCoroWorkerForeignCallWithAuthority(
@@ -785,7 +787,7 @@ func validateCoroWorkerForeignCall(
 
 func validateCoroWorkerForeignCallWithAuthority(
 	authority coroStaticForeignCallAuthority,
-	call *ssa.Call,
+	call ssa.CallInstruction,
 	pointerSize int,
 ) (shape coroWorkerForeignCallShape, recognized bool, err error) {
 	plan, universe := authority.plan, authority.universe
@@ -794,14 +796,44 @@ func validateCoroWorkerForeignCallWithAuthority(
 		return shape, false, nil
 	}
 	callPlan, planned := plan.CallPlan(call)
-	if !planned || callPlan.Kind != coro.CallForeign {
+	if !planned || (callPlan.Kind != coro.CallForeign && callPlan.Kind != coro.CallDefer) {
 		return shape, false, nil
+	}
+	common := call.Common()
+	if callPlan.Kind == coro.CallDefer {
+		// Defer preserves its source syntax kind in the effect graph even when
+		// its exact target is a blocking C declaration. Recognize only that
+		// narrow foreign subset here; ordinary Go cleanup targets continue to
+		// the managed static-cleanup planner.
+		raw := common.StaticCallee()
+		if raw == nil {
+			if callPlan.Transport == coro.RawCCodePointer {
+				return shape, true, fmt.Errorf(
+					"dynamic raw-C defer requires a frozen cleanup callee slot",
+				)
+			}
+			return shape, false, nil
+		} else {
+			target, frozen := universe.Resolve(raw)
+			if !frozen || target == nil {
+				return shape, false, nil
+			}
+			targetPlan, targetPlanned := plan.FunctionPlan(target)
+			background, classified, backgroundErr := universe.FunctionBackground(target)
+			if backgroundErr != nil {
+				return shape, true, fmt.Errorf("classify deferred target frontend ABI: %w", backgroundErr)
+			}
+			if !targetPlanned ||
+				targetPlan.External != coro.ExternalUnknownForeign ||
+				!classified || background != llssa.InC {
+				return shape, false, nil
+			}
+		}
 	}
 	recognized = true
 	if pointerSize <= 0 {
 		return shape, true, fmt.Errorf("target pointer width is unavailable")
 	}
-	common := call.Common()
 	if call.Parent() == nil {
 		return shape, true, fmt.Errorf("call has no exact SSA owner")
 	}
@@ -997,7 +1029,7 @@ func validateCoroWorkerForeignCallWithAuthority(
 func validateCoroWorkerDynamicForeignCall(
 	plan *coro.SSAPlan,
 	universe *EmissionUniverse,
-	call *ssa.Call,
+	call ssa.CallInstruction,
 	callPlan coro.SSACallPlan,
 ) (shape coroWorkerForeignCallShape, recognized bool, err error) {
 	shape.calleeField = -1
@@ -1007,7 +1039,7 @@ func validateCoroWorkerDynamicForeignCall(
 	}
 	common := call.Common()
 	if common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil ||
-		callPlan.Kind != coro.CallForeign || callPlan.Rep != coro.DirectPlain ||
+		(callPlan.Kind != coro.CallForeign && callPlan.Kind != coro.CallDefer) || callPlan.Rep != coro.DirectPlain ||
 		callPlan.Transport != coro.RawCCodePointer || !callPlan.Open ||
 		callPlan.Unresolved != coro.UnknownForeign || callPlan.SyncDispatch {
 		return shape, true, fmt.Errorf(
@@ -1155,15 +1187,6 @@ func (p *context) compileCoroWorkerForeignCall(
 		!dynamic && shape.target == nil {
 		panic("coroutine foreign worker lowering escaped its frozen physical operation recipe")
 	}
-	var target llssa.Function
-	if !dynamic {
-		var kind int
-		target, _, kind = p.compileFunction(shape.target)
-		if kind != cFunc || target == nil {
-			panic("coroutine foreign worker lowering lost its exact C target")
-		}
-	}
-	thunk := p.coroWorkerForeignThunk(shape, target)
 	oldInCFunc := p.inCFunc
 	p.inCFunc = true
 	callee := llssa.Expr{}
@@ -1189,6 +1212,38 @@ func (p *context) compileCoroWorkerForeignCall(
 	if shape.nilGuard {
 		p.compileCoroImplicitNilAccessGuard(b, callee)
 	}
+	return p.compileCoroWorkerForeignTransaction(
+		b, shape, callee, compiled, p.compileCoroCallKeepaliveSlots(b, call),
+	)
+}
+
+// compileCoroWorkerForeignTransaction is shared by an ordinary foreign call
+// and a deferred foreign cleanup. The source site owns evaluation and capture;
+// this helper owns only the exact typed record, raw C thunk, and common bounded
+// worker park/resume transaction.
+func (p *context) compileCoroWorkerForeignTransaction(
+	b llssa.Builder,
+	shape coroWorkerForeignCallShape,
+	callee llssa.Expr,
+	compiled []llssa.Expr,
+	keepaliveSlots []llssa.Expr,
+) llssa.Expr {
+	dynamic := shape.calleeType != nil
+	if p == nil || !p.hasCoroPhysicalBody() || shape.signature == nil || shape.record == nil ||
+		len(compiled) != shape.argc ||
+		dynamic && (shape.target != nil || shape.calleeField < 0 || callee.IsNil()) ||
+		!dynamic && (shape.target == nil || !callee.IsNil()) {
+		panic("coroutine foreign worker transaction escaped its frozen typed recipe")
+	}
+	var target llssa.Function
+	if !dynamic {
+		var kind int
+		target, _, kind = p.compileFunction(shape.target)
+		if kind != cFunc || target == nil {
+			panic("coroutine foreign worker transaction lost its exact C target")
+		}
+	}
+	thunk := p.coroWorkerForeignThunk(shape, target)
 	record := p.coroFrameAlloc(p.type_(shape.record, llssa.InC))
 	if dynamic {
 		b.Store(b.FieldAddr(record, shape.calleeField), callee)
@@ -1196,11 +1251,9 @@ func (p *context) compileCoroWorkerForeignCall(
 	for index, argument := range compiled {
 		b.Store(b.FieldAddr(record, shape.argumentBase+index), argument)
 	}
-	function := b.Convert(p.prog.Uintptr(), thunk.Expr)
-	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	p.compileCoroWorkerWordCall(
 		b,
-		function,
+		b.Convert(p.prog.Uintptr(), thunk.Expr),
 		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
 		keepaliveSlots,
 		nil,

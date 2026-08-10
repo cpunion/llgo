@@ -1671,6 +1671,11 @@ func validateCoroPhysicalABIForOwner(
 					return fail("deferred cgo worker cleanup has no frozen typed operation")
 				}
 				foreignWaits++
+			case coroStaticCleanupForeignWorker:
+				if site.foreignWorker == nil || site.foreignWorker.mode != coroForeignCallModeWorker {
+					return fail("deferred foreign worker cleanup has no frozen typed operation")
+				}
+				foreignWaits++
 			}
 		}
 	}
