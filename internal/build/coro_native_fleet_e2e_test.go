@@ -1968,6 +1968,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_m_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_replacement_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_replacement_reactor_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_current_task_route.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_ready_distribution_fleet_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_fleet_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_timer_llgo.go"),
@@ -1988,6 +1989,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro_atomic_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_wait_coro.go"),
 	}...)
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_current_task_route.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_operation_capacity.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_keyed_registry_atomic_llgo.go")
 	files = materializeCoroChannelNativeE2ERuntimeIsland(t, files)
