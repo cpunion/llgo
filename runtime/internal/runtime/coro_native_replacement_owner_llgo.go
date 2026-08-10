@@ -24,23 +24,29 @@ import (
 	"github.com/goplus/llgo/runtime/internal/corofleet"
 )
 
+// coroNativeReplacementDrainRouteV1 keeps progress and return safety
+// independent. more asks the replacement loop for one immediate drain retry;
+// settled permits a physical-owner return after the caller's remaining gates;
+// ok reports invariant validity. A valid unsettled result must advance the
+// ordinary run/wait loop before retrying because the current G or a bounded
+// producer transaction may be what makes the route unstable.
 func coroNativeReplacementDrainRouteV1(
 	owner *coroNativeMOwnerV1,
 	domain *coroNativeFleetDomainV1,
-) (more, ok bool) {
+) (more, settled, ok bool) {
 	if owner == nil || domain == nil || owner.handle != domain.handle {
-		return false, false
+		return false, false, false
 	}
 	p := domain.pOwnerV1()
 	if p == nil {
-		return false, false
+		return false, false, false
 	}
 	if domain.adopted {
 		if _, canceled := coroNativeFleetV1State.fleet.CancelPNeutralRunnableRequest(
 			owner.handle,
 			p,
 		); !canceled {
-			return false, false
+			return false, false, false
 		}
 		moved, pending, status := coroNativeFleetV1State.fleet.TryDrainPNeutralRunnables(
 			owner.handle,
@@ -49,22 +55,27 @@ func coroNativeReplacementDrainRouteV1(
 		)
 		switch status {
 		case coro.RunnableTransferDrainComplete:
-			return moved != 0 || pending, true
+			return moved != 0 || pending, true, true
 		case coro.RunnableTransferDrainContended,
 			coro.RunnableTransferDrainOwnerUnstable:
-			return true, true
+			// A contended producer still owns the route lease and an unstable
+			// P may retain the current G at a bounded RunSlice boundary. Neither
+			// state permits physical-owner return, but neither means that another
+			// drain retry can make progress. Let the replacement execute another
+			// slice (or reach its ordinary wait path) before rechecking.
+			return false, false, true
 		default:
-			return false, false
+			return false, false, false
 		}
 	}
 	if domain.ownerEpoch != owner.ownerEpoch {
-		return false, false
+		return false, false, false
 	}
 	if _, canceled := coroNativeFleetCancelOwnerRunnableDemandV1(
 		owner.handle,
 		owner.ownerEpoch,
 	); !canceled {
-		return false, false
+		return false, false, false
 	}
 	moved, pending, status := coroNativeFleetTryDrainOwnerEpochV1(
 		owner.handle,
@@ -73,12 +84,12 @@ func coroNativeReplacementDrainRouteV1(
 	)
 	switch status {
 	case coro.RunnableTransferDrainComplete:
-		return moved != 0 || pending, true
+		return moved != 0 || pending, true, true
 	case coro.RunnableTransferDrainContended,
 		coro.RunnableTransferDrainOwnerUnstable:
-		return true, true
+		return false, false, true
 	default:
-		return false, false
+		return false, false, false
 	}
 }
 
@@ -225,11 +236,11 @@ func coroNativeReplacementTryReturnV1(
 	if coroNativeAtomicLoadV1(&domain.borrowedWait) != 0 {
 		return false, false
 	}
-	more, drained := coroNativeReplacementDrainRouteV1(owner, domain)
-	if !drained {
+	more, settled, drainOK := coroNativeReplacementDrainRouteV1(owner, domain)
+	if !drainOK {
 		return false, false
 	}
-	if more {
+	if more || !settled {
 		return false, true
 	}
 	if detached {
@@ -311,7 +322,7 @@ func coroNativeMRunClaimedReplacementOwnerV1(
 		} else if returned {
 			return true
 		}
-		if more, drainOK := coroNativeReplacementDrainRouteV1(owner, domain); !drainOK {
+		if more, _, drainOK := coroNativeReplacementDrainRouteV1(owner, domain); !drainOK {
 			return coroNativeFleetPhysicalOwnerFailV1(
 				"native replacement route drain failed",
 			)
@@ -379,7 +390,7 @@ func coroNativeMRunClaimedReplacementOwnerV1(
 					"native replacement runnable demand failed",
 				)
 			}
-			if more, drainOK := coroNativeReplacementDrainRouteV1(owner, domain); !drainOK {
+			if more, _, drainOK := coroNativeReplacementDrainRouteV1(owner, domain); !drainOK {
 				return coroNativeFleetPhysicalOwnerFailV1(
 					"native replacement demand recheck failed",
 				)

@@ -717,6 +717,23 @@ import _ "unsafe"
 
 var Failed uint32
 var Start chan uint32
+var PreemptReady chan uint32
+var PreemptStart chan uint32
+var PreemptDone chan uint32
+var PreemptProgress uint32
+var PreemptFinished uint32
+var PreemptStop uint32
+
+const preemptLimit uint32 = 1000000
+
+//llgo:link atomicLoad llgo.atomicLoad
+func atomicLoad(address *uint32) uint32 { return *address }
+
+//llgo:link atomicStore llgo.atomicStore
+func atomicStore(address *uint32, value uint32) {}
+
+//llgo:link atomicAdd llgo.atomicAddReturnNew
+func atomicAdd(address *uint32, delta uint32) uint32 { return delta }
 
 //go:linkname osThreadLock llgo.coroOSThreadLock
 func osThreadLock()
@@ -736,9 +753,17 @@ func isWaiting() uintptr
 //go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
 func unblock()
 
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
 //llgo:coro worker
 //go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
 func block()
+
+//llgo:coro worker
+//go:linkname workerSleep C.__llgo_coro_native_fleet_e2e_nested_block_v1
+func workerSleep()
 
 func child() {
 	<-Start
@@ -747,9 +772,49 @@ func child() {
 	unblock()
 }
 
+func preemptPeer() {
+	PreemptReady <- 1
+	<-PreemptStart
+	for atomicLoad(&PreemptStop) == 0 &&
+		atomicLoad(&PreemptProgress) < preemptLimit {
+		atomicAdd(&PreemptProgress, 1)
+	}
+	atomicStore(&PreemptFinished, 1)
+	PreemptDone <- 1
+}
+
 func Setup() {
 	Failed = 0
 	Start = make(chan uint32)
+	PreemptReady = make(chan uint32)
+	PreemptStart = make(chan uint32, 1)
+	PreemptDone = make(chan uint32)
+	PreemptProgress = 0
+	PreemptFinished = 0
+	PreemptStop = 0
+}
+
+func testForeignReturnPreemptsReplacement() {
+	go preemptPeer()
+	<-PreemptReady
+	before := threadID()
+	osThreadLock()
+	PreemptStart <- 1
+	// The worker completes while the replacement is between bounded RunSlice
+	// passes with preemptPeer still current. Return must advance another slice
+	// instead of spinning on an unsettled route drain.
+	workerSleep()
+	after := threadID()
+	progressBeforeUnlock := atomicLoad(&PreemptProgress)
+	finishedBeforeUnlock := atomicLoad(&PreemptFinished)
+	atomicStore(&PreemptStop, 1)
+	osThreadUnlock()
+	<-PreemptDone
+	if after != before || finishedBeforeUnlock != 0 ||
+		progressBeforeUnlock == 0 || progressBeforeUnlock >= preemptLimit ||
+		atomicLoad(&PreemptProgress) >= preemptLimit {
+		Failed = 82
+	}
 }
 
 func main() {
@@ -763,7 +828,9 @@ func main() {
 	osThreadUnlock()
 	if isWaiting() == 0 {
 		Failed = 81
+		return
 	}
+	testForeignReturnPreemptsReplacement()
 }
 
 func Check() int32 {
@@ -893,6 +960,25 @@ var ChannelValue chan uint32
 var TimerReady chan uint32
 var TimerStart chan uint32
 var TimerDone chan uint32
+var PreemptReady chan uint32
+var PreemptStart chan uint32
+var PreemptWakeReady chan uint32
+var PreemptWakeStart chan uint32
+var PreemptRunning chan uint32
+var PreemptWake chan uint32
+var PreemptProgress uint32
+var PreemptFinished uint32
+
+const preemptLimit uint32 = 100000000
+
+//llgo:link atomicLoad llgo.atomicLoad
+func atomicLoad(address *uint32) uint32 { return *address }
+
+//llgo:link atomicStore llgo.atomicStore
+func atomicStore(address *uint32, value uint32) {}
+
+//llgo:link atomicAdd llgo.atomicAddReturnNew
+func atomicAdd(address *uint32, delta uint32) uint32 { return delta }
 
 //go:linkname osThreadLock llgo.coroOSThreadLock
 func osThreadLock()
@@ -923,6 +1009,14 @@ func Setup() {
 	TimerReady = make(chan uint32)
 	TimerStart = make(chan uint32)
 	TimerDone = make(chan uint32)
+	PreemptReady = make(chan uint32)
+	PreemptStart = make(chan uint32, 1)
+	PreemptWakeReady = make(chan uint32)
+	PreemptWakeStart = make(chan uint32, 1)
+	PreemptRunning = make(chan uint32)
+	PreemptWake = make(chan uint32)
+	PreemptProgress = 0
+	PreemptFinished = 0
 }
 
 func yieldPeer() {
@@ -956,6 +1050,32 @@ func timerPeer() {
 	<-TimerStart
 	PeerThread = threadID()
 	TimerDone <- 1
+}
+
+func preemptPeer() {
+	if threadID() != MainThread {
+		go preemptPeer()
+		return
+	}
+	PreemptReady <- 1
+	<-PreemptStart
+	PreemptRunning <- 1
+	for atomicLoad(&PreemptProgress) < preemptLimit {
+		atomicAdd(&PreemptProgress, 1)
+	}
+	atomicStore(&PreemptFinished, 1)
+}
+
+func preemptWaker() {
+	if threadID() == MainThread {
+		go preemptWaker()
+		return
+	}
+	PreemptWakeReady <- 1
+	<-PreemptWakeStart
+	<-PreemptRunning
+	timerSleep(30 * 1000 * 1000)
+	PreemptWake <- 1
 }
 
 func testLockedYield() {
@@ -1008,6 +1128,32 @@ func testLockedTimerPark() {
 	}
 }
 
+func testLockedCompilerPreempt() {
+	go preemptPeer()
+	<-PreemptReady
+	go preemptWaker()
+	<-PreemptWakeReady
+	before := threadID()
+	osThreadLock()
+	PreemptStart <- 1
+	PreemptWakeStart <- 1
+	// The locked owner parks on a channel while another P independently waits
+	// for a timer and publishes the wake-up back to this route. The replacement
+	// is then executing preemptPeer's long loop, so only a loop safepoint can
+	// observe the new request and restore this G before preemptLimit is reached.
+	<-PreemptWake
+	after := threadID()
+	progressBeforeUnlock := atomicLoad(&PreemptProgress)
+	finishedBeforeUnlock := atomicLoad(&PreemptFinished)
+	osThreadUnlock()
+	if before != MainThread || after != before ||
+		finishedBeforeUnlock != 0 ||
+		progressBeforeUnlock == 0 || progressBeforeUnlock >= preemptLimit ||
+		atomicLoad(&PreemptProgress) >= preemptLimit {
+		Failed = 144
+	}
+}
+
 func main() {
 	testLockedYield()
 	if Failed == 0 {
@@ -1015,6 +1161,9 @@ func main() {
 	}
 	if Failed == 0 {
 		testLockedTimerPark()
+	}
+	if Failed == 0 {
+		testLockedCompilerPreempt()
 	}
 }
 
@@ -1644,7 +1793,7 @@ func TestCoroNativeFleetSameRouteReplacementE2E(t *testing.T) {
 }
 
 func TestCoroNativeFleetLockedOrdinarySuspendE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetLockedOrdinarySuspendE2ESource, "locked-ordinary-suspend", true, 1)
+	runCoroNativeFleetE2E(t, coroNativeFleetLockedOrdinarySuspendE2ESource, "locked-ordinary-suspend", true, 2)
 }
 
 func TestCoroNativeFleetStandbyMHonorsSetMaxThreadsE2E(t *testing.T) {
