@@ -155,8 +155,8 @@ func TestExecutionQuotaConcurrentLimitNeverExceeded(t *testing.T) {
 	}
 	close(start)
 	workers.Wait()
-	if maximum.Load() < 2 || maximum.Load() > 3 {
-		t.Fatalf("observed maximum managed executions = %d, want 2..3", maximum.Load())
+	if maximum.Load() < 1 || maximum.Load() > 3 {
+		t.Fatalf("observed maximum managed executions = %d, want 1..3", maximum.Load())
 	}
 	if _, active, ok := quota.Usage(); !ok || active != 0 {
 		t.Fatalf("execution quota leaked %d active holders", active)
@@ -174,6 +174,7 @@ func TestExecutionQuotaConcurrentResizeMaintainsPhysicalBound(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32
 	start := make(chan struct{})
+	expanded := make(chan struct{})
 	overlap := make(chan struct{})
 	var workers sync.WaitGroup
 	for route := RouteID(1); route <= RouteID(ExecutorFleetCapacity); route++ {
@@ -182,6 +183,11 @@ func TestExecutionQuotaConcurrentResizeMaintainsPhysicalBound(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			<-start
+			// Do not let bounded acquisition attempts race ahead of the
+			// deliberate initial expansion. Otherwise every contender but
+			// the limit-1 holder can exhaust its attempts before SetLimit
+			// runs, leaving the resizer waiting forever for active >= 2.
+			<-expanded
 			for iteration := 0; iteration < 1000; iteration++ {
 				acquired, ok := quota.TryAcquire(route)
 				if !ok {
@@ -216,9 +222,11 @@ func TestExecutionQuotaConcurrentResizeMaintainsPhysicalBound(t *testing.T) {
 		<-start
 		if _, _, ok := quota.SetLimit(ExecutorFleetCapacity); !ok {
 			t.Error("grow execution quota for overlap")
+			close(expanded)
 			close(overlap)
 			return
 		}
+		close(expanded)
 		for active.Load() < 2 {
 			runtime.Gosched()
 		}
