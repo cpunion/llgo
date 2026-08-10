@@ -98,7 +98,7 @@ func validRunningExecutorOwner(driver *ExecutorDriver) bool {
 	return g != nil && p.inResume && expectedAction(p, g, p.action, ActionResume) &&
 		p.runDecision == (RunDecision{}) &&
 		g.state == GRunning && g.active != nil && g.active.state == FrameActive &&
-		g.active.handle == p.action.Handle && g.active.header != nil &&
+		activeResumeOwnedByAction(g) && g.active.header != nil &&
 		g.active.header.G == unsafe.Pointer(g) &&
 		g.active.header.SuspendReason == uint16(SuspendNone) &&
 		g.active.header.Lifecycle == uint16(FrameActive) &&
@@ -150,7 +150,7 @@ func currentExecutorParkDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, 
 	handle := g.active.handle
 	header := g.active.header
 	if !validExecutorDriverForP(driver, p) || p.current != g || !p.inResume ||
-		!expectedAction(p, g, p.action, ActionResume) || p.action.Handle != handle ||
+		!expectedAction(p, g, p.action, ActionResume) || !activeResumeOwnedByAction(g) ||
 		g.state != GRunning || g.active.state != FrameActive ||
 		g.active.handle != handle || g.active.header != header ||
 		header.G != unsafe.Pointer(g) || header.SuspendReason != uint16(SuspendPark) ||
@@ -311,7 +311,8 @@ func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) boo
 }
 
 func idleExecutorScheduler(p *P) bool {
-	return p != nil && p.current == nil && !p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
+	return p != nil && p.current == nil && !p.inResume && p.inlineAwaitDepth == 0 &&
+		p.action.Kind == ActionInvalid && p.action.Handle == nil &&
 		p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
 		validReadyQueueHeader(p) && validOSThreadOwnerHeader(p) &&
 		validParkWaitQueueHeader(p) && validAffectedWaitQueueHeader(p)
@@ -746,7 +747,7 @@ func ConfirmExecutorClose(driver *ExecutorDriver) bool {
 }
 
 func terminalExecutorRootPending(p *P, g *G, kind ActionKind) bool {
-	if p == nil || g == nil || p.current != g || p.inResume ||
+	if p == nil || g == nil || p.current != g || p.inResume || p.inlineAwaitDepth != 0 ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		!ValidG(g) || !gPreemptDepthZero(g) || g.runP != p || g.destroyTarget != nil || !g.destroyRoot ||
 		g.active != nil || g.frames != nil ||

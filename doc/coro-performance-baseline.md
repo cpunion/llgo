@@ -638,28 +638,35 @@ dominating non-zero proof emits neither helper nor fault edge. Native and
 wasm32 pre-/post-CoroSplit IR tests are the regression gate.
 
 The same Darwin arm64 machine, Go 1.26.5 toolchain, source case, 4 GiB hard
-process-group RSS limit, and three-minute step timeout produced:
+process-group RSS limit, and three-minute step timeout produced. The final
+column is a fresh semantic run of the general eager-child cohort:
 
-| Metric | `3a57f9a8a` | structured divide fault | Delta |
+| Metric | `3a57f9a8a` | structured divide fault | + eager child completion |
 | --- | ---: | ---: | ---: |
-| LLGo build | 22.064 s | 19.947 s | -2.117 s (-9.6%) |
-| LLGo run | 84.440 s | 43.864 s | -40.576 s (-48.1%) |
-| semantic result | pass | pass | unchanged |
+| LLGo build | 22.064 s | 19.947 s | 19.536 s |
+| LLGo run | 84.440 s | 43.864 s | 4.636 s |
+| peak process-group RSS | not recorded | not recorded | 1,046.0 MiB |
+| semantic result | pass | pass | pass |
 
-This result is deliberately not interpreted as completion of the synchronous
-fast path. It shows that one nested outcome helper accounted for almost half
-of this case, but the remaining 43.864 seconds still create and schedule the
-outer `i64test` frames and the path-insensitively colored `math/rand` chain.
-Adding more helper-name exceptions would not address that general cost.
+The general cohort reduces the post-divide-fault run time by 39.228 seconds
+(-89.4%), or 79.804 seconds (-94.5%) relative to the original checkpoint. It
+preserves one logical function version: each managed child still starts as an
+LLVM coroutine, but runs immediately on the current executor until final
+suspend or the first real yield/park/await. Synchronous completion uses the
+existing completion/destroy protocol. A real suspension conditionally suspends
+every generated parent while the temporary native resume chain unwinds, then
+the outer scheduler dispatches the deepest pending frame. Native nesting is
+bounded at 16 and falls back without mutating the ordinary pending await.
 
-The next core cohort must therefore preserve one logical function version while
-allowing a managed child to execute synchronously until it either completes or
-reaches its first real suspension. Its gate must cover frame publication,
-parent/child ownership, nested completion, panic/defer/Goexit, cancellation,
-preemption accounting, dynamic dispatch and archive metadata. A child that
-parks or awaits another event must still return ownership to the scheduler
-without retaining a native stack. Until that transaction is closed on native
-and wasm32, the mandatory initial-suspend scheduler path remains authoritative.
+The runtime-core transaction, nested-yield and wrong-child fail-closed tests,
+native and wasm32 pre-/post-CoroSplit IR, explicit panic, channel/static-spawn,
+production `time.Sleep`, same-M foreign and locked replacement E2Es all pass.
+The GOROOT case also exercised the worker/event slow path; this found and fixed
+an adapter assumption that `P.action.Handle` must equal the current leaf. Event
+adapters now accept only exact completion-owned inline ancestry. This is strong
+evidence that mandatory initial suspend no longer imposes a scheduler round
+trip on the common synchronous path, but it is not a full GOROOT or platform
+acceptance result.
 
 ### Compact emission type-graph cohort
 

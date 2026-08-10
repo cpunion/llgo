@@ -137,7 +137,7 @@ func releaseRunnableTransferGate(mailbox *RunnableTransferMailbox) {
 }
 
 func stableRunnableTransferP(p *P) bool {
-	if p == nil || p.current != nil || p.inResume || p.action != (Action{}) ||
+	if p == nil || p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action != (Action{}) ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
 		!validReadyQueueHeader(p) {
 		return false

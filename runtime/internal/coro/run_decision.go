@@ -176,6 +176,9 @@ func TakeRunDecision(
 		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, false
 	}
 	p := g.runP
+	if p.runDecisionTaken && takeInlineAwaitInitialDecision(g, expected) {
+		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, true
+	}
 	if p.current != g || !p.inResume || g.state != GRunning ||
 		p.runDecisionTaken || !expectedAction(p, g, p.action, ActionResume) || !validRunDecision(p.runDecision) {
 		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, false

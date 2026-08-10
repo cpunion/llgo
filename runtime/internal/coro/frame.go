@@ -96,6 +96,11 @@ type pendingKind uint8
 const (
 	pendingNone pendingKind = iota
 	pendingAwait
+	// pendingInlineStart exists only between BeginInlineAwait selecting an
+	// initial-suspended child and that child's compiler resume prologue taking
+	// its synthetic zero decision. It is never observable at a scheduler
+	// boundary and therefore is not handled by dispatchPending.
+	pendingInlineStart
 	pendingComplete
 	pendingYield
 	pendingParkSet

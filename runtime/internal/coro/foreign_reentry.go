@@ -123,7 +123,7 @@ func BeginForeignReentry(
 	p := driver.p
 	if !ExecutorResumeHandoffReturnable(driver) ||
 		!validForeignWaitingExecutorTask(p, task) ||
-		task.active.handle != handoff.action.Handle ||
+		!resumeActionOwnsActive(task, handoff.action, handoff.inlineAwaitDepth) ||
 		p.readyCount == ^uint32(0) {
 		return false
 	}
@@ -149,7 +149,7 @@ func BeginForeignReentry(
 		child.header.G != unsafe.Pointer(task) ||
 		child.header.Parent != parent.handle || child.parent != nil ||
 		!validReadyQueueHeader(p) || !validSchedulerWaitQueues(p) ||
-		p.current != nil || p.inResume || p.action != (Action{}) ||
+		p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action != (Action{}) ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		p.servicePreemptBudget != 0 ||
 		p.osThreadSuspend != osThreadSuspendAttached ||
@@ -248,7 +248,7 @@ func commitForeignReentryCompletion(
 		record.handoff == nil || record.handoff.state != executorResumeHandoffReentering ||
 		record.handoff.driver != driver || record.handoff.task != task ||
 		record.p != p || record.task != task || p.current != task ||
-		p.action != receipt || p.inResume ||
+		p.action != receipt || p.inResume || p.inlineAwaitDepth != 0 ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		p.servicePreemptBudget == 0 || task.runP != p ||
 		task.state != GDispatching || task.runAction != ActionInvalid ||

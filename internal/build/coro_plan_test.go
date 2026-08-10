@@ -554,6 +554,7 @@ func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
 func __llgo_coro_await_prepare_v1() {}
 func __llgo_coro_await_prepare_v3(g, parent, child unsafe.Pointer, mode uint32, typeWord, dataWord unsafe.Pointer) {}
+func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool { return false }
 func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) uint32 { return 0 }
 var preemptRequest uint32
 func __llgo_coro_preempt_poll_v1() bool { return atomicExchange(&preemptRequest, 0) == 1 }
@@ -683,6 +684,7 @@ func atomicExchange(*uint32, uint32) uint32
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
 		"__llgo_coro_await_prepare_v3",
+		"__llgo_coro_await_inline_v1",
 		"__llgo_coro_await_consume_v1",
 		"__llgo_coro_complete_prepare_v2",
 		"__llgo_coro_critical_enter_v1",
@@ -1409,6 +1411,7 @@ func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
 func __llgo_coro_await_prepare_v1() {}
 func __llgo_coro_await_prepare_v3(g, parent, child unsafe.Pointer, mode uint32, typeWord, dataWord unsafe.Pointer) {}
+func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool { return false }
 func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_preempt_poll_v1() bool { return false }
 func __llgo_coro_yield_prepare_v1() {}
@@ -2070,6 +2073,7 @@ func (f requiredCoroRuntimeFixture) analyze(config coro.SSAConfig) (*coro.SSAPla
 
 const requiredCoroPhysicalRuntimeFixture = `
 func __llgo_coro_await_prepare_v3(g, parent, child unsafe.Pointer, mode uint32, typeWord, dataWord unsafe.Pointer) {}
+func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool { return false }
 func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status uint32) {}
 func __llgo_coro_critical_enter_v1(g unsafe.Pointer) {}
@@ -2202,6 +2206,7 @@ func __llgo_coro_program_main_return_v1() {}
 func TestRequiredCoroProgramRuntimePlanCriticalRoots(t *testing.T) {
 	const physicalHooks = `
 func __llgo_coro_await_prepare_v3() {}
+func __llgo_coro_await_inline_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) bool { return false }
 func __llgo_coro_await_consume_v1() {}
 func __llgo_coro_complete_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32) {}
 func __llgo_coro_os_thread_lock_v1(unsafe.Pointer) {}

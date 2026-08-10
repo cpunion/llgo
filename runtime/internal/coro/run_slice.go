@@ -178,7 +178,7 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 		driver.run.issued = action.Kind
 		return ExecutorRunStep{Kind: ExecutorRunStepAction, G: g, Action: action}, true
 	}
-	if p.inResume || p.action != (Action{}) || p.runDecision != (RunDecision{}) ||
+	if p.inResume || p.inlineAwaitDepth != 0 || p.action != (Action{}) || p.runDecision != (RunDecision{}) ||
 		p.runDecisionTaken || p.servicePreemptBudget != 0 {
 		return ExecutorRunStep{}, false
 	}
@@ -292,6 +292,7 @@ func ExecutorOwnerWaitPending(driver *ExecutorDriver) (pending, ok bool) {
 
 func completedExecutorRunAction(p *P, g *G, action Action) bool {
 	if p == nil || g == nil || !validActionFlags(action) || action.Handle != nil || p.current != nil || p.inResume ||
+		p.inlineAwaitDepth != 0 ||
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		p.servicePreemptBudget != 0 || g.runP != nil || g.runAction != ActionInvalid ||
 		g.transferState != runnableTransferGIdle {

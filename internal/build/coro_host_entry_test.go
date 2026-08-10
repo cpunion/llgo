@@ -60,6 +60,7 @@ func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
 func __llgo_coro_await_prepare_v1() {}
 func __llgo_coro_await_prepare_v3(g, parent, child unsafe.Pointer, mode uint32, typeWord, dataWord unsafe.Pointer) {}
+func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool { return false }
 func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_preempt_poll_v1() bool { return false }
 func __llgo_coro_yield_prepare_v1() {}
@@ -160,6 +161,7 @@ func __llgo_coro_program_main_return_v1() {}
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
 		"__llgo_coro_await_prepare_v3",
+		"__llgo_coro_await_inline_v1",
 		"__llgo_coro_await_consume_v1",
 		"__llgo_coro_complete_prepare_v2",
 		"__llgo_coro_critical_enter_v1",

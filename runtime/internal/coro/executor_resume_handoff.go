@@ -63,8 +63,12 @@ type ExecutorResumeHandoff struct {
 	task   *G
 	action Action
 	budget uint32
-	mode   ExecutorResumeHandoffMode
-	state  executorResumeHandoffState
+	// inlineAwaitDepth is removed from P together with the active action. A
+	// replacement owner must observe an idle P; the blocked owner restores the
+	// bounded native-resume ancestry before returning from its foreign call.
+	inlineAwaitDepth uint8
+	mode             ExecutorResumeHandoffMode
+	state            executorResumeHandoffState
 }
 
 // Detached reports whether handoff currently roots one active foreign wait.
@@ -77,6 +81,7 @@ func emptyExecutorResumeHandoff(handoff *ExecutorResumeHandoff) bool {
 	return handoff != nil &&
 		handoff.driver == nil && handoff.task == nil &&
 		handoff.action == (Action{}) && handoff.budget == 0 &&
+		handoff.inlineAwaitDepth == 0 &&
 		handoff.mode == ExecutorResumeHandoffInvalid &&
 		handoff.state == executorResumeHandoffIdle
 }
@@ -137,7 +142,7 @@ func DetachExecutorResume(
 		task.waiting || task.spawnParent != nil || task.spawnP != nil ||
 		task.destroyTarget != nil || task.destroyRoot ||
 		p.action.Kind != ActionResume || p.action.Handle == nil ||
-		task.active == nil || task.active.handle != p.action.Handle ||
+		task.active == nil || !activeResumeOwnedByAction(task) ||
 		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
 		p.servicePreemptBudget == 0 {
 		return false
@@ -147,6 +152,7 @@ func DetachExecutorResume(
 	handoff.task = task
 	handoff.action = p.action
 	handoff.budget = p.servicePreemptBudget
+	handoff.inlineAwaitDepth = p.inlineAwaitDepth
 	handoff.mode = mode
 
 	// The issued resume has already started the ready action which satisfied
@@ -161,6 +167,7 @@ func DetachExecutorResume(
 	p.osThreadLockOwner = nil
 	p.current = nil
 	p.inResume = false
+	p.inlineAwaitDepth = 0
 	p.action = Action{}
 	p.runDecisionTaken = false
 	p.servicePreemptBudget = 0
@@ -200,12 +207,13 @@ func ExecutorResumeHandoffContext(
 		handoff.mode != ExecutorResumeHandoffSameMForeign ||
 		handoff.driver == nil || handoff.task == nil ||
 		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
+		handoff.inlineAwaitDepth > maxInlineAwaitDepth ||
 		!ExecutorResumeHandoffReturnable(handoff.driver) ||
 		!validForeignWaitingExecutorTask(handoff.driver.p, handoff.task) ||
-		handoff.task.active.handle != handoff.action.Handle {
+		!resumeActionOwnsActive(handoff.task, handoff.action, handoff.inlineAwaitDepth) {
 		return nil, nil, false
 	}
-	return handoff.task, handoff.action.Handle, true
+	return handoff.task, handoff.task.active.handle, true
 }
 
 // RestoreExecutorResume reattaches the exact active LLVM resume after the
@@ -217,7 +225,7 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
 		handoff.driver == nil || handoff.task == nil ||
 		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
-		handoff.budget == 0 ||
+		handoff.budget == 0 || handoff.inlineAwaitDepth > maxInlineAwaitDepth ||
 		(handoff.mode != ExecutorResumeHandoffLockedForeign &&
 			handoff.mode != ExecutorResumeHandoffSameMForeign) {
 		return false
@@ -229,13 +237,14 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 		(handoff.mode == ExecutorResumeHandoffLockedForeign &&
 			task.osThreadLockDepth == 0) ||
 		(p.foreignReentry != nil && p.foreignReentry.handoff == handoff) ||
-		task.active.handle != handoff.action.Handle ||
+		!resumeActionOwnsActive(task, handoff.action, handoff.inlineAwaitDepth) ||
 		task.runP != p || driver.run.issued != ActionInvalid {
 		return false
 	}
 
 	p.current = task
 	p.inResume = true
+	p.inlineAwaitDepth = handoff.inlineAwaitDepth
 	p.action = handoff.action
 	p.runDecision = RunDecision{}
 	p.runDecisionTaken = true
@@ -252,6 +261,7 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 	handoff.task = nil
 	handoff.action = Action{}
 	handoff.budget = 0
+	handoff.inlineAwaitDepth = 0
 	handoff.mode = ExecutorResumeHandoffInvalid
 	handoff.state = executorResumeHandoffIdle
 	return true

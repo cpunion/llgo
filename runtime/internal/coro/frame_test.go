@@ -333,6 +333,7 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		{"executor pointer", func(p *P) { p.executor = new(ExecutorDriver) }},
 		{"channel source", func(p *P) { p.channelSource = new(ChannelOperationSource) }},
 		{"in resume", func(p *P) { p.inResume = true }},
+		{"inline await depth", func(p *P) { p.inlineAwaitDepth = 1 }},
 		{"action kind", func(p *P) { p.action.Kind = ActionResume }},
 		{"action handle", func(p *P) { p.action.Handle = dummyActionHandle }},
 		{"service preempt budget", func(p *P) { p.servicePreemptBudget = 1 }},

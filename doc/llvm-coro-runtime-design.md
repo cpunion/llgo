@@ -4,7 +4,7 @@
 
 更新：2026-08-10
 
-当前审查基线：`cpunion/llgo:llvm-coro` @ `0ec7bf52d`，加本节记录的按需M存储提交
+当前审查基线：`cpunion/llgo:llvm-coro` @ `158350a0e`，加本节记录的同步完成事务
 
 集成状态：Phase 36 hard-cutover、P-neutral result materialization 与 demand-driven
 work sharing、native 固定有界物理 topology、动态 managed-execution quota 和标准
@@ -113,6 +113,23 @@ process-lifetime clean thread factory隔离replacement创建和已锁M的可继�
 但 Go 类型仍是 `Read([]byte) (int, error)`。调用链中的 `serve`、上层 handler 和 server loop 会由 Effect fixed point 自动 lower 成 coroutine primary；用户无需逐层修改签名。
 
 若具体 receiver 是 `*bytes.Buffer`，分析证明 `Read` 为 bounded `NoSuspend`，调用可以去虚拟化成普通 direct call。若 receiver 是 `net.Conn`，interface descriptor 在运行时选择对应实现。这个差异只存在于编译产物中。
+
+#### 2.2.1 单版本 eager child completion
+
+透明 await 不能把每个同步完成的 managed call 都强制交还 scheduler。实现采用一个
+single-version eager transaction，而不是为函数生成 sync/async 两个 body：
+
+1. caller仍创建callee的LLVM coroutine frame，callee停在mandatory initial suspend；
+2. caller通过现有`await_prepare`发布parent-owned completion record并冻结普通慢路径；
+3. `await_inline_v1(g, parent, child)`在当前executor stack上立即resume该child；
+4. child若到达final suspend，runtime按既有Return/Panic/Abort/Shutdown/Goexit协议提交结果、destroy child并恢复parent，caller跳过自己的await suspend；
+5. child或任意descendant若执行yield、park、event wait或普通await，所有临时nested resume逐层返回false，generated parent逐层执行条件`llvm.coro.suspend`；只有native调用栈完全退回scheduler后，scheduler才处理最深leaf发布的transition。
+
+临时native resume nesting限制为16层。到达上限时不修改已经准备好的`pendingAwait`，直接走原有scheduler路径；这只是性能回退，不产生第二套语义。poll、service quantum、task cancellation和panic/defer/Goexit仍使用同一协议：poll命中或任何真实等待都会迫使整个临时调用链退回scheduler，挂起后没有native stack被保留。
+
+物理`P.action`仍标识scheduler发起的最外层resume，而event adapter观察到的`G.active`可能是其inline descendant。同步begin/complete热路径只核对直接parent/child edge和归纳维护的depth，保持O(1)；只有真实suspend、event adapter和foreign handoff才逐边证明exact ancestry，不用handle地址反查或任意祖先关系。blocking foreign/same-M handoff在detach时从P移走action、budget和inline depth，replacement owner只看到idle P；原M返回时再恢复完全相同的resume ancestry。
+
+静态direct call、managed function descriptor、interface和reflect最终都汇合到同一个await lowering，因此无需在动态边界增加Future或复制函数体。compiler physical descriptor hash和program runtime root同时绑定`await_inline_v1`符号；新caller不能与缺少该hook的runtime静默链接。
 
 ### 2.3 标准库兼容的直接含义
 

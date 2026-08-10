@@ -571,25 +571,41 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 		t.Fatalf("%s lacks distinct normal/canceled child completion reconciliation:\n%s", function.Name(), body)
 	}
 	gateFound := false
+	inlineFound := false
+	normalBlock, canceledBlock := normalConsume.InstructionParent(), canceledConsume.InstructionParent()
 	for _, block := range function.BasicBlocks() {
 		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
-			if instruction.InstructionOpcode() != llvm.Call || instruction.CalledValue().Name() != coroRunDecisionTakeZeroHookV1 {
+			if instruction.InstructionOpcode() != llvm.Call {
 				continue
 			}
 			terminator := block.LastInstruction()
 			if terminator.IsNil() || terminator.InstructionOpcode() != llvm.Br || terminator.SuccessorsCount() != 2 {
 				continue
 			}
-			first, second := terminator.Successor(0), terminator.Successor(1)
-			normalBlock, canceledBlock := normalConsume.InstructionParent(), canceledConsume.InstructionParent()
-			if first == normalBlock && second == canceledBlock || first == canceledBlock && second == normalBlock {
-				gateFound = true
-				break
+			first := coroTestFirstReachableAwaitConsumes(terminator.Successor(0), normalBlock, canceledBlock)
+			second := coroTestFirstReachableAwaitConsumes(terminator.Successor(1), normalBlock, canceledBlock)
+			switch instruction.CalledValue().Name() {
+			case coroRunDecisionTakeZeroHookV1:
+				if first == coroTestAwaitConsumeNormal && second == coroTestAwaitConsumeCanceled ||
+					first == coroTestAwaitConsumeCanceled && second == coroTestAwaitConsumeNormal {
+					gateFound = true
+				}
+			case coroAwaitInlineHookV1:
+				// The inline-complete edge reaches only normal consume. The
+				// suspend edge re-enters the run-decision gate and can first
+				// reach cancellation as well as the normal continuation.
+				if first == coroTestAwaitConsumeNormal && second&coroTestAwaitConsumeCanceled != 0 ||
+					second == coroTestAwaitConsumeNormal && first&coroTestAwaitConsumeCanceled != 0 {
+					inlineFound = true
+				}
 			}
 		}
 	}
 	if !gateFound {
 		t.Fatalf("%s normal/canceled consumes are not mutually exclusive resumed run-decision successors:\n%s", function.Name(), body)
+	}
+	if !inlineFound {
+		t.Fatalf("%s inline completion does not bypass only the resumed cancellation gate:\n%s", function.Name(), body)
 	}
 	var returned, panicked, aborted, shutdown, goexited llvm.BasicBlock
 	for successor := 1; successor < dispatch.SuccessorsCount(); successor++ {
@@ -722,6 +738,40 @@ func coroTestBlockHasDirectCall(block llvm.BasicBlock, callee string) bool {
 		}
 	}
 	return false
+}
+
+const (
+	coroTestAwaitConsumeNormal uint8 = 1 << iota
+	coroTestAwaitConsumeCanceled
+)
+
+func coroTestFirstReachableAwaitConsumes(
+	entry, normal, canceled llvm.BasicBlock,
+) uint8 {
+	seen := make(map[llvm.BasicBlock]bool)
+	pending := []llvm.BasicBlock{entry}
+	var result uint8
+	for len(pending) != 0 {
+		block := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if block.IsNil() || seen[block] {
+			continue
+		}
+		seen[block] = true
+		switch block {
+		case normal:
+			result |= coroTestAwaitConsumeNormal
+			continue
+		case canceled:
+			result |= coroTestAwaitConsumeCanceled
+			continue
+		}
+		terminator := block.LastInstruction()
+		for successor := 0; successor < terminator.SuccessorsCount(); successor++ {
+			pending = append(pending, terminator.Successor(successor))
+		}
+	}
+	return result
 }
 
 func coroTestBlockCanReachDirectCall(entry llvm.BasicBlock, callee string) bool {
