@@ -18,7 +18,10 @@
 
 package runtime
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"unsafe"
+)
 
 func coroNativeAtomicLoadV1(word *uint32) uint32 {
 	return atomic.LoadUint32(word)
@@ -30,4 +33,16 @@ func coroNativeAtomicStoreV1(word *uint32, value uint32) {
 
 func coroNativeAtomicCASV1(word *uint32, old, next uint32) bool {
 	return atomic.CompareAndSwapUint32(word, old, next)
+}
+
+func coroNativeAtomicLoadPointerV1(word *unsafe.Pointer) unsafe.Pointer {
+	return atomic.LoadPointer(word)
+}
+
+func coroNativeAtomicStorePointerV1(word *unsafe.Pointer, value unsafe.Pointer) {
+	atomic.StorePointer(word, value)
+}
+
+func coroNativeAtomicCASPointerV1(word *unsafe.Pointer, old, next unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(word, old, next)
 }

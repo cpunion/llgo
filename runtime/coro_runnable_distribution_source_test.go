@@ -146,10 +146,18 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	directory := readRuntimePollFile(t, "internal/runtime/coro_native_m_owner_llgo.go")
 	for _, required := range []string{
 		"coroNativeMDirectoryCapacityV1 uint32 = 10_000",
+		"coroNativeMPageCapacityV1      uint32 = 64",
 		"handoff coro.ExecutionDomainHandoff",
 		"resume  coro.ExecutorResumeHandoff",
 		"token  uint32",
+		"owners [coroNativeFleetDomainCapacityV1]coroNativeMOwnerV1",
+		"pages  [coroNativeMPageCountV1]unsafe.Pointer",
 		"active [coroNativeFleetDomainCapacityV1]uint32",
+		"func coroNativeMEnsureOwnerForSlotV1(slot uint32)",
+		"coroNativeAtomicCASPointerV1(pageAddress, nil, publishing)",
+		"page = unsafe.Pointer(new(coroNativeMOwnerPageV1))",
+		"coroNativeAtomicStorePointerV1(pageAddress, page)",
+		"for page == publishing",
 		"corofleet.TryReuseOwner(&owner.thread, &owner.token, slot)",
 		"corofleet.ReleaseOwner(",
 		"coroNativeMAllocateReplacementV1(",
@@ -159,6 +167,13 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		if !strings.Contains(directory, required) {
 			t.Errorf("native M directory lacks replacement-owner marker %q", required)
 		}
+	}
+	if strings.Contains(directory, "owners [coroNativeMDirectoryCapacityV1]coroNativeMOwnerV1") {
+		t.Error("native M directory still reserves every logical owner in BSS")
+	}
+	if strings.Index(directory, "new(coroNativeMOwnerPageV1)") <
+		strings.Index(directory, "coroNativeAtomicCASPointerV1(pageAddress, nil, publishing)") {
+		t.Error("native M page allocation occurs before exclusive publication claim")
 	}
 
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
@@ -225,7 +240,13 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"LLGO_CORO_FLEET_OWNER_STANDBY_CAPACITY_V1 = 8",
 		"__llgo_coro_fleet_factory_stop_v2(uint32_t terminal_owner_token)",
 		"pthread_cond_wait(&factory->changed, &factory->mutex)",
-		"slot_records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1]",
+		"struct llgo_coro_fleet_owner_record_v1 *records;",
+		"struct llgo_coro_fleet_owner_record_v1 *standby_head;",
+		"struct llgo_coro_fleet_owner_record_v1 *all_next;",
+		"struct llgo_coro_fleet_owner_record_v1 *standby_next;",
+		"calloc(1, sizeof(*record))",
+		"free(record)",
+		"factory->next_token == UINT32_MAX",
 	} {
 		if !strings.Contains(leaf, required) {
 			t.Errorf("native fleet C leaf lacks scalar startup-policy marker %q", required)
@@ -235,6 +256,10 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"__llgo_coro_native_fleet_owner_v1",
 		"__llgo_coro_fleet_owner_create_v1",
 		"__llgo_coro_fleet_owner_create_v2",
+		"records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1]",
+		"slot_records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1]",
+		"LLGO_CORO_FLEET_OWNER_TOKEN_INDEX_BITS_V1",
+		"LLGO_CORO_FLEET_OWNER_TOKEN_GENERATION_MASK_V1",
 		"malloc(",
 		"void (*callback",
 	} {
