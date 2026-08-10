@@ -25,6 +25,12 @@ explicitly host-unsafe cases are skipped. Each not-applicable entry documents
 both the toolchain-specific mechanism under test and why the corresponding
 behavior is not an LLGo compatibility goal.
 
+An xfail that unexpectedly succeeds is reported in the verbose test log but
+does not fail the runner. This keeps stale expectations visible in verbose CI
+and audit runs without making a newly passing compatibility case fail CI. An
+unexpectedly successful not-applicable case still fails because it indicates a
+misclassification.
+
 Basic usage:
 
 ```bash
