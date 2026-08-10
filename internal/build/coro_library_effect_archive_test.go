@@ -303,12 +303,16 @@ func TestPackageArchiveCoroMetadataIsLinkerInvisible(t *testing.T) {
 	if err := os.WriteFile(collision, collisionData, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ctx.createPackageArchiveFile(
-		filepath.Join(temp, "collision.a"), []string{collision}, record,
-	); err == nil || !strings.Contains(err.Error(), "collides with reserved") {
+	if err := ctx.createPackageArchiveFile(filepath.Join(temp, "collision.a"), &aPackage{
+		ObjFiles:                 []string{collision},
+		CoroLibraryEffectRecords: record,
+	}, false); err == nil || !strings.Contains(err.Error(), "collides with reserved") {
 		t.Fatalf("reserved archive-member collision error = %v", err)
 	}
-	if err := ctx.createPackageArchiveFile(archive, []string{object}, record); err != nil {
+	if err := ctx.createPackageArchiveFile(archive, &aPackage{
+		ObjFiles:                 []string{object},
+		CoroLibraryEffectRecords: record,
+	}, false); err != nil {
 		t.Fatal(err)
 	}
 	summaries, found, err := ReadCoroLibraryEffectArchive(archive)

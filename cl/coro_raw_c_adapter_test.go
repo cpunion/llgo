@@ -30,6 +30,8 @@ import (
 
 const coroRawCAdapterFixtureSource = `package adapter
 
+import "unsafe"
+
 //llgo:type C
 type RawCallback func(int) int
 
@@ -52,6 +54,11 @@ func DynamicToRaw(fn func(int) int) RawCallback {
 
 func RawToManaged(fn RawCallback) func(int) int {
 	return (func(int) int)(fn)
+}
+
+func SizeOnly() uintptr {
+	var callback RawCallback = target
+	return unsafe.Sizeof(callback)
 }
 `
 
@@ -173,6 +180,28 @@ func TestCoroRawCAdapterSelectionIsOccurrenceSpecific(t *testing.T) {
 	if !found || callPlan.Transport != coro.ManagedTransport || callPlan.Rep != coro.DirectCoro ||
 		len(callPlan.Targets) != 1 || callPlan.Targets[0] != targetPlan.ID {
 		t.Fatalf("unrelated managed call plan = %+v, present=%t; want managed coroutine entry", callPlan, found)
+	}
+}
+
+func TestCoroRawCAdapterIgnoresFrozenUnsafeLayoutOnlyConversion(t *testing.T) {
+	fixture := prepareCoroRawCAdapterFixture(t)
+	defer fixture.prog.Dispose()
+
+	owner := fixture.pkg.Func("SizeOnly")
+	plan, err := fixture.analyze(t, owner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := coroRawCAdapterChangeType(t, owner)
+	unevaluated, frozen := fixture.universe.frozenUnsafeLayoutUnevaluatedSSA(owner)
+	if !frozen {
+		t.Fatal("unsafe layout-only SSA set was not frozen")
+	}
+	if _, omitted := unevaluated[change]; !omitted {
+		t.Fatal("raw callback conversion consumed only by unsafe.Sizeof was not frozen as unevaluated")
+	}
+	if err := validateCoroRawCFunctionAdapters(plan, fixture.universe); err != nil {
+		t.Fatalf("layout-only raw callback conversion required a physical adapter: %v", err)
 	}
 }
 

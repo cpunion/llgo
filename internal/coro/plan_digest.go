@@ -397,7 +397,9 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 					}
 				}
 				if call, ok := instruction.(ssa.CallInstruction); ok {
-					if _, builtin := call.Common().Value.(*ssa.Builtin); !builtin {
+					_, builtin := call.Common().Value.(*ssa.Builtin)
+					_, plannedBuiltin := p.callPlans[call]
+					if !builtin || plannedBuiltin {
 						if p.ElidesCall(call) {
 							if _, planned := p.callPlans[call]; planned {
 								return planDigestDocument{}, fmt.Errorf("coro: function %q block %d instruction %d is both elided and assigned a CallPlan", id, blockIndex, digestInstruction)

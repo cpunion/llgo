@@ -3,7 +3,7 @@ __llgo$generated$promoted$Close$llgo$promoted$v1$77575336b69e7eac563cd474c1c4b6c
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.58d53ebc24c31592642adb21b4feed24
+    __llgo_coro_frame_descriptor_v1.713d7ca7292bd9add7e74aace6fc4349
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1
@@ -23,7 +23,7 @@ __llgo$generated$promoted$Read$llgo$promoted$v1$dfcfeef340532e0df942cabc1157784a
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.90e596b7b1b225f7d285970f6127679e
+    __llgo_coro_frame_descriptor_v1.863d624b1d6227fca13a64da6a86d9c8
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1

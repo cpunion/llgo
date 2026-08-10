@@ -30,17 +30,18 @@ import (
 // global summaries, physical control and storage projections to this same
 // object rather than creating independently-versioned lowering documents.
 type coroProgramIR struct {
-	sitePlans           map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
-	siteOwners          map[emissionFunctionOwnerKey]none
-	functionPreambles   map[emissionFunctionOwnerKey]coroFunctionPreamblePlan
-	semanticPlans       map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan
-	localBodyFacts      map[*ssa.Function]coro.SSAFunctionBodyFacts
-	callPlans           map[ssa.CallInstruction]coroFrozenCallSitePlan
-	callsFrozen         bool
-	wasmImports         map[*ssa.Function]wasmImportSpec
-	cgoDirectReturns    map[*ssa.Return]ssa.Value
-	physicalPlans       map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan
-	physicalPlansSealed bool
+	sitePlans                map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
+	siteOwners               map[emissionFunctionOwnerKey]none
+	functionPreambles        map[emissionFunctionOwnerKey]coroFunctionPreamblePlan
+	semanticPlans            map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan
+	localBodyFacts           map[*ssa.Function]coro.SSAFunctionBodyFacts
+	callPlans                map[ssa.CallInstruction]coroFrozenCallSitePlan
+	erasedFunctionInterfaces map[*ssa.MakeInterface]none
+	callsFrozen              bool
+	wasmImports              map[*ssa.Function]wasmImportSpec
+	cgoDirectReturns         map[*ssa.Return]ssa.Value
+	physicalPlans            map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan
+	physicalPlansSealed      bool
 }
 
 // coroProgramIRBuilder is the sole mutable construction capability for hidden
@@ -52,16 +53,28 @@ type coroProgramIRBuilder struct {
 
 func newCoroProgramIR() *coroProgramIR {
 	return &coroProgramIR{
-		sitePlans:         make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
-		siteOwners:        make(map[emissionFunctionOwnerKey]none),
-		functionPreambles: make(map[emissionFunctionOwnerKey]coroFunctionPreamblePlan),
-		semanticPlans:     make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
-		localBodyFacts:    make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
-		callPlans:         make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
-		wasmImports:       make(map[*ssa.Function]wasmImportSpec),
-		cgoDirectReturns:  make(map[*ssa.Return]ssa.Value),
-		physicalPlans:     make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
+		sitePlans:                make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
+		siteOwners:               make(map[emissionFunctionOwnerKey]none),
+		functionPreambles:        make(map[emissionFunctionOwnerKey]coroFunctionPreamblePlan),
+		semanticPlans:            make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
+		localBodyFacts:           make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
+		callPlans:                make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
+		erasedFunctionInterfaces: make(map[*ssa.MakeInterface]none),
+		wasmImports:              make(map[*ssa.Function]wasmImportSpec),
+		cgoDirectReturns:         make(map[*ssa.Return]ssa.Value),
+		physicalPlans:            make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
 	}
+}
+
+func (ir *coroProgramIR) erasedFunctionInterface(box *ssa.MakeInterface) (bool, error) {
+	if ir == nil || !ir.callsFrozen {
+		return false, fmt.Errorf("erased function-interface facts are not frozen")
+	}
+	if box == nil || box.Parent() == nil {
+		return false, fmt.Errorf("erased function-interface lookup requires one exact SSA box")
+	}
+	_, found := ir.erasedFunctionInterfaces[box]
+	return found, nil
 }
 
 func (ir *coroProgramIR) wasmImport(function *ssa.Function) (wasmImportSpec, bool, error) {

@@ -18,7 +18,6 @@ package build
 
 import (
 	"sort"
-	"strings"
 
 	"github.com/xgo-dev/llvm"
 )
@@ -36,7 +35,6 @@ type packageLinkSnapshot struct {
 	methodByName        []string
 	funcInfo            []funcInfoRecord
 	pcLineInfo          []pcLineRecord
-	closureStubNames    []string
 	definedGlobals      []string
 	exportFunctionNames []string
 }
@@ -65,16 +63,6 @@ func freezePackageLinkSnapshot(pkg *aPackage) {
 		snapshot.methodByName = append(snapshot.methodByName, name)
 	}
 	sort.Strings(snapshot.methodByName)
-
-	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-		if fn.IsDeclaration() || fn.BasicBlocksCount() == 0 {
-			continue
-		}
-		if strings.HasPrefix(fn.Name(), closureStubPrefix) {
-			snapshot.closureStubNames = append(snapshot.closureStubNames, fn.Name())
-		}
-	}
-	sort.Strings(snapshot.closureStubNames)
 
 	for global := mod.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
 		if !global.IsDeclaration() {
@@ -134,13 +122,6 @@ func packageFuncInfo(pkg *aPackage) []funcInfoRecord {
 func packagePCLineInfo(pkg *aPackage) []pcLineRecord {
 	if snapshot := packageLinkSnapshotOf(pkg); snapshot != nil {
 		return snapshot.pcLineInfo
-	}
-	return nil
-}
-
-func packageClosureStubNames(pkg *aPackage) []string {
-	if snapshot := packageLinkSnapshotOf(pkg); snapshot != nil {
-		return snapshot.closureStubNames
 	}
 	return nil
 }

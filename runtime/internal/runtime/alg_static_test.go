@@ -55,7 +55,7 @@ func TestTypeEqualStaticScalars(t *testing.T) {
 	if typeequal(stringType, unsafe.Pointer(&s1), unsafe.Pointer(&s3)) {
 		t.Fatal("unequal strings compare equal")
 	}
-	if typehash(stringType, unsafe.Pointer(&s1), 17) != typehash(stringType, unsafe.Pointer(&s2), 17) {
+	if typehashImpl(stringType, unsafe.Pointer(&s1), 17) != typehashImpl(stringType, unsafe.Pointer(&s2), 17) {
 		t.Fatal("equal strings have different hashes")
 	}
 
@@ -66,7 +66,7 @@ func TestTypeEqualStaticScalars(t *testing.T) {
 	if !typeequal(floatType, unsafe.Pointer(&zero), unsafe.Pointer(&negativeZero)) {
 		t.Fatal("+0 and -0 must compare equal")
 	}
-	if typehash(floatType, unsafe.Pointer(&zero), 19) != typehash(floatType, unsafe.Pointer(&negativeZero), 19) {
+	if typehashImpl(floatType, unsafe.Pointer(&zero), 19) != typehashImpl(floatType, unsafe.Pointer(&negativeZero), 19) {
 		t.Fatal("+0 and -0 must have equal hashes")
 	}
 	nanBits := uint64(0x7ff8000000000001)
@@ -98,7 +98,7 @@ func TestTypeEqualStaticComposite(t *testing.T) {
 	if typeequal(&arrayType.Type, unsafe.Pointer(&a), unsafe.Pointer(&c)) {
 		t.Fatal("unequal arrays compare equal")
 	}
-	if typehash(&arrayType.Type, unsafe.Pointer(&a), 23) != typehash(&arrayType.Type, unsafe.Pointer(&b), 23) {
+	if typehashImpl(&arrayType.Type, unsafe.Pointer(&a), 23) != typehashImpl(&arrayType.Type, unsafe.Pointer(&b), 23) {
 		t.Fatal("equal arrays have different hashes")
 	}
 
@@ -124,7 +124,7 @@ func TestTypeEqualStaticComposite(t *testing.T) {
 	if typeequal(&structType.Type, unsafe.Pointer(&r1), unsafe.Pointer(&r3)) {
 		t.Fatal("unequal structs compare equal")
 	}
-	if typehash(&structType.Type, unsafe.Pointer(&r1), 29) != typehash(&structType.Type, unsafe.Pointer(&r2), 29) {
+	if typehashImpl(&structType.Type, unsafe.Pointer(&r1), 29) != typehashImpl(&structType.Type, unsafe.Pointer(&r2), 29) {
 		t.Fatal("equal structs have different hashes")
 	}
 }

@@ -1901,6 +1901,52 @@ func live() {}
 	}
 }
 
+func TestManagedDynamicCandidatesUseAdapterButRawCCandidatesKeepDeclaration(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_candidate_adapter.go", `package coroid
+type raw func()
+func foreign()
+func adapter() {}
+func managedCall(fn func()) { fn() }
+func rawCall(fn raw) { fn() }
+`)
+	foreign := packageFunction(t, pkg, "foreign")
+	adapter := packageFunction(t, pkg, "adapter")
+	managedCall := onlyNonBuiltinCall(t, packageFunction(t, pkg, "managedCall"))
+	rawOwner := packageFunction(t, pkg, "rawCall")
+	rawCall := onlyNonBuiltinCall(t, rawOwner)
+	rawType := rawOwner.Params[0].Type()
+	resolverCalls := 0
+	resolved, err := resolveSSAManagedDynamicCandidates(
+		map[ssa.CallInstruction]map[*ssa.Function]struct{}{
+			managedCall: {foreign: {}},
+			rawCall:     {foreign: {}},
+		},
+		newSSAFunctionCanonicalizer(prog, SSAConfig{}),
+		func(fn *ssa.Function) (*ssa.Function, bool, error) {
+			resolverCalls++
+			if fn == foreign {
+				return adapter, true, nil
+			}
+			return nil, false, nil
+		},
+		func(typ types.Type) (bool, error) {
+			return types.Identical(typ, rawType), nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := resolved[managedCall][adapter]; !ok || len(resolved[managedCall]) != 1 {
+		t.Fatalf("managed candidates = %v, want only adapter", resolved[managedCall])
+	}
+	if _, ok := resolved[rawCall][foreign]; !ok || len(resolved[rawCall]) != 1 {
+		t.Fatalf("raw C candidates = %v, want only original declaration", resolved[rawCall])
+	}
+	if resolverCalls != 1 {
+		t.Fatalf("managed resolver calls = %d, want 1 (raw C call must bypass it)", resolverCalls)
+	}
+}
+
 func TestAnalyzeSSAStaticCostIgnoresDebugRefs(t *testing.T) {
 	const source = `package coroid
 

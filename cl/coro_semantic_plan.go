@@ -80,10 +80,13 @@ func coroOutcomePlainScalarBinOp(instruction *ssa.BinOp) bool {
 	if instruction == nil {
 		return false
 	}
+	if _, folded := foldConstComparison(instruction); folded {
+		return true
+	}
 	info := coroOutcomePlainBasicInfo(instruction.X.Type())
 	switch instruction.Op {
 	case token.ADD, token.SUB, token.MUL:
-		return info&(types.IsInteger|types.IsFloat) != 0
+		return info&(types.IsInteger|types.IsFloat|types.IsComplex) != 0
 	case token.QUO:
 		return info&types.IsFloat != 0 ||
 			(info&types.IsInteger != 0 && ssaIntegerValueProvenNonZeroAt(instruction.Y, instruction))
@@ -94,7 +97,7 @@ func coroOutcomePlainScalarBinOp(instruction *ssa.BinOp) bool {
 	case token.SHL, token.SHR:
 		return info&types.IsInteger != 0 && coroOutcomePlainNonNegativeShiftCount(instruction.Y)
 	case token.EQL, token.NEQ:
-		return info&(types.IsBoolean|types.IsInteger|types.IsFloat) != 0 ||
+		return info&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) != 0 ||
 			coroOutcomePlainPointerLike(instruction.X.Type())
 	case token.LSS, token.LEQ, token.GTR, token.GEQ:
 		return info&(types.IsInteger|types.IsFloat) != 0
@@ -126,7 +129,7 @@ func coroOutcomePlainScalarUnOp(instruction *ssa.UnOp) bool {
 		_, ok := types.Unalias(instruction.X.Type()).Underlying().(*types.Pointer)
 		return ok
 	case token.SUB:
-		return info&(types.IsInteger|types.IsFloat) != 0
+		return info&(types.IsInteger|types.IsFloat|types.IsComplex) != 0
 	case token.XOR:
 		return info&types.IsInteger != 0
 	case token.NOT:

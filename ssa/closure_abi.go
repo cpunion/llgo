@@ -7,77 +7,134 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-// closureContextABI describes only how the compiler-owned __llgo_ctx
-// parameter is transported. It deliberately says nothing about the in-memory
-// representation of a Go function value, which remains the fixed two-word
-// {function-or-descriptor, environment} carrier.
-type closureContextABI uint8
+// closureEnvABI describes only the physical transport of an environment
+// parameter. It deliberately says nothing about the in-memory representation
+// of a Go function value, which remains the fixed two-word {code, environment}
+// carrier. The environment is not part of a Go or go/types signature.
+type closureEnvABI uint8
 
 const (
-	// closureContextExplicit keeps __llgo_ctx as an ordinary leading physical
-	// parameter. It is the portable fallback for backends without a dedicated
-	// closure-context register (notably WebAssembly).
-	closureContextExplicit closureContextABI = iota
-	closureContextNest
-	closureContextSwiftSelf
+	// closureEnvExplicit is the typed fallback used by WebAssembly and targets
+	// for which no hidden parameter transport has been validated.
+	closureEnvExplicit closureEnvABI = iota
+	closureEnvNest
+	closureEnvSwiftSelf
 )
 
-func closureContextABIForTarget(triple, goos string, llvmMajor int) closureContextABI {
-	arch, _, _ := strings.Cut(strings.ToLower(triple), "-")
+// Keep the coroutine backend's original names as aliases. Coroutine physical
+// signatures already use these helpers, while ordinary closure lowering uses
+// the environment-oriented API below; both must select one machine ABI.
+type closureContextABI = closureEnvABI
+
+const (
+	closureContextExplicit  = closureEnvExplicit
+	closureContextNest      = closureEnvNest
+	closureContextSwiftSelf = closureEnvSwiftSelf
+)
+
+func closureEnvABIForTarget(triple string) closureEnvABI {
+	triple = strings.ToLower(triple)
+	arch, _, _ := strings.Cut(triple, "-")
+	// Select the long-term machine ABI by physical target even when LLGo does
+	// not yet support the target OS. FFI final-hop support may follow later
+	// without changing compiled closure entries.
 	switch {
 	case arch == "arm64", arch == "arm64_32", arch == "aarch64", arch == "aarch64_be":
-		// handled below
-	case arch == "x86_64",
-		arch == "i386", arch == "i486", arch == "i586", arch == "i686",
-		strings.HasPrefix(arch, "arm"), strings.HasPrefix(arch, "thumb"),
-		arch == "riscv32", arch == "riscv64":
-		return closureContextNest
+		// Keep a stable runtime ABI across LLVM versions on platforms which
+		// reserve X18. swiftself uses X20 and is also usable by the libffi bridge
+		// without rebuilding libffi.
+		if aarch64UsesSwiftSelf(triple) {
+			return closureEnvSwiftSelf
+		}
+		return closureEnvNest
+	case strings.HasPrefix(arch, "arm"), strings.HasPrefix(arch, "thumb"):
+		// LLVM lowers swiftself through the platform's dedicated self register.
+		// This keeps ordinary C arguments in their normal ABI locations.
+		return closureEnvSwiftSelf
+	case arch == "x86_64", arch == "amd64",
+		arch == "x86", arch == "386",
+		arch == "i386", arch == "i486", arch == "i586", arch == "i686":
+		return closureEnvNest
+	case arch == "riscv32", arch == "riscv64":
+		// LLVM and libffi lower the RISC-V static chain through t2 (x7).
+		return closureEnvNest
 	default:
-		return closureContextExplicit
+		return closureEnvExplicit
 	}
+}
 
-	// LLVM 19 and 20 assign AArch64 nest to X18. Darwin and Windows reserve
-	// X18 as a platform register, and Android may reserve it for shadow-call
-	// stack. LLVM 21 moved nest to X15 for every AArch64 PCS. swiftself uses
-	// X20 and is the safe hidden-context transport on the older affected
-	// targets.
-	if llvmMajor < 21 && aarch64PlatformReservesX18(triple, goos) {
-		return closureContextSwiftSelf
+func aarch64UsesSwiftSelf(triple string) bool {
+	// Apple, Android, and Windows reserve X18, so LLGo uses LLVM's
+	// swiftself/X20 transport there.
+	return strings.Contains(triple, "apple") ||
+		strings.Contains(triple, "darwin") ||
+		strings.Contains(triple, "android") ||
+		strings.Contains(triple, "windows") ||
+		strings.Contains(triple, "win32") ||
+		strings.Contains(triple, "mingw")
+}
+
+// closureContextABIForTarget is retained for the coroutine lowering API. The
+// LLVM version is intentionally ignored: changing LLVM must not change the
+// ABI of already compiled libraries. goos only disambiguates legacy generic
+// AArch64 triples which did not encode their platform.
+func closureContextABIForTarget(triple, goos string, _ int) closureContextABI {
+	lower := strings.ToLower(triple)
+	arch, _, _ := strings.Cut(lower, "-")
+	if (arch == "arm64" || arch == "arm64_32" || arch == "aarch64" || arch == "aarch64_be") &&
+		!aarch64UsesSwiftSelf(lower) {
+		switch strings.ToLower(goos) {
+		case "darwin", "ios", "tvos", "watchos", "windows", "android":
+			return closureEnvSwiftSelf
+		}
 	}
-	return closureContextNest
+	return closureEnvABIForTarget(triple)
 }
 
 func aarch64PlatformReservesX18(triple, goos string) bool {
-	switch strings.ToLower(goos) {
-	case "darwin", "ios", "tvos", "watchos", "windows", "android":
-		return true
+	return closureContextABIForTarget(triple, goos, 0) == closureEnvSwiftSelf
+}
+
+func (p *Target) closureEnvABI() closureEnvABI {
+	triple := p.LLVMTarget
+	if triple == "" {
+		triple = p.Spec().Triple
 	}
-	triple = strings.ToLower(triple)
-	return strings.Contains(triple, "apple") ||
-		strings.Contains(triple, "darwin") ||
-		strings.Contains(triple, "windows") ||
-		strings.Contains(triple, "win32") ||
-		strings.Contains(triple, "android")
+	return closureEnvABIForTarget(triple)
+}
+
+// ClosureEnvBuildTag selects the runtime half of the same physical ABI used
+// by the backend. It must be added after a named target has resolved its real
+// LLVM triple; GOARCH may only be a package-selection compatibility value.
+func (p *Target) ClosureEnvBuildTag() string {
+	switch p.closureEnvABI() {
+	case closureEnvNest:
+		return "llgo_closure_env_nest"
+	case closureEnvSwiftSelf:
+		return "llgo_closure_env_swiftself"
+	default:
+		return "llgo_closure_env_explicit"
+	}
+}
+
+func (p Program) closureEnvABI() closureEnvABI {
+	return p.Target().closureEnvABI()
 }
 
 func (p Program) closureContextABI() closureContextABI {
-	goos := ""
-	if p.target != nil {
-		goos = p.target.GOOS
-	}
-	return closureContextABIForTarget(p.spec.Triple, goos, llvmMajorVersion())
+	return p.closureEnvABI()
 }
 
 func (p Program) hasHiddenClosureContextABI() bool {
-	return p.closureContextABI() != closureContextExplicit
+	return p.closureEnvABI() != closureEnvExplicit
 }
 
-func (p Program) closureContextAttribute() llvm.Attribute {
+func (p Program) closureEnvAttribute() llvm.Attribute {
 	var name string
-	switch p.closureContextABI() {
-	case closureContextNest:
+	switch p.closureEnvABI() {
+	case closureEnvNest:
 		name = "nest"
-	case closureContextSwiftSelf:
+	case closureEnvSwiftSelf:
 		name = "swiftself"
 	default:
 		return llvm.Attribute{}
@@ -89,20 +146,96 @@ func (p Program) closureContextAttribute() llvm.Attribute {
 	return p.ctx.CreateEnumAttribute(kind, 0)
 }
 
-func (p Program) markClosureContextFunction(fn llvm.Value, sig *types.Signature) {
-	index := closureCtxPhysicalParamIndex(sig)
-	attr := p.closureContextAttribute()
-	if index < 0 || attr.IsNil() {
+func (p Program) closureContextAttribute() llvm.Attribute {
+	return p.closureEnvAttribute()
+}
+
+func (p Program) markClosureEnvFunction(fn llvm.Value, physicalIndex int) {
+	attr := p.closureEnvAttribute()
+	if physicalIndex < 0 || attr.IsNil() {
 		return
 	}
-	fn.AddAttributeAtIndex(index+1, attr)
+	fn.AddAttributeAtIndex(physicalIndex+1, attr)
+}
+
+func (p Program) markClosureEnvCall(call llvm.Value, physicalIndex int) {
+	attr := p.closureEnvAttribute()
+	if physicalIndex < 0 || attr.IsNil() {
+		return
+	}
+	call.AddCallSiteAttribute(physicalIndex+1, attr)
+}
+
+func (p Program) markClosureContextFunction(fn llvm.Value, sig *types.Signature) {
+	p.markClosureEnvFunction(fn, closureCtxPhysicalParamIndex(sig))
 }
 
 func (p Program) markClosureContextCall(call llvm.Value, sig *types.Signature) {
-	index := closureCtxPhysicalParamIndex(sig)
-	attr := p.closureContextAttribute()
-	if index < 0 || attr.IsNil() {
-		return
+	p.markClosureEnvCall(call, closureCtxPhysicalParamIndex(sig))
+}
+
+func isClosureCtxParam(param *types.Var) bool {
+	if param == nil {
+		return false
 	}
-	call.AddCallSiteAttribute(index+1, attr)
+	// NewEnvFunc tracks its environment out of band, while coroutine physical
+	// entries expose the same compiler-owned word in their complete
+	// (g,out,env,args...) signature. Both spellings are impossible in Go source
+	// and therefore unambiguously identify the hidden-context parameter.
+	name := param.Name()
+	if name != closureCtx && name != "$env" {
+		return false
+	}
+	switch typ := param.Type().Underlying().(type) {
+	case *types.Pointer:
+		return true
+	case *types.Basic:
+		return typ.Kind() == types.UnsafePointer
+	default:
+		return false
+	}
+}
+
+// closureCtxParam returns the leading compiler-owned environment parameter if
+// present. Source closure signatures keep the environment first even when a
+// later physical ABI prefixes coroutine-owned parameters.
+func closureCtxParam(sig *types.Signature) *types.Var {
+	if sig == nil || sig.Params().Len() == 0 {
+		return nil
+	}
+	first := sig.Params().At(0)
+	if !isClosureCtxParam(first) {
+		return nil
+	}
+	return first
+}
+
+// closureCtxPhysicalParamIndex returns the environment's actual LLVM
+// parameter position. Coroutine entries can prefix __llgo_g and __llgo_out,
+// so ABI attribute placement must not assume parameter zero.
+func closureCtxPhysicalParamIndex(sig *types.Signature) int {
+	if sig == nil {
+		return -1
+	}
+	params := sig.Params()
+	for index := 0; index < params.Len(); index++ {
+		if isClosureCtxParam(params.At(index)) {
+			return index
+		}
+	}
+	return -1
+}
+
+// hideClosureCodeIdentity keeps LLVM from devirtualizing a native funcval call
+// across the intentionally different IR prototypes of env and no-env entries.
+// The empty tied-register asm is a machine-code no-op: it returns the same code
+// pointer, but LLVM can no longer reinterpret a known no-env body as though the
+// hidden environment were an ordinary first argument.
+func (b Builder) hideClosureCodeIdentity(fn Expr) Expr {
+	ftype := llvm.FunctionType(fn.Type.ll, []llvm.Type{fn.Type.ll}, false)
+	asm := llvm.InlineAsm(ftype, "", "=r,0", false, false, llvm.InlineAsmDialectATT, false)
+	return Expr{
+		b.impl.CreateCall(ftype, asm, []llvm.Value{fn.impl}, "__llgo_funcval_code"),
+		fn.Type,
+	}
 }

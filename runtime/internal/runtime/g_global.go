@@ -35,3 +35,7 @@ func getg() *g {
 func setg(gp *g) {
 	currentG = gp
 }
+
+func currentGUsesLifecycle() bool {
+	return false
+}

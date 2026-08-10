@@ -8,28 +8,28 @@ _llgo_main.T:
 *_llgo_main.T:
     _llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.memequalptr
-__llgo_coro_root_factory_descriptor_v1.ea18e55c08d842155bceedbb4a9b0877:
-    __llgo_coro_root_factory_v1.ea18e55c08d842155bceedbb4a9b0877
-__llgo_coro_root_factory_v1.ea18e55c08d842155bceedbb4a9b0877:
+__llgo_coro_root_factory_descriptor_v1.c6527c229582d9177d331b3d11a81e32:
+    __llgo_coro_root_factory_v1.c6527c229582d9177d331b3d11a81e32
+__llgo_coro_root_factory_v1.c6527c229582d9177d331b3d11a81e32:
     main.main$coro
-__llgo_coro_root_package_v1.c1f332eb52d1965d65e85f8c644b6a1b:
-    __llgo_coro_root_package_v1.c1f332eb52d1965d65e85f8c644b6a1b.entries
-__llgo_coro_root_package_v1.c1f332eb52d1965d65e85f8c644b6a1b.entries:
-    __llgo_coro_root_factory_descriptor_v1.ea18e55c08d842155bceedbb4a9b0877
+__llgo_coro_root_package_v1.42538989abc5c00ea9f807df5a483675:
+    __llgo_coro_root_package_v1.42538989abc5c00ea9f807df5a483675.entries
+__llgo_coro_root_package_v1.42538989abc5c00ea9f807df5a483675.entries:
+    __llgo_coro_root_factory_descriptor_v1.c6527c229582d9177d331b3d11a81e32
 _llgo_main.T:
     *_llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
     __llgo_coro_library_effect_v6.6e13a20588277ad1732abfdfc51410f8
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.ea18e55c08d842155bceedbb4a9b0877
-    __llgo_coro_root_package_v1.c1f332eb52d1965d65e85f8c644b6a1b
+    __llgo_coro_root_factory_descriptor_v1.c6527c229582d9177d331b3d11a81e32
+    __llgo_coro_root_package_v1.42538989abc5c00ea9f807df5a483675
 main.init:
     main.init$guard
 main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.ea18e55c08d842155bceedbb4a9b0877
+    __llgo_coro_frame_descriptor_v1.c6527c229582d9177d331b3d11a81e32
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_run_decision_take_zero_v1

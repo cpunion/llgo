@@ -41,62 +41,86 @@ const (
 // resolveCoroStaticAwait proves the exact subset implemented by the physical
 // child-await lowering. The returned function is the canonical target recorded
 // by the whole-program plan, not an identity inferred from an SSA display name.
-func resolveCoroStaticAwait(plan *coro.SSAPlan, caller coro.FunctionPlan, call ssa.CallInstruction, universe *EmissionUniverse) (*ssa.Function, coro.FunctionPlan, error) {
+func resolveCoroStaticAwait(plan *coro.SSAPlan, caller coro.FunctionPlan, call ssa.CallInstruction, universe *EmissionUniverse) (*ssa.Function, coro.FunctionPlan, ssa.Value, error) {
 	if plan == nil || call == nil || call.Common() == nil {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("requires a compilation CallPlan")
+		return nil, coro.FunctionPlan{}, nil, fmt.Errorf("requires a compilation CallPlan")
 	}
 	common := call.Common()
 	if common.IsInvoke() {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("requires a non-invoke call")
+		return nil, coro.FunctionPlan{}, nil, fmt.Errorf("requires a non-invoke call")
 	}
 	callPlan, ok := plan.CallPlan(call)
 	if !ok {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("call has no compilation CallPlan")
+		return nil, coro.FunctionPlan{}, nil, fmt.Errorf("call has no compilation CallPlan")
 	}
 	if callPlan.Kind != coro.CallDirect || callPlan.Rep != coro.DirectCoro || callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 {
-		return nil, coro.FunctionPlan{}, fmt.Errorf(
+		return nil, coro.FunctionPlan{}, nil, fmt.Errorf(
 			"requires one closed non-nil direct coroutine target, got kind=%v representation=%s open=%t may-be-nil=%t targets=%d",
 			callPlan.Kind, callPlan.Rep, callPlan.Open, callPlan.MayBeNil, len(callPlan.Targets),
 		)
 	}
 	target, ok := plan.Function(callPlan.Targets[0])
 	if !ok || target == nil {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("direct coroutine target %q is absent from the compilation plan", callPlan.Targets[0])
+		return nil, coro.FunctionPlan{}, nil, fmt.Errorf("direct coroutine target %q is absent from the compilation plan", callPlan.Targets[0])
 	}
 	targetPlan, ok := plan.FunctionPlan(target)
 	if !ok || targetPlan.ID != callPlan.Targets[0] {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("direct coroutine target %q has no canonical function plan", callPlan.Targets[0])
+		return nil, coro.FunctionPlan{}, nil, fmt.Errorf("direct coroutine target %q has no canonical function plan", callPlan.Targets[0])
 	}
 	if err := validateCoroAwaitTarget(caller, targetPlan); err != nil {
-		return nil, coro.FunctionPlan{}, err
+		return nil, coro.FunctionPlan{}, nil, err
 	}
+	var closureValue ssa.Value
 	if target.Signature != nil && target.Signature.Recv() != nil {
 		if err := validateCoroStaticMethodCallOperands(call, target, universe); err != nil {
-			return nil, coro.FunctionPlan{}, err
+			return nil, coro.FunctionPlan{}, nil, err
 		}
 	} else if len(target.FreeVars) != 0 {
+		if universe == nil {
+			return nil, coro.FunctionPlan{}, nil, fmt.Errorf("captured coroutine target requires frozen closure-environment facts")
+		}
+		_, hasEnvironment, err := universe.closureEnvironments.entryEnvironment(target)
+		if err != nil {
+			return nil, coro.FunctionPlan{}, nil, err
+		}
 		closure, exact := common.Value.(*ssa.MakeClosure)
-		closureTarget, targetExact := func() (*ssa.Function, bool) {
-			if !exact || closure == nil {
-				return nil, false
+		if exact {
+			closureTarget, targetExact := closure.Fn.(*ssa.Function)
+			if targetExact {
+				canonical, required := universe.Resolve(closureTarget)
+				if !required || canonical == nil {
+					targetExact = false
+				} else {
+					closureTarget = canonical
+				}
 			}
-			fn, ok := closure.Fn.(*ssa.Function)
-			return fn, ok
-		}()
-		if !targetExact || closureTarget != target || len(closure.Bindings) != len(target.FreeVars) {
-			return nil, coro.FunctionPlan{}, fmt.Errorf("closed captured coroutine target requires its exact MakeClosure environment")
+			if !targetExact || closureTarget != target || len(closure.Bindings) != len(target.FreeVars) {
+				return nil, coro.FunctionPlan{}, nil, fmt.Errorf("closed captured coroutine target has an incompatible MakeClosure environment")
+			}
+			if hasEnvironment {
+				closureValue = closure
+			}
+		} else if hasEnvironment {
+			// A Phi/copy/retagged function value can still be an exact closed
+			// carrier. The immutable CallPlan above proves its sole non-nil target;
+			// consume only the environment word and invoke that frozen target.
+			if common.Value == nil || common.Value.Type() == nil || target.Signature == nil ||
+				!types.Identical(common.Value.Type().Underlying(), target.Signature.Underlying()) {
+				return nil, coro.FunctionPlan{}, nil, fmt.Errorf("closed captured coroutine target has no compatible frozen function-value environment")
+			}
+			closureValue = common.Value
 		}
 	} else if common.StaticCallee() == nil {
 		if common.Method != nil || target.Signature == nil || target.Signature.Variadic() || len(common.Args) != target.Signature.Params().Len() {
-			return nil, coro.FunctionPlan{}, fmt.Errorf("closed direct coroutine target has an incompatible dynamic call shape")
+			return nil, coro.FunctionPlan{}, nil, fmt.Errorf("closed direct coroutine target has an incompatible dynamic call shape")
 		}
 		for index, argument := range common.Args {
 			if argument == nil || !types.Identical(argument.Type(), target.Signature.Params().At(index).Type()) {
-				return nil, coro.FunctionPlan{}, fmt.Errorf("closed direct coroutine operand %d does not match the target parameter ABI", index)
+				return nil, coro.FunctionPlan{}, nil, fmt.Errorf("closed direct coroutine operand %d does not match the target parameter ABI", index)
 			}
 		}
 	}
-	return target, targetPlan, nil
+	return target, targetPlan, closureValue, nil
 }
 
 // resolveCoroCompilerElidedStaticAwaitRetag proves that one or more managed
@@ -193,7 +217,7 @@ func resolveCoroCompilerElidedStaticAwaitRetag(
 			if !ok || call.Parent() != owner || call.Common() == nil || call.Common().Value != value {
 				return fmt.Errorf("retag escapes to non-static-await consumer %T", ref)
 			}
-			resolved, _, err := resolveCoroStaticAwait(plan, caller, call, universe)
+			resolved, _, _, err := resolveCoroStaticAwait(plan, caller, call, universe)
 			if err != nil {
 				return fmt.Errorf("retag call is not a closed static await: %w", err)
 			}
@@ -367,21 +391,75 @@ func (p *context) compileCoroStaticAwait(
 	// Preserve Go's left-to-right argument evaluation before publishing any
 	// child or parent scheduler state.
 	args := p.compileValues(b, call.Call.Args, p.funcKind(call.Call.Value))
+	source, _ := call.Call.Value.(*ssa.Function)
+	args = p.compileManagedGoLinknameCallArguments(b, source, callee, args)
 	var closureContext llssa.Expr
 	if len(callee.FreeVars) != 0 {
-		closure, exact := call.Call.Value.(*ssa.MakeClosure)
-		if !exact {
-			panic("coroutine child await lost its exact captured closure")
+		if p.emissionUniverse == nil {
+			panic("coroutine child await requires frozen closure-environment facts")
 		}
-		closureValue := p.compileValue(b, closure)
-		closureContext = b.Field(closureValue, 1)
+		_, hasEnvironment, err := p.emissionUniverse.closureEnvironments.entryEnvironment(callee)
+		if err != nil {
+			panic(err)
+		}
+		if hasEnvironment {
+			if instructionPlan.controlClosure == nil {
+				panic("coroutine child await lost its frozen captured closure carrier")
+			}
+			closureValue := p.compileValue(b, instructionPlan.controlClosure)
+			closureContext = b.Field(closureValue, 1)
+		}
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	result := p.compileCoroTargetAwaitWithContextAndRecoveryResult(
 		b, callee, closureContext, args, nil, keepaliveSlots,
 	)
-	p.recordCoroValueAddress(call, result.address)
-	return result.value
+	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, result.value)
+	if !retagged {
+		p.recordCoroValueAddress(call, result.address)
+	}
+	return value
+}
+
+// tryCompileCoroDirectClosureValue constructs the environment carrier used by
+// a closed captured coroutine call. The frozen DirectCoro call consumes only
+// its environment word and invokes the selected physical entry itself; it must
+// therefore retain the logical Go function type without pretending that the
+// physical (g,out,env,args)->handle entry has an ordinary callable signature.
+// Escaping or otherwise dynamic producers are intercepted earlier and use a
+// coroutine dispatch descriptor instead.
+func (p *context) tryCompileCoroDirectClosureValue(
+	b llssa.Builder, closure *ssa.MakeClosure, target *ssa.Function, code llssa.Expr,
+) (llssa.Expr, bool) {
+	if p == nil || closure == nil || target == nil || p.rawPlainBody ||
+		p.compilation == nil || p.immutablePlan() == nil || len(target.FreeVars) == 0 {
+		return llssa.Expr{}, false
+	}
+	targetPlan, planned := p.immutablePlan().FunctionPlan(target)
+	if !planned || targetPlan.Emission != coro.EmitCoroutine {
+		return llssa.Expr{}, false
+	}
+	if p.emissionUniverse == nil {
+		panic("captured coroutine closure requires a prepared emission universe")
+	}
+	if len(closure.Bindings) != len(target.FreeVars) {
+		panic(fmt.Errorf(
+			"captured coroutine closure %q has %d bindings for %d free variables",
+			targetPlan.ID, len(closure.Bindings), len(target.FreeVars),
+		))
+	}
+	envParam, hasEnv, err := p.emissionUniverse.closureEnvironments.entryEnvironment(target)
+	if err != nil {
+		panic(fmt.Errorf("captured coroutine closure %q: %w", targetPlan.ID, err))
+	}
+	var env llssa.Expr
+	if hasEnv {
+		bindings := p.compileValues(b, closure.Bindings, 0)
+		env = b.MakeClosureEnvironment(p.prog.Type(envParam.Type(), llssa.InGo), bindings)
+	} else if !p.canElideZeroSizedClosureEnv(target) {
+		panic(fmt.Errorf("captured coroutine closure %q has no physical environment", targetPlan.ID))
+	}
+	return b.MakeClosureValue(p.type_(closure.Type(), llssa.InGo), code, env), true
 }
 
 type coroAwaitedValue struct {
@@ -469,17 +547,17 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 ) coroAwaitedValue {
 	callee := entry.function
 	body := p.coroBody()
-	if body == nil || p.compilation == nil || p.compilation.CoroPlan == nil {
+	if body == nil || p.compilation == nil || p.immutablePlan() == nil {
 		panic("coroutine child await requires an active physical coroutine body")
 	}
 	if b.Func != p.fn {
 		panic("coroutine child await builder does not belong to the active physical coroutine function")
 	}
-	callerPlan, ok := p.compilation.CoroPlan.FunctionPlan(p.goFn)
+	callerPlan, ok := p.immutablePlan().FunctionPlan(p.goFn)
 	if !ok {
 		panic("coroutine child await: current function has no compilation plan")
 	}
-	targetPlan, ok := p.compilation.CoroPlan.FunctionPlan(callee)
+	targetPlan, ok := p.immutablePlan().FunctionPlan(callee)
 	if !ok {
 		panic("coroutine child await: target has no compilation plan")
 	}
@@ -494,20 +572,22 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	if err != nil {
 		panic(fmt.Sprintf("coroutine child await: derive target %q ABI: %v", entry.plan.ID, err))
 	}
+	entrySig, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(callee)
+	if err != nil {
+		panic(fmt.Sprintf("coroutine child await: derive target %q entry ABI: %v", entry.plan.ID, err))
+	}
+	hasEnv := entrySig.Params().Len() == sourceSig.Params().Len()+1
 	physicalArgs := args
-	if len(callee.FreeVars) != 0 {
+	if hasEnv {
 		if closureContext.IsNil() {
-			panic(fmt.Sprintf("coroutine child await: captured target %q has no exact closure context", entry.plan.ID))
+			panic(fmt.Sprintf("coroutine child await: environment-bearing target %q has no exact closure context", entry.plan.ID))
 		}
-		sourceSig, err = p.emissionUniverse.coroPhysicalEntrySourceSignature(callee)
-		if err != nil {
-			panic(fmt.Sprintf("coroutine child await: derive captured target %q ABI: %v", entry.plan.ID, err))
-		}
+		sourceSig = entrySig
 		physicalArgs = make([]llssa.Expr, 0, len(args)+1)
 		physicalArgs = append(physicalArgs, closureContext)
 		physicalArgs = append(physicalArgs, args...)
 	} else if !closureContext.IsNil() {
-		panic(fmt.Sprintf("coroutine child await: non-captured target %q received a closure context", entry.plan.ID))
+		panic(fmt.Sprintf("coroutine child await: context-free target %q received a closure context", entry.plan.ID))
 	}
 	abi := newCoroPhysicalABI(p, entry, sourceSig)
 	if len(physicalArgs) != sourceSig.Params().Len() {
@@ -574,14 +654,14 @@ func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
 	if !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn {
 		panic("coroutine patch initializer await requires an active physical body")
 	}
-	if p.emissionUniverse == nil || p.compilation.CoroPlan == nil || p.goFn == nil {
+	if p.emissionUniverse == nil || p.immutablePlan() == nil || p.goFn == nil {
 		panic("coroutine patch initializer await requires a frozen exact plan")
 	}
 	original, frozen, err := p.emissionUniverse.ResolveCoroLoweredCall(p.goFn, coroPatchOriginalInitCall)
 	if err != nil {
 		panic(fmt.Errorf("coroutine patch initializer edge: %w", err))
 	}
-	planned, exact := p.compilation.CoroPlan.ResolveLoweredCall(p.goFn, coroPatchOriginalInitCall)
+	planned, exact := p.immutablePlan().ResolveLoweredCall(p.goFn, coroPatchOriginalInitCall)
 	if !frozen || original == nil || !exact || planned != original {
 		panic("coroutine patch initializer edge disagrees between the frozen emission universe and SSA plan")
 	}
@@ -610,6 +690,14 @@ func (p *context) coroFrameAlloca(typ llssa.Type) llssa.Expr {
 	defer alloc.Dispose()
 	alloc.SetBlockEx(entry, llssa.AtStart, true)
 	return alloc.AllocaT(typ)
+}
+
+func (p *context) coroFrameByteAlloca(b llssa.Builder, size int64) llssa.Expr {
+	if size < 0 {
+		panic("coroutine byte alloca requires a non-negative constant size")
+	}
+	storageType := p.type_(types.NewArray(types.Typ[types.Uint8], size), llssa.InGo)
+	return b.Convert(p.prog.VoidPtr(), p.coroFrameAlloca(storageType))
 }
 
 // coroResultSlot emits the child-owned result sink in the physical ramp. Small

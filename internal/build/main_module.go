@@ -40,6 +40,7 @@ type genConfig struct {
 	rtInit           bool
 	pyInit           bool
 	abiInit          int
+	packageInits     []string
 	coroRootAnchors  []string
 	coroManifestHash [16]byte
 	coroBootstrap    *coroProgramBootstrapV1
@@ -48,7 +49,6 @@ type genConfig struct {
 	abiSymbols       map[string]none
 	funcInfo         []funcInfoRecord
 	pcLineInfo       []pcLineRecord
-	funcInfoStubs    []funcInfoStubRecord
 }
 
 // genMainModule generates the main entry module for an llgo program.
@@ -67,7 +67,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	argvValueType := prog.Pointer(prog.CStr())
 	argvVar := mainPkg.NewVarEx("__llgo_argv", prog.Pointer(argvValueType))
 	argvVar.InitNil()
-	emitFuncInfoTable(ctx, mainPkg, cfg.funcInfo, cfg.pcLineInfo, cfg.funcInfoStubs)
+	emitFuncInfoTable(ctx, mainPkg, cfg.funcInfo, cfg.pcLineInfo)
 	emitCoroControlWrappers(ctx, mainPkg, cfg.rtInit)
 	coroEntry := emitCoroProgramManifest(ctx, mainPkg, cfg)
 
@@ -84,7 +84,6 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 
 	var runtimeStub llssa.Function
-	var mainInit, mainMain llssa.Function
 
 	var pyInit llssa.Function
 	var pyFinalize llssa.Function
@@ -109,6 +108,14 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		pkgPath = "main"
 	}
 
+	mainInit := declareNoArgFunc(mainPkg, pkgPath+".init")
+	mainMain := declareNoArgFunc(mainPkg, pkgPath+".main")
+	packageInits := make([]llssa.Function, len(cfg.packageInits))
+	for i, name := range cfg.packageInits {
+		packageInits[i] = declareNoArgFunc(mainPkg, name)
+	}
+	defineRootInitTask(mainPkg, pkgPath)
+
 	if ctx.buildConf.BuildMode != BuildModeExe {
 		runtimeStub = defineWeakNoArgStub(mainPkg, "runtime.init")
 		// TODO(lijie): workaround for syscall patch
@@ -125,6 +132,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		// The C test runner supplies argc/argv before calling the generated
 		// test main package's init and main functions.
 		if ctx.mode != ModeTest {
+			inits = append(inits, packageInits...)
 			inits = append(inits, mainInit)
 		}
 		defineLibraryRuntimeInit(mainPkg, initArraySection, inits...)
@@ -137,7 +145,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 
 	// The v2 table always contains the compiler ABI-init stage. Targets with no
 	// selected ABI symbols still define the exact target as a bounded no-op so
-	// the five-stage program never relies on an optional external symbol.
+	// the startup program never relies on an optional external symbol.
 	if abiInit == nil {
 		abiInit = mainPkg.FuncOf("init$abitypes")
 		if abiInit == nil {
@@ -1095,6 +1103,15 @@ func defineStart(pkg llssa.Package, entry llssa.Function, argvType llssa.Type) {
 
 func declareNoArgFunc(pkg llssa.Package, name string) llssa.Function {
 	return pkg.NewFunc(name, llssa.NoArgsNoRet, llssa.InC)
+}
+
+// defineRootInitTask exposes the header of the compiler-generated Go init task.
+// LLGo runs package initialization through guarded package init functions, so
+// there are no runtime-dispatched function entries in this compatibility task.
+func defineRootInitTask(pkg llssa.Package, pkgPath string) {
+	prog := pkg.Prog
+	taskType := prog.Struct(prog.Uint32(), prog.Uint32())
+	pkg.NewVarEx(pkgPath+"..inittask", prog.Pointer(taskType)).InitNil()
 }
 
 func defineWeakNoArgStub(pkg llssa.Package, name string) llssa.Function {

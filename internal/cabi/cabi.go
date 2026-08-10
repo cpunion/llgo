@@ -403,7 +403,7 @@ func (p *Transformer) transformFunc(m llvm.Module, fn llvm.Value) bool {
 	for i, attr := range attrs {
 		nfn.AddAttributeAtIndex(i, attr)
 	}
-	copyClosureContextFunctionAttrs(fn, nfn, paramMap)
+	copyClosureEnvFunctionAttrs(fn, nfn, paramMap)
 	if !preloweredSRet.IsNil() {
 		nfn.AddAttributeAtIndex(1, preloweredSRet)
 	}
@@ -646,7 +646,7 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 				"llgo.reflect.methodbyname.name", "1",
 			))
 		}
-		copyClosureContextCallAttrs(call, replacement, paramMap)
+		copyClosureEnvCallAttrs(call, replacement, paramMap)
 	}
 
 	var instr llvm.Value
@@ -725,7 +725,7 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 	for i, attr := range attrs {
 		wrapFunc.AddAttributeAtIndex(i, attr)
 	}
-	copyClosureContextFunctionAttrs(fn, wrapFunc, paramMap)
+	copyClosureEnvFunctionAttrs(fn, wrapFunc, paramMap)
 
 	b := ctx.NewBuilder()
 	block := ctx.AddBasicBlock(wrapFunc, "entry")
@@ -740,6 +740,7 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 	for _, ti := range info.Params {
 		switch ti.Kind {
 		default:
+			nparams = append(nparams, params[index])
 		case AttrVoid:
 			// none
 		case AttrPointer:
@@ -773,16 +774,16 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 	switch info.Return.Kind {
 	case AttrVoid:
 		call := llvm.CreateCall(b, info.Type, fn, nparams)
-		copyClosureContextFunctionAttrsToCall(fn, call)
+		copyClosureEnvFunctionAttrsToCall(fn, call)
 		b.CreateRetVoid()
 	case AttrPointer:
 		ret := llvm.CreateCall(b, info.Type, fn, nparams)
-		copyClosureContextFunctionAttrsToCall(fn, ret)
+		copyClosureEnvFunctionAttrsToCall(fn, ret)
 		b.CreateStore(ret, params[0])
 		b.CreateRetVoid()
 	case AttrWidthType, AttrWidthType2:
 		ret := llvm.CreateCall(b, info.Type, fn, nparams)
-		copyClosureContextFunctionAttrsToCall(fn, ret)
+		copyClosureEnvFunctionAttrsToCall(fn, ret)
 		ptr := llvm.CreateAlloca(b, info.Return.Type)
 		b.CreateStore(ret, ptr)
 		returnType := nft.ReturnType()
@@ -790,23 +791,23 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 		b.CreateRet(b.CreateLoad(returnType, iptr, ""))
 	default:
 		ret := llvm.CreateCall(b, info.Type, fn, nparams)
-		copyClosureContextFunctionAttrsToCall(fn, ret)
+		copyClosureEnvFunctionAttrsToCall(fn, ret)
 		b.CreateRet(ret)
 	}
 	return wrapFunc, true
 }
 
-var closureContextAttributeKinds = []uint{
+var closureEnvAttributeKinds = []uint{
 	llvm.AttributeKindID("nest"),
 	llvm.AttributeKindID("swiftself"),
 }
 
-func copyClosureContextFunctionAttrs(from, to llvm.Value, paramMap []int) {
+func copyClosureEnvFunctionAttrs(from, to llvm.Value, paramMap []int) {
 	for oldIndex, newIndex := range paramMap {
 		if newIndex == 0 {
 			continue
 		}
-		for _, kind := range closureContextAttributeKinds {
+		for _, kind := range closureEnvAttributeKinds {
 			if kind == 0 {
 				continue
 			}
@@ -817,12 +818,12 @@ func copyClosureContextFunctionAttrs(from, to llvm.Value, paramMap []int) {
 	}
 }
 
-func copyClosureContextCallAttrs(from, to llvm.Value, paramMap []int) {
+func copyClosureEnvCallAttrs(from, to llvm.Value, paramMap []int) {
 	for oldIndex, newIndex := range paramMap {
 		if newIndex == 0 {
 			continue
 		}
-		for _, kind := range closureContextAttributeKinds {
+		for _, kind := range closureEnvAttributeKinds {
 			if kind == 0 {
 				continue
 			}
@@ -833,9 +834,9 @@ func copyClosureContextCallAttrs(from, to llvm.Value, paramMap []int) {
 	}
 }
 
-func copyClosureContextFunctionAttrsToCall(from, to llvm.Value) {
+func copyClosureEnvFunctionAttrsToCall(from, to llvm.Value) {
 	for i := 0; i < from.GlobalValueType().ParamTypesCount(); i++ {
-		for _, kind := range closureContextAttributeKinds {
+		for _, kind := range closureEnvAttributeKinds {
 			if kind == 0 {
 				continue
 			}

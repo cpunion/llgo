@@ -103,7 +103,8 @@ func emitCoroProgramTakeNormalRunDecisionV1(
 // load the exact validated descriptor factory from their bound package
 // anchor/index, create an initial-suspended child, and reuse the ordinary v1
 // parent/await scheduler handoff. The runtime never chooses or invokes a user
-// function pointer; the compiler emits this fixed five-stage program.
+// function pointer; the compiler emits the complete statically ordered startup
+// program.
 func emitCoroProgramBootstrapFactoryV2(
 	pkg llssa.Package,
 	bootstrap *coroProgramBootstrapV1,
@@ -274,19 +275,23 @@ func validateCoroProgramBootstrapFactoryV2(
 	if pkg == nil || pkg.Prog == nil {
 		panic("coroutine program bootstrap v2 factory requires an LLVM package")
 	}
-	if bootstrap == nil || bootstrap.Version != coroProgramBootstrapVersionV2 || len(bootstrap.Steps) != 5 || len(targets) != 5 {
-		panic("coroutine program bootstrap v2 factory requires exactly five validated steps")
-	}
-	roles := [...]uint32{
-		coroProgramStepRoleRuntimeInitV2,
-		coroProgramStepRoleABIInitV2,
-		coroProgramStepRolePublicRuntimeInitV2,
-		coroProgramStepRolePackageInitV2,
-		coroProgramStepRoleMainV2,
+	if bootstrap == nil || bootstrap.Version != coroProgramBootstrapVersionV2 || len(bootstrap.Steps) < 5 || len(targets) != len(bootstrap.Steps) {
+		panic("coroutine program bootstrap v2 factory requires a complete validated startup program")
 	}
 	for index, step := range bootstrap.Steps {
 		target := targets[index]
-		if step.Role != roles[index] || step.FunctionID == "" || step.Target == "" {
+		wantRole := coroProgramStepRolePackageInitV2
+		switch index {
+		case 0:
+			wantRole = coroProgramStepRoleRuntimeInitV2
+		case 1:
+			wantRole = coroProgramStepRoleABIInitV2
+		case 2:
+			wantRole = coroProgramStepRolePublicRuntimeInitV2
+		case len(bootstrap.Steps) - 1:
+			wantRole = coroProgramStepRoleMainV2
+		}
+		if step.Role != wantRole || step.FunctionID == "" || step.Target == "" {
 			panic(fmt.Sprintf("coroutine program bootstrap v2 factory step %d has noncanonical identity or role", index))
 		}
 		switch step.Kind {

@@ -168,7 +168,7 @@ func TestCoroPlainDispatchV1TargetLayoutAndLowering(t *testing.T) {
 					!strings.Contains(body, "(ptr ") {
 					t.Fatalf("missing target-specific (ctx,args) thunk %q:\n%s", thunk, ir)
 				}
-				if strings.Contains(thunk, closureStub) {
+				if strings.Contains(thunk, legacyClosureStubPrefix) {
 					t.Fatalf("dispatch thunk reused legacy closure stub namespace: %q", thunk)
 				}
 			}

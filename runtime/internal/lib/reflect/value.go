@@ -3538,7 +3538,7 @@ func mapiternext(it *hiter) {
 //go:linkname mapclear github.com/goplus/llgo/runtime/internal/runtime.ReflectMapClear
 func mapclear(t *abi.Type, m unsafe.Pointer)
 
-//go:linkname typehash github.com/goplus/llgo/runtime/internal/runtime.typehash
+//go:linkname typehash github.com/goplus/llgo/runtime/internal/runtime.typehashImpl
 func typehash(t *abi.Type, p unsafe.Pointer, h uintptr) uintptr
 
 //go:linkname typeequal github.com/goplus/llgo/runtime/internal/runtime.typeequal

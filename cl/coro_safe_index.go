@@ -33,13 +33,13 @@ func (p *context) frozenSafeFixedArrayIndex(
 ) bool {
 	if p == nil || operation == nil || collection == nil || index == nil ||
 		p.compilation == nil ||
-		p.compilation.CoroPlan == nil || p.emissionUniverse == nil {
+		p.immutablePlan() == nil || p.emissionUniverse == nil {
 		return false
 	}
 	if p.goFn == nil || operation.Parent() != p.goFn {
 		panic(fmt.Errorf("safe fixed-array index escaped its exact SSA owner"))
 	}
-	plannedBound, planned := p.compilation.CoroPlan.ExactSafeFixedArrayIndex(operation)
+	plannedBound, planned := p.immutablePlan().ExactSafeFixedArrayIndex(operation)
 	actualBound, fixedArray := emissionFixedArrayBound(p, collection)
 	recomputed := fixedArray && coro.ProveSSAExactSafeFixedArrayIndex(
 		operation.Parent(), index, actualBound, operation,

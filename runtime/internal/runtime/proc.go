@@ -18,6 +18,8 @@ package runtime
 
 import (
 	"unsafe"
+
+	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
 // NewProc creates a new G running fn.
@@ -29,6 +31,7 @@ func NewProc(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr) {
 	gp := newproc1(fn, arg, getg())
 	if errno := newm(gp.m, stackSize); errno != 0 {
 		ctx := gp.context
+		releaseG()
 		FreeRoot(arg)
 		FreeRoot(ctx.root)
 		panic("runtime: failed to create new OS thread")
@@ -97,6 +100,7 @@ func mexit(mp *m) {
 	pp := mp.p
 	ctx := gp.context
 	root := ctx.root
+	releaseGAndCheckDeadlock()
 
 	casgstatus(gp, _Grunning, _Gdead)
 	setpstatus(pp, _Pdead)
@@ -113,6 +117,17 @@ func mexit(mp *m) {
 	}
 }
 
+// releaseGAndCheckDeadlock is the sole last-goroutine decision. Main marks its
+// exit before releasing its own context, so regardless of release ordering the
+// final goroutine observes both facts in the packed atomic state.
+func releaseGAndCheckDeadlock() {
+	remaining, mainExited := releaseG()
+	if remaining == 0 && mainExited {
+		fatal("no goroutines (main called runtime.Goexit) - deadlock!")
+		c.Exit(2)
+	}
+}
+
 // GMPForTesting reports the current runtime ownership graph. It is kept
 // internal to the compiler runtime and linked only by LLGo execution tests.
 func GMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, pstatus uint32, linked bool) {
@@ -126,4 +141,11 @@ func GMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, ps
 	return gp.goid, gp.parentGoid, mp.id, pp.id, readgstatus(gp), readpstatus(pp),
 		mp.curg == gp && pp.m == mp && ctx != nil &&
 			&ctx.g == gp && &ctx.m == mp && &ctx.p == pp
+}
+
+// GStateForTesting reports the packed scheduler state without changing it.
+// Execution tests use it to wait until the logical main G has completed mexit
+// before allowing the last worker to return.
+func GStateForTesting() (count uint64, mainExited bool) {
+	return gStateForTesting()
 }

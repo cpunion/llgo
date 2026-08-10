@@ -234,7 +234,7 @@ func Root(counter Counter) uint32 {
 }
 `,
 			resolution: coro.DynamicCHAClosed,
-			want:       "approved runtime helper(s) lack an exact coroutine-safe lowered-call plan: AllocU",
+			want:       "",
 		},
 		{
 			name: "dynamic suspending interface",

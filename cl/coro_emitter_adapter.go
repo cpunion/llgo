@@ -162,7 +162,8 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		if instructionPlan.operation != coroPhysicalOperationWorkerCgo &&
 			instructionPlan.operation != coroPhysicalOperationWorkerCgoErrno &&
 			instructionPlan.operation != coroPhysicalOperationWorkerForeign &&
-			instructionPlan.operation != coroPhysicalOperationSameMForeign {
+			instructionPlan.operation != coroPhysicalOperationSameMForeign &&
+			instructionPlan.operation != coroPhysicalOperationSameMPython {
 			return llssa.Expr{}, false
 		}
 		p.observeCoroPhysicalOperation(call, instructionPlan.operation)
@@ -194,6 +195,13 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 				panic("physical coroutine same-M call has no frozen foreign shape")
 			}
 			return p.compileCoroSameMForeignCall(b, call, *instructionPlan.operationWorker), true
+		case coroPhysicalOperationSameMPython:
+			return p.compileCoroPythonOperation(
+				b,
+				call,
+				instructionPlan.operationPythonTarget,
+				instructionPlan.operationPythonOpcode,
+			), true
 		default:
 			panic("physical coroutine worker call selected an unsupported operation")
 		}
@@ -326,6 +334,16 @@ func (p *context) tryCompileCoroFreeVar(b llssa.Builder, fn *ssa.Function, index
 	if !p.hasCoroPhysicalBody() || len(fn.FreeVars) == 0 {
 		return llssa.Expr{}, false
 	}
+	_, hasEnv, err := p.emissionUniverse.closureEnvironments.entryEnvironment(fn)
+	if err != nil {
+		panic(fmt.Errorf("physical free variable closure environment: %w", err))
+	}
+	if !hasEnv {
+		// A source closure whose captures are all zero-sized has no physical
+		// environment. compileValue recreates those pointers from the module's
+		// canonical zero-sized allocation sentinel.
+		return llssa.Expr{}, false
+	}
 	// Physical captured coroutine entries expose their typed context explicitly
 	// at (g,out,ctx,...). Do not use Function.FreeVar: that legacy helper
 	// hard-codes implicit ctx at parameter zero, which is the G word in the
@@ -333,6 +351,26 @@ func (p *context) tryCompileCoroFreeVar(b llssa.Builder, fn *ssa.Function, index
 	// block after CoroSplit.
 	ctx := b.Load(p.fn.PhysicalParam(2))
 	return b.Field(ctx, index), true
+}
+
+func (p *context) compileClosureEnvironment() llssa.Expr {
+	if p.fn == nil || p.goFn == nil {
+		panic("closureEnv(): called outside an env-bearing function")
+	}
+	if p.hasCoroPhysicalBody() {
+		_, hasEnv, err := p.emissionUniverse.closureEnvironments.entryEnvironment(p.goFn)
+		if err != nil {
+			panic(fmt.Errorf("closureEnv(): %w", err))
+		}
+		if !hasEnv {
+			panic("closureEnv(): physical function has no frozen environment")
+		}
+		return p.fn.PhysicalParam(2)
+	}
+	if !p.fn.NeedsEnv() {
+		panic("closureEnv(): called outside an env-bearing function")
+	}
+	return p.fn.Env()
 }
 
 func (p *context) coroUsesExplicitStatusFaults() bool {

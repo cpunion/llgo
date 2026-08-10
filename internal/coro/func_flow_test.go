@@ -226,6 +226,65 @@ func dynamicDefer(flag bool) {
 	}
 }
 
+func TestAnalyzeSSAErasedFunctionInterfaceKeepsReferenceWithoutDispatch(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "erased_interface.go", `package coroid
+
+func target() {}
+func consume(values ...any) {}
+func root() { consume(target) }
+`)
+	target := packageFunction(t, pkg, "target")
+	root := packageFunction(t, pkg, "root")
+
+	var box *ssa.MakeInterface
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			candidate, ok := instruction.(*ssa.MakeInterface)
+			if ok && candidate.X == target {
+				box = candidate
+			}
+		}
+	}
+	if box == nil {
+		t.Fatal("root has no static function MakeInterface")
+	}
+
+	baseline, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, SSAConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineTarget := functionPlanFor(t, baseline, target)
+	if baselineTarget.FuncRep != Dispatch || baselineTarget.Demand == NoDemand {
+		t.Fatalf("ordinary interface publication plan = %+v, want demanded Dispatch", baselineTarget)
+	}
+
+	classified := 0
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyErasedFunctionInterface: func(owner *ssa.Function, candidate *ssa.MakeInterface) (bool, error) {
+			if owner == root && candidate == box {
+				classified++
+				return true, nil
+			}
+			return false, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if classified != 1 {
+		t.Fatalf("erased interface classifications = %d, want 1", classified)
+	}
+	targetPlan := functionPlanFor(t, plan, target)
+	if targetPlan.FuncRep != DirectPlain || targetPlan.Demand != baselineTarget.Demand {
+		t.Fatalf("erased interface target plan = %+v, want direct plain with preserved %s reference demand", targetPlan, baselineTarget.Demand)
+	}
+	valuePlan, ok := plan.ValuePlan(target)
+	if !ok || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != DirectPlain ||
+		len(valuePlan.Funcs[0].Targets) != 1 || valuePlan.Funcs[0].Targets[0] != targetPlan.ID {
+		t.Fatalf("erased interface value plan = %+v, present=%t", valuePlan, ok)
+	}
+}
+
 func TestAnalyzeSSAFunctionValueStorageBoundaries(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "storage.go", `package coroid
 
@@ -373,9 +432,16 @@ type CCallback func()
 var channel chan int
 
 func sink(CCallback) {}
+func sinkGo(func()) {}
 func rawTarget() { <-channel }
 func rawOwner() { sink(rawTarget) }
 func managedOwner() { rawTarget() }
+
+func rawToGoTarget() {}
+func rawToGoOwner() {
+	var callback CCallback = rawToGoTarget
+	sinkGo(callback)
+}
 
 func boxedTarget() {}
 func boxedOwner() {
@@ -418,6 +484,22 @@ func openOwner(callback CCallback) { sink(callback) }
 		valuePlan.Funcs[0].Transport != RawCCodePointer ||
 		valuePlan.Funcs[0].MayBeNil || len(valuePlan.Funcs[0].Targets) != 1 {
 		t.Fatalf("raw callback value plan = %+v, present=%t", valuePlan, ok)
+	}
+
+	rawToGoOwner := packageFunction(t, pkg, "rawToGoOwner")
+	rawToGoTarget := packageFunction(t, pkg, "rawToGoTarget")
+	rawToGoPlan, err := AnalyzeSSA(prog, Roots{{Function: rawToGoOwner, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyRawDirectPlainCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return caller == rawToGoOwner && call.Common().StaticCallee() == packageFunction(t, pkg, "sinkGo") && argument == 0, nil
+		},
+		ClassifyRawCFunctionType: classifyRawType,
+		MaxPlainInstructions:     -1,
+	})
+	if err != nil {
+		t.Fatalf("named raw-C callback passed to Go func parameter: %v", err)
+	}
+	if got := functionPlanFor(t, rawToGoPlan, rawToGoTarget); got.ManagedDemand != NoDemand || !got.RawPlainDemand || !got.RawPlainOnly {
+		t.Fatalf("raw-to-Go direct callback target = %+v, want raw-only demand", got)
 	}
 
 	managedOwner := packageFunction(t, pkg, "managedOwner")

@@ -409,14 +409,14 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	// }
 	if h == nil || h.count == 0 {
 		if t.HashMightPanic() {
-			typehash(t.Key, key, 0) // see issue 23734
+			typehashImpl(t.Key, key, 0) // see issue 23734
 		}
 		return unsafe.Pointer(&zeroVal[0])
 	}
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map read and map write")
 	}
-	hash := typehash(t.Key, key, uintptr(h.hash0))
+	hash := typehashImpl(t.Key, key, uintptr(h.hash0))
 	m := bucketMask(h.B)
 	b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.BucketSize)))
 	if c := h.oldbuckets; c != nil {
@@ -470,14 +470,14 @@ func mapaccess2(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) 
 	// }
 	if h == nil || h.count == 0 {
 		if t.HashMightPanic() {
-			typehash(t.Key, key, 0) // see issue 23734
+			typehashImpl(t.Key, key, 0) // see issue 23734
 		}
 		return unsafe.Pointer(&zeroVal[0]), false
 	}
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map read and map write")
 	}
-	hash := typehash(t.Key, key, uintptr(h.hash0))
+	hash := typehashImpl(t.Key, key, uintptr(h.hash0))
 	m := bucketMask(h.B)
 	b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.BucketSize)))
 	if c := h.oldbuckets; c != nil {
@@ -521,7 +521,7 @@ func mapaccessK(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, unsafe
 	if h == nil || h.count == 0 {
 		return nil, nil
 	}
-	hash := typehash(t.Key, key, uintptr(h.hash0))
+	hash := typehashImpl(t.Key, key, uintptr(h.hash0))
 	m := bucketMask(h.B)
 	b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.BucketSize)))
 	if c := h.oldbuckets; c != nil {
@@ -597,7 +597,7 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map writes")
 	}
-	hash := typehash(t.Key, key, uintptr(h.hash0))
+	hash := typehashImpl(t.Key, key, uintptr(h.hash0))
 
 	// Set hashWriting after calling t.hasher, since t.hasher may panic,
 	// in which case we have not actually done a write.
@@ -710,7 +710,7 @@ func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 	// }
 	if h == nil || h.count == 0 {
 		if t.HashMightPanic() {
-			typehash(t.Key, key, 0) // see issue 23734
+			typehashImpl(t.Key, key, 0) // see issue 23734
 		}
 		return
 	}
@@ -718,7 +718,7 @@ func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 		fatal("concurrent map writes")
 	}
 
-	hash := typehash(t.Key, key, uintptr(h.hash0))
+	hash := typehashImpl(t.Key, key, uintptr(h.hash0))
 
 	// Set hashWriting after calling t.hasher, since t.hasher may panic,
 	// in which case we have not actually done a write (delete).
@@ -936,7 +936,7 @@ next:
 			if t.ReflexiveKey() || typeequal(t.Key, k, k) {
 				// If the item in the oldbucket is not destined for
 				// the current new bucket in the iteration, skip it.
-				hash := typehash(t.Key, k, uintptr(h.hash0))
+				hash := typehashImpl(t.Key, k, uintptr(h.hash0))
 				if hash&bucketMask(it.B) != checkBucket {
 					continue
 				}
@@ -1211,7 +1211,7 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 				if !h.sameSizeGrow() {
 					// Compute hash to make our evacuation decision (whether we need
 					// to send this key/elem to bucket x or bucket y).
-					hash := typehash(t.Key, k2, uintptr(h.hash0))
+					hash := typehashImpl(t.Key, k2, uintptr(h.hash0))
 					if h.flags&iterator != 0 && !t.ReflexiveKey() && !typeequal(t.Key, k2, k2) {
 						// If key != key (NaNs), then the hash could be (and probably
 						// will be) entirely different from the old hash. Moreover,

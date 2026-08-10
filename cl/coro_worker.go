@@ -412,10 +412,20 @@ func (p *context) compileCoroCallKeepaliveValues(
 }
 
 func (p *context) compileCoroCallKeepaliveSlots(b llssa.Builder, call ssa.CallInstruction) []llssa.Expr {
+	sources := p.coroCallKeepaliveSources(call)
 	values := p.compileCoroCallKeepaliveValues(b, call)
+	if len(values) != len(sources) {
+		panic("coroutine keepalive values lost their exact sources")
+	}
 	slots := make([]llssa.Expr, len(values))
 	for index, value := range values {
-		slots[index] = p.coroFrameAlloc(value.Type)
+		// The source-language storage type is intentionally independent from
+		// the transient expression type. In particular a static *ssa.Function
+		// compiles to an LLVM function declaration, which cannot itself be an
+		// alloca element; storing it in its Go function carrier performs the
+		// same declaration-to-{code, environment} conversion as an ordinary
+		// assignment while retaining the exact source across suspension.
+		slots[index] = p.coroFrameAlloc(p.coroCallKeepaliveStorageType(sources[index]))
 		b.Store(slots[index], value)
 	}
 	return slots

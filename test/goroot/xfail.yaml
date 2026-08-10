@@ -4,61 +4,41 @@ host_skips:
     directive: run
     case: ddd.go
     reason: go1.24 goroot run is host-sensitive on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: ddd.go
-    reason: go1.25 goroot run is host-sensitive on darwin/arm64
   - version: go1.24
     platform: darwin/arm64
     directive: run
     case: gcgort.go
     reason: go1.24 goroot run is host-sensitive on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: gcgort.go
-    reason: go1.25 goroot run is host-sensitive on darwin/arm64
   - version: go1.24
     platform: darwin/arm64
     directive: run
     case: fixedbugs/issue25897b.go
     reason: go1.24 goroot run is host-sensitive on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue25897b.go
-    reason: go1.25 goroot run is host-sensitive on darwin/arm64
   - version: go1.24
     platform: darwin/arm64
     directive: run
     case: fixedbugs/issue27695.go
     reason: go1.24 goroot run is host-sensitive on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue27695.go
-    reason: go1.25 goroot run is host-sensitive on darwin/arm64
   - version: go1.24
     platform: darwin/arm64
     directive: run
     case: fixedbugs/issue39541.go
     reason: go1.24 goroot run is host-sensitive on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue39541.go
-    reason: go1.25 goroot run is host-sensitive on darwin/arm64
   - version: go1.24
     platform: linux/amd64
     directive: run
     case: fixedbugs/issue39541.go
     reason: go1.24 goroot run is host-sensitive on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
+  - version: go1.24
+    platform: darwin/arm64
     directive: run
     case: fixedbugs/issue16016.go
-    reason: go1.25 goroot run is host-sensitive on linux/amd64
+    reason: go1.24 goroot run can exhaust the macOS runner thread limit
+  - version: go1.26
+    platform: darwin/arm64
+    directive: run
+    case: fixedbugs/issue16016.go
+    reason: go1.26 goroot run can exhaust the macOS runner thread limit
   - version: go1.24
     platform: linux/amd64
     directive: run
@@ -69,11 +49,6 @@ host_skips:
     directive: runoutput
     case: rangegen.go
     reason: go1.24 rangegen runoutput exceeds the darwin/arm64 CI timeout
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue39541.go
-    reason: go1.25 goroot run is host-sensitive on linux/amd64
   - version: go1.24
     platform: darwin/arm64
     directive: run
@@ -84,29 +59,45 @@ host_skips:
     directive: run
     case: chan/goroutines.go
     reason: go1.24 goroot run is host-sensitive on linux/amd64
-  - version: go1.25
+  - version: go1.26
     platform: darwin/arm64
     directive: run
     case: chan/goroutines.go
-    reason: go1.25 goroot run is host-sensitive on darwin/arm64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: chan/goroutines.go
-    reason: go1.25 goroot run is host-sensitive on linux/amd64
+    reason: go1.26 goroot run can exhaust the macOS runner thread limit
   - version: go1.24
     platform: darwin/arm64
     directive: run
     case: chanlinear.go
     reason: go1.24 goroot run is host-sensitive on darwin/arm64
-  - version: go1.25
+  - version: go1.24
     platform: darwin/arm64
-    directive: run
-    case: chanlinear.go
-    reason: go1.25 goroot run is host-sensitive on darwin/arm64
+    directive: runoutput
+    case: fixedbugs/bug449.go
+    reason: go1.24 bug449 generated build exceeds the darwin/arm64 hosted runner resource budget
+  - version: go1.26
+    platform: darwin/arm64
+    directive: runoutput
+    case: fixedbugs/bug449.go
+    reason: go1.26 bug449 generated build exceeds the darwin/arm64 hosted runner resource budget
+  - version: go1.24
+    platform: linux/amd64
+    directive: runoutput
+    case: fixedbugs/bug449.go
+    reason: go1.24 bug449 generated build exceeds the linux/amd64 hosted runner memory budget
+  - version: go1.26
+    platform: linux/amd64
+    directive: runoutput
+    case: fixedbugs/bug449.go
+    reason: go1.26 bug449 generated build exceeds the linux/amd64 hosted runner memory budget
 timeouts:
   - version: go1.26
     platform: darwin/arm64
+    directive: run
+    case: fixedbugs/issue79186.go
+    timeout: 90s
+    reason: the 51.2 million-operation RWMutex stress loop needs load-dependent runtime slack
+  - version: go1.26
+    platform: linux/amd64
     directive: run
     case: fixedbugs/issue79186.go
     timeout: 90s
@@ -117,19 +108,7 @@ timeouts:
     case: fixedbugs/issue19658.go
     timeout: 2m
     reason: the test launches 19 nested go run commands and needs load-dependent runtime slack
-  - version: go1.26
-    platform: darwin/arm64
-    directive: runoutput
-    case: fixedbugs/bug449.go
-    timeout: 6m
-    reason: bug449 generated build exceeds the 3m build timeout on darwin/arm64
   - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: abi/uglyfib.go
-    timeout: 1m
-    reason: uglyfib runs close to the default timeout on darwin/arm64
-  - version: go1.25
     platform: darwin/arm64
     directive: run
     case: abi/uglyfib.go
@@ -142,12 +121,6 @@ timeouts:
     timeout: 1m
     reason: uglyfib runs close to the default timeout on darwin/arm64
   - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: abi/uglyfib.go
-    timeout: 1m
-    reason: uglyfib runs close to the default timeout on loaded linux/amd64 runners
-  - version: go1.25
     platform: linux/amd64
     directive: run
     case: abi/uglyfib.go
@@ -172,12 +145,6 @@ timeouts:
     timeout: 2m
     reason: chan/select5 runoutput generation runs past the 1m timeout on linux/amd64
   - version: go1.24
-    platform: linux/amd64
-    directive: runoutput
-    case: mergemul.go
-    timeout: 1m
-    reason: mergemul runoutput generation runs past the default timeout on linux/amd64
-  - version: go1.25
     platform: linux/amd64
     directive: runoutput
     case: mergemul.go
@@ -657,372 +624,6 @@ timeouts:
     case: shift3.go
     timeout: 2m
     reason: shift3 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: clearfat.go
-    timeout: 8m
-    reason: clearfat runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: rangegen.go
-    timeout: 20m
-    reason: rangegen runoutput compiles the generated stress test past 10m on darwin/arm64 CI
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: closure2.go
-    timeout: 2m
-    reason: closure2 baseline run exceeds the 1m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: closure.go
-    timeout: 2m
-    reason: closure run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug225.go
-    timeout: 2m
-    reason: bug225 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug230.go
-    timeout: 2m
-    reason: bug230 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug452.go
-    timeout: 2m
-    reason: bug452 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug454.go
-    timeout: 2m
-    reason: bug454 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug456.go
-    timeout: 2m
-    reason: bug456 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug461.go
-    timeout: 2m
-    reason: bug461 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug473.go
-    timeout: 2m
-    reason: bug473 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug483.go
-    timeout: 2m
-    reason: bug483 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: fixedbugs/issue10407.go
-    timeout: 8m
-    reason: issue10407 runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue10925.go
-    timeout: 2m
-    reason: issue10925 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue11286.go
-    timeout: 2m
-    reason: issue11286 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue29013a.go
-    timeout: 2m
-    reason: issue29013a run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue30956.go
-    timeout: 2m
-    reason: issue30956 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue31419.go
-    timeout: 2m
-    reason: issue31419 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue43444.go
-    timeout: 2m
-    reason: issue43444 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue4353.go
-    timeout: 2m
-    reason: issue4353 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: fixedbugs/issue5162.go
-    timeout: 8m
-    reason: issue5162 runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue51913.go
-    timeout: 2m
-    reason: issue51913 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue57309.go
-    timeout: 2m
-    reason: issue57309 run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: fixedbugs/issue7316.go
-    timeout: 4m
-    reason: issue7316 runoutput generation runs past the 2m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: interface/bigdata.go
-    timeout: 2m
-    reason: interface/bigdata baseline run exceeds the 1m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: interface/convert1.go
-    timeout: 1m
-    reason: interface/convert1 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue73748b.go
-    timeout: 2m
-    reason: issue73748b run runs past the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: method3.go
-    timeout: 2m
-    reason: method3 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: method7.go
-    timeout: 2m
-    reason: method7 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: reflectmethod7.go
-    timeout: 4m
-    reason: reflectmethod7 baseline run exceeds the 2m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: mergemul.go
-    timeout: 4m
-    reason: mergemul runoutput generation runs past the 2m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: slice3.go
-    timeout: 8m
-    reason: slice3 runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: stackobj2.go
-    timeout: 1m
-    reason: stackobj2 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: clear.go
-    timeout: 2m
-    reason: clear baseline run exceeds the 1m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: closure1.go
-    timeout: 1m
-    reason: closure1 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: cmp.go
-    timeout: 1m
-    reason: cmp baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: const.go
-    timeout: 1m
-    reason: const baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: const8.go
-    timeout: 1m
-    reason: const8 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: sigchld.go
-    timeout: 1m
-    reason: sigchld baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: 64bit.go
-    timeout: 8m
-    reason: 64bit runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: bom.go
-    timeout: 8m
-    reason: bom runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: convinline.go
-    timeout: 4m
-    reason: convinline runoutput generation runs past the 2m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: crlf.go
-    timeout: 8m
-    reason: crlf runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: linux/amd64
-    directive: runoutput
-    case: crlf.go
-    timeout: 2m
-    reason: crlf runoutput generation runs past the default timeout on linux/amd64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: fixedbugs/bug447.go
-    timeout: 4m
-    reason: bug447 runoutput generation runs past the 2m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: fixedbugs/issue7867.go
-    timeout: 8m
-    reason: issue7867 runoutput generation runs past the 2m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: fixedbugs/issue9604b.go
-    timeout: 8m
-    reason: issue9604b runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue9738.go
-    timeout: 2m
-    reason: issue9738 baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue40367.go
-    timeout: 2m
-    reason: issue40367 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue4066.go
-    timeout: 2m
-    reason: issue4066 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue40917.go
-    timeout: 2m
-    reason: issue40917 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue41239.go
-    timeout: 2m
-    reason: issue41239 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue41780.go
-    timeout: 2m
-    reason: issue41780 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue42032.go
-    timeout: 2m
-    reason: issue42032 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue4620.go
-    timeout: 2m
-    reason: issue4620 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue46304.go
-    timeout: 2m
-    reason: issue46304 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue4748.go
-    timeout: 2m
-    reason: issue4748 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue47771.go
-    timeout: 2m
-    reason: issue47771 run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: strength.go
-    timeout: 8m
-    reason: strength runoutput generation exceeds the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: switch.go
-    timeout: 1m
-    reason: switch baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: shift3.go
-    timeout: 2m
-    reason: shift3 baseline run exceeds the default timeout on darwin/arm64
   - version: go1.24
     platform: darwin/arm64
     directive: runoutput
@@ -1042,30 +643,6 @@ timeouts:
     timeout: 8m
     reason: rotate3 runoutput generation runs past the 4m timeout on darwin/arm64
   - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: sizeof.go
-    timeout: 1m
-    reason: sizeof baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: rotate1.go
-    timeout: 4m
-    reason: rotate1 runoutput generation runs past the 2m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: rotate2.go
-    timeout: 16m
-    reason: rotate2 runoutput generation runs past the 12m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: rotate3.go
-    timeout: 8m
-    reason: rotate3 runoutput generation runs past the 4m timeout on darwin/arm64
-  - version: go1.25
     platform: darwin/arm64
     directive: run
     case: sizeof.go
@@ -1449,54 +1026,6 @@ timeouts:
     case: strcopy.go
     timeout: 4m
     reason: strcopy baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: initialize.go
-    timeout: 8m
-    reason: initialize run exceeds the 4m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: simassign.go
-    timeout: 1m
-    reason: simassign baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: strcopy.go
-    timeout: 1m
-    reason: strcopy baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: int_lit.go
-    timeout: 1m
-    reason: int_lit baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: args.go
-    timeout: 2m
-    reason: args baseline run exceeds the 1m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: bigmap.go
-    timeout: 1m
-    reason: bigmap baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: closedchan.go
-    timeout: 1m
-    reason: closedchan baseline run exceeds the default timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue52127.go
-    timeout: 1m
-    reason: issue52127 baseline run exceeds the default timeout on darwin/arm64
   - version: go1.26
     platform: darwin/arm64
     directive: run
@@ -1569,36 +1098,6 @@ timeouts:
     case: nosplit.go
     timeout: 2m
     reason: nosplit run runs past the default timeout on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: runoutput
-    case: 64bit.go
-    timeout: 4m
-    reason: 64bit runoutput generation runs past the 2m timeout on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: runoutput
-    case: bom.go
-    timeout: 2m
-    reason: bom runoutput generation runs past the default timeout on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/bug265.go
-    timeout: 4m
-    reason: bug265 llgo build exceeds the 3m build timeout on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: runoutput
-    case: clearfat.go
-    timeout: 2m
-    reason: clearfat runoutput generation runs past the default timeout on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: nosplit.go
-    timeout: 2m
-    reason: nosplit run runs past the default timeout on linux/amd64
   - version: go1.26
     platform: linux/amd64
     directive: runoutput
@@ -1636,15 +1135,15 @@ flakes:
     case: fixedbugs/issue79186.go
     reason: the RWMutex stress test passes when the host is idle but can exceed its timeout under sustained CPU contention
   - version: go1.26
+    platform: linux/amd64
+    directive: run
+    case: fixedbugs/issue79186.go
+    reason: the RWMutex stress test passes when the host is idle but can exceed its timeout under sustained CPU contention
+  - version: go1.26
     platform: darwin/arm64
     directive: run
     case: chanlinear.go
     reason: the timing-based linearity check can pass or report chanSelect as too slow on darwin/arm64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue11256.go
-    reason: go1.25 goroot ci-mode run can either pass or panic in GC_call_with_stack_base on linux/amd64
   - version: go1.26
     platform: linux/amd64
     directive: run
@@ -1680,16 +1179,6 @@ flakes:
     directive: run
     case: stack.go
     reason: go1.24 goroot run can either pass or fail on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: stack.go
-    reason: go1.25 goroot run can either pass or fail on linux/amd64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: stack.go
-    reason: go1.25 goroot run can either pass or fail on darwin/arm64
   - version: go1.26
     platform: darwin/arm64
     directive: run
@@ -1700,16 +1189,6 @@ flakes:
     directive: run
     case: stack.go
     reason: go1.24 goroot run can either pass or fail on darwin/arm64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue43942.go
-    reason: go1.25 goroot run can either pass or fail on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue48898.go
-    reason: go1.25 goroot run can either pass or fail on linux/amd64
   - version: go1.26
     platform: linux/amd64
     directive: run
@@ -1730,17 +1209,7 @@ flakes:
     directive: run
     case: fixedbugs/issue52612.go
     reason: go1.24 goroot run can panic on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue52612.go
-    reason: go1.25 goroot run can panic on linux/amd64
   - version: go1.24
-    platform: darwin/arm64
-    directive: runoutput
-    case: rotate0.go
-    reason: rotate0 runoutput can either pass or time out on darwin/arm64
-  - version: go1.25
     platform: darwin/arm64
     directive: runoutput
     case: rotate0.go
@@ -1750,16 +1219,10 @@ flakes:
     directive: runoutput
     case: rotate0.go
     reason: rotate0 runoutput can either pass or time out on darwin/arm64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: gcgort.go
-    reason: go1.25 goroot ci-mode can either pass or panic in GC_call_with_stack_base on linux/amd64
-  - version: go1.26.0
-    platform: linux/amd64
+  - platform: linux/amd64
     directive: run
     case: goprint.go
-    reason: go1.26.0 goroot run can either pass or mismatch stderr on linux/amd64
+    reason: linux/amd64 goroot run can either pass or mismatch stderr
   - platform: darwin/arm64
     directive: run
     case: fixedbugs/issue48898.go
@@ -1772,783 +1235,156 @@ flakes:
     directive: run
     case: goprint.go
     reason: darwin/arm64 goroot run can either pass or fail
-  - version: go1.24
-    platform: linux/amd64
+  - platform: darwin/arm64
     directive: run
-    case: fixedbugs/issue45045.go
-    reason: replaced map keys are not reliably finalized on linux/amd64, so the run can pass or time out waiting for the old key
-  - version: go1.25
-    platform: linux/amd64
+    case: init1.go
+    reason: darwin/arm64 goroot run can either pass or expose incomplete runtime initialization
+  - platform: linux/amd64
     directive: run
-    case: fixedbugs/issue45045.go
-    reason: replaced map keys are not reliably finalized on linux/amd64, so the run can pass or time out waiting for the old key
-  - version: go1.26
-    platform: linux/amd64
+    case: init1.go
+    reason: linux/amd64 goroot run can either pass or expose incomplete runtime initialization
+  - platform: darwin/arm64
     directive: run
-    case: fixedbugs/issue45045.go
-    reason: replaced map keys are not reliably finalized on linux/amd64, so the run can pass or time out waiting for the old key
-  - version: go1.24
-    platform: linux/amd64
+    case: recover2.go
+    reason: darwin/arm64 goroot run can either pass or expose incomplete recover semantics
+  - platform: linux/amd64
     directive: run
-    case: fixedbugs/issue54343.go
-    reason: the bound-method receiver is not reliably finalized after its method value is cleared on linux/amd64, so the run can pass or report never GC'd
-  - version: go1.25
-    platform: linux/amd64
+    case: recover2.go
+    reason: linux/amd64 goroot run can either pass or expose incomplete recover semantics
+  - platform: darwin/arm64
     directive: run
-    case: fixedbugs/issue54343.go
-    reason: the bound-method receiver is not reliably finalized after its method value is cleared on linux/amd64, so the run can pass or report never GC'd
-  - version: go1.26
-    platform: linux/amd64
+    case: zerodivide.go
+    reason: darwin/arm64 goroot run can either pass or expose incomplete integer divide panic semantics
+  - platform: linux/amd64
     directive: run
-    case: fixedbugs/issue54343.go
-    reason: the bound-method receiver is not reliably finalized after its method value is cleared on linux/amd64, so the run can pass or report never GC'd
-  - version: go1.24
-    platform: darwin/arm64
+    case: zerodivide.go
+    reason: linux/amd64 goroot run can either pass or expose incomplete integer divide panic semantics
+  - platform: darwin/arm64
+    directive: run
+    case: deferfin.go
+    reason: darwin/arm64 goroot run can either pass or expose incomplete defer and finalizer semantics
+  - platform: linux/amd64
+    directive: run
+    case: deferfin.go
+    reason: linux/amd64 goroot run can either pass or expose incomplete defer and finalizer semantics
+  - platform: linux/amd64
+    directive: run
+    case: fixedbugs/issue5493.go
+    reason: linux/amd64 goroot run can either pass or expose incomplete goroutine stack growth
+  - platform: linux/amd64
     directive: run
     case: fixedbugs/issue25897a.go
-    reason: reflect-generated goroutines under a single-P continuous-GC loop can complete or exceed the 1m run timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
+    reason: reflect-generated goroutines under a single-P continuous-GC loop can complete or exceed the 1m run timeout on linux/amd64
+  - version: go1.24
+    platform: linux/amd64
     directive: run
-    case: fixedbugs/issue25897a.go
-    reason: reflect-generated goroutines under a single-P continuous-GC loop can complete or exceed the 1m run timeout on darwin/arm64
+    case: fixedbugs/issue27695.go
+    reason: concurrent GC can either preserve reflect-call results or expose incomplete result scanning on linux/amd64
+  - version: go1.26
+    platform: linux/amd64
+    directive: run
+    case: fixedbugs/issue27695.go
+    reason: concurrent GC can either preserve reflect-call results or expose incomplete result scanning on linux/amd64
   - version: go1.26
     platform: darwin/arm64
+    directive: run
+    case: fixedbugs/issue27695.go
+    reason: concurrent GC can either preserve reflect-call results or expose incomplete result scanning on darwin/arm64
+  - platform: linux/amd64
+    directive: run
+    case: typeparam/chans.go
+    reason: select over the unbuffered channel can either complete or miss the final receive and time out on linux/amd64
+  - version: go1.24
+    platform: linux/amd64
+    directive: run
+    case: fixedbugs/issue45045.go
+    reason: replaced map keys are not reliably finalized on linux/amd64, so the run can pass or time out waiting for the old key
+  - version: go1.26
+    platform: linux/amd64
+    directive: run
+    case: fixedbugs/issue45045.go
+    reason: replaced map keys are not reliably finalized on linux/amd64, so the run can pass or time out waiting for the old key
+  - version: go1.24
+    platform: linux/amd64
+    directive: run
+    case: fixedbugs/issue54343.go
+    reason: the bound-method receiver is not reliably finalized after its method value is cleared on linux/amd64, so the run can pass or report never GC'd
+  - version: go1.26
+    platform: linux/amd64
+    directive: run
+    case: fixedbugs/issue54343.go
+    reason: the bound-method receiver is not reliably finalized after its method value is cleared on linux/amd64, so the run can pass or report never GC'd
+  - platform: darwin/arm64
     directive: run
     case: fixedbugs/issue25897a.go
     reason: reflect-generated goroutines under a single-P continuous-GC loop can complete or exceed the 1m run timeout on darwin/arm64
 xfails:
   - version: go1.26
     directive: errorcheck
-    case: escape_array.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_struct_param2.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: nilptr3.go
-    reason: gc-specific nil-check elimination diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue23664.go
-    reason: llgo parser recovery emits additional malformed-declaration diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape6.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_struct_param1.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: nilcheck.go
-    reason: gc-specific nil-check elimination diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue18331.go
-    reason: gc standard-library pragma validation is not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue41635.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue52193.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue33386.go
-    reason: llgo parser recovery emits additional malformed-go/defer diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape5.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_slice.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: interface/assertinline.go
-    reason: gc-specific type-assertion optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/bug349.go
-    reason: llgo parser recovery emits additional return-value diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue23587.go
-    reason: llgo parser recovery emits additional invalid-tilde diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/semi7.go
-    reason: llgo parser recovery emits additional semicolon and else diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape4.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_selfassign.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue14999.go
-    reason: gc runtime heap-allocation diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue27732a.go
-    reason: gc-specific small-frame and optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/bug274.go
-    reason: llgo parser recovery emits additional case and label diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue18092.go
-    reason: llgo parser recovery emits additional malformed-channel diagnostics
-  - version: go1.26
-    directive: errorcheck
     case: fixedbugs/issue4776.go
     reason: llgo parser uses a different missing-package-clause diagnostic
-  - version: go1.26
-    directive: errorcheck
-    case: escape2n.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_runtime_atomic.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: abi/result_live.go
-    reason: gc-specific liveness diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue21709.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue23521.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue18419.dir/test.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/bug388.go
-    reason: gc runtime pseudo-type diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: switch2.go
-    reason: llgo parser recovery emits additional malformed-switch diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue13319.go
-    reason: llgo parser recovery emits additional malformed-call diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/semi5.go
-    reason: llgo parser recovery emits additional semicolon and end-of-file diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape2.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_reflect.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: sliceopt.go
-    reason: gc-specific append and slice optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: writebarrier.go
-    reason: "not applicable: llgo's BDWGC and tinygogc runtimes do not use Go GC write barriers"
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue19743.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue27557.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue10700.dir/test.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue13274.go
-    reason: llgo parser emits an additional end-of-file diagnostic
   - version: go1.26
     directive: errorcheck
     case: fixedbugs/issue4405.go
     reason: llgo parser recovery emits additional malformed-statement diagnostics
   - version: go1.26
     directive: errorcheck
-    case: syntax/semi4.go
-    reason: llgo parser recovery emits additional semicolon and brace diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape_param.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue31573.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue4099.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue7921.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/notinheap3.go
-    reason: "not applicable: llgo's runtimes do not use Go GC write barriers; notinheap diagnostics are covered separately"
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue13273.go
-    reason: llgo parser and type checker emit additional channel-direction diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/semi3.go
-    reason: llgo parser recovery emits additional semicolon and end-of-file diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape_mutations.go
-    reason: gc-specific escape-mutation and zerocopy diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/notinheap2.go
-    reason: gc-specific notinheap allocation diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
     case: fixedbugs/issue13266.go
     reason: llgo parser uses a different malformed-package-clause diagnostic
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue19667.go
-    reason: llgo parser recovery emits additional malformed-call diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/semi2.go
-    reason: llgo parser recovery emits additional semicolon and brace diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape_map.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: runtime.go
-    reason: gc runtime private-symbol compiler diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/notinheap.go
-    reason: gc-specific notinheap allocation diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue13248.go
-    reason: llgo parser recovery emits additional malformed-expression diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue17328.go
-    reason: llgo parser recovery emits additional end-of-file diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/semi1.go
-    reason: llgo parser recovery emits additional semicolon and end-of-file diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape_make_non_const.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fuse.go
-    reason: gc-specific SSA late-fuse diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue17318.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue30898.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue39292.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue67329.go
-    reason: gc-specific bounds-check elimination diagnostics are not implemented by llgo
   - version: go1.26
     directive: errorcheck
     case: fixedbugs/issue20789.go
     reason: llgo parser does not emit the expected malformed-name diagnostic
   - version: go1.26
     directive: errorcheck
-    case: syntax/initvar.go
-    reason: llgo parser recovery emits additional invalid-initializer diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: devirtualization_with_type_assertions_interleaved.go
-    reason: gc-specific -m devirtualization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_level.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue12588.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue20780.go
-    reason: gc-specific stack-frame size diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: bounds.go
-    reason: gc-specific -m bounds-check diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: devirtualization.go
-    reason: gc-specific -m devirtualization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_indir.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: live_uintptrkeepalive.go
-    reason: gc-specific liveness and standard-package diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: uintptrescapes2.go
-    reason: gc-specific escape and liveness diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue19168.go
-    reason: "not applicable: llgo's BDWGC and tinygogc runtimes do not use Go GC write barriers"
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue75278.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: typeparam/pragma.go
-    reason: gc-specific pragma optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
     case: fixedbugs/bug050.go
     reason: llgo parser emits an additional malformed-declaration diagnostic
   - version: go1.26
     directive: errorcheck
-    case: devirt.go
-    reason: gc-specific SSA devirtualization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_iface_data.go
-    reason: gc-specific escape-debug diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: live2.go
-    reason: "not applicable: llgo's runtimes do not use Go GC write barriers; liveness diagnostics require separate compiler support"
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue12006.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue42944.go
-    reason: gc-specific liveness diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
     case: bombad.go
     reason: llgo parser recovery emits additional byte-order-mark diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/bug435.go
-    reason: llgo parser recovery emits additional end-of-file diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue14006.go
-    reason: llgo parser recovery emits additional malformed-label diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue22581.go
-    reason: llgo parser recovery emits additional malformed-control-clause diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: bloop.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: defererrcheck.go
-    reason: gc-specific defer optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_iface.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: prove_popcount.go
-    reason: gc-specific SSA prove diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: typeparam/issue54497.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/ddd.go
-    reason: llgo parser recovery emits additional malformed-selector diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape_hash_maphash.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: prove_invert_loop_with_unused_iterators.go
-    reason: gc-specific SSA prove diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue13799.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue24651b.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_goto.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: prove_constant_folding.go
-    reason: gc-specific SSA prove diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue16241_64.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue20250.go
-    reason: gc-specific liveness diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue35518.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/bug121.go
-    reason: llgo parser recovery emits additional malformed-declaration diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/bug228.go
-    reason: llgo parser emits an additional malformed-parameter diagnostic
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/chan1.go
-    reason: llgo parser recovery emits additional malformed-channel diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape_field.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_unsafe.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: intrinsic_atomic.go
-    reason: gc-specific intrinsic substitution diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: prove.go
-    reason: gc-specific SSA prove diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue13587.go
-    reason: "not applicable: llgo's BDWGC and tinygogc runtimes do not use Go GC write barriers"
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue16241.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue18747.go
-    reason: llgo parser recovery emits additional undefined-name diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: escape_closure.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_unique.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: inline_variadic.go
-    reason: gc-specific -m inlining diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: phiopt.go
-    reason: gc-specific SSA phi optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: tighten.go
-    reason: gc-specific SSA tighten diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue35073b.go
-    reason: gc-specific escape and checkptr diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue54159.go
-    reason: gc-specific -m optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: internal/runtime/sys/inlinegcpc.go
-    reason: gc runtime inlining diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue11610.go
-    reason: llgo parser reports additional illegal-character diagnostics
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue22164.go
-    reason: llgo parser recovery emits additional diagnostics for a malformed argument list
-  - version: go1.26
-    directive: errorcheck
-    case: escape_calls.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_sync_atomic.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: inline_sync.go
-    reason: gc-specific -m inlining diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: nowritebarrier.go
-    reason: "not applicable: llgo's BDWGC and tinygogc runtimes do not use Go GC write barriers"
-  - version: go1.26
-    directive: errorcheck
-    case: tailcall.go
-    reason: gc-specific tail-call optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue15747.go
-    reason: gc-specific liveness diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: fixedbugs/issue34723.go
-    reason: "not applicable: llgo's BDWGC and tinygogc runtimes do not use Go GC write barriers"
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/vareq1.go
-    reason: llgo parser recovery emits an additional diagnostic after the expected syntax error
-  - version: go1.26
-    directive: errorcheck
-    case: escape_bloop.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: escape_struct_return.go
-    reason: gc-specific -m escape-analysis diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: inline_big.go
-    reason: gc-specific -m inlining diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: nilptr5.go
-    reason: gc-specific -d=nil optimization diagnostics are not implemented by llgo
-  - version: go1.26
-    directive: errorcheck
-    case: syntax/vareq.go
-    reason: llgo parser recovery emits additional diagnostics after the expected syntax error
-  - version: go1.26
-    directive: compile
-    case: typeparam/issue50993.go
-    reason: gc-specific -d=checkptr backend option is not implemented by llgo
-  - version: go1.26
-    directive: compile
-    case: fixedbugs/issue26163.go
-    reason: gc-specific -d=softfloat backend option is not implemented by llgo
-  - version: go1.26
-    directive: compile
-    case: fixedbugs/issue56141.go
-    reason: gc-specific -d=libfuzzer backend option is not implemented by llgo
-  - version: go1.26
-    directive: compile
-    case: fixedbugs/issue56105.go
-    reason: gc-specific -d=libfuzzer backend option is not implemented by llgo
-  - version: go1.26
-    directive: compile
-    case: fixedbugs/issue34966.go
-    reason: gc-specific -d=checkptr backend option is not implemented by llgo
-  - version: go1.26
-    directive: compile
-    case: fixedbugs/issue58826.go
-    reason: gc-specific -dynlink backend mode is not implemented by llgo
-  - version: go1.26
-    directive: compile
-    case: fixedbugs/issue69825.go
-    reason: gc-specific -d=libfuzzer backend option is not implemented by llgo
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: init1.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: init1.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: finprofiled.go
-    reason: LLGo finalizer profiling run hangs beyond the 1m timeout on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: finprofiled.go
-    reason: LLGo finalizer profiling run hangs beyond the 1m timeout on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: gcstring.go
-    reason: GC frees a string-backed pointer before its finalizer check on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: gcstring.go
-    reason: GC frees a string-backed pointer before its finalizer check on darwin/arm64
   - platform: darwin/arm64
     directive: run
     case: inline_caller.go
     reason: runtime caller frame reports main instead of runtime.main on darwin/arm64
+  - platform: linux/amd64
+    directive: run
+    case: inline_caller.go
+    reason: runtime caller frame reports main instead of runtime.main on linux/amd64
   - platform: darwin/arm64
     directive: run
     case: nilptr2.go
     reason: address-of a dereferenced nil pointer does not panic and the run hangs on darwin/arm64
-  - platform: darwin/arm64
+  - platform: linux/amd64
     directive: run
-    case: range4.go
-    reason: range-over-function build exits successfully without producing a binary on darwin/arm64
+    case: nilptr2.go
+    reason: address-of a dereferenced nil pointer does not panic and the run hangs on linux/amd64
+  - platform: linux/amd64
+    directive: runoutput
+    case: convinline.go
+    reason: generated conversion checks produce incorrect results on linux/amd64
   - platform: darwin/arm64
     directive: run
     case: fixedbugs/issue31546.go
     reason: reflection exposes the initializer value of a blank struct field instead of zero on darwin/arm64
-  - platform: darwin/arm64
+  - platform: linux/amd64
     directive: run
-    case: fixedbugs/issue72063.go
-    reason: generic Y-combinator build exits successfully without producing a binary on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue8047b.go
-    reason: recover interaction panics with value 1 on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue8047b.go
-    reason: recover interaction panics with value 1 on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: typeparam/orderedmap.go
-    reason: generic ordered-map iterator dereferences a nil entry on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: typeparam/orderedmap.go
-    reason: generic ordered-map iterator dereferences a nil entry on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: uintptrescapes3.go
-    reason: uintptr escape round trip dereferences a nil pointer on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: uintptrescapes3.go
-    reason: uintptr escape round trip dereferences a nil pointer on darwin/arm64
+    case: fixedbugs/issue31546.go
+    reason: reflection exposes the initializer value of a blank struct field instead of zero on linux/amd64
   - version: go1.26
     platform: darwin/arm64
     directive: run
     case: convert5.go
     reason: out-of-range float-to-uint32 conversions wrap instead of producing zero on darwin/arm64
-  - platform: darwin/arm64
+  - version: go1.26
+    platform: linux/amd64
     directive: run
-    case: noinit.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: recover2.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: recover2.go
-    reason: current main goroot run failure on darwin/arm64
+    case: convert5.go
+    reason: out-of-range float-to-uint32 conversions wrap instead of producing zero on linux/amd64
   - platform: darwin/arm64
     directive: runoutput
     case: rangegen.go
     reason: current main goroot runoutput failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: zerodivide.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: zerodivide.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue16130.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue16130.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue19040.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue19040.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue37975.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue37975.go
-    reason: current main goroot run failure on darwin/arm64
   - version: go1.26
     platform: darwin/arm64
     directive: run
@@ -2566,46 +1402,6 @@ xfails:
   - version: go1.24
     platform: linux/amd64
     directive: run
-    case: append.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: init1.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: noinit.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: recover2.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: recover3.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: switch.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: zerodivide.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: typeparam/mdempsky/16.go
-    reason: nil-interface assertion panic implements runtime.Error but the message lacks the source interface type and prints the command-line-arguments package path on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
     case: typeparam/mdempsky/16.go
     reason: nil-interface assertion panic implements runtime.Error but the message lacks the source interface type and prints the command-line-arguments package path on linux/amd64
   - version: go1.26
@@ -2613,136 +1409,6 @@ xfails:
     directive: run
     case: typeparam/mdempsky/16.go
     reason: nil-interface assertion panic implements runtime.Error but the message lacks the source interface type and prints the command-line-arguments package path on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue19040.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue37975.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue63657.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue65417.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: append.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: init1.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: noinit.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: recover2.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: recover3.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: switch.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: zerodivide.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue19040.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue37975.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue63657.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue65417.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: append.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: init1.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: noinit.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: recover2.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: recover3.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: switch.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: zerodivide.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue19040.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue37975.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue63657.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue65417.go
-    reason: go1.26 goroot run failure on linux/amd64
   - version: go1.26
     platform: linux/amd64
     directive: run
@@ -2753,36 +1419,11 @@ xfails:
     directive: run
     case: fixedbugs/issue73916b.go
     reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue75327.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: maymorestack.go
-    reason: go1.24 goroot ci-mode run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: maymorestack.go
-    reason: go1.25 goroot ci-mode run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: maymorestack.go
-    reason: go1.26 goroot ci-mode run failure on linux/amd64
   - version: go1.24
     platform: linux/amd64
     directive: runoutput
     case: rangegen.go
     reason: go1.24 goroot ci-mode runoutput failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: runoutput
-    case: rangegen.go
-    reason: go1.25 goroot ci-mode runoutput failure on linux/amd64
   - version: go1.26
     platform: linux/amd64
     directive: runoutput
@@ -2811,11 +1452,11 @@ xfails:
   - platform: darwin/arm64
     directive: run
     case: stackobj.go
-    reason: conservative GC lacks precise cross-frame stack-object liveness
+    reason: latest main goroot run failure on darwin/arm64
   - platform: darwin/arm64
     directive: run
     case: stackobj3.go
-    reason: conservative GC lacks precise ambiguous-parameter liveness
+    reason: latest main goroot run failure on darwin/arm64
   - platform: darwin/arm64
     directive: run
     case: fixedbugs/bug347.go
@@ -2856,165 +1497,10 @@ xfails:
     directive: run
     case: fixedbugs/issue46725.go
     reason: latest main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue5493.go
-    reason: latest main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue5493.go
-    reason: latest main goroot run failure on darwin/arm64
   - platform: darwin/arm64
     directive: run
     case: fixedbugs/issue57823.go
     reason: latest main goroot run failure on darwin/arm64
-  - platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue5963.go
-    reason: latest main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: deferfin.go
-    reason: exiting pthread may retain conservative stack or register roots after goroutine completion
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/bug347.go
-    reason: panic/fault statement-line granularity in untracked functions (P4b prebuilt pcline)
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/bug348.go
-    reason: panic/fault statement-line granularity in untracked functions (P4b prebuilt pcline)
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue15277.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue15281.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue24491b.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue26335.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue27201.go
-    reason: panic/fault statement-line granularity in untracked functions (P4b prebuilt pcline)
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue27518b.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue29504.go
-    reason: panic/fault statement-line granularity in untracked functions (P4b prebuilt pcline)
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue32477.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue4066.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue4066.go
-    reason: go1.25 goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue4562.go
-    reason: panic/fault statement-line granularity in untracked functions (P4b prebuilt pcline)
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue46725.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue72860.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue5493.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue57823.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue5963.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: heapsampling.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: mallocfin.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: recover.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: recover1.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: recover4.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: stackobj.go
-    reason: conservative GC lacks precise cross-frame stack-object liveness
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: stackobj3.go
-    reason: conservative GC lacks precise ambiguous-parameter liveness
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: tinyfin.go
-    reason: go1.25 goroot run failure on linux/amd64
-
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: deferfin.go
-    reason: exiting pthread may retain conservative stack or register roots after goroutine completion
   - version: go1.24
     platform: linux/amd64
     directive: run
@@ -3063,11 +1549,6 @@ xfails:
   - version: go1.24
     platform: linux/amd64
     directive: run
-    case: fixedbugs/issue5963.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
     case: mallocfin.go
     reason: go1.24 goroot run failure on linux/amd64
   - version: go1.24
@@ -3079,16 +1560,11 @@ xfails:
     platform: linux/amd64
     directive: run
     case: stackobj.go
-    reason: conservative GC lacks precise cross-frame stack-object liveness
+    reason: go1.24 goroot run failure on linux/amd64
   - version: go1.24
     platform: linux/amd64
     directive: run
     case: stackobj3.go
-    reason: conservative GC lacks precise ambiguous-parameter liveness
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: tinyfin.go
     reason: go1.24 goroot run failure on linux/amd64
   - version: go1.24
     platform: linux/amd64
@@ -3099,11 +1575,6 @@ xfails:
     platform: linux/amd64
     directive: run
     case: fixedbugs/issue15281.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue26335.go
     reason: go1.24 goroot run failure on linux/amd64
   - version: go1.24
     platform: linux/amd64
@@ -3135,31 +1606,6 @@ xfails:
     directive: run
     case: recover4.go
     reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue5493.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: maymorestack.go
-    reason: go1.24 goroot ci-mode run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: maymorestack.go
-    reason: go1.25 goroot ci-mode run failure on darwin/arm64
-  - version: go1.26
-    platform: darwin/arm64
-    directive: run
-    case: maymorestack.go
-    reason: go1.26 goroot ci-mode run failure on darwin/arm64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: deferfin.go
-    reason: exiting pthread may retain conservative stack or register roots after goroutine completion
   - version: go1.26
     platform: linux/amd64
     directive: run
@@ -3179,16 +1625,11 @@ xfails:
     platform: linux/amd64
     directive: run
     case: stackobj.go
-    reason: conservative GC lacks precise cross-frame stack-object liveness
+    reason: go1.26 goroot run failure on linux/amd64
   - version: go1.26
     platform: linux/amd64
     directive: run
     case: stackobj3.go
-    reason: conservative GC lacks precise ambiguous-parameter liveness
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: tinyfin.go
     reason: go1.26 goroot run failure on linux/amd64
   - version: go1.26
     platform: linux/amd64
@@ -3199,11 +1640,6 @@ xfails:
     platform: linux/amd64
     directive: run
     case: fixedbugs/issue15281.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue26335.go
     reason: go1.26 goroot run failure on linux/amd64
   - version: go1.26
     platform: linux/amd64
@@ -3230,16 +1666,6 @@ xfails:
     directive: run
     case: fixedbugs/issue4562.go
     reason: panic/fault statement-line granularity in untracked functions (P4b prebuilt pcline)
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue72860.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue5493.go
-    reason: go1.26 goroot run failure on linux/amd64
   - version: go1.26
     platform: linux/amd64
     directive: run
@@ -3285,64 +1711,9 @@ xfails:
     directive: run
     case: fixedbugs/issue57823.go
     reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue5963.go
-    reason: go1.26 goroot run failure on linux/amd64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug273.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/bug273.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue12133.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue12133.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue13169.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue13169.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue19246.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue19246.go
-    reason: current main goroot run failure on darwin/arm64
   - platform: darwin/arm64
     directive: run
     case: fixedbugs/issue26094.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue43835.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue43835.go
     reason: current main goroot run failure on darwin/arm64
   - platform: darwin/arm64
     directive: run
@@ -3358,71 +1729,9 @@ xfails:
     directive: run
     case: fixedbugs/issue73920.go
     reason: go1.26 goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue8048.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue8048.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue8132.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: fixedbugs/issue8132.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: nil.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: nil.go
-    reason: current main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: typeparam/chans.go
-    reason: select over unbuffered channel misses final receive on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: run
-    case: typeparam/chans.go
-    reason: select over unbuffered channel misses final receive on darwin/arm64
-  - version: go1.24
-    platform: darwin/arm64
-    directive: runoutput
-    case: index0.go
-    reason: current main goroot runoutput failure on darwin/arm64
-  - version: go1.25
-    platform: darwin/arm64
-    directive: runoutput
-    case: index0.go
-    reason: current main goroot runoutput failure on darwin/arm64
-  - platform: linux/amd64
-    directive: run
-    case: fixedbugs/bug273.go
-    reason: current main goroot run failure on linux/amd64
-  - platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue19246.go
-    reason: current main goroot run failure on linux/amd64
   - platform: linux/amd64
     directive: run
     case: fixedbugs/issue26094.go
-    reason: current main goroot run failure on linux/amd64
-  - platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue43835.go
     reason: current main goroot run failure on linux/amd64
   - version: go1.26
     platform: linux/amd64
@@ -3436,85 +1745,17 @@ xfails:
     reason: go1.26 goroot run failure on linux/amd64
   - platform: linux/amd64
     directive: run
-    case: fixedbugs/issue8048.go
-    reason: current main goroot run failure on linux/amd64
-  - platform: linux/amd64
-    directive: run
-    case: fixedbugs/issue8132.go
-    reason: current main goroot run failure on linux/amd64
-  - platform: linux/amd64
-    directive: run
     case: fixedbugs/issue38496.go
-    reason: current main goroot run failure on linux/amd64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: goprint.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.25
-    platform: linux/amd64
-    directive: run
-    case: goprint.go
-    reason: go1.25 goroot run failure on linux/amd64
-  - platform: linux/amd64
-    directive: run
-    case: nil.go
     reason: current main goroot run failure on linux/amd64
   - platform: linux/amd64
     directive: run
     case: nilptr.go
     reason: current main goroot run failure on linux/amd64
-  - platform: linux/amd64
-    directive: run
-    case: typeparam/chans.go
-    reason: select over unbuffered channel misses final receive on linux/amd64
-  - platform: linux/amd64
-    directive: runoutput
-    case: index0.go
-    reason: current main goroot runoutput failure on linux/amd64
-  - version: go1.26
-    directive: errorcheckandrundir
-    case: intrinsic.go
-    reason: gc-specific SSA intrinsic diagnostics are not implemented by llgo; the run stage still executes
-  - version: go1.26
-    directive: errorcheckandrundir
-    case: closure3.go
-    reason: gc-specific escape and inlining diagnostics are not implemented by llgo; the run stage still executes
-  - version: go1.26
-    directive: errorcheckandrundir
-    case: linkname.go
-    reason: gc-specific escape and inlining diagnostics are not implemented by llgo; the run stage still executes
-  - version: go1.26
-    directive: errorcheckandrundir
-    case: fixedbugs/issue37837.go
-    reason: gc-specific escape-analysis diagnostics are not implemented by llgo; the run stage still executes
   - version: go1.26
     platform: darwin/arm64
     directive: rundir
     case: fixedbugs/issue29919.go
     reason: runtime CallersFrames reports llgo package names and initialization line metadata differently
-  - version: go1.26
-    platform: darwin/arm64
-    directive: buildrundir
-    case: asmhdr.go
-    reason: llgo build does not implement the Go assembler asmhdr and symabis pipeline
-  - version: go1.26
-    directive: rundir
-    case: fixedbugs/issue31636.go
-    reason: llgo initializes independent imported packages in reverse source order
-  - version: go1.26
-    directive: rundir
-    case: fixedbugs/issue9608.go
-    reason: llgo does not eliminate unreachable references to a bodyless function before linking
-  - version: go1.26
-    directive: runindir
-    case: fixedbugs/issue20014.go
-    reason: gc-specific fieldtrack linker metadata is not implemented by llgo
-  - version: go1.26
-    platform: darwin/arm64
-    directive: buildrundir
-    case: retjmp.go
-    reason: llgo does not preserve Go assembler return-jump ABI behavior
   - version: go1.26
     directive: rundir
     case: fixedbugs/issue24693.go
@@ -3527,7 +1768,6 @@ xfails:
     directive: rundir
     case: interface/embed3.go
     reason: llgo interface-conversion diagnostics report the import path instead of the package name
-  - version: go1.26
-    directive: run
+  - directive: run
     case: fixedbugs/issue52072.go
     reason: llgo loses the named return value when a deferred nil-receiver method panic is recovered

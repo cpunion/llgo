@@ -273,6 +273,120 @@ func Root(seed int) func(int) int {
 	}
 }
 
+func TestCoroDynamicDispatchProducerElidesZeroSizedClosureEnv(t *testing.T) {
+	const source = `package foo
+type marker struct{}
+var Sink marker
+func Root() func() {
+	value := marker{}
+	return func() { Sink = value }
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	root := ssaPkg.Func("Root")
+	if len(root.AnonFuncs) != 1 || len(root.AnonFuncs[0].FreeVars) != 1 {
+		t.Fatalf("Root anonymous functions = %+v; want one closure with one free variable", root.AnonFuncs)
+	}
+	target := root.AnonFuncs[0]
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !universe.closureEnvironments.canElideZeroSizedEnvironment(target) {
+		t.Fatal("fixture closure environment is not physically elidable")
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPlan, ok := plan.FunctionPlan(target)
+	if !ok || targetPlan.FuncRep != coro.Dispatch || targetPlan.Emission != coro.EmitPlain {
+		t.Fatalf("zero-sized target plan = %+v, present=%t; want a descriptor-backed plain primary", targetPlan, ok)
+	}
+
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: &Compilation{
+			CoroPlan:         plan,
+			EmissionUniverse: universe,
+
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:     coro.PanicExplicitStatusABIV0,
+			FuncRepABI:   coro.FuncRepABIV1}},
+	)
+	if err != nil {
+		t.Fatalf("compile zero-sized descriptor producer: %v", err)
+	}
+	module := compiled.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify zero-sized descriptor producer: %v\n%s", err, module.String())
+	}
+	descriptor := coroDispatchProducerOnlyGlobalWithPrefix(t, module, coroPlainDispatchDescriptorPrefix)
+	wantFlags := uint64(llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagNoCapture)
+	if got := descriptor.Initializer().Operand(1).ZExtValue(); got != wantFlags {
+		t.Fatalf("zero-sized plain descriptor flags = %#x, want %#x", got, wantFlags)
+	}
+	thunk := coroDispatchProducerOnlyFunctionWithPrefix(t, module, coroPlainDispatchThunkPrefix)
+	call := coroDispatchProducerOnlyCallTo(t, thunk, "")
+	if got := call.OperandsCount() - 1; got != 0 {
+		t.Fatalf("zero-sized plain thunk target arguments = %d, want no physical environment", got)
+	}
+}
+
+func TestCoroBoundMethodElidesZeroSizedValueReceiverEnvironment(t *testing.T) {
+	const source = `package foo
+type marker struct{}
+func (marker) Method() int { return 1 }
+var Bound = marker{}.Method
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	initFn := ssaPkg.Func("init")
+	var closure *ssa.MakeClosure
+	for _, block := range initFn.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.MakeClosure); ok {
+				closure = candidate
+				break
+			}
+		}
+	}
+	if closure == nil {
+		t.Fatal("package initializer has no bound-method closure")
+	}
+	target, ok := closure.Fn.(*ssa.Function)
+	if !ok || target == nil || len(target.FreeVars) != 1 || len(closure.Bindings) != 1 {
+		t.Fatalf("bound-method closure = %+v, target=%v", closure, target)
+	}
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !universe.closureEnvironments.canElideZeroSizedEnvironment(target) {
+		t.Fatalf(
+			"zero-sized bound-method receiver environment was retained (synthetic=%q parent=%v free=%v binding=%v fact=%+v)",
+			target.Synthetic, target.Parent(), target.FreeVars[0].Type(), closure.Bindings[0].Type(),
+			universe.closureEnvironments.facts[target],
+		)
+	}
+}
+
 func TestCoroDynamicDispatchProducerElidesDormantConditionalPublication(t *testing.T) {
 	const source = `package foo
 var slot func()
@@ -533,13 +647,31 @@ func TestCoroDynamicDispatchProducerCapturedCoroThunkInsertsEnvironment(t *testi
 		types.NewTuple(types.NewParam(token.NoPos, nil, "result", types.Typ[types.Int])),
 		false,
 	)
-	closureCtx := types.NewPointer(types.NewStruct([]*types.Var{
-		types.NewField(token.NoPos, nil, "seed", types.Typ[types.Int], false),
-	}, nil))
+	// Package loading can materialize equivalent imported named types as
+	// distinct go/types objects. Reproduce that identity split while retaining
+	// one frozen structural ABI for the closure environment.
+	newImportedMap := func() *types.Named {
+		imported := types.NewPackage("internal/sync", "sync")
+		name := types.NewTypeName(token.NoPos, imported, "HashTrieMap", nil)
+		return types.NewNamed(name, types.NewStruct(nil, nil), nil)
+	}
+	closureContext := func(mapType *types.Named) types.Type {
+		return types.NewPointer(types.NewStruct([]*types.Var{
+			types.NewField(token.NoPos, nil, "ht", types.NewPointer(types.NewPointer(mapType)), false),
+		}, nil))
+	}
+	targetClosureCtx := closureContext(newImportedMap())
+	producerClosureCtx := closureContext(newImportedMap())
+	if types.Identical(targetClosureCtx, producerClosureCtx) {
+		t.Fatal("fixture closure contexts unexpectedly share go/types identity")
+	}
+	if structuralEmissionABITypeKey(targetClosureCtx) != structuralEmissionABITypeKey(producerClosureCtx) {
+		t.Fatal("fixture closure contexts do not share one structural ABI")
+	}
 	hidden := []*types.Var{
 		types.NewParam(token.NoPos, nil, "__llgo_g", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "__llgo_out", types.Typ[types.UnsafePointer]),
-		types.NewParam(token.NoPos, nil, "__llgo_ctx", closureCtx),
+		types.NewParam(token.NoPos, nil, "__llgo_ctx", targetClosureCtx),
 		types.NewParam(token.NoPos, nil, "value", types.Typ[types.Int]),
 	}
 	physical := types.NewSignatureType(
@@ -557,7 +689,7 @@ func TestCoroDynamicDispatchProducerCapturedCoroThunkInsertsEnvironment(t *testi
 	abi := coroPlainDispatchABI{signature: logical, resultSlotType: resultSlot}
 	ctx := &context{prog: prog, pkg: pkg}
 	thunkName := coroCoroDispatchThunkPrefix + "captured"
-	thunkExpr := ctx.newCoroDynamicDispatchEntryThunk(thunkName, target.Expr, abi, coro.EmitCoroutine, closureCtx)
+	thunkExpr := ctx.newCoroDynamicDispatchEntryThunk(thunkName, target.Expr, abi, coro.EmitCoroutine, producerClosureCtx)
 	descriptorName := coroPlainDispatchDescriptorPrefix + "captured"
 	pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
 		Version:   llssa.CoroDispatchVersionV1,

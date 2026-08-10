@@ -1,3 +1,4 @@
+// LITTEST
 package main
 
 func f(s string) bool {
@@ -22,3 +23,19 @@ func main() {
 	fail()
 	println("unreachable")
 }
+
+// CHECK-LABEL: define i1 @main.f(
+// CHECK-NOT: @llvm.coro.
+// CHECK: ret i1
+// CHECK-LABEL: define ptr @"main.fail$coro"(
+// CHECK: call void @__llgo_coro_frame_publish_v1(
+// CHECK: call void @__llgo_coro_panic_prepare_v1(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
+// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK: call void @__llgo_coro_panic_prepare_v1(
+// CHECK: call ptr @"main.fail$coro"(
+// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK-LABEL: define ptr @"main.main$1$coro"(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"

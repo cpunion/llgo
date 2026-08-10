@@ -5,7 +5,7 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.81fc010426b315c933be084e5d6f39e7
+    __llgo_coro_frame_descriptor_v1.043de7e03aff8f0b004da3f0458bd05f
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v1
     __llgo_coro_panic_prepare_v1

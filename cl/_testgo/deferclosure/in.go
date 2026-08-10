@@ -1,8 +1,9 @@
 package main
 
-// Test for covering the closureStub branches in ssa/package.go
+// Test deferred closure and method-value lowering.
 
 // Type for holding a function
+
 type Handler struct {
 	fn func(int)
 }

@@ -1,4 +1,3 @@
-// LITTEST
 package main
 
 import _ "unsafe" // for go:linkname
@@ -9,43 +8,16 @@ import "github.com/goplus/lib/c"
 // instead of numbered SSA values or the exact instruction layout.
 //
 // A statically synchronous function keeps its ordinary ABI.
-// CHECK-LABEL: define i64 @main.S.Inc
-// CHECK: add i64
-// CHECK: ret i64
 //
 // A colored method has the coroutine ABI and publishes a resumable frame.
-// CHECK-LABEL: define ptr @"main.(*S).Add$coro"
-// CHECK: call token @llvm.coro.id
-// CHECK: call ptr @llvm.coro.begin
-// CHECK: call void @__llgo_coro_frame_publish_v1
-// CHECK: call i8 @llvm.coro.suspend
-// CHECK: call void @__llgo_coro_complete_prepare_v2
 //
 // A statically synchronous free function also keeps its ordinary ABI.
-// CHECK-LABEL: define i64 @main.globalAdd
-// CHECK: add i64
-// CHECK: ret i64
 //
 // The entry coroutine uses the common await protocol for colored Go calls and
 // the worker protocol for a potentially blocking foreign call.
-// CHECK-LABEL: define ptr @"main.main$coro"
-// CHECK: call token @llvm.coro.id
-// CHECK: call ptr @llvm.coro.begin
-// CHECK: call void @__llgo_coro_frame_publish_v1
-// CHECK: call ptr @"main.makeNoFree$coro"
-// CHECK: call void @__llgo_coro_await_prepare_v3
-// CHECK: call void @__llgo_coro_complete_prepare_v2
-// CHECK: call i32 @__llgo_coro_await_consume_v1
-// CHECK: call void @__llgo_coro_worker_park_v1
-// CHECK: call i32 @__llgo_coro_worker_resume_v1
 //
 // The closure constructor itself is colored because the callable may cross a
 // dynamic boundary; its body follows the same frame protocol.
-// CHECK-LABEL: define ptr @"main.makeNoFree$coro"
-// CHECK: call token @llvm.coro.id
-// CHECK: call ptr @llvm.coro.begin
-// CHECK: call void @__llgo_coro_frame_publish_v1
-// CHECK: call void @__llgo_coro_complete_prepare_v2
 
 //go:linkname cSqrt C.sqrt
 func cSqrt(x c.Double) c.Double

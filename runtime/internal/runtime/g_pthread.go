@@ -59,7 +59,7 @@ func getg() *g {
 	if ptr := gKey.Get(); ptr != nil {
 		return (*g)(ptr)
 	}
-	gp := initRuntimeContext(allocRuntimeContext(), nil, _Grunning)
+	gp := initRuntimeContextUntracked(allocRuntimeContext(), nil, _Grunning)
 	if ret := setgRaw(gp); ret != 0 {
 		destroyG(c.Pointer(unsafe.Pointer(gp)))
 		c.Fprintf(c.Stderr, c.Str("runtime: pthread_setspecific failed (errno=%d)\n"), ret)
@@ -87,6 +87,7 @@ func destroyG(ptr c.Pointer) {
 	}
 	if gp.panic_ != nil {
 		c.Free(gp.panic_)
+		gp.panic_ = nil
 	}
 	ctx := gp.context
 	if ctx != nil && ctx.root != nil {

@@ -1628,29 +1628,35 @@ func TestCoroProgramBootstrapV2MixedStartupTable(t *testing.T) {
 	pkg := prog.NewPackage("corobootstrapv2", "coro/bootstrap/v2")
 	defer pkg.Module().Dispose()
 
-	plains := [3]Function{
+	plains := [4]Function{
 		pkg.NewFunc("internal_runtime_init", functionSignature(nil, nil), InC),
 		pkg.NewFunc("public_runtime_init", functionSignature(nil, nil), InC),
+		pkg.NewFunc("dependency_plain_init", functionSignature(nil, nil), InC),
 		pkg.NewFunc("main", functionSignature(nil, nil), InC),
 	}
-	anchors := [2]Expr{
+	anchors := [3]Expr{
 		newCoroProgramPackageAnchor(pkg, "compiler_abi_init_anchor", false),
+		newCoroProgramPackageAnchor(pkg, "dependency_init_anchor", false),
 		newCoroProgramPackageAnchor(pkg, "main_package_init_anchor", false),
 	}
 	factory := pkg.NewFunc("bootstrap_factory_v2", coroRootFactoryTestSignature(), InC)
-	roles := [5]uint32{
+	roles := [7]uint32{
 		CoroProgramStepInternalRuntimeInitV2,
 		CoroProgramStepCompilerABIInitV2,
 		CoroProgramStepPublicRuntimeInitV2,
-		CoroProgramStepMainPackageInitV2,
+		CoroProgramStepPackageInitV2,
+		CoroProgramStepPackageInitV2,
+		CoroProgramStepPackageInitV2,
 		CoroProgramStepMainV2,
 	}
 	steps := []CoroProgramStep{
 		{Kind: CoroProgramStepDirectPlain, Flags: roles[0], Target: plains[0].Expr},
 		{Kind: CoroProgramStepCoroRoot, Flags: roles[1], Target: anchors[0], Aux: 2},
 		{Kind: CoroProgramStepDirectPlain, Flags: roles[2], Target: plains[1].Expr},
-		{Kind: CoroProgramStepCoroRoot, Flags: roles[3], Target: anchors[1], Aux: 7},
-		{Kind: CoroProgramStepDirectPlain, Flags: roles[4], Target: plains[2].Expr},
+		{Kind: CoroProgramStepDirectPlain, Flags: roles[3], Target: plains[2].Expr},
+		{Kind: CoroProgramStepCoroRoot, Flags: roles[4], Target: anchors[1], Aux: 5},
+		{Kind: CoroProgramStepCoroRoot, Flags: roles[5], Target: anchors[2], Aux: 7},
+		{Kind: CoroProgramStepDirectPlain, Flags: roles[6], Target: plains[3].Expr},
 	}
 	bootstrap := pkg.NewCoroProgramBootstrap("__llgo_coro_program_bootstrap_v2", CoroProgramBootstrapOptions{
 		Version: 2,
@@ -1666,26 +1672,28 @@ func TestCoroProgramBootstrapV2MixedStartupTable(t *testing.T) {
 	if got := initializer.Operand(0).ZExtValue(); got != 2 {
 		t.Fatalf("bootstrap version = %d, want 2", got)
 	}
-	if got := initializer.Operand(4).ZExtValue(); got != 5 {
-		t.Fatalf("bootstrap step count = %d, want 5", got)
+	if got := initializer.Operand(4).ZExtValue(); got != uint64(len(steps)) {
+		t.Fatalf("bootstrap step count = %d, want %d", got, len(steps))
 	}
 	stepsGlobal := pkg.Module().NamedGlobal("__llgo_coro_program_bootstrap_v2.steps")
 	if stepsGlobal.IsNil() || !stepsGlobal.IsGlobalConstant() {
 		t.Fatal("v2 bootstrap lacks its constant steps table")
 	}
 	array := stepsGlobal.Initializer()
-	if got := array.OperandsCount(); got != 5 {
-		t.Fatalf("v2 steps count = %d, want 5", got)
+	if got := array.OperandsCount(); got != len(steps) {
+		t.Fatalf("v2 steps count = %d, want %d", got, len(steps))
 	}
-	wantKinds := [5]CoroProgramStepKind{
+	wantKinds := [7]CoroProgramStepKind{
 		CoroProgramStepDirectPlain,
 		CoroProgramStepCoroRoot,
 		CoroProgramStepDirectPlain,
+		CoroProgramStepDirectPlain,
+		CoroProgramStepCoroRoot,
 		CoroProgramStepCoroRoot,
 		CoroProgramStepDirectPlain,
 	}
-	wantAux := [5]uint64{0, 2, 0, 7, 0}
-	for index := 0; index < 5; index++ {
+	wantAux := [7]uint64{0, 2, 0, 0, 5, 7, 0}
+	for index := range steps {
 		step := array.Operand(index)
 		if got := step.Operand(0).ZExtValue(); got != uint64(wantKinds[index]) {
 			t.Errorf("step %d kind = %d, want %d", index, got, wantKinds[index])
@@ -1697,7 +1705,8 @@ func TestCoroProgramBootstrapV2MixedStartupTable(t *testing.T) {
 			t.Errorf("step %d aux = %d, want %d", index, got, wantAux[index])
 		}
 	}
-	if !anchors[0].impl.IsGlobalConstant() || !anchors[1].impl.IsGlobalConstant() {
+	if !anchors[0].impl.IsGlobalConstant() || !anchors[1].impl.IsGlobalConstant() ||
+		!anchors[2].impl.IsGlobalConstant() {
 		t.Fatal("v2 coro-root anchor declarations were not normalized to constants")
 	}
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
@@ -1722,7 +1731,7 @@ func TestCoroProgramBootstrapV2RejectsShapeAndRoles(t *testing.T) {
 		CoroProgramStepInternalRuntimeInitV2,
 		CoroProgramStepCompilerABIInitV2,
 		CoroProgramStepPublicRuntimeInitV2,
-		CoroProgramStepMainPackageInitV2,
+		CoroProgramStepPackageInitV2,
 		CoroProgramStepMainV2,
 	}
 	valid := CoroProgramBootstrapOptions{Version: 2, Steps: make([]CoroProgramStep, 5)}
@@ -1731,15 +1740,11 @@ func TestCoroProgramBootstrapV2RejectsShapeAndRoles(t *testing.T) {
 			Kind: CoroProgramStepDirectPlain, Flags: roles[index], Target: plains[index].Expr,
 		}
 	}
-	for _, count := range []int{0, 1, 2, 4, 6} {
+	for _, count := range []int{0, 1, 2, 3, 4} {
 		bad := valid
 		bad.Steps = append([]CoroProgramStep(nil), valid.Steps...)
-		if count <= len(bad.Steps) {
-			bad.Steps = bad.Steps[:count]
-		} else {
-			bad.Steps = append(bad.Steps, valid.Steps[0])
-		}
-		mustPanicContains(t, "version 2 requires exactly 5 steps", func() {
+		bad.Steps = bad.Steps[:count]
+		mustPanicContains(t, "version 2 requires at least 5 steps", func() {
 			pkg.NewCoroProgramBootstrap(fmt.Sprintf("v2_bad_count_%d", count), bad)
 		})
 	}

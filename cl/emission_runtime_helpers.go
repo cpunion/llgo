@@ -714,14 +714,16 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		case token.ARROW:
 			add("CoroChanTryRecv")
 		case token.MUL:
+			free, _ := v.X.(*ssa.FreeVar)
+			elidedZeroSizedFreeVar := u.closureEnvironments.elidesZeroSizedFreeVar(v.Parent(), free)
 			if _, checkedReceiver := ctx.methodNilDerefChecks[v]; checkedReceiver {
 				// compileCheckedDeref preserves the checked pointer through the
 				// value-receiver call and therefore uses the pointer-returning ABI.
-				if !ssaValueProvenNonNilAt(v.X, v) {
+				if !elidedZeroSizedFreeVar && !ssaValueProvenNonNilAt(v.X, v) {
 					emissionCheckedDerefBaseRuntimeHelpers(v.X, add)
 					add("AssertNilDerefPtr")
 				}
-			} else if shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
+			} else if !elidedZeroSizedFreeVar && shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
 				add("AssertNilDeref")
 			}
 			// Builder.Load must still perform the source-language nil check
@@ -731,7 +733,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			// shouldAssertDirectNilDeref, and follows an AssertNilDerefPtr for a
 			// zero-sized value-receiver wrapper.
 			if emissionUniversallyZeroSizedType(ctx.patchType(v.Type())) &&
-				!isKnownNonNilAddr(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
+				!elidedZeroSizedFreeVar && !isKnownNonNilAddr(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
 				emissionAssertNilDerefBaseRuntimeHelpers(v.X, add)
 				add("AssertNilDeref")
 			}
@@ -847,7 +849,13 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 	case *ssa.MakeMap:
 		add("MakeMap")
 	case *ssa.MakeClosure:
-		if len(v.Bindings) != 0 {
+		target, _ := v.Fn.(*ssa.Function)
+		if target != nil {
+			if err := u.freezeCoroClosureEnvironment(target, u.ownerOf(v.Parent())); err != nil {
+				return nil, fmt.Errorf("freeze MakeClosure target environment: %w", err)
+			}
+		}
+		if len(v.Bindings) != 0 && (target == nil || !u.canElideZeroSizedClosureEnvironment(target)) {
 			add("AllocU")
 		}
 	case *ssa.Lookup:
@@ -1415,6 +1423,13 @@ func isEmissionVargsAlloc(ctx *context, alloc *ssa.Alloc) bool {
 }
 
 func (u *EmissionUniverse) binOpRuntimeHelpers(ctx *context, op *ssa.BinOp, add func(...string)) {
+	// compileInstrOrValue folds two non-nil go/constant operands before
+	// Builder.BinOp can emit any runtime call. Freeze the same empty helper set
+	// here so the site gate and whole-program demand graph describe the emitted
+	// recipe rather than the unfused source operator.
+	if _, folded := foldConstComparison(op); folded {
+		return
+	}
 	typ := types.Unalias(ctx.patchType(op.X.Type())).Underlying()
 	switch typ := typ.(type) {
 	case *types.Basic:

@@ -92,7 +92,15 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 		}
 	}
 	if fn == nil || !externalPlain && (plan.External != coro.Defined || len(fn.Blocks) == 0) {
-		return fail("requires one defined SSA body")
+		adapterDiagnostic := ""
+		if universe != nil && fn != nil {
+			adapter, adapted, adapterErr := universe.CoroManagedFunctionValueTarget(fn)
+			adapterDiagnostic = fmt.Sprintf(
+				"; managed-adapter=%t adapter=%v adapter-error=%v",
+				adapted, adapter, adapterErr,
+			)
+		}
+		return fail("requires one defined SSA body%s", adapterDiagnostic)
 	}
 	rawPlainOnly := plan.RawPlainOnly && plan.ManagedDemand == coro.NoDemand && plan.RawPlainDemand &&
 		plan.Emission == coro.EmitRawPlain && plan.Primary == coro.PrimaryPlain && plan.FuncRep == coro.DirectPlain
@@ -166,7 +174,16 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 		}
 		rangeYield = true
 	}
-	if fn.Synthetic != "" && !genericInstance && !boundMethod && !methodExpression && !rangeYield {
+	managedForeignWrapper := false
+	if universe != nil {
+		if _, compilerOwned := universe.managedForeignWrapInfo[fn]; compilerOwned {
+			if err := universe.validateManagedForeignFunctionValueWrapper(fn); err != nil {
+				return fail("invalid managed foreign function-value adapter: %v", err)
+			}
+			managedForeignWrapper = true
+		}
+	}
+	if fn.Synthetic != "" && !genericInstance && !boundMethod && !methodExpression && !rangeYield && !managedForeignWrapper {
 		return fail("synthetic function %q is outside the plain dispatch ABI", fn.Synthetic)
 	}
 	if params := fn.TypeParams(); params != nil && params.Len() != 0 && !genericInstance && !rangeYield {
@@ -525,7 +542,7 @@ func validateCoroPlainDispatchConsumers(
 					continue
 				}
 				if boxed, ok := instr.(*ssa.MakeInterface); ok &&
-					coroCompilerElidedFunctionAddressBox(plan, universe, fn, boxed) {
+					coroCompilerElidedFunctionBox(plan, universe, fn, boxed) {
 					// funcPCABI0/funcAddr consume the static SSA function directly;
 					// neither the transient interface nor its function operand is a
 					// descriptor producer/consumer.
@@ -1005,7 +1022,7 @@ func (p *context) coroPlainDispatchValuePlan(value ssa.Value) (coro.SSAValuePlan
 	if p == nil || p.compilation == nil {
 		return coro.SSAValuePlan{}, false
 	}
-	plan := p.compilation.CoroPlan
+	plan := p.immutablePlan()
 	if plan == nil {
 		return coro.SSAValuePlan{}, false
 	}
@@ -1020,7 +1037,8 @@ func (p *context) tryCompileCoroPlainDispatchFunctionValue(b llssa.Builder, valu
 	if valuePlan.Funcs[0].Transport != coro.ManagedTransport {
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: function value %q has Dispatch representation with non-managed transport %s", value.Name(), valuePlan.Funcs[0].Transport))
 	}
-	return p.emitCoroDynamicDispatchValue(b, value, valuePlan.Funcs[0], nil), true
+	target, _ := p.managedFunctionValueTarget(value)
+	return p.emitCoroDynamicDispatchValue(b, target, valuePlan.Funcs[0], nil), true
 }
 
 func (p *context) tryCompileCoroPlainDispatchClosure(b llssa.Builder, closure *ssa.MakeClosure) (llssa.Expr, bool) {
@@ -1035,7 +1053,10 @@ func (p *context) tryCompileCoroPlainDispatchClosure(b llssa.Builder, closure *s
 	if !ok || len(closure.Bindings) != len(target.FreeVars) {
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: closure %q has %d bindings for %d target free variables", closure.Name(), len(closure.Bindings), len(target.FreeVars)))
 	}
-	bindings := p.compileValues(b, closure.Bindings, 0)
+	var bindings []llssa.Expr
+	if !p.canElideZeroSizedClosureEnv(target) {
+		bindings = p.compileValues(b, closure.Bindings, 0)
+	}
 	return p.emitCoroDynamicDispatchValue(b, target, valuePlan.Funcs[0], bindings), true
 }
 
@@ -1056,8 +1077,8 @@ func (p *context) emitCoroDynamicDispatchValue(
 	if !plannedTarget {
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: exact producer %q target %q is absent from its %d planned targets", target.Name(), entry.plan.ID, len(leaf.Targets)))
 	}
-	if err := validateCoroDynamicDispatchTarget(entry.function, entry.plan, p.compilation.EmissionUniverse); err != nil {
-		panic(err)
+	if err := validateCoroDynamicDispatchTarget(entry.function, entry.plan, p.immutableEmissionUniverse()); err != nil {
+		panic(fmt.Errorf("emit coroutine dynamic descriptor: %w", err))
 	}
 	var (
 		abi coroPlainDispatchABI
@@ -1096,7 +1117,7 @@ func (p *context) emitCoroDynamicDispatchValue(
 		))
 	}
 	var rawPhysical llssa.Function
-	if entry.plan.Emission == coro.EmitCoroutine && p.compilation.CoroPlan.HasRawPlainVariant(entry.function) {
+	if entry.plan.Emission == coro.EmitCoroutine && p.immutablePlan().HasRawPlainVariant(entry.function) {
 		// The managed primary and legacy-stack variant are distinct physical
 		// capabilities of the same frozen SSA target. Publish the latter only
 		// when the whole-build plan proves that exact function has an
@@ -1106,27 +1127,52 @@ func (p *context) emitCoroDynamicDispatchValue(
 			panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q did not compile its frozen raw-plain variant as one Go function", entry.plan.ID))
 		}
 	}
-	captured := len(entry.function.FreeVars) != 0
-	if len(bindings) != len(entry.function.FreeVars) {
-		panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q has %d bindings for %d free variables", entry.plan.ID, len(bindings), len(entry.function.FreeVars)))
+	envParam, hasPhysicalEnv, envErr := p.emissionUniverse.closureEnvironments.entryEnvironment(entry.function)
+	if envErr != nil {
+		panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q environment: %w", entry.plan.ID, envErr))
+	}
+	captured := len(entry.function.FreeVars) != 0 && hasPhysicalEnv
+	if len(entry.function.FreeVars) != 0 && !captured && !p.canElideZeroSizedClosureEnv(entry.function) {
+		panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q lost its physical closure environment", entry.plan.ID))
+	}
+	wantBindings := 0
+	if captured {
+		wantBindings = len(entry.function.FreeVars)
+	}
+	if len(bindings) != wantBindings {
+		panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q has %d physical bindings, want %d", entry.plan.ID, len(bindings), wantBindings))
 	}
 	var env llssa.Expr
 	var closureCtx types.Type
+	plainTarget := physical.Expr
+	rawPlainTarget := llssa.Expr{}
+	if rawPhysical != nil {
+		rawPlainTarget = rawPhysical.Expr
+	}
 	if captured {
-		// Reuse the canonical LLGo closure allocator/layout instead of creating a
-		// second environment representation. The selected physical primary may
-		// be a coroutine ramp, so retag its opaque code pointer with the source
-		// closure signature solely while MakeClosure constructs {code,env}; only
-		// the env word is retained in the descriptor value.
-		ctx := makeClosureCtx(entry.pkgTypes, entry.function.FreeVars)
-		carrierSig := p.prog.PhysicalFuncDecl(llssa.FuncAddCtx(ctx, abi.signature), llssa.InGo)
+		// Reuse the frozen physical-entry environment and canonical LLGo closure
+		// allocator instead of independently rebuilding a second capture layout.
+		// Plain NewEnvFunc entries expose their logical signature, so an opaque
+		// carrier still makes their compiler-owned leading environment explicit to
+		// the descriptor thunk. No call is emitted through this temporary view.
+		carrierSig := p.prog.PhysicalFuncDecl(llssa.FuncAddCtx(envParam, abi.signature), llssa.InGo)
 		// Retag as an opaque function pointer rather than a declaration type:
 		// LLVM functions themselves have a pointer value while FuncDecl.Type is
 		// the pointee signature. No call is emitted through this temporary view.
 		carrier := b.ChangeType(p.prog.Type(carrierSig, llssa.InC), physical.Expr)
 		closureCtx = carrier.RawType().(*types.Signature).Params().At(0).Type()
-		legacy := b.MakeClosure(carrier, bindings)
-		env = b.Field(legacy, 1)
+		env = b.MakeClosureEnvironment(p.prog.Type(envParam.Type(), llssa.InGo), bindings)
+		// NewEnvFunc deliberately exposes the logical Go signature through
+		// Function.Expr while tracking its leading physical environment separately.
+		// A plain dispatch thunk emits a physical call, so retain the retagged
+		// (env,args) carrier there as well. Coroutine primaries already expose their
+		// complete (g,out,env,args) physical signature through the coroutine ABI.
+		if entry.plan.Emission != coro.EmitCoroutine {
+			plainTarget = carrier
+		}
+		if rawPhysical != nil {
+			rawPlainTarget = b.ChangeType(p.prog.Type(carrierSig, llssa.InC), rawPhysical.Expr)
+		}
 	}
 	targetHash := sha256.Sum256([]byte(entry.plan.ID))
 	targetKey := hex.EncodeToString(targetHash[:8]) + "." + hex.EncodeToString(abi.hash[:])
@@ -1140,7 +1186,7 @@ func (p *context) emitCoroDynamicDispatchValue(
 		case coro.EmitPlain, coro.EmitRawPlain, coro.EmitExternal:
 			flags |= llssa.CoroDispatchFlagHasPlain
 			plainEntry = p.newCoroDynamicDispatchEntryThunk(
-				coroPlainDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, closureCtx,
+				coroPlainDispatchThunkPrefix+targetKey, plainTarget, abi, entry.plan.Emission, closureCtx,
 			)
 		case coro.EmitCoroutine:
 			flags |= llssa.CoroDispatchFlagHasCoro
@@ -1150,7 +1196,7 @@ func (p *context) emitCoroDynamicDispatchValue(
 			if rawPhysical != nil {
 				flags |= llssa.CoroDispatchFlagHasPlain
 				plainEntry = p.newCoroDynamicDispatchEntryThunk(
-					coroPlainDispatchThunkPrefix+targetKey, rawPhysical.Expr, abi, coro.EmitRawPlain, closureCtx,
+					coroPlainDispatchThunkPrefix+targetKey, rawPlainTarget, abi, coro.EmitRawPlain, closureCtx,
 				)
 			}
 		default:
@@ -1239,9 +1285,29 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target result signature does not match the source ABI", name))
 	}
 	if closureCtx != nil {
-		if targetSig.Params().Len() <= targetParam || !types.Identical(targetSig.Params().At(targetParam).Type(), closureCtx) {
-			panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target closure context is absent or has the wrong type", name))
+		if targetSig.Params().Len() <= targetParam {
+			panic(fmt.Errorf(
+				"coroutine dynamic dispatch ABI: thunk %q target closure context is absent, want %s",
+				name, types.TypeString(closureCtx, nil),
+			))
 		}
+		targetClosureCtx := targetSig.Params().At(targetParam).Type()
+		if !types.Identical(targetClosureCtx, closureCtx) &&
+			structuralEmissionABITypeKey(targetClosureCtx) != structuralEmissionABITypeKey(closureCtx) {
+			got := "<absent>"
+			if targetSig.Params().Len() > targetParam {
+				got = types.TypeString(targetSig.Params().At(targetParam).Type(), nil)
+			}
+			panic(fmt.Errorf(
+				"coroutine dynamic dispatch ABI: thunk %q target closure context is %s, want %s",
+				name, got, types.TypeString(closureCtx, nil),
+			))
+		}
+		// Generic instantiation and patch-package loading can materialize two
+		// go/types nodes with one frozen structural ABI. Use the target
+		// declaration's exact compile-time node for the final typed call; the
+		// descriptor still transports only one opaque environment pointer.
+		closureCtx = targetClosureCtx
 		targetParam++
 	}
 	if targetSig.Params().Len()-targetParam != source.Params().Len() {
@@ -1353,10 +1419,10 @@ func coroDispatchTargetTypeCompatible(target, source types.Type, goLinknameFacad
 }
 
 func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if call == nil || p.hasCoroPhysicalBody() || p.compilation == nil || p.compilation.CoroPlan == nil {
+	if call == nil || p.hasCoroPhysicalBody() || p.compilation == nil || p.immutablePlan() == nil {
 		return llssa.Expr{}, false
 	}
-	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
+	callPlan, found := p.immutablePlan().CallPlan(call)
 	if !found || callPlan.Rep != coro.Dispatch {
 		return llssa.Expr{}, false
 	}
@@ -1368,7 +1434,7 @@ func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Cal
 		// a scheduling constraint, not a second function-value representation.
 		return llssa.Expr{}, false
 	}
-	if err := validateCoroPlainDispatchCall(p.compilation.CoroPlan, call.Parent(), call, callPlan, p.compilation.EmissionUniverse); err != nil {
+	if err := validateCoroPlainDispatchCall(p.immutablePlan(), call.Parent(), call, callPlan, p.immutableEmissionUniverse()); err != nil {
 		panic(err)
 	}
 	return p.emitCoroPlainDispatchCall(b, call, false), true

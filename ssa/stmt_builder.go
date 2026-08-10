@@ -143,7 +143,16 @@ func (b Builder) SetBlockEx(blk BasicBlock, pos InsertPoint, setBlk bool) {
 	case AtEnd:
 		b.impl.SetInsertPointAtEnd(blk.last)
 	case AtStart:
-		b.impl.SetInsertPointBefore(blk.first.FirstInstruction())
+		first := blk.first.FirstInstruction()
+		if first.IsNil() {
+			// LLVMSetInsertPointBefore(NULL) clears the insertion point. This is
+			// observable for compiler-owned coroutine ramp allocations when CFG
+			// expansion leaves the logical entry's first physical block empty.
+			// Appending is also the beginning of an empty block.
+			b.impl.SetInsertPointAtEnd(blk.first)
+		} else {
+			b.impl.SetInsertPointBefore(first)
+		}
 	case BeforeLast:
 		b.impl.SetInsertPointBefore(blk.last.LastInstruction())
 	case afterInit:

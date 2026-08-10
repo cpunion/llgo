@@ -19,6 +19,7 @@
 package build
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"strings"
@@ -86,6 +87,102 @@ func root() unsafe.Pointer { return Func(target) }
 	}
 }
 
+func TestCoroFuncAddrAcceptsExactContextFreeFunctionValues(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "named function value",
+			source: `package funcaddrvalue
+import "unsafe"
+//llgo:link Func llgo.funcAddr
+func Func(any) unsafe.Pointer
+type F func()
+func target() {}
+func root() unsafe.Pointer {
+	var value F = target
+	return Func(value)
+}
+`,
+		},
+		{
+			name: "zero-binding closure",
+			source: `package funcaddrvalue
+import "unsafe"
+//llgo:link Func llgo.funcAddr
+func Func(any) unsafe.Pointer
+func root() unsafe.Pointer {
+	value := func() {}
+	return Func(value)
+}
+`,
+		},
+		{
+			name: "address-taken named function value",
+			source: `package funcaddrvalue
+import "unsafe"
+//llgo:link Func llgo.funcAddr
+func Func(any) unsafe.Pointer
+type F func()
+func target() {}
+func root() unsafe.Pointer {
+	var value F = target
+	word := *(*unsafe.Pointer)(unsafe.Pointer(&value))
+	direct := Func(target)
+	if word == nil || Func(value) != word || direct == nil { panic("bad function word") }
+	return Func(value)
+}
+`,
+		},
+		{
+			name: "address-taken raw-C function value",
+			source: `package funcaddrvalue
+import "unsafe"
+//llgo:link Func llgo.funcAddr
+func Func(any) unsafe.Pointer
+//llgo:type C
+type F func()
+func target() {}
+func root() unsafe.Pointer {
+	var value F = target
+	word := *(*unsafe.Pointer)(unsafe.Pointer(&value))
+	direct := Func(target)
+	if word == nil || Func(value) != word || direct == nil { panic("bad function word") }
+	return Func(value)
+}
+`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ssaPkg, files := buildCoroPlanTestPackage(
+				t, "example.com/coro/funcaddrvalue/"+strings.ReplaceAll(test.name, " ", "_"), test.source, nil,
+			)
+			plan, _, call, err := analyzeCoroFuncAddrTest(t, ssaPkg, files)
+			if err != nil {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, ssaPkg.Func("root"))
+				t.Fatalf("%v\n%s", err, dump.String())
+			}
+			if !plan.ElidesCall(call) || !plan.RawFunctionAddressArgument(call, 0) {
+				t.Fatalf("funcAddr plan elided=%t raw-argument=%t; want both true", plan.ElidesCall(call), plan.RawFunctionAddressArgument(call, 0))
+			}
+			_, ok := call.Common().Args[0].(*ssa.MakeInterface)
+			if !ok {
+				t.Fatalf("funcAddr argument = %T, want *ssa.MakeInterface", call.Common().Args[0])
+			}
+			target, ok := plan.RawFunctionAddressTarget(call, 0)
+			if !ok || target == nil {
+				t.Fatal("context-free raw-address target is absent from the plan")
+			}
+			targetPlan, ok := plan.FunctionPlan(target)
+			if !ok || !targetPlan.RawPlainEntry || !plan.HasRawPlainVariant(target) {
+				t.Fatalf("context-free funcAddr target plan = %+v, %t; want RawPlainEntry", targetPlan, ok)
+			}
+		})
+	}
+}
+
 func TestCoroFuncAddrRejectsNonExactSites(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -110,7 +207,7 @@ import "unsafe"
 func Func(any) unsafe.Pointer
 func root() unsafe.Pointer { return Func(1) }
 `,
-			wantErr: "requires MakeInterface{X:*ssa.Function}",
+			wantErr: "context-free function value",
 		},
 		{
 			name: "captured closure",
@@ -123,7 +220,7 @@ func root(value int) unsafe.Pointer {
 	return Func(fn)
 }
 `,
-			wantErr: "requires MakeInterface{X:*ssa.Function}",
+			wantErr: "context-free function value",
 		},
 		{
 			name: "shared interface consumer",

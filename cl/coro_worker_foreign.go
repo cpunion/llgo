@@ -232,6 +232,67 @@ func coroWorkerForeignRawCallbackArgument(
 	return target, true
 }
 
+// coroWorkerForeignRawCallbackCompatibility admits a source-level function
+// type mismatch only when both signatures have the same Go-level callable
+// shape and whole-program planning froze this exact argument occurrence as one
+// non-nil raw/plain callback target. Named C callback types from different
+// packages and the unnamed func view permitted by Go assignment rules then
+// share one physical C function-pointer ABI without creating a managed
+// descriptor conversion.
+func coroWorkerForeignRawCallbackCompatibility(
+	plan *coro.SSAPlan,
+	value ssa.Value,
+	sourceType, targetType types.Type,
+) (*ssa.Function, bool) {
+	sourceSignature, sourceFunction := types.Unalias(sourceType).Underlying().(*types.Signature)
+	targetSignature, targetFunction := types.Unalias(targetType).Underlying().(*types.Signature)
+	if !sourceFunction || !targetFunction || sourceSignature == nil || targetSignature == nil ||
+		!types.Identical(sourceSignature, targetSignature) {
+		return nil, false
+	}
+	return coroWorkerForeignRawCallbackArgument(plan, value, targetType)
+}
+
+func coroWorkerForeignStaticSignaturesCompatible(
+	plan *coro.SSAPlan,
+	call *ssa.Call,
+	callSignature, targetSignature *types.Signature,
+	allowRawCallbackFacade bool,
+) bool {
+	if call == nil || call.Common() == nil || callSignature == nil || targetSignature == nil ||
+		callSignature.Recv() != nil || targetSignature.Recv() != nil ||
+		callSignature.Variadic() != targetSignature.Variadic() ||
+		callSignature.Params().Len() != targetSignature.Params().Len() ||
+		callSignature.Results().Len() != targetSignature.Results().Len() ||
+		len(call.Common().Args) != callSignature.Params().Len() {
+		return false
+	}
+	for index := 0; index < callSignature.Params().Len(); index++ {
+		sourceType := callSignature.Params().At(index).Type()
+		targetType := targetSignature.Params().At(index).Type()
+		if types.Identical(sourceType, targetType) {
+			continue
+		}
+		if !allowRawCallbackFacade {
+			return false
+		}
+		if _, compatible := coroWorkerForeignRawCallbackCompatibility(
+			plan, call.Common().Args[index], sourceType, targetType,
+		); !compatible {
+			return false
+		}
+	}
+	for index := 0; index < callSignature.Results().Len(); index++ {
+		if !types.Identical(
+			callSignature.Results().At(index).Type(),
+			targetSignature.Results().At(index).Type(),
+		) {
+			return false
+		}
+	}
+	return true
+}
+
 func coroWorkerForeignRecordType(
 	signature *types.Signature,
 	result types.Type,
@@ -776,6 +837,12 @@ func validateCoroWorkerForeignCallWithAuthority(
 	if !classified || background != llssa.InC {
 		return shape, true, fmt.Errorf("target is not one exact frontend C declaration")
 	}
+	if isCoroPythonBindingDeclaration(target) && !isCoroProgramManagedEntry(call.Parent()) {
+		return shape, true, fmt.Errorf(
+			"Python binding call in %q has no compiler-owned program-root owner realm",
+			call.Parent().Name(),
+		)
+	}
 	authorization, authorizationErr := authority.authorize(target)
 	if authorizationErr != nil {
 		return shape, true, authorizationErr
@@ -807,7 +874,10 @@ func validateCoroWorkerForeignCallWithAuthority(
 		return shape, true, fmt.Errorf("derive call-site effective signature: %w", contextErr)
 	}
 	callSignature, ok := ownerContext.patchType(common.Signature()).(*types.Signature)
-	if !ok || !types.Identical(coroPhysicalNormalizeSourceSignature(callSignature), signature) {
+	callSignature = coroPhysicalNormalizeSourceSignature(callSignature)
+	if !ok || !coroWorkerForeignStaticSignaturesCompatible(
+		plan, call, callSignature, signature, mode == coroForeignCallModeWorker,
+	) {
 		return shape, true, fmt.Errorf("call-site and target effective C signatures differ")
 	}
 	recordSignature, arguments, variadic, specializationErr := coroWorkerForeignSpecializedSignature(
@@ -831,7 +901,11 @@ func validateCoroWorkerForeignCallWithAuthority(
 		}
 		argumentType := ownerContext.patchType(argument.Type())
 		parameterType := recordSignature.Params().At(index).Type()
-		if !types.Identical(argumentType, parameterType) {
+		rawCallback, rawCallbackCompatible := coroWorkerForeignRawCallbackCompatibility(
+			plan, argument, argumentType, parameterType,
+		)
+		if !types.Identical(argumentType, parameterType) &&
+			(mode != coroForeignCallModeWorker || !rawCallbackCompatible) {
 			return shape, true, fmt.Errorf("argument %d type does not match the effective C parameter", index)
 		}
 		_, callbackParameter := types.Unalias(parameterType).Underlying().(*types.Signature)
@@ -855,10 +929,16 @@ func validateCoroWorkerForeignCallWithAuthority(
 			shape.reentryCallbacks[index] = callback
 			continue
 		}
+		if mode == coroForeignCallModeWorker && rawCallbackCompatible {
+			if shape.rawCallbacks == nil {
+				shape.rawCallbacks = make(map[int]*ssa.Function)
+			}
+			shape.rawCallbacks[index] = rawCallback
+			continue
+		}
 		argumentOK := coroWorkerForeignRecordValueType(
 			universe, parameterType, true, make(map[types.Type]bool),
 		)
-		var rawCallback *ssa.Function
 		if !argumentOK && mode == coroForeignCallModeWorker {
 			rawCallback, argumentOK = coroWorkerForeignRawCallbackArgument(
 				plan, argument, parameterType,

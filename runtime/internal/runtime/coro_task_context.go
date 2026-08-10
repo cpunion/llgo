@@ -135,6 +135,7 @@ func coroReleaseRuntimeContext(task *coro.G) bool {
 	gp.m = nil
 	root := ctx.root
 	ctx.root = nil
+	releaseG()
 	FreeRoot(root)
 	return true
 }
@@ -150,6 +151,7 @@ func discardCoroRuntimeContext(ctx *runtimeContext) {
 	root := ctx.root
 	ctx.root = nil
 	if root != nil {
+		releaseG()
 		FreeRoot(root)
 	}
 }

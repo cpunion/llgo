@@ -517,19 +517,19 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 	b llssa.Builder, call *ssa.Call,
 ) (llssa.Expr, bool) {
 	if call == nil || call.Common() == nil || p.hasCoroPhysicalBody() ||
-		p.compilation == nil || p.compilation.CoroPlan == nil || p.compilation.coroManagedInterface == nil {
+		p.compilation == nil || p.immutablePlan() == nil || p.compilation.coroManagedInterface == nil {
 		return llssa.Nil, false
 	}
 	if !p.compilation.coroManagedInterface.acceptsCall(call) {
 		return llssa.Nil, false
 	}
-	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
+	callPlan, found := p.immutablePlan().CallPlan(call)
 	if !found || callPlan.Rep != coro.Dispatch {
 		panic("managed interface descriptor call lost its frozen Dispatch CallPlan")
 	}
 	if callPlan.Open {
 		if err := validateCoroManagedInterfaceDispatchCall(
-			p.compilation.CoroPlan, p.compilation.EmissionUniverse, p.goFn, call, callPlan,
+			p.immutablePlan(), p.immutableEmissionUniverse(), p.goFn, call, callPlan,
 		); err != nil {
 			panic(err)
 		}
@@ -539,7 +539,7 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 		panic(err)
 	}
 	method, args := p.compileCoroManagedInterfaceOperands(b, call, false)
-	if callPlan.Open || coroDispatchCallHasCoroutineTarget(p.compilation.CoroPlan, callPlan) {
+	if callPlan.Open || coroDispatchCallHasCoroutineTarget(p.immutablePlan(), callPlan) {
 		panic("managed interface descriptor requires a coroutine owner for an open or coroutine-capable target")
 	}
 	abi, err := newCoroPlainDispatchABI(p, signature)
@@ -689,13 +689,13 @@ func (p *context) resolveCoroRawMethodSymbol(
 func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	target *ssa.Function, interfaceEntrySignature *types.Signature,
 ) (llssa.Expr, error) {
-	if p == nil || p.compilation == nil || p.compilation.CoroPlan == nil || target == nil {
+	if p == nil || p.compilation == nil || p.immutablePlan() == nil || target == nil {
 		return llssa.Nil, fmt.Errorf("managed interface descriptor requires an exact target and compilation plan")
 	}
 	entry := p.mustFunctionSymbol(target)
 	logicalSignature := coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(interfaceEntrySignature))
 	if err := validateCoroManagedInterfaceDescriptorTarget(
-		entry.function, entry.plan, p.compilation.EmissionUniverse, logicalSignature,
+		entry.function, entry.plan, p.immutableEmissionUniverse(), logicalSignature,
 	); err != nil {
 		return llssa.Nil, err
 	}

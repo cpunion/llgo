@@ -87,7 +87,7 @@ func newCoroProgramTestManifestV2() *coroProgramTestManifestV2 {
 		coro.ProgramStepFlagInternalRuntimeInitV2,
 		coro.ProgramStepFlagCompilerABIInitV2,
 		coro.ProgramStepFlagPublicRuntimeInitV2,
-		coro.ProgramStepFlagMainPackageInitV2,
+		coro.ProgramStepFlagPackageInitV2,
 		coro.ProgramStepFlagMainV2,
 	}
 	for index, role := range roles {

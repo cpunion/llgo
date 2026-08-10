@@ -22,8 +22,18 @@ import (
 	"strconv"
 
 	"github.com/goplus/llgo/internal/coro"
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
+
+func isCoroPythonIntrinsicOpcode(opcode int) bool {
+	switch opcode {
+	case llgoPyList, llgoPyTuple, llgoPyStr:
+		return true
+	default:
+		return false
+	}
+}
 
 // freezeCallSites is the final pre-SSAPlan ProgramIR builder stage. Runtime
 // helper closure, patch redirects, physical identities, and worker
@@ -145,6 +155,14 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 			}
 			for _, block := range function.Blocks {
 				for _, instruction := range block.Instrs {
+					if box, ok := instruction.(*ssa.MakeInterface); ok {
+						if err := u.freezeCoroErasedPythonFunctionInterface(ctx, box); err != nil {
+							return fmt.Errorf(
+								"function %q erased Python function interface: %w",
+								function.Name(), err,
+							)
+						}
+					}
 					call, ok := instruction.(ssa.CallInstruction)
 					if !ok || call.Common() == nil {
 						continue
@@ -177,6 +195,8 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 					}
 					semantics, intrinsic, opcode := CoroIntrinsicCallUnsupported, false, 0
 					controlOperation := CoroControlNone
+					pythonOperation := false
+					var pythonTarget *ssa.Function
 					var hostOperation coroHostOperationCallShape
 					var workerCertificate CoroWorkerSyscallCertificate
 					workerCertified := false
@@ -188,11 +208,32 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 							// private callees are deliberately absent from the
 							// emission universe. Preserve the source site, but only
 							// classify an intrinsic edge for a frozen target.
-							if _, frozen := u.Resolve(callee); frozen {
-								opcode, intrinsic, classifyErr = u.coroIntrinsicOpcode(callee)
-								if intrinsic {
-									controlOperation = coroControlOperationForIntrinsic(opcode)
+							if resolved, frozen := u.Resolve(callee); frozen {
+								background, classified, backgroundErr := u.FunctionBackground(resolved)
+								if backgroundErr != nil {
+									classifyErr = fmt.Errorf("classify frozen Python operation: %w", backgroundErr)
+								} else if classified && background == llssa.InPython {
+									pythonOperation = true
+									pythonTarget = resolved
+								} else {
+									opcode, intrinsic, classifyErr = u.coroIntrinsicOpcode(resolved)
+									if intrinsic && isCoroPythonIntrinsicOpcode(opcode) {
+										pythonOperation = true
+										intrinsic = false
+									} else if intrinsic {
+										controlOperation = coroControlOperationForIntrinsic(opcode)
+									}
 								}
+							}
+						}
+						if classifyErr == nil && pythonOperation {
+							if _, direct := call.(*ssa.Call); !direct {
+								classifyErr = fmt.Errorf("Python operation requires one exact direct call")
+							} else if !isCoroProgramManagedEntry(function) {
+								classifyErr = fmt.Errorf(
+									"Python operation in %q has no compiler-owned program-root owner realm",
+									function.Name(),
+								)
 							}
 						}
 						if classifyErr == nil && intrinsic && opcode == llgoCgoCgocall {
@@ -215,7 +256,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 								workerCertificate, workerCertified = u.workerSyscalls[direct]
 							}
 						}
-						if classifyErr == nil {
+						if classifyErr == nil && !pythonOperation {
 							semantics, intrinsic, classifyErr = u.classifyCoroIntrinsicCallSite(
 								ctx, site, call, opcode, intrinsic, controlOperation,
 								workerCertificate, workerCertified,
@@ -250,7 +291,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 					}
 					if managedStatic && classifyErr == nil &&
 						(frontendUnevaluated || noInit || patchRedirect ||
-							cgoWorkerCertified || intrinsic) {
+							cgoWorkerCertified || pythonOperation || intrinsic) {
 						classifyErr = fmt.Errorf(
 							"local-export managed call redirect overlaps an elided, patched, worker, or intrinsic recipe",
 						)
@@ -261,13 +302,53 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						ControlOperation:             controlOperation,
 						RawPlainSynchronousIntrinsic: rawPlainSynchronousIntrinsic,
 					}
+					if pythonOperation && classifyErr == nil {
+						semanticOrdinal, err := coro.SemanticInstructionOrdinal(call)
+						if err != nil {
+							classifyErr = fmt.Errorf("identify Python operation: %w", err)
+						} else {
+							targetIdentity := "python-intrinsic:" + strconv.Itoa(opcode)
+							if pythonTarget != nil {
+								targetIdentity = u.finalIdentity(pythonTarget)
+								if targetIdentity == "" || targetIdentity == "<nil>" || targetIdentity == "<cyclic-alias>" {
+									classifyErr = fmt.Errorf("Python operation target %q has no exact identity", pythonTarget.Name())
+								}
+							}
+							if classifyErr == nil {
+								plan.ElisionCertificate = emissionDigest(framedEmissionKey(
+									"cl-coro-python-operation-v1",
+									u.finalIdentity(function),
+									strconv.Itoa(block.Index),
+									strconv.Itoa(semanticOrdinal),
+									targetIdentity,
+								))
+								plan.PythonTarget = pythonTarget
+							}
+						}
+					}
 					if managedStatic && classifyErr == nil {
 						plan.ManagedStaticTarget = managedStaticTarget
 						plan.ManagedStaticTargetCertificate = managedStaticCertificate.ID
 					}
+					if spawn, spawned := call.(*ssa.Go); spawned && classifyErr == nil {
+						if _, builtin := spawn.Common().Value.(*ssa.Builtin); builtin {
+							wrapper, wrapped := u.builtinSpawnWraps[builtinSpawnWrapperKey{
+								owner: ctx.goPkg,
+								spawn: spawn,
+							}]
+							if !wrapped || wrapper == nil {
+								classifyErr = fmt.Errorf(
+									"spawned builtin %q has no compiler-owned coroutine carrier",
+									spawn.Common().Value.Name(),
+								)
+							} else {
+								plan.StaticSpawnTarget = wrapper
+							}
+						}
+					}
 					if rawCertificate := u.rawCriticalCalls[call]; rawCertificate != "" {
 						if frontendUnevaluated || noInit || patchRedirect || cgoWorkerCertified ||
-							intrinsic || managedStatic {
+							pythonOperation || intrinsic || managedStatic {
 							classifyErr = fmt.Errorf(
 								"raw-critical call overlaps an elided, redirected, generated-worker, or intrinsic recipe",
 							)
@@ -282,6 +363,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						intrinsicPlacement = coroRuntimeHelperAtCleanup
 					}
 					if _, spawned := call.(*ssa.Go); spawned && intrinsic && classifyErr == nil &&
+						plan.StaticSpawnTarget == nil &&
 						isCoroAtomicIntrinsic(opcode) {
 						callee := call.Common().StaticCallee()
 						wrapper, wrapped := u.intrinsicWrapper(ctx.goPkg, callee)
@@ -305,6 +387,8 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						plan.Elision = CoroCallElidedCgoWorker
 						plan.ElisionCertificate = cgoWorkerCertificate.ID
 						plan.CgoWorkerTarget = cgoWorkerTarget
+					case pythonOperation:
+						plan.Elision = CoroCallElidedPython
 					case intrinsic && classifyErr == nil && semantics.ElidesManagedCall() && plan.StaticSpawnTarget == nil:
 						plan.Elision = CoroCallElidedIntrinsic
 					}

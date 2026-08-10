@@ -791,16 +791,18 @@ func (b *coroFrameRetentionRootBuilder) traceAddress(value ssa.Value, use ssa.In
 		trace.addRoot(value)
 		return trace, true
 	case *ssa.FreeVar:
-		// A FreeVar in a capability-certified captured coroutine entry is a
-		// pointer to one exact closure cell loaded from the typed descriptor
-		// environment. The environment and this value may be retained by the
-		// LLVM coroutine frame, but capture does not prove the cell pointer is
-		// non-nil: each access still needs dominating evidence or the explicit
+		// A FreeVar in a capability-certified captured coroutine entry is either
+		// a pointer to one exact closure cell loaded from the typed descriptor
+		// environment, or an all-zero-sized capture recreated from the canonical
+		// non-nil module sentinel. The environment and either exact value may be
+		// retained by the LLVM coroutine frame. Only the ordinary environment
+		// form remains nullable and therefore needs dominating evidence or the
 		// compiler-owned nil-fault edge.
-		if !b.exactCoroClosureFreeVar(value) {
+		zeroSizedSentinel, exact := b.classifyExactCoroClosureFreeVar(value)
+		if !exact {
 			return trace, false
 		}
-		if requireNonNil {
+		if requireNonNil && !zeroSizedSentinel {
 			evidence, ok := b.dominatingNonNilEvidence(value, use)
 			if !ok {
 				return trace, false
@@ -1014,10 +1016,18 @@ func (b *coroFrameRetentionRootBuilder) traceAddressPhiComponent(
 	return trace, externalSeeds != 0
 }
 
-func (b *coroFrameRetentionRootBuilder) exactCoroClosureFreeVar(value *ssa.FreeVar) bool {
+// classifyExactCoroClosureFreeVar returns whether value is one exact physical
+// closure free variable and whether code generation replaces its elided
+// zero-sized environment with the canonical non-nil module sentinel. Keeping
+// the second fact explicit prevents a source FreeVar from acquiring blanket
+// non-nil authority merely because it is captured.
+func (b *coroFrameRetentionRootBuilder) classifyExactCoroClosureFreeVar(value *ssa.FreeVar) (
+	zeroSizedSentinel bool,
+	exact bool,
+) {
 	if b == nil || b.audit == nil || b.audit.fn == nil || b.audit.plan == nil ||
 		b.audit.universe == nil || value == nil || !coroFrameRetentionPointerLike(value.Type()) {
-		return false
+		return false, false
 	}
 	found := false
 	for _, free := range b.audit.fn.FreeVars {
@@ -1027,16 +1037,19 @@ func (b *coroFrameRetentionRootBuilder) exactCoroClosureFreeVar(value *ssa.FreeV
 		}
 	}
 	if !found {
-		return false
+		return false, false
 	}
 	function, planned := b.audit.plan.FunctionPlan(b.audit.fn)
 	if !planned || function.External != coro.Defined || function.Emission != coro.EmitCoroutine ||
 		function.Primary != coro.PrimaryCoroutine ||
 		(function.FuncRep != coro.Dispatch && function.FuncRep != coro.DirectCoro) {
-		return false
+		return false, false
+	}
+	if b.audit.universe.closureEnvironments.elidesZeroSizedFreeVar(b.audit.fn, value) {
+		return true, true
 	}
 	effective, err := b.audit.universe.coroPhysicalEntrySourceSignature(b.audit.fn)
-	return err == nil && effective != nil && effective.Params().Len() != 0 &&
+	return false, err == nil && effective != nil && effective.Params().Len() != 0 &&
 		coroPhysicalClosureContextMatches(b.audit.fn, effective.Params().At(0).Type())
 }
 

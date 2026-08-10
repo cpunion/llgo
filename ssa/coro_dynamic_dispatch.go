@@ -248,8 +248,8 @@ func (b Builder) prepareCoroDispatchCall(
 	if capability != 0 && capability != CoroDispatchFlagHasPlain && capability != CoroDispatchFlagHasCoro {
 		panic("ssa: coroutine dispatch call requires one known capability")
 	}
-	if fn.IsNil() || fn.kind != vkClosure {
-		panic("ssa: coroutine dispatch call requires a closure value")
+	if fn.IsNil() || fn.kind != vkClosure && fn.kind != vkIfaceMethod {
+		panic("ssa: coroutine dispatch call requires a function or interface-method pair")
 	}
 	sig, ok := b.Prog.Field(fn.Type, 0).RawType().(*types.Signature)
 	if !ok {

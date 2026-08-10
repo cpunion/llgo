@@ -18,10 +18,13 @@ package cl
 
 import (
 	"fmt"
+	"go/constant"
 	"go/token"
 	"go/types"
+	"math"
 
 	"github.com/goplus/llgo/internal/coro"
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -51,6 +54,7 @@ const (
 	coroPhysicalInstructionTerminalResultAllocation
 	coroPhysicalInstructionFrameAllocation
 	coroPhysicalInstructionFrameBitcastAllocation
+	coroPhysicalInstructionFrameAllocaBytes
 	coroPhysicalInstructionHeapCStr
 )
 
@@ -92,6 +96,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "frame-allocation"
 	case coroPhysicalInstructionFrameBitcastAllocation:
 		return "frame-bitcast-allocation"
+	case coroPhysicalInstructionFrameAllocaBytes:
+		return "frame-alloca-bytes"
 	case coroPhysicalInstructionHeapCStr:
 		return "heap-cstr"
 	default:
@@ -176,6 +182,7 @@ const (
 	coroPhysicalOperationWorkerSyscall
 	coroPhysicalOperationWorkerForeign
 	coroPhysicalOperationSameMForeign
+	coroPhysicalOperationSameMPython
 	coroPhysicalOperationWorkerCgo
 	coroPhysicalOperationWorkerCgoErrno
 	coroPhysicalOperationHostCall
@@ -202,6 +209,8 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "worker-foreign"
 	case coroPhysicalOperationSameMForeign:
 		return "same-m-foreign"
+	case coroPhysicalOperationSameMPython:
+		return "same-m-python"
 	case coroPhysicalOperationWorkerCgo:
 		return "worker-cgo"
 	case coroPhysicalOperationWorkerCgoErrno:
@@ -280,6 +289,7 @@ type coroPhysicalInstructionPlan struct {
 	controlTarget      *ssa.Function
 	controlTargetID    coro.FunctionID
 	controlReceiver    ssa.Value
+	controlClosure     ssa.Value
 	controlInterface   *coroInterfaceDispatchPlan
 	controlSignature   *types.Signature
 	controlFailure     string
@@ -293,6 +303,8 @@ type coroPhysicalInstructionPlan struct {
 	operation                 coroPhysicalOperationRecipe
 	operationFailure          string
 	operationWorker           *coroWorkerForeignCallShape
+	operationPythonTarget     *ssa.Function
+	operationPythonOpcode     int
 	operationCgo              *coroWorkerCgoCallShape
 	operationCgoErrno         *coroWorkerCgoErrnoCallShape
 	operationHost             coroHostOperationCallShape
@@ -885,13 +897,28 @@ func planCoroPhysicalInstruction(
 			if err != nil {
 				return result, fmt.Errorf("load intrinsic physical SitePlan: %w", err)
 			}
-			if found && frozen.failure == "" && frozen.plan.Intrinsic &&
-				(frozen.opcode == llgoAllocaCStr || frozen.opcode == llgoAllocaCStrs) &&
-				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineWithLoweredCalls {
-				if reason := audit.requireFrozenStructuredRuntimeHelpers(instruction, "AllocU", "CStrCopy"); reason != "" {
-					return result, fmt.Errorf("physical llgo C string heap storage: %s", reason)
+			if found && frozen.failure == "" && frozen.plan.Intrinsic {
+				switch {
+				case frozen.opcode == llgoAlloca &&
+					frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNoSuspend:
+					if len(instruction.Common().Args) != 1 {
+						return result, fmt.Errorf("physical llgo.alloca has no exact size operand")
+					}
+					size, exact := coroConstantAllocaSize(instruction.Common().Args[0])
+					if !exact {
+						return result, fmt.Errorf(
+							"dynamic llgo.alloca is valid only in a no-suspend plain island; a physical coroutine requires an exact constant frame size",
+						)
+					}
+					result.recipe = coroPhysicalInstructionFrameAllocaBytes
+					result.bound = size
+				case (frozen.opcode == llgoAllocaCStr || frozen.opcode == llgoAllocaCStrs) &&
+					frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineWithLoweredCalls:
+					if reason := audit.requireFrozenStructuredRuntimeHelpers(instruction, "AllocU", "CStrCopy"); reason != "" {
+						return result, fmt.Errorf("physical llgo C string heap storage: %s", reason)
+					}
+					result.recipe = coroPhysicalInstructionHeapCStr
 				}
-				result.recipe = coroPhysicalInstructionHeapCStr
 			}
 		}
 	case *ssa.ChangeType:
@@ -961,6 +988,30 @@ func planCoroPhysicalInstruction(
 		}
 	}
 	return result, nil
+}
+
+func coroConstantAllocaSize(value ssa.Value) (int64, bool) {
+	switch value := value.(type) {
+	case *ssa.ChangeType:
+		return coroConstantAllocaSize(value.X)
+	case *ssa.Convert:
+		return coroConstantAllocaSize(value.X)
+	case *ssa.Const:
+		if value.Value == nil {
+			return 0, false
+		}
+		basic, ok := types.Unalias(value.Type()).Underlying().(*types.Basic)
+		if !ok || basic.Info()&types.IsInteger == 0 || constant.Sign(value.Value) < 0 {
+			return 0, false
+		}
+		size, exact := constant.Uint64Val(value.Value)
+		if !exact || size > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(size), true
+	default:
+		return 0, false
+	}
 }
 
 func planCoroPhysicalOutcomeInstruction(
@@ -1170,6 +1221,45 @@ func planCoroPhysicalOperationInstruction(
 				}
 				result.operation = coroPhysicalOperationHostCall
 				result.operationHost = frozen.hostOperation
+				return
+			}
+			if found && frozen.plan.Elision == CoroCallElidedPython {
+				if frozen.failure != "" {
+					result.operationFailure = "invalid Python operation: " + frozen.failure
+					return
+				}
+				if frozen.plan.ElisionCertificate == "" {
+					result.operationFailure = "Python operation has no frozen call-site certificate"
+					return
+				}
+				if !capabilities.sameMForeign {
+					result.operationFailure = "Python operation requires the native same-M foreign-episode capability"
+					return
+				}
+				if !isCoroProgramManagedEntry(audit.fn) {
+					result.operationFailure = "Python operation has no compiler-owned program-root owner realm"
+					return
+				}
+				if target := frozen.plan.PythonTarget; target != nil {
+					resolved, required := audit.universe.Resolve(instruction.Common().StaticCallee())
+					if !required || resolved != target {
+						result.operationFailure = "Python operation target differs from its frozen frontend declaration"
+						return
+					}
+					background, classified, err := audit.universe.FunctionBackground(target)
+					if err != nil || !classified || background != llssa.InPython || frozen.plan.Intrinsic {
+						result.operationFailure = "Python operation target has no exact InPython frontend identity"
+						return
+					}
+					result.operationPythonTarget = target
+				} else {
+					if frozen.plan.Intrinsic || !isCoroPythonIntrinsicOpcode(frozen.opcode) {
+						result.operationFailure = "Python construction operation has no exact compiler-owned opcode"
+						return
+					}
+					result.operationPythonOpcode = frozen.opcode
+				}
+				result.operation = coroPhysicalOperationSameMPython
 				return
 			}
 			if found && frozen.plan.Elision == CoroCallElidedCgoWorker {
@@ -1427,7 +1517,7 @@ func planCoroPhysicalControlInstruction(
 			result.controlFailure = "current function has no compilation plan"
 			return
 		}
-		callee, targetPlan, err := resolveCoroStaticAwait(whole, callerPlan, instruction, audit.universe)
+		callee, targetPlan, closureValue, err := resolveCoroStaticAwait(whole, callerPlan, instruction, audit.universe)
 		if err != nil {
 			result.controlFailure = err.Error()
 			return
@@ -1456,6 +1546,7 @@ func planCoroPhysicalControlInstruction(
 		}
 		result.controlTarget = callee
 		result.controlTargetID = targetPlan.ID
+		result.controlClosure = closureValue
 	case *ssa.Go:
 		result.controlFailureHard = true
 		if !capabilities.staticSpawn {
