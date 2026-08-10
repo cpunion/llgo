@@ -5198,6 +5198,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
 		"__llgo_coro_await_prepare_v3",
+		"__llgo_coro_await_inline_v1",
 		"__llgo_coro_await_consume_v1",
 		"__llgo_coro_complete_prepare_v2",
 		"__llgo_coro_critical_enter_v1",

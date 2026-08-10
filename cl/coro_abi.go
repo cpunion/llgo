@@ -126,6 +126,7 @@ const (
 	coroFrameAllocHookV1                 = "__llgo_coro_frame_alloc_v1"
 	coroFramePublishHookV1               = "__llgo_coro_frame_publish_v1"
 	coroAwaitPrepareHookV1               = "__llgo_coro_await_prepare_v3"
+	coroAwaitInlineHookV1                = "__llgo_coro_await_inline_v1"
 	coroAwaitConsumeHookV1               = "__llgo_coro_await_consume_v1"
 	coroPreemptPollHookV1                = "__llgo_coro_preempt_poll_v1"
 	coroYieldPrepareHookV1               = "__llgo_coro_yield_prepare_v1"
@@ -198,6 +199,7 @@ type coroPhysicalABI struct {
 	frameFreeHook           string
 	framePublishHook        string
 	awaitPrepareHook        string
+	awaitInlineHook         string
 	awaitConsumeHook        string
 	preemptPollHook         string
 	yieldPrepareHook        string
@@ -275,6 +277,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	descriptorPrefix := coroDescriptorPrefixV1
 	framePublishHook := coroFramePublishHookV1
 	awaitPrepareHook := coroAwaitPrepareHookV1
+	awaitInlineHook := coroAwaitInlineHookV1
 	awaitConsumeHook := coroAwaitConsumeHookV1
 	preemptPollHook := coroPreemptPollHookV1
 	yieldPrepareHook := coroYieldPrepareHookV1
@@ -350,7 +353,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00await-prepare=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00await-prepare=%s\x00await-inline=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		traceFunction,
@@ -367,6 +370,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		faultPayloadArgsHook,
 		funcRepABI,
 		awaitPrepareHook,
+		awaitInlineHook,
 		awaitConsumeHook,
 		runDecisionTakeHook,
 		runDecisionTakeZeroHook,
@@ -396,6 +400,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		frameFreeHook:           frameFreeHook,
 		framePublishHook:        framePublishHook,
 		awaitPrepareHook:        awaitPrepareHook,
+		awaitInlineHook:         awaitInlineHook,
 		awaitConsumeHook:        awaitConsumeHook,
 		preemptPollHook:         preemptPollHook,
 		yieldPrepareHook:        yieldPrepareHook,
@@ -635,6 +640,17 @@ func coroAwaitPrepareSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "recoverData", types.Typ[types.UnsafePointer]),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroAwaitInlineSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "parent", pointer),
+		types.NewParam(token.NoPos, nil, "child", pointer),
+	)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "completed", types.Typ[types.Bool]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
 func coroAwaitConsumeSignature() *types.Signature {

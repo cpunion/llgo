@@ -19,6 +19,7 @@ package coro
 import (
 	"runtime"
 	"testing"
+	"unsafe"
 )
 
 type executorResumeHandoffFixture struct {
@@ -214,6 +215,67 @@ func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T
 	}
 	runtime.KeepAlive(task.frame.memory)
 	runtime.KeepAlive(peer.frame.memory)
+}
+
+func TestExecutorResumeHandoffPreservesInlineAwaitAncestry(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "inline-foreign-owner")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue inline handoff task")
+	}
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume || resume.Handle != task.handle {
+		t.Fatalf("check inline handoff root = (%+v, %t)", resume, ok)
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendCall)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	child := newTestFrame(t, task.g, unsafe.Pointer(new(byte)), task.handle)
+	if !PrepareAwaitCompletion(task.g, task.handle, child.handle) ||
+		BeginInlineAwait(task.g, task.handle, child.handle) != InlineAwaitStarted {
+		t.Fatal("begin inline handoff child")
+	}
+	if outcome, caseID, lease, cancel, taken := TakeRunDecision(task.g, ParkTicket{}); !taken ||
+		outcome != ParkOutcomePending || caseID != 0 || lease != (OperationResultLease{}) ||
+		cancel != TaskCancelNone {
+		t.Fatal("take inline handoff child initial gate")
+	}
+	child.header.SuspendReason = uint16(SuspendNone)
+	child.header.Lifecycle = uint16(FrameActive)
+
+	var handoff ExecutorResumeHandoff
+	if !DetachExecutorResume(
+		&handoff, driver, task.g, ExecutorResumeHandoffSameMForeign,
+	) {
+		t.Fatal("detach inline handoff child")
+	}
+	contextTask, contextHandle, contextOK := ExecutorResumeHandoffContext(&handoff)
+	if !contextOK || contextTask != task.g || contextHandle != child.handle ||
+		handoff.inlineAwaitDepth != 1 || p.inlineAwaitDepth != 0 {
+		t.Fatalf("detached inline ancestry = (task:%p handle:%p ok:%t saved:%d live:%d)",
+			contextTask, contextHandle, contextOK, handoff.inlineAwaitDepth, p.inlineAwaitDepth)
+	}
+	if !RestoreExecutorResume(&handoff) || p.inlineAwaitDepth != 1 ||
+		p.current != task.g || task.g.active != FrameFromStorage(child.storage) {
+		t.Fatalf("restore inline ancestry: depth=%d current=%p active=%p",
+			p.inlineAwaitDepth, p.current, task.g.active)
+	}
+
+	child.header.SuspendReason = uint16(SuspendYield)
+	child.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(task.g, child.handle, child.header) ||
+		FinishInlineAwait(task.g, task.handle, child.handle, false) != InlineAwaitSuspend {
+		t.Fatal("unwind restored inline child")
+	}
+	next, resumed := Resumed(p, task.g, resume)
+	if !resumed || next.Kind != ActionYield ||
+		!CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("commit restored inline yield = (%+v, %t)", next, resumed)
+	}
+	runtime.KeepAlive(task.frame.memory)
+	runtime.KeepAlive(child.memory)
 }
 
 func TestExecutorResumeHandoffSettlesIssuedReadyDebt(t *testing.T) {

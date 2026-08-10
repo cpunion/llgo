@@ -190,7 +190,11 @@ type P struct {
 	// osThreadSuspend occupies existing padding before Action. It is
 	// scheduler-owner-only and records no M, pthread, callback, or handle.
 	osThreadSuspend osThreadSuspendPhase
-	action          Action
+	// inlineAwaitDepth bounds temporary native llvm.coro.resume nesting while
+	// synchronous managed calls stay on their fast path. It is zero at every
+	// scheduler/host boundary and occupies existing padding before Action.
+	inlineAwaitDepth uint8
+	action           Action
 	// runDecision is populated immediately before ActionResume and must be
 	// consumed by the compiler-generated resume prologue before control can
 	// publish another scheduler transition. It scales with P, not G.
@@ -751,7 +755,7 @@ func emptySchedulerWaitQueues(p *P) bool {
 // affected queue, so neither their
 // logical resolution nor ParkReady promotion walks unrelated waiting Gs.
 func pollReady(p *P) (int, bool) {
-	if p == nil || p.current != nil || p.inResume || p.action.Kind != ActionInvalid ||
+	if p == nil || p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action.Kind != ActionInvalid ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !validReadyQueueHeader(p) ||
 		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
 		return 0, false
@@ -820,7 +824,7 @@ func HasWaiting(p *P) bool {
 // NextRunnable removes the next ready G. It returns ok=false when a scheduler
 // operation is already in progress; an empty ready queue is (nil, true).
 func NextRunnable(p *P) (g *G, ok bool) {
-	if p == nil || p.current != nil || p.inResume || p.action.Kind != ActionInvalid {
+	if p == nil || p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action.Kind != ActionInvalid {
 		return nil, false
 	}
 	if preemptLoad(&p.schedule) == scheduleDisabled {
@@ -839,7 +843,7 @@ func NextRunnable(p *P) (g *G, ok bool) {
 // from bypassing due timers and rejects a timer-bound executor if the caller
 // omits or supplies an invalid monotonic timestamp.
 func NextRunnableAt(p *P, now int64) (g *G, ok bool) {
-	if p == nil || now < 0 || p.current != nil || p.inResume || p.action.Kind != ActionInvalid {
+	if p == nil || now < 0 || p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action.Kind != ActionInvalid {
 		return nil, false
 	}
 	if preemptLoad(&p.schedule) == scheduleDisabled {
@@ -957,7 +961,7 @@ func queuedDestroyBlockedByTaskCancellation(g *G) bool {
 // check; a bounded-runner continuation restores the exact stable action that
 // was placed at the ready tail. Nested drivers are rejected by the P guards.
 func BeginRunG(p *P, g *G) (Action, bool) {
-	if p == nil || p.current != nil || p.inResume || p.action.Kind != ActionInvalid ||
+	if p == nil || p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action.Kind != ActionInvalid ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		!ValidG(g) || g.state != GRunnable || g.root == nil ||
 		!gPreemptEnabledAtDepthZero(g) ||
@@ -1011,6 +1015,7 @@ const (
 // exported commit boundaries.
 func pauseExecutorRunAction(p *P, g *G, action Action, placement executorRunQueuePlacement) bool {
 	if p == nil || g == nil || p.current != g || g.runP != p || p.inResume ||
+		p.inlineAwaitDepth != 0 ||
 		p.action != action || action.Handle == nil || g.runAction != ActionInvalid ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget == 0 ||
 		g.queued || g.nextReady != nil || g.waiting || !validRunnableParkState(&g.park) ||
@@ -1076,7 +1081,7 @@ func pauseExecutorRunAction(p *P, g *G, action Action, placement executorRunQueu
 func Checked(p *P, g *G, action Action, done bool) (Action, bool) {
 	switch action.Kind {
 	case ActionCheckResume:
-		if !expectedAction(p, g, action, ActionCheckResume) || done || p.inResume ||
+		if !expectedAction(p, g, action, ActionCheckResume) || done || p.inResume || p.inlineAwaitDepth != 0 ||
 			p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 			g.state != GRunning || g.active == nil || g.active.handle != action.Handle ||
 			g.active.header == nil ||
@@ -1090,7 +1095,7 @@ func Checked(p *P, g *G, action Action, done bool) (Action, bool) {
 		p.inResume = true
 		return setAction(p, ActionResume, action.Handle)
 	case ActionCheckDestroy:
-		if !expectedAction(p, g, action, ActionCheckDestroy) || !done || p.inResume ||
+		if !expectedAction(p, g, action, ActionCheckDestroy) || !done || p.inResume || p.inlineAwaitDepth != 0 ||
 			g.state != GDispatching || g.destroyTarget == nil ||
 			g.destroyTarget.handle != action.Handle || g.destroyTarget.state != FrameDestroyPending ||
 			g.park.taskCancelPhase == taskCancelRequested {
@@ -1106,13 +1111,15 @@ func Checked(p *P, g *G, action Action, done bool) (Action, bool) {
 // hooks must have recorded exactly one await or completion transition while
 // the frame was active.
 func Resumed(p *P, g *G, action Action) (Action, bool) {
-	if !resumeGateTaken(g) || p != g.runP || action != p.action ||
-		g.active == nil || g.active.handle != action.Handle || g.active.state != FrameActive {
+	if !resumeGateTaken(g) || p != g.runP || action != p.action || p.inlineAwaitDepth != 0 {
+		return Action{}, false
+	}
+	resumed, valid := resumedFrameForAction(g, action)
+	if !valid {
 		return Action{}, false
 	}
 	p.inResume = false
 	g.state = GDispatching
-	resumed := g.active
 	destroy, yielded, ok := dispatchPending(g, resumed)
 	if !ok {
 		return Action{}, false
@@ -1171,7 +1178,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 // Destroyed commits the return from a direct llvm.coro.destroy call. The
 // compiler deallocation hook must have called ReleaseFrame synchronously.
 func Destroyed(p *P, g *G, action Action) (Action, bool) {
-	if !expectedAction(p, g, action, ActionDestroy) || p.inResume || g.state != GDispatching ||
+	if !expectedAction(p, g, action, ActionDestroy) || p.inResume || p.inlineAwaitDepth != 0 || g.state != GDispatching ||
 		g.destroyTarget != nil {
 		return Action{}, false
 	}
@@ -1224,7 +1231,7 @@ func validRootDestroyedCommitMarker(p *P, g *G, kind ActionKind) bool {
 // both the old whole-episode adapter and a bounded handle-free receipt can use
 // the same state transition.
 func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool) {
-	if p == nil || g == nil || p.current != g || p.inResume || g.runP != p ||
+	if p == nil || g == nil || p.current != g || p.inResume || p.inlineAwaitDepth != 0 || g.runP != p ||
 		g.destroyTarget != nil || !g.destroyRoot || g.active != nil || g.frames != nil ||
 		!gPreemptDepthZero(g) ||
 		!validRootDestroyedCommitMarker(p, g, kind) ||
@@ -1284,7 +1291,8 @@ func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool
 }
 
 func validBoundedRootHeaders(p *P, g *G, wasRoot bool) bool {
-	if p == nil || g == nil || !wasRoot || g.active != nil || g.frames != nil ||
+	if p == nil || g == nil || !wasRoot || p.inResume || p.inlineAwaitDepth != 0 ||
+		g.active != nil || g.frames != nil ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||
 		!gPreemptEnabledAtDepthZero(g) ||
 		!validReadyQueueHeader(p) || !validParkWaitQueueHeader(p) ||
@@ -1354,7 +1362,7 @@ func finishBoundedRootDestroy(p *P, g *G, wasRoot, panicking bool) (Action, bool
 // freed action handle. Non-root destruction resumes through a later ready-tail
 // reduction; final-root work stops at ActionCommitDestroy.
 func DestroyedBounded(p *P, g *G, action Action) (Action, bool) {
-	if !expectedAction(p, g, action, ActionDestroy) || p.inResume || g.state != GDispatching ||
+	if !expectedAction(p, g, action, ActionDestroy) || p.inResume || p.inlineAwaitDepth != 0 || g.state != GDispatching ||
 		g.destroyTarget != nil || g.runAction != ActionInvalid {
 		return Action{}, false
 	}
@@ -1391,7 +1399,7 @@ func DestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 
 func validDestroyCommitReceipt(p *P, g *G, receipt Action) bool {
 	if p == nil || g == nil || receipt.Kind != ActionCommitDestroy || !validActionFlags(receipt) || receipt.Handle != nil ||
-		p.current != g || p.action != receipt || p.inResume || p.runDecision != (RunDecision{}) ||
+		p.current != g || p.action != receipt || p.inResume || p.inlineAwaitDepth != 0 || p.runDecision != (RunDecision{}) ||
 		p.runDecisionTaken || p.servicePreemptBudget == 0 || !ValidG(g) || g.runP != p ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||
 		g.destroyTarget != nil || !g.destroyRoot ||
@@ -1424,7 +1432,7 @@ func CommitDestroyedReceiptCompatibility(p *P, g *G, receipt Action) (Action, bo
 }
 
 func acknowledgeRootTerminalSchedule(p *P, g *G, kind ActionKind) bool {
-	if p == nil || g == nil || p.current != g || p.inResume || g.runP != p ||
+	if p == nil || g == nil || p.current != g || p.inResume || p.inlineAwaitDepth != 0 || g.runP != p ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil || p.channelSource != nil ||
 		g.destroyTarget != nil || !g.destroyRoot || g.active != nil || g.frames != nil ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
@@ -1449,7 +1457,7 @@ func acknowledgeRootTerminalSchedule(p *P, g *G, kind ActionKind) bool {
 // runtime adapter may retry the same ActionDestroy without invoking
 // llvm.coro.destroy again. Any queue, action, or G-state mismatch fails closed.
 func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
-	return expectedAction(p, g, action, ActionDestroy) && !p.inResume &&
+	return expectedAction(p, g, action, ActionDestroy) && !p.inResume && p.inlineAwaitDepth == 0 &&
 		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil && p.channelSource == nil &&
 		g.state == GDispatching && g.destroyTarget == nil && g.destroyRoot &&
 		g.active == nil && g.frames == nil && p.readyHead == nil && p.readyTail == nil &&
@@ -1468,7 +1476,7 @@ func TerminalG(p *P, g *G) bool {
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound &&
 		p.executor == nil && p.channelSource == nil && p.osThreadLockOwner == nil &&
 		p.osThreadSuspend == osThreadSuspendAttached &&
-		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
+		!p.inResume && p.inlineAwaitDepth == 0 && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
 		ValidG(g) && gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
 		g.osThreadLockDepth == 0 &&

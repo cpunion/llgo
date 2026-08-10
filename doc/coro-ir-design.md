@@ -800,6 +800,7 @@ defer/recover/主动Goexit producer需要统一cleanup transaction；function va
 frame create/publish
 spawn begin/commit
 await prepare
+await inline execute/commit
 operation prepare/park
 run-decision take
 result reconcile/take/discard
@@ -808,6 +809,20 @@ frame final suspend/free
 ```
 
 新增 timer、poll、host 或 worker source不应要求增加 IR opcode；只有出现新的语言控制语义或跨层ownership contract时才扩展 IR schema。
+
+`await inline execute/commit`不是第二种call recipe。ProgramIR/physical plan仍只选择一次managed child await；统一emitter在现有`await prepare -> await consume`之间插入一个target-neutral eager hook和条件suspend。它必须满足以下gate：
+
+- hook参数由编译时已知的`G/parent/child`直接注入，不从函数地址或handle反向提取；
+- fast与slow路径使用同一个child body、result slots、completion status和cleanup CFG；
+- slow路径只有在所有nested native resume完全unwind后才允许scheduler dispatch；
+- immediate child必须是exact parent completion edge，leaf ancestry每一边都由frame header与completion record共同证明；
+- depth bound只允许fail-open到原有scheduler await，不允许改变pending transaction；
+- 同步完成热路径只能做O(1) direct-edge/depth归纳检查；完整ancestry audit留在真实suspend、event和foreign边界；
+- panic/defer/recover/Goexit、task cancellation、preemption、dynamic dispatch和foreign handoff必须各有native E2E gate；
+- native与wasm pre-/post-CoroSplit都必须证明条件suspend仍存在，不能把eager路径错误优化成保留host stack的continuation；
+- physical descriptor digest和required runtime root必须包含hook identity，package/archive不能只保存旧await ABI摘要。
+
+runtime core只返回`Declined/Started/Suspend/Destroy`状态并维护frame ownership；`llvm.coro.resume/done/destroy`仍只存在于target runtime adapter。因而WASM、RTOS和baremetal可以使用相同状态机，只需提供各自已有的handle intrinsic与executor入口，不引入pthread、libuv或BDWGC依赖。
 
 compiler/runtime内部ABI可以进一步直接传稳定 `Frame*` 或等价 `FrameRef`。当前frame allocation已经在LLVM storage前保存back-pointer，但 `PrepareAwait/Complete/Yield/Park/ParkSet` 仍按handle在线性frame链中执行 `findFrame`。深structured-await链会把本应O(1)的transition变成线性查找。
 

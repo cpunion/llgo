@@ -236,7 +236,7 @@ func commitInitialPanicDestroyed(p *P, g *G, wasRoot bool) (Action, bool) {
 // already removed the frame. The next action is either another deepest parent
 // destroy or terminal PanicComplete; no normal continuation is resumed.
 func PanicDestroyed(p *P, g *G, action Action) (Action, bool) {
-	if !expectedAction(p, g, action, ActionPanicDestroy) || p.inResume ||
+	if !expectedAction(p, g, action, ActionPanicDestroy) || p.inResume || p.inlineAwaitDepth != 0 ||
 		g.state != GPanicking || !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) ||
 		g.destroyTarget != nil {
 		return Action{}, false
@@ -257,7 +257,7 @@ func PanicDestroyed(p *P, g *G, action Action) (Action, bool) {
 // destroy. A surviving ancestor is returned as a ready-tail continuation; the
 // root publishes the same handle-free terminal receipt as normal completion.
 func PanicDestroyedBounded(p *P, g *G, action Action) (Action, bool) {
-	if !expectedAction(p, g, action, ActionPanicDestroy) || p.inResume ||
+	if !expectedAction(p, g, action, ActionPanicDestroy) || p.inResume || p.inlineAwaitDepth != 0 ||
 		g.state != GPanicking || !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) ||
 		g.destroyTarget != nil || g.runAction != ActionInvalid {
 		return Action{}, false
@@ -278,7 +278,7 @@ func PanicDestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 // idle-to-disabled race. The adapter may then retry PanicDestroyed without
 // calling llvm.coro.destroy twice.
 func AcknowledgePanicTerminalSchedule(p *P, g *G, action Action) bool {
-	return expectedAction(p, g, action, ActionPanicDestroy) && !p.inResume &&
+	return expectedAction(p, g, action, ActionPanicDestroy) && !p.inResume && p.inlineAwaitDepth == 0 &&
 		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil && p.channelSource == nil &&
 		g.state == GPanicking && g.panicUnwind && publishedPanicRecord(&g.panicRecord) &&
 		g.destroyTarget == nil && g.destroyRoot && g.active == nil && g.frames == nil &&

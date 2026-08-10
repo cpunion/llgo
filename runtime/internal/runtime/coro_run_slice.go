@@ -39,6 +39,41 @@ func coroHandleResume(unsafe.Pointer)
 //go:linkname coroHandleDestroy C.__llgo_coro_destroy_v1
 func coroHandleDestroy(unsafe.Pointer)
 
+// __llgo_coro_await_inline_v1 resumes one already prepared child on the
+// current executor stack. A synchronous completion is destroyed and committed
+// here; a real suspension returns false so generated parents unwind through
+// llvm.coro.suspend before the outer scheduler consumes the deepest pending
+// transition. No native stack survives that false return path.
+//
+//export __llgo_coro_await_inline_v1
+func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool {
+	task := (*coro.G)(g)
+	switch coro.BeginInlineAwait(task, parent, child) {
+	case coro.InlineAwaitDeclined:
+		return false
+	case coro.InlineAwaitStarted:
+	default:
+		coroRuntimeAbort("invalid coroutine inline child begin")
+		return false
+	}
+
+	coroHandleResume(child)
+	switch coro.FinishInlineAwait(task, parent, child, coroHandleDone(child)) {
+	case coro.InlineAwaitSuspend:
+		return false
+	case coro.InlineAwaitDestroy:
+		coroHandleDestroy(child)
+		if !coro.CommitInlineAwaitDestroy(task, parent, child) {
+			coroRuntimeAbort("invalid coroutine inline child destroy commit")
+			return false
+		}
+		return true
+	default:
+		coroRuntimeAbort("invalid coroutine inline child return")
+		return false
+	}
+}
+
 type coroProgramLifecycleV1 uint8
 
 const (

@@ -61,6 +61,21 @@ type coroParkOperation struct {
 	shutdown      uint64
 }
 
+// suspendCoroCurrentBlockIf is the single compiler-owned conditional
+// stack-cut template. Park operations and eager child-await fallback bind
+// different publication/dispatch semantics around this one CFG primitive;
+// feature emitters must not grow another direct template call site.
+func (c *coroBodyContext) suspendCoroCurrentBlockIf(
+	condition llssa.Expr,
+	before func(llssa.Builder),
+	dispatch llssa.CoroResumeDispatch,
+) llssa.BasicBlock {
+	if c == nil || c.coro == nil || condition.IsNil() || dispatch == nil {
+		panic("coroutine conditional stack cut requires a complete physical body")
+	}
+	return c.coro.SuspendCurrentBlockIfWithResumeDispatch(condition, before, dispatch)
+}
+
 const maxCoroParkResumeStatus = uint64(^uint32(0))
 
 func validateCoroParkOperationStatuses(
@@ -124,7 +139,7 @@ func (c *coroBodyContext) emitCoroParkOperation(p *context, b llssa.Builder, ope
 	for index := range faultTargets {
 		faultTargets[index] = b.Func.MakeBlock()
 	}
-	join := c.coro.SuspendCurrentBlockIfWithResumeDispatch(
+	join := c.suspendCoroCurrentBlockIf(
 		operation.shouldSuspend,
 		func(suspend llssa.Builder) {
 			stateID := c.nextState

@@ -200,7 +200,7 @@ func validCancelableReadyG(g *G) bool {
 func BeginCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil || p.channelSource != nil ||
-		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
+		p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || !emptySchedulerWaitQueues(p) {
 		return false
@@ -241,7 +241,7 @@ func BeginCommandShutdown(p *P, main *G) bool {
 func RequestCommandShutdownDrain(p *P, main *G) (needed, ok bool) {
 	if p == nil || main == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		preemptLoad(&p.executorMode) != executorModeBound || p.executor == nil ||
-		p.current != nil || p.inResume || p.action != (Action{}) ||
+		p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action != (Action{}) ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
 		return false, false
@@ -314,7 +314,7 @@ func prepareCancelFrame(p *P, g *G, frame *Frame) (Action, bool) {
 // (nil, ActionInvalid, true).
 func NextCommandCancel(p *P) (*G, Action, bool) {
 	if p == nil || preemptLoad(&p.schedule) != scheduleStopping || p.current != nil ||
-		p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
+		p.inResume || p.inlineAwaitDepth != 0 || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || !emptySchedulerWaitQueues(p) {
 		return nil, Action{}, false
@@ -362,7 +362,7 @@ func NextCommandCancel(p *P) (*G, Action, bool) {
 // compiler free hook must already have unlinked the destroyed frame. Ancestors
 // are destroyed deepest-to-root without coro.done and without resume.
 func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
-	if !expectedAction(p, g, action, ActionCancelDestroy) || p.inResume ||
+	if !expectedAction(p, g, action, ActionCancelDestroy) || p.inResume || p.inlineAwaitDepth != 0 ||
 		preemptLoad(&p.schedule) != scheduleStopping || g.state != GCanceling || g.destroyTarget != nil ||
 		!gPreemptEnabledAtDepthZero(g) {
 		return Action{}, false
@@ -417,7 +417,7 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 func FinishCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil || p.channelSource != nil ||
-		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
+		p.current != nil || p.inResume || p.inlineAwaitDepth != 0 || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || p.readyHead != nil || p.readyTail != nil ||
 		!emptySchedulerWaitQueues(p) {

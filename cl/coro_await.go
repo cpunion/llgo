@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 
 	"github.com/goplus/llgo/internal/coro"
@@ -788,6 +789,11 @@ func (p *context) awaitCoroChildWithRecovery(
 		recoverType,
 		recoverData,
 	)
+	if body.abi.awaitInlineHook == "" {
+		panic("coroutine child await has no inline completion hook")
+	}
+	inline := p.pkg.NewFunc(body.abi.awaitInlineHook, coroAwaitInlineSignature(), llssa.InC)
+	completedInline := b.Call(inline.Expr, body.task, body.coro.Handle(), child)
 	if body.abi.awaitConsumeHook == "" {
 		panic("coroutine child await has no outcome consume hook")
 	}
@@ -805,9 +811,13 @@ func (p *context) awaitCoroChildWithRecovery(
 	// the base while reconciling a concurrent deferred-child recovery/panic as
 	// the overlay. This preserves both cancellation and Go panic ordering.
 	canceled := p.fn.MakeBlock()
-	body.coro.SuspendCurrentBlockWithResumeDispatch(func(gate llssa.Builder, normal llssa.BasicBlock) {
-		body.dispatchZeroRunDecisionTo(gate, normal, canceled)
-	})
+	body.suspendCoroCurrentBlockIf(
+		b.UnOp(token.NOT, completedInline),
+		nil,
+		func(gate llssa.Builder, normal llssa.BasicBlock) {
+			body.dispatchZeroRunDecisionTo(gate, normal, canceled)
+		},
+	)
 	body.activate(b)
 	cancelBuilder := p.fn.NewBuilder()
 	cancelBuilder.DICopyCurrentDebugLocation(b)

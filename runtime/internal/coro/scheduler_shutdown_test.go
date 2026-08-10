@@ -583,6 +583,7 @@ func TestCommandShutdownAcceptsIdleOrRequestedGateAndRejectsBusyP(t *testing.T) 
 	}{
 		{"current", func(p *P) { p.current = new(G) }},
 		{"in-resume", func(p *P) { p.inResume = true }},
+		{"inline-await-depth", func(p *P) { p.inlineAwaitDepth = 1 }},
 		{"action", func(p *P) { p.action = Action{Kind: ActionResume, Handle: unsafe.Pointer(new(byte))} }},
 		{"service-preempt-budget", func(p *P) { p.servicePreemptBudget = 1 }},
 	}
