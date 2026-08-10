@@ -10,7 +10,6 @@ import (
 	"github.com/goplus/lib/py/os"
 )
 
-
 func main() {
 	x := math.Sqrt(py.Float(2))
 	wd := os.Getcwd()

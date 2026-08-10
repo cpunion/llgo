@@ -6,7 +6,6 @@ import (
 	"github.com/goplus/lib/py"
 )
 
-
 const (
 	LLGoPackage = "py.math"
 )
