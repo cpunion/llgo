@@ -70,8 +70,10 @@ func TestCgoDeferredFreeUsesFrameOwnedWorkerCleanup(t *testing.T) {
 	}
 
 	ir := llgoIRFromProbe(t, "cgo-deferred-free", cgoDeferredFreeProbe)
-	freeThunk := llvmFunctionBodyContaining(ir, "call [0 x i8] @\"")
-	if freeThunk == "" || !strings.Contains(freeThunk, "._Cfunc_free\"") {
+	// LLVM may print an otherwise identical C symbol quoted or unquoted. Match
+	// the call shape and semantic suffix instead of depending on that spelling.
+	freeThunk := llvmFunctionBodyContaining(ir, "call [0 x i8] @")
+	if freeThunk == "" || !strings.Contains(freeThunk, "._Cfunc_free") {
 		t.Fatalf("missing deferred C.free worker thunk in IR:\n%s", ir)
 	}
 	freeThunkSymbol := llvmDefinedFunctionSymbol(freeThunk)
