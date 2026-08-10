@@ -44,6 +44,7 @@ const (
 	coroFaultUnsafeStringLenV1
 	coroFaultUnsafeStringNilV1
 	coroFaultSliceConvertV1
+	coroFaultIntegerDivideByZeroV1
 	coroFaultLimitV1
 )
 

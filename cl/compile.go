@@ -2188,7 +2188,8 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.BinOp(v.Op, typeWord, nilType)
 			break
 		}
-		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary &&
+			physicalInstruction.recipe != coroPhysicalInstructionIntegerDivideByZeroGuard {
 			panic(fmt.Sprintf("BinOp selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		}
 		if value, ok := foldConstComparison(v); ok {
@@ -2210,7 +2211,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		x := p.compileValueAs(b, v.X, v.Y.Type())
 		y := p.compileValueAs(b, v.Y, v.X.Type())
-		if (v.Op == token.QUO || v.Op == token.REM) && ssaIntegerValueProvenNonZeroAt(v.Y, v) {
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIntegerDivideByZeroGuard {
+			observePhysical(coroPhysicalInstructionIntegerDivideByZeroGuard)
+			zero := p.prog.Zero(y.Type)
+			isZero := b.BinOp(token.EQL, y, zero)
+			p.compileCoroFaultConditionGuard(b, isZero, coroFaultIntegerDivideByZeroV1)
+			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
+		} else if (v.Op == token.QUO || v.Op == token.REM) && ssaIntegerValueProvenNonZeroAt(v.Y, v) {
 			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
 		} else {
 			ret = b.BinOp(v.Op, x, y)

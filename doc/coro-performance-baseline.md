@@ -618,6 +618,49 @@ The next useful cohort should therefore freeze target-dependent direct-interface
 representation and bounded native-stack allocation facts in ProgramIR. It
 should not speculate a larger completion ABI or add a second lowering path.
 
+### Synchronous completion cost: `ken/modconst.go`
+
+Go 1.26.5 `GOROOT/test/ken/modconst.go` is a useful whole-program stress case
+for managed calls that almost always complete synchronously. Its integer
+remainder loops repeatedly call small test functions, and those functions in
+turn used the compiler-inserted `runtime.AssertDivideByZero` helper whenever
+the divisor was not statically proven non-zero. Under the original coroutine
+lowering, both the source function and the helper were initial-suspended child
+coroutines, even though the normal path never suspended.
+
+The first measured replacement cohort keeps the logical helper edge for effect
+analysis but freezes an instruction-owned physical recipe. It emits an integer
+zero comparison, routes the zero edge through the existing allocation-free V1
+explicit-fault payload, and lowers the normal edge with
+`BinOpWithNonZeroDivisor`. No helper call or child-await remains at the physical
+site. Cleanup and recover reuse the existing fault-payload transaction; a
+dominating non-zero proof emits neither helper nor fault edge. Native and
+wasm32 pre-/post-CoroSplit IR tests are the regression gate.
+
+The same Darwin arm64 machine, Go 1.26.5 toolchain, source case, 4 GiB hard
+process-group RSS limit, and three-minute step timeout produced:
+
+| Metric | `3a57f9a8a` | structured divide fault | Delta |
+| --- | ---: | ---: | ---: |
+| LLGo build | 22.064 s | 19.947 s | -2.117 s (-9.6%) |
+| LLGo run | 84.440 s | 43.864 s | -40.576 s (-48.1%) |
+| semantic result | pass | pass | unchanged |
+
+This result is deliberately not interpreted as completion of the synchronous
+fast path. It shows that one nested outcome helper accounted for almost half
+of this case, but the remaining 43.864 seconds still create and schedule the
+outer `i64test` frames and the path-insensitively colored `math/rand` chain.
+Adding more helper-name exceptions would not address that general cost.
+
+The next core cohort must therefore preserve one logical function version while
+allowing a managed child to execute synchronously until it either completes or
+reaches its first real suspension. Its gate must cover frame publication,
+parent/child ownership, nested completion, panic/defer/Goexit, cancellation,
+preemption accounting, dynamic dispatch and archive metadata. A child that
+parks or awaits another event must still return ownership to the scheduler
+without retaining a native stack. Until that transaction is closed on native
+and wasm32, the mandatory initial-suspend scheduler path remains authoritative.
+
 ### Compact emission type-graph cohort
 
 Whole-program `go:linkname` pairing previously expanded named/private-mirror

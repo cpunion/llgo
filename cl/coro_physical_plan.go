@@ -51,6 +51,7 @@ const (
 	coroPhysicalInstructionUnsafeString
 	coroPhysicalInstructionUnsafeSlice
 	coroPhysicalInstructionInterfaceNilCompare
+	coroPhysicalInstructionIntegerDivideByZeroGuard
 	coroPhysicalInstructionTerminalResultAllocation
 	coroPhysicalInstructionFrameAllocation
 	coroPhysicalInstructionFrameBitcastAllocation
@@ -90,6 +91,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "unsafe-slice"
 	case coroPhysicalInstructionInterfaceNilCompare:
 		return "interface-nil-compare"
+	case coroPhysicalInstructionIntegerDivideByZeroGuard:
+		return "integer-divide-by-zero-guard"
 	case coroPhysicalInstructionTerminalResultAllocation:
 		return "terminal-result-allocation"
 	case coroPhysicalInstructionFrameAllocation:
@@ -326,7 +329,8 @@ func (plan coroPhysicalInstructionPlan) mayFault() bool {
 	return plan.nilGuard || plan.boundsGuard ||
 		plan.recipe == coroPhysicalInstructionFieldAddr ||
 		plan.recipe == coroPhysicalInstructionDeref ||
-		plan.recipe == coroPhysicalInstructionBuiltinNilGuard
+		plan.recipe == coroPhysicalInstructionBuiltinNilGuard ||
+		plan.recipe == coroPhysicalInstructionIntegerDivideByZeroGuard
 }
 
 // elidesRuntimeHelper reports whether this frozen physical recipe replaces one
@@ -390,6 +394,10 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		}
 	case coroPhysicalInstructionInterfaceNilCompare:
 		if helper == "EfaceEqual" || helper == "IfaceType" {
+			return true
+		}
+	case coroPhysicalInstructionIntegerDivideByZeroGuard:
+		if helper == "AssertDivideByZero" {
 			return true
 		}
 	case coroPhysicalInstructionFrameAllocation:
@@ -975,6 +983,13 @@ func planCoroPhysicalInstruction(
 			}
 		}
 	case *ssa.BinOp:
+		operand, _ := types.Unalias(audit.typeOf(instruction.X.Type())).Underlying().(*types.Basic)
+		if explicitPanic && operand != nil && operand.Info()&types.IsInteger != 0 &&
+			(instruction.Op == token.QUO || instruction.Op == token.REM) &&
+			!ssaIntegerValueProvenNonZeroAt(instruction.Y, instruction) {
+			result.recipe = coroPhysicalInstructionIntegerDivideByZeroGuard
+			break
+		}
 		if (instruction.Op == token.EQL || instruction.Op == token.NEQ) &&
 			(isUntypedNilConst(instruction.X) || isUntypedNilConst(instruction.Y)) {
 			value := instruction.X

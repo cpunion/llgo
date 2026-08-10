@@ -2397,7 +2397,14 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 		// infinities or NaNs, so it requires neither a panic helper nor a
 		// non-zero dominance proof.
 		if operand != nil && operand.Info()&types.IsInteger != 0 && !ssaIntegerValueProvenNonZeroAt(op.Y, op) {
-			return a.requireFrozenOutcomeRuntimeHelper(op, "AssertDivideByZero")
+			if !a.allowImplicitNilFault {
+				return "integer division by an unproven divisor requires the explicit-status panic ABI"
+			}
+			// The physical recipe emits a target-neutral terminal fault edge and
+			// then lowers the normal edge with a proven non-zero divisor. Keep the
+			// logical helper in effect analysis, but require it to be the only
+			// compiler-elided helper at this exact source instruction.
+			return a.requireOnlyCompilerElidedRuntimeHelpers(op, "AssertDivideByZero")
 		}
 	case token.SHL, token.SHR:
 		if signedIntegerMayBeNegative(op.Y) {
