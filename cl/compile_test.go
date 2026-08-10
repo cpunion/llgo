@@ -571,11 +571,17 @@ func TestRunAndTestFromTestlibgo(t *testing.T) {
 }
 
 func TestRunAndTestFromTestlibc(t *testing.T) {
-	var ignore []string
+	ignore := []string{
+		// setjmp captures one native stack activation and cannot legally retain
+		// an LLVM stackless coroutine resume point. The physical compiler keeps
+		// this fail-closed in TestNativeSigjmpControlFailsClosedInPhysicalCoroutine;
+		// it is not a Go source/standard-library compatibility requirement.
+		"./_testlibc/setjmp",
+	}
 	if runtime.GOOS == "linux" {
-		ignore = []string{
+		ignore = append(ignore,
 			"./_testlibc/demangle", // Linux demangle symbol differs (itaniumDemangle linkage mismatch).
-		}
+		)
 	}
 	cltest.RunAndTestFromDir(t, "", "./_testlibc", ignore)
 }
