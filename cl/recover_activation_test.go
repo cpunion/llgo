@@ -49,3 +49,23 @@ func recursive(depth int) any {
 		t.Fatalf("recover function must preserve its activation frame:\n%s", ir)
 	}
 }
+
+func TestRecoverInterfaceMethodIR(t *testing.T) {
+	const src = `package foo
+
+type I interface { recoverValue() }
+type T int
+func (T) recoverValue() { recover() }
+	func call(v I) { defer v.recoverValue() }
+`
+	ir := cltest.CompileIREx(t, src, "foo.go", false, nil)
+	for _, want := range []string{
+		`BindRecoverFrame"(ptr @foo.T.recoverValue`,
+		`StartRecoverFrameAlias"(ptr @"foo.(*T).recoverValue", ptr @foo.T.recoverValue)`,
+		`StartRecoverFrame"(ptr %`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("missing recover wrapper handoff %q:\n%s", want, ir)
+		}
+	}
+}
