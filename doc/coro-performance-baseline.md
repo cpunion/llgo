@@ -710,3 +710,51 @@ or recursive/open-world paths. The next cohorts are:
 4. rerun representative standard-library executable size, direct/interface/
    channel throughput, and parked-frame memory baselines before broadening the
    default cohort.
+
+### Causal channel return-route checkpoint
+
+The next native scheduling checkpoint uses the tree shared by
+`cpunion/llgo:llvm-coro` `f32f1195d` and its parent `be1b2daec` as the exact
+baseline. The candidate changes only runtime scheduling metadata and policy;
+the compiler binary and the standard-Go source in
+`benchmark/coro_core/testdata/workload` are unchanged. Both artifacts were
+built on Darwin arm64 with Go 1.26.5, LLVM 22.1.8, fresh runtime inputs and the
+same LLGo compiler. Throughput values are medians of five interleaved complete
+process runs with process-start `GOMAXPROCS=1`.
+
+| Metric | `be1b2daec` | return-route candidate | Delta |
+| --- | ---: | ---: | ---: |
+| 5,000 unbuffered channel handoffs | 144.722 ms | 81.718 ms | -43.53% |
+| spawn 100 x 100 rounds | 147.531 ms | 138.898 ms | -5.85% |
+| 100 timers x 10 rounds | 45.560 ms | 44.899 ms | -1.45% |
+| file bytes | 4,818,208 | 4,836,496 | +18,288 (+0.38%) |
+| Mach-O `__TEXT` | 2,965,504 | 2,981,888 | +16,384 (+0.55%) |
+| Mach-O `__DATA` | 1,032,192 | 1,032,192 | unchanged |
+
+Three interleaved 1,000-parked-G runs gave median peak RSS 12,042,240 bytes
+before and 12,009,472 bytes after. This is noise-sized evidence of no observed
+memory regression, not a claim that the candidate reduces parked-G storage.
+The permanent scheduler layouts do not grow: the producer route phase-overlays
+the high bits of the existing channel physical word and then the materialized
+phase of `ParkState.seed`; current logical-task identity uses the runtime
+sidecar's otherwise-idle startup-argument field. Independent foreign-thread
+callbacks, timers and I/O
+producers retain route zero; synchronous same-G foreign reentry may inherit the
+managed resume's route.
+
+The policy is deliberately narrower than work stealing. A materialized channel
+continuation can return only to the exact producer route, only after that route
+has published runnable demand, and only after source cleanup has removed every
+old-P pointer. No alternative route is scanned. A producer which continues
+computing therefore cannot capture its peer; failure or contention retains the
+ordinary local FIFO. The durable transfer has an explicit core commit which
+settles source `readyDebt` only when no local runnable remains.
+
+Core/race tests, the production typed-channel adapter on native and JS/WASM,
+the host native-fleet/program adapters, five repeated native spawn/park/
+handoff/timer workload passes, and three 100,000-round handoff stress runs all
+completed. The standard-Go WASI fixture also compiled to a 1,747,245-byte
+module (3,225 functions, 13 imports, 1,304,987-byte code section and
+432,327-byte data section) and exited successfully under Wasmtime. These tests
+validate the route-zero portable fallback and the native optimization; they do
+not replace the final full repository and GOROOT acceptance matrix.

@@ -518,6 +518,20 @@ func takeResumeCleanupResult(
 	}
 }
 
+func resumeCleanupCompletionRoute(
+	sources *ExecutorSourceSet,
+	p *P,
+	id OperationID,
+) (RouteID, bool) {
+	if !executorSupportsResumeCleanupSource(sources, id) {
+		return 0, false
+	}
+	if id.Source() == OperationSourceChannel {
+		return sources.channel.CompletionRoute(p, id)
+	}
+	return 0, true
+}
+
 func recycleResumeCleanupOperation(
 	sources *ExecutorSourceSet,
 	p *P,
@@ -602,6 +616,14 @@ func advanceResumeCleanupCore(
 				return false, false
 			}
 			plan.result = result
+			preferredRoute, routeOK := resumeCleanupCompletionRoute(sources, p, *id)
+			if !routeOK || !setConsumedParkPreferredRoute(
+				&record.g.park,
+				plan.ticket,
+				preferredRoute,
+			) {
+				return false, false
+			}
 		} else if plan.outcome == ParkOutcomeCompleted {
 			return false, false
 		}

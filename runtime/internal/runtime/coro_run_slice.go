@@ -270,6 +270,11 @@ func coroReduceExecutorRunStepV1(
 	}
 	switch step.Kind {
 	case coro.ExecutorRunStepSource:
+		distributed, targetOK := coroTargetAfterSourceReductionV1(p, driver, step.Poll)
+		if !targetOK || distributed && !step.Poll.Complete ||
+			step.Poll.Complete && !coro.CommitExecutorRunSourceDistribution(driver, distributed) {
+			return false, false
+		}
 		result.used++
 		result.sources++
 		return false, true

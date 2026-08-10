@@ -58,6 +58,44 @@ const (
 	channelPhysicalCommitted
 )
 
+// channelOperationSlot.physical phase-overlays the unused high bits of its
+// existing atomic word with an optional producer locality hint. The hint is
+// meaningful only after a typed external commit and remains advisory: logical
+// result ownership, select arbitration, cancellation, and source routing all
+// continue to use their existing exact identities. Route zero means that the
+// producer is foreign, timer/IO-owned, or otherwise has no useful locality.
+const (
+	channelPhysicalStateBits  = 2
+	channelPhysicalStateMask  = uint32(1<<channelPhysicalStateBits - 1)
+	channelPhysicalRouteShift = channelPhysicalStateBits
+	channelPhysicalWordMask   = channelPhysicalStateMask | operationRouteMask<<channelPhysicalRouteShift
+)
+
+func makeChannelPhysicalWord(state channelPhysicalState, route RouteID) (uint32, bool) {
+	if state > channelPhysicalCommitted || route != 0 && !route.Valid() ||
+		route != 0 && state != channelPhysicalCommitted {
+		return 0, false
+	}
+	return uint32(state) | uint32(route)<<channelPhysicalRouteShift, true
+}
+
+func channelPhysicalStateOf(word uint32) channelPhysicalState {
+	state := channelPhysicalState(word & channelPhysicalStateMask)
+	route := RouteID(word >> channelPhysicalRouteShift)
+	if word&^channelPhysicalWordMask != 0 || state > channelPhysicalCommitted ||
+		route != 0 && (!route.Valid() || state != channelPhysicalCommitted) {
+		return channelPhysicalState(^uint32(0))
+	}
+	return state
+}
+
+func channelPhysicalCompletionRoute(word uint32) (RouteID, bool) {
+	if channelPhysicalStateOf(word) != channelPhysicalCommitted {
+		return 0, false
+	}
+	return RouteID(word >> channelPhysicalRouteShift), true
+}
+
 type channelExternalState uint32
 
 const (
@@ -708,7 +746,7 @@ func (source *ChannelOperationSource) postReadyAdmitted(slot *channelOperationSl
 		return ChannelOperationPostClosed
 	}
 	for {
-		switch channelPhysicalState(preemptLoad(&slot.physical)) {
+		switch channelPhysicalStateOf(preemptLoad(&slot.physical)) {
 		case channelPhysicalIdle:
 			if !preemptCompareAndSwap(&slot.physical, uint32(channelPhysicalIdle), uint32(channelPhysicalReady)) {
 				continue
@@ -878,13 +916,17 @@ func (admission *channelExternalCommitAdmission) releaseWithoutCommit() bool {
 // stored Claimed. Executor requests happen only after releaseCommitted on both
 // endpoints.
 func (admission *channelExternalCommitAdmission) publishExternallyCommitted() ChannelOperationPostResult {
+	return admission.publishExternallyCommittedAtRoute(0)
+}
+
+func (admission *channelExternalCommitAdmission) publishExternallyCommittedAtRoute(route RouteID) ChannelOperationPostResult {
 	if admission == nil || !admission.held || admission.posted || admission.broken || admission.source == nil ||
 		admission.slot == nil || !admission.id.Valid() || admission.token == 0 || admission.token&1 == 0 ||
-		preemptLoad(&admission.slot.externalLease) != admission.token {
+		preemptLoad(&admission.slot.externalLease) != admission.token || route != 0 && !route.Valid() {
 		return ChannelOperationPostInvalid
 	}
 	source, slot, id := admission.source, admission.slot, admission.id
-	result := source.publishExternallyCommittedHeld(slot, id)
+	result := source.publishExternallyCommittedHeld(slot, id, route)
 	if result == ChannelOperationPosted {
 		admission.posted = true
 	} else {
@@ -1181,15 +1223,20 @@ func (pair *channelExternalCommitPair) abort() bool {
 // A post-effect invariant failure retains the transaction/admissions and must
 // fail-stop; rollback is never legal in Effect or Broken.
 func (pair *channelExternalCommitPair) commit() bool {
-	if pair == nil || pair.self != pair || pair.phase != channelExternalCommitPairEffect {
+	return pair.commitAtRoute(0)
+}
+
+func (pair *channelExternalCommitPair) commitAtRoute(route RouteID) bool {
+	if pair == nil || pair.self != pair || pair.phase != channelExternalCommitPairEffect ||
+		route != 0 && !route.Valid() {
 		return false
 	}
-	firstResult := pair.endpointA.publishExternallyCommitted()
+	firstResult := pair.endpointA.publishExternallyCommittedAtRoute(route)
 	if firstResult != ChannelOperationPosted {
 		pair.phase = channelExternalCommitPairBroken
 		return false
 	}
-	secondResult := pair.endpointB.publishExternallyCommitted()
+	secondResult := pair.endpointB.publishExternallyCommittedAtRoute(route)
 	if secondResult != ChannelOperationPosted {
 		pair.phase = channelExternalCommitPairBroken
 		return false
@@ -1285,6 +1332,13 @@ func (pair *ChannelExternalCommitPair) Abort() bool {
 
 func (pair *ChannelExternalCommitPair) Commit() bool {
 	return pair != nil && pair.transaction.commit()
+}
+
+// CommitAtRoute is Commit with an advisory producer-locality hint. It is used
+// only by a currently running logical Go task; foreign and asynchronous
+// producers retain Commit's route-zero behavior.
+func (pair *ChannelExternalCommitPair) CommitAtRoute(route RouteID) bool {
+	return pair != nil && pair.transaction.commitAtRoute(route)
 }
 
 // ChannelExternalCommit is the single-endpoint counterpart of the pair
@@ -1427,11 +1481,19 @@ func (transaction *ChannelExternalCommit) Abort() bool {
 // releases the frame-lifetime admission. The hchan caller requests the exact
 // executor only after this method returns true.
 func (transaction *ChannelExternalCommit) Commit() bool {
+	return transaction.CommitAtRoute(0)
+}
+
+// CommitAtRoute is Commit with an advisory producer-locality hint. The hint
+// does not participate in the transaction proof and can be ignored by every
+// single-owner target.
+func (transaction *ChannelExternalCommit) CommitAtRoute(route RouteID) bool {
 	if transaction == nil || transaction.self != transaction ||
-		transaction.phase != channelExternalCommitPairEffect || transaction.claim == nil {
+		transaction.phase != channelExternalCommitPairEffect || transaction.claim == nil ||
+		route != 0 && !route.Valid() {
 		return false
 	}
-	if transaction.endpoint.publishExternallyCommitted() != ChannelOperationPosted ||
+	if transaction.endpoint.publishExternallyCommittedAtRoute(route) != ChannelOperationPosted ||
 		!publishExternalSelectClaim(transaction.claim) ||
 		!transaction.endpoint.releaseCommitted() {
 		transaction.phase = channelExternalCommitPairBroken
@@ -1441,20 +1503,29 @@ func (transaction *ChannelExternalCommit) Commit() bool {
 	return true
 }
 
-func (source *ChannelOperationSource) publishExternallyCommittedHeld(slot *channelOperationSlot, id OperationID) ChannelOperationPostResult {
+func (source *ChannelOperationSource) publishExternallyCommittedHeld(
+	slot *channelOperationSlot,
+	id OperationID,
+	route RouteID,
+) ChannelOperationPostResult {
 	if preemptLoad(&slot.generation) != id.Generation ||
-		preemptLoad(&slot.external) != uint32(channelExternalExposed) {
+		preemptLoad(&slot.external) != uint32(channelExternalExposed) || route != 0 && !route.Valid() {
 		return ChannelOperationPostStale
 	}
 	state := producerSourceLifecycle(preemptLoad(&slot.state))
 	if state != producerSourceActive && state != producerSourceClosing {
 		return ChannelOperationPostClosed
 	}
+	committed, committedOK := makeChannelPhysicalWord(channelPhysicalCommitted, route)
+	if !committedOK {
+		return ChannelOperationPostInvalid
+	}
 	for {
-		physical := channelPhysicalState(preemptLoad(&slot.physical))
+		word := preemptLoad(&slot.physical)
+		physical := channelPhysicalStateOf(word)
 		switch physical {
 		case channelPhysicalIdle, channelPhysicalReady, channelPhysicalRetryBudget:
-			if !preemptCompareAndSwap(&slot.physical, uint32(physical), uint32(channelPhysicalCommitted)) {
+			if !preemptCompareAndSwap(&slot.physical, word, committed) {
 				continue
 			}
 		case channelPhysicalCommitted:
@@ -1765,7 +1836,7 @@ func (source *ChannelOperationSource) TryCommit(request ParkCommitRequest, owner
 		(!owner.held || owner.claim != slot.claim || selectClaimLoad(slot.claim) != selectClaimAcquiring) {
 		return ParkCommitAttempt{}, false
 	}
-	switch channelPhysicalState(preemptLoad(&slot.physical)) {
+	switch channelPhysicalStateOf(preemptLoad(&slot.physical)) {
 	case channelPhysicalRetryBudget:
 		return request.RetryBudget(), true
 	case channelPhysicalIdle:
@@ -1895,7 +1966,7 @@ func (source *ChannelOperationSource) ConfirmQuiesced(p *P, id OperationID) bool
 	if !terminal {
 		return false
 	}
-	physical := channelPhysicalState(preemptLoad(&slot.physical))
+	physical := channelPhysicalStateOf(preemptLoad(&slot.physical))
 	if disposition == OperationDispositionWinner {
 		if physical != channelPhysicalCommitted || slot.record.resultState != operationResultOwned &&
 			slot.record.resultState != operationResultLeased && slot.record.resultState != operationResultTaken &&
@@ -1950,6 +2021,24 @@ func (source *ChannelOperationSource) ResetSelectClaim(p *P, claim *SelectClaim)
 	return preemptCompareAndSwap(&claim.state, selectClaimClaimed, selectClaimOpen)
 }
 
+// CompletionRoute returns the optional producer-locality hint retained by one
+// terminal winning channel operation. The source owner may inspect it only
+// after detach and before Recycle clears the phase-overlaid physical word.
+// Route zero is a valid answer and means that no migration preference exists.
+func (source *ChannelOperationSource) CompletionRoute(p *P, id OperationID) (RouteID, bool) {
+	slot, ok := channelOperationSlotFor(source, id)
+	if !ok || !validChannelOperationOwner(source, p) ||
+		preemptLoad(&slot.generation) != id.Generation || !slot.record.Matches(id) ||
+		slot.record.phase != operationDetached || !slot.record.resolutionApplied {
+		return 0, false
+	}
+	disposition, terminal := OperationDispositionOf(&slot.record, id)
+	if !terminal || disposition != OperationDispositionWinner {
+		return 0, false
+	}
+	return channelPhysicalCompletionRoute(preemptLoad(&slot.physical))
+}
+
 func (source *ChannelOperationSource) TakeResult(p *P, lease OperationResultLease) bool {
 	id, ok := lease.ID()
 	if !ok || !validChannelOperationOwner(source, p) {
@@ -1978,7 +2067,7 @@ func (source *ChannelOperationSource) Recycle(p *P, id OperationID) bool {
 		!OperationCanRecycle(&slot.record, id) {
 		return false
 	}
-	physical := channelPhysicalState(preemptLoad(&slot.physical))
+	physical := channelPhysicalStateOf(preemptLoad(&slot.physical))
 	if physical != channelPhysicalIdle && physical != channelPhysicalCommitted {
 		return false
 	}

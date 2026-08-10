@@ -76,6 +76,16 @@ func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDrive
 	if !distribution.Valid() {
 		return true
 	}
+	return coroTargetPublishReadyDistributionV1(state, distribution)
+}
+
+func coroTargetPublishReadyDistributionV1(
+	state *coroNativeFleetStateV1,
+	distribution coro.RunnableDistribution,
+) bool {
+	if state == nil || !distribution.Valid() {
+		return false
+	}
 	target, valid := coroNativeFleetDomainForHandleV1(
 		state,
 		distribution.Target,
@@ -88,6 +98,48 @@ func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDrive
 		return coroTargetReadyDistributionFailV1("native ready distribution doorbell failed")
 	}
 	return true
+}
+
+// coroTargetAfterSourceReductionV1 consumes the optional producer-locality
+// hint only after epoch-B cleanup has promoted a source-neutral park. A target
+// must have published exact runnable demand, so a producer which wakes a peer
+// and then keeps computing never captures that peer behind itself.
+func coroTargetAfterSourceReductionV1(
+	source *coro.P,
+	driver *coro.ExecutorDriver,
+	progress coro.ExecutorPollProgress,
+) (distributed, ok bool) {
+	if !progress.Complete || progress.Promoted == 0 {
+		return false, true
+	}
+	state := &coroNativeFleetV1State
+	if source == nil || driver == nil {
+		return false, coroTargetReadyDistributionFailV1("native source distribution lacks source owner")
+	}
+	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
+		return false, true
+	}
+	if state.lifecycle != coroNativeFleetActiveV1 {
+		return false, coroTargetReadyDistributionFailV1("native source distribution fleet is not active")
+	}
+	sourceDomain, ok := coroTargetReadyDistributionDomainV1(source, driver)
+	if !ok {
+		return false, coroTargetReadyDistributionFailV1("native source distribution route mismatch")
+	}
+	distribution, accepted := state.fleet.DistributeMaterializedRunnableToPreferredRoute(
+		sourceDomain.handle,
+		source,
+	)
+	if !accepted {
+		return false, coroTargetReadyDistributionFailV1("native source distribution core rejected owner")
+	}
+	if !distribution.Valid() {
+		return false, true
+	}
+	if !coroTargetPublishReadyDistributionV1(state, distribution) {
+		return false, false
+	}
+	return true, true
 }
 
 // coroTargetDrainProgramTransfersV1 imports the adopted route-1 mailbox while

@@ -335,7 +335,7 @@ func commitCoroRecvWaiterLocked(w *chanWaiter, src unsafe.Pointer, eltSize int, 
 		zeroChanRecv(w.elem, eltSize)
 	}
 	w.status = status
-	if !transaction.Commit() || !requestCoroChannelExecutorV1(w.coro) {
+	if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(w.coro) {
 		return coroChanMatchInvalid
 	}
 	return coroChanMatchCommitted
@@ -370,7 +370,7 @@ func commitCoroSendWaiterLocked(w *chanWaiter, dst unsafe.Pointer, eltSize int, 
 		copyChanElem(dst, w.elem, eltSize)
 	}
 	w.status = status
-	if !transaction.Commit() || !requestCoroChannelExecutorV1(w.coro) {
+	if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(w.coro) {
 		return coroChanMatchInvalid
 	}
 	return coroChanMatchCommitted
@@ -410,7 +410,7 @@ func commitCoroPairLocked(send, recv *chanWaiter, eltSize int) coroChanMatchResu
 	copyChanElem(recv.elem, send.elem, eltSize)
 	send.status = waitSendOK
 	recv.status = waitRecvOK
-	if !transaction.Commit() || !requestCoroChannelPairExecutorsV1(send.coro, recv.coro) {
+	if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelPairExecutorsV1(send.coro, recv.coro) {
 		return coroChanMatchInvalid
 	}
 	return coroChanMatchCommitted
@@ -444,7 +444,7 @@ func finishCurrentCoroChannelCommit(
 		return false
 	}
 	waiter.status = status
-	return transaction.Commit() && requestCoroChannelExecutorV1(waiter.coro)
+	return transaction.CommitAtRoute(coroCurrentTaskRouteV1()) && requestCoroChannelExecutorV1(waiter.coro)
 }
 
 func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
@@ -499,7 +499,7 @@ func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 		copyChanElem(peer.elem, waiter.elem, ch.elemsize)
 		waiter.status = waitSendOK
 		peer.finish(waitRecvOK)
-		if !transaction.Commit() || !requestCoroChannelExecutorV1(waiter.coro) {
+		if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
 			return false, false
 		}
 		return true, true
@@ -517,7 +517,7 @@ func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 		}
 		ch.qcount++
 		waiter.status = waitSendOK
-		if !transaction.Commit() || !requestCoroChannelExecutorV1(waiter.coro) {
+		if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
 			return false, false
 		}
 		return true, true
@@ -570,7 +570,7 @@ func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 			copyChanElem(waiter.elem, peer.elem, ch.elemsize)
 			waiter.status = waitRecvOK
 			peer.finish(waitSendOK)
-			if !transaction.Commit() || !requestCoroChannelExecutorV1(waiter.coro) {
+			if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
 				return false, false
 			}
 			return true, true
@@ -589,7 +589,7 @@ func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 		}
 		ch.qcount--
 		waiter.status = waitRecvOK
-		if !transaction.Commit() || !requestCoroChannelExecutorV1(waiter.coro) {
+		if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
 			return false, false
 		}
 		// Refill is a separate committed sender endpoint under the same hchan
@@ -606,7 +606,7 @@ func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 		}
 		zeroChanRecv(waiter.elem, ch.elemsize)
 		waiter.status = waitRecvClosed
-		if !transaction.Commit() || !requestCoroChannelExecutorV1(waiter.coro) {
+		if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
 			return false, false
 		}
 		return true, true

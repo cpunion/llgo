@@ -18,6 +18,36 @@ package coro
 
 import "testing"
 
+func TestChannelPhysicalWordCarriesOnlyCommittedRouteHint(t *testing.T) {
+	for _, state := range []channelPhysicalState{
+		channelPhysicalIdle,
+		channelPhysicalReady,
+		channelPhysicalRetryBudget,
+		channelPhysicalCommitted,
+	} {
+		word, ok := makeChannelPhysicalWord(state, 0)
+		if !ok || word != uint32(state) || channelPhysicalStateOf(word) != state {
+			t.Fatalf("route-zero physical word %d = (%#x,%t)", state, word, ok)
+		}
+	}
+	word, ok := makeChannelPhysicalWord(channelPhysicalCommitted, 7)
+	if !ok || channelPhysicalStateOf(word) != channelPhysicalCommitted {
+		t.Fatalf("committed route word = (%#x,%t)", word, ok)
+	}
+	if route, valid := channelPhysicalCompletionRoute(word); !valid || route != 7 {
+		t.Fatalf("committed route decode = (%d,%t)", route, valid)
+	}
+	if _, ok := makeChannelPhysicalWord(channelPhysicalReady, 7); ok {
+		t.Fatal("non-committed physical state accepted a route hint")
+	}
+	if _, ok := makeChannelPhysicalWord(channelPhysicalCommitted, OperationRouteEncodingCapacity+1); ok {
+		t.Fatal("physical word accepted an unencodable route hint")
+	}
+	if state := channelPhysicalStateOf(uint32(7) << channelPhysicalRouteShift); state <= channelPhysicalCommitted {
+		t.Fatalf("physical decoder accepted route on idle state: %d", state)
+	}
+}
+
 func TestChannelExternalCommitSingleAbortCopyAndCommit(t *testing.T) {
 	fixture := newChannelClaimCoreFixture(t, "channel-single-commit", []uint32{91}, true, 0)
 	slot, ok := channelOperationSlotFor(fixture.source, fixture.ids[0])
@@ -137,6 +167,44 @@ func TestChannelExternalCommitSingleFailureIsAtomic(t *testing.T) {
 	decision := takeChannelClaimCoreDecision(t, fixture)
 	if decision.outcome != ParkOutcomeCompleted || !decision.lease.Valid() {
 		t.Fatalf("single failure cleanup decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
+
+func TestChannelExternalCommitRetainsProducerRouteThroughDetach(t *testing.T) {
+	fixture := newChannelClaimCoreFixture(t, "channel-single-route-hint", []uint32{96}, true, 0)
+	slot, ok := channelOperationSlotFor(fixture.source, fixture.ids[0])
+	if !ok {
+		t.Fatal("find route-hint channel slot")
+	}
+	var transaction ChannelExternalCommit
+	if result := BeginChannelExternalCommit(
+		&transaction,
+		fixture.source,
+		fixture.ids[0],
+		fixture.claim,
+	); result != ChannelExternalCommitBeginPrepared || !transaction.BeginEffect() {
+		t.Fatalf("begin route-hint transaction = %d/%+v", result, transaction)
+	}
+	if transaction.CommitAtRoute(OperationRouteEncodingCapacity+1) ||
+		transaction.phase != channelExternalCommitPairEffect {
+		t.Fatal("invalid route mutated an external commit transaction")
+	}
+	if !transaction.CommitAtRoute(7) {
+		t.Fatal("commit channel producer route hint")
+	}
+	if route, valid := channelPhysicalCompletionRoute(preemptLoad(&slot.physical)); !valid || route != 7 {
+		t.Fatalf("slot lost channel producer route = (%d,%t), word=%#x",
+			route, valid, preemptLoad(&slot.physical))
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	pollChannelClaimCoreComplete(t, fixture)
+	if route, valid := fixture.source.CompletionRoute(fixture.p, fixture.ids[0]); !valid || route != 7 {
+		t.Fatalf("detached channel completion route = (%d,%t)", route, valid)
+	}
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || !decision.lease.Valid() {
+		t.Fatalf("route-hint channel decision = %+v", decision)
 	}
 	releaseChannelClaimCoreFixture(t, fixture, decision)
 }

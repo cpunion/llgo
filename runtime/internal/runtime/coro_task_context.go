@@ -35,7 +35,7 @@ func coroBindRuntimeContext(task, parent *coro.G, main bool) bool {
 	var parentG *g
 	if parent != nil {
 		parentContext := (*runtimeContext)(coro.TaskLocal(parent))
-		if !validCoroRuntimeContext(parentContext) {
+		if !validCoroRuntimeTaskContext(parent, parentContext) {
 			return false
 		}
 		parentG = &parentContext.g
@@ -45,6 +45,7 @@ func coroBindRuntimeContext(task, parent *coro.G, main bool) bool {
 	gp.localContext = &ctx.local
 	gp.isMain = main
 	if coro.BindTaskLocal(task, unsafe.Pointer(ctx)) {
+		gp.startarg = unsafe.Pointer(task)
 		return true
 	}
 	discardCoroRuntimeContext(ctx)
@@ -60,13 +61,18 @@ func validCoroRuntimeContext(ctx *runtimeContext) bool {
 		pp.m == mp && gp.localContext == &ctx.local
 }
 
+func validCoroRuntimeTaskContext(task *coro.G, ctx *runtimeContext) bool {
+	return task != nil && validCoroRuntimeContext(ctx) && ctx.g.startfn == nil &&
+		ctx.g.startarg == unsafe.Pointer(task)
+}
+
 // coroEnterRuntimeContext installs task's runtime G only for the physical
 // llvm.coro.resume interval. A synchronous C-to-Go reentry resumes a child
 // frame of the same logical G while its parent resume remains active below C;
 // that exact nested case borrows the existing install.
 func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool) {
 	ctx := (*runtimeContext)(coro.TaskLocal(task))
-	if !validCoroRuntimeContext(ctx) {
+	if !validCoroRuntimeTaskContext(task, ctx) {
 		return coroRuntimeContextActivationV1{}, false
 	}
 	gp, pp := &ctx.g, &ctx.p
@@ -88,7 +94,7 @@ func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool
 
 func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivationV1) bool {
 	ctx := (*runtimeContext)(coro.TaskLocal(task))
-	if !validCoroRuntimeContext(ctx) {
+	if !validCoroRuntimeTaskContext(task, ctx) {
 		return false
 	}
 	gp, pp := &ctx.g, &ctx.p
@@ -107,12 +113,13 @@ func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivati
 // coroReleaseRuntimeContext tears down the runtime sidecar after the scheduler
 // has made the G terminal but before its scanned task allocation is cleared.
 func coroReleaseRuntimeContext(task *coro.G) bool {
-	raw, ok := coro.ReleaseTaskLocal(task)
-	if !ok {
+	raw := coro.TaskLocal(task)
+	ctx := (*runtimeContext)(raw)
+	if !validCoroRuntimeTaskContext(task, ctx) {
 		return false
 	}
-	ctx := (*runtimeContext)(raw)
-	if !validCoroRuntimeContext(ctx) {
+	released, ok := coro.ReleaseTaskLocal(task)
+	if !ok || released != raw {
 		return false
 	}
 	gp, mp, pp := &ctx.g, &ctx.m, &ctx.p
@@ -127,6 +134,7 @@ func coroReleaseRuntimeContext(task *coro.G) bool {
 		c.Free(gp.panic_)
 		gp.panic_ = nil
 	}
+	gp.startarg = nil
 	casgstatus(gp, _Grunnable, _Gdead)
 	setpstatus(pp, _Pdead)
 	pp.m = nil

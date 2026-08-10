@@ -445,6 +445,15 @@ func releaseChannelClaimCoreFixture(t *testing.T, fixture *channelClaimCoreFixtu
 }
 
 func externallyCommitChannelCandidate(t *testing.T, fixture *channelClaimCoreFixture, index int) {
+	externallyCommitChannelCandidateAtRoute(t, fixture, index, 0)
+}
+
+func externallyCommitChannelCandidateAtRoute(
+	t *testing.T,
+	fixture *channelClaimCoreFixture,
+	index int,
+	route RouteID,
+) {
 	t.Helper()
 	admission, acquired := fixture.source.acquireExternalCommit(fixture.ids[index])
 	if acquired != channelExternalCommitAcquired {
@@ -457,7 +466,7 @@ func externallyCommitChannelCandidate(t *testing.T, fixture *channelClaimCoreFix
 	if !beginExternalSelectClaimEffect(fixture.claim) {
 		t.Fatal("begin externally committed channel effect")
 	}
-	if result := admission.publishExternallyCommitted(); result != ChannelOperationPosted {
+	if result := admission.publishExternallyCommittedAtRoute(route); result != ChannelOperationPosted {
 		t.Fatalf("publish externally committed channel candidate = %d", result)
 	}
 	if !publishExternalSelectClaim(fixture.claim) {

@@ -130,6 +130,38 @@ func serviceExecutorRunSource(driver *ExecutorDriver, now int64, withDeadline bo
 	return ExecutorRunStep{Kind: ExecutorRunStepSource, Poll: progress}, true
 }
 
+// CommitExecutorRunSourceDistribution closes the optional target-side ready
+// distribution boundary after one complete Source reduction. Source completion
+// records readyDebt before returning so a hot source cannot starve a newly
+// materialized continuation. If the target durably transferred the last such
+// continuation to another demanded route, that debt has been physically paid
+// by the transfer and must not make the now-empty source driver invalid.
+//
+// The target reports only whether a durable transfer was published. It never
+// mutates the runner cursor directly. A remaining local runnable retains the
+// debt and therefore still wins before another source epoch.
+func CommitExecutorRunSourceDistribution(driver *ExecutorDriver, distributed bool) bool {
+	if driver == nil || driver.state != executorDriverActive || driver.p == nil ||
+		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
+		driver.p.current != nil {
+		return false
+	}
+	if !distributed || runnableForOSThreadOwner(driver.p) {
+		return validExecutorDriver(driver)
+	}
+	if !driver.run.readyDebt {
+		return false
+	}
+	driver.run.readyDebt = false
+	if validExecutorDriver(driver) {
+		return true
+	}
+	// Preserve the fail-closed diagnostic state if an unrelated invariant was
+	// already broken; callers must reject the complete source reduction.
+	driver.run.readyDebt = true
+	return false
+}
+
 func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	p := driver.p
 	if !validReadyQueueHeader(p) {

@@ -24,6 +24,14 @@ func coroTargetAfterStableRunActionV1(*coro.P, *coro.ExecutorDriver) bool {
 	return true
 }
 
+func coroTargetAfterSourceReductionV1(
+	*coro.P,
+	*coro.ExecutorDriver,
+	coro.ExecutorPollProgress,
+) (distributed, ok bool) {
+	return false, true
+}
+
 func coroTargetDrainProgramTransfersV1(*coro.P, *coro.ExecutorDriver) (bool, bool) {
 	return false, true
 }

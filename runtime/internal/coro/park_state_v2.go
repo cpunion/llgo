@@ -141,7 +141,8 @@ type ParkLink struct {
 // seed is phase-overlaid without changing the cross-target layout: Preparing
 // uses it to assign immutable candidate ranks; Seal sorts the intrusive list
 // and resets it; Parked resolution uses it as the current snapshot's exact
-// candidate-visit count. resolving occupies existing scalar padding and freezes
+// candidate-visit count; Materialized uses it for an optional producer RouteID.
+// resolving occupies existing scalar padding and freezes
 // every owner-side publication/cancellation entry while the resumable resolver
 // spans host entries; it does not change the 32-bit/WASM or native layout.
 // While a ReadyThenTryCommit request is outstanding, the otherwise-terminal
@@ -185,7 +186,7 @@ func validPendingParkCommitCursor(state *ParkState) bool {
 
 func validMaterializedParkHeader(state *ParkState) bool {
 	if state == nil || !validParkTicket(state.ticket) || state.expected != 0 || state.attached != 0 ||
-		state.seed != 0 || state.hasDefault || state.cancelKind != ParkCancelNone ||
+		state.seed > operationRouteMask || state.hasDefault || state.cancelKind != ParkCancelNone ||
 		state.winnerID != (OperationID{}) || state.winnerRecord != nil || state.head != nil {
 		return false
 	}
@@ -333,14 +334,17 @@ func releasableParkState(state *ParkState) bool {
 
 func materializedParkState(state *ParkState, ticket ParkTicket, outcome ParkOutcome, caseID uint32) bool {
 	if state == nil || !validParkState(state) || state.phase != parkConsumed || state.ticket != ticket ||
+		state.seed > operationRouteMask ||
 		outcome == ParkOutcomePending || outcome == ParkOutcomeCanceled && caseID != 0 ||
 		(outcome == ParkOutcomeCompleted || outcome == ParkOutcomeDefault) && caseID == 0 {
 		return false
 	}
 	kind, phase := state.taskCancelKind, state.taskCancelPhase
+	preferredRoute := state.seed
 	*state = ParkState{
 		ticket:          ticket,
 		phase:           parkMaterialized,
+		seed:            preferredRoute,
 		taskCancelKind:  kind,
 		taskCancelPhase: phase,
 		outcome:         outcome,
@@ -774,8 +778,31 @@ func ConsumeParkSet(state *ParkState, ticket ParkTicket) (outcome ParkOutcome, c
 		lease = OperationResultLease{id: state.winnerID, ticket: ticket}
 		state.winnerRecord = nil
 	}
+	// Resolution no longer needs its bounded visit cursor after consumption.
+	// The same scalar is phase-overlaid below with an optional materialized
+	// runnable RouteID, avoiding another permanent G field.
+	state.seed = 0
 	state.phase = parkConsumed
 	return outcome, caseID, lease, true
+}
+
+func setConsumedParkPreferredRoute(state *ParkState, ticket ParkTicket, route RouteID) bool {
+	if !validParkState(state) || state.phase != parkConsumed || state.ticket != ticket ||
+		route != 0 && !route.Valid() {
+		return false
+	}
+	state.seed = uint32(route)
+	return validParkState(state)
+}
+
+// MaterializedRunnablePreferredRoute returns the advisory producer-locality
+// route carried by a source-neutral runnable park. Route zero is a valid
+// answer and means that the target should retain ordinary scheduling policy.
+func MaterializedRunnablePreferredRoute(g *G) (RouteID, bool) {
+	if !ValidG(g) || g.park.phase != parkMaterialized || !validMaterializedParkHeader(&g.park) {
+		return 0, false
+	}
+	return RouteID(g.park.seed), true
 }
 
 // DeliverParkResume is the scheduler-side acknowledgement that a consumed
