@@ -4,6 +4,14 @@ package runtime
 
 type memProfileCounter = uintptr
 
+// Bare-metal runtimes have a single execution context and must not introduce
+// native TLS relocations.
+var (
+	memProfileRemaining uintptr
+	memProfileRandState uint64
+	memProfileInSample  bool
+)
+
 func memProfileAddN(p *memProfileCounter, n uint64) {
 	*p += memProfileCounter(n)
 }

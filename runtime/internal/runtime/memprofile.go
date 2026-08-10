@@ -84,17 +84,15 @@ type memStackBucket struct {
 
 const memStackTabSize = 512 // power of two
 
-var memStackTab [memStackTabSize]*memStackBucket
+var (
+	memStackTab     [memStackTabSize]*memStackBucket
+	memStackTabLock memProfileLock
+)
 
 // memProfileRemaining counts down allocated bytes to the next sample.
-// Thresholds are drawn uniformly from [1, 2*rate) — mean rate — because a
-// deterministic stride starves small allocation sites when they interleave
-// with larger ones (every crossing lands on the big sites; gc randomizes
-// for the same reason). Benign races: sampling is statistical.
-var (
-	memProfileRemaining uintptr
-	memProfileRandState uint64 = 0x9e3779b97f4a7c15
-)
+// It and the random state are physical-thread local, matching gc's per-M
+// sampler: independent allocation streams must not race or phase-lock each
+// other. See memprofile_atomic.go for the native TLS declarations.
 
 func memProfileNextThreshold(rate int) uintptr {
 	// Exponentially distributed with mean rate, like gc's fastexprand:
@@ -103,6 +101,14 @@ func memProfileNextThreshold(rate int) uintptr {
 	// sampling points onto the large sites and skews per-site estimates
 	// (observed 1.6x on goroot heapsampling's interleaved sizes).
 	x := memProfileRandState
+	if x == 0 {
+		// Mix the physical stack address into the first state so independently
+		// initialized threads do not replay the same threshold stream.
+		x = 0x9e3779b97f4a7c15 ^ uint64(uintptr(unsafe.Pointer(&rate)))
+		if x == 0 {
+			x = 0x9e3779b97f4a7c15
+		}
+	}
 	x ^= x >> 12
 	x ^= x << 25
 	x ^= x >> 27
@@ -136,11 +142,6 @@ func lnApprox(u float64) float64 {
 	lnm := 2 * z * (1 + z2/3 + z2*z2/5 + z2*z2*z2/7)
 	return float64(e)*ln2 + lnm
 }
-
-// memProfileInSample breaks the recursion: allocating a bucket node (and
-// anything the capture path allocates) re-enters recordMemProfileAlloc.
-// Benign-racy flag — a concurrent thread skipping one sample is fine.
-var memProfileInSample bool
 
 func recordMemProfileAlloc(size uintptr) {
 	if size == 0 {
@@ -209,21 +210,43 @@ func sampleMemProfileStack(size uintptr) {
 		h = h*33 + pcs[i]
 	}
 	slot := h & (memStackTabSize - 1)
-	for b := memStackTab[slot]; b != nil; b = b.next {
-		if b.hash == h && int(b.nstk) == n && memStackEqual(b, pcs[:n]) {
-			memStackAdd(b, size)
-			return
-		}
+	memStackTabLock.lock()
+	if b := findMemStackBucket(slot, h, pcs[:n]); b != nil {
+		memStackAdd(b, size)
+		memStackTabLock.unlock()
+		return
 	}
+	memStackTabLock.unlock()
+
+	// Allocation re-enters recordMemProfileAlloc, where this physical
+	// thread's recursion guard suppresses the internal allocation. Keep the
+	// allocation outside the table lock so allocator or finalizer work cannot
+	// invert lock order with a concurrent MemProfile call.
 	b := (*memStackBucket)(AllocZ(unsafe.Sizeof(memStackBucket{})))
 	b.hash = h
 	b.nstk = int32(n)
 	copy(b.stk[:], pcs[:n])
+
+	memStackTabLock.lock()
+	if existing := findMemStackBucket(slot, h, pcs[:n]); existing != nil {
+		memStackAdd(existing, size)
+		memStackTabLock.unlock()
+		return
+	}
 	memStackAdd(b, size)
-	// Benign-racy publish: a lost insert loses one sample, never corrupts
-	// (nodes are immutable once linked and the list is prepend-only).
 	b.next = memStackTab[slot]
 	memStackTab[slot] = b
+	memStackTabLock.unlock()
+}
+
+// findMemStackBucket is called with memStackTabLock held.
+func findMemStackBucket(slot, hash uintptr, pcs []uintptr) *memStackBucket {
+	for b := memStackTab[slot]; b != nil; b = b.next {
+		if b.hash == hash && int(b.nstk) == len(pcs) && memStackEqual(b, pcs) {
+			return b
+		}
+	}
+	return nil
 }
 
 func memStackEqual(b *memStackBucket, pcs []uintptr) bool {
@@ -283,13 +306,17 @@ func MemProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) {
 }
 
 func memProfileStacks(p []MemProfileRecord) (n int, ok bool) {
-	// Freeze sampling while enumerating so the count cannot grow between
-	// a caller's sizing call and its fill call. Explicit reset instead of
-	// defer: the wasm backend crashes in instruction selection on the
-	// deferred closure here.
+	// Protect both list publication and enumeration. The public wrappers
+	// tolerate a bucket appearing between their sizing and fill calls, but
+	// each individual snapshot must see a valid immutable list. Snapshot
+	// construction may itself allocate, so suppress recursive sampling only
+	// on this physical thread while the table lock is held.
+	wasInSample := memProfileInSample
 	memProfileInSample = true
+	memStackTabLock.lock()
 	n, ok = memProfileStacksLocked(p)
-	memProfileInSample = false
+	memStackTabLock.unlock()
+	memProfileInSample = wasInSample
 	return n, ok
 }
 
