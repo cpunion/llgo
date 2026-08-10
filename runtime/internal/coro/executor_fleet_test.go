@@ -120,6 +120,28 @@ func settleExecutorFleetManual(
 	}
 }
 
+func enqueueMaterializedFleetRunnable(
+	t *testing.T,
+	p *P,
+	task *yieldingTestG,
+	preferred RouteID,
+) {
+	t.Helper()
+	task.g.active.state = FrameSuspended
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	task.g.park = ParkState{
+		ticket:     ParkTicket{generation: 1},
+		phase:      parkMaterialized,
+		seed:       uint32(preferred),
+		outcome:    ParkOutcomeCompleted,
+		winnerCase: 1,
+	}
+	if !validParkState(&task.g.park) || !Enqueue(p, task.g) {
+		t.Fatal("enqueue materialized fleet runnable")
+	}
+}
+
 func TestExecutorFleetHandleIsThreeWordPOD(t *testing.T) {
 	if unsafe.Sizeof(ExecutorFleetHandle{}) != 12 || unsafe.Alignof(ExecutorFleetHandle{}) != 4 ||
 		unsafe.Offsetof(ExecutorFleetHandle{}.Executor) != 4 {
@@ -665,6 +687,102 @@ func TestExecutorFleetDemandSharesSingleInitialButNotSingleYielded(t *testing.T)
 			t.Fatalf("cancel yielded demand = (%t,%t)", inflight, cancelOK)
 		}
 	})
+}
+
+func TestExecutorFleetPreferredMaterializedRunnableRequiresExactDemand(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	target := bindExecutorFleetManualFixture(t, fleet)
+	task := newYieldingTestG(t, "fleet-preferred-materialized")
+	enqueueMaterializedFleetRunnable(t, source.p, task, RouteID(target.handle.Route))
+
+	if distribution, ok := fleet.DistributeMaterializedRunnableToPreferredRoute(
+		source.handle,
+		source.p,
+	); !ok || distribution != (RunnableDistribution{}) || source.p.readyHead != task.g {
+		t.Fatalf("preferred runnable moved without demand = %+v/%t head=%p",
+			distribution, ok, source.p.readyHead)
+	}
+	if !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+		t.Fatal("request preferred materialized runnable")
+	}
+	distribution, ok := fleet.DistributeMaterializedRunnableToPreferredRoute(
+		source.handle,
+		source.p,
+	)
+	if !ok || !distribution.Valid() || distribution.Target != target.handle ||
+		distribution.Count != 1 || source.p.readyHead != nil || source.p.readyTail != nil ||
+		preemptLoad(&fleet.slots[target.handle.Route-1].runnableDemand) != uint32(runnableDemandIdle) {
+		t.Fatalf("preferred materialized distribution = %+v/%t source=(%p,%p) demand=%d",
+			distribution, ok, source.p.readyHead, source.p.readyTail,
+			preemptLoad(&fleet.slots[target.handle.Route-1].runnableDemand))
+	}
+	if !fleet.ImportPNeutralRunnable(target.handle, target.p, distribution.Transfer) ||
+		target.p.readyHead != task.g || target.p.readyTail != task.g {
+		t.Fatalf("import preferred materialized runnable = target=(%p,%p)",
+			target.p.readyHead, target.p.readyTail)
+	}
+	if preferred, valid := MaterializedRunnablePreferredRoute(task.g); !valid ||
+		preferred != RouteID(target.handle.Route) {
+		t.Fatalf("import lost preferred materialized route = (%d,%t)", preferred, valid)
+	}
+}
+
+func TestExecutorFleetPreferredMaterializedRunnableSettlesSourceReadyDebt(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	target := bindExecutorFleetManualFixture(t, fleet)
+	task := newYieldingTestG(t, "fleet-preferred-ready-debt")
+	enqueueMaterializedFleetRunnable(t, source.p, task, RouteID(target.handle.Route))
+	// This is the exact stable cursor produced by a completed source epoch
+	// which promoted the materialized continuation before returning to the
+	// target distribution hook.
+	source.driver.run.readyDebt = true
+	if !validExecutorDriver(source.driver) {
+		t.Fatal("prepare source ready debt")
+	}
+	if !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+		t.Fatal("request preferred ready-debt route")
+	}
+	distribution, ok := fleet.DistributeMaterializedRunnableToPreferredRoute(
+		source.handle,
+		source.p,
+	)
+	if !ok || !distribution.Valid() || validExecutorDriver(source.driver) {
+		t.Fatalf("transfer did not expose stale source debt = %+v/%t valid=%t",
+			distribution, ok, validExecutorDriver(source.driver))
+	}
+	if !CommitExecutorRunSourceDistribution(source.driver, true) ||
+		source.driver.run.readyDebt || !validExecutorDriver(source.driver) {
+		t.Fatalf("settle source ready debt = cursor:%+v valid:%t",
+			source.driver.run, validExecutorDriver(source.driver))
+	}
+	if !fleet.ImportPNeutralRunnable(target.handle, target.p, distribution.Transfer) ||
+		target.p.readyHead != task.g {
+		t.Fatal("import preferred ready-debt runnable")
+	}
+}
+
+func TestExecutorFleetPreferredMaterializedRunnableNeverScansAnotherDemand(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	preferred := bindExecutorFleetManualFixture(t, fleet)
+	other := bindExecutorFleetManualFixture(t, fleet)
+	task := newYieldingTestG(t, "fleet-exact-preferred-materialized")
+	enqueueMaterializedFleetRunnable(t, source.p, task, RouteID(preferred.handle.Route))
+	if !fleet.RequestPNeutralRunnable(other.handle, other.p) {
+		t.Fatal("request non-preferred materialized route")
+	}
+	if distribution, ok := fleet.DistributeMaterializedRunnableToPreferredRoute(
+		source.handle,
+		source.p,
+	); !ok || distribution != (RunnableDistribution{}) || source.p.readyHead != task.g {
+		t.Fatalf("preferred runnable scanned another demand = %+v/%t head=%p",
+			distribution, ok, source.p.readyHead)
+	}
+	if inflight, ok := fleet.CancelPNeutralRunnableRequest(other.handle, other.p); !ok || inflight {
+		t.Fatalf("cancel non-preferred demand = (%t,%t)", inflight, ok)
+	}
 }
 
 func TestExecutorFleetDemandDistributesBoundedHalfBatch(t *testing.T) {

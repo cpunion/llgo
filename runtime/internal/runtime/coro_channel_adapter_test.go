@@ -479,6 +479,8 @@ func TestCoroChannelAdapterCleanupCursorBoundsPeerWork(t *testing.T) {
 }
 
 func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
+	coroCurrentTaskRouteTestV1 = 7
+	defer func() { coroCurrentTaskRouteTestV1 = 0 }()
 	p := new(coro.P)
 	driver := new(coro.ExecutorDriver)
 	handle, ok := coroProgramExecutorRegistryState.Register()
@@ -509,6 +511,11 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	parkCoroChannelAdapterFrame(t, p, sender, closedSenderAction, closed, unsafe.Pointer(&sendValue), &sendState, true)
 	ChanClose(closed)
 	pollCoroChannelAdapterExecutor(t, driver)
+	for _, frame := range []*coroChannelAdapterFrame{receiver, sender} {
+		if route, valid := coro.MaterializedRunnablePreferredRoute(frame.g); !valid || route != 7 {
+			t.Fatalf("closed-channel materialized producer route = (%d,%t)", route, valid)
+		}
+	}
 	closedReady := map[*coro.G]bool{}
 	for len(closedReady) != 2 {
 		g, runnable := coro.NextRunnable(p)
@@ -553,6 +560,11 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	sendAction := dequeueCoroChannelAdapterFrame(t, p, pairSender)
 	parkCoroChannelAdapterFrame(t, p, pairSender, sendAction, ch, unsafe.Pointer(&sendValue), pairSenderState, true)
 	pollCoroChannelAdapterExecutor(t, driver)
+	for _, frame := range []*coroChannelAdapterFrame{pairReceiver, pairSender} {
+		if route, valid := coro.MaterializedRunnablePreferredRoute(frame.g); !valid || route != 7 {
+			t.Fatalf("paired-channel materialized producer route = (%d,%t)", route, valid)
+		}
+	}
 
 	ready := map[*coro.G]bool{}
 	for len(ready) != 2 {

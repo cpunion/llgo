@@ -675,6 +675,75 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	return RunnableDistribution{}, true
 }
 
+// DistributeMaterializedRunnableToPreferredRoute services one exact causal
+// locality hint after owner-side event cleanup has made the continuation fully
+// P-neutral. Unlike general surplus sharing, it never scans for an arbitrary
+// destination and never sends work to a busy route: the preferred route must
+// already have published runnable demand. This preserves the no-starvation
+// property for a producer which wakes a peer and then enters a non-safepointed
+// compute loop, while allowing channel/semaphore-style handoff loops to
+// converge onto the producer's newly idle P.
+func (fleet *ExecutorFleet) DistributeMaterializedRunnableToPreferredRoute(
+	sourceHandle ExecutorFleetHandle,
+	source *P,
+) (distribution RunnableDistribution, ok bool) {
+	sourceSlot, _, sourceOK := executorFleetSlotFor(fleet, sourceHandle)
+	if !sourceOK || preemptLoad(&sourceSlot.state) != uint32(executorFleetSlotActive) ||
+		sourceSlot.p != source || source == nil || !validReadyQueueHeader(source) {
+		return RunnableDistribution{}, false
+	}
+	if source.readyHead == nil || !stableRunnableTransferP(source) {
+		return RunnableDistribution{}, true
+	}
+	if !validReadyQueue(source) {
+		return RunnableDistribution{}, false
+	}
+	candidate := source.readyHead
+	preferred, preferredOK := MaterializedRunnablePreferredRoute(candidate)
+	if !preferredOK {
+		return RunnableDistribution{}, true
+	}
+	if preferred == 0 || uint32(preferred) > ExecutorFleetCapacity ||
+		preferred == RouteID(sourceHandle.Route) {
+		return RunnableDistribution{}, true
+	}
+	target := &fleet.slots[uint32(preferred)-1]
+	if preemptLoad(&target.state) != uint32(executorFleetSlotActive) ||
+		target.handle.Route != uint32(preferred) || target.handle == sourceHandle ||
+		!preemptCompareAndSwap(
+			&target.runnableDemand,
+			uint32(runnableDemandRequested),
+			uint32(runnableDemandClaimed),
+		) {
+		return RunnableDistribution{}, true
+	}
+	id, request, published := fleet.PublishPNeutralRunnableAndRequest(
+		target.handle,
+		source,
+		candidate,
+	)
+	if !published {
+		if !restoreRunnableDemandAfterFailedClaim(target) {
+			return RunnableDistribution{}, false
+		}
+		return RunnableDistribution{}, true
+	}
+	if !preemptCompareAndSwap(
+		&target.runnableDemand,
+		uint32(runnableDemandClaimed),
+		uint32(runnableDemandIdle),
+	) {
+		return RunnableDistribution{}, false
+	}
+	distribution = RunnableDistribution{
+		Target:   target.handle,
+		Transfer: id,
+		Count:    1,
+		Request:  request,
+	}
+	return distribution, distribution.Valid()
+}
+
 // ImportPNeutralRunnable imports one exact FIFO transfer on its destination P.
 // It is owner-serialized and accepted while Active or RouteClosing, allowing a
 // sealed route to drain before its pointer suffix is retired.

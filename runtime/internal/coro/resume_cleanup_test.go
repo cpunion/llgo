@@ -95,7 +95,7 @@ func TestTypedResumeCleanupIsBoundedAndPNeutral(t *testing.T) {
 			}
 		},
 	)
-	externallyCommitChannelCandidate(t, fixture, 1)
+	externallyCommitChannelCandidateAtRoute(t, fixture, 1, 7)
 	winnerSlot, _ := channelOperationSlotFor(fixture.source, fixture.ids[1])
 	if !producerAdmissionAcquire(&winnerSlot.inflight) {
 		t.Fatal("pin admitted producer across typed cleanup ApplyOne")
@@ -174,6 +174,9 @@ complete:
 		t.Fatalf("typed cleanup retained owner state: packet=%+v plan=%+v wait=%+v ids=%+v empty=%t",
 			packet, plan, fixture.wait, fixture.ids,
 			channelOperationSourceEmpty(fixture.source, fixture.p))
+	}
+	if preferred, valid := MaterializedRunnablePreferredRoute(fixture.task.g); !valid || preferred != 7 {
+		t.Fatalf("typed cleanup materialized route = (%d,%t)", preferred, valid)
 	}
 
 	target := new(P)

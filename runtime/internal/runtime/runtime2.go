@@ -66,7 +66,10 @@ type g struct {
 	goid         uint64
 	parentGoid   uint64
 
-	startfn  goroutineFunc
+	startfn goroutineFunc
+	// startarg belongs to the pthread entry only until mstart consumes and
+	// clears it. A stackless logical G has no such entry, so its runtime sidecar
+	// phase-overlays this otherwise idle pointer with the scheduler G identity.
 	startarg unsafe.Pointer
 
 	context *runtimeContext
