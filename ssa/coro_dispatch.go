@@ -100,7 +100,7 @@ type CoroPlainDispatchCallOptions struct {
 //
 //	{ version i32, flags i32, hashLo i64, hashHi i64,
 //	  plainEntry ptr, coroEntry ptr, resultSize uintptr,
-//	  resultAlign uintptr }
+//	  resultAlign uintptr, codeEntry ptr }
 //
 // plainEntry is a target-specific context thunk and coroEntry is null. The
 // descriptor is returned as a pointer. Hash words use big-endian byte order so
@@ -166,7 +166,7 @@ func (p Package) NewCoroPlainDispatchDescriptor(
 	thunk := p.newCoroPlainDispatchThunk(opts.ThunkName, opts.PlainTarget, physicalSig)
 	return p.newCoroDispatchDescriptorGlobal(
 		name, opts.Version, opts.Flags, opts.ABIHash,
-		thunk.impl, llvm.Value{}, opts.Result,
+		thunk.impl, llvm.Value{}, target, opts.Result,
 	)
 }
 
@@ -306,6 +306,7 @@ func (p Program) coroDispatchDescriptorType() Type {
 		p.VoidPtr(),
 		p.Uintptr(),
 		p.Uintptr(),
+		p.VoidPtr(),
 	)
 }
 
@@ -386,7 +387,7 @@ func (p Package) matchesCoroPlainDispatchDescriptor(
 		return false
 	}
 	initializer := descriptor.impl.Initializer()
-	if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 8 {
+	if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 9 {
 		return false
 	}
 	wantFixed := []uint64{
@@ -405,8 +406,10 @@ func (p Package) matchesCoroPlainDispatchDescriptor(
 		initializer.Operand(5).IsAConstantPointerNull().IsNil() {
 		return false
 	}
+	code := coroPlainDispatchFunction(initializer.Operand(8))
 	return initializer.Operand(6).ZExtValue() == p.Prog.SizeOf(opts.Result) &&
-		initializer.Operand(7).ZExtValue() == p.Prog.AlignOf(opts.Result)
+		initializer.Operand(7).ZExtValue() == p.Prog.AlignOf(opts.Result) &&
+		!code.IsNil() && code.C == target.C
 }
 
 func coroPlainDispatchThunkCalls(thunk Function, target llvm.Value) bool {

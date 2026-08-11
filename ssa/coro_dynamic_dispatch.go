@@ -42,7 +42,10 @@ type CoroDispatchDescriptorOptions struct {
 	Signature  *types.Signature
 	PlainEntry Expr
 	CoroEntry  Expr
-	Result     Type
+	// CodeEntry is the compiler-known physical function identity returned by
+	// reflection. It is never invoked through the descriptor dispatch ABI.
+	CodeEntry Expr
+	Result    Type
 }
 
 // CoroDispatchCallOptions is the caller's exact v1 ABI contract. Capability is
@@ -66,7 +69,7 @@ type CoroDispatchCallOptions struct {
 	TrustedDescriptor bool
 }
 
-// NewCoroDispatchDescriptor defines one link-once eight-field descriptor. It
+// NewCoroDispatchDescriptor defines one link-once nine-field descriptor. It
 // only publishes typed entry points; allocation, child registration, awaiting,
 // cancellation, and result consumption remain frontend/scheduler operations.
 func (p Package) NewCoroDispatchDescriptor(
@@ -99,8 +102,9 @@ func (p Package) NewCoroDispatchDescriptor(
 		opts.Flags&CoroDispatchFlagHasCoro != 0,
 		"coroutine",
 	)
+	code := p.validateCoroDispatchCodeEntry(opts.CodeEntry)
 	if descriptor := p.VarOf(name); descriptor != nil {
-		if p.matchesCoroDispatchDescriptor(descriptor, plain, coro, opts) {
+		if p.matchesCoroDispatchDescriptor(descriptor, plain, coro, code, opts) {
 			return descriptor.Expr
 		}
 		panic(fmt.Sprintf("ssa: coroutine dispatch symbol %q conflicts with an existing descriptor", name))
@@ -110,7 +114,7 @@ func (p Package) NewCoroDispatchDescriptor(
 		panic(fmt.Sprintf("ssa: coroutine dispatch symbol %q already exists", name))
 	}
 	return p.newCoroDispatchDescriptorGlobal(
-		name, opts.Version, opts.Flags, opts.ABIHash, plain, coro, opts.Result,
+		name, opts.Version, opts.Flags, opts.ABIHash, plain, coro, code, opts.Result,
 	)
 }
 
@@ -449,9 +453,20 @@ func (p Package) validateCoroDispatchEntry(
 	return target
 }
 
+func (p Package) validateCoroDispatchCodeEntry(entry Expr) llvm.Value {
+	if entry.IsNil() || entry.kind != vkFuncDecl {
+		panic("ssa: coroutine dispatch descriptor requires a physical code identity entry")
+	}
+	target := coroPlainDispatchFunction(entry.impl)
+	if target.IsNil() || target.GlobalParent().C != p.mod.C {
+		panic("ssa: coroutine dispatch descriptor requires a code identity entry from the same package module")
+	}
+	return target
+}
+
 func (p Package) newCoroDispatchDescriptorGlobal(
 	name string, version, flags uint32, hash [16]byte,
-	plain, coro llvm.Value, result Type,
+	plain, coro, code llvm.Value, result Type,
 ) Expr {
 	descriptorType := p.Prog.coroDispatchDescriptorType()
 	descriptor := p.NewVarEx(name, p.Prog.Pointer(descriptorType))
@@ -470,6 +485,7 @@ func (p Package) newCoroDispatchDescriptorGlobal(
 		coro,
 		p.Prog.IntVal(p.Prog.SizeOf(result), p.Prog.Uintptr()).impl,
 		p.Prog.IntVal(p.Prog.AlignOf(result), p.Prog.Uintptr()).impl,
+		code,
 	}
 	descriptor.impl.SetInitializer(p.Prog.ctx.ConstStruct(fields, false))
 	descriptor.impl.SetGlobalConstant(true)
@@ -479,13 +495,13 @@ func (p Package) newCoroDispatchDescriptorGlobal(
 }
 
 func (p Package) matchesCoroDispatchDescriptor(
-	descriptor Global, plain, coro llvm.Value, opts CoroDispatchDescriptorOptions,
+	descriptor Global, plain, coro, code llvm.Value, opts CoroDispatchDescriptorOptions,
 ) bool {
 	if descriptor == nil || !p.isCoroDispatchDescriptor(descriptor.Expr) {
 		return false
 	}
 	initializer := descriptor.impl.Initializer()
-	if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 8 {
+	if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 9 {
 		return false
 	}
 	wantFixed := []uint64{
@@ -511,8 +527,10 @@ func (p Package) matchesCoroDispatchDescriptor(
 			return false
 		}
 	}
+	identity := coroPlainDispatchFunction(initializer.Operand(8))
 	return initializer.Operand(6).ZExtValue() == p.Prog.SizeOf(opts.Result) &&
-		initializer.Operand(7).ZExtValue() == p.Prog.AlignOf(opts.Result)
+		initializer.Operand(7).ZExtValue() == p.Prog.AlignOf(opts.Result) &&
+		!identity.IsNil() && identity.C == code.C
 }
 
 func validateCoroDispatchContract(version, flags uint32) {
