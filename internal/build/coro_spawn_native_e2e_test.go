@@ -132,7 +132,11 @@ func Check() int32 {
 
 const coroChannelNativeE2ERuntimeShim = `package runtime
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/coro"
+)
 
 const maxAlloc = ^uintptr(0) >> 1
 
@@ -219,6 +223,11 @@ func AllocRoot(size uintptr) unsafe.Pointer { return AllocU(size) }
 func FreeRoot(unsafe.Pointer)
 
 func fatal(message string) { coroRuntimeAbort(message) }
+
+// The closed scheduler islands deliberately omit the caller/symbolization
+// closure. A foreign hardware fault therefore remains fail-closed here; full
+// runtime acceptance tests exercise StoreCoroWorkerFaultPCs itself.
+func StoreCoroWorkerFaultPCs(*coro.G, uintptr, uintptr) bool { return false }
 
 // libc rand returns C int. Keep this fixture ABI identical to every other
 // declaration of the shared physical symbol, then perform the Go uint32
