@@ -944,9 +944,20 @@ func (p *context) compileCoroPark(b llssa.Builder, args []llssa.Expr) {
 }
 
 func (p *context) compileCoroYield(b llssa.Builder) {
+	// A frozen raw/plain variant has no scheduler-owned current G to hand off.
+	// Its raw-closure preflight independently proves that the body contains no
+	// real park or event wait, so retain the legacy synchronous spin semantics
+	// by treating this cooperative managed yield as a no-op.
+	if p.rawPlainBody {
+		return
+	}
 	body := p.coroBody()
 	if body == nil || p.compilation == nil {
-		panic("llgo.coroYield requires an active PhysicalABIV1 coroutine body")
+		owner := "<unknown>"
+		if p.goFn != nil {
+			owner = p.goFn.String()
+		}
+		panic(fmt.Sprintf("llgo.coroYield in %q (raw-plain=%t) requires an active PhysicalABIV1 coroutine body", owner, p.rawPlainBody))
 	}
 	if b.Func != p.fn {
 		panic("llgo.coroYield requires the active coroutine function")

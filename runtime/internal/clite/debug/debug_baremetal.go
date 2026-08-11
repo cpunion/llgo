@@ -34,6 +34,10 @@ func StackTrace(skip int, fn func(fr *Frame) bool) {
 	panic("not implemented")
 }
 
+func StackFrames(skip int) []Frame {
+	panic("not implemented")
+}
+
 func PrintStack(skip int) {
 	panic("not implemented")
 

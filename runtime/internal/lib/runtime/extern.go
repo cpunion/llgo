@@ -68,15 +68,14 @@ func callers(skip int, pc []uintptr) int {
 		return 0
 	}
 	n := 0
-	clitedebug.StackTrace(skip, func(fr *clitedebug.Frame) bool {
+	for _, fr := range clitedebug.StackFrames(skip) {
 		if n >= len(pc) {
-			return false
+			break
 		}
 		pc[n] = fr.PC
 		recordFrameSymbol(fr.PC, fr.Offset, fr.Name)
 		rtdebug.BindCallerLocation(fr.PC, fr.Name)
 		n++
-		return true
-	})
+	}
 	return n
 }
