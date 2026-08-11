@@ -30,18 +30,23 @@ const (
 	coroProgramFramePublishHookV1     = "__llgo_coro_frame_publish_v1"
 	coroProgramAwaitPrepareHookV2     = "__llgo_coro_await_prepare_v2"
 	coroProgramAwaitConsumeHookV1     = "__llgo_coro_await_consume_v1"
+	coroProgramPanicPrepareHookV1     = "__llgo_coro_panic_prepare_v1"
 	coroProgramCompletePrepareHookV2  = "__llgo_coro_complete_prepare_v2"
 	coroProgramFrameFreeHookV1        = "__llgo_coro_frame_free_v1"
 	coroProgramPhysicalABIVersionV1   = 1
 	coroProgramSuspendNoneV1          = 0
 	coroProgramSuspendCallV1          = 1
 	coroProgramSuspendFrameCompleteV1 = 2
+	coroProgramSuspendPanicV1         = 5
 	coroProgramLifecycleInitialV1     = 1
 	coroProgramLifecycleActiveV1      = 2
 	coroProgramLifecycleSuspendedV1   = 3
 	coroProgramLifecycleFinalV1       = 4
 	coroProgramFrameTraceHiddenV1     = 1 << 0
 	coroProgramCompletionReturnV1     = 1
+	coroProgramCompletionPanicV1      = 2
+	coroProgramCompletionAbortV1      = 3
+	coroProgramCompletionShutdownV1   = 4
 	coroProgramCompletionGoexitV1     = 6
 )
 
@@ -170,6 +175,9 @@ func emitCoroProgramBootstrapFactoryV2(
 		[]types.Type{pointer, pointer, pointer, pointer},
 		[]types.Type{types.Typ[types.Uint32]},
 	), llssa.InC)
+	panicPrepare := pkg.NewFunc(coroProgramPanicPrepareHookV1, newSignature(
+		[]types.Type{pointer, pointer, pointer, pointer, pointer}, nil,
+	), llssa.InC)
 	complete := pkg.NewFunc(coroProgramCompletePrepareHookV2, newSignature(
 		[]types.Type{pointer, pointer, pointer, types.Typ[types.Uint32]}, nil,
 	), llssa.InC)
@@ -235,8 +243,9 @@ func emitCoroProgramBootstrapFactoryV2(
 		prog.VoidPtr(),
 		prog.Uintptr(), prog.Uintptr(), prog.Uintptr(), prog.Uintptr(),
 	)
-	goexited := factory.MakeBlock()
+	panicked := factory.MakeBlock()
 	terminal := factory.MakeBlock()
+	finish := factory.MakeBlock()
 	for index, step := range bootstrap.Steps {
 		target := targets[index]
 		switch step.Kind {
@@ -272,19 +281,28 @@ func emitCoroProgramBootstrapFactoryV2(
 				b.Convert(prog.VoidPtr(), completionTypeWord),
 				b.Convert(prog.VoidPtr(), completionDataWord),
 			)
+			// Return continues the statically ordered startup program. Every other
+			// legal managed-child outcome terminates the bootstrap itself. Store
+			// the payload-free status before dispatch so Abort, Shutdown, and
+			// Goexit share the exact root completion path; Panic has a distinct
+			// payload-carrying transaction below.
+			b.Store(terminalStatus, status)
 			returned := factory.MakeBlock()
 			invalid := factory.MakeBlock()
 			dispatch := b.Switch(status, invalid)
 			dispatch.Case(prog.IntVal(coroProgramCompletionReturnV1, prog.Uint32()), returned)
-			dispatch.Case(prog.IntVal(coroProgramCompletionGoexitV1, prog.Uint32()), goexited)
+			dispatch.Case(prog.IntVal(coroProgramCompletionPanicV1, prog.Uint32()), panicked)
+			dispatch.Case(prog.IntVal(coroProgramCompletionAbortV1, prog.Uint32()), terminal)
+			dispatch.Case(prog.IntVal(coroProgramCompletionShutdownV1, prog.Uint32()), terminal)
+			dispatch.Case(prog.IntVal(coroProgramCompletionGoexitV1, prog.Uint32()), terminal)
 			dispatch.End(b)
 			b.SetBlockEx(invalid, llssa.AtEnd, false)
 			b.Unreachable()
 			b.SetBlockContinuation(returned)
 		}
 		// This is deliberately the normal continuation of the exact V2 main
-		// step, not an entry-module call after program_run. A panic or Goexit
-		// terminal path never returns through this point, so it cannot be
+		// step, not an entry-module call after program_run. A non-return terminal
+		// path never returns through this point, so it cannot be
 		// mistaken for command-main return and cannot cancel background Gs.
 		if mainReturn != nil && step.Role == coroProgramStepRoleMainV2 {
 			b.Call(mainReturn.Expr, g)
@@ -292,11 +310,22 @@ func emitCoroProgramBootstrapFactoryV2(
 	}
 	b.Jump(terminal)
 
-	b.SetBlockEx(goexited, llssa.AtEnd, false)
-	b.Store(terminalStatus, prog.IntVal(coroProgramCompletionGoexitV1, prog.Uint32()))
-	b.Jump(terminal)
+	b.SetBlockEx(panicked, llssa.AtEnd, false)
+	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendPanicV1, prog.Uint16()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(uint64(len(bootstrap.Steps)+1), prog.Uint32()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
+	b.Call(
+		panicPrepare.Expr,
+		g,
+		coroBuilder.Handle(),
+		b.Convert(prog.VoidPtr(), header),
+		b.Load(completionTypeWord),
+		b.Load(completionDataWord),
+	)
+	b.Jump(finish)
 
-	b.SetBlockContinuation(terminal)
+	b.SetBlockEx(terminal, llssa.AtEnd, false)
 
 	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendFrameCompleteV1, prog.Uint16()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
@@ -309,6 +338,9 @@ func emitCoroProgramBootstrapFactoryV2(
 		b.Convert(prog.VoidPtr(), header),
 		b.Load(terminalStatus),
 	)
+	b.Jump(finish)
+
+	b.SetBlockContinuation(finish)
 	coroBuilder.Finish()
 	b.Dispose()
 	return factory

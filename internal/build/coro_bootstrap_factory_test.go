@@ -18,6 +18,7 @@ package build
 
 import (
 	"bytes"
+	"fmt"
 	"go/types"
 	"regexp"
 	"strings"
@@ -123,8 +124,13 @@ func TestCoroProgramBootstrapFactoryV2MainReturnIsOnlyOnCoroMainContinuation(t *
 	if got := strings.Count(body, "call i32 @"+coroProgramAwaitConsumeHookV1); got != 3 {
 		t.Fatalf("coroutine-main completion consumes = %d, want 3:\n%s", got, body)
 	}
-	if got := strings.Count(body, "i32 6, label"); got != 3 {
-		t.Fatalf("coroutine-main Goexit routes = %d, want 3:\n%s", got, body)
+	for _, status := range []int{2, 3, 4, 6} {
+		if got := strings.Count(body, fmt.Sprintf("i32 %d, label", status)); got != 3 {
+			t.Fatalf("coroutine-main terminal status %d routes = %d, want 3:\n%s", status, got, body)
+		}
+	}
+	if got := strings.Count(body, "call void @"+coroProgramPanicPrepareHookV1); got != 1 {
+		t.Fatalf("coroutine-main panic propagation calls = %d, want 1:\n%s", got, body)
 	}
 	if got := strings.Count(body, "call void @"+coroProgramMainReturnSymbolV1); got != 1 {
 		t.Fatalf("coroutine-main return calls = %d, want 1:\n%s", got, body)
@@ -286,8 +292,13 @@ func assertCoroProgramBootstrapFactoryPresplitV2(t *testing.T, ir, uintptrIR str
 	if got := strings.Count(body, "call i32 @"+coroProgramAwaitConsumeHookV1); got != 2 {
 		t.Fatalf("mixed v2 bootstrap completion consumes = %d, want 2:\n%s", got, body)
 	}
-	if got := strings.Count(body, "i32 6, label"); got != 2 {
-		t.Fatalf("mixed v2 bootstrap Goexit routes = %d, want 2:\n%s", got, body)
+	for _, status := range []int{2, 3, 4, 6} {
+		if got := strings.Count(body, fmt.Sprintf("i32 %d, label", status)); got != 2 {
+			t.Fatalf("mixed v2 bootstrap terminal status %d routes = %d, want 2:\n%s", status, got, body)
+		}
+	}
+	if got := strings.Count(body, "call void @"+coroProgramPanicPrepareHookV1); got != 1 {
+		t.Fatalf("mixed v2 bootstrap panic propagation calls = %d, want 1:\n%s", got, body)
 	}
 	if got := strings.Count(body, "call ptr %"); got != 2 {
 		t.Fatalf("mixed v2 bootstrap indirect child factory calls = %d, want 2:\n%s", got, body)

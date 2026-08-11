@@ -105,7 +105,7 @@ func coroFinishRunSliceCompatibility(
 	result coroRunResultV1,
 ) coroRunResultV1 {
 	switch result.stop {
-	case coroRunSliceBudgetV1, coroRunPanicCompleteV1:
+	case coroRunSliceBudgetV1, coroRunPanicCompleteV1, coroRunAgainV1:
 		return result
 	case coroRunExecutionWaitV1:
 		if !coroTargetWaitManagedExecutionV1(driver) {
