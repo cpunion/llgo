@@ -38,10 +38,10 @@ const (
 	_Pdead    = 4
 )
 
-// panicPCStore is part of a logical G's state. Keep the storage shape next to
-// g rather than in caller.go so minimal scheduler/runtime islands that do not
-// link the public stack-inspection implementation still retain the complete G
-// layout.
+// panicPCStore is the bounded traceback snapshot of a panic. G keeps only a
+// lazy pointer because ordinary logical Gs never need this 64-PC payload. The
+// legacy signal handler has a process-global, allocation-free emergency store;
+// its fault snapshot was already process-global and deliberately best-effort.
 type panicPCStore struct {
 	n     int32
 	armed int32
@@ -63,7 +63,7 @@ type panicPCStore struct {
 type g struct {
 	defer_   *Defer
 	panic_   unsafe.Pointer
-	panicPCs panicPCStore
+	panicPCs *panicPCStore
 	m        *m
 
 	atomicstatus uint32

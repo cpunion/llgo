@@ -283,15 +283,19 @@ func coroTerminalWriteCString(text *c.Char) bool {
 // guesses whether an address is native by inspecting pointer bits and never
 // asks a worker thread to traverse Go scheduler state.
 func coroTerminalWriteWorkerFaultFrames(ctx *runtimeContext) {
-	if ctx == nil || ctx.g.panicPCs.fault == 0 || ctx.g.panicPCs.native <= 0 {
+	if ctx == nil {
 		return
 	}
-	count := int(ctx.g.panicPCs.native)
-	if count > len(ctx.g.panicPCs.pcs) || count > coroTerminalPanicFrameLimit {
+	store := loadPanicPCStore(&ctx.g)
+	if store == nil || store.fault == 0 || store.native <= 0 {
+		return
+	}
+	count := int(store.native)
+	if count > len(store.pcs) || count > coroTerminalPanicFrameLimit {
 		coroRuntimeAbort("invalid coroutine C fault trace prefix")
 	}
 	for index := 0; index < count; index++ {
-		pc := ctx.g.panicPCs.pcs[index]
+		pc := store.pcs[index]
 		if pc <= 1 {
 			coroRuntimeAbort("invalid coroutine C fault trace pc")
 		}

@@ -107,6 +107,7 @@ func mexit(mp *m) {
 	mp.p = nil
 	mp.curg = nil
 	gp.m = nil
+	releasePanicPCStore(gp)
 
 	setg(nil)
 	if root != nil {

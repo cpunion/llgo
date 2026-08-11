@@ -134,6 +134,7 @@ func coroReleaseRuntimeContext(task *coro.G) bool {
 		c.Free(gp.panic_)
 		gp.panic_ = nil
 	}
+	releasePanicPCStore(gp)
 	gp.startarg = nil
 	casgstatus(gp, _Grunnable, _Gdead)
 	setpstatus(pp, _Pdead)
@@ -156,6 +157,7 @@ func discardCoroRuntimeContext(ctx *runtimeContext) {
 		releaseLocalBlocks(ctx.g.localContext)
 		ctx.g.localContext = nil
 	}
+	releasePanicPCStore(&ctx.g)
 	root := ctx.root
 	ctx.root = nil
 	if root != nil {

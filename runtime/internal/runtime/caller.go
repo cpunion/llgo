@@ -227,8 +227,8 @@ func Callers(skip int, pcs []uintptr) int {
 func SavePanicCallerFrames() {
 	// A fault handler stores the fault-site snapshot right before it
 	// panics; the regular capture here must not overwrite it.
-	p := panicPCStoreForG()
-	if p.armed != 0 {
+	p := loadPanicPCStore(getg())
+	if p != nil && p.armed != 0 {
 		p.armed = 0
 		return
 	}
@@ -238,20 +238,27 @@ func SavePanicCallerFrames() {
 	}
 }
 
-func panicPCStoreForG() *panicPCStore {
-	return &getg().panicPCs
-}
-
 // StorePanicPCs replaces the goroutine's panic snapshot (a new panic
 // supersedes the previous one) and resets the recover marks.
 func StorePanicPCs(pcs []uintptr) {
 	storePanicPCs(pcs, 0)
 }
 
-// StoreFaultPCs is StorePanicPCs for fault handlers: the imminent
-// panic's own capture is suppressed so the fault-site chain survives.
+// StoreFaultPCs is StorePanicPCs for a managed fault path. The imminent
+// panic's own capture is suppressed so the fault-site chain survives. Legacy
+// asynchronous signal callbacks must use StoreSignalFaultPCs instead.
 func StoreFaultPCs(pcs []uintptr) {
 	storePanicPCs(pcs, 1)
+}
+
+// StoreSignalFaultPCs publishes a legacy signal-handler snapshot without
+// allocating. A G which already owns a lazy store reuses it; otherwise it uses
+// the same process-global best-effort scope as the legacy fault source.
+func StoreSignalFaultPCs(pcs []uintptr) {
+	p := signalSafePanicPCStore(getg())
+	if p != nil {
+		storePanicPCsInto(p, pcs, 1)
+	}
 }
 
 // StoreCoroWorkerFaultPCs joins the two bounded native identities returned by
@@ -314,12 +321,23 @@ func StoreCoroWorkerFaultPCs(task *coro.G, faultPC, targetPC uintptr) bool {
 		}
 	}
 	StoreFaultPCs(pcs[:n])
-	panicPCStoreForG().native = int32(native)
+	store := loadPanicPCStore(getg())
+	if store == nil {
+		return false
+	}
+	store.native = int32(native)
 	return true
 }
 
 func storePanicPCs(pcs []uintptr, armed int32) {
-	p := panicPCStoreForG()
+	p := ensurePanicPCStore(getg())
+	if p == nil {
+		return
+	}
+	storePanicPCsInto(p, pcs, armed)
+}
+
+func storePanicPCsInto(p *panicPCStore, pcs []uintptr, armed int32) {
 	n := len(pcs)
 	if n > len(p.pcs) {
 		n = len(p.pcs)
@@ -336,13 +354,14 @@ func storePanicPCs(pcs []uintptr, armed int32) {
 // PanicPCsAreFault reports whether the stored snapshot came from a
 // hardware-fault context (captured without the program-text bound).
 func PanicPCsAreFault() bool {
-	return panicPCStoreForG().fault != 0
+	p := loadPanicPCStore(getg())
+	return p != nil && p.fault != 0
 }
 
 // PanicPCs returns the goroutine's captured panic pcs (nil when none).
 func PanicPCs() []uintptr {
-	p := panicPCStoreForG()
-	if p.n == 0 {
+	p := loadPanicPCStore(getg())
+	if p == nil || p.n == 0 {
 		return nil
 	}
 	return p.pcs[:p.n]
@@ -352,14 +371,20 @@ func PanicPCs() []uintptr {
 // time; the snapshot stays spliceable exactly while one of them is live on
 // the physical chain (the deferred function has not returned yet).
 func MarkPanicRecoverFPs(fp1, fp2 uintptr) {
-	p := panicPCStoreForG()
+	p := loadPanicPCStore(getg())
+	if p == nil {
+		return
+	}
 	p.recFP1 = fp1
 	p.recFP2 = fp2
 }
 
 // PanicRecoverFPs returns the recover-time frame marks.
 func PanicRecoverFPs() (uintptr, uintptr) {
-	p := panicPCStoreForG()
+	p := loadPanicPCStore(getg())
+	if p == nil {
+		return 0, 0
+	}
 	return p.recFP1, p.recFP2
 }
 
