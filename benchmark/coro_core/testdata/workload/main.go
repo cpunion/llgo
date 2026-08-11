@@ -25,7 +25,16 @@ import (
 	"time"
 )
 
-const maximumWork = 100_000_000
+const (
+	maximumWork        = 100_000_000
+	maximumConcurrency = 10_000
+)
+
+//go:noinline
+func arithmeticStep(value, salt int) int {
+	value ^= salt + 0x1f123bb5
+	return (value*1_664_525 + 1_013_904_223) & 0x7fff_ffff
+}
 
 func parsePositive(text string, allowZero bool) (int, bool) {
 	if text == "" {
@@ -51,6 +60,69 @@ func spawn(count, rounds int) int {
 		done.Wait()
 	}
 	return count * rounds
+}
+
+func compute(count, rounds int) int {
+	value := 1
+	for round := range rounds {
+		for index := range count {
+			value = arithmeticStep(value, round*count+index)
+		}
+	}
+	return value
+}
+
+func parallelCompute(count, rounds int) int {
+	results := make(chan int, count)
+	for worker := range count {
+		go func() {
+			value := worker + 1
+			for index := range rounds {
+				value = arithmeticStep(value, worker*rounds+index)
+			}
+			results <- value
+		}()
+	}
+	checksum := 0
+	for range count {
+		checksum ^= <-results
+	}
+	return checksum
+}
+
+func buffered(count, rounds int) int {
+	values := make(chan int, 1)
+	checksum := 0
+	for round := range rounds {
+		for index := range count {
+			value := round*count + index
+			values <- value
+			checksum ^= <-values
+		}
+	}
+	return checksum
+}
+
+func selectReady(count, rounds int) int {
+	left := make(chan int, 1)
+	right := make(chan int, 1)
+	checksum := 0
+	for round := range rounds {
+		for index := range count {
+			value := round*count + index
+			left <- value
+			right <- value + 1
+			select {
+			case selected := <-left:
+				checksum ^= selected
+				checksum ^= <-right
+			case selected := <-right:
+				checksum ^= selected
+				checksum ^= <-left
+			}
+		}
+	}
+	return checksum
 }
 
 func park(count int) int {
@@ -123,7 +195,7 @@ func main() {
 	rounds := 1
 	if len(os.Args) != 1 {
 		if len(os.Args) != 4 {
-			panic("usage: workload <idle|spawn|park|handoff|timers> <count> <rounds>")
+			panic("usage: workload <idle|compute|parallel|buffered|select|spawn|park|handoff|timers> <count> <rounds>")
 		}
 		var ok bool
 		mode = os.Args[1]
@@ -132,6 +204,10 @@ func main() {
 		}
 		if rounds, ok = parsePositive(os.Args[3], false); !ok || count != 0 && rounds > maximumWork/count {
 			panic("invalid rounds")
+		}
+		if count > maximumConcurrency &&
+			(mode == "parallel" || mode == "spawn" || mode == "park" || mode == "timers") {
+			panic("concurrency limit exceeded")
 		}
 	}
 
@@ -143,6 +219,14 @@ func main() {
 			panic("idle requires count 0 and rounds 1")
 		}
 		result = 1
+	case "compute":
+		result = compute(count, rounds)
+	case "parallel":
+		result = parallelCompute(count, rounds)
+	case "buffered":
+		result = buffered(count, rounds)
+	case "select":
+		result = selectReady(count, rounds)
 	case "spawn":
 		result = spawn(count, rounds)
 	case "park":
