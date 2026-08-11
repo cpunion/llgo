@@ -686,8 +686,10 @@ func (b Builder) binOp(op token.Token, x, y Expr, divisorProvenNonZero bool) Exp
 				var safeY llvm.Value
 				if (op == token.QUO || op == token.REM) && (kind == vkSigned || kind == vkUnsigned) {
 					needsCheck := !divisorProvenNonZero
-					if rv := y.impl.IsAConstantInt(); !rv.IsNil() {
-						needsCheck = rv.ZExtValue() == 0
+					if needsCheck {
+						if rv := y.impl.IsAConstantInt(); !rv.IsNil() {
+							needsCheck = rv.ZExtValue() == 0
+						}
 					}
 					if needsCheck {
 						zero := llvm.ConstInt(y.ll, 0, false)

@@ -97,6 +97,10 @@ func SliceFullLow(values []uint32, low, high, max int) []uint32 { return values[
 
 func Divide(value, divisor int64) int64 { return value / divisor }
 func Remainder(value, divisor int64) int64 { return value % divisor }
+func DivideConstantZero() int {
+	zero := 0
+	return 1 / zero
+}
 func GuardedDivide(value, divisor int64) int64 {
 	if divisor == 0 { return 0 }
 	return value / divisor
@@ -311,7 +315,7 @@ func TestCoroIntegerDivideByZeroUsesStructuredFaultNativeAndWasm32(t *testing.T)
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("verify structured integer division before CoroSplit: %v\n%s", err, module.String())
 			}
-			for _, name := range []string{"Divide", "Remainder"} {
+			for _, name := range []string{"Divide", "Remainder", "DivideConstantZero"} {
 				functionPlan, ok := plan.FunctionPlan(functions[name])
 				if !ok || functionPlan.Emission != coro.EmitCoroutine ||
 					!functionPlan.Exec.Contains(coro.MayUnwind) {
@@ -343,7 +347,7 @@ func TestCoroIntegerDivideByZeroUsesStructuredFaultNativeAndWasm32(t *testing.T)
 			}
 
 			runCoroABITestPipeline(t, prog, module)
-			for _, name := range []string{"Divide", "Remainder"} {
+			for _, name := range []string{"Divide", "Remainder", "DivideConstantZero"} {
 				resume := module.NamedFunction("foo." + name + "$coro.resume")
 				if resume.IsNil() || strings.Contains(resume.String(), "AssertDivideByZero") ||
 					strings.Count(resume.String(), "call void @"+coroFaultPrepareHookV1) != 1 {
@@ -675,6 +679,7 @@ func compileCoroImplicitNilFaultFixture(
 		"SliceFullLow":         ssaPkg.Func("SliceFullLow"),
 		"Divide":               ssaPkg.Func("Divide"),
 		"Remainder":            ssaPkg.Func("Remainder"),
+		"DivideConstantZero":   ssaPkg.Func("DivideConstantZero"),
 		"GuardedDivide":        ssaPkg.Func("GuardedDivide"),
 		"DivideWithCleanup":    ssaPkg.Func("DivideWithCleanup"),
 		"DivideWithRecover":    ssaPkg.Func("DivideWithRecover"),
