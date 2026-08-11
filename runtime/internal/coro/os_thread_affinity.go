@@ -255,6 +255,24 @@ func osThreadSuspendPeerReady(p *P, owner *G) bool {
 	return false
 }
 
+func validCompletedOSThreadSuspendAction(p *P, task *G, kind ActionKind) bool {
+	if !completedExecutorRunAction(p, task, Action{Kind: kind}) {
+		return false
+	}
+	switch kind {
+	case ActionYield:
+		// Resumed appends the just-yielded continuation at the owner tail.
+		return p.readyTail == task && task.nextReady == nil
+	case ActionPark:
+		// Validate the exact newly parked record and its two active-list
+		// neighbors without traversing unrelated parked tasks or candidates.
+		return task.active != nil &&
+			validActiveWaitSetRecordFast(p, task.active.parkWait)
+	default:
+		return true
+	}
+}
+
 // PrepareOSThreadSuspendHandoff converts one already committed locked
 // ActionYield or ActionPark into a P-local detached phase. It records no
 // physical owner. The target must publish its generation-bound M baton only
@@ -275,9 +293,8 @@ func PrepareOSThreadSuspendHandoff(
 	}
 	p := driver.p
 	if p == nil || task == nil ||
-		!idleExecutorScheduler(p) || !validReadyQueue(p) ||
-		!validSchedulerWaitQueues(p) ||
-		!completedExecutorRunAction(p, task, Action{Kind: kind}) {
+		!idleExecutorScheduler(p) ||
+		!validCompletedOSThreadSuspendAction(p, task, kind) {
 		return false, false
 	}
 	// The target observes every committed Yield/Park. An unlocked task needs no
@@ -286,6 +303,13 @@ func PrepareOSThreadSuspendHandoff(
 	// phase; every partial or mismatched lock relation remains invalid.
 	if task.osThreadLockDepth == 0 {
 		return false, true
+	}
+	// The overwhelmingly common unlocked path above needs only the scheduler's
+	// owner-maintained O(1) headers and the exact completed task. Retain the
+	// complete queue audits for the exceptional physical-owner transition,
+	// where they protect a detached LockOSThread island across another M.
+	if !validReadyQueue(p) || !validSchedulerWaitQueues(p) {
+		return false, false
 	}
 	if p.osThreadLockOwner != task ||
 		p.osThreadSuspend != osThreadSuspendAttached {

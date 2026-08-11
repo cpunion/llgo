@@ -203,9 +203,10 @@ func initialPNeutralRunnableState(g *G) bool {
 }
 
 // pNeutralRunnableHeader is the O(1) revalidation performed after the mailbox
-// Try gate succeeds. The source owner completed the full queue/frame audit
-// immediately before the CAS; no other scheduler may mutate this G, while an
-// asynchronous RequestPreempt is ordered by the later idle-to-disabled CAS.
+// Try gate succeeds. The source owner completed this candidate's full frame
+// audit and its queue's O(1) endpoint audit immediately before the CAS; no
+// other scheduler may mutate this G, while an asynchronous RequestPreempt is
+// ordered by the later idle-to-disabled CAS.
 func pNeutralRunnableHeader(g *G, queued bool) bool {
 	wantTransfer, wantPreempt := runnableTransferGIdle, preemptIdle
 	if !queued {
@@ -349,8 +350,9 @@ func PublishPNeutralRunnable(mailbox *RunnableTransferMailbox, source *P, g *G) 
 	return id, ok
 }
 
-// collectPNeutralRunnableBatch records one already owner-validated queue prefix.
-// Frame-chain validation remains outside the destination Try section.
+// collectPNeutralRunnableBatch records and completely validates one bounded
+// owner-held queue prefix. It never walks more than one mailbox capacity;
+// frame-chain validation remains outside the destination Try section.
 func collectPNeutralRunnableBatch(
 	source *P,
 	limit uint32,
@@ -504,7 +506,12 @@ func TryDrainPNeutralRunnables(
 		budget == 0 || budget > RunnableTransferMailboxCapacity {
 		return 0, false, RunnableTransferDrainInvalid
 	}
-	if !stableRunnableTransferP(owner) || !validReadyQueue(owner) {
+	// The destination owner maintains its ready endpoints. Import validates at
+	// most one fixed mailbox capacity of frozen incoming continuations, so the
+	// physical scheduler hot path must not revisit unrelated local runnables.
+	// The complete queue audit remains available at public exact-import,
+	// lifecycle, shutdown, test, and diagnostic boundaries.
+	if !stableRunnableTransferP(owner) || owner.readyCount == ^uint32(0) {
 		return 0, false, RunnableTransferDrainOwnerUnstable
 	}
 	if !tryRunnableTransferGate(mailbox) {

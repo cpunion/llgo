@@ -1018,3 +1018,70 @@ panic and recover IR tests, and the linked native ExplicitStatus panic E2E
 completed. The legacy PCLN signal integration command remains blocked before
 its fault subtest by the same unrelated `pclntab_external.go` uintptr-retention
 audit on both this candidate and the exact parent.
+
+### Bounded hot-queue audit checkpoint
+
+The next scheduler checkpoint uses `a3e1a09e2` as its exact parent. Three
+ordinary paths still revisited an entire owner queue: every completed unlocked
+Yield/Park passed the physical-owner handoff gate through full ready and wait
+audits, surplus distribution audited the complete source ready queue before
+selecting at most eight entries, and destination import audited all existing
+local runnables before draining at most eight frozen mailbox entries. A burst
+of N parked goroutines therefore retained quadratic validation work after the
+spawn-owner fix.
+
+The unlocked handoff now validates the O(1) scheduler endpoints plus the exact
+completed continuation. A Yield must be the newly appended ready tail; a Park
+must have an exact locally valid active wait record. Full queue audits remain
+mandatory for the exceptional locked-M handoff. Fleet distribution validates
+only the selected frame chain or a mailbox-bounded prefix, and fleet drain
+validates only the frozen incoming entries while rechecking the destination
+endpoints under its Try gate. Public exact import, physical-owner transitions,
+lifecycle, shutdown, tests, and diagnostics retain complete audits.
+
+Regression fixtures independently corrupt a distant source runnable, a
+distant destination runnable, unrelated active waits, ready tail links, wait
+endpoints, and the ready-count overflow sentinel. They prove that hot paths do
+not walk unrelated payloads while every local ownership header and selected
+continuation still fails closed.
+
+The same standard-Go workload was rebuilt on Darwin arm64 with Go 1.26.5 and
+LLVM 19.1.7. Five process-start `GOMAXPROCS=1` runs of each 10,000-parked-G
+artifact were interleaved with reversed order. Medians were:
+
+| Metric | `a3e1a09e2` parent | bounded-audit candidate | Change |
+| --- | ---: | ---: | ---: |
+| workload time | 1,904.885 ms | 157.035 ms | -91.76% (12.13x faster) |
+| retired instructions | 26.449 billion | 6.297 billion | -76.19% (4.20x fewer) |
+| peak RSS | 32,735,232 | 30,326,784 | -2,408,448 (-7.36%) |
+| stripped file size | 4,875,776 | 4,875,600 | -176 bytes |
+
+Segment reservations for `__TEXT`, `__DATA_CONST`, and `__DATA` are unchanged.
+Seven interleaved short-workload runs also showed no displaced regression:
+spawn 100 x 100 moved from a 56.690 ms median to 56.087 ms, and 5,000
+unbuffered request/ack handoffs moved from 72.557 ms to 71.484 ms.
+
+Five-run peak-RSS medians against the same-source Go build were:
+
+| parked Gs | Go gc RSS | candidate RSS | Go incremental / G | candidate incremental / G |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 3,522,560 | 7,716,864 | - | - |
+| 1,000 | 6,471,680 | 9,535,488 | 2,949 B | 1,819 B |
+| 5,000 | 17,596,416 | 18,989,056 | 2,815 B | 2,254 B |
+| 10,000 | 31,539,200 | 30,326,784 | 2,802 B | 2,261 B |
+
+At 10,000 parked goroutines the stackless candidate is 1,212,416 bytes (3.84%)
+below Go in total RSS, not only in slope. Its incremental resident cost is
+about 19.3% lower than Go's; the larger fixed LLGo runtime still makes the
+candidate larger at 5,000, so the observed total-footprint crossover lies
+between those scales. This checkpoint changes no logical frame or G layout;
+the extra RSS reduction comes from avoiding repeated touches of cold queue and
+frame metadata, and should be treated as a working-set result rather than a
+second object-size reduction.
+
+The remaining 5,000-to-10,000 instruction growth is about 2.46x rather than
+the former near-4x queue-scan signature. A larger diagnostic profile contains
+no `validReadyQueue` under normal handoff, distribution, or drain. Its active
+cost is now dominated by channel registration/cleanup, fixed source and fleet
+dispatch, frame allocation/free, and BDWGC marking/locking. Those are the next
+performance gates before broadening capability coverage.

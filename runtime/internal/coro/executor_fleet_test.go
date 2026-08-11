@@ -825,6 +825,130 @@ func TestExecutorFleetDemandDistributesBoundedHalfBatch(t *testing.T) {
 	}
 }
 
+func TestExecutorFleetDistributionAuditsOnlyBoundedSelectedPrefix(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	target := bindExecutorFleetManualFixture(t, fleet)
+	tasks := make([]*yieldingTestG, 18)
+	for index := range tasks {
+		tasks[index] = newYieldingTestG(t, "fleet-bounded-audit")
+		scratch := new(P)
+		yieldRunnableForTransfer(t, scratch, tasks[index])
+		runnable, ok := NextRunnable(scratch)
+		if !ok || runnable != tasks[index].g || !Enqueue(source.p, tasks[index].g) {
+			t.Fatalf("prepare bounded-audit task %d", index)
+		}
+	}
+	if !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+		t.Fatal("request bounded-audit target")
+	}
+
+	// The owner-maintained endpoint is still a mandatory O(1) gate.
+	source.p.readyTail.nextReady = source.p.readyTail
+	if distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p); ok ||
+		distribution != (RunnableDistribution{}) {
+		t.Fatalf("distribution accepted corrupt source header = %+v/%t", distribution, ok)
+	}
+	source.p.readyTail.nextReady = nil
+	readyCount := source.p.readyCount
+	source.p.readyCount = ^uint32(0)
+	if distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p); ok ||
+		distribution != (RunnableDistribution{}) {
+		t.Fatalf("distribution accepted overflowing source count = %+v/%t", distribution, ok)
+	}
+	source.p.readyCount = readyCount
+
+	// Corrupt a task beyond the maximum eight-entry transfer prefix. The full
+	// diagnostic catches it, while the hot path validates and moves only the
+	// exact bounded prefix selected for this transaction.
+	distant := tasks[12].g
+	distantState := distant.state
+	distant.state = GDead
+	if validReadyQueue(source.p) {
+		t.Fatal("full diagnostic accepted distant runnable corruption")
+	}
+	distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+	if !ok || !distribution.Valid() || distribution.Target != target.handle ||
+		distribution.Count != RunnableTransferMailboxCapacity ||
+		source.p.readyHead != tasks[RunnableTransferMailboxCapacity].g ||
+		source.p.readyCount != uint32(len(tasks))-RunnableTransferMailboxCapacity {
+		t.Fatalf("bounded selected-prefix distribution = %+v/%t count:%d head:%p",
+			distribution, ok, source.p.readyCount, source.p.readyHead)
+	}
+	distant.state = distantState
+	if !validReadyQueue(source.p) {
+		t.Fatal("restored source queue failed full diagnostic")
+	}
+	targetTasks := []*yieldingTestG{
+		newYieldingTestG(t, "fleet-target-first"),
+		newYieldingTestG(t, "fleet-target-middle"),
+		newYieldingTestG(t, "fleet-target-last"),
+	}
+	for index, task := range targetTasks {
+		scratch := new(P)
+		yieldRunnableForTransfer(t, scratch, task)
+		runnable, nextOK := NextRunnable(scratch)
+		if !nextOK || runnable != task.g || !Enqueue(target.p, task.g) {
+			t.Fatalf("prepare target bounded-audit task %d", index)
+		}
+	}
+	targetDistantState := targetTasks[1].g.state
+	targetTasks[1].g.state = GDead
+	if validReadyQueue(target.p) {
+		t.Fatal("full diagnostic accepted distant destination corruption")
+	}
+	moved, more, status := fleet.TryDrainPNeutralRunnables(
+		target.handle,
+		target.p,
+		RunnableTransferMailboxCapacity,
+	)
+	targetTasks[1].g.state = targetDistantState
+	if status != RunnableTransferDrainComplete || more || moved != RunnableTransferMailboxCapacity ||
+		target.p.readyHead != targetTasks[0].g ||
+		target.p.readyCount != uint32(len(targetTasks))+RunnableTransferMailboxCapacity ||
+		!validReadyQueue(target.p) {
+		t.Fatalf("drain bounded selected prefix = (%d,%t,%d)", moved, more, status)
+	}
+}
+
+func TestExecutorFleetPreferredDistributionAuditsOnlyExactCandidate(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	target := bindExecutorFleetManualFixture(t, fleet)
+	selected := newYieldingTestG(t, "fleet-preferred-exact")
+	distant := newYieldingTestG(t, "fleet-preferred-distant")
+	enqueueMaterializedFleetRunnable(t, source.p, selected, RouteID(target.handle.Route))
+	scratch := new(P)
+	yieldRunnableForTransfer(t, scratch, distant)
+	if runnable, ok := NextRunnable(scratch); !ok || runnable != distant.g ||
+		!Enqueue(source.p, distant.g) {
+		t.Fatal("prepare preferred distant runnable")
+	}
+	if !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+		t.Fatal("request preferred exact target")
+	}
+	distantState := distant.g.state
+	distant.g.state = GDead
+	if validReadyQueue(source.p) {
+		t.Fatal("full diagnostic accepted preferred distant corruption")
+	}
+	distribution, ok := fleet.DistributeMaterializedRunnableToPreferredRoute(
+		source.handle,
+		source.p,
+	)
+	if !ok || !distribution.Valid() || distribution.Target != target.handle ||
+		distribution.Count != 1 || source.p.readyHead != distant.g || source.p.readyCount != 1 {
+		t.Fatalf("preferred exact-candidate distribution = %+v/%t count:%d head:%p",
+			distribution, ok, source.p.readyCount, source.p.readyHead)
+	}
+	distant.g.state = distantState
+	if !validReadyQueue(source.p) ||
+		!fleet.ImportPNeutralRunnable(target.handle, target.p, distribution.Transfer) ||
+		target.p.readyHead != selected.g {
+		t.Fatal("restore/import preferred exact-candidate distribution")
+	}
+}
+
 func TestExecutorFleetBatchPreparationDoesNotAllocate(t *testing.T) {
 	fleet := new(ExecutorFleet)
 	source := bindExecutorFleetManualFixture(t, fleet)
