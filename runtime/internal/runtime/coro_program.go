@@ -319,7 +319,9 @@ func coroProgramConfirmTerminalJoinV1() coroProgramDriveStatusV1 {
 	switch action.Kind {
 	case coro.ActionComplete:
 		if action.Handle != nil ||
-			g != &coroProgramGV1State && coroProgramLifecycleV1State != coroProgramMainReturnRequestedV1 ||
+			g != &coroProgramGV1State &&
+				coroProgramLifecycleV1State != coroProgramMainReturnRequestedV1 &&
+				coroProgramLifecycleV1State != coroProgramMainGoexitV1 ||
 			!coroReleaseCompletedTask(g) {
 			return coroProgramFailV1()
 		}
@@ -401,6 +403,17 @@ func coroProgramFinishMainV1() coroProgramDriveStatusV1 {
 		}
 		coroProgramLifecycleV1State = coroProgramCompleteV1
 		return coroProgramDriveCompleteV1
+	case coroProgramMainGoexitV1:
+		// runtime.Goexit terminates only the main logical G. Keep servicing ready
+		// and event-backed goroutines; releaseGAndCheckDeadlock owns the required
+		// fatal report when the registered count reaches zero. Freestanding
+		// targets deliberately disable that process-level decision and may reach
+		// the already-terminal state here.
+		if coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+			coroProgramLifecycleV1State = coroProgramCompleteV1
+			return coroProgramDriveCompleteV1
+		}
+		return coroProgramDriveAgainV1
 	case coroProgramMainReturnRequestedV1:
 		if coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
 			coroProgramLifecycleV1State = coroProgramCompleteV1
@@ -891,6 +904,20 @@ func coroProgramContinueSliceV2(
 	default:
 		return uint32(coroProgramDriveInvalidV2)
 	}
+}
+
+// coroProgramCommitMainGoexitV1 commits the one root-only language transition made
+// by the status-carrying compiler bootstrap. It is called only after the core
+// accepted the final-suspended root frame, so publishing mainExited cannot race
+// ahead of a malformed completion transaction.
+func coroProgramCommitMainGoexitV1(g *coroG) bool {
+	if coroProgramLifecycleV1State != coroProgramRunningV1 ||
+		g != &coroProgramGV1State {
+		return false
+	}
+	coroProgramLifecycleV1State = coroProgramMainGoexitV1
+	markMainExited()
+	return true
 }
 
 func coroProgramMainReturnV1(gPointer unsafe.Pointer) bool {
