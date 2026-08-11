@@ -57,6 +57,24 @@ func TestExecutorPollProgressPODLayout(t *testing.T) {
 	}
 }
 
+func beginExecutorTimerBatchTestPark(t *testing.T, p *P, seed uint32) *timerV2TestPark {
+	t.Helper()
+	task := newYieldingTestG(t, "timer-batch")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue batched timer")
+	}
+	if g, ok := NextRunnableAt(p, 0); !ok || g != task.g {
+		t.Fatal("dequeue batched timer")
+	}
+	action := beginWaitTestResume(t, p, task)
+	ticket, ok := BeginParkSet(&task.g.park, 1, seed)
+	wait := new(WaitSetRecord)
+	if !ok || !PrepareWaitSetRecord(wait, task.g, ticket) {
+		t.Fatal("prepare batched timer park")
+	}
+	return &timerV2TestPark{task: task, ticket: ticket, wait: wait, action: action}
+}
+
 func TestExecutorPollEpochBPreservesAExternalBlockOnly(t *testing.T) {
 	sources := &ExecutorSourceSet{}
 	transaction := executorPollTransaction{
@@ -133,6 +151,103 @@ func TestExecutorPollProgressSkipsConfiguredUnallocatedTails(t *testing.T) {
 	closeTestExecutorDriver(t, driver)
 	if !timers.CanRelease() || !poll.CanRelease() || !worker.CanRelease() {
 		t.Fatal("paged progress catalog retained source storage")
+	}
+}
+
+func TestExecutorPollReductionBatchesDueTimers(t *testing.T) {
+	p := new(P)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	timers := new(TimerRegistrationTable)
+	handle := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalogAtRoute(
+		driver,
+		p,
+		registry,
+		handle,
+		RouteID(1),
+		ExecutorSourceCatalog{Timers: timers},
+	) {
+		t.Fatal("bind batched timer executor")
+	}
+
+	const count = executorCatalogBatchQuantum
+	parks := make([]*timerV2TestPark, int(count))
+	handles := make([]TimerRegistrationHandle, int(count))
+	for index := 0; index < int(count); index++ {
+		park := beginExecutorTimerBatchTestPark(t, p, uint32(301+index))
+		timer, attached := timers.ReserveAndAttachTimerV2(
+			p,
+			&park.task.g.park,
+			park.ticket,
+			park.wait,
+			uint32(index+1),
+			1,
+		)
+		if !attached {
+			t.Fatalf("reserve batched timer %d", index)
+		}
+		commitTimerV2TestPark(t, p, park)
+		parks[index], handles[index] = park, timer
+	}
+	if result := registry.Request(handle); result != ExecutorRequestPublished {
+		t.Fatalf("request batched timer executor = %d", result)
+	}
+	first, ok := PollExecutorSliceAt(driver, 1, 1)
+	if !ok || first.Used != 1 || first.Complete || first.Timers != count || first.Completed != count ||
+		driver.poll.phase != executorPollEpochAPublish || driver.poll.source != executorCatalogDone {
+		t.Fatalf("first batched timer reduction = (%+v,%t), poll=%+v", first, ok, driver.poll)
+	}
+
+	var complete ExecutorPollProgress
+	for reduction := 0; reduction < 1000; reduction++ {
+		progress, advanced := PollExecutorSliceAt(driver, 1, 1)
+		if !advanced || progress.Used != 1 {
+			t.Fatalf("continue batched timer reduction %d = (%+v,%t)", reduction, progress, advanced)
+		}
+		if progress.Complete {
+			complete = progress
+			break
+		}
+	}
+	if !complete.Complete || complete.Timers != count || complete.Promoted != count ||
+		driver.poll != (executorPollTransaction{}) {
+		t.Fatalf("complete batched timers = %+v poll=%+v", complete, driver.poll)
+	}
+	sentinel := newYieldingTestG(t, "timer-batch-sentinel")
+	if !Enqueue(p, sentinel.g) {
+		t.Fatal("enqueue batched timer terminal sentinel")
+	}
+	parkIndex := make(map[*G]int, len(parks))
+	for index, park := range parks {
+		parkIndex[park.task.g] = index
+	}
+	for resumed := 0; resumed < len(parks); resumed++ {
+		g, ok := NextRunnableAt(p, 1)
+		index, found := parkIndex[g]
+		if !ok || !found {
+			t.Fatalf("dequeue promoted batched timer %d = (%p,%t)", resumed, g, ok)
+		}
+		delete(parkIndex, g)
+		park := parks[index]
+		action := beginWaitTestResume(t, p, park.task)
+		outcome, caseID, lease, taskCancel, decisionOK := TakeRunDecision(park.task.g, park.ticket)
+		if outcome != ParkOutcomeCompleted || caseID != uint32(index+1) || taskCancel != TaskCancelNone ||
+			!decisionOK ||
+			!timers.DiscardTimerV2Result(p, handles[index], lease) ||
+			!timers.RecycleTimerV2(p, handles[index]) {
+			t.Fatalf("consume batched timer %d = outcome:%d case:%d lease:%+v task:%d",
+				index, outcome, caseID, lease, taskCancel)
+		}
+		finishWaitTestTask(t, p, park.task, action)
+	}
+	closeTestExecutorDriver(t, driver)
+	if g, ok := NextRunnable(p); !ok || g != sentinel.g {
+		t.Fatalf("dequeue batched timer terminal sentinel = (%p,%t)", g, ok)
+	}
+	finishWaitTestTask(t, p, sentinel, beginWaitTestResume(t, p, sentinel))
+	if !timers.CanRelease() || !registry.CanRelease() {
+		t.Fatal("batched timer fixture retained source state")
 	}
 }
 
