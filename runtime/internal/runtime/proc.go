@@ -18,8 +18,6 @@ package runtime
 
 import (
 	"unsafe"
-
-	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
 // NewProc creates a new G running fn.
@@ -114,17 +112,6 @@ func mexit(mp *m) {
 	if root != nil {
 		ctx.root = nil
 		FreeRoot(root)
-	}
-}
-
-// releaseGAndCheckDeadlock is the sole last-goroutine decision. Main marks its
-// exit before releasing its own context, so regardless of release ordering the
-// final goroutine observes both facts in the packed atomic state.
-func releaseGAndCheckDeadlock() {
-	remaining, mainExited := releaseG()
-	if remaining == 0 && mainExited {
-		fatal("no goroutines (main called runtime.Goexit) - deadlock!")
-		c.Exit(2)
 	}
 }
 

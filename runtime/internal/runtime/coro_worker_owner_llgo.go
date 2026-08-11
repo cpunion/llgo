@@ -214,33 +214,3 @@ func __llgo_coro_worker_resume_v1(
 	}
 	return coroWorkerResumeSuccessV1
 }
-
-func coroWorkerResultPayloadV1(
-	r1, r2, errno, fault, faultPC, faultTarget uintptr,
-) (coro.ScalarResultPayloadV1, bool) {
-	if fault == coroworker.FaultNone {
-		if faultPC != 0 || faultTarget != 0 {
-			return coro.ScalarResultPayloadV1{}, false
-		}
-		return coro.MakeScalarResultPayloadV1(
-			coro.ScalarResultKindWords,
-			coro.ScalarResultFlags(coroworker.FaultNone),
-			3,
-			uint64(r1),
-			uint64(r2),
-			uint64(errno),
-		)
-	}
-	if (fault != coroworker.FaultMemory && fault != coroworker.FaultDivide) ||
-		r1 != 0 || r2 != 0 || errno != 0 || faultPC == 0 || faultTarget == 0 {
-		return coro.ScalarResultPayloadV1{}, false
-	}
-	return coro.MakeScalarResultPayloadV1(
-		coro.ScalarResultKindWords,
-		coro.ScalarResultFlags(fault),
-		3,
-		uint64(faultPC),
-		uint64(faultTarget),
-		0,
-	)
-}
