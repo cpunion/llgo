@@ -43,6 +43,7 @@ type ExecutorDriver struct {
 	route         RouteID
 	sources       ExecutorSourceSet
 	poll          executorPollTransaction
+	local         ownerLocalCompletionCursor
 	run           executorRunCursor
 	prepareNow    int64
 	hasPrepareNow bool
@@ -87,13 +88,15 @@ func validExecutorDriverHeader(driver *ExecutorDriver) bool {
 		driver.route.Valid() && driver.sources.route == driver.route &&
 		driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
 		validExecutorSourceSetHeader(&driver.sources, driver.p) &&
+		validOwnerLocalCompletionHeader(&driver.local, driver.p) &&
 		validExecutorRunCursor(&driver.run, driver.p)
 }
 
 func validExecutorDriver(driver *ExecutorDriver) bool {
 	return validExecutorDriverHeader(driver) &&
 		validExecutorSourceSet(&driver.sources, driver.p) &&
-		validExecutorPollTransaction(&driver.poll, &driver.sources)
+		validExecutorPollTransaction(&driver.poll, &driver.sources) &&
+		validOwnerLocalCompletion(&driver.local, driver.p)
 }
 
 func validExecutorDriverForP(driver *ExecutorDriver, p *P) bool {
@@ -344,6 +347,7 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
 		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
 		driver.poll != (executorPollTransaction{}) ||
+		driver.local != (ownerLocalCompletionCursor{}) ||
 		driver.run != (executorRunCursor{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||

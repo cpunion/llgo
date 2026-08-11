@@ -477,6 +477,82 @@ func externallyCommitChannelCandidateAtRoute(
 	}
 }
 
+func TestOwnerLocalChannelCompletionSkipsExternalSourceEpoch(t *testing.T) {
+	fixture := newChannelClaimCoreFixture(t, "channel-owner-local-peer", []uint32{151}, true, 0)
+
+	// Consume the mandatory initial parked-set visit. The peer is still waiting,
+	// but its record is now owner-idle and therefore eligible for the exact local
+	// completion queue.
+	requestChannelClaimCoreFixture(t, fixture)
+	initial := pollChannelClaimCoreComplete(t, fixture)
+	if initial.Completed != 0 || initial.Promoted != 0 || fixture.wait.work != waitSetWorkIdle ||
+		fixture.p.affectedWaitHead != nil || fixture.p.affectedWaitTail != nil {
+		t.Fatalf("initial owner-local visit = %+v wait=%+v affected=(%p,%p)",
+			initial, fixture.wait, fixture.p.affectedWaitHead, fixture.p.affectedWaitTail)
+	}
+
+	producer := newYieldingTestG(t, "channel-owner-local-producer")
+	if !Enqueue(fixture.p, producer.g) {
+		t.Fatal("enqueue owner-local producer")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue owner-local producer = (%p,%t)", g, ok)
+	}
+	producerAction := beginWaitTestResume(t, fixture.p, producer)
+	externallyCommitChannelCandidateAtRoute(t, fixture, 0, RouteID(1))
+
+	local, ok := TryPublishOwnerLocalChannelCompletion(producer.g, fixture.source, fixture.ids[0])
+	ready, readyOK := channelOperationReadyAt(fixture.source, fixture.ids[0].LocalSlot()-1)
+	if !ok || !local || !readyOK || ready || fixture.source.Pending() ||
+		fixture.driver.local.head != &fixture.wait || fixture.driver.local.tail != &fixture.wait ||
+		fixture.wait.work != waitSetWorkQueued || fixture.p.affectedWaitHead != nil ||
+		fixture.p.affectedWaitTail != nil || fixture.registry.ObserveRequested(fixture.handle) ||
+		preemptWordState(loadGPreempt(producer.g)) != preemptRequested {
+		t.Fatalf("owner-local publication = (%t,%t) ready=(%t,%t) pending=%t local=(%p,%p) wait=%+v request=%t preempt=%#x",
+			local, ok, ready, readyOK, fixture.source.Pending(), fixture.driver.local.head,
+			fixture.driver.local.tail, fixture.wait, fixture.registry.ObserveRequested(fixture.handle),
+			loadGPreempt(producer.g))
+	}
+	yieldRunningDriverTask(t, fixture.p, producer, producerAction)
+
+	var complete ExecutorPollProgress
+	for reduction := 0; reduction < 64; reduction++ {
+		step, advanced := NextExecutorRunStep(fixture.driver)
+		if !advanced || step.Kind != ExecutorRunStepSource || step.Poll.Used != 1 ||
+			!step.Poll.AtomicResolve || fixture.driver.poll != (executorPollTransaction{}) {
+			t.Fatalf("owner-local reduction %d = (%+v,%t), poll=%+v", reduction, step, advanced, fixture.driver.poll)
+		}
+		complete = step.Poll
+		if complete.Complete {
+			if !CommitExecutorRunSourceDistribution(fixture.driver, false) {
+				t.Fatal("commit owner-local source distribution")
+			}
+			break
+		}
+	}
+	if !complete.Complete || complete.Promoted != 1 || !emptyOwnerLocalCompletion(&fixture.driver.local) ||
+		fixture.task.g.park.phase != parkReady || fixture.source.Pending() ||
+		fixture.registry.ObserveRequested(fixture.handle) {
+		t.Fatalf("owner-local completion = %+v local=%+v park=%+v pending=%t request=%t",
+			complete, fixture.driver.local, fixture.task.g.park, fixture.source.Pending(),
+			fixture.registry.ObserveRequested(fixture.handle))
+	}
+
+	if !EnterExecutorRunCompatibility(fixture.driver) {
+		t.Fatal("leave owner-local bounded runner")
+	}
+	if g, runnable := NextRunnable(fixture.p); !runnable || g != producer.g {
+		t.Fatalf("dequeue yielded owner-local producer = (%p,%t)", g, runnable)
+	}
+	finishWaitTestTask(t, fixture.p, producer, beginWaitTestResume(t, fixture.p, producer))
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 151 || !decision.lease.Valid() {
+		t.Fatalf("owner-local peer decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+	runtime.KeepAlive(producer.frame.memory)
+}
+
 func TestSelectClaimLayoutPairAcquisitionAndFrozenSourceID(t *testing.T) {
 	if unsafe.Sizeof(SelectClaim{}) != 4 || unsafe.Alignof(SelectClaim{}) != 4 {
 		t.Fatalf("SelectClaim layout = size:%d align:%d", unsafe.Sizeof(SelectClaim{}), unsafe.Alignof(SelectClaim{}))

@@ -288,17 +288,44 @@ func classifyCoroChanPairBegin(result coro.ChannelExternalCommitPairBeginResult)
 	}
 }
 
+func publishCoroChannelOwnerLocalV1(operation *coroChanOperationV1) (published, ok bool) {
+	if operation == nil || !operation.id.Valid() {
+		return false, false
+	}
+	if current, _ := coroCurrentTaskV1(); current != nil {
+		return coro.TryPublishOwnerLocalChannelCompletion(
+			current,
+			operation.source,
+			operation.id,
+		)
+	}
+	return false, true
+}
+
 func requestCoroChannelExecutorV1(operation *coroChanOperationV1) bool {
-	return operation != nil && operation.id.Valid() &&
-		coroTargetRequestChannelOperationV1(operation.id)
+	local, ok := publishCoroChannelOwnerLocalV1(operation)
+	if !ok || local {
+		return ok
+	}
+	return coroTargetRequestChannelOperationV1(operation.id)
 }
 
 func requestCoroChannelPairExecutorsV1(first, second *coroChanOperationV1) bool {
-	if first == nil || second == nil || !first.id.Valid() || !second.id.Valid() ||
-		!requestCoroChannelExecutorV1(first) {
+	if first == nil || second == nil || !first.id.Valid() || !second.id.Valid() {
 		return false
 	}
-	return first.id.Route() == second.id.Route() || requestCoroChannelExecutorV1(second)
+	firstLocal, firstOK := publishCoroChannelOwnerLocalV1(first)
+	secondLocal, secondOK := publishCoroChannelOwnerLocalV1(second)
+	if !firstOK || !secondOK {
+		return false
+	}
+	if !firstLocal && !coroTargetRequestChannelOperationV1(first.id) {
+		return false
+	}
+	if secondLocal || !firstLocal && first.id.Route() == second.id.Route() {
+		return true
+	}
+	return coroTargetRequestChannelOperationV1(second.id)
 }
 
 func commitCoroRecvWaiterLocked(w *chanWaiter, src unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {

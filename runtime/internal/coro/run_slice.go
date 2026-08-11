@@ -49,7 +49,8 @@ func validExecutorRunCursor(cursor *executorRunCursor, p *P) bool {
 }
 
 func emptyExecutorRunCursor(driver *ExecutorDriver) bool {
-	return driver != nil && driver.run == (executorRunCursor{})
+	return driver != nil && driver.run == (executorRunCursor{}) &&
+		emptyOwnerLocalCompletion(&driver.local)
 }
 
 // EnterExecutorRunCompatibility is the only supported stable-idle switch from
@@ -61,6 +62,7 @@ func emptyExecutorRunCursor(driver *ExecutorDriver) bool {
 func EnterExecutorRunCompatibility(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
+		!emptyOwnerLocalCompletion(&driver.local) ||
 		!idleExecutorScheduler(driver.p) {
 		return false
 	}
@@ -126,6 +128,39 @@ func serviceExecutorRunSource(driver *ExecutorDriver, now int64, withDeadline bo
 	} else {
 		driver.run.sourceMore = true
 		driver.run.blocked = false
+	}
+	return ExecutorRunStep{Kind: ExecutorRunStepSource, Poll: progress}, true
+}
+
+// serviceExecutorRunLocal advances one completion which was published by the
+// currently owning G on this same P. It deliberately uses the ordinary Source
+// host step so target-side ready distribution and readyDebt keep one common
+// boundary, but AtomicResolve identifies that no catalog scan or executor
+// acknowledgement was performed.
+func serviceExecutorRunLocal(driver *ExecutorDriver) (ExecutorRunStep, bool) {
+	var resolved publishedEpochResolveStep
+	if !resolveOwnerLocalCompletionStep(driver, &resolved) ||
+		resolved.applyVisits < 0 || resolved.promoted < 0 {
+		return ExecutorRunStep{}, false
+	}
+	complete := resolved.complete
+	if complete {
+		if ownerLocalCompletionPending(driver) {
+			return ExecutorRunStep{}, false
+		}
+		driver.run.blocked = false
+		driver.run.actionsSinceSource = 0
+		if runnableForOSThreadOwner(driver.p) {
+			driver.run.readyDebt = true
+		}
+	}
+	progress := ExecutorPollProgress{
+		Used:          1,
+		ApplyVisits:   uint32(resolved.applyVisits),
+		Promoted:      uint32(resolved.promoted),
+		Complete:      complete,
+		More:          !complete || runnableForOSThreadOwner(driver.p) || executorRunExternalSourceRequested(driver),
+		AtomicResolve: true,
 	}
 	return ExecutorRunStep{Kind: ExecutorRunStepSource, Poll: progress}, true
 }
@@ -217,10 +252,20 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 
 	// Once epoch A starts, acknowledgement and epoch B finish before any G.
 	if driver.poll.phase != executorPollIdle {
-		if cleanup, pending := pendingResumeCleanupStep(driver); pending {
+		if cleanup, pending := pendingResumeCleanupStepForCursor(&driver.poll.resolve); pending {
 			return ExecutorRunStep{Kind: ExecutorRunStepMaterialize, Cleanup: cleanup}, true
 		}
 		return serviceExecutorRunSource(driver, now, withDeadline)
+	}
+	// An owner-local completion has already published its exact typed source
+	// fact. Resolve it before starting an unrelated external A/ack/B epoch and
+	// before dispatching another G; typed cleanup still returns through the
+	// ordinary direct-runtime Materialize boundary.
+	if ownerLocalCompletionPending(driver) {
+		if cleanup, pending := pendingResumeCleanupStepForCursor(&driver.local.resolve); pending {
+			return ExecutorRunStep{Kind: ExecutorRunStepMaterialize, Cleanup: cleanup}, true
+		}
+		return serviceExecutorRunLocal(driver)
 	}
 	if driver.run.readyDebt {
 		if runnableForOSThreadOwner(p) {
@@ -263,10 +308,10 @@ func NextExecutorRunStepAt(driver *ExecutorDriver, now int64) (ExecutorRunStep, 
 // reduction will enter a managed llvm.coro.resume. It is deliberately
 // observational and must be called before NextExecutorRunStep marks the
 // physical Action interval issued. A target can therefore acquire its
-// process-level execution permit without returning across an issued action or
+// process-level P lease without returning across an issued action or
 // teaching the target-neutral driver about threads and GOMAXPROCS.
 func ExecutorRunManagedResumePending(driver *ExecutorDriver) (pending, ok bool) {
-	// This is only a pre-step permit probe. NextExecutorRunStep performs the
+	// This is only a pre-step lease probe. NextExecutorRunStep performs the
 	// complete owner-header validation before it can issue an action, so the
 	// probe needs only the exact active P back-pointer and issued-state gate.
 	if driver == nil || driver.magic != executorDriverMagic || driver.state != executorDriverActive ||
@@ -323,7 +368,7 @@ func ExecutorOwnerWaitPending(driver *ExecutorDriver) (pending, ok bool) {
 		return false, false
 	}
 	return runnableForOSThreadOwner(driver.p) ||
-		executorRunSourceRequested(driver), true
+		ownerLocalCompletionPending(driver) || executorRunSourceRequested(driver), true
 }
 
 func completedExecutorRunAction(p *P, g *G, action Action) bool {
