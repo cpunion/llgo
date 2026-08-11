@@ -131,6 +131,46 @@ func TestRuntimeSignalCoroAdapterIsSignalSafeAndEventDriven(t *testing.T) {
 	}
 }
 
+func TestRuntimePanicPCSnapshotIsLazyAndSignalSafe(t *testing.T) {
+	runtime2 := readRuntimePollFile(t, "internal/runtime/runtime2.go")
+	if !strings.Contains(runtime2, "panicPCs *panicPCStore") ||
+		strings.Contains(runtime2, "panicPCs panicPCStore") {
+		t.Fatal("runtime G does not keep the bounded panic PC payload out of line")
+	}
+
+	context := readRuntimePollFile(t, "internal/runtime/runtime_context.go")
+	for _, required := range []string{
+		"var signalPanicPCStore panicPCStore",
+		"func ensurePanicPCStore(gp *g) *panicPCStore",
+		"raw := AllocRoot(size)",
+		"func signalSafePanicPCStore(gp *g) *panicPCStore",
+		"gp.panicPCs = &signalPanicPCStore",
+		"if store == &signalPanicPCStore",
+	} {
+		if !strings.Contains(context, required) {
+			t.Errorf("lazy panic PC ownership lacks %q", required)
+		}
+	}
+
+	caller := readRuntimePollFile(t, "internal/runtime/caller.go")
+	for _, required := range []string{
+		"func StoreSignalFaultPCs(pcs []uintptr)",
+		"p := signalSafePanicPCStore(getg())",
+		"storePanicPCsInto(p, pcs, 1)",
+		"p := ensurePanicPCStore(getg())",
+	} {
+		if !strings.Contains(caller, required) {
+			t.Errorf("panic PC capture lacks %q", required)
+		}
+	}
+
+	faultLegacy := readRuntimePollFile(t, runtimeFaultLegacySource)
+	if !strings.Contains(faultLegacy, "rtdebug.StoreSignalFaultPCs(faultPCs[:n])") ||
+		strings.Contains(faultLegacy, "rtdebug.StoreFaultPCs(faultPCs[:n])") {
+		t.Fatal("legacy signal callback can reach the allocating panic PC path")
+	}
+}
+
 func TestRuntimeSignalSourceSelectionUsesCompleteNativeCapability(t *testing.T) {
 	native := []string{"llgo", "llgo_coro", "llgo_coro_native_pipe", "llgo_coro_native_timer"}
 	tests := []struct {

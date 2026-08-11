@@ -978,3 +978,43 @@ Mach-O text/data sizes were unchanged. These noisy-host measurements establish
 the removed complexity and absence of a storage regression, not a stable
 throughput promise. The remaining large-G cost is linear channel close/wakeup,
 task/frame allocation and runtime-context initialization.
+
+### Lazy panic-snapshot checkpoint
+
+The next memory checkpoint uses `c773ea52e` as its exact parent. Every runtime
+G previously embedded a 544-byte `panicPCStore`, including its 64-PC array,
+even though an ordinary parked logical G never panics. Replacing that payload
+with one pointer removes 536 bytes from every 64-bit runtime context. The
+bounded store is allocated and explicitly released only if a managed panic
+snapshot is actually requested. Stackless language panics continue to use
+their scheduler-owned logical frame trace and therefore do not allocate it.
+
+The legacy native fault callback cannot allocate in signal context. It now
+uses an already-owned G store when one exists and otherwise publishes into one
+static emergency store. This preserves the pre-existing process-global,
+best-effort concurrent-fault scope of the legacy fault source. A normal panic
+replaces that emergency attachment with an owned store. Source gates require
+the signal callback to use the allocation-free entry, while complete coroutine
+profiles retain their signal-stack-free compiler outcome path.
+
+Peak RSS from one bounded, process-start `GOMAXPROCS=1` run was:
+
+| parked Gs | Go gc RSS | `c773ea52e` RSS | lazy snapshot RSS | lazy incremental / G |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 3,555,328 | 7,716,864 | 7,733,248 | - |
+| 1,000 | 6,471,680 | 10,665,984 | 9,748,480 | 2,015 B |
+| 5,000 | 17,580,032 | 25,526,272 | 20,987,904 | 2,651 B |
+| 10,000 | 31,539,200 | 40,779,776 | 32,751,616 | 2,502 B |
+
+At 10,000 parked Gs the candidate removes 8,028,160 bytes (19.7%) from the
+parent and is only 1,212,416 bytes (3.8%) above Go in total RSS. Its slope from
+idle is about 10.6% below Go's 2,798 bytes/G, so the stackless implementation
+now demonstrates a per-goroutine memory advantage even though its larger fixed
+runtime still narrowly loses the total-footprint comparison at this scale.
+
+The stripped executable shrank by 416 bytes; Mach-O `__TEXT`, `__DATA_CONST`,
+and `__DATA` segment reservations were unchanged. Runtime tests, native/wasm
+panic and recover IR tests, and the linked native ExplicitStatus panic E2E
+completed. The legacy PCLN signal integration command remains blocked before
+its fault subtest by the same unrelated `pclntab_external.go` uintptr-retention
+audit on both this candidate and the exact parent.

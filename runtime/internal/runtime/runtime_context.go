@@ -50,6 +50,61 @@ var sched struct {
 	gstate uint64
 }
 
+// signalPanicPCStore is the allocation-free fallback used only when a legacy
+// SA_SIGINFO callback faults before its current G has ever needed a panic
+// snapshot. That callback's source snapshot is already process-global and
+// documents concurrent faults as a lost race on a doomed process.
+var signalPanicPCStore panicPCStore
+
+func loadPanicPCStore(gp *g) *panicPCStore {
+	if gp == nil {
+		return nil
+	}
+	return gp.panicPCs
+}
+
+func ensurePanicPCStore(gp *g) *panicPCStore {
+	if gp == nil {
+		return nil
+	}
+	if gp.panicPCs != nil && gp.panicPCs != &signalPanicPCStore {
+		return gp.panicPCs
+	}
+	size := unsafe.Sizeof(panicPCStore{})
+	raw := AllocRoot(size)
+	if raw == nil {
+		coroRuntimeAbort("failed to allocate panic PC store")
+		return nil
+	}
+	c.Memset(raw, 0, size)
+	gp.panicPCs = (*panicPCStore)(raw)
+	return gp.panicPCs
+}
+
+func signalSafePanicPCStore(gp *g) *panicPCStore {
+	if gp == nil {
+		return nil
+	}
+	if gp.panicPCs == nil {
+		gp.panicPCs = &signalPanicPCStore
+	}
+	return gp.panicPCs
+}
+
+func releasePanicPCStore(gp *g) {
+	if gp == nil || gp.panicPCs == nil {
+		return
+	}
+	store := gp.panicPCs
+	gp.panicPCs = nil
+	if store == &signalPanicPCStore {
+		return
+	}
+	size := unsafe.Sizeof(panicPCStore{})
+	c.Memset(unsafe.Pointer(store), 0, size)
+	FreeRoot(unsafe.Pointer(store))
+}
+
 func allocRuntimeContext() *runtimeContext {
 	size := unsafe.Sizeof(runtimeContext{})
 	root := AllocRoot(size)
