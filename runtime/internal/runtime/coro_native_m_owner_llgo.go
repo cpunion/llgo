@@ -943,6 +943,21 @@ func coroTargetRetirePhysicalOwnerV1(
 		_, _ = state.stop.Leave()
 		return false
 	}
+	// A bounded reducer can retain this route's P lease from the G's last
+	// resume through root destruction. The successor is the next physical owner
+	// of that same route and cannot acquire until the retiring M releases here.
+	// Destroy-only entries have no lease, so the exact Held query makes this one
+	// succession boundary valid for both call paths.
+	_, executionOK := coroTargetReleaseManagedExecutionIfHeldV1(driver)
+	if !executionOK {
+		_ = coroNativeMOwnerLifecycleCASV1(
+			owner,
+			coroNativeMOwnerRetiringV1,
+			lifecycle,
+		)
+		_, _ = state.stop.Leave()
+		return false
+	}
 	successorSlot, successor, allocated := coroNativeMAllocateSuccessorV1(
 		slot,
 		owner,

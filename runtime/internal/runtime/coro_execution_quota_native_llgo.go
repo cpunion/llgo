@@ -47,13 +47,17 @@ func coroNativeFleetExecutionDomainV1(
 		domain.handle.Route == uint32(route)
 }
 
-func coroNativeFleetRingExecutionWaitersV1() bool {
+func coroNativeFleetRingExecutionWaitersV1(waiters uint32) bool {
 	state := &coroNativeFleetV1State
 	if state.lifecycle != coroNativeFleetActiveV1 ||
-		state.domainCount != coroNativeFleetDomainCapacityV1 {
+		state.domainCount != coroNativeFleetDomainCapacityV1 ||
+		waiters>>state.domainCount != 0 {
 		return false
 	}
 	for index := uint32(0); index < state.domainCount; index++ {
+		if waiters&(uint32(1)<<index) == 0 {
+			continue
+		}
 		domain := &state.domains[index]
 		if domain.lifecycle != coroNativeFleetDomainActiveV1 ||
 			!domain.doorbell.Ring() {
@@ -77,12 +81,32 @@ func coroTargetReleaseManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 		return false
 	}
 	wake, released := coroNativeFleetV1State.execution.Release(route)
-	return released && (!wake || coroNativeFleetRingExecutionWaitersV1())
+	if !released || !wake {
+		return released
+	}
+	waiters, valid := coroNativeFleetV1State.execution.WaiterMask()
+	return valid && coroNativeFleetRingExecutionWaitersV1(waiters)
+}
+
+// coroTargetReleaseManagedExecutionIfHeldV1 is the physical-owner succession
+// handoff. Destroy-only entries may reach retirement without a P lease, while
+// a bounded slice which retained a lease across the preceding resume must
+// release it before starting a clean successor on the same route.
+func coroTargetReleaseManagedExecutionIfHeldV1(driver *coro.ExecutorDriver) (released, ok bool) {
+	_, route, valid := coroNativeFleetExecutionDomainV1(driver)
+	if !valid {
+		return false, false
+	}
+	held, valid := coroNativeFleetV1State.execution.Held(route)
+	if !valid || !held {
+		return false, valid
+	}
+	return true, coroTargetReleaseManagedExecutionV1(driver)
 }
 
 // A route which still owns runnable work waits only on its retained doorbell;
 // it does not enter the executor driver's idle protocol. Release or a limit
-// increase rings every sticky contender, while the bounded timeout preserves a
+// increase rings each exact sticky contender, while the bounded timeout preserves a
 // stop/fault recheck even if a platform write is unexpectedly lost.
 func coroTargetWaitManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 	domain, _, ok := coroNativeFleetExecutionDomainV1(driver)
@@ -93,8 +117,8 @@ func coroTargetWaitManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 	return ok
 }
 
-// coroTargetReenterManagedExecutionV1 restores an outer reducer's exact
-// ActionResume permit after its replacement M has returned and been joined.
+// coroTargetReenterManagedExecutionV1 restores an outer bounded run slice's
+// exact P lease after its replacement M has returned and been strongly joined.
 // The caller restores the detached active resume only after this succeeds.
 func coroTargetReenterManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 	for {
@@ -128,7 +152,12 @@ func CoroGOMAXPROCS(n int) int {
 		next = coroNativeMaximumLogicalProcsV1
 	}
 	previous, wake, changed := coroNativeFleetV1State.execution.SetLimit(next)
-	if !changed || wake && !coroNativeFleetRingExecutionWaitersV1() {
+	waiters := uint32(0)
+	waitersOK := true
+	if wake {
+		waiters, waitersOK = coroNativeFleetV1State.execution.WaiterMask()
+	}
+	if !changed || !waitersOK || wake && !coroNativeFleetRingExecutionWaitersV1(waiters) {
 		coroRuntimeAbort("native coroutine execution quota resize failed")
 		return int(limit)
 	}

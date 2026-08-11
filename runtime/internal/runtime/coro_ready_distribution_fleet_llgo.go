@@ -251,7 +251,7 @@ func coroTargetStopForOSThreadReturnV1(
 // corofleet's existing condition variable while one clean replacement owns
 // the same P/driver/source island. The ordinary suspended LLVM frame is already
 // rooted by P's ready/wait queues, so this path neither copies an active resume
-// nor acquires another managed-execution permit.
+// nor acquires another managed-execution P lease.
 func coroTargetHandleOSThreadSuspendV1(
 	p *coro.P,
 	driver *coro.ExecutorDriver,

@@ -51,9 +51,12 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 		return coroRunResultV1{}
 	}
 	result := coroRunResultV1{}
+	held := false
 	for result.used < budget {
-		held, wait, permitOK := coroPrepareManagedExecutionV1(driver)
+		var wait, permitOK bool
+		held, wait, permitOK = coroPrepareManagedExecutionV1(driver, held)
 		if !permitOK {
+			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
 		if wait {
@@ -72,21 +75,32 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 			step,
 			&result,
 		)
-		if !coroFinishManagedExecutionV1(driver, held) || !reduced {
+		if !reduced {
+			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
 		if terminal {
+			if !coroFinishManagedExecutionV1(driver, held) {
+				return coroRunResultV1{}
+			}
 			return result
 		}
 		stopForReturn, returnOK := coroStopAfterStableReductionV1(
 			driver, &result,
 		)
 		if !returnOK {
+			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
 		if stopForReturn {
+			if !coroFinishManagedExecutionV1(driver, held) {
+				return coroRunResultV1{}
+			}
 			return result
 		}
+	}
+	if !coroFinishManagedExecutionV1(driver, held) {
+		return coroRunResultV1{}
 	}
 	result.stop = coroRunSliceBudgetV1
 	return result

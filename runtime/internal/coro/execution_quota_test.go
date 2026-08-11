@@ -38,14 +38,26 @@ func TestExecutionQuotaLifecycleAndStickyWake(t *testing.T) {
 	if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
 		t.Fatal("route 1 did not acquire the only permit")
 	}
+	if held, ok := quota.Held(1); !ok || !held {
+		t.Fatalf("route 1 held lease = (%t, %t)", held, ok)
+	}
+	if held, ok := quota.Held(2); !ok || held {
+		t.Fatalf("idle route 2 held lease = (%t, %t)", held, ok)
+	}
 	if acquired, ok := quota.TryAcquire(2); acquired || !ok {
 		t.Fatalf("contended route 2 acquire = (%t, %t)", acquired, ok)
+	}
+	if waiters, ok := quota.WaiterMask(); !ok || waiters != 1<<(2-1) {
+		t.Fatalf("exact execution waiter mask = (%08b, %t)", waiters, ok)
 	}
 	if previous, wake, ok := quota.SetLimit(4); !ok || previous != 1 || !wake {
 		t.Fatalf("grow execution quota = (%d, %t, %t)", previous, wake, ok)
 	}
 	if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
 		t.Fatal("route 2 did not acquire after growth")
+	}
+	if waiters, ok := quota.WaiterMask(); !ok || waiters != 0 {
+		t.Fatalf("acquired route retained waiter = (%08b, %t)", waiters, ok)
 	}
 	if previous, wake, ok := quota.SetLimit(1); !ok || previous != 4 || wake {
 		t.Fatalf("shrink execution quota = (%d, %t, %t)", previous, wake, ok)
@@ -61,6 +73,9 @@ func TestExecutionQuotaLifecycleAndStickyWake(t *testing.T) {
 	}
 	if wake, ok := quota.Release(1); !ok || !wake {
 		t.Fatalf("route 1 release = (%t, %t), want sticky wake", wake, ok)
+	}
+	if held, ok := quota.Held(1); !ok || held {
+		t.Fatalf("released route 1 held lease = (%t, %t)", held, ok)
 	}
 	if acquired, ok := quota.TryAcquire(3); !acquired || !ok {
 		t.Fatal("route 3 did not acquire released permit")

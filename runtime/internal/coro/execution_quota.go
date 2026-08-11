@@ -17,15 +17,17 @@
 package coro
 
 // ExecutionQuota is the process-level managed-execution gate shared by a
-// bounded executor fleet. It limits only entry into a physical coroutine
-// resume. An executor which has no permit remains alive and may continue to
-// service its route-local timer, poll, channel, cancellation, and transfer
-// sources.
+// bounded executor fleet. A held route represents one physical owner leasing
+// a logical P across a bounded scheduler run slice, rather than a lock acquired
+// around every individual llvm.coro.resume. An executor which has no lease
+// remains alive and may continue to service route-local timer, poll, channel,
+// cancellation, and transfer sources until it first needs managed execution.
 //
 // This separation keeps every P/route identity stable while GOMAXPROCS changes:
 // shrinking the logical execution limit never destroys a source owner or moves
 // an outstanding operation. The same acquire/release boundary is also the
-// future blocking-compensation handoff point.
+// blocking-call compensation temporarily hands this same lease to a replacement
+// physical owner and reacquires it before the suspended owner resumes Go code.
 //
 // All concurrently observed fields are uint32 atomics. Two packed holder bits
 // per physical route make a double acquire/release fail closed without a
@@ -186,6 +188,52 @@ func (quota *ExecutionQuota) Usage() (limit, active uint32, ok bool) {
 	return limit, active, true
 }
 
+// WaiterMask returns the exact bounded physical routes which published quota
+// contention. It is an advisory wake snapshot, not a second admission gate:
+// each route still rechecks TryAcquire after its retained doorbell fires.
+// A contender which races after this snapshot observes newly available quota
+// in TryAcquire's final recheck and therefore cannot lose a wake.
+func (quota *ExecutionQuota) WaiterMask() (uint32, bool) {
+	if quota == nil || preemptLoad(&quota.lifecycle) != uint32(executionQuotaActive) {
+		return 0, false
+	}
+	mask := preemptLoad(&quota.waiters)
+	if preemptLoad(&quota.lifecycle) != uint32(executionQuotaActive) {
+		return 0, false
+	}
+	return mask & ((uint32(1) << uint32(ExecutorFleetCapacity)) - 1), true
+}
+
+// Held reports whether the exact physical route currently owns its P lease.
+// Idle and Held are stable query results; Claiming/Releasing is an in-flight
+// same-route ownership transition and therefore fails closed for an owner-side
+// handoff decision.
+func (quota *ExecutionQuota) Held(route RouteID) (held, ok bool) {
+	if quota == nil {
+		return false, false
+	}
+	lifecycle := executionQuotaLifecycle(preemptLoad(&quota.lifecycle))
+	if lifecycle != executionQuotaActive && lifecycle != executionQuotaSealed {
+		return false, false
+	}
+	holderMask, _, shift, valid := executionQuotaRouteMasks(route)
+	if !valid {
+		return false, false
+	}
+	state := executionQuotaHolderState((preemptLoad(&quota.holders) & holderMask) >> shift)
+	if current := executionQuotaLifecycle(preemptLoad(&quota.lifecycle)); current != lifecycle {
+		return false, false
+	}
+	switch state {
+	case executionQuotaHolderIdle:
+		return false, true
+	case executionQuotaHolderHeld:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // SetLimit atomically changes the logical execution limit and returns the
 // previous value. A shrink never revokes an in-flight resume; it prevents new
 // acquisitions until active falls below the new limit. wake reports whether a
@@ -210,8 +258,8 @@ func (quota *ExecutionQuota) SetLimit(limit uint32) (previous uint32, wake, ok b
 	}
 }
 
-// TryAcquire attempts to grant one exact physical route permission to enter a
-// managed coroutine resume. acquired=false, ok=true is ordinary quota
+// TryAcquire attempts to grant one exact physical route a bounded P lease.
+// acquired=false, ok=true is ordinary quota
 // contention. The waiter bit is published before the final availability
 // recheck, closing the release-before-sleep lost-wake window.
 func (quota *ExecutionQuota) TryAcquire(route RouteID) (acquired, ok bool) {
@@ -307,9 +355,9 @@ func (quota *ExecutionQuota) TryAcquire(route RouteID) (acquired, ok bool) {
 	}
 }
 
-// Release closes the exact route's physical resume interval. wake is a sticky
-// hint: ringing all bounded route doorbells is safe, and each contender clears
-// only its own waiter bit after it successfully rechecks or acquires.
+// Release closes the exact route's bounded P lease. wake is a sticky hint that
+// the caller must snapshot and ring the exact waiter routes. Each contender
+// clears only its own waiter bit after it successfully rechecks or acquires.
 func (quota *ExecutionQuota) Release(route RouteID) (wake, ok bool) {
 	lifecycle := executionQuotaLifecycle(preemptLoad(&quota.lifecycle))
 	if lifecycle != executionQuotaActive && lifecycle != executionQuotaSealed {

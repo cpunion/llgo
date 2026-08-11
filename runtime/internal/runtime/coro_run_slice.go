@@ -109,7 +109,7 @@ const (
 	coroRunExecutionWaitV1
 	// coroRunOSThreadSuspendV1 is a native full-thread target boundary after a
 	// locked Yield/Park has committed and the target-neutral P phase detached.
-	// The reducer has already released its managed-execution permit before the
+	// The bounded run slice releases its managed-execution P lease before the
 	// outer owner handles this stop.
 	coroRunOSThreadSuspendV1
 	// coroRunForeignReentryCompleteV1 returns one fully destroyed synchronous
@@ -207,17 +207,20 @@ func coroRunPhysicalActionV1(p *coro.P, g *coro.G, action coro.Action) (coro.Act
 	}
 }
 
-// coroPrepareManagedExecutionV1 acquires the target's process-level execution
-// permit before NextExecutorRunStep opens an issued physical Action interval.
+// coroPrepareManagedExecutionV1 acquires the target's process-level P lease
+// before NextExecutorRunStep opens an issued physical Action interval.
+// A lease already held by this bounded run slice is retained across source,
+// dispatch, and later physical-action reductions: it represents an M owning a
+// P, rather than a fresh quota transaction around every llvm.coro.resume.
 // wait=true is an ordinary stable scheduler-stack return: the route keeps all
-// runnable and source ownership and waits only for another permit publication.
-func coroPrepareManagedExecutionV1(driver *coro.ExecutorDriver) (held, wait, ok bool) {
+// runnable and source ownership and waits only for another P publication.
+func coroPrepareManagedExecutionV1(driver *coro.ExecutorDriver, held bool) (nextHeld, wait, ok bool) {
 	pending, valid := coro.ExecutorRunManagedResumePending(driver)
 	if !valid {
-		return false, false, false
+		return held, false, false
 	}
-	if !pending {
-		return false, false, true
+	if held || !pending {
+		return held, false, true
 	}
 	acquired, valid := coroTargetAcquireManagedExecutionV1(driver)
 	if !valid {
@@ -233,14 +236,16 @@ func coroFinishManagedExecutionV1(driver *coro.ExecutorDriver, held bool) bool {
 func coroStepMatchesManagedExecutionV1(step coro.ExecutorRunStep, held bool) bool {
 	resume := step.Kind == coro.ExecutorRunStepAction &&
 		step.Action.Kind == coro.ActionCheckResume
-	return resume == held
+	return !resume || held
 }
 
 // coroStopAfterStableReductionV1 is the common post-reducer target gate for
 // both the adopted program P and ordinary fleet Ps. It is called only after
-// the complete reduction and its managed-execution permit release. Keeping the
-// gate shared prevents either outer runner from crossing a detached locked
-// owner's exact return boundary.
+// the complete reduction at a stable scheduler boundary. The bounded run slice
+// may still retain its P lease; a requested target return releases that lease
+// immediately before crossing the outer boundary. Keeping the gate shared
+// prevents either runner from crossing a detached locked owner's exact return
+// boundary.
 func coroStopAfterStableReductionV1(
 	driver *coro.ExecutorDriver,
 	result *coroRunResultV1,
@@ -418,9 +423,12 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 		return coroRunResultV1{}
 	}
 	result := coroRunResultV1{}
+	held := false
 	for result.used < budget {
-		held, wait, permitOK := coroPrepareManagedExecutionV1(driver)
+		var wait, permitOK bool
+		held, wait, permitOK = coroPrepareManagedExecutionV1(driver, held)
 		if !permitOK {
+			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
 		if wait {
@@ -435,21 +443,32 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 		terminal, reduced := coroReduceExecutorRunStepV1(
 			p, driver, coroRunPolicyV1{}, step, &result,
 		)
-		if !coroFinishManagedExecutionV1(driver, held) || !reduced {
+		if !reduced {
+			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
 		if terminal {
+			if !coroFinishManagedExecutionV1(driver, held) {
+				return coroRunResultV1{}
+			}
 			return result
 		}
 		stopForReturn, returnOK := coroStopAfterStableReductionV1(
 			driver, &result,
 		)
 		if !returnOK {
+			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
 		if stopForReturn {
+			if !coroFinishManagedExecutionV1(driver, held) {
+				return coroRunResultV1{}
+			}
 			return result
 		}
+	}
+	if !coroFinishManagedExecutionV1(driver, held) {
+		return coroRunResultV1{}
 	}
 	result.stop = coroRunSliceBudgetV1
 	return result

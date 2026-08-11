@@ -218,7 +218,7 @@ func ExecutorResumeHandoffContext(
 
 // RestoreExecutorResume reattaches the exact active LLVM resume after the
 // replacement owner has finished and the target has strongly joined it. The
-// caller must reacquire its managed-execution permit before calling Restore.
+// caller must reacquire its managed-execution P lease before calling Restore.
 // Success consumes and zeroes handoff; a duplicate or mismatched restore is
 // rejected without changing scheduler state.
 func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
