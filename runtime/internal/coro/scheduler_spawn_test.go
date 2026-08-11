@@ -134,6 +134,79 @@ func completeSpawnTestG(t *testing.T, p *P, g *G, frame *testFrame, action Actio
 	return action
 }
 
+func TestSpawnOwnerGateIsConstantTimeAndChecksLocalHeaders(t *testing.T) {
+	p := new(P)
+	parent := newYieldingTestG(t, "owner-fast-parent")
+	peers := []*yieldingTestG{
+		newYieldingTestG(t, "owner-fast-first"),
+		newYieldingTestG(t, "owner-fast-middle"),
+		newYieldingTestG(t, "owner-fast-last"),
+	}
+	if !Enqueue(p, parent.g) {
+		t.Fatal("enqueue owner-fast parent")
+	}
+	for _, peer := range peers {
+		if !Enqueue(p, peer.g) {
+			t.Fatalf("enqueue owner-fast peer %s", peer.name)
+		}
+	}
+	if got, ok := NextRunnable(p); !ok || got != parent.g {
+		t.Fatal("dequeue owner-fast parent")
+	}
+	action := beginSpawnTestResume(t, p, parent)
+
+	// Corrupt only distant payloads while retaining the owner-maintained queue
+	// endpoints. The full diagnostic audits must see the corruption; the spawn
+	// hot gate must not walk unrelated tasks or wait records.
+	peerState := peers[1].g.state
+	peers[1].g.state = GDead
+	var firstWait, lastWait WaitSetRecord
+	firstWait.activeNext = &lastWait
+	lastWait.activePrev = &firstWait
+	p.parkWaitHead, p.parkWaitTail = &firstWait, &lastWait
+	if validReadyQueue(p) || validSchedulerWaitQueues(p) {
+		t.Fatal("full diagnostics accepted deliberately corrupt distant state")
+	}
+	if !CanBeginSpawn(parent.g) {
+		t.Fatal("spawn owner gate scanned unrelated ready or parked payloads")
+	}
+	peers[1].g.state = peerState
+	p.parkWaitHead, p.parkWaitTail = nil, nil
+
+	// Endpoint, affected-work, and affinity corruption are local O(1) facts and
+	// must still fail closed without publishing a spawn transaction.
+	tailNext := p.readyTail.nextReady
+	p.readyTail.nextReady = p.readyTail
+	if CanBeginSpawn(parent.g) {
+		t.Fatal("spawn owner gate accepted corrupt ready tail")
+	}
+	p.readyTail.nextReady = tailNext
+	p.parkWaitHead = &firstWait
+	if CanBeginSpawn(parent.g) {
+		t.Fatal("spawn owner gate accepted mismatched park endpoints")
+	}
+	p.parkWaitHead = nil
+	p.affectedWaitHead = &firstWait
+	if CanBeginSpawn(parent.g) {
+		t.Fatal("spawn owner gate accepted mismatched affected endpoints")
+	}
+	p.affectedWaitHead = nil
+	p.osThreadSuspend = osThreadSuspendPhase(0xff)
+	if CanBeginSpawn(parent.g) {
+		t.Fatal("spawn owner gate accepted invalid affinity owner header")
+	}
+	p.osThreadSuspend = osThreadSuspendAttached
+	if !CanBeginSpawn(parent.g) || parent.g.spawnChild != nil {
+		t.Fatal("restored spawn owner gate did not recover without mutation")
+	}
+
+	runtime.KeepAlive(action)
+	runtime.KeepAlive(parent.frame.memory)
+	for _, peer := range peers {
+		runtime.KeepAlive(peer.frame.memory)
+	}
+}
+
 func TestSpawnBeginRollbackIsExactlyOnce(t *testing.T) {
 	p := new(P)
 	parent := newYieldingTestG(t, "rollback-parent")

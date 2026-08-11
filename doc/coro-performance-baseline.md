@@ -950,3 +950,31 @@ must therefore preempt genuinely unbounded computation. The channel smoke
 accepts sender stage 4 or 5 after an unbuffered rendezvous: the send orders all
 work through stage 4, while Go does not require the sender's post-send
 continuation to run again before a receiving `main` returns.
+
+### Constant-time spawn-owner checkpoint
+
+The next checkpoint uses `19712185a` as its exact parent. The spawn transaction
+gate previously ran the complete ready-queue and scheduler-wait audits from
+`CanBeginSpawn`, `BeginSpawn`, and `CommitSpawn`. A burst which accumulated N
+children therefore revisited unrelated tasks and wait records for every `go`
+statement and made the transaction-validation component O(N^2).
+
+The hot owner gate now proves only O(1) facts: the current resume owns the P,
+the ready/park/affected queue endpoints are coherent, and the OS-thread owner
+header is valid. Enqueue, park, wake, and affinity operations maintain those
+headers while holding that same ownership. Full payload audits remain at
+lifecycle, shutdown, transfer, test, and diagnostic boundaries. A regression
+test deliberately corrupts distant queue payloads and separately corrupts
+each local header, proving that the hot gate does not scan the former and still
+fails closed on the latter.
+
+On a concurrently loaded Darwin arm64 host, three interleaved 10,000-parked-G
+runs had medians of 7.077 seconds for the parent and 3.184 seconds for the
+candidate (2.22x faster). Five interleaved spawn-100-by-100 runs had medians of
+124.932 ms and 114.161 ms (8.6% faster); this workload keeps its queues much
+shorter. A paired `/usr/bin/time -l` sample reported 40,796,160 versus
+40,779,776 bytes peak RSS. The executable changed by only 16 bytes and its
+Mach-O text/data sizes were unchanged. These noisy-host measurements establish
+the removed complexity and absence of a storage regression, not a stable
+throughput promise. The remaining large-G cost is linear channel close/wakeup,
+task/frame allocation and runtime-context initialization.

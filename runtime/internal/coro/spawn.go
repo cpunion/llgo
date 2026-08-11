@@ -117,8 +117,14 @@ func runningSpawnContext(parent *G) (*P, bool) {
 		return nil, false
 	}
 	p := parent.runP
-	if !resumeGateTaken(parent) ||
-		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
+	// The current resume owns every mutable P queue link. Validate only the
+	// queue endpoints and the exact affinity owner here: walking all ready and
+	// parked tasks for each go statement makes a burst of N spawns O(N^2).
+	// Lifecycle, shutdown, transfer, and diagnostic boundaries retain the full
+	// audits; ordinary enqueue/park operations already preserve these headers.
+	if !resumeGateTaken(parent) || !validReadyQueueHeader(p) ||
+		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) ||
+		!validOSThreadOwnerHeader(p) {
 		return nil, false
 	}
 	schedule := preemptLoad(&p.schedule)
