@@ -32,6 +32,123 @@ empty `GOCACHE`. The development compiler identity is revision-based, so `-a`
 alone can still reuse package artifacts produced by a different dirty-tree
 variant and invalidate a code-size comparison.
 
+## Same-source Go gc checkpoint
+
+The first direct Go comparison uses coroutine base `56154d44a` and the exact
+fixtures committed as `6edd888bc`. Go gc and LLGo compile the same ordinary Go
+sources, including the standard `os.File` and loopback `net.TCPConn` paths;
+there is no LLGo-only timing or scheduler hook. Both builds use `-trimpath` and
+`-ldflags='-s -w'` with independent caches. The host is Darwin arm64 on an
+Apple M4 Max with Go 1.26.5 and LLVM 19.1.7.
+
+This is deliberately a directional checkpoint. The host load average remained
+between roughly 26 and 32, with unrelated media analysis, filesystem indexing,
+and a VM active throughout the final run. Each throughput row is nevertheless
+an AB/BA-interleaved median of seven process runs; the complete min/max range is
+shown so the noise is visible. Process-start `GOMAXPROCS=1` fixes the
+single-executor rows, and the elapsed time is measured inside the common
+fixture after argument parsing. A quiet paired runner must reproduce the
+ratios before they become regression budgets.
+
+### Single-executor throughput
+
+| Same-source workload | Go gc median [range] | LLGo coroutine median [range] | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| 5,000,000 sequential arithmetic calls | 8.374 ms [7.718, 8.702] | 185.602 ms [182.896, 187.887] | 22.17x |
+| 1,000,000 buffered channel round trips | 16.359 ms [15.967, 16.736] | 54.780 ms [54.132, 55.501] | 3.35x |
+| 500,000 two-ready-case selects | 26.338 ms [25.799, 27.301] | 40.755 ms [39.729, 41.796] | 1.55x |
+| 10,000 created and joined goroutines | 0.961 ms [0.908, 1.051] | 143.423 ms [140.872, 145.706] | 149.32x |
+| 5,000 unbuffered request/ack handoffs | 0.771 ms [0.743, 0.828] | 82.289 ms [80.768, 83.903] | 106.67x |
+| 100 concurrent 1 ms timers, 10 rounds | 12.276 ms [12.011, 12.589] | 45.826 ms [44.801, 46.551] | 3.73x |
+| 500 cache-hot 4 KiB file round trips | 1.047 ms [0.927, 1.123] | 59.962 ms [57.768, 62.621] | 57.25x |
+| 500 loopback 4 KiB TCP echo round trips | 9.131 ms [6.461, 20.257] | 63.585 ms [60.441, 64.855] | 6.96x |
+
+The file round trip is seek/write/seek/read on one persistent temporary file,
+so it intentionally measures four standard-library transitions per iteration
+without storage durability latency. The timer row contains real 1 ms waits and
+is not a synthetic per-timer latency. The TCP row keeps one connection and one
+server goroutine alive; it excludes listen/dial setup from each operation but
+includes the normal standard-library poll path.
+
+The relatively small buffered-channel and ready-select ratios establish that
+their non-parking mechanics are already viable. The dominant measured costs
+are instead task creation, runnable return/handoff, and the regular-file worker
+transition. Sequential compute also exposes the current backedge
+safepoint/requeue tax. These are runtime-core or whole-program emission targets,
+not reasons to add library-specific lowering.
+
+### Parallel execution
+
+The parallel fixture runs four goroutines, each performing 1,000,000 instances
+of the same arithmetic kernel and producing the same checksum on both
+compilers:
+
+| Process-start quota | Go gc median [range] | LLGo coroutine median [range] | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| `GOMAXPROCS=1` | 6.784 ms [6.728, 6.927] | 348.080 ms [342.898, 360.002] | 51.31x |
+| `GOMAXPROCS=4` | 1.713 ms [1.685, 1.786] | 48.183 ms [44.158, 50.049] | 28.12x |
+
+Go improves by 3.96x and LLGo by 7.22x. The LLGo value greater than four is
+not a claim of superlinear CPU execution: changing the quota also removes much
+of the single-route runnable/poll traffic between four managed tasks. It does
+show that the native fleet performs real parallel progress, while identifying
+single-P task switching as a separate large overhead that a pure arithmetic
+speedup cannot explain.
+
+### Parked-goroutine RSS
+
+Peak RSS is the median of five AB/BA-interleaved `/usr/bin/time -l` process
+runs. Ranges are bytes, and the fixed process cost is deliberately shown rather
+than hidden in a per-G number:
+
+| Live parked G | Go gc median [range] | LLGo coroutine median [range] |
+| ---: | ---: | ---: |
+| 0 | 3,571,712 [3,522,560, 3,653,632] | 8,470,528 [8,437,760, 8,470,528] |
+| 1,000 | 6,455,296 [6,389,760, 6,488,064] | 12,632,064 [12,238,848, 13,320,192] |
+| 5,000 | 17,596,416 [17,563,648, 17,629,184] | 37,634,048 [37,224,448, 37,650,432] |
+
+The 0-to-1,000 slopes are about 2,884 bytes/G for Go and 4,162 bytes/G for
+LLGo. At 5,000 the endpoint slopes are about 2,805 and 5,833 bytes/G. Thus the
+current stackless implementation does **not** yet have an incremental resident
+memory advantage over Go's growable stacks; it uses about 1.44x more per G at
+1,000 and 2.08x more at 5,000, in addition to a 4.90 MB higher fixed cost. Its
+demonstrated memory advantage remains relative to LLGo's thread-per-goroutine
+backend, while fixed-stack independence and target portability remain separate
+architectural benefits. Frame-size census, allocation reuse, and parked wait
+state are required before making a memory-efficiency claim against Go.
+
+### Native artifact footprint
+
+Both executables are stripped through their compiler's `-s -w` path. Mach-O
+`__TEXT` below includes all allocated text/constant/pclntab sections; data and
+zero-fill use the same accounting as the repository baseline collector.
+
+| Fixture / metric | Go gc | LLGo coroutine | Ratio |
+| --- | ---: | ---: | ---: |
+| core file bytes | 1,488,034 | 4,859,920 | 3.27x |
+| core `__TEXT` bytes | 1,231,198 | 2,981,851 | 2.42x |
+| core data bytes | 195,156 | 359,424 | 1.84x |
+| core zero-fill bytes | 158,552 | 974,935 | 6.15x |
+| file/TCP file bytes | 1,797,730 | 7,346,704 | 4.09x |
+| file/TCP `__TEXT` bytes | 1,454,370 | 4,405,943 | 3.03x |
+| file/TCP data bytes | 264,928 | 584,896 | 2.21x |
+| file/TCP zero-fill bytes | 159,064 | 977,127 | 6.14x |
+
+This comparison confirms compatibility and exposes a useful optimization
+order, but it does not yet demonstrate a general performance win over Go:
+
+1. reduce safepoint/runnable-return traffic and make channel handoff transfer a
+   continuation without repeated global scheduling;
+2. pool or otherwise reduce spawn/frame lifecycle allocation and measure the
+   exact parked-frame layout;
+3. reduce regular-file worker submit/completion round trips in the common
+   fast-completion case while retaining the unified blocking contract;
+4. continue whole-program outcome/plain emission work to reduce both sequential
+   call overhead and the 2.4x--3.0x allocated `__TEXT` gap;
+5. rerun this exact source on a quiet pinned native host, then add embedded/WASM
+   artifact and linear-memory measurements rather than projecting native RSS
+   onto those targets.
+
 ## Exact same-source checkpoint before the main sync
 
 The current comparison uses the bounded standard-Go fixtures under
