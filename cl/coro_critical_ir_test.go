@@ -189,8 +189,12 @@ func TestCoroOSThreadAffinityMarkerLowering(t *testing.T) {
 	if lock < 0 || unlock <= lock {
 		t.Fatalf("AffinityRoot lacks ordered lock/unlock ABI hooks:\n%s", body)
 	}
-	if got := strings.Count(body[lock:], "call void @"+coroYieldPrepareHookV1); got != 2 {
-		t.Fatalf("AffinityRoot post-lock runnable handoffs = %d, want one after each affinity marker:\n%s", got, body)
+	lockHandoff := strings.Index(body[lock:], "call void @"+coroYieldPrepareHookV1)
+	if lockHandoff < 0 || lock+lockHandoff >= unlock {
+		t.Fatalf("AffinityRoot lock marker has no ordered runnable handoff before unlock:\n%s", body)
+	}
+	if unlockHandoff := strings.Index(body[unlock:], "call void @"+coroYieldPrepareHookV1); unlockHandoff < 0 {
+		t.Fatalf("AffinityRoot unlock marker has no runnable handoff:\n%s", body)
 	}
 	for _, marker := range []string{
 		"@foo.osThreadLock",

@@ -467,7 +467,7 @@ func TestPauseExecutorRunActionFailureIsAtomic(t *testing.T) {
 	}
 	if p.current != task.g || p.action != action || p.readyHead != nil || p.readyTail != nil ||
 		task.g.state != GRunning || task.g.runP != p || task.g.runAction != ActionInvalid ||
-		task.g.queued || task.g.nextReady != nil || p.servicePreemptBudget != servicePreemptPollBudget {
+		task.g.queued || task.g.nextReady != nil || p.servicePreemptBudget != servicePreemptSafepointBudget {
 		t.Fatalf("failed pause partially committed: current=%p action=%+v head=%p tail=%p state=%d runP=%p runAction=%d queued=%t budget=%d",
 			p.current, p.action, p.readyHead, p.readyTail, task.g.state, task.g.runP,
 			task.g.runAction, task.g.queued, p.servicePreemptBudget)

@@ -123,7 +123,11 @@ func Check() int32 {
 	if SelectGot != 0x0badcafe {
 		return 14
 	}
-	if MainStage != 6 || ChildStage != 5 {
+	// An unbuffered rendezvous orders the sender's work before the send against
+	// the receiver, but Go does not require the sender's continuation to run
+	// again before a main receiver returns. Stage 4 is therefore sufficient;
+	// Stage 5 is also legal when the scheduler selects the child first.
+	if MainStage != 6 || ChildStage < 4 || ChildStage > 5 {
 		return 15
 	}
 	return 0

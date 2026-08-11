@@ -445,6 +445,24 @@ func TestCoroScalarRunDecisionDoesNotGrowFrameNativeAndWasm(t *testing.T) {
 	}
 }
 
+func TestCoroPreemptCountdownDoesNotGrowFrameNativeAndWasm(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ungated := compileCoroPreemptCountdownFrameProbe(t, test.target, false)
+			gated := compileCoroPreemptCountdownFrameProbe(t, test.target, true)
+			if gated != ungated {
+				t.Fatalf("checkpoint countdown frame size = %d, want ungated poll baseline %d", gated, ungated)
+			}
+		})
+	}
+}
+
 func TestCoroPreemptiveLoopPhysicalABIV1(t *testing.T) {
 	const source = `package foo
 func Loop(limit uint32) uint32 {
@@ -504,6 +522,12 @@ func Loop(limit uint32) uint32 {
 			"Loop preemption polls = %d, want block-zero chain boundary plus one cycle feedback cut:\n%s",
 			polls, body,
 		)
+	}
+	if gates := strings.Count(body, "icmp ule i32"); gates != polls {
+		t.Fatalf("Loop checkpoint gates = %d, want one frame-local countdown gate per poll site (%d):\n%s", gates, polls, body)
+	}
+	if resets := strings.Count(body, "store i32 64"); resets < polls+1 {
+		t.Fatalf("Loop checkpoint resets = %d, want initial activation plus at least one reset per poll site (%d):\n%s", resets, polls+1, body)
 	}
 	assertCoroScalarRunDecisionCalls(t, "Loop", body, polls+1)
 	initialDecision := strings.Index(body, "call i32 @"+coroRunDecisionTakeZeroHookV1)
@@ -2379,6 +2403,59 @@ func compileCoroDecisionFrameProbe(t *testing.T, target *llssa.Target, scalarGat
 		t.Fatalf("gate-off frame probe retained scalar run-decision call:\n%s", module.String())
 	}
 	return coroFrameAllocationSize(t, ramp, prog.PointerSize()*8)
+}
+
+func compileCoroPreemptCountdownFrameProbe(t *testing.T, target *llssa.Target, gated bool) uint64 {
+	t.Helper()
+	var prog llssa.Program
+	if target == nil {
+		prog = newLLSSAProg(t)
+	} else {
+		prog = newLLSSAProgForTarget(t, target)
+	}
+	defer prog.Dispose()
+	pkg := prog.NewPackage("coro_preempt_frame_probe", "llgo/test/coro-preempt-frame-probe")
+	defer pkg.Module().Dispose()
+	ctx := &context{
+		prog: prog,
+		pkg:  pkg,
+		compilation: &Compilation{
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		},
+	}
+	sourceSignature := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	abi := newCoroPhysicalABI(ctx, plannedFunctionSymbol{
+		name: "llgo.test.coro-preempt-frame-probe",
+		plan: coro.FunctionPlan{ID: "llgo.test.coro-preempt-frame-probe"},
+	}, sourceSignature)
+	name := "coro_preempt_frame_probe$coro"
+	ctx.fn = pkg.NewFunc(name, abi.physicalSig, llssa.InGo)
+	b := ctx.fn.MakeBody(1)
+	defer b.Dispose()
+	body := ctx.beginCoroBody(b, abi, nil)
+	body.completion = ctx.fn.MakeBlock()
+	body.finalSuspend = ctx.fn.MakeBlock()
+	body.bindCancellationCompletion(b)
+	b.SetBlock(body.coro.InitialResumeBlock())
+	body.activate(b)
+	if gated {
+		body.pollAndSuspendForPreempt(b)
+	} else {
+		body.suspendCurrentFrameIfYieldRequested(b, b.Call(body.preemptPoll, body.task))
+	}
+	b.Jump(body.completion)
+	b.SetBlock(body.completion)
+	body.complete(b)
+	b.SetBlock(body.finalSuspend)
+	body.finish(b)
+	b.EndBuild()
+	module := pkg.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify target=%v gated=%t preemption frame probe before CoroSplit: %v\n%s", target, gated, err, module.String())
+	}
+	runCoroABITestPipeline(t, prog, module)
+	return coroFrameAllocationSize(t, module.NamedFunction(name), prog.PointerSize()*8)
 }
 
 func assertCoroRunDecisionResumeOnly(t *testing.T, module llvm.Module, rampName string, want int) {

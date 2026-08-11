@@ -724,8 +724,6 @@ var PreemptProgress uint32
 var PreemptFinished uint32
 var PreemptStop uint32
 
-const preemptLimit uint32 = 1000000
-
 //llgo:link atomicLoad llgo.atomicLoad
 func atomicLoad(address *uint32) uint32 { return *address }
 
@@ -775,8 +773,10 @@ func child() {
 func preemptPeer() {
 	PreemptReady <- 1
 	<-PreemptStart
-	for atomicLoad(&PreemptStop) == 0 &&
-		atomicLoad(&PreemptProgress) < preemptLimit {
+	// Deliberately has no finite work limit. The worker completion must interrupt
+	// this runnable compute peer; otherwise the enclosing E2E timeout diagnoses
+	// the missing preemption instead of depending on relative machine speed.
+	for atomicLoad(&PreemptStop) == 0 {
 		atomicAdd(&PreemptProgress, 1)
 	}
 	atomicStore(&PreemptFinished, 1)
@@ -810,9 +810,7 @@ func testForeignReturnPreemptsReplacement() {
 	atomicStore(&PreemptStop, 1)
 	osThreadUnlock()
 	<-PreemptDone
-	if after != before || finishedBeforeUnlock != 0 ||
-		progressBeforeUnlock == 0 || progressBeforeUnlock >= preemptLimit ||
-		atomicLoad(&PreemptProgress) >= preemptLimit {
+	if after != before || finishedBeforeUnlock != 0 || progressBeforeUnlock == 0 {
 		Failed = 82
 	}
 }

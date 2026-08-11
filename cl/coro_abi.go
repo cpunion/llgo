@@ -189,6 +189,12 @@ const (
 // safepoints, so even a tiny loop cannot run forever without a cut.
 const coroPreemptInstructionBudget = 64
 
+// coroPreemptCheckpointStride is the number of compiler-selected source
+// safepoints between full runtime polls. While a frame is active its existing
+// StateID word is compiler-private countdown storage; publishState overwrites
+// it with the real resume state before every scheduler-visible suspension.
+const coroPreemptCheckpointStride uint64 = 64
+
 type coroPhysicalABI struct {
 	version                 uint32
 	hash                    [16]byte
@@ -353,7 +359,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00await-prepare=%s\x00await-inline=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00await-prepare=%s\x00await-inline=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		traceFunction,
@@ -376,6 +382,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		runDecisionTakeZeroHook,
 		criticalEnterHook,
 		criticalExitHook,
+		coroPreemptCheckpointStride,
 		coroOSThreadLockHookV1,
 		coroOSThreadUnlockHookV1,
 		target.Triple,
@@ -766,6 +773,10 @@ func (c *coroBodyContext) activate(b llssa.Builder) {
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(coroSuspendNone, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(coroLifecycleActive, prog.Uint16()))
+	b.Store(
+		b.FieldAddr(c.header, coroHeaderStateID),
+		prog.IntVal(coroPreemptCheckpointStride, prog.Uint32()),
+	)
 }
 
 // dispatchZeroRunDecision emits the exactly-once compiler resume gate for a
@@ -877,7 +888,21 @@ func (c *coroBodyContext) pollAndSuspendForPreempt(b llssa.Builder) uint32 {
 	if c.abi.version < coroPhysicalABIVersionV1 || c.preemptPoll.IsNil() || c.yieldPrepare.IsNil() {
 		panic("coroutine preemption requires PhysicalABIV1 poll and scheduler handoff hooks")
 	}
-	return c.suspendCurrentFrameIfYieldRequested(b, b.Call(c.preemptPoll, c.task))
+	remaining := b.Load(b.FieldAddr(c.header, coroHeaderStateID))
+	one := b.Prog.IntVal(1, b.Prog.Uint32())
+	b.Store(
+		b.FieldAddr(c.header, coroHeaderStateID),
+		b.BinOp(token.SUB, remaining, one),
+	)
+	due := b.BinOp(token.LEQ, remaining, one)
+	stateID := c.nextState
+	// Only the stride boundary reaches a potentially suspending block. The hot
+	// edge performs one frame-local decrement and no call, so CoroSplit/O2 can
+	// retain loop-carried values in registers between full runtime polls.
+	b.IfThen(due, func() {
+		stateID = c.suspendCurrentFrameIfYieldRequested(b, b.Call(c.preemptPoll, c.task))
+	})
+	return stateID
 }
 
 // suspendCurrentFrameIfYieldRequested is the shared conditional runnable

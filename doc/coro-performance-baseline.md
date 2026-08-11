@@ -875,3 +875,78 @@ module (3,225 functions, 13 imports, 1,304,987-byte code section and
 432,327-byte data section) and exited successfully under Wasmtime. These tests
 validate the route-zero portable fallback and the native optimization; they do
 not replace the final full repository and GOROOT acceptance matrix.
+
+### Bounded preemption checkpoint cohort
+
+The next core optimization separates a compiler safepoint from a full runtime
+poll. Previously every selected loop feedback edge called the runtime, checked
+multiple atomic scheduler gates, and remained a potential LLVM suspension.
+With another runnable G, `BeginRunG` also requested an immediate cut, so a hot
+loop could spill its live values and return to the scheduler after every source
+iteration.
+
+The candidate retains the same physical safepoint plan but uses the active
+frame header's existing `StateID` word as a compiler-private 64-safepoint
+countdown. `StateID` is reset on activation and overwritten with the real
+resume state before every scheduler-visible suspension, so no frame or G field
+is added. The hot edge is a decrement/branch with no runtime call. A full poll
+occurs at the stride boundary; a known runnable competitor receives one
+64-safepoint slice, while a sole G returns for event-source service after 64
+full polls (4,096 source safepoints). Critical exit remains an immediate full
+poll and charges one source safepoint. Both bounds are deterministic and need
+no clock, signal, TLS, or host thread facility.
+
+The compiler ABI hash now includes the stride. Native and wasm32 regression
+tests compare a gated poll against an ungated poll with the same suspend and
+require identical CoroSplit frame sizes. On the native workload, representative
+frame sizes are unchanged: compute 144 bytes, parked closure 504 bytes, and
+spawn 184 bytes. The stripped workload executable grew from 4,859,920 to
+4,876,192 bytes (+16,272, +0.33%).
+
+On the same Darwin arm64 host, the old and candidate binaries were retained and
+run in the same session with process-start `GOMAXPROCS=1`. The old column is a
+five-run median; the candidate compute result is the seven-run AB-paired median
+used below, and the remaining candidate results are five-run medians.
+
+| Workload | old coroutine | checkpoint candidate | Change |
+| --- | ---: | ---: | ---: |
+| 5,000,000 arithmetic calls | 213.920 ms | 9.293 ms | -95.66% (23.02x faster) |
+| four x 1,000,000 arithmetic calls, one P | 543.964 ms | 27.040 ms | -95.03% (20.12x faster) |
+| spawn 100 x 100 rounds | 190.997 ms | 59.348 ms | -68.93% (3.22x faster) |
+| 5,000 unbuffered request/ack handoffs | 104.319 ms | 72.638 ms | -30.37% (1.44x faster) |
+
+Seven interleaved same-source Go comparisons give:
+
+| Workload | Go gc median [range] | checkpoint candidate [range] | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| 5,000,000 arithmetic calls | 8.251 ms [7.995, 8.498] | 9.293 ms [9.148, 10.256] | 1.13x |
+| spawn 100 x 100 rounds | 0.946 ms [0.918, 1.050] | 59.348 ms [57.251, 62.353] | 62.73x |
+| 5,000 unbuffered request/ack handoffs | 0.751 ms [0.701, 0.775] | 72.638 ms [71.772, 73.137] | 96.69x |
+
+Thus the basic preemption tax is no longer the dominant sequential-compute
+problem. Task/frame lifecycle and channel park/wake remain the dominant common
+substrate and are the next optimization gates.
+
+Peak RSS from one bounded run at each parked-G count was:
+
+| parked Gs | Go gc RSS | candidate RSS | Go incremental / G | candidate incremental / G |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 3,555,328 | 7,700,480 | - | - |
+| 1,000 | 6,471,680 | 10,600,448 | 2,916 B | 2,900 B |
+| 5,000 | 17,580,032 | 25,493,504 | 2,805 B | 3,559 B |
+| 10,000 | 31,539,200 | 39,813,120 | 2,798 B | 3,211 B |
+
+The candidate therefore has near-Go incremental storage at 1,000 parked Gs
+and narrows the 10,000-G slope to about 15% above Go, but its fixed runtime
+footprint is still about 4.1 MB higher and the larger-count slope is not yet an
+advantage. The 10,000-G LLGo run also took 3.75 seconds versus about 7 ms for
+Go, exposing nonlinear lifecycle/queue work that must be removed before this
+prototype can claim a practical large-goroutine advantage.
+
+Two native E2E gates were made independent of the speedup. The foreign-worker
+test now runs its compute peer until an explicit stop instead of assuming that
+one million atomic increments must outlast a 30 ms worker; the worker event
+must therefore preempt genuinely unbounded computation. The channel smoke
+accepts sender stage 4 or 5 after an unbuffered rendezvous: the send orders all
+work through stage 4, while Go does not require the sender's post-send
+continuation to run again before a receiving `main` returns.

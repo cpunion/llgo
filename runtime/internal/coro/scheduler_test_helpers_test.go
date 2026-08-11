@@ -42,6 +42,24 @@ func beginWaitTestResume(t *testing.T, p *P, task *yieldingTestG) Action {
 	return action
 }
 
+func pollCompilerSafepointForTest(t *testing.T, g *G) bool {
+	t.Helper()
+	if !ValidG(g) || g.active == nil || g.active.header == nil {
+		t.Fatal("compiler preemption checkpoint has no active frame")
+	}
+	remaining := g.active.header.StateID
+	if remaining == 0 || remaining > preemptCheckpointStride {
+		remaining = preemptCheckpointStride
+	}
+	remaining--
+	g.active.header.StateID = remaining
+	if remaining != 0 {
+		return false
+	}
+	g.active.header.StateID = preemptCheckpointStride
+	return PollPreempt(g)
+}
+
 func finishWaitTestTask(t *testing.T, p *P, task *yieldingTestG, action Action) {
 	t.Helper()
 	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)

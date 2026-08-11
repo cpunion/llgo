@@ -119,18 +119,19 @@ func TestBeginRunGDoesNotImmediatelyPreemptWithoutCompetitor(t *testing.T) {
 		t.Fatal("begin sole runnable G")
 	}
 	activatePreemptTestFrame(t, p, task, action)
-	if PollPreempt(task.g) {
+	if pollCompilerSafepointForTest(t, task.g) {
 		t.Fatal("sole runnable G was preempted before its service quantum")
 	}
-	if p.servicePreemptBudget != servicePreemptPollBudget-1 {
-		t.Fatalf("sole runnable G budget = %d, want %d", p.servicePreemptBudget, servicePreemptPollBudget-1)
+	if p.servicePreemptBudget != servicePreemptSafepointBudget {
+		t.Fatalf("sole runnable G budget = %d, want %d", p.servicePreemptBudget, servicePreemptSafepointBudget)
 	}
 	runtime.KeepAlive(task.frame.memory)
 }
 
 // TestSinglePRoundRobinTwoGPreemptPoll models compiler polls driving the
-// existing SuspendYield handoff. BeginRunG requests a cut only while another G
-// remains ready, and each consumed request moves the current G to the tail.
+// existing SuspendYield handoff. BeginRunG grants one bounded checkpoint
+// stride while another G remains ready, and each completed slice moves the
+// current G to the tail.
 func TestSinglePRoundRobinTwoGPreemptPoll(t *testing.T) {
 	p := new(P)
 	a := newYieldingTestG(t, "a")
@@ -163,7 +164,12 @@ func TestSinglePRoundRobinTwoGPreemptPoll(t *testing.T) {
 			case ActionResume:
 				task.resumes++
 				if task.resumes <= 2 {
-					if !PollPreempt(g) {
+					for safepoint := uint32(1); safepoint < preemptCheckpointStride; safepoint++ {
+						if pollCompilerSafepointForTest(t, g) {
+							t.Fatalf("G %s slice %d preempted at safepoint %d", task.name, task.resumes, safepoint)
+						}
+					}
+					if !pollCompilerSafepointForTest(t, g) {
 						t.Fatalf("G %s slice %d missed competitor preemption", task.name, task.resumes)
 					}
 					events = append(events, fmt.Sprintf("%s:preempt:%d", task.name, task.resumes))
