@@ -576,7 +576,8 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 ) (distribution RunnableDistribution, ok bool) {
 	sourceSlot, _, sourceOK := executorFleetSlotFor(fleet, sourceHandle)
 	if !sourceOK || preemptLoad(&sourceSlot.state) != uint32(executorFleetSlotActive) ||
-		sourceSlot.p != source || source == nil || !validReadyQueueHeader(source) {
+		sourceSlot.p != source || source == nil || !validReadyQueueHeader(source) ||
+		source.readyCount == ^uint32(0) {
 		return RunnableDistribution{}, false
 	}
 	if source.readyHead == nil {
@@ -584,9 +585,6 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	}
 	if !stableRunnableTransferP(source) {
 		return RunnableDistribution{}, true
-	}
-	if !validReadyQueue(source) {
-		return RunnableDistribution{}, false
 	}
 	batchLimit := source.readyCount / 2
 	if source.readyCount == 1 {
@@ -689,16 +687,21 @@ func (fleet *ExecutorFleet) DistributeMaterializedRunnableToPreferredRoute(
 ) (distribution RunnableDistribution, ok bool) {
 	sourceSlot, _, sourceOK := executorFleetSlotFor(fleet, sourceHandle)
 	if !sourceOK || preemptLoad(&sourceSlot.state) != uint32(executorFleetSlotActive) ||
-		sourceSlot.p != source || source == nil || !validReadyQueueHeader(source) {
+		sourceSlot.p != source || source == nil || !validReadyQueueHeader(source) ||
+		source.readyCount == ^uint32(0) {
 		return RunnableDistribution{}, false
 	}
 	if source.readyHead == nil || !stableRunnableTransferP(source) {
 		return RunnableDistribution{}, true
 	}
-	if !validReadyQueue(source) {
-		return RunnableDistribution{}, false
-	}
 	candidate := source.readyHead
+	// This exact causal route needs only the selected continuation. Validate its
+	// complete frame chain, but do not walk unrelated runnable work. The
+	// prepared publication rechecks its O(1) queue/G header under the target
+	// mailbox gate.
+	if !pNeutralRunnable(candidate, true) {
+		return RunnableDistribution{}, true
+	}
 	preferred, preferredOK := MaterializedRunnablePreferredRoute(candidate)
 	if !preferredOK {
 		return RunnableDistribution{}, true
@@ -717,16 +720,22 @@ func (fleet *ExecutorFleet) DistributeMaterializedRunnableToPreferredRoute(
 		) {
 		return RunnableDistribution{}, true
 	}
-	id, request, published := fleet.PublishPNeutralRunnableAndRequest(
+	var candidates [RunnableTransferMailboxCapacity]*G
+	candidates[0] = candidate
+	id, count, request, published := fleet.publishPreparedPNeutralRunnableBatchAndRequest(
 		target.handle,
 		source,
-		candidate,
+		&candidates,
+		1,
 	)
 	if !published {
 		if !restoreRunnableDemandAfterFailedClaim(target) {
 			return RunnableDistribution{}, false
 		}
 		return RunnableDistribution{}, true
+	}
+	if count != 1 {
+		return RunnableDistribution{}, false
 	}
 	if !preemptCompareAndSwap(
 		&target.runnableDemand,
@@ -738,7 +747,7 @@ func (fleet *ExecutorFleet) DistributeMaterializedRunnableToPreferredRoute(
 	distribution = RunnableDistribution{
 		Target:   target.handle,
 		Transfer: id,
-		Count:    1,
+		Count:    count,
 		Request:  request,
 	}
 	return distribution, distribution.Valid()

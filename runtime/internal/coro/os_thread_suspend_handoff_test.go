@@ -127,6 +127,73 @@ func TestOSThreadSuspendHandoffUnlockedActionIsNoop(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
+func TestOSThreadSuspendHandoffUnlockedGateIsConstantTime(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "unlocked-fast-handoff")
+	peers := []*yieldingTestG{
+		newYieldingTestG(t, "unlocked-fast-first"),
+		newYieldingTestG(t, "unlocked-fast-middle"),
+		newYieldingTestG(t, "unlocked-fast-last"),
+	}
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue unlocked fast-handoff task")
+	}
+	for _, peer := range peers {
+		if !Enqueue(p, peer.g) {
+			t.Fatalf("enqueue unlocked fast-handoff peer %s", peer.name)
+		}
+	}
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	runnerYieldAction(t, driver, step, task)
+
+	// Preserve every owner-maintained endpoint while corrupting only unrelated
+	// payloads. Full diagnostics must find both defects; the ordinary unlocked
+	// handoff gate must inspect only its exact completed task and O(1) headers.
+	peerState := peers[1].g.state
+	peers[1].g.state = GDead
+	var firstWait, lastWait WaitSetRecord
+	firstWait.activeNext = &lastWait
+	lastWait.activePrev = &firstWait
+	p.parkWaitHead, p.parkWaitTail = &firstWait, &lastWait
+	if validReadyQueue(p) || validSchedulerWaitQueues(p) {
+		t.Fatal("full diagnostics accepted corrupt distant handoff payloads")
+	}
+	if required, prepared := PrepareOSThreadSuspendHandoff(
+		driver, task.g, ActionYield,
+	); !prepared || required {
+		t.Fatalf("unlocked fast handoff = (%t, %t)", required, prepared)
+	}
+	peers[1].g.state = peerState
+	p.parkWaitHead, p.parkWaitTail = nil, nil
+
+	// Local endpoint corruption remains visible without walking either queue.
+	p.readyTail.nextReady = p.readyTail
+	if required, prepared := PrepareOSThreadSuspendHandoff(
+		driver, task.g, ActionYield,
+	); prepared || required {
+		t.Fatalf("unlocked handoff accepted corrupt ready tail = (%t, %t)", required, prepared)
+	}
+	p.readyTail.nextReady = nil
+	p.parkWaitHead = &firstWait
+	if required, prepared := PrepareOSThreadSuspendHandoff(
+		driver, task.g, ActionYield,
+	); prepared || required {
+		t.Fatalf("unlocked handoff accepted mismatched wait endpoints = (%t, %t)", required, prepared)
+	}
+	p.parkWaitHead = nil
+	if required, prepared := PrepareOSThreadSuspendHandoff(
+		driver, task.g, ActionYield,
+	); !prepared || required {
+		t.Fatalf("restored unlocked handoff = (%t, %t)", required, prepared)
+	}
+
+	runtime.KeepAlive(task.frame.memory)
+	for _, peer := range peers {
+		runtime.KeepAlive(peer.frame.memory)
+	}
+}
+
 func TestOSThreadYieldWithoutPeerStaysAttached(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)
