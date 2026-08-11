@@ -23,22 +23,23 @@ import (
 
 func consumeServicePreemptTestBudget(t *testing.T, p *P, g *G) {
 	t.Helper()
-	if p.servicePreemptBudget != servicePreemptPollBudget {
-		t.Fatalf("initial service preemption budget = %d, want %d", p.servicePreemptBudget, servicePreemptPollBudget)
+	if p.servicePreemptBudget != servicePreemptSafepointBudget {
+		t.Fatalf("initial service preemption budget = %d, want %d", p.servicePreemptBudget, servicePreemptSafepointBudget)
 	}
-	for poll := uint32(1); poll < servicePreemptPollBudget; poll++ {
-		if PollPreempt(g) {
-			t.Fatalf("service preemption fired at safepoint %d, want %d", poll, servicePreemptPollBudget)
+	for safepoint := uint32(1); safepoint < servicePreemptSafepointBudget; safepoint++ {
+		if pollCompilerSafepointForTest(t, g) {
+			t.Fatalf("service preemption fired at safepoint %d, want %d", safepoint, servicePreemptSafepointBudget)
 		}
-		if want := servicePreemptPollBudget - poll; p.servicePreemptBudget != want {
-			t.Fatalf("service preemption budget after safepoint %d = %d, want %d", poll, p.servicePreemptBudget, want)
+		charged := safepoint / preemptCheckpointStride * preemptCheckpointStride
+		if want := servicePreemptSafepointBudget - charged; p.servicePreemptBudget != want {
+			t.Fatalf("service preemption budget after safepoint %d = %d, want %d", safepoint, p.servicePreemptBudget, want)
 		}
 	}
-	if !PollPreempt(g) {
-		t.Fatalf("service preemption did not fire at safepoint %d", servicePreemptPollBudget)
+	if !pollCompilerSafepointForTest(t, g) {
+		t.Fatalf("service preemption did not fire at safepoint %d", servicePreemptSafepointBudget)
 	}
-	if p.servicePreemptBudget != servicePreemptPollBudget {
-		t.Fatalf("fired service preemption budget = %d, want reload %d", p.servicePreemptBudget, servicePreemptPollBudget)
+	if p.servicePreemptBudget != servicePreemptSafepointBudget {
+		t.Fatalf("fired service preemption budget = %d, want reload %d", p.servicePreemptBudget, servicePreemptSafepointBudget)
 	}
 }
 
@@ -126,7 +127,7 @@ func TestExplicitRequestsPrecedeServiceBudget(t *testing.T) {
 		if !RequestPreempt(task.g) || !PollPreempt(task.g) {
 			t.Fatal("G-local request was not observed")
 		}
-		if p.servicePreemptBudget != servicePreemptPollBudget {
+		if p.servicePreemptBudget != servicePreemptSafepointBudget {
 			t.Fatalf("G-local request consumed service budget: got %d", p.servicePreemptBudget)
 		}
 		yieldRunningDriverTask(t, p, task, action)
@@ -140,7 +141,7 @@ func TestExplicitRequestsPrecedeServiceBudget(t *testing.T) {
 		if !RequestSchedule(p) || !PollPreempt(task.g) {
 			t.Fatal("P scheduling request was not observed")
 		}
-		if p.servicePreemptBudget != servicePreemptPollBudget {
+		if p.servicePreemptBudget != servicePreemptSafepointBudget {
 			t.Fatalf("P scheduling request consumed service budget: got %d", p.servicePreemptBudget)
 		}
 		yieldRunningDriverTask(t, p, task, action)
@@ -155,7 +156,7 @@ func TestExplicitRequestsPrecedeServiceBudget(t *testing.T) {
 		if registry.Request(executor) != ExecutorRequestPublished || !PollPreempt(task.g) {
 			t.Fatal("executor scheduling request was not observed")
 		}
-		if p.servicePreemptBudget != servicePreemptPollBudget {
+		if p.servicePreemptBudget != servicePreemptSafepointBudget {
 			t.Fatalf("executor request consumed service budget: got %d", p.servicePreemptBudget)
 		}
 		yieldRunningDriverTask(t, p, task, action)

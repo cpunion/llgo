@@ -159,7 +159,7 @@ func EnterCritical(g *G) bool {
 // zero critical depth. A bound executor request stays published for scheduler
 // drain/ack; the G gate and legacy unbound P gate retain their original
 // consume-on-poll behavior.
-func pollPreemptDepthZero(g *G) (bool, bool) {
+func pollPreemptDepthZero(g *G, charge uint32) (bool, bool) {
 	if !enterCriticalContext(g) || !gPreemptDepthZero(g) {
 		return false, false
 	}
@@ -188,7 +188,8 @@ func pollPreemptDepthZero(g *G) (bool, bool) {
 		return false, false
 	}
 	budget := p.servicePreemptBudget
-	if budget == 0 || budget > servicePreemptPollBudget {
+	if charge == 0 || charge > preemptCheckpointStride || budget == 0 ||
+		budget > servicePreemptSafepointBudget {
 		return false, false
 	}
 
@@ -205,11 +206,11 @@ func pollPreemptDepthZero(g *G) (bool, bool) {
 		requested = true
 	}
 	if !requested {
-		if budget == 1 {
-			p.servicePreemptBudget = servicePreemptPollBudget
+		if budget <= charge {
+			p.servicePreemptBudget = servicePreemptSafepointBudget
 			requested = true
 		} else {
-			p.servicePreemptBudget = budget - 1
+			p.servicePreemptBudget = budget - charge
 		}
 	}
 	return requested, true
@@ -238,7 +239,7 @@ func ExitCritical(g *G) (mustYield, ok bool) {
 		if depth != 1 {
 			return false, true
 		}
-		requested, valid := pollPreemptDepthZero(g)
+		requested, valid := pollPreemptDepthZero(g, 1)
 		if !valid {
 			return false, false
 		}

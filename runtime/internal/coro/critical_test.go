@@ -67,7 +67,12 @@ func TestCriticalDepthNestingPreservesAndConsumesStickyRequests(t *testing.T) {
 		t.Fatalf("outer exit did not consume exact G/P requests: word=%#x schedule=%d budget=%d",
 			word, preemptLoad(&p.schedule), p.servicePreemptBudget)
 	}
-	if PollPreempt(task.g) || p.servicePreemptBudget != initialBudget-1 {
+	for safepoint := uint32(1); safepoint <= preemptCheckpointStride; safepoint++ {
+		if pollCompilerSafepointForTest(t, task.g) {
+			t.Fatalf("consumed request replayed at safepoint %d", safepoint)
+		}
+	}
+	if p.servicePreemptBudget != initialBudget-preemptCheckpointStride {
 		t.Fatal("consumed request replayed or ordinary budget poll was skipped")
 	}
 	runtime.KeepAlive(task.frame.memory)

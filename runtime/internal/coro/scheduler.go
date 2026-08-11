@@ -202,10 +202,10 @@ type P struct {
 	runDecisionTaken bool
 
 	// servicePreemptBudget is scheduler-thread-only. A non-zero value belongs
-	// to current's run slice and counts legal compiler safepoints until the
-	// scheduler must regain ownership to service runnable work and every bound
-	// event source. Every successful BeginRunG loads one full quantum; an idle
-	// P keeps the exact zero value.
+	// to current's run slice and counts source safepoints until the scheduler
+	// must regain ownership. The compiler first advances this cheap budget and
+	// enters the atomic request poll only at a bounded checkpoint. An idle P
+	// keeps the exact zero value.
 	servicePreemptBudget uint32
 	// readyCount is owner-only metadata for the intrusive ready queue. It makes
 	// bounded work sharing independent of a whole-queue length scan while the
@@ -213,12 +213,16 @@ type P struct {
 	readyCount uint32
 }
 
-// servicePreemptPollBudget bounds how many legal compiler safepoints one G may
-// cross before returning ownership to the scheduler service loop. This is a
-// deterministic safepoint budget rather than a wall-clock quantum: the yield
-// lets the executor drain all durable event sources, publish ready work, and
-// make the next scheduling decision without depending on a particular source.
-const servicePreemptPollBudget uint32 = 64
+const (
+	// preemptCheckpointStride bounds how many compiler safepoints may pass
+	// before a running G checks atomic G/P/executor requests. Keeping this
+	// deterministic preserves targets without a clock or signal source.
+	preemptCheckpointStride uint32 = 64
+	// servicePreemptSafepointBudget bounds a sole runnable G's complete run
+	// slice. A known competitor receives one checkpoint stride; otherwise the
+	// larger service quantum amortizes scheduler/event-source scans.
+	servicePreemptSafepointBudget uint32 = preemptCheckpointStride * 64
+)
 
 // ActionKind identifies either the next compiler-owned handle operation or a
 // terminal control event for the current scheduler slice. The core never
@@ -425,7 +429,7 @@ func PollPreempt(g *G) bool {
 	if g == nil || preemptWordDepth(loadGPreempt(g)) != 0 {
 		return false
 	}
-	requested, valid := pollPreemptDepthZero(g)
+	requested, valid := pollPreemptDepthZero(g, preemptCheckpointStride)
 	return valid && requested
 }
 
@@ -984,11 +988,12 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 	if !valid || handle == nil {
 		return Action{}, false
 	}
-	if runnableForOSThreadOwner(p) && !RequestPreempt(g) {
-		return Action{}, false
+	budget := servicePreemptSafepointBudget
+	if runnableForOSThreadOwner(p) {
+		budget = preemptCheckpointStride
 	}
 	p.current = g
-	p.servicePreemptBudget = servicePreemptPollBudget
+	p.servicePreemptBudget = budget
 	g.state = state
 	g.runP = p
 	g.runAction = ActionInvalid

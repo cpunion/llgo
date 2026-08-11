@@ -194,8 +194,13 @@ func TestCommandShutdownCancelsYieldedChild(t *testing.T) {
 		t.Fatal("dequeue child before yield")
 	}
 	childAction := beginSpawnTestChildResume(t, fixture.p, child.g, child.frame)
-	if !PollPreempt(child.g) {
-		t.Fatal("ready main did not preempt child")
+	for safepoint := uint32(1); safepoint < preemptCheckpointStride; safepoint++ {
+		if pollCompilerSafepointForTest(t, child.g) {
+			t.Fatalf("ready main preempted child at safepoint %d", safepoint)
+		}
+	}
+	if !pollCompilerSafepointForTest(t, child.g) {
+		t.Fatal("ready main did not preempt child after one checkpoint stride")
 	}
 	child.frame.header.SuspendReason = uint16(SuspendYield)
 	child.frame.header.Lifecycle = uint16(FrameSuspended)
@@ -264,8 +269,13 @@ func TestCommandShutdownDestroysStructuredChainDeepestToRoot(t *testing.T) {
 	}
 	leaf.header.SuspendReason = uint16(SuspendNone)
 	leaf.header.Lifecycle = uint16(FrameActive)
-	if !PollPreempt(child.g) {
-		t.Fatal("structured leaf missed parent competitor preemption")
+	for safepoint := uint32(1); safepoint < preemptCheckpointStride; safepoint++ {
+		if pollCompilerSafepointForTest(t, child.g) {
+			t.Fatalf("structured leaf preempted at safepoint %d", safepoint)
+		}
+	}
+	if !pollCompilerSafepointForTest(t, child.g) {
+		t.Fatal("structured leaf missed parent competitor preemption after one checkpoint stride")
 	}
 	leaf.header.SuspendReason = uint16(SuspendYield)
 	leaf.header.Lifecycle = uint16(FrameSuspended)
