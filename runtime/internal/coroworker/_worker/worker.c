@@ -14,15 +14,29 @@
  * limitations under the License.
  */
 
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+
 #include "worker.h"
 
 #include <errno.h>
 #include <limits.h>
 #include <sched.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ucontext.h>
+#include <unistd.h>
 
 #if defined(LLGO_CORO_WORKER_BDWGC)
 #include <gc/gc.h>
@@ -137,7 +151,10 @@ extern uint32_t __llgo_coro_native_worker_complete_v1(
     uint32_t generation,
     uintptr_t r1,
     uintptr_t r2,
-    uintptr_t error);
+    uintptr_t error,
+    uintptr_t fault,
+    uintptr_t fault_pc,
+    uintptr_t fault_target);
 
 static void *llgo_coro_worker_main_v1(void *unused);
 
@@ -163,12 +180,15 @@ _Static_assert(offsetof(struct llgo_coro_worker_job_v1, generation) == sizeof(ui
     "worker job generation ABI changed");
 _Static_assert(offsetof(struct llgo_coro_worker_job_v1, function) == 2 * sizeof(uint32_t),
     "worker job function ABI changed");
-_Static_assert(offsetof(struct llgo_coro_worker_job_v1, argc) ==
+_Static_assert(offsetof(struct llgo_coro_worker_job_v1, trace_target) ==
     2 * sizeof(uint32_t) + sizeof(uintptr_t),
+    "worker job trace target ABI changed");
+_Static_assert(offsetof(struct llgo_coro_worker_job_v1, argc) ==
+    2 * sizeof(uint32_t) + 2 * sizeof(uintptr_t),
     "worker job argc ABI changed");
 _Static_assert(offsetof(struct llgo_coro_worker_job_v1, args) ==
     LLGO_CORO_WORKER_ALIGN_UP_V1(
-        3 * sizeof(uint32_t) + sizeof(uintptr_t), _Alignof(uintptr_t)),
+        3 * sizeof(uint32_t) + 2 * sizeof(uintptr_t), _Alignof(uintptr_t)),
     "worker job args ABI changed");
 _Static_assert(sizeof(struct llgo_coro_worker_job_v1) ==
     LLGO_CORO_WORKER_ALIGN_UP_V1(
@@ -180,13 +200,14 @@ _Static_assert(sizeof(struct llgo_coro_worker_job_v1) ==
 static bool llgo_coro_worker_job_valid_v1(
     const struct llgo_coro_worker_job_v1 *job) {
     return job != NULL && job->source_slot != 0 && job->generation != 0 &&
-        job->function != 0 && job->argc <= LLGO_CORO_WORKER_MAX_ARGS_V1;
+        job->function != 0 && job->trace_target != 0 &&
+        job->argc <= LLGO_CORO_WORKER_MAX_ARGS_V1;
 }
 
 static bool llgo_coro_worker_job_canceled_v1(
     const struct llgo_coro_worker_job_v1 *job) {
     if (job == NULL || job->source_slot != 0 || job->generation != 0 ||
-        job->function != 0 || job->argc != 0) {
+        job->function != 0 || job->trace_target != 0 || job->argc != 0) {
         return false;
     }
     for (uint32_t index = 0; index < LLGO_CORO_WORKER_MAX_ARGS_V1; ++index) {
@@ -470,13 +491,174 @@ int __llgo_coro_worker_create_v1(pthread_t *thread) {
     return llgo_coro_worker_thread_create_v1(thread, llgo_coro_worker_main_v1);
 }
 
+/*
+ * A potentially blocking C call runs outside the managed executor, but a
+ * synchronous hardware fault must still complete the parked Go operation
+ * instead of killing the process. The process handler therefore does only a
+ * thread-local scalar capture and siglongjmp to this exact native call frame.
+ * It never enters Go, allocates, locks, or retains the coroutine frame.
+ */
+struct llgo_coro_worker_fault_tls_v1 {
+    sigjmp_buf *landing;
+    uintptr_t trace_target;
+    volatile uintptr_t fault_pc;
+    volatile sig_atomic_t fault;
+    volatile sig_atomic_t active;
+    volatile sig_atomic_t handling;
+};
+
+static _Thread_local struct llgo_coro_worker_fault_tls_v1
+    llgo_coro_worker_fault_tls_v1;
+
+struct llgo_coro_worker_fault_action_v1 {
+    int signal;
+    struct sigaction previous;
+};
+
+static struct llgo_coro_worker_fault_action_v1 llgo_coro_worker_fault_actions_v1[] = {
+    {SIGSEGV, {0}},
+    {SIGBUS, {0}},
+    {SIGFPE, {0}},
+};
+static pthread_once_t llgo_coro_worker_fault_once_v1 = PTHREAD_ONCE_INIT;
+static int llgo_coro_worker_fault_ready_v1;
+
+static uintptr_t llgo_coro_worker_fault_pc_v1(void *opaque) {
+    ucontext_t *context = (ucontext_t *)opaque;
+#if defined(__APPLE__) && defined(__aarch64__)
+    return (uintptr_t)context->uc_mcontext->__ss.__pc;
+#elif defined(__APPLE__) && defined(__x86_64__)
+    return (uintptr_t)context->uc_mcontext->__ss.__rip;
+#elif defined(__linux__) && defined(__aarch64__)
+    return (uintptr_t)context->uc_mcontext.pc;
+#elif defined(__linux__) && defined(__x86_64__)
+    return (uintptr_t)context->uc_mcontext.gregs[REG_RIP];
+#else
+    (void)context;
+    return 0;
+#endif
+}
+
+static struct llgo_coro_worker_fault_action_v1 *
+llgo_coro_worker_fault_action_v1(int signal) {
+    size_t count = sizeof(llgo_coro_worker_fault_actions_v1) /
+        sizeof(llgo_coro_worker_fault_actions_v1[0]);
+    for (size_t index = 0; index < count; ++index) {
+        if (llgo_coro_worker_fault_actions_v1[index].signal == signal) {
+            return &llgo_coro_worker_fault_actions_v1[index];
+        }
+    }
+    return NULL;
+}
+
+static void llgo_coro_worker_forward_fault_v1(
+    int signum,
+    siginfo_t *info,
+    void *context) {
+    struct llgo_coro_worker_fault_action_v1 *saved =
+        llgo_coro_worker_fault_action_v1(signum);
+    if (saved != NULL && saved->previous.sa_handler == SIG_IGN) {
+        return;
+    }
+    if (saved != NULL && saved->previous.sa_handler != SIG_DFL &&
+        saved->previous.sa_handler != NULL) {
+        if ((saved->previous.sa_flags & SA_SIGINFO) != 0) {
+            saved->previous.sa_sigaction(signum, info, context);
+        } else {
+            saved->previous.sa_handler(signum);
+        }
+        return;
+    }
+    if (saved != NULL) {
+        (void)sigaction(signum, &saved->previous, NULL);
+    } else {
+        (void)signal(signum, SIG_DFL);
+    }
+    (void)raise(signum);
+    _exit(128 + signum);
+}
+
+static void llgo_coro_worker_fault_handler_v1(
+    int signum,
+    siginfo_t *info,
+    void *context) {
+    struct llgo_coro_worker_fault_tls_v1 *state =
+        &llgo_coro_worker_fault_tls_v1;
+    if (state->active != 0 && state->handling == 0 && state->landing != NULL) {
+        state->handling = 1;
+        state->fault = signum == SIGFPE ?
+            LLGO_CORO_WORKER_FAULT_DIVIDE_V1 :
+            LLGO_CORO_WORKER_FAULT_MEMORY_V1;
+        state->fault_pc = llgo_coro_worker_fault_pc_v1(context);
+        siglongjmp(*state->landing, 1);
+    }
+    llgo_coro_worker_forward_fault_v1(signum, info, context);
+}
+
+static void llgo_coro_worker_fault_install_v1(void) {
+    struct sigaction action;
+    size_t count = sizeof(llgo_coro_worker_fault_actions_v1) /
+        sizeof(llgo_coro_worker_fault_actions_v1[0]);
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = llgo_coro_worker_fault_handler_v1;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_SIGINFO;
+    for (size_t index = 0; index < count; ++index) {
+        struct llgo_coro_worker_fault_action_v1 *slot =
+            &llgo_coro_worker_fault_actions_v1[index];
+        if (sigaction(slot->signal, NULL, &slot->previous) != 0 ||
+            sigaction(slot->signal, &action, NULL) != 0) {
+            while (index > 0) {
+                --index;
+                slot = &llgo_coro_worker_fault_actions_v1[index];
+                (void)sigaction(slot->signal, &slot->previous, NULL);
+            }
+            return;
+        }
+    }
+    llgo_coro_worker_fault_ready_v1 = 1;
+}
+
 bool __llgo_coro_worker_call_v1(
     uintptr_t function,
+    uintptr_t trace_target,
     uint32_t argc,
     const uintptr_t args[LLGO_CORO_WORKER_MAX_ARGS_V1],
     struct llgo_coro_worker_result_v1 *result) {
     if (function == 0 || argc > LLGO_CORO_WORKER_MAX_ARGS_V1 || args == NULL || result == NULL) {
         return false;
+    }
+
+    memset(result, 0, sizeof(*result));
+    sigjmp_buf landing;
+    struct llgo_coro_worker_fault_tls_v1 *fault_state =
+        &llgo_coro_worker_fault_tls_v1;
+    if (trace_target != 0) {
+        if (pthread_once(
+                &llgo_coro_worker_fault_once_v1,
+                llgo_coro_worker_fault_install_v1) != 0 ||
+            !llgo_coro_worker_fault_ready_v1 || fault_state->active != 0) {
+            return false;
+        }
+        fault_state->landing = &landing;
+        fault_state->trace_target = trace_target;
+        fault_state->fault_pc = 0;
+        fault_state->fault = LLGO_CORO_WORKER_FAULT_NONE_V1;
+        fault_state->handling = 0;
+        if (sigsetjmp(landing, 1) != 0) {
+            fault_state->active = 0;
+            fault_state->landing = NULL;
+            result->fault = (uintptr_t)fault_state->fault;
+            result->fault_pc = (uintptr_t)fault_state->fault_pc;
+            result->fault_target = fault_state->trace_target;
+            fault_state->trace_target = 0;
+            fault_state->fault_pc = 0;
+            fault_state->fault = LLGO_CORO_WORKER_FAULT_NONE_V1;
+            fault_state->handling = 0;
+            return result->fault == LLGO_CORO_WORKER_FAULT_MEMORY_V1 ||
+                result->fault == LLGO_CORO_WORKER_FAULT_DIVIDE_V1;
+        }
+        fault_state->active = 1;
     }
 
     errno = 0;
@@ -513,8 +695,14 @@ bool __llgo_coro_worker_call_v1(
         r1 = ((llgo_coro_worker_fn9_v1)function)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
         break;
     default:
+        fault_state->active = 0;
+        fault_state->landing = NULL;
         return false;
     }
+
+    fault_state->active = 0;
+    fault_state->landing = NULL;
+    fault_state->trace_target = 0;
 
     /*
      * This leaf returns raw worker-local errno. The compiler-owned
@@ -547,13 +735,16 @@ static void *llgo_coro_worker_main_v1(void *unused) {
 
         struct llgo_coro_worker_result_v1 result;
         if (!__llgo_coro_worker_call_v1(
-                job.function, job.argc, job.args, &result) ||
+                job.function, job.trace_target, job.argc, job.args, &result) ||
             __llgo_coro_native_worker_complete_v1(
                 job.source_slot,
                 job.generation,
                 result.r1,
                 result.r2,
-                result.error) != UINT32_C(1)) {
+                result.error,
+                result.fault,
+                result.fault_pc,
+                result.fault_target) != UINT32_C(1)) {
             abort();
         }
     }

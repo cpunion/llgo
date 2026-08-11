@@ -101,10 +101,12 @@ func requireRuntimeAnnotationFreeCDeclarations(t *testing.T, path string, names 
 
 func TestRuntimeTerminalStdioUsesExactPrivateSyncBoundary(t *testing.T) {
 	const abortPath = "internal/runtime/coro_abort_libc.go"
+	const panicPath = "internal/runtime/coro_panic_report_libc.go"
 	const workerPath = "internal/runtime/coro_worker_owner_llgo.go"
 	const clitePath = "internal/clite/c.go"
 
 	requireRuntimeAnnotationFreeCDeclarations(t, clitePath, "Fputs", "Fputc")
+	requireRuntimeAnnotationFreeCDeclarations(t, panicPath, "coroPanicTerminalFputc")
 
 	abort := readRuntimePollFile(t, abortPath)
 	for _, declaration := range []string{
@@ -123,7 +125,7 @@ func TestRuntimeTerminalStdioUsesExactPrivateSyncBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range paths {
-		if path == abortPath || path == workerPath || strings.HasSuffix(path, "_test.go") {
+		if path == abortPath || path == panicPath || path == workerPath || strings.HasSuffix(path, "_test.go") {
 			continue
 		}
 		source := readRuntimePollFile(t, path)
@@ -368,6 +370,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"__llgo_coro_worker_queue_wait_take_v1",
 		"static void *llgo_coro_worker_main_v1(void *unused)",
 		"__llgo_coro_native_worker_complete_v1(",
+		"siglongjmp(*state->landing, 1)",
+		"state->fault_pc = llgo_coro_worker_fault_pc_v1(context)",
 	} {
 		if !strings.Contains(cSource, required) {
 			t.Errorf("%s lacks C11 worker transport marker %q", runtimeCoroWorkerCSource, required)
@@ -384,7 +388,10 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 = 1024",
 		"struct llgo_coro_worker_job_v1",
 		"uint32_t source_slot;",
+		"uintptr_t trace_target;",
 		"uintptr_t args[LLGO_CORO_WORKER_MAX_ARGS_V1];",
+		"uintptr_t fault_pc;",
+		"uintptr_t fault_target;",
 	} {
 		if !strings.Contains(header, required) {
 			t.Errorf("%s lacks POD queue ABI marker %q", runtimeCoroWorkerHeaderSource, required)
@@ -497,7 +504,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"reserved for the runtime's dynamically proved",
 		"LockOSThread path",
 		"//go:linkname Call C.__llgo_coro_worker_call_v1",
-		"func Call(function uintptr, argc uint32, args *[MaxArgs]uintptr, result *Result) bool",
+		"func Call(function, traceTarget uintptr, argc uint32, args *[MaxArgs]uintptr, result *Result) bool",
 	} {
 		if !strings.Contains(declaration, required) {
 			t.Errorf("%s lacks guarded same-M call contract %q", runtimeCoroWorkerCallSource, required)
@@ -509,9 +516,9 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"sole same-M blocking foreign",
 		"!coro.CurrentOSThreadLocked(task)",
 		"type coroNativeForeignBoundaryV1 struct",
-		"coroNativeForeignBoundaryTLSV1      tls.Handle[*coroNativeForeignBoundaryV1]",
+		"coroNativeForeignBoundaryTLSV1      tls.StaticHandle[*coroNativeForeignBoundaryV1]",
 		"func coroNativeForeignBoundaryTLSStartV1() bool",
-		"tls.Alloc[*coroNativeForeignBoundaryV1](nil)",
+		"tls.AllocStatic[*coroNativeForeignBoundaryV1]()",
 		"!coroNativeForeignBoundaryTLSReadyV1",
 		"coro.CurrentExecutorDriver(task)",
 		"coro.DetachExecutorResume(",
@@ -520,7 +527,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"coroTargetReleaseManagedExecutionV1(boundary.driver)",
 		"coroNativeMStartPhysicalOwnerV1(replacement, slot)",
 		"boundary.beginV1(task, coro.ExecutorResumeHandoffLockedForeign)",
-		"callOK := coroworker.Call(function, argc, &args, &result)",
+		"callOK := coroworker.Call(function, traceTarget, argc, &args, &result)",
 		"boundary.parent.handoff.RequestReturn(boundary.baton)",
 		"coroNativeMReplacementLineageOwnerV1(",
 		"coroNativeMRecycleReplacementV1(returnedSlot)",
@@ -535,7 +542,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"//export __llgo_coro_foreign_reentry_failure_v1",
 		"//export __llgo_coro_same_m_foreign_call_v1",
 		"boundary.beginV1(task, coro.ExecutorResumeHandoffSameMForeign)",
-		"callOK := coroworker.Call(thunk, 1, &args, &result)",
+		"callOK := coroworker.Call(thunk, 0, 1, &args, &result)",
 	} {
 		if !strings.Contains(entrance, required) {
 			t.Errorf("%s lacks locked-thread call guard %q", runtimeCoroOSThreadForeignSource, required)
@@ -566,7 +573,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 	leave := strings.Index(entrance, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
 	create := strings.Index(entrance, "coroNativeMStartPhysicalOwnerV1(replacement, slot)")
 	begin := strings.LastIndex(entrance, "boundary.beginV1(task, coro.ExecutorResumeHandoffLockedForeign)")
-	call := strings.Index(entrance, "callOK := coroworker.Call(function, argc, &args, &result)")
+	call := strings.Index(entrance, "callOK := coroworker.Call(function, traceTarget, argc, &args, &result)")
 	finish := strings.LastIndex(entrance, "boundary.finishV1()")
 	request := strings.LastIndex(entrance, "boundary.parent.handoff.RequestReturn(boundary.baton)")
 	recycle := strings.Index(entrance, "coroNativeMRecycleReplacementV1(returnedSlot)")

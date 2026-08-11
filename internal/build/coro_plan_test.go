@@ -527,8 +527,8 @@ func __llgo_coro_program_report_panic_v1(unsafe.Pointer) {}
 func __llgo_coro_worker_park_v1() {}
 func __llgo_coro_worker_resume_v1() {}
 func __llgo_coro_os_thread_locked_v1(unsafe.Pointer) bool { return false }
-func __llgo_coro_os_thread_foreign_call_v1(unsafe.Pointer, uintptr, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, *uintptr, *uintptr, *uintptr) {}
-func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr) uint32 { return 0 }
+func __llgo_coro_os_thread_foreign_call_v1(unsafe.Pointer, uintptr, uintptr, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, *uintptr, *uintptr, *uintptr) uint32 { return 0 }
+func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) uint32 { return 0 }
 func __llgo_coro_native_fleet_owner_v2(uint32) uint32 { return 0 }
 func __llgo_coro_foreign_reentry_acquire_v1(*unsafe.Pointer) unsafe.Pointer { return nil }
 func __llgo_coro_foreign_reentry_run_v1(unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }

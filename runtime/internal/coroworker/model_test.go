@@ -21,14 +21,17 @@ import (
 	"unsafe"
 )
 
-func TestResultIsThreePointerWords(t *testing.T) {
-	want := uintptr(3) * unsafe.Sizeof(uintptr(0))
+func TestResultIsSixPointerWords(t *testing.T) {
+	want := uintptr(6) * unsafe.Sizeof(uintptr(0))
 	if got := unsafe.Sizeof(Result{}); got != want {
 		t.Fatalf("Result size = %d, want %d", got, want)
 	}
 	if unsafe.Offsetof(Result{}.R1) != 0 ||
 		unsafe.Offsetof(Result{}.R2) != unsafe.Sizeof(uintptr(0)) ||
-		unsafe.Offsetof(Result{}.Errno) != 2*unsafe.Sizeof(uintptr(0)) {
+		unsafe.Offsetof(Result{}.Errno) != 2*unsafe.Sizeof(uintptr(0)) ||
+		unsafe.Offsetof(Result{}.Fault) != 3*unsafe.Sizeof(uintptr(0)) ||
+		unsafe.Offsetof(Result{}.FaultPC) != 4*unsafe.Sizeof(uintptr(0)) ||
+		unsafe.Offsetof(Result{}.FaultTarget) != 5*unsafe.Sizeof(uintptr(0)) {
 		t.Fatalf("Result field offsets do not match the C ABI")
 	}
 }

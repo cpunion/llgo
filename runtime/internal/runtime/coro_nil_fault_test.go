@@ -171,7 +171,11 @@ func newCoroNilFaultTestFrameV1(t *testing.T, g *coro.G, parent unsafe.Pointer) 
 	wordSize := unsafe.Sizeof(uintptr(0))
 	memory := make([]uintptr, (total+wordSize-1)/wordSize)
 	raw := unsafe.Pointer(&memory[0])
-	descriptor := unsafe.Pointer(&coro.FrameDescriptorV1{Version: 1, ResultAlign: 1})
+	descriptor := unsafe.Pointer(&coro.FrameDescriptorV1{
+		Version:     1,
+		ResultAlign: 1,
+		Function:    "runtime.testNilFault",
+	})
 	storage, ok := coro.RegisterFrame(g, raw, total, size, align, descriptor)
 	if !ok {
 		t.Fatal("register nil-fault frame")
@@ -200,12 +204,20 @@ func newCoroNilFaultTestFrameV1(t *testing.T, g *coro.G, parent unsafe.Pointer) 
 	}
 }
 
-func releaseCoroNilFaultTestFrameV1(t *testing.T, g *coro.G, frame *coroNilFaultTestFrameV1) {
+func releaseCoroNilFaultTestFrameV1(
+	t *testing.T,
+	g *coro.G,
+	frame *coroNilFaultTestFrameV1,
+	retainPanicTrace bool,
+) {
 	t.Helper()
 	raw, total, ok := coro.ReleaseFrame(g, frame.storage, frame.size, frame.align, frame.descriptor)
 	if !ok || raw != frame.raw || total != frame.total {
 		t.Fatalf("release nil-fault frame = (%p, %d, %t), want (%p, %d, true)",
 			raw, total, ok, frame.raw, frame.total)
+	}
+	if retainPanicTrace && !coro.RetainPendingPanicTraceFrame(g, raw, total) {
+		t.Fatal("retain nil-fault panic trace frame")
 	}
 }
 
@@ -552,7 +564,7 @@ func TestCoroFaultPayloadHookFeedsDirectRecover(t *testing.T) {
 	if !ok || action.Kind != coro.ActionDestroy || action.Handle != child.handle {
 		t.Fatalf("activate recovered fault child destroy = (%+v, %t)", action, ok)
 	}
-	releaseCoroNilFaultTestFrameV1(t, g, child)
+	releaseCoroNilFaultTestFrameV1(t, g, child, false)
 	action, ok = coro.Destroyed(p, g, action)
 	if !ok || action.Kind != coro.ActionCheckResume || action.Handle != parent.handle {
 		t.Fatalf("resume recovered fault parent = (%+v, %t)", action, ok)
@@ -655,7 +667,7 @@ func TestCoroNilFaultHookPublishesAwaitedChildCompletion(t *testing.T) {
 	if !ok || action.Kind != coro.ActionDestroy || action.Handle != child.handle {
 		t.Fatalf("activate nil-fault child destroy = (%+v, %t)", action, ok)
 	}
-	releaseCoroNilFaultTestFrameV1(t, g, child)
+	releaseCoroNilFaultTestFrameV1(t, g, child, true)
 	action, ok = coro.Destroyed(p, g, action)
 	if !ok || action.Kind != coro.ActionCheckResume || action.Handle != parent.handle {
 		t.Fatalf("commit nil-fault child destroy = (%+v, %t)", action, ok)

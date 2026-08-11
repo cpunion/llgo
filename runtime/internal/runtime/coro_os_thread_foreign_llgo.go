@@ -396,7 +396,10 @@ func __llgo_coro_same_m_foreign_call_v1(
 	}
 	args := [coroworker.MaxArgs]uintptr{record}
 	var result coroworker.Result
-	callOK := coroworker.Call(thunk, 1, &args, &result)
+	// Managed reentry cannot be abandoned by a signal longjmp. The zero trace
+	// target deliberately disables the worker fault landing pad for this exact
+	// boundary; reentry faults retain the process signal disposition.
+	callOK := coroworker.Call(thunk, 0, 1, &args, &result)
 	if !coroNativeForeignBoundaryRestoreTLSV1(&boundary, previous) {
 		coroRuntimeAbort("same-M foreign call cannot restore callback context")
 	}
@@ -422,13 +425,13 @@ func __llgo_coro_same_m_foreign_call_v1(
 //export __llgo_coro_os_thread_foreign_call_v1
 func __llgo_coro_os_thread_foreign_call_v1(
 	g unsafe.Pointer,
-	function uintptr,
+	function, traceTarget uintptr,
 	argc uint32,
 	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 	r1, r2, errno *uintptr,
-) {
+) uint32 {
 	task := (*coro.G)(g)
-	if function == 0 || argc > coroworker.MaxArgs ||
+	if function == 0 || traceTarget == 0 || argc > coroworker.MaxArgs ||
 		r1 == nil || r2 == nil || errno == nil ||
 		r1 == r2 || r1 == errno || r2 == errno ||
 		!coro.CurrentOSThreadLocked(task) {
@@ -440,12 +443,26 @@ func __llgo_coro_os_thread_foreign_call_v1(
 	}
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	var result coroworker.Result
-	callOK := coroworker.Call(function, argc, &args, &result)
+	callOK := coroworker.Call(function, traceTarget, argc, &args, &result)
 	if !boundary.finishV1() {
 		coroRuntimeAbort("locked-thread foreign call cannot reacquire managed execution")
 	}
 	if !callOK {
 		coroRuntimeAbort("locked-thread foreign call failed")
 	}
+	if result.Fault != coroworker.FaultNone {
+		if !StoreCoroWorkerFaultPCs(task, result.FaultPC, result.FaultTarget) {
+			coroRuntimeAbort("locked-thread foreign fault has no traceback identity")
+		}
+		switch result.Fault {
+		case coroworker.FaultMemory:
+			return coroWorkerResumeFaultMemoryV1
+		case coroworker.FaultDivide:
+			return coroWorkerResumeFaultDivideV1
+		default:
+			coroRuntimeAbort("locked-thread foreign call returned unknown fault")
+		}
+	}
 	*r1, *r2, *errno = result.R1, result.R2, result.Errno
+	return coroWorkerResumeSuccessV1
 }

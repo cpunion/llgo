@@ -414,8 +414,11 @@ func TestCoroWorkerClosedDefaultForeignCallUsesTypedThunk(t *testing.T) {
 		t.Fatalf("verify foreign worker coroutine: %v\n%s", err, module.String())
 	}
 	body := requireCoroPhysicalFunction(t, module, "foreignworker.Root").String()
-	if strings.Contains(body, "@foreign_word_probe") {
+	if regexp.MustCompile(`call [^\n]*@foreign_word_probe\(`).MatchString(body) {
 		t.Fatalf("coroutine body directly calls the typed foreign symbol:\n%s", body)
+	}
+	if !strings.Contains(body, "ptrtoint (ptr @foreign_word_probe") {
+		t.Fatalf("coroutine body lost compiler-owned C fault attribution:\n%s", body)
 	}
 	for _, symbol := range []string{coroWorkerParkHookV1, coroWorkerResumeHookV1} {
 		if got := strings.Count(body, "@"+symbol); got != 1 {

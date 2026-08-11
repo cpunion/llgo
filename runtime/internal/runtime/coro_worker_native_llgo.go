@@ -36,15 +36,16 @@ const (
 )
 
 type coroNativeWorkerJobV1 struct {
-	id       coro.OperationID
-	function uintptr
-	argc     uint32
-	args     [coroworker.MaxArgs]uintptr
+	id          coro.OperationID
+	function    uintptr
+	traceTarget uintptr
+	argc        uint32
+	args        [coroworker.MaxArgs]uintptr
 }
 
 func (job coroNativeWorkerJobV1) valid() bool {
 	return job.id.Valid() && job.id.Source() == coro.OperationSourceWorker &&
-		job.function != 0 && job.argc <= coroworker.MaxArgs
+		job.function != 0 && job.traceTarget != 0 && job.argc <= coroworker.MaxArgs
 }
 
 func coroNativeWorkerJobFromTransportV1(raw coroworker.Job) (coroNativeWorkerJobV1, bool) {
@@ -53,9 +54,10 @@ func coroNativeWorkerJobFromTransportV1(raw coroworker.Job) (coroNativeWorkerJob
 			SourceSlot: raw.SourceSlot,
 			Generation: raw.Generation,
 		},
-		function: raw.Function,
-		argc:     raw.Argc,
-		args:     raw.Args,
+		function:    raw.Function,
+		traceTarget: raw.TraceTarget,
+		argc:        raw.Argc,
+		args:        raw.Args,
 	}
 	return job, job.valid()
 }
@@ -237,7 +239,7 @@ func coroNativeWorkerPoolSubmitReservedV1(
 	route coro.RouteID,
 	reservation coroworker.QueueReservation,
 	id coro.OperationID,
-	function uintptr,
+	function, traceTarget uintptr,
 	argc uint32,
 	args *[coroworker.MaxArgs]uintptr,
 ) bool {
@@ -245,11 +247,12 @@ func coroNativeWorkerPoolSubmitReservedV1(
 		return false
 	}
 	job := coroworker.Job{
-		SourceSlot: id.SourceSlot,
-		Generation: id.Generation,
-		Function:   function,
-		Argc:       argc,
-		Args:       *args,
+		SourceSlot:  id.SourceSlot,
+		Generation:  id.Generation,
+		Function:    function,
+		TraceTarget: traceTarget,
+		Argc:        argc,
+		Args:        *args,
 	}
 	if _, valid := coroNativeWorkerJobFromTransportV1(job); !valid {
 		return false
@@ -339,11 +342,11 @@ func coroCommitNativeWorkerSubmissionV1(
 	route coro.RouteID,
 	reservation coroworker.QueueReservation,
 	id coro.OperationID,
-	function uintptr,
+	function, traceTarget uintptr,
 	argc uint32,
 	args *[coroworker.MaxArgs]uintptr,
 ) bool {
-	if driver == nil || g == nil || args == nil || function == 0 ||
+	if driver == nil || g == nil || args == nil || function == 0 || traceTarget == 0 ||
 		argc > coroworker.MaxArgs || !id.Valid() || id.Source() != coro.OperationSourceWorker || id.Route() != route ||
 		!coroNativeWorkerSubmissionOwnerV1(handle, route) ||
 		!coro.CommitCurrentExecutorWorkerSubmission(driver, g, id) {
@@ -355,6 +358,7 @@ func coroCommitNativeWorkerSubmissionV1(
 		reservation,
 		id,
 		function,
+		traceTarget,
 		argc,
 		args,
 	) {

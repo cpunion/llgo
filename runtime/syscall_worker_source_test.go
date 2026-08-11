@@ -131,7 +131,7 @@ func TestRuntimeWriteCarriesExactWorkerSafetyContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, marker := range []string{
-		"//go:build wasip2 || wasm_unknown",
+		"//go:build wasip1 || wasip2 || wasm_unknown",
 		"func runtimeWrite(fd uintptr, p unsafe.Pointer, n int32) int32",
 		"return n",
 	} {
@@ -641,10 +641,14 @@ struct llgo_coro_worker_result_v1 {
     uintptr_t r1;
     uintptr_t r2;
     uintptr_t error;
+    uintptr_t fault;
+    uintptr_t fault_pc;
+    uintptr_t fault_target;
 };
 
 bool __llgo_coro_worker_call_v1(
     uintptr_t function,
+    uintptr_t trace_target,
     uint32_t argc,
     const uintptr_t args[9],
     struct llgo_coro_worker_result_v1 *result);
@@ -654,12 +658,18 @@ uint32_t __llgo_coro_native_worker_complete_v1(
     uint32_t generation,
     uintptr_t r1,
     uintptr_t r2,
-    uintptr_t error) {
+    uintptr_t error,
+    uintptr_t fault,
+    uintptr_t fault_pc,
+    uintptr_t fault_target) {
     (void)source_slot;
     (void)generation;
     (void)r1;
     (void)r2;
     (void)error;
+    (void)fault;
+    (void)fault_pc;
+    (void)fault_target;
     return 0;
 }
 
@@ -694,7 +704,7 @@ static int call_and_check(
     int base) {
     const uintptr_t args[9] = {0};
     struct llgo_coro_worker_result_v1 result = {0};
-    if (!__llgo_coro_worker_call_v1(function, 1, args, &result)) {
+    if (!__llgo_coro_worker_call_v1(function, function, 1, args, &result)) {
         return base;
     }
     if (result.r1 != want_r1) {
@@ -702,6 +712,9 @@ static int call_and_check(
     }
     if (result.error != want_errno) {
         return base + 2;
+    }
+    if (result.fault != 0 || result.fault_pc != 0 || result.fault_target != 0) {
+        return base + 3;
     }
     return 0;
 }

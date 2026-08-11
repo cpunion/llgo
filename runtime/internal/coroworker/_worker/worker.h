@@ -41,6 +41,7 @@ struct llgo_coro_worker_job_v1 {
     uint32_t source_slot;
     uint32_t generation;
     uintptr_t function;
+    uintptr_t trace_target;
     uint32_t argc;
     uintptr_t args[LLGO_CORO_WORKER_MAX_ARGS_V1];
 };
@@ -49,6 +50,15 @@ struct llgo_coro_worker_result_v1 {
     uintptr_t r1;
     uintptr_t r2;
     uintptr_t error;
+    uintptr_t fault;
+    uintptr_t fault_pc;
+    uintptr_t fault_target;
+};
+
+enum {
+    LLGO_CORO_WORKER_FAULT_NONE_V1 = 0,
+    LLGO_CORO_WORKER_FAULT_MEMORY_V1 = 1,
+    LLGO_CORO_WORKER_FAULT_DIVIDE_V1 = 2,
 };
 
 int __llgo_coro_worker_create_v1(pthread_t *thread);
@@ -67,6 +77,7 @@ bool __llgo_coro_worker_queue_destroy_after_join_v1(void);
 
 bool __llgo_coro_worker_call_v1(
     uintptr_t function,
+    uintptr_t trace_target,
     uint32_t argc,
     const uintptr_t args[LLGO_CORO_WORKER_MAX_ARGS_V1],
     struct llgo_coro_worker_result_v1 *result);

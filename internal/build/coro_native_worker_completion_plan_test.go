@@ -194,7 +194,7 @@ func __llgo_coro_sema_release_or_abort_v2(unsafe.Pointer) {}
 func __llgo_coro_notify_prepare_or_abort_v2(unsafe.Pointer, unsafe.Pointer, uint32) {}
 func __llgo_coro_notify_one_or_abort_v2(unsafe.Pointer, uint32) {}
 func __llgo_coro_notify_all_or_abort_v2(unsafe.Pointer, uint32) {}
-func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr) uint32 { return 1 }
+func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) uint32 { return 1 }
 func install() {}
 `)
 		fixture.ctx.buildConf = &Config{

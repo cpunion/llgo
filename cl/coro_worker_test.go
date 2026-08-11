@@ -149,7 +149,7 @@ func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 		}
 	}
 	lockedQuery := strings.Index(body, "call i1 @"+coroOSThreadLockedHookV1)
-	directCall := strings.Index(body, "call void @"+coroOSThreadForeignCallHookV1)
+	directCall := strings.Index(body, "call i32 @"+coroOSThreadForeignCallHookV1)
 	workerPark := strings.Index(body, "call void @"+coroWorkerParkHookV1)
 	if lockedQuery < 0 || directCall < lockedQuery || workerPark < lockedQuery {
 		t.Fatalf("Root does not branch from the lock query to both direct and worker paths:\n%s", body)
@@ -169,6 +169,8 @@ func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 		coroWorkerResumeSuccessV1,
 		coroWorkerResumeTaskAbortV1,
 		coroWorkerResumeShutdownV1,
+		coroWorkerResumeFaultMemoryV1,
+		coroWorkerResumeFaultDivideV1,
 	} {
 		if !regexp.MustCompile(`(?m)^\s+i32 ` + strconv.FormatUint(status, 10) + `, label `).MatchString(dispatch[1]) {
 			t.Fatalf("Root worker resume switch lacks status %d:\n%s", status, dispatch[0])
