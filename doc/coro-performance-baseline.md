@@ -1085,3 +1085,71 @@ no `validReadyQueue` under normal handoff, distribution, or drain. Its active
 cost is now dominated by channel registration/cleanup, fixed source and fleet
 dispatch, frame allocation/free, and BDWGC marking/locking. Those are the next
 performance gates before broadening capability coverage.
+
+### Fused task envelope and physical M/P checkpoint
+
+The next allocation checkpoint uses merge `2a3eb6884` as its exact parent. A
+spawned logical G previously owned three independently released native ranges:
+the 264-byte scheduler G, a 160-byte runtime G/M/P/local sidecar, and its LLVM
+coroutine-frame allocation. The first two have identical lifetimes and root
+requirements, but simply concatenating them was not sufficient. The local
+BDWGC `GC_size` boundary rounded the old pair to 272 + 160 = 432 bytes, while
+both a 424-byte and a 416-byte combined object occupied the 448-byte size
+class. Five-run gates observed the expected RSS regression and rejected both
+intermediate layouts.
+
+The retained design removes physical M/P state from the logical sidecar. A
+`coroRuntimeContext` now contains only the runtime G and its `LocalContext`;
+the independently allocated native/executor placeholder keeps the full
+`runtimeContext { logical core, M, P }`. Immediately around one physical
+`llvm.coro.resume`, the logical G borrows the executor placeholder's actual M/P
+and becomes `M.curg`; leave restores the exact placeholder and detaches the G.
+Synchronous same-G C-to-Go reentry borrows the already-installed attachment.
+Suspended and runnable logical Gs therefore retain no M/P, matching the
+scheduler model instead of carrying one synthetic M/P pair per goroutine.
+
+The scheduler G remains at allocation offset zero, so the compiler-facing
+spawn ABI is unchanged. The native64 104-byte logical runtime context follows
+it in one 368-byte scanned/root allocation, and a compile-time offset equality
+fixes the G-at-base invariant. Spawn clears that envelope once and retirement releases
+it once with the exact backend size. The ordinary dynamic lifecycle therefore
+drops from three allocator objects to two without a pool, retained cache,
+target callback, or GC-specific pointer recovery. Native BDWGC reports the
+368-byte request as an exact 368-byte object; WASI malloc and tinygogc consume
+the same target-neutral layout.
+
+Five process-start `GOMAXPROCS=1` runs of the final candidate gave the following
+peak-RSS medians. The Go column is the same five-run same-source build used by
+the bounded-audit checkpoint.
+
+| parked Gs | Go gc RSS | task-envelope RSS | Go incremental / G | candidate incremental / G |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 3,522,560 | 7,749,632 | - | - |
+| 1,000 | 6,471,680 | 9,486,336 | 2,949 B | 1,737 B |
+| 5,000 | 17,596,416 | 17,235,968 | 2,815 B | 1,897 B |
+| 10,000 | 31,539,200 | 29,409,280 | 2,802 B | 2,166 B |
+
+At 10,000 parked goroutines the candidate is 2,129,920 bytes (6.75%) below Go
+in total RSS and its incremental resident cost is about 22.7% lower. It is also
+360,448 bytes below Go at 5,000, while the higher fixed runtime still loses at
+1,000; the observed total-footprint crossover is therefore between 1,000 and
+5,000 live Gs.
+
+Five final 10,000-G runs interleaved with the exact parent measured 30,375,936
+versus 29,442,048 bytes peak RSS (-933,888, -3.07%), 6.294 versus 6.277 billion
+retired instructions (-0.28%), and 156.354 versus 156.989 ms workload time
+(+0.41%, within the loaded-host range). Seven interleaved short-workload runs
+showed compute +0.8%, spawn -1.3%, and unbuffered handoff -0.2%; their ranges
+overlap, so only absence of a displaced common-path regression is claimed.
+The stripped executable grew by 992 bytes (+0.02%); `__TEXT`, `__DATA_CONST`,
+and `__DATA` segment reservations are unchanged.
+
+The full runtime suite, all 20 native-fleet E2Es (including foreign reentry,
+blocking compensation, locked G/M replacement, cross-route channel/select,
+quota changes, and shutdown), the three linked defer/panic/channel-spawn E2Es,
+JS/WASM, WASI malloc, WASI tinygogc, Linux ARM/RISC-V, and Cortex-M baremetal
+target builds passed. Both WASI profiles also executed successfully under
+Wasmtime. These gates freeze two architectural requirements for later work:
+logical G storage may not regain permanent M/P fields, and task/frame pooling
+must demonstrate a benefit beyond this allocation fusion without retaining an
+unbounded embedded-target cache.

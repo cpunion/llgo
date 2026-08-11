@@ -27,6 +27,10 @@ func coroBindRuntimeContext(task, parent *coro.G, main bool) bool {
 	return task != nil
 }
 
+func coroBindTaskAllocationRuntimeContext(task, parent *coro.G) bool {
+	return task != nil
+}
+
 func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool) {
 	return coroRuntimeContextActivationV1{}, task != nil
 }

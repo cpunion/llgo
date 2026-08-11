@@ -85,15 +85,21 @@ func destroyG(ptr c.Pointer) {
 	if gp == nil {
 		return
 	}
+	if gp.startarg != nil {
+		// A managed logical G must restore the executor placeholder before
+		// pthread exit. Do not mutate or free either a standalone command
+		// context or an interior spawned-task context from the C destructor;
+		// physical-owner shutdown detects the missing resume/leave separately.
+		return
+	}
 	if gp.panic_ != nil {
 		c.Free(gp.panic_)
 		gp.panic_ = nil
 	}
 	releasePanicPCStore(gp)
 	ctx := gp.context
-	if ctx != nil && ctx.root != nil {
-		root := ctx.root
-		ctx.root = nil
-		FreeRoot(root)
+	if ctx != nil {
+		gp.context = nil
+		FreeRoot(unsafe.Pointer(ctx))
 	}
 }

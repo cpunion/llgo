@@ -33,27 +33,28 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 	if !coro.CanBeginSpawn(parent) || !coroalloc.Ready() {
 		return nil, false
 	}
-	size := coro.TaskStorageSize()
-	raw := coroalloc.AllocTask(size)
+	taskSize := coro.TaskStorageSize()
+	allocationSize := uintptr(coroTaskAllocationSize)
+	raw := coroalloc.AllocTask(allocationSize)
 	if raw == nil {
 		return nil, false
 	}
-	coro.Zero(raw, size)
-	child := (*coroG)(raw)
-	if !coro.BeginSpawn(parent, child, raw, size) {
-		coro.Zero(raw, size)
-		if !coroalloc.FreeTask(raw, size) {
+	coro.Zero(raw, allocationSize)
+	child, _, actualSize, allocationOK := coroTaskAllocationAt(raw)
+	if !allocationOK || actualSize != allocationSize || !coro.BeginSpawn(parent, child, raw, taskSize) {
+		coro.Zero(raw, allocationSize)
+		if !coroalloc.FreeTask(raw, allocationSize) {
 			return nil, false
 		}
 		return nil, false
 	}
-	if !coroBindRuntimeContext(child, parent, false) {
+	if !coroBindTaskAllocationRuntimeContext(child, parent) {
 		rolled, rolledSize, ok := coro.RollbackSpawn(parent, child)
-		if !ok || rolled != raw || rolledSize != size {
+		if !ok || rolled != raw || rolledSize != taskSize {
 			return nil, false
 		}
-		coro.Zero(raw, size)
-		if !coroalloc.FreeTask(raw, size) {
+		coro.Zero(raw, allocationSize)
+		if !coroalloc.FreeTask(raw, allocationSize) {
 			return nil, false
 		}
 		return nil, false
@@ -90,12 +91,13 @@ func coroReleaseCompletedTask(g *coroG) bool {
 	if !owned {
 		return true
 	}
-	raw, size, ok := coro.ReleaseTaskStorage(g)
-	if !ok {
+	raw, taskSize, ok := coro.ReleaseTaskStorage(g)
+	_, _, allocationSize, allocationOK := coroTaskAllocationAt(raw)
+	if !ok || !allocationOK || raw != unsafe.Pointer(g) || taskSize != coro.TaskStorageSize() {
 		return false
 	}
-	coro.Zero(raw, size)
-	return coroalloc.FreeTask(raw, size)
+	coro.Zero(raw, allocationSize)
+	return coroalloc.FreeTask(raw, allocationSize)
 }
 
 //export __llgo_coro_spawn_begin_v1

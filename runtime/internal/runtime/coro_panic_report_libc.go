@@ -282,7 +282,7 @@ func coroTerminalWriteCString(text *c.Char) bool {
 // worker result records the prefix length explicitly; terminal reporting never
 // guesses whether an address is native by inspecting pointer bits and never
 // asks a worker thread to traverse Go scheduler state.
-func coroTerminalWriteWorkerFaultFrames(ctx *runtimeContext) {
+func coroTerminalWriteWorkerFaultFrames(ctx *coroRuntimeContext) {
 	if ctx == nil {
 		return
 	}
@@ -311,7 +311,7 @@ func coroTerminalWriteWorkerFaultFrames(ctx *runtimeContext) {
 	}
 }
 
-func coroTerminalWritePanicFrames(g *coro.G, ctx *runtimeContext) {
+func coroTerminalWritePanicFrames(g *coro.G, ctx *coroRuntimeContext) {
 	coroTerminalWriteString("\n\ngoroutine ")
 	if ctx.g.goid == 0 {
 		coroTerminalWriteUint(1)
@@ -369,7 +369,7 @@ func __llgo_coro_program_report_panic_v1(gPointer unsafe.Pointer) {
 		coroRuntimeAbort("invalid coroutine program panic report")
 	}
 	record, published := coro.LoadPanicRecord(g)
-	ctx := (*runtimeContext)(coro.TaskLocal(g))
+	ctx := (*coroRuntimeContext)(coro.TaskLocal(g))
 	if !published || record.Status != coro.ExplicitStatusPanic ||
 		record.TypeWord == nil || !validCoroRuntimeContext(ctx) {
 		coroRuntimeAbort("invalid coroutine program panic record")

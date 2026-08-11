@@ -31,7 +31,7 @@ func coroCurrentTaskRouteV1() coro.RouteID {
 		return 0
 	}
 	task := (*coro.G)(gp.startarg)
-	if ctx := (*runtimeContext)(coro.TaskLocal(task)); ctx != gp.context || !validCoroRuntimeTaskContext(task, ctx) {
+	if ctx := (*coroRuntimeContext)(coro.TaskLocal(task)); ctx != gp.context || !validCoroRuntimeTaskContext(task, ctx) {
 		return 0
 	}
 	_, _, route, current := coro.CurrentExecutorDriver(task)
