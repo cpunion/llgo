@@ -403,7 +403,7 @@ func CoroPanicRecoverActive() bool {
 		return false
 	}
 	task := (*coro.G)(gp.startarg)
-	ctx := (*runtimeContext)(coro.TaskLocal(task))
+	ctx := (*coroRuntimeContext)(coro.TaskLocal(task))
 	return ctx == gp.context && validCoroRuntimeTaskContext(task, ctx) && coro.RecoverTraceActive(task)
 }
 

@@ -29,6 +29,7 @@ import (
 func coroNativeTaskContextRuntimeSources() []string {
 	root := filepath.Join("..", "..", "runtime", "internal", "runtime")
 	return []string{
+		filepath.Join(root, "coro_task_allocation.go"),
 		filepath.Join(root, "coro_task_context.go"),
 		filepath.Join(root, "runtime_context.go"),
 		filepath.Join(root, "runtime2.go"),

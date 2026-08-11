@@ -939,6 +939,16 @@ Runtime 可选配置每 G 的 `maxFrameDepth/maxFrameBytes`，用于资源受限
 
 Native 上 M 是 pthread，P 数量通常受 GOMAXPROCS 控制。JS/WASM、单线程 WASI 和 baremetal 初期折叠为一个 M、一个 P、多个 G。
 
+当前runtime实现已把语言runtime sidecar按同一ownership拆开：可迁移逻辑G只保留
+`g + LocalContext`，不永久内嵌`m/p`；native/executor placeholder才拥有完整
+`{logical core, m, p}`。每次物理`llvm.coro.resume`前，逻辑G临时借用当前executor的
+真实M/P并成为`M.curg`，leave恢复exact placeholder并把G重新置为detached；同G同步
+C→Go reentry只借用已经安装的关系。native64上动态scheduler G与104-byte语言
+sidecar合并成368-byte scanned/root task envelope，G仍位于offset 0，故compiler
+spawn ABI不变；wasm32/其他target按其pointer-size布局同一结构。
+该checkpoint通过native多executor/LockOSThread/replacement、WASM/WASI/tinygogc和
+baremetal门；后续不得为了方便又退化成per-G伪M/P。
+
 这里的结构只表达ownership，不冻结字段排列。V2等待由稳定G内嵌的`ParkState`、直接park frame拥有的`WaitSetRecord`和source-owned `OperationRecord/ParkLink`共同表示；旧`parkGeneration + wakePending`只属于legacy单等待迁移层，不能继续作为channel、select、timer或I/O的新契约。
 
 #### Execution-domain handoff

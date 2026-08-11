@@ -31,7 +31,7 @@ func NewProc(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr) {
 		ctx := gp.context
 		releaseG()
 		FreeRoot(arg)
-		FreeRoot(ctx.root)
+		FreeRoot(unsafe.Pointer(ctx))
 		panic("runtime: failed to create new OS thread")
 	}
 }
@@ -97,7 +97,7 @@ func mexit(mp *m) {
 	gp := mp.curg
 	pp := mp.p
 	ctx := gp.context
-	root := ctx.root
+	root := unsafe.Pointer(ctx)
 	releaseGAndCheckDeadlock()
 
 	casgstatus(gp, _Grunning, _Gdead)
@@ -107,13 +107,11 @@ func mexit(mp *m) {
 	mp.p = nil
 	mp.curg = nil
 	gp.m = nil
+	gp.context = nil
 	releasePanicPCStore(gp)
 
 	setg(nil)
-	if root != nil {
-		ctx.root = nil
-		FreeRoot(root)
-	}
+	FreeRoot(root)
 }
 
 // GMPForTesting reports the current runtime ownership graph. It is kept
@@ -125,10 +123,11 @@ func GMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, ps
 	}
 	mp := gp.m
 	pp := mp.p
-	ctx := gp.context
+	core := gp.context
+	ctx := (*runtimeContext)(unsafe.Pointer(core))
 	return gp.goid, gp.parentGoid, mp.id, pp.id, readgstatus(gp), readpstatus(pp),
-		mp.curg == gp && pp.m == mp && ctx != nil &&
-			&ctx.g == gp && &ctx.m == mp && &ctx.p == pp
+		mp.curg == gp && pp.m == mp && core != nil &&
+			&ctx.coroRuntimeContext == core && &ctx.g == gp && &ctx.m == mp && &ctx.p == pp
 }
 
 // GStateForTesting reports the packed scheduler state without changing it.

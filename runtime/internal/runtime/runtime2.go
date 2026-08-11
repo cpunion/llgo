@@ -76,7 +76,7 @@ type g struct {
 	// phase-overlays this otherwise idle pointer with the scheduler G identity.
 	startarg unsafe.Pointer
 
-	context *runtimeContext
+	context *coroRuntimeContext
 	// localContext follows the logical G. Native pthread execution installs a
 	// stack-owned context at its outer Go entry; the stackless scheduler points
 	// this field at the context embedded in the task's runtime sidecar.
@@ -85,6 +85,10 @@ type g struct {
 	goexit       bool
 	isMain       bool
 	paniconfault bool
+	// coroEmbedded occupies existing tail padding. It distinguishes a runtime
+	// context stored in a spawned task envelope from independently rooted
+	// pthread/bootstrap contexts without retaining a redundant root pointer.
+	coroEmbedded bool
 }
 
 // m represents the host execution resource running Go code. The platform

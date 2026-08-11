@@ -28,9 +28,11 @@ const (
 	taskStorageReleased
 )
 
-// TaskStorageSize is the exact scanned/root allocation required for one
-// independently scheduled G. The G begins at the allocation base so the C ABI
-// can pass the returned address directly to a coroutine root factory.
+// TaskStorageSize is the exact scheduler-owned prefix required for one
+// independently scheduled G. The G begins at its runtime allocation base so
+// the C ABI can pass the returned address directly to a coroutine root
+// factory; a runtime adapter may retain target-specific task-local storage in
+// the same scanned/root allocation after this prefix.
 func TaskStorageSize() uintptr {
 	return unsafe.Sizeof(G{})
 }

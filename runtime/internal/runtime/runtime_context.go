@@ -22,22 +22,29 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-// runtimeContext keeps the G, M, and P for one native or stackless logical
-// execution context in one allocation. Keeping this ownership core independent
-// of pthread creation lets every scheduler backend reuse it directly.
-type runtimeContext struct {
+// coroRuntimeContext is the state which follows one stackless logical G. M and
+// P are physical executor resources and are deliberately absent: the logical G
+// borrows its current executor's M/P only for a physical coroutine resume.
+type coroRuntimeContext struct {
 	g g
+	// local gives package-local blocks the same lifetime as the logical G.
+	local LocalContext
+}
+
+// runtimeContext owns a native or executor-placeholder G together with its
+// physical M/P. Keeping coroRuntimeContext as the first field gives g.context
+// one common prefix while independently allocated native contexts retain their
+// allocation-base identity.
+type runtimeContext struct {
+	coroRuntimeContext
 	m m
 	p p
-	// local is used only by a stackless logical G. Keeping it inside the rooted
-	// sidecar gives package-local blocks the same lifetime as that G.
-	local LocalContext
-
-	// root is non-nil for contexts passed through a host-thread API or retained
-	// by a stackless task. Such contexts remain visible to the collector until
-	// their owning M or logical G exits.
-	root unsafe.Pointer
 }
+
+const runtimeContextCoreOffset = unsafe.Offsetof(runtimeContext{}.coroRuntimeContext)
+
+// Native teardown frees g.context as the original independent-root base.
+var _ [runtimeContextCoreOffset]byte = [0]byte{}
 
 var sched struct {
 	goidgen uint64
@@ -113,9 +120,7 @@ func allocRuntimeContext() *runtimeContext {
 		return nil
 	}
 	c.Memset(root, 0, size)
-	ctx := (*runtimeContext)(root)
-	ctx.root = root
-	return ctx
+	return (*runtimeContext)(root)
 }
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
@@ -124,23 +129,33 @@ func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	return gp
 }
 
-// initRuntimeContextUntracked initializes the executor-thread placeholder
-// installed in pthread TLS. It is a physical context used only while no
-// stackless logical G is active, so it must not participate in the logical-G
-// count or the main-Goexit deadlock decision.
-func initRuntimeContextUntracked(ctx *runtimeContext, callergp *g, status uint32) *g {
-	gp := &ctx.g
-	mp := &ctx.m
-	pp := &ctx.p
+func initCoroRuntimeContext(ctx *coroRuntimeContext, callergp *g, status uint32) *g {
+	gp := initCoroRuntimeContextUntracked(ctx, callergp, status)
+	retainG()
+	return gp
+}
 
-	gp.m = mp
+func initCoroRuntimeContextUntracked(ctx *coroRuntimeContext, callergp *g, status uint32) *g {
+	gp := &ctx.g
 	gp.atomicstatus = status
 	gp.goid = nextGoid(gp)
 	if callergp != nil {
 		gp.parentGoid = callergp.goid
 	}
 	gp.context = ctx
+	return gp
+}
 
+// initRuntimeContextUntracked initializes the executor-thread placeholder
+// installed in pthread TLS. It is a physical context used only while no
+// stackless logical G is active, so it must not participate in the logical-G
+// count or the main-Goexit deadlock decision.
+func initRuntimeContextUntracked(ctx *runtimeContext, callergp *g, status uint32) *g {
+	gp := initCoroRuntimeContextUntracked(&ctx.coroRuntimeContext, callergp, status)
+	mp := &ctx.m
+	pp := &ctx.p
+
+	gp.m = mp
 	mp.curg = gp
 	mp.p = pp
 	mp.id = nextMid(mp)
