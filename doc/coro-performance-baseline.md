@@ -1153,3 +1153,62 @@ Wasmtime. These gates freeze two architectural requirements for later work:
 logical G storage may not regain permanent M/P fields, and task/frame pooling
 must demonstrate a benefit beyond this allocation fusion without retaining an
 unbounded embedded-target cache.
+
+### Constant-time source-owner gates checkpoint
+
+The next scheduler checkpoint uses merge `d2eff9bcc` as its exact parent. A
+single bounded source reduction previously re-entered the complete driver
+validator from several nested layers. That validator re-read every configured
+source capacity and walked the complete in-progress poll-resolution cursor.
+The work was valuable at bind, shutdown, compatibility, and diagnostic
+boundaries, but redundant while the same owner P was advancing one already
+selected source slot.
+
+The retained split has three explicit levels. The hot driver/source header
+checks the immutable driver-to-P binding, the channel source back-pointer, and
+the local run cursor in O(1). Every selected source then validates its own scan
+limit, owner, route, slot, generation, and operation state immediately before
+mutation. Complete audits remain at lifecycle and diagnostic boundaries. The
+bounded runner also calls a private already-bound poll reducer after validating
+the owner once; exported and compatibility poll entries retain the checked
+wrapper. Its managed-resume permit probe validates only the active P
+back-pointer and issued-action gate because `NextExecutorRunStep` performs the
+complete hot-header proof before opening the no-return action interval.
+
+Regression tests corrupt a distant manual-source scan tail and an in-progress
+poll cursor: an unrelated observational owner probe remains O(1), while the
+complete audit rejects both. Independent corruption of source-set identity, P
+back-pointer, and run cursor fails at the hot header. Finally, a selected
+manual operation with a damaged exact owner is rejected without changing its
+park or source state, then succeeds after the owner is restored. These are
+architecture gates, not only output tests.
+
+The host changed frequency substantially between two AB/BA-interleaved
+campaigns, so only within-campaign ratios are combined. In the first nine-run
+campaign, replacing complete catalog/cursor audits moved 5,000 unbuffered
+request/ack handoffs from 138.628 ms to 93.204 ms (-32.77%) and spawn 100 by
+100 from 102.044 ms to 99.249 ms (-2.74%). In the second eleven-run campaign,
+removing the nested owner recheck moved handoff from 47.830 ms to 43.712 ms
+(-8.61%) and spawn from 51.389 ms to 50.841 ms (-1.07%). The compounded
+handoff reduction is about 38.6%. The final handoff range in that stable
+campaign was 43.509--44.121 ms.
+
+The same pure-compute function has the same address and byte-for-byte identical
+machine code in parent and candidate binaries. Its noisy timing movement is
+therefore not attributed to this runtime-only change. Against the earlier
+stable same-source Go median of 0.751 ms, the final handoff sample is a
+directional cross-session ratio of about 58.2x, down from about 96.7x at the
+previous checkpoint. It is not promoted to a paired regression budget: the
+next attempted all-workload run coincided with unrelated media rendering and a
+host load average near 35, producing more than 10x ranges, and was rejected.
+
+The stripped workload executable grows from 4,876,592 to 4,877,056 bytes
+(+464, +0.010%). Mach-O `__TEXT`, `__DATA_CONST`, and `__DATA` segment
+reservations are unchanged; `__text` grows by 3,068 bytes. No runtime object or
+coroutine-frame layout changes. The host race/shuffle coroutine suite, complete
+runtime suite, all 20 native-fleet E2Es, and the linked native
+defer/panic/channel-spawn E2Es pass. The remaining handoff gap is no longer a
+catalog-scan problem: an immediately matched channel operation still suspends
+both endpoints and runs the durable A/ack/B plus typed-cleanup transaction.
+Avoiding that suspension on the exact local ready path is the next performance
+gate.

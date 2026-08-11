@@ -23,6 +23,11 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 // Targets without a multi-route fleet have no useful producer-locality
 // destination. Keeping this a compile-time zero also avoids treating the
 // command/host executor's route-1 identity as a migration contract.
+func coroCurrentTaskV1() (*coro.G, coro.RouteID) {
+	return nil, 0
+}
+
 func coroCurrentTaskRouteV1() coro.RouteID {
-	return 0
+	_, route := coroCurrentTaskV1()
+	return route
 }

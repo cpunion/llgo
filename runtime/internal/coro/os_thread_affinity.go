@@ -286,7 +286,7 @@ func PrepareOSThreadSuspendHandoff(
 	task *G,
 	kind ActionKind,
 ) (required, ok bool) {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid ||
 		driver.poll.phase != executorPollIdle {
 		return false, false
@@ -337,7 +337,7 @@ func PrepareOSThreadSuspendHandoff(
 func OSThreadSuspendHandoffStatus(
 	driver *ExecutorDriver,
 ) (detached, returnable, ok bool) {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive {
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive {
 		return false, false, false
 	}
 	p := driver.p

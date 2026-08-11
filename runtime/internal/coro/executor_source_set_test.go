@@ -56,6 +56,48 @@ func TestExecutorSourceSetRejectsStandaloneAffectedOperationBeforeResolution(t *
 	}
 }
 
+func TestExecutorSourceSetHotDispatchRevalidatesSelectedSource(t *testing.T) {
+	p := new(P)
+	driver, _, manual, _ := bindTestExecutorDriverWithManual(t, p)
+	state, ticket, ids := reserveManualWaitSet(t, manual, p, 87, []uint32{13})
+	id := ids[0]
+	slot, _ := manualOperationSlotFor(manual, id)
+	if result := manual.Post(id); result != ManualOperationPosted {
+		t.Fatalf("post exact hot-dispatch operation = %d", result)
+	}
+	if published, lost, ok := manual.PublishPass(p); !ok || published != 1 || lost != 0 {
+		t.Fatalf("publish exact hot-dispatch operation = (%d, %d, %t)", published, lost, ok)
+	}
+	if resolution, duplicates, ok := manual.ResolveAffectedPublishedEpoch(p); !ok || duplicates != 0 ||
+		resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}) {
+		t.Fatalf("resolve exact hot-dispatch operation = (%+v, %d, %t)", resolution, duplicates, ok)
+	}
+
+	// The aggregate header deliberately trusts its frozen source pointer, but
+	// the selected direct-call source must reject a damaged exact owner before
+	// touching its slot or park state.
+	manual.owner = new(P)
+	if !validExecutorSourceSetHeader(&driver.sources, p) {
+		t.Fatal("aggregate hot header inspected selected-source internals")
+	}
+	if result := driver.sources.applyOne(p, &slot.record.link); result != OperationApplyInvalid {
+		t.Fatalf("selected source accepted damaged exact owner: %d", result)
+	}
+	if slot.record.phase != operationActive || slot.record.resolutionApplied || ParkReady(state, ticket) {
+		t.Fatal("rejected selected-source dispatch changed live operation")
+	}
+	manual.owner = p
+	if result := driver.sources.applyOne(p, &slot.record.link); result != OperationApplyDetached {
+		t.Fatalf("restored selected-source dispatch = %d", result)
+	}
+	outcome, _, lease, consumed := ConsumeParkSet(state, ticket)
+	if !consumed || outcome != ParkOutcomeCompleted || !lease.Valid() {
+		t.Fatalf("consume selected-source winner = (%d, %+v, %t)", outcome, lease, consumed)
+	}
+	finishManualOperations(t, manual, p, ids, lease)
+	closeTestExecutorDriver(t, driver)
+}
+
 func TestExecutorSourceSetRetryBudgetAndExternalFactHaveDistinctScheduling(t *testing.T) {
 	p := new(P)
 	manual := new(ManualOperationSource)

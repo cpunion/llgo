@@ -20,8 +20,16 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
-var coroCurrentTaskRouteTestV1 coro.RouteID
+var (
+	coroCurrentTaskTestV1      *coro.G
+	coroCurrentTaskRouteTestV1 coro.RouteID
+)
+
+func coroCurrentTaskV1() (*coro.G, coro.RouteID) {
+	return coroCurrentTaskTestV1, coroCurrentTaskRouteTestV1
+}
 
 func coroCurrentTaskRouteV1() coro.RouteID {
-	return coroCurrentTaskRouteTestV1
+	_, route := coroCurrentTaskV1()
+	return route
 }

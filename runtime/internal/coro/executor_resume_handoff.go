@@ -183,7 +183,7 @@ func DetachExecutorResume(
 // requests may remain for the returning M. A target must additionally settle
 // its route mailbox, admission and physical-owner directory before FinishReturn.
 func ExecutorResumeHandoffReturnable(driver *ExecutorDriver) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle {
 		return false
 	}
@@ -218,7 +218,7 @@ func ExecutorResumeHandoffContext(
 
 // RestoreExecutorResume reattaches the exact active LLVM resume after the
 // replacement owner has finished and the target has strongly joined it. The
-// caller must reacquire its managed-execution permit before calling Restore.
+// caller must reacquire its managed-execution P lease before calling Restore.
 // Success consumes and zeroes handoff; a duplicate or mismatched restore is
 // rejected without changing scheduler state.
 func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {

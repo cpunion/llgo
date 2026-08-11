@@ -43,6 +43,7 @@ type ExecutorDriver struct {
 	route         RouteID
 	sources       ExecutorSourceSet
 	poll          executorPollTransaction
+	local         ownerLocalCompletionCursor
 	run           executorRunCursor
 	prepareNow    int64
 	hasPrepareNow bool
@@ -62,7 +63,12 @@ const (
 
 const executorDriverMagic uint32 = 0x45584431 // "EXD1"
 
-func validExecutorDriver(driver *ExecutorDriver) bool {
+// validExecutorDriverHeader is the O(1) owner gate for a selected runner
+// reduction. It checks the immutable binding, reciprocal P/source identities,
+// and the local run cursor, but deliberately does not re-audit every source
+// capacity or walk the in-progress logical resolution cursor. The concrete
+// source or resolution reduction performs those exact checks before mutation.
+func validExecutorDriverHeader(driver *ExecutorDriver) bool {
 	if driver == nil || driver.magic != executorDriverMagic || driver.state == executorDriverUnbound {
 		return false
 	}
@@ -81,16 +87,28 @@ func validExecutorDriver(driver *ExecutorDriver) bool {
 		driver.p != nil && driver.registry != nil && driver.handle.Slot != 0 && driver.handle.Generation != 0 &&
 		driver.route.Valid() && driver.sources.route == driver.route &&
 		driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
-		validExecutorSourceSet(&driver.sources, driver.p) && validExecutorPollTransaction(&driver.poll, &driver.sources) &&
+		validExecutorSourceSetHeader(&driver.sources, driver.p) &&
+		validOwnerLocalCompletionHeader(&driver.local, driver.p) &&
 		validExecutorRunCursor(&driver.run, driver.p)
+}
+
+func validExecutorDriver(driver *ExecutorDriver) bool {
+	return validExecutorDriverHeader(driver) &&
+		validExecutorSourceSet(&driver.sources, driver.p) &&
+		validExecutorPollTransaction(&driver.poll, &driver.sources) &&
+		validOwnerLocalCompletion(&driver.local, driver.p)
 }
 
 func validExecutorDriverForP(driver *ExecutorDriver, p *P) bool {
 	return validExecutorDriver(driver) && driver.state == executorDriverActive && driver.p == p
 }
 
+func validExecutorDriverHeaderForP(driver *ExecutorDriver, p *P) bool {
+	return validExecutorDriverHeader(driver) && driver.state == executorDriverActive && driver.p == p
+}
+
 func validRunningExecutorOwner(driver *ExecutorDriver) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive {
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive {
 		return false
 	}
 	p := driver.p
@@ -149,7 +167,7 @@ func currentExecutorParkDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, 
 	driver := p.executor
 	handle := g.active.handle
 	header := g.active.header
-	if !validExecutorDriverForP(driver, p) || p.current != g || !p.inResume ||
+	if !validExecutorDriverHeaderForP(driver, p) || p.current != g || !p.inResume ||
 		!expectedAction(p, g, p.action, ActionResume) || !activeResumeOwnedByAction(g) ||
 		g.state != GRunning || g.active.state != FrameActive ||
 		g.active.handle != handle || g.active.header != header ||
@@ -329,6 +347,7 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
 		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
 		driver.poll != (executorPollTransaction{}) ||
+		driver.local != (ownerLocalCompletionCursor{}) ||
 		driver.run != (executorRunCursor{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||

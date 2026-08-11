@@ -403,11 +403,11 @@ type ResumeCleanupStep struct {
 	plan       *ResumeCleanupPlan
 }
 
-func pendingResumeCleanupStep(driver *ExecutorDriver) (ResumeCleanupStep, bool) {
-	if driver == nil || driver.poll.resolve.phase != publishedEpochResolvePromote {
+func pendingResumeCleanupStepForCursor(cursor *publishedEpochResolveCursor) (ResumeCleanupStep, bool) {
+	if cursor == nil || cursor.phase != publishedEpochResolvePromote {
 		return ResumeCleanupStep{}, false
 	}
-	record := driver.poll.resolve.wait
+	record := cursor.wait
 	if record == nil || record.resumeKind != resumeBindingCleanup {
 		return ResumeCleanupStep{}, false
 	}
@@ -423,6 +423,16 @@ func pendingResumeCleanupStep(driver *ExecutorDriver) (ResumeCleanupStep, bool) 
 		Outcome:    plan.outcome,
 		plan:       plan,
 	}, true
+}
+
+func pendingResumeCleanupStep(driver *ExecutorDriver) (ResumeCleanupStep, bool) {
+	if driver == nil {
+		return ResumeCleanupStep{}, false
+	}
+	if step, pending := pendingResumeCleanupStepForCursor(&driver.poll.resolve); pending {
+		return step, true
+	}
+	return pendingResumeCleanupStepForCursor(&driver.local.resolve)
 }
 
 // CommitResumeCleanupStep completes the exact outstanding typed runtime step.
@@ -570,7 +580,7 @@ func advanceResumeCleanupCore(
 	record *WaitSetRecord,
 	plan *ResumeCleanupPlan,
 ) (finalized bool, ok bool) {
-	if sources == nil || p == nil || !validExecutorSourceSet(sources, p) ||
+	if sources == nil || p == nil || !validExecutorSourceSetHeader(sources, p) ||
 		!validResumeCleanupPlan(record, plan) {
 		return false, false
 	}

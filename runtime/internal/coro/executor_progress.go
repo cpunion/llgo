@@ -18,10 +18,12 @@ package coro
 
 // ExecutorPollProgress is the pointer-free host boundary for one bounded
 // source-service entry. Counts are cumulative for the current A/ack/B
-// transaction; Used is charged only for this call. Every production catalog
-// slot, affected wait-set decision, candidate scan/settle/apply, promotion, and
-// legacy-G visit is resumable and charged as one reduction. ApplyVisits counts
-// only source-specific candidate ApplyOne actions. Complete means that
+// transaction; Used is charged only for this call. One production catalog
+// reduction visits at most executorCatalogBatchQuantum adjacent timer or poll
+// slots (one slot for other sources); every affected wait-set decision,
+// candidate scan/settle/apply, promotion, and legacy-G visit remains one
+// reduction. ApplyVisits counts only source-specific candidate ApplyOne
+// actions. Complete means that
 // the transaction reached the end of epoch B. More requests a later,
 // non-recursive scheduler entry, while Blocked means that only a new external
 // fact (or a reported future deadline) can make progress. More and Blocked are
@@ -70,6 +72,13 @@ const (
 	executorCatalogControl
 	executorCatalogDone
 )
+
+// Timer expiry and reactor readiness commonly arrive in bursts. Keeping this
+// quantum small amortizes runner/validation dispatch without turning one host
+// reduction into an unbounded catalog walk on embedded or single-threaded
+// targets. Other source types retain one-entry reductions because they may run
+// stronger admission or control protocols per entry.
+const executorCatalogBatchQuantum uint32 = 8
 
 // executorPollTransaction is scheduler-owner-only continuation state. It has
 // no callback-visible pointer and is embedded at a stable address in the
@@ -234,10 +243,11 @@ func beginExecutorPollEpoch(transaction *executorPollTransaction, sources *Execu
 	return true
 }
 
-// executorMinPollBudget returns a conservative full-transaction budget. Most
-// catalogs charge every slot in their binding-local active prefix; indexed
-// catalogs may skip empty regions and finish earlier. Configured-but-never-
-// allocated tails remain covered by structural audits, not routine service.
+// executorMinPollBudget returns a conservative full-transaction budget. It
+// deliberately counts every slot in the binding-local active prefix even
+// though timer/poll batching and indexed catalogs can finish earlier.
+// Configured-but-never-allocated tails remain covered by structural audits,
+// not routine service.
 func executorMinPollBudget(sources *ExecutorSourceSet) (uint32, bool) {
 	if sources == nil {
 		return 0, false
@@ -254,10 +264,10 @@ func executorMinPollBudget(sources *ExecutorSourceSet) (uint32, bool) {
 }
 
 // MinExecutorPollBudget is a sufficient base budget for one idle driver's
-// fixed A/ack/B catalog and two empty common-resolution actions. An indexed
-// catalog can complete below this bound. Non-empty affected waits and legacy
-// waiters add explicitly charged reductions; smaller budgets retain exact
-// source and resolution cursors for a later entry.
+// fixed A/ack/B catalog and two empty common-resolution actions. Batched or
+// indexed catalogs can complete below this bound. Non-empty affected waits and
+// legacy waiters add explicitly charged reductions; smaller budgets retain
+// exact source and resolution cursors for a later entry.
 func MinExecutorPollBudget(driver *ExecutorDriver) (uint32, bool) {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || driver.poll.phase != executorPollIdle {
 		return 0, false
@@ -401,6 +411,30 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 	return true
 }
 
+func publishExecutorCatalogReduction(driver *ExecutorDriver) bool {
+	if driver == nil ||
+		(driver.poll.phase != executorPollEpochAPublish && driver.poll.phase != executorPollEpochBPublish) ||
+		driver.poll.source >= executorCatalogDone {
+		return false
+	}
+	source := driver.poll.source
+	limit := uint32(1)
+	if source == executorCatalogTimers || source == executorCatalogPoll {
+		limit = executorCatalogBatchQuantum
+	}
+	for visited := uint32(0); visited < limit; visited++ {
+		if !publishExecutorCatalogEntry(driver) {
+			return false
+		}
+		// A source transition is a stable fairness boundary. The next reducer
+		// starts the next source even when both are batchable.
+		if driver.poll.source != source {
+			break
+		}
+	}
+	return true
+}
+
 func executorProgressFromScan(scan executorSourceScan, used, budget uint32, complete, more, blocked bool) (ExecutorPollProgress, bool) {
 	if scan.completed < 0 || scan.timers < 0 || scan.poll < 0 || scan.manual < 0 || scan.manualLost < 0 ||
 		scan.worker < 0 || scan.workerLost < 0 ||
@@ -432,14 +466,14 @@ func executorProgressFromScan(scan executorSourceScan, used, budget uint32, comp
 	}, true
 }
 
-// pollExecutorSliceAt advances the first production-bounded part of one
-// A/ack/B transaction without recursively re-entering the scheduler. Every
-// source entry, acknowledgement, candidate action, promotion, and legacy-G
-// visit costs exactly one reduction. Administrative phase transitions are
-// folded into the action they expose and never hide a collection scan.
-func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, budget uint32) (scan executorSourceScan, progress ExecutorPollProgress, ok bool) {
-	if budget == 0 || !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
-		!driver.sources.acceptsScan(driver.p, now, withDeadline) {
+// pollBoundExecutorSliceAt advances a driver whose immutable binding was
+// validated by the current owner reduction. It still checks the exact idle
+// scheduler boundary and every transaction/source cursor before mutation.
+// Keeping this private avoids repeating the complete owner header when
+// nextExecutorRunStepAt immediately delegates one source reduction here.
+func pollBoundExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, budget uint32) (scan executorSourceScan, progress ExecutorPollProgress, ok bool) {
+	if budget == 0 || driver == nil || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
+		withDeadline != driver.sources.usesMonotonicTime() || withDeadline && now < 0 {
 		return executorSourceScan{}, ExecutorPollProgress{}, false
 	}
 	if driver.poll.phase == executorPollIdle {
@@ -469,7 +503,7 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 				}
 				continue
 			}
-			if !publishExecutorCatalogEntry(driver) {
+			if !publishExecutorCatalogReduction(driver) {
 				return transaction.total, ExecutorPollProgress{}, false
 			}
 			used++
@@ -525,6 +559,18 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 	scan = driver.poll.total
 	progress, ok = executorProgressFromScan(scan, used, budget, false, true, false)
 	return scan, progress, ok
+}
+
+// pollExecutorSliceAt is the checked host/compatibility boundary for the
+// production-bounded A/ack/B transaction. Every source entry,
+// acknowledgement, candidate action, promotion, and legacy-G visit costs
+// exactly one reduction. Administrative phase transitions are folded into the
+// action they expose and never hide a collection scan.
+func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, budget uint32) (scan executorSourceScan, progress ExecutorPollProgress, ok bool) {
+	if !validExecutorDriverHeader(driver) {
+		return executorSourceScan{}, ExecutorPollProgress{}, false
+	}
+	return pollBoundExecutorSliceAt(driver, now, withDeadline, budget)
 }
 
 // PollExecutorSlice services a no-deadline source catalog for at most budget

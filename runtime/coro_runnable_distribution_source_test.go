@@ -182,7 +182,8 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"coroNativeFleetV1State.execution.TryAcquire(route)",
 		"coroNativeFleetV1State.execution.Release(route)",
 		"func CoroGOMAXPROCS(n int) int",
-		"coroNativeFleetRingExecutionWaitersV1()",
+		"coroNativeFleetRingExecutionWaitersV1(waiters uint32)",
+		"coroNativeFleetV1State.execution.WaiterMask()",
 	} {
 		if !strings.Contains(quota, required) {
 			t.Errorf("native fleet execution quota lacks logical-limit marker %q", required)

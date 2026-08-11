@@ -1782,6 +1782,38 @@ func TestCoroNativeFleetLockedForeignReleasesQuotaBeforeReplacementStarts(t *tes
 	}
 }
 
+func TestCoroNativeFleetRetirementReleasesHeldLeaseBeforeSuccessorStarts(t *testing.T) {
+	path := filepath.Join(
+		"..", "..", "runtime", "internal", "runtime",
+		"coro_native_m_owner_llgo.go",
+	)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal("read native physical owner:", err)
+	}
+	source := string(raw)
+	entry := strings.Index(source, "func coroTargetRetirePhysicalOwnerV1(")
+	if entry < 0 {
+		t.Fatal("native physical owner retirement entry is absent")
+	}
+	retirement := source[entry:]
+	release := strings.Index(
+		retirement,
+		"coroTargetReleaseManagedExecutionIfHeldV1(driver)",
+	)
+	start := strings.Index(
+		retirement,
+		"coroNativeMStartPhysicalOwnerV1(successor, successorSlot)",
+	)
+	if release < 0 || start < 0 || release >= start {
+		t.Fatalf(
+			"physical owner retirement must release an inherited P lease before starting its successor: release=%d start=%d",
+			release,
+			start,
+		)
+	}
+}
+
 func TestCoroNativeFleetLockedForeignCompensationE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetLockedForeignCompensationE2ESource, "locked-foreign-compensation", true, 1)
 }

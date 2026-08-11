@@ -1503,6 +1503,101 @@ func (transaction *ChannelExternalCommit) CommitAtRoute(route RouteID) bool {
 	return true
 }
 
+// TryPublishOwnerLocalChannelCompletion consumes the exact Forced mailbox
+// produced by current on its own bound P. published=false, ok=true is the
+// ordinary fallback result: the caller must request the operation's executor
+// and let the durable external protocol service it. ok=false is an invariant
+// failure. A successful call queues only scheduler work and requests a bounded
+// safepoint; it never resolves, materializes, or resumes another G inline.
+//
+// This entry is intentionally G-authenticated rather than route-authenticated.
+// A route is public producer metadata and cannot prove that a callback or
+// foreign thread currently owns scheduler-only P fields.
+func TryPublishOwnerLocalChannelCompletion(
+	current *G,
+	source *ChannelOperationSource,
+	id OperationID,
+) (published, ok bool) {
+	driver, _, route, currentOK := CurrentExecutorDriver(current)
+	if !currentOK || source == nil || source != driver.sources.channel ||
+		source.owner != driver.p || source.route != route || id.Route() != route {
+		return false, true
+	}
+	slot, slotOK := channelOperationSlotFor(source, id)
+	if !slotOK || preemptLoad(&slot.generation) != id.Generation ||
+		producerSourceLifecycle(preemptLoad(&slot.state)) != producerSourceActive &&
+			producerSourceLifecycle(preemptLoad(&slot.state)) != producerSourceClosing {
+		return false, false
+	}
+	record, claim := &slot.record, slot.claim
+	wait := record.link.wait
+	completionRoute, committed := channelPhysicalCompletionRoute(preemptLoad(&slot.physical))
+	// Current operations which have not yet become active, an already queued
+	// wait, and a route-zero/cross-owner completion are valid external-path
+	// cases. Do not disturb their sticky mailbox or pending bit.
+	if !committed || completionRoute != route || wait == nil ||
+		!canAppendOwnerLocalCompletion(driver, wait) {
+		return false, true
+	}
+	ready, readyOK := channelOperationReadyAt(source, id.LocalSlot()-1)
+	state, candidatePublished := operationCandidateState(record), operationCandidateIsPublished(record)
+	if !readyOK || !ready || preemptLoad(&slot.mailbox) != uint32(channelMailboxForced) ||
+		claim == nil || selectClaimLoad(claim) != selectClaimClaimed ||
+		preemptLoad(&slot.external) != uint32(channelExternalExposed) ||
+		preemptLoad(&slot.externalLease)&1 != 0 ||
+		preemptLoad(&slot.inflight)&producerAdmissionCountMask != 0 ||
+		record.id != id || record.phase != operationActive || record.disposition != OperationDispositionPending ||
+		record.resolutionApplied || record.link.operation != record || record.link.park != &wait.g.park ||
+		record.link.ticket != wait.ticket || record.resultState != operationResultEmpty ||
+		!validOperationCandidate(record) || operationCandidateMode(record) != OperationCommitReadyThenTryCommit ||
+		(state != OperationCommitIdle || candidatePublished) &&
+			(state != OperationCommitReady || !candidatePublished) {
+		return false, false
+	}
+	if !candidatePublished {
+		if _, ticketOK := nextParkTicket(record.resultTicket); !ticketOK {
+			return false, false
+		}
+	}
+	// Request before the irreversible owner publication. It coalesces at any
+	// current critical depth and guarantees that the compiler returns to the
+	// scheduler at a bounded legal safepoint if this resume does not park first.
+	if !RequestPreempt(current) {
+		return false, false
+	}
+
+	// Clear pending before removing the exact leaf. A concurrent producer which
+	// was already between leaf and pending publication remains visible through
+	// the refreshed page summary below; one arriving later stores pending itself.
+	preemptStore(&source.pending, 0)
+	index := id.LocalSlot() - 1
+	page := index / ChannelOperationPageCapacity
+	if !source.readyPages.take(page) || !clearChannelOperationReadyAt(source, index) {
+		_ = markChannelOperationReadyAt(source, index)
+		preemptStore(&source.pending, 1)
+		return false, false
+	}
+	mailbox, drainOK := beginChannelMailboxDrain(slot, channelMailboxForced)
+	if !drainOK || mailbox != channelMailboxForced {
+		_ = markChannelOperationReadyAt(source, index)
+		preemptStore(&source.pending, 1)
+		return false, false
+	}
+	if PublishExternallyCommittedReadyThenCandidate(record, id) != OperationCompletionPublished {
+		_ = restoreChannelMailboxDrain(source, slot, channelMailboxForced)
+		return false, false
+	}
+	appendOwnerLocalCompletionUnchecked(driver, wait)
+	if !finishChannelMailboxDrain(source, slot, channelMailboxForced) ||
+		!refreshChannelOperationReadyPage(source, page) {
+		return false, false
+	}
+	if !source.readyPages.empty() {
+		preemptStore(&source.pending, 1)
+	}
+	return true, true
+}
+
 func (source *ChannelOperationSource) publishExternallyCommittedHeld(
 	slot *channelOperationSlot,
 	id OperationID,

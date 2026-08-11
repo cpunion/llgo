@@ -256,6 +256,11 @@ func yieldCoroChannelAdapterFrame(t *testing.T, p *coro.P, frame *coroChannelAda
 
 func pollCoroChannelAdapterExecutor(t *testing.T, driver *coro.ExecutorDriver) {
 	t.Helper()
+	_ = pollCoroChannelAdapterExecutorProgress(t, driver)
+}
+
+func pollCoroChannelAdapterExecutorProgress(t *testing.T, driver *coro.ExecutorDriver) (atomicResolve bool) {
+	t.Helper()
 	for step := 0; ; step++ {
 		runStep, ok := coro.NextExecutorRunStep(driver)
 		if !ok {
@@ -263,11 +268,12 @@ func pollCoroChannelAdapterExecutor(t *testing.T, driver *coro.ExecutorDriver) {
 		}
 		switch runStep.Kind {
 		case coro.ExecutorRunStepSource:
+			atomicResolve = atomicResolve || runStep.Poll.AtomicResolve
 			if runStep.Poll.Complete {
 				if !coro.EnterExecutorRunCompatibility(driver) {
 					t.Fatalf("leave bounded channel adapter executor at step %d", step)
 				}
-				return
+				return atomicResolve
 			}
 		case coro.ExecutorRunStepMaterialize:
 			if !coroMaterializeResumeCleanupStepV1(runStep.Cleanup) {
@@ -480,7 +486,10 @@ func TestCoroChannelAdapterCleanupCursorBoundsPeerWork(t *testing.T) {
 
 func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	coroCurrentTaskRouteTestV1 = 7
-	defer func() { coroCurrentTaskRouteTestV1 = 0 }()
+	defer func() {
+		coroCurrentTaskTestV1 = nil
+		coroCurrentTaskRouteTestV1 = 0
+	}()
 	p := new(coro.P)
 	driver := new(coro.ExecutorDriver)
 	handle, ok := coroProgramExecutorRegistryState.Register()
@@ -642,6 +651,9 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 		t.Fatalf("channel select waiters not published: first=%p second=%p",
 			selectChannels[0].recvq.first, selectChannels[1].recvq.first)
 	}
+	// Clear the mandatory initial parked-set visit so a later same-P matcher
+	// can publish the exact selected endpoint directly to the owner-local FIFO.
+	pollCoroChannelAdapterExecutor(t, driver)
 	deferredG, deferredOK := coro.NextRunnable(p)
 	if !deferredOK || deferredG == nil || deferredG == selectFrame.g {
 		t.Fatalf("dequeue unrelated ready G before select completion = (%p, %t)", deferredG, deferredOK)
@@ -656,12 +668,18 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 		t.Fatalf("unexpected direct select sender G %p", deferredG)
 	}
 	selectedValue := uint32(0xa5b6c7d8)
-	var directSendState CoroChanParkV1
 	directSendAction := activateCoroChannelAdapterFrame(t, p, directSender)
-	parkCoroChannelAdapterFrame(
-		t, p, directSender, directSendAction, selectChannels[1], unsafe.Pointer(&selectedValue), &directSendState, true,
-	)
-	pollCoroChannelAdapterExecutor(t, driver)
+	coroCurrentTaskTestV1 = directSender.g
+	coroCurrentTaskRouteTestV1 = 1
+	if !CoroChanTrySend(selectChannels[1], unsafe.Pointer(&selectedValue), int(unsafe.Sizeof(selectedValue))) {
+		t.Fatal("same-P direct send did not match channel selector")
+	}
+	coroCurrentTaskTestV1 = nil
+	coroCurrentTaskRouteTestV1 = 7
+	yieldCoroChannelAdapterFrame(t, p, directSender, directSendAction)
+	if !pollCoroChannelAdapterExecutorProgress(t, driver) {
+		t.Fatal("same-P channel match did not use owner-local completion reduction")
+	}
 	completed := map[*coro.G]bool{}
 	for len(completed) != 2 {
 		next, nextOK := coro.NextRunnable(p)
@@ -694,10 +712,7 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 			selectFrame.header.Lifecycle = uint16(coro.FrameActive)
 			yieldCoroChannelAdapterFrame(t, p, selectFrame, selectAction)
 		case directSender.g:
-			directSendAction, directStatus := resumeCoroChannelAdapterFrame(t, p, directSender, &directSendState)
-			if directStatus != coroChanResumeSendOK {
-				t.Fatalf("direct select sender resume status = %d, want %d", directStatus, coroChanResumeSendOK)
-			}
+			directSendAction = activateCoroChannelAdapterFrame(t, p, directSender)
 			yieldCoroChannelAdapterFrame(t, p, directSender, directSendAction)
 		default:
 			t.Fatalf("unexpected completed select pair G %p", next)
