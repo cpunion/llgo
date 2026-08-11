@@ -109,9 +109,9 @@ func serviceExecutorRunSource(driver *ExecutorDriver, now int64, withDeadline bo
 	var progress ExecutorPollProgress
 	var ok bool
 	if withDeadline {
-		_, progress, ok = pollExecutorSliceAt(driver, now, true, 1)
+		_, progress, ok = pollBoundExecutorSliceAt(driver, now, true, 1)
 	} else {
-		_, progress, ok = pollExecutorSliceAt(driver, 0, false, 1)
+		_, progress, ok = pollBoundExecutorSliceAt(driver, 0, false, 1)
 	}
 	if !ok || progress.Used != 1 {
 		return ExecutorRunStep{}, false
@@ -147,13 +147,13 @@ func CommitExecutorRunSourceDistribution(driver *ExecutorDriver, distributed boo
 		return false
 	}
 	if !distributed || runnableForOSThreadOwner(driver.p) {
-		return validExecutorDriver(driver)
+		return validExecutorDriverHeader(driver)
 	}
 	if !driver.run.readyDebt {
 		return false
 	}
 	driver.run.readyDebt = false
-	if validExecutorDriver(driver) {
+	if validExecutorDriverHeader(driver) {
 		return true
 	}
 	// Preserve the fail-closed diagnostic state if an unrelated invariant was
@@ -189,7 +189,7 @@ func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 }
 
 func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool) (ExecutorRunStep, bool) {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
 		driver.sources.usesMonotonicTime() != withDeadline || withDeadline && now < 0 ||
 		driver.run.issued != ActionInvalid {
 		return ExecutorRunStep{}, false
@@ -266,8 +266,12 @@ func NextExecutorRunStepAt(driver *ExecutorDriver, now int64) (ExecutorRunStep, 
 // process-level execution permit without returning across an issued action or
 // teaching the target-neutral driver about threads and GOMAXPROCS.
 func ExecutorRunManagedResumePending(driver *ExecutorDriver) (pending, ok bool) {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
-		driver.run.issued != ActionInvalid {
+	// This is only a pre-step permit probe. NextExecutorRunStep performs the
+	// complete owner-header validation before it can issue an action, so the
+	// probe needs only the exact active P back-pointer and issued-state gate.
+	if driver == nil || driver.magic != executorDriverMagic || driver.state != executorDriverActive ||
+		driver.p == nil || driver.p.executor != driver ||
+		preemptLoad(&driver.p.executorMode) != executorModeBound || driver.run.issued != ActionInvalid {
 		return false, false
 	}
 	p := driver.p
@@ -297,14 +301,14 @@ func ExecutorRunManagedResumePending(driver *ExecutorDriver) (pending, ok bool) 
 // and retains no platform state; asynchronous producers must still publish a
 // durable source and use the registry request/doorbell protocol.
 func RequestExecutorSourceService(driver *ExecutorDriver) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
 		!idleExecutorScheduler(driver.p) {
 		return false
 	}
 	driver.run.sourceMore = true
 	driver.run.blocked = false
-	return validExecutorDriver(driver)
+	return validExecutorDriverHeader(driver)
 }
 
 // ExecutorOwnerWaitPending closes the running-owner-to-physical-wait window
@@ -313,7 +317,7 @@ func RequestExecutorSourceService(driver *ExecutorDriver) bool {
 // G, source fact, registry request, or scheduler request makes blocking
 // unnecessary, while a later producer observes that marker and rings.
 func ExecutorOwnerWaitPending(driver *ExecutorDriver) (pending, ok bool) {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
 		!idleExecutorScheduler(driver.p) {
 		return false, false
@@ -352,7 +356,7 @@ func completedExecutorRunAction(p *P, g *G, action Action) bool {
 // the completed G nor its old handle, so a runtime may reclaim a dynamic G
 // immediately after a successful ActionComplete commit.
 func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placement executorRunQueuePlacement) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
 		driver.run.issued == ActionInvalid || g == nil ||
 		!validOSThreadPeerActionCommit(driver.p, g) {
 		return false

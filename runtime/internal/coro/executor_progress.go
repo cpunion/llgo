@@ -432,14 +432,14 @@ func executorProgressFromScan(scan executorSourceScan, used, budget uint32, comp
 	}, true
 }
 
-// pollExecutorSliceAt advances the first production-bounded part of one
-// A/ack/B transaction without recursively re-entering the scheduler. Every
-// source entry, acknowledgement, candidate action, promotion, and legacy-G
-// visit costs exactly one reduction. Administrative phase transitions are
-// folded into the action they expose and never hide a collection scan.
-func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, budget uint32) (scan executorSourceScan, progress ExecutorPollProgress, ok bool) {
-	if budget == 0 || !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
-		!driver.sources.acceptsScan(driver.p, now, withDeadline) {
+// pollBoundExecutorSliceAt advances a driver whose immutable binding was
+// validated by the current owner reduction. It still checks the exact idle
+// scheduler boundary and every transaction/source cursor before mutation.
+// Keeping this private avoids repeating the complete owner header when
+// nextExecutorRunStepAt immediately delegates one source reduction here.
+func pollBoundExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, budget uint32) (scan executorSourceScan, progress ExecutorPollProgress, ok bool) {
+	if budget == 0 || driver == nil || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
+		withDeadline != driver.sources.usesMonotonicTime() || withDeadline && now < 0 {
 		return executorSourceScan{}, ExecutorPollProgress{}, false
 	}
 	if driver.poll.phase == executorPollIdle {
@@ -525,6 +525,18 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 	scan = driver.poll.total
 	progress, ok = executorProgressFromScan(scan, used, budget, false, true, false)
 	return scan, progress, ok
+}
+
+// pollExecutorSliceAt is the checked host/compatibility boundary for the
+// production-bounded A/ack/B transaction. Every source entry,
+// acknowledgement, candidate action, promotion, and legacy-G visit costs
+// exactly one reduction. Administrative phase transitions are folded into the
+// action they expose and never hide a collection scan.
+func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, budget uint32) (scan executorSourceScan, progress ExecutorPollProgress, ok bool) {
+	if !validExecutorDriverHeader(driver) {
+		return executorSourceScan{}, ExecutorPollProgress{}, false
+	}
+	return pollBoundExecutorSliceAt(driver, now, withDeadline, budget)
 }
 
 // PollExecutorSlice services a no-deadline source catalog for at most budget

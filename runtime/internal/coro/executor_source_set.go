@@ -98,11 +98,25 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 	scan.hasDeadline = other.hasDeadline
 }
 
+// validExecutorSourceSetHeader checks only the immutable binding and reciprocal
+// owner identities maintained by BindExecutorSourceCatalog. It is the O(1)
+// gate for one already-selected scheduler reduction: the selected source then
+// validates its exact scan limit, slot, generation, and operation state before
+// it mutates anything.
+//
+// Do not add catalog-capacity walks here. Dynamic pages are published
+// monotonically and every concrete catalog access rechecks its own current
+// bound. Complete source-set audits remain in validExecutorSourceSet for
+// lifecycle, shutdown, compatibility, test, and diagnostic boundaries.
+func validExecutorSourceSetHeader(sources *ExecutorSourceSet, p *P) bool {
+	return sources != nil && sources.magic == executorSourceSetMagic && p != nil && sources.owner == p &&
+		sources.route.Valid() &&
+		(sources.channel == nil) == (p.channelSource == nil) &&
+		(sources.channel == nil || p.channelSource == sources.channel)
+}
+
 func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
-	if sources == nil || sources.magic != executorSourceSetMagic || p == nil || sources.owner != p ||
-		!sources.route.Valid() ||
-		(sources.channel == nil) != (p.channelSource == nil) ||
-		sources.channel != nil && p.channelSource != sources.channel {
+	if !validExecutorSourceSetHeader(sources, p) {
 		return false
 	}
 	_, timerScanOK := timerRegistrationScanLimit(sources.timers)
@@ -340,7 +354,7 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 // bit to become quiet. Keeping this separate prevents static source order from
 // becoming a select tie breaker.
 func (sources *ExecutorSourceSet) applyOne(p *P, link *ParkLink) OperationApplyResult {
-	if !validExecutorSourceSet(sources, p) || link == nil || link.operation == nil ||
+	if !validExecutorSourceSetHeader(sources, p) || link == nil || link.operation == nil ||
 		link.operation.link.operation != link.operation || &link.operation.link != link ||
 		link.operation.phase != operationActive || link.operation.id.Source() == OperationSourceInvalid {
 		return OperationApplyInvalid
@@ -560,7 +574,7 @@ func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVi
 // Deadline sources are sampled by drain and represented by the aggregate
 // deadline; future deadlines are not pending runnable work.
 func (sources *ExecutorSourceSet) pending(p *P) bool {
-	return validExecutorSourceSet(sources, p) &&
+	return validExecutorSourceSetHeader(sources, p) &&
 		(p.affectedWaitHead != nil || sources.poll != nil && sources.poll.Pending() ||
 			sources.manual != nil && sources.manual.Pending() ||
 			sources.worker != nil && sources.worker.Pending() ||

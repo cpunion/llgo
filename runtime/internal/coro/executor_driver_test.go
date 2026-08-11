@@ -111,6 +111,71 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	}
 }
 
+func TestExecutorDriverHotHeaderDefersDeepCatalogAndPollAudits(t *testing.T) {
+	p := new(P)
+	driver, _, manual, _ := bindTestExecutorDriverWithManual(t, p)
+	if !validExecutorDriverHeader(driver) || !validExecutorDriver(driver) {
+		t.Fatal("fresh driver failed header or complete audit")
+	}
+
+	// A selected owner reduction does not walk an unrelated source catalog.
+	// The complete diagnostic boundary must still reject its invalid scan tail.
+	manual.scanLimit = ManualOperationConfiguredCapacity(manual) + 1
+	if !validExecutorDriverHeader(driver) {
+		t.Fatal("hot header inspected the manual catalog scan tail")
+	}
+	if validExecutorDriver(driver) {
+		t.Fatal("complete driver audit accepted an invalid manual scan tail")
+	}
+	if pending, ok := ExecutorRunManagedResumePending(driver); !ok || pending {
+		t.Fatalf("observational hot gate over distant catalog damage = (%t, %t)", pending, ok)
+	}
+	manual.scanLimit = 0
+
+	// The in-progress poll cursor is likewise validated by its exact reducer and
+	// by complete lifecycle diagnostics, not by an unrelated owner observation.
+	driver.poll = executorPollTransaction{phase: executorPollAcknowledge}
+	if !validExecutorDriverHeader(driver) {
+		t.Fatal("hot header inspected the logical poll cursor")
+	}
+	if validExecutorDriver(driver) {
+		t.Fatal("complete driver audit accepted an invalid logical poll cursor")
+	}
+	driver.poll = executorPollTransaction{}
+	if !validExecutorDriver(driver) {
+		t.Fatal("restored driver failed complete audit")
+	}
+	closeTestExecutorDriver(t, driver)
+}
+
+func TestExecutorDriverHotHeaderRejectsLocalBindingDamage(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+
+	driver.sources.magic = 0
+	if validExecutorDriverHeader(driver) {
+		t.Fatal("hot header accepted damaged source-set identity")
+	}
+	driver.sources.magic = executorSourceSetMagic
+
+	p.executor = nil
+	if validExecutorDriverHeader(driver) {
+		t.Fatal("hot header accepted damaged P back-pointer")
+	}
+	p.executor = driver
+
+	driver.run.actionsSinceSource = executorRunSourceQuantum + 1
+	if validExecutorDriverHeader(driver) {
+		t.Fatal("hot header accepted damaged local run cursor")
+	}
+	driver.run.actionsSinceSource = 0
+
+	if !validExecutorDriver(driver) {
+		t.Fatal("restored local binding failed complete audit")
+	}
+	closeTestExecutorDriver(t, driver)
+}
+
 func drainTimerAwareExecutorRunSources(t *testing.T, driver *ExecutorDriver, now int64) {
 	t.Helper()
 	for reduction := 0; reduction < 4096; reduction++ {

@@ -199,7 +199,7 @@ func initializePublishedEpochResolution(sources *ExecutorSourceSet, p *P, cursor
 		return false
 	}
 	if sources != nil {
-		if !validExecutorSourceSet(sources, p) {
+		if !validExecutorSourceSetHeader(sources, p) {
 			return false
 		}
 		if sources.manual != nil {

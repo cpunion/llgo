@@ -334,7 +334,7 @@ func materializePollResume(
 // logical detach and before ready-queue publication. No source identity is
 // written to the packet after cleanup succeeds.
 func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *WaitSetRecord) bool {
-	if sources == nil || !validExecutorSourceSet(sources, p) || record == nil ||
+	if sources == nil || !validExecutorSourceSetHeader(sources, p) || record == nil ||
 		!validActiveWaitSetRecordFast(p, record) || record.work != waitSetWorkResolving ||
 		record.g.park.phase != parkReady || record.resumeKind != resumeBindingSingle ||
 		!validBoundResumePacket((*ResumePacket)(record.resume), record.ticket) {

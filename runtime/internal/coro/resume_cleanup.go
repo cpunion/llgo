@@ -570,7 +570,7 @@ func advanceResumeCleanupCore(
 	record *WaitSetRecord,
 	plan *ResumeCleanupPlan,
 ) (finalized bool, ok bool) {
-	if sources == nil || p == nil || !validExecutorSourceSet(sources, p) ||
+	if sources == nil || p == nil || !validExecutorSourceSetHeader(sources, p) ||
 		!validResumeCleanupPlan(record, plan) {
 		return false, false
 	}

@@ -183,7 +183,7 @@ func DetachExecutorResume(
 // requests may remain for the returning M. A target must additionally settle
 // its route mailbox, admission and physical-owner directory before FinishReturn.
 func ExecutorResumeHandoffReturnable(driver *ExecutorDriver) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle {
 		return false
 	}
