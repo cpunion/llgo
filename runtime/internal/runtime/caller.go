@@ -16,7 +16,10 @@
 
 package runtime
 
-import clitedebug "github.com/goplus/llgo/runtime/internal/clite/debug"
+import (
+	clitedebug "github.com/goplus/llgo/runtime/internal/clite/debug"
+	"github.com/goplus/llgo/runtime/internal/coro"
+)
 
 type CallerFrame struct {
 	PC        uintptr
@@ -251,6 +254,70 @@ func StoreFaultPCs(pcs []uintptr) {
 	storePanicPCs(pcs, 1)
 }
 
+// StoreCoroWorkerFaultPCs joins the two bounded native identities returned by
+// the C worker with the resumed coroutine's exact active frame and the current
+// G's compiler-maintained logical callers. The worker never receives this
+// stack or a G pointer: reconstruction happens only after the exact operation
+// resumes on its owning executor. Stored PCs follow Callers' return-PC
+// convention so symbolization uses pc-1 at the fault site and at the
+// compiler-known source C entry.
+func StoreCoroWorkerFaultPCs(task *coro.G, faultPC, targetPC uintptr) bool {
+	var pcs [64]uintptr
+	n := 0
+	appendNative := func(pc uintptr) {
+		if pc < 4096 || pc == ^uintptr(0) || n >= len(pcs) {
+			return
+		}
+		pc++
+		if n != 0 && pcs[n-1] == pc {
+			return
+		}
+		pcs[n] = pc
+		n++
+	}
+	appendNative(faultPC)
+	appendNative(targetPC)
+	if n == 0 {
+		return false
+	}
+	native := n
+	active, activeOK := coro.ActiveTraceFrame(task)
+	// A worker result reaches this function only in the exact compiler resume
+	// hook window. Missing task/frame metadata is an ABI violation, not a reason
+	// to publish a silently truncated traceback.
+	if !activeOK {
+		return false
+	}
+	if !active.Hidden && n < len(pcs) {
+		store := callerLocationStoreForGoroutine()
+		frame := store.captureFrame(CallerFrame{
+			Function: active.Function,
+			File:     active.File,
+			Line:     int(active.Line),
+		}, callersPCValue)
+		pcs[n] = frame.PC
+		n++
+	}
+	// Skip the synthetic runtime.Callers frame; the remaining entries are the
+	// logical Go callers of the exact active frame captured above.
+	logical := n
+	n += Callers(1, pcs[n:])
+	// A future compiler may keep the active leaf in its demand-driven shadow
+	// stack. Prefer the exact scheduler descriptor and remove only an identical
+	// first logical location, keeping this bridge compatible with that change.
+	if !active.Hidden && n > logical {
+		if first, ok := FrameForPC(pcs[logical]); ok &&
+			first.Function == active.Function && first.File == active.File &&
+			first.Line == int(active.Line) {
+			copy(pcs[logical:n-1], pcs[logical+1:n])
+			n--
+		}
+	}
+	StoreFaultPCs(pcs[:n])
+	panicPCStoreForG().native = int32(native)
+	return true
+}
+
 func storePanicPCs(pcs []uintptr, armed int32) {
 	p := panicPCStoreForG()
 	n := len(pcs)
@@ -261,6 +328,7 @@ func storePanicPCs(pcs []uintptr, armed int32) {
 	p.n = int32(n)
 	p.armed = armed
 	p.fault = armed
+	p.native = 0
 	p.recFP1 = 0
 	p.recFP2 = 0
 }
@@ -298,6 +366,20 @@ func PanicRecoverFPs() (uintptr, uintptr) {
 // PanicActive reports whether a panic is in flight (not yet recovered).
 func PanicActive() bool {
 	return getg().panic_ != nil
+}
+
+// CoroPanicRecoverActive derives recovered-panic visibility from the exact
+// scheduler CompletionRecord owned by the current stackless G. Native
+// setjmp-based recovery continues to use its physical-frame marker; a
+// coroutine never needs to manufacture or retain a pthread stack address.
+func CoroPanicRecoverActive() bool {
+	gp := getg()
+	if gp == nil || gp.startfn != nil || gp.startarg == nil || gp.context == nil {
+		return false
+	}
+	task := (*coro.G)(gp.startarg)
+	ctx := (*runtimeContext)(coro.TaskLocal(task))
+	return ctx == gp.context && validCoroRuntimeTaskContext(task, ctx) && coro.RecoverTraceActive(task)
 }
 
 func BindCallerLocation(pc uintptr, rawName string) {

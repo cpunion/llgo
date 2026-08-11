@@ -18,6 +18,7 @@ package build
 
 import (
 	"bytes"
+	"fmt"
 	"go/types"
 	"regexp"
 	"strings"
@@ -117,19 +118,32 @@ func TestCoroProgramBootstrapFactoryV2MainReturnIsOnlyOnCoroMainContinuation(t *
 	targets[4] = coroProgramBootstrapFactoryTargetV2{Anchor: targets[3].Anchor}
 	factory := emitCoroProgramBootstrapFactoryV2(pkg, bootstrap, targets, finalHash, true)
 	body := pkg.Module().NamedFunction(factory.Name()).String()
-	if got := strings.Count(body, "call void @__llgo_coro_await_prepare_v1"); got != 3 {
+	if got := strings.Count(body, "call void @"+coroProgramAwaitPrepareHookV2); got != 3 {
 		t.Fatalf("coroutine-main await calls = %d, want 3:\n%s", got, body)
+	}
+	if got := strings.Count(body, "call i32 @"+coroProgramAwaitConsumeHookV1); got != 3 {
+		t.Fatalf("coroutine-main completion consumes = %d, want 3:\n%s", got, body)
+	}
+	for _, status := range []int{2, 3, 4, 6} {
+		if got := strings.Count(body, fmt.Sprintf("i32 %d, label", status)); got != 3 {
+			t.Fatalf("coroutine-main terminal status %d routes = %d, want 3:\n%s", status, got, body)
+		}
+	}
+	if got := strings.Count(body, "call void @"+coroProgramPanicPrepareHookV1); got != 1 {
+		t.Fatalf("coroutine-main panic propagation calls = %d, want 1:\n%s", got, body)
 	}
 	if got := strings.Count(body, "call void @"+coroProgramMainReturnSymbolV1); got != 1 {
 		t.Fatalf("coroutine-main return calls = %d, want 1:\n%s", got, body)
 	}
-	lastAwait := strings.LastIndex(body, "call void @__llgo_coro_await_prepare_v1")
+	lastAwait := strings.LastIndex(body, "call void @"+coroProgramAwaitPrepareHookV2)
 	lastDecision := strings.LastIndex(body, "call void @"+coroRunDecisionTakeSymbolV1)
 	mainReturn := strings.Index(body, "call void @"+coroProgramMainReturnSymbolV1)
-	complete := strings.Index(body, "call void @"+coroProgramCompletePrepareHookV1)
-	if lastAwait < 0 || lastDecision < 0 || mainReturn < 0 || complete < 0 ||
-		!(lastAwait < lastDecision && lastDecision < mainReturn && mainReturn < complete) {
+	if lastAwait < 0 || lastDecision < 0 || mainReturn < 0 ||
+		!(lastAwait < lastDecision && lastDecision < mainReturn) {
 		t.Fatalf("main-return cancellation is not on the normal post-await continuation:\n%s", body)
+	}
+	if got := strings.Count(body, "call void @"+coroProgramCompletePrepareHookV2); got != 1 {
+		t.Fatalf("bootstrap terminal completion calls = %d, want 1:\n%s", got, body)
 	}
 	assertCoroProgramZeroRunDecisionCalls(t, body, 4)
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
@@ -152,9 +166,11 @@ func TestCoroProgramBootstrapFactoryV2MainReturnFollowsPlainMain(t *testing.T) {
 	}
 	plainMain := strings.Index(body, "call void @\"example.com/program.main\"()")
 	mainReturn := strings.Index(body, "call void @"+coroProgramMainReturnSymbolV1)
-	complete := strings.Index(body, "call void @"+coroProgramCompletePrepareHookV1)
-	if plainMain < 0 || mainReturn < 0 || complete < 0 || !(plainMain < mainReturn && mainReturn < complete) {
+	if plainMain < 0 || mainReturn < 0 || plainMain >= mainReturn {
 		t.Fatalf("main-return cancellation is not on the normal post-plain-main continuation:\n%s", body)
+	}
+	if got := strings.Count(body, "call void @"+coroProgramCompletePrepareHookV2); got != 1 {
+		t.Fatalf("bootstrap terminal completion calls = %d, want 1:\n%s", got, body)
 	}
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify plain-main return factory: %v\n%s", err, pkg.Module().String())
@@ -270,8 +286,19 @@ func assertCoroProgramBootstrapFactoryPresplitV2(t *testing.T, ir, uintptrIR str
 	if body == "" {
 		t.Fatalf("mixed v2 bootstrap factory body is missing:\n%s", ir)
 	}
-	if got := strings.Count(body, "call void @__llgo_coro_await_prepare_v1"); got != 2 {
+	if got := strings.Count(body, "call void @"+coroProgramAwaitPrepareHookV2); got != 2 {
 		t.Fatalf("mixed v2 bootstrap await calls = %d, want 2:\n%s", got, body)
+	}
+	if got := strings.Count(body, "call i32 @"+coroProgramAwaitConsumeHookV1); got != 2 {
+		t.Fatalf("mixed v2 bootstrap completion consumes = %d, want 2:\n%s", got, body)
+	}
+	for _, status := range []int{2, 3, 4, 6} {
+		if got := strings.Count(body, fmt.Sprintf("i32 %d, label", status)); got != 2 {
+			t.Fatalf("mixed v2 bootstrap terminal status %d routes = %d, want 2:\n%s", status, got, body)
+		}
+	}
+	if got := strings.Count(body, "call void @"+coroProgramPanicPrepareHookV1); got != 1 {
+		t.Fatalf("mixed v2 bootstrap panic propagation calls = %d, want 1:\n%s", got, body)
 	}
 	if got := strings.Count(body, "call ptr %"); got != 2 {
 		t.Fatalf("mixed v2 bootstrap indirect child factory calls = %d, want 2:\n%s", got, body)
@@ -287,18 +314,22 @@ func assertCoroProgramBootstrapFactoryPresplitV2(t *testing.T, ir, uintptrIR str
 		"call ptr %",
 		"store i16 1",
 		"store i16 3",
-		"call void @__llgo_coro_await_prepare_v1",
+		"call void @"+coroProgramAwaitPrepareHookV2,
 		"call i8 @llvm.coro.suspend",
 		"call void @"+coroRunDecisionTakeSymbolV1,
+		"call i32 @"+coroProgramAwaitConsumeHookV1,
 		"call void @\"init$abitypes\"()",
 		"call void @runtime.init()",
 		"call ptr %",
-		"call void @__llgo_coro_await_prepare_v1",
+		"call void @"+coroProgramAwaitPrepareHookV2,
 		"call i8 @llvm.coro.suspend",
 		"call void @"+coroRunDecisionTakeSymbolV1,
+		"call i32 @"+coroProgramAwaitConsumeHookV1,
 		"call void @\"example.com/program.main\"()",
-		"call void @"+coroProgramCompletePrepareHookV1,
 	)
+	if got := strings.Count(body, "call void @"+coroProgramCompletePrepareHookV2); got != 1 {
+		t.Fatalf("mixed v2 bootstrap terminal completion calls = %d, want 1:\n%s", got, body)
+	}
 	assertCoroProgramZeroRunDecisionCalls(t, body, 3)
 }
 

@@ -104,10 +104,17 @@ func __llgo_coro_complete_prepare_v1(g, handle, header unsafe.Pointer) {
 //
 //export __llgo_coro_complete_prepare_v2
 func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status uint32) {
+	task := (*coro.G)(g)
+	frameHeader := (*coro.HeaderV1)(header)
+	completion := coro.CompletionStatus(status)
 	if !coro.PrepareCompleteStatus(
-		(*coro.G)(g), handle, (*coro.HeaderV1)(header), coro.CompletionStatus(status),
+		task, handle, frameHeader, completion,
 	) {
 		coroRuntimeAbort("invalid coroutine terminal completion handoff")
+	}
+	if completion == coro.CompletionGoexit && frameHeader.Parent == nil &&
+		task == &coroProgramGV1State && !coroProgramCommitMainGoexitV1(task) {
+		coroRuntimeAbort("invalid coroutine command-main Goexit handoff")
 	}
 }
 

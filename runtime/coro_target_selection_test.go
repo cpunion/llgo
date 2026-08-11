@@ -135,6 +135,7 @@ func TestCoroNativeFleetTargetBuildSelection(t *testing.T) {
 		"coro_native_fleet_reactor.go",
 		"coro_ready_distribution_fleet_llgo.go",
 		"coro_worker_completion_fleet_llgo.go",
+		"coro_worker_result_llgo.go",
 	} {
 		if !slices.Contains(pkg.GoFiles, required) {
 			t.Errorf("native fleet GoFiles lack %s: %v", required, pkg.GoFiles)

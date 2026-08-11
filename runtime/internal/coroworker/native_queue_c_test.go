@@ -57,12 +57,18 @@ uint32_t __llgo_coro_native_worker_complete_v1(
     uint32_t generation,
     uintptr_t r1,
     uintptr_t r2,
-    uintptr_t error) {
+    uintptr_t error,
+    uintptr_t fault,
+    uintptr_t fault_pc,
+    uintptr_t fault_target) {
     (void)source_slot;
     (void)generation;
     (void)r1;
     (void)r2;
     (void)error;
+    (void)fault;
+    (void)fault_pc;
+    (void)fault_target;
     return 0;
 }
 
@@ -76,7 +82,8 @@ static void *consume(void *unused) {
         }
         if (status != LLGO_CORO_WORKER_QUEUE_TAKE_JOB_V1 ||
             job.generation == 0 || job.generation > generation_count ||
-            job.function != 1 || job.argc != LLGO_CORO_WORKER_MAX_ARGS_V1) {
+            job.function != 1 || job.trace_target != 1 ||
+            job.argc != LLGO_CORO_WORKER_MAX_ARGS_V1) {
             return (void *)(uintptr_t)1;
         }
         /* OperationSourceWorker=5, route=1/2, local slot=1. */
@@ -105,6 +112,7 @@ static int submit(size_t reservation, uint32_t generation) {
         ((generation & 1) != 0 ? UINT32_C(1) : UINT32_C(2)) << 15;
     job.generation = generation;
     job.function = 1;
+    job.trace_target = 1;
     job.argc = LLGO_CORO_WORKER_MAX_ARGS_V1;
     for (uint32_t arg = 0; arg < LLGO_CORO_WORKER_MAX_ARGS_V1; ++arg) {
         job.args[arg] = ((uintptr_t)generation << 8) + arg;

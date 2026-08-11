@@ -244,6 +244,11 @@ func main() {
 		go func(target concurrentTarget, pc uintptr) {
 			defer wg.Done()
 			<-start
+			if targetPC := reflect.ValueOf(target.fn).Pointer(); targetPC != pc {
+				errc <- "bad target pc pairing: got " + strconv.FormatUint(uint64(pc), 10) +
+					" want " + strconv.FormatUint(uint64(targetPC), 10) + " for " + target.name
+				return
+			}
 			for j := 0; j < rounds; j++ {
 				fn := runtime.FuncForPC(pc)
 				if fn == nil || fn.Name() != target.name {
@@ -251,7 +256,7 @@ func main() {
 					if fn != nil {
 						name = fn.Name()
 					}
-					errc <- "bad target func: " + name
+					errc <- "bad target func: got " + name + " want " + target.name
 					return
 				}
 				if err := checkRuntimeInfo(); err != "" {

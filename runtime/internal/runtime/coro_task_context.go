@@ -143,7 +143,7 @@ func coroReleaseRuntimeContext(task *coro.G) bool {
 	gp.m = nil
 	root := ctx.root
 	ctx.root = nil
-	releaseG()
+	releaseGAndCheckDeadlock()
 	FreeRoot(root)
 	return true
 }

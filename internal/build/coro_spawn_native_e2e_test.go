@@ -132,7 +132,11 @@ func Check() int32 {
 
 const coroChannelNativeE2ERuntimeShim = `package runtime
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/coro"
+)
 
 const maxAlloc = ^uintptr(0) >> 1
 
@@ -219,6 +223,11 @@ func AllocRoot(size uintptr) unsafe.Pointer { return AllocU(size) }
 func FreeRoot(unsafe.Pointer)
 
 func fatal(message string) { coroRuntimeAbort(message) }
+
+// The closed scheduler islands deliberately omit the caller/symbolization
+// closure. A foreign hardware fault therefore remains fail-closed here; full
+// runtime acceptance tests exercise StoreCoroWorkerFaultPCs itself.
+func StoreCoroWorkerFaultPCs(*coro.G, uintptr, uintptr) bool { return false }
 
 // libc rand returns C int. Keep this fixture ABI identical to every other
 // declaration of the shared physical symbol, then perform the Go uint32
@@ -773,6 +782,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_physical_thread_capacity_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_result_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_program_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_keyed_registry_atomic_llgo.go"),
@@ -792,6 +802,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_ready_distribution_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_target_executor_retired_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_program_llgo.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_result_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_nil_fault.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_panic_payload.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_panic_trace_release.go")

@@ -587,23 +587,33 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 				t.Fatalf("compiler-owned mixed v2 bootstrap factory is missing:\n%s", ir)
 			}
 			factoryBody := factory.String()
-			if got := strings.Count(factoryBody, "call void @__llgo_coro_await_prepare_v1"); got != 2 {
+			if got := strings.Count(factoryBody, "call void @"+coroProgramAwaitPrepareHookV2); got != 2 {
 				t.Fatalf("mixed v2 main-module factory await calls = %d, want 2:\n%s", got, factoryBody)
+			}
+			if got := strings.Count(factoryBody, "call i32 @"+coroProgramAwaitConsumeHookV1); got != 2 {
+				t.Fatalf("mixed v2 main-module factory completion consumes = %d, want 2:\n%s", got, factoryBody)
+			}
+			if got := strings.Count(factoryBody, "i32 6, label"); got != 2 {
+				t.Fatalf("mixed v2 main-module factory Goexit routes = %d, want 2:\n%s", got, factoryBody)
 			}
 			if got := strings.Count(factoryBody, "call void @"+coroProgramMainReturnSymbolV1); got != 1 {
 				t.Fatalf("mixed v2 main-module main-return calls = %d, want 1:\n%s", got, factoryBody)
 			}
 			assertInOrder(t, factoryBody,
 				"call ptr %",
-				"call void @__llgo_coro_await_prepare_v1",
+				"call void @"+coroProgramAwaitPrepareHookV2,
+				"call i32 @"+coroProgramAwaitConsumeHookV1,
 				"call void @\"init$abitypes\"()",
 				"call void @runtime.init()",
 				"call ptr %",
-				"call void @__llgo_coro_await_prepare_v1",
+				"call void @"+coroProgramAwaitPrepareHookV2,
+				"call i32 @"+coroProgramAwaitConsumeHookV1,
 				"call void @\"example.com/foo.main\"()",
 				"call void @"+coroProgramMainReturnSymbolV1,
-				"call void @"+coroProgramCompletePrepareHookV1,
 			)
+			if got := strings.Count(factoryBody, "call void @"+coroProgramCompletePrepareHookV2); got != 1 {
+				t.Fatalf("mixed v2 main-module terminal completion calls = %d, want 1:\n%s", got, factoryBody)
+			}
 
 			entryBody := mod.NamedFunction(test.entryName).String()
 			for _, legacyCall := range []string{

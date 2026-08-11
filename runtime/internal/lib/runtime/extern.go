@@ -24,6 +24,28 @@ func callerLocation(file string, line int) (string, int) {
 //go:noinline
 func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 	ensureRuntimePCLN()
+	// A visible panic snapshot overlays the ordinary stack. It must be spliced
+	// before consulting the compiler shadow stack; the latter is intentionally
+	// non-empty for stackless coroutines but cannot contain frames already
+	// removed by panic propagation or a C-worker fault landing.
+	if len(panicSplicePCs()) != 0 {
+		var pcs [1]uintptr
+		count := 0
+		if rtdebug.CoroPanicRecoverActive() {
+			var current [128]uintptr
+			if n := rtdebug.Callers(0, current[:]); n > 0 {
+				count = copyPanicSplicedCallers(current[:n], skip+1, pcs[:])
+			}
+		} else if fpUnwindAvailable() {
+			count = callersWithPanicSplice(skip+1, pcs[:])
+		}
+		if count >= 1 {
+			pc = pcs[0] - 1
+			sym := frameSymbol(pc)
+			file, line = callerLocation(sym.file, sym.line)
+			return pc, file, line, true
+		}
+	}
 	if frame, ok := rtdebug.Caller(skip); ok {
 		file, line = callerLocation(frame.File, frame.Line)
 		return frame.PC, file, line, true
@@ -52,6 +74,20 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 //go:noinline
 func Callers(skip int, pc []uintptr) int {
 	ensureRuntimePCLN()
+	if len(panicSplicePCs()) != 0 {
+		n := 0
+		if rtdebug.CoroPanicRecoverActive() {
+			var current [128]uintptr
+			if currentN := rtdebug.Callers(0, current[:]); currentN > 0 {
+				n = copyPanicSplicedCallers(current[:currentN], skip, pc)
+			}
+		} else if fpUnwindAvailable() {
+			n = callersWithPanicSplice(skip, pc)
+		}
+		if n > 0 {
+			return n
+		}
+	}
 	if n := rtdebug.Callers(skip, pc); n > 0 {
 		return n
 	}
@@ -68,15 +104,14 @@ func callers(skip int, pc []uintptr) int {
 		return 0
 	}
 	n := 0
-	clitedebug.StackTrace(skip, func(fr *clitedebug.Frame) bool {
+	for _, fr := range clitedebug.StackFrames(skip) {
 		if n >= len(pc) {
-			return false
+			break
 		}
 		pc[n] = fr.PC
 		recordFrameSymbol(fr.PC, fr.Offset, fr.Name)
 		rtdebug.BindCallerLocation(fr.PC, fr.Name)
 		n++
-		return true
-	})
+	}
 	return n
 }

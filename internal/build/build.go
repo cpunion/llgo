@@ -5354,21 +5354,23 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		if name == coroOSThreadForeignCallSymbolV1 {
 			sig := fn.Signature
 			valid := sig != nil && sig.Recv() == nil && !sig.Variadic() &&
-				sig.Params().Len() == 15 && sig.Results().Len() == 0 &&
+				sig.Params().Len() == 16 && sig.Results().Len() == 1 &&
 				types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) &&
 				types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uintptr]) &&
-				types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uint32])
-			for index := 3; valid && index < 12; index++ {
+				types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uintptr]) &&
+				types.Identical(sig.Params().At(3).Type(), types.Typ[types.Uint32]) &&
+				types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32])
+			for index := 4; valid && index < 13; index++ {
 				valid = types.Identical(sig.Params().At(index).Type(), types.Typ[types.Uintptr])
 			}
 			wordPointer := types.NewPointer(types.Typ[types.Uintptr])
-			for index := 12; valid && index < 15; index++ {
+			for index := 13; valid && index < 16; index++ {
 				valid = types.Identical(sig.Params().At(index).Type(), wordPointer)
 			}
 			if !valid || typeParamLen(sig.TypeParams()) != 0 ||
 				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf(
-					"coroutine locked-thread foreign ABI %q must have exact func(unsafe.Pointer, uintptr, uint32, [9]uintptr, *uintptr, *uintptr, *uintptr) signature",
+					"coroutine locked-thread foreign ABI %q must have exact func(unsafe.Pointer, uintptr, uintptr, uint32, [9]uintptr, *uintptr, *uintptr, *uintptr) uint32 signature",
 					name,
 				)
 			}
@@ -5493,16 +5495,16 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		}
 		if name == coroNativeWorkerCompleteSymbolV1 {
 			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 5 || sig.Results().Len() != 1 ||
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 8 || sig.Results().Len() != 1 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uint32]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uint32]) ||
 				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine native worker completion %q must have exact func(uint32, uint32, uintptr, uintptr, uintptr) uint32 signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine native worker completion %q must have exact func(uint32, uint32, [6]uintptr) uint32 signature", name)
 			}
 			for parameter := 2; parameter < sig.Params().Len(); parameter++ {
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uintptr]) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine native worker completion %q must have exact func(uint32, uint32, uintptr, uintptr, uintptr) uint32 signature", name)
+					return nil, nil, nil, nil, fmt.Errorf("coroutine native worker completion %q must have exact func(uint32, uint32, [6]uintptr) uint32 signature", name)
 				}
 			}
 		}

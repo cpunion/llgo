@@ -256,6 +256,11 @@ func coroReleaseCompletedTask(g *coroG) bool {
 	return true
 }
 
+// The source island has no process-wide G registry. Production main-Goexit
+// accounting is covered by proc_atomic tests; this adapter only needs the
+// lifecycle transition to remain link-complete.
+func markMainExited() {}
+
 func (driver *coroProgramTestDriverV1) ownsSpawnedTask(g *coro.G) bool {
 	if driver == nil || g == nil {
 		return false
@@ -1760,6 +1765,78 @@ func TestCoroProgramAsyncTerminalPanicContinuesAfterJoin(t *testing.T) {
 	runtime.KeepAlive(dataWord)
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramSliceV2AsyncTerminalPanicContinuesAfterJoin(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	coroProgramTestTargetV1State.mode = coroProgramTestTargetAsyncV1
+	manifest := newCoroProgramTestManifestV2()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin V2 asynchronous panic program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	typeWord, dataWord := new(byte), new(byte)
+	driver := &coroProgramTestDriverV1{
+		t:             t,
+		frame:         frame,
+		panicOnResume: true,
+		panicTypeWord: unsafe.Pointer(typeWord),
+		panicDataWord: unsafe.Pointer(dataWord),
+	}
+	activeCoroProgramDriver = driver
+	var result coroProgramRunResultV2
+	status := coroProgramRunSliceV2(gPointer, frame.handle, 64, &result)
+	if status != uint32(coroProgramDriveSuspendedV2) ||
+		result.Flags != coroProgramRunBlockedV2 ||
+		result.ExecutorSlot == 0 || result.ExecutorGeneration == 0 || result.Epoch == 0 ||
+		result.DeadlineLo != 0 || result.DeadlineHi != 0 || result.Reserved != 0 {
+		t.Fatalf("initial V2 asynchronous panic drive = status:%d result:%+v", status, result)
+	}
+	epoch := result.Epoch
+	coroProgramTestTargetV1State.joined = true
+	status = coroProgramContinueSliceV2(
+		result.ExecutorSlot,
+		result.ExecutorGeneration,
+		epoch,
+		64,
+		&result,
+	)
+	if status != uint32(coroProgramDrivePanicV2) ||
+		result.Flags != 0 || result.ExecutorSlot != 0 || result.ExecutorGeneration != 0 ||
+		result.Epoch != 0 || result.DeadlineLo != 0 || result.DeadlineHi != 0 || result.Reserved != 0 {
+		t.Fatalf("joined V2 asynchronous panic continuation = status:%d result:%+v", status, result)
+	}
+	record, published := coro.LoadPanicRecord(&coroProgramGV1State)
+	if !published || record.TypeWord != unsafe.Pointer(typeWord) || record.DataWord != unsafe.Pointer(dataWord) ||
+		coroProgramLifecycleV1State != coroProgramFailedV1 || coroProgramExecutorBoundV1State ||
+		coroProgramContinuationV1State != coroProgramContinuationNoneV1 ||
+		coroProgramExecutorDriverV1State != (coro.ExecutorDriver{}) ||
+		!coroProgramExecutorRegistryV1State.CanRelease() ||
+		!coroProgramDriveAdmissionV1State.CanRelease() {
+		t.Fatalf("V2 asynchronous panic completion = record:(%+v,%t) lifecycle:%d bound:%t admission:%t",
+			record, published, coroProgramLifecycleV1State, coroProgramExecutorBoundV1State,
+			coroProgramDriveAdmissionV1State.CanRelease())
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramCompatibilityPreservesStableReturnBoundary(t *testing.T) {
+	want := coroRunResultV1{
+		stop:       coroRunAgainV1,
+		used:       4,
+		sources:    1,
+		dispatches: 1,
+		resumes:    1,
+		destroys:   1,
+	}
+	if got := coroFinishRunSliceCompatibility(nil, nil, nil, want); got != want {
+		t.Fatalf("stable physical-owner return boundary = %+v, want %+v", got, want)
+	}
 }
 
 func TestCoroProgramExplicitPanicHookRejectsInvalidPhysicalG(t *testing.T) {

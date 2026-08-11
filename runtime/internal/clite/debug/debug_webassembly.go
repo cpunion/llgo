@@ -46,6 +46,12 @@ func StackTrace(skip int, fn func(fr *Frame) bool) {
 	// coroutine frames are reported by the runtime metadata path instead.
 }
 
+func StackFrames(skip int) []Frame {
+	// Native frame walking is not meaningful for stackless wasm. Logical
+	// coroutine frames are reported by the runtime metadata path instead.
+	return nil
+}
+
 func PrintStack(skip int) {
 	print_stack(c.Int(skip + 4))
 }

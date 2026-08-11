@@ -23,7 +23,7 @@ import (
 
 func TestJobMatchesCWorkerQueuePODLayout(t *testing.T) {
 	pointer := unsafe.Sizeof(uintptr(0))
-	wantArgs := uintptr(8) + pointer + uintptr(4)
+	wantArgs := uintptr(8) + 2*pointer + uintptr(4)
 	if remainder := wantArgs % uintptr(unsafe.Alignof(uintptr(0))); remainder != 0 {
 		wantArgs += uintptr(unsafe.Alignof(uintptr(0))) - remainder
 	}
@@ -34,12 +34,14 @@ func TestJobMatchesCWorkerQueuePODLayout(t *testing.T) {
 	if unsafe.Offsetof(Job{}.SourceSlot) != 0 ||
 		unsafe.Offsetof(Job{}.Generation) != 4 ||
 		unsafe.Offsetof(Job{}.Function) != 8 ||
-		unsafe.Offsetof(Job{}.Argc) != uintptr(8)+pointer ||
+		unsafe.Offsetof(Job{}.TraceTarget) != uintptr(8)+pointer ||
+		unsafe.Offsetof(Job{}.Argc) != uintptr(8)+2*pointer ||
 		unsafe.Offsetof(Job{}.Args) != wantArgs ||
 		unsafe.Sizeof(Job{}) != wantSize {
-		t.Fatalf("Job C ABI layout = size %d source %d generation %d function %d argc %d args %d",
+		t.Fatalf("Job C ABI layout = size %d source %d generation %d function %d trace %d argc %d args %d",
 			unsafe.Sizeof(Job{}), unsafe.Offsetof(Job{}.SourceSlot),
 			unsafe.Offsetof(Job{}.Generation), unsafe.Offsetof(Job{}.Function),
+			unsafe.Offsetof(Job{}.TraceTarget),
 			unsafe.Offsetof(Job{}.Argc), unsafe.Offsetof(Job{}.Args))
 	}
 }

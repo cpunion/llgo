@@ -80,6 +80,11 @@ const (
 	coroProgramUnusedV1 coroProgramLifecycleV1 = iota
 	coroProgramBegunV1
 	coroProgramRunningV1
+	// coroProgramMainGoexitV1 keeps the command executor alive after the main
+	// logical G has completed through runtime.Goexit. Unlike normal main return,
+	// background goroutines are not canceled: the last registered G owns the
+	// standard main-Goexit deadlock decision.
+	coroProgramMainGoexitV1
 	coroProgramMainReturnRequestedV1
 	coroProgramStoppingV1
 	coroProgramCompleteV1
@@ -158,6 +163,8 @@ func (policy coroRunPolicyV1) commandState() (running, returnRequested, ok bool)
 	}
 	switch *policy.lifecycle {
 	case coroProgramRunningV1:
+		return true, false, true
+	case coroProgramMainGoexitV1:
 		return true, false, true
 	case coroProgramMainReturnRequestedV1:
 		return false, true, true

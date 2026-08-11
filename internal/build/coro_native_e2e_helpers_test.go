@@ -33,6 +33,7 @@ func coroNativeTaskContextRuntimeSources() []string {
 		filepath.Join(root, "runtime_context.go"),
 		filepath.Join(root, "runtime2.go"),
 		filepath.Join(root, "proc_atomic.go"),
+		filepath.Join(root, "proc_release.go"),
 		filepath.Join(root, "g_pthread.go"),
 		filepath.Join(root, "local_context.go"),
 	}

@@ -47,11 +47,20 @@ func TestRecoverDirectDeferredChildTakesPayloadOnce(t *testing.T) {
 	if !valid || !recovered || snapshot != want {
 		t.Fatalf("take direct recover = (%+v, %t, %t), want (%+v, true, true)", snapshot, recovered, valid, want)
 	}
+	if !RecoverTraceActive(fixture.g) {
+		t.Fatal("direct recover did not expose its logical traceback scope")
+	}
 	if duplicate, recovered, valid := TakeRecover(fixture.g, fixture.child.handle); !valid || recovered || duplicate != (RecoverSnapshot{}) {
 		t.Fatalf("duplicate recover = (%+v, %t, %t)", duplicate, recovered, valid)
 	}
+	if !RecoverTraceActive(fixture.g) {
+		t.Fatal("duplicate recover cleared the winning traceback scope")
+	}
 
 	completeRecoverChild(t, fixture)
+	if RecoverTraceActive(fixture.g) {
+		t.Fatal("completed recovering child retained its traceback scope")
+	}
 	completion, ok := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle)
 	if !ok || completion != (CompletionSnapshot{Status: CompletionReturnRecovered}) {
 		t.Fatalf("consume recovered child return = (%+v, %t)", completion, ok)

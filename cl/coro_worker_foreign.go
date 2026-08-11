@@ -1254,6 +1254,12 @@ func (p *context) compileCoroWorkerForeignTransaction(
 	p.compileCoroWorkerWordCall(
 		b,
 		b.Convert(p.prog.Uintptr(), thunk.Expr),
+		func() llssa.Expr {
+			if dynamic {
+				return b.Convert(p.prog.Uintptr(), callee)
+			}
+			return b.Convert(p.prog.Uintptr(), target.Expr)
+		}(),
 		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
 		keepaliveSlots,
 		nil,

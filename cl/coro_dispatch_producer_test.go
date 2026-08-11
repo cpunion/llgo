@@ -604,6 +604,7 @@ func TestCoroDynamicDispatchProducerCoroThunkDropsNilEnvironment(t *testing.T) {
 		Flags:     llssa.CoroDispatchFlagHasCoro | llssa.CoroDispatchFlagNoCapture,
 		Signature: logical,
 		CoroEntry: thunkExpr,
+		CodeEntry: target.Expr,
 		Result:    prog.Type(resultSlot, llssa.InC),
 	})
 	producerSig := types.NewSignatureType(
@@ -696,6 +697,7 @@ func TestCoroDynamicDispatchProducerCapturedCoroThunkInsertsEnvironment(t *testi
 		Flags:     llssa.CoroDispatchFlagHasCoro,
 		Signature: logical,
 		CoroEntry: thunkExpr,
+		CodeEntry: target.Expr,
 		Result:    prog.Type(resultSlot, llssa.InC),
 	})
 

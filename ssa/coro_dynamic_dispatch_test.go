@@ -55,8 +55,8 @@ func TestCoroDynamicDispatchV1LLVM19CapturedCoroAndDualEntries(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			initializer := test.descriptor.impl.Initializer()
-			if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 8 {
-				t.Fatalf("descriptor is not the shared eight-field constant: %v", initializer)
+			if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 9 {
+				t.Fatalf("descriptor is not the shared nine-field constant: %v", initializer)
 			}
 			if got := initializer.Operand(1).ZExtValue(); got != test.flags {
 				t.Fatalf("flags = %#x, want %#x", got, test.flags)
@@ -78,6 +78,10 @@ func TestCoroDynamicDispatchV1LLVM19CapturedCoroAndDualEntries(t *testing.T) {
 			}
 			if got, want := initializer.Operand(7).ZExtValue(), prog.AlignOf(fixture.result); got != want {
 				t.Fatalf("result align = %d, want %d", got, want)
+			}
+			code := coroPlainDispatchFunction(initializer.Operand(8))
+			if code.IsNil() || code.C != fixture.coroEntry.impl.C {
+				t.Fatalf("code identity = %v, want %s", code, fixture.coroEntry.Name())
 			}
 		})
 	}
@@ -309,6 +313,7 @@ func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
 		ABIHash:    hash,
 		Signature:  signature,
 		PlainEntry: entry.Expr,
+		CodeEntry:  entry.Expr,
 		Result:     result,
 	})
 	callerSignature := types.NewSignatureType(
@@ -454,6 +459,7 @@ func (f *coroDynamicDispatchTestFixture) descriptorOptions(flags uint32) CoroDis
 		Flags:     flags,
 		ABIHash:   f.hash,
 		Signature: f.signature,
+		CodeEntry: f.coroEntry.Expr,
 		Result:    f.result,
 	}
 	if flags&CoroDispatchFlagHasPlain != 0 {

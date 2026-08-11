@@ -1212,6 +1212,7 @@ func (p *context) emitCoroDynamicDispatchValue(
 			Signature:  abi.signature,
 			PlainEntry: plainEntry,
 			CoroEntry:  coroEntry,
+			CodeEntry:  physical.Expr,
 			Result:     result,
 		})
 		if p.coroPlainDescriptors == nil {

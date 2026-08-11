@@ -184,7 +184,7 @@ func TestVerifyCoroAtomicCostModuleAcceptsConstantMemoryIntrinsic(t *testing.T) 
 	}
 }
 
-func TestVerifyCoroAtomicCostModuleAcceptsFixedIntegerMinMaxIntrinsics(t *testing.T) {
+func TestVerifyCoroAtomicCostModuleAcceptsFixedIntegerIntrinsics(t *testing.T) {
 	ctx, module := newCoroAtomicCostTestModule(t)
 	integerType := ctx.Int64Type()
 	functionType := llvm.FunctionType(integerType, []llvm.Type{integerType, integerType}, false)
@@ -199,6 +199,9 @@ func TestVerifyCoroAtomicCostModuleAcceptsFixedIntegerMinMaxIntrinsics(t *testin
 			value, function.Param(1),
 		}, "")
 	}
+	value = builder.CreateIntrinsic(integerType, llvm.LookupIntrinsicID("llvm.abs"), []llvm.Value{
+		value, llvm.ConstInt(ctx.Int1Type(), 0, false),
+	}, "")
 	builder.CreateRet(value)
 	addCoroAtomicCostTestMetadata(ctx, module, function.Name())
 
@@ -206,8 +209,31 @@ func TestVerifyCoroAtomicCostModuleAcceptsFixedIntegerMinMaxIntrinsics(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Functions) != 1 || report.Functions[0].LLVMMaxCost < 4 {
-		t.Fatalf("fixed integer min/max report = %+v", report)
+	if len(report.Functions) != 1 || report.Functions[0].LLVMMaxCost < 5 {
+		t.Fatalf("fixed integer intrinsic report = %+v", report)
+	}
+}
+
+func TestVerifyCoroAtomicCostModuleRejectsMalformedIntegerAbsIntrinsic(t *testing.T) {
+	ctx, module := newCoroAtomicCostTestModule(t)
+	i32 := ctx.Int32Type()
+	functionType := llvm.FunctionType(i32, []llvm.Type{i32}, false)
+	function := llvm.AddFunction(module, "pkg.atomic", functionType)
+	malformedType := llvm.FunctionType(i32, []llvm.Type{i32, i32}, false)
+	malformed := llvm.AddFunction(module, "llvm.abs.i32", malformedType)
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	entry := ctx.AddBasicBlock(function, "entry")
+	builder.SetInsertPointAtEnd(entry)
+	value := builder.CreateCall(malformedType, malformed, []llvm.Value{
+		function.Param(0), llvm.ConstInt(i32, 0, false),
+	}, "")
+	builder.CreateRet(value)
+	addCoroAtomicCostTestMetadata(ctx, module, function.Name())
+
+	_, err := VerifyCoroAtomicCostModule(module)
+	if err == nil || !strings.Contains(err.Error(), "calls uncertified helper") {
+		t.Fatalf("malformed integer abs error = %v", err)
 	}
 }
 

@@ -32,7 +32,8 @@ func TestCoroImplicitFaultContract(t *testing.T) {
 	cmd := exec.Command(
 		"go", "test",
 		"-tags=coro_nil_fault_adapter_test",
-		"coro_nil_fault.go", "coro_nil_fault_test.go",
+		"coro_nil_fault.go", "coro_panic_trace_release_test_adapter.go",
+		"coro_nil_fault_test.go",
 		"-run", "^TestCoro.*Fault",
 		"-count=1",
 	)

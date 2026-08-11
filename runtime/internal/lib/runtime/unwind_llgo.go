@@ -52,7 +52,7 @@ func panicSplicePCs() []uintptr {
 	if len(pcs) == 0 {
 		return nil
 	}
-	if rtdebug.PanicActive() {
+	if rtdebug.PanicActive() || rtdebug.CoroPanicRecoverActive() {
 		return pcs
 	}
 	mark, _ := rtdebug.PanicRecoverFPs()
@@ -136,14 +136,22 @@ func spliceCallers(cur []uintptr) []uintptr {
 	// defer and panic share a frame). Everything from there down is
 	// replaced by the whole snapshot: it already contains the owner and its
 	// callers, with the owner's pc on the panic path instead of the longjmp
-	// resume site.
+	// resume site. Native stacks normally share an entry address. Stackless
+	// frames use compiler-interned logical PCs, so their source identity may
+	// have a different entry from the live CoroSplit resume function; in that
+	// case the canonical function name is the stable cross-representation key.
 	for i := 0; i < len(cur); i++ {
-		entry := frameSymbol(cur[i] - 1).entry
-		if entry == 0 {
+		live := frameSymbol(cur[i] - 1)
+		if live.entry == 0 && live.function == "" {
 			continue
 		}
 		for j := 0; j < len(snap); j++ {
-			if frameSymbol(snap[j]-1).entry == entry {
+			saved := frameSymbol(snap[j] - 1)
+			sameEntry := live.entry != 0 && saved.entry == live.entry
+			sameFunction := live.function != "" && saved.function == live.function
+			sameSource := live.file != "" && saved.file == live.file &&
+				live.line > 0 && saved.line == live.line
+			if sameEntry || sameFunction || sameSource {
 				out := make([]uintptr, 0, i+len(snap))
 				out = append(out, cur[:i]...)
 				out = append(out, snap...)
@@ -154,12 +162,28 @@ func spliceCallers(cur []uintptr) []uintptr {
 	return cur
 }
 
-// callersWithPanicSplice is Callers with panic-frame splicing. With no
-// snapshot stored (the overwhelmingly common case) it degrades to the
-// plain walk at the cost of one TLS load. Otherwise the raw walk runs
-// unskipped so splicing sees the junction frame, then the requested skip
-// applies to the spliced view (matching gc, whose skip counts the logical
-// panic-inclusive stack).
+// copyPanicSplicedCallers applies skip only after constructing the complete
+// logical panic-inclusive view. cur is a native FP walk for legacy execution
+// and the compiler shadow stack for a stackless recovered coroutine.
+func copyPanicSplicedCallers(cur []uintptr, skip int, pc []uintptr) int {
+	if len(pc) == 0 {
+		return 0
+	}
+	view := spliceCallers(cur)
+	if skip < 0 {
+		skip = 0
+	}
+	if skip >= len(view) {
+		return 0
+	}
+	return copy(pc, view[skip:])
+}
+
+// callersWithPanicSplice is the legacy/native Callers overlay. The raw FP
+// walk runs unskipped so splicing sees the junction frame, then the requested
+// skip applies to the rebuilt view. Stackless callers supply their shadow
+// stack directly from extern.go because entering this helper before capture
+// would add the helper itself to that logical stack.
 //
 //go:noinline
 func callersWithPanicSplice(skip int, pc []uintptr) int {
@@ -175,14 +199,7 @@ func callersWithPanicSplice(skip int, pc []uintptr) int {
 	if n <= 0 {
 		return 0
 	}
-	view := spliceCallers(raw[:n])
-	if skip < 0 {
-		skip = 0
-	}
-	if skip >= len(view) {
-		return 0
-	}
-	return copy(pc, view[skip:])
+	return copyPanicSplicedCallers(raw[:n], skip, pc)
 }
 
 func hasPrefix(s, prefix string) bool {

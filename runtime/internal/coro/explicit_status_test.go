@@ -360,6 +360,52 @@ func TestExplicitPanicRetainsDescriptorTraceDeepestToRoot(t *testing.T) {
 	}
 }
 
+func TestActiveTraceFrameUsesCurrentCompilerDescriptor(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 1)
+	frame := fixture.frames[0]
+	descriptor := &FrameDescriptorV1{
+		Version:  1,
+		Function: "main.viaGo",
+		File:     "/src/main.go",
+	}
+	metadata := FrameFromStorage(frame.storage)
+	metadata.descriptor = unsafe.Pointer(descriptor)
+	frame.descriptor = unsafe.Pointer(descriptor)
+	frame.header.Descriptor = unsafe.Pointer(descriptor)
+	frame.header.Line = 17
+
+	want := PanicTraceFrameSnapshot{
+		Function: "main.viaGo",
+		File:     "/src/main.go",
+		Line:     17,
+	}
+	if got, ok := ActiveTraceFrame(fixture.g); !ok || got != want {
+		t.Fatalf("active trace frame = (%+v, %t), want %+v", got, ok, want)
+	}
+	frame.header.SuspendReason = uint16(SuspendPark)
+	frame.header.Lifecycle = uint16(FrameSuspended)
+	if got, ok := ActiveTraceFrame(fixture.g); !ok || got != want {
+		t.Fatalf("park-resume trace frame = (%+v, %t), want %+v", got, ok, want)
+	}
+	frame.header.SuspendReason = uint16(SuspendNone)
+	if got, ok := ActiveTraceFrame(fixture.g); ok || got != (PanicTraceFrameSnapshot{}) {
+		t.Fatalf("incoherent active trace header accepted: %+v", got)
+	}
+	frame.header.Lifecycle = uint16(FrameActive)
+
+	descriptor.Flags = FrameDescriptorTraceHiddenV1
+	want.Hidden = true
+	if got, ok := ActiveTraceFrame(fixture.g); !ok || got != want {
+		t.Fatalf("hidden active trace frame = (%+v, %t), want %+v", got, ok, want)
+	}
+	descriptor.Flags |= 1 << 31
+	if got, ok := ActiveTraceFrame(fixture.g); ok || got != (PanicTraceFrameSnapshot{}) {
+		t.Fatalf("invalid active trace descriptor accepted: %+v", got)
+	}
+	runtime.KeepAlive(descriptor)
+	runtime.KeepAlive(frame.memory)
+}
+
 func TestTerminalReplacementStagesDifferentPayloadTraceForRelease(t *testing.T) {
 	fixture := newExplicitPanicFixture(t, 1)
 	oldType, oldData := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))

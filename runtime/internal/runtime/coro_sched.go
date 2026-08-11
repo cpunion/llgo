@@ -105,7 +105,7 @@ func coroFinishRunSliceCompatibility(
 	result coroRunResultV1,
 ) coroRunResultV1 {
 	switch result.stop {
-	case coroRunSliceBudgetV1, coroRunPanicCompleteV1:
+	case coroRunSliceBudgetV1, coroRunPanicCompleteV1, coroRunAgainV1:
 		return result
 	case coroRunExecutionWaitV1:
 		if !coroTargetWaitManagedExecutionV1(driver) {
@@ -145,9 +145,14 @@ func coroFinishRunSliceCompatibility(
 			result.g = main
 			return result
 		}
-		if !coro.HasWaiting(p) {
+		if !coro.HasWaiting(p) && coroProgramLifecycleV1State != coroProgramMainGoexitV1 {
 			return coroRunResultV1{}
 		}
+		// Once command main has Goexited, every remaining G may be executing in
+		// another fleet domain. An empty adopted P is therefore a legitimate
+		// remote-work wait, not program completion or scheduler corruption. The
+		// runnable demand below lets a peer return work here; if the peer instead
+		// terminates, its runtime-context release owns the last-G deadlock report.
 		if !coroTargetRequestProgramRunnableV1(p, driver) {
 			return coroRunResultV1{}
 		}
@@ -172,7 +177,21 @@ func coroFinishRunSliceCompatibility(
 		result.stop = coroRunAgainV1
 		return result
 	case coroRunDestroyCommitV1:
-		next, committed := coro.CommitDestroyedReceiptCompatibility(p, result.g, result.action)
+		var next coro.Action
+		var committed bool
+		if result.g == main && coroProgramLifecycleV1State == coroProgramMainGoexitV1 {
+			// A command root which ended through Goexit is no longer runnable, but
+			// its executor remains the event/routing domain for background Gs. The
+			// ordinary domain commit finalizes only this G and deliberately avoids
+			// the last-local-root terminal-close transaction.
+			next, committed = coro.CommitExecutorRunDomainDestroy(
+				driver,
+				result.g,
+				result.action,
+			)
+		} else {
+			next, committed = coro.CommitDestroyedReceiptCompatibility(p, result.g, result.action)
+		}
 		if !committed {
 			return coroRunResultV1{}
 		}

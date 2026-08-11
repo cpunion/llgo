@@ -1139,13 +1139,14 @@ func (v Value) Pointer() uintptr {
 			// match the one used in makeMethodValue.
 			//			return methodValueCallCodePtr()
 			_, _, fn := methodReceiver("unsafePointer", v, int(v.flag)>>flagMethodShift)
-			return uintptr(fn)
+			return uintptr(functionCodePointer(fn))
 		}
 		p := v.pointer()
-		// Non-nil func value points at data block.
-		// First word of data block is actual code.
+		// Non-nil func value points at its physical two-word carrier. In the
+		// stackless profile the first word is a descriptor whose CodeEntry is
+		// compiler-injected; other profiles retain the direct code word.
 		if p != nil && v.typ_.IsClosure() {
-			p = *(*unsafe.Pointer)(p)
+			p = functionCodePointer(*(*unsafe.Pointer)(p))
 		}
 		return uintptr(p)
 
@@ -1761,13 +1762,14 @@ func (v Value) UnsafePointer() unsafe.Pointer {
 			// so their Pointers are equal. The function used here must
 			// match the one used in makeMethodValue.
 			_, _, fn := methodReceiver("unsafePointer", v, int(v.flag)>>flagMethodShift)
-			return fn
+			return functionCodePointer(fn)
 		}
 		p := v.pointer()
-		// Non-nil func value points at data block.
-		// First word of data block is actual code.
+		// Non-nil func value points at its physical two-word carrier. In the
+		// stackless profile the first word is a descriptor whose CodeEntry is
+		// compiler-injected; other profiles retain the direct code word.
 		if p != nil && v.typ_.IsClosure() {
-			p = *(*unsafe.Pointer)(p)
+			p = functionCodePointer(*(*unsafe.Pointer)(p))
 		}
 		return p
 

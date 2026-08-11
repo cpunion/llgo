@@ -60,7 +60,10 @@ type Frame struct {
 	Name   string
 }
 
-func StackTrace(skip int, fn func(fr *Frame) bool) {
+// StackFrames snapshots native frames without invoking managed code while the
+// native stack walker is active. Callers on raw runtime paths can consume the
+// returned values with ordinary static Go calls.
+func StackFrames(skip int) []Frame {
 	const (
 		initialCapacity = 64
 		maximumCapacity = 16 * 1024
@@ -76,9 +79,20 @@ func StackTrace(skip int, fn func(fr *Frame) bool) {
 		}
 		capacity *= 2
 	}
+	frames := make([]Frame, len(snapshot))
 	for i := range snapshot {
 		raw := &snapshot[i]
-		if !fn(&Frame{uintptr(raw.pc), raw.offset, raw.sp, c.GoString(raw.name)}) {
+		frames[i] = Frame{uintptr(raw.pc), raw.offset, raw.sp, c.GoString(raw.name)}
+	}
+	return frames
+}
+
+func StackTrace(skip int, fn func(fr *Frame) bool) {
+	// Account for this compatibility wrapper when asking StackFrames to skip
+	// its caller. The callback runs only after the native snapshot is complete.
+	frames := StackFrames(skip + 1)
+	for i := range frames {
+		if !fn(&frames[i]) {
 			return
 		}
 	}

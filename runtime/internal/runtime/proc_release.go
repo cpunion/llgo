@@ -1,5 +1,3 @@
-//go:build coro_runtime_adapter_test || coro_nil_fault_adapter_test
-
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -18,23 +16,15 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import c "github.com/goplus/llgo/runtime/internal/clite"
 
-// The host runtime-adapter island allocates any synthetic frame backing from
-// the Go test heap rather than coroalloc. It still exercises the exact trace
-// ownership transition, but reclamation belongs to the host GC.
-func coroReleaseDiscardedPanicTraceV1(task *coro.G) {
-	if !coro.PanicTraceDiscardPending(task) {
-		return
-	}
-	for {
-		raw, total, ok := coro.TakeDiscardedPanicTraceFrame(task)
-		if !ok {
-			coroRuntimeAbort("invalid discarded coroutine panic trace")
-		}
-		if raw == nil {
-			return
-		}
-		coro.Zero(raw, total)
+// releaseGAndCheckDeadlock is the sole last-goroutine decision shared by the
+// pthread and stackless task lifecycles. Main marks its exit before releasing
+// its own context, so the final goroutine observes both facts atomically.
+func releaseGAndCheckDeadlock() {
+	remaining, mainExited := releaseG()
+	if remaining == 0 && mainExited {
+		fatal("no goroutines (main called runtime.Goexit) - deadlock!")
+		c.Exit(2)
 	}
 }

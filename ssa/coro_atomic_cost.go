@@ -387,7 +387,7 @@ func projectCoroAtomicLLVMFunction(
 				if strings.HasPrefix(callee, "llvm.dbg.") || strings.HasPrefix(callee, "llvm.lifetime.") || callee == "llvm.assume" {
 					continue
 				}
-				if isCoroAtomicFixedIntegerMinMaxIntrinsic(instruction) {
+				if isCoroAtomicFixedIntegerIntrinsic(instruction) {
 					continue
 				}
 				if isCoroAtomicConstantMemoryIntrinsic(callee) {
@@ -456,12 +456,12 @@ func isCoroAtomicConstantMemoryIntrinsic(name string) bool {
 		strings.HasPrefix(name, "llvm.memmove.")
 }
 
-// isCoroAtomicFixedIntegerMinMaxIntrinsic admits the scalar, fixed-width
-// intrinsics which InstCombine may form from an ordinary integer compare and
-// select. Check both LLVM's intrinsic identity and its complete canonical
-// signature: a source declaration with a suggestive llvm.* name must not gain
-// an atomic-cost capability.
-func isCoroAtomicFixedIntegerMinMaxIntrinsic(call llvm.Value) bool {
+// isCoroAtomicFixedIntegerIntrinsic admits the scalar, fixed-width intrinsics
+// which InstCombine may form from ordinary integer operations. Check LLVM's
+// intrinsic identity, canonical overloaded name, and complete signature: a
+// source declaration with a suggestive llvm.* name must not gain an
+// atomic-cost capability.
+func isCoroAtomicFixedIntegerIntrinsic(call llvm.Value) bool {
 	callee := call.CalledValue()
 	if callee.IsNil() {
 		return false
@@ -473,16 +473,30 @@ func isCoroAtomicFixedIntegerMinMaxIntrinsic(call llvm.Value) bool {
 	}
 	parameters := functionType.ParamTypes()
 	resultType := functionType.ReturnType()
-	if len(parameters) != 2 || resultType.TypeKind() != llvm.IntegerTypeKind ||
-		resultType.IntTypeWidth() == 0 || resultType.IntTypeWidth() > 64 ||
-		parameters[0] != resultType || parameters[1] != resultType {
+	if resultType.TypeKind() != llvm.IntegerTypeKind ||
+		resultType.IntTypeWidth() == 0 || resultType.IntTypeWidth() > 64 {
 		return false
 	}
-	for _, base := range []string{"llvm.umin", "llvm.umax", "llvm.smin", "llvm.smax"} {
-		if callee.IntrinsicID() == llvm.LookupIntrinsicID(base) &&
-			callee.Name() == fmt.Sprintf("%s.i%d", base, resultType.IntTypeWidth()) {
-			return true
+	width := resultType.IntTypeWidth()
+	canonical := func(base string) bool {
+		return callee.IntrinsicID() == llvm.LookupIntrinsicID(base) &&
+			callee.Name() == fmt.Sprintf("%s.i%d", base, width)
+	}
+	if len(parameters) == 2 && parameters[0] == resultType && parameters[1] == resultType {
+		for _, base := range []string{"llvm.umin", "llvm.umax", "llvm.smin", "llvm.smax"} {
+			if canonical(base) {
+				return true
+			}
 		}
+	}
+	// llvm.abs has one data operand and one i1 poison flag. On scalar Go
+	// integer widths it lowers to a finite compare/negate/select recipe; unlike
+	// a target-dependent bit-count intrinsic it cannot introduce a hidden
+	// compiler-rt call after this structural verifier.
+	if len(parameters) == 2 && parameters[0] == resultType &&
+		parameters[1].TypeKind() == llvm.IntegerTypeKind &&
+		parameters[1].IntTypeWidth() == 1 && canonical("llvm.abs") {
+		return true
 	}
 	return false
 }

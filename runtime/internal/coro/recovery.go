@@ -86,3 +86,48 @@ func TakeRecover(g *G, childHandle unsafe.Pointer) (snapshot RecoverSnapshot, re
 		return RecoverSnapshot{}, false, false
 	}
 }
+
+// RecoverTraceActive reports whether the currently executing physical frame
+// is the deferred child which consumed its parent's panic or an exact managed
+// descendant of that child. The CompletionRecord already owns this scope from
+// recover through the child's terminal return, so stackless traceback
+// visibility needs no native frame marker, TLS side table, or additional per-G
+// state.
+func RecoverTraceActive(g *G) bool {
+	// This is a read-only observation used from runtime.Callers, which may be
+	// inside a compiler/runtime critical section. The active-frame and exact
+	// ancestry validation below are sufficient; requiring the suspension gate
+	// here would incorrectly hide the scope precisely while stack inspection
+	// has preemption masked.
+	if !ValidG(g) || g.state != GRunning {
+		return false
+	}
+	child := g.active
+	if child == nil || child.owner != g || child.handle == nil || child.header == nil ||
+		child.state != FrameActive || child.header.G != unsafe.Pointer(g) ||
+		child.header.SuspendReason != uint16(SuspendNone) ||
+		child.header.Lifecycle != uint16(FrameActive) {
+		return false
+	}
+	// Calls made by the recovering deferred function may themselves be managed
+	// children (debug.Stack -> runtime.Callers is one real example). Walk the
+	// exact await ancestry until the recovery-owning CompletionRecord appears.
+	for ; child.parent != nil; child = child.parent {
+		record := &child.parent.completion
+		if emptyCompletionRecord(record) {
+			return false
+		}
+		if record.child != child.handle {
+			return false
+		}
+		switch record.status {
+		case completionArmed, completionRecoverArmed:
+			continue
+		case completionRecoverTaken:
+			return record.typeWord != nil
+		default:
+			return false
+		}
+	}
+	return false
+}

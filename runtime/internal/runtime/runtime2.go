@@ -43,9 +43,13 @@ const (
 // link the public stack-inspection implementation still retain the complete G
 // layout.
 type panicPCStore struct {
-	n      int32
-	armed  int32
-	fault  int32
+	n     int32
+	armed int32
+	fault int32
+	// native is the exact leading prefix captured by a coroutine C worker.
+	// The remaining PCs are compiler-maintained logical Go frames; retaining
+	// this boundary avoids address-shape guesses in the terminal reporter.
+	native int32
 	recFP1 uintptr
 	recFP2 uintptr
 	pcs    [64]uintptr

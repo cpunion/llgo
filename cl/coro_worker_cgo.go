@@ -871,6 +871,7 @@ func (p *context) compileCoroWorkerCgoErrnoCall(
 	p.compileCoroWorkerWordCall(
 		b,
 		b.Convert(p.prog.Uintptr(), thunk.Expr),
+		b.Convert(p.prog.Uintptr(), callee),
 		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
 		nil,
 		nil,
@@ -922,6 +923,7 @@ func (p *context) compileCoroWorkerCgoTransaction(
 	p.compileCoroWorkerWordCall(
 		b,
 		b.Convert(p.prog.Uintptr(), thunk.Expr),
+		b.Convert(p.prog.Uintptr(), target.Expr),
 		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
 		keepaliveSlots,
 		nil,

@@ -45,6 +45,8 @@ const (
 	coroWorkerResumeSuccessV1 uint64 = iota + 1
 	coroWorkerResumeTaskAbortV1
 	coroWorkerResumeShutdownV1
+	coroWorkerResumeFaultMemoryV1
+	coroWorkerResumeFaultDivideV1
 )
 
 const (
@@ -61,6 +63,7 @@ func coroWorkerParkSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "header", pointer),
 		types.NewParam(token.NoPos, nil, "state", pointer),
 		types.NewParam(token.NoPos, nil, "function", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "traceTarget", types.Typ[types.Uintptr]),
 		types.NewParam(token.NoPos, nil, "argc", types.Typ[types.Uint32]),
 	}
 	for index := 0; index < coroWorkerMaxArgsV1; index++ {
@@ -138,6 +141,7 @@ func coroOSThreadForeignCallSignature() *types.Signature {
 	params := []*types.Var{
 		types.NewParam(token.NoPos, nil, "g", pointer),
 		types.NewParam(token.NoPos, nil, "function", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "traceTarget", types.Typ[types.Uintptr]),
 		types.NewParam(token.NoPos, nil, "argc", types.Typ[types.Uint32]),
 	}
 	for index := 0; index < coroWorkerMaxArgsV1; index++ {
@@ -150,7 +154,8 @@ func coroOSThreadForeignCallSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "r2", wordPointer),
 		types.NewParam(token.NoPos, nil, "errno", wordPointer),
 	)
-	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), nil, false)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
+	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), results, false)
 }
 
 func (p *context) requireCoroWorkerBody(b llssa.Builder) *coroBodyContext {
@@ -216,6 +221,7 @@ func (p *context) compileCoroHostOperation(
 	result := p.compileCoroWorkerWordCall(
 		b,
 		p.prog.IntVal(uint64(shape.opcode), p.prog.Uint32()),
+		llssa.Expr{},
 		physicalWords,
 		keepaliveSlots,
 		&coroHostWordOperationV1{metadata: metadata},
@@ -235,12 +241,14 @@ func (p *context) compileCoroHostOperation(
 func (p *context) compileCoroWorkerWordCall(
 	b llssa.Builder,
 	function llssa.Expr,
+	traceTarget llssa.Expr,
 	args []llssa.Expr,
 	keepaliveSlots []llssa.Expr,
 	host *coroHostWordOperationV1,
 ) coroWorkerWordResultV1 {
 	body := p.requireCoroWorkerBody(b)
-	if function.IsNil() || len(args) > coroWorkerMaxArgsV1 ||
+	if function.IsNil() || host == nil && traceTarget.IsNil() || host != nil && !traceTarget.IsNil() ||
+		len(args) > coroWorkerMaxArgsV1 ||
 		host != nil && len(host.metadata) != 0 &&
 			len(host.metadata) != coroHostOperationDeadlineMetadataWordsV1 {
 		panic("coroutine worker word call received an invalid function or argument count")
@@ -252,6 +260,9 @@ func (p *context) compileCoroWorkerWordCall(
 	}
 	if !types.Identical(function.RawType(), keyType.RawType()) {
 		panic("coroutine external word operation has the wrong key type")
+	}
+	if host == nil && !types.Identical(traceTarget.RawType(), word.RawType()) {
+		panic("coroutine worker trace target is not uintptr-shaped")
 	}
 	for index, argument := range args {
 		if argument.IsNil() || !types.Identical(argument.RawType(), word.RawType()) {
@@ -267,6 +278,10 @@ func (p *context) compileCoroWorkerWordCall(
 	normal := coroWorkerResumeSuccessV1
 	abort := coroWorkerResumeTaskAbortV1
 	shutdown := coroWorkerResumeShutdownV1
+	faults := []coroParkFaultRoute{
+		{status: coroWorkerResumeFaultMemoryV1, kind: coroFaultNilV1},
+		{status: coroWorkerResumeFaultDivideV1, kind: coroFaultIntegerDivideByZeroV1},
+	}
 	metadata := []llssa.Expr(nil)
 	if host != nil {
 		stateType = "CoroHostOperationParkV1"
@@ -277,6 +292,7 @@ func (p *context) compileCoroWorkerWordCall(
 		normal = coroHostOperationResumeSuccessV1
 		abort = coroHostOperationResumeTaskAbortV1
 		shutdown = coroHostOperationResumeShutdownV1
+		faults = nil
 		metadata = host.metadata
 		if len(metadata) != 0 {
 			stateType = "CoroHostOperationDeadlineParkV1"
@@ -290,15 +306,19 @@ func (p *context) compileCoroWorkerWordCall(
 	r2 := b.Alloc(p.prog.Uintptr(), false)
 	errno := b.Alloc(p.prog.Uintptr(), false)
 	zero := p.prog.Zero(p.prog.Uintptr())
-	physicalArgs := make([]llssa.Expr, 0, 6+len(metadata)+coroWorkerMaxArgsV1)
+	physicalArgs := make([]llssa.Expr, 0, 7+len(metadata)+coroWorkerMaxArgsV1)
 	physicalArgs = append(physicalArgs,
 		body.task,
 		body.coro.Handle(),
 		b.Convert(b.Prog.VoidPtr(), body.header),
 		b.Convert(b.Prog.VoidPtr(), state),
 		function,
-		p.prog.IntVal(uint64(len(args)), p.prog.Uint32()),
 	)
+	if host == nil {
+		physicalArgs = append(physicalArgs, traceTarget)
+	}
+	argcValue := p.prog.IntVal(uint64(len(args)), p.prog.Uint32())
+	physicalArgs = append(physicalArgs, argcValue)
 	physicalArgs = append(physicalArgs, metadata...)
 	for index := 0; index < coroWorkerMaxArgsV1; index++ {
 		if index < len(args) {
@@ -327,6 +347,7 @@ func (p *context) compileCoroWorkerWordCall(
 				)
 			},
 			normal:   []uint64{normal},
+			faults:   faults,
 			abort:    abort,
 			shutdown: shutdown,
 		})
@@ -348,11 +369,33 @@ func (p *context) compileCoroWorkerWordCall(
 	direct := p.pkg.NewFunc(
 		coroOSThreadForeignCallHookV1, coroOSThreadForeignCallSignature(), llssa.InC,
 	)
-	directArgs := make([]llssa.Expr, 0, 3+coroWorkerMaxArgsV1+3)
-	directArgs = append(directArgs, body.task, function, physicalArgs[5])
-	directArgs = append(directArgs, physicalArgs[6:]...)
+	directArgs := make([]llssa.Expr, 0, 4+coroWorkerMaxArgsV1+3)
+	directArgs = append(directArgs, body.task, function, traceTarget, argcValue)
+	for index := 0; index < coroWorkerMaxArgsV1; index++ {
+		if index < len(args) {
+			directArgs = append(directArgs, args[index])
+		} else {
+			directArgs = append(directArgs, zero)
+		}
+	}
 	directArgs = append(directArgs, r1, r2, errno)
-	b.Call(direct.Expr, directArgs...)
+	directStatus := b.Call(direct.Expr, directArgs...)
+	directNormal := b.Func.MakeBlock()
+	directMemoryFault := b.Func.MakeBlock()
+	directDivideFault := b.Func.MakeBlock()
+	directInvalid := b.Func.MakeBlock()
+	directDispatch := b.Switch(directStatus, directInvalid)
+	directDispatch.Case(p.prog.IntVal(coroWorkerResumeSuccessV1, p.prog.Uint32()), directNormal)
+	directDispatch.Case(p.prog.IntVal(coroWorkerResumeFaultMemoryV1, p.prog.Uint32()), directMemoryFault)
+	directDispatch.Case(p.prog.IntVal(coroWorkerResumeFaultDivideV1, p.prog.Uint32()), directDivideFault)
+	directDispatch.End(b)
+	b.SetBlockEx(directMemoryFault, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultNilV1)
+	b.SetBlockEx(directDivideFault, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultIntegerDivideByZeroV1)
+	b.SetBlockEx(directInvalid, llssa.AtEnd, false)
+	b.Unreachable()
+	b.SetBlockEx(directNormal, llssa.AtEnd, false)
 	b.Jump(join)
 
 	b.SetBlockEx(workerBlock, llssa.AtEnd, false)
@@ -475,7 +518,7 @@ func (p *context) compileCoroWorkerSyscall(
 		compiled[index] = p.compileValue(b, argument)
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, direct)
-	result := p.compileCoroWorkerWordCall(b, compiled[0], compiled[1:], keepaliveSlots, nil)
+	result := p.compileCoroWorkerWordCall(b, compiled[0], compiled[0], compiled[1:], keepaliveSlots, nil)
 	errnoValue := p.filterSyscallErrno(b, result.r1, result.errno, convention)
 	return b.Aggregate(p.type_(results, llssa.InGo), result.r1, result.r2, errnoValue)
 }

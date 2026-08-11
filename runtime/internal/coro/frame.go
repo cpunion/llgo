@@ -485,6 +485,52 @@ type PanicTraceFrameSnapshot struct {
 	Hidden   bool
 }
 
+// ActiveTraceFrame snapshots the compiler descriptor for g's currently
+// executing physical frame. It accepts both the ordinary active header and
+// the narrow park-resume-hook window, where scheduler ownership has resumed
+// the LLVM frame but the compiler intentionally calls its result hook before
+// restoring SuspendNone/FrameActive. It is current-owner-only: callers may use
+// the immutable strings after return, but must not retain or expose the private
+// Frame or Header pointers across a suspension boundary.
+//
+// This is the exact metadata boundary needed when a foreign operation resumes
+// with a fault. The worker owns no G pointer and cannot walk a stackless Go
+// continuation; after resume, the owner can prepend this frame to the bounded
+// native fault identities without reverse-looking-up a function address.
+func ActiveTraceFrame(g *G) (PanicTraceFrameSnapshot, bool) {
+	if !ValidG(g) || !resumeGateTaken(g) || g.state != GRunning ||
+		g.active == nil || g.pending != (pendingTransition{}) || g.destroyTarget != nil ||
+		g.destroyRoot || g.spawnChild != nil {
+		return PanicTraceFrameSnapshot{}, false
+	}
+	frame := g.active
+	header := frame.header
+	activeHeader := header != nil &&
+		header.SuspendReason == uint16(SuspendNone) &&
+		header.Lifecycle == uint16(FrameActive)
+	parkResumeHeader := header != nil &&
+		header.SuspendReason == uint16(SuspendPark) &&
+		header.Lifecycle == uint16(FrameSuspended)
+	if frame.owner != g || frame.handle == nil || header == nil ||
+		frame.descriptor == nil || frame.state != FrameActive ||
+		header.G != unsafe.Pointer(g) || header.Descriptor != frame.descriptor ||
+		(!activeHeader && !parkResumeHeader) {
+		return PanicTraceFrameSnapshot{}, false
+	}
+	descriptor := (*FrameDescriptorV1)(frame.descriptor)
+	if descriptor.Version != 1 ||
+		descriptor.Flags & ^FrameDescriptorTraceHiddenV1 != 0 ||
+		len(descriptor.Function) == 0 {
+		return PanicTraceFrameSnapshot{}, false
+	}
+	return PanicTraceFrameSnapshot{
+		Function: descriptor.Function,
+		File:     descriptor.File,
+		Line:     header.Line,
+		Hidden:   descriptor.Flags&FrameDescriptorTraceHiddenV1 != 0,
+	}, true
+}
+
 func emptyPanicTrace(g *G) bool {
 	return g != nil && g.panicTraceHead == nil && g.panicTraceTail == nil &&
 		g.panicTraceCount == 0

@@ -408,6 +408,12 @@ func coroNativeMRunClaimedReplacementOwnerV1(
 					"native replacement observed invalid main completion",
 				)
 			}
+			if coroProgramLifecycleV1State == coroProgramMainGoexitV1 {
+				// Main Goexit leaves this adopted command domain alive for its
+				// background Gs. The final runtime-context release performs the
+				// standard deadlock termination instead of a successful process exit.
+				continue
+			}
 			c.Exit(0)
 			for {
 			}

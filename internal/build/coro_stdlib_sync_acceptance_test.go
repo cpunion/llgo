@@ -278,6 +278,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_worker_completion_fleet_llgo.go":         false,
 		"coro_worker_native_llgo.go":                   false,
 		"coro_worker_owner_llgo.go":                    false,
+		"coro_worker_result_llgo.go":                   false,
 	}
 	forbidden := map[string]bool{
 		"coro_execution_quota_default.go":        false,

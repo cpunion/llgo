@@ -49,23 +49,26 @@ func TestCoroPlainDispatchV1TargetLayoutAndLowering(t *testing.T) {
 		coroEntryOffset   uint64
 		resultSizeOffset  uint64
 		resultAlignOffset uint64
+		codeEntryOffset   uint64
 	}{
 		{
 			name:              "native64",
 			pointerSize:       8,
-			descriptorSize:    56,
+			descriptorSize:    64,
 			coroEntryOffset:   32,
 			resultSizeOffset:  40,
 			resultAlignOffset: 48,
+			codeEntryOffset:   56,
 		},
 		{
 			name:              "wasm32",
 			target:            &Target{GOOS: "wasip1", GOARCH: "wasm"},
 			pointerSize:       4,
-			descriptorSize:    40,
+			descriptorSize:    48,
 			coroEntryOffset:   28,
 			resultSizeOffset:  32,
 			resultAlignOffset: 36,
+			codeEntryOffset:   40,
 		},
 	}
 	for _, test := range tests {
@@ -104,13 +107,16 @@ func TestCoroPlainDispatchV1TargetLayoutAndLowering(t *testing.T) {
 			if got := prog.OffsetOf(descriptorType, 7); got != test.resultAlignOffset {
 				t.Fatalf("resultAlign offset = %d, want %d", got, test.resultAlignOffset)
 			}
+			if got := prog.OffsetOf(descriptorType, 8); got != test.codeEntryOffset {
+				t.Fatalf("codeEntry offset = %d, want %d", got, test.codeEntryOffset)
+			}
 			if got, want := descriptor.impl.Alignment(), int(prog.AlignOf(descriptorType)); got != want {
 				t.Fatalf("descriptor alignment = %d, want %d", got, want)
 			}
 
 			initializer := descriptor.impl.Initializer()
-			if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 8 {
-				t.Fatalf("descriptor initializer is not an eight-field constant: %v", initializer)
+			if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 9 {
+				t.Fatalf("descriptor initializer is not a nine-field constant: %v", initializer)
 			}
 			wantFixed := []uint64{
 				uint64(CoroPlainDispatchVersionV1),
@@ -135,6 +141,10 @@ func TestCoroPlainDispatchV1TargetLayoutAndLowering(t *testing.T) {
 			}
 			if got, want := initializer.Operand(7).ZExtValue(), prog.AlignOf(fixture.result); got != want {
 				t.Fatalf("resultAlign = %d, want %d", got, want)
+			}
+			code := coroPlainDispatchFunction(initializer.Operand(8))
+			if code.IsNil() || code.Name() != "plain_target" {
+				t.Fatalf("codeEntry = %v, want plain_target", code)
 			}
 
 			// Repeated materialization of the same target is idempotent. This is

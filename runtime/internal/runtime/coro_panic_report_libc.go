@@ -23,6 +23,7 @@ import (
 
 	"github.com/goplus/llgo/runtime/abi"
 	c "github.com/goplus/llgo/runtime/internal/clite"
+	clitedebug "github.com/goplus/llgo/runtime/internal/clite/debug"
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
@@ -262,6 +263,50 @@ func coroTerminalWritePanicValue(record coro.PanicRecordSnapshot) {
 	}
 }
 
+func coroTerminalWriteCString(text *c.Char) bool {
+	if text == nil {
+		return false
+	}
+	for index := uintptr(0); index < coroTerminalPanicFrameLimit; index++ {
+		ch := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(text)) + index))
+		if ch == 0 {
+			return index != 0
+		}
+		coroPanicTerminalFputc(c.Int(ch), c.Stderr)
+	}
+	return true
+}
+
+// coroTerminalWriteWorkerFaultFrames prints the exact native prefix captured
+// by the C-worker landing pad before the retained stackless Go frames. The
+// worker result records the prefix length explicitly; terminal reporting never
+// guesses whether an address is native by inspecting pointer bits and never
+// asks a worker thread to traverse Go scheduler state.
+func coroTerminalWriteWorkerFaultFrames(ctx *runtimeContext) {
+	if ctx == nil || ctx.g.panicPCs.fault == 0 || ctx.g.panicPCs.native <= 0 {
+		return
+	}
+	count := int(ctx.g.panicPCs.native)
+	if count > len(ctx.g.panicPCs.pcs) || count > coroTerminalPanicFrameLimit {
+		coroRuntimeAbort("invalid coroutine C fault trace prefix")
+	}
+	for index := 0; index < count; index++ {
+		pc := ctx.g.panicPCs.pcs[index]
+		if pc <= 1 {
+			coroRuntimeAbort("invalid coroutine C fault trace pc")
+		}
+		// Stored PCs follow runtime.Callers' return-PC convention.
+		rawPC := pc - 1
+		var info clitedebug.Info
+		if clitedebug.Addrinfo(rawPC, &info) == 0 || !coroTerminalWriteCString(info.Sname) {
+			coroTerminalWriteString("unknown")
+		}
+		coroTerminalWriteString("(...)\n\tpc=")
+		coroTerminalWriteHex(rawPC)
+		coroPanicTerminalFputc(c.Int('\n'), c.Stderr)
+	}
+}
+
 func coroTerminalWritePanicFrames(g *coro.G, ctx *runtimeContext) {
 	coroTerminalWriteString("\n\ngoroutine ")
 	if ctx.g.goid == 0 {
@@ -270,6 +315,7 @@ func coroTerminalWritePanicFrames(g *coro.G, ctx *runtimeContext) {
 		coroTerminalWriteUint(ctx.g.goid)
 	}
 	coroTerminalWriteString(" [running]:\n")
+	coroTerminalWriteWorkerFaultFrames(ctx)
 	cursor := coro.FirstPanicTraceFrame(g)
 	if cursor == nil {
 		coroRuntimeAbort("coroutine program panic trace is empty")

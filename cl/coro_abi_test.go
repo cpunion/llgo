@@ -2649,6 +2649,29 @@ func runCoroABIGlobalDCE(t *testing.T, prog llssa.Program, module llvm.Module) {
 	}
 }
 
+func TestCoroRawPlainYieldIsSynchronousNoop(t *testing.T) {
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("coro_raw_yield", "llgo/test/coro-raw-yield")
+	defer pkg.Module().Dispose()
+	fn := pkg.NewFunc("raw_yield", llssa.NoArgsNoRet, llssa.InGo)
+	b := fn.MakeBody(1)
+	defer b.Dispose()
+	ctx := &context{prog: prog, pkg: pkg, fn: fn, rawPlainBody: true}
+	ctx.compileCoroYield(b)
+	b.Return()
+	b.EndBuild()
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify raw/plain yield no-op: %v\n%s", err, pkg.Module().String())
+	}
+	ir := pkg.Module().NamedFunction("raw_yield").String()
+	for _, forbidden := range []string{coroYieldPrepareHookV1, "llvm.coro.", "llgo.coroYield"} {
+		if strings.Contains(ir, forbidden) {
+			t.Fatalf("raw/plain yield retained managed scheduler operation %q:\n%s", forbidden, ir)
+		}
+	}
+}
+
 type coroRootFactoryTestRoot struct {
 	name   string
 	demand coro.Demand

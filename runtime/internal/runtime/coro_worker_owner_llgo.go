@@ -31,6 +31,8 @@ const (
 	coroWorkerResumeSuccessV1 uint32 = iota + 1
 	coroWorkerResumeTaskAbortV1
 	coroWorkerResumeShutdownV1
+	coroWorkerResumeFaultMemoryV1
+	coroWorkerResumeFaultDivideV1
 )
 
 // CoroWorkerParkV1 is opaque compiler-owned storage in the current LLVM
@@ -74,7 +76,7 @@ func coroWorkerAbortV1(message string) {
 //export __llgo_coro_worker_park_v1
 func __llgo_coro_worker_park_v1(
 	g, handle, header, storage unsafe.Pointer,
-	function uintptr,
+	function, traceTarget uintptr,
 	argc uint32,
 	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 ) {
@@ -82,7 +84,7 @@ func __llgo_coro_worker_park_v1(
 	task := (*coro.G)(g)
 	driver, executor, route, current := coro.CurrentExecutorWorkerDriver(task)
 	if g == nil || handle == nil || header == nil || state == nil ||
-		*state != (CoroWorkerParkV1{}) || function == 0 || argc > coroworker.MaxArgs ||
+		*state != (CoroWorkerParkV1{}) || function == 0 || traceTarget == 0 || argc > coroworker.MaxArgs ||
 		!current || !ensureCoroWorkerOperationCapacityV1(driver, task, coroRuntimeWorkerCapacityV1) {
 		coroWorkerAbortV1("invalid coroutine worker park ABI")
 		return
@@ -121,7 +123,7 @@ func __llgo_coro_worker_park_v1(
 	}
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	if !coroCommitNativeWorkerSubmissionV1(
-		driver, task, executor, route, reservation, operation, function, argc, &args,
+		driver, task, executor, route, reservation, operation, function, traceTarget, argc, &args,
 	) {
 		coroWorkerAbortV1("cannot commit coroutine worker submission")
 	}
@@ -180,6 +182,26 @@ func __llgo_coro_worker_resume_v1(
 	if payload.Kind() != coro.ScalarResultKindWords || payload.Count() != 3 {
 		coroWorkerAbortV1("invalid coroutine worker result payload")
 		return 0
+	}
+	if payload.Flags() != coro.ScalarResultFlags(coroworker.FaultNone) {
+		faultPC, faultPCOK := payload.Scalar(0)
+		faultTarget, faultTargetOK := payload.Scalar(1)
+		unused, unusedOK := payload.Scalar(2)
+		if !faultPCOK || !faultTargetOK || !unusedOK || unused != 0 ||
+			uint64(uintptr(faultPC)) != faultPC || uint64(uintptr(faultTarget)) != faultTarget ||
+			!StoreCoroWorkerFaultPCs(task, uintptr(faultPC), uintptr(faultTarget)) {
+			coroWorkerAbortV1("invalid coroutine worker fault payload")
+			return 0
+		}
+		switch uintptr(payload.Flags()) {
+		case coroworker.FaultMemory:
+			return coroWorkerResumeFaultMemoryV1
+		case coroworker.FaultDivide:
+			return coroWorkerResumeFaultDivideV1
+		default:
+			coroWorkerAbortV1("unknown coroutine worker fault kind")
+			return 0
+		}
 	}
 	values := [3]*uintptr{r1, r2, errno}
 	for index, output := range values {

@@ -48,7 +48,7 @@ func coroNativeWorkerSubmissionOwnerProfileV1(
 //export __llgo_coro_native_worker_complete_v1
 func __llgo_coro_native_worker_complete_v1(
 	sourceSlot, generation uint32,
-	r1, r2, errno uintptr,
+	r1, r2, errno, fault, faultPC, faultTarget uintptr,
 ) uint32 {
 	state := &coroNativeWorkerPoolV1State
 	id := coro.OperationID{SourceSlot: sourceSlot, Generation: generation}
@@ -57,14 +57,7 @@ func __llgo_coro_native_worker_complete_v1(
 		!id.Valid() || id.Source() != coro.OperationSourceWorker {
 		return 0
 	}
-	payload, ok := coro.MakeScalarResultPayloadV1(
-		coro.ScalarResultKindWords,
-		0,
-		3,
-		uint64(r1),
-		uint64(r2),
-		uint64(errno),
-	)
+	payload, ok := coroWorkerResultPayloadV1(r1, r2, errno, fault, faultPC, faultTarget)
 	if !ok {
 		return 0
 	}

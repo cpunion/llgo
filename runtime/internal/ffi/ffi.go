@@ -104,6 +104,7 @@ type dispatchDescriptorV1 struct {
 	CoroEntry   unsafe.Pointer
 	ResultSize  uintptr
 	ResultAlign uintptr
+	CodeEntry   unsafe.Pointer
 }
 
 // NewRuntimeCoroDescriptor creates the trusted dynamic descriptor used by
@@ -124,6 +125,7 @@ func NewRuntimeCoroDescriptor(
 		CoroEntry:   coroEntry,
 		ResultSize:  resultSize,
 		ResultAlign: resultAlign,
+		CodeEntry:   coroEntry,
 	})
 }
 
@@ -140,10 +142,31 @@ func CoroEntry(descriptor unsafe.Pointer) unsafe.Pointer {
 		flags&^dispatchKnownFlags != 0 ||
 		flags&dispatchHasCoro == 0 ||
 		d.CoroEntry == nil ||
+		d.CodeEntry == nil ||
 		(flags&dispatchHasPlain != 0) != (d.PlainEntry != nil) {
 		panic("llgo: invalid managed function descriptor")
 	}
 	return d.CoroEntry
+}
+
+// CodeEntry returns the compiler-injected physical function identity carried
+// by a managed descriptor. Dispatch thunks remain private call adapters; this
+// entry is used only by reflection and runtime symbolization.
+func CodeEntry(descriptor unsafe.Pointer) unsafe.Pointer {
+	if descriptor == nil {
+		return nil
+	}
+	d := (*dispatchDescriptorV1)(descriptor)
+	flags := d.Flags
+	if d.Version != dispatchVersionV1 ||
+		flags&^dispatchKnownFlags != 0 ||
+		flags&dispatchCapabilityMask == 0 ||
+		(flags&dispatchHasPlain != 0) != (d.PlainEntry != nil) ||
+		(flags&dispatchHasCoro != 0) != (d.CoroEntry != nil) ||
+		d.CodeEntry == nil {
+		panic("llgo: invalid managed function descriptor")
+	}
+	return d.CodeEntry
 }
 
 // coroFFICall is a compiler-owned stack cut. Its source ABI contains only the
@@ -176,6 +199,7 @@ func CallLLGo(
 		(flags&dispatchHasPlain != 0) != (d.PlainEntry != nil) ||
 		(flags&dispatchHasCoro != 0) != (d.CoroEntry != nil) ||
 		flags&dispatchNoCapture != 0 && env != nil ||
+		d.CodeEntry == nil ||
 		runtimeTyped && (runtimeType == nil ||
 			d.HashLo != uint64(bitcast.FromPointer(runtimeType)) ||
 			d.HashHi != dispatchRuntimeTypeMagicV1) ||

@@ -417,7 +417,15 @@ func (p *Transformer) transformFunc(m llvm.Module, fn llvm.Value) bool {
 	}
 
 	if !fn.IsDeclaration() {
-		p.transformFuncBody(m, ctx, &info, fn, nfn, nft)
+		// A presplit coroutine ramp returns at its initial suspend while its
+		// source body continues later from a scheduler-owned frame.  Forwarding
+		// a by-value aggregate's frontend alloca to the transformed caller-owned
+		// pointer would therefore turn Go value semantics into a borrow whose
+		// lifetime ends as soon as the ramp returns.  Keep the explicit copy for
+		// CoroSplit to retain in the coroutine frame.  Ordinary functions still
+		// use the existing forwarding optimization.
+		allowParamAllocaForwarding := p.optimize && !containsCoroID(fn)
+		p.transformFuncBody(m, ctx, &info, fn, nfn, nft, allowParamAllocaForwarding)
 	}
 
 	fn.ReplaceAllUsesWith(nfn)
@@ -425,7 +433,31 @@ func (p *Transformer) transformFunc(m llvm.Module, fn llvm.Value) bool {
 	return true
 }
 
-func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *FuncInfo, fn llvm.Value, nfn llvm.Value, nft llvm.Type) {
+func containsCoroID(fn llvm.Value) bool {
+	for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
+		for instruction := bb.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			call := instruction.IsACallInst()
+			if call.IsNil() {
+				continue
+			}
+			callee := call.CalledValue()
+			if !callee.IsAFunction().IsNil() && callee.Name() == "llvm.coro.id" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (p *Transformer) transformFuncBody(
+	m llvm.Module,
+	ctx llvm.Context,
+	info *FuncInfo,
+	fn llvm.Value,
+	nfn llvm.Value,
+	nft llvm.Type,
+	allowParamAllocaForwarding bool,
+) {
 	var blocks []llvm.BasicBlock
 	bb := fn.FirstBasicBlock()
 	for !bb.IsNil() {
@@ -468,7 +500,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			// store %typ %1, ptr %2, align 4
 			nv = b.CreateLoad(ti.Type, params[index], "")
 			// replace %0 to %2
-			if p.optimize {
+			if allowParamAllocaForwarding {
 				replaceAllocaInstrs(fn.Param(i), params[index])
 			}
 		case AttrWidthType:
@@ -476,7 +508,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			b.CreateStore(params[index], iptr)
 			ptr := b.CreateBitCast(iptr, llvm.PointerType(ti.Type, 0), "")
 			nv = b.CreateLoad(ti.Type, ptr, "")
-			if p.optimize {
+			if allowParamAllocaForwarding {
 				replaceAllocaInstrs(fn.Param(i), ptr)
 			}
 		case AttrWidthType2:
@@ -487,7 +519,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			b.CreateStore(params[index], b.CreateStructGEP(typ, iptr, 1, ""))
 			ptr := b.CreateBitCast(iptr, llvm.PointerType(ti.Type, 0), "")
 			nv = b.CreateLoad(ti.Type, ptr, "")
-			if p.optimize {
+			if allowParamAllocaForwarding {
 				replaceAllocaInstrs(fn.Param(i), ptr)
 			}
 		case AttrExtract:

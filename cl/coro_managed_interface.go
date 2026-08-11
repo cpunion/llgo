@@ -126,6 +126,7 @@ func (p *context) emitCoroMethodValueDescriptor(
 		Signature:  abi.signature,
 		PlainEntry: plainEntry,
 		CoroEntry:  coroEntry,
+		CodeEntry:  physical.Expr,
 		Result:     p.prog.Type(abi.resultSlotType, llssa.InC),
 	})
 	if p.coroPlainDescriptors == nil {
@@ -751,6 +752,7 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 		Signature:  abi.signature,
 		PlainEntry: plainEntry,
 		CoroEntry:  coroEntry,
+		CodeEntry:  physical.Expr,
 		Result:     p.prog.Type(abi.resultSlotType, llssa.InC),
 	})
 	if p.coroPlainDescriptors == nil {

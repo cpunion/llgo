@@ -44,14 +44,29 @@ type Job struct {
 	SourceSlot uint32
 	Generation uint32
 	Function   uintptr
-	Argc       uint32
-	Args       [MaxArgs]uintptr
+	// TraceTarget is the compiler-known source C entry represented by Function.
+	// Function may be a generated word-call thunk, so keeping this separate lets
+	// the fault result name the original boundary without native-stack reverse
+	// lookup. It is scalar metadata only and is never invoked by the worker.
+	TraceTarget uintptr
+	Argc        uint32
+	Args        [MaxArgs]uintptr
 }
 
+const (
+	FaultNone uintptr = iota
+	FaultMemory
+	FaultDivide
+)
+
 // Result is the pointer-free result copied into a WorkerOperationSource
-// payload before publication.
+// payload before publication. A fault result replaces the normal triple with
+// two code identities; it never carries a signal-stack or coroutine pointer.
 type Result struct {
-	R1    uintptr
-	R2    uintptr
-	Errno uintptr
+	R1          uintptr
+	R2          uintptr
+	Errno       uintptr
+	Fault       uintptr
+	FaultPC     uintptr
+	FaultTarget uintptr
 }

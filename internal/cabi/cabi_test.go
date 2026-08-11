@@ -460,6 +460,76 @@ entry:
 	}
 }
 
+func TestAttrPointerCoroParamKeepsOwnedAlloca(t *testing.T) {
+	testIR := `; ModuleID = 'test'
+source_filename = "test"
+
+%Large = type { i64, i64, i64 }
+
+declare token @llvm.coro.id(i32, ptr, ptr, ptr)
+
+define i64 @plain(%Large %value) {
+entry:
+  %slot = alloca %Large, align 8
+  store %Large %value, ptr %slot, align 8
+  %field = getelementptr inbounds %Large, ptr %slot, i32 0, i32 2
+  %result = load i64, ptr %field, align 8
+  ret i64 %result
+}
+
+define i64 @coro(%Large %value) {
+entry:
+  %slot = alloca %Large, align 8
+  store %Large %value, ptr %slot, align 8
+  %id = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
+  %field = getelementptr inbounds %Large, ptr %slot, i32 0, i32 2
+  %result = load i64, ptr %field, align 8
+  ret i64 %result
+}
+`
+
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	tmpfile := filepath.Join(t.TempDir(), "coro_param_copy.ll")
+	if err := os.WriteFile(tmpfile, []byte(testIR), 0644); err != nil {
+		t.Fatalf("write test IR: %v", err)
+	}
+	buf, err := llvm.NewMemoryBufferFromFile(tmpfile)
+	if err != nil {
+		t.Fatalf("read test IR: %v", err)
+	}
+	mod, err := ctx.ParseIR(buf)
+	if err != nil {
+		t.Fatalf("parse test IR: %v", err)
+	}
+	defer mod.Dispose()
+
+	conf, _ := buildConf(cabi.ModeAllFunc, "arm64")
+	pkgs, err := build.Do([]string{"./_testdata/demo/demo.go"}, conf)
+	if err != nil {
+		t.Fatalf("build C ABI program: %v", err)
+	}
+	defer pkgs[0].LPkg.Prog.Dispose()
+	tr := cabi.NewTransformer(pkgs[0].LPkg.Prog, "", "", cabi.ModeAllFunc, true)
+	tr.TransformModule("test", mod)
+
+	plain := mod.NamedFunction("plain")
+	if plain.IsNil() {
+		t.Fatal("transformed plain function not found")
+	}
+	if ir := plain.String(); !strings.Contains(ir, "getelementptr inbounds %Large, ptr %0") {
+		t.Fatalf("ordinary aggregate parameter did not retain the forwarding optimization:\n%s", ir)
+	}
+	coro := mod.NamedFunction("coro")
+	if coro.IsNil() {
+		t.Fatal("transformed coroutine function not found")
+	}
+	if ir := coro.String(); !strings.Contains(ir, "getelementptr inbounds %Large, ptr %slot") ||
+		strings.Contains(ir, "getelementptr inbounds %Large, ptr %0") {
+		t.Fatalf("coroutine aggregate parameter escaped its callee-owned snapshot:\n%s", ir)
+	}
+}
+
 // TestModeCFunc_SkipIndirectCallWrapping verifies that ModeCFunc does not
 // rewrite indirect calls. In opaque-pointer IR, indirect callees have empty
 // names and must not be treated as C symbol calls.
