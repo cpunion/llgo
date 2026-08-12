@@ -568,6 +568,7 @@ func changed(*int) int {
 `
 	const ir = `define i64 @"example.com/p.changed"(ptr %0) {
 entry:
+  %aggregate = insertvalue { ptr, ptr } undef, ptr %0, 0
   %nilcheck = icmp eq ptr %0, null
   br i1 %nilcheck, label %panic, label %cont
 

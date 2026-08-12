@@ -298,6 +298,9 @@ func resolveSnapshotRange(group string, directives []checkDirective, hasDefiniti
 		}
 		lines := context.fn.lines
 		start := context.nextLine
+		if snapshotEndsFunction(directives) {
+			return lines, start, len(lines) - 1, true, nil
+		}
 		if end, ok := matchSnapshotAt(group, directives, lines, start, true); ok {
 			return lines, start, end, true, nil
 		}
