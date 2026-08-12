@@ -601,3 +601,24 @@ cont:
 		t.Fatalf("update added a blank line at EOF:\n%q", got)
 	}
 }
+
+func TestUpdateSourceChecks_IgnoresOtherCheckPrefixes(t *testing.T) {
+	const src = `// LITTEST
+package main
+
+// SYMBOL-DAG: main
+func main() {}
+`
+	const ir = `define void @"example.com/p.main"() {
+entry:
+  ret void
+}
+`
+	got, changed, err := updateSourceChecks(src, "in.go", "example.com/p", "example.com", ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || got != src {
+		t.Fatalf("non-CHECK directives should remain unchanged:\n%s", got)
+	}
+}

@@ -143,6 +143,10 @@ type checkGroup struct {
 // failing function group is regenerated at the group's existing byte range,
 // so updating a golden does not move unrelated checks or add new functions.
 func updateSourceChecks(src, srcPath, _, modulePath, ir string) (string, bool, error) {
+	groups := sourceCheckGroups(src)
+	if len(groups) == 0 {
+		return src, false, nil
+	}
 	if err := matchCheckText(src, ir); err == nil {
 		return src, false, nil
 	}
@@ -150,7 +154,7 @@ func updateSourceChecks(src, srcPath, _, modulePath, ir string) (string, bool, e
 
 	var edits []sourceEdit
 	var currentFn *irFunction
-	for _, group := range sourceCheckGroups(src) {
+	for _, group := range groups {
 		fn, hasDefinition, err := findFunctionForCheckGroup(group.text, prog.funcs)
 		if err != nil {
 			return "", false, fmt.Errorf("%s: %w", srcPath, err)
