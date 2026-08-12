@@ -675,6 +675,45 @@ entry:
 	}
 }
 
+func TestUpdateSourceChecks_SplitsAdjacentAnchorsFromContinuousSnapshot(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+// CHECK: @0 = private constant i8 1
+// CHECK: define i64 @main.changed(ptr %0){{.*}} {
+// CHECK-NEXT: entry:
+// CHECK-NEXT:   %1 = load i64, ptr %0
+// CHECK-NEXT:   ret i64 %1
+// CHECK-NEXT: }
+func changed(*int) int { return 0 }
+`
+	const ir = `@0 = private constant i8 1
+
+define i64 @main.changed(ptr %0) {
+entry:
+  %nilcheck = icmp eq ptr %0, null
+  br i1 %nilcheck, label %panic, label %cont
+
+panic:
+  unreachable
+
+cont:
+  %1 = load i64, ptr %0
+  ret i64 %1
+}
+`
+	got, changed, err := updateSourceChecks(src, "in.go", "main", "example.com", ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || !strings.Contains(got, "// CHECK-NEXT:   %nilcheck = icmp eq ptr %0, null") {
+		t.Fatalf("adjacent function snapshot was not regenerated:\n%s", got)
+	}
+	if strings.Count(got, "// CHECK: @0 = private constant i8 1") != 1 {
+		t.Fatalf("adjacent manual anchor changed:\n%s", got)
+	}
+}
+
 func TestUpdateSourceChecks_RecoversChangedFunctionSignature(t *testing.T) {
 	const src = `// LITTEST
 package p

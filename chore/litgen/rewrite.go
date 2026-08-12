@@ -491,12 +491,32 @@ func sourceCheckGroups(src string) []checkGroup {
 			}
 			line++
 		}
-		start := lineStarts[startLine]
-		end := len(src)
-		if line < len(lineStarts) {
-			end = lineStarts[line]
+		blockEnd := line
+		groupStart := startLine
+		for current := startLine + 1; current < blockEnd; current++ {
+			currentEnd := len(src)
+			if current+1 < len(lineStarts) {
+				currentEnd = lineStarts[current+1]
+			}
+			match := checkDirectiveRE.FindStringSubmatch(strings.TrimRight(src[lineStarts[current]:currentEnd], "\r\n"))
+			if match != nil && match[1] != "CHECK-NEXT" && match[1] != "CHECK-EMPTY" {
+				groups = append(groups, checkGroup{
+					start: lineStarts[groupStart],
+					end:   lineStarts[current],
+					text:  src[lineStarts[groupStart]:lineStarts[current]],
+				})
+				groupStart = current
+			}
 		}
-		groups = append(groups, checkGroup{start: start, end: end, text: src[start:end]})
+		end := len(src)
+		if blockEnd < len(lineStarts) {
+			end = lineStarts[blockEnd]
+		}
+		groups = append(groups, checkGroup{
+			start: lineStarts[groupStart],
+			end:   end,
+			text:  src[lineStarts[groupStart]:end],
+		})
 	}
 	return groups
 }
