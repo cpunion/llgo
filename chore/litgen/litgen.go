@@ -26,7 +26,7 @@ import (
 	"github.com/goplus/llgo/xtool/env/llvm"
 )
 
-var update = flag.Bool("update", false, "update only failing existing CHECK groups in place")
+var force = flag.Bool("force", false, "replace all CHECK directives with fully regenerated IR checks")
 
 func main() {
 	llvm.SetupPath()
@@ -45,6 +45,10 @@ func main() {
 }
 
 func processPath(path string) error {
+	return processPathWithForce(path, *force)
+}
+
+func processPathWithForce(path string, force bool) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -54,7 +58,7 @@ func processPath(path string) error {
 		return err
 	}
 	if fi.IsDir() {
-		return processTree(abs)
+		return processTree(abs, force)
 	}
 	if filepath.Ext(abs) != ".go" {
 		return fmt.Errorf("%s: expected .go file or directory", abs)
@@ -71,10 +75,10 @@ func processPath(path string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "litgen", target.sourceFile)
-	return generateFile(target, *update)
+	return generateFile(target, force)
 }
 
-func processTree(root string) error {
+func processTree(root string, force bool) error {
 	var targets []resolvedTarget
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -108,7 +112,7 @@ func processTree(root string) error {
 	}
 	for _, target := range targets {
 		fmt.Fprintln(os.Stderr, "litgen", target.sourceFile)
-		if err := generateFile(target, *update); err != nil {
+		if err := generateFile(target, force); err != nil {
 			return err
 		}
 	}

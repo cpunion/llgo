@@ -17,6 +17,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -61,42 +62,44 @@ type irFunction struct {
 }
 
 var (
-	defineQuotedRE  = regexp.MustCompile(`^define\b.* @"([^"]+)"\(`)
-	definePlainRE   = regexp.MustCompile(`^define\b.* @([^\s(]+)\(`)
-	globalQuotedRE  = regexp.MustCompile(`^@"([^"]+)"\s*=`)
-	globalPlainRE   = regexp.MustCompile(`^@([A-Za-z0-9$._-]+)\s*=`)
-	globalRefRE     = regexp.MustCompile(`@"([^"]+)"|@([A-Za-z0-9$._-]+)`)
-	checkLineRE     = regexp.MustCompile(`^\s*//\s*CHECK(?:-[A-Z]+)?:`)
-	debugMetaRE     = regexp.MustCompile(`, ![A-Za-z0-9_.-]+ ![0-9]+`)
-	closureEnvRE    = regexp.MustCompile(`(\s)(?:nest|swiftself)(\s)`)
-	testCasePathRE  = regexp.MustCompile(`"[^"]*/cl/_test[^/"]*/[^/".]+`)
-	symbolHashRE    = regexp.MustCompile(`\$[-A-Za-z0-9_]{43}`)
-	cgoHashRE       = regexp.MustCompile(`(_cgo_)[0-9a-f]+(_Cfunc_)`)
-	numericGlobalRE = regexp.MustCompile(`@\d+\b`)
-	metadataIDRE    = regexp.MustCompile(`!\d+\b`)
-	sigJumpRE       = regexp.MustCompile(`@(?:__)?(sig(?:set|long)jmp)\b`)
-	plainJumpRE     = regexp.MustCompile(`@_*((?:set|long)jmp)\b`)
-	jmpBufAllocaRE  = regexp.MustCompile(`alloca i8, i64 (?:196|200), align 1`)
-	numericNameRE   = regexp.MustCompile(`^\d+$`)
+	defineQuotedRE   = regexp.MustCompile(`^define\b.* @"([^"]+)"\(`)
+	definePlainRE    = regexp.MustCompile(`^define\b.* @([^\s(]+)\(`)
+	globalQuotedRE   = regexp.MustCompile(`^@"([^"]+)"\s*=`)
+	globalPlainRE    = regexp.MustCompile(`^@([A-Za-z0-9$._-]+)\s*=`)
+	globalRefRE      = regexp.MustCompile(`@"([^"]+)"|@([A-Za-z0-9$._-]+)`)
+	checkLineRE      = regexp.MustCompile(`^\s*//\s*CHECK(?:-[A-Z]+)?:`)
+	checkDirectiveRE = regexp.MustCompile(`^\s*//\s*(CHECK(?:-[A-Z]+)?):\s?(.*?)(?:\r?\n)?$`)
+	symbolLineRE     = regexp.MustCompile(`(?m)^\s*//\s*SYMBOL(?:-[A-Z]+)?:`)
+	debugMetaRE      = regexp.MustCompile(`, ![A-Za-z0-9_.-]+ ![0-9]+`)
+	closureEnvRE     = regexp.MustCompile(`(\s)(?:nest|swiftself)(\s)`)
+	testCasePathRE   = regexp.MustCompile(`"[^"]*/cl/_test[^/"]*/[^/".]+`)
+	symbolHashRE     = regexp.MustCompile(`\$[-A-Za-z0-9_]{43}`)
+	cgoHashRE        = regexp.MustCompile(`(_cgo_)[0-9a-f]+(_Cfunc_)`)
+	numericGlobalRE  = regexp.MustCompile(`@\d+\b`)
+	metadataIDRE     = regexp.MustCompile(`!\d+\b`)
+	sigJumpRE        = regexp.MustCompile(`@(?:__)?(sig(?:set|long)jmp)\b`)
+	plainJumpRE      = regexp.MustCompile(`@_*((?:set|long)jmp)\b`)
+	jmpBufAllocaRE   = regexp.MustCompile(`alloca i8, i64 (?:196|200), align 1`)
+	pthreadTypeRE    = regexp.MustCompile(`/runtime/internal/clite/pthread/sync\.([A-Za-z0-9_]+)"`)
+	numericNameRE    = regexp.MustCompile(`^\d+$`)
 )
 
 type pthreadOpaqueSize struct {
-	typeName string
-	sizes    *regexp.Regexp
-	want     string
+	sizes *regexp.Regexp
+	want  string
 }
 
-var pthreadOpaqueSizes = []pthreadOpaqueSize{
-	{"MutexAttr", regexp.MustCompile(`\[(?:4|8|16) x i8\]`), `[{{(4|8|16)}} x i8]`},
-	{"RWLockAttr", regexp.MustCompile(`\[(?:8|16|24) x i8\]`), `[{{(8|16|24)}} x i8]`},
-	{"CondAttr", regexp.MustCompile(`\[(?:4|8|16) x i8\]`), `[{{(4|8|16)}} x i8]`},
-	{"Once", regexp.MustCompile(`\[(?:4|16) x i8\]`), `[{{(4|16)}} x i8]`},
-	{"Mutex", regexp.MustCompile(`\[(?:40|48|64) x i8\]`), `[{{(40|48|64)}} x i8]`},
-	{"RWLock", regexp.MustCompile(`\[(?:56|192|200) x i8\]`), `[{{(56|192|200)}} x i8]`},
-	{"Cond", regexp.MustCompile(`\[(?:40|48) x i8\]`), `[{{(40|48)}} x i8]`},
+var pthreadOpaqueSizes = map[string]pthreadOpaqueSize{
+	"MutexAttr":  {regexp.MustCompile(`\[(?:4|8|16) x i8\]`), `[{{(4|8|16)}} x i8]`},
+	"RWLockAttr": {regexp.MustCompile(`\[(?:8|16|24) x i8\]`), `[{{(8|16|24)}} x i8]`},
+	"CondAttr":   {regexp.MustCompile(`\[(?:4|8|16) x i8\]`), `[{{(4|8|16)}} x i8]`},
+	"Once":       {regexp.MustCompile(`\[(?:4|16) x i8\]`), `[{{(4|16)}} x i8]`},
+	"Mutex":      {regexp.MustCompile(`\[(?:40|48|64) x i8\]`), `[{{(40|48|64)}} x i8]`},
+	"RWLock":     {regexp.MustCompile(`\[(?:56|192|200) x i8\]`), `[{{(56|192|200)}} x i8]`},
+	"Cond":       {regexp.MustCompile(`\[(?:40|48) x i8\]`), `[{{(40|48)}} x i8]`},
 }
 
-func generateFile(target resolvedTarget, update bool) error {
+func generateFile(target resolvedTarget, force bool) error {
 	data, err := os.ReadFile(target.sourceFile)
 	if err != nil {
 		return err
@@ -105,7 +108,7 @@ func generateFile(target resolvedTarget, update bool) error {
 	if err != nil {
 		return err
 	}
-	if update {
+	if !force {
 		updated, changed, err := updateSourceChecks(string(data), target.sourceFile, target.pkgPath, target.modulePath, ir)
 		if err != nil {
 			return err
@@ -139,56 +142,70 @@ type checkGroup struct {
 	text  string
 }
 
-// updateSourceChecks preserves every CHECK group that still matches. A
-// failing function group is regenerated at the group's existing byte range,
-// so updating a golden does not move unrelated checks or add new functions.
+type checkDirective struct {
+	kind    string
+	pattern string
+}
+
+type updateContext struct {
+	fn       *irFunction
+	nextLine int
+	canNext  bool
+}
+
+// updateSourceChecks regenerates continuous anchor + NEXT/EMPTY snapshots in
+// place. Other CHECK forms express hand-written test intent: they are kept
+// verbatim and must still pass the final whole-file FileCheck validation.
 func updateSourceChecks(src, srcPath, _, modulePath, ir string) (string, bool, error) {
 	groups := sourceCheckGroups(src)
 	if len(groups) == 0 {
-		return src, false, nil
-	}
-	if err := matchCheckText(src, ir); err == nil {
-		return src, false, nil
+		if symbolLineRE.MatchString(src) {
+			return src, false, nil
+		}
+		return "", false, fmt.Errorf("%s: no CHECK directives; use -force to initialize IR checks", srcPath)
 	}
 	prog := parseIR(ir)
+	functionChecks := indexFunctionChecks(prog.funcs, modulePath)
 
 	var edits []sourceEdit
-	var currentFn *irFunction
+	var context updateContext
 	for _, group := range groups {
-		fn, hasDefinition, err := findFunctionForCheckGroup(group.text, prog.funcs)
+		directives, err := parseCheckDirectives(group.text)
+		if err != nil {
+			return "", false, fmt.Errorf("%s: %w", srcPath, err)
+		}
+		fn, hasDefinition, err := findFunctionForCheckGroup(group.text, prog.funcs, functionChecks)
 		if err != nil {
 			return "", false, fmt.Errorf("%s: %w", srcPath, err)
 		}
 		if hasDefinition {
-			currentFn = &fn
+			context = updateContext{fn: &fn, nextLine: 1, canNext: len(directives) == 1}
 		}
-		if err := matchCheckText(group.text, ir); err == nil {
+		if !isContinuousSnapshot(directives) {
+			context = advanceManualContext(context, directives, hasDefinition)
 			continue
 		}
-		if !hasDefinition {
-			if currentFn == nil {
-				return "", false, fmt.Errorf("%s: failing CHECK group has no preceding function definition", srcPath)
-			}
-			fn = *currentFn
+
+		lines, start, end, implicit, err := resolveSnapshotRange(group.text, directives, hasDefinition, context, ir, fn)
+		if err != nil {
+			return "", false, fmt.Errorf("%s: %w; use -force to regenerate all IR checks", srcPath, err)
 		}
-		lines := buildFunctionChecks(fn, modulePath)
-		if len(lines) == 0 {
-			return "", false, fmt.Errorf("%s: no checks generated for %q", srcPath, fn.symbol)
-		}
-		if hasDefinition {
-			// Keep the existing definition directive byte-for-byte. It may be
-			// intentionally looser than newly generated checks.
-			lines[0] = firstDefinitionCheck(group.text)
-		} else {
-			lines = lines[1:]
+		generated := buildRangeChecks(lines[start:end+1], modulePath, directives[0], implicit)
+		if len(generated) == 0 {
+			return "", false, fmt.Errorf("%s: no checks generated for continuous snapshot", srcPath)
 		}
 		indent := indentAt(src, group.start)
-		text := formatDirectiveBlock(indent, lines)
+		text := formatDirectiveBlock(indent, generated)
 		text = preserveTrailingNewlines(text, group.text)
-		edits = append(edits, sourceEdit{start: group.start, end: group.end, text: text})
-	}
-	if len(edits) == 0 {
-		return "", false, fmt.Errorf("%s: existing CHECKs fail, but no function CHECK group can be updated", srcPath)
+		if text != group.text {
+			edits = append(edits, sourceEdit{start: group.start, end: group.end, text: text})
+		}
+		if context.fn != nil && sameLineSlice(lines, context.fn.lines) {
+			context.nextLine = end + 1
+			context.canNext = true
+		} else {
+			context.canNext = false
+		}
 	}
 	sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
 	updated := src
@@ -196,18 +213,249 @@ func updateSourceChecks(src, srcPath, _, modulePath, ir string) (string, bool, e
 		updated = updated[:edit.start] + edit.text + updated[edit.end:]
 	}
 	if err := matchCheckText(updated, ir); err != nil {
-		return "", false, fmt.Errorf("%s: updated CHECKs still fail: %w", srcPath, err)
+		return "", false, fmt.Errorf("%s: CHECK validation failed and cannot be safely updated: %w; use -force to regenerate all IR checks", srcPath, err)
 	}
 	return updated, updated != src, nil
 }
 
-func firstDefinitionCheck(group string) string {
-	for _, line := range strings.Split(group, "\n") {
-		if strings.Contains(line, "define ") {
-			return strings.TrimLeft(line, " \t")
+func advanceManualContext(context updateContext, directives []checkDirective, hasDefinition bool) updateContext {
+	if context.fn == nil {
+		context.canNext = false
+		return context
+	}
+	start := 0
+	if context.canNext {
+		start = context.nextLine
+	}
+	first := 0
+	if hasDefinition {
+		first = 1
+		start = 1
+	}
+	matched := false
+	for _, directive := range directives[first:] {
+		if directive.kind != "CHECK" && directive.kind != "CHECK-LABEL" {
+			context.canNext = false
+			return context
+		}
+		lines := matchingDirectiveLines(directive, context.fn.lines, start)
+		if len(lines) == 0 {
+			context.canNext = false
+			return context
+		}
+		start = lines[0] + 1
+		matched = true
+	}
+	if matched || (hasDefinition && len(directives) == 1) {
+		context.nextLine = start
+		context.canNext = true
+		return context
+	}
+	context.canNext = false
+	return context
+}
+
+func sameLineSlice(a, b []string) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+}
+
+func parseCheckDirectives(group string) ([]checkDirective, error) {
+	var directives []checkDirective
+	for _, line := range strings.SplitAfter(group, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		match := checkDirectiveRE.FindStringSubmatch(line)
+		if match == nil {
+			return nil, fmt.Errorf("invalid CHECK directive %q", strings.TrimSpace(line))
+		}
+		directives = append(directives, checkDirective{kind: match[1], pattern: match[2]})
+	}
+	return directives, nil
+}
+
+func isContinuousSnapshot(directives []checkDirective) bool {
+	if len(directives) < 2 || strings.Contains(directives[0].pattern, "[[") {
+		return false
+	}
+	first := directives[0].kind
+	if first != "CHECK" && first != "CHECK-LABEL" && first != "CHECK-NEXT" {
+		return false
+	}
+	for _, directive := range directives[1:] {
+		if (directive.kind != "CHECK-NEXT" && directive.kind != "CHECK-EMPTY") || strings.Contains(directive.pattern, "[[") {
+			return false
 		}
 	}
-	return ""
+	return true
+}
+
+func resolveSnapshotRange(group string, directives []checkDirective, hasDefinition bool, context updateContext, ir string, fn irFunction) ([]string, int, int, bool, error) {
+	implicit := directives[0].kind == "CHECK-NEXT"
+	if implicit {
+		if context.fn == nil || !context.canNext || context.nextLine >= len(context.fn.lines) {
+			return nil, 0, 0, false, errors.New("CHECK-NEXT snapshot has no recoverable preceding anchor")
+		}
+		lines := context.fn.lines
+		start := context.nextLine
+		if end, ok := matchSnapshotAt(group, directives, lines, start, true); ok {
+			return lines, start, end, true, nil
+		}
+		end, err := recoverSnapshotEnd(directives, lines, start)
+		if err != nil {
+			return nil, 0, 0, false, err
+		}
+		return lines, start, end, true, nil
+	}
+
+	lines := splitIRLines(ir)
+	if hasDefinition {
+		lines = fn.lines
+		if snapshotEndsFunction(directives) {
+			return lines, 0, len(lines) - 1, false, nil
+		}
+		if end, ok := matchSnapshotAt(group, directives, lines, 0, false); ok {
+			return lines, 0, end, false, nil
+		}
+		end, err := recoverSnapshotEnd(directives, lines, 0)
+		if err != nil {
+			return nil, 0, 0, false, err
+		}
+		return lines, 0, end, false, nil
+	}
+	if context.fn != nil {
+		lines = context.fn.lines
+	}
+	minStart := 0
+	if context.canNext {
+		minStart = context.nextLine
+	}
+	starts := matchingSnapshotWindows(group, directives, lines, minStart)
+	if len(starts) == 1 || (context.canNext && len(starts) > 1) {
+		return lines, starts[0], starts[0] + len(directives) - 1, false, nil
+	}
+	if len(starts) > 1 {
+		return nil, 0, 0, false, fmt.Errorf("continuous snapshot matches %d IR ranges", len(starts))
+	}
+	start, end, err := recoverSnapshotBounds(directives, lines, minStart, context.canNext)
+	if err != nil {
+		return nil, 0, 0, false, err
+	}
+	return lines, start, end, false, nil
+}
+
+func snapshotEndsFunction(directives []checkDirective) bool {
+	for i := len(directives) - 1; i >= 0; i-- {
+		if directives[i].kind == "CHECK-EMPTY" {
+			continue
+		}
+		return strings.TrimSpace(directives[i].pattern) == "}"
+	}
+	return false
+}
+
+func matchSnapshotAt(group string, directives []checkDirective, lines []string, start int, implicit bool) (int, bool) {
+	count := len(directives)
+	if start < 0 || start+count > len(lines) {
+		return 0, false
+	}
+	checks := group
+	if implicit {
+		checks = replaceFirstDirectiveKind(group, "CHECK")
+	}
+	input := strings.Join(lines[start:start+count], "\n") + "\n"
+	return start + count - 1, matchCheckText(checks, input) == nil
+}
+
+func matchingSnapshotWindows(group string, directives []checkDirective, lines []string, minStart int) []int {
+	var matches []int
+	for start := minStart; start+len(directives) <= len(lines); start++ {
+		if _, ok := matchSnapshotAt(group, directives, lines, start, false); ok {
+			matches = append(matches, start)
+		}
+	}
+	return matches
+}
+
+func recoverSnapshotBounds(directives []checkDirective, lines []string, minStart int, ordered bool) (int, int, error) {
+	if directives[len(directives)-1].kind == "CHECK-EMPTY" {
+		return 0, 0, errors.New("failed snapshot ends in CHECK-EMPTY and has no stable end anchor")
+	}
+	starts := matchingDirectiveLines(directives[0], lines, minStart)
+	if len(starts) == 0 || (!ordered && len(starts) != 1) {
+		return 0, 0, fmt.Errorf("snapshot start anchor matches %d IR lines", len(starts))
+	}
+	end, err := recoverSnapshotEndWithOrder(directives, lines, starts[0], ordered)
+	if err != nil {
+		return 0, 0, err
+	}
+	return starts[0], end, nil
+}
+
+func recoverSnapshotEnd(directives []checkDirective, lines []string, start int) (int, error) {
+	return recoverSnapshotEndWithOrder(directives, lines, start, false)
+}
+
+func recoverSnapshotEndWithOrder(directives []checkDirective, lines []string, start int, ordered bool) (int, error) {
+	last := directives[len(directives)-1]
+	if last.kind == "CHECK-EMPTY" {
+		return 0, errors.New("failed snapshot ends in CHECK-EMPTY and has no stable end anchor")
+	}
+	ends := matchingDirectiveLines(last, lines, start+1)
+	var after []int
+	for _, end := range ends {
+		after = append(after, end)
+	}
+	if len(after) == 0 || (!ordered && len(after) != 1) {
+		return 0, fmt.Errorf("snapshot end anchor matches %d IR lines after its start", len(after))
+	}
+	return after[0], nil
+}
+
+func matchingDirectiveLines(directive checkDirective, lines []string, minStart int) []int {
+	if directive.kind == "CHECK-EMPTY" {
+		return nil
+	}
+	check := "// CHECK: " + directive.pattern + "\n"
+	var matches []int
+	for i := minStart; i < len(lines); i++ {
+		line := lines[i]
+		if matchCheckText(check, line+"\n") == nil {
+			matches = append(matches, i)
+		}
+	}
+	return matches
+}
+
+func replaceFirstDirectiveKind(group, kind string) string {
+	loc := checkDirectiveRE.FindStringSubmatchIndex(group)
+	if loc == nil {
+		return group
+	}
+	return group[:loc[2]] + kind + group[loc[3]:]
+}
+
+func buildRangeChecks(lines []string, modulePath string, first checkDirective, implicit bool) []string {
+	checks := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			checks = append(checks, "// CHECK-EMPTY:")
+			continue
+		}
+		if i == 0 && !implicit {
+			pattern := first.pattern
+			if len(matchingDirectiveLines(first, lines[:1], 0)) == 0 {
+				pattern = generalizeIRLine(line, modulePath)
+				if strings.HasPrefix(line, "define ") {
+					pattern = generalizeDefineLine(line, modulePath)
+				}
+			}
+			checks = append(checks, "// "+first.kind+": "+pattern)
+			continue
+		}
+		checks = append(checks, "// CHECK-NEXT: "+generalizeIRLine(line, modulePath))
+	}
+	return checks
 }
 
 func preserveTrailingNewlines(generated, original string) string {
@@ -253,19 +501,41 @@ func sourceCheckGroups(src string) []checkGroup {
 	return groups
 }
 
-func findFunctionForCheckGroup(group string, funcs []irFunction) (irFunction, bool, error) {
-	var definitionCheck string
+func indexFunctionChecks(funcs []irFunction, modulePath string) map[string][]*irFunction {
+	checks := make(map[string][]*irFunction, len(funcs))
+	for i := range funcs {
+		if len(funcs[i].lines) == 0 {
+			continue
+		}
+		line := generalizeDefineLine(funcs[i].lines[0], modulePath)
+		checks[line] = append(checks[line], &funcs[i])
+	}
+	return checks
+}
+
+func findFunctionForCheckGroup(group string, funcs []irFunction, functionChecks map[string][]*irFunction) (irFunction, bool, error) {
+	var definition string
 	for _, line := range strings.Split(group, "\n") {
 		idx := strings.Index(line, "define ")
 		if idx < 0 {
 			continue
 		}
-		definitionCheck = "// CHECK: " + line[idx:] + "\n"
+		definition = line[idx:]
 		break
 	}
-	if definitionCheck == "" {
+	if definition == "" {
 		return irFunction{}, false, nil
 	}
+	if matched := functionChecks[definition]; len(matched) != 0 {
+		if len(matched) != 1 {
+			return irFunction{}, false, fmt.Errorf("function CHECK matches both %q and %q", matched[0].symbol, matched[1].symbol)
+		}
+		return *matched[0], true, nil
+	}
+
+	// Hand-written definition checks can intentionally be looser than litgen's
+	// output. Retain FileCheck matching as a compatibility fallback for them.
+	definitionCheck := "// CHECK: " + definition + "\n"
 	var matched *irFunction
 	for i := range funcs {
 		if len(funcs[i].lines) == 0 || matchCheckText(definitionCheck, strings.Join(funcs[i].lines, "\n")) != nil {
@@ -276,10 +546,56 @@ func findFunctionForCheckGroup(group string, funcs []irFunction) (irFunction, bo
 		}
 		matched = &funcs[i]
 	}
-	if matched == nil {
-		return irFunction{}, false, fmt.Errorf("function CHECK does not match current IR: %s", strings.TrimSpace(definitionCheck))
+	if matched != nil {
+		return *matched, true, nil
 	}
-	return *matched, true, nil
+
+	// A source or ABI change can alter the signature while the function symbol
+	// remains stable. Match just that symbol before giving up on the snapshot.
+	symbolPattern, ok := definitionSymbolToken(definition)
+	if ok {
+		for i := range funcs {
+			if len(funcs[i].lines) == 0 {
+				continue
+			}
+			actual, found := definitionSymbolToken(funcs[i].lines[0])
+			if !found || matchCheckText("// CHECK: "+symbolPattern+"\n", actual+"\n") != nil {
+				continue
+			}
+			if matched != nil {
+				return irFunction{}, false, fmt.Errorf("function symbol CHECK matches both %q and %q", matched.symbol, funcs[i].symbol)
+			}
+			matched = &funcs[i]
+		}
+		if matched != nil {
+			return *matched, true, nil
+		}
+	}
+	return irFunction{}, false, fmt.Errorf("function CHECK does not match current IR: %s", strings.TrimSpace(definitionCheck))
+}
+
+func definitionSymbolToken(definition string) (string, bool) {
+	start := strings.IndexByte(definition, '@')
+	if start < 0 {
+		return "", false
+	}
+	inQuote := false
+	regexDepth := 0
+	for i := start + 1; i < len(definition); i++ {
+		switch {
+		case i+1 < len(definition) && definition[i:i+2] == "{{":
+			regexDepth++
+			i++
+		case regexDepth > 0 && i+1 < len(definition) && definition[i:i+2] == "}}":
+			regexDepth--
+			i++
+		case regexDepth == 0 && definition[i] == '"' && !isEscapedQuote(definition, i):
+			inQuote = !inQuote
+		case regexDepth == 0 && !inQuote && definition[i] == '(':
+			return definition[start:i], true
+		}
+	}
+	return "", false
 }
 
 func matchCheckText(checks, ir string) error {
@@ -682,6 +998,8 @@ func generalizeIRLine(line, modulePath string) string {
 }
 
 func scrubIRLine(line string) string {
+	// Escape source IR syntax before adding FileCheck regexes below.
+	line = strings.ReplaceAll(line, "[[", `{{\[\[}}`)
 	line = debugMetaRE.ReplaceAllString(line, "")
 	line = generalizeClosureEnvAttrs(line)
 	line = symbolHashRE.ReplaceAllString(line, `$${{[-A-Za-z0-9_]+}}`)
@@ -689,7 +1007,6 @@ func scrubIRLine(line string) string {
 	line = numericGlobalRE.ReplaceAllString(line, `@{{[0-9]+}}`)
 	line = metadataIDRE.ReplaceAllString(line, `!{{[0-9]+}}`)
 	line = generalizePlatformIR(line)
-	line = strings.ReplaceAll(line, "[[", `{{\[\[}}`)
 	return strings.TrimRight(line, " \t")
 }
 
@@ -702,8 +1019,8 @@ func generalizePlatformIR(line string) string {
 	line = sigJumpRE.ReplaceAllString(line, `@{{(__)?}}${1}`)
 	line = plainJumpRE.ReplaceAllString(line, `@{{_*}}${1}`)
 	line = jmpBufAllocaRE.ReplaceAllString(line, `alloca i8, i64 {{(196|200)}}, align 1`)
-	for _, opaque := range pthreadOpaqueSizes {
-		if strings.Contains(line, "/runtime/internal/clite/pthread/sync."+opaque.typeName+`"`) {
+	if match := pthreadTypeRE.FindStringSubmatch(line); match != nil {
+		if opaque, ok := pthreadOpaqueSizes[match[1]]; ok {
 			return opaque.sizes.ReplaceAllString(line, opaque.want)
 		}
 	}

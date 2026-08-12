@@ -446,6 +446,18 @@ func TestGeneralizePlatformIR(t *testing.T) {
 			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.Mutex" { [64 x i8] zeroinitializer }, ptr %0`,
 			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.Mutex" { [{{(40|48|64)}} x i8] zeroinitializer }, ptr %0`,
 		},
+		{
+			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.MutexAttr" { [16 x i8] zeroinitializer }, ptr %0`,
+			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.MutexAttr" { [{{(4|8|16)}} x i8] zeroinitializer }, ptr %0`,
+		},
+		{
+			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.RWLockAttr" { [24 x i8] zeroinitializer }, ptr %0`,
+			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.RWLockAttr" { [{{(8|16|24)}} x i8] zeroinitializer }, ptr %0`,
+		},
+		{
+			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.CondAttr" { [8 x i8] zeroinitializer }, ptr %0`,
+			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.CondAttr" { [{{(4|8|16)}} x i8] zeroinitializer }, ptr %0`,
+		},
 	}
 	for _, test := range tests {
 		if got := generalizePlatformIR(test.line); got != test.want {
@@ -464,11 +476,27 @@ func TestGeneralizeIRLine_WildcardsUnstableIDs(t *testing.T) {
 }
 
 func TestGeneralizeIRLine_EscapesFileCheckSyntaxAndCgoHash(t *testing.T) {
-	line := `  %0 = load ptr, ptr @main._cgo_52352d07b8a3_Cfunc_free, align 8 ; map[[2]int]`
+	line := `  %0 = load ptr, ptr @0[[, ptr @main._cgo_52352d07b8a3_Cfunc_free`
 	got := generalizeIRLine(line, "")
-	want := `  %0 = load ptr, ptr @main._cgo_{{[0-9a-f]+}}_Cfunc_free, align 8 ; map{{\[\[}}2]int]`
+	want := `  %0 = load ptr, ptr @{{[0-9]+}}{{\[\[}}, ptr @main._cgo_{{[0-9a-f]+}}_Cfunc_free`
 	if got != want {
 		t.Fatalf("generalizeIRLine() = %q, want %q", got, want)
+	}
+}
+
+func TestIndexFunctionChecks(t *testing.T) {
+	funcs := parseIR(`define void @main.main() {
+entry:
+  ret void
+}
+`).funcs
+	checks := indexFunctionChecks(funcs, "example.com")
+	got, found, err := findFunctionForCheckGroup("// CHECK-LABEL: define void @main.main(){{.*}} {\n", funcs, checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || got.symbol != "main.main" {
+		t.Fatalf("findFunctionForCheckGroup() = (%q, %v), want main.main", got.symbol, found)
 	}
 }
 
@@ -620,5 +648,130 @@ entry:
 	}
 	if changed || got != src {
 		t.Fatalf("non-CHECK directives should remain unchanged:\n%s", got)
+	}
+}
+
+func TestUpdateSourceChecks_RegeneratesPassingContinuousSnapshot(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+// CHECK-LABEL: define void @main.main(){{.*}} {
+// CHECK-NEXT: entry:
+// CHECK-NEXT:   ret {{.*}}
+// CHECK-NEXT: }
+func main() {}
+`
+	const ir = `define void @main.main() {
+entry:
+  ret void
+}
+`
+	got, changed, err := updateSourceChecks(src, "in.go", "main", "example.com", ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || !strings.Contains(got, "// CHECK-NEXT:   ret void") {
+		t.Fatalf("passing continuous snapshot was not regenerated:\n%s", got)
+	}
+}
+
+func TestUpdateSourceChecks_RecoversChangedFunctionSignature(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+// CHECK-LABEL: define i64 @main.changed(i64 %0){{.*}} {
+// CHECK-NEXT: entry:
+// CHECK-NEXT:   ret i64 %0
+// CHECK-NEXT: }
+func changed(int) int { return 0 }
+`
+	const ir = `define void @main.changed(ptr %0) {
+entry:
+  ret void
+}
+`
+	got, changed, err := updateSourceChecks(src, "in.go", "main", "example.com", ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || !strings.Contains(got, "// CHECK-LABEL: define void @main.changed(ptr %0){{.*}} {") {
+		t.Fatalf("changed function signature was not recovered:\n%s", got)
+	}
+}
+
+func TestUpdateSourceChecks_RecoversChangedLocalSnapshotBounds(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+// CHECK-LABEL: define void @main.main(){{.*}} {
+func main() {
+	// CHECK:   call void @main.work()
+	// CHECK-NEXT:   ret void
+	work()
+}
+`
+	const ir = `define void @main.main() {
+entry:
+  call void @main.work()
+  call void @main.added()
+  ret void
+}
+`
+	got, changed, err := updateSourceChecks(src, "in.go", "main", "example.com", ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || !strings.Contains(got, "// CHECK-NEXT:   call void @main.added()") {
+		t.Fatalf("changed local snapshot was not recovered:\n%s", got)
+	}
+}
+
+func TestUpdateSourceChecks_RejectsAmbiguousSnapshotBounds(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+func main() {
+	// CHECK:   load i64, ptr %0
+	// CHECK-NEXT:   ret void
+}
+`
+	const ir = `define void @main.main() {
+entry:
+  load i64, ptr %0
+  load i64, ptr %0
+  call void @main.added()
+  ret void
+}
+`
+	_, _, err := updateSourceChecks(src, "in.go", "main", "example.com", ir)
+	if err == nil || !strings.Contains(err.Error(), "start anchor matches 2 IR lines") {
+		t.Fatalf("ambiguous snapshot error = %v", err)
+	}
+}
+
+func TestUpdateSourceChecks_RejectsFailingManualCheck(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+// CHECK-LABEL: define void @main.main()
+// CHECK: call void @main.missing()
+func main() {}
+`
+	const ir = `define void @main.main() {
+entry:
+  ret void
+}
+`
+	_, _, err := updateSourceChecks(src, "in.go", "main", "example.com", ir)
+	if err == nil || !strings.Contains(err.Error(), "cannot be safely updated") {
+		t.Fatalf("manual CHECK error = %v", err)
+	}
+}
+
+func TestUpdateSourceChecks_RequiresForceToInitialize(t *testing.T) {
+	const src = "// LITTEST\npackage p\n"
+	_, _, err := updateSourceChecks(src, "in.go", "main", "example.com", "")
+	if err == nil || !strings.Contains(err.Error(), "use -force") {
+		t.Fatalf("missing CHECK error = %v", err)
 	}
 }

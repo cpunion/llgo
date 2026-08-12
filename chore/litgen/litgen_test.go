@@ -27,7 +27,7 @@ func TestProcessPath_SingleFileUsesContainingDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := processPath(sourceFile); err != nil {
+	if err := processPathWithForce(sourceFile, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -68,7 +68,7 @@ func TestProcessPath_UsesFlagsFileTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := processPath(sourceFile); err != nil {
+	if err := processPathWithForce(sourceFile, true); err != nil {
 		t.Fatal(err)
 	}
 

@@ -111,12 +111,19 @@ go run ./chore/litgen cl/_testrt/litdemo
 go run ./chore/litgen cl/_testdata
 ```
 
+Replace all CHECK directives and regenerate complete IR checks:
+
+```bash
+go run ./chore/litgen -force cl/_testdata
+```
+
 Behavior:
 
 - Accepts one or more paths.
 - If the path is a `.go` file, it refreshes only that file. The file must start with `// LITTEST`.
 - If the path is a directory, it walks that directory recursively, finds marked source files, and refreshes each marked test in place.
-- Rewrites embedded `CHECK-LABEL`, `CHECK-NEXT`, `CHECK-EMPTY`, and referenced constant `CHECK-LINE` directives from the current generated IR.
+- By default, regenerates recognized `CHECK`/`CHECK-LABEL` plus `CHECK-NEXT`/`CHECK-EMPTY` snapshots in place, even when they still pass. Hand-written checks are preserved and must pass FileCheck; ambiguous or unrecoverable snapshots fail without writing.
+- With `-force`, replaces all IR CHECK directives and generates referenced globals and all supported functions. `SYMBOL-*` checks are preserved.
 - Does not update `expect.txt` and does not write `out.ll`.
 
 Use `litgen` when the test case stores its IR expectations directly in the Go source instead of `out.ll`.
