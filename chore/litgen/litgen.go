@@ -21,14 +21,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
+	llgoenv "github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/littest"
 	"github.com/goplus/llgo/xtool/env/llvm"
 )
 
 var force = flag.Bool("force", false, "replace all CHECK directives with fully regenerated IR checks")
+var setupLLGoRootOnce sync.Once
 
 func main() {
+	setupLLGoRoot()
 	llvm.SetupPath()
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s <file-or-dir> [<file-or-dir>...]\n", filepath.Base(os.Args[0]))
@@ -42,6 +46,17 @@ func main() {
 	for _, arg := range flag.Args() {
 		fatal(processPath(arg))
 	}
+}
+
+func setupLLGoRoot() {
+	setupLLGoRootOnce.Do(func() {
+		if os.Getenv("LLGO_ROOT") != "" {
+			return
+		}
+		if root := llgoenv.LLGoROOT(); root != "" {
+			_ = os.Setenv("LLGO_ROOT", root)
+		}
+	})
 }
 
 func processPath(path string) error {

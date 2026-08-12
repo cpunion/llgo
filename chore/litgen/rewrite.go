@@ -662,6 +662,7 @@ func resolveTarget(sourceFile, genTarget string) (resolvedTarget, error) {
 }
 
 func genIR(target string) (ret string, err error) {
+	setupLLGoRoot()
 	defer func() {
 		if r := recover(); r != nil {
 			switch v := r.(type) {
