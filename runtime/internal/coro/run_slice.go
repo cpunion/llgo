@@ -165,6 +165,20 @@ func serviceExecutorRunLocal(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	return ExecutorRunStep{Kind: ExecutorRunStepSource, Poll: progress}, true
 }
 
+// nextExecutorRunLocalStep is deliberately kept out of the common selector.
+// Resolving and materializing an owner-local completion is a selected cold
+// path; inlining its typed cursor machinery into every ordinary runnable or
+// compute reduction expands the scheduler hot loop even when the local FIFO is
+// empty.
+//
+//go:noinline
+func nextExecutorRunLocalStep(driver *ExecutorDriver) (ExecutorRunStep, bool) {
+	if cleanup, pending := pendingResumeCleanupStepForCursor(&driver.local.resolve); pending {
+		return ExecutorRunStep{Kind: ExecutorRunStepMaterialize, Cleanup: cleanup}, true
+	}
+	return serviceExecutorRunLocal(driver)
+}
+
 // CommitExecutorRunSourceDistribution closes the optional target-side ready
 // distribution boundary after one complete Source reduction. Source completion
 // records readyDebt before returning so a hot source cannot starve a newly
@@ -262,10 +276,7 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 	// before dispatching another G; typed cleanup still returns through the
 	// ordinary direct-runtime Materialize boundary.
 	if ownerLocalCompletionPending(driver) {
-		if cleanup, pending := pendingResumeCleanupStepForCursor(&driver.local.resolve); pending {
-			return ExecutorRunStep{Kind: ExecutorRunStepMaterialize, Cleanup: cleanup}, true
-		}
-		return serviceExecutorRunLocal(driver)
+		return nextExecutorRunLocalStep(driver)
 	}
 	if driver.run.readyDebt {
 		if runnableForOSThreadOwner(p) {

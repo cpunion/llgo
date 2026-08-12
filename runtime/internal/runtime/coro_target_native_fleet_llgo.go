@@ -116,6 +116,14 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		coroRuntimeAbort("native coroutine execution quota start failed")
 		return false
 	}
+	for index := uint32(0); index < coroNativeFleetV1State.domainCount; index++ {
+		driver := coroNativeFleetV1State.domains[index].driverOwnerV1()
+		if !coro.BindExecutorServicePressure(driver, &coroNativeFleetV1State.execution) {
+			state.lifecycle = coroNativeFleetTargetFailedV1
+			coroRuntimeAbort("native coroutine execution quota pressure bind failed")
+			return false
+		}
+	}
 	program, programOK := coroNativeFleetHandleV1(0)
 	if !programOK || program.Executor != handle || program.Route != 1 {
 		state.lifecycle = coroNativeFleetTargetFailedV1

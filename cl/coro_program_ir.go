@@ -223,6 +223,33 @@ func (ir *coroProgramIR) freezeSiteOwner(
 		return fmt.Errorf("coroutine site plan owner %q has no frozen function preamble", function.Name())
 	}
 	semantic := ir.semanticPlans[key]
+	preamble := ir.functionPreambles[key]
+	facts, err := deriveCoroLocalBodyFacts(prog, function, semantic, preamble.emitsGoBody)
+	if err != nil {
+		return err
+	}
+	if previous, exists := ir.localBodyFacts[function]; exists && !previous.Same(facts) {
+		return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
+	}
+	ir.localBodyFacts[function] = facts
+	ir.siteOwners[key] = none{}
+	return nil
+}
+
+// deriveCoroLocalBodyFacts projects one already-frozen semantic instruction
+// table into the analyzer-owned local body summary. Call-site finalization may
+// invoke it a second time after replacing an exact compiler-elided intrinsic
+// call with its narrower semantic recipe. Keeping the projection here avoids
+// an analysis-time raw SSA rescan and keeps ProgramIR as the sole authority.
+func deriveCoroLocalBodyFacts(
+	prog llssa.Program,
+	function *ssa.Function,
+	semantic map[ssa.Instruction]coroSemanticInstructionPlan,
+	outcomePlainEligible bool,
+) (coro.SSAFunctionBodyFacts, error) {
+	if prog == nil || function == nil {
+		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("local body facts require one exact program and function")
+	}
 	facts := coro.SSAFunctionBodyFacts{
 		Effect:           coro.NoSuspend,
 		OutcomePlainLeaf: function.Blocks != nil,
@@ -241,7 +268,7 @@ func (ir *coroProgramIR) freezeSiteOwner(
 		for instructionIndex, instruction := range block.Instrs {
 			plan, ok := semantic[instruction]
 			if !ok {
-				return fmt.Errorf("coroutine semantic SitePlan owner %q omitted source instruction %q", function.Name(), instruction.String())
+				return coro.SSAFunctionBodyFacts{}, fmt.Errorf("coroutine semantic SitePlan owner %q omitted source instruction %q", function.Name(), instruction.String())
 			}
 			if !plan.evaluated {
 				facts.OutcomePlainLeaf = false
@@ -258,7 +285,7 @@ func (ir *coroProgramIR) freezeSiteOwner(
 				facts.OutcomePlainCallCount++
 				call, ok := instruction.(*ssa.Call)
 				if !ok {
-					return fmt.Errorf("coroutine call recipe in %q is attached to %T", function.Name(), instruction)
+					return coro.SSAFunctionBodyFacts{}, fmt.Errorf("coroutine call recipe in %q is attached to %T", function.Name(), instruction)
 				}
 				blockFacts.Calls = append(blockFacts.Calls, coro.SSAAtomicCallSiteFacts{
 					Instruction:      call,
@@ -289,19 +316,18 @@ func (ir *coroProgramIR) freezeSiteOwner(
 	if len(function.Blocks) != 0 {
 		atomicPath, err := coro.NewSSAAtomicPathFacts(function, atomicBlocks)
 		if err != nil {
-			return fmt.Errorf("function %q atomic path projection: %w", function.Name(), err)
+			return coro.SSAFunctionBodyFacts{}, fmt.Errorf("function %q atomic path projection: %w", function.Name(), err)
 		}
 		facts.AtomicPath = atomicPath
 	} else {
 		facts.OutcomePlainLeaf = false
 		facts.OutcomePlainDAG = false
 	}
-	if previous, exists := ir.localBodyFacts[function]; exists && !previous.Same(facts) {
-		return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
+	if !outcomePlainEligible {
+		facts.OutcomePlainLeaf = false
+		facts.OutcomePlainDAG = false
 	}
-	ir.localBodyFacts[function] = facts
-	ir.siteOwners[key] = none{}
-	return nil
+	return facts, nil
 }
 
 // coroOutcomePlainLeafSemanticRecipe consumes the capability already frozen by
@@ -327,6 +353,82 @@ func coroOutcomePlainDAGSemanticRecipe(plan coroSemanticInstructionPlan) bool {
 	default:
 		return false
 	}
+}
+
+// finalizeOutcomePlainIntrinsicSemantics narrows exact compiler-elided source
+// calls after the call-site table is complete. Raw SSA alone cannot know that
+// a declaration call will become one helper-free LLVM operation, so the first
+// semantic pass deliberately classifies it as an ordinary call. This final
+// ProgramIR builder step admits only operations whose frozen call recipe is
+// independently shape-checked and allocation-free.
+//
+// Start with atomic intrinsics. Other InlineNoSuspend intrinsics include asm,
+// dynamic alloca, control transfer, and target-specific operations; the broad
+// enum therefore is not by itself an outcome-plain proof.
+func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(u *EmissionUniverse) error {
+	if ir == nil || u == nil || u.prog == nil {
+		return fmt.Errorf("outcome-plain intrinsic finalization requires one exact ProgramIR and universe")
+	}
+	if ir.callsFrozen {
+		return fmt.Errorf("outcome-plain intrinsic finalization occurred after call SitePlan freeze")
+	}
+	for _, function := range u.functions {
+		if function == nil || len(function.Blocks) == 0 {
+			continue
+		}
+		refined := false
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ordinary := instruction.(*ssa.Call)
+				if !ordinary {
+					continue
+				}
+				frozen, found := ir.callPlans[call]
+				if !found || frozen.failure != "" || !frozen.plan.Intrinsic ||
+					frozen.plan.Elision != CoroCallElidedIntrinsic ||
+					frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend ||
+					!isCoroAtomicIntrinsic(frozen.opcode) {
+					continue
+				}
+				for _, owner := range u.sortedUseOwners(function) {
+					key := emissionFunctionOwnerKey{function: function, owner: owner}
+					if _, sealed := ir.siteOwners[key]; !sealed {
+						return fmt.Errorf("atomic intrinsic in %q has no frozen semantic owner %q", function.Name(), owner.identity)
+					}
+					semantic, present := ir.semanticPlans[key][call]
+					if !present || !semantic.evaluated || semantic.recipe != coro.RecipeID("cl.ssa.call.v1") ||
+						semantic.effect != coro.NoSuspend || semantic.exec != 0 {
+						return fmt.Errorf("atomic intrinsic call %q has an incompatible preliminary semantic recipe", call.String())
+					}
+					semantic.recipe = coro.RecipeID("cl.intrinsic.atomic.inline-nosuspend.v1")
+					semantic.outcomePlainLeaf = true
+					ir.semanticPlans[key][call] = semantic
+				}
+				refined = true
+			}
+		}
+		if !refined {
+			continue
+		}
+		var final coro.SSAFunctionBodyFacts
+		for index, owner := range u.sortedUseOwners(function) {
+			key := emissionFunctionOwnerKey{function: function, owner: owner}
+			preamble, present := ir.functionPreambles[key]
+			if !present {
+				return fmt.Errorf("finalize atomic intrinsic body %q: owner %q has no function preamble", function.Name(), owner.identity)
+			}
+			facts, err := deriveCoroLocalBodyFacts(u.prog, function, ir.semanticPlans[key], preamble.emitsGoBody)
+			if err != nil {
+				return fmt.Errorf("finalize atomic intrinsic body %q: %w", function.Name(), err)
+			}
+			if index != 0 && !final.Same(facts) {
+				return fmt.Errorf("function %q acquired owner-dependent finalized local semantic facts", function.Name())
+			}
+			final = facts
+		}
+		ir.localBodyFacts[function] = final
+	}
+	return nil
 }
 
 func coroSemanticEvaluatedCFGHasCycle(
@@ -388,7 +490,7 @@ func (ir *coroProgramIR) semanticInstructionPlan(
 }
 
 func (ir *coroProgramIR) functionLocalBodyFacts(function *ssa.Function) (coro.SSAFunctionBodyFacts, error) {
-	if ir == nil || function == nil {
+	if ir == nil || !ir.callsFrozen || function == nil {
 		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("local body facts require one exact function")
 	}
 	facts, ok := ir.localBodyFacts[function]

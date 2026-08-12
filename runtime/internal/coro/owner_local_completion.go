@@ -93,7 +93,9 @@ func appendOwnerLocalCompletionUnchecked(driver *ExecutorDriver, record *WaitSet
 }
 
 func ownerLocalCompletionPending(driver *ExecutorDriver) bool {
-	return driver != nil && (driver.local.head != nil ||
+	// Include a lone tail so malformed selected state enters the exact cold
+	// validator and fails closed instead of being skipped by the hot selector.
+	return driver != nil && (driver.local.head != nil || driver.local.tail != nil ||
 		driver.local.resolve.phase != publishedEpochResolveIdle)
 }
 

@@ -65,6 +65,10 @@ type coroFunctionPreamblePlan struct {
 	localityGuards        []locality.Kind
 	localContextEntry     bool
 	logicalCallerEntry    bool
+	// emitsGoBody distinguishes a real frontend-emitted Go definition from a
+	// declaration/intrinsic stub whose SSA body exists only for policy and type
+	// analysis. Only the former may acquire a physical outcome-plain entry.
+	emitsGoBody bool
 }
 
 func cloneCoroFunctionPreamblePlan(plan coroFunctionPreamblePlan) coroFunctionPreamblePlan {
@@ -79,7 +83,8 @@ func sameCoroFunctionPreamblePlan(first, second coroFunctionPreamblePlan) bool {
 		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers) &&
 		slices.Equal(first.localityGuards, second.localityGuards) &&
 		first.localContextEntry == second.localContextEntry &&
-		first.logicalCallerEntry == second.logicalCallerEntry
+		first.logicalCallerEntry == second.logicalCallerEntry &&
+		first.emitsGoBody == second.emitsGoBody
 }
 
 func (plan coroFunctionPreamblePlan) validate() error {
@@ -199,7 +204,7 @@ func (builder coroProgramIRBuilder) materializeFunctionPreamble(
 	if u == nil || u.coroProgramIR == nil || ctx == nil || ownerFn == nil || ownerPkg == nil {
 		return fmt.Errorf("prepare emission universe: function preamble requires one exact program IR, builder, owner, and function")
 	}
-	plan := coroFunctionPreamblePlan{}
+	plan := coroFunctionPreamblePlan{emitsGoBody: ftype == goFunc}
 	needsLocalContext := u.prog != nil && u.prog.NeedsLocalContext()
 	if u.prog != nil && u.logicalLocality {
 		needsLocalContext = u.prog.NeedsLogicalLocalContext()

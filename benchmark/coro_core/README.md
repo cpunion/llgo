@@ -28,6 +28,13 @@ pollute the core artifact. Its modes are:
 - `tcp`: one persistent loopback TCP connection, with 4 KiB request/echo round
   trips between two goroutines.
 
+`testdata/preempt_timer` is a bounded progress gate: one goroutine sleeps on a
+standard-library timer while the sole runnable goroutine executes a pure
+compute loop. The timer must wake by compiler safepoint preemption before the
+100-million-iteration guard is exhausted. This catches executor-service
+optimizations which accidentally rely only on runnable peers or callbacks and
+therefore starve elapsed timer/poll sources.
+
 The final output field is workload wall time in nanoseconds, measured inside
 the process after argument parsing. It excludes process startup; an external
 resource tool should still measure peak RSS for `park`.
@@ -57,6 +64,7 @@ the host Go tool as a lightweight source check:
 go test \
   ./benchmark/coro_core/testdata/workload \
   ./benchmark/coro_core/testdata/io_workload \
+  ./benchmark/coro_core/testdata/preempt_timer \
   ./benchmark/coro_core/testdata/wasm
 ```
 

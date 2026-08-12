@@ -41,6 +41,24 @@ type ExecutionQuota struct {
 	holders   uint32
 }
 
+// BindExecutorServicePressure gives one already-bound executor a read-only
+// view of this quota's waiter publication word. The quota and driver must both
+// remain at stable addresses through driver retirement. This is startup-only:
+// a runtime binds every fleet route after Start and before any managed resume.
+//
+// The word is advisory, not a second admission gate. A compiler safepoint only
+// uses a nonzero value to return to the scheduler; TryAcquire and Release remain
+// the sole owners of managed-execution admission.
+func BindExecutorServicePressure(driver *ExecutorDriver, quota *ExecutionQuota) bool {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.servicePressure != nil || quota == nil ||
+		preemptLoad(&quota.lifecycle) != uint32(executionQuotaActive) {
+		return false
+	}
+	driver.servicePressure = &quota.waiters
+	return true
+}
+
 type executionQuotaLifecycle uint32
 
 const (
@@ -276,6 +294,13 @@ func (quota *ExecutionQuota) TryAcquire(route RouteID) (acquired, ok bool) {
 	if !claimed {
 		return false, false
 	}
+	// A route whose bit was already published is an awakened contender. A
+	// freshly released holder has no bit; if it immediately races back into
+	// TryAcquire while another route is waiting, it must join the waiter set
+	// instead of repeatedly stealing the permit before that owner's doorbell
+	// wake can run. This is advisory FIFO at the physical-route boundary, not a
+	// ticket lock: uncontended acquisition retains the one-CAS fast path.
+	wasWaiting := preemptLoad(&quota.waiters)&mask != 0
 	for {
 		if preemptLoad(&quota.lifecycle) != uint32(executionQuotaActive) {
 			_ = executionQuotaClearWaiter(quota, mask)
@@ -290,6 +315,26 @@ func (quota *ExecutionQuota) TryAcquire(route RouteID) (acquired, ok bool) {
 		limit := preemptLoad(&quota.limit)
 		active := preemptLoad(&quota.active)
 		if limit != 0 && active < limit {
+			if !wasWaiting && preemptLoad(&quota.waiters)&^mask != 0 {
+				if !executionQuotaSetWaiter(quota, mask) {
+					_, _ = executionQuotaTransitionHolder(
+						quota,
+						route,
+						executionQuotaHolderClaiming,
+						executionQuotaHolderIdle,
+					)
+					return false, false
+				}
+				if _, deferred := executionQuotaTransitionHolder(
+					quota,
+					route,
+					executionQuotaHolderClaiming,
+					executionQuotaHolderIdle,
+				); !deferred {
+					return false, false
+				}
+				return false, true
+			}
 			if !preemptCompareAndSwap(&quota.active, active, active+1) {
 				continue
 			}

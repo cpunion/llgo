@@ -57,7 +57,7 @@ func pollCompilerSafepointForTest(t *testing.T, g *G) bool {
 		return false
 	}
 	g.active.header.StateID = preemptCheckpointStride
-	return PollPreempt(g)
+	return PollPreemptCompiler(g)
 }
 
 func finishWaitTestTask(t *testing.T, p *P, task *yieldingTestG, action Action) {

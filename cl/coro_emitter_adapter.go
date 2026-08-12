@@ -132,7 +132,13 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		p.observeCoroPhysicalControl(call, instructionPlan.control)
 	}
 	if p.hasOutcomePlainPhysicalBody() && instructionPlan.control != coroPhysicalControlDirectOutcome {
-		panic(fmt.Sprintf("outcome-plain DAG call selected incompatible frozen control recipe %s", instructionPlan.control))
+		// A ProgramIR-finalized helper-free intrinsic remains a source *ssa.Call
+		// but has no physical callee edge. Let the ordinary intrinsic emitter own
+		// it. Every unrefined source call still fails closed here.
+		if instructionPlan.control != coroPhysicalControlNone ||
+			!coroOutcomePlainLeafSemanticRecipe(instructionPlan.semantic) {
+			panic(fmt.Sprintf("outcome-plain DAG call selected incompatible frozen control recipe %s", instructionPlan.control))
+		}
 	}
 	switch instructionPlan.control {
 	case coroPhysicalControlDirectAwait:

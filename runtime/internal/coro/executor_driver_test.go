@@ -96,6 +96,10 @@ func finishReadyDriverTasks(t *testing.T, p *P, tasks map[*G]*yieldingTestG) {
 func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	p := new(P)
 	driver, registry, handle := bindTestExecutorDriver(t, p)
+	slot, ok := executorSlot(registry, handle)
+	if !ok || driver.requestGate != &slot.gate {
+		t.Fatal("bound driver did not retain its exact stable request gate")
+	}
 	if RequestSchedule(p) || preemptLoad(&p.schedule) != scheduleIdle {
 		t.Fatal("legacy P request entered a bound executor")
 	}
@@ -142,6 +146,22 @@ func TestExecutorDriverHotHeaderDefersDeepCatalogAndPollAudits(t *testing.T) {
 		t.Fatal("complete driver audit accepted an invalid logical poll cursor")
 	}
 	driver.poll = executorPollTransaction{}
+
+	// Owner-local completion is another selected-work cursor. Its exact
+	// publication/resolution gates and complete diagnostics validate payload;
+	// an unrelated managed-resume observation keeps the immutable driver hot
+	// header independent of dormant local queue state.
+	driver.local.resolve = publishedEpochResolveCursor{phase: publishedEpochResolveDiscover}
+	if !validExecutorDriverHeader(driver) {
+		t.Fatal("hot header inspected the owner-local completion cursor")
+	}
+	if validExecutorDriver(driver) {
+		t.Fatal("complete driver audit accepted an invalid owner-local completion cursor")
+	}
+	if pending, ok := ExecutorRunManagedResumePending(driver); !ok || pending {
+		t.Fatalf("observational hot gate over local cursor damage = (%t, %t)", pending, ok)
+	}
+	driver.local = ownerLocalCompletionCursor{}
 	if !validExecutorDriver(driver) {
 		t.Fatal("restored driver failed complete audit")
 	}

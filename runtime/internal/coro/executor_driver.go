@@ -25,6 +25,11 @@ import "unsafe"
 //
 // Every method is scheduler-owner-only. The driver, P, registry, and table must
 // remain at stable addresses from BindExecutor through ConfirmExecutorClose.
+// requestGate caches the exact registry slot gate during that lifetime; foreign
+// producers may update the gate atomically, but they never retain the driver.
+// servicePressure is an optional process-shared scheduler-pressure word. A
+// fleet quota binds its waiter word once at startup so a locally isolated G can
+// still yield to a remote executor waiting for managed-execution capacity.
 // A real target surrounds a successful PrepareExecutorSleep with its retained
 // source poll and calls WakeExecutor after a real or spurious wake.
 //
@@ -35,19 +40,21 @@ import "unsafe"
 // last-G terminal close handoff, while the target-specific join dispatcher and
 // multi-P executor migration remain later layers.
 type ExecutorDriver struct {
-	magic         uint32
-	state         executorDriverState
-	p             *P
-	registry      *ExecutorRegistry
-	handle        ExecutorHandle
-	route         RouteID
-	sources       ExecutorSourceSet
-	poll          executorPollTransaction
-	local         ownerLocalCompletionCursor
-	run           executorRunCursor
-	prepareNow    int64
-	hasPrepareNow bool
-	terminalKind  ActionKind
+	magic           uint32
+	state           executorDriverState
+	p               *P
+	registry        *ExecutorRegistry
+	handle          ExecutorHandle
+	requestGate     *uint32
+	servicePressure *uint32
+	route           RouteID
+	sources         ExecutorSourceSet
+	poll            executorPollTransaction
+	local           ownerLocalCompletionCursor
+	run             executorRunCursor
+	prepareNow      int64
+	hasPrepareNow   bool
+	terminalKind    ActionKind
 }
 
 type executorDriverState uint8
@@ -85,15 +92,24 @@ func validExecutorDriverHeader(driver *ExecutorDriver) bool {
 	}
 	return (driver.state == executorDriverTerminalClosing) == validTerminalState &&
 		driver.p != nil && driver.registry != nil && driver.handle.Slot != 0 && driver.handle.Generation != 0 &&
+		driver.requestGate != nil &&
 		driver.route.Valid() && driver.sources.route == driver.route &&
 		driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
 		validExecutorSourceSetHeader(&driver.sources, driver.p) &&
-		validOwnerLocalCompletionHeader(&driver.local, driver.p) &&
 		validExecutorRunCursor(&driver.run, driver.p)
 }
 
 func validExecutorDriver(driver *ExecutorDriver) bool {
-	return validExecutorDriverHeader(driver) &&
+	// The owner-local cursor is selected scheduler work, not an immutable
+	// driver binding. Keep its complete audit at full lifecycle boundaries and
+	// validate it again immediately before local publication or resolution;
+	// unrelated source and managed-resume probes must not make this optional
+	// queue part of the common driver-header gate.
+	if !validExecutorDriverHeader(driver) {
+		return false
+	}
+	slot, ok := executorSlot(driver.registry, driver.handle)
+	return ok && driver.requestGate == &slot.gate &&
 		validExecutorSourceSet(&driver.sources, driver.p) &&
 		validExecutorPollTransaction(&driver.poll, &driver.sources) &&
 		validOwnerLocalCompletion(&driver.local, driver.p)
@@ -344,8 +360,11 @@ func idleExecutorScheduler(p *P) bool {
 // its executorMode load; executorMode is a capability guard, not a refcounted
 // admission barrier for migration from the legacy ABI.
 func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, catalog ExecutorSourceCatalog) bool {
+	requestSlot, requestOK := executorSlot(registry, handle)
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
-		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
+		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.requestGate != nil ||
+		driver.servicePressure != nil ||
+		driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
 		driver.poll != (executorPollTransaction{}) ||
 		driver.local != (ownerLocalCompletionCursor{}) ||
 		driver.run != (executorRunCursor{}) ||
@@ -355,7 +374,8 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 		p.osThreadLockOwner != nil || p.foreignReentry != nil ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
-		!route.Valid() || !activeExecutorHandle(registry, handle) || !bindExecutorSourceSetAtRoute(&driver.sources, p, route, catalog) {
+		!route.Valid() || !requestOK || !activeExecutorHandle(registry, handle) ||
+		!bindExecutorSourceSetAtRoute(&driver.sources, p, route, catalog) {
 		return false
 	}
 	driver.magic = executorDriverMagic
@@ -363,6 +383,7 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 	driver.p = p
 	driver.registry = registry
 	driver.handle = handle
+	driver.requestGate = &requestSlot.gate
 	driver.route = route
 	p.executor = driver
 	preemptStore(&p.executorMode, executorModeBound)

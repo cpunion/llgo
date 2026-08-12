@@ -21,7 +21,7 @@ import (
 	"testing"
 )
 
-func consumeServicePreemptTestBudget(t *testing.T, p *P, g *G) {
+func consumeServicePreemptTestBudget(t *testing.T, p *P, g *G, wantYield bool) {
 	t.Helper()
 	if p.servicePreemptBudget != servicePreemptSafepointBudget {
 		t.Fatalf("initial service preemption budget = %d, want %d", p.servicePreemptBudget, servicePreemptSafepointBudget)
@@ -35,18 +35,22 @@ func consumeServicePreemptTestBudget(t *testing.T, p *P, g *G) {
 			t.Fatalf("service preemption budget after safepoint %d = %d, want %d", safepoint, p.servicePreemptBudget, want)
 		}
 	}
-	if !pollCompilerSafepointForTest(t, g) {
-		t.Fatalf("service preemption did not fire at safepoint %d", servicePreemptSafepointBudget)
+	if yielded := pollCompilerSafepointForTest(t, g); yielded != wantYield {
+		t.Fatalf("service preemption at safepoint %d = %t, want %t",
+			servicePreemptSafepointBudget, yielded, wantYield)
 	}
 	if p.servicePreemptBudget != servicePreemptSafepointBudget {
 		t.Fatalf("fired service preemption budget = %d, want reload %d", p.servicePreemptBudget, servicePreemptSafepointBudget)
 	}
 }
 
-func runServicePreemptTestQuantum(t *testing.T, p *P, task *yieldingTestG) {
+func runServicePreemptTestQuantum(t *testing.T, p *P, task *yieldingTestG, wantServiceYield bool) {
 	t.Helper()
 	action := beginWaitTestResume(t, p, task)
-	consumeServicePreemptTestBudget(t, p, task.g)
+	consumeServicePreemptTestBudget(t, p, task.g, wantServiceYield)
+	if !wantServiceYield && (!RequestPreempt(task.g) || !PollPreemptCompiler(task.g)) {
+		t.Fatal("explicit request did not end a bound sole-runnable service slice")
+	}
 	yieldRunningDriverTask(t, p, task, action)
 	if p.servicePreemptBudget != 0 || p.current != nil {
 		t.Fatalf("service yield retained run state: budget=%d current=%p", p.servicePreemptBudget, p.current)
@@ -66,11 +70,11 @@ func finishServicePreemptTestTask(t *testing.T, p *P, task *yieldingTestG) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
-func TestServicePreemptQuantumIsEventSourceIndependent(t *testing.T) {
+func TestServicePreemptQuantumUsesBoundRequestContract(t *testing.T) {
 	t.Run("unbound", func(t *testing.T) {
 		p := new(P)
 		task := newYieldingTestG(t, "service-unbound")
-		runServicePreemptTestQuantum(t, p, task)
+		runServicePreemptTestQuantum(t, p, task, true)
 		finishServicePreemptTestTask(t, p, task)
 	})
 
@@ -78,7 +82,7 @@ func TestServicePreemptQuantumIsEventSourceIndependent(t *testing.T) {
 		p := new(P)
 		driver, registry, _ := bindTestExecutorDriver(t, p)
 		task := newYieldingTestG(t, "service-source-empty")
-		runServicePreemptTestQuantum(t, p, task)
+		runServicePreemptTestQuantum(t, p, task, false)
 		closeTestExecutorDriver(t, driver)
 		finishServicePreemptTestTask(t, p, task)
 		if !registry.CanRelease() {
@@ -90,7 +94,7 @@ func TestServicePreemptQuantumIsEventSourceIndependent(t *testing.T) {
 		p := new(P)
 		driver, registry, timers, _ := bindTestExecutorDriverWithTimers(t, p)
 		task := newYieldingTestG(t, "service-timer-empty")
-		runServicePreemptTestQuantum(t, p, task)
+		runServicePreemptTestQuantum(t, p, task, false)
 		closeTestExecutorDriver(t, driver)
 		finishServicePreemptTestTask(t, p, task)
 		if !timers.CanRelease() || !registry.CanRelease() {
@@ -98,6 +102,106 @@ func TestServicePreemptQuantumIsEventSourceIndependent(t *testing.T) {
 		}
 	})
 
+	t.Run("bound-waiting-source-audit", func(t *testing.T) {
+		p := new(P)
+		driver, registry, _ := bindTestExecutorDriver(t, p)
+		task := newYieldingTestG(t, "service-waiting-source")
+		action := beginWaitTestResume(t, p, task)
+
+		// The source-specific park tests cover the complete queue shape. This
+		// fixture isolates the service policy: a non-empty logical wait set must
+		// retain periodic source audits even when no runnable peer exists.
+		wait := new(WaitSetRecord)
+		p.parkWaitHead, p.parkWaitTail = wait, wait
+		consumeServicePreemptTestBudget(t, p, task.g, true)
+		p.parkWaitHead, p.parkWaitTail = nil, nil
+
+		yieldRunningDriverTask(t, p, task, action)
+		closeTestExecutorDriver(t, driver)
+		finishServicePreemptTestTask(t, p, task)
+		if !registry.CanRelease() {
+			t.Fatal("waiting-source service quantum retained executor state")
+		}
+	})
+
+	t.Run("bound-remote-quota-pressure", func(t *testing.T) {
+		p := new(P)
+		driver, registry, _ := bindTestExecutorDriver(t, p)
+		quota := new(ExecutionQuota)
+		if !quota.Start(1) || !BindExecutorServicePressure(driver, quota) ||
+			BindExecutorServicePressure(driver, quota) {
+			t.Fatal("bind shared execution-quota service pressure")
+		}
+		if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
+			t.Fatal("acquire current route execution quota")
+		}
+		if acquired, ok := quota.TryAcquire(2); acquired || !ok {
+			t.Fatalf("publish remote quota contention = (%t, %t)", acquired, ok)
+		}
+
+		task := newYieldingTestG(t, "service-remote-quota-pressure")
+		runServicePreemptTestQuantum(t, p, task, true)
+
+		if wake, ok := quota.Release(1); !wake || !ok {
+			t.Fatalf("release current route quota = (%t, %t)", wake, ok)
+		}
+		if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
+			t.Fatal("remote route did not acquire released execution quota")
+		}
+		if _, ok := quota.Release(2); !ok {
+			t.Fatal("release remote route execution quota")
+		}
+		if _, ok := quota.Seal(); !ok || !quota.Quiesced() || !quota.Retire() {
+			t.Fatal("retire shared execution quota")
+		}
+
+		closeTestExecutorDriver(t, driver)
+		finishServicePreemptTestTask(t, p, task)
+		if !registry.CanRelease() {
+			t.Fatal("remote-pressure service quantum retained executor state")
+		}
+	})
+
+}
+
+func TestCompilerPreemptPollObservesConcurrentExecutorRequest(t *testing.T) {
+	p := new(P)
+	driver, registry, executor := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "concurrent-executor-request")
+	action := beginWaitTestResume(t, p, task)
+
+	start := make(chan struct{})
+	result := make(chan ExecutorRequestResult, 1)
+	go func() {
+		<-start
+		result <- registry.Request(executor)
+	}()
+	close(start)
+
+	observed := false
+	for attempt := 0; attempt != 100000 && !observed; attempt++ {
+		observed = PollPreemptCompiler(task.g)
+		if !observed {
+			runtime.Gosched()
+		}
+	}
+	if request := <-result; request != ExecutorRequestPublished {
+		t.Fatalf("concurrent executor request = %d, want published", request)
+	}
+	if !observed {
+		t.Fatal("compiler poll missed a concurrent sticky executor request")
+	}
+
+	yieldRunningDriverTask(t, p, task, action)
+	if promoted, ok := PollReady(p); !ok || promoted != 0 || registry.ObserveRequested(executor) {
+		t.Fatalf("concurrent executor request acknowledgment = (%d, %t), requested=%t",
+			promoted, ok, registry.ObserveRequested(executor))
+	}
+	closeTestExecutorDriver(t, driver)
+	finishServicePreemptTestTask(t, p, task)
+	if !registry.CanRelease() {
+		t.Fatal("concurrent executor request retained executor state")
+	}
 }
 
 func TestServicePreemptBudgetRejectsStaleIdleState(t *testing.T) {
@@ -124,7 +228,7 @@ func TestExplicitRequestsPrecedeServiceBudget(t *testing.T) {
 		p := new(P)
 		task := newYieldingTestG(t, "service-request-g")
 		action := beginWaitTestResume(t, p, task)
-		if !RequestPreempt(task.g) || !PollPreempt(task.g) {
+		if !RequestPreempt(task.g) || !PollPreemptCompiler(task.g) {
 			t.Fatal("G-local request was not observed")
 		}
 		if p.servicePreemptBudget != servicePreemptSafepointBudget {
@@ -138,7 +242,7 @@ func TestExplicitRequestsPrecedeServiceBudget(t *testing.T) {
 		p := new(P)
 		task := newYieldingTestG(t, "service-request-p")
 		action := beginWaitTestResume(t, p, task)
-		if !RequestSchedule(p) || !PollPreempt(task.g) {
+		if !RequestSchedule(p) || !PollPreemptCompiler(task.g) {
 			t.Fatal("P scheduling request was not observed")
 		}
 		if p.servicePreemptBudget != servicePreemptSafepointBudget {
@@ -153,7 +257,7 @@ func TestExplicitRequestsPrecedeServiceBudget(t *testing.T) {
 		driver, registry, executor := bindTestExecutorDriver(t, p)
 		task := newYieldingTestG(t, "service-request-executor")
 		action := beginWaitTestResume(t, p, task)
-		if registry.Request(executor) != ExecutorRequestPublished || !PollPreempt(task.g) {
+		if registry.Request(executor) != ExecutorRequestPublished || !PollPreemptCompiler(task.g) {
 			t.Fatal("executor scheduling request was not observed")
 		}
 		if p.servicePreemptBudget != servicePreemptSafepointBudget {

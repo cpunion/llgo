@@ -217,11 +217,13 @@ const (
 	// preemptCheckpointStride bounds how many compiler safepoints may pass
 	// before a running G checks atomic G/P/executor requests. Keeping this
 	// deterministic preserves targets without a clock or signal source.
-	preemptCheckpointStride uint32 = 64
-	// servicePreemptSafepointBudget bounds a sole runnable G's complete run
-	// slice. A known competitor receives one checkpoint stride; otherwise the
-	// larger service quantum amortizes scheduler/event-source scans.
-	servicePreemptSafepointBudget uint32 = preemptCheckpointStride * 64
+	preemptCheckpointStride uint32 = 256
+	// servicePreemptSafepointBudget bounds the fallback scheduler audit cadence.
+	// A known competitor receives one checkpoint stride. A bound executor does
+	// not yield a sole runnable G merely to rediscover empty sources: every
+	// durable producer must publish its request gate. Unbound compatibility
+	// mode retains the periodic scheduler handoff as its polling fallback.
+	servicePreemptSafepointBudget uint32 = 4096
 )
 
 // ActionKind identifies either the next compiler-owned handle operation or a
@@ -431,6 +433,93 @@ func PollPreempt(g *G) bool {
 	}
 	requested, valid := pollPreemptDepthZero(g, preemptCheckpointStride)
 	return valid && requested
+}
+
+// PollPreemptCompiler is the trusted generated-code safepoint. The physical
+// resume prologue and every scheduler transition already establish or revoke
+// the complete frame/source invariants, so this hot hook rechecks only the
+// structural resume capability, the immutable P/executor binding, and the
+// three request/budget words it actually consumes.
+//
+// Runtime adapters must call this function only from
+// __llgo_coro_preempt_poll_v1. Defensive or manually driven scheduler code
+// uses PollPreempt, which retains the complete active-frame validation.
+func PollPreemptCompiler(g *G) bool {
+	if g == nil || g.magic != gMagic {
+		return false
+	}
+	p := g.runP
+	if p == nil || p.current != g || !p.inResume || g.state != GRunning ||
+		p.action.Kind != ActionResume || p.action.Flags != 0 || p.action.Handle == nil ||
+		!p.runDecisionTaken {
+		return false
+	}
+	word := loadGPreempt(g)
+	if word != preemptIdle && word != preemptRequested {
+		return false
+	}
+	budget := p.servicePreemptBudget
+	if budget == 0 || budget > servicePreemptSafepointBudget {
+		return false
+	}
+
+	mode := preemptLoad(&p.executorMode)
+	var driver *ExecutorDriver
+	var schedule uint32
+	switch mode {
+	case executorModeBound:
+		driver = p.executor
+		if driver == nil || driver.magic != executorDriverMagic ||
+			driver.state != executorDriverActive || driver.p != p ||
+			driver.requestGate == nil {
+			return false
+		}
+		gate := preemptLoad(driver.requestGate)
+		if gate&^executorGateMask != 0 || gate&executorGateClosed != 0 {
+			return false
+		}
+	case executorModeUnbound:
+		schedule = preemptLoad(&p.schedule)
+		if schedule != scheduleIdle && schedule != scheduleRequested {
+			return false
+		}
+	default:
+		return false
+	}
+
+	requested := compareAndSwapGPreemptStateAtDepthZero(g, preemptRequested, preemptIdle)
+	if mode == executorModeBound {
+		gate := preemptLoad(driver.requestGate)
+		if gate&^executorGateMask != 0 || gate&executorGateClosed != 0 {
+			return false
+		}
+		requested = requested || gate&executorGateRequested != 0
+	} else if preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle) {
+		requested = true
+	}
+	if requested {
+		return true
+	}
+	if budget <= preemptCheckpointStride {
+		p.servicePreemptBudget = servicePreemptSafepointBudget
+		return servicePreemptBudgetExpired(p, mode)
+	}
+	p.servicePreemptBudget = budget - preemptCheckpointStride
+	return false
+}
+
+// servicePreemptBudgetExpired keeps the target/locked-owner selection policy
+// out of the common compiler-poll body. It runs only once per complete service
+// budget, while explicit requests retain the shorter checkpoint bound.
+//
+//go:noinline
+func servicePreemptBudgetExpired(p *P, mode uint32) bool {
+	if mode != executorModeBound || runnableForOSThreadOwner(p) || HasWaiting(p) {
+		return true
+	}
+	driver := p.executor
+	return driver != nil && driver.servicePressure != nil &&
+		preemptLoad(driver.servicePressure) != 0
 }
 
 // acknowledgeSuspendedGPreempt consumes a request which was already satisfied

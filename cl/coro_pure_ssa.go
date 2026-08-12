@@ -471,6 +471,13 @@ func (a *coroPhysicalPureSSAAudit) validateFieldAddr(field *ssa.FieldAddr) strin
 	if err := validateCoroPhysicalSSAValueType(a.typeOf(field.Type())); err != nil {
 		return "field address has unsupported type: " + err.Error()
 	}
+	if a.allowImplicitNilFault {
+		// ExplicitStatus lowering emits the nil branch before forming the GEP and
+		// publishes the fault directly. This covers address-taking consumers such
+		// as an inline atomic intrinsic; unlike a dominated load there is no later
+		// dereference instruction that can own the guard.
+		return a.requireOnlyCompilerElidedRuntimeHelpers(field, "AssertNilDeref")
+	}
 	return a.requireNoRuntimeHelpersExcept(field, "AssertNilDeref")
 }
 

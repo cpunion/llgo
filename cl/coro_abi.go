@@ -193,7 +193,7 @@ const coroPreemptInstructionBudget = 64
 // safepoints between full runtime polls. While a frame is active its existing
 // StateID word is compiler-private countdown storage; publishState overwrites
 // it with the real resume state before every scheduler-visible suspension.
-const coroPreemptCheckpointStride uint64 = 64
+const coroPreemptCheckpointStride uint64 = 256
 
 type coroPhysicalABI struct {
 	version                 uint32

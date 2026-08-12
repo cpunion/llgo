@@ -526,7 +526,8 @@ func Loop(limit uint32) uint32 {
 	if gates := strings.Count(body, "icmp ule i32"); gates != polls {
 		t.Fatalf("Loop checkpoint gates = %d, want one frame-local countdown gate per poll site (%d):\n%s", gates, polls, body)
 	}
-	if resets := strings.Count(body, "store i32 64"); resets < polls+1 {
+	reset := "store i32 " + strconv.FormatUint(coroPreemptCheckpointStride, 10)
+	if resets := strings.Count(body, reset); resets < polls+1 {
 		t.Fatalf("Loop checkpoint resets = %d, want initial activation plus at least one reset per poll site (%d):\n%s", resets, polls+1, body)
 	}
 	assertCoroScalarRunDecisionCalls(t, "Loop", body, polls+1)

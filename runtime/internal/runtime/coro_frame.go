@@ -82,7 +82,7 @@ func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) ui
 
 //export __llgo_coro_preempt_poll_v1
 func __llgo_coro_preempt_poll_v1(g unsafe.Pointer) bool {
-	return coro.PollPreempt((*coro.G)(g))
+	return coro.PollPreemptCompiler((*coro.G)(g))
 }
 
 //export __llgo_coro_yield_prepare_v1
