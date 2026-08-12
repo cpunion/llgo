@@ -26,6 +26,8 @@ import (
 	"github.com/goplus/llgo/xtool/env/llvm"
 )
 
+var update = flag.Bool("update", false, "update only failing existing CHECK groups in place")
+
 func main() {
 	llvm.SetupPath()
 	flag.Usage = func() {
@@ -69,7 +71,7 @@ func processPath(path string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "litgen", target.sourceFile)
-	return generateFile(target)
+	return generateFile(target, *update)
 }
 
 func processTree(root string) error {
@@ -106,7 +108,7 @@ func processTree(root string) error {
 	}
 	for _, target := range targets {
 		fmt.Fprintln(os.Stderr, "litgen", target.sourceFile)
-		if err := generateFile(target); err != nil {
+		if err := generateFile(target, *update); err != nil {
 			return err
 		}
 	}

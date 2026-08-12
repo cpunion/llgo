@@ -159,16 +159,16 @@ _llgo_0:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, `// CHECK: {{^}}@0 = private unnamed_addr constant [4 x i8] c"Hi\0A\00", align 1{{$}}`) {
+	if !strings.Contains(got, `// CHECK: {{^}}@{{[0-9]+}} = private unnamed_addr constant [4 x i8] c"Hi\0A\00", align 1{{$}}`) {
 		t.Fatalf("missing numeric global @0:\n%s", got)
 	}
-	if !strings.Contains(got, `// CHECK: {{^}}@1 = private unnamed_addr constant [3 x i8] c"%s\00", align 1{{$}}`) {
+	if !strings.Contains(got, `// CHECK: {{^}}@{{[0-9]+}} = private unnamed_addr constant [3 x i8] c"%s\00", align 1{{$}}`) {
 		t.Fatalf("missing numeric global @1:\n%s", got)
 	}
 	if strings.Contains(got, `// CHECK: {{^}}@"{{.*}}/p.named" = global i64 1{{$}}`) {
 		t.Fatalf("named globals should not be emitted by default:\n%s", got)
 	}
-	if strings.Index(got, `// CHECK: {{^}}@0 = private unnamed_addr constant [4 x i8] c"Hi\0A\00", align 1{{$}}`) > strings.Index(got, "func main()") {
+	if strings.Index(got, `// CHECK: {{^}}@{{[0-9]+}} = private unnamed_addr constant [4 x i8] c"Hi\0A\00", align 1{{$}}`) > strings.Index(got, "func main()") {
 		t.Fatalf("global checks should be placed before first declaration:\n%s", got)
 	}
 }
@@ -207,14 +207,14 @@ package main
 
 import _ "unsafe"
 
-// CHECK: {{^}}@0 = private unnamed_addr constant [4 x i8] c"sqrt"{{$}}
+// CHECK: {{^}}@{{[0-9]+}} = private unnamed_addr constant [4 x i8] c"sqrt"{{$}}
 
 //go:linkname cSqrt C.sqrt
 func cSqrt(float64) float64
 
 // CHECK-LABEL: define double @"{{.*}}/p.callSqrt"(double %0){{.*}} {
 // CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintString"(ptr @0)
+// CHECK-NEXT:   call void @"{{.*}}/runtime/internal/runtime.PrintString"(ptr @{{[0-9]+}})
 // CHECK-NEXT:   %1 = call double @sqrt(double %0)
 // CHECK-NEXT:   ret double %1
 // CHECK-NEXT: }
@@ -404,5 +404,200 @@ func TestGeneralizeModulePath_IgnoresEscapedQuotes(t *testing.T) {
 	want := "  !0 = !{!\"prefix \\\"quoted\\\" suffix\", !\"{{.*}}/example.fn\"}"
 	if got != want {
 		t.Fatalf("generalizeModulePath = %q, want %q", got, want)
+	}
+}
+
+func TestGeneralizeSymbolPaths_WildcardsTestCasePrefix(t *testing.T) {
+	tests := []struct {
+		line string
+		want string
+	}{
+		{
+			`define void @"github.com/goplus/llgo/cl/_testgo/deferfn.A"() {`,
+			`define void @"{{.*}}.A"() {`,
+		},
+		{
+			`call void @"github.com/goplus/llgo/cl/_testgo/deferfn/foo.B"()`,
+			`call void @"{{.*}}/foo.B"()`,
+		},
+		{
+			`call void @"github.com/goplus/llgo/runtime.Start"()`,
+			`call void @"{{.*}}/runtime.Start"()`,
+		},
+	}
+	for _, test := range tests {
+		if got := generalizeSymbolPaths(test.line, "github.com/goplus/llgo"); got != test.want {
+			t.Errorf("generalizeSymbolPaths(%q) = %q, want %q", test.line, got, test.want)
+		}
+	}
+}
+
+func TestGeneralizePlatformIR(t *testing.T) {
+	tests := []struct {
+		line string
+		want string
+	}{
+		{`%0 = call i32 @__sigsetjmp(ptr %buf, i32 0)`, `%0 = call i32 @{{(__)?}}sigsetjmp(ptr %buf, i32 0)`},
+		{`call void @siglongjmp(ptr %buf, i32 1)`, `call void @{{(__)?}}siglongjmp(ptr %buf, i32 1)`},
+		{`%0 = call i32 @_setjmp(ptr %buf)`, `%0 = call i32 @{{_*}}setjmp(ptr %buf)`},
+		{`call void @longjmp(ptr %buf, i32 1)`, `call void @{{_*}}longjmp(ptr %buf, i32 1)`},
+		{`%0 = alloca i8, i64 196, align 1`, `%0 = alloca i8, i64 {{(196|200)}}, align 1`},
+		{
+			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.Mutex" { [64 x i8] zeroinitializer }, ptr %0`,
+			`store %"github.com/goplus/llgo/runtime/internal/clite/pthread/sync.Mutex" { [{{(40|48|64)}} x i8] zeroinitializer }, ptr %0`,
+		},
+	}
+	for _, test := range tests {
+		if got := generalizePlatformIR(test.line); got != test.want {
+			t.Errorf("generalizePlatformIR(%q) = %q, want %q", test.line, got, test.want)
+		}
+	}
+}
+
+func TestGeneralizeIRLine_WildcardsUnstableIDs(t *testing.T) {
+	line := `  call void @0(ptr @19, ptr @"_llgo_closure$QIHBTaw1IFobr8yvWpq-2AJFm3xBNhdW_aNBicqUBGk"), !dbg !42`
+	got := generalizeIRLine(line, "")
+	want := `  call void @{{[0-9]+}}(ptr @{{[0-9]+}}, ptr @"_llgo_closure${{[-A-Za-z0-9_]+}}")`
+	if got != want {
+		t.Fatalf("generalizeIRLine() = %q, want %q", got, want)
+	}
+}
+
+func TestGeneralizeIRLine_EscapesFileCheckSyntaxAndCgoHash(t *testing.T) {
+	line := `  %0 = load ptr, ptr @main._cgo_52352d07b8a3_Cfunc_free, align 8 ; map[[2]int]`
+	got := generalizeIRLine(line, "")
+	want := `  %0 = load ptr, ptr @main._cgo_{{[0-9a-f]+}}_Cfunc_free, align 8 ; map{{\[\[}}2]int]`
+	if got != want {
+		t.Fatalf("generalizeIRLine() = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateSourceChecks_UpdatesOnlyFailingGroupInPlace(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+// CHECK-LABEL: define void @"example.com/p.good"(){{.*}} {
+// CHECK-NEXT: entry:
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
+func good() {}
+
+// CHECK-LABEL: define i64 @"example.com/p.changed"(ptr %0){{.*}} {
+// CHECK-NEXT: entry:
+// CHECK-NEXT:   %1 = load i64, ptr %0
+// CHECK-NEXT:   ret i64 %1
+func changed(*int) int { return 0 }
+`
+	const ir = `define void @"example.com/p.good"() {
+entry:
+  ret void
+}
+
+define i64 @"example.com/p.changed"(ptr %0) {
+entry:
+  %nilcheck = icmp eq ptr %0, null
+  br i1 %nilcheck, label %panic, label %cont
+
+panic:
+  unreachable
+
+cont:
+  %1 = load i64, ptr %0
+  ret i64 %1
+}
+`
+	got, changed, err := updateSourceChecks(src, "in.go", "example.com/p", "example.com", ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("updateSourceChecks reported no change")
+	}
+	good := src[strings.Index(src, `// CHECK-LABEL: define void`):strings.Index(src, `func good()`)]
+	if !strings.Contains(got, good) {
+		t.Fatalf("passing CHECK group changed:\n%s", got)
+	}
+	if strings.Index(got, `// CHECK-LABEL: define i64`) > strings.Index(got, `func changed(`) {
+		t.Fatalf("updated CHECK group moved after its declaration:\n%s", got)
+	}
+	if !strings.Contains(got, `%nilcheck = icmp eq ptr %0, null`) {
+		t.Fatalf("updated CHECK group missing changed IR:\n%s", got)
+	}
+}
+
+func TestUpdateSourceChecks_UpdatesBodyGroupInsideFunction(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+// CHECK-LABEL: define i64 @"example.com/p.changed"(ptr %0){{.*}} {
+func changed(*int) int {
+	// CHECK-NEXT: entry:
+	// CHECK-NEXT:   %1 = load i64, ptr %0
+	// CHECK-NEXT:   ret i64 %1
+	// CHECK-NEXT: }
+	return 0
+}
+`
+	const ir = `define i64 @"example.com/p.changed"(ptr %0) {
+entry:
+  %nilcheck = icmp eq ptr %0, null
+  br i1 %nilcheck, label %panic, label %cont
+
+panic:
+  unreachable
+
+cont:
+  %1 = load i64, ptr %0
+  ret i64 %1
+}
+`
+	got, changed, err := updateSourceChecks(src, "in.go", "example.com/p", "example.com", ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || !strings.Contains(got, "\t// CHECK-NEXT:   %nilcheck = icmp eq ptr %0, null") {
+		t.Fatalf("body CHECK group was not updated in place:\n%s", got)
+	}
+	if strings.Count(got, "CHECK-LABEL") != 1 {
+		t.Fatalf("function label was duplicated:\n%s", got)
+	}
+}
+
+func TestUpdateSourceChecks_PreservesDefinitionAndEOF(t *testing.T) {
+	const src = `// LITTEST
+package p
+
+// CHECK: define i64 @"{{.*}}.changed"(ptr %0){{.*}} {
+// CHECK-NEXT: entry:
+// CHECK-NEXT:   %1 = load i64, ptr %0
+// CHECK-NEXT:   ret i64 %1
+// CHECK-NEXT: }
+func changed(*int) int { return 0 }
+`
+	const ir = `define i64 @"example.com/p.changed"(ptr %0) {
+entry:
+  %nilcheck = icmp eq ptr %0, null
+  br i1 %nilcheck, label %panic, label %cont
+
+panic:
+  unreachable
+
+cont:
+  %1 = load i64, ptr %0
+  ret i64 %1
+}
+`
+	got, changed, err := updateSourceChecks(src, "in.go", "example.com/p", "example.com", ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("updateSourceChecks reported no change")
+	}
+	if !strings.Contains(got, `// CHECK: define i64 @"{{.*}}.changed"`) || strings.Contains(got, "CHECK-LABEL") {
+		t.Fatalf("definition directive changed:\n%s", got)
+	}
+	if strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("update added a blank line at EOF:\n%q", got)
 	}
 }

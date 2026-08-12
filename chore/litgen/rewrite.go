@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/goplus/llgo/internal/filecheck"
 	"github.com/goplus/llgo/internal/llgen"
 	"github.com/goplus/mod"
 	"golang.org/x/mod/modfile"
@@ -60,27 +61,61 @@ type irFunction struct {
 }
 
 var (
-	defineQuotedRE = regexp.MustCompile(`^define\b.* @"([^"]+)"\(`)
-	definePlainRE  = regexp.MustCompile(`^define\b.* @([^\s(]+)\(`)
-	globalQuotedRE = regexp.MustCompile(`^@"([^"]+)"\s*=`)
-	globalPlainRE  = regexp.MustCompile(`^@([A-Za-z0-9$._-]+)\s*=`)
-	globalRefRE    = regexp.MustCompile(`@"([^"]+)"|@([A-Za-z0-9$._-]+)`)
-	checkLineRE    = regexp.MustCompile(`^\s*//\s*CHECK(?:-[A-Z]+)?:`)
-	debugMetaRE    = regexp.MustCompile(`, ![A-Za-z0-9_.-]+ ![0-9]+`)
-	closureEnvRE   = regexp.MustCompile(`(\s)(?:nest|swiftself)(\s)`)
-	numericNameRE  = regexp.MustCompile(`^\d+$`)
+	defineQuotedRE  = regexp.MustCompile(`^define\b.* @"([^"]+)"\(`)
+	definePlainRE   = regexp.MustCompile(`^define\b.* @([^\s(]+)\(`)
+	globalQuotedRE  = regexp.MustCompile(`^@"([^"]+)"\s*=`)
+	globalPlainRE   = regexp.MustCompile(`^@([A-Za-z0-9$._-]+)\s*=`)
+	globalRefRE     = regexp.MustCompile(`@"([^"]+)"|@([A-Za-z0-9$._-]+)`)
+	checkLineRE     = regexp.MustCompile(`^\s*//\s*CHECK(?:-[A-Z]+)?:`)
+	debugMetaRE     = regexp.MustCompile(`, ![A-Za-z0-9_.-]+ ![0-9]+`)
+	closureEnvRE    = regexp.MustCompile(`(\s)(?:nest|swiftself)(\s)`)
+	testCasePathRE  = regexp.MustCompile(`"[^"]*/cl/_test[^/"]*/[^/".]+`)
+	symbolHashRE    = regexp.MustCompile(`\$[-A-Za-z0-9_]{43}`)
+	cgoHashRE       = regexp.MustCompile(`(_cgo_)[0-9a-f]+(_Cfunc_)`)
+	numericGlobalRE = regexp.MustCompile(`@\d+\b`)
+	metadataIDRE    = regexp.MustCompile(`!\d+\b`)
+	sigJumpRE       = regexp.MustCompile(`@(?:__)?(sig(?:set|long)jmp)\b`)
+	plainJumpRE     = regexp.MustCompile(`@_*((?:set|long)jmp)\b`)
+	jmpBufAllocaRE  = regexp.MustCompile(`alloca i8, i64 (?:196|200), align 1`)
+	numericNameRE   = regexp.MustCompile(`^\d+$`)
 )
 
-func generateFile(target resolvedTarget) error {
+type pthreadOpaqueSize struct {
+	typeName string
+	sizes    *regexp.Regexp
+	want     string
+}
+
+var pthreadOpaqueSizes = []pthreadOpaqueSize{
+	{"MutexAttr", regexp.MustCompile(`\[(?:4|8|16) x i8\]`), `[{{(4|8|16)}} x i8]`},
+	{"RWLockAttr", regexp.MustCompile(`\[(?:8|16|24) x i8\]`), `[{{(8|16|24)}} x i8]`},
+	{"CondAttr", regexp.MustCompile(`\[(?:4|8|16) x i8\]`), `[{{(4|8|16)}} x i8]`},
+	{"Once", regexp.MustCompile(`\[(?:4|16) x i8\]`), `[{{(4|16)}} x i8]`},
+	{"Mutex", regexp.MustCompile(`\[(?:40|48|64) x i8\]`), `[{{(40|48|64)}} x i8]`},
+	{"RWLock", regexp.MustCompile(`\[(?:56|192|200) x i8\]`), `[{{(56|192|200)}} x i8]`},
+	{"Cond", regexp.MustCompile(`\[(?:40|48) x i8\]`), `[{{(40|48)}} x i8]`},
+}
+
+func generateFile(target resolvedTarget, update bool) error {
 	data, err := os.ReadFile(target.sourceFile)
 	if err != nil {
 		return err
 	}
-	cleaned := stripCheckDirectives(string(data))
 	ir, err := genIR(target.genTarget)
 	if err != nil {
 		return err
 	}
+	if update {
+		updated, changed, err := updateSourceChecks(string(data), target.sourceFile, target.pkgPath, target.modulePath, ir)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		return writeFileAtomically(target.sourceFile, []byte(updated), 0644)
+	}
+	cleaned := stripCheckDirectives(string(data))
 	updated, err := rewriteSource(cleaned, target.sourceFile, target.pkgPath, target.modulePath, ir)
 	if err != nil {
 		return err
@@ -90,6 +125,174 @@ func generateFile(target resolvedTarget) error {
 		return fmt.Errorf("%s: gofmt failed: %w", target.sourceFile, err)
 	}
 	return writeFileAtomically(target.sourceFile, formatted, 0644)
+}
+
+type sourceEdit struct {
+	start int
+	end   int
+	text  string
+}
+
+type checkGroup struct {
+	start int
+	end   int
+	text  string
+}
+
+// updateSourceChecks preserves every CHECK group that still matches. A
+// failing function group is regenerated at the group's existing byte range,
+// so updating a golden does not move unrelated checks or add new functions.
+func updateSourceChecks(src, srcPath, _, modulePath, ir string) (string, bool, error) {
+	if err := matchCheckText(src, ir); err == nil {
+		return src, false, nil
+	}
+	prog := parseIR(ir)
+
+	var edits []sourceEdit
+	var currentFn *irFunction
+	for _, group := range sourceCheckGroups(src) {
+		fn, hasDefinition, err := findFunctionForCheckGroup(group.text, prog.funcs)
+		if err != nil {
+			return "", false, fmt.Errorf("%s: %w", srcPath, err)
+		}
+		if hasDefinition {
+			currentFn = &fn
+		}
+		if err := matchCheckText(group.text, ir); err == nil {
+			continue
+		}
+		if !hasDefinition {
+			if currentFn == nil {
+				return "", false, fmt.Errorf("%s: failing CHECK group has no preceding function definition", srcPath)
+			}
+			fn = *currentFn
+		}
+		lines := buildFunctionChecks(fn, modulePath)
+		if len(lines) == 0 {
+			return "", false, fmt.Errorf("%s: no checks generated for %q", srcPath, fn.symbol)
+		}
+		if hasDefinition {
+			// Keep the existing definition directive byte-for-byte. It may be
+			// intentionally looser than newly generated checks.
+			lines[0] = firstDefinitionCheck(group.text)
+		} else {
+			lines = lines[1:]
+		}
+		indent := indentAt(src, group.start)
+		text := formatDirectiveBlock(indent, lines)
+		text = preserveTrailingNewlines(text, group.text)
+		edits = append(edits, sourceEdit{start: group.start, end: group.end, text: text})
+	}
+	if len(edits) == 0 {
+		return "", false, fmt.Errorf("%s: existing CHECKs fail, but no function CHECK group can be updated", srcPath)
+	}
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
+	updated := src
+	for _, edit := range edits {
+		updated = updated[:edit.start] + edit.text + updated[edit.end:]
+	}
+	if err := matchCheckText(updated, ir); err != nil {
+		return "", false, fmt.Errorf("%s: updated CHECKs still fail: %w", srcPath, err)
+	}
+	return updated, updated != src, nil
+}
+
+func firstDefinitionCheck(group string) string {
+	for _, line := range strings.Split(group, "\n") {
+		if strings.Contains(line, "define ") {
+			return strings.TrimLeft(line, " \t")
+		}
+	}
+	return ""
+}
+
+func preserveTrailingNewlines(generated, original string) string {
+	want := len(original) - len(strings.TrimRight(original, "\n"))
+	return strings.TrimRight(generated, "\n") + strings.Repeat("\n", want)
+}
+
+func sourceCheckGroups(src string) []checkGroup {
+	lineStarts := []int{0}
+	for i := 0; i < len(src); i++ {
+		if src[i] == '\n' {
+			lineStarts = append(lineStarts, i+1)
+		}
+	}
+	var groups []checkGroup
+	for line := 0; line < len(lineStarts); {
+		lineEnd := len(src)
+		if line+1 < len(lineStarts) {
+			lineEnd = lineStarts[line+1]
+		}
+		if !checkLineRE.MatchString(strings.TrimRight(src[lineStarts[line]:lineEnd], "\r\n")) {
+			line++
+			continue
+		}
+		startLine := line
+		for line < len(lineStarts) {
+			lineEnd = len(src)
+			if line+1 < len(lineStarts) {
+				lineEnd = lineStarts[line+1]
+			}
+			if !checkLineRE.MatchString(strings.TrimRight(src[lineStarts[line]:lineEnd], "\r\n")) {
+				break
+			}
+			line++
+		}
+		start := lineStarts[startLine]
+		end := len(src)
+		if line < len(lineStarts) {
+			end = lineStarts[line]
+		}
+		groups = append(groups, checkGroup{start: start, end: end, text: src[start:end]})
+	}
+	return groups
+}
+
+func findFunctionForCheckGroup(group string, funcs []irFunction) (irFunction, bool, error) {
+	var definitionCheck string
+	for _, line := range strings.Split(group, "\n") {
+		idx := strings.Index(line, "define ")
+		if idx < 0 {
+			continue
+		}
+		definitionCheck = "// CHECK: " + line[idx:] + "\n"
+		break
+	}
+	if definitionCheck == "" {
+		return irFunction{}, false, nil
+	}
+	var matched *irFunction
+	for i := range funcs {
+		if len(funcs[i].lines) == 0 || matchCheckText(definitionCheck, strings.Join(funcs[i].lines, "\n")) != nil {
+			continue
+		}
+		if matched != nil {
+			return irFunction{}, false, fmt.Errorf("function CHECK matches both %q and %q", matched.symbol, funcs[i].symbol)
+		}
+		matched = &funcs[i]
+	}
+	if matched == nil {
+		return irFunction{}, false, fmt.Errorf("function CHECK does not match current IR: %s", strings.TrimSpace(definitionCheck))
+	}
+	return *matched, true, nil
+}
+
+func matchCheckText(checks, ir string) error {
+	tmp, err := os.CreateTemp("", "llgo-litgen-check-*.go")
+	if err != nil {
+		return err
+	}
+	path := tmp.Name()
+	defer os.Remove(path)
+	if _, err := tmp.WriteString(checks); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return filecheck.Match(path, ir)
 }
 
 func resolveTarget(sourceFile, genTarget string) (resolvedTarget, error) {
@@ -467,17 +670,40 @@ func generalizeDefineLine(line, modulePath string) string {
 			line = head[:sigEnd+1] + "{{.*}}" + line[idx:]
 		}
 	}
-	return generalizeModulePath(line, modulePath)
+	return generalizeSymbolPaths(line, modulePath)
 }
 
 func generalizeIRLine(line, modulePath string) string {
-	return generalizeModulePath(scrubIRLine(line), modulePath)
+	return generalizeSymbolPaths(scrubIRLine(line), modulePath)
 }
 
 func scrubIRLine(line string) string {
 	line = debugMetaRE.ReplaceAllString(line, "")
 	line = generalizeClosureEnvAttrs(line)
+	line = symbolHashRE.ReplaceAllString(line, `$${{[-A-Za-z0-9_]+}}`)
+	line = cgoHashRE.ReplaceAllString(line, `${1}{{[0-9a-f]+}}${2}`)
+	line = numericGlobalRE.ReplaceAllString(line, `@{{[0-9]+}}`)
+	line = metadataIDRE.ReplaceAllString(line, `!{{[0-9]+}}`)
+	line = generalizePlatformIR(line)
+	line = strings.ReplaceAll(line, "[[", `{{\[\[}}`)
 	return strings.TrimRight(line, " \t")
+}
+
+func generalizeSymbolPaths(line, modulePath string) string {
+	line = testCasePathRE.ReplaceAllString(line, `"{{.*}}`)
+	return generalizeModulePath(line, modulePath)
+}
+
+func generalizePlatformIR(line string) string {
+	line = sigJumpRE.ReplaceAllString(line, `@{{(__)?}}${1}`)
+	line = plainJumpRE.ReplaceAllString(line, `@{{_*}}${1}`)
+	line = jmpBufAllocaRE.ReplaceAllString(line, `alloca i8, i64 {{(196|200)}}, align 1`)
+	for _, opaque := range pthreadOpaqueSizes {
+		if strings.Contains(line, "/runtime/internal/clite/pthread/sync."+opaque.typeName+`"`) {
+			return opaque.sizes.ReplaceAllString(line, opaque.want)
+		}
+	}
+	return line
 }
 
 func generalizeClosureEnvAttrs(line string) string {
