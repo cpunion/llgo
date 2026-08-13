@@ -476,7 +476,7 @@ func root(value any, fail bool) int { return middle(value, fail) }
 	}
 }
 
-func TestAnalyzeSSAOutcomePlainLeafFailsClosedWithoutBoundOrAtRoot(t *testing.T) {
+func TestAnalyzeSSAOutcomePlainLeafFailsClosedWithoutBoundAndKeepsRootPrimary(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "outcome_plain_reject.go", `package coroid
 
 func leaf(value any, fail bool) int {
@@ -496,12 +496,13 @@ func caller(value any, fail bool) int { return leaf(value, fail) }
 		return facts, nil
 	}
 	for _, test := range []struct {
-		name  string
-		roots Roots
-		max   int
+		name     string
+		roots    Roots
+		max      int
+		wantTwin bool
 	}{
 		{name: "budget disabled", roots: Roots{{Function: caller, ManagedDemand: AsyncDemand}}, max: -1},
-		{name: "explicit root", roots: Roots{{Function: leaf, ManagedDemand: AsyncDemand}}, max: 64},
+		{name: "explicit root", roots: Roots{{Function: leaf, ManagedDemand: AsyncDemand}}, max: 64, wantTwin: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			plan, err := AnalyzeSSA(prog, test.roots, SSAConfig{
@@ -513,7 +514,12 @@ func caller(value any, fail bool) int { return leaf(value, fail) }
 				t.Fatal(err)
 			}
 			got := functionPlanFor(t, plan, leaf)
-			if got.Emission == EmitOutcomePlain || got.AtomicCostProof != AtomicCostUnproven || got.AtomicCost != 0 {
+			if test.wantTwin {
+				if got.Emission != EmitCoroutine || got.ManagedEntry != ManagedEntryCoroutine ||
+					!got.AtomicCostProof.ProvesOutcomePlain() || got.AtomicCost == 0 {
+					t.Fatalf("root leaf plan = %+v, want coroutine primary plus static outcome entry", got)
+				}
+			} else if got.Emission == EmitOutcomePlain || got.AtomicCostProof != AtomicCostUnproven || got.AtomicCost != 0 {
 				t.Fatalf("leaf plan = %+v, outcome-plain proof must fail closed", got)
 			}
 		})

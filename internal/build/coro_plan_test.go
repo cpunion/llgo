@@ -171,6 +171,34 @@ func calls(fn func()) {
 		t.Fatalf("ordinary builder elision error = %v, want fail-closed rejection", err)
 	}
 
+	unevaluatedInput := input
+	unevaluatedInput.callSitePlan = func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
+		return cl.CoroCallSitePlan{Elision: cl.CoroCallElidedFrontendUnevaluated}, true, nil
+	}
+	unevaluatedPlan, err := unevaluatedInput.Analyze(
+		coro.Roots{{Function: ssaPkg.Func("calls"), Demand: coro.AsyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range ordinaryCalls {
+		wantElided := false
+		switch exact := call.(type) {
+		case *ssa.Call:
+			wantElided = exact != nil && exact.Common().StaticCallee() != nil && !exact.Common().IsInvoke()
+		case *ssa.Defer:
+			wantElided = exact != nil && exact.DeferStack == nil && exact.Common().StaticCallee() != nil && !exact.Common().IsInvoke()
+		}
+		if got := unevaluatedPlan.ElidesCall(call); got != wantElided {
+			t.Fatalf("frontend-unevaluated %T call elided=%t, want %t: %s", call, got, wantElided, call)
+		}
+		_, planned := unevaluatedPlan.CallPlan(call)
+		if planned == wantElided {
+			t.Fatalf("frontend-unevaluated %T CallPlan present=%t, want %t: %s", call, planned, !wantElided, call)
+		}
+	}
+
 	var ordinaryInitCall ssa.CallInstruction
 	for _, call := range initCalls {
 		callee := call.Common().StaticCallee()
@@ -573,8 +601,8 @@ func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointe
 func __llgo_coro_chan_resume_v1(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
 type Chan struct{}
 type ChanOp struct{}
-func CoroChanTrySend(*Chan, unsafe.Pointer, int) bool { return false }
-func CoroChanTryRecv(*Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
+func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
+func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryClose(*Chan) uint32 { return 0 }
 func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
@@ -1429,8 +1457,8 @@ func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointe
 func __llgo_coro_chan_resume_v1(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
 type Chan struct{}
 type ChanOp struct{}
-func CoroChanTrySend(*Chan, unsafe.Pointer, int) bool { return false }
-func CoroChanTryRecv(*Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
+func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
+func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryClose(*Chan) uint32 { return 0 }
 func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
@@ -2113,8 +2141,8 @@ func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointe
 func __llgo_coro_chan_resume_v1(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
 type Chan struct{}
 type ChanOp struct{}
-func CoroChanTrySend(*Chan, unsafe.Pointer, int) bool { return false }
-func CoroChanTryRecv(*Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
+func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
+func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryClose(*Chan) uint32 { return 0 }
 func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}

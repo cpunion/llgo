@@ -29,13 +29,15 @@ import (
 )
 
 const (
+	LibraryEffectSummaryVersion = "v8"
+
 	// LibraryEffectSummarySchema is the producer ABI summary embedded in LLGo
 	// package objects and archives. It is deliberately independent from the
 	// whole-program Summary and PlanDigest schemas: consumer demand may change,
 	// while these producer effects and physically available entries may not.
-	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v6"
+	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary." + LibraryEffectSummaryVersion
 
-	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v6"
+	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest." + LibraryEffectSummaryVersion
 
 	// LibraryEffectSummarySection is the portable object-section identity.
 	// Mach-O emission uses the same leaf name in an explicit segment.
@@ -53,7 +55,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 6,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 8,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -98,8 +100,19 @@ type LibraryEffectFunction struct {
 	AtomicCost            uint64           `json:"atomic_cost"`
 	AtomicCostProof       AtomicCostProof  `json:"atomic_cost_proof"`
 	AtomicCostCertificate string           `json:"atomic_cost_certificate"`
-	PrimarySymbol         string           `json:"primary_symbol"`
-	RawPlainSymbol        string           `json:"raw_plain_symbol,omitempty"`
+	// StaticOutcome publishes an unbounded exact-static synchronous twin. It is
+	// orthogonal to AtomicCostProof and never replaces the coroutine primary.
+	StaticOutcome bool   `json:"static_outcome"`
+	PrimarySymbol string `json:"primary_symbol"`
+	// OutcomePlainSymbol is the exact synchronous static-call entry certified by
+	// AtomicCostProof. It equals PrimarySymbol when outcome-plain is primary and
+	// names a separate twin when ManagedEntry remains coroutine.
+	OutcomePlainSymbol string `json:"outcome_plain_symbol,omitempty"`
+	RawPlainSymbol     string `json:"raw_plain_symbol,omitempty"`
+}
+
+func (function LibraryEffectFunction) HasStaticOutcome() bool {
+	return function.AtomicCostProof.ProvesOutcomePlain() || function.StaticOutcome
 }
 
 // LibraryEffectForeignCallable publishes one exact producer-side C
@@ -337,15 +350,39 @@ func (function LibraryEffectFunction) validate() error {
 			return fmt.Errorf("coro: library function %q has an invalid outcome-plain entry capability", function.ID)
 		}
 	}
-	if function.ManagedEntry == ManagedEntryOutcomePlain {
-		if !function.AtomicCostProof.ProvesOutcomePlain() || function.AtomicCost == 0 {
-			return fmt.Errorf("coro: library function %q has an outcome entry without an atomic-cost proof", function.ID)
+	if function.AtomicCostProof.ProvesOutcomePlain() {
+		if function.AtomicCost == 0 {
+			return fmt.Errorf("coro: library function %q has an outcome entry without an atomic cost", function.ID)
 		}
 		if err := validateSHA256Hex("library function atomic-cost certificate", function.AtomicCostCertificate); err != nil {
 			return err
 		}
+		if err := validateStableIdentityText("library function outcome-plain symbol", function.OutcomePlainSymbol); err != nil {
+			return err
+		}
 	} else if function.AtomicCostProof != AtomicCostUnproven || function.AtomicCost != 0 || function.AtomicCostCertificate != "" {
 		return fmt.Errorf("coro: library function %q has atomic-cost metadata without an outcome entry", function.ID)
+	} else if function.OutcomePlainSymbol != "" && !function.StaticOutcome {
+		return fmt.Errorf("coro: library function %q has an outcome symbol without an atomic-cost proof", function.ID)
+	}
+	if function.StaticOutcome {
+		if function.AtomicCostProof.ProvesOutcomePlain() || function.ManagedEntry != ManagedEntryCoroutine ||
+			function.Primary != PrimaryCoroutine ||
+			function.Effect&^(YieldOnly|AwaitStructured|OutcomeStructured) != 0 ||
+			!function.Effect.Contains(OutcomeStructured) ||
+			function.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
+			return fmt.Errorf("coro: library function %q has an invalid unbounded static outcome capability", function.ID)
+		}
+		if err := validateStableIdentityText("library function outcome-plain symbol", function.OutcomePlainSymbol); err != nil {
+			return err
+		}
+	}
+	if function.ManagedEntry == ManagedEntryOutcomePlain && function.OutcomePlainSymbol != function.PrimarySymbol {
+		return fmt.Errorf("coro: library function %q outcome primary and static outcome symbols differ", function.ID)
+	}
+	if function.ManagedEntry == ManagedEntryCoroutine &&
+		function.OutcomePlainSymbol == function.PrimarySymbol {
+		return fmt.Errorf("coro: library function %q coroutine primary and static outcome symbols are identical", function.ID)
 	}
 	if err := validateStableIdentityText("library function primary symbol", function.PrimarySymbol); err != nil {
 		return err
@@ -666,6 +703,7 @@ func (function LibraryEffectFunction) ImportedPolicy() (SSAFunctionPolicy, error
 		AtomicCost:            function.AtomicCost,
 		AtomicCostProof:       function.AtomicCostProof,
 		AtomicCostCertificate: function.AtomicCostCertificate,
+		StaticOutcome:         function.StaticOutcome,
 		IgnoreBody:            true,
 		External:              ExternalKnown,
 		OverrideExternal:      true,

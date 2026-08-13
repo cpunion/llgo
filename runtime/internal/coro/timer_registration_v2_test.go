@@ -208,8 +208,12 @@ func TestTimerRegistrationV2FutureDeadlineOnlyPublishesWhenDue(t *testing.T) {
 	sources, timers := bindTimerV2TestSources(t, p, nil)
 	park := beginTimerV2TestPark(t, p, "timer-v2-future", 1, 103)
 	handle, attached := timers.ReserveAndAttachTimerV2(p, &park.task.g.park, park.ticket, park.wait, 88, 50)
-	if !attached {
-		t.Fatal("reserve future timer V2")
+	deadline, hasDeadline, skip, fastOK := timerRegistrationFastDeadline(timers, p, 49)
+	if !attached || timers.activeCount != 1 || timers.controlledCount != 0 ||
+		!timers.minimumKnown || timers.minimum != 50 || !fastOK || !skip || !hasDeadline || deadline != 50 {
+		t.Fatalf("reserve future timer V2 = (%+v,%t), index=(%d,%d,%d,%t), fast=(%d,%t,%t,%t)",
+			handle, attached, timers.activeCount, timers.controlledCount, timers.minimum, timers.minimumKnown,
+			deadline, hasDeadline, skip, fastOK)
 	}
 	commitTimerV2TestPark(t, p, park)
 
@@ -221,6 +225,10 @@ func TestTimerRegistrationV2FutureDeadlineOnlyPublishesWhenDue(t *testing.T) {
 	}
 	if scan, ok := sources.publishPass(p, 50, true); !ok || scan.timers != 1 || scan.hasDeadline {
 		t.Fatalf("due future timer scan = (%+v, %t)", scan, ok)
+	}
+	if _, hasDeadline, skip, fastOK := timerRegistrationFastDeadline(timers, p, 50); !fastOK || !skip || hasDeadline || timers.activeCount != 0 || timers.minimumKnown || timers.minimum != 0 {
+		t.Fatalf("delivered timer fast index = active:%d minimum:(%d,%t) fast:(%t,%t,%t)",
+			timers.activeCount, timers.minimum, timers.minimumKnown, hasDeadline, skip, fastOK)
 	}
 	if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
 		t.Fatalf("due future timer resolve = (%d, %d, %t)", promoted, visits, ok)
@@ -252,6 +260,10 @@ func TestTimerRegistrationControlledV2OwnerScanObservesGenerationChange(t *testi
 	)
 	if !attached || handle == (TimerRegistrationHandle{}) {
 		t.Fatal("reserve generation-observed controlled timer V2")
+	}
+	if _, _, skip, fastOK := timerRegistrationFastDeadline(timers, p, 0); !fastOK || skip || timers.activeCount != 1 || timers.controlledCount != 1 {
+		t.Fatalf("controlled timer was incorrectly fast-skippable: active=%d controlled=%d skip=(%t,%t)",
+			timers.activeCount, timers.controlledCount, skip, fastOK)
 	}
 	commitTimerV2TestPark(t, p, park)
 

@@ -19,7 +19,6 @@
 package cl
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/goplus/llgo/internal/coro"
@@ -109,35 +108,46 @@ func Parent(pointer *byte) {
 		t.Fatalf("verify child keepalive before CoroSplit: %v\n%s", err, module.String())
 	}
 
-	parentIR := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
-	consume := "call i32 @" + coroAwaitConsumeHookV1
-	fakeUse := "call void (...) @llvm.fake.use(ptr "
-	consumeAt, fakeUseAt := allTextIndexes(parentIR, consume), allTextIndexes(parentIR, fakeUse)
-	if len(consumeAt) != 2 || len(fakeUseAt) != 2 {
-		t.Fatalf("child completion consume/fake-use sites = %d/%d, want 2/2:\n%s", len(consumeAt), len(fakeUseAt), parentIR)
-	}
-	for index := range consumeAt {
-		if fakeUseAt[index] <= consumeAt[index] || index+1 < len(consumeAt) && fakeUseAt[index] >= consumeAt[index+1] {
-			t.Fatalf("fake-use %d does not follow its exact completion consume:\n%s", index, parentIR)
-		}
+	parentRamp := requireCoroPhysicalFunction(t, module, "foo.Parent")
+	consumeCount, ownerUseCount := coroChildAwaitCompletionOwnerUseCounts(parentRamp)
+	if consumeCount != 2 || ownerUseCount != 2 {
+		t.Fatalf("child completion consume/owner fake-use sites = %d/%d, want 2/2:\n%s",
+			consumeCount, ownerUseCount, parentRamp.String())
 	}
 
 	runCoroABITestPipeline(t, prog, module)
 	resume := module.NamedFunction("foo.Parent$coro.resume")
-	if resume.IsNil() || strings.Count(resume.String(), fakeUse) != 2 {
+	consumeCount, ownerUseCount = coroChildAwaitCompletionOwnerUseCounts(resume)
+	if resume.IsNil() || consumeCount != 2 || ownerUseCount != 2 {
 		t.Fatalf("CoroSplit did not retain both completion-bound pointer owners:\n%s", module.String())
 	}
 }
 
-func allTextIndexes(text, marker string) []int {
-	var indexes []int
-	for offset := 0; ; {
-		index := strings.Index(text[offset:], marker)
-		if index < 0 {
-			return indexes
-		}
-		index += offset
-		indexes = append(indexes, index)
-		offset = index + len(marker)
+func coroChildAwaitCompletionOwnerUseCounts(function llvm.Value) (consumes, ownerUses int) {
+	if function.IsNil() {
+		return 0, 0
 	}
+	for _, block := range function.BasicBlocks() {
+		awaitingOwnerUse := false
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.InstructionOpcode() != llvm.Call {
+				continue
+			}
+			switch instruction.CalledValue().Name() {
+			case coroAwaitConsumeHookV1:
+				consumes++
+				awaitingOwnerUse = true
+			case "llvm.fake.use":
+				// The scheduler's scalar run-decision scratch may also need an
+				// llvm.fake.use. The pointer owner retained across this exact
+				// child await is distinguished by its post-consume frame load.
+				if awaitingOwnerUse && instruction.OperandsCount() > 1 &&
+					instruction.Operand(0).InstructionOpcode() == llvm.Load {
+					ownerUses++
+					awaitingOwnerUse = false
+				}
+			}
+		}
+	}
+	return consumes, ownerUses
 }

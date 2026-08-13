@@ -61,9 +61,15 @@ func TestOSThreadYieldHandoffRunsOnePeerAndRestoresOwnerFIFO(t *testing.T) {
 		t.Fatal("enqueue locked-yield fixture")
 	}
 	kind := commitLockedRunnerYield(t, driver, owner)
+	if !OSThreadSuspendHandoffCandidate(owner.g) {
+		t.Fatal("locked yield did not remain a physical-owner handoff candidate")
+	}
 	required, ok := PrepareOSThreadSuspendHandoff(driver, owner.g, kind.Kind)
 	if !ok || !required {
 		t.Fatalf("prepare locked-yield handoff = (%t, %t)", required, ok)
+	}
+	if possible, valid := OSThreadSuspendHandoffPossible(driver); !valid || !possible {
+		t.Fatalf("locked-yield fast status gate = (%t, %t)", possible, valid)
 	}
 	if p.readyHead != first.g || first.g.nextReady != second.g ||
 		second.g.nextReady != owner.g || p.readyTail != owner.g {
@@ -114,10 +120,16 @@ func TestOSThreadSuspendHandoffUnlockedActionIsNoop(t *testing.T) {
 	}
 	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
 	runnerYieldAction(t, driver, step, task)
+	if OSThreadSuspendHandoffCandidate(task.g) {
+		t.Fatal("unlocked yield became a physical-owner handoff candidate")
+	}
 	if required, prepared := PrepareOSThreadSuspendHandoff(
 		driver, task.g, ActionYield,
 	); !prepared || required {
 		t.Fatalf("unlocked-yield handoff = (%t, %t)", required, prepared)
+	}
+	if possible, valid := OSThreadSuspendHandoffPossible(driver); !valid || possible {
+		t.Fatalf("unlocked-yield fast status gate = (%t, %t)", possible, valid)
 	}
 	if detached, returnable, valid := OSThreadSuspendHandoffStatus(driver); !valid ||
 		detached || returnable {

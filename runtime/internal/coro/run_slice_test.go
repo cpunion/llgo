@@ -215,6 +215,165 @@ func TestExecutorRunManagedResumePendingIsObservational(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
+func TestExecutorRunSliceCapabilityRetainsExactOwnerAcrossBoundedSteps(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "run-slice-capability")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue run-slice capability task")
+	}
+	run, ok := BeginExecutorRunSlice(driver)
+	if !ok {
+		t.Fatal("begin executor run-slice capability")
+	}
+	dispatch, ok := run.Next()
+	if !ok || dispatch.Kind != ExecutorRunStepDispatch || dispatch.G != task.g ||
+		dispatch.Action.Kind != ActionCheckResume || driver.run.issued != ActionInvalid {
+		t.Fatalf("capability dispatch = (%+v, %t), cursor=%+v", dispatch, ok, driver.run)
+	}
+	savedExecutor := p.executor
+	p.executor = nil
+	if step, selected := run.Next(); selected || step != (ExecutorRunStep{}) ||
+		driver.run.issued != ActionInvalid {
+		t.Fatalf("ownerless capability selection = (%+v, %t), cursor=%+v", step, selected, driver.run)
+	}
+	p.executor = savedExecutor
+	step, ok := run.Next()
+	if !ok || step.Kind != ExecutorRunStepAction || step.G != task.g ||
+		step.Action != dispatch.Action || driver.run.issued != ActionCheckResume {
+		t.Fatalf("capability action = (%+v, %t), cursor=%+v", step, ok, driver.run)
+	}
+	runnerYieldAction(t, driver, step, task)
+	if next, selected := run.Next(); !selected || next.Kind != ExecutorRunStepDispatch ||
+		next.G != task.g || next.Action.Kind != ActionCheckResume {
+		t.Fatalf("capability reuse after stable reduction = (%+v, %t)", next, selected)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestCurrentExecutorDriverForActiveResumeUsesIssuedCapability(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "active-resume-capability")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue active-resume-capability task")
+	}
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("enter active-resume capability")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	if current, route, valid := CurrentExecutorDriverForActiveResume(task.g); !valid || current != driver || route != driver.route {
+		t.Fatalf("active-resume driver = (%p, %d, %t)", current, route, valid)
+	}
+	savedExecutor := p.executor
+	p.executor = nil
+	if current, route, valid := CurrentExecutorDriverForActiveResume(task.g); valid || current != nil || route != 0 {
+		t.Fatalf("ownerless active-resume driver = (%p, %d, %t)", current, route, valid)
+	}
+	p.executor = savedExecutor
+	savedIssued := driver.run.issued
+	driver.run.issued = ActionInvalid
+	if current, route, valid := CurrentExecutorDriverForActiveResume(task.g); valid || current != nil || route != 0 {
+		t.Fatalf("unissued active-resume driver = (%p, %d, %t)", current, route, valid)
+	}
+	driver.run.issued = savedIssued
+	task.frame.header.SuspendReason = uint16(SuspendYield)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare active-resume capability yield")
+	}
+	next, resumed := Resumed(p, task.g, resume)
+	if !resumed || next.Kind != ActionYield || !CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("finish active-resume capability = (%+v, %t)", next, resumed)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestCurrentExecutorDriverForCompilerTaskUsesHiddenTaskCapability(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "compiler-task-capability")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue compiler-task-capability task")
+	}
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("enter compiler-task capability")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	if current, route, valid := CurrentExecutorDriverForCompilerTask(task.g); !valid || current != driver || route != driver.route {
+		t.Fatalf("compiler-task driver = (%p, %d, %t)", current, route, valid)
+	}
+	// The hidden task is the capability; this boundary does not require the
+	// host runner's optional issued-action marker.
+	savedIssued := driver.run.issued
+	driver.run.issued = ActionInvalid
+	if current, route, valid := CurrentExecutorDriverForCompilerTask(task.g); !valid || current != driver || route != driver.route {
+		t.Fatalf("unissued compiler-task driver = (%p, %d, %t)", current, route, valid)
+	}
+	driver.run.issued = savedIssued
+	savedCurrent := p.current
+	p.current = nil
+	if current, route, valid := CurrentExecutorDriverForCompilerTask(task.g); valid || current != nil || route != 0 {
+		t.Fatalf("detached compiler-task driver = (%p, %d, %t)", current, route, valid)
+	}
+	p.current = savedCurrent
+	task.frame.header.SuspendReason = uint16(SuspendYield)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare compiler-task capability yield")
+	}
+	next, resumed := Resumed(p, task.g, resume)
+	if !resumed || next.Kind != ActionYield || !CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("finish compiler-task capability = (%+v, %t)", next, resumed)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorRunIssuedCommitRetainsExactOwnerGate(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "issued-owner-gate")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue issued-owner-gate task")
+	}
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check issued-owner-gate resume")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendYield)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare issued-owner-gate yield")
+	}
+	next, ok := Resumed(p, task.g, resume)
+	if !ok || next.Kind != ActionYield {
+		t.Fatalf("resume issued-owner-gate task = (%+v, %t)", next, ok)
+	}
+
+	// run.issued alone is not authority: the exact P back-pointer and bound
+	// executor mode remain mandatory at the commit boundary.
+	p.executor = nil
+	if CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatal("issued commit accepted a missing P owner")
+	}
+	p.executor = driver
+	preemptStore(&p.executorMode, executorModeUnbound)
+	if CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatal("issued commit accepted an unbound P")
+	}
+	preemptStore(&p.executorMode, executorModeBound)
+	if !CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatal("issued commit rejected restored exact owner")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestExecutorRunCommandBootstrapDirectChildHandoffPrecedesTwoPeers(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)
@@ -511,13 +670,15 @@ func TestExecutorRunStartedEpochPrecedesReadyAndHotSourceAlternates(t *testing.T
 		t.Fatal("prepare hot source runner")
 	}
 
-	sourceSteps := uint32(0)
+	sourceSteps, sourceUsed := uint32(0), uint32(0)
 	for {
 		step, ok := NextExecutorRunStep(driver)
-		if !ok || step.Kind != ExecutorRunStepSource || step.Poll.Used != 1 {
+		if !ok || step.Kind != ExecutorRunStepSource || step.Poll.Used == 0 ||
+			step.Poll.Used > executorRunSourceBatchQuantum {
 			t.Fatalf("started epoch step %d = (%+v, %t)", sourceSteps, step, ok)
 		}
 		sourceSteps++
+		sourceUsed += step.Poll.Used
 		if step.Poll.Complete {
 			break
 		}
@@ -525,8 +686,9 @@ func TestExecutorRunStartedEpochPrecedesReadyAndHotSourceAlternates(t *testing.T
 			t.Fatal("ready G interrupted a started A/ack/B epoch")
 		}
 	}
-	if want, ok := MinExecutorPollBudget(driver); !ok || sourceSteps != want {
-		t.Fatalf("budget-one source transaction used %d, want (%d, %t)", sourceSteps, want, ok)
+	if want, ok := MinExecutorPollBudget(driver); !ok || sourceUsed != want {
+		t.Fatalf("batched source transaction used %d reductions in %d steps, want (%d, %t)",
+			sourceUsed, sourceSteps, want, ok)
 	}
 	// Publish the next hot epoch before paying the ready debt. Dispatch and one
 	// complete physical G action must still precede that epoch.
@@ -543,10 +705,64 @@ func TestExecutorRunStartedEpochPrecedesReadyAndHotSourceAlternates(t *testing.T
 	}
 	runnerYieldAction(t, driver, step, task)
 	step, ok = NextExecutorRunStep(driver)
-	if !ok || step.Kind != ExecutorRunStepSource || step.Poll.Used != 1 {
+	if !ok || step.Kind != ExecutorRunStepSource || step.Poll.Used == 0 ||
+		step.Poll.Used > executorRunSourceBatchQuantum {
 		t.Fatalf("hot source did not alternate after one G action = (%+v, %t)", step, ok)
 	}
 	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorRunActionPreservesReadyDebtPublishedDuringResume(t *testing.T) {
+	p := new(P)
+	driver, registry, handle := bindTestExecutorDriver(t, p)
+	current := newYieldingTestG(t, "ready-debt-current")
+	peer := newYieldingTestG(t, "ready-debt-peer")
+	if !Enqueue(p, current.g) || registry.Request(handle) != ExecutorRequestPublished {
+		t.Fatal("prepare ready-debt action")
+	}
+	// This debt selected current and is paid when its physical Action starts.
+	// The pending source remains observable behind that action.
+	driver.run.readyDebt = true
+	step := runnerNextPhysicalAction(t, driver, current, ActionCheckResume)
+	if driver.run.readyDebt || driver.run.issued != ActionCheckResume ||
+		!registry.ObserveRequested(handle) {
+		t.Fatalf("issued action retained old debt: run=%+v requested=%t",
+			driver.run, registry.ObserveRequested(handle))
+	}
+	resume, ok := Checked(p, current.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check ready-debt current")
+	}
+	takeNormalRunnerDecision(t, current.g)
+
+	// Model a same-owner completion produced inside llvm.coro.resume: it makes
+	// a peer runnable and publishes a new debt before the current Action receipt.
+	if !Enqueue(p, peer.g) {
+		t.Fatal("publish peer during physical resume")
+	}
+	driver.run.readyDebt = true
+	current.frame.header.SuspendReason = uint16(SuspendYield)
+	current.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(current.g, current.handle, current.frame.header) {
+		t.Fatal("prepare current yield")
+	}
+	next, resumed := Resumed(p, current.g, resume)
+	if !resumed || next.Kind != ActionYield ||
+		!CommitExecutorRunAction(driver, current.g, next) {
+		t.Fatalf("commit action with newly published ready debt = (%+v, %t)", next, resumed)
+	}
+	if !driver.run.readyDebt || driver.run.issued != ActionInvalid ||
+		p.readyHead != peer.g || p.readyTail != current.g ||
+		!registry.ObserveRequested(handle) {
+		t.Fatalf("action receipt lost new debt: run=%+v head=%p tail=%p requested=%t",
+			driver.run, p.readyHead, p.readyTail, registry.ObserveRequested(handle))
+	}
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != peer.g {
+		t.Fatalf("new peer did not precede pending source = (%+v, %t)", step, ok)
+	}
+	runtime.KeepAlive(current.frame.memory)
+	runtime.KeepAlive(peer.frame.memory)
 }
 
 func TestExecutorRunCursorRejectsImplicitLegacySwitch(t *testing.T) {
@@ -607,7 +823,6 @@ func TestExecutorRunCursorRejectsExportedPollSlice(t *testing.T) {
 				t.Fatal("prepare mixed hot-source/ready-debt cursor")
 			}
 
-			requestedBehindA := false
 			now := int64(1)
 			for {
 				var step ExecutorRunStep
@@ -621,20 +836,21 @@ func TestExecutorRunCursorRejectsExportedPollSlice(t *testing.T) {
 				if !ok || step.Kind != ExecutorRunStepSource {
 					t.Fatalf("mixed cursor source = (%+v, %t)", step, ok)
 				}
-				if !requestedBehindA && driver.poll.phase >= executorPollEpochBPublish {
-					if registry.Request(handle) != ExecutorRequestPublished {
-						t.Fatal("publish hot source behind acknowledged epoch A")
-					}
-					requestedBehindA = true
-				}
 				if step.Poll.Complete {
 					break
 				}
 			}
-			if !requestedBehindA || !driver.run.sourceMore || !driver.run.readyDebt ||
+			// A small A/ack/B transaction may complete in one bounded Source
+			// step. Publish the next hot epoch after completion but before
+			// ready-debt dispatch; the exported compatibility poll must still
+			// reject this mixed bounded-runner state.
+			if registry.Request(handle) != ExecutorRequestPublished {
+				t.Fatal("publish hot source behind completed batched epoch")
+			}
+			if !driver.run.readyDebt ||
 				driver.poll != (executorPollTransaction{}) || p.readyHead != task.g {
-				t.Fatalf("mixed cursor precondition = requested:%t run:%+v poll:%+v head:%p",
-					requestedBehindA, driver.run, driver.poll, p.readyHead)
+				t.Fatalf("mixed cursor precondition = run:%+v poll:%+v head:%p",
+					driver.run, driver.poll, p.readyHead)
 			}
 			beforeRun, beforePoll := driver.run, driver.poll
 			var progress ExecutorPollProgress
@@ -678,6 +894,39 @@ func TestRequestExecutorSourceServiceResumesBlockedOwnerTransaction(t *testing.T
 	if !ok || step.Kind != ExecutorRunStepSource {
 		t.Fatalf("requested owner source step = (%+v, %t)", step, ok)
 	}
+}
+
+func TestNextExecutorRunStepBeforeTimeDefersOnlyTimedSource(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithTimers(t, p)
+	task := newYieldingTestG(t, "before-time-ready")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue before-time runnable")
+	}
+	step, ok := NextExecutorRunStepBeforeTime(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != task.g {
+		t.Fatalf("before-time dispatch = (%+v, %t)", step, ok)
+	}
+
+	// A separate stable driver isolates the time-required source decision. The
+	// before-time probe must reject it without cursor mutation.
+	sourceP := new(P)
+	sourceDriver, registry, _, handle := bindTestExecutorDriverWithTimers(t, sourceP)
+	if result := registry.Request(handle); result != ExecutorRequestPublished {
+		t.Fatalf("publish timed source request = %d", result)
+	}
+	beforeRun, beforePoll := sourceDriver.run, sourceDriver.poll
+	if step, ok := NextExecutorRunStepBeforeTime(sourceDriver); ok || step != (ExecutorRunStep{}) {
+		t.Fatalf("before-time source probe = (%+v, %t)", step, ok)
+	}
+	if sourceDriver.run != beforeRun || sourceDriver.poll != beforePoll {
+		t.Fatalf("before-time source probe mutated state: run=%+v poll=%+v", sourceDriver.run, sourceDriver.poll)
+	}
+	step, ok = NextExecutorRunStepAt(sourceDriver, 1)
+	if !ok || step.Kind != ExecutorRunStepSource {
+		t.Fatalf("timed retry source = (%+v, %t)", step, ok)
+	}
+	runtime.KeepAlive(task.frame.memory)
 }
 
 func TestRequestExecutorSourceServiceRejectsUnstableOwner(t *testing.T) {

@@ -156,10 +156,11 @@ func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T
 		t.Fatalf("request replacement source transaction = %d", result)
 	}
 	sourceSteps := 0
+	sourceUsed := uint32(0)
 	for {
 		sourceStep, advanced := NextExecutorRunStep(driver)
 		if !advanced || sourceStep.Kind != ExecutorRunStepSource ||
-			sourceStep.Poll.Used != 1 {
+			sourceStep.Poll.Used == 0 || sourceStep.Poll.Used > executorRunSourceBatchQuantum {
 			t.Fatalf(
 				"replacement source step %d = (%+v, %t)",
 				sourceSteps,
@@ -168,6 +169,7 @@ func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T
 			)
 		}
 		sourceSteps++
+		sourceUsed += sourceStep.Poll.Used
 		if sourceStep.Poll.Complete {
 			break
 		}
@@ -177,10 +179,14 @@ func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T
 			t.Fatal("returned across replacement source A/ack/B transaction")
 		}
 	}
-	if sourceSteps < 2 || !ExecutorResumeHandoffReturnable(driver) {
+	if want, budgetOK := MinExecutorPollBudget(driver); !budgetOK || sourceUsed != want ||
+		!ExecutorResumeHandoffReturnable(driver) {
 		t.Fatalf(
-			"replacement source transaction = %d steps, returnable=%t",
+			"replacement source transaction = %d reductions in %d steps, want=(%d,%t), returnable=%t",
+			sourceUsed,
 			sourceSteps,
+			want,
+			budgetOK,
 			ExecutorResumeHandoffReturnable(driver),
 		)
 	}

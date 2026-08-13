@@ -413,7 +413,7 @@ func (u *EmissionUniverse) freezeCoroWorkerResultProjectionCertificates() error 
 		certificate.id = framedEmissionKey(
 			"llgo-coro-worker-result-projection-v1",
 			identity,
-			structuralGoLinknameABITypeKey(fn.Signature),
+			u.cachedGoLinknameABITypeKey(fn.Signature),
 			projection.canonical,
 		)
 		u.workerResultProjections[fn] = certificate

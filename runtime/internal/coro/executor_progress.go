@@ -73,12 +73,16 @@ const (
 	executorCatalogDone
 )
 
-// Timer expiry and reactor readiness commonly arrive in bursts. Keeping this
-// quantum small amortizes runner/validation dispatch without turning one host
-// reduction into an unbounded catalog walk on embedded or single-threaded
-// targets. Other source types retain one-entry reductions because they may run
-// stronger admission or control protocols per entry.
-const executorCatalogBatchQuantum uint32 = 8
+// Timer expiry and reactor readiness commonly arrive in bursts. A timer
+// reduction consumes at most one fixed catalog page: this amortizes the
+// runner/validation boundary while retaining the same allocation-free bound
+// on embedded and single-threaded targets. Poll keeps the smaller quantum
+// because each reactor entry may carry a stronger OS-facing protocol. Other
+// source types retain one-entry reductions.
+const (
+	executorTimerCatalogBatchQuantum uint32 = TimerRegistrationPageCapacity
+	executorPollCatalogBatchQuantum  uint32 = 8
+)
 
 // executorPollTransaction is scheduler-owner-only continuation state. It has
 // no callback-visible pointer and is embedded at a stable address in the
@@ -314,8 +318,11 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 			transaction.deadline, transaction.hasDeadline = deadline, true
 		}
 		transaction.cursor++
-		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
-			return false
+		if uint32(transaction.cursor) == limit {
+			if !sources.timers.commitTimerRegistrationMinimum(transaction.deadline, transaction.hasDeadline) ||
+				!transaction.advanceCatalogSource(sources) {
+				return false
+			}
 		}
 	case executorCatalogPoll:
 		if index == 0 && !sources.poll.beginDrainPass(p) {
@@ -418,9 +425,28 @@ func publishExecutorCatalogReduction(driver *ExecutorDriver) bool {
 		return false
 	}
 	source := driver.poll.source
+	if source == executorCatalogTimers && driver.poll.cursor == 0 {
+		deadline, hasDeadline, skip, ok := timerRegistrationFastDeadline(
+			driver.sources.timers,
+			driver.p,
+			driver.poll.now,
+		)
+		if !ok {
+			return false
+		}
+		if skip {
+			if hasDeadline && (!driver.poll.hasDeadline || deadline < driver.poll.deadline) {
+				driver.poll.deadline, driver.poll.hasDeadline = deadline, true
+			}
+			return driver.poll.advanceCatalogSource(&driver.sources)
+		}
+	}
 	limit := uint32(1)
-	if source == executorCatalogTimers || source == executorCatalogPoll {
-		limit = executorCatalogBatchQuantum
+	switch source {
+	case executorCatalogTimers:
+		limit = executorTimerCatalogBatchQuantum
+	case executorCatalogPoll:
+		limit = executorPollCatalogBatchQuantum
 	}
 	for visited := uint32(0); visited < limit; visited++ {
 		if !publishExecutorCatalogEntry(driver) {
@@ -487,6 +513,20 @@ func pollBoundExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bo
 	used := uint32(0)
 	for used < budget {
 		transaction := &driver.poll
+		// A typed cleanup is a direct-runtime boundary, not another core
+		// reduction. A batched runner entry may have reached it after consuming
+		// earlier source work; return that bounded progress so the next unified
+		// step can expose ExecutorRunStepMaterialize. A caller which enters with
+		// the cleanup already pending violated the runner selector contract.
+		if _, pending := pendingResumeCleanupStepForCursor(&transaction.resolve); pending {
+			if used == 0 {
+				return transaction.total, ExecutorPollProgress{}, false
+			}
+			progress, progressOK := executorProgressFromScan(
+				transaction.total, used, budget, false, true, false,
+			)
+			return transaction.total, progress, progressOK
+		}
 		switch transaction.phase {
 		case executorPollEpochAPublish, executorPollEpochBPublish:
 			if transaction.resampleNow {

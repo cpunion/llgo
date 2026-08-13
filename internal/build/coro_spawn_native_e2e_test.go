@@ -656,21 +656,25 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	newChanBody := newChan.MakeBody(1)
 	newChanBody.Return(newChanBody.Call(rawNewChan.Expr, newChan.Param(0), newChan.Param(1)))
 	rawTrySend := pkg.NewFunc("command-line-arguments.CoroChanTrySend", newSignature(
-		[]types.Type{pointer, pointer, intType}, []types.Type{boolType},
+		[]types.Type{pointer, pointer, pointer, intType}, []types.Type{boolType},
 	), llssa.InGo)
 	trySend := pkg.NewFunc(llssa.PkgRuntime+".CoroChanTrySend", newSignature(
-		[]types.Type{pointer, pointer, intType}, []types.Type{boolType},
+		[]types.Type{pointer, pointer, pointer, intType}, []types.Type{boolType},
 	), llssa.InGo)
 	trySendBody := trySend.MakeBody(1)
-	trySendBody.Return(trySendBody.Call(rawTrySend.Expr, trySend.Param(0), trySend.Param(1), trySend.Param(2)))
+	trySendBody.Return(trySendBody.Call(
+		rawTrySend.Expr, trySend.Param(0), trySend.Param(1), trySend.Param(2), trySend.Param(3),
+	))
 	rawTryRecv := pkg.NewFunc("command-line-arguments.CoroChanTryRecv", newSignature(
-		[]types.Type{pointer, pointer, intType}, []types.Type{boolType, boolType},
+		[]types.Type{pointer, pointer, pointer, intType}, []types.Type{boolType, boolType},
 	), llssa.InGo)
 	tryRecv := pkg.NewFunc(llssa.PkgRuntime+".CoroChanTryRecv", newSignature(
-		[]types.Type{pointer, pointer, intType}, []types.Type{boolType, boolType},
+		[]types.Type{pointer, pointer, pointer, intType}, []types.Type{boolType, boolType},
 	), llssa.InGo)
 	tryRecvBody := tryRecv.MakeBody(1)
-	tryRecvResult := tryRecvBody.Call(rawTryRecv.Expr, tryRecv.Param(0), tryRecv.Param(1), tryRecv.Param(2))
+	tryRecvResult := tryRecvBody.Call(
+		rawTryRecv.Expr, tryRecv.Param(0), tryRecv.Param(1), tryRecv.Param(2), tryRecv.Param(3),
+	)
 	tryRecvBody.Return(tryRecvBody.Extract(tryRecvResult, 0), tryRecvBody.Extract(tryRecvResult, 1))
 	chanOpSliceType := types.NewSlice(prog.RuntimeType("ChanOp").RawType())
 	uint32Type := types.Typ[types.Uint32]

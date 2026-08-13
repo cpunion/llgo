@@ -315,7 +315,7 @@ func coroWorkerCallableTarget(
 			coroWorkerAddressFunctionIdentity(universe, sourceTarget),
 			coroWorkerAddressFunctionIdentity(universe, target),
 			physical,
-			structuralGoLinknameABITypeKey(target.Signature),
+			universe.cachedGoLinknameABITypeKey(target.Signature),
 			parsed.Canonical,
 			behaviorDigest,
 		))
@@ -368,7 +368,7 @@ func coroWorkerCallableTarget(
 		coroWorkerAddressFunctionIdentity(universe, sourceTarget),
 		coroWorkerAddressFunctionIdentity(universe, target),
 		physical,
-		structuralGoLinknameABITypeKey(target.Signature),
+		universe.cachedGoLinknameABITypeKey(target.Signature),
 		defaultContract.Canonical,
 		behaviorDigest,
 	))

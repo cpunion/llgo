@@ -121,6 +121,10 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 
 			sendPhysical := requireCoroPhysicalFunction(t, module, "foo.Send")
 			send := sendPhysical.String()
+			assertCoroChannelTryUsesCompilerTask(
+				t, sendPhysical, "github.com/goplus/llgo/runtime/internal/runtime.CoroChanTrySend",
+			)
+			assertCoroChannelParkStateHasNoCallerStore(t, sendPhysical, coroChanSendParkHookV1)
 			assertCoroCancellationTerminalStatusPublication(t, sendPhysical)
 			assertCoroChannelBody(t, "Send", send, coroChanSendParkHookV1, []uint64{
 				coroChanResumeSendOK,
@@ -138,7 +142,12 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				t.Fatalf("Send coroutine did not select the send-closed fault kind:\n%s", send)
 			}
 			for _, name := range []string{"Recv", "RecvOK"} {
-				recv := requireCoroPhysicalFunction(t, module, "foo."+name).String()
+				recvPhysical := requireCoroPhysicalFunction(t, module, "foo."+name)
+				recv := recvPhysical.String()
+				assertCoroChannelTryUsesCompilerTask(
+					t, recvPhysical, "github.com/goplus/llgo/runtime/internal/runtime.CoroChanTryRecv",
+				)
+				assertCoroChannelParkStateHasNoCallerStore(t, recvPhysical, coroChanRecvParkHookV1)
 				assertCoroChannelBody(t, name, recv, coroChanRecvParkHookV1, []uint64{
 					coroChanResumeRecvOK,
 					coroChanResumeRecvClosed,
@@ -248,6 +257,84 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 			}
 		})
 	}
+}
+
+// assertCoroChannelTryUsesCompilerTask freezes the internal channel-helper
+// boundary: the first physical coroutine parameter is the scheduler G, and it
+// must be forwarded as the first helper argument. Reconstructing that identity
+// through TLS or a code-address lookup would add native hot-path work and make
+// the same owner-local optimization unavailable to WASM/bare-metal targets.
+func assertCoroChannelTryUsesCompilerTask(t *testing.T, function llvm.Value, callee string) {
+	t.Helper()
+	var call llvm.Value
+	for _, block := range function.BasicBlocks() {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.InstructionOpcode() != llvm.Call || instruction.CalledValue().Name() != callee {
+				continue
+			}
+			if !call.IsNil() {
+				t.Fatalf("%s calls %q more than once:\n%s", function.Name(), callee, function.String())
+			}
+			call = instruction
+		}
+	}
+	if call.IsNil() {
+		t.Fatalf("%s does not call %q:\n%s", function.Name(), callee, function.String())
+	}
+	if got := call.OperandsCount() - 1; got != 4 {
+		t.Fatalf("%s arguments = %d, want task/channel/element/size:\n%s", callee, got, call.String())
+	}
+	if function.ParamsCount() < 1 || call.Operand(0) != function.Param(0) {
+		t.Fatalf("%s does not receive the compiler-carried task as argument zero:\n%s", callee, call.String())
+	}
+}
+
+// assertCoroChannelParkStateHasNoCallerStore freezes the zero-initialization
+// ownership boundary. Coroutine frame allocation supplies the initial zero
+// state, the park hook initializes it only after a nonblocking try fails, and
+// resume clears it before reuse. A caller-side aggregate store would make
+// every successful try pay the cost of initializing slow-path-only state.
+func assertCoroChannelParkStateHasNoCallerStore(t *testing.T, function llvm.Value, parkHook string) {
+	t.Helper()
+	var call llvm.Value
+	for _, block := range function.BasicBlocks() {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.InstructionOpcode() != llvm.Call || instruction.CalledValue().Name() != parkHook {
+				continue
+			}
+			if !call.IsNil() {
+				t.Fatalf("%s calls %q more than once:\n%s", function.Name(), parkHook, function.String())
+			}
+			call = instruction
+		}
+	}
+	if call.IsNil() {
+		t.Fatalf("%s does not call %q:\n%s", function.Name(), parkHook, function.String())
+	}
+	if got := call.OperandsCount() - 1; got != 7 {
+		t.Fatalf("%s arguments = %d, want task/handle/header/channel/element/state/size:\n%s",
+			parkHook, got, call.String())
+	}
+	state := coroChannelPointerBase(call.Operand(5))
+	if state.IsAAllocaInst().IsNil() {
+		t.Fatalf("%s park state is not physical-ramp frame storage:\n%s", function.Name(), call.String())
+	}
+	for _, block := range function.BasicBlocks() {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.InstructionOpcode() == llvm.Store &&
+				coroChannelPointerBase(instruction.Operand(1)) == state {
+				t.Fatalf("%s eagerly stores channel park state before the slow-path hook:\n%s",
+					function.Name(), instruction.String())
+			}
+		}
+	}
+}
+
+func coroChannelPointerBase(value llvm.Value) llvm.Value {
+	for !value.IsABitCastInst().IsNil() && value.OperandsCount() == 1 {
+		value = value.Operand(0)
+	}
+	return value
 }
 
 func assertCoroSelectBody(t *testing.T, body string) {

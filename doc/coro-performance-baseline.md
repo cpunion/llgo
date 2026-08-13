@@ -1212,3 +1212,332 @@ catalog-scan problem: an immediately matched channel operation still suspends
 both endpoints and runs the durable A/ack/B plus typed-cleanup transaction.
 Avoiding that suspension on the exact local ready path is the next performance
 gate.
+
+### Closed-program worker demand and pure static checkpoint
+
+The 2026-08-13 local candidate based on `914379fbd` separates target support
+from closed-program demand. After the final physical ProgramIR transaction is
+sealed, the compiler projects a worker bit only from reachable
+`worker-syscall`, `worker-foreign`, `worker-cgo`, and `worker-cgo-errno`
+recipes. The bit is included in both startup-table and manifest hashes. The
+runtime validates it before binding executor sources and starts the native
+worker pool only when the program requests it.
+
+This exposed one real false demand in `g_pthread.go`: an unrecoverable TLS-key
+failure tried to call `fprintf` before a scheduler existed. That diagnostic
+could never suspend and resume correctly. It now delegates directly to the
+existing terminal synchronous abort path, while ordinary stdio remains a
+potentially blocking worker operation.
+
+Two no-import, no-output fixtures provide a closed negative gate. Both were
+built with LLVM 22.1.8 using `-a -trimpath -O3 -lto=full -ldflags='-s -w'` and
+an independent cache. Their linked V2 bootstrap has flags zero, the generated
+worker foreign-call thunk is absent, and the four-second compute run has one
+OS thread. The existing general workload retains flags `1`, providing the
+positive worker-demand side of the gate.
+
+The table reports medians of seven AB/BA-interleaved `/usr/bin/time -lp` runs.
+Retired instructions and cycles are authoritative because process wall time
+was heavily affected by unrelated host scheduling.
+
+| Pure fixture / metric | Go 1.26.5 | LLGo coroutine | Difference |
+| --- | ---: | ---: | ---: |
+| idle file bytes | 1,161,922 | 897,968 | -22.72% |
+| idle retired instructions | 23,433,796 | 40,681,350 | +73.60% |
+| idle cycles | 19,374,249 | 22,141,783 | +14.29% |
+| idle peak RSS | 3,293,184 | 3,768,320 | +475,136 (+14.43%) |
+| compute file bytes | 1,161,922 | 898,608 | -22.66% |
+| one-billion-call instructions | 25,235,748,943 | 23,219,390,643 | -7.99% |
+| one-billion-call cycles | 6,876,063,156 | 5,779,240,893 | -15.95% |
+| compute peak RSS | 3,276,800 | 3,768,320 | +491,520 (+15.00%) |
+
+The full seven-run instruction ranges were 25.172--25.507 billion for Go and
+23.192--23.275 billion for LLGo. Cycle ranges were 6.709--7.295 billion and
+5.696--5.861 billion respectively. Thus the direct static-call plus bounded
+safepoint path now beats Go on both stable hardware counters; it is no longer
+the general performance blocker. The LLGo compute payload adds only 640 bytes
+to its pure-idle artifact.
+
+The fixed path is not finished. Pure LLGo startup still retires about 17.25
+million more instructions than Go and holds about 464 KiB more resident
+memory. Also, 64 worker-named runtime symbols remain linked even when the
+capability bit is zero: the change avoids their threads and operation source,
+but the runtime's dynamic source-binding references prevent complete LTO code
+elimination. The next fixed-cost work should profile scheduler/bootstrap
+initialization and then make optional service code itself link-time removable;
+it should not perturb the now-competitive static kernel.
+
+A same-source full-LTO `-tags=nogc` control isolates most of that fixed gap.
+Seven runs gave 27,229,137 median retired instructions and 2,424,832-byte
+median peak RSS; the stripped artifact was 897,552 bytes and had no `libgc`
+dependency. Compared with the default coroutine build, removing BDWGC startup
+saves about 13.45 million instructions and 1.34 MiB RSS. That accounts for
+roughly 78% of LLGo's 17.25-million-instruction fixed deficit to Go. The
+remaining `nogc` gap is about 3.80 million instructions (+16.2%), while its
+RSS is about 0.83 MiB below Go. Default-GC lazy initialization/linkage is
+therefore the primary fixed-cost target; scheduler bootstrap is a smaller,
+separately measurable remainder.
+
+### Compact structural emission type graph checkpoint
+
+The same 2026-08-13 candidate removes a compiler-side exponential path that
+was exposed by the complete cmd/cgo fixture. The previous structural emission
+keys recursively serialized every occurrence of a type child. A shared
+go/types DAG was therefore expanded as a tree, even though repeated acyclic
+children carry no additional identity. Deep generic C and managed-interface
+signatures could spend more time and memory constructing key strings than
+emitting their LLVM body.
+
+One parameterized graph now serves all three required equivalence policies:
+strict emission retains named identity, tuple names, and struct metadata;
+strict ABI omits only tuple names; identity-free ABI also expands named types
+and erases struct field metadata. Tarjan SCCs preserve recursive topology,
+ordered root-local references encode cycles, and acyclic children contribute a
+Merkle digest. Each public key is a schema-separated SHA-256 digest, so
+incidental go/types pointer sharing no longer changes equality or output size.
+This replaces the separate recursive builder rather than adding a second type
+authority; the implementation and tests have a net growth of 71 lines.
+
+At depth 18, the adversarial shared-DAG benchmark completes in about 61 us with
+76,880 bytes and 509 allocations per operation, while returning a fixed-length
+key. Before the change, `cgofull` had not reached its IR check after more than
+720 seconds. The compact graph reached that check in about 374 seconds; a
+subsequent complete build-and-run gate passed in 616 seconds. The latter also
+includes compilation, linking, and execution, so it is recorded as a
+correctness gate rather than compared directly with the IR-only cutoff.
+
+A follow-up retains root digests in the owning `EmissionUniverse`. The cache is
+mode-separated, canonicalizes aliases, and dies with that one compiler
+session; it cannot pin go/types graphs from earlier requests in a process-wide
+map. All production structural-key consumers use this boundary, including
+interface descriptors, worker/cgo thunks, callable shadows, frame-retention
+proofs, dispatch layouts, and archive effect summaries. A cache hit takes
+about 318--560 ns with zero bytes and zero allocations on the loaded validation
+host, versus about 0.8--1.1 ms, 76,880 bytes, and 509 allocations when rebuilding
+the depth-18 graph. The affected semantic suite and the complete `cgobasic`
+build/link/run fixture pass.
+
+The large `cgofull` fixture was not promoted as a post-cache timing result. Both
+its IR-only and full paths entered the existing LLVM emission peak above the
+1.6-GiB local validation ceiling and were terminated cleanly. The earlier
+post-graph 616-second pass remains the correctness result; no claim is made
+from incomplete, heavily host-contended wall-clock samples.
+
+### Closed direct-channel transaction checkpoint
+
+The next 2026-08-13 local candidate, still based on `914379fbd`, isolates the
+remaining unbuffered handoff cost with `testdata/pure_handoff`. The fixture has
+no imports or output and performs 100,000 request/ack round trips, hence 200,000
+successful unbuffered rendezvous. Go 1.26.5 and the LLVM 22.1.8 coroutine
+compiler build the exact same source. Every LLGo variant uses an independent
+cache plus `-a -trimpath -O3 -lto=full -ldflags='-s -w'`.
+
+The retained direct path is a closed transaction rather than a second channel
+implementation:
+
+1. compiler lowering passes its exact hidden `*G` task to channel helpers;
+2. zero-filled coroutine-frame allocation replaces redundant caller and
+   prepare aggregate stores;
+3. `PrepareCurrentChannelParkCleanup` authenticates the compiler park window,
+   reserves and exposes one source operation, publishes the parked frame, and
+   binds typed cleanup in one transaction; catalog exhaustion returns an exact
+   zero-effect `NeedsCapacity` result;
+4. after an hchan has detached an ordinary one-case waiter under its lock, the
+   same-P matcher acquires the private select claim without first taking the
+   generic producer lifetime admission;
+5. an already published Ready fact upgrades that transaction to the complete
+   admission/mailbox path. After a successful physical commit, the source is
+   sealed before any frame detach. Producers admitted just before the seal are
+   joined through the owner-local FIFO; otherwise the common closed Apply tail
+   resolves, detaches, materializes, recycles, and promotes the peer inline.
+
+Multi-case select, cross-P matching, buffered channels, close, cancellation,
+and every uncertain shape retain the durable source transaction. The fast path
+therefore removes proof work only where hchan serialization plus the exact
+current-P capability already supplies that proof; it does not weaken the
+general producer ABI.
+
+Each intermediate change had its own seven-run instruction gate. Removing the
+caller zero saved 0.382%, removing the duplicate prepare zero saved 0.139%, the
+narrow compiler-task capability saved 1.027%, and the closed park preparation
+saved 1.264% in their respective AB/BA campaigns. A shared struct-return park
+helper was rejected after increasing instructions by 0.359%; LLVM did not
+inline its three boundaries. These independent campaign ratios are not
+compounded below.
+
+The final measurement rotates Go, the retained closed-park parent, and the
+sealed same-P candidate through seven process runs. Retired instructions are
+the primary metric because unrelated host load moved wall time by more than an
+order of magnitude. Complete hardware-counter ranges are included.
+
+| Pure handoff metric | Go 1.26.5 | closed-park parent | sealed same-P candidate |
+| --- | ---: | ---: | ---: |
+| file bytes | 1,161,970 | 916,256 | 916,544 |
+| retired instructions, median | 312,088,337 | 2,332,891,820 | 2,270,337,552 |
+| retired instructions, range | 311,143,041--319,408,760 | 2,328,641,148--2,337,837,686 | 2,266,369,974--2,273,049,208 |
+| cycles, median | 94,773,661 | 531,823,719 | 524,401,481 |
+| cycles, range | 88,386,522--104,969,862 | 516,014,589--614,000,723 | 499,670,027--554,399,515 |
+| peak RSS, median | 3,309,568 | 3,817,472 | 3,801,088 |
+
+Against the exact parent, the candidate retires 2.681% fewer instructions and
+uses 1.396% fewer cycles. Its instruction ratio to Go narrows from 7.48x to
+7.27x, while the cycle ratio narrows from 5.61x to 5.53x. Peak RSS drops one
+16-KiB page versus the parent but remains 14.85% above Go. The stripped LLGo
+artifact remains 21.12% smaller than Go; versus its parent it grows 288 bytes
+and its Mach-O `__text` grows 1,524 bytes. No compiler-spilled channel-frame
+layout changes.
+
+Correctness gates cover the capability boundaries, not only the benchmark
+output. The ordinary direct transaction must leave admission count and linear
+lease zero. A Ready race must upgrade to the generic admission and complete
+source/claim/packet/frame recycling. A producer paused after admission but
+before its physical store must observe the sealed source, release its lease,
+and defer inline detach until quiescence. Capacity failure must leave all frame
+and scheduler state untouched. The complete `runtime/internal/coro` suite, the
+CI-shaped race/shuffle typed-hchan and owner-lock suite, and compiler native plus
+WASM channel-lowering tests pass.
+
+This checkpoint is a real reduction, not completion of channel optimization.
+About 11,350 instructions are still retired per successful rendezvous versus
+about 1,560 for Go. The next gate should collapse the remaining ordinary
+park/resolve/materialize metadata transitions under the same closed capability
+or avoid suspending the immediately matched endpoint. General select and
+cross-owner machinery should not be cloned into another fast runtime.
+
+#### Closed inline state transaction follow-up
+
+The retained follow-up executes that first next gate without introducing a
+second channel state machine. The exact same-P, uncanceled, one-case capability
+now performs one complete read-only preflight over the source slot, frozen park
+descriptor, active/affected queue edges, result packet, and ready-queue header.
+Only after every fallible observation succeeds does one no-fail write half
+publish the canonical end states: source slot `Free`, claim `Open`, packet and
+park `Materialized`, wait record detached, and peer `Runnable`. The transient
+`Detaching`, `Ready`, `Consumed`, `Detached`, `Quiesced`, and `Taken` states are
+not externally observable while producer ingress is sealed, its admission is
+quiesced, the claim excludes another resolver, and the current P excludes
+owner mutation. The general state machine remains authoritative for select,
+cancellation, cross-P work, an admitted producer, and every failed fast-path
+shape.
+
+This replaces repeated construction and validation of the same state; it does
+not remove a lifecycle gate. A deterministic corruption test changes the
+bound packet after the physical effect and verifies that failed preflight has
+not detached, recycled, or promoted any owner state. Restoring the descriptor
+then lets the same closed transaction reach its canonical terminal state. The
+existing Ready-race admission upgrade and producer-before-seal join tests also
+remain passing.
+
+The comparison below is a fresh seven-run rotation of Go, the immediately
+preceding source-proof-tail candidate, and the closed inline candidate. It is
+not mixed with the earlier checkpoint's host-counter session.
+
+| Pure handoff metric | Go 1.26.5 | source-proof-tail parent | closed inline candidate |
+| --- | ---: | ---: | ---: |
+| file bytes | 1,161,970 | 916,784 | 933,104 |
+| retired instructions, median | 321,618,389 | 2,190,867,063 | 1,814,602,002 |
+| retired instructions, range | 319,044,013--323,486,769 | 2,187,207,643--2,194,970,866 | 1,813,240,660--1,816,758,591 |
+| cycles, median | 90,885,434 | 488,143,750 | 387,515,097 |
+| cycles, range | 84,637,855--101,931,134 | 447,473,831--517,061,273 | 367,009,332--419,624,483 |
+| peak RSS, median | 3,260,416 | 3,801,088 | 3,817,472 |
+
+Against the exact parent, the closed transaction retires 17.174% fewer
+instructions and 20.615% fewer cycles. The instruction ratio to Go narrows
+from 6.81x to 5.64x, and the cycle ratio narrows from 5.37x to 4.26x. The
+candidate's median RSS is one 16-KiB page above its parent. Its `__text` grows
+only 672 bytes, but an additional 256 bytes in the on-disk data/metadata
+section crosses the next Mach-O 16-KiB segment-file alignment boundary; that
+accounts for the apparent 16,320-byte file increase. The artifact remains
+19.70% smaller than Go, with no G, wait-record, source-slot, or coroutine-frame
+layout changes.
+
+The complete target-neutral runtime suite, the CI-shaped race/shuffle typed
+hchan and owner-lock suite, and LLVM 22 native plus WASM32 compiler channel
+lowering tests pass. The remaining roughly 9,073 instructions per rendezvous
+versus Go's roughly 1,608 are no longer dominated by resolve/apply/materialize
+validation. The next profile gate should separate unavoidable stackless
+suspend/resume and scheduler handoff cost from hchan locking, compiler-emitted
+park preparation, and the still-general producer-side transaction. An
+immediately matched endpoint may avoid more work, but only if its no-suspend
+hchan critical section can retain the same close/claim lifetime proof.
+
+#### Fused direct park preparation follow-up
+
+The next retained checkpoint applies the same closed-transaction rule to the
+ordinary compiler-generated park half. `PrepareCurrentChannelParkCleanup`
+first authenticates the exact G/P/frame/source relation, fresh frame storage,
+reusable ParkState, source capacity, operation identity, and private direct
+reservation. It then seals the selected producer generation before changing
+owner state. Once that atomic begin succeeds, one no-fail write suffix builds
+the final single-link `Parked` graph, committed wait record, cleanup packet,
+frame transition, source cursor, and reserved external endpoint. Release
+publication of the initialized generation and then the hchan endpoint are the
+only visibility boundaries.
+
+This removes the hot chain through generic operation prepare, commit-mode
+declaration, link attachment, post-build graph audit, and external-exposure
+revalidation. Those APIs remain authoritative for multi-case select, pending
+task cancellation, compatibility callers, and any non-private reservation.
+The generation/admission protocol is unchanged. A deterministic stale-
+reservation gate forces the generation begin to fail and verifies that the
+ParkState, pending transition, frame link, wait/claim/packet/cleanup storage,
+source scan limit, and reserve cursor all remain untouched.
+
+The table is a fresh seven-run candidate/parent/Go rotation using the same
+LLVM 22.1.8 full-LTO build and `/usr/bin/time -lp` hardware counters as the
+preceding checkpoint.
+
+| Pure handoff metric | Go 1.26.5 | closed inline parent | fused park candidate |
+| --- | ---: | ---: | ---: |
+| file bytes | 1,161,970 | 933,104 | 933,104 |
+| retired instructions, median | 311,240,084 | 1,802,711,153 | 1,620,832,698 |
+| retired instructions, range | 309,587,998--316,837,619 | 1,800,541,881--1,812,707,051 | 1,618,790,552--1,624,955,168 |
+| cycles, median | 82,996,555 | 381,292,958 | 365,235,840 |
+| cycles, range | 77,067,945--91,384,658 | 352,567,507--448,725,174 | 357,100,740--376,275,824 |
+| peak RSS, median | 3,227,648 | 3,817,472 | 3,833,856 |
+
+Against the exact parent, the candidate retires 10.089% fewer instructions
+and uses 4.211% fewer cycles. Its instruction ratio to Go narrows from 5.79x
+to 5.21x and its cycle ratio from 4.59x to 4.40x. That is about 8,104 retired
+instructions per rendezvous versus Go's 1,556 in this campaign. The stripped
+file size is unchanged, Mach-O `__text` grows by 400 bytes, and median RSS
+grows by one 16-KiB page. The artifact remains 19.70% smaller than Go and no
+runtime or coroutine-frame layout changes.
+
+The target-neutral core suite, full race/shuffle core gate, native and WASM
+typed-hchan adapter gates, and LLVM 22 native/WASM32 compiler lowering gate
+pass. The remaining gap now needs a new profile: the old park-preparation
+stack no longer describes the emitted transaction, so further optimization
+must target measured hchan, scheduler, or suspend/resume cost rather than
+guessing at another metadata layer.
+
+#### Hchan direct-shape certificate follow-up
+
+The typed hchan matcher already validates the dequeued coroutine operation,
+waiter back-pointers, source route, payload size, direction, and terminal
+status before it acquires the select claim. For the same open, unbuffered,
+direct waiter, the hchan mutex then keeps queue linkage and channel state
+stable across the existing no-suspend begin/effect/commit span. The retained
+follow-up records that proof in the transient commit context and consumes it
+at the later phase boundaries instead of calling the complete operation
+validator and direct-shape recognizer again. Select, buffered, close, and every
+caller without that certificate still perform the ordinary checks. No bit is
+stored in the waiter, operation source, coroutine frame, or producer ABI.
+
+A fresh seven-run parent/candidate rotation measured:
+
+| Pure handoff metric | fused park parent | hchan certificate candidate | Change |
+| --- | ---: | ---: | ---: |
+| file bytes | 933,104 | 933,104 | 0 |
+| retired instructions, median | 1,621,999,749 | 1,587,608,197 | -2.120% |
+| retired instructions, range | 1,621,031,474--1,625,614,230 | 1,585,121,525--1,588,455,666 | |
+| cycles, median | 366,395,409 | 362,085,650 | -1.176% |
+| cycles, range | 354,485,472--371,605,891 | 352,947,743--379,396,740 | |
+| peak RSS, median | 3,833,856 | 3,817,472 | -16,384 |
+
+Mach-O `__text` grows by 176 bytes. A separate fresh candidate/Go rotation
+gave 1,586,785,281 versus 312,146,532 median retired instructions (5.08x) and
+343,619,997 versus 81,370,142 median cycles (4.22x), or about 7,934 versus
+1,561 retired instructions per rendezvous. The complete core and race/shuffle
+gates, native/WASM typed-hchan gates, and LLVM 22 native/WASM32 lowering gate
+remain passing.

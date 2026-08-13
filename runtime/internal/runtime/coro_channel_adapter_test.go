@@ -236,6 +236,9 @@ func resumeCoroChannelAdapterFrame(
 		t.Fatalf("activate completed channel adapter G = (%+v, %t)", action, ok)
 	}
 	status := __llgo_coro_chan_resume_v1(unsafe.Pointer(frame.g), unsafe.Pointer(state))
+	if *state != (CoroChanParkV1{}) {
+		t.Fatalf("channel adapter resume retained reusable park state: %+v", *state)
+	}
 	frame.header.SuspendReason = uint16(coro.SuspendNone)
 	frame.header.Lifecycle = uint16(coro.FrameActive)
 	return action, status
@@ -669,13 +672,16 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	}
 	selectedValue := uint32(0xa5b6c7d8)
 	directSendAction := activateCoroChannelAdapterFrame(t, p, directSender)
-	coroCurrentTaskTestV1 = directSender.g
-	coroCurrentTaskRouteTestV1 = 1
-	if !CoroChanTrySend(selectChannels[1], unsafe.Pointer(&selectedValue), int(unsafe.Sizeof(selectedValue))) {
-		t.Fatal("same-P direct send did not match channel selector")
-	}
+	// Deliberately leave the legacy ambient-current adapter empty and publish a
+	// mismatched advisory route. The compiler-owned try ABI must derive owner
+	// locality only from its explicit task argument; otherwise this rendezvous
+	// falls back to an external source epoch and the atomic-resolve gate below
+	// fails.
 	coroCurrentTaskTestV1 = nil
 	coroCurrentTaskRouteTestV1 = 7
+	if !CoroChanTrySend(unsafe.Pointer(directSender.g), selectChannels[1], unsafe.Pointer(&selectedValue), int(unsafe.Sizeof(selectedValue))) {
+		t.Fatal("same-P direct send did not match channel selector")
+	}
 	yieldCoroChannelAdapterFrame(t, p, directSender, directSendAction)
 	if !pollCoroChannelAdapterExecutorProgress(t, driver) {
 		t.Fatal("same-P channel match did not use owner-local completion reduction")

@@ -217,7 +217,7 @@ const (
 	// preemptCheckpointStride bounds how many compiler safepoints may pass
 	// before a running G checks atomic G/P/executor requests. Keeping this
 	// deterministic preserves targets without a clock or signal source.
-	preemptCheckpointStride uint32 = 256
+	preemptCheckpointStride uint32 = 2048
 	// servicePreemptSafepointBudget bounds the fallback scheduler audit cadence.
 	// A known competitor receives one checkpoint stride. A bound executor does
 	// not yield a sole runnable G merely to rediscover empty sources: every
@@ -692,16 +692,19 @@ func nextOSThreadRunnable(p *P) *G {
 	return nil
 }
 
-// dequeueOSThreadRunnable removes the first G this physical owner is permitted
-// to execute without reordering any other ready entry.
-func dequeueOSThreadRunnable(p *P) *G {
+// dequeueOSThreadRunnableWithTransfer selects and removes the first G this
+// physical owner may execute in one scheduler-owned pass. imported reports the
+// transfer marker consumed by the dequeue so a later BeginRunG rejection can
+// restore the exact queue state without selecting the same G a second time.
+func dequeueOSThreadRunnableWithTransfer(p *P) (*G, bool) {
 	if p == nil || p.readyHead == nil || p.readyCount == 0 {
-		return nil
+		return nil, false
 	}
 	selected := nextOSThreadRunnable(p)
 	if selected == nil {
-		return nil
+		return nil, false
 	}
+	imported := selected.transferState == runnableTransferGImported
 	var previous *G
 	for current := p.readyHead; current != nil; current = current.nextReady {
 		if current != selected {
@@ -713,7 +716,7 @@ func dequeueOSThreadRunnable(p *P) *G {
 			if g != nil && g.transferState == runnableTransferGImported {
 				g.transferState = runnableTransferGIdle
 			}
-			return g
+			return g, imported
 		}
 		previous.nextReady = current.nextReady
 		if p.readyTail == current {
@@ -725,9 +728,16 @@ func dequeueOSThreadRunnable(p *P) *G {
 		if current.transferState == runnableTransferGImported {
 			current.transferState = runnableTransferGIdle
 		}
-		return current
+		return current, imported
 	}
-	return nil
+	return nil, false
+}
+
+// dequeueOSThreadRunnable retains the compatibility shape for lifecycle and
+// shutdown callers which do not need to roll back a consumed transfer marker.
+func dequeueOSThreadRunnable(p *P) *G {
+	g, _ := dequeueOSThreadRunnableWithTransfer(p)
+	return g
 }
 
 func enqueueParkSet(p *P, g *G) bool {
@@ -742,11 +752,17 @@ func enqueueParkSet(p *P, g *G) bool {
 }
 
 func validRunnableParkState(state *ParkState) bool {
-	if !validParkState(state) {
+	if state == nil {
 		return false
 	}
-	return state.phase == parkIdle || state.phase == parkConsumed || state.phase == parkDelivered ||
-		state.phase == parkReady || state.phase == parkMaterialized
+	switch state.phase {
+	case parkIdle, parkConsumed, parkDelivered:
+		return validReleasableParkState(state)
+	case parkReady, parkMaterialized:
+		return validParkState(state)
+	default:
+		return false
+	}
 }
 
 // validRunnableRunAction distinguishes an ordinary runnable suspension from a
@@ -948,11 +964,11 @@ func NextRunnableAt(p *P, now int64) (g *G, ok bool) {
 	return dequeueOSThreadRunnable(p), true
 }
 
-func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded bool, ok bool) {
+func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded, directPark, ok bool) {
 	pending := g.pending
 	g.pending = pendingTransition{}
 	if pending.from != resumed {
-		return nil, false, false
+		return nil, false, false, false
 	}
 	switch pending.kind {
 	case pendingAwait:
@@ -960,55 +976,63 @@ func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded bool, ok boo
 		if child == nil || child.parent != resumed || resumed.header == nil || child.header == nil ||
 			resumed.header.Lifecycle != uint16(FrameSuspended) ||
 			child.header.Lifecycle != uint16(FrameInitialSuspended) {
-			return nil, false, false
+			return nil, false, false, false
 		}
 		resumed.state = FrameSuspended
 		g.active = child
-		return nil, false, true
+		return nil, false, false, true
 	case pendingComplete:
 		if pending.target != nil || resumed.header == nil ||
 			resumed.header.Lifecycle != uint16(FrameFinalSuspended) || !completionMatchesTerminalFrame(resumed) {
-			return nil, false, false
+			return nil, false, false, false
 		}
 		g.active = resumed.parent
 		resumed.state = FrameDestroyPending
 		resumed.header.Lifecycle = uint16(FrameDestroyPending)
 		g.destroyTarget = resumed
-		return resumed, false, true
+		return resumed, false, false, true
 	case pendingYield:
 		if pending.target != nil || resumed.header == nil ||
 			resumed.header.SuspendReason != uint16(SuspendYield) ||
 			resumed.header.Lifecycle != uint16(FrameSuspended) {
-			return nil, false, false
+			return nil, false, false, false
 		}
 		resumed.state = FrameSuspended
-		return nil, true, true
+		return nil, true, false, true
 	case pendingParkSet:
 		if pending.target != nil || resumed.header == nil ||
 			resumed.header.SuspendReason != uint16(SuspendPark) ||
 			resumed.header.Lifecycle != uint16(FrameSuspended) ||
-			g.waiting ||
-			!validParkState(&g.park) || g.park.phase != parkParked ||
-			!validCommittedWaitSetRecord(resumed.parkWait, g, resumed) {
-			return nil, false, false
+			g.waiting {
+			return nil, false, false, false
+		}
+		wait := resumed.parkWait
+		direct := wait != nil && wait.directChannel
+		if direct {
+			if !validCommittedDirectChannelPark(g, resumed, wait) {
+				return nil, false, false, false
+			}
+		} else if !validParkState(&g.park) || g.park.phase != parkParked ||
+			!validCommittedWaitSetRecord(wait, g, resumed) {
+			return nil, false, false, false
 		}
 		resumed.state = FrameSuspended
-		return nil, false, true
+		return nil, false, direct, true
 	case pendingPanic:
 		if pending.target != nil || resumed.header == nil ||
 			resumed.header.SuspendReason != uint16(SuspendPanic) ||
 			resumed.header.Lifecycle != uint16(FrameFinalSuspended) ||
 			g.panicUnwind || !publishedPanicRecord(&g.panicRecord) {
-			return nil, false, false
+			return nil, false, false, false
 		}
 		g.active = resumed.parent
 		resumed.state = FrameDestroyPending
 		resumed.header.Lifecycle = uint16(FrameDestroyPending)
 		g.destroyTarget = resumed
 		g.panicUnwind = true
-		return resumed, false, true
+		return resumed, false, false, true
 	default:
-		return nil, false, false
+		return nil, false, false, false
 	}
 }
 
@@ -1214,7 +1238,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 	}
 	p.inResume = false
 	g.state = GDispatching
-	destroy, yielded, ok := dispatchPending(g, resumed)
+	destroy, yielded, directPark, ok := dispatchPending(g, resumed)
 	if !ok {
 		return Action{}, false
 	}
@@ -1251,7 +1275,9 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		p.current = nil
 		p.servicePreemptBudget = 0
 		p.action = Action{}
-		if !enqueueParkSet(p, g) {
+		if directPark {
+			activateWaitSetRecordUnchecked(p, g, g.active.parkWait)
+		} else if !enqueueParkSet(p, g) {
 			return Action{}, false
 		}
 		return Action{Kind: ActionPark}, true

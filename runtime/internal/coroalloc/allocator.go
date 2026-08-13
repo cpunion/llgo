@@ -84,10 +84,12 @@ func Ready() bool {
 	return state == bootstrapReady
 }
 
-// AllocFrame allocates one explicitly owned, GC-visible coroutine frame
-// range. A caller cannot accidentally rely on a backend's implicit lazy init.
+// AllocFrame allocates one zero-filled, explicitly owned, GC-visible
+// coroutine frame range. Zero initialization is a backend contract: BDWGC and
+// tinygogc already clear scanned allocations, while libc profiles use calloc.
+// A caller cannot accidentally rely on a backend's implicit lazy init.
 func AllocFrame(size uintptr) unsafe.Pointer {
-	if !Ready() || size == 0 {
+	if !backendAllocationsAreZeroed || !Ready() || size == 0 {
 		return nil
 	}
 	return backendAllocFrame(size)
@@ -103,14 +105,14 @@ func FreeFrame(ptr unsafe.Pointer, size uintptr) bool {
 	return backendFreeFrame(ptr, size)
 }
 
-// AllocTask allocates pointer-containing scheduler task storage. It uses the
-// same statically selected scanned/root backend as coroutine frames: BDWGC's
+// AllocTask allocates zero-filled, pointer-containing scheduler task storage.
+// It uses the same statically selected scanned/root backend as coroutine frames: BDWGC's
 // uncollectable allocation is conservatively scanned, tinygogc sees the task
 // through the scheduler's static P/parent links, and leaking WebAssembly
 // profiles have no tracing collector that an ordinary malloc range could hide
 // pointers from.
 func AllocTask(size uintptr) unsafe.Pointer {
-	if !Ready() || size == 0 {
+	if !backendAllocationsAreZeroed || !Ready() || size == 0 {
 		return nil
 	}
 	return backendAllocFrame(size)

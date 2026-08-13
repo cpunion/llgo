@@ -190,6 +190,9 @@ func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
 // already-bound fleet routes. It deliberately retains no executor handle: the
 // exact destination is encoded by every submitted OperationID.
 func coroNativeWorkerPoolStartFleetV1() bool {
+	if !coroProgramWorkerCapabilityV2() {
+		return coroNativeWorkerPoolCanReleaseV1()
+	}
 	return coroNativeWorkerPoolStartDeliveryV1(
 		coroNativeWorkerDeliveryFleetV1,
 		coro.ExecutorHandle{},
@@ -306,6 +309,9 @@ func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {
 // ingress is still active. The join covers all queued route completions; only
 // after it returns may the coordinator begin route close.
 func coroNativeWorkerPoolStopFleetV1() bool {
+	if coroNativeWorkerPoolV1State == (coroNativeWorkerPoolV1{}) {
+		return coroNativeWorkerPoolCanReleaseV1()
+	}
 	return coroNativeWorkerPoolStopDeliveryV1(
 		coroNativeWorkerDeliveryFleetV1,
 		coro.ExecutorHandle{},

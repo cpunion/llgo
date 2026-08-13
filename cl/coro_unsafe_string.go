@@ -76,10 +76,10 @@ func (p *context) compileCoroUnsafeString(
 	pointerValue, lengthValue llssa.Expr,
 ) llssa.Expr {
 	body := p.coroBody()
-	if body == nil || b == nil || b.Func != p.fn || call == nil ||
+	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn || call == nil ||
 		!p.coroEmissionExplicitStatus() ||
-		body.abi.version < coroPhysicalABIVersionV1 {
-		panic("unsafe.String coroutine lowering requires the PhysicalABIV1 explicit-status ABI")
+		body != nil && body.abi.version < coroPhysicalABIVersionV1 {
+		panic("unsafe.String structured lowering requires an explicit-status physical ABI")
 	}
 	results := call.Signature().Results()
 	if results == nil || results.Len() != 1 || len(call.Args) != 2 || pointerValue.IsNil() || lengthValue.IsNil() {

@@ -423,7 +423,16 @@ func (b Builder) AssertNilDeref(ptr Expr) {
 	}
 	nilPtr := llvm.ConstNull(ptr.impl.Type())
 	isNil := Expr{llvm.CreateICmp(b.impl, llvm.IntEQ, ptr.impl, nilPtr), b.Prog.Bool()}
-	b.InlineCall(b.Pkg.rtFunc("AssertNilDeref"), isNil)
+	// Keep the recoverable Go panic helper entirely on the nil edge. Calling
+	// AssertNilDeref(false) used to put one cross-package call after every
+	// ordinary pointer check; separate-object builds cannot reliably inline it,
+	// and even full LTO retained many calls whose false argument was already
+	// implied by surrounding control flow. Passing literal true on the cold edge
+	// also lets LLVM fold a proven-non-nil predecessor without inspecting the
+	// runtime package body.
+	b.IfThen(isNil, func() {
+		b.InlineCall(b.Pkg.rtFunc("AssertNilDeref"), b.Prog.BoolVal(true))
+	})
 }
 
 func (b Builder) NilDerefCheck(ptr Expr) Expr {

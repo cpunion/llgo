@@ -50,6 +50,8 @@ func TestCoroPhysicalPlanRuntimeHelperElisionIsRecipeOwned(t *testing.T) {
 		{name: "integer divide keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIntegerDivideByZeroGuard}, helper: "AssertNegativeShift"},
 		{name: "frame allocation", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionFrameAllocation}, helper: "AllocZ", want: true},
 		{name: "frame allocation keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionFrameAllocation}, helper: "AllocU"},
+		{name: "borrowed allocation", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionBorrowedAllocation}, helper: "AllocZ", want: true},
+		{name: "borrowed allocation keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionBorrowedAllocation}, helper: "AllocU"},
 		{name: "panic outcome", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomePanic}, helper: "Panic", want: true},
 		{name: "recover outcome", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomeRecover}, helper: "Recover", want: true},
 	}
@@ -109,6 +111,68 @@ func Root(value int) int { return value + 1 }
 	}
 	if err := ir.commitPhysicalFunctionPlans(stage, expected); err == nil || !strings.Contains(err.Error(), "committed more than once") {
 		t.Fatalf("second physical commit = %v", err)
+	}
+}
+
+func TestCoroProgramCapabilitiesUseOnlyReachablePhysicalWorkerRecipes(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func Worker(enabled bool) {
+	if enabled {
+		println("worker")
+	}
+}
+`)
+	function := ssaPkg.Func("Worker")
+	owner := &preparedEmissionPackage{identity: "foo"}
+	physical := &coroPhysicalFunctionPlan{
+		function:        function,
+		owner:           owner,
+		reachableBlocks: make(map[*ssa.BasicBlock]bool),
+		instructions:    make(map[ssa.Instruction]coroPhysicalInstructionPlan),
+	}
+	var reachable, unreachable ssa.Instruction
+	for _, block := range function.Blocks {
+		physical.reachableBlocks[block] = block.Index != 2
+		for _, instruction := range block.Instrs {
+			physical.instructions[instruction] = coroPhysicalInstructionPlan{}
+			if block.Index == 2 && unreachable == nil {
+				unreachable = instruction
+			} else if block.Index != 2 && reachable == nil {
+				reachable = instruction
+			}
+		}
+	}
+	if reachable == nil || unreachable == nil {
+		t.Fatal("worker capability fixture has no reachable/unreachable instructions")
+	}
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	commit := func() *coroProgramIR {
+		stage := newCoroPhysicalPlanStage()
+		if err := stage.freezePhysicalFunctionPlan(physical); err != nil {
+			t.Fatal(err)
+		}
+		ir := newCoroProgramIR()
+		ir.callsFrozen = true
+		if err := ir.commitPhysicalFunctionPlans(stage, map[emissionFunctionOwnerKey]none{key: {}}); err != nil {
+			t.Fatal(err)
+		}
+		return ir
+	}
+
+	plan := physical.instructions[unreachable]
+	plan.operation = coroPhysicalOperationWorkerSyscall
+	physical.instructions[unreachable] = plan
+	capabilities, err := commit().programCapabilities()
+	if err != nil || capabilities.Worker() {
+		t.Fatalf("unreachable worker capability = (%v, %v), want no worker", capabilities, err)
+	}
+
+	plan = physical.instructions[reachable]
+	plan.operation = coroPhysicalOperationWorkerCgo
+	physical.instructions[reachable] = plan
+	capabilities, err = commit().programCapabilities()
+	if err != nil || !capabilities.Worker() {
+		t.Fatalf("reachable worker capability = (%v, %v), want worker", capabilities, err)
 	}
 }
 

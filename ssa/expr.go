@@ -289,11 +289,27 @@ func (b Builder) CBytes(v Expr) Expr {
 
 // InlineAsm generates inline assembly instruction
 func (b Builder) InlineAsm(instruction string) {
+	b.inlineAsmCall(instruction)
+}
+
+func (b Builder) inlineAsmCall(instruction string) llvm.Value {
 	dbgInstrf("InlineAsm %s\n", instruction)
 
 	typ := llvm.FunctionType(b.Prog.tyVoid(), nil, false)
 	asm := llvm.InlineAsm(typ, instruction, "", true, false, llvm.InlineAsmDialectATT, false)
-	b.impl.CreateCall(typ, asm, nil, "")
+	return b.impl.CreateCall(typ, asm, nil, "")
+}
+
+// CoroAtomicDataAnchor emits compiler-owned, zero-runtime-work inline
+// assembly and attaches the capability consumed by the atomic outcome
+// verifier. The capability is injected at construction time and binds the
+// complete inline-assembly content; arbitrary source assembly cannot acquire
+// it by spelling or later reverse classification.
+func (b Builder) CoroAtomicDataAnchor(instruction string) {
+	call := b.inlineAsmCall(instruction)
+	MarkCoroAtomicBoundedCompilerCall(
+		b.Pkg.mod.Context(), call, CoroAtomicCompilerDataAnchorV1,
+	)
 }
 
 func (b Builder) InlineAsmFull(instruction, constraints string, retType Type, exprs []Expr) Expr {

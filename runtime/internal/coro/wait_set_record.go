@@ -66,7 +66,10 @@ type WaitSetRecord struct {
 	state      waitSetRecordState
 	work       waitSetWorkState
 	resumeKind resumeBindingKind
-	_          [1]byte
+	// directChannel certifies the compiler/runtime fused one-channel binding.
+	// It occupies the record's former tail padding and is cleared with the
+	// complete record at promotion, so the native/WASM frame ABI is unchanged.
+	directChannel bool
 }
 
 // PrepareWaitSetRecord binds zero caller storage to one preparing logical
@@ -157,7 +160,7 @@ func validActiveWaitSetRecordFast(p *P, record *WaitSetRecord) bool {
 		record.g.queued || record.g.nextReady != nil || record.g.runP != nil ||
 		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
 		record.g.active.parkWait != record || !validActiveParkStateHeader(&record.g.park, record.ticket) ||
-		!validWaitSetResumeBinding(record) {
+		!validTrustedWaitSetResumeBinding(record) {
 		return false
 	}
 	if record.activePrev == nil {
@@ -174,7 +177,8 @@ func validActiveWaitSetRecordFast(p *P, record *WaitSetRecord) bool {
 }
 
 func validActiveWaitSetRecord(p *P, record *WaitSetRecord) bool {
-	return validActiveWaitSetRecordFast(p, record) && validParkSetWaitingG(record.g)
+	return validActiveWaitSetRecordFast(p, record) && validWaitSetResumeBinding(record) &&
+		validParkSetWaitingG(record.g)
 }
 
 // validParkWaitQueue is the allocation-free full audit retained for tests,
@@ -299,6 +303,16 @@ func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 		!validParkState(&g.park) || g.park.phase != parkParked {
 		return false
 	}
+	activateWaitSetRecordUnchecked(p, g, record)
+	return true
+}
+
+// activateWaitSetRecordUnchecked is the no-fail queue write half. Resumed may
+// call it directly only when dispatchPending has just performed the complete
+// direct-channel ParkState/record/cleanup audit in the same scheduler-owner
+// activation; no callback or producer can mutate these owner-only queues in
+// between. Other entry points retain activateWaitSetRecord's full validation.
+func activateWaitSetRecordUnchecked(p *P, g *G, record *WaitSetRecord) {
 	record.activePrev = p.parkWaitTail
 	record.state = waitSetRecordActive
 	g.waiting = true
@@ -315,7 +329,6 @@ func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 	// affected-queue and record-idle preconditions were checked before the
 	// active-list mutation, so there is no fallible step after scheduler commit.
 	appendAffectedWaitSetUnchecked(p, record)
-	return true
 }
 
 // legacyAffectedWaitSetsClaimlessCompatible audits the complete affected FIFO
@@ -436,6 +449,17 @@ func promoteReadyWaitSet(sources *ExecutorSourceSet, p *P, record *WaitSetRecord
 		record.g.park.phase == parkMaterialized && record.resumeKind != resumeBindingMaterialized {
 		return false
 	}
+	promoteReadyWaitSetUnchecked(p, record)
+	return true
+}
+
+// promoteReadyWaitSetUnchecked is the no-fail queue transfer half. The direct
+// channel completion path calls it only after its exact cursor, active-list,
+// ParkState, frame, and ready-queue headers were audited in the same owner
+// reduction. Generic and multi-source callers retain promoteReadyWaitSet.
+func promoteReadyWaitSetUnchecked(p *P, record *WaitSetRecord) {
+	g := record.g
+	frame := g.active
 	previous, next := record.activePrev, record.activeNext
 	if previous == nil {
 		p.parkWaitHead = next
@@ -452,7 +476,6 @@ func promoteReadyWaitSet(sources *ExecutorSourceSet, p *P, record *WaitSetRecord
 	g.state = GRunnable
 	appendRunnableUnchecked(p, g)
 	*record = WaitSetRecord{}
-	return true
 }
 
 // promoteResolvedWaitSets completes the post-source-apply half of one published

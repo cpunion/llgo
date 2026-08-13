@@ -43,7 +43,6 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 	if coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coro.TimerRegistrationPageCapacity ||
 		coro.PollOperationConfiguredCapacity(&coroProgramPollSourceV1State) != coro.PollOperationPageCapacity ||
 		coro.ManualOperationConfiguredCapacity(&coroProgramManualSourceV2State) != coro.ManualOperationPageCapacity ||
-		coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coro.WorkerOperationPageCapacity ||
 		coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coro.ChannelOperationPageCapacity ||
 		coroNativeTimerCapacityV1 != coroNativeTimerPageCountV1*coro.TimerRegistrationPageCapacity ||
 		coroNativePollCapacityV1 != coroNativeSourcePageCountV1*coro.PollOperationPageCapacity ||
@@ -51,22 +50,35 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 		coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1 {
 		return false
 	}
+	var worker *coro.WorkerOperationSource
+	if coroProgramWorkerCapabilityV2() {
+		if coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coro.WorkerOperationPageCapacity {
+			return false
+		}
+		worker = &coroProgramWorkerSourceV1State
+	}
 	return coro.BindExecutorSourceCatalog(driver, p, registry, handle, coro.ExecutorSourceCatalog{
 		Timers:  &coroProgramTimerTableV1State,
 		Poll:    &coroProgramPollSourceV1State,
 		Manual:  &coroProgramManualSourceV2State,
-		Worker:  &coroProgramWorkerSourceV1State,
+		Worker:  worker,
 		Channel: &coroProgramChannelSourceV1State,
 		Control: &coroProgramTaskControlSourceV1State,
 	})
 }
 
-func coroProgramNextRunStepV1(driver *coro.ExecutorDriver) (coro.ExecutorRunStep, bool) {
+func coroProgramNextRunStepV1(
+	_ *coro.ExecutorDriver,
+	run *coro.ExecutorRunSliceCapability,
+) (coro.ExecutorRunStep, bool) {
+	if step, ok := run.NextBeforeTime(); ok {
+		return step, true
+	}
 	now, ok := coroclock.MonotonicNano()
 	if !ok {
 		return coro.ExecutorRunStep{}, false
 	}
-	return coro.NextExecutorRunStepAt(driver, now)
+	return run.NextAt(now)
 }
 
 func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {

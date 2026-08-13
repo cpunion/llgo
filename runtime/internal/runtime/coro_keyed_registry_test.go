@@ -92,6 +92,35 @@ func TestCoroKeyedRegistryFIFOAndExactLogicalSelectionV2(t *testing.T) {
 	}
 }
 
+func TestCoroKeyedRegistryScanLimitTracksOnlyPublishedHighWaterV2(t *testing.T) {
+	registry := new(coroKeyedRegistryV2)
+	firstID := keyedRegistryOperation(t, 1, 1)
+	first, ok := registry.register(coroKeyedParkSemaphoreV2, 0x11, 0, firstID)
+	if !ok || first.Slot != 1 || coroKeyedAtomicLoadUint32(&registry.scanLimit) != 1 {
+		t.Fatalf("first keyed scan prefix = handle:%+v ok:%t limit:%d",
+			first, ok, coroKeyedAtomicLoadUint32(&registry.scanLimit))
+	}
+	secondID := keyedRegistryOperation(t, 2, 1)
+	second, ok := registry.register(coroKeyedParkSemaphoreV2, 0x11, 0, secondID)
+	if !ok || second.Slot != 2 || coroKeyedAtomicLoadUint32(&registry.scanLimit) != 2 {
+		t.Fatalf("second keyed scan prefix = handle:%+v ok:%t limit:%d",
+			second, ok, coroKeyedAtomicLoadUint32(&registry.scanLimit))
+	}
+	if !registry.retire(second, secondID) ||
+		coroKeyedAtomicLoadUint32(&registry.scanLimit) != 2 {
+		t.Fatalf("retirement rewrote monotonic scan prefix = %d",
+			coroKeyedAtomicLoadUint32(&registry.scanLimit))
+	}
+	claimed, operation, found := registry.claimOne(coroKeyedParkSemaphoreV2, 0x11, 0, false)
+	if !found || claimed != first || operation != firstID {
+		t.Fatalf("bounded-prefix keyed claim = %+v/%+v/%t", claimed, operation, found)
+	}
+	if registry.finishPost(claimed, operation) != coroKeyedRegistryPublishReadyV2 ||
+		!registry.retire(claimed, operation) {
+		t.Fatal("finish bounded-prefix keyed claim")
+	}
+}
+
 func TestCoroKeyedRegistryConcurrentClaimIsSingleOwnerV2(t *testing.T) {
 	registry := new(coroKeyedRegistryV2)
 	id := keyedRegistryOperation(t, 1, 1)

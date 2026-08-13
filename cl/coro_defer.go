@@ -271,7 +271,11 @@ func prepareCoroStaticCleanupPlan(
 			return nil, fmt.Errorf("cleanup site function %q has no compilation plan", siteFunction.Name())
 		}
 		siteInfos := blocks.Infos(siteFunction.Blocks)
+		reachable := coroPhysicalConstantReachableBlocks(siteFunction)
 		for _, block := range siteFunction.Blocks {
+			if !reachable[block] {
+				continue
+			}
 			for instructionIndex, raw := range block.Instrs {
 				switch instruction := raw.(type) {
 				case *ssa.Defer:
@@ -441,7 +445,7 @@ func prepareCoroStaticCleanupPlan(
 	}
 
 	if len(byInstruction) == 0 {
-		if caller.Exec.Contains(coro.NeedsCleanupFrame) || runDefers != 0 {
+		if caller.Exec.Contains(coro.NeedsCleanupFrame) {
 			return nil, fmt.Errorf("needs-cleanup-frame body has no supported static defer site")
 		}
 		return nil, nil

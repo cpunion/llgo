@@ -96,12 +96,12 @@ func (p *context) compileCoroSliceToArrayPointer(
 	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
 	body := p.coroBody()
-	if body == nil || conversion == nil || b == nil || b.Func != p.fn {
-		panic("structured slice-to-array-pointer conversion escaped its physical coroutine body")
+	if !p.hasStructuredOutcomePhysicalBody() || conversion == nil || b == nil || b.Func != p.fn {
+		panic("structured slice-to-array-pointer conversion escaped its physical body")
 	}
 	if !p.coroEmissionExplicitStatus() ||
-		body.abi.version < coroPhysicalABIVersionV1 {
-		panic("slice-to-array-pointer fault requires the PhysicalABIV1 explicit-status panic ABI")
+		body != nil && body.abi.version < coroPhysicalABIVersionV1 {
+		panic("slice-to-array-pointer fault requires an explicit-status physical ABI")
 	}
 	if plan.recipe != coroPhysicalInstructionSliceToArrayPointer || plan.bound < 0 ||
 		plan.boundsDisabled != b.Prog.BoundsChecksDisabled() ||

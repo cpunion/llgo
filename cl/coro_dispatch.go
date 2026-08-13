@@ -899,15 +899,16 @@ func newCoroPlainDispatchEffectiveABI(p *context, patched *types.Signature) (cor
 	// The ABI identity is structural at every function nesting depth. Parameter
 	// and result names are source decoration, including inside callback types;
 	// they must not make an otherwise identical producer and consumer disagree.
-	writeDispatchHashField(&key, "logical-signature", structuralEmissionABITypeKey(patched))
-	writeDispatchHashField(&key, "physical-signature", structuralEmissionABITypeKey(physical))
-	if err := appendCoroPlainDispatchTupleLayout(&key, p.prog, "params", physical.Params(), qualified); err != nil {
+	writeDispatchHashField(&key, "logical-signature", p.cachedStrictEmissionABITypeKey(patched))
+	writeDispatchHashField(&key, "physical-signature", p.cachedStrictEmissionABITypeKey(physical))
+	universe := p.immutableEmissionUniverse()
+	if err := appendCoroPlainDispatchTupleLayout(&key, p.prog, "params", physical.Params(), qualified, universe); err != nil {
 		return coroPlainDispatchABI{}, err
 	}
-	if err := appendCoroPlainDispatchTupleLayout(&key, p.prog, "results", physical.Results(), qualified); err != nil {
+	if err := appendCoroPlainDispatchTupleLayout(&key, p.prog, "results", physical.Results(), qualified, universe); err != nil {
 		return coroPlainDispatchABI{}, err
 	}
-	if err := appendCoroPlainDispatchTypeLayout(&key, p.prog, "result-slot", resultSlot, qualified, make(map[types.Type]bool)); err != nil {
+	if err := appendCoroPlainDispatchTypeLayout(&key, p.prog, "result-slot", resultSlot, qualified, make(map[types.Type]bool), universe); err != nil {
 		return coroPlainDispatchABI{}, err
 	}
 	sum := sha256.Sum256([]byte(key.String()))
@@ -954,22 +955,43 @@ func writeDispatchHashField(builder *strings.Builder, name, value string) {
 	builder.WriteByte('\n')
 }
 
-func appendCoroPlainDispatchTupleLayout(builder *strings.Builder, prog llssa.Program, path string, tuple *types.Tuple, qualified types.Qualifier) error {
+func appendCoroPlainDispatchTupleLayout(
+	builder *strings.Builder,
+	prog llssa.Program,
+	path string,
+	tuple *types.Tuple,
+	qualified types.Qualifier,
+	universes ...*EmissionUniverse,
+) error {
 	writeDispatchHashField(builder, path+".count", strconv.Itoa(tuple.Len()))
 	for i := 0; i < tuple.Len(); i++ {
-		if err := appendCoroPlainDispatchTypeLayout(builder, prog, fmt.Sprintf("%s[%d]", path, i), tuple.At(i).Type(), qualified, make(map[types.Type]bool)); err != nil {
+		if err := appendCoroPlainDispatchTypeLayout(builder, prog, fmt.Sprintf("%s[%d]", path, i), tuple.At(i).Type(), qualified, make(map[types.Type]bool), universes...); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func appendCoroPlainDispatchTypeLayout(builder *strings.Builder, prog llssa.Program, path string, typ types.Type, qualified types.Qualifier, visiting map[types.Type]bool) error {
+func appendCoroPlainDispatchTypeLayout(
+	builder *strings.Builder,
+	prog llssa.Program,
+	path string,
+	typ types.Type,
+	qualified types.Qualifier,
+	visiting map[types.Type]bool,
+	universes ...*EmissionUniverse,
+) error {
 	if typ == nil {
 		return fmt.Errorf("coroutine plain dispatch ABI: nil type at %s", path)
 	}
 	typ = types.Unalias(typ)
-	writeDispatchHashField(builder, path+".type", structuralEmissionABITypeKey(typ))
+	var typeKey string
+	if len(universes) != 0 && universes[0] != nil {
+		typeKey = universes[0].cachedStrictEmissionABITypeKey(typ)
+	} else {
+		typeKey = structuralEmissionABITypeKey(typ)
+	}
+	writeDispatchHashField(builder, path+".type", typeKey)
 	physical := prog.Type(typ, llssa.InC)
 	writeDispatchHashField(builder, path+".size", strconv.FormatUint(prog.SizeOf(physical), 10))
 	writeDispatchHashField(builder, path+".align", strconv.FormatUint(prog.AlignOf(physical), 10))
@@ -990,20 +1012,20 @@ func appendCoroPlainDispatchTypeLayout(builder *strings.Builder, prog llssa.Prog
 			writeDispatchHashField(builder, path+".named-interface", "two-word-header")
 			return nil
 		}
-		return appendCoroPlainDispatchTypeLayout(builder, prog, path+".underlying", value.Underlying(), qualified, visiting)
+		return appendCoroPlainDispatchTypeLayout(builder, prog, path+".underlying", value.Underlying(), qualified, visiting, universes...)
 	case *types.Pointer:
 		writeDispatchHashField(builder, path+".pointer", "opaque")
 	case *types.Struct:
 		writeDispatchHashField(builder, path+".fields", strconv.Itoa(value.NumFields()))
 		for i := 0; i < value.NumFields(); i++ {
 			writeDispatchHashField(builder, fmt.Sprintf("%s.field[%d].offset", path, i), strconv.FormatUint(prog.OffsetOf(physical, i), 10))
-			if err := appendCoroPlainDispatchTypeLayout(builder, prog, fmt.Sprintf("%s.field[%d]", path, i), value.Field(i).Type(), qualified, visiting); err != nil {
+			if err := appendCoroPlainDispatchTypeLayout(builder, prog, fmt.Sprintf("%s.field[%d]", path, i), value.Field(i).Type(), qualified, visiting, universes...); err != nil {
 				return err
 			}
 		}
 	case *types.Array:
 		writeDispatchHashField(builder, path+".length", strconv.FormatInt(value.Len(), 10))
-		return appendCoroPlainDispatchTypeLayout(builder, prog, path+".element", value.Elem(), qualified, visiting)
+		return appendCoroPlainDispatchTypeLayout(builder, prog, path+".element", value.Elem(), qualified, visiting, universes...)
 	case *types.Signature:
 		// A signature here is the first field of LLGo's already-converted
 		// two-pointer closure aggregate. LLVM opaque pointers make the code word
@@ -1294,7 +1316,7 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		}
 		targetClosureCtx := targetSig.Params().At(targetParam).Type()
 		if !types.Identical(targetClosureCtx, closureCtx) &&
-			structuralEmissionABITypeKey(targetClosureCtx) != structuralEmissionABITypeKey(closureCtx) {
+			p.cachedStrictEmissionABITypeKey(targetClosureCtx) != p.cachedStrictEmissionABITypeKey(closureCtx) {
 			got := "<absent>"
 			if targetSig.Params().Len() > targetParam {
 				got = types.TypeString(targetSig.Params().At(targetParam).Type(), nil)

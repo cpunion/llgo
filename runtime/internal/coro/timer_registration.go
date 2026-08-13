@@ -102,6 +102,16 @@ type TimerRegistrationTable struct {
 	owner        *P
 	route        RouteID
 	scanLimit    uint32
+	// reserveCursor is an owner-only circular allocation hint. Timer parks are
+	// commonly prepared in bursts; restarting every reservation at slot zero
+	// makes a dense burst quadratic even though the catalog is already stable
+	// storage. The cursor changes no handle identity and degrades safely to one
+	// bounded full-catalog search when the table is fragmented.
+	reserveCursor   uint32
+	activeCount     uint32
+	controlledCount uint32
+	minimum         int64
+	minimumKnown    bool
 }
 
 // TimerRegistrationConfiguredCapacity returns the exact number of addressable
@@ -123,7 +133,120 @@ func timerRegistrationScanLimit(table *TimerRegistrationTable) (uint32, bool) {
 		return 0, false
 	}
 	capacity := TimerRegistrationConfiguredCapacity(table)
-	return table.scanLimit, validSourceScanLimit(table.scanLimit, capacity)
+	return table.scanLimit, validSourceScanLimit(table.scanLimit, capacity) &&
+		validTimerRegistrationIndex(table, capacity)
+}
+
+func validTimerRegistrationIndex(table *TimerRegistrationTable, capacity uint32) bool {
+	if table == nil || capacity == 0 || table.reserveCursor >= capacity ||
+		table.activeCount > table.scanLimit || table.controlledCount > table.activeCount {
+		return false
+	}
+	if table.activeCount == 0 {
+		return table.controlledCount == 0 && !table.minimumKnown && table.minimum == 0
+	}
+	return !table.minimumKnown && table.minimum == 0 || table.minimumKnown && table.minimum >= 0
+}
+
+// timerRegistrationFastDeadline returns an owner-certified future deadline
+// when no controlled generation must be inspected. A false skip asks the
+// ordinary catalog pass to validate and publish concrete slots. An empty
+// active set is also an exact skip even while delivered/canceled generations
+// remain attached for resolution or resume cleanup.
+func timerRegistrationFastDeadline(table *TimerRegistrationTable, owner *P, now int64) (deadline int64, hasDeadline, skip, ok bool) {
+	limit, valid := timerRegistrationScanLimit(table)
+	if !valid || table.owner != owner || now < 0 || limit == 0 && table.activeCount != 0 {
+		return 0, false, false, false
+	}
+	if table.activeCount == 0 {
+		return 0, false, true, true
+	}
+	if table.controlledCount == 0 && table.minimumKnown && now < table.minimum {
+		return table.minimum, true, true, true
+	}
+	return 0, false, false, true
+}
+
+func (table *TimerRegistrationTable) attachActiveTimer(slot *timerRegistrationSlot) bool {
+	capacity := TimerRegistrationConfiguredCapacity(table)
+	if !validTimerRegistrationIndex(table, capacity) || slot == nil || slot.state != timerRegistrationActive ||
+		table.activeCount >= capacity {
+		return false
+	}
+	wasEmpty := table.activeCount == 0
+	table.activeCount++
+	if slot.control != nil {
+		table.controlledCount++
+	}
+	if wasEmpty {
+		table.minimum = slot.deadline
+		table.minimumKnown = true
+	} else if table.minimumKnown && slot.deadline < table.minimum {
+		table.minimum = slot.deadline
+	}
+	return true
+}
+
+func (table *TimerRegistrationTable) detachActiveTimer(slot *timerRegistrationSlot) bool {
+	capacity := TimerRegistrationConfiguredCapacity(table)
+	if !validTimerRegistrationIndex(table, capacity) || slot == nil || slot.state != timerRegistrationActive ||
+		table.activeCount == 0 || slot.control != nil && table.controlledCount == 0 {
+		return false
+	}
+	table.activeCount--
+	if slot.control != nil {
+		table.controlledCount--
+	}
+	if table.activeCount == 0 {
+		table.minimum = 0
+		table.minimumKnown = false
+	} else if table.minimumKnown && slot.deadline == table.minimum {
+		// A complete source pass reconstructs the next exact minimum. Until
+		// then the source remains conservatively non-skippable.
+		table.minimum = 0
+		table.minimumKnown = false
+	}
+	return true
+}
+
+func (table *TimerRegistrationTable) commitTimerRegistrationMinimum(deadline int64, hasDeadline bool) bool {
+	capacity := TimerRegistrationConfiguredCapacity(table)
+	if !validTimerRegistrationIndex(table, capacity) || hasDeadline && (deadline < 0 || table.activeCount == 0) {
+		return false
+	}
+	if hasDeadline {
+		table.minimum = deadline
+		table.minimumKnown = true
+	} else {
+		table.minimum = 0
+		table.minimumKnown = false
+	}
+	return true
+}
+
+// nextReusableTimerRegistrationSlot starts at the owner-only circular hint and
+// visits each physical slot at most once. It deliberately does not advance the
+// hint: CanReserveTimerV2 may preflight a park before the exact reservation,
+// and only a successfully attached generation is allowed to consume the hint.
+func nextReusableTimerRegistrationSlot(table *TimerRegistrationTable) (uint32, *timerRegistrationSlot, bool) {
+	capacity := TimerRegistrationConfiguredCapacity(table)
+	if !validTimerRegistrationIndex(table, capacity) {
+		return 0, nil, false
+	}
+	for offset := uint32(0); offset < capacity; offset++ {
+		index := table.reserveCursor + offset
+		if index >= capacity {
+			index -= capacity
+		}
+		slot, ok := timerRegistrationSlotAt(table, index)
+		if !ok {
+			return 0, nil, false
+		}
+		if slot.generation != ^uint32(0) && reusableTimerRegistrationSlot(slot, table.route, index) {
+			return index, slot, true
+		}
+	}
+	return 0, nil, false
 }
 
 func timerRegistrationSlotAt(table *TimerRegistrationTable, index uint32) (*timerRegistrationSlot, bool) {
@@ -306,39 +429,44 @@ func (table *TimerRegistrationTable) reserveAndAttachTimerV2(
 	if !validTimerRegistrationController(controller, control, controlWord) {
 		return TimerRegistrationHandle{}, false
 	}
-	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
-		slot, slotOK := timerRegistrationSlotAt(table, index)
-		if !slotOK || slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, table.route, index) {
-			continue
-		}
-		slot.state = timerRegistrationInitializing
-		if !raiseSourceScanLimit(&table.scanLimit, index, TimerRegistrationConfiguredCapacity(table)) {
-			return TimerRegistrationHandle{}, false
-		}
-		desired, idOK := timerRegistrationOperationID(table.route, index, slot.generation+1)
-		if !idOK || !PrepareOperationAtGeneration(&slot.record, desired) {
-			slot.state = timerRegistrationFree
-			continue
-		}
-		// Install the shared physical generation before any later failure can
-		// expose a copied desired ID to reuse.
-		slot.generation = desired.Generation
-		if !AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID) {
-			if !AbortReservedOperation(&slot.record, desired) {
-				return TimerRegistrationHandle{}, false
-			}
-			slot.state = timerRegistrationFree
-			return TimerRegistrationHandle{}, false
-		}
-		slot.p = p
-		slot.deadline = deadline
-		slot.controller = controller
-		slot.control = control
-		slot.controlWord = controlWord
-		slot.state = timerRegistrationActive
-		return TimerRegistrationHandle{Slot: index + 1, Generation: desired.Generation}, true
+	capacity := TimerRegistrationConfiguredCapacity(table)
+	index, slot, slotOK := nextReusableTimerRegistrationSlot(table)
+	if !slotOK {
+		return TimerRegistrationHandle{}, false
 	}
-	return TimerRegistrationHandle{}, false
+	slot.state = timerRegistrationInitializing
+	if !raiseSourceScanLimit(&table.scanLimit, index, capacity) {
+		return TimerRegistrationHandle{}, false
+	}
+	desired, idOK := timerRegistrationOperationID(table.route, index, slot.generation+1)
+	if !idOK || !PrepareOperationAtGeneration(&slot.record, desired) {
+		slot.state = timerRegistrationFree
+		return TimerRegistrationHandle{}, false
+	}
+	// Install the shared physical generation before any later failure can
+	// expose a copied desired ID to reuse.
+	slot.generation = desired.Generation
+	if !AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID) {
+		if !AbortReservedOperation(&slot.record, desired) {
+			return TimerRegistrationHandle{}, false
+		}
+		slot.state = timerRegistrationFree
+		return TimerRegistrationHandle{}, false
+	}
+	slot.p = p
+	slot.deadline = deadline
+	slot.controller = controller
+	slot.control = control
+	slot.controlWord = controlWord
+	slot.state = timerRegistrationActive
+	if !table.attachActiveTimer(slot) {
+		return TimerRegistrationHandle{}, false
+	}
+	table.reserveCursor = index + 1
+	if table.reserveCursor == capacity {
+		table.reserveCursor = 0
+	}
+	return TimerRegistrationHandle{Slot: index + 1, Generation: desired.Generation}, true
 }
 
 func (table *TimerRegistrationTable) ReserveAndAttachTimerV2(
@@ -401,6 +529,15 @@ func (table *TimerRegistrationTable) nextDeadlineFor(owner *P) (deadline int64, 
 	if table == nil || table.owner != owner {
 		return 0, false, false
 	}
+	if _, valid := timerRegistrationScanLimit(table); !valid {
+		return 0, false, false
+	}
+	if table.activeCount == 0 {
+		return 0, false, true
+	}
+	if table.minimumKnown {
+		return table.minimum, true, true
+	}
 	limit, valid := timerRegistrationScanLimit(table)
 	if !valid {
 		return 0, false, false
@@ -429,6 +566,9 @@ func (table *TimerRegistrationTable) nextDeadlineFor(owner *P) (deadline int64, 
 		default:
 			return 0, false, false
 		}
+	}
+	if !table.commitTimerRegistrationMinimum(deadline, hasDeadline) {
+		return 0, false, false
 	}
 	return deadline, hasDeadline, true
 }
@@ -487,6 +627,9 @@ func (table *TimerRegistrationTable) drainDueSlotFor(owner *P, now int64, index 
 				// physical slot Active so it cannot be recycled.
 				return 0, 0, false, false
 			}
+			if !table.detachActiveTimer(slot) {
+				return 0, 0, false, false
+			}
 			slot.state = timerRegistrationDelivered
 			return 1, 0, false, true
 		}
@@ -518,6 +661,9 @@ func (table *TimerRegistrationTable) drainDueFor(owner *P, now int64) (completed
 		if hasNext && (!hasDeadline || next < deadline) {
 			deadline, hasDeadline = next, true
 		}
+	}
+	if !table.commitTimerRegistrationMinimum(deadline, hasDeadline) {
+		return completed, 0, false, false
 	}
 	return completed, deadline, hasDeadline, true
 }
@@ -568,6 +714,9 @@ func (table *TimerRegistrationTable) ApplyTimerV2One(p *P, id OperationID, recor
 	if disposition != OperationDispositionWinner {
 		// Timer cancellation is the complete source-specific rollback: after
 		// this transition no due delivery can retain or recreate the result.
+		if slot.state == timerRegistrationActive && !table.detachActiveTimer(slot) {
+			return OperationApplyInvalid
+		}
 		slot.state = timerRegistrationCanceled
 		if slot.record.resultState == operationResultOwned &&
 			!DiscardUnselectedOperationResult(&slot.record, id) {
@@ -633,14 +782,41 @@ func (table *TimerRegistrationTable) RecycleTimerV2(p *P, handle TimerRegistrati
 	slot.controller = 0
 	slot.control = nil
 	slot.controlWord = 0
+	// The exact retired slot is now a proven reusable generation. Publishing it
+	// as the next owner-local hint keeps sparse churn O(1) and preserves the
+	// useful one-slot reuse property without imposing a free-list ABI on pages.
+	table.reserveCursor = handle.Slot - 1
+	if handle.Slot == table.scanLimit {
+		for table.scanLimit != 0 {
+			index := table.scanLimit - 1
+			last, lastOK := timerRegistrationSlotAt(table, index)
+			if !lastOK {
+				return false
+			}
+			if last.state != timerRegistrationFree {
+				break
+			}
+			if !reusableTimerRegistrationSlot(last, table.route, index) {
+				return false
+			}
+			table.scanLimit--
+		}
+		if table.scanLimit == 0 {
+			// An empty table should rebuild a compact active prefix on the next
+			// burst so due scans do not retain a high-water gap from prior use.
+			table.reserveCursor = 0
+		}
+	}
 	return true
 }
 
 func timerRegistrationTableEmpty(table *TimerRegistrationTable, owner *P) bool {
-	if table == nil || table.owner != owner {
+	capacity := TimerRegistrationConfiguredCapacity(table)
+	if table == nil || table.owner != owner || !validTimerRegistrationIndex(table, capacity) ||
+		table.activeCount != 0 || table.controlledCount != 0 || table.minimumKnown || table.minimum != 0 {
 		return false
 	}
-	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
+	for index := uint32(0); index < capacity; index++ {
 		slot, slotOK := timerRegistrationSlotAt(table, index)
 		if !slotOK || !reusableTimerRegistrationSlot(slot, table.route, index) {
 			return false
@@ -656,6 +832,11 @@ func bindTimerRegistrationTableAtRoute(table *TimerRegistrationTable, p *P, rout
 	}
 	table.route = route
 	table.scanLimit = 0
+	table.reserveCursor = 0
+	table.activeCount = 0
+	table.controlledCount = 0
+	table.minimum = 0
+	table.minimumKnown = false
 	table.owner = p
 	return true
 }
@@ -671,6 +852,11 @@ func unbindTimerRegistrationTable(table *TimerRegistrationTable, p *P) bool {
 	}
 	table.owner = nil
 	table.scanLimit = 0
+	table.reserveCursor = 0
+	table.activeCount = 0
+	table.controlledCount = 0
+	table.minimum = 0
+	table.minimumKnown = false
 	return true
 }
 

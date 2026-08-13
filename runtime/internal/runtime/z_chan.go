@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	c "github.com/goplus/llgo/runtime/internal/clite"
+	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/runtime/math"
 )
 
@@ -228,13 +229,54 @@ func panicSendOnClosedChan() {
 }
 
 func zeroChanRecv(v unsafe.Pointer, eltSize int) {
-	if v != nil && eltSize > 0 {
+	if v == nil || eltSize <= 0 {
+		return
+	}
+	// Channel element size is dynamic at this runtime boundary, but the small
+	// sizes below dominate ordinary scalar, string, slice and interface
+	// channels. Array types deliberately have byte alignment: this remains
+	// valid for types such as [8]byte whose address need not be uint64-aligned,
+	// while LLVM can still lower each constant-size assignment inline.
+	switch eltSize {
+	case 1:
+		*(*[1]byte)(v) = [1]byte{}
+	case 2:
+		*(*[2]byte)(v) = [2]byte{}
+	case 4:
+		*(*[4]byte)(v) = [4]byte{}
+	case 8:
+		*(*[8]byte)(v) = [8]byte{}
+	case 16:
+		*(*[16]byte)(v) = [16]byte{}
+	case 24:
+		*(*[24]byte)(v) = [24]byte{}
+	case 32:
+		*(*[32]byte)(v) = [32]byte{}
+	default:
 		c.Memset(v, 0, uintptr(eltSize))
 	}
 }
 
 func copyChanElem(dst, src unsafe.Pointer, eltSize int) {
-	if dst != nil && src != nil && eltSize > 0 {
+	if dst == nil || src == nil || eltSize <= 0 {
+		return
+	}
+	switch eltSize {
+	case 1:
+		*(*[1]byte)(dst) = *(*[1]byte)(src)
+	case 2:
+		*(*[2]byte)(dst) = *(*[2]byte)(src)
+	case 4:
+		*(*[4]byte)(dst) = *(*[4]byte)(src)
+	case 8:
+		*(*[8]byte)(dst) = *(*[8]byte)(src)
+	case 16:
+		*(*[16]byte)(dst) = *(*[16]byte)(src)
+	case 24:
+		*(*[24]byte)(dst) = *(*[24]byte)(src)
+	case 32:
+		*(*[32]byte)(dst) = *(*[32]byte)(src)
+	default:
 		c.Memcpy(dst, src, uintptr(eltSize))
 	}
 }
@@ -339,8 +381,17 @@ func claimWaiter(w *chanWaiter) bool {
 	return true
 }
 
-func completeRecvWaiter(w *chanWaiter, src unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {
+func completeRecvWaiterWithContext(
+	w *chanWaiter,
+	src unsafe.Pointer,
+	eltSize int,
+	status waitStatus,
+	context *coroChanExternalCommitContextV1,
+) coroChanMatchResult {
 	if w.coro != nil {
+		if context != nil {
+			return commitCoroRecvWaiterLockedWithContext(w, src, eltSize, status, *context)
+		}
 		return commitCoroRecvWaiterLocked(w, src, eltSize, status)
 	}
 	if !claimWaiter(w) {
@@ -355,8 +406,19 @@ func completeRecvWaiter(w *chanWaiter, src unsafe.Pointer, eltSize int, status w
 	return coroChanMatchCommitted
 }
 
-func completeSendWaiter(w *chanWaiter, status waitStatus) coroChanMatchResult {
+func completeRecvWaiter(w *chanWaiter, src unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {
+	return completeRecvWaiterWithContext(w, src, eltSize, status, nil)
+}
+
+func completeSendWaiterWithContext(
+	w *chanWaiter,
+	status waitStatus,
+	context *coroChanExternalCommitContextV1,
+) coroChanMatchResult {
 	if w.coro != nil {
+		if context != nil {
+			return commitCoroSendWaiterLockedWithContext(w, nil, w.size, status, *context)
+		}
 		return commitCoroSendWaiterLocked(w, nil, w.size, status)
 	}
 	if !claimWaiter(w) {
@@ -366,8 +428,20 @@ func completeSendWaiter(w *chanWaiter, status waitStatus) coroChanMatchResult {
 	return coroChanMatchCommitted
 }
 
-func recvFromSendWaiter(dst unsafe.Pointer, w *chanWaiter, eltSize int) coroChanMatchResult {
+func completeSendWaiter(w *chanWaiter, status waitStatus) coroChanMatchResult {
+	return completeSendWaiterWithContext(w, status, nil)
+}
+
+func recvFromSendWaiterWithContext(
+	dst unsafe.Pointer,
+	w *chanWaiter,
+	eltSize int,
+	context *coroChanExternalCommitContextV1,
+) coroChanMatchResult {
 	if w.coro != nil {
+		if context != nil {
+			return commitCoroSendWaiterLockedWithContext(w, dst, eltSize, waitSendOK, *context)
+		}
 		return commitCoroSendWaiterLocked(w, dst, eltSize, waitSendOK)
 	}
 	if !claimWaiter(w) {
@@ -378,13 +452,23 @@ func recvFromSendWaiter(dst unsafe.Pointer, w *chanWaiter, eltSize int) coroChan
 	return coroChanMatchCommitted
 }
 
-func dequeueRecvAndComplete(p *Chan, src unsafe.Pointer, eltSize int, status waitStatus) bool {
+func recvFromSendWaiter(dst unsafe.Pointer, w *chanWaiter, eltSize int) coroChanMatchResult {
+	return recvFromSendWaiterWithContext(dst, w, eltSize, nil)
+}
+
+func dequeueRecvAndCompleteWithContext(
+	p *Chan,
+	src unsafe.Pointer,
+	eltSize int,
+	status waitStatus,
+	context *coroChanExternalCommitContextV1,
+) bool {
 	for {
 		w := p.recvq.dequeue()
 		if w == nil {
 			return false
 		}
-		switch result := completeRecvWaiter(w, src, eltSize, status); result {
+		switch result := completeRecvWaiterWithContext(w, src, eltSize, status, context); result {
 		case coroChanMatchCommitted:
 			return true
 		case coroChanMatchDiscarded:
@@ -399,13 +483,22 @@ func dequeueRecvAndComplete(p *Chan, src unsafe.Pointer, eltSize int, status wai
 	}
 }
 
-func dequeueSendAndRecv(p *Chan, dst unsafe.Pointer, eltSize int) bool {
+func dequeueRecvAndComplete(p *Chan, src unsafe.Pointer, eltSize int, status waitStatus) bool {
+	return dequeueRecvAndCompleteWithContext(p, src, eltSize, status, nil)
+}
+
+func dequeueSendAndRecvWithContext(
+	p *Chan,
+	dst unsafe.Pointer,
+	eltSize int,
+	context *coroChanExternalCommitContextV1,
+) bool {
 	for {
 		w := p.sendq.dequeue()
 		if w == nil {
 			return false
 		}
-		switch result := recvFromSendWaiter(dst, w, eltSize); result {
+		switch result := recvFromSendWaiterWithContext(dst, w, eltSize, context); result {
 		case coroChanMatchCommitted:
 			return true
 		case coroChanMatchDiscarded:
@@ -420,12 +513,25 @@ func dequeueSendAndRecv(p *Chan, dst unsafe.Pointer, eltSize int) bool {
 	}
 }
 
-func chanTrySendLocked(p *Chan, v unsafe.Pointer, eltSize int) (tryOK bool, closed bool) {
+func dequeueSendAndRecv(p *Chan, dst unsafe.Pointer, eltSize int) bool {
+	return dequeueSendAndRecvWithContext(p, dst, eltSize, nil)
+}
+
+func chanTrySendLockedWithContext(
+	p *Chan,
+	v unsafe.Pointer,
+	eltSize int,
+	context *coroChanExternalCommitContextV1,
+) (tryOK bool, closed bool) {
 	elemSize := p.elemsize
 	if p.closed {
 		return false, true
 	}
-	if dequeueRecvAndComplete(p, v, elemSize, waitRecvOK) {
+	// The overwhelmingly common buffered fast path has no parked receiver.
+	// Avoid entering the claim/queue helper chain unless the O(1) queue header
+	// says there is work. A non-nil head may still be a stale select case; the
+	// existing helper retains the exact retry/discard semantics for that case.
+	if p.recvq.first != nil && dequeueRecvAndCompleteWithContext(p, v, elemSize, waitRecvOK, context) {
 		return true, false
 	}
 	if p.qcount < p.dataqsiz {
@@ -438,6 +544,10 @@ func chanTrySendLocked(p *Chan, v unsafe.Pointer, eltSize int) (tryOK bool, clos
 		return true, false
 	}
 	return false, false
+}
+
+func chanTrySendLocked(p *Chan, v unsafe.Pointer, eltSize int) (tryOK bool, closed bool) {
+	return chanTrySendLockedWithContext(p, v, eltSize, nil)
 }
 
 func ChanTrySend(p *Chan, v unsafe.Pointer, eltSize int) bool {
@@ -457,12 +567,17 @@ func ChanTrySend(p *Chan, v unsafe.Pointer, eltSize int) bool {
 // compiler-owned stackless channel lowering. A closed channel deliberately
 // returns false: the exact park transaction rechecks it and returns a typed
 // send-closed status without unwinding across an LLVM coroutine suspension.
-func CoroChanTrySend(p *Chan, v unsafe.Pointer, eltSize int) bool {
+func CoroChanTrySend(g unsafe.Pointer, p *Chan, v unsafe.Pointer, eltSize int) bool {
 	if p == nil {
 		return false
 	}
 	p.mutex.Lock()
-	ok, closed := chanTrySendLocked(p, v, eltSize)
+	var context *coroChanExternalCommitContextV1
+	if p.recvq.first != nil {
+		resolved := coroChannelExternalContextForTaskV1((*coro.G)(g))
+		context = &resolved
+	}
+	ok, closed := chanTrySendLockedWithContext(p, v, eltSize, context)
 	p.mutex.Unlock()
 	return ok && !closed
 }
@@ -493,10 +608,15 @@ func ChanSend(p *Chan, v unsafe.Pointer, eltSize int) bool {
 	return true
 }
 
-func chanTryRecvLocked(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK bool) {
+func chanTryRecvLockedWithContext(
+	p *Chan,
+	v unsafe.Pointer,
+	eltSize int,
+	context *coroChanExternalCommitContextV1,
+) (recvOK bool, tryOK bool) {
 	elemSize := p.elemsize
 	if p.dataqsiz == 0 {
-		if dequeueSendAndRecv(p, v, elemSize) {
+		if dequeueSendAndRecvWithContext(p, v, elemSize, context) {
 			return true, true
 		}
 	} else if p.qcount > 0 {
@@ -507,7 +627,13 @@ func chanTryRecvLocked(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, try
 			p.recvx = 0
 		}
 		p.qcount--
-		dequeueSendToBuffer(p)
+		// A local buffered send/receive pair normally has no parked sender.
+		// Refill only when the queue header proves that the reconciliation path
+		// can make progress; stale/select entries are still handled by the
+		// existing helper once present.
+		if p.sendq.first != nil {
+			dequeueSendToBuffer(p, context)
+		}
 		return true, true
 	}
 	if p.closed {
@@ -515,6 +641,10 @@ func chanTryRecvLocked(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, try
 		return false, true
 	}
 	return false, false
+}
+
+func chanTryRecvLocked(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK bool) {
+	return chanTryRecvLockedWithContext(p, v, eltSize, nil)
 }
 
 func ChanTryRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK bool) {
@@ -530,8 +660,19 @@ func ChanTryRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK boo
 // CoroChanTryRecv is the nonblocking first attempt used by compiler-owned
 // stackless channel lowering. Unlike ChanRecv it never retains the caller's
 // activation; a false tryOK is completed by the exact park transaction.
-func CoroChanTryRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK bool) {
-	return ChanTryRecv(p, v, eltSize)
+func CoroChanTryRecv(g unsafe.Pointer, p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK bool) {
+	if p == nil {
+		return false, false
+	}
+	p.mutex.Lock()
+	var context *coroChanExternalCommitContextV1
+	if p.sendq.first != nil {
+		resolved := coroChannelExternalContextForTaskV1((*coro.G)(g))
+		context = &resolved
+	}
+	recvOK, tryOK = chanTryRecvLockedWithContext(p, v, eltSize, context)
+	p.mutex.Unlock()
+	return
 }
 
 func ChanRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool) {

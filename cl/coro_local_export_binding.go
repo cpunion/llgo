@@ -152,6 +152,7 @@ type coroLocalExportBindingFreezeInput struct {
 	freezeCallableShape   func(*ssa.Function) (coroCallableFrozenShape, error)
 	entrySourceSignature  func(*ssa.Function) (*types.Signature, error)
 	finalFunctionIdentity func(*ssa.Function) string
+	cFunctionABITypeKey   func(types.Type) string
 }
 
 // freezeCoroLocalExportBindings joins only compiler-visible source facts:
@@ -170,7 +171,7 @@ func freezeCoroLocalExportBindings(
 	bindings := make(map[*ssa.Function]coroLocalExportBinding)
 	if input.canonicalAlias == nil || input.functionSortKey == nil ||
 		input.freezeCallableShape == nil || input.entrySourceSignature == nil ||
-		input.finalFunctionIdentity == nil {
+		input.finalFunctionIdentity == nil || input.cFunctionABITypeKey == nil {
 		return nil, fmt.Errorf("prepare emission universe: local export binding freezer has incomplete builder inputs")
 	}
 
@@ -210,7 +211,7 @@ func freezeCoroLocalExportBindings(
 		if err != nil || effective == nil {
 			continue
 		}
-		abi := structuralCFunctionABITypeKey(effective)
+		abi := input.cFunctionABITypeKey(effective)
 		if abi == "" {
 			continue
 		}

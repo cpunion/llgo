@@ -331,7 +331,7 @@ func validateCoroInterfaceDispatchCandidate(
 	if err != nil {
 		return fail("derive effective source call signature: %v", err)
 	}
-	if entrySignature == nil || !coroInterfaceDispatchSignaturesIdentical(effectiveSourceSignature, entrySignature) {
+	if entrySignature == nil || !coroInterfaceDispatchSignaturesIdentical(effectiveSourceSignature, entrySignature, universe) {
 		return fail("effective method entry signature %v does not match source call signature %v", entrySignature, effectiveSourceSignature)
 	}
 
@@ -339,7 +339,7 @@ func validateCoroInterfaceDispatchCandidate(
 	if err != nil {
 		return fail("derive effective target signature: %v", err)
 	}
-	if targetSignature == nil || !coroInterfaceDispatchSignaturesIdentical(effectiveSourceSignature, coroInterfaceDispatchCanonicalSignature(targetSignature)) {
+	if targetSignature == nil || !coroInterfaceDispatchSignaturesIdentical(effectiveSourceSignature, coroInterfaceDispatchCanonicalSignature(targetSignature), universe) {
 		return fail("effective source call signature %v does not match receiver-free target signature %v", effectiveSourceSignature, targetSignature)
 	}
 	if len(target.Params) != target.Signature.Params().Len()+1 || target.Params[0] == nil || !types.Identical(target.Params[0].Type(), recv.Type()) {
@@ -387,9 +387,16 @@ func coroInterfaceDispatchEffectiveCallableSignature(
 	return coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(signature)), nil
 }
 
-func coroInterfaceDispatchSignaturesIdentical(left, right *types.Signature) bool {
+func coroInterfaceDispatchSignaturesIdentical(
+	left, right *types.Signature,
+	universes ...*EmissionUniverse,
+) bool {
 	if left == nil || right == nil {
 		return left == right
+	}
+	if len(universes) != 0 && universes[0] != nil {
+		return universes[0].cachedStrictEmissionABITypeKey(left) ==
+			universes[0].cachedStrictEmissionABITypeKey(right)
 	}
 	return structuralEmissionABITypeKey(left) == structuralEmissionABITypeKey(right)
 }

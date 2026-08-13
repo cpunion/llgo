@@ -106,8 +106,9 @@ type coroKeyedRegistrySlotV2 struct {
 }
 
 type coroKeyedRegistryV2 struct {
-	sequence uint32
-	slots    [coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
+	sequence  uint32
+	scanLimit uint32
+	slots     [coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
 }
 
 var coroProgramKeyedRegistryV2State coroKeyedRegistryV2

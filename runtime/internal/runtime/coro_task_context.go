@@ -188,8 +188,7 @@ func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivati
 
 // coroReleaseRuntimeContext tears down the runtime sidecar after the scheduler
 // has made the G terminal but before its scanned task allocation is cleared.
-func coroReleaseRuntimeContext(task *coro.G) bool {
-	raw := coro.TaskLocal(task)
+func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
 	ctx := (*coroRuntimeContext)(raw)
 	if !validCoroRuntimeTaskContext(task, ctx) {
 		return false
@@ -199,10 +198,6 @@ func coroReleaseRuntimeContext(task *coro.G) bool {
 		return false
 	}
 	embedded := ctx.g.coroEmbedded
-	released, ok := coro.ReleaseTaskLocal(task)
-	if !ok || released != raw {
-		return false
-	}
 	if gp.localContext != nil {
 		releaseLocalBlocks(gp.localContext)
 		gp.localContext = nil

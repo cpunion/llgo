@@ -32,6 +32,10 @@ func getg() *g {
 	return currentG
 }
 
+func getgIfPresent() *g {
+	return currentG
+}
+
 func setg(gp *g) {
 	currentG = gp
 }

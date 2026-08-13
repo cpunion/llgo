@@ -54,6 +54,7 @@ const (
 	coroPhysicalInstructionIntegerDivideByZeroGuard
 	coroPhysicalInstructionTerminalResultAllocation
 	coroPhysicalInstructionFrameAllocation
+	coroPhysicalInstructionBorrowedAllocation
 	coroPhysicalInstructionFrameBitcastAllocation
 	coroPhysicalInstructionFrameAllocaBytes
 	coroPhysicalInstructionHeapCStr
@@ -97,6 +98,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "terminal-result-allocation"
 	case coroPhysicalInstructionFrameAllocation:
 		return "frame-allocation"
+	case coroPhysicalInstructionBorrowedAllocation:
+		return "borrowed-allocation"
 	case coroPhysicalInstructionFrameBitcastAllocation:
 		return "frame-bitcast-allocation"
 	case coroPhysicalInstructionFrameAllocaBytes:
@@ -400,7 +403,7 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		if helper == "AssertDivideByZero" {
 			return true
 		}
-	case coroPhysicalInstructionFrameAllocation:
+	case coroPhysicalInstructionFrameAllocation, coroPhysicalInstructionBorrowedAllocation:
 		if helper == "AllocZ" {
 			return true
 		}
@@ -431,6 +434,8 @@ type coroPhysicalFunctionPlan struct {
 	atomicCost        uint64
 	atomicCostProof   coro.AtomicCostProof
 	atomicCertificate string
+	staticOutcome     bool
+	reachableBlocks   map[*ssa.BasicBlock]bool
 	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
 }
 
@@ -453,7 +458,11 @@ func prepareCoroPhysicalFunctionPlan(
 		critical:          critical,
 		cleanup:           cleanup,
 		frameRetentionABI: audit.frameRetentionABI,
+		reachableBlocks:   make(map[*ssa.BasicBlock]bool, len(audit.reachableBlocks)),
 		instructions:      make(map[ssa.Instruction]coroPhysicalInstructionPlan),
+	}
+	for block, reachable := range audit.reachableBlocks {
+		plan.reachableBlocks[block] = reachable
 	}
 	var logical coro.FunctionPlan
 	if whole != nil {
@@ -463,6 +472,7 @@ func prepareCoroPhysicalFunctionPlan(
 		}
 		logical = function
 		plan.needsPreempt = function.Exec.Contains(coro.NeedsPreempt)
+		plan.staticOutcome = function.StaticOutcome
 	}
 	preempt, err := planCoroPhysicalPreemption(
 		audit, critical, plan.needsPreempt,
@@ -526,7 +536,6 @@ func prepareCoroPhysicalFunctionPlan(
 			}
 			targetPlan, planned := whole.FunctionPlan(instructionPlan.controlTarget)
 			if !planned || targetPlan.ID != instructionPlan.controlTargetID ||
-				targetPlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
 				!targetPlan.AtomicCostProof.ProvesOutcomePlain() {
 				return nil, fmt.Errorf("atomic-cost physical proof target %q has no exact outcome capability", instructionPlan.controlTargetID)
 			}
@@ -638,6 +647,44 @@ func (ir *coroProgramIR) physicalFunctionPlan(function *ssa.Function, owner *pre
 	return plan, nil
 }
 
+// programCapabilities projects optional target-service demand only after the
+// complete physical plan transaction has committed. Logical WaitForeign or a
+// target's ability to host workers is insufficient: same-M episodes and dead
+// source blocks must not start a worker pool. Conversely every reachable
+// worker transaction below is the exact recipe codegen will emit.
+func (ir *coroProgramIR) programCapabilities() (coro.ProgramCapabilities, error) {
+	if ir == nil || !ir.physicalPlansSealed {
+		return 0, fmt.Errorf("coroutine program capabilities require sealed physical plans")
+	}
+	worker := false
+	for key, function := range ir.physicalPlans {
+		if key.function == nil || key.owner == nil || function == nil ||
+			function.function != key.function || function.owner != key.owner {
+			return 0, fmt.Errorf("coroutine program capabilities found an incomplete physical owner")
+		}
+		for instruction, plan := range function.instructions {
+			if instruction == nil || instruction.Parent() != function.function || instruction.Block() == nil {
+				return 0, fmt.Errorf("coroutine program capabilities found an incomplete physical instruction")
+			}
+			if !function.reachableBlocks[instruction.Block()] {
+				continue
+			}
+			switch plan.operation {
+			case coroPhysicalOperationWorkerSyscall,
+				coroPhysicalOperationWorkerForeign,
+				coroPhysicalOperationWorkerCgo,
+				coroPhysicalOperationWorkerCgoErrno:
+				worker = true
+			}
+		}
+	}
+	capabilities := coro.NewProgramCapabilities(worker)
+	if !capabilities.Valid() {
+		return 0, fmt.Errorf("coroutine program capabilities are invalid")
+	}
+	return capabilities, nil
+}
+
 // physicalFunctionPlanForEmission resolves the frozen definition projection
 // used by one physical emission. Ordinary functions require the exact current
 // package owner. A syntax-free generated wrapper is the sole exception: ABI
@@ -714,6 +761,9 @@ func planCoroPhysicalInstruction(
 		return result, fmt.Errorf("load semantic instruction recipe: %w", err)
 	}
 	result.semantic = semantic
+	if !semantic.evaluated {
+		return result, nil
+	}
 	planCoroPhysicalControlInstruction(audit, whole, instruction, capabilities, &result)
 	planCoroPhysicalOperationInstruction(audit, whole, instruction, capabilities, &result)
 	planCoroPhysicalOutcomeInstruction(audit, cleanup, instruction, capabilities, &result)
@@ -727,6 +777,8 @@ func planCoroPhysicalInstruction(
 		case audit.frameRetainsManagedHeapAllocation(instruction):
 			// Preserve AllocZ for semantic escapes and target-layout promotion
 			// of oversized locals. CoroSplit retains the resulting pointer.
+		case audit.frameRetainsBorrowedAllocation(instruction):
+			result.recipe = coroPhysicalInstructionBorrowedAllocation
 		case !instruction.Heap || audit.frameRetainsAllocation(instruction):
 			result.recipe = coroPhysicalInstructionFrameAllocation
 		}
@@ -1050,6 +1102,15 @@ func planCoroPhysicalOutcomeInstruction(
 		result.outcome = coroPhysicalOutcomeDeferRegister
 	case *ssa.RunDefers:
 		if cleanup == nil || len(cleanup.sites) == 0 {
+			if audit != nil && audit.plan != nil {
+				if logical, planned := audit.plan.FunctionPlan(audit.fn); planned &&
+					!logical.Exec.Contains(coro.NeedsCleanupFrame) {
+					// ProgramIR removed NeedsCleanupFrame only after proving that no
+					// reachable Defer registration remains. Leave this synthetic
+					// RunDefers as an explicit no-op physical recipe.
+					return
+				}
+			}
 			result.outcomeFailure = "RunDefers has no frozen cleanup plan"
 			return
 		}
@@ -1549,7 +1610,7 @@ func planCoroPhysicalControlInstruction(
 			result.controlFailureHard = true
 			return
 		}
-		if targetPlan.ManagedEntry == coro.ManagedEntryOutcomePlain {
+		if targetPlan.HasStaticOutcome() {
 			result.control = coroPhysicalControlDirectOutcome
 			if audit.ctx != nil && audit.ctx.prog != nil {
 				result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(

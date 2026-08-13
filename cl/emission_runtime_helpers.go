@@ -51,6 +51,59 @@ type coroLogicalLocalitySite struct {
 	dispatchers []*ssa.Function
 }
 
+type coroPlainAllocationRecipe uint8
+
+const (
+	coroPlainAllocationOrdinary coroPlainAllocationRecipe = iota
+	coroPlainAllocationBorrowed
+)
+
+// coroPlainAllocationPlan is frozen with the exact source SitePlan before
+// whole-program effect analysis. It prevents final code generation from
+// rediscovering escape/lifetime facts and records enough proof shape to make
+// owner conflicts observable during universe construction.
+type coroPlainAllocationPlan struct {
+	recipe           coroPlainAllocationRecipe
+	functionsVisited uint32
+	parametersProven uint32
+}
+
+func (plan coroPlainAllocationPlan) borrowed() bool {
+	return plan.recipe == coroPlainAllocationBorrowed &&
+		plan.functionsVisited != 0
+}
+
+func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAllocationPlan {
+	if ctx == nil || ctx.prog == nil || allocation == nil || !allocation.Heap ||
+		allocation.Type() == nil || ctx.skipSyntheticMakeSliceAlloc(allocation) ||
+		isEmissionVargsAlloc(ctx, allocation) {
+		return coroPlainAllocationPlan{}
+	}
+	if bitcast, exact := coro.ProveSSAExactScalarBitcast(allocation.Parent()); exact &&
+		bitcast.Allocation == allocation {
+		return coroPlainAllocationPlan{}
+	}
+	pointer, ok := types.Unalias(ctx.patchType(allocation.Type())).Underlying().(*types.Pointer)
+	if !ok || ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(pointer.Elem())) {
+		return coroPlainAllocationPlan{}
+	}
+	physical := ctx.type_(pointer.Elem(), llssa.InGo)
+	if ctx.prog.SizeOf(physical) == 0 {
+		// Preserve the existing module-sentinel identity for a zero-sized heap
+		// allocation. It already has no AllocZ cost and needs no stack slot.
+		return coroPlainAllocationPlan{}
+	}
+	proof, exact := coro.ProveSSABorrowedAllocation(allocation)
+	if !exact || proof.FunctionsVisited == 0 {
+		return coroPlainAllocationPlan{}
+	}
+	return coroPlainAllocationPlan{
+		recipe:           coroPlainAllocationBorrowed,
+		functionsVisited: proof.FunctionsVisited,
+		parametersProven: proof.ParametersProven,
+	}
+}
+
 // coroFunctionPreamblePlan freezes compiler-owned operations which have no
 // source SSA instruction anchor. Package-init locality guard setup is the first
 // such operation: it resolves one logical-G package block, then marks the
@@ -302,6 +355,9 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 	}
 	sitePlan := coroEmissionSitePlan{}
 	if u.prog != nil {
+		if allocation, ok := instr.(*ssa.Alloc); ok {
+			sitePlan.plainAllocation = planCoroPlainAllocation(ctx, allocation)
+		}
 		managed, err := u.classifyCoroRuntimeHelpers(ctx, shape, instr)
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: function %q logical locality site: %w", ownerFn.Name(), err)
@@ -313,6 +369,12 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 			})
 		}
 		sitePlan.plainRuntimeHelpers = u.classifyPlainRuntimeHelpers(ctx, instr, managed)
+		if sitePlan.plainAllocation.borrowed() {
+			sitePlan.plainRuntimeHelpers = slices.DeleteFunc(
+				sitePlan.plainRuntimeHelpers,
+				func(helper string) bool { return helper == "AllocZ" },
+			)
+		}
 		preamble, err := u.coroProgramIR.functionPreambleDuringFreeze(ownerFn, ownerPkg)
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: function %q preamble lookup: %w", ownerFn.Name(), err)
@@ -490,6 +552,8 @@ func coroLoweredCallExplicitStatusElided(instr ssa.Instruction, helper string) b
 // helper name emitted by any other lowering remains an ordinary managed edge.
 func coroCompilerElidesImplicitFaultRuntimeHelper(instr ssa.Instruction, helper string) bool {
 	switch instr.(type) {
+	case *ssa.FieldAddr:
+		return helper == "AssertNilDeref"
 	case *ssa.Index, *ssa.IndexAddr:
 		return helper == "CheckIndexRange" || helper == "AssertNilDeref"
 	default:

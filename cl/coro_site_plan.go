@@ -45,6 +45,8 @@ type coroSiteEmissionObserver struct {
 	expectedIntrinsicSemantics  CoroIntrinsicCallSemantics
 	expectedElision             CoroCallElisionKind
 	seenElision                 bool
+	expectedPlainAllocation     coroPlainAllocationPlan
+	seenPlainAllocation         bool
 	expectedPhysical            coroPhysicalInstructionPlan
 	hasExpectedPhysical         bool
 	seenSemantic                bool
@@ -233,6 +235,9 @@ func (p *context) beginCoroSiteEmissionMode(
 		seenLocalityDispatchers:     make(map[*ssa.Function]none, len(localityDispatchers)),
 		observeFrozenSite:           p.emissionUniverse.CompleteRuntimeABI(),
 	}
+	if placement == coroRuntimeHelperAtSource && !hasPhysical {
+		observer.expectedPlainAllocation = plan.plainAllocation
+	}
 	if hasPhysical {
 		observer.expectedPhysical = physical
 		observer.hasExpectedPhysical = true
@@ -305,6 +310,12 @@ func (p *context) beginCoroSiteEmissionMode(
 				instruction.String(), observer.expectedElision,
 			))
 		}
+		if observer.expectedPlainAllocation.borrowed() && !observer.seenPlainAllocation {
+			panic(fmt.Errorf(
+				"coroutine emission site %q omitted frozen borrowed-allocation recipe",
+				instruction.String(),
+			))
+		}
 		if observer.hasExpectedPhysical && !observer.seenSemantic {
 			panic(fmt.Errorf(
 				"coroutine emission site %q omitted frozen semantic recipe %s",
@@ -348,6 +359,39 @@ func (p *context) beginCoroSiteEmissionMode(
 			))
 		}
 	}
+}
+
+// selectCoroPlainBorrowedAllocation consumes the exact source SitePlan storage
+// recipe for a synchronous Go body. Physical coro/outcome bodies use their
+// separate instruction plan and never enter this selector.
+func (p *context) selectCoroPlainBorrowedAllocation(allocation *ssa.Alloc) bool {
+	if p == nil || allocation == nil || p.hasCoroPhysicalEmission() {
+		return false
+	}
+	if p.rawPlainBody && p.emissionUniverse != nil &&
+		p.emissionUniverse.coroProgramIR != nil {
+		// Raw-plain compiler/runtime islands deliberately suppress the ordinary
+		// helper observer because their complete call inventory is validated by
+		// the separate raw closure. Storage is orthogonal: consume the same exact
+		// owner-scoped frozen allocation recipe without re-running escape proof.
+		plan, err := p.emissionUniverse.coroProgramIR.sitePlan(p, allocation)
+		if err != nil {
+			panic(fmt.Errorf("raw-plain allocation %q: %w", allocation.String(), err))
+		}
+		return plan.plainAllocation.borrowed()
+	}
+	observer := p.coroEmissionSite()
+	if observer == nil || observer.instruction != allocation || observer.hasExpectedPhysical {
+		return false
+	}
+	if !observer.expectedPlainAllocation.borrowed() {
+		return false
+	}
+	if observer.seenPlainAllocation {
+		panic(fmt.Errorf("source allocation %q consumed its borrowed storage recipe more than once", allocation.String()))
+	}
+	observer.seenPlainAllocation = true
+	return true
 }
 
 func (p *context) observeCoroSemanticInstruction(instruction ssa.Instruction) {

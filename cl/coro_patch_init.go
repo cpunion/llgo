@@ -95,8 +95,17 @@ func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Cal
 		}
 		b.Call(fn.Expr)
 	case coro.EmitCoroutine:
+		if p.hasOutcomePlainPhysicalBody() {
+			if !targetPlan.HasStaticOutcome() {
+				panic("outcome-plain patch initializer replacement target has no synchronous twin")
+			}
+			if result := p.compileCoroStaticOutcomeTargetCall(b, target, nil, true); !result.IsNil() {
+				panic("outcome-plain patch initializer replacement returned a value")
+			}
+			break
+		}
 		if p.coroBody() == nil {
-			panic("coroutine patch initializer replacement escaped into a plain owner")
+			panic("coroutine patch initializer replacement escaped into a structured owner")
 		}
 		if result := p.compileCoroTargetAwait(b, target, nil); !result.IsNil() {
 			panic("coroutine patch initializer replacement returned a value")

@@ -213,8 +213,8 @@ func FinishInlineAwait(
 			!terminalInlineCompletion(&parent.completion, child.handle) {
 			return InlineAwaitInvalid
 		}
-		destroy, yielded, ok := dispatchPending(g, child)
-		if !ok || yielded || destroy != child || g.active != parent ||
+		destroy, yielded, directPark, ok := dispatchPending(g, child)
+		if !ok || yielded || directPark || destroy != child || g.active != parent ||
 			g.destroyTarget != child || child.state != FrameDestroyPending {
 			return InlineAwaitInvalid
 		}

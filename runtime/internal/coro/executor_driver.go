@@ -79,6 +79,25 @@ func validExecutorDriverHeader(driver *ExecutorDriver) bool {
 	if driver == nil || driver.magic != executorDriverMagic || driver.state == executorDriverUnbound {
 		return false
 	}
+	if driver.state == executorDriverActive {
+		return driver.terminalKind == ActionInvalid && !driver.hasPrepareNow && driver.prepareNow == 0 &&
+			driver.p != nil && driver.registry != nil &&
+			driver.handle.Slot != 0 && driver.handle.Generation != 0 && driver.requestGate != nil &&
+			driver.route.Valid() && driver.sources.route == driver.route &&
+			driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
+			validExecutorSourceSetHeader(&driver.sources, driver.p) &&
+			validExecutorRunCursor(&driver.run, driver.p)
+	}
+	return validExecutorDriverColdHeader(driver)
+}
+
+// validExecutorDriverColdHeader retains the complete lifecycle-state audit
+// outside the active runner. Keeping it out of the common reduction selector
+// avoids calculating terminal/prepare truth tables for every dispatch, source,
+// and action while preserving the exact sleep/close diagnostics.
+//
+//go:noinline
+func validExecutorDriverColdHeader(driver *ExecutorDriver) bool {
 	terminalKind := driver.terminalKind
 	validTerminalState := driver.state == executorDriverTerminalClosing &&
 		(terminalKind == ActionDestroy || terminalKind == ActionPanicDestroy)
@@ -167,6 +186,63 @@ func CurrentExecutorDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool
 		return nil, ExecutorHandle{}, 0, false
 	}
 	return driver, driver.handle, driver.route, true
+}
+
+// CurrentExecutorDriverForActiveResume is the narrow runtime-context
+// capability used after the physical runtime has already authenticated g as
+// its currently installed logical task. It accepts only the bounded runner's
+// issued CheckResume interval and rechecks the exact P/G/action, driver, source
+// and route identities. Unlike CurrentExecutorDriver it does not repeat the
+// registry-slot and complete active-frame audit: neither registry lifetime nor
+// frame identity can change inside this no-suspend physical resume.
+//
+// The returned driver is scheduler-owner-only and must not survive the current
+// resume or be passed to a producer. Callers without an independently proven
+// current runtime task must use CurrentExecutorDriver instead.
+func CurrentExecutorDriverForActiveResume(g *G) (*ExecutorDriver, RouteID, bool) {
+	if !ValidG(g) || g.transferState != runnableTransferGIdle || !resumeGateTaken(g) {
+		return nil, 0, false
+	}
+	p := g.runP
+	driver := p.executor
+	if driver == nil || driver.magic != executorDriverMagic ||
+		driver.state != executorDriverActive || driver.p != p ||
+		driver.run.issued != ActionCheckResume ||
+		preemptLoad(&p.executorMode) != executorModeBound ||
+		driver.handle.Slot == 0 || driver.handle.Generation == 0 ||
+		!driver.route.Valid() || !validExecutorSourceSetHeader(&driver.sources, p) ||
+		driver.sources.route != driver.route {
+		return nil, 0, false
+	}
+	return driver, driver.route, true
+}
+
+// CurrentExecutorDriverForCompilerTask is the narrow capability boundary for
+// a hidden G parameter carried by generated physical coroutine code. The
+// scheduler has already authenticated the resume before that parameter can be
+// observed; this check therefore freezes only the mutable G/P/driver relation
+// needed until the next no-suspend runtime call returns. Source-specific
+// operations must still validate their own source and endpoint identities.
+//
+// Callers which recovered a G through TLS, a callback, or public metadata must
+// use CurrentExecutorDriver or CurrentExecutorDriverForActiveResume instead.
+func CurrentExecutorDriverForCompilerTask(g *G) (*ExecutorDriver, RouteID, bool) {
+	if g == nil || g.magic != gMagic || g.state != GRunning ||
+		g.transferState != runnableTransferGIdle {
+		return nil, 0, false
+	}
+	p := g.runP
+	if p == nil || p.current != g || !p.inResume ||
+		preemptLoad(&p.executorMode) != executorModeBound {
+		return nil, 0, false
+	}
+	driver := p.executor
+	if driver == nil || driver.magic != executorDriverMagic ||
+		driver.state != executorDriverActive || driver.p != p ||
+		!driver.route.Valid() || driver.sources.route != driver.route {
+		return nil, 0, false
+	}
+	return driver, driver.route, true
 }
 
 // currentExecutorParkDriver resolves the exact executor during the narrow

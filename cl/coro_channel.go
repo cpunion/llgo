@@ -93,13 +93,18 @@ func (p *context) requireCoroChannelBody(b llssa.Builder) *coroBodyContext {
 func (p *context) newCoroChannelStorage(b llssa.Builder, elemType llssa.Type) (elem, state llssa.Expr) {
 	// These addresses may be published to hchan immediately before suspend.
 	// Allocate them in the physical ramp entry so no waiter can retain a
-	// resume-local M stack address. Reset at the logical operation point because
-	// the same static channel instruction may execute repeatedly in a loop.
+	// resume-local M stack address. The coroutine frame allocator zero-fills the
+	// complete frame, and channel resume clears state before the same static
+	// instruction can execute again in a loop.
 	elem = p.coroFrameAlloca(elemType)
 	stateType := p.prog.RuntimeType("CoroChanParkV1")
 	state = p.coroFrameAlloca(stateType)
 	b.Store(elem, b.Prog.Zero(elemType))
-	b.Store(state, b.Prog.Zero(stateType))
+	// State is unreachable until the conditional park hook runs, and that hook
+	// initializes the complete CoroChanParkV1 before publishing any frame
+	// pointer. Resume clears it before a loop can reuse this static operation.
+	// Eagerly zeroing the large aggregate here made both successful try paths
+	// and actual parks pay for a store which the runtime immediately repeated.
 	return
 }
 
@@ -107,7 +112,7 @@ func (p *context) compileCoroChanSend(b llssa.Builder, channel, value llssa.Expr
 	body := p.requireCoroChannelBody(b)
 	elem, state := p.newCoroChannelStorage(b, value.Type)
 	b.Store(elem, value)
-	ready := b.CoroChanTrySend(channel, elem)
+	ready := b.CoroChanTrySend(body.task, channel, elem)
 	body.emitCoroParkOperation(p, b, coroParkOperation{
 		shouldSuspend: b.UnOp(token.NOT, ready),
 		park: func(suspend llssa.Builder) {
@@ -143,7 +148,7 @@ func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, ch
 	body := p.requireCoroChannelBody(b)
 	elemType := p.prog.Elem(channel.Type)
 	elem, state := p.newCoroChannelStorage(b, elemType)
-	result := b.CoroChanTryRecv(channel, elem)
+	result := b.CoroChanTryRecv(body.task, channel, elem)
 	recvOK := b.Extract(result, 0)
 	tryOK := b.Extract(result, 1)
 	recvOKSlot := p.coroFrameAlloca(p.prog.Bool())

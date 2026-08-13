@@ -292,7 +292,7 @@ func validateCoroStaticMethodCallOperands(call ssa.CallInstruction, target *ssa.
 		if err != nil {
 			return fmt.Errorf("derive canonical static coroutine method signature: %w", err)
 		}
-		if !flattenedLinkname && !coroInterfaceDispatchSignaturesIdentical(effectiveRaw, normalized) {
+		if !flattenedLinkname && !coroInterfaceDispatchSignaturesIdentical(effectiveRaw, normalized, universe) {
 			return fmt.Errorf("static coroutine method source ABI %s does not match canonical target ABI %s", effectiveRaw, normalized)
 		}
 		targetContext, err = universe.functionABIContext(target, universe.ownerOf(target))
@@ -358,10 +358,10 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 			target.ID, target.External, target.Emission, target.Primary, target.FuncRep, target.Demand,
 		)
 	}
-	if callerOutcome && target.ManagedEntry != coro.ManagedEntryOutcomePlain {
+	if callerOutcome && !target.HasStaticOutcome() {
 		return fmt.Errorf(
-			"outcome-plain caller %q targets non-atomic managed entry %s",
-			caller.ID, target.ManagedEntry,
+			"outcome-plain caller %q targets a function without a static outcome capability",
+			caller.ID,
 		)
 	}
 	return nil
@@ -621,6 +621,12 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 			callerPlan.ID, targetPlan.ID, childFn.Name(), childType, childFn.Expr.RawType(),
 		))
 	}
+	// This edge names one exact managed ramp and the child cannot outlive the
+	// caller's coroutine frame: every terminal or suspended path is reconciled
+	// by awaitCoroChildWithRecovery below. LLVM 22 may therefore embed the child
+	// frame in its static parent; dynamic/function-value calls never reach this
+	// proof point.
+	b.MarkCoroElideSafe(child)
 	value := p.awaitCoroChildWithRecovery(
 		b, child, resultSlot, sourceSig.Results(), cleanup, keepaliveSlots,
 	)
@@ -652,8 +658,8 @@ func (p *context) coroAwaitResultAddress(
 // this edge therefore uses the same scheduler-owned child transaction as an
 // ordinary static synchronous-style call.
 func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
-	if !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn {
-		panic("coroutine patch initializer await requires an active physical body")
+	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn {
+		panic("coroutine patch initializer call requires an active structured body")
 	}
 	if p.emissionUniverse == nil || p.immutablePlan() == nil || p.goFn == nil {
 		panic("coroutine patch initializer await requires a frozen exact plan")
@@ -665,6 +671,29 @@ func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
 	planned, exact := p.immutablePlan().ResolveLoweredCall(p.goFn, coroPatchOriginalInitCall)
 	if !frozen || original == nil || !exact || planned != original {
 		panic("coroutine patch initializer edge disagrees between the frozen emission universe and SSA plan")
+	}
+	if p.hasOutcomePlainPhysicalBody() {
+		entry, err := p.resolvePatchOriginalInitOutcomeSymbol(original)
+		if err != nil {
+			panic(err)
+		}
+		if err := entry.checkOutcomePlainSupported(); err != nil {
+			panic(err)
+		}
+		calleeFn, _, kind := p.compileFuncDeclVariantEntry(p.pkg, entry, false)
+		if kind != goFunc {
+			panic("patch original initializer outcome target did not resolve to a Go entry")
+		}
+		completion := p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), true)
+		resultType := p.prog.Type(newOutcomePlainPhysicalABI(original.Signature).resultSlotType, llssa.InGo)
+		resultSlot := p.structuredOutcomeAlloca(resultType, false)
+		b.Call(calleeFn.Expr,
+			p.managedPhysicalTask(),
+			b.Convert(p.prog.VoidPtr(), resultSlot),
+			b.Convert(p.prog.VoidPtr(), completion),
+		)
+		p.dispatchOutcomePlainCompletion(b, completion)
+		return
 	}
 	entry := p.mustPatchOriginalInitFunctionSymbol(original)
 	if entry.function != original || !entry.patchOriginalInit {
@@ -690,6 +719,31 @@ func (p *context) coroFrameAlloca(typ llssa.Type) llssa.Expr {
 	alloc := p.fn.NewBuilder()
 	defer alloc.Dispose()
 	alloc.SetBlockEx(entry, llssa.AtStart, true)
+	return alloc.AllocaT(typ)
+}
+
+// structuredOutcomeAlloca emits function-lifetime storage for either managed
+// physical body.  A real coroutine must define the slot in its ramp entry so
+// CoroSplit can retain it across suspension.  An outcome-plain body is a normal
+// synchronous function, so the same proven-local storage belongs on its native
+// entry stack and remains available to LLVM's ordinary SROA/mem2reg pipeline.
+func (p *context) structuredOutcomeAlloca(typ llssa.Type, zeroed bool) llssa.Expr {
+	if !p.hasStructuredOutcomePhysicalBody() || p.fn == nil || typ == nil {
+		panic("structured outcome alloca requires an active physical body and type")
+	}
+	if p.hasCoroPhysicalBody() {
+		if zeroed {
+			return p.coroFrameAlloc(typ)
+		}
+		return p.coroFrameAlloca(typ)
+	}
+	entry := p.fn.Block(0)
+	alloc := p.fn.NewBuilder()
+	defer alloc.Dispose()
+	alloc.SetBlockEx(entry, llssa.AtStart, true)
+	if zeroed {
+		return alloc.AllocaZeroedT(typ)
+	}
 	return alloc.AllocaT(typ)
 }
 
@@ -789,11 +843,7 @@ func (p *context) awaitCoroChildWithRecovery(
 		recoverType,
 		recoverData,
 	)
-	if body.abi.awaitInlineHook == "" {
-		panic("coroutine child await has no inline completion hook")
-	}
-	inline := p.pkg.NewFunc(body.abi.awaitInlineHook, coroAwaitInlineSignature(), llssa.InC)
-	completedInline := b.Call(inline.Expr, body.task, body.coro.Handle(), child)
+	completedInline := p.emitCoroStaticInlineAwait(b, child)
 	if body.abi.awaitConsumeHook == "" {
 		panic("coroutine child await has no outcome consume hook")
 	}
@@ -947,6 +997,55 @@ func (p *context) awaitCoroChildWithRecovery(
 	}
 	b.SetBlockContinuation(returned)
 	return p.loadCoroAwaitResult(b, resultSlot, results)
+}
+
+// emitCoroStaticInlineAwait keeps LLVM's handle operations in the exact static
+// caller while the runtime owns only scheduler-state transitions. Besides
+// removing one opaque runtime round trip, this is the shape required for LLVM
+// 22 to select a coro_elide_safe no-allocation ramp and embed the child frame
+// in its parent. A declined/deep or genuinely suspended child converges on the
+// existing false result and parent suspend path.
+func (p *context) emitCoroStaticInlineAwait(b llssa.Builder, child llssa.Expr) llssa.Expr {
+	body := p.coroBody()
+	if body == nil || b == nil || b.Func != p.fn || child.IsNil() ||
+		body.abi.awaitInlineHook == "" || body.abi.awaitInlineFinishHook == "" ||
+		body.abi.awaitInlineCommitHook == "" || body.abi.frameDestroyCommitHook == "" {
+		panic("coroutine static inline await has an incomplete physical contract")
+	}
+	begin := p.pkg.NewFunc(body.abi.awaitInlineHook, coroAwaitInlineSignature(), llssa.InC)
+	finish := p.pkg.NewFunc(
+		body.abi.awaitInlineFinishHook, coroAwaitInlineFinishSignature(), llssa.InC,
+	)
+	frameCommit := p.pkg.NewFunc(
+		body.abi.frameDestroyCommitHook, coroFrameDestroyCommitSignature(), llssa.InC,
+	)
+	inlineCommit := p.pkg.NewFunc(
+		body.abi.awaitInlineCommitHook, coroAwaitInlineCommitSignature(), llssa.InC,
+	)
+
+	started, declined, destroy, joined := p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock()
+	parent := body.coro.Handle()
+	b.If(b.Call(begin.Expr, body.task, parent, child), started, declined)
+
+	b.SetBlockEx(started, llssa.AtEnd, false)
+	b.CoroResume(child)
+	done := b.CoroDone(child)
+	b.If(b.Call(finish.Expr, body.task, parent, child, done), destroy, declined)
+
+	b.SetBlockEx(declined, llssa.AtEnd, false)
+	b.Jump(joined)
+	b.SetBlockEx(destroy, llssa.AtEnd, false)
+	b.CoroDestroy(child)
+	b.Call(frameCommit.Expr, body.task, child)
+	b.Call(inlineCommit.Expr, body.task, parent, child)
+	b.Jump(joined)
+
+	b.SetBlockContinuation(joined)
+	completed := b.Phi(p.prog.Bool())
+	completed.AddIncoming(b, []llssa.BasicBlock{declined, destroy}, func(index int, _ llssa.BasicBlock) llssa.Expr {
+		return p.prog.BoolVal(index == 1)
+	})
+	return completed.Expr
 }
 
 // enterCoroPropagatedPanic and enterCoroPropagatedGoexit are the narrow parent

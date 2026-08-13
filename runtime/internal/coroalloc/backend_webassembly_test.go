@@ -36,6 +36,11 @@ func TestWasmBackendAllocatesAndFreesWithLibc(t *testing.T) {
 		t.Fatal("wasm malloc frame allocation returned nil")
 	}
 	for offset := uintptr(0); offset < size; offset++ {
+		if got := *(*byte)(unsafe.Add(ptr, offset)); got != 0 {
+			t.Fatalf("wasm calloc frame byte %d = %d, want zero", offset, got)
+		}
+	}
+	for offset := uintptr(0); offset < size; offset++ {
 		*(*byte)(unsafe.Add(ptr, offset)) = byte(offset + 1)
 	}
 	for offset := uintptr(0); offset < size; offset++ {

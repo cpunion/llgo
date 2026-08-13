@@ -598,6 +598,7 @@ func resetCoroProgramTestStateV1(t *testing.T) {
 	coroProgramLifecycleV1State = coroProgramUnusedV1
 	coroProgramManifestV1State = nil
 	coroProgramFactoryV1State = nil
+	coroProgramCapabilitiesV2State = 0
 	coroProgramGV1State = coroG{}
 	coroProgramPV1State = coroP{}
 	coroProgramContinuationV1State = coroProgramContinuationNoneV1
@@ -619,6 +620,7 @@ func resetCoroProgramTestStateV1(t *testing.T) {
 		coroProgramLifecycleV1State = coroProgramUnusedV1
 		coroProgramManifestV1State = nil
 		coroProgramFactoryV1State = nil
+		coroProgramCapabilitiesV2State = 0
 		coroProgramGV1State = coroG{}
 		coroProgramPV1State = coroP{}
 		coroProgramContinuationV1State = coroProgramContinuationNoneV1

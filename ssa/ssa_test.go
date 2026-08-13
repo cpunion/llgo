@@ -2414,6 +2414,27 @@ attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
 `)
 }
 
+func TestIfWithBranchWeights(t *testing.T) {
+	prog := NewProgram(nil)
+	pkg := prog.NewPackage("bar", "foo/bar")
+	params := types.NewTuple(types.NewVar(0, nil, "a", types.Typ[types.Int]))
+	rets := types.NewTuple(types.NewVar(0, nil, "", types.Typ[types.Int]))
+	sig := types.NewSignatureType(nil, nil, nil, params, rets, false)
+	fn := pkg.NewFunc("weighted", sig, InGo)
+	b := fn.MakeBody(3)
+	iftrue := fn.Block(1)
+	iffalse := fn.Block(2)
+	cond := b.BinOp(token.GTR, fn.Param(0), prog.Val(0))
+	b.IfWithBranchWeights(cond, iftrue, iffalse, 1000, 1)
+	b.SetBlock(iftrue).Return(prog.Val(1))
+	b.SetBlock(iffalse).Return(prog.Val(0))
+	ir := pkg.String()
+	if !strings.Contains(ir, `br i1 %1, label %_llgo_1, label %_llgo_2, !prof !0`) ||
+		!strings.Contains(ir, `!0 = !{!"branch_weights", i32 1000, i32 1}`) {
+		t.Fatalf("weighted branch metadata is absent or malformed:\n%s", ir)
+	}
+}
+
 func TestPrintf(t *testing.T) {
 	prog := NewProgram(nil)
 	pkg := prog.NewPackage("bar", "foo/bar")

@@ -861,6 +861,8 @@ var llgoInstrs = map[string]int{
 	"_Cfunc__CMalloc":      llgoCgoCMalloc,
 	"_cgoCheckPointer":     llgoCgoCheckPointer,
 	"_cgo_runtime_cgocall": llgoCgoCgocall,
+	"cgoUse":               llgoCgoUse,
+	"cgoKeepAlive":         llgoCgoKeepAlive,
 
 	"asm":       llgoAsm,
 	"stackSave": llgoStackSave,
@@ -1983,7 +1985,7 @@ func (p *context) emitPCLineLabel(b llssa.Builder, pos token.Pos) {
 		pushSection = ".pushsection __DATA,__llgo_pcl,regular,live_support"
 		recordSymbol = "l_llgo_pcline_rec_${:uid}:\n"
 	}
-	b.InlineAsm(
+	b.CoroAtomicDataAnchor(
 		asmLabel + ":\n" +
 			pushSection + "\n" +
 			".p2align " + align + "\n" +
@@ -2632,6 +2634,12 @@ func (p *context) callEx(
 			ret = p.cgoCMalloc(b, args)
 		case llgoCgoCheckPointer:
 			p.cgoCheckPointer(b, args)
+		case llgoCgoUse, llgoCgoKeepAlive:
+			if act != llssa.Call || ds != nil || len(args) != 1 {
+				panic("generated cgo liveness intrinsic requires one exact direct call")
+			}
+			compiled := p.compileValues(b, args, kind)
+			b.KeepAlive(compiled[0])
 		case llgoCgoCgocall:
 			ret = p.cgoCgocall(b, args)
 		case llgoAdvance:

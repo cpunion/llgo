@@ -18,29 +18,35 @@ package coro
 
 import "testing"
 
-func TestChannelPhysicalWordCarriesOnlyCommittedRouteHint(t *testing.T) {
+func TestChannelPhysicalWordCarriesCommittedRouteAndResultHints(t *testing.T) {
 	for _, state := range []channelPhysicalState{
 		channelPhysicalIdle,
 		channelPhysicalReady,
 		channelPhysicalRetryBudget,
 		channelPhysicalCommitted,
 	} {
-		word, ok := makeChannelPhysicalWord(state, 0)
+		word, ok := makeChannelPhysicalWord(state, 0, ResumeSmallInvalid)
 		if !ok || word != uint32(state) || channelPhysicalStateOf(word) != state {
 			t.Fatalf("route-zero physical word %d = (%#x,%t)", state, word, ok)
 		}
 	}
-	word, ok := makeChannelPhysicalWord(channelPhysicalCommitted, 7)
+	word, ok := makeChannelPhysicalWord(channelPhysicalCommitted, 7, 5)
 	if !ok || channelPhysicalStateOf(word) != channelPhysicalCommitted {
 		t.Fatalf("committed route word = (%#x,%t)", word, ok)
 	}
 	if route, valid := channelPhysicalCompletionRoute(word); !valid || route != 7 {
 		t.Fatalf("committed route decode = (%d,%t)", route, valid)
 	}
-	if _, ok := makeChannelPhysicalWord(channelPhysicalReady, 7); ok {
+	if route, small, valid := channelPhysicalCompletion(word); !valid || route != 7 || small != 5 {
+		t.Fatalf("committed completion decode = (%d,%d,%t)", route, small, valid)
+	}
+	if _, ok := makeChannelPhysicalWord(channelPhysicalReady, 7, ResumeSmallInvalid); ok {
 		t.Fatal("non-committed physical state accepted a route hint")
 	}
-	if _, ok := makeChannelPhysicalWord(channelPhysicalCommitted, OperationRouteEncodingCapacity+1); ok {
+	if _, ok := makeChannelPhysicalWord(channelPhysicalReady, 0, 5); ok {
+		t.Fatal("non-committed physical state accepted a result hint")
+	}
+	if _, ok := makeChannelPhysicalWord(channelPhysicalCommitted, OperationRouteEncodingCapacity+1, 5); ok {
 		t.Fatal("physical word accepted an unencodable route hint")
 	}
 	if state := channelPhysicalStateOf(uint32(7) << channelPhysicalRouteShift); state <= channelPhysicalCommitted {
@@ -97,6 +103,57 @@ func TestChannelExternalCommitSingleAbortCopyAndCommit(t *testing.T) {
 	decision := takeChannelClaimCoreDecision(t, fixture)
 	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 91 || !decision.lease.Valid() {
 		t.Fatalf("single committed decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
+
+func TestChannelExternalCommitInvalidOutputOverwritesScratchSuffix(t *testing.T) {
+	fixture := newChannelClaimCoreFixture(t, "channel-single-scratch-output", []uint32{97}, true, 0)
+	transaction := ChannelExternalCommit{
+		endpoint: channelExternalCommitAdmission{
+			source: fixture.source,
+			id:     fixture.ids[0],
+			token:  0xdeadbeef,
+			posted: true,
+			broken: true,
+		},
+		claim:                new(SelectClaim),
+		ownerLocalCurrent:    fixture.task.g,
+		ownerLocalDriver:     fixture.driver,
+		ownerLocalWait:       &fixture.wait,
+		ownerLocalAdmission:  ownerLocalCompletionAffectedHead,
+		ownerLocalUnadmitted: true,
+	}
+	if !availableChannelExternalCommitOutput(&transaction) {
+		t.Fatal("invalid transaction suffix became authoritative")
+	}
+	if result := BeginChannelExternalCommit(
+		&transaction,
+		fixture.source,
+		fixture.ids[0],
+		fixture.claim,
+	); result != ChannelExternalCommitBeginPrepared || transaction.self != &transaction ||
+		transaction.endpoint.source != fixture.source || transaction.endpoint.id != fixture.ids[0] ||
+		transaction.endpoint.token == 0 || !transaction.endpoint.held || transaction.endpoint.posted ||
+		transaction.endpoint.broken || transaction.claim != fixture.claim ||
+		transaction.ownerLocalCurrent != nil || transaction.ownerLocalDriver != nil ||
+		transaction.ownerLocalWait != nil || transaction.ownerLocalAdmission != ownerLocalCompletionRejected ||
+		transaction.ownerLocalUnadmitted {
+		t.Fatalf("begin did not overwrite invalid suffix: result=%d transaction=%+v", result, transaction)
+	}
+	if availableChannelExternalCommitOutput(&transaction) || !transaction.Abort() ||
+		transaction != (ChannelExternalCommit{}) {
+		t.Fatalf("live transaction was reusable or did not abort: %+v", transaction)
+	}
+
+	if result := fixture.source.PostReady(fixture.ids[0]); result != ChannelOperationPosted {
+		t.Fatalf("post scratch-output cleanup readiness = %d", result)
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	pollChannelClaimCoreComplete(t, fixture)
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 97 || !decision.lease.Valid() {
+		t.Fatalf("scratch-output decision = %+v", decision)
 	}
 	releaseChannelClaimCoreFixture(t, fixture, decision)
 }

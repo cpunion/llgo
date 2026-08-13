@@ -151,7 +151,7 @@ func CoroGOMAXPROCS(n int) int {
 	if uint64(n) > uint64(coroNativeMaximumLogicalProcsV1) {
 		next = coroNativeMaximumLogicalProcsV1
 	}
-	previous, wake, changed := coroNativeFleetV1State.execution.SetLimit(next)
+	previous, wake, changed := coroNativeFleetSetExecutionLimitV1(next)
 	waiters := uint32(0)
 	waitersOK := true
 	if wake {

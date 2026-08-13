@@ -122,28 +122,35 @@ const (
 	coroFrameFreeHook             = "__llgo_coro_frame_free_v0"
 	coroDescriptorPrefix          = "__llgo_coro_frame_descriptor_v0."
 
-	coroPhysicalABIVersionV1      uint32 = 1
-	coroFrameAllocHookV1                 = "__llgo_coro_frame_alloc_v1"
-	coroFramePublishHookV1               = "__llgo_coro_frame_publish_v1"
-	coroAwaitPrepareHookV1               = "__llgo_coro_await_prepare_v3"
-	coroAwaitInlineHookV1                = "__llgo_coro_await_inline_v1"
-	coroAwaitConsumeHookV1               = "__llgo_coro_await_consume_v1"
-	coroPreemptPollHookV1                = "__llgo_coro_preempt_poll_v1"
-	coroYieldPrepareHookV1               = "__llgo_coro_yield_prepare_v1"
-	coroCriticalEnterHookV1              = "__llgo_coro_critical_enter_v1"
-	coroCriticalExitHookV1               = "__llgo_coro_critical_exit_v1"
-	coroKeyedParkHookV2                  = "__llgo_coro_keyed_park_v2"
-	coroKeyedResumeHookV2                = "__llgo_coro_keyed_resume_v2"
-	coroRunDecisionTakeHookV1            = "__llgo_coro_run_decision_take_v1"
-	coroRunDecisionTakeZeroHookV1        = "__llgo_coro_run_decision_take_zero_v1"
-	coroPanicPrepareHookV1               = "__llgo_coro_panic_prepare_v1"
-	coroPanicTraceReplaceHookV1          = "__llgo_coro_panic_trace_replace_v1"
-	coroRecoverTakeHookV1                = "__llgo_coro_recover_take_v1"
-	coroSpawnBeginHookV1                 = "__llgo_coro_spawn_begin_v1"
-	coroSpawnCommitHookV1                = "__llgo_coro_spawn_commit_v1"
-	coroCompletePrepareHookV2            = "__llgo_coro_complete_prepare_v2"
-	coroFrameFreeHookV1                  = "__llgo_coro_frame_free_v1"
-	coroDescriptorPrefixV1               = "__llgo_coro_frame_descriptor_v1."
+	coroPhysicalABIVersionV1           uint32 = 1
+	coroFrameAllocHookV1                      = "__llgo_coro_frame_alloc_v1"
+	coroFramePublishHookV1                    = "__llgo_coro_frame_publish_v1"
+	coroFramePublishHookV2                    = "__llgo_coro_frame_publish_v2"
+	coroFramePublishHookV3                    = "__llgo_coro_frame_publish_v3"
+	coroAwaitPrepareHookV1                    = "__llgo_coro_await_prepare_v3"
+	coroAwaitInlineHookV1                     = "__llgo_coro_await_inline_v1"
+	coroAwaitInlineBeginHookV2                = "__llgo_coro_await_inline_begin_v2"
+	coroAwaitInlineFinishHookV2               = "__llgo_coro_await_inline_finish_v2"
+	coroAwaitInlineDestroyCommitHookV2        = "__llgo_coro_await_inline_destroy_commit_v2"
+	coroFrameDestroyCommitHookV2              = "__llgo_coro_frame_destroy_commit_v2"
+	coroAwaitConsumeHookV1                    = "__llgo_coro_await_consume_v1"
+	coroPreemptPollHookV1                     = "__llgo_coro_preempt_poll_v1"
+	coroYieldPrepareHookV1                    = "__llgo_coro_yield_prepare_v1"
+	coroCriticalEnterHookV1                   = "__llgo_coro_critical_enter_v1"
+	coroCriticalExitHookV1                    = "__llgo_coro_critical_exit_v1"
+	coroKeyedParkHookV2                       = "__llgo_coro_keyed_park_v2"
+	coroKeyedResumeHookV2                     = "__llgo_coro_keyed_resume_v2"
+	coroRunDecisionTakeHookV1                 = "__llgo_coro_run_decision_take_v1"
+	coroRunDecisionTakeZeroHookV1             = "__llgo_coro_run_decision_take_zero_v1"
+	coroPanicPrepareHookV1                    = "__llgo_coro_panic_prepare_v1"
+	coroPanicTraceReplaceHookV1               = "__llgo_coro_panic_trace_replace_v1"
+	coroRecoverTakeHookV1                     = "__llgo_coro_recover_take_v1"
+	coroSpawnBeginHookV1                      = "__llgo_coro_spawn_begin_v1"
+	coroSpawnCommitHookV1                     = "__llgo_coro_spawn_commit_v1"
+	coroCompletePrepareHookV2                 = "__llgo_coro_complete_prepare_v2"
+	coroFrameFreeHookV1                       = "__llgo_coro_frame_free_v1"
+	coroDescriptorPrefixV1                    = "__llgo_coro_frame_descriptor_v1."
+	coroBorrowedFrameMetadataWordsV2          = 20
 )
 
 const (
@@ -190,10 +197,12 @@ const (
 const coroPreemptInstructionBudget = 64
 
 // coroPreemptCheckpointStride is the number of compiler-selected source
-// safepoints between full runtime polls. While a frame is active its existing
-// StateID word is compiler-private countdown storage; publishState overwrites
-// it with the real resume state before every scheduler-visible suspension.
-const coroPreemptCheckpointStride uint64 = 256
+// safepoints between full runtime polls. The countdown lives in compiler-local
+// storage whose address never escapes; the ordinary SROA/mem2reg pipeline can
+// therefore keep it in SSA registers on a non-suspending loop edge. Every
+// activation resets it, so it is not live across a scheduler-visible suspend.
+// StateID remains exclusively the published resume-state identity.
+const coroPreemptCheckpointStride uint64 = 2048
 
 type coroPhysicalABI struct {
 	version                 uint32
@@ -206,6 +215,9 @@ type coroPhysicalABI struct {
 	framePublishHook        string
 	awaitPrepareHook        string
 	awaitInlineHook         string
+	awaitInlineFinishHook   string
+	awaitInlineCommitHook   string
+	frameDestroyCommitHook  string
 	awaitConsumeHook        string
 	preemptPollHook         string
 	yieldPrepareHook        string
@@ -250,6 +262,7 @@ type coroBodyContext struct {
 	panicTraceReplace      llssa.Expr
 	completePrepare        llssa.Expr
 	terminalStatus         llssa.Expr
+	preemptCountdown       llssa.Expr
 	nextState              uint32
 	terminalState          uint32
 	needsPreempt           bool
@@ -281,9 +294,12 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	frameAllocHook := coroFrameAllocHookV1
 	frameFreeHook := coroFrameFreeHookV1
 	descriptorPrefix := coroDescriptorPrefixV1
-	framePublishHook := coroFramePublishHookV1
+	framePublishHook := coroFramePublishHookV3
 	awaitPrepareHook := coroAwaitPrepareHookV1
-	awaitInlineHook := coroAwaitInlineHookV1
+	awaitInlineHook := coroAwaitInlineBeginHookV2
+	awaitInlineFinishHook := coroAwaitInlineFinishHookV2
+	awaitInlineCommitHook := coroAwaitInlineDestroyCommitHookV2
+	frameDestroyCommitHook := coroFrameDestroyCommitHookV2
 	awaitConsumeHook := coroAwaitConsumeHookV1
 	preemptPollHook := coroPreemptPollHookV1
 	yieldPrepareHook := coroYieldPrepareHookV1
@@ -359,7 +375,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00await-prepare=%s\x00await-inline=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare=%s\x00await-inline=%s\x00await-inline-finish=%s\x00await-inline-commit=%s\x00frame-destroy-commit=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		traceFunction,
@@ -375,8 +391,12 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		faultPrepareArgsHook,
 		faultPayloadArgsHook,
 		funcRepABI,
+		framePublishHook,
 		awaitPrepareHook,
 		awaitInlineHook,
+		awaitInlineFinishHook,
+		awaitInlineCommitHook,
+		frameDestroyCommitHook,
 		awaitConsumeHook,
 		runDecisionTakeHook,
 		runDecisionTakeZeroHook,
@@ -408,6 +428,9 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		framePublishHook:        framePublishHook,
 		awaitPrepareHook:        awaitPrepareHook,
 		awaitInlineHook:         awaitInlineHook,
+		awaitInlineFinishHook:   awaitInlineFinishHook,
+		awaitInlineCommitHook:   awaitInlineCommitHook,
+		frameDestroyCommitHook:  frameDestroyCommitHook,
 		awaitConsumeHook:        awaitConsumeHook,
 		preemptPollHook:         preemptPollHook,
 		yieldPrepareHook:        yieldPrepareHook,
@@ -458,25 +481,17 @@ func (p *context) beginCoroBody(
 	descriptorPtr := b.Convert(prog.VoidPtr(), descriptor)
 	task := p.fn.PhysicalParam(0)
 	resultSlot := p.fn.PhysicalParam(1)
-	null := prog.Nil(prog.VoidPtr())
 	headerType := coroHeaderType(prog)
 	header := b.AllocaT(headerType)
-	initialLifecycle := uint64(coroLifecycleAllocated)
-	if abi.version >= coroPhysicalABIVersionV1 {
-		initialLifecycle = coroLifecycleInitialSuspended
-	}
-	headerValues := []llssa.Expr{
-		task,
-		null,
-		descriptorPtr,
-		null,
-		resultSlot,
-		prog.IntVal(coroSuspendNone, prog.Uint16()),
-		prog.IntVal(initialLifecycle, prog.Uint16()),
-		prog.IntVal(0, prog.Uint32()),
-		prog.IntVal(0, prog.Uint32()),
-		prog.IntVal(0, prog.Uint32()),
-	}
+	borrowedFrameMetadataType := p.type_(
+		types.NewArray(types.Typ[types.Uintptr], coroBorrowedFrameMetadataWordsV2),
+		llssa.InGo,
+	)
+	// Dynamic ramps never consume this fallback storage. Leave it uninitialized
+	// here so every ordinary coroutine creation does not pay a 20-word memset;
+	// PublishFrameV2 initializes the complete private Frame only when LLVM has
+	// actually selected the allocation-elided path (storage == nil).
+	borrowedFrameMetadata := b.AllocaT(borrowedFrameMetadataType)
 	allocSig := coroFrameAllocSignature(abi.version)
 	freeSig := coroFrameFreeSignature(abi.version)
 	alloc := p.pkg.NewFunc(abi.frameAllocHook, allocSig, llssa.InC)
@@ -490,6 +505,10 @@ func (p *context) beginCoroBody(
 		},
 		Free: func(b llssa.Builder, storage, size, align llssa.Expr) {
 			if abi.version >= coroPhysicalABIVersionV1 {
+				// The fake use is removed after CoroSplit. Until then it makes the
+				// compiler-injected scheduler metadata live through final cleanup,
+				// so an elided child owns it inside its static parent's LLVM frame.
+				b.KeepAlive(borrowedFrameMetadata)
 				b.Call(free.Expr, task, storage, size, align, descriptorPtr)
 				return
 			}
@@ -510,6 +529,11 @@ func (p *context) beginCoroBody(
 		// managed calls and receive their ordinary Return outcomes.
 		body.terminalStatus = b.AllocaT(prog.Uint32())
 		b.Store(body.terminalStatus, prog.IntVal(coroAwaitCompletionReturn, prog.Uint32()))
+		// This address is compiler-private and never reaches a runtime call. It
+		// deliberately differs from Header.StateID: that externally visible
+		// field aliases runtime validation calls and therefore forces a
+		// load/store on every otherwise plain loop edge.
+		body.preemptCountdown = b.AllocaT(prog.Uint32())
 	}
 	if abi.runDecisionTakeZeroHook != "" {
 		body.runDecisionTakeZero = p.pkg.NewFunc(
@@ -549,12 +573,18 @@ func (p *context) beginCoroBody(
 		Promise: header,
 		Frame:   frame,
 		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
-			for i, value := range headerValues {
-				b.Store(b.FieldAddr(header, i), value)
-			}
 			if abi.framePublishHook != "" {
 				publish := p.pkg.NewFunc(abi.framePublishHook, coroFramePublishSignature(), llssa.InC)
-				b.Call(publish.Expr, task, handle, b.Convert(prog.VoidPtr(), header), storage)
+				b.Call(
+					publish.Expr,
+					task,
+					handle,
+					b.Convert(prog.VoidPtr(), header),
+					storage,
+					b.Convert(prog.VoidPtr(), borrowedFrameMetadata),
+					descriptorPtr,
+					resultSlot,
+				)
 			}
 			// A named result captured by a defer is an ordinary Go heap object,
 			// but x/tools reloads it from compiler-owned RunDefers continuations.
@@ -585,7 +615,18 @@ func (p *context) beginCoroBody(
 		},
 	}
 	if !body.runDecisionTakeZero.IsNil() {
-		coroOptions.AfterResumeDispatch = body.dispatchZeroRunDecision
+		coroOptions.AfterResumeDispatch = func(b llssa.Builder, normal llssa.BasicBlock) {
+			// Publication lets the scheduler retain this opaque address after the
+			// ramp returns. Keep one resumed use until CoroSplit has physically
+			// placed the storage in the LLVM frame; the post-split cleanup removes
+			// the fake use before instruction selection.
+			b.KeepAlive(borrowedFrameMetadata)
+			body.dispatchZeroRunDecision(b, normal)
+		}
+	} else {
+		coroOptions.AfterResume = func(b llssa.Builder) {
+			b.KeepAlive(borrowedFrameMetadata)
+		}
 	}
 	body.coro = b.BeginCoro(coroOptions)
 	if body.unsupportedRunDecision != nil {
@@ -633,6 +674,9 @@ func coroFramePublishSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "storage", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "metadata", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "descriptor", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "resultSlot", types.Typ[types.UnsafePointer]),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
@@ -658,6 +702,37 @@ func coroAwaitInlineSignature() *types.Signature {
 	)
 	results := types.NewTuple(types.NewParam(token.NoPos, nil, "completed", types.Typ[types.Bool]))
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroAwaitInlineFinishSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "parent", pointer),
+		types.NewParam(token.NoPos, nil, "child", pointer),
+		types.NewParam(token.NoPos, nil, "done", types.Typ[types.Bool]),
+	)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "destroy", types.Typ[types.Bool]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroAwaitInlineCommitSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "parent", pointer),
+		types.NewParam(token.NoPos, nil, "child", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroFrameDestroyCommitSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
 func coroAwaitConsumeSignature() *types.Signature {
@@ -773,10 +848,10 @@ func (c *coroBodyContext) activate(b llssa.Builder) {
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(coroSuspendNone, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(coroLifecycleActive, prog.Uint16()))
-	b.Store(
-		b.FieldAddr(c.header, coroHeaderStateID),
-		prog.IntVal(coroPreemptCheckpointStride, prog.Uint32()),
-	)
+	if c.preemptCountdown.IsNil() {
+		panic("coroutine activation has no private preemption countdown")
+	}
+	b.Store(c.preemptCountdown, prog.IntVal(coroPreemptCheckpointStride, prog.Uint32()))
 }
 
 // dispatchZeroRunDecision emits the exactly-once compiler resume gate for a
@@ -814,7 +889,12 @@ func (c *coroBodyContext) dispatchZeroRunDecisionTo(
 	mapped := b.BinOp(token.ADD, taskKind, b.Prog.IntVal(2, b.Prog.Uint32()))
 	current := b.Load(c.terminalStatus)
 	b.Store(c.terminalStatus, b.SelectValue(isCanceled, mapped, current))
-	b.If(isCanceled, canceled, normal)
+	// Ordinary execution overwhelmingly has no cancellation request. Besides
+	// describing the scheduler's expected path, this keeps a resumed static
+	// child call above LLVM 22 CoroAnnotationElide's default 55% block-frequency
+	// threshold; an unannotated binary branch would make the normal arm look
+	// artificially cold even though cancellation remains fully reachable.
+	b.IfWithBranchWeights(isCanceled, canceled, normal, 1, 1000)
 }
 
 func (c *coroBodyContext) bindCancellationCompletion(b llssa.Builder) {
@@ -888,12 +968,12 @@ func (c *coroBodyContext) pollAndSuspendForPreempt(b llssa.Builder) uint32 {
 	if c.abi.version < coroPhysicalABIVersionV1 || c.preemptPoll.IsNil() || c.yieldPrepare.IsNil() {
 		panic("coroutine preemption requires PhysicalABIV1 poll and scheduler handoff hooks")
 	}
-	remaining := b.Load(b.FieldAddr(c.header, coroHeaderStateID))
+	if c.preemptCountdown.IsNil() {
+		panic("coroutine preemption has no private countdown")
+	}
+	remaining := b.Load(c.preemptCountdown)
 	one := b.Prog.IntVal(1, b.Prog.Uint32())
-	b.Store(
-		b.FieldAddr(c.header, coroHeaderStateID),
-		b.BinOp(token.SUB, remaining, one),
-	)
+	b.Store(c.preemptCountdown, b.BinOp(token.SUB, remaining, one))
 	due := b.BinOp(token.LEQ, remaining, one)
 	stateID := c.nextState
 	// Only the stride boundary reaches a potentially suspending block. The hot
@@ -1381,10 +1461,17 @@ func validateCoroPhysicalABIForOwner(
 		fn.Signature != nil && fn.Signature.Recv() == nil
 	rawMethodDispatchToken := rawMethodToken && plan.FuncRep == coro.Dispatch &&
 		fn.Signature != nil && fn.Signature.Recv() != nil
-	outcomePlain := plan.Emission == coro.EmitOutcomePlain && plan.ManagedEntry == coro.ManagedEntryOutcomePlain &&
-		plan.AtomicCostProof.ProvesOutcomePlain() &&
-		plan.AtomicCost != 0 && plan.FuncRep == coro.DirectCoro && !plan.Recursive &&
-		plan.Effect == coro.OutcomeStructured && plan.Exec&^coro.MayUnwind == 0
+	outcomePlainPrimary := plan.Emission == coro.EmitOutcomePlain && plan.ManagedEntry == coro.ManagedEntryOutcomePlain
+	outcomePlainTwin := plan.Emission == coro.EmitCoroutine && plan.ManagedEntry == coro.ManagedEntryCoroutine &&
+		plan.HasStaticOutcome()
+	outcomePlain := (outcomePlainPrimary || outcomePlainTwin) &&
+		plan.HasStaticOutcome() && !plan.Recursive &&
+		(plan.AtomicCostProof.ProvesOutcomePlain() && plan.AtomicCost != 0 && plan.Exec&^coro.MayUnwind == 0 ||
+			plan.StaticOutcome && plan.Exec&(coro.BlockForeign|coro.ThreadAffine|coro.NeedsCleanupFrame|coro.OpaqueExec) == 0) &&
+		(plan.FuncRep == coro.DirectCoro || outcomePlainTwin && plan.FuncRep == coro.Dispatch) &&
+		(plan.Effect == coro.OutcomeStructured || outcomePlainTwin &&
+			plan.Effect.Contains(coro.OutcomeStructured) &&
+			plan.Effect&^(coro.YieldOnly|coro.AwaitStructured|coro.OutcomeStructured) == 0)
 	if plan.Emission != coro.EmitCoroutine && !outcomePlain ||
 		plan.FuncRep != coro.DirectCoro && !managedDispatchTarget && !rawMethodDispatchToken {
 		return fail("requires a direct coroutine/outcome or capability-certified Dispatch emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
@@ -1434,7 +1521,8 @@ func validateCoroPhysicalABIForOwner(
 	if len(fn.FreeVars) != 0 && !managedDispatchTarget && plan.FuncRep != coro.DirectCoro {
 		return fail("captured coroutine bodies require one exact direct or capability-certified descriptor context ABI")
 	}
-	if fn.Recover != nil && (cleanupPlan == nil || cleanupPlan.external) {
+	deadCleanupRecover := cleanupPlan == nil && !plan.Exec.Contains(coro.NeedsCleanupFrame)
+	if fn.Recover != nil && (cleanupPlan == nil || cleanupPlan.external) && !deadCleanupRecover {
 		return fail("recover blocks require coroutine cleanup/unwind lowering")
 	}
 	if cleanupPlan != nil && !cleanupPlan.external {
@@ -1574,6 +1662,7 @@ func validateCoroPhysicalABIForOwner(
 			}
 			wrapperOwner := universe.packages[wrapperInfo.owner]
 			structuralKey, err := builtinSpawnWrapperStructuralKey(
+				universe,
 				wrapperInfo,
 				wrapperOwner,
 				universe.finalIdentity(spawn.Parent()),
@@ -1800,6 +1889,10 @@ func validateCoroPhysicalABIForOwner(
 			case *ssa.Defer, *ssa.RunDefers:
 				want := coroPhysicalOutcomeDeferRegister
 				if _, run := instr.(*ssa.RunDefers); run {
+					if cleanupPlan == nil && !plan.Exec.Contains(coro.NeedsCleanupFrame) &&
+						instructionPlan.outcome == coroPhysicalOutcomeNone {
+						continue
+					}
 					want = coroPhysicalOutcomeRunDefers
 				}
 				if instructionPlan.outcome != want {

@@ -93,6 +93,23 @@ func TestTypedResumeCleanupIsBoundedAndPNeutral(t *testing.T) {
 			if !BindWaitSetResumeCleanup(&fixture.wait, &packet, &plan, binding) {
 				t.Fatal("bind typed resume cleanup")
 			}
+			if plan.verified != resumeCleanupPlanVerifiedV1 ||
+				!validResumeCleanupPlan(&fixture.wait, &plan) ||
+				!validTrustedResumeCleanupPlanState(&fixture.wait, &plan) ||
+				!validTrustedWaitSetResumeBinding(&fixture.wait) {
+				t.Fatal("bound cleanup plan lacks its one-time descriptor certificate")
+			}
+			plan.verified = 0
+			if validResumeCleanupPlan(&fixture.wait, &plan) ||
+				validTrustedResumeCleanupPlanState(&fixture.wait, &plan) ||
+				validTrustedWaitSetResumeBinding(&fixture.wait) {
+				t.Fatal("cleanup validators accepted an uncertified descriptor")
+			}
+			plan.verified = resumeCleanupPlanVerifiedV1
+			if !validResumeCleanupPlan(&fixture.wait, &plan) ||
+				!validTrustedResumeCleanupPlanState(&fixture.wait, &plan) {
+				t.Fatal("cleanup validators rejected a restored descriptor certificate")
+			}
 		},
 	)
 	externallyCommitChannelCandidateAtRoute(t, fixture, 1, 7)

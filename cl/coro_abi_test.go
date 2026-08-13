@@ -62,7 +62,7 @@ func TestCoroLeafPhysicalABIPresplit(t *testing.T) {
 		t.Fatalf("coro.suspend calls = %d, want initial + final:\n%s", got, leafIR)
 	}
 	begin := strings.Index(leafIR, "call ptr @llvm.coro.begin")
-	publish := strings.Index(leafIR, "call void @"+coroFramePublishHookV1)
+	publish := strings.Index(leafIR, "call void @"+coroFramePublishHookV3)
 	initialSuspend := strings.Index(leafIR, "call i8 @llvm.coro.suspend")
 	if begin < 0 || publish < 0 || initialSuspend < 0 || !(begin < publish && publish < initialSuspend) {
 		t.Fatalf("promise/header was not published after coro.begin and before initial suspend:\n%s", leafIR)
@@ -239,17 +239,20 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	if got := strings.Count(childIR, "call i8 @llvm.coro.suspend"); got != 2 {
 		t.Fatalf("Child coro.suspend calls = %d, want initial + final:\n%s", got, childIR)
 	}
-	for _, forbidden := range []string{"llvm.coro.resume", "llvm.coro.done", "llvm.coro.destroy"} {
-		if hasLLVMCall(parentIR, forbidden) {
-			t.Fatalf("Parent directly owns forbidden %s operation:\n%s", forbidden, parentIR)
+	for _, operation := range []string{"llvm.coro.resume", "llvm.coro.done", "llvm.coro.destroy"} {
+		if got := len(regexp.MustCompile(`call [^\n]*@`+regexp.QuoteMeta(operation)+`\b`).FindAllString(parentIR, -1)); got != 1 {
+			t.Fatalf("Parent direct static-inline %s calls = %d, want 1:\n%s", operation, got, parentIR)
 		}
 	}
 
 	for _, hook := range []string{
 		coroFrameAllocHookV1,
-		coroFramePublishHookV1,
+		coroFramePublishHookV3,
 		coroAwaitPrepareHookV1,
-		coroAwaitInlineHookV1,
+		coroAwaitInlineBeginHookV2,
+		coroAwaitInlineFinishHookV2,
+		coroFrameDestroyCommitHookV2,
+		coroAwaitInlineDestroyCommitHookV2,
 		coroAwaitConsumeHookV1,
 		coroPreemptPollHookV1,
 		coroRunDecisionTakeZeroHookV1,
@@ -268,14 +271,22 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	if got := strings.Count(ir, "call ptr @"+coroFrameAllocHookV1); got != 2 {
 		t.Fatalf("task-aware v1 frame allocations = %d, want Parent + Child:\n%s", got, ir)
 	}
-	if got := strings.Count(ir, "call void @"+coroFramePublishHookV1); got != 2 {
+	if got := strings.Count(ir, "call void @"+coroFramePublishHookV3); got != 2 {
 		t.Fatalf("v1 frame publications = %d, want Parent + Child:\n%s", got, ir)
 	}
 	if got := strings.Count(ir, "call void @"+coroAwaitPrepareHookV1); got != 1 {
 		t.Fatalf("v1 await preparations = %d, want one Parent->Child handoff:\n%s", got, ir)
 	}
-	if got := strings.Count(ir, "call i1 @"+coroAwaitInlineHookV1); got != 1 {
+	if got := strings.Count(ir, "call i1 @"+coroAwaitInlineBeginHookV2); got != 1 {
 		t.Fatalf("v1 inline await attempts = %d, want one Parent->Child fast path:\n%s", got, ir)
+	}
+	if got := strings.Count(ir, "call i1 @"+coroAwaitInlineFinishHookV2); got != 1 {
+		t.Fatalf("v2 inline await finishes = %d, want one Parent->Child ownership settlement:\n%s", got, ir)
+	}
+	for _, hook := range []string{coroFrameDestroyCommitHookV2, coroAwaitInlineDestroyCommitHookV2} {
+		if got := strings.Count(ir, "call void @"+hook); got != 1 {
+			t.Fatalf("v2 inline await %s calls = %d, want one:\n%s", hook, got, ir)
+		}
 	}
 	if got := strings.Count(ir, "call i32 @"+coroAwaitConsumeHookV1); got != 2 {
 		t.Fatalf("v1 await outcome consume sites = %d, want normal/cancellation reconciliation:\n%s", got, ir)
@@ -417,7 +428,7 @@ func TestCoroChildAwaitPhysicalABIV1CoroSplit(t *testing.T) {
 	}
 	for _, function := range []string{"foo.Parent$coro", "foo.Child$coro"} {
 		ramp := module.NamedFunction(function).String()
-		if !strings.Contains(ramp, "call void @"+coroFramePublishHookV1) {
+		if !strings.Contains(ramp, "call void @"+coroFramePublishHookV3) {
 			t.Fatalf("%s ramp lost frame publication:\n%s", function, ramp)
 		}
 		destroy := module.NamedFunction(function + ".destroy").String()
@@ -524,7 +535,7 @@ func Loop(limit uint32) uint32 {
 		)
 	}
 	if gates := strings.Count(body, "icmp ule i32"); gates != polls {
-		t.Fatalf("Loop checkpoint gates = %d, want one frame-local countdown gate per poll site (%d):\n%s", gates, polls, body)
+		t.Fatalf("Loop checkpoint gates = %d, want one private countdown gate per poll site (%d):\n%s", gates, polls, body)
 	}
 	reset := "store i32 " + strconv.FormatUint(coroPreemptCheckpointStride, 10)
 	if resets := strings.Count(body, reset); resets < polls+1 {
@@ -2188,16 +2199,17 @@ func assertCoroV0HeaderStateZero(t *testing.T, body string) {
 func assertCoroV1InitialPublish(t *testing.T, name, body string) {
 	t.Helper()
 	begin := strings.Index(body, "call ptr @llvm.coro.begin")
-	publish := strings.Index(body, "call void @"+coroFramePublishHookV1)
+	publish := strings.Index(body, "call void @"+coroFramePublishHookV3)
 	suspend := strings.Index(body, "call i8 @llvm.coro.suspend")
 	if begin < 0 || publish < 0 || suspend < 0 || !(begin < publish && publish < suspend) {
 		t.Fatalf("%s does not publish its v1 frame after coro.begin and before initial suspend:\n%s", name, body)
 	}
 	call := regexp.MustCompile(
-		`call void @` + regexp.QuoteMeta(coroFramePublishHookV1) + `\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^)]+\)`,
+		`call void @` + regexp.QuoteMeta(coroFramePublishHookV3) +
+			`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^)]+\)`,
 	)
 	if !call.MatchString(body) {
-		t.Fatalf("%s frame publication lacks (task, handle, header, storage):\n%s", name, body)
+		t.Fatalf("%s frame publication lacks (task, handle, header, storage, metadata, descriptor, result):\n%s", name, body)
 	}
 }
 
@@ -2235,37 +2247,62 @@ func assertCoroScalarRunDecisionCalls(t *testing.T, name, body string, want int)
 		block := body[startOfMatch : searchOffset+end]
 		branch := regexp.MustCompile(
 			`(?m)^\s+br i1 ` + regexp.QuoteMeta(match[2]) +
-				`, label %([-a-zA-Z$._0-9]+), label %[-a-zA-Z$._0-9]+\s*$`,
+				`, label %([-a-zA-Z$._0-9]+), label %[-a-zA-Z$._0-9]+` +
+				`(?:, !prof ![0-9]+)?\s*$`,
 		).FindStringSubmatch(block)
 		if len(branch) != 2 {
 			t.Fatalf("%s scalar run-decision result does not control its block terminator:\n%s", name, block)
 		}
-		label := branch[1] + ":"
-		start := strings.Index(body, "\n"+label)
-		if start < 0 {
-			t.Fatalf("%s cancellation target %q is absent:\n%s", name, branch[1], body)
-		}
-		start++
-		targetRest := body[start+len(label):]
-		targetEnd := len(targetRest)
-		if next := regexp.MustCompile(`(?m)^[-a-zA-Z$._0-9]+:`).FindStringIndex(targetRest); next != nil {
-			targetEnd = next[0]
-		}
-		targetBlock := body[start : start+len(label)+targetEnd]
-		branches := regexp.MustCompile(`(?m)^\s+br label %([-a-zA-Z$._0-9]+)\s*$`).FindAllStringSubmatch(targetBlock, -1)
-		if len(branches) != 1 {
-			t.Fatalf("%s cancellation target %q does not unconditionally enter cleanup:\n%s", name, branch[1], targetBlock)
+		completionBlock, ok := coroTextCancellationCompletionBlock(body, branch[1])
+		if !ok {
+			t.Fatalf("%s cancellation target %q does not have a unique unconditional path to completion:\n%s", name, branch[1], body)
 		}
 		if completion == "" {
-			completion = branches[0][1]
-		} else if branches[0][1] != completion {
+			completion = completionBlock
+		} else if completionBlock != completion {
 			t.Fatalf("%s cancellation gates reach different cleanup entries %s and %s:\n%s",
-				name, completion, branches[0][1], body)
+				name, completion, completionBlock, body)
 		}
 	}
 	if completion == "" {
 		t.Fatalf("%s has no cancellation cleanup destination:\n%s", name, body)
 	}
+}
+
+// coroTextCancellationCompletionBlock follows only unique unconditional
+// branches. LLVM 22 may split child-consumption from the shared completion
+// block, so comparing only the cancellation target's immediate successor is
+// too strict: every gate must instead converge on the same exact completion
+// publication block.
+func coroTextCancellationCompletionBlock(body, start string) (string, bool) {
+	labelPattern := regexp.MustCompile(`(?m)^([-a-zA-Z$._0-9]+):(?:[ \t]*;[^\n]*)?[ \t]*$`)
+	matches := labelPattern.FindAllStringSubmatchIndex(body, -1)
+	blocks := make(map[string]string, len(matches))
+	for index, match := range matches {
+		end := len(body)
+		if index+1 < len(matches) {
+			end = matches[index+1][0]
+		}
+		blocks[body[match[2]:match[3]]] = body[match[0]:end]
+	}
+	unconditional := regexp.MustCompile(`(?m)^\s+br label %([-a-zA-Z$._0-9]+)\s*$`)
+	visited := make(map[string]bool)
+	for label := start; label != "" && !visited[label]; {
+		visited[label] = true
+		block, ok := blocks[label]
+		if !ok {
+			return "", false
+		}
+		if strings.Contains(block, "call void @"+coroCompletePrepareHookV2) {
+			return label, true
+		}
+		branches := unconditional.FindAllStringSubmatch(block, -1)
+		if len(branches) != 1 {
+			return "", false
+		}
+		label = branches[0][1]
+	}
+	return "", false
 }
 
 func assertCoroCancellationTerminalStatusPublication(t *testing.T, function llvm.Value) {
@@ -2648,10 +2685,10 @@ func assertCoroV1Completion(t *testing.T, name, body string) {
 func assertCoroStaticChildAwait(t *testing.T, parent string) {
 	t.Helper()
 	childCall := regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\(`).FindStringIndex(parent)
-	publish := strings.Index(parent, "call void @"+coroFramePublishHookV1)
+	publish := strings.Index(parent, "call void @"+coroFramePublishHookV3)
 	initialSuspend := strings.Index(parent, "call i8 @llvm.coro.suspend")
 	await := strings.Index(parent, "call void @"+coroAwaitPrepareHookV1)
-	inline := strings.Index(parent, "call i1 @"+coroAwaitInlineHookV1)
+	inline := strings.Index(parent, "call i1 @"+coroAwaitInlineBeginHookV2)
 	if childCall == nil || publish < 0 || initialSuspend < 0 || await < 0 ||
 		inline < 0 ||
 		!(publish < initialSuspend && initialSuspend < childCall[0] && childCall[0] < await && await < inline) {
@@ -2683,9 +2720,19 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 	if decisionRelative < 0 {
 		t.Fatalf("Parent slow edge does not take its run decision after await resume:\n%s", parent)
 	}
-	if !regexp.MustCompile(`(?s)call i1 @` + regexp.QuoteMeta(coroAwaitInlineHookV1) +
+	if !regexp.MustCompile(`(?s)call i1 @` + regexp.QuoteMeta(coroAwaitInlineBeginHookV2) +
 		`.*xor i1 .*true.*br i1`).MatchString(parent[inline:]) {
 		t.Fatalf("Parent does not branch to the slow suspend on an incomplete inline await:\n%s", parent)
+	}
+	resume := strings.Index(parent[inline:], "call void @llvm.coro.resume")
+	done := strings.Index(parent[inline:], "call i1 @llvm.coro.done")
+	finish := strings.Index(parent[inline:], "call i1 @"+coroAwaitInlineFinishHookV2)
+	destroy := strings.Index(parent[inline:], "call void @llvm.coro.destroy")
+	frameCommit := strings.Index(parent[inline:], "call void @"+coroFrameDestroyCommitHookV2)
+	inlineCommit := strings.Index(parent[inline:], "call void @"+coroAwaitInlineDestroyCommitHookV2)
+	if resume < 0 || done <= resume || finish <= done || destroy <= finish ||
+		frameCommit <= destroy || inlineCommit <= frameCommit {
+		t.Fatalf("Parent static-inline ownership order is not resume -> done -> finish -> destroy -> frame commit -> await commit:\n%s", parent)
 	}
 	if !regexp.MustCompile(`(?s)store i16 0,.*store i16 2,.*call i32 @` +
 		regexp.QuoteMeta(coroAwaitConsumeHookV1) + `.*switch i32`).MatchString(parent[inline:]) {

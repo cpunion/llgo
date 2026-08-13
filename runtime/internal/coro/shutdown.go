@@ -27,9 +27,16 @@ func CommandMainReturnPoint(p *P, main *G) bool {
 }
 
 func validCancelFrame(frame *Frame, g *G) bool {
-	return frame != nil && frame.owner == g && frame.handle != nil && frame.header != nil &&
-		frame.storage != nil && frame.rawBase != nil && frame.descriptor != nil &&
-		frame.header.G == unsafe.Pointer(g) && frame.header.Descriptor == frame.descriptor &&
+	if frame == nil || frame.owner != g || frame.handle == nil || frame.header == nil ||
+		frame.descriptor == nil || frame.header.G != unsafe.Pointer(g) ||
+		frame.header.Descriptor != frame.descriptor {
+		return false
+	}
+	if frame.borrowedStorage {
+		return frame.storage == nil && frame.rawBase == nil && frame.allocationSize == 0 &&
+			frame.header.AllocationBase == unsafe.Pointer(frame)
+	}
+	return frame.storage != nil && frame.rawBase != nil &&
 		frame.header.AllocationBase == frame.rawBase
 }
 

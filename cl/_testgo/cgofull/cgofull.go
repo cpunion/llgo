@@ -177,7 +177,7 @@ func runPy() {
 // This is a structural cgo/coro boundary test. Exact worker thunk hashes and
 // LLVM block numbering are deliberately not part of the contract.
 // CHECK-LABEL: define ptr @"main.Bar$coro"(
-// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1(
+// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1(
 // CHECK: call void @__llgo_coro_worker_park_v1(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK: call i32 @__llgo_coro_worker_resume_v1(

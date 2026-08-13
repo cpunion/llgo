@@ -1140,8 +1140,8 @@ func (p *context) coroWorkerForeignThunk(shape coroWorkerForeignCallShape, targe
 	key := framedEmissionKey(
 		"cl-coro-worker-foreign-thunk-v1",
 		targetName,
-		structuralEmissionABITypeKey(shape.calleeType),
-		structuralEmissionABITypeKey(shape.signature),
+		p.cachedStrictEmissionABITypeKey(shape.calleeType),
+		p.cachedStrictEmissionABITypeKey(shape.signature),
 		strconv.Itoa(p.prog.PointerSize()),
 	)
 	name := coroWorkerForeignThunkPrefixV1 + emissionDigest(key)

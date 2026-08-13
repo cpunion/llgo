@@ -13,6 +13,31 @@ func TestAssertNilDerefZeroExprNoPanic(t *testing.T) {
 	b.AssertNilDeref(Expr{})
 }
 
+func TestAssertNilDerefCallsRuntimeOnlyOnNilEdge(t *testing.T) {
+	prog := NewProgram(nil)
+	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+	pkg := prog.NewPackage("memory-guard", "test/memory-guard")
+	param := types.NewVar(0, nil, "p", types.NewPointer(types.Typ[types.Int]))
+	sig := types.NewSignatureType(nil, nil, nil, types.NewTuple(param), nil, false)
+	fn := pkg.NewFunc("guard", sig, InGo)
+	b := fn.MakeBody(1)
+	b.AssertNilDeref(fn.Param(0))
+	b.Return()
+	b.EndBuild()
+	body := fn.impl.String()
+	if !strings.Contains(body, "icmp eq ptr") || !strings.Contains(body, "br i1") ||
+		!strings.Contains(body, "AssertNilDeref\"(i1 true)") {
+		t.Fatalf("nil guard is not a cold-edge runtime call:\n%s", body)
+	}
+}
+
 func TestLoadKnownNonNilZeroSizedSkipsNilDerefGuard(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)

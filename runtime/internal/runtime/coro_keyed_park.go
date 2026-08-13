@@ -31,6 +31,29 @@ const (
 	coroKeyedResumeShutdownV2
 )
 
+// raiseScanLimit publishes the shortest prefix which can contain an Active
+// slot. The prefix is monotonic: retirement never needs to coordinate a
+// downward move with concurrent registration or claim. This keeps the common
+// one-waiter semaphore path O(1), while a registry which has actually reached
+// N simultaneous slots retains the original bounded O(N) FIFO selection.
+func (registry *coroKeyedRegistryV2) raiseScanLimit(needed uint32) bool {
+	if registry == nil || needed == 0 || needed > uint32(len(registry.slots)) {
+		return false
+	}
+	for {
+		limit := coroKeyedAtomicLoadUint32(&registry.scanLimit)
+		if limit > uint32(len(registry.slots)) {
+			return false
+		}
+		if limit >= needed {
+			return true
+		}
+		if coroKeyedAtomicCompareAndSwapUint32(&registry.scanLimit, limit, needed) {
+			return true
+		}
+	}
+}
+
 func (registry *coroKeyedRegistryV2) register(
 	kind coroKeyedParkKindV2,
 	key uintptr,
@@ -53,6 +76,10 @@ func (registry *coroKeyedRegistryV2) register(
 		registering := coroKeyedRegistryControlV2(generation, coroKeyedRegistryRegisteringV2)
 		if !coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, registering) {
 			continue
+		}
+		if !registry.raiseScanLimit(uint32(index) + 1) {
+			_ = coroKeyedAtomicCompareAndSwapUint32(&slot.control, registering, control)
+			return coroKeyedRegistryHandleV2{}, false
 		}
 		sequence := coroKeyedAtomicAddUint32(&registry.sequence, 1)
 		coroKeyedAtomicStoreUint32((*uint32)(unsafe.Pointer(&slot.kind)), uint32(kind))
@@ -155,9 +182,13 @@ func (registry *coroKeyedRegistryV2) claimOne(
 		return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 	}
 	for {
+		limit := coroKeyedAtomicLoadUint32(&registry.scanLimit)
+		if limit > uint32(len(registry.slots)) {
+			return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
+		}
 		selected := -1
 		var candidate coroKeyedRegistrySnapshotV2
-		for index := range registry.slots {
+		for index := uint32(0); index < limit; index++ {
 			slot := &registry.slots[index]
 			control := coroKeyedAtomicLoadUint32(&slot.control)
 			if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryActiveV2 {
@@ -169,7 +200,7 @@ func (registry *coroKeyedRegistryV2) claimOne(
 				continue
 			}
 			if selected < 0 || coroKeyedRegistrySequenceLessV2(snapshot.sequence, candidate.sequence) {
-				selected, candidate = index, snapshot
+				selected, candidate = int(index), snapshot
 			}
 		}
 		if selected < 0 {
@@ -261,6 +292,21 @@ func coroKeyedPostClaimedV2(handle coroKeyedRegistryHandleV2, operation coro.Ope
 	case coroKeyedRegistryPublishRetiredV2:
 		return true
 	case coroKeyedRegistryPublishReadyV2:
+		current, driver, route := coroCurrentTaskV1()
+		if current != nil && driver != nil && route == operation.Route() {
+			completion, cleanup, local, localOK := coro.BeginOwnerLocalManualCompletionCurrent(
+				current,
+				driver,
+				operation,
+			)
+			if !localOK {
+				return coroProgramKeyedRegistryV2State.publicationRetired(handle)
+			}
+			if local {
+				return coroMaterializePrivateResumeCleanupStepV1(cleanup) &&
+					coro.FinishOwnerLocalManualCompletionCurrent(&completion)
+			}
+		}
 		if coroTargetPostKeyedOperationV2(operation) {
 			return true
 		}
@@ -319,37 +365,44 @@ func __llgo_coro_keyed_park_v2(g, handle, header, storage unsafe.Pointer) {
 		return
 	}
 	task := (*coro.G)(g)
-	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorManualDriver(task)
-	if !ok || !ensureCoroManualOperationCapacityV1(driver, task, coroRuntimeManualCapacityV1) {
+	driver, wantExecutor, wantRoute, reservation, current, reserved :=
+		coro.CurrentExecutorManualReservation(task)
+	if current && !reserved {
+		if !ensureCoroManualOperationCapacityV1(driver, task, coroRuntimeManualCapacityV1) {
+			coroKeyedAbortV2("cannot resolve coroutine keyed Park V2 owner")
+			return
+		}
+		var retryDriver *coro.ExecutorDriver
+		retryDriver, wantExecutor, wantRoute, reservation, current, reserved =
+			coro.CurrentExecutorManualReservation(task)
+		if retryDriver != driver {
+			current = false
+		}
+	}
+	if !current || !reserved {
 		coroKeyedAbortV2("cannot resolve coroutine keyed Park V2 owner")
 		return
 	}
-	ticket, operation, executor, prepared := coro.PrepareCurrentExecutorManualPark(
-		driver, task, handle, (*coro.HeaderV1)(header), &state.wait, 1, 1,
+	ticket, operation, executor, prepared := coro.PrepareCurrentExecutorManualCleanupParkReserved(
+		driver,
+		task,
+		handle,
+		(*coro.HeaderV1)(header),
+		&state.wait,
+		reservation,
+		&state.packet,
+		&state.cleanup,
+		unsafe.Pointer(state),
+		&state.operation,
+		1,
+		1,
 	)
 	if !prepared || executor != wantExecutor || operation.Route() != wantRoute {
 		coroKeyedAbortV2("cannot prepare coroutine keyed Park V2 source")
 		return
 	}
 	state.ticket = ticket
-	state.operation = operation
 	state.magic = coroKeyedParkActiveMagicV2
-	if !coro.BindWaitSetResumeCleanup(
-		&state.wait,
-		&state.packet,
-		&state.cleanup,
-		coro.ResumeCleanupBinding{
-			Kind:         coro.ResumeCleanupKeyedPark,
-			Context:      unsafe.Pointer(state),
-			Entries:      unsafe.Pointer(&state.operation),
-			Count:        1,
-			RuntimeCount: 1,
-			Stride:       unsafe.Sizeof(coro.OperationID{}),
-		},
-	) {
-		coroKeyedAbortV2("cannot bind coroutine keyed Park V2 cleanup")
-		return
-	}
 	// Publish the scalar key only after the complete P-neutral cleanup
 	// descriptor is bound. A concurrent release can post the Manual fact
 	// immediately, but the current owner cannot suspend this G with a partially

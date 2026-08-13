@@ -123,6 +123,10 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	owner := readRuntimePollFile(t, "internal/runtime/coro_native_fleet_owner_llgo.go")
 	for _, required := range []string{
 		"[coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1",
+		"func coroNativeFleetPhysicalOwnerDesiredPeersV1(limit, capacity uint32)",
+		"func coroNativeFleetPhysicalOwnersEnsureLockedV1(",
+		"state.started < desired",
+		"func coroNativeFleetSetExecutionLimitV1(limit uint32)",
 		"coroNativeMStartPhysicalOwnerV1(owner, slot)",
 		"func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32",
 		"coroNativeMRunReplacementOwnerV1(slot)",
@@ -182,6 +186,7 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"coroNativeFleetV1State.execution.TryAcquire(route)",
 		"coroNativeFleetV1State.execution.Release(route)",
 		"func CoroGOMAXPROCS(n int) int",
+		"coroNativeFleetSetExecutionLimitV1(next)",
 		"coroNativeFleetRingExecutionWaitersV1(waiters uint32)",
 		"coroNativeFleetV1State.execution.WaiterMask()",
 	} {
@@ -196,6 +201,7 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"coroTargetStartPhysicalThreadCapacityV1()",
 		"coroNativeFleetStartProgramV1(coroNativeFleetDomainCapacityV1)",
 		"coroNativeFleetV1State.execution.Start(limit)",
+		"coroNativeFleetPhysicalOwnersStartV1(limit)",
 		"coroNativeFleetV1State.execution.Seal()",
 		"coroNativeFleetV1State.execution.Retire()",
 		"coroNativeMStartCleanFactoryV1()",

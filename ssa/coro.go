@@ -207,7 +207,8 @@ type CoroProgramStep struct {
 }
 
 // CoroProgramBootstrapOptions describes the entry module's immutable startup
-// table. Version must be one or two. Flags is reserved and must be zero.
+// table. Version must be one or two. Version one requires zero flags; version
+// two accepts the CoroProgramBootstrapFlag* capability bits below.
 // ABIHash covers the ordered steps and their referenced catalog. Factory may
 // be Nil in the data-only phase; a non-Nil factory must use the root factory
 // ABI and belong to this module.
@@ -218,6 +219,11 @@ type CoroProgramBootstrapOptions struct {
 	Steps   []CoroProgramStep
 	Factory Expr
 }
+
+// CoroProgramBootstrapFlagWorkerV2 says that the final physical program owns
+// at least one reachable bounded-worker transaction. It is program demand,
+// not a declaration that the selected target supports workers.
+const CoroProgramBootstrapFlagWorkerV2 uint32 = 1 << 0
 
 // NewCoroFrameDescriptor defines a link-once constant descriptor with layout:
 //
@@ -631,14 +637,17 @@ func (p Package) NewCoroProgramBootstrap(
 	if p.coroProgramBootstrap != "" {
 		panic(fmt.Sprintf("ssa: coroutine program bootstrap already defined as %q", p.coroProgramBootstrap))
 	}
-	if opts.Flags != 0 {
-		panic("ssa: coroutine program bootstrap flags must be zero")
-	}
 	var roles []uint32
 	switch opts.Version {
 	case 1:
+		if opts.Flags != 0 {
+			panic("ssa: coroutine program bootstrap version 1 flags must be zero")
+		}
 		roles = []uint32{CoroProgramStepInit, CoroProgramStepMain}
 	case 2:
+		if unknown := opts.Flags &^ CoroProgramBootstrapFlagWorkerV2; unknown != 0 {
+			panic(fmt.Sprintf("ssa: coroutine program bootstrap version 2 has unknown capability flags %#x", unknown))
+		}
 		if len(opts.Steps) < coroProgramStepMinimumV2 {
 			panic(fmt.Sprintf(
 				"ssa: coroutine program bootstrap version %d requires at least %d steps, got %d",
@@ -797,7 +806,7 @@ func (p Package) NewCoroProgramBootstrap(
 	bootstrap := p.NewVarEx(name, prog.Pointer(bootstrapType))
 	bootstrap.impl.SetInitializer(prog.ctx.ConstStruct([]llvm.Value{
 		prog.IntVal(uint64(opts.Version), prog.Uint32()).impl,
-		prog.IntVal(0, prog.Uint32()).impl,
+		prog.IntVal(uint64(opts.Flags), prog.Uint32()).impl,
 		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), prog.Uint64()).impl,
 		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), prog.Uint64()).impl,
 		prog.IntVal(uint64(len(stepValues)), prog.Uintptr()).impl,
@@ -1215,6 +1224,22 @@ func (c *CoroBuilder) emitSuspendWithCallbacks(
 	switchValue := b.impl.CreateSwitch(result, c.suspendBlk.first, 2)
 	switchValue.AddCase(llvm.ConstInt(prog.tyInt8(), 0, false), resumeBlk.first)
 	switchValue.AddCase(llvm.ConstInt(prog.tyInt8(), 1, false), c.cleanupBlk.first)
+	if !final {
+		// A coroutine's normal continuation is entered by a later resume call,
+		// not by the ramp invocation which first executes this switch. Generic
+		// block-frequency analysis otherwise assigns the resume arm roughly one
+		// third of the entry frequency and LLVM 22's CoroAnnotationElide rejects
+		// every source-style static await as cold (its default threshold is 55%).
+		// Describe the language-level common path explicitly. The suspend return
+		// and destroy arms stay possible and retain their exact control flow.
+		ctx := prog.ctx
+		switchValue.SetMetadata(ctx.MDKindID("prof"), ctx.MDNode([]llvm.Metadata{
+			ctx.MDString("branch_weights"),
+			llvm.ConstInt(prog.tyInt32(), 1, false).ConstantAsMetadata(),
+			llvm.ConstInt(prog.tyInt32(), 1000, false).ConstantAsMetadata(),
+			llvm.ConstInt(prog.tyInt32(), 1, false).ConstantAsMetadata(),
+		}))
+	}
 	b.SetBlock(resumeBlk)
 	if !final && dispatch != nil {
 		callbackPoint := captureCoroFrameCallbackPoint(b)
@@ -1312,6 +1337,32 @@ func (b Builder) CoroDestroy(handle Expr) {
 		[]llvm.Value{b.Convert(b.Prog.VoidPtr(), handle).impl},
 		"",
 	)
+}
+
+// MarkCoroElideSafe marks one exact direct coroutine ramp call as having a
+// caller-bounded lifetime. LLVM 22 uses this proof to synthesize and select a
+// no-allocation ramp while both caller and callee are still presplit. Older
+// LLVM releases retain the ordinary heap-backed path and return false.
+//
+// The caller must prove that every use of the returned handle is contained by
+// its own coroutine frame lifetime. This is deliberately not inferred from an
+// arbitrary function value or exposed as a source annotation.
+func (b Builder) MarkCoroElideSafe(call Expr) bool {
+	if b == nil || b.Func == nil || b.blk == nil {
+		panic("ssa: cannot mark coroutine elision without an active function block")
+	}
+	if call.IsNil() || call.impl.IsACallInst().IsNil() {
+		panic("ssa: coroutine elision requires an exact call result")
+	}
+	if llvmMajorVersion() < 22 {
+		return false
+	}
+	kind := llvm.AttributeKindID("coro_elide_safe")
+	if kind == 0 {
+		panic(fmt.Sprintf("ssa: LLVM %s has no coro_elide_safe attribute", llvm.Version))
+	}
+	call.impl.AddCallSiteAttribute(-1, b.Prog.ctx.CreateEnumAttribute(kind, 0))
+	return true
 }
 
 func (b Builder) requireCoroHandle(operation string, handle Expr) {

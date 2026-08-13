@@ -201,6 +201,7 @@ func (ir *coroProgramIR) freezeSite(function *ssa.Function, owner *preparedEmiss
 		return nil
 	}
 	if len(plan.managedRuntimeHelpers) != 0 || len(plan.plainRuntimeHelpers) != 0 ||
+		plan.plainAllocation.borrowed() ||
 		len(plan.localityDispatchers) != 0 {
 		byInstruction[instruction] = plan
 	}
@@ -251,14 +252,16 @@ func deriveCoroLocalBodyFacts(
 		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("local body facts require one exact program and function")
 	}
 	facts := coro.SSAFunctionBodyFacts{
-		Effect:           coro.NoSuspend,
-		OutcomePlainLeaf: function.Blocks != nil,
-		OutcomePlainDAG:  function.Blocks != nil,
+		Effect:             coro.NoSuspend,
+		OutcomePlainLeaf:   function.Blocks != nil,
+		OutcomePlainDAG:    function.Blocks != nil,
+		StaticOutcomeLocal: function.Blocks != nil,
 	}
 	if function.Blocks != nil {
 		facts.Exec = coro.MayUnwind
 	}
 	atomicBlocks := make([]coro.SSAAtomicBlockFacts, len(function.Blocks))
+	hasEvaluatedDefer := false
 	for _, block := range function.Blocks {
 		blockFacts := coro.SSAAtomicBlockFacts{Index: block.Index}
 		for _, successor := range block.Succs {
@@ -274,6 +277,12 @@ func deriveCoroLocalBodyFacts(
 				facts.OutcomePlainLeaf = false
 				facts.OutcomePlainDAG = false
 				continue
+			}
+			if _, deferInstruction := instruction.(*ssa.Defer); deferInstruction {
+				hasEvaluatedDefer = true
+			}
+			if !plan.staticOutcome {
+				facts.StaticOutcomeLocal = false
 			}
 			if !coroOutcomePlainLeafSemanticRecipe(plan) {
 				facts.OutcomePlainLeaf = false
@@ -300,6 +309,11 @@ func deriveCoroLocalBodyFacts(
 					// that hidden allocation, so reject the optimization while the
 					// ordinary coroutine fallback is still available.
 					facts.OutcomePlainDAG = false
+					// An unbounded static-outcome body has the same synchronous
+					// caller-owned result-slot constraint. Its full coroutine primary
+					// may use a managed frame slot, but the native twin must not place
+					// an oversized child result on a fixed stack.
+					facts.StaticOutcomeLocal = false
 				}
 			}
 			facts.Effect = facts.Effect.Join(plan.effect)
@@ -312,6 +326,21 @@ func deriveCoroLocalBodyFacts(
 		atomicBlocks[block.Index] = blockFacts
 	}
 	facts.Effect = facts.Effect.Normalize()
+	if !hasEvaluatedDefer {
+		// x/tools retains RunDefers on normal returns whenever the function has
+		// any syntactic defer, including one behind a constant-dead branch. With
+		// no evaluated registration site it is semantically a no-op and does not
+		// require a cleanup frame.
+		facts.Exec &^= coro.NeedsCleanupFrame
+		for instruction, plan := range semantic {
+			if _, runDefers := instruction.(*ssa.RunDefers); !runDefers || !plan.evaluated {
+				continue
+			}
+			plan.exec &^= coro.NeedsCleanupFrame
+			plan.materialized = false
+			semantic[instruction] = plan
+		}
+	}
 	facts.HasCycle = coroSemanticEvaluatedCFGHasCycle(function.Blocks, semantic)
 	if len(function.Blocks) != 0 {
 		atomicPath, err := coro.NewSSAAtomicPathFacts(function, atomicBlocks)
@@ -322,6 +351,7 @@ func deriveCoroLocalBodyFacts(
 	} else {
 		facts.OutcomePlainLeaf = false
 		facts.OutcomePlainDAG = false
+		facts.StaticOutcomeLocal = false
 	}
 	if !outcomePlainEligible {
 		facts.OutcomePlainLeaf = false
@@ -362,9 +392,14 @@ func coroOutcomePlainDAGSemanticRecipe(plan coroSemanticInstructionPlan) bool {
 // ProgramIR builder step admits only operations whose frozen call recipe is
 // independently shape-checked and allocation-free.
 //
-// Start with atomic intrinsics. Other InlineNoSuspend intrinsics include asm,
-// dynamic alloca, control transfer, and target-specific operations; the broad
-// enum therefore is not by itself an outcome-plain proof.
+// Atomic intrinsics acquire their bounded leaf proof here. A real inline yield
+// is also recorded here as an evaluated local effect: this distinguishes an
+// explicit scheduler handoff from the synthetic YieldOnly/NeedsPreempt seed
+// added later for an otherwise synchronous CFG loop. Static outcome twins may
+// omit the latter under the current compute-blocking policy, but must never
+// erase the former. Other InlineNoSuspend intrinsics include asm, dynamic
+// alloca, control transfer, and target-specific operations; the broad enum is
+// therefore not by itself an outcome-plain proof.
 func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(u *EmissionUniverse) error {
 	if ir == nil || u == nil || u.prog == nil {
 		return fmt.Errorf("outcome-plain intrinsic finalization requires one exact ProgramIR and universe")
@@ -385,9 +420,13 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(u *EmissionUnive
 				}
 				frozen, found := ir.callPlans[call]
 				if !found || frozen.failure != "" || !frozen.plan.Intrinsic ||
-					frozen.plan.Elision != CoroCallElidedIntrinsic ||
-					frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend ||
-					!isCoroAtomicIntrinsic(frozen.opcode) {
+					frozen.plan.Elision != CoroCallElidedIntrinsic {
+					continue
+				}
+				atomic := frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNoSuspend &&
+					isCoroAtomicIntrinsic(frozen.opcode)
+				realYield := frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineYield
+				if !atomic && !realYield {
 					continue
 				}
 				for _, owner := range u.sortedUseOwners(function) {
@@ -400,8 +439,16 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(u *EmissionUnive
 						semantic.effect != coro.NoSuspend || semantic.exec != 0 {
 						return fmt.Errorf("atomic intrinsic call %q has an incompatible preliminary semantic recipe", call.String())
 					}
-					semantic.recipe = coro.RecipeID("cl.intrinsic.atomic.inline-nosuspend.v1")
-					semantic.outcomePlainLeaf = true
+					if atomic {
+						semantic.recipe = coro.RecipeID("cl.intrinsic.atomic.inline-nosuspend.v1")
+						semantic.outcomePlainLeaf = true
+						semantic.staticOutcome = true
+					} else {
+						semantic.recipe, semantic.effect = coroIntrinsicLoweringRecipe(CoroIntrinsicCallInlineYield)
+						semantic.materialized = true
+						semantic.outcomePlainLeaf = false
+						semantic.staticOutcome = false
+					}
 					ir.semanticPlans[key][call] = semantic
 				}
 				refined = true
@@ -665,6 +712,7 @@ func cloneCoroEmissionSitePlan(plan coroEmissionSitePlan) coroEmissionSitePlan {
 func sameCoroEmissionSitePlan(first, second coroEmissionSitePlan) bool {
 	return slices.Equal(first.managedRuntimeHelpers, second.managedRuntimeHelpers) &&
 		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers) &&
+		first.plainAllocation == second.plainAllocation &&
 		slices.Equal(first.localityDispatchers, second.localityDispatchers) &&
 		first.hasCallPlan == second.hasCallPlan && sameCoroFrozenCallSitePlan(first.callPlan, second.callPlan)
 }

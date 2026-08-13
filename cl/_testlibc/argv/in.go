@@ -9,7 +9,7 @@ import (
 func main() {
 	// CHECK-DAG: load i32, ptr @__llgo_argc, align 4
 	// CHECK-DAG: load ptr, ptr @__llgo_argv, align 8
-	// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1
+	// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1
 	// CHECK: call void @__llgo_coro_worker_park_v1
 	// CHECK: call i32 (ptr, ...) @printf(ptr {{%.*}}, ptr {{%.*}})
 	for i := c.Int(0); i < c.Argc; i++ {

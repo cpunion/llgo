@@ -22,6 +22,15 @@ package coro
 // for a hot CPU-only workload.
 const executorRunSourceQuantum uint8 = 64
 
+// executorRunSourceBatchQuantum is the bounded number of catalog, resolution,
+// and acknowledgement reductions collapsed into one Source host step. The
+// resumable A/ack/B transaction remains the single semantic owner; batching
+// only avoids re-entering the target/runtime selector between adjacent direct
+// core reductions. Typed runtime cleanup is still an explicit Materialize
+// boundary, and readyDebt still prevents a completed source epoch from
+// starting another epoch before a newly runnable continuation is paid.
+const executorRunSourceBatchQuantum uint32 = 16
+
 // executorRunCursor is cold, scheduler-owner-only continuation state. It has
 // no callback-visible pointer. readyDebt forces one physical ready action after
 // a completed source epoch before a hot source can start another A/ack/B epoch.
@@ -111,11 +120,15 @@ func serviceExecutorRunSource(driver *ExecutorDriver, now int64, withDeadline bo
 	var progress ExecutorPollProgress
 	var ok bool
 	if withDeadline {
-		_, progress, ok = pollBoundExecutorSliceAt(driver, now, true, 1)
+		_, progress, ok = pollBoundExecutorSliceAt(
+			driver, now, true, executorRunSourceBatchQuantum,
+		)
 	} else {
-		_, progress, ok = pollBoundExecutorSliceAt(driver, 0, false, 1)
+		_, progress, ok = pollBoundExecutorSliceAt(
+			driver, 0, false, executorRunSourceBatchQuantum,
+		)
 	}
-	if !ok || progress.Used != 1 {
+	if !ok || progress.Used == 0 || progress.Used > executorRunSourceBatchQuantum {
 		return ExecutorRunStep{}, false
 	}
 	if progress.Complete {
@@ -137,13 +150,38 @@ func serviceExecutorRunSource(driver *ExecutorDriver, now int64, withDeadline bo
 // host step so target-side ready distribution and readyDebt keep one common
 // boundary, but AtomicResolve identifies that no catalog scan or executor
 // acknowledgement was performed.
+const ownerLocalResolveBatchQuantum uint32 = 16
+
 func serviceExecutorRunLocal(driver *ExecutorDriver) (ExecutorRunStep, bool) {
-	var resolved publishedEpochResolveStep
-	if !resolveOwnerLocalCompletionStep(driver, &resolved) ||
-		resolved.applyVisits < 0 || resolved.promoted < 0 {
+	var applyVisits, promoted uint32
+	complete := false
+	resolved := &driver.local.scratch
+	if *resolved != (publishedEpochResolveStep{}) {
 		return ExecutorRunStep{}, false
 	}
-	complete := resolved.complete
+	for reduction := uint32(0); reduction < ownerLocalResolveBatchQuantum; reduction++ {
+		// Typed runtime cleanup is the only boundary which cannot be reduced by
+		// the target-neutral core. Return it as the next explicit Materialize
+		// step; the following local service entry continues from the same cursor.
+		if _, pending := pendingResumeCleanupStepForCursor(&driver.local.resolve); pending {
+			break
+		}
+		if !resolveOwnerLocalCompletionStep(driver, resolved) ||
+			resolved.applyVisits < 0 || resolved.promoted < 0 ||
+			uint64(applyVisits)+uint64(resolved.applyVisits) > uint64(^uint32(0)) ||
+			uint64(promoted)+uint64(resolved.promoted) > uint64(^uint32(0)) {
+			*resolved = publishedEpochResolveStep{}
+			return ExecutorRunStep{}, false
+		}
+		applyVisits += uint32(resolved.applyVisits)
+		promoted += uint32(resolved.promoted)
+		resolvedComplete := resolved.complete
+		*resolved = publishedEpochResolveStep{}
+		if resolvedComplete {
+			complete = true
+			break
+		}
+	}
 	if complete {
 		if ownerLocalCompletionPending(driver) {
 			return ExecutorRunStep{}, false
@@ -156,8 +194,8 @@ func serviceExecutorRunLocal(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	}
 	progress := ExecutorPollProgress{
 		Used:          1,
-		ApplyVisits:   uint32(resolved.applyVisits),
-		Promoted:      uint32(resolved.promoted),
+		ApplyVisits:   applyVisits,
+		Promoted:      promoted,
 		Complete:      complete,
 		More:          !complete || runnableForOSThreadOwner(driver.p) || executorRunExternalSourceRequested(driver),
 		AtomicResolve: true,
@@ -216,10 +254,8 @@ func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	if !validReadyQueueHeader(p) {
 		return ExecutorRunStep{}, false
 	}
-	selected := nextOSThreadRunnable(p)
-	imported := selected != nil && selected.transferState == runnableTransferGImported
-	g := dequeueOSThreadRunnable(p)
-	if g == nil || g != selected {
+	g, imported := dequeueOSThreadRunnableWithTransfer(p)
+	if g == nil {
 		return ExecutorRunStep{}, false
 	}
 	action, ok := BeginRunG(p, g)
@@ -237,12 +273,7 @@ func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	return ExecutorRunStep{Kind: ExecutorRunStepDispatch, G: g, Action: action}, true
 }
 
-func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool) (ExecutorRunStep, bool) {
-	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
-		driver.sources.usesMonotonicTime() != withDeadline || withDeadline && now < 0 ||
-		driver.run.issued != ActionInvalid {
-		return ExecutorRunStep{}, false
-	}
+func nextExecutorRunStepAtValidated(driver *ExecutorDriver, now int64, withDeadline bool) (ExecutorRunStep, bool) {
 	p := driver.p
 	if p.current != nil {
 		action, g := p.action, p.current
@@ -256,6 +287,11 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 			(action.Kind != ActionCheckResume && action.Kind != ActionCheckDestroy && action.Kind != ActionPanicDestroy) {
 			return ExecutorRunStep{}, false
 		}
+		// Dispatch has already selected this action as payment for any prior
+		// ready debt. Clear it before opening the no-return physical interval;
+		// a completion produced by the resumed coroutine may raise a new debt
+		// which CommitExecutorRunAction must preserve.
+		driver.run.readyDebt = false
 		driver.run.issued = action.Kind
 		return ExecutorRunStep{Kind: ExecutorRunStepAction, G: g, Action: action}, true
 	}
@@ -269,6 +305,9 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 		if cleanup, pending := pendingResumeCleanupStepForCursor(&driver.poll.resolve); pending {
 			return ExecutorRunStep{Kind: ExecutorRunStepMaterialize, Cleanup: cleanup}, true
 		}
+		if withDeadline && now < 0 {
+			return ExecutorRunStep{}, false
+		}
 		return serviceExecutorRunSource(driver, now, withDeadline)
 	}
 	// An owner-local completion has already published its exact typed source
@@ -278,26 +317,114 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 	if ownerLocalCompletionPending(driver) {
 		return nextExecutorRunLocalStep(driver)
 	}
+	runnable := runnableForOSThreadOwner(p)
 	if driver.run.readyDebt {
-		if runnableForOSThreadOwner(p) {
+		if runnable {
 			return dispatchExecutorRunReady(driver)
 		}
-		driver.run.readyDebt = false
 	}
 	if executorRunSourceRequested(driver) ||
 		driver.run.actionsSinceSource == executorRunSourceQuantum ||
-		!runnableForOSThreadOwner(p) && HasWaiting(p) && !driver.run.blocked {
+		!runnable && HasWaiting(p) && !driver.run.blocked {
+		// A negative timestamp is the explicit before-time probe used by the
+		// native adapter. Selection has not mutated the cursor yet, so its
+		// caller can sample a fresh clock and retry this exact decision.
+		if withDeadline && now < 0 {
+			return ExecutorRunStep{}, false
+		}
+		driver.run.readyDebt = false
 		return serviceExecutorRunSource(driver, now, withDeadline)
 	}
-	if runnableForOSThreadOwner(p) {
+	driver.run.readyDebt = false
+	if runnable {
 		return dispatchExecutorRunReady(driver)
 	}
 	return ExecutorRunStep{Kind: ExecutorRunStepIdle}, true
 }
 
-// NextExecutorRunStep selects one no-deadline runner reduction. It never calls
-// PollExecutor, PollReady, or NextRunnable; all source work goes through the
-// budget-one PollExecutorSlice cursor.
+func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool) (ExecutorRunStep, bool) {
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
+		driver.sources.usesMonotonicTime() != withDeadline ||
+		driver.run.issued != ActionInvalid {
+		return ExecutorRunStep{}, false
+	}
+	return nextExecutorRunStepAtValidated(driver, now, withDeadline)
+}
+
+// ExecutorRunSliceCapability is a scheduler-owner-only proof that one bounded
+// RunSlice entry audited the complete immutable driver/source binding. It is
+// deliberately stack-scoped by the runtime adapter: a host return discards it,
+// and the next entry must call BeginExecutorRunSlice again. Producers retain
+// only source/registry POD identities and cannot manufacture or mutate this
+// private P/driver pair.
+type ExecutorRunSliceCapability struct {
+	driver       *ExecutorDriver
+	p            *P
+	withDeadline bool
+}
+
+// BeginExecutorRunSlice performs the full cold-boundary audit once before a
+// bounded owner loop. Exact source reducers, physical actions, and commits
+// continue to validate every mutable transition; only the immutable catalog,
+// route, and run-cursor header are not re-read before each adjacent step.
+func BeginExecutorRunSlice(driver *ExecutorDriver) (ExecutorRunSliceCapability, bool) {
+	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid {
+		return ExecutorRunSliceCapability{}, false
+	}
+	return ExecutorRunSliceCapability{
+		driver:       driver,
+		p:            driver.p,
+		withDeadline: driver.sources.usesMonotonicTime(),
+	}, true
+}
+
+func (capability *ExecutorRunSliceCapability) owner(
+	withDeadline bool,
+) (*ExecutorDriver, bool) {
+	if capability == nil || capability.driver == nil || capability.p == nil ||
+		capability.withDeadline != withDeadline {
+		return nil, false
+	}
+	driver, p := capability.driver, capability.p
+	return driver, driver.magic == executorDriverMagic &&
+		driver.state == executorDriverActive && driver.p == p && p.executor == driver &&
+		preemptLoad(&p.executorMode) == executorModeBound &&
+		driver.run.issued == ActionInvalid
+}
+
+// Next selects one step for a no-deadline bounded slice.
+func (capability *ExecutorRunSliceCapability) Next() (ExecutorRunStep, bool) {
+	driver, ok := capability.owner(false)
+	if !ok {
+		return ExecutorRunStep{}, false
+	}
+	return nextExecutorRunStepAtValidated(driver, 0, false)
+}
+
+// NextBeforeTime performs the timer-aware before-clock probe without
+// re-auditing immutable driver/source structure.
+func (capability *ExecutorRunSliceCapability) NextBeforeTime() (ExecutorRunStep, bool) {
+	driver, ok := capability.owner(true)
+	if !ok {
+		return ExecutorRunStep{}, false
+	}
+	return nextExecutorRunStepAtValidated(driver, -1, true)
+}
+
+// NextAt selects one timer-aware step using the host's current monotonic
+// sample. The logical A/B epoch still freezes time in its own transaction.
+func (capability *ExecutorRunSliceCapability) NextAt(now int64) (ExecutorRunStep, bool) {
+	driver, ok := capability.owner(true)
+	if !ok || now < 0 {
+		return ExecutorRunStep{}, false
+	}
+	return nextExecutorRunStepAtValidated(driver, now, true)
+}
+
+// NextExecutorRunStep selects one no-deadline runner step. It never calls
+// PollExecutor, PollReady, or NextRunnable; source work goes through the
+// bounded PollExecutorSlice cursor.
 func NextExecutorRunStep(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	if driver == nil || driver.sources.usesMonotonicTime() {
 		return ExecutorRunStep{}, false
@@ -305,11 +432,25 @@ func NextExecutorRunStep(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	return nextExecutorRunStepAt(driver, 0, false)
 }
 
+// NextExecutorRunStepBeforeTime selects one timer-aware reduction only when
+// that reduction does not consume a monotonic sample. A false result is
+// deliberately ambiguous: the driver is invalid or the next reduction needs
+// fresh time. In either case a native adapter may sample its clock and retry
+// through NextExecutorRunStepAt; a time-required rejection does not mutate the
+// runner cursor. This keeps ordinary action, channel-cleanup, and ready-queue
+// traffic off the platform clock without weakening source/deadline ordering.
+func NextExecutorRunStepBeforeTime(driver *ExecutorDriver) (ExecutorRunStep, bool) {
+	if driver == nil || !driver.sources.usesMonotonicTime() {
+		return ExecutorRunStep{}, false
+	}
+	return nextExecutorRunStepAt(driver, -1, true)
+}
+
 // NextExecutorRunStepAt is the deadline-capable counterpart. A fresh sample is
 // accepted at each source reduction; PollExecutorSliceAt freezes the correct
 // sample across each logical A or B epoch.
 func NextExecutorRunStepAt(driver *ExecutorDriver, now int64) (ExecutorRunStep, bool) {
-	if driver == nil || !driver.sources.usesMonotonicTime() {
+	if driver == nil || !driver.sources.usesMonotonicTime() || now < 0 {
 		return ExecutorRunStep{}, false
 	}
 	return nextExecutorRunStepAt(driver, now, true)
@@ -406,18 +547,45 @@ func completedExecutorRunAction(p *P, g *G, action Action) bool {
 	}
 }
 
+// validIssuedExecutorRunAction is the commit-side proof for the no-return
+// physical interval opened by nextExecutorRunStepAt. The selector already
+// audited the immutable registry, source-set, route, and run-cursor binding
+// before setting run.issued. No target or coroutine callback can retain the
+// private driver or cross a host boundary during that interval, so repeating
+// those immutable audits after llvm.coro.resume/destroy only adds hot-path
+// work. The mutable P/G/action episode is still checked in full by the exact
+// commit reducer below, and the next selector repeats the complete header gate.
+func validIssuedExecutorRunAction(driver *ExecutorDriver) bool {
+	if driver == nil || driver.magic != executorDriverMagic || driver.state != executorDriverActive ||
+		driver.terminalKind != ActionInvalid || driver.hasPrepareNow || driver.prepareNow != 0 ||
+		driver.p == nil || driver.p.executor != driver ||
+		preemptLoad(&driver.p.executorMode) != executorModeBound {
+		return false
+	}
+	switch driver.run.issued {
+	case ActionCheckResume, ActionCheckDestroy, ActionPanicDestroy:
+		return true
+	default:
+		return false
+	}
+}
+
 // CommitExecutorRunAction closes the no-return physical interval opened by an
 // Action step. A live continuation is moved to the ready tail; terminal and
 // yield/park control actions are already stable. The function retains neither
 // the completed G nor its old handle, so a runtime may reclaim a dynamic G
 // immediately after a successful ActionComplete commit.
 func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placement executorRunQueuePlacement) bool {
-	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
-		driver.run.issued == ActionInvalid || g == nil ||
+	if !validIssuedExecutorRunAction(driver) || g == nil ||
 		!validOSThreadPeerActionCommit(driver.p, g) {
 		return false
 	}
 	p := driver.p
+	// Dispatch consumes the ready debt which selected this physical action, but
+	// a same-owner completion may publish a new runnable while llvm.coro.resume
+	// is executing. Preserve only that newly raised debt across the action
+	// receipt so its peer runs before an unrelated source epoch.
+	publishedReady := driver.run.readyDebt
 	committed := false
 	switch next.Kind {
 	case ActionCheckResume, ActionCheckDestroy, ActionPanicDestroy:
@@ -442,7 +610,7 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placemen
 		return false
 	}
 	driver.run.issued = ActionInvalid
-	driver.run.readyDebt = false
+	driver.run.readyDebt = publishedReady && runnableForOSThreadOwner(p)
 	driver.run.blocked = false
 	if driver.run.actionsSinceSource < executorRunSourceQuantum {
 		driver.run.actionsSinceSource++
@@ -510,8 +678,12 @@ func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action
 // child destroy plus one root resume per step. Nested non-root cleanup remains
 // ordinary FIFO work; normal-main return's final root destroy is separate.
 func CommitExecutorRunCommandBootstrapDirectChildHandoff(driver *ExecutorDriver, g *G, next Action) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive || g == nil ||
-		g.root == nil || g.active != g.root || g.panicUnwind || !emptyPanicRecord(&g.panicRecord) {
+	// This helper is probed for every live command-main action. Reject the
+	// overwhelmingly common non-bootstrap shape before auditing the complete
+	// source and owner-local cursors; an exact candidate still receives the
+	// same full driver validation before any scheduler state is mutated.
+	if driver == nil || g == nil || g.root == nil || g.active != g.root ||
+		g.panicUnwind || !emptyPanicRecord(&g.panicRecord) {
 		return false
 	}
 	switch next.Kind {
@@ -529,6 +701,9 @@ func CommitExecutorRunCommandBootstrapDirectChildHandoff(driver *ExecutorDriver,
 			return false
 		}
 	default:
+		return false
+	}
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive {
 		return false
 	}
 	return commitExecutorRunAction(driver, g, next, executorRunQueueCommandBootstrapDirectChildHandoff)

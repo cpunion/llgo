@@ -874,6 +874,13 @@ const (
 	llgoCgoCMalloc      = llgoCgoBase + 0x5
 	llgoCgoCheckPointer = llgoCgoBase + 0x6
 	llgoCgoCgocall      = llgoCgoBase + 0x7
+	// llgoCgoUse and llgoCgoKeepAlive are private compiler identities for
+	// cmd/cgo's generated, false-guarded liveness declarations. They are not
+	// recognized by source name alone: funcName requires the exact bodyless
+	// signature and runtime.cgoUse/runtime.cgoKeepAlive linkname first, while
+	// ProgramIR separately verifies the exact runtime.cgoAlwaysFalse guard.
+	llgoCgoUse       = llgoCgoBase + 0x8
+	llgoCgoKeepAlive = llgoCgoBase + 0x9
 
 	llgoAsm                = llgoInstrBase + 0x40
 	llgoStackSave          = llgoInstrBase + 0x41
@@ -1141,6 +1148,9 @@ func (p *context) funcName(fn *ssa.Function) (*types.Package, string, int) {
 		p.ensureLoaded(pkg)
 		orgName = funcName(pkg, fn, false)
 	}
+	if intrinsicName, ok := p.cgoGeneratedTouchIntrinsic(fn, orgName); ok {
+		return nil, intrinsicName, llgoInstr
+	}
 	if v, ok := p.prog.Linkname(orgName); ok {
 		if strings.HasPrefix(v, "C.") {
 			return nil, v[2:], cFunc
@@ -1171,6 +1181,36 @@ func (p *context) funcName(fn *ssa.Function) (*types.Package, string, int) {
 		return nil, instr, llgoInstr
 	}
 	return pkg, funcName(pkg, fn, false), goFunc
+}
+
+func (p *context) cgoGeneratedTouchIntrinsic(fn *ssa.Function, orgName string) (string, bool) {
+	if p == nil || p.prog == nil || fn == nil || orgName == "" || len(fn.Blocks) != 0 {
+		return "", false
+	}
+	var intrinsicName, target string
+	switch fn.Name() {
+	case "_Cgo_use":
+		intrinsicName, target = "cgoUse", "runtime.cgoUse"
+	case "_Cgo_keepalive":
+		intrinsicName, target = "cgoKeepAlive", "runtime.cgoKeepAlive"
+	default:
+		return "", false
+	}
+	linkname, linked := p.prog.Linkname(orgName)
+	if !linked || linkname != target {
+		return "", false
+	}
+	signature := fn.Signature
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		signature.Params() == nil || signature.Params().Len() != 1 ||
+		signature.Results() != nil && signature.Results().Len() != 0 {
+		return "", false
+	}
+	iface, ok := types.Unalias(signature.Params().At(0).Type()).Underlying().(*types.Interface)
+	if !ok || !iface.Empty() {
+		return "", false
+	}
+	return intrinsicName, true
 }
 
 const (

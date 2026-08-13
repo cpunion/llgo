@@ -50,6 +50,10 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 	if !coroTargetBeforeProgramRunSliceV1(p, driver) {
 		return coroRunResultV1{}
 	}
+	run, runOK := coro.BeginExecutorRunSlice(driver)
+	if !runOK {
+		return coroRunResultV1{}
+	}
 	result := coroRunResultV1{}
 	held := false
 	for result.used < budget {
@@ -63,7 +67,7 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 			result.stop = coroRunExecutionWaitV1
 			return result
 		}
-		step, ok := coroProgramNextRunStepV1(driver)
+		step, ok := coroProgramNextRunStepV1(driver, &run)
 		if !ok || !coroStepMatchesManagedExecutionV1(step, held) {
 			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
@@ -281,7 +285,9 @@ func coroCancelReady(p *coroP) bool {
 		for {
 			switch action.Kind {
 			case coro.ActionCancelDestroy:
-				coroHandleDestroy(action.Handle)
+				if !coroHandleDestroyCommitted(g, action.Handle) {
+					return false
+				}
 				action, ok = coro.CancelDestroyed(p, g, action)
 				if !ok {
 					return false

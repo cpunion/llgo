@@ -5,16 +5,19 @@ package cl
 
 import (
 	"go/ast"
+	"go/build"
 	"go/constant"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/goplus/gogen/packages"
+	llpackages "github.com/goplus/llgo/internal/packages"
 	llssa "github.com/goplus/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	gossa "golang.org/x/tools/go/ssa"
@@ -209,6 +212,144 @@ func findStaticCall(t *testing.T, fn *gossa.Function, name string) *gossa.Call {
 	}
 	t.Fatalf("missing call to %s in %s", name, fn.Name())
 	return nil
+}
+
+func TestCgoGeneratedTouchIntrinsicRequiresExactDeclarationAndGuard(t *testing.T) {
+	ssaPkg, fset, files := buildGoSSAPkg(t, `
+package foo
+
+import _ "unsafe"
+
+//go:linkname _Cgo_always_false runtime.cgoAlwaysFalse
+var _Cgo_always_false bool
+
+//go:linkname _Cgo_use runtime.cgoUse
+func _Cgo_use(any)
+
+//go:linkname _Cgo_keepalive runtime.cgoKeepAlive
+func _Cgo_keepalive(any)
+
+func Guarded(value any) {
+	if _Cgo_always_false {
+		_Cgo_use(value)
+	}
+}
+
+func GuardedKeepAlive(value any) {
+	if _Cgo_always_false {
+		_Cgo_keepalive(value)
+	}
+}
+
+func Unguarded(value any) { _Cgo_use(value) }
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	if err := ParsePkgSyntax(prog, fset, ssaPkg.Pkg, files); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &context{prog: prog, goTyps: ssaPkg.Pkg}
+	for _, test := range []struct {
+		declaration string
+		wantName    string
+		opcode      int
+		caller      string
+	}{
+		{declaration: "_Cgo_use", wantName: "cgoUse", opcode: llgoCgoUse, caller: "Guarded"},
+		{declaration: "_Cgo_keepalive", wantName: "cgoKeepAlive", opcode: llgoCgoKeepAlive, caller: "GuardedKeepAlive"},
+	} {
+		declaration := ssaPkg.Func(test.declaration)
+		_, name, kind := ctx.funcName(declaration)
+		if name != test.wantName || kind != llgoInstr || llgoInstrs[name] != test.opcode {
+			t.Fatalf("%s classification = (%q, %d/%d), want (%q, llgoInstr/%d)",
+				test.declaration, name, kind, llgoInstrs[name], test.wantName, test.opcode)
+		}
+		call := findStaticCall(t, ssaPkg.Func(test.caller), test.declaration)
+		if err := (&EmissionUniverse{prog: prog}).verifyCoroGeneratedTouchCall(test.opcode, call); err != nil {
+			t.Fatalf("verify %s generated guard: %v", test.declaration, err)
+		}
+	}
+	unguarded := findStaticCall(t, ssaPkg.Func("Unguarded"), "_Cgo_use")
+	if err := (&EmissionUniverse{prog: prog}).verifyCoroGeneratedTouchCall(llgoCgoUse, unguarded); err == nil ||
+		!strings.Contains(err.Error(), "false-global guard") {
+		t.Fatalf("unguarded cgo touch error = %v", err)
+	}
+}
+
+func TestCgoGeneratedTouchMetadataFromCmdCgo(t *testing.T) {
+	if !build.Default.CgoEnabled {
+		t.Skip("cmd/cgo metadata requires cgo")
+	}
+	fset := token.NewFileSet()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	dedup := llpackages.NewDeduper()
+	var preloadErr error
+	dedup.SetPreload(func(pkg *types.Package, files []*ast.File) {
+		if preloadErr != nil {
+			return
+		}
+		preloadErr = ParsePkgSyntax(prog, fset, pkg, files)
+	})
+	loaded, err := llpackages.LoadEx(dedup, nil, &llpackages.Config{
+		Mode: llpackages.NeedName | llpackages.NeedFiles |
+			llpackages.NeedCompiledGoFiles | llpackages.NeedImports |
+			llpackages.NeedDeps | llpackages.NeedTypes |
+			llpackages.NeedTypesSizes | llpackages.NeedSyntax |
+			llpackages.NeedTypesInfo,
+		Dir:  filepath.Join("_testgo", "cgobasic"),
+		Fset: fset,
+	}, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preloadErr != nil {
+		t.Fatal(preloadErr)
+	}
+	if len(loaded) != 1 || loaded[0].Types == nil {
+		t.Fatalf("loaded packages = %d, want one typed package", len(loaded))
+	}
+	fullName := llssa.FullName(loaded[0].Types, "_Cgo_use")
+	if linkname, ok := prog.Linkname(fullName); !ok || linkname != "runtime.cgoUse" {
+		files := make([]string, len(loaded[0].CompiledGoFiles))
+		for index, file := range loaded[0].CompiledGoFiles {
+			files[index] = filepath.Base(file)
+		}
+		t.Fatalf("linkname %q = (%q, %v), want runtime.cgoUse; compiled files: %v",
+			fullName, linkname, ok, files)
+	}
+	goProg, ssaPackages := ssautil.AllPackages(loaded,
+		gossa.SanityCheckFunctions|gossa.InstantiateGenerics)
+	goProg.Build()
+	if len(ssaPackages) != 1 || ssaPackages[0] == nil {
+		t.Fatalf("SSA packages = %d, want one package", len(ssaPackages))
+	}
+	declaration := ssaPackages[0].Func("_Cgo_use")
+	ctx := &context{prog: prog, goTyps: loaded[0].Types}
+	_, name, kind := ctx.funcName(declaration)
+	if name != "cgoUse" || kind != llgoInstr {
+		t.Fatalf("real cmd/cgo _Cgo_use classification = (%q, %d), want (cgoUse, llgoInstr)",
+			name, kind)
+	}
+	for _, member := range ssaPackages[0].Members {
+		function, ok := member.(*gossa.Function)
+		if !ok || !strings.HasPrefix(function.Name(), "_Cfunc_") {
+			continue
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(*gossa.Call)
+				if !ok || call.Call.StaticCallee() != declaration {
+					continue
+				}
+				if err := (&EmissionUniverse{prog: prog}).verifyCoroGeneratedTouchCall(llgoCgoUse, call); err != nil {
+					t.Fatalf("verify real cmd/cgo touch in %s: %v", function.Name(), err)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("real cmd/cgo output contains no _Cgo_use call")
 }
 
 func TestCgoCgocall_InitArgsFromParams(t *testing.T) {

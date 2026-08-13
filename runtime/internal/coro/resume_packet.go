@@ -159,17 +159,94 @@ func validMaterializedResumePacket(packet *ResumePacket) bool {
 	}
 }
 
+// directChannelBoundResumeHeader is the hot selector for a fused direct
+// channel park before source resolution starts. The immutable descriptor was
+// fully audited when directChannel was installed; producers can change only
+// source atomics and SelectClaim during suspension. The post-suspend commit
+// boundary calls validDirectChannelBoundResumeState once before queue effects.
+func directChannelBoundResumeHeader(record *WaitSetRecord) (*ResumeCleanupPlan, bool) {
+	if record == nil || !record.directChannel || record.resume == nil ||
+		record.resumeKind != resumeBindingCleanup || !validParkTicket(record.ticket) {
+		return nil, false
+	}
+	plan := (*ResumeCleanupPlan)(record.resume)
+	if plan == nil || plan.phase != resumeCleanupBound ||
+		plan.kind != ResumeCleanupChannelDirect || plan.ticket != record.ticket ||
+		plan.verified != resumeCleanupPlanVerifiedV1 ||
+		plan.packet == nil || plan.packet.state != resumePacketBound ||
+		plan.packet.ticket != record.ticket {
+		return nil, false
+	}
+	return plan, true
+}
+
+// validDirectChannelBoundResumeState performs the complete descriptor audit
+// exactly once at the post-llvm.coro.suspend queue-commit boundary.
+func validDirectChannelBoundResumeState(record *WaitSetRecord, plan *ResumeCleanupPlan) bool {
+	headerPlan, headerOK := directChannelBoundResumeHeader(record)
+	if !headerOK || headerPlan != plan || plan.claim == nil || plan.context == nil ||
+		plan.entries == nil ||
+		plan.stride != unsafe.Sizeof(OperationID{}) || plan.idOffset != 0 ||
+		plan.count != 1 || plan.runtime != 1 || plan.index != 0 ||
+		plan.caseID != 0 || plan.outcome != ParkOutcomePending ||
+		plan.lease != (OperationResultLease{}) || plan.result != ResumeResultNone ||
+		plan.small != ResumeSmallInvalid {
+		return false
+	}
+	id := (*OperationID)(plan.entries)
+	packet := plan.packet
+	return id.Valid() && id.Source() == OperationSourceChannel &&
+		packet.state == resumePacketBound && packet.ticket == record.ticket &&
+		packet.source == (OperationID{}) && packet.scalar == (ScalarResultPayloadV1{}) &&
+		packet.caseID == 0 && packet.outcome == ParkOutcomePending &&
+		packet.result == ResumeResultNone && packet.small == ResumeSmallInvalid
+}
+
 func validWaitSetResumeBinding(record *WaitSetRecord) bool {
 	if record == nil {
 		return false
 	}
 	switch record.resumeKind {
 	case resumeBindingNone:
-		return record.resume == nil
+		return !record.directChannel && record.resume == nil
 	case resumeBindingSingle:
-		return validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
+		return !record.directChannel && validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
 	case resumeBindingCleanup:
-		return validResumeCleanupPlan(record, (*ResumeCleanupPlan)(record.resume))
+		plan := (*ResumeCleanupPlan)(record.resume)
+		if record.directChannel && plan != nil && plan.phase == resumeCleanupBound {
+			_, ok := directChannelBoundResumeHeader(record)
+			return ok
+		}
+		return validResumeCleanupPlan(record, plan)
+	case resumeBindingMaterialized:
+		return validMaterializedResumePacket((*ResumePacket)(record.resume))
+	default:
+		return false
+	}
+}
+
+// validTrustedWaitSetResumeBinding is the active scheduler-record selector.
+// Bind/commit performed the complete descriptor audit before the record became
+// reachable from P. While active, only the runtime cleanup machine can mutate
+// a cleanup plan, so hot queue/cursor checks validate its certified transition
+// state without re-walking immutable frame/source descriptors. Full queue and
+// whole-G audits continue through validWaitSetResumeBinding.
+func validTrustedWaitSetResumeBinding(record *WaitSetRecord) bool {
+	if record == nil {
+		return false
+	}
+	switch record.resumeKind {
+	case resumeBindingNone:
+		return !record.directChannel && record.resume == nil
+	case resumeBindingSingle:
+		return !record.directChannel && validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
+	case resumeBindingCleanup:
+		plan := (*ResumeCleanupPlan)(record.resume)
+		if record.directChannel && plan != nil && plan.phase == resumeCleanupBound {
+			_, ok := directChannelBoundResumeHeader(record)
+			return ok
+		}
+		return validTrustedResumeCleanupPlanState(record, plan)
 	case resumeBindingMaterialized:
 		return validMaterializedResumePacket((*ResumePacket)(record.resume))
 	default:

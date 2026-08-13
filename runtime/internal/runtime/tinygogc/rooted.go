@@ -18,7 +18,11 @@
 
 package tinygogc
 
-import "unsafe"
+import (
+	"unsafe"
+
+	c "github.com/goplus/llgo/runtime/internal/clite"
+)
 
 const rootedAllocationMagic uintptr = 0x726f6f74
 
@@ -73,6 +77,11 @@ func FreeRooted(ptr unsafe.Pointer, size uintptr) bool {
 		unlock(&gcMutex)
 		return false
 	}
+	// The caller's raw pointer may remain conservatively visible on its native
+	// stack after logical release. Clear the payload before unlinking the
+	// explicit root so such a stale pointer cannot retain the frame's former Go
+	// object graph during a later collection.
+	c.Memset(ptr, 0, size)
 	unlinkRootedAllocation(root)
 	unlock(&gcMutex)
 	return true

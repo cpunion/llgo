@@ -74,6 +74,9 @@ func TestBootstrapStateFailsClosed(t *testing.T) {
 }
 
 func TestSelectedBackendKindIsKnown(t *testing.T) {
+	if !backendAllocationsAreZeroed {
+		t.Fatal("selected coroutine allocator does not guarantee zero-filled storage")
+	}
 	switch backendKind {
 	case "bdwgc", "malloc", "tinygogc":
 	default:

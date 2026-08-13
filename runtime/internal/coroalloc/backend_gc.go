@@ -25,6 +25,7 @@ import (
 )
 
 const backendKind = "bdwgc"
+const backendAllocationsAreZeroed = true
 
 func backendBootstrap() bool {
 	bdwgc.Init()

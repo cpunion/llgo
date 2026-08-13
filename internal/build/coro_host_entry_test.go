@@ -78,8 +78,8 @@ func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointe
 func __llgo_coro_chan_resume_v1(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
 type Chan struct{}
 type ChanOp struct{}
-func CoroChanTrySend(*Chan, unsafe.Pointer, int) bool { return false }
-func CoroChanTryRecv(*Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
+func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
+func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryClose(*Chan) uint32 { return 0 }
 func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}

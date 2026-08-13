@@ -30,7 +30,12 @@ const coroSpawnProductionEnabledV1 = true
 
 func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 	parent := (*coroG)(parentPointer)
-	if !coro.CanBeginSpawn(parent) || !coroalloc.Ready() {
+	// BeginSpawn is the authoritative parent/P validation. The production
+	// caller is already executing on the parent resume, so repeating the
+	// read-only CanBeginSpawn preflight before every successful allocation only
+	// audits the same scheduler episode twice. Allocation failure is rolled back
+	// locally and an invalid boundary still fails atomically in BeginSpawn.
+	if !coroalloc.Ready() {
 		return nil, false
 	}
 	taskSize := coro.TaskStorageSize()
@@ -39,7 +44,6 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 	if raw == nil {
 		return nil, false
 	}
-	coro.Zero(raw, allocationSize)
 	child, _, actualSize, allocationOK := coroTaskAllocationAt(raw)
 	if !allocationOK || actualSize != allocationSize || !coro.BeginSpawn(parent, child, raw, taskSize) {
 		coro.Zero(raw, allocationSize)
@@ -76,27 +80,27 @@ func coroReleaseCompletedTask(g *coroG) bool {
 	// frame completion after source-specific park cleanup. The cancellation
 	// record remains sticky until the G is physically dead; acknowledge it here
 	// before applying the normal reclaimability/storage transfer contract.
-	if !coro.ReclaimableG(g) &&
-		!coro.AcknowledgeTaskCancellation(g, coro.TaskCancelAbort) &&
-		!coro.AcknowledgeTaskCancellation(g, coro.TaskCancelShutdown) {
-		return false
-	}
-	owned, ok := coro.TaskStorageOwned(g)
+	local, raw, taskSize, owned, ok := coro.ReleaseCompletedTask(g)
 	if !ok {
-		return false
+		if !coro.AcknowledgeTaskCancellation(g, coro.TaskCancelAbort) &&
+			!coro.AcknowledgeTaskCancellation(g, coro.TaskCancelShutdown) {
+			return false
+		}
+		local, raw, taskSize, owned, ok = coro.ReleaseCompletedTask(g)
+		if !ok {
+			return false
+		}
 	}
-	if !coroReleaseRuntimeContext(g) {
+	if !coroReleaseRuntimeContext(g, local) {
 		return false
 	}
 	if !owned {
-		return true
+		return raw == nil && taskSize == 0
 	}
-	raw, taskSize, ok := coro.ReleaseTaskStorage(g)
 	_, _, allocationSize, allocationOK := coroTaskAllocationAt(raw)
-	if !ok || !allocationOK || raw != unsafe.Pointer(g) || taskSize != coro.TaskStorageSize() {
+	if !allocationOK || raw != unsafe.Pointer(g) || taskSize != coro.TaskStorageSize() {
 		return false
 	}
-	coro.Zero(raw, allocationSize)
 	return coroalloc.FreeTask(raw, allocationSize)
 }
 

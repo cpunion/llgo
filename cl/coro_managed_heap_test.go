@@ -345,7 +345,7 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 			var publishBlock llvm.BasicBlock
 			for _, block := range capturedPhysical.BasicBlocks() {
 				for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
-					if instruction.InstructionOpcode() == llvm.Call && instruction.CalledValue().Name() == coroFramePublishHookV1 {
+					if instruction.InstructionOpcode() == llvm.Call && instruction.CalledValue().Name() == coroFramePublishHookV3 {
 						publishBlock = instruction.InstructionParent()
 					}
 				}
@@ -370,7 +370,7 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 				t.Fatalf("CapturedResults hoisted/ordinary AllocZ calls = %d/%d, want 3/%d:\n%s",
 					hoistedHeapCalls, ordinaryHeapCalls, len(capturedHeapAllocs)-3, capturedIR)
 			}
-			publish := strings.Index(capturedIR, "call void @"+coroFramePublishHookV1)
+			publish := strings.Index(capturedIR, "call void @"+coroFramePublishHookV3)
 			alloc := strings.Index(capturedIR, "runtime.AllocZ")
 			initialSuspend := strings.Index(capturedIR, "%coro.suspend = call i8 @llvm.coro.suspend")
 			if publish < 0 || alloc < 0 || initialSuspend < 0 || publish >= alloc || alloc >= initialSuspend {

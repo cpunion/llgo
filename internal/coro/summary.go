@@ -31,7 +31,7 @@ import (
 // snapshots. Version v7 is intentionally not an archive ABI: producer
 // artifacts use the separate LibraryEffectSummarySchema, and cache identity
 // uses PlanDigestSchema.
-const SummarySchema = "llgo.coro.plan.v7"
+const SummarySchema = "llgo.coro.plan.v8"
 
 // SummaryMetadata identifies ABI and target properties that affect an
 // experimental plan snapshot. Empty fields are permitted during early
@@ -61,6 +61,7 @@ type FunctionSummary struct {
 	AtomicCost              uint64           `json:"atomic_cost"`
 	AtomicCostProof         AtomicCostProof  `json:"atomic_cost_proof"`
 	AtomicCostCertificate   string           `json:"atomic_cost_certificate"`
+	StaticOutcome           bool             `json:"static_outcome"`
 	FuncRep                 FuncRep          `json:"func_rep"`
 	External                ExternalKind     `json:"external"`
 	Recursive               bool             `json:"recursive"`
@@ -112,6 +113,7 @@ type functionSummaryWire struct {
 	AtomicCost              *uint64           `json:"atomic_cost"`
 	AtomicCostProof         *AtomicCostProof  `json:"atomic_cost_proof"`
 	AtomicCostCertificate   *string           `json:"atomic_cost_certificate"`
+	StaticOutcome           *bool             `json:"static_outcome"`
 	FuncRep                 *FuncRep          `json:"func_rep"`
 	External                *ExternalKind     `json:"external"`
 	Recursive               *bool             `json:"recursive"`
@@ -149,6 +151,7 @@ func (p *Plan) Summary(metadata SummaryMetadata) Summary {
 			AtomicCost:              fn.AtomicCost,
 			AtomicCostProof:         fn.AtomicCostProof,
 			AtomicCostCertificate:   fn.AtomicCostCertificate,
+			StaticOutcome:           fn.StaticOutcome,
 			FuncRep:                 fn.FuncRep,
 			External:                fn.External,
 			Recursive:               fn.Recursive,
@@ -313,6 +316,9 @@ func (w functionSummaryWire) summary(index int) (FunctionSummary, error) {
 	if w.AtomicCostCertificate == nil {
 		return missing("atomic_cost_certificate")
 	}
+	if w.StaticOutcome == nil {
+		return missing("static_outcome")
+	}
 	if w.FuncRep == nil {
 		return missing("func_rep")
 	}
@@ -350,6 +356,7 @@ func (w functionSummaryWire) summary(index int) (FunctionSummary, error) {
 		AtomicCost:              *w.AtomicCost,
 		AtomicCostProof:         *w.AtomicCostProof,
 		AtomicCostCertificate:   *w.AtomicCostCertificate,
+		StaticOutcome:           *w.StaticOutcome,
 		FuncRep:                 *w.FuncRep,
 		External:                *w.External,
 		Recursive:               *w.Recursive,
@@ -556,6 +563,7 @@ func (s Summary) canonical() (Summary, error) {
 			Emission: fn.Emission, ManagedEntry: fn.ManagedEntry,
 			AtomicCost: fn.AtomicCost, AtomicCostProof: fn.AtomicCostProof,
 			AtomicCostCertificate: fn.AtomicCostCertificate,
+			StaticOutcome:         fn.StaticOutcome,
 			FuncRep:               fn.FuncRep, External: fn.External, Recursive: fn.Recursive,
 			Primary: fn.Primary, RawPlainOnly: fn.RawPlainOnly, RawPlainEntry: fn.RawPlainEntry,
 		}

@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v33"
+const PlanDigestSchema = "llgo.coro.plan-digest.v34"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -172,6 +172,7 @@ type planDigestFunction struct {
 	AtomicCost                   uint64                       `json:"atomic_cost"`
 	AtomicCostProof              uint8                        `json:"atomic_cost_proof"`
 	AtomicCostCertificate        string                       `json:"atomic_cost_certificate"`
+	StaticOutcome                bool                         `json:"static_outcome"`
 	FuncRep                      uint8                        `json:"func_rep"`
 	External                     uint8                        `json:"external"`
 	Recursive                    bool                         `json:"recursive"`
@@ -894,6 +895,7 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 			AtomicCost:              plan.AtomicCost,
 			AtomicCostProof:         uint8(plan.AtomicCostProof),
 			AtomicCostCertificate:   plan.AtomicCostCertificate,
+			StaticOutcome:           plan.StaticOutcome,
 			FuncRep:                 uint8(plan.FuncRep),
 			External:                uint8(plan.External),
 			Recursive:               plan.Recursive,

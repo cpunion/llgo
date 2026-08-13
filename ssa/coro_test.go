@@ -384,6 +384,108 @@ func TestCoroHandleIntrinsicsBeforeAndAfterCoroSplit(t *testing.T) {
 	}
 }
 
+func TestCoroElideStaticChildFrameContract(t *testing.T) {
+	if llvmMajorVersion() < 22 {
+		t.Skipf("coro_elide_safe requires LLVM 22, using %s", llvm.Version)
+	}
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	pkg := prog.NewPackage("coroelide", "coro/elide")
+	t.Cleanup(func() {
+		pkg.Module().Dispose()
+		prog.Dispose()
+	})
+
+	childAlloc := pkg.NewFunc("coro_elide_child_alloc_probe", functionSignature(
+		[]types.Type{types.Typ[types.Uintptr], types.Typ[types.Uintptr]},
+		[]types.Type{types.Typ[types.UnsafePointer]},
+	), InC)
+	childFree := pkg.NewFunc("coro_elide_child_free_probe", functionSignature(
+		[]types.Type{types.Typ[types.UnsafePointer], types.Typ[types.Uintptr], types.Typ[types.Uintptr]},
+		nil,
+	), InC)
+	childPublish := pkg.NewFunc("coro_elide_child_publish_probe", functionSignature(
+		[]types.Type{types.Typ[types.UnsafePointer], types.Typ[types.UnsafePointer]},
+		nil,
+	), InC)
+	bodyProbe := pkg.NewFunc("coro_elide_body_probe", functionSignature(nil, nil), InC)
+	doneProbe := pkg.NewFunc("coro_elide_done_probe", functionSignature(
+		[]types.Type{types.Typ[types.Bool]}, nil,
+	), InC)
+
+	child := pkg.NewFunc("coro_elide_child", coroHandleSignature(), InGo)
+	childBuilder := child.MakeBody(1)
+	childCoro := childBuilder.BeginCoro(CoroOptions{
+		AllocationAlign: 32,
+		Frame: CoroFrameOps{
+			Alloc: func(b Builder, size, align Expr) Expr {
+				return b.Call(childAlloc.Expr, size, align)
+			},
+			Free: func(b Builder, frame, size, align Expr) {
+				b.Call(childFree.Expr, frame, size, align)
+			},
+		},
+		BeforeInitialSuspend: func(b Builder, handle, storage Expr) {
+			b.Call(childPublish.Expr, handle, storage)
+		},
+	})
+	childBuilder.Call(bodyProbe.Expr)
+	childCoro.Finish()
+	childBuilder.EndBuild()
+	childBuilder.Dispose()
+
+	parentAlloc := pkg.NewFunc("coro_elide_parent_alloc_probe", functionSignature(
+		[]types.Type{types.Typ[types.Uintptr], types.Typ[types.Uintptr]},
+		[]types.Type{types.Typ[types.UnsafePointer]},
+	), InC)
+	parentFree := pkg.NewFunc("coro_elide_parent_free_probe", functionSignature(
+		[]types.Type{types.Typ[types.UnsafePointer], types.Typ[types.Uintptr], types.Typ[types.Uintptr]},
+		nil,
+	), InC)
+	parent := pkg.NewFunc("coro_elide_parent", coroHandleSignature(), InGo)
+	parentBuilder := parent.MakeBody(1)
+	parentCoro := parentBuilder.BeginCoro(CoroOptions{
+		AllocationAlign: 32,
+		Frame: CoroFrameOps{
+			Alloc: func(b Builder, size, align Expr) Expr {
+				return b.Call(parentAlloc.Expr, size, align)
+			},
+			Free: func(b Builder, frame, size, align Expr) {
+				b.Call(parentFree.Expr, frame, size, align)
+			},
+		},
+	})
+	handle := parentBuilder.Call(child.Expr)
+	if !parentBuilder.MarkCoroElideSafe(handle) {
+		t.Fatal("LLVM 22 rejected an exact coroutine elision proof")
+	}
+	parentBuilder.CoroResume(handle)
+	done := parentBuilder.CoroDone(handle)
+	parentBuilder.CoroDestroy(handle)
+	parentBuilder.Call(doneProbe.Expr, done)
+	parentCoro.Finish()
+	parentBuilder.EndBuild()
+	parentBuilder.Dispose()
+
+	fixture := &coroTestFixture{prog: prog, pkg: pkg, fn: parent, coro: parentCoro}
+	runCoroPasses(t, fixture, "lto<O3>")
+	post := pkg.Module().String()
+	parentResume := pkg.Module().NamedFunction("coro_elide_parent.resume").String()
+	if !strings.Contains(post, "@coro_elide_child.noalloc") {
+		t.Fatalf("CoroSplit did not synthesize the attributed no-allocation ramp:\n%s", post)
+	}
+	if strings.Contains(parentResume, "call ptr @coro_elide_child()") ||
+		strings.Contains(parentResume, "@coro_elide_child_alloc_probe") ||
+		strings.Contains(parentResume, "@coro_elide_child_free_probe") {
+		t.Fatalf("static child retained its dynamic allocation path in the parent resume:\n%s", parentResume)
+	}
+	if !regexp.MustCompile(
+		`call void @coro_elide_child_publish_probe\(ptr [^,]+, ptr null\)`,
+	).MatchString(parentResume) {
+		t.Fatalf("elided child publication did not expose a null dynamic-storage operand:\n%s", parentResume)
+	}
+}
+
 func TestCoroBuilderDefaultPipelineLLVM19(t *testing.T) {
 	if llvmMajorVersion() != 19 {
 		t.Skipf("production default<O0> smoke is specific to LLVM 19, using %s", llvm.Version)
@@ -1660,6 +1762,7 @@ func TestCoroProgramBootstrapV2MixedStartupTable(t *testing.T) {
 	}
 	bootstrap := pkg.NewCoroProgramBootstrap("__llgo_coro_program_bootstrap_v2", CoroProgramBootstrapOptions{
 		Version: 2,
+		Flags:   CoroProgramBootstrapFlagWorkerV2,
 		ABIHash: [16]byte{
 			0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
 			0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
@@ -1671,6 +1774,9 @@ func TestCoroProgramBootstrapV2MixedStartupTable(t *testing.T) {
 	initializer := bootstrap.impl.Initializer()
 	if got := initializer.Operand(0).ZExtValue(); got != 2 {
 		t.Fatalf("bootstrap version = %d, want 2", got)
+	}
+	if got := initializer.Operand(1).ZExtValue(); got != uint64(CoroProgramBootstrapFlagWorkerV2) {
+		t.Fatalf("bootstrap flags = %#x, want worker capability", got)
 	}
 	if got := initializer.Operand(4).ZExtValue(); got != uint64(len(steps)) {
 		t.Fatalf("bootstrap step count = %d, want %d", got, len(steps))
@@ -1740,6 +1846,11 @@ func TestCoroProgramBootstrapV2RejectsShapeAndRoles(t *testing.T) {
 			Kind: CoroProgramStepDirectPlain, Flags: roles[index], Target: plains[index].Expr,
 		}
 	}
+	badFlags := valid
+	badFlags.Flags = CoroProgramBootstrapFlagWorkerV2 << 1
+	mustPanicContains(t, "unknown capability flags", func() {
+		pkg.NewCoroProgramBootstrap("v2_bad_capability_flags", badFlags)
+	})
 	for _, count := range []int{0, 1, 2, 3, 4} {
 		bad := valid
 		bad.Steps = append([]CoroProgramStep(nil), valid.Steps...)

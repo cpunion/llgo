@@ -43,6 +43,25 @@ func coroTargetReadyDistributionDomainV1(
 	return nil, false
 }
 
+// coroTargetReadyDistributionEnabledV1 keeps runnable ownership local when
+// managed Go execution is serial. The native fleet intentionally keeps every
+// physical route alive so it can continue to service timer, poll, channel and
+// cancellation sources, but moving a runnable between those routes cannot add
+// execution capacity while GOMAXPROCS is one. Apart from the mailbox and
+// doorbell traffic, such a move also loses the warm owner-local scheduler
+// state and makes the next route contend for the sole execution lease.
+//
+// Limit is a live observation rather than startup policy: increasing
+// GOMAXPROCS immediately re-enables surplus sharing, while shrinking it stops
+// new transfers without disturbing work that was already published.
+func coroTargetReadyDistributionEnabledV1(state *coroNativeFleetStateV1) (bool, bool) {
+	if state == nil {
+		return false, false
+	}
+	limit, ok := state.execution.Limit()
+	return limit > 1, ok
+}
+
 // coroTargetAfterStableRunActionV1 is owner-to-owner work distribution, not a
 // producer callback. The active domain prefix and every P/driver identity are
 // frozen before any peer M starts, and the program coordinator joins all peer
@@ -61,6 +80,13 @@ func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDrive
 	}
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return coroTargetReadyDistributionFailV1("native ready distribution fleet is not active")
+	}
+	distributionEnabled, limitOK := coroTargetReadyDistributionEnabledV1(state)
+	if !limitOK {
+		return coroTargetReadyDistributionFailV1("native ready distribution execution quota is not active")
+	}
+	if !distributionEnabled {
+		return true
 	}
 	sourceDomain, ok := coroTargetReadyDistributionDomainV1(source, driver)
 	if !ok {
@@ -121,6 +147,13 @@ func coroTargetAfterSourceReductionV1(
 	}
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return false, coroTargetReadyDistributionFailV1("native source distribution fleet is not active")
+	}
+	distributionEnabled, limitOK := coroTargetReadyDistributionEnabledV1(state)
+	if !limitOK {
+		return false, coroTargetReadyDistributionFailV1("native source distribution execution quota is not active")
+	}
+	if !distributionEnabled {
+		return false, true
 	}
 	sourceDomain, ok := coroTargetReadyDistributionDomainV1(source, driver)
 	if !ok {
@@ -214,6 +247,9 @@ func coroTargetPrepareOSThreadSuspendV1(
 			action.Handle != nil || action.Flags != 0 {
 			return false, false
 		}
+		if !coro.OSThreadSuspendHandoffCandidate(task) {
+			return false, true
+		}
 		return coro.PrepareOSThreadSuspendHandoff(
 			driver, task, action.Kind,
 		)
@@ -243,6 +279,10 @@ func coroNativeAbortOSThreadSuspendV1(
 func coroTargetStopForOSThreadReturnV1(
 	driver *coro.ExecutorDriver,
 ) (bool, bool) {
+	possible, ok := coro.OSThreadSuspendHandoffPossible(driver)
+	if !ok || !possible {
+		return false, ok
+	}
 	detached, returnable, ok := coro.OSThreadSuspendHandoffStatus(driver)
 	return detached && returnable, ok
 }

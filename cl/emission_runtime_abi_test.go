@@ -226,8 +226,8 @@ func Use() {}
 func TestEmissionUniverseCoroChannelRetainsPlainAndPhysicalHelpers(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
-func CoroChanTrySend(ch chan int, value *int, size int) bool { return false }
-func CoroChanTryRecv(ch chan int, value *int, size int) (bool, bool) { return false, false }
+func CoroChanTrySend(task *byte, ch chan int, value *int, size int) bool { return false }
+func CoroChanTryRecv(task *byte, ch chan int, value *int, size int) (bool, bool) { return false, false }
 func CoroChanTryClose(ch chan int) uint32 { return 0 }
 type ChanOp struct{}
 func CoroChanSelectTry(ops ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }

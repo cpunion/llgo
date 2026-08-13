@@ -38,6 +38,7 @@ type coroChanOperationV1 struct {
 	waiter *chanWaiter
 	source *coro.ChannelOperationSource
 	magic  uint32
+	direct bool
 }
 
 type coroChanCleanupPhaseV1 uint8
@@ -71,7 +72,9 @@ type coroChanCleanupCursorV1 struct {
 //
 // The type is exported solely so the compiler can request its target layout
 // from the frozen runtime package. Its fields remain runtime-private and no Go
-// aggregate crosses a C or compiler hook ABI.
+// aggregate crosses a C or compiler hook ABI. Storage is zero-filled with its
+// containing coroutine frame before the first prepare; every successful
+// resume restores the complete zero value before the compiler can reuse it.
 type CoroChanParkV1 struct {
 	wait      coro.WaitSetRecord
 	claim     coro.SelectClaim
@@ -288,70 +291,375 @@ func classifyCoroChanPairBegin(result coro.ChannelExternalCommitPairBeginResult)
 	}
 }
 
-func publishCoroChannelOwnerLocalV1(operation *coroChanOperationV1) (published, ok bool) {
-	if operation == nil || !operation.id.Valid() {
+// coroChanCompletionEndpointV1 is the only source identity needed after an
+// irreversible hchan commit. Keeping it outside compiler-spilled waiter state
+// lets an exact open/unbuffered direct rendezvous retire that state before the
+// executor can observe the completion.
+type coroChanCompletionEndpointV1 struct {
+	source *coro.ChannelOperationSource
+	id     coro.OperationID
+}
+
+func coroChanCompletionEndpointForV1(
+	operation *coroChanOperationV1,
+) (coroChanCompletionEndpointV1, bool) {
+	if operation == nil || operation.source == nil || !operation.id.Valid() {
+		return coroChanCompletionEndpointV1{}, false
+	}
+	return coroChanCompletionEndpointV1{source: operation.source, id: operation.id}, true
+}
+
+// coroChanDirectResultFinalizableV1 recognizes the exact typed cleanup which
+// is a no-op: a compiler-owned direct waiter has already been detached from an
+// open unbuffered hchan and its payload/status effect is complete. Buffered
+// channels, close propagation, select candidates, cancellation, and any node
+// still linked in a queue retain the bounded runtime cleanup cursor.
+func coroChanDirectResultFinalizableV1(
+	operation *coroChanOperationV1,
+	status waitStatus,
+) bool {
+	if operation == nil || !operation.direct || operation.waiter == nil ||
+		!validCoroChanOperationV1(operation, operation.waiter) || !status.done() {
+		return false
+	}
+	return coroChanDirectCommitShapeV1(operation, status, true)
+}
+
+// coroChanDirectCommitShapeV1 checks only the hchan-owned half of the exact
+// direct waiter certificate. Callers which already proved
+// validCoroChanOperationV1 under this hchan lock can retain that proof across
+// the no-suspend transaction instead of revalidating the same operation,
+// waiter, source route, and back-pointers at every phase boundary.
+func coroChanDirectCommitShapeV1(
+	operation *coroChanOperationV1,
+	status waitStatus,
+	completed bool,
+) bool {
+	waiter := operation.waiter
+	ch := waiter.ch
+	wantStatus := waitPending
+	if completed {
+		wantStatus = status
+	}
+	return operation.direct && status.done() && waiter.status == wantStatus &&
+		!waiter.queued && waiter.prev == nil && waiter.next == nil &&
+		ch != nil && ch.dataqsiz == 0 && ch.qcount == 0 && !ch.closed
+}
+
+// coroChanDirectCommitCandidateV1 is the pre-effect counterpart of
+// coroChanDirectResultFinalizableV1. The exact waiter has been detached under
+// its hchan lock but its typed payload and terminal status have not yet been
+// written. Only this open, unbuffered, one-operation shape may prepare the
+// owner-local source fast lane.
+func coroChanDirectCommitCandidateV1(
+	operation *coroChanOperationV1,
+	status waitStatus,
+) bool {
+	if operation == nil || !operation.direct || operation.waiter == nil ||
+		!validCoroChanOperationV1(operation, operation.waiter) || !status.done() {
+		return false
+	}
+	return coroChanDirectCommitShapeV1(operation, status, false)
+}
+
+func finalizeCoroChanDirectResultV1(operation *coroChanOperationV1, recycled bool) bool {
+	if operation == nil || operation.waiter == nil {
+		return false
+	}
+	id, waiter := operation.id, operation.waiter
+	if recycled {
+		ch := waiter.ch
+		if id != (coro.OperationID{}) || !operation.direct ||
+			operation.magic != coroChanOperationMagicV1 || operation.claim == nil ||
+			operation.source == nil || waiter.coro != operation || !waiter.status.done() ||
+			waiter.queued || waiter.prev != nil || waiter.next != nil || ch == nil ||
+			ch.dataqsiz != 0 || ch.qcount != 0 || ch.closed {
+			return false
+		}
+		*waiter = chanWaiter{}
+		*operation = coroChanOperationV1{}
+		return true
+	}
+	if !id.Valid() {
+		return false
+	}
+	*waiter = chanWaiter{}
+	*operation = coroChanOperationV1{id: id}
+	return true
+}
+
+func publishCoroChannelOwnerLocalV1(
+	current *coro.G,
+	driver *coro.ExecutorDriver,
+	endpoint coroChanCompletionEndpointV1,
+) (published, ok bool) {
+	if endpoint.source == nil || !endpoint.id.Valid() {
 		return false, false
 	}
-	if current, _ := coroCurrentTaskV1(); current != nil {
-		return coro.TryPublishOwnerLocalChannelCompletion(
+	if current != nil && driver != nil {
+		return coro.TryPublishOwnerLocalChannelCompletionCurrent(
 			current,
-			operation.source,
-			operation.id,
+			driver,
+			endpoint.source,
+			endpoint.id,
 		)
 	}
 	return false, true
 }
 
-func requestCoroChannelExecutorV1(operation *coroChanOperationV1) bool {
-	local, ok := publishCoroChannelOwnerLocalV1(operation)
-	if !ok || local {
-		return ok
-	}
-	return coroTargetRequestChannelOperationV1(operation.id)
+type coroChanExternalCommitContextV1 struct {
+	current          *coro.G
+	driver           *coro.ExecutorDriver
+	route            coro.RouteID
+	ownerLocalDirect bool
+	directResult     bool
 }
 
-func requestCoroChannelPairExecutorsV1(first, second *coroChanOperationV1) bool {
-	if first == nil || second == nil || !first.id.Valid() || !second.id.Valid() {
+func currentCoroChannelExternalContextV1() coroChanExternalCommitContextV1 {
+	current, driver, route := coroCurrentTaskV1()
+	return coroChanExternalCommitContextV1{
+		current: current,
+		driver:  driver,
+		route:   route,
+	}
+}
+
+// coroChannelExternalContextForTaskV1 consumes the compiler-carried logical
+// task directly. Channel lowering already owns this value as its first hidden
+// coroutine parameter, so recovering it through getg/TLS on every rendezvous
+// would both repeat work and unnecessarily disable owner-local completion on
+// targets without a native TLS-backed current-task adapter.
+func coroChannelExternalContextForTaskV1(task *coro.G) coroChanExternalCommitContextV1 {
+	if task == nil {
+		return coroChanExternalCommitContextV1{}
+	}
+	driver, route, current := coro.CurrentExecutorDriverForCompilerTask(task)
+	if !current {
+		// Host adapters and single-owner portable executors do not necessarily
+		// expose the native runner's narrow issued-action certificate. The exact
+		// compiler-carried G still admits the complete owner proof without TLS or
+		// a route scan.
+		var handle coro.ExecutorHandle
+		driver, handle, route, current = coro.CurrentExecutorDriver(task)
+		if !current || handle.Slot == 0 || handle.Generation == 0 {
+			return coroChanExternalCommitContextV1{}
+		}
+	}
+	return coroChanExternalCommitContextV1{
+		current: task,
+		driver:  driver,
+		route:   route,
+	}
+}
+
+// prepareCoroChannelExternalV1 samples the managed-owner capability before the
+// no-return effect boundary. The common path reuses the same sample after the
+// typed transfer; the exact direct shape may additionally reserve an empty
+// same-P source slot for mailbox-free publication.
+func prepareCoroChannelExternalV1(
+	transaction *coro.ChannelExternalCommit,
+	operation *coroChanOperationV1,
+	status waitStatus,
+) coroChanExternalCommitContextV1 {
+	context := currentCoroChannelExternalContextV1()
+	return prepareCoroChannelExternalWithContextV1(transaction, operation, status, context)
+}
+
+func prepareCoroChannelExternalWithContextV1(
+	transaction *coro.ChannelExternalCommit,
+	operation *coroChanOperationV1,
+	status waitStatus,
+	context coroChanExternalCommitContextV1,
+) coroChanExternalCommitContextV1 {
+	context.ownerLocalDirect = false
+	context.directResult = coroChanDirectCommitCandidateV1(operation, status)
+	if context.directResult &&
+		context.current != nil && context.driver != nil {
+		context.ownerLocalDirect = transaction.PrepareOwnerLocalDirect(
+			context.current,
+			context.driver,
+		)
+	}
+	return context
+}
+
+// beginCoroChannelExternalV1 is the queued-waiter direct ingress. The exact
+// current-G capability is sampled once; on the common same-P shape the source
+// transaction consumes it while acquiring admission, avoiding a second full
+// endpoint audit after the select claim has already excluded its owner.
+func beginCoroChannelExternalV1(
+	waiter *chanWaiter,
+	status waitStatus,
+	transaction *coro.ChannelExternalCommit,
+) (coroChanMatchResult, coroChanExternalCommitContextV1) {
+	context := currentCoroChannelExternalContextV1()
+	return beginCoroChannelExternalWithContextV1(waiter, status, transaction, context)
+}
+
+func beginCoroChannelExternalWithContextV1(
+	waiter *chanWaiter,
+	status waitStatus,
+	transaction *coro.ChannelExternalCommit,
+	context coroChanExternalCommitContextV1,
+) (coroChanMatchResult, coroChanExternalCommitContextV1) {
+	return beginCoroChannelExternalValidatedWithContextV1(
+		waiter, status, transaction, context,
+		coroChanDirectCommitCandidateV1(waiter.coro, status),
+	)
+}
+
+func beginCoroChannelExternalValidatedWithContextV1(
+	waiter *chanWaiter,
+	status waitStatus,
+	transaction *coro.ChannelExternalCommit,
+	context coroChanExternalCommitContextV1,
+	directResult bool,
+) (coroChanMatchResult, coroChanExternalCommitContextV1) {
+	context.ownerLocalDirect = false
+	context.directResult = directResult
+	direct := directResult &&
+		context.current != nil && context.driver != nil
+	for {
+		var result coro.ChannelExternalCommitBeginResult
+		if direct {
+			result, context.ownerLocalDirect = coro.BeginChannelOwnerLocalDirectCommit(
+				transaction,
+				waiter.coro.source,
+				waiter.coro.id,
+				waiter.coro.claim,
+				context.current,
+				context.driver,
+			)
+		} else {
+			result = coro.BeginChannelExternalCommit(
+				transaction,
+				waiter.coro.source,
+				waiter.coro.id,
+				waiter.coro.claim,
+			)
+		}
+		classified := classifyCoroChanSingleBegin(result)
+		if classified != coroChanMatchRetry {
+			return classified, context
+		}
+	}
+}
+
+// commitCoroChannelExternalV1 samples the current managed owner once for the
+// complete post-effect tail. Previously CommitAtRoute and owner-local
+// publication each repeated the TLS/runtime-context/driver proof, making a
+// successful same-P rendezvous pay that full lookup three times. The physical
+// transaction still publishes before any scheduler-local mutation, and a nil
+// current retains the ordinary routed producer path.
+func commitCoroChannelExternalV1(
+	transaction *coro.ChannelExternalCommit,
+	operation *coroChanOperationV1,
+	status waitStatus,
+	context coroChanExternalCommitContextV1,
+) bool {
+	endpoint, endpointOK := coroChanCompletionEndpointForV1(operation)
+	if transaction == nil || !status.done() || !endpointOK {
 		return false
 	}
-	firstLocal, firstOK := publishCoroChannelOwnerLocalV1(first)
-	secondLocal, secondOK := publishCoroChannelOwnerLocalV1(second)
-	if !firstOK || !secondOK {
+	directResult := context.directResult
+	if context.ownerLocalDirect {
+		if !directResult {
+			return false
+		}
+		switch transaction.CommitOwnerLocalDirectWithResult(uint8(status)) {
+		case coro.ChannelOwnerLocalCommitted:
+			return finalizeCoroChanDirectResultV1(operation, false)
+		case coro.ChannelOwnerLocalCompletedInline:
+			return finalizeCoroChanDirectResultV1(operation, true)
+		case coro.ChannelOwnerLocalCommitFallback:
+		case coro.ChannelOwnerLocalCommitInvalid:
+			return false
+		default:
+			return false
+		}
+	}
+	var committed bool
+	if directResult {
+		committed = transaction.CommitAtRouteWithResult(context.route, uint8(status))
+	} else {
+		committed = transaction.CommitAtRoute(context.route)
+	}
+	if !committed {
 		return false
 	}
-	if !firstLocal && !coroTargetRequestChannelOperationV1(first.id) {
+	local, localOK := publishCoroChannelOwnerLocalV1(context.current, context.driver, endpoint)
+	if !localOK {
 		return false
 	}
-	if secondLocal || !firstLocal && first.id.Route() == second.id.Route() {
+	if local {
+		return !directResult || finalizeCoroChanDirectResultV1(operation, false)
+	}
+	return coroTargetRequestChannelOperationV1(endpoint.id)
+}
+
+func commitCoroChannelExternalPairV1(
+	transaction *coro.ChannelExternalCommitPair,
+	first, second *coroChanOperationV1,
+) bool {
+	firstEndpoint, firstEndpointOK := coroChanCompletionEndpointForV1(first)
+	secondEndpoint, secondEndpointOK := coroChanCompletionEndpointForV1(second)
+	if transaction == nil || !firstEndpointOK || !secondEndpointOK {
+		return false
+	}
+	firstDirect := coroChanDirectResultFinalizableV1(first, waitSendOK)
+	secondDirect := coroChanDirectResultFinalizableV1(second, waitRecvOK)
+	firstSmall, secondSmall := uint8(coro.ResumeSmallInvalid), uint8(coro.ResumeSmallInvalid)
+	if firstDirect {
+		firstSmall = uint8(waitSendOK)
+	}
+	if secondDirect {
+		secondSmall = uint8(waitRecvOK)
+	}
+	current, driver, route := coroCurrentTaskV1()
+	if !transaction.CommitAtRouteWithResults(route, firstSmall, secondSmall) ||
+		firstEndpoint.source == nil || secondEndpoint.source == nil {
+		return false
+	}
+	firstLocal, firstOK := publishCoroChannelOwnerLocalV1(current, driver, firstEndpoint)
+	secondLocal, secondOK := publishCoroChannelOwnerLocalV1(current, driver, secondEndpoint)
+	if !firstOK || !secondOK ||
+		firstLocal && firstDirect && !finalizeCoroChanDirectResultV1(first, false) ||
+		secondLocal && secondDirect && !finalizeCoroChanDirectResultV1(second, false) {
+		return false
+	}
+	if !firstLocal && !coroTargetRequestChannelOperationV1(firstEndpoint.id) {
+		return false
+	}
+	if secondLocal || !firstLocal && firstEndpoint.id.Route() == secondEndpoint.id.Route() {
 		return true
 	}
-	return coroTargetRequestChannelOperationV1(second.id)
+	return coroTargetRequestChannelOperationV1(secondEndpoint.id)
 }
 
 func commitCoroRecvWaiterLocked(w *chanWaiter, src unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {
+	return commitCoroRecvWaiterLockedWithContext(
+		w, src, eltSize, status, currentCoroChannelExternalContextV1(),
+	)
+}
+
+func commitCoroRecvWaiterLockedWithContext(
+	w *chanWaiter,
+	src unsafe.Pointer,
+	eltSize int,
+	status waitStatus,
+	context coroChanExternalCommitContextV1,
+) coroChanMatchResult {
 	if !validCoroChanOperationV1(w.coro, w) || w.send || w.size != eltSize ||
 		!status.done() || status == waitSendClosed {
 		return coroChanMatchInvalid
 	}
+	directResult := coroChanDirectCommitShapeV1(w.coro, status, false)
 	var transaction coro.ChannelExternalCommit
-	for {
-		result := coro.BeginChannelExternalCommit(
-			&transaction,
-			w.coro.source,
-			w.coro.id,
-			w.coro.claim,
-		)
-		classified := classifyCoroChanSingleBegin(result)
-		if classified == coroChanMatchRetry {
-			// Acquiring/Committing is a no-suspend claim critical section. Its
-			// holder never waits for hchan, so retrying under the already-held
-			// channel gate cannot form a lock cycle or strand a rendezvous.
-			continue
-		}
-		if classified != coroChanMatchCommitted {
-			return classified
-		}
-		break
+	classified, context := beginCoroChannelExternalValidatedWithContextV1(
+		w, status, &transaction, context, directResult,
+	)
+	if classified != coroChanMatchCommitted {
+		return classified
 	}
 	if !transaction.BeginEffect() {
 		return coroChanMatchInvalid
@@ -362,33 +670,36 @@ func commitCoroRecvWaiterLocked(w *chanWaiter, src unsafe.Pointer, eltSize int, 
 		zeroChanRecv(w.elem, eltSize)
 	}
 	w.status = status
-	if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(w.coro) {
+	if !commitCoroChannelExternalV1(&transaction, w.coro, status, context) {
 		return coroChanMatchInvalid
 	}
 	return coroChanMatchCommitted
 }
 
 func commitCoroSendWaiterLocked(w *chanWaiter, dst unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {
+	return commitCoroSendWaiterLockedWithContext(
+		w, dst, eltSize, status, currentCoroChannelExternalContextV1(),
+	)
+}
+
+func commitCoroSendWaiterLockedWithContext(
+	w *chanWaiter,
+	dst unsafe.Pointer,
+	eltSize int,
+	status waitStatus,
+	context coroChanExternalCommitContextV1,
+) coroChanMatchResult {
 	if !validCoroChanOperationV1(w.coro, w) || !w.send || w.size != eltSize ||
 		(status != waitSendOK && status != waitSendClosed) {
 		return coroChanMatchInvalid
 	}
+	directResult := coroChanDirectCommitShapeV1(w.coro, status, false)
 	var transaction coro.ChannelExternalCommit
-	for {
-		result := coro.BeginChannelExternalCommit(
-			&transaction,
-			w.coro.source,
-			w.coro.id,
-			w.coro.claim,
-		)
-		classified := classifyCoroChanSingleBegin(result)
-		if classified == coroChanMatchRetry {
-			continue
-		}
-		if classified != coroChanMatchCommitted {
-			return classified
-		}
-		break
+	classified, context := beginCoroChannelExternalValidatedWithContextV1(
+		w, status, &transaction, context, directResult,
+	)
+	if classified != coroChanMatchCommitted {
+		return classified
 	}
 	if !transaction.BeginEffect() {
 		return coroChanMatchInvalid
@@ -397,7 +708,7 @@ func commitCoroSendWaiterLocked(w *chanWaiter, dst unsafe.Pointer, eltSize int, 
 		copyChanElem(dst, w.elem, eltSize)
 	}
 	w.status = status
-	if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(w.coro) {
+	if !commitCoroChannelExternalV1(&transaction, w.coro, status, context) {
 		return coroChanMatchInvalid
 	}
 	return coroChanMatchCommitted
@@ -437,7 +748,7 @@ func commitCoroPairLocked(send, recv *chanWaiter, eltSize int) coroChanMatchResu
 	copyChanElem(recv.elem, send.elem, eltSize)
 	send.status = waitSendOK
 	recv.status = waitRecvOK
-	if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelPairExecutorsV1(send.coro, recv.coro) {
+	if !commitCoroChannelExternalPairV1(&transaction, send.coro, recv.coro) {
 		return coroChanMatchInvalid
 	}
 	return coroChanMatchCommitted
@@ -466,12 +777,15 @@ func finishCurrentCoroChannelCommit(
 	transaction *coro.ChannelExternalCommit,
 	status waitStatus,
 ) bool {
-	if !validCoroChanOperationV1(waiter.coro, waiter) || transaction == nil || !status.done() ||
-		!transaction.BeginEffect() {
+	if !validCoroChanOperationV1(waiter.coro, waiter) || transaction == nil || !status.done() {
+		return false
+	}
+	context := prepareCoroChannelExternalV1(transaction, waiter.coro, status)
+	if !transaction.BeginEffect() {
 		return false
 	}
 	waiter.status = status
-	return transaction.CommitAtRoute(coroCurrentTaskRouteV1()) && requestCoroChannelExecutorV1(waiter.coro)
+	return commitCoroChannelExternalV1(transaction, waiter.coro, status, context)
 }
 
 func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
@@ -520,21 +834,25 @@ func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 			}
 			continue
 		}
+		context := prepareCoroChannelExternalV1(&transaction, waiter.coro, waitSendOK)
 		if !transaction.BeginEffect() {
 			return false, false
 		}
 		copyChanElem(peer.elem, waiter.elem, ch.elemsize)
 		waiter.status = waitSendOK
 		peer.finish(waitRecvOK)
-		if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
+		if !commitCoroChannelExternalV1(&transaction, waiter.coro, waitSendOK, context) {
 			return false, false
 		}
 		return true, true
 	}
 	if ch.qcount < ch.dataqsiz {
 		var transaction coro.ChannelExternalCommit
-		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted ||
-			!transaction.BeginEffect() {
+		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted {
+			return false, false
+		}
+		context := prepareCoroChannelExternalV1(&transaction, waiter.coro, waitSendOK)
+		if !transaction.BeginEffect() {
 			return false, false
 		}
 		copyChanElem(chanBuf(ch, ch.sendx), waiter.elem, ch.elemsize)
@@ -544,7 +862,7 @@ func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 		}
 		ch.qcount++
 		waiter.status = waitSendOK
-		if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
+		if !commitCoroChannelExternalV1(&transaction, waiter.coro, waitSendOK, context) {
 			return false, false
 		}
 		return true, true
@@ -591,21 +909,25 @@ func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 				}
 				continue
 			}
+			context := prepareCoroChannelExternalV1(&transaction, waiter.coro, waitRecvOK)
 			if !transaction.BeginEffect() {
 				return false, false
 			}
 			copyChanElem(waiter.elem, peer.elem, ch.elemsize)
 			waiter.status = waitRecvOK
 			peer.finish(waitSendOK)
-			if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
+			if !commitCoroChannelExternalV1(&transaction, waiter.coro, waitRecvOK, context) {
 				return false, false
 			}
 			return true, true
 		}
 	} else if ch.qcount > 0 {
 		var transaction coro.ChannelExternalCommit
-		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted ||
-			!transaction.BeginEffect() {
+		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted {
+			return false, false
+		}
+		context := prepareCoroChannelExternalV1(&transaction, waiter.coro, waitRecvOK)
+		if !transaction.BeginEffect() {
 			return false, false
 		}
 		copyChanElem(waiter.elem, chanBuf(ch, ch.recvx), ch.elemsize)
@@ -616,24 +938,27 @@ func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 		}
 		ch.qcount--
 		waiter.status = waitRecvOK
-		if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
+		if !commitCoroChannelExternalV1(&transaction, waiter.coro, waitRecvOK, context) {
 			return false, false
 		}
 		// Refill is a separate committed sender endpoint under the same hchan
 		// lock. Failure leaves the now-available buffer slot visible to a later
 		// sender without changing the completed receive.
-		dequeueSendToBuffer(ch)
+		dequeueSendToBuffer(ch, &context)
 		return true, true
 	}
 	if ch.closed {
 		var transaction coro.ChannelExternalCommit
-		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted ||
-			!transaction.BeginEffect() {
+		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted {
+			return false, false
+		}
+		context := prepareCoroChannelExternalV1(&transaction, waiter.coro, waitRecvClosed)
+		if !transaction.BeginEffect() {
 			return false, false
 		}
 		zeroChanRecv(waiter.elem, ch.elemsize)
 		waiter.status = waitRecvClosed
-		if !transaction.CommitAtRoute(coroCurrentTaskRouteV1()) || !requestCoroChannelExecutorV1(waiter.coro) {
+		if !commitCoroChannelExternalV1(&transaction, waiter.coro, waitRecvClosed, context) {
 			return false, false
 		}
 		return true, true
@@ -653,7 +978,10 @@ const (
 
 // dequeueSendToBufferStepLocked examines and removes at most one queued
 // sender. The caller owns ch.mutex.
-func dequeueSendToBufferStepLocked(ch *Chan) coroChanQueueStepV1 {
+func dequeueSendToBufferStepLocked(
+	ch *Chan,
+	context *coroChanExternalCommitContextV1,
+) coroChanQueueStepV1 {
 	if ch == nil || ch.closed || ch.qcount >= ch.dataqsiz {
 		return coroChanQueueIdleV1
 	}
@@ -662,7 +990,15 @@ func dequeueSendToBufferStepLocked(ch *Chan) coroChanQueueStepV1 {
 		return coroChanQueueIdleV1
 	}
 	if w.coro != nil {
-		switch result := commitCoroSendWaiterLocked(w, chanBuf(ch, ch.sendx), ch.elemsize, waitSendOK); result {
+		var result coroChanMatchResult
+		if context == nil {
+			result = commitCoroSendWaiterLocked(w, chanBuf(ch, ch.sendx), ch.elemsize, waitSendOK)
+		} else {
+			result = commitCoroSendWaiterLockedWithContext(
+				w, chanBuf(ch, ch.sendx), ch.elemsize, waitSendOK, *context,
+			)
+		}
+		switch result {
 		case coroChanMatchCommitted:
 			ch.sendx++
 			if ch.sendx == ch.dataqsiz {
@@ -692,9 +1028,12 @@ func dequeueSendToBufferStepLocked(ch *Chan) coroChanQueueStepV1 {
 	return coroChanQueueCommittedV1
 }
 
-func dequeueSendToBufferLocked(ch *Chan) (progress, ok bool) {
+func dequeueSendToBufferLocked(
+	ch *Chan,
+	context *coroChanExternalCommitContextV1,
+) (progress, ok bool) {
 	for {
-		switch dequeueSendToBufferStepLocked(ch) {
+		switch dequeueSendToBufferStepLocked(ch, context) {
 		case coroChanQueueCommittedV1:
 			return true, true
 		case coroChanQueueDiscardedV1:
@@ -707,8 +1046,8 @@ func dequeueSendToBufferLocked(ch *Chan) (progress, ok bool) {
 	}
 }
 
-func dequeueSendToBuffer(ch *Chan) {
-	if _, ok := dequeueSendToBufferLocked(ch); !ok {
+func dequeueSendToBuffer(ch *Chan, context *coroChanExternalCommitContextV1) {
+	if _, ok := dequeueSendToBufferLocked(ch, context); !ok {
 		coroRuntimeAbort("invalid coroutine channel buffer refill")
 	}
 }
@@ -780,7 +1119,7 @@ func reconcileBufferedChanLocked(ch *Chan, refill bool) bool {
 			progress = consumed
 		}
 		if refill && !ch.closed && ch.qcount < ch.dataqsiz {
-			filled, ok := dequeueSendToBufferLocked(ch)
+			filled, ok := dequeueSendToBufferLocked(ch, nil)
 			if !ok {
 				return false
 			}
@@ -851,23 +1190,52 @@ func ensureCoroChannelOperationCapacityV1(
 		return false
 	}
 	for !coro.CanReserveChannelOperations(p, source, needed) {
-		if coro.ChannelOperationConfiguredCapacity(source) >= coro.ChannelOperationMaximumCapacity {
-			return false
-		}
-		page := new(coro.ChannelOperationPage)
-		if page == nil {
-			return false
-		}
-		attached := coro.AttachChannelOperationPage(source, p, page, nil)
-		if !attached {
-			block := new(coro.OperationPageDirectoryBlock)
-			attached = block != nil && coro.AttachChannelOperationPage(source, p, page, block)
-		}
-		if !attached {
+		if !growCoroChannelOperationCapacityV1(p, source) {
 			return false
 		}
 	}
 	return true
+}
+
+func growCoroChannelOperationCapacityV1(
+	p *coro.P,
+	source *coro.ChannelOperationSource,
+) bool {
+	if p == nil || source == nil ||
+		coro.ChannelOperationConfiguredCapacity(source) >= coro.ChannelOperationMaximumCapacity {
+		return false
+	}
+	page := new(coro.ChannelOperationPage)
+	if page == nil {
+		return false
+	}
+	attached := coro.AttachChannelOperationPage(source, p, page, nil)
+	if !attached {
+		block := new(coro.OperationPageDirectoryBlock)
+		attached = block != nil && coro.AttachChannelOperationPage(source, p, page, block)
+	}
+	return attached
+}
+
+// prepareCoroChannelDirectReservationV1 combines the direct park's capacity
+// check with selection of its exact reusable slot. The opaque capability is
+// consumed before any suspension, eliminating the second catalog scan which
+// the general select-capacity API necessarily performs.
+func prepareCoroChannelDirectReservationV1(
+	p *coro.P,
+	source *coro.ChannelOperationSource,
+) (coro.ChannelDirectReservation, bool) {
+	if p == nil || source == nil {
+		return coro.ChannelDirectReservation{}, false
+	}
+	for {
+		if reservation, ok := source.PreflightDirectReservation(p); ok {
+			return reservation, true
+		}
+		if !growCoroChannelOperationCapacityV1(p, source) {
+			return coro.ChannelDirectReservation{}, false
+		}
+	}
 }
 
 func prepareCoroChanSelectV1(
@@ -914,9 +1282,8 @@ func prepareCoroChanSelectV1(
 		return
 	}
 	sortCoroChanSelectOrder(candidates, ops)
-	driver, _, route, current := coro.CurrentExecutorChannelDriver(task)
-	p, park, source, ownerOK := coro.CurrentExecutorChannelParkOwner(driver, task)
-	if !current || !ownerOK || !ensureCoroChannelOperationCapacityV1(p, source, physical) {
+	_, _, route, p, park, source, current := coro.CurrentExecutorChannelParkContext(task)
+	if !current || !ensureCoroChannelOperationCapacityV1(p, source, physical) {
 		coroRuntimeAbort("coroutine channel select source capacity exhausted")
 		return
 	}
@@ -1111,11 +1478,12 @@ func prepareCoroChanParkV1(
 		return
 	}
 	state := (*CoroChanParkV1)(storage)
-	*state = CoroChanParkV1{}
+	// The frame allocator and the prior resume own whole-state clearing. Doing
+	// it again here made every actual park clear this large record twice.
 	ch := (*Chan)(channel)
 	size := int(eltSize)
 	state.magic = coroChanParkMagicV1
-	state.operation = coroChanOperationV1{claim: &state.claim, waiter: &state.waiter}
+	state.operation = coroChanOperationV1{claim: &state.claim, waiter: &state.waiter, direct: true}
 	state.waiter = chanWaiter{ch: ch, elem: elem, size: size, send: send, coro: &state.operation}
 	if ch == nil {
 		ticket, ok := coro.PrepareEmptyChannelPark(
@@ -1136,49 +1504,52 @@ func prepareCoroChanParkV1(
 		return
 	}
 	task := (*coro.G)(g)
-	driver, _, route, current := coro.CurrentExecutorChannelDriver(task)
-	p, _, source, ownerOK := coro.CurrentExecutorChannelParkOwner(driver, task)
-	if !current || !ownerOK || !ensureCoroChannelOperationCapacityV1(p, source, 1) {
-		coroRuntimeAbort("cannot resolve coroutine channel park owner")
-		return
-	}
-	ticket, id, ok := coro.PrepareSingleChannelPark(
+	seed := fastrand()
+	prepared := coro.PrepareCurrentChannelParkCleanup(
 		task,
 		handle,
 		(*coro.HeaderV1)(header),
-		source,
 		&state.wait,
 		&state.claim,
+		&state.packet,
+		&state.cleanup,
+		unsafe.Pointer(state),
+		&state.operation.id,
+		coro.ChannelDirectReservation{},
+		false,
 		1,
-		fastrand(),
+		seed,
 	)
-	if !ok || id.Route() != route {
+	if prepared.State == coro.CurrentChannelParkPreparationNeedsCapacity {
+		reservation, ok := prepareCoroChannelDirectReservationV1(prepared.Owner, prepared.Source)
+		if ok {
+			prepared = coro.PrepareCurrentChannelParkCleanup(
+				task,
+				handle,
+				(*coro.HeaderV1)(header),
+				&state.wait,
+				&state.claim,
+				&state.packet,
+				&state.cleanup,
+				unsafe.Pointer(state),
+				&state.operation.id,
+				reservation,
+				true,
+				1,
+				seed,
+			)
+		}
+	}
+	if prepared.State != coro.CurrentChannelParkPreparationPrepared ||
+		prepared.Operation.Route() != prepared.Route {
 		coroRuntimeAbort("cannot prepare coroutine channel park")
 		return
 	}
-	state.ticket = ticket
-	state.operation.id = id
-	state.operation.source = source
+	state.ticket = prepared.Ticket
+	state.operation.source = prepared.Source
 	state.operation.magic = coroChanOperationMagicV1
-	if !coro.BindWaitSetResumeCleanup(
-		&state.wait,
-		&state.packet,
-		&state.cleanup,
-		coro.ResumeCleanupBinding{
-			Kind:         coro.ResumeCleanupChannelDirect,
-			Context:      unsafe.Pointer(state),
-			Entries:      unsafe.Pointer(&state.operation.id),
-			Claim:        &state.claim,
-			Count:        1,
-			RuntimeCount: 1,
-			Stride:       unsafe.Sizeof(coro.OperationID{}),
-		},
-	) {
-		coroRuntimeAbort("cannot bind coroutine channel cleanup")
-		return
-	}
 	ch.mutex.Lock()
-	var ready bool
+	var ready, ok bool
 	if send {
 		ready, ok = coroChanTrySendLocked(ch, &state.waiter)
 	} else {
@@ -1313,7 +1684,7 @@ func advanceCoroChanCleanupCursorV1(
 		}
 	case coroChanCleanupBufferSendV1:
 		if ch.dataqsiz != 0 && !ch.closed && ch.qcount < ch.dataqsiz {
-			switch dequeueSendToBufferStepLocked(ch) {
+			switch dequeueSendToBufferStepLocked(ch, nil) {
 			case coroChanQueueCommittedV1:
 				cursor.phase = coroChanCleanupBufferRecvV1
 			case coroChanQueueDiscardedV1:
@@ -1413,10 +1784,24 @@ func materializeCoroChanOperationV1(
 	} else {
 		ch.recvq.remove(waiter)
 	}
+	// A completed rendezvous on an open unbuffered channel has no buffer or
+	// closed-channel reconciliation work. The old bounded cursor would perform
+	// two phase-only reductions before reaching the same result. Finish this
+	// exact zero-peer shape while the channel snapshot is still protected; all
+	// buffered, closed, and potentially cascading cases retain the resumable
+	// one-peer-per-reduction cleanup path below.
+	directRendezvous := deliver && ch.dataqsiz == 0 && !ch.closed
 	ch.mutex.Unlock()
 	id := operation.id
 	*waiter = chanWaiter{}
 	*operation = coroChanOperationV1{id: id}
+	if directRendezvous {
+		small := uint8(coro.ResumeSmallInvalid)
+		if deliver {
+			small = uint8(status)
+		}
+		return small, true, true
+	}
 	*cursor = coroChanCleanupCursorV1{
 		ch:      ch,
 		status:  status,

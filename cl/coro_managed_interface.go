@@ -182,13 +182,20 @@ func (p *coroManagedInterfaceDispatchPlan) acceptsTarget(fn *ssa.Function, plan 
 	return ok && target == fn
 }
 
-func coroManagedInterfaceMethodKey(method *types.Func, signature *types.Signature) string {
+func coroManagedInterfaceMethodKey(
+	method *types.Func,
+	signature *types.Signature,
+	universes ...*EmissionUniverse,
+) string {
 	if method == nil || signature == nil {
 		return ""
 	}
 	callable := coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(signature))
 	if callable == nil {
 		return ""
+	}
+	if len(universes) != 0 && universes[0] != nil {
+		return method.Id() + "\x00" + universes[0].cachedStrictEmissionABITypeKey(callable)
 	}
 	return method.Id() + "\x00" + structuralEmissionABITypeKey(callable)
 }
@@ -207,7 +214,7 @@ func coroManagedInterfaceInvokeMethodKey(
 	if err != nil {
 		return "", err
 	}
-	key := coroManagedInterfaceMethodKey(common.Method, signature)
+	key := coroManagedInterfaceMethodKey(common.Method, signature, universe)
 	if key == "" {
 		return "", fmt.Errorf("managed interface descriptor has no exact method/signature key")
 	}
@@ -667,7 +674,7 @@ func (p *context) resolveCoroRawMethodSymbol(
 		}
 		return p.mustRawPlainFunctionSymbol(target).name, true
 	}
-	key := sha256.Sum256([]byte(string(entry.plan.ID) + "\x00" + structuralEmissionABITypeKey(patched)))
+	key := sha256.Sum256([]byte(string(entry.plan.ID) + "\x00" + p.cachedStrictEmissionABITypeKey(patched)))
 	name := coroManagedInterfaceRawTrapPrefix + hex.EncodeToString(key[:16])
 	// ABI method tables for one concrete type may be materialized in several
 	// package archives. The content-addressed trap is therefore a coalescible
@@ -852,7 +859,7 @@ func validateCoroManagedInterfaceDescriptorTarget(
 	targetLogical := coroInterfaceDispatchCanonicalSignature(types.NewSignatureType(
 		nil, nil, nil, types.NewTuple(params...), effective.Results(), effective.Variadic(),
 	))
-	if !coroInterfaceDispatchSignaturesIdentical(logicalSignature, targetLogical) {
+	if !coroInterfaceDispatchSignaturesIdentical(logicalSignature, targetLogical, universe) {
 		return fail("logical signature %s does not match effective target signature %s", logicalSignature, targetLogical)
 	}
 	return nil

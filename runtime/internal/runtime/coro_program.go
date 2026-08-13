@@ -122,6 +122,7 @@ var (
 	coroProgramLifecycleV1State          coroProgramLifecycleV1
 	coroProgramManifestV1State           *coro.ProgramManifestV1
 	coroProgramFactoryV1State            unsafe.Pointer
+	coroProgramCapabilitiesV2State       coro.ProgramCapabilitiesV2
 	coroProgramGV1State                  coroG
 	coroProgramPV1State                  coroP
 	coroProgramContinuationV1State       coroProgramContinuationV1
@@ -251,11 +252,17 @@ func coroProgramBeginOwnedV1(manifest, expectedFactory unsafe.Pointer) (unsafe.P
 		return nil, false
 	}
 	programManifest := (*coro.ProgramManifestV1)(manifest)
-	_, v2Code := coro.ValidateRunnableProgramV2(programManifest, expectedFactory)
+	program, v2Code := coro.ValidateRunnableProgramV2(programManifest, expectedFactory)
 	if v2Code != coro.ProgramValidationOKV2 {
 		coroProgramLifecycleV1State = coroProgramFailedV1
 		return nil, false
 	}
+	capabilities, capabilityCode := coro.ResolveProgramCapabilitiesV2(program)
+	if capabilityCode != coro.ProgramValidationOKV2 || !capabilities.Valid() {
+		coroProgramLifecycleV1State = coroProgramFailedV1
+		return nil, false
+	}
+	coroProgramCapabilitiesV2State = capabilities
 	if !coroInitG(&coroProgramGV1State) ||
 		!coro.BindRunnableOwner(&coroProgramGV1State) ||
 		!coroProgramBindExecutorV1() ||
@@ -267,6 +274,10 @@ func coroProgramBeginOwnedV1(manifest, expectedFactory unsafe.Pointer) (unsafe.P
 	coroProgramFactoryV1State = expectedFactory
 	coroProgramLifecycleV1State = coroProgramBegunV1
 	return unsafe.Pointer(&coroProgramGV1State), true
+}
+
+func coroProgramWorkerCapabilityV2() bool {
+	return coroProgramCapabilitiesV2State.Valid() && coroProgramCapabilitiesV2State.Worker()
 }
 
 func coroProgramBeginV1(manifest, expectedFactory unsafe.Pointer) (unsafe.Pointer, bool) {

@@ -148,7 +148,7 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		coroRuntimeAbort("native coroutine fleet worker start failed")
 		return false
 	}
-	if !coroNativeFleetPhysicalOwnersStartV1() {
+	if !coroNativeFleetPhysicalOwnersStartV1(limit) {
 		_ = coroNativeWorkerPoolStopFleetV1()
 		_ = coroNativeMStopCleanFactoryV1()
 		state.lifecycle = coroNativeFleetTargetFailedV1

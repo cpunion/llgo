@@ -84,7 +84,7 @@ func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Inst
 }
 
 func (p *context) compileCoroPatchInitAtBlock(b llssa.Builder) bool {
-	if !p.hasCoroPhysicalBody() {
+	if !p.hasStructuredOutcomePhysicalBody() {
 		return false
 	}
 	p.compileCoroPatchInitAwait(b)
@@ -135,8 +135,12 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		// A ProgramIR-finalized helper-free intrinsic remains a source *ssa.Call
 		// but has no physical callee edge. Let the ordinary intrinsic emitter own
 		// it. Every unrefined source call still fails closed here.
+		staticOutcome := false
+		if physical := p.coroEmissionPlan(); physical != nil {
+			staticOutcome = physical.staticOutcome
+		}
 		if instructionPlan.control != coroPhysicalControlNone ||
-			!coroOutcomePlainLeafSemanticRecipe(instructionPlan.semantic) {
+			!staticOutcome && !coroOutcomePlainLeafSemanticRecipe(instructionPlan.semantic) {
 			panic(fmt.Sprintf("outcome-plain DAG call selected incompatible frozen control recipe %s", instructionPlan.control))
 		}
 	}

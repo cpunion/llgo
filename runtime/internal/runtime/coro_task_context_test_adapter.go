@@ -18,7 +18,11 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import (
+	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/coro"
+)
 
 // Named-source adapters exercise the target-neutral scheduler without loading
 // runtime2.go and platform getg implementations into the host Go runtime.
@@ -39,6 +43,6 @@ func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivati
 	return task != nil
 }
 
-func coroReleaseRuntimeContext(task *coro.G) bool {
-	return task != nil
+func coroReleaseRuntimeContext(task *coro.G, local unsafe.Pointer) bool {
+	return task != nil && local != nil
 }

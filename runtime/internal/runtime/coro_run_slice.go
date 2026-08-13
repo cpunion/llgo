@@ -39,6 +39,14 @@ func coroHandleResume(unsafe.Pointer)
 //go:linkname coroHandleDestroy C.__llgo_coro_destroy_v1
 func coroHandleDestroy(unsafe.Pointer)
 
+func coroHandleDestroyCommitted(g *coro.G, handle unsafe.Pointer) bool {
+	if g == nil || handle == nil {
+		return false
+	}
+	coroHandleDestroy(handle)
+	return coro.CommitFrameDestroyV2(g, handle)
+}
+
 // __llgo_coro_await_inline_v1 resumes one already prepared child on the
 // current executor stack. A synchronous completion is destroyed and committed
 // here; a real suspension returns false so generated parents unwind through
@@ -62,7 +70,10 @@ func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool {
 	case coro.InlineAwaitSuspend:
 		return false
 	case coro.InlineAwaitDestroy:
-		coroHandleDestroy(child)
+		if !coroHandleDestroyCommitted(task, child) {
+			coroRuntimeAbort("invalid coroutine inline child physical destroy")
+			return false
+		}
 		if !coro.CommitInlineAwaitDestroy(task, parent, child) {
 			coroRuntimeAbort("invalid coroutine inline child destroy commit")
 			return false
@@ -71,6 +82,44 @@ func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool {
 	default:
 		coroRuntimeAbort("invalid coroutine inline child return")
 		return false
+	}
+}
+
+// __llgo_coro_await_inline_begin_v2 owns only the scheduler-state half of an
+// eager static child handoff. Keeping llvm.coro.resume/done/destroy in the
+// generated caller exposes the exact handle lifetime to LLVM 22's annotated
+// frame-elision pass.
+//
+//export __llgo_coro_await_inline_begin_v2
+func __llgo_coro_await_inline_begin_v2(g, parent, child unsafe.Pointer) bool {
+	switch coro.BeginInlineAwait((*coro.G)(g), parent, child) {
+	case coro.InlineAwaitDeclined:
+		return false
+	case coro.InlineAwaitStarted:
+		return true
+	default:
+		coroRuntimeAbort("invalid coroutine inline child begin")
+		return false
+	}
+}
+
+//export __llgo_coro_await_inline_finish_v2
+func __llgo_coro_await_inline_finish_v2(g, parent, child unsafe.Pointer, done bool) bool {
+	switch coro.FinishInlineAwait((*coro.G)(g), parent, child, done) {
+	case coro.InlineAwaitSuspend:
+		return false
+	case coro.InlineAwaitDestroy:
+		return true
+	default:
+		coroRuntimeAbort("invalid coroutine inline child finish")
+		return false
+	}
+}
+
+//export __llgo_coro_await_inline_destroy_commit_v2
+func __llgo_coro_await_inline_destroy_commit_v2(g, parent, child unsafe.Pointer) {
+	if !coro.CommitInlineAwaitDestroy((*coro.G)(g), parent, child) {
+		coroRuntimeAbort("invalid coroutine inline child destroy commit")
 	}
 }
 
@@ -197,10 +246,14 @@ func coroRunPhysicalActionV1(p *coro.P, g *coro.G, action coro.Action) (coro.Act
 		if !ok || next.Kind != coro.ActionDestroy || next.Handle != action.Handle {
 			return coro.Action{}, false
 		}
-		coroHandleDestroy(next.Handle)
+		if !coroHandleDestroyCommitted(g, next.Handle) {
+			return coro.Action{}, false
+		}
 		return coro.DestroyedBounded(p, g, next)
 	case coro.ActionPanicDestroy:
-		coroHandleDestroy(action.Handle)
+		if !coroHandleDestroyCommitted(g, action.Handle) {
+			return coro.Action{}, false
+		}
 		return coro.PanicDestroyedBounded(p, g, action)
 	default:
 		return coro.Action{}, false
@@ -215,11 +268,18 @@ func coroRunPhysicalActionV1(p *coro.P, g *coro.G, action coro.Action) (coro.Act
 // wait=true is an ordinary stable scheduler-stack return: the route keeps all
 // runnable and source ownership and waits only for another P publication.
 func coroPrepareManagedExecutionV1(driver *coro.ExecutorDriver, held bool) (nextHeld, wait, ok bool) {
+	// A slice-held lease already proves that this M owns one managed-execution
+	// slot. NextExecutorRunStep performs the complete driver/action validation;
+	// re-running the observational pending probe before every source, dispatch,
+	// and later action reduction cannot change the retained lease decision.
+	if held {
+		return true, false, true
+	}
 	pending, valid := coro.ExecutorRunManagedResumePending(driver)
 	if !valid {
 		return held, false, false
 	}
-	if held || !pending {
+	if !pending {
 		return held, false, true
 	}
 	acquired, valid := coroTargetAcquireManagedExecutionV1(driver)
@@ -422,6 +482,10 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 	if p == nil || driver == nil || now < 0 || budget == 0 {
 		return coroRunResultV1{}
 	}
+	run, runOK := coro.BeginExecutorRunSlice(driver)
+	if !runOK {
+		return coroRunResultV1{}
+	}
 	result := coroRunResultV1{}
 	held := false
 	for result.used < budget {
@@ -435,7 +499,7 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 			result.stop = coroRunExecutionWaitV1
 			return result
 		}
-		step, nextOK := coro.NextExecutorRunStepAt(driver, now)
+		step, nextOK := run.NextAt(now)
 		if !nextOK || !coroStepMatchesManagedExecutionV1(step, held) {
 			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}

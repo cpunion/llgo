@@ -52,10 +52,17 @@ type plannedFunctionSymbol struct {
 	patchOriginalInit bool
 	wasmImport        wasmImportSpec
 	hasWasmImport     bool
+	// outcomePlainTwin selects the compiler-owned synchronous static-call
+	// symbol while leaving plan.ManagedEntry and the dynamic descriptor on the
+	// ordinary coroutine primary.
+	outcomePlainTwin bool
 }
 
 func (e plannedFunctionSymbol) usesCoroPhysicalABI() bool {
 	if !e.planned || !e.physical {
+		return false
+	}
+	if e.outcomePlainTwin {
 		return false
 	}
 	if e.plan.Emission == coro.EmitCoroutine {
@@ -70,11 +77,29 @@ func (e plannedFunctionSymbol) usesOutcomePlainPhysicalABI() bool {
 	if !e.planned || !e.physical {
 		return false
 	}
+	if e.outcomePlainTwin {
+		return true
+	}
 	if e.plan.Emission == coro.EmitOutcomePlain {
 		return true
 	}
 	return e.importedLibrary && e.plan.Emission == coro.EmitExternal &&
 		e.libraryEffect.ManagedEntry == coro.ManagedEntryOutcomePlain
+}
+
+func (e plannedFunctionSymbol) hasOutcomePlainCapability() bool {
+	if !e.planned || !e.physical || !e.plan.HasStaticOutcome() {
+		return false
+	}
+	if !e.plan.StaticOutcome && (e.plan.AtomicCost == 0 || e.plan.AtomicCostCertificate == "") {
+		return false
+	}
+	if e.importedLibrary {
+		return e.plan.External == coro.ExternalKnown && e.plan.Emission == coro.EmitExternal &&
+			e.libraryEffect.OutcomePlainSymbol != ""
+	}
+	return e.plan.External == coro.Defined &&
+		(e.plan.Emission == coro.EmitOutcomePlain || e.plan.Emission == coro.EmitCoroutine)
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -201,6 +226,23 @@ func (p *context) resolvePatchOriginalInitSymbol(fn *ssa.Function) (plannedFunct
 		entry.name += coroPrimarySuffix
 	}
 	entry.patchOriginalInit = true
+	return entry, nil
+}
+
+// resolvePatchOriginalInitOutcomeSymbol preserves the private original-init
+// role while selecting its synchronous outcome twin. The generic outcome
+// resolver starts from the public initializer base name and therefore cannot be
+// used for this compiler-owned patch edge.
+func (p *context) resolvePatchOriginalInitOutcomeSymbol(fn *ssa.Function) (plannedFunctionSymbol, error) {
+	entry, err := p.resolvePatchOriginalInitSymbol(fn)
+	if err != nil {
+		return plannedFunctionSymbol{}, err
+	}
+	if !entry.plan.HasStaticOutcome() || entry.baseName == "" {
+		return plannedFunctionSymbol{}, fmt.Errorf("patch original initializer %q has no synchronous outcome capability", entry.plan.ID)
+	}
+	entry.name = entry.baseName + coroOutcomePlainPrimarySuffix
+	entry.outcomePlainTwin = true
 	return entry, nil
 }
 
@@ -494,6 +536,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			e.plan.AtomicCost != e.libraryEffect.AtomicCost ||
 			e.plan.AtomicCostProof != e.libraryEffect.AtomicCostProof ||
 			e.plan.AtomicCostCertificate != e.libraryEffect.AtomicCostCertificate ||
+			e.plan.StaticOutcome != e.libraryEffect.StaticOutcome ||
 			e.libraryEffect.PrimarySymbol == "" {
 			return fmt.Errorf(
 				"external coroutine emission %q disagrees with its producer library fact",
@@ -520,6 +563,19 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 		return validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, true)
 	}
 	return nil
+}
+
+func (e plannedFunctionSymbol) checkOutcomePlainSupported() error {
+	if !e.outcomePlainTwin || !e.hasOutcomePlainCapability() || e.importedLibrary ||
+		e.plan.External != coro.Defined || e.plan.Emission != coro.EmitCoroutine ||
+		e.plan.ManagedEntry != coro.ManagedEntryCoroutine {
+		return fmt.Errorf("outcome-plain twin %q has no owned coroutine-primary capability", e.plan.ID)
+	}
+	physical, err := e.sealedPhysicalFunctionPlan()
+	if err != nil {
+		return err
+	}
+	return validateOutcomePlainFrozenPlan(physical, e.plan)
 }
 
 // sealedPhysicalFunctionPlan is the single post-freeze lookup authority shared
@@ -696,10 +752,63 @@ func (c *Compilation) preflightCoroPlan() error {
 	return c.coroPreflightErr
 }
 
+// CoroProgramCapabilities returns the optional runtime services demanded by
+// the final reachable physical recipes. It deliberately runs the same atomic
+// preflight used by codegen, so a build cannot publish bootstrap capability
+// bits from a partial semantic plan and later emit a different operation set.
+func (c *Compilation) CoroProgramCapabilities() (coro.ProgramCapabilities, error) {
+	if c == nil {
+		return 0, fmt.Errorf("coroutine program capabilities require a compilation")
+	}
+	if err := c.preflightCoroPlan(); err != nil {
+		return 0, err
+	}
+	universe := c.immutableEmissionUniverse()
+	if universe == nil || universe.coroProgramIR == nil {
+		return 0, fmt.Errorf("coroutine program capabilities require a prepared ProgramIR")
+	}
+	return universe.coroProgramIR.programCapabilities()
+}
+
 func (p *context) mustFunctionSymbol(fn *ssa.Function) plannedFunctionSymbol {
 	entry, err := p.resolveFunctionSymbol(fn)
 	if err == nil {
 		err = entry.checkSupported()
+	}
+	if err != nil {
+		panic(err)
+	}
+	return entry
+}
+
+// mustOutcomePlainFunctionSymbol selects the proof-carrying synchronous entry
+// used only by one exact static call. It never changes the managed primary
+// published through a function value, method table, interface, or reflection.
+func (p *context) mustOutcomePlainFunctionSymbol(fn *ssa.Function) plannedFunctionSymbol {
+	entry, err := p.resolveFunctionSymbol(fn)
+	if err == nil {
+		err = entry.checkSupported()
+	}
+	if err == nil && !entry.hasOutcomePlainCapability() {
+		err = fmt.Errorf("outcome-plain static entry %q has no frozen atomic-cost capability", entry.plan.ID)
+	}
+	if err == nil {
+		if entry.importedLibrary {
+			entry.name = entry.libraryEffect.OutcomePlainSymbol
+		} else {
+			if entry.baseName == "" {
+				err = fmt.Errorf("outcome-plain static entry %q has no frozen base symbol", entry.plan.ID)
+			} else {
+				entry.name = entry.baseName + coroOutcomePlainPrimarySuffix
+			}
+		}
+		entry.outcomePlainTwin = entry.plan.Emission != coro.EmitOutcomePlain ||
+			entry.plan.ManagedEntry != coro.ManagedEntryOutcomePlain
+	}
+	if err == nil && entry.outcomePlainTwin && !entry.importedLibrary &&
+		entry.emission != nil && entry.emission.coroProgramIR != nil &&
+		entry.emission.coroProgramIR.physicalPlansSealed {
+		err = entry.checkOutcomePlainSupported()
 	}
 	if err != nil {
 		panic(err)

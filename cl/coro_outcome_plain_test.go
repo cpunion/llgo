@@ -155,6 +155,64 @@ func Root(cell *Cell, delta Word) Word {
 }
 `
 
+const coroOutcomePlainStaticTwinFixture = `package foo
+
+func Leaf(value uint32, payload any, fail bool) uint32 {
+	if fail { panic(payload) }
+	return value + 1
+}
+
+func Static(value uint32, payload any, fail bool) uint32 {
+	return Leaf(value, payload, fail)
+}
+
+
+func Publish() func(uint32, any, bool) uint32 {
+	return Leaf
+}
+
+func Root(value uint32, payload any, fail bool) uint32 {
+	_ = Publish()
+	return Static(value, payload, fail)
+}
+`
+
+func TestCoroOutcomePlainStaticTwinKeepsDynamicCoroutineEntry(t *testing.T) {
+	prog, pkg, plan, ssaPkg := compileCoroOutcomePlainSource(
+		t, nil, coroOutcomePlainStaticTwinFixture, "Root", 64,
+	)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	leaf := ssaPkg.Func("Leaf")
+	leafPlan, found := plan.FunctionPlan(leaf)
+	if !found || leafPlan.Emission != coro.EmitCoroutine ||
+		leafPlan.ManagedEntry != coro.ManagedEntryCoroutine || leafPlan.FuncRep != coro.Dispatch ||
+		!leafPlan.AtomicCostProof.ProvesOutcomePlain() || leafPlan.AtomicCost == 0 {
+		t.Fatalf("static-twin Leaf plan = %+v, present=%t", leafPlan, found)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify static outcome twin module: %v\n%s", err, module.String())
+	}
+	text := module.String()
+	base := "foo.Leaf"
+	if module.NamedFunction(base+coroPrimarySuffix).IsNil() ||
+		module.NamedFunction(base+coroOutcomePlainPrimarySuffix).IsNil() {
+		t.Fatalf("Leaf did not emit both coroutine and outcome entries:\n%s", text)
+	}
+	staticBody := module.NamedFunction("foo.Static" + coroOutcomePlainPrimarySuffix).String()
+	if !strings.Contains(staticBody, base+coroOutcomePlainPrimarySuffix) ||
+		strings.Contains(staticBody, base+coroPrimarySuffix) {
+		t.Fatalf("static caller did not select only the outcome twin:\n%s", staticBody)
+	}
+	if !strings.Contains(text, coroCoroDispatchThunkPrefix) ||
+		!strings.Contains(text, base+coroPrimarySuffix) {
+		t.Fatalf("dynamic descriptor did not retain the coroutine primary:\n%s", text)
+	}
+	runCoroABITestPipeline(t, prog, module)
+}
+
 func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
@@ -604,8 +662,9 @@ func TestCoroOutcomePlainPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 
 			baselineLeafPlan, baselineFound := baselinePlan.FunctionPlan(baselineLeaf)
 			optimizedLeafPlan, optimizedFound := optimizedPlan.FunctionPlan(optimizedLeaf)
-			if !baselineFound || baselineLeafPlan.Emission != coro.EmitCoroutine {
-				t.Fatalf("baseline Leaf plan = %+v, present=%t; want coroutine", baselineLeafPlan, baselineFound)
+			if !baselineFound || baselineLeafPlan.Emission != coro.EmitCoroutine ||
+				!baselineLeafPlan.HasStaticOutcome() {
+				t.Fatalf("baseline Leaf plan = %+v, present=%t; want coroutine primary plus static outcome twin", baselineLeafPlan, baselineFound)
 			}
 			if !optimizedFound || optimizedLeafPlan.Emission != coro.EmitOutcomePlain {
 				t.Fatalf("optimized Leaf plan = %+v, present=%t; want outcome-plain", optimizedLeafPlan, optimizedFound)
@@ -641,9 +700,10 @@ func TestCoroOutcomePlainPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 				strings.Count(baselineParent, coroAwaitConsumeHookV1)
 			optimizedAwaitCalls := strings.Count(optimizedParent, coroAwaitPrepareHookV1) +
 				strings.Count(optimizedParent, coroAwaitConsumeHookV1)
-			if baselineAwaitCalls == 0 || optimizedAwaitCalls != 0 ||
+			if baselineAwaitCalls != 0 || optimizedAwaitCalls != 0 ||
+				!strings.Contains(baselineParent, "foo.Leaf$outcome") ||
 				!strings.Contains(optimizedParent, "foo.Leaf$outcome") {
-				t.Fatalf("Leaf scheduling boundary baseline calls=%d optimized calls=%d", baselineAwaitCalls, optimizedAwaitCalls)
+				t.Fatalf("static Leaf call retained a scheduling boundary: baseline calls=%d optimized calls=%d", baselineAwaitCalls, optimizedAwaitCalls)
 			}
 
 			optimizeCoroOutcomeCostModule(t, baselineProg, baselineModule)
@@ -669,8 +729,8 @@ func TestCoroOutcomePlainPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 				)
 			}
 			t.Logf(
-				"post-split fixture: IR baseline=%d optimized=%d; O2 object baseline=%d optimized=%d; eliminated Leaf frame=1 resume=1 destroy=1 await-hook-refs=%d",
-				len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes, baselineAwaitCalls,
+				"post-split fixture: IR baseline=%d optimized=%d; O2 object baseline=%d optimized=%d; static call is flat in both, optimized primary eliminates Leaf frame/resume/destroy=1/1/1",
+				len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes,
 			)
 		})
 	}
@@ -852,6 +912,7 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 		AtomicCostProof:       coro.AtomicCostLeaf,
 		AtomicCostCertificate: strings.Repeat("a", 64),
 		PrimarySymbol:         baseSymbol + coroOutcomePlainPrimarySuffix,
+		OutcomePlainSymbol:    baseSymbol + coroOutcomePlainPrimarySuffix,
 	}
 	plan, err := coro.AnalyzeSSA(
 		ssaPkg.Prog,

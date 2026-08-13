@@ -244,19 +244,37 @@ func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 func TestCoroKeyedResumeIsPNeutralAndRegistryIsPreemptibleLockFree(t *testing.T) {
 	const (
 		parkPath        = "internal/runtime/coro_keyed_park.go"
+		manualPath      = "internal/coro/manual_park_owner.go"
 		materializePath = "internal/runtime/coro_resume_materialize.go"
 	)
 	park := readRuntimePollFile(t, parkPath)
+	manual := readRuntimePollFile(t, manualPath)
 	materialize := readRuntimePollFile(t, materializePath)
 	for _, marker := range []string{
-		"coro.BindWaitSetResumeCleanup(",
-		"Kind:         coro.ResumeCleanupKeyedPark",
+		"coro.PrepareCurrentExecutorManualCleanupParkReserved(",
+		"coro.BeginOwnerLocalManualCompletionCurrent(",
+		"coro.FinishOwnerLocalManualCompletionCurrent(",
 		"coro.TakeResumePacket(",
 		"validMaterializedCoroKeyedParkV2(state)",
 	} {
 		if !strings.Contains(park, marker) {
 			t.Errorf("%s lacks keyed P-neutral marker %q", parkPath, marker)
 		}
+	}
+	for _, marker := range []string{
+		"func PrepareCurrentExecutorManualCleanupParkReserved(",
+		"installWaitSetResumeCleanup(",
+		"Kind:         ResumeCleanupKeyedPark",
+		"Context:      context",
+		"Entries:      unsafe.Pointer(entry)",
+		"RuntimeCount: 1",
+	} {
+		if !strings.Contains(manual, marker) {
+			t.Errorf("%s lacks fused keyed cleanup marker %q", manualPath, marker)
+		}
+	}
+	if strings.Contains(park, "coro.BindWaitSetResumeCleanup(") {
+		t.Errorf("%s repeats the fused keyed cleanup binding", parkPath)
 	}
 	resumeStart := strings.Index(park, "func __llgo_coro_keyed_resume_v2(")
 	if resumeStart < 0 {

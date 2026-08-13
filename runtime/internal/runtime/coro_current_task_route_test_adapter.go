@@ -25,11 +25,18 @@ var (
 	coroCurrentTaskRouteTestV1 coro.RouteID
 )
 
-func coroCurrentTaskV1() (*coro.G, coro.RouteID) {
-	return coroCurrentTaskTestV1, coroCurrentTaskRouteTestV1
+func coroCurrentTaskV1() (*coro.G, *coro.ExecutorDriver, coro.RouteID) {
+	if coroCurrentTaskTestV1 == nil {
+		return nil, nil, coroCurrentTaskRouteTestV1
+	}
+	driver, _, route, ok := coro.CurrentExecutorDriver(coroCurrentTaskTestV1)
+	if !ok || route != coroCurrentTaskRouteTestV1 {
+		return coroCurrentTaskTestV1, nil, coroCurrentTaskRouteTestV1
+	}
+	return coroCurrentTaskTestV1, driver, route
 }
 
 func coroCurrentTaskRouteV1() coro.RouteID {
-	_, route := coroCurrentTaskV1()
+	_, _, route := coroCurrentTaskV1()
 	return route
 }

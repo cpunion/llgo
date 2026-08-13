@@ -90,6 +90,10 @@ type SSAFunctionPolicy struct {
 	// AtomicCostCertificate binds a producer-owned path proof to its exact
 	// FunctionID, CFG projection and transitive callee certificates.
 	AtomicCostCertificate string
+	// StaticOutcome carries a producer-owned unbounded synchronous twin for an
+	// ExternalKnown declaration. Local bodies derive the same capability from
+	// ProgramIR after effect and CallPlan finalization.
+	StaticOutcome bool
 	// CallableIdentityCertificate is the execution-policy-neutral identity of
 	// one exact managed C declaration. It may coexist with either a generic
 	// behavior contract, a legacy physical capability, or neither.
@@ -651,6 +655,12 @@ type SSAFunctionBodyFacts struct {
 	// prove an acyclic call graph, and include every callee cost.
 	OutcomePlainDAG       bool
 	OutcomePlainCallCount int
+	// StaticOutcomeLocal proves that every evaluated source instruction belongs
+	// to the wider synchronous-outcome language. Unlike OutcomePlainDAG it may
+	// contain CFG cycles and does not imply a bounded scheduler gap. Whole-
+	// program planning must still close every ordinary call over an exact plain
+	// or static-outcome target and reject hidden lowered calls.
+	StaticOutcomeLocal bool
 }
 
 func (facts SSAFunctionBodyFacts) validate(function *ssa.Function) error {
@@ -1643,6 +1653,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			policy.AtomicCost = trusted.AtomicCost
 			policy.AtomicCostProof = trusted.AtomicCostProof
 			policy.AtomicCostCertificate = trusted.AtomicCostCertificate
+			policy.StaticOutcome = trusted.StaticOutcome
 			policy.NeedsDispatch = policy.NeedsDispatch || trusted.NeedsDispatch
 			policy.TrustedBoundedRecursion = trusted.TrustedBoundedRecursion
 			_, rawFunctionAddressEntry := rawFunctionAddressEntries[fn]
@@ -1706,6 +1717,17 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	evaluatedSourceCalls := make(map[ssa.CallInstruction]bool)
+	for _, facts := range localBodyFacts {
+		if facts.AtomicPath == nil {
+			continue
+		}
+		for _, block := range facts.AtomicPath.Blocks {
+			for _, occurrence := range block.Calls {
+				evaluatedSourceCalls[occurrence.Instruction] = true
+			}
+		}
+	}
 
 	graph := NewGraph()
 	for _, fn := range included {
@@ -1722,6 +1744,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			AtomicCost:              policy.AtomicCost,
 			AtomicCostProof:         policy.AtomicCostProof,
 			AtomicCostCertificate:   policy.AtomicCostCertificate,
+			StaticOutcome:           policy.StaticOutcome,
 			TrustedBoundedRecursion: policy.TrustedBoundedRecursion,
 			NeedsDispatch:           policy.NeedsDispatch,
 			RawPlainEntry:           policy.RawPlainEntry,
@@ -2048,6 +2071,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	); err != nil {
 		return nil, err
 	}
+	if err := applySSAStaticOutcomePlans(base, byID, localBodyFacts, callPlans, loweredCalls, elidedCalls); err != nil {
+		return nil, err
+	}
 	elidedCallSet := make(map[ssa.CallInstruction]struct{}, len(elidedCalls))
 	for call, elided := range elidedCalls {
 		if elided {
@@ -2144,7 +2170,7 @@ func validateSSAImportedOutcomePlainCosts(plan *Plan, maxAtomicCost int) error {
 		return nil
 	}
 	for _, function := range plan.functions {
-		if function.External != ExternalKnown || function.ManagedEntry != ManagedEntryOutcomePlain ||
+		if function.External != ExternalKnown || !function.AtomicCostProof.ProvesOutcomePlain() ||
 			function.ManagedDemand == NoDemand {
 			continue
 		}
@@ -2189,7 +2215,9 @@ func applySSAOutcomePlainPlans(
 	if maxAtomicCost < 0 {
 		return nil
 	}
-	blocked := make(map[FunctionID]bool)
+	// primaryBlocked records uses which require the ordinary coroutine entry.
+	// They no longer suppress a separately proven static outcome entry.
+	primaryBlocked := make(map[FunctionID]bool)
 	direct := make(map[FunctionID]bool)
 	type outcomeCall struct {
 		instruction ssa.CallInstruction
@@ -2201,10 +2229,10 @@ func applySSAOutcomePlainPlans(
 		ids[function] = id
 	}
 	for _, root := range roots {
-		blocked[root.ID] = true
+		primaryBlocked[root.ID] = true
 	}
 	for reference := range graph.references {
-		blocked[reference.target] = true
+		primaryBlocked[reference.target] = true
 	}
 	for call, plan := range callPlans {
 		exactStatic := call != nil && call.Common() != nil && call.Common().StaticCallee() != nil &&
@@ -2219,7 +2247,7 @@ func applySSAOutcomePlainPlans(
 			if exactStatic {
 				direct[target] = true
 			} else {
-				blocked[target] = true
+				primaryBlocked[target] = true
 			}
 		}
 	}
@@ -2229,13 +2257,13 @@ func applySSAOutcomePlainPlans(
 				continue
 			}
 			if id, ok := ids[call.Target]; ok {
-				blocked[id] = true
+				primaryBlocked[id] = true
 			}
 		}
 	}
 	eligible := func(plan FunctionPlan, function *ssa.Function, facts SSAFunctionBodyFacts, classified bool) bool {
 		if function == nil || len(function.FreeVars) != 0 || !classified || facts.HasCycle || facts.AtomicPath == nil ||
-			facts.InstructionCount <= 0 || blocked[plan.ID] || !direct[plan.ID] {
+			facts.InstructionCount <= 0 || !direct[plan.ID] {
 			return false
 		}
 		for _, lowered := range loweredCalls[function] {
@@ -2245,7 +2273,7 @@ func applySSAOutcomePlainPlans(
 		}
 		return plan.External == Defined && plan.Emission == EmitCoroutine &&
 			plan.ManagedEntry == ManagedEntryCoroutine &&
-			plan.Primary == PrimaryCoroutine && plan.FuncRep == DirectCoro &&
+			plan.Primary == PrimaryCoroutine && (plan.FuncRep == DirectCoro || plan.FuncRep == Dispatch) &&
 			plan.ManagedDemand != NoDemand && !plan.RawPlainDemand && !plan.RawPlainEntry &&
 			!plan.RawPlainOnly && !plan.Recursive && plan.Effect.Contains(OutcomeStructured) &&
 			plan.Effect&^(AwaitStructured|OutcomeStructured) == 0 &&
@@ -2255,15 +2283,21 @@ func applySSAOutcomePlainPlans(
 	}
 	selectPlan := func(index int, cost uint64, proof AtomicCostProof, certificate string) error {
 		plan := base.functions[index]
-		plan.Emission = EmitOutcomePlain
-		plan.ManagedEntry = ManagedEntryOutcomePlain
-		// Every AwaitStructured dependency was proven to be a synchronous
-		// outcome entry before selection. Retain terminal outcome semantics but
-		// remove the now-elided physical await capability from this body.
-		plan.Effect = OutcomeStructured
 		plan.AtomicCost = cost
 		plan.AtomicCostProof = proof
 		plan.AtomicCostCertificate = certificate
+		// A target with no dynamic/root/raw entry obligation can make the
+		// synchronous outcome ABI its managed primary as before. Otherwise retain
+		// the coroutine primary and emit the same proven outcome body as a static
+		// twin; exact direct calls select it while dynamic calls keep their ABI.
+		if !primaryBlocked[plan.ID] && plan.FuncRep == DirectCoro {
+			plan.Emission = EmitOutcomePlain
+			plan.ManagedEntry = ManagedEntryOutcomePlain
+			// Every AwaitStructured dependency was proven to be a synchronous
+			// outcome entry before selection. Retain terminal outcome semantics but
+			// remove the now-elided physical await capability from this body.
+			plan.Effect = OutcomeStructured
+		}
 		if err := validateManagedEntryPlan(plan); err != nil {
 			return fmt.Errorf("coro: select outcome-plain %s %q: %w", proof, plan.ID, err)
 		}
@@ -2273,8 +2307,7 @@ func applySSAOutcomePlainPlans(
 
 	available := make(map[FunctionID]SSAAtomicCalleeCertificate)
 	for _, plan := range base.functions {
-		if plan.External == ExternalKnown && plan.ManagedEntry == ManagedEntryOutcomePlain &&
-			plan.AtomicCostProof.ProvesOutcomePlain() && plan.AtomicCost != 0 {
+		if plan.External == ExternalKnown && plan.AtomicCostProof.ProvesOutcomePlain() && plan.AtomicCost != 0 {
 			available[plan.ID] = SSAAtomicCalleeCertificate{
 				Function: plan.ID, Cost: plan.AtomicCost, Certificate: plan.AtomicCostCertificate,
 			}
@@ -2337,6 +2370,181 @@ func applySSAOutcomePlainPlans(
 			available[plan.ID] = SSAAtomicCalleeCertificate{Function: plan.ID, Cost: cost, Certificate: certificate}
 			changed = true
 		}
+	}
+	return nil
+}
+
+// applySSAStaticOutcomePlans closes the exact-static no-suspend call graph
+// after the bounded atomic cohort has been selected. The resulting twin uses
+// the same explicit-status outcome ABI but deliberately carries no atomic cost
+// certificate: a source CFG loop may compute for an unbounded interval. This
+// is currently permitted only at exact static call sites; dynamic/function-
+// value callers retain the ordinary preemptible coroutine primary.
+func applySSAStaticOutcomePlans(
+	base *Plan,
+	byID map[FunctionID]*ssa.Function,
+	localBodyFacts map[*ssa.Function]SSAFunctionBodyFacts,
+	callPlans map[ssa.CallInstruction]SSACallPlan,
+	loweredCalls map[*ssa.Function][]SSALoweredCall,
+	elidedCalls map[ssa.CallInstruction]bool,
+) error {
+	if base == nil {
+		return fmt.Errorf("coro: static-outcome planning requires a complete graph plan")
+	}
+	ids := make(map[*ssa.Function]FunctionID, len(byID))
+	for id, function := range byID {
+		ids[function] = id
+	}
+	type staticCall struct {
+		target FunctionID
+	}
+	outgoing := make(map[FunctionID][]staticCall)
+	sourceOutgoing := make(map[FunctionID]int)
+	invalidCall := make(map[FunctionID]bool)
+	evaluatedCalls := make(map[ssa.CallInstruction]bool)
+	for function, facts := range localBodyFacts {
+		_ = function
+		if facts.AtomicPath == nil {
+			continue
+		}
+		for _, block := range facts.AtomicPath.Blocks {
+			for _, occurrence := range block.Calls {
+				evaluatedCalls[occurrence.Instruction] = true
+			}
+		}
+	}
+	for call, callPlan := range callPlans {
+		owner, owned := ids[call.Parent()]
+		if !owned || !evaluatedCalls[call] {
+			continue
+		}
+		exact := call != nil && call.Common() != nil &&
+			callPlan.Kind == CallDirect && callPlan.Transport == ManagedTransport &&
+			!callPlan.Open && !callPlan.MayBeNil && !callPlan.SyncDispatch && !callPlan.RawPlain &&
+			len(callPlan.Targets) == 1 &&
+			(callPlan.Rep == DirectCoro || callPlan.Rep == DirectPlain)
+		if !exact {
+			invalidCall[owner] = true
+			continue
+		}
+		outgoing[owner] = append(outgoing[owner], staticCall{target: callPlan.Targets[0]})
+		sourceOutgoing[owner]++
+	}
+	// Compiler-inserted calls participate in the same exact closure. A terminal
+	// ExplicitStatus helper is absent from the synchronous outcome body; every
+	// other helper participates in the same exact target closure as a source
+	// static call. Plain targets must be non-suspending and non-unwinding;
+	// structured targets must publish a bounded or unbounded synchronous outcome
+	// entry before their owner can enter the cohort.
+	for function, calls := range loweredCalls {
+		owner, owned := ids[function]
+		if !owned {
+			continue
+		}
+		for _, call := range calls {
+			if call.ExplicitStatusElided {
+				continue
+			}
+			targetID, identified := ids[call.Target]
+			target, found := base.Lookup(targetID)
+			if call.Target == nil || !identified || !found || call.RawPlain {
+				invalidCall[owner] = true
+				continue
+			}
+			switch target.ManagedEntry {
+			case ManagedEntryPlain:
+				if target.Effect.MaySuspend() || target.Exec.Contains(MayUnwind) {
+					invalidCall[owner] = true
+					continue
+				}
+			case ManagedEntryCoroutine, ManagedEntryOutcomePlain:
+			default:
+				invalidCall[owner] = true
+				continue
+			}
+			outgoing[owner] = append(outgoing[owner], staticCall{target: targetID})
+		}
+	}
+
+	eligible := make(map[FunctionID]bool)
+	for _, plan := range base.functions {
+		function := byID[plan.ID]
+		facts, classified := localBodyFacts[function]
+		if function == nil || !classified || !facts.StaticOutcomeLocal || facts.Effect.Contains(YieldOnly) ||
+			len(function.FreeVars) != 0 ||
+			invalidCall[plan.ID] || plan.HasStaticOutcome() ||
+			plan.External != Defined || plan.Emission != EmitCoroutine ||
+			plan.ManagedEntry != ManagedEntryCoroutine || plan.Primary != PrimaryCoroutine ||
+			plan.ManagedDemand == NoDemand || plan.RawPlainOnly ||
+			plan.Recursive || plan.Effect&^(YieldOnly|AwaitStructured|OutcomeStructured) != 0 ||
+			!plan.Effect.Contains(OutcomeStructured) ||
+			plan.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
+			continue
+		}
+		// Every evaluated ordinary call must appear in CallPlan or be one exact
+		// compiler-elided intrinsic. This prevents a builtin, raw C edge, or
+		// hidden helper from entering the synchronous twin by omission.
+		calls := 0
+		for call := range evaluatedCalls {
+			if call.Parent() != function || elidedCalls[call] {
+				continue
+			}
+			if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+				continue
+			}
+			calls++
+		}
+		if calls != sourceOutgoing[plan.ID] {
+			continue
+		}
+		eligible[plan.ID] = true
+	}
+
+	// Start from the local candidate set and monotonically remove every member
+	// whose exact coroutine callee cannot publish a synchronous outcome entry.
+	// This formulation deliberately removes recursive call-graph SCCs through
+	// FunctionPlan.Recursive above; future budgeted continuation can admit them
+	// only with an independent fairness proof.
+	for changed := true; changed; {
+		changed = false
+		for id := range eligible {
+			for _, call := range outgoing[id] {
+				target, found := base.Lookup(call.target)
+				plainUnsafe := target.ManagedEntry == ManagedEntryPlain &&
+					(target.Effect.MaySuspend() || target.Exec.Contains(MayUnwind))
+				coroutineUnavailable := (target.ManagedEntry == ManagedEntryCoroutine ||
+					target.ManagedEntry == ManagedEntryOutcomePlain) &&
+					!target.HasStaticOutcome() && !eligible[target.ID]
+				if !found || target.ManagedEntry == ManagedEntryNone || plainUnsafe || coroutineUnavailable {
+					delete(eligible, id)
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	for index, plan := range base.functions {
+		if !eligible[plan.ID] {
+			continue
+		}
+		plan.StaticOutcome = true
+		facts := localBodyFacts[byID[plan.ID]]
+		if plan.LocalExec.Contains(NeedsCleanupFrame) && !facts.Exec.Contains(NeedsCleanupFrame) {
+			plan.LocalExec &^= NeedsCleanupFrame
+			plan.Exec &^= NeedsCleanupFrame
+		}
+		// NeedsCleanupFrame is local-only. If ProgramIR's evaluated projection
+		// retained no cleanup operation, a transitive caller cannot reintroduce
+		// the bit; clear the syntactic dead-defer seed on this exact function.
+		if !facts.Exec.Contains(NeedsCleanupFrame) {
+			plan.DeclaredExec &^= NeedsCleanupFrame
+			plan.LocalExec &^= NeedsCleanupFrame
+			plan.Exec &^= NeedsCleanupFrame
+		}
+		if err := validateManagedEntryPlan(plan); err != nil {
+			return fmt.Errorf("coro: select unbounded static outcome %q: %w", plan.ID, err)
+		}
+		base.functions[index] = plan
 	}
 	return nil
 }

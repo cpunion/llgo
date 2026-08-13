@@ -456,7 +456,12 @@ func implementation(value uint32) uint32 { return value + 1 }
 	defer prog.Dispose()
 	definitionModule := definitionLL.Module()
 	declarationModule := declarationLL.Module()
-	defer definitionModule.Dispose()
+	definitionConsumed := false
+	defer func() {
+		if !definitionConsumed {
+			definitionModule.Dispose()
+		}
+	}()
 	defer declarationModule.Dispose()
 	for name, module := range map[string]llvm.Module{"definition": definitionModule, "declaration": declarationModule} {
 		if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
@@ -478,6 +483,52 @@ func implementation(value uint32) uint32 { return value + 1 }
 	rootBody := declarationModule.NamedFunction("example.com/coro/linkdecl.Root" + coroPrimarySuffix).String()
 	if !strings.Contains(rootBody, "runtimeHook$coro") || strings.Contains(rootBody, "runtimeHook\"(") {
 		t.Fatalf("managed root did not select the canonical coroutine alias:\n%s", rootBody)
+	}
+
+	// LLVM 22's annotation-elision protocol is only useful if the exact proof
+	// survives the bodyless managed-linkname facade and the package-module
+	// boundary. Link the two frontend modules just as FullLTO does, then require
+	// the child ramp and its allocator path to disappear from Root.resume.
+	elideKind := llvm.AttributeKindID("coro_elide_safe")
+	if elideKind == 0 {
+		return
+	}
+	foundElideSafeCall := false
+	rootEntry := declarationModule.NamedFunction("example.com/coro/linkdecl.Root" + coroPrimarySuffix)
+	for block := rootEntry.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.InstructionOpcode() != llvm.Call ||
+				instruction.CalledValue().Name() != baseName+coroPrimarySuffix {
+				continue
+			}
+			foundElideSafeCall = instruction.GetCallSiteEnumAttribute(-1, elideKind).IsEnum()
+		}
+	}
+	if !foundElideSafeCall {
+		t.Fatalf("managed-linkname static await lost coro_elide_safe before FullLTO:\n%s", rootBody)
+	}
+	if err := llvm.LinkModules(declarationModule, definitionModule); err != nil {
+		t.Fatalf("link managed-linkname coroutine modules: %v", err)
+	}
+	definitionConsumed = true
+	options := llvm.NewPassBuilderOptions()
+	defer options.Dispose()
+	options.SetVerifyEach(true)
+	if err := declarationModule.RunPasses("lto<O3>", prog.TargetMachine(), options); err != nil {
+		t.Fatalf("run managed-linkname coroutine FullLTO gate: %v\n%s", err, declarationModule.String())
+	}
+	if err := llvm.VerifyModule(declarationModule, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify managed-linkname coroutine FullLTO gate: %v\n%s", err, declarationModule.String())
+	}
+	rootResume := declarationModule.NamedFunction("example.com/coro/linkdecl.Root" + coroPrimarySuffix + ".resume")
+	if rootResume.IsNil() {
+		t.Fatalf("managed-linkname FullLTO gate has no Root coroutine resume:\n%s", declarationModule.String())
+	}
+	resumeBody := rootResume.String()
+	if strings.Contains(resumeBody, "call ptr @\""+baseName+coroPrimarySuffix+"\"(") ||
+		strings.Contains(resumeBody, "call ptr @"+baseName+coroPrimarySuffix+"(") ||
+		strings.Contains(resumeBody, coroFrameAllocHookV1) {
+		t.Fatalf("managed-linkname static await retained its ramp/allocation path after FullLTO:\n%s", resumeBody)
 	}
 }
 

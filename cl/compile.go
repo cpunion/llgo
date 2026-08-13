@@ -209,6 +209,7 @@ type context struct {
 	vargs                map[*ssa.Alloc][]llssa.Expr // varargs
 	funcs                map[*ssa.Function]llssa.Function
 	rawPlainFuncs        map[*ssa.Function]llssa.Function
+	outcomePlainFuncs    map[*ssa.Function]llssa.Function
 	linkOnceFns          map[*ssa.Function]none
 	stackDefers          map[*ssa.Function]bool
 	anonDefers           map[*ssa.Function]bool
@@ -226,6 +227,11 @@ type context struct {
 	coroEmission         *coroPhysicalEmissionSession
 	coroPlainSite        *coroSiteEmissionObserver
 	rawPlainBody         bool // compiling the legacy ABI variant of a managed function
+	// physicalReachable is the owner-scoped constant-CFG projection used by
+	// every separately emitted managed body. A full coroutine already carries
+	// it in coroEmissionPlan; ordinary/outcome-independent bodies use this copy
+	// so helper inventory, analysis, and codegen agree about dead blocks.
+	physicalReachable    map[*ssa.BasicBlock]bool
 	coroOwnerBodySymbols map[string]none
 	// preservePatchedNamed keeps an alternate package's named type intact
 	// while constructing source-level ABI certificates. Ordinary codegen
@@ -678,7 +684,29 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		// declaration behind.
 		p.compileFuncDeclVariant(pkg, entry.function, true)
 	}
+	if entry.planned && entry.plan.Emission == coro.EmitCoroutine &&
+		entry.plan.HasStaticOutcome() {
+		p.compileOutcomePlainFunction(entry.function)
+	}
 	return fn, py, kind
+}
+
+func (p *context) compileOutcomePlainFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
+	if v == nil || p.compilation == nil || p.immutablePlan() == nil || p.immutableEmissionUniverse() == nil {
+		panic("outcome-plain function resolution requires an exact function, emission universe, and coroutine plan")
+	}
+	canonical, ok := p.immutableEmissionUniverse().Resolve(v)
+	if !ok || canonical == nil {
+		panic(fmt.Errorf("outcome-plain function resolution: function %q is absent from the prepared emission universe", v.Name()))
+	}
+	entry := p.mustOutcomePlainFunctionSymbol(canonical)
+	if entry.ftype != goFunc {
+		return p.funcOfEntry(entry)
+	}
+	if p.ownsFunctionEmission(canonical) {
+		return p.compileFuncDeclVariantEntry(p.pkg, entry, false)
+	}
+	return p.funcOfEntry(entry)
 }
 
 // compileFuncDeclVariant materializes either the managed primary or the exact
@@ -826,7 +854,9 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 	if noInlineDirective || runtimeStackNoInline || pcLineNoInline {
 		fn.DisableTailCalls()
 	}
-	if rawPlain {
+	if entry.outcomePlainTwin {
+		p.outcomePlainFuncs[f] = fn
+	} else if rawPlain {
 		p.rawPlainFuncs[f] = fn
 	} else {
 		p.funcs[f] = fn
@@ -845,7 +875,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			pkg.EmitFuncInfo(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column)
 		}
 		var childInits []func()
-		if !rawPlain && len(f.AnonFuncs) > 0 {
+		if !rawPlain && !entry.outcomePlainTwin && len(f.AnonFuncs) > 0 {
 			parentInits := p.inits
 			p.inits = nil
 			for _, af := range f.AnonFuncs {
@@ -877,16 +907,19 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		dbgSymsEnabled := p.frontendOptions().DebugSymbols && (f == nil || f.Origin() == nil)
 		p.inits = append(p.inits, func() {
 			oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldRawPlainBody := p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.rawPlainBody
+			oldPhysicalReachable := p.physicalReachable
 			oldLocalityFunction := p.locality.function
 			p.fn = fn
 			p.goFn = f
 			p.patchOriginalInitIf = patchOriginalInitIf
 			p.rawPlainBody = rawPlain
+			p.physicalReachable = coroPhysicalConstantReachableBlocks(f)
 			p.locality.function = localityFunction{}
 			p.state = state // restore pkgState when compiling funcBody
 			oldCoroValueAddrs := p.coroValueAddrs
 			defer func() {
 				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldRawPlainBody
+				p.physicalReachable = oldPhysicalReachable
 				p.coroValueAddrs = oldCoroValueAddrs
 				p.locality.function = oldLocalityFunction
 			}()
@@ -1188,6 +1221,10 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	var instrs = block.Instrs[n:]
 	var ret = p.sourceBlock(block.Index)
 	b.SetBlock(ret)
+	if !p.coroSourceBlockReachable(block) {
+		b.Unreachable()
+		return ret
+	}
 	if block.Index == 0 {
 		p.emitFunctionPreambleWithCoroPlan(b, block.Parent())
 	}
@@ -2019,6 +2056,9 @@ func isPhi(i ssa.Instruction) bool {
 func (p *context) compilePhis(b llssa.Builder, block *ssa.BasicBlock) int {
 	ret := p.sourceBlock(block.Index)
 	b.SetBlockEx(ret, llssa.AtEnd, false)
+	if !p.coroSourceBlockReachable(block) {
+		return 0
+	}
 	if ninstr := len(block.Instrs); ninstr > 0 {
 		if isPhi(block.Instrs[0]) {
 			n := 1
@@ -2053,17 +2093,41 @@ func (p *context) compilePhi(b llssa.Builder, v *ssa.Phi) (ret llssa.Expr) {
 		finishSite := p.beginCoroSemanticInstructionEmission(v)
 		defer finishSite()
 		preds := v.Block().Preds
+		edges := v.Edges
+		if p.coroEmissionPlan() != nil || p.physicalReachable != nil {
+			livePreds := make([]*ssa.BasicBlock, 0, len(preds))
+			liveEdges := make([]ssa.Value, 0, len(edges))
+			for index, pred := range preds {
+				if p.coroSourceBlockReachable(pred) {
+					livePreds = append(livePreds, pred)
+					liveEdges = append(liveEdges, edges[index])
+				}
+			}
+			preds, edges = livePreds, liveEdges
+		}
 		bblks := make([]llssa.BasicBlock, len(preds))
 		for i, pred := range preds {
 			bblks[i] = p.sourceBlock(pred.Index)
 		}
-		edges := v.Edges
 		phi.AddIncoming(b, bblks, func(i int, blk llssa.BasicBlock) llssa.Expr {
 			b.SetBlockEx(blk, llssa.BeforeLast, false)
 			return p.compileValue(b, edges[i])
 		})
 	})
 	return
+}
+
+func (p *context) coroSourceBlockReachable(block *ssa.BasicBlock) bool {
+	if block == nil {
+		return false
+	}
+	if physical := p.coroEmissionPlan(); physical != nil {
+		return physical.reachableBlocks[block]
+	}
+	if p.physicalReachable != nil {
+		return p.physicalReachable[block]
+	}
+	return true
 }
 
 // beginCoroSemanticInstructionEmission is the single source-instruction
@@ -2419,10 +2483,19 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				ret = p.compileCoroTerminalResultAllocation(v)
 			case coroPhysicalInstructionFrameBitcastAllocation:
 				observePhysical(coroPhysicalInstructionFrameBitcastAllocation)
-				ret = p.coroFrameAlloca(elem)
+				ret = p.structuredOutcomeAlloca(elem, false)
 			case coroPhysicalInstructionFrameAllocation:
 				observePhysical(coroPhysicalInstructionFrameAllocation)
-				ret = p.coroFrameAlloc(elem)
+				ret = p.structuredOutcomeAlloca(elem, true)
+			case coroPhysicalInstructionBorrowedAllocation:
+				observePhysical(coroPhysicalInstructionBorrowedAllocation)
+				// The storage itself belongs to the entry/native frame, but a
+				// Heap Alloc denotes a fresh zeroed object every time its source
+				// instruction executes. Reinitialize here so loops and conditional
+				// declarations retain their Go semantics while reusing the proven
+				// non-escaping physical slot.
+				ret = p.structuredOutcomeAlloca(elem, false)
+				b.Store(ret, p.prog.Zero(elem))
 			case coroPhysicalInstructionOrdinary:
 			default:
 				panic(fmt.Sprintf("Alloc selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
@@ -2431,6 +2504,15 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				p.debugAlloc(b, v, ret)
 				break
 			}
+		}
+		if p.selectCoroPlainBorrowedAllocation(v) {
+			// The frozen SitePlan proves that every static callee borrows this
+			// exact address only until return. Builder.Alloc retains the ordinary
+			// source-point zeroing and target stack-limit check while changing the
+			// conservative x/tools Heap decision to native local storage.
+			ret = b.Alloc(elem, false)
+			p.debugAlloc(b, v, ret)
+			break
 		}
 		exactBitcast := false
 		if !physicalPlanned {
@@ -3127,6 +3209,12 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.emitPCLineLabel(b, p.deferRunPos(v.Pos()))
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
+			if p.hasStructuredOutcomePhysicalBody() && outcome.semantic.evaluated &&
+				outcome.outcome == coroPhysicalOutcomeNone {
+				// The static-outcome proof found no reachable Defer
+				// registration. x/tools' synthetic RunDefers is a no-op.
+				return
+			}
 			if outcome.outcome != coroPhysicalOutcomeRunDefers {
 				panic(fmt.Sprintf("RunDefers selected incompatible frozen physical outcome recipe %s", outcome.outcome))
 			}
@@ -3521,6 +3609,9 @@ func (p *context) deferRunPos(fallback token.Pos) token.Pos {
 }
 
 func (p *context) returnNeedsImplicitRunDefers(ret *ssa.Return) bool {
+	if physical := p.coroEmissionPlan(); physical != nil && physical.cleanup == nil {
+		return false
+	}
 	fn := ret.Parent()
 	if fn == nil || fn.Synthetic != "" || ret.Block() == fn.Recover {
 		return false
@@ -3775,21 +3866,22 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		ct = NewCallerTracking()
 	}
 	ctx := &context{
-		prog:             prog,
-		pkg:              ret,
-		fset:             pkgProg.Fset,
-		goProg:           pkgProg,
-		goTyps:           pkgTypes,
-		goPkg:            pkg,
-		patches:          patches,
-		options:          options,
-		optionsSet:       true,
-		skips:            make(map[string]none),
-		vargs:            make(map[*ssa.Alloc][]llssa.Expr),
-		funcs:            make(map[*ssa.Function]llssa.Function),
-		rawPlainFuncs:    make(map[*ssa.Function]llssa.Function),
-		linkOnceFns:      make(map[*ssa.Function]none),
-		addrOfFieldAddrs: collectAddrOfFieldSelectors(files),
+		prog:              prog,
+		pkg:               ret,
+		fset:              pkgProg.Fset,
+		goProg:            pkgProg,
+		goTyps:            pkgTypes,
+		goPkg:             pkg,
+		patches:           patches,
+		options:           options,
+		optionsSet:        true,
+		skips:             make(map[string]none),
+		vargs:             make(map[*ssa.Alloc][]llssa.Expr),
+		funcs:             make(map[*ssa.Function]llssa.Function),
+		rawPlainFuncs:     make(map[*ssa.Function]llssa.Function),
+		outcomePlainFuncs: make(map[*ssa.Function]llssa.Function),
+		linkOnceFns:       make(map[*ssa.Function]none),
+		addrOfFieldAddrs:  collectAddrOfFieldSelectors(files),
 		loaded: map[*types.Package]*pkgInfo{
 			types.Unsafe: {kind: PkgDeclOnly}, // TODO(xsw): PkgNoInit or PkgDeclOnly?
 		},

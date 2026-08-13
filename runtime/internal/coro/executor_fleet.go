@@ -556,14 +556,13 @@ func restoreRunnableDemandAfterFailedClaim(slot *executorFleetSlot) bool {
 // DistributePNeutralRunnable services at most one global demand from an exact
 // source owner after a stable physical action. A source normally exports about
 // half of its local runnable queue, bounded by one destination mailbox, so one
-// continuation remains local and a lone yielding G cannot bounce between idle
-// Ps. Source links remain owner-only: an idle route publishes only a scalar
-// demand and never concurrently reads or mutates the victim queue. The only
-// single-runnable exception is a never-run initial frame, derived directly
-// from frozen G/frame state rather than a target-owned spawn pointer. It may
-// use an active route even before that route publishes demand: otherwise a
-// child spawned immediately before a non-safepointed compute loop could never
-// reach an idle P. Target selection scans the fixed route catalog beginning
+// continuation remains local and a lone G cannot bounce between idle Ps. A
+// never-run initial frame may use an active route even before that route
+// publishes demand, but only while it is genuine surplus: the sole runnable is
+// the local handoff after its parent parks and exporting it would turn a cheap
+// scheduler switch into a cross-thread wake. Source links remain owner-only:
+// an idle route publishes only a scalar demand and never concurrently reads or
+// mutates the victim queue. Target selection scans the fixed route catalog beginning
 // after the source route; a demanded target is protected by its route producer
 // lease until mailbox publication and executor request have both completed.
 //
@@ -586,10 +585,10 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	if !stableRunnableTransferP(source) {
 		return RunnableDistribution{}, true
 	}
-	batchLimit := source.readyCount / 2
 	if source.readyCount == 1 {
-		batchLimit = 1
+		return RunnableDistribution{}, true
 	}
+	batchLimit := source.readyCount / 2
 	if batchLimit > RunnableTransferMailboxCapacity {
 		batchLimit = RunnableTransferMailboxCapacity
 	}
@@ -600,9 +599,6 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	}
 	candidate := candidates[0]
 	initialCandidate := initialPNeutralRunnableState(candidate)
-	if source.readyCount == 1 && !initialCandidate {
-		return RunnableDistribution{}, true
-	}
 	for offset := uint32(1); offset < ExecutorFleetCapacity; offset++ {
 		index := (sourceHandle.Route - 1 + offset) % ExecutorFleetCapacity
 		target := &fleet.slots[index]

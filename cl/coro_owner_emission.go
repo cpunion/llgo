@@ -132,6 +132,17 @@ func (p *context) emitCoroFrozenOwnerBodies(pkg llssa.Package) error {
 		p.coroOwnerBodySymbols[function.Name()] = none{}
 
 		functionPlan, _ := plan.FunctionPlan(body.function)
+		if functionPlan.Emission == coro.EmitCoroutine &&
+			functionPlan.HasStaticOutcome() {
+			outcome := p.outcomePlainFuncs[body.function]
+			if outcome == nil || !outcome.HasBody() {
+				return fmt.Errorf(
+					"coroutine owner emission: frozen Go body %q did not materialize its outcome/plain twin",
+					body.function.String(),
+				)
+			}
+			p.coroOwnerBodySymbols[outcome.Name()] = none{}
+		}
 		if functionPlan.Emission != coro.EmitCoroutine ||
 			!plan.HasRawPlainVariant(body.function) {
 			continue
