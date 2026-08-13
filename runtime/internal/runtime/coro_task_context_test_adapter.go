@@ -24,6 +24,14 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
+// The isolated scheduler/fleet adapter tests do not link the typed hchan
+// implementation. A direct-channel step would therefore be an invalid fixture
+// input; keep the reducer's production dependency explicit and fail closed if
+// a test accidentally manufactures one.
+func coroMaterializeDirectChannelCompletionV1(*coro.DirectChannelCompletion) bool {
+	return false
+}
+
 // Named-source adapters exercise the target-neutral scheduler without loading
 // runtime2.go and platform getg implementations into the host Go runtime.
 // Linked runtime islands separately verify real logical runtime-G ownership.

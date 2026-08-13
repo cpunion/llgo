@@ -47,6 +47,7 @@ const (
 	resumeBindingSingle
 	resumeBindingCleanup
 	resumeBindingMaterialized
+	resumeBindingDirectChannel
 )
 
 // ResumePacket is stable storage in the direct-parking LLVM coroutine frame.
@@ -220,6 +221,8 @@ func validWaitSetResumeBinding(record *WaitSetRecord) bool {
 		return validResumeCleanupPlan(record, plan)
 	case resumeBindingMaterialized:
 		return validMaterializedResumePacket((*ResumePacket)(record.resume))
+	case resumeBindingDirectChannel:
+		return validBoundDirectChannelCompletion(record, (*DirectChannelCompletion)(record.resume))
 	default:
 		return false
 	}
@@ -249,6 +252,8 @@ func validTrustedWaitSetResumeBinding(record *WaitSetRecord) bool {
 		return validTrustedResumeCleanupPlanState(record, plan)
 	case resumeBindingMaterialized:
 		return validMaterializedResumePacket((*ResumePacket)(record.resume))
+	case resumeBindingDirectChannel:
+		return validBoundDirectChannelCompletion(record, (*DirectChannelCompletion)(record.resume))
 	default:
 		return false
 	}
@@ -514,7 +519,99 @@ func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *Wai
 	return validMaterializedResumePacket(packet)
 }
 
-// TakeResumePacket is the typed resume prologue for packet-backed parks. It
+// TakeDirectChannelResume is the compiler-owned one-case channel resume
+// prologue. DirectChannelCompletion already reduced the physical hchan effect
+// into its frame-local terminal word before making G runnable. Checked then
+// copied that exact decision into P. This function consumes the adjacent
+// completion/decision/ParkState certificates without constructing the generic
+// scalar/poll ResumePacket union.
+//
+// A prompt task stop may suppress an already copied channel value. In that
+// case completion and ParkState retain the completed physical fact while the P
+// decision carries Canceled plus the task token; the compiler observes only
+// the cancellation edge.
+func TakeDirectChannelResume(
+	g *G,
+	expected ParkTicket,
+	completion *DirectChannelCompletion,
+	wait *WaitSetRecord,
+	context unsafe.Pointer,
+) (
+	outcome ParkOutcome,
+	task TaskCancelKind,
+	small uint8,
+	ok bool,
+) {
+	if g == nil || g.magic != gMagic || !validParkTicket(expected) || completion == nil || wait == nil ||
+		context == nil || completion.context != context || completion.owner == nil ||
+		completion.wait != wait || !completion.route.Valid() ||
+		completion.owner.route != completion.route ||
+		preemptLoad(&completion.state) != uint32(directChannelCompletionMaterialized) ||
+		preemptLoad(&completion.small) > uint32(^uint8(0)) {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	physicalSmall := uint8(preemptLoad(&completion.small))
+	park := &g.park
+	physicalCompleted := park.outcome == ParkOutcomeCompleted && park.winnerCase == 1 &&
+		physicalSmall != ResumeSmallInvalid
+	physicalCanceled := park.outcome == ParkOutcomeCanceled && park.winnerCase == 0 &&
+		physicalSmall == ResumeSmallInvalid
+	if !physicalCompleted && !physicalCanceled {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	p := g.runP
+	if p == nil || p.current != g || !p.inResume || g.state != GRunning ||
+		p.runDecisionTaken || p.action.Kind != ActionResume || p.action.Flags != 0 ||
+		p.action.Handle == nil || g.runP != p {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	decision := &p.runDecision
+	if decision.g != g || decision.ticket != expected || !decision.materialized ||
+		decision.lease != (OperationResultLease{}) {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	resultSmall := uint8(ResumeSmallInvalid)
+	switch decision.outcome {
+	case ParkOutcomeCompleted:
+		if !physicalCompleted || decision.caseID != 1 || decision.task != TaskCancelNone {
+			return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+		}
+		resultSmall = physicalSmall
+	case ParkOutcomeCanceled:
+		if decision.caseID != 0 || !validTaskCancelKind(decision.task) {
+			return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+		}
+	default:
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	// prepareRunDecision copied this exact materialized park into the private P
+	// decision immediately before llvm.coro.resume. The compiler-generated
+	// continuation reaches this prologue before user code, and no producer owns
+	// ParkState or the frame completion. The completion owner records where the
+	// physical fact was materialized; it deliberately does not bind this resume
+	// to that P because a materialized G is P-neutral and may already have crossed
+	// a runnable-transfer mailbox. Recheck only the correlation fields needed by
+	// this consuming mutation; the decision is the full prior certificate.
+	if park.phase != parkMaterialized || park.ticket != expected || park.resolving ||
+		!validTaskCancelState(park.taskCancelKind, park.taskCancelPhase) ||
+		park.winnerID != (OperationID{}) {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	// The exact completion/decision/park triple is now consumed. Preserve only the
+	// sticky task token for the compiler's terminal control path.
+	outcome, task, small = decision.outcome, decision.task, resultSmall
+	kind, phase := park.taskCancelKind, park.taskCancelPhase
+	*park = ParkState{
+		ticket: expected, phase: parkDelivered,
+		taskCancelKind: kind, taskCancelPhase: phase,
+	}
+	*completion = DirectChannelCompletion{}
+	p.runDecision = RunDecision{}
+	p.runDecisionTaken = true
+	return outcome, task, small, true
+}
+
+// TakeResumePacket is the typed resume prologue for general packet-backed parks. It
 // consumes the P-owned logical decision and frame-local result exactly once.
 // A task stop selected after migration suppresses the copied payload without
 // consulting or touching the old source.

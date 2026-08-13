@@ -460,6 +460,9 @@ func validCommittedDirectChannelPark(g *G, frame *Frame, wait *WaitSetRecord) bo
 		wait.activePrev != nil || wait.activeNext != nil || wait.workNext != nil {
 		return false
 	}
+	if wait.resumeKind == resumeBindingDirectChannel {
+		return validCommittedCompactDirectChannelPark(g, frame, wait)
+	}
 	plan := (*ResumeCleanupPlan)(wait.resume)
 	if !validDirectChannelBoundResumeState(wait, plan) {
 		return false

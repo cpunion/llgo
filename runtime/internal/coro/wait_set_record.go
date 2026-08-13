@@ -322,6 +322,12 @@ func activateWaitSetRecordUnchecked(p *P, g *G, record *WaitSetRecord) {
 		p.parkWaitTail.activeNext = record
 	}
 	p.parkWaitTail = record
+	if record.resumeKind == resumeBindingDirectChannel {
+		// The hchan node has its own exact completion inbox. Unlike a source-backed
+		// park it cannot have an unobserved catalog fact which requires an initial
+		// affected-set visit.
+		return
+	}
 
 	// Every newly parked set receives one initial visit. This catches an owner
 	// completion published during preparation without adding an always-live G

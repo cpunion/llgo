@@ -67,18 +67,34 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 			result.stop = coroRunExecutionWaitV1
 			return result
 		}
-		step, ok := coroProgramNextRunStepV1(driver, &run)
-		if !ok || !coroStepMatchesManagedExecutionV1(step, held) {
+		combineDispatch := held && budget-result.used >= 2
+		var actionStep coro.ExecutorRunActionStep
+		var actionSelected, ok bool
+		if combineDispatch {
+			actionStep, actionSelected, ok = run.NextActionCombined()
+		} else {
+			actionStep, actionSelected, ok = run.NextAction()
+		}
+		if !ok || actionSelected && !coroActionStepMatchesManagedExecutionV1(actionStep, held) {
 			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
-		terminal, reduced := coroReduceExecutorRunStepV1(
-			p,
-			driver,
-			coroRunPolicyV1{main: main, lifecycle: &coroProgramLifecycleV1State},
-			step,
-			&result,
-		)
+		policy := coroRunPolicyV1{main: main, lifecycle: &coroProgramLifecycleV1State}
+		var terminal, reduced bool
+		if actionSelected {
+			terminal, reduced = coroReduceExecutorRunActionV1(
+				p, driver, policy, actionStep, &result,
+			)
+		} else {
+			step, nextOK := coroProgramNextRunStepV1(driver, &run, combineDispatch)
+			if !nextOK || !coroStepMatchesManagedExecutionV1(step, held) {
+				_ = coroFinishManagedExecutionV1(driver, held)
+				return coroRunResultV1{}
+			}
+			terminal, reduced = coroReduceExecutorRunStepV1(
+				p, driver, policy, step, &result,
+			)
+		}
 		if !reduced {
 			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}

@@ -701,6 +701,17 @@ func dequeueOSThreadRunnableWithTransfer(p *P) (*G, bool) {
 		return nil, false
 	}
 	selected := nextOSThreadRunnable(p)
+	return dequeueSelectedOSThreadRunnableWithTransfer(p, selected)
+}
+
+// dequeueSelectedOSThreadRunnableWithTransfer consumes the exact candidate
+// previously selected under this same scheduler-owner reduction. The common
+// unlocked case is the ready head and stays O(1); the exceptional detached
+// LockOSThread phase may select a later peer and retains the bounded list walk.
+func dequeueSelectedOSThreadRunnableWithTransfer(p *P, selected *G) (*G, bool) {
+	if p == nil || p.readyHead == nil || p.readyCount == 0 {
+		return nil, false
+	}
 	if selected == nil {
 		return nil, false
 	}
@@ -758,7 +769,9 @@ func validRunnableParkState(state *ParkState) bool {
 	switch state.phase {
 	case parkIdle, parkConsumed, parkDelivered:
 		return validReleasableParkState(state)
-	case parkReady, parkMaterialized:
+	case parkMaterialized:
+		return validMaterializedParkState(state, state.ticket)
+	case parkReady:
 		return validParkState(state)
 	default:
 		return false
@@ -1117,6 +1130,48 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 	return action, true
 }
 
+// beginExecutorRunContinuation consumes the private certificate installed by
+// pauseExecutorRunAction or materialized park promotion. The executor selector
+// has just validated the queue header, selected this G under the exact
+// LockOSThread phase, and removed its queue/transfer links. All producer-visible
+// work ended before the continuation was published. Rechecking the complete G,
+// ParkState, and frame graph here would therefore duplicate the insertion
+// boundary rather than establish a new ownership fact.
+//
+// Keep this unexported: arbitrary callers and compatibility paths must retain
+// BeginRunG's complete validator.
+func beginExecutorRunContinuation(p *P, g *G, peerRunnable bool) (Action, bool) {
+	if p == nil || g == nil || p.current != nil || p.inResume || p.inlineAwaitDepth != 0 ||
+		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
+		p.servicePreemptBudget != 0 || g.magic != gMagic || g.state != GRunnable ||
+		(g.runAction != ActionCheckResume &&
+			(g.runAction != ActionInvalid || g.park.phase != parkMaterialized)) ||
+		g.queued || g.nextReady != nil || g.waiting ||
+		g.runP != nil || g.transferState != runnableTransferGIdle ||
+		!gPreemptEnabledAtDepthZero(g) || g.active == nil || g.active.handle == nil ||
+		g.active.header == nil ||
+		(g.active.state != FrameInitialSuspended && g.active.state != FrameSuspended) {
+		return Action{}, false
+	}
+	schedule := preemptLoad(&p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested {
+		return Action{}, false
+	}
+	handle := g.active.handle
+	budget := servicePreemptSafepointBudget
+	if peerRunnable {
+		budget = preemptCheckpointStride
+	}
+	p.current = g
+	p.servicePreemptBudget = budget
+	g.state = GRunning
+	g.runP = p
+	g.runAction = ActionInvalid
+	action := Action{Kind: ActionCheckResume, Handle: handle}
+	p.action = action
+	return action, true
+}
+
 type executorRunQueuePlacement uint8
 
 const (
@@ -1220,6 +1275,54 @@ func Checked(p *P, g *G, action Action, done bool) (Action, bool) {
 			return Action{}, false
 		}
 		return setAction(p, ActionDestroy, action.Handle)
+	default:
+		return Action{}, false
+	}
+}
+
+// CheckedExecutorRun is Checked for the no-return physical interval opened by
+// ExecutorRunStepAction. The private issued marker and exact P action were
+// established after the scheduler's dequeue/frame audit, and llvm.coro.done is
+// observational, so replaying that complete audit before the adjacent
+// resume/destroy would not create another ownership boundary. Compiler code
+// still has to consume the run decision before it may publish a transition.
+func CheckedExecutorRun(
+	driver *ExecutorDriver,
+	g *G,
+	action Action,
+	done bool,
+) (Action, bool) {
+	if driver == nil || g == nil || driver.p == nil ||
+		driver.run.issued != action.Kind || action.Flags != 0 || action.Handle == nil {
+		return Action{}, false
+	}
+	p := driver.p
+	if p.current != g || g.runP != p || p.action != action || p.inResume ||
+		p.inlineAwaitDepth != 0 {
+		return Action{}, false
+	}
+	switch action.Kind {
+	case ActionCheckResume:
+		if done || g.state != GRunning || g.active == nil ||
+			g.active.handle != action.Handle ||
+			!prepareRunDecision(p, g) {
+			return Action{}, false
+		}
+		g.active.state = FrameActive
+		p.inResume = true
+		next := Action{Kind: ActionResume, Handle: action.Handle}
+		p.action = next
+		return next, true
+	case ActionCheckDestroy:
+		if !done || g.state != GDispatching || g.destroyTarget == nil ||
+			g.destroyTarget.handle != action.Handle ||
+			g.destroyTarget.state != FrameDestroyPending ||
+			g.park.taskCancelPhase == taskCancelRequested {
+			return Action{}, false
+		}
+		next := Action{Kind: ActionDestroy, Handle: action.Handle}
+		p.action = next
+		return next, true
 	default:
 		return Action{}, false
 	}

@@ -220,6 +220,29 @@ func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
 	return accepted && (!coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring())
 }
 
+func coroTargetPublishDirectChannelCompletionV1(
+	owner *coro.ExecutorDriver,
+	route coro.RouteID,
+	completion *coro.DirectChannelCompletion,
+) bool {
+	domain, ok := coroNativeFleetActiveDomainForRouteV1(route)
+	if !ok || owner == nil || domain.driverOwnerV1() != owner || !domain.ingress.Enter() {
+		return false
+	}
+	if domain.lifecycle != coroNativeFleetDomainActiveV1 || domain.driverOwnerV1() != owner ||
+		domain.handle.Route != uint32(route) ||
+		!coro.PublishExecutorDirectChannelCompletion(owner, completion) {
+		_, _ = domain.ingress.Leave()
+		return false
+	}
+	result := coroNativeFleetV1State.fleet.RequestExecutor(domain.handle)
+	accepted := result == coro.ExecutorRequestPublished ||
+		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
+	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring()
+	_, leaveOK := domain.ingress.Leave()
+	return accepted && ringOK && leaveOK
+}
+
 // coroTargetRequestControlledTimerV2 requests the exact owner after
 // time.Timer atomically publishes a new logical generation. The timer catalog
 // owns no producer callback: its next owner scan observes the retained control

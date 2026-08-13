@@ -59,7 +59,8 @@ func validExecutorRunCursor(cursor *executorRunCursor, p *P) bool {
 
 func emptyExecutorRunCursor(driver *ExecutorDriver) bool {
 	return driver != nil && driver.run == (executorRunCursor{}) &&
-		emptyOwnerLocalCompletion(&driver.local)
+		emptyOwnerLocalCompletion(&driver.local) &&
+		executorDirectChannelInboxIdle(driver)
 }
 
 // EnterExecutorRunCompatibility is the only supported stable-idle switch from
@@ -72,6 +73,7 @@ func EnterExecutorRunCompatibility(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
 		!emptyOwnerLocalCompletion(&driver.local) ||
+		!executorDirectChannelInboxIdle(driver) ||
 		!idleExecutorScheduler(driver.p) {
 		return false
 	}
@@ -80,16 +82,19 @@ func EnterExecutorRunCompatibility(driver *ExecutorDriver) bool {
 }
 
 // ExecutorRunStepKind is one reduction selected by the unified resumable core.
-// Dispatch is separate from Action so budget one always has a stable return
-// after dequeue/BeginRunG. Source advances exactly one PollExecutorSlice
-// reduction. Action must be completed and committed without returning through
-// another host boundary.
+// Dispatch remains available when the caller cannot yet prove a managed
+// execution lease or has only one budget unit. A lease-holding caller may ask
+// the selector to combine that stable transition with the immediately
+// following Action; Dispatched records the extra charged reduction. Source
+// advances exactly one PollExecutorSlice reduction. Action must be completed
+// and committed without returning through another host boundary.
 type ExecutorRunStepKind uint8
 
 const (
 	ExecutorRunStepInvalid ExecutorRunStepKind = iota
 	ExecutorRunStepSource
 	ExecutorRunStepMaterialize
+	ExecutorRunStepDirectChannel
 	ExecutorRunStepDispatch
 	ExecutorRunStepAction
 	ExecutorRunStepDestroyCommit
@@ -99,15 +104,33 @@ const (
 // ExecutorRunStep carries no callback or interface value. Action handles are
 // live only for Dispatch/Action. DestroyCommit is always handle-free.
 type ExecutorRunStep struct {
-	Kind    ExecutorRunStepKind
-	G       *G
-	Action  Action
-	Poll    ExecutorPollProgress
-	Cleanup ResumeCleanupStep
+	Kind ExecutorRunStepKind
+	// Dispatched is valid only for Action. It certifies that this selection also
+	// dequeued G and completed BeginRunG, so the reducer charges two units and
+	// applies the command-cancellation gate before the physical operation.
+	Dispatched bool
+	G          *G
+	Action     Action
+	Poll       ExecutorPollProgress
+	Cleanup    ResumeCleanupStep
+	Direct     *DirectChannelCompletion
+}
+
+// ExecutorRunActionStep is the compact high-frequency half of
+// ExecutorRunStep. Poll progress and typed cleanup are cold event payloads;
+// carrying their storage through every runnable dequeue and physical resume
+// made the common scheduler ABI larger than the state it actually transfers.
+// The selector below returns this shape only when the ordinary priority rules
+// have already selected Dispatch/Action. Every source, materialize, direct
+// completion, destroy receipt, and idle boundary retains ExecutorRunStep.
+type ExecutorRunActionStep struct {
+	Dispatched bool
+	G          *G
+	Action     Action
 }
 
 func executorRunExternalSourceRequested(driver *ExecutorDriver) bool {
-	return driver.sources.pending(driver.p) ||
+	return executorDirectChannelCompletionPending(driver) || driver.sources.pending(driver.p) ||
 		driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 }
@@ -249,16 +272,28 @@ func CommitExecutorRunSourceDistribution(driver *ExecutorDriver, distributed boo
 	return false
 }
 
-func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
+func dispatchExecutorRunReadyAction(
+	driver *ExecutorDriver,
+	selected *G,
+	combineAction bool,
+) (ExecutorRunActionStep, bool) {
 	p := driver.p
-	if !validReadyQueueHeader(p) {
-		return ExecutorRunStep{}, false
+	if selected == nil || !validReadyQueueHeader(p) {
+		return ExecutorRunActionStep{}, false
 	}
-	g, imported := dequeueOSThreadRunnableWithTransfer(p)
+	g, imported := dequeueSelectedOSThreadRunnableWithTransfer(p, selected)
 	if g == nil {
-		return ExecutorRunStep{}, false
+		return ExecutorRunActionStep{}, false
 	}
-	action, ok := BeginRunG(p, g)
+	peerRunnable := nextOSThreadRunnable(p) != nil
+	var action Action
+	var ok bool
+	if g.runAction == ActionCheckResume ||
+		g.runAction == ActionInvalid && g.park.phase == parkMaterialized {
+		action, ok = beginExecutorRunContinuation(p, g, peerRunnable)
+	} else {
+		action, ok = BeginRunG(p, g)
+	}
 	if !ok {
 		// dequeue only clears the selected head's scheduler-owned queue fields.
 		// Restore those exact fields on a fail-closed BeginRunG rejection so a
@@ -268,12 +303,89 @@ func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 			g.transferState = runnableTransferGImported
 		}
 		prependReadyUnchecked(p, g)
-		return ExecutorRunStep{}, false
+		return ExecutorRunActionStep{}, false
 	}
-	return ExecutorRunStep{Kind: ExecutorRunStepDispatch, G: g, Action: action}, true
+	if combineAction {
+		driver.run.issued = action.Kind
+		return ExecutorRunActionStep{Dispatched: true, G: g, Action: action}, true
+	}
+	return ExecutorRunActionStep{G: g, Action: action}, true
 }
 
-func nextExecutorRunStepAtValidated(driver *ExecutorDriver, now int64, withDeadline bool) (ExecutorRunStep, bool) {
+func dispatchExecutorRunReady(
+	driver *ExecutorDriver,
+	selected *G,
+	combineAction bool,
+) (ExecutorRunStep, bool) {
+	action, ok := dispatchExecutorRunReadyAction(driver, selected, combineAction)
+	if !ok {
+		return ExecutorRunStep{}, false
+	}
+	kind := ExecutorRunStepDispatch
+	if combineAction {
+		kind = ExecutorRunStepAction
+	}
+	return ExecutorRunStep{
+		Kind: kind, Dispatched: action.Dispatched, G: action.G, Action: action.Action,
+	}, true
+}
+
+// nextExecutorRunActionValidated applies the same priority order as
+// nextExecutorRunStepAtValidated but stops before every cold event reduction.
+// selected=false is a side-effect-free request to use the complete selector.
+// This keeps one scheduling authority while allowing the production runner to
+// avoid constructing the large cold-event union for the overwhelmingly common
+// Action path.
+func nextExecutorRunActionValidated(
+	driver *ExecutorDriver,
+	combineDispatch bool,
+) (step ExecutorRunActionStep, selected, ok bool) {
+	p := driver.p
+	if p.current != nil {
+		action, g := p.action, p.current
+		if action.Kind == ActionCommitDestroy {
+			return ExecutorRunActionStep{}, false, true
+		}
+		if action.Handle == nil ||
+			(action.Kind != ActionCheckResume && action.Kind != ActionCheckDestroy && action.Kind != ActionPanicDestroy) {
+			return ExecutorRunActionStep{}, false, false
+		}
+		driver.run.readyDebt = false
+		driver.run.issued = action.Kind
+		return ExecutorRunActionStep{G: g, Action: action}, true, true
+	}
+	if p.inResume || p.inlineAwaitDepth != 0 || p.action != (Action{}) || p.runDecision != (RunDecision{}) ||
+		p.runDecisionTaken || p.servicePreemptBudget != 0 {
+		return ExecutorRunActionStep{}, false, false
+	}
+	if !combineDispatch || driver.poll.phase != executorPollIdle ||
+		executorDirectChannelCompletionPending(driver) || ownerLocalCompletionPending(driver) {
+		return ExecutorRunActionStep{}, false, true
+	}
+	runnable := nextOSThreadRunnable(p)
+	if driver.run.readyDebt && runnable != nil {
+		step, ok := dispatchExecutorRunReadyAction(driver, runnable, true)
+		return step, ok, ok
+	}
+	if executorRunSourceRequested(driver) ||
+		driver.run.actionsSinceSource == executorRunSourceQuantum ||
+		runnable == nil && HasWaiting(p) && !driver.run.blocked {
+		return ExecutorRunActionStep{}, false, true
+	}
+	driver.run.readyDebt = false
+	if runnable == nil {
+		return ExecutorRunActionStep{}, false, true
+	}
+	step, ok = dispatchExecutorRunReadyAction(driver, runnable, true)
+	return step, ok, ok
+}
+
+func nextExecutorRunStepAtValidated(
+	driver *ExecutorDriver,
+	now int64,
+	withDeadline bool,
+	combineDispatch bool,
+) (ExecutorRunStep, bool) {
 	p := driver.p
 	if p.current != nil {
 		action, g := p.action, p.current
@@ -310,6 +422,19 @@ func nextExecutorRunStepAtValidated(driver *ExecutorDriver, now int64, withDeadl
 		}
 		return serviceExecutorRunSource(driver, now, withDeadline)
 	}
+	// A compact hchan completion is already a terminal typed fact and has no
+	// source epoch to acknowledge. Consume it before unrelated catalog work; the
+	// runtime adapter removes the typed queue node and commits the returned
+	// frame-local packet in this single explicit reduction.
+	if executorDirectChannelCompletionPending(driver) {
+		completion, taken := takeExecutorDirectChannelCompletion(driver)
+		if !taken {
+			return ExecutorRunStep{}, false
+		}
+		if completion != nil {
+			return ExecutorRunStep{Kind: ExecutorRunStepDirectChannel, Direct: completion}, true
+		}
+	}
 	// An owner-local completion has already published its exact typed source
 	// fact. Resolve it before starting an unrelated external A/ack/B epoch and
 	// before dispatching another G; typed cleanup still returns through the
@@ -317,15 +442,15 @@ func nextExecutorRunStepAtValidated(driver *ExecutorDriver, now int64, withDeadl
 	if ownerLocalCompletionPending(driver) {
 		return nextExecutorRunLocalStep(driver)
 	}
-	runnable := runnableForOSThreadOwner(p)
+	runnable := nextOSThreadRunnable(p)
 	if driver.run.readyDebt {
-		if runnable {
-			return dispatchExecutorRunReady(driver)
+		if runnable != nil {
+			return dispatchExecutorRunReady(driver, runnable, combineDispatch)
 		}
 	}
 	if executorRunSourceRequested(driver) ||
 		driver.run.actionsSinceSource == executorRunSourceQuantum ||
-		!runnable && HasWaiting(p) && !driver.run.blocked {
+		runnable == nil && HasWaiting(p) && !driver.run.blocked {
 		// A negative timestamp is the explicit before-time probe used by the
 		// native adapter. Selection has not mutated the cursor yet, so its
 		// caller can sample a fresh clock and retry this exact decision.
@@ -336,8 +461,8 @@ func nextExecutorRunStepAtValidated(driver *ExecutorDriver, now int64, withDeadl
 		return serviceExecutorRunSource(driver, now, withDeadline)
 	}
 	driver.run.readyDebt = false
-	if runnable {
-		return dispatchExecutorRunReady(driver)
+	if runnable != nil {
+		return dispatchExecutorRunReady(driver, runnable, combineDispatch)
 	}
 	return ExecutorRunStep{Kind: ExecutorRunStepIdle}, true
 }
@@ -348,7 +473,7 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 		driver.run.issued != ActionInvalid {
 		return ExecutorRunStep{}, false
 	}
-	return nextExecutorRunStepAtValidated(driver, now, withDeadline)
+	return nextExecutorRunStepAtValidated(driver, now, withDeadline, false)
 }
 
 // ExecutorRunSliceCapability is a scheduler-owner-only proof that one bounded
@@ -393,13 +518,60 @@ func (capability *ExecutorRunSliceCapability) owner(
 		driver.run.issued == ActionInvalid
 }
 
+func (capability *ExecutorRunSliceCapability) nextAction(
+	combineDispatch bool,
+) (ExecutorRunActionStep, bool, bool) {
+	if capability == nil {
+		return ExecutorRunActionStep{}, false, false
+	}
+	driver, ok := capability.owner(capability.withDeadline)
+	if !ok {
+		return ExecutorRunActionStep{}, false, false
+	}
+	return nextExecutorRunActionValidated(driver, combineDispatch)
+}
+
+// NextAction selects an already dispatched physical action without carrying
+// the cold source/materialization payload union. selected=false means the
+// complete Next/NextBeforeTime/NextAt selector still owns the next reduction.
+func (capability *ExecutorRunSliceCapability) NextAction() (
+	step ExecutorRunActionStep,
+	selected bool,
+	ok bool,
+) {
+	return capability.nextAction(false)
+}
+
+// NextActionCombined additionally combines a ready dequeue with its physical
+// action. The caller must hold the same managed-execution lease and two-unit
+// budget required by NextCombined/NextAtCombined.
+func (capability *ExecutorRunSliceCapability) NextActionCombined() (
+	step ExecutorRunActionStep,
+	selected bool,
+	ok bool,
+) {
+	return capability.nextAction(true)
+}
+
 // Next selects one step for a no-deadline bounded slice.
 func (capability *ExecutorRunSliceCapability) Next() (ExecutorRunStep, bool) {
 	driver, ok := capability.owner(false)
 	if !ok {
 		return ExecutorRunStep{}, false
 	}
-	return nextExecutorRunStepAtValidated(driver, 0, false)
+	return nextExecutorRunStepAtValidated(driver, 0, false, false)
+}
+
+// NextCombined is Next with the additional proof that the caller already owns
+// a managed-execution lease and has at least two budget units. An immediately
+// runnable G therefore crosses dequeue/BeginRunG and the issued Action boundary
+// in one selector entry.
+func (capability *ExecutorRunSliceCapability) NextCombined() (ExecutorRunStep, bool) {
+	driver, ok := capability.owner(false)
+	if !ok {
+		return ExecutorRunStep{}, false
+	}
+	return nextExecutorRunStepAtValidated(driver, 0, false, true)
 }
 
 // NextBeforeTime performs the timer-aware before-clock probe without
@@ -409,7 +581,17 @@ func (capability *ExecutorRunSliceCapability) NextBeforeTime() (ExecutorRunStep,
 	if !ok {
 		return ExecutorRunStep{}, false
 	}
-	return nextExecutorRunStepAtValidated(driver, -1, true)
+	return nextExecutorRunStepAtValidated(driver, -1, true, false)
+}
+
+// NextBeforeTimeCombined is NextBeforeTime with adjacent dispatch/action
+// selection enabled under the caller's retained lease and budget proof.
+func (capability *ExecutorRunSliceCapability) NextBeforeTimeCombined() (ExecutorRunStep, bool) {
+	driver, ok := capability.owner(true)
+	if !ok {
+		return ExecutorRunStep{}, false
+	}
+	return nextExecutorRunStepAtValidated(driver, -1, true, true)
 }
 
 // NextAt selects one timer-aware step using the host's current monotonic
@@ -419,7 +601,17 @@ func (capability *ExecutorRunSliceCapability) NextAt(now int64) (ExecutorRunStep
 	if !ok || now < 0 {
 		return ExecutorRunStep{}, false
 	}
-	return nextExecutorRunStepAtValidated(driver, now, true)
+	return nextExecutorRunStepAtValidated(driver, now, true, false)
+}
+
+// NextAtCombined is NextAt with adjacent dispatch/action selection enabled
+// under the caller's retained lease and budget proof.
+func (capability *ExecutorRunSliceCapability) NextAtCombined(now int64) (ExecutorRunStep, bool) {
+	driver, ok := capability.owner(true)
+	if !ok || now < 0 {
+		return ExecutorRunStep{}, false
+	}
+	return nextExecutorRunStepAtValidated(driver, now, true, true)
 }
 
 // NextExecutorRunStep selects one no-deadline runner step. It never calls
@@ -568,6 +760,89 @@ func validIssuedExecutorRunAction(driver *ExecutorDriver) bool {
 	default:
 		return false
 	}
+}
+
+// resumeIssuedDirectChannelPark is the exact post-llvm.coro.resume transition
+// for the compact one-case channel protocol. The compiler hook has already
+// published pendingParkSet and the complete committed frame record. Consuming
+// that single certificate here avoids routing the common transition through
+// resumeGateTaken, resumedFrameForAction, dispatchPending, and then a second
+// direct-park audit. Inline-await ancestry and every other suspension retain
+// the generic Resumed path.
+func resumeIssuedDirectChannelPark(p *P, g *G, action Action) (Action, bool) {
+	if p == nil || g == nil || action.Kind != ActionResume || action.Flags != 0 ||
+		action.Handle == nil || p.current != g || g.runP != p || !p.inResume ||
+		p.inlineAwaitDepth != 0 || p.action != action || g.state != GRunning ||
+		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
+		!gPreemptEnabledAtDepthZero(g) || g.pending.kind != pendingParkSet ||
+		g.pending.target != nil || g.queued || g.nextReady != nil ||
+		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
+		return Action{}, false
+	}
+	frame := g.active
+	if frame == nil || frame != g.pending.from || frame.handle != action.Handle ||
+		frame.state != FrameActive || frame.header == nil ||
+		frame.header.SuspendReason != uint16(SuspendPark) ||
+		frame.header.Lifecycle != uint16(FrameSuspended) || frame.parkWait == nil ||
+		!frame.parkWait.directChannel ||
+		!validCommittedCompactDirectChannelPark(g, frame, frame.parkWait) ||
+		!acknowledgeSuspendedGPreempt(g) {
+		return Action{}, false
+	}
+	g.pending = pendingTransition{}
+	frame.state = FrameSuspended
+	p.inResume = false
+	p.runDecisionTaken = false
+	g.state = GWaiting
+	g.runP = nil
+	p.current = nil
+	p.servicePreemptBudget = 0
+	p.action = Action{}
+	activateWaitSetRecordUnchecked(p, g, frame.parkWait)
+	return Action{Kind: ActionPark}, true
+}
+
+// ResumedExecutorRun consumes the exact ActionResume return for an issued
+// executor step. Yield/Park are terminal control receipts constructed entirely
+// by Resumed; no runtime or target policy chooses a queue placement for them.
+// Commit those adjacent receipts here so the post-resume path does not replay
+// completedExecutorRunAction's arbitrary-caller audit. Handle continuations,
+// completion, panic, and destroy receipts retain the ordinary explicit commit
+// APIs because their placement or terminal policy is selected by the runtime.
+func ResumedExecutorRun(
+	driver *ExecutorDriver,
+	p *P,
+	g *G,
+	action Action,
+) (next Action, committed, ok bool) {
+	if !validIssuedExecutorRunAction(driver) || driver.p != p ||
+		driver.run.issued != ActionCheckResume {
+		return Action{}, false, false
+	}
+	if g != nil && g.pending.kind == pendingParkSet && g.active != nil &&
+		g.active.parkWait != nil && g.active.parkWait.directChannel {
+		next, ok = resumeIssuedDirectChannelPark(p, g, action)
+	} else {
+		next, ok = Resumed(p, g, action)
+	}
+	if !ok || (next.Kind != ActionYield && next.Kind != ActionPark) {
+		return next, false, ok
+	}
+	if !validOSThreadPeerActionCommit(p, g) {
+		return Action{}, false, false
+	}
+	// Resumed has just produced the complete stable Yield/Park state and cleared
+	// P.current/action/service state. Preserve a same-resume ready publication,
+	// close the issued interval, and apply the exceptional detached-owner debt.
+	publishedReady := driver.run.readyDebt
+	driver.run.issued = ActionInvalid
+	driver.run.readyDebt = publishedReady && runnableForOSThreadOwner(p)
+	driver.run.blocked = false
+	if driver.run.actionsSinceSource < executorRunSourceQuantum {
+		driver.run.actionsSinceSource++
+	}
+	commitOSThreadPeerAction(p)
+	return next, true, true
 }
 
 // CommitExecutorRunAction closes the no-return physical interval opened by an

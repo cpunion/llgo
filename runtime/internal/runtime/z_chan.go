@@ -78,7 +78,8 @@ type chanWaiter struct {
 	// multi-channel select. Such a waiter never owns pthread mutex/cond state;
 	// z_chan_coro.go commits it through the exact ChannelOperationSource
 	// transaction before any typed payload or completion status is published.
-	coro *coroChanOperationV1
+	coro   *coroChanOperationV1
+	direct *coro.DirectChannelCompletion
 }
 
 type selectState struct {
@@ -364,7 +365,7 @@ func (w *chanWaiter) finish(status waitStatus) {
 }
 
 func claimWaiter(w *chanWaiter) bool {
-	if w.coro != nil {
+	if w.coro != nil || w.direct != nil {
 		return false
 	}
 	if w.sel != nil {
@@ -388,6 +389,9 @@ func completeRecvWaiterWithContext(
 	status waitStatus,
 	context *coroChanExternalCommitContextV1,
 ) coroChanMatchResult {
+	if w.direct != nil {
+		return commitDirectCoroRecvWaiterLockedV1(w, src, eltSize, status, context)
+	}
 	if w.coro != nil {
 		if context != nil {
 			return commitCoroRecvWaiterLockedWithContext(w, src, eltSize, status, *context)
@@ -415,6 +419,9 @@ func completeSendWaiterWithContext(
 	status waitStatus,
 	context *coroChanExternalCommitContextV1,
 ) coroChanMatchResult {
+	if w.direct != nil {
+		return commitDirectCoroSendWaiterLockedV1(w, nil, w.size, status, context)
+	}
 	if w.coro != nil {
 		if context != nil {
 			return commitCoroSendWaiterLockedWithContext(w, nil, w.size, status, *context)
@@ -438,6 +445,9 @@ func recvFromSendWaiterWithContext(
 	eltSize int,
 	context *coroChanExternalCommitContextV1,
 ) coroChanMatchResult {
+	if w.direct != nil {
+		return commitDirectCoroSendWaiterLockedV1(w, dst, eltSize, waitSendOK, context)
+	}
 	if w.coro != nil {
 		if context != nil {
 			return commitCoroSendWaiterLockedWithContext(w, dst, eltSize, waitSendOK, *context)

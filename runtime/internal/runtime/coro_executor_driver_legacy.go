@@ -29,7 +29,11 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 func coroProgramNextRunStepV1(
 	_ *coro.ExecutorDriver,
 	run *coro.ExecutorRunSliceCapability,
+	combineDispatch bool,
 ) (coro.ExecutorRunStep, bool) {
+	if combineDispatch {
+		return run.NextCombined()
+	}
 	return run.Next()
 }
 

@@ -51,10 +51,17 @@ type ExecutorDriver struct {
 	sources         ExecutorSourceSet
 	poll            executorPollTransaction
 	local           ownerLocalCompletionCursor
-	run             executorRunCursor
-	prepareNow      int64
-	hasPrepareNow   bool
-	terminalKind    ActionKind
+	// directChannelHead is the producer exchange cursor; directChannelTail is
+	// owner-only, and directChannelStub is the permanent one-word sentinel.
+	// Together they form an intrusive MPSC queue for frame-local one-case hchan
+	// completions. A node's owning frame remains pinned by its WaitSetRecord.
+	directChannelHead unsafe.Pointer
+	directChannelTail unsafe.Pointer
+	directChannelStub unsafe.Pointer
+	run               executorRunCursor
+	prepareNow        int64
+	hasPrepareNow     bool
+	terminalKind      ActionKind
 }
 
 type executorDriverState uint8
@@ -227,19 +234,21 @@ func CurrentExecutorDriverForActiveResume(g *G) (*ExecutorDriver, RouteID, bool)
 // Callers which recovered a G through TLS, a callback, or public metadata must
 // use CurrentExecutorDriver or CurrentExecutorDriverForActiveResume instead.
 func CurrentExecutorDriverForCompilerTask(g *G) (*ExecutorDriver, RouteID, bool) {
-	if g == nil || g.magic != gMagic || g.state != GRunning ||
-		g.transferState != runnableTransferGIdle {
+	if g == nil {
 		return nil, 0, false
 	}
 	p := g.runP
-	if p == nil || p.current != g || !p.inResume ||
-		preemptLoad(&p.executorMode) != executorModeBound {
+	if p == nil || p.current != g || !p.inResume {
 		return nil, 0, false
 	}
 	driver := p.executor
-	if driver == nil || driver.magic != executorDriverMagic ||
-		driver.state != executorDriverActive || driver.p != p ||
-		!driver.route.Valid() || driver.sources.route != driver.route {
+	// The hidden task and private inResume episode are the scheduler's
+	// certificate: no target can close, rebind, transfer, or replace this
+	// P/driver while generated code is active below llvm.coro.resume. Retain the
+	// exact pointer and route correlation needed by the no-suspend caller; the
+	// next park/source operation validates its own mutable endpoint state.
+	if driver == nil || driver.p != p || !driver.route.Valid() ||
+		driver.sources.route != driver.route {
 		return nil, 0, false
 	}
 	return driver, driver.route, true
@@ -251,29 +260,32 @@ func CurrentExecutorDriverForCompilerTask(g *G) (*ExecutorDriver, RouteID, bool)
 // ActionResume episode. Typed adapters add only their closed source-owner
 // validation after this common proof.
 func currentExecutorParkDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool) {
-	if !ValidG(g) || g.transferState != runnableTransferGIdle || !resumeGateTaken(g) ||
-		g.runP == nil || g.active == nil || g.active.handle == nil || g.active.header == nil {
+	driver, route, current := CurrentExecutorDriverForCompilerTask(g)
+	if !current || g.active == nil || g.active.handle == nil || g.active.header == nil {
 		return nil, ExecutorHandle{}, 0, false
 	}
-	p := g.runP
-	driver := p.executor
+	p := driver.p
 	handle := g.active.handle
 	header := g.active.header
-	if !validExecutorDriverHeaderForP(driver, p) || p.current != g || !p.inResume ||
-		!expectedAction(p, g, p.action, ActionResume) || !activeResumeOwnedByAction(g) ||
-		g.state != GRunning || g.active.state != FrameActive ||
+	action := p.action
+	if action.Kind != ActionResume || action.Flags != 0 || action.Handle == nil ||
+		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
+		!gPreemptEnabledAtDepthZero(g) ||
+		g.active.state != FrameActive ||
 		g.active.handle != handle || g.active.header != header ||
 		header.G != unsafe.Pointer(g) || header.SuspendReason != uint16(SuspendPark) ||
 		header.Lifecycle != uint16(FrameSuspended) || !driver.route.Valid() ||
 		driver.handle.Slot == 0 || driver.handle.Generation == 0 {
 		return nil, ExecutorHandle{}, 0, false
 	}
-	slot, ok := executorSlot(driver.registry, driver.handle)
-	if !ok || preemptLoad(&slot.generation) != driver.handle.Generation ||
-		preemptLoad(&slot.state) != uint32(executorActive) {
+	if p.inlineAwaitDepth == 0 {
+		if action.Handle != handle {
+			return nil, ExecutorHandle{}, 0, false
+		}
+	} else if !resumeActionOwnsActive(g, action, p.inlineAwaitDepth) {
 		return nil, ExecutorHandle{}, 0, false
 	}
-	return driver, driver.handle, driver.route, true
+	return driver, driver.handle, route, true
 }
 
 // CurrentExecutorSourceCatalog returns the exact owner P and direct-call source
@@ -443,6 +455,8 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 		driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
 		driver.poll != (executorPollTransaction{}) ||
 		driver.local != (ownerLocalCompletionCursor{}) ||
+		driver.directChannelHead != nil || driver.directChannelTail != nil ||
+		driver.directChannelStub != nil ||
 		driver.run != (executorRunCursor{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||
@@ -461,6 +475,9 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 	driver.handle = handle
 	driver.requestGate = &requestSlot.gate
 	driver.route = route
+	directChannelStub := unsafe.Pointer(&driver.directChannelStub)
+	preemptStorePointer(&driver.directChannelHead, directChannelStub)
+	driver.directChannelTail = directChannelStub
 	p.executor = driver
 	preemptStore(&p.executorMode, executorModeBound)
 	return true

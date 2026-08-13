@@ -828,6 +828,19 @@ func (fleet *ExecutorFleet) RequestTimerExecutor(route RouteID) ExecutorRequestR
 	return fleet.routes.RequestTimerExecutor(route)
 }
 
+// RequestExecutor wakes the exact fleet route for a fact already published in
+// executor-owned storage rather than a source catalog.
+func (fleet *ExecutorFleet) RequestExecutor(handle ExecutorFleetHandle) ExecutorRequestResult {
+	if fleet == nil || !handle.Valid() {
+		return ExecutorRequestInvalid
+	}
+	route, ok := handle.RouteID()
+	if !ok {
+		return ExecutorRequestInvalid
+	}
+	return fleet.routes.RequestExecutor(route, handle.Executor)
+}
+
 // RequestChannelExecutor routes the wake half of an already committed typed
 // channel rendezvous. The Channel source fact is published by the hchan
 // transaction before this call; this method only resolves and requests the

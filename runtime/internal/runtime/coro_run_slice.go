@@ -225,38 +225,46 @@ func (policy coroRunPolicyV1) commandState() (running, returnRequested, ok bool)
 // coroRunPhysicalActionV1 is the indivisible runtime half of one runner action
 // reduction. Neither Checked's ActionResume/ActionDestroy nor a freed handle is
 // observable at a reducer return boundary.
-func coroRunPhysicalActionV1(p *coro.P, g *coro.G, action coro.Action) (coro.Action, bool) {
+func coroRunPhysicalActionV1(
+	p *coro.P,
+	driver *coro.ExecutorDriver,
+	g *coro.G,
+	action coro.Action,
+) (next coro.Action, advanced, committed bool) {
 	switch action.Kind {
 	case coro.ActionCheckResume:
-		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))
+		next, ok := coro.CheckedExecutorRun(driver, g, action, coroHandleDone(action.Handle))
 		if !ok || next.Kind != coro.ActionResume || next.Handle != action.Handle {
-			return coro.Action{}, false
+			return coro.Action{}, false, false
 		}
 		activation, entered := coroEnterRuntimeContext(g)
 		if !entered {
-			return coro.Action{}, false
+			return coro.Action{}, false, false
 		}
 		coroHandleResume(next.Handle)
 		if !coroLeaveRuntimeContext(g, activation) {
-			return coro.Action{}, false
+			return coro.Action{}, false, false
 		}
-		return coro.Resumed(p, g, next)
+		next, committed, advanced = coro.ResumedExecutorRun(driver, p, g, next)
+		return next, advanced, committed
 	case coro.ActionCheckDestroy:
-		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))
+		next, ok := coro.CheckedExecutorRun(driver, g, action, coroHandleDone(action.Handle))
 		if !ok || next.Kind != coro.ActionDestroy || next.Handle != action.Handle {
-			return coro.Action{}, false
+			return coro.Action{}, false, false
 		}
 		if !coroHandleDestroyCommitted(g, next.Handle) {
-			return coro.Action{}, false
+			return coro.Action{}, false, false
 		}
-		return coro.DestroyedBounded(p, g, next)
+		next, advanced = coro.DestroyedBounded(p, g, next)
+		return next, advanced, false
 	case coro.ActionPanicDestroy:
 		if !coroHandleDestroyCommitted(g, action.Handle) {
-			return coro.Action{}, false
+			return coro.Action{}, false, false
 		}
-		return coro.PanicDestroyedBounded(p, g, action)
+		next, advanced = coro.PanicDestroyedBounded(p, g, action)
+		return next, advanced, false
 	default:
-		return coro.Action{}, false
+		return coro.Action{}, false, false
 	}
 }
 
@@ -299,6 +307,10 @@ func coroStepMatchesManagedExecutionV1(step coro.ExecutorRunStep, held bool) boo
 	return !resume || held
 }
 
+func coroActionStepMatchesManagedExecutionV1(step coro.ExecutorRunActionStep, held bool) bool {
+	return step.Action.Kind != coro.ActionCheckResume || held
+}
+
 // coroStopAfterStableReductionV1 is the common post-reducer target gate for
 // both the adopted program P and ordinary fleet Ps. It is called only after
 // the complete reduction at a stable scheduler boundary. The bounded run slice
@@ -319,6 +331,140 @@ func coroStopAfterStableReductionV1(
 	}
 	result.stop = coroRunAgainV1
 	return true, true
+}
+
+// coroReduceExecutorRunActionPreparedV1 consumes the compact hot action ABI.
+// The caller has already sampled command-return state for the dispatch gate;
+// the physical resume may change it, so the post-resume sample remains the
+// commit authority exactly as in the general reducer.
+func coroReduceExecutorRunActionPreparedV1(
+	p *coro.P,
+	driver *coro.ExecutorDriver,
+	policy coroRunPolicyV1,
+	g *coro.G,
+	action coro.Action,
+	dispatched bool,
+	returnRequested bool,
+	result *coroRunResultV1,
+) (terminal, ok bool) {
+	if g == nil || action.Handle == nil {
+		return false, false
+	}
+	if dispatched {
+		if returnRequested && g != policy.main && action.Kind == coro.ActionCheckResume &&
+			!coro.RequestTaskCancellation(p, g, coro.TaskCancelShutdown) {
+			return false, false
+		}
+		result.dispatches++
+	}
+	next, advanced, committed := coroRunPhysicalActionV1(p, driver, g, action)
+	// The physical resume may have changed program lifecycle. Re-read the live
+	// policy before selecting the scheduler commit placement.
+	running, returnRequested, stateOK := policy.commandState()
+	if !stateOK {
+		return false, false
+	}
+	if advanced && !committed && g == policy.main && returnRequested && next.Kind == coro.ActionCheckDestroy {
+		committed = coro.CommitExecutorRunCommandRootDestroy(driver, g, next)
+	} else if advanced && !committed && g == policy.main && running &&
+		coro.CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, g, next) {
+		committed = true
+	} else if advanced && !committed {
+		committed = coro.CommitExecutorRunAction(driver, g, next)
+	}
+	if !committed {
+		return false, false
+	}
+	if next.Kind == coro.ActionForeignReentryComplete {
+		result.used++
+		if dispatched {
+			result.used++
+		}
+		result.destroys++
+		result.stop = coroRunForeignReentryCompleteV1
+		result.g = g
+		result.action = next
+		return true, true
+	}
+	// A locked ordinary suspension must decide whether to detach before ready
+	// distribution can move the peer which justifies a Yield handoff.
+	osThreadSuspend, suspendOK := coroTargetPrepareOSThreadSuspendV1(
+		p, driver, g, next,
+	)
+	if !suspendOK {
+		return false, false
+	}
+	if !osThreadSuspend && !coroTargetAfterStableRunActionV1(p, driver) {
+		return false, false
+	}
+	result.used++
+	if dispatched {
+		result.used++
+	}
+	switch action.Kind {
+	case coro.ActionCheckResume:
+		result.resumes++
+	case coro.ActionCheckDestroy, coro.ActionPanicDestroy:
+		result.destroys++
+	}
+	if osThreadSuspend {
+		result.stop = coroRunOSThreadSuspendV1
+		result.g = g
+		result.action = next
+		return true, true
+	}
+	switch next.Kind {
+	case coro.ActionCheckResume, coro.ActionCheckDestroy, coro.ActionPanicDestroy:
+		if g == policy.main && returnRequested && next.Kind == coro.ActionCheckResume {
+			return false, false
+		}
+	case coro.ActionYield, coro.ActionPark:
+		if g == policy.main && returnRequested {
+			return false, false
+		}
+	case coro.ActionComplete:
+		isMain := g == policy.main
+		retireOwner := coro.ActionRetiresPhysicalOwner(next)
+		if !coroReleaseCompletedTask(g) {
+			return false, false
+		}
+		if isMain {
+			result.stop, result.g = coroRunMainDoneV1, policy.main
+			return true, true
+		}
+		if retireOwner && !coroTargetRetirePhysicalOwnerV1(p, driver) {
+			return false, false
+		}
+	case coro.ActionPanicComplete:
+		result.stop, result.g, result.action = coroRunPanicCompleteV1, g, next
+		return true, true
+	case coro.ActionCommitDestroy:
+		result.stop, result.g, result.action = coroRunDestroyCommitV1, g, next
+		return true, true
+	default:
+		return false, false
+	}
+	return false, true
+}
+
+func coroReduceExecutorRunActionV1(
+	p *coro.P,
+	driver *coro.ExecutorDriver,
+	policy coroRunPolicyV1,
+	step coro.ExecutorRunActionStep,
+	result *coroRunResultV1,
+) (terminal, ok bool) {
+	if p == nil || driver == nil || result == nil || !policy.valid() {
+		return false, false
+	}
+	_, returnRequested, stateOK := policy.commandState()
+	if !stateOK {
+		return false, false
+	}
+	return coroReduceExecutorRunActionPreparedV1(
+		p, driver, policy, step.G, step.Action, step.Dispatched,
+		returnRequested, result,
+	)
 }
 
 // coroReduceExecutorRunStepV1 is the single physical scheduler reducer shared
@@ -356,8 +502,14 @@ func coroReduceExecutorRunStepV1(
 		}
 		result.used++
 		return false, true
+	case coro.ExecutorRunStepDirectChannel:
+		if step.Direct == nil || !coroMaterializeDirectChannelCompletionV1(step.Direct) {
+			return false, false
+		}
+		result.used++
+		return false, true
 	case coro.ExecutorRunStepDispatch:
-		if step.G == nil || step.Action.Handle == nil {
+		if step.Dispatched || step.G == nil || step.Action.Handle == nil {
 			return false, false
 		}
 		if returnRequested && step.G != policy.main && step.Action.Kind == coro.ActionCheckResume &&
@@ -368,98 +520,10 @@ func coroReduceExecutorRunStepV1(
 		result.dispatches++
 		return false, true
 	case coro.ExecutorRunStepAction:
-		if step.G == nil || step.Action.Handle == nil {
-			return false, false
-		}
-		next, advanced := coroRunPhysicalActionV1(p, step.G, step.Action)
-		// The physical resume may have changed program lifecycle. Re-read the
-		// live policy before selecting the scheduler commit placement.
-		running, returnRequested, stateOK := policy.commandState()
-		if !stateOK {
-			return false, false
-		}
-		committed := false
-		if advanced && step.G == policy.main && returnRequested && next.Kind == coro.ActionCheckDestroy {
-			committed = coro.CommitExecutorRunCommandRootDestroy(driver, step.G, next)
-		} else if advanced && step.G == policy.main && running &&
-			coro.CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, step.G, next) {
-			committed = true
-		} else if advanced {
-			committed = coro.CommitExecutorRunAction(driver, step.G, next)
-		}
-		if !committed {
-			return false, false
-		}
-		if next.Kind == coro.ActionForeignReentryComplete {
-			result.used++
-			result.destroys++
-			result.stop = coroRunForeignReentryCompleteV1
-			result.g = step.G
-			result.action = next
-			return true, true
-		}
-		// A locked ordinary suspension must decide whether to detach before
-		// ready distribution can move the peer which justifies a Yield handoff.
-		// Non-native targets compile this observation to a no-op.
-		osThreadSuspend, suspendOK := coroTargetPrepareOSThreadSuspendV1(
-			p, driver, step.G, next,
+		return coroReduceExecutorRunActionPreparedV1(
+			p, driver, policy, step.G, step.Action, step.Dispatched,
+			returnRequested, result,
 		)
-		if !suspendOK {
-			return false, false
-		}
-		// A resume commit is the first stable scheduler-stack boundary after a
-		// managed `go` statement publishes its initial child. Native fleet targets
-		// may opportunistically hand that exact ready head to another P here; all
-		// other targets compile this call to a no-op. Failure after an actual
-		// publication is fatal because the mailbox has become the child's sole root.
-		if !osThreadSuspend && !coroTargetAfterStableRunActionV1(p, driver) {
-			return false, false
-		}
-		result.used++
-		switch step.Action.Kind {
-		case coro.ActionCheckResume:
-			result.resumes++
-		case coro.ActionCheckDestroy, coro.ActionPanicDestroy:
-			result.destroys++
-		}
-		if osThreadSuspend {
-			result.stop = coroRunOSThreadSuspendV1
-			result.g = step.G
-			result.action = next
-			return true, true
-		}
-		switch next.Kind {
-		case coro.ActionCheckResume, coro.ActionCheckDestroy, coro.ActionPanicDestroy:
-			if step.G == policy.main && returnRequested && next.Kind == coro.ActionCheckResume {
-				return false, false
-			}
-		case coro.ActionYield, coro.ActionPark:
-			if step.G == policy.main && returnRequested {
-				return false, false
-			}
-		case coro.ActionComplete:
-			isMain := step.G == policy.main
-			retireOwner := coro.ActionRetiresPhysicalOwner(next)
-			if !coroReleaseCompletedTask(step.G) {
-				return false, false
-			}
-			if isMain {
-				result.stop, result.g = coroRunMainDoneV1, policy.main
-				return true, true
-			}
-			if retireOwner && !coroTargetRetirePhysicalOwnerV1(p, driver) {
-				return false, false
-			}
-		case coro.ActionPanicComplete:
-			result.stop, result.g, result.action = coroRunPanicCompleteV1, step.G, next
-			return true, true
-		case coro.ActionCommitDestroy:
-			result.stop, result.g, result.action = coroRunDestroyCommitV1, step.G, next
-			return true, true
-		default:
-			return false, false
-		}
-		return false, true
 	case coro.ExecutorRunStepDestroyCommit:
 		if step.G == nil || step.Action.Kind != coro.ActionCommitDestroy || step.Action.Handle != nil {
 			return false, false
@@ -499,14 +563,38 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 			result.stop = coroRunExecutionWaitV1
 			return result
 		}
-		step, nextOK := run.NextAt(now)
-		if !nextOK || !coroStepMatchesManagedExecutionV1(step, held) {
+		combineDispatch := held && budget-result.used >= 2
+		var actionStep coro.ExecutorRunActionStep
+		var actionSelected, nextOK bool
+		if combineDispatch {
+			actionStep, actionSelected, nextOK = run.NextActionCombined()
+		} else {
+			actionStep, actionSelected, nextOK = run.NextAction()
+		}
+		if !nextOK || actionSelected && !coroActionStepMatchesManagedExecutionV1(actionStep, held) {
 			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
-		terminal, reduced := coroReduceExecutorRunStepV1(
-			p, driver, coroRunPolicyV1{}, step, &result,
-		)
+		var terminal, reduced bool
+		if actionSelected {
+			terminal, reduced = coroReduceExecutorRunActionV1(
+				p, driver, coroRunPolicyV1{}, actionStep, &result,
+			)
+		} else {
+			var step coro.ExecutorRunStep
+			if combineDispatch {
+				step, nextOK = run.NextAtCombined(now)
+			} else {
+				step, nextOK = run.NextAt(now)
+			}
+			if !nextOK || !coroStepMatchesManagedExecutionV1(step, held) {
+				_ = coroFinishManagedExecutionV1(driver, held)
+				return coroRunResultV1{}
+			}
+			terminal, reduced = coroReduceExecutorRunStepV1(
+				p, driver, coroRunPolicyV1{}, step, &result,
+			)
+		}
 		if !reduced {
 			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}

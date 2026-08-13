@@ -351,11 +351,16 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 		return false
 	}
 	var wait *WaitSetRecord
+	var direct *DirectChannelCompletion
 	if g.state == GWaiting && g.active != nil && g.active.parkWait != nil {
 		wait = g.active.parkWait
 		if g.park.resolving || g.park.winnerRecord != nil ||
-			proof == taskCancellationProofRegistered && !validRegisteredActiveParkHeader(&g.park) ||
-			!canAppendAffectedWaitSet(p, wait) {
+			proof == taskCancellationProofRegistered && !validRegisteredActiveParkHeader(&g.park) {
+			return false
+		}
+		if completion, compact := directChannelCompletionForWait(wait); compact {
+			direct = completion
+		} else if !canAppendAffectedWaitSet(p, wait) {
 			return false
 		}
 	} else {
@@ -397,6 +402,9 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 	}
 	g.park.taskCancelKind = strongest
 	g.park.taskCancelPhase = taskCancelRequested
+	if direct != nil {
+		return requestDirectChannelCancellation(direct)
+	}
 	if wait != nil {
 		appendAffectedWaitSetUnchecked(p, wait)
 	}

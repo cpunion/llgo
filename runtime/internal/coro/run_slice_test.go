@@ -251,6 +251,59 @@ func TestExecutorRunSliceCapabilityRetainsExactOwnerAcrossBoundedSteps(t *testin
 	runtime.KeepAlive(task.frame.memory)
 }
 
+func TestExecutorRunSliceCompactActionPreservesSelectionAndBudgetBoundaries(t *testing.T) {
+	if compact, full := unsafe.Sizeof(ExecutorRunActionStep{}), unsafe.Sizeof(ExecutorRunStep{}); compact >= full {
+		t.Fatalf("compact action ABI size = %d, full step = %d", compact, full)
+	}
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "run-slice-compact-action")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue compact-action task")
+	}
+	run, ok := BeginExecutorRunSlice(driver)
+	if !ok {
+		t.Fatal("begin compact-action run slice")
+	}
+
+	// A one-unit caller may not combine dequeue with the physical action. The
+	// compact probe must be observational and leave the complete selector's
+	// ordinary Dispatch boundary intact.
+	if step, selected, valid := run.NextAction(); !valid || selected || step != (ExecutorRunActionStep{}) {
+		t.Fatalf("one-unit compact probe = (%+v, %t, %t)", step, selected, valid)
+	}
+	if p.readyHead != task.g || p.readyTail != task.g || p.readyCount != 1 || p.current != nil ||
+		driver.run.issued != ActionInvalid {
+		t.Fatalf("one-unit compact probe mutated scheduler: head=%p tail=%p count=%d current=%p cursor=%+v",
+			p.readyHead, p.readyTail, p.readyCount, p.current, driver.run)
+	}
+	dispatch, dispatched := run.Next()
+	if !dispatched || dispatch.Kind != ExecutorRunStepDispatch || dispatch.G != task.g ||
+		dispatch.Action.Kind != ActionCheckResume || driver.run.issued != ActionInvalid {
+		t.Fatalf("compact fallback dispatch = (%+v, %t), cursor=%+v", dispatch, dispatched, driver.run)
+	}
+	action, selected, valid := run.NextAction()
+	if !valid || !selected || action.Dispatched || action.G != task.g ||
+		action.Action != dispatch.Action || driver.run.issued != ActionCheckResume {
+		t.Fatalf("compact issued action = (%+v, %t, %t), cursor=%+v", action, selected, valid, driver.run)
+	}
+	runnerYieldAction(t, driver, ExecutorRunStep{
+		Kind: ExecutorRunStepAction, G: action.G, Action: action.Action,
+	}, task)
+
+	// A two-unit caller owns the managed-execution lease and may collapse the
+	// same dequeue/action pair without constructing the cold event union.
+	action, selected, valid = run.NextActionCombined()
+	if !valid || !selected || !action.Dispatched || action.G != task.g ||
+		action.Action.Kind != ActionCheckResume || driver.run.issued != ActionCheckResume {
+		t.Fatalf("combined compact action = (%+v, %t, %t), cursor=%+v", action, selected, valid, driver.run)
+	}
+	runnerYieldAction(t, driver, ExecutorRunStep{
+		Kind: ExecutorRunStepAction, Dispatched: true, G: action.G, Action: action.Action,
+	}, task)
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestCurrentExecutorDriverForActiveResumeUsesIssuedCapability(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)

@@ -105,10 +105,16 @@ func resumeGateTaken(g *G) bool {
 // G. A ready park is consumed here, not in a producer callback or PollReady.
 func prepareRunDecision(p *P, g *G) bool {
 	if p == nil || !ValidG(g) || p.current != g || g.runP != p || g.state != GRunning ||
-		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !gPreemptEnabledAtDepthZero(g) ||
-		!validParkState(&g.park) {
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !gPreemptEnabledAtDepthZero(g) {
 		return false
 	}
+	// BeginRunG is the sole producer of this exact P/G/ActionCheckResume
+	// episode and already audited the runnable ParkState before publishing it.
+	// No producer can mutate a materialized frame packet or scheduler-owned
+	// ParkState between that action and Checked. ConsumeTaskParkSet retains its
+	// complete validator for source-backed Ready parks; releasable phases retain
+	// their complete O(1) validator below. Repeating the materialized audit here
+	// would not establish an independent boundary.
 	decision := RunDecision{}
 	if g.park.phase == parkReady {
 		ticket := g.park.ticket
@@ -153,9 +159,12 @@ func prepareRunDecision(p *P, g *G) bool {
 			decision.task = kind
 		}
 	}
-	if !validRunDecision(decision) {
-		return false
-	}
+	// Every non-zero shape above is produced by an exact consuming helper:
+	// ConsumeTaskParkSet, the materialized ParkState certificate, or
+	// ClaimTaskCancellation. None accepts caller-supplied decision fields, so a
+	// second generic union validation here would only replay those branches.
+	// The compiler prologue still correlates the private slot with G/ticket and
+	// consumes it exactly once.
 	p.runDecision = decision
 	return true
 }

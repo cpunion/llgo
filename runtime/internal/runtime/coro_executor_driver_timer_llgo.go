@@ -70,13 +70,21 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 func coroProgramNextRunStepV1(
 	_ *coro.ExecutorDriver,
 	run *coro.ExecutorRunSliceCapability,
+	combineDispatch bool,
 ) (coro.ExecutorRunStep, bool) {
-	if step, ok := run.NextBeforeTime(); ok {
+	if combineDispatch {
+		if step, ok := run.NextBeforeTimeCombined(); ok {
+			return step, true
+		}
+	} else if step, ok := run.NextBeforeTime(); ok {
 		return step, true
 	}
 	now, ok := coroclock.MonotonicNano()
 	if !ok {
 		return coro.ExecutorRunStep{}, false
+	}
+	if combineDispatch {
+		return run.NextAtCombined(now)
 	}
 	return run.NextAt(now)
 }

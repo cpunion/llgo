@@ -18,7 +18,10 @@
 
 package coro
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"unsafe"
+)
 
 func preemptLoad(ptr *uint32) uint32 {
 	return atomic.LoadUint32(ptr)
@@ -50,4 +53,16 @@ func preemptLoadWord(ptr *uintptr) uintptr {
 
 func preemptStoreWord(ptr *uintptr, value uintptr) {
 	atomic.StoreUintptr(ptr, value)
+}
+
+func preemptLoadPointer(ptr *unsafe.Pointer) unsafe.Pointer {
+	return atomic.LoadPointer(ptr)
+}
+
+func preemptStorePointer(ptr *unsafe.Pointer, value unsafe.Pointer) {
+	atomic.StorePointer(ptr, value)
+}
+
+func preemptSwapPointer(ptr *unsafe.Pointer, value unsafe.Pointer) unsafe.Pointer {
+	return atomic.SwapPointer(ptr, value)
 }
