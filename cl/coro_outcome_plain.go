@@ -214,7 +214,9 @@ func validateStaticOutcomeFrozenPlan(plan *coroPhysicalFunctionPlan, logical cor
 		}
 		operationSupported := physical.operation == coroPhysicalOperationNone ||
 			physical.operation == coroPhysicalOperationControl &&
-				!physical.operationControl.NativeActivationBound()
+				!physical.operationControl.NativeActivationBound() ||
+			physical.operation == coroPhysicalOperationNativeSyscall &&
+				physical.semantic.recipe == coro.RecipeID("cl.intrinsic.inline-native-block.v1")
 		if !operationSupported || physical.controlFailureHard ||
 			physical.operationFailure != "" || physical.outcomeFailure != "" {
 			return fmt.Errorf(

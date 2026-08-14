@@ -79,7 +79,7 @@ func TestCoroTimerSleepCurrentFrameNativeAndWasm32(t *testing.T) {
 			rootPlan, ok := plan.FunctionPlan(root)
 			if !ok || rootPlan.Emission != coro.EmitCoroutine || rootPlan.FuncRep != coro.DirectCoro ||
 				!rootPlan.DeclaredEffect.Contains(coro.MayPark) || !rootPlan.LocalEffect.Contains(coro.MayPark) ||
-				!rootPlan.Effect.Contains(coro.MayPark) {
+				!rootPlan.Effect.Contains(coro.MayPark) || rootPlan.HasStaticOutcome() {
 				t.Fatalf("Root plan = %+v, present=%t; want one local timer-park coroutine", rootPlan, ok)
 			}
 			if !plan.ElidesCall(sleepCall) {
@@ -175,7 +175,7 @@ func TestCoroControlledTimerWaitCurrentFrameNativeAndWasm32(t *testing.T) {
 
 			rootPlan, ok := plan.FunctionPlan(root)
 			if !ok || rootPlan.Emission != coro.EmitCoroutine || !rootPlan.Effect.Contains(coro.MayPark) ||
-				!plan.ElidesCall(waitCall) {
+				rootPlan.HasStaticOutcome() || !plan.ElidesCall(waitCall) {
 				t.Fatalf("controlled Timer Root plan = %+v, present=%t, elided=%t", rootPlan, ok, plan.ElidesCall(waitCall))
 			}
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
@@ -290,6 +290,8 @@ func compileCoroTimerIntrinsicFixture(t *testing.T, target *llssa.Target, source
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			if fn == root {
 				return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil

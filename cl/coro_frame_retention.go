@@ -1572,7 +1572,9 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 		allocation := coroFrameRetentionDirectAllocRoot(call.Common().Args[0], make(map[ssa.Value]bool))
 		if _, retained := b.proof.allocations[allocation]; retained {
 			semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(b.audit.universe, call)
-			if err == nil && (!intrinsic || semantics != CoroIntrinsicCallInlineSuspend) {
+			if err == nil && (!intrinsic ||
+				(semantics != CoroIntrinsicCallInlineSuspend &&
+					semantics != CoroIntrinsicCallInlineNativeBlock)) {
 				return coroFrameRetentionCallParkOwnerV1, true
 			}
 		}
@@ -1586,7 +1588,9 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 				return coroFrameRetentionCallWorkerV1, true
 			}
 		}
-		if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
+		if err == nil && intrinsic &&
+			(semantics == CoroIntrinsicCallInlineSuspend ||
+				semantics == CoroIntrinsicCallInlineNativeBlock) {
 			workerCertified := false
 			if b.audit.plan == nil {
 				// Report-only physical audits have no lowering authority. They may

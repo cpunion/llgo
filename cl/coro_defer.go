@@ -1256,6 +1256,7 @@ func validateCoroStaticCleanupNoUnwind(
 					return fmt.Sprintf("block %d intrinsic: %v", block.Index, err)
 				}
 				if !intrinsic || (semantics != CoroIntrinsicCallInlineNoSuspend && semantics != CoroIntrinsicCallInlineSuspend &&
+					semantics != CoroIntrinsicCallInlineNativeBlock &&
 					semantics != CoroIntrinsicCallInlineYield) {
 					return fmt.Sprintf("block %d intrinsic has unproved semantics %d", block.Index, uint8(semantics))
 				}

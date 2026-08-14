@@ -412,14 +412,15 @@ func coroOutcomePlainDAGSemanticRecipe(plan coroSemanticInstructionPlan) bool {
 // ProgramIR builder step admits only operations whose frozen call recipe is
 // independently shape-checked and allocation-free.
 //
-// Atomic intrinsics acquire their bounded leaf proof here. A real inline yield
-// is also recorded here as an evaluated local effect: this distinguishes an
-// explicit scheduler handoff from the synthetic YieldOnly/NeedsPreempt seed
-// added later for an otherwise synchronous CFG loop. Static outcome twins may
-// omit the latter under the current compute-blocking policy, but must never
-// erase the former. Other InlineNoSuspend intrinsics include asm, dynamic
-// alloca, control transfer, and target-specific operations; the broad enum is
-// therefore not by itself an outcome-plain proof.
+// Atomic intrinsics acquire their bounded leaf proof here. Structured waits,
+// real yields, and terminal outcomes are also projected into the local semantic
+// facts so a static-outcome decision cannot mistake an elided declaration for
+// a synchronous operation. The sole dual recipe is InlineNativeBlock: its
+// certified native syscall releases the execution domain and returns on the
+// same M without suspending the LLVM coroutine, so an exact static caller may
+// use the synchronous outcome twin. Other InlineNoSuspend intrinsics include
+// asm, dynamic alloca, control transfer, and target-specific operations; the
+// broad enum is therefore not by itself an outcome-plain proof.
 func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 	prog llssa.Program,
 	functions []*ssa.Function,
@@ -447,31 +448,36 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 					frozen.plan.Elision != CoroCallElidedIntrinsic {
 					continue
 				}
-				atomic := frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNoSuspend &&
+				semantics := frozen.plan.IntrinsicSemantics
+				atomic := semantics == CoroIntrinsicCallInlineNoSuspend &&
 					isCoroAtomicIntrinsic(frozen.opcode)
-				realYield := frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineYield
-				if !atomic && !realYield {
+				structured := semantics == CoroIntrinsicCallInlineSuspend ||
+					semantics == CoroIntrinsicCallInlineNativeBlock ||
+					semantics == CoroIntrinsicCallInlineForeignSuspend ||
+					semantics == CoroIntrinsicCallInlineYield ||
+					semantics == CoroIntrinsicCallInlineOutcome
+				if !atomic && !structured {
 					continue
 				}
 				for _, owner := range sortedUseOwners(function) {
 					key := emissionFunctionOwnerKey{function: function, owner: owner}
 					if _, sealed := ir.siteOwners[key]; !sealed {
-						return fmt.Errorf("atomic intrinsic in %q has no frozen semantic owner %q", function.Name(), owner.identity)
+						return fmt.Errorf("intrinsic refinement in %q has no frozen semantic owner %q", function.Name(), owner.identity)
 					}
 					semantic, present := ir.semanticPlans[key][call]
 					if !present || !semantic.evaluated || semantic.recipe != coro.RecipeID("cl.ssa.call.v1") ||
 						semantic.effect != coro.NoSuspend || semantic.exec != 0 {
-						return fmt.Errorf("atomic intrinsic call %q has an incompatible preliminary semantic recipe", call.String())
+						return fmt.Errorf("intrinsic call %q has an incompatible preliminary semantic recipe", call.String())
 					}
 					if atomic {
 						semantic.recipe = coro.RecipeID("cl.intrinsic.atomic.inline-nosuspend.v1")
 						semantic.outcomePlainLeaf = true
 						semantic.staticOutcome = true
 					} else {
-						semantic.recipe, semantic.effect = coroIntrinsicLoweringRecipe(CoroIntrinsicCallInlineYield)
+						semantic.recipe, semantic.effect = coroIntrinsicLoweringRecipe(semantics)
 						semantic.materialized = true
 						semantic.outcomePlainLeaf = false
-						semantic.staticOutcome = false
+						semantic.staticOutcome = semantics == CoroIntrinsicCallInlineNativeBlock
 					}
 					ir.semanticPlans[key][call] = semantic
 				}
@@ -486,11 +492,11 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 			key := emissionFunctionOwnerKey{function: function, owner: owner}
 			preamble, present := ir.functionPreambles[key]
 			if !present {
-				return fmt.Errorf("finalize atomic intrinsic body %q: owner %q has no function preamble", function.Name(), owner.identity)
+				return fmt.Errorf("finalize intrinsic body %q: owner %q has no function preamble", function.Name(), owner.identity)
 			}
 			facts, err := deriveCoroLocalBodyFacts(prog, function, ir.semanticPlans[key], preamble.emitsGoBody)
 			if err != nil {
-				return fmt.Errorf("finalize atomic intrinsic body %q: %w", function.Name(), err)
+				return fmt.Errorf("finalize intrinsic body %q: %w", function.Name(), err)
 			}
 			if index != 0 && !final.Same(facts) {
 				return fmt.Errorf("function %q acquired owner-dependent finalized local semantic facts", function.Name())

@@ -193,6 +193,10 @@ const (
 	coroPhysicalOperationWorkerCgoErrno
 	coroPhysicalOperationHostCall
 	coroPhysicalOperationControl
+	// NativeSyscall executes the compiler-certified word call synchronously on
+	// the current M. It owns no park/resume transaction and must not request the
+	// program worker fleet.
+	coroPhysicalOperationNativeSyscall
 )
 
 func (recipe coroPhysicalOperationRecipe) String() string {
@@ -225,6 +229,8 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "host-operation"
 	case coroPhysicalOperationControl:
 		return "control-operation"
+	case coroPhysicalOperationNativeSyscall:
+		return "native-syscall"
 	default:
 		return fmt.Sprintf("physical-operation-recipe(%d)", uint8(recipe))
 	}
@@ -1407,7 +1413,8 @@ func planCoroPhysicalOperationInstruction(
 				return
 			}
 			if found && frozen.plan.Intrinsic && isLLGoSyscallIntrinsic(frozen.opcode) &&
-				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineSuspend {
+				(frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineSuspend ||
+					frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNativeBlock) {
 				if !capabilities.worker {
 					result.operationFailure = "worker llgo.syscall requires the bounded worker capability"
 					return
@@ -1416,7 +1423,11 @@ func planCoroPhysicalOperationInstruction(
 					result.operationFailure = "invalid worker llgo.syscall capability: " + err.Error()
 					return
 				}
-				result.operation = coroPhysicalOperationWorkerSyscall
+				if frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNativeBlock {
+					result.operation = coroPhysicalOperationNativeSyscall
+				} else {
+					result.operation = coroPhysicalOperationWorkerSyscall
+				}
 				return
 			}
 		}

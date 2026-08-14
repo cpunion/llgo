@@ -113,7 +113,9 @@ func TestCoroFrameExactRootsAndUintptrKeepaliveAreFrozen(t *testing.T) {
 						childCall = instruction
 					}
 					semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(instruction)
-					if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
+					if err == nil && intrinsic &&
+						(semantics == CoroIntrinsicCallInlineSuspend ||
+							semantics == CoroIntrinsicCallInlineNativeBlock) {
 						workerCall = instruction
 					}
 				case *ssa.IndexAddr:

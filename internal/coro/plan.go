@@ -373,9 +373,12 @@ func validateManagedEntryPlan(plan FunctionPlan) error {
 		if plan.AtomicCostProof.ProvesOutcomePlain() || plan.AtomicCost != 0 || plan.AtomicCostCertificate != "" {
 			return fmt.Errorf("coro: function %q mixes bounded and unbounded static outcome capabilities", plan.ID)
 		}
+		// The outcome twin is also useful for a no-unwind native block. Such a
+		// function always returns the success status, but exact static callers can
+		// still erase its coroutine frame. OutcomeStructured is therefore optional;
+		// functions which can unwind acquire it through the ordinary effect solver.
 		if plan.Recursive || plan.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 ||
-			plan.Effect&^(YieldOnly|AwaitStructured|OutcomeStructured) != 0 ||
-			!plan.Effect.Contains(OutcomeStructured) {
+			plan.Effect&^(AwaitStructured|OutcomeStructured|MayPark) != 0 {
 			return fmt.Errorf(
 				"coro: function %q has an invalid unbounded static outcome capability (effect=%s exec=%s recursive=%t)",
 				plan.ID, plan.Effect, plan.Exec, plan.Recursive,

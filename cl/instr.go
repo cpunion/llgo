@@ -2725,20 +2725,52 @@ func (p *context) callEx(
 			if !ok {
 				panic("unknown coroutine llgo.syscall failure convention")
 			}
+			semantics := CoroIntrinsicCallUnsupported
+			semanticsPlanned := false
+			if sourceCall != nil && p.emissionUniverse != nil {
+				var semanticsErr error
+				semantics, semanticsPlanned, semanticsErr = coroIntrinsicCallSiteSemantics(
+					p.emissionUniverse, sourceCall,
+				)
+				if semanticsErr != nil {
+					panic(fmt.Errorf("coroutine llgo.syscall semantics: %w", semanticsErr))
+				}
+			}
+			expectedOperation := coroPhysicalOperationWorkerSyscall
+			if semantics == CoroIntrinsicCallInlineNativeBlock {
+				expectedOperation = coroPhysicalOperationNativeSyscall
+			}
 			_, managedWorker, operationPlanned := p.selectCoroPhysicalOperation(
-				sourceCall, coroPhysicalOperationWorkerSyscall,
+				sourceCall, expectedOperation,
 			)
 			if !managedWorker && !operationPlanned {
-				if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
-					managedWorker = semantics == CoroIntrinsicCallInlineSuspend
+				// A frozen call-site classification describes what this call
+				// means if its owner is emitted through the managed physical ABI;
+				// it is not by itself authority to use the hidden task ABI. A
+				// simultaneously emitted ordinary/raw twin has the same global
+				// SitePlan but no managed task. Only the active source-site
+				// observer can select the managed fallback when no physical
+				// operation record is installed.
+				if activeSemantics, active := p.plannedCoroIntrinsicCall(ftype); active {
+					semantics = activeSemantics
+					semanticsPlanned = true
+					managedWorker = semantics == CoroIntrinsicCallInlineSuspend ||
+						semantics == CoroIntrinsicCallInlineNativeBlock
 				}
 			}
 			if managedWorker {
-				if act != llssa.Call || ds != nil {
+				if !semanticsPlanned ||
+					(semantics != CoroIntrinsicCallInlineSuspend &&
+						semantics != CoroIntrinsicCallInlineNativeBlock) {
+					panic("coroutine llgo.syscall operation has incompatible frozen semantics")
+				}
+				if act != llssa.Call || ds != nil || sourceCall == nil {
 					panic("coroutine llgo.syscall requires an exact direct call")
 				}
-				ret = p.compileCoroWorkerSyscall(b, call, args, call.Signature().Results(), convention)
-				p.completeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallInlineSuspend)
+				ret = p.compileCoroSyscallOperation(
+					b, call, args, call.Signature().Results(), convention, semantics,
+				)
+				p.completeCoroIntrinsicCallEmission(ftype, semantics)
 			} else {
 				ret = p.syscallIntrinsic(b, args, call.Signature().Results(), convention)
 				p.completeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallUnsupported)
