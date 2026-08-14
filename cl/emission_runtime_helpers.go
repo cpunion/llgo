@@ -92,7 +92,7 @@ func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAlloc
 		// allocation. It already has no AllocZ cost and needs no stack slot.
 		return coroPlainAllocationPlan{}
 	}
-	proof, exact := coro.ProveSSABorrowedAllocation(allocation)
+	proof, exact := proveCoroBorrowedAllocation(ctx.emissionUniverse, allocation)
 	if !exact || proof.FunctionsVisited == 0 {
 		return coroPlainAllocationPlan{}
 	}
@@ -101,6 +101,32 @@ func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAlloc
 		functionsVisited: proof.FunctionsVisited,
 		parametersProven: proof.ParametersProven,
 	}
+}
+
+// proveCoroBorrowedAllocation admits only bodies which the frozen emission
+// universe will actually compile as managed Go. Source bodies attached to C,
+// Python, or LLVM intrinsic declarations are type-checking stubs rather than
+// memory-semantics evidence and must never justify local storage.
+func proveCoroBorrowedAllocation(
+	universe *EmissionUniverse,
+	allocation *ssa.Alloc,
+) (coro.SSABorrowedAllocationProof, bool) {
+	if universe == nil {
+		return coro.SSABorrowedAllocationProof{Allocation: allocation}, false
+	}
+	return coro.ProveSSABorrowedAllocationWithConfig(allocation, coro.SSABorrowedAllocationConfig{
+		ResolveCalleeBody: func(function *ssa.Function) (*ssa.Function, bool) {
+			canonical, resolved := universe.Resolve(function)
+			if !resolved || canonical == nil || len(canonical.Blocks) == 0 {
+				return nil, false
+			}
+			background, classified, err := universe.FunctionBackground(canonical)
+			if err != nil || !classified || background != llssa.InGo {
+				return nil, false
+			}
+			return canonical, true
+		},
+	})
 }
 
 // coroFunctionPreamblePlan freezes compiler-owned operations which have no

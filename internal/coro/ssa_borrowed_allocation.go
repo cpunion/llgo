@@ -38,6 +38,15 @@ type SSABorrowedAllocationProof struct {
 	ParametersProven uint32
 }
 
+// SSABorrowedAllocationConfig defines which static callee body is authoritative
+// for the final program. Frontends which replace a source SSA body with an
+// intrinsic, foreign symbol, or other physical implementation must reject that
+// body (or resolve it to an exact managed-Go definition); otherwise an inert
+// declaration stub can incorrectly prove that an argument is not retained.
+type SSABorrowedAllocationConfig struct {
+	ResolveCalleeBody func(*ssa.Function) (*ssa.Function, bool)
+}
+
 type ssaBorrowParameterKey struct {
 	function *ssa.Function
 	index    int
@@ -55,12 +64,23 @@ const (
 type ssaBorrowedAllocationAnalyzer struct {
 	parameters map[ssaBorrowParameterKey]ssaBorrowProofState
 	functions  map[*ssa.Function]struct{}
+	config     SSABorrowedAllocationConfig
 }
 
 // ProveSSABorrowedAllocation derives a closed interprocedural borrow proof for
 // one exact SSA allocation. Non-heap allocations already have local identity
 // and therefore deliberately do not receive this reclassification proof.
 func ProveSSABorrowedAllocation(allocation *ssa.Alloc) (SSABorrowedAllocationProof, bool) {
+	return ProveSSABorrowedAllocationWithConfig(allocation, SSABorrowedAllocationConfig{})
+}
+
+// ProveSSABorrowedAllocationWithConfig derives the same closed proof while
+// requiring every transitive call edge to use the frontend's authoritative
+// physical body. A rejected or unresolved callee fails closed.
+func ProveSSABorrowedAllocationWithConfig(
+	allocation *ssa.Alloc,
+	config SSABorrowedAllocationConfig,
+) (SSABorrowedAllocationProof, bool) {
 	proof := SSABorrowedAllocationProof{Allocation: allocation}
 	if allocation == nil || !allocation.Heap || allocation.Parent() == nil ||
 		allocation.Referrers() == nil {
@@ -69,6 +89,7 @@ func ProveSSABorrowedAllocation(allocation *ssa.Alloc) (SSABorrowedAllocationPro
 	analyzer := &ssaBorrowedAllocationAnalyzer{
 		parameters: make(map[ssaBorrowParameterKey]ssaBorrowProofState),
 		functions:  make(map[*ssa.Function]struct{}),
+		config:     config,
 	}
 	if !analyzer.proveAddressValue(allocation.Parent(), allocation) {
 		return proof, false
@@ -258,6 +279,13 @@ func (analyzer *ssaBorrowedAllocationAnalyzer) proveCallArgument(call *ssa.Call,
 			return false
 		}
 		return true
+	}
+	if analyzer.config.ResolveCalleeBody != nil {
+		var resolved bool
+		callee, resolved = analyzer.config.ResolveCalleeBody(callee)
+		if !resolved || callee == nil {
+			return false
+		}
 	}
 	found := false
 	for index, argument := range common.Args {

@@ -98,6 +98,16 @@ func escapeRecursive() { var value transaction; recurseA(&value, false) }
 	if !ok || proof.Allocation != safeAlloc || proof.FunctionsVisited < 4 || proof.ParametersProven < 3 {
 		t.Fatalf("safe borrow proof = %+v, present=%t; want transitive begin/effect/check proof", proof, ok)
 	}
+	if proof, ok := ProveSSABorrowedAllocationWithConfig(safeAlloc, SSABorrowedAllocationConfig{
+		ResolveCalleeBody: func(function *ssa.Function) (*ssa.Function, bool) {
+			if function != nil && function.Name() == "beginEffect" {
+				return nil, false
+			}
+			return function, function != nil
+		},
+	}); ok {
+		t.Fatalf("safe allocation crossed a rejected physical callee body: %+v", proof)
+	}
 	recursiveAlloc := exactHeapAllocation(t, packageFunction(t, pkg, "safeRecursive"))
 	if proof, ok := ProveSSABorrowedAllocation(recursiveAlloc); !ok || proof.ParametersProven == 0 {
 		t.Fatalf("safe recursive borrow proof = %+v, present=%t", proof, ok)

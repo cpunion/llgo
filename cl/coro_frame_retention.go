@@ -379,7 +379,7 @@ func (a *coroPhysicalPureSSAAudit) proveBorrowedHeapAllocations(proof *coroFrame
 				validateCoroPhysicalSSAValueType(a.typeOf(pointer.Elem())) != nil {
 				continue
 			}
-			borrow, exact := coro.ProveSSABorrowedAllocation(allocation)
+			borrow, exact := proveCoroBorrowedAllocation(a.universe, allocation)
 			if exact {
 				proof.borrowedAllocations[allocation] = borrow
 			}
