@@ -41,14 +41,14 @@ type coroNativeForeignBoundaryV1 struct {
 	domain      *coroNativeFleetDomainV1
 	replacement *coroNativeMOwnerV1
 
-	parentSlot         uint32
-	replacementSlot    uint32
-	ownerEpoch         uint32
-	baton              coro.ExecutionDomainHandoffHandle
-	replacementQueued  bool
-	replacementSkipped bool
-	callbackAcquired   bool
-	active             bool
+	parentSlot          uint32
+	replacementSlot     uint32
+	ownerEpoch          uint32
+	baton               coro.ExecutionDomainHandoffHandle
+	replacementQueued   bool
+	replacementDeferred bool
+	callbackAcquired    bool
+	active              bool
 }
 
 var (
@@ -82,7 +82,7 @@ func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(
 		boundary.parent == nil || boundary.domain == nil ||
 		boundary.replacement != nil || boundary.replacementSlot != 0 ||
 		boundary.baton.Valid() || boundary.replacementQueued ||
-		boundary.replacementSkipped {
+		boundary.replacementDeferred || !boundary.parent.deferred.Idle() {
 		return false
 	}
 	baton, begun := boundary.parent.handoff.Begin(boundary.ownerEpoch)
@@ -131,6 +131,62 @@ func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(
 	return true
 }
 
+// prepareDeferredReplacementV1 publishes the logical handoff and replacement
+// directory slot without consuming a physical M. Arm happens only after the
+// managed-execution permit is released. The post-Arm demand recheck closes the
+// request-before-Arm window; a later request races Withdraw directly in the
+// stable parent owner.
+func (boundary *coroNativeForeignBoundaryV1) prepareDeferredReplacementV1() bool {
+	if boundary == nil || !boundary.active || boundary.driver == nil ||
+		boundary.parent == nil || boundary.domain == nil ||
+		boundary.replacement != nil || boundary.replacementSlot != 0 ||
+		boundary.baton.Valid() || boundary.replacementQueued ||
+		boundary.replacementDeferred || !boundary.parent.deferred.Idle() {
+		return false
+	}
+	baton, begun := boundary.parent.handoff.Begin(boundary.ownerEpoch)
+	if !begun {
+		return false
+	}
+	slot, replacement, allocated := coroNativeMAllocateReplacementV1(
+		boundary.parentSlot,
+		boundary.domain.handle,
+		baton,
+	)
+	if !allocated {
+		rolledBack := boundary.parent.handoff.RequestReturn(baton) ==
+			coro.ExecutionDomainHandoffReturnUnclaimed &&
+			boundary.parent.handoff.Complete(baton)
+		_ = rolledBack
+		return false
+	}
+	if !coroTargetReleaseManagedExecutionV1(boundary.driver) {
+		// Release may already have published the free permit before a waiter
+		// doorbell failure. Nothing can safely restore ownership from this result.
+		coroRuntimeAbort("native deferred foreign execution quota release failed")
+		return false
+	}
+	boundary.replacement = replacement
+	boundary.replacementSlot = slot
+	boundary.baton = baton
+	boundary.replacementDeferred = true
+	if !boundary.parent.deferred.Arm(slot) {
+		coroRuntimeAbort("native deferred replacement arm failed")
+		return false
+	}
+	required, demandOK :=
+		coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)
+	if !demandOK {
+		coroRuntimeAbort("native deferred replacement demand recheck failed")
+		return false
+	}
+	if required && !coroNativeMActivateDeferredReplacementV1(boundary.domain) {
+		coroRuntimeAbort("native deferred replacement demand start failed")
+		return false
+	}
+	return true
+}
+
 func (boundary *coroNativeForeignBoundaryV1) beginV1(
 	task *coro.G,
 	mode coro.ExecutorResumeHandoffMode,
@@ -141,7 +197,7 @@ func (boundary *coroNativeForeignBoundaryV1) beginV1(
 		boundary.domain != nil || boundary.replacement != nil ||
 		boundary.parentSlot != 0 || boundary.replacementSlot != 0 ||
 		boundary.ownerEpoch != 0 || boundary.baton.Valid() ||
-		boundary.replacementQueued || boundary.replacementSkipped ||
+		boundary.replacementQueued || boundary.replacementDeferred ||
 		boundary.callbackAcquired {
 		return false
 	}
@@ -160,29 +216,8 @@ func (boundary *coroNativeForeignBoundaryV1) beginV1(
 	boundary.ownerEpoch = ownerEpoch
 	boundary.active = true
 	if lazyCompensation {
-		required, demandOK :=
-			coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)
-		if demandOK && !required {
-			if !coroTargetReleaseManagedExecutionV1(boundary.driver) {
-				// See startReplacementV1: a false result does not prove that the
-				// quota release itself failed before publication.
-				coroRuntimeAbort("native direct lazy execution quota release failed")
-				return false
-			}
-			boundary.replacementSkipped = true
+		if boundary.prepareDeferredReplacementV1() {
 			return true
-		}
-		if !demandOK || !required {
-			restored := coro.RestoreExecutorResume(&boundary.resume)
-			boundary.driver = nil
-			boundary.task = nil
-			boundary.parent = nil
-			boundary.domain = nil
-			boundary.parentSlot = 0
-			boundary.ownerEpoch = 0
-			boundary.active = false
-			_ = restored
-			return false
 		}
 	}
 	if boundary.startReplacementV1(true) {
@@ -204,7 +239,7 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 	if boundary == nil || !boundary.active || boundary.driver == nil ||
 		boundary.parent == nil || boundary.domain == nil ||
 		boundary.replacement == nil || boundary.replacementSlot == 0 ||
-		!boundary.baton.Valid() || boundary.replacementSkipped {
+		!boundary.baton.Valid() {
 		return false
 	}
 	if boundary.replacementQueued {
@@ -221,10 +256,12 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 			case 0:
 				boundary.replacement.thread = nil
 				boundary.replacement.token = 0
+				slot := boundary.replacementSlot
 				withdrawn := boundary.parent.handoff.RequestReturn(boundary.baton) ==
 					coro.ExecutionDomainHandoffReturnUnclaimed &&
 					boundary.parent.handoff.Complete(boundary.baton) &&
-					coroNativeMReleaseUnstartedReplacementV1(boundary.replacementSlot)
+					coroNativeMReleaseUnstartedReplacementV1(slot) &&
+					boundary.completeDeferredReplacementV1(slot)
 				if !withdrawn {
 					coroRuntimeAbort("native direct queued replacement withdrawal failed")
 				}
@@ -254,8 +291,9 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 	}
 	returnResult := boundary.parent.handoff.RequestReturn(boundary.baton)
 	if returnResult == coro.ExecutionDomainHandoffReturnUnclaimed {
+		slot := boundary.replacementSlot
 		if !coroNativeMWaitAndRecycleOSThreadSuspendV1(
-			boundary.replacementSlot,
+			slot,
 			boundary.replacement,
 			boundary.parent,
 		) {
@@ -263,6 +301,9 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 		}
 		if !boundary.parent.handoff.Complete(boundary.baton) {
 			coroRuntimeAbort("native direct revoked handoff completion failed")
+		}
+		if !boundary.completeDeferredReplacementV1(slot) {
+			coroRuntimeAbort("native direct revoked deferred dispatch completion failed")
 		}
 		boundary.replacement = nil
 		boundary.replacementSlot = 0
@@ -323,11 +364,77 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 	if !boundary.parent.handoff.Complete(boundary.baton) {
 		coroRuntimeAbort("native direct claimed handoff completion failed")
 	}
+	if !boundary.completeDeferredReplacementV1(boundary.replacementSlot) {
+		coroRuntimeAbort("native direct claimed deferred dispatch completion failed")
+	}
 	boundary.replacement = nil
 	boundary.replacementSlot = 0
 	boundary.baton = coro.ExecutionDomainHandoffHandle{}
 	boundary.replacementQueued = false
 	return true
+}
+
+func (boundary *coroNativeForeignBoundaryV1) completeDeferredReplacementV1(
+	slot uint32,
+) bool {
+	if boundary == nil || !boundary.replacementDeferred {
+		return true
+	}
+	if boundary.parent == nil || slot == 0 ||
+		!boundary.parent.deferred.Complete(slot) {
+		return false
+	}
+	boundary.replacementDeferred = false
+	return true
+}
+
+// resolveDeferredReplacementV1 reconciles the returning syscall owner with
+// the durable-request start race. Armed can be withdrawn without ever touching
+// a physical thread. Starting is bounded by one request publisher; Queued and
+// Started reuse the ordinary generation-bound reclaim path.
+func (boundary *coroNativeForeignBoundaryV1) resolveDeferredReplacementV1() bool {
+	if boundary == nil || !boundary.replacementDeferred ||
+		boundary.parent == nil || boundary.replacement == nil ||
+		boundary.replacementSlot == 0 || !boundary.baton.Valid() {
+		return false
+	}
+	for {
+		slot, phase, valid := boundary.parent.deferred.Observe()
+		if !valid || slot != boundary.replacementSlot {
+			return false
+		}
+		switch phase {
+		case coro.DeferredExecutorHandoffArmed:
+			if !boundary.parent.deferred.Withdraw(slot) {
+				continue
+			}
+			rolledBack := boundary.parent.handoff.RequestReturn(boundary.baton) ==
+				coro.ExecutionDomainHandoffReturnUnclaimed &&
+				boundary.parent.handoff.Complete(boundary.baton) &&
+				coroNativeMReleaseUnstartedReplacementV1(slot)
+			if !rolledBack {
+				return false
+			}
+			boundary.replacement = nil
+			boundary.replacementSlot = 0
+			boundary.baton = coro.ExecutionDomainHandoffHandle{}
+			boundary.replacementQueued = false
+			boundary.replacementDeferred = false
+			return true
+		case coro.DeferredExecutorHandoffStarting:
+			if corofleet.Yield() != 0 {
+				return false
+			}
+		case coro.DeferredExecutorHandoffQueued:
+			boundary.replacementQueued = true
+			return true
+		case coro.DeferredExecutorHandoffStarted:
+			boundary.replacementQueued = false
+			return true
+		default:
+			return false
+		}
+	}
 }
 
 func (boundary *coroNativeForeignBoundaryV1) restartReplacementV1() bool {
@@ -339,10 +446,17 @@ func (boundary *coroNativeForeignBoundaryV1) finishV1() bool {
 	if boundary == nil || boundary.callbackAcquired {
 		return false
 	}
-	if !boundary.replacementSkipped && !boundary.reclaimReplacementV1() {
+	if boundary.replacementDeferred && !boundary.resolveDeferredReplacementV1() {
+		coroRuntimeAbort("native deferred foreign replacement resolution failed")
+	}
+	if boundary.replacement != nil && !boundary.reclaimReplacementV1() {
 		coroRuntimeAbort("native direct foreign replacement reclaim failed")
 	}
-	boundary.replacementSkipped = false
+	if boundary.replacement != nil || boundary.replacementSlot != 0 ||
+		boundary.baton.Valid() || boundary.replacementQueued ||
+		boundary.replacementDeferred {
+		return false
+	}
 	if !coroTargetReenterManagedExecutionV1(boundary.driver) {
 		coroRuntimeAbort("native direct foreign execution quota reentry failed")
 	}
@@ -417,7 +531,7 @@ func coroNativeForeignReentryRunV1(
 	if boundary == nil || !boundary.active || !boundary.callbackAcquired ||
 		boundary.replacement != nil || boundary.replacementSlot != 0 ||
 		boundary.baton.Valid() || boundary.replacementQueued ||
-		boundary.replacementSkipped || child == nil {
+		boundary.replacementDeferred || child == nil {
 		coroRuntimeAbort("invalid synchronous foreign callback child")
 	}
 	var record coro.ForeignReentryRecord

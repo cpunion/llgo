@@ -189,8 +189,9 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	for _, required := range []string{
 		"coroNativeMDirectoryCapacityV1 uint32 = 10_000",
 		"coroNativeMPageCapacityV1      uint32 = 64",
-		"handoff coro.ExecutionDomainHandoff",
-		"resume  coro.ExecutorResumeHandoff",
+		"handoff  coro.ExecutionDomainHandoff",
+		"deferred coro.DeferredExecutorHandoff",
+		"resume   coro.ExecutorResumeHandoff",
 		"token  uint32",
 		"owners [coroNativeFleetDomainCapacityV1]coroNativeMOwnerV1",
 		"pages  [coroNativeMPageCountV1]unsafe.Pointer",
@@ -292,7 +293,7 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	for _, required := range []string{
 		"coroNativeFleetActiveDomainForRouteV1(id.Route())",
 		"coroNativeFleetV1State.fleet.PostManualAndRequest(id)",
-		"coroNativeFleetRequestNeedsRingV1(domain, result.Executor)",
+		"coroNativeFleetFinishExecutorRequestV1(domain, result.Executor)",
 	} {
 		if !strings.Contains(keyed, required) {
 			t.Errorf("managed keyed completion lacks owner-joined post marker %q", required)

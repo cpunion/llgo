@@ -129,6 +129,7 @@ func TestCoroNativeFleetTargetBuildSelection(t *testing.T) {
 	}
 	for _, required := range []string{
 		"coro_target_native_fleet_llgo.go",
+		"coro_native_deferred_replacement_llgo.go",
 		"coro_physical_thread_capacity_native_llgo.go",
 		"coro_native_fleet_owner_llgo.go",
 		"coro_native_fleet_program_llgo.go",
@@ -142,6 +143,7 @@ func TestCoroNativeFleetTargetBuildSelection(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"coro_native_deferred_replacement_default.go",
 		"coro_target_native_llgo.go",
 		"coro_ready_distribution_default.go",
 		"coro_target_executor_retired_default.go",

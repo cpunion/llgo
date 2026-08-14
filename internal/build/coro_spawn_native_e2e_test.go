@@ -490,6 +490,16 @@ func buildCoroSpawnNativeE2EUserSource(
 			semantics, intrinsic, err := coroIntrinsicCallSiteSemanticsForTest(universe, call)
 			return intrinsic && semantics.ElidesManagedCall(), err
 		},
+		ClassifyElidedCallCertificate: func(_ *ssa.Function, call ssa.CallInstruction) (string, error) {
+			certificate, certified, err := universe.CoroWorkerSyscallCertificate(call)
+			if err != nil || !certified {
+				return "", err
+			}
+			return certificate.ID, nil
+		},
+		ClassifyStaticCodeAddressCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return universe.CoroStaticCodeAddressCallArgument(call, argument)
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

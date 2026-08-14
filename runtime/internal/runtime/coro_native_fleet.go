@@ -509,6 +509,24 @@ func coroNativeFleetRequestNeedsRingV1(
 		domain != nil && coroNativeAtomicLoadV1(&domain.borrowedWait) != 0
 }
 
+// coroNativeFleetFinishExecutorRequestV1 is the common physical tail after a
+// source fact and its executor request are durable. Ring remains the ordinary
+// idle/borrowed-wait transport. An accepted request additionally starts a
+// prepared syscall replacement when the route's current M released its P
+// without pre-existing demand. Non-native profiles provide a no-op target
+// adapter, keeping source semantics independent of physical thread policy.
+func coroNativeFleetFinishExecutorRequestV1(
+	domain *coroNativeFleetDomainV1,
+	result coro.ExecutorRequestResult,
+) bool {
+	if coroNativeFleetRequestNeedsRingV1(domain, result) &&
+		(domain == nil || !domain.doorbell.Ring()) {
+		return false
+	}
+	return !coro.ExecutorRequestAccepted(result) ||
+		coroNativeMActivateDeferredReplacementV1(domain)
+}
+
 // coroNativeFleetPostV1 is the complete target-global completion ingress. The
 // caller supplies only the frozen two-word OperationID (plus a source-specific
 // POD result/control value). Route selects the stable ingress as the first
@@ -575,15 +593,12 @@ func coroNativeFleetPostV1(
 		return coroNativeFleetInvalidIngressV1()
 	}
 
-	ringOK := true
-	if coroNativeFleetRequestNeedsRingV1(domain, result.Executor) {
-		ringOK = domain.doorbell.Ring()
-	}
+	requestOK := coroNativeFleetFinishExecutorRequestV1(domain, result.Executor)
 	_, leaveOK := domain.ingress.Leave()
 	// Leave is the absolute final domain access. The durable source fact is not
 	// rolled back if a physical doorbell fails; fail-stop callers treat the
 	// invalid return as target corruption while the fact remains observable.
-	if !ringOK || !leaveOK {
+	if !requestOK || !leaveOK {
 		return coroNativeFleetInvalidIngressV1()
 	}
 	return result

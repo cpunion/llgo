@@ -3178,13 +3178,38 @@ event source 只要复用 common park/detach 协议，就自动进入这项判�
 
 未匹配 direct-channel waiter 不能独立完成，因此不能等同 timer/poll，否则一个
 常驻 runtime waiter 会使每个短 syscall 都启动 M。producer 完成匹配后必须先发布
-typed completion，再发布 exact executor request。完整的跨 route 闭环还要求：若
-目标 route 正处于“已释放 lease、原 M 阻塞、尚无 replacement”的窗口，这个 request
-必须能按需激活预留的 replacement。该 follow-up 应复用
-`ExecutionDomainHandoff` 和 active-M directory；不得重新把所有 channel waiter
-加入 eager gate，也不得引入第二套 channel 调度器。在此闭环验收前，timer/poll
-驱动的 blocking compensation 已验证，但“remote producer 唤醒目标 G，而该 G
-反过来解除原 syscall”的 direct-only 环不能标为完成。
+typed completion，再发布 exact executor request。该 request 现在通过公共物理 tail
+按需激活预留的 replacement，不把未匹配 waiter 加入 eager gate，也不
+引入第二套 channel 调度器。
+
+这个闭环复用 `ExecutionDomainHandoff` 和 active-M directory，只在稳定的
+parent M owner 中增加一个 pointer-free 32-bit `DeferredExecutorHandoff`：
+
+1. syscall owner 预先建立 exact logical handoff 并保留 replacement directory slot，
+   但不请求物理 M；
+2. 释放 managed-execution lease 后发布 `Armed`，再重查一次已存在
+   demand，关闭 request-before-arm 窗口；
+3. 每个 source 在事实与 executor request 都持久化后，先完成原有
+   doorbell transport，再调用公共 activation tail；
+4. accepted request 以单次 CAS 把 `Armed -> Starting`，随后发布
+   `Queued` 或 `Started`；syscall 快速返回则以同一个 CAS 尝试
+   `Armed -> Idle`；
+5. request 胜出时继续复用 generation-bound return/cancel/recycle，完成 strong
+   recycle 后才清回 `Idle`。
+
+`Starting` 只是一个有界的发布窗口，不是新的 scheduler wait state。slot 只是
+路由 hint；延迟到达的 accepted request 可与同一稳定 parent 下的下一次
+armed call 合并，而真正防止 stale physical owner 的 authority 仍是
+`ExecutionDomainHandoff` generation 和 replacement baton。该 gate 不保存 stack
+boundary、G/P、LLVM coroutine handle 或函数地址，因此 request 从其他 route
+到达时不需要反向解析编译器对象。
+
+已接入该公共 tail 的生产者包括 Manual/Worker/Poll/TaskControl ingress、
+keyed post、direct channel completion、controlled timer、ready distribution 和普通
+executor request。linked E2E 已验证：目标 route 的 sole M 在真实
+`llgo.syscall` C 调用中阻塞，另一 route 的 direct-channel producer 发布
+completion/request，request-driven replacement 恢复目标 waiter，waiter 又解除
+原 syscall。该测试不借助 timer、poll、worker 或额外 runtime waiter。
 
 物理 M 使用 generation 化的异步 standby request/cancel：request 只把 clean M 从
 standby 转入 `DISPATCHING`，不等待 C->Go；原 syscall 快速返回时只能取消仍处于
@@ -3199,5 +3224,5 @@ owner 的硬门槛。
 - sole-M blocking pipe + timer 必须继续前进；
 - TCP nonblocking poll 路径结构和性能不变；
 - queued-cancel、dispatch-wins、handoff return、shutdown 各竞态重复通过；
-- direct-only 跨 route 依赖在 request-driven replacement 完成前保持显式未完成，
-  不得用常驻 waiter eager compensation 掩盖。
+- direct-only 跨 route 依赖必须由 request-driven replacement 闭环，不得用
+  常驻 waiter eager compensation 掩盖。

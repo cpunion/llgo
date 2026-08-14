@@ -597,9 +597,27 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		}
 	}
 	detach := strings.Index(entrance, "coro.DetachExecutorResume(")
-	start := strings.Index(entrance, "if boundary.startReplacementV1(true)")
-	leave := strings.Index(entrance, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
-	create := strings.Index(entrance, "coroNativeMRequestPhysicalOwnerV1(replacement, slot)")
+	startEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(")
+	prepareEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) prepareDeferredReplacementV1()")
+	beginEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) beginV1(")
+	reclaimEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1()")
+	completeEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) completeDeferredReplacementV1(")
+	resolveEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) resolveDeferredReplacementV1()")
+	finishEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) finishV1()")
+	setTLSEntry := strings.Index(entrance, "func coroNativeForeignBoundarySetTLSV1(")
+	immediate, prepared, reclaim, finishBody := "", "", "", ""
+	if startEntry >= 0 && prepareEntry > startEntry {
+		immediate = entrance[startEntry:prepareEntry]
+	}
+	if prepareEntry >= 0 && beginEntry > prepareEntry {
+		prepared = entrance[prepareEntry:beginEntry]
+	}
+	if reclaimEntry >= 0 && completeEntry > reclaimEntry {
+		reclaim = entrance[reclaimEntry:completeEntry]
+	}
+	if finishEntry >= 0 && setTLSEntry > finishEntry {
+		finishBody = entrance[finishEntry:setTLSEntry]
+	}
 	helper := strings.Index(entrance, "func coroNativeForeignWordCallV1(")
 	begin, call := -1, -1
 	if helper >= 0 {
@@ -612,15 +630,25 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 			call += helper
 		}
 	}
-	finish := strings.LastIndex(entrance, "boundary.finishV1()")
-	cancel := strings.Index(entrance, "corofleet.CancelReuseOwner(")
-	request := strings.LastIndex(entrance, "boundary.parent.handoff.RequestReturn(boundary.baton)")
-	recycle := strings.Index(entrance, "coroNativeMRecycleReplacementV1(returnedSlot)")
-	reenter := strings.LastIndex(entrance, "coroTargetReenterManagedExecutionV1(boundary.driver)")
-	restore := strings.LastIndex(entrance, "coro.RestoreExecutorResume(&boundary.resume)")
-	if detach < 0 || start <= detach || create <= leave || cancel <= create ||
-		request < 0 || recycle <= request || reenter <= recycle || restore <= reenter ||
-		helper < 0 || begin < helper || call <= begin || finish <= call {
+	helperFinish := strings.LastIndex(entrance, "boundary.finishV1()")
+	immediateRelease := strings.Index(immediate, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
+	immediateCreate := strings.Index(immediate, "coroNativeMRequestPhysicalOwnerV1(replacement, slot)")
+	preparedRelease := strings.Index(prepared, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
+	preparedArm := strings.Index(prepared, "boundary.parent.deferred.Arm(slot)")
+	preparedRecheck := strings.Index(prepared, "coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)")
+	reclaimCancel := strings.Index(reclaim, "corofleet.CancelReuseOwner(")
+	reclaimRequest := strings.Index(reclaim, "boundary.parent.handoff.RequestReturn(boundary.baton)")
+	reclaimRecycle := strings.Index(reclaim, "coroNativeMRecycleReplacementV1(returnedSlot)")
+	finishResolve := strings.Index(finishBody, "boundary.resolveDeferredReplacementV1()")
+	finishReclaim := strings.Index(finishBody, "boundary.reclaimReplacementV1()")
+	finishReenter := strings.Index(finishBody, "coroTargetReenterManagedExecutionV1(boundary.driver)")
+	finishRestore := strings.Index(finishBody, "coro.RestoreExecutorResume(&boundary.resume)")
+	if detach < beginEntry || immediateRelease < 0 || immediateCreate <= immediateRelease ||
+		preparedRelease < 0 || preparedArm <= preparedRelease || preparedRecheck <= preparedArm ||
+		reclaimCancel < 0 || reclaimRequest <= reclaimCancel || reclaimRecycle <= reclaimRequest ||
+		resolveEntry <= completeEntry || finishResolve < 0 || finishReclaim <= finishResolve ||
+		finishReenter <= finishReclaim || finishRestore <= finishReenter ||
+		helper < 0 || begin < helper || call <= begin || helperFinish <= call {
 		t.Errorf("%s does not bracket same-M C with detach/release/create/return/recycle/restore", runtimeCoroOSThreadForeignSource)
 	}
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
@@ -644,6 +672,64 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		if !strings.Contains(cSource, required) {
 			t.Errorf("%s lacks fixed native-stack worker step %q", runtimeCoroWorkerCSource, required)
 		}
+	}
+}
+
+func TestRuntimeNativeSyscallDeferredReplacementUsesStableRequestGate(t *testing.T) {
+	core := readRuntimePollFile(t, "internal/coro/deferred_executor_handoff.go")
+	for _, required := range []string{
+		"type DeferredExecutorHandoff struct",
+		"state  uint32",
+		"func (handoff *DeferredExecutorHandoff) Arm(slot uint32) bool",
+		"func (handoff *DeferredExecutorHandoff) BeginStart()",
+		"func (handoff *DeferredExecutorHandoff) Withdraw(slot uint32) bool",
+		"func (handoff *DeferredExecutorHandoff) Complete(slot uint32) bool",
+	} {
+		if !strings.Contains(core, required) {
+			t.Errorf("deferred executor core lacks stable gate marker %q", required)
+		}
+	}
+
+	boundary := readRuntimePollFile(t, runtimeCoroOSThreadForeignSource)
+	prepare := strings.Index(boundary, "func (boundary *coroNativeForeignBoundaryV1) prepareDeferredReplacementV1()")
+	release, arm, recheck := -1, -1, -1
+	if prepare >= 0 {
+		prepared := boundary[prepare:]
+		release = strings.Index(prepared, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
+		arm = strings.Index(prepared, "boundary.parent.deferred.Arm(slot)")
+		recheck = strings.Index(prepared, "coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)")
+	}
+	if prepare < 0 || release < 0 || arm <= release || recheck <= arm {
+		t.Error("deferred native syscall does not release, arm, then recheck durable demand")
+	}
+
+	request := readRuntimePollFile(t, "internal/runtime/coro_native_deferred_replacement_llgo.go")
+	for _, required := range []string{
+		"coroNativeMActiveOwnerV1(domain.driverOwnerV1())",
+		"parent.deferred.BeginStart()",
+		"coroNativeMRequestPhysicalOwnerV1(replacement, slot)",
+		"parent.deferred.PublishStart(slot, queued)",
+	} {
+		if !strings.Contains(request, required) {
+			t.Errorf("deferred replacement request path lacks marker %q", required)
+		}
+	}
+	for _, forbidden := range []string{"unsafe.Pointer", "coroNativeForeignBoundaryV1"} {
+		if strings.Contains(request, forbidden) {
+			t.Errorf("deferred replacement request path retained stack/pointer coupling %q", forbidden)
+		}
+	}
+
+	fleet := readRuntimePollFile(t, runtimeCoroNativeFleetSource)
+	tail := strings.Index(fleet, "func coroNativeFleetFinishExecutorRequestV1(")
+	ring, activate := -1, -1
+	if tail >= 0 {
+		finish := fleet[tail:]
+		ring = strings.Index(finish, "domain.doorbell.Ring()")
+		activate = strings.Index(finish, "coroNativeMActivateDeferredReplacementV1(domain)")
+	}
+	if tail < 0 || ring < 0 || activate <= ring {
+		t.Error("durable native request tail does not ring before deferred physical activation")
 	}
 }
 
