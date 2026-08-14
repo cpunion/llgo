@@ -23,8 +23,9 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 // coroNativeMActivateDeferredReplacementV1 is the request-side half of a
 // demand-free native syscall handoff. It resolves only stable directory state;
 // neither the caller's stack boundary nor an LLVM coroutine handle is
-// published. The exact execution-domain generation remains authoritative in
-// parent.handoff and replacement.baton.
+// published. It allocates a replacement directory slot only after winning the
+// stable parent's Armed-to-Starting CAS. The exact execution-domain generation
+// remains authoritative in parent.handoff and replacement.baton.
 func coroNativeMActivateDeferredReplacementV1(
 	domain *coroNativeFleetDomainV1,
 ) bool {
@@ -59,23 +60,25 @@ func coroNativeMActivateDeferredReplacementV1(
 				activeSlot != parentSlot {
 				return false
 			}
-			startedSlot, won := parent.deferred.BeginStart()
-			if !won {
+			if slot != 0 || !parent.deferred.BeginStart() {
 				continue
 			}
 			// BeginStart reloads the one-word gate and is authoritative. A delayed
 			// accepted request may safely coalesce into a later armed call on the
-			// same stable parent even when that call obtained a different slot.
-			slot = startedSlot
-			if slot > coroNativeMDirectoryCapacityV1 {
-				_ = parent.deferred.RetryStart(startedSlot)
+			// same stable parent; the currently released baton selects the exact
+			// generation before this publisher materializes a directory slot.
+			released, releasedOK := parent.handoff.Released()
+			if !releasedOK || !released.Valid() ||
+				released.OwnerEpoch == 0 {
+				_ = parent.deferred.RetryStart()
 				return false
 			}
-			replacement, replacementOK := coroNativeMOwnerForSlotV1(slot)
-			released, releasedOK := parent.handoff.Released()
+			slot, replacement, replacementOK := coroNativeMAllocateReplacementV1(
+				parentSlot,
+				domain.handle,
+				released,
+			)
 			if !replacementOK || replacement == nil ||
-				coroNativeMOwnerLifecycleLoadV1(replacement) !=
-					coroNativeMOwnerReplacementPublishedV1 ||
 				replacement.parentSlot != parentSlot ||
 				replacement.predecessorSlot != 0 ||
 				replacement.lineageRootSlot != slot ||
@@ -84,14 +87,18 @@ func coroNativeMActivateDeferredReplacementV1(
 				replacement.thread != nil || replacement.self != nil ||
 				replacement.token != 0 || replacement.resume.Detached() ||
 				!replacement.handoff.Idle() || !replacement.deferred.Idle() ||
-				!releasedOK || released != replacement.baton ||
+				released != replacement.baton ||
 				replacement.ownerEpoch != released.OwnerEpoch {
-				_ = parent.deferred.RetryStart(slot)
+				if replacementOK && slot != 0 {
+					_ = coroNativeMReleaseUnstartedReplacementV1(slot)
+				}
+				_ = parent.deferred.RetryStart()
 				return false
 			}
 			queued, started := coroNativeMRequestPhysicalOwnerV1(replacement, slot)
 			if !started {
-				if !parent.deferred.RetryStart(slot) {
+				if !coroNativeMReleaseUnstartedReplacementV1(slot) ||
+					!parent.deferred.RetryStart() {
 					coroRuntimeAbort("native deferred replacement retry publication failed")
 				}
 				return false

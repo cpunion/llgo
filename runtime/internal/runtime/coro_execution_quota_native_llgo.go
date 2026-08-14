@@ -38,7 +38,22 @@ func coroNativeFleetExecutionDomainV1(
 		return nil, 0, false
 	}
 	route, ok := driver.Route()
-	if !ok || uint32(route) > coroNativeFleetV1State.domainCount {
+	if !ok {
+		return nil, 0, false
+	}
+	return coroNativeFleetExecutionDomainAtRouteV1(driver, route)
+}
+
+// coroNativeFleetExecutionDomainAtRouteV1 consumes a route frozen from the
+// current compiler-task capability. It still authenticates the target domain,
+// driver identity and fleet handle, but does not repeat the driver's complete
+// source-catalog and owner-local lifecycle audit.
+func coroNativeFleetExecutionDomainAtRouteV1(
+	driver *coro.ExecutorDriver,
+	route coro.RouteID,
+) (*coroNativeFleetDomainV1, coro.RouteID, bool) {
+	if driver == nil || !route.Valid() ||
+		uint32(route) > coroNativeFleetV1State.domainCount {
 		return nil, 0, false
 	}
 	domain := &coroNativeFleetV1State.domains[uint32(route)-1]
@@ -75,11 +90,37 @@ func coroTargetAcquireManagedExecutionV1(driver *coro.ExecutorDriver) (bool, boo
 	return coroNativeFleetV1State.execution.TryAcquire(route)
 }
 
+func coroTargetAcquireManagedExecutionAtRouteV1(
+	driver *coro.ExecutorDriver,
+	route coro.RouteID,
+) (bool, bool) {
+	_, route, ok := coroNativeFleetExecutionDomainAtRouteV1(driver, route)
+	if !ok {
+		return false, false
+	}
+	return coroNativeFleetV1State.execution.TryAcquire(route)
+}
+
 func coroTargetReleaseManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 	_, route, ok := coroNativeFleetExecutionDomainV1(driver)
 	if !ok {
 		return false
 	}
+	return coroTargetReleaseManagedExecutionRouteV1(route)
+}
+
+func coroTargetReleaseManagedExecutionAtRouteV1(
+	driver *coro.ExecutorDriver,
+	route coro.RouteID,
+) bool {
+	_, route, ok := coroNativeFleetExecutionDomainAtRouteV1(driver, route)
+	if !ok {
+		return false
+	}
+	return coroTargetReleaseManagedExecutionRouteV1(route)
+}
+
+func coroTargetReleaseManagedExecutionRouteV1(route coro.RouteID) bool {
 	wake, released := coroNativeFleetV1State.execution.Release(route)
 	if !released || !wake {
 		return released
@@ -117,6 +158,18 @@ func coroTargetWaitManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 	return ok
 }
 
+func coroTargetWaitManagedExecutionAtRouteV1(
+	driver *coro.ExecutorDriver,
+	route coro.RouteID,
+) bool {
+	domain, _, ok := coroNativeFleetExecutionDomainAtRouteV1(driver, route)
+	if !ok {
+		return false
+	}
+	_, ok = domain.doorbell.WaitBounded(corodoorbell.PollFaultContainmentMilliseconds)
+	return ok
+}
+
 // coroTargetReenterManagedExecutionV1 restores an outer bounded run slice's
 // exact P lease after its replacement M has returned and been strongly joined.
 // The caller restores the detached active resume only after this succeeds.
@@ -130,6 +183,24 @@ func coroTargetReenterManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 			return true
 		}
 		if !coroTargetWaitManagedExecutionV1(driver) {
+			return false
+		}
+	}
+}
+
+func coroTargetReenterManagedExecutionAtRouteV1(
+	driver *coro.ExecutorDriver,
+	route coro.RouteID,
+) bool {
+	for {
+		acquired, ok := coroTargetAcquireManagedExecutionAtRouteV1(driver, route)
+		if !ok {
+			return false
+		}
+		if acquired {
+			return true
+		}
+		if !coroTargetWaitManagedExecutionAtRouteV1(driver, route) {
 			return false
 		}
 	}

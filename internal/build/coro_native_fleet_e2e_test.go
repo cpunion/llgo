@@ -1930,7 +1930,7 @@ func TestCoroNativeFleetLockedForeignReleasesQuotaBeforeReplacementStarts(t *tes
 	source := string(raw)
 	release := strings.Index(
 		source,
-		"if releaseManaged && !coroTargetReleaseManagedExecutionV1(boundary.driver)",
+		"if releaseManaged && !coroTargetReleaseManagedExecutionAtRouteV1(",
 	)
 	request := strings.Index(
 		source,

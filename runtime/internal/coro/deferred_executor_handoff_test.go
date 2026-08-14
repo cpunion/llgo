@@ -23,13 +23,13 @@ import (
 
 func TestDeferredExecutorHandoffWithdraw(t *testing.T) {
 	var handoff DeferredExecutorHandoff
-	if !handoff.Idle() || !handoff.Arm(17) || handoff.Arm(18) {
+	if !handoff.Idle() || !handoff.Arm() || handoff.Arm() {
 		t.Fatal("arm deferred executor handoff")
 	}
-	if slot, phase, ok := handoff.Observe(); !ok || slot != 17 || phase != DeferredExecutorHandoffArmed {
+	if slot, phase, ok := handoff.Observe(); !ok || slot != 0 || phase != DeferredExecutorHandoffArmed {
 		t.Fatalf("armed snapshot = (%d, %d, %t)", slot, phase, ok)
 	}
-	if handoff.Withdraw(18) || !handoff.Withdraw(17) || !handoff.Idle() {
+	if !handoff.Withdraw() || handoff.Withdraw() || !handoff.Idle() {
 		t.Fatal("withdraw deferred executor handoff")
 	}
 }
@@ -37,11 +37,11 @@ func TestDeferredExecutorHandoffWithdraw(t *testing.T) {
 func TestDeferredExecutorHandoffStartOutcomes(t *testing.T) {
 	for _, queued := range []bool{false, true} {
 		var handoff DeferredExecutorHandoff
-		if !handoff.Arm(23) {
+		if !handoff.Arm() {
 			t.Fatal("arm deferred executor handoff")
 		}
-		slot, begun := handoff.BeginStart()
-		if !begun || slot != 23 || handoff.Withdraw(23) ||
+		const slot = uint32(23)
+		if !handoff.BeginStart() || handoff.Withdraw() ||
 			!handoff.PublishStart(slot, queued) {
 			t.Fatalf("publish deferred start queued=%t", queued)
 		}
@@ -60,14 +60,13 @@ func TestDeferredExecutorHandoffStartOutcomes(t *testing.T) {
 
 func TestDeferredExecutorHandoffRetry(t *testing.T) {
 	var handoff DeferredExecutorHandoff
-	if !handoff.Arm(29) {
+	if !handoff.Arm() {
 		t.Fatal("arm deferred executor handoff")
 	}
-	slot, begun := handoff.BeginStart()
-	if !begun || slot != 29 || !handoff.RetryStart(slot) {
+	if !handoff.BeginStart() || !handoff.RetryStart() {
 		t.Fatal("retry deferred executor start")
 	}
-	if !handoff.Withdraw(slot) || !handoff.Idle() {
+	if !handoff.Withdraw() || !handoff.Idle() {
 		t.Fatal("withdraw retried deferred executor handoff")
 	}
 }
@@ -76,7 +75,7 @@ func TestDeferredExecutorHandoffStartWithdrawRace(t *testing.T) {
 	const iterations = 2_000
 	for iteration := 0; iteration < iterations; iteration++ {
 		var handoff DeferredExecutorHandoff
-		if !handoff.Arm(31) {
+		if !handoff.Arm() {
 			t.Fatal("arm deferred executor handoff")
 		}
 		var wait sync.WaitGroup
@@ -85,15 +84,15 @@ func TestDeferredExecutorHandoffStartWithdrawRace(t *testing.T) {
 		withdrawn := make(chan bool, 1)
 		go func() {
 			defer wait.Done()
-			slot, ok := handoff.BeginStart()
-			if ok && !handoff.PublishStart(slot, true) {
+			ok := handoff.BeginStart()
+			if ok && !handoff.PublishStart(31, true) {
 				t.Errorf("publish winning start at iteration %d", iteration)
 			}
 			started <- ok
 		}()
 		go func() {
 			defer wait.Done()
-			withdrawn <- handoff.Withdraw(31)
+			withdrawn <- handoff.Withdraw()
 		}()
 		wait.Wait()
 		startWon, withdrawWon := <-started, <-withdrawn
@@ -113,10 +112,14 @@ func TestDeferredExecutorHandoffStartWithdrawRace(t *testing.T) {
 
 func TestDeferredExecutorHandoffRejectsInvalidSlots(t *testing.T) {
 	var handoff DeferredExecutorHandoff
-	if handoff.Arm(0) || handoff.Arm(deferredExecutorHandoffSlotMask+1) {
-		t.Fatal("accepted invalid deferred executor slot")
-	}
-	if _, begun := handoff.BeginStart(); begun {
+	if handoff.BeginStart() {
 		t.Fatal("started idle deferred executor handoff")
+	}
+	if !handoff.Arm() || !handoff.BeginStart() {
+		t.Fatal("cannot begin deferred executor handoff")
+	}
+	if handoff.PublishStart(0, false) ||
+		handoff.PublishStart(deferredExecutorHandoffSlotMask+1, false) {
+		t.Fatal("accepted invalid deferred executor slot")
 	}
 }

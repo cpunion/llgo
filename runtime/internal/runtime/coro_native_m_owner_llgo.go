@@ -383,6 +383,34 @@ func coroNativeMActiveOwnerV1(
 	if !domainOK || domain == nil || !route.Valid() {
 		return nil, nil, 0, 0, false
 	}
+	return coroNativeMActiveOwnerInDomainV1(domain, route)
+}
+
+func coroNativeMActiveOwnerAtRouteV1(
+	driver *coro.ExecutorDriver,
+	route coro.RouteID,
+) (
+	owner *coroNativeMOwnerV1,
+	domain *coroNativeFleetDomainV1,
+	slot, epoch uint32,
+	ok bool,
+) {
+	domain, route, domainOK := coroNativeFleetExecutionDomainAtRouteV1(driver, route)
+	if !domainOK || domain == nil || !route.Valid() {
+		return nil, nil, 0, 0, false
+	}
+	return coroNativeMActiveOwnerInDomainV1(domain, route)
+}
+
+func coroNativeMActiveOwnerInDomainV1(
+	domain *coroNativeFleetDomainV1,
+	route coro.RouteID,
+) (
+	owner *coroNativeMOwnerV1,
+	resolved *coroNativeFleetDomainV1,
+	slot, epoch uint32,
+	ok bool,
+) {
 	slot = coroNativeAtomicLoadV1(&coroNativeMDirectoryV1State.active[uint32(route)-1])
 	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
 	if !ownerOK || owner.handle != domain.handle || owner.self == nil {
@@ -457,6 +485,22 @@ func coroNativeMCurrentOwnerV1(
 	ok bool,
 ) {
 	owner, domain, slot, epoch, ok = coroNativeMActiveOwnerV1(driver)
+	if !ok || pthread.Equal(owner.self, pthread.Self()) == 0 {
+		return nil, nil, 0, 0, false
+	}
+	return owner, domain, slot, epoch, true
+}
+
+func coroNativeMCurrentOwnerAtRouteV1(
+	driver *coro.ExecutorDriver,
+	route coro.RouteID,
+) (
+	owner *coroNativeMOwnerV1,
+	domain *coroNativeFleetDomainV1,
+	slot, epoch uint32,
+	ok bool,
+) {
+	owner, domain, slot, epoch, ok = coroNativeMActiveOwnerAtRouteV1(driver, route)
 	if !ok || pthread.Equal(owner.self, pthread.Self()) == 0 {
 		return nil, nil, 0, 0, false
 	}
