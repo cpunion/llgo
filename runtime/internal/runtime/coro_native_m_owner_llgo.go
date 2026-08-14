@@ -422,11 +422,26 @@ func coroNativeMActiveOwnerV1(
 			if !domain.adopted || owner.ownerEpoch != coroNativeProgramOwnerEpochV1 {
 				return nil, nil, 0, 0, false
 			}
-		} else if domain.adopted || domain.ownerEpoch == 0 ||
-			owner.ownerEpoch != domain.ownerEpoch {
-			return nil, nil, 0, 0, false
+			epoch = owner.ownerEpoch
+		} else {
+			if domain.adopted || domain.ownerEpoch == 0 {
+				return nil, nil, 0, 0, false
+			}
+			if owner.baton.Valid() {
+				// A replacement successor inherits one released execution-domain
+				// baton and therefore remains bound to that exact logical epoch.
+				if owner.ownerEpoch != domain.ownerEpoch {
+					return nil, nil, 0, 0, false
+				}
+				epoch = owner.ownerEpoch
+			} else {
+				// An ordinary clean successor is the permanent physical M for this
+				// route. Like the initial peer above it spans arbitrarily many
+				// idle/wake epochs, so the live domain—not its creation record—is
+				// authoritative for the current logical owner epoch.
+				epoch = domain.ownerEpoch
+			}
 		}
-		epoch = owner.ownerEpoch
 	default:
 		return nil, nil, 0, 0, false
 	}

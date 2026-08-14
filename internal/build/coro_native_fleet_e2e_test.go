@@ -321,9 +321,15 @@ import _ "unsafe"
 var Failed uint32
 var MainThread uintptr
 var RetiredThread uintptr
+var SuccessorBefore uintptr
+var SuccessorAfter uintptr
+var SuccessorDone chan uint32
 
 //go:linkname osThreadLock llgo.coroOSThreadLock
 func osThreadLock()
+
+//go:linkname timerSleep llgo.coroTimerSleep
+func timerSleep(delay int64)
 
 //llgo:coro noblock
 //go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
@@ -341,6 +347,9 @@ func Setup() {
 	Failed = 0
 	MainThread = threadID()
 	RetiredThread = 0
+	SuccessorBefore = 0
+	SuccessorAfter = 0
+	SuccessorDone = make(chan uint32)
 }
 
 func retireLockedPeer() {
@@ -358,12 +367,33 @@ func retireLockedPeer() {
 	// before publishing the G as reclaimable.
 }
 
+func wakeRetiredPeerSuccessor() {
+	thread := threadID()
+	if thread == MainThread {
+		go wakeRetiredPeerSuccessor()
+		return
+	}
+	SuccessorBefore = thread
+	// With no other peer work, this parks the clean successor's route and
+	// forces its next resume through a fresh logical owner epoch.
+	timerSleep(5 * 1000 * 1000)
+	SuccessorAfter = threadID()
+	SuccessorDone <- 1
+}
+
 func main() {
 	go retireLockedPeer()
 	for threadExitCount() == 0 {
 	}
 	if RetiredThread == 0 || RetiredThread == MainThread {
 		Failed = 42
+		return
+	}
+	go wakeRetiredPeerSuccessor()
+	<-SuccessorDone
+	if SuccessorBefore == 0 || SuccessorBefore == MainThread ||
+		SuccessorBefore == RetiredThread || SuccessorAfter != SuccessorBefore {
+		Failed = 44
 	}
 }
 
