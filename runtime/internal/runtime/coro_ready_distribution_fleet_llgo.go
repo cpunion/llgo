@@ -182,8 +182,8 @@ func coroTargetPublishReadyDistributionV1(
 	if !valid {
 		return coroTargetReadyDistributionFailV1("native ready distribution target route mismatch")
 	}
-	if coroNativeFleetRequestNeedsRingV1(target, distribution.Request) && !target.doorbell.Ring() {
-		return coroTargetReadyDistributionFailV1("native ready distribution doorbell failed")
+	if !coroNativeFleetFinishExecutorRequestV1(target, distribution.Request) {
+		return coroTargetReadyDistributionFailV1("native ready distribution request tail failed")
 	}
 	return true
 }

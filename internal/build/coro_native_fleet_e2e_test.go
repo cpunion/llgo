@@ -953,6 +953,125 @@ func Check() int32 {
 }
 `
 
+// coroNativeFleetDeferredDirectChannelReplacementE2ESource isolates the one
+// liveness edge which cannot be inferred before a syscall starts: a source-free
+// one-case channel waiter on the blocked route is completed later by a peer
+// route. The raw llgo.syscall call must stay on the current M, while that
+// durable direct-channel request starts the pre-armed replacement which runs
+// the waiter and releases the C block.
+const coroNativeFleetDeferredDirectChannelReplacementE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var Ready chan uint32
+var Signal chan uint32
+var MainThread uintptr
+var WaiterBefore uintptr
+var WaiterAfter uintptr
+var SenderThread uintptr
+var Got uint32
+
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+
+//llgo:link raw llgo.syscall
+func raw(fn uintptr) (uintptr, uintptr, uintptr)
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=by-value abi=word-call.v1/0
+func libc___llgo_coro_native_fleet_e2e_block_v1_trampoline()
+
+//go:linkname schedulerYield llgo.coroYield
+func schedulerYield()
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+
+func directBlock() {
+	raw(funcPCABI0(libc___llgo_coro_native_fleet_e2e_block_v1_trampoline))
+}
+
+func waiter() {
+	thread := threadID()
+	if thread != MainThread {
+		go waiter()
+		return
+	}
+	WaiterBefore = thread
+	Ready <- 1
+	Got = <-Signal
+	WaiterAfter = threadID()
+	unblock()
+}
+
+func sender() {
+	thread := threadID()
+	if thread == MainThread {
+		go sender()
+		return
+	}
+	SenderThread = thread
+	for isWaiting() == 0 {
+	}
+	Signal <- 0xd1ec7
+}
+
+func Setup() {
+	Failed = 0
+	Ready = make(chan uint32, 1)
+	Signal = make(chan uint32)
+	MainThread = threadID()
+	WaiterBefore = 0
+	WaiterAfter = 0
+	SenderThread = 0
+	Got = 0
+}
+
+func main() {
+	resetState()
+	go waiter()
+	<-Ready
+	// The buffered Ready send lets waiter continue directly into its one-case
+	// receive. Yield is an explicit stable boundary which proves that receive
+	// has parked before this route enters C.
+	schedulerYield()
+	go sender()
+	before := threadID()
+	directBlock()
+	after := threadID()
+	if isWaiting() == 0 {
+		Failed = 151
+		return
+	}
+	if before != MainThread || after != before {
+		Failed = 152
+		return
+	}
+	if WaiterBefore != MainThread || WaiterAfter == 0 ||
+		WaiterAfter == MainThread || SenderThread == 0 ||
+		SenderThread == MainThread || Got != 0xd1ec7 {
+		Failed = 153
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
 const coroNativeFleetLockedOrdinarySuspendE2ESource = `package main
 
 import _ "unsafe"
@@ -1836,6 +1955,16 @@ func TestCoroNativeFleetSameRouteReplacementE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetSameRouteReplacementE2ESource, "same-route-replacement", true, 1)
 }
 
+func TestCoroNativeFleetDeferredDirectChannelReplacementE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetDeferredDirectChannelReplacementE2ESource,
+		"deferred-direct-channel-replacement",
+		true,
+		2,
+	)
+}
+
 func TestCoroNativeFleetLockedOrdinarySuspendE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetLockedOrdinarySuspendE2ESource, "locked-ordinary-suspend", true, 2)
 }
@@ -2006,6 +2135,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_trace_release.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_atomic_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_deferred_replacement_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_program_llgo.go"),

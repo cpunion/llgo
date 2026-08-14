@@ -299,6 +299,7 @@ func coroNativeFleetPhysicalOwnersStopV1() bool {
 			!coroNativeMJoinPhysicalOwnerV1(owner) ||
 			coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 ||
 			owner.resume.Detached() || !owner.handoff.Idle() ||
+			!owner.deferred.Idle() ||
 			!coroNativeMOwnerLifecycleCASV1(
 				owner,
 				coroNativeMOwnerReturnedV1,
@@ -655,6 +656,7 @@ func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32 {
 		route := owner.handle.Route
 		if route < 2 || route > coroNativeFleetV1State.domainCount ||
 			route-2 >= state.count || owner.self != nil ||
+			!owner.deferred.Idle() ||
 			!coroNativeMOwnerLifecycleCASV1(
 				owner,
 				coroNativeMOwnerPeerPublishedV1,
@@ -674,6 +676,7 @@ func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32 {
 			peer.handle != owner.handle ||
 			corofleet.OwnerReady(slot) != 0 ||
 			!coroNativeFleetRunPhysicalOwnerV1(peer.handle) ||
+			!owner.deferred.Idle() ||
 			!coroNativeMOwnerLifecycleCASV1(
 				owner,
 				coroNativeMOwnerPeerActiveV1,

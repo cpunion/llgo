@@ -1805,3 +1805,46 @@ runtime package, 20-repeat native standby, and focused compiler syscall/worker
 tests also pass. The next file-performance target is the remaining coroutine
 frame chain through `io.ReadFull`, `os.File` and `internal/poll`, not another
 file-specific runtime path.
+
+### Request-driven deferred replacement checkpoint
+
+The follow-up on 2026-08-14 closes the direct-only cross-route liveness gap
+without restoring eager compensation. A blocking native syscall now reserves
+the exact logical handoff and a replacement directory slot, releases its
+managed-execution permit, and arms one pointer-free 32-bit dispatch gate. It
+does not consume a physical M unless a durable executor request wins the gate.
+Every native source uses one common request tail: preserve the existing
+doorbell transport first, then activate an armed replacement for an accepted
+request. A quick syscall return withdraws the arm with one CAS; a request winner
+uses the existing generation-bound cancel, return, and strong-recycle path.
+
+The new linked gate constructs the dependency directly. Route A's sole current
+M blocks in a real compiler-certified `llgo.syscall`; route B completes a direct
+channel rendezvous for a waiter on A; the accepted request starts A's deferred
+replacement; the resumed waiter releases the C call. There is no timer, poll,
+worker, or additional runtime waiter in the cycle. The scenario and the nearby
+same-route/timer/poll/nested/retirement replacement set pass five repeated runs.
+
+The exact comparison parent is merge `a9bb968259c791c3eaaefd8a0db9a327647449f0`.
+The parent and candidate use the same LLVM 22 compiler/workload artifacts and
+31-process medians. A background Docker build was active on the machine, so
+these measurements are a regression guard rather than a new Go comparison:
+
+| 500-operation workload | parent | deferred candidate | delta |
+| --- | ---: | ---: | ---: |
+| direct `syscall.Seek/Write/Seek/Read` | 2.853167 ms | 3.043458 ms | +6.7% |
+| standard `os.File`/`io.ReadFull` chain | 7.441375 ms | 7.461333 ms | effectively neutral |
+
+The direct boundary pays roughly 95 ns per syscall in this fixture for logical
+handoff/slot prepare plus the uncontended Arm/Withdraw race; no physical thread
+is started. The standard-library path is unchanged within process noise. The
+stripped artifact grows from 7,050,672 to 7,129,760 bytes (+79,088, about 1.1%).
+This is accepted as the temporary correctness gate; follow-up profiling should
+reduce the prepare/rollback cost without weakening the direct-only liveness
+proof.
+
+One pre-existing `LockedOrdinarySuspend` stress case remains flaky: the merge
+parent failed 1 of 20 isolated runs with the same bare `abort trap`, while the
+candidate reproduced a similar rate. It does not exercise the deferred syscall
+path, so this checkpoint does not claim to fix or regress that independent
+native-fleet race.

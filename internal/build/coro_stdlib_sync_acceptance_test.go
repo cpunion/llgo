@@ -256,6 +256,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	t.Helper()
 	const runtimePackage = "github.com/goplus/llgo/runtime/internal/runtime"
 	required := map[string]bool{
+		"coro_native_deferred_replacement_llgo.go":     false,
 		"coro_execution_quota_native_llgo.go":          false,
 		"coro_executor_driver_timer_llgo.go":           false,
 		"coro_keyed_registry_atomic_llgo.go":           false,

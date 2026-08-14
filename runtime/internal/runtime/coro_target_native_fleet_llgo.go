@@ -197,9 +197,9 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 	result := coroProgramExecutorRegistryV1State.Request(handle)
 	accepted := result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced ||
 		result == coro.ExecutorRequestIdleWake
-	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring()
+	requestOK := coroNativeFleetFinishExecutorRequestV1(domain, result)
 	_, leaveOK := domain.ingress.Leave()
-	return accepted && ringOK && leaveOK
+	return accepted && requestOK && leaveOK
 }
 
 // coroTargetRequestChannelOperationV1 routes a typed hchan commit to the exact
@@ -217,7 +217,7 @@ func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
 	result := coroNativeFleetV1State.fleet.RequestChannelExecutor(id)
 	accepted := result == coro.ExecutorRequestPublished ||
 		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
-	return accepted && (!coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring())
+	return accepted && coroNativeFleetFinishExecutorRequestV1(domain, result)
 }
 
 func coroTargetPublishDirectChannelCompletionV1(
@@ -238,9 +238,9 @@ func coroTargetPublishDirectChannelCompletionV1(
 	result := coroNativeFleetV1State.fleet.RequestExecutor(domain.handle)
 	accepted := result == coro.ExecutorRequestPublished ||
 		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
-	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring()
+	requestOK := coroNativeFleetFinishExecutorRequestV1(domain, result)
 	_, leaveOK := domain.ingress.Leave()
-	return accepted && ringOK && leaveOK
+	return accepted && requestOK && leaveOK
 }
 
 // coroTargetRequestControlledTimerV2 requests the exact owner after
@@ -263,9 +263,9 @@ func coroTargetRequestControlledTimerV2(route coro.RouteID) bool {
 	result := coroNativeFleetV1State.fleet.RequestTimerExecutor(route)
 	accepted := result == coro.ExecutorRequestPublished ||
 		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
-	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring()
+	requestOK := coroNativeFleetFinishExecutorRequestV1(domain, result)
 	_, leaveOK := domain.ingress.Leave()
-	return accepted && ringOK && leaveOK
+	return accepted && requestOK && leaveOK
 }
 
 func coroTargetPostTaskControlV1(

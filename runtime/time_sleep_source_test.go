@@ -241,7 +241,7 @@ func TestControlledTimerOwnerUsesUnifiedTimerSource(t *testing.T) {
 		"func coroTargetRequestControlledTimerV2(route coro.RouteID) bool",
 		"domain.ingress.Enter()",
 		"fleet.RequestTimerExecutor(route)",
-		"domain.doorbell.Ring()",
+		"coroNativeFleetFinishExecutorRequestV1(domain, result)",
 		"domain.ingress.Leave()",
 	} {
 		if !strings.Contains(targetSource, contract) {

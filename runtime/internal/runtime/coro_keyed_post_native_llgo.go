@@ -35,8 +35,7 @@ func coroTargetPostKeyedOperationV2(id coro.OperationID) bool {
 	// backend retirement wait forever. Raw C/host producers continue to use the
 	// exported coroNativeFleetPostV1 path and its strong ingress join.
 	result := coroNativeFleetV1State.fleet.PostManualAndRequest(id)
-	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result.Executor) ||
-		domain.doorbell.Ring()
 	return result.Route == coro.OperationRoutePosted &&
-		coro.ExecutorRequestAccepted(result.Executor) && ringOK
+		coro.ExecutorRequestAccepted(result.Executor) &&
+		coroNativeFleetFinishExecutorRequestV1(domain, result.Executor)
 }
