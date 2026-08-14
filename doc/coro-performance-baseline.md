@@ -1848,3 +1848,43 @@ parent failed 1 of 20 isolated runs with the same bare `abort trap`, while the
 candidate reproduced a similar rate. It does not exercise the deferred syscall
 path, so this checkpoint does not claim to fix or regress that independent
 native-fleet race.
+
+### Fused synchronous child-transaction checkpoint
+
+The 2026-08-15 LLVM 22-only candidate starts at merge
+`6d3d11fd6feda125382d57780d03a57571454370` and reduces the dominant
+synchronous managed-child transaction without adding a second call recipe. The
+compiler-visible ABI now combines completion preparation with bounded inline
+selection, and combines the allocation-elided physical-destroy receipt with
+parent reactivation and terminal completion consumption. Generated code still
+owns `llvm.coro.resume/done/destroy`, so LLVM retains the complete static handle
+lifetime. A real yield/park, depth refusal, dynamic frame, panic/recover,
+Goexit, cancellation, or retained panic trace uses the existing fully checked
+transactions.
+
+The old common path performed separate prepare, begin, physical-destroy commit,
+logical-destroy commit, and completion-consume calls. The new common path uses
+prepare/inline-select, finish, and destroy/consume calls. Both the genuinely
+resumed path and the fused path store one status slot and enter the same outcome
+switch; cancellation retains its separate exactly-once consume edge.
+
+The parent and candidate were built from the same `io_workload` source with
+independent caches, full LTO, stripped output, Go 1.26.5, and LLVM 22.1.8 on
+Darwin arm64. Nine 5,000-operation standard-file runs produced these stable
+hardware-counter medians:
+
+| Metric | parent | fused candidate | delta |
+| --- | ---: | ---: | ---: |
+| retired instructions | 1,244,109,625 | 1,153,042,521 | -7.32% |
+| cycles | 449,759,850 | 442,010,131 | -1.72% |
+| stripped file bytes | 7,797,952 | 7,667,072 | -130,880 (-1.68%) |
+| Mach-O `__text` bytes | 4,152,648 | 4,073,188 | -79,460 (-1.91%) |
+
+The retired-instruction ranges were 1,238,650,207--1,250,721,649 for the
+parent and 1,142,367,052--1,163,670,472 for the candidate. Wall-clock file
+timings remained noisy on the shared host, so this checkpoint does not claim a
+stable wall-time percentage. Small actual-execution gates pass for standard
+file I/O, direct file syscalls, a sole-M blocking pipe whose writer first parks
+on a real timer, and loopback TCP. Runtime-core tests cover allocation-elided
+and dynamic destruction, panic/recover compatibility, slow yield, nesting, and
+the depth-bound scheduler fallback.
