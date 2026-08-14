@@ -155,15 +155,27 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	closureSHA256 := executorLeafClosureSHA256(module, names, module.DataLayout())
+	return ExecutorLeafProof{
+		Symbol:        symbol,
+		Signature:     root.GlobalValueType().String(),
+		TargetTriple:  module.Target(),
+		DataLayout:    module.DataLayout(),
+		CallClosure:   names,
+		ClosureSHA256: closureSHA256,
+	}, nil
+}
+
+func executorLeafClosureSHA256(module llvm.Module, names []string, dataLayout string) string {
 	var frozen strings.Builder
 	fmt.Fprintf(
 		&frozen,
 		"%d:%s\n%d:%s\n",
 		len(module.Target()), module.Target(),
-		len(module.DataLayout()), module.DataLayout(),
+		len(dataLayout), dataLayout,
 	)
 	for _, name := range names {
-		function := closure[name]
+		function := module.NamedFunction(name)
 		fmt.Fprintf(
 			&frozen,
 			"%d:%s\n%d:%s\n",
@@ -186,14 +198,162 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 		}
 	}
 	sum := sha256.Sum256([]byte(frozen.String()))
-	return ExecutorLeafProof{
-		Symbol:        symbol,
-		Signature:     root.GlobalValueType().String(),
-		TargetTriple:  module.Target(),
-		DataLayout:    module.DataLayout(),
-		CallClosure:   names,
-		ClosureSHA256: hex.EncodeToString(sum[:]),
-	}, nil
+	return hex.EncodeToString(sum[:])
+}
+
+// ProveExecutorLeafForDataLayout rebinds a structural executor-leaf proof to
+// another target-data spelling only when every LLVM type actually reachable
+// from that closure has identical ABI size, alignment, and aggregate offsets.
+// This is intentionally closure-local: LLVM 22 wasm Clang may omit an i128
+// alignment entry used by LLGo's target machine, but a void debug-trap leaf is
+// unaffected while a closure which mentions i128 remains rejected.
+func ProveExecutorLeafForDataLayout(
+	module llvm.Module,
+	symbol string,
+	dataLayout string,
+) (ExecutorLeafProof, error) {
+	proof, err := ProveExecutorLeaf(module, symbol)
+	if err != nil {
+		return ExecutorLeafProof{}, err
+	}
+	if dataLayout == proof.DataLayout {
+		return proof, nil
+	}
+	if dataLayout == "" {
+		return ExecutorLeafProof{}, fmt.Errorf(
+			"LLVM executor-leaf proof for %q: alternate data layout is empty", symbol,
+		)
+	}
+	if err := executorLeafClosureDataLayoutsCompatible(
+		module, proof.CallClosure, dataLayout,
+	); err != nil {
+		return ExecutorLeafProof{}, fmt.Errorf(
+			"LLVM executor-leaf proof for %q: alternate data layout: %w", symbol, err,
+		)
+	}
+	proof.DataLayout = dataLayout
+	proof.ClosureSHA256 = executorLeafClosureSHA256(
+		module, proof.CallClosure, dataLayout,
+	)
+	return proof, nil
+}
+
+func executorLeafClosureDataLayoutsCompatible(
+	module llvm.Module,
+	closure []string,
+	dataLayout string,
+) error {
+	if module.IsNil() || module.DataLayout() == "" || dataLayout == "" {
+		return fmt.Errorf("requires two non-empty target data layouts")
+	}
+	current := llvm.NewTargetData(module.DataLayout())
+	alternate := llvm.NewTargetData(dataLayout)
+	defer current.Dispose()
+	defer alternate.Dispose()
+	if current.ByteOrder() != alternate.ByteOrder() ||
+		current.PointerSize() != alternate.PointerSize() {
+		return fmt.Errorf("byte order or default pointer width differs")
+	}
+
+	seen := make(map[llvm.Type]bool)
+	var compareType func(llvm.Type) error
+	compareSized := func(typ llvm.Type) error {
+		if current.TypeAllocSize(typ) != alternate.TypeAllocSize(typ) ||
+			current.ABITypeAlignment(typ) != alternate.ABITypeAlignment(typ) {
+			return fmt.Errorf("type %q has different ABI layout", typ.String())
+		}
+		return nil
+	}
+	compareType = func(typ llvm.Type) error {
+		if typ.IsNil() || seen[typ] {
+			return nil
+		}
+		seen[typ] = true
+		switch typ.TypeKind() {
+		case llvm.VoidTypeKind, llvm.LabelTypeKind,
+			llvm.MetadataTypeKind, llvm.TokenTypeKind:
+			return nil
+		case llvm.FunctionTypeKind:
+			if err := compareType(typ.ReturnType()); err != nil {
+				return err
+			}
+			for _, parameter := range typ.ParamTypes() {
+				if err := compareType(parameter); err != nil {
+					return err
+				}
+			}
+			return nil
+		case llvm.StructTypeKind:
+			elements := typ.StructElementTypes()
+			// A named zero-field body can be opaque through the C API. Reject it
+			// rather than asking TargetData to size a potentially unsized type.
+			if typ.StructName() != "" && len(elements) == 0 {
+				return fmt.Errorf("named zero-field type %q is not layout-provable", typ.String())
+			}
+			for index, element := range elements {
+				if err := compareType(element); err != nil {
+					return err
+				}
+				if current.ElementOffset(typ, index) != alternate.ElementOffset(typ, index) {
+					return fmt.Errorf("type %q field %d has a different ABI offset", typ.String(), index)
+				}
+			}
+			return compareSized(typ)
+		case llvm.ArrayTypeKind, llvm.VectorTypeKind:
+			if err := compareType(typ.ElementType()); err != nil {
+				return err
+			}
+			return compareSized(typ)
+		case llvm.IntegerTypeKind, llvm.FloatTypeKind, llvm.DoubleTypeKind,
+			llvm.X86_FP80TypeKind, llvm.FP128TypeKind, llvm.PPC_FP128TypeKind,
+			llvm.PointerTypeKind:
+			return compareSized(typ)
+		default:
+			return fmt.Errorf("type %q has unsupported kind %d", typ.String(), typ.TypeKind())
+		}
+	}
+
+	for _, name := range closure {
+		function := module.NamedFunction(name)
+		if function.IsNil() {
+			return fmt.Errorf("closure function %q is absent", name)
+		}
+		if err := compareType(function.GlobalValueType()); err != nil {
+			return fmt.Errorf("function %q signature: %w", name, err)
+		}
+		for _, parameter := range function.Params() {
+			if err := compareType(parameter.Type()); err != nil {
+				return fmt.Errorf("function %q parameter: %w", name, err)
+			}
+		}
+		for block := function.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+			for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+				if err := compareType(instruction.Type()); err != nil {
+					return fmt.Errorf("function %q instruction result: %w", name, err)
+				}
+				for operand := 0; operand < instruction.OperandsCount(); operand++ {
+					if err := compareType(instruction.Operand(operand).Type()); err != nil {
+						return fmt.Errorf("function %q instruction operand: %w", name, err)
+					}
+				}
+				switch instruction.InstructionOpcode() {
+				case llvm.Alloca:
+					if err := compareType(instruction.AllocatedType()); err != nil {
+						return fmt.Errorf("function %q alloca: %w", name, err)
+					}
+				case llvm.GetElementPtr:
+					if err := compareType(instruction.GEPSourceElementType()); err != nil {
+						return fmt.Errorf("function %q GEP: %w", name, err)
+					}
+				case llvm.Call:
+					if err := compareType(instruction.CalledFunctionType()); err != nil {
+						return fmt.Errorf("function %q call: %w", name, err)
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // proveNoPointerRetention rejects a definition that can publish a

@@ -81,6 +81,26 @@ func EnterExecutorRunCompatibility(driver *ExecutorDriver) bool {
 	return true
 }
 
+// EnterExecutorRunStandbyCompatibility is the retained-wait variant of
+// EnterExecutorRunCompatibility. false,true means a producer won the stable
+// idle boundary by publishing a direct-channel completion, so the owner must
+// re-enter the bounded runner instead of treating that ordinary race as
+// corruption. Owner-local completion and every in-progress reducer field
+// remain hard failures; only the lock-free producer inbox is asynchronous.
+func EnterExecutorRunStandbyCompatibility(driver *ExecutorDriver) (entered, ok bool) {
+	if EnterExecutorRunCompatibility(driver) {
+		return true, true
+	}
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
+		!emptyOwnerLocalCompletion(&driver.local) ||
+		executorDirectChannelInboxIdle(driver) ||
+		!idleExecutorScheduler(driver.p) {
+		return false, false
+	}
+	return false, true
+}
+
 // ExecutorRunStepKind is one reduction selected by the unified resumable core.
 // Dispatch remains available when the caller cannot yet prove a managed
 // execution lease or has only one budget unit. A lease-holding caller may ask
@@ -278,17 +298,42 @@ func dispatchExecutorRunReadyAction(
 	combineAction bool,
 ) (ExecutorRunActionStep, bool) {
 	p := driver.p
-	if selected == nil || !validReadyQueueHeader(p) {
+	if selected == nil || p == nil {
 		return ExecutorRunActionStep{}, false
 	}
-	g, imported := dequeueSelectedOSThreadRunnableWithTransfer(p, selected)
+	// nextExecutorRunActionValidated selected this task immediately before this
+	// call from the same owner-only queue. Preserve the rollback path below for
+	// a malformed G, but consume the selected queue capability instead of
+	// replaying the full head/tail/count header relation here.
+	var g *G
+	imported := selected.transferState == runnableTransferGImported
+	ordinaryOwner := p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached
+	if ordinaryOwner {
+		// In the overwhelmingly common attached/unlocked phase, selection is the
+		// FIFO head. The caller has just selected it, so consume the non-empty
+		// queue capability without making dequeue repeat the same header checks.
+		if selected != p.readyHead || p.readyCount == 0 {
+			return ExecutorRunActionStep{}, false
+		}
+		g = dequeueReadyHeadUnchecked(p)
+		if g != nil && g.transferState == runnableTransferGImported {
+			g.transferState = runnableTransferGIdle
+		}
+	} else {
+		g, imported = dequeueSelectedOSThreadRunnableWithTransfer(p, selected)
+	}
 	if g == nil {
 		return ExecutorRunActionStep{}, false
 	}
-	peerRunnable := nextOSThreadRunnable(p) != nil
+	peerRunnable := p.readyHead != nil
+	if !ordinaryOwner {
+		peerRunnable = nextOSThreadRunnable(p) != nil
+	}
 	var action Action
 	var ok bool
-	if g.runAction == ActionCheckResume ||
+	if g.runAction == ActionInvalid && g.park.phase == parkMaterialized && g.park.directChannel {
+		action, ok = beginExecutorRunDirectChannelContinuation(p, g, peerRunnable)
+	} else if g.runAction == ActionCheckResume ||
 		g.runAction == ActionInvalid && g.park.phase == parkMaterialized {
 		action, ok = beginExecutorRunContinuation(p, g, peerRunnable)
 	} else {
@@ -341,6 +386,19 @@ func nextExecutorRunActionValidated(
 	combineDispatch bool,
 ) (step ExecutorRunActionStep, selected, ok bool) {
 	p := driver.p
+	// A completed same-owner materialization publishes readyDebt only after its
+	// full wait/frame transaction and an idle-P commit. While this bounded-slice
+	// capability is retained, no producer can mutate P-local scheduler fields;
+	// it can only publish another source fact. Fairness requires paying the
+	// existing debt first, so the ordinary unlocked head may cross directly into
+	// the adjacent dequeue/action reducer without replaying the complete idle-P
+	// tuple or probing lower-priority producer queues.
+	if combineDispatch && driver.run.readyDebt && driver.poll.phase == executorPollIdle &&
+		p.current == nil && p.osThreadLockOwner == nil &&
+		p.osThreadSuspend == osThreadSuspendAttached && p.readyHead != nil {
+		step, ok = dispatchExecutorRunReadyAction(driver, p.readyHead, true)
+		return step, ok, ok
+	}
 	if p.current != nil {
 		action, g := p.action, p.current
 		if action.Kind == ActionCommitDestroy {
@@ -358,14 +416,20 @@ func nextExecutorRunActionValidated(
 		p.runDecisionTaken || p.servicePreemptBudget != 0 {
 		return ExecutorRunActionStep{}, false, false
 	}
-	if !combineDispatch || driver.poll.phase != executorPollIdle ||
-		executorDirectChannelCompletionPending(driver) || ownerLocalCompletionPending(driver) {
+	if !combineDispatch || driver.poll.phase != executorPollIdle {
 		return ExecutorRunActionStep{}, false, true
 	}
 	runnable := nextOSThreadRunnable(p)
+	// A completed source or same-owner materialization has already selected one
+	// runnable as its bounded fairness payment. Dispatch that stable owner-local
+	// fact before probing producer queues again. Concurrent completion facts stay
+	// published and are observed immediately after this one physical action.
 	if driver.run.readyDebt && runnable != nil {
 		step, ok := dispatchExecutorRunReadyAction(driver, runnable, true)
 		return step, ok, ok
+	}
+	if executorDirectChannelCompletionPending(driver) || ownerLocalCompletionPending(driver) {
+		return ExecutorRunActionStep{}, false, true
 	}
 	if executorRunSourceRequested(driver) ||
 		driver.run.actionsSinceSource == executorRunSourceQuantum ||
@@ -484,7 +548,6 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 // private P/driver pair.
 type ExecutorRunSliceCapability struct {
 	driver       *ExecutorDriver
-	p            *P
 	withDeadline bool
 }
 
@@ -499,7 +562,6 @@ func BeginExecutorRunSlice(driver *ExecutorDriver) (ExecutorRunSliceCapability, 
 	}
 	return ExecutorRunSliceCapability{
 		driver:       driver,
-		p:            driver.p,
 		withDeadline: driver.sources.usesMonotonicTime(),
 	}, true
 }
@@ -507,28 +569,33 @@ func BeginExecutorRunSlice(driver *ExecutorDriver) (ExecutorRunSliceCapability, 
 func (capability *ExecutorRunSliceCapability) owner(
 	withDeadline bool,
 ) (*ExecutorDriver, bool) {
-	if capability == nil || capability.driver == nil || capability.p == nil ||
+	if capability == nil || capability.driver == nil ||
 		capability.withDeadline != withDeadline {
 		return nil, false
 	}
-	driver, p := capability.driver, capability.p
-	return driver, driver.magic == executorDriverMagic &&
-		driver.state == executorDriverActive && driver.p == p && p.executor == driver &&
-		preemptLoad(&p.executorMode) == executorModeBound &&
-		driver.run.issued == ActionInvalid
+	// BeginExecutorRunSlice authenticated the immutable driver/P/source binding
+	// before this stack-scoped capability was returned. A bounded runner never
+	// crosses a host boundary while retaining it, and physical/source reducers
+	// cannot close or rebind the executor. Only the issued no-return interval is
+	// mutable between adjacent selections, so rechecking the complete binding on
+	// every hot action would duplicate the entry proof.
+	driver := capability.driver
+	return driver, driver.run.issued == ActionInvalid
 }
 
 func (capability *ExecutorRunSliceCapability) nextAction(
 	combineDispatch bool,
 ) (ExecutorRunActionStep, bool, bool) {
-	if capability == nil {
+	// This stack-scoped capability already fixed its driver and source-time
+	// shape at BeginExecutorRunSlice. The compact action probe does not consume
+	// time, so replaying owner(withDeadline) here was a tautological comparison
+	// plus an otherwise unused cached P load on every physical resume. Only the
+	// adjacent issued interval can invalidate another selection.
+	if capability == nil || capability.driver == nil ||
+		capability.driver.run.issued != ActionInvalid {
 		return ExecutorRunActionStep{}, false, false
 	}
-	driver, ok := capability.owner(capability.withDeadline)
-	if !ok {
-		return ExecutorRunActionStep{}, false, false
-	}
-	return nextExecutorRunActionValidated(driver, combineDispatch)
+	return nextExecutorRunActionValidated(capability.driver, combineDispatch)
 }
 
 // NextAction selects an already dispatched physical action without carrying
@@ -748,9 +815,13 @@ func completedExecutorRunAction(p *P, g *G, action Action) bool {
 // work. The mutable P/G/action episode is still checked in full by the exact
 // commit reducer below, and the next selector repeats the complete header gate.
 func validIssuedExecutorRunAction(driver *ExecutorDriver) bool {
-	if driver == nil || driver.magic != executorDriverMagic || driver.state != executorDriverActive ||
-		driver.terminalKind != ActionInvalid || driver.hasPrepareNow || driver.prepareNow != 0 ||
-		driver.p == nil || driver.p.executor != driver ||
+	// run.issued is written only after the bounded selector's complete driver,
+	// source-set, registry, and action audit. Nothing outside this package can
+	// manufacture or retain that private field, and no host boundary exists
+	// before the matching commit clears it. The exact P back-pointer and bound
+	// mode remain the independent owner gate; consume the capability for the
+	// remaining immutable driver fields instead of replaying them here.
+	if driver == nil || driver.p == nil || driver.p.executor != driver ||
 		preemptLoad(&driver.p.executorMode) != executorModeBound {
 		return false
 	}
@@ -760,46 +831,6 @@ func validIssuedExecutorRunAction(driver *ExecutorDriver) bool {
 	default:
 		return false
 	}
-}
-
-// resumeIssuedDirectChannelPark is the exact post-llvm.coro.resume transition
-// for the compact one-case channel protocol. The compiler hook has already
-// published pendingParkSet and the complete committed frame record. Consuming
-// that single certificate here avoids routing the common transition through
-// resumeGateTaken, resumedFrameForAction, dispatchPending, and then a second
-// direct-park audit. Inline-await ancestry and every other suspension retain
-// the generic Resumed path.
-func resumeIssuedDirectChannelPark(p *P, g *G, action Action) (Action, bool) {
-	if p == nil || g == nil || action.Kind != ActionResume || action.Flags != 0 ||
-		action.Handle == nil || p.current != g || g.runP != p || !p.inResume ||
-		p.inlineAwaitDepth != 0 || p.action != action || g.state != GRunning ||
-		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
-		!gPreemptEnabledAtDepthZero(g) || g.pending.kind != pendingParkSet ||
-		g.pending.target != nil || g.queued || g.nextReady != nil ||
-		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
-		return Action{}, false
-	}
-	frame := g.active
-	if frame == nil || frame != g.pending.from || frame.handle != action.Handle ||
-		frame.state != FrameActive || frame.header == nil ||
-		frame.header.SuspendReason != uint16(SuspendPark) ||
-		frame.header.Lifecycle != uint16(FrameSuspended) || frame.parkWait == nil ||
-		!frame.parkWait.directChannel ||
-		!validCommittedCompactDirectChannelPark(g, frame, frame.parkWait) ||
-		!acknowledgeSuspendedGPreempt(g) {
-		return Action{}, false
-	}
-	g.pending = pendingTransition{}
-	frame.state = FrameSuspended
-	p.inResume = false
-	p.runDecisionTaken = false
-	g.state = GWaiting
-	g.runP = nil
-	p.current = nil
-	p.servicePreemptBudget = 0
-	p.action = Action{}
-	activateWaitSetRecordUnchecked(p, g, frame.parkWait)
-	return Action{Kind: ActionPark}, true
 }
 
 // ResumedExecutorRun consumes the exact ActionResume return for an issued
@@ -815,13 +846,48 @@ func ResumedExecutorRun(
 	g *G,
 	action Action,
 ) (next Action, committed, ok bool) {
-	if !validIssuedExecutorRunAction(driver) || driver.p != p ||
+	// BeginIssuedExecutorResumeRuntimeContext has just consumed this private
+	// issued episode and opened p.action=ActionResume. No host boundary can
+	// unbind the driver before the adjacent physical resume returns; only the
+	// resumed G may publish scheduler state. Keep the exact driver/P identity
+	// and issued-kind checks, but do not replay the P.executor/executorMode
+	// binding already certified by the selector and Begin. Stable-boundary
+	// callers still use CommitExecutorRunAction and its complete owner gate.
+	if driver == nil || p == nil || driver.p != p ||
 		driver.run.issued != ActionCheckResume {
 		return Action{}, false, false
 	}
-	if g != nil && g.pending.kind == pendingParkSet && g.active != nil &&
+	if g != nil && g.pending.kind == pendingParkSet && g.pending.directChannel && g.active != nil &&
+		g.pending.from == g.active && g.active.handle == action.Handle &&
 		g.active.parkWait != nil && g.active.parkWait.directChannel {
-		next, ok = resumeIssuedDirectChannelPark(p, g, action)
+		// PrepareCurrentDirectChannelPark installed the pending direct marker
+		// only after building the complete frame/wait/park graph. The issued
+		// action and current/inResume relation freeze every owner field until
+		// this adjacent return from llvm.coro.resume; a peer may change only the
+		// completion's atomic word. Consume that certificate in one flat commit
+		// instead of calling the generic Resumed graph validator. An inline child
+		// may be the deepest active frame while action still names its physical
+		// outer resume; that ancestry is intentionally left to Resumed.
+		frame := g.pending.from
+		if p.current != g || g.runP != p || !p.inResume || p.inlineAwaitDepth != 0 ||
+			p.action != action || !p.runDecisionTaken || frame == nil || frame != g.active ||
+			frame.handle != action.Handle || frame.parkWait != g.active.parkWait ||
+			frame.parkWait.resumeKind != resumeBindingDirectChannel ||
+			!acknowledgeSuspendedGPreempt(g) {
+			return Action{}, false, false
+		}
+		wait := frame.parkWait
+		g.pending = pendingTransition{}
+		frame.state = FrameSuspended
+		p.inResume = false
+		p.runDecisionTaken = false
+		g.state = GWaiting
+		g.runP = nil
+		p.current = nil
+		p.servicePreemptBudget = 0
+		p.action = Action{}
+		activateWaitSetRecordUnchecked(p, g, wait)
+		next, ok = Action{Kind: ActionPark}, true
 	} else {
 		next, ok = Resumed(p, g, action)
 	}
@@ -836,7 +902,17 @@ func ResumedExecutorRun(
 	// close the issued interval, and apply the exceptional detached-owner debt.
 	publishedReady := driver.run.readyDebt
 	driver.run.issued = ActionInvalid
-	driver.run.readyDebt = publishedReady && runnableForOSThreadOwner(p)
+	if !publishedReady {
+		driver.run.readyDebt = false
+	} else if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached {
+		// The direct-channel handoff normally publishes exactly one peer while
+		// the physical owner is unattached. Consume the stable queue head here;
+		// entering nextOSThreadRunnable would only rediscover these two scalar
+		// affinity facts on every rendezvous.
+		driver.run.readyDebt = p.readyHead != nil
+	} else {
+		driver.run.readyDebt = runnableForOSThreadOwner(p)
+	}
 	driver.run.blocked = false
 	if driver.run.actionsSinceSource < executorRunSourceQuantum {
 		driver.run.actionsSinceSource++
@@ -885,7 +961,13 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placemen
 		return false
 	}
 	driver.run.issued = ActionInvalid
-	driver.run.readyDebt = publishedReady && runnableForOSThreadOwner(p)
+	if !publishedReady {
+		driver.run.readyDebt = false
+	} else if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached {
+		driver.run.readyDebt = p.readyHead != nil
+	} else {
+		driver.run.readyDebt = runnableForOSThreadOwner(p)
+	}
 	driver.run.blocked = false
 	if driver.run.actionsSinceSource < executorRunSourceQuantum {
 		driver.run.actionsSinceSource++

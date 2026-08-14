@@ -172,7 +172,7 @@ func (u *EmissionUniverse) freezeCoroCallableIdentityCertificates() error {
 		freezeCallableShape:   u.freezeCoroCallableShape,
 		entrySourceSignature:  u.coroPhysicalEntrySourceSignature,
 		finalFunctionIdentity: u.finalIdentity,
-		cFunctionABITypeKey:   u.cachedCFunctionABITypeKey,
+		cFunctionABITypeKey:   u.emissionTypeKeys.cFunctionABI,
 	})
 	if err != nil {
 		return err

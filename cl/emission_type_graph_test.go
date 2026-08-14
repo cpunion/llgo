@@ -117,26 +117,26 @@ func TestEmissionUniverseStructuralTypeKeyCacheIsSessionLocalAndModeSeparated(t 
 		{mode: emissionTypeKeyIdentityFreeABI, want: structuralNamedIdentityFreeABITypeKey(typ)},
 	}
 	for _, test := range tests {
-		if got := universe.cachedStructuralEmissionTypeKey(test.mode, typ); got != test.want {
+		if got := universe.emissionTypeKeys.key(test.mode, typ); got != test.want {
 			t.Fatalf("cached mode %d key = %q, want %q", test.mode, got, test.want)
 		}
-		if got := universe.cachedStructuralEmissionTypeKey(test.mode, alias); got != test.want {
+		if got := universe.emissionTypeKeys.key(test.mode, alias); got != test.want {
 			t.Fatalf("cached alias mode %d key = %q, want %q", test.mode, got, test.want)
 		}
 	}
-	universe.emissionTypeKeyMu.RLock()
-	entries := len(universe.emissionTypeKeys)
-	universe.emissionTypeKeyMu.RUnlock()
+	universe.emissionTypeKeys.mu.RLock()
+	entries := len(universe.emissionTypeKeys.values)
+	universe.emissionTypeKeys.mu.RUnlock()
 	if entries != len(tests) {
 		t.Fatalf("session cache entries = %d, want one canonical entry per mode (%d)", entries, len(tests))
 	}
 	other := new(EmissionUniverse)
-	if got := other.cachedStrictEmissionABITypeKey(typ); got != tests[1].want {
+	if got := other.emissionTypeKeys.strictABI(typ); got != tests[1].want {
 		t.Fatalf("independent session key = %q, want %q", got, tests[1].want)
 	}
-	other.emissionTypeKeyMu.RLock()
-	otherEntries := len(other.emissionTypeKeys)
-	other.emissionTypeKeyMu.RUnlock()
+	other.emissionTypeKeys.mu.RLock()
+	otherEntries := len(other.emissionTypeKeys.values)
+	other.emissionTypeKeys.mu.RUnlock()
 	if otherEntries != 1 {
 		t.Fatalf("independent session cache entries = %d, want 1", otherEntries)
 	}
@@ -233,11 +233,11 @@ func BenchmarkStructuralEmissionABITypeKeySharedDAG(b *testing.B) {
 func BenchmarkEmissionUniverseCachedStructuralEmissionABITypeKeySharedDAG(b *testing.B) {
 	typ := testSharedAnonymousEmissionType(18)
 	universe := new(EmissionUniverse)
-	_ = universe.cachedStrictEmissionABITypeKey(typ)
+	_ = universe.emissionTypeKeys.strictABI(typ)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = universe.cachedStrictEmissionABITypeKey(typ)
+		_ = universe.emissionTypeKeys.strictABI(typ)
 	}
 }
 

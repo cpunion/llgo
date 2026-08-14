@@ -434,7 +434,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 			}
 		}
 	}
-	if err := ir.finalizeOutcomePlainIntrinsicSemantics(u); err != nil {
+	if err := ir.finalizeOutcomePlainIntrinsicSemantics(u.prog, u.functions, u.sortedUseOwners); err != nil {
 		return fmt.Errorf("finalize outcome-plain intrinsic semantics: %w", err)
 	}
 	ir.callsFrozen = true

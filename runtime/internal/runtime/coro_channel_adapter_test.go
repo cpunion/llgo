@@ -245,7 +245,7 @@ func resumeCoroChannelAdapterFrame(
 	if !ok || action.Kind != coro.ActionResume {
 		t.Fatalf("activate completed channel adapter G = (%+v, %t)", action, ok)
 	}
-	status := __llgo_coro_chan_resume_v1(unsafe.Pointer(frame.g), unsafe.Pointer(state))
+	status := coroChanResumeCompatibilityV1(unsafe.Pointer(frame.g), unsafe.Pointer(state))
 	if *state != (CoroChanParkV1{}) {
 		t.Fatalf("channel adapter resume retained reusable park state: %+v", *state)
 	}
@@ -851,7 +851,7 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 		unsafe.Pointer(&bufferedSendValue), &bufferedSendState, true,
 	)
 	if compactBuffered.sendq.first != &bufferedSendState.waiter ||
-		bufferedSendState.waiter.direct != &bufferedSendState.direct {
+		bufferedSendState.waiter.direct != &bufferedSendState.Completion {
 		t.Fatalf("compact buffered sender not published: %p", compactBuffered.sendq.first)
 	}
 	bufferedReceiverG, bufferedReceiverOK := coro.NextRunnable(p)
@@ -1122,7 +1122,7 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	parkCoroChannelAdapterFrame(
 		t, p, nilWaitFrame, nilWaitAction, nil, unsafe.Pointer(&nilWaitValue), &nilWaitState, false,
 	)
-	if nilWaitState.waiter.ch != nil || nilWaitState.waiter.direct != &nilWaitState.direct ||
+	if nilWaitState.waiter.ch != nil || nilWaitState.waiter.direct != &nilWaitState.Completion ||
 		coroProgramChannelSourceV1State.Pending() {
 		t.Fatalf("compact nil-channel park retained physical/source state: waiter=%+v pending=%t",
 			nilWaitState.waiter, coroProgramChannelSourceV1State.Pending())
@@ -1167,47 +1167,61 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	migrateChannel.mutex.Init(nil)
 	var migrateRecvValue uint32
 	var migrateRecvState CoroChanParkV1
-	parkCoroChannelAdapterFrame(
-		t, p, migrateRecvFrame, migrateRecvAction, migrateChannel,
-		unsafe.Pointer(&migrateRecvValue), &migrateRecvState, false,
-	)
+	if status := tryOrParkCoroChanV2(
+		unsafe.Pointer(migrateRecvFrame.g), migrateRecvFrame.handle,
+		unsafe.Pointer(migrateRecvFrame.header), unsafe.Pointer(migrateChannel),
+		unsafe.Pointer(&migrateRecvValue), unsafe.Pointer(&migrateRecvState),
+		unsafe.Sizeof(migrateRecvValue), 41, 73, false,
+	); status != coroChanResumeInvalid {
+		t.Fatalf("compact try-or-park receive status = %d, want pending", status)
+	}
+	if migrateRecvFrame.header.SuspendReason != uint16(coro.SuspendPark) ||
+		migrateRecvFrame.header.Lifecycle != uint16(coro.FrameSuspended) ||
+		migrateRecvFrame.header.StateID != 41 || migrateRecvFrame.header.Line != 73 {
+		t.Fatalf("compact try-or-park receive header = %+v", *migrateRecvFrame.header)
+	}
+	if parked, ok := coro.Resumed(p, migrateRecvFrame.g, migrateRecvAction); !ok || parked.Kind != coro.ActionPark {
+		t.Fatalf("commit compact try-or-park receive = (%+v, %t)", parked, ok)
+	}
 	migrateSendFrame := newCoroChannelAdapterFrame(t)
-	migrateSendG := migrateSendFrame.g
 	migrateSendAction := beginCoroChannelAdapterFrame(t, p, migrateSendFrame)
 	migrateSendValue := uint32(0xc0decafe)
 	var migrateSendState CoroChanParkV1
-	parkCoroChannelAdapterFrame(
-		t, p, migrateSendFrame, migrateSendAction, migrateChannel,
-		unsafe.Pointer(&migrateSendValue), &migrateSendState, true,
-	)
-	pollCoroChannelAdapterExecutor(t, driver)
+	if status := tryOrParkCoroChanV2(
+		unsafe.Pointer(migrateSendFrame.g), migrateSendFrame.handle,
+		unsafe.Pointer(migrateSendFrame.header), unsafe.Pointer(migrateChannel),
+		unsafe.Pointer(&migrateSendValue), unsafe.Pointer(&migrateSendState),
+		unsafe.Sizeof(migrateSendValue), 42, 74, true,
+	); status != coroChanResumeSendOK {
+		t.Fatalf("compact try-or-park send status = %d, want %d", status, coroChanResumeSendOK)
+	}
+	if migrateSendState != (CoroChanParkV1{}) ||
+		migrateSendFrame.header.SuspendReason != uint16(coro.SuspendNone) ||
+		migrateSendFrame.header.Lifecycle != uint16(coro.FrameActive) {
+		t.Fatalf("ready compact try-or-park mutated slow state: state=%+v header=%+v",
+			migrateSendState, *migrateSendFrame.header)
+	}
+	yieldCoroChannelAdapterFrame(t, p, migrateSendFrame, migrateSendAction)
 
 	directTargetP := new(coro.P)
 	var directTransfer coro.RunnableTransferMailbox
 	if !coro.BindRunnableTransferMailbox(&directTransfer, directTargetP) {
 		t.Fatal("bind compact channel transfer mailbox")
 	}
-	migratedFrame, migratedState, wantMigratedStatus := migrateRecvFrame, &migrateRecvState, uint32(coroChanResumeRecvOK)
-	migratedG := migrateRecvG
-	directTransferID, directTransferred := coro.PublishPNeutralRunnable(&directTransfer, p, migratedG)
-	if !directTransferred {
-		migratedFrame, migratedState, wantMigratedStatus = migrateSendFrame, &migrateSendState, coroChanResumeSendOK
-		migratedG = migrateSendG
-		directTransferID, directTransferred = coro.PublishPNeutralRunnable(&directTransfer, p, migratedG)
-	}
+	directTransferID, directTransferred := coro.PublishPNeutralRunnable(&directTransfer, p, migrateRecvG)
 	if !directTransferred || !directTransferID.Valid() ||
 		!coro.ImportPNeutralRunnable(&directTransfer, directTargetP, directTransferID) {
 		t.Fatalf("transfer materialized compact channel G = (%+v, %t)", directTransferID, directTransferred)
 	}
-	if next, ok := coro.NextRunnable(directTargetP); !ok || next != migratedG {
-		t.Fatalf("dequeue transferred compact channel G = (%p, %t), want %p", next, ok, migratedG)
+	if next, ok := coro.NextRunnable(directTargetP); !ok || next != migrateRecvG {
+		t.Fatalf("dequeue transferred compact channel G = (%p, %t), want %p", next, ok, migrateRecvG)
 	}
 	migratedAction, status := resumeCoroChannelAdapterFrame(
-		t, directTargetP, migratedFrame, migratedState,
+		t, directTargetP, migrateRecvFrame, &migrateRecvState,
 	)
-	if status != wantMigratedStatus || migrateRecvValue != migrateSendValue {
+	if status != coroChanResumeRecvOK || migrateRecvValue != migrateSendValue {
 		t.Fatalf("migrated compact channel resume = status:%d value:%#x, want status:%d value:%#x",
-			status, migrateRecvValue, wantMigratedStatus, migrateSendValue)
+			status, migrateRecvValue, coroChanResumeRecvOK, migrateSendValue)
 	}
-	yieldCoroChannelAdapterFrame(t, directTargetP, migratedFrame, migratedAction)
+	yieldCoroChannelAdapterFrame(t, directTargetP, migrateRecvFrame, migratedAction)
 }

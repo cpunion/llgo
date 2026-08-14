@@ -476,6 +476,7 @@ func Selected(first, second <-chan any) {
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 		ClassifyLoweredCalls: universe.CoroLoweredCalls,
 	})
 	if err != nil {

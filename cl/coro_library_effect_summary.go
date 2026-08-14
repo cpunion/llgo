@@ -121,7 +121,7 @@ func (view CoroLibraryEffectView) FunctionABIHash(
 		strconv.Itoa(metadata.PointerBits),
 		metadata.Endianness,
 		metadata.DataLayout,
-		u.cachedStrictEmissionABITypeKey(signature),
+		u.emissionTypeKeys.strictABI(signature),
 	)), nil
 }
 
@@ -155,7 +155,7 @@ func (view CoroLibraryEffectView) ExportABIHash(
 		strconv.Itoa(metadata.PointerBits),
 		metadata.Endianness,
 		metadata.DataLayout,
-		u.cachedStrictEmissionABITypeKey(signature),
+		u.emissionTypeKeys.strictABI(signature),
 	)), nil
 }
 

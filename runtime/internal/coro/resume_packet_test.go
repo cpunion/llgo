@@ -73,6 +73,82 @@ func TestResumePacketLayoutIsPointerFreeAndCrossTargetStable(t *testing.T) {
 	}
 }
 
+func TestTakeIssuedDirectChannelResumeConsumesExactCapabilityOnce(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		decision      ParkOutcome
+		task          TaskCancelKind
+		physicalSmall uint8
+		wantSmall     uint8
+	}{
+		{
+			name:          "completed",
+			decision:      ParkOutcomeCompleted,
+			physicalSmall: 3,
+			wantSmall:     3,
+		},
+		{
+			name:          "task canceled after completion",
+			decision:      ParkOutcomeCanceled,
+			task:          TaskCancelAbort,
+			physicalSmall: 3,
+			wantSmall:     ResumeSmallInvalid,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ticket := ParkTicket{epoch: 11, generation: 29}
+			storage := new(DirectChannelParkStorageV1)
+			storage.Ticket = ticket
+			storage.Completion.wait = &storage.Wait
+			storage.Completion.context = unsafe.Pointer(storage)
+			storage.Completion.state = uint32(directChannelCompletionMaterialized)
+			storage.Completion.small = uint32(test.physicalSmall)
+
+			g, p, driver := new(G), new(P), new(ExecutorDriver)
+			g.runP = p
+			g.park = ParkState{
+				ticket:        ticket,
+				phase:         parkMaterialized,
+				directChannel: true,
+				outcome:       ParkOutcomeCompleted,
+				winnerCase:    1,
+			}
+			p.executor = driver
+			p.current = g
+			p.inResume = true
+			p.runDecision = RunDecision{
+				g:             g,
+				ticket:        ticket,
+				caseID:        1,
+				outcome:       test.decision,
+				task:          test.task,
+				materialized:  true,
+				directChannel: true,
+			}
+			if test.decision == ParkOutcomeCanceled {
+				p.runDecision.caseID = 0
+			}
+			driver.p = p
+			driver.run.issued = ActionCheckResume
+
+			outcome, task, small, ok := TakeIssuedDirectChannelResume(g, storage)
+			if !ok || outcome != test.decision || task != test.task || small != test.wantSmall {
+				t.Fatalf("take issued direct resume = (%d,%d,%d,%t), want (%d,%d,%d,true)",
+					outcome, task, small, ok, test.decision, test.task, test.wantSmall)
+			}
+			if g.park.phase != parkDelivered || g.park.directChannel ||
+				storage.Completion != (DirectChannelCompletion{}) ||
+				p.runDecision != (RunDecision{}) || !p.runDecisionTaken {
+				t.Fatalf("issued direct resume residue: park=%+v completion=%+v decision=%+v taken=%t",
+					g.park, storage.Completion, p.runDecision, p.runDecisionTaken)
+			}
+			if _, _, _, replay := TakeIssuedDirectChannelResume(g, storage); replay {
+				t.Fatal("issued direct resume capability was consumed twice")
+			}
+		})
+	}
+}
+
 func TestZeroSourceResumePacketMaterializesDefault(t *testing.T) {
 	p, targetP := new(P), new(P)
 	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)

@@ -83,6 +83,41 @@ trap:
 	}
 }
 
+func TestProveExecutorLeafForDataLayoutIsClosureLocal(t *testing.T) {
+	const (
+		clangWasm = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20"
+		llgoWasm  = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+	)
+	terminal := parseExecutorLeafModule(t, `
+target datalayout = "`+clangWasm+`"
+target triple = "wasm32-unknown-unknown"
+declare void @llvm.debugtrap()
+define void @leaf() {
+entry:
+  call void @llvm.debugtrap()
+  ret void
+}`)
+	proof, err := ProveExecutorLeafForDataLayout(terminal, "leaf", llgoWasm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.DataLayout != llgoWasm || len(proof.ClosureSHA256) != 64 {
+		t.Fatalf("rebound terminal proof = %+v", proof)
+	}
+
+	wide := parseExecutorLeafModule(t, `
+target datalayout = "`+clangWasm+`"
+target triple = "wasm32-unknown-unknown"
+define i128 @leaf(i128 %value) {
+entry:
+  ret i128 %value
+}`)
+	if _, err := ProveExecutorLeafForDataLayout(wide, "leaf", llgoWasm); err == nil ||
+		!strings.Contains(err.Error(), "different ABI layout") {
+		t.Fatalf("i128 alternate-layout proof error = %v", err)
+	}
+}
+
 func TestProveExecutorLeafFailsClosed(t *testing.T) {
 	tests := []struct {
 		name string

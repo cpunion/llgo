@@ -58,6 +58,8 @@ func __llgo_coro_notify_all_or_abort_v2(unsafe.Pointer, uint32) {}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
+func __llgo_coro_frame_publish_v3() {}
+func __llgo_coro_frame_destroy_commit_v2() {}
 func __llgo_coro_await_prepare_v1() {}
 func __llgo_coro_await_prepare_v3(g, parent, child unsafe.Pointer, mode uint32, typeWord, dataWord unsafe.Pointer) {}
 func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool { return false }
@@ -73,14 +75,14 @@ func __llgo_coro_critical_exit_v1(unsafe.Pointer) bool { return false }
 func __llgo_coro_os_thread_lock_v1(unsafe.Pointer) {}
 func __llgo_coro_os_thread_unlock_v1(unsafe.Pointer) {}
 func __llgo_coro_frame_free_v1() {}
-func __llgo_coro_chan_send_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
-func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
-func __llgo_coro_chan_resume_v1(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_chan_send_try_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 { return 0 }
+func __llgo_coro_chan_recv_try_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 { return 0 }
+func __llgo_coro_chan_resume_v2(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
 type Chan struct{}
 type ChanOp struct{}
 func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
 func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
-func CoroChanTryClose(*Chan) uint32 { return 0 }
+func CoroChanTryCloseTask(unsafe.Pointer, *Chan) uint32 { return 0 }
 func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
@@ -170,13 +172,13 @@ func __llgo_coro_program_main_return_v1() {}
 		coroOSThreadUnlockSymbolV1,
 		"CoroChanTrySend",
 		"CoroChanTryRecv",
-		"CoroChanTryClose",
+		"CoroChanTryCloseTask",
 		"CoroChanSelectTry",
 		"CoroChanSelectPark",
 		"CoroChanSelectResume",
-		coroChanSendParkSymbolV1,
-		coroChanRecvParkSymbolV1,
-		coroChanResumeSymbolV1,
+		coroChanSendTryParkSymbolV2,
+		coroChanRecvTryParkSymbolV2,
+		coroChanResumeSymbolV2,
 		"__llgo_coro_fault_prepare_v1",
 		"__llgo_coro_fault_prepare_v2",
 		"__llgo_coro_panic_prepare_v1",

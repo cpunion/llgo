@@ -221,14 +221,18 @@ func OSThreadSuspendHandoffCandidate(g *G) bool {
 // in either case, while the target must terminate the latter physical owner.
 func releaseOSThreadLockForExit(p *P, g *G) (retireOwner, ok bool) {
 	if p == nil || g == nil || p.current != g || g.runP != p ||
-		p.osThreadSuspend != osThreadSuspendAttached ||
 		osThreadForeignReentryAffined(g) {
 		return false, false
 	}
 	if g.osThreadLockDepth == 0 {
-		return false, p.osThreadLockOwner != g
+		// A replacement M may finish an unlocked peer while the locked owner is
+		// detached in Park or YieldNeedsPeer. The peer owns no physical lease to
+		// retire, and its exit must preserve the suspended owner's P-local lock
+		// header. validOSThreadRunOwner proves both that replacement relation and
+		// the ordinary attached/unlocked case without weakening locked-G exit.
+		return false, validOSThreadRunOwner(p, g)
 	}
-	if p.osThreadLockOwner != g {
+	if p.osThreadSuspend != osThreadSuspendAttached || p.osThreadLockOwner != g {
 		return false, false
 	}
 	g.osThreadLockDepth = 0
@@ -477,4 +481,18 @@ func commitOSThreadPeerAction(p *P) {
 	if p != nil && p.osThreadSuspend == osThreadSuspendYieldNeedsPeer {
 		p.osThreadSuspend = osThreadSuspendYieldPeerServiced
 	}
+}
+
+// osThreadSuspendCurrentPeerNeedsService reports the one case where an
+// otherwise sole-running bound G must still cross a scheduler boundary. The
+// current replacement peer itself is the outstanding physical Action; it is
+// not in the ready queue, so runnableForOSThreadOwner cannot represent this
+// debt until the peer first yields.
+func osThreadSuspendCurrentPeerNeedsService(p *P) bool {
+	if p == nil || p.osThreadSuspend != osThreadSuspendYieldNeedsPeer {
+		return false
+	}
+	owner, current := p.osThreadLockOwner, p.current
+	return owner != nil && current != nil && current != owner &&
+		current.osThreadLockDepth == 0
 }

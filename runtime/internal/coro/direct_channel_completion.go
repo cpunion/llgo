@@ -43,6 +43,22 @@ type DirectChannelCompletion struct {
 	preferred uint32
 }
 
+// DirectChannelParkStorageV1 is the core-owned prefix of the compiler's
+// one-case channel spill. Keeping Wait, Completion, and Ticket in one typed
+// object makes their address relation structural: runtime adapters pass one
+// capability instead of decomposing it into several raw pointers which the
+// core then has to correlate again. The fields are exported only because the
+// adjacent runtime package embeds this prefix; their contained scheduler state
+// remains opaque.
+//
+// Field order intentionally matches the former CoroChanParkV1 prefix, so this
+// refactor does not increase native, WASM32, embedded, or bare-metal frames.
+type DirectChannelParkStorageV1 struct {
+	Wait       WaitSetRecord
+	Completion DirectChannelCompletion
+	Ticket     ParkTicket
+}
+
 type directChannelCompletionState uint32
 
 const (
@@ -65,6 +81,20 @@ const (
 	DirectChannelCompletionBeginInvalid DirectChannelCompletionBeginResult = iota
 	DirectChannelCompletionBeginCanceled
 	DirectChannelCompletionBeginAcquired
+)
+
+// DirectChannelCompletionFinishResult tells the typed hchan adapter whether
+// the owner-local scheduler transaction completed the peer immediately, the
+// core published it into that owner's inbox, or a target route still has to
+// publish and request the remote owner. Only the inline case may retire the
+// hchan waiter before a later materialization reduction observes it.
+type DirectChannelCompletionFinishResult uint8
+
+const (
+	DirectChannelCompletionFinishInvalid DirectChannelCompletionFinishResult = iota
+	DirectChannelCompletionFinishInline
+	DirectChannelCompletionFinishOwnerPublished
+	DirectChannelCompletionFinishNeedsTarget
 )
 
 func directChannelCompletionLiveState(state directChannelCompletionState) bool {
@@ -150,13 +180,125 @@ func PrepareCurrentDirectChannelPark(
 	g *G,
 	handle unsafe.Pointer,
 	header *HeaderV1,
-	wait *WaitSetRecord,
-	completion *DirectChannelCompletion,
-	context unsafe.Pointer,
-) (ParkTicket, *ExecutorDriver, RouteID, bool) {
-	if g == nil || handle == nil || header == nil || wait == nil || completion == nil || context == nil {
-		return ParkTicket{}, nil, 0, false
+	storage *DirectChannelParkStorageV1,
+) (*ExecutorDriver, RouteID) {
+	if g == nil || handle == nil || header == nil || storage == nil {
+		return nil, 0
 	}
+	wait := &storage.Wait
+	completion := &storage.Completion
+	context := unsafe.Pointer(storage)
+	p := g.runP
+	driver := (*ExecutorDriver)(nil)
+	if p != nil {
+		driver = p.executor
+	}
+	// The bounded runner retains run.issued across the complete physical
+	// llvm.coro.resume. Generated code can therefore present an exact one-shot
+	// compiler park capability: CheckedExecutorRun already authenticated the
+	// immutable P/G/frame binding, and the channel hook owns its spill storage
+	// from the preceding resume prologue through this no-suspend call. Keep the
+	// arbitrary-caller path below for compatibility adapters and tests.
+	if driver != nil && driver.run.issued == ActionCheckResume {
+		// run.issued is retained across the physical resume and can be written
+		// only by the validated bounded selector. Together with current/inResume
+		// it already freezes the driver, route, action kind, running G, and empty
+		// scheduler queues. The compiler's park-spill magic (checked by the typed
+		// caller) certifies fresh Wait/Completion storage. Recheck only mutable
+		// facts which this operation itself consumes.
+		if p.current != g || !p.inResume || !p.runDecisionTaken ||
+			!gPreemptEnabledAtDepthZero(g) || g.pending.kind != pendingNone {
+			return nil, 0
+		}
+		frame := g.active
+		if frame == nil || frame.handle != handle || frame.header != header ||
+			frame.state != FrameActive || frame.parkWait != nil {
+			return nil, 0
+		}
+		if p.inlineAwaitDepth == 0 {
+			if p.action.Handle != handle {
+				return nil, 0
+			}
+		} else if !resumeActionOwnsActive(g, p.action, p.inlineAwaitDepth) {
+			return nil, 0
+		}
+
+		previous := g.park.ticket
+		switch g.park.phase {
+		case parkIdle:
+			if previous != (ParkTicket{}) {
+				return nil, 0
+			}
+		case parkDelivered:
+			if !validParkTicket(previous) {
+				return nil, 0
+			}
+		default:
+			return prepareCurrentDirectChannelParkCompatibility(
+				g, handle, header, storage,
+			)
+		}
+		// This issued path is deliberately flat. nextParkTicket is shared by
+		// arbitrary source transactions and is not inlined into this already
+		// sizeable boundary by LLVM; spelling its three scalar rollover cases
+		// here avoids a hot aggregate-return call without changing the ticket
+		// sequence.
+		ticket := previous
+		if ticket == (ParkTicket{}) {
+			ticket.generation = 1
+		} else if !validParkTicket(ticket) {
+			return nil, 0
+		} else if ticket.generation != ^uint32(0) {
+			ticket.generation++
+		} else if ticket.epoch != ^uint32(0) {
+			ticket.epoch++
+			ticket.generation = 1
+		} else {
+			return nil, 0
+		}
+
+		// The direct compiler spill is exact zero storage at this boundary
+		// except for ParkState's retained generation/Delivered phase. Initialize
+		// only live words; promotion and the resume prologue clear them before
+		// the lifecycle capability is made reusable.
+		g.park.ticket = ticket
+		g.park.phase = parkParked
+		completion.owner = driver
+		completion.wait = wait
+		completion.context = context
+		completion.route = driver.route
+		completion.state = uint32(directChannelCompletionBound)
+		wait.g = g
+		wait.resume = unsafe.Pointer(completion)
+		wait.ticket = ticket
+		wait.state = waitSetRecordCommitted
+		wait.resumeKind = resumeBindingDirectChannel
+		wait.directChannel = true
+		frame.parkWait = wait
+		g.pending.kind = pendingParkSet
+		g.pending.directChannel = true
+		g.pending.from = frame
+		storage.Ticket = ticket
+		return driver, driver.route
+	}
+	return prepareCurrentDirectChannelParkCompatibility(
+		g, handle, header, storage,
+	)
+}
+
+// prepareCurrentDirectChannelParkCompatibility retains the complete
+// arbitrary-caller implementation. It is split only so the issued path can
+// fail over for the legacy parkConsumed shape without recursively selecting
+// itself again.
+func prepareCurrentDirectChannelParkCompatibility(
+	g *G,
+	handle unsafe.Pointer,
+	header *HeaderV1,
+	storage *DirectChannelParkStorageV1,
+) (*ExecutorDriver, RouteID) {
+	wait := &storage.Wait
+	completion := &storage.Completion
+	context := unsafe.Pointer(storage)
 	p := g.runP
 	driver := (*ExecutorDriver)(nil)
 	if p != nil {
@@ -166,12 +308,6 @@ func PrepareCurrentDirectChannelPark(
 	if p != nil {
 		action = p.action
 	}
-	// p.current/inResume plus the private ActionResume episode is the immutable
-	// executor-binding certificate established by CheckedExecutorRun. A driver
-	// cannot close, rebind its route/catalog, or transfer this P while generated
-	// code is active below llvm.coro.resume. The source-free direct record needs
-	// only the exact driver back-pointer and route; its mutable park/frame state
-	// is still audited below before any waiter becomes visible.
 	if p == nil || p.current != g || !p.inResume || driver == nil || driver.p != p ||
 		!driver.route.Valid() || action.Kind != ActionResume || action.Flags != 0 ||
 		action.Handle == nil || p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
@@ -180,48 +316,41 @@ func PrepareCurrentDirectChannelPark(
 		g.park.taskCancelKind != TaskCancelNone || g.park.taskCancelPhase != taskCancelIdle ||
 		(wait.state != waitSetRecordUnused || wait.resume != nil) ||
 		directChannelCompletionState(preemptLoad(&completion.state)) != directChannelCompletionUnused {
-		return ParkTicket{}, nil, 0, false
+		return nil, 0
 	}
 	if frame == nil || frame.handle != handle || frame.header != header || frame.state != FrameActive ||
 		frame.parkWait != nil || header.G != unsafe.Pointer(g) ||
 		header.SuspendReason != uint16(SuspendPark) || header.Lifecycle != uint16(FrameSuspended) {
-		return ParkTicket{}, nil, 0, false
+		return nil, 0
 	}
 	if p.inlineAwaitDepth == 0 {
 		if action.Handle != handle {
-			return ParkTicket{}, nil, 0, false
+			return nil, 0
 		}
 	} else if !resumeActionOwnsActive(g, action, p.inlineAwaitDepth) {
-		return ParkTicket{}, nil, 0, false
+		return nil, 0
 	}
-	// The compiler frame allocator and the prior resume own whole-storage
-	// clearing. The state words above reject live reuse; every record is replaced
-	// below, so comparing three complete structs against zero would only read
-	// construction bytes that cannot be independently published. ParkState is
-	// likewise a private resume receipt. Consumed is the legacy compatibility
-	// shape and retains its complete validator.
 	switch g.park.phase {
 	case parkIdle:
 		if g.park.ticket != (ParkTicket{}) {
-			return ParkTicket{}, nil, 0, false
+			return nil, 0
 		}
 	case parkDelivered:
 		if !validParkTicket(g.park.ticket) || g.park.cancelKind != ParkCancelNone ||
 			g.park.outcome != ParkOutcomePending {
-			return ParkTicket{}, nil, 0, false
+			return nil, 0
 		}
 	case parkConsumed:
 		if !validReusableDirectChannelParkState(&g.park) {
-			return ParkTicket{}, nil, 0, false
+			return nil, 0
 		}
 	default:
-		return ParkTicket{}, nil, 0, false
+		return nil, 0
 	}
 	ticket, ok := nextParkTicket(g.park.ticket)
 	if !ok {
-		return ParkTicket{}, nil, 0, false
+		return nil, 0
 	}
-
 	g.park = ParkState{ticket: ticket, phase: parkParked}
 	*completion = DirectChannelCompletion{
 		owner: driver, wait: wait, context: context,
@@ -233,8 +362,9 @@ func PrepareCurrentDirectChannelPark(
 		directChannel: true,
 	}
 	frame.parkWait = wait
-	g.pending = pendingTransition{kind: pendingParkSet, from: frame}
-	return ticket, driver, driver.route, true
+	g.pending = pendingTransition{kind: pendingParkSet, directChannel: true, from: frame}
+	storage.Ticket = ticket
+	return driver, driver.route
 }
 
 // BeginDirectChannelCompletion claims the typed hchan effect. The hchan lock
@@ -301,22 +431,6 @@ func FinishDirectChannelCompletion(
 		return nil, 0, false
 	}
 	return completion.owner, completion.route, true
-}
-
-func directChannelCompletionActiveOnCurrent(
-	current *G,
-	driver *ExecutorDriver,
-	completion *DirectChannelCompletion,
-) bool {
-	if current == nil || driver == nil || driver.p == nil || current.runP != driver.p ||
-		driver.p.current != current || !driver.p.inResume || !driver.p.runDecisionTaken ||
-		driver.p.executor != driver || completion == nil ||
-		completion.owner != driver || completion.wait == nil ||
-		completion.wait.state != waitSetRecordActive || completion.wait.work != waitSetWorkIdle ||
-		completion.wait.workNext != nil {
-		return false
-	}
-	return true
 }
 
 // validActiveDirectChannelWaitHeader proves the owner-local queue and G/frame
@@ -398,48 +512,134 @@ func completeDirectChannelWait(
 	if canceled {
 		outcome, caseID, resultSmall = ParkOutcomeCanceled, 0, ResumeSmallInvalid
 	}
-	ticket := wait.ticket
-	preemptStore(&completion.small, uint32(resultSmall))
-	kind, phase := state.taskCancelKind, state.taskCancelPhase
-	*state = ParkState{
-		ticket: ticket, phase: parkMaterialized,
-		seed:           preemptLoad(&completion.preferred),
-		taskCancelKind: kind, taskCancelPhase: phase,
-		outcome: outcome, winnerCase: caseID,
-	}
-	preemptStore(&completion.state, uint32(directChannelCompletionMaterialized))
-	promoteReadyWaitSetUnchecked(p, wait)
-	driver.run.blocked = false
-	driver.run.actionsSinceSource = 0
-	driver.run.readyDebt = true
+	materializeDirectChannelWaitUnchecked(
+		driver, completion, wait, state, resultSmall, outcome, caseID,
+	)
 	return true
 }
 
-// TryCompleteCurrentDirectChannel completes the common same-executor
-// rendezvous without an inbox or source reduction. current is the exact
-// compiler-carried task already used to derive driver for this no-suspend
-// runtime call; the exact wait/park/packet validator below remains the mutation
-// gate. handled=false is a clean fallback for a waiter which has not yet
-// reached Active or belongs elsewhere.
-func TryCompleteCurrentDirectChannel(
-	current *G,
+// materializeDirectChannelWaitUnchecked is the common no-fail owner mutation
+// after either the routed inbox or the current-owner hchan transaction has
+// authenticated its exact completion generation. It contains no observation
+// or branch so the two entry gates cannot drift in the state they publish.
+func materializeDirectChannelWaitUnchecked(
 	driver *ExecutorDriver,
 	completion *DirectChannelCompletion,
+	wait *WaitSetRecord,
+	state *ParkState,
+	resultSmall uint8,
+	outcome ParkOutcome,
+	caseID uint32,
+) {
+	preemptStore(&completion.small, uint32(resultSmall))
+	// A compact Parked state owns no source/link payload. Its ticket and task
+	// cancellation receipt remain live; materialization changes only this small
+	// scalar overlay. Avoid clearing and reconstructing the complete ParkState.
+	state.phase = parkMaterialized
+	state.directChannel = true
+	state.seed = preemptLoad(&completion.preferred)
+	state.cancelKind = ParkCancelNone
+	state.outcome = outcome
+	state.winnerCase = caseID
+	preemptStore(&completion.state, uint32(directChannelCompletionMaterialized))
+	promoteReadyWaitSetUnchecked(driver.p, wait)
+	driver.run.blocked = false
+	driver.run.actionsSinceSource = 0
+	driver.run.readyDebt = true
+}
+
+// FinishDirectChannelCompletionFromCompilerTask is the fused completion
+// boundary for a compiler-owned one-case channel operation. The hidden task is
+// already available to the typed hchan path; deriving its P/driver here avoids
+// decomposing that private scheduler capability in runtime and then replaying
+// the same relation at a second package boundary.
+//
+// A valid current task supplies the preferred producer route and admits the
+// owner-local materialization fast path. Compatibility/foreign callers may
+// pass nil and an advisory fallback route; they retain the routed publication
+// path. NeedsTarget returns the exact owner and route which the target shim
+// must retain and request.
+func FinishDirectChannelCompletionFromCompilerTask(
+	current *G,
+	completion *DirectChannelCompletion,
 	small uint8,
-	preferred RouteID,
-) (handled, ok bool) {
-	if completion == nil || small == ResumeSmallInvalid || preferred != 0 && !preferred.Valid() ||
-		preemptLoad(&completion.state) != uint32(directChannelCompletionEffect) {
-		return false, false
+	fallback RouteID,
+) (*ExecutorDriver, RouteID, DirectChannelCompletionFinishResult) {
+	if completion == nil || small == ResumeSmallInvalid {
+		return nil, 0, DirectChannelCompletionFinishInvalid
 	}
-	if !directChannelCompletionActiveOnCurrent(current, driver, completion) {
-		return false, true
+	preferred := fallback
+	var currentDriver *ExecutorDriver
+	if current != nil {
+		p := current.runP
+		if p != nil && p.current == current && p.inResume {
+			driver := p.executor
+			if driver != nil && driver.p == p && driver.route.Valid() &&
+				driver.sources.route == driver.route {
+				currentDriver = driver
+				preferred = driver.route
+			}
+		}
 	}
-	preemptStore(&completion.small, uint32(small))
-	preemptStore(&completion.preferred, uint32(preferred))
-	return true, completeDirectChannelWait(
-		driver, completion, directChannelCompletionEffect, small,
-	)
+	if preferred != 0 && !preferred.Valid() {
+		return nil, 0, DirectChannelCompletionFinishInvalid
+	}
+	if currentDriver != nil && completion.owner == currentDriver {
+		p := currentDriver.p
+		wait := completion.wait
+		// The legacy prepare-then-try ABI can match the current task before its
+		// committed waiter has crossed llvm.coro.resume and become Active. That
+		// record cannot be promoted while the task is still running; authenticate
+		// the exact adjacent pending capability and let the ordinary completion
+		// inbox materialize it after Resumed activates the wait. The fused V2 ABI
+		// probes before preparing and never takes this compatibility edge.
+		if wait != nil && wait.state == waitSetRecordCommitted && wait.g == current {
+			frame := current.active
+			if frame == nil || current.pending.kind != pendingParkSet ||
+				!current.pending.directChannel || current.pending.from != frame ||
+				!validCommittedCompactDirectChannelPark(current, frame, wait) {
+				return nil, 0, DirectChannelCompletionFinishInvalid
+			}
+		} else {
+			// The hchan lock and Effect state are the cross-thread arbitration
+			// boundary; current/inResume makes every scheduler field owner-only.
+			// Recheck the live generation and active-list correlations immediately
+			// consumed by the no-fail materialization suffix.
+			if completion.route != currentDriver.route || wait == nil || wait.g == nil ||
+				preemptLoad(&completion.state) != uint32(directChannelCompletionEffect) ||
+				wait.state != waitSetRecordActive || !wait.directChannel ||
+				wait.resume != unsafe.Pointer(completion) {
+				return nil, 0, DirectChannelCompletionFinishInvalid
+			}
+			g := wait.g
+			frame := g.active
+			if frame == nil || frame.parkWait != wait {
+				return nil, 0, DirectChannelCompletionFinishInvalid
+			}
+			state := &g.park
+			if state.ticket != wait.ticket || state.phase != parkParked ||
+				state.taskCancelKind != TaskCancelNone || state.taskCancelPhase != taskCancelIdle ||
+				state.cancelKind != ParkCancelNone || p.readyCount == ^uint32(0) {
+				return nil, 0, DirectChannelCompletionFinishInvalid
+			}
+			preemptStore(&completion.preferred, uint32(preferred))
+			materializeDirectChannelWaitUnchecked(
+				currentDriver, completion, wait, state, small, ParkOutcomeCompleted, 1,
+			)
+			return nil, 0, DirectChannelCompletionFinishInline
+		}
+	}
+	owner, route, ok := FinishDirectChannelCompletion(completion, small, preferred)
+	if !ok {
+		return nil, 0, DirectChannelCompletionFinishInvalid
+	}
+	if currentDriver == owner {
+		if !PublishExecutorDirectChannelCompletion(owner, completion) {
+			return nil, 0, DirectChannelCompletionFinishInvalid
+		}
+		return nil, 0, DirectChannelCompletionFinishOwnerPublished
+	}
+	return owner, route, DirectChannelCompletionFinishNeedsTarget
 }
 
 // PublishExecutorDirectChannelCompletion appends one terminal frame node to
@@ -451,7 +651,8 @@ func PublishExecutorDirectChannelCompletion(
 ) bool {
 	if driver == nil || completion == nil || completion.owner != driver ||
 		completion.route != driver.route || driver.magic != executorDriverMagic ||
-		driver.state != executorDriverActive {
+		driver.p == nil || driver.p.executor != driver ||
+		preemptLoadPointer(&driver.directChannelHead) == nil {
 		return false
 	}
 	state := directChannelCompletionState(preemptLoad(&completion.state))

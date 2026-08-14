@@ -55,12 +55,13 @@ type coroNativeFleetPhysicalOwnerV1 struct {
 // Seal is the release publication observed by every peer through Quiesced, and
 // Retire leaves a permanent non-reusable process tombstone after all joins.
 type coroNativeFleetPhysicalOwnersV1 struct {
-	stop      coro.TargetIngress
-	peers     [coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1
-	count     uint32 // immutable configured peer capacity
-	started   uint32 // contiguous live prefix, protected by guard
-	guard     uint32
-	lifecycle coroNativeFleetPhysicalLifecycleV1
+	stop        coro.TargetIngress
+	peers       [coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1
+	count       uint32 // immutable configured peer capacity
+	started     uint32 // contiguous live prefix, protected by guard
+	policyEpoch uint32 // atomic GOMAXPROCS placement-policy generation
+	guard       uint32
+	lifecycle   coroNativeFleetPhysicalLifecycleV1
 }
 
 var coroNativeFleetPhysicalOwnerV1State coroNativeFleetPhysicalOwnersV1
@@ -173,11 +174,13 @@ func coroNativeFleetPhysicalOwnersStartV1(limit uint32) bool {
 	if coroNativeFleetV1State.lifecycle != coroNativeFleetActiveV1 ||
 		count == 0 || count > coroNativeFleetDomainCapacityV1 ||
 		state.lifecycle != coroNativeFleetPhysicalUnusedV1 || state.count != 0 ||
-		state.started != 0 || coroNativeAtomicLoadV1(&state.guard) != 0 ||
+		state.started != 0 || coroNativeAtomicLoadV1(&state.policyEpoch) != 0 ||
+		coroNativeAtomicLoadV1(&state.guard) != 0 ||
 		!state.stop.CanReleaseResources() || !state.stop.Start() {
 		return false
 	}
 	state.count = count - 1
+	coroNativeAtomicStoreV1(&state.policyEpoch, 1)
 	state.lifecycle = coroNativeFleetPhysicalActiveV1
 	if coroNativeFleetPhysicalOwnersEnsureLockedV1(state, limit) {
 		return true
@@ -227,6 +230,14 @@ func coroNativeFleetSetExecutionLimitV1(limit uint32) (
 		return 0, false, false
 	}
 	previous, wake, ok = coroNativeFleetV1State.execution.SetLimit(limit)
+	if ok && previous != limit {
+		epoch := coroNativeAtomicLoadV1(&state.policyEpoch)
+		if epoch == 0 || epoch == ^uint32(0) {
+			ok = false
+		} else {
+			coroNativeAtomicStoreV1(&state.policyEpoch, epoch+1)
+		}
+	}
 	coroNativeFleetPhysicalOwnersUnlockV1(state)
 	return previous, wake, ok
 }
@@ -252,7 +263,18 @@ func coroNativeFleetPhysicalOwnersStopV1() bool {
 			peer.handle,
 			coroNativeFleetDomainActiveV1,
 		)
+		request := coro.ExecutorRequestInvalid
+		if ok {
+			// Seal is the durable shutdown fact, but an owner can currently be
+			// inside an unbounded user resume and therefore cannot observe the
+			// doorbell until that resume returns. Publish through the executor
+			// gate as well: compiler safepoints observe this gate and return the
+			// physical action to the owner loop, which then consumes Seal and
+			// begins the ordinary sticky-cancellation drain.
+			request = coroNativeFleetV1State.fleet.RequestExecutor(domain.handle)
+		}
 		if !ok || peer.lifecycle != coroNativeFleetPhysicalActiveV1 ||
+			!coro.ExecutorRequestAccepted(request) ||
 			!domain.doorbell.Ring() {
 			state.lifecycle = coroNativeFleetPhysicalFailedV1
 			return false

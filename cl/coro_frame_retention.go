@@ -2217,7 +2217,7 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 	builder := newCoroFrameRetentionRootBuilder(a, proof)
 	typeKey := structuralEmissionTypeKey
 	if a.universe != nil {
-		typeKey = a.universe.cachedStrictEmissionTypeKey
+		typeKey = a.universe.emissionTypeKeys.strict
 	}
 	valueID := func(value ssa.Value) string {
 		if value == nil {

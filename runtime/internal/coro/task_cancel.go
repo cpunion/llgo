@@ -180,7 +180,8 @@ func validRegisteredActiveParkHeader(state *ParkState) bool {
 
 func validRegisteredReleasableParkHeader(state *ParkState) bool {
 	if state == nil || state.resolving || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
-		state.cancelKind > ParkCancelShutdown || state.attached > state.expected {
+		state.cancelKind > ParkCancelShutdown || state.attached > state.expected ||
+		state.directChannel && state.phase != parkMaterialized {
 		return false
 	}
 	switch state.phase {
@@ -481,7 +482,7 @@ func AcknowledgeTaskCancellation(g *G, kind TaskCancelKind) bool {
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||
 		g.root != nil || g.active != nil || g.frames != nil || g.runP != nil ||
 		g.nextReady != nil || g.queued || g.waiting ||
-		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
+		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
 		g.destroyTarget != nil || g.destroyRoot ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!releasableParkState(&g.park) {

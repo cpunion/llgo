@@ -352,7 +352,7 @@ func InitG(g *G) bool {
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle || g.osThreadLockDepth != 0 ||
 		g.runnableAffinity != runnableAnyOwner ||
 		g.frames != nil || g.active != nil || g.root != nil ||
-		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
+		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
 		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
 		g.waiting || g.runP != nil ||
 		g.park != (ParkState{}) ||
@@ -514,7 +514,8 @@ func PollPreemptCompiler(g *G) bool {
 //
 //go:noinline
 func servicePreemptBudgetExpired(p *P, mode uint32) bool {
-	if mode != executorModeBound || runnableForOSThreadOwner(p) || HasWaiting(p) {
+	if mode != executorModeBound || runnableForOSThreadOwner(p) || HasWaiting(p) ||
+		osThreadSuspendCurrentPeerNeedsService(p) {
 		return true
 	}
 	driver := p.executor
@@ -644,6 +645,15 @@ func dequeue(p *P) *G {
 	if p == nil || p.readyHead == nil || p.readyCount == 0 {
 		return nil
 	}
+	return dequeueReadyHeadUnchecked(p)
+}
+
+// dequeueReadyHeadUnchecked consumes the queue-head capability held by the
+// scheduler owner. Callers must already have proved a non-empty header in the
+// same reduction; keeping the mutation suffix here prevents optimized bounded
+// selectors from duplicating it while the arbitrary-caller dequeue retains its
+// complete fail-closed gate above.
+func dequeueReadyHeadUnchecked(p *P) *G {
 	g := p.readyHead
 	p.readyHead = g.nextReady
 	if p.readyHead == nil {
@@ -1140,6 +1150,37 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 //
 // Keep this unexported: arbitrary callers and compatibility paths must retain
 // BeginRunG's complete validator.
+func beginExecutorRunDirectChannelContinuation(p *P, g *G, peerRunnable bool) (Action, bool) {
+	// The selector has just proved an idle P, selected this exact queue member,
+	// and removed its queue/transfer links. The caller selected this helper only
+	// after observing the private materialized-direct certificate installed by
+	// the owner-only no-fail promotion suffix. That suffix also wrote GRunnable,
+	// waiting=false, runP=nil and the queue fields which dequeue has just
+	// consumed; replaying those correlated owner-only bytes here is not another
+	// safety boundary. Recheck only asynchronous preemption and the exact handle
+	// consumed below.
+	if p == nil || g == nil || !gPreemptEnabledAtDepthZero(g) ||
+		g.active == nil || g.active.handle == nil {
+		return Action{}, false
+	}
+	schedule := preemptLoad(&p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested {
+		return Action{}, false
+	}
+	handle := g.active.handle
+	budget := servicePreemptSafepointBudget
+	if peerRunnable {
+		budget = preemptCheckpointStride
+	}
+	p.current = g
+	p.servicePreemptBudget = budget
+	g.state = GRunning
+	g.runP = p
+	action := Action{Kind: ActionCheckResume, Handle: handle}
+	p.action = action
+	return action, true
+}
+
 func beginExecutorRunContinuation(p *P, g *G, peerRunnable bool) (Action, bool) {
 	if p == nil || g == nil || p.current != nil || p.inResume || p.inlineAwaitDepth != 0 ||
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
@@ -1286,46 +1327,144 @@ func Checked(p *P, g *G, action Action, done bool) (Action, bool) {
 // observational, so replaying that complete audit before the adjacent
 // resume/destroy would not create another ownership boundary. Compiler code
 // still has to consume the run decision before it may publish a transition.
+func checkedExecutorRun(
+	driver *ExecutorDriver,
+	g *G,
+	action Action,
+	done bool,
+	withRuntimeContextMode bool,
+) (next Action, needsRuntimeContext bool, ok bool) {
+	if driver == nil || g == nil || driver.p == nil ||
+		driver.run.issued != action.Kind || action.Flags != 0 || action.Handle == nil {
+		return Action{}, false, false
+	}
+	p := driver.p
+	if p.current != g || g.runP != p || p.inResume ||
+		p.inlineAwaitDepth != 0 {
+		return Action{}, false, false
+	}
+	switch action.Kind {
+	case ActionCheckResume:
+		if done || g.state != GRunning || g.active == nil ||
+			g.active.handle != action.Handle {
+			return Action{}, false, false
+		}
+		if withRuntimeContextMode {
+			mode := g.active.runtimeContext
+			if mode == frameRuntimeContextUnknown {
+				var valid bool
+				mode, valid = descriptorRuntimeContextMode(g.active.descriptor)
+				if !valid {
+					return Action{}, false, false
+				}
+			}
+			needsRuntimeContext = mode != frameRuntimeContextNotRequired
+		}
+		if !prepareIssuedRunDecision(p, g) {
+			return Action{}, false, false
+		}
+		g.active.state = FrameActive
+		p.inResume = true
+		next = Action{Kind: ActionResume, Handle: action.Handle}
+		p.action = next
+		return next, needsRuntimeContext, true
+	case ActionCheckDestroy:
+		if !done || g.state != GDispatching || g.destroyTarget == nil ||
+			g.destroyTarget.handle != action.Handle ||
+			g.destroyTarget.state != FrameDestroyPending ||
+			g.park.taskCancelPhase == taskCancelRequested {
+			return Action{}, false, false
+		}
+		next = Action{Kind: ActionDestroy, Handle: action.Handle}
+		p.action = next
+		return next, false, true
+	default:
+		return Action{}, false, false
+	}
+}
+
 func CheckedExecutorRun(
 	driver *ExecutorDriver,
 	g *G,
 	action Action,
 	done bool,
 ) (Action, bool) {
+	next, _, ok := checkedExecutorRun(driver, g, action, done, false)
+	return next, ok
+}
+
+// CheckedExecutorRunRuntimeContext is the hot physical-resume transaction. It
+// consumes the publication-time descriptor capability in the same scheduler
+// audit which opens ActionResume, avoiding both a second ownership audit and a
+// per-resume descriptor/string decode. Unknown legacy frames fail closed by
+// validating their live descriptor before any scheduler state is mutated.
+func CheckedExecutorRunRuntimeContext(
+	driver *ExecutorDriver,
+	g *G,
+	action Action,
+	done bool,
+) (next Action, needsRuntimeContext bool, ok bool) {
+	return checkedExecutorRun(driver, g, action, done, true)
+}
+
+// BeginIssuedExecutorResumeRuntimeContext consumes the bounded runner's
+// private CheckResume episode without an llvm.coro.done probe. A resume action
+// is created only for an initial- or ordinary-suspended frame; a physical
+// resume which reaches final suspend returns a destroy action and can never be
+// selected as CheckResume again. The issued marker and exact P/G/frame
+// correlation below are therefore the stronger scheduler-owned capability.
+//
+// Compatibility callers which present an independently observed handle keep
+// using CheckedExecutorRunRuntimeContext, and every destroy still proves
+// llvm.coro.done before invoking llvm.coro.destroy.
+func BeginIssuedExecutorResumeRuntimeContext(
+	driver *ExecutorDriver,
+	g *G,
+) (next Action, needsRuntimeContext bool, ok bool) {
 	if driver == nil || g == nil || driver.p == nil ||
-		driver.run.issued != action.Kind || action.Flags != 0 || action.Handle == nil {
-		return Action{}, false
+		driver.run.issued != ActionCheckResume {
+		return Action{}, false, false
 	}
 	p := driver.p
+	action := p.action
 	if p.current != g || g.runP != p || p.action != action || p.inResume ||
-		p.inlineAwaitDepth != 0 {
-		return Action{}, false
+		p.inlineAwaitDepth != 0 || action.Kind != ActionCheckResume ||
+		action.Flags != 0 || action.Handle == nil || g.state != GRunning || g.active == nil ||
+		g.active.handle != action.Handle {
+		return Action{}, false, false
 	}
-	switch action.Kind {
-	case ActionCheckResume:
-		if done || g.state != GRunning || g.active == nil ||
-			g.active.handle != action.Handle ||
-			!prepareRunDecision(p, g) {
-			return Action{}, false
+	mode := g.active.runtimeContext
+	if mode == frameRuntimeContextUnknown {
+		var valid bool
+		mode, valid = descriptorRuntimeContextMode(g.active.descriptor)
+		if !valid {
+			return Action{}, false, false
 		}
-		g.active.state = FrameActive
-		p.inResume = true
-		next := Action{Kind: ActionResume, Handle: action.Handle}
-		p.action = next
-		return next, true
-	case ActionCheckDestroy:
-		if !done || g.state != GDispatching || g.destroyTarget == nil ||
-			g.destroyTarget.handle != action.Handle ||
-			g.destroyTarget.state != FrameDestroyPending ||
-			g.park.taskCancelPhase == taskCancelRequested {
-			return Action{}, false
-		}
-		next := Action{Kind: ActionDestroy, Handle: action.Handle}
-		p.action = next
-		return next, true
-	default:
-		return Action{}, false
 	}
+	needsRuntimeContext = mode != frameRuntimeContextNotRequired
+	if g.park.phase == parkMaterialized && g.park.directChannel &&
+		g.park.taskCancelKind == TaskCancelNone && g.park.taskCancelPhase == taskCancelIdle {
+		// The direct-channel materializer published this exact owner-only
+		// certificate before enqueueing G, and the issued selector removed G
+		// immediately before this resume. Construct its small decision here;
+		// the general helper remains authoritative for source-backed parks and
+		// the cancellation race, which must claim the task token.
+		p.runDecision = RunDecision{
+			g:             g,
+			ticket:        g.park.ticket,
+			caseID:        g.park.winnerCase,
+			outcome:       g.park.outcome,
+			materialized:  true,
+			directChannel: true,
+		}
+	} else if !prepareIssuedRunDecision(p, g) {
+		return Action{}, false, false
+	}
+	g.active.state = FrameActive
+	p.inResume = true
+	next = Action{Kind: ActionResume, Handle: action.Handle}
+	p.action = next
+	return next, needsRuntimeContext, true
 }
 
 // Resumed commits the return from a direct llvm.coro.resume call. Coroutine
@@ -1703,7 +1842,7 @@ func TerminalG(p *P, g *G) bool {
 		ValidG(g) && gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
 		g.osThreadLockDepth == 0 &&
-		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
+		g.pending.kind == pendingNone && !g.pending.directChannel && g.pending.from == nil && g.pending.target == nil &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		!g.waiting && g.runP == nil &&
 		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&

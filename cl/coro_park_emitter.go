@@ -52,13 +52,19 @@ type coroParkFaultRoute struct {
 // WaitSet transaction inside these hooks and is never represented as several
 // independent parks.
 type coroParkOperation struct {
-	shouldSuspend llssa.Expr
-	park          func(llssa.Builder)
-	resume        func(llssa.Builder) llssa.Expr
-	normal        []uint64
-	faults        []coroParkFaultRoute
-	abort         uint64
-	shutdown      uint64
+	// prepare runs in the active block after the emitter has allocated the
+	// static state identity. It returns the runtime suspend predicate. Most
+	// operations only return an already-computed predicate and bind park below;
+	// a fused try-or-park hook may instead publish its complete state here and
+	// leave park nil. In both cases, state allocation and the stack-cut protocol
+	// remain compiler-owned rather than leaking into a feature lowerer.
+	prepare  func(llssa.Builder, uint32, uint32) llssa.Expr
+	park     func(llssa.Builder)
+	resume   func(llssa.Builder) llssa.Expr
+	normal   []uint64
+	faults   []coroParkFaultRoute
+	abort    uint64
+	shutdown uint64
 }
 
 // suspendCoroCurrentBlockIf is the single compiler-owned conditional
@@ -121,7 +127,7 @@ func validateCoroParkOperationStatuses(
 
 func (c *coroBodyContext) emitCoroParkOperation(p *context, b llssa.Builder, operation coroParkOperation) {
 	if c == nil || p == nil || b == nil || b.Func != p.fn || c.coro == nil || c.unsupportedRunDecision == nil ||
-		operation.shouldSuspend.IsNil() || operation.park == nil || operation.resume == nil {
+		operation.prepare == nil || operation.resume == nil {
 		panic("coroutine park operation requires a complete physical emitter and protocol")
 	}
 	if err := validateCoroParkOperationStatuses(
@@ -132,7 +138,12 @@ func (c *coroBodyContext) emitCoroParkOperation(p *context, b llssa.Builder, ope
 	); err != nil {
 		panic(err)
 	}
-	if operation.shouldSuspend.Type != b.Prog.Bool() {
+	stateID := c.nextState
+	c.nextState++
+	c.instructions = 0
+	sourceLine := p.coroCurrentSourceLine()
+	shouldSuspend := operation.prepare(b, stateID, sourceLine)
+	if shouldSuspend.IsNil() || shouldSuspend.Type != b.Prog.Bool() {
 		panic("coroutine park suspend predicate must be bool")
 	}
 	faultTargets := make([]llssa.BasicBlock, len(operation.faults))
@@ -140,17 +151,17 @@ func (c *coroBodyContext) emitCoroParkOperation(p *context, b llssa.Builder, ope
 		faultTargets[index] = b.Func.MakeBlock()
 	}
 	join := c.suspendCoroCurrentBlockIf(
-		operation.shouldSuspend,
+		shouldSuspend,
 		func(suspend llssa.Builder) {
-			stateID := c.nextState
-			c.nextState++
-			c.instructions = 0
+			if operation.park == nil {
+				return
+			}
 			c.publishState(
 				suspend,
 				coroSuspendPark,
 				coroLifecycleSuspended,
 				stateID,
-				p.coroCurrentSourceLine(),
+				sourceLine,
 			)
 			operation.park(suspend)
 		},

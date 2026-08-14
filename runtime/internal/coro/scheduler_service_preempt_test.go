@@ -162,6 +162,45 @@ func TestServicePreemptQuantumUsesBoundRequestContract(t *testing.T) {
 		}
 	})
 
+	t.Run("bound-locked-handoff-current-peer", func(t *testing.T) {
+		p := new(P)
+		driver, _, _ := bindTestExecutorDriver(t, p)
+		owner := newYieldingTestG(t, "service-locked-owner")
+		peer := newYieldingTestG(t, "service-replacement-peer")
+		if !Enqueue(p, owner.g) || !Enqueue(p, peer.g) {
+			t.Fatal("enqueue locked service fixture")
+		}
+		kind := commitLockedRunnerYield(t, driver, owner)
+		if required, ok := PrepareOSThreadSuspendHandoff(driver, owner.g, kind.Kind); !ok || !required {
+			t.Fatal("prepare locked service handoff")
+		}
+
+		step := runnerNextPhysicalAction(t, driver, peer, ActionCheckResume)
+		resume, ok := Checked(p, peer.g, step.Action, false)
+		if !ok || resume.Kind != ActionResume {
+			t.Fatal("check replacement service peer")
+		}
+		takeNormalRunnerDecision(t, peer.g)
+		peer.frame.header.SuspendReason = uint16(SuspendNone)
+		peer.frame.header.Lifecycle = uint16(FrameActive)
+		consumeServicePreemptTestBudget(t, p, peer.g, true)
+		peer.frame.header.SuspendReason = uint16(SuspendYield)
+		peer.frame.header.Lifecycle = uint16(FrameSuspended)
+		if !PrepareYield(peer.g, peer.handle, peer.frame.header) {
+			t.Fatal("prepare replacement service peer yield")
+		}
+		next, resumed := Resumed(p, peer.g, resume)
+		if !resumed || next.Kind != ActionYield ||
+			!CommitExecutorRunAction(driver, peer.g, next) {
+			t.Fatalf("commit replacement service peer = (%+v, %t)", next, resumed)
+		}
+		if !RestoreOSThreadSuspendHandoff(driver, owner.g) {
+			t.Fatal("restore locked owner after service peer action")
+		}
+		runtime.KeepAlive(owner.frame.memory)
+		runtime.KeepAlive(peer.frame.memory)
+	})
+
 }
 
 func TestCompilerPreemptPollObservesConcurrentExecutorRequest(t *testing.T) {

@@ -260,6 +260,13 @@ func deriveCoroLocalBodyFacts(
 	if function.Blocks != nil {
 		facts.Exec = coro.MayUnwind
 	}
+	if coroRuntimeContextPrimitive(function) {
+		// These are the only bottom-level runtime operations which observe or
+		// replace the ambient logical G. All ordinary Go wrappers acquire this
+		// bit through the normal call fixed point, including across imported
+		// library summaries; source annotations are neither required nor read.
+		facts.Exec = facts.Exec.Join(coro.NeedsRuntimeContext)
+	}
 	atomicBlocks := make([]coro.SSAAtomicBlockFacts, len(function.Blocks))
 	hasEvaluatedDefer := false
 	for _, block := range function.Blocks {
@@ -360,6 +367,19 @@ func deriveCoroLocalBodyFacts(
 	return facts, nil
 }
 
+func coroRuntimeContextPrimitive(function *ssa.Function) bool {
+	if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil ||
+		llssa.PathOf(function.Pkg.Pkg) != "github.com/goplus/llgo/runtime/internal/runtime" {
+		return false
+	}
+	switch function.Name() {
+	case "getg", "getgIfPresent", "setg", "setgRaw":
+		return true
+	default:
+		return false
+	}
+}
+
 // coroOutcomePlainLeafSemanticRecipe consumes the capability already frozen by
 // the sole raw-SSA semantic classifier. Analysis and emission therefore cannot
 // independently reinterpret a source operation. Calls, allocation,
@@ -400,14 +420,18 @@ func coroOutcomePlainDAGSemanticRecipe(plan coroSemanticInstructionPlan) bool {
 // erase the former. Other InlineNoSuspend intrinsics include asm, dynamic
 // alloca, control transfer, and target-specific operations; the broad enum is
 // therefore not by itself an outcome-plain proof.
-func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(u *EmissionUniverse) error {
-	if ir == nil || u == nil || u.prog == nil {
-		return fmt.Errorf("outcome-plain intrinsic finalization requires one exact ProgramIR and universe")
+func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
+	prog llssa.Program,
+	functions []*ssa.Function,
+	sortedUseOwners func(*ssa.Function) []*preparedEmissionPackage,
+) error {
+	if ir == nil || prog == nil || sortedUseOwners == nil {
+		return fmt.Errorf("outcome-plain intrinsic finalization requires one exact ProgramIR input")
 	}
 	if ir.callsFrozen {
 		return fmt.Errorf("outcome-plain intrinsic finalization occurred after call SitePlan freeze")
 	}
-	for _, function := range u.functions {
+	for _, function := range functions {
 		if function == nil || len(function.Blocks) == 0 {
 			continue
 		}
@@ -429,7 +453,7 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(u *EmissionUnive
 				if !atomic && !realYield {
 					continue
 				}
-				for _, owner := range u.sortedUseOwners(function) {
+				for _, owner := range sortedUseOwners(function) {
 					key := emissionFunctionOwnerKey{function: function, owner: owner}
 					if _, sealed := ir.siteOwners[key]; !sealed {
 						return fmt.Errorf("atomic intrinsic in %q has no frozen semantic owner %q", function.Name(), owner.identity)
@@ -458,13 +482,13 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(u *EmissionUnive
 			continue
 		}
 		var final coro.SSAFunctionBodyFacts
-		for index, owner := range u.sortedUseOwners(function) {
+		for index, owner := range sortedUseOwners(function) {
 			key := emissionFunctionOwnerKey{function: function, owner: owner}
 			preamble, present := ir.functionPreambles[key]
 			if !present {
 				return fmt.Errorf("finalize atomic intrinsic body %q: owner %q has no function preamble", function.Name(), owner.identity)
 			}
-			facts, err := deriveCoroLocalBodyFacts(u.prog, function, ir.semanticPlans[key], preamble.emitsGoBody)
+			facts, err := deriveCoroLocalBodyFacts(prog, function, ir.semanticPlans[key], preamble.emitsGoBody)
 			if err != nil {
 				return fmt.Errorf("finalize atomic intrinsic body %q: %w", function.Name(), err)
 			}

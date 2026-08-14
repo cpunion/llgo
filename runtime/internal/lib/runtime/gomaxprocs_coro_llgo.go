@@ -21,5 +21,12 @@ package runtime
 import llruntime "github.com/goplus/llgo/runtime/internal/runtime"
 
 func GOMAXPROCS(n int) int {
-	return llruntime.CoroGOMAXPROCS(n)
+	previous := llruntime.CoroGOMAXPROCS(n)
+	if n > 0 && previous != n {
+		// The logical quota changes synchronously above. One explicit scheduler
+		// boundary makes the next bounded run slice observe its placement policy;
+		// unrelated channel and timer actions therefore need no epoch poll.
+		coroSchedulerYield()
+	}
+	return previous
 }

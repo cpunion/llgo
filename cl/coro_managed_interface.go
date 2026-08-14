@@ -185,7 +185,7 @@ func (p *coroManagedInterfaceDispatchPlan) acceptsTarget(fn *ssa.Function, plan 
 func coroManagedInterfaceMethodKey(
 	method *types.Func,
 	signature *types.Signature,
-	universes ...*EmissionUniverse,
+	typeKeys ...func(types.Type) string,
 ) string {
 	if method == nil || signature == nil {
 		return ""
@@ -194,8 +194,8 @@ func coroManagedInterfaceMethodKey(
 	if callable == nil {
 		return ""
 	}
-	if len(universes) != 0 && universes[0] != nil {
-		return method.Id() + "\x00" + universes[0].cachedStrictEmissionABITypeKey(callable)
+	if len(typeKeys) != 0 && typeKeys[0] != nil {
+		return method.Id() + "\x00" + typeKeys[0](callable)
 	}
 	return method.Id() + "\x00" + structuralEmissionABITypeKey(callable)
 }
@@ -214,7 +214,11 @@ func coroManagedInterfaceInvokeMethodKey(
 	if err != nil {
 		return "", err
 	}
-	key := coroManagedInterfaceMethodKey(common.Method, signature, universe)
+	var typeKeys *emissionTypeKeyCache
+	if universe != nil {
+		typeKeys = &universe.emissionTypeKeys
+	}
+	key := coroManagedInterfaceMethodKey(common.Method, signature, typeKeys.strictABI)
 	if key == "" {
 		return "", fmt.Errorf("managed interface descriptor has no exact method/signature key")
 	}
@@ -859,7 +863,7 @@ func validateCoroManagedInterfaceDescriptorTarget(
 	targetLogical := coroInterfaceDispatchCanonicalSignature(types.NewSignatureType(
 		nil, nil, nil, types.NewTuple(params...), effective.Results(), effective.Variadic(),
 	))
-	if !coroInterfaceDispatchSignaturesIdentical(logicalSignature, targetLogical, universe) {
+	if !coroInterfaceDispatchSignaturesIdentical(logicalSignature, targetLogical, universe.emissionTypeKeys.strictABI) {
 		return fail("logical signature %s does not match effective target signature %s", logicalSignature, targetLogical)
 	}
 	return nil

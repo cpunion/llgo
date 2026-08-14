@@ -151,10 +151,15 @@ type ParkLink struct {
 // irreversible/reservable winners.
 // All ParkState and ParkLink operations are strictly owner-P-only.
 type ParkState struct {
-	ticket          ParkTicket
-	phase           parkPhase
-	hasDefault      bool
-	resolving       bool
+	ticket     ParkTicket
+	phase      parkPhase
+	hasDefault bool
+	resolving  bool
+	// directChannel occupies the final byte before expected's alignment. It is
+	// set only on a source-free compact hchan materialization and consumed by
+	// the immediately resumed compiler prologue; no native/WASM ABI size or
+	// following-field offset changes.
+	directChannel   bool
 	expected        uint32
 	attached        uint32
 	seed            uint32
@@ -191,7 +196,15 @@ func validMaterializedParkHeader(state *ParkState) bool {
 		return false
 	}
 	switch state.outcome {
-	case ParkOutcomeCompleted, ParkOutcomeDefault:
+	case ParkOutcomeCompleted:
+		if state.directChannel {
+			return state.winnerCase == 1
+		}
+		return state.winnerCase != 0
+	case ParkOutcomeDefault:
+		if state.directChannel {
+			return false
+		}
 		return state.winnerCase != 0
 	case ParkOutcomeCanceled:
 		return state.winnerCase == 0
@@ -202,7 +215,7 @@ func validMaterializedParkHeader(state *ParkState) bool {
 
 func validParkState(state *ParkState) bool {
 	if state == nil || state.resolving || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
-		state.attached > state.expected {
+		state.attached > state.expected || state.directChannel && state.phase != parkMaterialized {
 		return false
 	}
 	links := uint32(0)
@@ -333,7 +346,7 @@ func validParkState(state *ParkState) bool {
 func validReleasableParkState(state *ParkState) bool {
 	if state == nil || state.resolving ||
 		!validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
-		state.cancelKind > ParkCancelShutdown || state.attached > state.expected {
+		state.cancelKind > ParkCancelShutdown || state.attached > state.expected || state.directChannel {
 		return false
 	}
 	switch state.phase {

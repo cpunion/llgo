@@ -292,9 +292,13 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 			effect = coro.MayPark
 		}
 		return coroSemanticInstructionPlan{
-			class:        coro.OpSelect,
-			recipe:       coro.RecipeID(recipe),
-			effect:       effect,
+			class:  coro.OpSelect,
+			recipe: coro.RecipeID(recipe),
+			effect: effect,
+			// The current select helper ABI still samples owner-local completion
+			// through the installed runtime G. Single-channel send/receive and
+			// close already carry an explicit task and need no such seed.
+			exec:         coro.NeedsRuntimeContext,
 			materialized: true,
 		}, nil
 	case *ssa.Range:

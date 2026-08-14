@@ -1066,12 +1066,13 @@ func (b Builder) CoroChanTryRecv(task, ch, elem Expr) Expr {
 	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryRecv"), task, ch, elem, eltSize)
 }
 
-// CoroChanTryClose performs one complete non-panicking channel-close
-// transaction. Its scalar result distinguishes success, nil channel, and an
-// already closed channel; physical coroutine lowering owns the two language
-// panic outcomes through its explicit-status ABI.
-func (b Builder) CoroChanTryClose(ch Expr) Expr {
-	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryClose"), ch)
+// CoroChanTryCloseTask performs one complete non-panicking channel-close
+// transaction using the compiler-carried logical task capability. Its scalar
+// result distinguishes success, nil channel, and an already closed channel;
+// physical coroutine lowering owns the two language panic outcomes through
+// its explicit-status ABI.
+func (b Builder) CoroChanTryCloseTask(task, ch Expr) Expr {
+	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryCloseTask"), task, ch)
 }
 
 type SelectState struct {

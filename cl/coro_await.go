@@ -292,7 +292,7 @@ func validateCoroStaticMethodCallOperands(call ssa.CallInstruction, target *ssa.
 		if err != nil {
 			return fmt.Errorf("derive canonical static coroutine method signature: %w", err)
 		}
-		if !flattenedLinkname && !coroInterfaceDispatchSignaturesIdentical(effectiveRaw, normalized, universe) {
+		if !flattenedLinkname && !coroInterfaceDispatchSignaturesIdentical(effectiveRaw, normalized, universe.emissionTypeKeys.strictABI) {
 			return fmt.Errorf("static coroutine method source ABI %s does not match canonical target ABI %s", effectiveRaw, normalized)
 		}
 		targetContext, err = universe.functionABIContext(target, universe.ownerOf(target))

@@ -79,7 +79,10 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 	}
 
 	want := map[string]int{
-		"contract": 7,
+		// The eighth bottom contract is the native scheduler doorbell write:
+		// its descriptor is created O_NONBLOCK, a semantic fact unavailable
+		// from the C signature and therefore not soundly compiler-inferable.
+		"contract": 8,
 		"noblock":  35,
 		"sync":     28,
 	}
@@ -91,7 +94,7 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		)
 	}
 	sort.Strings(manifest)
-	const wantManifestSHA256 = "a1773b45067110dc275caee403ab26bf6a69b167f3df40439b2e0c4f7298e26f"
+	const wantManifestSHA256 = "79e04f606714069df05f69f48ddce3c7108b38bc503b734370a021ab5aadc912"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)

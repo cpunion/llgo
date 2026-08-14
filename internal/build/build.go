@@ -1040,7 +1040,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			// implementation. A may-block callable is admitted only when this
 			// exact member belongs to the compiler-owned raw host/scheduler-stack
 			// island.
-			const supportedExec = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe
+			const supportedExec = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe | coro.NeedsRuntimeContext
 			allowedExec := coro.ExecFlags(supportedExec)
 			callableWaitsForeign := false
 			callableNoReturn := false
@@ -2314,7 +2314,8 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 		return fmt.Errorf("live raw ABI plain closure validation requires an exact closure")
 	}
 	const managedOnlyEffects = coro.YieldOnly | coro.AwaitStructured | coro.OutcomeStructured
-	const legacyExec = coro.IRQUnsafe | coro.NeedsPreempt | coro.MayUnwind | coro.NeedsCleanupFrame | coro.NoReturn | coro.PanicOnly
+	const legacyExec = coro.IRQUnsafe | coro.NeedsPreempt | coro.MayUnwind | coro.NeedsCleanupFrame |
+		coro.NoReturn | coro.PanicOnly | coro.NeedsRuntimeContext
 
 	validateTarget := func(owner, target *ssa.Function, terminalOnly bool, site string) error {
 		if target == nil {
@@ -5224,7 +5225,6 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	names = append(names,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
-		"__llgo_coro_frame_publish_v2",
 		"__llgo_coro_frame_publish_v3",
 		"__llgo_coro_frame_destroy_commit_v2",
 		"__llgo_coro_await_prepare_v1",
@@ -5252,13 +5252,13 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		// plain runtime island as the raw channel hooks below.
 		"CoroChanTrySend",
 		"CoroChanTryRecv",
-		"CoroChanTryClose",
+		"CoroChanTryCloseTask",
 		"CoroChanSelectTry",
 		"CoroChanSelectPark",
 		"CoroChanSelectResume",
-		coroChanSendParkSymbolV1,
-		coroChanRecvParkSymbolV1,
-		coroChanResumeSymbolV1,
+		coroChanSendTryParkSymbolV2,
+		coroChanRecvTryParkSymbolV2,
+		coroChanResumeSymbolV2,
 		"__llgo_coro_fault_prepare_v1",
 		"__llgo_coro_fault_prepare_v2",
 	)
@@ -5724,22 +5724,28 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				}
 			}
 		}
-		if name == coroChanSendParkSymbolV1 || name == coroChanRecvParkSymbolV1 {
+		if name == coroChanSendTryParkSymbolV2 || name == coroChanRecvTryParkSymbolV2 {
 			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 7 || sig.Results().Len() != 0 ||
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 9 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel try-or-park ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 signature", name)
 			}
 			for parameter := 0; parameter < 6; parameter++ {
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.UnsafePointer]) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must use unsafe.Pointer for parameter %d", name, parameter)
+					return nil, nil, nil, nil, fmt.Errorf("coroutine channel try-or-park ABI %q must use unsafe.Pointer for parameter %d", name, parameter)
 				}
 			}
 			if !types.Identical(sig.Params().At(6).Type(), types.Typ[types.Uintptr]) {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must use uintptr element size", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel try-or-park ABI %q must use uintptr element size", name)
+			}
+			for parameter := 7; parameter < 9; parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine channel try-or-park ABI %q must use uint32 for parameter %d", name, parameter)
+				}
 			}
 		}
-		if name == coroChanResumeSymbolV1 {
+		if name == coroChanResumeSymbolV2 {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 1 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||

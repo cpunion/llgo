@@ -50,15 +50,6 @@ func __llgo_coro_frame_publish_v1(g, handle, header, storage unsafe.Pointer) {
 	}
 }
 
-//export __llgo_coro_frame_publish_v2
-func __llgo_coro_frame_publish_v2(g, handle, header, storage, metadata unsafe.Pointer) {
-	if !coro.PublishFrameV2(
-		(*coro.G)(g), handle, (*coro.HeaderV1)(header), storage, metadata,
-	) {
-		coroRuntimeAbort("invalid borrowable coroutine frame publication")
-	}
-}
-
 //go:noinline
 //export __llgo_coro_frame_publish_v3
 func __llgo_coro_frame_publish_v3(

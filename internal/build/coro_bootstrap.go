@@ -74,9 +74,9 @@ const (
 	coroNotifyPrepareOrAbortSymbolV2                            = "__llgo_coro_notify_prepare_or_abort_v2"
 	coroNotifyOneOrAbortSymbolV2                                = "__llgo_coro_notify_one_or_abort_v2"
 	coroNotifyAllOrAbortSymbolV2                                = "__llgo_coro_notify_all_or_abort_v2"
-	coroChanSendParkSymbolV1                                    = "__llgo_coro_chan_send_park_v1"
-	coroChanRecvParkSymbolV1                                    = "__llgo_coro_chan_recv_park_v1"
-	coroChanResumeSymbolV1                                      = "__llgo_coro_chan_resume_v1"
+	coroChanSendTryParkSymbolV2                                 = "__llgo_coro_chan_send_try_park_v2"
+	coroChanRecvTryParkSymbolV2                                 = "__llgo_coro_chan_recv_try_park_v2"
+	coroChanResumeSymbolV2                                      = "__llgo_coro_chan_resume_v2"
 	coroWorkerParkSymbolV1                                      = "__llgo_coro_worker_park_v1"
 	coroWorkerResumeSymbolV1                                    = "__llgo_coro_worker_resume_v1"
 	coroHostOperationParkSymbolV1                               = "__llgo_coro_host_operation_park_v1"
@@ -491,7 +491,7 @@ func selectCoroProgramManagedStepV2(
 		// executor, never as an interrupt callback, so a bounded plain stage may
 		// retain this flag. ThreadAffine remains rejected until the bootstrap G has
 		// an explicit locked-M/pinned-P contract.
-		const supportedPlain = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe
+		const supportedPlain = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe | coro.NeedsRuntimeContext
 		if unsupported := plan.Exec &^ supportedPlain; unsupported != 0 {
 			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: plain function %q target %q has unsupported execution constraints %s", label, fn.String(), plan.ID, unsupported)
 		}
@@ -508,7 +508,8 @@ func selectCoroProgramManagedStepV2(
 		// not a separate bootstrap execution protocol. Physical preflight proves
 		// and emits that body's defer/recover frame before this selector publishes
 		// its ordinary scheduler root descriptor.
-		const supportedCoroutine = coro.MayUnwind | coro.NeedsCleanupFrame | coro.NeedsPreempt | coro.IRQUnsafe
+		const supportedCoroutine = coro.MayUnwind | coro.NeedsCleanupFrame | coro.NeedsPreempt |
+			coro.IRQUnsafe | coro.NeedsRuntimeContext
 		if unsupported := plan.Exec &^ supportedCoroutine; unsupported != 0 {
 			trace := ""
 			if unsupported.Contains(coro.OpaqueExec) {
@@ -823,10 +824,10 @@ func coroProgramBootstrapHash(ctx *context, version, flags uint32, steps []coroP
 			coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
 			coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
 	}
-	write("channel-v1=" +
-		coroChanSendParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
-		coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
-		coroChanResumeSymbolV1 + "(g:ptr,state:ptr)->u32;" +
+	write("channel-v2=" +
+		coroChanSendTryParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr,state-id:u32,line:u32)->u32;" +
+		coroChanRecvTryParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr,state-id:u32,line:u32)->u32;" +
+		coroChanResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
 		"send-closed-fault=__llgo_coro_fault_prepare_v1:kind=3")
 	if ctx.buildConf.coroWorkerSupported() {
 		write("worker-v1=" +

@@ -2443,6 +2443,43 @@ func compileCoroDecisionFrameProbe(t *testing.T, target *llssa.Target, scalarGat
 	return coroFrameAllocationSize(t, ramp, prog.PointerSize()*8)
 }
 
+func TestCoroPhysicalABIRuntimeContextDescriptorProof(t *testing.T) {
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("coro_context_descriptor_probe", "llgo/test/coro-context-descriptor-probe")
+	defer pkg.Module().Dispose()
+	ctx := &context{prog: prog, pkg: pkg}
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+
+	var contextFreeHash [16]byte
+	for _, test := range []struct {
+		name string
+		exec coro.ExecFlags
+		want bool
+	}{
+		{name: "closed managed body", want: true},
+		{name: "ambient runtime primitive", exec: coro.NeedsRuntimeContext},
+		{name: "open target", exec: coro.OpaqueExec},
+		{name: "irq eligibility is orthogonal", exec: coro.IRQUnsafe, want: true},
+		{name: "thread affinity is orthogonal", exec: coro.ThreadAffine, want: true},
+		{name: "worker blocking is orthogonal", exec: coro.BlockForeign, want: true},
+	} {
+		abi := newCoroPhysicalABI(ctx, plannedFunctionSymbol{
+			name: test.name,
+			plan: coro.FunctionPlan{ID: coro.FunctionID("llgo.test.context." + test.name), Exec: test.exec},
+		}, sig)
+		got := abi.descriptorFlags&coro.FrameDescriptorNoRuntimeContextV1 != 0
+		if got != test.want {
+			t.Fatalf("%s context-free descriptor = %t, want %t (exec=%s)", test.name, got, test.want, test.exec)
+		}
+		if test.want {
+			contextFreeHash = abi.hash
+		} else if abi.hash == contextFreeHash {
+			t.Fatalf("%s descriptor hash did not bind runtime-context mode", test.name)
+		}
+	}
+}
+
 func compileCoroPreemptCountdownFrameProbe(t *testing.T, target *llssa.Target, gated bool) uint64 {
 	t.Helper()
 	var prog llssa.Program
@@ -3086,7 +3123,8 @@ func assertCoroRootFactoryV1Descriptor(t *testing.T, ir, hash, parentHash string
 			` = linkonce_odr unnamed_addr constant ` +
 			`\{ i32, i32, i64, i64, ` + uintptrType + `, ` + uintptrType +
 			`, \{ ptr, ` + uintptrType + ` \}, \{ ptr, ` + uintptrType + ` \} \} ` +
-			`\{ i32 1, i32 0, i64 ([^,]+), i64 ([^,]+),`,
+			`\{ i32 1, i32 ` + strconv.FormatUint(uint64(coro.FrameDescriptorNoRuntimeContextV1), 10) +
+			`, i64 ([^,]+), i64 ([^,]+),`,
 	)
 	frame := framePattern.FindStringSubmatch(ir)
 	if len(frame) != 3 {

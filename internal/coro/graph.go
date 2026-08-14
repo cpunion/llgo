@@ -93,7 +93,7 @@ func (k CallKind) validate() error {
 // produced by CallableContractExecConstraints. Keeping this narrow is what
 // prevents an invocation refinement from suppressing independent IRQUnsafe,
 // MayUnwind, or future non-contract constraints.
-const callableContractExecFlags = ThreadAffine | OpaqueExec
+const callableContractExecFlags = ThreadAffine | OpaqueExec | NeedsRuntimeContext
 
 // CallEdge is a statically resolved call graph edge.
 type CallEdge struct {

@@ -647,8 +647,19 @@ var Done chan uint32
 var Failed uint32
 
 //llgo:coro noblock
-//go:linkname gomaxprocs command-line-arguments.CoroGOMAXPROCS
-func gomaxprocs(int) int
+//go:linkname gomaxprocsRaw command-line-arguments.CoroGOMAXPROCS
+func gomaxprocsRaw(int) int
+
+//go:linkname schedulerYield llgo.coroYield
+func schedulerYield()
+
+func gomaxprocs(n int) int {
+	previous := gomaxprocsRaw(n)
+	if n > 0 && previous != n {
+		schedulerYield()
+	}
+	return previous
+}
 
 //llgo:coro noblock
 //go:linkname quotaReset C.__llgo_coro_native_fleet_e2e_quota_reset_v1
@@ -1728,7 +1739,10 @@ func TestCoroNativeFleetPeerSpawnReturnsToProgramE2E(t *testing.T) {
 }
 
 func TestCoroNativeFleetLockedGExitRetiresPhysicalPeerE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetLockedGExitRetiresPeerE2ESource, "locked-g-exit-retire-peer", false, 1)
+	// The fixture explicitly rejects the adopted program M and therefore needs
+	// one quota-backed peer M. GOMAXPROCS=1 deliberately starts no idle peer;
+	// locked program-owner succession at that limit is covered separately.
+	runCoroNativeFleetE2E(t, coroNativeFleetLockedGExitRetiresPeerE2ESource, "locked-g-exit-retire-peer", false, 2)
 }
 
 func TestCoroNativeFleetLockedGExitRetiresProgramOwnerE2E(t *testing.T) {
@@ -1893,10 +1907,10 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
 	defer prog.Dispose()
 
-	userObject, anchor, setupSymbol, checkSymbol := buildCoroSpawnNativeE2EUserSource(
-		t, prog, temp, source, enableChannel, cl.CoroNativeTargetCapabilities(),
+	userObject, anchor, setupSymbol, checkSymbol, capabilities := buildCoroSpawnNativeE2EUserSource(
+		t, prog, temp, source, enableChannel, cl.CoroNativeTargetCapabilities(), false,
 	)
-	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor)
+	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor, capabilities)
 	driverObject := buildCoroSpawnNativeE2EDriver(t, prog, temp, setupSymbol, checkSymbol)
 	runtimeArchive := cachedCoroNativeFleetE2ERuntimeArchive(t, clang, ar)
 

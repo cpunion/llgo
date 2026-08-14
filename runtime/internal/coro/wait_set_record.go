@@ -112,7 +112,7 @@ func validAffectedWaitQueueHeader(p *P) bool {
 
 func validActiveParkStateHeader(state *ParkState, ticket ParkTicket) bool {
 	if state == nil || state.ticket != ticket || !validParkTicket(ticket) ||
-		state.resolving ||
+		state.resolving || state.directChannel ||
 		!validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
 		state.cancelKind > ParkCancelShutdown || state.attached > state.expected {
 		return false

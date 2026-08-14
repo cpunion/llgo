@@ -55,8 +55,7 @@ func TestCoroZeroSizedChannelResultsUseKnownNonNilStorage(t *testing.T) {
 		t.Fatalf("verify zero-sized channel lowering before CoroSplit: %v\n%s", err, module.String())
 	}
 	recv := requireCoroPhysicalFunction(t, module, "foo.Recv").String()
-	if !strings.Contains(recv, "github.com/goplus/llgo/runtime/internal/runtime.CoroChanTryRecv") ||
-		!strings.Contains(recv, "@"+coroChanRecvParkHookV1) {
+	if !strings.Contains(recv, "@"+coroChanRecvTryParkHookV2) {
 		t.Fatalf("direct zero-sized receive did not use coroutine channel lowering:\n%s", recv)
 	}
 	selected := requireCoroPhysicalFunction(t, module, "foo.Select").String()
@@ -117,6 +116,7 @@ func compileCoroZeroSizedChannelFixture(t *testing.T) (llssa.Program, llssa.Pack
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 	})
 	if err != nil {
 		program.Dispose()

@@ -111,6 +111,48 @@ func TestOSThreadYieldHandoffRunsOnePeerAndRestoresOwnerFIFO(t *testing.T) {
 	runtime.KeepAlive(second.frame.memory)
 }
 
+func TestOSThreadYieldHandoffAllowsReplacementPeerRootExit(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	owner := newYieldingTestG(t, "locked-yield-exit-owner")
+	peer := newYieldingTestG(t, "locked-yield-exit-peer")
+	if !Enqueue(p, owner.g) || !Enqueue(p, peer.g) {
+		t.Fatal("enqueue locked-yield peer-exit fixture")
+	}
+	kind := commitLockedRunnerYield(t, driver, owner)
+	if required, ok := PrepareOSThreadSuspendHandoff(driver, owner.g, kind.Kind); !ok || !required {
+		t.Fatal("prepare locked-yield peer-exit handoff")
+	}
+
+	target := queueRunnerCheckDestroy(t, driver, peer)
+	step := runnerNextPhysicalAction(t, driver, peer, ActionCheckDestroy)
+	destroy, ok := Checked(p, peer.g, step.Action, true)
+	if !ok || destroy.Kind != ActionDestroy || peer.g.destroyTarget != target {
+		t.Fatalf("check replacement peer destroy = (%+v, %t)", destroy, ok)
+	}
+	releaseTestFrame(t, peer.g, peer.frame)
+	completed, ok := DestroyedBounded(p, peer.g, destroy)
+	if !ok || completed.Kind != ActionComplete || ActionRetiresPhysicalOwner(completed) ||
+		!CommitExecutorRunAction(driver, peer.g, completed) {
+		t.Fatalf("complete replacement peer = (%+v, %t)", completed, ok)
+	}
+	if p.osThreadLockOwner != owner.g ||
+		owner.g.osThreadLockDepth == 0 ||
+		peer.g.state != GDead {
+		t.Fatal("replacement peer exit disturbed locked owner")
+	}
+	if detached, returnable, valid := OSThreadSuspendHandoffStatus(driver); !valid ||
+		!detached || !returnable {
+		t.Fatalf("peer-exit locked-yield status = (%t, %t, %t)", detached, returnable, valid)
+	}
+	if !RestoreOSThreadSuspendHandoff(driver, owner.g) {
+		t.Fatal("restore locked-yield owner after peer exit")
+	}
+	_ = runnerNextPhysicalAction(t, driver, owner, ActionCheckResume)
+	runtime.KeepAlive(owner.frame.memory)
+	runtime.KeepAlive(peer.frame.memory)
+}
+
 func TestOSThreadSuspendHandoffUnlockedActionIsNoop(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)

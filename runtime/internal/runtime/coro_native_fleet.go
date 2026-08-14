@@ -898,9 +898,15 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 		coroNativeFleetDomainActiveV1,
 	)
 	driver := domain.driverOwnerV1()
-	if !valid || driver == nil || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || freshNow < now ||
-		!coro.EnterExecutorRunCompatibility(driver) {
+	if !valid || driver == nil || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || freshNow < now {
 		return coroNativeFleetOwnerWaitPlanV1{}, false
+	}
+	entered, compatibilityOK := coro.EnterExecutorRunStandbyCompatibility(driver)
+	if !compatibilityOK {
+		return coroNativeFleetOwnerWaitPlanV1{}, false
+	}
+	if !entered {
+		return coroNativeFleetOwnerWaitPlanV1{}, true
 	}
 	prepared, ok := coro.PrepareExecutorStandbyAt(driver, now)
 	if !ok {

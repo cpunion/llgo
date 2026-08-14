@@ -2964,7 +2964,7 @@ func (a *coroPhysicalPureSSAAudit) validateCloseBuiltin(call *ssa.Call) string {
 	if !a.allowImplicitNilFault {
 		return "close builtin requires the explicit-status panic ABI"
 	}
-	return a.requireFrozenExactRuntimeHelper(call, "CoroChanTryClose")
+	return a.requireFrozenExactRuntimeHelper(call, "CoroChanTryCloseTask")
 }
 
 // validateUnsafeDataBuiltin accepts only the two header projection intrinsics.

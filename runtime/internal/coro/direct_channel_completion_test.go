@@ -28,11 +28,14 @@ func TestDirectChannelCompletionInboxConcurrentReuse(t *testing.T) {
 		producers  = 8
 		iterations = 500
 	)
+	p := new(P)
 	driver := &ExecutorDriver{
 		magic: executorDriverMagic,
 		state: executorDriverActive,
+		p:     p,
 		route: RouteID(1),
 	}
+	p.executor = driver
 	stub := unsafe.Pointer(&driver.directChannelStub)
 	preemptStorePointer(&driver.directChannelHead, stub)
 	driver.directChannelTail = stub
@@ -102,5 +105,32 @@ func TestDirectChannelCompletionInboxConcurrentReuse(t *testing.T) {
 	}
 	if !executorDirectChannelInboxIdle(driver) || executorDirectChannelCompletionPending(driver) {
 		t.Fatal("direct channel completion inbox retained a node")
+	}
+}
+
+func TestDirectChannelCompletionPublishesToSleepingOwner(t *testing.T) {
+	p := new(P)
+	driver := &ExecutorDriver{
+		magic: executorDriverMagic,
+		state: executorDriverSleeping,
+		p:     p,
+		route: RouteID(1),
+	}
+	p.executor = driver
+	stub := unsafe.Pointer(&driver.directChannelStub)
+	preemptStorePointer(&driver.directChannelHead, stub)
+	driver.directChannelTail = stub
+
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionMatched),
+	}
+	if !PublishExecutorDirectChannelCompletion(driver, completion) {
+		t.Fatal("publish direct channel completion to sleeping owner")
+	}
+	got, ok := takeExecutorDirectChannelCompletion(driver)
+	if !ok || got != completion {
+		t.Fatalf("take sleeping-owner completion = (%p, %t), want (%p, true)", got, ok, completion)
 	}
 }

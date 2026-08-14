@@ -52,7 +52,11 @@ type FrameDescriptorV1 struct {
 	File        string
 }
 
-const FrameDescriptorTraceHiddenV1 uint32 = 1 << 0
+const (
+	FrameDescriptorTraceHiddenV1      uint32 = 1 << 0
+	FrameDescriptorNoRuntimeContextV1 uint32 = 1 << 1
+	frameDescriptorAllowedFlagsV1            = FrameDescriptorTraceHiddenV1 | FrameDescriptorNoRuntimeContextV1
+)
 
 // SuspendReason describes why a coroutine returned control to its scheduler.
 type SuspendReason uint16
@@ -89,6 +93,34 @@ const (
 	FrameDestroyed
 )
 
+// frameRuntimeContextMode is a publication-time cache of the immutable
+// compiler descriptor capability. Generated frames are always published via
+// PublishFrameV2/V3, so their hot resume path never has to decode Go strings
+// and descriptor flags again. Legacy/test PublishFrame callers retain the
+// unknown value and are validated from the live descriptor when queried.
+type frameRuntimeContextMode uint8
+
+const (
+	frameRuntimeContextUnknown frameRuntimeContextMode = iota
+	frameRuntimeContextRequired
+	frameRuntimeContextNotRequired
+)
+
+func descriptorRuntimeContextMode(descriptor unsafe.Pointer) (frameRuntimeContextMode, bool) {
+	if descriptor == nil {
+		return frameRuntimeContextUnknown, false
+	}
+	value := (*FrameDescriptorV1)(descriptor)
+	if value.Version != 1 || value.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
+		len(value.Function) == 0 {
+		return frameRuntimeContextUnknown, false
+	}
+	if value.Flags&FrameDescriptorNoRuntimeContextV1 != 0 {
+		return frameRuntimeContextNotRequired, true
+	}
+	return frameRuntimeContextRequired, true
+}
+
 const gMagic uint32 = 0x434f524f // "CORO"
 
 type pendingKind uint8
@@ -108,9 +140,16 @@ const (
 )
 
 type pendingTransition struct {
-	kind   pendingKind
-	from   *Frame
-	target *Frame
+	kind pendingKind
+	// directChannel is a one-resume capability produced only by the compact
+	// compiler/runtime channel transaction. It certifies that from, its wait
+	// record, and the adjacent ParkState were constructed together before the
+	// hchan waiter became visible. The bit is owner-only and is consumed on the
+	// immediately following llvm.coro.resume return; generic parks leave it
+	// clear and retain their complete graph audit.
+	directChannel bool
+	from          *Frame
+	target        *Frame
 }
 
 // Frame is scheduler-owned metadata. It lives at the beginning of the same
@@ -141,6 +180,7 @@ type Frame struct {
 	allocationSize uintptr
 	panicLine      uint32
 	state          FrameState
+	runtimeContext frameRuntimeContextMode
 	// retainPanicTrace is set only after a managed child publishes
 	// CompletionPanic. It occupies the padding before parent on pointer-aligned
 	// targets and transfers the destroyed allocation to the task trace chain.
@@ -304,8 +344,23 @@ func PublishFrame(g *G, handle unsafe.Pointer, header *HeaderV1, storage unsafe.
 func PublishFrameV2(
 	g *G, handle unsafe.Pointer, header *HeaderV1, storage, metadata unsafe.Pointer,
 ) bool {
+	if header == nil {
+		return false
+	}
+	mode, modeOK := descriptorRuntimeContextMode(header.Descriptor)
+	if !modeOK {
+		return false
+	}
 	if storage != nil {
-		return metadata != nil && PublishFrame(g, handle, header, storage)
+		if metadata == nil || !PublishFrame(g, handle, header, storage) {
+			return false
+		}
+		frame := FrameFromStorage(storage)
+		if frame == nil {
+			return false
+		}
+		frame.runtimeContext = mode
+		return true
 	}
 	if !ValidG(g) || handle == nil || header == nil || metadata == nil ||
 		metadata == unsafe.Pointer(g) || metadata == unsafe.Pointer(header) ||
@@ -322,6 +377,7 @@ func PublishFrameV2(
 	frame.header = header
 	frame.descriptor = header.Descriptor
 	frame.state = FrameInitialSuspended
+	frame.runtimeContext = mode
 	frame.borrowedStorage = true
 	frame.next = g.frames
 	g.frames = frame
@@ -622,7 +678,7 @@ func ActiveTraceFrame(g *G) (PanicTraceFrameSnapshot, bool) {
 	}
 	descriptor := (*FrameDescriptorV1)(frame.descriptor)
 	if descriptor.Version != 1 ||
-		descriptor.Flags & ^FrameDescriptorTraceHiddenV1 != 0 ||
+		descriptor.Flags & ^frameDescriptorAllowedFlagsV1 != 0 ||
 		len(descriptor.Function) == 0 {
 		return PanicTraceFrameSnapshot{}, false
 	}
@@ -740,7 +796,7 @@ func retainPanicTraceFrameMetadata(
 	}
 	descriptor := (*FrameDescriptorV1)(frame.descriptor)
 	if descriptor.Version != 1 ||
-		descriptor.Flags & ^FrameDescriptorTraceHiddenV1 != 0 ||
+		descriptor.Flags & ^frameDescriptorAllowedFlagsV1 != 0 ||
 		len(descriptor.Function) == 0 {
 		return false
 	}
@@ -908,7 +964,7 @@ func LoadPanicTraceFrame(g *G, cursor unsafe.Pointer) (snapshot PanicTraceFrameS
 	}
 	descriptor := (*FrameDescriptorV1)(frame.descriptor)
 	if descriptor.Version != 1 ||
-		descriptor.Flags & ^FrameDescriptorTraceHiddenV1 != 0 ||
+		descriptor.Flags & ^frameDescriptorAllowedFlagsV1 != 0 ||
 		len(descriptor.Function) == 0 {
 		return PanicTraceFrameSnapshot{}, nil, false
 	}

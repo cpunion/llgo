@@ -18,6 +18,7 @@ package cl
 
 import (
 	"strconv"
+	"sync"
 
 	llssa "github.com/goplus/llgo/ssa"
 	"go/types"
@@ -54,6 +55,14 @@ type emissionTypeKeyCacheKey struct {
 	typ  types.Type
 }
 
+// emissionTypeKeyCache is a self-contained, compilation-lifetime cache. It is
+// deliberately narrower than EmissionUniverse: structural type identity is a
+// reusable service, not another consumer of the whole-program plan authority.
+type emissionTypeKeyCache struct {
+	mu     sync.RWMutex
+	values map[emissionTypeKeyCacheKey]string
+}
+
 func structuralEmissionTypeKeyForMode(mode emissionTypeKeyMode, typ types.Type) string {
 	switch mode {
 	case emissionTypeKeyStrict:
@@ -69,62 +78,62 @@ func structuralEmissionTypeKeyForMode(mode emissionTypeKeyMode, typ types.Type) 
 	}
 }
 
-// cachedStructuralEmissionTypeKey retains a root digest only inside the
-// immutable emission universe which owns its go/types graph. This avoids both
-// repeated full-graph walks and a process-global cache that would keep every
-// prior compiler request alive. The computation remains outside the mutex so
-// independent package emitters do not serialize on a large first-use graph.
-func (u *EmissionUniverse) cachedStructuralEmissionTypeKey(
+// key retains a root digest only inside the cache which owns its go/types
+// graph. This avoids both repeated full-graph walks and a process-global cache
+// that would keep every prior compiler request alive. The computation remains
+// outside the mutex so independent package emitters do not serialize on a
+// large first-use graph.
+func (c *emissionTypeKeyCache) key(
 	mode emissionTypeKeyMode,
 	typ types.Type,
 ) string {
-	if u == nil {
+	if c == nil {
 		return structuralEmissionTypeKeyForMode(mode, typ)
 	}
 	if typ != nil {
 		typ = types.Unalias(typ)
 	}
 	key := emissionTypeKeyCacheKey{mode: mode, typ: typ}
-	u.emissionTypeKeyMu.RLock()
-	value, ok := u.emissionTypeKeys[key]
-	u.emissionTypeKeyMu.RUnlock()
+	c.mu.RLock()
+	value, ok := c.values[key]
+	c.mu.RUnlock()
 	if ok {
 		return value
 	}
 	value = structuralEmissionTypeKeyForMode(mode, typ)
-	u.emissionTypeKeyMu.Lock()
-	if u.emissionTypeKeys == nil {
-		u.emissionTypeKeys = make(map[emissionTypeKeyCacheKey]string)
+	c.mu.Lock()
+	if c.values == nil {
+		c.values = make(map[emissionTypeKeyCacheKey]string)
 	}
-	if existing, exists := u.emissionTypeKeys[key]; exists {
+	if existing, exists := c.values[key]; exists {
 		value = existing
 	} else {
-		u.emissionTypeKeys[key] = value
+		c.values[key] = value
 	}
-	u.emissionTypeKeyMu.Unlock()
+	c.mu.Unlock()
 	return value
 }
 
-func (u *EmissionUniverse) cachedStrictEmissionTypeKey(typ types.Type) string {
-	return u.cachedStructuralEmissionTypeKey(emissionTypeKeyStrict, typ)
+func (c *emissionTypeKeyCache) strict(typ types.Type) string {
+	return c.key(emissionTypeKeyStrict, typ)
 }
 
-func (u *EmissionUniverse) cachedStrictEmissionABITypeKey(typ types.Type) string {
-	return u.cachedStructuralEmissionTypeKey(emissionTypeKeyStrictABI, typ)
+func (c *emissionTypeKeyCache) strictABI(typ types.Type) string {
+	return c.key(emissionTypeKeyStrictABI, typ)
 }
 
-func (u *EmissionUniverse) cachedGoLinknameABITypeKey(typ types.Type) string {
-	return u.cachedStructuralEmissionTypeKey(emissionTypeKeyGoLinknameABI, typ)
+func (c *emissionTypeKeyCache) goLinknameABI(typ types.Type) string {
+	return c.key(emissionTypeKeyGoLinknameABI, typ)
 }
 
-func (u *EmissionUniverse) cachedCFunctionABITypeKey(typ types.Type) string {
-	return u.cachedStructuralEmissionTypeKey(emissionTypeKeyIdentityFreeABI, typ)
+func (c *emissionTypeKeyCache) cFunctionABI(typ types.Type) string {
+	return c.key(emissionTypeKeyIdentityFreeABI, typ)
 }
 
 func (p *context) cachedStrictEmissionTypeKey(typ types.Type) string {
 	if p != nil {
 		if universe := p.immutableEmissionUniverse(); universe != nil {
-			return universe.cachedStrictEmissionTypeKey(typ)
+			return universe.emissionTypeKeys.strict(typ)
 		}
 	}
 	return structuralEmissionTypeKey(typ)
@@ -133,7 +142,7 @@ func (p *context) cachedStrictEmissionTypeKey(typ types.Type) string {
 func (p *context) cachedStrictEmissionABITypeKey(typ types.Type) string {
 	if p != nil {
 		if universe := p.immutableEmissionUniverse(); universe != nil {
-			return universe.cachedStrictEmissionABITypeKey(typ)
+			return universe.emissionTypeKeys.strictABI(typ)
 		}
 	}
 	return structuralEmissionABITypeKey(typ)
@@ -142,7 +151,7 @@ func (p *context) cachedStrictEmissionABITypeKey(typ types.Type) string {
 func (p *context) cachedCFunctionABITypeKey(typ types.Type) string {
 	if p != nil {
 		if universe := p.immutableEmissionUniverse(); universe != nil {
-			return universe.cachedCFunctionABITypeKey(typ)
+			return universe.emissionTypeKeys.cFunctionABI(typ)
 		}
 	}
 	return structuralCFunctionABITypeKey(typ)

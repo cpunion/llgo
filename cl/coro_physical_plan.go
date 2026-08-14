@@ -517,6 +517,21 @@ func prepareCoroPhysicalFunctionPlan(
 			plan.instructions[instruction] = instructionPlan
 		}
 	}
+	if whole != nil {
+		for instruction, instructionPlan := range plan.instructions {
+			if instruction == nil || instruction.Block() == nil ||
+				!plan.reachableBlocks[instruction.Block()] ||
+				!coroPhysicalInstructionNeedsRuntimeContext(instructionPlan) {
+				continue
+			}
+			if !logical.Exec.Contains(coro.NeedsRuntimeContext) {
+				return nil, fmt.Errorf(
+					"physical %s operation at %q requires runtime context but logical exec is %s",
+					instructionPlan.control, instruction.String(), logical.Exec,
+				)
+			}
+		}
+	}
 	if logical.AtomicCostProof.ProvesOutcomePlain() {
 		if audit.universe == nil || audit.universe.coroProgramIR == nil {
 			return nil, fmt.Errorf("atomic-cost physical proof requires one frozen ProgramIR")
@@ -554,6 +569,20 @@ func prepareCoroPhysicalFunctionPlan(
 		plan.atomicCertificate = logical.AtomicCostCertificate
 	}
 	return plan, nil
+}
+
+// coroPhysicalInstructionNeedsRuntimeContext is the emission-side closure of
+// compiler-injected helpers whose requirement is not represented by an
+// ordinary Go call edge. ProgramIR seeds the corresponding source operation;
+// this independent gate prevents a stale/custom analyzer from issuing an
+// unsafe frame descriptor when those two projections disagree.
+func coroPhysicalInstructionNeedsRuntimeContext(plan coroPhysicalInstructionPlan) bool {
+	switch plan.operation {
+	case coroPhysicalOperationChannelSelectPark, coroPhysicalOperationChannelSelectTry:
+		return true
+	default:
+		return false
+	}
 }
 
 func (plan *coroPhysicalFunctionPlan) instructionPlan(instruction ssa.Instruction) (coroPhysicalInstructionPlan, error) {

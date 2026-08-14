@@ -505,9 +505,17 @@ func (driver *ExecutorDriver) Route() (RouteID, bool) {
 
 func publishExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {
 	if !validExecutorDriver(driver) || driver.state != state || driver.poll.phase != executorPollIdle ||
-		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
+		driver.run != (executorRunCursor{}) || !emptyOwnerLocalCompletion(&driver.local) ||
+		!idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
+	// The producer-owned direct-channel inbox is an independent durable work
+	// source. In particular, a producer may append to it after the owner arms
+	// the executor gate and while this bounded source-catalog scan is running.
+	// Source publication neither consumes nor interprets that inbox, so making
+	// its emptiness a scan invariant would turn legal ingress into corruption.
+	// Sleep admission observes it again after the scan and leaves IdleArmed;
+	// the unified runner then owns materialization.
 	return driver.sources.publishPass(driver.p, now, withDeadline)
 }
 
@@ -622,6 +630,20 @@ func leaveExecutorIdleForRun(driver *ExecutorDriver) bool {
 	return validExecutorDriver(driver)
 }
 
+// wakeableExecutorRunCursor accepts the producer-visible work which may arrive
+// after CommitSleep. The owner run cursor and owner-local reducer must still be
+// exactly idle, but a direct-channel producer is specifically allowed to have
+// appended an MPSC inbox node before it requests and wakes this executor.
+// Requiring emptyExecutorRunCursor here would turn that legal wake into a
+// fail-closed result because that stronger helper deliberately requires the
+// producer inbox to be empty for sleep admission and lifecycle transitions.
+func wakeableExecutorRunCursor(driver *ExecutorDriver) bool {
+	return driver != nil && driver.run == (executorRunCursor{}) &&
+		emptyOwnerLocalCompletion(&driver.local) &&
+		driver.directChannelTail != nil &&
+		preemptLoadPointer(&driver.directChannelHead) != nil
+}
+
 // PrepareExecutorSleep executes ArmIdle, an unconditional source fact scan,
 // and exact CommitSleep only when no runnable exists and parked Gs remain.
 // Source resolution stays in the unified runner. A true sleep result authorizes
@@ -629,8 +651,12 @@ func leaveExecutorIdleForRun(driver *ExecutorDriver) bool {
 // request won and the scheduler should continue without blocking.
 func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
-		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
+		driver.run != (executorRunCursor{}) || !emptyOwnerLocalCompletion(&driver.local) ||
+		!idleExecutorScheduler(driver.p) {
 		return false, false
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		return false, wakeableExecutorRunCursor(driver)
 	}
 	if runnableForOSThreadOwner(driver.p) || !HasWaiting(driver.p) {
 		return false, true
@@ -656,7 +682,8 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 		_, _ = driver.registry.LeaveIdle(driver.handle)
 		return false, false
 	}
-	hasWork := drained != 0 || runnableForOSThreadOwner(driver.p) || driver.sources.pending(driver.p) ||
+	hasWork := drained != 0 || !executorDirectChannelInboxIdle(driver) ||
+		runnableForOSThreadOwner(driver.p) || driver.sources.pending(driver.p) ||
 		driver.registry.ObserveRequested(driver.handle) || preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
 		if !leaveExecutorIdleForRun(driver) {
@@ -687,8 +714,15 @@ func prepareExecutorSleepAt(
 	allowEmpty bool,
 ) (prepared bool, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
-		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) || now < 0 {
+		driver.run != (executorRunCursor{}) || !emptyOwnerLocalCompletion(&driver.local) ||
+		!idleExecutorScheduler(driver.p) || now < 0 {
 		return false, false
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		if !wakeableExecutorRunCursor(driver) {
+			return false, false
+		}
+		return false, true
 	}
 	if runnableForOSThreadOwner(driver.p) || !allowEmpty && !HasWaiting(driver.p) {
 		return false, true
@@ -710,7 +744,8 @@ func prepareExecutorSleepAt(
 		_ = leaveExecutorIdle(driver)
 		return false, false
 	}
-	hasWork := scan.completed != 0 || runnableForOSThreadOwner(driver.p) ||
+	hasWork := scan.completed != 0 || !executorDirectChannelInboxIdle(driver) ||
+		runnableForOSThreadOwner(driver.p) ||
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
@@ -747,8 +782,15 @@ func PrepareExecutorStandbyAt(driver *ExecutorDriver, now int64) (prepared bool,
 // preparation and restores the active driver.
 func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadline int64, hasDeadline, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() ||
-		driver.state != executorDriverIdlePreparing || !emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
+		driver.state != executorDriverIdlePreparing || driver.run != (executorRunCursor{}) ||
+		!emptyOwnerLocalCompletion(&driver.local) || !idleExecutorScheduler(driver.p) {
 		return false, 0, false, false
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		if !wakeableExecutorRunCursor(driver) || !leaveExecutorIdleForRun(driver) {
+			return false, 0, false, false
+		}
+		return false, 0, false, true
 	}
 	if now < driver.prepareNow {
 		_ = leaveExecutorIdle(driver)
@@ -760,7 +802,8 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 		_ = leaveExecutorIdle(driver)
 		return false, 0, false, false
 	}
-	hasWork := scan.completed != 0 || runnableForOSThreadOwner(driver.p) ||
+	hasWork := scan.completed != 0 || !executorDirectChannelInboxIdle(driver) ||
+		runnableForOSThreadOwner(driver.p) ||
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
@@ -787,7 +830,7 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 
 func wakeExecutorRun(driver *ExecutorDriver, now int64, withDeadline bool) bool {
 	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() != withDeadline ||
-		driver.state != executorDriverSleeping || !emptyExecutorRunCursor(driver) ||
+		driver.state != executorDriverSleeping || !wakeableExecutorRunCursor(driver) ||
 		!idleExecutorScheduler(driver.p) || withDeadline && now < 0 {
 		return false
 	}

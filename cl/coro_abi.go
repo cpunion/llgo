@@ -125,7 +125,6 @@ const (
 	coroPhysicalABIVersionV1           uint32 = 1
 	coroFrameAllocHookV1                      = "__llgo_coro_frame_alloc_v1"
 	coroFramePublishHookV1                    = "__llgo_coro_frame_publish_v1"
-	coroFramePublishHookV2                    = "__llgo_coro_frame_publish_v2"
 	coroFramePublishHookV3                    = "__llgo_coro_frame_publish_v3"
 	coroAwaitPrepareHookV1                    = "__llgo_coro_await_prepare_v3"
 	coroAwaitInlineHookV1                     = "__llgo_coro_await_inline_v1"
@@ -207,6 +206,7 @@ const coroPreemptCheckpointStride uint64 = 2048
 type coroPhysicalABI struct {
 	version                 uint32
 	hash                    [16]byte
+	descriptorFlags         uint32
 	descriptorName          string
 	traceFunction           string
 	traceFile               string
@@ -291,6 +291,18 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		hasEnv = hidden == 1
 	}
 	version := coroPhysicalABIVersionV1
+	descriptorFlags := uint32(0)
+	// Absence of an execution flag is a capability only for a closed managed
+	// body. Unknown/open execution and any propagated getg/reentry primitive
+	// retain the ordinary per-resume runtime-context install. Blocking,
+	// affinity, preemption, and IRQ eligibility are independent scheduler
+	// dimensions; treating them as ambient-G requirements would discard an
+	// otherwise valid proof. Every remaining Go call is covered by the
+	// fixed-point plan (and by imported library summaries).
+	const contextUnproven = coro.NeedsRuntimeContext | coro.OpaqueExec
+	if entry.plan.External == coro.Defined && entry.plan.Exec&contextUnproven == 0 {
+		descriptorFlags |= coro.FrameDescriptorNoRuntimeContextV1
+	}
 	frameAllocHook := coroFrameAllocHookV1
 	frameFreeHook := coroFrameFreeHookV1
 	descriptorPrefix := coroDescriptorPrefixV1
@@ -375,9 +387,10 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare=%s\x00await-inline=%s\x00await-inline-finish=%s\x00await-inline-commit=%s\x00frame-destroy-commit=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare=%s\x00await-inline=%s\x00await-inline-finish=%s\x00await-inline-commit=%s\x00frame-destroy-commit=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
+		descriptorFlags,
 		traceFunction,
 		traceFile,
 		coroABI,
@@ -420,6 +433,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	return coroPhysicalABI{
 		version:                 version,
 		hash:                    hash,
+		descriptorFlags:         descriptorFlags,
 		descriptorName:          descriptorPrefix + hex.EncodeToString(hash[:]),
 		traceFunction:           traceFunction,
 		traceFile:               traceFile,
@@ -474,6 +488,7 @@ func (p *context) beginCoroBody(
 	descriptor := p.pkg.NewCoroFrameDescriptor(abi.descriptorName, llssa.CoroFrameDescriptorOptions{
 		Version:  abi.version,
 		ABIHash:  abi.hash,
+		Flags:    abi.descriptorFlags,
 		Result:   resultType,
 		Function: abi.traceFunction,
 		File:     abi.traceFile,
@@ -1027,7 +1042,9 @@ func (p *context) compileCoroPark(b llssa.Builder, args []llssa.Expr) {
 	}
 	state := b.Convert(b.Prog.VoidPtr(), args[0])
 	body.emitCoroParkOperation(p, b, coroParkOperation{
-		shouldSuspend: b.Prog.BoolVal(true),
+		prepare: func(active llssa.Builder, _, _ uint32) llssa.Expr {
+			return active.Prog.BoolVal(true)
+		},
 		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroKeyedParkHookV2, coroKeyedParkSignatureV2(), llssa.InC)
 			suspend.Call(
@@ -1508,7 +1525,7 @@ func validateCoroPhysicalABIForOwner(
 	// not an IRQ context. Preserve the bit in the plan/digest while allowing the
 	// CFG lowering to execute it. Thread affinity and opaque execution still
 	// require scheduler protocols that this ABI does not provide.
-	allowedExec := coro.MayUnwind | coro.NeedsPreempt | coro.IRQUnsafe
+	allowedExec := coro.MayUnwind | coro.NeedsPreempt | coro.IRQUnsafe | coro.NeedsRuntimeContext
 	if cleanupPlan != nil {
 		allowedExec |= coro.NeedsCleanupFrame
 	}
@@ -1662,7 +1679,7 @@ func validateCoroPhysicalABIForOwner(
 			}
 			wrapperOwner := universe.packages[wrapperInfo.owner]
 			structuralKey, err := builtinSpawnWrapperStructuralKey(
-				universe,
+				universe.emissionTypeKeys.strict,
 				wrapperInfo,
 				wrapperOwner,
 				universe.finalIdentity(spawn.Parent()),
@@ -2974,7 +2991,7 @@ func resolveCoroStaticPlainCall(plan *coro.SSAPlan, call ssa.CallInstruction) (*
 	validTrustedExternal := trustedInline && targetPlan.External == coro.ExternalUnknownForeign &&
 		targetPlan.Emission == coro.EmitExternal && targetPlan.Primary == coro.PrimaryExternal
 	effectiveExec := targetPlan.Exec
-	allowedExec := coro.MayUnwind | coro.IRQUnsafe
+	allowedExec := coro.MayUnwind | coro.IRQUnsafe | coro.NeedsRuntimeContext
 	if trustedInline {
 		targetCertificate, certified := plan.CallableContractCertificate(target)
 		if !certified {
@@ -3005,7 +3022,7 @@ func resolveCoroStaticPlainCall(plan *coro.SSAPlan, call ssa.CallInstruction) (*
 		}
 		defaultExec := coro.CallableContractExecConstraints(targetCertificate.Contract)
 		selectedExec := coro.CallableContractExecConstraints(targetCertificate.TrustedInlineContract)
-		const contractExec = coro.ThreadAffine | coro.OpaqueExec
+		const contractExec = coro.ThreadAffine | coro.OpaqueExec | coro.NeedsRuntimeContext
 		if unsupported := (defaultExec | selectedExec) &^ contractExec; unsupported != 0 {
 			return nil, coro.FunctionPlan{}, fmt.Errorf("trusted-inline target projected non-contract execution flags %s", unsupported)
 		}

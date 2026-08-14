@@ -508,7 +508,7 @@ func validReusableDirectChannelParkState(state *ParkState) bool {
 		return *state == (ParkState{})
 	case parkDelivered:
 		return validParkTicket(state.ticket) && state.expected == 0 && state.attached == 0 &&
-			state.seed == 0 && !state.hasDefault && state.cancelKind == ParkCancelNone &&
+			state.seed == 0 && !state.hasDefault && !state.directChannel && state.cancelKind == ParkCancelNone &&
 			state.outcome == ParkOutcomePending && state.winnerCase == 0 &&
 			state.winnerID == (OperationID{}) && state.winnerRecord == nil && state.head == nil
 	case parkConsumed:

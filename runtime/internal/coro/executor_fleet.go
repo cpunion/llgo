@@ -557,14 +557,13 @@ func restoreRunnableDemandAfterFailedClaim(slot *executorFleetSlot) bool {
 // source owner after a stable physical action. A source normally exports about
 // half of its local runnable queue, bounded by one destination mailbox, so one
 // continuation remains local and a lone G cannot bounce between idle Ps. A
-// never-run initial frame may use an active route even before that route
-// publishes demand, but only while it is genuine surplus: the sole runnable is
-// the local handoff after its parent parks and exporting it would turn a cheap
-// scheduler switch into a cross-thread wake. Source links remain owner-only:
-// an idle route publishes only a scalar demand and never concurrently reads or
-// mutates the victim queue. Target selection scans the fixed route catalog beginning
-// after the source route; a demanded target is protected by its route producer
-// lease until mailbox publication and executor request have both completed.
+// Source links remain owner-only: an idle route publishes only a scalar demand
+// and never concurrently reads or mutates the victim queue. Requiring that
+// demand for every transfer is also a physical-service capability: a logical
+// route may be bound before its target starts an M, host turn, or interrupt
+// executor. Target selection scans the fixed route catalog beginning after the
+// source route; a demanded target is protected by its route producer lease
+// until mailbox publication and executor request have both completed.
 //
 // An empty valid result is ordinary: there was no demand, no surplus, or every
 // demanded mailbox was transiently contended/full. ok=false denotes a broken
@@ -597,8 +596,6 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	if prepared == 0 {
 		return RunnableDistribution{}, true
 	}
-	candidate := candidates[0]
-	initialCandidate := initialPNeutralRunnableState(candidate)
 	for offset := uint32(1); offset < ExecutorFleetCapacity; offset++ {
 		index := (sourceHandle.Route - 1 + offset) % ExecutorFleetCapacity
 		target := &fleet.slots[index]
@@ -637,34 +634,6 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 			Request:  request,
 		}
 		return distribution, distribution.Valid()
-	}
-	if initialCandidate {
-		var initial [RunnableTransferMailboxCapacity]*G
-		initial[0] = candidate
-		for offset := uint32(1); offset < ExecutorFleetCapacity; offset++ {
-			index := (sourceHandle.Route - 1 + offset) % ExecutorFleetCapacity
-			target := &fleet.slots[index]
-			if preemptLoad(&target.state) != uint32(executorFleetSlotActive) ||
-				target.handle == sourceHandle {
-				continue
-			}
-			id, count, request, published := fleet.publishPreparedPNeutralRunnableBatchAndRequest(
-				target.handle,
-				source,
-				&initial,
-				1,
-			)
-			if !published {
-				continue
-			}
-			distribution = RunnableDistribution{
-				Target:   target.handle,
-				Transfer: id,
-				Count:    count,
-				Request:  request,
-			}
-			return distribution, distribution.Valid()
-		}
 	}
 	return RunnableDistribution{}, true
 }

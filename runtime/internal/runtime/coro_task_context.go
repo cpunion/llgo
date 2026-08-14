@@ -36,9 +36,24 @@ func coroRuntimeContextParent(task, parent *coro.G) (*g, bool) {
 			return nil, false
 		}
 		parentG = &parentContext.g
-		if parentG.m == nil || parentG.m.curg != parentG || parentG.m.p == nil ||
-			parentG.m.p.m != parentG.m || readgstatus(parentG) != _Grunning ||
-			readpstatus(parentG.m.p) != _Prunning {
+		// Spawn already carries and validates the exact scheduler-owned parent
+		// task. Child initialization consumes only its immutable goid, so it does
+		// not require the logical runtime G to be installed in pthread TLS. A
+		// context-free parent remains detached/runnable during the physical
+		// resume; legacy or genuinely context-dependent callers remain attached
+		// and running. Reject every mixed graph rather than inferring ownership
+		// from ambient runtime state.
+		switch readgstatus(parentG) {
+		case _Grunnable:
+			if parentG.m != nil {
+				return nil, false
+			}
+		case _Grunning:
+			if parentG.m == nil || parentG.m.curg != parentG || parentG.m.p == nil ||
+				parentG.m.p.m != parentG.m || readpstatus(parentG.m.p) != _Prunning {
+				return nil, false
+			}
+		default:
 			return nil, false
 		}
 	}
@@ -127,17 +142,26 @@ func validCoroRuntimeTaskContext(task *coro.G, ctx *coroRuntimeContext) bool {
 	return ctx.g.isMain
 }
 
-// coroEnterRuntimeContext installs task's runtime G only for the physical
+// coroCaptureRuntimeContextV1 snapshots the executor context once at a stable
+// scheduler boundary. A bounded run slice always restores this exact context
+// after every physical resume, so its later actions do not need another
+// pthread TLS lookup merely to rediscover the same owner.
+func coroCaptureRuntimeContextV1() unsafe.Pointer {
+	return unsafe.Pointer(getg())
+}
+
+// coroEnterRuntimeContextFrom installs task's runtime G only for the physical
 // llvm.coro.resume interval. A synchronous C-to-Go reentry resumes a child
 // frame of the same logical G while its parent resume remains active below C;
-// that exact nested case borrows the existing install.
-func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool) {
+// that exact nested case borrows the existing install. current is captured at
+// the surrounding stable scheduler boundary and is restored by leave.
+func coroEnterRuntimeContextFrom(task *coro.G, currentRaw unsafe.Pointer) (coroRuntimeContextActivationV1, bool) {
 	ctx := (*coroRuntimeContext)(coro.TaskLocal(task))
 	if !validCoroRuntimeTaskContext(task, ctx) {
 		return coroRuntimeContextActivationV1{}, false
 	}
 	gp := &ctx.g
-	current := getg()
+	current := (*g)(currentRaw)
 	if current == gp {
 		if gp.m == nil || gp.m.curg != gp || gp.m.p == nil || gp.m.p.m != gp.m ||
 			readgstatus(gp) != _Grunning || readpstatus(gp.m.p) != _Prunning {
@@ -160,13 +184,23 @@ func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool
 	return coroRuntimeContextActivationV1{previous: unsafe.Pointer(current)}, true
 }
 
+func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool) {
+	return coroEnterRuntimeContextFrom(task, coroCaptureRuntimeContextV1())
+}
+
 func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivationV1) bool {
 	ctx := (*coroRuntimeContext)(coro.TaskLocal(task))
 	if !validCoroRuntimeTaskContext(task, ctx) {
 		return false
 	}
 	gp := &ctx.g
-	if getg() != gp || gp.m == nil || gp.m.curg != gp || gp.m.p == nil ||
+	// Enter is the only operation which installs this logical G, and every
+	// nested C-to-Go entry must borrow and restore the same installation before
+	// llvm.coro.resume returns. No other runtime path writes the getg slot in
+	// this interval. Re-reading pthread TLS here therefore proves no additional
+	// state; the exact G/M/P graph and status below are the authoritative
+	// post-resume certificate, while setg(previous) remains the checked restore.
+	if gp.m == nil || gp.m.curg != gp || gp.m.p == nil ||
 		gp.m.p.m != gp.m || readgstatus(gp) != _Grunning || readpstatus(gp.m.p) != _Prunning {
 		return false
 	}

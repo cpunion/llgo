@@ -393,10 +393,9 @@ func completeRecvWaiterWithContext(
 		return commitDirectCoroRecvWaiterLockedV1(w, src, eltSize, status, context)
 	}
 	if w.coro != nil {
-		if context != nil {
-			return commitCoroRecvWaiterLockedWithContext(w, src, eltSize, status, *context)
-		}
-		return commitCoroRecvWaiterLocked(w, src, eltSize, status)
+		return commitCoroRecvWaiterLockedWithContext(
+			w, src, eltSize, status, coroChanExternalContextValueV1(context),
+		)
 	}
 	if !claimWaiter(w) {
 		return coroChanMatchDiscarded
@@ -411,7 +410,8 @@ func completeRecvWaiterWithContext(
 }
 
 func completeRecvWaiter(w *chanWaiter, src unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {
-	return completeRecvWaiterWithContext(w, src, eltSize, status, nil)
+	context := currentCoroChannelExternalContextV1()
+	return completeRecvWaiterWithContext(w, src, eltSize, status, &context)
 }
 
 func completeSendWaiterWithContext(
@@ -423,10 +423,9 @@ func completeSendWaiterWithContext(
 		return commitDirectCoroSendWaiterLockedV1(w, nil, w.size, status, context)
 	}
 	if w.coro != nil {
-		if context != nil {
-			return commitCoroSendWaiterLockedWithContext(w, nil, w.size, status, *context)
-		}
-		return commitCoroSendWaiterLocked(w, nil, w.size, status)
+		return commitCoroSendWaiterLockedWithContext(
+			w, nil, w.size, status, coroChanExternalContextValueV1(context),
+		)
 	}
 	if !claimWaiter(w) {
 		return coroChanMatchDiscarded
@@ -436,7 +435,8 @@ func completeSendWaiterWithContext(
 }
 
 func completeSendWaiter(w *chanWaiter, status waitStatus) coroChanMatchResult {
-	return completeSendWaiterWithContext(w, status, nil)
+	context := currentCoroChannelExternalContextV1()
+	return completeSendWaiterWithContext(w, status, &context)
 }
 
 func recvFromSendWaiterWithContext(
@@ -449,10 +449,9 @@ func recvFromSendWaiterWithContext(
 		return commitDirectCoroSendWaiterLockedV1(w, dst, eltSize, waitSendOK, context)
 	}
 	if w.coro != nil {
-		if context != nil {
-			return commitCoroSendWaiterLockedWithContext(w, dst, eltSize, waitSendOK, *context)
-		}
-		return commitCoroSendWaiterLocked(w, dst, eltSize, waitSendOK)
+		return commitCoroSendWaiterLockedWithContext(
+			w, dst, eltSize, waitSendOK, coroChanExternalContextValueV1(context),
+		)
 	}
 	if !claimWaiter(w) {
 		return coroChanMatchDiscarded
@@ -463,7 +462,8 @@ func recvFromSendWaiterWithContext(
 }
 
 func recvFromSendWaiter(dst unsafe.Pointer, w *chanWaiter, eltSize int) coroChanMatchResult {
-	return recvFromSendWaiterWithContext(dst, w, eltSize, nil)
+	context := currentCoroChannelExternalContextV1()
+	return recvFromSendWaiterWithContext(dst, w, eltSize, &context)
 }
 
 func dequeueRecvAndCompleteWithContext(
@@ -494,7 +494,8 @@ func dequeueRecvAndCompleteWithContext(
 }
 
 func dequeueRecvAndComplete(p *Chan, src unsafe.Pointer, eltSize int, status waitStatus) bool {
-	return dequeueRecvAndCompleteWithContext(p, src, eltSize, status, nil)
+	context := currentCoroChannelExternalContextV1()
+	return dequeueRecvAndCompleteWithContext(p, src, eltSize, status, &context)
 }
 
 func dequeueSendAndRecvWithContext(
@@ -709,12 +710,10 @@ const (
 	coroChanCloseClosed
 )
 
-// CoroChanTryClose performs the complete owner-local close transaction without
-// raising a Go panic. The compiler maps the two ordinary language errors to
-// its explicit-status terminal path, so neither can unwind through a live LLVM
-// coroutine frame. Closing wakes receivers, senders, and select candidates via
-// the same channel operation source used by send/receive cancellation.
-func CoroChanTryClose(p *Chan) uint32 {
+func coroChanTryCloseWithContext(
+	p *Chan,
+	context *coroChanExternalCommitContextV1,
+) uint32 {
 	if p == nil {
 		return coroChanCloseNil
 	}
@@ -727,18 +726,38 @@ func CoroChanTryClose(p *Chan) uint32 {
 	// Claim contention can temporarily leave buffered data behind a queued
 	// receiver. Preserve Go's close ordering: publish those values before the
 	// remaining receivers observe the closed zero value.
-	if !reconcileBufferedChanLocked(p, false) {
+	if !reconcileBufferedChanLocked(p, false, context) {
 		p.mutex.Unlock()
 		coroRuntimeAbort("invalid coroutine buffered channel close reconciliation")
 		return coroChanCloseClosed
 	}
-	if !drainClosedChanWaitersLocked(p) {
+	if !drainClosedChanWaitersLocked(p, context) {
 		p.mutex.Unlock()
 		coroRuntimeAbort("invalid coroutine channel close completion")
 		return coroChanCloseClosed
 	}
 	p.mutex.Unlock()
 	return coroChanCloseOK
+}
+
+// CoroChanTryClose performs the complete owner-local close transaction without
+// raising a Go panic. The compiler maps the two ordinary language errors to
+// its explicit-status terminal path, so neither can unwind through a live LLVM
+// coroutine frame. Closing wakes receivers, senders, and select candidates via
+// the same channel operation source used by send/receive cancellation.
+func CoroChanTryClose(p *Chan) uint32 {
+	context := currentCoroChannelExternalContextV1()
+	return coroChanTryCloseWithContext(p, &context)
+}
+
+// CoroChanTryCloseTask is the compiler-owned close boundary. The hidden task
+// parameter closes the owner-local completion transaction without consulting
+// ambient runtime state, allowing whole-program analysis to prove that a
+// physical caller is runtime-context independent. Ordinary ChanClose retains
+// CoroChanTryClose and its ambient compatibility path.
+func CoroChanTryCloseTask(g unsafe.Pointer, p *Chan) uint32 {
+	context := coroChannelExternalContextForTaskV1((*coro.G)(g))
+	return coroChanTryCloseWithContext(p, &context)
 }
 
 func ChanClose(p *Chan) {
@@ -754,7 +773,10 @@ func ChanClose(p *Chan) {
 	}
 }
 
-func dequeueClosedRecvStepLocked(p *Chan) coroChanQueueStepV1 {
+func dequeueClosedRecvStepLocked(
+	p *Chan,
+	context *coroChanExternalCommitContextV1,
+) coroChanQueueStepV1 {
 	if p == nil || !p.closed {
 		return coroChanQueueInvalidV1
 	}
@@ -762,7 +784,9 @@ func dequeueClosedRecvStepLocked(p *Chan) coroChanQueueStepV1 {
 	if w == nil {
 		return coroChanQueueIdleV1
 	}
-	switch result := completeRecvWaiter(w, nil, p.elemsize, waitRecvClosed); result {
+	switch result := completeRecvWaiterWithContext(
+		w, nil, p.elemsize, waitRecvClosed, context,
+	); result {
 	case coroChanMatchCommitted:
 		return coroChanQueueCommittedV1
 	case coroChanMatchDiscarded:
@@ -775,7 +799,10 @@ func dequeueClosedRecvStepLocked(p *Chan) coroChanQueueStepV1 {
 	}
 }
 
-func dequeueClosedSendStepLocked(p *Chan) coroChanQueueStepV1 {
+func dequeueClosedSendStepLocked(
+	p *Chan,
+	context *coroChanExternalCommitContextV1,
+) coroChanQueueStepV1 {
 	if p == nil || !p.closed {
 		return coroChanQueueInvalidV1
 	}
@@ -783,7 +810,7 @@ func dequeueClosedSendStepLocked(p *Chan) coroChanQueueStepV1 {
 	if w == nil {
 		return coroChanQueueIdleV1
 	}
-	switch result := completeSendWaiter(w, waitSendClosed); result {
+	switch result := completeSendWaiterWithContext(w, waitSendClosed, context); result {
 	case coroChanMatchCommitted:
 		return coroChanQueueCommittedV1
 	case coroChanMatchDiscarded:
@@ -801,9 +828,12 @@ func dequeueClosedSendStepLocked(p *Chan) coroChanQueueStepV1 {
 // eventually resume and remove that exact node. Its resume tail calls this
 // helper again, so ordinary waiters behind it cannot remain stranded on an
 // already-closed channel.
-func drainClosedChanWaitersLocked(p *Chan) bool {
+func drainClosedChanWaitersLocked(
+	p *Chan,
+	context *coroChanExternalCommitContextV1,
+) bool {
 	for {
-		switch dequeueClosedRecvStepLocked(p) {
+		switch dequeueClosedRecvStepLocked(p, context) {
 		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
 			continue
 		case coroChanQueueBlockedV1:
@@ -817,7 +847,7 @@ func drainClosedChanWaitersLocked(p *Chan) bool {
 
 send:
 	for {
-		switch dequeueClosedSendStepLocked(p) {
+		switch dequeueClosedSendStepLocked(p, context) {
 		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
 			continue
 		case coroChanQueueIdleV1, coroChanQueueBlockedV1:

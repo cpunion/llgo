@@ -28,14 +28,14 @@ import (
 )
 
 // SummarySchema is the experimental wire schema for deterministic plan
-// snapshots. Version v7 is intentionally not an archive ABI: producer
+// snapshots. This schema is intentionally not an archive ABI: producer
 // artifacts use the separate LibraryEffectSummarySchema, and cache identity
 // uses PlanDigestSchema.
-const SummarySchema = "llgo.coro.plan.v8"
+const SummarySchema = "llgo.coro.plan.v9"
 
 // SummaryMetadata identifies ABI and target properties that affect an
 // experimental plan snapshot. Empty fields are permitted during early
-// analysis. This v7 type must not be used as an archive compatibility record;
+// analysis. This type must not be used as an archive compatibility record;
 // LibraryEffectMetadata owns that strict target/ABI contract.
 type SummaryMetadata struct {
 	CoroABI      string `json:"coro_abi"`

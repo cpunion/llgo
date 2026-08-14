@@ -20,6 +20,21 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
+func coroTargetBeginRunSliceV1(
+	*coro.P,
+	*coro.ExecutorDriver,
+) (coroRunTargetCapabilityV1, bool) {
+	return coroRunTargetCapabilityV1{}, true
+}
+
+func coroTargetReadyDistributionV1(coroRunTargetCapabilityV1) (distribute, stop, ok bool) {
+	return false, false, true
+}
+
+func coroTargetRefreshRunSliceV1(coroRunTargetCapabilityV1) (distribute, restart, ok bool) {
+	return false, false, true
+}
+
 func coroTargetAfterStableRunActionV1(*coro.P, *coro.ExecutorDriver) bool {
 	return true
 }
@@ -66,7 +81,7 @@ func coroTargetHandleOSThreadSuspendV1(
 	return false
 }
 
-func coroTargetStopForOSThreadReturnV1(*coro.ExecutorDriver) (bool, bool) {
+func coroTargetStopForPhysicalReturnV1(*coro.ExecutorDriver) (bool, bool) {
 	return false, true
 }
 

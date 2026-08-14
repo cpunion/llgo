@@ -77,7 +77,9 @@ func TestCoroBoundedRunSliceAuditsImmutableDriverOncePerHostEntry(t *testing.T) 
 		"func (capability *ExecutorRunSliceCapability) Next(",
 		"func (capability *ExecutorRunSliceCapability) NextBeforeTime(",
 		"func (capability *ExecutorRunSliceCapability) NextAt(",
-		"return nextExecutorRunStepAtValidated(driver, now, withDeadline)",
+		"return nextExecutorRunStepAtValidated(driver, now, withDeadline, false)",
+		"func (capability *ExecutorRunSliceCapability) NextActionCombined()",
+		"func (capability *ExecutorRunSliceCapability) NextAtCombined(now int64)",
 	} {
 		if !strings.Contains(core, marker) {
 			t.Errorf("%s lacks bounded run-slice capability marker %q", corePath, marker)
@@ -88,7 +90,8 @@ func TestCoroBoundedRunSliceAuditsImmutableDriverOncePerHostEntry(t *testing.T) 
 	program := read(programPath)
 	for _, marker := range []string{
 		"run, runOK := coro.BeginExecutorRunSlice(driver)",
-		"coroProgramNextRunStepV1(driver, &run)",
+		"run.NextActionCombined()",
+		"coroProgramNextRunStepV1(driver, &run, combineDispatch)",
 	} {
 		if !strings.Contains(program, marker) {
 			t.Errorf("%s lacks bounded program-run marker %q", programPath, marker)
@@ -99,7 +102,9 @@ func TestCoroBoundedRunSliceAuditsImmutableDriverOncePerHostEntry(t *testing.T) 
 	fleet := read(fleetPath)
 	for _, marker := range []string{
 		"run, runOK := coro.BeginExecutorRunSlice(driver)",
-		"step, nextOK := run.NextAt(now)",
+		"run.NextActionCombined()",
+		"step, nextOK = run.NextAtCombined(now)",
+		"step, nextOK = run.NextAt(now)",
 	} {
 		if !strings.Contains(fleet, marker) {
 			t.Errorf("%s lacks bounded fleet-run marker %q", fleetPath, marker)

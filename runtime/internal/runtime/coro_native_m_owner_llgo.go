@@ -338,7 +338,13 @@ func coroNativeMInitialPeerV1(
 		coroNativeAtomicLoadV1(&directory.active[handle.Route-1]) == slot
 }
 
-func coroNativeMCurrentOwnerV1(
+// coroNativeMActiveOwnerV1 resolves the directory owner which is allowed to
+// execute this driver's route. It deliberately proves only logical directory
+// ownership: callers which are about to mutate physical-thread state must add
+// the pthread identity check in coroNativeMCurrentOwnerV1. Keeping these two
+// proofs separate lets an ordinary bounded run slice detect the exceptional
+// replacement-return capability without calling pthread_self/equal.
+func coroNativeMActiveOwnerV1(
 	driver *coro.ExecutorDriver,
 ) (
 	owner *coroNativeMOwnerV1,
@@ -352,8 +358,7 @@ func coroNativeMCurrentOwnerV1(
 	}
 	slot = coroNativeAtomicLoadV1(&coroNativeMDirectoryV1State.active[uint32(route)-1])
 	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
-	if !ownerOK || owner.handle != domain.handle || owner.self == nil ||
-		pthread.Equal(owner.self, pthread.Self()) == 0 {
+	if !ownerOK || owner.handle != domain.handle || owner.self == nil {
 		return nil, nil, 0, 0, false
 	}
 	switch coroNativeMOwnerLifecycleLoadV1(owner) {
@@ -396,6 +401,21 @@ func coroNativeMCurrentOwnerV1(
 		}
 		epoch = owner.ownerEpoch
 	default:
+		return nil, nil, 0, 0, false
+	}
+	return owner, domain, slot, epoch, true
+}
+
+func coroNativeMCurrentOwnerV1(
+	driver *coro.ExecutorDriver,
+) (
+	owner *coroNativeMOwnerV1,
+	domain *coroNativeFleetDomainV1,
+	slot, epoch uint32,
+	ok bool,
+) {
+	owner, domain, slot, epoch, ok = coroNativeMActiveOwnerV1(driver)
+	if !ok || pthread.Equal(owner.self, pthread.Self()) == 0 {
 		return nil, nil, 0, 0, false
 	}
 	return owner, domain, slot, epoch, true

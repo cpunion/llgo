@@ -1541,3 +1541,146 @@ gave 1,586,785,281 versus 312,146,532 median retired instructions (5.08x) and
 1,561 retired instructions per rendezvous. The complete core and race/shuffle
 gates, native/WASM typed-hchan gates, and LLVM 22 native/WASM32 lowering gate
 remain passing.
+
+#### Issued-action scheduler and scalar-resume checkpoint
+
+The final 2026-08-14 optimization pass follows one exact same-owner channel
+handoff from hchan commit through coroutine resume. The root cause was no
+longer one expensive function. It was duplicated interpretation at each layer:
+the scheduler rebuilt ready headers and compatibility context, the runtime
+reopened execution ownership around each action, the completion path decoded
+the same driver/route/source relation after hchan had already proved it, and
+the compiler/runtime resume ABI returned an aggregate whose fields represented
+one small finite outcome.
+
+The retained implementation keeps one managed execution lease across adjacent
+actions, dispatches the already validated ready FIFO directly, and enters the
+same-owner issued-completion branch before reconstructing compatibility
+context. The exact V2 resume ABI consumes a single `uint32` word containing
+outcome class and payload; the typed aggregate wrapper remains only as an
+internal test/compatibility helper. OS-thread suspend bookkeeping is skipped
+unless the task has actually acquired thread-lock depth. These are projections
+of the existing scheduler, completion, and cancellation state machines, not a
+second protocol. Multi-case select, cross-owner completion, cancellation, and
+uncertain shapes still take the durable path.
+
+A review follow-up then restored the intended architecture boundaries without
+changing the hot transaction. The shared park emitter now owns static state-ID
+allocation and accepts one typed prepare callback, so fused channel try-or-park
+does not expose `nextState`, instruction counters, or a `parkPrepared` mode in
+the feature lowerer. Structural type-key memoization is a standalone
+compilation-lifetime component rather than twelve new direct consumers of
+`EmissionUniverse`. The architecture gate therefore remains at 296 direct
+plan-authority observations, legacy Park steps remain zero, raw helper
+physical-type observations remain zero, and physical-body capability access
+drops from 35 to 33. The unconsumed external `frame_publish_v2` ABI was removed;
+V3 is the sole current metadata-bearing publication ABI.
+
+The same no-import `pure_handoff` source performs 100,000 request/ack round
+trips, or 200,000 successful unbuffered rendezvous. Both binaries are stripped;
+LLGo uses LLVM 22.1.8 with `-O3 -lto=full`. The table is a fresh nine-run
+same-host measurement after the architecture review. The first LLGo run and
+first Go run show ordinary cold-start counter elevation; medians and complete
+ranges are reported.
+
+| Pure handoff metric | Go 1.26.5 | LLGo coroutine | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| file bytes | 1,161,970 | 932,752 | 0.803x |
+| retired instructions, median | 308,400,621 | 347,676,747 | 1.127x |
+| retired instructions, range | 308,281,359--313,822,784 | 347,611,493--350,025,044 | |
+| cycles, median | 68,603,883 | 58,946,249 | 0.859x |
+| cycles, range | 66,893,098--74,009,098 | 57,796,591--62,107,540 | |
+| peak footprint, median | 2,245,136 | 2,769,208 | 1.233x |
+| maximum RSS, median | 3,194,880 | 3,801,088 | 1.190x |
+
+LLGo still retires 12.7% more instructions because each rendezvous explicitly
+advances a stackless continuation and its scheduler state. On this CPU that is
+not a remaining throughput deficit: its median cycle count is 14.1% below Go,
+and the stripped artifact is 19.7% smaller. Relative to the roughly
+1.59-billion-instruction hchan-certificate checkpoint, the cumulative issued
+action, lease, scheduler, completion, and resume work removes about 78% of the
+remaining instructions. The previously reported broad “LLGo is slower than
+Go” handoff gap is therefore closed for this single-executor core case.
+
+Build configuration is material. Rebuilding the same source with full LTO but
+the default optimization level retired about 350.4 million instructions; with
+both full LTO and `-O3`, it retired about 347.7 million. Disabling LTO produced
+an 810,512-byte artifact but retired about 394.2 million instructions, roughly
+13.4% more than the matched `-O3 -lto=full` binary. Cross-package inlining of
+the compiler/runtime transaction is consequently a required performance
+profile today, not merely a benchmark decoration. Making equivalent
+optimization available without full LTO is future build-pipeline work; it is
+not evidence of a missing scheduler mechanism.
+
+#### Stable-boundary scheduler review follow-up
+
+A final commit review found that the remaining retired-instruction gap was not
+the LLVM coroutine operation itself. Four already-linearized facts were being
+re-observed on every channel action:
+
+1. `ExecutionQuota.TryAcquire` was already the exact live concurrency gate,
+   but ready placement reloaded the GOMAXPROCS limit after every action.
+2. The private issued-action interval authenticated P, G, driver and action
+   before `llvm.coro.resume`, but its adjacent return replayed the immutable
+   executor binding.
+3. Direct-channel materialization published one complete runnable certificate,
+   but dequeue and continuation entry rechecked fields written and consumed by
+   that same owner-only transaction.
+4. `readyDebt` semantically requires one already-materialized runnable to run
+   before any lower-priority source, yet the selector still traversed all idle-P
+   and producer probes before making that forced choice.
+
+The retained fix keeps those proofs at their actual stable boundaries. A
+successful public `runtime.GOMAXPROCS` change performs one compiler scheduler
+yield; the next bounded slice refreshes its cached placement epoch, while
+`TryAcquire` continues to enforce shrink immediately. Issued resume consumes
+the P-owned action instead of round-tripping a duplicate runtime value. The
+direct continuation consumes the private materialized/dequeued certificate,
+and an ordinary same-owner `readyDebt` takes a priority-preserving selector
+shortcut. General commits, LockOSThread islands, source work, cancellation,
+cross-owner completion and compatibility entries retain their complete gates.
+An additional dispatch-capability parameter measured only 0.06% and was
+discarded rather than retained as architectural surface.
+
+The final race review also found one producer-side read of the owner-only
+direct-channel inbox tail. The MPSC publisher now observes only its atomic head
+and immutable retained-ingress binding; the single consumer remains the sole
+tail owner. A source-shape gate prevents that cursor ownership from leaking
+back into the producer, and the complete target-neutral core race suite passes.
+All measurements below use the corrected publisher.
+
+The following table is a fresh nine-run same-host rotation of the same stripped
+100,000-round-trip binaries. It supersedes the preceding short-run checkpoint;
+the build remains LLVM 22.1.8, `-O3 -lto=full`.
+
+| Pure handoff metric | Go 1.26.5 | LLGo coroutine | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| file bytes | 1,161,970 | 916,784 | 0.789x |
+| retired instructions, median | 316,755,514 | 334,224,188 | 1.055x |
+| retired instructions, range | 316,415,548--318,241,479 | 333,610,648--336,123,375 | |
+| cycles, median | 71,281,738 | 64,066,897 | 0.899x |
+| cycles, range | 69,396,625--73,644,923 | 62,764,022--79,084,562 | |
+| peak footprint, median | 2,228,752 | 2,785,592 | 1.250x |
+| maximum RSS, median | 3,162,112 | 3,801,088 | 1.202x |
+
+The short process still includes LLGo's roughly 13.45-million-instruction GC
+startup cost measured above. A 100,000,000-round-trip steady-state run therefore
+provides the more useful transaction comparison:
+
+| Long pure handoff metric | Go 1.26.5 | LLGo coroutine | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| retired instructions | 293,936,307,783 | 296,022,059,612 | 1.007x |
+| cycles | 60,430,528,016 | 50,224,458,184 | 0.831x |
+| peak footprint | 2,327,056 | 2,785,592 | 1.197x |
+| maximum RSS | 3,342,336 | 3,801,088 | 1.137x |
+
+Thus steady retired instructions are within 0.7% of Go, while LLGo uses 16.9%
+fewer cycles and its stripped artifact is 21.1% smaller. The remaining fixed
+memory difference in these runs is about 0.45--0.61 MiB; parked-G slopes and
+broader workloads remain separate measurements. The target-neutral runtime suites, coroutine
+`cl` subset, full `internal/build` `TestCoro*`, architecture/directive gates,
+bootstrap/runtime-link tests, cross-route channel/select, dynamic GOMAXPROCS,
+LockOSThread suspension, native/WASM lowering and timer gates pass. The complete
+`cl` command reached its explicit 15-minute limit in the unrelated testgo
+`cursor` case; no full-suite pass is claimed. A full `ssa` run likewise has no
+result beyond its previously reported explicit timeout.

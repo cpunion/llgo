@@ -59,7 +59,7 @@ func validCancelFrame(frame *Frame, g *G) bool {
 func validCancelableReadyG(g *G) bool {
 	if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.runP != nil || g.root == nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone ||
-		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
+		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.taskControlLeases != 0 ||
 		g.taskState != taskStorageOwned || g.taskStorage != unsafe.Pointer(g) || g.taskSize != TaskStorageSize() {

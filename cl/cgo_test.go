@@ -265,12 +265,12 @@ func Unguarded(value any) { _Cgo_use(value) }
 				test.declaration, name, kind, llgoInstrs[name], test.wantName, test.opcode)
 		}
 		call := findStaticCall(t, ssaPkg.Func(test.caller), test.declaration)
-		if err := (&EmissionUniverse{prog: prog}).verifyCoroGeneratedTouchCall(test.opcode, call); err != nil {
+		if err := verifyCoroGeneratedTouchCall(prog, test.opcode, call); err != nil {
 			t.Fatalf("verify %s generated guard: %v", test.declaration, err)
 		}
 	}
 	unguarded := findStaticCall(t, ssaPkg.Func("Unguarded"), "_Cgo_use")
-	if err := (&EmissionUniverse{prog: prog}).verifyCoroGeneratedTouchCall(llgoCgoUse, unguarded); err == nil ||
+	if err := verifyCoroGeneratedTouchCall(prog, llgoCgoUse, unguarded); err == nil ||
 		!strings.Contains(err.Error(), "false-global guard") {
 		t.Fatalf("unguarded cgo touch error = %v", err)
 	}
@@ -342,7 +342,7 @@ func TestCgoGeneratedTouchMetadataFromCmdCgo(t *testing.T) {
 				if !ok || call.Call.StaticCallee() != declaration {
 					continue
 				}
-				if err := (&EmissionUniverse{prog: prog}).verifyCoroGeneratedTouchCall(llgoCgoUse, call); err != nil {
+				if err := verifyCoroGeneratedTouchCall(prog, llgoCgoUse, call); err != nil {
 					t.Fatalf("verify real cmd/cgo touch in %s: %v", function.Name(), err)
 				}
 				return

@@ -478,6 +478,7 @@ type coroStaticForeignCallAuthority struct {
 type coroStaticForeignCallAuthorization struct {
 	mode    coroForeignCallMode
 	reentry coro.ReentryClass
+	exec    coro.ExecFlags
 }
 
 // authorize accepts exactly one of the legacy worker certificate and the
@@ -562,6 +563,7 @@ func (a coroStaticForeignCallAuthority) authorize(
 		}
 		return coroStaticForeignCallAuthorization{
 			mode: coroForeignCallModeWorker, reentry: coro.ReentryNone,
+			exec: coro.BlockForeign | coro.IRQUnsafe,
 		}, nil
 	}
 
@@ -607,6 +609,8 @@ func (a coroStaticForeignCallAuthority) authorize(
 		}
 	}
 	contract := universeCallable.Contract
+	exec := coro.BlockForeign | coro.IRQUnsafe |
+		coro.CallableContractExecConstraints(contract)
 	if contract.Progress != coro.ProgressMayBlock {
 		return reject, fmt.Errorf(
 			"callable progress %q does not authorize synchronous blocking foreign lowering; require %q",
@@ -628,6 +632,7 @@ func (a coroStaticForeignCallAuthority) authorize(
 		case coro.ReentryNone:
 			return coroStaticForeignCallAuthorization{
 				mode: coroForeignCallModeWorker, reentry: contract.Reentry,
+				exec: exec,
 			}, nil
 		case coro.ReentryManagedCallback:
 			// A synchronous managed callback needs the parent M's native
@@ -635,6 +640,7 @@ func (a coroStaticForeignCallAuthority) authorize(
 			// itself is otherwise thread-independent.
 			return coroStaticForeignCallAuthorization{
 				mode: coroForeignCallModeSameM, reentry: contract.Reentry,
+				exec: exec,
 			}, nil
 		}
 	case coro.AffinityCallerThread:
@@ -642,6 +648,7 @@ func (a coroStaticForeignCallAuthority) authorize(
 		case coro.ReentryNone, coro.ReentryManagedCallback:
 			return coroStaticForeignCallAuthorization{
 				mode: coroForeignCallModeSameM, reentry: contract.Reentry,
+				exec: exec,
 			}, nil
 		}
 	default:
@@ -881,7 +888,7 @@ func validateCoroWorkerForeignCallWithAuthority(
 	}
 	mode := authorization.mode
 	if targetPlan.External != coro.ExternalUnknownForeign || targetPlan.Emission != coro.EmitExternal ||
-		targetPlan.Effect != coro.NoSuspend || targetPlan.Exec != coro.BlockForeign|coro.IRQUnsafe {
+		targetPlan.Effect != coro.NoSuspend || targetPlan.Exec != authorization.exec {
 		return shape, true, fmt.Errorf(
 			"target %q is not an exact blocking foreign declaration (external=%s emission=%s effect=%s exec=%s)",
 			targetPlan.ID, targetPlan.External, targetPlan.Emission, targetPlan.Effect, targetPlan.Exec,

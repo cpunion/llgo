@@ -85,7 +85,9 @@ func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value) llssa.E
 	result := b.Alloc(p.prog.Uint32(), false)
 
 	body.emitCoroParkOperation(p, b, coroParkOperation{
-		shouldSuspend: b.Prog.BoolVal(true),
+		prepare: func(active llssa.Builder, _, _ uint32) llssa.Expr {
+			return active.Prog.BoolVal(true)
+		},
 		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroPollParkHookV2, coroPollParkSignatureV2(), llssa.InC)
 			suspend.Call(

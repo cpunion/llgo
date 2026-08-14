@@ -87,8 +87,7 @@ func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAlloc
 	if !ok || ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(pointer.Elem())) {
 		return coroPlainAllocationPlan{}
 	}
-	physical := ctx.type_(pointer.Elem(), llssa.InGo)
-	if ctx.prog.SizeOf(physical) == 0 {
+	if ctx.prog.PhysicalSizeOfGoType(ctx.patchType(pointer.Elem())) == 0 {
 		// Preserve the existing module-sentinel identity for a zero-sized heap
 		// allocation. It already has no AllocZ cost and needs no stack slot.
 		return coroPlainAllocationPlan{}
@@ -514,7 +513,7 @@ func coroCompilerRawPlainLoweredRuntimeHelper(u *EmissionUniverse, helper string
 		return false
 	}
 	switch helper {
-	case "CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryClose",
+	case "CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryCloseTask",
 		"CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume":
 		return true
 	default:
@@ -781,7 +780,9 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 	case *ssa.UnOp:
 		switch v.Op {
 		case token.ARROW:
-			add("CoroChanTryRecv")
+			// Physical coroutine lowering owns the raw try-or-park V2 hook
+			// through the frozen bootstrap ABI. No Go runtime helper call remains
+			// at this source instruction.
 		case token.MUL:
 			free, _ := v.X.(*ssa.FreeVar)
 			elidedZeroSizedFreeVar := u.closureEnvironments.elidesZeroSizedFreeVar(v.Parent(), free)
@@ -981,7 +982,8 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			add("Panic")
 		}
 	case *ssa.Send:
-		add("CoroChanTrySend")
+		// See receive above: the raw V2 hook, not a separately emitted Go
+		// nonblocking helper, owns the complete one-case transaction.
 	case *ssa.Call:
 		if emissionCallNeedsManagedCoroResultSlot(ctx, v) {
 			add(coroManagedFrameSlotAllocZCall)
@@ -1827,7 +1829,7 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 	case "copy":
 		add("SliceCopy")
 	case "close":
-		add("CoroChanTryClose")
+		add("CoroChanTryCloseTask")
 	case "recover":
 		add("Recover")
 	case "panic":

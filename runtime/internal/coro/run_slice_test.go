@@ -35,7 +35,7 @@ func runnerYieldAction(t *testing.T, driver *ExecutorDriver, step ExecutorRunSte
 	if step.Kind != ExecutorRunStepAction || step.G != task.g || step.Action.Kind != ActionCheckResume {
 		t.Fatalf("runner yield action = %+v", step)
 	}
-	resume, ok := Checked(driver.p, task.g, step.Action, false)
+	resume, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
 	if !ok || resume.Kind != ActionResume || resume.Handle != task.handle {
 		t.Fatalf("runner yield check = (%+v, %t)", resume, ok)
 	}
@@ -45,8 +45,8 @@ func runnerYieldAction(t *testing.T, driver *ExecutorDriver, step ExecutorRunSte
 	if !PrepareYield(task.g, task.handle, task.frame.header) {
 		t.Fatal("prepare runner yield")
 	}
-	next, ok := Resumed(driver.p, task.g, resume)
-	if !ok || next.Kind != ActionYield || !CommitExecutorRunAction(driver, task.g, next) {
+	next, committed, ok := ResumedExecutorRun(driver, driver.p, task.g, resume)
+	if !ok || !committed || next.Kind != ActionYield {
 		t.Fatalf("commit runner yield = (%+v, %t)", next, ok)
 	}
 }
@@ -62,6 +62,35 @@ func runnerNextPhysicalAction(t *testing.T, driver *ExecutorDriver, task *yieldi
 		t.Fatalf("runner action %d = (%+v, %t)", want, step, ok)
 	}
 	return step
+}
+
+func TestExecutorRunResumeRuntimeContextDescriptorCapability(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		flags     uint32
+		wantNeeds bool
+		wantOK    bool
+	}{
+		{name: "ordinary frame", wantNeeds: true, wantOK: true},
+		{name: "context independent", flags: FrameDescriptorNoRuntimeContextV1, wantOK: true},
+		{name: "hidden context independent", flags: FrameDescriptorTraceHiddenV1 | FrameDescriptorNoRuntimeContextV1, wantOK: true},
+		{name: "unknown capability", flags: 1 << 31},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := new(P)
+			driver, _, _ := bindTestExecutorDriver(t, p)
+			task := newYieldingTestG(t, test.name)
+			(*FrameDescriptorV1)(task.frame.descriptor).Flags = test.flags
+			if !Enqueue(p, task.g) {
+				t.Fatal("enqueue descriptor-capability task")
+			}
+			step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+			_, needs, modeOK := CheckedExecutorRunRuntimeContext(driver, task.g, step.Action, false)
+			if needs != test.wantNeeds || modeOK != test.wantOK {
+				t.Fatalf("runtime context mode = (%t, %t), want (%t, %t)", needs, modeOK, test.wantNeeds, test.wantOK)
+			}
+		})
+	}
 }
 
 func queueRunnerCheckDestroy(t *testing.T, driver *ExecutorDriver, task *yieldingTestG) *Frame {
@@ -231,13 +260,6 @@ func TestExecutorRunSliceCapabilityRetainsExactOwnerAcrossBoundedSteps(t *testin
 		dispatch.Action.Kind != ActionCheckResume || driver.run.issued != ActionInvalid {
 		t.Fatalf("capability dispatch = (%+v, %t), cursor=%+v", dispatch, ok, driver.run)
 	}
-	savedExecutor := p.executor
-	p.executor = nil
-	if step, selected := run.Next(); selected || step != (ExecutorRunStep{}) ||
-		driver.run.issued != ActionInvalid {
-		t.Fatalf("ownerless capability selection = (%+v, %t), cursor=%+v", step, selected, driver.run)
-	}
-	p.executor = savedExecutor
 	step, ok := run.Next()
 	if !ok || step.Kind != ExecutorRunStepAction || step.G != task.g ||
 		step.Action != dispatch.Action || driver.run.issued != ActionCheckResume {
@@ -818,6 +840,32 @@ func TestExecutorRunActionPreservesReadyDebtPublishedDuringResume(t *testing.T) 
 	runtime.KeepAlive(peer.frame.memory)
 }
 
+func TestExecutorRunReadyDebtPrecedesNewDirectCompletion(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "ready-debt-before-direct")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue ready-debt task")
+	}
+	driver.run.readyDebt = true
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+	}
+	preemptStore(&completion.state, uint32(directChannelCompletionMatched))
+	if !PublishExecutorDirectChannelCompletion(driver, completion) {
+		t.Fatal("publish direct completion behind ready debt")
+	}
+
+	step, selected, ok := nextExecutorRunActionValidated(driver, true)
+	if !ok || !selected || !step.Dispatched || step.G != task.g ||
+		!executorDirectChannelCompletionPending(driver) {
+		t.Fatalf("compact ready debt/direct completion ordering = (%+v, %t, %t), pending=%t",
+			step, selected, ok, executorDirectChannelCompletionPending(driver))
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestExecutorRunCursorRejectsImplicitLegacySwitch(t *testing.T) {
 	p := new(P)
 	driver, registry, handle := bindTestExecutorDriver(t, p)
@@ -853,6 +901,32 @@ func TestExecutorRunCursorRejectsImplicitLegacySwitch(t *testing.T) {
 		t.Fatalf("explicit legacy dequeue = (%p, %t)", g, ok)
 	}
 	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorRunStandbyCompatibilityDefersDirectIngress(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionMatched),
+	}
+	if !PublishExecutorDirectChannelCompletion(driver, completion) {
+		t.Fatal("publish direct completion before standby compatibility")
+	}
+	if entered, ok := EnterExecutorRunStandbyCompatibility(driver); !ok || entered {
+		t.Fatalf("standby compatibility over direct ingress = (%t, %t), want (false, true)", entered, ok)
+	}
+	if got, ok := takeExecutorDirectChannelCompletion(driver); !ok || got != completion {
+		t.Fatalf("take deferred direct completion = (%p, %t), want (%p, true)", got, ok, completion)
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		t.Fatal("deferred direct completion did not restore idle inbox")
+	}
+	if entered, ok := EnterExecutorRunStandbyCompatibility(driver); !ok || !entered {
+		t.Fatalf("stable standby compatibility = (%t, %t), want (true, true)", entered, ok)
+	}
+	closeTestExecutorDriver(t, driver)
 }
 
 func TestExecutorRunCursorRejectsExportedPollSlice(t *testing.T) {

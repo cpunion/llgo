@@ -197,7 +197,7 @@ func validDiscardResultSpawnRoot(child *G, handle unsafe.Pointer) (*Frame, bool)
 		return nil, false
 	}
 	descriptor := (*FrameDescriptorV1)(root.descriptor)
-	if descriptor.Version != 1 || descriptor.Flags != 0 ||
+	if descriptor.Version != 1 || descriptor.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
 		!validProgramPayloadLayoutV1(descriptor.ResultSize, descriptor.ResultAlign) {
 		return nil, false
 	}
@@ -289,7 +289,7 @@ func ReclaimableG(g *G) bool {
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
 		g.osThreadLockDepth == 0 &&
 		g.root == nil && g.active == nil && g.frames == nil &&
-		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
+		g.pending.kind == pendingNone && !g.pending.directChannel && g.pending.from == nil && g.pending.target == nil &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		!g.waiting && g.runP == nil &&
 		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
