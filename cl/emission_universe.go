@@ -418,6 +418,14 @@ const (
 	// The build analyzer seeds the owner with MayPark; there is no callable sync
 	// helper and no managed callee edge.
 	CoroIntrinsicCallInlineSuspend
+	// CoroIntrinsicCallInlineNativeBlock means cl erases one exact certified
+	// llgo.syscall declaration call and executes it synchronously on the current
+	// native M after releasing the managed execution domain. The operation may
+	// block the M, so its owner retains the conservative MayPark managed effect,
+	// but it never parks or resumes the current LLVM coroutine. This target-
+	// specific dual recipe can therefore also execute in a synchronous outcome
+	// twin while timer, poll, host, and generic worker waits cannot.
+	CoroIntrinsicCallInlineNativeBlock
 	// CoroIntrinsicCallInlineForeignSuspend is the same current-frame erasure
 	// shape, but the structured suspension waits for a bounded foreign-worker
 	// transaction rather than a scheduler-local event. Keeping it distinct
@@ -440,17 +448,21 @@ const (
 // through the owner's exact frozen lowered-call set.
 func (s CoroIntrinsicCallSemantics) ElidesManagedCall() bool {
 	return s == CoroIntrinsicCallInlineNoSuspend || s == CoroIntrinsicCallInlineWithLoweredCalls ||
-		s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineForeignSuspend ||
+		s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineNativeBlock ||
+		s == CoroIntrinsicCallInlineForeignSuspend ||
 		s == CoroIntrinsicCallInlineYield ||
 		s == CoroIntrinsicCallInlineOutcome
 }
 
-// SuspendsCurrentFrame reports whether an intrinsic requires its owner to have
-// a coroutine primary even though the declaration call itself is erased by
-// frontend lowering. Terminal structured outcomes share this physical
-// requirement even though they do not have a resumable continuation.
+// SuspendsCurrentFrame is the legacy name for the owner-local structured-effect
+// predicate. It reports whether an erased intrinsic requires a managed
+// structured body rather than an ordinary plain body. A native blocking call
+// and terminal outcome do not literally suspend a resumable LLVM frame, but
+// they still require the hidden task/completion ABI and therefore participate
+// in the same analyzer seed.
 func (s CoroIntrinsicCallSemantics) SuspendsCurrentFrame() bool {
-	return s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineForeignSuspend ||
+	return s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineNativeBlock ||
+		s == CoroIntrinsicCallInlineForeignSuspend ||
 		s == CoroIntrinsicCallInlineYield ||
 		s == CoroIntrinsicCallInlineOutcome
 
@@ -471,7 +483,7 @@ const (
 // coroutine effect.
 func (s CoroIntrinsicCallSemantics) CurrentFrameEffect() coro.Effect {
 	switch s {
-	case CoroIntrinsicCallInlineSuspend:
+	case CoroIntrinsicCallInlineSuspend, CoroIntrinsicCallInlineNativeBlock:
 		return coro.MayPark
 	case CoroIntrinsicCallInlineForeignSuspend:
 		return coro.WaitForeign
@@ -1909,6 +1921,9 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			// coroutine reaching one retains its conservative call edge and fails
 			// physical preflight instead of submitting an arbitrary uintptr.
 			return CoroIntrinsicCallUnsupported, true, nil
+		}
+		if u.coroCapabilities.NativeFleet() {
+			return CoroIntrinsicCallInlineNativeBlock, true, nil
 		}
 		return CoroIntrinsicCallInlineSuspend, true, nil
 	}

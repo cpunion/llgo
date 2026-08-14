@@ -238,6 +238,54 @@ func TestLibraryEffectSummaryCanonicalRecordAndImportPolicy(t *testing.T) {
 	}
 }
 
+func TestLibraryEffectSummaryPublishesNoUnwindStaticOutcome(t *testing.T) {
+	summary := testLibraryEffectSummary(t, "example/native", false)
+	function := LibraryEffectFunction{
+		ID:                 "llgo.function.v0:native-block",
+		ABIHash:            strings.Repeat("4", 64),
+		Effect:             MayPark,
+		FuncRep:            DirectCoro,
+		Primary:            PrimaryCoroutine,
+		ManagedEntry:       ManagedEntryCoroutine,
+		StaticOutcome:      true,
+		PrimarySymbol:      "example/native.Block$coro",
+		OutcomePlainSymbol: "example/native.Block$outcome",
+	}
+	summary.Functions = append(summary.Functions, function)
+	data, err := summary.MarshalStable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseLibraryEffectSummary(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var imported LibraryEffectFunction
+	for _, candidate := range parsed.Functions {
+		if candidate.ID == function.ID {
+			imported = candidate
+			break
+		}
+	}
+	if !imported.StaticOutcome || imported.Effect != MayPark || imported.Exec != 0 {
+		t.Fatalf("no-unwind static outcome metadata = %+v", imported)
+	}
+	policy, err := imported.ImportedPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.StaticOutcome || policy.Effect != MayPark || policy.Exec != 0 {
+		t.Fatalf("no-unwind static outcome import policy = %+v", policy)
+	}
+	invalid := summary
+	invalid.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
+	invalid.Functions[len(invalid.Functions)-1].Effect |= YieldOnly
+	if _, err := invalid.MarshalStable(); err == nil ||
+		!strings.Contains(err.Error(), "invalid unbounded static outcome") {
+		t.Fatalf("yielding static outcome error = %v", err)
+	}
+}
+
 func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 	summary := testLibraryEffectSummary(t, "example/outcome", false)
 	summary.Functions = []LibraryEffectFunction{{

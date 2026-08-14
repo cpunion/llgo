@@ -83,3 +83,71 @@ func caller() { imported() }
 		t.Fatalf("caller was not automatically colored from library summary: %+v", callerPlan)
 	}
 }
+
+func TestLibraryEffectSummaryPropagatesNoUnwindStaticOutcome(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "library_static_outcome.go", `package coroid
+func imported()
+func caller() { imported() }
+`)
+	imported := packageFunction(t, pkg, "imported")
+	caller := packageFunction(t, pkg, "caller")
+	functionIDs := FunctionIDConfig{}
+	importedID, err := StableFunctionID(imported, functionIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := testLibraryEffectSummary(t, "example/static", false)
+	summary.Functions = []LibraryEffectFunction{{
+		ID:                 importedID,
+		ABIHash:            strings.Repeat("4", 64),
+		Effect:             MayPark,
+		FuncRep:            DirectCoro,
+		Primary:            PrimaryCoroutine,
+		ManagedEntry:       ManagedEntryCoroutine,
+		StaticOutcome:      true,
+		PrimarySymbol:      "example/static.imported$coro",
+		OutcomePlainSymbol: "example/static.imported$outcome",
+	}}
+	summary.ForeignCallables = nil
+	summary.ExportBindings = nil
+	index, err := NewLibraryEffectIndex([]LibraryEffectSummary{summary}, testLibraryEffectMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: caller, ManagedDemand: AsyncDemand}}, SSAConfig{
+		FunctionIDs:          functionIDs,
+		OutcomeMode:          OutcomeExplicitStatus,
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(function *ssa.Function) (SSAFunctionPolicy, error) {
+			id, idErr := StableFunctionID(function, functionIDs)
+			if idErr != nil {
+				return SSAFunctionPolicy{}, idErr
+			}
+			fact, ok := index.Lookup(id)
+			if !ok {
+				return SSAFunctionPolicy{}, nil
+			}
+			return fact.ImportedPolicy()
+		},
+		ClassifyLocalBody: func(function *ssa.Function) (SSAFunctionBodyFacts, error) {
+			facts := scanSSAFunctionBody(function)
+			if function == caller {
+				facts.StaticOutcomeLocal = true
+			}
+			return facts, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	importedPlan := functionPlanFor(t, plan, imported)
+	if importedPlan.External != ExternalKnown || importedPlan.Effect != MayPark ||
+		!importedPlan.StaticOutcome || !importedPlan.HasStaticOutcome() {
+		t.Fatalf("imported no-unwind static outcome plan = %+v", importedPlan)
+	}
+	callerPlan := functionPlanFor(t, plan, caller)
+	if callerPlan.Emission != EmitCoroutine || !callerPlan.Effect.Contains(MayPark|AwaitStructured) ||
+		!callerPlan.StaticOutcome || !callerPlan.HasStaticOutcome() {
+		t.Fatalf("caller did not inherit imported static outcome = %+v", callerPlan)
+	}
+}

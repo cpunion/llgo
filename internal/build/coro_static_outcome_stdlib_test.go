@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -359,5 +360,108 @@ func main() {
 			continue
 		}
 		t.Logf("%s: emission=%s static=%t declared=%s local=%s effect=%s declared-exec=%s local-exec=%s exec=%s proof=%s cost=%d facts=%+v trace=%s", name, plan.Emission, plan.StaticOutcome, plan.DeclaredEffect, plan.LocalEffect, plan.Effect, plan.DeclaredExec, plan.LocalExec, plan.Exec, plan.AtomicCostProof, plan.AtomicCost, frozenFacts[name], traces[name])
+	}
+}
+
+func TestCoroDarwinSyscallWrappersPublishStaticOutcomeChain(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin fixed-target syscall patch coverage")
+	}
+	t.Setenv(llgoBuildCache, "off")
+	source := filepath.Join(t.TempDir(), "main.go")
+	if err := os.WriteFile(source, []byte(`package main
+
+import "syscall"
+
+var buffer [1]byte
+
+func main() {
+	_, _ = syscall.Seek(0, 0, 0)
+	_, _ = syscall.Write(1, buffer[:])
+	_, _ = syscall.Read(0, buffer[:])
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wanted := map[string]bool{
+		"syscall": true,
+		"write":   true,
+		"Write":   true,
+		"Read":    true,
+		"Seek":    true,
+	}
+	plans := make(map[string]coro.FunctionPlan, len(wanted))
+	facts := make(map[string]coro.SSAFunctionBodyFacts, len(wanted))
+	definitions := make(map[string]bool, len(wanted))
+
+	conf := NewDefaultConf(ModeGen)
+	conf.ForceRebuild = true
+	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
+		plan, err := defaultCoroPlanBuilder(input)
+		if err != nil {
+			return nil, err
+		}
+		for _, fn := range input.EmissionUniverse.Functions() {
+			if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || !wanted[fn.Name()] {
+				continue
+			}
+			path := fn.Pkg.Pkg.Path()
+			if path != "syscall" && !(fn.Name() == "syscall" &&
+				strings.HasSuffix(path, "/runtime/internal/lib/syscall")) {
+				continue
+			}
+			functionPlan, found := plan.FunctionPlan(fn)
+			if !found {
+				return nil, fmt.Errorf("syscall.%s has no whole-program plan", fn.Name())
+			}
+			bodyFacts, err := input.localBodyFacts(fn)
+			if err != nil {
+				return nil, fmt.Errorf("syscall.%s local body facts: %w", fn.Name(), err)
+			}
+			if previous, duplicate := plans[fn.Name()]; duplicate && previous.ID != functionPlan.ID {
+				return nil, fmt.Errorf("syscall.%s has multiple canonical plans", fn.Name())
+			}
+			plans[fn.Name()] = functionPlan
+			facts[fn.Name()] = bodyFacts
+		}
+		return plan, nil
+	}
+	conf.ModuleHook = func(pkg Package) {
+		if pkg.PkgPath != "syscall" {
+			return
+		}
+		for name := range wanted {
+			function := pkg.LPkg.FuncOf("syscall." + name + "$outcome")
+			definitions[name] = function != nil && function.HasBody()
+		}
+	}
+	if _, err := Do([]string{source}, conf); err != nil {
+		t.Fatalf("compile Darwin syscall static-outcome fixture: %v", err)
+	}
+
+	for name := range wanted {
+		plan, found := plans[name]
+		if !found {
+			t.Errorf("syscall.%s is absent from the whole-program plan", name)
+			continue
+		}
+		if plan.Emission != coro.EmitCoroutine || plan.ManagedEntry != coro.ManagedEntryCoroutine ||
+			!plan.Effect.Contains(coro.MayPark) || !plan.StaticOutcome || !plan.HasStaticOutcome() {
+			t.Errorf("syscall.%s plan = %+v, want coroutine primary plus static outcome twin", name, plan)
+		}
+		if !facts[name].StaticOutcomeLocal {
+			t.Errorf("syscall.%s local facts = %+v, want closed static-outcome vocabulary", name, facts[name])
+		}
+		if !definitions[name] {
+			t.Errorf("syscall.%s$outcome has no emitted definition", name)
+		}
+	}
+	bottom, found := plans["syscall"]
+	if !found {
+		return
+	}
+	if bottom.Exec.Contains(coro.MayUnwind) || bottom.Effect.Contains(coro.OutcomeStructured) {
+		t.Fatalf("syscall.syscall plan = %+v, fixture no longer covers the no-unwind native-block case", bottom)
 	}
 }

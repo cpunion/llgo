@@ -168,6 +168,13 @@ func Worker(enabled bool) {
 	}
 
 	plan = physical.instructions[reachable]
+	plan.operation = coroPhysicalOperationNativeSyscall
+	physical.instructions[reachable] = plan
+	capabilities, err = commit().programCapabilities()
+	if err != nil || capabilities.Worker() {
+		t.Fatalf("reachable native syscall capability = (%v, %v), want no worker", capabilities, err)
+	}
+
 	plan.operation = coroPhysicalOperationWorkerCgo
 	physical.instructions[reachable] = plan
 	capabilities, err = commit().programCapabilities()

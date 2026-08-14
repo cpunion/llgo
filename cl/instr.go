@@ -2725,20 +2725,42 @@ func (p *context) callEx(
 			if !ok {
 				panic("unknown coroutine llgo.syscall failure convention")
 			}
-			_, managedWorker, operationPlanned := p.selectCoroPhysicalOperation(
-				sourceCall, coroPhysicalOperationWorkerSyscall,
-			)
-			if !managedWorker && !operationPlanned {
-				if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
-					managedWorker = semantics == CoroIntrinsicCallInlineSuspend
+			semantics := CoroIntrinsicCallUnsupported
+			semanticsPlanned := false
+			if sourceCall != nil && p.emissionUniverse != nil {
+				var semanticsErr error
+				semantics, semanticsPlanned, semanticsErr = coroIntrinsicCallSiteSemantics(
+					p.emissionUniverse, sourceCall,
+				)
+				if semanticsErr != nil {
+					panic(fmt.Errorf("coroutine llgo.syscall semantics: %w", semanticsErr))
 				}
 			}
+			expectedOperation := coroPhysicalOperationWorkerSyscall
+			if semantics == CoroIntrinsicCallInlineNativeBlock {
+				expectedOperation = coroPhysicalOperationNativeSyscall
+			}
+			_, managedWorker, operationPlanned := p.selectCoroPhysicalOperation(
+				sourceCall, expectedOperation,
+			)
+			if !managedWorker && !operationPlanned {
+				managedWorker = semanticsPlanned &&
+					(semantics == CoroIntrinsicCallInlineSuspend ||
+						semantics == CoroIntrinsicCallInlineNativeBlock)
+			}
 			if managedWorker {
-				if act != llssa.Call || ds != nil {
+				if !semanticsPlanned ||
+					(semantics != CoroIntrinsicCallInlineSuspend &&
+						semantics != CoroIntrinsicCallInlineNativeBlock) {
+					panic("coroutine llgo.syscall operation has incompatible frozen semantics")
+				}
+				if act != llssa.Call || ds != nil || sourceCall == nil {
 					panic("coroutine llgo.syscall requires an exact direct call")
 				}
-				ret = p.compileCoroWorkerSyscall(b, call, args, call.Signature().Results(), convention)
-				p.completeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallInlineSuspend)
+				ret = p.compileCoroSyscallOperation(
+					b, call, args, call.Signature().Results(), convention, semantics,
+				)
+				p.completeCoroIntrinsicCallEmission(ftype, semantics)
 			} else {
 				ret = p.syscallIntrinsic(b, args, call.Signature().Results(), convention)
 				p.completeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallUnsupported)

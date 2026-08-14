@@ -2470,14 +2470,25 @@ func applySSAStaticOutcomePlans(
 	for _, plan := range base.functions {
 		function := byID[plan.ID]
 		facts, classified := localBodyFacts[function]
+		// MayPark is admitted only when ProgramIR kept StaticOutcomeLocal true
+		// while projecting that exact local effect. Today the sole such recipe is
+		// a target-certified native syscall which releases the execution domain
+		// but returns synchronously on the same M. A timer, poll, channel, host, or
+		// generic worker wait clears StaticOutcomeLocal before analysis reaches
+		// this closure, even though it contributes the same aggregate effect bit.
+		// A proved no-unwind syscall has no OutcomeStructured effect; its outcome
+		// twin is still valid and simply returns success on every normal return.
+		localStaticEffects := facts.Effect & MayPark
 		if function == nil || !classified || !facts.StaticOutcomeLocal || facts.Effect.Contains(YieldOnly) ||
+			facts.Effect&^MayPark != NoSuspend ||
 			len(function.FreeVars) != 0 ||
 			invalidCall[plan.ID] || plan.HasStaticOutcome() ||
 			plan.External != Defined || plan.Emission != EmitCoroutine ||
 			plan.ManagedEntry != ManagedEntryCoroutine || plan.Primary != PrimaryCoroutine ||
 			plan.ManagedDemand == NoDemand || plan.RawPlainOnly ||
-			plan.Recursive || plan.Effect&^(YieldOnly|AwaitStructured|OutcomeStructured) != 0 ||
-			!plan.Effect.Contains(OutcomeStructured) ||
+			plan.Recursive || plan.DeclaredEffect&^(OutcomeStructured|localStaticEffects) != 0 ||
+			plan.LocalEffect&^(AwaitStructured|OutcomeStructured|localStaticEffects) != 0 ||
+			plan.Effect&^(AwaitStructured|OutcomeStructured|MayPark) != 0 ||
 			plan.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
 			continue
 		}

@@ -1460,8 +1460,7 @@ func validateCoroPhysicalABIForOwner(
 			plan.StaticOutcome && plan.Exec&(coro.BlockForeign|coro.ThreadAffine|coro.NeedsCleanupFrame|coro.OpaqueExec) == 0) &&
 		(plan.FuncRep == coro.DirectCoro || outcomePlainTwin && plan.FuncRep == coro.Dispatch) &&
 		(plan.Effect == coro.OutcomeStructured || outcomePlainTwin &&
-			plan.Effect.Contains(coro.OutcomeStructured) &&
-			plan.Effect&^(coro.YieldOnly|coro.AwaitStructured|coro.OutcomeStructured) == 0)
+			plan.Effect&^(coro.AwaitStructured|coro.OutcomeStructured|coro.MayPark) == 0)
 	if plan.Emission != coro.EmitCoroutine && !outcomePlain ||
 		plan.FuncRep != coro.DirectCoro && !managedDispatchTarget && !rawMethodDispatchToken {
 		return fail("requires a direct coroutine/outcome or capability-certified Dispatch emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
@@ -1781,6 +1780,7 @@ func validateCoroPhysicalABIForOwner(
 	panics := 0
 	awaits := 0
 	parks := 0
+	nativeBlocks := 0
 	foreignWaits := 0
 	yields := 0
 	spawns := 0
@@ -2016,6 +2016,13 @@ func validateCoroPhysicalABIForOwner(
 									"generated C2 foreign suspend has no frozen typed errno operation")
 							}
 							foreignWaits++
+						} else if intrinsic && semantics == CoroIntrinsicCallInlineNativeBlock {
+							if !isLLGoSyscallIntrinsic(frozen.opcode) ||
+								instructionPlan.operation != coroPhysicalOperationNativeSyscall {
+								return coroLeafInstructionError(fn, plan, instr,
+									"native blocking intrinsic has no frozen native-syscall recipe")
+							}
+							nativeBlocks++
 						} else if intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
 							if isLLGoSyscallIntrinsic(frozen.opcode) {
 								if instructionPlan.operation != coroPhysicalOperationWorkerSyscall {
@@ -2036,7 +2043,9 @@ func validateCoroPhysicalABIForOwner(
 							goexits++
 						}
 						if intrinsic {
-							if isLLGoSyscallIntrinsic(frozen.opcode) && semantics != CoroIntrinsicCallInlineSuspend {
+							if isLLGoSyscallIntrinsic(frozen.opcode) &&
+								semantics != CoroIntrinsicCallInlineSuspend &&
+								semantics != CoroIntrinsicCallInlineNativeBlock {
 								return coroLeafInstructionError(fn, plan, instr,
 									"elided worker llgo.syscall has no frozen function-word capability")
 							}
@@ -2166,8 +2175,8 @@ func validateCoroPhysicalABIForOwner(
 	if awaits != 0 && !plan.Effect.Contains(coro.AwaitStructured) {
 		return fail("child-await body lacks await-structured final effect: %s", plan.Effect)
 	}
-	if parks != 0 && !plan.Effect.Contains(coro.MayPark) {
-		return fail("structured-park body lacks may-park final effect: %s", plan.Effect)
+	if parks+nativeBlocks != 0 && !plan.Effect.Contains(coro.MayPark) {
+		return fail("park/native-block body lacks may-park final effect: %s", plan.Effect)
 	}
 	if foreignWaits != 0 && !plan.Effect.Contains(coro.WaitForeign) {
 		return fail("bounded worker body lacks wait-foreign final effect: %s", plan.Effect)
@@ -2183,8 +2192,8 @@ func validateCoroPhysicalABIForOwner(
 		!plan.Effect.Contains(coro.OutcomeStructured)) {
 		return fail("Goexit body lacks outcome-structured owner effect: declared=%s local=%s final=%s", plan.DeclaredEffect, plan.LocalEffect, plan.Effect)
 	}
-	if plan.DeclaredEffect.Contains(coro.MayPark) && parks == 0 {
-		return fail("declared may-park effect has no exact structured park intrinsic")
+	if plan.DeclaredEffect.Contains(coro.MayPark) && parks+nativeBlocks == 0 {
+		return fail("declared may-park effect has no exact structured park or native blocking intrinsic")
 	}
 	if plan.DeclaredEffect.Contains(coro.WaitForeign) && foreignWaits == 0 {
 		return fail("declared wait-foreign effect has no exact bounded worker operation")

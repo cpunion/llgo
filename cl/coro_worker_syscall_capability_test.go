@@ -163,7 +163,7 @@ func TestCoroWorkerSyscallFunctionWordCapabilityIsFailClosed(t *testing.T) {
 		}
 		wantSemantics := CoroIntrinsicCallUnsupported
 		if wantCertified[name] {
-			wantSemantics = CoroIntrinsicCallInlineSuspend
+			wantSemantics = CoroIntrinsicCallInlineNativeBlock
 			if certificate.ID == "" || certificate.WorkerABISignature == "" ||
 				certificate.PhysicalTargetSetID == "" || certificate.CallableShadowSetID == "" ||
 				certificate.StaticTargetCount != 1 {

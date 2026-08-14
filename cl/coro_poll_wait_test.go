@@ -119,7 +119,7 @@ func TestCoroPollWaitCurrentFrameNativeAndWasm32(t *testing.T) {
 			rootPlan, ok := plan.FunctionPlan(root)
 			if !ok || rootPlan.Emission != coro.EmitCoroutine || rootPlan.FuncRep != coro.DirectCoro ||
 				!rootPlan.DeclaredEffect.Contains(coro.MayPark) || !rootPlan.LocalEffect.Contains(coro.MayPark) ||
-				!rootPlan.Effect.Contains(coro.MayPark) {
+				!rootPlan.Effect.Contains(coro.MayPark) || rootPlan.HasStaticOutcome() {
 				t.Fatalf("Root plan = %+v, present=%t; want one local poll-park coroutine", rootPlan, ok)
 			}
 			if !plan.ElidesCall(waitCall) {
@@ -268,6 +268,8 @@ func compileCoroPollWaitFixture(t *testing.T, target *llssa.Target) (
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			if fn == root {
 				return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil

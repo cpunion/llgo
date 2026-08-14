@@ -181,6 +181,109 @@ type coroHostWordOperationV1 struct {
 	metadata []llssa.Expr
 }
 
+// emitCoroSameMWordCall is the shared synchronous status transaction for the
+// two runtime boundaries which execute a word call on the current native M.
+// The caller owns result storage so a locked-foreign direct branch can share it
+// with its worker branch, while a native syscall outcome can use native-stack
+// storage without acquiring a coroutine frame.
+func (p *context) emitCoroSameMWordCall(
+	b llssa.Builder,
+	hookName string,
+	function llssa.Expr,
+	traceTarget llssa.Expr,
+	args []llssa.Expr,
+	r1, r2, errno llssa.Expr,
+) {
+	if p == nil {
+		panic("same-M word call requires one active structured body and exact storage")
+	}
+	task := p.managedPhysicalTask()
+	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn ||
+		task.IsNil() || function.IsNil() || traceTarget.IsNil() ||
+		r1.IsNil() || r2.IsNil() || errno.IsNil() || len(args) > coroWorkerMaxArgsV1 {
+		panic("same-M word call requires one active structured body and exact storage")
+	}
+	switch hookName {
+	case coroNativeSyscallCallHookV1:
+	case coroOSThreadForeignCallHookV1:
+		if !p.hasCoroPhysicalBody() {
+			panic("locked foreign word call requires a full coroutine body")
+		}
+	default:
+		panic("same-M word call received an unsupported runtime boundary")
+	}
+	word := p.prog.Uintptr()
+	if !types.Identical(function.RawType(), word.RawType()) ||
+		!types.Identical(traceTarget.RawType(), word.RawType()) {
+		panic("same-M function or trace target is not uintptr-shaped")
+	}
+	for index, argument := range args {
+		if argument.IsNil() || !types.Identical(argument.RawType(), word.RawType()) {
+			panic(fmt.Sprintf("same-M word call argument %d is not uintptr-shaped", index))
+		}
+	}
+
+	zero := p.prog.Zero(word)
+	directArgs := make([]llssa.Expr, 0, 4+coroWorkerMaxArgsV1+3)
+	directArgs = append(directArgs,
+		task,
+		function,
+		traceTarget,
+		p.prog.IntVal(uint64(len(args)), p.prog.Uint32()),
+	)
+	for index := 0; index < coroWorkerMaxArgsV1; index++ {
+		if index < len(args) {
+			directArgs = append(directArgs, args[index])
+		} else {
+			directArgs = append(directArgs, zero)
+		}
+	}
+	directArgs = append(directArgs, r1, r2, errno)
+	direct := p.pkg.NewFunc(hookName, coroOSThreadForeignCallSignature(), llssa.InC)
+	status := b.Call(direct.Expr, directArgs...)
+	normal := b.Func.MakeBlock()
+	memoryFault := b.Func.MakeBlock()
+	divideFault := b.Func.MakeBlock()
+	invalid := b.Func.MakeBlock()
+	dispatch := b.Switch(status, invalid)
+	dispatch.Case(p.prog.IntVal(coroWorkerResumeSuccessV1, p.prog.Uint32()), normal)
+	dispatch.Case(p.prog.IntVal(coroWorkerResumeFaultMemoryV1, p.prog.Uint32()), memoryFault)
+	dispatch.Case(p.prog.IntVal(coroWorkerResumeFaultDivideV1, p.prog.Uint32()), divideFault)
+	dispatch.End(b)
+	b.SetBlockEx(memoryFault, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultNilV1)
+	b.SetBlockEx(divideFault, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultIntegerDivideByZeroV1)
+	b.SetBlockEx(invalid, llssa.AtEnd, false)
+	b.Unreachable()
+	b.SetBlockContinuation(normal)
+}
+
+// compileCoroNativeSyscallWordCall is the synchronous native-M half of a
+// certified llgo.syscall operation. The runtime hook releases and reacquires
+// the managed execution domain around the blocking call, but it never parks
+// this LLVM coroutine. Consequently the same transaction is valid in either a
+// full coroutine body or its exact static-outcome twin.
+func (p *context) compileCoroNativeSyscallWordCall(
+	b llssa.Builder,
+	function llssa.Expr,
+	traceTarget llssa.Expr,
+	args []llssa.Expr,
+	keepalives []llssa.Expr,
+) coroWorkerWordResultV1 {
+	word := p.prog.Uintptr()
+	r1 := b.Alloc(word, false)
+	r2 := b.Alloc(word, false)
+	errno := b.Alloc(word, false)
+	p.emitCoroSameMWordCall(
+		b, coroNativeSyscallCallHookV1, function, traceTarget, args, r1, r2, errno,
+	)
+	if len(keepalives) != 0 {
+		b.KeepAlive(keepalives...)
+	}
+	return coroWorkerWordResultV1{r1: b.Load(r1), r2: b.Load(r2), errno: b.Load(errno)}
+}
+
 // compileCoroHostOperation lowers one source-style synchronous host request
 // into the shared scalar external-operation source. Unlike a native worker it
 // has no current-thread/direct branch: only a later host turn owns the
@@ -226,7 +329,6 @@ func (p *context) compileCoroHostOperation(
 		physicalWords,
 		keepaliveSlots,
 		&coroHostWordOperationV1{metadata: metadata},
-		false,
 	)
 	return b.Aggregate(
 		p.type_(results, llssa.InGo),
@@ -236,10 +338,12 @@ func (p *context) compileCoroHostOperation(
 	)
 }
 
-// compileCoroWorkerWordCall is the one physical ForeignWait transaction used
-// by both llgo.syscall and exact ordinary C-call thunks. function always names
-// a uniform uintptr (...uintptr) thunk whose arity is len(args); typed foreign
-// declarations are never called through this ABI directly.
+// compileCoroWorkerWordCall is the one physically suspending ForeignWait
+// transaction used by host operations and exact ordinary C-call thunks.
+// function always names a uniform uintptr (...uintptr) thunk whose arity is
+// len(args); typed foreign declarations are never called through this ABI
+// directly. Certified native syscalls use compileCoroNativeSyscallWordCall and
+// never enter this park/resume transaction.
 func (p *context) compileCoroWorkerWordCall(
 	b llssa.Builder,
 	function llssa.Expr,
@@ -247,11 +351,9 @@ func (p *context) compileCoroWorkerWordCall(
 	args []llssa.Expr,
 	keepaliveSlots []llssa.Expr,
 	host *coroHostWordOperationV1,
-	nativeSyscall bool,
 ) coroWorkerWordResultV1 {
 	body := p.requireCoroWorkerBody(b)
 	if function.IsNil() || host == nil && traceTarget.IsNil() || host != nil && !traceTarget.IsNil() ||
-		host != nil && nativeSyscall ||
 		len(args) > coroWorkerMaxArgsV1 ||
 		host != nil && len(host.metadata) != 0 &&
 			len(host.metadata) != coroHostOperationDeadlineMetadataWordsV1 {
@@ -365,53 +467,19 @@ func (p *context) compileCoroWorkerWordCall(
 	}
 
 	join := b.Func.MakeBlock()
-	directArgs := make([]llssa.Expr, 0, 4+coroWorkerMaxArgsV1+3)
-	directArgs = append(directArgs, body.task, function, traceTarget, argcValue)
-	for index := 0; index < coroWorkerMaxArgsV1; index++ {
-		if index < len(args) {
-			directArgs = append(directArgs, args[index])
-		} else {
-			directArgs = append(directArgs, zero)
-		}
-	}
-	directArgs = append(directArgs, r1, r2, errno)
-	emitDirect := func(hookName string) {
-		direct := p.pkg.NewFunc(
-			hookName, coroOSThreadForeignCallSignature(), llssa.InC,
-		)
-		directStatus := b.Call(direct.Expr, directArgs...)
-		directNormal := b.Func.MakeBlock()
-		directMemoryFault := b.Func.MakeBlock()
-		directDivideFault := b.Func.MakeBlock()
-		directInvalid := b.Func.MakeBlock()
-		directDispatch := b.Switch(directStatus, directInvalid)
-		directDispatch.Case(p.prog.IntVal(coroWorkerResumeSuccessV1, p.prog.Uint32()), directNormal)
-		directDispatch.Case(p.prog.IntVal(coroWorkerResumeFaultMemoryV1, p.prog.Uint32()), directMemoryFault)
-		directDispatch.Case(p.prog.IntVal(coroWorkerResumeFaultDivideV1, p.prog.Uint32()), directDivideFault)
-		directDispatch.End(b)
-		b.SetBlockEx(directMemoryFault, llssa.AtEnd, false)
-		p.compileCoroTerminalFault(b, coroFaultNilV1)
-		b.SetBlockEx(directDivideFault, llssa.AtEnd, false)
-		p.compileCoroTerminalFault(b, coroFaultIntegerDivideByZeroV1)
-		b.SetBlockEx(directInvalid, llssa.AtEnd, false)
-		b.Unreachable()
-		b.SetBlockEx(directNormal, llssa.AtEnd, false)
-		b.Jump(join)
-	}
-	if nativeSyscall {
-		emitDirect(coroNativeSyscallCallHookV1)
-	} else {
-		lockedHook := p.pkg.NewFunc(coroOSThreadLockedHookV1, coroOSThreadLockedSignature(), llssa.InC)
-		locked := b.Call(lockedHook.Expr, body.task)
-		directBlock := b.Func.MakeBlock()
-		workerBlock := b.Func.MakeBlock()
-		b.If(locked, directBlock, workerBlock)
-		b.SetBlockEx(directBlock, llssa.AtEnd, false)
-		emitDirect(coroOSThreadForeignCallHookV1)
-		b.SetBlockEx(workerBlock, llssa.AtEnd, false)
-		emitPark(b)
-		b.Jump(join)
-	}
+	lockedHook := p.pkg.NewFunc(coroOSThreadLockedHookV1, coroOSThreadLockedSignature(), llssa.InC)
+	locked := b.Call(lockedHook.Expr, body.task)
+	directBlock := b.Func.MakeBlock()
+	workerBlock := b.Func.MakeBlock()
+	b.If(locked, directBlock, workerBlock)
+	b.SetBlockEx(directBlock, llssa.AtEnd, false)
+	p.emitCoroSameMWordCall(
+		b, coroOSThreadForeignCallHookV1, function, traceTarget, args, r1, r2, errno,
+	)
+	b.Jump(join)
+	b.SetBlockEx(workerBlock, llssa.AtEnd, false)
+	emitPark(b)
+	b.Jump(join)
 	b.SetBlockContinuation(join)
 	// Keep every independently proved typed owner live until direct return or
 	// worker completion has selected this normal path; llvm.fake.use emits no
@@ -427,11 +495,11 @@ func (p *context) compileCoroWorkerWordCall(
 // in that continuation preserves both valid LLVM SSA and the typed owner until
 // the physical completion/retirement boundary.
 func (p *context) coroCallKeepaliveSources(call ssa.CallInstruction) []ssa.Value {
-	body := p.coroBody()
-	if body == nil || body.frameRetention == nil || call == nil {
+	plan := p.coroEmissionPlan()
+	if plan == nil || plan.frameRetention == nil || call == nil {
 		return nil
 	}
-	return body.frameRetention.exactCallKeepaliveSources(call)
+	return plan.frameRetention.exactCallKeepaliveSources(call)
 }
 
 func (p *context) coroCallKeepaliveStorageType(source ssa.Value) llssa.Type {
@@ -510,25 +578,42 @@ func (p *context) coroWorkerOrdinaryCall(common *ssa.CallCommon) *ssa.Call {
 	return nil
 }
 
-// compileCoroWorkerSyscall lowers one source-style synchronous llgo.syscall
-// family operation into the common ForeignWait recipe. All conventions share
-// one park/resume CFG; only the final errno predicate differs. Argument
-// evaluation happens before publication, and the fixed pool receives only
-// copied uintptr words.
-func (p *context) compileCoroWorkerSyscall(
+// compileCoroSyscallOperation lowers one source-style synchronous llgo.syscall
+// family operation through its frozen target recipe. A certified native target
+// blocks synchronously on the current M after releasing the execution domain;
+// a worker-only target uses the full park/resume transaction. All conventions
+// share the same result and errno projection.
+func (p *context) compileCoroSyscallOperation(
 	b llssa.Builder,
 	call *ssa.CallCommon,
 	args []ssa.Value,
 	results *types.Tuple,
 	convention syscallFailureConvention,
+	semantics CoroIntrinsicCallSemantics,
 ) llssa.Expr {
 	direct := p.coroWorkerOrdinaryCall(call)
+	if direct == nil {
+		panic("coroutine syscall lowering lost its exact source call")
+	}
 	compiled := make([]llssa.Expr, len(args))
 	for index, argument := range args {
 		compiled[index] = p.compileValue(b, argument)
 	}
-	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, direct)
-	result := p.compileCoroWorkerWordCall(b, compiled[0], compiled[0], compiled[1:], keepaliveSlots, nil, true)
+	var result coroWorkerWordResultV1
+	switch semantics {
+	case CoroIntrinsicCallInlineNativeBlock:
+		keepalives := p.compileCoroCallKeepaliveValues(b, direct)
+		result = p.compileCoroNativeSyscallWordCall(
+			b, compiled[0], compiled[0], compiled[1:], keepalives,
+		)
+	case CoroIntrinsicCallInlineSuspend:
+		keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, direct)
+		result = p.compileCoroWorkerWordCall(
+			b, compiled[0], compiled[0], compiled[1:], keepaliveSlots, nil,
+		)
+	default:
+		panic(fmt.Sprintf("coroutine syscall lowering received incompatible semantics %d", semantics))
+	}
 	errnoValue := p.filterSyscallErrno(b, result.r1, result.errno, convention)
 	return b.Aggregate(p.type_(results, llssa.InGo), result.r1, result.r2, errnoValue)
 }

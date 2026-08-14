@@ -525,3 +525,46 @@ func caller(value any, fail bool) int { return leaf(value, fail) }
 		})
 	}
 }
+
+func TestAnalyzeSSAStaticOutcomeAdmitsNoUnwindNativeBlock(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_outcome_native_block.go", `package coroid
+
+func nativeBlock() int { return 7 }
+`)
+	nativeBlock := packageFunction(t, pkg, "nativeBlock")
+	config := planDigestSSAConfig()
+	config.OutcomeMode = OutcomeExplicitStatus
+	config.MaxPlainInstructions = -1
+	config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+		if fn == nativeBlock {
+			return SSAFunctionPolicy{Effect: MayPark, TrustedNoUnwind: true}, nil
+		}
+		return SSAFunctionPolicy{}, nil
+	}
+	config.ClassifyLocalBody = func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		if fn == nativeBlock {
+			// This is the analyzer projection of ProgramIR's certified native-
+			// block recipe. The physical planner independently verifies that the
+			// corresponding instruction is a direct native syscall operation.
+			facts.Effect = MayPark
+			facts.StaticOutcomeLocal = true
+			facts.OutcomePlainLeaf = false
+			facts.OutcomePlainDAG = false
+		}
+		return facts, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: nativeBlock, ManagedDemand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := functionPlanFor(t, plan, nativeBlock)
+	if got.Emission != EmitCoroutine || got.ManagedEntry != ManagedEntryCoroutine ||
+		got.Effect != MayPark || got.Exec.Contains(MayUnwind) || !got.StaticOutcome ||
+		!got.HasStaticOutcome() {
+		t.Fatalf("no-unwind native-block plan = %+v, want may-park coroutine plus static outcome twin", got)
+	}
+	if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err != nil {
+		t.Fatalf("digest no-unwind native-block plan: %v", err)
+	}
+}

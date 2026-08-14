@@ -2151,7 +2151,7 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 							if callSite.ElidesCall() || callSite.ElisionCertificate != "" {
 								return nil, fmt.Errorf("raw-plain synchronous call %q in %q has a malformed retained managed recipe", direct.String(), fn.Name())
 							}
-						case cl.CoroIntrinsicCallInlineSuspend:
+						case cl.CoroIntrinsicCallInlineSuspend, cl.CoroIntrinsicCallInlineNativeBlock:
 							if callSite.Elision != cl.CoroCallElidedIntrinsic || callSite.ElisionCertificate == "" {
 								return nil, fmt.Errorf("raw-plain synchronous call %q in %q has no exact worker elision certificate", direct.String(), fn.Name())
 							}
@@ -2510,7 +2510,7 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 				if _, planned := plan.CallPlan(call); !planned {
 					return fmt.Errorf("live raw ABI plain closure function %q (%s) lost its retained managed fail-closed syscall edge", functionPlan.ID, fn.String())
 				}
-			case cl.CoroIntrinsicCallInlineSuspend:
+			case cl.CoroIntrinsicCallInlineSuspend, cl.CoroIntrinsicCallInlineNativeBlock:
 				plannedCertificate, planned := plan.ElidedCallCertificate(call)
 				if !planned || !plan.ElidesCall(call) || plannedCertificate != site.ElisionCertificate {
 					return fmt.Errorf("live raw ABI plain closure function %q (%s) lost its exact worker syscall certificate", functionPlan.ID, fn.String())

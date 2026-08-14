@@ -241,8 +241,7 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 	if spec.StaticOutcome {
 		if spec.External != ExternalKnown || spec.ManagedEntry != ManagedEntryCoroutine ||
 			spec.AtomicCostProof != AtomicCostUnproven || spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" ||
-			spec.Seed&^(YieldOnly|AwaitStructured|OutcomeStructured) != 0 ||
-			!spec.Seed.Contains(OutcomeStructured) ||
+			spec.Seed&^(AwaitStructured|OutcomeStructured|MayPark) != 0 ||
 			spec.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
 			return fmt.Errorf("coro: function %q: invalid imported unbounded static outcome capability", spec.ID)
 		}

@@ -368,8 +368,7 @@ func (function LibraryEffectFunction) validate() error {
 	if function.StaticOutcome {
 		if function.AtomicCostProof.ProvesOutcomePlain() || function.ManagedEntry != ManagedEntryCoroutine ||
 			function.Primary != PrimaryCoroutine ||
-			function.Effect&^(YieldOnly|AwaitStructured|OutcomeStructured) != 0 ||
-			!function.Effect.Contains(OutcomeStructured) ||
+			function.Effect&^(AwaitStructured|OutcomeStructured|MayPark) != 0 ||
 			function.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
 			return fmt.Errorf("coro: library function %q has an invalid unbounded static outcome capability", function.ID)
 		}

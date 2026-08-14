@@ -83,6 +83,33 @@ func Root(fn, a0 uintptr, f0 float64) (uintptr, uintptr, uintptr) {
 }
 `
 
+const coroWorkerStaticOutcomeChainTestSource = `package chain
+
+import _ "unsafe"
+
+//go:linkname raw llgo.syscall
+func raw(fn, a0 uintptr) (uintptr, uintptr, uintptr)
+
+//go:linkname funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+
+//llgo:coro workeraddr 1
+func libc_worker1_v1_trampoline()
+
+func Leaf(a0 uintptr) uintptr {
+	r1, _, _ := raw(funcPCABI0(libc_worker1_v1_trampoline), a0)
+	return r1
+}
+
+func Middle(a0 uintptr) uintptr {
+	return Leaf(a0) + 1
+}
+
+func Top(a0 uintptr) uintptr {
+	return Middle(a0) + 2
+}
+`
+
 func TestCoroTypedSyncSyscallDoesNotForgeWordWorkerABI(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, coroWorkerTypedSyncSyscallTestSource)
 	root := ssaPkg.Func("Root")
@@ -120,8 +147,9 @@ func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 	rootPlan, ok := plan.FunctionPlan(root)
 	if !ok || rootPlan.Emission != coro.EmitCoroutine || rootPlan.FuncRep != coro.DirectCoro ||
 		rootPlan.Demand != coro.AsyncDemand || !rootPlan.Effect.Contains(coro.MayPark) ||
-		!rootPlan.LocalEffect.Contains(coro.MayPark) {
-		t.Fatalf("Root plan = %+v, present=%t; want one local may-park coroutine", rootPlan, ok)
+		!rootPlan.LocalEffect.Contains(coro.MayPark) || !rootPlan.StaticOutcome ||
+		!rootPlan.HasStaticOutcome() {
+		t.Fatalf("Root plan = %+v, present=%t; want one local may-park coroutine plus static outcome twin", rootPlan, ok)
 	}
 	if !plan.ElidesCall(rawCall) {
 		t.Fatal("llgo.syscall declaration call is not frozen as a frontend-elided worker site")
@@ -170,11 +198,36 @@ func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 			t.Fatalf("Root native syscall switch lacks status %d:\n%s", status, dispatch[0])
 		}
 	}
+	outcome := module.NamedFunction("foo.Root$outcome")
+	if outcome.IsNil() {
+		t.Fatalf("Root static outcome twin is missing:\n%s", module.String())
+	}
+	outcomeBody := outcome.String()
+	if got := strings.Count(outcomeBody, "@"+coroNativeSyscallCallHookV1); got != 1 {
+		t.Fatalf("Root outcome native syscall calls = %d, want 1:\n%s", got, outcomeBody)
+	}
+	for _, forbidden := range []string{
+		"llvm.coro.",
+		coroFrameAllocHookV1,
+		coroWorkerParkHookV1,
+		coroWorkerResumeHookV1,
+		coroAwaitPrepareInlineHookV4,
+		coroAwaitConsumeHookV1,
+	} {
+		if strings.Contains(outcomeBody, forbidden) {
+			t.Fatalf("Root outcome retained coroutine/worker operation %q:\n%s", forbidden, outcomeBody)
+		}
+	}
 
 	runCoroABITestPipeline(t, prog, module)
 	resumeBody := module.NamedFunction("foo.Root$coro.resume")
 	if resumeBody.IsNil() || !strings.Contains(resumeBody.String(), "call i32 @"+coroNativeSyscallCallHookV1) {
 		t.Fatalf("CoroSplit lost native syscall dispatch:\n%s", module.String())
+	}
+	postSplitOutcome := module.NamedFunction("foo.Root$outcome")
+	if postSplitOutcome.IsNil() || strings.Contains(postSplitOutcome.String(), "llvm.coro.") ||
+		!strings.Contains(postSplitOutcome.String(), "call i32 @"+coroNativeSyscallCallHookV1) {
+		t.Fatalf("CoroSplit changed the synchronous native syscall outcome:\n%s", module.String())
 	}
 	object, err := prog.TargetMachine().EmitToMemoryBuffer(module, llvm.ObjectFile)
 	if err != nil {
@@ -249,6 +302,57 @@ func TestCoroWorkerSyscallFailureConventionsShareLowering(t *testing.T) {
 			if got := strings.Count(text, "@"+symbol); got != 0 {
 				t.Errorf("%s retained worker syscall hook %q = %d", test.name, symbol, got)
 			}
+		}
+	}
+}
+
+func TestCoroNativeSyscallStaticOutcomePropagatesThroughExactCallChain(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	compiled := compileCoroWorkerSourceFixture(
+		t, coroWorkerStaticOutcomeChainTestSource, []string{"Top"},
+	)
+	defer compiled.prog.Dispose()
+	module := compiled.pkg.Module()
+	defer module.Dispose()
+
+	topPlan, found := compiled.plan.FunctionPlan(compiled.roots["Top"])
+	if !found || topPlan.Emission != coro.EmitCoroutine || !topPlan.StaticOutcome ||
+		!topPlan.HasStaticOutcome() || !topPlan.Effect.Contains(coro.MayPark) {
+		t.Fatalf("Top plan = %+v, present=%t; want propagated native-block static outcome", topPlan, found)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify native syscall outcome chain before CoroSplit: %v\n%s", err, module.String())
+	}
+	for _, edge := range []struct {
+		caller string
+		callee string
+	}{
+		{caller: "chain.Top", callee: "chain.Middle$outcome"},
+		{caller: "chain.Middle", callee: "chain.Leaf$outcome"},
+	} {
+		coroutineBody := requireCoroPhysicalFunction(t, module, edge.caller).String()
+		if !strings.Contains(coroutineBody, edge.callee) ||
+			strings.Contains(coroutineBody, coroAwaitPrepareInlineHookV4) ||
+			strings.Contains(coroutineBody, coroAwaitConsumeHookV1) {
+			t.Fatalf("%s coroutine did not flatten exact call through %s:\n%s", edge.caller, edge.callee, coroutineBody)
+		}
+		outcomeBody := module.NamedFunction(edge.caller + "$outcome")
+		if outcomeBody.IsNil() || !strings.Contains(outcomeBody.String(), edge.callee) ||
+			strings.Contains(outcomeBody.String(), "llvm.coro.") {
+			t.Fatalf("%s outcome did not flatten exact call through %s:\n%s", edge.caller, edge.callee, module.String())
+		}
+	}
+	leafOutcome := module.NamedFunction("chain.Leaf$outcome")
+	if leafOutcome.IsNil() || strings.Count(leafOutcome.String(), "@"+coroNativeSyscallCallHookV1) != 1 ||
+		strings.Contains(leafOutcome.String(), "llvm.coro.") {
+		t.Fatalf("Leaf has no synchronous native syscall outcome:\n%s", module.String())
+	}
+
+	runCoroABITestPipeline(t, compiled.prog, module)
+	for _, name := range []string{"chain.Top$outcome", "chain.Middle$outcome", "chain.Leaf$outcome"} {
+		outcome := module.NamedFunction(name)
+		if outcome.IsNil() || strings.Contains(outcome.String(), "llvm.coro.") {
+			t.Fatalf("post-CoroSplit static chain lost %s:\n%s", name, module.String())
 		}
 	}
 }
@@ -422,6 +526,10 @@ func compileCoroWorkerFixture(t *testing.T) (
 	compiled := compileCoroWorkerSourceFixture(
 		t, coroWorkerTestSource, []string{"Root", "RootInt32", "RootPointer"},
 	)
+	if compiled.calls["Root"] == nil {
+		compiled.prog.Dispose()
+		t.Fatal("worker fixture Root has no direct llgo.syscall call")
+	}
 	return compiled.prog, compiled.pkg, compiled.plan, compiled.roots["Root"], compiled.calls["Root"]
 }
 
@@ -469,7 +577,6 @@ func compileCoroWorkerSourceFixture(
 	rootsByName := make(map[string]*ssa.Function, len(rootNames))
 	callsByName := make(map[string]*ssa.Call, len(rootNames))
 	analysisRoots := make(coro.Roots, 0, len(rootNames))
-	rootSet := make(map[*ssa.Function]bool, len(rootNames))
 	for _, name := range rootNames {
 		root := ssaPkg.Func(name)
 		if root == nil {
@@ -477,7 +584,6 @@ func compileCoroWorkerSourceFixture(
 			t.Fatalf("worker fixture lacks root %q", name)
 		}
 		rootsByName[name] = root
-		rootSet[root] = true
 		analysisRoots = append(analysisRoots, coro.Root{Function: root, Demand: coro.AsyncDemand})
 		for _, block := range root.Blocks {
 			for _, instruction := range block.Instrs {
@@ -499,9 +605,24 @@ func compileCoroWorkerSourceFixture(
 				}
 			}
 		}
-		if callsByName[name] == nil {
-			prog.Dispose()
-			t.Fatalf("worker fixture root %q has no direct llgo.syscall call", name)
+	}
+	intrinsicEffects := make(map[*ssa.Function]coro.Effect)
+	for _, function := range universe.Functions() {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(*ssa.Call)
+				if !ok {
+					continue
+				}
+				semantics, intrinsic, semanticsErr := universe.CoroIntrinsicCallSiteSemantics(call)
+				if semanticsErr != nil {
+					prog.Dispose()
+					t.Fatalf("classify %s intrinsic effect: %v", function.String(), semanticsErr)
+				}
+				if intrinsic && semantics.SuspendsCurrentFrame() {
+					intrinsicEffects[function] = intrinsicEffects[function].Join(semantics.CurrentFrameEffect())
+				}
+			}
 		}
 	}
 	functionIDs := universe.FunctionIDConfig()
@@ -512,14 +633,13 @@ func compileCoroWorkerSourceFixture(
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
-			if rootSet[fn] {
-				// Production builds seed this fact through
-				// CoroPlanInput.intrinsicCallSemantics. This isolated cl fixture
-				// has no build-driver wrapper, so freeze the same owner effect.
-				return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
-			}
-			return coro.SSAFunctionPolicy{}, nil
+			// Production builds seed owner-local intrinsic effects from the same
+			// frozen call SitePlans. Reproduce that bridge without assuming every
+			// externally demanded root contains the syscall itself.
+			return coro.SSAFunctionPolicy{Effect: intrinsicEffects[fn]}, nil
 		},
 		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
 			callee := call.Common().StaticCallee()
