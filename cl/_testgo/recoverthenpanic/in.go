@@ -7,7 +7,7 @@ package main
 // CHECK: call void @__llgo_coro_panic_prepare_v1(
 // CHECK: call void @__llgo_coro_recover_take_v1(
 // CHECK: call ptr @"{{.*}}PrintString$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr @"{{.*}}PrintByte$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-NOT: GetThreadDefer
@@ -15,7 +15,7 @@ package main
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call void @__llgo_coro_panic_prepare_v1(
 // CHECK: call ptr @"main.End$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-NOT: GetThreadDefer
 // CHECK-NOT: SetThreadDefer

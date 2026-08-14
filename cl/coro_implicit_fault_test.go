@@ -256,7 +256,7 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 			recovering := requireCoroPhysicalFunction(t, module, "foo.WithRecover").String()
 			if strings.Count(recovering, "call void @"+coroFaultPayloadHookV1) != 1 ||
 				strings.Contains(recovering, "call void @"+coroFaultPrepareHookV1) ||
-				countCoroIRDirectCalls(requireCoroPhysicalFunction(t, module, "foo.WithRecover"), coroAwaitPrepareHookV1) != 1 ||
+				countCoroIRDirectCalls(requireCoroPhysicalFunction(t, module, "foo.WithRecover"), coroAwaitPrepareInlineHookV4) != 1 ||
 				countCoroIRDirectCalls(requireCoroPhysicalFunction(t, module, "foo.RecoverFault"), coroRecoverTakeHookV1) != 1 {
 				t.Fatalf("recoverable implicit fault does not use the shared panic/child transaction:\nWithRecover:\n%s\nRecoverFault:\n%s",
 					recovering, requireCoroPhysicalFunction(t, module, "foo.RecoverFault").String())
@@ -280,7 +280,7 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 			recoverFault := module.NamedFunction("foo.RecoverFault$coro.resume")
 			if withRecover.IsNil() || recoverFault.IsNil() ||
 				strings.Count(withRecover.String(), "call void @"+coroFaultPayloadHookV1) != 1 ||
-				countCoroIRDirectCalls(withRecover, coroAwaitPrepareHookV1) != 1 ||
+				countCoroIRDirectCalls(withRecover, coroAwaitPrepareInlineHookV4) != 1 ||
 				countCoroIRDirectCalls(recoverFault, coroRecoverTakeHookV1) != 1 {
 				t.Fatalf("post-split recoverable implicit fault lost its payload/recover transaction:\n%s", module.String())
 			}
@@ -323,7 +323,7 @@ func TestCoroIntegerDivideByZeroUsesStructuredFaultNativeAndWasm32(t *testing.T)
 				}
 				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
 				if strings.Contains(body, "AssertDivideByZero") ||
-					strings.Contains(body, "call void @"+coroAwaitPrepareHookV1) ||
+					strings.Contains(body, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
 					strings.Count(body, "call void @"+coroFaultPrepareHookV1) != 1 ||
 					!strings.Contains(body, fmt.Sprintf("i32 %d", coroFaultIntegerDivideByZeroV1)) {
 					t.Fatalf("%s did not exclusively use one structured divide-by-zero fault:\n%s", name, body)

@@ -20,7 +20,7 @@ func main() {
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call void @__llgo_coro_panic_prepare_v1(
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-LABEL: define ptr @"main.main$1$coro"(
 // CHECK: call void @__llgo_coro_recover_take_v1(
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"

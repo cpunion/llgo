@@ -15,8 +15,7 @@ func main() {
 	// CHECK: [[CSTRMEM:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64
 	// CHECK-NOT: alloca ptr, i64
 	// CHECK-NOT: alloca i8, i64
-	// CHECK: [[COPY:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.CStrCopy$coro"({{.*}}ptr [[CSTRMEM]]
-	// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[COPY]]
+	// CHECK: call void @"{{.*}}/runtime/internal/runtime.CStrCopy$outcome"({{.*}}ptr [[CSTRMEM]]
 	// CHECK-NOT: alloca ptr, i64
 	// CHECK-NOT: alloca i8, i64
 	// CHECK: call void @__llgo_coro_worker_park_v1

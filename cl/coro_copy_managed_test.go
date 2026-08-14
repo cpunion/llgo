@@ -136,7 +136,7 @@ func TestCoroCopyHelperNativeAndWasm32(t *testing.T) {
 				if !strings.Contains(body, "runtime.SliceCopy") || strings.Contains(body, "runtime.SliceCopy$coro") {
 					t.Fatalf("%s did not call the exact plain SliceCopy helper:\n%s", name, body)
 				}
-				if strings.Contains(body, coroAwaitPrepareHookV1) || strings.Contains(body, coroAwaitConsumeHookV1) {
+				if strings.Contains(body, coroAwaitPrepareInlineHookV4) || strings.Contains(body, coroAwaitConsumeHookV1) {
 					t.Fatalf("%s awaited a proven no-suspend SliceCopy helper:\n%s", name, body)
 				}
 			}

@@ -47,62 +47,6 @@ func coroHandleDestroyCommitted(g *coro.G, handle unsafe.Pointer) bool {
 	return coro.CommitFrameDestroyCompiler(g, handle)
 }
 
-// __llgo_coro_await_inline_v1 resumes one already prepared child on the
-// current executor stack. A synchronous completion is destroyed and committed
-// here; a real suspension returns false so generated parents unwind through
-// llvm.coro.suspend before the outer scheduler consumes the deepest pending
-// transition. No native stack survives that false return path.
-//
-//export __llgo_coro_await_inline_v1
-func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool {
-	task := (*coro.G)(g)
-	switch coro.BeginInlineAwait(task, parent, child) {
-	case coro.InlineAwaitDeclined:
-		return false
-	case coro.InlineAwaitStarted:
-	default:
-		coroRuntimeAbort("invalid coroutine inline child begin")
-		return false
-	}
-
-	coroHandleResume(child)
-	switch coro.FinishInlineAwait(task, parent, child, coroHandleDone(child)) {
-	case coro.InlineAwaitSuspend:
-		return false
-	case coro.InlineAwaitDestroy:
-		if !coroHandleDestroyCommitted(task, child) {
-			coroRuntimeAbort("invalid coroutine inline child physical destroy")
-			return false
-		}
-		if !coro.CommitInlineAwaitDestroy(task, parent, child) {
-			coroRuntimeAbort("invalid coroutine inline child destroy commit")
-			return false
-		}
-		return true
-	default:
-		coroRuntimeAbort("invalid coroutine inline child return")
-		return false
-	}
-}
-
-// __llgo_coro_await_inline_begin_v2 owns only the scheduler-state half of an
-// eager static child handoff. Keeping llvm.coro.resume/done/destroy in the
-// generated caller exposes the exact handle lifetime to LLVM 22's annotated
-// frame-elision pass.
-//
-//export __llgo_coro_await_inline_begin_v2
-func __llgo_coro_await_inline_begin_v2(g, parent, child unsafe.Pointer) bool {
-	switch coro.BeginInlineAwaitCompiler((*coro.G)(g), parent, child) {
-	case coro.InlineAwaitDeclined:
-		return false
-	case coro.InlineAwaitStarted:
-		return true
-	default:
-		coroRuntimeAbort("invalid coroutine inline child begin")
-		return false
-	}
-}
-
 //export __llgo_coro_await_inline_finish_v2
 func __llgo_coro_await_inline_finish_v2(g, parent, child unsafe.Pointer, done bool) bool {
 	switch coro.FinishInlineAwaitCompiler((*coro.G)(g), parent, child, done) {
@@ -113,13 +57,6 @@ func __llgo_coro_await_inline_finish_v2(g, parent, child unsafe.Pointer, done bo
 	default:
 		coroRuntimeAbort("invalid coroutine inline child finish")
 		return false
-	}
-}
-
-//export __llgo_coro_await_inline_destroy_commit_v2
-func __llgo_coro_await_inline_destroy_commit_v2(g, parent, child unsafe.Pointer) {
-	if !coro.CommitInlineAwaitDestroyCompiler((*coro.G)(g), parent, child) {
-		coroRuntimeAbort("invalid coroutine inline child destroy commit")
 	}
 }
 

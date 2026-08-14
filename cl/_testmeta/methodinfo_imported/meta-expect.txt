@@ -1,31 +1,33 @@
 [OrdinaryEdges]
-__llgo_coro_root_factory_descriptor_v1.040f9e7d8f3b704641dbfcfa24143f1f:
-    __llgo_coro_root_factory_v1.040f9e7d8f3b704641dbfcfa24143f1f
-__llgo_coro_root_factory_descriptor_v1.ceaadd22940763468d30b2e97725b52e:
-    __llgo_coro_root_factory_v1.ceaadd22940763468d30b2e97725b52e
-__llgo_coro_root_factory_v1.040f9e7d8f3b704641dbfcfa24143f1f:
+__llgo_coro_root_factory_descriptor_v1.0eddab38efa319180982a879473e8886:
+    __llgo_coro_root_factory_v1.0eddab38efa319180982a879473e8886
+__llgo_coro_root_factory_descriptor_v1.2571e4eb67f7c8ca3bc0c295522edcb9:
+    __llgo_coro_root_factory_v1.2571e4eb67f7c8ca3bc0c295522edcb9
+__llgo_coro_root_factory_v1.0eddab38efa319180982a879473e8886:
     main.main$coro
-__llgo_coro_root_factory_v1.ceaadd22940763468d30b2e97725b52e:
+__llgo_coro_root_factory_v1.2571e4eb67f7c8ca3bc0c295522edcb9:
     main.init$coro
-__llgo_coro_root_package_v1.a26699e638ee763118a1d4991ecd57a5:
-    __llgo_coro_root_package_v1.a26699e638ee763118a1d4991ecd57a5.entries
-__llgo_coro_root_package_v1.a26699e638ee763118a1d4991ecd57a5.entries:
-    __llgo_coro_root_factory_descriptor_v1.040f9e7d8f3b704641dbfcfa24143f1f
-    __llgo_coro_root_factory_descriptor_v1.ceaadd22940763468d30b2e97725b52e
+__llgo_coro_root_package_v1.90f6136d7da8c90701144a73d9e8e948:
+    __llgo_coro_root_package_v1.90f6136d7da8c90701144a73d9e8e948.entries
+__llgo_coro_root_package_v1.90f6136d7da8c90701144a73d9e8e948.entries:
+    __llgo_coro_root_factory_descriptor_v1.0eddab38efa319180982a879473e8886
+    __llgo_coro_root_factory_descriptor_v1.2571e4eb67f7c8ca3bc0c295522edcb9
 llvm.compiler.used:
-    __llgo_coro_library_effect_v6.c80e133b52a5e2617aa48a13f6acf1f4
+    __llgo_coro_library_effect_v9.3ac9d41c83e30836bd73bd3b84b3f46f
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.040f9e7d8f3b704641dbfcfa24143f1f
-    __llgo_coro_root_factory_descriptor_v1.ceaadd22940763468d30b2e97725b52e
-    __llgo_coro_root_package_v1.a26699e638ee763118a1d4991ecd57a5
+    __llgo_coro_root_factory_descriptor_v1.0eddab38efa319180982a879473e8886
+    __llgo_coro_root_factory_descriptor_v1.2571e4eb67f7c8ca3bc0c295522edcb9
+    __llgo_coro_root_package_v1.90f6136d7da8c90701144a73d9e8e948
 main.init$coro:
     __llgo_coro_await_consume_v1
-    __llgo_coro_await_prepare_v3
+    __llgo_coro_await_inline_destroy_consume_v4
+    __llgo_coro_await_inline_finish_v2
+    __llgo_coro_await_prepare_inline_v4
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.ceaadd22940763468d30b2e97725b52e
+    __llgo_coro_frame_descriptor_v1.2571e4eb67f7c8ca3bc0c295522edcb9
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     bytes.init$coro
@@ -33,33 +35,43 @@ main.init$coro:
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
+    llvm.coro.destroy
+    llvm.coro.done
     llvm.coro.end
     llvm.coro.free
     llvm.coro.id
     llvm.coro.promise
+    llvm.coro.resume
     llvm.coro.size.i64
     llvm.coro.suspend
+    llvm.fake.use
     llvm.trap
     main.init$guard
 main.main$coro:
     __llgo_coro_await_consume_v1
-    __llgo_coro_await_prepare_v3
+    __llgo_coro_await_inline_destroy_consume_v4
+    __llgo_coro_await_inline_finish_v2
+    __llgo_coro_await_prepare_inline_v4
     __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.040f9e7d8f3b704641dbfcfa24143f1f
+    __llgo_coro_frame_descriptor_v1.0eddab38efa319180982a879473e8886
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     bytes.(*Buffer).Read$coro
-    bytes.NewBuffer$coro
+    bytes.NewBuffer$outcome
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
+    llvm.coro.destroy
+    llvm.coro.done
     llvm.coro.end
     llvm.coro.free
     llvm.coro.id
     llvm.coro.promise
+    llvm.coro.resume
     llvm.coro.size.i64
     llvm.coro.suspend
     llvm.fake.use

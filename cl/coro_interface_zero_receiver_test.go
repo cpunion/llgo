@@ -151,7 +151,7 @@ func Root(runner Runner) int { return runner.Run() }
 		t.Fatalf("zero-size interface module retained a native-stack nil assertion:\n%s", ir)
 	}
 	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-	if !strings.Contains(rootIR, "call void @"+coroAwaitPrepareHookV1) ||
+	if !strings.Contains(rootIR, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
 		!strings.Contains(rootIR, "call i8 @llvm.coro.suspend") {
 		t.Fatalf("zero-size interface dispatch did not use structured child-await lowering:\n%s", rootIR)
 	}
@@ -170,7 +170,7 @@ func Root(runner Runner) int { return runner.Run() }
 	wrapperIR := wrapperCoro.String()
 	if strings.Contains(wrapperIR, "AssertNilDeref") ||
 		!strings.Contains(wrapperIR, "call void @"+coroFaultPrepareHookV1) ||
-		!strings.Contains(wrapperIR, "call void @"+coroAwaitPrepareHookV1) {
+		!strings.Contains(wrapperIR, "call i1 @"+coroAwaitPrepareInlineHookV4) {
 		t.Fatalf("promoted wrapper did not lower pointer adaptation through structured fault/await edges:\n%s", wrapperIR)
 	}
 

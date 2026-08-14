@@ -193,7 +193,7 @@ func Root(waiter Waiter) uint32 { <-gate; return waiter.Wait() }
 	}
 	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
 	waitName := funcName(ssaPkg.Pkg, wait, false) + coroPrimarySuffix
-	if required := "call void @" + coroAwaitPrepareHookV1; !strings.Contains(rootIR, required) {
+	if required := "call i1 @" + coroAwaitPrepareInlineHookV4; !strings.Contains(rootIR, required) {
 		t.Fatalf("pointer-receiver interface await lacks %q:\n%s", required, rootIR)
 	}
 	for _, forbidden := range []string{"coro.dispatch.version.invalid", "coro.dispatch.hash.invalid"} {

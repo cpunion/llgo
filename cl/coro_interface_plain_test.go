@@ -784,7 +784,7 @@ func assertCoroManagedClosedInterfaceIR(t *testing.T, ir string) {
 	if !strings.Contains(ir, "llvm.coro.suspend") && !strings.Contains(ir, ".resume") {
 		t.Fatalf("coroutine body has no suspension/resume marker:\n%s", ir)
 	}
-	if !strings.Contains(ir, coroAwaitPrepareHookV1) {
+	if !strings.Contains(ir, coroAwaitPrepareInlineHookV4) {
 		t.Fatalf("coroutine body does not await the managed interface child:\n%s", ir)
 	}
 	if strings.Contains(ir, "IfacePtrData") {
@@ -797,7 +797,7 @@ func assertCoroClosedInterfacePlainIR(t *testing.T, ir string) {
 	if !strings.Contains(ir, "llvm.coro.suspend") && !strings.Contains(ir, ".resume") {
 		t.Fatalf("coroutine body has no suspension/resume marker:\n%s", ir)
 	}
-	if strings.Contains(ir, coroAwaitPrepareHookV1) {
+	if strings.Contains(ir, coroAwaitPrepareInlineHookV4) {
 		t.Fatalf("closed no-unwind interface invoke retained a managed child transaction:\n%s", ir)
 	}
 }

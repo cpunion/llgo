@@ -122,34 +122,31 @@ const (
 	coroFrameFreeHook             = "__llgo_coro_frame_free_v0"
 	coroDescriptorPrefix          = "__llgo_coro_frame_descriptor_v0."
 
-	coroPhysicalABIVersionV1           uint32 = 1
-	coroFrameAllocHookV1                      = "__llgo_coro_frame_alloc_v1"
-	coroFramePublishHookV1                    = "__llgo_coro_frame_publish_v1"
-	coroFramePublishHookV3                    = "__llgo_coro_frame_publish_v3"
-	coroAwaitPrepareHookV1                    = "__llgo_coro_await_prepare_v3"
-	coroAwaitInlineHookV1                     = "__llgo_coro_await_inline_v1"
-	coroAwaitInlineBeginHookV2                = "__llgo_coro_await_inline_begin_v2"
-	coroAwaitInlineFinishHookV2               = "__llgo_coro_await_inline_finish_v2"
-	coroAwaitInlineDestroyCommitHookV2        = "__llgo_coro_await_inline_destroy_commit_v2"
-	coroFrameDestroyCommitHookV2              = "__llgo_coro_frame_destroy_commit_v2"
-	coroAwaitConsumeHookV1                    = "__llgo_coro_await_consume_v1"
-	coroPreemptPollHookV1                     = "__llgo_coro_preempt_poll_v1"
-	coroYieldPrepareHookV1                    = "__llgo_coro_yield_prepare_v1"
-	coroCriticalEnterHookV1                   = "__llgo_coro_critical_enter_v1"
-	coroCriticalExitHookV1                    = "__llgo_coro_critical_exit_v1"
-	coroKeyedParkHookV2                       = "__llgo_coro_keyed_park_v2"
-	coroKeyedResumeHookV2                     = "__llgo_coro_keyed_resume_v2"
-	coroRunDecisionTakeHookV1                 = "__llgo_coro_run_decision_take_v1"
-	coroRunDecisionTakeZeroHookV1             = "__llgo_coro_run_decision_take_zero_v1"
-	coroPanicPrepareHookV1                    = "__llgo_coro_panic_prepare_v1"
-	coroPanicTraceReplaceHookV1               = "__llgo_coro_panic_trace_replace_v1"
-	coroRecoverTakeHookV1                     = "__llgo_coro_recover_take_v1"
-	coroSpawnBeginHookV1                      = "__llgo_coro_spawn_begin_v1"
-	coroSpawnCommitHookV1                     = "__llgo_coro_spawn_commit_v1"
-	coroCompletePrepareHookV2                 = "__llgo_coro_complete_prepare_v2"
-	coroFrameFreeHookV1                       = "__llgo_coro_frame_free_v1"
-	coroDescriptorPrefixV1                    = "__llgo_coro_frame_descriptor_v1."
-	coroBorrowedFrameMetadataWordsV2          = 20
+	coroPhysicalABIVersionV1            uint32 = 1
+	coroFrameAllocHookV1                       = "__llgo_coro_frame_alloc_v1"
+	coroFramePublishHookV1                     = "__llgo_coro_frame_publish_v1"
+	coroFramePublishHookV3                     = "__llgo_coro_frame_publish_v3"
+	coroAwaitPrepareInlineHookV4               = "__llgo_coro_await_prepare_inline_v4"
+	coroAwaitInlineFinishHookV2                = "__llgo_coro_await_inline_finish_v2"
+	coroAwaitInlineDestroyConsumeHookV4        = "__llgo_coro_await_inline_destroy_consume_v4"
+	coroAwaitConsumeHookV1                     = "__llgo_coro_await_consume_v1"
+	coroPreemptPollHookV1                      = "__llgo_coro_preempt_poll_v1"
+	coroYieldPrepareHookV1                     = "__llgo_coro_yield_prepare_v1"
+	coroCriticalEnterHookV1                    = "__llgo_coro_critical_enter_v1"
+	coroCriticalExitHookV1                     = "__llgo_coro_critical_exit_v1"
+	coroKeyedParkHookV2                        = "__llgo_coro_keyed_park_v2"
+	coroKeyedResumeHookV2                      = "__llgo_coro_keyed_resume_v2"
+	coroRunDecisionTakeHookV1                  = "__llgo_coro_run_decision_take_v1"
+	coroRunDecisionTakeZeroHookV1              = "__llgo_coro_run_decision_take_zero_v1"
+	coroPanicPrepareHookV1                     = "__llgo_coro_panic_prepare_v1"
+	coroPanicTraceReplaceHookV1                = "__llgo_coro_panic_trace_replace_v1"
+	coroRecoverTakeHookV1                      = "__llgo_coro_recover_take_v1"
+	coroSpawnBeginHookV1                       = "__llgo_coro_spawn_begin_v1"
+	coroSpawnCommitHookV1                      = "__llgo_coro_spawn_commit_v1"
+	coroCompletePrepareHookV2                  = "__llgo_coro_complete_prepare_v2"
+	coroFrameFreeHookV1                        = "__llgo_coro_frame_free_v1"
+	coroDescriptorPrefixV1                     = "__llgo_coro_frame_descriptor_v1."
+	coroBorrowedFrameMetadataWordsV2           = 20
 )
 
 const (
@@ -204,35 +201,33 @@ const coroPreemptInstructionBudget = 64
 const coroPreemptCheckpointStride uint64 = 2048
 
 type coroPhysicalABI struct {
-	version                 uint32
-	hash                    [16]byte
-	descriptorFlags         uint32
-	descriptorName          string
-	traceFunction           string
-	traceFile               string
-	frameAllocHook          string
-	frameFreeHook           string
-	framePublishHook        string
-	awaitPrepareHook        string
-	awaitInlineHook         string
-	awaitInlineFinishHook   string
-	awaitInlineCommitHook   string
-	frameDestroyCommitHook  string
-	awaitConsumeHook        string
-	preemptPollHook         string
-	yieldPrepareHook        string
-	criticalEnterHook       string
-	criticalExitHook        string
-	runDecisionTakeHook     string
-	runDecisionTakeZeroHook string
-	panicPrepareHook        string
-	panicTraceReplaceHook   string
-	recoverTakeHook         string
-	completePrepareHook     string
-	physicalSig             *types.Signature
-	hasEnv                  bool
-	resultSlotType          types.Type
-	resultCount             int
+	version                       uint32
+	hash                          [16]byte
+	descriptorFlags               uint32
+	descriptorName                string
+	traceFunction                 string
+	traceFile                     string
+	frameAllocHook                string
+	frameFreeHook                 string
+	framePublishHook              string
+	awaitPrepareInlineHook        string
+	awaitInlineFinishHook         string
+	awaitInlineDestroyConsumeHook string
+	awaitConsumeHook              string
+	preemptPollHook               string
+	yieldPrepareHook              string
+	criticalEnterHook             string
+	criticalExitHook              string
+	runDecisionTakeHook           string
+	runDecisionTakeZeroHook       string
+	panicPrepareHook              string
+	panicTraceReplaceHook         string
+	recoverTakeHook               string
+	completePrepareHook           string
+	physicalSig                   *types.Signature
+	hasEnv                        bool
+	resultSlotType                types.Type
+	resultCount                   int
 }
 
 // coroBodyContext exists only while emitting one physical coroutine body. It
@@ -307,11 +302,9 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	frameFreeHook := coroFrameFreeHookV1
 	descriptorPrefix := coroDescriptorPrefixV1
 	framePublishHook := coroFramePublishHookV3
-	awaitPrepareHook := coroAwaitPrepareHookV1
-	awaitInlineHook := coroAwaitInlineBeginHookV2
+	awaitPrepareInlineHook := coroAwaitPrepareInlineHookV4
 	awaitInlineFinishHook := coroAwaitInlineFinishHookV2
-	awaitInlineCommitHook := coroAwaitInlineDestroyCommitHookV2
-	frameDestroyCommitHook := coroFrameDestroyCommitHookV2
+	awaitInlineDestroyConsumeHook := coroAwaitInlineDestroyConsumeHookV4
 	awaitConsumeHook := coroAwaitConsumeHookV1
 	preemptPollHook := coroPreemptPollHookV1
 	yieldPrepareHook := coroYieldPrepareHookV1
@@ -387,7 +380,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare=%s\x00await-inline=%s\x00await-inline-finish=%s\x00await-inline-commit=%s\x00frame-destroy-commit=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare-inline=%s\x00await-inline-finish=%s\x00await-inline-destroy-consume=%s\x00await-consume-slow=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		descriptorFlags,
@@ -405,11 +398,9 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		faultPayloadArgsHook,
 		funcRepABI,
 		framePublishHook,
-		awaitPrepareHook,
-		awaitInlineHook,
+		awaitPrepareInlineHook,
 		awaitInlineFinishHook,
-		awaitInlineCommitHook,
-		frameDestroyCommitHook,
+		awaitInlineDestroyConsumeHook,
 		awaitConsumeHook,
 		runDecisionTakeHook,
 		runDecisionTakeZeroHook,
@@ -431,35 +422,33 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	var hash [16]byte
 	copy(hash[:], sum[:len(hash)])
 	return coroPhysicalABI{
-		version:                 version,
-		hash:                    hash,
-		descriptorFlags:         descriptorFlags,
-		descriptorName:          descriptorPrefix + hex.EncodeToString(hash[:]),
-		traceFunction:           traceFunction,
-		traceFile:               traceFile,
-		frameAllocHook:          frameAllocHook,
-		frameFreeHook:           frameFreeHook,
-		framePublishHook:        framePublishHook,
-		awaitPrepareHook:        awaitPrepareHook,
-		awaitInlineHook:         awaitInlineHook,
-		awaitInlineFinishHook:   awaitInlineFinishHook,
-		awaitInlineCommitHook:   awaitInlineCommitHook,
-		frameDestroyCommitHook:  frameDestroyCommitHook,
-		awaitConsumeHook:        awaitConsumeHook,
-		preemptPollHook:         preemptPollHook,
-		yieldPrepareHook:        yieldPrepareHook,
-		criticalEnterHook:       criticalEnterHook,
-		criticalExitHook:        criticalExitHook,
-		runDecisionTakeHook:     runDecisionTakeHook,
-		runDecisionTakeZeroHook: runDecisionTakeZeroHook,
-		panicPrepareHook:        panicPrepareHook,
-		panicTraceReplaceHook:   panicTraceReplaceHook,
-		recoverTakeHook:         recoverTakeHook,
-		completePrepareHook:     completePrepareHook,
-		physicalSig:             physicalSig,
-		hasEnv:                  hasEnv,
-		resultSlotType:          resultSlotType,
-		resultCount:             sourceSig.Results().Len(),
+		version:                       version,
+		hash:                          hash,
+		descriptorFlags:               descriptorFlags,
+		descriptorName:                descriptorPrefix + hex.EncodeToString(hash[:]),
+		traceFunction:                 traceFunction,
+		traceFile:                     traceFile,
+		frameAllocHook:                frameAllocHook,
+		frameFreeHook:                 frameFreeHook,
+		framePublishHook:              framePublishHook,
+		awaitPrepareInlineHook:        awaitPrepareInlineHook,
+		awaitInlineFinishHook:         awaitInlineFinishHook,
+		awaitInlineDestroyConsumeHook: awaitInlineDestroyConsumeHook,
+		awaitConsumeHook:              awaitConsumeHook,
+		preemptPollHook:               preemptPollHook,
+		yieldPrepareHook:              yieldPrepareHook,
+		criticalEnterHook:             criticalEnterHook,
+		criticalExitHook:              criticalExitHook,
+		runDecisionTakeHook:           runDecisionTakeHook,
+		runDecisionTakeZeroHook:       runDecisionTakeZeroHook,
+		panicPrepareHook:              panicPrepareHook,
+		panicTraceReplaceHook:         panicTraceReplaceHook,
+		recoverTakeHook:               recoverTakeHook,
+		completePrepareHook:           completePrepareHook,
+		physicalSig:                   physicalSig,
+		hasEnv:                        hasEnv,
+		resultSlotType:                resultSlotType,
+		resultCount:                   sourceSig.Results().Len(),
 	}
 }
 
@@ -696,7 +685,7 @@ func coroFramePublishSignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
-func coroAwaitPrepareSignature() *types.Signature {
+func coroAwaitPrepareInlineSignature() *types.Signature {
 	params := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "parent", types.Typ[types.UnsafePointer]),
@@ -705,17 +694,7 @@ func coroAwaitPrepareSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "recoverType", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "recoverData", types.Typ[types.UnsafePointer]),
 	)
-	return types.NewSignatureType(nil, nil, nil, params, nil, false)
-}
-
-func coroAwaitInlineSignature() *types.Signature {
-	pointer := types.Typ[types.UnsafePointer]
-	params := types.NewTuple(
-		types.NewParam(token.NoPos, nil, "g", pointer),
-		types.NewParam(token.NoPos, nil, "parent", pointer),
-		types.NewParam(token.NoPos, nil, "child", pointer),
-	)
-	results := types.NewTuple(types.NewParam(token.NoPos, nil, "completed", types.Typ[types.Bool]))
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "inline", types.Typ[types.Bool]))
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
@@ -731,23 +710,17 @@ func coroAwaitInlineFinishSignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
-func coroAwaitInlineCommitSignature() *types.Signature {
+func coroAwaitInlineDestroyConsumeSignature() *types.Signature {
 	pointer := types.Typ[types.UnsafePointer]
 	params := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "g", pointer),
 		types.NewParam(token.NoPos, nil, "parent", pointer),
 		types.NewParam(token.NoPos, nil, "child", pointer),
+		types.NewParam(token.NoPos, nil, "typeOut", pointer),
+		types.NewParam(token.NoPos, nil, "dataOut", pointer),
 	)
-	return types.NewSignatureType(nil, nil, nil, params, nil, false)
-}
-
-func coroFrameDestroyCommitSignature() *types.Signature {
-	pointer := types.Typ[types.UnsafePointer]
-	params := types.NewTuple(
-		types.NewParam(token.NoPos, nil, "g", pointer),
-		types.NewParam(token.NoPos, nil, "handle", pointer),
-	)
-	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
 func coroAwaitConsumeSignature() *types.Signature {

@@ -109,45 +109,46 @@ func Parent(pointer *byte) {
 	}
 
 	parentRamp := requireCoroPhysicalFunction(t, module, "foo.Parent")
-	consumeCount, ownerUseCount := coroChildAwaitCompletionOwnerUseCounts(parentRamp)
-	if consumeCount != 2 || ownerUseCount != 2 {
-		t.Fatalf("child completion consume/owner fake-use sites = %d/%d, want 2/2:\n%s",
-			consumeCount, ownerUseCount, parentRamp.String())
+	slowConsumeCount, fusedConsumeCount, ownerUseCount := coroChildAwaitCompletionOwnerUseCounts(parentRamp)
+	if slowConsumeCount != 2 || fusedConsumeCount != 1 || ownerUseCount != 2 {
+		t.Fatalf("child completion slow/fused consume and owner fake-use sites = %d/%d/%d, want 2/1/2:\n%s",
+			slowConsumeCount, fusedConsumeCount, ownerUseCount, parentRamp.String())
 	}
 
 	runCoroABITestPipeline(t, prog, module)
 	resume := module.NamedFunction("foo.Parent$coro.resume")
-	consumeCount, ownerUseCount = coroChildAwaitCompletionOwnerUseCounts(resume)
-	if resume.IsNil() || consumeCount != 2 || ownerUseCount != 2 {
+	slowConsumeCount, fusedConsumeCount, ownerUseCount = coroChildAwaitCompletionOwnerUseCounts(resume)
+	if resume.IsNil() || slowConsumeCount != 2 || fusedConsumeCount != 1 || ownerUseCount != 2 {
 		t.Fatalf("CoroSplit did not retain both completion-bound pointer owners:\n%s", module.String())
 	}
 }
 
-func coroChildAwaitCompletionOwnerUseCounts(function llvm.Value) (consumes, ownerUses int) {
+func coroChildAwaitCompletionOwnerUseCounts(function llvm.Value) (slowConsumes, fusedConsumes, ownerUses int) {
 	if function.IsNil() {
-		return 0, 0
+		return 0, 0, 0
 	}
 	for _, block := range function.BasicBlocks() {
-		awaitingOwnerUse := false
 		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
 			if instruction.InstructionOpcode() != llvm.Call {
 				continue
 			}
 			switch instruction.CalledValue().Name() {
 			case coroAwaitConsumeHookV1:
-				consumes++
-				awaitingOwnerUse = true
+				slowConsumes++
+			case coroAwaitInlineDestroyConsumeHookV4:
+				fusedConsumes++
 			case "llvm.fake.use":
 				// The scheduler's scalar run-decision scratch may also need an
-				// llvm.fake.use. The pointer owner retained across this exact
-				// child await is distinguished by its post-consume frame load.
-				if awaitingOwnerUse && instruction.OperandsCount() > 1 &&
-					instruction.Operand(0).InstructionOpcode() == llvm.Load {
+				// llvm.fake.use. The pointer owner retained across this child
+				// transaction is distinguished by its pointer-typed frame load;
+				// one shared site covers both fused and normally-resumed outcomes.
+				if instruction.OperandsCount() > 1 &&
+					instruction.Operand(0).InstructionOpcode() == llvm.Load &&
+					instruction.Operand(0).Type().TypeKind() == llvm.PointerTypeKind {
 					ownerUses++
-					awaitingOwnerUse = false
 				}
 			}
 		}
 	}
-	return consumes, ownerUses
+	return slowConsumes, fusedConsumes, ownerUses
 }

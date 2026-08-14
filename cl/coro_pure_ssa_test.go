@@ -118,7 +118,7 @@ func TestCoroPureSSAPhysicalABIV1NativeAndWasm(t *testing.T) {
 			for _, required := range []string{
 				"alloca %foo.Pair",
 				"foo.Child$coro",
-				"call void @" + coroAwaitPrepareHookV1,
+				"call i1 @" + coroAwaitPrepareInlineHookV4,
 				"call i1 @" + coroPreemptPollHookV1,
 			} {
 				if !strings.Contains(rootIR, required) {

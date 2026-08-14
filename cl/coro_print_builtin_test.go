@@ -246,7 +246,7 @@ func TestCoroPrintBuiltinManagedHelpersNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s is not one call-free plain scalar transform:\n%s", transform, plain.String())
 				}
 			}
-			if got := strings.Count(body, "call void @"+coroAwaitPrepareHookV1); got != 7 {
+			if got := strings.Count(body, "call i1 @"+coroAwaitPrepareInlineHookV4); got != 7 {
 				t.Fatalf("print helper awaits = %d, want 7:\n%s", got, body)
 			}
 

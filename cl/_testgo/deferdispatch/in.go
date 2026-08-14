@@ -14,7 +14,7 @@ func main() {
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call i64 @llvm.coro.size.i64()
 // CHECK: call ptr @"main.run$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define ptr @"main.run$coro"(
 // CHECK: call i64 @llvm.coro.size.i64()

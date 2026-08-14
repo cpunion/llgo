@@ -14,7 +14,7 @@ import (
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @"sync.(*Map).Store$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr @"sync.(*Map).Load$coro"(
 // CHECK: call ptr @"fmt.Println$coro"(
 // CHECK: call ptr @"sync.(*Map).Range$coro"(
@@ -22,7 +22,7 @@ import (
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define ptr @"main.main$1$coro"(
 // CHECK: call ptr @"fmt.Printf$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-NOT: __llgo_stub.
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine

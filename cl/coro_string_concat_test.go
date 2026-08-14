@@ -137,7 +137,7 @@ func TestCoroStringConcatManagedHelperNativeAndWasm32(t *testing.T) {
 			for _, required := range []string{
 				"runtime.StringCat$coro",
 				"foo.Pause$coro",
-				"call void @" + coroAwaitPrepareHookV1,
+				"call i1 @" + coroAwaitPrepareInlineHookV4,
 				"call i32 @" + coroAwaitConsumeHookV1,
 			} {
 				if !strings.Contains(rootIR, required) {
@@ -147,7 +147,7 @@ func TestCoroStringConcatManagedHelperNativeAndWasm32(t *testing.T) {
 			if got := strings.Count(rootIR, "runtime.StringCat$coro"); got != 2 {
 				t.Fatalf("managed StringCat calls = %d, want two across Pause:\n%s", got, rootIR)
 			}
-			if got := strings.Count(rootIR, "call void @"+coroAwaitPrepareHookV1); got != 3 {
+			if got := strings.Count(rootIR, "call i1 @"+coroAwaitPrepareInlineHookV4); got != 3 {
 				t.Fatalf("managed awaits = %d, want StringCat + Pause + StringCat:\n%s", got, rootIR)
 			}
 

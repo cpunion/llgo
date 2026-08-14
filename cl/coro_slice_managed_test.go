@@ -146,14 +146,14 @@ func TestCoroManagedSliceHelpersNativeAndWasm32(t *testing.T) {
 			for _, required := range []string{
 				"runtime.MakeSlice$coro",
 				"runtime.SliceAppend$coro",
-				"call void @" + coroAwaitPrepareHookV1,
+				"call i1 @" + coroAwaitPrepareInlineHookV4,
 				"call i32 @" + coroAwaitConsumeHookV1,
 			} {
 				if !strings.Contains(rootIR, required) {
 					t.Fatalf("managed slice owner lacks %q:\n%s", required, rootIR)
 				}
 			}
-			if got := strings.Count(rootIR, "call void @"+coroAwaitPrepareHookV1); got != 2 {
+			if got := strings.Count(rootIR, "call i1 @"+coroAwaitPrepareInlineHookV4); got != 2 {
 				t.Fatalf("managed slice awaits = %d, want MakeSlice + SliceAppend:\n%s", got, rootIR)
 			}
 

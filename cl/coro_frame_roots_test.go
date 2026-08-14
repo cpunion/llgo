@@ -667,7 +667,7 @@ func Root(header *Header, offset uintptr) unsafe.Pointer {
 				t.Fatalf("verify uintptr roundtrip before CoroSplit: %v\n%s", err, module.String())
 			}
 			body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-			for _, required := range []string{"ptrtoint", "inttoptr", "foo.Align$coro", "call void @" + coroAwaitPrepareHookV1} {
+			for _, required := range []string{"ptrtoint", "inttoptr", "foo.Align$coro", "call i1 @" + coroAwaitPrepareInlineHookV4} {
 				if !strings.Contains(body, required) {
 					t.Fatalf("uintptr roundtrip child-await coroutine lacks %q:\n%s", required, body)
 				}

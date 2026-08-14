@@ -183,7 +183,7 @@ func TestCoroPointerUintptrAffineObservationNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s plan = %+v, present=%t; want non-preempting outcome-only coroutine", name, functionPlan, ok)
 				}
 				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
-				if strings.Contains(body, coroAwaitPrepareHookV1) || strings.Contains(body, coroPreemptPollHookV1) {
+				if strings.Contains(body, coroAwaitPrepareInlineHookV4) || strings.Contains(body, coroPreemptPollHookV1) {
 					t.Fatalf("%s scalar observation acquired an await/preempt hook:\n%s", name, body)
 				}
 				if got := strings.Count(body, "ptrtoint ptr"); got < 2 || !strings.Contains(body, "to "+target.uintptrType) {
@@ -199,7 +199,7 @@ func TestCoroPointerUintptrAffineObservationNativeAndWasm32(t *testing.T) {
 					t.Fatalf("post-split %s has no resume function", name)
 				}
 				resumeIR := resume.String()
-				if strings.Contains(resumeIR, coroAwaitPrepareHookV1) || strings.Contains(resumeIR, coroPreemptPollHookV1) {
+				if strings.Contains(resumeIR, coroAwaitPrepareInlineHookV4) || strings.Contains(resumeIR, coroPreemptPollHookV1) {
 					t.Fatalf("post-split %s acquired an await/preempt hook:\n%s", name, resumeIR)
 				}
 			}
@@ -412,7 +412,7 @@ func assertCoroUintptrAffineIR(t *testing.T, name, body string) {
 		t.Fatalf("%s does not lower pointer+offset before comparison:\n%s", name, body)
 	}
 	span := affine[:comparison]
-	for _, hook := range []string{coroAwaitPrepareHookV1, coroPreemptPollHookV1, "llvm.coro.suspend"} {
+	for _, hook := range []string{coroAwaitPrepareInlineHookV4, coroPreemptPollHookV1, "llvm.coro.suspend"} {
 		if strings.Contains(span, hook) {
 			t.Fatalf("%s affine pointer lifetime crosses %s:\n%s", name, hook, body)
 		}

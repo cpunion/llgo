@@ -13,7 +13,7 @@ import "github.com/goplus/llgo/cl/_testdata/foo"
 // CHECK: call ptr @"{{.*}}NewItab$coro"(
 // CHECK: call ptr @"{{.*}}PrintString$coro"(
 // CHECK: call ptr %{{[0-9]+}}(ptr %0,
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr @"{{.*}}NewItab$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-NOT: NewProc

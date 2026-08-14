@@ -104,7 +104,7 @@ func assertCoroRecoverIR(t *testing.T, module llvm.Module, split bool) {
 	rootRepanic := function("RootRepanic")
 	catchAndRepanic := function("CatchAndRepanic")
 
-	if got := countCoroIRDirectCalls(rootRecover, coroAwaitPrepareHookV1); got != 1 {
+	if got := countCoroIRDirectCalls(rootRecover, coroAwaitPrepareInlineHookV4); got != 1 {
 		t.Fatalf("RootRecover await_prepare_v3 calls = %d, want 1 (post-split=%t):\n%s", got, split, rootRecover.String())
 	}
 	if got := countCoroIRDirectCalls(catch, coroRecoverTakeHookV1); got != 1 {
@@ -113,11 +113,11 @@ func assertCoroRecoverIR(t *testing.T, module llvm.Module, split bool) {
 	if got := countCoroIRDirectCalls(rootNil, coroRecoverTakeHookV1); got != 1 {
 		t.Fatalf("root recover(nil) take calls = %d, want 1 (post-split=%t):\n%s", got, split, rootNil.String())
 	}
-	if got := countCoroIRDirectCalls(rootNil, coroAwaitPrepareHookV1); got != 0 {
+	if got := countCoroIRDirectCalls(rootNil, coroAwaitPrepareInlineHookV4); got != 0 {
 		t.Fatalf("root recover(nil) unexpectedly creates a child transaction (post-split=%t):\n%s", split, rootNil.String())
 	}
 
-	if got := countCoroIRDirectCalls(rootRepanic, coroAwaitPrepareHookV1); got != 1 {
+	if got := countCoroIRDirectCalls(rootRepanic, coroAwaitPrepareInlineHookV4); got != 1 {
 		t.Fatalf("RootRepanic await_prepare_v3 calls = %d, want 1 (post-split=%t):\n%s", got, split, rootRepanic.String())
 	}
 	if got := countCoroIRDirectCalls(catchAndRepanic, coroRecoverTakeHookV1); got != 1 {
