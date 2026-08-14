@@ -1783,15 +1783,15 @@ func TestCoroNativeFleetLockedForeignReleasesQuotaBeforeReplacementStarts(t *tes
 		source,
 		"if releaseManaged && !coroTargetReleaseManagedExecutionV1(boundary.driver)",
 	)
-	create := strings.Index(
+	request := strings.Index(
 		source,
-		"if !coroNativeMStartPhysicalOwnerV1(replacement, slot)",
+		"queued, started := coroNativeMRequestPhysicalOwnerV1(replacement, slot)",
 	)
-	if release < 0 || create < 0 || release >= create {
+	if release < 0 || request < 0 || release >= request {
 		t.Fatalf(
-			"locked-thread foreign owner must release its route quota before the replacement pthread can start: release=%d create=%d",
+			"locked-thread foreign owner must release its route quota before the replacement pthread can be requested: release=%d request=%d",
 			release,
-			create,
+			request,
 		)
 	}
 }

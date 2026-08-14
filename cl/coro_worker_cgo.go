@@ -875,6 +875,7 @@ func (p *context) compileCoroWorkerCgoErrnoCall(
 		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
 		nil,
 		nil,
+		false,
 	)
 	b.KeepAlive(record)
 	p.cgoRet = b.LoadKnownNonNil(b.FieldAddr(record, shape.resultField))
@@ -927,6 +928,7 @@ func (p *context) compileCoroWorkerCgoTransaction(
 		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
 		keepaliveSlots,
 		nil,
+		false,
 	)
 	b.KeepAlive(record)
 	if shape.result == nil {

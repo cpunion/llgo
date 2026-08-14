@@ -105,7 +105,7 @@ func TestPublishedEpochResolutionHighCardinalityHasExactLinearSteps(t *testing.T
 	}
 
 	for index := range operations.records {
-		detachSchedulerParkV2(t, task.g, operations, index)
+		detachSchedulerParkV2(t, p, task.g, operations, index)
 	}
 	if promoted, ok := PollReady(p); !ok || promoted != 1 || HasWaiting(p) {
 		t.Fatalf("promote bounded high-cardinality task = (%d, %t), waiting=%t", promoted, ok, HasWaiting(p))
@@ -181,7 +181,7 @@ func TestSchedulerOnlyReadyCommitFailsClosedAndRestoresAffectedSnapshot(t *testi
 	}
 	discardUnselectedTestResult(t, &record, id)
 	if !AcknowledgeOperationResolution(&record, id, disposition) ||
-		!DetachParkWaitOperation(&task.g.park, ticket, &record, id) {
+		!DetachParkWaitOperation(p, &task.g.park, ticket, &record, id) {
 		t.Fatal("detach scheduler-only Ready cleanup")
 	}
 	if promoted, polled := PollReady(p); !polled || promoted != 1 {

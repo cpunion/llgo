@@ -26,6 +26,10 @@ int __llgo_coro_fleet_owner_create_v3(
     pthread_t *thread, uint32_t *token, uint32_t slot);
 int __llgo_coro_fleet_owner_try_reuse_v1(
     pthread_t *thread, uint32_t *token, uint32_t slot);
+int __llgo_coro_fleet_owner_request_reuse_v1(
+    pthread_t *thread, uint32_t *token, uint32_t slot);
+int __llgo_coro_fleet_owner_cancel_reuse_v1(
+    pthread_t thread, uint32_t token, uint32_t slot);
 int __llgo_coro_fleet_owner_ready_v1(uint32_t slot);
 int __llgo_coro_fleet_owner_join_v1(pthread_t thread, uint32_t token);
 int __llgo_coro_fleet_owner_release_v1(

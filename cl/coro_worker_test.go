@@ -134,25 +134,21 @@ func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 		t.Fatalf("verify worker coroutine before CoroSplit: %v\n%s", err, module.String())
 	}
 	body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-	assertCoroCancellationTerminalStatusPublication(t, requireCoroPhysicalFunction(t, module, "foo.Root"))
-	if got := strings.Count(body, "call i8 @llvm.coro.suspend"); got != 3 {
-		t.Fatalf("Root coro.suspend calls = %d, want initial + worker + final:\n%s", got, body)
+	if got := strings.Count(body, "call i8 @llvm.coro.suspend"); got != 2 {
+		t.Fatalf("Root coro.suspend calls = %d, want initial + final:\n%s", got, body)
 	}
-	for _, symbol := range []string{coroWorkerParkHookV1, coroWorkerResumeHookV1} {
-		if got := strings.Count(body, "@"+symbol); got != 1 {
-			t.Fatalf("Root references to %q = %d, want 1:\n%s", symbol, got, body)
+	if got := strings.Count(body, "@"+coroNativeSyscallCallHookV1); got != 1 {
+		t.Fatalf("Root native syscall calls = %d, want 1:\n%s", got, body)
+	}
+	for _, symbol := range []string{
+		coroWorkerParkHookV1,
+		coroWorkerResumeHookV1,
+		coroOSThreadLockedHookV1,
+		coroOSThreadForeignCallHookV1,
+	} {
+		if got := strings.Count(body, "@"+symbol); got != 0 {
+			t.Fatalf("Root retained obsolete syscall path %q = %d:\n%s", symbol, got, body)
 		}
-	}
-	for _, symbol := range []string{coroOSThreadLockedHookV1, coroOSThreadForeignCallHookV1} {
-		if got := strings.Count(body, "@"+symbol); got != 1 {
-			t.Fatalf("Root references to locked-thread branch %q = %d, want 1:\n%s", symbol, got, body)
-		}
-	}
-	lockedQuery := strings.Index(body, "call i1 @"+coroOSThreadLockedHookV1)
-	directCall := strings.Index(body, "call i32 @"+coroOSThreadForeignCallHookV1)
-	workerPark := strings.Index(body, "call void @"+coroWorkerParkHookV1)
-	if lockedQuery < 0 || directCall < lockedQuery || workerPark < lockedQuery {
-		t.Fatalf("Root does not branch from the lock query to both direct and worker paths:\n%s", body)
 	}
 	for _, forbidden := range []string{"@foo.raw", "@llgo.syscall"} {
 		if strings.Contains(body, forbidden) {
@@ -160,46 +156,32 @@ func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 		}
 	}
 	dispatch := regexp.MustCompile(
-		`(?s)call i32 @` + regexp.QuoteMeta(coroWorkerResumeHookV1) + `\([^\n]+\)\n\s+switch i32 [^\[]+\[(.*?)\]`,
+		`(?s)call i32 @` + regexp.QuoteMeta(coroNativeSyscallCallHookV1) + `\([^\n]+\)\n\s+switch i32 [^\[]+\[(.*?)\]`,
 	).FindStringSubmatch(body)
 	if len(dispatch) != 2 {
-		t.Fatalf("Root has no isolated worker resume switch:\n%s", body)
+		t.Fatalf("Root has no isolated native syscall result switch:\n%s", body)
 	}
 	for _, status := range []uint64{
 		coroWorkerResumeSuccessV1,
-		coroWorkerResumeTaskAbortV1,
-		coroWorkerResumeShutdownV1,
 		coroWorkerResumeFaultMemoryV1,
 		coroWorkerResumeFaultDivideV1,
 	} {
 		if !regexp.MustCompile(`(?m)^\s+i32 ` + strconv.FormatUint(status, 10) + `, label `).MatchString(dispatch[1]) {
-			t.Fatalf("Root worker resume switch lacks status %d:\n%s", status, dispatch[0])
+			t.Fatalf("Root native syscall switch lacks status %d:\n%s", status, dispatch[0])
 		}
-	}
-	park := strings.Index(body, "call void @"+coroWorkerParkHookV1)
-	suspend := strings.Index(body[park:], "call i8 @llvm.coro.suspend")
-	resume := strings.Index(body[park:], "call i32 @"+coroWorkerResumeHookV1)
-	if park < 0 || suspend < 0 || resume < 0 || suspend >= resume {
-		t.Fatalf("Root does not publish worker park before suspend and consume after resume:\n%s", body)
 	}
 
 	runCoroABITestPipeline(t, prog, module)
 	resumeBody := module.NamedFunction("foo.Root$coro.resume")
-	if resumeBody.IsNil() || !strings.Contains(resumeBody.String(), "call i32 @"+coroWorkerResumeHookV1) {
-		t.Fatalf("CoroSplit lost worker resume dispatch:\n%s", module.String())
+	if resumeBody.IsNil() || !strings.Contains(resumeBody.String(), "call i32 @"+coroNativeSyscallCallHookV1) {
+		t.Fatalf("CoroSplit lost native syscall dispatch:\n%s", module.String())
 	}
-	assertCoroCancellationTerminalStatusPublication(t, resumeBody)
 	object, err := prog.TargetMachine().EmitToMemoryBuffer(module, llvm.ObjectFile)
 	if err != nil {
 		t.Fatalf("emit post-CoroSplit worker object: %v\n%s", err, module.String())
 	}
 	defer object.Dispose()
-	for _, symbol := range []string{
-		coroWorkerParkHookV1,
-		coroWorkerResumeHookV1,
-		coroOSThreadLockedHookV1,
-		coroOSThreadForeignCallHookV1,
-	} {
+	for _, symbol := range []string{coroNativeSyscallCallHookV1} {
 		if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(symbol)) {
 			t.Fatalf("post-CoroSplit object lost worker ABI symbol %q", symbol)
 		}
@@ -260,9 +242,12 @@ func TestCoroWorkerSyscallFailureConventionsShareLowering(t *testing.T) {
 				t.Errorf("%s contains wrong failure predicate %s:\n%s", test.name, forbidden, text)
 			}
 		}
+		if got := strings.Count(text, "@"+coroNativeSyscallCallHookV1); got != 1 {
+			t.Errorf("%s native syscall calls = %d, want one direct lowering", test.name, got)
+		}
 		for _, symbol := range []string{coroWorkerParkHookV1, coroWorkerResumeHookV1} {
-			if got := strings.Count(text, "@"+symbol); got != 1 {
-				t.Errorf("%s %q calls = %d, want one shared park/resume lowering", test.name, symbol, got)
+			if got := strings.Count(text, "@"+symbol); got != 0 {
+				t.Errorf("%s retained worker syscall hook %q = %d", test.name, symbol, got)
 			}
 		}
 	}

@@ -314,7 +314,7 @@ func TestDuplicateCaseSealFailureRemainsAbortable(t *testing.T) {
 	for index := range records {
 		discardUnselectedTestResult(t, &records[index], ids[index])
 		if !AcknowledgeOperationResolution(&records[index], ids[index], OperationDispositionCanceled) ||
-			!DetachParkWaitOperation(&g.park, ticket, &records[index], ids[index]) {
+			!DetachParkWaitOperation(nil, &g.park, ticket, &records[index], ids[index]) {
 			t.Fatalf("detach duplicate case %d", index)
 		}
 	}

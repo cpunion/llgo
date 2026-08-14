@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -79,6 +80,87 @@ func fileRoundTrip(count, rounds int) int {
 				panic(err)
 			}
 			checksum += int(readback[(round*count+index)%len(readback)])
+		}
+	}
+	return checksum
+}
+
+// fileSyscallRoundTrip performs the same persistent-file transaction as
+// fileRoundTrip but deliberately bypasses os.File and internal/poll inside the
+// measured loop. Keeping both modes in one source fixture separates the
+// compiler/runtime worker boundary from coroutine frames introduced by the
+// standard-library wrapper chain without changing the physical syscalls.
+func fileSyscallRoundTrip(count, rounds int) int {
+	file, err := os.CreateTemp("", "llgo-coro-benchmark-syscall-*")
+	if err != nil {
+		panic(err)
+	}
+	path := file.Name()
+	defer os.Remove(path)
+	defer file.Close()
+
+	fd := int(file.Fd())
+	payload := make([]byte, payloadSize)
+	readback := make([]byte, payloadSize)
+	fillPayload(payload)
+	checksum := 0
+	for round := range rounds {
+		for index := range count {
+			if _, err := syscall.Seek(fd, 0, 0); err != nil {
+				panic(err)
+			}
+			if n, err := syscall.Write(fd, payload); err != nil || n != len(payload) {
+				panic("short syscall file write")
+			}
+			if _, err := syscall.Seek(fd, 0, 0); err != nil {
+				panic(err)
+			}
+			if n, err := syscall.Read(fd, readback); err != nil || n != len(readback) {
+				panic("short syscall file read")
+			}
+			checksum += int(readback[(round*count+index)%len(readback)])
+		}
+	}
+	return checksum
+}
+
+// blockingPipeRoundTrip is a scheduler-progress gate, not a throughput mode.
+// The reader enters a genuinely blocking syscall on the current M. With
+// GOMAXPROCS=1, the buffered armed handoff first proves that the writer has
+// parked on its timer. Only a compensation M can then service that timer and
+// issue the write which releases the reader.
+func blockingPipeRoundTrip(count, rounds int) int {
+	fds := make([]int, 2)
+	if err := syscall.Pipe(fds); err != nil {
+		panic(err)
+	}
+	defer syscall.Close(fds[0])
+	defer syscall.Close(fds[1])
+
+	readback := []byte{0}
+	checksum := 0
+	for round := range rounds {
+		for index := range count {
+			value := byte(round*count + index + 1)
+			armed := make(chan struct{}, 1)
+			done := make(chan error, 1)
+			go func() {
+				armed <- struct{}{}
+				time.Sleep(time.Millisecond)
+				written, err := syscall.Write(fds[1], []byte{value})
+				if err == nil && written != 1 {
+					err = syscall.EIO
+				}
+				done <- err
+			}()
+			<-armed
+			if read, err := syscall.Read(fds[0], readback); err != nil || read != 1 {
+				panic("blocking pipe read failed")
+			}
+			if err := <-done; err != nil {
+				panic(err)
+			}
+			checksum += int(readback[0])
 		}
 	}
 	return checksum
@@ -146,7 +228,7 @@ func tcpRoundTrip(count, rounds int) int {
 
 func main() {
 	if len(os.Args) != 4 {
-		panic("usage: io_workload <file|tcp> <count> <rounds>")
+		panic("usage: io_workload <file|file-syscall|pipe-block|tcp> <count> <rounds>")
 	}
 	mode := os.Args[1]
 	count, ok := parsePositive(os.Args[2])
@@ -163,6 +245,10 @@ func main() {
 	switch mode {
 	case "file":
 		result = fileRoundTrip(count, rounds)
+	case "file-syscall":
+		result = fileSyscallRoundTrip(count, rounds)
+	case "pipe-block":
+		result = blockingPipeRoundTrip(count, rounds)
 	case "tcp":
 		result = tcpRoundTrip(count, rounds)
 	default:

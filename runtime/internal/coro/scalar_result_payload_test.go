@@ -169,7 +169,7 @@ func consumeScalarCommitFake(
 			t.Fatalf("candidate %d retained a payload without Owned result", index)
 		}
 		if !AcknowledgeOperationResolution(record, id, disposition) ||
-			!DetachParkWaitOperation(source.state, source.ticket, record, id) || !ConfirmOperationQuiesced(record, id) {
+			!DetachParkWaitOperation(nil, source.state, source.ticket, record, id) || !ConfirmOperationQuiesced(record, id) {
 			t.Fatalf("finish scalar candidate %d", index)
 		}
 	}
@@ -385,7 +385,7 @@ func TestScalarResultCleanupIgnoresInvalidPayloadMetadata(t *testing.T) {
 			t.Fatal("invalid unselected payload blocked loser cleanup")
 		}
 		if !AcknowledgeOperationResolution(&source.records[0], source.ids[0], OperationDispositionCanceled) ||
-			!DetachParkWaitOperation(source.state, source.ticket, &source.records[0], source.ids[0]) ||
+			!DetachParkWaitOperation(nil, source.state, source.ticket, &source.records[0], source.ids[0]) ||
 			!ConfirmOperationQuiesced(&source.records[0], source.ids[0]) {
 			t.Fatal("finish invalid unselected scalar payload")
 		}

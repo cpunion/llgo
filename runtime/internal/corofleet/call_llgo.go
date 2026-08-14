@@ -61,6 +61,22 @@ func CreateOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
 //go:linkname TryReuseOwner C.__llgo_coro_fleet_owner_try_reuse_v1
 func TryReuseOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
 
+// RequestReuseOwner assigns a standby pthread without waiting for it to enter
+// Go or claim the execution-domain handoff. Zero means queued, one means the
+// cache was empty, and every other value is an invariant failure. The exact
+// thread/token/slot request must subsequently be canceled or released.
+//
+//go:linkname RequestReuseOwner C.__llgo_coro_fleet_owner_request_reuse_v1
+func RequestReuseOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
+
+// CancelReuseOwner withdraws an exact queued RequestReuseOwner. Zero means the
+// standby pthread had not begun dispatch and is already back in the cache; one
+// means dispatch won the race and the caller must complete the ordinary owner
+// release protocol. Every other value is an invariant failure.
+//
+//go:linkname CancelReuseOwner C.__llgo_coro_fleet_owner_cancel_reuse_v1
+func CancelReuseOwner(thread pthread.Thread, token, slot uint32) c.Int
+
 // OwnerReady completes CreateOwner only after the new raw owner has claimed
 // its stable scalar directory slot and execution route.
 //

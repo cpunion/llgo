@@ -55,6 +55,11 @@ type TaskControlSource struct {
 	routedProducerSource
 	slots     [TaskControlSourceCapacity]taskControlSlot
 	scanLimit uint32
+	// activeCount is the exact number of endpoints which can still admit an
+	// external Post. It is owner-only; producer requests retain the existing
+	// atomic pending word. The native blocking-syscall gate reads it only while
+	// this source's owner P is detached at a stable boundary.
+	activeCount uint32
 }
 
 func taskControlScanLimit(source *TaskControlSource) (uint32, bool) {
@@ -81,8 +86,9 @@ func taskControlReusableSlot(slot *taskControlSlot) bool {
 }
 
 func validTaskControlOwner(source *TaskControlSource, p *P) bool {
-	_, scanOK := taskControlScanLimit(source)
-	return scanOK && validRoutedProducerSource(&source.routedProducerSource, p)
+	limit, scanOK := taskControlScanLimit(source)
+	return scanOK && source.activeCount <= limit &&
+		validRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 // registeredTaskControlDelivery proves that one exact endpoint still pins its
@@ -139,6 +145,7 @@ func RegisterTaskControl(source *TaskControlSource, p *P, task *G) (OperationID,
 		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
 			return OperationID{}, false
 		}
+		source.activeCount++
 		return id, true
 	}
 	return OperationID{}, false
@@ -319,11 +326,13 @@ func ConfirmTaskControlQuiesced(source *TaskControlSource, p *P, id OperationID)
 	slot, ok := taskControlSlotFor(source, id)
 	if !ok || !validTaskControlOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
 		preemptLoad(&slot.state) != uint32(producerSourceClosing) || !producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
-		preemptLoad(&slot.request) != uint32(TaskCancelNone) || slot.task == nil || slot.task.taskControlLeases == 0 {
+		preemptLoad(&slot.request) != uint32(TaskCancelNone) || slot.task == nil ||
+		slot.task.taskControlLeases == 0 || source.activeCount == 0 {
 		return false
 	}
 	slot.task.taskControlLeases--
 	slot.task = nil
+	source.activeCount--
 	return markProducerSourceQuiesced(&slot.producerSourceSlot)
 }
 
@@ -364,12 +373,14 @@ func validTaskControlTerminalSlot(source *TaskControlSource, index int, state pr
 }
 
 func taskControlTerminalLeaseCountsValid(source *TaskControlSource) bool {
+	activeCount := uint32(0)
 	for index := range source.slots {
 		slot := &source.slots[index]
 		state := producerSourceLifecycle(preemptLoad(&slot.state))
 		if state != producerSourceActive && state != producerSourceClosing {
 			continue
 		}
+		activeCount++
 		needed := uint8(1)
 		for prior := 0; prior < index; prior++ {
 			other := &source.slots[prior]
@@ -385,7 +396,7 @@ func taskControlTerminalLeaseCountsValid(source *TaskControlSource) bool {
 			return false
 		}
 	}
-	return true
+	return activeCount == source.activeCount
 }
 
 // taskControlSourceCanBeginTerminalClose permits live task endpoints while
@@ -489,6 +500,7 @@ func finishTaskControlSourceTerminalClose(source *TaskControlSource, p *P) bool 
 		}
 		slot.task.taskControlLeases--
 		slot.task = nil
+		source.activeCount--
 		if !markProducerSourceQuiesced(&slot.producerSourceSlot) {
 			return false
 		}
@@ -504,7 +516,8 @@ func finishTaskControlSourceTerminalClose(source *TaskControlSource, p *P) bool 
 }
 
 func taskControlSourceEmpty(source *TaskControlSource, p *P) bool {
-	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, p) {
+	if source == nil || source.activeCount != 0 ||
+		!routedProducerHeaderEmpty(&source.routedProducerSource, p) {
 		return false
 	}
 	for index := range source.slots {
@@ -523,6 +536,7 @@ func BindTaskControlSourceAtRoute(source *TaskControlSource, p *P, route RouteID
 		return false
 	}
 	source.scanLimit = 0
+	source.activeCount = 0
 	return true
 }
 
@@ -539,6 +553,7 @@ func UnbindTaskControlSource(source *TaskControlSource, p *P) bool {
 		return false
 	}
 	source.scanLimit = 0
+	source.activeCount = 0
 	return true
 }
 

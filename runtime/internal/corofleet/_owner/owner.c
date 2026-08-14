@@ -46,6 +46,7 @@ enum {
 enum llgo_coro_fleet_owner_state_v1 {
     LLGO_CORO_FLEET_OWNER_UNUSED_V1 = 0,
     LLGO_CORO_FLEET_OWNER_STARTING_V1,
+    LLGO_CORO_FLEET_OWNER_DISPATCHING_V1,
     LLGO_CORO_FLEET_OWNER_RUNNING_V1,
     LLGO_CORO_FLEET_OWNER_RETURNED_V1,
     LLGO_CORO_FLEET_OWNER_PARKING_V1,
@@ -317,9 +318,20 @@ static void *llgo_coro_fleet_owner_run_v1(
             (void)pthread_mutex_unlock(&factory->mutex);
             return 0;
         }
+        while (record->state == LLGO_CORO_FLEET_OWNER_STARTING_V1 &&
+               record->thread == (pthread_t)0) {
+            if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
+                record->state = LLGO_CORO_FLEET_OWNER_FAILED_V1;
+                factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
+                (void)pthread_mutex_unlock(&factory->mutex);
+                return (void *)(uintptr_t)1;
+            }
+        }
         if (record->state != LLGO_CORO_FLEET_OWNER_STARTING_V1 ||
+            record->thread == (pthread_t)0 ||
+            pthread_equal(record->thread, pthread_self()) == 0 ||
             record->slot == 0 || record->token == 0 ||
-            record->acknowledged != 0 || record->published != 0) {
+            record->acknowledged != 0 || record->published > 1) {
             record->state = LLGO_CORO_FLEET_OWNER_FAILED_V1;
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
             (void)pthread_cond_broadcast(&factory->changed);
@@ -327,6 +339,13 @@ static void *llgo_coro_fleet_owner_run_v1(
             return (void *)(uintptr_t)1;
         }
         uint32_t slot = record->slot;
+        record->state = LLGO_CORO_FLEET_OWNER_DISPATCHING_V1;
+        if (pthread_cond_broadcast(&factory->changed) != 0) {
+            record->state = LLGO_CORO_FLEET_OWNER_FAILED_V1;
+            factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
+            (void)pthread_mutex_unlock(&factory->mutex);
+            return (void *)(uintptr_t)1;
+        }
         if (pthread_mutex_unlock(&factory->mutex) != 0) {
             return (void *)(uintptr_t)1;
         }
@@ -704,6 +723,113 @@ int __llgo_coro_fleet_owner_try_reuse_v1(
     return 0;
 }
 
+int __llgo_coro_fleet_owner_request_reuse_v1(
+        pthread_t *thread, uint32_t *token, uint32_t slot) {
+    struct llgo_coro_fleet_factory_v1 *factory =
+        &llgo_coro_fleet_factory_v1;
+    if (thread == 0 || token == 0 || slot == 0 ||
+        slot > LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1 ||
+        pthread_mutex_lock(&factory->mutex) != 0) {
+        return -1;
+    }
+    *thread = (pthread_t)0;
+    *token = 0;
+    struct llgo_coro_fleet_owner_record_v1 *existing = 0;
+    if (factory->state == LLGO_CORO_FLEET_FACTORY_UNUSED_V1 ||
+        factory->state == LLGO_CORO_FLEET_FACTORY_STOPPING_V1 ||
+        factory->state == LLGO_CORO_FLEET_FACTORY_FAILED_V1 ||
+        llgo_coro_fleet_find_record_for_slot_locked_v1(
+            slot, &existing) != 0 || existing != 0) {
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
+    if (factory->standby_head == 0) {
+        if (factory->standby_count != 0) {
+            factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
+            (void)pthread_mutex_unlock(&factory->mutex);
+            return -1;
+        }
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return 1;
+    }
+    struct llgo_coro_fleet_owner_record_v1 *record =
+        factory->standby_head;
+    if (factory->standby_count == 0 ||
+        record->state != LLGO_CORO_FLEET_OWNER_STANDBY_V1 ||
+        record->thread == (pthread_t)0 || record->slot != 0 ||
+        record->token == 0 || record->acknowledged != 0 ||
+        record->published != 0 || record->joining != 0) {
+        factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
+    factory->standby_head = record->standby_next;
+    factory->standby_count--;
+    record->standby_next = 0;
+    record->slot = slot;
+    record->published = 1;
+    record->state = LLGO_CORO_FLEET_OWNER_STARTING_V1;
+    *thread = record->thread;
+    *token = record->token;
+    if (pthread_cond_broadcast(&factory->changed) != 0 ||
+        pthread_mutex_unlock(&factory->mutex) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int __llgo_coro_fleet_owner_cancel_reuse_v1(
+        pthread_t thread, uint32_t token, uint32_t slot) {
+    struct llgo_coro_fleet_factory_v1 *factory =
+        &llgo_coro_fleet_factory_v1;
+    if (thread == (pthread_t)0 || token == 0 || slot == 0 ||
+        pthread_mutex_lock(&factory->mutex) != 0) {
+        return -1;
+    }
+    struct llgo_coro_fleet_owner_record_v1 *record = 0;
+    struct llgo_coro_fleet_owner_record_v1 *slot_record = 0;
+    if (llgo_coro_fleet_find_record_for_token_locked_v1(
+            token, &record) != 0 ||
+        llgo_coro_fleet_find_record_for_slot_locked_v1(
+            slot, &slot_record) != 0 ||
+        record == 0 || slot_record != record ||
+        record->thread == (pthread_t)0 ||
+        pthread_equal(record->thread, thread) == 0 ||
+        record->slot != slot || record->token != token ||
+        record->published != 1 || record->joining != 0) {
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
+    if (record->state != LLGO_CORO_FLEET_OWNER_STARTING_V1) {
+        int dispatched =
+            (record->state == LLGO_CORO_FLEET_OWNER_DISPATCHING_V1 &&
+             record->acknowledged == 0) ||
+            ((record->state == LLGO_CORO_FLEET_OWNER_RUNNING_V1 ||
+              record->state == LLGO_CORO_FLEET_OWNER_RETURNED_V1) &&
+             record->acknowledged == 1);
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return dispatched ? 1 : -1;
+    }
+    if (record->acknowledged != 0 || factory->standby_count >=
+        LLGO_CORO_FLEET_OWNER_STANDBY_CAPACITY_V1) {
+        factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
+    llgo_coro_fleet_clear_slot_locked_v1(record);
+    record->slot = 0;
+    record->published = 0;
+    record->state = LLGO_CORO_FLEET_OWNER_STANDBY_V1;
+    record->standby_next = factory->standby_head;
+    factory->standby_head = record;
+    factory->standby_count++;
+    if (pthread_cond_broadcast(&factory->changed) != 0 ||
+        pthread_mutex_unlock(&factory->mutex) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 int __llgo_coro_fleet_owner_ready_v1(uint32_t slot) {
     struct llgo_coro_fleet_factory_v1 *factory =
         &llgo_coro_fleet_factory_v1;
@@ -718,7 +844,7 @@ int __llgo_coro_fleet_owner_ready_v1(uint32_t slot) {
         return -1;
     }
     while (record != 0 && record->thread == (pthread_t)0 &&
-           record->state == LLGO_CORO_FLEET_OWNER_STARTING_V1 &&
+           record->state == LLGO_CORO_FLEET_OWNER_DISPATCHING_V1 &&
            factory->state != LLGO_CORO_FLEET_FACTORY_FAILED_V1) {
         if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
@@ -728,9 +854,9 @@ int __llgo_coro_fleet_owner_ready_v1(uint32_t slot) {
     }
     if (record == 0 || record->thread == (pthread_t)0 ||
         pthread_equal(record->thread, pthread_self()) == 0 ||
-        record->state != LLGO_CORO_FLEET_OWNER_STARTING_V1 ||
+        record->state != LLGO_CORO_FLEET_OWNER_DISPATCHING_V1 ||
         record->slot != slot || record->acknowledged != 0 ||
-        record->published != 0) {
+        record->published > 1) {
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
     }
@@ -827,7 +953,8 @@ int __llgo_coro_fleet_owner_release_v1(
         return -1;
     }
     while (record != 0 &&
-           record->state == LLGO_CORO_FLEET_OWNER_RUNNING_V1) {
+           (record->state == LLGO_CORO_FLEET_OWNER_DISPATCHING_V1 ||
+            record->state == LLGO_CORO_FLEET_OWNER_RUNNING_V1)) {
         if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
             (void)pthread_mutex_unlock(&factory->mutex);

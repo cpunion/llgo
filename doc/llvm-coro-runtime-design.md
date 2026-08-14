@@ -3153,3 +3153,51 @@ Native退出实验模式的最低要求是 Tier 2，而不是少量自定义coro
 4. 32位atomic、64位fallback、atomic.Pointer barrier、ISR临界区和RawCritical HAL/syscall verifier通过。
 
 满足通用加对应平台门槛后，才能评估将coroutine scheduler设为该平台默认。Native pthread模式的移除是更晚、独立的兼容性决策。
+
+## 36. Native syscall 的按需补偿边界
+
+`llgo.syscall` 的 coroutine lowering 可以在完整 ProgramIR/callable
+certificate 证明后，直接调用统一 native boundary；普通 C/cgo 调用不能因此
+绕过 worker 或 locked-M 路径。这个区分来自编译期语义，不允许在运行期用函数
+地址反查调用类型。
+
+native boundary 先把 active resume detach，并释放 managed-execution lease。
+是否立即请求 replacement 只读取这个稳定点上的 O(1) 事实：
+
+1. P 已有 runnable；
+2. active WaitSet 仍持有 timer、poll、manual、worker 或 channel source operation；
+3. TaskControl 有 active endpoint；
+4. owner-local completion、direct completion inbox、source/registry/scheduler request
+   已经发布。
+
+P 的 `externalWaitCount` 在 WaitSet activate 时一次增加
+`ParkState.attached`，并在 common detach 时逐 operation 减一。它是外部唤醒
+obligation 的投影，不是第二份 source 状态，也不扫描各 source catalog。
+TaskControl 不依赖 park，因此只保留一个正交的 active endpoint 计数。所有新
+event source 只要复用 common park/detach 协议，就自动进入这项判断。
+
+未匹配 direct-channel waiter 不能独立完成，因此不能等同 timer/poll，否则一个
+常驻 runtime waiter 会使每个短 syscall 都启动 M。producer 完成匹配后必须先发布
+typed completion，再发布 exact executor request。完整的跨 route 闭环还要求：若
+目标 route 正处于“已释放 lease、原 M 阻塞、尚无 replacement”的窗口，这个 request
+必须能按需激活预留的 replacement。该 follow-up 应复用
+`ExecutionDomainHandoff` 和 active-M directory；不得重新把所有 channel waiter
+加入 eager gate，也不得引入第二套 channel 调度器。在此闭环验收前，timer/poll
+驱动的 blocking compensation 已验证，但“remote producer 唤醒目标 G，而该 G
+反过来解除原 syscall”的 direct-only 环不能标为完成。
+
+物理 M 使用 generation 化的异步 standby request/cancel：request 只把 clean M 从
+standby 转入 `DISPATCHING`，不等待 C->Go；原 syscall 快速返回时只能取消仍处于
+`STARTING` 的请求，dispatch 已胜则走 exact handoff return 和 strong join。quota
+release 若返回失败必须 fail-stop，因为它可能已经完成 release、只在唤醒其他
+waiter 时失败；这种状态下 restore continuation 会违反一个 P 只有一个 physical
+owner 的硬门槛。
+
+这项设计的验收 gate 是：
+
+- 短 regular-file syscall 不创建/dispatch replacement；
+- sole-M blocking pipe + timer 必须继续前进；
+- TCP nonblocking poll 路径结构和性能不变；
+- queued-cancel、dispatch-wins、handoff return、shutdown 各竞态重复通过；
+- direct-only 跨 route 依赖在 request-driven replacement 完成前保持显式未完成，
+  不得用常驻 waiter eager compensation 掩盖。

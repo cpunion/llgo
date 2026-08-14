@@ -41,12 +41,14 @@ type coroNativeForeignBoundaryV1 struct {
 	domain      *coroNativeFleetDomainV1
 	replacement *coroNativeMOwnerV1
 
-	parentSlot       uint32
-	replacementSlot  uint32
-	ownerEpoch       uint32
-	baton            coro.ExecutionDomainHandoffHandle
-	callbackAcquired bool
-	active           bool
+	parentSlot         uint32
+	replacementSlot    uint32
+	ownerEpoch         uint32
+	baton              coro.ExecutionDomainHandoffHandle
+	replacementQueued  bool
+	replacementSkipped bool
+	callbackAcquired   bool
+	active             bool
 }
 
 var (
@@ -79,7 +81,8 @@ func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(
 	if boundary == nil || !boundary.active || boundary.driver == nil ||
 		boundary.parent == nil || boundary.domain == nil ||
 		boundary.replacement != nil || boundary.replacementSlot != 0 ||
-		boundary.baton.Valid() {
+		boundary.baton.Valid() || boundary.replacementQueued ||
+		boundary.replacementSkipped {
 		return false
 	}
 	baton, begun := boundary.parent.handoff.Begin(boundary.ownerEpoch)
@@ -99,12 +102,15 @@ func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(
 		return false
 	}
 	if releaseManaged && !coroTargetReleaseManagedExecutionV1(boundary.driver) {
-		_ = boundary.parent.handoff.RequestReturn(baton)
-		_ = boundary.parent.handoff.Complete(baton)
-		_ = coroNativeMReleaseUnstartedReplacementV1(slot)
+		// Release may have already dropped the quota before a required waiter
+		// doorbell failed. Its boolean result therefore cannot authorize restoring
+		// the detached resume or releasing the handoff as though the lease were
+		// still held. Fail closed instead of creating two physical owners for one P.
+		coroRuntimeAbort("native direct foreign execution quota release failed")
 		return false
 	}
-	if !coroNativeMStartPhysicalOwnerV1(replacement, slot) {
+	queued, started := coroNativeMRequestPhysicalOwnerV1(replacement, slot)
+	if !started {
 		replacement.thread = nil
 		replacement.token = 0
 		rollback := boundary.parent.handoff.RequestReturn(baton) ==
@@ -121,18 +127,21 @@ func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(
 	boundary.replacement = replacement
 	boundary.replacementSlot = slot
 	boundary.baton = baton
+	boundary.replacementQueued = queued
 	return true
 }
 
 func (boundary *coroNativeForeignBoundaryV1) beginV1(
 	task *coro.G,
 	mode coro.ExecutorResumeHandoffMode,
+	lazyCompensation bool,
 ) bool {
 	if boundary == nil || boundary.active || boundary.driver != nil ||
 		boundary.task != nil || boundary.parent != nil ||
 		boundary.domain != nil || boundary.replacement != nil ||
 		boundary.parentSlot != 0 || boundary.replacementSlot != 0 ||
 		boundary.ownerEpoch != 0 || boundary.baton.Valid() ||
+		boundary.replacementQueued || boundary.replacementSkipped ||
 		boundary.callbackAcquired {
 		return false
 	}
@@ -150,6 +159,32 @@ func (boundary *coroNativeForeignBoundaryV1) beginV1(
 	boundary.parentSlot = parentSlot
 	boundary.ownerEpoch = ownerEpoch
 	boundary.active = true
+	if lazyCompensation {
+		required, demandOK :=
+			coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)
+		if demandOK && !required {
+			if !coroTargetReleaseManagedExecutionV1(boundary.driver) {
+				// See startReplacementV1: a false result does not prove that the
+				// quota release itself failed before publication.
+				coroRuntimeAbort("native direct lazy execution quota release failed")
+				return false
+			}
+			boundary.replacementSkipped = true
+			return true
+		}
+		if !demandOK || !required {
+			restored := coro.RestoreExecutorResume(&boundary.resume)
+			boundary.driver = nil
+			boundary.task = nil
+			boundary.parent = nil
+			boundary.domain = nil
+			boundary.parentSlot = 0
+			boundary.ownerEpoch = 0
+			boundary.active = false
+			_ = restored
+			return false
+		}
+	}
 	if boundary.startReplacementV1(true) {
 		return true
 	}
@@ -169,22 +204,99 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 	if boundary == nil || !boundary.active || boundary.driver == nil ||
 		boundary.parent == nil || boundary.domain == nil ||
 		boundary.replacement == nil || boundary.replacementSlot == 0 ||
-		!boundary.baton.Valid() {
+		!boundary.baton.Valid() || boundary.replacementSkipped {
 		return false
 	}
+	if boundary.replacementQueued {
+		released, stillQueued := boundary.parent.handoff.Released()
+		if stillQueued && released != boundary.baton {
+			coroRuntimeAbort("native direct queued replacement handoff mismatch")
+		}
+		if stillQueued {
+			switch corofleet.CancelReuseOwner(
+				boundary.replacement.thread,
+				boundary.replacement.token,
+				boundary.replacementSlot,
+			) {
+			case 0:
+				boundary.replacement.thread = nil
+				boundary.replacement.token = 0
+				withdrawn := boundary.parent.handoff.RequestReturn(boundary.baton) ==
+					coro.ExecutionDomainHandoffReturnUnclaimed &&
+					boundary.parent.handoff.Complete(boundary.baton) &&
+					coroNativeMReleaseUnstartedReplacementV1(boundary.replacementSlot)
+				if !withdrawn {
+					coroRuntimeAbort("native direct queued replacement withdrawal failed")
+				}
+				boundary.replacement = nil
+				boundary.replacementSlot = 0
+				boundary.baton = coro.ExecutionDomainHandoffHandle{}
+				boundary.replacementQueued = false
+				return true
+			case 1:
+				// Dispatch won between Released and cancellation. The handoff race
+				// below decides whether it claimed or only acknowledges return.
+			default:
+				// Claim and an immediate retirement may consume both the Released
+				// phase and the original C token between our snapshot and cancel.
+				// Only a still-live exact Released publication makes the failed
+				// cancellation an invariant error.
+				current, releasedNow := boundary.parent.handoff.Released()
+				if releasedNow && current == boundary.baton {
+					coroRuntimeAbort("native direct replacement cancel state invalid")
+				}
+			}
+		}
+		// Once Claim has consumed Released, the C record may already have
+		// retired into a clean successor and its original token is no longer a
+		// cancel capability. The handoff generation is then the sole authority.
+		boundary.replacementQueued = false
+	}
 	returnResult := boundary.parent.handoff.RequestReturn(boundary.baton)
+	if returnResult == coro.ExecutionDomainHandoffReturnUnclaimed {
+		if !coroNativeMWaitAndRecycleOSThreadSuspendV1(
+			boundary.replacementSlot,
+			boundary.replacement,
+			boundary.parent,
+		) {
+			coroRuntimeAbort("native direct revoked replacement recycle failed")
+		}
+		if !boundary.parent.handoff.Complete(boundary.baton) {
+			coroRuntimeAbort("native direct revoked handoff completion failed")
+		}
+		boundary.replacement = nil
+		boundary.replacementSlot = 0
+		boundary.baton = coro.ExecutionDomainHandoffHandle{}
+		boundary.replacementQueued = false
+		return true
+	}
+	returnRequested := returnResult == coro.ExecutionDomainHandoffReturnClaimed
+	alreadyReturned := false
+	if returnResult == coro.ExecutionDomainHandoffReturnInvalid {
+		returnRequested = boundary.parent.handoff.ReturnRequested(boundary.baton)
+		alreadyReturned = boundary.parent.handoff.Returned(boundary.baton)
+	}
 	request := coro.ExecutorRequestInvalid
-	if returnResult == coro.ExecutionDomainHandoffReturnClaimed {
+	if returnRequested {
 		// The return baton is the durable fact. The executor request is its
 		// preemption transport: a replacement may currently be inside an
 		// unbounded managed resume and cannot observe a doorbell until it first
 		// reaches the compiler safepoint gate.
 		request = coroNativeFleetV1State.fleet.RequestExecutor(boundary.domain.handle)
 	}
-	ringOK := returnResult == coro.ExecutionDomainHandoffReturnClaimed &&
+	ringOK := returnRequested &&
 		coro.ExecutorRequestAccepted(request) &&
 		boundary.domain.doorbell.Ring()
-	for ringOK && !boundary.parent.handoff.Returned(boundary.baton) {
+	if !returnRequested && !alreadyReturned {
+		coroRuntimeAbort("native direct replacement return state invalid")
+	}
+	if returnRequested && !coro.ExecutorRequestAccepted(request) {
+		coroRuntimeAbort("native direct replacement preemption request failed")
+	}
+	if returnRequested && !ringOK {
+		coroRuntimeAbort("native direct replacement doorbell failed")
+	}
+	for returnRequested && ringOK && !boundary.parent.handoff.Returned(boundary.baton) {
 		if corofleet.Yield() != 0 {
 			ringOK = false
 		}
@@ -196,18 +308,25 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 		boundary.baton,
 	)
 	returned = returned && returnedOwner.thread != nil &&
-		coroNativeMOwnerLifecycleLoadV1(returnedOwner) == coroNativeMOwnerReturnedV1 &&
 		coroNativeAtomicLoadV1(
 			&coroNativeMDirectoryV1State.active[boundary.domain.handle.Route-1],
 		) == boundary.parentSlot
-	if !ringOK || !returned ||
-		!coroNativeMRecycleReplacementV1(returnedSlot) ||
-		!boundary.parent.handoff.Complete(boundary.baton) {
-		return false
+	if returnRequested && !ringOK {
+		coroRuntimeAbort("native direct replacement return wait failed")
+	}
+	if !returned {
+		coroRuntimeAbort("native direct replacement lineage return failed")
+	}
+	if !coroNativeMRecycleReplacementV1(returnedSlot) {
+		coroRuntimeAbort("native direct claimed replacement recycle failed")
+	}
+	if !boundary.parent.handoff.Complete(boundary.baton) {
+		coroRuntimeAbort("native direct claimed handoff completion failed")
 	}
 	boundary.replacement = nil
 	boundary.replacementSlot = 0
 	boundary.baton = coro.ExecutionDomainHandoffHandle{}
+	boundary.replacementQueued = false
 	return true
 }
 
@@ -217,11 +336,18 @@ func (boundary *coroNativeForeignBoundaryV1) restartReplacementV1() bool {
 }
 
 func (boundary *coroNativeForeignBoundaryV1) finishV1() bool {
-	if boundary == nil || boundary.callbackAcquired ||
-		!boundary.reclaimReplacementV1() ||
-		!coroTargetReenterManagedExecutionV1(boundary.driver) ||
-		!coro.RestoreExecutorResume(&boundary.resume) {
+	if boundary == nil || boundary.callbackAcquired {
 		return false
+	}
+	if !boundary.replacementSkipped && !boundary.reclaimReplacementV1() {
+		coroRuntimeAbort("native direct foreign replacement reclaim failed")
+	}
+	boundary.replacementSkipped = false
+	if !coroTargetReenterManagedExecutionV1(boundary.driver) {
+		coroRuntimeAbort("native direct foreign execution quota reentry failed")
+	}
+	if !coro.RestoreExecutorResume(&boundary.resume) {
+		coroRuntimeAbort("native direct foreign resume restore failed")
 	}
 	boundary.driver = nil
 	boundary.task = nil
@@ -290,7 +416,8 @@ func coroNativeForeignReentryRunV1(
 ) coro.CompletionSnapshot {
 	if boundary == nil || !boundary.active || !boundary.callbackAcquired ||
 		boundary.replacement != nil || boundary.replacementSlot != 0 ||
-		boundary.baton.Valid() || child == nil {
+		boundary.baton.Valid() || boundary.replacementQueued ||
+		boundary.replacementSkipped || child == nil {
 		coroRuntimeAbort("invalid synchronous foreign callback child")
 	}
 	var record coro.ForeignReentryRecord
@@ -396,7 +523,7 @@ func __llgo_coro_same_m_foreign_call_v1(
 		coroRuntimeAbort("invalid same-M foreign call")
 	}
 	var boundary coroNativeForeignBoundaryV1
-	if !boundary.beginV1(task, coro.ExecutorResumeHandoffSameMForeign) {
+	if !boundary.beginV1(task, coro.ExecutorResumeHandoffSameMForeign, false) {
 		coroRuntimeAbort("same-M foreign call cannot detach active resume")
 	}
 	previous, installed := coroNativeForeignBoundarySetTLSV1(&boundary)
@@ -420,19 +547,82 @@ func __llgo_coro_same_m_foreign_call_v1(
 	}
 }
 
-// __llgo_coro_os_thread_foreign_call_v1 is the sole same-M blocking foreign
-// boundary. The compiler selects it dynamically only while the current G owns
-// this P/M island through LockOSThread. All ordinary calls continue through
-// the shared any-thread worker pool. This owner detaches the active resume,
-// reserves one scalar-slot replacement M, releases its managed-execution
-// P lease before creating the replacement thread, and strongly rejoins that
-// replacement before restoring the resume. Releasing first is mandatory:
-// execution-quota ownership belongs to the route, so a replacement which
-// starts while its parent still holds that route is a fail-closed double
-// acquire rather than ordinary quota contention. On return, the parent first
-// strongly joins the replacement and then reacquires the same P lease before
-// restoring the detached LLVM resume, so the enclosing run slice can safely
-// continue to retain its logical lease state.
+func coroNativeForeignWordCallV1(
+	task *coro.G,
+	mode coro.ExecutorResumeHandoffMode,
+	lazyCompensation bool,
+	function, traceTarget uintptr,
+	argc uint32,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
+	r1, r2, errno *uintptr,
+) uint32 {
+	if function == 0 || traceTarget == 0 || argc > coroworker.MaxArgs ||
+		r1 == nil || r2 == nil || errno == nil ||
+		r1 == r2 || r1 == errno || r2 == errno ||
+		(mode != coro.ExecutorResumeHandoffLockedForeign &&
+			mode != coro.ExecutorResumeHandoffSameMForeign) ||
+		lazyCompensation && mode != coro.ExecutorResumeHandoffSameMForeign {
+		coroRuntimeAbort("invalid native direct foreign call")
+	}
+	var boundary coroNativeForeignBoundaryV1
+	if !boundary.beginV1(task, mode, lazyCompensation) {
+		coroRuntimeAbort("native direct foreign call cannot detach active resume")
+	}
+	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
+	var result coroworker.Result
+	callOK := coroworker.Call(function, traceTarget, argc, &args, &result)
+	if !boundary.finishV1() {
+		coroRuntimeAbort("native direct foreign call cannot reacquire managed execution")
+	}
+	if !callOK {
+		coroRuntimeAbort("native direct foreign call failed")
+	}
+	if result.Fault != coroworker.FaultNone {
+		if !StoreCoroWorkerFaultPCs(task, result.FaultPC, result.FaultTarget) {
+			coroRuntimeAbort("native direct foreign fault has no traceback identity")
+		}
+		switch result.Fault {
+		case coroworker.FaultMemory:
+			return coroWorkerResumeFaultMemoryV1
+		case coroworker.FaultDivide:
+			return coroWorkerResumeFaultDivideV1
+		default:
+			coroRuntimeAbort("native direct foreign call returned unknown fault")
+		}
+	}
+	*r1, *r2, *errno = result.R1, result.R2, result.Errno
+	return coroWorkerResumeSuccessV1
+}
+
+// __llgo_coro_native_syscall_call_v1 is the native entersyscall/exitsyscall
+// boundary for compiler-certified llgo.syscall calls. The current M performs
+// the syscall directly after releasing its execution domain. The detached
+// scheduler boundary requests a cached clean M only when independently
+// progressing route work already requires compensation; a quick return can
+// still cancel that request before dispatch, while a blocking syscall lets a
+// dispatch winner claim and service the route.
+//
+//export __llgo_coro_native_syscall_call_v1
+func __llgo_coro_native_syscall_call_v1(
+	g unsafe.Pointer,
+	function, traceTarget uintptr,
+	argc uint32,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
+	r1, r2, errno *uintptr,
+) uint32 {
+	return coroNativeForeignWordCallV1(
+		(*coro.G)(g),
+		coro.ExecutorResumeHandoffSameMForeign,
+		true,
+		function, traceTarget, argc,
+		a0, a1, a2, a3, a4, a5, a6, a7, a8,
+		r1, r2, errno,
+	)
+}
+
+// __llgo_coro_os_thread_foreign_call_v1 is the LockOSThread form of the same
+// direct blocking boundary. The dynamic guard preserves the G-to-M contract;
+// its compensation and exact return protocol are shared with native syscalls.
 //
 //export __llgo_coro_os_thread_foreign_call_v1
 func __llgo_coro_os_thread_foreign_call_v1(
@@ -443,38 +633,15 @@ func __llgo_coro_os_thread_foreign_call_v1(
 	r1, r2, errno *uintptr,
 ) uint32 {
 	task := (*coro.G)(g)
-	if function == 0 || traceTarget == 0 || argc > coroworker.MaxArgs ||
-		r1 == nil || r2 == nil || errno == nil ||
-		r1 == r2 || r1 == errno || r2 == errno ||
-		!coro.CurrentOSThreadLocked(task) {
+	if !coro.CurrentOSThreadLocked(task) {
 		coroRuntimeAbort("invalid locked-thread foreign call")
 	}
-	var boundary coroNativeForeignBoundaryV1
-	if !boundary.beginV1(task, coro.ExecutorResumeHandoffLockedForeign) {
-		coroRuntimeAbort("locked-thread foreign call cannot detach active resume")
-	}
-	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
-	var result coroworker.Result
-	callOK := coroworker.Call(function, traceTarget, argc, &args, &result)
-	if !boundary.finishV1() {
-		coroRuntimeAbort("locked-thread foreign call cannot reacquire managed execution")
-	}
-	if !callOK {
-		coroRuntimeAbort("locked-thread foreign call failed")
-	}
-	if result.Fault != coroworker.FaultNone {
-		if !StoreCoroWorkerFaultPCs(task, result.FaultPC, result.FaultTarget) {
-			coroRuntimeAbort("locked-thread foreign fault has no traceback identity")
-		}
-		switch result.Fault {
-		case coroworker.FaultMemory:
-			return coroWorkerResumeFaultMemoryV1
-		case coroworker.FaultDivide:
-			return coroWorkerResumeFaultDivideV1
-		default:
-			coroRuntimeAbort("locked-thread foreign call returned unknown fault")
-		}
-	}
-	*r1, *r2, *errno = result.R1, result.R2, result.Errno
-	return coroWorkerResumeSuccessV1
+	return coroNativeForeignWordCallV1(
+		task,
+		coro.ExecutorResumeHandoffLockedForeign,
+		false,
+		function, traceTarget, argc,
+		a0, a1, a2, a3, a4, a5, a6, a7, a8,
+		r1, r2, errno,
+	)
 }

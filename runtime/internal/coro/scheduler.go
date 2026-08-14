@@ -211,6 +211,14 @@ type P struct {
 	// bounded work sharing independent of a whole-queue length scan while the
 	// head/tail/link audit remains available at lifecycle and debug gates.
 	readyCount uint32
+	// externalWaitCount is the number of still-live external wake obligations
+	// rooted by active WaitSetRecords. Every attached source operation owns one
+	// unit. The common activate/detach lifecycle maintains it, so individual
+	// sources need no parallel compensation metadata. Pure logical parks,
+	// including an unmatched direct channel waiter, deliberately leave it zero:
+	// only an executing producer can turn that waiter into a durable executor
+	// request.
+	externalWaitCount uint32
 }
 
 const (
@@ -880,7 +888,8 @@ func validSchedulerWaitQueues(p *P) bool {
 
 func emptySchedulerWaitQueues(p *P) bool {
 	return p != nil && p.parkWaitHead == nil && p.parkWaitTail == nil &&
-		p.affectedWaitHead == nil && p.affectedWaitTail == nil
+		p.affectedWaitHead == nil && p.affectedWaitTail == nil &&
+		p.externalWaitCount == 0
 }
 
 // pollReady is scheduler-thread-only. Parks are reached only through P's
@@ -1506,7 +1515,8 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		return Action{Kind: ActionYield}, true
 	}
 	if g.park.phase == parkParked {
-		if g.queued || g.nextReady != nil || !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
+		if g.queued || g.nextReady != nil || !validParkWaitQueueHeader(p) ||
+			!validAffectedWaitQueueHeader(p) || !canAccountWaitSetExternal(p, g, g.active.parkWait) {
 			return Action{}, false
 		}
 		if !acknowledgeSuspendedGPreempt(g) {

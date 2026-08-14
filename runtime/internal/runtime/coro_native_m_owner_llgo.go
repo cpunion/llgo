@@ -221,6 +221,31 @@ func coroNativeMStartPhysicalOwnerV1(
 	return false
 }
 
+// coroNativeMRequestPhysicalOwnerV1 publishes an already-cached clean M
+// without waiting for its C-to-Go dispatch or scheduler-domain claim. queued
+// distinguishes that cancelable path from the one-time synchronous creation
+// fallback which seeds the standby cache.
+func coroNativeMRequestPhysicalOwnerV1(
+	owner *coroNativeMOwnerV1,
+	slot uint32,
+) (queued, ok bool) {
+	if owner == nil || slot == 0 || owner.thread != nil || owner.token != 0 {
+		return false, false
+	}
+	switch corofleet.RequestReuseOwner(&owner.thread, &owner.token, slot) {
+	case 0:
+		return true, owner.thread != nil && owner.token != 0
+	case 1:
+		owner.thread = nil
+		owner.token = 0
+		return false, coroNativeMStartPhysicalOwnerV1(owner, slot)
+	default:
+		owner.thread = nil
+		owner.token = 0
+		return false, false
+	}
+}
+
 func coroNativeMJoinPhysicalOwnerV1(owner *coroNativeMOwnerV1) bool {
 	if owner == nil || owner.thread == nil || owner.token == 0 ||
 		corofleet.JoinOwner(owner.thread, owner.token) != 0 {
@@ -658,7 +683,7 @@ func coroNativeMClearReplacementStorageV1(owner *coroNativeMOwnerV1) {
 
 func coroNativeMRecycleReplacementV1(slot uint32) bool {
 	owner, ok := coroNativeMOwnerForSlotV1(slot)
-	if !ok || coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 ||
+	if !ok ||
 		owner.thread == nil || owner.self == nil || owner.token == 0 ||
 		!owner.handle.Valid() ||
 		owner.handle.Route > coroNativeFleetDomainCapacityV1 ||
@@ -666,6 +691,13 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 		owner.lineageRootSlot == 0 ||
 		owner.ownerEpoch != owner.baton.OwnerEpoch ||
 		owner.resume.Detached() || !owner.handoff.Idle() {
+		return false
+	}
+	switch coroNativeMOwnerLifecycleLoadV1(owner) {
+	case coroNativeMOwnerReplacementActiveV1,
+		coroNativeMOwnerSuccessorActiveV1,
+		coroNativeMOwnerReturnedV1:
+	default:
 		return false
 	}
 	root, rootOK := coroNativeMOwnerForSlotV1(owner.lineageRootSlot)
@@ -676,12 +708,7 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 		parent.handle != owner.handle || !parent.handoff.Returned(owner.baton) ||
 		coroNativeAtomicLoadV1(
 			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
-		) != owner.parentSlot ||
-		!coroNativeMOwnerLifecycleCASV1(
-			owner,
-			coroNativeMOwnerReturnedV1,
-			coroNativeMOwnerPreparingV1,
-		) {
+		) != owner.parentSlot {
 		return false
 	}
 	released := corofleet.ReleaseOwner(
@@ -690,6 +717,22 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 		slot,
 	)
 	if released != 0 && released != 1 {
+		coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
+		return false
+	}
+	if coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 ||
+		root.lineageRootSlot != owner.lineageRootSlot ||
+		root.baton != owner.baton || root.parentSlot != owner.parentSlot ||
+		coroNativeAtomicLoadV1(&root.lineageSlot) != slot ||
+		!parent.handoff.Returned(owner.baton) ||
+		coroNativeAtomicLoadV1(
+			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
+		) != owner.parentSlot ||
+		!coroNativeMOwnerLifecycleCASV1(
+			owner,
+			coroNativeMOwnerReturnedV1,
+			coroNativeMOwnerPreparingV1,
+		) {
 		coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
 		return false
 	}
@@ -702,17 +745,18 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 }
 
 // coroNativeMWaitAndRecycleOSThreadSuspendV1 is the original M's blocking
-// rendezvous for an ordinary locked Yield/Park handoff. ReleaseOwner waits on
-// corofleet's existing condition variable while the exact child is still in
-// Go; there is no scheduler busy loop. This staged protocol admits only the
-// original replacement record, not a retirement successor lineage.
+// rendezvous for an ordinary locked Yield/Park handoff or for an asynchronously
+// dispatched replacement whose handoff was revoked before Claim. ReleaseOwner
+// waits on corofleet's existing condition variable while the exact child is
+// still in Go; there is no scheduler busy loop. This staged protocol admits
+// only the original replacement record, not a retirement successor lineage.
 func coroNativeMWaitAndRecycleOSThreadSuspendV1(
 	slot uint32,
 	owner, parent *coroNativeMOwnerV1,
 ) bool {
 	resolved, ownerOK := coroNativeMOwnerForSlotV1(slot)
 	if !ownerOK || resolved != owner || owner == nil || parent == nil ||
-		owner.thread == nil || owner.self == nil || owner.token == 0 ||
+		owner.thread == nil || owner.token == 0 ||
 		!owner.handle.Valid() ||
 		owner.handle.Route > coroNativeFleetDomainCapacityV1 ||
 		!owner.baton.Valid() || owner.parentSlot == 0 ||
@@ -725,7 +769,9 @@ func coroNativeMWaitAndRecycleOSThreadSuspendV1(
 		return false
 	}
 	switch coroNativeMOwnerLifecycleLoadV1(owner) {
-	case coroNativeMOwnerReplacementActiveV1, coroNativeMOwnerReturnedV1:
+	case coroNativeMOwnerReplacementPublishedV1,
+		coroNativeMOwnerReplacementActiveV1,
+		coroNativeMOwnerReturnedV1:
 	default:
 		return false
 	}
@@ -741,7 +787,8 @@ func coroNativeMWaitAndRecycleOSThreadSuspendV1(
 		coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
 		return false
 	}
-	if coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 ||
+	if owner.self == nil ||
+		coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 ||
 		owner.lineageRootSlot != slot ||
 		coroNativeAtomicLoadV1(&owner.lineageSlot) != slot ||
 		!parent.handoff.Returned(owner.baton) ||
@@ -798,18 +845,37 @@ func coroNativeMClaimReplacementV1(
 	}
 	released, releasedOK := parent.handoff.Released()
 	if !releasedOK {
-		if !parent.handoff.Returned(owner.baton) {
+		if !parent.handoff.Returned(owner.baton) ||
+			!coroNativeMOwnerLifecycleCASV1(
+				owner,
+				coroNativeMOwnerReplacementPublishedV1,
+				coroNativeMOwnerReturnedV1,
+			) {
 			return nil, nil, nil, false, false
 		}
-		coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerReturnedV1))
 		return owner, parent, domain, false, true
 	}
-	if released != owner.baton || !parent.handoff.Claim(owner.baton) ||
-		!coroNativeAtomicCASV1(
-			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
-			owner.parentSlot,
-			slot,
-		) || !coroNativeMOwnerLifecycleCASV1(
+	if released != owner.baton {
+		return nil, nil, nil, false, false
+	}
+	if !parent.handoff.Claim(owner.baton) {
+		// Released was an exact snapshot, not a lease. RequestReturn may win
+		// before Claim's CAS; that is the normal asynchronous-cancel outcome.
+		if parent.handoff.Returned(owner.baton) &&
+			coroNativeMOwnerLifecycleCASV1(
+				owner,
+				coroNativeMOwnerReplacementPublishedV1,
+				coroNativeMOwnerReturnedV1,
+			) {
+			return owner, parent, domain, false, true
+		}
+		return nil, nil, nil, false, false
+	}
+	if !coroNativeAtomicCASV1(
+		&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
+		owner.parentSlot,
+		slot,
+	) || !coroNativeMOwnerLifecycleCASV1(
 		owner,
 		coroNativeMOwnerReplacementPublishedV1,
 		coroNativeMOwnerReplacementActiveV1,
@@ -867,8 +933,14 @@ func coroNativeMReplacementLineageOwnerV1(
 	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
 	if !ownerOK || owner.handle != root.handle || owner.baton != baton ||
 		owner.parentSlot != root.parentSlot ||
-		owner.lineageRootSlot != rootSlot ||
-		coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 {
+		owner.lineageRootSlot != rootSlot {
+		return 0, nil, false
+	}
+	switch coroNativeMOwnerLifecycleLoadV1(owner) {
+	case coroNativeMOwnerReplacementActiveV1,
+		coroNativeMOwnerSuccessorActiveV1,
+		coroNativeMOwnerReturnedV1:
+	default:
 		return 0, nil, false
 	}
 	return slot, owner, true

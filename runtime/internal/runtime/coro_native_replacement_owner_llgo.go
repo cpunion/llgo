@@ -440,15 +440,16 @@ func coroNativeMRunReplacementOwnerV1(slot uint32) bool {
 			"native replacement M claim failed",
 		)
 	}
-	if !claimed {
-		return coroNativeFleetPhysicalOwnerFailV1(
-			"native replacement M claim was revoked before startup",
-		)
-	}
 	if corofleet.OwnerReady(slot) != 0 {
 		return coroNativeFleetPhysicalOwnerFailV1(
 			"native replacement M startup acknowledgement failed",
 		)
+	}
+	if !claimed {
+		// RequestReturn won before this clean M reached Claim. OwnerReady still
+		// acknowledges the physical dispatch so ReleaseOwner can return the
+		// exact pthread to standby; no scheduler domain was touched.
+		return true
 	}
 	return coroNativeMRunClaimedReplacementOwnerV1(
 		slot,
