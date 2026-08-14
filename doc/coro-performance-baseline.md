@@ -2021,3 +2021,94 @@ remaining standard-file gap primarily in synchronous child coroutine
 allocation, frame publication, inline-await completion, and destroy/consume
 transactions through `syscall`, `internal/poll`, `os.File`, and `io`, rather
 than in replacement-slot or full driver-route recovery.
+
+### Certified native static-outcome chain checkpoint
+
+The 2026-08-15 follow-up starts at merge `db6a6eb2e`; the measured
+implementation is `3fa2cfc44`. It completes the compiler-owned static outcome
+chain for a certified native syscall. A native call whose contract proves a
+bounded synchronous result now releases the managed execution domain, performs
+the call on the current native M, and reacquires the domain without allocating
+or parking an LLVM coroutine. The physical M may block in the kernel, but a
+durable runnable/event demand can still start a replacement M, so the managed
+scheduler is not blocked. Network sockets retain their nonblocking poll/event
+path.
+
+ProgramIR records this as `cl.intrinsic.inline-native-block.v1`. Exact static
+Go callers consume the generated `$outcome` entry point recursively; dynamic
+function values and interface calls retain the ordinary `$coro` entry point.
+Library-effect summaries carry the no-unwind static-outcome proof across package
+boundaries. Timer, poll, host, foreign/generic worker waits, yield-only effects,
+retained-memory calls, and unresolved contracts fail closed. The production
+Darwin gate verifies the real `syscall.syscall`, `syscall.{Read,Write,Seek}` and
+the private write wrapper rather than a synthetic fixture.
+
+The parent and candidate use Go 1.26.5, LLVM 22.1.8, full LTO, stripped Darwin
+arm64 outputs, independent build caches, and process-start `GOMAXPROCS=1`.
+Fifteen AB/BA-interleaved process runs gave the following wall-time medians;
+brackets are the first and third quartiles:
+
+| Workload | Go median [Q1, Q3] | LLGo median [Q1, Q3] | LLGo / Go | previous LLGo / Go |
+| --- | ---: | ---: | ---: | ---: |
+| direct `syscall` file round trip, 5,000 operations | 7.763 ms [7.726, 7.929] | 11.591 ms [11.511, 11.698] | 1.49x | 2.07x |
+| cache-hot 4 KiB standard file round trip, 5,000 operations | 7.909 ms [7.818, 8.117] | 30.736 ms [30.410, 30.938] | 3.89x | 4.94x |
+| loopback TCP echo, 500 operations | 8.714 ms [8.409, 9.263] | 17.722 ms [17.210, 18.038] | 2.03x | 2.04x |
+
+Relative to the preceding equal-count checkpoint, direct syscalls improve
+26.8% and the standard-file path improves 19.9%. TCP remains effectively
+unchanged: it does not use the newly flattened blocking-native path, and the
+shared-host distributions do not support a network speedup claim. The
+standard-file gap is now above the native leaf, in the remaining
+`internal/poll`, `os.File`, and `io` coroutine/transaction layers.
+
+Eleven AB/BA-interleaved core runs on the same binaries show that the static
+compiler path is already competitive, while goroutine creation is the largest
+core latency gap:
+
+| Core workload | Go median | LLGo median | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| scalar compute, 5,000,000 iterations | 8.243 ms | 7.752 ms | 0.94x |
+| buffered channel, 1,000,000 operations | 16.108 ms | 20.154 ms | 1.25x |
+| ready `select`, 500,000 operations | 26.295 ms | 21.268 ms | 0.81x |
+| spawn 100 x 100 goroutines | 0.964 ms | 3.007 ms | 3.12x |
+| unbuffered handoff, 5,000 operations | 0.798 ms | 0.660 ms | 0.83x |
+| timers, 100 x 10 expirations | 12.908 ms | 14.761 ms | 1.14x |
+
+A four-worker compute fixture scales from one to four Ps by 3.83x in Go and
+3.85x in LLGo, but LLGo remains 2.22x slower in absolute time (14.545 versus
+6.543 ms at P=1; 3.780 versus 1.707 ms at P=4). This isolates the remaining
+cost in goroutine entry/completion and channel coordination rather than a
+failure of parallel execution.
+
+Nine `/usr/bin/time -l` AB/BA runs validate the stackless memory advantage at
+high concurrency:
+
+| Parked goroutines | Go median max RSS | LLGo median max RSS |
+| ---: | ---: | ---: |
+| 0 | 3,522,560 B | 6,176,768 B |
+| 1,000 | 6,471,680 B | 8,372,224 B |
+| 5,000 | 17,580,032 B | 16,056,320 B |
+| 10,000 | 31,522,816 B | 25,657,344 B |
+
+From 0 to 10,000 parked goroutines, Go grows by about 2,800 B per goroutine and
+LLGo by about 1,948 B, a 30.4% lower LLGo incremental slope. LLGo has a roughly
+2.65 MiB higher fixed process cost, but is 1.52 MiB smaller at 5,000 parked
+goroutines and 5.87 MiB smaller at 10,000.
+
+Code size remains a major unresolved cost. The core executable is 4,093,696 B
+for LLGo versus 1,488,034 B for Go (2.75x), and its Mach-O `__text` is
+2,046,804 B versus 582,500 B (3.51x). The I/O executable is 7,085,200 B versus
+1,797,874 B (3.94x), with `__text` at 3,524,144 B versus 696,708 B (5.06x).
+Within LLGo, however, this change removes 86,444 text bytes (-2.39%) and
+111,760 file bytes (-1.55%); `coro_resume` symbols fall from 1,859 to 1,792
+while `$outcome` symbols rise from 503 to 551.
+
+Semantic gates pass for effect/ProgramIR propagation, raw ABI, exact frame
+retention, timer/poll/worker negative cases, the runtime coroutine module, and
+actual standard-file, direct-syscall, sole-M blocking-pipe-with-timer, and TCP
+execution. This is not yet the final compatibility checkpoint: at measurement
+time `cpunion/llvm-coro` is 101 `xgo-dev/main` commits behind (merge base
+`c9515d8c`, upstream tip `8b76e388`). The next integration gate is to merge
+this focused change, synchronize the branch with current upstream main, run all
+repository and selected GOROOT tests, and repeat the performance measurements
+on the synchronized tree.
