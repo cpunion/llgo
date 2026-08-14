@@ -161,6 +161,7 @@ jobs:
           # generation reuse, cancellation, and single-owner posting without
           # silently restoring the old channel spin gate dependency.
           go test -race -shuffle=on -tags=coro_sema_owner_test \
+            ./internal/runtime/coro_current_task_route_test_adapter.go \
             ./internal/runtime/coro_keyed_registry_atomic_host.go \
             ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/coro_operation_capacity.go \
@@ -171,6 +172,7 @@ jobs:
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_sema_owner_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+            ./internal/runtime/coro_current_task_route_test_adapter.go \
             ./internal/runtime/coro_keyed_registry_atomic_host.go \
             ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/coro_operation_capacity.go \

@@ -489,6 +489,11 @@ func TestCgoC2Return_ErrnoNeedsConvert(t *testing.T) {
 	prog := newLLSSAProg(t)
 	pkg := prog.NewPackage("foo", "foo")
 	errType := types.Universe.Lookup("error").Type()
+	syscallPkg, err := importer.Default().Import("syscall")
+	if err != nil {
+		t.Fatal(err)
+	}
+	errnoType := syscallPkg.Scope().Lookup("Errno").Type()
 	sig := types.NewSignatureType(nil, nil, nil, nil,
 		types.NewTuple(
 			types.NewVar(0, nil, "", types.Typ[types.Int]),
@@ -499,7 +504,7 @@ func TestCgoC2Return_ErrnoNeedsConvert(t *testing.T) {
 	b := fn.MakeBody(1)
 
 	ctx := &context{prog: prog, pkg: pkg, fn: fn}
-	ctx.cgoErrnoTy = types.Typ[types.Int32] // avoid needing goProg for lookup
+	ctx.cgoErrnoTy = errnoType // avoid needing goProg while retaining the real error implementation
 	ctx.cgoErrno = b.Const(constant.MakeInt64(1), ctx.type_(types.Typ[types.Int64], llssa.InGo))
 	ret := b.Const(constant.MakeInt64(7), ctx.type_(types.Typ[types.Int], llssa.InGo))
 

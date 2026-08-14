@@ -114,7 +114,7 @@ func GetCompilerRTConfig() compile.LibConfig {
 }
 
 func GetCompilerRTCompileConfig(baseDir, target string) compile.CompileConfig {
-	return compile.CompileConfig{
+	config := compile.CompileConfig{
 		Groups: []compile.CompileGroup{
 			{
 				OutputFileName: fmt.Sprintf("libclang_builtins-%s.a", target),
@@ -297,4 +297,13 @@ func GetCompilerRTCompileConfig(baseDir, target string) compile.CompileConfig {
 			},
 		},
 	}
+	if strings.HasPrefix(target, "wasm32") || strings.HasPrefix(target, "wasm64") {
+		// Keep Clang's resource headers (compiler-rt uses them), but never let
+		// a freestanding WebAssembly build fall through to the host libc
+		// include directories. LLVM 22's WASI limits.h uses include_next when
+		// those directories are visible, which otherwise mixes Linux headers
+		// into the target archive.
+		config.Groups[0].CCFlags = append(config.Groups[0].CCFlags, "-nostdlibinc")
+	}
+	return config
 }

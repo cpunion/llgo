@@ -1042,11 +1042,13 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			case intrinsic && opcode == llgoCgoCgocall &&
 				v.Parent() != nil && isCgoC2func(v.Parent().Name()):
 				// The exact generated C2 worker transaction resumes in the Go
-				// wrapper and constructs its (result, error) pair there. Attach
-				// that synthetic interface construction to the cgocall source
-				// site so helper closure, physical emission, and observation
-				// share one immutable recipe.
-				add("AllocU", "NewItab")
+				// wrapper and constructs its (result, error) pair there. The nil
+				// error slot owns AllocU. The non-nil syscall.Errno conversion has
+				// one statically known concrete type, so Builder.MakeInterface now
+				// emits an immutable itab and no runtime NewItab call. Attach only
+				// the helper that physical emission actually performs to this
+				// cgocall source site.
+				add("AllocU")
 			case intrinsic && opcode == llgoDeferData:
 				// Builder.DeferData replaces the compiler declaration with an
 				// ordinary runtime.GetThreadDefer call.
