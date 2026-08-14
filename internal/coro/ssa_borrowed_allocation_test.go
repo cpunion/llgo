@@ -28,6 +28,8 @@ import (
 func TestSSABorrowedAllocationProof(t *testing.T) {
 	_, pkg := buildCoroTestSSA(t, "borrowed_allocation.go", `package coroid
 
+import "unsafe"
+
 type transaction struct {
 	self *transaction
 	endpoint *int
@@ -84,6 +86,13 @@ func safeRecursive() bool {
 	return value.phase == 0
 }
 
+func externalWord(uintptr)
+func safeExternalWord() bool {
+	var value transaction
+	externalWord(uintptr(unsafe.Pointer(&value)))
+	return value.phase == 0
+}
+
 func recurseA(value *transaction, escape bool) { recurseB(value, escape) }
 func recurseB(value *transaction, escape bool) {
 	if escape { escaped = value; return }
@@ -111,6 +120,25 @@ func escapeRecursive() { var value transaction; recurseA(&value, false) }
 	recursiveAlloc := exactHeapAllocation(t, packageFunction(t, pkg, "safeRecursive"))
 	if proof, ok := ProveSSABorrowedAllocation(recursiveAlloc); !ok || proof.ParametersProven == 0 {
 		t.Fatalf("safe recursive borrow proof = %+v, present=%t", proof, ok)
+	}
+	external := packageFunction(t, pkg, "safeExternalWord")
+	externalAlloc := exactHeapAllocation(t, external)
+	if proof, ok := ProveSSABorrowedAllocation(externalAlloc); ok {
+		t.Fatalf("bodyless external call received an implicit borrow proof: %+v", proof)
+	}
+	proof, ok = ProveSSABorrowedAllocationWithConfig(externalAlloc, SSABorrowedAllocationConfig{
+		BorrowedCallArgument: func(call *ssa.Call, index int) bool {
+			callee := call.Common().StaticCallee()
+			return callee != nil && callee.Name() == "externalWord" && index == 0
+		},
+	})
+	if !ok || proof.Allocation != externalAlloc {
+		t.Fatalf("certified external borrow proof = %+v, present=%t", proof, ok)
+	}
+	if proof, ok := ProveSSABorrowedAllocationWithConfig(externalAlloc, SSABorrowedAllocationConfig{
+		BorrowedCallArgument: func(*ssa.Call, int) bool { return false },
+	}); ok {
+		t.Fatalf("rejected external argument received a borrow proof: %+v", proof)
 	}
 
 	for _, name := range []string{

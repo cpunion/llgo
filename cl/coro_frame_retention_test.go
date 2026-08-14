@@ -82,6 +82,26 @@ func Root(limit uint32) bool {
 }
 `
 
+const coroForeignBorrowedAllocationFixture = `package foo
+
+import "unsafe"
+
+type result struct {
+	value uintptr
+}
+
+//go:linkname call C.coro_borrowed_allocation_fixture
+func call(resultAddress uintptr) bool
+
+func Root() uintptr {
+	var value result
+	if !call(uintptr(unsafe.Pointer(&value))) {
+		return 0
+	}
+	return value.value
+}
+`
+
 func TestCoroBorrowedAllocationUsesPhysicalLocalStorage(t *testing.T) {
 	prog, ssaPkg, files, universe, plan := prepareCoroPreemptTestPlan(
 		t,
@@ -151,6 +171,100 @@ func TestCoroBorrowedAllocationUsesPhysicalLocalStorage(t *testing.T) {
 	if resume := module.NamedFunction("foo.Root$coro.resume"); resume.IsNil() ||
 		strings.Contains(resume.String(), "runtime.AllocZ") {
 		t.Fatalf("CoroSplit lost borrowed local storage:\n%s", module.String())
+	}
+}
+
+func TestCoroForeignBorrowContractUsesPhysicalLocalStorage(t *testing.T) {
+	prog, ssaPkg, _, universe, plan := prepareCoroPreemptTestPlan(
+		t,
+		coroForeignBorrowedAllocationFixture,
+		[]coroRootFactoryTestRoot{{name: "Root", demand: coro.AsyncDemand}},
+		nil,
+		-1,
+	)
+	defer prog.Dispose()
+	root := ssaPkg.Func("Root")
+	var foreignCall *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common() != nil && call.Common().StaticCallee() != nil &&
+				call.Common().StaticCallee().Name() == "call" {
+				foreignCall = call
+			}
+		}
+	}
+	if foreignCall == nil {
+		t.Fatal("foreign-borrow fixture has no direct C call")
+	}
+	site, frozen, err := universe.CoroCallSitePlan(foreignCall)
+	if err != nil || !frozen || !site.ArgumentsBorrowedUntilCompletion {
+		t.Fatalf("foreign-borrow call SitePlan = %+v, frozen=%t, err=%v, samePkg=%t",
+			site, frozen, err, foreignCall.Common().StaticCallee().Pkg == ssaPkg)
+	}
+	audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := audit.currentFrameRetentionProof()
+	allocations := coroFrameRetentionHeapAllocs(root)
+	if len(allocations) != 1 || len(proof.borrowedAllocations) != 1 ||
+		len(proof.managedHeapAllocations) != 0 {
+		t.Fatalf("foreign-borrow fixture SSA/borrowed/managed allocations = %d/%d/%d, want 1/1/0",
+			len(allocations), len(proof.borrowedAllocations), len(proof.managedHeapAllocations))
+	}
+	borrow, retained := proof.borrowedAllocations[allocations[0]]
+	if !retained || borrow.FunctionsVisited == 0 {
+		t.Fatalf("foreign declaration did not retain an exact borrow proof: %+v", borrow)
+	}
+	if reason := audit.validateAlloc(allocations[0]); reason != "" {
+		t.Fatalf("foreign borrowed allocation rejected: %s", reason)
+	}
+}
+
+func TestCoroForeignRetainedContractRejectsBorrowedStorage(t *testing.T) {
+	source := strings.Replace(
+		coroForeignBorrowedAllocationFixture,
+		"//go:linkname call C.coro_borrowed_allocation_fixture",
+		"//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=retained\n//go:linkname call C.coro_borrowed_allocation_fixture",
+		1,
+	)
+	prog, ssaPkg, _, universe, plan := prepareCoroPreemptTestPlan(
+		t,
+		source,
+		[]coroRootFactoryTestRoot{{name: "Root", demand: coro.AsyncDemand}},
+		nil,
+		-1,
+	)
+	defer prog.Dispose()
+	root := ssaPkg.Func("Root")
+	var foreignCall *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common() != nil && call.Common().StaticCallee() != nil &&
+				call.Common().StaticCallee().Name() == "call" {
+				foreignCall = call
+			}
+		}
+	}
+	if foreignCall == nil {
+		t.Fatal("foreign-retained fixture has no direct C call")
+	}
+	site, frozen, err := universe.CoroCallSitePlan(foreignCall)
+	if err != nil || !frozen || site.ArgumentsBorrowedUntilCompletion {
+		t.Fatalf("foreign-retained call SitePlan = %+v, frozen=%t, err=%v; want conservative lifetime",
+			site, frozen, err)
+	}
+	audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := audit.currentFrameRetentionProof()
+	allocations := coroFrameRetentionHeapAllocs(root)
+	if len(allocations) != 1 || len(proof.borrowedAllocations) != 0 {
+		t.Fatalf("foreign-retained fixture SSA/borrowed/managed allocations = %d/%d/%d, want one SSA allocation and no borrow proof",
+			len(allocations), len(proof.borrowedAllocations), len(proof.managedHeapAllocations))
 	}
 }
 

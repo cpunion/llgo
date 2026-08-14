@@ -35,6 +35,103 @@ func isCoroPythonIntrinsicOpcode(opcode int) bool {
 	}
 }
 
+type coroCallArgumentLifetimeUniverse interface {
+	canonicalAlias(*ssa.Function) *ssa.Function
+	sortedUseOwners(*ssa.Function) []*preparedEmissionPackage
+	functionABIContext(*ssa.Function, *preparedEmissionPackage) (*context, error)
+	freezeCoroCallableShape(*ssa.Function) (coroCallableFrozenShape, error)
+}
+
+func classifyCoroCallArgumentsBorrowedUntilCompletion(
+	universe coroCallArgumentLifetimeUniverse,
+	ctx *context,
+	caller *ssa.Function,
+	call ssa.CallInstruction,
+) (bool, error) {
+	direct, ok := call.(*ssa.Call)
+	if !ok || direct.Common() == nil || direct.Common().IsInvoke() ||
+		direct.Common().Method != nil || ctx == nil || ctx.prog == nil || caller == nil {
+		return false, nil
+	}
+	callee := universe.canonicalAlias(direct.Common().StaticCallee())
+	if callee == nil || callee.Pkg == nil || caller.Pkg == nil ||
+		callee.Pkg != caller.Pkg || callee.Pkg != ctx.goPkg {
+		return false, nil
+	}
+	// A source stub may remain visible to x/tools SSA even though patch
+	// selection or reachability omitted its physical declaration. Such a call
+	// has no frozen ABI owner and therefore cannot receive an occurrence-level
+	// lifetime certificate; it must not make ProgramIR construction fail either.
+	if len(universe.sortedUseOwners(callee)) == 0 {
+		return false, nil
+	}
+	shape, err := universe.freezeCoroCallableShape(callee)
+	if err != nil {
+		return false, fmt.Errorf("freeze C argument lifetime for %q: %w", callee.Name(), err)
+	}
+	if shape.kind != cFunc {
+		return false, nil
+	}
+	parsed, present, err := coroCallableContractCertificateFor(callee)
+	if err != nil {
+		return false, fmt.Errorf("freeze C argument lifetime for %q: %w", callee.Name(), err)
+	}
+	contract := defaultCoroForeignDeclarationContract().Contract
+	if present {
+		if parsed.Scope != coroCallableContractScopeDeclaration {
+			return false, nil
+		}
+		contract = parsed.Contract
+	}
+	switch contract.Memory {
+	case coro.MemoryByValue, coro.MemoryBorrowUntilReturn:
+		return true, nil
+	case coro.MemoryBorrowUntilComplete:
+		return contract.Progress == coro.ProgressExecutorSafe ||
+			contract.Progress == coro.ProgressMayBlock, nil
+	default:
+		return false, nil
+	}
+}
+
+func coroCallArgumentsBorrowedUntilCompletion(
+	universe coroCallArgumentLifetimeUniverse,
+	call *ssa.Call,
+) (bool, error) {
+	if universe == nil || call == nil || call.Parent() == nil {
+		return false, nil
+	}
+	caller := universe.canonicalAlias(call.Parent())
+	if caller == nil || caller != call.Parent() {
+		return false, nil
+	}
+	owners := universe.sortedUseOwners(caller)
+	if len(owners) == 0 {
+		return false, nil
+	}
+	borrowed, classified := false, false
+	for _, owner := range owners {
+		ctx, err := universe.functionABIContext(caller, owner)
+		if err != nil {
+			return false, err
+		}
+		candidate, err := classifyCoroCallArgumentsBorrowedUntilCompletion(universe, ctx, caller, call)
+		if err != nil {
+			return false, err
+		}
+		if classified && candidate != borrowed {
+			return false, fmt.Errorf(
+				"call %q has owner-dependent C argument lifetime", call.String(),
+			)
+		}
+		borrowed, classified = candidate, true
+	}
+	if !classified {
+		return false, nil
+	}
+	return borrowed, nil
+}
+
 // freezeCallSites is the final pre-SSAPlan ProgramIR builder stage. Runtime
 // helper closure, patch redirects, physical identities, and worker
 // certificates must already be immutable. The stage validates raw SSA exactly
@@ -391,6 +488,11 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						plan.Elision = CoroCallElidedPython
 					case intrinsic && classifyErr == nil && semantics.ElidesManagedCall() && plan.StaticSpawnTarget == nil:
 						plan.Elision = CoroCallElidedIntrinsic
+					}
+					if classifyErr == nil {
+						direct, _ := call.(*ssa.Call)
+						plan.ArgumentsBorrowedUntilCompletion, classifyErr =
+							coroCallArgumentsBorrowedUntilCompletion(u, direct)
 					}
 					if plan.ElidesCall() && intrinsic && classifyErr == nil && workerCertified {
 						if workerCertificate.ID == "" {

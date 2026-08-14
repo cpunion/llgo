@@ -789,7 +789,7 @@ static bool llgo_coro_worker_prepare_fault_signals_v1(void) {
     return true;
 }
 
-bool __llgo_coro_worker_call_v1(
+static bool llgo_coro_worker_call_array_v1(
     uintptr_t function,
     uintptr_t trace_target,
     uint32_t argc,
@@ -902,6 +902,31 @@ bool __llgo_coro_worker_call_v1(
     return true;
 }
 
+bool __llgo_coro_worker_call_words_v2(
+    uintptr_t function,
+    uintptr_t trace_target,
+    uint32_t argc,
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t a4,
+    uintptr_t a5,
+    uintptr_t a6,
+    uintptr_t a7,
+    uintptr_t a8,
+    uintptr_t result_address) {
+    const uintptr_t args[LLGO_CORO_WORKER_MAX_ARGS_V1] = {
+        a0, a1, a2, a3, a4, a5, a6, a7, a8,
+    };
+    return llgo_coro_worker_call_array_v1(
+        function,
+        trace_target,
+        argc,
+        args,
+        (struct llgo_coro_worker_result_v1 *)result_address);
+}
+
 /*
  * This is the complete blocking worker island. Neither the queue wait nor the
  * uintptr-shaped foreign call can enter a managed LLVM coroutine. Only the
@@ -921,7 +946,7 @@ static void *llgo_coro_worker_main_v1(void *unused) {
         }
 
         struct llgo_coro_worker_result_v1 result;
-        if (!__llgo_coro_worker_call_v1(
+        if (!llgo_coro_worker_call_array_v1(
                 job.function, job.trace_target, job.argc, job.args, &result) ||
             __llgo_coro_native_worker_complete_v1(
                 job.source_slot,

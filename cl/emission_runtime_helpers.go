@@ -104,17 +104,20 @@ func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAlloc
 }
 
 // coroBorrowedAllocationUniverse is the complete read-only authority needed by
-// the interprocedural lifetime proof. Keeping this as a two-method view avoids
+// the interprocedural lifetime proof. Keeping this as a narrow view avoids
 // turning a local allocation classifier into another whole-program plan owner.
 type coroBorrowedAllocationUniverse interface {
+	coroCallArgumentLifetimeUniverse
 	Resolve(*ssa.Function) (*ssa.Function, bool)
 	FunctionBackground(*ssa.Function) (llssa.Background, bool, error)
 }
 
 // proveCoroBorrowedAllocation admits only bodies which the frozen emission
-// universe will actually compile as managed Go. Source bodies attached to C,
-// Python, or LLVM intrinsic declarations are type-checking stubs rather than
-// memory-semantics evidence and must never justify local storage.
+// universe will actually compile as managed Go, or exact call-site plans which
+// prove that a foreign call stops borrowing an argument no later than its
+// logical completion. Source bodies attached to C, Python, or LLVM intrinsic
+// declarations remain type-checking stubs and never constitute memory-
+// semantics evidence themselves.
 func proveCoroBorrowedAllocation(
 	universe coroBorrowedAllocationUniverse,
 	allocation *ssa.Alloc,
@@ -123,6 +126,10 @@ func proveCoroBorrowedAllocation(
 		return coro.SSABorrowedAllocationProof{Allocation: allocation}, false
 	}
 	return coro.ProveSSABorrowedAllocationWithConfig(allocation, coro.SSABorrowedAllocationConfig{
+		BorrowedCallArgument: func(call *ssa.Call, _ int) bool {
+			borrowed, err := coroCallArgumentsBorrowedUntilCompletion(universe, call)
+			return err == nil && borrowed
+		},
 		ResolveCalleeBody: func(function *ssa.Function) (*ssa.Function, bool) {
 			canonical, resolved := universe.Resolve(function)
 			if !resolved || canonical == nil || len(canonical.Blocks) == 0 {

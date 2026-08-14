@@ -517,25 +517,26 @@ func TestRuntimeCoroWorkerKeepsPthreadCreationCertificateOwnerScoped(t *testing.
 	}
 }
 
-func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) {
+func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testing.T) {
 	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
-	requireRuntimeAnnotationFreeCDeclarations(t, runtimeCoroWorkerCallSource, "Call")
 	if strings.Contains(declaration, "func QueueWaitTake(") {
 		t.Errorf("%s exposes the blocking worker consumer loop to managed Go", runtimeCoroWorkerCallSource)
 	}
-	for _, required := range []string{
-		"reserved for the runtime's dynamically proved",
-		"LockOSThread path",
-		"//go:linkname Call C.__llgo_coro_worker_call_v1",
-		"func Call(function, traceTarget uintptr, argc uint32, args *[MaxArgs]uintptr, result *Result) bool",
-	} {
-		if !strings.Contains(declaration, required) {
-			t.Errorf("%s lacks guarded same-M call contract %q", runtimeCoroWorkerCallSource, required)
-		}
+	if strings.Contains(declaration, "func Call(") ||
+		strings.Contains(declaration, "func CallWords(") ||
+		strings.Contains(declaration, "C.__llgo_coro_worker_call_v1") ||
+		strings.Contains(declaration, "C.__llgo_coro_worker_call_words_v2") {
+		t.Errorf("%s exposes a synchronous C worker leaf outside its exact runtime owner", runtimeCoroWorkerCallSource)
 	}
 
 	entrance := readRuntimePollFile(t, runtimeCoroOSThreadForeignSource)
+	requireRuntimeAnnotationFreeCDeclarations(t, runtimeCoroOSThreadForeignSource, "coroWorkerCallWordsV2")
 	for _, required := range []string{
+		"C wrapper owns its scratch",
+		"frozen foreign borrow contract",
+		"//go:linkname coroWorkerCallWordsV2 C.__llgo_coro_worker_call_words_v2",
+		"func coroWorkerCallWordsV2(",
+		"resultAddress uintptr,",
 		"native entersyscall/exitsyscall",
 		"!coro.CurrentOSThreadLocked(task)",
 		"type coroNativeForeignBoundaryV1 struct",
@@ -555,7 +556,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"//export __llgo_coro_native_syscall_call_v1",
 		"coro.ExecutorResumeHandoffSameMForeign",
 		"coro.ExecutorResumeHandoffLockedForeign",
-		"callOK := coroworker.Call(function, traceTarget, argc, &args, &result)",
+		"callOK := coroWorkerCallWordsV2(",
 		"boundary.parent.handoff.RequestReturn(boundary.baton)",
 		"coroNativeMReplacementLineageOwnerV1(",
 		"coroNativeMRecycleReplacementV1(returnedSlot)",
@@ -570,7 +571,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"//export __llgo_coro_foreign_reentry_failure_v1",
 		"//export __llgo_coro_same_m_foreign_call_v1",
 		"boundary.beginV1(task, coro.ExecutorResumeHandoffSameMForeign, false)",
-		"callOK := coroworker.Call(thunk, 0, 1, &args, &result)",
+		"if !callOK",
 	} {
 		if !strings.Contains(entrance, required) {
 			t.Errorf("%s lacks locked-thread call guard %q", runtimeCoroOSThreadForeignSource, required)
@@ -622,7 +623,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 	begin, call := -1, -1
 	if helper >= 0 {
 		begin = strings.Index(entrance[helper:], "if !boundary.beginV1(task, mode, lazyCompensation)")
-		call = strings.Index(entrance[helper:], "callOK := coroworker.Call(function, traceTarget, argc, &args, &result)")
+		call = strings.Index(entrance[helper:], "callOK := coroWorkerCallWordsV2(")
 		if begin >= 0 {
 			begin += helper
 		}
@@ -651,6 +652,11 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		helper < 0 || begin < helper || call <= begin || helperFinish <= call {
 		t.Errorf("%s does not bracket same-M C with detach/release/create/return/recycle/restore", runtimeCoroOSThreadForeignSource)
 	}
+	if strings.Count(entrance, "callOK := coroWorkerCallWordsV2(") != 2 ||
+		strings.Contains(entrance, "coroworker.Call(") ||
+		strings.Contains(entrance, "coroworker.CallWords(") {
+		t.Errorf("%s does not use the scalar Go-to-C ABI for both synchronous native calls", runtimeCoroOSThreadForeignSource)
+	}
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
 	for _, required := range []string{
 		"func coroTargetReleaseManagedExecutionV1(driver *coro.ExecutorDriver) bool",
@@ -666,12 +672,18 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 	for _, required := range []string{
 		"This is the complete blocking worker island",
 		"__llgo_coro_worker_queue_wait_take_v1(&job)",
-		"__llgo_coro_worker_call_v1(",
+		"static bool llgo_coro_worker_call_array_v1(",
+		"return llgo_coro_worker_call_array_v1(",
+		"if (!llgo_coro_worker_call_array_v1(",
+		"__llgo_coro_worker_call_words_v2(",
 		"__llgo_coro_native_worker_complete_v1(",
 	} {
 		if !strings.Contains(cSource, required) {
 			t.Errorf("%s lacks fixed native-stack worker step %q", runtimeCoroWorkerCSource, required)
 		}
+	}
+	if strings.Contains(cSource, "bool __llgo_coro_worker_call_v1(") {
+		t.Errorf("%s still exports the superseded pointer-taking worker-call ABI", runtimeCoroWorkerCSource)
 	}
 }
 
