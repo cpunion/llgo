@@ -68,10 +68,12 @@ func TestExecutorRunResumeRuntimeContextDescriptorCapability(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		flags     uint32
+		anonymous bool
 		wantNeeds bool
 		wantOK    bool
 	}{
 		{name: "ordinary frame", wantNeeds: true, wantOK: true},
+		{name: "anonymous legacy frame", anonymous: true, wantNeeds: true, wantOK: true},
 		{name: "context independent", flags: FrameDescriptorNoRuntimeContextV1, wantOK: true},
 		{name: "hidden context independent", flags: FrameDescriptorTraceHiddenV1 | FrameDescriptorNoRuntimeContextV1, wantOK: true},
 		{name: "unknown capability", flags: 1 << 31},
@@ -80,7 +82,11 @@ func TestExecutorRunResumeRuntimeContextDescriptorCapability(t *testing.T) {
 			p := new(P)
 			driver, _, _ := bindTestExecutorDriver(t, p)
 			task := newYieldingTestG(t, test.name)
-			(*FrameDescriptorV1)(task.frame.descriptor).Flags = test.flags
+			descriptor := (*FrameDescriptorV1)(task.frame.descriptor)
+			descriptor.Flags = test.flags
+			if test.anonymous {
+				descriptor.Function = ""
+			}
 			if !Enqueue(p, task.g) {
 				t.Fatal("enqueue descriptor-capability task")
 			}

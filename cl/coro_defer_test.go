@@ -160,6 +160,44 @@ func Root() {
 	}
 }
 
+func TestCoroStaticCleanupOrderIgnoresConstantUnreachableDefer(t *testing.T) {
+	const source = `package foo
+func live() {}
+func dead() {}
+func Root() {
+	defer live()
+	if false {
+		defer dead()
+	}
+}
+`
+	prog, universe, plan, root, _ := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+
+	reachable := coroPhysicalConstantReachableBlocks(root)
+	allDefers, reachableDefers := 0, 0
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if _, ok := instruction.(*ssa.Defer); ok {
+				allDefers++
+				if reachable[block] {
+					reachableDefers++
+				}
+			}
+		}
+	}
+	if allDefers != 2 || reachableDefers != 1 {
+		t.Fatalf("constant-unreachable defer shape = all:%d reachable:%d", allDefers, reachableDefers)
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].target == nil || cleanup.sites[0].target.Name() != "live" {
+		t.Fatalf("constant-unreachable cleanup plan = %+v", cleanup)
+	}
+}
+
 func TestCoroStaticCleanupIRNativeAndWasm32(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {

@@ -111,8 +111,11 @@ func descriptorRuntimeContextMode(descriptor unsafe.Pointer) (frameRuntimeContex
 		return frameRuntimeContextUnknown, false
 	}
 	value := (*FrameDescriptorV1)(descriptor)
-	if value.Version != 1 || value.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
-		len(value.Function) == 0 {
+	// Runtime-context installation is an execution capability, independent of
+	// optional trace names. Legacy PublishFrame callers may legally publish an
+	// anonymous descriptor; panic-trace readers retain their separate, stricter
+	// Function validation at the point where that diagnostic string is needed.
+	if value.Version != 1 || value.Flags&^frameDescriptorAllowedFlagsV1 != 0 {
 		return frameRuntimeContextUnknown, false
 	}
 	if value.Flags&FrameDescriptorNoRuntimeContextV1 != 0 {
