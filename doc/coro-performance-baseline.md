@@ -1963,3 +1963,61 @@ not on the file/syscall path. Small standard-file, direct-syscall, sole-M
 blocking-pipe/timer, and loopback-TCP execution gates pass with
 `GOMAXPROCS=1`, as do separately linked same-M callback, locked-thread
 compensation, deferred replacement, and worker-capability E2Es.
+
+### Demand-lazy replacement and compiler-task route checkpoint
+
+The 2026-08-15 follow-up starts at merge
+`95acde8e415516d07f2caea74578d91125a0997f`; the measured implementation is
+`13bdf13c4`. Profiling the scalar-ABI binary showed that a quick native syscall
+still reserved and initialized a replacement directory slot before entering
+the kernel, even though almost every call returned before another task or event
+needed a physical owner. The same compiler-owned call window also recovered the
+current driver repeatedly through its complete registry, source-catalog,
+poll-transaction, and owner-local lifecycle validator.
+
+The deferred handoff gate now has two demand-lazy phases. `Armed` and
+`Starting` contain no replacement slot. A durable executor request must first
+win the stable parent's `Armed -> Starting` CAS; only that unique publisher
+reads the released execution-domain generation, allocates a directory slot,
+and publishes `Queued` or `Started` with the slot. A quick returning syscall
+wins `Withdraw` without scanning, initializing, or recycling replacement
+storage. The request side retains no pointer to the caller's stack, G, P,
+driver, LLVM handle, or coroutine frame. The post-Arm durable-demand recheck
+and request-tail activation still close the request-before-Arm race.
+
+Generated physical coroutine code already carries the exact hidden task. The
+native boundary now consumes `CurrentExecutorDriverForCompilerTask`, freezes
+its route for the no-suspend detach interval, and uses route-authenticated
+native-owner and managed-quota operations. The detach transition still checks
+the mutable task, frame, park, action, lock, preemption, and P fields it changes.
+TLS/reentry, retained, and otherwise non-compiler callers retain the original
+complete validator; no annotation or function-address reverse lookup was
+introduced.
+
+The parent and candidate were built from the same `io_workload` source with
+independent caches, full LTO, stripped output, Go 1.26.5, LLVM 22.1.8, and
+process-start `GOMAXPROCS=1` on Darwin arm64. Fifteen three-way rotated process
+runs gave:
+
+| Workload | scalar parent median [range] | candidate median [range] | Go median [range] | candidate delta / Go |
+| --- | ---: | ---: | ---: | ---: |
+| cache-hot 4 KiB standard file round trip, 5,000 operations | 42.343 ms [41.093, 44.261] | 38.376 ms [37.189, 39.208] | 7.765 ms [7.644, 7.946] | -9.37%; 4.94x |
+| direct `syscall` file round trip, 5,000 operations | 18.485 ms [18.149, 19.471] | 15.826 ms [15.384, 16.718] | 7.658 ms [7.467, 7.891] | -14.39%; 2.07x |
+| loopback TCP echo, 500 operations | 19.980 ms [17.879, 21.272] | 19.343 ms [18.015, 21.213] | 9.486 ms [8.745, 10.183] | -3.19%; 2.04x |
+
+The TCP ranges overlap, so the table establishes no network speedup beyond a
+no-regression observation. In a three-second direct-syscall sample, the kernel
+`write` leaf accounted for about 77% of samples below `syscall.Write`, versus
+about 62% before the route-capability change; complete source-set validation no
+longer appears in the ordinary begin/release/reenter path. The stripped binary
+is 7,016,288 bytes versus 7,014,768 (+1,520, 0.022%), and Mach-O `__text` is
+3,140,944 bytes versus 3,137,244 (+3,700, 0.118%).
+
+The full runtime module, architecture debt gate, native target-plan gate,
+same-M scheduler-progress E2E, locked compensation E2E, request-driven direct
+channel replacement E2E, and real standard-file/direct-syscall/sole-M blocking
+pipe with timer/loopback-TCP executions pass. Sampling now identifies the
+remaining standard-file gap primarily in synchronous child coroutine
+allocation, frame publication, inline-await completion, and destroy/consume
+transactions through `syscall`, `internal/poll`, `os.File`, and `io`, rather
+than in replacement-slot or full driver-route recovery.
