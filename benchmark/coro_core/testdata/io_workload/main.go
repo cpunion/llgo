@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -77,6 +78,45 @@ func fileRoundTrip(count, rounds int) int {
 			}
 			if _, err := io.ReadFull(file, readback); err != nil {
 				panic(err)
+			}
+			checksum += int(readback[(round*count+index)%len(readback)])
+		}
+	}
+	return checksum
+}
+
+// fileSyscallRoundTrip performs the same persistent-file transaction as
+// fileRoundTrip but deliberately bypasses os.File and internal/poll inside the
+// measured loop. Keeping both modes in one source fixture separates the
+// compiler/runtime worker boundary from coroutine frames introduced by the
+// standard-library wrapper chain without changing the physical syscalls.
+func fileSyscallRoundTrip(count, rounds int) int {
+	file, err := os.CreateTemp("", "llgo-coro-benchmark-syscall-*")
+	if err != nil {
+		panic(err)
+	}
+	path := file.Name()
+	defer os.Remove(path)
+	defer file.Close()
+
+	fd := int(file.Fd())
+	payload := make([]byte, payloadSize)
+	readback := make([]byte, payloadSize)
+	fillPayload(payload)
+	checksum := 0
+	for round := range rounds {
+		for index := range count {
+			if _, err := syscall.Seek(fd, 0, 0); err != nil {
+				panic(err)
+			}
+			if n, err := syscall.Write(fd, payload); err != nil || n != len(payload) {
+				panic("short syscall file write")
+			}
+			if _, err := syscall.Seek(fd, 0, 0); err != nil {
+				panic(err)
+			}
+			if n, err := syscall.Read(fd, readback); err != nil || n != len(readback) {
+				panic("short syscall file read")
 			}
 			checksum += int(readback[(round*count+index)%len(readback)])
 		}
@@ -146,7 +186,7 @@ func tcpRoundTrip(count, rounds int) int {
 
 func main() {
 	if len(os.Args) != 4 {
-		panic("usage: io_workload <file|tcp> <count> <rounds>")
+		panic("usage: io_workload <file|file-syscall|tcp> <count> <rounds>")
 	}
 	mode := os.Args[1]
 	count, ok := parsePositive(os.Args[2])
@@ -163,6 +203,8 @@ func main() {
 	switch mode {
 	case "file":
 		result = fileRoundTrip(count, rounds)
+	case "file-syscall":
+		result = fileSyscallRoundTrip(count, rounds)
 	case "tcp":
 		result = tcpRoundTrip(count, rounds)
 	default:

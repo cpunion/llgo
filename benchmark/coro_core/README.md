@@ -34,6 +34,10 @@ pollute the core artifact. Its modes are:
 
 - `file`: one persistent temporary file, with cache-hot 4 KiB
   seek/write/seek/read round trips;
+- `file-syscall`: the same physical file transaction using direct
+  `syscall.Seek`, `syscall.Write`, and `syscall.Read` calls inside the measured
+  loop, isolating worker-boundary cost from the `os.File`/`internal/poll`
+  wrapper chain;
 - `tcp`: one persistent loopback TCP connection, with 4 KiB request/echo round
   trips between two goroutines.
 
