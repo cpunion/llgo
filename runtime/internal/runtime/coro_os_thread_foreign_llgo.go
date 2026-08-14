@@ -56,6 +56,23 @@ var (
 	coroNativeForeignBoundaryTLSReadyV1 bool
 )
 
+// coroWorkerCallWordsV2 executes one exact uintptr-shaped foreign thunk
+// synchronously on the calling native thread. The C wrapper owns its scratch
+// argument record. resultAddress is the scalar encoding of a caller-owned
+// coroworker.Result which remains live for this exact call; the compiler's
+// frozen foreign borrow contract keeps that scratch result in the native or
+// coroutine frame instead of the collector heap. traceTarget is used only for
+// fault attribution; zero disables the hardware-fault landing pad for a
+// reentry-capable boundary which cannot be abandoned by siglongjmp.
+//
+//go:linkname coroWorkerCallWordsV2 C.__llgo_coro_worker_call_words_v2
+func coroWorkerCallWordsV2(
+	function, traceTarget uintptr,
+	argc uint32,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
+	resultAddress uintptr,
+) bool
+
 // coroNativeForeignBoundaryTLSStartV1 makes the process-global pthread key an
 // explicit part of native-fleet startup. Runtime-only archives and other
 // section-garbage-collected library links are not required to retain or invoke
@@ -644,12 +661,15 @@ func __llgo_coro_same_m_foreign_call_v1(
 	if !installed {
 		coroRuntimeAbort("same-M foreign call cannot publish callback context")
 	}
-	args := [coroworker.MaxArgs]uintptr{record}
-	var result coroworker.Result
 	// Managed reentry cannot be abandoned by a signal longjmp. The zero trace
 	// target deliberately disables the worker fault landing pad for this exact
 	// boundary; reentry faults retain the process signal disposition.
-	callOK := coroworker.Call(thunk, 0, 1, &args, &result)
+	var result coroworker.Result
+	callOK := coroWorkerCallWordsV2(
+		thunk, 0, 1,
+		record, 0, 0, 0, 0, 0, 0, 0, 0,
+		uintptr(unsafe.Pointer(&result)),
+	)
 	if !coroNativeForeignBoundaryRestoreTLSV1(&boundary, previous) {
 		coroRuntimeAbort("same-M foreign call cannot restore callback context")
 	}
@@ -682,9 +702,12 @@ func coroNativeForeignWordCallV1(
 	if !boundary.beginV1(task, mode, lazyCompensation) {
 		coroRuntimeAbort("native direct foreign call cannot detach active resume")
 	}
-	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	var result coroworker.Result
-	callOK := coroworker.Call(function, traceTarget, argc, &args, &result)
+	callOK := coroWorkerCallWordsV2(
+		function, traceTarget, argc,
+		a0, a1, a2, a3, a4, a5, a6, a7, a8,
+		uintptr(unsafe.Pointer(&result)),
+	)
 	if !boundary.finishV1() {
 		coroRuntimeAbort("native direct foreign call cannot reacquire managed execution")
 	}

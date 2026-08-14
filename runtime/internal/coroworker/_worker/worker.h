@@ -88,11 +88,19 @@ uint32_t __llgo_coro_worker_queue_wait_take_v1(
 bool __llgo_coro_worker_queue_stop_v1(uint32_t worker_count);
 bool __llgo_coro_worker_queue_destroy_after_join_v1(void);
 
-bool __llgo_coro_worker_call_v1(
+bool __llgo_coro_worker_call_words_v2(
     uintptr_t function,
     uintptr_t trace_target,
     uint32_t argc,
-    const uintptr_t args[LLGO_CORO_WORKER_MAX_ARGS_V1],
-    struct llgo_coro_worker_result_v1 *result);
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t a4,
+    uintptr_t a5,
+    uintptr_t a6,
+    uintptr_t a7,
+    uintptr_t a8,
+    uintptr_t result_address);
 
 #endif

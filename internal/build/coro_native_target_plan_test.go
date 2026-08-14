@@ -633,7 +633,7 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			"__llgo_coro_worker_queue_init_v1":               false,
 			"__llgo_coro_worker_queue_stop_v1":               false,
 			"__llgo_coro_worker_queue_destroy_after_join_v1": false,
-			"__llgo_coro_worker_call_v1":                     false,
+			"__llgo_coro_worker_call_words_v2":               false,
 			"__llgo_coro_worker_queue_reserve_v2":            false,
 			"__llgo_coro_worker_queue_cancel_reservation_v2": false,
 			"__llgo_coro_worker_queue_submit_reserved_v4":    false,

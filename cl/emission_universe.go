@@ -546,6 +546,13 @@ type CoroCallSitePlan struct {
 	// construction and is the only authority consumed by analysis, physical
 	// planning, lowering facts, and codegen.
 	ControlOperation CoroControlOperation
+	// ArgumentsBorrowedUntilCompletion is an occurrence-level lifetime fact for
+	// one exact ordinary call to a source-visible C declaration in the caller's
+	// package. It permits caller-owned storage to live in the native/coroutine
+	// frame only when the frozen callable contract ends every argument borrow no
+	// later than this logical call completes. Dynamic, deferred, spawned,
+	// cross-package, async-completion, and retained-memory calls keep this false.
+	ArgumentsBorrowedUntilCompletion bool
 	// RawPlainSynchronousIntrinsic proves that this exact direct llgo.syscall
 	// occurrence has the uintptr word ABI accepted by ordinary synchronous
 	// intrinsic lowering. It authorizes only a separately proven raw/plain

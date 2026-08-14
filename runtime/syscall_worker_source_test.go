@@ -646,12 +646,20 @@ struct llgo_coro_worker_result_v1 {
     uintptr_t fault_target;
 };
 
-bool __llgo_coro_worker_call_v1(
+bool __llgo_coro_worker_call_words_v2(
     uintptr_t function,
     uintptr_t trace_target,
     uint32_t argc,
-    const uintptr_t args[9],
-    struct llgo_coro_worker_result_v1 *result);
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t a4,
+    uintptr_t a5,
+    uintptr_t a6,
+    uintptr_t a7,
+    uintptr_t a8,
+    uintptr_t result_address);
 
 uint32_t __llgo_coro_native_worker_complete_v1(
     uint32_t source_slot,
@@ -701,14 +709,24 @@ static uintptr_t fault_memory(uintptr_t address) {
     return *(volatile uintptr_t *)address;
 }
 
+static bool call_words(
+    uintptr_t function,
+    uintptr_t trace_target,
+    uint32_t argc,
+    struct llgo_coro_worker_result_v1 *result) {
+    return __llgo_coro_worker_call_words_v2(
+        function, trace_target, argc,
+        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        (uintptr_t)(void *)result);
+}
+
 static int call_and_check(
     uintptr_t function,
     uintptr_t want_r1,
     uintptr_t want_errno,
     int base) {
-    const uintptr_t args[9] = {0};
     struct llgo_coro_worker_result_v1 result = {0};
-    if (!__llgo_coro_worker_call_v1(function, function, 1, args, &result)) {
+    if (!call_words(function, function, 1, &result)) {
         return base;
     }
     if (result.r1 != want_r1) {
@@ -756,11 +774,18 @@ int main(void) {
     if (status != 0) {
         return status;
     }
+    struct llgo_coro_worker_result_v1 invalid = {0};
+    if (call_words(
+            (uintptr_t)(void *)&success_with_errno,
+            (uintptr_t)(void *)&success_with_errno,
+            10,
+            &invalid)) {
+        return 49;
+    }
     for (int attempt = 0; attempt < 2; ++attempt) {
-        const uintptr_t args[9] = {0};
         struct llgo_coro_worker_result_v1 result = {0};
         uintptr_t function = (uintptr_t)(void *)&fault_memory;
-        if (!__llgo_coro_worker_call_v1(function, function, 1, args, &result)) {
+        if (!call_words(function, function, 1, &result)) {
             return 50 + attempt * 10;
         }
         if (result.fault != 1 || result.fault_target != function) {

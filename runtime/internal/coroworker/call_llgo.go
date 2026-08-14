@@ -107,13 +107,3 @@ func QueueStop(workerCount uint32) bool
 //
 //go:linkname QueueDestroyAfterJoin C.__llgo_coro_worker_queue_destroy_after_join_v1
 func QueueDestroyAfterJoin() bool
-
-// Call executes one exact uintptr-shaped foreign thunk synchronously on the
-// calling native thread. traceTarget is the compiler-known source C entry used
-// only for fault attribution; zero disables the hardware-fault landing pad for
-// a reentry-capable boundary which cannot be abandoned by siglongjmp. It is
-// reserved for the runtime's dynamically proved LockOSThread path; ordinary
-// potentially blocking calls use the bounded worker queue above.
-//
-//go:linkname Call C.__llgo_coro_worker_call_v1
-func Call(function, traceTarget uintptr, argc uint32, args *[MaxArgs]uintptr, result *Result) bool

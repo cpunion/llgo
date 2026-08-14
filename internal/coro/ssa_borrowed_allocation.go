@@ -43,8 +43,12 @@ type SSABorrowedAllocationProof struct {
 // intrinsic, foreign symbol, or other physical implementation must reject that
 // body (or resolve it to an exact managed-Go definition); otherwise an inert
 // declaration stub can incorrectly prove that an argument is not retained.
+// BorrowedCallArgument is the separate extension point for a frontend-owned,
+// exact call certificate which proves that one argument is not retained beyond
+// the logical call. Dynamic calls never reach it.
 type SSABorrowedAllocationConfig struct {
-	ResolveCalleeBody func(*ssa.Function) (*ssa.Function, bool)
+	ResolveCalleeBody    func(*ssa.Function) (*ssa.Function, bool)
+	BorrowedCallArgument func(*ssa.Call, int) bool
 }
 
 type ssaBorrowParameterKey struct {
@@ -280,19 +284,25 @@ func (analyzer *ssaBorrowedAllocationAnalyzer) proveCallArgument(call *ssa.Call,
 		}
 		return true
 	}
-	if analyzer.config.ResolveCalleeBody != nil {
-		var resolved bool
-		callee, resolved = analyzer.config.ResolveCalleeBody(callee)
-		if !resolved || callee == nil {
-			return false
-		}
-	}
 	found := false
+	resolvedBody := false
 	for index, argument := range common.Args {
 		if argument != value {
 			continue
 		}
 		found = true
+		if analyzer.config.BorrowedCallArgument != nil &&
+			analyzer.config.BorrowedCallArgument(call, index) {
+			continue
+		}
+		if analyzer.config.ResolveCalleeBody != nil && !resolvedBody {
+			var resolved bool
+			callee, resolved = analyzer.config.ResolveCalleeBody(callee)
+			if !resolved || callee == nil {
+				return false
+			}
+			resolvedBody = true
+		}
 		if !analyzer.proveParameter(callee, index) {
 			return false
 		}
