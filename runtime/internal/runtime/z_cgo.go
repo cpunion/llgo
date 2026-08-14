@@ -22,6 +22,23 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
+// These names are the implementation side of cmd/cgo's generated
+// runtime.cgoAlwaysFalse, runtime.cgoUse, and runtime.cgoKeepAlive linknames.
+// The guarded calls are deliberately visible to Go escape/liveness analysis,
+// but cgoAlwaysFalse makes them unreachable at run time. Keep real definitions
+// so whole-program coroutine analysis and raw/plain cgo adapters resolve the
+// same ordinary Go symbols instead of treating generated declarations as
+// unknown managed externals.
+var cgoAlwaysFalse bool
+
+func cgoUse(any) {
+	coroRuntimeAbort("runtime.cgoUse was called")
+}
+
+func cgoKeepAlive(any) {
+	coroRuntimeAbort("runtime.cgoKeepAlive was called")
+}
+
 func CString(s string) *int8 {
 	p := c.Malloc(uintptr(len(s)) + 1)
 	return CStrCopy(p, *(*String)(unsafe.Pointer(&s)))

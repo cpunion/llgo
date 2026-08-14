@@ -59,6 +59,24 @@ func (pkg Package) ConstBytes(value []byte) Expr {
 	return Expr{cv, styp}
 }
 
+// constantAddress materializes immutable package-local storage for an LLVM
+// constant. Interface values whose physical representation is indirect may
+// point at this storage instead of allocating and copying an identical value
+// on every conversion. The address must never escape as writable Go storage;
+// callers use it only as the read-only data word of an interface value.
+func (pkg Package) constantAddress(value Expr) Expr {
+	if value.IsNil() || value.impl.IsAConstant().IsNil() {
+		panic("ssa: constantAddress requires an LLVM constant")
+	}
+	global := llvm.AddGlobal(pkg.mod, value.impl.Type(), "")
+	global.SetInitializer(value.impl)
+	global.SetLinkage(llvm.PrivateLinkage)
+	global.SetGlobalConstant(true)
+	global.SetUnnamedAddr(true)
+	global.SetAlignment(pkg.Prog.td.ABITypeAlignment(value.impl.Type()))
+	return Expr{global, pkg.Prog.Pointer(value.Type)}
+}
+
 // ConstArray creates an LLVM constant array expression.
 func (prog Program) ConstArray(t Type, values []Expr) Expr {
 	elem := prog.Index(t)

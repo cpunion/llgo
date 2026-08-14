@@ -319,6 +319,12 @@ func CallableContractExecConstraints(contract CallableContract) ExecFlags {
 	switch contract.Reentry {
 	case ReentryUnknown:
 		flags |= OpaqueExec
+	case ReentryManagedCallback:
+		// A direct same-thread C call may reenter generated Go while the outer
+		// physical frame is live. The callback must observe that frame's logical
+		// G rather than the executor placeholder, so retain the ambient runtime
+		// context for the complete caller closure.
+		flags |= NeedsRuntimeContext
 	}
 	switch contract.Memory {
 	case MemoryUnknown, MemoryRetained:

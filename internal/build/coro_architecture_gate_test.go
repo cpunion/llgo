@@ -147,7 +147,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	legacyPhysicalSelector:    0,
 	legacySplitEmissionState:  0,
 	emissionSessionAccess:     20,
-	bodyCapabilityAccess:      35,
+	bodyCapabilityAccess:      33,
 	// The outcome-plain cohort replaced the coroutine-only begin/bind/complete
 	// entry points with one exclusive managed-body transaction. Keep the legacy
 	// names at zero so a second physical-emission lifecycle cannot grow back.
@@ -465,13 +465,13 @@ var allowedPhysicalOutcomeObservationFiles = map[string]bool{
 }
 
 var allowedCoroParkOperationFields = map[string]bool{
-	"shouldSuspend": true,
-	"park":          true,
-	"resume":        true,
-	"normal":        true,
-	"faults":        true,
-	"abort":         true,
-	"shutdown":      true,
+	"prepare":  true,
+	"park":     true,
+	"resume":   true,
+	"normal":   true,
+	"faults":   true,
+	"abort":    true,
+	"shutdown": true,
 }
 
 var allowedCoroParkFaultRouteFields = map[string]bool{

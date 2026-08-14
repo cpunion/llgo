@@ -697,6 +697,10 @@ static uintptr_t success_with_errno(uintptr_t ignored) {
     return 7;
 }
 
+static uintptr_t fault_memory(uintptr_t address) {
+    return *(volatile uintptr_t *)address;
+}
+
 static int call_and_check(
     uintptr_t function,
     uintptr_t want_r1,
@@ -749,6 +753,31 @@ int main(void) {
         7,
         (uintptr_t)EBUSY,
         40);
+    if (status != 0) {
+        return status;
+    }
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const uintptr_t args[9] = {0};
+        struct llgo_coro_worker_result_v1 result = {0};
+        uintptr_t function = (uintptr_t)(void *)&fault_memory;
+        if (!__llgo_coro_worker_call_v1(function, function, 1, args, &result)) {
+            return 50 + attempt * 10;
+        }
+        if (result.fault != 1 || result.fault_target != function) {
+            return 51 + attempt * 10;
+        }
+#if (defined(__APPLE__) || defined(__linux__)) && \
+    (defined(__aarch64__) || defined(__x86_64__))
+        if (result.fault_pc == 0) {
+            return 52 + attempt * 10;
+        }
+#endif
+    }
+    status = call_and_check(
+        (uintptr_t)(void *)&success_with_errno,
+        7,
+        (uintptr_t)EBUSY,
+        80);
     if (status != 0) {
         return status;
     }

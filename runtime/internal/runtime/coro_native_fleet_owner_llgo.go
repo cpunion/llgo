@@ -39,9 +39,10 @@ const (
 	coroNativeFleetPhysicalFailedV1
 )
 
-// coroNativeFleetPhysicalOwnerV1 is one process-lifetime peer M. Production
-// starts the complete bounded topology before any managed resume, and each
-// slot retains its exact route tombstone after join.
+// coroNativeFleetPhysicalOwnerV1 is one process-lifetime peer M. The logical
+// route topology is bound eagerly, but a peer M is started only when the
+// logical execution quota can use its route. Once started, each slot retains
+// its exact route tombstone after join.
 type coroNativeFleetPhysicalOwnerV1 struct {
 	handle    coro.ExecutorFleetHandle
 	slot      uint32
@@ -54,10 +55,13 @@ type coroNativeFleetPhysicalOwnerV1 struct {
 // Seal is the release publication observed by every peer through Quiesced, and
 // Retire leaves a permanent non-reusable process tombstone after all joins.
 type coroNativeFleetPhysicalOwnersV1 struct {
-	stop      coro.TargetIngress
-	peers     [coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1
-	count     uint32
-	lifecycle coroNativeFleetPhysicalLifecycleV1
+	stop        coro.TargetIngress
+	peers       [coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1
+	count       uint32 // immutable configured peer capacity
+	started     uint32 // contiguous live prefix, protected by guard
+	policyEpoch uint32 // atomic GOMAXPROCS placement-policy generation
+	guard       uint32
+	lifecycle   coroNativeFleetPhysicalLifecycleV1
 }
 
 var coroNativeFleetPhysicalOwnerV1State coroNativeFleetPhysicalOwnersV1
@@ -87,48 +91,103 @@ func coroNativeFleetPhysicalOwnerForHandleV1(
 	}
 }
 
-func coroNativeFleetPhysicalOwnersStartV1() bool {
-	state := &coroNativeFleetPhysicalOwnerV1State
-	count := coroNativeFleetV1State.domainCount
-	if coroNativeFleetV1State.lifecycle != coroNativeFleetActiveV1 ||
-		count == 0 || count > coroNativeFleetDomainCapacityV1 ||
-		state.lifecycle != coroNativeFleetPhysicalUnusedV1 || state.count != 0 ||
-		!state.stop.CanReleaseResources() || !state.stop.Start() {
+func coroNativeFleetPhysicalOwnerDesiredPeersV1(limit, capacity uint32) (uint32, bool) {
+	if limit == 0 || capacity >= coroNativeFleetDomainCapacityV1 {
+		return 0, false
+	}
+	if limit-1 < capacity {
+		return limit - 1, true
+	}
+	return capacity, true
+}
+
+func coroNativeFleetPhysicalOwnersLockV1(state *coroNativeFleetPhysicalOwnersV1) bool {
+	if state == nil {
 		return false
 	}
-	state.count = count - 1
-	state.lifecycle = coroNativeFleetPhysicalActiveV1
-	created := uint32(0)
-	for index := uint32(0); index < state.count; index++ {
+	for !coroNativeAtomicCASV1(&state.guard, 0, 1) {
+		if corofleet.Yield() != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func coroNativeFleetPhysicalOwnersUnlockV1(state *coroNativeFleetPhysicalOwnersV1) {
+	if state == nil || coroNativeAtomicLoadV1(&state.guard) != 1 {
+		coroRuntimeAbort("native coroutine fleet physical owner lock corrupt")
+		return
+	}
+	coroNativeAtomicStoreV1(&state.guard, 0)
+}
+
+// coroNativeFleetPhysicalOwnersEnsureLockedV1 grows the contiguous physical
+// peer prefix to cover limit. Logical domains outside that prefix remain fully
+// bound but never publish runnable demand, so no task or source completion can
+// be routed to an ownerless domain. The clean factory acknowledges each new M
+// before this function publishes started.
+func coroNativeFleetPhysicalOwnersEnsureLockedV1(
+	state *coroNativeFleetPhysicalOwnersV1,
+	limit uint32,
+) bool {
+	if state == nil || state.lifecycle != coroNativeFleetPhysicalActiveV1 ||
+		state.count+1 != coroNativeFleetV1State.domainCount ||
+		state.started > state.count {
+		return false
+	}
+	desired, ok := coroNativeFleetPhysicalOwnerDesiredPeersV1(limit, state.count)
+	if !ok {
+		return false
+	}
+	for state.started < desired {
+		index := state.started
 		peer := &state.peers[index]
-		handle, ok := coroNativeFleetHandleV1(index + 1)
-		if !ok || peer.lifecycle != coroNativeFleetPhysicalUnusedV1 ||
+		handle, handleOK := coroNativeFleetHandleV1(index + 1)
+		if !handleOK || peer.lifecycle != coroNativeFleetPhysicalUnusedV1 ||
 			coroNativeAtomicLoadV1(&peer.slot) != 0 ||
 			peer.handle != (coro.ExecutorFleetHandle{}) || peer.shutdown {
-			break
+			return false
 		}
 		slot, owner, ownerOK := coroNativeMInitialPeerV1(handle)
 		if !ownerOK || slot != handle.Route || owner.thread != nil {
-			break
+			return false
 		}
 		peer.handle = handle
 		coroNativeAtomicStoreV1(&peer.slot, slot)
 		peer.lifecycle = coroNativeFleetPhysicalActiveV1
 		if !coroNativeMStartPhysicalOwnerV1(owner, slot) {
-			// pthread_create leaves the result slot unspecified on failure.
+			// pthread_create leaves the result slot unspecified on failure. A
+			// partially published physical route cannot be reused safely.
 			owner.thread = nil
 			owner.token = 0
 			peer.lifecycle = coroNativeFleetPhysicalFailedV1
-			break
+			return false
 		}
-		created++
+		state.started++
 	}
-	if created == state.count {
+	return true
+}
+
+func coroNativeFleetPhysicalOwnersStartV1(limit uint32) bool {
+	state := &coroNativeFleetPhysicalOwnerV1State
+	count := coroNativeFleetV1State.domainCount
+	if coroNativeFleetV1State.lifecycle != coroNativeFleetActiveV1 ||
+		count == 0 || count > coroNativeFleetDomainCapacityV1 ||
+		state.lifecycle != coroNativeFleetPhysicalUnusedV1 || state.count != 0 ||
+		state.started != 0 || coroNativeAtomicLoadV1(&state.policyEpoch) != 0 ||
+		coroNativeAtomicLoadV1(&state.guard) != 0 ||
+		!state.stop.CanReleaseResources() || !state.stop.Start() {
+		return false
+	}
+	state.count = count - 1
+	coroNativeAtomicStoreV1(&state.policyEpoch, 1)
+	state.lifecycle = coroNativeFleetPhysicalActiveV1
+	if coroNativeFleetPhysicalOwnersEnsureLockedV1(state, limit) {
 		return true
 	}
 	sealed := state.stop.Seal()
 	rang := sealed
-	for index := uint32(0); index < created; index++ {
+	for index := uint32(0); index < state.started; index++ {
 		domain, ok := coroNativeFleetDomainForHandleV1(
 			&coroNativeFleetV1State,
 			state.peers[index].handle,
@@ -138,7 +197,7 @@ func coroNativeFleetPhysicalOwnersStartV1() bool {
 		rang = rang && ringOK
 	}
 	joined := rang
-	for index := uint32(0); index < created; index++ {
+	for index := uint32(0); index < state.started; index++ {
 		peer := &state.peers[index]
 		owner, ownerOK := coroNativeMOwnerForSlotV1(
 			coroNativeAtomicLoadV1(&peer.slot),
@@ -155,21 +214,67 @@ func coroNativeFleetPhysicalOwnersStartV1() bool {
 	return false
 }
 
+// coroNativeFleetSetExecutionLimitV1 serializes physical peer growth with the
+// logical quota update. Shrinks park excess peers instead of destroying them;
+// later growth reuses the same stable routes without another topology change.
+func coroNativeFleetSetExecutionLimitV1(limit uint32) (
+	previous uint32,
+	wake, ok bool,
+) {
+	state := &coroNativeFleetPhysicalOwnerV1State
+	if limit == 0 || !coroNativeFleetPhysicalOwnersLockV1(state) {
+		return 0, false, false
+	}
+	if !coroNativeFleetPhysicalOwnersEnsureLockedV1(state, limit) {
+		coroNativeFleetPhysicalOwnersUnlockV1(state)
+		return 0, false, false
+	}
+	previous, wake, ok = coroNativeFleetV1State.execution.SetLimit(limit)
+	if ok && previous != limit {
+		epoch := coroNativeAtomicLoadV1(&state.policyEpoch)
+		if epoch == 0 || epoch == ^uint32(0) {
+			ok = false
+		} else {
+			coroNativeAtomicStoreV1(&state.policyEpoch, epoch+1)
+		}
+	}
+	coroNativeFleetPhysicalOwnersUnlockV1(state)
+	return previous, wake, ok
+}
+
 func coroNativeFleetPhysicalOwnersStopV1() bool {
 	state := &coroNativeFleetPhysicalOwnerV1State
+	if !coroNativeFleetPhysicalOwnersLockV1(state) {
+		return false
+	}
 	if state.lifecycle != coroNativeFleetPhysicalActiveV1 ||
-		state.count+1 != coroNativeFleetV1State.domainCount || !state.stop.Seal() {
+		state.count+1 != coroNativeFleetV1State.domainCount ||
+		state.started > state.count || !state.stop.Seal() {
+		coroNativeFleetPhysicalOwnersUnlockV1(state)
 		return false
 	}
 	state.lifecycle = coroNativeFleetPhysicalStoppingV1
-	for index := uint32(0); index < state.count; index++ {
+	started := state.started
+	coroNativeFleetPhysicalOwnersUnlockV1(state)
+	for index := uint32(0); index < started; index++ {
 		peer := &state.peers[index]
 		domain, ok := coroNativeFleetDomainForHandleV1(
 			&coroNativeFleetV1State,
 			peer.handle,
 			coroNativeFleetDomainActiveV1,
 		)
+		request := coro.ExecutorRequestInvalid
+		if ok {
+			// Seal is the durable shutdown fact, but an owner can currently be
+			// inside an unbounded user resume and therefore cannot observe the
+			// doorbell until that resume returns. Publish through the executor
+			// gate as well: compiler safepoints observe this gate and return the
+			// physical action to the owner loop, which then consumes Seal and
+			// begins the ordinary sticky-cancellation drain.
+			request = coroNativeFleetV1State.fleet.RequestExecutor(domain.handle)
+		}
 		if !ok || peer.lifecycle != coroNativeFleetPhysicalActiveV1 ||
+			!coro.ExecutorRequestAccepted(request) ||
 			!domain.doorbell.Ring() {
 			state.lifecycle = coroNativeFleetPhysicalFailedV1
 			return false
@@ -185,7 +290,7 @@ func coroNativeFleetPhysicalOwnersStopV1() bool {
 			return false
 		}
 	}
-	for index := uint32(0); index < state.count; index++ {
+	for index := uint32(0); index < started; index++ {
 		peer := &state.peers[index]
 		owner, ownerOK := coroNativeMOwnerForSlotV1(
 			coroNativeAtomicLoadV1(&peer.slot),
@@ -424,6 +529,19 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer demand recheck failed")
 		}
 		if moved != 0 || more {
+			return true
+		}
+		domain, domainOK := coroNativeFleetDomainForHandleV1(
+			&coroNativeFleetV1State,
+			handle,
+			coroNativeFleetDomainActiveV1,
+		)
+		if !domainOK {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer completion window domain lost")
+		}
+		if ready, fastOK := coroNativeTryFastWorkerCompletionV1(domain.driverOwnerV1()); !fastOK {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer completion window failed")
+		} else if ready {
 			return true
 		}
 		freshNow, freshClockOK := coroNativeFleetPhysicalOwnerClockV1()

@@ -115,7 +115,7 @@ func (u *EmissionUniverse) managedForeignFunctionValueWrapperStructuralKey(
 		"llgo-managed-foreign-function-value-wrapper-v1",
 		owner.identity,
 		identity,
-		structuralEmissionTypeKey(effective),
+		u.emissionTypeKeys.strict(effective),
 	), nil
 }
 

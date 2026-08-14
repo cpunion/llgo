@@ -243,6 +243,13 @@ type EmissionUniverse struct {
 	globalPhysicalGroups    map[string]CoroGlobalPhysicalIdentity
 	globalPhysicalSeen      map[*ssa.Global]none
 
+	// emissionTypeKeys memoizes structural digests only for the lifetime of
+	// this frozen compilation universe. A package-level cache would retain
+	// complete go/types graphs across compiler requests; rebuilding at every
+	// use instead made managed-interface and cgo emission repeat the same graph
+	// walk many times.
+	emissionTypeKeys emissionTypeKeyCache
+
 	effectiveTypeMu         sync.Mutex
 	effectiveTypeCacheReady bool
 	effectiveTypes          map[emissionEffectiveTypeKey]types.Type
@@ -627,6 +634,11 @@ type coroFrozenCallSitePlan struct {
 type coroEmissionSitePlan struct {
 	managedRuntimeHelpers []coroPlannedRuntimeHelper
 	plainRuntimeHelpers   []string
+	// plainAllocation freezes the stronger interprocedural storage decision for
+	// a synchronous Go body. Managed coroutine emission keeps its independent
+	// physical plan because the same allocation then belongs in a CoroSplit
+	// frame rather than a native entry stack.
+	plainAllocation coroPlainAllocationPlan
 	// localityDispatchers are compiler-materialized func() values passed to
 	// EnsureLogicalLocalInitializer at this source instruction. They are
 	// demand references rather than owner-local calls; the runtime helper owns
@@ -2260,6 +2272,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoCgoUse, llgoCgoKeepAlive:
+		if err := verifyCoroGeneratedTouchCall(u.prog, opcode, direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoCoroYield:
 		if err := verifyCoroExactVoidIntrinsicCallSite(direct, "llgo.coroYield"); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
@@ -2465,6 +2482,61 @@ func verifyCoroCgoCheckPointerCall(call *ssa.Call) error {
 		if !ok || !iface.Empty() {
 			return fmt.Errorf("_cgoCheckPointer call %q parameter %d is not any", call.String(), index)
 		}
+	}
+	return nil
+}
+
+func verifyCoroGeneratedTouchCall(prog llssa.Program, opcode int, call *ssa.Call) error {
+	name := "_Cgo_use"
+	if opcode == llgoCgoKeepAlive {
+		name = "_Cgo_keepalive"
+	} else if opcode != llgoCgoUse {
+		return fmt.Errorf("generated cgo liveness call has unknown opcode %d", opcode)
+	}
+	const shape = "func(any) guarded by runtime.cgoAlwaysFalse"
+	if prog == nil || call == nil || call.Common() == nil ||
+		call.Common().IsInvoke() || call.Common().Method != nil ||
+		len(call.Common().Args) != 1 {
+		return fmt.Errorf("%s requires one exact direct %s call", name, shape)
+	}
+	signature := call.Common().Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		signature.Params() == nil || signature.Params().Len() != 1 ||
+		signature.Results() != nil && signature.Results().Len() != 0 ||
+		!types.Identical(signature.Params().At(0).Type(), call.Common().Args[0].Type()) {
+		return fmt.Errorf("%s call %q requires the exact %s shape", name, call.String(), shape)
+	}
+	parameter, ok := types.Unalias(signature.Params().At(0).Type()).Underlying().(*types.Interface)
+	if !ok || !parameter.Empty() {
+		return fmt.Errorf("%s call %q requires the exact %s shape", name, call.String(), shape)
+	}
+	block := call.Block()
+	if block == nil || len(block.Preds) != 1 {
+		return fmt.Errorf("%s call %q is not reached through one exact false-global guard", name, call.String())
+	}
+	pred := block.Preds[0]
+	if pred == nil || len(pred.Succs) != 2 || pred.Succs[0] != block || len(pred.Instrs) == 0 {
+		return fmt.Errorf("%s call %q is not the true edge of one exact false-global guard", name, call.String())
+	}
+	branch, ok := pred.Instrs[len(pred.Instrs)-1].(*ssa.If)
+	if !ok {
+		return fmt.Errorf("%s call %q is not controlled by one exact false-global guard", name, call.String())
+	}
+	load, ok := branch.Cond.(*ssa.UnOp)
+	if !ok || load.Op != token.MUL {
+		return fmt.Errorf("%s call %q guard is not an exact global load", name, call.String())
+	}
+	global, ok := load.X.(*ssa.Global)
+	if !ok || global.Pkg == nil || global.Pkg.Pkg == nil || global.Name() != "_Cgo_always_false" {
+		return fmt.Errorf("%s call %q guard is not cmd/cgo's exact global", name, call.String())
+	}
+	condition, ok := types.Unalias(load.Type()).Underlying().(*types.Basic)
+	if !ok || condition.Kind() != types.Bool {
+		return fmt.Errorf("%s call %q guard is not a bool global", name, call.String())
+	}
+	linkname, linked := prog.Linkname(llssa.FullName(global.Pkg.Pkg, global.Name()))
+	if !linked || linkname != "runtime.cgoAlwaysFalse" {
+		return fmt.Errorf("%s call %q guard does not resolve to runtime.cgoAlwaysFalse", name, call.String())
 	}
 	return nil
 }
@@ -3018,6 +3090,12 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// LLGo's cgo pointer check is an intentionally empty compiler
 		// compatibility operation. It consumes its already-evaluated operands
 		// and emits no call or suspension.
+		return CoroIntrinsicCallInlineNoSuspend
+	case llgoCgoUse, llgoCgoKeepAlive:
+		// cmd/cgo emits these liveness calls only on the true edge of the exact
+		// runtime.cgoAlwaysFalse global. ProgramIR verifies that generated shape;
+		// lowering retains the argument through the preceding worker suspension
+		// with llvm.fake.use and emits no callable edge.
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCoroPark:
 		return CoroIntrinsicCallInlineSuspend
@@ -3644,7 +3722,7 @@ func (u *EmissionUniverse) physicalName(ownerSSA *ssa.Package, fn *ssa.Function,
 		}
 		return "", fmt.Errorf(
 			"coroutine entry resolution: generated wrapper %q (%q, %s) has no frozen physical symbol for owner %q; frozen owners: %v",
-			fn.Name(), fn.Synthetic, structuralEmissionTypeKey(fn.Signature), ownerName, available,
+			fn.Name(), fn.Synthetic, u.emissionTypeKeys.strict(fn.Signature), ownerName, available,
 		)
 	}
 	return legacy, nil
@@ -4527,9 +4605,9 @@ func (u *EmissionUniverse) samePromotedWrapperLinkIdentity(owner *preparedEmissi
 }
 
 func (u *EmissionUniverse) structuralWrapperABIKey(owner *preparedEmissionPackage, fn *ssa.Function) string {
-	fields := []string{"wrapper-abi-v1", structuralEmissionTypeKey(u.effectiveType(owner, fn, fn.Signature, false))}
+	fields := []string{"wrapper-abi-v1", u.emissionTypeKeys.strict(u.effectiveType(owner, fn, fn.Signature, false))}
 	for _, free := range fn.FreeVars {
-		fields = append(fields, structuralEmissionTypeKey(u.effectiveType(owner, fn, free.Type(), false)))
+		fields = append(fields, u.emissionTypeKeys.strict(u.effectiveType(owner, fn, free.Type(), false)))
 	}
 	return framedEmissionKey(fields...)
 }
@@ -4605,13 +4683,21 @@ func deterministicSSABody(fn *ssa.Function) string {
 // used only by the prepared active universe; it does not change global
 // funcName or report-only IR naming.
 func structuralEmissionTypeKey(typ types.Type) string {
-	builder := emissionTypeKeyBuilder{active: make(map[types.Type]int)}
-	return builder.key(typ)
+	return compactStructuralTypeGraphKey(
+		typ,
+		emissionStrictTypeGraphSchema,
+		emissionStrictTypeGraphKeyPrefix,
+		emissionTypeGraphOptions{},
+	)
 }
 
 func structuralEmissionABITypeKey(typ types.Type) string {
-	builder := emissionTypeKeyBuilder{active: make(map[types.Type]int), omitTupleNames: true}
-	return builder.key(typ)
+	return compactStructuralTypeGraphKey(
+		typ,
+		emissionStrictABITypeGraphSchema,
+		emissionStrictABITypeGraphKeyPrefix,
+		emissionTypeGraphOptions{omitTupleNames: true},
+	)
 }
 
 // structuralGoLinknameABITypeKey models the source-level ABI promise made by
@@ -4636,16 +4722,19 @@ func structuralCFunctionABITypeKey(typ types.Type) string {
 }
 
 func structuralNamedIdentityFreeABITypeKey(typ types.Type) string {
-	builder := emissionTypeKeyBuilder{
-		active:                  make(map[types.Type]int),
-		omitTupleNames:          true,
-		expandNamed:             true,
-		omitStructFieldMetadata: true,
-	}
 	if signature, ok := types.Unalias(typ).(*types.Signature); ok {
 		typ = normalizeGoLinknameABISignature(signature)
 	}
-	return builder.key(typ)
+	return compactStructuralTypeGraphKey(
+		typ,
+		emissionIdentityFreeTypeGraphSchema,
+		emissionIdentityFreeTypeGraphPrefix,
+		emissionTypeGraphOptions{
+			omitTupleNames:          true,
+			expandNamed:             true,
+			omitStructFieldMetadata: true,
+		},
+	)
 }
 
 // normalizeGoLinknameABISignature models the symbol ABI used by a linkname to
@@ -4688,167 +4777,6 @@ func normalizeGoLinknameABISignature(signature *types.Signature) *types.Signatur
 		signature.Results(),
 		signature.Variadic(),
 	)
-}
-
-type emissionTypeKeyBuilder struct {
-	active                  map[types.Type]int
-	next                    int
-	omitTupleNames          bool
-	expandNamed             bool
-	omitStructFieldMetadata bool
-}
-
-func (b *emissionTypeKeyBuilder) key(typ types.Type) string {
-	if typ == nil {
-		return framedEmissionKey("nil-type")
-	}
-	typ = types.Unalias(typ)
-	if named, ok := typ.(*types.Named); ok && b.expandNamed {
-		return b.expandedNamedKey(named)
-	}
-	return b.keyNode(typ)
-}
-
-// expandedNamedKey assigns one cycle identity to a named type and its
-// underlying node. Linkname ABI comparison deliberately erases named
-// identity; a patched signature may therefore contain the named source type
-// on one side and its anonymous physical RawType on the other. Recursive
-// layouts must hash identically in both representations.
-func (b *emissionTypeKeyBuilder) expandedNamedKey(named *types.Named) string {
-	if id, ok := b.active[named]; ok {
-		return framedEmissionKey("type-cycle", strconv.Itoa(id))
-	}
-	underlying := types.Unalias(named.Underlying())
-	if id, ok := b.active[underlying]; ok {
-		return framedEmissionKey("type-cycle", strconv.Itoa(id))
-	}
-	id := b.next
-	b.next++
-	b.active[named] = id
-	b.active[underlying] = id
-	defer delete(b.active, named)
-	defer delete(b.active, underlying)
-	return b.keyBody(underlying)
-}
-
-func (b *emissionTypeKeyBuilder) keyNode(typ types.Type) string {
-	if id, ok := b.active[typ]; ok {
-		return framedEmissionKey("type-cycle", strconv.Itoa(id))
-	}
-	id := b.next
-	b.next++
-	b.active[typ] = id
-	defer delete(b.active, typ)
-	return b.keyBody(typ)
-}
-
-func (b *emissionTypeKeyBuilder) keyBody(typ types.Type) string {
-	pkgKey := func(pkg *types.Package) string {
-		if pkg == nil {
-			return ""
-		}
-		return llssa.PathOf(pkg)
-	}
-	switch typ := typ.(type) {
-	case *types.Basic:
-		return framedEmissionKey("basic", strconv.Itoa(int(typ.Kind())), typ.Name())
-	case *types.Pointer:
-		return framedEmissionKey("pointer", b.key(typ.Elem()))
-	case *types.Array:
-		return framedEmissionKey("array", strconv.FormatInt(typ.Len(), 10), b.key(typ.Elem()))
-	case *types.Slice:
-		return framedEmissionKey("slice", b.key(typ.Elem()))
-	case *types.Map:
-		return framedEmissionKey("map", b.key(typ.Key()), b.key(typ.Elem()))
-	case *types.Chan:
-		return framedEmissionKey("chan", strconv.Itoa(int(typ.Dir())), b.key(typ.Elem()))
-	case *types.Named:
-		obj := typ.Obj()
-		fields := []string{"named"}
-		packageLevel := false
-		if obj != nil {
-			fields = append(fields, pkgKey(obj.Pkg()), obj.Name())
-			packageLevel = obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope()
-		}
-		if args := typ.TypeArgs(); args != nil {
-			for i := 0; i < args.Len(); i++ {
-				fields = append(fields, b.key(args.At(i)))
-			}
-		}
-		if !packageLevel {
-			fields = append(fields, "local-underlying", b.key(typ.Underlying()))
-		}
-		return framedEmissionKey(fields...)
-	case *types.Struct:
-		fields := []string{"struct", strconv.Itoa(typ.NumFields())}
-		for i := 0; i < typ.NumFields(); i++ {
-			field := typ.Field(i)
-			if b.omitStructFieldMetadata {
-				fields = append(fields, b.key(field.Type()))
-				continue
-			}
-			fields = append(fields,
-				pkgKey(field.Pkg()),
-				field.Name(),
-				strconv.FormatBool(field.Embedded()),
-				typ.Tag(i),
-				b.key(field.Type()),
-			)
-		}
-		return framedEmissionKey(fields...)
-	case *types.Tuple:
-		fields := []string{"tuple", strconv.Itoa(typ.Len())}
-		for i := 0; i < typ.Len(); i++ {
-			variable := typ.At(i)
-			if !b.omitTupleNames {
-				fields = append(fields, pkgKey(variable.Pkg()), variable.Name())
-			}
-			fields = append(fields, b.key(variable.Type()))
-		}
-		return framedEmissionKey(fields...)
-	case *types.Signature:
-		fields := []string{"signature", strconv.FormatBool(typ.Variadic())}
-		if typ.Recv() != nil {
-			fields = append(fields, "recv", b.key(typ.Recv().Type()))
-		}
-		for _, params := range []*types.TypeParamList{typ.RecvTypeParams(), typ.TypeParams()} {
-			fields = append(fields, "type-params")
-			if params != nil {
-				for i := 0; i < params.Len(); i++ {
-					fields = append(fields, b.key(params.At(i)))
-				}
-			}
-		}
-		fields = append(fields, b.key(typ.Params()), b.key(typ.Results()))
-		return framedEmissionKey(fields...)
-	case *types.Interface:
-		typ.Complete()
-		fields := []string{"interface", strconv.Itoa(typ.NumMethods()), strconv.Itoa(typ.NumEmbeddeds())}
-		for i := 0; i < typ.NumMethods(); i++ {
-			method := typ.Method(i)
-			fields = append(fields, pkgKey(method.Pkg()), method.Name(), b.key(method.Type()))
-		}
-		for i := 0; i < typ.NumEmbeddeds(); i++ {
-			fields = append(fields, b.key(typ.EmbeddedType(i)))
-		}
-		return framedEmissionKey(fields...)
-	case *types.TypeParam:
-		obj := typ.Obj()
-		name, pkg := "", ""
-		if obj != nil {
-			name, pkg = obj.Name(), pkgKey(obj.Pkg())
-		}
-		return framedEmissionKey("type-param", pkg, name, b.key(typ.Constraint()))
-	case *types.Union:
-		fields := []string{"union", strconv.Itoa(typ.Len())}
-		for i := 0; i < typ.Len(); i++ {
-			term := typ.Term(i)
-			fields = append(fields, strconv.FormatBool(term.Tilde()), b.key(term.Type()))
-		}
-		return framedEmissionKey(fields...)
-	default:
-		return framedEmissionKey("other-type", types.TypeString(typ, func(pkg *types.Package) string { return pkgKey(pkg) }))
-	}
 }
 
 func isLocallyMergedPromotedWrapper(fn *ssa.Function) bool {
@@ -5297,12 +5225,12 @@ func (index emissionCanonicalIndex) managedGoLinknamePairKeyWithPointerFacade(
 	if signature := physicalSignature.(*types.Signature); forcePointerFacade || managedGoLinknameHasDirectUnsafePointer(signature) {
 		signatureType = managedGoLinknameDirectPointerFacade(signature)
 	}
-	signature := structuralGoLinknameABITypeKey(signatureType)
+	signature := u.emissionTypeKeys.goLinknameABI(signatureType)
 	if typeArgs := function.TypeArgs(); len(typeArgs) != 0 {
 		fields := make([]string, 0, len(typeArgs)+2)
 		fields = append(fields, "go-linkname-callable-instance-v1", signature)
 		for _, argument := range typeArgs {
-			fields = append(fields, structuralGoLinknameABITypeKey(u.effectiveType(owner, function, argument, false)))
+			fields = append(fields, u.emissionTypeKeys.goLinknameABI(u.effectiveType(owner, function, argument, false)))
 		}
 		signature = framedEmissionKey(fields...)
 	}
@@ -5895,9 +5823,9 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 	// Parameter and result names are source/debug metadata, not callable ABI.
 	// Patch replacements may legitimately omit or rename them.
 	if ftype == cFunc {
-		sig = structuralCFunctionABITypeKey(patchedSignature)
+		sig = u.emissionTypeKeys.cFunctionABI(patchedSignature)
 	} else {
-		sig = structuralEmissionABITypeKey(patchedSignature)
+		sig = u.emissionTypeKeys.strictABI(patchedSignature)
 	}
 	if typeArgs := fn.TypeArgs(); len(typeArgs) != 0 {
 		// A generic argument is not necessarily observable in the callable
@@ -5908,7 +5836,7 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 		fields := make([]string, 0, len(typeArgs)+2)
 		fields = append(fields, "callable-instance-v1", sig)
 		for _, argument := range typeArgs {
-			fields = append(fields, structuralEmissionTypeKey(ctx.patchType(argument)))
+			fields = append(fields, u.emissionTypeKeys.strict(ctx.patchType(argument)))
 		}
 		sig = framedEmissionKey(fields...)
 	}
@@ -6031,8 +5959,8 @@ func (u *EmissionUniverse) wrapperCallIdentity(prepared *preparedEmissionPackage
 			"invoke-method-v1",
 			pkgPath,
 			method.Name(),
-			structuralEmissionTypeKey(u.effectiveType(prepared, fn, method.Type(), false)),
-			structuralEmissionTypeKey(u.effectiveType(prepared, fn, common.Value.Type(), false)),
+			u.emissionTypeKeys.strict(u.effectiveType(prepared, fn, method.Type(), false)),
+			u.emissionTypeKeys.strict(u.effectiveType(prepared, fn, common.Value.Type(), false)),
 		), false, nil
 	}
 	return "", false, nil
@@ -6167,11 +6095,13 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 	// though codegen does not emit those instructions. ProgramIR must therefore
 	// own their local facts as well; falling back to an analysis-time raw scan
 	// would reopen a second semantic authority.
+	constantReachable := coroPhysicalConstantReachableBlocks(fn)
 	for _, block := range fn.Blocks {
 		for _, instruction := range block.Instrs {
-			evaluated := true
+			evaluated := constantReachable[block]
 			if isCgo {
-				_, evaluated = cgoPlan.evaluated[instruction]
+				_, cgoEvaluated := cgoPlan.evaluated[instruction]
+				evaluated = evaluated && cgoEvaluated
 			}
 			if err := u.coroProgramIR.freezeSemanticInstruction(fn, owner, instruction, evaluated); err != nil {
 				return fmt.Errorf("prepare emission universe: function %q semantic SitePlan: %w", fn.Name(), err)
@@ -6276,7 +6206,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 			}
 			effectiveSignature := u.effectiveType(owner, spawn.Parent(), signature, false)
 			structuralKey, err := builtinSpawnWrapperStructuralKey(
-				key, owner, u.finalIdentity(spawn.Parent()), effectiveSignature,
+				u.emissionTypeKeys.strict, key, owner, u.finalIdentity(spawn.Parent()), effectiveSignature,
 			)
 			if err != nil {
 				return err
@@ -6340,6 +6270,9 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		return fmt.Errorf("prepare emission universe: function %q SitePlan shape: %w", fn.Name(), err)
 	}
 	for _, block := range fn.Blocks {
+		if !constantReachable[block] {
+			continue
+		}
 		for _, instr := range block.Instrs {
 			if _, unevaluated := ctx.unevaluatedSSA[instr]; unevaluated {
 				continue
@@ -7690,6 +7623,7 @@ func (u *EmissionUniverse) intrinsicWrapperStructuralKey(info intrinsicWrapperKe
 }
 
 func builtinSpawnWrapperStructuralKey(
+	typeKey func(types.Type) string,
 	info builtinSpawnWrapperKey,
 	owner *preparedEmissionPackage,
 	parentIdentity string,
@@ -7699,7 +7633,7 @@ func builtinSpawnWrapperStructuralKey(
 		info.spawn.Parent() == nil || info.spawn.Block() == nil {
 		return "", fmt.Errorf("builtin spawn wrapper has no exact owner and source call")
 	}
-	if owner == nil || owner.ssa != info.owner || parentIdentity == "" || effectiveSignature == nil {
+	if typeKey == nil || owner == nil || owner.ssa != info.owner || parentIdentity == "" || effectiveSignature == nil {
 		return "", fmt.Errorf("builtin spawn wrapper owner is absent from the emission universe")
 	}
 	builtin, ok := info.spawn.Common().Value.(*ssa.Builtin)
@@ -7717,7 +7651,7 @@ func builtinSpawnWrapperStructuralKey(
 		strconv.Itoa(info.spawn.Block().Index),
 		strconv.Itoa(ordinal),
 		builtin.Name(),
-		structuralEmissionTypeKey(effectiveSignature),
+		typeKey(effectiveSignature),
 	), nil
 }
 
@@ -7790,7 +7724,7 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 				global:         global,
 				owner:          prepared,
 				physicalSymbol: physicalSymbol,
-				structuralType: structuralEmissionTypeKey(patchedType),
+				structuralType: u.emissionTypeKeys.strict(patchedType),
 				background:     llssa.Background(variableType),
 				define:         define,
 				linknamed:      linknamed,
@@ -8032,6 +7966,7 @@ func (u *EmissionUniverse) freezeFunctionIdentities() error {
 			return err
 		}
 		key, err := builtinSpawnWrapperStructuralKey(
+			u.emissionTypeKeys.strict,
 			info,
 			owner,
 			u.finalIdentity(info.spawn.Parent()),
@@ -8702,6 +8637,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		owner := u.packages[info.owner]
 		if signature, err := builtinSpawnCarrierSignature(info.spawn.Common()); err == nil {
 			if key, err := builtinSpawnWrapperStructuralKey(
+				u.emissionTypeKeys.strict,
 				info,
 				owner,
 				u.finalIdentity(info.spawn.Parent()),

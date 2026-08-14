@@ -11,7 +11,7 @@ package main
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.close$wrapper$llgo$builtin-spawn$v1${{.*}}$coro"(
-// CHECK: call i32 @"{{.*}}CoroChanTryClose"(
+// CHECK: call i32 @"{{.*}}CoroChanTryCloseTask"(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine

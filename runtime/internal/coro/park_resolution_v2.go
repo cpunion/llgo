@@ -358,6 +358,60 @@ func beginForcedParkSnapshotResolution(state *ParkState, ticket ParkTicket, curs
 	return false
 }
 
+// resolveForcedSinglePark is the aggregate form of the forced-completion
+// state machine for one exact direct operation. The external channel commit
+// has already made the physical effect irreversible and claimed the direct
+// operation's private SelectClaim, so there is no rank scan, default choice,
+// or losing candidate to preserve between scheduler reductions.
+//
+// Multi-event select never enters this helper. Strong task cancellation is
+// still honored exactly like beginForcedParkSnapshotResolution: it suppresses
+// delivery while retaining the committed physical result for source cleanup.
+// The successful result is consumed immediately by source ApplyOne in both
+// callers. ApplyOne's detach gate validates the complete active ParkState
+// header before its first mutation, so this aggregate transition does not
+// repeat that same post-state audit after deterministic scalar writes.
+func resolveForcedSinglePark(
+	state *ParkState,
+	ticket ParkTicket,
+	forced *OperationRecord,
+) (CompletionResolution, bool) {
+	if state == nil || state.resolving || state.phase != parkParked || state.ticket != ticket ||
+		!validParkTicket(ticket) || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
+		state.cancelKind > ParkCancelShutdown || state.expected != 1 || state.attached != 1 ||
+		state.hasDefault || state.outcome != ParkOutcomePending || state.winnerCase != 0 ||
+		state.winnerID != (OperationID{}) || state.winnerRecord != nil || state.head == nil ||
+		state.head.previous != nil || state.head.next != nil || state.head.operation != forced ||
+		forced == nil || !validPendingParkResolutionLink(state, ticket, state.head) ||
+		!operationCandidateExternallyCommitted(forced) {
+		return CompletionResolution{}, false
+	}
+
+	state.seed = 0
+	state.phase = parkDetaching
+	if state.cancelKind == ParkCancelTaskAbort || state.cancelKind == ParkCancelShutdown {
+		forced.resultTicket = ParkTicket{}
+		forced.cancelRequested = true
+		forced.disposition = OperationDispositionCanceled
+		state.outcome = ParkOutcomeCanceled
+		state.winnerCase = 0
+		state.winnerID = OperationID{}
+		state.winnerRecord = nil
+		return CompletionResolution{WaitSets: 1, Canceled: 1, Losers: 1}, true
+	}
+
+	if forced.resultState != operationResultOwned || !commitOperationCandidate(forced) {
+		return CompletionResolution{}, false
+	}
+	forced.resultTicket = ticket
+	forced.disposition = OperationDispositionWinner
+	state.outcome = ParkOutcomeCompleted
+	state.winnerCase = forced.link.caseID
+	state.winnerID = forced.id
+	state.winnerRecord = forced
+	return CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}, true
+}
+
 func beginParkSnapshotResolution(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor, fullAudit bool) bool {
 	if cursor == nil || *cursor != (parkResolutionCursor{}) || state == nil || state.resolving ||
 		state.phase != parkParked || state.ticket != ticket || !validParkTicket(ticket) ||

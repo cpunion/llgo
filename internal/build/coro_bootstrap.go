@@ -74,9 +74,9 @@ const (
 	coroNotifyPrepareOrAbortSymbolV2                            = "__llgo_coro_notify_prepare_or_abort_v2"
 	coroNotifyOneOrAbortSymbolV2                                = "__llgo_coro_notify_one_or_abort_v2"
 	coroNotifyAllOrAbortSymbolV2                                = "__llgo_coro_notify_all_or_abort_v2"
-	coroChanSendParkSymbolV1                                    = "__llgo_coro_chan_send_park_v1"
-	coroChanRecvParkSymbolV1                                    = "__llgo_coro_chan_recv_park_v1"
-	coroChanResumeSymbolV1                                      = "__llgo_coro_chan_resume_v1"
+	coroChanSendTryParkSymbolV2                                 = "__llgo_coro_chan_send_try_park_v2"
+	coroChanRecvTryParkSymbolV2                                 = "__llgo_coro_chan_recv_try_park_v2"
+	coroChanResumeSymbolV2                                      = "__llgo_coro_chan_resume_v2"
 	coroWorkerParkSymbolV1                                      = "__llgo_coro_worker_park_v1"
 	coroWorkerResumeSymbolV1                                    = "__llgo_coro_worker_resume_v1"
 	coroHostOperationParkSymbolV1                               = "__llgo_coro_host_operation_park_v1"
@@ -115,6 +115,11 @@ const (
 	coroProgramRunHasDeadlineV2   uint32 = 1 << 2
 	coroProgramRunRequestInlineV2 uint32 = 1 << 3
 	coroProgramRunRequestQueuedV2 uint32 = 1 << 4
+
+	// Program bootstrap capabilities are closed-world physical demand, not
+	// target support. Keep these values synchronized with ssa and
+	// runtime/internal/coro; the bootstrap hash binds the complete bitset.
+	coroProgramCapabilityWorkerV2 uint32 = 1 << 0
 )
 
 type coroProgramBootstrapStepV1 struct {
@@ -133,8 +138,20 @@ type coroProgramBootstrapStepV1 struct {
 
 type coroProgramBootstrapV1 struct {
 	Version  uint32
+	Flags    uint32
 	StepHash [16]byte
 	Steps    []coroProgramBootstrapStepV1
+}
+
+func coroProgramCapabilityFlagsV2(capabilities coro.ProgramCapabilities) (uint32, error) {
+	if !capabilities.Valid() {
+		return 0, fmt.Errorf("invalid coroutine program capabilities")
+	}
+	var flags uint32
+	if capabilities.Worker() {
+		flags |= coroProgramCapabilityWorkerV2
+	}
+	return flags, nil
 }
 
 func validateCoroProgramBootstrapConfig(conf *Config) error {
@@ -294,11 +311,20 @@ func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroPro
 	if err := appendManaged(aPkg.SSA.Func("main"), mainSymbolPrefix+".main", aPkg.PkgPath, "main", coroProgramStepRoleMainV2); err != nil {
 		return nil, err
 	}
-	hash, err := coroProgramBootstrapHash(ctx, coroProgramBootstrapVersionV2, steps)
+	flags, err := coroProgramCapabilityFlagsV2(ctx.coroProgramCapabilities)
 	if err != nil {
 		return nil, err
 	}
-	return &coroProgramBootstrapV1{Version: coroProgramBootstrapVersionV2, StepHash: hash, Steps: steps}, nil
+	hash, err := coroProgramBootstrapHash(ctx, coroProgramBootstrapVersionV2, flags, steps)
+	if err != nil {
+		return nil, err
+	}
+	return &coroProgramBootstrapV1{
+		Version:  coroProgramBootstrapVersionV2,
+		Flags:    flags,
+		StepHash: hash,
+		Steps:    steps,
+	}, nil
 }
 
 func exactCoroRuntimeABIFunction(ctx *context, name string) (*ssa.Function, error) {
@@ -465,7 +491,7 @@ func selectCoroProgramManagedStepV2(
 		// executor, never as an interrupt callback, so a bounded plain stage may
 		// retain this flag. ThreadAffine remains rejected until the bootstrap G has
 		// an explicit locked-M/pinned-P contract.
-		const supportedPlain = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe
+		const supportedPlain = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe | coro.NeedsRuntimeContext
 		if unsupported := plan.Exec &^ supportedPlain; unsupported != 0 {
 			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: plain function %q target %q has unsupported execution constraints %s", label, fn.String(), plan.ID, unsupported)
 		}
@@ -482,7 +508,8 @@ func selectCoroProgramManagedStepV2(
 		// not a separate bootstrap execution protocol. Physical preflight proves
 		// and emits that body's defer/recover frame before this selector publishes
 		// its ordinary scheduler root descriptor.
-		const supportedCoroutine = coro.MayUnwind | coro.NeedsCleanupFrame | coro.NeedsPreempt | coro.IRQUnsafe
+		const supportedCoroutine = coro.MayUnwind | coro.NeedsCleanupFrame | coro.NeedsPreempt |
+			coro.IRQUnsafe | coro.NeedsRuntimeContext
 		if unsupported := plan.Exec &^ supportedCoroutine; unsupported != 0 {
 			trace := ""
 			if unsupported.Contains(coro.OpaqueExec) {
@@ -697,7 +724,7 @@ func typeParamLen(list *types.TypeParamList) int {
 	return list.Len()
 }
 
-func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramBootstrapStepV1) ([16]byte, error) {
+func coroProgramBootstrapHash(ctx *context, version, flags uint32, steps []coroProgramBootstrapStepV1) ([16]byte, error) {
 	if ctx == nil || ctx.prog == nil || ctx.buildConf == nil || ctx.coroPlan == nil {
 		return [16]byte{}, fmt.Errorf("coroutine program bootstrap hash requires a complete build context and plan")
 	}
@@ -725,7 +752,10 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 	}
 	write("llgo.coro.program-bootstrap.v" + strconv.FormatUint(uint64(version), 10))
 	write(strconv.FormatUint(uint64(version), 10))
-	write("flags=0")
+	if unknown := flags &^ coroProgramCapabilityWorkerV2; unknown != 0 {
+		return [16]byte{}, fmt.Errorf("coroutine program bootstrap has unknown capability flags %#x", unknown)
+	}
+	write("flags=" + strconv.FormatUint(uint64(flags), 10))
 	write("step={kind:u32,flags:u32,target:ptr,aux:uintptr}")
 	write("bootstrap={version:u32,flags:u32,hash-lo:u64,hash-hi:u64,step-count:uintptr,steps:ptr,factory:ptr}")
 	write("direct-plain=" + strconv.FormatUint(uint64(coroProgramStepDirectPlainV1), 10))
@@ -794,10 +824,10 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
 			coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
 	}
-	write("channel-v1=" +
-		coroChanSendParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
-		coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
-		coroChanResumeSymbolV1 + "(g:ptr,state:ptr)->u32;" +
+	write("channel-v2=" +
+		coroChanSendTryParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr,state-id:u32,line:u32)->u32;" +
+		coroChanRecvTryParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr,state-id:u32,line:u32)->u32;" +
+		coroChanResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
 		"send-closed-fault=__llgo_coro_fault_prepare_v1:kind=3")
 	if ctx.buildConf.coroWorkerSupported() {
 		write("worker-v1=" +

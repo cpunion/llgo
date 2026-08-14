@@ -1354,7 +1354,7 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 	add(emissionIntrinsicFirstValue,
 		"alloca", "allocCStr", "allocaCStr", "allocaCStrs", "string",
 		"stringData", "_Cfunc_CString", "_Cfunc_CBytes", "_Cfunc_GoString",
-		"_Cfunc__CMalloc", "_cgo_runtime_cgocall")
+		"_Cfunc__CMalloc", "_cgo_runtime_cgocall", "cgoUse", "cgoKeepAlive")
 	add(emissionIntrinsicFirstTwoValues,
 		"advance", "index", "sigsetjmp", "siglongjmp", "_Cfunc_GoStringN",
 		"_Cfunc_GoBytes")

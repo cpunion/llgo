@@ -129,17 +129,26 @@ func validateOutcomePlainFrozenPlan(
 	if plan == nil || plan.function == nil {
 		return fmt.Errorf("outcome-plain emission requires one frozen physical plan")
 	}
-	if logical.Emission != coro.EmitOutcomePlain ||
-		logical.ManagedEntry != coro.ManagedEntryOutcomePlain ||
-		!logical.AtomicCostProof.ProvesOutcomePlain() {
+	primary := logical.Emission == coro.EmitOutcomePlain &&
+		logical.ManagedEntry == coro.ManagedEntryOutcomePlain
+	twin := logical.Emission == coro.EmitCoroutine &&
+		logical.ManagedEntry == coro.ManagedEntryCoroutine
+	if (!primary && !twin) || !logical.HasStaticOutcome() {
 		return fmt.Errorf("outcome-plain physical plan disagrees with its logical capability")
 	}
 	if plan.atomicCost != logical.AtomicCost || plan.atomicCostProof != logical.AtomicCostProof ||
 		plan.atomicCertificate != logical.AtomicCostCertificate {
 		return fmt.Errorf("outcome-plain physical plan lost its exact atomic-cost certificate")
 	}
-	if plan.cleanup != nil || plan.critical != nil || plan.needsPreempt || plan.preempt != nil {
-		return fmt.Errorf("outcome-plain body acquired cleanup, critical, or preemption state")
+	if plan.staticOutcome != logical.StaticOutcome {
+		return fmt.Errorf("outcome-plain physical plan lost its exact unbounded-static capability")
+	}
+	if plan.cleanup != nil || plan.critical != nil ||
+		!logical.StaticOutcome && (plan.needsPreempt || plan.preempt != nil) {
+		return fmt.Errorf("outcome-plain body acquired cleanup, critical, or incompatible preemption state")
+	}
+	if logical.StaticOutcome {
+		return validateStaticOutcomeFrozenPlan(plan, logical)
 	}
 	directCalls := 0
 	for instruction, physical := range plan.instructions {
@@ -198,6 +207,56 @@ func validateOutcomePlainFrozenPlan(
 	return nil
 }
 
+func validateStaticOutcomeFrozenPlan(plan *coroPhysicalFunctionPlan, logical coro.FunctionPlan) error {
+	for instruction, physical := range plan.instructions {
+		if !physical.semantic.evaluated {
+			continue
+		}
+		operationSupported := physical.operation == coroPhysicalOperationNone ||
+			physical.operation == coroPhysicalOperationControl &&
+				!physical.operationControl.NativeActivationBound()
+		if !operationSupported || physical.controlFailureHard ||
+			physical.operationFailure != "" || physical.outcomeFailure != "" {
+			return fmt.Errorf(
+				"static-outcome function %q instruction %T %q selected an invalid physical recipe (operation=%s control=%s hard=%t operation-failure=%q outcome-failure=%q)",
+				plan.function.String(), instruction, instruction.String(), physical.operation, physical.control,
+				physical.controlFailureHard, physical.operationFailure, physical.outcomeFailure,
+			)
+		}
+		if _, runDefers := instruction.(*ssa.RunDefers); runDefers {
+			// ProgramIR proved that no evaluated Defer registration exists. The
+			// synthetic RunDefers is therefore an explicit no-op in this twin.
+			continue
+		}
+		if _, deferInstruction := instruction.(*ssa.Defer); deferInstruction {
+			return fmt.Errorf("static-outcome body contains an evaluated defer registration")
+		}
+		if call, ok := instruction.(*ssa.Call); ok &&
+			physical.semantic.recipe == coro.RecipeID("cl.ssa.call.v1") {
+			if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+				continue
+			}
+			if physical.control == coroPhysicalControlNone && !physical.controlFailureHard {
+				// Full physical ABI preflight independently proved this exact
+				// ordinary call to be a closed no-unwind plain target.
+				continue
+			}
+			if physical.control != coroPhysicalControlDirectOutcome || physical.controlTarget == nil ||
+				physical.controlTargetID == "" || !physical.directOutcomeNativeResult {
+				return fmt.Errorf("static-outcome call %q lacks an exact synchronous target", call.String())
+			}
+		} else if physical.control != coroPhysicalControlNone {
+			return fmt.Errorf("static-outcome instruction %T selected unsupported control %s", instruction, physical.control)
+		}
+		switch physical.outcome {
+		case coroPhysicalOutcomeNone, coroPhysicalOutcomeReturn, coroPhysicalOutcomePanic:
+		default:
+			return fmt.Errorf("static-outcome instruction %T selected unsupported outcome %s", instruction, physical.outcome)
+		}
+	}
+	return nil
+}
+
 func (p *context) compileOutcomePlainPhysicalBody(
 	b llssa.Builder,
 	fn *ssa.Function,
@@ -246,10 +305,12 @@ func (p *context) compileOutcomePlainPhysicalBody(
 		phi()
 	}
 	emission.completeManagedPhysicalBody(bodyCapability)
-	if err := p.pkg.EmitCoroAtomicCostCertificate(
-		p.fn.Name(), logical.AtomicCost, uint8(logical.AtomicCostProof), logical.AtomicCostCertificate,
-	); err != nil {
-		panic(fmt.Errorf("publish outcome-plain atomic-cost certificate: %w", err))
+	if logical.AtomicCostProof.ProvesOutcomePlain() {
+		if err := p.pkg.EmitCoroAtomicCostCertificate(
+			p.fn.Name(), logical.AtomicCost, uint8(logical.AtomicCostProof), logical.AtomicCostCertificate,
+		); err != nil {
+			panic(fmt.Errorf("publish outcome-plain atomic-cost certificate: %w", err))
+		}
 	}
 }
 
@@ -304,17 +365,58 @@ func (p *context) compileCoroStaticOutcomeCall(
 	args := p.compileValues(b, call.Call.Args, p.funcKind(call.Call.Value))
 	source, _ := call.Call.Value.(*ssa.Function)
 	args = p.compileManagedGoLinknameCallArguments(b, source, callee, args)
-	entry := p.mustFunctionSymbol(callee)
+	result := p.compileCoroStaticOutcomeTargetCallResult(
+		b, callee, args, instructionPlan.directOutcomeNativeResult,
+	)
+	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, result.value)
+	if !retagged {
+		if !result.address.IsNil() {
+			p.recordCoroValueAddress(call, result.address)
+		}
+	}
+	return value
+}
+
+// compileCoroStaticOutcomeTargetCall is the single synchronous outcome-call
+// transaction shared by exact source calls and compiler-inserted runtime
+// helpers. The target and arguments have already crossed their respective
+// source/marker ABI boundary; this layer owns only the hidden outcome ABI and
+// terminal propagation.
+func (p *context) compileCoroStaticOutcomeTargetCall(
+	b llssa.Builder,
+	callee *ssa.Function,
+	args []llssa.Expr,
+	nativeResult bool,
+) llssa.Expr {
+	return p.compileCoroStaticOutcomeTargetCallResult(b, callee, args, nativeResult).value
+}
+
+func (p *context) compileCoroStaticOutcomeTargetCallResult(
+	b llssa.Builder,
+	callee *ssa.Function,
+	args []llssa.Expr,
+	nativeResult bool,
+) coroAwaitedValue {
+	if !p.hasStructuredOutcomePhysicalBody() || callee == nil || len(callee.FreeVars) != 0 {
+		panic("static outcome target call escaped its context-free structured body")
+	}
+	entry := p.mustOutcomePlainFunctionSymbol(callee)
 	sourceSig, err := p.emissionUniverse.coroPhysicalSourceSignature(callee)
 	if err != nil {
 		panic(fmt.Errorf("derive outcome-plain target %q ABI: %w", entry.plan.ID, err))
 	}
 	abi := newOutcomePlainPhysicalABI(sourceSig)
-	calleeFn, _, kind := p.compileFunctionEntry(entry)
+	calleeFn, _, kind := p.compileOutcomePlainFunction(callee)
 	if kind != goFunc {
 		panic(fmt.Sprintf("outcome-plain target %q did not resolve to a Go entry", entry.plan.ID))
 	}
-	if p.hasOutcomePlainPhysicalBody() && entry.plan.External == coro.ExternalKnown {
+	// Complete-program analysis keeps a producer Defined even while a different
+	// package module sees only its declaration. Certificate consumption is a
+	// physical owner fact, not the logical whole-program External dimension.
+	// compileOutcomePlainFunction has already materialized every locally owned
+	// body, so HasBody is the exact module-boundary test here.
+	if p.hasOutcomePlainPhysicalBody() && !calleeFn.HasBody() &&
+		entry.plan.AtomicCostProof.ProvesOutcomePlain() {
 		if err := p.pkg.EmitCoroAtomicCostDependency(
 			calleeFn.Name(), entry.plan.AtomicCost, uint8(entry.plan.AtomicCostProof), entry.plan.AtomicCostCertificate,
 		); err != nil {
@@ -330,14 +432,16 @@ func (p *context) compileCoroStaticOutcomeCall(
 	if p.hasCoroPhysicalBody() {
 		resultSlot = p.coroResultSlot(resultType)
 	} else {
-		if !p.hasOutcomePlainPhysicalBody() || !instructionPlan.directOutcomeNativeResult {
+		if !p.hasOutcomePlainPhysicalBody() || !nativeResult {
 			panic("outcome-plain DAG call result escaped its frozen native-stack bound")
 		}
-		resultSlot = b.AllocaT(resultType)
+		resultSlot = p.structuredOutcomeAlloca(resultType, false)
 	}
 	// The completion record is three fixed words and is consumed before the next
-	// suspension, so this site-local alloca is independently bounded.
-	completion := b.AllocaZeroedT(outcomePlainCompletionType(p.prog))
+	// suspension. Keep it in the physical function entry: loop iterations reuse
+	// the record after a fully synchronous call, avoiding dynamic stack growth and
+	// exposing its fields to ordinary SROA.
+	completion := p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), true)
 	physicalArgs := make([]llssa.Expr, 0, len(args)+3)
 	physicalArgs = append(physicalArgs,
 		p.managedPhysicalTask(),
@@ -346,7 +450,20 @@ func (p *context) compileCoroStaticOutcomeCall(
 	)
 	physicalArgs = append(physicalArgs, args...)
 	b.Call(calleeFn.Expr, physicalArgs...)
+	p.dispatchOutcomePlainCompletion(b, completion)
+	return coroAwaitedValue{
+		value:   p.loadCoroAwaitResult(b, resultSlot, sourceSig.Results()),
+		address: p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()),
+	}
+}
 
+// dispatchOutcomePlainCompletion consumes one immediate synchronous child
+// transaction and leaves b in the child's Return continuation. Every other
+// terminal state is propagated into the current structured parent.
+func (p *context) dispatchOutcomePlainCompletion(b llssa.Builder, completion llssa.Expr) {
+	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn || completion.IsNil() {
+		panic("outcome-plain completion dispatch escaped its structured parent")
+	}
 	status := b.Load(b.FieldAddr(completion, outcomePlainCompletionStatus))
 	returned := p.fn.MakeBlock()
 	panicked := p.fn.MakeBlock()
@@ -372,10 +489,4 @@ func (p *context) compileCoroStaticOutcomeCall(
 	b.SetBlockEx(invalid, llssa.AtEnd, false)
 	b.Unreachable()
 	b.SetBlockContinuation(returned)
-	value := p.loadCoroAwaitResult(b, resultSlot, sourceSig.Results())
-	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, value)
-	if !retagged {
-		p.recordCoroValueAddress(call, p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()))
-	}
-	return value
 }

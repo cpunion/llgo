@@ -64,21 +64,33 @@ func QueueCanRelease() bool
 // no-suspend hook. Every live occurrence is in the compiler-verified raw-host
 // closure, so the declaration publishes no managed executor-safe capability.
 //
-//go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1
-func QueueReserve(reservation *QueueReservation) bool
+// Zero is the failure sentinel; successful C reservations are encoded as the
+// exact ring position plus one so no Go out-parameter crosses this boundary.
+//
+//go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v2
+func QueueReserve() QueueReservation
 
 // QueueCancelReservation publishes an internal tombstone for one unpublished
 // token. Consumers retire it without exposing an invalid worker job.
 //
-//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1
+//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v2
 func QueueCancelReservation(reservation QueueReservation) bool
 
 // QueueSubmitReserved release-publishes one POD job and emits one platform
-// semaphore signal. sem_post and Mach semaphore_signal never wait for worker
-// progress; full capacity was already rejected by QueueReserve.
+// semaphore signal. Every argument crosses the Go/C boundary by value and is
+// copied into a C-stack Job before queue publication; no Go aggregate address
+// crosses the boundary or requires a GC allocation. sem_post and Mach
+// semaphore_signal never wait for worker progress; full capacity was already
+// rejected by QueueReserve.
 //
-//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1
-func QueueSubmitReserved(reservation QueueReservation, job *Job) bool
+//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v4
+func QueueSubmitReserved(
+	reservation QueueReservation,
+	sourceSlot, generation uint32,
+	function, traceTarget uintptr,
+	argc uint32,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
+) bool
 
 // QueueStop seals producer ingress and emits one terminal wake per raw worker.
 // It neither drains nor joins workers, but its platform signals may enter libc

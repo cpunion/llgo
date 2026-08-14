@@ -20,6 +20,15 @@ runtime costs:
 - `handoff`: unbuffered channel scheduling throughput;
 - `timers`: concurrent standard-library timer registration and wakeup.
 
+`testdata/pure_idle`, `testdata/pure_compute`, and `testdata/pure_handoff` have
+no imports and no output. They are closed-world negative fixtures for the
+optional worker executor. The first isolates fixed startup cost; the second
+measures a billion direct, non-inlined integer calls plus loop safepoints; the
+third performs 100,000 request/ack round trips through two unbuffered channels
+without pulling standard-library, timer, poller, or worker costs into the
+artifact. Success is established by exit status and compiler/runtime
+capability gates, not by parsing stdout.
+
 `testdata/io_workload` is separate so importing `os`, `io`, and `net` does not
 pollute the core artifact. Its modes are:
 
@@ -27,6 +36,13 @@ pollute the core artifact. Its modes are:
   seek/write/seek/read round trips;
 - `tcp`: one persistent loopback TCP connection, with 4 KiB request/echo round
   trips between two goroutines.
+
+`testdata/preempt_timer` is a bounded progress gate: one goroutine sleeps on a
+standard-library timer while the sole runnable goroutine executes a pure
+compute loop. The timer must wake by compiler safepoint preemption before the
+100-million-iteration guard is exhausted. This catches executor-service
+optimizations which accidentally rely only on runnable peers or callbacks and
+therefore starve elapsed timer/poll sources.
 
 The final output field is workload wall time in nanoseconds, measured inside
 the process after argument parsing. It excludes process startup; an external
@@ -55,8 +71,12 @@ the host Go tool as a lightweight source check:
 
 ```sh
 go test \
+	./benchmark/coro_core/testdata/pure_idle \
+	./benchmark/coro_core/testdata/pure_compute \
+	./benchmark/coro_core/testdata/pure_handoff \
   ./benchmark/coro_core/testdata/workload \
   ./benchmark/coro_core/testdata/io_workload \
+  ./benchmark/coro_core/testdata/preempt_timer \
   ./benchmark/coro_core/testdata/wasm
 ```
 

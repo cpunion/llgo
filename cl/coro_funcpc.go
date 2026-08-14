@@ -103,7 +103,7 @@ func (u *EmissionUniverse) aliasPatchedFuncPCABI0Declarations() error {
 				intrinsic.Signature == nil {
 				continue
 			}
-			intrinsicSignature := structuralEmissionABITypeKey(u.effectiveType(prepared, intrinsic, intrinsic.Signature, false))
+			intrinsicSignature := u.emissionTypeKeys.strictABI(u.effectiveType(prepared, intrinsic, intrinsic.Signature, false))
 			if originalSignature != intrinsicSignature {
 				return fmt.Errorf(
 					"prepare emission universe: patched internal/abi.%s declaration and alternate intrinsic have different structural ABI signatures", localName,
@@ -131,7 +131,7 @@ func (u *EmissionUniverse) aliasPatchedFuncPCABI0Declarations() error {
 				candidateOpcode, opcodeOK := u.intrinsicOps[candidateOwnerKey]
 				candidateSignature := ""
 				if candidate.Signature != nil {
-					candidateSignature = structuralEmissionABITypeKey(u.effectiveType(prepared, candidate, candidate.Signature, false))
+					candidateSignature = u.emissionTypeKeys.strictABI(u.effectiveType(prepared, candidate, candidate.Signature, false))
 				}
 				if kindOK && candidateKind == llgoInstr && opcodeOK && candidateOpcode == llgoFuncPCABI0 &&
 					candidateSignature == originalSignature {

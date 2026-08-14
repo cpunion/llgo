@@ -26,13 +26,14 @@ import (
 )
 
 const (
-	coroChanSendParkHookV1 = "__llgo_coro_chan_send_park_v1"
-	coroChanRecvParkHookV1 = "__llgo_coro_chan_recv_park_v1"
-	coroChanResumeHookV1   = "__llgo_coro_chan_resume_v1"
+	coroChanSendTryParkHookV2 = "__llgo_coro_chan_send_try_park_v2"
+	coroChanRecvTryParkHookV2 = "__llgo_coro_chan_recv_try_park_v2"
+	coroChanResumeHookV2      = "__llgo_coro_chan_resume_v2"
 )
 
 const (
-	coroChanResumeSendOK uint64 = iota + 1
+	coroChanResumeInvalid uint64 = iota
+	coroChanResumeSendOK
 	coroChanResumeRecvOK
 	coroChanResumeRecvClosed
 	coroChanResumeSendClosed
@@ -54,7 +55,7 @@ func isCoroCloseBuiltinCall(call *ssa.Call) bool {
 	return ok && builtin.Name() == "close"
 }
 
-func coroChanParkSignature() *types.Signature {
+func coroChanTryParkSignatureV2() *types.Signature {
 	pointer := types.Typ[types.UnsafePointer]
 	params := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "g", pointer),
@@ -64,8 +65,11 @@ func coroChanParkSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "elem", pointer),
 		types.NewParam(token.NoPos, nil, "state", pointer),
 		types.NewParam(token.NoPos, nil, "size", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "stateID", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "line", types.Typ[types.Uint32]),
 	)
-	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
 func coroChanResumeSignature() *types.Signature {
@@ -93,13 +97,18 @@ func (p *context) requireCoroChannelBody(b llssa.Builder) *coroBodyContext {
 func (p *context) newCoroChannelStorage(b llssa.Builder, elemType llssa.Type) (elem, state llssa.Expr) {
 	// These addresses may be published to hchan immediately before suspend.
 	// Allocate them in the physical ramp entry so no waiter can retain a
-	// resume-local M stack address. Reset at the logical operation point because
-	// the same static channel instruction may execute repeatedly in a loop.
+	// resume-local M stack address. The coroutine frame allocator zero-fills the
+	// complete frame, and channel resume clears state before the same static
+	// instruction can execute again in a loop.
 	elem = p.coroFrameAlloca(elemType)
 	stateType := p.prog.RuntimeType("CoroChanParkV1")
 	state = p.coroFrameAlloca(stateType)
 	b.Store(elem, b.Prog.Zero(elemType))
-	b.Store(state, b.Prog.Zero(stateType))
+	// State is unreachable until the conditional park hook runs, and that hook
+	// initializes the complete CoroChanParkV1 before publishing any frame
+	// pointer. Resume clears it before a loop can reuse this static operation.
+	// Eagerly zeroing the large aggregate here made both successful try paths
+	// and actual parks pay for a store which the runtime immediately repeated.
 	return
 }
 
@@ -107,24 +116,27 @@ func (p *context) compileCoroChanSend(b llssa.Builder, channel, value llssa.Expr
 	body := p.requireCoroChannelBody(b)
 	elem, state := p.newCoroChannelStorage(b, value.Type)
 	b.Store(elem, value)
-	ready := b.CoroChanTrySend(channel, elem)
 	body.emitCoroParkOperation(p, b, coroParkOperation{
-		shouldSuspend: b.UnOp(token.NOT, ready),
-		park: func(suspend llssa.Builder) {
-			park := p.pkg.NewFunc(coroChanSendParkHookV1, coroChanParkSignature(), llssa.InC)
-			suspend.Call(
+		prepare: func(active llssa.Builder, stateID, sourceLine uint32) llssa.Expr {
+			park := p.pkg.NewFunc(coroChanSendTryParkHookV2, coroChanTryParkSignatureV2(), llssa.InC)
+			status := active.Call(
 				park.Expr,
 				body.task,
 				body.coro.Handle(),
-				suspend.Convert(suspend.Prog.VoidPtr(), body.header),
-				suspend.Convert(suspend.Prog.VoidPtr(), channel),
-				suspend.Convert(suspend.Prog.VoidPtr(), elem),
-				suspend.Convert(suspend.Prog.VoidPtr(), state),
-				p.prog.IntVal(p.prog.SizeOf(value.Type), p.prog.Uintptr()),
+				active.Convert(active.Prog.VoidPtr(), body.header),
+				active.Convert(active.Prog.VoidPtr(), channel),
+				active.Convert(active.Prog.VoidPtr(), elem),
+				active.Convert(active.Prog.VoidPtr(), state),
+				active.Prog.IntVal(active.Prog.SizeOf(value.Type), active.Prog.Uintptr()),
+				active.Prog.IntVal(uint64(stateID), active.Prog.Uint32()),
+				active.Prog.IntVal(uint64(sourceLine), active.Prog.Uint32()),
+			)
+			return active.BinOp(
+				token.EQL, status, active.Prog.IntVal(coroChanResumeInvalid, active.Prog.Uint32()),
 			)
 		},
 		resume: func(resume llssa.Builder) llssa.Expr {
-			statusHook := p.pkg.NewFunc(coroChanResumeHookV1, coroChanResumeSignature(), llssa.InC)
+			statusHook := p.pkg.NewFunc(coroChanResumeHookV2, coroChanResumeSignature(), llssa.InC)
 			return resume.Call(statusHook.Expr, body.task, resume.Convert(resume.Prog.VoidPtr(), state))
 		},
 		normal: []uint64{coroChanResumeSendOK},
@@ -143,28 +155,36 @@ func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, ch
 	body := p.requireCoroChannelBody(b)
 	elemType := p.prog.Elem(channel.Type)
 	elem, state := p.newCoroChannelStorage(b, elemType)
-	result := b.CoroChanTryRecv(channel, elem)
-	recvOK := b.Extract(result, 0)
-	tryOK := b.Extract(result, 1)
 	recvOKSlot := p.coroFrameAlloca(p.prog.Bool())
-	b.Store(recvOKSlot, recvOK)
 	body.emitCoroParkOperation(p, b, coroParkOperation{
-		shouldSuspend: b.UnOp(token.NOT, tryOK),
-		park: func(suspend llssa.Builder) {
-			park := p.pkg.NewFunc(coroChanRecvParkHookV1, coroChanParkSignature(), llssa.InC)
-			suspend.Call(
+		prepare: func(active llssa.Builder, stateID, sourceLine uint32) llssa.Expr {
+			park := p.pkg.NewFunc(coroChanRecvTryParkHookV2, coroChanTryParkSignatureV2(), llssa.InC)
+			status := active.Call(
 				park.Expr,
 				body.task,
 				body.coro.Handle(),
-				suspend.Convert(suspend.Prog.VoidPtr(), body.header),
-				suspend.Convert(suspend.Prog.VoidPtr(), channel),
-				suspend.Convert(suspend.Prog.VoidPtr(), elem),
-				suspend.Convert(suspend.Prog.VoidPtr(), state),
-				p.prog.IntVal(p.prog.SizeOf(elemType), p.prog.Uintptr()),
+				active.Convert(active.Prog.VoidPtr(), body.header),
+				active.Convert(active.Prog.VoidPtr(), channel),
+				active.Convert(active.Prog.VoidPtr(), elem),
+				active.Convert(active.Prog.VoidPtr(), state),
+				active.Prog.IntVal(active.Prog.SizeOf(elemType), active.Prog.Uintptr()),
+				active.Prog.IntVal(uint64(stateID), active.Prog.Uint32()),
+				active.Prog.IntVal(uint64(sourceLine), active.Prog.Uint32()),
+			)
+			active.Store(
+				recvOKSlot,
+				active.BinOp(
+					token.EQL,
+					status,
+					active.Prog.IntVal(coroChanResumeRecvOK, active.Prog.Uint32()),
+				),
+			)
+			return active.BinOp(
+				token.EQL, status, active.Prog.IntVal(coroChanResumeInvalid, active.Prog.Uint32()),
 			)
 		},
 		resume: func(resume llssa.Builder) llssa.Expr {
-			statusHook := p.pkg.NewFunc(coroChanResumeHookV1, coroChanResumeSignature(), llssa.InC)
+			statusHook := p.pkg.NewFunc(coroChanResumeHookV2, coroChanResumeSignature(), llssa.InC)
 			status := resume.Call(statusHook.Expr, body.task, resume.Convert(resume.Prog.VoidPtr(), state))
 			resume.Store(
 				recvOKSlot,
@@ -212,7 +232,7 @@ func (p *context) compileCoroChanCloseWithRecovery(
 	if cleanup != nil && body.cleanup != cleanup {
 		panic("coroutine deferred close does not belong to the active cleanup drainer")
 	}
-	status := b.CoroChanTryClose(channel)
+	status := b.CoroChanTryCloseTask(body.task, channel)
 	nilChannel := b.Func.MakeBlock()
 	alreadyClosed := b.Func.MakeBlock()
 	normal := b.Func.MakeBlock()
@@ -251,7 +271,9 @@ func (p *context) compileCoroChanSelect(b llssa.Builder, states []*llssa.SelectS
 	b.Store(recvOKSlot, b.Extract(attempt, 1))
 	tryOK := b.Extract(attempt, 2)
 	body.emitCoroParkOperation(p, b, coroParkOperation{
-		shouldSuspend: b.UnOp(token.NOT, tryOK),
+		prepare: func(active llssa.Builder, _, _ uint32) llssa.Expr {
+			return active.UnOp(token.NOT, tryOK)
+		},
 		park: func(suspend llssa.Builder) {
 			suspend.CoroChanSelectPark(
 				plan,

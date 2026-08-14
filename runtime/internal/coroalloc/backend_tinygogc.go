@@ -25,6 +25,7 @@ import (
 )
 
 const backendKind = "tinygogc"
+const backendAllocationsAreZeroed = true
 
 func backendBootstrap() bool {
 	tinygogc.Init()

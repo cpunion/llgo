@@ -20,11 +20,25 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 var testAtomicCostCertificate = strings.Repeat("a", 64)
+
+func TestLibraryEffectSummaryVersionIdentity(t *testing.T) {
+	version := strconv.Itoa(int(libraryEffectSummaryRecordMagic[len(libraryEffectSummaryRecordMagic)-1]))
+	if LibraryEffectSummaryVersion != "v"+version {
+		t.Fatalf("record magic version %s disagrees with version %q", version, LibraryEffectSummaryVersion)
+	}
+	if !strings.HasSuffix(LibraryEffectSummarySchema, ".v"+version) {
+		t.Fatalf("record magic version %s disagrees with schema %q", version, LibraryEffectSummarySchema)
+	}
+	if !strings.HasSuffix(LibraryEffectSummaryDigestDomain, ".v"+version) {
+		t.Fatalf("record magic version %s disagrees with digest domain %q", version, LibraryEffectSummaryDigestDomain)
+	}
+}
 
 func testLibraryEffectMetadata() LibraryEffectMetadata {
 	return LibraryEffectMetadata{
@@ -238,6 +252,7 @@ func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 		AtomicCostProof:       AtomicCostLeaf,
 		AtomicCostCertificate: testAtomicCostCertificate,
 		PrimarySymbol:         "example/outcome.Leaf$outcome",
+		OutcomePlainSymbol:    "example/outcome.Leaf$outcome",
 	}}
 	summary.ForeignCallables = nil
 	summary.ExportBindings = nil
@@ -282,7 +297,7 @@ func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 		func(function *LibraryEffectFunction) { function.AtomicCost = 0 },
 		func(function *LibraryEffectFunction) { function.AtomicCostProof = AtomicCostUnproven },
 		func(function *LibraryEffectFunction) { function.AtomicCostCertificate = "" },
-		func(function *LibraryEffectFunction) { function.ManagedEntry = ManagedEntryCoroutine },
+		func(function *LibraryEffectFunction) { function.OutcomePlainSymbol = "" },
 	} {
 		invalid := summary
 		invalid.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
@@ -290,6 +305,16 @@ func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 		if _, err := invalid.MarshalStable(); err == nil {
 			t.Fatalf("invalid outcome library capability was accepted: %+v", invalid.Functions[0])
 		}
+	}
+	dual := summary
+	dual.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
+	dual.Functions[0].ManagedEntry = ManagedEntryCoroutine
+	dual.Functions[0].Effect = AwaitStructured | OutcomeStructured
+	dual.Functions[0].FuncRep = Dispatch
+	dual.Functions[0].PrimarySymbol = "example/outcome.Leaf$coro"
+	dual.Functions[0].OutcomePlainSymbol = "example/outcome.Leaf$outcome"
+	if _, err := dual.MarshalStable(); err != nil {
+		t.Fatalf("marshal coroutine primary plus outcome twin: %v", err)
 	}
 }
 

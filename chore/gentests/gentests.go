@@ -32,7 +32,7 @@ import (
 )
 
 func main() {
-	llvm.SetupPath()
+	llvm.SetupPathOrExit()
 	dir, _, err := mod.FindGoMod(".")
 	check(err)
 

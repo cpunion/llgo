@@ -32,12 +32,12 @@ import (
 // LoweringFactsSchema identifies the pointer-free sparse lowering-fact wire
 // format. It remains independently versioned from PlanDigestSchema; the
 // production plan digest binds this exact schema and its canonical digest.
-const LoweringFactsSchema = "llgo.coro.lowering-facts.v0"
+const LoweringFactsSchema = "llgo.coro.lowering-facts.v1"
 
 // LoweringFactsDigestDomain separates lowering-fact hashes from source,
 // function identity, plan, and future overlay hashes that happen to contain
 // the same bytes.
-const LoweringFactsDigestDomain = "llgo.coro.lowering-facts.digest.v0"
+const LoweringFactsDigestDomain = "llgo.coro.lowering-facts.digest.v1"
 
 // EmissionInstanceID identifies one physical owner/patch/ABI context for a
 // logical function. Owner and Context must be canonical, checkout-independent

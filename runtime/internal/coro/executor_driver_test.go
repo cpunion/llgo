@@ -96,6 +96,10 @@ func finishReadyDriverTasks(t *testing.T, p *P, tasks map[*G]*yieldingTestG) {
 func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	p := new(P)
 	driver, registry, handle := bindTestExecutorDriver(t, p)
+	slot, ok := executorSlot(registry, handle)
+	if !ok || driver.requestGate != &slot.gate {
+		t.Fatal("bound driver did not retain its exact stable request gate")
+	}
 	if RequestSchedule(p) || preemptLoad(&p.schedule) != scheduleIdle {
 		t.Fatal("legacy P request entered a bound executor")
 	}
@@ -142,6 +146,22 @@ func TestExecutorDriverHotHeaderDefersDeepCatalogAndPollAudits(t *testing.T) {
 		t.Fatal("complete driver audit accepted an invalid logical poll cursor")
 	}
 	driver.poll = executorPollTransaction{}
+
+	// Owner-local completion is another selected-work cursor. Its exact
+	// publication/resolution gates and complete diagnostics validate payload;
+	// an unrelated managed-resume observation keeps the immutable driver hot
+	// header independent of dormant local queue state.
+	driver.local.resolve = publishedEpochResolveCursor{phase: publishedEpochResolveDiscover}
+	if !validExecutorDriverHeader(driver) {
+		t.Fatal("hot header inspected the owner-local completion cursor")
+	}
+	if validExecutorDriver(driver) {
+		t.Fatal("complete driver audit accepted an invalid owner-local completion cursor")
+	}
+	if pending, ok := ExecutorRunManagedResumePending(driver); !ok || pending {
+		t.Fatalf("observational hot gate over local cursor damage = (%t, %t)", pending, ok)
+	}
+	driver.local = ownerLocalCompletionCursor{}
 	if !validExecutorDriver(driver) {
 		t.Fatal("restored driver failed complete audit")
 	}
@@ -214,6 +234,114 @@ func TestExecutorRunWakeDefersSourceService(t *testing.T) {
 	if driver.run != (executorRunCursor{}) {
 		t.Fatalf("drained run cursor = %+v", driver.run)
 	}
+	closeTestExecutorDriver(t, driver)
+}
+
+func TestExecutorRunWakeAcceptsDirectChannelArrivalAfterSleep(t *testing.T) {
+	p := new(P)
+	driver, registry, _, handle := bindTestExecutorDriverWithTimers(t, p)
+	prepared, ok := PrepareExecutorStandbyAt(driver, 10)
+	if !ok || !prepared {
+		t.Fatalf("prepare direct-channel standby = (%t, %t)", prepared, ok)
+	}
+	sleep, deadline, hasDeadline, ok := CommitExecutorSleepAt(driver, 11)
+	if !ok || !sleep || hasDeadline || deadline != 0 {
+		t.Fatalf("commit direct-channel standby = (%t, %d, %t, %t)", sleep, deadline, hasDeadline, ok)
+	}
+
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionMatched),
+	}
+	if !PublishExecutorDirectChannelCompletion(driver, completion) {
+		t.Fatal("publish direct-channel completion after executor sleep")
+	}
+	if request := registry.Request(handle); request != ExecutorRequestIdleWake {
+		t.Fatalf("request sleeping executor after direct completion = %d", request)
+	}
+	if !WakeExecutorAt(driver, 12) || driver.state != executorDriverActive ||
+		!driver.run.sourceMore {
+		t.Fatalf("wake over direct-channel arrival: state=%d run=%+v", driver.state, driver.run)
+	}
+	if got, takeOK := takeExecutorDirectChannelCompletion(driver); !takeOK || got != completion {
+		t.Fatalf("take post-sleep direct completion = (%p, %t), want (%p, true)", got, takeOK, completion)
+	}
+	drainTimerAwareExecutorRunSources(t, driver, 13)
+	closeTestExecutorDriver(t, driver)
+}
+
+func TestPrepareExecutorStandbyDefersDirectChannelIngress(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithTimers(t, p)
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionMatched),
+	}
+	if !PublishExecutorDirectChannelCompletion(driver, completion) {
+		t.Fatal("publish direct-channel completion before standby")
+	}
+	if prepared, ok := PrepareExecutorStandbyAt(driver, 10); !ok || prepared {
+		t.Fatalf("standby over direct-channel ingress = (%t, %t), want (false, true)", prepared, ok)
+	}
+	if got, ok := takeExecutorDirectChannelCompletion(driver); !ok || got != completion {
+		t.Fatalf("take deferred standby completion = (%p, %t), want (%p, true)", got, ok, completion)
+	}
+	closeTestExecutorDriver(t, driver)
+}
+
+func TestCommitExecutorStandbyDefersDirectChannelIngress(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithTimers(t, p)
+	if prepared, ok := PrepareExecutorStandbyAt(driver, 10); !ok || !prepared {
+		t.Fatalf("prepare standby before direct ingress = (%t, %t)", prepared, ok)
+	}
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionMatched),
+	}
+	if !PublishExecutorDirectChannelCompletion(driver, completion) {
+		t.Fatal("publish direct-channel completion during standby preparation")
+	}
+	sleep, deadline, hasDeadline, ok := CommitExecutorSleepAt(driver, 11)
+	if !ok || sleep || deadline != 0 || hasDeadline || driver.state != executorDriverActive ||
+		!driver.run.sourceMore {
+		t.Fatalf("commit standby over direct ingress = (%t, %d, %t, %t), state=%d run=%+v",
+			sleep, deadline, hasDeadline, ok, driver.state, driver.run)
+	}
+	if got, ok := takeExecutorDirectChannelCompletion(driver); !ok || got != completion {
+		t.Fatalf("take commit-deferred completion = (%p, %t), want (%p, true)", got, ok, completion)
+	}
+	drainTimerAwareExecutorRunSources(t, driver, 12)
+	closeTestExecutorDriver(t, driver)
+}
+
+func TestExecutorStandbySourceScanAllowsDirectChannelIngress(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithTimers(t, p)
+	if !driver.registry.ArmIdle(driver.handle) {
+		t.Fatal("arm executor idle before source scan")
+	}
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionMatched),
+	}
+	if !PublishExecutorDirectChannelCompletion(driver, completion) {
+		t.Fatal("publish direct-channel completion after idle arm")
+	}
+	if scan, ok := publishExecutorSourcesAt(driver, 10, true); !ok || scan != (executorSourceScan{}) {
+		t.Fatalf("source scan over direct-channel ingress = (%+v, %t)", scan, ok)
+	}
+	if !leaveExecutorIdleForRun(driver) {
+		t.Fatal("leave idle after direct-channel ingress")
+	}
+	if got, ok := takeExecutorDirectChannelCompletion(driver); !ok || got != completion {
+		t.Fatalf("take scan-racing completion = (%p, %t), want (%p, true)", got, ok, completion)
+	}
+	drainTimerAwareExecutorRunSources(t, driver, 11)
 	closeTestExecutorDriver(t, driver)
 }
 

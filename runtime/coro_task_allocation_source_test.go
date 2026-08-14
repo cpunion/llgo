@@ -52,6 +52,12 @@ func TestCoroSpawnFusesTaskAndRuntimeContextAllocation(t *testing.T) {
 		strings.Contains(spawn, "coroBindRuntimeContext(child, parent, false)") {
 		t.Fatal("spawn path retained a separately allocated runtime sidecar")
 	}
+	allocation := strings.Index(spawn, "raw := coroalloc.AllocTask(allocationSize)")
+	initialize := strings.Index(spawn, "child, _, actualSize, allocationOK := coroTaskAllocationAt(raw)")
+	if allocation < 0 || initialize < 0 || allocation >= initialize ||
+		strings.Contains(spawn[allocation:initialize], "coro.Zero(") {
+		t.Fatal("spawn path repeats the allocator's zero-filled storage contract")
+	}
 
 	context := readRuntimePollFile(t, "internal/runtime/coro_task_context.go")
 	for _, required := range []string{
@@ -63,6 +69,59 @@ func TestCoroSpawnFusesTaskAndRuntimeContextAllocation(t *testing.T) {
 		if !strings.Contains(context, required) {
 			t.Errorf("runtime-context release lacks shared-root gate %q", required)
 		}
+	}
+}
+
+func TestCoroAllocatorOwnsZeroFillAndRetirementSanitization(t *testing.T) {
+	allocator := readRuntimePollFile(t, "internal/coroalloc/allocator.go")
+	for _, marker := range []string{
+		"const backendAllocationsAreZeroed = true",
+		"allocates one zero-filled, explicitly owned",
+		"if !backendAllocationsAreZeroed || !Ready()",
+	} {
+		if marker == "const backendAllocationsAreZeroed = true" {
+			continue
+		}
+		if !strings.Contains(allocator, marker) {
+			t.Errorf("coroutine allocator lacks zero-fill contract marker %q", marker)
+		}
+	}
+	for _, path := range []string{
+		"internal/coroalloc/backend_gc.go",
+		"internal/coroalloc/backend_nogc.go",
+		"internal/coroalloc/backend_webassembly.go",
+		"internal/coroalloc/backend_tinygogc.go",
+	} {
+		source := readRuntimePollFile(t, path)
+		if !strings.Contains(source, "const backendAllocationsAreZeroed = true") {
+			t.Errorf("%s lacks zero-filled backend contract", path)
+		}
+	}
+	for _, path := range []string{
+		"internal/coroalloc/backend_nogc.go",
+		"internal/coroalloc/backend_webassembly.go",
+	} {
+		if source := readRuntimePollFile(t, path); !strings.Contains(source, "return c.Calloc(1, size)") ||
+			strings.Contains(source, "return c.Malloc(size)") {
+			t.Errorf("%s does not implement the zero-filled libc contract", path)
+		}
+	}
+	tiny := readRuntimePollFile(t, "internal/runtime/tinygogc/rooted.go")
+	if !strings.Contains(tiny, "c.Memset(ptr, 0, size)") ||
+		strings.Index(tiny, "c.Memset(ptr, 0, size)") > strings.Index(tiny, "unlinkRootedAllocation(root)") {
+		t.Fatal("tinygogc does not sanitize a rooted allocation before unlink")
+	}
+	frameCore := readRuntimePollFile(t, "internal/coro/frame.go")
+	register := strings.Index(frameCore, "func RegisterFrame(")
+	publish := strings.Index(frameCore, "func FrameFromStorage(")
+	if register < 0 || publish < 0 || register >= publish ||
+		strings.Contains(frameCore[register:publish], "Zero(raw, total)") {
+		t.Fatal("frame registration repeats the allocator's zero-fill contract")
+	}
+	frameRuntime := readRuntimePollFile(t, "internal/runtime/coro_frame.go")
+	free := strings.Index(frameRuntime, "func __llgo_coro_frame_free_v1(")
+	if free < 0 || strings.Contains(frameRuntime[free:], "coro.Zero(raw, total)") {
+		t.Fatal("frame release sanitizes outside the selected allocator backend")
 	}
 }
 

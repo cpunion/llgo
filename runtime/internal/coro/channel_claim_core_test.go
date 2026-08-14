@@ -454,6 +454,18 @@ func externallyCommitChannelCandidateAtRoute(
 	index int,
 	route RouteID,
 ) {
+	externallyCommitChannelCandidateAtRouteWithResult(
+		t, fixture, index, route, ResumeSmallInvalid,
+	)
+}
+
+func externallyCommitChannelCandidateAtRouteWithResult(
+	t *testing.T,
+	fixture *channelClaimCoreFixture,
+	index int,
+	route RouteID,
+	small uint8,
+) {
 	t.Helper()
 	admission, acquired := fixture.source.acquireExternalCommit(fixture.ids[index])
 	if acquired != channelExternalCommitAcquired {
@@ -466,7 +478,7 @@ func externallyCommitChannelCandidateAtRoute(
 	if !beginExternalSelectClaimEffect(fixture.claim) {
 		t.Fatal("begin externally committed channel effect")
 	}
-	if result := admission.publishExternallyCommittedAtRoute(route); result != ChannelOperationPosted {
+	if result := admission.publishExternallyCommittedAtRoute(route, small); result != ChannelOperationPosted {
 		t.Fatalf("publish externally committed channel candidate = %d", result)
 	}
 	if !publishExternalSelectClaim(fixture.claim) {
@@ -516,8 +528,10 @@ func TestOwnerLocalChannelCompletionSkipsExternalSourceEpoch(t *testing.T) {
 	yieldRunningDriverTask(t, fixture.p, producer, producerAction)
 
 	var complete ExecutorPollProgress
+	reductions := 0
 	for reduction := 0; reduction < 64; reduction++ {
 		step, advanced := NextExecutorRunStep(fixture.driver)
+		reductions++
 		if !advanced || step.Kind != ExecutorRunStepSource || step.Poll.Used != 1 ||
 			!step.Poll.AtomicResolve || fixture.driver.poll != (executorPollTransaction{}) {
 			t.Fatalf("owner-local reduction %d = (%+v,%t), poll=%+v", reduction, step, advanced, fixture.driver.poll)
@@ -537,6 +551,9 @@ func TestOwnerLocalChannelCompletionSkipsExternalSourceEpoch(t *testing.T) {
 			complete, fixture.driver.local, fixture.task.g.park, fixture.source.Pending(),
 			fixture.registry.ObserveRequested(fixture.handle))
 	}
+	if reductions > 4 {
+		t.Fatalf("owner-local direct completion used %d scheduler reductions, want at most 4", reductions)
+	}
 
 	if !EnterExecutorRunCompatibility(fixture.driver) {
 		t.Fatal("leave owner-local bounded runner")
@@ -548,6 +565,812 @@ func TestOwnerLocalChannelCompletionSkipsExternalSourceEpoch(t *testing.T) {
 	decision := takeChannelClaimCoreDecision(t, fixture)
 	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 151 || !decision.lease.Valid() {
 		t.Fatalf("owner-local peer decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+	runtime.KeepAlive(producer.frame.memory)
+}
+
+func TestOwnerLocalDirectChannelCleanupFinishesAfterMaterialize(t *testing.T) {
+	var (
+		packet ResumePacket
+		plan   ResumeCleanupPlan
+		token  byte
+	)
+	fixture := newChannelClaimCoreFixtureBeforeResume(
+		t,
+		"channel-owner-local-direct-cleanup",
+		[]uint32{1},
+		true,
+		0,
+		func(fixture *channelClaimCoreFixture) {
+			if !BindWaitSetResumeCleanup(
+				&fixture.wait,
+				&packet,
+				&plan,
+				ResumeCleanupBinding{
+					Kind:         ResumeCleanupChannelDirect,
+					Context:      unsafe.Pointer(&token),
+					Entries:      unsafe.Pointer(&fixture.ids[0]),
+					Claim:        fixture.claim,
+					Count:        1,
+					RuntimeCount: 1,
+					Stride:       unsafe.Sizeof(OperationID{}),
+				},
+			) {
+				t.Fatal("bind owner-local direct cleanup")
+			}
+		},
+	)
+
+	producer := newYieldingTestG(t, "channel-owner-local-direct-producer")
+	if !Enqueue(fixture.p, producer.g) {
+		t.Fatal("enqueue owner-local direct producer")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue owner-local direct producer = (%p,%t)", g, ok)
+	}
+	producerAction := beginWaitTestResume(t, fixture.p, producer)
+	externallyCommitChannelCandidateAtRoute(t, fixture, 0, RouteID(1))
+	local, localOK := TryPublishOwnerLocalChannelCompletion(
+		producer.g,
+		fixture.source,
+		fixture.ids[0],
+	)
+	if !localOK || !local {
+		t.Fatalf("publish owner-local direct completion = (%t,%t)", local, localOK)
+	}
+	yieldRunningDriverTask(t, fixture.p, producer, producerAction)
+
+	begin, beginOK := NextExecutorRunStep(fixture.driver)
+	if !beginOK || begin.Kind != ExecutorRunStepSource || begin.Poll.Complete ||
+		!begin.Poll.AtomicResolve || begin.Poll.Used != 1 || begin.Poll.ApplyVisits != 1 ||
+		plan.phase != resumeCleanupRuntime || fixture.task.g.park.phase != parkConsumed ||
+		!fixture.driver.local.resolve.directChannel {
+		t.Fatalf("owner-local direct begin = (%+v,%t), plan=%+v park=%+v",
+			begin, beginOK, plan, fixture.task.g.park)
+	}
+	assertDirectSelector := func(want bool) {
+		t.Helper()
+		_, _, _, selectorOK := ownerLocalDirectChannelCleanupHeader(&fixture.driver.local.resolve)
+		_, pending := pendingResumeCleanupStepForCursor(&fixture.driver.local.resolve)
+		headerOK := validOwnerLocalCompletionHeader(&fixture.driver.local, fixture.p)
+		if selectorOK != want || pending != want || headerOK != want {
+			t.Fatalf("direct runtime selector = certificate:%t pending:%t header:%t, want %t",
+				selectorOK, pending, headerOK, want)
+		}
+	}
+	assertDirectState := func(want bool) {
+		t.Helper()
+		_, _, _, stateOK := ownerLocalDirectChannelCleanupState(&fixture.driver.local.resolve)
+		if stateOK != want {
+			t.Fatalf("direct runtime effect audit = %t, want %t", stateOK, want)
+		}
+	}
+	assertDirectSelector(true)
+	assertDirectState(true)
+	// Cursor and typed context fields guard selection itself. Corruption in an
+	// immutable packet or ParkState is deliberately deferred to the one complete
+	// audit at the effectful retirement boundary.
+	savedNext := fixture.driver.local.resolve.nextWait
+	fixture.driver.local.resolve.nextWait = &fixture.wait
+	assertDirectSelector(false)
+	assertDirectState(false)
+	fixture.driver.local.resolve.nextWait = savedNext
+	savedContext := plan.context
+	plan.context = nil
+	assertDirectSelector(false)
+	assertDirectState(false)
+	plan.context = savedContext
+	savedPacketCase := packet.caseID
+	packet.caseID = 1
+	assertDirectSelector(true)
+	assertDirectState(false)
+	packet.caseID = savedPacketCase
+	savedExpected := fixture.task.g.park.expected
+	fixture.task.g.park.expected = 2
+	assertDirectSelector(true)
+	assertDirectState(false)
+	fixture.task.g.park.expected = savedExpected
+	assertDirectSelector(true)
+	assertDirectState(true)
+	materialize, materializeOK := NextExecutorRunStep(fixture.driver)
+	if !materializeOK || materialize.Kind != ExecutorRunStepMaterialize ||
+		materialize.Cleanup.Kind != ResumeCleanupChannelDirect ||
+		materialize.Cleanup.Context != unsafe.Pointer(&token) ||
+		materialize.Cleanup.Index != 0 || materialize.Cleanup.WinnerCase != 1 ||
+		materialize.Cleanup.Outcome != ParkOutcomeCompleted ||
+		!CommitResumeCleanupStep(materialize.Cleanup, 3) {
+		t.Fatalf("owner-local direct materialize = (%+v,%t)", materialize, materializeOK)
+	}
+	if _, _, _, stateOK := ownerLocalDirectChannelCleanupState(&fixture.driver.local.resolve); !stateOK {
+		t.Fatal("direct confirmation certificate rejected materialized status")
+	}
+	slot, slotOK := channelOperationSlotFor(fixture.source, fixture.ids[0])
+	if !slotOK {
+		t.Fatal("lookup owner-local direct closing source")
+	}
+	preemptStore(&slot.mailbox, uint32(channelMailboxReady))
+	if _, _, _, _, direct := ownerLocalDirectChannelPlan(
+		fixture.driver,
+		&fixture.driver.local.resolve,
+	); direct {
+		t.Fatal("direct finish accepted a non-empty source mailbox")
+	}
+	preemptStore(&slot.mailbox, uint32(channelMailboxEmpty))
+	if _, _, _, _, direct := ownerLocalDirectChannelPlan(
+		fixture.driver,
+		&fixture.driver.local.resolve,
+	); !direct {
+		t.Fatal("direct finish rejected restored exact source generation")
+	}
+
+	// The first source reduction after the one typed runtime hook must perform
+	// confirm, claim release, result transfer, recycle, packet finalization, and
+	// promotion together. A generic cleanup fallback needs several reductions,
+	// so this exact boundary is the performance regression gate.
+	finish, finishOK := NextExecutorRunStep(fixture.driver)
+	if !finishOK || finish.Kind != ExecutorRunStepSource || !finish.Poll.Complete ||
+		!finish.Poll.AtomicResolve || finish.Poll.Used != 1 || finish.Poll.Promoted != 1 ||
+		finish.Poll.ApplyVisits != 0 {
+		t.Fatalf("owner-local direct finish = (%+v,%t), plan=%+v local=%+v",
+			finish, finishOK, plan, fixture.driver.local)
+	}
+	if !CommitExecutorRunSourceDistribution(fixture.driver, false) {
+		t.Fatal("commit owner-local direct source distribution")
+	}
+	if packet.state != resumePacketMaterialized || packet.outcome != ParkOutcomeCompleted ||
+		packet.caseID != 1 || packet.result != ResumeResultChannel || packet.small != 3 ||
+		plan != (ResumeCleanupPlan{}) || fixture.wait != (WaitSetRecord{}) ||
+		fixture.ids[0] != (OperationID{}) ||
+		!emptyOwnerLocalCompletion(&fixture.driver.local) ||
+		!channelOperationSourceEmpty(fixture.source, fixture.p) {
+		t.Fatalf("owner-local direct cleanup retained state: packet=%+v plan=%+v wait=%+v ids=%+v local=%+v empty=%t",
+			packet, plan, fixture.wait, fixture.ids, fixture.driver.local,
+			channelOperationSourceEmpty(fixture.source, fixture.p))
+	}
+
+	if !EnterExecutorRunCompatibility(fixture.driver) {
+		t.Fatal("leave owner-local direct bounded runner")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue yielded owner-local direct producer = (%p,%t)", g, ok)
+	}
+	finishWaitTestTask(t, fixture.p, producer, beginWaitTestResume(t, fixture.p, producer))
+	if g, ok := NextRunnable(fixture.p); !ok || g != fixture.task.g {
+		t.Fatalf("dequeue owner-local direct peer = (%p,%t)", g, ok)
+	}
+	action := beginWaitTestResume(t, fixture.p, fixture.task)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(
+		fixture.task.g,
+		fixture.ticket,
+		&packet,
+		nil,
+	)
+	if !taken || outcome != ParkOutcomeCompleted || caseID != 1 ||
+		cancel != TaskCancelNone || result != ResumeResultChannel || small != 3 {
+		t.Fatalf("take owner-local direct packet = (%d,%d,%d,%d,%d,%t)",
+			outcome, caseID, cancel, result, small, taken)
+	}
+	yieldRunningDriverTask(t, fixture.p, fixture.task, action)
+	closeTestExecutorDriver(t, fixture.driver)
+	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{
+		fixture.task.g: fixture.task,
+	})
+	if !fixture.source.CanRelease() || !fixture.registry.CanRelease() {
+		t.Fatal("owner-local direct cleanup retained source/registry")
+	}
+	runtime.KeepAlive(producer.frame.memory)
+	runtime.KeepAlive(fixture.task.frame.memory)
+}
+
+func TestOwnerLocalDirectChannelCommittedResultCompletesInline(t *testing.T) {
+	var (
+		packet ResumePacket
+		plan   ResumeCleanupPlan
+		token  byte
+	)
+	fixture := newChannelClaimCoreFixtureBeforeResume(
+		t,
+		"channel-owner-local-direct-result",
+		[]uint32{1},
+		true,
+		0,
+		func(fixture *channelClaimCoreFixture) {
+			if !BindWaitSetResumeCleanup(
+				&fixture.wait,
+				&packet,
+				&plan,
+				ResumeCleanupBinding{
+					Kind:         ResumeCleanupChannelDirect,
+					Context:      unsafe.Pointer(&token),
+					Entries:      unsafe.Pointer(&fixture.ids[0]),
+					Claim:        fixture.claim,
+					Count:        1,
+					RuntimeCount: 1,
+					Stride:       unsafe.Sizeof(OperationID{}),
+				},
+			) {
+				t.Fatal("bind owner-local direct result cleanup")
+			}
+			// Production installs this certificate through
+			// PrepareSingleChannelParkCleanup. This fixture assembles the same
+			// frozen binding explicitly so it can exercise the source core.
+			fixture.wait.directChannel = true
+		},
+	)
+
+	producer := newYieldingTestG(t, "channel-owner-local-direct-result-producer")
+	if !Enqueue(fixture.p, producer.g) {
+		t.Fatal("enqueue owner-local direct result producer")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue owner-local direct result producer = (%p,%t)", g, ok)
+	}
+	producerAction := beginWaitTestResume(t, fixture.p, producer)
+	slot, slotOK := channelOperationSlotFor(fixture.source, fixture.ids[0])
+	if !slotOK {
+		t.Fatal("find owner-local direct result slot")
+	}
+	var transaction ChannelExternalCommit
+	beginResult, prepared := BeginChannelOwnerLocalDirectCommit(
+		&transaction,
+		fixture.source,
+		fixture.ids[0],
+		fixture.claim,
+		producer.g,
+		fixture.driver,
+	)
+	if beginResult != ChannelExternalCommitBeginPrepared || !prepared ||
+		!transaction.ownerLocalUnadmitted || transaction.endpoint.held ||
+		preemptLoad(&slot.inflight) != 0 || preemptLoad(&slot.externalLease) != 0 {
+		t.Fatalf("begin owner-local direct result = transaction:%+v claim:%d inflight:%#x lease:%#x",
+			transaction, selectClaimLoad(fixture.claim), preemptLoad(&slot.inflight),
+			preemptLoad(&slot.externalLease))
+	}
+	if !transaction.BeginEffect() || transaction.CommitOwnerLocalDirectWithResult(3) != ChannelOwnerLocalCompletedInline {
+		t.Fatalf("commit owner-local direct result = transaction:%+v claim:%d",
+			transaction, selectClaimLoad(fixture.claim))
+	}
+	if preemptLoad(&slot.inflight)&producerAdmissionCountMask != 0 ||
+		preemptLoad(&slot.externalLease) != 0 {
+		t.Fatalf("owner-local direct result paid generic admission: inflight=%#x lease=%#x",
+			preemptLoad(&slot.inflight), preemptLoad(&slot.externalLease))
+	}
+	if packet.state != resumePacketMaterialized || packet.outcome != ParkOutcomeCompleted ||
+		packet.caseID != 1 || packet.result != ResumeResultChannel || packet.small != 3 ||
+		plan != (ResumeCleanupPlan{}) || fixture.wait != (WaitSetRecord{}) ||
+		fixture.ids[0] != (OperationID{}) || !emptyOwnerLocalCompletion(&fixture.driver.local) ||
+		!channelOperationSourceEmpty(fixture.source, fixture.p) ||
+		fixture.p.readyHead != fixture.task.g || fixture.p.readyTail != fixture.task.g {
+		t.Fatalf("inline owner-local direct result retained state: packet=%+v plan=%+v wait=%+v ids=%+v local=%+v ready=(%p,%p)",
+			packet, plan, fixture.wait, fixture.ids, fixture.driver.local,
+			fixture.p.readyHead, fixture.p.readyTail)
+	}
+	yieldRunningDriverTask(t, fixture.p, producer, producerAction)
+
+	if !EnterExecutorRunCompatibility(fixture.driver) {
+		t.Fatal("leave owner-local direct result bounded runner")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != fixture.task.g {
+		t.Fatalf("dequeue inline owner-local direct result peer = (%p,%t)", g, ok)
+	}
+	action := beginWaitTestResume(t, fixture.p, fixture.task)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(
+		fixture.task.g,
+		fixture.ticket,
+		&packet,
+		nil,
+	)
+	if !taken || outcome != ParkOutcomeCompleted || caseID != 1 ||
+		cancel != TaskCancelNone || result != ResumeResultChannel || small != 3 {
+		t.Fatalf("take owner-local direct result packet = (%d,%d,%d,%d,%d,%t)",
+			outcome, caseID, cancel, result, small, taken)
+	}
+	yieldRunningDriverTask(t, fixture.p, fixture.task, action)
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue yielded owner-local direct result producer = (%p,%t)", g, ok)
+	}
+	finishWaitTestTask(t, fixture.p, producer, beginWaitTestResume(t, fixture.p, producer))
+	closeTestExecutorDriver(t, fixture.driver)
+	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{
+		fixture.task.g: fixture.task,
+	})
+	if !fixture.source.CanRelease() || !fixture.registry.CanRelease() {
+		t.Fatal("owner-local direct result retained source/registry")
+	}
+	runtime.KeepAlive(producer.frame.memory)
+	runtime.KeepAlive(fixture.task.frame.memory)
+}
+
+func TestOwnerLocalDirectChannelInlinePreflightIsAtomic(t *testing.T) {
+	var (
+		packet ResumePacket
+		plan   ResumeCleanupPlan
+		token  byte
+	)
+	fixture := newChannelClaimCoreFixtureBeforeResume(
+		t,
+		"channel-owner-local-direct-preflight",
+		[]uint32{1},
+		true,
+		0,
+		func(fixture *channelClaimCoreFixture) {
+			if !BindWaitSetResumeCleanup(
+				&fixture.wait,
+				&packet,
+				&plan,
+				ResumeCleanupBinding{
+					Kind:         ResumeCleanupChannelDirect,
+					Context:      unsafe.Pointer(&token),
+					Entries:      unsafe.Pointer(&fixture.ids[0]),
+					Claim:        fixture.claim,
+					Count:        1,
+					RuntimeCount: 1,
+					Stride:       unsafe.Sizeof(OperationID{}),
+				},
+			) {
+				t.Fatal("bind owner-local direct preflight cleanup")
+			}
+			fixture.wait.directChannel = true
+		},
+	)
+
+	producer := newYieldingTestG(t, "channel-owner-local-direct-preflight-producer")
+	if !Enqueue(fixture.p, producer.g) {
+		t.Fatal("enqueue owner-local direct preflight producer")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue owner-local direct preflight producer = (%p,%t)", g, ok)
+	}
+	producerAction := beginWaitTestResume(t, fixture.p, producer)
+	slot, slotOK := channelOperationSlotFor(fixture.source, fixture.ids[0])
+	if !slotOK {
+		t.Fatal("find owner-local direct preflight slot")
+	}
+	var transaction ChannelExternalCommit
+	beginResult, prepared := BeginChannelOwnerLocalDirectCommit(
+		&transaction,
+		fixture.source,
+		fixture.ids[0],
+		fixture.claim,
+		producer.g,
+		fixture.driver,
+	)
+	if beginResult != ChannelExternalCommitBeginPrepared || !prepared ||
+		!transaction.BeginEffect() {
+		t.Fatalf("begin owner-local direct preflight = (%d,%t,%+v)",
+			beginResult, prepared, transaction)
+	}
+
+	// Corrupt immutable packet scratch after the prepared capability. Commit
+	// has already crossed the physical effect when the inline preflight sees
+	// this, so it must fail closed without partially detaching, recycling, or
+	// promoting any owner state.
+	packet.small = 9
+	if result := transaction.CommitOwnerLocalDirectWithResult(3); result != ChannelOwnerLocalCommitInvalid ||
+		transaction.phase != channelExternalCommitPairBroken ||
+		preemptLoad(&slot.state) != uint32(producerSourceClosing) ||
+		!producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
+		slot.record.phase != operationActive || slot.record.resolutionApplied || slot.claim != fixture.claim ||
+		selectClaimLoad(fixture.claim) != selectClaimClaimed ||
+		fixture.wait.state != waitSetRecordActive || fixture.wait.g.park.phase != parkParked ||
+		fixture.p.parkWaitHead != &fixture.wait || fixture.p.parkWaitTail != &fixture.wait ||
+		fixture.p.readyHead != nil || fixture.p.readyTail != nil {
+		t.Fatalf("failed inline preflight partially mutated state: result=%d transaction=%+v slot=%+v wait=%+v ready=(%p,%p)",
+			result, transaction, *slot, fixture.wait, fixture.p.readyHead, fixture.p.readyTail)
+	}
+
+	packet.small = ResumeSmallInvalid
+	handled, recovered := completeOwnerLocalDirectChannelInline(
+		transaction.ownerLocalDriver,
+		transaction.ownerLocalWait,
+		transaction.ownerLocalAdmission,
+		transaction.endpoint.source,
+		transaction.endpoint.slot,
+		transaction.endpoint.id,
+		3,
+	)
+	if !handled || !recovered {
+		t.Fatalf("recover owner-local direct preflight = (%t,%t)", handled, recovered)
+	}
+	transaction = ChannelExternalCommit{}
+	if packet.state != resumePacketMaterialized || packet.result != ResumeResultChannel || packet.small != 3 ||
+		plan != (ResumeCleanupPlan{}) || fixture.wait != (WaitSetRecord{}) ||
+		fixture.ids[0] != (OperationID{}) || !channelOperationSourceEmpty(fixture.source, fixture.p) ||
+		fixture.p.readyHead != fixture.task.g || fixture.p.readyTail != fixture.task.g {
+		t.Fatalf("recovered inline preflight retained state: packet=%+v plan=%+v wait=%+v ids=%+v ready=(%p,%p)",
+			packet, plan, fixture.wait, fixture.ids, fixture.p.readyHead, fixture.p.readyTail)
+	}
+	yieldRunningDriverTask(t, fixture.p, producer, producerAction)
+
+	if !EnterExecutorRunCompatibility(fixture.driver) {
+		t.Fatal("leave owner-local direct preflight bounded runner")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != fixture.task.g {
+		t.Fatalf("dequeue owner-local direct preflight peer = (%p,%t)", g, ok)
+	}
+	action := beginWaitTestResume(t, fixture.p, fixture.task)
+	if outcome, caseID, cancel, result, small, taken := TakeResumePacket(
+		fixture.task.g,
+		fixture.ticket,
+		&packet,
+		nil,
+	); !taken || outcome != ParkOutcomeCompleted || caseID != 1 || cancel != TaskCancelNone ||
+		result != ResumeResultChannel || small != 3 {
+		t.Fatalf("take recovered owner-local direct preflight packet = (%d,%d,%d,%d,%d,%t)",
+			outcome, caseID, cancel, result, small, taken)
+	}
+	yieldRunningDriverTask(t, fixture.p, fixture.task, action)
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue yielded owner-local direct preflight producer = (%p,%t)", g, ok)
+	}
+	finishWaitTestTask(t, fixture.p, producer, beginWaitTestResume(t, fixture.p, producer))
+	closeTestExecutorDriver(t, fixture.driver)
+	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{
+		fixture.task.g: fixture.task,
+	})
+	if !fixture.source.CanRelease() || !fixture.registry.CanRelease() {
+		t.Fatal("owner-local direct preflight retained source/registry")
+	}
+	runtime.KeepAlive(producer.frame.memory)
+	runtime.KeepAlive(fixture.task.frame.memory)
+}
+
+func TestOwnerLocalDirectChannelReadyRaceUpgradesAdmission(t *testing.T) {
+	var (
+		packet ResumePacket
+		plan   ResumeCleanupPlan
+		token  byte
+	)
+	fixture := newChannelClaimCoreFixtureBeforeResume(
+		t,
+		"channel-owner-local-ready-race",
+		[]uint32{1},
+		true,
+		0,
+		func(fixture *channelClaimCoreFixture) {
+			if !BindWaitSetResumeCleanup(
+				&fixture.wait,
+				&packet,
+				&plan,
+				ResumeCleanupBinding{
+					Kind:         ResumeCleanupChannelDirect,
+					Context:      unsafe.Pointer(&token),
+					Entries:      unsafe.Pointer(&fixture.ids[0]),
+					Claim:        fixture.claim,
+					Count:        1,
+					RuntimeCount: 1,
+					Stride:       unsafe.Sizeof(OperationID{}),
+				},
+			) {
+				t.Fatal("bind ready-race direct result cleanup")
+			}
+			fixture.wait.directChannel = true
+		},
+	)
+
+	producer := newYieldingTestG(t, "channel-owner-local-ready-race-producer")
+	if !Enqueue(fixture.p, producer.g) {
+		t.Fatal("enqueue ready-race producer")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue ready-race producer = (%p,%t)", g, ok)
+	}
+	producerAction := beginWaitTestResume(t, fixture.p, producer)
+	slot, slotOK := channelOperationSlotFor(fixture.source, fixture.ids[0])
+	if !slotOK {
+		t.Fatal("find ready-race channel slot")
+	}
+	var transaction ChannelExternalCommit
+	if result, prepared := BeginChannelOwnerLocalDirectCommit(
+		&transaction,
+		fixture.source,
+		fixture.ids[0],
+		fixture.claim,
+		producer.g,
+		fixture.driver,
+	); result != ChannelExternalCommitBeginPrepared || !prepared ||
+		!transaction.ownerLocalUnadmitted || transaction.endpoint.held {
+		t.Fatalf("begin ready-race direct transaction = (%d,%t,%+v)", result, prepared, transaction)
+	}
+	if result := fixture.source.PostReady(fixture.ids[0]); result != ChannelOperationPosted {
+		t.Fatalf("post ready-race source = %d", result)
+	}
+	if !transaction.BeginEffect() ||
+		transaction.CommitOwnerLocalDirectWithResult(3) != ChannelOwnerLocalCommitFallback {
+		t.Fatalf("ready-race direct fallback = %+v", transaction)
+	}
+	if transaction.ownerLocalUnadmitted || !transaction.endpoint.held ||
+		preemptLoad(&slot.inflight) != 1 || preemptLoad(&slot.externalLease)&1 == 0 ||
+		selectClaimLoad(fixture.claim) != selectClaimCommitting {
+		t.Fatalf("ready-race admission upgrade = transaction:%+v inflight:%#x lease:%#x claim:%d",
+			transaction, preemptLoad(&slot.inflight), preemptLoad(&slot.externalLease),
+			selectClaimLoad(fixture.claim))
+	}
+	if !transaction.CommitAtRouteWithResult(fixture.driver.route, 3) ||
+		transaction != (ChannelExternalCommit{}) || preemptLoad(&slot.inflight) != 0 ||
+		preemptLoad(&slot.externalLease)&1 != 0 || selectClaimLoad(fixture.claim) != selectClaimClaimed {
+		t.Fatalf("commit ready-race fallback = transaction:%+v inflight:%#x lease:%#x claim:%d",
+			transaction, preemptLoad(&slot.inflight), preemptLoad(&slot.externalLease),
+			selectClaimLoad(fixture.claim))
+	}
+
+	local, localOK := TryPublishOwnerLocalChannelCompletionCurrent(
+		producer.g,
+		fixture.driver,
+		fixture.source,
+		fixture.ids[0],
+	)
+	if !localOK || !local {
+		t.Fatalf("publish ready-race owner-local fallback = (%t,%t)", local, localOK)
+	}
+	yieldRunningDriverTask(t, fixture.p, producer, producerAction)
+
+	finish, finishOK := NextExecutorRunStep(fixture.driver)
+	if !finishOK || finish.Kind != ExecutorRunStepSource || !finish.Poll.Complete ||
+		!finish.Poll.AtomicResolve || finish.Poll.ApplyVisits != 1 || finish.Poll.Promoted != 1 ||
+		!CommitExecutorRunSourceDistribution(fixture.driver, false) {
+		t.Fatalf("ready-race owner-local finish = (%+v,%t)", finish, finishOK)
+	}
+	if !EnterExecutorRunCompatibility(fixture.driver) {
+		t.Fatal("leave ready-race bounded runner")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue yielded ready-race producer = (%p,%t)", g, ok)
+	}
+	finishWaitTestTask(t, fixture.p, producer, beginWaitTestResume(t, fixture.p, producer))
+	if g, ok := NextRunnable(fixture.p); !ok || g != fixture.task.g {
+		t.Fatalf("dequeue ready-race peer = (%p,%t)", g, ok)
+	}
+	action := beginWaitTestResume(t, fixture.p, fixture.task)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(
+		fixture.task.g,
+		fixture.ticket,
+		&packet,
+		nil,
+	)
+	if !taken || outcome != ParkOutcomeCompleted || caseID != 1 || cancel != TaskCancelNone ||
+		result != ResumeResultChannel || small != 3 {
+		t.Fatalf("take ready-race packet = (%d,%d,%d,%d,%d,%t)",
+			outcome, caseID, cancel, result, small, taken)
+	}
+	yieldRunningDriverTask(t, fixture.p, fixture.task, action)
+	closeTestExecutorDriver(t, fixture.driver)
+	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{
+		fixture.task.g: fixture.task,
+	})
+	if !fixture.source.CanRelease() || !fixture.registry.CanRelease() {
+		t.Fatal("ready-race fallback retained source/registry")
+	}
+	runtime.KeepAlive(producer.frame.memory)
+	runtime.KeepAlive(fixture.task.frame.memory)
+}
+
+func TestOwnerLocalDirectChannelJoinsProducerAdmittedBeforePhysicalCommit(t *testing.T) {
+	var (
+		packet ResumePacket
+		plan   ResumeCleanupPlan
+		token  byte
+	)
+	fixture := newChannelClaimCoreFixtureBeforeResume(
+		t,
+		"channel-owner-local-admitted-producer",
+		[]uint32{1},
+		true,
+		0,
+		func(fixture *channelClaimCoreFixture) {
+			if !BindWaitSetResumeCleanup(
+				&fixture.wait,
+				&packet,
+				&plan,
+				ResumeCleanupBinding{
+					Kind:         ResumeCleanupChannelDirect,
+					Context:      unsafe.Pointer(&token),
+					Entries:      unsafe.Pointer(&fixture.ids[0]),
+					Claim:        fixture.claim,
+					Count:        1,
+					RuntimeCount: 1,
+					Stride:       unsafe.Sizeof(OperationID{}),
+				},
+			) {
+				t.Fatal("bind admitted-producer direct cleanup")
+			}
+			fixture.wait.directChannel = true
+		},
+	)
+
+	producer := newYieldingTestG(t, "channel-owner-local-admitted-producer-current")
+	if !Enqueue(fixture.p, producer.g) {
+		t.Fatal("enqueue admitted-producer current")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue admitted-producer current = (%p,%t)", g, ok)
+	}
+	producerAction := beginWaitTestResume(t, fixture.p, producer)
+	slot, slotOK := channelOperationSlotFor(fixture.source, fixture.ids[0])
+	if !slotOK {
+		t.Fatal("find admitted-producer channel slot")
+	}
+	var transaction ChannelExternalCommit
+	if result, prepared := BeginChannelOwnerLocalDirectCommit(
+		&transaction,
+		fixture.source,
+		fixture.ids[0],
+		fixture.claim,
+		producer.g,
+		fixture.driver,
+	); result != ChannelExternalCommitBeginPrepared || !prepared ||
+		!transaction.ownerLocalUnadmitted || transaction.endpoint.held {
+		t.Fatalf("begin admitted-producer direct transaction = (%d,%t,%+v)", result, prepared, transaction)
+	}
+	if acquired := acquireProducerSourceGeneration(
+		&slot.producerSourceSlot,
+		fixture.ids[0].Generation,
+	); acquired != producerSourceAcquired {
+		t.Fatalf("hold source producer before physical commit = %d", acquired)
+	}
+	if !transaction.BeginEffect() ||
+		transaction.CommitOwnerLocalDirectWithResult(3) != ChannelOwnerLocalCommitted {
+		t.Fatalf("commit with admitted producer = %+v", transaction)
+	}
+	if transaction != (ChannelExternalCommit{}) ||
+		preemptLoad(&slot.state) != uint32(producerSourceClosing) ||
+		preemptLoad(&slot.inflight) != producerAdmissionClosed|1 ||
+		fixture.driver.local.head != &fixture.wait || fixture.driver.local.tail != &fixture.wait ||
+		fixture.wait.work != waitSetWorkQueued || slot.record.phase != operationActive ||
+		selectClaimLoad(fixture.claim) != selectClaimClaimed {
+		t.Fatalf("admitted producer did not defer inline detach: transaction=%+v state=%d inflight=%#x local=(%p,%p) wait=%+v record=%+v claim=%d",
+			transaction, preemptLoad(&slot.state), preemptLoad(&slot.inflight),
+			fixture.driver.local.head, fixture.driver.local.tail, fixture.wait,
+			slot.record, selectClaimLoad(fixture.claim))
+	}
+	posted := fixture.source.postReadyAdmitted(slot, fixture.ids[0])
+	released := producerAdmissionReleaseChecked(&slot.inflight)
+	if posted != ChannelOperationPostClosed || !released ||
+		preemptLoad(&slot.inflight) != producerAdmissionClosed {
+		t.Fatalf("finish admitted producer after seal = posted:%d inflight:%#x",
+			posted, preemptLoad(&slot.inflight))
+	}
+	yieldRunningDriverTask(t, fixture.p, producer, producerAction)
+
+	complete := false
+	for reduction := 0; reduction < 16; reduction++ {
+		step, advanced := NextExecutorRunStep(fixture.driver)
+		if !advanced {
+			t.Fatalf("admitted-producer reduction %d did not advance", reduction)
+		}
+		switch step.Kind {
+		case ExecutorRunStepSource:
+			if !step.Poll.AtomicResolve || step.Poll.Used != 1 {
+				t.Fatalf("admitted-producer source reduction %d = %+v", reduction, step.Poll)
+			}
+			if step.Poll.Complete {
+				if !CommitExecutorRunSourceDistribution(fixture.driver, false) {
+					t.Fatal("commit admitted-producer source distribution")
+				}
+				complete = true
+			}
+		case ExecutorRunStepMaterialize:
+			if step.Cleanup.Kind != ResumeCleanupChannelDirect ||
+				!CommitResumeCleanupStep(step.Cleanup, 3) {
+				t.Fatalf("materialize admitted-producer cleanup %d = %+v", reduction, step.Cleanup)
+			}
+		default:
+			t.Fatalf("admitted-producer reduction %d kind = %d", reduction, step.Kind)
+		}
+		if complete {
+			break
+		}
+	}
+	if !complete || packet.state != resumePacketMaterialized || packet.outcome != ParkOutcomeCompleted ||
+		packet.caseID != 1 || packet.result != ResumeResultChannel || packet.small != 3 {
+		t.Fatalf("admitted-producer cleanup incomplete: complete=%t packet=%+v", complete, packet)
+	}
+	if !EnterExecutorRunCompatibility(fixture.driver) {
+		t.Fatal("leave admitted-producer bounded runner")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue admitted-producer current after yield = (%p,%t)", g, ok)
+	}
+	finishWaitTestTask(t, fixture.p, producer, beginWaitTestResume(t, fixture.p, producer))
+	if g, ok := NextRunnable(fixture.p); !ok || g != fixture.task.g {
+		t.Fatalf("dequeue admitted-producer peer = (%p,%t)", g, ok)
+	}
+	action := beginWaitTestResume(t, fixture.p, fixture.task)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(
+		fixture.task.g,
+		fixture.ticket,
+		&packet,
+		nil,
+	)
+	if !taken || outcome != ParkOutcomeCompleted || caseID != 1 || cancel != TaskCancelNone ||
+		result != ResumeResultChannel || small != 3 {
+		t.Fatalf("take admitted-producer packet = (%d,%d,%d,%d,%d,%t)",
+			outcome, caseID, cancel, result, small, taken)
+	}
+	yieldRunningDriverTask(t, fixture.p, fixture.task, action)
+	closeTestExecutorDriver(t, fixture.driver)
+	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{
+		fixture.task.g: fixture.task,
+	})
+	if !fixture.source.CanRelease() || !fixture.registry.CanRelease() {
+		t.Fatal("admitted-producer cleanup retained source/registry")
+	}
+	runtime.KeepAlive(producer.frame.memory)
+	runtime.KeepAlive(fixture.task.frame.memory)
+}
+
+func TestOwnerLocalChannelCompletionConsumesInitialAffectedVisit(t *testing.T) {
+	fixture := newChannelClaimCoreFixture(t, "channel-owner-local-initial", []uint32{152}, true, 0)
+	if fixture.wait.work != waitSetWorkQueued || fixture.p.affectedWaitHead != &fixture.wait ||
+		fixture.p.affectedWaitTail != &fixture.wait {
+		t.Fatalf("initial affected visit = wait:%+v queue:(%p,%p)",
+			fixture.wait, fixture.p.affectedWaitHead, fixture.p.affectedWaitTail)
+	}
+
+	producer := newYieldingTestG(t, "channel-owner-local-initial-producer")
+	if !Enqueue(fixture.p, producer.g) {
+		t.Fatal("enqueue initial-visit producer")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != producer.g {
+		t.Fatalf("dequeue initial-visit producer = (%p,%t)", g, ok)
+	}
+	producerAction := beginWaitTestResume(t, fixture.p, producer)
+	externallyCommitChannelCandidateAtRoute(t, fixture, 0, RouteID(1))
+
+	local, ok := TryPublishOwnerLocalChannelCompletion(producer.g, fixture.source, fixture.ids[0])
+	if !ok || !local || fixture.p.affectedWaitHead != nil || fixture.p.affectedWaitTail != nil ||
+		fixture.driver.local.head != &fixture.wait || fixture.driver.local.tail != &fixture.wait ||
+		fixture.wait.work != waitSetWorkQueued || fixture.wait.workNext != nil || fixture.source.Pending() ||
+		fixture.registry.ObserveRequested(fixture.handle) {
+		t.Fatalf("consume initial affected visit = (%t,%t) affected:(%p,%p) local:(%p,%p) wait:%+v pending:%t request:%t",
+			local, ok, fixture.p.affectedWaitHead, fixture.p.affectedWaitTail,
+			fixture.driver.local.head, fixture.driver.local.tail, fixture.wait, fixture.source.Pending(),
+			fixture.registry.ObserveRequested(fixture.handle))
+	}
+	yieldRunningDriverTask(t, fixture.p, producer, producerAction)
+
+	var complete ExecutorPollProgress
+	for reduction := 0; reduction < 8; reduction++ {
+		step, advanced := NextExecutorRunStep(fixture.driver)
+		if !advanced {
+			t.Fatalf("initial-visit local reduction %d failed", reduction)
+		}
+		switch step.Kind {
+		case ExecutorRunStepSource:
+			if !step.Poll.AtomicResolve || step.Poll.Used != 1 {
+				t.Fatalf("initial-visit source reduction %d = %+v", reduction, step.Poll)
+			}
+			complete = step.Poll
+		case ExecutorRunStepMaterialize:
+			// The core fixture binds no runtime-owned typed cleanup plan.
+			t.Fatalf("unexpected initial-visit materialize reduction %d", reduction)
+		default:
+			t.Fatalf("unexpected initial-visit reduction %d kind %d", reduction, step.Kind)
+		}
+		if complete.Complete {
+			if !CommitExecutorRunSourceDistribution(fixture.driver, false) {
+				t.Fatal("commit initial-visit local distribution")
+			}
+			break
+		}
+	}
+	if !complete.Complete || complete.Promoted != 1 || !emptyOwnerLocalCompletion(&fixture.driver.local) ||
+		fixture.task.g.park.phase != parkReady || fixture.source.Pending() {
+		t.Fatalf("initial-visit owner-local completion = %+v local:%+v park:%+v pending:%t",
+			complete, fixture.driver.local, fixture.task.g.park, fixture.source.Pending())
+	}
+
+	if !EnterExecutorRunCompatibility(fixture.driver) {
+		t.Fatal("leave initial-visit bounded runner")
+	}
+	if g, runnable := NextRunnable(fixture.p); !runnable || g != producer.g {
+		t.Fatalf("dequeue yielded initial-visit producer = (%p,%t)", g, runnable)
+	}
+	finishWaitTestTask(t, fixture.p, producer, beginWaitTestResume(t, fixture.p, producer))
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 152 || !decision.lease.Valid() {
+		t.Fatalf("initial-visit peer decision = %+v", decision)
 	}
 	releaseChannelClaimCoreFixture(t, fixture, decision)
 	runtime.KeepAlive(producer.frame.memory)
@@ -1159,7 +1982,8 @@ func TestChannelReadyTryCommitRetryBudgetYieldsEpochAndPreservesReady(t *testing
 	var progress ExecutorPollProgress
 	for step := 0; step < 10000; step++ {
 		runStep, ok := NextExecutorRunStep(fixture.driver)
-		if !ok || runStep.Kind != ExecutorRunStepSource || runStep.Poll.Used != 1 {
+		if !ok || runStep.Kind != ExecutorRunStepSource || runStep.Poll.Used == 0 ||
+			runStep.Poll.Used > executorRunSourceBatchQuantum {
 			t.Fatalf("bounded retry source step %d = (%+v,%t)", step, runStep, ok)
 		}
 		progress = runStep.Poll

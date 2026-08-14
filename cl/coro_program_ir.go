@@ -201,6 +201,7 @@ func (ir *coroProgramIR) freezeSite(function *ssa.Function, owner *preparedEmiss
 		return nil
 	}
 	if len(plan.managedRuntimeHelpers) != 0 || len(plan.plainRuntimeHelpers) != 0 ||
+		plan.plainAllocation.borrowed() ||
 		len(plan.localityDispatchers) != 0 {
 		byInstruction[instruction] = plan
 	}
@@ -223,15 +224,51 @@ func (ir *coroProgramIR) freezeSiteOwner(
 		return fmt.Errorf("coroutine site plan owner %q has no frozen function preamble", function.Name())
 	}
 	semantic := ir.semanticPlans[key]
+	preamble := ir.functionPreambles[key]
+	facts, err := deriveCoroLocalBodyFacts(prog, function, semantic, preamble.emitsGoBody)
+	if err != nil {
+		return err
+	}
+	if previous, exists := ir.localBodyFacts[function]; exists && !previous.Same(facts) {
+		return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
+	}
+	ir.localBodyFacts[function] = facts
+	ir.siteOwners[key] = none{}
+	return nil
+}
+
+// deriveCoroLocalBodyFacts projects one already-frozen semantic instruction
+// table into the analyzer-owned local body summary. Call-site finalization may
+// invoke it a second time after replacing an exact compiler-elided intrinsic
+// call with its narrower semantic recipe. Keeping the projection here avoids
+// an analysis-time raw SSA rescan and keeps ProgramIR as the sole authority.
+func deriveCoroLocalBodyFacts(
+	prog llssa.Program,
+	function *ssa.Function,
+	semantic map[ssa.Instruction]coroSemanticInstructionPlan,
+	outcomePlainEligible bool,
+) (coro.SSAFunctionBodyFacts, error) {
+	if prog == nil || function == nil {
+		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("local body facts require one exact program and function")
+	}
 	facts := coro.SSAFunctionBodyFacts{
-		Effect:           coro.NoSuspend,
-		OutcomePlainLeaf: function.Blocks != nil,
-		OutcomePlainDAG:  function.Blocks != nil,
+		Effect:             coro.NoSuspend,
+		OutcomePlainLeaf:   function.Blocks != nil,
+		OutcomePlainDAG:    function.Blocks != nil,
+		StaticOutcomeLocal: function.Blocks != nil,
 	}
 	if function.Blocks != nil {
 		facts.Exec = coro.MayUnwind
 	}
+	if coroRuntimeContextPrimitive(function) {
+		// These are the only bottom-level runtime operations which observe or
+		// replace the ambient logical G. All ordinary Go wrappers acquire this
+		// bit through the normal call fixed point, including across imported
+		// library summaries; source annotations are neither required nor read.
+		facts.Exec = facts.Exec.Join(coro.NeedsRuntimeContext)
+	}
 	atomicBlocks := make([]coro.SSAAtomicBlockFacts, len(function.Blocks))
+	hasEvaluatedDefer := false
 	for _, block := range function.Blocks {
 		blockFacts := coro.SSAAtomicBlockFacts{Index: block.Index}
 		for _, successor := range block.Succs {
@@ -241,12 +278,18 @@ func (ir *coroProgramIR) freezeSiteOwner(
 		for instructionIndex, instruction := range block.Instrs {
 			plan, ok := semantic[instruction]
 			if !ok {
-				return fmt.Errorf("coroutine semantic SitePlan owner %q omitted source instruction %q", function.Name(), instruction.String())
+				return coro.SSAFunctionBodyFacts{}, fmt.Errorf("coroutine semantic SitePlan owner %q omitted source instruction %q", function.Name(), instruction.String())
 			}
 			if !plan.evaluated {
 				facts.OutcomePlainLeaf = false
 				facts.OutcomePlainDAG = false
 				continue
+			}
+			if _, deferInstruction := instruction.(*ssa.Defer); deferInstruction {
+				hasEvaluatedDefer = true
+			}
+			if !plan.staticOutcome {
+				facts.StaticOutcomeLocal = false
 			}
 			if !coroOutcomePlainLeafSemanticRecipe(plan) {
 				facts.OutcomePlainLeaf = false
@@ -258,7 +301,7 @@ func (ir *coroProgramIR) freezeSiteOwner(
 				facts.OutcomePlainCallCount++
 				call, ok := instruction.(*ssa.Call)
 				if !ok {
-					return fmt.Errorf("coroutine call recipe in %q is attached to %T", function.Name(), instruction)
+					return coro.SSAFunctionBodyFacts{}, fmt.Errorf("coroutine call recipe in %q is attached to %T", function.Name(), instruction)
 				}
 				blockFacts.Calls = append(blockFacts.Calls, coro.SSAAtomicCallSiteFacts{
 					Instruction:      call,
@@ -273,6 +316,11 @@ func (ir *coroProgramIR) freezeSiteOwner(
 					// that hidden allocation, so reject the optimization while the
 					// ordinary coroutine fallback is still available.
 					facts.OutcomePlainDAG = false
+					// An unbounded static-outcome body has the same synchronous
+					// caller-owned result-slot constraint. Its full coroutine primary
+					// may use a managed frame slot, but the native twin must not place
+					// an oversized child result on a fixed stack.
+					facts.StaticOutcomeLocal = false
 				}
 			}
 			facts.Effect = facts.Effect.Join(plan.effect)
@@ -285,23 +333,51 @@ func (ir *coroProgramIR) freezeSiteOwner(
 		atomicBlocks[block.Index] = blockFacts
 	}
 	facts.Effect = facts.Effect.Normalize()
+	if !hasEvaluatedDefer {
+		// x/tools retains RunDefers on normal returns whenever the function has
+		// any syntactic defer, including one behind a constant-dead branch. With
+		// no evaluated registration site it is semantically a no-op and does not
+		// require a cleanup frame.
+		facts.Exec &^= coro.NeedsCleanupFrame
+		for instruction, plan := range semantic {
+			if _, runDefers := instruction.(*ssa.RunDefers); !runDefers || !plan.evaluated {
+				continue
+			}
+			plan.exec &^= coro.NeedsCleanupFrame
+			plan.materialized = false
+			semantic[instruction] = plan
+		}
+	}
 	facts.HasCycle = coroSemanticEvaluatedCFGHasCycle(function.Blocks, semantic)
 	if len(function.Blocks) != 0 {
 		atomicPath, err := coro.NewSSAAtomicPathFacts(function, atomicBlocks)
 		if err != nil {
-			return fmt.Errorf("function %q atomic path projection: %w", function.Name(), err)
+			return coro.SSAFunctionBodyFacts{}, fmt.Errorf("function %q atomic path projection: %w", function.Name(), err)
 		}
 		facts.AtomicPath = atomicPath
 	} else {
 		facts.OutcomePlainLeaf = false
 		facts.OutcomePlainDAG = false
+		facts.StaticOutcomeLocal = false
 	}
-	if previous, exists := ir.localBodyFacts[function]; exists && !previous.Same(facts) {
-		return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
+	if !outcomePlainEligible {
+		facts.OutcomePlainLeaf = false
+		facts.OutcomePlainDAG = false
 	}
-	ir.localBodyFacts[function] = facts
-	ir.siteOwners[key] = none{}
-	return nil
+	return facts, nil
+}
+
+func coroRuntimeContextPrimitive(function *ssa.Function) bool {
+	if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil ||
+		llssa.PathOf(function.Pkg.Pkg) != "github.com/goplus/llgo/runtime/internal/runtime" {
+		return false
+	}
+	switch function.Name() {
+	case "getg", "getgIfPresent", "setg", "setgRaw":
+		return true
+	default:
+		return false
+	}
 }
 
 // coroOutcomePlainLeafSemanticRecipe consumes the capability already frozen by
@@ -327,6 +403,103 @@ func coroOutcomePlainDAGSemanticRecipe(plan coroSemanticInstructionPlan) bool {
 	default:
 		return false
 	}
+}
+
+// finalizeOutcomePlainIntrinsicSemantics narrows exact compiler-elided source
+// calls after the call-site table is complete. Raw SSA alone cannot know that
+// a declaration call will become one helper-free LLVM operation, so the first
+// semantic pass deliberately classifies it as an ordinary call. This final
+// ProgramIR builder step admits only operations whose frozen call recipe is
+// independently shape-checked and allocation-free.
+//
+// Atomic intrinsics acquire their bounded leaf proof here. A real inline yield
+// is also recorded here as an evaluated local effect: this distinguishes an
+// explicit scheduler handoff from the synthetic YieldOnly/NeedsPreempt seed
+// added later for an otherwise synchronous CFG loop. Static outcome twins may
+// omit the latter under the current compute-blocking policy, but must never
+// erase the former. Other InlineNoSuspend intrinsics include asm, dynamic
+// alloca, control transfer, and target-specific operations; the broad enum is
+// therefore not by itself an outcome-plain proof.
+func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
+	prog llssa.Program,
+	functions []*ssa.Function,
+	sortedUseOwners func(*ssa.Function) []*preparedEmissionPackage,
+) error {
+	if ir == nil || prog == nil || sortedUseOwners == nil {
+		return fmt.Errorf("outcome-plain intrinsic finalization requires one exact ProgramIR input")
+	}
+	if ir.callsFrozen {
+		return fmt.Errorf("outcome-plain intrinsic finalization occurred after call SitePlan freeze")
+	}
+	for _, function := range functions {
+		if function == nil || len(function.Blocks) == 0 {
+			continue
+		}
+		refined := false
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ordinary := instruction.(*ssa.Call)
+				if !ordinary {
+					continue
+				}
+				frozen, found := ir.callPlans[call]
+				if !found || frozen.failure != "" || !frozen.plan.Intrinsic ||
+					frozen.plan.Elision != CoroCallElidedIntrinsic {
+					continue
+				}
+				atomic := frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNoSuspend &&
+					isCoroAtomicIntrinsic(frozen.opcode)
+				realYield := frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineYield
+				if !atomic && !realYield {
+					continue
+				}
+				for _, owner := range sortedUseOwners(function) {
+					key := emissionFunctionOwnerKey{function: function, owner: owner}
+					if _, sealed := ir.siteOwners[key]; !sealed {
+						return fmt.Errorf("atomic intrinsic in %q has no frozen semantic owner %q", function.Name(), owner.identity)
+					}
+					semantic, present := ir.semanticPlans[key][call]
+					if !present || !semantic.evaluated || semantic.recipe != coro.RecipeID("cl.ssa.call.v1") ||
+						semantic.effect != coro.NoSuspend || semantic.exec != 0 {
+						return fmt.Errorf("atomic intrinsic call %q has an incompatible preliminary semantic recipe", call.String())
+					}
+					if atomic {
+						semantic.recipe = coro.RecipeID("cl.intrinsic.atomic.inline-nosuspend.v1")
+						semantic.outcomePlainLeaf = true
+						semantic.staticOutcome = true
+					} else {
+						semantic.recipe, semantic.effect = coroIntrinsicLoweringRecipe(CoroIntrinsicCallInlineYield)
+						semantic.materialized = true
+						semantic.outcomePlainLeaf = false
+						semantic.staticOutcome = false
+					}
+					ir.semanticPlans[key][call] = semantic
+				}
+				refined = true
+			}
+		}
+		if !refined {
+			continue
+		}
+		var final coro.SSAFunctionBodyFacts
+		for index, owner := range sortedUseOwners(function) {
+			key := emissionFunctionOwnerKey{function: function, owner: owner}
+			preamble, present := ir.functionPreambles[key]
+			if !present {
+				return fmt.Errorf("finalize atomic intrinsic body %q: owner %q has no function preamble", function.Name(), owner.identity)
+			}
+			facts, err := deriveCoroLocalBodyFacts(prog, function, ir.semanticPlans[key], preamble.emitsGoBody)
+			if err != nil {
+				return fmt.Errorf("finalize atomic intrinsic body %q: %w", function.Name(), err)
+			}
+			if index != 0 && !final.Same(facts) {
+				return fmt.Errorf("function %q acquired owner-dependent finalized local semantic facts", function.Name())
+			}
+			final = facts
+		}
+		ir.localBodyFacts[function] = final
+	}
+	return nil
 }
 
 func coroSemanticEvaluatedCFGHasCycle(
@@ -388,7 +561,7 @@ func (ir *coroProgramIR) semanticInstructionPlan(
 }
 
 func (ir *coroProgramIR) functionLocalBodyFacts(function *ssa.Function) (coro.SSAFunctionBodyFacts, error) {
-	if ir == nil || function == nil {
+	if ir == nil || !ir.callsFrozen || function == nil {
 		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("local body facts require one exact function")
 	}
 	facts, ok := ir.localBodyFacts[function]
@@ -563,6 +736,7 @@ func cloneCoroEmissionSitePlan(plan coroEmissionSitePlan) coroEmissionSitePlan {
 func sameCoroEmissionSitePlan(first, second coroEmissionSitePlan) bool {
 	return slices.Equal(first.managedRuntimeHelpers, second.managedRuntimeHelpers) &&
 		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers) &&
+		first.plainAllocation == second.plainAllocation &&
 		slices.Equal(first.localityDispatchers, second.localityDispatchers) &&
 		first.hasCallPlan == second.hasCallPlan && sameCoroFrozenCallSitePlan(first.callPlan, second.callPlan)
 }

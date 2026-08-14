@@ -93,7 +93,7 @@ func (k CallKind) validate() error {
 // produced by CallableContractExecConstraints. Keeping this narrow is what
 // prevents an invocation refinement from suppressing independent IRQUnsafe,
 // MayUnwind, or future non-contract constraints.
-const callableContractExecFlags = ThreadAffine | OpaqueExec
+const callableContractExecFlags = ThreadAffine | OpaqueExec | NeedsRuntimeContext
 
 // CallEdge is a statically resolved call graph edge.
 type CallEdge struct {
@@ -238,6 +238,15 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 	if spec.ManagedEntry != ManagedEntryNone && spec.External != ExternalKnown {
 		return fmt.Errorf("coro: function %q: managed entry %s requires an external-known producer", spec.ID, spec.ManagedEntry)
 	}
+	if spec.StaticOutcome {
+		if spec.External != ExternalKnown || spec.ManagedEntry != ManagedEntryCoroutine ||
+			spec.AtomicCostProof != AtomicCostUnproven || spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" ||
+			spec.Seed&^(YieldOnly|AwaitStructured|OutcomeStructured) != 0 ||
+			!spec.Seed.Contains(OutcomeStructured) ||
+			spec.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
+			return fmt.Errorf("coro: function %q: invalid imported unbounded static outcome capability", spec.ID)
+		}
+	}
 	switch spec.AtomicCostProof {
 	case AtomicCostUnproven:
 		if spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" || spec.ManagedEntry == ManagedEntryOutcomePlain {
@@ -245,9 +254,13 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 		}
 	case AtomicCostLeaf, AtomicCostDAG:
 		if spec.AtomicCost == 0 || spec.External != ExternalKnown ||
-			spec.ManagedEntry != ManagedEntryOutcomePlain || spec.Seed != OutcomeStructured ||
+			(spec.ManagedEntry != ManagedEntryCoroutine && spec.ManagedEntry != ManagedEntryOutcomePlain) ||
+			!spec.Seed.Contains(OutcomeStructured) || spec.Seed&^(AwaitStructured|OutcomeStructured) != 0 ||
 			spec.Exec&^MayUnwind != 0 {
 			return fmt.Errorf("coro: function %q: invalid imported outcome-plain capability", spec.ID)
+		}
+		if spec.ManagedEntry == ManagedEntryOutcomePlain && spec.Seed != OutcomeStructured {
+			return fmt.Errorf("coro: function %q: outcome-plain primary has effect %s", spec.ID, spec.Seed)
 		}
 		if err := validateSHA256Hex("atomic-cost certificate", spec.AtomicCostCertificate); err != nil {
 			return fmt.Errorf("coro: function %q: %w", spec.ID, err)
@@ -966,6 +979,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 		emission := bodyEmissionFor(managedDemands[id], rawPlainDemands[id], effects[id], spec.External)
 		managedEntry := ManagedEntryNone
 		atomicCost, atomicCostProof, atomicCostCertificate := uint64(0), AtomicCostUnproven, ""
+		staticOutcome := false
 		if spec.External == ExternalKnown {
 			managedEntry = spec.ManagedEntry
 			if managedEntry == ManagedEntryNone {
@@ -978,6 +992,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 				}
 			}
 			atomicCost, atomicCostProof, atomicCostCertificate = spec.AtomicCost, spec.AtomicCostProof, spec.AtomicCostCertificate
+			staticOutcome = spec.StaticOutcome
 		} else {
 			switch emission {
 			case EmitPlain, EmitRawPlain:
@@ -1002,6 +1017,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 			AtomicCost:              atomicCost,
 			AtomicCostProof:         atomicCostProof,
 			AtomicCostCertificate:   atomicCostCertificate,
+			StaticOutcome:           staticOutcome,
 			FuncRep:                 rep,
 			External:                spec.External,
 			Recursive:               recursive[id],

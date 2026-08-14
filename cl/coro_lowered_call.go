@@ -137,6 +137,12 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		}
 		return b.Call(fn.Expr, args...), true
 	}
+	if p.hasStructuredOutcomePhysicalBody() && targetPlan.HasStaticOutcome() {
+		nativeResult := !p.prog.LocalGoTypeExceedsNativeStack(
+			newOutcomePlainPhysicalABI(sourceSig).resultSlotType,
+		)
+		return p.compileCoroStaticOutcomeTargetCall(b, target, args, nativeResult), true
+	}
 
 	switch targetPlan.Emission {
 	case coro.EmitPlain:

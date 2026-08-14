@@ -471,6 +471,13 @@ func (a *coroPhysicalPureSSAAudit) validateFieldAddr(field *ssa.FieldAddr) strin
 	if err := validateCoroPhysicalSSAValueType(a.typeOf(field.Type())); err != nil {
 		return "field address has unsupported type: " + err.Error()
 	}
+	if a.allowImplicitNilFault {
+		// ExplicitStatus lowering emits the nil branch before forming the GEP and
+		// publishes the fault directly. This covers address-taking consumers such
+		// as an inline atomic intrinsic; unlike a dominated load there is no later
+		// dereference instruction that can own the guard.
+		return a.requireOnlyCompilerElidedRuntimeHelpers(field, "AssertNilDeref")
+	}
 	return a.requireNoRuntimeHelpersExcept(field, "AssertNilDeref")
 }
 
@@ -904,7 +911,8 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	// lowerings. This admits ordinary `return errno` error paths without
 	// granting a symbol-name exception to syscall or to error itself.
 	physical := a.ctx.type_(box.X.Type(), llssa.InGo)
-	needsAlloc := !emissionDirectIfaceType(physical.RawType())
+	needsAlloc := !emissionDirectIfaceType(physical.RawType()) &&
+		!makeInterfaceUsesConstantBacking(box)
 	needsNilCheck := false
 	needsTypedMove := false
 	if unop, ok := box.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
@@ -924,7 +932,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	if needsNilCheck {
 		expected = append(expected, "AssertNilDeref")
 	}
-	if !target.Empty() {
+	if !target.Empty() && !llssa.CanBuildStaticItab(target, physical.RawType()) {
 		expected = append(expected, "NewItab")
 	}
 	if needsTypedMove {
@@ -2957,7 +2965,7 @@ func (a *coroPhysicalPureSSAAudit) validateCloseBuiltin(call *ssa.Call) string {
 	if !a.allowImplicitNilFault {
 		return "close builtin requires the explicit-status panic ABI"
 	}
-	return a.requireFrozenExactRuntimeHelper(call, "CoroChanTryClose")
+	return a.requireFrozenExactRuntimeHelper(call, "CoroChanTryCloseTask")
 }
 
 // validateUnsafeDataBuiltin accepts only the two header projection intrinsics.

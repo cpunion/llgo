@@ -22,22 +22,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "compat", check: "test (19, 1.26.5, llvm19)" }
-          - { llvm: 20, go: "1.26.5", tags: "llvm20", lane: "compat", check: "test (20, 1.26.5, llvm20)" }
-          - { llvm: 21, go: "1.26.5", tags: "llvm21", lane: "compat", check: "test (21, 1.26.5, llvm21)" }
-          - { llvm: 22, go: "1.26.5", tags: "llvm22", lane: "compat", check: "test (22, 1.26.5, llvm22)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "integration", check: "test integration (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "integration-build", check: "test production build plan (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "native-e2e", check: "test native linked E2E (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "fleet-e2e", check: "test native fleet E2E (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-core", check: "test target adapters (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-js-wasm", check: "test JS/WASM command reactor (llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasi-command", check: "test WASI command reactor (llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, llvm19)" }
+          - { llvm: 22, go: "1.26.5", lane: "compat", check: "test (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "integration", check: "test integration (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "target-core", check: "test target adapters (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "target-js-wasm", check: "test JS/WASM command reactor (LLVM 22)" }
+          - { llvm: 22, go: "1.26.5", lane: "target-wasi-command", check: "test WASI command reactor (LLVM 22)" }
+          - { llvm: 22, go: "1.26.5", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, LLVM 22)" }
+          - { llvm: 22, go: "1.26.5", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, LLVM 22)" }
     steps:
       - uses: actions/checkout@v7
 
@@ -164,6 +161,7 @@ jobs:
           # generation reuse, cancellation, and single-owner posting without
           # silently restoring the old channel spin gate dependency.
           go test -race -shuffle=on -tags=coro_sema_owner_test \
+            ./internal/runtime/coro_current_task_route_test_adapter.go \
             ./internal/runtime/coro_keyed_registry_atomic_host.go \
             ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/coro_operation_capacity.go \
@@ -174,6 +172,7 @@ jobs:
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_sema_owner_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+            ./internal/runtime/coro_current_task_route_test_adapter.go \
             ./internal/runtime/coro_keyed_registry_atomic_host.go \
             ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/coro_operation_capacity.go \
@@ -373,7 +372,7 @@ jobs:
 
       - name: Verify production time.Sleep coroutine plan
         if: matrix.lane == 'compat'
-        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroNativeTimeSleepProductionPlanAndCodegen$' -timeout=10m -count=1
+        run: go test -v ./internal/build -run '^TestCoroNativeTimeSleepProductionPlanAndCodegen$' -timeout=10m -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.lane == 'integration'
@@ -383,33 +382,33 @@ jobs:
 
       - name: Test structured LLVM coroutine builder
         if: matrix.lane == 'compat'
-        run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoro' -count=1
+        run: go test -v ./ssa -run '^TestCoro' -count=1
 
       - name: Test canonical coroutine plan digest and cache identity
         if: matrix.lane == 'compat'
         run: |
-          go test -tags='${{ matrix.tags }}' ./internal/coro -run '^TestCoroPlanDigest' -count=1
-          go test -tags='${{ matrix.tags }}' ./internal/build -run '^Test(BuildCoroPlanInstallsArchiveDigest|CoroutinePlanInputsAffectFingerprint|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroPlanDigestMetadataUsesEffectiveLLVMTarget|CoroPhysicalABICacheRegistrationPreservesCollectedFuncInfo)$' -count=1
-          go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
+          go test ./internal/coro -run '^TestCoroPlanDigest' -count=1
+          go test ./internal/build -run '^Test(BuildCoroPlanInstallsArchiveDigest|CoroutinePlanInputsAffectFingerprint|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroPhysicalABICacheRegistrationPreservesCollectedFuncInfo)$' -count=1
+          go test ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI and function dispatch lowering
         if: matrix.lane == 'compat'
         # Run every compiler test whose name is part of the coroutine contract;
         # in particular this covers pure SSA aggregates/PHI and caller-frame
         # park lowering on native64 and wasm32 before and after CoroSplit.
-        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^Test(Coro|EmissionUniverse(ActiveABIMethodTablesUseFrozenWrapperSymbols|ABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped))' -count=1
+        run: go test -v ./cl -run '^Test(Coro|EmissionUniverse(ActiveABIMethodTablesUseFrozenWrapperSymbols|ABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped))' -count=1
 
       - name: Test coroutine TLS function dispatch proof
         if: matrix.lane == 'compat'
-        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroTLS' -count=1
+        run: go test -v ./internal/build -run '^TestCoroTLS' -count=1
 
       - name: Test coroutine registry and control integration
         if: matrix.lane == 'compat'
-        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroProgramManifest.*|CoroProgramBootstrap.*|SelectCoroProgramBootstrap.*|GenMainModule.*Coro.*)$' -count=1
+        run: go test -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroProgramManifest.*|CoroProgramBootstrap.*|SelectCoroProgramBootstrap.*|GenMainModule.*Coro.*)$' -count=1
 
       - name: Test LLVM 22 tool configuration
-        if: matrix.lane == 'compat' && matrix.llvm == 22
-        run: go test -tags=llvm22 ./xtool/env/llvm ./internal/xtool/llvm
+        if: matrix.lane == 'compat'
+        run: go test ./xtool/env/llvm ./internal/xtool/llvm
 
       - name: Test resolved LLVM target configuration
         if: matrix.lane == 'target-core'

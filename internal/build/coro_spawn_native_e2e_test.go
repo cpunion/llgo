@@ -285,8 +285,8 @@ func TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
 	defer prog.Dispose()
 
-	userObject, anchor, setupSymbol, checkSymbol := buildCoroSpawnNativeE2EUser(t, prog, temp)
-	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor)
+	userObject, anchor, setupSymbol, checkSymbol, capabilities := buildCoroSpawnNativeE2EUser(t, prog, temp)
+	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor, capabilities)
 	driverObject := buildCoroSpawnNativeE2EDriver(t, prog, temp, setupSymbol, checkSymbol)
 	runtimeObjects := buildCoroSpawnNativeE2ERuntimeIsland(t, temp)
 	runtimeArchive := filepath.Join(temp, "libllgo-coro-runtime-island.a")
@@ -318,9 +318,12 @@ func TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
 	}
 }
 
-func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) (object, anchor, setupSymbol, checkSymbol string) {
+func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) (
+	object, anchor, setupSymbol, checkSymbol string,
+	capabilities coro.ProgramCapabilities,
+) {
 	return buildCoroSpawnNativeE2EUserSource(
-		t, prog, temp, coroSpawnNativeE2ESource, true, coro.TargetCapabilities(0),
+		t, prog, temp, coroSpawnNativeE2ESource, true, coro.TargetCapabilities(0), true,
 	)
 }
 
@@ -330,7 +333,11 @@ func buildCoroSpawnNativeE2EUserSource(
 	temp, source string,
 	enableChannel bool,
 	targetCapabilities coro.TargetCapabilities,
-) (object, anchor, setupSymbol, checkSymbol string) {
+	requireRuntimeContext bool,
+) (
+	object, anchor, setupSymbol, checkSymbol string,
+	capabilities coro.ProgramCapabilities,
+) {
 	t.Helper()
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, source, nil)
 	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
@@ -386,6 +393,7 @@ func buildCoroSpawnNativeE2EUserSource(
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			effect := coro.NoSuspend
 			if _, required := spawnSeeded[fn]; required {
@@ -486,6 +494,10 @@ func buildCoroSpawnNativeE2EUserSource(
 	if err != nil {
 		t.Fatal(err)
 	}
+	if mainPlan, ok := plan.FunctionPlan(mainFn); requireRuntimeContext &&
+		(!ok || !mainPlan.Exec.Contains(coro.NeedsRuntimeContext)) {
+		t.Fatalf("select main lacks inferred runtime-context requirement: %+v, present=%t", mainPlan, ok)
+	}
 	compilation := &cl.Compilation{
 		CoroPlan: plan,
 
@@ -503,6 +515,10 @@ func buildCoroSpawnNativeE2EUserSource(
 	if err != nil {
 		t.Fatal(err)
 	}
+	capabilities, err = compilation.CoroProgramCapabilities()
+	if err != nil {
+		t.Fatal("resolve native E2E program capabilities:", err)
+	}
 	module := pkg.Module()
 	runCoroSpawnNativeE2EPasses(t, prog, module)
 	ir := module.String()
@@ -518,18 +534,28 @@ func buildCoroSpawnNativeE2EUserSource(
 	if module.NamedFunction(setupSymbol).IsNil() {
 		t.Fatalf("compiled E2E user module has no plain setup %q:\n%s", setupSymbol, ir)
 	}
-	return emitCoroSpawnNativeE2EObject(t, prog, module, filepath.Join(temp, "user.o")), match[1], setupSymbol, checkSymbol
+	return emitCoroSpawnNativeE2EObject(t, prog, module, filepath.Join(temp, "user.o")), match[1], setupSymbol, checkSymbol, capabilities
 }
 
-func buildCoroSpawnNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor string) string {
+func buildCoroSpawnNativeE2EEntry(
+	t *testing.T,
+	prog llssa.Program,
+	temp, anchor string,
+	capabilities coro.ProgramCapabilities,
+) string {
 	t.Helper()
 	conf := &Config{
 		BuildMode: BuildModeExe,
 		Goos:      runtime.GOOS,
 		Goarch:    runtime.GOARCH}
 	ctx := &context{prog: prog, buildConf: conf}
+	flags, err := coroProgramCapabilityFlagsV2(capabilities)
+	if err != nil {
+		t.Fatal("encode native E2E program capabilities:", err)
+	}
 	bootstrap := &coroProgramBootstrapV1{
 		Version: coroProgramBootstrapVersionV2,
+		Flags:   flags,
 		Steps: []coroProgramBootstrapStepV1{
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleRuntimeInitV2, FunctionID: "e2e-runtime-init", Target: "__llgo_coro_e2e_runtime_init"},
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleABIInitV2, FunctionID: "e2e-abi-init", Target: "init$abitypes"},
@@ -656,21 +682,25 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	newChanBody := newChan.MakeBody(1)
 	newChanBody.Return(newChanBody.Call(rawNewChan.Expr, newChan.Param(0), newChan.Param(1)))
 	rawTrySend := pkg.NewFunc("command-line-arguments.CoroChanTrySend", newSignature(
-		[]types.Type{pointer, pointer, intType}, []types.Type{boolType},
+		[]types.Type{pointer, pointer, pointer, intType}, []types.Type{boolType},
 	), llssa.InGo)
 	trySend := pkg.NewFunc(llssa.PkgRuntime+".CoroChanTrySend", newSignature(
-		[]types.Type{pointer, pointer, intType}, []types.Type{boolType},
+		[]types.Type{pointer, pointer, pointer, intType}, []types.Type{boolType},
 	), llssa.InGo)
 	trySendBody := trySend.MakeBody(1)
-	trySendBody.Return(trySendBody.Call(rawTrySend.Expr, trySend.Param(0), trySend.Param(1), trySend.Param(2)))
+	trySendBody.Return(trySendBody.Call(
+		rawTrySend.Expr, trySend.Param(0), trySend.Param(1), trySend.Param(2), trySend.Param(3),
+	))
 	rawTryRecv := pkg.NewFunc("command-line-arguments.CoroChanTryRecv", newSignature(
-		[]types.Type{pointer, pointer, intType}, []types.Type{boolType, boolType},
+		[]types.Type{pointer, pointer, pointer, intType}, []types.Type{boolType, boolType},
 	), llssa.InGo)
 	tryRecv := pkg.NewFunc(llssa.PkgRuntime+".CoroChanTryRecv", newSignature(
-		[]types.Type{pointer, pointer, intType}, []types.Type{boolType, boolType},
+		[]types.Type{pointer, pointer, pointer, intType}, []types.Type{boolType, boolType},
 	), llssa.InGo)
 	tryRecvBody := tryRecv.MakeBody(1)
-	tryRecvResult := tryRecvBody.Call(rawTryRecv.Expr, tryRecv.Param(0), tryRecv.Param(1), tryRecv.Param(2))
+	tryRecvResult := tryRecvBody.Call(
+		rawTryRecv.Expr, tryRecv.Param(0), tryRecv.Param(1), tryRecv.Param(2), tryRecv.Param(3),
+	)
 	tryRecvBody.Return(tryRecvBody.Extract(tryRecvResult, 0), tryRecvBody.Extract(tryRecvResult, 1))
 	chanOpSliceType := types.NewSlice(prog.RuntimeType("ChanOp").RawType())
 	uint32Type := types.Typ[types.Uint32]
@@ -781,6 +811,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_trace_release.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_worker_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_window_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_operation_capacity.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_physical_thread_capacity_native_llgo.go"),
@@ -805,6 +836,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_current_task_route_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_ready_distribution_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_target_executor_retired_default.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_window_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_program_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_result_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_nil_fault.go")
@@ -1073,9 +1105,9 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"__llgo_coro_doorbell_poll_one_v1",
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
-		"__llgo_coro_chan_send_park_v1",
-		"__llgo_coro_chan_recv_park_v1",
-		"__llgo_coro_chan_resume_v1",
+		"__llgo_coro_chan_send_try_park_v2",
+		"__llgo_coro_chan_recv_try_park_v2",
+		"__llgo_coro_chan_resume_v2",
 		"__llgo_coro_fault_prepare_v1",
 		"__llgo_coro_fault_prepare_v2",
 		"__llgo_coro_fault_payload_v2",

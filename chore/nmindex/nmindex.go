@@ -54,6 +54,7 @@ The commands are:
 }
 
 func makeIndex() {
+	llvm.SetupPathOrExit()
 	env := llvm.New("")
 	idxDir := indexDir()
 	os.MkdirAll(idxDir, 0755)

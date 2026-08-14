@@ -27,9 +27,16 @@ func CommandMainReturnPoint(p *P, main *G) bool {
 }
 
 func validCancelFrame(frame *Frame, g *G) bool {
-	return frame != nil && frame.owner == g && frame.handle != nil && frame.header != nil &&
-		frame.storage != nil && frame.rawBase != nil && frame.descriptor != nil &&
-		frame.header.G == unsafe.Pointer(g) && frame.header.Descriptor == frame.descriptor &&
+	if frame == nil || frame.owner != g || frame.handle == nil || frame.header == nil ||
+		frame.descriptor == nil || frame.header.G != unsafe.Pointer(g) ||
+		frame.header.Descriptor != frame.descriptor {
+		return false
+	}
+	if frame.borrowedStorage {
+		return frame.storage == nil && frame.rawBase == nil && frame.allocationSize == 0 &&
+			frame.header.AllocationBase == unsafe.Pointer(frame)
+	}
+	return frame.storage != nil && frame.rawBase != nil &&
 		frame.header.AllocationBase == frame.rawBase
 }
 
@@ -52,7 +59,7 @@ func validCancelFrame(frame *Frame, g *G) bool {
 func validCancelableReadyG(g *G) bool {
 	if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.runP != nil || g.root == nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone ||
-		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
+		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.taskControlLeases != 0 ||
 		g.taskState != taskStorageOwned || g.taskStorage != unsafe.Pointer(g) || g.taskSize != TaskStorageSize() {

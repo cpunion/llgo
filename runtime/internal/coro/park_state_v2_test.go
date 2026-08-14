@@ -183,6 +183,45 @@ func TestOperationIDIsTwoWordPODAndFailsClosedAtExhaustion(t *testing.T) {
 	}
 }
 
+func TestReleasableParkStateFastValidatorMatchesCompleteInvariant(t *testing.T) {
+	completedID, ok := MakeOperationID(OperationSourceWait, 1, 1)
+	if !ok {
+		t.Fatal("make completed operation ID")
+	}
+	valid := []ParkState{
+		{},
+		{ticket: ParkTicket{generation: 1}, phase: parkConsumed, expected: 3,
+			outcome: ParkOutcomeCompleted, winnerCase: 2, winnerID: completedID},
+		{ticket: ParkTicket{generation: 2}, phase: parkConsumed, expected: 1,
+			cancelKind: ParkCancelOperation, outcome: ParkOutcomeCanceled},
+		{ticket: ParkTicket{generation: 3}, phase: parkConsumed, expected: 2,
+			hasDefault: true, outcome: ParkOutcomeDefault, winnerCase: 7},
+		{ticket: ParkTicket{epoch: 1, generation: 1}, phase: parkDelivered},
+	}
+	for index := range valid {
+		state := &valid[index]
+		if !validParkState(state) || !validReleasableParkState(state) || !releasableParkState(state) {
+			t.Fatalf("valid state %d rejected: %+v", index, *state)
+		}
+	}
+
+	invalid := []ParkState{
+		{resolving: true},
+		{taskCancelKind: TaskCancelAbort},
+		{phase: parkIdle, expected: 1},
+		{ticket: ParkTicket{generation: 1}, phase: parkConsumed, attached: 1},
+		{ticket: ParkTicket{generation: 1}, phase: parkConsumed},
+		{ticket: ParkTicket{generation: 1}, phase: parkDelivered, head: &ParkLink{}},
+		{ticket: ParkTicket{generation: 1}, phase: parkReady},
+	}
+	for index := range invalid {
+		state := &invalid[index]
+		if validReleasableParkState(state) || releasableParkState(state) {
+			t.Fatalf("invalid state %d accepted: %+v", index, *state)
+		}
+	}
+}
+
 func TestZeroCandidateParkCanOnlyResumeThroughLogicalCancel(t *testing.T) {
 	var state ParkState
 	ticket, ok := BeginParkSet(&state, 0, 3)

@@ -178,6 +178,20 @@ type coroAtomicLLVMFunction struct {
 // optimization/compiler-owned site insertion, so backend-created structural
 // work cannot silently escape the certificate boundary.
 func VerifyCoroAtomicCostModule(module llvm.Module) (CoroAtomicCostReport, error) {
+	return verifyCoroAtomicCostModule(module, false)
+}
+
+// VerifyOptimizedCoroAtomicCostModule verifies a module which has already
+// passed VerifyCoroAtomicCostModule and then an ordinary LLVM optimization
+// pipeline. Named metadata deliberately does not retain code; full inlining may
+// therefore erase a local or imported outcome symbol while leaving its string
+// proof row behind. A missing symbol has no remaining call edge and is ignored.
+// Present symbols and every reachable certified call remain strictly checked.
+func VerifyOptimizedCoroAtomicCostModule(module llvm.Module) (CoroAtomicCostReport, error) {
+	return verifyCoroAtomicCostModule(module, true)
+}
+
+func verifyCoroAtomicCostModule(module llvm.Module, allowMissingAfterOptimization bool) (CoroAtomicCostReport, error) {
 	report := CoroAtomicCostReport{Schema: coroAtomicCostReportSchema}
 	if module.IsNil() {
 		return report, fmt.Errorf("ssa: verify atomic-cost metadata in a nil module")
@@ -194,6 +208,9 @@ func VerifyCoroAtomicCostModule(module llvm.Module) (CoroAtomicCostReport, error
 	for symbol, record := range records {
 		function := module.NamedFunction(symbol)
 		if function.IsNil() {
+			if allowMissingAfterOptimization {
+				continue
+			}
 			return report, fmt.Errorf("ssa: atomic-cost symbol %q has no LLVM declaration", symbol)
 		}
 		if !record.local {
@@ -413,7 +430,10 @@ func projectCoroAtomicLLVMFunction(
 					if bounded {
 						continue
 					}
-					return projection, fmt.Errorf("ssa: atomic-cost LLVM function %q contains an indirect or inline-assembly call", function.Name())
+					return projection, fmt.Errorf(
+						"ssa: atomic-cost LLVM function %q contains an indirect or inline-assembly call: %s",
+						function.Name(), instruction.String(),
+					)
 				}
 				if _, certified := records[callee]; !certified {
 					return projection, fmt.Errorf("ssa: atomic-cost LLVM function %q calls uncertified helper %q", function.Name(), callee)

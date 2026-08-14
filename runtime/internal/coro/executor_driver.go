@@ -25,6 +25,11 @@ import "unsafe"
 //
 // Every method is scheduler-owner-only. The driver, P, registry, and table must
 // remain at stable addresses from BindExecutor through ConfirmExecutorClose.
+// requestGate caches the exact registry slot gate during that lifetime; foreign
+// producers may update the gate atomically, but they never retain the driver.
+// servicePressure is an optional process-shared scheduler-pressure word. A
+// fleet quota binds its waiter word once at startup so a locally isolated G can
+// still yield to a remote executor waiting for managed-execution capacity.
 // A real target surrounds a successful PrepareExecutorSleep with its retained
 // source poll and calls WakeExecutor after a real or spurious wake.
 //
@@ -35,19 +40,28 @@ import "unsafe"
 // last-G terminal close handoff, while the target-specific join dispatcher and
 // multi-P executor migration remain later layers.
 type ExecutorDriver struct {
-	magic         uint32
-	state         executorDriverState
-	p             *P
-	registry      *ExecutorRegistry
-	handle        ExecutorHandle
-	route         RouteID
-	sources       ExecutorSourceSet
-	poll          executorPollTransaction
-	local         ownerLocalCompletionCursor
-	run           executorRunCursor
-	prepareNow    int64
-	hasPrepareNow bool
-	terminalKind  ActionKind
+	magic           uint32
+	state           executorDriverState
+	p               *P
+	registry        *ExecutorRegistry
+	handle          ExecutorHandle
+	requestGate     *uint32
+	servicePressure *uint32
+	route           RouteID
+	sources         ExecutorSourceSet
+	poll            executorPollTransaction
+	local           ownerLocalCompletionCursor
+	// directChannelHead is the producer exchange cursor; directChannelTail is
+	// owner-only, and directChannelStub is the permanent one-word sentinel.
+	// Together they form an intrusive MPSC queue for frame-local one-case hchan
+	// completions. A node's owning frame remains pinned by its WaitSetRecord.
+	directChannelHead unsafe.Pointer
+	directChannelTail unsafe.Pointer
+	directChannelStub unsafe.Pointer
+	run               executorRunCursor
+	prepareNow        int64
+	hasPrepareNow     bool
+	terminalKind      ActionKind
 }
 
 type executorDriverState uint8
@@ -72,6 +86,25 @@ func validExecutorDriverHeader(driver *ExecutorDriver) bool {
 	if driver == nil || driver.magic != executorDriverMagic || driver.state == executorDriverUnbound {
 		return false
 	}
+	if driver.state == executorDriverActive {
+		return driver.terminalKind == ActionInvalid && !driver.hasPrepareNow && driver.prepareNow == 0 &&
+			driver.p != nil && driver.registry != nil &&
+			driver.handle.Slot != 0 && driver.handle.Generation != 0 && driver.requestGate != nil &&
+			driver.route.Valid() && driver.sources.route == driver.route &&
+			driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
+			validExecutorSourceSetHeader(&driver.sources, driver.p) &&
+			validExecutorRunCursor(&driver.run, driver.p)
+	}
+	return validExecutorDriverColdHeader(driver)
+}
+
+// validExecutorDriverColdHeader retains the complete lifecycle-state audit
+// outside the active runner. Keeping it out of the common reduction selector
+// avoids calculating terminal/prepare truth tables for every dispatch, source,
+// and action while preserving the exact sleep/close diagnostics.
+//
+//go:noinline
+func validExecutorDriverColdHeader(driver *ExecutorDriver) bool {
 	terminalKind := driver.terminalKind
 	validTerminalState := driver.state == executorDriverTerminalClosing &&
 		(terminalKind == ActionDestroy || terminalKind == ActionPanicDestroy)
@@ -85,15 +118,24 @@ func validExecutorDriverHeader(driver *ExecutorDriver) bool {
 	}
 	return (driver.state == executorDriverTerminalClosing) == validTerminalState &&
 		driver.p != nil && driver.registry != nil && driver.handle.Slot != 0 && driver.handle.Generation != 0 &&
+		driver.requestGate != nil &&
 		driver.route.Valid() && driver.sources.route == driver.route &&
 		driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
 		validExecutorSourceSetHeader(&driver.sources, driver.p) &&
-		validOwnerLocalCompletionHeader(&driver.local, driver.p) &&
 		validExecutorRunCursor(&driver.run, driver.p)
 }
 
 func validExecutorDriver(driver *ExecutorDriver) bool {
-	return validExecutorDriverHeader(driver) &&
+	// The owner-local cursor is selected scheduler work, not an immutable
+	// driver binding. Keep its complete audit at full lifecycle boundaries and
+	// validate it again immediately before local publication or resolution;
+	// unrelated source and managed-resume probes must not make this optional
+	// queue part of the common driver-header gate.
+	if !validExecutorDriverHeader(driver) {
+		return false
+	}
+	slot, ok := executorSlot(driver.registry, driver.handle)
+	return ok && driver.requestGate == &slot.gate &&
 		validExecutorSourceSet(&driver.sources, driver.p) &&
 		validExecutorPollTransaction(&driver.poll, &driver.sources) &&
 		validOwnerLocalCompletion(&driver.local, driver.p)
@@ -153,35 +195,97 @@ func CurrentExecutorDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool
 	return driver, driver.handle, driver.route, true
 }
 
+// CurrentExecutorDriverForActiveResume is the narrow runtime-context
+// capability used after the physical runtime has already authenticated g as
+// its currently installed logical task. It accepts only the bounded runner's
+// issued CheckResume interval and rechecks the exact P/G/action, driver, source
+// and route identities. Unlike CurrentExecutorDriver it does not repeat the
+// registry-slot and complete active-frame audit: neither registry lifetime nor
+// frame identity can change inside this no-suspend physical resume.
+//
+// The returned driver is scheduler-owner-only and must not survive the current
+// resume or be passed to a producer. Callers without an independently proven
+// current runtime task must use CurrentExecutorDriver instead.
+func CurrentExecutorDriverForActiveResume(g *G) (*ExecutorDriver, RouteID, bool) {
+	if !ValidG(g) || g.transferState != runnableTransferGIdle || !resumeGateTaken(g) {
+		return nil, 0, false
+	}
+	p := g.runP
+	driver := p.executor
+	if driver == nil || driver.magic != executorDriverMagic ||
+		driver.state != executorDriverActive || driver.p != p ||
+		driver.run.issued != ActionCheckResume ||
+		preemptLoad(&p.executorMode) != executorModeBound ||
+		driver.handle.Slot == 0 || driver.handle.Generation == 0 ||
+		!driver.route.Valid() || !validExecutorSourceSetHeader(&driver.sources, p) ||
+		driver.sources.route != driver.route {
+		return nil, 0, false
+	}
+	return driver, driver.route, true
+}
+
+// CurrentExecutorDriverForCompilerTask is the narrow capability boundary for
+// a hidden G parameter carried by generated physical coroutine code. The
+// scheduler has already authenticated the resume before that parameter can be
+// observed; this check therefore freezes only the mutable G/P/driver relation
+// needed until the next no-suspend runtime call returns. Source-specific
+// operations must still validate their own source and endpoint identities.
+//
+// Callers which recovered a G through TLS, a callback, or public metadata must
+// use CurrentExecutorDriver or CurrentExecutorDriverForActiveResume instead.
+func CurrentExecutorDriverForCompilerTask(g *G) (*ExecutorDriver, RouteID, bool) {
+	if g == nil {
+		return nil, 0, false
+	}
+	p := g.runP
+	if p == nil || p.current != g || !p.inResume {
+		return nil, 0, false
+	}
+	driver := p.executor
+	// The hidden task and private inResume episode are the scheduler's
+	// certificate: no target can close, rebind, transfer, or replace this
+	// P/driver while generated code is active below llvm.coro.resume. Retain the
+	// exact pointer and route correlation needed by the no-suspend caller; the
+	// next park/source operation validates its own mutable endpoint state.
+	if driver == nil || driver.p != p || !driver.route.Valid() ||
+		driver.sources.route != driver.route {
+		return nil, 0, false
+	}
+	return driver, driver.route, true
+}
+
 // currentExecutorParkDriver resolves the exact executor during the narrow
 // compiler park/resume-hook window. The active frame has already published
 // SuspendPark/FrameSuspended while the scheduler still owns the same
 // ActionResume episode. Typed adapters add only their closed source-owner
 // validation after this common proof.
 func currentExecutorParkDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool) {
-	if !ValidG(g) || g.transferState != runnableTransferGIdle || !resumeGateTaken(g) ||
-		g.runP == nil || g.active == nil || g.active.handle == nil || g.active.header == nil {
+	driver, route, current := CurrentExecutorDriverForCompilerTask(g)
+	if !current || g.active == nil || g.active.handle == nil || g.active.header == nil {
 		return nil, ExecutorHandle{}, 0, false
 	}
-	p := g.runP
-	driver := p.executor
+	p := driver.p
 	handle := g.active.handle
 	header := g.active.header
-	if !validExecutorDriverHeaderForP(driver, p) || p.current != g || !p.inResume ||
-		!expectedAction(p, g, p.action, ActionResume) || !activeResumeOwnedByAction(g) ||
-		g.state != GRunning || g.active.state != FrameActive ||
+	action := p.action
+	if action.Kind != ActionResume || action.Flags != 0 || action.Handle == nil ||
+		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
+		!gPreemptEnabledAtDepthZero(g) ||
+		g.active.state != FrameActive ||
 		g.active.handle != handle || g.active.header != header ||
 		header.G != unsafe.Pointer(g) || header.SuspendReason != uint16(SuspendPark) ||
 		header.Lifecycle != uint16(FrameSuspended) || !driver.route.Valid() ||
 		driver.handle.Slot == 0 || driver.handle.Generation == 0 {
 		return nil, ExecutorHandle{}, 0, false
 	}
-	slot, ok := executorSlot(driver.registry, driver.handle)
-	if !ok || preemptLoad(&slot.generation) != driver.handle.Generation ||
-		preemptLoad(&slot.state) != uint32(executorActive) {
+	if p.inlineAwaitDepth == 0 {
+		if action.Handle != handle {
+			return nil, ExecutorHandle{}, 0, false
+		}
+	} else if !resumeActionOwnsActive(g, action, p.inlineAwaitDepth) {
 		return nil, ExecutorHandle{}, 0, false
 	}
-	return driver, driver.handle, driver.route, true
+	return driver, driver.handle, route, true
 }
 
 // CurrentExecutorSourceCatalog returns the exact owner P and direct-call source
@@ -344,10 +448,15 @@ func idleExecutorScheduler(p *P) bool {
 // its executorMode load; executorMode is a capability guard, not a refcounted
 // admission barrier for migration from the legacy ABI.
 func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, catalog ExecutorSourceCatalog) bool {
+	requestSlot, requestOK := executorSlot(registry, handle)
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
-		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
+		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.requestGate != nil ||
+		driver.servicePressure != nil ||
+		driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
 		driver.poll != (executorPollTransaction{}) ||
 		driver.local != (ownerLocalCompletionCursor{}) ||
+		driver.directChannelHead != nil || driver.directChannelTail != nil ||
+		driver.directChannelStub != nil ||
 		driver.run != (executorRunCursor{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||
@@ -355,7 +464,8 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 		p.osThreadLockOwner != nil || p.foreignReentry != nil ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
-		!route.Valid() || !activeExecutorHandle(registry, handle) || !bindExecutorSourceSetAtRoute(&driver.sources, p, route, catalog) {
+		!route.Valid() || !requestOK || !activeExecutorHandle(registry, handle) ||
+		!bindExecutorSourceSetAtRoute(&driver.sources, p, route, catalog) {
 		return false
 	}
 	driver.magic = executorDriverMagic
@@ -363,7 +473,11 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 	driver.p = p
 	driver.registry = registry
 	driver.handle = handle
+	driver.requestGate = &requestSlot.gate
 	driver.route = route
+	directChannelStub := unsafe.Pointer(&driver.directChannelStub)
+	preemptStorePointer(&driver.directChannelHead, directChannelStub)
+	driver.directChannelTail = directChannelStub
 	p.executor = driver
 	preemptStore(&p.executorMode, executorModeBound)
 	return true
@@ -391,9 +505,17 @@ func (driver *ExecutorDriver) Route() (RouteID, bool) {
 
 func publishExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {
 	if !validExecutorDriver(driver) || driver.state != state || driver.poll.phase != executorPollIdle ||
-		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
+		driver.run != (executorRunCursor{}) || !emptyOwnerLocalCompletion(&driver.local) ||
+		!idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
+	// The producer-owned direct-channel inbox is an independent durable work
+	// source. In particular, a producer may append to it after the owner arms
+	// the executor gate and while this bounded source-catalog scan is running.
+	// Source publication neither consumes nor interprets that inbox, so making
+	// its emptiness a scan invariant would turn legal ingress into corruption.
+	// Sleep admission observes it again after the scan and leaves IdleArmed;
+	// the unified runner then owns materialization.
 	return driver.sources.publishPass(driver.p, now, withDeadline)
 }
 
@@ -508,6 +630,63 @@ func leaveExecutorIdleForRun(driver *ExecutorDriver) bool {
 	return validExecutorDriver(driver)
 }
 
+// wakeableExecutorRunCursor accepts the producer-visible work which may arrive
+// after CommitSleep. The owner run cursor and owner-local reducer must still be
+// exactly idle, but a direct-channel producer is specifically allowed to have
+// appended an MPSC inbox node before it requests and wakes this executor.
+// Requiring emptyExecutorRunCursor here would turn that legal wake into a
+// fail-closed result because that stronger helper deliberately requires the
+// producer inbox to be empty for sleep admission and lifecycle transitions.
+func wakeableExecutorRunCursor(driver *ExecutorDriver) bool {
+	return driver != nil && driver.run == (executorRunCursor{}) &&
+		emptyOwnerLocalCompletion(&driver.local) &&
+		driver.directChannelTail != nil &&
+		preemptLoadPointer(&driver.directChannelHead) != nil
+}
+
+// ExecutorWorkerCompletionProbe is one short-lived owner-side observation of
+// the worker source's durable pending word. It exposes neither operation
+// identities nor source mutation. A target may retain it only across a bounded
+// non-suspending active-spin policy immediately before ArmIdle.
+type ExecutorWorkerCompletionProbe struct {
+	source *WorkerOperationSource
+}
+
+func (probe ExecutorWorkerCompletionProbe) Valid() bool {
+	return probe.source != nil
+}
+
+// Ready is an acquire observation of a completed worker publication. The
+// producer stores this word only after the exact payload and mailbox are
+// durable, so the owner may safely re-enter its unified source reducer.
+func (probe ExecutorWorkerCompletionProbe) Ready() bool {
+	return probe.source != nil && probe.source.Pending()
+}
+
+// PrepareExecutorWorkerCompletionProbe observes the one condition under which
+// a native target may profitably defer ArmIdle: an exact submitted worker
+// operation is still incomplete. It never turns that advisory observation into
+// a correctness obligation. A target which does not observe Ready within its
+// bounded policy must use the ordinary retained wait transaction unchanged.
+func PrepareExecutorWorkerCompletionProbe(
+	driver *ExecutorDriver,
+) (probe ExecutorWorkerCompletionProbe, awaiting, ready, ok bool) {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
+		!emptyOwnerLocalCompletion(&driver.local) ||
+		!executorDirectChannelInboxIdle(driver) || !idleExecutorScheduler(driver.p) {
+		return ExecutorWorkerCompletionProbe{}, false, false, false
+	}
+	if driver.sources.worker == nil {
+		return ExecutorWorkerCompletionProbe{}, false, false, true
+	}
+	awaiting, ready, ok = driver.sources.worker.submittedCompletionState(driver.p)
+	if !ok || !awaiting && !ready {
+		return ExecutorWorkerCompletionProbe{}, awaiting, ready, ok
+	}
+	return ExecutorWorkerCompletionProbe{source: driver.sources.worker}, awaiting, ready, true
+}
+
 // PrepareExecutorSleep executes ArmIdle, an unconditional source fact scan,
 // and exact CommitSleep only when no runnable exists and parked Gs remain.
 // Source resolution stays in the unified runner. A true sleep result authorizes
@@ -515,8 +694,12 @@ func leaveExecutorIdleForRun(driver *ExecutorDriver) bool {
 // request won and the scheduler should continue without blocking.
 func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
-		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
+		driver.run != (executorRunCursor{}) || !emptyOwnerLocalCompletion(&driver.local) ||
+		!idleExecutorScheduler(driver.p) {
 		return false, false
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		return false, wakeableExecutorRunCursor(driver)
 	}
 	if runnableForOSThreadOwner(driver.p) || !HasWaiting(driver.p) {
 		return false, true
@@ -542,7 +725,8 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 		_, _ = driver.registry.LeaveIdle(driver.handle)
 		return false, false
 	}
-	hasWork := drained != 0 || runnableForOSThreadOwner(driver.p) || driver.sources.pending(driver.p) ||
+	hasWork := drained != 0 || !executorDirectChannelInboxIdle(driver) ||
+		runnableForOSThreadOwner(driver.p) || driver.sources.pending(driver.p) ||
 		driver.registry.ObserveRequested(driver.handle) || preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
 		if !leaveExecutorIdleForRun(driver) {
@@ -573,8 +757,15 @@ func prepareExecutorSleepAt(
 	allowEmpty bool,
 ) (prepared bool, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
-		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) || now < 0 {
+		driver.run != (executorRunCursor{}) || !emptyOwnerLocalCompletion(&driver.local) ||
+		!idleExecutorScheduler(driver.p) || now < 0 {
 		return false, false
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		if !wakeableExecutorRunCursor(driver) {
+			return false, false
+		}
+		return false, true
 	}
 	if runnableForOSThreadOwner(driver.p) || !allowEmpty && !HasWaiting(driver.p) {
 		return false, true
@@ -596,7 +787,8 @@ func prepareExecutorSleepAt(
 		_ = leaveExecutorIdle(driver)
 		return false, false
 	}
-	hasWork := scan.completed != 0 || runnableForOSThreadOwner(driver.p) ||
+	hasWork := scan.completed != 0 || !executorDirectChannelInboxIdle(driver) ||
+		runnableForOSThreadOwner(driver.p) ||
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
@@ -633,8 +825,15 @@ func PrepareExecutorStandbyAt(driver *ExecutorDriver, now int64) (prepared bool,
 // preparation and restores the active driver.
 func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadline int64, hasDeadline, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() ||
-		driver.state != executorDriverIdlePreparing || !emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
+		driver.state != executorDriverIdlePreparing || driver.run != (executorRunCursor{}) ||
+		!emptyOwnerLocalCompletion(&driver.local) || !idleExecutorScheduler(driver.p) {
 		return false, 0, false, false
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		if !wakeableExecutorRunCursor(driver) || !leaveExecutorIdleForRun(driver) {
+			return false, 0, false, false
+		}
+		return false, 0, false, true
 	}
 	if now < driver.prepareNow {
 		_ = leaveExecutorIdle(driver)
@@ -646,7 +845,8 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 		_ = leaveExecutorIdle(driver)
 		return false, 0, false, false
 	}
-	hasWork := scan.completed != 0 || runnableForOSThreadOwner(driver.p) ||
+	hasWork := scan.completed != 0 || !executorDirectChannelInboxIdle(driver) ||
+		runnableForOSThreadOwner(driver.p) ||
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
@@ -673,7 +873,7 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 
 func wakeExecutorRun(driver *ExecutorDriver, now int64, withDeadline bool) bool {
 	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() != withDeadline ||
-		driver.state != executorDriverSleeping || !emptyExecutorRunCursor(driver) ||
+		driver.state != executorDriverSleeping || !wakeableExecutorRunCursor(driver) ||
 		!idleExecutorScheduler(driver.p) || withDeadline && now < 0 {
 		return false
 	}

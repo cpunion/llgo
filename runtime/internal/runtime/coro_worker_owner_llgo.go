@@ -96,12 +96,13 @@ func __llgo_coro_worker_park_v1(
 	}
 
 	state.magic = coroWorkerParkMagicV1
-	ticket, operation, ok := coro.PrepareCurrentExecutorWorkerPark(
+	ticket, operation, ok := coro.PrepareCurrentExecutorWorkerParkCompiler(
 		driver,
 		task,
 		handle,
 		(*coro.HeaderV1)(header),
 		&state.wait,
+		&state.packet,
 		1,
 		1,
 	)
@@ -117,13 +118,9 @@ func __llgo_coro_worker_park_v1(
 	}
 	state.ticket = ticket
 	state.operation = operation
-	if !coro.BindSingleWaitSetResumePacket(&state.wait, &state.packet, operation) {
-		coroWorkerAbortV1("cannot bind coroutine worker resume packet")
-		return
-	}
-	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
-	if !coroCommitNativeWorkerSubmissionV1(
-		driver, task, executor, route, reservation, operation, function, traceTarget, argc, &args,
+	if !coroPublishNativeWorkerSubmissionV1(
+		executor, route, reservation, operation, function, traceTarget, argc,
+		a0, a1, a2, a3, a4, a5, a6, a7, a8,
 	) {
 		coroWorkerAbortV1("cannot commit coroutine worker submission")
 	}

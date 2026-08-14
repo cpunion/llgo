@@ -32,6 +32,24 @@ const (
 	RootFactoryVersionV1       uint32 = 1
 )
 
+// ProgramCapabilitiesV2 is the compiler-proven set of optional physical
+// services used by the final program. It is carried in ProgramBootstrapV2.Flags
+// and is deliberately independent of the target's larger capability set.
+type ProgramCapabilitiesV2 uint32
+
+const (
+	ProgramCapabilityWorkerV2 ProgramCapabilitiesV2 = 1 << iota
+)
+
+func (capabilities ProgramCapabilitiesV2) Valid() bool {
+	const known = ProgramCapabilityWorkerV2
+	return capabilities&^known == 0
+}
+
+func (capabilities ProgramCapabilitiesV2) Worker() bool {
+	return capabilities&ProgramCapabilityWorkerV2 != 0
+}
+
 // ProgramStepKindV1 identifies how one compiler-emitted bootstrap step must be
 // entered. It is data only: this package never invokes either pointer kind.
 type ProgramStepKindV1 uint32
@@ -545,6 +563,7 @@ func programStepsDigestV2(
 ) (uint64, uint64, ProgramValidationCodeV2) {
 	lo := uint64(14695981039346656037)
 	hi := uint64(0x6eed0e9da4d94a4f)
+	lo, hi = mixProgramDigestV2(lo, hi, uint64(bootstrap.Flags))
 	lo, hi = mixProgramDigestV2(lo, hi, uint64(bootstrap.StepCount))
 	lo, hi = mixProgramDigestV2(lo, hi, bootstrap.HashLo)
 	lo, hi = mixProgramDigestV2(lo, hi, bootstrap.HashHi)
@@ -622,7 +641,7 @@ func ValidateRunnableProgramV2(
 	if bootstrap.Version != ProgramBootstrapVersionV2 {
 		return ProgramViewV2{}, ProgramValidationBootstrapVersionV2
 	}
-	if bootstrap.Flags != 0 {
+	if !ProgramCapabilitiesV2(bootstrap.Flags).Valid() {
 		return ProgramViewV2{}, ProgramValidationBootstrapFlagsV2
 	}
 	if bootstrap.HashLo != manifest.HashLo || bootstrap.HashHi != manifest.HashHi {
@@ -666,6 +685,28 @@ func ValidateRunnableProgramV2(
 		digestLo:  digestLo,
 		digestHi:  digestHi,
 	}, ProgramValidationOKV2
+}
+
+// ResolveProgramCapabilitiesV2 returns the optional-service demand from an
+// opaque validated view. Like ResolveProgramStepV2 it revalidates mutable test
+// storage and compares the complete digest before publishing any fact.
+func ResolveProgramCapabilitiesV2(
+	program ProgramViewV2,
+) (ProgramCapabilitiesV2, ProgramValidationCodeV2) {
+	if program.magic != validatedProgramMagicV2 {
+		return 0, ProgramValidationInvalidViewV2
+	}
+	current, code := ValidateRunnableProgramV2(program.manifest, program.factory)
+	if code != ProgramValidationOKV2 || current.bootstrap != program.bootstrap ||
+		current.steps != program.steps || current.stepCount != program.stepCount ||
+		current.digestLo != program.digestLo || current.digestHi != program.digestHi {
+		return 0, ProgramValidationInvalidViewV2
+	}
+	capabilities := ProgramCapabilitiesV2(current.bootstrap.Flags)
+	if !capabilities.Valid() {
+		return 0, ProgramValidationBootstrapFlagsV2
+	}
+	return capabilities, ProgramValidationOKV2
 }
 
 // ResolveProgramStepV2 returns one action from an opaque validated view. It

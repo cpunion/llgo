@@ -176,7 +176,13 @@ func pollPreemptDepthZero(g *G, charge uint32) (bool, bool) {
 	switch mode {
 	case executorModeBound:
 		driver := p.executor
-		if !validExecutorDriverForP(driver, p) {
+		// A compiler safepoint only consumes the immutable current-P binding
+		// and the executor request gate below. Source catalogs, poll
+		// transactions, and selected owner-local work are scheduler-owned
+		// payload: their concrete publication/resolution boundaries perform
+		// the full audit before mutation. Re-auditing them at every compiler
+		// checkpoint makes unrelated event state part of every compute loop.
+		if !validExecutorDriverHeaderForP(driver, p) {
 			return false, false
 		}
 	case executorModeUnbound:
@@ -208,7 +214,7 @@ func pollPreemptDepthZero(g *G, charge uint32) (bool, bool) {
 	if !requested {
 		if budget <= charge {
 			p.servicePreemptBudget = servicePreemptSafepointBudget
-			requested = true
+			requested = servicePreemptBudgetExpired(p, mode)
 		} else {
 			p.servicePreemptBudget = budget - charge
 		}

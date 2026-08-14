@@ -252,7 +252,7 @@ func compileCoroExplicitStatusPanicFixture(t *testing.T, target *llssa.Target) (
 	return prog, pkg, plan, root
 }
 
-func TestCoroExplicitStatusPanicPreflightRemainsFailClosed(t *testing.T) {
+func TestCoroExplicitStatusPanicPreflightCapabilities(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		source string
@@ -268,9 +268,15 @@ func Root(address uintptr, trigger bool) { if trigger { panic(*(*any)(unsafe.Poi
 			want: "uintptr-to-pointer conversion has no traceable exact pointer provenance",
 		},
 		{
-			name: "boxed scalar",
+			name: "constant backed scalar",
 			source: `package foo
 func Root(trigger bool) { if trigger { panic(uint32(7)) } }
+`,
+		},
+		{
+			name: "dynamic boxed scalar",
+			source: `package foo
+func Root(value uint32, trigger bool) { if trigger { panic(value) } }
 `,
 			want: "structured runtime helper validation requires a frozen emission universe",
 		},
@@ -320,6 +326,12 @@ func Root(trigger bool) { defer cleanup(); if trigger { panic(&Payload) } }
 				Exec:          coro.MayUnwind | test.exec,
 			}
 			err = validateCoroPhysicalABIWithUniverseCapabilities(root, plan, nil, universe, true, false, false, true)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("preflight error = %v, want constant-backed payload acceptance", err)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("preflight error = %v, want %q", err, test.want)
 			}
@@ -476,6 +488,7 @@ func Selected(first, second <-chan any) {
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 		ClassifyLoweredCalls: universe.CoroLoweredCalls,
 	})
 	if err != nil {

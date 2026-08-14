@@ -151,10 +151,15 @@ type ParkLink struct {
 // irreversible/reservable winners.
 // All ParkState and ParkLink operations are strictly owner-P-only.
 type ParkState struct {
-	ticket          ParkTicket
-	phase           parkPhase
-	hasDefault      bool
-	resolving       bool
+	ticket     ParkTicket
+	phase      parkPhase
+	hasDefault bool
+	resolving  bool
+	// directChannel occupies the final byte before expected's alignment. It is
+	// set only on a source-free compact hchan materialization and consumed by
+	// the immediately resumed compiler prologue; no native/WASM ABI size or
+	// following-field offset changes.
+	directChannel   bool
 	expected        uint32
 	attached        uint32
 	seed            uint32
@@ -191,7 +196,15 @@ func validMaterializedParkHeader(state *ParkState) bool {
 		return false
 	}
 	switch state.outcome {
-	case ParkOutcomeCompleted, ParkOutcomeDefault:
+	case ParkOutcomeCompleted:
+		if state.directChannel {
+			return state.winnerCase == 1
+		}
+		return state.winnerCase != 0
+	case ParkOutcomeDefault:
+		if state.directChannel {
+			return false
+		}
 		return state.winnerCase != 0
 	case ParkOutcomeCanceled:
 		return state.winnerCase == 0
@@ -202,7 +215,7 @@ func validMaterializedParkHeader(state *ParkState) bool {
 
 func validParkState(state *ParkState) bool {
 	if state == nil || state.resolving || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
-		state.attached > state.expected {
+		state.attached > state.expected || state.directChannel && state.phase != parkMaterialized {
 		return false
 	}
 	links := uint32(0)
@@ -325,11 +338,47 @@ func validParkState(state *ParkState) bool {
 	}
 }
 
-func releasableParkState(state *ParkState) bool {
-	if !validParkState(state) {
+// validReleasableParkState is the complete O(1) validator for phases which
+// cannot retain a source link. These phases are on every spawn, dispatch, and
+// terminal-G path; routing them through validParkState needlessly enters the
+// generic intrusive-list validator even though their exact invariant requires
+// head == nil and attached == 0.
+func validReleasableParkState(state *ParkState) bool {
+	if state == nil || state.resolving ||
+		!validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
+		state.cancelKind > ParkCancelShutdown || state.attached > state.expected || state.directChannel {
 		return false
 	}
-	return state.phase == parkIdle || state.phase == parkConsumed || state.phase == parkDelivered
+	switch state.phase {
+	case parkIdle:
+		return state.ticket == (ParkTicket{}) && state.expected == 0 && state.attached == 0 &&
+			state.seed == 0 && !state.hasDefault && state.cancelKind == ParkCancelNone &&
+			state.outcome == ParkOutcomePending && state.winnerCase == 0 &&
+			state.winnerID == (OperationID{}) && state.winnerRecord == nil && state.head == nil
+	case parkConsumed:
+		if !validParkTicket(state.ticket) || state.attached != 0 || state.head != nil {
+			return false
+		}
+		return state.outcome == ParkOutcomeCompleted && !state.hasDefault &&
+			state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord == nil ||
+			state.outcome == ParkOutcomeCanceled && !state.hasDefault &&
+				state.cancelKind != ParkCancelNone && state.winnerCase == 0 &&
+				state.winnerID == (OperationID{}) && state.winnerRecord == nil ||
+			state.outcome == ParkOutcomeDefault && state.hasDefault &&
+				state.cancelKind == ParkCancelNone && state.winnerID == (OperationID{}) &&
+				state.winnerRecord == nil
+	case parkDelivered:
+		return validParkTicket(state.ticket) && state.expected == 0 && state.attached == 0 &&
+			state.seed == 0 && !state.hasDefault && state.cancelKind == ParkCancelNone &&
+			state.outcome == ParkOutcomePending && state.winnerCase == 0 &&
+			state.winnerID == (OperationID{}) && state.winnerRecord == nil && state.head == nil
+	default:
+		return false
+	}
+}
+
+func releasableParkState(state *ParkState) bool {
+	return validReleasableParkState(state)
 }
 
 func materializedParkState(state *ParkState, ticket ParkTicket, outcome ParkOutcome, caseID uint32) bool {
@@ -350,11 +399,36 @@ func materializedParkState(state *ParkState, ticket ParkTicket, outcome ParkOutc
 		outcome:         outcome,
 		winnerCase:      caseID,
 	}
-	return validParkState(state)
+	return validMaterializedParkState(state, ticket)
+}
+
+func validMaterializedParkState(state *ParkState, ticket ParkTicket) bool {
+	return state != nil && state.phase == parkMaterialized && state.ticket == ticket &&
+		!state.resolving && validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) &&
+		validMaterializedParkHeader(state)
+}
+
+func materializeConsumedParkStateUnchecked(
+	state *ParkState,
+	ticket ParkTicket,
+	outcome ParkOutcome,
+	caseID uint32,
+) {
+	kind, phase := state.taskCancelKind, state.taskCancelPhase
+	preferredRoute := state.seed
+	*state = ParkState{
+		ticket:          ticket,
+		phase:           parkMaterialized,
+		seed:            preferredRoute,
+		taskCancelKind:  kind,
+		taskCancelPhase: phase,
+		outcome:         outcome,
+		winnerCase:      caseID,
+	}
 }
 
 func deliverMaterializedParkResume(state *ParkState, ticket ParkTicket) bool {
-	if !validParkState(state) || state.phase != parkMaterialized || state.ticket != ticket {
+	if !validMaterializedParkState(state, ticket) {
 		return false
 	}
 	kind, phase := state.taskCancelKind, state.taskCancelPhase
@@ -364,7 +438,7 @@ func deliverMaterializedParkResume(state *ParkState, ticket ParkTicket) bool {
 		taskCancelKind:  kind,
 		taskCancelPhase: phase,
 	}
-	return validParkState(state)
+	return true
 }
 
 // BeginParkSet starts one logical N-candidate wait. The two-word ticket only

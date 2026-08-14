@@ -239,6 +239,26 @@ func TestValidateAndResolveEveryHeterogeneousProgramV2(t *testing.T) {
 	}
 }
 
+func TestProgramCapabilitiesV2AreValidatedAndDigestBound(t *testing.T) {
+	f := newProgramBootstrapTestFixtureV2(0b01010)
+	f.bootstrap.Flags = uint32(ProgramCapabilityWorkerV2)
+	view := requireProgramViewV2(t, f)
+	capabilities, code := ResolveProgramCapabilitiesV2(view)
+	if code != ProgramValidationOKV2 || !capabilities.Worker() {
+		t.Fatalf("resolved program capabilities = (%#x, %d), want worker", capabilities, code)
+	}
+	f.bootstrap.Flags = 0
+	if _, code := ResolveProgramCapabilitiesV2(view); code != ProgramValidationInvalidViewV2 {
+		t.Fatalf("mutated program capabilities code = %d, want invalid view", code)
+	}
+
+	unknown := newProgramBootstrapTestFixtureV2(0b01010)
+	unknown.bootstrap.Flags = uint32(ProgramCapabilityWorkerV2) << 1
+	if _, code := ValidateRunnableProgramV2(&unknown.manifest, unsafe.Pointer(&unknown.bootstrapFactory)); code != ProgramValidationBootstrapFlagsV2 {
+		t.Fatalf("unknown program capability code = %d, want bootstrap flags", code)
+	}
+}
+
 func TestValidateRunnableProgramV2RejectsMalformedTable(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -250,7 +270,7 @@ func TestValidateRunnableProgramV2RejectsMalformedTable(t *testing.T) {
 		{"nil bootstrap", ProgramValidationNilBootstrapV2, func(f *programBootstrapTestFixtureV2) { f.manifest.Bootstrap = nil }},
 		{"bootstrap v1", ProgramValidationBootstrapVersionV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.Version = uint32(1) }},
 		{"unknown bootstrap version", ProgramValidationBootstrapVersionV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.Version = 3 }},
-		{"bootstrap flags", ProgramValidationBootstrapFlagsV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.Flags = 1 }},
+		{"bootstrap flags", ProgramValidationBootstrapFlagsV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.Flags = 2 }},
 		{"bootstrap hash", ProgramValidationBootstrapHashV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.HashHi++ }},
 		{"four steps", ProgramValidationStepCountV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.StepCount = 4 }},
 		{"nil steps", ProgramValidationStepCountPointerV2, func(f *programBootstrapTestFixtureV2) { f.bootstrap.Steps = nil }},

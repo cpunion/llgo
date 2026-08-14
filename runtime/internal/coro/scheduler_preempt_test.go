@@ -111,6 +111,26 @@ func TestPreemptPollFailsClosedAndConsumesOnlyActiveRequest(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
+func TestCompilerPreemptPollRejectsBrokenOwnerBeforeConsumingRequest(t *testing.T) {
+	p := new(P)
+	task := newYieldingTestG(t, "compiler-poll-owner")
+	_ = beginWaitTestResume(t, p, task)
+	if !RequestPreempt(task.g) {
+		t.Fatal("request active compiler-poll G")
+	}
+	p.current = nil
+	if PollPreemptCompiler(task.g) || loadGPreempt(task.g) != preemptRequested ||
+		p.servicePreemptBudget != servicePreemptSafepointBudget {
+		t.Fatal("compiler poll consumed request or budget through a broken owner")
+	}
+	p.current = task.g
+	if !PollPreemptCompiler(task.g) || loadGPreempt(task.g) != preemptIdle ||
+		p.servicePreemptBudget != servicePreemptSafepointBudget {
+		t.Fatal("restored compiler poll did not consume the exact G request")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestBeginRunGDoesNotImmediatelyPreemptWithoutCompetitor(t *testing.T) {
 	task := newYieldingTestG(t, "single")
 	p := new(P)

@@ -1,6 +1,7 @@
 package rtlib
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -117,6 +118,19 @@ func TestGetCompilerRTConfig(t *testing.T) {
 		if len(group.CCFlags) == 0 {
 			t.Error("Expected non-empty CCFlags")
 		}
+	}
+}
+
+func TestCompilerRTWasmDoesNotUseHostLibcHeaders(t *testing.T) {
+	for _, target := range []string{"wasm32-unknown-wasi", "wasm32-unknown-unknown", "wasm64-unknown-unknown"} {
+		config := GetCompilerRTCompileConfig("/test/base", target)
+		if len(config.Groups) != 1 || !slices.Contains(config.Groups[0].CCFlags, "-nostdlibinc") {
+			t.Errorf("compiler-rt %s flags = %v, want -nostdlibinc", target, config.Groups[0].CCFlags)
+		}
+	}
+	native := GetCompilerRTCompileConfig("/test/base", "riscv32-unknown-elf")
+	if slices.Contains(native.Groups[0].CCFlags, "-nostdlibinc") {
+		t.Fatalf("native compiler-rt flags unexpectedly disable target libc headers: %v", native.Groups[0].CCFlags)
 	}
 }
 

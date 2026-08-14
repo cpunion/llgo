@@ -130,6 +130,29 @@ func TestSelectCoroProgramBootstrapV2ExactMixedFiveStageProgram(t *testing.T) {
 	}
 }
 
+func TestSelectCoroProgramBootstrapV2PublishesAndBindsWorkerDemand(t *testing.T) {
+	fixture := newCoroBootstrapV2TestContext(t)
+	withoutWorker, err := selectCoroProgramBootstrapV2(fixture.ctx, fixture.mainPackage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutWorker.Flags != 0 {
+		t.Fatalf("bootstrap without worker demand flags = %#x, want zero", withoutWorker.Flags)
+	}
+
+	fixture.ctx.coroProgramCapabilities = coro.NewProgramCapabilities(true)
+	withWorker, err := selectCoroProgramBootstrapV2(fixture.ctx, fixture.mainPackage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withWorker.Flags != coroProgramCapabilityWorkerV2 {
+		t.Fatalf("bootstrap worker flags = %#x, want %#x", withWorker.Flags, coroProgramCapabilityWorkerV2)
+	}
+	if withWorker.StepHash == withoutWorker.StepHash {
+		t.Fatalf("bootstrap hash ignored program capabilities: %x", withWorker.StepHash)
+	}
+}
+
 func TestSelectCoroProgramBootstrapV2UsesOwnedNoopWhenPublicRuntimeIsAbsent(t *testing.T) {
 	fixture := newCoroBootstrapV2TestContextWithPublicRuntime(t, false)
 	bootstrap, err := selectCoroProgramBootstrapV2(fixture.ctx, fixture.mainPackage)

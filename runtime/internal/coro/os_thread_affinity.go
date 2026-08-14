@@ -205,20 +205,34 @@ func CurrentOSThreadLocked(g *G) bool {
 		p.osThreadSuspend == osThreadSuspendAttached
 }
 
+// OSThreadSuspendHandoffCandidate is the target adapter's O(1) negative
+// filter after an ordinary Yield/Park action has already committed. A true
+// result is only a hint: PrepareOSThreadSuspendHandoff still proves the exact
+// driver, task, action, and physical-owner relation before mutation. A false
+// result is sufficient because an unlocked task has no M-affinity state to
+// transfer.
+func OSThreadSuspendHandoffCandidate(g *G) bool {
+	return g != nil && g.osThreadLockDepth != 0
+}
+
 // releaseOSThreadLockForExit closes the logical lease before terminal G
 // publication. retireOwner distinguishes a balanced/unlocked exit from a G
 // which still held LockOSThread: the scheduler must clear both logical pointers
 // in either case, while the target must terminate the latter physical owner.
 func releaseOSThreadLockForExit(p *P, g *G) (retireOwner, ok bool) {
 	if p == nil || g == nil || p.current != g || g.runP != p ||
-		p.osThreadSuspend != osThreadSuspendAttached ||
 		osThreadForeignReentryAffined(g) {
 		return false, false
 	}
 	if g.osThreadLockDepth == 0 {
-		return false, p.osThreadLockOwner != g
+		// A replacement M may finish an unlocked peer while the locked owner is
+		// detached in Park or YieldNeedsPeer. The peer owns no physical lease to
+		// retire, and its exit must preserve the suspended owner's P-local lock
+		// header. validOSThreadRunOwner proves both that replacement relation and
+		// the ordinary attached/unlocked case without weakening locked-G exit.
+		return false, validOSThreadRunOwner(p, g)
 	}
-	if p.osThreadLockOwner != g {
+	if p.osThreadSuspend != osThreadSuspendAttached || p.osThreadLockOwner != g {
 		return false, false
 	}
 	g.osThreadLockDepth = 0
@@ -255,14 +269,22 @@ func osThreadSuspendPeerReady(p *P, owner *G) bool {
 	return false
 }
 
-func validCompletedOSThreadSuspendAction(p *P, task *G, kind ActionKind) bool {
-	if !completedExecutorRunAction(p, task, Action{Kind: kind}) {
-		return false
-	}
+func validCompletedOSThreadSuspendPlacement(p *P, task *G, kind ActionKind) bool {
 	switch kind {
 	case ActionYield:
 		// Resumed appends the just-yielded continuation at the owner tail.
 		return p.readyTail == task && task.nextReady == nil
+	case ActionPark:
+		return true
+	default:
+		return false
+	}
+}
+
+func validCompletedOSThreadSuspendPayload(p *P, task *G, kind ActionKind) bool {
+	switch kind {
+	case ActionYield:
+		return true
 	case ActionPark:
 		// Validate the exact newly parked record and its two active-list
 		// neighbors without traversing unrelated parked tasks or candidates.
@@ -294,7 +316,8 @@ func PrepareOSThreadSuspendHandoff(
 	p := driver.p
 	if p == nil || task == nil ||
 		!idleExecutorScheduler(p) ||
-		!validCompletedOSThreadSuspendAction(p, task, kind) {
+		!completedExecutorRunAction(p, task, Action{Kind: kind}) ||
+		!validCompletedOSThreadSuspendPlacement(p, task, kind) {
 		return false, false
 	}
 	// The target observes every committed Yield/Park. An unlocked task needs no
@@ -303,6 +326,9 @@ func PrepareOSThreadSuspendHandoff(
 	// phase; every partial or mismatched lock relation remains invalid.
 	if task.osThreadLockDepth == 0 {
 		return false, true
+	}
+	if !validCompletedOSThreadSuspendPayload(p, task, kind) {
+		return false, false
 	}
 	// The overwhelmingly common unlocked path above needs only the scheduler's
 	// owner-maintained O(1) headers and the exact completed task. Retain the
@@ -334,6 +360,25 @@ func PrepareOSThreadSuspendHandoff(
 // transaction; returnable becomes true only at a stable scheduler boundary
 // after a parked owner is runnable or a yielding owner's one peer Action debt
 // has been satisfied.
+//
+// OSThreadSuspendHandoffPossible is the constant-time negative gate for the
+// overwhelmingly common executor which has never acquired LockOSThread. A
+// positive result is only a hint and must be followed by the complete status
+// audit below; false is exact because an attached P with no lock owner has no
+// handoff state which a stable reduction could return to.
+func OSThreadSuspendHandoffPossible(driver *ExecutorDriver) (possible, ok bool) {
+	if driver == nil || driver.magic != executorDriverMagic || driver.state != executorDriverActive ||
+		driver.p == nil || driver.p.executor != driver ||
+		preemptLoad(&driver.p.executorMode) != executorModeBound {
+		return false, false
+	}
+	p := driver.p
+	if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached {
+		return false, true
+	}
+	return true, true
+}
+
 func OSThreadSuspendHandoffStatus(
 	driver *ExecutorDriver,
 ) (detached, returnable, ok bool) {
@@ -436,4 +481,18 @@ func commitOSThreadPeerAction(p *P) {
 	if p != nil && p.osThreadSuspend == osThreadSuspendYieldNeedsPeer {
 		p.osThreadSuspend = osThreadSuspendYieldPeerServiced
 	}
+}
+
+// osThreadSuspendCurrentPeerNeedsService reports the one case where an
+// otherwise sole-running bound G must still cross a scheduler boundary. The
+// current replacement peer itself is the outstanding physical Action; it is
+// not in the ready queue, so runnableForOSThreadOwner cannot represent this
+// debt until the peer first yields.
+func osThreadSuspendCurrentPeerNeedsService(p *P) bool {
+	if p == nil || p.osThreadSuspend != osThreadSuspendYieldNeedsPeer {
+		return false
+	}
+	owner, current := p.osThreadLockOwner, p.current
+	return owner != nil && current != nil && current != owner &&
+		current.osThreadLockDepth == 0
 }

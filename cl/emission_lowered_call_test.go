@@ -21,6 +21,7 @@ package cl
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"strings"
 	"testing"
 
@@ -188,7 +189,6 @@ func Use(m map[int]int, key int, value I) {
 	delete(m, key)
 	value.M()
 }
-
 `)
 	testProg.ssa.Build()
 	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
@@ -209,6 +209,36 @@ func Use(m map[int]int, key int, value I) {
 		if !got[helper] {
 			t.Errorf("lowered runtime helpers %v omit %q", got, helper)
 		}
+	}
+}
+
+func TestLoweredRuntimeHelpersCgoC2UsesStaticErrnoItab(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/cgoc2helpers", `package cgoc2helpers
+var _cgo_demo uintptr
+func _cgo_runtime_cgocall(fn uintptr, arg uintptr) int32
+func _C2func_demo() (int, error) {
+	_cgo_runtime_cgocall(_cgo_demo, 0)
+	return 0, nil
+}
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	universe.prog = prog
+	fn := pkg.ssa.Func("_C2func_demo")
+	ctx, err := universe.functionABIContext(fn, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := findStaticCall(t, fn, "_cgo_runtime_cgocall")
+	helpers := universe.loweredRuntimeHelpers(ctx, call)
+	if !slices.Contains(helpers, "AllocU") {
+		t.Fatalf("C2 errno return helpers = %v, want AllocU for the nil error slot", helpers)
+	}
+	if slices.Contains(helpers, "NewItab") {
+		t.Fatalf("C2 errno return helpers = %v, static errno itab must not retain NewItab", helpers)
 	}
 }
 

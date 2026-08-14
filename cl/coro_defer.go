@@ -271,7 +271,11 @@ func prepareCoroStaticCleanupPlan(
 			return nil, fmt.Errorf("cleanup site function %q has no compilation plan", siteFunction.Name())
 		}
 		siteInfos := blocks.Infos(siteFunction.Blocks)
+		reachable := coroPhysicalConstantReachableBlocks(siteFunction)
 		for _, block := range siteFunction.Blocks {
+			if !reachable[block] {
+				continue
+			}
 			for instructionIndex, raw := range block.Instrs {
 				switch instruction := raw.(type) {
 				case *ssa.Defer:
@@ -441,7 +445,7 @@ func prepareCoroStaticCleanupPlan(
 	}
 
 	if len(byInstruction) == 0 {
-		if caller.Exec.Contains(coro.NeedsCleanupFrame) || runDefers != 0 {
+		if caller.Exec.Contains(coro.NeedsCleanupFrame) {
 			return nil, fmt.Errorf("needs-cleanup-frame body has no supported static defer site")
 		}
 		return nil, nil
@@ -529,11 +533,20 @@ func prepareCoroStaticCleanupPlan(
 	// blocks.Infos' Next chain is a topological order outside SCCs.  Defer
 	// sites in SCCs were rejected above, so reversing this list later is the
 	// exact registration order for every path on which two sites both ran.
+	reachable := coroPhysicalConstantReachableBlocks(fn)
 	ordered := make([]*coroStaticCleanupSitePlan, 0, len(byInstruction))
 	for index := 0; index >= 0; index = infos[index].Next {
-		for _, raw := range fn.Blocks[index].Instrs {
+		block := fn.Blocks[index]
+		if !reachable[block] {
+			continue
+		}
+		for _, raw := range block.Instrs {
 			if instruction, ok := raw.(*ssa.Defer); ok {
-				ordered = append(ordered, byInstruction[instruction])
+				site, planned := byInstruction[instruction]
+				if !planned {
+					return nil, fmt.Errorf("reachable defer in block %d is absent from the cleanup plan", block.Index)
+				}
+				ordered = append(ordered, site)
 			}
 		}
 	}

@@ -226,8 +226,10 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity",
 		"coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity",
 		"bounded C11 sequence ring",
-		"coroworker.QueueReserve(&reservation)",
-		"coroworker.QueueSubmitReserved(reservation, &job)",
+		"reservation := coroworker.QueueReserve()",
+		"coroworker.QueueSubmitReserved(",
+		"id.SourceSlot,",
+		"id.Generation,",
 		"coroNativeWorkerDeliveryFleetV1",
 		"func coroNativeWorkerPoolStartFleetV1() bool",
 	} {
@@ -278,7 +280,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 			t.Fatalf("native worker reservation contains managed blocking edge %q:\n%s", forbidden, reserve)
 		}
 	}
-	if !strings.Contains(reserve, "coroworker.QueueReserve(&reservation)") {
+	if !strings.Contains(reserve, "reservation := coroworker.QueueReserve()") {
 		t.Fatalf("native worker reservation bypasses the C11 capacity preflight:\n%s", reserve)
 	}
 	for _, forbidden := range []string{"psync", "state.mutex", "state.work", "pthread.Mutex", "pthread.Cond"} {
@@ -289,7 +291,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	for _, required := range []string{
 		"func coroReserveNativeWorkerSubmissionV1(",
 		"coroNativeWorkerSubmissionOwnerV1(handle, route)",
-		"coro.CommitCurrentExecutorWorkerSubmission(driver, g, id)",
+		"func coroPublishNativeWorkerSubmissionV1(",
 		"id.Route() != route",
 	} {
 		if !strings.Contains(native, required) {
@@ -300,8 +302,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	owner := readRuntimePollFile(t, runtimeCoroWorkerOwnerSource)
 	for _, required := range []string{
 		"coro.CurrentExecutorWorkerDriver(task)",
-		"coro.PrepareCurrentExecutorWorkerPark(",
-		"coro.BindSingleWaitSetResumePacket(",
+		"coro.PrepareCurrentExecutorWorkerParkCompiler(",
+		"&state.packet,",
 		"coro.TakeResumePacket(",
 		"coroReserveNativeWorkerSubmissionV1(executor, route)",
 		"packet    coro.ResumePacket",
@@ -315,6 +317,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"coroProgramReserveNativeWorkerSubmissionV1",
 		"coroProgramCancelNativeWorkerSubmissionV1",
 		"coroProgramCommitNativeWorkerSubmissionV1",
+		"coro.BindSingleWaitSetResumePacket(",
+		"coro.CommitCurrentExecutorWorkerSubmission(",
 		"coro.TakeRunDecision(",
 		"coro.FinishCurrentExecutorWorkerPark(",
 	} {
@@ -337,9 +341,9 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	for _, required := range []string{
 		"//go:linkname QueueInit C.__llgo_coro_worker_queue_init_v1",
 		"//go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1",
-		"//go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1",
-		"//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1",
-		"//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1",
+		"//go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v2",
+		"//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v2",
+		"//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v4",
 		"//go:linkname QueueStop C.__llgo_coro_worker_queue_stop_v1",
 		"lock-free by QueueInit",
 		"semaphore_signal never wait for worker",
@@ -362,8 +366,13 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"_Atomic size_t sequence;",
 		"_Atomic uint32_t producer_state;",
 		"_Atomic size_t enqueue_position;",
+		"_Atomic bool handoff_poller;",
 		"atomic_is_lock_free(&queue->enqueue_position)",
 		"atomic_store_explicit(&slot->sequence, reservation + 1, memory_order_release);",
+		"LLGO_CORO_WORKER_HANDOFF_POLLS_V1",
+		"handoff_slot->sequence",
+		"llgo_coro_worker_cpu_relax_v1();",
+		"&queue->handoff_poller, false",
 		"llgo_coro_worker_job_canceled_v1",
 		"sem_post(wake)",
 		"semaphore_signal(*wake)",
@@ -372,6 +381,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"__llgo_coro_native_worker_complete_v1(",
 		"siglongjmp(*state->landing, 1)",
 		"state->fault_pc = llgo_coro_worker_fault_pc_v1(context)",
+		"sigsetjmp(landing, 0)",
+		"llgo_coro_worker_unblock_fault_signals_v1(fault_signal)",
 	} {
 		if !strings.Contains(cSource, required) {
 			t.Errorf("%s lacks C11 worker transport marker %q", runtimeCoroWorkerCSource, required)
@@ -380,6 +391,18 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	for _, forbidden := range []string{"pthread_mutex_lock", "pthread_cond_wait", "pthread_cond_signal"} {
 		if strings.Contains(cSource, forbidden) {
 			t.Errorf("%s retains pthread queue synchronization %q", runtimeCoroWorkerCSource, forbidden)
+		}
+	}
+	for _, forbidden := range []string{
+		"QueueReserve(&",
+		"args *[coroworker.MaxArgs]uintptr",
+		"args := [coroworker.MaxArgs]uintptr",
+		"__llgo_coro_worker_queue_submit_reserved_v2",
+		"__llgo_coro_worker_queue_submit_reserved_v3",
+	} {
+		if strings.Contains(native, forbidden) || strings.Contains(owner, forbidden) ||
+			strings.Contains(declaration, forbidden) || strings.Contains(cSource, forbidden) {
+			t.Errorf("worker submission retains escaping Go aggregate boundary %q", forbidden)
 		}
 	}
 	header := readRuntimePollFile(t, runtimeCoroWorkerHeaderSource)

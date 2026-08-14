@@ -57,8 +57,11 @@ func nativeCDoorbellRead(fd int32, buffer *byte, size uintptr) uint64
 
 // nativeCDoorbellWrite performs exactly one one-byte write to the private
 // nonblocking write end. EAGAIN is returned to the retained-wake protocol.
-// Its exact raw-host use domain is frozen before physical lowering.
+// The descriptor capability is established by nativeCDoorbellOpen before the
+// Pipe is published, while this declaration supplies the one fact unavailable
+// from its C type: the exact call cannot block an executor.
 //
+//llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return
 //go:linkname nativeCDoorbellWrite C.__llgo_coro_doorbell_write_v1
 func nativeCDoorbellWrite(fd int32, buffer *byte, size uintptr) uint64
 

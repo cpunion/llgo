@@ -1051,27 +1051,28 @@ func (b Builder) Recv(ch Expr, commaOk bool) (ret Expr) {
 // CoroChanTrySend performs only the nonblocking, non-panicking first attempt
 // of a compiler-owned stackless channel send. The caller owns elem storage and
 // must enter the exact channel park transaction when false is returned.
-func (b Builder) CoroChanTrySend(ch, elem Expr) Expr {
+func (b Builder) CoroChanTrySend(task, ch, elem Expr) Expr {
 	prog := b.Prog
 	eltSize := prog.IntVal(prog.SizeOf(prog.Elem(ch.Type)), prog.Int())
-	return b.InlineCall(b.Pkg.rtFunc("CoroChanTrySend"), ch, elem, eltSize)
+	return b.InlineCall(b.Pkg.rtFunc("CoroChanTrySend"), task, ch, elem, eltSize)
 }
 
 // CoroChanTryRecv performs only the nonblocking first attempt of a
 // compiler-owned stackless channel receive. It returns (recvOK, tryOK); the
 // caller must enter the exact channel park transaction when tryOK is false.
-func (b Builder) CoroChanTryRecv(ch, elem Expr) Expr {
+func (b Builder) CoroChanTryRecv(task, ch, elem Expr) Expr {
 	prog := b.Prog
 	eltSize := prog.IntVal(prog.SizeOf(prog.Elem(ch.Type)), prog.Int())
-	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryRecv"), ch, elem, eltSize)
+	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryRecv"), task, ch, elem, eltSize)
 }
 
-// CoroChanTryClose performs one complete non-panicking channel-close
-// transaction. Its scalar result distinguishes success, nil channel, and an
-// already closed channel; physical coroutine lowering owns the two language
-// panic outcomes through its explicit-status ABI.
-func (b Builder) CoroChanTryClose(ch Expr) Expr {
-	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryClose"), ch)
+// CoroChanTryCloseTask performs one complete non-panicking channel-close
+// transaction using the compiler-carried logical task capability. Its scalar
+// result distinguishes success, nil channel, and an already closed channel;
+// physical coroutine lowering owns the two language panic outcomes through
+// its explicit-status ABI.
+func (b Builder) CoroChanTryCloseTask(task, ch Expr) Expr {
+	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryCloseTask"), task, ch)
 }
 
 type SelectState struct {

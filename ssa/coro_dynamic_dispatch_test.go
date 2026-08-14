@@ -37,10 +37,7 @@ type coroDynamicDispatchTestFixture struct {
 	dual       Expr
 }
 
-func TestCoroDynamicDispatchV1LLVM19CapturedCoroAndDualEntries(t *testing.T) {
-	if llvmMajorVersion() != 19 {
-		t.Skipf("dynamic coroutine descriptor IR proof is focused on LLVM 19, using %s", llvm.Version)
-	}
+func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
 	fixture := newCoroDynamicDispatchTestFixture(t)
 	prog, pkg := fixture.prog, fixture.pkg
 

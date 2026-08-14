@@ -167,6 +167,23 @@ func BeginSpawn(parent, child *G, storage unsafe.Pointer, size uintptr) bool {
 	return true
 }
 
+// activeSpawnTransaction consumes the reciprocal parent/child/P links
+// published by BeginSpawn as an unforgeable scheduler-owned certificate. The
+// compiler's root factory cannot suspend or run another scheduler reduction,
+// so the links remain exclusive until CommitSpawn or RollbackSpawn clears
+// them. Revalidate the live resume owner because an asynchronous preemption
+// request may arrive, but do not repeat every parent and queue audit already
+// completed at BeginSpawn.
+func activeSpawnTransaction(parent, child *G) (*P, bool) {
+	if parent == nil || child == nil || parent == child ||
+		parent.spawnChild != child || child.spawnParent != parent ||
+		child.spawnP == nil || parent.runP != child.spawnP ||
+		!resumeGateTaken(parent) {
+		return nil, false
+	}
+	return child.spawnP, true
+}
+
 func validDiscardResultSpawnRoot(child *G, handle unsafe.Pointer) (*Frame, bool) {
 	root := findFrame(child, handle)
 	if root == nil || child.frames != root || root.next != nil || root.owner != child ||
@@ -180,7 +197,7 @@ func validDiscardResultSpawnRoot(child *G, handle unsafe.Pointer) (*Frame, bool)
 		return nil, false
 	}
 	descriptor := (*FrameDescriptorV1)(root.descriptor)
-	if descriptor.Version != 1 || descriptor.Flags != 0 ||
+	if descriptor.Version != 1 || descriptor.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
 		!validProgramPayloadLayoutV1(descriptor.ResultSize, descriptor.ResultAlign) {
 		return nil, false
 	}
@@ -190,17 +207,19 @@ func validDiscardResultSpawnRoot(child *G, handle unsafe.Pointer) (*Frame, bool)
 // CommitSpawn atomically adopts the independently created root and appends its
 // G to the current P's ready queue. Every potentially failing check happens
 // before RequestPreempt and the scheduler-owned stores, so failure never
-// exposes a half-adopted or half-enqueued child. The request forces the parent
-// through its next compiler safepoint; yielding then places the parent behind
-// the newly ready child.
+// exposes a half-adopted or half-enqueued child. The first local child does not
+// force an immediate parent yield: a parent which is about to park can hand the
+// P directly to that child without exporting either continuation or ringing a
+// peer doorbell. An already non-empty local queue requests preemption so bursts
+// still reach the scheduler promptly and can be shared with idle Ps.
 func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
-	p, ok := runningSpawnContext(parent)
-	if !ok || handle == nil || parent.spawnChild != child || child == nil ||
+	p, ok := activeSpawnTransaction(parent, child)
+	if !ok || handle == nil ||
 		!ValidG(child) || child.state != GNew || child.root != nil || child.active != nil ||
 		child.pending.kind != pendingNone || child.pending.from != nil || child.pending.target != nil ||
 		child.destroyTarget != nil || child.destroyRoot || child.nextReady != nil || child.queued ||
 		child.waiting || child.runP != nil ||
-		child.spawnChild != nil || child.spawnParent != parent || child.spawnP != p ||
+		child.spawnChild != nil ||
 		child.transferState != runnableTransferGIdle ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
 		child.taskSize != TaskStorageSize() || !gPreemptStateAtDepthZero(child, preemptIdle) {
@@ -212,8 +231,10 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 	}
 	// This cannot fail after the complete parent/child/P validation above. It is
 	// intentionally issued before queue publication so no post-publication
-	// operation can force CommitSpawn to report failure.
-	if !RequestPreempt(parent) {
+	// operation can force CommitSpawn to report failure. A sole new child is
+	// serviced when the parent next parks, yields, or exhausts its ordinary
+	// compiler-poll quantum; it needs no eager scheduling transaction.
+	if p.readyCount != 0 && !RequestPreempt(parent) {
 		return false
 	}
 
@@ -233,9 +254,8 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 // fail-stop: only the scheduler may destroy that handle, so the exported ABI
 // aborts instead of trying to free it on the parent executor stack.
 func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
-	p, ok := runningSpawnContext(parent)
-	if !ok || parent.spawnChild != child || child == nil || !ValidG(child) ||
-		child.spawnParent != parent || child.spawnP != p || child.spawnChild != nil ||
+	_, ok := activeSpawnTransaction(parent, child)
+	if !ok || !ValidG(child) || child.spawnChild != nil ||
 		child.state != GNew || child.root != nil || child.active != nil || child.frames != nil ||
 		child.pending.kind != pendingNone || child.destroyTarget != nil || child.destroyRoot ||
 		child.nextReady != nil || child.queued || child.waiting || child.runP != nil ||
@@ -269,7 +289,7 @@ func ReclaimableG(g *G) bool {
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
 		g.osThreadLockDepth == 0 &&
 		g.root == nil && g.active == nil && g.frames == nil &&
-		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
+		g.pending.kind == pendingNone && !g.pending.directChannel && g.pending.from == nil && g.pending.target == nil &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		!g.waiting && g.runP == nil &&
 		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
@@ -310,6 +330,41 @@ func ReleaseTaskStorage(g *G) (raw unsafe.Pointer, size uintptr, ok bool) {
 	g.taskSize = 0
 	g.taskState = taskStorageReleased
 	return raw, size, true
+}
+
+// ReleaseCompletedTask transfers both runtime-adapter context and physical
+// task storage after one complete terminal audit. Production retirement owns
+// these two values as one scheduler-thread transaction: the adapter destroys
+// the returned context while the owned allocation is still live, then clears
+// and frees that allocation. Clearing taskLocal/taskState here makes duplicate
+// transfer fail without repeating ReclaimableG through each release stage.
+//
+// The narrower ReleaseTaskLocal and ReleaseTaskStorage APIs remain available
+// for diagnostics and lifecycle tests which intentionally exercise stages in
+// isolation.
+func ReleaseCompletedTask(g *G) (local, raw unsafe.Pointer, size uintptr, owned, ok bool) {
+	if !ReclaimableG(g) || g.taskLocal == nil {
+		return nil, nil, 0, false, false
+	}
+	local = g.taskLocal
+	switch g.taskState {
+	case taskStorageStatic:
+		if g.taskStorage != nil || g.taskSize != 0 {
+			return nil, nil, 0, false, false
+		}
+	case taskStorageOwned:
+		if g.taskStorage != unsafe.Pointer(g) || g.taskSize != TaskStorageSize() {
+			return nil, nil, 0, false, false
+		}
+		raw, size, owned = g.taskStorage, g.taskSize, true
+		g.taskStorage = nil
+		g.taskSize = 0
+		g.taskState = taskStorageReleased
+	default:
+		return nil, nil, 0, false, false
+	}
+	g.taskLocal = nil
+	return local, raw, size, owned, true
 }
 
 // DeadG is a narrow program-driver query. It does not imply that a command

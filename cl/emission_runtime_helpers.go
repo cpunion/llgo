@@ -51,6 +51,92 @@ type coroLogicalLocalitySite struct {
 	dispatchers []*ssa.Function
 }
 
+type coroPlainAllocationRecipe uint8
+
+const (
+	coroPlainAllocationOrdinary coroPlainAllocationRecipe = iota
+	coroPlainAllocationBorrowed
+)
+
+// coroPlainAllocationPlan is frozen with the exact source SitePlan before
+// whole-program effect analysis. It prevents final code generation from
+// rediscovering escape/lifetime facts and records enough proof shape to make
+// owner conflicts observable during universe construction.
+type coroPlainAllocationPlan struct {
+	recipe           coroPlainAllocationRecipe
+	functionsVisited uint32
+	parametersProven uint32
+}
+
+func (plan coroPlainAllocationPlan) borrowed() bool {
+	return plan.recipe == coroPlainAllocationBorrowed &&
+		plan.functionsVisited != 0
+}
+
+func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAllocationPlan {
+	if ctx == nil || ctx.prog == nil || ctx.emissionUniverse == nil || allocation == nil || !allocation.Heap ||
+		allocation.Type() == nil || ctx.skipSyntheticMakeSliceAlloc(allocation) ||
+		isEmissionVargsAlloc(ctx, allocation) {
+		return coroPlainAllocationPlan{}
+	}
+	if bitcast, exact := coro.ProveSSAExactScalarBitcast(allocation.Parent()); exact &&
+		bitcast.Allocation == allocation {
+		return coroPlainAllocationPlan{}
+	}
+	pointer, ok := types.Unalias(ctx.patchType(allocation.Type())).Underlying().(*types.Pointer)
+	if !ok || ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(pointer.Elem())) {
+		return coroPlainAllocationPlan{}
+	}
+	if ctx.prog.PhysicalSizeOfGoType(ctx.patchType(pointer.Elem())) == 0 {
+		// Preserve the existing module-sentinel identity for a zero-sized heap
+		// allocation. It already has no AllocZ cost and needs no stack slot.
+		return coroPlainAllocationPlan{}
+	}
+	proof, exact := proveCoroBorrowedAllocation(ctx.emissionUniverse, allocation)
+	if !exact || proof.FunctionsVisited == 0 {
+		return coroPlainAllocationPlan{}
+	}
+	return coroPlainAllocationPlan{
+		recipe:           coroPlainAllocationBorrowed,
+		functionsVisited: proof.FunctionsVisited,
+		parametersProven: proof.ParametersProven,
+	}
+}
+
+// coroBorrowedAllocationUniverse is the complete read-only authority needed by
+// the interprocedural lifetime proof. Keeping this as a two-method view avoids
+// turning a local allocation classifier into another whole-program plan owner.
+type coroBorrowedAllocationUniverse interface {
+	Resolve(*ssa.Function) (*ssa.Function, bool)
+	FunctionBackground(*ssa.Function) (llssa.Background, bool, error)
+}
+
+// proveCoroBorrowedAllocation admits only bodies which the frozen emission
+// universe will actually compile as managed Go. Source bodies attached to C,
+// Python, or LLVM intrinsic declarations are type-checking stubs rather than
+// memory-semantics evidence and must never justify local storage.
+func proveCoroBorrowedAllocation(
+	universe coroBorrowedAllocationUniverse,
+	allocation *ssa.Alloc,
+) (coro.SSABorrowedAllocationProof, bool) {
+	if universe == nil {
+		return coro.SSABorrowedAllocationProof{Allocation: allocation}, false
+	}
+	return coro.ProveSSABorrowedAllocationWithConfig(allocation, coro.SSABorrowedAllocationConfig{
+		ResolveCalleeBody: func(function *ssa.Function) (*ssa.Function, bool) {
+			canonical, resolved := universe.Resolve(function)
+			if !resolved || canonical == nil || len(canonical.Blocks) == 0 {
+				return nil, false
+			}
+			background, classified, err := universe.FunctionBackground(canonical)
+			if err != nil || !classified || background != llssa.InGo {
+				return nil, false
+			}
+			return canonical, true
+		},
+	})
+}
+
 // coroFunctionPreamblePlan freezes compiler-owned operations which have no
 // source SSA instruction anchor. Package-init locality guard setup is the first
 // such operation: it resolves one logical-G package block, then marks the
@@ -65,6 +151,10 @@ type coroFunctionPreamblePlan struct {
 	localityGuards        []locality.Kind
 	localContextEntry     bool
 	logicalCallerEntry    bool
+	// emitsGoBody distinguishes a real frontend-emitted Go definition from a
+	// declaration/intrinsic stub whose SSA body exists only for policy and type
+	// analysis. Only the former may acquire a physical outcome-plain entry.
+	emitsGoBody bool
 }
 
 func cloneCoroFunctionPreamblePlan(plan coroFunctionPreamblePlan) coroFunctionPreamblePlan {
@@ -79,7 +169,8 @@ func sameCoroFunctionPreamblePlan(first, second coroFunctionPreamblePlan) bool {
 		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers) &&
 		slices.Equal(first.localityGuards, second.localityGuards) &&
 		first.localContextEntry == second.localContextEntry &&
-		first.logicalCallerEntry == second.logicalCallerEntry
+		first.logicalCallerEntry == second.logicalCallerEntry &&
+		first.emitsGoBody == second.emitsGoBody
 }
 
 func (plan coroFunctionPreamblePlan) validate() error {
@@ -199,7 +290,7 @@ func (builder coroProgramIRBuilder) materializeFunctionPreamble(
 	if u == nil || u.coroProgramIR == nil || ctx == nil || ownerFn == nil || ownerPkg == nil {
 		return fmt.Errorf("prepare emission universe: function preamble requires one exact program IR, builder, owner, and function")
 	}
-	plan := coroFunctionPreamblePlan{}
+	plan := coroFunctionPreamblePlan{emitsGoBody: ftype == goFunc}
 	needsLocalContext := u.prog != nil && u.prog.NeedsLocalContext()
 	if u.prog != nil && u.logicalLocality {
 		needsLocalContext = u.prog.NeedsLogicalLocalContext()
@@ -297,6 +388,9 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 	}
 	sitePlan := coroEmissionSitePlan{}
 	if u.prog != nil {
+		if allocation, ok := instr.(*ssa.Alloc); ok {
+			sitePlan.plainAllocation = planCoroPlainAllocation(ctx, allocation)
+		}
 		managed, err := u.classifyCoroRuntimeHelpers(ctx, shape, instr)
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: function %q logical locality site: %w", ownerFn.Name(), err)
@@ -308,6 +402,12 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 			})
 		}
 		sitePlan.plainRuntimeHelpers = u.classifyPlainRuntimeHelpers(ctx, instr, managed)
+		if sitePlan.plainAllocation.borrowed() {
+			sitePlan.plainRuntimeHelpers = slices.DeleteFunc(
+				sitePlan.plainRuntimeHelpers,
+				func(helper string) bool { return helper == "AllocZ" },
+			)
+		}
 		preamble, err := u.coroProgramIR.functionPreambleDuringFreeze(ownerFn, ownerPkg)
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: function %q preamble lookup: %w", ownerFn.Name(), err)
@@ -447,7 +547,7 @@ func coroCompilerRawPlainLoweredRuntimeHelper(u *EmissionUniverse, helper string
 		return false
 	}
 	switch helper {
-	case "CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryClose",
+	case "CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryCloseTask",
 		"CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume":
 		return true
 	default:
@@ -485,6 +585,8 @@ func coroLoweredCallExplicitStatusElided(instr ssa.Instruction, helper string) b
 // helper name emitted by any other lowering remains an ordinary managed edge.
 func coroCompilerElidesImplicitFaultRuntimeHelper(instr ssa.Instruction, helper string) bool {
 	switch instr.(type) {
+	case *ssa.FieldAddr:
+		return helper == "AssertNilDeref"
 	case *ssa.Index, *ssa.IndexAddr:
 		return helper == "CheckIndexRange" || helper == "AssertNilDeref"
 	default:
@@ -712,7 +814,9 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 	case *ssa.UnOp:
 		switch v.Op {
 		case token.ARROW:
-			add("CoroChanTryRecv")
+			// Physical coroutine lowering owns the raw try-or-park V2 hook
+			// through the frozen bootstrap ABI. No Go runtime helper call remains
+			// at this source instruction.
 		case token.MUL:
 			free, _ := v.X.(*ssa.FreeVar)
 			elidedZeroSizedFreeVar := u.closureEnvironments.elidesZeroSizedFreeVar(v.Parent(), free)
@@ -912,7 +1016,8 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			add("Panic")
 		}
 	case *ssa.Send:
-		add("CoroChanTrySend")
+		// See receive above: the raw V2 hook, not a separately emitted Go
+		// nonblocking helper, owns the complete one-case transaction.
 	case *ssa.Call:
 		if emissionCallNeedsManagedCoroResultSlot(ctx, v) {
 			add(coroManagedFrameSlotAllocZCall)
@@ -937,11 +1042,13 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			case intrinsic && opcode == llgoCgoCgocall &&
 				v.Parent() != nil && isCgoC2func(v.Parent().Name()):
 				// The exact generated C2 worker transaction resumes in the Go
-				// wrapper and constructs its (result, error) pair there. Attach
-				// that synthetic interface construction to the cgocall source
-				// site so helper closure, physical emission, and observation
-				// share one immutable recipe.
-				add("AllocU", "NewItab")
+				// wrapper and constructs its (result, error) pair there. The nil
+				// error slot owns AllocU. The non-nil syscall.Errno conversion has
+				// one statically known concrete type, so Builder.MakeInterface now
+				// emits an immutable itab and no runtime NewItab call. Attach only
+				// the helper that physical emission actually performs to this
+				// cgocall source site.
+				add("AllocU")
 			case intrinsic && opcode == llgoDeferData:
 				// Builder.DeferData replaces the compiler declaration with an
 				// ordinary runtime.GetThreadDefer call.
@@ -1563,9 +1670,6 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 	if !u.makeInterfaceEmitsABIType(makeInterface, ctx) {
 		return
 	}
-	if interfaceIsNonEmpty(ctx.patchType(makeInterface.Type())) {
-		add("NewItab")
-	}
 	// Helper planning must remain valid for report/identity universes whose
 	// LLSSA program intentionally has no runtime package. The interface data
 	// representation and the large/zero dereference rules depend only on the
@@ -1577,7 +1681,11 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 	// only at the source *types.Signature would incorrectly classify it as one
 	// direct pointer and omit the AllocU call that code generation emits.
 	physical := u.physicalFunctionABIType(ctx, makeInterface.X.Type())
-	if !emissionDirectIfaceType(physical) {
+	if target := ctx.patchType(makeInterface.Type()); interfaceIsNonEmpty(target) &&
+		!llssa.CanBuildStaticItab(target, physical) {
+		add("NewItab")
+	}
+	if !emissionDirectIfaceType(physical) && !makeInterfaceUsesConstantBacking(makeInterface) {
 		add("AllocU")
 	}
 	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
@@ -1589,6 +1697,14 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 		// and zero-sized values and therefore always copies through AllocU.
 		add("AllocU", "Typedmemmove")
 	}
+}
+
+func makeInterfaceUsesConstantBacking(makeInterface *ssa.MakeInterface) bool {
+	if makeInterface == nil || isUntypedNilConst(makeInterface.X) {
+		return false
+	}
+	_, ok := makeInterface.X.(*ssa.Const)
+	return ok
 }
 
 func emissionLargeOrZeroInterfaceDeref(typ types.Type, pointerSize int) bool {
@@ -1758,7 +1874,7 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 	case "copy":
 		add("SliceCopy")
 	case "close":
-		add("CoroChanTryClose")
+		add("CoroChanTryCloseTask")
 	case "recover":
 		add("Recover")
 	case "panic":

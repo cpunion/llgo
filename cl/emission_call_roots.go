@@ -73,7 +73,7 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 	case llgoAlloca, llgoAllocaCStr, llgoAllocCStr, llgoAllocaCStrs,
 		llgoString, llgoStringData,
 		llgoCgoCString, llgoCgoCBytes, llgoCgoGoString, llgoCgoCMalloc,
-		llgoCgoCgocall:
+		llgoCgoCgocall, llgoCgoUse, llgoCgoKeepAlive:
 		return emissionIntrinsicFirstValue, nil
 
 	case llgoPyList, llgoPyTuple:

@@ -116,6 +116,14 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		coroRuntimeAbort("native coroutine execution quota start failed")
 		return false
 	}
+	for index := uint32(0); index < coroNativeFleetV1State.domainCount; index++ {
+		driver := coroNativeFleetV1State.domains[index].driverOwnerV1()
+		if !coro.BindExecutorServicePressure(driver, &coroNativeFleetV1State.execution) {
+			state.lifecycle = coroNativeFleetTargetFailedV1
+			coroRuntimeAbort("native coroutine execution quota pressure bind failed")
+			return false
+		}
+	}
 	program, programOK := coroNativeFleetHandleV1(0)
 	if !programOK || program.Executor != handle || program.Route != 1 {
 		state.lifecycle = coroNativeFleetTargetFailedV1
@@ -140,7 +148,7 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		coroRuntimeAbort("native coroutine fleet worker start failed")
 		return false
 	}
-	if !coroNativeFleetPhysicalOwnersStartV1() {
+	if !coroNativeFleetPhysicalOwnersStartV1(limit) {
 		_ = coroNativeWorkerPoolStopFleetV1()
 		_ = coroNativeMStopCleanFactoryV1()
 		state.lifecycle = coroNativeFleetTargetFailedV1
@@ -210,6 +218,29 @@ func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
 	accepted := result == coro.ExecutorRequestPublished ||
 		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
 	return accepted && (!coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring())
+}
+
+func coroTargetPublishDirectChannelCompletionV1(
+	owner *coro.ExecutorDriver,
+	route coro.RouteID,
+	completion *coro.DirectChannelCompletion,
+) bool {
+	domain, ok := coroNativeFleetActiveDomainForRouteV1(route)
+	if !ok || owner == nil || domain.driverOwnerV1() != owner || !domain.ingress.Enter() {
+		return false
+	}
+	if domain.lifecycle != coroNativeFleetDomainActiveV1 || domain.driverOwnerV1() != owner ||
+		domain.handle.Route != uint32(route) ||
+		!coro.PublishExecutorDirectChannelCompletion(owner, completion) {
+		_, _ = domain.ingress.Leave()
+		return false
+	}
+	result := coroNativeFleetV1State.fleet.RequestExecutor(domain.handle)
+	accepted := result == coro.ExecutorRequestPublished ||
+		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
+	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring()
+	_, leaveOK := domain.ingress.Leave()
+	return accepted && ringOK && leaveOK
 }
 
 // coroTargetRequestControlledTimerV2 requests the exact owner after

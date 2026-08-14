@@ -51,7 +51,7 @@ const (
 	coroPanicNativeE2EThirdDestroy     = "__llgo_coro_panic_e2e_third_destroy"
 	coroPanicNativeE2EExplicitStatus   = uint64(1)
 	coroPanicNativeE2EDrivePanic       = uint64(4)
-	coroPanicNativeE2EExpectedDestroys = uint64(3)
+	coroPanicNativeE2EExpectedDestroys = uint64(2)
 )
 
 const coroPanicNativeE2ESource = `package main
@@ -104,9 +104,10 @@ func main() {
 // full-runtime caller acceptance test exercises production presentation. The
 // report accepts only the exact drive status, a
 // published record on a dead, non-reclaimable G, the original package-global
-// payload word, and exactly one destroy of each distinct handle in the child
-// -> main -> bootstrap chain. It does not turn panic into production success
-// or provide a replacement printer.
+// payload word, and exactly one destroy of each distinct handle in the main ->
+// bootstrap chain. panicChild is now outcome-plain, so it propagates an
+// explicit status without allocating a third coroutine frame. The test does
+// not turn panic into production success or provide a replacement printer.
 func TestCoroExplicitPanicNativeNoStdlibRuntimeE2E(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine link smoke requires Darwin or Linux")
@@ -473,10 +474,8 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	third := reportBody.Load(thirdDestroy.Expr)
 	requireCondition(reportBody.BinOp(token.NEQ, first, nilPointer))
 	requireCondition(reportBody.BinOp(token.NEQ, second, nilPointer))
-	requireCondition(reportBody.BinOp(token.NEQ, third, nilPointer))
+	requireCondition(reportBody.BinOp(token.EQL, third, nilPointer))
 	requireCondition(reportBody.BinOp(token.NEQ, first, second))
-	requireCondition(reportBody.BinOp(token.NEQ, first, third))
-	requireCondition(reportBody.BinOp(token.NEQ, second, third))
 	requireCondition(reportBody.BinOp(token.EQL, reportBody.Load(before.Expr), one32))
 	requireCondition(reportBody.BinOp(token.EQL, reportBody.Load(after.Expr), zero32))
 	requireCondition(reportBody.BinOp(
@@ -573,7 +572,7 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"github.com/goplus/llgo/runtime/internal/coro.PreparePanic",
 		"github.com/goplus/llgo/runtime/internal/coro.PanicDestroyed",
 		"github.com/goplus/llgo/runtime/internal/coro.LoadPanicRecord",
-		coroNativeE2EMainPhysicalSymbol("panicChild$coro"),
+		coroNativeE2EMainPhysicalSymbol("panicChild$outcome"),
 		coroNativeE2EMainPhysicalSymbol("panicLeaf$outcome"),
 	} {
 		if !strings.Contains(symbols, required) {

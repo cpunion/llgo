@@ -47,12 +47,21 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 	})
 }
 
-func coroProgramNextRunStepV1(driver *coro.ExecutorDriver) (coro.ExecutorRunStep, bool) {
+func coroProgramNextRunStepV1(
+	driver *coro.ExecutorDriver,
+	run *coro.ExecutorRunSliceCapability,
+	combineDispatch bool,
+) (coro.ExecutorRunStep, bool) {
 	now, ok := coroHostClockV1State.Snapshot()
 	if !ok {
 		return coro.ExecutorRunStep{}, false
 	}
-	step, ok := coro.NextExecutorRunStepAt(driver, now)
+	var step coro.ExecutorRunStep
+	if combineDispatch {
+		step, ok = run.NextAtCombined(now)
+	} else {
+		step, ok = run.NextAt(now)
+	}
 	return step, ok && coroProgramSyncHostOperationCancelsV1(driver)
 }
 

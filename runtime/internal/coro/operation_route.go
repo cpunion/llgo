@@ -563,6 +563,37 @@ func (registry *OperationRouteRegistry) RequestTimerExecutor(route RouteID) Exec
 	return result
 }
 
+// RequestExecutor requests one exact bound route without attributing the wake
+// to a catalog source. It is used by frame-local direct channel completions
+// whose terminal fact already lives in the executor's MPSC inbox.
+func (registry *OperationRouteRegistry) RequestExecutor(
+	route RouteID,
+	executor ExecutorHandle,
+) ExecutorRequestResult {
+	if !route.Valid() || executor == (ExecutorHandle{}) {
+		return ExecutorRequestInvalid
+	}
+	slot, ok := operationRouteSlotFor(registry, route)
+	if !ok {
+		return ExecutorRequestStale
+	}
+	if !operationRouteAcquireProducer(slot) {
+		state := operationRouteLifecycle(preemptLoad(&slot.state))
+		if state == operationRouteClosing || state == operationRouteQuiesced || state == operationRouteRetired {
+			return ExecutorRequestClosed
+		}
+		return ExecutorRequestStale
+	}
+	result := ExecutorRequestInvalid
+	if preemptLoad(&slot.state) == uint32(operationRouteActive) &&
+		preemptLoad(&slot.route) == uint32(route) && slot.executor == executor &&
+		slot.executorRegistry != nil {
+		result = slot.executorRegistry.Request(slot.executor)
+	}
+	operationRouteReleaseProducer(slot)
+	return result
+}
+
 // RequestChannelExecutor requests the exact executor after the typed hchan
 // adapter has durably committed one Channel endpoint. Unlike PostAndRequest,
 // this method does not publish a source fact: the adapter's external commit

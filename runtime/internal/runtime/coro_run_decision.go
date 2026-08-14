@@ -89,7 +89,7 @@ func zeroTicketCoroRunDecisionTaskV1(
 //
 //export __llgo_coro_run_decision_take_zero_v1
 func __llgo_coro_run_decision_take_zero_v1(g unsafe.Pointer) uint32 {
-	outcome, caseID, taskKind, sourceSlot, generation, ok := coro.TakeRunDecisionWords((*coro.G)(g), 0, 0)
+	outcome, caseID, taskKind, sourceSlot, generation, ok := coro.TakeRunDecisionWordsCompiler((*coro.G)(g), 0, 0)
 	task, valid := zeroTicketCoroRunDecisionTaskV1(outcome, caseID, taskKind, sourceSlot, generation, ok)
 	if !valid {
 		coroRuntimeAbort("invalid zero-ticket coroutine run decision")
@@ -125,7 +125,7 @@ func __llgo_coro_run_decision_take_v1(
 		return
 	}
 	if mode == coroRunDecisionOutputNormalOnlyV1 {
-		decisionOutcome, selectedCase, cancelKind, sourceSlot, generation, ok := coro.TakeRunDecisionWords((*coro.G)(g), 0, 0)
+		decisionOutcome, selectedCase, cancelKind, sourceSlot, generation, ok := coro.TakeRunDecisionWordsCompiler((*coro.G)(g), 0, 0)
 		if !normalCoroRunDecisionWordsV1(decisionOutcome, selectedCase, cancelKind, sourceSlot, generation, ok) {
 			coroRuntimeAbort("unsupported non-normal coroutine run decision")
 		}
@@ -136,7 +136,7 @@ func __llgo_coro_run_decision_take_v1(
 	*taskKind = 0
 	*operationSourceSlot = 0
 	*operationGeneration = 0
-	decisionOutcome, selectedCase, cancelKind, sourceSlot, generation, ok := coro.TakeRunDecisionWords(
+	decisionOutcome, selectedCase, cancelKind, sourceSlot, generation, ok := coro.TakeRunDecisionWordsCompiler(
 		(*coro.G)(g), expectedEpoch, expectedGeneration,
 	)
 	if !ok {

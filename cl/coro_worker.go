@@ -330,7 +330,9 @@ func (p *context) compileCoroWorkerWordCall(
 
 	emitPark := func(worker llssa.Builder) {
 		body.emitCoroParkOperation(p, worker, coroParkOperation{
-			shouldSuspend: worker.Prog.BoolVal(true),
+			prepare: func(active llssa.Builder, _, _ uint32) llssa.Expr {
+				return active.Prog.BoolVal(true)
+			},
 			park: func(suspend llssa.Builder) {
 				park := p.pkg.NewFunc(parkHook, parkSignature, llssa.InC)
 				suspend.Call(park.Expr, physicalArgs...)

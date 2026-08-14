@@ -31,6 +31,10 @@ type inlineAwaitFixture struct {
 }
 
 func newInlineAwaitFixture(t *testing.T) *inlineAwaitFixture {
+	return newInlineAwaitFixtureForCompiler(t, false)
+}
+
+func newInlineAwaitFixtureForCompiler(t *testing.T, compiler bool) *inlineAwaitFixture {
 	t.Helper()
 	g := new(G)
 	if !InitG(g) {
@@ -58,19 +62,95 @@ func newInlineAwaitFixture(t *testing.T) *inlineAwaitFixture {
 	}
 	parent.header.SuspendReason = uint16(SuspendCall)
 	parent.header.Lifecycle = uint16(FrameSuspended)
-	if !PrepareAwaitCompletion(g, parent.handle, child.handle) {
+	var prepared bool
+	if compiler {
+		prepared = PrepareAwaitCompletionCompiler(g, parent.handle, child.handle)
+	} else {
+		prepared = PrepareAwaitCompletion(g, parent.handle, child.handle)
+	}
+	if !prepared {
 		t.Fatal("prepare inline-await child")
 	}
-	if got := BeginInlineAwait(g, parent.handle, child.handle); got != InlineAwaitStarted {
-		t.Fatalf("begin inline-await = %d, want started", got)
+	var disposition InlineAwaitDisposition
+	if compiler {
+		disposition = BeginInlineAwaitCompiler(g, parent.handle, child.handle)
+	} else {
+		disposition = BeginInlineAwait(g, parent.handle, child.handle)
 	}
-	if outcome, caseID, lease, task, taken := TakeRunDecision(g, ParkTicket{}); !taken || outcome != ParkOutcomePending || caseID != 0 ||
+	if disposition != InlineAwaitStarted {
+		t.Fatalf("begin inline-await = %d, want started", disposition)
+	}
+	if compiler {
+		if outcome, caseID, task, source, generation, taken := TakeRunDecisionWordsCompiler(g, 0, 0); !taken || outcome != 0 || caseID != 0 || task != 0 || source != 0 || generation != 0 {
+			t.Fatalf("take compiler inline child initial gate = (%d, %d, %d, %d, %d, %t)",
+				outcome, caseID, task, source, generation, taken)
+		}
+	} else if outcome, caseID, lease, task, taken := TakeRunDecision(g, ParkTicket{}); !taken || outcome != ParkOutcomePending || caseID != 0 ||
 		lease != (OperationResultLease{}) || task != TaskCancelNone {
 		t.Fatalf("take inline child initial gate = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, task, taken)
 	}
 	child.header.SuspendReason = uint16(SuspendNone)
 	child.header.Lifecycle = uint16(FrameActive)
 	return &inlineAwaitFixture{p: p, g: g, parent: parent, child: child, action: action}
+}
+
+func TestCompilerInlineAwaitCompletesThroughTrustedSuffix(t *testing.T) {
+	fixture := newInlineAwaitFixtureForCompiler(t, true)
+	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareCompleteStatusCompiler(
+		fixture.g, fixture.child.handle, fixture.child.header, CompletionReturn,
+	) {
+		t.Fatal("publish compiler inline child return")
+	}
+	if got := FinishInlineAwaitCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle, true,
+	); got != InlineAwaitDestroy {
+		t.Fatalf("finish compiler inline-await = %d, want destroy", got)
+	}
+	if fixture.p.inlineAwaitDepth != 0 || fixture.g.active != FrameFromStorage(fixture.parent.storage) {
+		t.Fatalf("compiler inline destroy did not restore parent ownership: depth=%d active=%p",
+			fixture.p.inlineAwaitDepth, fixture.g.active)
+	}
+	releaseTestFrame(t, fixture.g, fixture.child)
+	if !CommitFrameDestroyCompiler(fixture.g, fixture.child.handle) {
+		t.Fatal("commit compiler physical child destroy")
+	}
+	if !CommitInlineAwaitDestroyCompiler(fixture.g, fixture.parent.handle, fixture.child.handle) {
+		t.Fatal("commit compiler inline child destroy")
+	}
+	snapshot, ok := ConsumeAwaitCompletionCompiler(fixture.g, fixture.parent.handle)
+	if !ok || snapshot != (CompletionSnapshot{Status: CompletionReturn}) {
+		t.Fatalf("consume compiler inline child return = (%+v, %t)", snapshot, ok)
+	}
+	if fixture.parent.header.SuspendReason != uint16(SuspendNone) ||
+		fixture.parent.header.Lifecycle != uint16(FrameActive) {
+		t.Fatalf("compiler inline parent header = (%d, %d), want active",
+			fixture.parent.header.SuspendReason, fixture.parent.header.Lifecycle)
+	}
+	runtime.KeepAlive(fixture.parent.memory)
+}
+
+func TestCompilerInlineAwaitSlowYieldUsesCheckedDispatch(t *testing.T) {
+	fixture := newInlineAwaitFixtureForCompiler(t, true)
+	fixture.child.header.SuspendReason = uint16(SuspendYield)
+	fixture.child.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(fixture.g, fixture.child.handle, fixture.child.header) {
+		t.Fatal("publish compiler inline child yield")
+	}
+	if got := FinishInlineAwaitCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle, false,
+	); got != InlineAwaitSuspend {
+		t.Fatalf("finish yielding compiler inline child = %d, want suspend", got)
+	}
+	action, ok := Resumed(fixture.p, fixture.g, fixture.action)
+	if !ok || action.Kind != ActionYield || action.Handle != nil ||
+		fixture.g.state != GRunnable || !fixture.g.queued {
+		t.Fatalf("dispatch compiler inline yield = (%+v, %t), state=%d queued=%t",
+			action, ok, fixture.g.state, fixture.g.queued)
+	}
+	runtime.KeepAlive(fixture.parent.memory)
+	runtime.KeepAlive(fixture.child.memory)
 }
 
 func (fixture *inlineAwaitFixture) finishFastChild(t *testing.T) {

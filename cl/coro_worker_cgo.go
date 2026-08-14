@@ -347,7 +347,7 @@ func (ctx *context) coroCgoErrnoWorkerCallShape(
 		strconv.Itoa(block.Index),
 		strconv.Itoa(semantic),
 	)
-	abi := structuralCFunctionABITypeKey(directSignature)
+	abi := u.emissionTypeKeys.cFunctionABI(directSignature)
 	targetSpec := u.prog.TargetSpec()
 	certificate := CoroCgoWorkerCallCertificate{
 		ID: emissionDigest(framedEmissionKey(
@@ -599,7 +599,7 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 	if linkIdentity == "" || targetIdentity == "" || targetIdentity == "<nil>" || targetIdentity == "<cyclic-alias>" {
 		return certificate, nil, false, fmt.Errorf("generated cgo worker target %q has no frozen identity", target.Name())
 	}
-	abi := structuralEmissionABITypeKey(signature)
+	abi := u.emissionTypeKeys.strictABI(signature)
 	targetSpec := u.prog.TargetSpec()
 	certificate = CoroCgoWorkerCallCertificate{
 		ID: emissionDigest(framedEmissionKey(
@@ -659,7 +659,7 @@ func validateCoroWorkerCgoCall(
 	if signatureErr != nil {
 		return shape, true, signatureErr
 	}
-	if structuralEmissionABITypeKey(signature) != frozen.cgoWorker.ABISignature {
+	if universe.emissionTypeKeys.strictABI(signature) != frozen.cgoWorker.ABISignature {
 		return shape, true, fmt.Errorf("generated cgo worker ABI differs from its frozen certificate")
 	}
 	result := types.Type(nil)
@@ -729,7 +729,7 @@ func validateCoroWorkerCgoErrnoCall(
 		return shape, true, fmt.Errorf("frozen C2 cgo call no longer has its generated worker shape")
 	}
 	if derived.certificate != frozen.cgoWorker ||
-		structuralCFunctionABITypeKey(derived.signature) != frozen.cgoWorker.ABISignature {
+		universe.emissionTypeKeys.cFunctionABI(derived.signature) != frozen.cgoWorker.ABISignature {
 		return shape, true, fmt.Errorf("generated C2 cgo call differs from its frozen worker certificate")
 	}
 	return derived, true, nil
@@ -774,7 +774,7 @@ func (p *context) coroWorkerCgoThunk(shape coroWorkerCgoCallShape, target llssa.
 		"cl-coro-worker-cgo-thunk-v1",
 		shape.certificate.ID,
 		target.Name(),
-		structuralEmissionABITypeKey(shape.signature),
+		p.cachedStrictEmissionABITypeKey(shape.signature),
 	))
 	thunk := p.pkg.NewFuncEx(name, coroWorkerForeignThunkSignature(), llssa.InC, false, true)
 	if thunk.HasBody() {
@@ -811,7 +811,7 @@ func (p *context) coroWorkerCgoErrnoThunk(shape coroWorkerCgoErrnoCallShape) lls
 	name := coroWorkerCgoThunkPrefixV1 + emissionDigest(framedEmissionKey(
 		"cl-coro-worker-cgo-errno-thunk-v1",
 		shape.certificate.ID,
-		structuralCFunctionABITypeKey(shape.signature),
+		p.cachedCFunctionABITypeKey(shape.signature),
 	))
 	thunk := p.pkg.NewFuncEx(name, coroWorkerForeignThunkSignature(), llssa.InC, false, true)
 	if thunk.HasBody() {

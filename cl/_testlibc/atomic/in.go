@@ -13,7 +13,7 @@ func main() {
 	// CHECK: store atomic i64 100, ptr [[ADDR:%[0-9]+]] seq_cst, align 8
 	atomic.Store(&v, 100)
 	// CHECK: load atomic i64, ptr [[ADDR]] seq_cst, align 8
-	// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1
+	// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1
 	c.Printf(c.Str("store: %ld\n"), atomic.Load(&v))
 	// CHECK: atomicrmw add ptr [[ADDR]], i64 1 seq_cst, align 8
 	ret := atomic.Add(&v, 1)

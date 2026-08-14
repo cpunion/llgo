@@ -47,6 +47,7 @@ const (
 	resumeBindingSingle
 	resumeBindingCleanup
 	resumeBindingMaterialized
+	resumeBindingDirectChannel
 )
 
 // ResumePacket is stable storage in the direct-parking LLVM coroutine frame.
@@ -159,19 +160,100 @@ func validMaterializedResumePacket(packet *ResumePacket) bool {
 	}
 }
 
+// directChannelBoundResumeHeader is the hot selector for a fused direct
+// channel park before source resolution starts. The immutable descriptor was
+// fully audited when directChannel was installed; producers can change only
+// source atomics and SelectClaim during suspension. The post-suspend commit
+// boundary calls validDirectChannelBoundResumeState once before queue effects.
+func directChannelBoundResumeHeader(record *WaitSetRecord) (*ResumeCleanupPlan, bool) {
+	if record == nil || !record.directChannel || record.resume == nil ||
+		record.resumeKind != resumeBindingCleanup || !validParkTicket(record.ticket) {
+		return nil, false
+	}
+	plan := (*ResumeCleanupPlan)(record.resume)
+	if plan == nil || plan.phase != resumeCleanupBound ||
+		plan.kind != ResumeCleanupChannelDirect || plan.ticket != record.ticket ||
+		plan.verified != resumeCleanupPlanVerifiedV1 ||
+		plan.packet == nil || plan.packet.state != resumePacketBound ||
+		plan.packet.ticket != record.ticket {
+		return nil, false
+	}
+	return plan, true
+}
+
+// validDirectChannelBoundResumeState performs the complete descriptor audit
+// exactly once at the post-llvm.coro.suspend queue-commit boundary.
+func validDirectChannelBoundResumeState(record *WaitSetRecord, plan *ResumeCleanupPlan) bool {
+	headerPlan, headerOK := directChannelBoundResumeHeader(record)
+	if !headerOK || headerPlan != plan || plan.claim == nil || plan.context == nil ||
+		plan.entries == nil ||
+		plan.stride != unsafe.Sizeof(OperationID{}) || plan.idOffset != 0 ||
+		plan.count != 1 || plan.runtime != 1 || plan.index != 0 ||
+		plan.caseID != 0 || plan.outcome != ParkOutcomePending ||
+		plan.lease != (OperationResultLease{}) || plan.result != ResumeResultNone ||
+		plan.small != ResumeSmallInvalid {
+		return false
+	}
+	id := (*OperationID)(plan.entries)
+	packet := plan.packet
+	return id.Valid() && id.Source() == OperationSourceChannel &&
+		packet.state == resumePacketBound && packet.ticket == record.ticket &&
+		packet.source == (OperationID{}) && packet.scalar == (ScalarResultPayloadV1{}) &&
+		packet.caseID == 0 && packet.outcome == ParkOutcomePending &&
+		packet.result == ResumeResultNone && packet.small == ResumeSmallInvalid
+}
+
 func validWaitSetResumeBinding(record *WaitSetRecord) bool {
 	if record == nil {
 		return false
 	}
 	switch record.resumeKind {
 	case resumeBindingNone:
-		return record.resume == nil
+		return !record.directChannel && record.resume == nil
 	case resumeBindingSingle:
-		return validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
+		return !record.directChannel && validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
 	case resumeBindingCleanup:
-		return validResumeCleanupPlan(record, (*ResumeCleanupPlan)(record.resume))
+		plan := (*ResumeCleanupPlan)(record.resume)
+		if record.directChannel && plan != nil && plan.phase == resumeCleanupBound {
+			_, ok := directChannelBoundResumeHeader(record)
+			return ok
+		}
+		return validResumeCleanupPlan(record, plan)
 	case resumeBindingMaterialized:
 		return validMaterializedResumePacket((*ResumePacket)(record.resume))
+	case resumeBindingDirectChannel:
+		return validBoundDirectChannelCompletion(record, (*DirectChannelCompletion)(record.resume))
+	default:
+		return false
+	}
+}
+
+// validTrustedWaitSetResumeBinding is the active scheduler-record selector.
+// Bind/commit performed the complete descriptor audit before the record became
+// reachable from P. While active, only the runtime cleanup machine can mutate
+// a cleanup plan, so hot queue/cursor checks validate its certified transition
+// state without re-walking immutable frame/source descriptors. Full queue and
+// whole-G audits continue through validWaitSetResumeBinding.
+func validTrustedWaitSetResumeBinding(record *WaitSetRecord) bool {
+	if record == nil {
+		return false
+	}
+	switch record.resumeKind {
+	case resumeBindingNone:
+		return !record.directChannel && record.resume == nil
+	case resumeBindingSingle:
+		return !record.directChannel && validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
+	case resumeBindingCleanup:
+		plan := (*ResumeCleanupPlan)(record.resume)
+		if record.directChannel && plan != nil && plan.phase == resumeCleanupBound {
+			_, ok := directChannelBoundResumeHeader(record)
+			return ok
+		}
+		return validTrustedResumeCleanupPlanState(record, plan)
+	case resumeBindingMaterialized:
+		return validMaterializedResumePacket((*ResumePacket)(record.resume))
+	case resumeBindingDirectChannel:
+		return validBoundDirectChannelCompletion(record, (*DirectChannelCompletion)(record.resume))
 	default:
 		return false
 	}
@@ -210,6 +292,19 @@ func BindSingleWaitSetResumePacket(record *WaitSetRecord, packet *ResumePacket, 
 		state.head.next != nil || state.head.operation == nil || state.head.operation.id != source {
 		return false
 	}
+	installSingleWaitSetResumePacket(record, packet, source)
+	return true
+}
+
+// installSingleWaitSetResumePacket is the no-fail write half shared by the
+// general audited binder and compiler-owned one-event source transactions.
+// The latter have already built and audited the exact ParkLink relation in the
+// same owner-P interval, so immediately walking it again carries no new fact.
+func installSingleWaitSetResumePacket(
+	record *WaitSetRecord,
+	packet *ResumePacket,
+	source OperationID,
+) {
 	*packet = ResumePacket{
 		ticket: record.ticket,
 		source: source,
@@ -217,7 +312,6 @@ func BindSingleWaitSetResumePacket(record *WaitSetRecord, packet *ResumePacket, 
 	}
 	record.resume = unsafe.Pointer(packet)
 	record.resumeKind = resumeBindingSingle
-	return true
 }
 
 func materializeManualResume(
@@ -437,7 +531,238 @@ func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *Wai
 	return validMaterializedResumePacket(packet)
 }
 
-// TakeResumePacket is the typed resume prologue for packet-backed parks. It
+// TakeDirectChannelResume retains the arbitrary-runner compatibility entry.
+// New compiler lowering calls TakeIssuedDirectChannelResume after the bounded
+// selector has issued the exact physical resume capability.
+func TakeDirectChannelResume(
+	g *G,
+	storage *DirectChannelParkStorageV1,
+) (
+	outcome ParkOutcome,
+	task TaskCancelKind,
+	small uint8,
+	ok bool,
+) {
+	if g == nil || storage == nil || !validParkTicket(storage.Ticket) {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	p := g.runP
+	if p != nil && p.executor != nil && p.executor.run.issued == ActionCheckResume {
+		return TakeIssuedDirectChannelResume(g, storage)
+	}
+	return takeDirectChannelResumeCompatibility(
+		g, storage.Ticket, &storage.Completion, &storage.Wait, unsafe.Pointer(storage),
+	)
+}
+
+// DirectChannelResumeWordV1 is the scalar compiler/runtime result of one exact
+// issued channel continuation. Bits 8..9 identify completion or cancellation;
+// the low byte contains the physical channel status or TaskCancelKind. Keeping
+// this boundary scalar avoids lowering four logical results through an
+// aggregate ABI in every generated channel continuation.
+type DirectChannelResumeWordV1 uint32
+
+const (
+	DirectChannelResumeWordInvalidV1     DirectChannelResumeWordV1 = 0
+	DirectChannelResumeWordCompletedV1   DirectChannelResumeWordV1 = 1 << 8
+	DirectChannelResumeWordCanceledV1    DirectChannelResumeWordV1 = 2 << 8
+	DirectChannelResumeWordClassMaskV1   DirectChannelResumeWordV1 = 3 << 8
+	DirectChannelResumeWordPayloadMaskV1 DirectChannelResumeWordV1 = 0xff
+)
+
+// TakeIssuedDirectChannelResumeWordV1 is the compiler-owned one-case channel
+// resume prologue. DirectChannelCompletion already reduced the physical hchan
+// effect into its frame-local terminal word before making G runnable. Checked
+// then copied that exact decision into P. This function consumes the adjacent
+// completion/decision/ParkState certificates without constructing either the
+// generic scalar/poll ResumePacket union or a multi-result return aggregate.
+//
+// A prompt task stop may suppress an already copied channel value. In that
+// case completion and ParkState retain the completed physical fact while the P
+// decision carries Canceled plus the task token; the compiler observes only
+// the cancellation edge.
+func TakeIssuedDirectChannelResumeWordV1(
+	g *G,
+	storage *DirectChannelParkStorageV1,
+) DirectChannelResumeWordV1 {
+	if g == nil || storage == nil || !validParkTicket(storage.Ticket) {
+		return DirectChannelResumeWordInvalidV1
+	}
+	expected := storage.Ticket
+	completion := &storage.Completion
+	wait := &storage.Wait
+	context := unsafe.Pointer(storage)
+	p := g.runP
+	if p == nil || p.executor == nil || p.executor.run.issued != ActionCheckResume ||
+		p.current != g || !p.inResume || p.runDecisionTaken {
+		return DirectChannelResumeWordInvalidV1
+	}
+	decision := &p.runDecision
+	if decision.g != g || decision.ticket != expected || !decision.materialized ||
+		!decision.directChannel {
+		return DirectChannelResumeWordInvalidV1
+	}
+	completionState := preemptLoad(&completion.state)
+	physicalSmallWord := preemptLoad(&completion.small)
+	if completion.context != context || completion.wait != wait ||
+		completionState != uint32(directChannelCompletionMaterialized) ||
+		physicalSmallWord > uint32(^uint8(0)) {
+		return DirectChannelResumeWordInvalidV1
+	}
+	park := &g.park
+	physicalSmall := uint8(physicalSmallWord)
+	result := DirectChannelResumeWordInvalidV1
+	switch decision.outcome {
+	case ParkOutcomeCompleted:
+		if decision.caseID != 1 || decision.task != TaskCancelNone ||
+			physicalSmall == ResumeSmallInvalid {
+			return DirectChannelResumeWordInvalidV1
+		}
+		result = DirectChannelResumeWordCompletedV1 | DirectChannelResumeWordV1(physicalSmall)
+	case ParkOutcomeCanceled:
+		if decision.caseID != 0 || !validTaskCancelKind(decision.task) {
+			return DirectChannelResumeWordInvalidV1
+		}
+		result = DirectChannelResumeWordCanceledV1 | DirectChannelResumeWordV1(decision.task)
+	default:
+		return DirectChannelResumeWordInvalidV1
+	}
+
+	// BeginIssuedExecutorResumeRuntimeContext copied phase/ticket/directChannel
+	// into the P-owned decision immediately before llvm.coro.resume. No owner or
+	// producer can mutate ParkState while this G is running, so replaying those
+	// three source reads here would not establish a second boundary. The exact
+	// completion/context correlation above still authenticates the frame-local
+	// storage which the decision itself does not address.
+	//
+	// The direct materialization shape has no source/link payload. Preserve
+	// its ticket and task-cancellation receipt, and retire only the scalar
+	// result fields made live by materializeDirectChannelWaitUnchecked. This
+	// avoids rewriting the entire mostly-zero ParkState on every handoff.
+	park.phase = parkDelivered
+	park.directChannel = false
+	park.seed = 0
+	park.cancelKind = ParkCancelNone
+	park.outcome = ParkOutcomePending
+	park.winnerCase = 0
+	*completion = DirectChannelCompletion{}
+	p.runDecision = RunDecision{}
+	p.runDecisionTaken = true
+	return result
+}
+
+// TakeIssuedDirectChannelResume retains the structured core API for tests and
+// compatibility callers. Current compiler lowering consumes the scalar word
+// above directly.
+func TakeIssuedDirectChannelResume(
+	g *G,
+	storage *DirectChannelParkStorageV1,
+) (
+	outcome ParkOutcome,
+	task TaskCancelKind,
+	small uint8,
+	ok bool,
+) {
+	word := TakeIssuedDirectChannelResumeWordV1(g, storage)
+	payload := uint8(word & DirectChannelResumeWordPayloadMaskV1)
+	switch word & DirectChannelResumeWordClassMaskV1 {
+	case DirectChannelResumeWordCompletedV1:
+		return ParkOutcomeCompleted, TaskCancelNone, payload, true
+	case DirectChannelResumeWordCanceledV1:
+		return ParkOutcomeCanceled, TaskCancelKind(payload), ResumeSmallInvalid, true
+	default:
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+}
+
+func takeDirectChannelResumeCompatibility(
+	g *G,
+	expected ParkTicket,
+	completion *DirectChannelCompletion,
+	wait *WaitSetRecord,
+	context unsafe.Pointer,
+) (
+	outcome ParkOutcome,
+	task TaskCancelKind,
+	small uint8,
+	ok bool,
+) {
+	if g == nil || g.magic != gMagic || !validParkTicket(expected) ||
+		completion == nil || wait == nil || context == nil {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	p := g.runP
+	if p == nil || p.current != g || !p.inResume || g.state != GRunning ||
+		p.runDecisionTaken || p.action.Kind != ActionResume || p.action.Flags != 0 ||
+		p.action.Handle == nil || g.runP != p {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	decision := &p.runDecision
+	if decision.g != g || decision.ticket != expected || !decision.materialized ||
+		!decision.directChannel ||
+		decision.lease != (OperationResultLease{}) {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	if completion.context != context || completion.owner == nil ||
+		completion.wait != wait || !completion.route.Valid() ||
+		completion.owner.route != completion.route ||
+		preemptLoad(&completion.state) != uint32(directChannelCompletionMaterialized) ||
+		preemptLoad(&completion.small) > uint32(^uint8(0)) {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	physicalSmall := uint8(preemptLoad(&completion.small))
+	park := &g.park
+	if park.phase != parkMaterialized || park.ticket != expected ||
+		!park.directChannel || park.resolving {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	resultSmall := uint8(ResumeSmallInvalid)
+	switch decision.outcome {
+	case ParkOutcomeCompleted:
+		if decision.caseID != 1 || decision.task != TaskCancelNone ||
+			park.outcome != ParkOutcomeCompleted || park.winnerCase != 1 ||
+			physicalSmall == ResumeSmallInvalid {
+			return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+		}
+		resultSmall = physicalSmall
+	case ParkOutcomeCanceled:
+		if decision.caseID != 0 || !validTaskCancelKind(decision.task) ||
+			(park.outcome == ParkOutcomeCompleted &&
+				(park.winnerCase != 1 || physicalSmall == ResumeSmallInvalid)) ||
+			(park.outcome == ParkOutcomeCanceled &&
+				(park.winnerCase != 0 || physicalSmall != ResumeSmallInvalid)) ||
+			(park.outcome != ParkOutcomeCompleted && park.outcome != ParkOutcomeCanceled) {
+			return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+		}
+	default:
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	// prepareRunDecision copied this exact materialized park into the private P
+	// decision immediately before llvm.coro.resume. The compiler-generated
+	// continuation reaches this prologue before user code, and no producer owns
+	// ParkState or the frame completion. The completion owner records where the
+	// physical fact was materialized; it deliberately does not bind this resume
+	// to that P because a materialized G is P-neutral and may already have crossed
+	// a runnable-transfer mailbox. Recheck only the correlation fields needed by
+	// this consuming mutation; the decision is the full prior certificate.
+	if !validTaskCancelState(park.taskCancelKind, park.taskCancelPhase) {
+		return ParkOutcomePending, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	// The exact completion/decision/park triple is now consumed. Preserve only the
+	// sticky task token for the compiler's terminal control path.
+	outcome, task, small = decision.outcome, decision.task, resultSmall
+	kind, phase := park.taskCancelKind, park.taskCancelPhase
+	*park = ParkState{
+		ticket: expected, phase: parkDelivered,
+		taskCancelKind: kind, taskCancelPhase: phase,
+	}
+	*completion = DirectChannelCompletion{}
+	p.runDecision = RunDecision{}
+	p.runDecisionTaken = true
+	return outcome, task, small, true
+}
+
+// TakeResumePacket is the typed resume prologue for general packet-backed parks. It
 // consumes the P-owned logical decision and frame-local result exactly once.
 // A task stop selected after migration suppresses the copied payload without
 // consulting or touching the old source.
@@ -464,7 +789,7 @@ func TakeResumePacket(
 		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 	}
 	decision := &p.runDecision
-	if !decision.materialized || decision.g != g || decision.ticket != expected ||
+	if !decision.materialized || decision.directChannel || decision.g != g || decision.ticket != expected ||
 		g.park.phase != parkMaterialized || g.park.ticket != expected ||
 		packet.outcome != g.park.outcome || packet.caseID != g.park.winnerCase {
 		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false

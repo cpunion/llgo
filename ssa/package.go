@@ -974,6 +974,8 @@ type aPackage struct {
 	Meta                *meta.PackageMeta
 	metaBuilder         *meta.Builder
 	abiTypeWithUncommon map[llvm.Value]struct{}
+	abiMethodIfns       map[abiMethodEntryKey]llvm.Value
+	staticItabs         map[staticItabKey]Expr
 
 	export               map[string]string   // pkgPath.nameInPkg => exportname
 	preserveSyms         map[string]struct{} // set of exported symbol names

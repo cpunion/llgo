@@ -226,8 +226,8 @@ func (p *context) compileCoroPlannedWrapNilGuard(
 	instruction ssa.Instruction,
 	base, recvType, methodName llssa.Expr,
 ) llssa.Expr {
-	if !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn || instruction == nil {
-		panic("value-method nil guard escaped its physical coroutine body")
+	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn || instruction == nil {
+		panic("value-method nil guard escaped its structured physical body")
 	}
 	if !p.coroEmissionExplicitStatus() {
 		panic("value-method nil guard requires the PhysicalABIV1 explicit-status panic ABI")
@@ -239,8 +239,7 @@ func (p *context) compileCoroPlannedWrapNilGuard(
 	b.If(isNil, fault, normal)
 
 	b.SetBlockEx(fault, llssa.AtEnd, false)
-	typeSlot := p.coroFrameAlloca(p.prog.VoidPtr())
-	dataSlot := p.coroFrameAlloca(p.prog.VoidPtr())
+	typeSlot, dataSlot := p.coroFaultPayloadSlots(b)
 	b.Store(typeSlot, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(dataSlot, p.prog.Nil(p.prog.VoidPtr()))
 	payload := p.pkg.NewFunc(
@@ -342,10 +341,9 @@ func (p *context) compileCoroIndexAddrPlanned(
 	base, index llssa.Expr,
 	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	body := p.coroBody()
-	if body == nil || operation == nil || operation.X == nil ||
+	if !p.hasStructuredOutcomePhysicalBody() || operation == nil || operation.X == nil ||
 		b == nil || b.Func != p.fn {
-		panic("structured coroutine IndexAddr escaped its physical body")
+		panic("structured IndexAddr escaped its physical body")
 	}
 	if plan.recipe != coroPhysicalInstructionIndexAddr {
 		panic("structured coroutine IndexAddr has the wrong physical recipe")
@@ -396,9 +394,9 @@ func (p *context) compileCoroIndexPlanned(
 	takeArrayAddr func() (addr llssa.Expr, zero bool),
 	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if p == nil || p.coroBody() == nil || operation == nil || operation.X == nil ||
+	if p == nil || !p.hasStructuredOutcomePhysicalBody() || operation == nil || operation.X == nil ||
 		operation.Index == nil || b == nil || b.Func != p.fn {
-		panic("structured coroutine Index escaped its physical body")
+		panic("structured Index escaped its physical body")
 	}
 
 	if plan.recipe != coroPhysicalInstructionIndex {
@@ -455,14 +453,13 @@ func (p *context) compileCoroSlicePlanned(
 	base, low, high, max llssa.Expr,
 	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	body := p.coroBody()
-	if body == nil || operation == nil || operation.X == nil ||
+	if !p.hasStructuredOutcomePhysicalBody() || operation == nil || operation.X == nil ||
 		b == nil || b.Func != p.fn {
-		panic("structured coroutine Slice escaped its physical body")
+		panic("structured Slice escaped its physical body")
 	}
 	if (plan.nilGuard || plan.boundsGuard) &&
-		(!p.coroEmissionExplicitStatus() || body.abi.version < coroPhysicalABIVersionV1) {
-		panic("structured coroutine Slice requires the PhysicalABIV1 explicit-status panic ABI")
+		!p.coroEmissionExplicitStatus() {
+		panic("structured Slice requires the explicit-status panic ABI")
 	}
 	if plan.recipe != coroPhysicalInstructionSlice ||
 		plan.boundsDisabled != b.Prog.BoundsChecksDisabled() ||
@@ -648,10 +645,12 @@ func (p *context) compileCoroTerminalFaultWithOperands(
 		if b == nil || b.Func != p.fn {
 			panic("outcome-plain terminal fault escaped its physical body")
 		}
-		if kind != coroFaultNilV1 || operands != nil {
-			panic("outcome-plain v0 admitted a parameterized or non-nil language fault")
+		if kind == coroFaultNilV1 && operands == nil {
+			p.outcomePlainBody().publishNilFault(b)
+			return
 		}
-		p.outcomePlainBody().publishNilFault(b)
+		typeWord, dataWord := p.materializeCoroFaultPayloadWithOperands(b, kind, operands)
+		p.compileOutcomePlainPanicPair(b, typeWord, dataWord)
 		return
 	}
 	body := p.coroBody()
@@ -725,12 +724,11 @@ func (p *context) materializeCoroFaultPayloadWithOperands(
 	operands *coroFaultOperands,
 ) (typeWord, dataWord llssa.Expr) {
 	body := p.coroBody()
-	if body == nil || b == nil || b.Func != p.fn ||
-		!p.coroEmissionExplicitStatus() || body.abi.version < coroPhysicalABIVersionV1 {
-		panic("coroutine fault payload materialization requires an explicit-status PhysicalABIV1 body")
+	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn ||
+		!p.coroEmissionExplicitStatus() || body != nil && body.abi.version < coroPhysicalABIVersionV1 {
+		panic("fault payload materialization requires an explicit-status structured body")
 	}
-	typeSlot := p.coroFrameAlloca(p.prog.VoidPtr())
-	dataSlot := p.coroFrameAlloca(p.prog.VoidPtr())
+	typeSlot, dataSlot := p.coroFaultPayloadSlots(b)
 	b.Store(typeSlot, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(dataSlot, p.prog.Nil(p.prog.VoidPtr()))
 	args := []llssa.Expr{p.prog.IntVal(uint64(kind), p.prog.Uint32())}
@@ -751,6 +749,20 @@ func (p *context) materializeCoroFaultPayloadWithOperands(
 	payload := p.pkg.NewFunc(payloadHook, payloadSignature, llssa.InC)
 	b.Call(payload.Expr, args...)
 	return b.Load(typeSlot), b.Load(dataSlot)
+}
+
+// coroFaultPayloadSlots keeps payload cells in the LLVM coroutine ramp when a
+// body may suspend, and on the ordinary native stack for a synchronous outcome
+// twin. Both lifetimes dominate the immediate payload helper call and terminal
+// publication; the payload itself is runtime-owned persistent storage.
+func (p *context) coroFaultPayloadSlots(b llssa.Builder) (typeSlot, dataSlot llssa.Expr) {
+	if p == nil || !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn {
+		panic("fault payload slots escaped their structured physical body")
+	}
+	if p.hasCoroPhysicalBody() {
+		return p.coroFrameAlloca(p.prog.VoidPtr()), p.coroFrameAlloca(p.prog.VoidPtr())
+	}
+	return b.AllocaT(p.prog.VoidPtr()), b.AllocaT(p.prog.VoidPtr())
 }
 
 // enterCoroPropagatedNilFault transports the allocation-free nil-fault status

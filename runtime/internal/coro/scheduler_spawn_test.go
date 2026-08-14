@@ -97,8 +97,12 @@ func beginSpawnTestChildResume(t *testing.T, p *P, g *G, frame *testFrame) Actio
 
 func yieldSpawnTestG(t *testing.T, p *P, g *G, frame *testFrame, action Action) {
 	t.Helper()
-	if !PollPreempt(g) {
-		t.Fatal("spawn commit did not request parent preemption")
+	// A sole newly spawned child now stays local without forcing the parent to
+	// yield. Tests which need to hand execution to that child request the
+	// scheduling point explicitly; a burst with existing ready work still
+	// coalesces the same request in CommitSpawn.
+	if !RequestPreempt(g) || !PollPreempt(g) {
+		t.Fatal("request spawned-parent preemption")
 	}
 	frame.header.SuspendReason = uint16(SuspendYield)
 	frame.header.Lifecycle = uint16(FrameSuspended)
@@ -274,18 +278,31 @@ func TestSpawnCommitDiscardedResultAtomicAndTaskReclaim(t *testing.T) {
 		t.Fatal("rejected result layout partially committed spawn")
 	}
 	descriptor.ResultAlign = 8
+	p.current = nil
+	if CommitSpawn(parent.g, child, handle) {
+		t.Fatal("spawn transaction accepted a lost resume owner")
+	}
+	p.current = parent.g
+	child.spawnP = new(P)
+	if CommitSpawn(parent.g, child, handle) {
+		t.Fatal("spawn transaction accepted a mismatched P certificate")
+	}
+	child.spawnP = p
 	if !CommitSpawn(parent.g, child, handle) {
 		t.Fatal("commit goroutine root with discarded result")
 	}
 	if parent.g.spawnChild != nil || child.root == nil || child.active != child.root || child.state != GRunnable ||
 		child.root.header.ResultSlot != nil || !child.queued ||
-		p.readyHead != child || p.readyTail != child || preemptLoad(preemptAddress(parent.g)) != preemptRequested {
+		p.readyHead != child || p.readyTail != child || preemptLoad(preemptAddress(parent.g)) != preemptIdle {
 		t.Fatal("committed spawn state is incomplete")
 	}
 	if CommitSpawn(parent.g, child, handle) || p.readyHead != child || p.readyTail != child || child.nextReady != nil {
 		t.Fatal("duplicate spawn commit changed the ready queue")
 	}
 
+	if !RequestPreempt(parent.g) {
+		t.Fatal("request explicit parent yield after sole-child locality check")
+	}
 	yieldSpawnTestG(t, p, parent.g, parent.frame, parentAction)
 	if got, ok := NextRunnable(p); !ok || got != child {
 		t.Fatalf("spawned child was not first after parent yield: (%p, %t)", got, ok)
@@ -319,6 +336,34 @@ func TestSpawnCommitDiscardedResultAtomicAndTaskReclaim(t *testing.T) {
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(descriptor)
 	runtime.KeepAlive(child)
+}
+
+func TestCompletedTaskTransfersContextAndStorageAfterOneTerminalAudit(t *testing.T) {
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("initialize completed task transfer G")
+	}
+	g.taskStorage = unsafe.Pointer(g)
+	g.taskSize = TaskStorageSize()
+	g.taskState = taskStorageOwned
+	local := unsafe.Pointer(new(byte))
+	if !BindTaskLocal(g, local) {
+		t.Fatal("bind completed task transfer context")
+	}
+	if !disableGPreempt(g) {
+		t.Fatal("disable completed task transfer preemption")
+	}
+	g.state = GDead
+
+	releasedLocal, raw, size, owned, ok := ReleaseCompletedTask(g)
+	if !ok || !owned || releasedLocal != local || raw != unsafe.Pointer(g) || size != TaskStorageSize() ||
+		g.taskLocal != nil || g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageReleased {
+		t.Fatalf("completed task transfer = local:%p raw:%p size:%d owned:%t ok:%t state:%d",
+			releasedLocal, raw, size, owned, ok, g.taskState)
+	}
+	if _, _, _, _, ok := ReleaseCompletedTask(g); ok {
+		t.Fatal("completed task transferred twice")
+	}
 }
 
 func TestSpawnReadyQueuePreservesFIFOAndParentFairness(t *testing.T) {

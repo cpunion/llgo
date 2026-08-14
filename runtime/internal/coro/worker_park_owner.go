@@ -113,6 +113,71 @@ func PrepareCurrentExecutorWorkerPark(
 	return PrepareSingleWorkerPark(g, handle, header, source, wait, caseID, seed)
 }
 
+// PrepareCurrentExecutorWorkerParkCompiler fuses the compiler-generated
+// one-worker transaction through packet binding and backend-submission commit.
+// The runtime has already resolved driver with CurrentExecutorWorkerDriver and
+// reserved its bounded physical queue in the same no-suspend interval.
+//
+// Ordinary operation builds and audits one exact ParkLink, selects one source
+// slot, and publishes one packet without re-entering the generic N-way park
+// layers. A pending task stop retains the complete cancellation-aware path.
+func PrepareCurrentExecutorWorkerParkCompiler(
+	driver *ExecutorDriver,
+	g *G,
+	handle unsafe.Pointer,
+	header *HeaderV1,
+	wait *WaitSetRecord,
+	packet *ResumePacket,
+	caseID uint32,
+	seed uint32,
+) (ParkTicket, OperationID, bool) {
+	if driver == nil || g == nil || packet == nil || *packet != (ResumePacket{}) ||
+		driver.magic != executorDriverMagic || driver.state != executorDriverActive ||
+		driver.p == nil || driver.p != g.runP || driver.p.executor != driver ||
+		driver.p.current != g || driver.sources.worker == nil || caseID == 0 {
+		return ParkTicket{}, OperationID{}, false
+	}
+	p, source := driver.p, driver.sources.worker
+	if !validWorkerOperationOwner(source, p) || source.route != driver.route {
+		return ParkTicket{}, OperationID{}, false
+	}
+
+	// CommitParkSet must translate a stop which arrived before this hook into
+	// logical cancellation, so that uncommon shape deliberately keeps every
+	// generic proof. The packet and submission still become one ABI result.
+	if g.park.taskCancelKind != TaskCancelNone || g.park.taskCancelPhase != taskCancelIdle {
+		ticket, id, ok := PrepareSingleWorkerPark(
+			g, handle, header, source, wait, caseID, seed,
+		)
+		if !ok || !BindSingleWaitSetResumePacket(wait, packet, id) ||
+			!source.MarkSubmitted(p, id) {
+			return ParkTicket{}, OperationID{}, false
+		}
+		return ticket, id, true
+	}
+
+	prepared, ok := preflightSingleParkPreparation(g, handle, header, wait, seed)
+	if !ok || prepared.p != p {
+		return ParkTicket{}, OperationID{}, false
+	}
+	reservation, ok := source.preflightWorkerReservationOwned(p)
+	if !ok {
+		return ParkTicket{}, OperationID{}, false
+	}
+	prepared.begin()
+	id, ok := source.reserveAndAttachWorkerSlot(
+		&g.park, prepared.ticket, wait, caseID, reservation,
+	)
+	if !ok || !prepared.commit(id, caseID) {
+		return ParkTicket{}, OperationID{}, false
+	}
+	installSingleWaitSetResumePacket(wait, packet, id)
+	if !source.markWorkerReservationSubmitted(p, reservation, id) {
+		return ParkTicket{}, OperationID{}, false
+	}
+	return prepared.ticket, id, true
+}
+
 // PrepareCurrentExecutorWorkerTimerPark installs one external operation and,
 // when deadline is non-zero, one absolute timer in the same ParkSet. A zero
 // deadline keeps the operation controllable without manufacturing an infinite

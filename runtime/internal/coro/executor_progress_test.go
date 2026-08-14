@@ -171,7 +171,7 @@ func TestExecutorPollReductionBatchesDueTimers(t *testing.T) {
 		t.Fatal("bind batched timer executor")
 	}
 
-	const count = executorCatalogBatchQuantum
+	const count = executorTimerCatalogBatchQuantum
 	parks := make([]*timerV2TestPark, int(count))
 	handles := make([]TimerRegistrationHandle, int(count))
 	for index := 0; index < int(count); index++ {
@@ -184,8 +184,10 @@ func TestExecutorPollReductionBatchesDueTimers(t *testing.T) {
 			uint32(index+1),
 			1,
 		)
-		if !attached {
-			t.Fatalf("reserve batched timer %d", index)
+		wantCursor := uint32(index+1) % TimerRegistrationConfiguredCapacity(timers)
+		if !attached || timer.Slot != uint32(index+1) || timers.reserveCursor != wantCursor {
+			t.Fatalf("reserve batched timer %d = (%+v,%t), cursor=%d want=%d",
+				index, timer, attached, timers.reserveCursor, wantCursor)
 		}
 		commitTimerV2TestPark(t, p, park)
 		parks[index], handles[index] = park, timer

@@ -694,7 +694,7 @@ func Complex(ch chan int) int {
 		t.Fatalf("verify demanded channel/control-flow coroutine: %v\n%s", err, module.String())
 	}
 	body := requireCoroPhysicalFunction(t, module, "foo.Complex").String()
-	if !strings.Contains(body, coroChanRecvParkHookV1) || !strings.Contains(body, "switch i32") {
+	if !strings.Contains(body, coroChanRecvTryParkHookV2) || !strings.Contains(body, "switch i32") {
 		t.Fatalf("complex coroutine lacks channel park/control-flow lowering:\n%s", body)
 	}
 }

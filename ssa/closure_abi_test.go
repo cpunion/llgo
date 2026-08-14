@@ -24,33 +24,30 @@ func closureContextIRAttr(prog Program) string {
 
 func TestClosureContextABIForTarget(t *testing.T) {
 	tests := []struct {
-		name      string
-		triple    string
-		goos      string
-		llvmMajor int
-		want      closureContextABI
+		name   string
+		triple string
+		goos   string
+		want   closureContextABI
 	}{
-		{"amd64", "x86_64-unknown-linux-gnu", "linux", 19, closureContextNest},
-		{"386", "i386-unknown-linux-gnu", "linux", 22, closureContextNest},
-		{"arm", "thumbv7em-none-eabi", "linux", 19, closureContextSwiftSelf},
-		{"riscv32", "riscv32-unknown-none", "linux", 20, closureContextNest},
-		{"riscv64", "riscv64-unknown-linux-gnu", "linux", 22, closureContextNest},
-		{"arm64 linux llvm19", "aarch64-unknown-linux-gnu", "linux", 19, closureContextNest},
-		{"arm64 darwin llvm19", "arm64-apple-darwin", "darwin", 19, closureContextSwiftSelf},
-		{"arm64 windows llvm20", "aarch64-pc-windows-msvc", "windows", 20, closureContextSwiftSelf},
-		{"arm64 android llvm20", "aarch64-linux-android", "android", 20, closureContextSwiftSelf},
-		{"arm64 darwin llvm21", "arm64-apple-darwin", "darwin", 21, closureContextSwiftSelf},
-		{"arm64 windows llvm22", "aarch64-pc-windows-msvc", "windows", 22, closureContextSwiftSelf},
-		{"wasm", "wasm32-unknown-wasip1", "wasip1", 22, closureContextExplicit},
-		{"xtensa", "xtensa-esp32-none-elf", "linux", 22, closureContextExplicit},
-		{"avr", "avr-unknown-unknown", "linux", 22, closureContextExplicit},
+		{"amd64", "x86_64-unknown-linux-gnu", "linux", closureContextNest},
+		{"386", "i386-unknown-linux-gnu", "linux", closureContextNest},
+		{"arm", "thumbv7em-none-eabi", "linux", closureContextSwiftSelf},
+		{"riscv32", "riscv32-unknown-none", "linux", closureContextNest},
+		{"riscv64", "riscv64-unknown-linux-gnu", "linux", closureContextNest},
+		{"arm64 linux", "aarch64-unknown-linux-gnu", "linux", closureContextNest},
+		{"arm64 darwin", "arm64-apple-darwin", "darwin", closureContextSwiftSelf},
+		{"arm64 windows", "aarch64-pc-windows-msvc", "windows", closureContextSwiftSelf},
+		{"arm64 android", "aarch64-linux-android", "android", closureContextSwiftSelf},
+		{"wasm", "wasm32-unknown-wasip1", "wasip1", closureContextExplicit},
+		{"xtensa", "xtensa-esp32-none-elf", "linux", closureContextExplicit},
+		{"avr", "avr-unknown-unknown", "linux", closureContextExplicit},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := closureContextABIForTarget(test.triple, test.goos, test.llvmMajor); got != test.want {
+			if got := closureContextABIForTarget(test.triple, test.goos); got != test.want {
 				t.Fatalf(
-					"closureContextABIForTarget(%q, %q, %d) = %d, want %d",
-					test.triple, test.goos, test.llvmMajor, got, test.want,
+					"closureContextABIForTarget(%q, %q) = %d, want %d",
+					test.triple, test.goos, got, test.want,
 				)
 			}
 		})

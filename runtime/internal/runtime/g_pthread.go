@@ -47,7 +47,9 @@ func coroRuntimeContextBootstrap() bool {
 	}
 	var key pthread.Key
 	if ret := key.Create(pthread.KeyDestructor(destroyG)); ret != 0 {
-		c.Fprintf(c.Stderr, c.Str("runtime: pthread_key_create failed (errno=%d)\n"), ret)
+		// The caller owns the terminal diagnostic. Formatting through stdio here
+		// would turn an unrecoverable pre-scheduler failure into an asynchronous
+		// worker transaction even though there is no scheduler which can resume it.
 		return false
 	}
 	gKey = key
@@ -62,16 +64,23 @@ func getg() *g {
 	gp := initRuntimeContextUntracked(allocRuntimeContext(), nil, _Grunning)
 	if ret := setgRaw(gp); ret != 0 {
 		destroyG(c.Pointer(unsafe.Pointer(gp)))
-		c.Fprintf(c.Stderr, c.Str("runtime: pthread_setspecific failed (errno=%d)\n"), ret)
 		coroRuntimeAbort("failed to install runtime g")
 		return nil
 	}
 	return gp
 }
 
+// getgIfPresent is the observation-only counterpart of getg. Runtime
+// locality probes run inside an already installed managed resume and must not
+// allocate or install a fallback context merely because no logical G is
+// active. Keeping that cold initialization path out of this function also
+// lets coroutine effect analysis preserve pthread TLS lookup as noblock.
+func getgIfPresent() *g {
+	return (*g)(gKey.Get())
+}
+
 func setg(gp *g) {
 	if ret := setgRaw(gp); ret != 0 {
-		c.Fprintf(c.Stderr, c.Str("runtime: pthread_setspecific failed (errno=%d)\n"), ret)
 		coroRuntimeAbort("failed to install runtime g")
 	}
 }

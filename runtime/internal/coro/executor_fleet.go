@@ -556,16 +556,14 @@ func restoreRunnableDemandAfterFailedClaim(slot *executorFleetSlot) bool {
 // DistributePNeutralRunnable services at most one global demand from an exact
 // source owner after a stable physical action. A source normally exports about
 // half of its local runnable queue, bounded by one destination mailbox, so one
-// continuation remains local and a lone yielding G cannot bounce between idle
-// Ps. Source links remain owner-only: an idle route publishes only a scalar
-// demand and never concurrently reads or mutates the victim queue. The only
-// single-runnable exception is a never-run initial frame, derived directly
-// from frozen G/frame state rather than a target-owned spawn pointer. It may
-// use an active route even before that route publishes demand: otherwise a
-// child spawned immediately before a non-safepointed compute loop could never
-// reach an idle P. Target selection scans the fixed route catalog beginning
-// after the source route; a demanded target is protected by its route producer
-// lease until mailbox publication and executor request have both completed.
+// continuation remains local and a lone G cannot bounce between idle Ps. A
+// Source links remain owner-only: an idle route publishes only a scalar demand
+// and never concurrently reads or mutates the victim queue. Requiring that
+// demand for every transfer is also a physical-service capability: a logical
+// route may be bound before its target starts an M, host turn, or interrupt
+// executor. Target selection scans the fixed route catalog beginning after the
+// source route; a demanded target is protected by its route producer lease
+// until mailbox publication and executor request have both completed.
 //
 // An empty valid result is ordinary: there was no demand, no surplus, or every
 // demanded mailbox was transiently contended/full. ok=false denotes a broken
@@ -586,21 +584,16 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	if !stableRunnableTransferP(source) {
 		return RunnableDistribution{}, true
 	}
-	batchLimit := source.readyCount / 2
 	if source.readyCount == 1 {
-		batchLimit = 1
+		return RunnableDistribution{}, true
 	}
+	batchLimit := source.readyCount / 2
 	if batchLimit > RunnableTransferMailboxCapacity {
 		batchLimit = RunnableTransferMailboxCapacity
 	}
 	var candidates [RunnableTransferMailboxCapacity]*G
 	prepared := collectPNeutralRunnableBatch(source, batchLimit, &candidates)
 	if prepared == 0 {
-		return RunnableDistribution{}, true
-	}
-	candidate := candidates[0]
-	initialCandidate := initialPNeutralRunnableState(candidate)
-	if source.readyCount == 1 && !initialCandidate {
 		return RunnableDistribution{}, true
 	}
 	for offset := uint32(1); offset < ExecutorFleetCapacity; offset++ {
@@ -641,34 +634,6 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 			Request:  request,
 		}
 		return distribution, distribution.Valid()
-	}
-	if initialCandidate {
-		var initial [RunnableTransferMailboxCapacity]*G
-		initial[0] = candidate
-		for offset := uint32(1); offset < ExecutorFleetCapacity; offset++ {
-			index := (sourceHandle.Route - 1 + offset) % ExecutorFleetCapacity
-			target := &fleet.slots[index]
-			if preemptLoad(&target.state) != uint32(executorFleetSlotActive) ||
-				target.handle == sourceHandle {
-				continue
-			}
-			id, count, request, published := fleet.publishPreparedPNeutralRunnableBatchAndRequest(
-				target.handle,
-				source,
-				&initial,
-				1,
-			)
-			if !published {
-				continue
-			}
-			distribution = RunnableDistribution{
-				Target:   target.handle,
-				Transfer: id,
-				Count:    count,
-				Request:  request,
-			}
-			return distribution, distribution.Valid()
-		}
 	}
 	return RunnableDistribution{}, true
 }
@@ -830,6 +795,19 @@ func (fleet *ExecutorFleet) RequestTimerExecutor(route RouteID) ExecutorRequestR
 		return ExecutorRequestInvalid
 	}
 	return fleet.routes.RequestTimerExecutor(route)
+}
+
+// RequestExecutor wakes the exact fleet route for a fact already published in
+// executor-owned storage rather than a source catalog.
+func (fleet *ExecutorFleet) RequestExecutor(handle ExecutorFleetHandle) ExecutorRequestResult {
+	if fleet == nil || !handle.Valid() {
+		return ExecutorRequestInvalid
+	}
+	route, ok := handle.RouteID()
+	if !ok {
+		return ExecutorRequestInvalid
+	}
+	return fleet.routes.RequestExecutor(route, handle.Executor)
 }
 
 // RequestChannelExecutor routes the wake half of an already committed typed

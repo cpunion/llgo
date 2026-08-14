@@ -143,6 +143,9 @@ func (domain *coroNativeFleetDomainV1) workerOwnerV1() *coro.WorkerOperationSour
 	if domain.adopted {
 		return domain.owners.sources.Worker
 	}
+	if _, bound := domain.worker.Route(); !bound {
+		return nil
+	}
 	return &domain.worker
 }
 
@@ -159,7 +162,7 @@ func (domain *coroNativeFleetDomainV1) channelOwnerV1() *coro.ChannelOperationSo
 func validCoroNativeFleetAdoptedOwnersV1(owners coroNativeFleetDomainOwnersV1) bool {
 	sources := owners.sources
 	return owners.p != nil && owners.driver != nil && sources.Timers != nil &&
-		sources.Poll != nil && sources.Manual != nil && sources.Worker != nil && sources.Channel != nil &&
+		sources.Poll != nil && sources.Manual != nil && sources.Channel != nil &&
 		sources.Control != nil
 }
 
@@ -169,8 +172,9 @@ func coroNativeFleetAdoptedOwnersRetiredV1(domain *coroNativeFleetDomainV1) bool
 	}
 	owners := domain.owners
 	sources := owners.sources
+	workerRetired := sources.Worker == nil || sources.Worker.CanRelease()
 	return *owners.driver == (coro.ExecutorDriver{}) && sources.Timers.CanRelease() &&
-		sources.Poll.CanRelease() && sources.Manual.CanRelease() && sources.Worker.CanRelease() && sources.Channel.CanRelease() &&
+		sources.Poll.CanRelease() && sources.Manual.CanRelease() && workerRetired && sources.Channel.CanRelease() &&
 		sources.Control.CanRelease()
 }
 
@@ -310,7 +314,7 @@ func coroNativeFleetValidateOwnedDomainSourcesV1(domain *coroNativeFleetDomainV1
 		coro.ChannelOperationConfiguredCapacity(&domain.channel) == coro.ChannelOperationPageCapacity
 }
 
-func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bool {
+func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32, workerEnabled bool) bool {
 	if state == nil || index >= coroNativeFleetDomainCapacityV1 {
 		return false
 	}
@@ -320,6 +324,10 @@ func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bo
 		!domain.doorbell.Open() {
 		return false
 	}
+	var worker *coro.WorkerOperationSource
+	if workerEnabled {
+		worker = &domain.worker
+	}
 	handle, ok := coro.BindExecutorFleet(
 		&state.fleet,
 		&domain.driver,
@@ -328,7 +336,7 @@ func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bo
 			Timers:  &domain.timers,
 			Poll:    &domain.poll,
 			Manual:  &domain.manual,
-			Worker:  &domain.worker,
+			Worker:  worker,
 			Channel: &domain.channel,
 			Control: &domain.control,
 		},
@@ -376,12 +384,13 @@ func coroNativeFleetStartDomainsV1(
 	// identities and guessed callback words must keep observing one permanent
 	// fail-stop policy rather than a recyclable zero state.
 	state.domainCount = count
+	workerEnabled := program == nil || program.sources.Worker != nil
 	for index := uint32(0); index < count; index++ {
 		started := false
 		if index == 0 && program != nil {
 			started = coroNativeFleetAdoptDomainV1(state, index, *program)
 		} else {
-			started = coroNativeFleetBindDomainV1(state, index)
+			started = coroNativeFleetBindDomainV1(state, index, workerEnabled)
 		}
 		if !started {
 			for previous := uint32(0); previous < index; previous++ {
@@ -889,9 +898,15 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 		coroNativeFleetDomainActiveV1,
 	)
 	driver := domain.driverOwnerV1()
-	if !valid || driver == nil || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || freshNow < now ||
-		!coro.EnterExecutorRunCompatibility(driver) {
+	if !valid || driver == nil || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || freshNow < now {
 		return coroNativeFleetOwnerWaitPlanV1{}, false
+	}
+	entered, compatibilityOK := coro.EnterExecutorRunStandbyCompatibility(driver)
+	if !compatibilityOK {
+		return coroNativeFleetOwnerWaitPlanV1{}, false
+	}
+	if !entered {
+		return coroNativeFleetOwnerWaitPlanV1{}, true
 	}
 	prepared, ok := coro.PrepareExecutorStandbyAt(driver, now)
 	if !ok {

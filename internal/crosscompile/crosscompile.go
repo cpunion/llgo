@@ -165,6 +165,52 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 	return
 }
 
+// getLLVM22Toolchain resolves the host LLVM tools used for WebAssembly. LLGo
+// emits LLVM 22 IR, so handing that IR to the target-specific ESP LLVM 19
+// bundle is not a compatibility path: LLVM 22 attributes such as
+// captures(none) and target_mem0 are rejected by its parser. The command entry
+// installs the validated LLVM 22 bin directory in PATH; repeat that validation
+// here so library callers receive the same fail-closed contract.
+func getLLVM22Toolchain(linker string) (root, bin, cc, linkerPath string, err error) {
+	return resolveLLVM22Toolchain(linker, envllvm.SetupPath, exec.LookPath)
+}
+
+func resolveLLVM22Toolchain(
+	linker string,
+	setup func() error,
+	lookup func(string) (string, error),
+) (root, bin, cc, linkerPath string, err error) {
+	if err = setup(); err != nil {
+		err = fmt.Errorf("select LLVM 22 WebAssembly toolchain: %w", err)
+		return
+	}
+	if cc, err = lookup("clang++"); err != nil {
+		err = fmt.Errorf("select LLVM 22 WebAssembly compiler: %w", err)
+		return
+	}
+	bin = filepath.Dir(cc)
+	ar, arErr := lookup("llvm-ar")
+	if arErr != nil {
+		err = fmt.Errorf("select LLVM 22 archive tool: %w", arErr)
+		return
+	}
+	if filepath.Clean(filepath.Dir(ar)) != filepath.Clean(bin) {
+		err = fmt.Errorf(
+			"LLVM 22 clang++ and llvm-ar must share one bin directory: %q and %q",
+			cc, ar,
+		)
+		return
+	}
+	root = filepath.Dir(bin)
+	if linker != "" {
+		if linkerPath, err = lookup(linker); err != nil {
+			err = fmt.Errorf("select LLVM 22 linker %q: %w", linker, err)
+			return
+		}
+	}
+	return
+}
+
 // getESPClangPlatform returns the platform suffix for ESP Clang downloads
 func getESPClangPlatform(goos, goarch string) string {
 	switch goos {
@@ -272,19 +318,30 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 	}
 	llgoRoot := env.LLGoROOT()
 
-	// Check for ESP Clang support for target-based builds
-	clangRoot, err := getESPClangRoot(forceEspClang)
-	if err != nil {
-		return
-	}
-
-	// Set ClangRoot and CC if clang is available
-	export.ClangRoot = clangRoot
-	if clangRoot != "" {
-		export.CC = filepath.Join(clangRoot, "bin", "clang++")
+	// WebAssembly IR is emitted by LLVM 22 and must be consumed by that same
+	// baseline. ESP Clang remains a target backend for non-wasm embedded builds;
+	// it is never an IR compatibility fallback for wasm.
+	var clangRoot string
+	if goarch == "wasm" {
+		var clangBin string
+		clangRoot, clangBin, export.CC, _, err = getLLVM22Toolchain("")
+		if err != nil {
+			return
+		}
+		export.ClangBinPath = clangBin
 	} else {
-		export.CC = "clang++"
+		clangRoot, err = getESPClangRoot(forceEspClang)
+		if err != nil {
+			return
+		}
+		if clangRoot != "" {
+			export.CC = filepath.Join(clangRoot, "bin", "clang++")
+			export.ClangBinPath = filepath.Join(clangRoot, "bin")
+		} else {
+			export.CC = "clang++"
+		}
 	}
+	export.ClangRoot = clangRoot
 
 	if runtime.GOOS == goos && runtime.GOARCH == goarch {
 		export.DebugInfo = nativeDebugInfoPolicy(goos)
@@ -560,15 +617,25 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 		return export, fmt.Errorf("target '%s' has incompatible libc/toolchain configuration: %w", targetName, err)
 	}
 
-	// Check for ESP Clang support for target-based builds
-	clangRoot, err := getESPClangRoot(true)
-	if err != nil {
-		return
+	// The in-process frontend and every WebAssembly IR consumer share LLVM 22.
+	// Non-wasm embedded targets may still require the ESP backend for target
+	// instruction support, but it must never parse LLGo's LLVM 22 wasm IR.
+	var clangRoot string
+	if strings.HasPrefix(target, "wasm") {
+		clangRoot, export.ClangBinPath, export.CC, export.Linker, err =
+			getLLVM22Toolchain(config.Linker)
+		if err != nil {
+			return
+		}
+	} else {
+		clangRoot, err = getESPClangRoot(true)
+		if err != nil {
+			return
+		}
+		export.CC = filepath.Join(clangRoot, "bin", "clang++")
+		export.ClangBinPath = filepath.Join(clangRoot, "bin")
 	}
-
-	// Set ClangRoot and CC if clang is available
 	export.ClangRoot = clangRoot
-	export.CC = filepath.Join(clangRoot, "bin", "clang++")
 
 	// Convert target config to Export - only export necessary fields
 	export.BuildTags = config.BuildTags
@@ -609,12 +676,15 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	envs := buildEnvMap(env.LLGoROOT())
 
 	// Convert LLVMTarget, CPU, Features to CCFLAGS/LDFLAGS. Some wasm-ld
-	// distributions expose the lld ICF switch while others (including the ESP
-	// LLVM 19 build) reject it. Keep the Go pc-identity policy explicit whenever
-	// the selected linker advertises the option; older wasm-ld defaults to no
+	// distributions expose the lld ICF switch while legacy target-specific
+	// distributions reject it. Keep the Go pc-identity policy explicit whenever
+	// the selected linker advertises the option; those wasm-ld builds default to no
 	// ICF, so omitting the unsupported switch preserves the same semantics.
 	ldflags := []string{"-S"}
-	targetLinker := filepath.Join(clangRoot, "bin", config.Linker)
+	targetLinker := export.Linker
+	if targetLinker == "" {
+		targetLinker = filepath.Join(clangRoot, "bin", config.Linker)
+	}
 	if config.Linker != "wasm-ld" || linkerSupportsICF(targetLinker) {
 		ldflags = append(ldflags, "--icf=none")
 	}
@@ -733,7 +803,7 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	}
 
 	// Handle Linker - keep it for external usage
-	if config.Linker != "" {
+	if config.Linker != "" && export.Linker == "" {
 		export.Linker = filepath.Join(clangRoot, "bin", config.Linker)
 	}
 	if config.LinkerScript != "" {

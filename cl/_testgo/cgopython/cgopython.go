@@ -29,7 +29,7 @@ import "runtime"
 // CHECK: call token @llvm.coro.id
 // CHECK: call ptr @"runtime.LockOSThread$coro"
 // CHECK: call i1 @__llgo_coro_os_thread_locked_v1
-// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1
+// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1
 // CHECK: call void @__llgo_coro_worker_park_v1
 // CHECK: call i32 @__llgo_coro_worker_resume_v1
 

@@ -228,8 +228,11 @@ func TestCoroRawLLGoFilesInfersWasmDebugTrap(t *testing.T) {
 	if err != nil {
 		t.Skip("clang is unavailable")
 	}
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
 	ctx := &context{
 		buildConf: &Config{Goos: "wasip1", Goarch: "wasm"},
+		prog:      prog,
 		crossCompile: crosscompile.Export{
 			CC:      compiler,
 			CCFLAGS: []string{"-target", "wasm32-unknown-unknown"},
@@ -261,8 +264,6 @@ func TestCoroRawLLGoFilesInfersWasmDebugTrap(t *testing.T) {
 		t.Fatalf("WASM debugtrap executor-leaf proof = %+v, %t", proof, inferred)
 	}
 
-	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
-	defer prog.Dispose()
 	if proof.LLVMDataLayout != prog.DataLayout() {
 		t.Fatalf(
 			"WASM debugtrap proof data layout = %q, frontend = %q",

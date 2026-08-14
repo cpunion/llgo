@@ -1040,7 +1040,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			// implementation. A may-block callable is admitted only when this
 			// exact member belongs to the compiler-owned raw host/scheduler-stack
 			// island.
-			const supportedExec = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe
+			const supportedExec = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe | coro.NeedsRuntimeContext
 			allowedExec := coro.ExecFlags(supportedExec)
 			callableWaitsForeign := false
 			callableNoReturn := false
@@ -1122,6 +1122,27 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 		}
 		if !frozen {
 			return false, fmt.Errorf("call %q in %q is absent from the frozen ProgramIR", call.String(), caller.Name())
+		}
+		if frontend.Elision == cl.CoroCallElidedFrontendUnevaluated {
+			// Preserve the ProgramIR decision when the omitted instruction also
+			// satisfies AnalyzeSSA's narrow static-call gate. Generated cgo adapters
+			// place _Cgo_use/_Cgo_keepalive behind runtime.cgoAlwaysFalse; their
+			// blocks are absent from physical lowering and must not reappear as raw
+			// closure edges. Dynamic calls, invokes, builtins, spawns, and alternate
+			// defer stacks remain conservative until the analyzer has a complete
+			// frontend-unevaluated instruction projection for those shapes.
+			common := call.Common()
+			if common == nil || common.StaticCallee() == nil || common.IsInvoke() {
+				return false, nil
+			}
+			switch exact := call.(type) {
+			case *ssa.Call:
+				return exact != nil, nil
+			case *ssa.Defer:
+				return exact != nil && exact.DeferStack == nil, nil
+			default:
+				return false, nil
+			}
 		}
 		if requested && !frontend.ElidesCall() {
 			return false, fmt.Errorf("builder cannot elide ordinary call in %q; only calls omitted by the build frontend may be elided", caller.Name())
@@ -2293,7 +2314,8 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 		return fmt.Errorf("live raw ABI plain closure validation requires an exact closure")
 	}
 	const managedOnlyEffects = coro.YieldOnly | coro.AwaitStructured | coro.OutcomeStructured
-	const legacyExec = coro.IRQUnsafe | coro.NeedsPreempt | coro.MayUnwind | coro.NeedsCleanupFrame | coro.NoReturn | coro.PanicOnly
+	const legacyExec = coro.IRQUnsafe | coro.NeedsPreempt | coro.MayUnwind | coro.NeedsCleanupFrame |
+		coro.NoReturn | coro.PanicOnly | coro.NeedsRuntimeContext
 
 	validateTarget := func(owner, target *ssa.Function, terminalOnly bool, site string) error {
 		if target == nil {
@@ -4237,6 +4259,19 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		CoroLibraryEffects:          maps.Clone(importedLibraryEffects),
 		CoroLibraryForeignCallables: maps.Clone(libraryForeign),
 	}
+	if ctx.coroEmission != nil && ctx.coroEmission.CompleteRuntimeABI() {
+		programCapabilities, err := ctx.clCompilation.CoroProgramCapabilities()
+		if err != nil {
+			ctx.coroPlan = nil
+			ctx.coroPlanDigest = ""
+			ctx.coroPlanMetadata = coro.PlanDigestMetadata{}
+			ctx.coroLoweringFacts = coro.LoweringFacts{}
+			ctx.coroLoweringFactsDigest = ""
+			ctx.clCompilation = nil
+			return fmt.Errorf("freeze coroutine program capabilities: %w", err)
+		}
+		ctx.coroProgramCapabilities = programCapabilities
+	}
 	if ctx.prog != nil {
 		ctx.prog.SetLogicalLocality(true)
 	}
@@ -5190,6 +5225,8 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	names = append(names,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
+		"__llgo_coro_frame_publish_v3",
+		"__llgo_coro_frame_destroy_commit_v2",
 		"__llgo_coro_await_prepare_v1",
 		"__llgo_coro_preempt_poll_v1",
 		"__llgo_coro_yield_prepare_v1",
@@ -5215,13 +5252,13 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		// plain runtime island as the raw channel hooks below.
 		"CoroChanTrySend",
 		"CoroChanTryRecv",
-		"CoroChanTryClose",
+		"CoroChanTryCloseTask",
 		"CoroChanSelectTry",
 		"CoroChanSelectPark",
 		"CoroChanSelectResume",
-		coroChanSendParkSymbolV1,
-		coroChanRecvParkSymbolV1,
-		coroChanResumeSymbolV1,
+		coroChanSendTryParkSymbolV2,
+		coroChanRecvTryParkSymbolV2,
+		coroChanResumeSymbolV2,
 		"__llgo_coro_fault_prepare_v1",
 		"__llgo_coro_fault_prepare_v2",
 	)
@@ -5687,22 +5724,28 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				}
 			}
 		}
-		if name == coroChanSendParkSymbolV1 || name == coroChanRecvParkSymbolV1 {
+		if name == coroChanSendTryParkSymbolV2 || name == coroChanRecvTryParkSymbolV2 {
 			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 7 || sig.Results().Len() != 0 ||
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 9 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel try-or-park ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 signature", name)
 			}
 			for parameter := 0; parameter < 6; parameter++ {
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.UnsafePointer]) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must use unsafe.Pointer for parameter %d", name, parameter)
+					return nil, nil, nil, nil, fmt.Errorf("coroutine channel try-or-park ABI %q must use unsafe.Pointer for parameter %d", name, parameter)
 				}
 			}
 			if !types.Identical(sig.Params().At(6).Type(), types.Typ[types.Uintptr]) {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must use uintptr element size", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel try-or-park ABI %q must use uintptr element size", name)
+			}
+			for parameter := 7; parameter < 9; parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine channel try-or-park ABI %q must use uint32 for parameter %d", name, parameter)
+				}
 			}
 		}
-		if name == coroChanResumeSymbolV1 {
+		if name == coroChanResumeSymbolV2 {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 1 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
@@ -6644,6 +6687,10 @@ type context struct {
 	coroPlanMetadata            coro.PlanDigestMetadata
 	coroLoweringFacts           coro.LoweringFacts
 	coroLoweringFactsDigest     string
+	// coroProgramCapabilities is the closed-world projection of optional
+	// physical runtime services. It is frozen by cl preflight before bootstrap
+	// selection and survives only as hashed entry-module flags.
+	coroProgramCapabilities coro.ProgramCapabilities
 	// Frozen immediately after whole-program analysis, before package codegen.
 	// linkMainPkg only consumes these exact per-entry-package tables.
 	coroProgramBootstraps map[string]*coroProgramBootstrapV1
@@ -7975,19 +8022,20 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	mod.SetDataLayout(ctx.prog.DataLayout())
 	mod.SetTarget(ctx.prog.TargetSpec().Triple)
 	stageBackend := shouldStageNativeExecutableBackend(ctx)
+	wholeProgramCoroLTO := shouldDeferCoroLoweringToFullLTO(ctx)
 	// Coroutine splitting is a mandatory correctness pass, not an optimization.
 	// In particular, native debug builds intentionally skip the default
 	// optimization pipeline, but TargetMachine cannot select unresolved
 	// llvm.coro.* operators. ModeGen deliberately retains frontend coroutine IR
 	// for golden/LIT inspection and never reaches object emission here.
-	if ctx.mode != ModeGen && !stageBackend {
+	if ctx.mode != ModeGen && !stageBackend && !wholeProgramCoroLTO {
 		if err := lowerCoroPackageModule(ctx, pkgPath, mod); err != nil {
 			return err
 		}
 	}
 
 	// Run the default LLVM optimization pipeline selected by the requested -O level.
-	if ctx.passOpt && !stageBackend {
+	if ctx.passOpt && !stageBackend && !wholeProgramCoroLTO {
 		pbo := gllvm.NewPassBuilderOptions()
 		defer pbo.Dispose()
 		if err := gllvm.VerifyModule(mod, gllvm.ReturnStatusAction); err != nil {
@@ -8006,7 +8054,11 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	if !stageBackend {
 		emitFuncInfoEntrySites(ctx, ret)
 		if ctx.mode != ModeGen {
-			if _, err := llssa.VerifyCoroAtomicCostModule(mod); err != nil {
+			verifyAtomicCost := llssa.VerifyCoroAtomicCostModule
+			if ctx.passOpt && !wholeProgramCoroLTO {
+				verifyAtomicCost = llssa.VerifyOptimizedCoroAtomicCostModule
+			}
+			if _, err := verifyAtomicCost(mod); err != nil {
 				return fmt.Errorf("verify package %s final atomic-cost certificates: %w", pkgPath, err)
 			}
 		}
@@ -8091,6 +8143,17 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 }
 
 const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split),coro-cleanup"
+
+// shouldDeferCoroLoweringToFullLTO preserves presplit coroutine bodies and
+// exact static call edges until LLVM owns the complete program. Package-level
+// coro-cleanup irreversibly erases the coro.id information required by both
+// HALO and LLVM 22's coro_elide_safe/.noalloc protocol; the full-LTO backend's
+// mandatory pipeline performs CoroEarly, CoroSplit, annotation elision, and
+// CoroCleanup after all package bitcode has been combined.
+func shouldDeferCoroLoweringToFullLTO(ctx *context) bool {
+	return ctx != nil && ctx.mode != ModeGen && ctx.buildConf != nil &&
+		ctx.buildConf.ltoMode() == lto.Full
+}
 
 func lowerCoroPackageModule(ctx *context, pkgPath string, mod gllvm.Module) error {
 	if ctx == nil || ctx.prog == nil || mod.IsNil() {
@@ -8241,7 +8304,11 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	if ctx.stagedFuncInfoSites && ctx.stagedFuncInfoMeta {
 		emitFuncInfoEntrySitesForModule(mod, ctx.stagedPointerSize, ctx.stagedMachOSites)
 	}
-	if _, err := llssa.VerifyCoroAtomicCostModule(mod); err != nil {
+	verifyAtomicCost := llssa.VerifyCoroAtomicCostModule
+	if ctx.passOpt {
+		verifyAtomicCost = llssa.VerifyOptimizedCoroAtomicCostModule
+	}
+	if _, err := verifyAtomicCost(mod); err != nil {
 		return "", fmt.Errorf("verify package %s final detached atomic-cost certificates: %w", pkg.PkgPath, err)
 	}
 	if ctx.buildConf.CheckLLFiles {

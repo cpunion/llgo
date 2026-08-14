@@ -25,13 +25,14 @@ import (
 )
 
 const backendKind = "malloc"
+const backendAllocationsAreZeroed = true
 
 func backendBootstrap() bool {
 	return true
 }
 
 func backendAllocFrame(size uintptr) unsafe.Pointer {
-	return c.Malloc(size)
+	return c.Calloc(1, size)
 }
 
 func backendFreeFrame(ptr unsafe.Pointer, size uintptr) bool {

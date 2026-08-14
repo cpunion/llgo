@@ -26,6 +26,10 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 // references until every route, ingress, backend, and driver is strongly
 // retired.
 func coroNativeFleetStartProgramV1(count uint32) bool {
+	var worker *coro.WorkerOperationSource
+	if coroProgramWorkerCapabilityV2() {
+		worker = &coroProgramWorkerSourceV1State
+	}
 	owners := coroNativeFleetDomainOwnersV1{
 		p:      &coroProgramPV1State,
 		driver: &coroProgramExecutorDriverV1State,
@@ -33,7 +37,7 @@ func coroNativeFleetStartProgramV1(count uint32) bool {
 			Timers:  &coroProgramTimerTableV1State,
 			Poll:    &coroProgramPollSourceV1State,
 			Manual:  &coroProgramManualSourceV2State,
-			Worker:  &coroProgramWorkerSourceV1State,
+			Worker:  worker,
 			Channel: &coroProgramChannelSourceV1State,
 			Control: &coroProgramTaskControlSourceV1State,
 		},

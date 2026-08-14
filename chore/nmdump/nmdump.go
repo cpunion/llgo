@@ -31,6 +31,7 @@ func main() {
 		return
 	}
 
+	llvm.SetupPathOrExit()
 	nm := llvm.New("").Nm()
 
 	var flags []string

@@ -35,33 +35,6 @@ const (
 	coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity
 )
 
-type coroNativeWorkerJobV1 struct {
-	id          coro.OperationID
-	function    uintptr
-	traceTarget uintptr
-	argc        uint32
-	args        [coroworker.MaxArgs]uintptr
-}
-
-func (job coroNativeWorkerJobV1) valid() bool {
-	return job.id.Valid() && job.id.Source() == coro.OperationSourceWorker &&
-		job.function != 0 && job.traceTarget != 0 && job.argc <= coroworker.MaxArgs
-}
-
-func coroNativeWorkerJobFromTransportV1(raw coroworker.Job) (coroNativeWorkerJobV1, bool) {
-	job := coroNativeWorkerJobV1{
-		id: coro.OperationID{
-			SourceSlot: raw.SourceSlot,
-			Generation: raw.Generation,
-		},
-		function:    raw.Function,
-		traceTarget: raw.TraceTarget,
-		argc:        raw.Argc,
-		args:        raw.Args,
-	}
-	return job, job.valid()
-}
-
 type coroNativeWorkerDeliveryV1 uint8
 
 const (
@@ -190,6 +163,9 @@ func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
 // already-bound fleet routes. It deliberately retains no executor handle: the
 // exact destination is encoded by every submitted OperationID.
 func coroNativeWorkerPoolStartFleetV1() bool {
+	if !coroProgramWorkerCapabilityV2() {
+		return coroNativeWorkerPoolCanReleaseV1()
+	}
 	return coroNativeWorkerPoolStartDeliveryV1(
 		coroNativeWorkerDeliveryFleetV1,
 		coro.ExecutorHandle{},
@@ -216,9 +192,8 @@ func coroNativeWorkerPoolReserveV1(
 	if !coroNativeWorkerSubmissionOwnerV1(handle, route) {
 		return 0, false
 	}
-	var reservation coroworker.QueueReservation
-	reserved := coroworker.QueueReserve(&reservation)
-	return reservation, reserved
+	reservation := coroworker.QueueReserve()
+	return reservation, reservation != 0
 }
 
 func coroNativeWorkerPoolCancelReservationV1(
@@ -241,24 +216,22 @@ func coroNativeWorkerPoolSubmitReservedV1(
 	id coro.OperationID,
 	function, traceTarget uintptr,
 	argc uint32,
-	args *[coroworker.MaxArgs]uintptr,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 ) bool {
-	if args == nil {
-		return false
-	}
-	job := coroworker.Job{
-		SourceSlot:  id.SourceSlot,
-		Generation:  id.Generation,
-		Function:    function,
-		TraceTarget: traceTarget,
-		Argc:        argc,
-		Args:        *args,
-	}
-	if _, valid := coroNativeWorkerJobFromTransportV1(job); !valid {
+	if !id.Valid() || id.Source() != coro.OperationSourceWorker ||
+		function == 0 || traceTarget == 0 || argc > coroworker.MaxArgs {
 		return false
 	}
 	return id.Route() == route && coroNativeWorkerSubmissionOwnerV1(handle, route) &&
-		coroworker.QueueSubmitReserved(reservation, &job)
+		coroworker.QueueSubmitReserved(
+			reservation,
+			id.SourceSlot,
+			id.Generation,
+			function,
+			traceTarget,
+			argc,
+			a0, a1, a2, a3, a4, a5, a6, a7, a8,
+		)
 }
 
 // coroNativeWorkerPoolStopDeliveryV1 seals submission, wakes all idle workers,
@@ -306,6 +279,9 @@ func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {
 // ingress is still active. The join covers all queued route completions; only
 // after it returns may the coordinator begin route close.
 func coroNativeWorkerPoolStopFleetV1() bool {
+	if coroNativeWorkerPoolV1State == (coroNativeWorkerPoolV1{}) {
+		return coroNativeWorkerPoolCanReleaseV1()
+	}
 	return coroNativeWorkerPoolStopDeliveryV1(
 		coroNativeWorkerDeliveryFleetV1,
 		coro.ExecutorHandle{},
@@ -331,25 +307,22 @@ func coroCancelNativeWorkerSubmissionV1(
 	return coroNativeWorkerPoolCancelReservationV1(handle, route, reservation)
 }
 
-// coroCommitNativeWorkerSubmissionV1 closes the no-return handoff from
-// the core Worker park owner into the pre-reserved native queue. A failure to
-// enqueue after MarkSubmitted would leave a retained frame with no future
-// physical fact and therefore aborts instead of returning to the caller.
-func coroCommitNativeWorkerSubmissionV1(
-	driver *coro.ExecutorDriver,
-	g *coro.G,
+// coroPublishNativeWorkerSubmissionV1 closes the no-return handoff from the
+// already committed core Worker generation into the pre-reserved native queue.
+// A failure to enqueue would leave a retained frame with no future physical
+// fact and therefore aborts instead of returning to the caller.
+func coroPublishNativeWorkerSubmissionV1(
 	handle coro.ExecutorHandle,
 	route coro.RouteID,
 	reservation coroworker.QueueReservation,
 	id coro.OperationID,
 	function, traceTarget uintptr,
 	argc uint32,
-	args *[coroworker.MaxArgs]uintptr,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 ) bool {
-	if driver == nil || g == nil || args == nil || function == 0 || traceTarget == 0 ||
+	if function == 0 || traceTarget == 0 ||
 		argc > coroworker.MaxArgs || !id.Valid() || id.Source() != coro.OperationSourceWorker || id.Route() != route ||
-		!coroNativeWorkerSubmissionOwnerV1(handle, route) ||
-		!coro.CommitCurrentExecutorWorkerSubmission(driver, g, id) {
+		!coroNativeWorkerSubmissionOwnerV1(handle, route) {
 		return false
 	}
 	if !coroNativeWorkerPoolSubmitReservedV1(
@@ -360,7 +333,7 @@ func coroCommitNativeWorkerSubmissionV1(
 		function,
 		traceTarget,
 		argc,
-		args,
+		a0, a1, a2, a3, a4, a5, a6, a7, a8,
 	) {
 		coroRuntimeAbort("native coroutine worker committed submission failed")
 		for {

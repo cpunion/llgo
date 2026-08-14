@@ -25,23 +25,23 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 // foreign-thread callbacks, timers, IO reactors, and teardown paths
 // deliberately return route zero. A synchronous same-G C-to-Go reentry is
 // still inside that managed resume and may inherit its route.
-func coroCurrentTaskV1() (*coro.G, coro.RouteID) {
-	gp := getg()
+func coroCurrentTaskV1() (*coro.G, *coro.ExecutorDriver, coro.RouteID) {
+	gp := getgIfPresent()
 	if gp == nil || gp.startfn != nil || gp.startarg == nil {
-		return nil, 0
+		return nil, nil, 0
 	}
 	task := (*coro.G)(gp.startarg)
 	if ctx := (*coroRuntimeContext)(coro.TaskLocal(task)); ctx != gp.context || !validCoroRuntimeTaskContext(task, ctx) {
-		return nil, 0
+		return nil, nil, 0
 	}
-	_, _, route, current := coro.CurrentExecutorDriver(task)
+	driver, route, current := coro.CurrentExecutorDriverForActiveResume(task)
 	if !current {
-		return nil, 0
+		return nil, nil, 0
 	}
-	return task, route
+	return task, driver, route
 }
 
 func coroCurrentTaskRouteV1() coro.RouteID {
-	_, route := coroCurrentTaskV1()
+	_, _, route := coroCurrentTaskV1()
 	return route
 }

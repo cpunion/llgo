@@ -43,13 +43,13 @@ func TestCoroDoorbellUsesExactBoundedForeignLeaves(t *testing.T) {
 		coroDoorbellGoSource,
 		"nativeCDoorbellOpen",
 		"nativeCDoorbellRead",
-		"nativeCDoorbellWrite",
 		"nativeCDoorbellClose",
 	)
 	for _, required := range []string{
 		`LLGoFiles   = "_wrap/doorbell.c"`,
 		"//go:linkname nativeCDoorbellOpen C.__llgo_coro_doorbell_open_v1",
 		"//go:linkname nativeCDoorbellRead C.__llgo_coro_doorbell_read_v1",
+		"//llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return\n//go:linkname nativeCDoorbellWrite C.__llgo_coro_doorbell_write_v1",
 		"//go:linkname nativeCDoorbellWrite C.__llgo_coro_doorbell_write_v1",
 		"//go:linkname nativeCDoorbellClose C.__llgo_coro_doorbell_close_v1",
 		"unpackNativeDoorbellResult",

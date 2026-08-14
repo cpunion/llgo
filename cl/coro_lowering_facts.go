@@ -193,6 +193,13 @@ func (u *EmissionUniverse) coroLoweringFunctionSites(plan *coro.SSAPlan, functio
 			if _, unevaluated := ctx.unevaluatedSSA[instruction]; unevaluated {
 				continue
 			}
+			semantic, err := u.coroProgramIR.semanticInstructionPlan(function, owner, instruction)
+			if err != nil {
+				return nil, fmt.Errorf("coroutine lowering facts: function %q block %d semantic plan: %w", function.Name(), block.Index, err)
+			}
+			if !semantic.evaluated {
+				continue
+			}
 			if _, debug := instruction.(*ssa.DebugRef); debug {
 				continue
 			}

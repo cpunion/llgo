@@ -651,7 +651,7 @@ func TestExecutorFleetDemandDistributesSurplusWithoutBouncingLastRunnable(t *tes
 	}
 }
 
-func TestExecutorFleetDemandSharesSingleInitialButNotSingleYielded(t *testing.T) {
+func TestExecutorFleetDemandKeepsSingleRunnableLocal(t *testing.T) {
 	t.Run("initial", func(t *testing.T) {
 		fleet := new(ExecutorFleet)
 		source := bindExecutorFleetManualFixture(t, fleet)
@@ -661,12 +661,30 @@ func TestExecutorFleetDemandSharesSingleInitialButNotSingleYielded(t *testing.T)
 			t.Fatal("prepare single initial demand")
 		}
 		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
-		if !ok || !distribution.Valid() || distribution.Target != target.handle ||
-			distribution.Count != 1 ||
-			source.p.readyHead != nil || source.p.readyTail != nil {
-			t.Fatalf("single initial distribution = %+v/%t source=(%p,%p)",
+		if !ok || distribution != (RunnableDistribution{}) ||
+			source.p.readyHead != task.g || source.p.readyTail != task.g || !task.g.queued {
+			t.Fatalf("single initial runnable migrated = %+v/%t source=(%p,%p)",
 				distribution, ok, source.p.readyHead, source.p.readyTail)
 		}
+		_ = target
+	})
+	t.Run("initial-surplus-without-demand", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		source := bindExecutorFleetManualFixture(t, fleet)
+		target := bindExecutorFleetManualFixture(t, fleet)
+		first := newYieldingTestG(t, "fleet-initial-surplus-first")
+		second := newYieldingTestG(t, "fleet-initial-surplus-second")
+		if !Enqueue(source.p, first.g) || !Enqueue(source.p, second.g) {
+			t.Fatal("prepare initial surplus without target demand")
+		}
+		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+		if !ok || distribution != (RunnableDistribution{}) ||
+			source.p.readyHead != first.g || source.p.readyTail != second.g ||
+			source.p.readyCount != 2 || !first.g.queued || !second.g.queued {
+			t.Fatalf("initial surplus moved without physical-service demand = %+v/%t source=(%p,%p,%d)",
+				distribution, ok, source.p.readyHead, source.p.readyTail, source.p.readyCount)
+		}
+		_ = target
 	})
 	t.Run("yielded", func(t *testing.T) {
 		fleet := new(ExecutorFleet)

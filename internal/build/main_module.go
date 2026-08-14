@@ -345,6 +345,7 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 		}
 		bootstrap = pkg.NewCoroProgramBootstrap(coroProgramBootstrapSymbolV2, llssa.CoroProgramBootstrapOptions{
 			Version: coroProgramBootstrapVersionV2,
+			Flags:   cfg.coroBootstrap.Flags,
 			// The runtime validates one program ABI identity across the manifest
 			// and startup table. StepHash is an input to this final manifest hash,
 			// not a second externally visible ABI identity.

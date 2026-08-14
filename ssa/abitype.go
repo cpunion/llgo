@@ -19,6 +19,7 @@ package ssa
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -62,6 +63,22 @@ var (
 		types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Uintptr])), false)
 )
 
+type abiMethodEntryKey struct {
+	concrete  string
+	name      string
+	methodTyp string
+}
+
+func abiTypeHash(name string) uint32 {
+	h := sha256.Sum256([]byte(name))
+	return binary.LittleEndian.Uint32(h[:4])
+}
+
+func staticItabSymbol(packagePath, interfaceName, concreteName string) string {
+	digest := sha256.Sum256([]byte(packagePath + "\x00" + interfaceName + "\x00" + concreteName))
+	return "__llgo_static_itab." + hex.EncodeToString(digest[:16])
+}
+
 // ABITypeRuntimeFunctions returns the logical runtime functions whose
 // addresses abiType embeds while materializing the descriptor for t. These are
 // references, not calls: consumers must demand the selected entries without
@@ -103,8 +120,7 @@ func (b Builder) abiCommonFields(t types.Type, name string, hasUncommon bool, gl
 	// PtrBytes uintptr
 	fields = append(fields, prog.IntVal(uint64(ab.PtrBytes(t)), prog.Uintptr()).impl)
 	// Hash uint32
-	h := sha256.Sum256([]byte(name))
-	hash := binary.LittleEndian.Uint32(h[:4])
+	hash := abiTypeHash(name)
 	fields = append(fields, prog.IntVal(uint64(hash), prog.Uint32()).impl)
 	// TFlag uint8
 	tflag := ab.TFlag(t)
@@ -565,9 +581,18 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 				ifn = descriptor.impl
 			}
 		}
+		ftyp := funcType(prog, m.Type())
+		methodTypeName, _ := prog.abi.TypeName(ftyp)
+		if b.Pkg.abiMethodIfns == nil {
+			b.Pkg.abiMethodIfns = make(map[abiMethodEntryKey]llvm.Value)
+		}
+		b.Pkg.abiMethodIfns[abiMethodEntryKey{
+			concrete:  typeName,
+			name:      fullName,
+			methodTyp: methodTypeName,
+		}] = ifn
 		var values []llvm.Value
 		values = append(values, name)
-		ftyp := funcType(prog, m.Type())
 		values = append(values, b.abiType(ftyp).impl)
 		values = append(values, ifn)
 		values = append(values, tfn)

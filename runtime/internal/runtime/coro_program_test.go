@@ -598,6 +598,7 @@ func resetCoroProgramTestStateV1(t *testing.T) {
 	coroProgramLifecycleV1State = coroProgramUnusedV1
 	coroProgramManifestV1State = nil
 	coroProgramFactoryV1State = nil
+	coroProgramCapabilitiesV2State = 0
 	coroProgramGV1State = coroG{}
 	coroProgramPV1State = coroP{}
 	coroProgramContinuationV1State = coroProgramContinuationNoneV1
@@ -619,6 +620,7 @@ func resetCoroProgramTestStateV1(t *testing.T) {
 		coroProgramLifecycleV1State = coroProgramUnusedV1
 		coroProgramManifestV1State = nil
 		coroProgramFactoryV1State = nil
+		coroProgramCapabilitiesV2State = 0
 		coroProgramGV1State = coroG{}
 		coroProgramPV1State = coroP{}
 		coroProgramContinuationV1State = coroProgramContinuationNoneV1
@@ -663,7 +665,7 @@ func TestCoroProgramV1BeginRunAndDestroy(t *testing.T) {
 	if coroProgramLifecycleV1State != coroProgramCompleteV1 || !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
 		t.Fatalf("completed coroutine program retained scheduler state: lifecycle=%d", coroProgramLifecycleV1State)
 	}
-	if driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
+	if driver.doneCalls != 1 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
 		t.Fatalf("coroutine wrapper calls = done:%d resume:%d destroy:%d released:%t", driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
 	}
 	if !coroProgramTestTargetV1State.joined || coroProgramTestTargetV1State.closeCalls != 1 ||
@@ -804,7 +806,7 @@ func TestCoroProgramRunSliceBudgetOneKeepsPhysicalActionsAtomic(t *testing.T) {
 		}
 	}
 	if dispatches != 2 || resumes != 1 || destroys != 1 ||
-		driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
+		driver.doneCalls != 1 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
 		t.Fatalf("budget-one totals = source:%d dispatch:%d resume:%d destroy:%d wrappers={done:%d resume:%d destroy:%d released:%t}",
 			sources, dispatches, resumes, destroys, driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
 	}
@@ -1325,6 +1327,7 @@ func TestCoroProgramRunSliceV2ConcurrentDuplicateEpochIsExactOnce(t *testing.T) 
 	close(start)
 	var winner coroProgramRunResultV2
 	winners := 0
+	unexpected := make([]callbackResult, 0, callers)
 	for index := 0; index < callers; index++ {
 		got := <-results
 		switch got.status {
@@ -1339,11 +1342,18 @@ func TestCoroProgramRunSliceV2ConcurrentDuplicateEpochIsExactOnce(t *testing.T) 
 			}
 		case uint32(coroProgramDriveIgnoredV2):
 			if got.result != (coroProgramRunResultV2{}) {
-				t.Fatalf("ignored duplicate retained result = %+v", got.result)
+				unexpected = append(unexpected, got)
 			}
 		default:
-			t.Fatalf("duplicate V2 callback status = %d result:%+v", got.status, got.result)
+			unexpected = append(unexpected, got)
 		}
+	}
+	if len(unexpected) != 0 {
+		t.Fatalf("duplicate V2 callback unexpected results = %+v, lifecycle:%d continuation:%d epoch:%d mode:%d consumes:%d admission-release:%t",
+			unexpected, coroProgramLifecycleV1State, coroProgramContinuationV1State,
+			coroProgramContinuationEpochV1, coroProgramDriverModeV2State,
+			coroProgramTestTargetV1State.runConsumeCalls,
+			coroProgramDriveAdmissionV1State.CanRelease())
 	}
 	if winners != 1 || winner.Epoch == 0 || winner.Epoch == initial.Epoch ||
 		coroProgramContinuationEpochV1 != winner.Epoch ||
@@ -1424,7 +1434,7 @@ func TestCoroProgramV2BeginRunAndDestroy(t *testing.T) {
 	if coroProgramLifecycleV1State != coroProgramCompleteV1 || !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
 		t.Fatalf("completed coroutine program v2 retained scheduler state: lifecycle=%d", coroProgramLifecycleV1State)
 	}
-	if driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
+	if driver.doneCalls != 1 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
 		t.Fatalf("coroutine v2 wrapper calls = done:%d resume:%d destroy:%d released:%t", driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
 	}
 	if !coroProgramTestTargetV1State.joined || coroProgramTestTargetV1State.closeCalls != 1 ||
@@ -1695,7 +1705,7 @@ func TestCoroProgramExplicitPanicHookAndTerminalDispatcher(t *testing.T) {
 		t.Fatalf("terminal adapter panic record = (%+v, %t)", record, published)
 	}
 	if coroProgramLifecycleV1State != coroProgramFailedV1 ||
-		driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released ||
+		driver.doneCalls != 1 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released ||
 		coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) || coro.ReclaimableG(&coroProgramGV1State) ||
 		!coroProgramTestTargetV1State.joined || coroProgramTestTargetV1State.closeCalls != 1 ||
 		coroProgramExecutorBoundV1State || !coroProgramExecutorRegistryV1State.CanRelease() {
@@ -1859,7 +1869,7 @@ func TestCoroProgramNormalMainReturnCancelsReadyChild(t *testing.T) {
 	if status := coroProgramRunV1(gPointer, frame.handle); status != coroProgramDriveCompleteV1 {
 		t.Fatalf("run command-shutdown program = %d", status)
 	}
-	if coroProgramLifecycleV1State != coroProgramCompleteV1 || driver.doneCalls != 2 ||
+	if coroProgramLifecycleV1State != coroProgramCompleteV1 || driver.doneCalls != 1 ||
 		driver.resumeCalls != 1 || driver.destroyCalls != 1 || driver.cancelDestroyCalls != 1 ||
 		driver.taskReleaseCalls != 1 || driver.child == nil || driver.childFrame == nil ||
 		!coroProgramTestTargetV1State.joined || coroProgramTestTargetV1State.closeCalls != 1 ||
@@ -1891,8 +1901,8 @@ func TestCoroProgramMainReturnCancelsBoundedChildDestroyContinuation(t *testing.
 		t.Fatalf("run bounded-child command program = %d", status)
 	}
 	if coroProgramLifecycleV1State != coroProgramCompleteV1 ||
-		driver.doneCalls != 3 || driver.resumeCalls != 2 || driver.destroyCalls != 1 ||
-		driver.childDoneCalls != 1 || driver.childResumeCalls != 1 || !driver.childCompleteReady ||
+		driver.doneCalls != 1 || driver.resumeCalls != 2 || driver.destroyCalls != 1 ||
+		driver.childDoneCalls != 0 || driver.childResumeCalls != 1 || !driver.childCompleteReady ||
 		driver.cancelDestroyCalls != 1 || driver.taskReleaseCalls != 1 ||
 		driver.child == nil || driver.childFrame == nil ||
 		!coroProgramTestTargetV1State.joined || coroProgramTestTargetV1State.closeCalls != 1 ||
@@ -1948,8 +1958,8 @@ func TestCoroProgramCommandBootstrapDirectChildHandoffPrecedesTwoPeers(t *testin
 		}
 	}
 	if coroProgramLifecycleV1State != coroProgramCompleteV1 ||
-		driver.doneCalls != 3 || driver.resumeCalls != 2 || driver.destroyCalls != 1 || !driver.released ||
-		driver.bootstrapChildDoneCalls != 2 || driver.bootstrapChildResumeCalls != 1 ||
+		driver.doneCalls != 1 || driver.resumeCalls != 2 || driver.destroyCalls != 1 || !driver.released ||
+		driver.bootstrapChildDoneCalls != 1 || driver.bootstrapChildResumeCalls != 1 ||
 		driver.bootstrapChildDestroyCalls != 1 || driver.bootstrapPeerDestroyCalls != 2 ||
 		driver.taskReleaseCalls != 2 || !coroProgramTestTargetV1State.joined ||
 		coroProgramTestTargetV1State.closeCalls != 1 || coroProgramExecutorBoundV1State ||

@@ -72,7 +72,7 @@ storage、archive 或开放动态边界传递的 foreign callable 使用显式�
 - 不让 wrapper 的信任标注跳过其余 Go body、循环、panic、cleanup、pollWait 或调用图
   分析；
 - 不承诺不存在相应 OS/HAL/host capability 的 target 实现完整文件、网络或进程 API；
-- 不以 LLVM 19 以下版本、旧 LLGo 二进制 ABI 或旧 coroutine prototype 为兼容目标。
+- 不以 LLVM 22 以外版本、旧 LLGo 二进制 ABI 或旧 coroutine prototype 为兼容目标。
 
 ## 4. 不可协商的硬约束
 
@@ -1169,9 +1169,9 @@ Native bounded worker、regular-file与双owner TCP链已有生产证据；forwa
 | RTOS/embedded | QEMU或硬件notification、one-shot alarm、ISR publish、DMA cancel、容量填满、task affinity |
 | Baremetal | QEMU main loop、hardware compare、IRQ ring、WFI/WFE、stale generation、IRQ fence、无pthread/libuv依赖 |
 
-最终支持范围要求LLVM 19、20、21、22分别验证CoroSplit、descriptor/frame layout、
-module verification和关键E2E；不覆盖LLVM 19以下。这是待完成的验收门，不是当前
-通过声明。GC profile亦需分别验证nogc、conservative和最终的exact frame root/pin
+最终支持范围固定为LLVM 22，并要求验证CoroSplit、descriptor/frame layout、module
+verification和关键E2E；不再维护LLVM 21及以下的兼容分支。这是待完成的验收门，
+不是当前通过声明。GC profile亦需分别验证nogc、conservative和最终的exact frame root/pin
 contract，compile-only不能替代production platform E2E。
 
 ## 20. 当前实现状态与差距

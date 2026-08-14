@@ -50,31 +50,72 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 	if !coroTargetBeforeProgramRunSliceV1(p, driver) {
 		return coroRunResultV1{}
 	}
+	runtimeContext := coroCaptureRuntimeContextV1()
+	if runtimeContext == nil {
+		return coroRunResultV1{}
+	}
+	run, runOK := coro.BeginExecutorRunSlice(driver)
+	if !runOK {
+		return coroRunResultV1{}
+	}
+	target, targetOK := coroTargetBeginRunSliceV1(p, driver)
+	if !targetOK {
+		return coroRunResultV1{}
+	}
 	result := coroRunResultV1{}
 	held := false
 	for result.used < budget {
-		var wait, permitOK bool
-		held, wait, permitOK = coroPrepareManagedExecutionV1(driver, held)
-		if !permitOK {
+		if !held {
+			var wait, permitOK bool
+			held, wait, permitOK = coroPrepareManagedExecutionV1(driver)
+			if !permitOK {
+				_ = coroFinishManagedExecutionV1(driver, held)
+				return coroRunResultV1{}
+			}
+			if wait {
+				result.stop = coroRunExecutionWaitV1
+				return result
+			}
+		}
+		combineDispatch := held && budget-result.used >= 2
+		var actionStep coro.ExecutorRunActionStep
+		var actionSelected, ok bool
+		if combineDispatch {
+			actionStep, actionSelected, ok = run.NextActionCombined()
+		} else {
+			actionStep, actionSelected, ok = run.NextAction()
+		}
+		if !ok || actionSelected && !coroActionStepMatchesManagedExecutionV1(actionStep, held) {
 			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
-		if wait {
-			result.stop = coroRunExecutionWaitV1
-			return result
+		policy := coroRunPolicyV1{main: main, lifecycle: &coroProgramLifecycleV1State}
+		var terminal, reduced bool
+		if actionSelected {
+			returnRequested := false
+			switch coroProgramLifecycleV1State {
+			case coroProgramRunningV1, coroProgramMainGoexitV1:
+			case coroProgramMainReturnRequestedV1:
+				returnRequested = true
+			default:
+				_ = coroFinishManagedExecutionV1(driver, held)
+				return coroRunResultV1{}
+			}
+			terminal, reduced = coroReduceExecutorRunActionPreparedV1(
+				p, driver, policy, target,
+				actionStep.G, actionStep.Action, actionStep.Dispatched,
+				returnRequested, runtimeContext, &result,
+			)
+		} else {
+			step, nextOK := coroProgramNextRunStepV1(driver, &run, combineDispatch)
+			if !nextOK || !coroStepMatchesManagedExecutionV1(step, held) {
+				_ = coroFinishManagedExecutionV1(driver, held)
+				return coroRunResultV1{}
+			}
+			terminal, reduced = coroReduceExecutorRunStepV1(
+				p, driver, policy, target, step, runtimeContext, &result,
+			)
 		}
-		step, ok := coroProgramNextRunStepV1(driver)
-		if !ok || !coroStepMatchesManagedExecutionV1(step, held) {
-			_ = coroFinishManagedExecutionV1(driver, held)
-			return coroRunResultV1{}
-		}
-		terminal, reduced := coroReduceExecutorRunStepV1(
-			p,
-			driver,
-			coroRunPolicyV1{main: main, lifecycle: &coroProgramLifecycleV1State},
-			step,
-			&result,
-		)
 		if !reduced {
 			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
@@ -85,18 +126,18 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 			}
 			return result
 		}
-		stopForReturn, returnOK := coroStopAfterStableReductionV1(
-			driver, &result,
-		)
-		if !returnOK {
-			_ = coroFinishManagedExecutionV1(driver, held)
-			return coroRunResultV1{}
-		}
-		if stopForReturn {
-			if !coroFinishManagedExecutionV1(driver, held) {
+		if target.physicalReturn {
+			stopForReturn, returnOK := coroStopAfterStableReductionV1(driver, &result)
+			if !returnOK {
+				_ = coroFinishManagedExecutionV1(driver, held)
 				return coroRunResultV1{}
 			}
-			return result
+			if stopForReturn {
+				if !coroFinishManagedExecutionV1(driver, held) {
+					return coroRunResultV1{}
+				}
+				return result
+			}
 		}
 	}
 	if !coroFinishManagedExecutionV1(driver, held) {
@@ -143,8 +184,13 @@ func coroFinishRunSliceCompatibility(
 		}
 		return result
 	case coroRunIdleV1:
-		if !coro.EnterExecutorRunCompatibility(driver) {
+		entered, compatibilityOK := coro.EnterExecutorRunStandbyCompatibility(driver)
+		if !compatibilityOK {
 			return coroRunResultV1{}
+		}
+		if !entered {
+			result.stop = coroRunAgainV1
+			return result
 		}
 		more, drained := coroTargetDrainProgramTransfersV1(p, driver)
 		if !drained {
@@ -281,7 +327,9 @@ func coroCancelReady(p *coroP) bool {
 		for {
 			switch action.Kind {
 			case coro.ActionCancelDestroy:
-				coroHandleDestroy(action.Handle)
+				if !coroHandleDestroyCommitted(g, action.Handle) {
+					return false
+				}
 				action, ok = coro.CancelDestroyed(p, g, action)
 				if !ok {
 					return false

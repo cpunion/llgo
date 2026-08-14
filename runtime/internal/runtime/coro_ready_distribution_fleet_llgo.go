@@ -32,15 +32,103 @@ func coroTargetReadyDistributionDomainV1(
 	if p == nil || driver == nil {
 		return nil, false
 	}
-	state := &coroNativeFleetV1State
-	for index := uint32(0); index < state.domainCount; index++ {
-		domain := &state.domains[index]
-		if domain.lifecycle == coroNativeFleetDomainActiveV1 &&
-			domain.pOwnerV1() == p && domain.driverOwnerV1() == driver {
-			return domain, true
-		}
+	domain, _, ok := coroNativeFleetExecutionDomainV1(driver)
+	return domain, ok && domain.pOwnerV1() == p
+}
+
+// coroTargetReadyDistributionEnabledV1 keeps runnable ownership local when
+// managed Go execution is serial. The native fleet intentionally keeps every
+// physical route alive so it can continue to service timer, poll, channel and
+// cancellation sources, but moving a runnable between those routes cannot add
+// execution capacity while GOMAXPROCS is one. Apart from the mailbox and
+// doorbell traffic, such a move also loses the warm owner-local scheduler
+// state and makes the next route contend for the sole execution lease.
+//
+// Limit is a live observation rather than startup policy: increasing
+// GOMAXPROCS immediately re-enables surplus sharing, while shrinking it stops
+// new transfers without disturbing work that was already published.
+func coroTargetReadyDistributionEnabledV1(state *coroNativeFleetStateV1) (bool, bool) {
+	if state == nil {
+		return false, false
 	}
-	return nil, false
+	limit, ok := state.execution.Limit()
+	return limit > 1, ok
+}
+
+// coroTargetBeginRunSliceV1 freezes policy which is safe to observe at a
+// bounded scheduler-stack entry. GOMAXPROCS changes take effect on the next
+// slice (at most 64 reductions for compatibility runners); the execution quota
+// itself remains the exact concurrency gate immediately, so caching only the
+// placement policy cannot exceed a shrunken limit. A negative LockOSThread
+// handoff observation is exact until this slice itself creates a detached
+// handoff, and that transition returns from the slice immediately.
+func coroTargetBeginRunSliceV1(
+	source *coro.P,
+	driver *coro.ExecutorDriver,
+) (coroRunTargetCapabilityV1, bool) {
+	osThreadPossible, osThreadOK := coro.OSThreadSuspendHandoffPossible(driver)
+	if source == nil || driver == nil || !osThreadOK {
+		return coroRunTargetCapabilityV1{}, false
+	}
+	target := coroRunTargetCapabilityV1{physicalReturn: osThreadPossible}
+	state := &coroNativeFleetV1State
+	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
+		return target, true
+	}
+	if state.lifecycle != coroNativeFleetActiveV1 {
+		return coroRunTargetCapabilityV1{}, false
+	}
+	if _, ok := coroTargetReadyDistributionDomainV1(source, driver); !ok {
+		return coroRunTargetCapabilityV1{}, false
+	}
+	policy := &coroNativeFleetPhysicalOwnerV1State.policyEpoch
+	for {
+		epoch := coroNativeAtomicLoadV1(policy)
+		distributionEnabled, distributionOK := coroTargetReadyDistributionEnabledV1(state)
+		if !distributionOK || epoch == 0 {
+			return coroRunTargetCapabilityV1{}, false
+		}
+		if coroNativeAtomicLoadV1(policy) != epoch {
+			continue
+		}
+		target.readyDistribution = distributionEnabled
+		target.policyEpoch = epoch
+		break
+	}
+	replacementPossible, replacementOK := coroTargetReplacementReturnPossibleV1(driver)
+	if !replacementOK {
+		return coroRunTargetCapabilityV1{}, false
+	}
+	target.physicalReturn = target.physicalReturn || replacementPossible
+	return target, true
+}
+
+// The stop word is live because program-main return may publish it while a
+// distribution-capable peer is inside this very slice. A serial slice skips
+// this post-action hook entirely: shutdown also publishes the executor request
+// which makes its next bounded source reduction observe stop, while a physical
+// return candidate has the separate exact hook. Ready placement is the bounded
+// slice capability above; revalidating the complete quota lifetime and limit
+// after every action adds no safety because TryAcquire remains authoritative.
+func coroTargetReadyDistributionV1(target coroRunTargetCapabilityV1) (distribute, stop, ok bool) {
+	stop = coroNativeFleetPhysicalOwnerV1State.stop.Quiesced()
+	return target.readyDistribution && !stop, stop, true
+}
+
+// A successful quota resize executes an exact compiler yield before its Go
+// caller can continue. That rare action is the synchronization point for this
+// policy epoch; ordinary channel/park/complete actions do not read it. An
+// unrelated explicit yield with an unchanged epoch keeps the current slice.
+func coroTargetRefreshRunSliceV1(target coroRunTargetCapabilityV1) (distribute, restart, ok bool) {
+	stop := coroNativeFleetPhysicalOwnerV1State.stop.Quiesced()
+	epoch := coroKeyedAtomicLoadUint32(&coroNativeFleetPhysicalOwnerV1State.policyEpoch)
+	enabled, valid := coroTargetReadyDistributionEnabledV1(&coroNativeFleetV1State)
+	if !valid || target.policyEpoch == 0 || epoch == 0 {
+		return false, false, false
+	}
+	return target.readyDistribution && enabled && !stop,
+		stop || epoch != target.policyEpoch || enabled != target.readyDistribution,
+		true
 }
 
 // coroTargetAfterStableRunActionV1 is owner-to-owner work distribution, not a
@@ -214,6 +302,9 @@ func coroTargetPrepareOSThreadSuspendV1(
 			action.Handle != nil || action.Flags != 0 {
 			return false, false
 		}
+		if !coro.OSThreadSuspendHandoffCandidate(task) {
+			return false, true
+		}
 		return coro.PrepareOSThreadSuspendHandoff(
 			driver, task, action.Kind,
 		)
@@ -235,16 +326,49 @@ func coroNativeAbortOSThreadSuspendV1(
 		coro.AbortOSThreadSuspendHandoff(driver, task)
 }
 
-// coroTargetStopForOSThreadReturnV1 is the exact stable-reduction gate for a
-// compensation M. A detached Yield stops after its first complete peer Action;
-// a detached Park stops as soon as source service promotes the locked owner.
-// Keeping this observation inside the common runner lets source transactions
-// retain their normal batch budget without crossing the return boundary.
-func coroTargetStopForOSThreadReturnV1(
+func coroTargetReplacementReturnPossibleV1(
 	driver *coro.ExecutorDriver,
 ) (bool, bool) {
-	detached, returnable, ok := coro.OSThreadSuspendHandoffStatus(driver)
-	return detached && returnable, ok
+	owner, _, _, _, ok := coroNativeMActiveOwnerV1(driver)
+	if !ok {
+		return false, false
+	}
+	if !owner.baton.Valid() {
+		return false, true
+	}
+	parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
+	return parentOK && parent.handle == owner.handle, parentOK
+}
+
+// coroTargetStopForPhysicalReturnV1 is the exact stable-reduction gate for a
+// compensation M. An ordinary detached Yield/Park uses the P-local handoff;
+// an active foreign-call replacement uses its parent M's atomic return baton.
+// Both stop only after a complete reducer commit, so no physical action or
+// source transaction is split. Ordinary owners skip this hook through the
+// slice-entry negative capability above.
+func coroTargetStopForPhysicalReturnV1(
+	driver *coro.ExecutorDriver,
+) (bool, bool) {
+	possible, ok := coro.OSThreadSuspendHandoffPossible(driver)
+	if !ok {
+		return false, false
+	}
+	if possible {
+		detached, returnable, statusOK := coro.OSThreadSuspendHandoffStatus(driver)
+		return detached && returnable, statusOK
+	}
+	owner, _, _, _, ownerOK := coroNativeMCurrentOwnerV1(driver)
+	if !ownerOK || !owner.baton.Valid() {
+		return false, ownerOK
+	}
+	parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
+	if !parentOK || parent.handle != owner.handle {
+		return false, false
+	}
+	if !parent.handoff.ReturnRequested(owner.baton) {
+		return false, true
+	}
+	return coro.ExecutorResumeHandoffReturnable(driver), true
 }
 
 // coroTargetHandleOSThreadSuspendV1 temporarily blocks the original M on

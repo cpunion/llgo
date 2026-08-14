@@ -16,7 +16,56 @@
 
 package coro
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
+
+func TestDirectChannelParkStateCertificates(t *testing.T) {
+	if !validReusableSingleParkState(new(ParkState)) {
+		t.Fatal("zero idle park was not reusable")
+	}
+	ticket := ParkTicket{generation: 1}
+	delivered := ParkState{ticket: ticket, phase: parkDelivered}
+	if !validReusableSingleParkState(&delivered) {
+		t.Fatal("clean delivered park was not reusable")
+	}
+	delivered.expected = 1
+	if validReusableSingleParkState(&delivered) {
+		t.Fatal("delivered park with retained expected count was reusable")
+	}
+
+	id, idOK := MakeOperationID(OperationSourceChannel, 1, 1)
+	if !idOK {
+		t.Fatal("make direct certificate operation ID")
+	}
+	g := new(G)
+	wait := WaitSetRecord{
+		g: g, ticket: ticket, state: waitSetRecordPreparing,
+	}
+	record := OperationRecord{id: id, phase: operationActive}
+	setOperationCandidate(&record, OperationCommitReadyThenTryCommit, OperationCommitIdle, false)
+	g.park = ParkState{
+		ticket: ticket, phase: parkParked, expected: 1, attached: 1,
+	}
+	record.link = ParkLink{
+		park: &g.park, wait: &wait, operation: &record,
+		ticket: ticket, caseID: 1,
+	}
+	g.park.head = &record.link
+	if !validPreparedDirectChannelParkState(&g.park, &wait, id, 1) {
+		t.Fatal("exact prepared direct park certificate was rejected")
+	}
+	record.link.previous = &record.link
+	if validPreparedDirectChannelParkState(&g.park, &wait, id, 1) {
+		t.Fatal("cyclic prepared direct park certificate was accepted")
+	}
+	record.link.previous = nil
+	setOperationCandidate(&record, OperationCommitReadyThenTryCommit, OperationCommitCommitted, true)
+	if validPreparedDirectChannelParkState(&g.park, &wait, id, 1) {
+		t.Fatal("pre-committed prepared direct park certificate was accepted")
+	}
+}
 
 func TestCurrentExecutorChannelOwnerResolvesExactRouteAcrossTwoP(t *testing.T) {
 	registry := new(ExecutorRegistry)
@@ -58,6 +107,14 @@ func TestCurrentExecutorChannelOwnerResolvesExactRouteAcrossTwoP(t *testing.T) {
 			t.Fatalf("resolve channel route %d = driver:%p handle:%+v route:%d p:%p park:%p source:%p ok:(%t,%t)",
 				current.route, driver, handle, route, p, park, source, ok, ownerOK)
 		}
+		directRoute, directP, directSource, reservation, directCurrent, reserved :=
+			CurrentExecutorChannelDirectReservation(current.task.g)
+		if !directCurrent || !reserved || directRoute != current.route ||
+			directP != current.p || directSource != current.source ||
+			!validDirectReservationHeader(directSource, directP, reservation) {
+			t.Fatalf("resolve direct channel route %d = route:%d p:%p source:%p current:%t reserved:%t",
+				current.route, directRoute, directP, directSource, directCurrent, reserved)
+		}
 	}
 	if fixtures[0].source == fixtures[1].source || fixtures[0].handle == fixtures[1].handle {
 		t.Fatal("channel route fixtures alias physical ownership")
@@ -74,6 +131,121 @@ func TestCurrentExecutorChannelOwnerResolvesExactRouteAcrossTwoP(t *testing.T) {
 	}
 	if !registry.CanRelease() {
 		t.Fatal("channel route owner test retained executor registry")
+	}
+}
+
+func TestCurrentChannelParkPreparationCapacityFailureIsZeroEffect(t *testing.T) {
+	p := new(P)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	source := new(ChannelOperationSource)
+	handle := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Channel: source}) {
+		t.Fatal("bind capacity-gate channel executor")
+	}
+	task := newYieldingTestG(t, "channel-capacity-gate")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue capacity-gate channel task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue capacity-gate channel task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+
+	capacity := ChannelOperationConfiguredCapacity(source)
+	for index := uint32(0); index < capacity; index++ {
+		slot, ok := channelOperationSlotAt(source, index)
+		if !ok {
+			t.Fatalf("lookup capacity-gate slot %d", index)
+		}
+		preemptStore(&slot.externalLease, ^uint32(0)-1)
+	}
+	defer func() {
+		for index := uint32(0); index < capacity; index++ {
+			slot, _ := channelOperationSlotAt(source, index)
+			preemptStore(&slot.externalLease, 0)
+		}
+	}()
+
+	var wait WaitSetRecord
+	var claim SelectClaim
+	var packet ResumePacket
+	var plan ResumeCleanupPlan
+	var entry OperationID
+	var context byte
+	beforePark, beforePending := task.g.park, task.g.pending
+	prepared := PrepareCurrentChannelParkCleanup(
+		task.g,
+		task.handle,
+		task.frame.header,
+		&wait,
+		&claim,
+		&packet,
+		&plan,
+		unsafe.Pointer(&context),
+		&entry,
+		ChannelDirectReservation{},
+		false,
+		1,
+		91,
+	)
+	if prepared.State != CurrentChannelParkPreparationNeedsCapacity ||
+		prepared.Owner != p || prepared.Source != source || prepared.Route != driver.route ||
+		prepared.Ticket != (ParkTicket{}) || prepared.Operation != (OperationID{}) {
+		t.Fatalf("capacity-gate result = %+v", prepared)
+	}
+	if task.g.park != beforePark || task.g.pending != beforePending || task.g.active.parkWait != nil ||
+		wait != (WaitSetRecord{}) || claim != (SelectClaim{}) || packet != (ResumePacket{}) ||
+		plan != (ResumeCleanupPlan{}) || entry != (OperationID{}) {
+		t.Fatalf("capacity-gate preparation mutated state: park=%+v pending=%+v frameWait=%p wait=%+v claim=%+v packet=%+v plan=%+v entry=%+v",
+			task.g.park, task.g.pending, task.g.active.parkWait, wait, claim, packet, plan, entry)
+	}
+
+	for index := uint32(0); index < capacity; index++ {
+		slot, _ := channelOperationSlotAt(source, index)
+		preemptStore(&slot.externalLease, 0)
+	}
+	reservation, reserved := source.PreflightDirectReservation(p)
+	if !reserved {
+		t.Fatal("preflight stale direct reservation")
+	}
+	beforeScan, beforeCursor := source.scanLimit, source.reserveCursor
+	preemptStore(&reservation.slot.state, uint32(producerSourceInitializing))
+	prepared = PrepareCurrentChannelParkCleanup(
+		task.g,
+		task.handle,
+		task.frame.header,
+		&wait,
+		&claim,
+		&packet,
+		&plan,
+		unsafe.Pointer(&context),
+		&entry,
+		reservation,
+		true,
+		1,
+		91,
+	)
+	if prepared != (CurrentChannelParkPreparation{}) || task.g.park != beforePark ||
+		task.g.pending != beforePending || task.g.active.parkWait != nil ||
+		wait != (WaitSetRecord{}) || claim != (SelectClaim{}) ||
+		packet != (ResumePacket{}) || plan != (ResumeCleanupPlan{}) ||
+		entry != (OperationID{}) || source.scanLimit != beforeScan ||
+		source.reserveCursor != beforeCursor {
+		t.Fatalf("stale-reservation preparation was not zero effect: result=%+v park=%+v pending=%+v frameWait=%p wait=%+v claim=%+v packet=%+v plan=%+v entry=%+v scan=%d cursor=%d",
+			prepared, task.g.park, task.g.pending, task.g.active.parkWait, wait, claim,
+			packet, plan, entry, source.scanLimit, source.reserveCursor)
+	}
+	preemptStore(&reservation.slot.state, uint32(producerSourceFree))
+	task.frame.header.SuspendReason = uint16(SuspendNone)
+	task.frame.header.Lifecycle = uint16(FrameActive)
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !source.CanRelease() || !registry.CanRelease() {
+		t.Fatal("capacity-gate cleanup retained source/registry")
 	}
 }
 
@@ -100,13 +272,26 @@ func TestSingleChannelParkOwnerTransactionAndFinish(t *testing.T) {
 	task.frame.header.Lifecycle = uint16(FrameSuspended)
 	var wait WaitSetRecord
 	var claim SelectClaim
-	ticket, id, ok := PrepareSingleChannelPark(
+	reservation, reserved := source.PreflightDirectReservation(p)
+	if !reserved {
+		t.Fatal("preflight single-channel owner reservation")
+	}
+	if !validDirectReservationHeader(source, p, reservation) {
+		t.Fatal("direct reservation lost its authenticated owner/slot identity")
+	}
+	malformed := reservation
+	malformed.index = malformed.capacity
+	if validDirectReservationHeader(source, p, malformed) {
+		t.Fatal("direct reservation accepted an out-of-catalog slot identity")
+	}
+	ticket, id, ok := prepareSingleChannelParkOrdinary(
 		task.g,
 		task.handle,
 		task.frame.header,
 		source,
 		&wait,
 		&claim,
+		&reservation,
 		41,
 		73,
 	)

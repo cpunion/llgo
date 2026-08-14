@@ -35,12 +35,21 @@ import (
 
 const coroManagedHeapFixture = `package foo
 
+import "unsafe"
+
 type Node struct {
 	Value uint32
 	Next *Node
 }
 
 type Empty struct{}
+
+type Published struct { Value uint32 }
+
+//llgo:link Compare llgo.atomicCmpXchg
+func Compare(address *unsafe.Pointer, old, new unsafe.Pointer) (unsafe.Pointer, bool) {
+	return old, false
+}
 
 var ObservedWritten int64
 var ObservedHandled bool
@@ -56,6 +65,14 @@ func Root(value uint32) *Node {
 }
 
 func Zero() *Empty { return &Empty{} }
+
+func Publish(address *unsafe.Pointer, value uint32) {
+	candidate := &Published{Value: value}
+	for {
+		_, swapped := Compare(address, nil, unsafe.Pointer(candidate))
+		if swapped { return }
+	}
+}
 
 func CapturedResults(value uint32) (written int64, err error, handled bool, node *Node) {
 	defer func() {
@@ -197,7 +214,25 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 			defer prog.Dispose()
 			root := ssaPkg.Func("Root")
 			zero := ssaPkg.Func("Zero")
+			publishFn := ssaPkg.Func("Publish")
 			captured := ssaPkg.Func("CapturedResults")
+
+			publishAudit, err := newCoroPhysicalPureSSAAudit(universe, plan, publishFn, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			publishAllocs := coroManagedHeapAllocs(publishFn)
+			if len(publishAllocs) != 1 {
+				t.Fatalf("Publish heap allocations = %d, want one", len(publishAllocs))
+			}
+			if raw, borrowed := coro.ProveSSABorrowedAllocation(publishAllocs[0]); !borrowed {
+				t.Fatalf("Publish fixture no longer demonstrates the source-stub lifetime hazard: %+v", raw)
+			}
+			publishProof := publishAudit.currentFrameRetentionProof()
+			if len(publishProof.borrowedAllocations) != 0 || len(publishProof.managedHeapAllocations) != 1 {
+				t.Fatalf("Publish borrowed/managed allocations = %d/%d, want 0/1",
+					len(publishProof.borrowedAllocations), len(publishProof.managedHeapAllocations))
+			}
 
 			audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
 			if err != nil {
@@ -328,6 +363,11 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 			if !strings.Contains(rootIR, "foo.Child$coro") {
 				t.Fatalf("Root does not suspend through Child after its first allocation:\n%s", rootIR)
 			}
+			publishPhysical := requireCoroPhysicalFunction(t, module, "foo.Publish")
+			publishIR := publishPhysical.String()
+			if strings.Count(publishIR, "runtime.AllocZ") != 1 || strings.Contains(publishIR, "alloca %foo.Published") {
+				t.Fatalf("Publish intrinsic boundary did not retain managed storage:\n%s", publishIR)
+			}
 			capturedPhysical := requireCoroPhysicalFunction(t, module, "foo.CapturedResults")
 			capturedIR := capturedPhysical.String()
 			capturedHeapAllocs := coroManagedHeapAllocs(captured)
@@ -345,7 +385,7 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 			var publishBlock llvm.BasicBlock
 			for _, block := range capturedPhysical.BasicBlocks() {
 				for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
-					if instruction.InstructionOpcode() == llvm.Call && instruction.CalledValue().Name() == coroFramePublishHookV1 {
+					if instruction.InstructionOpcode() == llvm.Call && instruction.CalledValue().Name() == coroFramePublishHookV3 {
 						publishBlock = instruction.InstructionParent()
 					}
 				}
@@ -370,7 +410,7 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 				t.Fatalf("CapturedResults hoisted/ordinary AllocZ calls = %d/%d, want 3/%d:\n%s",
 					hoistedHeapCalls, ordinaryHeapCalls, len(capturedHeapAllocs)-3, capturedIR)
 			}
-			publish := strings.Index(capturedIR, "call void @"+coroFramePublishHookV1)
+			publish := strings.Index(capturedIR, "call void @"+coroFramePublishHookV3)
 			alloc := strings.Index(capturedIR, "runtime.AllocZ")
 			initialSuspend := strings.Index(capturedIR, "%coro.suspend = call i8 @llvm.coro.suspend")
 			if publish < 0 || alloc < 0 || initialSuspend < 0 || publish >= alloc || alloc >= initialSuspend {
@@ -401,6 +441,11 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 				!strings.Contains(resumeIR, "store ptr") {
 				t.Fatalf("CoroSplit moved ordinary Root AllocZ calls out of resume (resume AllocZ=%d):\nramp:\n%s\nresume:\n%s",
 					got, rampIR, resumeIR)
+			}
+			publishResume := module.NamedFunction("foo.Publish$coro.resume")
+			if publishResume.IsNil() || strings.Count(publishResume.String(), "runtime.AllocZ") != 1 ||
+				strings.Contains(publishResume.String(), "alloca %foo.Published") {
+				t.Fatalf("CoroSplit lost Publish managed storage:\n%s", module.String())
 			}
 			capturedRamp := module.NamedFunction("foo.CapturedResults$coro")
 			capturedResume := module.NamedFunction("foo.CapturedResults$coro.resume")
@@ -490,7 +535,7 @@ func AllocU(size uintptr) unsafe.Pointer {
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
-	root, zero, child, captured := ssaPkg.Func("Root"), ssaPkg.Func("Zero"), ssaPkg.Func("Child"), ssaPkg.Func("CapturedResults")
+	root, zero, publish, child, captured := ssaPkg.Func("Root"), ssaPkg.Func("Zero"), ssaPkg.Func("Publish"), ssaPkg.Func("Child"), ssaPkg.Func("CapturedResults")
 	var capturedCleanup *ssa.Function
 	for _, block := range captured.Blocks {
 		for _, instruction := range block.Instrs {
@@ -513,6 +558,7 @@ func AllocU(size uintptr) unsafe.Pointer {
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: root, Demand: coro.AsyncDemand},
 		{Function: zero, Demand: coro.AsyncDemand},
+		{Function: publish, Demand: coro.AsyncDemand},
 		{Function: captured, Demand: coro.AsyncDemand},
 	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -524,6 +570,10 @@ func AllocU(size uintptr) unsafe.Pointer {
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 			}
 			return coro.SSAFunctionPolicy{}, nil
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
+			return intrinsic && semantics.ElidesManagedCall(), err
 		},
 	})
 	if err != nil {

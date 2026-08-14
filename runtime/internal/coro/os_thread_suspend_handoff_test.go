@@ -61,9 +61,15 @@ func TestOSThreadYieldHandoffRunsOnePeerAndRestoresOwnerFIFO(t *testing.T) {
 		t.Fatal("enqueue locked-yield fixture")
 	}
 	kind := commitLockedRunnerYield(t, driver, owner)
+	if !OSThreadSuspendHandoffCandidate(owner.g) {
+		t.Fatal("locked yield did not remain a physical-owner handoff candidate")
+	}
 	required, ok := PrepareOSThreadSuspendHandoff(driver, owner.g, kind.Kind)
 	if !ok || !required {
 		t.Fatalf("prepare locked-yield handoff = (%t, %t)", required, ok)
+	}
+	if possible, valid := OSThreadSuspendHandoffPossible(driver); !valid || !possible {
+		t.Fatalf("locked-yield fast status gate = (%t, %t)", possible, valid)
 	}
 	if p.readyHead != first.g || first.g.nextReady != second.g ||
 		second.g.nextReady != owner.g || p.readyTail != owner.g {
@@ -105,6 +111,48 @@ func TestOSThreadYieldHandoffRunsOnePeerAndRestoresOwnerFIFO(t *testing.T) {
 	runtime.KeepAlive(second.frame.memory)
 }
 
+func TestOSThreadYieldHandoffAllowsReplacementPeerRootExit(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	owner := newYieldingTestG(t, "locked-yield-exit-owner")
+	peer := newYieldingTestG(t, "locked-yield-exit-peer")
+	if !Enqueue(p, owner.g) || !Enqueue(p, peer.g) {
+		t.Fatal("enqueue locked-yield peer-exit fixture")
+	}
+	kind := commitLockedRunnerYield(t, driver, owner)
+	if required, ok := PrepareOSThreadSuspendHandoff(driver, owner.g, kind.Kind); !ok || !required {
+		t.Fatal("prepare locked-yield peer-exit handoff")
+	}
+
+	target := queueRunnerCheckDestroy(t, driver, peer)
+	step := runnerNextPhysicalAction(t, driver, peer, ActionCheckDestroy)
+	destroy, ok := Checked(p, peer.g, step.Action, true)
+	if !ok || destroy.Kind != ActionDestroy || peer.g.destroyTarget != target {
+		t.Fatalf("check replacement peer destroy = (%+v, %t)", destroy, ok)
+	}
+	releaseTestFrame(t, peer.g, peer.frame)
+	completed, ok := DestroyedBounded(p, peer.g, destroy)
+	if !ok || completed.Kind != ActionComplete || ActionRetiresPhysicalOwner(completed) ||
+		!CommitExecutorRunAction(driver, peer.g, completed) {
+		t.Fatalf("complete replacement peer = (%+v, %t)", completed, ok)
+	}
+	if p.osThreadLockOwner != owner.g ||
+		owner.g.osThreadLockDepth == 0 ||
+		peer.g.state != GDead {
+		t.Fatal("replacement peer exit disturbed locked owner")
+	}
+	if detached, returnable, valid := OSThreadSuspendHandoffStatus(driver); !valid ||
+		!detached || !returnable {
+		t.Fatalf("peer-exit locked-yield status = (%t, %t, %t)", detached, returnable, valid)
+	}
+	if !RestoreOSThreadSuspendHandoff(driver, owner.g) {
+		t.Fatal("restore locked-yield owner after peer exit")
+	}
+	_ = runnerNextPhysicalAction(t, driver, owner, ActionCheckResume)
+	runtime.KeepAlive(owner.frame.memory)
+	runtime.KeepAlive(peer.frame.memory)
+}
+
 func TestOSThreadSuspendHandoffUnlockedActionIsNoop(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)
@@ -114,10 +162,16 @@ func TestOSThreadSuspendHandoffUnlockedActionIsNoop(t *testing.T) {
 	}
 	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
 	runnerYieldAction(t, driver, step, task)
+	if OSThreadSuspendHandoffCandidate(task.g) {
+		t.Fatal("unlocked yield became a physical-owner handoff candidate")
+	}
 	if required, prepared := PrepareOSThreadSuspendHandoff(
 		driver, task.g, ActionYield,
 	); !prepared || required {
 		t.Fatalf("unlocked-yield handoff = (%t, %t)", required, prepared)
+	}
+	if possible, valid := OSThreadSuspendHandoffPossible(driver); !valid || possible {
+		t.Fatalf("unlocked-yield fast status gate = (%t, %t)", possible, valid)
 	}
 	if detached, returnable, valid := OSThreadSuspendHandoffStatus(driver); !valid ||
 		detached || returnable {

@@ -9,7 +9,7 @@ import (
 // CHECK-LABEL: define ptr @"main.check$coro"(
 func check(err sqlite.Errno) {
 	if err != sqlite.OK {
-		// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1
+		// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1
 		c.Printf(c.Str("==> Error: (%d) %s\n"), err, err.Errstr())
 		c.Exit(1)
 	}
@@ -22,7 +22,7 @@ func main() {
 	db, err := sqlite.OpenV2(c.Str(":memory:"), sqlite.OpenReadWrite|sqlite.OpenMemory, nil)
 	check(err)
 
-	// CHECK: call void @__llgo_coro_os_thread_foreign_call_v1
+	// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1
 	db.Close()
 }
 

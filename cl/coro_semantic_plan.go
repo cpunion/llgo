@@ -45,6 +45,10 @@ type coroSemanticInstructionPlan struct {
 	// only here, while classifying raw SSA, and is consumed from the frozen
 	// ProgramIR by analysis and physical emission.
 	outcomePlainLeaf bool
+	// staticOutcome records that this local instruction can participate in an
+	// unbounded synchronous outcome twin. Calls still require a whole-program
+	// exact-target proof; this bit only closes the local lowering vocabulary.
+	staticOutcome bool
 }
 
 func coroOutcomePlainBasicInfo(typ types.Type) types.BasicInfo {
@@ -181,14 +185,22 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 	}()
 	ordinary := func(recipe string) (coroSemanticInstructionPlan, error) {
 		return coroSemanticInstructionPlan{
-			class:  coro.OpPure,
-			recipe: coro.RecipeID(recipe),
-			effect: coro.NoSuspend,
+			class:         coro.OpPure,
+			recipe:        coro.RecipeID(recipe),
+			effect:        coro.NoSuspend,
+			staticOutcome: true,
 		}, nil
 	}
 	leaf := func(recipe string, safe bool) (coroSemanticInstructionPlan, error) {
 		plan, err := ordinary(recipe)
 		plan.outcomePlainLeaf = safe
+		// The bounded leaf vocabulary is intentionally narrower than the
+		// synchronous outcome vocabulary. Operations such as string arithmetic,
+		// interface comparison, and checked integer arithmetic may lower through
+		// exact runtime helpers or explicit fault edges, but neither fact makes the
+		// source operation suspend. Static-outcome closure accounts for those helper
+		// calls independently, so do not erase the ordinary synchronous capability
+		// merely because this instruction is not an allocation-free atomic leaf.
 		return plan, err
 	}
 	control := func(recipe string, exec coro.ExecFlags) (coroSemanticInstructionPlan, error) {
@@ -210,6 +222,7 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 		return leaf("cl.ssa.phi.v1", true)
 	case *ssa.Call:
 		plan, err := ordinary("cl.ssa.call.v1")
+		plan.staticOutcome = true
 		if err != nil {
 			return plan, err
 		}
@@ -219,6 +232,7 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 				plan.exec = coro.MayUnwind
 				plan.materialized = true
 				plan.recipe = coro.RecipeID("cl.ssa.builtin-panic.v0")
+				plan.staticOutcome = true
 			}
 		}
 		return plan, nil
@@ -245,7 +259,12 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 	case *ssa.SliceToArrayPointer:
 		return ordinary("cl.ssa.slice-to-array-pointer.v1")
 	case *ssa.MakeInterface:
-		return ordinary("cl.ssa.make-interface.v1")
+		plan, err := ordinary("cl.ssa.make-interface.v1")
+		// The source operation itself is synchronous. Any backing allocation or
+		// itab construction remains an explicit owner-scoped lowered-call edge;
+		// static-outcome planning closes those helpers independently.
+		plan.staticOutcome = true
+		return plan, err
 	case *ssa.MakeClosure:
 		return ordinary("cl.ssa.make-closure.v1")
 	case *ssa.MakeMap:
@@ -273,9 +292,13 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 			effect = coro.MayPark
 		}
 		return coroSemanticInstructionPlan{
-			class:        coro.OpSelect,
-			recipe:       coro.RecipeID(recipe),
-			effect:       effect,
+			class:  coro.OpSelect,
+			recipe: coro.RecipeID(recipe),
+			effect: effect,
+			// The current select helper ABI still samples owner-local completion
+			// through the installed runtime G. Single-channel send/receive and
+			// close already carry an explicit task and need no such seed.
+			exec:         coro.NeedsRuntimeContext,
 			materialized: true,
 		}, nil
 	case *ssa.Range:
@@ -294,12 +317,19 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 		plan, err := control("cl.ssa.return.v1", 0)
 		plan.materialized = false
 		plan.outcomePlainLeaf = true
+		plan.staticOutcome = true
 		return plan, err
 	case *ssa.RunDefers:
-		return control("cl.ssa.run-defers.v0", coro.NeedsCleanupFrame)
+		plan, err := control("cl.ssa.run-defers.v0", coro.NeedsCleanupFrame)
+		// Whole-function projection admits this only when no evaluated Defer site
+		// remains. In that case x/tools' synthetic RunDefers is a no-op and the
+		// physical static-outcome recipe removes it explicitly.
+		plan.staticOutcome = true
+		return plan, err
 	case *ssa.Panic:
 		plan, err := control("cl.ssa.panic.v0", coro.MayUnwind)
 		plan.outcomePlainLeaf = true
+		plan.staticOutcome = true
 		return plan, err
 	case *ssa.Go:
 		return coroSemanticInstructionPlan{

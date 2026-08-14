@@ -160,6 +160,44 @@ func Root() {
 	}
 }
 
+func TestCoroStaticCleanupOrderIgnoresConstantUnreachableDefer(t *testing.T) {
+	const source = `package foo
+func live() {}
+func dead() {}
+func Root() {
+	defer live()
+	if false {
+		defer dead()
+	}
+}
+`
+	prog, universe, plan, root, _ := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+
+	reachable := coroPhysicalConstantReachableBlocks(root)
+	allDefers, reachableDefers := 0, 0
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if _, ok := instruction.(*ssa.Defer); ok {
+				allDefers++
+				if reachable[block] {
+					reachableDefers++
+				}
+			}
+		}
+	}
+	if allDefers != 2 || reachableDefers != 1 {
+		t.Fatalf("constant-unreachable defer shape = all:%d reachable:%d", allDefers, reachableDefers)
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].target == nil || cleanup.sites[0].target.Name() != "live" {
+		t.Fatalf("constant-unreachable cleanup plan = %+v", cleanup)
+	}
+}
+
 func TestCoroStaticCleanupIRNativeAndWasm32(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
@@ -590,7 +628,7 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 					first == coroTestAwaitConsumeCanceled && second == coroTestAwaitConsumeNormal {
 					gateFound = true
 				}
-			case coroAwaitInlineHookV1:
+			case coroAwaitInlineFinishHookV2:
 				// The inline-complete edge reaches only normal consume. The
 				// suspend edge re-enters the run-decision gate and can first
 				// reach cancellation as well as the normal continuation.
@@ -748,17 +786,35 @@ const (
 func coroTestFirstReachableAwaitConsumes(
 	entry, normal, canceled llvm.BasicBlock,
 ) uint8 {
-	seen := make(map[llvm.BasicBlock]bool)
-	pending := []llvm.BasicBlock{entry}
+	type edge struct {
+		block       llvm.BasicBlock
+		predecessor llvm.BasicBlock
+	}
+	type state struct {
+		edge
+		constants map[llvm.Value]uint64
+	}
+	seen := make(map[edge][]map[llvm.Value]uint64)
+	pending := []state{{edge: edge{block: entry}, constants: make(map[llvm.Value]uint64)}}
 	var result uint8
 	for len(pending) != 0 {
-		block := pending[len(pending)-1]
+		current := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
-		if block.IsNil() || seen[block] {
+		if current.block.IsNil() {
 			continue
 		}
-		seen[block] = true
-		switch block {
+		alreadySeen := false
+		for _, constants := range seen[current.edge] {
+			if sameCoroCFGConstants(constants, current.constants) {
+				alreadySeen = true
+				break
+			}
+		}
+		if alreadySeen {
+			continue
+		}
+		seen[current.edge] = append(seen[current.edge], current.constants)
+		switch current.block {
 		case normal:
 			result |= coroTestAwaitConsumeNormal
 			continue
@@ -766,9 +822,34 @@ func coroTestFirstReachableAwaitConsumes(
 			result |= coroTestAwaitConsumeCanceled
 			continue
 		}
-		terminator := block.LastInstruction()
-		for successor := 0; successor < terminator.SuccessorsCount(); successor++ {
-			pending = append(pending, terminator.Successor(successor))
+		constants := copyCoroCFGConstants(current.constants)
+		for instruction := current.block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if !instruction.IsAPHINode().IsNil() {
+				value, ok := coroCFGPHIIncomingConstant(instruction, current.predecessor, constants)
+				if ok {
+					constants[instruction] = value
+				} else {
+					delete(constants, instruction)
+				}
+				continue
+			}
+			// Conditional stack cuts encode !completed as xor i1 %phi, true.
+			// Preserve that exact path fact so the inline-complete predecessor
+			// is not incorrectly considered able to enter the resume gate.
+			if instruction.InstructionOpcode() == llvm.Xor {
+				left, leftOK := coroCFGConstant(instruction.Operand(0), constants)
+				right, rightOK := coroCFGConstant(instruction.Operand(1), constants)
+				if leftOK && rightOK {
+					constants[instruction] = left ^ right
+				}
+			}
+		}
+		terminator := current.block.LastInstruction()
+		for _, successor := range executableTerminatorSuccessors(terminator, constants) {
+			pending = append(pending, state{
+				edge:      edge{block: successor, predecessor: current.block},
+				constants: constants,
+			})
 		}
 	}
 	return result

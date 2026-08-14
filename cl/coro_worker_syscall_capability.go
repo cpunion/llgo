@@ -228,7 +228,7 @@ func (u *EmissionUniverse) aliasPatchedWorkerAddressTrampolines() error {
 					name,
 				)
 			}
-			if structuralGoLinknameABITypeKey(original.Signature) != structuralGoLinknameABITypeKey(alternate.Signature) {
+			if u.emissionTypeKeys.goLinknameABI(original.Signature) != u.emissionTypeKeys.goLinknameABI(alternate.Signature) {
 				return fmt.Errorf("prepare emission universe: patched workeraddr target %q changes the upstream trampoline ABI", name)
 			}
 			if canonical := u.canonicalAlias(original); canonical == nil || canonical != original {
@@ -334,7 +334,11 @@ func coroWorkerAddressFunctionIdentity(universe *EmissionUniverse, fn *ssa.Funct
 	}
 	signature := ""
 	if fn.Signature != nil {
-		signature = structuralGoLinknameABITypeKey(fn.Signature)
+		if universe != nil {
+			signature = universe.emissionTypeKeys.goLinknameABI(fn.Signature)
+		} else {
+			signature = structuralGoLinknameABITypeKey(fn.Signature)
+		}
 	}
 	return framedEmissionKey(
 		"llgo-coro-worker-address-function-v0",

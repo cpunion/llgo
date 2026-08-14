@@ -538,6 +538,43 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			}
 			return nil
 		}
+		validateDeclaredExecutorSafeRawHost := func(record coroForeignUseDomainRecord, identity string) error {
+			if !record.DirectExecutorCertified || record.NoBlockCertified || record.SyncCertified ||
+				!record.rawHostOnly() {
+				return fmt.Errorf(
+					"native target declared executor-safe raw-host declaration %q = %s",
+					identity, record.diagnostic(),
+				)
+			}
+			if _, legacy := plan.ForeignNoBlockCertificate(record.Function); legacy {
+				return fmt.Errorf(
+					"native target declared executor-safe raw-host declaration %q retained a foreign-noblock certificate",
+					identity,
+				)
+			}
+			if _, legacy := plan.ForeignSyncCertificate(record.Function); legacy {
+				return fmt.Errorf(
+					"native target declared executor-safe raw-host declaration %q retained a foreign-sync certificate",
+					identity,
+				)
+			}
+			callable, certified := plan.CallableContractCertificate(record.Function)
+			function, planned := plan.FunctionPlan(record.Function)
+			if !certified || callable.Scope != coro.CallableContractScopeDeclaration ||
+				!strings.HasPrefix(string(callable.Contract.ID), "foreign.v1/") ||
+				!coro.CallableContractDirectExecutorCompatible(callable.Contract) ||
+				!planned || function.External != coro.ExternalKnown ||
+				function.Effect != coro.NoSuspend || function.Exec != coro.IRQUnsafe ||
+				function.ManagedDemand != coro.NoDemand || !function.RawPlainDemand ||
+				function.Emission != coro.EmitExternal {
+				return fmt.Errorf(
+					"native target declared executor-safe raw-host declaration %q lost its exact contract: "+
+						"callable=%+v certified=%t function=%+v planned=%t",
+					identity, callable, certified, function, planned,
+				)
+			}
+			return nil
+		}
 		validateElidedTypedControl := func(record coroForeignUseDomainRecord, identity string) error {
 			if record.DirectExecutorCertified ||
 				record.NoBlockCertified ||
@@ -597,13 +634,12 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			"__llgo_coro_worker_queue_stop_v1":               false,
 			"__llgo_coro_worker_queue_destroy_after_join_v1": false,
 			"__llgo_coro_worker_call_v1":                     false,
-			"__llgo_coro_worker_queue_reserve_v1":            false,
-			"__llgo_coro_worker_queue_cancel_reservation_v1": false,
-			"__llgo_coro_worker_queue_submit_reserved_v1":    false,
+			"__llgo_coro_worker_queue_reserve_v2":            false,
+			"__llgo_coro_worker_queue_cancel_reservation_v2": false,
+			"__llgo_coro_worker_queue_submit_reserved_v4":    false,
 			"__llgo_coro_fleet_owner_retire_self_v1":         false,
 			"__llgo_coro_doorbell_open_v1":                   false,
 			"__llgo_coro_doorbell_read_v1":                   false,
-			"__llgo_coro_doorbell_write_v1":                  false,
 			"__llgo_coro_doorbell_close_v1":                  false,
 			"GC_init":                                        false,
 			"GC_add_roots":                                   false,
@@ -611,6 +647,9 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 		}
 		migratedRawHostDeclarations := map[string]string{
 			runtimePath + ".coroPanicTerminalFputc": "__llgo_coro_panic_fputc_v1",
+		}
+		declaredExecutorSafeRawHostSymbols := map[string]bool{
+			"__llgo_coro_doorbell_write_v1": false,
 		}
 		elidedTypedControlSymbols := map[string]bool{
 			"siglongjmp": false,
@@ -657,6 +696,20 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 				t.Log("elided typed control " + record.diagnostic())
 				continue
 			}
+			if _, declared := declaredExecutorSafeRawHostSymbols[record.PhysicalSymbol]; declared {
+				if declaredExecutorSafeRawHostSymbols[record.PhysicalSymbol] {
+					return nil, fmt.Errorf(
+						"native target declared executor-safe raw-host declaration %q is ambiguous",
+						record.PhysicalSymbol,
+					)
+				}
+				declaredExecutorSafeRawHostSymbols[record.PhysicalSymbol] = true
+				if err := validateDeclaredExecutorSafeRawHost(record, record.PhysicalSymbol); err != nil {
+					return nil, err
+				}
+				t.Log("declared executor-safe " + record.diagnostic())
+				continue
+			}
 			if _, migrated := migratedRawHostSymbols[record.PhysicalSymbol]; !migrated {
 				continue
 			}
@@ -679,6 +732,14 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 				return nil, fmt.Errorf(
 					"native target raw-host declaration %q is absent from the closed report",
 					declaration,
+				)
+			}
+		}
+		for symbol, found := range declaredExecutorSafeRawHostSymbols {
+			if !found {
+				return nil, fmt.Errorf(
+					"native target declared executor-safe raw-host declaration %q is absent from the closed report",
+					symbol,
 				)
 			}
 		}

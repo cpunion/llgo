@@ -111,6 +111,38 @@ func TestVerifyCoroAtomicCostModuleRejectsTruncatedProofMetadata(t *testing.T) {
 	}
 }
 
+func TestVerifyOptimizedCoroAtomicCostModuleAllowsInlinedAwayDependency(t *testing.T) {
+	ctx, module := newCoroAtomicCostTestModule(t)
+	functionType := llvm.FunctionType(ctx.VoidType(), nil, false)
+	function := llvm.AddFunction(module, "pkg.atomic", functionType)
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	entry := ctx.AddBasicBlock(function, "entry")
+	builder.SetInsertPointAtEnd(entry)
+	builder.CreateRetVoid()
+	addCoroAtomicCostTestMetadata(ctx, module, function.Name())
+	module.AddNamedMetadataOperand(CoroAtomicCostMetadataName, ctx.MDNode([]llvm.Metadata{
+		llvm.ConstInt(ctx.Int32Type(), coroAtomicCostMetadataV1, false).ConstantAsMetadata(),
+		ctx.MDString("pkg.inlined-away"),
+		llvm.ConstInt(ctx.Int64Type(), 2, false).ConstantAsMetadata(),
+		llvm.ConstInt(ctx.Int32Type(), 1, false).ConstantAsMetadata(),
+		ctx.MDString(strings.Repeat("b", 64)),
+		llvm.ConstInt(ctx.Int32Type(), 0, false).ConstantAsMetadata(),
+	}))
+
+	if _, err := VerifyCoroAtomicCostModule(module); err == nil ||
+		!strings.Contains(err.Error(), "has no LLVM declaration") {
+		t.Fatalf("strict verifier accepted missing dependency: %v", err)
+	}
+	report, err := VerifyOptimizedCoroAtomicCostModule(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Functions) != 1 || report.Functions[0].Symbol != function.Name() {
+		t.Fatalf("stale imported dependency report = %+v", report)
+	}
+}
+
 func TestVerifyCoroAtomicCostModuleRequiresInjectedInlineAsmCapability(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -152,6 +184,24 @@ func TestVerifyCoroAtomicCostModuleRequiresInjectedInlineAsmCapability(t *testin
 				t.Fatalf("marked inline assembly report = %+v", report)
 			}
 		})
+	}
+}
+
+func TestCoroAtomicDataAnchorInjectsBoundedCapabilityAtCreation(t *testing.T) {
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("example.com/atomic", "atomic")
+	function := pkg.NewFunc("example.com/atomic.body", NoArgsNoRet, InGo)
+	builder := function.MakeBody(1)
+	builder.CoroAtomicDataAnchor(".pushsection .llgo_test_anchor\n.byte 0\n.popsection")
+	builder.Return()
+	if err := pkg.EmitCoroAtomicCostCertificate(
+		function.Name(), 1, 1, strings.Repeat("a", 64),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyCoroAtomicCostModule(pkg.Module()); err != nil {
+		t.Fatalf("verify compiler-created atomic data anchor: %v\n%s", err, pkg.String())
 	}
 }
 

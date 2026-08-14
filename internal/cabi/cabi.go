@@ -604,7 +604,6 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 	}
 	nft, attrs, paramMap := p.transformFuncType(ctx, &info)
 	preloweredSRet := call.GetCallSiteEnumAttribute(1, llvm.AttributeKindID("sret"))
-	reflectMethodByNameAttr := call.GetCallSiteStringAttribute(-1, "llgo.reflect.methodbyname")
 	b := ctx.NewBuilder()
 	b.SetInsertPointBefore(call)
 
@@ -664,14 +663,12 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 	// updateCallAttr receives the replacement call, but closure-context
 	// attributes must be read from the original call before it is erased.
 	updateCallAttr := func(replacement llvm.Value) {
+		copyCallSiteFunctionAttrs(call, replacement)
 		for i, attr := range attrs {
 			replacement.AddCallSiteAttribute(i, attr)
 		}
 		if !preloweredSRet.IsNil() {
 			replacement.AddCallSiteAttribute(1, preloweredSRet)
-		}
-		if !reflectMethodByNameAttr.IsNil() {
-			replacement.AddCallSiteAttribute(-1, reflectMethodByNameAttr)
 		}
 		if remappedReflectMethodByNameArgAttrIndex >= 0 {
 			replacement.AddCallSiteAttribute(remappedReflectMethodByNameArgAttrIndex, ctx.CreateStringAttribute(
@@ -832,6 +829,12 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 var closureEnvAttributeKinds = []uint{
 	llvm.AttributeKindID("nest"),
 	llvm.AttributeKindID("swiftself"),
+}
+
+func copyCallSiteFunctionAttrs(from, to llvm.Value) {
+	for _, attr := range from.GetCallSiteAttributesAtIndex(-1) {
+		to.AddCallSiteAttribute(-1, attr)
+	}
 }
 
 func copyClosureEnvFunctionAttrs(from, to llvm.Value, paramMap []int) {

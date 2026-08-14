@@ -55,16 +55,8 @@ func CanReserveTimerV2(p *P, table *TimerRegistrationTable) bool {
 	if table == nil || p == nil || table.owner != p || !table.route.Valid() {
 		return false
 	}
-	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
-		slot, ok := timerRegistrationSlotAt(table, index)
-		if !ok {
-			return false
-		}
-		if slot.generation != ^uint32(0) && reusableTimerRegistrationSlot(slot, table.route, index) {
-			return true
-		}
-	}
-	return false
+	_, _, ok := nextReusableTimerRegistrationSlot(table)
+	return ok
 }
 
 // PrepareSingleTimerPark installs one source-aware one-shot timer into the

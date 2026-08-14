@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/goplus/llgo/internal/env"
@@ -37,6 +38,10 @@ import (
 const (
 	// CrosscompileClangPath is the relative path from LLGO_ROOT to the clang installation
 	CrosscompileClangPath = "crosscompile/clang"
+
+	// SupportedMajorVersion is the sole LLVM release accepted by LLGo. Keep
+	// this gate aligned with the github.com/xgo-dev/llvm binding baseline.
+	SupportedMajorVersion = 22
 )
 
 // -----------------------------------------------------------------------------
@@ -88,25 +93,83 @@ func New(llvmConfigBin string) *Env {
 // means LLVM executables are assumed to be in PATH.
 func (e *Env) BinDir() string { return e.binDir }
 
-// SetupPath makes the selected LLVM installation part of the process
-// environment. Command entry points call it before starting builds; build
-// requests and workers then inherit LLVM through the ordinary PATH snapshot.
-func SetupPath() {
-	binDir := New("").BinDir()
+// SetupPath validates the selected LLVM installation and makes it part of the
+// process environment. Command entry points call it before starting builds;
+// build requests and workers then inherit one LLVM 22 toolchain through the
+// ordinary PATH snapshot.
+func SetupPath() error {
+	llvmConfigBin := defaultLLVMConfigBin()
+	version, err := commandOutput(llvmConfigBin, "--version")
+	if err != nil {
+		return fmt.Errorf("run LLVM configuration %q: %w", llvmConfigBin, err)
+	}
+	major, err := parseMajorVersion(version)
+	if err != nil {
+		return fmt.Errorf("read LLVM version from %q: %w", llvmConfigBin, err)
+	}
+	if major != SupportedMajorVersion {
+		return fmt.Errorf(
+			"LLVM %s selected by %q is unsupported; LLGo requires LLVM %d",
+			version, llvmConfigBin, SupportedMajorVersion,
+		)
+	}
+	binDir, err := commandOutput(llvmConfigBin, "--bindir")
+	if err != nil {
+		return fmt.Errorf("read LLVM binary directory from %q: %w", llvmConfigBin, err)
+	}
 	if binDir == "" {
-		return
+		return fmt.Errorf("LLVM configuration %q returned an empty binary directory", llvmConfigBin)
+	}
+	if info, statErr := os.Stat(binDir); statErr != nil || !info.IsDir() {
+		if statErr != nil {
+			return fmt.Errorf("LLVM binary directory %q: %w", binDir, statErr)
+		}
+		return fmt.Errorf("LLVM binary directory %q is not a directory", binDir)
 	}
 
 	path := os.Getenv("PATH")
 	for _, dir := range filepath.SplitList(path) {
 		if samePath(dir, binDir) {
-			return
+			return nil
 		}
 	}
 	if path != "" {
 		binDir += string(os.PathListSeparator) + path
 	}
-	_ = os.Setenv("PATH", binDir)
+	if err := os.Setenv("PATH", binDir); err != nil {
+		return fmt.Errorf("install LLVM %d binary directory in PATH: %w", SupportedMajorVersion, err)
+	}
+	return nil
+}
+
+// SetupPathOrExit is the command-entry counterpart of [SetupPath]. A version
+// mismatch is a configuration error, not a compatibility mode.
+func SetupPathOrExit() {
+	if err := SetupPath(); err != nil {
+		fmt.Fprintln(os.Stderr, "llgo:", err)
+		os.Exit(2)
+	}
+}
+
+func commandOutput(name string, args ...string) (string, error) {
+	output, err := exec.Command(name, args...).CombinedOutput()
+	text := strings.TrimSpace(string(output))
+	if err != nil {
+		if text != "" {
+			return "", fmt.Errorf("%w: %s", err, text)
+		}
+		return "", err
+	}
+	return text, nil
+}
+
+func parseMajorVersion(version string) (int, error) {
+	text, _, _ := strings.Cut(strings.TrimSpace(version), ".")
+	major, err := strconv.Atoi(text)
+	if err != nil || major <= 0 {
+		return 0, fmt.Errorf("invalid version %q", version)
+	}
+	return major, nil
 }
 
 func samePath(x, y string) bool {

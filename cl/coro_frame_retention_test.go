@@ -62,6 +62,98 @@ func Root(addr *uint32) uint32 {
 }
 `
 
+const coroBorrowedAllocationFixture = `package foo
+
+type transaction struct {
+	value uint32
+}
+
+func borrow(value *transaction) bool { return value != nil }
+
+func Root(limit uint32) bool {
+	var value transaction
+	if !borrow(&value) {
+		return false
+	}
+	for value.value < limit {
+		value.value++
+	}
+	return value.value == limit
+}
+`
+
+func TestCoroBorrowedAllocationUsesPhysicalLocalStorage(t *testing.T) {
+	prog, ssaPkg, files, universe, plan := prepareCoroPreemptTestPlan(
+		t,
+		coroBorrowedAllocationFixture,
+		[]coroRootFactoryTestRoot{{name: "Root", demand: coro.AsyncDemand}},
+		nil,
+		-1,
+	)
+	defer prog.Dispose()
+	root := ssaPkg.Func("Root")
+	audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := audit.currentFrameRetentionProof()
+	allocations := coroFrameRetentionHeapAllocs(root)
+	if len(allocations) != 1 || len(proof.borrowedAllocations) != 1 ||
+		len(proof.managedHeapAllocations) != 0 {
+		t.Fatalf("borrowed fixture SSA/borrowed/managed allocations = %d/%d/%d, want 1/1/0",
+			len(allocations), len(proof.borrowedAllocations), len(proof.managedHeapAllocations))
+	}
+	borrow, retained := proof.borrowedAllocations[allocations[0]]
+	rootFact, rooted := proof.exactRoots[allocations[0]]
+	if !retained || borrow.FunctionsVisited < 2 || borrow.ParametersProven < 1 ||
+		!rooted || rootFact.kind != coroFrameRetentionRootLocalAddress {
+		t.Fatalf("borrowed allocation fact = %+v, retained=%t root=%+v rooted=%t",
+			borrow, retained, rootFact, rooted)
+	}
+	if reason := audit.validateAlloc(allocations[0]); reason != "" {
+		t.Fatalf("borrowed allocation rejected: %s", reason)
+	}
+	owners := universe.sortedUseOwners(root)
+	if len(owners) != 1 {
+		t.Fatalf("borrowed Root owners = %d, want 1", len(owners))
+	}
+	plainContext, err := universe.functionABIContext(root, owners[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainContext.compilation = &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	plainContext.rawPlainBody = true
+	if !plainContext.selectCoroPlainBorrowedAllocation(allocations[0]) {
+		frozen, frozenErr := universe.coroProgramIR.sitePlan(plainContext, allocations[0])
+		t.Fatalf("raw-plain body did not consume its frozen borrowed-allocation SitePlan: plan=%+v err=%v",
+			frozen.plainAllocation, frozenErr)
+	}
+
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	if strings.Contains(rootIR, "runtime.AllocZ") || !strings.Contains(rootIR, "alloca %foo.transaction") {
+		t.Fatalf("borrowed allocation did not lower to local physical storage:\n%s", rootIR)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify borrowed allocation before CoroSplit: %v\n%s", err, module.String())
+	}
+	runCoroABITestPipeline(t, prog, module)
+	if resume := module.NamedFunction("foo.Root$coro.resume"); resume.IsNil() ||
+		strings.Contains(resume.String(), "runtime.AllocZ") {
+		t.Fatalf("CoroSplit lost borrowed local storage:\n%s", module.String())
+	}
+}
+
 func TestCoroGenericParkStateRetentionIsSourceIndependent(t *testing.T) {
 	for _, symbol := range []string{"__llgo_coro_fixture_prepare", "__llgo_coro_another_source_prepare"} {
 		t.Run(symbol, func(t *testing.T) {

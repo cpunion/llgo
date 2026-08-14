@@ -53,7 +53,15 @@ type publishedEpochResolveCursor struct {
 	waitAwait  bool
 	hasChannel bool
 	claimOwned bool
-	_          [3]byte
+	// directChannel is an owner-only certificate installed only after the
+	// one-case channel fast lane has completed its fully audited resolve,
+	// detach, and ParkSet consume transaction. It lets the intervening typed
+	// materialization and final source retirement validate the exact scalar
+	// continuation instead of re-walking the already destroyed ParkLink graph.
+	// It occupies existing padding and is cleared before advancing to another
+	// wait, so the persisted cursor layout does not grow.
+	directChannel bool
+	_             [2]byte
 }
 
 type publishedEpochResolveStep struct {
@@ -258,6 +266,7 @@ func advancePublishedEpochWaitAfterCleared(sources *ExecutorSourceSet, cursor *p
 	cursor.forced = nil
 	cursor.hasChannel = false
 	cursor.claimOwned = false
+	cursor.directChannel = false
 	cursor.waitRetry = false
 	cursor.waitAwait = false
 	if next != nil {
@@ -535,7 +544,7 @@ func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *
 	}
 	if wait.resumeKind == resumeBindingCleanup {
 		plan := (*ResumeCleanupPlan)(wait.resume)
-		if !validResumeCleanupPlan(wait, plan) {
+		if !validTrustedResumeCleanupPlanState(wait, plan) {
 			return false
 		}
 		switch plan.phase {

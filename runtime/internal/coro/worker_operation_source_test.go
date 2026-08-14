@@ -457,6 +457,41 @@ func TestWorkerOperationSourceSubmittedCancellationAwaitsPhysicalCompletion(t *t
 	}
 }
 
+func TestWorkerOperationSubmittedCompletionState(t *testing.T) {
+	p := new(P)
+	source := new(WorkerOperationSource)
+	if !BindWorkerOperationSource(source, p) {
+		t.Fatal("bind completion-state worker source")
+	}
+	state, ticket, ids := reserveWorkerWaitSet(t, source, p, 74, []uint32{29})
+	id := ids[0]
+	if awaiting, ready, ok := source.submittedCompletionState(p); !ok || awaiting || ready {
+		t.Fatalf("reserved completion state = (%t, %t, %t)", awaiting, ready, ok)
+	}
+	if !source.MarkSubmitted(p, id) {
+		t.Fatal("mark completion-state worker submitted")
+	}
+	if awaiting, ready, ok := source.submittedCompletionState(p); !ok || !awaiting || ready {
+		t.Fatalf("submitted completion state = (%t, %t, %t)", awaiting, ready, ok)
+	}
+	payload := workerPayloadForTest(t, 11, 1100)
+	if source.Post(id, payload) != WorkerOperationPosted {
+		t.Fatal("post completion-state worker result")
+	}
+	if awaiting, ready, ok := source.submittedCompletionState(p); !ok || awaiting || !ready {
+		t.Fatalf("posted completion state = (%t, %t, %t)", awaiting, ready, ok)
+	}
+	if published, lost, ok := source.PublishPass(p); !ok || published != 1 || lost != 0 {
+		t.Fatalf("publish completion-state worker = (%d, %d, %t)", published, lost, ok)
+	}
+	if awaiting, ready, ok := source.submittedCompletionState(p); !ok || awaiting || ready {
+		t.Fatalf("delivered completion state = (%t, %t, %t)", awaiting, ready, ok)
+	}
+	if !RequestParkCancel(state, ticket, ParkCancelOperation) {
+		t.Fatal("cancel completion-state worker park")
+	}
+}
+
 func TestWorkerOperationSourceProducerPrefixIsAlignedPOD(t *testing.T) {
 	if unsafe.Offsetof(workerOperationSlot{}.producerSourceSlot) != 0 ||
 		unsafe.Offsetof(workerOperationSlot{}.state)%4 != 0 ||

@@ -18,7 +18,19 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import (
+	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/coro"
+)
+
+// The isolated scheduler/fleet adapter tests do not link the typed hchan
+// implementation. A direct-channel step would therefore be an invalid fixture
+// input; keep the reducer's production dependency explicit and fail closed if
+// a test accidentally manufactures one.
+func coroMaterializeDirectChannelCompletionV1(*coro.DirectChannelCompletion) bool {
+	return false
+}
 
 // Named-source adapters exercise the target-neutral scheduler without loading
 // runtime2.go and platform getg implementations into the host Go runtime.
@@ -31,14 +43,24 @@ func coroBindTaskAllocationRuntimeContext(task, parent *coro.G) bool {
 	return task != nil
 }
 
+var coroTestRuntimeContextV1 byte
+
+func coroCaptureRuntimeContextV1() unsafe.Pointer {
+	return unsafe.Pointer(&coroTestRuntimeContextV1)
+}
+
+func coroEnterRuntimeContextFrom(task *coro.G, current unsafe.Pointer) (coroRuntimeContextActivationV1, bool) {
+	return coroRuntimeContextActivationV1{}, task != nil && current != nil
+}
+
 func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool) {
-	return coroRuntimeContextActivationV1{}, task != nil
+	return coroEnterRuntimeContextFrom(task, coroCaptureRuntimeContextV1())
 }
 
 func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivationV1) bool {
 	return task != nil
 }
 
-func coroReleaseRuntimeContext(task *coro.G) bool {
-	return task != nil
+func coroReleaseRuntimeContext(task *coro.G, local unsafe.Pointer) bool {
+	return task != nil && local != nil
 }

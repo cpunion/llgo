@@ -226,9 +226,10 @@ func Use() {}
 func TestEmissionUniverseCoroChannelRetainsPlainAndPhysicalHelpers(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
-func CoroChanTrySend(ch chan int, value *int, size int) bool { return false }
-func CoroChanTryRecv(ch chan int, value *int, size int) (bool, bool) { return false, false }
+func CoroChanTrySend(task *byte, ch chan int, value *int, size int) bool { return false }
+func CoroChanTryRecv(task *byte, ch chan int, value *int, size int) (bool, bool) { return false, false }
 func CoroChanTryClose(ch chan int) uint32 { return 0 }
+func CoroChanTryCloseTask(task *byte, ch chan int) uint32 { return 0 }
 type ChanOp struct{}
 func CoroChanSelectTry(ops ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(ops ...ChanOp) {}
@@ -270,7 +271,7 @@ func Close(ch chan int) { close(ch) }
 		required[fn] = true
 	}
 	for _, helper := range []string{
-		"CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryClose", "CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume",
+		"CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryClose", "CoroChanTryCloseTask", "CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume",
 		"ChanSend", "ChanRecv", "ChanClose", "Select", "TrySelect",
 	} {
 		if fn := runtimePkg.ssa.Func(helper); fn == nil || !required[fn] {
@@ -281,11 +282,14 @@ func Close(ch chan int) { close(ch) }
 		owner string
 		want  []string
 	}{
-		{owner: "Send", want: []string{"CoroChanTrySend"}},
-		{owner: "Recv", want: []string{"CoroChanTryRecv"}},
+		// One-case send/receive use the frozen raw try-or-park V2 ABI. Unlike
+		// select and close, no separately emitted Go runtime helper remains at
+		// the source instruction.
+		{owner: "Send"},
+		{owner: "Recv"},
 		{owner: "BlockingSelect", want: []string{"CoroChanSelectPark", "CoroChanSelectResume", "CoroChanSelectTry"}},
 		{owner: "NonblockingSelect", want: []string{"CoroChanSelectTry"}},
-		{owner: "Close", want: []string{"CoroChanTryClose"}},
+		{owner: "Close", want: []string{"CoroChanTryCloseTask"}},
 	} {
 		lowered, err := universe.CoroLoweredCalls(callerPkg.ssa.Func(test.owner))
 		if err != nil {

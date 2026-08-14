@@ -105,6 +105,18 @@ type ManualOperationSource struct {
 	affectedTail uint32
 }
 
+// ManualOperationReservation is an owner-stack capability for one reusable
+// manual-event slot. It exists only between the current-executor preflight and
+// the no-suspend park transaction; producers and coroutine frames retain only
+// the resulting OperationID.
+type ManualOperationReservation struct {
+	source   *ManualOperationSource
+	owner    *P
+	slot     *manualOperationSlot
+	index    uint32
+	capacity uint32
+}
+
 func ManualOperationConfiguredCapacity(source *ManualOperationSource) uint32 {
 	if source == nil {
 		return 0
@@ -210,22 +222,52 @@ func ConfigureManualOperationPages(source *ManualOperationSource, pages []Manual
 	return true
 }
 
+func (source *ManualOperationSource) preflightManualReservationOwned(
+	p *P,
+) (ManualOperationReservation, bool) {
+	capacity := ManualOperationConfiguredCapacity(source)
+	for index := uint32(0); index < capacity; index++ {
+		slot, ok := manualOperationSlotAt(source, index)
+		if !ok {
+			return ManualOperationReservation{}, false
+		}
+		if preemptLoad(&slot.generation) != ^uint32(0) && manualOperationReusableSlot(source, slot, index) {
+			return ManualOperationReservation{
+				source: source, owner: p, slot: slot, index: index, capacity: capacity,
+			}, true
+		}
+	}
+	return ManualOperationReservation{}, false
+}
+
+func validManualOperationReservationHeader(
+	source *ManualOperationSource,
+	p *P,
+	reservation ManualOperationReservation,
+) bool {
+	return source != nil && p != nil && reservation.source == source &&
+		reservation.owner == p && reservation.slot != nil &&
+		reservation.capacity != 0 && reservation.index < reservation.capacity
+}
+
+// PreflightManualOperationReservation authenticates the source owner and
+// selects the exact reusable slot once. The capability is consumed before any
+// suspension; the final generation CAS remains in the reservation commit.
+func PreflightManualOperationReservation(
+	p *P,
+	source *ManualOperationSource,
+) (ManualOperationReservation, bool) {
+	if !validManualOperationOwner(source, p) {
+		return ManualOperationReservation{}, false
+	}
+	return source.preflightManualReservationOwned(p)
+}
+
 // CanReserveManualOperation is the allocation-free owner preflight used before
 // BeginParkSet mutates a logical wait transaction.
 func CanReserveManualOperation(p *P, source *ManualOperationSource) bool {
-	if !validManualOperationOwner(source, p) {
-		return false
-	}
-	for index := uint32(0); index < ManualOperationConfiguredCapacity(source); index++ {
-		slot, ok := manualOperationSlotAt(source, index)
-		if !ok {
-			return false
-		}
-		if preemptLoad(&slot.generation) != ^uint32(0) && manualOperationReusableSlot(source, slot, index) {
-			return true
-		}
-	}
-	return false
+	_, ok := PreflightManualOperationReservation(p, source)
+	return ok
 }
 
 // AttachManualOperationPage publishes one pristine target-owned page while
@@ -277,52 +319,72 @@ func validManualOperationLiveSlot(source *ManualOperationSource, p *P, index uin
 	return ok && slot.record.Matches(id)
 }
 
+func (source *ManualOperationSource) reserveAndAttachManualSlot(
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	reservation ManualOperationReservation,
+) (OperationID, bool) {
+	slot, index := reservation.slot, reservation.index
+	if slot == nil || index >= reservation.capacity ||
+		reservation.capacity != ManualOperationConfiguredCapacity(source) {
+		return OperationID{}, false
+	}
+	generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
+	if !begun {
+		return OperationID{}, false
+	}
+	id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, index+1, generation)
+	if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
+		return OperationID{}, false
+	}
+	attached := false
+	if wait == nil {
+		attached = AttachParkOperation(state, ticket, &slot.record, caseID)
+	} else {
+		attached = AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID)
+	}
+	if !attached {
+		if !AbortReservedOperation(&slot.record, id) ||
+			!resetProducerSourceSlot(&slot.producerSourceSlot, generation) {
+			return OperationID{}, false
+		}
+		return OperationID{}, false
+	}
+	if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
+		return OperationID{}, false
+	}
+	if index+1 > source.scanLimit {
+		source.scanLimit = index + 1
+	}
+	return id, true
+}
+
 // ReserveAndAttachManualOperation reserves one physical slot generation and
 // attaches its stable OperationRecord to a preparing logical wait-set. No
 // producer is admitted until all owner pointers are initialized and Active is
 // release-published.
 func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ticket ParkTicket, wait *WaitSetRecord, caseID uint32) (OperationID, bool) {
-	if !validManualOperationOwner(source, p) {
+	reservation, ok := PreflightManualOperationReservation(p, source)
+	if !ok {
 		return OperationID{}, false
 	}
-	for index := uint32(0); index < ManualOperationConfiguredCapacity(source); index++ {
-		slot, slotOK := manualOperationSlotAt(source, index)
-		if !slotOK {
-			return OperationID{}, false
-		}
-		if !manualOperationReusableSlot(source, slot, index) || preemptLoad(&slot.generation) == ^uint32(0) {
-			continue
-		}
-		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
-		if !begun {
-			return OperationID{}, false
-		}
-		id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, index+1, generation)
-		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
-			return OperationID{}, false
-		}
-		attached := false
-		if wait == nil {
-			attached = AttachParkOperation(state, ticket, &slot.record, caseID)
-		} else {
-			attached = AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID)
-		}
-		if !attached {
-			if !AbortReservedOperation(&slot.record, id) ||
-				!resetProducerSourceSlot(&slot.producerSourceSlot, generation) {
-				return OperationID{}, false
-			}
-			return OperationID{}, false
-		}
-		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
-			return OperationID{}, false
-		}
-		if index+1 > source.scanLimit {
-			source.scanLimit = index + 1
-		}
-		return id, true
+	return source.reserveAndAttachManualSlot(state, ticket, wait, caseID, reservation)
+}
+
+func (source *ManualOperationSource) reserveAndAttachManualReservation(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	reservation ManualOperationReservation,
+) (OperationID, bool) {
+	if !validManualOperationReservationHeader(source, p, reservation) {
+		return OperationID{}, false
 	}
-	return OperationID{}, false
+	return source.reserveAndAttachManualSlot(state, ticket, wait, caseID, reservation)
 }
 
 func (source *ManualOperationSource) ReserveAndAttach(p *P, state *ParkState, ticket ParkTicket, caseID uint32) (OperationID, bool) {

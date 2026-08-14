@@ -6,5 +6,5 @@ import "github.com/goplus/llgo/xtool/env/llvm"
 // dispatch so build requests and their workers only need an environment
 // snapshot; they do not carry or reselect an LLVM installation.
 func init() {
-	llvm.SetupPath()
+	llvm.SetupPathOrExit()
 }

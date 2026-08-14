@@ -42,6 +42,26 @@ func TestAnalyzeDirectPropagation(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRuntimeContextRequirementPropagatesOnlyThroughManagedCalls(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{ID: "caller"})
+	mustAddFunction(t, g, FunctionSpec{ID: "spawn-owner"})
+	mustAddFunction(t, g, FunctionSpec{ID: "ambient-leaf", Exec: NeedsRuntimeContext})
+	mustAddCall(t, g, CallEdge{Caller: "caller", Callee: "ambient-leaf", Kind: CallDirect})
+	mustAddCall(t, g, CallEdge{Caller: "spawn-owner", Callee: "ambient-leaf", Kind: CallSpawn})
+
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caller := mustLookup(t, plan, "caller"); !caller.Exec.Contains(NeedsRuntimeContext) {
+		t.Fatalf("direct caller execution flags = %s", caller.Exec)
+	}
+	if owner := mustLookup(t, plan, "spawn-owner"); owner.Exec.Contains(NeedsRuntimeContext) {
+		t.Fatalf("spawn owner inherited independently resumed child context: %s", owner.Exec)
+	}
+}
+
 func TestAnalyzeRecursiveSCC(t *testing.T) {
 	g := NewGraph()
 	for _, spec := range []FunctionSpec{

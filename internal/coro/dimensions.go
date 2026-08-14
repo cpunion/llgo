@@ -39,15 +39,21 @@ const (
 	// unavailable. Verifiers must reject it in restricted contexts unless a
 	// compatible external summary replaces it.
 	OpaqueExec
+	// NeedsRuntimeContext records that physical execution observes or mutates
+	// the ambient runtime G (for example through getg/getgIfPresent), or crosses
+	// a boundary which can synchronously reenter Go and observe that G. It is a
+	// propagated may-property: a caller can omit the per-resume runtime-context
+	// install only when its complete managed call closure lacks this bit.
+	NeedsRuntimeContext
 )
 
 const validExecFlags = BlockForeign | ThreadAffine | IRQUnsafe | NeedsPreempt |
-	MayUnwind | NeedsCleanupFrame | NoReturn | PanicOnly | OpaqueExec
+	MayUnwind | NeedsCleanupFrame | NoReturn | PanicOnly | OpaqueExec | NeedsRuntimeContext
 
 // propagatedExecFlags are conservative "may" constraints inherited by a
 // managed caller. Control-flow guarantees and local lowering requirements are
 // intentionally excluded.
-const propagatedExecFlags = ThreadAffine | IRQUnsafe | MayUnwind | OpaqueExec
+const propagatedExecFlags = ThreadAffine | IRQUnsafe | MayUnwind | OpaqueExec | NeedsRuntimeContext
 
 var execFlagNames = [...]struct {
 	bit  ExecFlags
@@ -62,6 +68,7 @@ var execFlagNames = [...]struct {
 	{NoReturn, "no-return"},
 	{PanicOnly, "panic-only"},
 	{OpaqueExec, "opaque"},
+	{NeedsRuntimeContext, "needs-runtime-context"},
 }
 
 func (f ExecFlags) Validate() error {

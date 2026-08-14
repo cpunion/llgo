@@ -1787,11 +1787,85 @@ func TestMakeInterfaceKinds(t *testing.T) {
 	rawMeth := types.NewFunc(0, pkgTypes, "M", rawSig)
 	nonEmpty := types.NewInterfaceType([]*types.Func{rawMeth}, nil)
 	nonEmpty.Complete()
+	concrete := types.NewNamed(
+		types.NewTypeName(token.NoPos, pkgTypes, "methodInt", nil),
+		types.Typ[types.Int], nil,
+	)
+	methodSig := types.NewSignatureType(
+		types.NewVar(token.NoPos, pkgTypes, "", concrete), nil, nil, nil, nil, false,
+	)
+	concrete.AddMethod(types.NewFunc(token.NoPos, pkgTypes, "M", methodSig))
 	nonEmptyType := prog.Type(nonEmpty, InGo)
 	sigNE := types.NewSignatureType(nil, nil, nil, nil, types.NewTuple(types.NewVar(0, nil, "", nonEmpty)), false)
 	fnNE := pkg.NewFunc("nonEmptyIface", sigNE, InGo)
 	bNE := fnNE.MakeBody(1)
-	bNE.Return(bNE.MakeInterface(nonEmptyType, prog.Val(7)))
+	bNE.Return(bNE.MakeInterface(nonEmptyType, prog.IntVal(7, prog.Type(concrete, InGo))))
+}
+
+func TestMakeInterfaceFromConstantUsesImmutableBacking(t *testing.T) {
+	prog := NewProgram(nil)
+	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+	pkg := prog.NewPackage("bar", "foo/bar")
+	rawPkg := types.NewPackage("foo/bar", "bar")
+	namedInt := types.NewNamed(
+		types.NewTypeName(token.NoPos, rawPkg, "Errno", nil),
+		types.Typ[types.Int], nil,
+	)
+	stringResult := types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.String]))
+	concreteMethodSig := types.NewSignatureType(
+		types.NewVar(token.NoPos, rawPkg, "", namedInt), nil, nil, nil, stringResult, false,
+	)
+	namedInt.AddMethod(types.NewFunc(token.NoPos, rawPkg, "Error", concreteMethodSig))
+	interfaceMethodSig := types.NewSignatureType(nil, nil, nil, nil, stringResult, false)
+	errorIface := types.NewInterfaceType(
+		[]*types.Func{types.NewFunc(token.NoPos, nil, "Error", interfaceMethodSig)}, nil,
+	)
+	errorIface.Complete()
+	errorType := prog.Type(errorIface, InGo)
+
+	valueType := prog.Type(namedInt, InGo)
+	result := types.NewTuple(types.NewVar(token.NoPos, nil, "", errorIface))
+
+	constantFn := pkg.NewFunc("constant", types.NewSignatureType(nil, nil, nil, nil, result, false), InGo)
+	constantBody := constantFn.MakeBody(1)
+	constantBody.Return(constantBody.MakeInterfaceFromConstant(errorType, prog.IntVal(4, valueType)))
+
+	dynamicParams := types.NewTuple(types.NewVar(token.NoPos, nil, "value", namedInt))
+	dynamicFn := pkg.NewFunc("dynamic", types.NewSignatureType(nil, nil, nil, dynamicParams, result, false), InGo)
+	dynamicBody := dynamicFn.MakeBody(1)
+	dynamicBody.Return(dynamicBody.MakeInterface(errorType, dynamicFn.Param(0)))
+
+	constantIR := constantFn.impl.String()
+	if strings.Contains(constantIR, ".AllocU\"") {
+		t.Fatalf("constant interface conversion allocates:\n%s", constantIR)
+	}
+	if strings.Contains(constantIR, ".NewItab\"") {
+		t.Fatalf("constant concrete-to-interface conversion builds an itab at runtime:\n%s", constantIR)
+	}
+	if !strings.Contains(constantIR, "ret ") || !strings.Contains(constantIR, ", ptr @") {
+		t.Fatalf("constant interface conversion does not use static backing:\n%s", constantIR)
+	}
+	dynamicIR := dynamicFn.impl.String()
+	if !strings.Contains(dynamicIR, ".AllocU\"") {
+		t.Fatalf("dynamic interface conversion lost its required copy:\n%s", dynamicIR)
+	}
+	if strings.Contains(dynamicIR, ".NewItab\"") {
+		t.Fatalf("dynamic concrete-to-interface conversion builds an itab at runtime:\n%s", dynamicIR)
+	}
+	moduleIR := pkg.String()
+	if !strings.Contains(moduleIR, "private unnamed_addr constant i64 4") {
+		t.Fatalf("missing immutable constant interface backing:\n%s", moduleIR)
+	}
+	if !strings.Contains(moduleIR, "private unnamed_addr constant { ptr, ptr, i32, [1 x ptr] }") {
+		t.Fatalf("missing immutable static itab:\n%s", moduleIR)
+	}
 }
 
 func TestCheckExprAssignmentConversions(t *testing.T) {
@@ -2414,6 +2488,27 @@ attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
 `)
 }
 
+func TestIfWithBranchWeights(t *testing.T) {
+	prog := NewProgram(nil)
+	pkg := prog.NewPackage("bar", "foo/bar")
+	params := types.NewTuple(types.NewVar(0, nil, "a", types.Typ[types.Int]))
+	rets := types.NewTuple(types.NewVar(0, nil, "", types.Typ[types.Int]))
+	sig := types.NewSignatureType(nil, nil, nil, params, rets, false)
+	fn := pkg.NewFunc("weighted", sig, InGo)
+	b := fn.MakeBody(3)
+	iftrue := fn.Block(1)
+	iffalse := fn.Block(2)
+	cond := b.BinOp(token.GTR, fn.Param(0), prog.Val(0))
+	b.IfWithBranchWeights(cond, iftrue, iffalse, 1000, 1)
+	b.SetBlock(iftrue).Return(prog.Val(1))
+	b.SetBlock(iffalse).Return(prog.Val(0))
+	ir := pkg.String()
+	if !strings.Contains(ir, `br i1 %1, label %_llgo_1, label %_llgo_2, !prof !0`) ||
+		!strings.Contains(ir, `!0 = !{!"branch_weights", i32 1000, i32 1}`) {
+		t.Fatalf("weighted branch metadata is absent or malformed:\n%s", ir)
+	}
+}
+
 func TestPrintf(t *testing.T) {
 	prog := NewProgram(nil)
 	pkg := prog.NewPackage("bar", "foo/bar")
@@ -2730,9 +2825,9 @@ func TestTargetMachineAndDataLayout(t *testing.T) {
 		triple     string
 	}{
 		{"linux", "amd64", "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128", "x86_64-unknown-linux"},
-		{"linux", "arm64", "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32", "aarch64-unknown-linux"},
+		{"linux", "arm64", "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32", "aarch64-unknown-linux"},
 		{"darwin", "amd64", "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128", "x86_64-apple-macosx"},
-		{"darwin", "arm64", "e-m:o-i64:64-i128:128-n32:64-S128-Fn32", "arm64-apple-macosx"},
+		{"darwin", "arm64", "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32", "arm64-apple-macosx"},
 	}
 	for _, tt := range tests {
 		prog := NewProgram(&Target{GOOS: tt.goos, GOARCH: tt.goarch})
@@ -2810,11 +2905,19 @@ func TestAbiTables(t *testing.T) {
 	rawMeth := types.NewFunc(0, pkgTypes, "M", rawSig)
 	nonEmpty := types.NewInterfaceType([]*types.Func{rawMeth}, nil)
 	nonEmpty.Complete()
+	concrete := types.NewNamed(
+		types.NewTypeName(token.NoPos, pkgTypes, "abiMethodInt", nil),
+		types.Typ[types.Int], nil,
+	)
+	methodSig := types.NewSignatureType(
+		types.NewVar(token.NoPos, pkgTypes, "", concrete), nil, nil, nil, nil, false,
+	)
+	concrete.AddMethod(types.NewFunc(token.NoPos, pkgTypes, "M", methodSig))
 	nonEmptyType := prog.Type(nonEmpty, InGo)
 	sigNE := types.NewSignatureType(nil, nil, nil, nil, types.NewTuple(types.NewVar(0, nil, "", nonEmpty)), false)
 	fnNE := pkg.NewFunc("nonEmptyIface", sigNE, InGo)
 	bNE := fnNE.MakeBody(1)
-	bNE.Return(bNE.MakeInterface(nonEmptyType, prog.Val(7)))
+	bNE.Return(bNE.MakeInterface(nonEmptyType, prog.IntVal(7, prog.Type(concrete, InGo))))
 
 	fn := pkg.InitAbiTypes(pkg.Path() + ".init$abitables")
 	s := fn.impl.String()

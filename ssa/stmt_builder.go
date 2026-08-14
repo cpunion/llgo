@@ -254,6 +254,31 @@ func (b Builder) If(cond Expr, thenb, elseb BasicBlock) {
 	b.impl.CreateCondBr(cond.impl, thenb.first, elseb.first)
 }
 
+// IfWithBranchWeights emits an if instruction with relative, nonzero branch
+// frequencies. The weights are optimization evidence only: both successors
+// retain their ordinary control-flow and language semantics.
+func (b Builder) IfWithBranchWeights(
+	cond Expr, thenb, elseb BasicBlock, thenWeight, elseWeight uint32,
+) {
+	if b.Func != thenb.fn || b.Func != elseb.fn {
+		panic("mismatched function")
+	}
+	if thenWeight == 0 || elseWeight == 0 {
+		panic("branch weights must be nonzero")
+	}
+	dbgInstrf(
+		"IfWithBranchWeights %v, _llgo_%v, _llgo_%v, %d, %d\n",
+		cond.impl, thenb.idx, elseb.idx, thenWeight, elseWeight,
+	)
+	branch := b.impl.CreateCondBr(cond.impl, thenb.first, elseb.first)
+	ctx := b.Prog.ctx
+	branch.SetMetadata(ctx.MDKindID("prof"), ctx.MDNode([]llvm.Metadata{
+		ctx.MDString("branch_weights"),
+		llvm.ConstInt(b.Prog.tyInt32(), uint64(thenWeight), false).ConstantAsMetadata(),
+		llvm.ConstInt(b.Prog.tyInt32(), uint64(elseWeight), false).ConstantAsMetadata(),
+	}))
+}
+
 // IfThen emits an if-then instruction.
 func (b Builder) IfThen(cond Expr, then func()) {
 	blks := b.Func.MakeBlocks(2)

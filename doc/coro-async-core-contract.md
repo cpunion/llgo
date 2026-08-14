@@ -579,7 +579,7 @@ deadline 修改必须更新已 park operation，且 timeout 恢复后重新读�
 
 Native表中的有界fleet已从production-island推进为可执行target profile；它证明无栈continuation可在固定8-route物理topology上按动态逻辑quota并行，并能用统一event/worker模型运行标准库TCP链。物理route/source identity不随`GOMAXPROCS`变化；locked-M同P replacement已证明阻塞期间原route继续服务channel/timer/poll并可嵌套，clean succession又证明未解锁退出不会复用被污染M，但当前证据仍不能外推为全部可运行G迁移、所有callback/reentry/非command shutdown/affinity场景或完整标准库兼容。
 
-无栈 continuation 和 target-neutral operation core 不依赖 libuv、BDWGC 或 pthread；但当前 native worker adapter 确实使用固定 pthread pool，collector 集成也仍是 target profile 的独立责任。LLVM 支持基线只是 19–22，不考虑 LLVM 19 以下版本；每个支持版本都要分别验证 CoroSplit、frame layout/root metadata 和 module verification。
+无栈 continuation 和 target-neutral operation core 不依赖 libuv、BDWGC 或 pthread；但当前 native worker adapter 确实使用固定 pthread pool，collector 集成也仍是 target profile 的独立责任。LLVM 支持基线固定为 22；LLVM 21 及以下不再维护兼容配置或 CI。LLVM 22 必须验证 CoroSplit、frame layout/root metadata 和 module verification。
 
 full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblocking self-pipe；signal handler 只发布 lock-free POD signum，Go `signal_recv` 复用 coroutine poll owner，不依赖 legacy libuv timer loop。当前 source/C/race 验证已通过，`os/signal.Notify` 的真实 LLGo 链接执行仍随全程序 acceptance 推进。
 

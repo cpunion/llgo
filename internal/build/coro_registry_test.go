@@ -105,6 +105,18 @@ func TestCoroProgramManifestHashV1StableAndComplete(t *testing.T) {
 	if changedBootstrap == withBootstrap {
 		t.Fatal("manifest hash ignored bootstrap StepHash")
 	}
+	bootstrapC := &coroProgramBootstrapV1{
+		Version:  coroProgramBootstrapVersionV2,
+		Flags:    coroProgramCapabilityWorkerV2,
+		StepHash: bootstrapA.StepHash,
+	}
+	changedCapabilities, err := coroProgramManifestHashV1(ctx, []string{a, b}, bootstrapC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedCapabilities == withBootstrap {
+		t.Fatal("manifest hash ignored bootstrap program capabilities")
+	}
 	if _, err := coroProgramManifestHashV1(ctx, []string{a, b}, bootstrapA, bootstrapB); err == nil {
 		t.Fatal("manifest hash accepted multiple bootstrap tables")
 	}

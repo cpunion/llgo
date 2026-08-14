@@ -49,7 +49,7 @@ func TestLinkerHelpSupportsICF(t *testing.T) {
 		help string
 		want bool
 	}{
-		{name: "esp-llvm19-no-icf", help: "--import-memory\n--no-entry\n--export=<value>\n", want: false},
+		{name: "legacy-wasm-ld-no-icf", help: "--import-memory\n--no-entry\n--export=<value>\n", want: false},
 		{name: "lld-equals-form", help: "--icf={none,safe,all}  Perform identical code folding\n", want: true},
 		{name: "lld-separated-form", help: "--icf <mode>  Perform identical code folding\n", want: true},
 	} {
@@ -58,6 +58,40 @@ func TestLinkerHelpSupportsICF(t *testing.T) {
 				t.Fatalf("linkerHelpSupportsICF(%q) = %v, want %v", tt.help, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLLVM22WasmToolchainUsesConfiguredPath(t *testing.T) {
+	setupCalls := 0
+	setup := func() error {
+		setupCalls++
+		return nil
+	}
+	root := filepath.Join(t.TempDir(), "llvm-22")
+	bin := filepath.Join(root, "bin")
+	linkBin := filepath.Join(t.TempDir(), "lld-22", "bin")
+	tools := map[string]string{
+		"clang++": filepath.Join(bin, "clang++"),
+		"llvm-ar": filepath.Join(bin, "llvm-ar"),
+		"wasm-ld": filepath.Join(linkBin, "wasm-ld"),
+	}
+	lookup := func(name string) (string, error) {
+		if path := tools[name]; path != "" {
+			return path, nil
+		}
+		return "", os.ErrNotExist
+	}
+
+	gotRoot, gotBin, gotCC, gotLinker, err := resolveLLVM22Toolchain("wasm-ld", setup, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setupCalls != 1 || gotRoot != root || gotBin != bin ||
+		gotCC != tools["clang++"] || gotLinker != tools["wasm-ld"] {
+		t.Fatalf(
+			"LLVM 22 wasm tools = setup:%d root:%q bin:%q cc:%q linker:%q",
+			setupCalls, gotRoot, gotBin, gotCC, gotLinker,
+		)
 	}
 }
 

@@ -37,4 +37,4 @@ func main() {
 // CHECK: CoroChanTrySend
 // CHECK-LABEL: define ptr @"main.main$2$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
-// CHECK: CoroChanTryClose
+// CHECK: CoroChanTryCloseTask

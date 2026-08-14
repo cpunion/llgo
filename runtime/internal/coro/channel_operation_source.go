@@ -68,32 +68,45 @@ const (
 	channelPhysicalStateBits  = 2
 	channelPhysicalStateMask  = uint32(1<<channelPhysicalStateBits - 1)
 	channelPhysicalRouteShift = channelPhysicalStateBits
-	channelPhysicalWordMask   = channelPhysicalStateMask | operationRouteMask<<channelPhysicalRouteShift
+	channelPhysicalSmallBits  = 8
+	channelPhysicalSmallShift = channelPhysicalRouteShift + operationRouteBits
+	channelPhysicalSmallMask  = uint32(1<<channelPhysicalSmallBits-1) << channelPhysicalSmallShift
+	channelPhysicalWordMask   = channelPhysicalStateMask |
+		operationRouteMask<<channelPhysicalRouteShift | channelPhysicalSmallMask
 )
 
-func makeChannelPhysicalWord(state channelPhysicalState, route RouteID) (uint32, bool) {
+func makeChannelPhysicalWord(state channelPhysicalState, route RouteID, small uint8) (uint32, bool) {
 	if state > channelPhysicalCommitted || route != 0 && !route.Valid() ||
-		route != 0 && state != channelPhysicalCommitted {
+		(route != 0 || small != ResumeSmallInvalid) && state != channelPhysicalCommitted {
 		return 0, false
 	}
-	return uint32(state) | uint32(route)<<channelPhysicalRouteShift, true
+	return uint32(state) | uint32(route)<<channelPhysicalRouteShift |
+		uint32(small)<<channelPhysicalSmallShift, true
 }
 
 func channelPhysicalStateOf(word uint32) channelPhysicalState {
 	state := channelPhysicalState(word & channelPhysicalStateMask)
-	route := RouteID(word >> channelPhysicalRouteShift)
+	route := RouteID(word >> channelPhysicalRouteShift & operationRouteMask)
+	small := uint8(word >> channelPhysicalSmallShift)
 	if word&^channelPhysicalWordMask != 0 || state > channelPhysicalCommitted ||
-		route != 0 && (!route.Valid() || state != channelPhysicalCommitted) {
+		route != 0 && !route.Valid() ||
+		(route != 0 || small != ResumeSmallInvalid) && state != channelPhysicalCommitted {
 		return channelPhysicalState(^uint32(0))
 	}
 	return state
 }
 
-func channelPhysicalCompletionRoute(word uint32) (RouteID, bool) {
+func channelPhysicalCompletion(word uint32) (RouteID, uint8, bool) {
 	if channelPhysicalStateOf(word) != channelPhysicalCommitted {
-		return 0, false
+		return 0, ResumeSmallInvalid, false
 	}
-	return RouteID(word >> channelPhysicalRouteShift), true
+	return RouteID(word >> channelPhysicalRouteShift & operationRouteMask),
+		uint8(word >> channelPhysicalSmallShift), true
+}
+
+func channelPhysicalCompletionRoute(word uint32) (RouteID, bool) {
+	route, _, ok := channelPhysicalCompletion(word)
+	return route, ok
 }
 
 type channelExternalState uint32
@@ -121,6 +134,20 @@ type channelOperationSlot struct {
 
 	record OperationRecord
 	claim  *SelectClaim
+}
+
+// ChannelDirectReservation is an owner-stack capability retained only across
+// the fallible frame/capacity preflight and the no-fail direct park commit. It
+// never enters a coroutine frame or producer ABI. Stable source configuration
+// and owner serialization make the selected reusable slot immutable during
+// that interval. Its fields are deliberately private: runtime adapters may
+// carry the value but cannot forge a source, owner, or slot identity.
+type ChannelDirectReservation struct {
+	source   *ChannelOperationSource
+	owner    *P
+	slot     *channelOperationSlot
+	index    uint32
+	capacity uint32
 }
 
 // ChannelOperationPage is stable target-provided storage. Producer ingress
@@ -537,7 +564,54 @@ func channelOperationCommitDomainCompatible(
 	return true
 }
 
-func (source *ChannelOperationSource) ReserveAndAttachWait(
+func (source *ChannelOperationSource) reserveAndAttachWaitSlot(
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	claim *SelectClaim,
+	slot *channelOperationSlot,
+	index uint32,
+	capacity uint32,
+) (OperationID, bool) {
+	if slot == nil || index >= capacity || capacity != ChannelOperationConfiguredCapacity(source) {
+		return OperationID{}, false
+	}
+	generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
+	if !begun {
+		return OperationID{}, false
+	}
+	if !raiseSourceScanLimit(&source.scanLimit, index, capacity) {
+		return OperationID{}, false
+	}
+	id, ok := MakeOperationIDAtRoute(OperationSourceChannel, source.route, index+1, generation)
+	if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
+		_ = resetProducerSourceSlot(&slot.producerSourceSlot, generation)
+		return OperationID{}, false
+	}
+	if !DeclareOperationCommitMode(&slot.record, OperationCommitReadyThenTryCommit) ||
+		!AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID) {
+		if !AbortReservedOperation(&slot.record, id) ||
+			!resetProducerSourceSlot(&slot.producerSourceSlot, generation) {
+			return OperationID{}, false
+		}
+		return OperationID{}, false
+	}
+	slot.claim = claim
+	if claim != nil {
+		preemptStore(&slot.external, uint32(channelExternalReserved))
+	}
+	if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
+		return OperationID{}, false
+	}
+	source.reserveCursor = index + 1
+	if source.reserveCursor == capacity {
+		source.reserveCursor = 0
+	}
+	return id, true
+}
+
+func (source *ChannelOperationSource) reserveAndAttachWait(
 	p *P,
 	state *ParkState,
 	ticket ParkTicket,
@@ -545,7 +619,8 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 	caseID uint32,
 	claim *SelectClaim,
 ) (OperationID, bool) {
-	if !validChannelOperationOwner(source, p) || claim != nil && selectClaimLoad(claim) != selectClaimOpen ||
+	if !validChannelOperationOwner(source, p) ||
+		claim != nil && selectClaimLoad(claim) != selectClaimOpen ||
 		!channelOperationCommitDomainCompatible(source, state, ticket, wait, claim) {
 		return OperationID{}, false
 	}
@@ -564,58 +639,107 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 			claim != nil && !channelOperationExternalReservable(slot) {
 			continue
 		}
-		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
-		if !begun {
-			return OperationID{}, false
-		}
-		if !raiseSourceScanLimit(&source.scanLimit, index, ChannelOperationConfiguredCapacity(source)) {
-			return OperationID{}, false
-		}
-		id, ok := MakeOperationIDAtRoute(OperationSourceChannel, source.route, index+1, generation)
-		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
-			_ = resetProducerSourceSlot(&slot.producerSourceSlot, generation)
-			return OperationID{}, false
-		}
-		if !DeclareOperationCommitMode(&slot.record, OperationCommitReadyThenTryCommit) ||
-			!AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID) {
-			if !AbortReservedOperation(&slot.record, id) ||
-				!resetProducerSourceSlot(&slot.producerSourceSlot, generation) {
-				return OperationID{}, false
-			}
-			return OperationID{}, false
-		}
-		slot.claim = claim
-		if claim != nil {
-			preemptStore(&slot.external, uint32(channelExternalReserved))
-		}
-		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
-			return OperationID{}, false
-		}
-		source.reserveCursor = index + 1
-		if source.reserveCursor == capacity {
-			source.reserveCursor = 0
-		}
-		return id, true
+		return source.reserveAndAttachWaitSlot(
+			state, ticket, wait, caseID, claim, slot, index, capacity,
+		)
 	}
 	return OperationID{}, false
 }
 
-// ExposeExternalCommit is the final owner-side publication before a typed
-// hchan node becomes reachable. PrepareParkSet has already frozen the exact
-// ParkState/WaitSet/frame relation and installed pendingParkSet; after this
-// release publication the compiler/runtime path may only publish the node and
-// execute llvm.coro.suspend. Rejection leaves Reserved unchanged, so no peer
-// can mistake a partial preparation for a committable endpoint.
-func (source *ChannelOperationSource) ExposeExternalCommit(
+func (source *ChannelOperationSource) ReserveAndAttachWait(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	claim *SelectClaim,
+) (OperationID, bool) {
+	return source.reserveAndAttachWait(p, state, ticket, wait, caseID, claim)
+}
+
+func (source *ChannelOperationSource) preflightDirectReservationOwned(p *P) (ChannelDirectReservation, bool) {
+	capacity := ChannelOperationConfiguredCapacity(source)
+	start := source.reserveCursor
+	if start >= capacity {
+		start = 0
+	}
+	for offset := uint32(0); offset < capacity; offset++ {
+		index := start + offset
+		if index >= capacity {
+			index -= capacity
+		}
+		slot, ok := channelOperationSlotAt(source, index)
+		if ok && channelOperationReusableSlot(source, slot, index) &&
+			preemptLoad(&slot.generation) != ^uint32(0) &&
+			channelOperationExternalReservable(slot) {
+			return ChannelDirectReservation{
+				source: source, owner: p, slot: slot, index: index, capacity: capacity,
+			}, true
+		}
+	}
+	return ChannelDirectReservation{}, false
+}
+
+func (source *ChannelOperationSource) PreflightDirectReservation(p *P) (ChannelDirectReservation, bool) {
+	if !validChannelOperationOwner(source, p) {
+		return ChannelDirectReservation{}, false
+	}
+	return source.preflightDirectReservationOwned(p)
+}
+
+// validDirectReservationHeader authenticates only the private identity carried
+// across the direct park's no-suspend interval. PreflightDirectReservation
+// already audited the owner binding and reusable slot before constructing this
+// value; the consuming slot primitive still checks capacity and atomically
+// begins the exact generation. Repeating the complete source-owner proof at
+// every intervening helper would turn this capability back into a hint.
+func validDirectReservationHeader(
+	source *ChannelOperationSource,
+	p *P,
+	reservation ChannelDirectReservation,
+) bool {
+	return source != nil && p != nil && reservation.source == source &&
+		reservation.owner == p && reservation.slot != nil &&
+		reservation.capacity != 0 && reservation.index < reservation.capacity
+}
+
+func (source *ChannelOperationSource) reserveAndAttachDirectWait(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	claim *SelectClaim,
+	reservation ChannelDirectReservation,
+) (OperationID, bool) {
+	// The compiler-owned direct-channel recipe supplies fresh frame storage for
+	// one exact ParkSet. Its private claim cannot alias another live generation,
+	// so the preflight capability replaces both the shared-domain scan and a
+	// second reusable-slot scan. The caller consumes the capability in the same
+	// no-suspend interval; do not repeat its owner proof here.
+	if !validDirectReservationHeader(source, p, reservation) || claim == nil ||
+		selectClaimLoad(claim) != selectClaimOpen || state == nil ||
+		state.phase != parkPreparing || state.ticket != ticket || state.expected != 1 ||
+		state.attached != 0 || state.head != nil ||
+		!validPreparingWaitSetRecord(wait, state, ticket) {
+		return OperationID{}, false
+	}
+	return source.reserveAndAttachWaitSlot(
+		state, ticket, wait, caseID, claim,
+		reservation.slot, reservation.index, reservation.capacity,
+	)
+}
+
+func (source *ChannelOperationSource) exposeExternalCommitSlot(
 	p *P,
 	g *G,
 	id OperationID,
 	ticket ParkTicket,
 	wait *WaitSetRecord,
 	claim *SelectClaim,
+	slot *channelOperationSlot,
 ) bool {
-	slot, ok := channelOperationSlotFor(source, id)
-	if !ok || !validChannelOperationOwner(source, p) || g == nil || claim == nil ||
+	if p == nil || slot == nil || g == nil || claim == nil ||
 		preemptLoad(&slot.generation) != id.Generation || preemptLoad(&slot.state) != uint32(producerSourceActive) ||
 		preemptLoad(&slot.external) != uint32(channelExternalReserved) || slot.claim != claim ||
 		selectClaimLoad(claim) != selectClaimOpen || g.runP != p || p.current != g || !p.inResume ||
@@ -633,6 +757,51 @@ func (source *ChannelOperationSource) ExposeExternalCommit(
 		uint32(channelExternalReserved),
 		uint32(channelExternalExposed),
 	)
+}
+
+// exposeExternalCommitDirect consumes the same private reservation which
+// selected and began this slot. OperationID construction fixes its route and
+// one-based local index, so the terminal publication needs no catalog lookup
+// or repeated owner audit. All mutable post-build state is still checked by
+// exposeExternalCommitSlot immediately before the release CAS.
+func (source *ChannelOperationSource) exposeExternalCommitDirect(
+	g *G,
+	id OperationID,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	claim *SelectClaim,
+	reservation ChannelDirectReservation,
+) bool {
+	p := reservation.owner
+	if !validDirectReservationHeader(source, p, reservation) || !id.Valid() ||
+		id.Source() != OperationSourceChannel || id.Route() != source.route ||
+		id.LocalSlot() != reservation.index+1 {
+		return false
+	}
+	return source.exposeExternalCommitSlot(
+		p, g, id, ticket, wait, claim, reservation.slot,
+	)
+}
+
+// ExposeExternalCommit is the final owner-side publication before a typed
+// hchan node becomes reachable. PrepareParkSet has already frozen the exact
+// ParkState/WaitSet/frame relation and installed pendingParkSet; after this
+// release publication the compiler/runtime path may only publish the node and
+// execute llvm.coro.suspend. Rejection leaves Reserved unchanged, so no peer
+// can mistake a partial preparation for a committable endpoint.
+func (source *ChannelOperationSource) ExposeExternalCommit(
+	p *P,
+	g *G,
+	id OperationID,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	claim *SelectClaim,
+) bool {
+	slot, ok := channelOperationSlotFor(source, id)
+	if !ok || !validChannelOperationOwner(source, p) {
+		return false
+	}
+	return source.exposeExternalCommitSlot(p, g, id, ticket, wait, claim, slot)
 }
 
 // AbortSelectPreparation atomically excludes external claimers, aborts one
@@ -916,17 +1085,20 @@ func (admission *channelExternalCommitAdmission) releaseWithoutCommit() bool {
 // stored Claimed. Executor requests happen only after releaseCommitted on both
 // endpoints.
 func (admission *channelExternalCommitAdmission) publishExternallyCommitted() ChannelOperationPostResult {
-	return admission.publishExternallyCommittedAtRoute(0)
+	return admission.publishExternallyCommittedAtRoute(0, ResumeSmallInvalid)
 }
 
-func (admission *channelExternalCommitAdmission) publishExternallyCommittedAtRoute(route RouteID) ChannelOperationPostResult {
+func (admission *channelExternalCommitAdmission) publishExternallyCommittedAtRoute(
+	route RouteID,
+	small uint8,
+) ChannelOperationPostResult {
 	if admission == nil || !admission.held || admission.posted || admission.broken || admission.source == nil ||
 		admission.slot == nil || !admission.id.Valid() || admission.token == 0 || admission.token&1 == 0 ||
 		preemptLoad(&admission.slot.externalLease) != admission.token || route != 0 && !route.Valid() {
 		return ChannelOperationPostInvalid
 	}
 	source, slot, id := admission.source, admission.slot, admission.id
-	result := source.publishExternallyCommittedHeld(slot, id, route)
+	result := source.publishExternallyCommittedHeld(slot, id, route, small)
 	if result == ChannelOperationPosted {
 		admission.posted = true
 	} else {
@@ -1223,20 +1395,23 @@ func (pair *channelExternalCommitPair) abort() bool {
 // A post-effect invariant failure retains the transaction/admissions and must
 // fail-stop; rollback is never legal in Effect or Broken.
 func (pair *channelExternalCommitPair) commit() bool {
-	return pair.commitAtRoute(0)
+	return pair.commitAtRoute(0, ResumeSmallInvalid, ResumeSmallInvalid)
 }
 
-func (pair *channelExternalCommitPair) commitAtRoute(route RouteID) bool {
+func (pair *channelExternalCommitPair) commitAtRoute(
+	route RouteID,
+	firstSmall, secondSmall uint8,
+) bool {
 	if pair == nil || pair.self != pair || pair.phase != channelExternalCommitPairEffect ||
 		route != 0 && !route.Valid() {
 		return false
 	}
-	firstResult := pair.endpointA.publishExternallyCommittedAtRoute(route)
+	firstResult := pair.endpointA.publishExternallyCommittedAtRoute(route, firstSmall)
 	if firstResult != ChannelOperationPosted {
 		pair.phase = channelExternalCommitPairBroken
 		return false
 	}
-	secondResult := pair.endpointB.publishExternallyCommittedAtRoute(route)
+	secondResult := pair.endpointB.publishExternallyCommittedAtRoute(route, secondSmall)
 	if secondResult != ChannelOperationPosted {
 		pair.phase = channelExternalCommitPairBroken
 		return false
@@ -1331,14 +1506,30 @@ func (pair *ChannelExternalCommitPair) Abort() bool {
 }
 
 func (pair *ChannelExternalCommitPair) Commit() bool {
-	return pair != nil && pair.transaction.commit()
+	return pair != nil && pair.transaction.commitAtRoute(
+		0, ResumeSmallInvalid, ResumeSmallInvalid,
+	)
 }
 
 // CommitAtRoute is Commit with an advisory producer-locality hint. It is used
 // only by a currently running logical Go task; foreign and asynchronous
 // producers retain Commit's route-zero behavior.
 func (pair *ChannelExternalCommitPair) CommitAtRoute(route RouteID) bool {
-	return pair != nil && pair.transaction.commitAtRoute(route)
+	return pair != nil && pair.transaction.commitAtRoute(
+		route, ResumeSmallInvalid, ResumeSmallInvalid,
+	)
+}
+
+// CommitAtRouteWithResults publishes the two optional closed runtime result
+// tags with the physical pair commit. The tags are opaque to the source core;
+// zero independently keeps an endpoint on the general typed-materialization
+// path, while a fused direct winner may consume its non-zero tag after the
+// producer admission join.
+func (pair *ChannelExternalCommitPair) CommitAtRouteWithResults(
+	route RouteID,
+	firstSmall, secondSmall uint8,
+) bool {
+	return pair != nil && pair.transaction.commitAtRoute(route, firstSmall, secondSmall)
 }
 
 // ChannelExternalCommit is the single-endpoint counterpart of the pair
@@ -1355,11 +1546,16 @@ func (pair *ChannelExternalCommitPair) CommitAtRoute(route RouteID) bool {
 // heap allocation and that Begin -> BeginEffect -> typed effect -> Commit is a
 // NoSuspend/NoPanic span.
 type ChannelExternalCommit struct {
-	self     *ChannelExternalCommit
-	endpoint channelExternalCommitAdmission
-	claim    *SelectClaim
-	phase    channelExternalCommitPairPhase
-	_        [7]byte
+	self                 *ChannelExternalCommit
+	endpoint             channelExternalCommitAdmission
+	claim                *SelectClaim
+	ownerLocalCurrent    *G
+	ownerLocalDriver     *ExecutorDriver
+	ownerLocalWait       *WaitSetRecord
+	phase                channelExternalCommitPairPhase
+	ownerLocalAdmission  ownerLocalCompletionAdmission
+	ownerLocalUnadmitted bool
+	_                    [5]byte
 }
 
 // ChannelExternalCommitBeginResult distinguishes ordinary stale/contention
@@ -1381,10 +1577,27 @@ const (
 	ChannelExternalCommitBeginInvariantFailure
 )
 
+// availableChannelExternalCommitOutput checks the two authoritative linear
+// state fields. Invalid owns no endpoint or frame capability, so its suffix is
+// scratch and is overwritten in full by Begin. Prepared, Effect, Broken, and
+// every copied live transaction retain either self or a non-invalid phase and
+// cannot be reused as output.
+func availableChannelExternalCommitOutput(out *ChannelExternalCommit) bool {
+	return out != nil && out.self == nil && out.phase == channelExternalCommitPairInvalid
+}
+
 func releaseChannelExternalCommitWithoutClaim(transaction *ChannelExternalCommit) bool {
 	if transaction == nil || transaction.self != transaction ||
 		transaction.phase != channelExternalCommitPairPrepared || transaction.claim == nil {
 		return false
+	}
+	if transaction.ownerLocalUnadmitted {
+		if transaction.endpoint.held || transaction.endpoint.posted || transaction.endpoint.broken {
+			transaction.phase = channelExternalCommitPairBroken
+			return false
+		}
+		*transaction = ChannelExternalCommit{}
+		return true
 	}
 	if !transaction.endpoint.releaseWithoutCommit() {
 		transaction.phase = channelExternalCommitPairBroken
@@ -1406,7 +1619,107 @@ func BeginChannelExternalCommit(
 	id OperationID,
 	claim *SelectClaim,
 ) ChannelExternalCommitBeginResult {
-	if out == nil || *out != (ChannelExternalCommit{}) || source == nil || !id.Valid() || claim == nil {
+	return beginChannelExternalCommit(out, source, id, claim, nil, nil, false)
+}
+
+// BeginChannelOwnerLocalDirectCommit first attempts the same-P direct
+// preparation proof without taking an endpoint admission. prepared is true
+// only when that capability replaced the complete general endpoint audit;
+// false with a Prepared result remains a valid common mailbox transaction.
+func BeginChannelOwnerLocalDirectCommit(
+	out *ChannelExternalCommit,
+	source *ChannelOperationSource,
+	id OperationID,
+	claim *SelectClaim,
+	current *G,
+	driver *ExecutorDriver,
+) (result ChannelExternalCommitBeginResult, prepared bool) {
+	if result, prepared, handled := beginChannelOwnerLocalDirectUnadmitted(
+		out, source, id, claim, current, driver,
+	); handled {
+		return result, prepared
+	}
+	result = beginChannelExternalCommit(out, source, id, claim, current, driver, true)
+	return result, result == ChannelExternalCommitBeginPrepared && out != nil &&
+		current != nil && driver != nil &&
+		out.ownerLocalCurrent == current && out.ownerLocalDriver == driver
+}
+
+// beginChannelOwnerLocalDirectUnadmitted consumes the compiler's exact
+// current-G capability before taking the generic producer lifetime lease. A
+// direct one-case waiter has exactly one hchan node, that node has already been
+// detached under its hchan lock, and its owner P cannot resolve or recycle the
+// frame while another G is current on that same P. An atomic-prefix readiness
+// producer may still race; Commit upgrades to the full admission protocol if
+// its publication appears before the effect is recorded.
+//
+// handled=false means no shared state remains changed and the caller may use
+// the general transaction. handled=true returns a complete public begin
+// result and must not be retried through another admission in this call.
+func beginChannelOwnerLocalDirectUnadmitted(
+	out *ChannelExternalCommit,
+	source *ChannelOperationSource,
+	id OperationID,
+	claim *SelectClaim,
+	current *G,
+	driver *ExecutorDriver,
+) (result ChannelExternalCommitBeginResult, prepared, handled bool) {
+	if !availableChannelExternalCommitOutput(out) || source == nil || !id.Valid() || claim == nil ||
+		current == nil || driver == nil || driver.magic != executorDriverMagic ||
+		driver.state != executorDriverActive || driver.p == nil || driver.p.executor != driver ||
+		driver.p.current != current || current.runP != driver.p ||
+		source != driver.sources.channel || source.owner != driver.p ||
+		source.route != driver.route || id.Route() != driver.route {
+		return ChannelExternalCommitBeginInvalid, false, false
+	}
+	slot, ok := channelOperationSlotFor(source, id)
+	if !ok || preemptLoad(&slot.generation) != id.Generation ||
+		preemptLoad(&slot.state) != uint32(producerSourceActive) ||
+		preemptLoad(&slot.external) != uint32(channelExternalExposed) || slot.claim != claim {
+		return ChannelExternalCommitBeginInvalid, false, false
+	}
+	switch state := selectClaimOwnerAcquire(claim); state {
+	case selectClaimOpen:
+	case selectClaimAcquiring, selectClaimCommitting, selectClaimContended:
+		return ChannelExternalCommitBeginClaimContended, false, true
+	case selectClaimClaimed:
+		return ChannelExternalCommitBeginClaimResolved, false, true
+	default:
+		return ChannelExternalCommitBeginInvariantFailure, false, true
+	}
+	*out = ChannelExternalCommit{
+		self: out,
+		endpoint: channelExternalCommitAdmission{
+			source: source,
+			slot:   slot,
+			id:     id,
+		},
+		claim:                claim,
+		phase:                channelExternalCommitPairPrepared,
+		ownerLocalUnadmitted: true,
+		ownerLocalAdmission:  ownerLocalCompletionRejected,
+	}
+	if out.prepareOwnerLocalDirectAfterSource(current, driver, source, slot, id) {
+		return ChannelExternalCommitBeginPrepared, true, true
+	}
+	if !selectClaimOwnerReleasePending(claim) {
+		out.phase = channelExternalCommitPairBroken
+		return ChannelExternalCommitBeginInvariantFailure, false, true
+	}
+	*out = ChannelExternalCommit{}
+	return ChannelExternalCommitBeginInvalid, false, false
+}
+
+func beginChannelExternalCommit(
+	out *ChannelExternalCommit,
+	source *ChannelOperationSource,
+	id OperationID,
+	claim *SelectClaim,
+	current *G,
+	driver *ExecutorDriver,
+	tryOwnerLocal bool,
+) ChannelExternalCommitBeginResult {
+	if !availableChannelExternalCommitOutput(out) || source == nil || !id.Valid() || claim == nil {
 		return ChannelExternalCommitBeginInvalid
 	}
 	endpoint, acquired := source.acquireExternalCommit(id)
@@ -1440,6 +1753,9 @@ func BeginChannelExternalCommit(
 		out.phase = channelExternalCommitPairBroken
 		return ChannelExternalCommitBeginInvariantFailure
 	}
+	if tryOwnerLocal && out.prepareOwnerLocalDirectHeld(current, driver) {
+		return ChannelExternalCommitBeginPrepared
+	}
 	if !validChannelExternalEndpointHeld(&out.endpoint, claim) {
 		if !out.Abort() {
 			return ChannelExternalCommitBeginInvariantFailure
@@ -1462,6 +1778,253 @@ func (transaction *ChannelExternalCommit) BeginEffect() bool {
 	}
 	transaction.phase = channelExternalCommitPairEffect
 	return true
+}
+
+// ChannelOwnerLocalCommitResult reports whether an already prepared direct
+// same-P completion was committed, remained untouched for the common durable
+// source path, or encountered an invariant failure after the physical effect.
+type ChannelOwnerLocalCommitResult uint8
+
+const (
+	ChannelOwnerLocalCommitInvalid ChannelOwnerLocalCommitResult = iota
+	ChannelOwnerLocalCommitFallback
+	ChannelOwnerLocalCommitted
+	// ChannelOwnerLocalCompletedInline means the core also materialized and
+	// promoted the one-case peer before returning. The typed hchan adapter must
+	// clear its now-recycled frame node instead of retaining the old source ID
+	// for a later owner-local reduction.
+	ChannelOwnerLocalCompletedInline
+)
+
+// PrepareOwnerLocalDirect proves that the currently running G owns the exact
+// executor and direct one-channel continuation named by transaction. It does
+// not publish a channel result. The returned capability is valid only across
+// the caller's existing NoSuspend/NoPanic hchan critical section.
+//
+// The fast lane intentionally accepts only an untouched physical source slot.
+// A readiness producer racing after this proof first changes physical away
+// from Idle; CommitOwnerLocalDirectWithResult then observes that failed CAS
+// before making any source mutation and falls back to the ordinary sticky
+// mailbox protocol.
+func (transaction *ChannelExternalCommit) PrepareOwnerLocalDirect(
+	current *G,
+	driver *ExecutorDriver,
+) bool {
+	return transaction.prepareOwnerLocalDirectHeld(current, driver)
+}
+
+func (transaction *ChannelExternalCommit) prepareOwnerLocalDirectHeld(
+	current *G,
+	driver *ExecutorDriver,
+) bool {
+	if transaction == nil || transaction.self != transaction ||
+		transaction.phase != channelExternalCommitPairPrepared || transaction.claim == nil ||
+		transaction.ownerLocalCurrent != nil || transaction.ownerLocalDriver != nil ||
+		transaction.ownerLocalWait != nil ||
+		transaction.ownerLocalAdmission != ownerLocalCompletionRejected ||
+		current == nil || driver == nil || driver.magic != executorDriverMagic ||
+		driver.state != executorDriverActive || driver.p == nil || driver.p.executor != driver ||
+		driver.p.current != current || current.runP != driver.p {
+		return false
+	}
+	endpoint := &transaction.endpoint
+	source, slot, id := endpoint.source, endpoint.slot, endpoint.id
+	if source == nil || slot == nil || !id.Valid() || source != driver.sources.channel ||
+		source.owner != driver.p || source.route != driver.route || id.Route() != driver.route {
+		return false
+	}
+	return transaction.prepareOwnerLocalDirectAfterSource(current, driver, source, slot, id)
+}
+
+// prepareOwnerLocalDirectAfterSource is the shared proof tail after the caller
+// has authenticated transaction/current/driver and the exact source slot. The
+// compiler-task ingress already owns that capability; the generic transaction
+// reaches it through prepareOwnerLocalDirectHeld. Keeping source-independent
+// scheduler and frozen-frame checks here prevents those paths from diverging.
+func (transaction *ChannelExternalCommit) prepareOwnerLocalDirectAfterSource(
+	current *G,
+	driver *ExecutorDriver,
+	source *ChannelOperationSource,
+	slot *channelOperationSlot,
+	id OperationID,
+) bool {
+	if preemptLoad(&slot.physical) != uint32(channelPhysicalIdle) ||
+		preemptLoad(&slot.mailbox) != uint32(channelMailboxEmpty) {
+		return false
+	}
+	ready, readyOK := channelOperationReadyAt(source, id.LocalSlot()-1)
+	record, wait := &slot.record, slot.record.link.wait
+	plan, planOK := directChannelBoundResumeHeader(wait)
+	// The current-P capability keeps the owner resolver excluded after claim
+	// acquisition. validCommittedDirectChannelPark audited the complete
+	// ParkState/record/link/cleanup graph before this waiter became active, and
+	// only this same P can mutate its owner-only suffix. Check the source-facing
+	// identities which select this transaction; atomic producer state remains
+	// checked separately before and after the physical effect.
+	if !readyOK || ready || wait == nil || !planOK ||
+		plan.claim != transaction.claim || plan.entries == nil || *(*OperationID)(plan.entries) != id ||
+		record.id != id || record.phase != operationActive || record.link.wait != wait {
+		return false
+	}
+	admission := ownerLocalDirectCompletionAdmissionForCurrent(driver, wait)
+	if admission == ownerLocalCompletionRejected {
+		admission = ownerLocalCompletionAdmissionForCurrent(driver, wait)
+	}
+	if admission == ownerLocalCompletionRejected || !RequestPreempt(current) {
+		return false
+	}
+	transaction.ownerLocalCurrent = current
+	transaction.ownerLocalDriver = driver
+	transaction.ownerLocalWait = wait
+	transaction.ownerLocalAdmission = admission
+	return true
+}
+
+func clearChannelExternalCommitOwnerLocal(transaction *ChannelExternalCommit) {
+	transaction.ownerLocalCurrent = nil
+	transaction.ownerLocalDriver = nil
+	transaction.ownerLocalWait = nil
+	transaction.ownerLocalAdmission = ownerLocalCompletionRejected
+}
+
+// acquireChannelExternalCommitFallback upgrades an owner-local transaction
+// only when a concurrent atomic-prefix producer made the mailbox protocol
+// necessary. Claim ownership and the current P keep the frame stable while the
+// ordinary admission is acquired; no physical source effect has been
+// published by this transaction yet.
+func acquireChannelExternalCommitFallback(transaction *ChannelExternalCommit) bool {
+	if transaction == nil || transaction.self != transaction || !transaction.ownerLocalUnadmitted ||
+		transaction.claim == nil || transaction.endpoint.held || transaction.endpoint.posted ||
+		transaction.endpoint.broken {
+		return false
+	}
+	source, slot, id := transaction.endpoint.source, transaction.endpoint.slot, transaction.endpoint.id
+	if source == nil || slot == nil || !id.Valid() || slot.claim != transaction.claim {
+		return false
+	}
+	endpoint, acquired := source.acquireExternalCommit(id)
+	if acquired != channelExternalCommitAcquired {
+		return false
+	}
+	if endpoint.slot != slot || endpoint.source != source || endpoint.id != id ||
+		endpoint.slot.claim != transaction.claim {
+		_ = endpoint.releaseWithoutCommit()
+		return false
+	}
+	transaction.endpoint = endpoint
+	transaction.ownerLocalUnadmitted = false
+	return true
+}
+
+// CommitOwnerLocalDirectWithResult publishes one direct result without
+// round-tripping through the external mailbox, ready leaf/page, pending
+// summary, and subsequent drain protocol. The exact ordinary one-case shape
+// may be resolved and promoted inline; every other valid shape enters the
+// scheduler-owned completion FIFO. The peer is never executed while the hchan
+// lock may still be held.
+func (transaction *ChannelExternalCommit) CommitOwnerLocalDirectWithResult(
+	small uint8,
+) ChannelOwnerLocalCommitResult {
+	if transaction == nil || transaction.self != transaction ||
+		transaction.phase != channelExternalCommitPairEffect || transaction.claim == nil ||
+		small == ResumeSmallInvalid || transaction.ownerLocalCurrent == nil ||
+		transaction.ownerLocalDriver == nil || transaction.ownerLocalWait == nil ||
+		transaction.ownerLocalAdmission == ownerLocalCompletionRejected {
+		return ChannelOwnerLocalCommitInvalid
+	}
+	current, driver, wait := transaction.ownerLocalCurrent,
+		transaction.ownerLocalDriver, transaction.ownerLocalWait
+	endpoint := &transaction.endpoint
+	source, slot, id := endpoint.source, endpoint.slot, endpoint.id
+	if driver.p == nil || driver.p.executor != driver || driver.p.current != current ||
+		current.runP != driver.p || source == nil || slot == nil ||
+		source != driver.sources.channel || source.owner != driver.p ||
+		source.route != driver.route || id.Route() != driver.route ||
+		slot.record.link.wait != wait {
+		transaction.phase = channelExternalCommitPairBroken
+		return ChannelOwnerLocalCommitInvalid
+	}
+	ready, readyOK := channelOperationReadyAt(source, id.LocalSlot()-1)
+	if !readyOK {
+		transaction.phase = channelExternalCommitPairBroken
+		return ChannelOwnerLocalCommitInvalid
+	}
+	if ready || preemptLoad(&slot.mailbox) != uint32(channelMailboxEmpty) {
+		if transaction.ownerLocalUnadmitted && !acquireChannelExternalCommitFallback(transaction) {
+			transaction.phase = channelExternalCommitPairBroken
+			return ChannelOwnerLocalCommitInvalid
+		}
+		clearChannelExternalCommitOwnerLocal(transaction)
+		return ChannelOwnerLocalCommitFallback
+	}
+	committed, committedOK := makeChannelPhysicalWord(
+		channelPhysicalCommitted,
+		driver.route,
+		small,
+	)
+	if !committedOK {
+		transaction.phase = channelExternalCommitPairBroken
+		return ChannelOwnerLocalCommitInvalid
+	}
+	if !preemptCompareAndSwap(&slot.physical, uint32(channelPhysicalIdle), committed) {
+		physical := channelPhysicalStateOf(preemptLoad(&slot.physical))
+		if physical == channelPhysicalReady || physical == channelPhysicalRetryBudget {
+			if transaction.ownerLocalUnadmitted && !acquireChannelExternalCommitFallback(transaction) {
+				transaction.phase = channelExternalCommitPairBroken
+				return ChannelOwnerLocalCommitInvalid
+			}
+			clearChannelExternalCommitOwnerLocal(transaction)
+			return ChannelOwnerLocalCommitFallback
+		}
+		transaction.phase = channelExternalCommitPairBroken
+		return ChannelOwnerLocalCommitInvalid
+	}
+	// From the successful Idle -> Committed CAS onward, PostReady can only
+	// observe Duplicate and cannot mutate the empty mailbox or ready bitmap.
+	// Every remaining transition was prevalidated while the select claim and
+	// current-P capability excluded owner resolution. A generic transaction
+	// additionally retains its producer lifetime admission through Claimed.
+	releaseAdmission := !transaction.ownerLocalUnadmitted
+	if releaseAdmission {
+		endpoint.posted = true
+	}
+	if PublishExternallyCommittedReadyThenCandidate(&slot.record, id) != OperationCompletionPublished ||
+		!publishExternalSelectClaim(transaction.claim) {
+		transaction.phase = channelExternalCommitPairBroken
+		return ChannelOwnerLocalCommitInvalid
+	}
+	// Seal producer ingress before releasing an ordinary endpoint admission or
+	// touching the parked frame. This closes the narrow Duplicate-producer
+	// window between the physical commit and inline ApplyOne: an already
+	// admitted producer is joined by the owner-local fallback, and no new one
+	// can enter after this point.
+	closeResult := source.beginCloseSlot(driver.p, id)
+	if (closeResult != ChannelOperationCloseStarted && closeResult != ChannelOperationAlreadyClosing &&
+		closeResult != ChannelOperationAlreadyQuiesced) ||
+		releaseAdmission && !endpoint.releaseCommitted() {
+		transaction.phase = channelExternalCommitPairBroken
+		return ChannelOwnerLocalCommitInvalid
+	}
+	handled, inlineOK := completeOwnerLocalDirectChannelInline(
+		driver,
+		wait,
+		transaction.ownerLocalAdmission,
+		source,
+		slot,
+		id,
+		small,
+	)
+	if !inlineOK {
+		transaction.phase = channelExternalCommitPairBroken
+		return ChannelOwnerLocalCommitInvalid
+	}
+	if handled {
+		*transaction = ChannelExternalCommit{}
+		return ChannelOwnerLocalCompletedInline
+	}
+	appendOwnerLocalCompletionUnchecked(driver, wait, transaction.ownerLocalAdmission)
+	*transaction = ChannelExternalCommit{}
+	return ChannelOwnerLocalCommitted
 }
 
 // Abort releases a Prepared transaction in claim-before-admission order.
@@ -1488,12 +2051,29 @@ func (transaction *ChannelExternalCommit) Commit() bool {
 // does not participate in the transaction proof and can be ignored by every
 // single-owner target.
 func (transaction *ChannelExternalCommit) CommitAtRoute(route RouteID) bool {
+	return transaction.commitAtRouteWithResult(route, ResumeSmallInvalid)
+}
+
+// CommitAtRouteWithResult is the runtime-facing direct result publication.
+// A zero result is reserved for the general typed cleanup path.
+func (transaction *ChannelExternalCommit) CommitAtRouteWithResult(
+	route RouteID,
+	small uint8,
+) bool {
+	return small != ResumeSmallInvalid && transaction.commitAtRouteWithResult(route, small)
+}
+
+func (transaction *ChannelExternalCommit) commitAtRouteWithResult(route RouteID, small uint8) bool {
 	if transaction == nil || transaction.self != transaction ||
 		transaction.phase != channelExternalCommitPairEffect || transaction.claim == nil ||
 		route != 0 && !route.Valid() {
 		return false
 	}
-	if transaction.endpoint.publishExternallyCommittedAtRoute(route) != ChannelOperationPosted ||
+	if transaction.ownerLocalUnadmitted && !acquireChannelExternalCommitFallback(transaction) {
+		transaction.phase = channelExternalCommitPairBroken
+		return false
+	}
+	if transaction.endpoint.publishExternallyCommittedAtRoute(route, small) != ChannelOperationPosted ||
 		!publishExternalSelectClaim(transaction.claim) ||
 		!transaction.endpoint.releaseCommitted() {
 		transaction.phase = channelExternalCommitPairBroken
@@ -1518,11 +2098,32 @@ func TryPublishOwnerLocalChannelCompletion(
 	source *ChannelOperationSource,
 	id OperationID,
 ) (published, ok bool) {
-	driver, _, route, currentOK := CurrentExecutorDriver(current)
-	if !currentOK || source == nil || source != driver.sources.channel ||
-		source.owner != driver.p || source.route != route || id.Route() != route {
+	driver, _, _, currentOK := CurrentExecutorDriver(current)
+	if !currentOK {
 		return false, true
 	}
+	return TryPublishOwnerLocalChannelCompletionCurrent(current, driver, source, id)
+}
+
+// TryPublishOwnerLocalChannelCompletionCurrent consumes the transient driver
+// capability returned together with current by CurrentExecutorDriver. The
+// caller must not cross a suspension between those calls. Rechecking only the
+// reciprocal current/P/source identities here preserves that capability while
+// avoiding a second complete managed-resume proof in every same-P hchan
+// completion.
+func TryPublishOwnerLocalChannelCompletionCurrent(
+	current *G,
+	driver *ExecutorDriver,
+	source *ChannelOperationSource,
+	id OperationID,
+) (published, ok bool) {
+	if current == nil || driver == nil || source == nil || driver.magic != executorDriverMagic ||
+		driver.state != executorDriverActive || driver.p == nil || driver.p.executor != driver ||
+		driver.p.current != current || current.runP != driver.p || source != driver.sources.channel ||
+		source.owner != driver.p || source.route != driver.route || id.Route() != driver.route {
+		return false, true
+	}
+	route := driver.route
 	slot, slotOK := channelOperationSlotFor(source, id)
 	if !slotOK || preemptLoad(&slot.generation) != id.Generation ||
 		producerSourceLifecycle(preemptLoad(&slot.state)) != producerSourceActive &&
@@ -1532,11 +2133,12 @@ func TryPublishOwnerLocalChannelCompletion(
 	record, claim := &slot.record, slot.claim
 	wait := record.link.wait
 	completionRoute, committed := channelPhysicalCompletionRoute(preemptLoad(&slot.physical))
+	localAdmission := ownerLocalCompletionAdmissionFor(driver, wait)
 	// Current operations which have not yet become active, an already queued
 	// wait, and a route-zero/cross-owner completion are valid external-path
 	// cases. Do not disturb their sticky mailbox or pending bit.
 	if !committed || completionRoute != route || wait == nil ||
-		!canAppendOwnerLocalCompletion(driver, wait) {
+		localAdmission == ownerLocalCompletionRejected {
 		return false, true
 	}
 	ready, readyOK := channelOperationReadyAt(source, id.LocalSlot()-1)
@@ -1587,7 +2189,7 @@ func TryPublishOwnerLocalChannelCompletion(
 		_ = restoreChannelMailboxDrain(source, slot, channelMailboxForced)
 		return false, false
 	}
-	appendOwnerLocalCompletionUnchecked(driver, wait)
+	appendOwnerLocalCompletionUnchecked(driver, wait, localAdmission)
 	if !finishChannelMailboxDrain(source, slot, channelMailboxForced) ||
 		!refreshChannelOperationReadyPage(source, page) {
 		return false, false
@@ -1602,6 +2204,7 @@ func (source *ChannelOperationSource) publishExternallyCommittedHeld(
 	slot *channelOperationSlot,
 	id OperationID,
 	route RouteID,
+	small uint8,
 ) ChannelOperationPostResult {
 	if preemptLoad(&slot.generation) != id.Generation ||
 		preemptLoad(&slot.external) != uint32(channelExternalExposed) || route != 0 && !route.Valid() {
@@ -1611,7 +2214,7 @@ func (source *ChannelOperationSource) publishExternallyCommittedHeld(
 	if state != producerSourceActive && state != producerSourceClosing {
 		return ChannelOperationPostClosed
 	}
-	committed, committedOK := makeChannelPhysicalWord(channelPhysicalCommitted, route)
+	committed, committedOK := makeChannelPhysicalWord(channelPhysicalCommitted, route, small)
 	if !committedOK {
 		return ChannelOperationPostInvalid
 	}
@@ -1986,32 +2589,26 @@ func (source *ChannelOperationSource) BeginClose(p *P, id OperationID) ChannelOp
 	return source.beginCloseSlot(p, id)
 }
 
-// ApplyOne seals producer ingress and joins every admitted frame access before
-// detach. A source-only Ready producer touches just the atomic prefix, but an
-// external hchan transaction uses this same admission as the lifetime lease
-// for its queue-node claim pointer. ConfirmQuiesced remains the later backend
-// strong join and physical cleanup boundary, mirroring ManualOperationSource.
-func (source *ChannelOperationSource) ApplyOne(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
-	slot, ok := channelOperationSlotFor(source, id)
-	if !ok || !validChannelOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
-		&slot.record != record || !record.Matches(id) || record.phase != operationActive {
-		return OperationApplyInvalid
-	}
-	disposition, terminal := OperationDispositionOf(record, id)
-	if !terminal || record.link.park == nil || record.link.wait == nil || record.link.operation != record ||
-		record.link.ticket == (ParkTicket{}) {
-		return OperationApplyInvalid
-	}
-	closeResult := source.beginCloseSlot(p, id)
-	if closeResult != ChannelOperationCloseStarted && closeResult != ChannelOperationAlreadyClosing &&
-		closeResult != ChannelOperationAlreadyQuiesced {
-		return OperationApplyInvalid
-	}
+// applyClosedChannelOperationSlot is the shared detach tail after producer
+// ingress has been sealed. The ordinary source reducer enters through
+// ApplyOne; an exact owner-local direct commit consumes its already-closed
+// capability without repeating slot lookup, owner proof, or close.
+func applyClosedChannelOperationSlot(
+	slot *channelOperationSlot,
+	id OperationID,
+	record *OperationRecord,
+	disposition OperationDisposition,
+) OperationApplyResult {
 	// Admission covers every hchan access to the frame-local claim, not just
 	// atomic source fields. A held external transaction may have published its
 	// mailbox but not yet stored both claims Claimed. Never acknowledge, detach,
 	// clear the claim pointer, or make the G promotable until the sealed source
 	// joins that transaction.
+	if slot == nil || preemptLoad(&slot.generation) != id.Generation ||
+		preemptLoad(&slot.state) != uint32(producerSourceClosing) ||
+		&slot.record != record || !record.Matches(id) || record.phase != operationActive {
+		return OperationApplyInvalid
+	}
 	if !producerSourceSlotQuiesced(&slot.producerSourceSlot) {
 		return OperationApplyRetryBudget
 	}
@@ -2045,12 +2642,35 @@ func (source *ChannelOperationSource) ApplyOne(p *P, id OperationID, record *Ope
 	return OperationApplyDetached
 }
 
+// ApplyOne seals producer ingress and joins every admitted frame access before
+// detach. A source-only Ready producer touches just the atomic prefix, but an
+// external hchan transaction uses this same admission as the lifetime lease
+// for its queue-node claim pointer. ConfirmQuiesced remains the later backend
+// strong join and physical cleanup boundary, mirroring ManualOperationSource.
+func (source *ChannelOperationSource) ApplyOne(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
+	slot, ok := channelOperationSlotFor(source, id)
+	if !ok || !validChannelOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
+		&slot.record != record || !record.Matches(id) || record.phase != operationActive {
+		return OperationApplyInvalid
+	}
+	disposition, terminal := OperationDispositionOf(record, id)
+	if !terminal || record.link.park == nil || record.link.wait == nil || record.link.operation != record ||
+		record.link.ticket == (ParkTicket{}) {
+		return OperationApplyInvalid
+	}
+	closeResult := source.beginCloseSlot(p, id)
+	if closeResult != ChannelOperationCloseStarted && closeResult != ChannelOperationAlreadyClosing &&
+		closeResult != ChannelOperationAlreadyQuiesced {
+		return OperationApplyInvalid
+	}
+	return applyClosedChannelOperationSlot(slot, id, record, disposition)
+}
+
 // ConfirmQuiesced accepts the hchan/backend strong join. The admission word
 // additionally proves every source shim admitted before Apply's seal returned;
 // a late sticky mailbox must first be classified by a later publish epoch.
-func (source *ChannelOperationSource) ConfirmQuiesced(p *P, id OperationID) bool {
-	slot, ok := channelOperationSlotFor(source, id)
-	if !ok || !validChannelOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
+func confirmChannelOperationQuiescedSlot(slot *channelOperationSlot, id OperationID) bool {
+	if slot == nil || preemptLoad(&slot.generation) != id.Generation ||
 		preemptLoad(&slot.state) != uint32(producerSourceClosing) || !producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
 		preemptLoad(&slot.mailbox) != uint32(channelMailboxEmpty) || slot.claim != nil ||
 		preemptLoad(&slot.externalLease)&1 != 0 ||
@@ -2095,6 +2715,12 @@ func (source *ChannelOperationSource) ConfirmQuiesced(p *P, id OperationID) bool
 	return markProducerSourceQuiesced(&slot.producerSourceSlot)
 }
 
+func (source *ChannelOperationSource) ConfirmQuiesced(p *P, id OperationID) bool {
+	slot, ok := channelOperationSlotFor(source, id)
+	return ok && validChannelOperationOwner(source, p) &&
+		confirmChannelOperationQuiescedSlot(slot, id)
+}
+
 // ResetSelectClaim is the resume/compiler-owner reuse boundary. A select claim
 // remains Claimed through logical resolution and every Channel detach; it may
 // return to Open only after this source no longer retains that frame pointer.
@@ -2116,14 +2742,29 @@ func (source *ChannelOperationSource) ResetSelectClaim(p *P, claim *SelectClaim)
 	return preemptCompareAndSwap(&claim.state, selectClaimClaimed, selectClaimOpen)
 }
 
+// ResetSelectClaimAfterConfirmed is the typed-cleanup counterpart of
+// ResetSelectClaim. The caller has already confirmed every frozen operation
+// ID in the wait-set, and ConfirmQuiesced clears each exact slot.claim only
+// after producer admission reaches zero. The binding-time ID audit plus this
+// per-generation confirmation is a stronger, O(case count) certificate than
+// rescanning the source's configured catalog here.
+func (source *ChannelOperationSource) ResetSelectClaimAfterConfirmed(
+	p *P,
+	claim *SelectClaim,
+	confirmed uint32,
+	want uint32,
+) bool {
+	return validChannelOperationOwner(source, p) && p.channelSource == source &&
+		claim != nil && confirmed == want && want != 0 &&
+		preemptCompareAndSwap(&claim.state, selectClaimClaimed, selectClaimOpen)
+}
+
 // CompletionRoute returns the optional producer-locality hint retained by one
 // terminal winning channel operation. The source owner may inspect it only
 // after detach and before Recycle clears the phase-overlaid physical word.
 // Route zero is a valid answer and means that no migration preference exists.
-func (source *ChannelOperationSource) CompletionRoute(p *P, id OperationID) (RouteID, bool) {
-	slot, ok := channelOperationSlotFor(source, id)
-	if !ok || !validChannelOperationOwner(source, p) ||
-		preemptLoad(&slot.generation) != id.Generation || !slot.record.Matches(id) ||
+func channelOperationCompletionRouteSlot(slot *channelOperationSlot, id OperationID) (RouteID, bool) {
+	if slot == nil || preemptLoad(&slot.generation) != id.Generation || !slot.record.Matches(id) ||
 		slot.record.phase != operationDetached || !slot.record.resolutionApplied {
 		return 0, false
 	}
@@ -2134,13 +2775,27 @@ func (source *ChannelOperationSource) CompletionRoute(p *P, id OperationID) (Rou
 	return channelPhysicalCompletionRoute(preemptLoad(&slot.physical))
 }
 
+func (source *ChannelOperationSource) CompletionRoute(p *P, id OperationID) (RouteID, bool) {
+	slot, ok := channelOperationSlotFor(source, id)
+	if !ok || !validChannelOperationOwner(source, p) {
+		return 0, false
+	}
+	return channelOperationCompletionRouteSlot(slot, id)
+}
+
+func takeChannelOperationResultSlot(slot *channelOperationSlot, lease OperationResultLease) bool {
+	id, ok := lease.ID()
+	return ok && slot != nil && preemptLoad(&slot.generation) == id.Generation &&
+		TakeOperationResult(&slot.record, lease)
+}
+
 func (source *ChannelOperationSource) TakeResult(p *P, lease OperationResultLease) bool {
 	id, ok := lease.ID()
 	if !ok || !validChannelOperationOwner(source, p) {
 		return false
 	}
 	slot, ok := channelOperationSlotFor(source, id)
-	return ok && preemptLoad(&slot.generation) == id.Generation && TakeOperationResult(&slot.record, lease)
+	return ok && takeChannelOperationResultSlot(slot, lease)
 }
 
 func (source *ChannelOperationSource) DiscardResult(p *P, lease OperationResultLease) bool {
@@ -2152,10 +2807,9 @@ func (source *ChannelOperationSource) DiscardResult(p *P, lease OperationResultL
 	return ok && preemptLoad(&slot.generation) == id.Generation && DiscardOperationResult(&slot.record, lease)
 }
 
-func (source *ChannelOperationSource) Recycle(p *P, id OperationID) bool {
-	slot, ok := channelOperationSlotFor(source, id)
+func recycleChannelOperationSlot(source *ChannelOperationSource, slot *channelOperationSlot, id OperationID) bool {
 	ready, readyOK := channelOperationReadyAt(source, id.LocalSlot()-1)
-	if !ok || !validChannelOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
+	if slot == nil || preemptLoad(&slot.generation) != id.Generation ||
 		preemptLoad(&slot.state) != uint32(producerSourceQuiesced) || !producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
 		preemptLoad(&slot.mailbox) != uint32(channelMailboxEmpty) || preemptLoad(&slot.external) != 0 ||
 		preemptLoad(&slot.externalLease)&1 != 0 || slot.claim != nil || !readyOK || ready ||
@@ -2178,6 +2832,42 @@ func (source *ChannelOperationSource) Recycle(p *P, id OperationID) bool {
 	// a change to generation reuse or external-lease retirement semantics.
 	source.reserveCursor = 0
 	return true
+}
+
+func (source *ChannelOperationSource) Recycle(p *P, id OperationID) bool {
+	slot, ok := channelOperationSlotFor(source, id)
+	return ok && validChannelOperationOwner(source, p) &&
+		recycleChannelOperationSlot(source, slot, id)
+}
+
+// finishOwnerLocalDirectChannelResult collapses the confirmed one-channel
+// result tail while retaining the same source lifecycle gates. The direct
+// cleanup cursor has already authenticated this generation and descriptor;
+// resolve the stable slot once, then confirm, release the private claim, take
+// the exact result lease, read its locality hint, and recycle in that order.
+// Generic select continues to use the independently bounded operations above.
+func (source *ChannelOperationSource) finishOwnerLocalDirectChannelResult(
+	p *P,
+	slot *channelOperationSlot,
+	id OperationID,
+	claim *SelectClaim,
+	lease OperationResultLease,
+) (RouteID, bool) {
+	leaseID, leaseOK := lease.ID()
+	if slot == nil || !leaseOK || leaseID != id || claim == nil ||
+		!validChannelOperationOwner(source, p) ||
+		preemptLoad(&slot.generation) != id.Generation ||
+		!confirmChannelOperationQuiescedSlot(slot, id) ||
+		!preemptCompareAndSwap(&claim.state, selectClaimClaimed, selectClaimOpen) ||
+		!takeChannelOperationResultSlot(slot, lease) {
+		return 0, false
+	}
+	preferred, routeOK := channelOperationCompletionRouteSlot(slot, id)
+	if !routeOK || preferred != 0 && !preferred.Valid() ||
+		!recycleChannelOperationSlot(source, slot, id) {
+		return 0, false
+	}
+	return preferred, true
 }
 
 func channelOperationSourceEmpty(source *ChannelOperationSource, owner *P) bool {

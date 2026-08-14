@@ -18,7 +18,11 @@
 
 package coro
 
-import "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+import (
+	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+)
 
 // Keep these operations as target-lowered sequentially consistent uint32
 // atomics. A target without native 32-bit atomics (for example RV32IMC without
@@ -54,4 +58,16 @@ func preemptLoadWord(ptr *uintptr) uintptr {
 
 func preemptStoreWord(ptr *uintptr, value uintptr) {
 	atomic.Store(ptr, value)
+}
+
+func preemptLoadPointer(ptr *unsafe.Pointer) unsafe.Pointer {
+	return atomic.Load(ptr)
+}
+
+func preemptStorePointer(ptr *unsafe.Pointer, value unsafe.Pointer) {
+	atomic.Store(ptr, value)
+}
+
+func preemptSwapPointer(ptr *unsafe.Pointer, value unsafe.Pointer) unsafe.Pointer {
+	return atomic.Exchange(ptr, value)
 }

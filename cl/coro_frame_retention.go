@@ -38,6 +38,12 @@ type coroFrameRetentionProof struct {
 	// allocations are the exact park-transaction cells reclassified from an
 	// x/tools Heap Alloc into storage owned by the LLVM coroutine frame.
 	allocations map[*ssa.Alloc]struct{}
+	// borrowedAllocations are ordinary fresh Go cells whose complete static
+	// address graph is proven not to survive the owning function. x/tools marks
+	// them Heap at a conservative interprocedural call boundary; the stronger
+	// closed-world proof permits target-bounded LLVM frame/native-stack storage
+	// without source annotations or per-operation runtime scratch fields.
+	borrowedAllocations map[*ssa.Alloc]coro.SSABorrowedAllocationProof
 	// managedHeapAllocations remain ordinary Go heap allocations. Each fact is
 	// admitted only after the frozen lowered-call plan proves its exact AllocZ
 	// path; the resulting pointer may then be conservatively scanned from this
@@ -271,7 +277,19 @@ func (a *coroPhysicalPureSSAAudit) frameRetainsAllocation(alloc *ssa.Alloc) bool
 	if proof == nil {
 		return false
 	}
-	_, ok := proof.allocations[alloc]
+	if _, ok := proof.allocations[alloc]; ok {
+		return true
+	}
+	_, ok := proof.borrowedAllocations[alloc]
+	return ok
+}
+
+func (a *coroPhysicalPureSSAAudit) frameRetainsBorrowedAllocation(alloc *ssa.Alloc) bool {
+	proof := a.currentFrameRetentionProof()
+	if proof == nil {
+		return false
+	}
+	_, ok := proof.borrowedAllocations[alloc]
 	return ok
 }
 
@@ -298,6 +316,7 @@ func (a *coroPhysicalPureSSAAudit) currentFrameRetentionProof() *coroFrameRetent
 func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetentionProof {
 	proof := &coroFrameRetentionProof{
 		allocations:               make(map[*ssa.Alloc]struct{}),
+		borrowedAllocations:       make(map[*ssa.Alloc]coro.SSABorrowedAllocationProof),
 		managedHeapAllocations:    make(map[*ssa.Alloc]coroFrameRetentionManagedHeapAllocation),
 		terminalResultAllocations: make(map[*ssa.Alloc]struct{}),
 		exactRoots:                make(map[ssa.Value]coroFrameRetentionExactRoot),
@@ -311,7 +330,6 @@ func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetent
 	if a.frameRetentionABI == CoroFrameRetentionParkABIV2 {
 		a.proveParkFrameRetention(proof)
 	}
-	a.proveManagedHeapAllocations(proof)
 	terminalAllocations, err := coroStaticTerminalReconstructionAllocations(a.fn)
 	if err != nil {
 		// Static-cleanup preflight reports the precise structural error. Do not
@@ -321,9 +339,52 @@ func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetent
 	for _, allocation := range terminalAllocations {
 		proof.terminalResultAllocations[allocation] = struct{}{}
 	}
+	a.proveBorrowedHeapAllocations(proof)
+	a.proveManagedHeapAllocations(proof)
 	newCoroFrameRetentionRootBuilder(a, proof).prove()
 	proof.rootDigest = coroFrameRetentionRootDigest(a, proof)
 	return proof
+}
+
+// proveBorrowedHeapAllocations strengthens x/tools' conservative Heap bit only
+// for fresh cells whose complete interprocedural address graph remains bounded
+// by the owning call. The exact physical type must fit the target's native
+// local limit: outcome-plain functions use an entry alloca, while CoroSplit
+// incorporates the same storage into a stackless frame. Each physical recipe
+// still zeroes the cell at the source Alloc instruction, preserving loop and
+// conditional allocation semantics despite entry-owned storage.
+func (a *coroPhysicalPureSSAAudit) proveBorrowedHeapAllocations(proof *coroFrameRetentionProof) {
+	if a == nil || a.ctx == nil || a.ctx.prog == nil || a.universe == nil || a.fn == nil || proof == nil {
+		return
+	}
+	bitcastAllocation := (*ssa.Alloc)(nil)
+	if bitcast, exact := coro.ProveSSAExactScalarBitcast(a.fn); exact {
+		bitcastAllocation = bitcast.Allocation
+	}
+	for _, block := range a.fn.Blocks {
+		for _, instruction := range block.Instrs {
+			allocation, ok := instruction.(*ssa.Alloc)
+			if !ok || !allocation.Heap || allocation == bitcastAllocation ||
+				a.ctx.skipSyntheticMakeSliceAlloc(allocation) || isEmissionVargsAlloc(a.ctx, allocation) {
+				continue
+			}
+			if _, park := proof.allocations[allocation]; park {
+				continue
+			}
+			if _, terminal := proof.terminalResultAllocations[allocation]; terminal {
+				continue
+			}
+			pointer, ok := types.Unalias(a.typeOf(allocation.Type())).Underlying().(*types.Pointer)
+			if !ok || a.ctx.prog.LocalGoTypeExceedsNativeStack(a.typeOf(pointer.Elem())) ||
+				validateCoroPhysicalSSAValueType(a.typeOf(pointer.Elem())) != nil {
+				continue
+			}
+			borrow, exact := proveCoroBorrowedAllocation(a.universe, allocation)
+			if exact {
+				proof.borrowedAllocations[allocation] = borrow
+			}
+		}
+	}
 }
 
 func (a *coroPhysicalPureSSAAudit) proveParkFrameRetention(proof *coroFrameRetentionProof) {
@@ -466,6 +527,9 @@ func (a *coroPhysicalPureSSAAudit) proveManagedHeapAllocations(proof *coroFrameR
 				continue
 			}
 			if _, frameLocal := proof.allocations[alloc]; frameLocal {
+				continue
+			}
+			if _, borrowed := proof.borrowedAllocations[alloc]; borrowed {
 				continue
 			}
 			fact, reason := a.managedHeapAllocationCapability(alloc)
@@ -817,7 +881,9 @@ func (b *coroFrameRetentionRootBuilder) traceAddress(value ssa.Value, use ssa.In
 		if _, managed := b.proof.managedHeapAllocations[value]; managed {
 			kind = coroFrameRetentionRootManagedHeapAllocation
 		} else if value.Heap {
-			if _, retained := b.proof.allocations[value]; !retained {
+			_, parkRetained := b.proof.allocations[value]
+			_, borrowRetained := b.proof.borrowedAllocations[value]
+			if !parkRetained && !borrowRetained {
 				return trace, false
 			}
 		}
@@ -2149,6 +2215,10 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 		return ""
 	}
 	builder := newCoroFrameRetentionRootBuilder(a, proof)
+	typeKey := structuralEmissionTypeKey
+	if a.universe != nil {
+		typeKey = a.universe.emissionTypeKeys.strict
+	}
 	valueID := func(value ssa.Value) string {
 		if value == nil {
 			return "none"
@@ -2171,7 +2241,7 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 	for _, rootValue := range proof.exactRetainedRoots() {
 		root := proof.exactRoots[rootValue]
 		fields = append(fields, framedEmissionKey(
-			"root", valueID(root.value), strconv.Itoa(int(root.kind)), structuralEmissionTypeKey(a.typeOf(root.value.Type())),
+			"root", valueID(root.value), strconv.Itoa(int(root.kind)), typeKey(a.typeOf(root.value.Type())),
 		))
 	}
 	managedAllocationKeys := make([]*ssa.Alloc, 0, len(proof.managedHeapAllocations))
@@ -2188,7 +2258,7 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 			mode = "module-zero-sentinel"
 		}
 		fields = append(fields, framedEmissionKey(
-			"managed-heap-allocation", valueID(allocation), structuralEmissionTypeKey(a.typeOf(allocation.Type())),
+			"managed-heap-allocation", valueID(allocation), typeKey(a.typeOf(allocation.Type())),
 			mode, fact.helper, string(fact.helperTarget), fact.helperEmission.String(),
 		))
 	}
@@ -2201,7 +2271,7 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 	})
 	for _, allocation := range terminalAllocationKeys {
 		fields = append(fields, framedEmissionKey(
-			"cleanup-terminal-result-allocation", valueID(allocation), structuralEmissionTypeKey(a.typeOf(allocation.Type())),
+			"cleanup-terminal-result-allocation", valueID(allocation), typeKey(a.typeOf(allocation.Type())),
 		))
 	}
 	addressKeys := make([]coroFrameRetentionAddressUse, 0, len(proof.stableAddresses))
@@ -2221,7 +2291,7 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 		if fact.nonNil {
 			nilMode = "non-nil"
 		}
-		entry := []string{"address", valueID(key.value), instructionID(key.use), structuralEmissionTypeKey(a.typeOf(key.value.Type())), nilMode}
+		entry := []string{"address", valueID(key.value), instructionID(key.use), typeKey(a.typeOf(key.value.Type())), nilMode}
 		for _, evidence := range fact.evidence {
 			entry = append(entry, "evidence="+instructionID(evidence))
 		}
@@ -2264,6 +2334,21 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 	})
 	for _, allocation := range allocationKeys {
 		fields = append(fields, framedEmissionKey("park-allocation", valueID(allocation)))
+	}
+	borrowedAllocationKeys := make([]*ssa.Alloc, 0, len(proof.borrowedAllocations))
+	for allocation := range proof.borrowedAllocations {
+		borrowedAllocationKeys = append(borrowedAllocationKeys, allocation)
+	}
+	sort.Slice(borrowedAllocationKeys, func(i, j int) bool {
+		return builder.valueOrder[borrowedAllocationKeys[i]] < builder.valueOrder[borrowedAllocationKeys[j]]
+	})
+	for _, allocation := range borrowedAllocationKeys {
+		borrow := proof.borrowedAllocations[allocation]
+		fields = append(fields, framedEmissionKey(
+			"borrowed-allocation", valueID(allocation), typeKey(a.typeOf(allocation.Type())),
+			strconv.FormatUint(uint64(borrow.FunctionsVisited), 10),
+			strconv.FormatUint(uint64(borrow.ParametersProven), 10),
+		))
 	}
 	sum := sha256.Sum256([]byte(framedEmissionKey(fields...)))
 	return hex.EncodeToString(sum[:])

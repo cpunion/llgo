@@ -97,6 +97,7 @@ func coroProgramManifestHashV1(ctx *context, anchors []string, bootstrap ...*cor
 			return [16]byte{}, fmt.Errorf("coroutine program manifest requires the unique V2 startup table")
 		}
 		write("llgo.coro.program-bootstrap.v2")
+		write(fmt.Sprintf("%d", program.Flags))
 		write(hex.EncodeToString(program.StepHash[:]))
 		for _, step := range program.Steps {
 			write(fmt.Sprintf("%d", step.Kind))

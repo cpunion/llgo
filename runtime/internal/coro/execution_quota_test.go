@@ -74,14 +74,23 @@ func TestExecutionQuotaLifecycleAndStickyWake(t *testing.T) {
 	if wake, ok := quota.Release(1); !ok || !wake {
 		t.Fatalf("route 1 release = (%t, %t), want sticky wake", wake, ok)
 	}
+	if acquired, ok := quota.TryAcquire(1); acquired || !ok {
+		t.Fatalf("freshly released route bypassed published waiter: (%t, %t)", acquired, ok)
+	}
 	if held, ok := quota.Held(1); !ok || held {
 		t.Fatalf("released route 1 held lease = (%t, %t)", held, ok)
 	}
 	if acquired, ok := quota.TryAcquire(3); !acquired || !ok {
 		t.Fatal("route 3 did not acquire released permit")
 	}
-	if _, ok := quota.Release(3); !ok {
+	if wake, ok := quota.Release(3); !ok || !wake {
 		t.Fatal("route 3 release failed")
+	}
+	if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
+		t.Fatal("deferred route 1 did not acquire after waiter release")
+	}
+	if _, ok := quota.Release(1); !ok {
+		t.Fatal("route 1 final release failed")
 	}
 	if wake, ok := quota.Seal(); !ok || wake {
 		t.Fatalf("execution quota seal = (%t, %t)", wake, ok)

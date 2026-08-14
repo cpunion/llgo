@@ -1,7 +1,5 @@
-//go:build !byollvm && darwin && !amd64 && llvm14
-
 /*
- * Copyright (c) 2024 The XGo Authors (xgo.dev). All rights reserved.
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +14,9 @@
  * limitations under the License.
  */
 
-package llvm
+// This fixture deliberately imports and observes nothing. It isolates process
+// and scheduler startup without making a foreign write part of the closed
+// program, so the compiler must not request a worker executor.
+package main
 
-const ldLLVMConfigBin = "/opt/homebrew/opt/llvm@14/bin/llvm-config"
+func main() {}

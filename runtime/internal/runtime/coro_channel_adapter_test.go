@@ -113,6 +113,16 @@ func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
 		coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State)
 }
 
+func coroTargetPublishDirectChannelCompletionV1(
+	owner *coro.ExecutorDriver,
+	route coro.RouteID,
+	completion *coro.DirectChannelCompletion,
+) bool {
+	return route == coro.RouteID(1) &&
+		coro.PublishExecutorDirectChannelCompletion(owner, completion) &&
+		coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State)
+}
+
 type coroChannelAdapterFrame struct {
 	g          *coro.G
 	handle     unsafe.Pointer
@@ -235,7 +245,10 @@ func resumeCoroChannelAdapterFrame(
 	if !ok || action.Kind != coro.ActionResume {
 		t.Fatalf("activate completed channel adapter G = (%+v, %t)", action, ok)
 	}
-	status := __llgo_coro_chan_resume_v1(unsafe.Pointer(frame.g), unsafe.Pointer(state))
+	status := coroChanResumeCompatibilityV1(unsafe.Pointer(frame.g), unsafe.Pointer(state))
+	if *state != (CoroChanParkV1{}) {
+		t.Fatalf("channel adapter resume retained reusable park state: %+v", *state)
+	}
 	frame.header.SuspendReason = uint16(coro.SuspendNone)
 	frame.header.Lifecycle = uint16(coro.FrameActive)
 	return action, status
@@ -278,6 +291,14 @@ func pollCoroChannelAdapterExecutorProgress(t *testing.T, driver *coro.ExecutorD
 		case coro.ExecutorRunStepMaterialize:
 			if !coroMaterializeResumeCleanupStepV1(runStep.Cleanup) {
 				t.Fatalf("materialize channel adapter executor at step %d", step)
+			}
+		case coro.ExecutorRunStepDirectChannel:
+			if !coroMaterializeDirectChannelCompletionV1(runStep.Direct) {
+				t.Fatalf("materialize compact channel adapter executor at step %d", step)
+			}
+			atomicResolve = true
+			if coro.EnterExecutorRunCompatibility(driver) {
+				return atomicResolve
 			}
 		default:
 			t.Fatalf("unexpected channel adapter executor step %d at %d", runStep.Kind, step)
@@ -485,6 +506,9 @@ func TestCoroChannelAdapterCleanupCursorBoundsPeerWork(t *testing.T) {
 }
 
 func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
+	if size := unsafe.Sizeof(CoroChanParkV1{}); size > 216 {
+		t.Fatalf("compact channel park storage size = %d, want <= 216", size)
+	}
 	coroCurrentTaskRouteTestV1 = 7
 	defer func() {
 		coroCurrentTaskTestV1 = nil
@@ -569,8 +593,16 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	sendAction := dequeueCoroChannelAdapterFrame(t, p, pairSender)
 	parkCoroChannelAdapterFrame(t, p, pairSender, sendAction, ch, unsafe.Pointer(&sendValue), pairSenderState, true)
 	pollCoroChannelAdapterExecutor(t, driver)
+	producerRoute, validProducerRoute := driver.Route()
+	if !validProducerRoute {
+		t.Fatal("resolve paired-channel producer route")
+	}
 	for _, frame := range []*coroChannelAdapterFrame{pairReceiver, pairSender} {
-		if route, valid := coro.MaterializedRunnablePreferredRoute(frame.g); !valid || route != 7 {
+		// Compiler channel lowering carries the exact logical task, so the
+		// compact path derives producer locality from its bound executor rather
+		// than the host-test current-task shim used by foreign entry points.
+		if route, valid := coro.MaterializedRunnablePreferredRoute(frame.g); !valid ||
+			route != producerRoute {
 			t.Fatalf("paired-channel materialized producer route = (%d,%t)", route, valid)
 		}
 	}
@@ -669,13 +701,16 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	}
 	selectedValue := uint32(0xa5b6c7d8)
 	directSendAction := activateCoroChannelAdapterFrame(t, p, directSender)
-	coroCurrentTaskTestV1 = directSender.g
-	coroCurrentTaskRouteTestV1 = 1
-	if !CoroChanTrySend(selectChannels[1], unsafe.Pointer(&selectedValue), int(unsafe.Sizeof(selectedValue))) {
-		t.Fatal("same-P direct send did not match channel selector")
-	}
+	// Deliberately leave the legacy ambient-current adapter empty and publish a
+	// mismatched advisory route. The compiler-owned try ABI must derive owner
+	// locality only from its explicit task argument; otherwise this rendezvous
+	// falls back to an external source epoch and the atomic-resolve gate below
+	// fails.
 	coroCurrentTaskTestV1 = nil
 	coroCurrentTaskRouteTestV1 = 7
+	if !CoroChanTrySend(unsafe.Pointer(directSender.g), selectChannels[1], unsafe.Pointer(&selectedValue), int(unsafe.Sizeof(selectedValue))) {
+		t.Fatal("same-P direct send did not match channel selector")
+	}
 	yieldCoroChannelAdapterFrame(t, p, directSender, directSendAction)
 	if !pollCoroChannelAdapterExecutorProgress(t, driver) {
 		t.Fatal("same-P channel match did not use owner-local completion reduction")
@@ -785,6 +820,146 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 		t.Fatalf("post-select pair retained queue/source state: send=%p recv=%p pending=%t",
 			follow.sendq.first, follow.recvq.first, coroProgramChannelSourceV1State.Pending())
 	}
+
+	// A blocked buffered sender uses the same compact node. Consuming the old
+	// buffer head must move that sender into the newly free slot, complete it on
+	// the owner, and leave no generic channel-source generation behind.
+	bufferedSenderG, bufferedSenderOK := coro.NextRunnable(p)
+	if !bufferedSenderOK || bufferedSenderG == nil {
+		t.Fatalf("dequeue compact buffered sender = (%p, %t)", bufferedSenderG, bufferedSenderOK)
+	}
+	var bufferedSender *coroChannelAdapterFrame
+	switch bufferedSenderG {
+	case receiver.g:
+		bufferedSender = receiver
+	case sender.g:
+		bufferedSender = sender
+	default:
+		t.Fatalf("unexpected compact buffered sender G %p", bufferedSenderG)
+	}
+	bufferBacking := [1]uint32{0xdecafbad}
+	compactBuffered := &Chan{
+		qcount: 1, dataqsiz: 1, buf: unsafe.Pointer(&bufferBacking[0]),
+		elemsize: int(unsafe.Sizeof(bufferBacking[0])),
+	}
+	compactBuffered.mutex.Init(nil)
+	bufferedSendValue := uint32(0x11223344)
+	var bufferedSendState CoroChanParkV1
+	bufferedSendAction := activateCoroChannelAdapterFrame(t, p, bufferedSender)
+	parkCoroChannelAdapterFrame(
+		t, p, bufferedSender, bufferedSendAction, compactBuffered,
+		unsafe.Pointer(&bufferedSendValue), &bufferedSendState, true,
+	)
+	if compactBuffered.sendq.first != &bufferedSendState.waiter ||
+		bufferedSendState.waiter.direct != &bufferedSendState.Completion {
+		t.Fatalf("compact buffered sender not published: %p", compactBuffered.sendq.first)
+	}
+	bufferedReceiverG, bufferedReceiverOK := coro.NextRunnable(p)
+	if !bufferedReceiverOK || bufferedReceiverG == nil || bufferedReceiverG == bufferedSenderG {
+		t.Fatalf("dequeue compact buffered receiver = (%p, %t), sender=%p",
+			bufferedReceiverG, bufferedReceiverOK, bufferedSenderG)
+	}
+	var bufferedReceiver *coroChannelAdapterFrame
+	switch bufferedReceiverG {
+	case receiver.g:
+		bufferedReceiver = receiver
+	case sender.g:
+		bufferedReceiver = sender
+	default:
+		t.Fatalf("unexpected compact buffered receiver G %p", bufferedReceiverG)
+	}
+	bufferedRecvAction := activateCoroChannelAdapterFrame(t, p, bufferedReceiver)
+	var bufferedRecvValue uint32
+	recvOK, tryOK := CoroChanTryRecv(
+		unsafe.Pointer(bufferedReceiver.g), compactBuffered,
+		unsafe.Pointer(&bufferedRecvValue), int(unsafe.Sizeof(bufferedRecvValue)),
+	)
+	if !recvOK || !tryOK || bufferedRecvValue != 0xdecafbad {
+		t.Fatalf("compact buffered receive = (%#x, %t, %t)", bufferedRecvValue, recvOK, tryOK)
+	}
+	yieldCoroChannelAdapterFrame(t, p, bufferedReceiver, bufferedRecvAction)
+	if !coro.EnterExecutorRunCompatibility(driver) {
+		t.Fatal("leave compact buffered owner-local completion runner")
+	}
+	if compactBuffered.sendq.first != nil || compactBuffered.sendq.last != nil ||
+		compactBuffered.qcount != 1 || bufferBacking[0] != bufferedSendValue ||
+		coroProgramChannelSourceV1State.Pending() {
+		t.Fatalf("compact buffered refill = queue:(%p,%p) count:%d value:%#x pending:%t",
+			compactBuffered.sendq.first, compactBuffered.sendq.last, compactBuffered.qcount,
+			bufferBacking[0], coroProgramChannelSourceV1State.Pending())
+	}
+	bufferedSenderNext, bufferedSenderNextOK := coro.NextRunnable(p)
+	if !bufferedSenderNextOK || bufferedSenderNext != bufferedSender.g {
+		t.Fatalf("dequeue completed compact buffered sender = (%p, %t), want %p",
+			bufferedSenderNext, bufferedSenderNextOK, bufferedSender.g)
+	}
+	bufferedSendAction, bufferedSendStatus := resumeCoroChannelAdapterFrame(
+		t, p, bufferedSender, &bufferedSendState,
+	)
+	if bufferedSendStatus != coroChanResumeSendOK {
+		t.Fatalf("compact buffered send status = %d, want %d", bufferedSendStatus, coroChanResumeSendOK)
+	}
+	yieldCoroChannelAdapterFrame(t, p, bufferedSender, bufferedSendAction)
+
+	// A one-case unbuffered wait uses the compact completion node rather than
+	// the generic channel source graph. Task cancellation must arbitrate that
+	// node, detach the typed hchan waiter on the owner, and materialize the same
+	// compiler-visible abort result without leaving source state behind.
+	directCanceledG, directCanceledOK := coro.NextRunnable(p)
+	if !directCanceledOK || directCanceledG == nil {
+		t.Fatalf("dequeue direct channel waiter for cancellation = (%p, %t)", directCanceledG, directCanceledOK)
+	}
+	var directCanceledFrame *coroChannelAdapterFrame
+	switch directCanceledG {
+	case receiver.g:
+		directCanceledFrame = receiver
+	case sender.g:
+		directCanceledFrame = sender
+	default:
+		t.Fatalf("unexpected direct canceled frame G %p", directCanceledG)
+	}
+	directCanceledAction := activateCoroChannelAdapterFrame(t, p, directCanceledFrame)
+	directCanceledChannel := new(Chan)
+	directCanceledChannel.elemsize = int(unsafe.Sizeof(uint32(0)))
+	directCanceledChannel.mutex.Init(nil)
+	var directCanceledValue uint32
+	var directCanceledState CoroChanParkV1
+	parkCoroChannelAdapterFrame(
+		t, p, directCanceledFrame, directCanceledAction, directCanceledChannel,
+		unsafe.Pointer(&directCanceledValue), &directCanceledState, false,
+	)
+	if directCanceledChannel.recvq.first != &directCanceledState.waiter {
+		t.Fatalf("direct canceled waiter not published: %p", directCanceledChannel.recvq.first)
+	}
+	if !coro.RequestTaskCancellation(p, directCanceledFrame.g, coro.TaskCancelAbort) {
+		t.Fatal("request direct channel cancellation")
+	}
+	pollCoroChannelAdapterExecutor(t, driver)
+	if directCanceledChannel.recvq.first != nil || directCanceledChannel.recvq.last != nil ||
+		coroProgramChannelSourceV1State.Pending() {
+		t.Fatalf("direct channel cancellation retained queue/source state: recv=(%p,%p) pending=%t",
+			directCanceledChannel.recvq.first, directCanceledChannel.recvq.last,
+			coroProgramChannelSourceV1State.Pending())
+	}
+	directCanceledNext, directCanceledNextOK := coro.NextRunnable(p)
+	if directCanceledNextOK && directCanceledNext != directCanceledFrame.g {
+		if !coro.Enqueue(p, directCanceledNext) {
+			t.Fatalf("rotate unrelated direct cancellation G %p", directCanceledNext)
+		}
+		directCanceledNext, directCanceledNextOK = coro.NextRunnable(p)
+	}
+	if !directCanceledNextOK || directCanceledNext != directCanceledFrame.g {
+		t.Fatalf("dequeue canceled direct channel G = (%p, %t), want %p",
+			directCanceledNext, directCanceledNextOK, directCanceledFrame.g)
+	}
+	directCanceledAction, directCanceledStatus := resumeCoroChannelAdapterFrame(
+		t, p, directCanceledFrame, &directCanceledState,
+	)
+	if directCanceledStatus != coroChanResumeTaskAbort {
+		t.Fatalf("direct channel cancellation status = %d, want %d",
+			directCanceledStatus, coroChanResumeTaskAbort)
+	}
+	yieldCoroChannelAdapterFrame(t, p, directCanceledFrame, directCanceledAction)
 
 	// Claim contention can temporarily leave receivers queued while a sender
 	// uses an available buffer slot. Closing must deliver that buffered value
@@ -937,4 +1112,116 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 			canceledChannels[0].recvq.first, canceledChannels[1].recvq.first,
 			coroProgramChannelSourceV1State.Pending())
 	}
+
+	// Nil channels have no hchan queue at all. A fresh frame isolates this final
+	// cancellation-only check from the two task-stop scenarios above.
+	nilWaitFrame := newCoroChannelAdapterFrame(t)
+	nilWaitAction := beginCoroChannelAdapterFrame(t, p, nilWaitFrame)
+	var nilWaitValue uint32
+	var nilWaitState CoroChanParkV1
+	parkCoroChannelAdapterFrame(
+		t, p, nilWaitFrame, nilWaitAction, nil, unsafe.Pointer(&nilWaitValue), &nilWaitState, false,
+	)
+	if nilWaitState.waiter.ch != nil || nilWaitState.waiter.direct != &nilWaitState.Completion ||
+		coroProgramChannelSourceV1State.Pending() {
+		t.Fatalf("compact nil-channel park retained physical/source state: waiter=%+v pending=%t",
+			nilWaitState.waiter, coroProgramChannelSourceV1State.Pending())
+	}
+	if !coro.RequestTaskCancellation(p, nilWaitFrame.g, coro.TaskCancelAbort) {
+		t.Fatal("request compact nil-channel cancellation")
+	}
+	pollCoroChannelAdapterExecutor(t, driver)
+	nilWaitNext, nilWaitNextOK := coro.NextRunnable(p)
+	if !nilWaitNextOK || nilWaitNext != nilWaitFrame.g {
+		t.Fatalf("dequeue canceled compact nil-channel G = (%p, %t), want %p",
+			nilWaitNext, nilWaitNextOK, nilWaitFrame.g)
+	}
+	nilWaitAction, nilWaitStatus := resumeCoroChannelAdapterFrame(t, p, nilWaitFrame, &nilWaitState)
+	if nilWaitStatus != coroChanResumeTaskAbort {
+		t.Fatalf("compact nil-channel status = %d, want %d", nilWaitStatus, coroChanResumeTaskAbort)
+	}
+	yieldCoroChannelAdapterFrame(t, p, nilWaitFrame, nilWaitAction)
+
+	// Once the owner has materialized a compact one-case completion, neither its
+	// direct record nor the physical producer may pin the continuation to that
+	// owner's P. Exercise the actual typed resume after a runnable transfer; this
+	// guards the compact path's P-neutral contract independently of select's
+	// generic ResumePacket migration above.
+	// Retire prior reusable fixture runnables from this final isolated scenario;
+	// canceled tasks deliberately retain their task-stop token and cannot form a
+	// fresh physical park.
+	for {
+		g, ok := coro.NextRunnable(p)
+		if !ok {
+			t.Fatal("drain prior compact channel fixture runnables")
+		}
+		if g == nil {
+			break
+		}
+	}
+	migrateRecvFrame := newCoroChannelAdapterFrame(t)
+	migrateRecvG := migrateRecvFrame.g
+	migrateRecvAction := beginCoroChannelAdapterFrame(t, p, migrateRecvFrame)
+	migrateChannel := new(Chan)
+	migrateChannel.elemsize = int(unsafe.Sizeof(uint32(0)))
+	migrateChannel.mutex.Init(nil)
+	var migrateRecvValue uint32
+	var migrateRecvState CoroChanParkV1
+	if status := tryOrParkCoroChanV2(
+		unsafe.Pointer(migrateRecvFrame.g), migrateRecvFrame.handle,
+		unsafe.Pointer(migrateRecvFrame.header), unsafe.Pointer(migrateChannel),
+		unsafe.Pointer(&migrateRecvValue), unsafe.Pointer(&migrateRecvState),
+		unsafe.Sizeof(migrateRecvValue), 41, 73, false,
+	); status != coroChanResumeInvalid {
+		t.Fatalf("compact try-or-park receive status = %d, want pending", status)
+	}
+	if migrateRecvFrame.header.SuspendReason != uint16(coro.SuspendPark) ||
+		migrateRecvFrame.header.Lifecycle != uint16(coro.FrameSuspended) ||
+		migrateRecvFrame.header.StateID != 41 || migrateRecvFrame.header.Line != 73 {
+		t.Fatalf("compact try-or-park receive header = %+v", *migrateRecvFrame.header)
+	}
+	if parked, ok := coro.Resumed(p, migrateRecvFrame.g, migrateRecvAction); !ok || parked.Kind != coro.ActionPark {
+		t.Fatalf("commit compact try-or-park receive = (%+v, %t)", parked, ok)
+	}
+	migrateSendFrame := newCoroChannelAdapterFrame(t)
+	migrateSendAction := beginCoroChannelAdapterFrame(t, p, migrateSendFrame)
+	migrateSendValue := uint32(0xc0decafe)
+	var migrateSendState CoroChanParkV1
+	if status := tryOrParkCoroChanV2(
+		unsafe.Pointer(migrateSendFrame.g), migrateSendFrame.handle,
+		unsafe.Pointer(migrateSendFrame.header), unsafe.Pointer(migrateChannel),
+		unsafe.Pointer(&migrateSendValue), unsafe.Pointer(&migrateSendState),
+		unsafe.Sizeof(migrateSendValue), 42, 74, true,
+	); status != coroChanResumeSendOK {
+		t.Fatalf("compact try-or-park send status = %d, want %d", status, coroChanResumeSendOK)
+	}
+	if migrateSendState != (CoroChanParkV1{}) ||
+		migrateSendFrame.header.SuspendReason != uint16(coro.SuspendNone) ||
+		migrateSendFrame.header.Lifecycle != uint16(coro.FrameActive) {
+		t.Fatalf("ready compact try-or-park mutated slow state: state=%+v header=%+v",
+			migrateSendState, *migrateSendFrame.header)
+	}
+	yieldCoroChannelAdapterFrame(t, p, migrateSendFrame, migrateSendAction)
+
+	directTargetP := new(coro.P)
+	var directTransfer coro.RunnableTransferMailbox
+	if !coro.BindRunnableTransferMailbox(&directTransfer, directTargetP) {
+		t.Fatal("bind compact channel transfer mailbox")
+	}
+	directTransferID, directTransferred := coro.PublishPNeutralRunnable(&directTransfer, p, migrateRecvG)
+	if !directTransferred || !directTransferID.Valid() ||
+		!coro.ImportPNeutralRunnable(&directTransfer, directTargetP, directTransferID) {
+		t.Fatalf("transfer materialized compact channel G = (%+v, %t)", directTransferID, directTransferred)
+	}
+	if next, ok := coro.NextRunnable(directTargetP); !ok || next != migrateRecvG {
+		t.Fatalf("dequeue transferred compact channel G = (%p, %t), want %p", next, ok, migrateRecvG)
+	}
+	migratedAction, status := resumeCoroChannelAdapterFrame(
+		t, directTargetP, migrateRecvFrame, &migrateRecvState,
+	)
+	if status != coroChanResumeRecvOK || migrateRecvValue != migrateSendValue {
+		t.Fatalf("migrated compact channel resume = status:%d value:%#x, want status:%d value:%#x",
+			status, migrateRecvValue, coroChanResumeRecvOK, migrateSendValue)
+	}
+	yieldCoroChannelAdapterFrame(t, directTargetP, migrateRecvFrame, migratedAction)
 }

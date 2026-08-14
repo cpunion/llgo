@@ -78,7 +78,7 @@ entry:
   ret %Small %value
 }
 
-attributes #0 = { "llgo.reflect.methodbyname"="value" }
+attributes #0 = { nounwind "llgo.reflect.methodbyname"="value" }
 attributes #1 = { noinline }
 `
 
@@ -134,6 +134,18 @@ attributes #1 = { noinline }
 	}
 	if !strings.Contains(mod.String(), `"llgo.reflect.methodbyname"="value"`) {
 		t.Fatalf("reflect MethodByName call marker was not preserved:\n%s", mod.String())
+	}
+	callerFn := mod.NamedFunction("caller")
+	var loweredCall llvm.Value
+	for block := callerFn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if call := instruction.IsACallInst(); !call.IsNil() && call.CalledValue().Name() == "callee" {
+				loweredCall = call
+			}
+		}
+	}
+	if loweredCall.IsNil() || loweredCall.GetCallSiteEnumAttribute(-1, llvm.AttributeKindID("nounwind")).IsNil() {
+		t.Fatalf("large-return call lowering lost a function-index call attribute:\n%s", callerFn.String())
 	}
 
 	for _, name := range []string{"wrapper", "indirect", "self_copy"} {

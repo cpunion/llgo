@@ -124,6 +124,9 @@ type FunctionSpec struct {
 	AtomicCost            uint64
 	AtomicCostProof       AtomicCostProof
 	AtomicCostCertificate string
+	// StaticOutcome is producer-owned only for an ExternalKnown declaration.
+	// Defined bodies derive it after the complete SSA effect/call fixed point.
+	StaticOutcome bool
 	// TrustedBoundedRecursion is a frontend proof that this function's
 	// recursion depth is bounded independently of scheduler preemption. It
 	// suppresses the automatic recursive-SCC preemption seed only when every
@@ -230,18 +233,26 @@ type FunctionPlan struct {
 	// ManagedEntry is the exact physical ABI invoked by managed callers. Unlike
 	// Emission it remains meaningful for an imported EmitExternal declaration.
 	ManagedEntry ManagedEntryKind
-	// AtomicCost is the longest path-sensitive semantic work bound from the
-	// last scheduler cut to terminal completion. It is meaningful only when
-	// AtomicCostProof is not AtomicCostUnproven.
+	// AtomicCost is the longest path-sensitive semantic work bound of the
+	// optional synchronous outcome entry. It is meaningful only when
+	// AtomicCostProof is not AtomicCostUnproven. The ordinary ManagedEntry may
+	// remain a coroutine when dynamic/function-value consumers also exist; exact
+	// static calls can still select the separately emitted outcome entry.
 	AtomicCost uint64
 	// AtomicCostProof records the closed-world proof class which authorized the
-	// bound. EmitOutcomePlain requires a proof. Declared/local effects remain
-	// unchanged; the final effect may drop AwaitStructured after every such edge
-	// has been replaced by a proven synchronous outcome call.
+	// bound. EmitOutcomePlain requires a proof and makes that entry primary; an
+	// EmitCoroutine plan with a proof emits both the coroutine primary and the
+	// static outcome entry. Declared/local effects remain unchanged; the final
+	// effect may drop AwaitStructured only when the outcome entry is primary.
 	AtomicCostProof AtomicCostProof
 	// AtomicCostCertificate is the content-addressed path proof. Imported and
 	// local outcome entries require it; unproven functions must leave it empty.
 	AtomicCostCertificate string
+	// StaticOutcome records a separately emitted synchronous outcome entry for
+	// exact static calls. Unlike AtomicCostProof it makes no finite scheduler-gap
+	// claim: source loops may execute synchronously. It is therefore only a twin
+	// of a coroutine primary, never the managed primary itself.
+	StaticOutcome bool
 	// FuncRep is direct unless value-flow requested an open dispatch boundary.
 	FuncRep   FuncRep
 	External  ExternalKind
@@ -261,6 +272,13 @@ type FunctionPlan struct {
 	// of Primary: EmitCoroutine therefore denotes a managed coroutine primary
 	// plus a separately lowered raw plain entry, not a weakened managed body.
 	RawPlainEntry bool
+}
+
+// HasStaticOutcome reports that an exact managed static call may use the
+// synchronous outcome ABI. An atomic-cost proof is the bounded form of this
+// capability; StaticOutcome is the explicitly unbounded form.
+func (plan FunctionPlan) HasStaticOutcome() bool {
+	return plan.AtomicCostProof.ProvesOutcomePlain() || plan.StaticOutcome
 }
 
 // bodyEmissionFor derives the physical body independently from logical
@@ -346,6 +364,38 @@ func validateManagedEntryPlan(plan FunctionPlan) error {
 				plan.ID, plan.Effect, plan.Exec, plan.FuncRep, plan.Recursive, plan.RawPlainDemand,
 			)
 		}
+		if !plan.AtomicCostProof.ProvesOutcomePlain() {
+			return fmt.Errorf("coro: function %q has an outcome-plain primary without a static outcome proof", plan.ID)
+		}
+	}
+
+	if plan.StaticOutcome {
+		if plan.AtomicCostProof.ProvesOutcomePlain() || plan.AtomicCost != 0 || plan.AtomicCostCertificate != "" {
+			return fmt.Errorf("coro: function %q mixes bounded and unbounded static outcome capabilities", plan.ID)
+		}
+		if plan.Recursive || plan.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 ||
+			plan.Effect&^(YieldOnly|AwaitStructured|OutcomeStructured) != 0 ||
+			!plan.Effect.Contains(OutcomeStructured) {
+			return fmt.Errorf(
+				"coro: function %q has an invalid unbounded static outcome capability (effect=%s exec=%s recursive=%t)",
+				plan.ID, plan.Effect, plan.Exec, plan.Recursive,
+			)
+		}
+		if plan.External == Defined {
+			if plan.Emission != EmitCoroutine || plan.ManagedEntry != ManagedEntryCoroutine ||
+				plan.Primary != PrimaryCoroutine {
+				return fmt.Errorf("coro: function %q has an unbounded static outcome without a coroutine primary twin", plan.ID)
+			}
+		} else if plan.External == ExternalKnown {
+			if plan.ManagedEntry != ManagedEntryCoroutine || plan.Primary != PrimaryExternal {
+				return fmt.Errorf(
+					"coro: external function %q has an unbounded static outcome with managed entry %s",
+					plan.ID, plan.ManagedEntry,
+				)
+			}
+		} else {
+			return fmt.Errorf("coro: function %q has an unbounded static outcome with external kind %s", plan.ID, plan.External)
+		}
 	}
 
 	switch plan.AtomicCostProof {
@@ -354,9 +404,23 @@ func validateManagedEntryPlan(plan FunctionPlan) error {
 			return fmt.Errorf("coro: function %q has outcome entry/cost without an atomic-cost proof", plan.ID)
 		}
 	case AtomicCostLeaf, AtomicCostDAG:
-		if plan.AtomicCost == 0 || plan.ManagedEntry != ManagedEntryOutcomePlain ||
-			(plan.External != Defined && plan.External != ExternalKnown) {
+		if plan.AtomicCost == 0 || (plan.External != Defined && plan.External != ExternalKnown) {
 			return fmt.Errorf("coro: function %q has an invalid atomic-cost capability", plan.ID)
+		}
+		if plan.External == Defined {
+			primaryOutcome := plan.Emission == EmitOutcomePlain && plan.ManagedEntry == ManagedEntryOutcomePlain
+			dualOutcome := plan.Emission == EmitCoroutine && plan.ManagedEntry == ManagedEntryCoroutine
+			if !primaryOutcome && !dualOutcome {
+				return fmt.Errorf(
+					"coro: function %q has an atomic outcome capability without an outcome primary or coroutine primary twin (emission=%s managed=%s)",
+					plan.ID, plan.Emission, plan.ManagedEntry,
+				)
+			}
+		} else if plan.ManagedEntry != ManagedEntryCoroutine && plan.ManagedEntry != ManagedEntryOutcomePlain {
+			return fmt.Errorf(
+				"coro: external function %q has an atomic outcome capability with managed entry %s",
+				plan.ID, plan.ManagedEntry,
+			)
 		}
 		if err := validateSHA256Hex("atomic-cost certificate", plan.AtomicCostCertificate); err != nil {
 			return fmt.Errorf("coro: function %q: %w", plan.ID, err)

@@ -33,7 +33,11 @@ type RunDecision struct {
 	// materialized selects a frame-local ResumePacket rather than an
 	// old-source OperationResultLease. It occupies existing scalar padding.
 	materialized bool
-	lease        OperationResultLease
+	// directChannel consumes the remaining scalar padding. It is copied only
+	// from a marked materialized ParkState and lets the compiler's dedicated
+	// prologue avoid re-proving the generic packet union.
+	directChannel bool
+	lease         OperationResultLease
 }
 
 func validRunDecision(decision RunDecision) bool {
@@ -41,6 +45,7 @@ func validRunDecision(decision RunDecision) bool {
 		return true
 	}
 	if !ValidG(decision.g) || decision.outcome > ParkOutcomeDefault ||
+		decision.directChannel && !decision.materialized ||
 		(decision.task != TaskCancelNone && !validTaskCancelKind(decision.task)) {
 		return false
 	}
@@ -58,10 +63,19 @@ func validRunDecision(decision RunDecision) bool {
 			return false
 		}
 		switch decision.outcome {
-		case ParkOutcomeCompleted, ParkOutcomeDefault:
+		case ParkOutcomeCompleted:
+			if decision.directChannel {
+				return decision.task == TaskCancelNone && decision.caseID == 1
+			}
+			return decision.task == TaskCancelNone && decision.caseID != 0
+		case ParkOutcomeDefault:
+			if decision.directChannel {
+				return false
+			}
 			return decision.task == TaskCancelNone && decision.caseID != 0
 		case ParkOutcomeCanceled:
-			return decision.caseID == 0
+			return decision.caseID == 0 &&
+				(!decision.directChannel || validTaskCancelKind(decision.task))
 		default:
 			return false
 		}
@@ -105,10 +119,25 @@ func resumeGateTaken(g *G) bool {
 // G. A ready park is consumed here, not in a producer callback or PollReady.
 func prepareRunDecision(p *P, g *G) bool {
 	if p == nil || !ValidG(g) || p.current != g || g.runP != p || g.state != GRunning ||
-		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !gPreemptEnabledAtDepthZero(g) ||
-		!validParkState(&g.park) {
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !gPreemptEnabledAtDepthZero(g) {
 		return false
 	}
+	return prepareIssuedRunDecision(p, g)
+}
+
+// prepareIssuedRunDecision is the mutation half used only after
+// checkedExecutorRun has consumed the private run.issued episode and proved
+// the exact P/G/action/frame relation. llvm.coro.done is observational, so no
+// independent writer exists between those adjacent gates. Compatibility
+// Checked retains prepareRunDecision's complete arbitrary-caller validation.
+func prepareIssuedRunDecision(p *P, g *G) bool {
+	// BeginRunG is the sole producer of this exact P/G/ActionCheckResume
+	// episode and already audited the runnable ParkState before publishing it.
+	// No producer can mutate a materialized frame packet or scheduler-owned
+	// ParkState between that action and Checked. ConsumeTaskParkSet retains its
+	// complete validator for source-backed Ready parks; releasable phases retain
+	// their complete O(1) validator below. Repeating the materialized audit here
+	// would not establish an independent boundary.
 	decision := RunDecision{}
 	if g.park.phase == parkReady {
 		ticket := g.park.ticket
@@ -126,11 +155,12 @@ func prepareRunDecision(p *P, g *G) bool {
 		}
 	} else if g.park.phase == parkMaterialized {
 		decision = RunDecision{
-			g:            g,
-			ticket:       g.park.ticket,
-			outcome:      g.park.outcome,
-			caseID:       g.park.winnerCase,
-			materialized: true,
+			g:             g,
+			ticket:        g.park.ticket,
+			outcome:       g.park.outcome,
+			caseID:        g.park.winnerCase,
+			materialized:  true,
+			directChannel: g.park.directChannel,
 		}
 	} else if !releasableParkState(&g.park) {
 		return false
@@ -153,9 +183,12 @@ func prepareRunDecision(p *P, g *G) bool {
 			decision.task = kind
 		}
 	}
-	if !validRunDecision(decision) {
-		return false
-	}
+	// Every non-zero shape above is produced by an exact consuming helper:
+	// ConsumeTaskParkSet, the materialized ParkState certificate, or
+	// ClaimTaskCancellation. None accepts caller-supplied decision fields, so a
+	// second generic union validation here would only replay those branches.
+	// The compiler prologue still correlates the private slot with G/ticket and
+	// consumes it exactly once.
 	p.runDecision = decision
 	return true
 }

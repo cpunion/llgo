@@ -55,6 +55,9 @@ func TestHeaderV1TargetNeutralLayout(t *testing.T) {
 }
 
 func TestFrameAllocationLayout(t *testing.T) {
+	if got, capacity := unsafe.Sizeof(Frame{}), unsafe.Sizeof(BorrowedFrameStorageV2{}); got > capacity {
+		t.Fatalf("Frame size = %d, borrowed ABI capacity = %d", got, capacity)
+	}
 	for _, align := range []uintptr{1, 2, 4, 8, 16, 64} {
 		total, ok := FrameAllocationSize(37, align)
 		if !ok {
@@ -86,6 +89,98 @@ func TestFrameAllocationLayout(t *testing.T) {
 	offset := unsafe.Sizeof(Frame{}) + unsafe.Sizeof(uintptr(0))
 	if _, ok := alignedStorageOffset(^uintptr(0)-offset-1, 8); ok {
 		t.Fatal("overflowing aligned storage address accepted")
+	}
+}
+
+func TestBorrowedFrameV2PublishAndDestroy(t *testing.T) {
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("InitG failed")
+	}
+	handle := unsafe.Pointer(new(byte))
+	descriptor := &FrameDescriptorV1{Version: 1, ResultAlign: 1, Function: "test.borrowed"}
+	header := &HeaderV1{
+		G:             unsafe.Pointer(g),
+		Descriptor:    unsafe.Pointer(descriptor),
+		SuspendReason: uint16(SuspendNone),
+		Lifecycle:     uint16(FrameInitialSuspended),
+	}
+	metadata := new(BorrowedFrameStorageV2)
+	for index := range metadata {
+		metadata[index] = ^uintptr(0)
+	}
+	if !PublishFrameV2(g, handle, header, nil, unsafe.Pointer(metadata)) {
+		t.Fatal("publish borrowed frame")
+	}
+	frame := (*Frame)(unsafe.Pointer(metadata))
+	if g.frames != frame || frame.owner != g || frame.handle != handle ||
+		frame.header != header || frame.storage != nil || frame.rawBase != nil ||
+		!frame.borrowedStorage || frame.state != FrameInitialSuspended ||
+		header.AllocationBase != unsafe.Pointer(frame) {
+		t.Fatalf("borrowed publication = %+v, header base=%p", frame, header.AllocationBase)
+	}
+	frame.state = FrameDestroyPending
+	header.Lifecycle = uint16(FrameDestroyPending)
+	g.destroyTarget = frame
+	if !CommitFrameDestroyV2(g, handle) {
+		t.Fatal("commit borrowed frame destroy")
+	}
+	if g.frames != nil || g.destroyTarget != nil || findFrame(g, handle) != nil {
+		t.Fatal("borrowed destroy retained scheduler ownership")
+	}
+	if *frame != (Frame{}) {
+		t.Fatalf("ordinary borrowed destroy did not clear metadata: %+v", frame)
+	}
+	if header.Lifecycle != uint16(FrameDestroyed) {
+		t.Fatalf("borrowed header lifecycle = %d, want destroyed", header.Lifecycle)
+	}
+}
+
+func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("InitG failed")
+	}
+	handle := unsafe.Pointer(new(byte))
+	descriptor := &FrameDescriptorV1{Version: 1, ResultAlign: 1, Function: "test.borrowed.v3"}
+	resultSlot := unsafe.Pointer(new(uintptr))
+	header := &HeaderV1{
+		G:              unsafe.Pointer(new(byte)),
+		Parent:         unsafe.Pointer(new(byte)),
+		Descriptor:     unsafe.Pointer(new(byte)),
+		AllocationBase: unsafe.Pointer(new(byte)),
+		ResultSlot:     unsafe.Pointer(new(byte)),
+		SuspendReason:  ^uint16(0),
+		Lifecycle:      ^uint16(0),
+		StateID:        ^uint32(0),
+		Line:           ^uint32(0),
+		Flags:          ^uint32(0),
+	}
+	metadata := new(BorrowedFrameStorageV2)
+	for index := range metadata {
+		metadata[index] = ^uintptr(0)
+	}
+	if !PublishFrameV3(
+		g, handle, header, nil, unsafe.Pointer(metadata),
+		unsafe.Pointer(descriptor), resultSlot,
+	) {
+		t.Fatal("publish initialized borrowed frame")
+	}
+	frame := (*Frame)(unsafe.Pointer(metadata))
+	if g.frames != frame || frame.owner != g || frame.handle != handle || frame.header != header ||
+		frame.descriptor != unsafe.Pointer(descriptor) || !frame.borrowedStorage ||
+		header.G != unsafe.Pointer(g) || header.Parent != nil ||
+		header.Descriptor != unsafe.Pointer(descriptor) || header.AllocationBase != unsafe.Pointer(frame) ||
+		header.ResultSlot != resultSlot || header.SuspendReason != uint16(SuspendNone) ||
+		header.Lifecycle != uint16(FrameInitialSuspended) || header.StateID != 0 ||
+		header.Line != 0 || header.Flags != 0 {
+		t.Fatalf("V3 borrowed publication frame=%+v header=%+v", frame, header)
+	}
+	frame.state = FrameDestroyPending
+	header.Lifecycle = uint16(FrameDestroyPending)
+	g.destroyTarget = frame
+	if !CommitFrameDestroyV2(g, handle) {
+		t.Fatal("commit initialized borrowed frame destroy")
 	}
 }
 

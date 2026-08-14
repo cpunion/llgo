@@ -32,11 +32,17 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v33"
+const PlanDigestSchema = "llgo.coro.plan-digest.v35"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
 const (
+	// FrameDescriptorNoRuntimeContextV1 is the compiler/runtime physical-frame
+	// ABI bit proving that the complete inlined managed execution closure does
+	// not observe or replace the ambient runtime G. Runtime validation owns the
+	// identically valued flag in runtime/internal/coro.
+	FrameDescriptorNoRuntimeContextV1 uint32 = 1 << 1
+
 	EntryResolutionABIV0 = "llgo.coro.entry-resolution.v0"
 	PhysicalABIV0        = "llgo.coro.physical.v0"
 	PhysicalABIV1        = "llgo.coro.physical.v1"
@@ -172,6 +178,7 @@ type planDigestFunction struct {
 	AtomicCost                   uint64                       `json:"atomic_cost"`
 	AtomicCostProof              uint8                        `json:"atomic_cost_proof"`
 	AtomicCostCertificate        string                       `json:"atomic_cost_certificate"`
+	StaticOutcome                bool                         `json:"static_outcome"`
 	FuncRep                      uint8                        `json:"func_rep"`
 	External                     uint8                        `json:"external"`
 	Recursive                    bool                         `json:"recursive"`
@@ -894,6 +901,7 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 			AtomicCost:              plan.AtomicCost,
 			AtomicCostProof:         uint8(plan.AtomicCostProof),
 			AtomicCostCertificate:   plan.AtomicCostCertificate,
+			StaticOutcome:           plan.StaticOutcome,
 			FuncRep:                 uint8(plan.FuncRep),
 			External:                uint8(plan.External),
 			Recursive:               plan.Recursive,

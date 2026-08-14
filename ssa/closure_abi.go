@@ -75,10 +75,9 @@ func aarch64UsesSwiftSelf(triple string) bool {
 }
 
 // closureContextABIForTarget is retained for the coroutine lowering API. The
-// LLVM version is intentionally ignored: changing LLVM must not change the
-// ABI of already compiled libraries. goos only disambiguates legacy generic
-// AArch64 triples which did not encode their platform.
-func closureContextABIForTarget(triple, goos string, _ int) closureContextABI {
+// goos only disambiguates legacy generic AArch64 triples which did not encode
+// their platform. The ABI does not vary within LLGo's LLVM 22 baseline.
+func closureContextABIForTarget(triple, goos string) closureContextABI {
 	lower := strings.ToLower(triple)
 	arch, _, _ := strings.Cut(lower, "-")
 	if (arch == "arm64" || arch == "arm64_32" || arch == "aarch64" || arch == "aarch64_be") &&
@@ -92,7 +91,7 @@ func closureContextABIForTarget(triple, goos string, _ int) closureContextABI {
 }
 
 func aarch64PlatformReservesX18(triple, goos string) bool {
-	return closureContextABIForTarget(triple, goos, 0) == closureEnvSwiftSelf
+	return closureContextABIForTarget(triple, goos) == closureEnvSwiftSelf
 }
 
 func (p *Target) closureEnvABI() closureEnvABI {

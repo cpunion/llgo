@@ -26,23 +26,40 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 // managed blocking foreign call always parks its G and completes through the
 // pipe; it must never fall back to running on the executor thread.
 func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle) bool {
-	if coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coro.WorkerOperationPageCapacity ||
-		coroNativeWorkerCapacityV1 != coroRuntimeWorkerCapacityV1 ||
+	workerEnabled := coroProgramWorkerCapabilityV2()
+	if workerEnabled && (coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coro.WorkerOperationPageCapacity ||
+		coroNativeWorkerCapacityV1 != coroRuntimeWorkerCapacityV1) ||
 		coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1 {
 		return false
 	}
+	var worker *coro.WorkerOperationSource
+	if workerEnabled {
+		worker = &coroProgramWorkerSourceV1State
+	}
 	return coro.BindExecutorSourceCatalog(driver, p, registry, handle, coro.ExecutorSourceCatalog{
-		Worker:  &coroProgramWorkerSourceV1State,
+		Worker:  worker,
 		Channel: &coroProgramChannelSourceV1State,
 		Control: &coroProgramTaskControlSourceV1State,
 	})
 }
 
-func coroProgramNextRunStepV1(driver *coro.ExecutorDriver) (coro.ExecutorRunStep, bool) {
-	return coro.NextExecutorRunStep(driver)
+func coroProgramNextRunStepV1(
+	_ *coro.ExecutorDriver,
+	run *coro.ExecutorRunSliceCapability,
+	combineDispatch bool,
+) (coro.ExecutorRunStep, bool) {
+	if combineDispatch {
+		return run.NextCombined()
+	}
+	return run.Next()
 }
 
 func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {
+	if ready, fastOK := coroNativeTryFastWorkerCompletionV1(driver); !fastOK {
+		return false, 0, false, false
+	} else if ready {
+		return false, 0, false, true
+	}
 	sleep, ok = coro.PrepareExecutorSleep(driver)
 	return sleep, 0, false, ok
 }

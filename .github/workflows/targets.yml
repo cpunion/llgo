@@ -21,7 +21,7 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-        llvm: [19]
+        llvm: [22]
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v7

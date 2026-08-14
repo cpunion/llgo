@@ -289,11 +289,27 @@ func (b Builder) CBytes(v Expr) Expr {
 
 // InlineAsm generates inline assembly instruction
 func (b Builder) InlineAsm(instruction string) {
+	b.inlineAsmCall(instruction)
+}
+
+func (b Builder) inlineAsmCall(instruction string) llvm.Value {
 	dbgInstrf("InlineAsm %s\n", instruction)
 
 	typ := llvm.FunctionType(b.Prog.tyVoid(), nil, false)
 	asm := llvm.InlineAsm(typ, instruction, "", true, false, llvm.InlineAsmDialectATT, false)
-	b.impl.CreateCall(typ, asm, nil, "")
+	return b.impl.CreateCall(typ, asm, nil, "")
+}
+
+// CoroAtomicDataAnchor emits compiler-owned, zero-runtime-work inline
+// assembly and attaches the capability consumed by the atomic outcome
+// verifier. The capability is injected at construction time and binds the
+// complete inline-assembly content; arbitrary source assembly cannot acquire
+// it by spelling or later reverse classification.
+func (b Builder) CoroAtomicDataAnchor(instruction string) {
+	call := b.inlineAsmCall(instruction)
+	MarkCoroAtomicBoundedCompilerCall(
+		b.Pkg.mod.Context(), call, CoroAtomicCompilerDataAnchorV1,
+	)
 }
 
 func (b Builder) InlineAsmFull(instruction, constraints string, retType Type, exprs []Expr) Expr {
@@ -324,10 +340,9 @@ func (b Builder) KeepAlive(values ...Expr) {
 		}
 		args[index] = value.impl
 	}
-	// LLVM 19's C API does not expose llvm.fake.use through
+	// The LLVM C API does not expose llvm.fake.use through
 	// LLVMLookupIntrinsicID even though the intrinsic is part of the IR and
-	// verifier. Declare its canonical variadic form directly so the same code
-	// works on LLVM 19--22.
+	// verifier. Declare its canonical variadic form directly.
 	fnType := llvm.FunctionType(b.Prog.tyVoid(), nil, true)
 	fn := b.Pkg.mod.NamedFunction("llvm.fake.use")
 	if fn.IsNil() {
@@ -339,7 +354,7 @@ func (b Builder) KeepAlive(values ...Expr) {
 }
 
 // RemoveKeepAliveCallsAfterCoroSplit erases the optimizer-only liveness uses
-// after LLVM has materialized coroutine frames. LLVM 19 accepts llvm.fake.use
+// after LLVM has materialized coroutine frames. LLVM 22 accepts llvm.fake.use
 // in IR and CoroSplit honors it, but its target pipeline can otherwise emit an
 // unresolved external call at O0. The declaration may remain: with every call
 // removed it contributes no object-file reference.

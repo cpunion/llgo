@@ -106,6 +106,33 @@ func TestCriticalPollDoesNotConsumeBoundExecutorRequest(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
+func TestCriticalPollDefersSelectedExecutorPayloadAudit(t *testing.T) {
+	p := new(P)
+	driver, registry, executor := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "critical-executor-selected-payload")
+	action, ok := BeginRunG(p, task.g)
+	if !ok {
+		t.Fatal("begin bound-executor selected-payload G")
+	}
+	_ = activatePreemptTestFrame(t, p, task, action)
+
+	// This is an impossible owner-local resolution cursor. The complete
+	// lifecycle audit must reject it, but a compiler safepoint neither reads
+	// nor mutates that selected scheduler payload. Its hot gate depends only
+	// on the stable driver/P binding and the exact request handle.
+	driver.local.resolve = publishedEpochResolveCursor{phase: publishedEpochResolveDiscover}
+	if !validExecutorDriverHeaderForP(driver, p) || validExecutorDriverForP(driver, p) {
+		t.Fatal("selected payload damage did not remain outside the hot driver header")
+	}
+	if registry.Request(executor) != ExecutorRequestPublished {
+		t.Fatal("publish request beside selected executor payload")
+	}
+	if !PollPreemptCompiler(task.g) || !PollPreempt(task.g) || !registry.ObserveRequested(executor) {
+		t.Fatal("compiler or defensive poll rejected selected payload or consumed the executor request")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestCriticalExitObservesButDoesNotClaimTaskCancellation(t *testing.T) {
 	p, task, _ := newActiveCriticalTestG(t, "critical-cancel")
 	if !EnterCritical(task.g) || !RequestTaskCancellation(p, task.g, TaskCancelAbort) {

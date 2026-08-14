@@ -161,7 +161,7 @@ func (p *context) resolveCoroPythonCall(
 	keyFields = append(keyFields,
 		"cl-coro-python-call-thunk-v1",
 		fn.Name(),
-		structuralEmissionABITypeKey(signature),
+		p.cachedStrictEmissionABITypeKey(signature),
 		strconv.Itoa(p.prog.PointerSize()),
 	)
 	for _, argument := range args {
@@ -169,14 +169,14 @@ func (p *context) resolveCoroPythonCall(
 			panic("coroutine Python call has an untyped physical argument")
 		}
 		fields = append(fields, argument.Type)
-		keyFields = append(keyFields, structuralEmissionABITypeKey(argument.RawType()))
+		keyFields = append(keyFields, p.cachedStrictEmissionABITypeKey(argument.RawType()))
 	}
 	resultField := -1
 	if results != nil && results.Len() == 1 {
 		resultField = len(fields)
 		resultType := p.prog.Type(results.At(0).Type(), llssa.InC)
 		fields = append(fields, resultType)
-		keyFields = append(keyFields, structuralEmissionABITypeKey(resultType.RawType()))
+		keyFields = append(keyFields, p.cachedStrictEmissionABITypeKey(resultType.RawType()))
 	}
 	recordType := p.prog.Struct(fields...)
 	name := coroPythonCallThunkPrefixV1 + emissionDigest(framedEmissionKey(keyFields...))

@@ -26,8 +26,15 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 	})
 }
 
-func coroProgramNextRunStepV1(driver *coro.ExecutorDriver) (coro.ExecutorRunStep, bool) {
-	return coro.NextExecutorRunStep(driver)
+func coroProgramNextRunStepV1(
+	_ *coro.ExecutorDriver,
+	run *coro.ExecutorRunSliceCapability,
+	combineDispatch bool,
+) (coro.ExecutorRunStep, bool) {
+	if combineDispatch {
+		return run.NextCombined()
+	}
+	return run.Next()
 }
 
 func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {

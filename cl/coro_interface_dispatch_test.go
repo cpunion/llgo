@@ -309,7 +309,7 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	if !strings.Contains(rootIR, "coro.dispatch.version.invalid") ||
 		!strings.Contains(rootIR, "coro.dispatch.flags.unknown") ||
 		!strings.Contains(rootIR, "call void @"+coroAwaitPrepareHookV1) ||
-		!strings.Contains(rootIR, "call i1 @"+coroAwaitInlineHookV1) {
+		!strings.Contains(rootIR, "call i1 @"+coroAwaitInlineBeginHookV2) {
 		t.Fatalf("open interface invoke did not enter validated descriptor child-await lowering:\n%s", rootIR)
 	}
 	if strings.Contains(rootIR, "call i1 %") && !strings.Contains(rootIR, "coro.dispatch") {

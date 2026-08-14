@@ -85,7 +85,7 @@ func (p *context) coroForeignReentryPlainRamp(
 		"cl-coro-foreign-reentry-plain-ramp-v1",
 		string(entry.plan.ID),
 		entry.name,
-		structuralEmissionABITypeKey(sourceSignature),
+		p.cachedStrictEmissionABITypeKey(sourceSignature),
 		strconv.Itoa(p.prog.PointerSize()),
 	)
 	name := coroForeignReentryPlainRampPrefixV1 + emissionDigest(key)
@@ -223,7 +223,7 @@ func (p *context) coroForeignReentryAdapter(
 		"cl-coro-foreign-reentry-adapter-v1",
 		string(entry.plan.ID),
 		entry.name,
-		structuralEmissionABITypeKey(callbackSignature),
+		p.cachedStrictEmissionABITypeKey(callbackSignature),
 		strconv.Itoa(p.prog.PointerSize()),
 	)
 	name := coroForeignReentryAdapterPrefixV1 + emissionDigest(key)

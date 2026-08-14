@@ -173,7 +173,16 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 		return false
 	}
 	returnResult := boundary.parent.handoff.RequestReturn(boundary.baton)
+	request := coro.ExecutorRequestInvalid
+	if returnResult == coro.ExecutionDomainHandoffReturnClaimed {
+		// The return baton is the durable fact. The executor request is its
+		// preemption transport: a replacement may currently be inside an
+		// unbounded managed resume and cannot observe a doorbell until it first
+		// reaches the compiler safepoint gate.
+		request = coroNativeFleetV1State.fleet.RequestExecutor(boundary.domain.handle)
+	}
 	ringOK := returnResult == coro.ExecutionDomainHandoffReturnClaimed &&
+		coro.ExecutorRequestAccepted(request) &&
 		boundary.domain.doorbell.Ring()
 	for ringOK && !boundary.parent.handoff.Returned(boundary.baton) {
 		if corofleet.Yield() != 0 {

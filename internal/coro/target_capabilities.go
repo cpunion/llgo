@@ -58,3 +58,32 @@ func (capabilities TargetCapabilities) Valid() bool {
 	const known = targetCapabilityWorker | targetCapabilityNativeFleet | targetCapabilityHostOperation
 	return capabilities&^known == 0 && (!capabilities.NativeFleet() || capabilities.Worker())
 }
+
+// ProgramCapabilities is the closed-world demand projection of physical
+// operations which need an optional target service. TargetCapabilities says
+// what the selected environment can provide; ProgramCapabilities says what
+// the final emitted program will actually use. Keeping the two lattices
+// separate prevents a capable native target from eagerly starting services
+// which have no reachable physical transaction.
+type ProgramCapabilities uint8
+
+const (
+	programCapabilityWorker ProgramCapabilities = 1 << iota
+)
+
+func NewProgramCapabilities(worker bool) ProgramCapabilities {
+	var capabilities ProgramCapabilities
+	if worker {
+		capabilities |= programCapabilityWorker
+	}
+	return capabilities
+}
+
+func (capabilities ProgramCapabilities) Worker() bool {
+	return capabilities&programCapabilityWorker != 0
+}
+
+func (capabilities ProgramCapabilities) Valid() bool {
+	const known = programCapabilityWorker
+	return capabilities&^known == 0
+}

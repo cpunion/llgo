@@ -19,6 +19,9 @@
 package runtime
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 )
@@ -64,6 +67,39 @@ func TestCoroRunnableDistributionUsesDemandAndExactMailbox(t *testing.T) {
 		if !strings.Contains(scheduler, required) {
 			t.Errorf("scheduler lacks imported dequeue gate %q", required)
 		}
+	}
+}
+
+func TestCoroDirectChannelPublisherDoesNotReadOwnerCursor(t *testing.T) {
+	const name = "PublishExecutorDirectChannelCompletion"
+	source := readRuntimePollFile(t, "internal/coro/direct_channel_completion.go")
+	file, err := parser.ParseFile(token.NewFileSet(), "direct_channel_completion.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publisher *ast.FuncDecl
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == name {
+			publisher = function
+			break
+		}
+	}
+	if publisher == nil {
+		t.Fatalf("runtime core lacks %s", name)
+	}
+	ast.Inspect(publisher.Body, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "directChannelTail" {
+			return true
+		}
+		if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "driver" {
+			t.Error("direct-channel producer reads the owner-only inbox cursor")
+		}
+		return true
+	})
+	if !strings.Contains(source, "preemptLoadPointer(&driver.directChannelHead)") {
+		t.Error("direct-channel producer lacks its atomic publication cursor gate")
 	}
 }
 
@@ -123,6 +159,12 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	owner := readRuntimePollFile(t, "internal/runtime/coro_native_fleet_owner_llgo.go")
 	for _, required := range []string{
 		"[coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1",
+		"policyEpoch uint32",
+		"func coroNativeFleetPhysicalOwnerDesiredPeersV1(limit, capacity uint32)",
+		"func coroNativeFleetPhysicalOwnersEnsureLockedV1(",
+		"state.started < desired",
+		"func coroNativeFleetSetExecutionLimitV1(limit uint32)",
+		"coroNativeAtomicStoreV1(&state.policyEpoch, epoch+1)",
 		"coroNativeMStartPhysicalOwnerV1(owner, slot)",
 		"func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32",
 		"coroNativeMRunReplacementOwnerV1(slot)",
@@ -182,11 +224,49 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"coroNativeFleetV1State.execution.TryAcquire(route)",
 		"coroNativeFleetV1State.execution.Release(route)",
 		"func CoroGOMAXPROCS(n int) int",
+		"coroNativeFleetSetExecutionLimitV1(next)",
 		"coroNativeFleetRingExecutionWaitersV1(waiters uint32)",
 		"coroNativeFleetV1State.execution.WaiterMask()",
 	} {
 		if !strings.Contains(quota, required) {
 			t.Errorf("native fleet execution quota lacks logical-limit marker %q", required)
+		}
+	}
+
+	distribution := readRuntimePollFile(t, "internal/runtime/coro_ready_distribution_fleet_llgo.go")
+	for _, required := range []string{
+		"func coroTargetBeginRunSliceV1(",
+		"target.policyEpoch = epoch",
+		"func coroTargetRefreshRunSliceV1(target coroRunTargetCapabilityV1)",
+		"epoch != target.policyEpoch",
+	} {
+		if !strings.Contains(distribution, required) {
+			t.Errorf("native fleet distribution lacks stable-slice policy marker %q", required)
+		}
+	}
+
+	runSlice := readRuntimePollFile(t, "internal/runtime/coro_run_slice.go")
+	for _, required := range []string{
+		"if next.Kind == coro.ActionYield {",
+		"coroTargetRefreshRunSliceV1(target)",
+		"coroTargetReadyDistributionV1(target)",
+	} {
+		if !strings.Contains(runSlice, required) {
+			t.Errorf("runtime run slice lacks yield-synchronized policy marker %q", required)
+		}
+	}
+	if strings.Count(runSlice, "coroTargetRefreshRunSliceV1(target)") != 1 {
+		t.Error("runtime run slice must refresh mutable placement policy only at the explicit yield boundary")
+	}
+
+	gomaxprocs := readRuntimePollFile(t, "internal/lib/runtime/gomaxprocs_coro_llgo.go")
+	for _, required := range []string{
+		"previous := llruntime.CoroGOMAXPROCS(n)",
+		"if n > 0 && previous != n {",
+		"coroSchedulerYield()",
+	} {
+		if !strings.Contains(gomaxprocs, required) {
+			t.Errorf("public coroutine GOMAXPROCS wrapper lacks policy handoff marker %q", required)
 		}
 	}
 
@@ -196,6 +276,7 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"coroTargetStartPhysicalThreadCapacityV1()",
 		"coroNativeFleetStartProgramV1(coroNativeFleetDomainCapacityV1)",
 		"coroNativeFleetV1State.execution.Start(limit)",
+		"coroNativeFleetPhysicalOwnersStartV1(limit)",
 		"coroNativeFleetV1State.execution.Seal()",
 		"coroNativeFleetV1State.execution.Retire()",
 		"coroNativeMStartCleanFactoryV1()",
