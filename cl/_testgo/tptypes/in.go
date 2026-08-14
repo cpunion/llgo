@@ -1,26 +1,27 @@
 // LITTEST
 package main
 
-// Generic instances keep distinct typed entries but share the same stackless
-// call/await protocol. Register allocation and expanded append lowering are not
-// part of this fixture's contract.
+// Generic instances keep distinct typed coroutine entries. Their bounded
+// append bodies and statically known callers use the outcome-plain fast path;
+// only genuinely suspending printing keeps the stackless await protocol.
 //
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.main$coro"(
-// CHECK: call ptr @"main.(*Slice{{\[\[\]int,int\]}}).Append$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
-// CHECK: call ptr @"main.(*Slice{{\[\[\]string,string\]}}).Append$coro"(
-// CHECK: call ptr @"main.(*Slice{{\[\[\]int,int\]}}).Append2$coro"(
+// CHECK: call void @"main.(*Slice{{\[\[\]int,int\]}}).Append$outcome"(
+// CHECK: call void @"main.(*Slice{{\[\[\]string,string\]}}).Append$outcome"(
+// CHECK: call void @"main.(*Slice{{\[\[\]int,int\]}}).Append$outcome"(
+// CHECK: call void @"main.(*Slice{{\[\[\]int,int\]}}).Append2$outcome"(
 // CHECK: call ptr @"{{.*}}PrintInt$coro"(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr @"{{.*}}PrintString$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define linkonce ptr @"main.(*Slice{{\[\[\]int,int\]}}).Append$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call void @"{{.*}}SliceAppend$outcome"(
 // CHECK-LABEL: define linkonce ptr @"main.(*Slice{{\[\[\]int,int\]}}).Append2$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call void @"{{.*}}SliceAppend$outcome"(
 // CHECK-LABEL: define linkonce ptr @"main.(*Slice{{\[\[\]string,string\]}}).Append$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call void @"{{.*}}SliceAppend$outcome"(
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 

@@ -4,8 +4,7 @@ package main
 import "errors"
 
 // CHECK-LABEL: define ptr @"main.main$coro"(
-// CHECK: [[NEW:%[0-9]+]] = call ptr @"errors.New$coro"
-// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[NEW]]
+// CHECK: call void @"errors.New$outcome"
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.IfaceType"
 // CHECK: call void @__llgo_coro_panic_prepare_v1
 func main() {

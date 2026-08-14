@@ -18,7 +18,7 @@ func check(err sqlite.Errno) {
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	// CHECK: [[OPEN:%[0-9]+]] = call ptr @"github.com/goplus/lib/c/sqlite.OpenV2$coro"({{.*}}ptr @{{[0-9]+}}, i32 130, ptr null)
-	// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[OPEN]]
+	// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[OPEN]]
 	db, err := sqlite.OpenV2(c.Str(":memory:"), sqlite.OpenReadWrite|sqlite.OpenMemory, nil)
 	check(err)
 

@@ -13,7 +13,7 @@ import (
 // CHECK: @__llgo_coro_func_descriptor_v1.method.{{.*}} = linkonce_odr unnamed_addr constant
 // CHECK-LABEL: define ptr @"main.Point.String$coro"(ptr %0, ptr %1, %main.Point %2){{.*}} {
 // CHECK: call ptr @"fmt.Sprintf$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
 // CHECK-LABEL: define ptr @"main.(*Point).Set$coro"(ptr %0, ptr %1, ptr %2, i64 %3, i64 %4){{.*}} {
 // CHECK: store i64 %3
 // CHECK: store i64 %4
@@ -25,7 +25,7 @@ import (
 // CHECK-DAG: call ptr @"reflect.PointerTo$coro"(
 // CHECK-DAG: call ptr @"reflect.SliceOf$coro"(
 // CHECK-DAG: call ptr @"reflect.StructOf$coro"(
-// CHECK-DAG: call ptr @"reflect.Value.Method$coro"(
+// CHECK-DAG: call void @"reflect.Value.Method$outcome"(
 // CHECK-DAG: call ptr @"reflect.Value.MethodByName$coro"(
 // CHECK-DAG: call ptr @"reflect.Value.Call$coro"(
 // CHECK-LABEL: define ptr @"main.method$coro"(ptr %0, ptr %1, i64 %2){{.*}} {

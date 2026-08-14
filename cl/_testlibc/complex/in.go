@@ -30,4 +30,4 @@ func main() {
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: store ptr @main.f
 // CHECK: call ptr @"main.f$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4

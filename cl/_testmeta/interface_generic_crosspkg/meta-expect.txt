@@ -52,42 +52,51 @@ _llgo_string:
 *_llgo_string:
     _llgo_string
     github.com/goplus/llgo/runtime/internal/runtime.memequalptr
-__llgo_coro_func_coro_v1.method-value.29eb060357d7a736.af113d4191fe9eae3d0593639f874651:
-    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$coro
-__llgo_coro_func_coro_v1.method-value.4a794b448ada5e7e.12d52cbc7004cd8daa99877c5b48cb34:
-    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Value$coro
-__llgo_coro_func_coro_v1.method-value.4f4992be7488eb6e.af113d4191fe9eae3d0593639f874651:
+__llgo_coro_func_coro_v1.method-value.6bed1fbe712ba7e0.d2c90a5d813225420adb2cb46b92d6fe:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Value$coro
-__llgo_coro_func_coro_v1.method-value.5161df40a3f6522d.12d52cbc7004cd8daa99877c5b48cb34:
-    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$coro
-__llgo_coro_func_coro_v1.method.4a794b448ada5e7e.3c1baa11c05cc96de3b33ee3f4f5036f:
+__llgo_coro_func_coro_v1.method-value.94a385c438b38d8d.53623eefcad4daa1f89a30d5c19e201e:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Value$coro
-__llgo_coro_func_descriptor_v1.method-value.29eb060357d7a736.af113d4191fe9eae3d0593639f874651:
-    __llgo_coro_func_coro_v1.method-value.29eb060357d7a736.af113d4191fe9eae3d0593639f874651
-__llgo_coro_func_descriptor_v1.method-value.4a794b448ada5e7e.12d52cbc7004cd8daa99877c5b48cb34:
-    __llgo_coro_func_coro_v1.method-value.4a794b448ada5e7e.12d52cbc7004cd8daa99877c5b48cb34
-__llgo_coro_func_descriptor_v1.method-value.4f4992be7488eb6e.af113d4191fe9eae3d0593639f874651:
-    __llgo_coro_func_coro_v1.method-value.4f4992be7488eb6e.af113d4191fe9eae3d0593639f874651
-__llgo_coro_func_descriptor_v1.method-value.5161df40a3f6522d.12d52cbc7004cd8daa99877c5b48cb34:
-    __llgo_coro_func_coro_v1.method-value.5161df40a3f6522d.12d52cbc7004cd8daa99877c5b48cb34
-__llgo_coro_func_descriptor_v1.method.4a794b448ada5e7e.3c1baa11c05cc96de3b33ee3f4f5036f:
-    __llgo_coro_func_coro_v1.method.4a794b448ada5e7e.3c1baa11c05cc96de3b33ee3f4f5036f
-__llgo_coro_method_raw_trap_v1.20cb3bf8c1ddb3f52381e9cad2ffdbfa:
+__llgo_coro_func_coro_v1.method-value.b59a474ef1c18bc7.d2c90a5d813225420adb2cb46b92d6fe:
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$coro
+__llgo_coro_func_coro_v1.method-value.bd5633db8b97e748.53623eefcad4daa1f89a30d5c19e201e:
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$coro
+__llgo_coro_func_coro_v1.method.94a385c438b38d8d.94f9ceee1e642b161ef7d158ea7a6a74:
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Value$coro
+__llgo_coro_func_descriptor_v1.method-value.6bed1fbe712ba7e0.d2c90a5d813225420adb2cb46b92d6fe:
+    __llgo_coro_func_coro_v1.method-value.6bed1fbe712ba7e0.d2c90a5d813225420adb2cb46b92d6fe
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Value$coro
+__llgo_coro_func_descriptor_v1.method-value.94a385c438b38d8d.53623eefcad4daa1f89a30d5c19e201e:
+    __llgo_coro_func_coro_v1.method-value.94a385c438b38d8d.53623eefcad4daa1f89a30d5c19e201e
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Value$coro
+__llgo_coro_func_descriptor_v1.method-value.b59a474ef1c18bc7.d2c90a5d813225420adb2cb46b92d6fe:
+    __llgo_coro_func_coro_v1.method-value.b59a474ef1c18bc7.d2c90a5d813225420adb2cb46b92d6fe
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$coro
+__llgo_coro_func_descriptor_v1.method-value.bd5633db8b97e748.53623eefcad4daa1f89a30d5c19e201e:
+    __llgo_coro_func_coro_v1.method-value.bd5633db8b97e748.53623eefcad4daa1f89a30d5c19e201e
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$coro
+__llgo_coro_func_descriptor_v1.method.94a385c438b38d8d.94f9ceee1e642b161ef7d158ea7a6a74:
+    __llgo_coro_func_coro_v1.method.94a385c438b38d8d.94f9ceee1e642b161ef7d158ea7a6a74
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Value$coro
+__llgo_coro_method_raw_trap_v1.72416a68672da495b33d046e772f4b75:
     llvm.trap
-__llgo_coro_method_raw_trap_v1.a004b111b9a7caef2ec1e2c43c7ddf88:
+__llgo_coro_method_raw_trap_v1.7f11223c141d65c92b3f7f28dcb9c254:
     llvm.trap
-__llgo_coro_method_raw_trap_v1.a551e081876916393b495942515ada43:
+__llgo_coro_method_raw_trap_v1.e6cf5082578b9ac34b4758fd195dbe38:
     llvm.trap
-__llgo_coro_method_raw_trap_v1.edebc1e42fd6c8885c32b3db61eb66f7:
+__llgo_coro_method_raw_trap_v1.eaa24971ef9f50fab26b76842dd4f7eb:
     llvm.trap
-__llgo_coro_root_factory_descriptor_v1.9e4639ed80ff6ac79e8ba81bc0e1a711:
-    __llgo_coro_root_factory_v1.9e4639ed80ff6ac79e8ba81bc0e1a711
-__llgo_coro_root_factory_v1.9e4639ed80ff6ac79e8ba81bc0e1a711:
+__llgo_coro_root_factory_descriptor_v1.0edbbbaf9927db6213cd2dee35a9538f:
+    __llgo_coro_root_factory_v1.0edbbbaf9927db6213cd2dee35a9538f
+__llgo_coro_root_factory_v1.0edbbbaf9927db6213cd2dee35a9538f:
     main.main$coro
-__llgo_coro_root_package_v1.92fd3e62ca218ce8a1969cd2b5ce1639:
-    __llgo_coro_root_package_v1.92fd3e62ca218ce8a1969cd2b5ce1639.entries
-__llgo_coro_root_package_v1.92fd3e62ca218ce8a1969cd2b5ce1639.entries:
-    __llgo_coro_root_factory_descriptor_v1.9e4639ed80ff6ac79e8ba81bc0e1a711
+__llgo_coro_root_package_v1.1a40c860b4b54eb490bf75d4c00e59e1:
+    __llgo_coro_root_package_v1.1a40c860b4b54eb490bf75d4c00e59e1.entries
+__llgo_coro_root_package_v1.1a40c860b4b54eb490bf75d4c00e59e1.entries:
+    __llgo_coro_root_factory_descriptor_v1.0edbbbaf9927db6213cd2dee35a9538f
+__llgo_static_itab.d8c81beed6220446e1b767d928f3597f:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[int]
+    __llgo_coro_func_descriptor_v1.method.94a385c438b38d8d.94f9ceee1e642b161ef7d158ea7a6a74
+    _llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8
 _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
     *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
     _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA$out
@@ -121,13 +130,12 @@ _llgo_string:
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.070ba4e409232ef4bfb7874ae908f2d4
+    __llgo_coro_frame_descriptor_v1.91f93f4316a6601fcb5dcea1aa52a92b
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     _llgo_string
-    github.com/goplus/llgo/runtime/internal/runtime.AllocU
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
@@ -136,14 +144,17 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int])
     llvm.coro.id
     llvm.coro.size.i64
     llvm.coro.suspend
+    llvm.fake.use
     llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$outcome:
+    _llgo_string
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Value$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.3ef233a8323b674d280cf87e646ef91f
+    __llgo_coro_frame_descriptor_v1.6de9fe3554349ebe09b56190dec75c8d
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1
     llvm.coro.align.i64
     llvm.coro.alloc
@@ -153,17 +164,17 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int])
     llvm.coro.id
     llvm.coro.size.i64
     llvm.coro.suspend
+    llvm.fake.use
     llvm.trap
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.94d797f8dee4f1fa3148e39f7c26b6b4
+    __llgo_coro_frame_descriptor_v1.852d85f2f5eb3745540cf939246d72cd
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     _llgo_string
-    github.com/goplus/llgo/runtime/internal/runtime.AllocU
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
@@ -172,14 +183,17 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[strin
     llvm.coro.id
     llvm.coro.size.i64
     llvm.coro.suspend
+    llvm.fake.use
     llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$outcome:
+    _llgo_string
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Value$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.fb46e76d942af7ea61be5f6f0caef166
+    __llgo_coro_frame_descriptor_v1.fa92d8db2ca5dcf58367699e17b8c505
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1
     llvm.coro.align.i64
     llvm.coro.alloc
@@ -189,47 +203,52 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[strin
     llvm.coro.id
     llvm.coro.size.i64
     llvm.coro.suspend
+    llvm.fake.use
     llvm.trap
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.struct$XNpHe-3-A25gBmHjYdF74H8M4k3Eik680huOzY6OtaU$fields:
     _llgo_string
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.struct$lOhriNu2BrWBR2Mh8k-KggMYlAw0Wx-2ftE2_gNyubg$fields:
     _llgo_int
 llvm.compiler.used:
-    __llgo_coro_library_effect_v6.c63a04e0f0f5ba44b461a7ccfc25e00c
+    __llgo_coro_library_effect_v9.e59e8cc4743350ee44585d2a25d65ada
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.9e4639ed80ff6ac79e8ba81bc0e1a711
-    __llgo_coro_root_package_v1.92fd3e62ca218ce8a1969cd2b5ce1639
+    __llgo_coro_root_factory_descriptor_v1.0edbbbaf9927db6213cd2dee35a9538f
+    __llgo_coro_root_package_v1.1a40c860b4b54eb490bf75d4c00e59e1
 main.init:
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init
     main.init$guard
 main.main$coro:
-    *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[int]
     *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[string]
     __llgo_coro_await_consume_v1
-    __llgo_coro_await_prepare_v3
+    __llgo_coro_await_inline_destroy_consume_v4
+    __llgo_coro_await_inline_finish_v2
+    __llgo_coro_await_prepare_inline_v4
     __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.9e4639ed80ff6ac79e8ba81bc0e1a711
+    __llgo_coro_frame_descriptor_v1.0edbbbaf9927db6213cd2dee35a9538f
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
-    _llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8
+    __llgo_static_itab.d8c81beed6220446e1b767d928f3597f
     github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro
-    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$coro
-    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewStringBox$coro
-    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.UseStringBox$coro
-    github.com/goplus/llgo/runtime/internal/runtime.NewItab$coro
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$outcome
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewStringBox$outcome
+    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.UseStringBox$outcome
     github.com/goplus/llgo/runtime/internal/runtime.PrintByte$coro
     github.com/goplus/llgo/runtime/internal/runtime.PrintInt$coro
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
+    llvm.coro.destroy
+    llvm.coro.done
     llvm.coro.end
     llvm.coro.free
     llvm.coro.id
     llvm.coro.promise
+    llvm.coro.resume
     llvm.coro.size.i64
     llvm.coro.suspend
     llvm.fake.use
@@ -240,7 +259,11 @@ main.main$coro:
 [UseIface]
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$coro:
     _llgo_string
+github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]).Drop$outcome:
+    _llgo_string
 github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$coro:
+    _llgo_string
+github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[string]).Drop$outcome:
     _llgo_string
 main.main$coro:
     *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[int]
@@ -248,9 +271,9 @@ main.main$coro:
 
 [MethodInfo]
 *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[int]:
-    0 Drop _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA __llgo_coro_method_raw_trap_v1.edebc1e42fd6c8885c32b3db61eb66f7 __llgo_coro_func_descriptor_v1.method-value.5161df40a3f6522d.12d52cbc7004cd8daa99877c5b48cb34
-    1 Value _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA __llgo_coro_func_descriptor_v1.method.4a794b448ada5e7e.3c1baa11c05cc96de3b33ee3f4f5036f __llgo_coro_func_descriptor_v1.method-value.4a794b448ada5e7e.12d52cbc7004cd8daa99877c5b48cb34
+    0 Drop _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA __llgo_coro_method_raw_trap_v1.eaa24971ef9f50fab26b76842dd4f7eb __llgo_coro_func_descriptor_v1.method-value.bd5633db8b97e748.53623eefcad4daa1f89a30d5c19e201e
+    1 Value _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA __llgo_coro_func_descriptor_v1.method.94a385c438b38d8d.94f9ceee1e642b161ef7d158ea7a6a74 __llgo_coro_func_descriptor_v1.method-value.94a385c438b38d8d.53623eefcad4daa1f89a30d5c19e201e
 *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.Box[string]:
-    0 Drop _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to __llgo_coro_method_raw_trap_v1.a004b111b9a7caef2ec1e2c43c7ddf88 __llgo_coro_func_descriptor_v1.method-value.29eb060357d7a736.af113d4191fe9eae3d0593639f874651
-    1 Value _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to __llgo_coro_method_raw_trap_v1.a551e081876916393b495942515ada43 __llgo_coro_func_descriptor_v1.method-value.4f4992be7488eb6e.af113d4191fe9eae3d0593639f874651
+    0 Drop _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to __llgo_coro_method_raw_trap_v1.e6cf5082578b9ac34b4758fd195dbe38 __llgo_coro_func_descriptor_v1.method-value.b59a474ef1c18bc7.d2c90a5d813225420adb2cb46b92d6fe
+    1 Value _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to __llgo_coro_method_raw_trap_v1.72416a68672da495b33d046e772f4b75 __llgo_coro_func_descriptor_v1.method-value.6bed1fbe712ba7e0.d2c90a5d813225420adb2cb46b92d6fe
 

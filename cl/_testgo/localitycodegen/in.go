@@ -17,11 +17,11 @@ package main
 // CHECK: ret ptr
 // CHECK-LABEL: define ptr @"main.__llgo_local_dispatch_tls_0$coro"(
 // CHECK: call ptr @"main.__llgo_local_init_0$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define ptr @"main.__llgo_local_init_0$coro"(
 // CHECK: call ptr @main.newPointer()
-// CHECK: call ptr @"{{.*}}LocalPackageLogical$coro"(
+// CHECK: call void @"{{.*}}LocalPackageLogical$outcome"(
 // CHECK: call ptr @"{{.*}}EnsureLogicalLocalInitializer$coro"(
 // CHECK-LABEL: define ptr @"main.init$coro"(
 // CHECK: call ptr @main.newPointer()
@@ -34,7 +34,7 @@ package main
 // CHECK-LABEL: define ptr @main.newPointer()
 // CHECK: ret ptr @main.backing
 // CHECK-LABEL: define ptr @"main.values$coro"(
-// CHECK: call ptr @"{{.*}}LocalPackageLogical$coro"(
+// CHECK: call void @"{{.*}}LocalPackageLogical$outcome"(
 // CHECK: call ptr @"{{.*}}EnsureLogicalLocalInitializer$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-NOT: NewProc

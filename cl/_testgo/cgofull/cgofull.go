@@ -197,7 +197,7 @@ func runPy() {
 // CHECK: call i32 @__llgo_coro_worker_resume_v1(
 // CHECK-LABEL: define ptr @"main.triggerC2func$coro"(
 // CHECK: call ptr @"main._C2func_test_structs$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
 // CHECK: call {{.*}} @main._Cfunc_

@@ -17,9 +17,9 @@ import "runtime"
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.demo1$1$coro"(
 // CHECK: call ptr @"runtime.Goexit$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr @"main.demo1$1$1$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.demo1$1$1$coro"(

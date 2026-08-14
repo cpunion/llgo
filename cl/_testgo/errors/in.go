@@ -5,7 +5,7 @@ package main
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.New$coro"(
 // CHECK: call ptr @"{{.*}}AllocZ"(
-// CHECK: call ptr @"{{.*}}NewItab$coro"(
+// CHECK: insertvalue %"{{.*}}iface" { ptr @__llgo_static_itab.
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
@@ -15,9 +15,9 @@ package main
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.main$coro"(
-// CHECK: call ptr @"main.New$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call void @"main.New$outcome"(
 // CHECK: call ptr @"{{.*}}PrintIface$coro"(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr %{{[0-9]+}}(ptr %0,
 // CHECK: call ptr @"{{.*}}PrintString$coro"(
 // CHECK: call ptr @"{{.*}}PrintByte$coro"(

@@ -26,7 +26,7 @@ func main() {
 // as the third physical parameter.
 // CHECK-LABEL: define ptr @"main.f$coro"(
 // CHECK: call ptr @"sync.(*Once).Do$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call i8 @llvm.coro.suspend(
 
 // CHECK-LABEL: define ptr @"main.f$1$coro"(ptr %0, ptr %1, ptr swiftself %2)

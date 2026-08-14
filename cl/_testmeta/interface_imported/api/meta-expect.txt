@@ -1,11 +1,11 @@
 [OrdinaryEdges]
-__llgo$generated$promoted$Close$llgo$promoted$v1$77575336b69e7eac563cd474c1c4b6cfce8992a2ca19cdb50fb669058dfbb395$coro:
+__llgo$generated$promoted$Close$llgo$promoted$v1$99ecc0384df167e852f57195384c7142b1e255037df2db2c23f6defe6db377ff$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.713d7ca7292bd9add7e74aace6fc4349
+    __llgo_coro_frame_descriptor_v1.93980eb480dcf849e3db244c155240dc
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     __llgo_coro_wrap_nil_payload_v1
@@ -18,14 +18,18 @@ __llgo$generated$promoted$Close$llgo$promoted$v1$77575336b69e7eac563cd474c1c4b6c
     llvm.coro.id
     llvm.coro.size.i64
     llvm.coro.suspend
+    llvm.fake.use
     llvm.trap
-__llgo$generated$promoted$Read$llgo$promoted$v1$dfcfeef340532e0df942cabc1157784ab1bd8f8bcab83246687af39fe0d8a164$coro:
+__llgo$generated$promoted$Close$llgo$promoted$v1$99ecc0384df167e852f57195384c7142b1e255037df2db2c23f6defe6db377ff$outcome:
+    __llgo_coro_wrap_nil_payload_v1
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Close
+__llgo$generated$promoted$Read$llgo$promoted$v1$88cb386361a8853c4f9177ef33616451223a619c8119e5d797370bb0c81dca0d$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.863d624b1d6227fca13a64da6a86d9c8
+    __llgo_coro_frame_descriptor_v1.4a7f2c0bc225bc79cd573d16131d24bb
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     __llgo_coro_wrap_nil_payload_v1
@@ -38,9 +42,13 @@ __llgo$generated$promoted$Read$llgo$promoted$v1$dfcfeef340532e0df942cabc1157784a
     llvm.coro.id
     llvm.coro.size.i64
     llvm.coro.suspend
+    llvm.fake.use
     llvm.trap
+__llgo$generated$promoted$Read$llgo$promoted$v1$88cb386361a8853c4f9177ef33616451223a619c8119e5d797370bb0c81dca0d$outcome:
+    __llgo_coro_wrap_nil_payload_v1
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Read
 github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init:
     github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v6.00cd9083226ff505e874b69adef84218
+    __llgo_coro_library_effect_v9.f818e9affa2aab9d4b5261b58188d851
 

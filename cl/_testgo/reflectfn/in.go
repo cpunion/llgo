@@ -19,7 +19,7 @@ func demo() {
 // CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: store { ptr, ptr } { ptr @__llgo_coro_func_descriptor_v1.{{.*}}, ptr null }
 // CHECK: call ptr @{{.*}}reflect.Value.UnsafePointer$coro{{.*}}(
-// CHECK: call void @__llgo_coro_await_prepare_v3
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
 func main() {
 	v := 100
 	fn := func() {
@@ -37,5 +37,5 @@ func main() {
 // CHECK-LABEL: define ptr @"main.main$1$coro"(ptr %0, ptr %1, ptr swiftself %2){{.*}} {
 // CHECK: load { ptr }, ptr %2
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintInt$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
 // CHECK-NOT: __llgo_stub.

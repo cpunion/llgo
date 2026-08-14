@@ -7,8 +7,9 @@ import (
 
 // CHECK-LABEL: define ptr @"main.f$coro"(
 func f(c, z complex128) {
-	// CHECK: [[ABS:%[0-9]+]] = call ptr @"math/cmplx.Abs$coro"
-	// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[ABS]]
+	// CHECK: call void @"math/cmplx.Abs$outcome"
+	// CHECK: [[PRINT:%[0-9]+]] = call ptr @"{{.*}}PrintFloat$coro"
+	// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[PRINT]]
 	println("abs(3+4i):", cmplx.Abs(c))
 	// CHECK: extractvalue { double, double } %3, 0
 	// CHECK: extractvalue { double, double } %3, 1

@@ -8,33 +8,32 @@ _llgo_main.T:
 *_llgo_main.T:
     _llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.memequalptr
-__llgo_coro_root_factory_descriptor_v1.c6527c229582d9177d331b3d11a81e32:
-    __llgo_coro_root_factory_v1.c6527c229582d9177d331b3d11a81e32
-__llgo_coro_root_factory_v1.c6527c229582d9177d331b3d11a81e32:
+__llgo_coro_root_factory_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934:
+    __llgo_coro_root_factory_v1.dfc7f364c7c31c1996dcb4f150ed6934
+__llgo_coro_root_factory_v1.dfc7f364c7c31c1996dcb4f150ed6934:
     main.main$coro
-__llgo_coro_root_package_v1.42538989abc5c00ea9f807df5a483675:
-    __llgo_coro_root_package_v1.42538989abc5c00ea9f807df5a483675.entries
-__llgo_coro_root_package_v1.42538989abc5c00ea9f807df5a483675.entries:
-    __llgo_coro_root_factory_descriptor_v1.c6527c229582d9177d331b3d11a81e32
+__llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0:
+    __llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0.entries
+__llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0.entries:
+    __llgo_coro_root_factory_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934
 _llgo_main.T:
     *_llgo_main.T
     github.com/goplus/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
-    __llgo_coro_library_effect_v6.6e13a20588277ad1732abfdfc51410f8
+    __llgo_coro_library_effect_v9.208ab9b5dc648747a50b0812e926e3fb
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.c6527c229582d9177d331b3d11a81e32
-    __llgo_coro_root_package_v1.42538989abc5c00ea9f807df5a483675
+    __llgo_coro_root_factory_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934
+    __llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0
 main.init:
     main.init$guard
 main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.c6527c229582d9177d331b3d11a81e32
+    __llgo_coro_frame_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934
     __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v1
+    __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1
     _llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.AllocU
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
@@ -43,10 +42,16 @@ main.main$coro:
     llvm.coro.id
     llvm.coro.size.i64
     llvm.coro.suspend
+    llvm.fake.use
     llvm.trap
+    main.sink
+main.main$outcome:
+    _llgo_main.T
     main.sink
 
 [UseIface]
 main.main$coro:
+    _llgo_main.T
+main.main$outcome:
     _llgo_main.T
 

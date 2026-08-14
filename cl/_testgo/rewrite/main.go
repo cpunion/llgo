@@ -18,9 +18,9 @@ import (
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.init$coro"(
 // CHECK: call ptr @"fmt.init$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr @"github.com/goplus/llgo/cl/_testgo/rewrite/dep.init$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @"main.printLine$coro"(
 // CHECK: call ptr @"github.com/goplus/llgo/cl/_testgo/rewrite/dep.PrintVar$coro"(
@@ -28,10 +28,10 @@ import (
 // CHECK: call ptr @"main.printLine$coro"(
 // CHECK: call %"{{.*}}String" @runtime.Version()
 // CHECK: call ptr @"main.printLine$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-LABEL: define ptr @"main.printLine$coro"(
 // CHECK: call ptr @"fmt.Printf$coro"(
-// CHECK: call void @__llgo_coro_await_prepare_v3(
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 

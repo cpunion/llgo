@@ -18,10 +18,10 @@ func Foo(s string) int {
 // CHECK-DAG: call i64 @main.Foo(%"{{.*}}String" { ptr @{{[0-9]+}}, i64 5 })
 // CHECK-DAG: call i1 @__llgo_coro_preempt_poll_v1(ptr %0)
 // CHECK-DAG: call ptr @"{{.*}}PrintInt$coro"
-// CHECK-DAG: call void @__llgo_coro_await_prepare_v3
+// CHECK-DAG: call i1 @__llgo_coro_await_prepare_inline_v4
 // CHECK-DAG: icmp slt i64 {{.*}}, 10000000
 // CHECK-DAG: call ptr @"{{.*}}PrintByte$coro"({{.*}}i8 10)
-// CHECK-DAG: call void @__llgo_coro_await_prepare_v3
+// CHECK-DAG: call i1 @__llgo_coro_await_prepare_inline_v4
 // CHECK-NOT: call ptr @"{{.*}}AllocZ"
 func Test() {
 	j := 0
@@ -33,7 +33,7 @@ func Test() {
 
 // CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @"main.Test$coro"
-// CHECK: call void @__llgo_coro_await_prepare_v3
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
 func main() {
 	Test()
 }

@@ -6,15 +6,14 @@ import (
 )
 
 // CHECK-LABEL: define ptr @"main.main$coro"(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 40)
-// CHECK: [[S2B:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.StringToBytes$coro"
-// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[S2B]]
+// CHECK: alloca %bytes.Buffer
+// CHECK: call void @"{{.*}}/runtime/internal/runtime.StringToBytes$outcome"
 // CHECK: [[WRITE:%[0-9]+]] = call ptr @"bytes.(*Buffer).Write$coro"
-// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[WRITE]]
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[WRITE]]
 // CHECK: call ptr @"bytes.(*Buffer).WriteString$coro"
-// CHECK: call ptr @"bytes.(*Buffer).Bytes$coro"
-// CHECK: call ptr @"bytes.(*Buffer).String$coro"
-// CHECK: call ptr @"bytes.EqualFold$coro"
+// CHECK: call void @"bytes.(*Buffer).Bytes$outcome"
+// CHECK: call void @"bytes.(*Buffer).String$outcome"
+// CHECK: call void @"bytes.EqualFold$outcome"
 func main() {
 	var b bytes.Buffer // A Buffer needs no initialization.
 	b.Write([]byte("Hello "))
