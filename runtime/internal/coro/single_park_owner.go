@@ -42,7 +42,7 @@ func preflightSingleParkPreparation(
 	if !ValidG(g) || handle == nil || header == nil || wait == nil ||
 		*wait != (WaitSetRecord{}) || !resumeGateTaken(g) || g.runP == nil ||
 		g.pending.kind != pendingNone || g.spawnChild != nil || g.waiting ||
-		!validReusableDirectChannelParkState(&g.park) || g.park.attached != 0 || g.park.head != nil {
+		!validReusableSingleParkState(&g.park) || g.park.attached != 0 || g.park.head != nil {
 		return singleParkPreparation{}, false
 	}
 	frame := findFrame(g, handle)

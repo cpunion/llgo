@@ -44,7 +44,7 @@ func coroHandleDestroyCommitted(g *coro.G, handle unsafe.Pointer) bool {
 		return false
 	}
 	coroHandleDestroy(handle)
-	return coro.CommitFrameDestroyV2(g, handle)
+	return coro.CommitFrameDestroyCompiler(g, handle)
 }
 
 // __llgo_coro_await_inline_v1 resumes one already prepared child on the
@@ -92,7 +92,7 @@ func __llgo_coro_await_inline_v1(g, parent, child unsafe.Pointer) bool {
 //
 //export __llgo_coro_await_inline_begin_v2
 func __llgo_coro_await_inline_begin_v2(g, parent, child unsafe.Pointer) bool {
-	switch coro.BeginInlineAwait((*coro.G)(g), parent, child) {
+	switch coro.BeginInlineAwaitCompiler((*coro.G)(g), parent, child) {
 	case coro.InlineAwaitDeclined:
 		return false
 	case coro.InlineAwaitStarted:
@@ -105,7 +105,7 @@ func __llgo_coro_await_inline_begin_v2(g, parent, child unsafe.Pointer) bool {
 
 //export __llgo_coro_await_inline_finish_v2
 func __llgo_coro_await_inline_finish_v2(g, parent, child unsafe.Pointer, done bool) bool {
-	switch coro.FinishInlineAwait((*coro.G)(g), parent, child, done) {
+	switch coro.FinishInlineAwaitCompiler((*coro.G)(g), parent, child, done) {
 	case coro.InlineAwaitSuspend:
 		return false
 	case coro.InlineAwaitDestroy:
@@ -118,7 +118,7 @@ func __llgo_coro_await_inline_finish_v2(g, parent, child unsafe.Pointer, done bo
 
 //export __llgo_coro_await_inline_destroy_commit_v2
 func __llgo_coro_await_inline_destroy_commit_v2(g, parent, child unsafe.Pointer) {
-	if !coro.CommitInlineAwaitDestroy((*coro.G)(g), parent, child) {
+	if !coro.CommitInlineAwaitDestroyCompiler((*coro.G)(g), parent, child) {
 		coroRuntimeAbort("invalid coroutine inline child destroy commit")
 	}
 }

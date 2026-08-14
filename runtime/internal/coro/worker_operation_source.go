@@ -101,6 +101,17 @@ type WorkerOperationSource struct {
 	affectedTail uint32
 }
 
+// workerOperationReservation is an owner-stack capability for one reusable
+// worker slot. It exists only inside a no-suspend park transaction; the
+// backend receives the resulting OperationID, never this source or slot.
+type workerOperationReservation struct {
+	source   *WorkerOperationSource
+	owner    *P
+	slot     *workerOperationSlot
+	index    uint32
+	capacity uint32
+}
+
 // WorkerOperationConfiguredCapacity returns the exact linear slot and scan
 // capacity. Linear one-based slot identities remain encodable in the frozen
 // 15-bit OperationID local field.
@@ -193,22 +204,51 @@ func ConfigureWorkerOperationPages(source *WorkerOperationSource, pages []Worker
 	return true
 }
 
-// CanReserveWorkerOperation is the allocation-free source-capacity preflight.
-// Physical queue capacity remains an independent target responsibility.
-func CanReserveWorkerOperation(p *P, source *WorkerOperationSource) bool {
-	if !validWorkerOperationOwner(source, p) {
-		return false
-	}
-	for index := uint32(0); index < WorkerOperationConfiguredCapacity(source); index++ {
+func (source *WorkerOperationSource) preflightWorkerReservationOwned(
+	p *P,
+) (workerOperationReservation, bool) {
+	capacity := WorkerOperationConfiguredCapacity(source)
+	for index := uint32(0); index < capacity; index++ {
 		slot, ok := workerOperationSlotAt(source, index)
 		if !ok {
-			return false
+			return workerOperationReservation{}, false
 		}
 		if preemptLoad(&slot.generation) != ^uint32(0) && workerOperationReusableSlot(source, slot, index) {
-			return true
+			return workerOperationReservation{
+				source: source, owner: p, slot: slot, index: index, capacity: capacity,
+			}, true
 		}
 	}
-	return false
+	return workerOperationReservation{}, false
+}
+
+func validWorkerOperationReservationHeader(
+	source *WorkerOperationSource,
+	p *P,
+	reservation workerOperationReservation,
+) bool {
+	return source != nil && p != nil && reservation.source == source &&
+		reservation.owner == p && reservation.slot != nil &&
+		reservation.capacity != 0 && reservation.index < reservation.capacity
+}
+
+// preflightWorkerOperationReservation authenticates the owner and selects the
+// exact reusable slot once. Physical queue capacity remains an independent
+// target responsibility.
+func preflightWorkerOperationReservation(
+	p *P,
+	source *WorkerOperationSource,
+) (workerOperationReservation, bool) {
+	if !validWorkerOperationOwner(source, p) {
+		return workerOperationReservation{}, false
+	}
+	return source.preflightWorkerReservationOwned(p)
+}
+
+// CanReserveWorkerOperation is the allocation-free source-capacity preflight.
+func CanReserveWorkerOperation(p *P, source *WorkerOperationSource) bool {
+	_, ok := preflightWorkerOperationReservation(p, source)
+	return ok
 }
 
 // AttachWorkerOperationPage publishes one pristine stable page from the owner
@@ -287,6 +327,48 @@ func validWorkerOperationLiveSlot(source *WorkerOperationSource, p *P, index uin
 	return ok && slot.record.Matches(id)
 }
 
+func (source *WorkerOperationSource) reserveAndAttachWorkerSlot(
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	reservation workerOperationReservation,
+) (OperationID, bool) {
+	slot, index := reservation.slot, reservation.index
+	if slot == nil || index >= reservation.capacity ||
+		reservation.capacity != WorkerOperationConfiguredCapacity(source) {
+		return OperationID{}, false
+	}
+	generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
+	if !begun {
+		return OperationID{}, false
+	}
+	if !raiseSourceScanLimit(&source.scanLimit, index, reservation.capacity) {
+		return OperationID{}, false
+	}
+	id, ok := MakeOperationIDAtRoute(OperationSourceWorker, source.route, index+1, generation)
+	if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
+		return OperationID{}, false
+	}
+	attached := false
+	if wait == nil {
+		attached = AttachParkOperation(state, ticket, &slot.record, caseID)
+	} else {
+		attached = AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID)
+	}
+	if !attached {
+		if !AbortReservedOperation(&slot.record, id) ||
+			!resetProducerSourceSlot(&slot.producerSourceSlot, generation) {
+			return OperationID{}, false
+		}
+		return OperationID{}, false
+	}
+	if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
+		return OperationID{}, false
+	}
+	return id, true
+}
+
 func (source *WorkerOperationSource) reserveAndAttach(
 	p *P,
 	state *ParkState,
@@ -294,44 +376,11 @@ func (source *WorkerOperationSource) reserveAndAttach(
 	wait *WaitSetRecord,
 	caseID uint32,
 ) (OperationID, bool) {
-	if !validWorkerOperationOwner(source, p) {
+	reservation, ok := preflightWorkerOperationReservation(p, source)
+	if !ok {
 		return OperationID{}, false
 	}
-	for index := uint32(0); index < WorkerOperationConfiguredCapacity(source); index++ {
-		slot, slotOK := workerOperationSlotAt(source, index)
-		if !slotOK || !workerOperationReusableSlot(source, slot, index) || preemptLoad(&slot.generation) == ^uint32(0) {
-			continue
-		}
-		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
-		if !begun {
-			return OperationID{}, false
-		}
-		if !raiseSourceScanLimit(&source.scanLimit, index, WorkerOperationConfiguredCapacity(source)) {
-			return OperationID{}, false
-		}
-		id, ok := MakeOperationIDAtRoute(OperationSourceWorker, source.route, index+1, generation)
-		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
-			return OperationID{}, false
-		}
-		attached := false
-		if wait == nil {
-			attached = AttachParkOperation(state, ticket, &slot.record, caseID)
-		} else {
-			attached = AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID)
-		}
-		if !attached {
-			if !AbortReservedOperation(&slot.record, id) ||
-				!resetProducerSourceSlot(&slot.producerSourceSlot, generation) {
-				return OperationID{}, false
-			}
-			return OperationID{}, false
-		}
-		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
-			return OperationID{}, false
-		}
-		return id, true
-	}
-	return OperationID{}, false
+	return source.reserveAndAttachWorkerSlot(state, ticket, wait, caseID, reservation)
 }
 
 func (source *WorkerOperationSource) ReserveAndAttach(
@@ -361,6 +410,30 @@ func (source *WorkerOperationSource) MarkSubmitted(p *P, id OperationID) bool {
 	slot, ok := workerOperationSlotFor(source, id)
 	if !ok || !validWorkerOperationOwner(source, p) || slot.submitted ||
 		preemptLoad(&slot.generation) != id.Generation ||
+		preemptLoad(&slot.state) != uint32(producerSourceActive) ||
+		preemptLoad(&slot.mailbox) != uint32(workerOperationMailboxEmpty) ||
+		!slot.record.Matches(id) || slot.record.phase != operationActive {
+		return false
+	}
+	slot.submitted = true
+	return true
+}
+
+// markWorkerReservationSubmitted closes the compiler-owned worker transaction
+// against the slot it just reserved. The owner/source relation and complete
+// ParkLink graph were already audited before this no-suspend suffix.
+func (source *WorkerOperationSource) markWorkerReservationSubmitted(
+	p *P,
+	reservation workerOperationReservation,
+	id OperationID,
+) bool {
+	if !validWorkerOperationReservationHeader(source, p, reservation) ||
+		id.LocalSlot() != reservation.index+1 || id.Route() != source.route ||
+		id.Source() != OperationSourceWorker {
+		return false
+	}
+	slot := reservation.slot
+	if slot.submitted || preemptLoad(&slot.generation) != id.Generation ||
 		preemptLoad(&slot.state) != uint32(producerSourceActive) ||
 		preemptLoad(&slot.mailbox) != uint32(workerOperationMailboxEmpty) ||
 		!slot.record.Matches(id) || slot.record.phase != operationActive {

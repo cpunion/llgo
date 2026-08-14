@@ -292,6 +292,19 @@ func BindSingleWaitSetResumePacket(record *WaitSetRecord, packet *ResumePacket, 
 		state.head.next != nil || state.head.operation == nil || state.head.operation.id != source {
 		return false
 	}
+	installSingleWaitSetResumePacket(record, packet, source)
+	return true
+}
+
+// installSingleWaitSetResumePacket is the no-fail write half shared by the
+// general audited binder and compiler-owned one-event source transactions.
+// The latter have already built and audited the exact ParkLink relation in the
+// same owner-P interval, so immediately walking it again carries no new fact.
+func installSingleWaitSetResumePacket(
+	record *WaitSetRecord,
+	packet *ResumePacket,
+	source OperationID,
+) {
 	*packet = ResumePacket{
 		ticket: record.ticket,
 		source: source,
@@ -299,7 +312,6 @@ func BindSingleWaitSetResumePacket(record *WaitSetRecord, packet *ResumePacket, 
 	}
 	record.resume = unsafe.Pointer(packet)
 	record.resumeKind = resumeBindingSingle
-	return true
 }
 
 func materializeManualResume(

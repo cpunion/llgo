@@ -291,7 +291,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	for _, required := range []string{
 		"func coroReserveNativeWorkerSubmissionV1(",
 		"coroNativeWorkerSubmissionOwnerV1(handle, route)",
-		"coro.CommitCurrentExecutorWorkerSubmission(driver, g, id)",
+		"func coroPublishNativeWorkerSubmissionV1(",
 		"id.Route() != route",
 	} {
 		if !strings.Contains(native, required) {
@@ -302,8 +302,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	owner := readRuntimePollFile(t, runtimeCoroWorkerOwnerSource)
 	for _, required := range []string{
 		"coro.CurrentExecutorWorkerDriver(task)",
-		"coro.PrepareCurrentExecutorWorkerPark(",
-		"coro.BindSingleWaitSetResumePacket(",
+		"coro.PrepareCurrentExecutorWorkerParkCompiler(",
+		"&state.packet,",
 		"coro.TakeResumePacket(",
 		"coroReserveNativeWorkerSubmissionV1(executor, route)",
 		"packet    coro.ResumePacket",
@@ -317,6 +317,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"coroProgramReserveNativeWorkerSubmissionV1",
 		"coroProgramCancelNativeWorkerSubmissionV1",
 		"coroProgramCommitNativeWorkerSubmissionV1",
+		"coro.BindSingleWaitSetResumePacket(",
+		"coro.CommitCurrentExecutorWorkerSubmission(",
 		"coro.TakeRunDecision(",
 		"coro.FinishCurrentExecutorWorkerPark(",
 	} {

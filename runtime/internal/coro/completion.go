@@ -388,3 +388,29 @@ func ConsumeAwaitCompletion(g *G, parentHandle unsafe.Pointer) (CompletionSnapsh
 	*record = CompletionRecord{}
 	return snapshot, true
 }
+
+// ConsumeAwaitCompletionCompiler is the ordinary-return lane immediately
+// following CommitInlineAwaitDestroyCompiler or the scheduler's checked
+// destroy/resume transaction. The active parent and its terminal completion
+// record already carry the exact destroyed-child receipt; panic/recover,
+// cancellation, Goexit, and uncertain callers retain the complete validator.
+func ConsumeAwaitCompletionCompiler(g *G, parentHandle unsafe.Pointer) (CompletionSnapshot, bool) {
+	if ValidG(g) && parentHandle != nil && resumeGateTaken(g) &&
+		g.pending.kind == pendingNone && g.destroyTarget == nil &&
+		g.spawnChild == nil && compilerReleasableParkState(&g.park) {
+		parent := g.active
+		if parent != nil && parent.handle == parentHandle && parent.owner == g &&
+			parent.header != nil && parent.state == FrameActive &&
+			parent.header.G == unsafe.Pointer(g) &&
+			parent.header.SuspendReason == uint16(SuspendNone) &&
+			parent.header.Lifecycle == uint16(FrameActive) {
+			record := &parent.completion
+			if record.child != nil && record.status == CompletionReturn &&
+				record.typeWord == nil && record.dataWord == nil {
+				*record = CompletionRecord{}
+				return CompletionSnapshot{Status: CompletionReturn}, true
+			}
+		}
+	}
+	return ConsumeAwaitCompletion(g, parentHandle)
+}

@@ -163,7 +163,7 @@ func PrepareCurrentChannelParkCleanup(
 		return base
 	}
 	if g.pending.kind != pendingNone || g.spawnChild != nil || g.waiting ||
-		!validReusableDirectChannelParkState(&g.park) ||
+		!validReusableSingleParkState(&g.park) ||
 		g.park.attached != 0 || g.park.head != nil {
 		return CurrentChannelParkPreparation{}
 	}
@@ -491,14 +491,13 @@ func validCommittedDirectChannelPark(g *G, frame *Frame, wait *WaitSetRecord) bo
 		record.link.ticket == wait.ticket && record.link.previous == nil && record.link.next == nil
 }
 
-// validReusableDirectChannelParkState is the O(1) preflight for the ordinary
-// compiler-owned direct park. Idle and Delivered have no attached operation
+// validReusableSingleParkState is the O(1) preflight for an ordinary
+// compiler-owned one-event park. Idle and Delivered have no attached operation
 // graph; checking them through validParkState would enter its general N-way
-// link walker and large phase switch on every channel operation. Consumed is a
+// link walker and large phase switch on every operation. Consumed is a
 // compatibility handoff shape with outcome-dependent state and deliberately
-// retains the complete validator. The manual single-event transaction reuses
-// the same source-neutral certificate.
-func validReusableDirectChannelParkState(state *ParkState) bool {
+// retains the complete validator.
+func validReusableSingleParkState(state *ParkState) bool {
 	if state == nil || state.resolving || state.taskCancelKind != TaskCancelNone ||
 		state.taskCancelPhase != taskCancelIdle {
 		return false
@@ -563,7 +562,7 @@ func prepareSingleChannelParkOrdinary(
 		*wait != (WaitSetRecord{}) || *claim != (SelectClaim{}) || caseID == 0 ||
 		!resumeGateTaken(g) || g.runP == nil || g.pending.kind != pendingNone ||
 		g.spawnChild != nil || g.waiting || g.park.taskCancelKind != TaskCancelNone ||
-		g.park.taskCancelPhase != taskCancelIdle || !validReusableDirectChannelParkState(&g.park) ||
+		g.park.taskCancelPhase != taskCancelIdle || !validReusableSingleParkState(&g.park) ||
 		g.park.attached != 0 || g.park.head != nil {
 		return ParkTicket{}, OperationID{}, false
 	}

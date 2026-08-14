@@ -49,3 +49,21 @@ func TakeRunDecisionWords(
 	}
 	return uint32(parkOutcome), selectedCase, uint32(task), operation.SourceSlot, operation.Generation, true
 }
+
+// TakeRunDecisionWordsCompiler is the compiler-owned scalar gate. A nested
+// static child's initial zero-ticket resume directly consumes the adjacent
+// pendingInlineStart certificate; ordinary resumes and every non-zero ticket
+// retain TakeRunDecisionWords' complete decision validation.
+func TakeRunDecisionWordsCompiler(
+	g *G,
+	expectedEpoch, expectedGeneration uint32,
+) (
+	outcome, caseID, taskKind, operationSourceSlot, operationGeneration uint32,
+	ok bool,
+) {
+	if expectedEpoch == 0 && expectedGeneration == 0 &&
+		takeInlineAwaitInitialDecisionCompiler(g) {
+		return 0, 0, 0, 0, 0, true
+	}
+	return TakeRunDecisionWords(g, expectedEpoch, expectedGeneration)
+}

@@ -65,7 +65,7 @@ func __llgo_coro_frame_publish_v3(
 
 //export __llgo_coro_frame_destroy_commit_v2
 func __llgo_coro_frame_destroy_commit_v2(g, handle unsafe.Pointer) {
-	if !coro.CommitFrameDestroyV2((*coro.G)(g), handle) {
+	if !coro.CommitFrameDestroyCompiler((*coro.G)(g), handle) {
 		coroRuntimeAbort("invalid borrowable coroutine frame destruction")
 	}
 }
@@ -79,7 +79,7 @@ func __llgo_coro_await_prepare_v1(g, parent, child unsafe.Pointer) {
 
 //export __llgo_coro_await_prepare_v2
 func __llgo_coro_await_prepare_v2(g, parent, child unsafe.Pointer) {
-	if !coro.PrepareAwaitCompletion((*coro.G)(g), parent, child) {
+	if !coro.PrepareAwaitCompletionCompiler((*coro.G)(g), parent, child) {
 		coroRuntimeAbort("invalid coroutine child completion handoff")
 	}
 }
@@ -90,7 +90,7 @@ func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) ui
 		coroRuntimeAbort("invalid coroutine child outcome output")
 	}
 	task := (*coro.G)(g)
-	snapshot, ok := coro.ConsumeAwaitCompletion(task, parent)
+	snapshot, ok := coro.ConsumeAwaitCompletionCompiler(task, parent)
 	if !ok {
 		coroRuntimeAbort("invalid coroutine child outcome consume")
 	}
@@ -127,7 +127,7 @@ func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status ui
 	task := (*coro.G)(g)
 	frameHeader := (*coro.HeaderV1)(header)
 	completion := coro.CompletionStatus(status)
-	if !coro.PrepareCompleteStatus(
+	if !coro.PrepareCompleteStatusCompiler(
 		task, handle, frameHeader, completion,
 	) {
 		coroRuntimeAbort("invalid coroutine terminal completion handoff")

@@ -36,17 +36,18 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	}
 	action := beginWaitTestResume(t, p, task)
 	var wait WaitSetRecord
+	var packet ResumePacket
 	task.frame.header.SuspendReason = uint16(SuspendPark)
 	task.frame.header.Lifecycle = uint16(FrameSuspended)
 	current, currentHandle, currentRoute, currentOK := CurrentExecutorWorkerDriver(task.g)
 	if !currentOK || current != driver || currentHandle != executor || currentRoute != RouteID(1) {
 		t.Fatalf("resolve current worker owner = (%p, %+v, %d, %t)", current, currentHandle, currentRoute, currentOK)
 	}
-	ticket, id, ok := PrepareCurrentExecutorWorkerPark(
-		driver, task.g, task.handle, task.frame.header, &wait, 31, 79,
+	ticket, id, ok := PrepareCurrentExecutorWorkerParkCompiler(
+		driver, task.g, task.handle, task.frame.header, &wait, &packet, 31, 79,
 	)
-	if !ok || !CommitCurrentExecutorWorkerSubmission(driver, task.g, id) {
-		t.Fatal("prepare worker owner park")
+	if !ok {
+		t.Fatal("prepare compiler worker owner park")
 	}
 	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
 		t.Fatalf("commit worker owner park = (%+v, %t)", action, ok)
@@ -86,13 +87,15 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	action = beginWaitTestResume(t, p, task)
 	task.frame.header.SuspendReason = uint16(SuspendPark)
 	task.frame.header.Lifecycle = uint16(FrameSuspended)
-	outcome, caseID, lease, taskCancel, ok := TakeRunDecision(task.g, ticket)
-	if !ok || outcome != ParkOutcomeCompleted || caseID != 31 || !lease.Valid() || taskCancel != TaskCancelNone {
-		t.Fatalf("take worker owner decision = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, ok)
-	}
 	var got ScalarResultPayloadV1
-	if result := FinishCurrentExecutorWorkerPark(driver, task.g, id, lease, false, &got); !result.Finished() || got != payload {
-		t.Fatalf("finish worker owner result = %+v, want %+v", got, payload)
+	outcome, caseID, taskCancel, result, small, ok := TakeResumePacket(
+		task.g, ticket, &packet, &got,
+	)
+	if !ok || outcome != ParkOutcomeCompleted || caseID != 31 ||
+		taskCancel != TaskCancelNone || result != ResumeResultScalar ||
+		small != ResumeSmallInvalid || got != payload {
+		t.Fatalf("take compiler worker packet = (%d, %d, %d, %d, %d, %+v, %t)",
+			outcome, caseID, taskCancel, result, small, got, ok)
 	}
 	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
 	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)

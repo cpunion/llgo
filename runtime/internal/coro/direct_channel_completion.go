@@ -341,7 +341,7 @@ func prepareCurrentDirectChannelParkCompatibility(
 			return nil, 0
 		}
 	case parkConsumed:
-		if !validReusableDirectChannelParkState(&g.park) {
+		if !validReusableSingleParkState(&g.park) {
 			return nil, 0
 		}
 	default:

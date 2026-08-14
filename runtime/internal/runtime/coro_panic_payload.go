@@ -94,7 +94,7 @@ func __llgo_coro_await_prepare_v3(g, parent, child unsafe.Pointer, mode uint32, 
 	switch mode {
 	case 0:
 		if typeWord != nil || dataWord != nil ||
-			!coro.PrepareAwaitCompletion((*coro.G)(g), parent, child) {
+			!coro.PrepareAwaitCompletionCompiler((*coro.G)(g), parent, child) {
 			coroRuntimeAbort("invalid ordinary coroutine child completion handoff")
 		}
 	case 1:

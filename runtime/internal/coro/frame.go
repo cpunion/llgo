@@ -433,6 +433,53 @@ func prepareAwait(
 	return true
 }
 
+// compilerReleasableParkState consumes the owner-only certificate established
+// when a park reaches a source-free phase. Compiler hooks run inside one
+// already authenticated resume episode, so replaying the complete union audit
+// at every ordinary Go call does not establish a new ownership boundary.
+// Compatibility and lifecycle APIs continue to use releasableParkState.
+func compilerReleasableParkState(state *ParkState) bool {
+	if state == nil || state.resolving || state.directChannel || state.attached != 0 || state.head != nil ||
+		!validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) {
+		return false
+	}
+	switch state.phase {
+	case parkIdle, parkConsumed, parkDelivered:
+		return true
+	default:
+		return false
+	}
+}
+
+// PrepareAwaitCompletionCompiler is the private compiler-hook lane for an
+// ordinary managed call. The child ramp has just published the newest frame
+// and the current frame is the exact active parent, so both frame identities
+// are available in O(1). If that certificate is absent, retain the complete
+// compatibility validator and fail-closed behavior.
+func PrepareAwaitCompletionCompiler(g *G, parentHandle, childHandle unsafe.Pointer) bool {
+	if ValidG(g) && parentHandle != nil && childHandle != nil && resumeGateTaken(g) &&
+		g.pending.kind == pendingNone && g.spawnChild == nil &&
+		compilerReleasableParkState(&g.park) {
+		parent, child := g.active, g.frames
+		if parent != nil && child != nil && parent != child &&
+			parent.handle == parentHandle && child.handle == childHandle &&
+			parent.owner == g && child.owner == g &&
+			parent.header != nil && child.header != nil &&
+			parent.state == FrameActive && child.state == FrameInitialSuspended &&
+			parent.header.SuspendReason == uint16(SuspendCall) &&
+			parent.header.Lifecycle == uint16(FrameSuspended) &&
+			child.header.Parent == parentHandle && child.parent == nil &&
+			emptyCompletionRecord(&parent.completion) {
+			parent.completion.child = child.handle
+			parent.completion.status = completionArmed
+			child.parent = parent
+			g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
+			return true
+		}
+	}
+	return PrepareAwaitCompletion(g, parentHandle, childHandle)
+}
+
 // PrepareAwait preserves the original V1 scheduler transaction. It is kept for
 // adapters and tests that intentionally have no child-outcome transport.
 func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
@@ -499,6 +546,31 @@ func PrepareCompleteStatus(g *G, handle unsafe.Pointer, header *HeaderV1, status
 	}
 	g.pending = pendingTransition{kind: pendingComplete, from: frame}
 	return true
+}
+
+// PrepareCompleteStatusCompiler handles the dominant ordinary-return suffix
+// from compiler-generated code using the active-frame and parent-completion
+// certificates already established by PrepareAwaitCompletionCompiler. Panic,
+// Goexit, cancellation, roots, and any uncertain shape retain the complete
+// status validator below.
+func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1, status CompletionStatus) bool {
+	if status == CompletionReturn && ValidG(g) && resumeGateTaken(g) &&
+		handle != nil && header != nil && g.pending.kind == pendingNone &&
+		g.spawnChild == nil && compilerReleasableParkState(&g.park) &&
+		g.park.taskCancelPhase != taskCancelRequested {
+		frame := g.active
+		if frame != nil && frame.parent != nil && frame.handle == handle && frame.header == header &&
+			frame.owner == g && frame.state == FrameActive &&
+			header.SuspendReason == uint16(SuspendFrameComplete) &&
+			header.Lifecycle == uint16(FrameFinalSuspended) {
+			if awaitCompletionArmedForChild(frame) &&
+				publishAwaitCompletion(frame.parent, CompletionReturn, nil, nil) {
+				g.pending = pendingTransition{kind: pendingComplete, from: frame}
+				return true
+			}
+		}
+	}
+	return PrepareCompleteStatus(g, handle, header, status)
 }
 
 // PrepareComplete preserves the normal-return V1 adapter contract.
@@ -632,6 +704,19 @@ func CommitFrameDestroyV2(g *G, handle unsafe.Pointer) bool {
 	}
 	Zero(unsafe.Pointer(frame), unsafe.Sizeof(Frame{}))
 	return true
+}
+
+// CommitFrameDestroyCompiler consumes the receipt produced synchronously by
+// the immediately preceding compiler-owned llvm.coro.destroy. A dynamic frame
+// can clear destroyTarget only through ReleaseFrame after validating the exact
+// storage, descriptor, size, lifecycle, and target. Allocation-elided frames
+// retain destroyTarget and therefore use the complete unlink transaction.
+func CommitFrameDestroyCompiler(g *G, handle unsafe.Pointer) bool {
+	if ValidG(g) && handle != nil && gPreemptEnabledAtDepthZero(g) &&
+		g.destroyTarget == nil {
+		return true
+	}
+	return CommitFrameDestroyV2(g, handle)
 }
 
 // PanicTraceFrameSnapshot is the allocation-free diagnostic prefix retained

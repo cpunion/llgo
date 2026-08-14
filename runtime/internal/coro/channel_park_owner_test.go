@@ -22,16 +22,16 @@ import (
 )
 
 func TestDirectChannelParkStateCertificates(t *testing.T) {
-	if !validReusableDirectChannelParkState(new(ParkState)) {
+	if !validReusableSingleParkState(new(ParkState)) {
 		t.Fatal("zero idle park was not reusable")
 	}
 	ticket := ParkTicket{generation: 1}
 	delivered := ParkState{ticket: ticket, phase: parkDelivered}
-	if !validReusableDirectChannelParkState(&delivered) {
+	if !validReusableSingleParkState(&delivered) {
 		t.Fatal("clean delivered park was not reusable")
 	}
 	delivered.expected = 1
-	if validReusableDirectChannelParkState(&delivered) {
+	if validReusableSingleParkState(&delivered) {
 		t.Fatal("delivered park with retained expected count was reusable")
 	}
 

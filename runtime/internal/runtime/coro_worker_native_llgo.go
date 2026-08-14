@@ -307,13 +307,11 @@ func coroCancelNativeWorkerSubmissionV1(
 	return coroNativeWorkerPoolCancelReservationV1(handle, route, reservation)
 }
 
-// coroCommitNativeWorkerSubmissionV1 closes the no-return handoff from
-// the core Worker park owner into the pre-reserved native queue. A failure to
-// enqueue after MarkSubmitted would leave a retained frame with no future
-// physical fact and therefore aborts instead of returning to the caller.
-func coroCommitNativeWorkerSubmissionV1(
-	driver *coro.ExecutorDriver,
-	g *coro.G,
+// coroPublishNativeWorkerSubmissionV1 closes the no-return handoff from the
+// already committed core Worker generation into the pre-reserved native queue.
+// A failure to enqueue would leave a retained frame with no future physical
+// fact and therefore aborts instead of returning to the caller.
+func coroPublishNativeWorkerSubmissionV1(
 	handle coro.ExecutorHandle,
 	route coro.RouteID,
 	reservation coroworker.QueueReservation,
@@ -322,10 +320,9 @@ func coroCommitNativeWorkerSubmissionV1(
 	argc uint32,
 	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 ) bool {
-	if driver == nil || g == nil || function == 0 || traceTarget == 0 ||
+	if function == 0 || traceTarget == 0 ||
 		argc > coroworker.MaxArgs || !id.Valid() || id.Source() != coro.OperationSourceWorker || id.Route() != route ||
-		!coroNativeWorkerSubmissionOwnerV1(handle, route) ||
-		!coro.CommitCurrentExecutorWorkerSubmission(driver, g, id) {
+		!coroNativeWorkerSubmissionOwnerV1(handle, route) {
 		return false
 	}
 	if !coroNativeWorkerPoolSubmitReservedV1(
