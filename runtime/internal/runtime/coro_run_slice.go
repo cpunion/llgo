@@ -60,22 +60,6 @@ func __llgo_coro_await_inline_finish_v2(g, parent, child unsafe.Pointer, done bo
 	}
 }
 
-//export __llgo_coro_await_inline_destroy_consume_v4
-func __llgo_coro_await_inline_destroy_consume_v4(g, parent, child, typeOut, dataOut unsafe.Pointer) uint32 {
-	if typeOut == nil || dataOut == nil {
-		coroRuntimeAbort("invalid coroutine inline child outcome output")
-	}
-	task := (*coro.G)(g)
-	snapshot, ok := coro.CommitInlineAwaitPhysicalDestroyCompiler(task, parent, child)
-	if !ok {
-		coroRuntimeAbort("invalid coroutine inline physical child completion")
-	}
-	coroReleaseDiscardedPanicTraceV1(task)
-	*(*unsafe.Pointer)(typeOut) = snapshot.TypeWord
-	*(*unsafe.Pointer)(dataOut) = snapshot.DataWord
-	return uint32(snapshot.Status)
-}
-
 type coroProgramLifecycleV1 uint8
 
 const (

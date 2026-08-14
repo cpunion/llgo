@@ -119,6 +119,27 @@ func __llgo_coro_await_prepare_inline_v4(g, parent, child unsafe.Pointer, mode u
 	}
 }
 
+// __llgo_coro_await_inline_destroy_consume_v4 consumes the child outcome while
+// its exact destroy receipt is still adjacent to generated llvm.coro.destroy.
+// Panic/recover fallbacks may stage an old retained trace for release, so this
+// payload adapter owns that final allocation handoff as part of the same ABI.
+//
+//export __llgo_coro_await_inline_destroy_consume_v4
+func __llgo_coro_await_inline_destroy_consume_v4(g, parent, child, typeOut, dataOut unsafe.Pointer) uint32 {
+	if typeOut == nil || dataOut == nil {
+		coroRuntimeAbort("invalid coroutine inline child outcome output")
+	}
+	task := (*coro.G)(g)
+	snapshot, ok := coro.CommitInlineAwaitPhysicalDestroyCompiler(task, parent, child)
+	if !ok {
+		coroRuntimeAbort("invalid coroutine inline physical child completion")
+	}
+	coroReleaseDiscardedPanicTraceV1(task)
+	*(*unsafe.Pointer)(typeOut) = snapshot.TypeWord
+	*(*unsafe.Pointer)(dataOut) = snapshot.DataWord
+	return uint32(snapshot.Status)
+}
+
 // __llgo_coro_recover_take_v1 implements one syntactic recover in the active
 // physical frame. A valid but non-direct call writes a nil empty interface;
 // malformed scheduler ownership aborts instead of consulting legacy TLS.
