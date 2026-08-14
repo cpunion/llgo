@@ -544,11 +544,11 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		"func coroNativeForeignBoundaryTLSStartV1() bool",
 		"tls.AllocStatic[*coroNativeForeignBoundaryV1]()",
 		"!coroNativeForeignBoundaryTLSReadyV1",
-		"coro.CurrentExecutorDriver(task)",
-		"coro.DetachExecutorResume(",
+		"coro.CurrentExecutorDriverForCompilerTask(task)",
+		"coro.DetachExecutorResumeForCompilerTask(",
 		"boundary.parent.handoff.Begin(boundary.ownerEpoch)",
 		"coroNativeMAllocateReplacementV1(",
-		"coroTargetReleaseManagedExecutionV1(boundary.driver)",
+		"coroTargetReleaseManagedExecutionAtRouteV1(",
 		"coroNativeMRequestPhysicalOwnerV1(replacement, slot)",
 		"corofleet.CancelReuseOwner(",
 		"if !boundary.beginV1(task, mode, lazyCompensation)",
@@ -560,7 +560,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		"boundary.parent.handoff.RequestReturn(boundary.baton)",
 		"coroNativeMReplacementLineageOwnerV1(",
 		"coroNativeMRecycleReplacementV1(returnedSlot)",
-		"coroTargetReenterManagedExecutionV1(boundary.driver)",
+		"coroTargetReenterManagedExecutionAtRouteV1(",
 		"coro.RestoreExecutorResume(&boundary.resume)",
 		"boundary.finishV1()",
 		"//export __llgo_coro_foreign_reentry_acquire_v1",
@@ -597,7 +597,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 			)
 		}
 	}
-	detach := strings.Index(entrance, "coro.DetachExecutorResume(")
+	detach := strings.Index(entrance, "coro.DetachExecutorResumeForCompilerTask(")
 	startEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(")
 	prepareEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) prepareDeferredReplacementV1()")
 	beginEntry := strings.Index(entrance, "func (boundary *coroNativeForeignBoundaryV1) beginV1(")
@@ -632,20 +632,22 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		}
 	}
 	helperFinish := strings.LastIndex(entrance, "boundary.finishV1()")
-	immediateRelease := strings.Index(immediate, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
+	immediateRelease := strings.Index(immediate, "coroTargetReleaseManagedExecutionAtRouteV1(")
 	immediateCreate := strings.Index(immediate, "coroNativeMRequestPhysicalOwnerV1(replacement, slot)")
-	preparedRelease := strings.Index(prepared, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
-	preparedArm := strings.Index(prepared, "boundary.parent.deferred.Arm(slot)")
+	preparedRelease := strings.Index(prepared, "coroTargetReleaseManagedExecutionAtRouteV1(")
+	preparedArm := strings.Index(prepared, "boundary.parent.deferred.Arm()")
 	preparedRecheck := strings.Index(prepared, "coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)")
+	preparedAllocate := strings.Index(prepared, "coroNativeMAllocateReplacementV1(")
 	reclaimCancel := strings.Index(reclaim, "corofleet.CancelReuseOwner(")
 	reclaimRequest := strings.Index(reclaim, "boundary.parent.handoff.RequestReturn(boundary.baton)")
 	reclaimRecycle := strings.Index(reclaim, "coroNativeMRecycleReplacementV1(returnedSlot)")
 	finishResolve := strings.Index(finishBody, "boundary.resolveDeferredReplacementV1()")
 	finishReclaim := strings.Index(finishBody, "boundary.reclaimReplacementV1()")
-	finishReenter := strings.Index(finishBody, "coroTargetReenterManagedExecutionV1(boundary.driver)")
+	finishReenter := strings.Index(finishBody, "coroTargetReenterManagedExecutionAtRouteV1(")
 	finishRestore := strings.Index(finishBody, "coro.RestoreExecutorResume(&boundary.resume)")
 	if detach < beginEntry || immediateRelease < 0 || immediateCreate <= immediateRelease ||
 		preparedRelease < 0 || preparedArm <= preparedRelease || preparedRecheck <= preparedArm ||
+		preparedAllocate >= 0 ||
 		reclaimCancel < 0 || reclaimRequest <= reclaimCancel || reclaimRecycle <= reclaimRequest ||
 		resolveEntry <= completeEntry || finishResolve < 0 || finishReclaim <= finishResolve ||
 		finishReenter <= finishReclaim || finishRestore <= finishReenter ||
@@ -659,10 +661,10 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 	}
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
 	for _, required := range []string{
-		"func coroTargetReleaseManagedExecutionV1(driver *coro.ExecutorDriver) bool",
-		"func coroTargetReenterManagedExecutionV1(driver *coro.ExecutorDriver) bool",
-		"acquired, ok := coroTargetAcquireManagedExecutionV1(driver)",
-		"if !coroTargetWaitManagedExecutionV1(driver)",
+		"func coroTargetReleaseManagedExecutionAtRouteV1(",
+		"func coroTargetReenterManagedExecutionAtRouteV1(",
+		"acquired, ok := coroTargetAcquireManagedExecutionAtRouteV1(driver, route)",
+		"if !coroTargetWaitManagedExecutionAtRouteV1(driver, route)",
 	} {
 		if !strings.Contains(quota, required) {
 			t.Errorf("native execution quota lacks same-M compensation marker %q", required)
@@ -692,9 +694,9 @@ func TestRuntimeNativeSyscallDeferredReplacementUsesStableRequestGate(t *testing
 	for _, required := range []string{
 		"type DeferredExecutorHandoff struct",
 		"state  uint32",
-		"func (handoff *DeferredExecutorHandoff) Arm(slot uint32) bool",
+		"func (handoff *DeferredExecutorHandoff) Arm() bool",
 		"func (handoff *DeferredExecutorHandoff) BeginStart()",
-		"func (handoff *DeferredExecutorHandoff) Withdraw(slot uint32) bool",
+		"func (handoff *DeferredExecutorHandoff) Withdraw() bool",
 		"func (handoff *DeferredExecutorHandoff) Complete(slot uint32) bool",
 	} {
 		if !strings.Contains(core, required) {
@@ -707,9 +709,12 @@ func TestRuntimeNativeSyscallDeferredReplacementUsesStableRequestGate(t *testing
 	release, arm, recheck := -1, -1, -1
 	if prepare >= 0 {
 		prepared := boundary[prepare:]
-		release = strings.Index(prepared, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
-		arm = strings.Index(prepared, "boundary.parent.deferred.Arm(slot)")
+		release = strings.Index(prepared, "coroTargetReleaseManagedExecutionAtRouteV1(")
+		arm = strings.Index(prepared, "boundary.parent.deferred.Arm()")
 		recheck = strings.Index(prepared, "coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)")
+		if recheck > 0 && strings.Index(prepared[:recheck], "coroNativeMAllocateReplacementV1(") >= 0 {
+			t.Error("deferred native syscall eagerly allocates a replacement slot")
+		}
 	}
 	if prepare < 0 || release < 0 || arm <= release || recheck <= arm {
 		t.Error("deferred native syscall does not release, arm, then recheck durable demand")
@@ -719,6 +724,7 @@ func TestRuntimeNativeSyscallDeferredReplacementUsesStableRequestGate(t *testing
 	for _, required := range []string{
 		"coroNativeMActiveOwnerV1(domain.driverOwnerV1())",
 		"parent.deferred.BeginStart()",
+		"coroNativeMAllocateReplacementV1(",
 		"coroNativeMRequestPhysicalOwnerV1(replacement, slot)",
 		"parent.deferred.PublishStart(slot, queued)",
 	} {

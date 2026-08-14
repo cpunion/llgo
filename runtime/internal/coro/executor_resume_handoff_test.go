@@ -110,6 +110,65 @@ func (fixture *executorResumeHandoffFixture) restore(t *testing.T) {
 	}
 }
 
+func TestCompilerTaskExecutorResumeHandoffUsesHiddenOwnerCapability(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "compiler-foreign-wait-owner")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue compiler foreign-wait owner")
+	}
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume || resume.Handle != task.handle {
+		t.Fatalf("check compiler foreign-wait owner = (%+v, %t)", resume, ok)
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendNone)
+	task.frame.header.Lifecycle = uint16(FrameActive)
+
+	var handoff ExecutorResumeHandoff
+	savedCurrent := p.current
+	p.current = nil
+	if DetachExecutorResumeForCompilerTask(
+		&handoff,
+		driver,
+		task.g,
+		ExecutorResumeHandoffSameMForeign,
+	) {
+		t.Fatal("compiler detach accepted a hidden task outside its physical resume")
+	}
+	p.current = savedCurrent
+	if !emptyExecutorResumeHandoff(&handoff) ||
+		!DetachExecutorResumeForCompilerTask(
+			&handoff,
+			driver,
+			task.g,
+			ExecutorResumeHandoffSameMForeign,
+		) {
+		t.Fatal("detach compiler-task executor resume")
+	}
+	if !handoff.Detached() || task.g.state != GForeignWaiting ||
+		p.current != nil || p.inResume || driver.run.issued != ActionInvalid {
+		t.Fatal("compiler-task executor resume did not detach exact owner state")
+	}
+	if !RestoreExecutorResume(&handoff) || p.current != task.g ||
+		!p.inResume || driver.run.issued != ActionCheckResume {
+		t.Fatal("restore compiler-task executor resume")
+	}
+
+	task.frame.header.SuspendReason = uint16(SuspendYield)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare compiler foreign-wait owner yield")
+	}
+	next, resumed := Resumed(p, task.g, resume)
+	if !resumed || next.Kind != ActionYield ||
+		!CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("finish compiler foreign-wait owner = (%+v, %t)", next, resumed)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T) {
 	p := new(P)
 	driver, registry, executor := bindTestExecutorDriver(t, p)

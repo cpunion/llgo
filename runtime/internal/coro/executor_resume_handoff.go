@@ -106,28 +106,23 @@ func validForeignWaitingExecutorTask(p *P, task *G) bool {
 		active.header.Lifecycle == uint16(FrameActive)
 }
 
-// DetachExecutorResume removes one exact issued ActionResume from its P and
-// driver while leaving the LLVM frame active on the calling locked M. The
-// caller must publish an ExecutionDomainHandoff only after this succeeds.
+// detachExecutorResumeCertified removes one owner-certified issued
+// ActionResume from its P and driver while leaving the LLVM frame active on
+// the calling M. The caller must publish an ExecutionDomainHandoff only after
+// this succeeds.
 //
 // No coroutine transition or scheduler action is executed here. The task
 // remains rooted by handoff, keeps runP as its cancellation ownership domain,
 // and enters GForeignWaiting. Clearing P.osThreadLockOwner lets a replacement
 // M run unrelated work on the same P without weakening the original G-to-M
 // affinity.
-func DetachExecutorResume(
+func detachExecutorResumeCertified(
 	handoff *ExecutorResumeHandoff,
 	driver *ExecutorDriver,
 	task *G,
 	mode ExecutorResumeHandoffMode,
 ) bool {
-	if !emptyExecutorResumeHandoff(handoff) || driver == nil || task == nil ||
-		(mode != ExecutorResumeHandoffLockedForeign &&
-			mode != ExecutorResumeHandoffSameMForeign) {
-		return false
-	}
-	current, _, _, ownerOK := CurrentExecutorDriver(task)
-	if !ownerOK || current != driver || !enterCriticalContext(task) ||
+	if !enterCriticalContext(task) ||
 		driver.run.issued != ActionCheckResume {
 		return false
 	}
@@ -174,6 +169,55 @@ func DetachExecutorResume(
 	task.state = GForeignWaiting
 	handoff.state = executorResumeHandoffDetached
 	return true
+}
+
+func validExecutorResumeHandoffDetachRequest(
+	handoff *ExecutorResumeHandoff,
+	driver *ExecutorDriver,
+	task *G,
+	mode ExecutorResumeHandoffMode,
+) bool {
+	return emptyExecutorResumeHandoff(handoff) && driver != nil && task != nil &&
+		(mode == ExecutorResumeHandoffLockedForeign ||
+			mode == ExecutorResumeHandoffSameMForeign)
+}
+
+// DetachExecutorResume removes one exact issued ActionResume after performing
+// the complete retained/native owner audit. Targets which do not hold the
+// compiler's hidden task capability must use this entry.
+func DetachExecutorResume(
+	handoff *ExecutorResumeHandoff,
+	driver *ExecutorDriver,
+	task *G,
+	mode ExecutorResumeHandoffMode,
+) bool {
+	if !validExecutorResumeHandoffDetachRequest(handoff, driver, task, mode) {
+		return false
+	}
+	current, _, _, ownerOK := CurrentExecutorDriver(task)
+	return ownerOK && current == driver &&
+		detachExecutorResumeCertified(handoff, driver, task, mode)
+}
+
+// DetachExecutorResumeForCompilerTask consumes the hidden task capability
+// carried by generated physical coroutine code. CurrentExecutorDriverForCompilerTask
+// has already frozen the exact no-suspend G/P/driver relation, so this path does
+// not repeat the registry, complete source-catalog, or owner-local queue audits
+// required when a target recovers a task through TLS or retained native state.
+// The concrete detach transition still validates every mutable task, action,
+// lock, park and preemption field which it changes.
+func DetachExecutorResumeForCompilerTask(
+	handoff *ExecutorResumeHandoff,
+	driver *ExecutorDriver,
+	task *G,
+	mode ExecutorResumeHandoffMode,
+) bool {
+	if !validExecutorResumeHandoffDetachRequest(handoff, driver, task, mode) {
+		return false
+	}
+	current, _, ownerOK := CurrentExecutorDriverForCompilerTask(task)
+	return ownerOK && current == driver &&
+		detachExecutorResumeCertified(handoff, driver, task, mode)
 }
 
 // ExecutorResumeHandoffReturnable reports the necessary target-neutral

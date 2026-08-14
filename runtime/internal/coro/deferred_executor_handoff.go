@@ -42,25 +42,28 @@ func (*deferredExecutorHandoffNoCopy) Lock()   {}
 func (*deferredExecutorHandoffNoCopy) Unlock() {}
 
 // DeferredExecutorHandoff is a pointer-free, stable-address dispatch gate for
-// a replacement which has already obtained an exact ExecutionDomainHandoff
-// and directory slot but has not yet consumed a physical thread. Arm happens
-// only after the blocked owner releases its managed-execution permit. A
-// durable target request and the returning owner then race one CAS:
+// a replacement whose exact ExecutionDomainHandoff has been published but
+// whose directory slot and physical thread are both still demand-lazy. Arm
+// happens only after the blocked owner releases its managed-execution permit.
+// A durable target request and the returning owner then race one CAS:
 //
 //   - BeginStart wins and must publish Queued or Started;
 //   - Withdraw wins and proves that no physical owner was dispatched.
 //
-// Starting is a short publication interval, not a scheduler wait state. The
-// returning owner may yield until the request publisher records the outcome.
-// Queued distinguishes an asynchronously dispatched cached thread, which can
-// still be canceled before C-to-Go dispatch, from a synchronously acknowledged
-// start. Complete is called only after the ordinary generation-bound return and
+// Armed and Starting carry no directory slot. The unique Starting publisher
+// allocates one and includes it only when publishing Queued or Started. Starting
+// is a short publication interval, not a scheduler wait state; the returning
+// owner may yield until the request publisher records the outcome. Queued
+// distinguishes an asynchronously dispatched cached thread, which can still be
+// canceled before C-to-Go dispatch, from a synchronously acknowledged start.
+// Complete is called only after the ordinary generation-bound return and
 // strong-recycle protocol has finished.
 //
 // Slot is deliberately a routing hint rather than a generation capability. A
-// delayed accepted request may start a later armed use of the same slot; that
-// is a safe coalesced compensation request. ExecutionDomainHandoff remains the
-// authority which prevents a stale physical owner from claiming a later call.
+// delayed accepted request may start a later armed use of the same stable
+// parent; that is a safe coalesced compensation request. ExecutionDomainHandoff
+// remains the authority which prevents a stale physical owner from claiming a
+// later call.
 type DeferredExecutorHandoff struct {
 	noCopy deferredExecutorHandoffNoCopy
 	state  uint32
@@ -76,56 +79,61 @@ func deferredExecutorHandoffUnpack(state uint32) (uint32, DeferredExecutorHandof
 }
 
 func deferredExecutorHandoffValid(slot uint32, phase DeferredExecutorHandoffPhase) bool {
-	if phase == DeferredExecutorHandoffIdle {
+	switch phase {
+	case DeferredExecutorHandoffIdle,
+		DeferredExecutorHandoffArmed,
+		DeferredExecutorHandoffStarting:
 		return slot == 0
+	case DeferredExecutorHandoffQueued,
+		DeferredExecutorHandoffStarted:
+		return slot != 0 && slot <= deferredExecutorHandoffSlotMask
+	default:
+		return false
 	}
-	return slot != 0 && slot <= deferredExecutorHandoffSlotMask &&
-		phase <= DeferredExecutorHandoffStarted
 }
 
-// Arm publishes one prepared replacement after its managed-execution permit
-// has been released. The zero value is reusable Idle.
-func (handoff *DeferredExecutorHandoff) Arm(slot uint32) bool {
-	return handoff != nil && deferredExecutorHandoffValid(slot, DeferredExecutorHandoffArmed) &&
-		preemptCompareAndSwap(
-			&handoff.state,
-			0,
-			deferredExecutorHandoffPack(slot, DeferredExecutorHandoffArmed),
-		)
+// Arm publishes one demand-lazy replacement after its managed-execution
+// permit has been released. The zero value is reusable Idle.
+func (handoff *DeferredExecutorHandoff) Arm() bool {
+	return handoff != nil && preemptCompareAndSwap(
+		&handoff.state,
+		0,
+		deferredExecutorHandoffPack(0, DeferredExecutorHandoffArmed),
+	)
 }
 
 // BeginStart lets one accepted durable executor request become the unique
 // physical-start publisher. A false result means there is no armed replacement
 // to start; Idle and an already-starting/started request are both benign.
-func (handoff *DeferredExecutorHandoff) BeginStart() (slot uint32, started bool) {
+func (handoff *DeferredExecutorHandoff) BeginStart() bool {
 	if handoff == nil {
-		return 0, false
+		return false
 	}
 	state := preemptLoad(&handoff.state)
 	slot, phase := deferredExecutorHandoffUnpack(state)
 	if !deferredExecutorHandoffValid(slot, phase) || phase != DeferredExecutorHandoffArmed {
-		return 0, false
+		return false
 	}
-	return slot, preemptCompareAndSwap(
+	return preemptCompareAndSwap(
 		&handoff.state,
 		state,
-		deferredExecutorHandoffPack(slot, DeferredExecutorHandoffStarting),
+		deferredExecutorHandoffPack(0, DeferredExecutorHandoffStarting),
 	)
 }
 
 // PublishStart completes the unique Starting interval. queued records whether
 // the cached-thread dispatch can still be withdrawn through its C token.
 func (handoff *DeferredExecutorHandoff) PublishStart(slot uint32, queued bool) bool {
-	if handoff == nil || !deferredExecutorHandoffValid(slot, DeferredExecutorHandoffStarting) {
-		return false
-	}
 	phase := DeferredExecutorHandoffStarted
 	if queued {
 		phase = DeferredExecutorHandoffQueued
 	}
+	if handoff == nil || !deferredExecutorHandoffValid(slot, phase) {
+		return false
+	}
 	return preemptCompareAndSwap(
 		&handoff.state,
-		deferredExecutorHandoffPack(slot, DeferredExecutorHandoffStarting),
+		deferredExecutorHandoffPack(0, DeferredExecutorHandoffStarting),
 		deferredExecutorHandoffPack(slot, phase),
 	)
 }
@@ -133,23 +141,21 @@ func (handoff *DeferredExecutorHandoff) PublishStart(slot uint32, queued bool) b
 // RetryStart returns a failed physical-start publication to Armed. The durable
 // request caller must report failure; a later request may retry, while a
 // concurrently returning owner may withdraw the restored arm.
-func (handoff *DeferredExecutorHandoff) RetryStart(slot uint32) bool {
-	return handoff != nil && deferredExecutorHandoffValid(slot, DeferredExecutorHandoffStarting) &&
-		preemptCompareAndSwap(
-			&handoff.state,
-			deferredExecutorHandoffPack(slot, DeferredExecutorHandoffStarting),
-			deferredExecutorHandoffPack(slot, DeferredExecutorHandoffArmed),
-		)
+func (handoff *DeferredExecutorHandoff) RetryStart() bool {
+	return handoff != nil && preemptCompareAndSwap(
+		&handoff.state,
+		deferredExecutorHandoffPack(0, DeferredExecutorHandoffStarting),
+		deferredExecutorHandoffPack(0, DeferredExecutorHandoffArmed),
+	)
 }
 
 // Withdraw wins only before a durable request has begun physical dispatch.
-func (handoff *DeferredExecutorHandoff) Withdraw(slot uint32) bool {
-	return handoff != nil && deferredExecutorHandoffValid(slot, DeferredExecutorHandoffArmed) &&
-		preemptCompareAndSwap(
-			&handoff.state,
-			deferredExecutorHandoffPack(slot, DeferredExecutorHandoffArmed),
-			0,
-		)
+func (handoff *DeferredExecutorHandoff) Withdraw() bool {
+	return handoff != nil && preemptCompareAndSwap(
+		&handoff.state,
+		deferredExecutorHandoffPack(0, DeferredExecutorHandoffArmed),
+		0,
+	)
 }
 
 // Observe returns one atomic state snapshot. ok rejects an impossible packed
