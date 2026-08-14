@@ -74,7 +74,7 @@ func (plan coroPlainAllocationPlan) borrowed() bool {
 }
 
 func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAllocationPlan {
-	if ctx == nil || ctx.prog == nil || allocation == nil || !allocation.Heap ||
+	if ctx == nil || ctx.prog == nil || ctx.emissionUniverse == nil || allocation == nil || !allocation.Heap ||
 		allocation.Type() == nil || ctx.skipSyntheticMakeSliceAlloc(allocation) ||
 		isEmissionVargsAlloc(ctx, allocation) {
 		return coroPlainAllocationPlan{}
@@ -103,12 +103,20 @@ func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAlloc
 	}
 }
 
+// coroBorrowedAllocationUniverse is the complete read-only authority needed by
+// the interprocedural lifetime proof. Keeping this as a two-method view avoids
+// turning a local allocation classifier into another whole-program plan owner.
+type coroBorrowedAllocationUniverse interface {
+	Resolve(*ssa.Function) (*ssa.Function, bool)
+	FunctionBackground(*ssa.Function) (llssa.Background, bool, error)
+}
+
 // proveCoroBorrowedAllocation admits only bodies which the frozen emission
 // universe will actually compile as managed Go. Source bodies attached to C,
 // Python, or LLVM intrinsic declarations are type-checking stubs rather than
 // memory-semantics evidence and must never justify local storage.
 func proveCoroBorrowedAllocation(
-	universe *EmissionUniverse,
+	universe coroBorrowedAllocationUniverse,
 	allocation *ssa.Alloc,
 ) (coro.SSABorrowedAllocationProof, bool) {
 	if universe == nil {
@@ -1660,9 +1668,6 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 	if !u.makeInterfaceEmitsABIType(makeInterface, ctx) {
 		return
 	}
-	if interfaceIsNonEmpty(ctx.patchType(makeInterface.Type())) {
-		add("NewItab")
-	}
 	// Helper planning must remain valid for report/identity universes whose
 	// LLSSA program intentionally has no runtime package. The interface data
 	// representation and the large/zero dereference rules depend only on the
@@ -1674,7 +1679,11 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 	// only at the source *types.Signature would incorrectly classify it as one
 	// direct pointer and omit the AllocU call that code generation emits.
 	physical := u.physicalFunctionABIType(ctx, makeInterface.X.Type())
-	if !emissionDirectIfaceType(physical) {
+	if target := ctx.patchType(makeInterface.Type()); interfaceIsNonEmpty(target) &&
+		!llssa.CanBuildStaticItab(target, physical) {
+		add("NewItab")
+	}
+	if !emissionDirectIfaceType(physical) && !makeInterfaceUsesConstantBacking(makeInterface) {
 		add("AllocU")
 	}
 	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
@@ -1686,6 +1695,14 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 		// and zero-sized values and therefore always copies through AllocU.
 		add("AllocU", "Typedmemmove")
 	}
+}
+
+func makeInterfaceUsesConstantBacking(makeInterface *ssa.MakeInterface) bool {
+	if makeInterface == nil || isUntypedNilConst(makeInterface.X) {
+		return false
+	}
+	_, ok := makeInterface.X.(*ssa.Const)
+	return ok
 }
 
 func emissionLargeOrZeroInterfaceDeref(typ types.Type, pointerSize int) bool {

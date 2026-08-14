@@ -51,9 +51,19 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
 		t.Fatalf("commit worker owner park = (%+v, %t)", action, ok)
 	}
+	probe, awaiting, ready, probeOK := PrepareExecutorWorkerCompletionProbe(driver)
+	if !probeOK || !awaiting || ready || !probe.Valid() || probe.Ready() {
+		t.Fatalf("prepare incomplete worker probe = (%+v, %t, %t, %t)", probe, awaiting, ready, probeOK)
+	}
 	payload := workerPayloadForTest(t, 11, 111, 222, 0)
 	if workers.Post(id, payload) != WorkerOperationPosted {
 		t.Fatal("post worker owner result")
+	}
+	if !probe.Ready() {
+		t.Fatal("worker completion probe missed durable publication")
+	}
+	if next, awaiting, ready, ok := PrepareExecutorWorkerCompletionProbe(driver); !ok || awaiting || !ready || !next.Valid() || !next.Ready() {
+		t.Fatalf("prepare ready worker probe = (%+v, %t, %t, %t)", next, awaiting, ready, ok)
 	}
 	var complete ExecutorPollProgress
 	for entries := 0; entries < 1000; entries++ {

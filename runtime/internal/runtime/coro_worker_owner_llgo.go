@@ -121,9 +121,9 @@ func __llgo_coro_worker_park_v1(
 		coroWorkerAbortV1("cannot bind coroutine worker resume packet")
 		return
 	}
-	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	if !coroCommitNativeWorkerSubmissionV1(
-		driver, task, executor, route, reservation, operation, function, traceTarget, argc, &args,
+		driver, task, executor, route, reservation, operation, function, traceTarget, argc,
+		a0, a1, a2, a3, a4, a5, a6, a7, a8,
 	) {
 		coroWorkerAbortV1("cannot commit coroutine worker submission")
 	}

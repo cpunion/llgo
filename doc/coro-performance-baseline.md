@@ -1684,3 +1684,54 @@ LockOSThread suspension, native/WASM lowering and timer gates pass. The complete
 `cl` command reached its explicit 15-minute limit in the unrelated testgo
 `cursor` case; no full-suite pass is claimed. A full `ssa` run likewise has no
 result beyond its previously reported explicit timeout.
+
+### Static interface and bounded worker-completion checkpoint
+
+The 2026-08-14 LLVM 22-only candidate removes allocation and handoff work from
+the standard-library file/network path without changing its blocking policy.
+Concrete-to-interface conversions now emit immutable package-local itabs;
+constant indirect payloads use immutable backing instead of `AllocU`. C ABI and
+large-result rewrites preserve all function-index call-site attributes,
+including LLVM's `coro_elide_safe`. The native worker boundary passes its
+reservation and nine argument words as scalars, initializes synchronous-fault
+signal state once per physical worker, and uses one bounded between-job handoff
+poller. Regular files remain worker operations because POSIX nonblocking mode
+does not make their storage access nonblocking; sockets retain the poll/event
+path.
+
+Immediately before a native executor arms its retained wait, it may also inspect
+the exact worker source and spin for at most 32,768 pending-word observations.
+This is an advisory latency window: publication still goes through the normal
+mailbox, doorbell, source reducer, cancellation, and retained-wait protocol.
+Expiry always falls back to that protocol. The source scan is bounded by the
+existing high-water catalog limit and does not add another operation index or
+completion queue.
+
+A controlled A/B changed only that executor spin budget from zero to 32,768.
+The binaries differed by 16 bytes. Eleven AB/BA-interleaved runs used the same
+LLVM 22 compiler, fresh caches, full LTO, `GOMAXPROCS=1`, and 500 operations:
+
+| Workload | zero budget median [range] | 32K budget median [range] | Delta |
+| --- | ---: | ---: | ---: |
+| cache-hot 4 KiB file round trips | 11.895 ms [10.805, 13.202] | 10.712 ms [9.857, 12.981] | -9.95% |
+| loopback 4 KiB TCP echo round trips | 25.401 ms [24.063, 27.481] | 25.632 ms [23.776, 27.292] | +0.91% |
+
+The TCP movement is noise-sized and no TCP benefit is claimed. The bounded
+file-path gain justifies retaining the window, while a future power/latency
+campaign should tune or disable active polling for energy-constrained native
+profiles. WASM and bare-metal profiles do not select this native-pipe file.
+
+The complete candidate was then compared with Go 1.26.5 using the same source
+and another eleven-run AB/BA rotation:
+
+| Workload | Go median [range] | LLGo coroutine median [range] | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| cache-hot 4 KiB file round trips | 1.254 ms [1.031, 1.351] | 9.804 ms [9.159, 11.327] | 7.82x |
+| loopback 4 KiB TCP echo round trips | 9.967 ms [8.000, 14.629] | 21.728 ms [21.496, 23.886] | 2.18x |
+
+The stripped binaries are 1,797,730 bytes for Go and 7,944,320 bytes for LLGo
+(4.42x). Runtime-core, C11 queue, ABI/CABI attribute, static-interface,
+architecture-debt, native target-plan, representative native E2E, and actual
+file/TCP execution gates pass. The full `internal/cabi` suite was deliberately
+stopped after an unrelated fixture reached about 5 GiB RSS; the exact changed
+CABI tests pass, so no full-suite result is claimed here.

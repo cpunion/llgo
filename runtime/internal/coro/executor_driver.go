@@ -644,6 +644,49 @@ func wakeableExecutorRunCursor(driver *ExecutorDriver) bool {
 		preemptLoadPointer(&driver.directChannelHead) != nil
 }
 
+// ExecutorWorkerCompletionProbe is one short-lived owner-side observation of
+// the worker source's durable pending word. It exposes neither operation
+// identities nor source mutation. A target may retain it only across a bounded
+// non-suspending active-spin policy immediately before ArmIdle.
+type ExecutorWorkerCompletionProbe struct {
+	source *WorkerOperationSource
+}
+
+func (probe ExecutorWorkerCompletionProbe) Valid() bool {
+	return probe.source != nil
+}
+
+// Ready is an acquire observation of a completed worker publication. The
+// producer stores this word only after the exact payload and mailbox are
+// durable, so the owner may safely re-enter its unified source reducer.
+func (probe ExecutorWorkerCompletionProbe) Ready() bool {
+	return probe.source != nil && probe.source.Pending()
+}
+
+// PrepareExecutorWorkerCompletionProbe observes the one condition under which
+// a native target may profitably defer ArmIdle: an exact submitted worker
+// operation is still incomplete. It never turns that advisory observation into
+// a correctness obligation. A target which does not observe Ready within its
+// bounded policy must use the ordinary retained wait transaction unchanged.
+func PrepareExecutorWorkerCompletionProbe(
+	driver *ExecutorDriver,
+) (probe ExecutorWorkerCompletionProbe, awaiting, ready, ok bool) {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
+		!emptyOwnerLocalCompletion(&driver.local) ||
+		!executorDirectChannelInboxIdle(driver) || !idleExecutorScheduler(driver.p) {
+		return ExecutorWorkerCompletionProbe{}, false, false, false
+	}
+	if driver.sources.worker == nil {
+		return ExecutorWorkerCompletionProbe{}, false, false, true
+	}
+	awaiting, ready, ok = driver.sources.worker.submittedCompletionState(driver.p)
+	if !ok || !awaiting && !ready {
+		return ExecutorWorkerCompletionProbe{}, awaiting, ready, ok
+	}
+	return ExecutorWorkerCompletionProbe{source: driver.sources.worker}, awaiting, ready, true
+}
+
 // PrepareExecutorSleep executes ArmIdle, an unconditional source fact scan,
 // and exact CommitSleep only when no runnable exists and parked Gs remain.
 // Source resolution stays in the unified runner. A true sleep result authorizes

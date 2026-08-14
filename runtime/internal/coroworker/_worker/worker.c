@@ -140,6 +140,8 @@ struct llgo_coro_worker_queue_v1 {
     _Atomic uint32_t producer_state;
     _Atomic size_t enqueue_position;
     _Atomic size_t dequeue_position;
+    /* Exactly one between-job worker may advertise a kernel-free handoff. */
+    _Atomic bool handoff_poller;
     llgo_coro_worker_wake_v1 wake;
     struct llgo_coro_worker_queue_slot_v1 slots[LLGO_CORO_WORKER_QUEUE_CAPACITY_V1];
 };
@@ -157,6 +159,22 @@ extern uint32_t __llgo_coro_native_worker_complete_v1(
     uintptr_t fault_target);
 
 static void *llgo_coro_worker_main_v1(void *unused);
+
+#if defined(__aarch64__) || defined(__arm__)
+#define LLGO_CORO_WORKER_HANDOFF_POLLS_V1 UINT32_C(262144)
+#else
+#define LLGO_CORO_WORKER_HANDOFF_POLLS_V1 UINT32_C(32768)
+#endif
+
+static inline void llgo_coro_worker_cpu_relax_v1(void) {
+#if defined(__aarch64__) || defined(__arm__)
+    __asm__ volatile("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("pause" ::: "memory");
+#else
+    atomic_signal_fence(memory_order_seq_cst);
+#endif
+}
 
 static int llgo_coro_worker_thread_create_v1(
     pthread_t *thread,
@@ -294,10 +312,17 @@ static bool llgo_coro_worker_queue_publish_reserved_v1(
     slot->job = *job;
     atomic_store_explicit(&slot->sequence, reservation + 1, memory_order_release);
     /*
-     * Keep producer admission through wake publication. Stop therefore cannot
-     * seal between the durable cell and its matching semaphore token.
+     * Only a successful exchange of the exact handoff token may suppress the
+     * wake. A poller clears that token before sleeping and rechecks after a
+     * producer claims it, so no stale population count can lose a wake.
+     * Backlog always emits another token and retains full pool parallelism.
+     * Keep producer admission through this decision: Stop cannot seal between
+     * the durable cell and its required wake.
      */
-    if (!llgo_coro_worker_wake_signal_v1(&queue->wake) ||
+    size_t dequeue = atomic_load_explicit(&queue->dequeue_position, memory_order_acquire);
+    bool direct_handoff = reservation == dequeue &&
+        atomic_exchange_explicit(&queue->handoff_poller, false, memory_order_acq_rel);
+    if ((!direct_handoff && !llgo_coro_worker_wake_signal_v1(&queue->wake)) ||
         !llgo_coro_worker_queue_leave_producer_v1(queue)) {
         return false;
     }
@@ -309,7 +334,8 @@ bool __llgo_coro_worker_queue_can_release_v1(void) {
     return !atomic_load_explicit(&queue->initialized, memory_order_acquire) &&
         atomic_load_explicit(&queue->producer_state, memory_order_relaxed) == 0 &&
         atomic_load_explicit(&queue->enqueue_position, memory_order_relaxed) == 0 &&
-        atomic_load_explicit(&queue->dequeue_position, memory_order_relaxed) == 0;
+        atomic_load_explicit(&queue->dequeue_position, memory_order_relaxed) == 0 &&
+        !atomic_load_explicit(&queue->handoff_poller, memory_order_relaxed);
 }
 
 bool __llgo_coro_worker_queue_init_v1(void) {
@@ -321,6 +347,7 @@ bool __llgo_coro_worker_queue_init_v1(void) {
     atomic_init(&queue->producer_state, 0);
     atomic_init(&queue->enqueue_position, 0);
     atomic_init(&queue->dequeue_position, 0);
+    atomic_init(&queue->handoff_poller, false);
     for (size_t index = 0; index < LLGO_CORO_WORKER_QUEUE_CAPACITY_V1; ++index) {
         atomic_init(&queue->slots[index].sequence, index);
         memset(&queue->slots[index].job, 0, sizeof(queue->slots[index].job));
@@ -331,6 +358,7 @@ bool __llgo_coro_worker_queue_init_v1(void) {
         !atomic_is_lock_free(&queue->producer_state) ||
         !atomic_is_lock_free(&queue->enqueue_position) ||
         !atomic_is_lock_free(&queue->dequeue_position) ||
+        !atomic_is_lock_free(&queue->handoff_poller) ||
         !atomic_is_lock_free(&queue->slots[0].sequence) ||
         !llgo_coro_worker_wake_init_v1(&queue->wake)) {
         return false;
@@ -339,10 +367,10 @@ bool __llgo_coro_worker_queue_init_v1(void) {
     return true;
 }
 
-bool __llgo_coro_worker_queue_reserve_v1(size_t *reservation) {
+size_t __llgo_coro_worker_queue_reserve_v2(void) {
     struct llgo_coro_worker_queue_v1 *queue = &llgo_coro_worker_queue_v1;
-    if (reservation == NULL || !llgo_coro_worker_queue_enter_producer_v1(queue)) {
-        return false;
+    if (!llgo_coro_worker_queue_enter_producer_v1(queue)) {
+        return 0;
     }
 
     size_t position = atomic_load_explicit(&queue->enqueue_position, memory_order_relaxed);
@@ -350,7 +378,7 @@ bool __llgo_coro_worker_queue_reserve_v1(size_t *reservation) {
         /* Keep all sequence arithmetic defined instead of depending on wrap. */
         if (position > SIZE_MAX - LLGO_CORO_WORKER_QUEUE_CAPACITY_V1) {
             (void)llgo_coro_worker_queue_leave_producer_v1(queue);
-            return false;
+            return 0;
         }
         struct llgo_coro_worker_queue_slot_v1 *slot =
             &queue->slots[position & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1)];
@@ -360,35 +388,128 @@ bool __llgo_coro_worker_queue_reserve_v1(size_t *reservation) {
             if (atomic_compare_exchange_weak_explicit(
                     &queue->enqueue_position, &expected, position + 1,
                     memory_order_relaxed, memory_order_relaxed)) {
-                *reservation = position;
-                return true;
+                /* Zero is the failure sentinel; the opaque public token is
+                 * decoded by cancel/submit before sequence arithmetic. */
+                return position + 1;
             }
             position = expected;
             continue;
         }
         if (sequence < position) {
             (void)llgo_coro_worker_queue_leave_producer_v1(queue);
-            return false;
+            return 0;
         }
         position = atomic_load_explicit(&queue->enqueue_position, memory_order_relaxed);
     }
 }
 
-bool __llgo_coro_worker_queue_cancel_reservation_v1(size_t reservation) {
-    struct llgo_coro_worker_queue_v1 *queue = &llgo_coro_worker_queue_v1;
-    struct llgo_coro_worker_job_v1 canceled;
-    memset(&canceled, 0, sizeof(canceled));
-    return llgo_coro_worker_queue_publish_reserved_v1(queue, reservation, &canceled);
-}
-
-bool __llgo_coro_worker_queue_submit_reserved_v1(
+static bool llgo_coro_worker_queue_decode_reservation_v2(
     size_t reservation,
-    const struct llgo_coro_worker_job_v1 *job) {
-    struct llgo_coro_worker_queue_v1 *queue = &llgo_coro_worker_queue_v1;
-    if (!llgo_coro_worker_job_valid_v1(job)) {
+    size_t *position) {
+    if (reservation == 0 || position == NULL) {
         return false;
     }
-    return llgo_coro_worker_queue_publish_reserved_v1(queue, reservation, job);
+    *position = reservation - 1;
+    return true;
+}
+
+bool __llgo_coro_worker_queue_cancel_reservation_v2(size_t reservation) {
+    struct llgo_coro_worker_queue_v1 *queue = &llgo_coro_worker_queue_v1;
+    size_t position;
+    if (!llgo_coro_worker_queue_decode_reservation_v2(reservation, &position)) {
+        return false;
+    }
+    struct llgo_coro_worker_job_v1 canceled;
+    memset(&canceled, 0, sizeof(canceled));
+    return llgo_coro_worker_queue_publish_reserved_v1(queue, position, &canceled);
+}
+
+bool __llgo_coro_worker_queue_submit_reserved_v4(
+    size_t reservation,
+    uint32_t source_slot,
+    uint32_t generation,
+    uintptr_t function,
+    uintptr_t trace_target,
+    uint32_t argc,
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t a4,
+    uintptr_t a5,
+    uintptr_t a6,
+    uintptr_t a7,
+    uintptr_t a8) {
+    struct llgo_coro_worker_queue_v1 *queue = &llgo_coro_worker_queue_v1;
+    size_t position;
+    if (!llgo_coro_worker_queue_decode_reservation_v2(reservation, &position)) {
+        return false;
+    }
+    struct llgo_coro_worker_job_v1 job;
+    memset(&job, 0, sizeof(job));
+    job.source_slot = source_slot;
+    job.generation = generation;
+    job.function = function;
+    job.trace_target = trace_target;
+    job.argc = argc;
+    job.args[0] = a0;
+    job.args[1] = a1;
+    job.args[2] = a2;
+    job.args[3] = a3;
+    job.args[4] = a4;
+    job.args[5] = a5;
+    job.args[6] = a6;
+    job.args[7] = a7;
+    job.args[8] = a8;
+    if (!llgo_coro_worker_job_valid_v1(&job)) {
+        return false;
+    }
+    return llgo_coro_worker_queue_publish_reserved_v1(queue, position, &job);
+}
+
+enum {
+    LLGO_CORO_WORKER_QUEUE_TAKE_EMPTY_V1 = 3,
+    LLGO_CORO_WORKER_QUEUE_TAKE_CANCELED_V1 = 4,
+};
+
+static uint32_t llgo_coro_worker_queue_try_take_v1(
+    struct llgo_coro_worker_queue_v1 *queue,
+    struct llgo_coro_worker_job_v1 *job) {
+    for (;;) {
+        size_t position = atomic_load_explicit(&queue->dequeue_position, memory_order_relaxed);
+        struct llgo_coro_worker_queue_slot_v1 *slot =
+            &queue->slots[position & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1)];
+        size_t sequence = atomic_load_explicit(&slot->sequence, memory_order_acquire);
+        if (sequence == position + 1) {
+            if (!atomic_compare_exchange_weak_explicit(
+                    &queue->dequeue_position, &position, position + 1,
+                    memory_order_relaxed, memory_order_relaxed)) {
+                continue;
+            }
+            *job = slot->job;
+            memset(&slot->job, 0, sizeof(slot->job));
+            atomic_store_explicit(
+                &slot->sequence,
+                position + LLGO_CORO_WORKER_QUEUE_CAPACITY_V1,
+                memory_order_release);
+            if (llgo_coro_worker_job_valid_v1(job)) {
+                return LLGO_CORO_WORKER_QUEUE_TAKE_JOB_V1;
+            }
+            return llgo_coro_worker_job_canceled_v1(job) ?
+                LLGO_CORO_WORKER_QUEUE_TAKE_CANCELED_V1 :
+                LLGO_CORO_WORKER_QUEUE_TAKE_INVALID_V1;
+        }
+        if (position != atomic_load_explicit(
+                &queue->dequeue_position, memory_order_relaxed)) {
+            continue;
+        }
+        if (llgo_coro_worker_queue_stopping_v1(queue) &&
+            position == atomic_load_explicit(&queue->enqueue_position, memory_order_acquire)) {
+            return LLGO_CORO_WORKER_QUEUE_TAKE_STOP_V1;
+        }
+        /* Empty also covers an earlier reservation which is not published yet. */
+        return LLGO_CORO_WORKER_QUEUE_TAKE_EMPTY_V1;
+    }
 }
 
 uint32_t __llgo_coro_worker_queue_wait_take_v1(
@@ -399,44 +520,47 @@ uint32_t __llgo_coro_worker_queue_wait_take_v1(
         return LLGO_CORO_WORKER_QUEUE_TAKE_INVALID_V1;
     }
     for (;;) {
-        if (!llgo_coro_worker_wake_wait_v1(&queue->wake)) {
-            return LLGO_CORO_WORKER_QUEUE_TAKE_INVALID_V1;
+        /* A consumed semaphore token always earns one queue/Stop observation. */
+        uint32_t status = llgo_coro_worker_queue_try_take_v1(queue, job);
+        bool expected = false;
+        if (status == LLGO_CORO_WORKER_QUEUE_TAKE_EMPTY_V1 &&
+            atomic_compare_exchange_strong_explicit(
+                &queue->handoff_poller, &expected, true,
+                memory_order_acq_rel, memory_order_acquire)) {
+            /*
+             * Only this one idle worker owns the exact next dequeue cell.
+             * A producer may consume the token only while publishing that
+             * cell, so polling avoids a kernel wake without weakening queue
+             * correctness. The bounded architecture-specific budget is only
+             * a latency/power tradeoff; expiry falls back to the semaphore.
+             */
+            size_t handoff_position = atomic_load_explicit(
+                &queue->dequeue_position, memory_order_relaxed);
+            struct llgo_coro_worker_queue_slot_v1 *handoff_slot =
+                &queue->slots[handoff_position &
+                    (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1)];
+            for (uint32_t attempt = 0;
+                 attempt < LLGO_CORO_WORKER_HANDOFF_POLLS_V1 &&
+                     atomic_load_explicit(
+                         &handoff_slot->sequence, memory_order_acquire) !=
+                         handoff_position + 1 &&
+                     atomic_load_explicit(
+                         &queue->handoff_poller, memory_order_acquire);
+                 ++attempt) {
+                llgo_coro_worker_cpu_relax_v1();
+            }
+            (void)atomic_exchange_explicit(
+                &queue->handoff_poller, false, memory_order_acq_rel);
+            status = llgo_coro_worker_queue_try_take_v1(queue, job);
         }
-        memset(job, 0, sizeof(*job));
-
-        size_t position = atomic_load_explicit(&queue->dequeue_position, memory_order_relaxed);
-        for (;;) {
-            struct llgo_coro_worker_queue_slot_v1 *slot =
-                &queue->slots[position & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1)];
-            size_t sequence = atomic_load_explicit(&slot->sequence, memory_order_acquire);
-            if (sequence == position + 1) {
-                if (atomic_compare_exchange_weak_explicit(
-                        &queue->dequeue_position, &position, position + 1,
-                        memory_order_relaxed, memory_order_relaxed)) {
-                    *job = slot->job;
-                    memset(&slot->job, 0, sizeof(slot->job));
-                    atomic_store_explicit(
-                        &slot->sequence,
-                        position + LLGO_CORO_WORKER_QUEUE_CAPACITY_V1,
-                        memory_order_release);
-                    if (llgo_coro_worker_job_valid_v1(job)) {
-                        return LLGO_CORO_WORKER_QUEUE_TAKE_JOB_V1;
-                    }
-                    if (!llgo_coro_worker_job_canceled_v1(job)) {
-                        return LLGO_CORO_WORKER_QUEUE_TAKE_INVALID_V1;
-                    }
-                    break;
-                }
+        if (status != LLGO_CORO_WORKER_QUEUE_TAKE_EMPTY_V1) {
+            if (status == LLGO_CORO_WORKER_QUEUE_TAKE_CANCELED_V1) {
                 continue;
             }
-
-            position = atomic_load_explicit(&queue->dequeue_position, memory_order_relaxed);
-            if (llgo_coro_worker_queue_stopping_v1(queue) &&
-                position == atomic_load_explicit(&queue->enqueue_position, memory_order_acquire)) {
-                return LLGO_CORO_WORKER_QUEUE_TAKE_STOP_V1;
-            }
-            /* A later producer may have published before this exact cell. */
-            sched_yield();
+            return status;
+        }
+        if (!llgo_coro_worker_wake_wait_v1(&queue->wake)) {
+            return LLGO_CORO_WORKER_QUEUE_TAKE_INVALID_V1;
         }
     }
 }
@@ -479,6 +603,7 @@ bool __llgo_coro_worker_queue_destroy_after_join_v1(void) {
     }
     atomic_store_explicit(&queue->enqueue_position, 0, memory_order_relaxed);
     atomic_store_explicit(&queue->dequeue_position, 0, memory_order_relaxed);
+    atomic_store_explicit(&queue->handoff_poller, false, memory_order_relaxed);
     atomic_store_explicit(&queue->producer_state, 0, memory_order_relaxed);
     atomic_store_explicit(&queue->initialized, false, memory_order_release);
     return true;
@@ -503,12 +628,14 @@ struct llgo_coro_worker_fault_tls_v1 {
     uintptr_t trace_target;
     volatile uintptr_t fault_pc;
     volatile sig_atomic_t fault;
+    volatile sig_atomic_t signal_number;
     volatile sig_atomic_t active;
     volatile sig_atomic_t handling;
 };
 
 static _Thread_local struct llgo_coro_worker_fault_tls_v1
     llgo_coro_worker_fault_tls_v1;
+static _Thread_local int llgo_coro_worker_fault_signals_ready_v1;
 
 struct llgo_coro_worker_fault_action_v1 {
     int signal;
@@ -589,6 +716,7 @@ static void llgo_coro_worker_fault_handler_v1(
         state->fault = signum == SIGFPE ?
             LLGO_CORO_WORKER_FAULT_DIVIDE_V1 :
             LLGO_CORO_WORKER_FAULT_MEMORY_V1;
+        state->signal_number = signum;
         state->fault_pc = llgo_coro_worker_fault_pc_v1(context);
         siglongjmp(*state->landing, 1);
     }
@@ -619,6 +747,48 @@ static void llgo_coro_worker_fault_install_v1(void) {
     llgo_coro_worker_fault_ready_v1 = 1;
 }
 
+/*
+ * Internal workers must be able to receive the three synchronous faults that
+ * the process handler translates. pthreads inherit their creator's mask, so
+ * normalize it once per physical worker. After a cold siglongjmp, unblock the
+ * delivered signal again because sigsetjmp deliberately leaves the hot path's
+ * complete signal-mask snapshot unsaved.
+ */
+static bool llgo_coro_worker_unblock_fault_signals_v1(int only_signal) {
+    sigset_t signals;
+    if (sigemptyset(&signals) != 0) {
+        return false;
+    }
+    if (only_signal != 0) {
+        if (llgo_coro_worker_fault_action_v1(only_signal) == NULL) {
+            return false;
+        }
+        if (sigaddset(&signals, only_signal) != 0) {
+            return false;
+        }
+    } else {
+        size_t count = sizeof(llgo_coro_worker_fault_actions_v1) /
+            sizeof(llgo_coro_worker_fault_actions_v1[0]);
+        for (size_t index = 0; index < count; ++index) {
+            if (sigaddset(&signals, llgo_coro_worker_fault_actions_v1[index].signal) != 0) {
+                return false;
+            }
+        }
+    }
+    return pthread_sigmask(SIG_UNBLOCK, &signals, NULL) == 0;
+}
+
+static bool llgo_coro_worker_prepare_fault_signals_v1(void) {
+    if (llgo_coro_worker_fault_signals_ready_v1 != 0) {
+        return true;
+    }
+    if (!llgo_coro_worker_unblock_fault_signals_v1(0)) {
+        return false;
+    }
+    llgo_coro_worker_fault_signals_ready_v1 = 1;
+    return true;
+}
+
 bool __llgo_coro_worker_call_v1(
     uintptr_t function,
     uintptr_t trace_target,
@@ -634,18 +804,32 @@ bool __llgo_coro_worker_call_v1(
     struct llgo_coro_worker_fault_tls_v1 *fault_state =
         &llgo_coro_worker_fault_tls_v1;
     if (trace_target != 0) {
-        if (pthread_once(
-                &llgo_coro_worker_fault_once_v1,
-                llgo_coro_worker_fault_install_v1) != 0 ||
-            !llgo_coro_worker_fault_ready_v1 || fault_state->active != 0) {
+        if (fault_state->active != 0) {
+            return false;
+        }
+        /*
+         * fault_signals_ready is a thread-local certificate produced only
+         * after pthread_once has installed the process handlers and this
+         * physical thread has unblocked them. Rechecking pthread_once on
+         * every foreign call adds an atomic/library boundary to the hottest
+         * worker path without strengthening that certificate.
+         */
+        if (llgo_coro_worker_fault_signals_ready_v1 == 0 &&
+            (pthread_once(
+                 &llgo_coro_worker_fault_once_v1,
+                 llgo_coro_worker_fault_install_v1) != 0 ||
+             !llgo_coro_worker_fault_ready_v1 ||
+             !llgo_coro_worker_prepare_fault_signals_v1())) {
             return false;
         }
         fault_state->landing = &landing;
         fault_state->trace_target = trace_target;
         fault_state->fault_pc = 0;
         fault_state->fault = LLGO_CORO_WORKER_FAULT_NONE_V1;
+        fault_state->signal_number = 0;
         fault_state->handling = 0;
-        if (sigsetjmp(landing, 1) != 0) {
+        if (sigsetjmp(landing, 0) != 0) {
+            int fault_signal = (int)fault_state->signal_number;
             fault_state->active = 0;
             fault_state->landing = NULL;
             result->fault = (uintptr_t)fault_state->fault;
@@ -654,9 +838,11 @@ bool __llgo_coro_worker_call_v1(
             fault_state->trace_target = 0;
             fault_state->fault_pc = 0;
             fault_state->fault = LLGO_CORO_WORKER_FAULT_NONE_V1;
+            fault_state->signal_number = 0;
             fault_state->handling = 0;
-            return result->fault == LLGO_CORO_WORKER_FAULT_MEMORY_V1 ||
-                result->fault == LLGO_CORO_WORKER_FAULT_DIVIDE_V1;
+            return llgo_coro_worker_unblock_fault_signals_v1(fault_signal) &&
+                (result->fault == LLGO_CORO_WORKER_FAULT_MEMORY_V1 ||
+                    result->fault == LLGO_CORO_WORKER_FAULT_DIVIDE_V1);
         }
         fault_state->active = 1;
     }
@@ -703,6 +889,7 @@ bool __llgo_coro_worker_call_v1(
     fault_state->active = 0;
     fault_state->landing = NULL;
     fault_state->trace_target = 0;
+    fault_state->signal_number = 0;
 
     /*
      * This leaf returns raw worker-local errno. The compiler-owned

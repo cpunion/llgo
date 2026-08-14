@@ -419,6 +419,43 @@ func (source *WorkerOperationSource) Pending() bool {
 	return source != nil && routedProducerPending(&source.routedProducerSource)
 }
 
+// submittedCompletionState is the owner-side observation used by a physical
+// executor immediately before it arms a retained wait. awaiting reports that
+// at least one backend owns an exact submitted generation whose completion is
+// not yet durable; ready reports the source's durable completion hint. The
+// observation never changes source state and never waits for a producer.
+func (source *WorkerOperationSource) submittedCompletionState(p *P) (awaiting, ready, ok bool) {
+	if !validWorkerOperationOwner(source, p) {
+		return false, false, false
+	}
+	ready = source.Pending()
+	limit, valid := workerOperationScanLimit(source)
+	if !valid {
+		return false, false, false
+	}
+	for index := uint32(0); index < limit; index++ {
+		slot, found := workerOperationSlotAt(source, index)
+		if !found {
+			return false, false, false
+		}
+		if !slot.submitted {
+			continue
+		}
+		if !validWorkerOperationLiveSlot(source, p, index) {
+			return false, false, false
+		}
+		switch workerOperationMailbox(preemptLoad(&slot.mailbox)) {
+		case workerOperationMailboxEmpty, workerOperationMailboxPosting:
+			awaiting = true
+		case workerOperationMailboxPosted, workerOperationMailboxDraining,
+			workerOperationMailboxDelivered:
+		default:
+			return false, false, false
+		}
+	}
+	return awaiting, ready, true
+}
+
 func (source *WorkerOperationSource) RequestCancel(p *P, wait *WaitSetRecord) bool {
 	return validWorkerOperationOwner(source, p) && RequestWaitSetCancel(p, wait, ParkCancelOperation)
 }

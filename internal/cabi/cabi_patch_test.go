@@ -110,9 +110,11 @@ entry:
 
 define %Value @caller(ptr %g, ptr %out, ptr nest %env, %Value %value) {
 entry:
-  %result = call %Value @callee(ptr %g, ptr %out, ptr nest %env, %Value %value)
+  %result = call %Value @callee(ptr %g, ptr %out, ptr nest %env, %Value %value) #0
   ret %Value %result
 }
+
+attributes #0 = { nounwind "llgo.callsite.test"="value" }
 `
 	ctx := llvm.NewContext()
 	defer ctx.Dispose()
@@ -129,6 +131,15 @@ entry:
 		t.Fatal(err)
 	}
 	defer mod.Dispose()
+	coroElideSafe := llvm.AttributeKindID("coro_elide_safe")
+	if coroElideSafe != 0 {
+		caller := mod.NamedFunction("caller")
+		call := caller.FirstBasicBlock().FirstInstruction().IsACallInst()
+		if call.IsNil() {
+			t.Fatalf("test fixture has no direct callee call:\n%s", caller.String())
+		}
+		call.AddCallSiteAttribute(-1, ctx.CreateEnumAttribute(coroElideSafe, 0))
+	}
 
 	prog := llssa.NewProgram(&llssa.Target{GOOS: "linux", GOARCH: "amd64"})
 	defer prog.Dispose()
@@ -161,6 +172,15 @@ entry:
 	}
 	if attr := nestedCall.GetCallSiteEnumAttribute(3, nest); !attr.IsNil() {
 		t.Fatalf("C ABI lowering left nest on the old call parameter:\n%s", caller.String())
+	}
+	if attr := nestedCall.GetCallSiteEnumAttribute(-1, llvm.AttributeKindID("nounwind")); attr.IsNil() {
+		t.Fatalf("C ABI lowering lost a standard function-index call attribute:\n%s", caller.String())
+	}
+	if attr := nestedCall.GetCallSiteStringAttribute(-1, "llgo.callsite.test"); attr.IsNil() {
+		t.Fatalf("C ABI lowering lost a string function-index call attribute:\n%s", caller.String())
+	}
+	if coroElideSafe != 0 && nestedCall.GetCallSiteEnumAttribute(-1, coroElideSafe).IsNil() {
+		t.Fatalf("C ABI lowering lost coro_elide_safe:\n%s", caller.String())
 	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("C ABI closure-env module is invalid: %v\n%s", err, mod.String())

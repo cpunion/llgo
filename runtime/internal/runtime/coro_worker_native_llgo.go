@@ -35,33 +35,6 @@ const (
 	coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity
 )
 
-type coroNativeWorkerJobV1 struct {
-	id          coro.OperationID
-	function    uintptr
-	traceTarget uintptr
-	argc        uint32
-	args        [coroworker.MaxArgs]uintptr
-}
-
-func (job coroNativeWorkerJobV1) valid() bool {
-	return job.id.Valid() && job.id.Source() == coro.OperationSourceWorker &&
-		job.function != 0 && job.traceTarget != 0 && job.argc <= coroworker.MaxArgs
-}
-
-func coroNativeWorkerJobFromTransportV1(raw coroworker.Job) (coroNativeWorkerJobV1, bool) {
-	job := coroNativeWorkerJobV1{
-		id: coro.OperationID{
-			SourceSlot: raw.SourceSlot,
-			Generation: raw.Generation,
-		},
-		function:    raw.Function,
-		traceTarget: raw.TraceTarget,
-		argc:        raw.Argc,
-		args:        raw.Args,
-	}
-	return job, job.valid()
-}
-
 type coroNativeWorkerDeliveryV1 uint8
 
 const (
@@ -219,9 +192,8 @@ func coroNativeWorkerPoolReserveV1(
 	if !coroNativeWorkerSubmissionOwnerV1(handle, route) {
 		return 0, false
 	}
-	var reservation coroworker.QueueReservation
-	reserved := coroworker.QueueReserve(&reservation)
-	return reservation, reserved
+	reservation := coroworker.QueueReserve()
+	return reservation, reservation != 0
 }
 
 func coroNativeWorkerPoolCancelReservationV1(
@@ -244,24 +216,22 @@ func coroNativeWorkerPoolSubmitReservedV1(
 	id coro.OperationID,
 	function, traceTarget uintptr,
 	argc uint32,
-	args *[coroworker.MaxArgs]uintptr,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 ) bool {
-	if args == nil {
-		return false
-	}
-	job := coroworker.Job{
-		SourceSlot:  id.SourceSlot,
-		Generation:  id.Generation,
-		Function:    function,
-		TraceTarget: traceTarget,
-		Argc:        argc,
-		Args:        *args,
-	}
-	if _, valid := coroNativeWorkerJobFromTransportV1(job); !valid {
+	if !id.Valid() || id.Source() != coro.OperationSourceWorker ||
+		function == 0 || traceTarget == 0 || argc > coroworker.MaxArgs {
 		return false
 	}
 	return id.Route() == route && coroNativeWorkerSubmissionOwnerV1(handle, route) &&
-		coroworker.QueueSubmitReserved(reservation, &job)
+		coroworker.QueueSubmitReserved(
+			reservation,
+			id.SourceSlot,
+			id.Generation,
+			function,
+			traceTarget,
+			argc,
+			a0, a1, a2, a3, a4, a5, a6, a7, a8,
+		)
 }
 
 // coroNativeWorkerPoolStopDeliveryV1 seals submission, wakes all idle workers,
@@ -350,9 +320,9 @@ func coroCommitNativeWorkerSubmissionV1(
 	id coro.OperationID,
 	function, traceTarget uintptr,
 	argc uint32,
-	args *[coroworker.MaxArgs]uintptr,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 ) bool {
-	if driver == nil || g == nil || args == nil || function == 0 || traceTarget == 0 ||
+	if driver == nil || g == nil || function == 0 || traceTarget == 0 ||
 		argc > coroworker.MaxArgs || !id.Valid() || id.Source() != coro.OperationSourceWorker || id.Route() != route ||
 		!coroNativeWorkerSubmissionOwnerV1(handle, route) ||
 		!coro.CommitCurrentExecutorWorkerSubmission(driver, g, id) {
@@ -366,7 +336,7 @@ func coroCommitNativeWorkerSubmissionV1(
 		function,
 		traceTarget,
 		argc,
-		args,
+		a0, a1, a2, a3, a4, a5, a6, a7, a8,
 	) {
 		coroRuntimeAbort("native coroutine worker committed submission failed")
 		for {

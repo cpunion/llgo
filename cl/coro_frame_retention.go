@@ -354,7 +354,7 @@ func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetent
 // still zeroes the cell at the source Alloc instruction, preserving loop and
 // conditional allocation semantics despite entry-owned storage.
 func (a *coroPhysicalPureSSAAudit) proveBorrowedHeapAllocations(proof *coroFrameRetentionProof) {
-	if a == nil || a.ctx == nil || a.ctx.prog == nil || a.fn == nil || proof == nil {
+	if a == nil || a.ctx == nil || a.ctx.prog == nil || a.universe == nil || a.fn == nil || proof == nil {
 		return
 	}
 	bitcastAllocation := (*ssa.Alloc)(nil)

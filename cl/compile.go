@@ -2718,7 +2718,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 		}
 		x := p.compileValue(b, v.X)
-		ret = b.MakeInterface(t, x)
+		if _, constant := v.X.(*ssa.Const); constant {
+			ret = b.MakeInterfaceFromConstant(t, x)
+		} else {
+			ret = b.MakeInterface(t, x)
+		}
 	case *ssa.MakeSlice:
 		t := p.type_(v.Type(), llssa.InGo)
 		nLen := p.compileValue(b, v.Len)

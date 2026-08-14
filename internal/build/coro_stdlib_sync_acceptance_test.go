@@ -276,6 +276,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_target_wait_timer_llgo.go":               false,
 		"coro_timer_owner_llgo.go":                     false,
 		"coro_worker_completion_fleet_llgo.go":         false,
+		"coro_worker_completion_window_llgo.go":        false,
 		"coro_worker_native_llgo.go":                   false,
 		"coro_worker_owner_llgo.go":                    false,
 		"coro_worker_result_llgo.go":                   false,

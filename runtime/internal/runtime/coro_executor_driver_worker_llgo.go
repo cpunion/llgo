@@ -55,6 +55,11 @@ func coroProgramNextRunStepV1(
 }
 
 func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {
+	if ready, fastOK := coroNativeTryFastWorkerCompletionV1(driver); !fastOK {
+		return false, 0, false, false
+	} else if ready {
+		return false, 0, false, true
+	}
 	sleep, ok = coro.PrepareExecutorSleep(driver)
 	return sleep, 0, false, ok
 }

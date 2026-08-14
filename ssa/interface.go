@@ -50,6 +50,103 @@ func (b Builder) unsafeInterface(rawIntf *types.Interface, t Expr, data llvm.Val
 	return b.unsafeIface(itab.impl, data)
 }
 
+type staticItabKey struct {
+	interfaceType string
+	concreteType  string
+}
+
+// CanBuildStaticItab reports whether a concrete-to-interface conversion has a
+// statically known concrete type. A well-typed MakeInterface instruction is
+// already the assignability proof; do not repeat types.Implements here because
+// frontend physical type patches may use equivalent package-local type copies
+// with deliberately different go/types object identity. staticItab validates
+// every ABI method key before publishing the constant. Interface-to-interface
+// conversions retain the runtime path because their concrete type is dynamic.
+func CanBuildStaticItab(target, concrete types.Type) bool {
+	rawIntf, ok := types.Unalias(target).Underlying().(*types.Interface)
+	if !ok || rawIntf.Empty() || concrete == nil {
+		return false
+	}
+	if _, dynamic := types.Unalias(concrete).Underlying().(*types.Interface); dynamic {
+		return false
+	}
+	return true
+}
+
+func (b Builder) staticItab(rawIntf *types.Interface, concrete Type, tintf, typ Expr) Expr {
+	prog := b.Prog
+	if !CanBuildStaticItab(rawIntf, concrete.raw.Type) {
+		panic("ssa: staticItab requires a statically known concrete type")
+	}
+	interfaceName, _ := prog.abi.TypeName(rawIntf)
+	concreteName, _ := prog.abi.TypeName(concrete.raw.Type)
+	key := staticItabKey{interfaceType: interfaceName, concreteType: concreteName}
+	if itab, ok := b.Pkg.staticItabs[key]; ok {
+		return itab
+	}
+
+	methods := make([]llvm.Value, rawIntf.NumMethods())
+	for index := range methods {
+		method := rawIntf.Method(index)
+		methodType := funcType(prog, method.Type())
+		methodTypeName, _ := prog.abi.TypeName(methodType)
+		ifn, ok := b.Pkg.abiMethodIfns[abiMethodEntryKey{
+			concrete:  concreteName,
+			name:      abiMethodName(method),
+			methodTyp: methodTypeName,
+		}]
+		if !ok || ifn.IsNil() || ifn.IsAConstant().IsNil() {
+			panic("ssa: concrete interface method is missing from ABI metadata")
+		}
+		methods[index] = ifn
+	}
+
+	runtimeItab := prog.rtType("Itab")
+	interField := prog.Field(runtimeItab, 0)
+	typeField := prog.Field(runtimeItab, 1)
+	hashField := prog.Field(runtimeItab, 2)
+	funField := prog.Field(runtimeItab, 3)
+	textField := prog.Index(funField)
+	funArray := llvm.ArrayType(textField.ll, len(methods))
+	layout := prog.ctx.StructType([]llvm.Type{
+		interField.ll,
+		typeField.ll,
+		hashField.ll,
+		funArray,
+	}, false)
+	initializer := prog.ctx.ConstStruct([]llvm.Value{
+		tintf.impl,
+		typ.impl,
+		prog.IntVal(uint64(abiTypeHash(concreteName)), hashField).impl,
+		llvm.ConstArray(textField.ll, methods),
+	}, false)
+	global := llvm.AddGlobal(b.Pkg.mod, layout, staticItabSymbol(b.Pkg.Path(), interfaceName, concreteName))
+	global.SetInitializer(initializer)
+	global.SetLinkage(llvm.PrivateLinkage)
+	global.SetGlobalConstant(true)
+	global.SetUnnamedAddr(true)
+	global.SetAlignment(prog.td.ABITypeAlignment(runtimeItab.ll))
+	ret := Expr{global, prog.Pointer(runtimeItab)}
+	if b.Pkg.staticItabs == nil {
+		b.Pkg.staticItabs = make(map[staticItabKey]Expr)
+	}
+	b.Pkg.staticItabs[key] = ret
+	return ret
+}
+
+func (b Builder) unsafeConcreteInterface(rawIntf *types.Interface, concrete Type, typ Expr, data llvm.Value) llvm.Value {
+	if rawIntf.Empty() {
+		return b.unsafeEface(typ.impl, data)
+	}
+	tintf := b.abiType(rawIntf)
+	if CanBuildStaticItab(rawIntf, concrete.raw.Type) {
+		itab := b.staticItab(rawIntf, concrete, tintf, typ)
+		return b.unsafeIface(itab.impl, data)
+	}
+	itab := b.newItab(tintf, typ)
+	return b.unsafeIface(itab.impl, data)
+}
+
 func iMethodOf(rawIntf *types.Interface, name string) int {
 	n := rawIntf.NumMethods()
 	for i := 0; i < n; i++ {
@@ -140,6 +237,22 @@ func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil bool)
 //	t1 = make interface{} <- int (42:int)
 //	t2 = make Stringer <- t0
 func (b Builder) MakeInterface(tinter Type, x Expr) (ret Expr) {
+	return b.makeInterface(tinter, x, false)
+}
+
+// MakeInterfaceFromConstant constructs an interface from a compile-time
+// constant. Indirect interface payloads use immutable package-local backing
+// storage instead of a fresh heap allocation. This is safe because an
+// interface exposes a copy of the concrete value, not writable access to its
+// backing storage.
+func (b Builder) MakeInterfaceFromConstant(tinter Type, x Expr) (ret Expr) {
+	if x.IsNil() || x.impl.IsAConstant().IsNil() {
+		panic("ssa: MakeInterfaceFromConstant requires an LLVM constant")
+	}
+	return b.makeInterface(tinter, x, true)
+}
+
+func (b Builder) makeInterface(tinter Type, x Expr, constantBacking bool) (ret Expr) {
 	rawIntf := tinter.raw.Type.Underlying().(*types.Interface)
 	dbgInstrf("MakeInterface %v, %v\n", rawIntf, x.impl)
 	if x.kind == vkFuncDecl {
@@ -151,16 +264,24 @@ func (b Builder) MakeInterface(tinter Type, x Expr) (ret Expr) {
 	b.recordUseIface(typ)
 	tabi := b.abiType(typ.raw.Type)
 	if !directIfaceType(typ.raw.Type) {
+		if constantBacking {
+			vptr := b.Pkg.constantAddress(x)
+			return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
+		}
 		vptr := b.AllocU(typ)
 		b.Store(vptr, x)
-		return Expr{b.unsafeInterface(rawIntf, tabi, vptr.impl), tinter}
+		return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 	}
 	kind, _, lvl := abi.DataKindOf(typ.raw.Type, 0, prog.is32Bits)
 	switch kind {
 	case abi.Indirect:
+		if constantBacking {
+			vptr := b.Pkg.constantAddress(x)
+			return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
+		}
 		vptr := b.AllocU(typ)
 		b.Store(vptr, x)
-		return Expr{b.unsafeInterface(rawIntf, tabi, vptr.impl), tinter}
+		return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 	}
 	ximpl := x.impl
 	if lvl > 0 {
@@ -169,7 +290,7 @@ func (b Builder) MakeInterface(tinter Type, x Expr) (ret Expr) {
 	var u llvm.Value
 	switch kind {
 	case abi.Pointer:
-		return Expr{b.unsafeInterface(rawIntf, tabi, ximpl), tinter}
+		return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, ximpl), tinter}
 	case abi.Integer:
 		tu := prog.Uintptr()
 		u = llvm.CreateIntCast(b.impl, ximpl, tu.ll)
@@ -184,7 +305,7 @@ func (b Builder) MakeInterface(tinter Type, x Expr) (ret Expr) {
 		panic("todo")
 	}
 	data := llvm.CreateIntToPtr(b.impl, u, prog.tyVoidPtr())
-	return Expr{b.unsafeInterface(rawIntf, tabi, data), tinter}
+	return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, data), tinter}
 }
 
 func (b Builder) MakeInterfaceFromPtr(tinter Type, ptr Expr) (ret Expr) {
@@ -219,7 +340,7 @@ func (b Builder) makeInterfaceFromPtr(tinter Type, ptr Expr, knownNonNil bool) (
 	dst := b.Convert(prog.VoidPtr(), vptr)
 	src := b.Convert(prog.VoidPtr(), ptr)
 	b.Call(b.Pkg.rtFunc("Typedmemmove"), tabi, dst, src)
-	return Expr{b.unsafeInterface(rawIntf, tabi, vptr.impl), tinter}
+	return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 }
 
 func (b Builder) recordUseIface(typ Type) {

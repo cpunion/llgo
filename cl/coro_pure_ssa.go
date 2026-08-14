@@ -911,7 +911,8 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	// lowerings. This admits ordinary `return errno` error paths without
 	// granting a symbol-name exception to syscall or to error itself.
 	physical := a.ctx.type_(box.X.Type(), llssa.InGo)
-	needsAlloc := !emissionDirectIfaceType(physical.RawType())
+	needsAlloc := !emissionDirectIfaceType(physical.RawType()) &&
+		!makeInterfaceUsesConstantBacking(box)
 	needsNilCheck := false
 	needsTypedMove := false
 	if unop, ok := box.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
@@ -931,7 +932,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	if needsNilCheck {
 		expected = append(expected, "AssertNilDeref")
 	}
-	if !target.Empty() {
+	if !target.Empty() && !llssa.CanBuildStaticItab(target, physical.RawType()) {
 		expected = append(expected, "NewItab")
 	}
 	if needsTypedMove {

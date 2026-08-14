@@ -531,6 +531,19 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		if moved != 0 || more {
 			return true
 		}
+		domain, domainOK := coroNativeFleetDomainForHandleV1(
+			&coroNativeFleetV1State,
+			handle,
+			coroNativeFleetDomainActiveV1,
+		)
+		if !domainOK {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer completion window domain lost")
+		}
+		if ready, fastOK := coroNativeTryFastWorkerCompletionV1(domain.driverOwnerV1()); !fastOK {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer completion window failed")
+		} else if ready {
+			return true
+		}
 		freshNow, freshClockOK := coroNativeFleetPhysicalOwnerClockV1()
 		if !freshClockOK {
 			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wait clock failed")

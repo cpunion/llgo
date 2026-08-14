@@ -65,11 +65,24 @@ int __llgo_coro_worker_create_v1(pthread_t *thread);
 
 bool __llgo_coro_worker_queue_init_v1(void);
 bool __llgo_coro_worker_queue_can_release_v1(void);
-bool __llgo_coro_worker_queue_reserve_v1(size_t *reservation);
-bool __llgo_coro_worker_queue_cancel_reservation_v1(size_t reservation);
-bool __llgo_coro_worker_queue_submit_reserved_v1(
+size_t __llgo_coro_worker_queue_reserve_v2(void);
+bool __llgo_coro_worker_queue_cancel_reservation_v2(size_t reservation);
+bool __llgo_coro_worker_queue_submit_reserved_v4(
     size_t reservation,
-    const struct llgo_coro_worker_job_v1 *job);
+    uint32_t source_slot,
+    uint32_t generation,
+    uintptr_t function,
+    uintptr_t trace_target,
+    uint32_t argc,
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t a4,
+    uintptr_t a5,
+    uintptr_t a6,
+    uintptr_t a7,
+    uintptr_t a8);
 uint32_t __llgo_coro_worker_queue_wait_take_v1(
     struct llgo_coro_worker_job_v1 *job);
 bool __llgo_coro_worker_queue_stop_v1(uint32_t worker_count);
