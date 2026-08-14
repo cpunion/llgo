@@ -3289,7 +3289,7 @@ func TestCoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen(t *testing.T) {
 		t.Fatalf("CoroPlanBuilder did not successfully return a plan: %v", err)
 	}
 	if err == nil ||
-		!strings.Contains(err.Error(), "declared may-park effect has no exact structured park intrinsic") {
+		!strings.Contains(err.Error(), "declared may-park effect has no exact structured park or native blocking intrinsic") {
 		t.Fatalf("Do error = %v, want exact coroutine physical-ABI rejection before codegen", err)
 	}
 	if len(pkgs) != 0 {

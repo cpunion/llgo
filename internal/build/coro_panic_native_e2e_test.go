@@ -200,7 +200,7 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		ClassifyLoweredCalls: universe.CoroLoweredCalls,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			switch fn {
-			case mainFn, childFn:
+			case mainFn:
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 			default:
 				return coro.SSAFunctionPolicy{}, nil
@@ -221,6 +221,10 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		middlePlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
 		middlePlan.AtomicCostProof != coro.AtomicCostDAG || middlePlan.AtomicCost <= leafPlan.AtomicCost {
 		t.Fatalf("panic middle plan = %+v, present=%t; want outcome-plain DAG above leaf cost %d", middlePlan, found, leafPlan.AtomicCost)
+	}
+	childPlan, found := plan.FunctionPlan(childFn)
+	if !found || !childPlan.HasStaticOutcome() || childPlan.Effect.Contains(coro.YieldOnly) {
+		t.Fatalf("panic child plan = %+v, present=%t; want synchronous outcome without a forged yield effect", childPlan, found)
 	}
 	compilation := &cl.Compilation{
 		CoroPlan: plan,

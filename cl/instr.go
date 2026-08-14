@@ -2744,9 +2744,19 @@ func (p *context) callEx(
 				sourceCall, expectedOperation,
 			)
 			if !managedWorker && !operationPlanned {
-				managedWorker = semanticsPlanned &&
-					(semantics == CoroIntrinsicCallInlineSuspend ||
-						semantics == CoroIntrinsicCallInlineNativeBlock)
+				// A frozen call-site classification describes what this call
+				// means if its owner is emitted through the managed physical ABI;
+				// it is not by itself authority to use the hidden task ABI. A
+				// simultaneously emitted ordinary/raw twin has the same global
+				// SitePlan but no managed task. Only the active source-site
+				// observer can select the managed fallback when no physical
+				// operation record is installed.
+				if activeSemantics, active := p.plannedCoroIntrinsicCall(ftype); active {
+					semantics = activeSemantics
+					semanticsPlanned = true
+					managedWorker = semantics == CoroIntrinsicCallInlineSuspend ||
+						semantics == CoroIntrinsicCallInlineNativeBlock
+				}
 			}
 			if managedWorker {
 				if !semanticsPlanned ||

@@ -108,6 +108,15 @@ func Middle(a0 uintptr) uintptr {
 func Top(a0 uintptr) uintptr {
 	return Middle(a0) + 2
 }
+
+// Plain is deliberately outside the managed root closure. Its call still has
+// a globally frozen native-block SitePlan, but ordinary emission must not use
+// the hidden managed-task ABI.
+func Plain(a0 uintptr) uintptr {
+	r1, _, _ := raw(funcPCABI0(libc_worker1_v1_trampoline), a0)
+	return r1
+}
+
 `
 
 func TestCoroTypedSyncSyscallDoesNotForgeWordWorkerABI(t *testing.T) {
@@ -309,7 +318,7 @@ func TestCoroWorkerSyscallFailureConventionsShareLowering(t *testing.T) {
 func TestCoroNativeSyscallStaticOutcomePropagatesThroughExactCallChain(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	compiled := compileCoroWorkerSourceFixture(
-		t, coroWorkerStaticOutcomeChainTestSource, []string{"Top"},
+		t, coroWorkerStaticOutcomeChainTestSource, []string{"Top"}, []string{"Plain"},
 	)
 	defer compiled.prog.Dispose()
 	module := compiled.pkg.Module()
@@ -346,6 +355,11 @@ func TestCoroNativeSyscallStaticOutcomePropagatesThroughExactCallChain(t *testin
 	if leafOutcome.IsNil() || strings.Count(leafOutcome.String(), "@"+coroNativeSyscallCallHookV1) != 1 ||
 		strings.Contains(leafOutcome.String(), "llvm.coro.") {
 		t.Fatalf("Leaf has no synchronous native syscall outcome:\n%s", module.String())
+	}
+	plain := module.NamedFunction("chain.Plain")
+	if plain.IsNil() || strings.Contains(plain.String(), coroNativeSyscallCallHookV1) ||
+		strings.Contains(plain.String(), "llvm.coro.") {
+		t.Fatalf("unmanaged Plain selected the hidden managed syscall ABI:\n%s", module.String())
 	}
 
 	runCoroABITestPipeline(t, compiled.prog, module)
@@ -524,7 +538,7 @@ func compileCoroWorkerFixture(t *testing.T) (
 ) {
 	t.Helper()
 	compiled := compileCoroWorkerSourceFixture(
-		t, coroWorkerTestSource, []string{"Root", "RootInt32", "RootPointer"},
+		t, coroWorkerTestSource, []string{"Root", "RootInt32", "RootPointer"}, nil,
 	)
 	if compiled.calls["Root"] == nil {
 		compiled.prog.Dispose()
@@ -537,6 +551,7 @@ func compileCoroWorkerSourceFixture(
 	t *testing.T,
 	source string,
 	rootNames []string,
+	rawRootNames []string,
 ) compiledCoroWorkerFixture {
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
@@ -574,17 +589,34 @@ func compileCoroWorkerSourceFixture(
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	rootsByName := make(map[string]*ssa.Function, len(rootNames))
-	callsByName := make(map[string]*ssa.Call, len(rootNames))
-	analysisRoots := make(coro.Roots, 0, len(rootNames))
+	type rootSpec struct {
+		name string
+		root coro.Root
+	}
+	rootSpecs := make([]rootSpec, 0, len(rootNames)+len(rawRootNames))
 	for _, name := range rootNames {
+		rootSpecs = append(rootSpecs, rootSpec{name: name, root: coro.Root{Demand: coro.AsyncDemand}})
+	}
+	for _, name := range rawRootNames {
+		rootSpecs = append(rootSpecs, rootSpec{name: name, root: coro.Root{RawPlainDemand: true}})
+	}
+	rootsByName := make(map[string]*ssa.Function, len(rootSpecs))
+	callsByName := make(map[string]*ssa.Call, len(rootSpecs))
+	rawRootFunctions := make(map[*ssa.Function]bool, len(rawRootNames))
+	analysisRoots := make(coro.Roots, 0, len(rootSpecs))
+	for _, spec := range rootSpecs {
+		name := spec.name
 		root := ssaPkg.Func(name)
 		if root == nil {
 			prog.Dispose()
 			t.Fatalf("worker fixture lacks root %q", name)
 		}
 		rootsByName[name] = root
-		analysisRoots = append(analysisRoots, coro.Root{Function: root, Demand: coro.AsyncDemand})
+		if spec.root.RawPlainDemand {
+			rawRootFunctions[root] = true
+		}
+		spec.root.Function = root
+		analysisRoots = append(analysisRoots, spec.root)
 		for _, block := range root.Blocks {
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(*ssa.Call)
@@ -639,7 +671,10 @@ func compileCoroWorkerSourceFixture(
 			// Production builds seed owner-local intrinsic effects from the same
 			// frozen call SitePlans. Reproduce that bridge without assuming every
 			// externally demanded root contains the syscall itself.
-			return coro.SSAFunctionPolicy{Effect: intrinsicEffects[fn]}, nil
+			return coro.SSAFunctionPolicy{
+				Effect:        intrinsicEffects[fn],
+				RawPlainEntry: rawRootFunctions[fn],
+			}, nil
 		},
 		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
 			callee := call.Common().StaticCallee()
