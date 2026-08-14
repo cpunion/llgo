@@ -830,12 +830,14 @@ func (p *context) awaitCoroChildWithRecovery(
 	line := p.coroCurrentSourceLine()
 	body.suspendForChild(b, line)
 
-	if body.abi.awaitPrepareHook == "" {
+	if body.abi.awaitPrepareInlineHook == "" {
 		panic("coroutine child await has no scheduler handoff hook")
 	}
-	publish := p.pkg.NewFunc(body.abi.awaitPrepareHook, coroAwaitPrepareSignature(), llssa.InC)
-	b.Call(
-		publish.Expr,
+	prepareInline := p.pkg.NewFunc(
+		body.abi.awaitPrepareInlineHook, coroAwaitPrepareInlineSignature(), llssa.InC,
+	)
+	startedInline := b.Call(
+		prepareInline.Expr,
 		body.task,
 		body.coro.Handle(),
 		child,
@@ -843,14 +845,18 @@ func (p *context) awaitCoroChildWithRecovery(
 		recoverType,
 		recoverData,
 	)
-	completedInline := p.emitCoroStaticInlineAwait(b, child)
 	if body.abi.awaitConsumeHook == "" {
 		panic("coroutine child await has no outcome consume hook")
 	}
 	typeWord := p.coroFrameAlloca(p.prog.VoidPtr())
 	dataWord := p.coroFrameAlloca(p.prog.VoidPtr())
+	statusWord := p.coroFrameAlloca(p.prog.Uint32())
 	b.Store(typeWord, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(dataWord, p.prog.Nil(p.prog.VoidPtr()))
+	b.Store(statusWord, p.prog.IntVal(0, p.prog.Uint32()))
+	completedInline := p.emitCoroStaticInlineAwait(
+		b, child, startedInline, typeWord, dataWord, statusWord,
+	)
 	consume := p.pkg.NewFunc(body.abi.awaitConsumeHook, coroAwaitConsumeSignature(), llssa.InC)
 
 	// A task-cancellation decision is taken before the site's ordinary resumed
@@ -861,14 +867,35 @@ func (p *context) awaitCoroChildWithRecovery(
 	// the base while reconciling a concurrent deferred-child recovery/panic as
 	// the overlay. This preserves both cancellation and Go panic ordering.
 	canceled := p.fn.MakeBlock()
+	resumedOutcome := p.fn.MakeBlock()
+	var normalContinuation llssa.BasicBlock
 	body.suspendCoroCurrentBlockIf(
 		b.UnOp(token.NOT, completedInline),
 		nil,
 		func(gate llssa.Builder, normal llssa.BasicBlock) {
-			body.dispatchZeroRunDecisionTo(gate, normal, canceled)
+			normalContinuation = normal
+			body.dispatchZeroRunDecisionTo(gate, resumedOutcome, canceled)
 		},
 	)
+	if normalContinuation == nil {
+		panic("coroutine child await lost its resumed normal continuation")
+	}
 	body.activate(b)
+	resumeBuilder := p.fn.NewBuilder()
+	resumeBuilder.DICopyCurrentDebugLocation(b)
+	resumeBuilder.SetBlock(resumedOutcome)
+	body.activate(resumeBuilder)
+	resumedStatus := resumeBuilder.Call(
+		consume.Expr,
+		body.task,
+		body.coro.Handle(),
+		resumeBuilder.Convert(p.prog.VoidPtr(), typeWord),
+		resumeBuilder.Convert(p.prog.VoidPtr(), dataWord),
+	)
+	resumeBuilder.Store(statusWord, resumedStatus)
+	resumeBuilder.Jump(normalContinuation)
+	resumeBuilder.Dispose()
+
 	cancelBuilder := p.fn.NewBuilder()
 	cancelBuilder.DICopyCurrentDebugLocation(b)
 	cancelBuilder.SetBlock(canceled)
@@ -940,13 +967,7 @@ func (p *context) awaitCoroChildWithRecovery(
 	// terminal outcome therefore lives in scheduler-owned parent metadata, not
 	// in the result slot or child promise.  Consume exactly once before reading
 	// results or allowing another child transaction to start.
-	status := b.Call(
-		consume.Expr,
-		body.task,
-		body.coro.Handle(),
-		b.Convert(p.prog.VoidPtr(), typeWord),
-		b.Convert(p.prog.VoidPtr(), dataWord),
-	)
+	status := b.Load(statusWord)
 	p.emitCoroKeepaliveSlots(b, keepaliveSlots)
 	returned := p.fn.MakeBlock()
 	panicked := p.fn.MakeBlock()
@@ -1005,27 +1026,28 @@ func (p *context) awaitCoroChildWithRecovery(
 // 22 to select a coro_elide_safe no-allocation ramp and embed the child frame
 // in its parent. A declined/deep or genuinely suspended child converges on the
 // existing false result and parent suspend path.
-func (p *context) emitCoroStaticInlineAwait(b llssa.Builder, child llssa.Expr) llssa.Expr {
+func (p *context) emitCoroStaticInlineAwait(
+	b llssa.Builder, child, startedInline, typeWord, dataWord, statusWord llssa.Expr,
+) llssa.Expr {
 	body := p.coroBody()
-	if body == nil || b == nil || b.Func != p.fn || child.IsNil() ||
-		body.abi.awaitInlineHook == "" || body.abi.awaitInlineFinishHook == "" ||
-		body.abi.awaitInlineCommitHook == "" || body.abi.frameDestroyCommitHook == "" {
+	if body == nil || b == nil || b.Func != p.fn || child.IsNil() || startedInline.IsNil() ||
+		typeWord.IsNil() || dataWord.IsNil() || statusWord.IsNil() ||
+		body.abi.awaitInlineFinishHook == "" ||
+		body.abi.awaitInlineDestroyConsumeHook == "" {
 		panic("coroutine static inline await has an incomplete physical contract")
 	}
-	begin := p.pkg.NewFunc(body.abi.awaitInlineHook, coroAwaitInlineSignature(), llssa.InC)
 	finish := p.pkg.NewFunc(
 		body.abi.awaitInlineFinishHook, coroAwaitInlineFinishSignature(), llssa.InC,
 	)
-	frameCommit := p.pkg.NewFunc(
-		body.abi.frameDestroyCommitHook, coroFrameDestroyCommitSignature(), llssa.InC,
-	)
-	inlineCommit := p.pkg.NewFunc(
-		body.abi.awaitInlineCommitHook, coroAwaitInlineCommitSignature(), llssa.InC,
+	destroyConsume := p.pkg.NewFunc(
+		body.abi.awaitInlineDestroyConsumeHook,
+		coroAwaitInlineDestroyConsumeSignature(),
+		llssa.InC,
 	)
 
 	started, declined, destroy, joined := p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock()
 	parent := body.coro.Handle()
-	b.If(b.Call(begin.Expr, body.task, parent, child), started, declined)
+	b.If(startedInline, started, declined)
 
 	b.SetBlockEx(started, llssa.AtEnd, false)
 	b.CoroResume(child)
@@ -1036,8 +1058,15 @@ func (p *context) emitCoroStaticInlineAwait(b llssa.Builder, child llssa.Expr) l
 	b.Jump(joined)
 	b.SetBlockEx(destroy, llssa.AtEnd, false)
 	b.CoroDestroy(child)
-	b.Call(frameCommit.Expr, body.task, child)
-	b.Call(inlineCommit.Expr, body.task, parent, child)
+	destroyStatus := b.Call(
+		destroyConsume.Expr,
+		body.task,
+		parent,
+		child,
+		b.Convert(p.prog.VoidPtr(), typeWord),
+		b.Convert(p.prog.VoidPtr(), dataWord),
+	)
+	b.Store(statusWord, destroyStatus)
 	b.Jump(joined)
 
 	b.SetBlockContinuation(joined)

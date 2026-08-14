@@ -18,9 +18,10 @@ package coro
 
 import "unsafe"
 
-// InlineAwaitDisposition is the target-neutral half of one eager child
-// resume. The runtime adapter remains the sole owner of llvm.coro.resume,
-// llvm.coro.done, and llvm.coro.destroy; the core owns only frame state.
+// InlineAwaitDisposition is the target-neutral scheduler half of one eager
+// child resume. Generated code owns llvm.coro.resume, llvm.coro.done, and
+// llvm.coro.destroy so LLVM can see the exact static handle lifetime; this core
+// owns only frame, completion, and scheduler state.
 type InlineAwaitDisposition uint8
 
 const (
@@ -36,8 +37,8 @@ const (
 	// transition after the native stack is gone.
 	InlineAwaitSuspend
 	// InlineAwaitDestroy means the immediate child reached final suspend and
-	// is now the exact destroy target. The adapter must destroy it and then
-	// call CommitInlineAwaitDestroy before returning success to generated code.
+	// is now the exact destroy target. Generated code must destroy it and then
+	// commit the physical/logical destroy receipt before continuing.
 	InlineAwaitDestroy
 )
 
@@ -46,6 +47,73 @@ const (
 // pre-existing scheduler path. Sixteen is deliberately conservative for
 // embedded host stacks and still collapses ordinary shallow Go call chains.
 const maxInlineAwaitDepth uint8 = 16
+
+// PrepareInlineAwaitCompiler atomically arms one compiler-owned child
+// completion and selects the bounded eager-resume path. The old two-hook form
+// authenticated the same immutable caller/child edge twice even though no
+// callback, suspension, or scheduler entry exists between prepare and begin.
+// This helper performs one shared proof and commits either pendingInlineStart
+// or the canonical depth-bound pendingAwait transaction.
+func PrepareInlineAwaitCompiler(
+	g *G, parentHandle, childHandle, recoverType, recoverData unsafe.Pointer,
+) InlineAwaitDisposition {
+	if ValidG(g) && parentHandle != nil && childHandle != nil &&
+		(recoverType != nil || recoverData == nil) && resumeGateTaken(g) &&
+		g.runP != nil && g.pending.kind == pendingNone &&
+		g.destroyTarget == nil && !g.destroyRoot &&
+		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
+		!g.waiting && compilerReleasableParkState(&g.park) {
+		p := g.runP
+		parent, child := g.active, g.frames
+		if parent != nil && child != nil && parent != child &&
+			parent.handle == parentHandle && child.handle == childHandle &&
+			parent.owner == g && child.owner == g &&
+			parent.header != nil && child.header != nil &&
+			parent.state == FrameActive && child.state == FrameInitialSuspended &&
+			parent.header.SuspendReason == uint16(SuspendCall) &&
+			parent.header.Lifecycle == uint16(FrameSuspended) &&
+			child.header.Parent == parentHandle &&
+			child.header.Lifecycle == uint16(FrameInitialSuspended) &&
+			child.parent == nil && emptyCompletionRecord(&parent.completion) &&
+			compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth) {
+			parent.completion.child = child.handle
+			if recoverType == nil {
+				parent.completion.status = completionArmed
+			} else {
+				parent.completion.status = completionRecoverArmed
+				parent.completion.typeWord = recoverType
+				parent.completion.dataWord = recoverData
+			}
+			child.parent = parent
+			if p.inlineAwaitDepth >= maxInlineAwaitDepth {
+				g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
+				return InlineAwaitDeclined
+			}
+			parent.state = FrameSuspended
+			child.state = FrameActive
+			g.active = child
+			g.pending = pendingTransition{kind: pendingInlineStart, from: parent, target: child}
+			p.inlineAwaitDepth++
+			return InlineAwaitStarted
+		}
+	}
+
+	var prepared bool
+	if recoverType == nil {
+		if recoverData != nil {
+			return InlineAwaitInvalid
+		}
+		prepared = PrepareAwaitCompletionCompiler(g, parentHandle, childHandle)
+	} else {
+		prepared = PrepareAwaitCompletionRecover(
+			g, parentHandle, childHandle, recoverType, recoverData,
+		)
+	}
+	if !prepared {
+		return InlineAwaitInvalid
+	}
+	return BeginInlineAwaitCompiler(g, parentHandle, childHandle)
+}
 
 func validInlineAwaitEdge(parent, child *Frame) bool {
 	if parent == nil || child == nil || parent == child || parent.handle == nil ||
@@ -271,8 +339,8 @@ func takeInlineAwaitInitialDecisionCompiler(g *G) bool {
 	return true
 }
 
-// FinishInlineAwait commits the return from the adapter's nested
-// llvm.coro.resume. done is the adapter's exact llvm.coro.done result.
+// FinishInlineAwait commits the return from generated code's nested
+// llvm.coro.resume. done is its exact llvm.coro.done result.
 func FinishInlineAwait(
 	g *G, parentHandle, childHandle unsafe.Pointer, done bool,
 ) InlineAwaitDisposition {
@@ -378,10 +446,10 @@ func terminalInlineCompletion(record *CompletionRecord, childHandle unsafe.Point
 	}
 }
 
-// CommitInlineAwaitDestroy restores the parent activation after the adapter's
-// synchronous llvm.coro.destroy has called ReleaseFrame. It never consumes the
-// completion; generated code uses the same await-consume ABI as the scheduler
-// path.
+// CommitInlineAwaitDestroy restores the parent activation after generated
+// code's synchronous llvm.coro.destroy has called ReleaseFrame. It never
+// consumes the completion; compatibility callers use the same await-consume
+// transaction as the scheduler path.
 func CommitInlineAwaitDestroy(g *G, parentHandle, childHandle unsafe.Pointer) bool {
 	if !ValidG(g) || parentHandle == nil || childHandle == nil || g.runP == nil {
 		return false
@@ -434,6 +502,61 @@ func CommitInlineAwaitDestroyCompiler(g *G, parentHandle, childHandle unsafe.Poi
 		}
 	}
 	return CommitInlineAwaitDestroy(g, parentHandle, childHandle)
+}
+
+// CommitInlineAwaitPhysicalDestroyCompiler consumes the exact
+// llvm.coro.destroy receipt, restores its static parent, and takes the terminal
+// completion in one transaction.
+// The common Return path uses compiler-borrowed metadata at the head of the
+// frame list, so every fallible observation is completed before a no-fail
+// unlink/zero/reactivate suffix. Dynamic storage, panic-trace retention, and
+// non-Return outcomes retain the two complete compatibility transactions.
+func CommitInlineAwaitPhysicalDestroyCompiler(
+	g *G, parentHandle, childHandle unsafe.Pointer,
+) (CompletionSnapshot, bool) {
+	if ValidG(g) && parentHandle != nil && childHandle != nil &&
+		gPreemptEnabledAtDepthZero(g) && g.runP != nil &&
+		g.destroyTarget != nil && !g.destroyRoot &&
+		g.pending == (pendingTransition{}) {
+		p := g.runP
+		parent, child := g.active, g.destroyTarget
+		if parent != nil && child != nil && parent != child &&
+			parent.handle == parentHandle && child.handle == childHandle &&
+			parent.owner == g && child.owner == g && child.parent == parent &&
+			parent.header != nil && child.header != nil &&
+			parent.state == FrameSuspended && child.state == FrameDestroyPending &&
+			parent.header.SuspendReason == uint16(SuspendCall) &&
+			parent.header.Lifecycle == uint16(FrameSuspended) &&
+			child.header.Lifecycle == uint16(FrameDestroyPending) &&
+			child.borrowedStorage && child.storage == nil && child.rawBase == nil &&
+			child.allocationSize == 0 && child.parkWait == nil &&
+			child.header.AllocationBase == unsafe.Pointer(child) &&
+			!child.retainPanicTrace && g.frames == child &&
+			parent.completion.child == childHandle &&
+			parent.completion.status == CompletionReturn &&
+			parent.completion.typeWord == nil && parent.completion.dataWord == nil &&
+			p.current == g && p.inResume && g.state == GRunning &&
+			p.runDecisionTaken && p.runDecision == (RunDecision{}) &&
+			p.action.Kind == ActionResume && p.action.Flags == 0 &&
+			compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth) {
+			g.frames = child.next
+			child.next = nil
+			child.state = FrameDestroyed
+			child.header.Lifecycle = uint16(FrameDestroyed)
+			g.destroyTarget = nil
+			Zero(unsafe.Pointer(child), unsafe.Sizeof(Frame{}))
+			parent.state = FrameActive
+			parent.header.SuspendReason = uint16(SuspendNone)
+			parent.header.Lifecycle = uint16(FrameActive)
+			parent.completion = CompletionRecord{}
+			return CompletionSnapshot{Status: CompletionReturn}, true
+		}
+	}
+	if !CommitFrameDestroyCompiler(g, childHandle) ||
+		!CommitInlineAwaitDestroyCompiler(g, parentHandle, childHandle) {
+		return CompletionSnapshot{}, false
+	}
+	return ConsumeAwaitCompletionCompiler(g, parentHandle)
 }
 
 // resumedFrameForAction accepts the ordinary one-frame return or a completely

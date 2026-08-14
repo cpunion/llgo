@@ -35,7 +35,16 @@ func newInlineAwaitFixture(t *testing.T) *inlineAwaitFixture {
 }
 
 func newInlineAwaitFixtureForCompiler(t *testing.T, compiler bool) *inlineAwaitFixture {
+	return newInlineAwaitFixtureWithRecovery(t, compiler, nil, nil)
+}
+
+func newInlineAwaitFixtureWithRecovery(
+	t *testing.T, compiler bool, recoverType, recoverData unsafe.Pointer,
+) *inlineAwaitFixture {
 	t.Helper()
+	if !compiler && (recoverType != nil || recoverData != nil) {
+		t.Fatal("compatibility inline-await fixture cannot arm compiler recovery")
+	}
 	g := new(G)
 	if !InitG(g) {
 		t.Fatal("initialize inline-await G")
@@ -62,19 +71,15 @@ func newInlineAwaitFixtureForCompiler(t *testing.T, compiler bool) *inlineAwaitF
 	}
 	parent.header.SuspendReason = uint16(SuspendCall)
 	parent.header.Lifecycle = uint16(FrameSuspended)
-	var prepared bool
-	if compiler {
-		prepared = PrepareAwaitCompletionCompiler(g, parent.handle, child.handle)
-	} else {
-		prepared = PrepareAwaitCompletion(g, parent.handle, child.handle)
-	}
-	if !prepared {
-		t.Fatal("prepare inline-await child")
-	}
 	var disposition InlineAwaitDisposition
 	if compiler {
-		disposition = BeginInlineAwaitCompiler(g, parent.handle, child.handle)
+		disposition = PrepareInlineAwaitCompiler(
+			g, parent.handle, child.handle, recoverType, recoverData,
+		)
 	} else {
+		if !PrepareAwaitCompletion(g, parent.handle, child.handle) {
+			t.Fatal("prepare inline-await child")
+		}
 		disposition = BeginInlineAwait(g, parent.handle, child.handle)
 	}
 	if disposition != InlineAwaitStarted {
@@ -113,13 +118,9 @@ func TestCompilerInlineAwaitCompletesThroughTrustedSuffix(t *testing.T) {
 			fixture.p.inlineAwaitDepth, fixture.g.active)
 	}
 	releaseTestFrame(t, fixture.g, fixture.child)
-	if !CommitFrameDestroyCompiler(fixture.g, fixture.child.handle) {
-		t.Fatal("commit compiler physical child destroy")
-	}
-	if !CommitInlineAwaitDestroyCompiler(fixture.g, fixture.parent.handle, fixture.child.handle) {
-		t.Fatal("commit compiler inline child destroy")
-	}
-	snapshot, ok := ConsumeAwaitCompletionCompiler(fixture.g, fixture.parent.handle)
+	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle,
+	)
 	if !ok || snapshot != (CompletionSnapshot{Status: CompletionReturn}) {
 		t.Fatalf("consume compiler inline child return = (%+v, %t)", snapshot, ok)
 	}
@@ -128,6 +129,114 @@ func TestCompilerInlineAwaitCompletesThroughTrustedSuffix(t *testing.T) {
 		t.Fatalf("compiler inline parent header = (%d, %d), want active",
 			fixture.parent.header.SuspendReason, fixture.parent.header.Lifecycle)
 	}
+	runtime.KeepAlive(fixture.parent.memory)
+}
+
+func TestCompilerInlineAwaitFusesBorrowedDestroyAndConsume(t *testing.T) {
+	fixture := newInlineAwaitFixtureForCompiler(t, true)
+	child := FrameFromStorage(fixture.child.storage)
+	if child == nil {
+		t.Fatal("resolve borrowed compiler child")
+	}
+	child.borrowedStorage = true
+	child.storage = nil
+	child.rawBase = nil
+	child.allocationSize = 0
+	fixture.child.header.AllocationBase = unsafe.Pointer(child)
+	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareCompleteStatusCompiler(
+		fixture.g, fixture.child.handle, fixture.child.header, CompletionReturn,
+	) {
+		t.Fatal("publish borrowed compiler inline child return")
+	}
+	if got := FinishInlineAwaitCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle, true,
+	); got != InlineAwaitDestroy {
+		t.Fatalf("finish borrowed compiler inline-await = %d, want destroy", got)
+	}
+	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle,
+	)
+	if !ok || snapshot != (CompletionSnapshot{Status: CompletionReturn}) {
+		t.Fatalf("fused borrowed completion = (%+v, %t)", snapshot, ok)
+	}
+	if *child != (Frame{}) || fixture.g.destroyTarget != nil || fixture.g.frames != fixture.g.active ||
+		fixture.g.active != FrameFromStorage(fixture.parent.storage) ||
+		fixture.g.active.completion != (CompletionRecord{}) ||
+		fixture.parent.header.SuspendReason != uint16(SuspendNone) ||
+		fixture.parent.header.Lifecycle != uint16(FrameActive) {
+		t.Fatalf("fused borrowed completion left residue: child=%+v active=%p frames=%p target=%p completion=%+v header=(%d,%d)",
+			child, fixture.g.active, fixture.g.frames, fixture.g.destroyTarget,
+			fixture.g.active.completion, fixture.parent.header.SuspendReason,
+			fixture.parent.header.Lifecycle)
+	}
+	runtime.KeepAlive(fixture.parent.memory)
+	runtime.KeepAlive(fixture.child.memory)
+}
+
+func TestCompilerInlineAwaitPanicRetainsCompatibilityProtocol(t *testing.T) {
+	fixture := newInlineAwaitFixtureForCompiler(t, true)
+	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	fixture.child.header.SuspendReason = uint16(SuspendPanic)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(
+		fixture.g, fixture.child.handle, fixture.child.header, typeWord, dataWord,
+	) {
+		t.Fatal("publish compiler inline child panic")
+	}
+	if got := FinishInlineAwaitCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle, true,
+	); got != InlineAwaitDestroy {
+		t.Fatalf("finish panicking compiler inline-await = %d, want destroy", got)
+	}
+	releaseTestFrame(t, fixture.g, fixture.child)
+	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle,
+	)
+	if !ok || snapshot != (CompletionSnapshot{
+		Status: CompletionPanic, TypeWord: typeWord, DataWord: dataWord,
+	}) {
+		t.Fatalf("consume compiler inline child panic = (%+v, %t)", snapshot, ok)
+	}
+	if !activePanicTrace(fixture.g) || panicTraceCarrier(fixture.g) != fixture.g.active {
+		t.Fatal("compiler inline child panic lost its retained trace carrier")
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	runtime.KeepAlive(fixture.parent.memory)
+	runtime.KeepAlive(fixture.child.memory)
+}
+
+func TestCompilerInlineAwaitRecoveredReturnUsesCompatibilityProtocol(t *testing.T) {
+	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	fixture := newInlineAwaitFixtureWithRecovery(t, true, typeWord, dataWord)
+	if snapshot, recovered, valid := TakeRecover(
+		fixture.g, fixture.child.handle,
+	); !valid || !recovered || snapshot != (RecoverSnapshot{TypeWord: typeWord, DataWord: dataWord}) {
+		t.Fatalf("take compiler inline recovery = (%+v, %t, %t)", snapshot, recovered, valid)
+	}
+	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareCompleteStatusCompiler(
+		fixture.g, fixture.child.handle, fixture.child.header, CompletionReturn,
+	) {
+		t.Fatal("publish recovered compiler inline child return")
+	}
+	if got := FinishInlineAwaitCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle, true,
+	); got != InlineAwaitDestroy {
+		t.Fatalf("finish recovered compiler inline-await = %d, want destroy", got)
+	}
+	releaseTestFrame(t, fixture.g, fixture.child)
+	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle,
+	)
+	if !ok || snapshot != (CompletionSnapshot{Status: CompletionReturnRecovered}) {
+		t.Fatalf("consume recovered compiler inline child = (%+v, %t)", snapshot, ok)
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
 	runtime.KeepAlive(fixture.parent.memory)
 }
 
@@ -343,6 +452,53 @@ func TestInlineAwaitDepthBoundDeclinesWithoutMutation(t *testing.T) {
 		FrameFromStorage(declined.storage).state != FrameInitialSuspended ||
 		fixture.p.inlineAwaitDepth != maxInlineAwaitDepth {
 		t.Fatal("depth-bound refusal mutated prepared scheduler transaction")
+	}
+	for _, frame := range frames {
+		runtime.KeepAlive(frame.memory)
+	}
+}
+
+func TestCompilerFusedInlineAwaitDepthBoundLeavesCanonicalPendingAwait(t *testing.T) {
+	fixture := newInlineAwaitFixture(t)
+	frames := []*testFrame{fixture.parent, fixture.child}
+	active := fixture.child
+	for fixture.p.inlineAwaitDepth < maxInlineAwaitDepth {
+		next := newTestFrame(t, fixture.g, unsafe.Pointer(new(byte)), active.handle)
+		frames = append(frames, next)
+		active.header.SuspendReason = uint16(SuspendCall)
+		active.header.Lifecycle = uint16(FrameSuspended)
+		if got := PrepareInlineAwaitCompiler(
+			fixture.g, active.handle, next.handle, nil, nil,
+		); got != InlineAwaitStarted {
+			t.Fatalf("fused inline depth %d = %d, want started", fixture.p.inlineAwaitDepth+1, got)
+		}
+		if outcome, caseID, task, source, generation, taken := TakeRunDecisionWordsCompiler(
+			fixture.g, 0, 0,
+		); !taken || outcome != 0 || caseID != 0 || task != 0 || source != 0 || generation != 0 {
+			t.Fatalf("take fused inline depth %d initial gate", fixture.p.inlineAwaitDepth)
+		}
+		next.header.SuspendReason = uint16(SuspendNone)
+		next.header.Lifecycle = uint16(FrameActive)
+		active = next
+	}
+
+	declined := newTestFrame(t, fixture.g, unsafe.Pointer(new(byte)), active.handle)
+	frames = append(frames, declined)
+	active.header.SuspendReason = uint16(SuspendCall)
+	active.header.Lifecycle = uint16(FrameSuspended)
+	if got := PrepareInlineAwaitCompiler(
+		fixture.g, active.handle, declined.handle, nil, nil,
+	); got != InlineAwaitDeclined {
+		t.Fatalf("fused depth-bound inline await = %d, want declined", got)
+	}
+	parent, child := FrameFromStorage(active.storage), FrameFromStorage(declined.storage)
+	if fixture.g.pending.kind != pendingAwait || fixture.g.pending.from != parent ||
+		fixture.g.pending.target != child || fixture.g.active != parent ||
+		parent.state != FrameActive || child.state != FrameInitialSuspended ||
+		child.parent != parent || parent.completion.child != child.handle ||
+		parent.completion.status != completionArmed ||
+		fixture.p.inlineAwaitDepth != maxInlineAwaitDepth {
+		t.Fatal("fused depth-bound refusal did not leave one canonical scheduler transaction")
 	}
 	for _, frame := range frames {
 		runtime.KeepAlive(frame.memory)

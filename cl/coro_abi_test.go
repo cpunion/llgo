@@ -248,11 +248,9 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	for _, hook := range []string{
 		coroFrameAllocHookV1,
 		coroFramePublishHookV3,
-		coroAwaitPrepareHookV1,
-		coroAwaitInlineBeginHookV2,
+		coroAwaitPrepareInlineHookV4,
 		coroAwaitInlineFinishHookV2,
-		coroFrameDestroyCommitHookV2,
-		coroAwaitInlineDestroyCommitHookV2,
+		coroAwaitInlineDestroyConsumeHookV4,
 		coroAwaitConsumeHookV1,
 		coroPreemptPollHookV1,
 		coroRunDecisionTakeZeroHookV1,
@@ -274,19 +272,14 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	if got := strings.Count(ir, "call void @"+coroFramePublishHookV3); got != 2 {
 		t.Fatalf("v1 frame publications = %d, want Parent + Child:\n%s", got, ir)
 	}
-	if got := strings.Count(ir, "call void @"+coroAwaitPrepareHookV1); got != 1 {
-		t.Fatalf("v1 await preparations = %d, want one Parent->Child handoff:\n%s", got, ir)
-	}
-	if got := strings.Count(ir, "call i1 @"+coroAwaitInlineBeginHookV2); got != 1 {
-		t.Fatalf("v1 inline await attempts = %d, want one Parent->Child fast path:\n%s", got, ir)
+	if got := strings.Count(ir, "call i1 @"+coroAwaitPrepareInlineHookV4); got != 1 {
+		t.Fatalf("v4 fused await prepare/inline attempts = %d, want one Parent->Child handoff:\n%s", got, ir)
 	}
 	if got := strings.Count(ir, "call i1 @"+coroAwaitInlineFinishHookV2); got != 1 {
 		t.Fatalf("v2 inline await finishes = %d, want one Parent->Child ownership settlement:\n%s", got, ir)
 	}
-	for _, hook := range []string{coroFrameDestroyCommitHookV2, coroAwaitInlineDestroyCommitHookV2} {
-		if got := strings.Count(ir, "call void @"+hook); got != 1 {
-			t.Fatalf("v2 inline await %s calls = %d, want one:\n%s", hook, got, ir)
-		}
+	if got := strings.Count(ir, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4); got != 1 {
+		t.Fatalf("v4 fused inline destroy/consume calls = %d, want one:\n%s", got, ir)
 	}
 	if got := strings.Count(ir, "call i32 @"+coroAwaitConsumeHookV1); got != 2 {
 		t.Fatalf("v1 await outcome consume sites = %d, want normal/cancellation reconciliation:\n%s", got, ir)
@@ -413,10 +406,14 @@ func TestCoroChildAwaitPhysicalABIV1CoroSplit(t *testing.T) {
 	if !regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\(`).MatchString(parentResume) {
 		t.Fatalf("Parent resume entry lost the static child ramp call:\n%s", parentResume)
 	}
-	for _, hook := range []string{coroAwaitPrepareHookV1, coroCompletePrepareHookV2} {
-		if !strings.Contains(parentResume, "call void @"+hook) {
-			t.Fatalf("Parent resume entry lost %s:\n%s", hook, parentResume)
-		}
+	if !strings.Contains(parentResume, "call i1 @"+coroAwaitPrepareInlineHookV4) {
+		t.Fatalf("Parent resume entry lost %s:\n%s", coroAwaitPrepareInlineHookV4, parentResume)
+	}
+	if !strings.Contains(parentResume, "call void @"+coroCompletePrepareHookV2) {
+		t.Fatalf("Parent resume entry lost %s:\n%s", coroCompletePrepareHookV2, parentResume)
+	}
+	if !strings.Contains(parentResume, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4) {
+		t.Fatalf("Parent resume entry lost %s:\n%s", coroAwaitInlineDestroyConsumeHookV4, parentResume)
 	}
 	if !strings.Contains(parentResume, "call i32 @"+coroAwaitConsumeHookV1) {
 		t.Fatalf("Parent resume entry lost %s:\n%s", coroAwaitConsumeHookV1, parentResume)
@@ -706,7 +703,7 @@ func init() {
 		t.Fatalf("declared init lost its exact direct plain call:\n%s", declaredInit)
 	}
 	if !regexp.MustCompile(`call ptr @"?foo\.Yield\$coro"?\(`).MatchString(declaredInit) ||
-		!strings.Contains(declaredInit, "call void @"+coroAwaitPrepareHookV1) {
+		!strings.Contains(declaredInit, "call i1 @"+coroAwaitPrepareInlineHookV4) {
 		t.Fatalf("declared init lost its static child await:\n%s", declaredInit)
 	}
 	runCoroABITestPipeline(t, prog, module)
@@ -2724,12 +2721,10 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 	childCall := regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\(`).FindStringIndex(parent)
 	publish := strings.Index(parent, "call void @"+coroFramePublishHookV3)
 	initialSuspend := strings.Index(parent, "call i8 @llvm.coro.suspend")
-	await := strings.Index(parent, "call void @"+coroAwaitPrepareHookV1)
-	inline := strings.Index(parent, "call i1 @"+coroAwaitInlineBeginHookV2)
+	await := strings.Index(parent, "call i1 @"+coroAwaitPrepareInlineHookV4)
 	if childCall == nil || publish < 0 || initialSuspend < 0 || await < 0 ||
-		inline < 0 ||
-		!(publish < initialSuspend && initialSuspend < childCall[0] && childCall[0] < await && await < inline) {
-		t.Fatalf("Parent hook order is not frame_publish -> initial suspend -> Child -> await_prepare -> await_inline:\n%s", parent)
+		!(publish < initialSuspend && initialSuspend < childCall[0] && childCall[0] < await) {
+		t.Fatalf("Parent hook order is not frame_publish -> initial suspend -> Child -> fused await_prepare_inline:\n%s", parent)
 	}
 	prefix := parent[childCall[0]:await]
 	promiseResult := regexp.MustCompile(`(%[-a-zA-Z$._0-9]+) = call ptr @llvm\.coro\.promise\(ptr [^,]+, i32 [0-9]+, i1 false\)`).FindStringSubmatch(prefix)
@@ -2748,32 +2743,31 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 	if !state.MatchString(prefix) {
 		t.Fatalf("Parent does not publish Call/Suspended/stateID=1 before await_prepare:\n%s", prefix)
 	}
-	awaitSuspend := strings.Index(parent[inline:], "call i8 @llvm.coro.suspend")
+	awaitSuspend := strings.Index(parent[await:], "call i8 @llvm.coro.suspend")
 	if awaitSuspend < 0 {
-		t.Fatalf("Parent does not retain a conditional slow suspend after await_inline:\n%s", parent)
+		t.Fatalf("Parent does not retain a conditional slow suspend after fused await_prepare_inline:\n%s", parent)
 	}
-	awaitSuspend += inline
+	awaitSuspend += await
 	decisionRelative := strings.Index(parent[awaitSuspend:], "call i32 @"+coroRunDecisionTakeZeroHookV1)
 	if decisionRelative < 0 {
 		t.Fatalf("Parent slow edge does not take its run decision after await resume:\n%s", parent)
 	}
-	if !regexp.MustCompile(`(?s)call i1 @` + regexp.QuoteMeta(coroAwaitInlineBeginHookV2) +
-		`.*xor i1 .*true.*br i1`).MatchString(parent[inline:]) {
+	if !regexp.MustCompile(`(?s)call i1 @` + regexp.QuoteMeta(coroAwaitPrepareInlineHookV4) +
+		`.*xor i1 .*true.*br i1`).MatchString(parent[await:]) {
 		t.Fatalf("Parent does not branch to the slow suspend on an incomplete inline await:\n%s", parent)
 	}
-	resume := strings.Index(parent[inline:], "call void @llvm.coro.resume")
-	done := strings.Index(parent[inline:], "call i1 @llvm.coro.done")
-	finish := strings.Index(parent[inline:], "call i1 @"+coroAwaitInlineFinishHookV2)
-	destroy := strings.Index(parent[inline:], "call void @llvm.coro.destroy")
-	frameCommit := strings.Index(parent[inline:], "call void @"+coroFrameDestroyCommitHookV2)
-	inlineCommit := strings.Index(parent[inline:], "call void @"+coroAwaitInlineDestroyCommitHookV2)
+	resume := strings.Index(parent[await:], "call void @llvm.coro.resume")
+	done := strings.Index(parent[await:], "call i1 @llvm.coro.done")
+	finish := strings.Index(parent[await:], "call i1 @"+coroAwaitInlineFinishHookV2)
+	destroy := strings.Index(parent[await:], "call void @llvm.coro.destroy")
+	inlineCommit := strings.Index(parent[await:], "call i32 @"+coroAwaitInlineDestroyConsumeHookV4)
 	if resume < 0 || done <= resume || finish <= done || destroy <= finish ||
-		frameCommit <= destroy || inlineCommit <= frameCommit {
-		t.Fatalf("Parent static-inline ownership order is not resume -> done -> finish -> destroy -> frame commit -> await commit:\n%s", parent)
+		inlineCommit <= destroy {
+		t.Fatalf("Parent static-inline ownership order is not resume -> done -> finish -> destroy -> fused destroy/consume:\n%s", parent)
 	}
-	if !regexp.MustCompile(`(?s)store i16 0,.*store i16 2,.*call i32 @` +
-		regexp.QuoteMeta(coroAwaitConsumeHookV1) + `.*switch i32`).MatchString(parent[inline:]) {
-		t.Fatalf("Parent shared fast/resumed continuation does not activate and consume the child outcome:\n%s", parent)
+	if !regexp.MustCompile(`(?s)call i32 @` + regexp.QuoteMeta(coroAwaitInlineDestroyConsumeHookV4) +
+		`.*store i32 .*load i32.*switch i32`).MatchString(parent[await:]) {
+		t.Fatalf("Parent shared fast/resumed continuation does not carry the fused or slow child outcome into its status switch:\n%s", parent)
 	}
 	completionState := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 2,`)
 	if !completionState.MatchString(parent[childCall[0]:]) {

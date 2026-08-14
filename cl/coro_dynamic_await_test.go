@@ -151,13 +151,12 @@ func Apply(callback func(int) int, value int) int {
 				t.Fatalf("Apply is missing plain/coroutine descriptor branches (plain=%v coro=%v):\n%s", plainCall, coroCall, applyIR)
 			}
 			if !strings.Contains(applyIR, "@llvm.coro.promise") ||
-				!strings.Contains(applyIR, "call void @"+coroAwaitPrepareHookV1) ||
-				!strings.Contains(applyIR, "call i1 @"+coroAwaitInlineBeginHookV2) {
+				!strings.Contains(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
+				!strings.Contains(applyIR, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4) {
 				t.Fatalf("Apply coroutine descriptor branch does not enter the shared child-await handoff:\n%s", applyIR)
 			}
-			await := strings.Index(applyIR, "call void @"+coroAwaitPrepareHookV1)
-			inline := strings.Index(applyIR, "call i1 @"+coroAwaitInlineBeginHookV2)
-			if await < coroCall[0] || inline < await || strings.Index(applyIR[inline:], "call i8 @llvm.coro.suspend") < 0 {
+			await := strings.Index(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4)
+			if await < coroCall[0] || strings.Index(applyIR[await:], "call i8 @llvm.coro.suspend") < 0 {
 				t.Fatalf("Apply does not publish, try inline completion, and retain its dynamic-child slow suspend:\n%s", applyIR)
 			}
 			if !regexp.MustCompile(`store i64 [^,]+, ptr `).MatchString(applyIR[plainCall[0]:]) {
@@ -286,8 +285,8 @@ func Apply(
 		t.Fatalf("verify aggregate managed descriptor await: %v\n%s", err, module.String())
 	}
 	applyIR := requireCoroPhysicalFunction(t, module, "foo.Apply").String()
-	if !strings.Contains(applyIR, "call void @"+coroAwaitPrepareHookV1) ||
-		!strings.Contains(applyIR, "call i1 @"+coroAwaitInlineBeginHookV2) ||
+	if !strings.Contains(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
+		!strings.Contains(applyIR, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4) ||
 		strings.Count(applyIR, "extractvalue") < 6 {
 		t.Fatalf("aggregate descriptor branches did not hand off child and merge six typed results:\n%s", applyIR)
 	}

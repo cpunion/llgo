@@ -125,7 +125,7 @@ func Root(p *Pointer[int]) *int { return p.Load() }
 				t.Fatalf("verify generic receiver instance before CoroSplit: %v\n%s", err, module.String())
 			}
 			rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-			if !strings.Contains(rootIR, "$coro") || !strings.Contains(rootIR, "call void @"+coroAwaitPrepareHookV1) {
+			if !strings.Contains(rootIR, "$coro") || !strings.Contains(rootIR, "call i1 @"+coroAwaitPrepareInlineHookV4) {
 				t.Fatalf("generic receiver call did not use child await:\n%s", rootIR)
 			}
 			runCoroABITestPipeline(t, prog, module)

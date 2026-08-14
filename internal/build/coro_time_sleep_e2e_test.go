@@ -45,7 +45,7 @@ const (
 	coroTimeSleepParkSymbolV2   = "__llgo_coro_timer_park_v2"
 	coroTimeSleepResumeSymbolV2 = "__llgo_coro_timer_resume_v2"
 	coroTimeSleepPreemptPollV1  = "__llgo_coro_preempt_poll_v1"
-	coroTimeSleepAwaitHookV1    = "__llgo_coro_await_prepare_v3"
+	coroTimeSleepAwaitHookV1    = "__llgo_coro_await_prepare_inline_v4"
 )
 
 // TestCoroNativeTimeSleepProductionPlanAndCodegen starts from an ordinary

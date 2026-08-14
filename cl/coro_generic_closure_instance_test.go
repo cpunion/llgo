@@ -169,7 +169,7 @@ func Root(b *Box[int]) { b.All()(Yield) }
 			}
 			ir := module.String()
 			if strings.Count(ir, coroPlainDispatchDescriptorPrefix) < 2 ||
-				!strings.Contains(ir, "{ ptr, ptr }") || !strings.Contains(ir, "call void @"+coroAwaitPrepareHookV1) {
+				!strings.Contains(ir, "{ ptr, ptr }") || !strings.Contains(ir, "call i1 @"+coroAwaitPrepareInlineHookV4) {
 				t.Fatalf("recursive descriptor transport is incomplete:\n%s", ir)
 			}
 			runCoroABITestPipeline(t, prog, module)

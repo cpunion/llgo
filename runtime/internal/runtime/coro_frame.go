@@ -63,13 +63,6 @@ func __llgo_coro_frame_publish_v3(
 	}
 }
 
-//export __llgo_coro_frame_destroy_commit_v2
-func __llgo_coro_frame_destroy_commit_v2(g, handle unsafe.Pointer) {
-	if !coro.CommitFrameDestroyCompiler((*coro.G)(g), handle) {
-		coroRuntimeAbort("invalid borrowable coroutine frame destruction")
-	}
-}
-
 //export __llgo_coro_await_prepare_v1
 func __llgo_coro_await_prepare_v1(g, parent, child unsafe.Pointer) {
 	if !coro.PrepareAwait((*coro.G)(g), parent, child) {

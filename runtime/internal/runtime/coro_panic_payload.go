@@ -83,29 +83,39 @@ func __llgo_coro_panic_trace_replace_v1(g, handle unsafe.Pointer) {
 	coroReleaseDiscardedPanicTraceV1(task)
 }
 
-// __llgo_coro_await_prepare_v3 is the unified managed-child handoff. Mode zero
-// is an ordinary call. Mode one marks an exact deferred child as eligible to
-// recover the supplied panic; normalization here ensures a successfully
-// recovered panic(nil) observes the Go 1.21+ *PanicNilError value. Both modes
-// use the same parent CompletionRecord and terminal consume operation.
+// __llgo_coro_await_prepare_inline_v4 fuses the compiler-private prepare and
+// eager-begin transaction. Mode zero arms an ordinary call. Mode one arms an
+// exact deferred child for recovery and normalizes panic(nil) to the Go 1.21+
+// *PanicNilError payload. False is the valid bounded-depth scheduler fallback;
+// every malformed state remains fail-stop.
 //
-//export __llgo_coro_await_prepare_v3
-func __llgo_coro_await_prepare_v3(g, parent, child unsafe.Pointer, mode uint32, typeWord, dataWord unsafe.Pointer) {
+//export __llgo_coro_await_prepare_inline_v4
+func __llgo_coro_await_prepare_inline_v4(g, parent, child unsafe.Pointer, mode uint32, typeWord, dataWord unsafe.Pointer) bool {
+	task := (*coro.G)(g)
+	var disposition coro.InlineAwaitDisposition
 	switch mode {
 	case 0:
-		if typeWord != nil || dataWord != nil ||
-			!coro.PrepareAwaitCompletionCompiler((*coro.G)(g), parent, child) {
+		if typeWord != nil || dataWord != nil {
 			coroRuntimeAbort("invalid ordinary coroutine child completion handoff")
 		}
+		disposition = coro.PrepareInlineAwaitCompiler(task, parent, child, nil, nil)
 	case 1:
 		typeWord, dataWord = coroNormalizePanicPayloadV1(typeWord, dataWord)
-		if typeWord == nil || !coro.PrepareAwaitCompletionRecover(
-			(*coro.G)(g), parent, child, typeWord, dataWord,
-		) {
+		if typeWord == nil {
 			coroRuntimeAbort("invalid recoverable coroutine child completion handoff")
 		}
+		disposition = coro.PrepareInlineAwaitCompiler(task, parent, child, typeWord, dataWord)
 	default:
 		coroRuntimeAbort("invalid coroutine child completion mode")
+	}
+	switch disposition {
+	case coro.InlineAwaitDeclined:
+		return false
+	case coro.InlineAwaitStarted:
+		return true
+	default:
+		coroRuntimeAbort("invalid coroutine child completion handoff")
+		return false
 	}
 }
 

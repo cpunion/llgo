@@ -433,7 +433,7 @@ func TestCoroDynamicCleanupLIFOIRNativeAndWasm32(t *testing.T) {
 			body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
 			for _, required := range []string{
 				"AllocU", "FreeDeferNode", "switch i32", "foo.Cleanup$coro",
-				"llvm.coro.promise", coroAwaitPrepareHookV1, coroFaultPayloadHookV1,
+				"llvm.coro.promise", coroAwaitPrepareInlineHookV4, coroFaultPayloadHookV1,
 			} {
 				if !strings.Contains(body, required) {
 					t.Fatalf("dynamic cleanup body lacks %q:\n%s", required, body)
@@ -494,7 +494,7 @@ func assertCoroCapturedCleanupCall(t *testing.T, function llvm.Value, target str
 	if requireContextLoad && context.InstructionOpcode() != llvm.Load {
 		t.Fatalf("captured cleanup context is not loaded from its registration slot:\n%s", call.String())
 	}
-	if got := countCoroIRDirectCalls(function, coroAwaitPrepareHookV1); got != 1 {
+	if got := countCoroIRDirectCalls(function, coroAwaitPrepareInlineHookV4); got != 1 {
 		t.Fatalf("%s captured cleanup await_prepare calls = %d, want 1:\n%s", function.Name(), got, function.String())
 	}
 }
@@ -566,7 +566,7 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 		t.Fatal("cannot inspect nil parent completion function")
 	}
 	body := function.String()
-	await := strings.Index(body, "call void @"+coroAwaitPrepareHookV1)
+	await := strings.Index(body, "call i1 @"+coroAwaitPrepareInlineHookV4)
 	if await < 0 {
 		t.Fatalf("%s has no parent-owned child await preparation:\n%s", function.Name(), body)
 	}
@@ -579,21 +579,23 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 		}
 	}
 
-	var normalConsume, canceledConsume, dispatch, canceledDispatch llvm.Value
+	var slowConsume, fusedConsume, canceledConsume, dispatch, canceledDispatch llvm.Value
 	for _, block := range function.BasicBlocks() {
 		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
-			if instruction.InstructionOpcode() != llvm.Call || instruction.CalledValue().Name() != coroAwaitConsumeHookV1 {
+			if instruction.InstructionOpcode() != llvm.Call {
+				continue
+			}
+			if instruction.CalledValue().Name() == coroAwaitInlineDestroyConsumeHookV4 {
+				if !fusedConsume.IsNil() {
+					t.Fatalf("%s has multiple fused child completion consumes:\n%s", function.Name(), body)
+				}
+				fusedConsume = instruction
+				continue
+			}
+			if instruction.CalledValue().Name() != coroAwaitConsumeHookV1 {
 				continue
 			}
 			terminator := block.LastInstruction()
-			if !terminator.IsNil() && terminator.InstructionOpcode() == llvm.Switch && terminator.Operand(0) == instruction &&
-				!coroTestBlockStoresI32(block, coroStaticCleanupContinueComplete) {
-				if !normalConsume.IsNil() {
-					t.Fatalf("%s has multiple normal child completion dispatches:\n%s", function.Name(), body)
-				}
-				normalConsume, dispatch = instruction, terminator
-				continue
-			}
 			if !terminator.IsNil() && terminator.InstructionOpcode() == llvm.Switch && terminator.Operand(0) == instruction &&
 				coroTestBlockStoresI32(block, coroStaticCleanupContinueComplete) {
 				if !canceledConsume.IsNil() {
@@ -602,15 +604,32 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 				canceledConsume, canceledDispatch = instruction, terminator
 				continue
 			}
-			t.Fatalf("%s child completion consume is not status-dispatched into cleanup:\n%s", function.Name(), body)
+			if !slowConsume.IsNil() {
+				t.Fatalf("%s has multiple normally-resumed child completion consumes:\n%s", function.Name(), body)
+			}
+			slowConsume = instruction
+		}
+		terminator := block.LastInstruction()
+		if !terminator.IsNil() && coroTestIsAwaitCompletionSwitch(terminator) &&
+			terminator.Operand(0).InstructionOpcode() == llvm.Load &&
+			!coroTestBlockStoresI32(block, coroStaticCleanupContinueComplete) {
+			if !dispatch.IsNil() {
+				t.Fatalf("%s has multiple shared child completion dispatches:\n%s", function.Name(), body)
+			}
+			dispatch = terminator
 		}
 	}
-	if normalConsume.IsNil() || canceledConsume.IsNil() || dispatch.IsNil() || canceledDispatch.IsNil() {
-		t.Fatalf("%s lacks distinct normal/canceled child completion reconciliation:\n%s", function.Name(), body)
+	if slowConsume.IsNil() || fusedConsume.IsNil() || canceledConsume.IsNil() || dispatch.IsNil() || canceledDispatch.IsNil() {
+		t.Fatalf("%s lacks fused/normal/canceled child completion reconciliation:\n%s", function.Name(), body)
+	}
+	statusSlot := dispatch.Operand(0).Operand(0)
+	if !coroTestBlockStoresValueTo(slowConsume.InstructionParent(), slowConsume, statusSlot) ||
+		!coroTestBlockStoresValueTo(fusedConsume.InstructionParent(), fusedConsume, statusSlot) {
+		t.Fatalf("%s fused and normally-resumed outcomes do not converge through one status slot:\n%s", function.Name(), body)
 	}
 	gateFound := false
 	inlineFound := false
-	normalBlock, canceledBlock := normalConsume.InstructionParent(), canceledConsume.InstructionParent()
+	normalBlock, canceledBlock := dispatch.InstructionParent(), canceledConsume.InstructionParent()
 	for _, block := range function.BasicBlocks() {
 		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
 			if instruction.InstructionOpcode() != llvm.Call {
@@ -853,6 +872,41 @@ func coroTestFirstReachableAwaitConsumes(
 		}
 	}
 	return result
+}
+
+func coroTestIsAwaitCompletionSwitch(terminator llvm.Value) bool {
+	if terminator.IsNil() || terminator.InstructionOpcode() != llvm.Switch {
+		return false
+	}
+	want := map[uint64]bool{
+		coroAwaitCompletionReturn:   false,
+		coroAwaitCompletionPanic:    false,
+		coroAwaitCompletionAbort:    false,
+		coroAwaitCompletionShutdown: false,
+		coroAwaitCompletionGoexit:   false,
+	}
+	for successor := 1; successor < terminator.SuccessorsCount(); successor++ {
+		value := terminator.GetSwitchCaseValue(successor).ZExtValue()
+		if _, ok := want[value]; ok {
+			want[value] = true
+		}
+	}
+	for _, present := range want {
+		if !present {
+			return false
+		}
+	}
+	return true
+}
+
+func coroTestBlockStoresValueTo(block llvm.BasicBlock, value, address llvm.Value) bool {
+	for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+		if instruction.InstructionOpcode() == llvm.Store &&
+			instruction.Operand(0) == value && instruction.Operand(1) == address {
+			return true
+		}
+	}
+	return false
 }
 
 func coroTestBlockCanReachDirectCall(entry llvm.BasicBlock, callee string) bool {

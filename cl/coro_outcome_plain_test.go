@@ -580,7 +580,7 @@ func TestCoroOutcomePlainDAGNativeAndWasm32(t *testing.T) {
 					t.Fatalf("Middle did not propagate child completion status %d into its parent record:\n%s", status, middleIR)
 				}
 			}
-			for _, forbidden := range []string{"llvm.coro.", "$coro", ".resume", ".destroy", coroAwaitPrepareHookV1, coroAwaitConsumeHookV1} {
+			for _, forbidden := range []string{"llvm.coro.", "$coro", ".resume", ".destroy", coroAwaitPrepareInlineHookV4, coroAwaitConsumeHookV1} {
 				if strings.Contains(middleIR, forbidden) {
 					t.Fatalf("outcome-plain DAG retained coroutine artifact %q:\n%s", forbidden, middleIR)
 				}
@@ -696,9 +696,9 @@ func TestCoroOutcomePlainPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 			}
 			baselineParent := baselineModule.NamedFunction("foo.Parent$coro.resume").String()
 			optimizedParent := optimizedModule.NamedFunction("foo.Parent$coro.resume").String()
-			baselineAwaitCalls := strings.Count(baselineParent, coroAwaitPrepareHookV1) +
+			baselineAwaitCalls := strings.Count(baselineParent, coroAwaitPrepareInlineHookV4) +
 				strings.Count(baselineParent, coroAwaitConsumeHookV1)
-			optimizedAwaitCalls := strings.Count(optimizedParent, coroAwaitPrepareHookV1) +
+			optimizedAwaitCalls := strings.Count(optimizedParent, coroAwaitPrepareInlineHookV4) +
 				strings.Count(optimizedParent, coroAwaitConsumeHookV1)
 			if baselineAwaitCalls != 0 || optimizedAwaitCalls != 0 ||
 				!strings.Contains(baselineParent, "foo.Leaf$outcome") ||
