@@ -1888,3 +1888,78 @@ file I/O, direct file syscalls, a sole-M blocking pipe whose writer first parks
 on a real timer, and loopback TCP. Runtime-core tests cover allocation-elided
 and dynamic destruction, panic/recover compatibility, slow yield, nesting, and
 the depth-bound scheduler fallback.
+
+### Escape-free scalar synchronous native-call checkpoint
+
+The 2026-08-15 follow-up starts at merge
+`b48265391044cf8e20f160e550f1abfcf4fa8b98`; the measured implementation is
+`9f0470cd1`. Profiling the standard-file fixture showed that every
+compiler-certified native syscall created two
+collector allocations before entering the kernel: one for the nine-word
+argument record and one for the six-word result record. Their addresses crossed
+the Go-to-C ABI in `coroworker.Call`, so LLGo's conservative escape decision was
+correct; wrapping the pointers in a runtime `noescape` helper did not change the
+SSA allocation class.
+
+The retained implementation replaces that Go-visible pointer ABI with a local
+runtime declaration of `__llgo_coro_worker_call_words_v2`. Its nine arguments
+and the address of one caller-owned result record cross as scalar words. The C
+wrapper owns the argument array and calls the old pointer-taking leaf entirely
+inside the native worker island; no Go declaration can select that leaf.
+
+Scalar encoding alone is not an escape proof: x/tools SSA still conservatively
+marks the result record as heap storage because its address reaches a bodyless
+C declaration. The compiler now freezes an occurrence-level argument-lifetime
+fact and feeds it into the generic interprocedural borrowed-allocation proof.
+Only an ordinary static call to a same-package, owner-backed C declaration can
+qualify, and its callable contract must end the borrow by return or synchronous
+completion. Retained-memory, asynchronous-completion, cross-package, dynamic,
+deferred, spawned, ownerless, and unresolved calls fail closed. Unit tests cover
+the positive call and an explicit `memory=retained` rejection; no new source
+annotation is needed for this runtime leaf.
+
+A seven-word C struct return was also tested and rejected before retention:
+separately compiled Mach-O objects disagreed about the hidden `sret` ABI and
+faulted despite a full-LTO fixture appearing to work. Keeping the result address
+as an explicit `uintptr` gives the cross-object boundary an all-scalar ABI and
+the independent-link E2Es guard it. Fault attribution, native handoff, lazy
+compensation, and result/fault interpretation are otherwise unchanged.
+
+The parent and candidate were built from the same `io_workload` source with
+independent caches, full LTO, stripped output, Go 1.26.5, and LLVM 22.1.8 on
+Darwin arm64. Nine AB/BA-interleaved 5,000-operation standard-file runs produced
+these hardware-counter medians:
+
+| Metric | fused parent | scalar-ABI candidate | delta |
+| --- | ---: | ---: | ---: |
+| retired instructions | 1,409,175,860 | 1,256,015,357 | -10.87% |
+| cycles | 471,775,229 | 226,316,522 | -52.03% |
+| stripped file bytes | 7,014,704 | 7,014,768 | +64 (+0.001%) |
+| Mach-O `__text` bytes | 3,137,408 | 3,137,244 | -164 (-0.005%) |
+
+These are fresh-cache rebuilds of the exact parent and candidate; earlier
+temporary binaries were discarded after their runtime archives were found not
+to be comparable. Retired-instruction ranges were
+1,276,319,938--1,417,813,058 for the parent and
+1,252,119,179--1,257,990,658 for the candidate. Candidate cycles were tightly
+grouped at 221,952,862--229,185,984, while parent cycles ranged from
+257,958,534 to 515,229,856 as its allocation and collection work varied. The
+cycle reduction is therefore a strong same-host observation, not a portable
+latency claim.
+
+An independent 15-process AB/BA wall-time gate measured the standard-file
+fixture at 42.658 ms [41.355, 44.624] versus 53.021 ms [44.064, 53.907] for
+the parent (-19.54%) and 7.740 ms [7.644, 8.172] for Go (5.51x Go). Direct
+`syscall` file I/O improved from 21.684 ms [21.102, 22.030] to 18.890 ms
+[18.223, 19.222] (-12.88%, 2.44x Go). Loopback TCP remained within noise at
+19.741 ms versus 19.729 ms for the parent because it already uses the
+nonblocking poll/event path; Go measured 9.561 ms in the same run.
+
+Disassembly of `coroNativeForeignWordCallV1` changes two runtime GC allocation
+calls into one stack result area plus `__llgo_coro_worker_call_words_v2`. The
+reentry-capable same-M path changes three allocations to one; its remaining
+104-byte boundary is temporarily published in TLS for C-to-Go callbacks and is
+not on the file/syscall path. Small standard-file, direct-syscall, sole-M
+blocking-pipe/timer, and loopback-TCP execution gates pass with
+`GOMAXPROCS=1`, as do separately linked same-M callback, locked-thread
+compensation, deferred replacement, and worker-capability E2Es.
