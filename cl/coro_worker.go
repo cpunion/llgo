@@ -34,6 +34,7 @@ const (
 	coroHostOperationDeadlineResumeHookV1 = "__llgo_coro_host_operation_deadline_resume_v1"
 	coroOSThreadLockedHookV1              = "__llgo_coro_os_thread_locked_v1"
 	coroOSThreadForeignCallHookV1         = "__llgo_coro_os_thread_foreign_call_v1"
+	coroNativeSyscallCallHookV1           = "__llgo_coro_native_syscall_call_v1"
 )
 
 const (
@@ -225,6 +226,7 @@ func (p *context) compileCoroHostOperation(
 		physicalWords,
 		keepaliveSlots,
 		&coroHostWordOperationV1{metadata: metadata},
+		false,
 	)
 	return b.Aggregate(
 		p.type_(results, llssa.InGo),
@@ -245,9 +247,11 @@ func (p *context) compileCoroWorkerWordCall(
 	args []llssa.Expr,
 	keepaliveSlots []llssa.Expr,
 	host *coroHostWordOperationV1,
+	nativeSyscall bool,
 ) coroWorkerWordResultV1 {
 	body := p.requireCoroWorkerBody(b)
 	if function.IsNil() || host == nil && traceTarget.IsNil() || host != nil && !traceTarget.IsNil() ||
+		host != nil && nativeSyscall ||
 		len(args) > coroWorkerMaxArgsV1 ||
 		host != nil && len(host.metadata) != 0 &&
 			len(host.metadata) != coroHostOperationDeadlineMetadataWordsV1 {
@@ -301,34 +305,34 @@ func (p *context) compileCoroWorkerWordCall(
 			resumeHook = coroHostOperationDeadlineResumeHookV1
 		}
 	}
-	state := b.Alloc(p.prog.RuntimeType(stateType), false)
 	r1 := b.Alloc(p.prog.Uintptr(), false)
 	r2 := b.Alloc(p.prog.Uintptr(), false)
 	errno := b.Alloc(p.prog.Uintptr(), false)
 	zero := p.prog.Zero(p.prog.Uintptr())
-	physicalArgs := make([]llssa.Expr, 0, 7+len(metadata)+coroWorkerMaxArgsV1)
-	physicalArgs = append(physicalArgs,
-		body.task,
-		body.coro.Handle(),
-		b.Convert(b.Prog.VoidPtr(), body.header),
-		b.Convert(b.Prog.VoidPtr(), state),
-		function,
-	)
-	if host == nil {
-		physicalArgs = append(physicalArgs, traceTarget)
-	}
 	argcValue := p.prog.IntVal(uint64(len(args)), p.prog.Uint32())
-	physicalArgs = append(physicalArgs, argcValue)
-	physicalArgs = append(physicalArgs, metadata...)
-	for index := 0; index < coroWorkerMaxArgsV1; index++ {
-		if index < len(args) {
-			physicalArgs = append(physicalArgs, args[index])
-		} else {
-			physicalArgs = append(physicalArgs, zero)
-		}
-	}
 
 	emitPark := func(worker llssa.Builder) {
+		state := worker.Alloc(p.prog.RuntimeType(stateType), false)
+		physicalArgs := make([]llssa.Expr, 0, 7+len(metadata)+coroWorkerMaxArgsV1)
+		physicalArgs = append(physicalArgs,
+			body.task,
+			body.coro.Handle(),
+			worker.Convert(worker.Prog.VoidPtr(), body.header),
+			worker.Convert(worker.Prog.VoidPtr(), state),
+			function,
+		)
+		if host == nil {
+			physicalArgs = append(physicalArgs, traceTarget)
+		}
+		physicalArgs = append(physicalArgs, argcValue)
+		physicalArgs = append(physicalArgs, metadata...)
+		for index := 0; index < coroWorkerMaxArgsV1; index++ {
+			if index < len(args) {
+				physicalArgs = append(physicalArgs, args[index])
+			} else {
+				physicalArgs = append(physicalArgs, zero)
+			}
+		}
 		body.emitCoroParkOperation(p, worker, coroParkOperation{
 			prepare: func(active llssa.Builder, _, _ uint32) llssa.Expr {
 				return active.Prog.BoolVal(true)
@@ -360,17 +364,7 @@ func (p *context) compileCoroWorkerWordCall(
 		return coroWorkerWordResultV1{r1: b.Load(r1), r2: b.Load(r2), errno: b.Load(errno)}
 	}
 
-	lockedHook := p.pkg.NewFunc(coroOSThreadLockedHookV1, coroOSThreadLockedSignature(), llssa.InC)
-	locked := b.Call(lockedHook.Expr, body.task)
-	directBlock := b.Func.MakeBlock()
-	workerBlock := b.Func.MakeBlock()
 	join := b.Func.MakeBlock()
-	b.If(locked, directBlock, workerBlock)
-
-	b.SetBlockEx(directBlock, llssa.AtEnd, false)
-	direct := p.pkg.NewFunc(
-		coroOSThreadForeignCallHookV1, coroOSThreadForeignCallSignature(), llssa.InC,
-	)
 	directArgs := make([]llssa.Expr, 0, 4+coroWorkerMaxArgsV1+3)
 	directArgs = append(directArgs, body.task, function, traceTarget, argcValue)
 	for index := 0; index < coroWorkerMaxArgsV1; index++ {
@@ -381,33 +375,47 @@ func (p *context) compileCoroWorkerWordCall(
 		}
 	}
 	directArgs = append(directArgs, r1, r2, errno)
-	directStatus := b.Call(direct.Expr, directArgs...)
-	directNormal := b.Func.MakeBlock()
-	directMemoryFault := b.Func.MakeBlock()
-	directDivideFault := b.Func.MakeBlock()
-	directInvalid := b.Func.MakeBlock()
-	directDispatch := b.Switch(directStatus, directInvalid)
-	directDispatch.Case(p.prog.IntVal(coroWorkerResumeSuccessV1, p.prog.Uint32()), directNormal)
-	directDispatch.Case(p.prog.IntVal(coroWorkerResumeFaultMemoryV1, p.prog.Uint32()), directMemoryFault)
-	directDispatch.Case(p.prog.IntVal(coroWorkerResumeFaultDivideV1, p.prog.Uint32()), directDivideFault)
-	directDispatch.End(b)
-	b.SetBlockEx(directMemoryFault, llssa.AtEnd, false)
-	p.compileCoroTerminalFault(b, coroFaultNilV1)
-	b.SetBlockEx(directDivideFault, llssa.AtEnd, false)
-	p.compileCoroTerminalFault(b, coroFaultIntegerDivideByZeroV1)
-	b.SetBlockEx(directInvalid, llssa.AtEnd, false)
-	b.Unreachable()
-	b.SetBlockEx(directNormal, llssa.AtEnd, false)
-	b.Jump(join)
-
-	b.SetBlockEx(workerBlock, llssa.AtEnd, false)
-	emitPark(b)
-	b.Jump(join)
+	emitDirect := func(hookName string) {
+		direct := p.pkg.NewFunc(
+			hookName, coroOSThreadForeignCallSignature(), llssa.InC,
+		)
+		directStatus := b.Call(direct.Expr, directArgs...)
+		directNormal := b.Func.MakeBlock()
+		directMemoryFault := b.Func.MakeBlock()
+		directDivideFault := b.Func.MakeBlock()
+		directInvalid := b.Func.MakeBlock()
+		directDispatch := b.Switch(directStatus, directInvalid)
+		directDispatch.Case(p.prog.IntVal(coroWorkerResumeSuccessV1, p.prog.Uint32()), directNormal)
+		directDispatch.Case(p.prog.IntVal(coroWorkerResumeFaultMemoryV1, p.prog.Uint32()), directMemoryFault)
+		directDispatch.Case(p.prog.IntVal(coroWorkerResumeFaultDivideV1, p.prog.Uint32()), directDivideFault)
+		directDispatch.End(b)
+		b.SetBlockEx(directMemoryFault, llssa.AtEnd, false)
+		p.compileCoroTerminalFault(b, coroFaultNilV1)
+		b.SetBlockEx(directDivideFault, llssa.AtEnd, false)
+		p.compileCoroTerminalFault(b, coroFaultIntegerDivideByZeroV1)
+		b.SetBlockEx(directInvalid, llssa.AtEnd, false)
+		b.Unreachable()
+		b.SetBlockEx(directNormal, llssa.AtEnd, false)
+		b.Jump(join)
+	}
+	if nativeSyscall {
+		emitDirect(coroNativeSyscallCallHookV1)
+	} else {
+		lockedHook := p.pkg.NewFunc(coroOSThreadLockedHookV1, coroOSThreadLockedSignature(), llssa.InC)
+		locked := b.Call(lockedHook.Expr, body.task)
+		directBlock := b.Func.MakeBlock()
+		workerBlock := b.Func.MakeBlock()
+		b.If(locked, directBlock, workerBlock)
+		b.SetBlockEx(directBlock, llssa.AtEnd, false)
+		emitDirect(coroOSThreadForeignCallHookV1)
+		b.SetBlockEx(workerBlock, llssa.AtEnd, false)
+		emitPark(b)
+		b.Jump(join)
+	}
 	b.SetBlockContinuation(join)
-	// The worker queue deliberately contains only copied uintptr words. Keep
-	// every independently proved typed owner live until the physical completion
-	// acknowledgement has selected this normal resume path; llvm.fake.use emits
-	// no machine code but forces CoroSplit to retain the values in the frame.
+	// Keep every independently proved typed owner live until direct return or
+	// worker completion has selected this normal path; llvm.fake.use emits no
+	// machine code but forces CoroSplit to retain the values in the frame.
 	p.emitCoroKeepaliveSlots(b, keepaliveSlots)
 	return coroWorkerWordResultV1{r1: b.Load(r1), r2: b.Load(r2), errno: b.Load(errno)}
 }
@@ -520,7 +528,7 @@ func (p *context) compileCoroWorkerSyscall(
 		compiled[index] = p.compileValue(b, argument)
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, direct)
-	result := p.compileCoroWorkerWordCall(b, compiled[0], compiled[0], compiled[1:], keepaliveSlots, nil)
+	result := p.compileCoroWorkerWordCall(b, compiled[0], compiled[0], compiled[1:], keepaliveSlots, nil, true)
 	errnoValue := p.filterSyscallErrno(b, result.r1, result.errno, convention)
 	return b.Aggregate(p.type_(results, llssa.InGo), result.r1, result.r2, errnoValue)
 }

@@ -43,12 +43,14 @@ func attachWaitingTaskCancelFixture(p *P, g *G) {
 	g.active = frame
 	p.parkWaitHead = record
 	p.parkWaitTail = record
+	p.externalWaitCount = g.park.attached
 }
 
 func detachWaitingTaskCancelFixture(p *P, g *G) {
 	record := g.active.parkWait
 	p.parkWaitHead = nil
 	p.parkWaitTail = nil
+	p.externalWaitCount = 0
 	if p.affectedWaitHead == record {
 		p.affectedWaitHead = nil
 		p.affectedWaitTail = nil

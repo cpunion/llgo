@@ -90,7 +90,7 @@ func TestTakeRunDecisionWordsPreservesExactTicketAndScalarizesLease(t *testing.T
 	if count, ok := PollReady(p); !ok || count != 0 {
 		t.Fatalf("resolve scalar decision park = (%d, %t)", count, ok)
 	}
-	detachSchedulerParkV2(t, task.g, operations, 0)
+	detachSchedulerParkV2(t, p, task.g, operations, 0)
 	if count, ok := PollReady(p); !ok || count != 1 {
 		t.Fatalf("promote scalar decision park = (%d, %t)", count, ok)
 	}

@@ -45,7 +45,7 @@ enum {
     requester_count = 16,
 };
 
-static _Atomic uint32_t seen[requester_count + 13];
+static _Atomic uint32_t seen[requester_count + 15];
 static _Atomic uint32_t inherited_taint;
 static _Atomic uint32_t standby_mode;
 static _Atomic uint32_t terminal_mode;
@@ -54,7 +54,7 @@ static uint32_t terminal_token;
 
 uint32_t __llgo_coro_native_fleet_owner_v2(uint32_t slot) {
     sigset_t current;
-    if (slot == 0 || slot > requester_count + 12 ||
+    if (slot == 0 || slot > requester_count + 14 ||
         pthread_sigmask(SIG_SETMASK, NULL, &current) != 0 ||
         __llgo_coro_fleet_owner_ready_v1(slot) != 0) {
         return 0;
@@ -163,6 +163,61 @@ int main(void) {
     if (__llgo_coro_fleet_owner_release_v1(
             reused, reused_token, requester_count + 2) != 0) {
         return 24;
+    }
+
+    const uint32_t cancel_slot = requester_count + 13;
+    int canceled = 0;
+    for (uint32_t attempt = 0; attempt < 1024 && !canceled; attempt++) {
+        pthread_t requested = (pthread_t)0;
+        uint32_t requested_token = 0;
+        uint32_t before = atomic_load_explicit(
+            &seen[cancel_slot], memory_order_relaxed);
+        if (__llgo_coro_fleet_owner_request_reuse_v1(
+                &requested, &requested_token, cancel_slot) != 0 ||
+            requested == (pthread_t)0 || requested_token == 0) {
+            return 37;
+        }
+        int cancel_result = __llgo_coro_fleet_owner_cancel_reuse_v1(
+            requested, requested_token, cancel_slot);
+        if (cancel_result == 0) {
+            if (atomic_load_explicit(
+                    &seen[cancel_slot], memory_order_relaxed) != before) {
+                return 38;
+            }
+            canceled = 1;
+        } else if (cancel_result == 1) {
+            while (atomic_load_explicit(
+                       &seen[cancel_slot], memory_order_relaxed) == before) {
+                (void)sched_yield();
+            }
+            if (__llgo_coro_fleet_owner_release_v1(
+                    requested, requested_token, cancel_slot) != 0) {
+                return 39;
+            }
+        } else {
+            return 40;
+        }
+    }
+    if (!canceled) {
+        return 41;
+    }
+
+    const uint32_t dispatch_slot = requester_count + 14;
+    pthread_t requested = (pthread_t)0;
+    uint32_t requested_token = 0;
+    if (__llgo_coro_fleet_owner_request_reuse_v1(
+            &requested, &requested_token, dispatch_slot) != 0) {
+        return 42;
+    }
+    while (atomic_load_explicit(
+               &seen[dispatch_slot], memory_order_relaxed) == 0) {
+        (void)sched_yield();
+    }
+    if (__llgo_coro_fleet_owner_cancel_reuse_v1(
+            requested, requested_token, dispatch_slot) != 1 ||
+        __llgo_coro_fleet_owner_release_v1(
+            requested, requested_token, dispatch_slot) != 0) {
+        return 43;
     }
 
     pthread_t overflow_owners[8];

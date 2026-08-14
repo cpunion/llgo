@@ -102,7 +102,8 @@ func validCommittedWaitSetRecord(record *WaitSetRecord, g *G, frame *Frame) bool
 
 func validParkWaitQueueHeader(p *P) bool {
 	return p != nil && (p.parkWaitHead == nil) == (p.parkWaitTail == nil) &&
-		(p.parkWaitHead == nil || p.parkWaitHead.activePrev == nil && p.parkWaitTail.activeNext == nil)
+		(p.parkWaitHead == nil || p.parkWaitHead.activePrev == nil && p.parkWaitTail.activeNext == nil) &&
+		(p.parkWaitHead != nil || p.externalWaitCount == 0)
 }
 
 func validAffectedWaitQueueHeader(p *P) bool {
@@ -155,11 +156,16 @@ func validActiveParkStateHeader(state *ParkState, ticket ParkTicket) bool {
 // ParkState headers. It never walks candidate ParkLinks and is the predicate
 // used by fact publication, cancellation, affected pop, and promotion.
 func validActiveWaitSetRecordFast(p *P, record *WaitSetRecord) bool {
-	if p == nil || record == nil || record.state != waitSetRecordActive || !validParkTicket(record.ticket) ||
+	if record == nil {
+		return false
+	}
+	external, externalOK := waitSetExternalCount(record.g, record)
+	if p == nil || record.state != waitSetRecordActive || !validParkTicket(record.ticket) ||
 		record.g == nil || !ValidG(record.g) || record.g.state != GWaiting || !record.g.waiting ||
 		record.g.queued || record.g.nextReady != nil || record.g.runP != nil ||
 		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
-		record.g.active.parkWait != record || !validActiveParkStateHeader(&record.g.park, record.ticket) ||
+		record.g.active.parkWait != record || !externalOK || external > p.externalWaitCount ||
+		!validActiveParkStateHeader(&record.g.park, record.ticket) ||
 		!validTrustedWaitSetResumeBinding(record) {
 		return false
 	}
@@ -196,13 +202,19 @@ func validParkWaitQueue(p *P) bool {
 		}
 	}
 	var tail *WaitSetRecord
+	var externalWaitCount uint32
 	for record := p.parkWaitHead; record != nil; record = record.activeNext {
 		if !validActiveWaitSetRecord(p, record) {
 			return false
 		}
+		count, countOK := waitSetExternalCount(record.g, record)
+		if !countOK || count > ^uint32(0)-externalWaitCount {
+			return false
+		}
+		externalWaitCount += count
 		tail = record
 	}
-	if tail != p.parkWaitTail {
+	if tail != p.parkWaitTail || externalWaitCount != p.externalWaitCount {
 		return false
 	}
 	for slow, fast := p.affectedWaitHead, p.affectedWaitHead; fast != nil && fast.workNext != nil; {
@@ -300,11 +312,24 @@ func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 	if !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) ||
 		!validCommittedWaitSetRecord(record, g, g.active) || g.state != GWaiting || g.waiting ||
 		g.queued || g.nextReady != nil || g.runP != nil ||
-		!validParkState(&g.park) || g.park.phase != parkParked {
+		!validParkState(&g.park) || g.park.phase != parkParked ||
+		!canAccountWaitSetExternal(p, g, record) {
 		return false
 	}
 	activateWaitSetRecordUnchecked(p, g, record)
 	return true
+}
+
+func waitSetExternalCount(g *G, record *WaitSetRecord) (uint32, bool) {
+	if g == nil || record == nil {
+		return 0, false
+	}
+	return g.park.attached, true
+}
+
+func canAccountWaitSetExternal(p *P, g *G, record *WaitSetRecord) bool {
+	count, ok := waitSetExternalCount(g, record)
+	return ok && p != nil && count <= ^uint32(0)-p.externalWaitCount
 }
 
 // activateWaitSetRecordUnchecked is the no-fail queue write half. Resumed may
@@ -313,6 +338,8 @@ func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 // activation; no callback or producer can mutate these owner-only queues in
 // between. Other entry points retain activateWaitSetRecord's full validation.
 func activateWaitSetRecordUnchecked(p *P, g *G, record *WaitSetRecord) {
+	count, _ := waitSetExternalCount(g, record)
+	p.externalWaitCount += count
 	record.activePrev = p.parkWaitTail
 	record.state = waitSetRecordActive
 	g.waiting = true

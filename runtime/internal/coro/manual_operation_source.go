@@ -660,7 +660,7 @@ func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *Oper
 		return OperationApplyInvalid
 	}
 	park, ticket, wait := slot.record.link.park, slot.record.link.ticket, slot.record.link.wait
-	detached := wait != nil && DetachParkWaitOperation(park, ticket, &slot.record, id) ||
+	detached := wait != nil && DetachParkWaitOperation(p, park, ticket, &slot.record, id) ||
 		wait == nil && DetachParkOperation(park, ticket, &slot.record, id)
 	if !detached {
 		return OperationApplyInvalid

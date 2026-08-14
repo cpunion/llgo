@@ -774,7 +774,7 @@ func ParkOperationClaim(record *OperationRecord, id OperationID) ParkClaimResult
 // DetachParkOperation clears the only physical-source pointer path to the
 // logical wait before publishing the ready transition. Physical quiescence is
 // intentionally not required here.
-func detachParkOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID, fast bool) bool {
+func detachParkOperation(p *P, state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID, fast bool) bool {
 	validState := fast && validActiveParkStateHeader(state, ticket) || !fast && validParkState(state)
 	if !validState || state.phase != parkDetaching || ticket != state.ticket ||
 		record == nil || !record.Matches(id) || record.phase != operationActive || record.disposition == OperationDispositionPending ||
@@ -783,6 +783,11 @@ func detachParkOperation(state *ParkState, ticket ParkTicket, record *OperationR
 	}
 	link := &record.link
 	if fast && link.wait == nil {
+		return false
+	}
+	accounted := fast && link.wait.state == waitSetRecordActive
+	if accounted && (p == nil || p.externalWaitCount == 0 ||
+		link.wait.g == nil || &link.wait.g.park != state) {
 		return false
 	}
 	previous, next := link.previous, link.next
@@ -807,6 +812,9 @@ func detachParkOperation(state *ParkState, ticket ParkTicket, record *OperationR
 	record.phase = operationDetached
 	record.link = ParkLink{}
 	state.attached--
+	if accounted {
+		p.externalWaitCount--
+	}
 	if state.attached == 0 {
 		if state.head != nil {
 			return false
@@ -820,14 +828,14 @@ func detachParkOperation(state *ParkState, ticket ParkTicket, record *OperationR
 }
 
 func DetachParkOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID) bool {
-	return detachParkOperation(state, ticket, record, id, false)
+	return detachParkOperation(nil, state, ticket, record, id, false)
 }
 
 // DetachParkWaitOperation is the O(1) scheduler-integrated detach path. Its
 // transient ParkLink carries the predecessor, and the complete wait-set was
 // already audited once by published-epoch resolution.
-func DetachParkWaitOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID) bool {
-	return detachParkOperation(state, ticket, record, id, true)
+func DetachParkWaitOperation(p *P, state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID) bool {
+	return detachParkOperation(p, state, ticket, record, id, true)
 }
 
 func ConsumeParkSet(state *ParkState, ticket ParkTicket) (outcome ParkOutcome, caseID uint32, lease OperationResultLease, ok bool) {

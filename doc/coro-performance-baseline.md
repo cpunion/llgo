@@ -1735,3 +1735,73 @@ architecture-debt, native target-plan, representative native E2E, and actual
 file/TCP execution gates pass. The full `internal/cabi` suite was deliberately
 stopped after an unrelated fixture reached about 5 GiB RSS; the exact changed
 CABI tests pass, so no full-suite result is claimed here.
+
+### Demand-gated native syscall compensation checkpoint
+
+The next 2026-08-14 LLVM 22-only checkpoint separates a compiler-certified
+`llgo.syscall` boundary from the general C/worker path. The generated native
+syscall call executes on the current M, but first detaches the active resume and
+releases its managed-execution lease. A replacement M is requested only when
+the stable detached boundary contains work which can progress independently of
+the syscall: runnable work, an attached timer/poll/manual/worker/channel source,
+an active TaskControl endpoint, an owner-local completion, or an already
+published executor/source request. Ordinary C and cgo calls retain their worker
+or locked-thread paths.
+
+The scheduler maintains one owner-only aggregate count for attached external
+source operations. Activation adds `ParkState.attached`, and the common detach
+path removes one unit for each operation, so adding a future source through the
+common park protocol needs no compensation-specific bit or scan. TaskControl is
+the one orthogonal source which can receive a foreign post without parking a G;
+its exact active-endpoint count is checked separately. An unmatched direct
+channel waiter is deliberately not counted: it cannot complete without an
+executing producer, and its completed form already publishes a durable executor
+request. Request-driven activation of a deferred replacement remains a separate
+liveness follow-up for the cross-route dependency in which that producer needs
+another G on the syscall owner's route to release the syscall itself.
+
+The native standby factory also gained an asynchronous request/cancel protocol.
+The syscall owner may publish one clean cached M without waiting for its Go
+dispatch; a quick return cancels a still-queued request, while a dispatch winner
+is joined through the existing generation/owner-epoch handoff. The C owner
+state machine linearizes `STARTING -> DISPATCHING -> RUNNING`, and cancellation
+may win only before dispatch. Repeated native harness tests cover both sides of
+that race. A failed managed-quota release is fail-stop because its boolean result
+cannot distinguish a pre-release failure from a post-release doorbell failure;
+restoring the old resume in that ambiguous state could create two owners for one
+P.
+
+Two broader gates were measured and rejected. Scanning every source catalog at
+each syscall made the common path proportional to configured capacity. Treating
+every parked G, or every direct-channel waiter, as compensation demand made a
+long-lived internal waiter start a replacement for every regular-file syscall;
+the 500-operation direct fixture regressed from about 2.3 ms to 12.1 ms. The
+retained aggregate counts only independently progressing external obligations.
+
+The exact parent is `07c6ddf1fc61646cbfdf488a9e10209476d04741`. Go 1.26.5,
+the parent LLGo binary and the candidate compile the same `io_workload` source
+with independent caches, `-trimpath -ldflags='-s -w'`, LLVM 22.1.8 and
+process-start `GOMAXPROCS=1`. Each row is an AB/BA-interleaved 31-process median
+with the complete range:
+
+| 500-operation workload | Go 1.26.5 median [range] | parent median [range] | candidate median [range] | candidate / Go |
+| --- | ---: | ---: | ---: | ---: |
+| direct `syscall.Seek/Write/Seek/Read` | 1.022 ms [0.941, 1.282] | 5.379 ms [5.004, 7.441] | 2.240 ms [2.044, 2.421] | 2.19x |
+| standard `os.File`/`io.ReadFull` chain | 1.021 ms [0.960, 1.803] | 8.772 ms [8.292, 10.518] | 5.556 ms [5.210, 5.888] | 5.44x |
+| loopback TCP echo | 9.453 ms [6.704, 19.594] | 20.454 ms [18.939, 24.538] | 20.372 ms [19.224, 23.462] | 2.16x |
+
+The candidate is 58.4% faster than its parent in the direct syscall fixture and
+36.7% faster through the standard file wrappers. TCP changes by less than one
+percent and no network gain is claimed; its nonblocking poll/event path does not
+use the new direct boundary. The stripped candidate is 7,050,672 bytes versus
+1,797,874 bytes for Go (3.92x).
+
+A strengthened `pipe-block` gate first parks a writer on a real 1 ms timer, then
+blocks the sole current M in `syscall.Read`; only a replacement M can service the
+timer and write the byte. It passes in about 12 ms for ten iterations. A final
+stress run launched 500 direct-file, 200 standard-file, 200 TCP and 100 blocking-
+pipe processes without failure or a surviving LLGo process. Runtime core, full
+runtime package, 20-repeat native standby, and focused compiler syscall/worker
+tests also pass. The next file-performance target is the remaining coroutine
+frame chain through `io.ReadFull`, `os.File` and `internal/poll`, not another
+file-specific runtime path.

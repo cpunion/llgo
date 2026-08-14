@@ -369,7 +369,8 @@ func completeOwnerLocalDirectChannelInline(
 		!operationCandidateExternallyCommitted(record) ||
 		link.park != state || link.wait != wait || link.operation != record ||
 		link.ticket != wait.ticket || link.caseID != 1 || link.previous != nil || link.next != nil ||
-		state.head != link || !validReadyQueueHeader(p) || p.readyCount == ^uint32(0) ||
+		state.head != link || p.externalWaitCount == 0 ||
+		!validReadyQueueHeader(p) || p.readyCount == ^uint32(0) ||
 		(schedule != scheduleIdle && schedule != scheduleRequested) {
 		return true, false
 	}
@@ -441,6 +442,7 @@ func completeOwnerLocalDirectChannelInline(
 		result: ResumeResultChannel, small: small, state: resumePacketMaterialized,
 	}
 	*plan = ResumeCleanupPlan{}
+	p.externalWaitCount--
 	*state = ParkState{
 		ticket: ticket, phase: parkMaterialized, seed: uint32(preferred),
 		outcome: ParkOutcomeCompleted, winnerCase: 1,

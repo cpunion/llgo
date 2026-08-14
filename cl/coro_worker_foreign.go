@@ -1270,6 +1270,7 @@ func (p *context) compileCoroWorkerForeignTransaction(
 		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
 		keepaliveSlots,
 		nil,
+		false,
 	)
 	// The native queue carries the record address as an opaque uintptr. This
 	// post-acknowledgement use forces CoroSplit to retain the complete typed

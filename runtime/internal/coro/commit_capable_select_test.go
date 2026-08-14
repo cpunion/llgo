@@ -200,7 +200,7 @@ func (source *commitSelectFakeSource) finish(
 			!AcknowledgeOperationResolution(&source.records[index], source.ids[index], disposition) {
 			t.Fatalf("acknowledge candidate %d", index)
 		}
-		if !DetachParkWaitOperation(source.state, source.ticket, &source.records[index], source.ids[index]) {
+		if !DetachParkWaitOperation(nil, source.state, source.ticket, &source.records[index], source.ids[index]) {
 			t.Fatalf("detach candidate %d", index)
 		}
 	}

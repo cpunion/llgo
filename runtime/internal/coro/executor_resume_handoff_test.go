@@ -223,6 +223,100 @@ func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T
 	runtime.KeepAlive(peer.frame.memory)
 }
 
+func TestExecutorResumeHandoffCompensationDemandGate(t *testing.T) {
+	t.Run("quiescent", func(t *testing.T) {
+		p := new(P)
+		driver, _, _ := bindTestExecutorDriver(t, p)
+		task := newYieldingTestG(t, "foreign-wait-quiescent")
+		fixture := beginExecutorResumeHandoffFixture(t, p, driver, task)
+		if required, ok := ExecutorResumeHandoffCompensationRequired(&fixture.handoff); !ok || required {
+			t.Fatalf("quiescent compensation = (%t, %t), want false, true", required, ok)
+		}
+		fixture.restore(t)
+	})
+
+	t.Run("runnable", func(t *testing.T) {
+		p := new(P)
+		driver, _, _ := bindTestExecutorDriver(t, p)
+		task := newYieldingTestG(t, "foreign-wait-runnable-owner")
+		peer := newYieldingTestG(t, "foreign-wait-runnable-peer")
+		fixture := beginExecutorResumeHandoffFixture(t, p, driver, task)
+		if !Enqueue(p, peer.g) {
+			t.Fatal("enqueue compensation peer")
+		}
+		if required, ok := ExecutorResumeHandoffCompensationRequired(&fixture.handoff); !ok || !required {
+			t.Fatalf("runnable compensation = (%t, %t), want true, true", required, ok)
+		}
+		fixture.restore(t)
+	})
+
+	t.Run("request", func(t *testing.T) {
+		p := new(P)
+		driver, registry, executor := bindTestExecutorDriver(t, p)
+		task := newYieldingTestG(t, "foreign-wait-request")
+		fixture := beginExecutorResumeHandoffFixture(t, p, driver, task)
+		if result := registry.Request(executor); result != ExecutorRequestPublished {
+			t.Fatalf("publish compensation request = %d", result)
+		}
+		if required, ok := ExecutorResumeHandoffCompensationRequired(&fixture.handoff); !ok || !required {
+			t.Fatalf("requested compensation = (%t, %t), want true, true", required, ok)
+		}
+		fixture.restore(t)
+	})
+
+	t.Run("task-control-endpoint", func(t *testing.T) {
+		p := new(P)
+		driver := new(ExecutorDriver)
+		registry := new(ExecutorRegistry)
+		control := new(TaskControlSource)
+		executor := registerTestExecutor(t, registry)
+		if !BindExecutorSourceCatalog(
+			driver,
+			p,
+			registry,
+			executor,
+			ExecutorSourceCatalog{Control: control},
+		) {
+			t.Fatal("bind task-control compensation executor")
+		}
+		task := newYieldingTestG(t, "foreign-wait-control")
+		if !Enqueue(p, task.g) {
+			t.Fatal("enqueue task-control compensation owner")
+		}
+		step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+		resume, checked := Checked(p, task.g, step.Action, false)
+		if !checked || resume.Kind != ActionResume || resume.Handle != task.handle {
+			t.Fatalf("check task-control compensation resume = (%+v, %t)", resume, checked)
+		}
+		takeNormalRunnerDecision(t, task.g)
+		task.frame.header.SuspendReason = uint16(SuspendNone)
+		task.frame.header.Lifecycle = uint16(FrameActive)
+		id, registered := RegisterCurrentExecutorTaskControl(driver, task.g)
+		if !registered || !EnterOSThreadLock(task.g) {
+			t.Fatal("register task-control compensation endpoint")
+		}
+		fixture := &executorResumeHandoffFixture{
+			p: p, driver: driver, task: task, resume: resume,
+		}
+		if !DetachExecutorResume(
+			&fixture.handoff,
+			driver,
+			task.g,
+			ExecutorResumeHandoffLockedForeign,
+		) {
+			t.Fatal("detach task-control compensation owner")
+		}
+		if required, ok := ExecutorResumeHandoffCompensationRequired(&fixture.handoff); !ok || !required {
+			t.Fatalf("task-control compensation = (%t, %t), want true, true", required, ok)
+		}
+		fixture.restore(t)
+		if !BeginCloseCurrentExecutorTaskControl(driver, task.g, id) ||
+			!FinishCloseCurrentExecutorTaskControl(driver, task.g, id) {
+			t.Fatal("close task-control compensation endpoint")
+		}
+	})
+}
+
 func TestExecutorResumeHandoffPreservesInlineAwaitAncestry(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)

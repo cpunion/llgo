@@ -262,7 +262,7 @@ func publishSchedulerParkV2(t *testing.T, p *P, operations *schedulerParkV2Opera
 	}
 }
 
-func detachSchedulerParkV2(t *testing.T, g *G, operations *schedulerParkV2Operations, index int) {
+func detachSchedulerParkV2(t *testing.T, p *P, g *G, operations *schedulerParkV2Operations, index int) {
 	t.Helper()
 	disposition, ok := OperationDispositionOf(&operations.records[index], operations.ids[index])
 	if !ok {
@@ -272,7 +272,7 @@ func detachSchedulerParkV2(t *testing.T, g *G, operations *schedulerParkV2Operat
 	if !AcknowledgeOperationResolution(&operations.records[index], operations.ids[index], disposition) {
 		t.Fatalf("acknowledge scheduler park candidate %d", index)
 	}
-	if !DetachParkWaitOperation(&g.park, operations.ticket, &operations.records[index], operations.ids[index]) {
+	if !DetachParkWaitOperation(p, &g.park, operations.ticket, &operations.records[index], operations.ids[index]) {
 		t.Fatalf("detach scheduler park candidate %d", index)
 	}
 }
@@ -348,11 +348,11 @@ func TestSchedulerParkSetEarlyCompletionDetachGateAndRunDecision(t *testing.T) {
 	if disposition, ok := OperationDispositionOf(&operations.records[1], operations.ids[1]); !ok || disposition != OperationDispositionLost {
 		t.Fatalf("early loser disposition = (%d, %t)", disposition, ok)
 	}
-	detachSchedulerParkV2(t, task.g, operations, 0)
+	detachSchedulerParkV2(t, p, task.g, operations, 0)
 	if count, ok := PollReady(p); !ok || count != 0 || !HasWaiting(p) || ParkReady(&task.g.park, operations.ticket) {
 		t.Fatalf("poll partial detach = (%d, %t), waiting=%t ready=%t", count, ok, HasWaiting(p), ParkReady(&task.g.park, operations.ticket))
 	}
-	detachSchedulerParkV2(t, task.g, operations, 1)
+	detachSchedulerParkV2(t, p, task.g, operations, 1)
 	if !ParkReady(&task.g.park, operations.ticket) {
 		t.Fatal("final source detach did not publish ParkReady")
 	}
@@ -456,7 +456,7 @@ func TestSchedulerRecordAwareWaitSetHighCardinalityUsesLocalDetach(t *testing.T)
 		t.Fatal("distant candidate corruption escaped complete audit")
 	}
 	detached := make([]bool, candidateCount)
-	detachSchedulerParkV2(t, task.g, operations, headIndex)
+	detachSchedulerParkV2(t, p, task.g, operations, headIndex)
 	detached[headIndex] = true
 	distant.link.ticket = savedTicket
 	if !validParkState(&task.g.park) {
@@ -470,7 +470,7 @@ func TestSchedulerRecordAwareWaitSetHighCardinalityUsesLocalDetach(t *testing.T)
 		middleIndex++
 	}
 	for _, index := range []int{distantIndex, middleIndex} {
-		detachSchedulerParkV2(t, task.g, operations, index)
+		detachSchedulerParkV2(t, p, task.g, operations, index)
 		detached[index] = true
 	}
 	detachedCount := 3
@@ -478,7 +478,7 @@ func TestSchedulerRecordAwareWaitSetHighCardinalityUsesLocalDetach(t *testing.T)
 		if detached[index] {
 			continue
 		}
-		detachSchedulerParkV2(t, task.g, operations, index)
+		detachSchedulerParkV2(t, p, task.g, operations, index)
 		detachedCount++
 	}
 	if detachedCount != candidateCount || task.g.park.attached != 0 || !ParkReady(&task.g.park, operations.ticket) {
@@ -519,7 +519,7 @@ func TestSchedulerParkSetReadyTaskCancelSuppressesCaseAndKeepsLease(t *testing.T
 	if count, ok := PollReady(p); !ok || count != 0 || task.g.park.phase != parkDetaching {
 		t.Fatalf("resolve late-cancel winner = (%d, %t), phase=%d", count, ok, task.g.park.phase)
 	}
-	detachSchedulerParkV2(t, task.g, operations, 0)
+	detachSchedulerParkV2(t, p, task.g, operations, 0)
 	if count, ok := PollReady(p); !ok || count != 1 || !task.g.queued || task.g.park.phase != parkReady {
 		t.Fatalf("promote late-cancel winner = (%d, %t), queued=%t phase=%d", count, ok, task.g.queued, task.g.park.phase)
 	}
@@ -563,7 +563,7 @@ func TestSchedulerTaskCancelAfterDeliveredParkIsObservedAtNextResumeGate(t *test
 	if count, ok := PollReady(p); !ok || count != 0 || task.g.park.phase != parkDetaching {
 		t.Fatalf("resolve post-delivery park = (%d, %t), phase=%d", count, ok, task.g.park.phase)
 	}
-	detachSchedulerParkV2(t, task.g, operations, 0)
+	detachSchedulerParkV2(t, p, task.g, operations, 0)
 	if count, ok := PollReady(p); !ok || count != 1 {
 		t.Fatalf("promote post-delivery park = (%d, %t)", count, ok)
 	}
@@ -809,7 +809,7 @@ func TestSchedulerParkPreparationAbortDetachesInlineWithoutParkingG(t *testing.T
 		task.g.pending.kind != pendingNone || task.g.state != GRunning || HasWaiting(p) {
 		t.Fatalf("abort producer-visible preparation: phase=%d pending=%d state=%d waiting=%t", task.g.park.phase, task.g.pending.kind, task.g.state, HasWaiting(p))
 	}
-	detachSchedulerParkV2(t, task.g, operations, 0)
+	detachSchedulerParkV2(t, p, task.g, operations, 0)
 	if !ParkReady(&task.g.park, operations.ticket) {
 		t.Fatal("preparation abort did not finish detach barrier")
 	}

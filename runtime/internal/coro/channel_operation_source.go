@@ -2594,6 +2594,7 @@ func (source *ChannelOperationSource) BeginClose(p *P, id OperationID) ChannelOp
 // ApplyOne; an exact owner-local direct commit consumes its already-closed
 // capability without repeating slot lookup, owner proof, or close.
 func applyClosedChannelOperationSlot(
+	p *P,
 	slot *channelOperationSlot,
 	id OperationID,
 	record *OperationRecord,
@@ -2632,7 +2633,7 @@ func applyClosedChannelOperationSlot(
 		return OperationApplyInvalid
 	}
 	park, ticket := record.link.park, record.link.ticket
-	if !DetachParkWaitOperation(park, ticket, record, id) {
+	if !DetachParkWaitOperation(p, park, ticket, record, id) {
 		return OperationApplyInvalid
 	}
 	// No new producer can enter and the admission join above proves no hchan
@@ -2663,7 +2664,7 @@ func (source *ChannelOperationSource) ApplyOne(p *P, id OperationID, record *Ope
 		closeResult != ChannelOperationAlreadyQuiesced {
 		return OperationApplyInvalid
 	}
-	return applyClosedChannelOperationSlot(slot, id, record, disposition)
+	return applyClosedChannelOperationSlot(p, slot, id, record, disposition)
 }
 
 // ConfirmQuiesced accepts the hchan/backend strong join. The admission word

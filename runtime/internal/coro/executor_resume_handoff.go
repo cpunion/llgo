@@ -195,6 +195,34 @@ func ExecutorResumeHandoffReturnable(driver *ExecutorDriver) bool {
 	return schedule == scheduleIdle || schedule == scheduleRequested
 }
 
+// ExecutorResumeHandoffCompensationRequired classifies the exact detached
+// owner boundary at which a native syscall decides whether another physical M
+// must service this route. All timer, poll, manual, worker, and channel source
+// operations owned by another task are rooted by the committed park queue at
+// this stable boundary. The detached task itself has already proved a
+// releasable park state. Task control is the sole externally posted source
+// which does not require a park, so its aggregate live-endpoint count is
+// checked separately. Durable facts and requests which have already arrived
+// retain their independent O(1) gates below.
+func ExecutorResumeHandoffCompensationRequired(
+	handoff *ExecutorResumeHandoff,
+) (required, ok bool) {
+	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
+		handoff.driver == nil || handoff.task == nil ||
+		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
+		!ExecutorResumeHandoffReturnable(handoff.driver) {
+		return false, false
+	}
+	driver := handoff.driver
+	p := driver.p
+	control := driver.sources.control
+	return runnableForOSThreadOwner(p) ||
+		p.externalWaitCount != 0 ||
+		control != nil && control.activeCount != 0 ||
+		ownerLocalCompletionPending(driver) ||
+		executorRunSourceRequested(driver), true
+}
+
 // ExecutorResumeHandoffContext returns the exact logical task and physical
 // parent handle for a detached same-M boundary which actually reentered
 // through a managed callback. It exposes no target function identity and

@@ -959,7 +959,7 @@ func (source *PollOperationSource) ApplyPollOperationV2One(
 		return OperationApplyInvalid
 	}
 	park, ticket := slot.record.link.park, slot.record.link.ticket
-	if !DetachParkWaitOperation(park, ticket, &slot.record, id) {
+	if !DetachParkWaitOperation(p, park, ticket, &slot.record, id) {
 		return OperationApplyInvalid
 	}
 	return OperationApplyDetached

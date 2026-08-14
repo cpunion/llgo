@@ -731,7 +731,7 @@ func (table *TimerRegistrationTable) ApplyTimerV2One(p *P, id OperationID, recor
 	// checks above repeat the timer-local ownership proof. Failure after the two
 	// monotonic acknowledgements is therefore fail-stop corruption, not a
 	// Deferred retry: replaying an already-applied disposition would be unsafe.
-	if !DetachParkWaitOperation(park, ticket, &slot.record, id) {
+	if !DetachParkWaitOperation(p, park, ticket, &slot.record, id) {
 		return OperationApplyInvalid
 	}
 	return OperationApplyDetached

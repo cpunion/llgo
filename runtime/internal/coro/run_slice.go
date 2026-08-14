@@ -873,6 +873,7 @@ func ResumedExecutorRun(
 			p.action != action || !p.runDecisionTaken || frame == nil || frame != g.active ||
 			frame.handle != action.Handle || frame.parkWait != g.active.parkWait ||
 			frame.parkWait.resumeKind != resumeBindingDirectChannel ||
+			!canAccountWaitSetExternal(p, g, frame.parkWait) ||
 			!acknowledgeSuspendedGPreempt(g) {
 			return Action{}, false, false
 		}
