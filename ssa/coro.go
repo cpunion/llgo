@@ -20,8 +20,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"go/types"
-	"strconv"
-	"strings"
 
 	"github.com/xgo-dev/llvm"
 )
@@ -1341,8 +1339,7 @@ func (b Builder) CoroDestroy(handle Expr) {
 
 // MarkCoroElideSafe marks one exact direct coroutine ramp call as having a
 // caller-bounded lifetime. LLVM 22 uses this proof to synthesize and select a
-// no-allocation ramp while both caller and callee are still presplit. Older
-// LLVM releases retain the ordinary heap-backed path and return false.
+// no-allocation ramp while both caller and callee are still presplit.
 //
 // The caller must prove that every use of the returned handle is contained by
 // its own coroutine frame lifetime. This is deliberately not inferred from an
@@ -1353,9 +1350,6 @@ func (b Builder) MarkCoroElideSafe(call Expr) bool {
 	}
 	if call.IsNil() || call.impl.IsACallInst().IsNil() {
 		panic("ssa: coroutine elision requires an exact call result")
-	}
-	if llvmMajorVersion() < 22 {
-		return false
 	}
 	kind := llvm.AttributeKindID("coro_elide_safe")
 	if kind == 0 {
@@ -1486,15 +1480,7 @@ func coroBlockInstructions(block llvm.BasicBlock) []llvm.Value {
 }
 
 func markPresplitCoroutine(fn Function) {
-	major := llvmMajorVersion()
 	ctx := fn.Pkg.mod.Context()
-	if major == 14 {
-		// LLVM 14's string attribute encodes a legacy state machine. Frontends
-		// must emit the unprepared "0" state before CoroEarly; "1" is reserved
-		// for a coroutine already prepared for a direct CoroSplit invocation.
-		fn.impl.AddFunctionAttr(ctx.CreateStringAttribute("coroutine.presplit", "0"))
-		return
-	}
 	kind := llvm.AttributeKindID("presplitcoroutine")
 	if kind == 0 {
 		panic(fmt.Sprintf("ssa: LLVM %s has no presplitcoroutine attribute", llvm.Version))
@@ -1517,18 +1503,12 @@ func (b Builder) coroFrameLayout(allocationAlign uint32) (size, align Expr) {
 }
 
 func (b Builder) coroEnd(handle Expr) {
-	major := llvmMajorVersion()
-	args := []llvm.Value{handle.impl, b.Prog.BoolVal(false).impl}
-	if major >= 18 {
-		args = append(args, b.Prog.ctx.ConstTokenNone())
+	args := []llvm.Value{
+		handle.impl,
+		b.Prog.BoolVal(false).impl,
+		b.Prog.ctx.ConstTokenNone(),
 	}
-	ret := b.Prog.Bool().ll
-	name := "coro.end"
-	if major >= 22 {
-		ret = b.Prog.Void().ll
-		name = ""
-	}
-	b.coroIntrinsic("llvm.coro.end", ret, args, name)
+	b.coroIntrinsic("llvm.coro.end", b.Prog.Void().ll, args, "")
 }
 
 func (b Builder) coroIntrinsic(name string, ret llvm.Type, args []llvm.Value, resultName string) llvm.Value {
@@ -1541,13 +1521,4 @@ func (b Builder) coroIntrinsic(name string, ret llvm.Type, args []llvm.Value, re
 		panic(fmt.Sprintf("ssa: LLVM %s rejected %s intrinsic signature", llvm.Version, name))
 	}
 	return value
-}
-
-func llvmMajorVersion() int {
-	text, _, _ := strings.Cut(llvm.Version, ".")
-	major, err := strconv.Atoi(text)
-	if err != nil {
-		panic(fmt.Sprintf("ssa: parse LLVM version %q: %v", llvm.Version, err))
-	}
-	return major
 }

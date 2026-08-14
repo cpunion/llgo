@@ -44,11 +44,7 @@ func TestCoroBuilderPresplitShape(t *testing.T) {
 	}
 
 	ir := mod.String()
-	if major := llvmMajorVersion(); major == 14 {
-		if !strings.Contains(ir, `"coroutine.presplit"="0"`) {
-			t.Fatalf("LLVM 14 coroutine lacks unprepared frontend presplit state:\n%s", ir)
-		}
-	} else if !strings.Contains(ir, "presplitcoroutine") {
+	if !strings.Contains(ir, "presplitcoroutine") {
 		t.Fatalf("coroutine lacks enum presplit attribute:\n%s", ir)
 	}
 	if !strings.Contains(ir, "@llvm.coro.id(i32 32") {
@@ -280,13 +276,7 @@ func TestCoroBuilderPerSuspendAfterResumeOverride(t *testing.T) {
 func TestCoroBuilderCoroSplit(t *testing.T) {
 	fixture := newCoroTestFixture(t, nil, 32)
 	mod := fixture.pkg.Module()
-	pipeline := "coro-early,cgscc(coro-split),coro-cleanup"
-	if llvmMajorVersion() == 14 {
-		// LLVM 14 implicitly treats a pipeline beginning with coro-early as a
-		// function pipeline, so every pass-manager level must be explicit.
-		pipeline = "function(coro-early),cgscc(coro-split),function(coro-cleanup)"
-	}
-	runCoroPasses(t, fixture, pipeline)
+	runCoroPasses(t, fixture, "coro-early,cgscc(coro-split),coro-cleanup")
 
 	post := mod.String()
 	for _, suffix := range []string{".resume", ".destroy"} {
@@ -364,11 +354,7 @@ func TestCoroHandleIntrinsicsBeforeAndAfterCoroSplit(t *testing.T) {
 		t.Fatalf("llvm.coro.promise does not use payload ABI alignment %d and from=false:\n%s", wantAlign, pre)
 	}
 
-	pipeline := "coro-early,cgscc(coro-split),coro-cleanup"
-	if llvmMajorVersion() == 14 {
-		pipeline = "function(coro-early),cgscc(coro-split),function(coro-cleanup)"
-	}
-	runCoroPasses(t, fixture, pipeline)
+	runCoroPasses(t, fixture, "coro-early,cgscc(coro-split),coro-cleanup")
 	post := mod.String()
 	for _, intrinsic := range []string{
 		"llvm.coro.promise", "llvm.coro.done", "llvm.coro.resume", "llvm.coro.destroy",
@@ -385,9 +371,6 @@ func TestCoroHandleIntrinsicsBeforeAndAfterCoroSplit(t *testing.T) {
 }
 
 func TestCoroElideStaticChildFrameContract(t *testing.T) {
-	if llvmMajorVersion() < 22 {
-		t.Skipf("coro_elide_safe requires LLVM 22, using %s", llvm.Version)
-	}
 	Initialize(InitAll)
 	prog := NewProgram(nil)
 	pkg := prog.NewPackage("coroelide", "coro/elide")
@@ -486,10 +469,7 @@ func TestCoroElideStaticChildFrameContract(t *testing.T) {
 	}
 }
 
-func TestCoroBuilderDefaultPipelineLLVM19(t *testing.T) {
-	if llvmMajorVersion() != 19 {
-		t.Skipf("production default<O0> smoke is specific to LLVM 19, using %s", llvm.Version)
-	}
+func TestCoroBuilderDefaultPipelineLLVM22(t *testing.T) {
 	fixture := newCoroTestFixture(t, nil, 0)
 	runCoroPasses(t, fixture, "default<O0>")
 	post := fixture.pkg.String()

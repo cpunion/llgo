@@ -1,4 +1,4 @@
-//go:build !byollvm && linux && llvm22
+//go:build !byollvm && linux
 
 /*
  * Copyright (c) 2024 The XGo Authors (xgo.dev). All rights reserved.

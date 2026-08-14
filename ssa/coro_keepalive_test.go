@@ -32,10 +32,6 @@ import (
 // no resumed use other than KeepAlive. The fake use must remain on the resumed
 // side of the cut and make CoroSplit place the local in the coroutine frame.
 func TestCoroKeepAliveRetainsLocalAddress(t *testing.T) {
-	if major := llvmMajorVersion(); major < 19 || major > 22 {
-		t.Skipf("coroutine keepalive regression requires supported LLVM 19-22, using %s", llvm.Version)
-	}
-
 	Initialize(InitAll)
 	prog := NewProgram(nil)
 	defer prog.Dispose()

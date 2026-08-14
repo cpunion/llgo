@@ -27,7 +27,7 @@ import (
 )
 
 func main() {
-	llvm.SetupPath()
+	llvm.SetupPathOrExit()
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s <file-or-dir> [<file-or-dir>...]\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()

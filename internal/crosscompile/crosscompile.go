@@ -609,9 +609,9 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	envs := buildEnvMap(env.LLGoROOT())
 
 	// Convert LLVMTarget, CPU, Features to CCFLAGS/LDFLAGS. Some wasm-ld
-	// distributions expose the lld ICF switch while others (including the ESP
-	// LLVM 19 build) reject it. Keep the Go pc-identity policy explicit whenever
-	// the selected linker advertises the option; older wasm-ld defaults to no
+	// distributions expose the lld ICF switch while legacy target-specific
+	// distributions reject it. Keep the Go pc-identity policy explicit whenever
+	// the selected linker advertises the option; those wasm-ld builds default to no
 	// ICF, so omitting the unsupported switch preserves the same semantics.
 	ldflags := []string{"-S"}
 	targetLinker := filepath.Join(clangRoot, "bin", config.Linker)

@@ -31,7 +31,7 @@ var (
 )
 
 func main() {
-	llvm.SetupPath()
+	llvm.SetupPathOrExit()
 	flag.Parse()
 	if len(flag.Args()) != 1 {
 		fmt.Fprintln(os.Stderr, "Usage: llgen [flags] <pkg>")

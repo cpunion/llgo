@@ -93,7 +93,7 @@ ProgramModelBuilder fixed point
 - 让 timer、文件、网络、host Promise、worker、RTOS notification、IRQ 等扩展复用同一 `Park/Operation` 模型，而不是新增 compiler semantic family。
 - 把 select 多候选和执行取消作为公共底层语义，保证结果 lease、loser detach 和 cleanup 次序。
 - 降低新增语言特性或 event source 时同时修改多个 compiler 模块的概率。
-- 保留当前 LLVM 19–22 支持范围；不为 LLVM 19 以下版本增加设计负担。
+- 固定 LLVM 22 支持基线；不为 LLVM 21 及以下保留兼容分支。
 
 ### 2.2 非目标
 
@@ -876,7 +876,7 @@ Op(frame-spilled for internal waits, registry-backed for external callbacks)
 
 它应保留为 LLVM backend，不应把 Go effect、select或cleanup语义塞入其中。新 emitter可减少 feature callback数量，但无需重写 `CoroBuilder`。
 
-LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 GC需要在CoroSplit后取得可靠frame layout/root metadata，或在显式slot层为GC-managed值提供自己的descriptor；这需要LLVM 19–22分别验证，不能仅凭pre-split IR推断最终offset。
+LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 GC需要在CoroSplit后取得可靠frame layout/root metadata，或在显式slot层为GC-managed值提供自己的descriptor；这需要在LLVM 22各目标上分别验证，不能仅凭pre-split IR推断最终offset。
 
 非移动保守GC不必等待这项精确metadata：当前`wasip1-gc`把G task和整个LLVM frame allocation都放入tinygogc heap，static P/G与wait链提供owner root，collector递归扫描完整frame block即可观察CoroSplit spill。该路径没有全局current-root chain、函数地址反查或额外sidecar allocation；代价是false-positive retention，并且仅允许stop-the-world单executor。它是精确/移动GC之前的独立可验收profile，不可把通过结果外推到并行STW、weak/finalizer或GC Full。
 
@@ -1011,7 +1011,7 @@ cl/coro_recipe_*.go        ordinary lowering recipe planning/emission pairs
 
 - 以 `897d251f8` 为迁移基线，不混入新runtime功能。
 - 先实现plan/semantic CFG canonicalizer；只为小型代表fixture保存plain/await/preempt/park/timer/channel/select/spawn/panic投影，不保存整个支持subset或完整post-CoroSplit文本；panic标注为focused/manual fixture，不冒充production build path。
-- 各LLVM版本分别做module verify和结构断言；frame/object size记录版本内基线与阈值，不要求LLVM 19–22文本或精确size相同。
+- LLVM 22各目标分别做module verify和结构断言；frame/object size记录目标内基线与阈值，不要求不同目标的文本或精确size相同。
 - 定义固定fixture/target、warm cache、重复次数/中位数、alloc和peak RSS采集方式；先报告compile wall、node/bytes、block/instruction、frame和object size，取得噪声后再冻结回退阈值。
 
 验收：不改生成IR。
@@ -1410,7 +1410,7 @@ site只接受ProgramIR projection。旧callback/classifier在同一提交删除�
 - 对同一fixture执行两个独立test-only compile/module invocation：legacy读取raw SSA，新backend读取FunctionIR，避免同名symbol在一个module双发；production config没有双backend开关。
 - 比较canonical semantic projection、suspend/continuation/helper/descriptor、post-CoroSplit verify、frame阈值和运行结果，不要求physical CFG同构。
 
-验收：native+nogc E2E、host race/shuffle、JS/WASM test adapter、native64/wasm32、LLVM 19–22全部通过后，在同一cohort cutover并删除legacy emitter。只完成对照而未删除旧路径不算Phase E完成。
+验收：native+nogc E2E、host race/shuffle、JS/WASM test adapter、LLVM 22 native64/wasm32全部通过后，在同一cohort cutover并删除legacy emitter。只完成对照而未删除旧路径不算Phase E完成。
 
 ### Phase F：按完整函数切换并删除重复实现
 
@@ -1460,7 +1460,7 @@ runtime hard cutover不删除`OperationRecord/ParkState/WaitSetRecord/result lea
 - `G`/`P`及production target不存在`WaitToken`logical queue，Timer/Poll不存在V1/V2 mode；
 - production config不再含多个阶段性`EnableCoro*`布尔字段；
 - 新增一种event source只修改source adapter、profile catalog和测试，不修改compiler opcode/feature lowerer；
-- `go test -race` runtime core、LLVM 19/20/21/22结构门和六项fresh fleet标准库E2E全部通过。
+- `go test -race` runtime core、LLVM 22结构门和六项fresh fleet标准库E2E全部通过。
 
 最终仓库验收不是上述六个探针，而是`test/*`（包括`test/std/*`）与Go 1.26 GOROOT runner的全部适用测试通过。临时xfail只用于定位；最终基线不得有unexpected failure或stale XPASS，也不得用package/function白名单、扩大xfail或修改指令期望来掩盖通用lowering/runtime缺口。当前阶段另有一条先行硬门：任何OS/host I/O、timer、同步原语或不可避免的外部等待都不能阻塞executor，必须先stack-cut并park或转交bounded worker/平台事件源；每个此类接入至少有一个“等待方未完成时另一G仍前进”的进度用例。纯计算暂时允许占用一个P，生产级完成前再以M/P/G、P-neutral runnable/result、动态P/steal及blocking compensation把密集计算和不可避免的阻塞彼此解耦。
 
@@ -1533,7 +1533,7 @@ gate应解析Go AST/build constraints或检查冻结catalog，不依赖容易被
 
 ### 16.3 target矩阵
 
-当前feature PR必跑层按现有 `coroutine.yml`：Ubuntu 22.04；Go 1.26.5上的LLVM 19/20/21/22 compatibility矩阵，并在LLVM 19单独运行integration与targets lane；host runtime core `-race -shuffle`、JS/WASM test adapter、native timer/time.Sleep focused E2E、arm/riscv/WASM/baremetal compile/link检查。快速structural/verify矩阵与LLVM 19完整E2E保持拆分，避免四个compatibility job重复重runtime而超过20分钟job预算。
+当前feature PR必跑层按现有 `coroutine.yml`：Ubuntu 22.04、Go 1.26.5、LLVM 22；按compatibility、integration、targets和分片E2E lane拆分host runtime core `-race -shuffle`、JS/WASM test adapter、native timer/time.Sleep focused E2E及arm/riscv/WASM/baremetal compile/link检查，避免重runtime任务在同一进程累积资源。
 
 `cpunion/llgo`的coro开发分支只触发`Format Check`和上述focused coroutine workflow；
 Go、cache、LLGo、target、release、docs及stdlib coverage等宽工作流只接受`main`的push/PR。
@@ -1620,7 +1620,7 @@ channel/select physical operation choice、panic/outcome/cleanup choice及remain
    feature分支；不得把B.11统一call dispatcher误当成whole-function emitter已经完成。
 5. runtime Phase R已经完成：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
    mandatory stackless架构均以旧production符号/配置入口为零，并由hard-cutover gate持续约束。
-6. 本轮合并门运行runtime race、LLVM 19–22、native/wasm32结构验证和六项fresh stdlib E2E。后续compiler
+6. 本轮合并门运行runtime race、LLVM 22 native/wasm32结构验证和六项fresh stdlib E2E。后续compiler
    whole-function emitter仍按完整replacement cohort推进；single-source、Channel/select、HostOp/keyed
    P-neutral materialization、动态逻辑execution quota、locked-M同P replacement、standby M、`SetMaxThreads`、三类clean owner succession和command main-return blocked-M终止已独立落地，callback-reentry与非command shutdown、GC、
    panic/Goexit和更多平台adapter属于功能阶段，不能借机恢复旧runtime轨道。

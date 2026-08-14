@@ -50,9 +50,9 @@ type ExecutorLeafProof struct {
 	ClosureSHA256 string
 }
 
-// LLVM C's opcode enum has kept these values stable since before the supported
-// LLVM 19 floor. The Go binding currently omits symbolic Opcode constants for
-// them even though it exposes their builders.
+// LLVM C's opcode enum uses these values in the supported LLVM 22 release. The
+// Go binding currently omits symbolic Opcode constants for them even though it
+// exposes their builders.
 const (
 	llvmOpcodeFence         llvm.Opcode = 55
 	llvmOpcodeAtomicCmpXchg llvm.Opcode = 56

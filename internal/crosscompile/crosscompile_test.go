@@ -49,7 +49,7 @@ func TestLinkerHelpSupportsICF(t *testing.T) {
 		help string
 		want bool
 	}{
-		{name: "esp-llvm19-no-icf", help: "--import-memory\n--no-entry\n--export=<value>\n", want: false},
+		{name: "legacy-wasm-ld-no-icf", help: "--import-memory\n--no-entry\n--export=<value>\n", want: false},
 		{name: "lld-equals-form", help: "--icf={none,safe,all}  Perform identical code folding\n", want: true},
 		{name: "lld-separated-form", help: "--icf <mode>  Perform identical code folding\n", want: true},
 	} {

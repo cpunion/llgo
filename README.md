@@ -341,14 +341,19 @@ Here are the Go packages that can be imported correctly:
 ## Dependencies
 
 - [Go 1.21+](https://go.dev)
-- [LLVM 18](https://llvm.org)
-- [Clang 18](https://clang.llvm.org)
-- [LLD 18](https://lld.llvm.org)
+- [LLVM 22](https://llvm.org)
+- [Clang 22](https://clang.llvm.org)
+- [LLD 22](https://lld.llvm.org)
 - [pkg-config 0.29+](https://www.freedesktop.org/wiki/Software/pkg-config/)
 - [bdwgc/libgc 8.0+](https://www.hboehm.info/gc/)
 - [OpenSSL 3.0+](https://www.openssl.org/)
 - [zlib 1.2+](https://www.zlib.net)
 - [Python 3.12+](https://www.python.org) (optional, for [github.com/goplus/lib/py](https://pkg.go.dev/github.com/goplus/lib/py))
+
+LLGo's compiler, Go binding, coroutine lowering, and supported CI baseline are
+LLVM 22 only. Version-pinned Espressif artifacts and generated ABI fixtures in
+the target support tree are external vendor inputs, not an alternate supported
+host LLVM/CoroSplit version.
 
 ## How to install
 
@@ -360,9 +365,9 @@ Follow these steps to generate the `llgo` command (its usage is the same as the 
 
 ```sh
 brew update
-brew install llvm@19 lld@19 bdw-gc openssl cjson libffi libuv pkg-config
+brew install llvm@22 lld@22 bdw-gc openssl cjson libffi libuv pkg-config
 brew install python@3.12 # optional
-brew link --overwrite llvm@19 lld@19 libffi
+brew link --overwrite llvm@22 lld@22 libffi
 # curl https://raw.githubusercontent.com/xgo-dev/llgo/refs/heads/main/install.sh | bash
 ./install.sh
 ```
@@ -374,10 +379,10 @@ brew link --overwrite llvm@19 lld@19 libffi
 <!-- embedme doc/_readme/scripts/install_ubuntu.sh#L2-L1000 -->
 
 ```sh
-echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-19 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
 wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
 sudo apt-get update
-sudo apt-get install -y llvm-19-dev clang-19 libclang-19-dev lld-19 libunwind-19-dev libc++-19-dev pkg-config libgc-dev libssl-dev zlib1g-dev libffi-dev libcjson-dev libsqlite3-dev libuv1-dev
+sudo apt-get install -y llvm-22-dev clang-22 libclang-22-dev lld-22 libunwind-22-dev libc++-22-dev pkg-config libgc-dev libssl-dev zlib1g-dev libffi-dev libcjson-dev libsqlite3-dev libuv1-dev
 sudo apt-get install -y python3.12-dev # optional
 #curl https://raw.githubusercontent.com/xgo-dev/llgo/refs/heads/main/install.sh | bash
 ./install.sh
@@ -386,10 +391,10 @@ sudo apt-get install -y python3.12-dev # optional
 #### Alpine Linux
 
 ```sh
-apk add go llvm19-dev clang19-dev lld19 pkgconf gc-dev libunwind-dev openssl-dev zlib-dev
+apk add go llvm22-dev clang22-dev lld22 pkgconf gc-dev libunwind-dev openssl-dev zlib-dev
 apk add python3-dev # optional
 apk add g++ # build only
-export LLVM_CONFIG=/usr/lib/llvm19/bin/llvm-config
+export LLVM_CONFIG=/usr/lib/llvm22/bin/llvm-config
 export CGO_CPPFLAGS="$($LLVM_CONFIG --cppflags)"
 export CGO_CXXFLAGS=-std=c++17
 export CGO_LDFLAGS="$($LLVM_CONFIG --ldflags) $($LLVM_CONFIG --libs all)"
