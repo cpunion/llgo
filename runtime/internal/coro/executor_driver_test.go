@@ -291,6 +291,53 @@ func TestPrepareExecutorStandbyDefersDirectChannelIngress(t *testing.T) {
 	closeTestExecutorDriver(t, driver)
 }
 
+func TestWorkerCompletionProbeDefersDirectChannelIngress(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	// A fleet peer may still own cold fairness/source state here; only an
+	// issued physical action or active source transaction would make the
+	// completion window unstable.
+	driver.run.sourceMore = true
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionMatched),
+	}
+	if !PublishExecutorDirectChannelCompletion(driver, completion) {
+		t.Fatal("publish direct-channel completion before worker probe")
+	}
+	probe, awaiting, ready, ok := PrepareExecutorWorkerCompletionProbe(driver)
+	if !ok || awaiting || !ready || probe.Valid() {
+		t.Fatalf(
+			"worker probe over direct-channel ingress = (%+v, %t, %t, %t), want (invalid, false, true, true)",
+			probe, awaiting, ready, ok,
+		)
+	}
+	if got, ok := takeExecutorDirectChannelCompletion(driver); !ok || got != completion {
+		t.Fatalf("take probe-deferred completion = (%p, %t), want (%p, true)", got, ok, completion)
+	}
+	if !EnterExecutorRunCompatibility(driver) {
+		t.Fatal("settle cold cursor after probe-deferred completion")
+	}
+	closeTestExecutorDriver(t, driver)
+}
+
+func TestWorkerCompletionProbeRejectsInvalidDirectChannelHeader(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	tail := driver.directChannelTail
+	driver.directChannelTail = nil
+	probe, awaiting, ready, ok := PrepareExecutorWorkerCompletionProbe(driver)
+	if ok || awaiting || ready || probe.Valid() {
+		t.Fatalf(
+			"worker probe with invalid direct-channel header = (%+v, %t, %t, %t), want zero invalid result",
+			probe, awaiting, ready, ok,
+		)
+	}
+	driver.directChannelTail = tail
+	closeTestExecutorDriver(t, driver)
+}
+
 func TestCommitExecutorStandbyDefersDirectChannelIngress(t *testing.T) {
 	p := new(P)
 	driver, _, _, _ := bindTestExecutorDriverWithTimers(t, p)

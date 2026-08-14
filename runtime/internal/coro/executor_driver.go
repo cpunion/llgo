@@ -665,17 +665,27 @@ func (probe ExecutorWorkerCompletionProbe) Ready() bool {
 
 // PrepareExecutorWorkerCompletionProbe observes the one condition under which
 // a native target may profitably defer ArmIdle: an exact submitted worker
-// operation is still incomplete. It never turns that advisory observation into
-// a correctness obligation. A target which does not observe Ready within its
-// bounded policy must use the ordinary retained wait transaction unchanged.
+// operation is still incomplete. A direct-channel producer may also win after
+// the owner reached stable idle but before this advisory probe. Report that
+// ordinary race as ready work with an invalid probe so the target re-enters
+// the unified reducer; a valid ready probe continues to mean worker
+// completion. Every owner-only cursor, queue header, and lifecycle invariant
+// remains fail-closed. A target which does not observe Ready within its bounded
+// policy must use the ordinary retained wait transaction unchanged.
 func PrepareExecutorWorkerCompletionProbe(
 	driver *ExecutorDriver,
 ) (probe ExecutorWorkerCompletionProbe, awaiting, ready, ok bool) {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
 		!emptyOwnerLocalCompletion(&driver.local) ||
-		!executorDirectChannelInboxIdle(driver) || !idleExecutorScheduler(driver.p) {
+		!idleExecutorScheduler(driver.p) {
 		return ExecutorWorkerCompletionProbe{}, false, false, false
+	}
+	if driver.directChannelTail == nil || preemptLoadPointer(&driver.directChannelHead) == nil {
+		return ExecutorWorkerCompletionProbe{}, false, false, false
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		return ExecutorWorkerCompletionProbe{}, false, true, true
 	}
 	if driver.sources.worker == nil {
 		return ExecutorWorkerCompletionProbe{}, false, false, true
