@@ -61,6 +61,40 @@ func TestLinkerHelpSupportsICF(t *testing.T) {
 	}
 }
 
+func TestLLVM22WasmToolchainUsesConfiguredPath(t *testing.T) {
+	setupCalls := 0
+	setup := func() error {
+		setupCalls++
+		return nil
+	}
+	root := filepath.Join(t.TempDir(), "llvm-22")
+	bin := filepath.Join(root, "bin")
+	linkBin := filepath.Join(t.TempDir(), "lld-22", "bin")
+	tools := map[string]string{
+		"clang++": filepath.Join(bin, "clang++"),
+		"llvm-ar": filepath.Join(bin, "llvm-ar"),
+		"wasm-ld": filepath.Join(linkBin, "wasm-ld"),
+	}
+	lookup := func(name string) (string, error) {
+		if path := tools[name]; path != "" {
+			return path, nil
+		}
+		return "", os.ErrNotExist
+	}
+
+	gotRoot, gotBin, gotCC, gotLinker, err := resolveLLVM22Toolchain("wasm-ld", setup, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setupCalls != 1 || gotRoot != root || gotBin != bin ||
+		gotCC != tools["clang++"] || gotLinker != tools["wasm-ld"] {
+		t.Fatalf(
+			"LLVM 22 wasm tools = setup:%d root:%q bin:%q cc:%q linker:%q",
+			setupCalls, gotRoot, gotBin, gotCC, gotLinker,
+		)
+	}
+}
+
 func TestValidateWasmBuiltinsTargetCompatibility(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
