@@ -21,10 +21,21 @@
 #include <string.h>
 
 enum {
-    llgo_coro_alloc_cache_min_shift = 8,
-    llgo_coro_alloc_cache_max_shift = 16,
+    llgo_coro_alloc_cache_dense_min = 256,
+    llgo_coro_alloc_cache_dense_max = 512,
+    llgo_coro_alloc_cache_dense_quantum = 64,
+    llgo_coro_alloc_cache_dense_count =
+        (llgo_coro_alloc_cache_dense_max - llgo_coro_alloc_cache_dense_min) /
+            llgo_coro_alloc_cache_dense_quantum +
+        1,
+    llgo_coro_alloc_cache_power_min_shift = 10,
+    llgo_coro_alloc_cache_power_max_shift = 16,
+    llgo_coro_alloc_cache_power_count =
+        llgo_coro_alloc_cache_power_max_shift -
+        llgo_coro_alloc_cache_power_min_shift + 1,
     llgo_coro_alloc_cache_bin_count =
-        llgo_coro_alloc_cache_max_shift - llgo_coro_alloc_cache_min_shift + 1,
+        llgo_coro_alloc_cache_dense_count +
+        llgo_coro_alloc_cache_power_count,
     llgo_coro_alloc_cache_bytes_per_bin = 128 * 1024,
 };
 
@@ -38,8 +49,16 @@ static struct llgo_coro_alloc_cache_bin_v1
     llgo_coro_alloc_cache_bins_v1[llgo_coro_alloc_cache_bin_count];
 
 static int llgo_coro_alloc_cache_index_v1(uintptr_t size) {
-    uintptr_t value = (uintptr_t)1 << llgo_coro_alloc_cache_min_shift;
-    for (int index = 0; index < llgo_coro_alloc_cache_bin_count;
+    if (size >= llgo_coro_alloc_cache_dense_min &&
+        size <= llgo_coro_alloc_cache_dense_max &&
+        (size & (llgo_coro_alloc_cache_dense_quantum - 1)) == 0) {
+        return (int)((size - llgo_coro_alloc_cache_dense_min) /
+                     llgo_coro_alloc_cache_dense_quantum);
+    }
+    uintptr_t value =
+        (uintptr_t)1 << llgo_coro_alloc_cache_power_min_shift;
+    for (int index = llgo_coro_alloc_cache_dense_count;
+         index < llgo_coro_alloc_cache_bin_count;
          ++index, value <<= 1) {
         if (size == value) {
             return index;

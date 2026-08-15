@@ -45,6 +45,7 @@ bool __llgo_coro_alloc_cache_put_v1(void *pointer, uintptr_t size);
 enum {
     bounded_size = 256,
     bounded_capacity = 512,
+	compact_size = 384,
     thread_count = 8,
     thread_iterations = 10000,
     concurrent_size = 512,
@@ -123,6 +124,25 @@ int main(void) {
     if (__llgo_coro_alloc_cache_take_v1(bounded_size) != NULL) {
         return 18;
     }
+
+    unsigned char *compact = malloc(compact_size);
+    if (compact == NULL) {
+        return 21;
+    }
+    memset(compact, 0xa5, compact_size);
+    if (!__llgo_coro_alloc_cache_put_v1(compact, compact_size)) {
+        return 22;
+    }
+    compact = __llgo_coro_alloc_cache_take_v1(compact_size);
+    if (compact == NULL) {
+        return 23;
+    }
+    for (int byte = 0; byte < compact_size; ++byte) {
+        if (compact[byte] != 0) {
+            return 24;
+        }
+    }
+    free(compact);
 
     pthread_t threads[thread_count];
     for (int index = 0; index < thread_count; ++index) {
