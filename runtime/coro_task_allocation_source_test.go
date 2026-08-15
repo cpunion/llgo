@@ -41,7 +41,7 @@ func TestCoroSpawnFusesTaskAndRuntimeContextAllocation(t *testing.T) {
 	for _, required := range []string{
 		"coroalloc.AllocTask(allocationSize)",
 		"coro.Zero(raw, allocationSize)",
-		"coroBindTaskAllocationRuntimeContext(child, parent)",
+		"coroBindTaskAllocationRuntimeContextCompiler(child, parent)",
 		"coroalloc.FreeTask(raw, allocationSize)",
 	} {
 		if !strings.Contains(spawn, required) {

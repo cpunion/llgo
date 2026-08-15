@@ -27,7 +27,7 @@ import (
 
 const (
 	coroProgramFrameAllocHookV1       = "__llgo_coro_frame_alloc_v1"
-	coroProgramFramePublishHookV1     = "__llgo_coro_frame_publish_v1"
+	coroProgramFramePublishHookV3     = "__llgo_coro_frame_publish_v3"
 	coroProgramAwaitPrepareHookV2     = "__llgo_coro_await_prepare_v2"
 	coroProgramAwaitConsumeHookV1     = "__llgo_coro_await_consume_v1"
 	coroProgramPanicPrepareHookV1     = "__llgo_coro_panic_prepare_v1"
@@ -58,9 +58,7 @@ const (
 	coroProgramHeaderResultSlotV1
 	coroProgramHeaderSuspendReasonV1
 	coroProgramHeaderLifecycleV1
-	coroProgramHeaderStateIDV1
 	coroProgramHeaderLineV1
-	coroProgramHeaderFlagsV1
 )
 
 type coroProgramBootstrapFactoryTargetV2 struct {
@@ -160,13 +158,18 @@ func emitCoroProgramBootstrapFactoryV2(
 	descriptorPointer := b.Convert(prog.VoidPtr(), descriptor)
 	headerType := coroProgramBootstrapHeaderTypeV1(prog)
 	header := b.AllocaT(headerType)
+	frameMetadataType := prog.Type(
+		types.NewArray(types.Typ[types.Uintptr], coroProgramFrameMetadataWordsV2(prog)),
+		llssa.InGo,
+	)
+	frameMetadata := b.AllocaT(frameMetadataType)
 
 	alloc := pkg.NewFunc(coroProgramFrameAllocHookV1, newSignature(
 		[]types.Type{pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer},
 		[]types.Type{pointer},
 	), llssa.InC)
-	publish := pkg.NewFunc(coroProgramFramePublishHookV1, newSignature(
-		[]types.Type{pointer, pointer, pointer, pointer}, nil,
+	publish := pkg.NewFunc(coroProgramFramePublishHookV3, newSignature(
+		[]types.Type{pointer, pointer, pointer, pointer, pointer, pointer, pointer}, nil,
 	), llssa.InC)
 	await := pkg.NewFunc(coroProgramAwaitPrepareHookV2, newSignature(
 		[]types.Type{pointer, pointer, pointer}, nil,
@@ -197,6 +200,7 @@ func emitCoroProgramBootstrapFactoryV2(
 			return b.Call(alloc.Expr, g, size, align, descriptorPointer)
 		},
 		Free: func(b llssa.Builder, storage, size, align llssa.Expr) {
+			b.KeepAlive(frameMetadata)
 			b.Call(free.Expr, g, storage, size, align, descriptorPointer)
 		},
 	}
@@ -207,22 +211,16 @@ func emitCoroProgramBootstrapFactoryV2(
 			emitCoroProgramTakeNormalRunDecisionV1(b, runDecisionTake, g)
 		},
 		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
-			values := []llssa.Expr{
+			b.Call(
+				publish.Expr,
 				g,
-				null,
+				handle,
+				b.Convert(prog.VoidPtr(), header),
+				storage,
+				b.Convert(prog.VoidPtr(), frameMetadata),
 				descriptorPointer,
-				null,
 				out,
-				prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()),
-				prog.IntVal(coroProgramLifecycleInitialV1, prog.Uint16()),
-				prog.IntVal(0, prog.Uint32()),
-				prog.IntVal(0, prog.Uint32()),
-				prog.IntVal(0, prog.Uint32()),
-			}
-			for index, value := range values {
-				b.Store(b.FieldAddr(header, index), value)
-			}
-			b.Call(publish.Expr, g, handle, b.Convert(prog.VoidPtr(), header), storage)
+			)
 		},
 	})
 
@@ -265,10 +263,8 @@ func emitCoroProgramBootstrapFactoryV2(
 			child := b.Call(rootFactory, g, null, null)
 			childHeader := b.CoroPromise(child, headerType)
 			b.Store(b.FieldAddr(childHeader, coroProgramHeaderParentV1), coroBuilder.Handle())
-			stateID := uint64(index + 1)
 			b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendCallV1, prog.Uint16()))
 			b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleSuspendedV1, prog.Uint16()))
-			b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(stateID, prog.Uint32()))
 			b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
 			b.Call(await.Expr, g, coroBuilder.Handle(), child)
 			coroBuilder.SuspendCurrentBlock()
@@ -313,7 +309,6 @@ func emitCoroProgramBootstrapFactoryV2(
 	b.SetBlockEx(panicked, llssa.AtEnd, false)
 	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendPanicV1, prog.Uint16()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
-	b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(uint64(len(bootstrap.Steps)+1), prog.Uint32()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
 	b.Call(
 		panicPrepare.Expr,
@@ -329,7 +324,6 @@ func emitCoroProgramBootstrapFactoryV2(
 
 	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendFrameCompleteV1, prog.Uint16()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
-	b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(uint64(len(bootstrap.Steps)+1), prog.Uint32()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
 	b.Call(
 		complete.Expr,
@@ -344,6 +338,14 @@ func emitCoroProgramBootstrapFactoryV2(
 	coroBuilder.Finish()
 	b.Dispose()
 	return factory
+}
+
+func coroProgramFrameMetadataWordsV2(prog llssa.Program) int64 {
+	pointerSize := prog.PointerSize()
+	if pointerSize != 4 && pointerSize != 8 {
+		panic("coroutine bootstrap metadata requires a 32-bit or 64-bit pointer target")
+	}
+	return int64(12 + 4/pointerSize)
 }
 
 func validateCoroProgramBootstrapFactoryV2(
@@ -402,8 +404,6 @@ func coroProgramBootstrapHeaderTypeV1(prog llssa.Program) llssa.Type {
 		prog.VoidPtr(), // ResultSlot
 		prog.Uint16(),  // SuspendReason
 		prog.Uint16(),  // Lifecycle
-		prog.Uint32(),  // StateID
 		prog.Uint32(),  // Line
-		prog.Uint32(),  // Flags
 	)
 }

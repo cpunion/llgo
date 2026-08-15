@@ -38,16 +38,14 @@ func TestHeaderV1TargetNeutralLayout(t *testing.T) {
 		{"ResultSlot", unsafe.Offsetof(header.ResultSlot), 4 * pointerSize},
 		{"SuspendReason", unsafe.Offsetof(header.SuspendReason), 5 * pointerSize},
 		{"Lifecycle", unsafe.Offsetof(header.Lifecycle), 5*pointerSize + 2},
-		{"StateID", unsafe.Offsetof(header.StateID), 5*pointerSize + 4},
-		{"Line", unsafe.Offsetof(header.Line), 5*pointerSize + 8},
-		{"Flags", unsafe.Offsetof(header.Flags), 5*pointerSize + 12},
+		{"Line", unsafe.Offsetof(header.Line), 5*pointerSize + 4},
 	}
 	for _, field := range wants {
 		if field.got != field.want {
 			t.Fatalf("HeaderV1.%s offset = %d, want %d", field.name, field.got, field.want)
 		}
 	}
-	rawSize := 5*pointerSize + 16
+	rawSize := 5*pointerSize + 8
 	wantSize := (rawSize + pointerSize - 1) &^ (pointerSize - 1)
 	if got := unsafe.Sizeof(header); got != wantSize {
 		t.Fatalf("HeaderV1 size = %d, want %d", got, wantSize)
@@ -55,8 +53,8 @@ func TestHeaderV1TargetNeutralLayout(t *testing.T) {
 }
 
 func TestFrameAllocationLayout(t *testing.T) {
-	if got, capacity := unsafe.Sizeof(Frame{}), unsafe.Sizeof(BorrowedFrameStorageV2{}); got > capacity {
-		t.Fatalf("Frame size = %d, borrowed ABI capacity = %d", got, capacity)
+	if got, capacity := unsafe.Sizeof(Frame{}), unsafe.Sizeof(BorrowedFrameStorageV2{}); got != capacity {
+		t.Fatalf("Frame size = %d, want exact borrowed ABI capacity %d", got, capacity)
 	}
 	for _, align := range []uintptr{1, 2, 4, 8, 16, 64} {
 		total, ok := FrameAllocationSize(37, align)
@@ -78,13 +76,38 @@ func TestFrameAllocationLayout(t *testing.T) {
 		}
 		runtime.KeepAlive(memory)
 	}
+	for _, align := range []uintptr{1, 2, 4, 8, 16, 64} {
+		total, ok := CompilerFrameAllocationSize(37, align)
+		if !ok {
+			t.Fatalf("CompilerFrameAllocationSize(37, %d) rejected", align)
+		}
+		memory := make([]byte, total)
+		raw := unsafe.Pointer(&memory[0])
+		storage, ok := compilerAlignedStorage(raw, align)
+		if !ok || uintptr(storage)%align != 0 ||
+			!allocationContains(raw, total, storage, 37) {
+			t.Fatalf("compact compiler storage align %d = (%p, %t)", align, storage, ok)
+		}
+		receipt, ok := compilerFrameReceipt(storage)
+		if !ok || uintptr(unsafe.Pointer(receipt)) < uintptr(raw) ||
+			!allocationContains(raw, total, unsafe.Pointer(receipt), unsafe.Sizeof(*receipt)) {
+			t.Fatalf("compact compiler receipt align %d = (%p, %t)", align, receipt, ok)
+		}
+		runtime.KeepAlive(memory)
+	}
 	for _, align := range []uintptr{0, 3, 6} {
 		if _, ok := FrameAllocationSize(1, align); ok {
 			t.Fatalf("invalid alignment %d accepted", align)
 		}
+		if _, ok := CompilerFrameAllocationSize(1, align); ok {
+			t.Fatalf("invalid compact compiler alignment %d accepted", align)
+		}
 	}
 	if _, ok := FrameAllocationSize(^uintptr(0), 8); ok {
 		t.Fatal("overflowing frame allocation accepted")
+	}
+	if _, ok := CompilerFrameAllocationSize(^uintptr(0), 8); ok {
+		t.Fatal("overflowing compact compiler frame allocation accepted")
 	}
 	offset := unsafe.Sizeof(Frame{}) + unsafe.Sizeof(uintptr(0))
 	if _, ok := alignedStorageOffset(^uintptr(0)-offset-1, 8); ok {
@@ -114,7 +137,7 @@ func TestBorrowedFrameV2PublishAndDestroy(t *testing.T) {
 	}
 	frame := (*Frame)(unsafe.Pointer(metadata))
 	if g.frames != frame || frame.owner != g || frame.handle != handle ||
-		frame.header != header || frame.storage != nil || frame.rawBase != nil ||
+		frame.header != header || frame.allocationSize != 0 ||
 		!frame.borrowedStorage || frame.state != FrameInitialSuspended ||
 		header.AllocationBase != unsafe.Pointer(frame) {
 		t.Fatalf("borrowed publication = %+v, header base=%p", frame, header.AllocationBase)
@@ -152,15 +175,13 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 		ResultSlot:     unsafe.Pointer(new(byte)),
 		SuspendReason:  ^uint16(0),
 		Lifecycle:      ^uint16(0),
-		StateID:        ^uint32(0),
 		Line:           ^uint32(0),
-		Flags:          ^uint32(0),
 	}
 	metadata := new(BorrowedFrameStorageV2)
 	for index := range metadata {
 		metadata[index] = ^uintptr(0)
 	}
-	if !PublishFrameV3(
+	if !PublishFrameV3Compiler(
 		g, handle, header, nil, unsafe.Pointer(metadata),
 		unsafe.Pointer(descriptor), resultSlot,
 	) {
@@ -168,12 +189,11 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 	}
 	frame := (*Frame)(unsafe.Pointer(metadata))
 	if g.frames != frame || frame.owner != g || frame.handle != handle || frame.header != header ||
-		frame.descriptor != unsafe.Pointer(descriptor) || !frame.borrowedStorage ||
+		frame.header.Descriptor != unsafe.Pointer(descriptor) || !frame.borrowedStorage ||
 		header.G != unsafe.Pointer(g) || header.Parent != nil ||
 		header.Descriptor != unsafe.Pointer(descriptor) || header.AllocationBase != unsafe.Pointer(frame) ||
 		header.ResultSlot != resultSlot || header.SuspendReason != uint16(SuspendNone) ||
-		header.Lifecycle != uint16(FrameInitialSuspended) || header.StateID != 0 ||
-		header.Line != 0 || header.Flags != 0 {
+		header.Lifecycle != uint16(FrameInitialSuspended) || header.Line != 0 {
 		t.Fatalf("V3 borrowed publication frame=%+v header=%+v", frame, header)
 	}
 	frame.state = FrameDestroyPending
@@ -182,6 +202,90 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 	if !CommitFrameDestroyV2(g, handle) {
 		t.Fatal("commit initialized borrowed frame destroy")
 	}
+}
+
+func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("InitG failed")
+	}
+	const (
+		size  = uintptr(256)
+		align = uintptr(16)
+	)
+	total, ok := CompilerFrameAllocationSize(size, align)
+	if !ok {
+		t.Fatal("compute compiler frame allocation")
+	}
+	memory := make([]byte, total)
+	descriptor := &FrameDescriptorV1{Version: 1, ResultAlign: 1, Function: "test.compiler.dynamic"}
+	storage, ok := RegisterFrameCompiler(
+		g, unsafe.Pointer(&memory[0]), total, size, align, unsafe.Pointer(descriptor),
+	)
+	if !ok {
+		t.Fatal("register compiler frame")
+	}
+	handle := unsafe.Pointer(new(byte))
+	header := (*HeaderV1)(unsafe.Add(storage, 16))
+	metadata := (*BorrowedFrameStorageV2)(unsafe.Add(storage, 80))
+	if !PublishFrameV3Compiler(
+		g, handle, header, storage, unsafe.Pointer(metadata),
+		unsafe.Pointer(descriptor), nil,
+	) {
+		t.Fatal("publish compiler frame")
+	}
+	frame := FrameFromStorage(storage)
+	if frame == nil || g.frames != frame || frame.owner != g || frame.handle != handle ||
+		frame.header != header || frame.header.Descriptor != unsafe.Pointer(descriptor) ||
+		frame.allocationSize != total || frame.state != FrameInitialSuspended ||
+		frame.borrowedStorage || header.AllocationBase != unsafe.Pointer(&memory[0]) ||
+		frame != (*Frame)(unsafe.Pointer(metadata)) {
+		t.Fatalf("compiler frame publication = %+v, header=%+v", frame, header)
+	}
+	frame.state = FrameDestroyPending
+	header.Lifecycle = uint16(FrameDestroyPending)
+	g.destroyTarget = frame
+	releasedMetadata, raw, released, ok := ReleaseFrameCompiler(
+		g, storage, size, align, unsafe.Pointer(descriptor),
+	)
+	if !ok || releasedMetadata != unsafe.Pointer(metadata) ||
+		raw != unsafe.Pointer(&memory[0]) || released != total {
+		t.Fatalf(
+			"compiler frame release = (%p, %p, %d, %t), want (%p, %p, %d, true)",
+			releasedMetadata, raw, released, ok, metadata, &memory[0], total,
+		)
+	}
+	if g.frames != nil || g.destroyTarget != nil || frame.state != FrameDestroyed ||
+		header.Lifecycle != uint16(FrameDestroyed) {
+		t.Fatalf("compiler frame release retained state: frames=%p target=%p frame=%d header=%d", g.frames, g.destroyTarget, frame.state, header.Lifecycle)
+	}
+	// A panic keeps the embedded metadata while the physical raw allocation is
+	// distinct. The dead handle word must carry that base through trace discard
+	// so the allocator receives the exact original range.
+	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	parent := &Frame{completion: CompletionRecord{
+		status: CompletionPanic, child: handle, typeWord: typeWord, dataWord: dataWord,
+	}}
+	frame.parent = parent
+	frame.retainPanicTrace = true
+	if !RetainPendingPanicTraceFrameCompiler(
+		g, releasedMetadata, raw, released,
+	) || g.panicTraceHead != frame || g.panicTraceTail != frame ||
+		frame.state != FrameTraceRetained ||
+		unsafe.Pointer(frame.header) != unsafe.Pointer(descriptor) || frame.handle != raw {
+		t.Fatalf("retain compact compiler panic frame = %+v", frame)
+	}
+	if !stagePanicTraceDiscard(g) {
+		t.Fatal("stage compact compiler panic trace discard")
+	}
+	discardedRaw, discardedTotal, ok := TakeDiscardedPanicTraceFrame(g)
+	if !ok || discardedRaw != raw || discardedTotal != released {
+		t.Fatalf(
+			"compact compiler panic discard = (%p, %d, %t), want (%p, %d, true)",
+			discardedRaw, discardedTotal, ok, raw, released,
+		)
+	}
+	runtime.KeepAlive(memory)
 }
 
 type testFrame struct {
@@ -263,11 +367,11 @@ func retainDetachedTestPanicTrace(
 	}
 	memory = make([]byte, unsafe.Sizeof(Frame{}))
 	raw := unsafe.Pointer(&memory[0])
+	header := &HeaderV1{Descriptor: unsafe.Pointer(descriptor)}
 	*(*Frame)(raw) = Frame{
 		owner:          g,
-		rawBase:        raw,
 		allocationSize: uintptr(len(memory)),
-		descriptor:     unsafe.Pointer(descriptor),
+		header:         header,
 		state:          FrameDestroyed,
 		parent:         carrier,
 	}
@@ -359,6 +463,62 @@ func TestReleaseFrameDoesNotPartiallyCommitFailedUnlink(t *testing.T) {
 		t.Fatalf("failed release partially committed: state=%d lifecycle=%d target=%p", frame.state, test.header.Lifecycle, g.destroyTarget)
 	}
 	runtime.KeepAlive(test.memory)
+}
+
+func TestReleaseFrameRequiresExactDerivedLayout(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testFrame) (uintptr, uintptr, unsafe.Pointer)
+	}{
+		{
+			name: "size",
+			mutate: func(frame *testFrame) (uintptr, uintptr, unsafe.Pointer) {
+				return frame.size + 1, frame.align, frame.descriptor
+			},
+		},
+		{
+			name: "alignment",
+			mutate: func(frame *testFrame) (uintptr, uintptr, unsafe.Pointer) {
+				return frame.size, frame.align * 2, frame.descriptor
+			},
+		},
+		{
+			name: "invalid alignment",
+			mutate: func(frame *testFrame) (uintptr, uintptr, unsafe.Pointer) {
+				return frame.size, 3, frame.descriptor
+			},
+		},
+		{
+			name: "descriptor",
+			mutate: func(frame *testFrame) (uintptr, uintptr, unsafe.Pointer) {
+				return frame.size, frame.align, unsafe.Pointer(new(FrameDescriptorV1))
+			},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := new(G)
+			if !InitG(g) {
+				t.Fatal("InitG failed")
+			}
+			test := newTestFrame(t, g, unsafe.Pointer(new(byte)), nil)
+			frame := FrameFromStorage(test.storage)
+			frame.state = FrameDestroyPending
+			test.header.Lifecycle = uint16(FrameDestroyPending)
+			g.destroyTarget = frame
+			size, align, descriptor := testCase.mutate(test)
+
+			if _, _, ok := ReleaseFrame(g, test.storage, size, align, descriptor); ok {
+				t.Fatal("release accepted mismatched compiler layout metadata")
+			}
+			if g.frames != frame || g.destroyTarget != frame || frame.state != FrameDestroyPending ||
+				test.header.Lifecycle != uint16(FrameDestroyPending) {
+				t.Fatalf("failed release mutated ownership: frames=%p target=%p state=%d lifecycle=%d", g.frames, g.destroyTarget, frame.state, test.header.Lifecycle)
+			}
+			releaseTestFrame(t, g, test)
+			runtime.KeepAlive(test.memory)
+		})
+	}
 }
 
 func TestSinglePSchedulerChildDestroyedBeforeParentResume(t *testing.T) {

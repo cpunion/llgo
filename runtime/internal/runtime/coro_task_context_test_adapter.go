@@ -43,6 +43,10 @@ func coroBindTaskAllocationRuntimeContext(task, parent *coro.G) bool {
 	return task != nil
 }
 
+func coroBindTaskAllocationRuntimeContextCompiler(task, parent *coro.G) bool {
+	return task != nil && parent != nil
+}
+
 var coroTestRuntimeContextV1 byte
 
 func coroCaptureRuntimeContextV1() unsafe.Pointer {

@@ -104,7 +104,7 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 			terminal, reduced = coroReduceExecutorRunActionPreparedV1(
 				p, driver, policy, target,
 				actionStep.G, actionStep.Action, actionStep.Dispatched,
-				returnRequested, runtimeContext, &result,
+				returnRequested, runtimeContext, budget-result.used, &result,
 			)
 		} else {
 			step, nextOK := coroProgramNextRunStepV1(driver, &run, combineDispatch)
@@ -113,7 +113,8 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 				return coroRunResultV1{}
 			}
 			terminal, reduced = coroReduceExecutorRunStepV1(
-				p, driver, policy, target, step, runtimeContext, &result,
+				p, driver, policy, target, step, runtimeContext,
+				budget-result.used, &result,
 			)
 		}
 		if !reduced {

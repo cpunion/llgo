@@ -684,7 +684,7 @@ func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
 		if kind != goFunc {
 			panic("patch original initializer outcome target did not resolve to a Go entry")
 		}
-		completion := p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), true)
+		completion := p.structuredOutcomeScratch()
 		resultType := p.prog.Type(newOutcomePlainPhysicalABI(original.Signature).resultSlotType, llssa.InGo)
 		resultSlot := p.structuredOutcomeAlloca(resultType, false)
 		b.Call(calleeFn.Expr,
@@ -745,6 +745,31 @@ func (p *context) structuredOutcomeAlloca(typ llssa.Type, zeroed bool) llssa.Exp
 		return alloc.AllocaZeroedT(typ)
 	}
 	return alloc.AllocaT(typ)
+}
+
+// structuredOutcomeScratch returns the one status/interface record owned by
+// the active physical body. Every consumer completes before source execution
+// can begin another transaction in the same frame: outcome-plain calls are
+// synchronous, and a coroutine child keeps its parent suspended until the
+// scheduler-owned completion has been consumed. The record therefore has a
+// function-wide non-overlapping lifetime even when several source call sites
+// survive CoroSplit.
+func (p *context) structuredOutcomeScratch() llssa.Expr {
+	if !p.hasStructuredOutcomePhysicalBody() || p.fn == nil {
+		panic("structured outcome scratch requires an active physical body")
+	}
+	slot, coroutine := p.activeStructuredOutcomeScratchSlot()
+	if slot == nil {
+		panic("structured outcome scratch lost its physical owner")
+	}
+	if slot.IsNil() {
+		if coroutine {
+			*slot = p.coroFrameAlloc(outcomePlainCompletionType(p.prog))
+		} else {
+			*slot = p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), true)
+		}
+	}
+	return *slot
 }
 
 func (p *context) coroFrameByteAlloca(b llssa.Builder, size int64) llssa.Expr {
@@ -848,9 +873,10 @@ func (p *context) awaitCoroChildWithRecovery(
 	if body.abi.awaitConsumeHook == "" {
 		panic("coroutine child await has no outcome consume hook")
 	}
-	typeWord := p.coroFrameAlloca(p.prog.VoidPtr())
-	dataWord := p.coroFrameAlloca(p.prog.VoidPtr())
-	statusWord := p.coroFrameAlloca(p.prog.Uint32())
+	outcomeScratch := p.structuredOutcomeScratch()
+	typeWord := b.FieldAddr(outcomeScratch, outcomePlainCompletionTypeWord)
+	dataWord := b.FieldAddr(outcomeScratch, outcomePlainCompletionDataWord)
+	statusWord := b.FieldAddr(outcomeScratch, outcomePlainCompletionStatus)
 	b.Store(typeWord, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(dataWord, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(statusWord, p.prog.IntVal(0, p.prog.Uint32()))

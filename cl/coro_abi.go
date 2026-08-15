@@ -146,7 +146,6 @@ const (
 	coroCompletePrepareHookV2                  = "__llgo_coro_complete_prepare_v2"
 	coroFrameFreeHookV1                        = "__llgo_coro_frame_free_v1"
 	coroDescriptorPrefixV1                     = "__llgo_coro_frame_descriptor_v1."
-	coroBorrowedFrameMetadataWordsV2           = 20
 )
 
 const (
@@ -163,9 +162,7 @@ const (
 	coroHeaderResultSlot
 	coroHeaderSuspendReason
 	coroHeaderLifecycle
-	coroHeaderStateID
 	coroHeaderLine
-	coroHeaderFlags
 )
 
 const (
@@ -197,7 +194,6 @@ const coroPreemptInstructionBudget = 64
 // storage whose address never escapes; the ordinary SROA/mem2reg pipeline can
 // therefore keep it in SSA registers on a non-suspending loop edge. Every
 // activation resets it, so it is not live across a scheduler-visible suspend.
-// StateID remains exclusively the published resume-state identity.
 const coroPreemptCheckpointStride uint64 = 2048
 
 type coroPhysicalABI struct {
@@ -258,14 +254,22 @@ type coroBodyContext struct {
 	completePrepare        llssa.Expr
 	terminalStatus         llssa.Expr
 	preemptCountdown       llssa.Expr
-	nextState              uint32
-	terminalState          uint32
-	needsPreempt           bool
-	instructions           int
-	frameRetention         *coroFrameRetentionProof
-	critical               *coroCriticalProof
-	terminalResultAllocs   map[*ssa.Alloc]llssa.Expr
-	sourceBlockPollFresh   bool
+	// outcomeScratch is the one frame-local status/interface record shared by
+	// every fully consumed managed child transaction. Source execution cannot
+	// overlap two calls in one physical frame: a coroutine child suspends its
+	// parent until the old outcome is consumed, while an outcome-plain child
+	// returns synchronously. Keeping one directly addressed record avoids one
+	// permanent CoroSplit field per call site without adding a runtime lookup or
+	// dynamic lifetime protocol.
+	outcomeScratch       llssa.Expr
+	nextState            uint32
+	terminalState        uint32
+	needsPreempt         bool
+	instructions         int
+	frameRetention       *coroFrameRetentionProof
+	critical             *coroCriticalProof
+	terminalResultAllocs map[*ssa.Alloc]llssa.Expr
+	sourceBlockPollFresh bool
 }
 
 func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *types.Signature) coroPhysicalABI {
@@ -461,10 +465,18 @@ func coroHeaderType(prog llssa.Program) llssa.Type {
 		prog.VoidPtr(), // result slot
 		prog.Uint16(),  // suspend reason
 		prog.Uint16(),  // lifecycle state
-		prog.Uint32(),  // state ID
 		prog.Uint32(),  // source line
-		prog.Uint32(),  // flags
 	)
+}
+
+func coroBorrowedFrameMetadataWordsV2(prog llssa.Program) int64 {
+	pointerSize := prog.PointerSize()
+	if pointerSize != 4 && pointerSize != 8 {
+		panic("coroutine frame metadata requires a 32-bit or 64-bit pointer target")
+	}
+	// Mirrors runtime/internal/coro.BorrowedFrameStorageV2. The native Frame is
+	// twelve words; pointer-32 needs one extra word for its uint32 status field.
+	return int64(12 + 4/pointerSize)
 }
 
 func (p *context) beginCoroBody(
@@ -488,11 +500,11 @@ func (p *context) beginCoroBody(
 	headerType := coroHeaderType(prog)
 	header := b.AllocaT(headerType)
 	borrowedFrameMetadataType := p.type_(
-		types.NewArray(types.Typ[types.Uintptr], coroBorrowedFrameMetadataWordsV2),
+		types.NewArray(types.Typ[types.Uintptr], coroBorrowedFrameMetadataWordsV2(prog)),
 		llssa.InGo,
 	)
 	// Dynamic ramps never consume this fallback storage. Leave it uninitialized
-	// here so every ordinary coroutine creation does not pay a 20-word memset;
+	// here so every ordinary coroutine creation does not pay a metadata memset;
 	// PublishFrameV2 initializes the complete private Frame only when LLVM has
 	// actually selected the allocation-elided path (storage == nil).
 	borrowedFrameMetadata := b.AllocaT(borrowedFrameMetadataType)
@@ -533,10 +545,8 @@ func (p *context) beginCoroBody(
 		// managed calls and receive their ordinary Return outcomes.
 		body.terminalStatus = b.AllocaT(prog.Uint32())
 		b.Store(body.terminalStatus, prog.IntVal(coroAwaitCompletionReturn, prog.Uint32()))
-		// This address is compiler-private and never reaches a runtime call. It
-		// deliberately differs from Header.StateID: that externally visible
-		// field aliases runtime validation calls and therefore forces a
-		// load/store on every otherwise plain loop edge.
+		// This address is compiler-private and never reaches a runtime call, so
+		// ordinary SROA can keep it in SSA registers on non-suspending edges.
 		body.preemptCountdown = b.AllocaT(prog.Uint32())
 	}
 	if abi.runDecisionTakeZeroHook != "" {
@@ -820,12 +830,11 @@ func coroPanicTraceReplaceSignature() *types.Signature {
 func (c *coroBodyContext) publishState(
 	b llssa.Builder,
 	reason, lifecycle uint64,
-	stateID, line uint32,
+	_ uint32, line uint32,
 ) {
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(reason, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(lifecycle, prog.Uint16()))
-	b.Store(b.FieldAddr(c.header, coroHeaderStateID), prog.IntVal(uint64(stateID), prog.Uint32()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLine), prog.IntVal(uint64(line), prog.Uint32()))
 }
 
@@ -1121,7 +1130,6 @@ func (c *coroBodyContext) panicWithLine(
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(coroSuspendPanic, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(coroLifecycleFinalSuspended, prog.Uint16()))
-	b.Store(b.FieldAddr(c.header, coroHeaderStateID), prog.IntVal(uint64(c.terminalStateID()), prog.Uint32()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLine), line)
 	b.Call(
 		c.panicPrepare,
@@ -1175,6 +1183,10 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	physicalPlan, err := (emissionCanonicalIndex{universe: p.emissionUniverse}).physicalFunctionPlanForEmission(fn, p.emissionOwner)
 	if err != nil {
 		panic(fmt.Errorf("load frozen coroutine physical plan: %w", err))
+	}
+	if physicalPlan.tailForward != nil {
+		p.compileCoroTailForwardPhysicalBody(b, fn, physicalPlan, sourceParamBase)
+		return
 	}
 	frameRetention := physicalPlan.frameRetention
 	critical := physicalPlan.critical
@@ -1298,6 +1310,55 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	b.SetBlock(physical.finalSuspend)
 	physical.finish(b)
 	emission.completeManagedPhysicalBody(bodyCapability)
+}
+
+// compileCoroTailForwardPhysicalBody emits a stable coroutine entry ramp that
+// owns no coroutine frame. The frozen physical plan guarantees that its source
+// body is exactly one static call followed by an unchanged return, so passing
+// the task and result slot straight through preserves every terminal and
+// suspension protocol while avoiding a redundant parent await transaction.
+func (p *context) compileCoroTailForwardPhysicalBody(
+	b llssa.Builder,
+	function *ssa.Function,
+	physical *coroPhysicalFunctionPlan,
+	sourceParamBase int,
+) {
+	if p == nil || b == nil || b.Func != p.fn || function == nil || physical == nil ||
+		physical.function != function || physical.tailForward == nil ||
+		p.compilation == nil || p.immutablePlan() == nil || sourceParamBase < 2 {
+		panic("coroutine tail-forward emission requires one exact frozen physical plan")
+	}
+	forward := physical.tailForward
+	if err := forward.validate(function, p.immutablePlan()); err != nil {
+		panic(fmt.Errorf("validate frozen coroutine tail-forward plan: %w", err))
+	}
+	if sourceParamBase != 2 {
+		panic("coroutine tail-forward source unexpectedly has a closure environment")
+	}
+
+	b.SetBlock(p.fn.Block(0))
+	entry := p.mustFunctionSymbol(forward.target)
+	if entry.plan.ID != forward.targetID || !entry.usesCoroPhysicalABI() {
+		panic("coroutine tail-forward target no longer resolves to its frozen physical entry")
+	}
+	target, _, kind := p.compileFunctionEntry(entry)
+	if kind != goFunc || target == nil {
+		panic("coroutine tail-forward target did not resolve to a Go coroutine entry")
+	}
+	args := make([]llssa.Expr, 0, len(forward.args)+2)
+	args = append(args, p.fn.PhysicalParam(0), p.fn.PhysicalParam(1))
+	for _, argument := range forward.args {
+		if argument.sourceParameter >= 0 {
+			args = append(args, p.fn.PhysicalParam(sourceParamBase+argument.sourceParameter))
+			continue
+		}
+		args = append(args, p.compileValueAs(b, argument.constant, argument.targetType))
+	}
+	handle := b.Call(target.Expr, args...)
+	if handle.Type == nil || !types.Identical(handle.RawType(), types.Typ[types.UnsafePointer]) {
+		panic("coroutine tail-forward target returned a non-handle value")
+	}
+	b.Return(handle)
 }
 
 // validateCoroExactSyntheticForwarder proves the complete SSA body shared by

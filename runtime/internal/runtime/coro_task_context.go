@@ -116,6 +116,62 @@ func coroBindTaskAllocationRuntimeContext(task, parent *coro.G) bool {
 	return coroBindRuntimeContextAt(task, parentG, ctx, true)
 }
 
+// coroBindTaskAllocationRuntimeContextCompiler is the adjacent spawn lane.
+// BeginSpawnCompiler has already established that task is the aligned base of
+// a fresh zero-filled coroTaskAllocation, while the currently resumed parent
+// owns the only reference to it. Validate the parent's live logical context
+// directly, initialize the known tail address, and publish it through the
+// reciprocal compiler transaction without repeating generic task audits.
+func coroBindTaskAllocationRuntimeContextCompiler(task, parent *coro.G) bool {
+	if task == nil || parent == nil || coro.TaskLocal(task) != nil {
+		return false
+	}
+	parentContext := (*coroRuntimeContext)(coro.TaskLocal(parent))
+	if parentContext == nil {
+		return false
+	}
+	parentG := &parentContext.g
+	if parentG.context != parentContext || parentG.localContext != &parentContext.local ||
+		parentG.startfn != nil || parentG.startarg != unsafe.Pointer(parent) {
+		return false
+	}
+	if parentG.coroEmbedded {
+		if parentContext != &(*coroTaskAllocation)(unsafe.Pointer(parent)).context {
+			return false
+		}
+	} else if !parentG.isMain {
+		return false
+	}
+	switch readgstatus(parentG) {
+	case _Grunnable:
+		if parentG.m != nil {
+			return false
+		}
+	case _Grunning:
+		if parentG.m == nil || parentG.m.curg != parentG || parentG.m.p == nil ||
+			parentG.m.p.m != parentG.m || readpstatus(parentG.m.p) != _Prunning {
+			return false
+		}
+	default:
+		return false
+	}
+
+	ctx := &(*coroTaskAllocation)(unsafe.Pointer(task)).context
+	if ctx.g.context != nil || ctx.g.localContext != nil {
+		return false
+	}
+	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)
+	gp.localContext = &ctx.local
+	gp.isMain = false
+	gp.coroEmbedded = true
+	if coro.BindTaskLocalCompiler(task, unsafe.Pointer(ctx)) {
+		gp.startarg = unsafe.Pointer(task)
+		return true
+	}
+	discardCoroRuntimeContext(ctx, false)
+	return false
+}
+
 // validCoroRuntimeContext checks only state which follows the logical G. Its
 // temporary physical M/P attachment is validated exactly once by enter/leave;
 // parent spawn admission performs its own running-state check.

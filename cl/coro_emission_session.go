@@ -192,6 +192,20 @@ func (p *context) hasStructuredOutcomePhysicalBody() bool {
 	return p.activeCoroPhysicalBodyCapability() != nil
 }
 
+// activeStructuredOutcomeScratchSlot exposes only the reusable completion
+// record owned by the active exclusive body. Keeping the body choice here
+// avoids giving the call lowerer another complete coroutine-body capability.
+func (p *context) activeStructuredOutcomeScratchSlot() (slot *llssa.Expr, coroutine bool) {
+	body := p.activeCoroPhysicalBodyCapability()
+	if body == nil {
+		return nil, false
+	}
+	if body.coroutine != nil {
+		return &body.coroutine.outcomeScratch, true
+	}
+	return &body.outcome.outcomeScratch, false
+}
+
 // managedPhysicalTask is the scheduler-owned G passed to either structured
 // physical ABI. Outcome-plain DAG calls forward it unchanged; only a full LLVM
 // coroutine body may consume the coroutine and cleanup capabilities below.

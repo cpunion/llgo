@@ -922,6 +922,57 @@ func ResumedExecutorRun(
 	return next, true, true
 }
 
+// CanBeginIssuedExecutorDestroyAfterResume reports whether one still-private
+// issued resume may enter its adjacent normal-completion destroy interval.
+// The optimization cannot cross an already-runnable peer, panic/cancellation,
+// foreign reentry, producer callback, or host boundary. Keeping the issued
+// capability live avoids a ready-tail round trip for an otherwise isolated
+// short-lived coroutine, while llvm.coro.done remains an independent guard.
+//
+// Panic unwinding and foreign reentry deliberately retain their existing
+// separately scheduled destroy paths because those transitions carry an
+// externally visible control boundary in addition to frame completion.
+func CanBeginIssuedExecutorDestroyAfterResume(
+	driver *ExecutorDriver,
+	g *G,
+	action Action,
+) bool {
+	if !validIssuedExecutorRunAction(driver) ||
+		driver.run.issued != ActionCheckResume || g == nil {
+		return false
+	}
+	p := driver.p
+	if p.current != g || g.runP != p || p.inResume || p.inlineAwaitDepth != 0 ||
+		p.action != action || action.Kind != ActionCheckDestroy || action.Flags != 0 ||
+		action.Handle == nil || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
+		g.state != GDispatching || g.destroyTarget == nil ||
+		g.destroyTarget.handle != action.Handle ||
+		g.destroyTarget.state != FrameDestroyPending ||
+		g.park.taskCancelPhase == taskCancelRequested || g.panicUnwind ||
+		p.foreignReentry != nil || driver.run.readyDebt || runnableForOSThreadOwner(p) {
+		return false
+	}
+	return true
+}
+
+// BeginIssuedExecutorDestroyAfterResume consumes the checked private interval
+// after the compiler-owned llvm.coro.done observation succeeds.
+func BeginIssuedExecutorDestroyAfterResume(
+	driver *ExecutorDriver,
+	g *G,
+	action Action,
+	done bool,
+) (Action, bool) {
+	if !done || !CanBeginIssuedExecutorDestroyAfterResume(driver, g, action) {
+		return Action{}, false
+	}
+	p := driver.p
+	next := Action{Kind: ActionDestroy, Handle: action.Handle}
+	driver.run.issued = ActionCheckDestroy
+	p.action = next
+	return next, true
+}
+
 // CommitExecutorRunAction closes the no-return physical interval opened by an
 // Action step. A live continuation is moved to the ready tail; terminal and
 // yield/park control actions are already stable. The function retains neither

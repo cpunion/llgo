@@ -902,11 +902,37 @@ func coroTestIsAwaitCompletionSwitch(terminator llvm.Value) bool {
 func coroTestBlockStoresValueTo(block llvm.BasicBlock, value, address llvm.Value) bool {
 	for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
 		if instruction.InstructionOpcode() == llvm.Store &&
-			instruction.Operand(0) == value && instruction.Operand(1) == address {
+			instruction.Operand(0) == value && coroTestSameAddress(instruction.Operand(1), address) {
 			return true
 		}
 	}
 	return false
+}
+
+// coroTestSameAddress recognizes equivalent GEP expressions even when LLVM has
+// emitted separate SSA instructions for the same field in shared frame storage.
+func coroTestSameAddress(left, right llvm.Value) bool {
+	if left == right {
+		return true
+	}
+	if left.IsNil() || right.IsNil() || left.IsAGetElementPtrInst().IsNil() || right.IsAGetElementPtrInst().IsNil() ||
+		left.OperandsCount() != right.OperandsCount() {
+		return false
+	}
+	for index := 0; index < left.OperandsCount(); index++ {
+		leftOperand, rightOperand := left.Operand(index), right.Operand(index)
+		if leftOperand == rightOperand {
+			continue
+		}
+		if !leftOperand.IsAConstantInt().IsNil() && !rightOperand.IsAConstantInt().IsNil() &&
+			leftOperand.ZExtValue() == rightOperand.ZExtValue() {
+			continue
+		}
+		if !coroTestSameAddress(leftOperand, rightOperand) {
+			return false
+		}
+	}
+	return true
 }
 
 func coroTestBlockCanReachDirectCall(entry llvm.BasicBlock, callee string) bool {

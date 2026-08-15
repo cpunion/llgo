@@ -74,6 +74,37 @@ func TestTakeRunDecisionWordsAcceptsZeroTicketNormalResume(t *testing.T) {
 	finishWaitTestTask(t, p, task, action)
 }
 
+func TestTakeRunDecisionWordsCompilerConsumesAdjacentZeroDecision(t *testing.T) {
+	p := new(P)
+	task := newYieldingTestG(t, "compiler-run-decision-words-normal")
+	action := beginWaitTestResumeWithoutGate(t, p, task)
+	outcome, caseID, taskKind, sourceSlot, generation, ok := TakeRunDecisionWordsCompiler(task.g, 0, 0)
+	if !ok || outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 ||
+		!p.runDecisionTaken || p.runDecision != (RunDecision{}) {
+		t.Fatalf("compiler zero decision = (%d,%d,%d,%d,%d,%t), retained=%+v taken=%t",
+			outcome, caseID, taskKind, sourceSlot, generation, ok, p.runDecision, p.runDecisionTaken)
+	}
+	if outcome, caseID, taskKind, sourceSlot, generation, ok = TakeRunDecisionWordsCompiler(task.g, 0, 0); ok ||
+		outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 {
+		t.Fatalf("compiler zero decision replay = (%d,%d,%d,%d,%d,%t)",
+			outcome, caseID, taskKind, sourceSlot, generation, ok)
+	}
+	finishWaitTestTask(t, p, task, action)
+}
+
+func TestTakeRunDecisionWordsCompilerRejectsMalformedActionWithoutMutation(t *testing.T) {
+	fixture := newUncheckedResumeGateFixture(t, "compiler-run-decision-malformed")
+	fixture.p.action.Handle = nil
+	if outcome, caseID, taskKind, sourceSlot, generation, ok := TakeRunDecisionWordsCompiler(
+		fixture.task.g, 0, 0,
+	); ok || outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 ||
+		fixture.p.runDecisionTaken || fixture.p.runDecision != (RunDecision{}) {
+		t.Fatalf("malformed compiler decision = (%d,%d,%d,%d,%d,%t), retained=%+v taken=%t",
+			outcome, caseID, taskKind, sourceSlot, generation, ok,
+			fixture.p.runDecision, fixture.p.runDecisionTaken)
+	}
+}
+
 func TestTakeRunDecisionWordsPreservesExactTicketAndScalarizesLease(t *testing.T) {
 	p := new(P)
 	task := newYieldingTestG(t, "run-decision-words")

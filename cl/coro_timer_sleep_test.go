@@ -109,11 +109,11 @@ func TestCoroTimerSleepCurrentFrameNativeAndWasm32(t *testing.T) {
 				}
 			}
 			stateAndPark := regexp.MustCompile(
-				`(?s)store i16 4,.*store i16 3,.*store i32 1,.*call void @` + regexp.QuoteMeta(coroTimerParkHookV2) +
+				`(?s)store i16 4,.*store i16 3,.*store i32 [1-9][0-9]*,.*call void @` + regexp.QuoteMeta(coroTimerParkHookV2) +
 					`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i64 [^)]+\)`,
 			)
 			if !stateAndPark.MatchString(body) {
-				t.Fatalf("Root does not publish Park/Suspended/stateID=1 before Timer V2 park:\n%s", body)
+				t.Fatalf("Root does not publish Park/Suspended/source-line before Timer V2 park:\n%s", body)
 			}
 			park := strings.Index(body, "call void @"+coroTimerParkHookV2)
 			suspendRelative := strings.Index(body[park:], "call i8 @llvm.coro.suspend")

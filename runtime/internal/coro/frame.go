@@ -32,9 +32,7 @@ type HeaderV1 struct {
 	ResultSlot     unsafe.Pointer
 	SuspendReason  uint16
 	Lifecycle      uint16
-	StateID        uint32
 	Line           uint32
-	Flags          uint32
 }
 
 // FrameDescriptorV1 is the runtime prefix emitted for every physical
@@ -81,7 +79,12 @@ const (
 )
 
 // FrameState values deliberately match the lifecycle field emitted by cl.
-type FrameState uint16
+// FrameState has eight values and is scheduler-private. Keep it byte-sized so
+// the lifecycle/context/retention flags fill one pointer-aligned word after
+// panicLine instead of forcing a padding word in every physical frame. The
+// compiler-facing HeaderV1 lifecycle remains uint16 and is converted at the
+// validation boundary.
+type FrameState uint8
 
 const (
 	FrameAllocated FrameState = iota
@@ -91,6 +94,10 @@ const (
 	FrameFinalSuspended
 	FrameDestroyPending
 	FrameDestroyed
+	// FrameTraceRetained is no longer schedulable. Its dead header word carries
+	// the immutable descriptor while handle carries the raw allocation base;
+	// this avoids two duplicate pointers in every live physical frame.
+	FrameTraceRetained
 )
 
 // frameRuntimeContextMode is a publication-time cache of the immutable
@@ -155,10 +162,11 @@ type pendingTransition struct {
 	target        *Frame
 }
 
-// Frame is scheduler-owned metadata. It lives at the beginning of the same
-// allocation as the aligned LLVM frame storage. A back-pointer immediately
-// before storage makes the free hook independent of maps, TLS, pthreads,
-// libuv, and any particular garbage collector.
+// Frame is scheduler-owned metadata. Compiler-created dynamic and elided
+// coroutines place it in BorrowedFrameStorageV2 inside LLVM frame storage;
+// compatibility constructors may still place it at the allocation base. A
+// back-pointer immediately before storage keeps lookup independent of maps,
+// TLS, pthreads, libuv, and any particular garbage collector.
 type Frame struct {
 	owner  *G
 	handle unsafe.Pointer
@@ -175,11 +183,6 @@ type Frame struct {
 	// direct-parking LLVM coroutine frame; ordinary frames pay only this
 	// metadata pointer during the first migration stage.
 	parkWait       *WaitSetRecord
-	storage        unsafe.Pointer
-	rawBase        unsafe.Pointer
-	descriptor     unsafe.Pointer
-	size           uintptr
-	align          uintptr
 	allocationSize uintptr
 	panicLine      uint32
 	state          FrameState
@@ -202,12 +205,18 @@ type Frame struct {
 // Frame stored inside an elidable coroutine. It is intentionally opaque to
 // generated code: the compiler only reserves and forwards this pointer, while
 // the runtime initializes and remains the sole owner of Frame's private
-// layout. Twenty pointer
-// words cover both wasm32 and native layouts with expansion room; the compile-
-// time assertion fails if runtime metadata ever outgrows the ABI capacity.
-type BorrowedFrameStorageV2 [20]uintptr
+// layout. The compile-time assertion fails if runtime metadata ever outgrows
+// the ABI capacity. Twelve words exactly cover the native layout. Pointer-32 targets
+// need one additional word because CompletionRecord's uint32 status cannot
+// share pointer alignment padding; the compiler mirrors this formula from the
+// target pointer width. Dynamic frames record only the exact allocation size; their raw
+// base stays in HeaderV1 until destruction and moves into the dead handle word
+// only for the rare retained-panic trace. Keeping that pointer out of every
+// live Frame preserves the compact layout on native, wasm, and bare metal.
+type BorrowedFrameStorageV2 [12 + 4/unsafe.Sizeof(uintptr(0))]uintptr
 
 var _ [int(unsafe.Sizeof(BorrowedFrameStorageV2{})) - int(unsafe.Sizeof(Frame{}))]byte
+var _ [int(unsafe.Sizeof(Frame{})) - int(unsafe.Sizeof(BorrowedFrameStorageV2{}))]byte
 
 // ValidG reports whether g has been initialized as a coroutine task.
 func ValidG(g *G) bool {
@@ -217,10 +226,14 @@ func ValidG(g *G) bool {
 // FrameAllocationSize returns the single-allocation size needed for Frame,
 // the storage back-pointer, alignment padding, and the LLVM coroutine frame.
 func FrameAllocationSize(size, align uintptr) (uintptr, bool) {
+	overhead := unsafe.Sizeof(Frame{}) + unsafe.Sizeof(uintptr(0))
+	return frameStorageAllocationSize(size, align, overhead)
+}
+
+func frameStorageAllocationSize(size, align, overhead uintptr) (uintptr, bool) {
 	if align == 0 || align&(align-1) != 0 {
 		return 0, false
 	}
-	overhead := unsafe.Sizeof(Frame{}) + unsafe.Sizeof(uintptr(0))
 	max := ^uintptr(0)
 	if overhead > max-(align-1) {
 		return 0, false
@@ -230,6 +243,26 @@ func FrameAllocationSize(size, align uintptr) (uintptr, bool) {
 		return 0, false
 	}
 	return overhead + size, true
+}
+
+// compilerFrameAllocationReceiptV1 is the temporary prefix immediately before
+// dynamically allocated LLVM storage. Before publication it carries the raw
+// allocator receipt; publication moves total into the compiler-injected Frame
+// metadata and replaces the last word with FrameFromStorage's back-pointer.
+// The raw base remains in HeaderV1.AllocationBase until physical destruction.
+type compilerFrameAllocationReceiptV1 struct {
+	raw   unsafe.Pointer
+	total uintptr
+}
+
+// CompilerFrameAllocationSize is the compact compiler-owned allocation shape.
+// Every coroutine already reserves BorrowedFrameStorageV2 inside its LLVM
+// frame for allocation elision. Dynamic frames use that same storage instead
+// of prepending a second Frame, leaving only this two-word allocation receipt.
+func CompilerFrameAllocationSize(size, align uintptr) (uintptr, bool) {
+	return frameStorageAllocationSize(
+		size, align, unsafe.Sizeof(compilerFrameAllocationReceiptV1{}),
+	)
 }
 
 // AlignedStorage locates LLVM frame storage within a combined allocation.
@@ -246,6 +279,10 @@ func AlignedStorage(raw unsafe.Pointer, align uintptr) (unsafe.Pointer, bool) {
 
 func alignedStorageOffset(base, align uintptr) (uintptr, bool) {
 	offset := unsafe.Sizeof(Frame{}) + unsafe.Sizeof(uintptr(0))
+	return frameStorageOffset(base, align, offset)
+}
+
+func frameStorageOffset(base, align, offset uintptr) (uintptr, bool) {
 	if offset > ^uintptr(0)-base {
 		return 0, false
 	}
@@ -255,6 +292,65 @@ func alignedStorageOffset(base, align uintptr) (uintptr, bool) {
 		return 0, false
 	}
 	return offset + padding, true
+}
+
+func compilerAlignedStorage(raw unsafe.Pointer, align uintptr) (unsafe.Pointer, bool) {
+	if raw == nil || align == 0 || align&(align-1) != 0 {
+		return nil, false
+	}
+	base := uintptr(raw)
+	offset, ok := frameStorageOffset(
+		base, align, unsafe.Sizeof(compilerFrameAllocationReceiptV1{}),
+	)
+	if !ok {
+		return nil, false
+	}
+	return unsafe.Add(raw, offset), true
+}
+
+func compilerFrameReceipt(storage unsafe.Pointer) (*compilerFrameAllocationReceiptV1, bool) {
+	if storage == nil {
+		return nil, false
+	}
+	size := unsafe.Sizeof(compilerFrameAllocationReceiptV1{})
+	if uintptr(storage) < size {
+		return nil, false
+	}
+	return (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(size))), true
+}
+
+func allocationContains(raw unsafe.Pointer, total uintptr, value unsafe.Pointer, size uintptr) bool {
+	if raw == nil || value == nil {
+		return false
+	}
+	base, address := uintptr(raw), uintptr(value)
+	if total > ^uintptr(0)-base || address < base || address > base+total {
+		return false
+	}
+	return size <= base+total-address
+}
+
+func validFrameAllocationIdentity(frame *Frame) bool {
+	if frame == nil || frame.header == nil {
+		return false
+	}
+	if frame.borrowedStorage {
+		return frame.allocationSize == 0 &&
+			frame.header.AllocationBase == unsafe.Pointer(frame)
+	}
+	return frame.allocationSize != 0 &&
+		allocationContains(
+			frame.header.AllocationBase, frame.allocationSize,
+			unsafe.Pointer(frame), unsafe.Sizeof(Frame{}),
+		)
+}
+
+func rangesOverlap(first unsafe.Pointer, firstSize uintptr, second unsafe.Pointer, secondSize uintptr) bool {
+	firstAddress, secondAddress := uintptr(first), uintptr(second)
+	if firstSize > ^uintptr(0)-firstAddress || secondSize > ^uintptr(0)-secondAddress {
+		return true
+	}
+	return firstAddress < secondAddress+secondSize && secondAddress < firstAddress+firstSize
 }
 
 // Zero clears size bytes beginning at ptr without introducing a libc/runtime
@@ -281,17 +377,41 @@ func RegisterFrame(g *G, raw unsafe.Pointer, total, size, align uintptr, descrip
 	}
 	frame := (*Frame)(raw)
 	frame.owner = g
-	frame.storage = storage
-	frame.rawBase = raw
-	frame.descriptor = descriptor
-	frame.size = size
-	frame.align = align
+	// FrameAllocated has no compiler header yet. Stage the descriptor in the
+	// header word; PublishFrame consumes it before the frame can run.
+	frame.header = (*HeaderV1)(descriptor)
 	frame.allocationSize = total
 	frame.state = FrameAllocated
 	frame.next = g.frames
 	g.frames = frame
 	back := (**Frame)(unsafe.Add(storage, -int(unsafe.Sizeof(uintptr(0)))))
 	*back = frame
+	return storage, true
+}
+
+// RegisterFrameCompiler prepares a compact, zero-filled compiler allocation.
+// No scheduler action can occur between this call and PublishFrameV3Compiler,
+// so the Frame embedded in LLVM storage is linked only once its handle and
+// header exist. The two-word receipt is then replaced by the normal storage
+// back-pointer without a map or a second allocation.
+func RegisterFrameCompiler(
+	g *G, raw unsafe.Pointer, total, size, align uintptr, descriptor unsafe.Pointer,
+) (unsafe.Pointer, bool) {
+	want, layoutOK := CompilerFrameAllocationSize(size, align)
+	if !ValidG(g) || raw == nil || descriptor == nil || !layoutOK || total != want ||
+		uintptr(raw)%unsafe.Alignof(Frame{}) != 0 {
+		return nil, false
+	}
+	storage, ok := compilerAlignedStorage(raw, align)
+	base, address := uintptr(raw), uintptr(storage)
+	if !ok || address < base || address-base >= total || size > total-(address-base) {
+		return nil, false
+	}
+	receipt, ok := compilerFrameReceipt(storage)
+	if !ok {
+		return nil, false
+	}
+	*receipt = compilerFrameAllocationReceiptV1{raw: raw, total: total}
 	return storage, true
 }
 
@@ -324,9 +444,13 @@ func PublishFrame(g *G, handle unsafe.Pointer, header *HeaderV1, storage unsafe.
 		return false
 	}
 	frame := FrameFromStorage(storage)
-	if frame == nil || frame.owner != g || frame.storage != storage || frame.state != FrameAllocated ||
-		frame.handle != nil || frame.header != nil || header.G != unsafe.Pointer(g) ||
-		header.Descriptor != frame.descriptor || header.Lifecycle != uint16(FrameInitialSuspended) ||
+	if frame == nil {
+		return false
+	}
+	descriptor := unsafe.Pointer(frame.header)
+	if frame.owner != g || frame.state != FrameAllocated ||
+		frame.handle != nil || descriptor == nil || header.G != unsafe.Pointer(g) ||
+		header.Descriptor != descriptor || header.Lifecycle != uint16(FrameInitialSuspended) ||
 		header.SuspendReason != uint16(SuspendNone) {
 		return false
 	}
@@ -336,7 +460,7 @@ func PublishFrame(g *G, handle unsafe.Pointer, header *HeaderV1, storage unsafe.
 	frame.handle = handle
 	frame.header = header
 	frame.state = FrameInitialSuspended
-	header.AllocationBase = frame.rawBase
+	header.AllocationBase = unsafe.Pointer(frame)
 	return true
 }
 
@@ -378,7 +502,6 @@ func PublishFrameV2(
 	frame.owner = g
 	frame.handle = handle
 	frame.header = header
-	frame.descriptor = header.Descriptor
 	frame.state = FrameInitialSuspended
 	frame.runtimeContext = mode
 	frame.borrowedStorage = true
@@ -392,7 +515,7 @@ func PublishFrameV2(
 // publishes either dynamic storage or compiler-borrowed metadata. Keeping the
 // initialization in this shared helper makes coroutine ramps small: generated
 // code supplies only immutable descriptor/result operands and never duplicates
-// the scheduler header's ten-field initialization sequence.
+// the scheduler header's eight-field initialization sequence.
 func PublishFrameV3(
 	g *G, handle unsafe.Pointer, header *HeaderV1, storage, metadata,
 	descriptor, resultSlot unsafe.Pointer,
@@ -408,6 +531,85 @@ func PublishFrameV3(
 		Lifecycle:     uint16(FrameInitialSuspended),
 	}
 	return PublishFrameV2(g, handle, header, storage, metadata)
+}
+
+// PublishFrameV3Compiler is the adjacent generated-ramp publication lane.
+// RegisterFrameCompiler has just prepended a dynamic frame, or metadata names
+// the compiler-owned borrowed slot for this exact handle. No scheduler action
+// can run between those operations, so the new head is an O(1) uniqueness
+// certificate and a second findFrame walk establishes no additional safety.
+func PublishFrameV3Compiler(
+	g *G, handle unsafe.Pointer, header *HeaderV1, storage, metadata,
+	descriptor, resultSlot unsafe.Pointer,
+) bool {
+	if !ValidG(g) || handle == nil || header == nil || metadata == nil || descriptor == nil {
+		return false
+	}
+	mode, ok := descriptorRuntimeContextMode(descriptor)
+	if !ok {
+		return false
+	}
+	if storage != nil {
+		receipt, receiptOK := compilerFrameReceipt(storage)
+		if !receiptOK || receipt.raw == nil || receipt.total == 0 ||
+			uintptr(receipt.raw)%unsafe.Alignof(Frame{}) != 0 ||
+			metadata == unsafe.Pointer(g) || metadata == unsafe.Pointer(header) ||
+			uintptr(metadata)%unsafe.Alignof(Frame{}) != 0 ||
+			uintptr(unsafe.Pointer(header)) < uintptr(storage) || uintptr(metadata) < uintptr(storage) ||
+			!allocationContains(receipt.raw, receipt.total, unsafe.Pointer(receipt), unsafe.Sizeof(*receipt)) ||
+			!allocationContains(receipt.raw, receipt.total, storage, 1) ||
+			!allocationContains(receipt.raw, receipt.total, unsafe.Pointer(header), unsafe.Sizeof(HeaderV1{})) ||
+			!allocationContains(receipt.raw, receipt.total, metadata, unsafe.Sizeof(Frame{})) ||
+			rangesOverlap(unsafe.Pointer(header), unsafe.Sizeof(HeaderV1{}), metadata, unsafe.Sizeof(Frame{})) ||
+			findFrame(g, handle) != nil {
+			return false
+		}
+		frame := (*Frame)(metadata)
+		*header = HeaderV1{
+			G:              unsafe.Pointer(g),
+			Descriptor:     descriptor,
+			AllocationBase: receipt.raw,
+			ResultSlot:     resultSlot,
+			SuspendReason:  uint16(SuspendNone),
+			Lifecycle:      uint16(FrameInitialSuspended),
+		}
+		// AllocFrame guarantees a zero-filled range. Initialize only live words;
+		// unlike borrowed storage this dynamic metadata cannot contain state from
+		// an earlier parent-frame activation.
+		frame.owner = g
+		frame.handle = handle
+		frame.header = header
+		frame.allocationSize = receipt.total
+		frame.state = FrameInitialSuspended
+		frame.runtimeContext = mode
+		frame.next = g.frames
+		g.frames = frame
+		receipt.total = uintptr(unsafe.Pointer(frame))
+		return true
+	}
+	if metadata == unsafe.Pointer(g) || metadata == unsafe.Pointer(header) ||
+		uintptr(metadata)%unsafe.Alignof(Frame{}) != 0 {
+		return false
+	}
+	*header = HeaderV1{
+		G:             unsafe.Pointer(g),
+		Descriptor:    descriptor,
+		ResultSlot:    resultSlot,
+		SuspendReason: uint16(SuspendNone),
+		Lifecycle:     uint16(FrameInitialSuspended),
+	}
+	Zero(metadata, unsafe.Sizeof(Frame{}))
+	frame := (*Frame)(metadata)
+	frame.owner = g
+	frame.handle = handle
+	frame.header = header
+	frame.state = FrameInitialSuspended
+	frame.runtimeContext = mode
+	frame.borrowedStorage = true
+	frame.next = g.frames
+	g.frames = frame
+	header.AllocationBase = metadata
+	return true
 }
 
 // PrepareAwait records a parent-to-child handoff. It never resumes either
@@ -552,9 +754,11 @@ func PrepareCompleteStatus(g *G, handle unsafe.Pointer, header *HeaderV1, status
 }
 
 // PrepareCompleteStatusCompiler handles the dominant ordinary-return suffix
-// from compiler-generated code using the active-frame and parent-completion
-// certificates already established by PrepareAwaitCompletionCompiler. Panic,
-// Goexit, cancellation, roots, and any uncertain shape retain the complete
+// from compiler-generated code using the active-frame certificate and, for a
+// managed child, the parent-completion certificate already established by
+// PrepareAwaitCompletionCompiler. A root has no CompletionRecord publisher;
+// its exact singleton frame chain is itself the corresponding certificate.
+// Panic, Goexit, cancellation, and any uncertain shape retain the complete
 // status validator below.
 func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1, status CompletionStatus) bool {
 	if status == CompletionReturn && ValidG(g) && resumeGateTaken(g) &&
@@ -562,12 +766,19 @@ func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1
 		g.spawnChild == nil && compilerReleasableParkState(&g.park) &&
 		g.park.taskCancelPhase != taskCancelRequested {
 		frame := g.active
-		if frame != nil && frame.parent != nil && frame.handle == handle && frame.header == header &&
+		if frame != nil && frame.handle == handle && frame.header == header &&
 			frame.owner == g && frame.state == FrameActive &&
 			header.SuspendReason == uint16(SuspendFrameComplete) &&
 			header.Lifecycle == uint16(FrameFinalSuspended) {
-			if awaitCompletionArmedForChild(frame) &&
+			if frame.parent != nil && awaitCompletionArmedForChild(frame) &&
 				publishAwaitCompletion(frame.parent, CompletionReturn, nil, nil) {
+				g.pending = pendingTransition{kind: pendingComplete, from: frame}
+				return true
+			}
+			if frame.parent == nil && frame == g.root && g.frames == frame && frame.next == nil &&
+				header.Parent == nil && frame.parkWait == nil &&
+				emptyCompletionRecord(&frame.completion) &&
+				g.park.taskCancelKind == TaskCancelNone {
 				g.pending = pendingTransition{kind: pendingComplete, from: frame}
 				return true
 			}
@@ -659,14 +870,17 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 	if !ValidG(g) || !gPreemptEnabledAtDepthZero(g) || storage == nil {
 		return nil, 0, false
 	}
+	total, layoutOK := FrameAllocationSize(size, align)
 	frame := FrameFromStorage(storage)
-	if frame == nil || frame.owner != g || frame.storage != storage || frame.size != size ||
-		frame.align != align || frame.descriptor != descriptor || frame.state != FrameDestroyPending ||
-		g.destroyTarget != frame || frame.header == nil || frame.parkWait != nil ||
+	aligned, storageOK := AlignedStorage(unsafe.Pointer(frame), align)
+	if frame == nil || !layoutOK || !storageOK || aligned != storage ||
+		frame.owner != g || frame.header == nil || frame.header.Descriptor != descriptor || frame.allocationSize != total ||
+		frame.state != FrameDestroyPending ||
+		g.destroyTarget != frame || frame.parkWait != nil ||
 		frame.header.Lifecycle != uint16(FrameDestroyPending) {
 		return nil, 0, false
 	}
-	raw, total := frame.rawBase, frame.allocationSize
+	raw := unsafe.Pointer(frame)
 	if !unlinkFrame(g, frame) {
 		return nil, 0, false
 	}
@@ -675,6 +889,40 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 	frame.header.Lifecycle = uint16(FrameDestroyed)
 	g.destroyTarget = nil
 	return raw, total, true
+}
+
+// ReleaseFrameCompiler consumes the exact llvm.coro.free callback adjacent to
+// one scheduler-issued destroy. The destroy target and newest frame are the
+// same dynamic allocation on the ordinary managed path. Exceptional or legacy
+// shapes retain ReleaseFrame's complete unlink search and validation.
+func ReleaseFrameCompiler(
+	g *G, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer,
+) (metadata, raw unsafe.Pointer, total uintptr, ok bool) {
+	if ValidG(g) && gPreemptEnabledAtDepthZero(g) && storage != nil {
+		want, layoutOK := CompilerFrameAllocationSize(size, align)
+		frame := g.destroyTarget
+		var allocationBase unsafe.Pointer
+		if frame != nil && frame.header != nil {
+			allocationBase = frame.header.AllocationBase
+		}
+		aligned, storageOK := compilerAlignedStorage(allocationBase, align)
+		if frame != nil && layoutOK && storageOK && aligned == storage &&
+			FrameFromStorage(storage) == frame && g.frames == frame &&
+			frame.owner == g && frame.header != nil && frame.header.Descriptor == descriptor && frame.allocationSize == want &&
+			frame.state == FrameDestroyPending && frame.parkWait == nil &&
+			allocationContains(allocationBase, want, unsafe.Pointer(frame), unsafe.Sizeof(Frame{})) &&
+			frame.header.Lifecycle == uint16(FrameDestroyPending) {
+			g.frames = frame.next
+			frame.next = nil
+			frame.state = FrameDestroyed
+			frame.panicLine = frame.header.Line
+			frame.header.Lifecycle = uint16(FrameDestroyed)
+			g.destroyTarget = nil
+			return unsafe.Pointer(frame), allocationBase, want, true
+		}
+	}
+	legacyRaw, legacyTotal, legacyOK := ReleaseFrame(g, storage, size, align, descriptor)
+	return legacyRaw, legacyRaw, legacyTotal, legacyOK
 }
 
 // CommitFrameDestroyV2 completes the physical destroy of an allocation-elided
@@ -691,8 +939,8 @@ func CommitFrameDestroyV2(g *G, handle unsafe.Pointer) bool {
 		// schedulable frame with the same handle would make that receipt invalid.
 		return findFrame(g, handle) == nil
 	}
-	if frame.handle != handle || !frame.borrowedStorage || frame.storage != nil ||
-		frame.rawBase != nil || frame.allocationSize != 0 || frame.owner != g ||
+	if frame.handle != handle || !frame.borrowedStorage ||
+		frame.allocationSize != 0 || frame.owner != g ||
 		frame.header == nil || frame.parkWait != nil || frame.state != FrameDestroyPending ||
 		frame.header.AllocationBase != unsafe.Pointer(frame) ||
 		frame.header.Lifecycle != uint16(FrameDestroyPending) || !unlinkFrame(g, frame) {
@@ -758,13 +1006,17 @@ func ActiveTraceFrame(g *G) (PanicTraceFrameSnapshot, bool) {
 	parkResumeHeader := header != nil &&
 		header.SuspendReason == uint16(SuspendPark) &&
 		header.Lifecycle == uint16(FrameSuspended)
+	var descriptorPointer unsafe.Pointer
+	if header != nil {
+		descriptorPointer = header.Descriptor
+	}
 	if frame.owner != g || frame.handle == nil || header == nil ||
-		frame.descriptor == nil || frame.state != FrameActive ||
-		header.G != unsafe.Pointer(g) || header.Descriptor != frame.descriptor ||
+		descriptorPointer == nil || frame.state != FrameActive ||
+		header.G != unsafe.Pointer(g) || header.Descriptor != descriptorPointer ||
 		(!activeHeader && !parkResumeHeader) {
 		return PanicTraceFrameSnapshot{}, false
 	}
-	descriptor := (*FrameDescriptorV1)(frame.descriptor)
+	descriptor := (*FrameDescriptorV1)(descriptorPointer)
 	if descriptor.Version != 1 ||
 		descriptor.Flags & ^frameDescriptorAllowedFlagsV1 != 0 ||
 		len(descriptor.Function) == 0 {
@@ -869,20 +1121,31 @@ func retainPanicTraceFrameMetadata(
 		return false
 	}
 	if frame.borrowedStorage {
-		if raw != nil || total != 0 || frame.rawBase != nil || frame.allocationSize != 0 ||
-			frame.storage != nil {
+		if raw != nil || total != 0 || frame.allocationSize != 0 {
 			return false
 		}
-	} else if raw == nil || total == 0 || frame.rawBase != raw ||
-		frame.allocationSize != total || raw != unsafe.Pointer(frame) {
-		return false
+	} else {
+		if raw == nil || total == 0 || frame.allocationSize != total {
+			return false
+		}
+		// Compatibility frames live at raw. Compact compiler frames live inside
+		// the LLVM range and carry raw in their still-live header until this
+		// transaction deliberately clears it.
+		if raw != unsafe.Pointer(frame) &&
+			(frame.header == nil || frame.header.AllocationBase != raw ||
+				!allocationContains(raw, total, unsafe.Pointer(frame), unsafe.Sizeof(Frame{}))) {
+			return false
+		}
 	}
-	if frame.owner != g ||
-		frame.state != FrameDestroyed || frame.next != nil || frame.descriptor == nil ||
+	if frame.owner != g || frame.state != FrameDestroyed || frame.next != nil || frame.header == nil ||
 		!emptyCompletionRecord(&frame.completion) {
 		return false
 	}
-	descriptor := (*FrameDescriptorV1)(frame.descriptor)
+	descriptorPointer := frame.header.Descriptor
+	if descriptorPointer == nil {
+		return false
+	}
+	descriptor := (*FrameDescriptorV1)(descriptorPointer)
 	if descriptor.Version != 1 ||
 		descriptor.Flags & ^frameDescriptorAllowedFlagsV1 != 0 ||
 		len(descriptor.Function) == 0 {
@@ -900,7 +1163,17 @@ func retainPanicTraceFrameMetadata(
 			return false
 		}
 	}
-	frame.header = nil
+	if !frame.borrowedStorage {
+		// The LLVM handle is dead and the frame is no longer schedulable. Reuse
+		// its handle word for the physical allocation base so compact metadata
+		// embedded inside LLVM storage can later release the whole allocation
+		// without adding a permanent pointer to every live frame.
+		frame.handle = raw
+	}
+	// The compiler header dies with the LLVM frame. Preserve only its immutable
+	// descriptor in the same pointer word for diagnostic trace iteration.
+	frame.header = (*HeaderV1)(descriptorPointer)
+	frame.state = FrameTraceRetained
 	frame.retainPanicTrace = false
 	if emptyPanicTrace(g) {
 		frame.completion = CompletionRecord{
@@ -958,7 +1231,15 @@ func RetainPendingPanicTraceFrame(g *G, raw unsafe.Pointer, total uintptr) bool 
 	if !ValidG(g) || raw == nil {
 		return false
 	}
-	frame := (*Frame)(raw)
+	return retainPendingPanicTraceFrame(g, (*Frame)(raw), raw, total)
+}
+
+func retainPendingPanicTraceFrame(
+	g *G, frame *Frame, raw unsafe.Pointer, total uintptr,
+) bool {
+	if !ValidG(g) || frame == nil || raw == nil {
+		return false
+	}
 	if !frame.retainPanicTrace || frame.parent == nil ||
 		frame.parent.completion.status != CompletionPanic ||
 		frame.parent.completion.child != frame.handle ||
@@ -966,7 +1247,21 @@ func RetainPendingPanicTraceFrame(g *G, raw unsafe.Pointer, total uintptr) bool 
 		return false
 	}
 	record := frame.parent.completion
-	return retainPanicTraceFrame(g, raw, total, record.typeWord, record.dataWord)
+	return retainPanicTraceFrameMetadata(
+		g, frame, raw, total, record.typeWord, record.dataWord,
+	)
+}
+
+// RetainPendingPanicTraceFrameCompiler retains metadata injected into the
+// LLVM frame while preserving the distinct physical allocation base returned
+// by the compact compiler allocator.
+func RetainPendingPanicTraceFrameCompiler(
+	g *G, metadata, raw unsafe.Pointer, total uintptr,
+) bool {
+	if metadata == nil {
+		return false
+	}
+	return retainPendingPanicTraceFrame(g, (*Frame)(metadata), raw, total)
 }
 
 // RetainPanicTraceFrame transfers one terminal command-root frame allocation
@@ -980,6 +1275,21 @@ func RetainPanicTraceFrame(g *G, raw unsafe.Pointer, total uintptr) bool {
 	}
 	record := &g.panicRecord
 	return retainPanicTraceFrame(g, raw, total, record.typeWord, record.dataWord)
+}
+
+// RetainPanicTraceFrameCompiler is the compact-allocation form of
+// RetainPanicTraceFrame. metadata may live inside raw rather than at its base.
+func RetainPanicTraceFrameCompiler(
+	g *G, metadata, raw unsafe.Pointer, total uintptr,
+) bool {
+	if !ValidG(g) || metadata == nil || !g.panicUnwind ||
+		!publishedPanicRecord(&g.panicRecord) {
+		return false
+	}
+	record := &g.panicRecord
+	return retainPanicTraceFrameMetadata(
+		g, (*Frame)(metadata), raw, total, record.typeWord, record.dataWord,
+	)
 }
 
 // PanicTraceDiscardPending reports the transient adapter-owned drain state.
@@ -1004,15 +1314,15 @@ func TakeDiscardedPanicTraceFrame(g *G) (raw unsafe.Pointer, total uintptr, ok b
 			return nil, 0, false
 		}
 		frame := g.panicTraceHead
-		if frame.owner != g || frame.state != FrameDestroyed ||
-			frame.header != nil || frame.descriptor == nil {
+		if frame.owner != g || frame.state != FrameTraceRetained ||
+			frame.header == nil {
 			return nil, 0, false
 		}
 		if frame.borrowedStorage {
-			if frame.rawBase != nil || frame.allocationSize != 0 || frame.storage != nil {
+			if frame.allocationSize != 0 {
 				return nil, 0, false
 			}
-		} else if frame.rawBase != unsafe.Pointer(frame) || frame.allocationSize == 0 {
+		} else if frame.allocationSize == 0 {
 			return nil, 0, false
 		}
 		g.panicTraceHead = frame.next
@@ -1023,7 +1333,11 @@ func TakeDiscardedPanicTraceFrame(g *G) (raw unsafe.Pointer, total uintptr, ok b
 			Zero(unsafe.Pointer(frame), unsafe.Sizeof(Frame{}))
 			continue
 		}
-		return frame.rawBase, frame.allocationSize, true
+		raw := frame.handle
+		if raw == nil {
+			return nil, 0, false
+		}
+		return raw, frame.allocationSize, true
 	}
 }
 
@@ -1045,12 +1359,12 @@ func LoadPanicTraceFrame(g *G, cursor unsafe.Pointer) (snapshot PanicTraceFrameS
 		return PanicTraceFrameSnapshot{}, nil, false
 	}
 	frame := (*Frame)(cursor)
-	if frame.owner != g || frame.state != FrameDestroyed || frame.header != nil || frame.descriptor == nil ||
-		frame.borrowedStorage && (frame.rawBase != nil || frame.allocationSize != 0 || frame.storage != nil) ||
-		!frame.borrowedStorage && (frame.rawBase != cursor || frame.allocationSize == 0) {
+	if frame.owner != g || frame.state != FrameTraceRetained || frame.header == nil ||
+		frame.borrowedStorage && frame.allocationSize != 0 ||
+		!frame.borrowedStorage && frame.allocationSize == 0 {
 		return PanicTraceFrameSnapshot{}, nil, false
 	}
-	descriptor := (*FrameDescriptorV1)(frame.descriptor)
+	descriptor := (*FrameDescriptorV1)(unsafe.Pointer(frame.header))
 	if descriptor.Version != 1 ||
 		descriptor.Flags & ^frameDescriptorAllowedFlagsV1 != 0 ||
 		len(descriptor.Function) == 0 {

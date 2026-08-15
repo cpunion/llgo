@@ -1703,7 +1703,7 @@ func prepareCoroChanParkStateV2(
 	elem unsafe.Pointer,
 	size int,
 	send bool,
-	stateID, line uint32,
+	_ uint32, line uint32,
 ) (*coro.ExecutorDriver, coro.RouteID) {
 	// magic is the compiler-spill lifecycle capability. Fresh coroutine frames
 	// are zero-filled, and the direct resume prologue clears magic only after
@@ -1715,7 +1715,6 @@ func prepareCoroChanParkStateV2(
 	}
 	frameHeader.SuspendReason = uint16(coro.SuspendPark)
 	frameHeader.Lifecycle = uint16(coro.FrameSuspended)
-	frameHeader.StateID = stateID
 	frameHeader.Line = line
 	// magic == 0 certifies that the prior resume retired every embedded record.
 	// Initialize only the five words consumed by the hchan queue instead of

@@ -261,7 +261,7 @@ func prepareChildPanic(
 ) bool {
 	if !ValidG(g) || !resumeGateTaken(g) || status != ExplicitStatusPanic || typeWord == nil ||
 		frame == nil || frame.parent == nil || frame != g.active || frame.header != header ||
-		header == nil || header.Flags != 0 || frame.state != FrameActive ||
+		header == nil || frame.state != FrameActive ||
 		header.G != unsafe.Pointer(g) || header.SuspendReason != uint16(SuspendPanic) ||
 		header.Lifecycle != uint16(FrameFinalSuspended) ||
 		g.state != GRunning || g.runP == nil || g.pending.kind != pendingNone ||

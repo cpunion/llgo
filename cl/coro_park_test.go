@@ -87,11 +87,11 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 				t.Fatalf("structured park leaked an ordinary sync helper call:\n%s", body)
 			}
 			stateAndHook := regexp.MustCompile(
-				`(?s)store i16 4,.*store i16 3,.*store i32 1,.*call void @` + regexp.QuoteMeta(coroKeyedParkHookV2) +
+				`(?s)store i16 4,.*store i16 3,.*store i32 [1-9][0-9]*,.*call void @` + regexp.QuoteMeta(coroKeyedParkHookV2) +
 					`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^)]+\)`,
 			)
 			if !stateAndHook.MatchString(body) {
-				t.Fatalf("Root does not publish Park/Suspended/stateID=1 before the exact v1 hook:\n%s", body)
+				t.Fatalf("Root does not publish Park/Suspended/source-line before the exact v1 hook:\n%s", body)
 			}
 			hook := strings.Index(body, "call void @"+coroKeyedParkHookV2)
 			parkSuspendRelative := strings.Index(body[hook:], "call i8 @llvm.coro.suspend")

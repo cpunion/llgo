@@ -24,6 +24,23 @@ import (
 	"testing"
 )
 
+// buildCoroNativeAllocationCacheObject materializes the LLGoFiles leaf owned
+// by runtime/internal/coroalloc. Source-island E2E tests emit package LLVM
+// modules directly, so their ordinary package link never sees this C object.
+func buildCoroNativeAllocationCacheObject(t *testing.T, temp string) string {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang is unavailable")
+	}
+	source := filepath.Join("..", "..", "runtime", "internal", "coroalloc", "_cache", "cache.c")
+	object := filepath.Join(temp, "coro-allocation-cache.o")
+	if output, err := exec.Command(clang, "-std=c11", "-O2", "-c", source, "-o", object).CombinedOutput(); err != nil {
+		t.Fatalf("compile native coroutine allocation cache leaf: %v\n%s", err, output)
+	}
+	return object
+}
+
 // buildCoroNativeWorkerCallObject materializes the LLGoFiles leaf normally
 // owned by runtime/internal/coroworker. Source-island E2E tests emit package
 // LLVM modules themselves, so the ordinary package linker never gets a chance

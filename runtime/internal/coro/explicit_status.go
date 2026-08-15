@@ -81,15 +81,15 @@ func LoadPanicRecord(g *G) (PanicRecordSnapshot, bool) {
 
 func validPanicAncestor(g *G, frame *Frame) bool {
 	return frame != nil && frame.owner == g && frame.handle != nil && frame.header != nil &&
-		frame.state == FrameSuspended && frame.header.G == unsafe.Pointer(g) && frame.header.Flags == 0 &&
+		frame.state == FrameSuspended && frame.header.G == unsafe.Pointer(g) &&
 		frame.header.SuspendReason == uint16(SuspendCall) &&
 		frame.header.Lifecycle == uint16(FrameSuspended)
 }
 
 // validPanicAncestry proves before publication that every continuation which
 // terminal panic unwinding would bypass is a plain suspended await. Version
-// zero has no cleanup/recover transport, so any non-zero flags reject the
-// entire operation before the active frame or an ancestor can be destroyed.
+// zero has no cleanup/recover transport; the compiler must lower those shapes
+// through the structured cleanup protocol before this terminal boundary.
 func validPanicAncestry(g *G, active *Frame) bool {
 	if g == nil || active == nil || active.header == nil {
 		return false
@@ -109,10 +109,10 @@ func validPanicAncestry(g *G, active *Frame) bool {
 // the publication attempt; any malformed winner permanently poisons the record
 // instead of allowing execution to continue with ambiguous terminal state.
 //
-// HeaderV1.Flags must be zero. Thus cleanup/recover/Goexit/implicit-fault
-// shapes cannot be smuggled through an unversioned flag convention. An
-// untyped nil panic is also rejected; the compiler must first materialize the
-// Go-version-appropriate non-nil panic type word.
+// Cleanup/recover/Goexit/implicit-fault shapes use their dedicated structured
+// protocols rather than an open-ended header convention. An untyped nil panic
+// is also rejected; the compiler must first materialize the Go-version-
+// appropriate non-nil panic type word.
 func PrepareExplicitStatus(
 	g *G,
 	handle unsafe.Pointer,
@@ -145,7 +145,7 @@ func PrepareExplicitStatus(
 		preemptStore(&record.status, explicitStatusRejected)
 		return false
 	}
-	if status != ExplicitStatusPanic || typeWord == nil || handle == nil || header == nil || header.Flags != 0 ||
+	if status != ExplicitStatusPanic || typeWord == nil || handle == nil || header == nil ||
 		g.state != GRunning || g.active == nil || g.root == nil || g.runP == nil ||
 		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
 		g.destroyTarget != nil || g.destroyRoot || g.queued || g.nextReady != nil ||

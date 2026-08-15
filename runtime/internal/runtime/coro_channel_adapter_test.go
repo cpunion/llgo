@@ -1177,7 +1177,7 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	}
 	if migrateRecvFrame.header.SuspendReason != uint16(coro.SuspendPark) ||
 		migrateRecvFrame.header.Lifecycle != uint16(coro.FrameSuspended) ||
-		migrateRecvFrame.header.StateID != 41 || migrateRecvFrame.header.Line != 73 {
+		migrateRecvFrame.header.Line != 73 {
 		t.Fatalf("compact try-or-park receive header = %+v", *migrateRecvFrame.header)
 	}
 	if parked, ok := coro.Resumed(p, migrateRecvFrame.g, migrateRecvAction); !ok || parked.Kind != coro.ActionPark {

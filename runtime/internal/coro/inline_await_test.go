@@ -132,6 +132,32 @@ func TestCompilerInlineAwaitCompletesThroughTrustedSuffix(t *testing.T) {
 	runtime.KeepAlive(fixture.parent.memory)
 }
 
+func TestCompilerRootCompletionUsesTrustedSuffix(t *testing.T) {
+	p := new(P)
+	task := newYieldingTestG(t, "compiler-root-complete")
+	action := beginWaitTestResume(t, p, task)
+	frame := FrameFromStorage(task.frame.storage)
+	if frame == nil || task.g.root != frame || task.g.frames != frame || frame.next != nil {
+		t.Fatal("compiler root fixture is not an exact singleton frame chain")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareCompleteStatusCompiler(
+		task.g, task.handle, task.frame.header, CompletionReturn,
+	) {
+		t.Fatal("publish compiler root return")
+	}
+	if task.g.pending.kind != pendingComplete || task.g.pending.from != frame ||
+		task.g.pending.target != nil {
+		t.Fatalf("compiler root pending transition = %+v", task.g.pending)
+	}
+	next, ok := Resumed(p, task.g, action)
+	if !ok || next.Kind != ActionCheckDestroy || next.Handle != task.handle {
+		t.Fatalf("commit compiler root return = (%+v, %t)", next, ok)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestCompilerInlineAwaitFusesBorrowedDestroyAndConsume(t *testing.T) {
 	fixture := newInlineAwaitFixtureForCompiler(t, true)
 	child := FrameFromStorage(fixture.child.storage)
@@ -139,8 +165,6 @@ func TestCompilerInlineAwaitFusesBorrowedDestroyAndConsume(t *testing.T) {
 		t.Fatal("resolve borrowed compiler child")
 	}
 	child.borrowedStorage = true
-	child.storage = nil
-	child.rawBase = nil
 	child.allocationSize = 0
 	fixture.child.header.AllocationBase = unsafe.Pointer(child)
 	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)

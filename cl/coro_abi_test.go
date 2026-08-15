@@ -316,6 +316,73 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	}
 }
 
+func TestCoroExactTailForwardReusesTargetHandle(t *testing.T) {
+	const source = `package foo
+func Child(value uint32, delta int) {}
+func Parent(value uint32) { Child(value, -1) }
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, nil, source)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify tail-forward coroutine: %v\n%s", err, module.String())
+	}
+
+	parentSSA, childSSA := ssaPkg.Func("Parent"), ssaPkg.Func("Child")
+	owner := universe.ownerOf(parentSSA)
+	physical, err := universe.coroProgramIR.physicalFunctionPlan(parentSSA, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if physical.tailForward == nil || physical.tailForward.target != childSSA ||
+		len(physical.tailForward.args) != 2 ||
+		physical.tailForward.args[0].sourceParameter != 0 ||
+		physical.tailForward.args[1].constant == nil ||
+		physical.tailForward.args[1].constant.Int64() != -1 {
+		t.Fatalf("tail-forward physical plan = %+v; want Parent(value)->Child(value,-1)", physical.tailForward)
+	}
+
+	parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
+	child := requireCoroPhysicalFunction(t, module, "foo.Child")
+	parentIR, childIR := parent.String(), child.String()
+	if strings.Contains(parentIR, "llvm.coro.") ||
+		strings.Contains(parentIR, coroFrameAllocHookV1) ||
+		strings.Contains(parentIR, coroAwaitPrepareInlineHookV4) {
+		t.Fatalf("tail-forward ramp retained a coroutine frame or await transaction:\n%s", parentIR)
+	}
+	if !regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\(ptr [^,]+, ptr [^,]+, i32 [^,]+, i64 -1\)`).MatchString(parentIR) {
+		t.Fatalf("tail-forward ramp did not pass task/result/parameter/constant directly:\n%s", parentIR)
+	}
+	if strings.Count(parentIR, "call ptr") != 1 || !strings.Contains(parentIR, "ret ptr") {
+		t.Fatalf("tail-forward ramp is not one target call plus handle return:\n%s", parentIR)
+	}
+	if !strings.Contains(childIR, "llvm.coro.begin") ||
+		!strings.Contains(childIR, coroFrameAllocHookV1) {
+		t.Fatalf("tail-forward target lost its physical coroutine body:\n%s", childIR)
+	}
+
+	runCoroABITestPipeline(t, prog, module)
+	if module.NamedFunction("foo.Parent$coro.resume").IsNil() == false ||
+		module.NamedFunction("foo.Parent$coro.destroy").IsNil() == false {
+		t.Fatalf("frame-free tail-forward ramp acquired split resume/destroy entries:\n%s", module.String())
+	}
+	for _, suffix := range []string{".resume", ".destroy"} {
+		if module.NamedFunction("foo.Child$coro" + suffix).IsNil() {
+			t.Fatalf("tail-forward target lost split %s entry:\n%s", suffix, module.String())
+		}
+	}
+}
+
 func TestCoroNamedFunctionTypeDirectAwait(t *testing.T) {
 	const source = `package foo
 type Task func(uint32) uint32
@@ -801,6 +868,13 @@ func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			parentPhysical, err := universe.coroProgramIR.physicalFunctionPlan(parent, universe.ownerOf(parent))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parentPhysical.tailForward == nil || parentPhysical.tailForward.target != child {
+				t.Fatalf("Parent physical tail forward = %+v; want exact Child target", parentPhysical.tailForward)
+			}
 			module := pkg.Module()
 			defer module.Dispose()
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
@@ -823,10 +897,15 @@ func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
 
 			runCoroABITestPipeline(t, prog, module)
 			post := module.String()
-			for _, function := range []string{"foo.Child$coro", "foo.Parent$coro", "foo.Pair$coro"} {
+			for _, function := range []string{"foo.Child$coro", "foo.Pair$coro"} {
 				for _, suffix := range []string{".resume", ".destroy"} {
 					if module.NamedFunction(function + suffix).IsNil() {
 						t.Fatalf("CoroSplit did not create %s%s:\n%s", function, suffix, post)
+					}
+				}
+				for _, suffix := range []string{".resume", ".destroy"} {
+					if !module.NamedFunction("foo.Parent$coro" + suffix).IsNil() {
+						t.Fatalf("frame-free Parent tail-forward acquired %s:\n%s", suffix, post)
 					}
 				}
 			}
@@ -2171,10 +2250,9 @@ func assertCoroV0HeaderStateZero(t *testing.T, body string) {
 	}{
 		{index: coroHeaderSuspendReason, type_: "i16", name: "suspend reason"},
 		{index: coroHeaderLifecycle, type_: "i16", name: "lifecycle"},
-		{index: coroHeaderStateID, type_: "i32", name: "state ID"},
 	} {
 		addresses := regexp.MustCompile(
-			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr[^\n{]* \{ ptr, ptr, ptr, ptr, ptr, i16, i16, i32, i32, i32 \}, ptr [^,]+, i32 0, i32 `+strconv.Itoa(field.index)+`\s*$`,
+			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr[^\n{]* \{ ptr, ptr, ptr, ptr, ptr, i16, i16, i32 \}, ptr [^,]+, i32 0, i32 `+strconv.Itoa(field.index)+`\s*$`,
 		).FindAllStringSubmatch(body, -1)
 		if len(addresses) == 0 {
 			t.Fatalf("v0 coroutine has no header %s store:\n%s", field.name, body)
@@ -2710,9 +2788,9 @@ func assertCoroV1Completion(t *testing.T, name, body string) {
 		t.Fatalf("%s does not prepare completion before final suspend:\n%s", name, body)
 	}
 	segment := body[:complete]
-	state := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 [1-9][0-9]*,`)
+	state := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 0,`)
 	if !state.MatchString(segment) {
-		t.Fatalf("%s does not publish final reason/lifecycle/stateID before completion preparation:\n%s", name, body)
+		t.Fatalf("%s does not publish final reason/lifecycle and clear its source line before completion preparation:\n%s", name, body)
 	}
 }
 
@@ -2739,9 +2817,9 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 	if !parentLink.MatchString(prefix) {
 		t.Fatalf("Parent does not store its handle into child.parent before handoff:\n%s", prefix)
 	}
-	state := regexp.MustCompile(`(?s)store i16 1,.*store i16 3,.*store i32 1,`)
+	state := regexp.MustCompile(`(?s)store i16 1,.*store i16 3,.*store i32 [1-9][0-9]*,`)
 	if !state.MatchString(prefix) {
-		t.Fatalf("Parent does not publish Call/Suspended/stateID=1 before await_prepare:\n%s", prefix)
+		t.Fatalf("Parent does not publish Call/Suspended/source-line before await_prepare:\n%s", prefix)
 	}
 	awaitSuspend := strings.Index(parent[await:], "call i8 @llvm.coro.suspend")
 	if awaitSuspend < 0 {
@@ -2769,9 +2847,9 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 		`.*store i32 .*load i32.*switch i32`).MatchString(parent[await:]) {
 		t.Fatalf("Parent shared fast/resumed continuation does not carry the fused or slow child outcome into its status switch:\n%s", parent)
 	}
-	completionState := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 2,`)
+	completionState := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 0,`)
 	if !completionState.MatchString(parent[childCall[0]:]) {
-		t.Fatalf("Parent does not publish FrameComplete/FinalSuspended/stateID=2 after await:\n%s", parent)
+		t.Fatalf("Parent does not publish FrameComplete/FinalSuspended and clear its source line after await:\n%s", parent)
 	}
 }
 

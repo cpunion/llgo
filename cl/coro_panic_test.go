@@ -148,11 +148,11 @@ func assertCoroExplicitStatusPanicBody(t *testing.T, body string, panicSites int
 		t.Fatalf("final coro.suspend calls = %d, want exactly one shared final suspend:\n%s", got, body)
 	}
 	stateAndHook := regexp.MustCompile(
-		`(?s)store i16 5,.*?store i16 4,.*?store i32 [1-9][0-9]*,.*?store i32 [1-9][0-9]*,.*?call void @` + regexp.QuoteMeta(coroPanicPrepareHookV1) +
+		`(?s)store i16 5,.*?store i16 4,.*?store i32 [1-9][0-9]*,.*?call void @` + regexp.QuoteMeta(coroPanicPrepareHookV1) +
 			`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^)]+\)`,
 	)
 	if got := len(stateAndHook.FindAllStringIndex(body, -1)); got != panicSites {
-		t.Fatalf("Panic/FinalSuspended/stateID/source-line publication followed by the five-pointer hook = %d, want %d:\n%s", got, panicSites, body)
+		t.Fatalf("Panic/FinalSuspended/source-line publication followed by the five-pointer hook = %d, want %d:\n%s", got, panicSites, body)
 	}
 	hookBranch := regexp.MustCompile(
 		`call void @`+regexp.QuoteMeta(coroPanicPrepareHookV1)+`\([^\n]+\)\n\s+br label (%[-a-zA-Z$._0-9]+)`,

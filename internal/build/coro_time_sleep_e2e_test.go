@@ -560,8 +560,14 @@ func assertCoroTimeSleepDirectCoroCall(plan *coro.SSAPlan, call ssa.CallInstruct
 
 func assertCoroTimeSleepAwaitsIR(t *testing.T, label, body string, childSymbols ...string) {
 	t.Helper()
-	if len(childSymbols) == 0 || strings.Count(body, coroTimeSleepAwaitHookV1) != len(childSymbols) {
-		t.Fatalf("%s await handoffs = %d, want %d:\n%s", label, strings.Count(body, coroTimeSleepAwaitHookV1), len(childSymbols), body)
+	if len(childSymbols) == 0 {
+		t.Fatalf("%s has no expected coroutine child", label)
+	}
+	handoffs := strings.Count(body, coroTimeSleepAwaitHookV1)
+	tailForward := len(childSymbols) == 1 && handoffs == 0 &&
+		strings.Contains(body, "ret ptr") && !strings.Contains(body, "llvm.coro.")
+	if handoffs != len(childSymbols) && !tailForward {
+		t.Fatalf("%s await handoffs = %d, want %d or one frame-free tail forward:\n%s", label, handoffs, len(childSymbols), body)
 	}
 	previous := -1
 	for _, childSymbol := range childSymbols {
@@ -570,9 +576,12 @@ func assertCoroTimeSleepAwaitsIR(t *testing.T, label, body string, childSymbols 
 			t.Fatalf("%s does not call coroutine child %q exactly once in source order:\n%s", label, childSymbol, body)
 		}
 		await := strings.Index(body[child:], coroTimeSleepAwaitHookV1)
-		if await < 0 {
+		if await < 0 && !tailForward {
 			t.Fatalf("%s child %q is not followed by a structured await:\n%s", label, childSymbol, body)
 		}
-		previous = child + await
+		previous = child
+		if await >= 0 {
+			previous += await
+		}
 	}
 }

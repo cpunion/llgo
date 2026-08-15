@@ -52,8 +52,9 @@ func TakeRunDecisionWords(
 
 // TakeRunDecisionWordsCompiler is the compiler-owned scalar gate. A nested
 // static child's initial zero-ticket resume directly consumes the adjacent
-// pendingInlineStart certificate; ordinary resumes and every non-zero ticket
-// retain TakeRunDecisionWords' complete decision validation.
+// pendingInlineStart certificate. A scheduler-issued all-zero decision uses
+// the adjacent P/G/action receipt; non-zero decisions and every non-zero
+// ticket retain TakeRunDecisionWords' complete decision validation.
 func TakeRunDecisionWordsCompiler(
 	g *G,
 	expectedEpoch, expectedGeneration uint32,
@@ -65,5 +66,31 @@ func TakeRunDecisionWordsCompiler(
 		takeInlineAwaitInitialDecisionCompiler(g) {
 		return 0, 0, 0, 0, 0, true
 	}
+	if expectedEpoch == 0 && expectedGeneration == 0 &&
+		takeOrdinaryZeroRunDecisionCompiler(g) {
+		return 0, 0, 0, 0, 0, true
+	}
 	return TakeRunDecisionWords(g, expectedEpoch, expectedGeneration)
+}
+
+// takeOrdinaryZeroRunDecisionCompiler consumes the overwhelmingly common
+// scheduler-issued decision whose complete value is zero. checkedExecutorRun
+// created this private P/G/action episode immediately before llvm.coro.resume;
+// a zero RunDecision is already a valid union value, so replaying the generic
+// union validator and expectedAction adapter does not prove anything new.
+// Park, cancellation, nested-inline, stale, and malformed shapes fall through
+// to the complete TakeRunDecision path.
+func takeOrdinaryZeroRunDecisionCompiler(g *G) bool {
+	if !ValidG(g) || g.runP == nil {
+		return false
+	}
+	p := g.runP
+	if p.current != g || !p.inResume || g.state != GRunning ||
+		p.runDecisionTaken || p.runDecision != (RunDecision{}) ||
+		p.action.Kind != ActionResume || p.action.Flags != 0 || p.action.Handle == nil ||
+		!gPreemptEnabledAtDepthZero(g) {
+		return false
+	}
+	p.runDecisionTaken = true
+	return true
 }

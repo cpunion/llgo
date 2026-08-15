@@ -64,6 +64,106 @@ func runnerNextPhysicalAction(t *testing.T, driver *ExecutorDriver, task *yieldi
 	return step
 }
 
+func TestExecutorRunFusesPrivateNormalCompletionDestroy(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "fused-completion-destroy")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue fused completion task")
+	}
+	_ = runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
+	if !ok || resume.Kind != ActionResume || resume.Handle != task.handle {
+		t.Fatalf("begin fused completion resume = (%+v, %t)", resume, ok)
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare fused completion")
+	}
+	checkDestroy, committed, ok := ResumedExecutorRun(driver, p, task.g, resume)
+	if !ok || committed || checkDestroy.Kind != ActionCheckDestroy ||
+		checkDestroy.Handle != task.handle || driver.run.issued != ActionCheckResume {
+		t.Fatalf(
+			"private completion check = (%+v, committed=%t, ok=%t, issued=%d)",
+			checkDestroy, committed, ok, driver.run.issued,
+		)
+	}
+	beforeAction, beforeIssued := p.action, driver.run.issued
+	if destroy, fused := BeginIssuedExecutorDestroyAfterResume(
+		driver, task.g, checkDestroy, false,
+	); fused || destroy != (Action{}) || p.action != beforeAction || driver.run.issued != beforeIssued {
+		t.Fatalf(
+			"unfinished frame changed private interval = (%+v, fused=%t, action=%+v, issued=%d)",
+			destroy, fused, p.action, driver.run.issued,
+		)
+	}
+	destroy, fused := BeginIssuedExecutorDestroyAfterResume(
+		driver, task.g, checkDestroy, true,
+	)
+	if !fused || destroy.Kind != ActionDestroy || destroy.Handle != task.handle ||
+		p.action != destroy || driver.run.issued != ActionCheckDestroy {
+		t.Fatalf(
+			"fused completion destroy = (%+v, fused=%t, action=%+v, issued=%d)",
+			destroy, fused, p.action, driver.run.issued,
+		)
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	receipt, ok := DestroyedBounded(p, task.g, destroy)
+	if !ok || receipt.Kind != ActionCommitDestroy || receipt.Handle != nil ||
+		!CommitExecutorRunAction(driver, task.g, receipt) {
+		t.Fatalf("commit fused completion destroy = (%+v, %t)", receipt, ok)
+	}
+	commit, ok := NextExecutorRunStep(driver)
+	if !ok || commit.Kind != ExecutorRunStepDestroyCommit || commit.Action != receipt {
+		t.Fatalf("select fused completion commit = (%+v, %t)", commit, ok)
+	}
+	completed, ok := CommitExecutorRunDomainDestroy(driver, task.g, receipt)
+	if !ok || completed.Kind != ActionComplete {
+		t.Fatalf("finish fused completion domain = (%+v, %t)", completed, ok)
+	}
+	if task.g.root != nil || task.g.destroyTarget != nil || task.g.state != GDead {
+		t.Fatalf(
+			"fused completion retained task state: root=%p target=%p state=%d",
+			task.g.root, task.g.destroyTarget, task.g.state,
+		)
+	}
+}
+
+func TestExecutorRunDoesNotFuseCompletionPastReadyPeer(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "completion-before-ready-peer")
+	peer := newYieldingTestG(t, "ready-peer-before-destroy")
+	if !Enqueue(p, task.g) || !Enqueue(p, peer.g) {
+		t.Fatal("enqueue completion task and ready peer")
+	}
+	_ = runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
+	if !ok {
+		t.Fatal("begin completion resume")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare completion before ready peer")
+	}
+	checkDestroy, committed, ok := ResumedExecutorRun(driver, p, task.g, resume)
+	if !ok || committed || checkDestroy.Kind != ActionCheckDestroy {
+		t.Fatalf("private completion check = (%+v, committed=%t, ok=%t)", checkDestroy, committed, ok)
+	}
+	beforeAction, beforeIssued := p.action, driver.run.issued
+	if CanBeginIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy) {
+		t.Fatal("completion destroy fusion bypassed an already-ready peer")
+	}
+	if destroy, fused := BeginIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy, true); fused ||
+		destroy != (Action{}) || p.action != beforeAction || driver.run.issued != beforeIssued {
+		t.Fatalf("rejected fusion changed private interval = (%+v, fused=%t)", destroy, fused)
+	}
+}
+
 func TestExecutorRunResumeRuntimeContextDescriptorCapability(t *testing.T) {
 	for _, test := range []struct {
 		name      string

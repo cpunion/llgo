@@ -307,7 +307,7 @@ func assertCoroProgramBootstrapFactoryPresplitV2(t *testing.T, ir, uintptrIR str
 		t.Fatalf("V2 factory without closed-static spawn emitted main-return cancellation:\n%s", body)
 	}
 	assertInOrder(t, body,
-		"call void @"+coroProgramFramePublishHookV1,
+		"call void @"+coroProgramFramePublishHookV3,
 		"call i8 @llvm.coro.suspend",
 		"call void @"+coroRunDecisionTakeSymbolV1,
 		"store i16 2",

@@ -92,7 +92,7 @@ func AllocFrame(size uintptr) unsafe.Pointer {
 	if !backendAllocationsAreZeroed || !Ready() || size == 0 {
 		return nil
 	}
-	return backendAllocFrame(size)
+	return alloc(size)
 }
 
 // FreeFrame releases a range previously returned by AllocFrame. Backends that
@@ -102,7 +102,7 @@ func FreeFrame(ptr unsafe.Pointer, size uintptr) bool {
 	if !Ready() || ptr == nil || size == 0 {
 		return false
 	}
-	return backendFreeFrame(ptr, size)
+	return free(ptr, size)
 }
 
 // AllocTask allocates zero-filled, pointer-containing scheduler task storage.
@@ -115,7 +115,7 @@ func AllocTask(size uintptr) unsafe.Pointer {
 	if !backendAllocationsAreZeroed || !Ready() || size == 0 {
 		return nil
 	}
-	return backendAllocFrame(size)
+	return alloc(size)
 }
 
 // FreeTask performs the physical half of the scheduler's exactly-once task
@@ -125,5 +125,21 @@ func FreeTask(ptr unsafe.Pointer, size uintptr) bool {
 	if !Ready() || ptr == nil || size == 0 {
 		return false
 	}
-	return backendFreeFrame(ptr, size)
+	return free(ptr, size)
+}
+
+func alloc(size uintptr) unsafe.Pointer {
+	allocationSize := cacheAllocationSize(size)
+	if ptr := cacheTake(allocationSize); ptr != nil {
+		return ptr
+	}
+	return backendAllocFrame(allocationSize)
+}
+
+func free(ptr unsafe.Pointer, size uintptr) bool {
+	allocationSize := cacheAllocationSize(size)
+	if cachePut(ptr, allocationSize) {
+		return true
+	}
+	return backendFreeFrame(ptr, allocationSize)
 }

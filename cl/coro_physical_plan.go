@@ -431,6 +431,7 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 type coroPhysicalFunctionPlan struct {
 	function          *ssa.Function
 	owner             *preparedEmissionPackage
+	tailForward       *coroPhysicalTailForwardPlan
 	frameRetention    *coroFrameRetentionProof
 	critical          *coroCriticalProof
 	cleanup           *coroStaticCleanupPlan
@@ -443,6 +444,84 @@ type coroPhysicalFunctionPlan struct {
 	staticOutcome     bool
 	reachableBlocks   map[*ssa.BasicBlock]bool
 	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
+}
+
+// coroPhysicalTailForwardArgument is one frozen source-to-target parameter
+// recipe for a coroutine ramp that can be represented by another ramp. Exactly
+// one arm is selected: sourceParameter indexes the forwarding function's
+// physical source parameters, while constant retains one immutable SSA
+// literal and its exact target parameter type.
+type coroPhysicalTailForwardArgument struct {
+	sourceParameter int
+	constant        *ssa.Const
+	targetType      types.Type
+}
+
+// coroPhysicalTailForwardPlan proves that a source function contributes no
+// physical state of its own: it performs one exact static coroutine call and
+// returns that call's results unchanged. Its public $coro symbol remains the
+// stable callable identity, but the ramp can return the target ramp's handle
+// directly. Suspension, preemption, cancellation, panic outcome, and result
+// publication then remain owned by the target frame instead of traversing a
+// redundant parent frame and await transaction.
+type coroPhysicalTailForwardPlan struct {
+	target   *ssa.Function
+	targetID coro.FunctionID
+	args     []coroPhysicalTailForwardArgument
+}
+
+func (plan *coroPhysicalTailForwardPlan) validate(
+	function *ssa.Function,
+	whole *coro.SSAPlan,
+) error {
+	if plan == nil || function == nil || whole == nil || plan.target == nil ||
+		plan.target == function || plan.targetID == "" || len(plan.target.FreeVars) != 0 {
+		return fmt.Errorf("tail-forward plan has an incomplete function or target identity")
+	}
+	functionPlan, functionPlanned := whole.FunctionPlan(function)
+	targetPlan, targetPlanned := whole.FunctionPlan(plan.target)
+	if !functionPlanned || functionPlan.Emission != coro.EmitCoroutine ||
+		functionPlan.ManagedEntry != coro.ManagedEntryCoroutine || functionPlan.Recursive {
+		return fmt.Errorf("tail-forward source is not one non-recursive coroutine primary")
+	}
+	if !targetPlanned || targetPlan.ID != plan.targetID ||
+		targetPlan.Emission != coro.EmitCoroutine ||
+		targetPlan.ManagedEntry != coro.ManagedEntryCoroutine ||
+		targetPlan.Primary != coro.PrimaryCoroutine || targetPlan.FuncRep != coro.DirectCoro {
+		return fmt.Errorf("tail-forward target is not the frozen direct coroutine primary %q", plan.targetID)
+	}
+	sourceSig := coroPhysicalNormalizeSourceSignature(function.Signature)
+	targetSig := coroPhysicalNormalizeSourceSignature(plan.target.Signature)
+	if sourceSig == nil || targetSig == nil || sourceSig.Variadic() || targetSig.Variadic() ||
+		sourceSig.Params().Len() != len(function.Params) ||
+		targetSig.Params().Len() != len(plan.args) ||
+		!types.Identical(sourceSig.Results(), targetSig.Results()) {
+		return fmt.Errorf("tail-forward source and target physical signatures are incompatible")
+	}
+	for index, argument := range plan.args {
+		parameter := argument.sourceParameter >= 0
+		literal := argument.constant != nil
+		if parameter == literal || argument.targetType == nil ||
+			!types.Identical(argument.targetType, targetSig.Params().At(index).Type()) {
+			return fmt.Errorf("tail-forward argument %d has an invalid frozen recipe", index)
+		}
+		if parameter {
+			if argument.sourceParameter >= sourceSig.Params().Len() ||
+				!types.Identical(
+					sourceSig.Params().At(argument.sourceParameter).Type(),
+					argument.targetType,
+				) {
+				return fmt.Errorf("tail-forward argument %d has an incompatible source parameter", index)
+			}
+			continue
+		}
+		if argument.constant.Type() == nil ||
+			(!types.AssignableTo(argument.constant.Type(), argument.targetType) &&
+				!types.Identical(types.Default(argument.constant.Type()), argument.targetType)) {
+			return fmt.Errorf("tail-forward argument %d has an incompatible constant", index)
+		}
+	}
+	return nil
 }
 
 func prepareCoroPhysicalFunctionPlan(
@@ -574,7 +653,157 @@ func prepareCoroPhysicalFunctionPlan(
 		plan.atomicCostProof = logical.AtomicCostProof
 		plan.atomicCertificate = logical.AtomicCostCertificate
 	}
+	tailForward, err := planCoroPhysicalTailForward(plan, whole)
+	if err != nil {
+		return nil, err
+	}
+	plan.tailForward = tailForward
 	return plan, nil
+}
+
+// planCoroPhysicalTailForward recognizes the deliberately small forwarding
+// language after ordinary instruction and call control recipes are frozen. It
+// is not source inlining: the forwarding symbol remains externally callable
+// and merely returns the exact target coroutine handle. Restricting arguments
+// to unchanged parameters and literals makes target invocation independent of
+// the removed frame and prevents code generation from rediscovering SSA value
+// semantics after ProgramIR preflight.
+func planCoroPhysicalTailForward(
+	physical *coroPhysicalFunctionPlan,
+	whole *coro.SSAPlan,
+) (*coroPhysicalTailForwardPlan, error) {
+	if physical == nil || physical.function == nil || whole == nil ||
+		physical.cleanup != nil || physical.critical != nil {
+		return nil, nil
+	}
+	function := physical.function
+	logical, planned := whole.FunctionPlan(function)
+	if !planned || logical.Emission != coro.EmitCoroutine ||
+		logical.ManagedEntry != coro.ManagedEntryCoroutine || logical.Recursive ||
+		len(function.Blocks) != 1 || len(function.Blocks[0].Succs) != 0 ||
+		len(function.FreeVars) != 0 || function.Recover != nil ||
+		function.Signature == nil || function.Signature.Variadic() ||
+		hasNoInlineDirective(function) {
+		return nil, nil
+	}
+
+	// DebugRef is intentionally not ignored. A debug-symbol build keeps the
+	// ordinary frame so its source parameter locations and physical inline
+	// boundary remain representable without a second debug-only recipe.
+	instructions := function.Blocks[0].Instrs
+	if len(instructions) < 2 {
+		return nil, nil
+	}
+	call, ok := instructions[0].(*ssa.Call)
+	if !ok || call.Common() == nil || call.Common().IsInvoke() ||
+		call.Common().Method != nil || call.Common().StaticCallee() == nil {
+		return nil, nil
+	}
+	callPhysical, frozen := physical.instructions[call]
+	if !frozen || callPhysical.semantic.recipe != coro.RecipeID("cl.ssa.call.v1") ||
+		!callPhysical.semantic.evaluated || callPhysical.control != coroPhysicalControlDirectAwait ||
+		callPhysical.operation != coroPhysicalOperationNone ||
+		callPhysical.outcome != coroPhysicalOutcomeNone ||
+		callPhysical.controlFailure != "" || callPhysical.operationFailure != "" ||
+		callPhysical.outcomeFailure != "" {
+		return nil, nil
+	}
+	target := callPhysical.controlTarget
+	if target == nil || target == function || target != call.Common().StaticCallee() ||
+		len(target.FreeVars) != 0 || target.Signature == nil || target.Signature.Variadic() {
+		return nil, nil
+	}
+	callPlan, callPlanned := whole.CallPlan(call)
+	targetPlan, targetPlanned := whole.FunctionPlan(target)
+	if !callPlanned || callPlan.Kind != coro.CallDirect || callPlan.Open ||
+		callPlan.MayBeNil || callPlan.Rep != coro.DirectCoro || len(callPlan.Targets) != 1 ||
+		!targetPlanned || targetPlan.ID != callPhysical.controlTargetID ||
+		callPlan.Targets[0] != targetPlan.ID || targetPlan.Emission != coro.EmitCoroutine ||
+		targetPlan.ManagedEntry != coro.ManagedEntryCoroutine ||
+		targetPlan.Primary != coro.PrimaryCoroutine || targetPlan.FuncRep != coro.DirectCoro {
+		return nil, nil
+	}
+
+	sourceSig := coroPhysicalNormalizeSourceSignature(function.Signature)
+	targetSig := coroPhysicalNormalizeSourceSignature(target.Signature)
+	if sourceSig.Params().Len() != len(function.Params) ||
+		targetSig.Params().Len() != len(call.Common().Args) ||
+		!types.Identical(sourceSig.Results(), targetSig.Results()) {
+		return nil, nil
+	}
+	parameterIndex := make(map[*ssa.Parameter]int, len(function.Params))
+	for index, parameter := range function.Params {
+		parameterIndex[parameter] = index
+	}
+	arguments := make([]coroPhysicalTailForwardArgument, len(call.Common().Args))
+	for index, value := range call.Common().Args {
+		targetType := targetSig.Params().At(index).Type()
+		if parameter, ok := value.(*ssa.Parameter); ok {
+			sourceIndex, owned := parameterIndex[parameter]
+			if !owned || !types.Identical(parameter.Type(), targetType) {
+				return nil, nil
+			}
+			arguments[index] = coroPhysicalTailForwardArgument{
+				sourceParameter: sourceIndex,
+				targetType:      targetType,
+			}
+			continue
+		}
+		literal, ok := value.(*ssa.Const)
+		if !ok || literal.Type() == nil ||
+			(!types.AssignableTo(literal.Type(), targetType) &&
+				!types.Identical(types.Default(literal.Type()), targetType)) {
+			return nil, nil
+		}
+		arguments[index] = coroPhysicalTailForwardArgument{
+			sourceParameter: -1,
+			constant:        literal,
+			targetType:      targetType,
+		}
+	}
+
+	resultCount := sourceSig.Results().Len()
+	returned := make([]ssa.Value, 0, resultCount)
+	cursor := 1
+	switch resultCount {
+	case 0:
+	case 1:
+		returned = append(returned, call)
+	default:
+		for index := 0; index < resultCount; index++ {
+			if cursor >= len(instructions)-1 {
+				return nil, nil
+			}
+			extract, ok := instructions[cursor].(*ssa.Extract)
+			if !ok || extract.Tuple != call || extract.Index != index {
+				return nil, nil
+			}
+			returned = append(returned, extract)
+			cursor++
+		}
+	}
+	if cursor != len(instructions)-1 {
+		return nil, nil
+	}
+	ret, ok := instructions[cursor].(*ssa.Return)
+	if !ok || len(ret.Results) != len(returned) {
+		return nil, nil
+	}
+	for index := range returned {
+		if ret.Results[index] != returned[index] {
+			return nil, nil
+		}
+	}
+
+	forward := &coroPhysicalTailForwardPlan{
+		target:   target,
+		targetID: targetPlan.ID,
+		args:     arguments,
+	}
+	if err := forward.validate(function, whole); err != nil {
+		return nil, fmt.Errorf("tail-forward physical plan: %w", err)
+	}
+	return forward, nil
 }
 
 // coroPhysicalInstructionNeedsRuntimeContext is the emission-side closure of

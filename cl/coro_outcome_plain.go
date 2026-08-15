@@ -86,10 +86,11 @@ const (
 )
 
 type outcomePlainBodyContext struct {
-	abi        outcomePlainPhysicalABI
-	task       llssa.Expr
-	resultSlot llssa.Expr
-	completion llssa.Expr
+	abi            outcomePlainPhysicalABI
+	task           llssa.Expr
+	resultSlot     llssa.Expr
+	completion     llssa.Expr
+	outcomeScratch llssa.Expr
 }
 
 func (body *outcomePlainBodyContext) publish(
@@ -443,7 +444,7 @@ func (p *context) compileCoroStaticOutcomeTargetCallResult(
 	// suspension. Keep it in the physical function entry: loop iterations reuse
 	// the record after a fully synchronous call, avoiding dynamic stack growth and
 	// exposing its fields to ordinary SROA.
-	completion := p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), true)
+	completion := p.structuredOutcomeScratch()
 	physicalArgs := make([]llssa.Expr, 0, len(args)+3)
 	physicalArgs = append(physicalArgs,
 		p.managedPhysicalTask(),
