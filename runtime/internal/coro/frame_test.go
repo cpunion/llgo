@@ -78,13 +78,38 @@ func TestFrameAllocationLayout(t *testing.T) {
 		}
 		runtime.KeepAlive(memory)
 	}
+	for _, align := range []uintptr{1, 2, 4, 8, 16, 64} {
+		total, ok := CompilerFrameAllocationSize(37, align)
+		if !ok {
+			t.Fatalf("CompilerFrameAllocationSize(37, %d) rejected", align)
+		}
+		memory := make([]byte, total)
+		raw := unsafe.Pointer(&memory[0])
+		storage, ok := compilerAlignedStorage(raw, align)
+		if !ok || uintptr(storage)%align != 0 ||
+			!allocationContains(raw, total, storage, 37) {
+			t.Fatalf("compact compiler storage align %d = (%p, %t)", align, storage, ok)
+		}
+		receipt, ok := compilerFrameReceipt(storage)
+		if !ok || uintptr(unsafe.Pointer(receipt)) < uintptr(raw) ||
+			!allocationContains(raw, total, unsafe.Pointer(receipt), unsafe.Sizeof(*receipt)) {
+			t.Fatalf("compact compiler receipt align %d = (%p, %t)", align, receipt, ok)
+		}
+		runtime.KeepAlive(memory)
+	}
 	for _, align := range []uintptr{0, 3, 6} {
 		if _, ok := FrameAllocationSize(1, align); ok {
 			t.Fatalf("invalid alignment %d accepted", align)
 		}
+		if _, ok := CompilerFrameAllocationSize(1, align); ok {
+			t.Fatalf("invalid compact compiler alignment %d accepted", align)
+		}
 	}
 	if _, ok := FrameAllocationSize(^uintptr(0), 8); ok {
 		t.Fatal("overflowing frame allocation accepted")
+	}
+	if _, ok := CompilerFrameAllocationSize(^uintptr(0), 8); ok {
+		t.Fatal("overflowing compact compiler frame allocation accepted")
 	}
 	offset := unsafe.Sizeof(Frame{}) + unsafe.Sizeof(uintptr(0))
 	if _, ok := alignedStorageOffset(^uintptr(0)-offset-1, 8); ok {
@@ -190,24 +215,24 @@ func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
 		t.Fatal("InitG failed")
 	}
 	const (
-		size  = uintptr(37)
+		size  = uintptr(256)
 		align = uintptr(16)
 	)
-	total, ok := FrameAllocationSize(size, align)
+	total, ok := CompilerFrameAllocationSize(size, align)
 	if !ok {
 		t.Fatal("compute compiler frame allocation")
 	}
 	memory := make([]byte, total)
 	descriptor := &FrameDescriptorV1{Version: 1, ResultAlign: 1, Function: "test.compiler.dynamic"}
 	storage, ok := RegisterFrameCompiler(
-		g, unsafe.Pointer(&memory[0]), total, align, unsafe.Pointer(descriptor),
+		g, unsafe.Pointer(&memory[0]), total, size, align, unsafe.Pointer(descriptor),
 	)
 	if !ok {
 		t.Fatal("register compiler frame")
 	}
 	handle := unsafe.Pointer(new(byte))
-	header := new(HeaderV1)
-	metadata := new(BorrowedFrameStorageV2)
+	header := (*HeaderV1)(unsafe.Add(storage, 16))
+	metadata := (*BorrowedFrameStorageV2)(unsafe.Add(storage, 80))
 	if !PublishFrameV3Compiler(
 		g, handle, header, storage, unsafe.Pointer(metadata),
 		unsafe.Pointer(descriptor), nil,
@@ -218,19 +243,51 @@ func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
 	if frame == nil || g.frames != frame || frame.owner != g || frame.handle != handle ||
 		frame.header != header || frame.descriptor != unsafe.Pointer(descriptor) ||
 		frame.allocationSize != total || frame.state != FrameInitialSuspended ||
-		frame.borrowedStorage || header.AllocationBase != unsafe.Pointer(frame) {
+		frame.borrowedStorage || header.AllocationBase != unsafe.Pointer(&memory[0]) ||
+		frame != (*Frame)(unsafe.Pointer(metadata)) {
 		t.Fatalf("compiler frame publication = %+v, header=%+v", frame, header)
 	}
 	frame.state = FrameDestroyPending
 	header.Lifecycle = uint16(FrameDestroyPending)
 	g.destroyTarget = frame
-	raw, released, ok := ReleaseFrameCompiler(g, storage, size, align, unsafe.Pointer(descriptor))
-	if !ok || raw != unsafe.Pointer(&memory[0]) || released != total {
-		t.Fatalf("compiler frame release = (%p, %d, %t), want (%p, %d, true)", raw, released, ok, &memory[0], total)
+	releasedMetadata, raw, released, ok := ReleaseFrameCompiler(
+		g, storage, size, align, unsafe.Pointer(descriptor),
+	)
+	if !ok || releasedMetadata != unsafe.Pointer(metadata) ||
+		raw != unsafe.Pointer(&memory[0]) || released != total {
+		t.Fatalf(
+			"compiler frame release = (%p, %p, %d, %t), want (%p, %p, %d, true)",
+			releasedMetadata, raw, released, ok, metadata, &memory[0], total,
+		)
 	}
 	if g.frames != nil || g.destroyTarget != nil || frame.state != FrameDestroyed ||
 		header.Lifecycle != uint16(FrameDestroyed) {
 		t.Fatalf("compiler frame release retained state: frames=%p target=%p frame=%d header=%d", g.frames, g.destroyTarget, frame.state, header.Lifecycle)
+	}
+	// A panic keeps the embedded metadata while the physical raw allocation is
+	// distinct. The dead handle word must carry that base through trace discard
+	// so the allocator receives the exact original range.
+	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	parent := &Frame{completion: CompletionRecord{
+		status: CompletionPanic, child: handle, typeWord: typeWord, dataWord: dataWord,
+	}}
+	frame.parent = parent
+	frame.retainPanicTrace = true
+	if !RetainPendingPanicTraceFrameCompiler(
+		g, releasedMetadata, raw, released,
+	) || g.panicTraceHead != frame || g.panicTraceTail != frame ||
+		frame.header != nil || frame.handle != raw {
+		t.Fatalf("retain compact compiler panic frame = %+v", frame)
+	}
+	if !stagePanicTraceDiscard(g) {
+		t.Fatal("stage compact compiler panic trace discard")
+	}
+	discardedRaw, discardedTotal, ok := TakeDiscardedPanicTraceFrame(g)
+	if !ok || discardedRaw != raw || discardedTotal != released {
+		t.Fatalf(
+			"compact compiler panic discard = (%p, %d, %t), want (%p, %d, true)",
+			discardedRaw, discardedTotal, ok, raw, released,
+		)
 	}
 	runtime.KeepAlive(memory)
 }

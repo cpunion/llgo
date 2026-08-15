@@ -27,7 +27,7 @@ import (
 
 const (
 	coroProgramFrameAllocHookV1       = "__llgo_coro_frame_alloc_v1"
-	coroProgramFramePublishHookV1     = "__llgo_coro_frame_publish_v1"
+	coroProgramFramePublishHookV3     = "__llgo_coro_frame_publish_v3"
 	coroProgramAwaitPrepareHookV2     = "__llgo_coro_await_prepare_v2"
 	coroProgramAwaitConsumeHookV1     = "__llgo_coro_await_consume_v1"
 	coroProgramPanicPrepareHookV1     = "__llgo_coro_panic_prepare_v1"
@@ -48,6 +48,7 @@ const (
 	coroProgramCompletionAbortV1      = 3
 	coroProgramCompletionShutdownV1   = 4
 	coroProgramCompletionGoexitV1     = 6
+	coroProgramFrameMetadataWordsV2   = 14
 )
 
 const (
@@ -160,13 +161,18 @@ func emitCoroProgramBootstrapFactoryV2(
 	descriptorPointer := b.Convert(prog.VoidPtr(), descriptor)
 	headerType := coroProgramBootstrapHeaderTypeV1(prog)
 	header := b.AllocaT(headerType)
+	frameMetadataType := prog.Type(
+		types.NewArray(types.Typ[types.Uintptr], coroProgramFrameMetadataWordsV2),
+		llssa.InGo,
+	)
+	frameMetadata := b.AllocaT(frameMetadataType)
 
 	alloc := pkg.NewFunc(coroProgramFrameAllocHookV1, newSignature(
 		[]types.Type{pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer},
 		[]types.Type{pointer},
 	), llssa.InC)
-	publish := pkg.NewFunc(coroProgramFramePublishHookV1, newSignature(
-		[]types.Type{pointer, pointer, pointer, pointer}, nil,
+	publish := pkg.NewFunc(coroProgramFramePublishHookV3, newSignature(
+		[]types.Type{pointer, pointer, pointer, pointer, pointer, pointer, pointer}, nil,
 	), llssa.InC)
 	await := pkg.NewFunc(coroProgramAwaitPrepareHookV2, newSignature(
 		[]types.Type{pointer, pointer, pointer}, nil,
@@ -197,6 +203,7 @@ func emitCoroProgramBootstrapFactoryV2(
 			return b.Call(alloc.Expr, g, size, align, descriptorPointer)
 		},
 		Free: func(b llssa.Builder, storage, size, align llssa.Expr) {
+			b.KeepAlive(frameMetadata)
 			b.Call(free.Expr, g, storage, size, align, descriptorPointer)
 		},
 	}
@@ -207,22 +214,16 @@ func emitCoroProgramBootstrapFactoryV2(
 			emitCoroProgramTakeNormalRunDecisionV1(b, runDecisionTake, g)
 		},
 		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
-			values := []llssa.Expr{
+			b.Call(
+				publish.Expr,
 				g,
-				null,
+				handle,
+				b.Convert(prog.VoidPtr(), header),
+				storage,
+				b.Convert(prog.VoidPtr(), frameMetadata),
 				descriptorPointer,
-				null,
 				out,
-				prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()),
-				prog.IntVal(coroProgramLifecycleInitialV1, prog.Uint16()),
-				prog.IntVal(0, prog.Uint32()),
-				prog.IntVal(0, prog.Uint32()),
-				prog.IntVal(0, prog.Uint32()),
-			}
-			for index, value := range values {
-				b.Store(b.FieldAddr(header, index), value)
-			}
-			b.Call(publish.Expr, g, handle, b.Convert(prog.VoidPtr(), header), storage)
+			)
 		},
 	})
 

@@ -25,7 +25,7 @@ import (
 
 //export __llgo_coro_frame_alloc_v1
 func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) unsafe.Pointer {
-	total, ok := coro.FrameAllocationSize(size, align)
+	total, ok := coro.CompilerFrameAllocationSize(size, align)
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame allocation size")
 	}
@@ -33,7 +33,7 @@ func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descripto
 	if raw == nil {
 		coroRuntimeAbort("coroutine frame allocation failed")
 	}
-	storage, ok := coro.RegisterFrameCompiler((*coro.G)(g), raw, total, align, descriptor)
+	storage, ok := coro.RegisterFrameCompiler((*coro.G)(g), raw, total, size, align, descriptor)
 	if !ok {
 		if !coroalloc.FreeFrame(raw, total) {
 			coroRuntimeAbort("coroutine frame allocation rollback failed")
@@ -44,10 +44,12 @@ func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descripto
 }
 
 //export __llgo_coro_frame_publish_v1
-func __llgo_coro_frame_publish_v1(g, handle, header, storage unsafe.Pointer) {
-	if !coro.PublishFrame((*coro.G)(g), handle, (*coro.HeaderV1)(header), storage) {
-		coroRuntimeAbort("invalid coroutine frame publication")
-	}
+func __llgo_coro_frame_publish_v1(_, _, _, _ unsafe.Pointer) {
+	// The compact allocator stores Frame inside compiler-provided metadata;
+	// publication without that address cannot reconstruct ownership safely.
+	// Every current compiler path, including the synthesized program bootstrap,
+	// uses V3. Fail closed if an incompatible archive reaches this runtime.
+	coroRuntimeAbort("legacy coroutine frame publication is unsupported")
 }
 
 //go:noinline
@@ -134,15 +136,15 @@ func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status ui
 //export __llgo_coro_frame_free_v1
 func __llgo_coro_frame_free_v1(g, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {
 	task := (*coro.G)(g)
-	raw, total, ok := coro.ReleaseFrameCompiler(task, storage, size, align, descriptor)
+	metadata, raw, total, ok := coro.ReleaseFrameCompiler(task, storage, size, align, descriptor)
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame destruction")
 	}
 	// A managed child panic remains recoverable by its parent, so every logical
 	// G may retain that pending frame. Only the static command G may retain a
 	// terminal frame chain because its native entry owns the no-return report.
-	if coro.RetainPendingPanicTraceFrame(task, raw, total) ||
-		task == &coroProgramGV1State && coro.RetainPanicTraceFrame(task, raw, total) {
+	if coro.RetainPendingPanicTraceFrameCompiler(task, metadata, raw, total) ||
+		task == &coroProgramGV1State && coro.RetainPanicTraceFrameCompiler(task, metadata, raw, total) {
 		return
 	}
 	if !coroalloc.FreeFrame(raw, total) {

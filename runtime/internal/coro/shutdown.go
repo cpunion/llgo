@@ -29,15 +29,10 @@ func CommandMainReturnPoint(p *P, main *G) bool {
 func validCancelFrame(frame *Frame, g *G) bool {
 	if frame == nil || frame.owner != g || frame.handle == nil || frame.header == nil ||
 		frame.descriptor == nil || frame.header.G != unsafe.Pointer(g) ||
-		frame.header.Descriptor != frame.descriptor {
+		frame.header.Descriptor != frame.descriptor || !validFrameAllocationIdentity(frame) {
 		return false
 	}
-	if frame.borrowedStorage {
-		return frame.allocationSize == 0 &&
-			frame.header.AllocationBase == unsafe.Pointer(frame)
-	}
-	return frame.allocationSize != 0 &&
-		frame.header.AllocationBase == unsafe.Pointer(frame)
+	return true
 }
 
 // validCancelableReadyG proves that a ready G contains exactly one structured
