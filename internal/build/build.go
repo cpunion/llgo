@@ -476,7 +476,7 @@ func Build(inv Invocation) ([]Package, error) {
 	}()
 	// Handle crosscompile configuration first to set correct GOOS/GOARCH
 	forceEspClang := conf.ForceEspClang || conf.Target != ""
-	export, err := crosscompile.Use(conf.Goos, conf.Goarch, conf.Target, IsWasiThreadsEnabled(), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
+	export, err := crosscompile.UseWithGOARM(conf.Goos, conf.Goarch, conf.GOARM, conf.Target, IsWasiThreadsEnabled(), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup crosscompile: %w", err)
 	}
