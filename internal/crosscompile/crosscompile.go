@@ -268,10 +268,25 @@ func coffLTOLevel(level optlevel.Level) string {
 	}
 }
 
-func nativeWindowsSectionFlags() (ccflags, ldflags []string) {
-	ccflags = []string{"-fdata-sections", "-ffunction-sections"}
-	ldflags = []string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref"}
-	return
+func nativeSectionFlags(goos string) (ccflags, ldflags []string) {
+	switch goos {
+	case "darwin":
+		return nil, []string{"-Xlinker", "-dead_strip"}
+	case "windows":
+		return []string{"-fdata-sections", "-ffunction-sections"},
+			[]string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref"}
+	default:
+		return []string{"-fdata-sections", "-ffunction-sections"}, []string{
+			"-fdata-sections",
+			"-ffunction-sections",
+			"-Xlinker",
+			"--gc-sections",
+			"-latomic",
+			// libpthread & libdl is built-in since glibc 2.34 (2021-08-01); we need to support earlier versions.
+			"-lpthread",
+			"-ldl",
+		}
+	}
 }
 
 func use(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
@@ -349,35 +364,9 @@ func use(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optl
 			export.LDFLAGS = append(export.LDFLAGS, []string{"--sysroot=" + sysrootPath}...)
 		}
 
-		// Add OS-specific flags
-		switch goos {
-		case "darwin": // ld64.lld (macOS)
-			export.LDFLAGS = append(
-				export.LDFLAGS,
-				"-Xlinker", "-dead_strip",
-			)
-		case "windows": // lld-link (Windows)
-			ccflags, ldflags := nativeWindowsSectionFlags()
-			export.CCFLAGS = append(export.CCFLAGS, ccflags...)
-			export.LDFLAGS = append(export.LDFLAGS, ldflags...)
-		default: // ld.lld (Unix)
-			export.CCFLAGS = append(
-				export.CCFLAGS,
-				"-fdata-sections",
-				"-ffunction-sections",
-			)
-			export.LDFLAGS = append(
-				export.LDFLAGS,
-				"-fdata-sections",
-				"-ffunction-sections",
-				"-Xlinker",
-				"--gc-sections",
-				"-latomic",
-				// libpthread & libdl is built-in since glibc 2.34 (2021-08-01); we need to support earlier versions.
-				"-lpthread",
-				"-ldl",
-			)
-		}
+		ccflags, ldflags := nativeSectionFlags(goos)
+		export.CCFLAGS = append(export.CCFLAGS, ccflags...)
+		export.LDFLAGS = append(export.LDFLAGS, ldflags...)
 		return
 	}
 	if goarch != "wasm" {
