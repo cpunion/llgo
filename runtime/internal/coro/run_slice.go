@@ -922,6 +922,45 @@ func ResumedExecutorRun(
 	return next, true, true
 }
 
+// BeginIssuedExecutorDestroyAfterResume changes one still-private issued
+// resume interval into its adjacent normal-completion destroy interval. The
+// resumed frame has already published and committed pendingComplete; no user
+// code, producer callback, queue selection, or host boundary can observe the
+// CheckDestroy action between these two physical operations. Keeping the
+// issued capability live avoids a ready-tail round trip for every short-lived
+// coroutine while the independent llvm.coro.done observation still guards
+// llvm.coro.destroy.
+//
+// Panic unwinding and foreign reentry deliberately retain their existing
+// separately scheduled destroy paths because those transitions carry an
+// externally visible control boundary in addition to frame completion.
+func BeginIssuedExecutorDestroyAfterResume(
+	driver *ExecutorDriver,
+	g *G,
+	action Action,
+	done bool,
+) (Action, bool) {
+	if !done || !validIssuedExecutorRunAction(driver) ||
+		driver.run.issued != ActionCheckResume || g == nil {
+		return Action{}, false
+	}
+	p := driver.p
+	if p.current != g || g.runP != p || p.inResume || p.inlineAwaitDepth != 0 ||
+		p.action != action || action.Kind != ActionCheckDestroy || action.Flags != 0 ||
+		action.Handle == nil || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
+		g.state != GDispatching || g.destroyTarget == nil ||
+		g.destroyTarget.handle != action.Handle ||
+		g.destroyTarget.state != FrameDestroyPending ||
+		g.park.taskCancelPhase == taskCancelRequested || g.panicUnwind ||
+		p.foreignReentry != nil {
+		return Action{}, false
+	}
+	next := Action{Kind: ActionDestroy, Handle: action.Handle}
+	driver.run.issued = ActionCheckDestroy
+	p.action = next
+	return next, true
+}
+
 // CommitExecutorRunAction closes the no-return physical interval opened by an
 // Action step. A live continuation is moved to the ready tail; terminal and
 // yield/park control actions are already stable. The function retains neither

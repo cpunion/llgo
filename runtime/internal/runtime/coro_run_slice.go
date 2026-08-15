@@ -162,45 +162,61 @@ func coroRunPhysicalActionV1(
 	g *coro.G,
 	action coro.Action,
 	runtimeContext unsafe.Pointer,
-) (next coro.Action, advanced, committed bool) {
+	fuseCompletionDestroy bool,
+) (next coro.Action, advanced, committed, fusedDestroy bool) {
 	switch action.Kind {
 	case coro.ActionCheckResume:
 		next, needsRuntimeContext, ok := coro.BeginIssuedExecutorResumeRuntimeContext(driver, g)
 		if !ok {
-			return coro.Action{}, false, false
+			return coro.Action{}, false, false, false
 		}
 		if needsRuntimeContext {
 			activation, entered := coroEnterRuntimeContextFrom(g, runtimeContext)
 			if !entered {
-				return coro.Action{}, false, false
+				return coro.Action{}, false, false, false
 			}
 			coroHandleResume(next.Handle)
 			if !coroLeaveRuntimeContext(g, activation) {
-				return coro.Action{}, false, false
+				return coro.Action{}, false, false, false
 			}
 		} else {
 			coroHandleResume(next.Handle)
 		}
 		next, committed, advanced = coro.ResumedExecutorRun(driver, p, g, next)
-		return next, advanced, committed
+		if !advanced || committed || !fuseCompletionDestroy ||
+			next.Kind != coro.ActionCheckDestroy {
+			return next, advanced, committed, false
+		}
+		checkDestroy := next
+		next, ok = coro.BeginIssuedExecutorDestroyAfterResume(
+			driver, g, checkDestroy, coroHandleDone(checkDestroy.Handle),
+		)
+		if !ok {
+			return checkDestroy, advanced, committed, false
+		}
+		if !coroHandleDestroyCommitted(g, next.Handle) {
+			return coro.Action{}, false, false, false
+		}
+		next, advanced = coro.DestroyedBounded(p, g, next)
+		return next, advanced, false, advanced
 	case coro.ActionCheckDestroy:
 		next, ok := coro.CheckedExecutorRun(driver, g, action, coroHandleDone(action.Handle))
 		if !ok || next.Kind != coro.ActionDestroy || next.Handle != action.Handle {
-			return coro.Action{}, false, false
+			return coro.Action{}, false, false, false
 		}
 		if !coroHandleDestroyCommitted(g, next.Handle) {
-			return coro.Action{}, false, false
+			return coro.Action{}, false, false, false
 		}
 		next, advanced = coro.DestroyedBounded(p, g, next)
-		return next, advanced, false
+		return next, advanced, false, false
 	case coro.ActionPanicDestroy:
 		if !coroHandleDestroyCommitted(g, action.Handle) {
-			return coro.Action{}, false, false
+			return coro.Action{}, false, false, false
 		}
 		next, advanced = coro.PanicDestroyedBounded(p, g, action)
-		return next, advanced, false
+		return next, advanced, false, false
 	default:
-		return coro.Action{}, false, false
+		return coro.Action{}, false, false, false
 	}
 }
 
@@ -276,9 +292,14 @@ func coroReduceExecutorRunActionPreparedV1(
 	dispatched bool,
 	returnRequested bool,
 	runtimeContext unsafe.Pointer,
+	remaining uint32,
 	result *coroRunResultV1,
 ) (terminal, ok bool) {
-	if g == nil || action.Handle == nil || runtimeContext == nil {
+	baseCost := uint32(1)
+	if dispatched {
+		baseCost++
+	}
+	if g == nil || action.Handle == nil || runtimeContext == nil || remaining < baseCost {
 		return false, false
 	}
 	if dispatched {
@@ -288,7 +309,9 @@ func coroReduceExecutorRunActionPreparedV1(
 		}
 		result.dispatches++
 	}
-	next, advanced, committed := coroRunPhysicalActionV1(p, driver, g, action, runtimeContext)
+	next, advanced, committed, fusedDestroy := coroRunPhysicalActionV1(
+		p, driver, g, action, runtimeContext, remaining > baseCost,
+	)
 	// The physical resume may have changed program lifecycle. Re-read the live
 	// policy before selecting the scheduler commit placement.
 	running, returnRequested := false, false
@@ -362,6 +385,10 @@ func coroReduceExecutorRunActionPreparedV1(
 	if dispatched {
 		result.used++
 	}
+	if fusedDestroy {
+		result.used++
+		result.destroys++
+	}
 	switch action.Kind {
 	case coro.ActionCheckResume:
 		result.resumes++
@@ -428,6 +455,7 @@ func coroReduceExecutorRunStepV1(
 	target coroRunTargetCapabilityV1,
 	step coro.ExecutorRunStep,
 	runtimeContext unsafe.Pointer,
+	remaining uint32,
 	result *coroRunResultV1,
 ) (terminal, ok bool) {
 	if p == nil || driver == nil || runtimeContext == nil || result == nil || !policy.valid() {
@@ -490,7 +518,7 @@ func coroReduceExecutorRunStepV1(
 	case coro.ExecutorRunStepAction:
 		return coroReduceExecutorRunActionPreparedV1(
 			p, driver, policy, target, step.G, step.Action, step.Dispatched,
-			returnRequested, runtimeContext, result,
+			returnRequested, runtimeContext, remaining, result,
 		)
 	case coro.ExecutorRunStepDestroyCommit:
 		if step.G == nil || step.Action.Kind != coro.ActionCommitDestroy || step.Action.Handle != nil {
@@ -562,7 +590,7 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 			terminal, reduced = coroReduceExecutorRunActionPreparedV1(
 				p, driver, coroRunPolicyV1{}, target,
 				actionStep.G, actionStep.Action, actionStep.Dispatched,
-				false, runtimeContext, &result,
+				false, runtimeContext, budget-result.used, &result,
 			)
 		} else {
 			var step coro.ExecutorRunStep
@@ -576,7 +604,8 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 				return coroRunResultV1{}
 			}
 			terminal, reduced = coroReduceExecutorRunStepV1(
-				p, driver, coroRunPolicyV1{}, target, step, runtimeContext, &result,
+				p, driver, coroRunPolicyV1{}, target, step, runtimeContext,
+				budget-result.used, &result,
 			)
 		}
 		if !reduced {
