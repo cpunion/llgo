@@ -70,7 +70,12 @@ func GetTargetTripleWithGOARM(goos, goarch, goarm string) string {
 	if llvmos == "windows" {
 		triple += "-msvc"
 	} else if goarch == "arm" {
-		triple += "-gnueabihf"
+		// Match Go's defaults: GOARM=5 uses software floating point, while
+		// GOARM=6 and GOARM=7 use hardware floating point.
+		triple += "-gnueabi"
+		if goarm != "5" {
+			triple += "hf"
+		}
 	}
 	return triple
 }
