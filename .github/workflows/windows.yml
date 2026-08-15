@@ -1,0 +1,62 @@
+name: Windows
+
+on:
+  pull_request:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-smoke:
+    name: host smoke (windows-amd64, LLVM 22, Go 1.26.5)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+
+      - name: Set up LLVM
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-llvm
+
+      - name: Build and test the Windows host compiler
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+
+          export CC=clang
+          export CXX=clang++
+          export CGO_ENABLED=1
+          export CGO_CFLAGS="$(llvm-config --cflags)"
+          export CGO_CXXFLAGS="$(llvm-config --cxxflags)"
+          export CGO_LDFLAGS="$(llvm-config --ldflags --libs all --system-libs)"
+
+          llvm_version="$(llvm-config --version)"
+          case "$llvm_version" in
+            22.*) build_tags=byollvm,llvm22 ;;
+            *)
+              echo "unsupported MSYS2 LLVM version: $llvm_version" >&2
+              exit 1
+              ;;
+          esac
+
+          go version
+          llvm-config --version
+          go test -tags="$build_tags" \
+            ./internal/meta \
+            ./internal/crosscompile \
+            ./internal/xtool/llvm
+
+          go build -tags="$build_tags" -o llgo-windows-smoke.exe ./cmd/llgo
+          LLGO_ROOT="$PWD" ./llgo-windows-smoke.exe version
