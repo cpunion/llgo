@@ -2,7 +2,9 @@
 
 package thread
 
+import _ "github.com/goplus/llgo/runtime/internal/clite/bdwgc"
+
 const (
-	LLGoFiles   = "-DLLGO_USE_BDWGC: _wrap/thread_windows.c"
-	LLGoPackage = "link: $(pkg-config --libs bdw-gc); -lgc"
+	LLGoFiles   = "_wrap/thread_windows_gc.c"
+	LLGoPackage = "link"
 )
