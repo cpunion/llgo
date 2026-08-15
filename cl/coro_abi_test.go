@@ -316,6 +316,73 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	}
 }
 
+func TestCoroExactTailForwardReusesTargetHandle(t *testing.T) {
+	const source = `package foo
+func Child(value uint32, delta int) {}
+func Parent(value uint32) { Child(value, -1) }
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, nil, source)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify tail-forward coroutine: %v\n%s", err, module.String())
+	}
+
+	parentSSA, childSSA := ssaPkg.Func("Parent"), ssaPkg.Func("Child")
+	owner := universe.ownerOf(parentSSA)
+	physical, err := universe.coroProgramIR.physicalFunctionPlan(parentSSA, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if physical.tailForward == nil || physical.tailForward.target != childSSA ||
+		len(physical.tailForward.args) != 2 ||
+		physical.tailForward.args[0].sourceParameter != 0 ||
+		physical.tailForward.args[1].constant == nil ||
+		physical.tailForward.args[1].constant.Int64() != -1 {
+		t.Fatalf("tail-forward physical plan = %+v; want Parent(value)->Child(value,-1)", physical.tailForward)
+	}
+
+	parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
+	child := requireCoroPhysicalFunction(t, module, "foo.Child")
+	parentIR, childIR := parent.String(), child.String()
+	if strings.Contains(parentIR, "llvm.coro.") ||
+		strings.Contains(parentIR, coroFrameAllocHookV1) ||
+		strings.Contains(parentIR, coroAwaitPrepareInlineHookV4) {
+		t.Fatalf("tail-forward ramp retained a coroutine frame or await transaction:\n%s", parentIR)
+	}
+	if !regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\(ptr [^,]+, ptr [^,]+, i32 [^,]+, i64 -1\)`).MatchString(parentIR) {
+		t.Fatalf("tail-forward ramp did not pass task/result/parameter/constant directly:\n%s", parentIR)
+	}
+	if strings.Count(parentIR, "call ptr") != 1 || !strings.Contains(parentIR, "ret ptr") {
+		t.Fatalf("tail-forward ramp is not one target call plus handle return:\n%s", parentIR)
+	}
+	if !strings.Contains(childIR, "llvm.coro.begin") ||
+		!strings.Contains(childIR, coroFrameAllocHookV1) {
+		t.Fatalf("tail-forward target lost its physical coroutine body:\n%s", childIR)
+	}
+
+	runCoroABITestPipeline(t, prog, module)
+	if module.NamedFunction("foo.Parent$coro.resume").IsNil() == false ||
+		module.NamedFunction("foo.Parent$coro.destroy").IsNil() == false {
+		t.Fatalf("frame-free tail-forward ramp acquired split resume/destroy entries:\n%s", module.String())
+	}
+	for _, suffix := range []string{".resume", ".destroy"} {
+		if module.NamedFunction("foo.Child$coro" + suffix).IsNil() {
+			t.Fatalf("tail-forward target lost split %s entry:\n%s", suffix, module.String())
+		}
+	}
+}
+
 func TestCoroNamedFunctionTypeDirectAwait(t *testing.T) {
 	const source = `package foo
 type Task func(uint32) uint32

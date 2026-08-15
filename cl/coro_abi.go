@@ -1176,6 +1176,10 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	if err != nil {
 		panic(fmt.Errorf("load frozen coroutine physical plan: %w", err))
 	}
+	if physicalPlan.tailForward != nil {
+		p.compileCoroTailForwardPhysicalBody(b, fn, physicalPlan, sourceParamBase)
+		return
+	}
 	frameRetention := physicalPlan.frameRetention
 	critical := physicalPlan.critical
 	cleanupPlan := physicalPlan.cleanup
@@ -1298,6 +1302,55 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	b.SetBlock(physical.finalSuspend)
 	physical.finish(b)
 	emission.completeManagedPhysicalBody(bodyCapability)
+}
+
+// compileCoroTailForwardPhysicalBody emits a stable coroutine entry ramp that
+// owns no coroutine frame. The frozen physical plan guarantees that its source
+// body is exactly one static call followed by an unchanged return, so passing
+// the task and result slot straight through preserves every terminal and
+// suspension protocol while avoiding a redundant parent await transaction.
+func (p *context) compileCoroTailForwardPhysicalBody(
+	b llssa.Builder,
+	function *ssa.Function,
+	physical *coroPhysicalFunctionPlan,
+	sourceParamBase int,
+) {
+	if p == nil || b == nil || b.Func != p.fn || function == nil || physical == nil ||
+		physical.function != function || physical.tailForward == nil ||
+		p.compilation == nil || p.immutablePlan() == nil || sourceParamBase < 2 {
+		panic("coroutine tail-forward emission requires one exact frozen physical plan")
+	}
+	forward := physical.tailForward
+	if err := forward.validate(function, p.immutablePlan()); err != nil {
+		panic(fmt.Errorf("validate frozen coroutine tail-forward plan: %w", err))
+	}
+	if sourceParamBase != 2 {
+		panic("coroutine tail-forward source unexpectedly has a closure environment")
+	}
+
+	b.SetBlock(p.fn.Block(0))
+	entry := p.mustFunctionSymbol(forward.target)
+	if entry.plan.ID != forward.targetID || !entry.usesCoroPhysicalABI() {
+		panic("coroutine tail-forward target no longer resolves to its frozen physical entry")
+	}
+	target, _, kind := p.compileFunctionEntry(entry)
+	if kind != goFunc || target == nil {
+		panic("coroutine tail-forward target did not resolve to a Go coroutine entry")
+	}
+	args := make([]llssa.Expr, 0, len(forward.args)+2)
+	args = append(args, p.fn.PhysicalParam(0), p.fn.PhysicalParam(1))
+	for _, argument := range forward.args {
+		if argument.sourceParameter >= 0 {
+			args = append(args, p.fn.PhysicalParam(sourceParamBase+argument.sourceParameter))
+			continue
+		}
+		args = append(args, p.compileValueAs(b, argument.constant, argument.targetType))
+	}
+	handle := b.Call(target.Expr, args...)
+	if handle.Type == nil || !types.Identical(handle.RawType(), types.Typ[types.UnsafePointer]) {
+		panic("coroutine tail-forward target returned a non-handle value")
+	}
+	b.Return(handle)
 }
 
 // validateCoroExactSyntheticForwarder proves the complete SSA body shared by
