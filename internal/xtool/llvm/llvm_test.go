@@ -157,7 +157,9 @@ func TestGetTargetTripleWithGOARM(t *testing.T) {
 		want  string
 	}{
 		{"5", "armv5-unknown-linux-gnueabi"},
+		{"5,hardfloat", "armv5-unknown-linux-gnueabihf"},
 		{"6", "armv6-unknown-linux-gnueabihf"},
+		{"6,softfloat", "armv6-unknown-linux-gnueabi"},
 		{"7", "armv7-unknown-linux-gnueabihf"},
 		{"", "armv7-unknown-linux-gnueabihf"},
 	} {

@@ -136,7 +136,11 @@ func (p *Target) Spec() (spec TargetSpec) {
 	// runtime.GOOS/runtime.GOARCH), and generate a LLVM target based on it.
 	goarch := p.effectiveGOARCH()
 	goos := p.effectiveGOOS()
-	spec.Triple = intllvm.GetTargetTripleWithGOARM(goos, goarch, p.GOARM)
+	goarm := p.GOARM
+	if p.Target != "" {
+		goarm = ""
+	}
+	spec.Triple = intllvm.GetTargetTripleWithGOARM(goos, goarch, goarm)
 	switch goarch {
 	case "386":
 		spec.CPU = "pentium4"
@@ -163,13 +167,21 @@ func (p *Target) Spec() (spec TargetSpec) {
 		spec.Features = "+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
 	case "arm":
 		spec.CPU = "generic"
-		switch p.GOARM {
+		arm, _ := archcfg.ParseARM(goarm)
+		switch arm.Version {
 		case "5":
 			spec.Features = "+armv5t,+strict-align,-aes,-bf16,-d32,-dotprod,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fp64,-fpregs,-fullfp16,-mve.fp,-neon,-sha2,-thumb-mode,-vfp2,-vfp2sp,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
 		case "6":
 			spec.Features = "+armv6,+dsp,+fp64,+strict-align,+vfp2,+vfp2sp,-aes,-d32,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fullfp16,-neon,-sha2,-thumb-mode,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
-		default:
+		case "7":
 			spec.Features = "+armv7-a,+d32,+dsp,+fp64,+neon,+vfp2,+vfp2sp,+vfp3,+vfp3d16,+vfp3d16sp,+vfp3sp,-aes,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fullfp16,-sha2,-thumb-mode,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
+		}
+		if arm.SoftFloat {
+			spec.Features += ",+soft-float"
+		} else if arm.Version == "5" {
+			// GOARM=5,hardfloat uses VFPv2 even though ARMv5 defaults to
+			// software floating point.
+			spec.Features += ",+fp64,+fpregs,+vfp2,+vfp2sp"
 		}
 	case "arm64":
 		spec.CPU = "generic"
