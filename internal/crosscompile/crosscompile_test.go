@@ -81,7 +81,7 @@ func TestUseCrossCompileSDK(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			export, err := use(tc.goos, tc.goarch, false, false, optlevel.O2, lto.Off, false)
+			export, err := use(tc.goos, tc.goarch, "", false, false, optlevel.O2, lto.Off, false)
 
 			if err != nil {
 				t.Fatalf("Unexpected error: %v", err)
@@ -465,7 +465,7 @@ func TestNativeWindowsExportFlags(t *testing.T) {
 		t.Skip("requires a native Windows host")
 	}
 
-	export, err := use("windows", runtime.GOARCH, false, false, optlevel.O2, lto.Thin, false)
+	export, err := use("windows", runtime.GOARCH, "", false, false, optlevel.O2, lto.Thin, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestNativeWindowsExportFlags(t *testing.T) {
 }
 
 func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
-	export, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Off, false)
+	export, err := use(runtime.GOOS, runtime.GOARCH, "", false, false, optlevel.O2, lto.Off, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -509,7 +509,7 @@ func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
 		}
 	}
 
-	thin, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Thin, false)
+	thin, err := use(runtime.GOOS, runtime.GOARCH, "", false, false, optlevel.O2, lto.Thin, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
 		t.Fatalf("missing thin LTO linker opt flag: %v", thin.LDFLAGS)
 	}
 
-	full, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Full, false)
+	full, err := use(runtime.GOOS, runtime.GOARCH, "", false, false, optlevel.O2, lto.Full, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
 		t.Fatalf("missing full LTO link driver flag: %v", full.LDFLAGS)
 	}
 
-	fullGlobalDCE, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Full, true)
+	fullGlobalDCE, err := use(runtime.GOOS, runtime.GOARCH, "", false, false, optlevel.O2, lto.Full, true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
