@@ -260,7 +260,6 @@ func TestRoundTripFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer pm2.Close()
 
 	if got := pm2.symbolName(fn); got != "pkg.Fn" {
 		t.Errorf("SymbolName after file round-trip = %q, want \"pkg.Fn\"", got)
@@ -268,6 +267,12 @@ func TestRoundTripFile(t *testing.T) {
 	edges := pm2.ordinaryEdges(fn)
 	if len(edges) != 1 || edges[0] != dep {
 		t.Errorf("OrdinaryEdges after file round-trip = %v", edges)
+	}
+	if err := pm2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := pm2.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }
 
