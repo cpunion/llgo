@@ -111,6 +111,7 @@ func main() {
 
 	checkRecover()
 	checkNilFault()
+	checkGC()
 	if windowsUnrecoveredFault() != 0 {
 		_ = windowsNilFault()
 		panic("unrecovered Windows fault returned")
