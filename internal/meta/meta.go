@@ -169,7 +169,7 @@ func Open(path string) (*PackageMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fi.Size() < headerSize || fi.Size() > int64(^uint(0)>>1) {
+	if fi.Size() < headerSize || uint64(fi.Size()) > uint64(^uint32(0)) || fi.Size() > int64(^uint(0)>>1) {
 		return nil, fmt.Errorf("meta: mmap %s: invalid file size %d", path, fi.Size())
 	}
 	size := int(fi.Size())
@@ -306,6 +306,9 @@ func newPackageMeta(raw []byte) (*PackageMeta, error) {
 	if len(raw) < headerSize {
 		return nil, fmt.Errorf("meta: file too small: %d bytes", len(raw))
 	}
+	if uint64(len(raw)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("meta: file too large: %d bytes", len(raw))
+	}
 	if string(raw[0:4]) != magic {
 		return nil, fmt.Errorf("meta: bad magic %q", raw[0:4])
 	}
@@ -327,9 +330,21 @@ func newPackageMeta(raw []byte) (*PackageMeta, error) {
 	if offsets[secOrdinaryEdges]-offsets[secSymbols] < 4 {
 		return nil, fmt.Errorf("meta: truncated symbols section")
 	}
+	nsyms := binary.LittleEndian.Uint32(raw[offsets[secSymbols]:])
+	pm := packageMetaView(raw, offsets, nsyms)
+	if err := pm.validate(); err != nil {
+		return nil, err
+	}
+	return pm, nil
+}
 
-	pm := &PackageMeta{
+// packageMetaView constructs a view over a layout whose header has already
+// been decoded. Builder uses it for bytes it just wrote; Open validates the
+// returned view before exposing mapped, file-controlled bytes.
+func packageMetaView(raw []byte, offsets [numSections]uint32, nsyms uint32) *PackageMeta {
+	return &PackageMeta{
 		raw:         raw,
+		nsyms:       nsyms,
 		strOff:      offsets[secStringTable],
 		symOff:      offsets[secSymbols],
 		ordinaryOff: offsets[secOrdinaryEdges],
@@ -338,10 +353,120 @@ func newPackageMeta(raw []byte) (*PackageMeta, error) {
 		methodOff:   offsets[secMethodInfo],
 		ifaceOff:    offsets[secIfaceInfo],
 	}
+}
 
-	// read nsyms from Symbols section header
-	pm.nsyms = binary.LittleEndian.Uint32(raw[pm.symOff:])
-	return pm, nil
+type csrLayout struct {
+	dataOff  uint32
+	nrecords uint32
+}
+
+func (pm *PackageMeta) validate() error {
+	symSize := uint64(pm.ordinaryOff - pm.symOff)
+	wantSymSize := uint64(4) + uint64(pm.nsyms)*12
+	if symSize != wantSymSize {
+		return fmt.Errorf("meta: invalid symbols section size %d for %d symbols", symSize, pm.nsyms)
+	}
+
+	sections := [...]struct {
+		name       string
+		start      uint32
+		end        uint32
+		recordSize uint32
+	}{
+		{name: "OrdinaryEdges", start: pm.ordinaryOff, end: pm.demandOff, recordSize: 4},
+		{name: "FuncDemand", start: pm.demandOff, end: pm.childOff, recordSize: 12},
+		{name: "TypeChildren", start: pm.childOff, end: pm.methodOff, recordSize: 4},
+		{name: "MethodInfo", start: pm.methodOff, end: pm.ifaceOff, recordSize: 20},
+		{name: "InterfaceInfo", start: pm.ifaceOff, end: uint32(len(pm.raw)), recordSize: 12},
+	}
+	var layouts [len(sections)]csrLayout
+	for i, section := range sections {
+		layout, err := validateCSRSection(pm.raw, section.name, section.start, section.end, pm.nsyms, section.recordSize)
+		if err != nil {
+			return err
+		}
+		layouts[i] = layout
+	}
+
+	strSize := pm.symOff - pm.strOff
+	if err := pm.validateNameRecords("Symbols", pm.symOff+4, pm.nsyms, 12, strSize); err != nil {
+		return err
+	}
+	if err := pm.validateFuncDemandNames(layouts[1], strSize); err != nil {
+		return err
+	}
+	if err := pm.validateNameRecords(sections[3].name, layouts[3].dataOff, layouts[3].nrecords, 20, strSize); err != nil {
+		return err
+	}
+	return pm.validateNameRecords(sections[4].name, layouts[4].dataOff, layouts[4].nrecords, 12, strSize)
+}
+
+func validNameRef(ref nameRef, strSize uint32) bool {
+	return uint64(ref.Off)+uint64(ref.Len) <= uint64(strSize)
+}
+
+func validateCSRSection(raw []byte, name string, start, end, nsyms, recordSize uint32) (csrLayout, error) {
+	sectionSize := uint64(end - start)
+	headerSize := uint64(4) + (uint64(nsyms)+1)*4
+	if sectionSize < headerSize {
+		return csrLayout{}, fmt.Errorf("meta: truncated %s CSR header", name)
+	}
+	if got := binary.LittleEndian.Uint32(raw[start:]); got != nsyms {
+		return csrLayout{}, fmt.Errorf("meta: %s has %d symbols, want %d", name, got, nsyms)
+	}
+	dataSize := sectionSize - headerSize
+	if dataSize%uint64(recordSize) != 0 {
+		return csrLayout{}, fmt.Errorf("meta: invalid %s data size %d", name, dataSize)
+	}
+	nrecords := dataSize / uint64(recordSize)
+	offsetsBase := start + 4
+	prev := binary.LittleEndian.Uint32(raw[offsetsBase:])
+	if prev != 0 {
+		return csrLayout{}, fmt.Errorf("meta: %s CSR first offset is %d, want 0", name, prev)
+	}
+	for sym := uint32(0); sym < nsyms; sym++ {
+		cur := binary.LittleEndian.Uint32(raw[offsetsBase+(sym+1)*4:])
+		if cur < prev || uint64(cur) > nrecords {
+			return csrLayout{}, fmt.Errorf("meta: invalid %s CSR offset %d at symbol %d", name, cur, sym)
+		}
+		prev = cur
+	}
+	if uint64(prev) != nrecords {
+		return csrLayout{}, fmt.Errorf("meta: %s CSR covers %d records, section contains %d", name, prev, nrecords)
+	}
+	return csrLayout{dataOff: uint32(uint64(start) + headerSize), nrecords: uint32(nrecords)}, nil
+}
+
+func (pm *PackageMeta) validateFuncDemandNames(layout csrLayout, strSize uint32) error {
+	for i := uint32(0); i < layout.nrecords; i++ {
+		base := layout.dataOff + i*12
+		kind := DemandKind(binary.LittleEndian.Uint32(pm.raw[base:]))
+		if kind != DemandNamedMethod {
+			continue
+		}
+		ref := nameRef{
+			Off: binary.LittleEndian.Uint32(pm.raw[base+4:]),
+			Len: binary.LittleEndian.Uint32(pm.raw[base+8:]),
+		}
+		if !validNameRef(ref, strSize) {
+			return fmt.Errorf("meta: FuncDemand record %d has invalid name range [%d,%d)", i, ref.Off, uint64(ref.Off)+uint64(ref.Len))
+		}
+	}
+	return nil
+}
+
+func (pm *PackageMeta) validateNameRecords(section string, dataOff, nrecords, recordSize, strSize uint32) error {
+	for i := uint32(0); i < nrecords; i++ {
+		base := dataOff + i*recordSize
+		ref := nameRef{
+			Off: binary.LittleEndian.Uint32(pm.raw[base:]),
+			Len: binary.LittleEndian.Uint32(pm.raw[base+4:]),
+		}
+		if !validNameRef(ref, strSize) {
+			return fmt.Errorf("meta: %s record %d has invalid name range [%d,%d)", section, i, ref.Off, uint64(ref.Off)+uint64(ref.Len))
+		}
+	}
+	return nil
 }
 
 // csrSlice returns the records for package-local sym from a CSR section, or nil
