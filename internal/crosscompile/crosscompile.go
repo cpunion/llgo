@@ -142,7 +142,7 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 	}
 
 	// Try to download ESP Clang if platform is supported
-	platformSuffix := getESPClangPlatform(runtime.GOOS, runtime.GOARCH)
+	platformSuffix := getESPClangHostPlatform(runtime.GOOS, runtime.GOARCH)
 	if platformSuffix != "" {
 		cacheClangDir := filepath.Join(cacheRoot(), "crosscompile", "esp-clang-"+espClangVersion)
 		if _, err = os.Stat(cacheClangDir); err != nil {
@@ -162,8 +162,11 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 	return
 }
 
-// getESPClangPlatform returns the platform suffix for ESP Clang downloads
-func getESPClangPlatform(goos, goarch string) string {
+// getESPClangHostPlatform returns the host-platform suffix of an ESP Clang
+// distribution. For example, x86_64-w64-mingw32 describes the ABI of the
+// downloaded compiler executable; it does not select the ABI of code that
+// compiler emits for LLGo's target triple.
+func getESPClangHostPlatform(goos, goarch string) string {
 	switch goos {
 	case "darwin":
 		switch goarch {
