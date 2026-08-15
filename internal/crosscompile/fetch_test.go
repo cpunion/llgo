@@ -97,6 +97,21 @@ func TestAcquireAndReleaseLock(t *testing.T) {
 	if err := releaseLock(lockFile); err != nil {
 		t.Errorf("Failed to release reacquired lock: %v", err)
 	}
+
+	// A closed handle exercises the platform unlock failure path and verifies
+	// that releaseLock preserves enough context for callers to diagnose it.
+	closedLock, err := acquireLock(filepath.Join(tempDir, "closed.lock"))
+	if err != nil {
+		t.Fatalf("Failed to acquire lock for error test: %v", err)
+	}
+	if err := closedLock.Close(); err != nil {
+		t.Fatalf("Failed to close lock for error test: %v", err)
+	}
+	if err := releaseLock(closedLock); err == nil {
+		t.Fatal("Expected release of a closed lock to fail")
+	} else if !strings.Contains(err.Error(), "failed to release lock") {
+		t.Fatalf("Unexpected closed lock release error: %v", err)
+	}
 }
 
 func TestAcquireLockConcurrency(t *testing.T) {
