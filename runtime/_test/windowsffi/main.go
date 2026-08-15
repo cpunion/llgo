@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"runtime"
 	_ "unsafe"
 
 	_ "github.com/goplus/llgo/runtime/internal/runtime"
@@ -19,11 +20,63 @@ type pair struct {
 
 type mixedFunc func(int64, float64, complex128, pair) (int64, float64, complex128, pair)
 
+type foreignGCProbe struct {
+	value uintptr
+}
+
 func checkMixed(label string, got []reflect.Value) {
 	if len(got) != 4 || got[0].Int() != 47 || got[1].Float() != 5.25 ||
 		got[2].Complex() != complex(4.5, -1.25) ||
 		got[3].Interface().(pair) != (pair{Integer: 16, Float: 5.5}) {
 		panic("Windows reflect FFI corrupted " + label + " arguments or results")
+	}
+}
+
+func makeForeignCallback(finalized chan uintptr, deferred, recovered *bool) func(uintptr) uintptr {
+	probe := &foreignGCProbe{value: 100}
+	runtime.SetFinalizer(probe, func(value *foreignGCProbe) {
+		finalized <- value.value
+	})
+	return reflect.MakeFunc(reflect.TypeOf((func(uintptr) uintptr)(nil)), func(args []reflect.Value) []reflect.Value {
+		defer func() { *deferred = true }()
+		func() {
+			defer func() {
+				if value := recover(); value == "Windows foreign callback panic" {
+					*recovered = true
+				}
+			}()
+			panic("Windows foreign callback panic")
+		}()
+		stackProbe := &foreignGCProbe{value: 7}
+		runtime.SetFinalizer(stackProbe, func(value *foreignGCProbe) {
+			finalized <- value.value
+		})
+		runtime.GC()
+		select {
+		case <-finalized:
+			panic("Windows foreign-thread callback lost a live GC root")
+		default:
+		}
+		if stackProbe.value != 7 {
+			panic("Windows foreign-thread callback corrupted a stack root")
+		}
+		runtime.KeepAlive(stackProbe)
+		return []reflect.Value{reflect.ValueOf(probe.value + uintptr(args[0].Uint()))}
+	}).Interface().(func(uintptr) uintptr)
+}
+
+//go:noinline
+func checkForeignCallback(finalized chan uintptr) {
+	deferred := false
+	recovered := false
+	foreign := makeForeignCallback(finalized, &deferred, &recovered)
+	var result uintptr
+	if errno := callOnForeignThread(reflect.ValueOf(foreign).Pointer(), 23, &result); errno != 0 || result != 123 {
+		panic("Windows foreign-thread callback failed")
+	}
+	runtime.KeepAlive(foreign)
+	if !deferred || !recovered {
+		panic("Windows foreign-thread callback lost defer or panic/recover state")
 	}
 }
 
@@ -72,13 +125,9 @@ func main() {
 	}
 	checkMixed("MakeFunc", reflect.ValueOf(made).Call(args))
 
-	foreignBase := uintptr(100)
-	foreign := reflect.MakeFunc(reflect.TypeOf((func(uintptr) uintptr)(nil)), func(args []reflect.Value) []reflect.Value {
-		return []reflect.Value{reflect.ValueOf(foreignBase + uintptr(args[0].Uint()))}
-	}).Interface().(func(uintptr) uintptr)
-	var foreignResult uintptr
-	if errno := callOnForeignThread(reflect.ValueOf(foreign).Pointer(), 23, &foreignResult); errno != 0 || foreignResult != 123 {
-		panic("Windows foreign-thread callback failed")
+	for attempt := 0; attempt < 4; attempt++ {
+		finalized := make(chan uintptr, 2)
+		checkForeignCallback(finalized)
 	}
 
 	println("windows FFI smoke: ok")
