@@ -101,7 +101,7 @@ jobs:
             ./internal/meta \
             ./internal/xtool/llvm
           go test -tags="$build_tags" \
-            -run '^TestAcquire(AndReleaseLock(Errors)?|LockConcurrency)$' \
+            -run '^(TestAcquire(AndReleaseLock(Errors)?|LockConcurrency)|TestNativeWindows.*|TestCOFFLTOLevel)$' \
             ./internal/crosscompile
           go test -tags="$build_tags" \
             -run '^Test(WindowsTargetTriple|ARMTargetSpec)$' \

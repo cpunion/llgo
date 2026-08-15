@@ -394,6 +394,105 @@ func TestOptimizationFlagPlacement(t *testing.T) {
 	}
 }
 
+func TestNativeWindowsLLDFlags(t *testing.T) {
+	flags := nativeLLDFlags("windows", optlevel.O2, lto.Off)
+	for _, want := range []string{
+		"-fuse-ld=lld",
+		"-Wl,/errorlimit:0",
+		"-Wl,/opt:noicf",
+	} {
+		if !slices.Contains(flags, want) {
+			t.Errorf("native Windows LLD flags = %v, want %q", flags, want)
+		}
+	}
+	for _, unwanted := range []string{"-Wl,--error-limit=0", "-Wl,--icf=none"} {
+		if slices.Contains(flags, unwanted) {
+			t.Errorf("native Windows LLD flags = %v, do not want %q", flags, unwanted)
+		}
+	}
+
+	thin := nativeLLDFlags("windows", optlevel.O3, lto.Thin)
+	for _, want := range []string{"-flto=thin", "-Wl,/opt:lldlto=3"} {
+		if !slices.Contains(thin, want) {
+			t.Errorf("native Windows ThinLTO flags = %v, want %q", thin, want)
+		}
+	}
+	if slices.Contains(thin, "-Wl,--lto-O3") {
+		t.Errorf("native Windows ThinLTO flags = %v, contain ELF LTO syntax", thin)
+	}
+}
+
+func TestCOFFLTOLevel(t *testing.T) {
+	for _, tt := range []struct {
+		level optlevel.Level
+		want  string
+	}{
+		{optlevel.O0, "0"},
+		{optlevel.O1, "1"},
+		{optlevel.O2, "2"},
+		{optlevel.O3, "3"},
+		{optlevel.Os, "2"},
+		{optlevel.Oz, "2"},
+	} {
+		if got := coffLTOLevel(tt.level); got != tt.want {
+			t.Errorf("coffLTOLevel(%s) = %q, want %q", tt.level, got, tt.want)
+		}
+	}
+}
+
+func TestNativeWindowsOSFlags(t *testing.T) {
+	ccflags, ldflags := nativeWindowsSectionFlags()
+
+	for _, want := range []string{"-fdata-sections", "-ffunction-sections"} {
+		if !slices.Contains(ccflags, want) {
+			t.Errorf("native Windows CCFLAGS = %v, want %q", ccflags, want)
+		}
+	}
+	for _, want := range []string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref"} {
+		if !slices.Contains(ldflags, want) {
+			t.Errorf("native Windows LDFLAGS = %v, want %q", ldflags, want)
+		}
+	}
+	for _, unwanted := range []string{"--gc-sections", "-latomic", "-lpthread", "-ldl"} {
+		if slices.Contains(ldflags, unwanted) {
+			t.Errorf("native Windows LDFLAGS = %v, do not want %q", ldflags, unwanted)
+		}
+	}
+}
+
+func TestNativeWindowsExportFlags(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("requires a native Windows host")
+	}
+
+	export, err := use("windows", runtime.GOARCH, false, false, optlevel.O2, lto.Thin, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"-Wl,/errorlimit:0",
+		"-Wl,/opt:noicf",
+		"-Wl,/opt:ref",
+		"-Wl,/opt:lldlto=2",
+	} {
+		if !slices.Contains(export.LDFLAGS, want) {
+			t.Errorf("native Windows LDFLAGS = %v, want %q", export.LDFLAGS, want)
+		}
+	}
+	for _, unwanted := range []string{
+		"-Wl,--error-limit=0",
+		"-Wl,--icf=none",
+		"--gc-sections",
+		"-latomic",
+		"-lpthread",
+		"-ldl",
+	} {
+		if slices.Contains(export.LDFLAGS, unwanted) {
+			t.Errorf("native Windows LDFLAGS = %v, do not want %q", export.LDFLAGS, unwanted)
+		}
+	}
+}
+
 func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
 	export, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Off, false)
 	if err != nil {
