@@ -43,9 +43,10 @@ void *__llgo_coro_alloc_cache_take_v1(uintptr_t size);
 bool __llgo_coro_alloc_cache_put_v1(void *pointer, uintptr_t size);
 
 enum {
-    bounded_size = 256,
-    bounded_capacity = 512,
-	compact_size = 384,
+	bounded_size = 256,
+	bounded_capacity = 512,
+	compact_size = 576,
+	large_compact_size = 1152,
     thread_count = 8,
     thread_iterations = 10000,
     concurrent_size = 512,
@@ -143,6 +144,25 @@ int main(void) {
         }
     }
     free(compact);
+
+    unsigned char *large_compact = malloc(large_compact_size);
+    if (large_compact == NULL) {
+        return 25;
+    }
+    memset(large_compact, 0xa5, large_compact_size);
+    if (!__llgo_coro_alloc_cache_put_v1(large_compact, large_compact_size)) {
+        return 26;
+    }
+    large_compact = __llgo_coro_alloc_cache_take_v1(large_compact_size);
+    if (large_compact == NULL) {
+        return 27;
+    }
+    for (int byte = 0; byte < large_compact_size; ++byte) {
+        if (large_compact[byte] != 0) {
+            return 28;
+        }
+    }
+    free(large_compact);
 
     pthread_t threads[thread_count];
     for (int index = 0; index < thread_count; ++index) {

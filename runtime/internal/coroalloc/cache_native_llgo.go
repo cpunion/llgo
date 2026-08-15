@@ -20,38 +20,16 @@ package coroalloc
 
 import "unsafe"
 
-// cacheAllocationSize maps the small, repeatedly allocated coroutine/task
-// ranges onto compact classes. The 256..512 byte hot range uses one cache-line
-// granularity: compiler frames commonly land between 320 and 448 bytes, where
-// power-of-two rounding otherwise wastes up to half of every allocation. The
-// mapping is arithmetic on that hot path; larger classes retain the old powers
-// of two. The native cache keeps at most 128 KiB per class, and unusual ranges
-// retain the backend's exact-size path.
+// cacheAllocationSize maps the repeatedly allocated coroutine/task range onto
+// compact classes. Compiler frames are commonly 250 bytes to a few KiB; using
+// powers of two there can waste almost half of every live goroutine. The hot
+// 256..1024 byte range therefore uses 32-byte classes; 1152..4096 uses 128-byte
+// classes. Both mappings remain one range check plus an add/mask, and the C
+// cache derives the same bin index with arithmetic rather than a search.
+// Larger, uncommon ranges retain powers of two and outliers retain the
+// backend's exact-size path.
 func cacheAllocationSize(size uintptr) uintptr {
-	if size <= 512 {
-		if size <= 256 {
-			return 256
-		}
-		return (size + 63) &^ 63
-	}
-	switch {
-	case size <= 1024:
-		return 1024
-	case size <= 2048:
-		return 2048
-	case size <= 4096:
-		return 4096
-	case size <= 8192:
-		return 8192
-	case size <= 16384:
-		return 16384
-	case size <= 32768:
-		return 32768
-	case size <= 65536:
-		return 65536
-	default:
-		return size
-	}
+	return nativeCacheAllocationSize(size)
 }
 
 // The cache leaf owns no Go pointer, callback, scheduler object, or coroutine

@@ -21,43 +21,67 @@
 #include <string.h>
 
 enum {
-    llgo_coro_alloc_cache_dense_min = 256,
-    llgo_coro_alloc_cache_dense_max = 512,
-    llgo_coro_alloc_cache_dense_quantum = 64,
-    llgo_coro_alloc_cache_dense_count =
-        (llgo_coro_alloc_cache_dense_max - llgo_coro_alloc_cache_dense_min) /
-            llgo_coro_alloc_cache_dense_quantum +
+    llgo_coro_alloc_cache_small_min = 256,
+    llgo_coro_alloc_cache_small_max = 1024,
+    llgo_coro_alloc_cache_small_quantum = 32,
+    llgo_coro_alloc_cache_small_count =
+        (llgo_coro_alloc_cache_small_max - llgo_coro_alloc_cache_small_min) /
+            llgo_coro_alloc_cache_small_quantum +
         1,
-    llgo_coro_alloc_cache_power_min_shift = 10,
+    llgo_coro_alloc_cache_large_min = 1152,
+    llgo_coro_alloc_cache_large_max = 4096,
+    llgo_coro_alloc_cache_large_quantum = 128,
+    llgo_coro_alloc_cache_large_count =
+        (llgo_coro_alloc_cache_large_max - llgo_coro_alloc_cache_large_min) /
+            llgo_coro_alloc_cache_large_quantum +
+        1,
+    llgo_coro_alloc_cache_power_min_shift = 13,
     llgo_coro_alloc_cache_power_max_shift = 16,
     llgo_coro_alloc_cache_power_count =
         llgo_coro_alloc_cache_power_max_shift -
         llgo_coro_alloc_cache_power_min_shift + 1,
     llgo_coro_alloc_cache_bin_count =
-        llgo_coro_alloc_cache_dense_count +
+        llgo_coro_alloc_cache_small_count +
+        llgo_coro_alloc_cache_large_count +
         llgo_coro_alloc_cache_power_count,
-    llgo_coro_alloc_cache_bytes_per_bin = 128 * 1024,
+    /* Small frames dominate high-rate spawn/retire loops, so preserve their
+       prior reuse depth. The larger compact classes get a small budget: their
+       main benefit is low live slack, not retaining a deep free list. Across
+       all 53 bins the theoretical retention bound is below 3.6 MiB. */
+    llgo_coro_alloc_cache_small_bytes_per_bin = 128 * 1024,
+    llgo_coro_alloc_cache_large_bytes_per_bin = 16 * 1024,
 };
 
 struct llgo_coro_alloc_cache_bin_v1 {
     _Atomic(uint32_t) lock;
     void *head;
     uint32_t count;
+    /* Zero is uninitialized; UINT32_MAX marks a class whose budget cannot
+       retain even one object. On pointer-64 this occupies existing padding. */
+    uint32_t capacity;
 };
 
 static struct llgo_coro_alloc_cache_bin_v1
     llgo_coro_alloc_cache_bins_v1[llgo_coro_alloc_cache_bin_count];
 
 static int llgo_coro_alloc_cache_index_v1(uintptr_t size) {
-    if (size >= llgo_coro_alloc_cache_dense_min &&
-        size <= llgo_coro_alloc_cache_dense_max &&
-        (size & (llgo_coro_alloc_cache_dense_quantum - 1)) == 0) {
-        return (int)((size - llgo_coro_alloc_cache_dense_min) /
-                     llgo_coro_alloc_cache_dense_quantum);
+    if (size >= llgo_coro_alloc_cache_small_min &&
+        size <= llgo_coro_alloc_cache_small_max &&
+        (size & (llgo_coro_alloc_cache_small_quantum - 1)) == 0) {
+        return (int)((size - llgo_coro_alloc_cache_small_min) /
+                     llgo_coro_alloc_cache_small_quantum);
+    }
+    if (size >= llgo_coro_alloc_cache_large_min &&
+        size <= llgo_coro_alloc_cache_large_max &&
+        (size & (llgo_coro_alloc_cache_large_quantum - 1)) == 0) {
+        return llgo_coro_alloc_cache_small_count +
+            (int)((size - llgo_coro_alloc_cache_large_min) /
+                  llgo_coro_alloc_cache_large_quantum);
     }
     uintptr_t value =
         (uintptr_t)1 << llgo_coro_alloc_cache_power_min_shift;
-    for (int index = llgo_coro_alloc_cache_dense_count;
+    for (int index = llgo_coro_alloc_cache_small_count +
+                     llgo_coro_alloc_cache_large_count;
          index < llgo_coro_alloc_cache_bin_count;
          ++index, value <<= 1) {
         if (size == value) {
@@ -110,9 +134,17 @@ bool __llgo_coro_alloc_cache_put_v1(void *pointer, uintptr_t size) {
     memset(pointer, 0, size);
     struct llgo_coro_alloc_cache_bin_v1 *bin =
         &llgo_coro_alloc_cache_bins_v1[index];
-    uint32_t capacity = (uint32_t)(llgo_coro_alloc_cache_bytes_per_bin / size);
     llgo_coro_alloc_cache_lock_v1(bin);
-    if (bin->count >= capacity) {
+    uint32_t capacity = bin->capacity;
+    if (capacity == 0) {
+        uintptr_t budget = size <= llgo_coro_alloc_cache_small_max
+            ? llgo_coro_alloc_cache_small_bytes_per_bin
+            : llgo_coro_alloc_cache_large_bytes_per_bin;
+        uintptr_t computed = budget / size;
+        capacity = computed == 0 ? UINT32_MAX : (uint32_t)computed;
+        bin->capacity = capacity;
+    }
+    if (capacity == UINT32_MAX || bin->count >= capacity) {
         llgo_coro_alloc_cache_unlock_v1(bin);
         return false;
     }

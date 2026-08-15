@@ -83,3 +83,20 @@ func TestSelectedBackendKindIsKnown(t *testing.T) {
 		t.Fatalf("unknown statically selected backend %q", backendKind)
 	}
 }
+
+func TestNativeCacheAllocationSizeClasses(t *testing.T) {
+	tests := []struct {
+		size uintptr
+		want uintptr
+	}{
+		{0, 256}, {256, 256}, {257, 288},
+		{1024, 1024}, {1025, 1152}, {1152, 1152},
+		{4096, 4096}, {4097, 8192}, {8192, 8192},
+		{8193, 16384}, {65536, 65536}, {65537, 65537},
+	}
+	for _, test := range tests {
+		if got := nativeCacheAllocationSize(test.size); got != test.want {
+			t.Fatalf("native class for %d = %d, want %d", test.size, got, test.want)
+		}
+	}
+}
