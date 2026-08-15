@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -83,9 +84,18 @@ func TestAcquireAndReleaseLock(t *testing.T) {
 		t.Errorf("Failed to release lock: %v", err)
 	}
 
-	// Check lock file is removed
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Error("Lock file should be removed after release")
+	// The lock file remains so every caller continues to lock the same file.
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("Lock file should remain after release: %v", err)
+	}
+
+	// A retained lock file can be acquired again.
+	lockFile, err = acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("Failed to reacquire lock: %v", err)
+	}
+	if err := releaseLock(lockFile); err != nil {
+		t.Errorf("Failed to release reacquired lock: %v", err)
 	}
 }
 
@@ -96,6 +106,7 @@ func TestAcquireLockConcurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	var results []int
 	var resultsMu sync.Mutex
+	var active atomic.Int32
 
 	// Start multiple goroutines trying to acquire the same lock
 	for i := 0; i < 5; i++ {
@@ -109,12 +120,17 @@ func TestAcquireLockConcurrency(t *testing.T) {
 				return
 			}
 
+			if n := active.Add(1); n != 1 {
+				t.Errorf("Goroutine %d entered an occupied critical section (%d active)", id, n)
+			}
+
 			// Hold the lock for a short time
 			resultsMu.Lock()
 			results = append(results, id)
 			resultsMu.Unlock()
 
 			time.Sleep(10 * time.Millisecond)
+			active.Add(-1)
 
 			if err := releaseLock(lockFile); err != nil {
 				t.Errorf("Goroutine %d failed to release lock: %v", id, err)
