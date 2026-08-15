@@ -11,7 +11,7 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/libuv"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
+	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 	ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
 )
 
