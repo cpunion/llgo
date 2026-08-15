@@ -12,7 +12,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // checkDownloadAndExtractWasiSDK downloads and extracts WASI SDK
@@ -133,22 +132,28 @@ func acquireLock(lockPath string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lock file: %w", err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFileHandle(lockFile); err != nil {
 		lockFile.Close()
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
 	return lockFile, nil
 }
 
-// releaseLock unlocks and removes the lock file
+// releaseLock unlocks and closes the lock file. The file must remain in place:
+// removing it could let a new caller lock a different file while another caller
+// still holds the original one.
 func releaseLock(lockFile *os.File) error {
 	if lockFile == nil {
 		return nil
 	}
-	lockPath := lockFile.Name()
-	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-	lockFile.Close()
-	os.Remove(lockPath)
+	unlockErr := unlockFileHandle(lockFile)
+	closeErr := lockFile.Close()
+	if unlockErr != nil {
+		return fmt.Errorf("failed to release lock: %w", unlockErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to close lock file: %w", closeErr)
+	}
 	return nil
 }
 
