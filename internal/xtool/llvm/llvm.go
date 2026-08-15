@@ -3,6 +3,12 @@ package llvm
 import "runtime"
 
 func GetTargetTriple(goos, goarch string) string {
+	return GetTargetTripleWithGOARM(goos, goarch, "")
+}
+
+// GetTargetTripleWithGOARM returns the LLVM target triple for a Go target.
+// goarm selects the ARM version for GOARCH=arm and defaults to ARMv7.
+func GetTargetTripleWithGOARM(goos, goarch, goarm string) string {
 	var llvmarch string
 	if goarch == "" {
 		goarch = runtime.GOARCH
@@ -22,9 +28,14 @@ func GetTargetTriple(goos, goarch string) string {
 	case "arm64":
 		llvmarch = "aarch64"
 	case "arm":
-		// Keep the default in sync with ssa.Target.Spec when GOARM is not
-		// explicitly modeled by this helper.
-		llvmarch = "armv7"
+		switch goarm {
+		case "5":
+			llvmarch = "armv5"
+		case "6":
+			llvmarch = "armv6"
+		default:
+			llvmarch = "armv7"
+		}
 	case "wasm":
 		llvmarch = "wasm32"
 	default:
@@ -41,7 +52,6 @@ func GetTargetTriple(goos, goarch string) string {
 			// Looks like Apple prefers to call this architecture ARM64
 			// instead of AArch64.
 			llvmarch = "arm64"
-			llvmos = "macosx"
 		}
 		llvmvendor = "apple"
 	case "wasip1":
