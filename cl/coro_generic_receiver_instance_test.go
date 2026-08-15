@@ -119,18 +119,28 @@ func Root(p *Pointer[int]) *int { return p.Load() }
 			if err != nil {
 				t.Fatal(err)
 			}
+			rootPhysical, err := universe.coroProgramIR.physicalFunctionPlan(root, universe.ownerOf(root))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rootPhysical.tailForward == nil || rootPhysical.tailForward.target != instance {
+				t.Fatalf("generic receiver root tail forward = %+v; want exact instance target", rootPhysical.tailForward)
+			}
 			module := compiled.Module()
 			defer module.Dispose()
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("verify generic receiver instance before CoroSplit: %v\n%s", err, module.String())
 			}
 			rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-			if !strings.Contains(rootIR, "$coro") || !strings.Contains(rootIR, "call i1 @"+coroAwaitPrepareInlineHookV4) {
-				t.Fatalf("generic receiver call did not use child await:\n%s", rootIR)
+			if !strings.Contains(rootIR, `call ptr @"foo.(*Pointer[int]).Load$coro"`) ||
+				!strings.Contains(rootIR, "ret ptr") || strings.Contains(rootIR, "llvm.coro.") ||
+				strings.Contains(rootIR, coroAwaitPrepareInlineHookV4) {
+				t.Fatalf("generic receiver call did not use the exact frame-free tail ramp:\n%s", rootIR)
 			}
 			runCoroABITestPipeline(t, prog, module)
-			if module.NamedFunction("foo.Root$coro.resume").IsNil() {
-				t.Fatalf("CoroSplit lost generic receiver caller resume:\n%s", module.String())
+			if !module.NamedFunction("foo.Root$coro.resume").IsNil() ||
+				module.NamedFunction("foo.(*Pointer[int]).Load$coro.resume").IsNil() {
+				t.Fatalf("CoroSplit did not preserve the frame-free root/physical instance split:\n%s", module.String())
 			}
 		})
 	}

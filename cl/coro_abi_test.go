@@ -868,6 +868,13 @@ func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			parentPhysical, err := universe.coroProgramIR.physicalFunctionPlan(parent, universe.ownerOf(parent))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parentPhysical.tailForward == nil || parentPhysical.tailForward.target != child {
+				t.Fatalf("Parent physical tail forward = %+v; want exact Child target", parentPhysical.tailForward)
+			}
 			module := pkg.Module()
 			defer module.Dispose()
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
@@ -890,10 +897,15 @@ func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
 
 			runCoroABITestPipeline(t, prog, module)
 			post := module.String()
-			for _, function := range []string{"foo.Child$coro", "foo.Parent$coro", "foo.Pair$coro"} {
+			for _, function := range []string{"foo.Child$coro", "foo.Pair$coro"} {
 				for _, suffix := range []string{".resume", ".destroy"} {
 					if module.NamedFunction(function + suffix).IsNil() {
 						t.Fatalf("CoroSplit did not create %s%s:\n%s", function, suffix, post)
+					}
+				}
+				for _, suffix := range []string{".resume", ".destroy"} {
+					if !module.NamedFunction("foo.Parent$coro" + suffix).IsNil() {
+						t.Fatalf("frame-free Parent tail-forward acquired %s:\n%s", suffix, post)
 					}
 				}
 			}
