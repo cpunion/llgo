@@ -137,6 +137,7 @@ type Config struct {
 	Goarch             string
 	GO386              string // 386 floating-point implementation: sse2 or softfloat
 	GOAMD64            string // amd64 microarchitecture level: v1 through v4
+	GOARM              string // arm architecture and floating-point implementation
 	GOARM64            string // arm64 ISA version and optional lse/crypto extensions
 	Target             string // target name (e.g., "rp2040", "wasi") - takes precedence over Goos/Goarch
 	OptLevel           optlevel.Level
@@ -296,11 +297,11 @@ func resolveBuildConfig(input *Config) (*Config, error) {
 
 func resolveGOARCHConfig(conf *Config, getenv func(string) string) error {
 	if conf.Target != "" {
-		conf.GO386, conf.GOAMD64, conf.GOARM64 = "", "", ""
+		conf.GO386, conf.GOAMD64, conf.GOARM, conf.GOARM64 = "", "", "", ""
 		return nil
 	}
-	go386, goamd64, goarm64 := conf.GO386, conf.GOAMD64, conf.GOARM64
-	conf.GO386, conf.GOAMD64, conf.GOARM64 = "", "", ""
+	go386, goamd64, goarm, goarm64 := conf.GO386, conf.GOAMD64, conf.GOARM, conf.GOARM64
+	conf.GO386, conf.GOAMD64, conf.GOARM, conf.GOARM64 = "", "", "", ""
 	switch conf.Goarch {
 	case "386":
 		if go386 == "" {
@@ -315,6 +316,13 @@ func resolveGOARCHConfig(conf *Config, getenv func(string) string) error {
 		}
 		value, err := goarch.ResolveAMD64(goamd64)
 		conf.GOAMD64 = value
+		return err
+	case "arm":
+		if goarm == "" {
+			goarm = getenv("GOARM")
+		}
+		value, err := goarch.ParseARM(goarm)
+		conf.GOARM = value.String()
 		return err
 	case "arm64":
 		if goarm64 == "" {
@@ -331,14 +339,16 @@ func goarchEnv(conf *Config) []string {
 	if conf == nil || conf.Target != "" {
 		return nil
 	}
-	values := []string{"GO386=", "GOAMD64=", "GOARM64="}
+	values := []string{"GO386=", "GOAMD64=", "GOARM=", "GOARM64="}
 	switch conf.Goarch {
 	case "386":
 		values[0] += conf.GO386
 	case "amd64":
 		values[1] += conf.GOAMD64
+	case "arm":
+		values[2] += conf.GOARM
 	case "arm64":
-		values[2] += conf.GOARM64
+		values[3] += conf.GOARM64
 	}
 	return values
 }
@@ -488,6 +498,7 @@ func Build(inv Invocation) ([]Package, error) {
 		GOARCH:                  conf.Goarch,
 		GO386:                   conf.GO386,
 		GOAMD64:                 conf.GOAMD64,
+		GOARM:                   conf.GOARM,
 		GOARM64:                 conf.GOARM64,
 		Target:                  conf.Target,
 		LLVMTarget:              export.LLVMTarget,

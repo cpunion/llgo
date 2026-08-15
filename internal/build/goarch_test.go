@@ -59,6 +59,23 @@ func TestResolveGOARCHConfig(t *testing.T) {
 			want: Config{Goarch: "amd64", GOAMD64: "v4"},
 		},
 		{
+			name: "arm default",
+			conf: Config{Goarch: "arm"},
+			want: Config{Goarch: "arm", GOARM: "7"},
+		},
+		{
+			name: "arm environment",
+			conf: Config{Goarch: "arm"},
+			env:  map[string]string{"GOARM": "6,softfloat"},
+			want: Config{Goarch: "arm", GOARM: "6,softfloat"},
+		},
+		{
+			name: "arm explicit wins",
+			conf: Config{Goarch: "arm", GOARM: "5,hardfloat"},
+			env:  map[string]string{"GOARM": "7"},
+			want: Config{Goarch: "arm", GOARM: "5,hardfloat"},
+		},
+		{
 			name: "arm64 canonical extensions",
 			conf: Config{Goarch: "arm64", GOARM64: "v8.2,crypto"},
 			want: Config{Goarch: "arm64", GOARM64: "v8.2,lse,crypto"},
@@ -71,12 +88,12 @@ func TestResolveGOARCHConfig(t *testing.T) {
 		},
 		{
 			name: "unrelated architecture",
-			conf: Config{Goarch: "wasm", GO386: "softfloat", GOAMD64: "v4", GOARM64: "v9.5"},
+			conf: Config{Goarch: "wasm", GO386: "softfloat", GOAMD64: "v4", GOARM: "5", GOARM64: "v9.5"},
 			want: Config{Goarch: "wasm"},
 		},
 		{
 			name: "named target ignores architecture environment",
-			conf: Config{Goarch: "amd64", GOAMD64: "v4", Target: "wasi"},
+			conf: Config{Goarch: "amd64", GOAMD64: "v4", GOARM: "5", Target: "wasi"},
 			want: Config{Goarch: "amd64", Target: "wasi"},
 		},
 	}
@@ -94,13 +111,17 @@ func TestResolveGOARCHConfig(t *testing.T) {
 }
 
 func TestResolveBuildConfigInvalidGOARCHValueIsAtomic(t *testing.T) {
-	input := &Config{Goarch: "amd64", GOAMD64: "v5", GoBuildFlags: []string{"-tags=keep"}}
-	want := input.clone()
-	if _, err := resolveBuildConfig(input); err == nil {
-		t.Fatal("resolveBuildConfig succeeded with GOAMD64=v5")
-	}
-	if !reflect.DeepEqual(input, want) {
-		t.Fatalf("input changed on error:\n got %+v\nwant %+v", input, want)
+	for _, input := range []*Config{
+		{Goarch: "amd64", GOAMD64: "v5", GoBuildFlags: []string{"-tags=keep"}},
+		{Goarch: "arm", GOARM: "8", GoBuildFlags: []string{"-tags=keep"}},
+	} {
+		want := input.clone()
+		if _, err := resolveBuildConfig(input); err == nil {
+			t.Fatalf("resolveBuildConfig succeeded with %+v", input)
+		}
+		if !reflect.DeepEqual(input, want) {
+			t.Fatalf("input changed on error:\n got %+v\nwant %+v", input, want)
+		}
 	}
 }
 
@@ -110,9 +131,10 @@ func TestGOARCHEnv(t *testing.T) {
 		want []string
 	}{
 		{},
-		{conf: &Config{Goarch: "386", GO386: "softfloat"}, want: []string{"GO386=softfloat", "GOAMD64=", "GOARM64="}},
-		{conf: &Config{Goarch: "amd64", GOAMD64: "v4"}, want: []string{"GO386=", "GOAMD64=v4", "GOARM64="}},
-		{conf: &Config{Goarch: "arm64", GOARM64: "v9.5,lse,crypto"}, want: []string{"GO386=", "GOAMD64=", "GOARM64=v9.5,lse,crypto"}},
+		{conf: &Config{Goarch: "386", GO386: "softfloat"}, want: []string{"GO386=softfloat", "GOAMD64=", "GOARM=", "GOARM64="}},
+		{conf: &Config{Goarch: "amd64", GOAMD64: "v4"}, want: []string{"GO386=", "GOAMD64=v4", "GOARM=", "GOARM64="}},
+		{conf: &Config{Goarch: "arm", GOARM: "6,softfloat"}, want: []string{"GO386=", "GOAMD64=", "GOARM=6,softfloat", "GOARM64="}},
+		{conf: &Config{Goarch: "arm64", GOARM64: "v9.5,lse,crypto"}, want: []string{"GO386=", "GOAMD64=", "GOARM=", "GOARM64=v9.5,lse,crypto"}},
 		{conf: &Config{Goarch: "amd64", Target: "wasi"}},
 	}
 	for _, test := range tests {
@@ -149,6 +171,13 @@ func TestGOARCHConfigSeparatesCacheFingerprints(t *testing.T) {
 			right:      &Config{Goos: "windows", Goarch: "amd64", GOAMD64: "v4"},
 			leftEntry:  "GOAMD64: v1",
 			rightEntry: "GOAMD64: v4",
+		},
+		{
+			name:       "GOARM",
+			left:       &Config{Goos: "linux", Goarch: "arm", GOARM: "7"},
+			right:      &Config{Goos: "linux", Goarch: "arm", GOARM: "6,softfloat"},
+			leftEntry:  "GOARM: \"7\"",
+			rightEntry: "GOARM: 6,softfloat",
 		},
 		{
 			name:       "GOARM64",
