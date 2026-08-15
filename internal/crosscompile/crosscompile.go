@@ -51,14 +51,20 @@ type Export struct {
 // Build orchestration consumes this typed capability instead of inferring it
 // from a target name or linker executable.
 type DebugInfoPolicy struct {
-	AlwaysOmit    bool
-	OmitLinkFlags []string
+	AlwaysOmit        bool
+	OmitLinkFlags     []string
+	PreserveLinkFlags []string
 }
 
 func nativeDebugInfoPolicy(goos string) DebugInfoPolicy {
 	switch goos {
 	case "darwin", "linux":
 		return DebugInfoPolicy{OmitLinkFlags: []string{"-Wl,-S"}}
+	case "windows":
+		return DebugInfoPolicy{
+			OmitLinkFlags:     []string{"-Wl,/debug:none"},
+			PreserveLinkFlags: []string{"-Wl,/debug:dwarf"},
+		}
 	default:
 		return DebugInfoPolicy{}
 	}
