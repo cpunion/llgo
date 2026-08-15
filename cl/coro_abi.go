@@ -146,7 +146,7 @@ const (
 	coroCompletePrepareHookV2                  = "__llgo_coro_complete_prepare_v2"
 	coroFrameFreeHookV1                        = "__llgo_coro_frame_free_v1"
 	coroDescriptorPrefixV1                     = "__llgo_coro_frame_descriptor_v1."
-	coroBorrowedFrameMetadataWordsV2           = 15
+	coroBorrowedFrameMetadataWordsV2           = 14
 )
 
 const (
@@ -258,14 +258,22 @@ type coroBodyContext struct {
 	completePrepare        llssa.Expr
 	terminalStatus         llssa.Expr
 	preemptCountdown       llssa.Expr
-	nextState              uint32
-	terminalState          uint32
-	needsPreempt           bool
-	instructions           int
-	frameRetention         *coroFrameRetentionProof
-	critical               *coroCriticalProof
-	terminalResultAllocs   map[*ssa.Alloc]llssa.Expr
-	sourceBlockPollFresh   bool
+	// outcomeScratch is the one frame-local status/interface record shared by
+	// every fully consumed managed child transaction. Source execution cannot
+	// overlap two calls in one physical frame: a coroutine child suspends its
+	// parent until the old outcome is consumed, while an outcome-plain child
+	// returns synchronously. Keeping one directly addressed record avoids one
+	// permanent CoroSplit field per call site without adding a runtime lookup or
+	// dynamic lifetime protocol.
+	outcomeScratch       llssa.Expr
+	nextState            uint32
+	terminalState        uint32
+	needsPreempt         bool
+	instructions         int
+	frameRetention       *coroFrameRetentionProof
+	critical             *coroCriticalProof
+	terminalResultAllocs map[*ssa.Alloc]llssa.Expr
+	sourceBlockPollFresh bool
 }
 
 func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *types.Signature) coroPhysicalABI {

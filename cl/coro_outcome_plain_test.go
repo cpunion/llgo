@@ -72,6 +72,22 @@ func Parent(first, second uint32, choose bool, payload any, fail bool) uint32 {
 }
 `
 
+const coroOutcomePlainSharedScratchFixture = `package foo
+
+func Leaf(value uint32, payload any, fail bool) uint32 {
+	if fail {
+		panic(payload)
+	}
+	return value + 1
+}
+
+func Parent(first, second uint32, payload any, fail bool) uint32 {
+	left := Leaf(first, payload, false)
+	right := Leaf(second, payload, fail)
+	return Leaf(left+right, payload, false)
+}
+`
+
 const coroOutcomePlainLargeDAGFixture = `package foo
 
 type Huge [131073]byte
@@ -211,6 +227,44 @@ func TestCoroOutcomePlainStaticTwinKeepsDynamicCoroutineEntry(t *testing.T) {
 		t.Fatalf("dynamic descriptor did not retain the coroutine primary:\n%s", text)
 	}
 	runCoroABITestPipeline(t, prog, module)
+}
+
+func TestCoroOutcomePlainCallSitesShareOneFrameScratchNativeAndWasm32(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg, plan, ssaPkg := compileCoroOutcomePlainSource(
+				t, test.target, coroOutcomePlainSharedScratchFixture, "Parent", 64,
+			)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			leaf := ssaPkg.Func("Leaf")
+			leafPlan, found := plan.FunctionPlan(leaf)
+			if !found || leafPlan.Emission != coro.EmitOutcomePlain {
+				t.Fatalf("Leaf plan = %+v, present=%t; want outcome-plain", leafPlan, found)
+			}
+			parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
+			parentIR := parent.String()
+			if got := strings.Count(parentIR, "foo.Leaf$outcome"); got != 3 {
+				t.Fatalf("Parent outcome calls = %d, want 3:\n%s", got, parentIR)
+			}
+			if got := strings.Count(parentIR, "alloca { i32, ptr, ptr }"); got != 1 {
+				t.Fatalf("Parent outcome completion allocas = %d, want one shared frame scratch:\n%s", got, parentIR)
+			}
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify shared outcome scratch module before CoroSplit: %v\n%s", err, module.String())
+			}
+			runCoroABITestPipeline(t, prog, module)
+		})
+	}
 }
 
 func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {

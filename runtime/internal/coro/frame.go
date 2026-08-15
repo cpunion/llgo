@@ -81,7 +81,12 @@ const (
 )
 
 // FrameState values deliberately match the lifecycle field emitted by cl.
-type FrameState uint16
+// FrameState has seven values and is scheduler-private. Keep it byte-sized so
+// the lifecycle/context/retention flags fill one pointer-aligned word after
+// panicLine instead of forcing a padding word in every physical frame. The
+// compiler-facing HeaderV1 lifecycle remains uint16 and is converted at the
+// validation boundary.
+type FrameState uint8
 
 const (
 	FrameAllocated FrameState = iota
@@ -204,7 +209,7 @@ type Frame struct {
 // the exact free callback supplies them, while the allocation base is the
 // Frame address itself. Keeping those derivable facts out of every frame also
 // keeps common short-lived coroutine allocations in the smaller size class.
-type BorrowedFrameStorageV2 [15]uintptr
+type BorrowedFrameStorageV2 [14]uintptr
 
 var _ [int(unsafe.Sizeof(BorrowedFrameStorageV2{})) - int(unsafe.Sizeof(Frame{}))]byte
 
