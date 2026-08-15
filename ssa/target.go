@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/goplus/llgo/internal/optlevel"
+	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -153,32 +154,7 @@ func (p *Target) Spec() (spec TargetSpec) {
 	default:
 		llvmarch = goarch
 	}
-	llvmvendor := "unknown"
-	llvmos := goos
-	switch goos {
-	case "darwin":
-		// Use macosx* instead of darwin, otherwise darwin/arm64 will refer
-		// to iOS!
-		llvmos = "macosx"
-		if llvmarch == "aarch64" {
-			// Looks like Apple prefers to call this architecture ARM64
-			// instead of AArch64.
-			llvmarch = "arm64"
-			llvmos = "macosx"
-		}
-		llvmvendor = "apple"
-	case "wasip1":
-		llvmos = "wasip1"
-	}
-	// Target triples (which actually have four components, but are called
-	// triples for historical reasons) have the form:
-	//   arch-vendor-os-environment
-	spec.Triple = llvmarch + "-" + llvmvendor + "-" + llvmos
-	if llvmos == "windows" {
-		spec.Triple += "-gnu"
-	} else if goarch == "arm" {
-		spec.Triple += "-gnueabihf"
-	}
+	spec.Triple = intllvm.GetTargetTripleWithGOARM(goos, goarch, p.GOARM)
 	switch goarch {
 	case "386":
 		spec.CPU = "pentium4"
