@@ -235,6 +235,58 @@ func ltoLinkerOptFlag(level optlevel.Level) string {
 	}
 }
 
+func nativeLLDFlags(goos string, level optlevel.Level, ltoMode lto.Mode) []string {
+	flags := []string{"-fuse-ld=lld"}
+	if goos == "windows" {
+		flags = append(flags,
+			"-Wl,/errorlimit:0",
+			// Go requires distinct functions to have distinct PCs. lld-link
+			// enables identical COMDAT folding through /opt:icf, so keep it
+			// disabled even when other dead-code elimination is enabled.
+			"-Wl,/opt:noicf",
+		)
+	} else {
+		flags = append(flags,
+			"-Wl,--error-limit=0",
+			// lld's safe mode still folds llgo-emitted same-body functions.
+			"-Wl,--icf=none",
+		)
+	}
+	if !ltoMode.Enabled() {
+		return flags
+	}
+
+	flags = append(flags, ltoMode.ClangFlag())
+	if goos == "windows" {
+		flags = append(flags, "-Wl,/opt:lldlto="+coffLTOLevel(level))
+	} else {
+		flags = append(flags, "-Wl,--lto"+level.Flag())
+	}
+	return flags
+}
+
+func coffLTOLevel(level optlevel.Level) string {
+	switch level {
+	case optlevel.O0:
+		return "0"
+	case optlevel.O1:
+		return "1"
+	case optlevel.O3:
+		return "3"
+	default:
+		// lld-link accepts only 0 through 3. -Os and -Oz are preserved in
+		// the input IR through optsize/minsize attributes; use its normal
+		// optimization pipeline for the link-wide setting.
+		return "2"
+	}
+}
+
+func nativeWindowsSectionFlags() (ccflags, ldflags []string) {
+	ccflags = []string{"-fdata-sections", "-ffunction-sections"}
+	ldflags = []string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref"}
+	return
+}
+
 func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
 	targetTriple := llvm.GetTargetTriple(goos, goarch)
 	llgoRoot := env.LLGoROOT()
@@ -261,20 +313,8 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 			"-target", targetTriple,
 			"-Qunused-arguments",
 			"-Wno-unused-command-line-argument",
-			"-Wl,--error-limit=0",
-			"-fuse-ld=lld",
-			// ICF stays off: Go semantics require distinct functions to
-			// have distinct pcs (FuncForPC names, function-value identity —
-			// goroot fixedbugs/issue58300). lld's safe mode still folds
-			// llgo-emitted same-body functions, and gc never folds.
-			"-Wl,--icf=none",
 		}
-		if ltoMode.Enabled() {
-			export.LDFLAGS = append(export.LDFLAGS, ltoMode.ClangFlag())
-			if optFlag := ltoLinkerOptFlag(level); optFlag != "" {
-				export.LDFLAGS = append(export.LDFLAGS, "-Wl,"+optFlag)
-			}
-		}
+		export.LDFLAGS = append(export.LDFLAGS, nativeLLDFlags(goos, level, ltoMode)...)
 		if clangRoot != "" {
 			clangLib := filepath.Join(clangRoot, "lib")
 			clangInc := filepath.Join(clangRoot, "include")
@@ -330,7 +370,9 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 				"-Xlinker", "-dead_strip",
 			)
 		case "windows": // lld-link (Windows)
-			// TODO(lijie): Add options for Windows.
+			ccflags, ldflags := nativeWindowsSectionFlags()
+			export.CCFLAGS = append(export.CCFLAGS, ccflags...)
+			export.LDFLAGS = append(export.LDFLAGS, ldflags...)
 		default: // ld.lld (Unix)
 			export.CCFLAGS = append(
 				export.CCFLAGS,
