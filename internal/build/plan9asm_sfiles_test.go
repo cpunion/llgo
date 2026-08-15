@@ -4,6 +4,8 @@
 package build
 
 import (
+	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -148,6 +150,38 @@ func TestPlan9AsmEnabledInitializesSelectedPackages(t *testing.T) {
 	}
 	if !ctx.plan9asmReady || ctx.plan9asmMode != plan9asmEnvSelected || !ctx.plan9asmPkgs["example.com/second"] {
 		t.Fatalf("prepared Plan 9 assembly policy = mode %v, packages %v", ctx.plan9asmMode, ctx.plan9asmPkgs)
+	}
+}
+
+func TestPlan9AsmSigsForConfiguredARMTarget(t *testing.T) {
+	const pkgPath = "example.com/armasm"
+	typesPkg := types.NewPackage(pkgPath, "armasm")
+	sig := types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(), false)
+	if old := typesPkg.Scope().Insert(types.NewFunc(token.NoPos, typesPkg, "Foo", sig)); old != nil {
+		t.Fatalf("insert Foo: replaced %v", old)
+	}
+	pkg := &packages.Package{ID: pkgPath, PkgPath: pkgPath, Types: typesPkg}
+	asmPath := filepath.Join(t.TempDir(), "foo_arm.s")
+	ctx := &context{
+		buildConf: &Config{
+			Goos:    "linux",
+			Goarch:  "arm",
+			GOARM:   "6,softfloat",
+			Overlay: map[string][]byte{asmPath: []byte("TEXT ·Foo(SB),NOSPLIT,$0-0\n\tRET\n")},
+		},
+		pkgs:          map[*packages.Package]Package{pkg: nil},
+		sfilesCache:   map[string][]string{pkg.ID: {asmPath}},
+		sfilesFrozen:  true,
+		plan9asmReady: true,
+		plan9asmMode:  plan9asmEnvAll,
+	}
+
+	sigs, err := plan9asmSigsForPkg(ctx, pkgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sigs[pkgPath+".Foo"]; !ok {
+		t.Fatalf("signatures = %v, want %s.Foo", sigs, pkgPath)
 	}
 }
 

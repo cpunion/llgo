@@ -144,19 +144,19 @@ func ParseARM64(value string) (ARM64, error) {
 	}
 	var ret ARM64
 	for {
-		switch {
-		case strings.HasSuffix(value, ",lse"):
+		if strings.HasSuffix(value, ",lse") {
 			ret.LSE = true
 			value = strings.TrimSuffix(value, ",lse")
-		case strings.HasSuffix(value, ",crypto"):
+			continue
+		}
+		if strings.HasSuffix(value, ",crypto") {
 			ret.Crypto = true
 			value = strings.TrimSuffix(value, ",crypto")
-		default:
-			goto parsedExtensions
+			continue
 		}
+		break
 	}
 
-parsedExtensions:
 	switch value {
 	case "v8.0":
 		ret.Version = value
