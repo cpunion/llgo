@@ -131,35 +131,34 @@ type TargetSpec struct {
 	Features string
 }
 
+func (p *Target) goArchitectureSetting(value string) string {
+	if p.Target != "" {
+		return ""
+	}
+	return value
+}
+
 func (p *Target) Spec() (spec TargetSpec) {
 	// Configure based on GOOS/GOARCH environment variables (falling back to
 	// runtime.GOOS/runtime.GOARCH), and generate a LLVM target based on it.
 	goarch := p.effectiveGOARCH()
 	goos := p.effectiveGOOS()
-	goarm := p.GOARM
-	if p.Target != "" {
-		goarm = ""
-	}
+	goarm := p.goArchitectureSetting(p.GOARM)
 	spec.Triple = intllvm.GetTargetTripleWithGOARM(goos, goarch, goarm)
+	// Build validates these settings before constructing Target. Spec also
+	// accepts hand-built Targets, so it intentionally uses each resolver's
+	// documented Go-default fallback when its error cannot be returned here.
 	switch goarch {
 	case "386":
 		spec.CPU = "pentium4"
-		go386 := p.GO386
-		if p.Target != "" {
-			go386 = ""
-		}
-		go386, _ = archcfg.Resolve386(go386)
+		go386, _ := archcfg.Resolve386(p.goArchitectureSetting(p.GO386))
 		if go386 == "softfloat" {
 			spec.Features = "+cx8,+fxsr,+mmx,+soft-float,-sse,-sse2,-x87"
 		} else {
 			spec.Features = "+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
 		}
 	case "amd64":
-		goamd64 := p.GOAMD64
-		if p.Target != "" {
-			goamd64 = ""
-		}
-		goamd64, _ = archcfg.ResolveAMD64(goamd64)
+		goamd64, _ := archcfg.ResolveAMD64(p.goArchitectureSetting(p.GOAMD64))
 		spec.CPU = "x86-64"
 		if goamd64 != "v1" {
 			spec.CPU += "-" + goamd64
@@ -185,11 +184,7 @@ func (p *Target) Spec() (spec TargetSpec) {
 		}
 	case "arm64":
 		spec.CPU = "generic"
-		goarm64 := p.GOARM64
-		if p.Target != "" {
-			goarm64 = ""
-		}
-		arm64, _ := archcfg.ParseARM64(goarm64)
+		arm64, _ := archcfg.ParseARM64(p.goArchitectureSetting(p.GOARM64))
 		archFeature := arm64.Version + "a"
 		if arm64.Version == "v9.0" {
 			archFeature = "v9a"

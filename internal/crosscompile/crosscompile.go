@@ -260,6 +260,8 @@ func nativeLLDFlags(goos string, level optlevel.Level, ltoMode lto.Mode) []strin
 	if goos == "windows" {
 		flags = append(flags, "-Wl,/opt:lldlto="+coffLTOLevel(level))
 	} else {
+		// ld.lld accepts the size-oriented --lto-Os/--lto-Oz spellings;
+		// lld-link accepts only the numeric levels mapped above.
 		flags = append(flags, "-Wl,--lto"+level.Flag())
 	}
 	return flags
