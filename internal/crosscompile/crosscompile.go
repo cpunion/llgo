@@ -310,6 +310,36 @@ func nativeSectionFlags(goos string) (ccflags, ldflags []string) {
 	}
 }
 
+// configureNativeTargetFlags configures clang and the native-format linker for
+// a Go operating-system target. The target may differ from the host; SDK and
+// host-library discovery remain the caller's responsibility.
+func configureNativeTargetFlags(export *Export, goos, targetTriple string, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) {
+	export.DebugInfo = nativeDebugInfoPolicy(goos)
+	export.LDFLAGS = []string{
+		"-target", targetTriple,
+		"-Qunused-arguments",
+		"-Wno-unused-command-line-argument",
+	}
+	export.LDFLAGS = append(export.LDFLAGS, nativeLLDFlags(goos, level, ltoMode)...)
+	export.CCFLAGS = []string{
+		level.Flag(),
+		"-target", targetTriple,
+		"-Qunused-arguments",
+		"-Wno-unused-command-line-argument",
+		// Keep frame pointers in C code too: the runtime's physical
+		// unwinder walks fault-site chains through C frames (Go keeps
+		// them via the "frame-pointer"="non-leaf" attribute; x86-64 C
+		// would omit them at -O by default).
+		"-fno-omit-frame-pointer",
+	}
+	if ltoMode.Enabled() {
+		export.CCFLAGS = append(export.CCFLAGS, ltoMode.ClangFlag())
+	}
+	if ltoMode == lto.Full && goGlobalDCE {
+		export.CCFLAGS = append(export.CCFLAGS, "-fvirtual-function-elimination", "-fwhole-program-vtables")
+	}
+}
+
 func use(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
 	targetTriple := llvm.GetTargetTripleWithGOARM(goos, goarch, goarm)
 	llgoRoot := env.LLGoROOT()
@@ -328,61 +358,41 @@ func use(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optl
 		export.CC = "clang++"
 	}
 
-	if runtime.GOOS == goos && runtime.GOARCH == goarch {
-		export.DebugInfo = nativeDebugInfoPolicy(goos)
-		// not cross compile
-		// Set up basic flags for non-cross-compile
-		export.LDFLAGS = []string{
-			"-target", targetTriple,
-			"-Qunused-arguments",
-			"-Wno-unused-command-line-argument",
-		}
-		export.LDFLAGS = append(export.LDFLAGS, nativeLLDFlags(goos, level, ltoMode)...)
-		if clangRoot != "" {
-			clangLib := filepath.Join(clangRoot, "lib")
-			clangInc := filepath.Join(clangRoot, "include")
-			export.CFLAGS = append(export.CFLAGS, "-I"+clangInc)
-			export.LDFLAGS = append(export.LDFLAGS, "-L"+clangLib)
-			// Add platform-specific rpath flags
-			switch goos {
-			case "darwin":
-				export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
-			case "linux":
-				export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
-			case "windows":
-				// Windows doesn't support rpath, DLLs should be in PATH or same directory
-			default:
-				// For other Unix-like systems, try the generic rpath
-				export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
+	nativeHost := runtime.GOOS == goos && runtime.GOARCH == goarch
+	if nativeHost || goos == "windows" {
+		// Windows uses the same explicit MSVC/COFF target configuration for
+		// native and cross builds. Other native GOOS targets retain their
+		// existing host-only support.
+		configureNativeTargetFlags(&export, goos, targetTriple, level, ltoMode, goGlobalDCE)
+		if nativeHost {
+			if clangRoot != "" {
+				clangLib := filepath.Join(clangRoot, "lib")
+				clangInc := filepath.Join(clangRoot, "include")
+				export.CFLAGS = append(export.CFLAGS, "-I"+clangInc)
+				export.LDFLAGS = append(export.LDFLAGS, "-L"+clangLib)
+				// Add platform-specific rpath flags
+				switch goos {
+				case "darwin":
+					export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
+				case "linux":
+					export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
+				case "windows":
+					// Windows doesn't support rpath, DLLs should be in PATH or same directory
+				default:
+					// For other Unix-like systems, try the generic rpath
+					export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
+				}
 			}
-		}
-		export.CCFLAGS = []string{
-			level.Flag(),
-			"-target", targetTriple,
-			"-Qunused-arguments",
-			"-Wno-unused-command-line-argument",
-			// Keep frame pointers in C code too: the runtime's physical
-			// unwinder walks fault-site chains through C frames (Go keeps
-			// them via the "frame-pointer"="non-leaf" attribute; x86-64 C
-			// would omit them at -O by default).
-			"-fno-omit-frame-pointer",
-		}
-		if ltoMode.Enabled() {
-			export.CCFLAGS = append(export.CCFLAGS, ltoMode.ClangFlag())
-		}
-		if ltoMode == lto.Full && goGlobalDCE {
-			export.CCFLAGS = append(export.CCFLAGS, "-fvirtual-function-elimination", "-fwhole-program-vtables")
-		}
-
-		// Add sysroot for macOS only
-		if goos == "darwin" {
-			sysrootPath, sysrootErr := getMacOSSysroot()
-			if sysrootErr != nil {
-				err = fmt.Errorf("failed to get macOS SDK path: %w", sysrootErr)
-				return
+			// Add sysroot for macOS only.
+			if goos == "darwin" {
+				sysrootPath, sysrootErr := getMacOSSysroot()
+				if sysrootErr != nil {
+					err = fmt.Errorf("failed to get macOS SDK path: %w", sysrootErr)
+					return
+				}
+				export.CCFLAGS = append(export.CCFLAGS, "--sysroot="+sysrootPath)
+				export.LDFLAGS = append(export.LDFLAGS, "--sysroot="+sysrootPath)
 			}
-			export.CCFLAGS = append(export.CCFLAGS, []string{"--sysroot=" + sysrootPath}...)
-			export.LDFLAGS = append(export.LDFLAGS, []string{"--sysroot=" + sysrootPath}...)
 		}
 
 		ccflags, ldflags := nativeSectionFlags(goos)

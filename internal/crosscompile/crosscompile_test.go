@@ -58,7 +58,7 @@ func TestUseCrossCompileSDK(t *testing.T) {
 		},
 		{
 			name:          "Unsupported Target",
-			goos:          "windows",
+			goos:          "plan9",
 			goarch:        "amd64",
 			expectSDK:     false, // Still false as it won't set up specific SDK
 			expectCCFlags: false, // No cross-compile specific flags
@@ -542,6 +542,53 @@ func TestNativeWindowsExportFlags(t *testing.T) {
 		if slices.Contains(export.LDFLAGS, unwanted) {
 			t.Errorf("native Windows LDFLAGS = %v, do not want %q", export.LDFLAGS, unwanted)
 		}
+	}
+}
+
+func TestCrossWindowsExportFlags(t *testing.T) {
+	goarch := "amd64"
+	if runtime.GOOS == "windows" && runtime.GOARCH == goarch {
+		goarch = "arm64"
+	}
+	targetTriple := llvm.GetTargetTriple("windows", goarch)
+	export, err := use("windows", goarch, "", false, false, optlevel.O2, lto.Thin, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasFlagValue(export.CCFLAGS, "-target", targetTriple) {
+		t.Errorf("cross-Windows CCFLAGS = %v, want -target %s", export.CCFLAGS, targetTriple)
+	}
+	if !hasFlagValue(export.LDFLAGS, "-target", targetTriple) {
+		t.Errorf("cross-Windows LDFLAGS = %v, want -target %s", export.LDFLAGS, targetTriple)
+	}
+	for _, want := range []string{
+		"-flto=thin",
+		"-Wl,/errorlimit:0",
+		"-Wl,/opt:noicf",
+		"-Wl,/opt:ref",
+		"-Wl,/opt:lldlto=2",
+	} {
+		if !slices.Contains(export.LDFLAGS, want) {
+			t.Errorf("cross-Windows LDFLAGS = %v, want %q", export.LDFLAGS, want)
+		}
+	}
+	for _, unwanted := range []string{
+		"-Wl,--error-limit=0",
+		"-Wl,--icf=none",
+		"--gc-sections",
+		"-latomic",
+		"-lpthread",
+		"-ldl",
+	} {
+		if slices.Contains(export.LDFLAGS, unwanted) {
+			t.Errorf("cross-Windows LDFLAGS = %v, do not want %q", export.LDFLAGS, unwanted)
+		}
+	}
+	wantDebugInfo := nativeDebugInfoPolicy("windows")
+	if !slices.Equal(export.DebugInfo.OmitLinkFlags, wantDebugInfo.OmitLinkFlags) ||
+		!slices.Equal(export.DebugInfo.PreserveLinkFlags, wantDebugInfo.PreserveLinkFlags) {
+		t.Errorf("cross-Windows debug-info policy = %+v, want %+v", export.DebugInfo, wantDebugInfo)
 	}
 }
 
