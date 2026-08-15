@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"syscall"
 	"unsafe"
 )
 
@@ -170,16 +169,19 @@ func Open(path string) (*PackageMeta, error) {
 	if err != nil {
 		return nil, err
 	}
+	if fi.Size() <= 0 || fi.Size() > int64(^uint(0)>>1) {
+		return nil, fmt.Errorf("meta: mmap %s: invalid file size %d", path, fi.Size())
+	}
 	size := int(fi.Size())
 
-	raw, err := syscall.Mmap(int(f.Fd()), 0, size, syscall.PROT_READ, syscall.MAP_SHARED)
+	raw, err := mapFile(f, size)
 	if err != nil {
 		return nil, fmt.Errorf("meta: mmap %s: %w", path, err)
 	}
 
 	pm, err := newPackageMeta(raw)
 	if err != nil {
-		_ = syscall.Munmap(raw)
+		_ = unmapFile(raw)
 		return nil, err
 	}
 	pm.mmap = true
@@ -199,8 +201,9 @@ func (pm *PackageMeta) WriteTo(w io.Writer) (int64, error) {
 // It is a no-op for PackageMeta values returned from Builder.Build.
 func (pm *PackageMeta) Close() error {
 	if pm.mmap && pm.raw != nil {
-		err := syscall.Munmap(pm.raw)
+		err := unmapFile(pm.raw)
 		pm.raw = nil
+		pm.mmap = false
 		return err
 	}
 	return nil
