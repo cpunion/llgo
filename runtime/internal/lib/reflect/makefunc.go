@@ -99,6 +99,8 @@ var (
 )
 
 func bind0(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
+	registered := runtime.EnterForeignThread()
+	defer runtime.ExitForeignThread(registered)
 	fd := (*funcData)(userdata)
 	ins := make([]Value, fd.nin)
 	for i := 0; i < fd.nin; i++ {
@@ -108,6 +110,8 @@ func bind0(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdat
 }
 
 func bind1(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
+	registered := runtime.EnterForeignThread()
+	defer runtime.ExitForeignThread(registered)
 	fd := (*funcData)(userdata)
 	ins := make([]Value, fd.nin)
 	for i := 0; i < fd.nin; i++ {
@@ -118,6 +122,8 @@ func bind1(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdat
 }
 
 func bindn(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
+	registered := runtime.EnterForeignThread()
+	defer runtime.ExitForeignThread(registered)
 	fd := (*funcData)(userdata)
 	ins := make([]Value, fd.nin)
 	for i := 0; i < fd.nin; i++ {

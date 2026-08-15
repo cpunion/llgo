@@ -22,10 +22,37 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
+const (
+	Success = iota
+	Duplicate
+	NoThreads
+	Unimplemented
+	NotFound
+)
+
+type StackBase struct {
+	MemBase c.Pointer
+}
+
 // -----------------------------------------------------------------------------
 
 //go:linkname Init C.GC_init
 func Init()
+
+//go:linkname AllowRegisterThreads C.GC_allow_register_threads
+func AllowRegisterThreads()
+
+//go:linkname GetStackBase C.GC_get_stack_base
+func GetStackBase(base *StackBase) c.Int
+
+//go:linkname RegisterMyThread C.GC_register_my_thread
+func RegisterMyThread(base *StackBase) c.Int
+
+//go:linkname ThreadIsRegistered C.GC_thread_is_registered
+func ThreadIsRegistered() c.Int
+
+//go:linkname UnregisterMyThread C.GC_unregister_my_thread
+func UnregisterMyThread() c.Int
 
 //go:linkname Malloc C.GC_malloc
 func Malloc(size uintptr) c.Pointer
