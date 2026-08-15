@@ -1,4 +1,4 @@
-//go:build !darwin && !linux && !windows && !baremetal
+//go:build windows
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -16,18 +16,16 @@
  * limitations under the License.
  */
 
-package runtime
+// Package os exposes the hosted runtime's operating-system C API.
+package os
 
 import (
-	"unsafe"
+	_ "unsafe"
 
-	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
+	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-// nanotime1 keeps the previous behavior on remaining platforms.
-func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_MONOTONIC, tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
-}
+const LLGoPackage = "decl"
+
+//go:linkname Getenv C.getenv
+func Getenv(name *c.Char) *c.Char
