@@ -27,6 +27,7 @@ import (
 const (
 	Default386   = "sse2"
 	DefaultAMD64 = "v1"
+	DefaultARM   = "7"
 	DefaultARM64 = "v8.0"
 )
 
@@ -58,6 +59,57 @@ func ResolveAMD64(value string) (string, error) {
 	default:
 		return DefaultAMD64, fmt.Errorf("invalid GOAMD64: must be v1, v2, v3, v4")
 	}
+}
+
+// ARM describes a normalized GOARM value.
+type ARM struct {
+	Version   string
+	SoftFloat bool
+	floatSet  bool
+}
+
+func (f ARM) String() string {
+	value := f.Version
+	if f.floatSet {
+		if f.SoftFloat {
+			value += ",softfloat"
+		} else {
+			value += ",hardfloat"
+		}
+	}
+	return value
+}
+
+// ParseARM validates and normalizes GOARM. ARMv5 defaults to software floating
+// point; ARMv6 and ARMv7 default to hardware floating point, matching Go.
+func ParseARM(value string) (ARM, error) {
+	if value == "" {
+		value = DefaultARM
+	}
+	const (
+		softFloat = ",softfloat"
+		hardFloat = ",hardfloat"
+	)
+	var ret ARM
+	if strings.HasSuffix(value, softFloat) {
+		ret.SoftFloat = true
+		ret.floatSet = true
+		value = strings.TrimSuffix(value, softFloat)
+	} else if strings.HasSuffix(value, hardFloat) {
+		ret.floatSet = true
+		value = strings.TrimSuffix(value, hardFloat)
+	}
+	switch value {
+	case "5", "6", "7":
+		ret.Version = value
+	default:
+		ret.Version = DefaultARM
+		return ret, fmt.Errorf("invalid GOARM: must start with 5, 6, or 7, and may optionally end in either %q or %q", hardFloat, softFloat)
+	}
+	if !ret.floatSet && ret.Version == "5" {
+		ret.SoftFloat = true
+	}
+	return ret, nil
 }
 
 // ARM64 describes a normalized GOARM64 value.

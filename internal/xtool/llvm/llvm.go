@@ -1,6 +1,10 @@
 package llvm
 
-import "runtime"
+import (
+	"runtime"
+
+	archcfg "github.com/goplus/llgo/internal/goarch"
+)
 
 func GetTargetTriple(goos, goarch string) string {
 	return GetTargetTripleWithGOARM(goos, goarch, "")
@@ -29,7 +33,8 @@ func GetTargetTripleWithGOARM(goos, goarch, goarm string) string {
 	case "arm64":
 		llvmarch = "aarch64"
 	case "arm":
-		switch goarm {
+		arm, _ := archcfg.ParseARM(goarm)
+		switch arm.Version {
 		case "5":
 			llvmarch = "armv5"
 		case "6":
@@ -70,10 +75,9 @@ func GetTargetTripleWithGOARM(goos, goarch, goarm string) string {
 	if llvmos == "windows" {
 		triple += "-msvc"
 	} else if goarch == "arm" {
-		// Match Go's defaults: GOARM=5 uses software floating point, while
-		// GOARM=6 and GOARM=7 use hardware floating point.
+		arm, _ := archcfg.ParseARM(goarm)
 		triple += "-gnueabi"
-		if goarm != "5" {
+		if !arm.SoftFloat {
 			triple += "hf"
 		}
 	}
