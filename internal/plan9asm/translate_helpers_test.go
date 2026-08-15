@@ -109,7 +109,7 @@ func Foo()
 		t.Fatal(err)
 	}
 	defer tr.Module.Dispose()
-	if got, want := tr.Module.Target(), "armv6-unknown-linux-gnueabihf"; got != want {
+	if got, want := tr.Module.Target(), "armv6-unknown-linux-gnueabi"; got != want {
 		t.Fatalf("module target = %q, want %q", got, want)
 	}
 }
