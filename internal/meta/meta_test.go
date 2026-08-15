@@ -299,6 +299,8 @@ func TestOpenErrors(t *testing.T) {
 		}
 	})
 
+	validRaw := validationMetaBytes(t)
+	cloneValid := func() []byte { return append([]byte(nil), validRaw...) }
 	tests := []struct {
 		name string
 		raw  func() []byte
@@ -365,6 +367,111 @@ func TestOpenErrors(t *testing.T) {
 			},
 			want: "meta: truncated symbols section",
 		},
+		{
+			name: "symbol count exceeds section",
+			raw: func() []byte {
+				raw := cloneValid()
+				symOff := metaSectionOffset(raw, secSymbols)
+				nsyms := binary.LittleEndian.Uint32(raw[symOff:])
+				binary.LittleEndian.PutUint32(raw[symOff:], nsyms+1)
+				return raw
+			},
+			want: "meta: invalid symbols section size",
+		},
+		{
+			name: "truncated csr offsets",
+			raw: func() []byte {
+				raw := cloneValid()
+				ordinaryOff := metaSectionOffset(raw, secOrdinaryEdges)
+				binary.LittleEndian.PutUint32(raw[8+secFuncDemand*4:], ordinaryOff+4)
+				return raw
+			},
+			want: "meta: truncated OrdinaryEdges CSR header",
+		},
+		{
+			name: "csr symbol count mismatch",
+			raw: func() []byte {
+				raw := cloneValid()
+				ordinaryOff := metaSectionOffset(raw, secOrdinaryEdges)
+				nsyms := binary.LittleEndian.Uint32(raw[ordinaryOff:])
+				binary.LittleEndian.PutUint32(raw[ordinaryOff:], nsyms+1)
+				return raw
+			},
+			want: "meta: OrdinaryEdges has",
+		},
+		{
+			name: "descending csr offsets",
+			raw: func() []byte {
+				raw := cloneValid()
+				ordinaryOff := metaSectionOffset(raw, secOrdinaryEdges)
+				offsetsBase := ordinaryOff + 4
+				binary.LittleEndian.PutUint32(raw[offsetsBase+4:], 1)
+				binary.LittleEndian.PutUint32(raw[offsetsBase+8:], 0)
+				return raw
+			},
+			want: "meta: invalid OrdinaryEdges CSR offset",
+		},
+		{
+			name: "csr offset past data",
+			raw: func() []byte {
+				raw := cloneValid()
+				ordinaryOff := metaSectionOffset(raw, secOrdinaryEdges)
+				nsyms := binary.LittleEndian.Uint32(raw[ordinaryOff:])
+				offsetsBase := ordinaryOff + 4
+				last := offsetsBase + nsyms*4
+				nrecords := binary.LittleEndian.Uint32(raw[last:])
+				binary.LittleEndian.PutUint32(raw[last:], nrecords+1)
+				return raw
+			},
+			want: "meta: invalid OrdinaryEdges CSR offset",
+		},
+		{
+			name: "symbol name past string table",
+			raw: func() []byte {
+				raw := cloneValid()
+				strOff := metaSectionOffset(raw, secStringTable)
+				symOff := metaSectionOffset(raw, secSymbols)
+				binary.LittleEndian.PutUint32(raw[symOff+4:], symOff-strOff)
+				return raw
+			},
+			want: "meta: Symbols record 0 has invalid name range",
+		},
+		{
+			name: "demand name past string table",
+			raw: func() []byte {
+				raw := cloneValid()
+				strOff := metaSectionOffset(raw, secStringTable)
+				symOff := metaSectionOffset(raw, secSymbols)
+				dataOff := metaCSRDataOffset(raw, secFuncDemand)
+				binary.LittleEndian.PutUint32(raw[dataOff+4:], symOff-strOff)
+				return raw
+			},
+			want: "meta: FuncDemand record 0 has invalid name range",
+		},
+		{
+			name: "method name past string table",
+			raw: func() []byte {
+				raw := cloneValid()
+				strOff := metaSectionOffset(raw, secStringTable)
+				symOff := metaSectionOffset(raw, secSymbols)
+				dataOff := metaCSRDataOffset(raw, secMethodInfo)
+				binary.LittleEndian.PutUint32(raw[dataOff:], symOff-strOff)
+				return raw
+			},
+			want: "meta: MethodInfo record 0 has invalid name range",
+		},
+		{
+			name: "interface name past string table",
+			raw: func() []byte {
+				raw := cloneValid()
+				strOff := metaSectionOffset(raw, secStringTable)
+				symOff := metaSectionOffset(raw, secSymbols)
+				dataOff := metaCSRDataOffset(raw, secIfaceInfo)
+				binary.LittleEndian.PutUint32(raw[dataOff:], symOff-strOff)
+				return raw
+			},
+			want: "meta: InterfaceInfo record 0 has invalid name range",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -377,6 +484,37 @@ func TestOpenErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func validationMetaBytes(t *testing.T) []byte {
+	t.Helper()
+	b := NewBuilder()
+	src := b.Sym("pkg.src")
+	dst := b.Sym("pkg.dst")
+	iface := b.Sym("pkg.iface")
+	mtype := b.Sym("pkg.mtype")
+	ifn := b.Sym("pkg.ifn")
+	tfn := b.Sym("pkg.tfn")
+	b.AddOrdinaryEdge(src, dst)
+	b.AddNamedMethodUse(src, "Method")
+	b.AddTypeChild(src, dst)
+	b.AddMethodSlot(src, "Method", mtype, ifn, tfn)
+	b.AddIfaceMethod(iface, "Method", mtype)
+	pm, err := b.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append([]byte(nil), pm.raw...)
+}
+
+func metaSectionOffset(raw []byte, section int) uint32 {
+	return binary.LittleEndian.Uint32(raw[8+section*4:])
+}
+
+func metaCSRDataOffset(raw []byte, section int) uint32 {
+	sectionOff := metaSectionOffset(raw, section)
+	nsyms := binary.LittleEndian.Uint32(raw[sectionOff:])
+	return sectionOff + 4 + (nsyms+1)*4
 }
 
 func validEmptyMetaHeader(size int) []byte {
