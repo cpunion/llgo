@@ -150,3 +150,19 @@ func TestGetTargetTriple(t *testing.T) {
 	checkTriple(t, "windows/arm64", "windows", "arm64", "aarch64-pc-windows-msvc")
 	checkTriple(t, "js/wasm", "js", "wasm", "wasm32-unknown-js")
 }
+
+func TestGetTargetTripleWithGOARM(t *testing.T) {
+	for _, test := range []struct {
+		goarm string
+		want  string
+	}{
+		{"5", "armv5-unknown-linux-gnueabihf"},
+		{"6", "armv6-unknown-linux-gnueabihf"},
+		{"7", "armv7-unknown-linux-gnueabihf"},
+		{"", "armv7-unknown-linux-gnueabihf"},
+	} {
+		if got := GetTargetTripleWithGOARM("linux", "arm", test.goarm); got != test.want {
+			t.Errorf("GetTargetTripleWithGOARM(linux, arm, %q) = %q, want %q", test.goarm, got, test.want)
+		}
+	}
+}
