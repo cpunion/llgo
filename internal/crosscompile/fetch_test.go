@@ -137,13 +137,35 @@ func TestAcquireAndReleaseLockErrors(t *testing.T) {
 			t.Fatal("failed lock file remained open")
 		}
 	})
+}
 
-	t.Run("close", func(t *testing.T) {
-		wantErr := errors.New("injected close failure")
-		if err := lockReleaseError(nil, wantErr); !errors.Is(err, wantErr) {
-			t.Fatalf("lockReleaseError = %v, want wrapped %v", err, wantErr)
-		}
-	})
+func TestLockReleaseError(t *testing.T) {
+	unlockErr := errors.New("unlock")
+	closeErr := errors.New("close")
+	for _, test := range []struct {
+		name      string
+		unlockErr error
+		closeErr  error
+		want      string
+	}{
+		{name: "success"},
+		{name: "unlock", unlockErr: unlockErr, want: "failed to release lock: unlock"},
+		{name: "close", closeErr: closeErr, want: "failed to close lock file: close"},
+		{name: "unlock takes precedence", unlockErr: unlockErr, closeErr: closeErr, want: "failed to release lock: unlock"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := lockReleaseError(test.unlockErr, test.closeErr)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("lockReleaseError() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("lockReleaseError() = %v, want %q", err, test.want)
+			}
+		})
+	}
 }
 
 func TestAcquireLockConcurrency(t *testing.T) {

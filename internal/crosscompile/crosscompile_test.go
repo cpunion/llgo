@@ -462,8 +462,36 @@ func TestCOFFLTOLevel(t *testing.T) {
 	}
 }
 
-func TestNativeWindowsOSFlags(t *testing.T) {
-	ccflags, ldflags := nativeWindowsSectionFlags()
+func TestNativeOSFlags(t *testing.T) {
+	for _, test := range []struct {
+		goos        string
+		wantCCFlags []string
+		wantLDFlags []string
+	}{
+		{goos: "darwin", wantLDFlags: []string{"-Xlinker", "-dead_strip"}},
+		{
+			goos:        "windows",
+			wantCCFlags: []string{"-fdata-sections", "-ffunction-sections"},
+			wantLDFlags: []string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref"},
+		},
+		{
+			goos:        "linux",
+			wantCCFlags: []string{"-fdata-sections", "-ffunction-sections"},
+			wantLDFlags: []string{"-fdata-sections", "-ffunction-sections", "-Xlinker", "--gc-sections", "-latomic", "-lpthread", "-ldl"},
+		},
+	} {
+		t.Run(test.goos, func(t *testing.T) {
+			ccflags, ldflags := nativeSectionFlags(test.goos)
+			if !slices.Equal(ccflags, test.wantCCFlags) {
+				t.Errorf("native %s CCFLAGS = %v, want %v", test.goos, ccflags, test.wantCCFlags)
+			}
+			if !slices.Equal(ldflags, test.wantLDFlags) {
+				t.Errorf("native %s LDFLAGS = %v, want %v", test.goos, ldflags, test.wantLDFlags)
+			}
+		})
+	}
+
+	ccflags, ldflags := nativeSectionFlags("windows")
 
 	for _, want := range []string{"-fdata-sections", "-ffunction-sections"} {
 		if !slices.Contains(ccflags, want) {
