@@ -13,7 +13,7 @@ import (
 
 	"github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
+	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/xgo-dev/llgo/runtime/internal/ffi"
 	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"

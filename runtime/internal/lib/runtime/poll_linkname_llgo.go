@@ -9,7 +9,7 @@ import (
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
+	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 	csyscall "github.com/xgo-dev/llgo/runtime/internal/clite/syscall"
 )
 
