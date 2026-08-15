@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build windows
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -25,17 +25,17 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/clite/thread"
 )
 
-// mOS is the pthread-specific part of an M.
+// mOS is intentionally empty for the current detached 1:1 backend. As in the
+// Go runtime, CreateThread owns the thread lifetime; LLGo does not retain a
+// closed HANDLE in the scheduler object.
 type mOS struct{}
 
-// newosproc provides the current host-thread backend for newm.
 func newosproc(mp *m, stackSize uintptr) int {
-	ret := thread.CreateDetached(
+	return int(thread.CreateDetached(
 		stackSize,
 		thread.RoutineFunc(mstart),
 		c.Pointer(unsafe.Pointer(mp)),
-	)
-	return int(ret)
+	))
 }
 
 func exitCurrentM() {
