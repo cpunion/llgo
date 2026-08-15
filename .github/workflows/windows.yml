@@ -111,5 +111,9 @@ jobs:
             -run '^Test(WindowsTargetTriple|ARMTargetSpec)$' \
             ./ssa
 
+          go test -tags="$build_tags" \
+            -run '^(TestTargetArchAndNewTransformerArchSelection|TestMSVC.*)$' \
+            ./internal/cabi
+
           go build -tags="$build_tags" -o llgo-windows-smoke.exe ./cmd/llgo
           ./llgo-windows-smoke.exe version
