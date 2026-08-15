@@ -95,6 +95,55 @@ func beginSpawnTestChildResume(t *testing.T, p *P, g *G, frame *testFrame) Actio
 	return action
 }
 
+func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
+	p := new(P)
+	parent := newYieldingTestG(t, "compiler-spawn-parent")
+	_ = beginSpawnTestResume(t, p, parent)
+	child := new(G)
+	if !BeginSpawnCompiler(parent.g, child, unsafe.Pointer(child), TaskStorageSize()) {
+		t.Fatal("begin compiler spawn")
+	}
+	if parent.g.spawnChild != child || child.spawnParent != parent.g || child.spawnP != p ||
+		child.taskStorage != unsafe.Pointer(child) || child.taskSize != TaskStorageSize() ||
+		child.taskState != taskStorageOwned || !gPreemptStateAtDepthZero(child, preemptIdle) {
+		t.Fatalf("compiler spawn begin state: parent-child=%p child-parent=%p child-p=%p storage=%p size=%d state=%d",
+			parent.g.spawnChild, child.spawnParent, child.spawnP, child.taskStorage, child.taskSize, child.taskState)
+	}
+	local := unsafe.Pointer(new(byte))
+	if !BindTaskLocalCompiler(child, local) || TaskLocal(child) != local ||
+		BindTaskLocalCompiler(child, unsafe.Pointer(new(byte))) {
+		t.Fatal("compiler spawn task-local binding did not publish exactly once")
+	}
+	handle := unsafe.Pointer(new(byte))
+	root, _ := newSpawnTestFrame(t, child, handle, 0, 1)
+	if !CommitSpawnCompiler(parent.g, child, handle) {
+		t.Fatal("commit compiler spawn")
+	}
+	metadata := FrameFromStorage(root.storage)
+	if child.root != metadata || child.active != metadata || child.frames != metadata ||
+		child.state != GRunnable || !child.queued || p.readyHead != child || p.readyTail != child ||
+		p.readyCount != 1 || parent.g.spawnChild != nil || child.spawnParent != nil || child.spawnP != nil {
+		t.Fatalf("compiler spawn commit state: child=%+v p=(%p,%p,%d) parent-child=%p",
+			child, p.readyHead, p.readyTail, p.readyCount, parent.g.spawnChild)
+	}
+	runtime.KeepAlive(parent.frame.memory)
+	runtime.KeepAlive(root.memory)
+}
+
+func TestCompilerSpawnRejectsUntakenResumeGateWithoutMutation(t *testing.T) {
+	fixture := newUncheckedResumeGateFixture(t, "compiler-spawn-gate")
+	child := new(G)
+	if BeginSpawnCompiler(fixture.task.g, child, unsafe.Pointer(child), TaskStorageSize()) {
+		t.Fatal("compiler spawn accepted an untaken resume gate")
+	}
+	if fixture.task.g.spawnChild != nil || child.magic != 0 || child.taskStorage != nil ||
+		child.spawnParent != nil || child.spawnP != nil ||
+		!gPreemptStateAtDepthZero(child, preemptDisabled) {
+		t.Fatal("rejected compiler spawn mutated transaction state")
+	}
+	assertResumeGateStillUnchecked(t, fixture)
+}
+
 func yieldSpawnTestG(t *testing.T, p *P, g *G, frame *testFrame, action Action) {
 	t.Helper()
 	// A sole newly spawned child now stays local without forcing the parent to
@@ -354,14 +403,19 @@ func TestCompletedTaskTransfersContextAndStorageAfterOneTerminalAudit(t *testing
 		t.Fatal("disable completed task transfer preemption")
 	}
 	g.state = GDead
+	g.taskControlLeases = 1
+	if _, _, _, _, ok := ReleaseCompletedTaskCompiler(g); ok {
+		t.Fatal("completed task with a live control lease transferred")
+	}
+	g.taskControlLeases = 0
 
-	releasedLocal, raw, size, owned, ok := ReleaseCompletedTask(g)
+	releasedLocal, raw, size, owned, ok := ReleaseCompletedTaskCompiler(g)
 	if !ok || !owned || releasedLocal != local || raw != unsafe.Pointer(g) || size != TaskStorageSize() ||
 		g.taskLocal != nil || g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageReleased {
 		t.Fatalf("completed task transfer = local:%p raw:%p size:%d owned:%t ok:%t state:%d",
 			releasedLocal, raw, size, owned, ok, g.taskState)
 	}
-	if _, _, _, _, ok := ReleaseCompletedTask(g); ok {
+	if _, _, _, _, ok := ReleaseCompletedTaskCompiler(g); ok {
 		t.Fatal("completed task transferred twice")
 	}
 }

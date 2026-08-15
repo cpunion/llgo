@@ -45,14 +45,14 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 		return nil, false
 	}
 	child, _, actualSize, allocationOK := coroTaskAllocationAt(raw)
-	if !allocationOK || actualSize != allocationSize || !coro.BeginSpawn(parent, child, raw, taskSize) {
+	if !allocationOK || actualSize != allocationSize || !coro.BeginSpawnCompiler(parent, child, raw, taskSize) {
 		coro.Zero(raw, allocationSize)
 		if !coroalloc.FreeTask(raw, allocationSize) {
 			return nil, false
 		}
 		return nil, false
 	}
-	if !coroBindTaskAllocationRuntimeContext(child, parent) {
+	if !coroBindTaskAllocationRuntimeContextCompiler(child, parent) {
 		rolled, rolledSize, ok := coro.RollbackSpawn(parent, child)
 		if !ok || rolled != raw || rolledSize != taskSize {
 			return nil, false
@@ -68,7 +68,7 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 
 func coroSpawnCommitV1(parentPointer, childPointer, handle unsafe.Pointer) bool {
 	parent, child := (*coroG)(parentPointer), (*coroG)(childPointer)
-	return coro.CommitSpawn(parent, child, handle)
+	return coro.CommitSpawnCompiler(parent, child, handle)
 }
 
 // coroReleaseCompletedTask performs the physical half of spawned-G
@@ -80,13 +80,13 @@ func coroReleaseCompletedTask(g *coroG) bool {
 	// frame completion after source-specific park cleanup. The cancellation
 	// record remains sticky until the G is physically dead; acknowledge it here
 	// before applying the normal reclaimability/storage transfer contract.
-	local, raw, taskSize, owned, ok := coro.ReleaseCompletedTask(g)
+	local, raw, taskSize, owned, ok := coro.ReleaseCompletedTaskCompiler(g)
 	if !ok {
 		if !coro.AcknowledgeTaskCancellation(g, coro.TaskCancelAbort) &&
 			!coro.AcknowledgeTaskCancellation(g, coro.TaskCancelShutdown) {
 			return false
 		}
-		local, raw, taskSize, owned, ok = coro.ReleaseCompletedTask(g)
+		local, raw, taskSize, owned, ok = coro.ReleaseCompletedTaskCompiler(g)
 		if !ok {
 			return false
 		}

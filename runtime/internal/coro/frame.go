@@ -290,6 +290,34 @@ func RegisterFrame(g *G, raw unsafe.Pointer, total, size, align uintptr, descrip
 	return storage, true
 }
 
+// RegisterFrameCompiler consumes the allocation receipt produced immediately
+// before a compiler-owned coroutine ramp. The runtime adapter has already
+// computed total with FrameAllocationSize and the selected allocator promises
+// a zero-filled range. Retain the ownership, alignment, and descriptor gates,
+// but do not recompute the same layout or audit zero fields one by one on every
+// short-lived managed call.
+func RegisterFrameCompiler(g *G, raw unsafe.Pointer, total, align uintptr, descriptor unsafe.Pointer) (unsafe.Pointer, bool) {
+	if !ValidG(g) || raw == nil || total == 0 || descriptor == nil ||
+		uintptr(raw)%unsafe.Alignof(Frame{}) != 0 {
+		return nil, false
+	}
+	storage, ok := AlignedStorage(raw, align)
+	base, address := uintptr(raw), uintptr(storage)
+	if !ok || address < base || address-base >= total {
+		return nil, false
+	}
+	frame := (*Frame)(raw)
+	frame.owner = g
+	frame.descriptor = descriptor
+	frame.allocationSize = total
+	frame.state = FrameAllocated
+	frame.next = g.frames
+	g.frames = frame
+	back := (**Frame)(unsafe.Add(storage, -int(unsafe.Sizeof(uintptr(0)))))
+	*back = frame
+	return storage, true
+}
+
 // FrameFromStorage obtains scheduler metadata through the back-pointer stored
 // immediately before LLVM coroutine frame storage.
 func FrameFromStorage(storage unsafe.Pointer) *Frame {
@@ -403,6 +431,62 @@ func PublishFrameV3(
 		Lifecycle:     uint16(FrameInitialSuspended),
 	}
 	return PublishFrameV2(g, handle, header, storage, metadata)
+}
+
+// PublishFrameV3Compiler is the adjacent generated-ramp publication lane.
+// RegisterFrameCompiler has just prepended a dynamic frame, or metadata names
+// the compiler-owned borrowed slot for this exact handle. No scheduler action
+// can run between those operations, so the new head is an O(1) uniqueness
+// certificate and a second findFrame walk establishes no additional safety.
+func PublishFrameV3Compiler(
+	g *G, handle unsafe.Pointer, header *HeaderV1, storage, metadata,
+	descriptor, resultSlot unsafe.Pointer,
+) bool {
+	if !ValidG(g) || handle == nil || header == nil || metadata == nil || descriptor == nil {
+		return false
+	}
+	mode, ok := descriptorRuntimeContextMode(descriptor)
+	if !ok {
+		return false
+	}
+	*header = HeaderV1{
+		G:             unsafe.Pointer(g),
+		Descriptor:    descriptor,
+		ResultSlot:    resultSlot,
+		SuspendReason: uint16(SuspendNone),
+		Lifecycle:     uint16(FrameInitialSuspended),
+	}
+	if storage != nil {
+		frame := FrameFromStorage(storage)
+		if frame == nil || g.frames != frame || frame.owner != g ||
+			frame.state != FrameAllocated || frame.handle != nil || frame.header != nil ||
+			frame.descriptor != descriptor || frame.allocationSize == 0 {
+			return false
+		}
+		frame.handle = handle
+		frame.header = header
+		frame.state = FrameInitialSuspended
+		frame.runtimeContext = mode
+		header.AllocationBase = unsafe.Pointer(frame)
+		return true
+	}
+	if metadata == unsafe.Pointer(g) || metadata == unsafe.Pointer(header) ||
+		uintptr(metadata)%unsafe.Alignof(Frame{}) != 0 {
+		return false
+	}
+	Zero(metadata, unsafe.Sizeof(Frame{}))
+	frame := (*Frame)(metadata)
+	frame.owner = g
+	frame.handle = handle
+	frame.header = header
+	frame.descriptor = descriptor
+	frame.state = FrameInitialSuspended
+	frame.runtimeContext = mode
+	frame.borrowedStorage = true
+	frame.next = g.frames
+	g.frames = frame
+	header.AllocationBase = metadata
+	return true
 }
 
 // PrepareAwait records a parent-to-child handoff. It never resumes either
@@ -547,9 +631,11 @@ func PrepareCompleteStatus(g *G, handle unsafe.Pointer, header *HeaderV1, status
 }
 
 // PrepareCompleteStatusCompiler handles the dominant ordinary-return suffix
-// from compiler-generated code using the active-frame and parent-completion
-// certificates already established by PrepareAwaitCompletionCompiler. Panic,
-// Goexit, cancellation, roots, and any uncertain shape retain the complete
+// from compiler-generated code using the active-frame certificate and, for a
+// managed child, the parent-completion certificate already established by
+// PrepareAwaitCompletionCompiler. A root has no CompletionRecord publisher;
+// its exact singleton frame chain is itself the corresponding certificate.
+// Panic, Goexit, cancellation, and any uncertain shape retain the complete
 // status validator below.
 func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1, status CompletionStatus) bool {
 	if status == CompletionReturn && ValidG(g) && resumeGateTaken(g) &&
@@ -557,12 +643,19 @@ func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1
 		g.spawnChild == nil && compilerReleasableParkState(&g.park) &&
 		g.park.taskCancelPhase != taskCancelRequested {
 		frame := g.active
-		if frame != nil && frame.parent != nil && frame.handle == handle && frame.header == header &&
+		if frame != nil && frame.handle == handle && frame.header == header &&
 			frame.owner == g && frame.state == FrameActive &&
 			header.SuspendReason == uint16(SuspendFrameComplete) &&
 			header.Lifecycle == uint16(FrameFinalSuspended) {
-			if awaitCompletionArmedForChild(frame) &&
+			if frame.parent != nil && awaitCompletionArmedForChild(frame) &&
 				publishAwaitCompletion(frame.parent, CompletionReturn, nil, nil) {
+				g.pending = pendingTransition{kind: pendingComplete, from: frame}
+				return true
+			}
+			if frame.parent == nil && frame == g.root && g.frames == frame && frame.next == nil &&
+				header.Parent == nil && frame.parkWait == nil &&
+				emptyCompletionRecord(&frame.completion) &&
+				g.park.taskCancelKind == TaskCancelNone {
 				g.pending = pendingTransition{kind: pendingComplete, from: frame}
 				return true
 			}
@@ -673,6 +766,32 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 	frame.header.Lifecycle = uint16(FrameDestroyed)
 	g.destroyTarget = nil
 	return raw, total, true
+}
+
+// ReleaseFrameCompiler consumes the exact llvm.coro.free callback adjacent to
+// one scheduler-issued destroy. The destroy target and newest frame are the
+// same dynamic allocation on the ordinary managed path. Exceptional or legacy
+// shapes retain ReleaseFrame's complete unlink search and validation.
+func ReleaseFrameCompiler(g *G, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) (unsafe.Pointer, uintptr, bool) {
+	if ValidG(g) && gPreemptEnabledAtDepthZero(g) && storage != nil {
+		total, layoutOK := FrameAllocationSize(size, align)
+		frame := g.destroyTarget
+		aligned, storageOK := AlignedStorage(unsafe.Pointer(frame), align)
+		if frame != nil && layoutOK && storageOK && aligned == storage &&
+			FrameFromStorage(storage) == frame && g.frames == frame &&
+			frame.owner == g && frame.descriptor == descriptor && frame.allocationSize == total &&
+			frame.state == FrameDestroyPending && frame.header != nil && frame.parkWait == nil &&
+			frame.header.Lifecycle == uint16(FrameDestroyPending) {
+			g.frames = frame.next
+			frame.next = nil
+			frame.state = FrameDestroyed
+			frame.panicLine = frame.header.Line
+			frame.header.Lifecycle = uint16(FrameDestroyed)
+			g.destroyTarget = nil
+			return unsafe.Pointer(frame), total, true
+		}
+	}
+	return ReleaseFrame(g, storage, size, align, descriptor)
 }
 
 // CommitFrameDestroyV2 completes the physical destroy of an allocation-elided

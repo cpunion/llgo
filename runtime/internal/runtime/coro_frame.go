@@ -33,7 +33,7 @@ func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descripto
 	if raw == nil {
 		coroRuntimeAbort("coroutine frame allocation failed")
 	}
-	storage, ok := coro.RegisterFrame((*coro.G)(g), raw, total, size, align, descriptor)
+	storage, ok := coro.RegisterFrameCompiler((*coro.G)(g), raw, total, align, descriptor)
 	if !ok {
 		if !coroalloc.FreeFrame(raw, total) {
 			coroRuntimeAbort("coroutine frame allocation rollback failed")
@@ -55,7 +55,7 @@ func __llgo_coro_frame_publish_v1(g, handle, header, storage unsafe.Pointer) {
 func __llgo_coro_frame_publish_v3(
 	g, handle, header, storage, metadata, descriptor, resultSlot unsafe.Pointer,
 ) {
-	if !coro.PublishFrameV3(
+	if !coro.PublishFrameV3Compiler(
 		(*coro.G)(g), handle, (*coro.HeaderV1)(header), storage, metadata,
 		descriptor, resultSlot,
 	) {
@@ -134,7 +134,7 @@ func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status ui
 //export __llgo_coro_frame_free_v1
 func __llgo_coro_frame_free_v1(g, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {
 	task := (*coro.G)(g)
-	raw, total, ok := coro.ReleaseFrame(task, storage, size, align, descriptor)
+	raw, total, ok := coro.ReleaseFrameCompiler(task, storage, size, align, descriptor)
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame destruction")
 	}

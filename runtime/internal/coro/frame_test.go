@@ -160,7 +160,7 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 	for index := range metadata {
 		metadata[index] = ^uintptr(0)
 	}
-	if !PublishFrameV3(
+	if !PublishFrameV3Compiler(
 		g, handle, header, nil, unsafe.Pointer(metadata),
 		unsafe.Pointer(descriptor), resultSlot,
 	) {
@@ -182,6 +182,57 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 	if !CommitFrameDestroyV2(g, handle) {
 		t.Fatal("commit initialized borrowed frame destroy")
 	}
+}
+
+func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("InitG failed")
+	}
+	const (
+		size  = uintptr(37)
+		align = uintptr(16)
+	)
+	total, ok := FrameAllocationSize(size, align)
+	if !ok {
+		t.Fatal("compute compiler frame allocation")
+	}
+	memory := make([]byte, total)
+	descriptor := &FrameDescriptorV1{Version: 1, ResultAlign: 1, Function: "test.compiler.dynamic"}
+	storage, ok := RegisterFrameCompiler(
+		g, unsafe.Pointer(&memory[0]), total, align, unsafe.Pointer(descriptor),
+	)
+	if !ok {
+		t.Fatal("register compiler frame")
+	}
+	handle := unsafe.Pointer(new(byte))
+	header := new(HeaderV1)
+	metadata := new(BorrowedFrameStorageV2)
+	if !PublishFrameV3Compiler(
+		g, handle, header, storage, unsafe.Pointer(metadata),
+		unsafe.Pointer(descriptor), nil,
+	) {
+		t.Fatal("publish compiler frame")
+	}
+	frame := FrameFromStorage(storage)
+	if frame == nil || g.frames != frame || frame.owner != g || frame.handle != handle ||
+		frame.header != header || frame.descriptor != unsafe.Pointer(descriptor) ||
+		frame.allocationSize != total || frame.state != FrameInitialSuspended ||
+		frame.borrowedStorage || header.AllocationBase != unsafe.Pointer(frame) {
+		t.Fatalf("compiler frame publication = %+v, header=%+v", frame, header)
+	}
+	frame.state = FrameDestroyPending
+	header.Lifecycle = uint16(FrameDestroyPending)
+	g.destroyTarget = frame
+	raw, released, ok := ReleaseFrameCompiler(g, storage, size, align, unsafe.Pointer(descriptor))
+	if !ok || raw != unsafe.Pointer(&memory[0]) || released != total {
+		t.Fatalf("compiler frame release = (%p, %d, %t), want (%p, %d, true)", raw, released, ok, &memory[0], total)
+	}
+	if g.frames != nil || g.destroyTarget != nil || frame.state != FrameDestroyed ||
+		header.Lifecycle != uint16(FrameDestroyed) {
+		t.Fatalf("compiler frame release retained state: frames=%p target=%p frame=%d header=%d", g.frames, g.destroyTarget, frame.state, header.Lifecycle)
+	}
+	runtime.KeepAlive(memory)
 }
 
 type testFrame struct {

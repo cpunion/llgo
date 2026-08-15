@@ -51,6 +51,21 @@ func BindTaskLocal(g *G, local unsafe.Pointer) bool {
 	return true
 }
 
+// BindTaskLocalCompiler attaches the runtime sidecar inside an active compiler
+// spawn transaction. BeginSpawnCompiler has already proved the zero-filled
+// owned allocation and the child is not scheduler-visible until CommitSpawn;
+// the reciprocal parent/P links are therefore the exact publication guard.
+func BindTaskLocalCompiler(g *G, local unsafe.Pointer) bool {
+	if !ValidG(g) || local == nil || g.taskLocal != nil || g.state != GNew ||
+		g.spawnParent == nil || g.spawnP == nil || g.spawnParent.spawnChild != g ||
+		g.taskState != taskStorageOwned || g.taskStorage != unsafe.Pointer(g) ||
+		g.taskSize != TaskStorageSize() || g.root != nil || g.active != nil || g.frames != nil {
+		return false
+	}
+	g.taskLocal = local
+	return true
+}
+
 // TaskLocal returns the runtime-adapter context attached to g.
 func TaskLocal(g *G) unsafe.Pointer {
 	if !ValidG(g) {
@@ -167,6 +182,45 @@ func BeginSpawn(parent, child *G, storage unsafe.Pointer, size uintptr) bool {
 	return true
 }
 
+// BeginSpawnCompiler consumes the private generated go-statement boundary.
+// The child range comes directly from the runtime's zero-filled task allocator
+// and the parent is inside the exact compiler resume episode. Those two
+// capabilities make InitG's arbitrary-memory audit and runningSpawnContext's
+// queue/park compatibility audit redundant on this adjacent path. The public
+// BeginSpawn contract remains the full validator for every other caller.
+func BeginSpawnCompiler(parent, child *G, storage unsafe.Pointer, size uintptr) bool {
+	if parent == nil || child == nil || child == parent || storage != unsafe.Pointer(child) ||
+		size != TaskStorageSize() || uintptr(storage)%unsafe.Alignof(G{}) != 0 ||
+		parent.spawnChild != nil || !resumeGateTaken(parent) {
+		return false
+	}
+	p := parent.runP
+	active := parent.active
+	if p == nil || active == nil || active.owner != parent ||
+		active.header == nil || active.state != FrameActive ||
+		active.header.G != unsafe.Pointer(parent) ||
+		active.header.SuspendReason != uint16(SuspendNone) ||
+		active.header.Lifecycle != uint16(FrameActive) ||
+		child.magic != 0 || !gPreemptStateAtDepthZero(child, preemptDisabled) ||
+		child.state != GNew || child.taskState != taskStorageStatic ||
+		child.taskStorage != nil || child.taskLocal != nil {
+		return false
+	}
+	child.magic = gMagic
+	child.taskStorage = storage
+	child.taskSize = size
+	child.taskState = taskStorageOwned
+	child.spawnParent = parent
+	child.spawnP = p
+	// Publish the asynchronous preemption gate only after the owned allocation
+	// and reciprocal transaction fields are complete.
+	if !compareAndSwapGPreemptStateAtDepthZero(child, preemptDisabled, preemptIdle) {
+		return false
+	}
+	parent.spawnChild = child
+	return true
+}
+
 // activeSpawnTransaction consumes the reciprocal parent/child/P links
 // published by BeginSpawn as an unforgeable scheduler-owned certificate. The
 // compiler's root factory cannot suspend or run another scheduler reduction,
@@ -245,6 +299,56 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 	child.spawnP = nil
 	appendReadyUnchecked(p, child)
 	// Clear the temporary root only after P's queue reaches the child.
+	parent.spawnChild = nil
+	return true
+}
+
+// CommitSpawnCompiler consumes the reciprocal begin receipt immediately after
+// the generated root ramp published its initial-suspended frame. The new root
+// is necessarily the frame-list head and PublishFrameV3Compiler has already
+// validated its descriptor capability, so an O(n) handle lookup and another
+// program-object range proof are unnecessary here.
+func CommitSpawnCompiler(parent, child *G, handle unsafe.Pointer) bool {
+	if parent == nil || child == nil || child == parent || handle == nil ||
+		parent.spawnChild != child || child.spawnParent != parent ||
+		child.spawnP == nil || parent.runP != child.spawnP {
+		return false
+	}
+	p := child.spawnP
+	// BeginSpawnCompiler authenticated the complete resume gate before
+	// publishing these reciprocal links. The generated root ramp reaches only
+	// initial suspend and cannot run a scheduler reduction, so the compact live
+	// episode check below consumes that receipt without replaying the full gate.
+	if p.current != parent || !p.inResume || parent.state != GRunning ||
+		!p.runDecisionTaken || p.runDecision != (RunDecision{}) ||
+		p.action.Kind != ActionResume || p.action.Flags != 0 || p.action.Handle == nil {
+		return false
+	}
+	root := child.frames
+	if child.magic != gMagic || child.state != GNew || child.root != nil || child.active != nil ||
+		child.spawnChild != nil || child.nextReady != nil || child.queued || child.waiting ||
+		child.runP != nil || child.transferState != runnableTransferGIdle ||
+		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
+		child.taskSize != TaskStorageSize() || !gPreemptStateAtDepthZero(child, preemptIdle) ||
+		root == nil || root.next != nil || root.owner != child || root.parent != nil ||
+		root.handle != handle || root.header == nil || root.header.G != unsafe.Pointer(child) ||
+		root.header.Parent != nil || root.header.Descriptor != root.descriptor ||
+		root.header.ResultSlot != nil || root.header.SuspendReason != uint16(SuspendNone) ||
+		root.header.Lifecycle != uint16(FrameInitialSuspended) ||
+		root.state != FrameInitialSuspended || root.descriptor == nil ||
+		!validReadyQueueHeader(p) || p.readyCount == ^uint32(0) {
+		return false
+	}
+	if p.readyCount != 0 && !RequestPreempt(parent) {
+		return false
+	}
+
+	child.root = root
+	child.active = root
+	child.state = GRunnable
+	child.spawnParent = nil
+	child.spawnP = nil
+	appendReadyUnchecked(p, child)
 	parent.spawnChild = nil
 	return true
 }
@@ -365,6 +469,34 @@ func ReleaseCompletedTask(g *G) (local, raw unsafe.Pointer, size uintptr, owned,
 	}
 	g.taskLocal = nil
 	return local, raw, size, owned, true
+}
+
+// ReleaseCompletedTaskCompiler consumes the ActionComplete receipt returned
+// immediately after a generated root completed and its physical frame was
+// destroyed. The normal spawned task has never parked or been canceled, so a
+// zero ParkState plus the terminal ownership headers certifies that no source
+// can retain it. Tasks with any exceptional residue fall back to the complete
+// reclaimability audit.
+func ReleaseCompletedTaskCompiler(g *G) (local, raw unsafe.Pointer, size uintptr, owned, ok bool) {
+	if g != nil && g.magic == gMagic && gPreemptStateAtDepthZero(g, preemptDisabled) &&
+		g.state == GDead && g.taskControlLeases == 0 && g.runAction == ActionInvalid &&
+		g.transferState == runnableTransferGIdle && g.osThreadLockDepth == 0 &&
+		g.root == nil && g.active == nil && g.frames == nil && g.pending == (pendingTransition{}) &&
+		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued && !g.waiting &&
+		g.runP == nil && g.park == (ParkState{}) &&
+		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
+		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind &&
+		g.panicTraceHead == nil && g.panicTraceTail == nil && g.panicTraceCount == 0 &&
+		g.taskLocal != nil && g.taskState == taskStorageOwned &&
+		g.taskStorage == unsafe.Pointer(g) && g.taskSize == TaskStorageSize() {
+		local, raw, size = g.taskLocal, g.taskStorage, g.taskSize
+		g.taskLocal = nil
+		g.taskStorage = nil
+		g.taskSize = 0
+		g.taskState = taskStorageReleased
+		return local, raw, size, true, true
+	}
+	return ReleaseCompletedTask(g)
 }
 
 // DeadG is a narrow program-driver query. It does not imply that a command
