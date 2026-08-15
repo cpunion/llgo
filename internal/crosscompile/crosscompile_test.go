@@ -344,27 +344,29 @@ func TestUseWithTarget(t *testing.T) {
 		t.Error("Expected LDFLAGS to be set for native build")
 	}
 	wantDebugInfo := nativeDebugInfoPolicy(runtime.GOOS)
-	if export.DebugInfo.AlwaysOmit != wantDebugInfo.AlwaysOmit || !slices.Equal(export.DebugInfo.OmitLinkFlags, wantDebugInfo.OmitLinkFlags) {
+	if export.DebugInfo.AlwaysOmit != wantDebugInfo.AlwaysOmit ||
+		!slices.Equal(export.DebugInfo.OmitLinkFlags, wantDebugInfo.OmitLinkFlags) ||
+		!slices.Equal(export.DebugInfo.PreserveLinkFlags, wantDebugInfo.PreserveLinkFlags) {
 		t.Fatalf("native debug-info policy = %+v, want %+v", export.DebugInfo, wantDebugInfo)
 	}
 }
 
 func TestNativeDebugInfoPolicy(t *testing.T) {
 	tests := []struct {
-		goos      string
-		supported bool
+		goos     string
+		omit     []string
+		preserve []string
 	}{
-		{goos: "darwin", supported: true},
-		{goos: "linux", supported: true},
-		{goos: "windows"},
+		{goos: "darwin", omit: []string{"-Wl,-S"}},
+		{goos: "linux", omit: []string{"-Wl,-S"}},
+		{goos: "windows", omit: []string{"-Wl,/debug:none"}, preserve: []string{"-Wl,/debug:dwarf"}},
 		{goos: "freebsd"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.goos, func(t *testing.T) {
 			policy := nativeDebugInfoPolicy(tt.goos)
-			got := !policy.AlwaysOmit && slices.Equal(policy.OmitLinkFlags, []string{"-Wl,-S"})
-			if got != tt.supported {
-				t.Fatalf("nativeDebugInfoPolicy(%q) = %+v, supported = %v", tt.goos, policy, got)
+			if policy.AlwaysOmit || !slices.Equal(policy.OmitLinkFlags, tt.omit) || !slices.Equal(policy.PreserveLinkFlags, tt.preserve) {
+				t.Fatalf("nativeDebugInfoPolicy(%q) = %+v, want omit=%v preserve=%v", tt.goos, policy, tt.omit, tt.preserve)
 			}
 		})
 	}
