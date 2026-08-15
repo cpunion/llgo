@@ -2788,9 +2788,9 @@ func assertCoroV1Completion(t *testing.T, name, body string) {
 		t.Fatalf("%s does not prepare completion before final suspend:\n%s", name, body)
 	}
 	segment := body[:complete]
-	state := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 [1-9][0-9]*,`)
+	state := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 0,`)
 	if !state.MatchString(segment) {
-		t.Fatalf("%s does not publish final reason/lifecycle/stateID before completion preparation:\n%s", name, body)
+		t.Fatalf("%s does not publish final reason/lifecycle and clear its source line before completion preparation:\n%s", name, body)
 	}
 }
 
@@ -2817,9 +2817,9 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 	if !parentLink.MatchString(prefix) {
 		t.Fatalf("Parent does not store its handle into child.parent before handoff:\n%s", prefix)
 	}
-	state := regexp.MustCompile(`(?s)store i16 1,.*store i16 3,.*store i32 1,`)
+	state := regexp.MustCompile(`(?s)store i16 1,.*store i16 3,.*store i32 [1-9][0-9]*,`)
 	if !state.MatchString(prefix) {
-		t.Fatalf("Parent does not publish Call/Suspended/stateID=1 before await_prepare:\n%s", prefix)
+		t.Fatalf("Parent does not publish Call/Suspended/source-line before await_prepare:\n%s", prefix)
 	}
 	awaitSuspend := strings.Index(parent[await:], "call i8 @llvm.coro.suspend")
 	if awaitSuspend < 0 {
@@ -2847,9 +2847,9 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 		`.*store i32 .*load i32.*switch i32`).MatchString(parent[await:]) {
 		t.Fatalf("Parent shared fast/resumed continuation does not carry the fused or slow child outcome into its status switch:\n%s", parent)
 	}
-	completionState := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 2,`)
+	completionState := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 0,`)
 	if !completionState.MatchString(parent[childCall[0]:]) {
-		t.Fatalf("Parent does not publish FrameComplete/FinalSuspended/stateID=2 after await:\n%s", parent)
+		t.Fatalf("Parent does not publish FrameComplete/FinalSuspended and clear its source line after await:\n%s", parent)
 	}
 }
 

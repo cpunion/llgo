@@ -32,8 +32,9 @@ func Test() {
 }
 
 // CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
-// CHECK: call ptr @"main.Test$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
+// CHECK-NEXT: _llgo_0:
+// CHECK-NEXT: %[[HANDLE:[0-9]+]] = call ptr @"main.Test$coro"(ptr %0, ptr %1)
+// CHECK-NEXT: ret ptr %[[HANDLE]]
 func main() {
 	Test()
 }
