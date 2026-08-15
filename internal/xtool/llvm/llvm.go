@@ -19,6 +19,7 @@ func GetTargetTripleWithGOARM(goos, goarch, goarm string) string {
 	switch goarch {
 	case "386":
 		if goos == "windows" {
+			// LLVM's 32-bit MSVC target spelling uses i686.
 			llvmarch = "i686"
 		} else {
 			llvmarch = "i386"
