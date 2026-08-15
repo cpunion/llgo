@@ -277,6 +277,12 @@ func TestRoundTripFile(t *testing.T) {
 }
 
 func TestOpenErrors(t *testing.T) {
+	t.Run("short in-memory header", func(t *testing.T) {
+		if _, err := newPackageMeta(make([]byte, headerSize-1)); err == nil || !strings.Contains(err.Error(), "meta: file too small") {
+			t.Fatalf("newPackageMeta error = %v, want short-file error", err)
+		}
+	})
+
 	t.Run("open", func(t *testing.T) {
 		if _, err := Open(filepath.Join(t.TempDir(), "missing.meta")); err == nil {
 			t.Fatal("Open succeeded for a missing file")
@@ -299,6 +305,13 @@ func TestOpenErrors(t *testing.T) {
 		want string
 	}{
 		{
+			name: "short header",
+			raw: func() []byte {
+				return make([]byte, headerSize-1)
+			},
+			want: "meta: mmap",
+		},
+		{
 			name: "magic",
 			raw: func() []byte {
 				raw := make([]byte, headerSize)
@@ -317,6 +330,41 @@ func TestOpenErrors(t *testing.T) {
 			},
 			want: "meta: unsupported version 2",
 		},
+		{
+			name: "section offset past end",
+			raw: func() []byte {
+				raw := validEmptyMetaHeader(headerSize)
+				binary.LittleEndian.PutUint32(raw[8+secIfaceInfo*4:], headerSize+4)
+				return raw
+			},
+			want: "meta: invalid section 6 offset 40",
+		},
+		{
+			name: "section offsets out of order",
+			raw: func() []byte {
+				raw := validEmptyMetaHeader(headerSize + 4)
+				binary.LittleEndian.PutUint32(raw[8+secSymbols*4:], headerSize+4)
+				binary.LittleEndian.PutUint32(raw[8+secOrdinaryEdges*4:], headerSize)
+				return raw
+			},
+			want: "meta: invalid section 2 offset 36",
+		},
+		{
+			name: "unaligned section offset",
+			raw: func() []byte {
+				raw := validEmptyMetaHeader(headerSize + 4)
+				binary.LittleEndian.PutUint32(raw[8+secSymbols*4:], headerSize+1)
+				return raw
+			},
+			want: "meta: invalid section 1 offset 37",
+		},
+		{
+			name: "truncated symbols section",
+			raw: func() []byte {
+				return validEmptyMetaHeader(headerSize)
+			},
+			want: "meta: truncated symbols section",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -329,4 +377,14 @@ func TestOpenErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func validEmptyMetaHeader(size int) []byte {
+	raw := make([]byte, size)
+	copy(raw, magic)
+	binary.LittleEndian.PutUint32(raw[4:8], version)
+	for sec := range numSections {
+		binary.LittleEndian.PutUint32(raw[8+sec*4:], headerSize)
+	}
+	return raw
 }

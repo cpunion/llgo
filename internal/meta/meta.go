@@ -169,7 +169,7 @@ func Open(path string) (*PackageMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fi.Size() <= 0 || fi.Size() > int64(^uint(0)>>1) {
+	if fi.Size() < headerSize || fi.Size() > int64(^uint(0)>>1) {
 		return nil, fmt.Errorf("meta: mmap %s: invalid file size %d", path, fi.Size())
 	}
 	size := int(fi.Size())
@@ -303,6 +303,9 @@ func (pm *PackageMeta) hasFuncDemand(sym Symbol) bool {
 // newPackageMeta checks the magic and version, then decodes the section offsets
 // from the fixed header.
 func newPackageMeta(raw []byte) (*PackageMeta, error) {
+	if len(raw) < headerSize {
+		return nil, fmt.Errorf("meta: file too small: %d bytes", len(raw))
+	}
 	if string(raw[0:4]) != magic {
 		return nil, fmt.Errorf("meta: bad magic %q", raw[0:4])
 	}
@@ -311,14 +314,30 @@ func newPackageMeta(raw []byte) (*PackageMeta, error) {
 		return nil, fmt.Errorf("meta: unsupported version %d", ver)
 	}
 
-	pm := &PackageMeta{raw: raw}
-	pm.strOff = binary.LittleEndian.Uint32(raw[8+secStringTable*4:])
-	pm.symOff = binary.LittleEndian.Uint32(raw[8+secSymbols*4:])
-	pm.ordinaryOff = binary.LittleEndian.Uint32(raw[8+secOrdinaryEdges*4:])
-	pm.demandOff = binary.LittleEndian.Uint32(raw[8+secFuncDemand*4:])
-	pm.childOff = binary.LittleEndian.Uint32(raw[8+secTypeChildren*4:])
-	pm.methodOff = binary.LittleEndian.Uint32(raw[8+secMethodInfo*4:])
-	pm.ifaceOff = binary.LittleEndian.Uint32(raw[8+secIfaceInfo*4:])
+	var offsets [numSections]uint32
+	prev := uint32(headerSize)
+	for sec := range offsets {
+		off := binary.LittleEndian.Uint32(raw[8+sec*4:])
+		if off < prev || uint64(off) > uint64(len(raw)) || off%4 != 0 {
+			return nil, fmt.Errorf("meta: invalid section %d offset %d", sec, off)
+		}
+		offsets[sec] = off
+		prev = off
+	}
+	if offsets[secOrdinaryEdges]-offsets[secSymbols] < 4 {
+		return nil, fmt.Errorf("meta: truncated symbols section")
+	}
+
+	pm := &PackageMeta{
+		raw:         raw,
+		strOff:      offsets[secStringTable],
+		symOff:      offsets[secSymbols],
+		ordinaryOff: offsets[secOrdinaryEdges],
+		demandOff:   offsets[secFuncDemand],
+		childOff:    offsets[secTypeChildren],
+		methodOff:   offsets[secMethodInfo],
+		ifaceOff:    offsets[secIfaceInfo],
+	}
 
 	// read nsyms from Symbols section header
 	pm.nsyms = binary.LittleEndian.Uint32(raw[pm.symOff:])
