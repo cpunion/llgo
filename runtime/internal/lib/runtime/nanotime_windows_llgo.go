@@ -1,4 +1,4 @@
-//go:build !darwin && !linux && !windows && !baremetal
+//go:build windows
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,16 +18,6 @@
 
 package runtime
 
-import (
-	"unsafe"
-
-	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
-)
-
-// nanotime1 keeps the previous behavior on remaining platforms.
 func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_MONOTONIC, tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
+	return c_nanotime()
 }
