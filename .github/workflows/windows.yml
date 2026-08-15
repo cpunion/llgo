@@ -13,9 +13,13 @@ concurrency:
 
 jobs:
   host-smoke:
-    name: host smoke (windows-amd64, LLVM 22, Go 1.26.5)
+    name: host smoke (windows-amd64, LLVM 19, Go 1.26.5)
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      LLVM_VERSION: "19.1.7"
+      MSYS2_LLVM_PACKAGE_VERSION: "19.1.7-1"
+      MSYS2_LIBXML2_PACKAGE_VERSION: "2.13.8-3"
     steps:
       - uses: actions/checkout@v7
 
@@ -30,9 +34,21 @@ jobs:
           msystem: CLANG64
           path-type: inherit
           update: true
-          install: >-
-            mingw-w64-clang-x86_64-clang
-            mingw-w64-clang-x86_64-llvm
+
+      - name: Install LLVM 19
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+
+          repo=https://repo.msys2.org/mingw/clang64
+          prefix=mingw-w64-clang-x86_64
+          packages=(clang clang-libs compiler-rt llvm llvm-libs lld libc++ libunwind)
+          urls=()
+          for package in "${packages[@]}"; do
+            urls+=("$repo/$prefix-$package-$MSYS2_LLVM_PACKAGE_VERSION-any.pkg.tar.zst")
+          done
+          urls+=("$repo/$prefix-libxml2-$MSYS2_LIBXML2_PACKAGE_VERSION-any.pkg.tar.zst")
+          pacman --noconfirm -U "${urls[@]}"
 
       - name: Build and test the Windows host compiler
         shell: msys2 {0}
@@ -48,13 +64,11 @@ jobs:
           export CGO_LDFLAGS="$(llvm-config --ldflags --libs all --system-libs)"
 
           llvm_version="$(llvm-config --version)"
-          case "$llvm_version" in
-            22.*) build_tags=byollvm,llvm22 ;;
-            *)
-              echo "unsupported MSYS2 LLVM version: $llvm_version" >&2
-              exit 1
-              ;;
-          esac
+          if [[ "$llvm_version" != "$LLVM_VERSION" ]]; then
+            echo "expected LLVM $LLVM_VERSION, got $llvm_version" >&2
+            exit 1
+          fi
+          build_tags=byollvm,llvm19
 
           go version
           llvm-config --version
