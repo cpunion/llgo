@@ -25,6 +25,7 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: CLANG64
+          path-type: inherit
           update: true
           install: >-
             mingw-w64-clang-x86_64-clang
