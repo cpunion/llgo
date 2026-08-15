@@ -32,7 +32,8 @@ const (
 )
 
 // Resolve386 validates and normalizes GO386. An empty value selects the Go
-// toolchain default.
+// toolchain default. Invalid input returns that default together with an error;
+// callers must check the error unless fallback behavior is intentional.
 func Resolve386(value string) (string, error) {
 	if value == "" {
 		return Default386, nil
@@ -48,7 +49,8 @@ func Resolve386(value string) (string, error) {
 }
 
 // ResolveAMD64 validates and normalizes GOAMD64. An empty value selects the Go
-// toolchain default.
+// toolchain default. Invalid input returns that default together with an error;
+// callers must check the error unless fallback behavior is intentional.
 func ResolveAMD64(value string) (string, error) {
 	if value == "" {
 		return DefaultAMD64, nil
@@ -82,6 +84,8 @@ func (f ARM) String() string {
 
 // ParseARM validates and normalizes GOARM. ARMv5 defaults to software floating
 // point; ARMv6 and ARMv7 default to hardware floating point, matching Go.
+// Invalid input returns a default-based value together with an error; callers
+// must check the error unless fallback behavior is intentional.
 func ParseARM(value string) (ARM, error) {
 	if value == "" {
 		value = DefaultARM
@@ -132,6 +136,8 @@ func (f ARM64) String() string {
 
 // ParseARM64 validates and normalizes GOARM64. Extension suffixes may occur in
 // either order, matching the Go toolchain. LSE is mandatory from ARMv8.1.
+// Invalid input returns a default-based value together with an error; callers
+// must check the error unless fallback behavior is intentional.
 func ParseARM64(value string) (ARM64, error) {
 	if value == "" {
 		value = DefaultARM64
