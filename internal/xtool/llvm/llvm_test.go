@@ -156,7 +156,7 @@ func TestGetTargetTripleWithGOARM(t *testing.T) {
 		goarm string
 		want  string
 	}{
-		{"5", "armv5-unknown-linux-gnueabihf"},
+		{"5", "armv5-unknown-linux-gnueabi"},
 		{"6", "armv6-unknown-linux-gnueabihf"},
 		{"7", "armv7-unknown-linux-gnueabihf"},
 		{"", "armv7-unknown-linux-gnueabihf"},

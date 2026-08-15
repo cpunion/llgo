@@ -130,30 +130,8 @@ type TargetSpec struct {
 func (p *Target) Spec() (spec TargetSpec) {
 	// Configure based on GOOS/GOARCH environment variables (falling back to
 	// runtime.GOOS/runtime.GOARCH), and generate a LLVM target based on it.
-	var llvmarch string
 	goarch := p.effectiveGOARCH()
 	goos := p.effectiveGOOS()
-	switch goarch {
-	case "386":
-		llvmarch = "i386"
-	case "amd64":
-		llvmarch = "x86_64"
-	case "arm64":
-		llvmarch = "aarch64"
-	case "arm":
-		switch p.GOARM {
-		case "5":
-			llvmarch = "armv5"
-		case "6":
-			llvmarch = "armv6"
-		default:
-			llvmarch = "armv7"
-		}
-	case "wasm":
-		llvmarch = "wasm32"
-	default:
-		llvmarch = goarch
-	}
 	spec.Triple = intllvm.GetTargetTripleWithGOARM(goos, goarch, p.GOARM)
 	switch goarch {
 	case "386":
@@ -164,12 +142,12 @@ func (p *Target) Spec() (spec TargetSpec) {
 		spec.Features = "+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
 	case "arm":
 		spec.CPU = "generic"
-		switch llvmarch {
-		case "armv5":
+		switch p.GOARM {
+		case "5":
 			spec.Features = "+armv5t,+strict-align,-aes,-bf16,-d32,-dotprod,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fp64,-fpregs,-fullfp16,-mve.fp,-neon,-sha2,-thumb-mode,-vfp2,-vfp2sp,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
-		case "armv6":
+		case "6":
 			spec.Features = "+armv6,+dsp,+fp64,+strict-align,+vfp2,+vfp2sp,-aes,-d32,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fullfp16,-neon,-sha2,-thumb-mode,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
-		case "armv7":
+		default:
 			spec.Features = "+armv7-a,+d32,+dsp,+fp64,+neon,+vfp2,+vfp2sp,+vfp3,+vfp3d16,+vfp3d16sp,+vfp3sp,-aes,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fullfp16,-sha2,-thumb-mode,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
 		}
 	case "arm64":
