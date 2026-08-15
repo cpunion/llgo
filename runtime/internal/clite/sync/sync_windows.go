@@ -47,8 +47,6 @@ type Once struct {
 	state uintptr
 }
 
-var OnceInit Once
-
 //go:linkname winOnce C.llgo_win_once
 func winOnce(once *Once, f *func()) c.Int
 

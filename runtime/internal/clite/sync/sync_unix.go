@@ -45,5 +45,3 @@ const (
 	MUTEX_RECURSIVE  = psync.MUTEX_RECURSIVE
 	MUTEX_DEFAULT    = psync.MUTEX_DEFAULT
 )
-
-var OnceInit = psync.OnceInit
