@@ -192,7 +192,7 @@ jobs:
             $buildExitCode = $LASTEXITCODE
           }
           if ($buildExitCode -eq 0) {
-            ..\llgo-windows-smoke.exe build -tags=nogc `
+            ..\llgo-windows-smoke.exe build `
               -o ..\windows-ffi-smoke.exe `
               .\_test\windowsffi
             $buildExitCode = $LASTEXITCODE
