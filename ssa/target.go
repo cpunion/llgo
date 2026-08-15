@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 
+	archcfg "github.com/xgo-dev/llgo/internal/goarch"
 	"github.com/xgo-dev/llgo/internal/optlevel"
 	intllvm "github.com/xgo-dev/llgo/internal/xtool/llvm"
 	"github.com/xgo-dev/llvm"
@@ -30,7 +31,10 @@ import (
 type Target struct {
 	GOOS                    string
 	GOARCH                  string
+	GO386                   string // "sse2" (default) or "softfloat"
+	GOAMD64                 string // "v1" (default), "v2", "v3", or "v4"
 	GOARM                   string // "5", "6", "7" (default)
+	GOARM64                 string // "v8.0" (default) through "v9.5", with optional extensions
 	Target                  string // target name from -target flag (e.g., "esp32", "arm7tdmi", "wasi")
 	LLVMTarget              string // physical LLVM target selected by a target configuration
 	OptLevel                optlevel.Level
@@ -136,9 +140,26 @@ func (p *Target) Spec() (spec TargetSpec) {
 	switch goarch {
 	case "386":
 		spec.CPU = "pentium4"
-		spec.Features = "+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
+		go386 := p.GO386
+		if p.Target != "" {
+			go386 = ""
+		}
+		go386, _ = archcfg.Resolve386(go386)
+		if go386 == "softfloat" {
+			spec.Features = "+cx8,+fxsr,+mmx,+soft-float,-sse,-sse2,-x87"
+		} else {
+			spec.Features = "+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
+		}
 	case "amd64":
+		goamd64 := p.GOAMD64
+		if p.Target != "" {
+			goamd64 = ""
+		}
+		goamd64, _ = archcfg.ResolveAMD64(goamd64)
 		spec.CPU = "x86-64"
+		if goamd64 != "v1" {
+			spec.CPU += "-" + goamd64
+		}
 		spec.Features = "+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
 	case "arm":
 		spec.CPU = "generic"
@@ -152,11 +173,30 @@ func (p *Target) Spec() (spec TargetSpec) {
 		}
 	case "arm64":
 		spec.CPU = "generic"
-		if goos == "darwin" {
-			spec.Features = "+neon"
-		} else { // windows, linux
-			spec.Features = "+neon,-fmv"
+		goarm64 := p.GOARM64
+		if p.Target != "" {
+			goarm64 = ""
 		}
+		arm64, _ := archcfg.ParseARM64(goarm64)
+		archFeature := arm64.Version + "a"
+		if arm64.Version == "v9.0" {
+			archFeature = "v9a"
+		}
+		features := make([]string, 0, 5)
+		if arm64.Version != "v8.0" {
+			features = append(features, "+"+archFeature)
+		}
+		features = append(features, "+neon")
+		if arm64.LSE {
+			features = append(features, "+lse")
+		}
+		if arm64.Crypto {
+			features = append(features, "+crypto")
+		}
+		if goos != "darwin" { // windows, linux
+			features = append(features, "-fmv")
+		}
+		spec.Features = strings.Join(features, ",")
 	case "wasm":
 		spec.CPU = "generic"
 		spec.Features = "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext"
