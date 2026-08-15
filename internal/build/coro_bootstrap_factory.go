@@ -48,7 +48,6 @@ const (
 	coroProgramCompletionAbortV1      = 3
 	coroProgramCompletionShutdownV1   = 4
 	coroProgramCompletionGoexitV1     = 6
-	coroProgramFrameMetadataWordsV2   = 14
 )
 
 const (
@@ -160,7 +159,7 @@ func emitCoroProgramBootstrapFactoryV2(
 	headerType := coroProgramBootstrapHeaderTypeV1(prog)
 	header := b.AllocaT(headerType)
 	frameMetadataType := prog.Type(
-		types.NewArray(types.Typ[types.Uintptr], coroProgramFrameMetadataWordsV2),
+		types.NewArray(types.Typ[types.Uintptr], coroProgramFrameMetadataWordsV2(prog)),
 		llssa.InGo,
 	)
 	frameMetadata := b.AllocaT(frameMetadataType)
@@ -339,6 +338,14 @@ func emitCoroProgramBootstrapFactoryV2(
 	coroBuilder.Finish()
 	b.Dispose()
 	return factory
+}
+
+func coroProgramFrameMetadataWordsV2(prog llssa.Program) int64 {
+	pointerSize := prog.PointerSize()
+	if pointerSize != 4 && pointerSize != 8 {
+		panic("coroutine bootstrap metadata requires a 32-bit or 64-bit pointer target")
+	}
+	return int64(12 + 4/pointerSize)
 }
 
 func validateCoroProgramBootstrapFactoryV2(

@@ -243,14 +243,14 @@ func validDiscardResultSpawnRoot(child *G, handle unsafe.Pointer) (*Frame, bool)
 	if root == nil || child.frames != root || root.next != nil || root.owner != child ||
 		root.parent != nil || root.handle != handle || root.header == nil ||
 		root.header.G != unsafe.Pointer(child) || root.header.Parent != nil ||
-		root.header.Descriptor != root.descriptor || root.header.ResultSlot != nil ||
+		root.header.Descriptor == nil || root.header.ResultSlot != nil ||
 		root.header.SuspendReason != uint16(SuspendNone) ||
 		root.header.Lifecycle != uint16(FrameInitialSuspended) ||
-		root.state != FrameInitialSuspended || root.descriptor == nil ||
-		!checkedProgramObjectV1(root.descriptor, unsafe.Sizeof(FrameDescriptorV1{}), unsafe.Alignof(FrameDescriptorV1{})) {
+		root.state != FrameInitialSuspended ||
+		!checkedProgramObjectV1(root.header.Descriptor, unsafe.Sizeof(FrameDescriptorV1{}), unsafe.Alignof(FrameDescriptorV1{})) {
 		return nil, false
 	}
-	descriptor := (*FrameDescriptorV1)(root.descriptor)
+	descriptor := (*FrameDescriptorV1)(root.header.Descriptor)
 	if descriptor.Version != 1 || descriptor.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
 		!validProgramPayloadLayoutV1(descriptor.ResultSize, descriptor.ResultAlign) {
 		return nil, false
@@ -332,10 +332,10 @@ func CommitSpawnCompiler(parent, child *G, handle unsafe.Pointer) bool {
 		child.taskSize != TaskStorageSize() || !gPreemptStateAtDepthZero(child, preemptIdle) ||
 		root == nil || root.next != nil || root.owner != child || root.parent != nil ||
 		root.handle != handle || root.header == nil || root.header.G != unsafe.Pointer(child) ||
-		root.header.Parent != nil || root.header.Descriptor != root.descriptor ||
+		root.header.Parent != nil || root.header.Descriptor == nil ||
 		root.header.ResultSlot != nil || root.header.SuspendReason != uint16(SuspendNone) ||
 		root.header.Lifecycle != uint16(FrameInitialSuspended) ||
-		root.state != FrameInitialSuspended || root.descriptor == nil ||
+		root.state != FrameInitialSuspended ||
 		!validReadyQueueHeader(p) || p.readyCount == ^uint32(0) {
 		return false
 	}

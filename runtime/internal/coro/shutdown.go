@@ -28,8 +28,8 @@ func CommandMainReturnPoint(p *P, main *G) bool {
 
 func validCancelFrame(frame *Frame, g *G) bool {
 	if frame == nil || frame.owner != g || frame.handle == nil || frame.header == nil ||
-		frame.descriptor == nil || frame.header.G != unsafe.Pointer(g) ||
-		frame.header.Descriptor != frame.descriptor || !validFrameAllocationIdentity(frame) {
+		frame.header.Descriptor == nil || frame.header.G != unsafe.Pointer(g) ||
+		!validFrameAllocationIdentity(frame) {
 		return false
 	}
 	return true

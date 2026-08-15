@@ -53,8 +53,8 @@ func TestHeaderV1TargetNeutralLayout(t *testing.T) {
 }
 
 func TestFrameAllocationLayout(t *testing.T) {
-	if got, capacity := unsafe.Sizeof(Frame{}), unsafe.Sizeof(BorrowedFrameStorageV2{}); got > capacity {
-		t.Fatalf("Frame size = %d, borrowed ABI capacity = %d", got, capacity)
+	if got, capacity := unsafe.Sizeof(Frame{}), unsafe.Sizeof(BorrowedFrameStorageV2{}); got != capacity {
+		t.Fatalf("Frame size = %d, want exact borrowed ABI capacity %d", got, capacity)
 	}
 	for _, align := range []uintptr{1, 2, 4, 8, 16, 64} {
 		total, ok := FrameAllocationSize(37, align)
@@ -189,7 +189,7 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 	}
 	frame := (*Frame)(unsafe.Pointer(metadata))
 	if g.frames != frame || frame.owner != g || frame.handle != handle || frame.header != header ||
-		frame.descriptor != unsafe.Pointer(descriptor) || !frame.borrowedStorage ||
+		frame.header.Descriptor != unsafe.Pointer(descriptor) || !frame.borrowedStorage ||
 		header.G != unsafe.Pointer(g) || header.Parent != nil ||
 		header.Descriptor != unsafe.Pointer(descriptor) || header.AllocationBase != unsafe.Pointer(frame) ||
 		header.ResultSlot != resultSlot || header.SuspendReason != uint16(SuspendNone) ||
@@ -236,7 +236,7 @@ func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
 	}
 	frame := FrameFromStorage(storage)
 	if frame == nil || g.frames != frame || frame.owner != g || frame.handle != handle ||
-		frame.header != header || frame.descriptor != unsafe.Pointer(descriptor) ||
+		frame.header != header || frame.header.Descriptor != unsafe.Pointer(descriptor) ||
 		frame.allocationSize != total || frame.state != FrameInitialSuspended ||
 		frame.borrowedStorage || header.AllocationBase != unsafe.Pointer(&memory[0]) ||
 		frame != (*Frame)(unsafe.Pointer(metadata)) {
@@ -271,7 +271,8 @@ func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
 	if !RetainPendingPanicTraceFrameCompiler(
 		g, releasedMetadata, raw, released,
 	) || g.panicTraceHead != frame || g.panicTraceTail != frame ||
-		frame.header != nil || frame.handle != raw {
+		frame.state != FrameTraceRetained ||
+		unsafe.Pointer(frame.header) != unsafe.Pointer(descriptor) || frame.handle != raw {
 		t.Fatalf("retain compact compiler panic frame = %+v", frame)
 	}
 	if !stagePanicTraceDiscard(g) {
@@ -366,10 +367,11 @@ func retainDetachedTestPanicTrace(
 	}
 	memory = make([]byte, unsafe.Sizeof(Frame{}))
 	raw := unsafe.Pointer(&memory[0])
+	header := &HeaderV1{Descriptor: unsafe.Pointer(descriptor)}
 	*(*Frame)(raw) = Frame{
 		owner:          g,
 		allocationSize: uintptr(len(memory)),
-		descriptor:     unsafe.Pointer(descriptor),
+		header:         header,
 		state:          FrameDestroyed,
 		parent:         carrier,
 	}

@@ -1361,8 +1361,12 @@ func checkedExecutorRun(
 		if withRuntimeContextMode {
 			mode := g.active.runtimeContext
 			if mode == frameRuntimeContextUnknown {
+				var descriptor unsafe.Pointer
+				if g.active.header != nil {
+					descriptor = g.active.header.Descriptor
+				}
 				var valid bool
-				mode, valid = descriptorRuntimeContextMode(g.active.descriptor)
+				mode, valid = descriptorRuntimeContextMode(descriptor)
 				if !valid {
 					return Action{}, false, false
 				}
@@ -1444,8 +1448,12 @@ func BeginIssuedExecutorResumeRuntimeContext(
 	}
 	mode := g.active.runtimeContext
 	if mode == frameRuntimeContextUnknown {
+		var descriptor unsafe.Pointer
+		if g.active.header != nil {
+			descriptor = g.active.header.Descriptor
+		}
 		var valid bool
-		mode, valid = descriptorRuntimeContextMode(g.active.descriptor)
+		mode, valid = descriptorRuntimeContextMode(descriptor)
 		if !valid {
 			return Action{}, false, false
 		}

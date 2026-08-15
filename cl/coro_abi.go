@@ -146,7 +146,6 @@ const (
 	coroCompletePrepareHookV2                  = "__llgo_coro_complete_prepare_v2"
 	coroFrameFreeHookV1                        = "__llgo_coro_frame_free_v1"
 	coroDescriptorPrefixV1                     = "__llgo_coro_frame_descriptor_v1."
-	coroBorrowedFrameMetadataWordsV2           = 14
 )
 
 const (
@@ -470,6 +469,16 @@ func coroHeaderType(prog llssa.Program) llssa.Type {
 	)
 }
 
+func coroBorrowedFrameMetadataWordsV2(prog llssa.Program) int64 {
+	pointerSize := prog.PointerSize()
+	if pointerSize != 4 && pointerSize != 8 {
+		panic("coroutine frame metadata requires a 32-bit or 64-bit pointer target")
+	}
+	// Mirrors runtime/internal/coro.BorrowedFrameStorageV2. The native Frame is
+	// twelve words; pointer-32 needs one extra word for its uint32 status field.
+	return int64(12 + 4/pointerSize)
+}
+
 func (p *context) beginCoroBody(
 	b llssa.Builder,
 	abi coroPhysicalABI,
@@ -491,7 +500,7 @@ func (p *context) beginCoroBody(
 	headerType := coroHeaderType(prog)
 	header := b.AllocaT(headerType)
 	borrowedFrameMetadataType := p.type_(
-		types.NewArray(types.Typ[types.Uintptr], coroBorrowedFrameMetadataWordsV2),
+		types.NewArray(types.Typ[types.Uintptr], coroBorrowedFrameMetadataWordsV2(prog)),
 		llssa.InGo,
 	)
 	// Dynamic ramps never consume this fallback storage. Leave it uninitialized

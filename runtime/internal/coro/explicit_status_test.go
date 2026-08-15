@@ -297,8 +297,6 @@ func TestExplicitPanicRetainsDescriptorTraceDeepestToRoot(t *testing.T) {
 	lines := []uint32{0, 20, 11}
 	for index, frame := range fixture.frames {
 		descriptor := unsafe.Pointer(descriptors[index])
-		metadata := FrameFromStorage(frame.storage)
-		metadata.descriptor = descriptor
 		frame.descriptor = descriptor
 		frame.header.Descriptor = descriptor
 		frame.header.Line = lines[index]
@@ -367,8 +365,6 @@ func TestActiveTraceFrameUsesCurrentCompilerDescriptor(t *testing.T) {
 		Function: "main.viaGo",
 		File:     "/src/main.go",
 	}
-	metadata := FrameFromStorage(frame.storage)
-	metadata.descriptor = unsafe.Pointer(descriptor)
 	frame.descriptor = unsafe.Pointer(descriptor)
 	frame.header.Descriptor = unsafe.Pointer(descriptor)
 	frame.header.Line = 17
