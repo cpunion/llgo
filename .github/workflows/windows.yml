@@ -130,7 +130,7 @@ jobs:
           go build -tags="$build_tags" -o llgo-windows-smoke.exe ./cmd/llgo
           ./llgo-windows-smoke.exe version
 
-      - name: Build and run the native Windows runtime smoke test
+      - name: Build and run the native Windows runtime and FFI smoke tests
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -173,6 +173,12 @@ jobs:
               .\_test\windowsstdlib
             $buildExitCode = $LASTEXITCODE
           }
+          if ($buildExitCode -eq 0) {
+            ..\llgo-windows-smoke.exe build -tags=nogc `
+              -o ..\windows-ffi-smoke.exe `
+              .\_test\windowsffi
+            $buildExitCode = $LASTEXITCODE
+          }
           Pop-Location
           if ($buildExitCode -ne 0) {
             exit $buildExitCode
@@ -182,6 +188,10 @@ jobs:
             exit $LASTEXITCODE
           }
           .\windows-stdlib-smoke.exe
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          .\windows-ffi-smoke.exe
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
