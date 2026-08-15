@@ -32,9 +32,7 @@ type HeaderV1 struct {
 	ResultSlot     unsafe.Pointer
 	SuspendReason  uint16
 	Lifecycle      uint16
-	StateID        uint32
 	Line           uint32
-	Flags          uint32
 }
 
 // FrameDescriptorV1 is the runtime prefix emitted for every physical
@@ -506,7 +504,7 @@ func PublishFrameV2(
 // publishes either dynamic storage or compiler-borrowed metadata. Keeping the
 // initialization in this shared helper makes coroutine ramps small: generated
 // code supplies only immutable descriptor/result operands and never duplicates
-// the scheduler header's ten-field initialization sequence.
+// the scheduler header's eight-field initialization sequence.
 func PublishFrameV3(
 	g *G, handle unsafe.Pointer, header *HeaderV1, storage, metadata,
 	descriptor, resultSlot unsafe.Pointer,

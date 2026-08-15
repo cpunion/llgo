@@ -2250,10 +2250,9 @@ func assertCoroV0HeaderStateZero(t *testing.T, body string) {
 	}{
 		{index: coroHeaderSuspendReason, type_: "i16", name: "suspend reason"},
 		{index: coroHeaderLifecycle, type_: "i16", name: "lifecycle"},
-		{index: coroHeaderStateID, type_: "i32", name: "state ID"},
 	} {
 		addresses := regexp.MustCompile(
-			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr[^\n{]* \{ ptr, ptr, ptr, ptr, ptr, i16, i16, i32, i32, i32 \}, ptr [^,]+, i32 0, i32 `+strconv.Itoa(field.index)+`\s*$`,
+			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr[^\n{]* \{ ptr, ptr, ptr, ptr, ptr, i16, i16, i32 \}, ptr [^,]+, i32 0, i32 `+strconv.Itoa(field.index)+`\s*$`,
 		).FindAllStringSubmatch(body, -1)
 		if len(addresses) == 0 {
 			t.Fatalf("v0 coroutine has no header %s store:\n%s", field.name, body)

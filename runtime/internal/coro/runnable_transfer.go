@@ -227,7 +227,7 @@ func pNeutralRunnableHeader(g *G, queued bool) bool {
 	if g.root == nil || active == nil || g.frames != active || g.root.owner != g ||
 		g.root.parent != nil || g.root.header == nil || g.root.header.Parent != nil ||
 		active.owner != g || active.handle == nil || active.header == nil ||
-		active.header.G != unsafe.Pointer(g) || active.header.Flags != 0 ||
+		active.header.G != unsafe.Pointer(g) ||
 		active.parkWait != nil || !emptyCompletionRecord(&active.completion) ||
 		active.state != FrameState(active.header.Lifecycle) {
 		return false
@@ -258,7 +258,7 @@ func pNeutralFrameChain(g *G) bool {
 
 	for frame := g.active; frame != nil; frame = frame.parent {
 		if frame.owner != g || frame.handle == nil || frame.header == nil || frame.next != frame.parent ||
-			frame.header.G != unsafe.Pointer(g) || frame.header.Flags != 0 ||
+			frame.header.G != unsafe.Pointer(g) ||
 			frame.parkWait != nil || !emptyCompletionRecord(&frame.completion) ||
 			frame.state != FrameState(frame.header.Lifecycle) {
 			return false

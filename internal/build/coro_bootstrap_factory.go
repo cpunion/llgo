@@ -59,9 +59,7 @@ const (
 	coroProgramHeaderResultSlotV1
 	coroProgramHeaderSuspendReasonV1
 	coroProgramHeaderLifecycleV1
-	coroProgramHeaderStateIDV1
 	coroProgramHeaderLineV1
-	coroProgramHeaderFlagsV1
 )
 
 type coroProgramBootstrapFactoryTargetV2 struct {
@@ -266,10 +264,8 @@ func emitCoroProgramBootstrapFactoryV2(
 			child := b.Call(rootFactory, g, null, null)
 			childHeader := b.CoroPromise(child, headerType)
 			b.Store(b.FieldAddr(childHeader, coroProgramHeaderParentV1), coroBuilder.Handle())
-			stateID := uint64(index + 1)
 			b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendCallV1, prog.Uint16()))
 			b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleSuspendedV1, prog.Uint16()))
-			b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(stateID, prog.Uint32()))
 			b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
 			b.Call(await.Expr, g, coroBuilder.Handle(), child)
 			coroBuilder.SuspendCurrentBlock()
@@ -314,7 +310,6 @@ func emitCoroProgramBootstrapFactoryV2(
 	b.SetBlockEx(panicked, llssa.AtEnd, false)
 	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendPanicV1, prog.Uint16()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
-	b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(uint64(len(bootstrap.Steps)+1), prog.Uint32()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
 	b.Call(
 		panicPrepare.Expr,
@@ -330,7 +325,6 @@ func emitCoroProgramBootstrapFactoryV2(
 
 	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendFrameCompleteV1, prog.Uint16()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
-	b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(uint64(len(bootstrap.Steps)+1), prog.Uint32()))
 	b.Store(b.FieldAddr(header, coroProgramHeaderLineV1), prog.IntVal(0, prog.Uint32()))
 	b.Call(
 		complete.Expr,
@@ -403,8 +397,6 @@ func coroProgramBootstrapHeaderTypeV1(prog llssa.Program) llssa.Type {
 		prog.VoidPtr(), // ResultSlot
 		prog.Uint16(),  // SuspendReason
 		prog.Uint16(),  // Lifecycle
-		prog.Uint32(),  // StateID
 		prog.Uint32(),  // Line
-		prog.Uint32(),  // Flags
 	)
 }

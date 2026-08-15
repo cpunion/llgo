@@ -47,16 +47,16 @@ func pollCompilerSafepointForTest(t *testing.T, g *G) bool {
 	if !ValidG(g) || g.active == nil || g.active.header == nil {
 		t.Fatal("compiler preemption checkpoint has no active frame")
 	}
-	remaining := g.active.header.StateID
+	remaining := g.active.panicLine
 	if remaining == 0 || remaining > preemptCheckpointStride {
 		remaining = preemptCheckpointStride
 	}
 	remaining--
-	g.active.header.StateID = remaining
+	g.active.panicLine = remaining
 	if remaining != 0 {
 		return false
 	}
-	g.active.header.StateID = preemptCheckpointStride
+	g.active.panicLine = preemptCheckpointStride
 	return PollPreemptCompiler(g)
 }
 

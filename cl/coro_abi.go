@@ -163,9 +163,7 @@ const (
 	coroHeaderResultSlot
 	coroHeaderSuspendReason
 	coroHeaderLifecycle
-	coroHeaderStateID
 	coroHeaderLine
-	coroHeaderFlags
 )
 
 const (
@@ -197,7 +195,6 @@ const coroPreemptInstructionBudget = 64
 // storage whose address never escapes; the ordinary SROA/mem2reg pipeline can
 // therefore keep it in SSA registers on a non-suspending loop edge. Every
 // activation resets it, so it is not live across a scheduler-visible suspend.
-// StateID remains exclusively the published resume-state identity.
 const coroPreemptCheckpointStride uint64 = 2048
 
 type coroPhysicalABI struct {
@@ -469,9 +466,7 @@ func coroHeaderType(prog llssa.Program) llssa.Type {
 		prog.VoidPtr(), // result slot
 		prog.Uint16(),  // suspend reason
 		prog.Uint16(),  // lifecycle state
-		prog.Uint32(),  // state ID
 		prog.Uint32(),  // source line
-		prog.Uint32(),  // flags
 	)
 }
 
@@ -541,10 +536,8 @@ func (p *context) beginCoroBody(
 		// managed calls and receive their ordinary Return outcomes.
 		body.terminalStatus = b.AllocaT(prog.Uint32())
 		b.Store(body.terminalStatus, prog.IntVal(coroAwaitCompletionReturn, prog.Uint32()))
-		// This address is compiler-private and never reaches a runtime call. It
-		// deliberately differs from Header.StateID: that externally visible
-		// field aliases runtime validation calls and therefore forces a
-		// load/store on every otherwise plain loop edge.
+		// This address is compiler-private and never reaches a runtime call, so
+		// ordinary SROA can keep it in SSA registers on non-suspending edges.
 		body.preemptCountdown = b.AllocaT(prog.Uint32())
 	}
 	if abi.runDecisionTakeZeroHook != "" {
@@ -828,12 +821,11 @@ func coroPanicTraceReplaceSignature() *types.Signature {
 func (c *coroBodyContext) publishState(
 	b llssa.Builder,
 	reason, lifecycle uint64,
-	stateID, line uint32,
+	_ uint32, line uint32,
 ) {
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(reason, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(lifecycle, prog.Uint16()))
-	b.Store(b.FieldAddr(c.header, coroHeaderStateID), prog.IntVal(uint64(stateID), prog.Uint32()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLine), prog.IntVal(uint64(line), prog.Uint32()))
 }
 
@@ -1129,7 +1121,6 @@ func (c *coroBodyContext) panicWithLine(
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(coroSuspendPanic, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(coroLifecycleFinalSuspended, prog.Uint16()))
-	b.Store(b.FieldAddr(c.header, coroHeaderStateID), prog.IntVal(uint64(c.terminalStateID()), prog.Uint32()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLine), line)
 	b.Call(
 		c.panicPrepare,

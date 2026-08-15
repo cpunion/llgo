@@ -38,16 +38,14 @@ func TestHeaderV1TargetNeutralLayout(t *testing.T) {
 		{"ResultSlot", unsafe.Offsetof(header.ResultSlot), 4 * pointerSize},
 		{"SuspendReason", unsafe.Offsetof(header.SuspendReason), 5 * pointerSize},
 		{"Lifecycle", unsafe.Offsetof(header.Lifecycle), 5*pointerSize + 2},
-		{"StateID", unsafe.Offsetof(header.StateID), 5*pointerSize + 4},
-		{"Line", unsafe.Offsetof(header.Line), 5*pointerSize + 8},
-		{"Flags", unsafe.Offsetof(header.Flags), 5*pointerSize + 12},
+		{"Line", unsafe.Offsetof(header.Line), 5*pointerSize + 4},
 	}
 	for _, field := range wants {
 		if field.got != field.want {
 			t.Fatalf("HeaderV1.%s offset = %d, want %d", field.name, field.got, field.want)
 		}
 	}
-	rawSize := 5*pointerSize + 16
+	rawSize := 5*pointerSize + 8
 	wantSize := (rawSize + pointerSize - 1) &^ (pointerSize - 1)
 	if got := unsafe.Sizeof(header); got != wantSize {
 		t.Fatalf("HeaderV1 size = %d, want %d", got, wantSize)
@@ -177,9 +175,7 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 		ResultSlot:     unsafe.Pointer(new(byte)),
 		SuspendReason:  ^uint16(0),
 		Lifecycle:      ^uint16(0),
-		StateID:        ^uint32(0),
 		Line:           ^uint32(0),
-		Flags:          ^uint32(0),
 	}
 	metadata := new(BorrowedFrameStorageV2)
 	for index := range metadata {
@@ -197,8 +193,7 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 		header.G != unsafe.Pointer(g) || header.Parent != nil ||
 		header.Descriptor != unsafe.Pointer(descriptor) || header.AllocationBase != unsafe.Pointer(frame) ||
 		header.ResultSlot != resultSlot || header.SuspendReason != uint16(SuspendNone) ||
-		header.Lifecycle != uint16(FrameInitialSuspended) || header.StateID != 0 ||
-		header.Line != 0 || header.Flags != 0 {
+		header.Lifecycle != uint16(FrameInitialSuspended) || header.Line != 0 {
 		t.Fatalf("V3 borrowed publication frame=%+v header=%+v", frame, header)
 	}
 	frame.state = FrameDestroyPending
