@@ -16,6 +16,9 @@ const LLGoFiles = "_wrap/fault.c"
 //go:linkname windowsInvalidAddress C.llgo_windows_invalid_address
 func windowsInvalidAddress() uintptr
 
+//go:linkname windowsUnrecoveredFault C.llgo_windows_unrecovered_fault
+func windowsUnrecoveredFault() int32
+
 //go:noinline
 func windowsNilFault() byte {
 	return *(*byte)(unsafe.Pointer(windowsInvalidAddress()))
@@ -108,5 +111,9 @@ func main() {
 
 	checkRecover()
 	checkNilFault()
+	if windowsUnrecoveredFault() != 0 {
+		_ = windowsNilFault()
+		panic("unrecovered Windows fault returned")
+	}
 	println("windows runtime smoke: ok")
 }
