@@ -65,6 +65,11 @@ func TestWebAssemblyTargetsSelectExplicitCollectorBackend(t *testing.T) {
 			if slices.Contains(pkg.GoFiles, "backend_gc.go") {
 				t.Fatalf("GoFiles = %v, unexpectedly selected BDWGC backend", pkg.GoFiles)
 			}
+			if !slices.Contains(pkg.GoFiles, "cache_disabled.go") ||
+				slices.Contains(pkg.GoFiles, "cache_native_llgo.go") ||
+				slices.Contains(pkg.GoFiles, "build_cache_native_llgo.go") {
+				t.Fatalf("GoFiles = %v, want the cache-free WebAssembly allocator", pkg.GoFiles)
+			}
 			if !slices.Contains(pkg.TestGoFiles, "backend_webassembly_test.go") {
 				t.Fatalf("TestGoFiles = %v, want backend_webassembly_test.go", pkg.TestGoFiles)
 			}

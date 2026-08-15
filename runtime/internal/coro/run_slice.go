@@ -922,27 +922,24 @@ func ResumedExecutorRun(
 	return next, true, true
 }
 
-// BeginIssuedExecutorDestroyAfterResume changes one still-private issued
-// resume interval into its adjacent normal-completion destroy interval. The
-// resumed frame has already published and committed pendingComplete; no user
-// code, producer callback, queue selection, or host boundary can observe the
-// CheckDestroy action between these two physical operations. Keeping the
-// issued capability live avoids a ready-tail round trip for every short-lived
-// coroutine while the independent llvm.coro.done observation still guards
-// llvm.coro.destroy.
+// CanBeginIssuedExecutorDestroyAfterResume reports whether one still-private
+// issued resume may enter its adjacent normal-completion destroy interval.
+// The optimization cannot cross an already-runnable peer, panic/cancellation,
+// foreign reentry, producer callback, or host boundary. Keeping the issued
+// capability live avoids a ready-tail round trip for an otherwise isolated
+// short-lived coroutine, while llvm.coro.done remains an independent guard.
 //
 // Panic unwinding and foreign reentry deliberately retain their existing
 // separately scheduled destroy paths because those transitions carry an
 // externally visible control boundary in addition to frame completion.
-func BeginIssuedExecutorDestroyAfterResume(
+func CanBeginIssuedExecutorDestroyAfterResume(
 	driver *ExecutorDriver,
 	g *G,
 	action Action,
-	done bool,
-) (Action, bool) {
-	if !done || !validIssuedExecutorRunAction(driver) ||
+) bool {
+	if !validIssuedExecutorRunAction(driver) ||
 		driver.run.issued != ActionCheckResume || g == nil {
-		return Action{}, false
+		return false
 	}
 	p := driver.p
 	if p.current != g || g.runP != p || p.inResume || p.inlineAwaitDepth != 0 ||
@@ -952,9 +949,24 @@ func BeginIssuedExecutorDestroyAfterResume(
 		g.destroyTarget.handle != action.Handle ||
 		g.destroyTarget.state != FrameDestroyPending ||
 		g.park.taskCancelPhase == taskCancelRequested || g.panicUnwind ||
-		p.foreignReentry != nil {
+		p.foreignReentry != nil || driver.run.readyDebt || runnableForOSThreadOwner(p) {
+		return false
+	}
+	return true
+}
+
+// BeginIssuedExecutorDestroyAfterResume consumes the checked private interval
+// after the compiler-owned llvm.coro.done observation succeeds.
+func BeginIssuedExecutorDestroyAfterResume(
+	driver *ExecutorDriver,
+	g *G,
+	action Action,
+	done bool,
+) (Action, bool) {
+	if !done || !CanBeginIssuedExecutorDestroyAfterResume(driver, g, action) {
 		return Action{}, false
 	}
+	p := driver.p
 	next := Action{Kind: ActionDestroy, Handle: action.Handle}
 	driver.run.issued = ActionCheckDestroy
 	p.action = next

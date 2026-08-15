@@ -1,4 +1,4 @@
-//go:build llgo && (darwin || linux) && !baremetal
+//go:build llgo && (darwin || linux) && !baremetal && !wasm && !tinygo.wasm
 
 package coroalloc
 

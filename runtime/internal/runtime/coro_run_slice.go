@@ -188,6 +188,9 @@ func coroRunPhysicalActionV1(
 			return next, advanced, committed, false
 		}
 		checkDestroy := next
+		if !coro.CanBeginIssuedExecutorDestroyAfterResume(driver, g, checkDestroy) {
+			return checkDestroy, advanced, committed, false
+		}
 		next, ok = coro.BeginIssuedExecutorDestroyAfterResume(
 			driver, g, checkDestroy, coroHandleDone(checkDestroy.Handle),
 		)

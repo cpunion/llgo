@@ -1,4 +1,4 @@
-//go:build llgo && (darwin || linux) && !baremetal
+//go:build llgo && (darwin || linux) && !baremetal && !wasm && !tinygo.wasm
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

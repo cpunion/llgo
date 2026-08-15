@@ -915,12 +915,13 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	}
 	objects = append(objects,
 		buildCoroRuntimeIslandFaultStringStubs(t, prog, temp),
+		buildCoroNativeAllocationCacheObject(t, temp),
 		buildCoroNativeWorkerCallObject(t, temp),
 		buildCoroNativeDoorbellObject(t, temp),
 	)
 	prog.Dispose()
-	if len(objects) != len(allowed)+3 {
-		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus fault-string, worker, and doorbell leaves", len(objects), len(allowed))
+	if len(objects) != len(allowed)+4 {
+		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, and doorbell leaves", len(objects), len(allowed))
 	}
 	return objects
 }

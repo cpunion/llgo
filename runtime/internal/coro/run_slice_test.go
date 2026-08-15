@@ -131,6 +131,39 @@ func TestExecutorRunFusesPrivateNormalCompletionDestroy(t *testing.T) {
 	}
 }
 
+func TestExecutorRunDoesNotFuseCompletionPastReadyPeer(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "completion-before-ready-peer")
+	peer := newYieldingTestG(t, "ready-peer-before-destroy")
+	if !Enqueue(p, task.g) || !Enqueue(p, peer.g) {
+		t.Fatal("enqueue completion task and ready peer")
+	}
+	_ = runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
+	if !ok {
+		t.Fatal("begin completion resume")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare completion before ready peer")
+	}
+	checkDestroy, committed, ok := ResumedExecutorRun(driver, p, task.g, resume)
+	if !ok || committed || checkDestroy.Kind != ActionCheckDestroy {
+		t.Fatalf("private completion check = (%+v, committed=%t, ok=%t)", checkDestroy, committed, ok)
+	}
+	beforeAction, beforeIssued := p.action, driver.run.issued
+	if CanBeginIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy) {
+		t.Fatal("completion destroy fusion bypassed an already-ready peer")
+	}
+	if destroy, fused := BeginIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy, true); fused ||
+		destroy != (Action{}) || p.action != beforeAction || driver.run.issued != beforeIssued {
+		t.Fatalf("rejected fusion changed private interval = (%+v, fused=%t)", destroy, fused)
+	}
+}
+
 func TestExecutorRunResumeRuntimeContextDescriptorCapability(t *testing.T) {
 	for _, test := range []struct {
 		name      string

@@ -2254,14 +2254,15 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	}
 	objects = append(objects,
 		buildCoroRuntimeIslandFaultStringStubs(t, prog, temp),
+		buildCoroNativeAllocationCacheObject(t, temp),
 		buildCoroNativeWorkerCallObject(t, temp),
 		buildCoroNativeDoorbellObject(t, temp),
 		buildCoroNativePollObject(t, temp),
 		buildCoroNativeFleetOwnerObject(t, temp),
 	)
 	prog.Dispose()
-	if len(objects) != len(allowed)+5 {
-		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus fault-string, worker, doorbell, poll, and fleet-owner leaves", len(objects), len(allowed))
+	if len(objects) != len(allowed)+6 {
+		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, doorbell, poll, and fleet-owner leaves", len(objects), len(allowed))
 	}
 	return objects
 }

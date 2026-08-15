@@ -758,20 +758,18 @@ func (p *context) structuredOutcomeScratch() llssa.Expr {
 	if !p.hasStructuredOutcomePhysicalBody() || p.fn == nil {
 		panic("structured outcome scratch requires an active physical body")
 	}
-	if body := p.coroBody(); body != nil {
-		if body.outcomeScratch.IsNil() {
-			body.outcomeScratch = p.coroFrameAlloc(outcomePlainCompletionType(p.prog))
-		}
-		return body.outcomeScratch
-	}
-	body := p.outcomePlainBody()
-	if body == nil {
+	slot, coroutine := p.activeStructuredOutcomeScratchSlot()
+	if slot == nil {
 		panic("structured outcome scratch lost its physical owner")
 	}
-	if body.outcomeScratch.IsNil() {
-		body.outcomeScratch = p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), true)
+	if slot.IsNil() {
+		if coroutine {
+			*slot = p.coroFrameAlloc(outcomePlainCompletionType(p.prog))
+		} else {
+			*slot = p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), true)
+		}
 	}
-	return body.outcomeScratch
+	return *slot
 }
 
 func (p *context) coroFrameByteAlloca(b llssa.Builder, size int64) llssa.Expr {
