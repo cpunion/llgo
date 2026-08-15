@@ -19,6 +19,7 @@ jobs:
     env:
       LLVM_VERSION: "19.1.7"
       MSYS2_LLVM_PACKAGE_VERSION: "19.1.7-1"
+      MSYS2_LIBUV_PACKAGE_VERSION: "1.52.1-1"
     steps:
       - uses: actions/checkout@v7
 
@@ -59,6 +60,7 @@ jobs:
             "xz-5.6.3-3"
             "zlib-1.3.1-1"
             "zstd-1.5.6-2"
+            "libuv-$MSYS2_LIBUV_PACKAGE_VERSION"
           )
           urls=()
           for package in "${packages[@]}"; do
@@ -73,6 +75,16 @@ jobs:
               exit 1
             fi
           done
+
+          installed="$(pacman -Q "$prefix-libuv" | awk '{print $2}')"
+          if [[ "$installed" != "$MSYS2_LIBUV_PACKAGE_VERSION" ]]; then
+            echo "expected libuv $MSYS2_LIBUV_PACKAGE_VERSION, got $installed" >&2
+            exit 1
+          fi
+
+          # Hosted runtime timers use libuv. The archive is COFF and is
+          # linked with the MSVC ABI; pkgconf supplies its installation path.
+          pacman --noconfirm -S --needed "$prefix-pkgconf"
           clang --version
 
       - name: Build and test the Windows host compiler
@@ -155,11 +167,21 @@ jobs:
             -o ..\windows-runtime-smoke.exe `
             .\_test\windowsruntime
           $buildExitCode = $LASTEXITCODE
+          if ($buildExitCode -eq 0) {
+            ..\llgo-windows-smoke.exe build -tags=nogc `
+              -o ..\windows-stdlib-smoke.exe `
+              .\_test\windowsstdlib
+            $buildExitCode = $LASTEXITCODE
+          }
           Pop-Location
           if ($buildExitCode -ne 0) {
             exit $buildExitCode
           }
           .\windows-runtime-smoke.exe
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          .\windows-stdlib-smoke.exe
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
