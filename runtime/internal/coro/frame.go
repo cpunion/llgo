@@ -305,7 +305,7 @@ func compilerAlignedStorage(raw unsafe.Pointer, align uintptr) (unsafe.Pointer, 
 	if !ok {
 		return nil, false
 	}
-	return unsafe.Pointer(base + offset), true
+	return unsafe.Add(raw, offset), true
 }
 
 func compilerFrameReceipt(storage unsafe.Pointer) (*compilerFrameAllocationReceiptV1, bool) {
