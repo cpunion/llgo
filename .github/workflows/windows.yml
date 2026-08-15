@@ -28,6 +28,8 @@ jobs:
           go-version: "1.26.5"
 
       - name: Set up LLVM
+        # CLANG64 supplies Windows-hosted LLVM libraries used to build llgo.
+        # LLGo-generated Windows code independently selects the MSVC target ABI.
         uses: msys2/setup-msys2@v2
         with:
           msystem: CLANG64
