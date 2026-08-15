@@ -528,8 +528,7 @@ func CommitInlineAwaitPhysicalDestroyCompiler(
 			parent.header.SuspendReason == uint16(SuspendCall) &&
 			parent.header.Lifecycle == uint16(FrameSuspended) &&
 			child.header.Lifecycle == uint16(FrameDestroyPending) &&
-			child.borrowedStorage && child.storage == nil && child.rawBase == nil &&
-			child.allocationSize == 0 && child.parkWait == nil &&
+			child.borrowedStorage && child.allocationSize == 0 && child.parkWait == nil &&
 			child.header.AllocationBase == unsafe.Pointer(child) &&
 			!child.retainPanicTrace && g.frames == child &&
 			parent.completion.child == childHandle &&

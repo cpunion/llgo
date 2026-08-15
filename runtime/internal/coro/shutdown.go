@@ -33,11 +33,11 @@ func validCancelFrame(frame *Frame, g *G) bool {
 		return false
 	}
 	if frame.borrowedStorage {
-		return frame.storage == nil && frame.rawBase == nil && frame.allocationSize == 0 &&
+		return frame.allocationSize == 0 &&
 			frame.header.AllocationBase == unsafe.Pointer(frame)
 	}
-	return frame.storage != nil && frame.rawBase != nil &&
-		frame.header.AllocationBase == frame.rawBase
+	return frame.allocationSize != 0 &&
+		frame.header.AllocationBase == unsafe.Pointer(frame)
 }
 
 // validCancelableReadyG proves that a ready G contains exactly one structured

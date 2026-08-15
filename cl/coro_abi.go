@@ -146,7 +146,7 @@ const (
 	coroCompletePrepareHookV2                  = "__llgo_coro_complete_prepare_v2"
 	coroFrameFreeHookV1                        = "__llgo_coro_frame_free_v1"
 	coroDescriptorPrefixV1                     = "__llgo_coro_frame_descriptor_v1."
-	coroBorrowedFrameMetadataWordsV2           = 20
+	coroBorrowedFrameMetadataWordsV2           = 15
 )
 
 const (
@@ -492,7 +492,7 @@ func (p *context) beginCoroBody(
 		llssa.InGo,
 	)
 	// Dynamic ramps never consume this fallback storage. Leave it uninitialized
-	// here so every ordinary coroutine creation does not pay a 20-word memset;
+	// here so every ordinary coroutine creation does not pay a metadata memset;
 	// PublishFrameV2 initializes the complete private Frame only when LLVM has
 	// actually selected the allocation-elided path (storage == nil).
 	borrowedFrameMetadata := b.AllocaT(borrowedFrameMetadataType)

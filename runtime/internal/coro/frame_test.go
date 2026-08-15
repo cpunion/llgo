@@ -114,7 +114,7 @@ func TestBorrowedFrameV2PublishAndDestroy(t *testing.T) {
 	}
 	frame := (*Frame)(unsafe.Pointer(metadata))
 	if g.frames != frame || frame.owner != g || frame.handle != handle ||
-		frame.header != header || frame.storage != nil || frame.rawBase != nil ||
+		frame.header != header || frame.allocationSize != 0 ||
 		!frame.borrowedStorage || frame.state != FrameInitialSuspended ||
 		header.AllocationBase != unsafe.Pointer(frame) {
 		t.Fatalf("borrowed publication = %+v, header base=%p", frame, header.AllocationBase)
@@ -265,7 +265,6 @@ func retainDetachedTestPanicTrace(
 	raw := unsafe.Pointer(&memory[0])
 	*(*Frame)(raw) = Frame{
 		owner:          g,
-		rawBase:        raw,
 		allocationSize: uintptr(len(memory)),
 		descriptor:     unsafe.Pointer(descriptor),
 		state:          FrameDestroyed,
@@ -359,6 +358,62 @@ func TestReleaseFrameDoesNotPartiallyCommitFailedUnlink(t *testing.T) {
 		t.Fatalf("failed release partially committed: state=%d lifecycle=%d target=%p", frame.state, test.header.Lifecycle, g.destroyTarget)
 	}
 	runtime.KeepAlive(test.memory)
+}
+
+func TestReleaseFrameRequiresExactDerivedLayout(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testFrame) (uintptr, uintptr, unsafe.Pointer)
+	}{
+		{
+			name: "size",
+			mutate: func(frame *testFrame) (uintptr, uintptr, unsafe.Pointer) {
+				return frame.size + 1, frame.align, frame.descriptor
+			},
+		},
+		{
+			name: "alignment",
+			mutate: func(frame *testFrame) (uintptr, uintptr, unsafe.Pointer) {
+				return frame.size, frame.align * 2, frame.descriptor
+			},
+		},
+		{
+			name: "invalid alignment",
+			mutate: func(frame *testFrame) (uintptr, uintptr, unsafe.Pointer) {
+				return frame.size, 3, frame.descriptor
+			},
+		},
+		{
+			name: "descriptor",
+			mutate: func(frame *testFrame) (uintptr, uintptr, unsafe.Pointer) {
+				return frame.size, frame.align, unsafe.Pointer(new(FrameDescriptorV1))
+			},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := new(G)
+			if !InitG(g) {
+				t.Fatal("InitG failed")
+			}
+			test := newTestFrame(t, g, unsafe.Pointer(new(byte)), nil)
+			frame := FrameFromStorage(test.storage)
+			frame.state = FrameDestroyPending
+			test.header.Lifecycle = uint16(FrameDestroyPending)
+			g.destroyTarget = frame
+			size, align, descriptor := testCase.mutate(test)
+
+			if _, _, ok := ReleaseFrame(g, test.storage, size, align, descriptor); ok {
+				t.Fatal("release accepted mismatched compiler layout metadata")
+			}
+			if g.frames != frame || g.destroyTarget != frame || frame.state != FrameDestroyPending ||
+				test.header.Lifecycle != uint16(FrameDestroyPending) {
+				t.Fatalf("failed release mutated ownership: frames=%p target=%p state=%d lifecycle=%d", g.frames, g.destroyTarget, frame.state, test.header.Lifecycle)
+			}
+			releaseTestFrame(t, g, test)
+			runtime.KeepAlive(test.memory)
+		})
+	}
 }
 
 func TestSinglePSchedulerChildDestroyedBeforeParentResume(t *testing.T) {

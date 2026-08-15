@@ -175,11 +175,7 @@ type Frame struct {
 	// direct-parking LLVM coroutine frame; ordinary frames pay only this
 	// metadata pointer during the first migration stage.
 	parkWait       *WaitSetRecord
-	storage        unsafe.Pointer
-	rawBase        unsafe.Pointer
 	descriptor     unsafe.Pointer
-	size           uintptr
-	align          uintptr
 	allocationSize uintptr
 	panicLine      uint32
 	state          FrameState
@@ -202,10 +198,13 @@ type Frame struct {
 // Frame stored inside an elidable coroutine. It is intentionally opaque to
 // generated code: the compiler only reserves and forwards this pointer, while
 // the runtime initializes and remains the sole owner of Frame's private
-// layout. Twenty pointer
-// words cover both wasm32 and native layouts with expansion room; the compile-
-// time assertion fails if runtime metadata ever outgrows the ABI capacity.
-type BorrowedFrameStorageV2 [20]uintptr
+// layout. Fifteen pointer words cover both wasm32 and native layouts; the
+// compile-time assertion fails if runtime metadata ever outgrows the ABI
+// capacity. Dynamic storage, size, and alignment are intentionally absent:
+// the exact free callback supplies them, while the allocation base is the
+// Frame address itself. Keeping those derivable facts out of every frame also
+// keeps common short-lived coroutine allocations in the smaller size class.
+type BorrowedFrameStorageV2 [15]uintptr
 
 var _ [int(unsafe.Sizeof(BorrowedFrameStorageV2{})) - int(unsafe.Sizeof(Frame{}))]byte
 
@@ -281,11 +280,7 @@ func RegisterFrame(g *G, raw unsafe.Pointer, total, size, align uintptr, descrip
 	}
 	frame := (*Frame)(raw)
 	frame.owner = g
-	frame.storage = storage
-	frame.rawBase = raw
 	frame.descriptor = descriptor
-	frame.size = size
-	frame.align = align
 	frame.allocationSize = total
 	frame.state = FrameAllocated
 	frame.next = g.frames
@@ -324,7 +319,7 @@ func PublishFrame(g *G, handle unsafe.Pointer, header *HeaderV1, storage unsafe.
 		return false
 	}
 	frame := FrameFromStorage(storage)
-	if frame == nil || frame.owner != g || frame.storage != storage || frame.state != FrameAllocated ||
+	if frame == nil || frame.owner != g || frame.state != FrameAllocated ||
 		frame.handle != nil || frame.header != nil || header.G != unsafe.Pointer(g) ||
 		header.Descriptor != frame.descriptor || header.Lifecycle != uint16(FrameInitialSuspended) ||
 		header.SuspendReason != uint16(SuspendNone) {
@@ -336,7 +331,7 @@ func PublishFrame(g *G, handle unsafe.Pointer, header *HeaderV1, storage unsafe.
 	frame.handle = handle
 	frame.header = header
 	frame.state = FrameInitialSuspended
-	header.AllocationBase = frame.rawBase
+	header.AllocationBase = unsafe.Pointer(frame)
 	return true
 }
 
@@ -659,14 +654,17 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 	if !ValidG(g) || !gPreemptEnabledAtDepthZero(g) || storage == nil {
 		return nil, 0, false
 	}
+	total, layoutOK := FrameAllocationSize(size, align)
 	frame := FrameFromStorage(storage)
-	if frame == nil || frame.owner != g || frame.storage != storage || frame.size != size ||
-		frame.align != align || frame.descriptor != descriptor || frame.state != FrameDestroyPending ||
+	aligned, storageOK := AlignedStorage(unsafe.Pointer(frame), align)
+	if frame == nil || !layoutOK || !storageOK || aligned != storage ||
+		frame.owner != g || frame.descriptor != descriptor || frame.allocationSize != total ||
+		frame.state != FrameDestroyPending ||
 		g.destroyTarget != frame || frame.header == nil || frame.parkWait != nil ||
 		frame.header.Lifecycle != uint16(FrameDestroyPending) {
 		return nil, 0, false
 	}
-	raw, total := frame.rawBase, frame.allocationSize
+	raw := unsafe.Pointer(frame)
 	if !unlinkFrame(g, frame) {
 		return nil, 0, false
 	}
@@ -691,8 +689,8 @@ func CommitFrameDestroyV2(g *G, handle unsafe.Pointer) bool {
 		// schedulable frame with the same handle would make that receipt invalid.
 		return findFrame(g, handle) == nil
 	}
-	if frame.handle != handle || !frame.borrowedStorage || frame.storage != nil ||
-		frame.rawBase != nil || frame.allocationSize != 0 || frame.owner != g ||
+	if frame.handle != handle || !frame.borrowedStorage ||
+		frame.allocationSize != 0 || frame.owner != g ||
 		frame.header == nil || frame.parkWait != nil || frame.state != FrameDestroyPending ||
 		frame.header.AllocationBase != unsafe.Pointer(frame) ||
 		frame.header.Lifecycle != uint16(FrameDestroyPending) || !unlinkFrame(g, frame) {
@@ -869,12 +867,11 @@ func retainPanicTraceFrameMetadata(
 		return false
 	}
 	if frame.borrowedStorage {
-		if raw != nil || total != 0 || frame.rawBase != nil || frame.allocationSize != 0 ||
-			frame.storage != nil {
+		if raw != nil || total != 0 || frame.allocationSize != 0 {
 			return false
 		}
-	} else if raw == nil || total == 0 || frame.rawBase != raw ||
-		frame.allocationSize != total || raw != unsafe.Pointer(frame) {
+	} else if raw == nil || total == 0 || frame.allocationSize != total ||
+		raw != unsafe.Pointer(frame) {
 		return false
 	}
 	if frame.owner != g ||
@@ -1009,10 +1006,10 @@ func TakeDiscardedPanicTraceFrame(g *G) (raw unsafe.Pointer, total uintptr, ok b
 			return nil, 0, false
 		}
 		if frame.borrowedStorage {
-			if frame.rawBase != nil || frame.allocationSize != 0 || frame.storage != nil {
+			if frame.allocationSize != 0 {
 				return nil, 0, false
 			}
-		} else if frame.rawBase != unsafe.Pointer(frame) || frame.allocationSize == 0 {
+		} else if frame.allocationSize == 0 {
 			return nil, 0, false
 		}
 		g.panicTraceHead = frame.next
@@ -1023,7 +1020,7 @@ func TakeDiscardedPanicTraceFrame(g *G) (raw unsafe.Pointer, total uintptr, ok b
 			Zero(unsafe.Pointer(frame), unsafe.Sizeof(Frame{}))
 			continue
 		}
-		return frame.rawBase, frame.allocationSize, true
+		return unsafe.Pointer(frame), frame.allocationSize, true
 	}
 }
 
@@ -1046,8 +1043,8 @@ func LoadPanicTraceFrame(g *G, cursor unsafe.Pointer) (snapshot PanicTraceFrameS
 	}
 	frame := (*Frame)(cursor)
 	if frame.owner != g || frame.state != FrameDestroyed || frame.header != nil || frame.descriptor == nil ||
-		frame.borrowedStorage && (frame.rawBase != nil || frame.allocationSize != 0 || frame.storage != nil) ||
-		!frame.borrowedStorage && (frame.rawBase != cursor || frame.allocationSize == 0) {
+		frame.borrowedStorage && frame.allocationSize != 0 ||
+		!frame.borrowedStorage && frame.allocationSize == 0 {
 		return PanicTraceFrameSnapshot{}, nil, false
 	}
 	descriptor := (*FrameDescriptorV1)(frame.descriptor)
