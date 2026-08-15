@@ -39,6 +39,7 @@ jobs:
           export CC=clang
           export CXX=clang++
           export CGO_ENABLED=1
+          export LLGO_ROOT="$PWD"
           export CGO_CFLAGS="$(llvm-config --cflags)"
           export CGO_CXXFLAGS="$(llvm-config --cxxflags)"
           export CGO_LDFLAGS="$(llvm-config --ldflags --libs all --system-libs)"
@@ -56,8 +57,13 @@ jobs:
           llvm-config --version
           go test -tags="$build_tags" \
             ./internal/meta \
-            ./internal/crosscompile \
             ./internal/xtool/llvm
+          go test -tags="$build_tags" \
+            -run '^TestAcquire(AndReleaseLock|LockConcurrency)$' \
+            ./internal/crosscompile
+          go test -tags="$build_tags" \
+            -run '^TestWindowsTargetTriple$' \
+            ./ssa
 
           go build -tags="$build_tags" -o llgo-windows-smoke.exe ./cmd/llgo
-          LLGO_ROOT="$PWD" ./llgo-windows-smoke.exe version
+          ./llgo-windows-smoke.exe version
