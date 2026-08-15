@@ -50,6 +50,7 @@ import (
 	"github.com/xgo-dev/llgo/internal/env"
 	"github.com/xgo-dev/llgo/internal/firmware"
 	"github.com/xgo-dev/llgo/internal/flash"
+	"github.com/xgo-dev/llgo/internal/goarch"
 	"github.com/xgo-dev/llgo/internal/goembed"
 	"github.com/xgo-dev/llgo/internal/header"
 	"github.com/xgo-dev/llgo/internal/lto"
@@ -134,6 +135,9 @@ type ModuleHook func(pkg Package)
 type Config struct {
 	Goos               string
 	Goarch             string
+	GO386              string // 386 floating-point implementation: sse2 or softfloat
+	GOAMD64            string // amd64 microarchitecture level: v1 through v4
+	GOARM64            string // arm64 ISA version and optional lse/crypto extensions
 	Target             string // target name (e.g., "rp2040", "wasi") - takes precedence over Goos/Goarch
 	OptLevel           optlevel.Level
 	LTO                lto.Mode
@@ -257,6 +261,9 @@ func resolveBuildConfig(input *Config) (*Config, error) {
 	if conf.Goarch == "" {
 		conf.Goarch = runtime.GOARCH
 	}
+	if err := resolveGOARCHConfig(conf, os.Getenv); err != nil {
+		return nil, err
+	}
 	if conf.AppExt == "" {
 		conf.AppExt = defaultAppExt(conf)
 	}
@@ -285,6 +292,55 @@ func resolveBuildConfig(input *Config) (*Config, error) {
 	}
 	conf.OptLevel = effectiveOptLevel(conf)
 	return conf, nil
+}
+
+func resolveGOARCHConfig(conf *Config, getenv func(string) string) error {
+	if conf.Target != "" {
+		conf.GO386, conf.GOAMD64, conf.GOARM64 = "", "", ""
+		return nil
+	}
+	go386, goamd64, goarm64 := conf.GO386, conf.GOAMD64, conf.GOARM64
+	conf.GO386, conf.GOAMD64, conf.GOARM64 = "", "", ""
+	switch conf.Goarch {
+	case "386":
+		if go386 == "" {
+			go386 = getenv("GO386")
+		}
+		value, err := goarch.Resolve386(go386)
+		conf.GO386 = value
+		return err
+	case "amd64":
+		if goamd64 == "" {
+			goamd64 = getenv("GOAMD64")
+		}
+		value, err := goarch.ResolveAMD64(goamd64)
+		conf.GOAMD64 = value
+		return err
+	case "arm64":
+		if goarm64 == "" {
+			goarm64 = getenv("GOARM64")
+		}
+		value, err := goarch.ParseARM64(goarm64)
+		conf.GOARM64 = value.String()
+		return err
+	}
+	return nil
+}
+
+func goarchEnv(conf *Config) []string {
+	if conf == nil || conf.Target != "" {
+		return nil
+	}
+	values := []string{"GO386=", "GOAMD64=", "GOARM64="}
+	switch conf.Goarch {
+	case "386":
+		values[0] += conf.GO386
+	case "amd64":
+		values[1] += conf.GOAMD64
+	case "arm64":
+		values[2] += conf.GOARM64
+	}
+	return values
 }
 
 func NewDefaultConf(mode Mode) *Config {
@@ -386,11 +442,14 @@ func Build(inv Invocation) ([]Package, error) {
 		}
 	}
 	environ := os.Environ()
-	commands := commandEnv{dir: dir, environ: environ}
 	conf, err := resolveBuildConfig(inv.Config)
 	if err != nil {
 		return nil, err
 	}
+	// Keep child Go invocations (notably cmptest's baseline) on the same
+	// architecture level as the LLVM build. GOOS/GOARCH retain their existing
+	// per-command handling.
+	commands := commandEnv{dir: dir, environ: withEnv(environ, goarchEnv(conf)...)}
 	buildTrace, err := startBuildTrace(conf.BuildTrace, dir, conf.parallelism())
 	if err != nil {
 		return nil, fmt.Errorf("start build trace: %w", err)
@@ -427,6 +486,9 @@ func Build(inv Invocation) ([]Package, error) {
 	target := &llssa.Target{
 		GOOS:                    conf.Goos,
 		GOARCH:                  conf.Goarch,
+		GO386:                   conf.GO386,
+		GOAMD64:                 conf.GOAMD64,
+		GOARM64:                 conf.GOARM64,
 		Target:                  conf.Target,
 		LLVMTarget:              export.LLVMTarget,
 		OptLevel:                conf.OptLevel,
@@ -456,7 +518,7 @@ func Build(inv Invocation) ([]Package, error) {
 		Dir:        dir,
 		Fset:       token.NewFileSet(),
 		Tests:      conf.Mode == ModeTest,
-		Env:        withEnv(environ, "GOOS="+conf.Goos, "GOARCH="+conf.Goarch),
+		Env:        withEnv(commands.environ, "GOOS="+conf.Goos, "GOARCH="+conf.Goarch),
 	}
 	if conf.Mode == ModeTest {
 		cfg.Mode |= packages.NeedForTest
