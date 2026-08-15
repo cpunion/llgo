@@ -1,4 +1,4 @@
-//go:build !darwin && !linux && !windows && !baremetal
+//go:build windows
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -16,18 +16,18 @@
  * limitations under the License.
  */
 
-package runtime
+package c
 
-import (
-	"unsafe"
+import _ "unsafe"
 
-	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
-)
+//go:linkname winSleep C.Sleep
+func winSleep(milliseconds Uint)
 
-// nanotime1 keeps the previous behavior on remaining platforms.
-func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_MONOTONIC, tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
+func Usleep(useconds Uint) Int {
+	milliseconds := useconds / 1000
+	if useconds%1000 != 0 {
+		milliseconds++
+	}
+	winSleep(milliseconds)
+	return 0
 }

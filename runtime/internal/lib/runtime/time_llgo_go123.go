@@ -508,10 +508,7 @@ func itoa(v int) string {
 
 //go:linkname time_now time.now
 func time_now() (sec int64, nsec int32, mono int64) {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_REALTIME, tv)
-	sec = int64(tv.Sec)
-	nsec = int32(tv.Nsec)
+	sec, nsec = walltime()
 	mono = runtimeNano()
 	return
 }

@@ -1,4 +1,4 @@
-//go:build !darwin && !linux && !windows && !baremetal
+//go:build windows
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -21,13 +21,21 @@ package runtime
 import (
 	"unsafe"
 
-	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
+	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-// nanotime1 keeps the previous behavior on remaining platforms.
-func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_MONOTONIC, tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
+//go:linkname c_memReadable C.llgo_mem_readable
+func c_memReadable(p unsafe.Pointer) c.Int
+
+func memReadable(addr uintptr) bool {
+	return c_memReadable(unsafe.Pointer(addr)) != 0
 }
+
+// Windows hardware exceptions need a CONTEXT-aware exception handler. Until
+// that backend is installed, explicit Go panic/recover still uses the normal
+// runtime path and has no fault traceback to clear or print.
+func clearFaultTraceback() {}
+
+func faultTracebackActive() bool { return false }
+
+func faultTraceback(skip int) bool { return false }

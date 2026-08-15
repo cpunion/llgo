@@ -1,4 +1,4 @@
-//go:build !darwin && !linux && !windows && !baremetal
+//go:build windows
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,16 +18,21 @@
 
 package runtime
 
-import (
-	"unsafe"
+import _ "unsafe"
 
-	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
+const (
+	LLGoPackage = "link: -lkernel32"
+	LLGoFiles   = "_wrap/runtime_windows.c; _wrap/syscall_windows.S; _wrap/debugtrap.c"
 )
 
-// nanotime1 keeps the previous behavior on remaining platforms.
-func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_MONOTONIC, tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
-}
+//go:linkname c_maxprocs C.llgo_maxprocs
+func c_maxprocs() int32
+
+//go:linkname c_debugtrap C.llgo_debugtrap
+func c_debugtrap()
+
+//go:linkname c_nanotime C.llgo_nanotime
+func c_nanotime() int64
+
+//go:linkname c_walltime C.llgo_walltime
+func c_walltime(sec *int64, nsec *int32)
