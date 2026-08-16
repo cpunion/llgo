@@ -704,6 +704,10 @@ func Build(inv Invocation) ([]Package, error) {
 		return nil, fmt.Errorf("initial package not found")
 	}
 
+	// buildAllPkgs has already used the existing bounded package scheduler.
+	// Test-main linking still uses coordinator-owned state, so keep links
+	// sequential and collect only the finished native binaries for concurrent
+	// execution below.
 	var testPrograms []testProgram
 	for _, pkg := range initial {
 		if needLink(pkg, mode) {
