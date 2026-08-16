@@ -2128,6 +2128,13 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	ctx.cTransformer.TransformModule(ret.Path(), ret.Module())
 	ctx.cTransformer.SetSkipFuncs(nil)
 	applySizeOptimizationAttributes(ret.Module(), ctx.buildConf.OptLevel)
+	pragmaSyntax := append([]*ast.File(nil), pkg.Syntax...)
+	if aPkg.AltPkg != nil {
+		pragmaSyntax = append(pragmaSyntax, aPkg.AltPkg.Syntax...)
+	}
+	if err := lowerWindowsCgoImportPointers(ctx.buildConf.Goos, ctx.buildConf.Goarch, pkgPath, pragmaSyntax, ret.Module()); err != nil {
+		return err
+	}
 
 	// Run the default LLVM optimization pipeline selected by the requested -O level.
 	if ctx.passOpt {

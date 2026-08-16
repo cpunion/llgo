@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	gllvm "github.com/xgo-dev/llvm"
 )
 
 type cgoImportDynamicDecl struct {
@@ -62,6 +64,70 @@ func collectGoCgoPragmas(files []*ast.File) (ldflags []string, dynimports []cgoI
 func goCgoLinkArgs(goos string, files []*ast.File) []string {
 	ldflags, _ := collectGoCgoPragmas(files)
 	return ldflags
+}
+
+func lowerWindowsCgoImportPointers(goos, goarch, pkgPath string, files []*ast.File, mod gllvm.Module) error {
+	if goos != "windows" || mod.IsNil() {
+		return nil
+	}
+	_, dynimports := collectGoCgoPragmas(files)
+	seen := make(map[string]string, len(dynimports))
+	for _, d := range dynimports {
+		if prev, ok := seen[d.local]; ok {
+			if prev == d.alias {
+				continue
+			}
+			return fmt.Errorf("%s: conflicting go:cgo_import_dynamic for %q: %q vs %q", pkgPath, d.local, prev, d.alias)
+		}
+		seen[d.local] = d.alias
+
+		global := mod.NamedGlobal(d.local)
+		if global.IsNil() {
+			// Function-style dynamic imports do not need an address variable.
+			// Keep them for a future direct-call lowering rather than guessing a
+			// C signature here.
+			continue
+		}
+		if global.GlobalValueType().TypeKind() != gllvm.PointerTypeKind {
+			return fmt.Errorf("%s: go:cgo_import_dynamic local %q is not a pointer variable", pkgPath, d.local)
+		}
+		name, argc, hasArgCount, err := splitWindowsCgoImportAlias(d.alias)
+		if err != nil {
+			return fmt.Errorf("%s: invalid go:cgo_import_dynamic alias %q: %w", pkgPath, d.alias, err)
+		}
+		fn := mod.NamedFunction(name)
+		if fn.IsNil() {
+			argType := mod.Context().Int32Type()
+			params := make([]gllvm.Type, argc)
+			for i := range params {
+				params[i] = argType
+			}
+			fn = gllvm.AddFunction(mod, name, gllvm.FunctionType(mod.Context().VoidType(), params, false))
+			if goarch == "386" && hasArgCount {
+				fn.SetFunctionCallConv(gllvm.X86StdcallCallConv)
+			}
+		}
+		fn.SetDLLStorageClass(gllvm.DLLImportStorageClass)
+		global.SetInitializer(fn)
+	}
+	return nil
+}
+
+func splitWindowsCgoImportAlias(alias string) (name string, argc int, hasArgCount bool, err error) {
+	name = alias
+	percent := strings.IndexByte(alias, '%')
+	if percent < 0 {
+		return name, 0, false, nil
+	}
+	name = alias[:percent]
+	if name == "" || percent+1 == len(alias) {
+		return "", 0, false, fmt.Errorf("missing symbol name or argument count")
+	}
+	argc64, parseErr := strconv.ParseUint(alias[percent+1:], 10, 31)
+	if parseErr != nil {
+		return "", 0, false, fmt.Errorf("invalid argument count: %w", parseErr)
+	}
+	return name, int(argc64), true, nil
 }
 
 func buildGoCgoAliasObjects(ctx *context, pkgPath string, files []*ast.File, verbose bool) ([]string, error) {

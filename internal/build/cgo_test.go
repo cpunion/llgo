@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/packages"
+	gllvm "github.com/xgo-dev/llvm"
 )
 
 func TestParseCgoDeclFlags(t *testing.T) {
@@ -442,6 +443,122 @@ func TestEmitDarwinDynimportTrampolineIncludesLocalAddress(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLowerWindowsCgoImportPointer(t *testing.T) {
+	llvmCtx := gllvm.NewContext()
+	defer llvmCtx.Dispose()
+	mod := llvmCtx.NewModule("windows-dynimport")
+	defer mod.Dispose()
+
+	ptrType := gllvm.PointerType(llvmCtx.Int8Type(), 0)
+	global := gllvm.AddGlobal(mod, ptrType, "syscall.__LoadLibraryExW")
+	global.SetInitializer(gllvm.ConstPointerNull(ptrType))
+	file, err := parser.ParseFile(token.NewFileSet(), "dll_windows.go", `package syscall
+//go:cgo_import_dynamic syscall.__LoadLibraryExW LoadLibraryExW%3 "kernel32.dll"
+`, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lowerWindowsCgoImportPointers("windows", "386", "syscall", []*ast.File{file}, mod); err != nil {
+		t.Fatal(err)
+	}
+	fn := mod.NamedFunction("LoadLibraryExW")
+	if fn.IsNil() {
+		t.Fatal("Windows dynamic import declaration was not emitted")
+	}
+	if fn.DLLStorageClass() != gllvm.DLLImportStorageClass {
+		t.Fatal("Windows dynamic import declaration is not dllimport")
+	}
+	if fn.FunctionCallConv() != gllvm.X86StdcallCallConv {
+		t.Fatal("Windows 386 dynamic import did not preserve stdcall decoration")
+	}
+	if init := global.Initializer(); init.IsNil() || init != fn {
+		t.Fatalf("Windows dynamic import pointer initializer = %v, want %v", init, fn)
+	}
+	if err := gllvm.VerifyModule(mod, gllvm.ReturnStatusAction); err != nil {
+		t.Fatalf("invalid Windows dynamic import module: %v\n%s", err, mod.String())
+	}
+}
+
+func TestLowerWindowsCgoImportPointerErrors(t *testing.T) {
+	parse := func(t *testing.T, src string) *ast.File {
+		t.Helper()
+		file, err := parser.ParseFile(token.NewFileSet(), "dll_windows.go", src, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return file
+	}
+
+	t.Run("non-pointer", func(t *testing.T) {
+		llvmCtx := gllvm.NewContext()
+		defer llvmCtx.Dispose()
+		mod := llvmCtx.NewModule("windows-dynimport-non-pointer")
+		defer mod.Dispose()
+		gllvm.AddGlobal(mod, llvmCtx.Int32Type(), "syscall.value")
+		file := parse(t, `package syscall
+//go:cgo_import_dynamic syscall.value Value%0 "kernel32.dll"
+`)
+		err := lowerWindowsCgoImportPointers("windows", "arm64", "syscall", []*ast.File{file}, mod)
+		if err == nil || !strings.Contains(err.Error(), "is not a pointer variable") {
+			t.Fatalf("lowerWindowsCgoImportPointers error = %v, want non-pointer error", err)
+		}
+	})
+
+	t.Run("conflict", func(t *testing.T) {
+		llvmCtx := gllvm.NewContext()
+		defer llvmCtx.Dispose()
+		mod := llvmCtx.NewModule("windows-dynimport-conflict")
+		defer mod.Dispose()
+		file := parse(t, `package syscall
+//go:cgo_import_dynamic syscall.value First%0 "kernel32.dll"
+//go:cgo_import_dynamic syscall.value Second%0 "kernel32.dll"
+`)
+		err := lowerWindowsCgoImportPointers("windows", "arm64", "syscall", []*ast.File{file}, mod)
+		if err == nil || !strings.Contains(err.Error(), "conflicting go:cgo_import_dynamic") {
+			t.Fatalf("lowerWindowsCgoImportPointers error = %v, want conflict error", err)
+		}
+	})
+
+	t.Run("other target", func(t *testing.T) {
+		llvmCtx := gllvm.NewContext()
+		defer llvmCtx.Dispose()
+		mod := llvmCtx.NewModule("non-windows-dynimport")
+		defer mod.Dispose()
+		file := parse(t, `package syscall
+//go:cgo_import_dynamic syscall.value Value%bad "kernel32.dll"
+`)
+		if err := lowerWindowsCgoImportPointers("linux", "amd64", "syscall", []*ast.File{file}, mod); err != nil {
+			t.Fatalf("non-Windows lowering failed: %v", err)
+		}
+	})
+}
+
+func TestSplitWindowsCgoImportAlias(t *testing.T) {
+	tests := []struct {
+		alias       string
+		name        string
+		argc        int
+		hasArgCount bool
+		wantErr     bool
+	}{
+		{alias: "GetProcAddress%2", name: "GetProcAddress", argc: 2, hasArgCount: true},
+		{alias: "GetCurrentProcessId%0", name: "GetCurrentProcessId", hasArgCount: true},
+		{alias: "plain", name: "plain"},
+		{alias: "bad%", wantErr: true},
+		{alias: "bad%no", wantErr: true},
+		{alias: "bad%1%2", wantErr: true},
+	}
+	for _, test := range tests {
+		name, argc, hasArgCount, err := splitWindowsCgoImportAlias(test.alias)
+		if (err != nil) != test.wantErr {
+			t.Fatalf("splitWindowsCgoImportAlias(%q) error = %v, wantErr %v", test.alias, err, test.wantErr)
+		}
+		if err == nil && (name != test.name || argc != test.argc || hasArgCount != test.hasArgCount) {
+			t.Fatalf("splitWindowsCgoImportAlias(%q) = (%q, %d, %v), want (%q, %d, %v)", test.alias, name, argc, hasArgCount, test.name, test.argc, test.hasArgCount)
+		}
 	}
 }
 
