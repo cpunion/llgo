@@ -34,5 +34,8 @@ func c_debugtrap()
 //go:linkname c_nanotime C.llgo_nanotime
 func c_nanotime() int64
 
+//go:linkname c_nanotimeInit C.llgo_nanotime_init
+func c_nanotimeInit() int32
+
 //go:linkname c_walltime C.llgo_walltime
 func c_walltime(sec *int64, nsec *int32)
