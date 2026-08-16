@@ -18,6 +18,15 @@
 
 package runtime
 
+func init() {
+	// QueryPerformanceFrequency is fixed for the lifetime of the system.
+	// Match Go's runtime startup model and keep the timestamp hot path to a
+	// single QueryPerformanceCounter call.
+	if c_nanotimeInit() == 0 {
+		panic("runtime: QueryPerformanceFrequency failed")
+	}
+}
+
 func nanotime1() int64 {
 	return c_nanotime()
 }
