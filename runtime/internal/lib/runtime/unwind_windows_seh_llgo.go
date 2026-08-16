@@ -18,6 +18,19 @@ func c_windowsLookupFunctionEntry(pc uintptr, imageBase *uintptr) unsafe.Pointer
 //go:linkname c_windowsVirtualUnwind C.llgo_windows_virtual_unwind
 func c_windowsVirtualUnwind(imageBase, pc uintptr, functionEntry unsafe.Pointer, context *windowsFaultContext, establisherFrame *uintptr) unsafe.Pointer
 
+const windowsFaultContextAlignment = 16
+
+// Go only guarantees 8-byte alignment for the fields in windowsFaultContext,
+// while Windows declares CONTEXT with 16-byte alignment. Reserve enough space
+// to select a suitably aligned address before calling the platform unwinder.
+type windowsFaultContextStorage [windowsFaultContextSize + windowsFaultContextAlignment - 1]byte
+
+func (storage *windowsFaultContextStorage) context() *windowsFaultContext {
+	base := unsafe.Pointer(&storage[0])
+	offset := (-uintptr(base)) & (windowsFaultContextAlignment - 1)
+	return (*windowsFaultContext)(unsafe.Add(base, offset))
+}
+
 func windowsUnwindOne(context *windowsFaultContext) bool {
 	pc := context.pc()
 	if pc < minLegalPC {
@@ -74,34 +87,38 @@ func windowsContextCallers(context *windowsFaultContext, skip int, pc []uintptr)
 
 //go:noinline
 func platformCallers(_ uintptr, skip int, pc []uintptr) int {
-	var context windowsFaultContext
-	if c_windowsCaptureContext(&context, windowsFaultContextPCOffset) == nil {
+	var storage windowsFaultContextStorage
+	context := storage.context()
+	if c_windowsCaptureContext(context, windowsFaultContextPCOffset) == nil {
 		return 0
 	}
-	// The capture wrapper already unwound itself. Drop platformCallers; the
-	// return from fpCallers, matching framePointerCallers' first entry.
-	return windowsContextCallers(&context, skip+1, pc)
+	// The capture wrapper already unwound itself. Drop platformCallers and the
+	// return into fpCallers, matching framePointerCallers' first entry.
+	return windowsContextCallers(context, skip+1, pc)
 }
 
 func platformFaultCallers(raw unsafe.Pointer, _ uintptr, pc []uintptr) int {
 	// Keep the OS-owned exception record intact. Windows still owns it while
 	// the vectored handler is active, even though LLGo leaves through its
 	// non-local panic path rather than resuming the faulting instruction.
-	context := *(*windowsFaultContext)(raw)
-	return windowsContextCallers(&context, 0, pc)
+	var storage windowsFaultContextStorage
+	context := storage.context()
+	*context = *(*windowsFaultContext)(raw)
+	return windowsContextCallers(context, 0, pc)
 }
 
 //go:noinline
 func recoverFrameMarks() (uintptr, uintptr) {
-	var context windowsFaultContext
-	if c_windowsCaptureContext(&context, windowsFaultContextPCOffset) == nil {
+	var storage windowsFaultContextStorage
+	context := storage.context()
+	if c_windowsCaptureContext(context, windowsFaultContextPCOffset) == nil {
 		return 0, 0
 	}
 	// The capture wrapper already unwound itself. Walk recoverFrameMarks ->
 	// recoverMark -> Recover -> the deferred function, then record both its
 	// stack identity and function entry.
 	for i := 0; i < 3; i++ {
-		if !windowsUnwindOne(&context) {
+		if !windowsUnwindOne(context) {
 			return 0, 0
 		}
 	}
@@ -117,12 +134,13 @@ func recoverFrameLive(stack, entry uintptr) bool {
 	if stack == 0 || entry == 0 {
 		return false
 	}
-	var context windowsFaultContext
-	if c_windowsCaptureContext(&context, windowsFaultContextPCOffset) == nil {
+	var storage windowsFaultContextStorage
+	context := storage.context()
+	if c_windowsCaptureContext(context, windowsFaultContextPCOffset) == nil {
 		return false
 	}
 	for i := 0; i < maxPanicSpliceFrames; i++ {
-		if !windowsUnwindOne(&context) {
+		if !windowsUnwindOne(context) {
 			break
 		}
 		if context.sp() == stack && frameSymbol(context.pc()-1).entry == entry {
