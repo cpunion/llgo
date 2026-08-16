@@ -1,4 +1,13 @@
 /*
+ * Copyright 2025 The Go Authors. All rights reserved.
+ * Use of this source code is governed by a BSD-style license available at
+ * https://go.dev/LICENSE.
+ *
+ * Adapted from internal/runtime/syscall/windows/asm_windows_amd64.s and
+ * asm_windows_arm64.s for LLGo's C ABI, including explicit COFF unwind data.
+ */
+
+/*
  * Variable-width Windows API call bridge. The layout of llgo_windows_syscall
  * is kept in sync with windowsSyscall in syscall_windows_llgo.go.
  */
