@@ -33,6 +33,7 @@ jobs:
       - name: Set up LLVM
         # CLANG64 supplies Windows-hosted LLVM libraries used to build llgo.
         # LLGo-generated Windows code independently selects the MSVC target ABI.
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: CLANG64
@@ -158,6 +159,8 @@ jobs:
 
       - name: Build and run the native Windows runtime and FFI smoke tests
         shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -173,7 +176,8 @@ jobs:
             -SkipAutomaticLocation `
             -DevCmdArguments "-arch=x64 -host_arch=x64"
 
-          $env:Path = "C:\msys64\clang64\bin;$env:Path"
+          $clangBin = Join-Path $env:MSYS2_LOCATION "clang64\bin"
+          $env:Path = "$clangBin;$env:Path"
           $env:LLGO_ROOT = (Get-Location).Path
           $env:LLGO_BUILD_CACHE = "off"
 
@@ -182,7 +186,7 @@ jobs:
           # Enter-VsDevShell may register the Visual Studio LLVM as a
           # PowerShell command, which takes precedence over PATH. Resolve the
           # pinned MSYS2 compiler explicitly for its matching resource dir.
-          $clangExe = "C:\msys64\clang64\bin\clang.exe"
+          $clangExe = Join-Path $clangBin "clang.exe"
           if (-not (Test-Path $clangExe)) {
             throw "LLVM 19 clang was not found at $clangExe"
           }
