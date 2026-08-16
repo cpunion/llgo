@@ -486,6 +486,48 @@ func TestOpenErrors(t *testing.T) {
 	}
 }
 
+func TestValidateCSRSectionErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		raw   []byte
+		nsyms uint32
+		want  string
+	}{
+		{
+			name: "misaligned data size",
+			raw:  make([]byte, 9),
+			want: "invalid Test data size",
+		},
+		{
+			name: "nonzero first offset",
+			raw: func() []byte {
+				raw := make([]byte, 8)
+				binary.LittleEndian.PutUint32(raw[4:], 1)
+				return raw
+			}(),
+			want: "Test CSR first offset is 1, want 0",
+		},
+		{
+			name: "terminal offset before data end",
+			raw: func() []byte {
+				raw := make([]byte, 16)
+				binary.LittleEndian.PutUint32(raw, 1)
+				return raw
+			}(),
+			nsyms: 1,
+			want:  "Test CSR covers 0 records, section contains 1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := validateCSRSection(tt.raw, "Test", 0, uint32(len(tt.raw)), tt.nsyms, 4)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validateCSRSection error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func validationMetaBytes(t *testing.T) []byte {
 	t.Helper()
 	b := NewBuilder()
