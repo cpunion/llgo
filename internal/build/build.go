@@ -2174,7 +2174,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		aPkg.ObjFiles = append(aPkg.ObjFiles, aliasObjs...)
 	}
 	aPkg.LinkArgs = append(aPkg.LinkArgs, cgoLdflags...)
-	aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(ctx.buildConf.Goos, aPkg.Package.Syntax)...)
+	aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(aPkg.Package.Syntax)...)
 	if aPkg.AltPkg != nil {
 		altLLFiles, altLdflags, e := buildCgo(ctx, aPkg, aPkg.AltPkg.Syntax, externs, printCmds)
 		if e != nil {
@@ -2193,7 +2193,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 			aPkg.ObjFiles = append(aPkg.ObjFiles, aliasObjs...)
 		}
 		aPkg.LinkArgs = append(aPkg.LinkArgs, altLdflags...)
-		aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(ctx.buildConf.Goos, aPkg.AltPkg.Syntax)...)
+		aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(aPkg.AltPkg.Syntax)...)
 	}
 	if pkg.ExportFile != "" {
 		exportFile, exportBuffer, err := exportPackageObject(ctx, pkg.PkgPath, pkg.ExportFile, ret)

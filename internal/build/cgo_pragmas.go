@@ -61,7 +61,7 @@ func collectGoCgoPragmas(files []*ast.File) (ldflags []string, dynimports []cgoI
 	return
 }
 
-func goCgoLinkArgs(goos string, files []*ast.File) []string {
+func goCgoLinkArgs(files []*ast.File) []string {
 	ldflags, _ := collectGoCgoPragmas(files)
 	return ldflags
 }
@@ -179,16 +179,25 @@ func buildGoCgoAliasObjects(ctx *context, pkgPath string, files []*ast.File, ver
 		return nil, err
 	}
 	objPath := objFile.Name()
-	objFile.Close()
+	keepObj := false
+	defer func() {
+		if !keepObj {
+			_ = os.Remove(objPath)
+		}
+	}()
+	if err := objFile.Close(); err != nil {
+		return nil, err
+	}
 	args := []string{"-o", objPath, "-c", asmPath}
 	if ctx.shouldPrintCommands(verbose) {
 		fmt.Fprintf(os.Stderr, "# compiling %s for pkg: %s\n", objPath, pkgPath)
 		fmt.Fprintln(os.Stderr, "clang", args)
 	}
 	if err := ctx.compiler().Compile(args...); err != nil {
-		os.Remove(objPath)
 		return nil, err
 	}
+	// The package archive builder consumes the object after this function returns.
+	keepObj = true
 	return []string{objPath}, nil
 }
 
