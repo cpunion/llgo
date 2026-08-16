@@ -5,7 +5,7 @@ import (
 	"unsafe"
 
 	nativesync "github.com/goplus/llgo/runtime/internal/clite/sync"
-	rtdebug "github.com/goplus/llgo/runtime/internal/runtime"
+	_ "github.com/goplus/llgo/runtime/internal/runtime"
 	// The smoke package lives below the LLGo runtime root, whose packages are
 	// excluded from the ordinary need-runtime signal. Import the core runtime
 	// explicitly so its global state is initialized before the low-level test.
@@ -41,31 +41,6 @@ func hasSuffix(value, suffix string) bool {
 	return len(value) >= len(suffix) && value[len(value)-len(suffix):] == suffix
 }
 
-func dumpFaultSnapshot() {
-	var current [32]uintptr
-	n := runtime.Callers(0, current[:])
-	frames := runtime.CallersFrames(current[:n])
-	for i := 0; ; i++ {
-		frame, more := frames.Next()
-		println("Windows current pc:", i, frame.PC, frame.Function)
-		if !more {
-			break
-		}
-	}
-
-	pcs := rtdebug.PanicPCs()
-	mark1, mark2 := rtdebug.PanicRecoverFPs()
-	println("Windows fault snapshot:", len(pcs), "fault:", rtdebug.PanicPCsAreFault())
-	println("Windows recover frame marks:", mark1, mark2)
-	for i, pc := range pcs {
-		name := ""
-		if fn := runtime.FuncForPC(pc - 1); fn != nil {
-			name = fn.Name()
-		}
-		println("Windows fault pc:", i, pc, name)
-	}
-}
-
 func checkNilFault() {
 	for attempt := 0; attempt < 2; attempt++ {
 		deferred := false
@@ -98,7 +73,6 @@ func checkNilFault() {
 					}
 				}
 				if !found {
-					dumpFaultSnapshot()
 					panic("Windows nil fault traceback lost the faulting frame")
 				}
 				recovered = true
