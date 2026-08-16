@@ -65,6 +65,10 @@ func createTestServer(t *testing.T, files map[string]string) *httptest.Server {
 }
 
 func TestAcquireAndReleaseLock(t *testing.T) {
+	if err := releaseLock(nil); err != nil {
+		t.Fatalf("releaseLock(nil) = %v, want nil", err)
+	}
+
 	tempDir := t.TempDir()
 	lockPath := filepath.Join(tempDir, "test.lock")
 
