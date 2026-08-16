@@ -70,7 +70,15 @@ jobs:
           for package in "${packages[@]}"; do
             urls+=("$repo/$prefix-$package-any.pkg.tar.zst")
           done
-          pacman --noconfirm -U "${urls[@]}"
+          # MSYS2 renamed the compiler-runtime virtual dependency from
+          # gcc-libs to cc-libs after the pinned LLVM 19 packages were
+          # archived. libc++ 19 provides the same runtime under the former
+          # name, so satisfy only this virtual rename instead of upgrading the
+          # compiler stack or disabling dependency checks globally.
+          assumed_cc_runtime="$prefix-cc-libs=$LLVM_VERSION"
+          pacman --noconfirm -U \
+            --assume-installed "$assumed_cc_runtime" \
+            "${urls[@]}"
 
           for package in clang clang-libs compiler-rt llvm llvm-libs lld libc++ libunwind; do
             installed="$(pacman -Q "$prefix-$package" | awk '{print $2}')"
@@ -100,7 +108,9 @@ jobs:
 
           # Hosted runtime timers use libuv. The archive is COFF and is
           # linked with the MSVC ABI; pkgconf supplies its installation path.
-          pacman --noconfirm -S --needed "$prefix-pkgconf"
+          pacman --noconfirm -S --needed \
+            --assume-installed "$assumed_cc_runtime" \
+            "$prefix-pkgconf"
           clang --version
 
       - name: Build and test the Windows host compiler
