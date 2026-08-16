@@ -36,6 +36,8 @@ QueryPerformanceCounter(long long *counter);
 __declspec(dllimport) int LLGO_WINAPI
 QueryPerformanceFrequency(long long *frequency);
 
+static long long llgo_nanotime_frequency;
+
 typedef struct {
     llgo_dword low;
     llgo_dword high;
@@ -75,19 +77,23 @@ int llgo_mem_readable(void *p)
            (info.protect & llgo_page_guard) == 0;
 }
 
+int llgo_nanotime_init(void)
+{
+    return QueryPerformanceFrequency(&llgo_nanotime_frequency) &&
+           llgo_nanotime_frequency > 0;
+}
+
 long long llgo_nanotime(void)
 {
     long long counter;
-    long long frequency;
     long long seconds;
     long long remainder;
-    if (!QueryPerformanceCounter(&counter) ||
-        !QueryPerformanceFrequency(&frequency) || frequency <= 0)
+    if (!QueryPerformanceCounter(&counter) || llgo_nanotime_frequency <= 0)
         return 0;
-    seconds = counter / frequency;
-    remainder = counter % frequency;
+    seconds = counter / llgo_nanotime_frequency;
+    remainder = counter % llgo_nanotime_frequency;
     return seconds * 1000000000LL +
-           remainder * 1000000000LL / frequency;
+           remainder * 1000000000LL / llgo_nanotime_frequency;
 }
 
 void llgo_walltime(long long *seconds, int *nanoseconds)

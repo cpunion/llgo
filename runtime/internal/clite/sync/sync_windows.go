@@ -69,7 +69,7 @@ const (
 )
 
 // MutexAttr keeps the portable API honest: SRW locks are neither recursive
-// nor error-checking, so unsupported pthread attributes fail at Init.
+// nor error-checking, so SetType and Mutex.Init reject unsupported types.
 type MutexAttr struct {
 	typ MutexType
 }
