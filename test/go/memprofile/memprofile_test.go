@@ -90,6 +90,10 @@ func TestRuntimeMemProfileSeparatesSizesAtOneStack(t *testing.T) {
 
 	mixedSizeSink = make([][]byte, 128)
 	mixedSizeProfileAlloc(mixedSizeSink)
+	// The gc runtime publishes heap profile samples up to two GC cycles
+	// after allocation. Materialize both sizes before reading them.
+	runtime.GC()
+	runtime.GC()
 	sizes := make(map[int64]bool)
 	for _, record := range readMemProfile(t) {
 		if record.AllocObjects == 0 {
