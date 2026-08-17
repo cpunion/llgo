@@ -1200,8 +1200,8 @@ func TestDirectiveFilename(t *testing.T) {
 	}
 }
 
-// Packages that read the memory profile pin every trackable function:
-// per-site heap attribution needs frames and allocation-site anchors.
+// Packages that read the memory profile pin allocation paths, not unrelated
+// helpers: per-site heap attribution needs only the observable stack.
 func TestPackageReadsMemProfilePin(t *testing.T) {
 	ssapkg, _ := buildCallerFrameSSAPackage(t, "example.com/hp", `package main
 
@@ -1209,21 +1209,26 @@ import "runtime"
 
 func allocLeaf() *[64]byte { return new([64]byte) }
 
+func allocWrapper() *[64]byte { return allocLeaf() }
+
 func plainHelper() int { return 1 }
 
 func main() {
 	runtime.MemProfileRate = 1
-	_ = allocLeaf()
+	_ = allocWrapper()
 	_ = plainHelper()
 	var r [4]runtime.MemProfileRecord
 	runtime.MemProfile(r[:], true)
 }
 `)
 	set := runtimeCallerFuncSet(NewCallerTracking(), ssapkg)
-	for _, name := range []string{"allocLeaf", "plainHelper", "main"} {
+	for _, name := range []string{"allocLeaf", "allocWrapper", "main"} {
 		if !set[ssapkg.Func(name)] {
 			t.Fatalf("%s must be pinned in a memprofile-reading package", name)
 		}
+	}
+	if set[ssapkg.Func("plainHelper")] {
+		t.Fatal("plainHelper must remain inlineable in a memprofile-reading package")
 	}
 	quiet, _ := buildCallerFrameSSAPackage(t, "example.com/quiet", `package q
 
@@ -1231,6 +1236,30 @@ func Helper() int { return 2 }
 `)
 	if set := runtimeCallerFuncSet(NewCallerTracking(), quiet); set[quiet.Func("Helper")] {
 		t.Fatal("quiet package must not be pinned")
+	}
+}
+
+func TestMemoryProfileConvertMayAllocate(t *testing.T) {
+	stringType := types.Typ[types.String]
+	intType := types.Typ[types.Int]
+	tests := []struct {
+		name     string
+		from, to types.Type
+		want     bool
+	}{
+		{"numeric", intType, types.Typ[types.Int64], false},
+		{"string to bytes", stringType, types.NewSlice(types.Typ[types.Uint8]), true},
+		{"runes to string", types.NewSlice(types.Typ[types.Int32]), stringType, true},
+		{"rune to string", types.Typ[types.Int32], stringType, true},
+		{"string to ints", stringType, types.NewSlice(intType), false},
+		{"pointer", types.NewPointer(intType), types.Typ[types.UnsafePointer], false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := memoryProfileConvertMayAllocate(test.from, test.to); got != test.want {
+				t.Fatalf("memoryProfileConvertMayAllocate(%v, %v) = %v, want %v", test.from, test.to, got, test.want)
+			}
+		})
 	}
 }
 
@@ -1258,6 +1287,13 @@ func enable() { runtime.MemProfileRate = 1 }`,
 			want: true,
 		},
 		{
+			name: "MemProfile function value",
+			src: `package p
+import "runtime"
+var report = runtime.MemProfile`,
+			want: true,
+		},
+		{
 			name: "unrelated runtime use",
 			src: `package p
 import "runtime"
@@ -1272,6 +1308,18 @@ func goos() string { return runtime.GOOS }`,
 				t.Fatalf("packageReadsMemProfile() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMemProfileConsumer(t *testing.T) {
+	quiet, _ := buildCallerFrameSSAPackage(t, "example.com/quiet", `package quiet
+func Value() int { return 1 }`)
+	if got := MemProfileConsumer([]*gossa.Package{quiet}); got != "" {
+		t.Fatal("quiet program unexpectedly enabled memory profiling")
+	}
+	pprof, _ := buildCallerFrameSSAPackage(t, "runtime/pprof", `package pprof`)
+	if got := MemProfileConsumer([]*gossa.Package{quiet, pprof}); got != "runtime/pprof" {
+		t.Fatal("runtime/pprof did not enable memory profiling")
 	}
 }
 

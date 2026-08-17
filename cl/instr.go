@@ -923,8 +923,8 @@ func fnUsesRuntimeCaller(c *CallerTracking, fn *ssa.Function) bool {
 //  5. the function can run below a defer that consumes panic pcs — recover
 //     exposes the panicked call chain after longjmp has removed those physical
 //     frames, so the compiler must keep and annotate the possible callees.
-//  6. the package reads the memory profile — exact per-site allocation
-//     attribution requires physical frames for all trackable functions.
+//  6. the program reads the memory profile — functions on a path to an
+//     allocation keep physical frames for per-site attribution.
 //
 // Criterion 2 tests membership against the callee package's *base* set
 // (criterion 1 alone), so tracking extends exactly one call level past a
@@ -954,7 +954,11 @@ func callerTrackingFuncSetsForPackage(c *CallerTracking, pkg *ssa.Package) calle
 	}
 	base := runtimeCallerBaseSet(c, pkg)
 	funcs, trackable := collectRuntimeCallerFunctions(pkg)
-	sets := computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkg, funcs, base, trackable, func(dep *ssa.Package) map[*ssa.Function]bool {
+	var profileFrames map[*ssa.Function]bool
+	if packageReadsMemProfile(trackable) {
+		profileFrames = memoryProfileAllocationFrames(trackable)
+	}
+	sets := computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkg, funcs, base, trackable, profileFrames, func(dep *ssa.Package) map[*ssa.Function]bool {
 		return runtimeCallerBaseSet(c, dep)
 	})
 	c.extended[pkg] = sets
@@ -966,24 +970,21 @@ type callerTrackingFuncSets struct {
 	recoverPanicSites map[*ssa.Function]bool
 }
 
-func computeRuntimeCallerFuncSets(recover *recoverFacts, pkg *ssa.Package, funcs, base, trackable map[*ssa.Function]bool, baseSet func(*ssa.Package) map[*ssa.Function]bool) callerTrackingFuncSets {
+func computeRuntimeCallerFuncSets(recover *recoverFacts, pkg *ssa.Package, funcs, base, trackable, profileFrames map[*ssa.Function]bool, baseSet func(*ssa.Package) map[*ssa.Function]bool) callerTrackingFuncSets {
 	frames := make(map[*ssa.Function]bool, len(base))
 	for fn := range base {
 		frames[fn] = true
 	}
-	// Criterion 6: a package that reads the memory profile gets every
-	// trackable function pinned. Heap records attribute sampled
-	// allocations to physical frames at exact statement lines; inlining
-	// any function in such a package would merge its allocation sites
-	// into the caller and lose per-site attribution (goroot
-	// heapsampling.go). Profiling packages are rare and accuracy beats
-	// inlining there — gc keeps per-site attribution via its inline tree.
-	pinAll := packageReadsMemProfile(trackable)
+	// Criterion 6: retain only functions that can reach an allocation when the
+	// program reads the profile. This keeps allocation leaf and wrapper
+	// identities, including across packages, without disabling inlining for
+	// unrelated helpers. gc represents the same logical frames in its inline
+	// tree; LLGo currently keeps these selected physical frames.
 	for fn := range trackable {
 		if frames[fn] {
 			continue
 		}
-		if pinAll {
+		if profileFrames[fn] {
 			frames[fn] = true
 			continue
 		}
@@ -1021,6 +1022,95 @@ func computeRuntimeCallerFuncSets(recover *recoverFacts, pkg *ssa.Package, funcs
 		frames = nil
 	}
 	return callerTrackingFuncSets{frames: frames, recoverPanicSites: recoverPanicSites}
+}
+
+// memoryProfileAllocationFrames returns allocation-bearing functions and
+// their static callers. Calls whose implementation is outside the analyzed
+// function set are conservatively allocation-bearing: the external callee may
+// use AllocZ/U, and the local wrapper is part of the exposed profile stack.
+func memoryProfileAllocationFrames(funcs map[*ssa.Function]bool) map[*ssa.Function]bool {
+	frames := make(map[*ssa.Function]bool)
+	for fn := range funcs {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if memoryProfileInstructionMayAllocate(instr, funcs) {
+					frames[fn] = true
+					break
+				}
+			}
+			if frames[fn] {
+				break
+			}
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for fn := range funcs {
+			if frames[fn] {
+				continue
+			}
+			forEachCall(fn, func(call *ssa.CallCommon) {
+				if callee := call.StaticCallee(); callee != nil && frames[callee] {
+					frames[fn] = true
+					changed = true
+				}
+			})
+		}
+	}
+	return frames
+}
+
+func memoryProfileInstructionMayAllocate(instr ssa.Instruction, funcs map[*ssa.Function]bool) bool {
+	switch instr := instr.(type) {
+	case *ssa.Alloc:
+		return instr.Heap
+	case *ssa.MakeChan, *ssa.MakeClosure, *ssa.MakeInterface, *ssa.MakeMap, *ssa.MakeSlice,
+		*ssa.Defer, *ssa.Go, *ssa.MapUpdate, *ssa.Send:
+		return true
+	case *ssa.BinOp:
+		return instr.Op == token.ADD && types.Identical(instr.Type(), types.Typ[types.String])
+	case *ssa.Convert:
+		return memoryProfileConvertMayAllocate(instr.X.Type(), instr.Type())
+	case *ssa.MultiConvert:
+		// A type-parameter conversion can select an allocating string/slice
+		// conversion after instantiation. Keep it conservative until its type
+		// set is lowered to concrete alternatives here.
+		return true
+	case ssa.CallInstruction:
+		call := instr.Common()
+		if builtin, ok := call.Value.(*ssa.Builtin); ok {
+			return builtin.Name() == "append"
+		}
+		callee := call.StaticCallee()
+		return callee == nil || !funcs[callee]
+	}
+	return false
+}
+
+func memoryProfileConvertMayAllocate(from, to types.Type) bool {
+	from = types.Unalias(from).Underlying()
+	to = types.Unalias(to).Underlying()
+	switch to := to.(type) {
+	case *types.Basic:
+		if to.Kind() != types.String {
+			return false
+		}
+		switch from := from.(type) {
+		case *types.Basic:
+			return from.Info()&types.IsInteger != 0
+		case *types.Slice:
+			return isByteOrRune(from.Elem())
+		}
+	case *types.Slice:
+		from, ok := from.(*types.Basic)
+		return ok && from.Kind() == types.String && isByteOrRune(to.Elem())
+	}
+	return false
+}
+
+func isByteOrRune(typ types.Type) bool {
+	basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+	return ok && (basic.Kind() == types.Uint8 || basic.Kind() == types.Int32)
 }
 
 // addRecoverObservableCallees keeps the same-package synchronous call/defer
@@ -1215,10 +1305,27 @@ func (a *runtimeCallerAnalysis) callTargets(fn *ssa.Function, call *ssa.CallComm
 // Precompute before workers start; recover facts also synchronize lazy queries
 // for nested and synthetic functions that are not package members.
 type CallerTracking struct {
-	base        map[*ssa.Package]map[*ssa.Function]bool
-	extended    map[*ssa.Package]callerTrackingFuncSets
-	recover     *recoverFacts
-	precomputed bool
+	base                     map[*ssa.Package]map[*ssa.Function]bool
+	extended                 map[*ssa.Package]callerTrackingFuncSets
+	recover                  *recoverFacts
+	memoryProfileAttribution bool
+	memoryProfileConfigured  bool
+	precomputed              bool
+}
+
+// SetMemoryProfileAttribution supplies the build-wide profiling decision.
+// The build coordinator already computed it for allocator selection, so
+// reusing it avoids a second program scan and covers externally callable
+// library modes that have no visible profile consumer.
+func (c *CallerTracking) SetMemoryProfileAttribution(enable bool) {
+	if c == nil {
+		return
+	}
+	if c.precomputed {
+		panic("memory-profile attribution configured after caller tracking")
+	}
+	c.memoryProfileAttribution = enable
+	c.memoryProfileConfigured = true
 }
 
 // Precompute resolves caller-tracking and recover data before package backends
@@ -1269,8 +1376,22 @@ func (c *CallerTracking) Precompute(pkgs []*ssa.Package) {
 		analyses[i] = analyzeCallerTrackingPackage(pkgs[i], methods[pkgs[i]])
 		base[i] = analyses[i].base
 	}
+	profileEnabled := c.memoryProfileAttribution
+	if !c.memoryProfileConfigured {
+		profileEnabled = MemProfileConsumer(pkgs) != ""
+	}
+	var profileFrames map[*ssa.Function]bool
+	if profileEnabled {
+		allTrackable := make(map[*ssa.Function]bool)
+		for i := range analyses {
+			for fn := range analyses[i].trackable {
+				allTrackable[fn] = true
+			}
+		}
+		profileFrames = memoryProfileAllocationFrames(allTrackable)
+	}
 	for i := range pkgs {
-		extended[i] = computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkgs[i], analyses[i].funcs, base[i], analyses[i].trackable, func(dep *ssa.Package) map[*ssa.Function]bool {
+		extended[i] = computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkgs[i], analyses[i].funcs, base[i], analyses[i].trackable, profileFrames, func(dep *ssa.Package) map[*ssa.Function]bool {
 			j, ok := index[dep]
 			if !ok {
 				panic("caller-tracking dependency was not precomputed")
@@ -1414,15 +1535,54 @@ func packageReadsMemProfile(funcs map[*ssa.Function]bool) bool {
 					if rand == nil {
 						continue
 					}
-					if g, ok := (*rand).(*ssa.Global); ok && g.Pkg != nil &&
-						isPublicRuntimePath(g.Pkg.Pkg.Path()) && g.Name() == "MemProfileRate" {
-						return true
+					switch value := (*rand).(type) {
+					case *ssa.Global:
+						if value.Pkg != nil && isPublicRuntimePath(value.Pkg.Pkg.Path()) && value.Name() == "MemProfileRate" {
+							return true
+						}
+					case *ssa.Function:
+						if value.Pkg != nil && isPublicRuntimePath(value.Pkg.Pkg.Path()) && value.Name() == "MemProfile" {
+							return true
+						}
 					}
 				}
 			}
 		}
 	}
 	return false
+}
+
+// MemProfileConsumer returns the package that made whole-program allocation
+// recording necessary, or an empty string when it is provably unused.
+// It runs after Go SSA construction but before backend compilation, so the
+// same decision applies to runtime and every dependency. Loading runtime/pprof
+// itself is a consumer even though its runtime call uses go:linkname rather
+// than a normal public-runtime reference.
+func MemProfileConsumer(pkgs []*ssa.Package) string {
+	for _, pkg := range pkgs {
+		if pkg == nil || pkg.Pkg == nil {
+			continue
+		}
+		// The public runtime implementation wires MemProfileRate and the
+		// capture hook internally; those references exist in every program and
+		// are providers, not consumers.
+		if isPublicRuntimePath(pkg.Pkg.Path()) {
+			continue
+		}
+		if pkg.Pkg.Path() == "runtime/pprof" {
+			return pkg.Pkg.Path()
+		}
+		_, funcs := collectRuntimeCallerFunctions(pkg)
+		if packageReadsMemProfile(funcs) {
+			return pkg.Pkg.Path()
+		}
+	}
+	return ""
+}
+
+func (p *context) omitMemProfileRecordCall(fn *ssa.Function) bool {
+	return !p.prog.MemoryProfilingEnabled() && p.pkg != nil && p.pkg.Path() == llssa.PkgRuntime &&
+		fn != nil && fn.Name() == "recordMemProfileAlloc"
 }
 
 func isProgramUniqueFrame(pkg *ssa.Package, fn *ssa.Function) bool {
@@ -2514,6 +2674,12 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		args := p.compileValues(b, args, kind)
 		ret = p.emitDo(b, act, ds, false, llssa.Builtin(fn), llssa.Builder.Call, args...)
 	case *ssa.Function:
+		if p.omitMemProfileRecordCall(cv) {
+			// The allocator hook has no result. Evaluate arguments for
+			// completeness, then omit the call itself even at O0.
+			p.compileValues(b, args, kind)
+			return
+		}
 		aFn, pyFn, ftype := p.compileFunction(cv)
 		// TODO(xsw): check ca != llssa.Call
 		switch ftype {
