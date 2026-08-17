@@ -12,6 +12,7 @@ import (
 
 var tinySink []*int32
 var mixedSizeSink [][]byte
+var memProfileWarmup []byte
 
 type profiledClosure struct {
 	fn func(int) int
@@ -79,6 +80,13 @@ func TestRuntimeMemProfileSeparatesSizesAtOneStack(t *testing.T) {
 	defer func() {
 		runtime.MemProfileRate = oldRate
 	}()
+
+	// gc caches the active rate in each mcache. Allocate enough to force the
+	// current cache to observe the change before checking the interesting
+	// allocation stacks (the Go runtime's own profiler tests do the same).
+	for range 1024 {
+		memProfileWarmup = make([]byte, 1024)
+	}
 
 	mixedSizeSink = make([][]byte, 128)
 	mixedSizeProfileAlloc(mixedSizeSink)
