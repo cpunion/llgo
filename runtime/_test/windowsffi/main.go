@@ -166,6 +166,15 @@ func registerStdcallCallback(finalized chan uintptr, deferred, recovered *bool) 
 	if code == 0 || syscall.NewCallback(callback) != code {
 		panic("syscall.NewCallback did not cache the callback")
 	}
+	codes := make(chan uintptr, 8)
+	for range 8 {
+		go func() { codes <- syscall.NewCallback(callback) }()
+	}
+	for range 8 {
+		if <-codes != code {
+			panic("concurrent syscall.NewCallback returned a different callback")
+		}
+	}
 	if runtime.GOARCH != "386" && syscall.NewCallbackCDecl(callback) != code {
 		panic("Windows 64-bit callbacks unexpectedly distinguished cdecl")
 	}
