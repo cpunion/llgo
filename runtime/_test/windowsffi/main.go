@@ -20,6 +20,9 @@ func callOnForeignThreadStdcall(fn, arg uintptr, result *uintptr) int32
 //go:linkname callOnForeignThreadCDecl C.llgo_windows_call_foreign_thread_cdecl
 func callOnForeignThreadCDecl(fn, arg uintptr, result *uintptr) int32
 
+//go:linkname repeatOnForeignThreadCDecl C.llgo_windows_repeat_foreign_thread_cdecl
+func repeatOnForeignThreadCDecl(fn, arg uintptr, repeats uint32, result *uintptr) int32
+
 type callbackPair struct {
 	Low  uint32
 	High uint32
@@ -228,6 +231,27 @@ func testDistinctClosureCallbacks() {
 	}
 }
 
+func testRepeatedForeignThreadCallback() {
+	var calls uintptr
+	callback := syscall.NewCallbackCDecl(func(argument uintptr) uintptr {
+		calls++
+		if calls%8 == 0 {
+			runtime.GC()
+		}
+		return 800 + argument
+	})
+	var result uintptr
+	if errno := repeatOnForeignThreadCDecl(callback, 10, 64, &result); errno != 0 || result != 873 {
+		panic("repeated foreign-thread callback failed")
+	}
+	if calls != 64 {
+		panic("repeated foreign-thread callback count is wrong")
+	}
+	// The foreign thread has exited, so its FLS lifecycle must have released
+	// both the Go context root and the retained collector registration.
+	runtime.GC()
+}
+
 func testSyscallCallbacks() {
 	testCallbackValidation()
 
@@ -281,6 +305,7 @@ func testSyscallCallbacks() {
 		panic("Windows callback corrupted a zero-sized argument")
 	}
 	testDistinctClosureCallbacks()
+	testRepeatedForeignThreadCallback()
 }
 
 func main() {

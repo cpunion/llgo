@@ -116,4 +116,9 @@ func destroyG(ptr c.Pointer) {
 		ctx.root = nil
 		FreeRoot(root)
 	}
+	// This is the last Go operation in the FLS destructor. A foreign thread
+	// that entered through a callback can now leave the collector safely.
+	if currentGHasLifecycle {
+		releaseForeignThreadRegistration()
+	}
 }

@@ -35,16 +35,21 @@ typedef struct {
     } callback;
     llgo_uintptr argument;
     llgo_uintptr result;
+    llgo_dword repeats;
     int cleanstack;
 } llgo_callback_context;
 
 static llgo_dword LLGO_WINAPI llgo_foreign_thread_start(void *parameter)
 {
     llgo_callback_context *context = (llgo_callback_context *)parameter;
-    if (context->cleanstack)
-        context->result = context->callback.stdcall(context->argument);
-    else
-        context->result = context->callback.cdecl(context->argument);
+    llgo_dword i;
+    for (i = 0; i < context->repeats; ++i) {
+        llgo_uintptr argument = context->argument + i;
+        if (context->cleanstack)
+            context->result = context->callback.stdcall(argument);
+        else
+            context->result = context->callback.cdecl(argument);
+    }
     return 0;
 }
 
@@ -71,7 +76,7 @@ int llgo_windows_call_foreign_thread(llgo_callback callback,
                                      llgo_uintptr argument,
                                      llgo_uintptr *result)
 {
-    llgo_callback_context context = {{callback}, argument, 0, 0};
+    llgo_callback_context context = {{callback}, argument, 0, 1, 0};
     return llgo_windows_run_foreign_callback(&context, result);
 }
 
@@ -79,7 +84,7 @@ int llgo_windows_call_foreign_thread_stdcall(llgo_stdcall_callback callback,
                                              llgo_uintptr argument,
                                              llgo_uintptr *result)
 {
-    llgo_callback_context context = {{0}, argument, 0, 1};
+    llgo_callback_context context = {{0}, argument, 0, 1, 1};
     context.callback.stdcall = callback;
     return llgo_windows_run_foreign_callback(&context, result);
 }
@@ -88,7 +93,16 @@ int llgo_windows_call_foreign_thread_cdecl(llgo_callback callback,
                                            llgo_uintptr argument,
                                            llgo_uintptr *result)
 {
-    llgo_callback_context context = {{callback}, argument, 0, 0};
+    llgo_callback_context context = {{callback}, argument, 0, 1, 0};
+    return llgo_windows_run_foreign_callback(&context, result);
+}
+
+int llgo_windows_repeat_foreign_thread_cdecl(llgo_callback callback,
+                                             llgo_uintptr argument,
+                                             llgo_dword repeats,
+                                             llgo_uintptr *result)
+{
+    llgo_callback_context context = {{callback}, argument, 0, repeats, 0};
     return llgo_windows_run_foreign_callback(&context, result);
 }
 
