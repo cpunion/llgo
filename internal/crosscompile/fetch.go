@@ -146,6 +146,10 @@ func checkDownloadAndExtractLib(url, dstDir, internalArchiveSrcDir string) error
 
 // acquireLock creates and locks a file to prevent concurrent operations
 func acquireLock(lockPath string) (*os.File, error) {
+	return acquireLockWith(lockPath, lockFileHandle)
+}
+
+func acquireLockWith(lockPath string, lock func(*os.File) error) (*os.File, error) {
 	// Ensure the parent directory exists
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create lock directory: %w", err)
@@ -155,7 +159,7 @@ func acquireLock(lockPath string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lock file: %w", err)
 	}
-	if err := lockFileHandle(lockFile); err != nil {
+	if err := lock(lockFile); err != nil {
 		lockFile.Close()
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -171,6 +175,10 @@ func releaseLock(lockFile *os.File) error {
 	}
 	unlockErr := unlockFileHandle(lockFile)
 	closeErr := lockFile.Close()
+	return lockReleaseError(unlockErr, closeErr)
+}
+
+func lockReleaseError(unlockErr, closeErr error) error {
 	if unlockErr != nil {
 		return fmt.Errorf("failed to release lock: %w", unlockErr)
 	}

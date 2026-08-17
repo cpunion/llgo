@@ -303,11 +303,8 @@ func (pm *PackageMeta) hasFuncDemand(sym Symbol) bool {
 // newPackageMeta checks the magic and version, then decodes the section offsets
 // from the fixed header.
 func newPackageMeta(raw []byte) (*PackageMeta, error) {
-	if len(raw) < headerSize {
-		return nil, fmt.Errorf("meta: file too small: %d bytes", len(raw))
-	}
-	if uint64(len(raw)) > uint64(^uint32(0)) {
-		return nil, fmt.Errorf("meta: file too large: %d bytes", len(raw))
+	if err := validateMetaSize(uint64(len(raw))); err != nil {
+		return nil, err
 	}
 	if string(raw[0:4]) != magic {
 		return nil, fmt.Errorf("meta: bad magic %q", raw[0:4])
@@ -336,6 +333,16 @@ func newPackageMeta(raw []byte) (*PackageMeta, error) {
 		return nil, err
 	}
 	return pm, nil
+}
+
+func validateMetaSize(size uint64) error {
+	if size < headerSize {
+		return fmt.Errorf("meta: file too small: %d bytes", size)
+	}
+	if size > uint64(^uint32(0)) {
+		return fmt.Errorf("meta: file too large: %d bytes", size)
+	}
+	return nil
 }
 
 // packageMetaView constructs a view over a layout whose header has already

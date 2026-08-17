@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -116,6 +117,33 @@ func TestAcquireAndReleaseLock(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "failed to release lock") {
 		t.Fatalf("Unexpected closed lock release error: %v", err)
 	}
+}
+
+func TestAcquireAndReleaseLockErrors(t *testing.T) {
+	t.Run("acquire", func(t *testing.T) {
+		wantErr := errors.New("injected lock failure")
+		var opened *os.File
+		got, err := acquireLockWith(filepath.Join(t.TempDir(), "failed.lock"), func(file *os.File) error {
+			opened = file
+			return wantErr
+		})
+		if got != nil || !errors.Is(err, wantErr) {
+			t.Fatalf("acquireLockWith = (%v, %v), want (nil, %v)", got, err, wantErr)
+		}
+		if opened == nil {
+			t.Fatal("lock callback did not receive the opened file")
+		}
+		if _, err := opened.Stat(); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("failed lock file remained open: Stat error = %v", err)
+		}
+	})
+
+	t.Run("close", func(t *testing.T) {
+		wantErr := errors.New("injected close failure")
+		if err := lockReleaseError(nil, wantErr); !errors.Is(err, wantErr) {
+			t.Fatalf("lockReleaseError = %v, want wrapped %v", err, wantErr)
+		}
+	})
 }
 
 func TestAcquireLockConcurrency(t *testing.T) {
