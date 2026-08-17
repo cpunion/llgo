@@ -17,6 +17,7 @@ typedef struct {
     unsigned int high;
 } llgo_callback_pair;
 typedef llgo_uintptr (*llgo_pair_callback)(llgo_callback_pair value);
+typedef llgo_uintptr (*llgo_no_arg_callback)(void);
 
 __declspec(dllimport) void *LLGO_WINAPI
 CreateThread(void *attributes, llgo_size_t stack_size,
@@ -95,4 +96,9 @@ llgo_uintptr llgo_windows_call_pair_callback(llgo_pair_callback callback,
                                              llgo_callback_pair value)
 {
     return callback(value);
+}
+
+llgo_uintptr llgo_windows_call_no_arg_callback(llgo_no_arg_callback callback)
+{
+    return callback();
 }
