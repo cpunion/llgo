@@ -2,11 +2,9 @@ package runtime
 
 import (
 	"unsafe"
-
-	"github.com/xgo-dev/llgo/runtime/internal/clite/bitcast"
 )
 
-// MemProfileRecord describes allocations aggregated by size class.
+// MemProfileRecord describes allocations aggregated into one profile bucket.
 type MemProfileRecord struct {
 	AllocBytes, FreeBytes     int64
 	AllocObjects, FreeObjects int64
@@ -80,6 +78,7 @@ var MemProfileRatePtr *int
 type memStackBucket struct {
 	next         *memStackBucket
 	hash         uintptr
+	size         uintptr
 	allocBytes   memProfileCounter
 	allocObjects memProfileCounter
 	nstk         int32
@@ -89,117 +88,14 @@ type memStackBucket struct {
 type memProfileThreadState struct {
 	remaining uintptr
 	rand      uint64
-	inSample  bool
 }
 
 const memStackTabSize = 512 // power of two
 
 var (
-	memStackTab     [memStackTabSize]*memStackBucket
+	memStackTab     [memStackTabSize]memProfileBucketHead
 	memStackTabLock memProfileLock
 )
-
-// The sampling state is physical-thread local, LLGo's analogue of gc's per-P
-// countdown. Independent allocation streams must not race or phase-lock each
-// other. See memprofile_atomic.go for the native TLS declaration.
-
-func memProfileNextThreshold(state *memProfileThreadState, rate int) uintptr {
-	// Exponentially distributed with mean rate, like gc's fastexprand:
-	// the memoryless property is required — with any bounded-support
-	// distribution a near-periodic allocation pattern phase-locks the
-	// sampling points onto the large sites and skews per-site estimates
-	// (observed 1.6x on goroot heapsampling's interleaved sizes).
-	x := state.rand
-	if x == 0 {
-		// Mix the TLS state address into the first state so independently
-		// initialized threads do not replay the same threshold stream. Using
-		// the existing state pointer also avoids making a local escape here.
-		x = 0x9e3779b97f4a7c15 ^ uint64(uintptr(unsafe.Pointer(state)))
-		if x == 0 {
-			x = 0x9e3779b97f4a7c15
-		}
-	}
-	x ^= x >> 12
-	x ^= x << 25
-	x ^= x >> 27
-	state.rand = x
-	r := (x * 0x2545f4914f6cdd1d) >> 11 // 53 random bits
-	u := float64(r) / (1 << 53)
-	if u < 1e-12 {
-		u = 1e-12
-	}
-	t := -lnApprox(u) * float64(rate)
-	if t < 1 {
-		t = 1
-	}
-	if max := float64(rate) * 64; t > max {
-		t = max
-	}
-	return uintptr(t)
-}
-
-// lnApprox computes ln(u) for u in (0,1] via exponent split and an
-// atanh series on the mantissa — a few 1e-6s of relative error, far
-// below sampling noise.
-func lnApprox(u float64) float64 {
-	const ln2 = 0.6931471805599453
-	bits := uint64(bitcast.FromFloat64(u))
-	e := int((bits>>52)&0x7ff) - 1023
-	mbits := (bits &^ (uint64(0x7ff) << 52)) | (uint64(1023) << 52)
-	m := bitcast.ToFloat64(int64(mbits)) // in [1, 2)
-	z := (m - 1) / (m + 1)
-	z2 := z * z
-	lnm := 2 * z * (1 + z2/3 + z2*z2/5 + z2*z2*z2/7)
-	return float64(e)*ln2 + lnm
-}
-
-func recordMemProfileAlloc(size uintptr) {
-	if size == 0 {
-		return
-	}
-	if MemProfileStackCapture != nil && MemProfileRatePtr != nil {
-		// Check the public rate before touching TLS so disabled profiling has
-		// no per-thread lookup cost.
-		rate := *MemProfileRatePtr
-		if rate <= 0 {
-			return
-		}
-		state := &memProfileState
-		if state.inSample {
-			return
-		}
-		if rate == 1 {
-			state.inSample = true
-			sampleMemProfileStack(size)
-			state.inSample = false
-			return
-		}
-		// Mirror gc's mcache.nextSample: subtract, sample once on
-		// crossing, redraw. Records hold RAW sampled counts — consumers
-		// (pprof, goroot heapsampling.go) apply the Poisson correction
-		// (scaleHeapSample) themselves, exactly like with gc.
-		if state.remaining == 0 {
-			state.remaining = memProfileNextThreshold(state, rate)
-		}
-		if size < state.remaining {
-			state.remaining -= size
-			return
-		}
-		state.remaining = memProfileNextThreshold(state, rate)
-		state.inSample = true
-		sampleMemProfileStack(size)
-		state.inSample = false
-		return
-	}
-	sizeClass := memProfileSizeClass(size)
-	for i := range memProfileBuckets {
-		b := &memProfileBuckets[i]
-		if b.size == sizeClass {
-			memProfileAddObject(&b.objects)
-			return
-		}
-	}
-}
 
 func sampleMemProfileStack(size uintptr) {
 	// Tiny allocations occupy at least one 16-byte granule (bdwgc's
@@ -218,14 +114,15 @@ func sampleMemProfileStack(size uintptr) {
 	for i := 0; i < n; i++ {
 		h = h*33 + pcs[i]
 	}
+	// gc keys heap profile buckets by both stack and allocation size. Besides
+	// preserving that contract, keeping sizes separate lets the consumer's
+	// Poisson correction use the actual sample size instead of a mixed mean.
+	h = h*33 + size
 	slot := h & (memStackTabSize - 1)
-	memStackTabLock.lock()
-	if b := findMemStackBucket(slot, h, pcs[:n]); b != nil {
+	if b := findMemStackBucket(memProfileLoadBucket(&memStackTab[slot]), h, size, pcs[:n]); b != nil {
 		memStackAdd(b, size)
-		memStackTabLock.unlock()
 		return
 	}
-	memStackTabLock.unlock()
 
 	// Allocation re-enters recordMemProfileAlloc, where this physical
 	// thread's recursion guard suppresses the internal allocation. Keep the
@@ -233,25 +130,29 @@ func sampleMemProfileStack(size uintptr) {
 	// invert lock order with a concurrent MemProfile call.
 	b := (*memStackBucket)(AllocZ(unsafe.Sizeof(memStackBucket{})))
 	b.hash = h
+	b.size = size
 	b.nstk = int32(n)
 	copy(b.stk[:], pcs[:n])
 
 	memStackTabLock.lock()
-	if existing := findMemStackBucket(slot, h, pcs[:n]); existing != nil {
-		memStackAdd(existing, size)
+	head := memProfileLoadBucket(&memStackTab[slot])
+	if existing := findMemStackBucket(head, h, size, pcs[:n]); existing != nil {
 		memStackTabLock.unlock()
+		memStackAdd(existing, size)
 		return
 	}
 	memStackAdd(b, size)
-	b.next = memStackTab[slot]
-	memStackTab[slot] = b
+	b.next = head
+	memProfileStoreBucket(&memStackTab[slot], b)
 	memStackTabLock.unlock()
 }
 
-// findMemStackBucket is called with memStackTabLock held.
-func findMemStackBucket(slot, hash uintptr, pcs []uintptr) *memStackBucket {
-	for b := memStackTab[slot]; b != nil; b = b.next {
-		if b.hash == hash && int(b.nstk) == len(pcs) && memStackEqual(b, pcs) {
+// Buckets and their next links are immutable after the head is atomically
+// published, so lookups need no lock. The insertion lock only resolves the
+// rare race between two first samples for the same key.
+func findMemStackBucket(head *memStackBucket, hash, size uintptr, pcs []uintptr) *memStackBucket {
+	for b := head; b != nil; b = b.next {
+		if b.hash == hash && b.size == size && int(b.nstk) == len(pcs) && memStackEqual(b, pcs) {
 			return b
 		}
 	}
@@ -315,24 +216,13 @@ func MemProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) {
 }
 
 func memProfileStacks(p []MemProfileRecord) (n int, ok bool) {
-	// Protect both list publication and enumeration. The public wrappers
-	// tolerate a bucket appearing between their sizing and fill calls, but
-	// each individual snapshot must see a valid immutable list. Snapshot
-	// construction may itself allocate, so suppress recursive sampling only
-	// on this physical thread while the table lock is held.
-	state := &memProfileState
-	wasInSample := state.inSample
-	state.inSample = true
-	memStackTabLock.lock()
-	n, ok = memProfileStacksLocked(p)
-	memStackTabLock.unlock()
-	state.inSample = wasInSample
-	return n, ok
-}
-
-func memProfileStacksLocked(p []MemProfileRecord) (n int, ok bool) {
-	for i := range memStackTab {
-		for b := memStackTab[i]; b != nil; b = b.next {
+	// Save one atomic head per slot. Published chains are immutable, so this
+	// gives a stable snapshot without blocking allocation samples and without
+	// touching the caller thread's sampling state.
+	var heads [memStackTabSize]*memStackBucket
+	for i := range heads {
+		heads[i] = memProfileLoadBucket(&memStackTab[i])
+		for b := heads[i]; b != nil; b = b.next {
 			n++
 		}
 	}
@@ -340,11 +230,8 @@ func memProfileStacksLocked(p []MemProfileRecord) (n int, ok bool) {
 		return n, false
 	}
 	j := 0
-	for i := range memStackTab {
-		for b := memStackTab[i]; b != nil; b = b.next {
-			if j >= len(p) {
-				break
-			}
+	for i := range heads {
+		for b := heads[i]; b != nil; b = b.next {
 			r := MemProfileRecord{
 				AllocBytes:   int64(memProfileLoadObjects(&b.allocBytes)),
 				AllocObjects: int64(memProfileLoadObjects(&b.allocObjects)),

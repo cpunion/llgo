@@ -6,10 +6,12 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/pprof"
+	"strings"
 	"testing"
 )
 
 var tinySink []*int32
+var mixedSizeSink [][]byte
 
 type profiledClosure struct {
 	fn func(int) int
@@ -69,6 +71,48 @@ func TestRuntimeMemProfileReportsTinyAllocations(t *testing.T) {
 		}
 	}
 	t.Fatalf("MemProfile did not report tiny allocations totaling at least %d bytes: %#v", wantBytes, records)
+}
+
+func TestRuntimeMemProfileSeparatesSizesAtOneStack(t *testing.T) {
+	oldRate := runtime.MemProfileRate
+	runtime.MemProfileRate = 1
+	defer func() {
+		runtime.MemProfileRate = oldRate
+	}()
+
+	mixedSizeSink = make([][]byte, 128)
+	mixedSizeProfileAlloc(mixedSizeSink)
+	sizes := make(map[int64]bool)
+	for _, record := range readMemProfile(t) {
+		if record.AllocObjects == 0 {
+			continue
+		}
+		frames := runtime.CallersFrames(record.Stack())
+		for {
+			frame, more := frames.Next()
+			if strings.HasSuffix(frame.Function, ".mixedSizeProfileAlloc") {
+				sizes[record.AllocBytes/record.AllocObjects] = true
+				break
+			}
+			if !more {
+				break
+			}
+		}
+	}
+	if !sizes[64] || !sizes[256] {
+		t.Fatalf("same-stack memory profile sizes = %v, want 64 and 256", sizes)
+	}
+}
+
+//go:noinline
+func mixedSizeProfileAlloc(dst [][]byte) {
+	for i := range dst {
+		size := 64
+		if i&1 != 0 {
+			size = 256
+		}
+		dst[i] = make([]byte, size)
+	}
 }
 
 func TestRuntimePprofHeapProfileReportsTinyAllocations(t *testing.T) {

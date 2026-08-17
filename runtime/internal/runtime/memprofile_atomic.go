@@ -2,13 +2,17 @@
 
 package runtime
 
-import "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
+import (
+	"unsafe"
+
+	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
+)
 
 type memProfileCounter = uint64
+type memProfileBucketHead = unsafe.Pointer
 
 // Keep the hot-path fields in one TLS object so one address lookup serves the
-// whole allocation decision. The recursion guard remains local to the thread
-// that is currently capturing a stack.
+// whole allocation decision. A sentinel countdown marks recursive sampling.
 //
 //llgo:tls
 var memProfileState memProfileThreadState
@@ -23,4 +27,12 @@ func memProfileAddN(p *memProfileCounter, n uint64) {
 
 func memProfileLoadObjects(p *memProfileCounter) memProfileCounter {
 	return atomic.Load(p)
+}
+
+func memProfileLoadBucket(p *memProfileBucketHead) *memStackBucket {
+	return (*memStackBucket)(atomic.Load(p))
+}
+
+func memProfileStoreBucket(p *memProfileBucketHead, b *memStackBucket) {
+	atomic.Store(p, unsafe.Pointer(b))
 }

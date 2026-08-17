@@ -29,6 +29,15 @@ type MemProfileRecord struct {
 	Stack0                    [32]uintptr
 }
 
+// MemProfile reuses its caller's record storage for the internal snapshot.
+// Keep that zero-copy conversion guarded if either definition changes.
+var (
+	_ [unsafe.Sizeof(MemProfileRecord{}) - unsafe.Sizeof(llrt.MemProfileRecord{})]byte
+	_ [unsafe.Sizeof(llrt.MemProfileRecord{}) - unsafe.Sizeof(MemProfileRecord{})]byte
+	_ [unsafe.Offsetof(MemProfileRecord{}.Stack0) - unsafe.Offsetof(llrt.MemProfileRecord{}.Stack0)]byte
+	_ [unsafe.Offsetof(llrt.MemProfileRecord{}.Stack0) - unsafe.Offsetof(MemProfileRecord{}.Stack0)]byte
+)
+
 func (r *MemProfileRecord) InUseBytes() int64 {
 	return r.AllocBytes - r.FreeBytes
 }
@@ -84,31 +93,22 @@ func isRuntimePlumbingFrame(pc uintptr) bool {
 }
 
 func MemProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) {
-	// Size dynamically with slack and retry: sampling between a sizing
-	// call and its fill call can grow the bucket set, and a fixed cap
-	// would make callers that retry-until-ok (pprof) loop forever.
-	records := make([]llrt.MemProfileRecord, 64)
-	for attempt := 0; ; attempt++ {
-		n, ok = llrt.MemProfile(records, inuseZero)
-		if ok || attempt >= 3 {
-			break
-		}
-		records = make([]llrt.MemProfileRecord, n+n/4+16)
-	}
-	if !ok || len(p) < n {
+	previous := llrt.MemProfilePause()
+	defer llrt.MemProfileResume(previous)
+	return memProfile(p, inuseZero)
+}
+
+func memProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) {
+	// The public and core records deliberately have the same fixed layout.
+	// Reuse the caller buffer so reading a rate-1 profile does not recursively
+	// allocate progressively larger profile buffers and create more buckets.
+	records := unsafe.Slice((*llrt.MemProfileRecord)(unsafe.Pointer(unsafe.SliceData(p))), len(p))
+	n, ok = llrt.MemProfile(records, inuseZero)
+	if !ok {
 		return n, false
 	}
-	if n == 0 {
-		return 0, true
-	}
 	for i := 0; i < n; i++ {
-		p[i] = MemProfileRecord{
-			AllocBytes:   records[i].AllocBytes,
-			FreeBytes:    records[i].FreeBytes,
-			AllocObjects: records[i].AllocObjects,
-			FreeObjects:  records[i].FreeObjects,
-			Stack0:       trimMemProfileStack(records[i].Stack0),
-		}
+		p[i].Stack0 = trimMemProfileStack(p[i].Stack0)
 	}
 	return n, true
 }
