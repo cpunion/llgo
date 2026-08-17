@@ -61,13 +61,23 @@ func TestResolveGOARCHConfig(t *testing.T) {
 		{
 			name: "arm default",
 			conf: Config{Goarch: "arm"},
-			want: Config{Goarch: "arm", GOARM: "7"},
+			want: Config{Goarch: "arm", GOARM: "7,hardfloat"},
 		},
 		{
 			name: "arm environment",
 			conf: Config{Goarch: "arm"},
 			env:  map[string]string{"GOARM": "6,softfloat"},
 			want: Config{Goarch: "arm", GOARM: "6,softfloat"},
+		},
+		{
+			name: "arm5 canonical default float mode",
+			conf: Config{Goarch: "arm", GOARM: "5"},
+			want: Config{Goarch: "arm", GOARM: "5,softfloat"},
+		},
+		{
+			name: "arm6 canonical default float mode",
+			conf: Config{Goarch: "arm", GOARM: "6"},
+			want: Config{Goarch: "arm", GOARM: "6,hardfloat"},
 		},
 		{
 			name: "arm explicit wins",
@@ -174,9 +184,9 @@ func TestGOARCHConfigSeparatesCacheFingerprints(t *testing.T) {
 		},
 		{
 			name:       "GOARM",
-			left:       &Config{Goos: "linux", Goarch: "arm", GOARM: "7"},
+			left:       &Config{Goos: "linux", Goarch: "arm", GOARM: "7,hardfloat"},
 			right:      &Config{Goos: "linux", Goarch: "arm", GOARM: "6,softfloat"},
-			leftEntry:  "GOARM: \"7\"",
+			leftEntry:  "GOARM: 7,hardfloat",
 			rightEntry: "GOARM: 6,softfloat",
 		},
 		{
