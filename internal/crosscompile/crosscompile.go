@@ -340,6 +340,19 @@ func configureNativeTargetFlags(export *Export, goos, targetTriple string, level
 	}
 }
 
+func configureNativeClangRootFlags(export *Export, goos, clangRoot string) {
+	if clangRoot == "" {
+		return
+	}
+	clangLib := filepath.Join(clangRoot, "lib")
+	clangInc := filepath.Join(clangRoot, "include")
+	export.CFLAGS = append(export.CFLAGS, "-I"+clangInc)
+	export.LDFLAGS = append(export.LDFLAGS, "-L"+clangLib)
+	if goos != "windows" {
+		export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
+	}
+}
+
 func use(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
 	targetTriple := llvm.GetTargetTripleWithGOARM(goos, goarch, goarm)
 	llgoRoot := env.LLGoROOT()
@@ -365,24 +378,7 @@ func use(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optl
 		// existing host-only support.
 		configureNativeTargetFlags(&export, goos, targetTriple, level, ltoMode, goGlobalDCE)
 		if nativeHost {
-			if clangRoot != "" {
-				clangLib := filepath.Join(clangRoot, "lib")
-				clangInc := filepath.Join(clangRoot, "include")
-				export.CFLAGS = append(export.CFLAGS, "-I"+clangInc)
-				export.LDFLAGS = append(export.LDFLAGS, "-L"+clangLib)
-				// Add platform-specific rpath flags
-				switch goos {
-				case "darwin":
-					export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
-				case "linux":
-					export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
-				case "windows":
-					// Windows doesn't support rpath, DLLs should be in PATH or same directory
-				default:
-					// For other Unix-like systems, try the generic rpath
-					export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
-				}
-			}
+			configureNativeClangRootFlags(&export, goos, clangRoot)
 			// Add sysroot for macOS only.
 			if goos == "darwin" {
 				sysrootPath, sysrootErr := getMacOSSysroot()

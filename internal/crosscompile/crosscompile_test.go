@@ -5,6 +5,7 @@ package crosscompile
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -509,6 +510,38 @@ func TestNativeOSFlags(t *testing.T) {
 		if slices.Contains(ldflags, unwanted) {
 			t.Errorf("native Windows LDFLAGS = %v, do not want %q", ldflags, unwanted)
 		}
+	}
+}
+
+func TestConfigureNativeClangRootFlags(t *testing.T) {
+	clangRoot := filepath.Join("toolchains", "clang")
+	clangLib := filepath.Join(clangRoot, "lib")
+	clangInc := filepath.Join(clangRoot, "include")
+	for _, test := range []struct {
+		goos        string
+		wantLDFlags []string
+	}{
+		{goos: "darwin", wantLDFlags: []string{"-L" + clangLib, "-Wl,-rpath," + clangLib}},
+		{goos: "linux", wantLDFlags: []string{"-L" + clangLib, "-Wl,-rpath," + clangLib}},
+		{goos: "freebsd", wantLDFlags: []string{"-L" + clangLib, "-Wl,-rpath," + clangLib}},
+		{goos: "windows", wantLDFlags: []string{"-L" + clangLib}},
+	} {
+		t.Run(test.goos, func(t *testing.T) {
+			export := Export{}
+			configureNativeClangRootFlags(&export, test.goos, clangRoot)
+			if want := []string{"-I" + clangInc}; !slices.Equal(export.CFLAGS, want) {
+				t.Errorf("native %s CFLAGS = %v, want %v", test.goos, export.CFLAGS, want)
+			}
+			if !slices.Equal(export.LDFLAGS, test.wantLDFlags) {
+				t.Errorf("native %s LDFLAGS = %v, want %v", test.goos, export.LDFLAGS, test.wantLDFlags)
+			}
+		})
+	}
+
+	export := Export{CFLAGS: []string{"existing-cflag"}, LDFLAGS: []string{"existing-ldflag"}}
+	configureNativeClangRootFlags(&export, "windows", "")
+	if !slices.Equal(export.CFLAGS, []string{"existing-cflag"}) || !slices.Equal(export.LDFLAGS, []string{"existing-ldflag"}) {
+		t.Fatalf("empty clang root changed flags: %+v", export)
 	}
 }
 
