@@ -907,7 +907,7 @@ func fnUsesRuntimeCaller(c *CallerTracking, fn *ssa.Function) bool {
 
 // runtimeCallerFuncSet is the per-package tracking set: functions that
 // must keep physical frames (noinline, no tail calls) and get statement
-// anchors at their call sites. Five criteria feed it:
+// anchors at their call sites. Six criteria feed it:
 //
 //  1. the function (transitively, within the package) reaches a
 //     runtime.Caller/Callers call — it consumes caller pcs itself;
@@ -923,6 +923,8 @@ func fnUsesRuntimeCaller(c *CallerTracking, fn *ssa.Function) bool {
 //  5. the function can run below a defer that consumes panic pcs — recover
 //     exposes the panicked call chain after longjmp has removed those physical
 //     frames, so the compiler must keep and annotate the possible callees.
+//  6. the package reads the memory profile — exact per-site allocation
+//     attribution requires physical frames for all trackable functions.
 //
 // Criterion 2 tests membership against the callee package's *base* set
 // (criterion 1 alone), so tracking extends exactly one call level past a
@@ -969,7 +971,7 @@ func computeRuntimeCallerFuncSets(recover *recoverFacts, pkg *ssa.Package, funcs
 	for fn := range base {
 		frames[fn] = true
 	}
-	// Criterion 5: a package that reads the memory profile gets every
+	// Criterion 6: a package that reads the memory profile gets every
 	// trackable function pinned. Heap records attribute sampled
 	// allocations to physical frames at exact statement lines; inlining
 	// any function in such a package would merge its allocation sites
@@ -982,7 +984,7 @@ func computeRuntimeCallerFuncSets(recover *recoverFacts, pkg *ssa.Package, funcs
 			continue
 		}
 		if pinAll {
-			out[fn] = true
+			frames[fn] = true
 			continue
 		}
 		// Criterion 3: pin program-unique frames. main.main and package
@@ -1374,7 +1376,7 @@ func NewCallerTracking() *CallerTracking {
 // it to LLGo's implementation package.
 func isPublicRuntimePath(path string) bool {
 	return path == "runtime" ||
-		path == "github.com/goplus/llgo/runtime/internal/lib/runtime"
+		path == "github.com/xgo-dev/llgo/runtime/internal/lib/runtime"
 }
 
 func packageReadsMemProfile(funcs map[*ssa.Function]bool) bool {

@@ -19,8 +19,8 @@
 package runtime
 
 import (
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
-	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 )
 
 const (

@@ -1285,7 +1285,7 @@ func TestPackageReadsMemProfileSkipsFunctionWithoutPackage(t *testing.T) {
 func TestPublicRuntimePath(t *testing.T) {
 	for path, want := range map[string]bool{
 		"runtime": true,
-		"github.com/goplus/llgo/runtime/internal/lib/runtime": true,
+		"github.com/xgo-dev/llgo/runtime/internal/lib/runtime": true,
 		"runtime/debug": false,
 	} {
 		if got := isPublicRuntimePath(path); got != want {

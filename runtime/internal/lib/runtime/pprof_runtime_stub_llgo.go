@@ -73,18 +73,13 @@ func trimMemProfileStack(stk [32]uintptr) [32]uintptr {
 }
 
 // isRuntimePlumbingFrame reports whether pc belongs to LLGo runtime
-// plumbing (allocator, capture hooks — including their __llgo_stub.
-// wrappers, which is how a hook held in a function variable is entered).
+// plumbing (allocator and capture hooks).
 func isRuntimePlumbingFrame(pc uintptr) bool {
 	name := frameSymbol(pc - 1).function
 	if name == "" {
 		return false
 	}
-	const stub = "__llgo_stub."
-	if hasPrefix(name, stub) {
-		name = name[len(stub):]
-	}
-	return hasPrefix(name, "github.com/goplus/llgo/runtime/internal/") ||
+	return hasPrefix(name, "github.com/xgo-dev/llgo/runtime/internal/") ||
 		name == "runtime.captureMemProfileStack"
 }
 
