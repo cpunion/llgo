@@ -1,3 +1,5 @@
+//go:build !nogc || windows
+
 package runtime
 
 import (
