@@ -1,6 +1,10 @@
 package runtime
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/xgo-dev/llgo/runtime/internal/clite/bitcast"
+)
 
 // MemProfileRecord describes allocations aggregated by size class.
 type MemProfileRecord struct {
@@ -82,6 +86,12 @@ type memStackBucket struct {
 	stk          [32]uintptr
 }
 
+type memProfileThreadState struct {
+	remaining uintptr
+	rand      uint64
+	inSample  bool
+}
+
 const memStackTabSize = 512 // power of two
 
 var (
@@ -89,22 +99,22 @@ var (
 	memStackTabLock memProfileLock
 )
 
-// memProfileRemaining counts down allocated bytes to the next sample.
-// It and the random state are physical-thread local, matching gc's per-M
-// sampler: independent allocation streams must not race or phase-lock each
-// other. See memprofile_atomic.go for the native TLS declarations.
+// The sampling state is physical-thread local, LLGo's analogue of gc's per-P
+// countdown. Independent allocation streams must not race or phase-lock each
+// other. See memprofile_atomic.go for the native TLS declaration.
 
-func memProfileNextThreshold(rate int) uintptr {
+func memProfileNextThreshold(state *memProfileThreadState, rate int) uintptr {
 	// Exponentially distributed with mean rate, like gc's fastexprand:
 	// the memoryless property is required — with any bounded-support
 	// distribution a near-periodic allocation pattern phase-locks the
 	// sampling points onto the large sites and skews per-site estimates
 	// (observed 1.6x on goroot heapsampling's interleaved sizes).
-	x := memProfileRandState
+	x := state.rand
 	if x == 0 {
-		// Mix the physical stack address into the first state so independently
-		// initialized threads do not replay the same threshold stream.
-		x = 0x9e3779b97f4a7c15 ^ uint64(uintptr(unsafe.Pointer(&rate)))
+		// Mix the TLS state address into the first state so independently
+		// initialized threads do not replay the same threshold stream. Using
+		// the existing state pointer also avoids making a local escape here.
+		x = 0x9e3779b97f4a7c15 ^ uint64(uintptr(unsafe.Pointer(state)))
 		if x == 0 {
 			x = 0x9e3779b97f4a7c15
 		}
@@ -112,7 +122,7 @@ func memProfileNextThreshold(rate int) uintptr {
 	x ^= x >> 12
 	x ^= x << 25
 	x ^= x >> 27
-	memProfileRandState = x
+	state.rand = x
 	r := (x * 0x2545f4914f6cdd1d) >> 11 // 53 random bits
 	u := float64(r) / (1 << 53)
 	if u < 1e-12 {
@@ -133,10 +143,10 @@ func memProfileNextThreshold(rate int) uintptr {
 // below sampling noise.
 func lnApprox(u float64) float64 {
 	const ln2 = 0.6931471805599453
-	bits := *(*uint64)(unsafe.Pointer(&u))
+	bits := uint64(bitcast.FromFloat64(u))
 	e := int((bits>>52)&0x7ff) - 1023
 	mbits := (bits &^ (uint64(0x7ff) << 52)) | (uint64(1023) << 52)
-	m := *(*float64)(unsafe.Pointer(&mbits)) // in [1, 2)
+	m := bitcast.ToFloat64(int64(mbits)) // in [1, 2)
 	z := (m - 1) / (m + 1)
 	z2 := z * z
 	lnm := 2 * z * (1 + z2/3 + z2*z2/5 + z2*z2*z2/7)
@@ -148,38 +158,37 @@ func recordMemProfileAlloc(size uintptr) {
 		return
 	}
 	if MemProfileStackCapture != nil && MemProfileRatePtr != nil {
-		// The guard covers the whole decision path: threshold drawing and
-		// stack capture may themselves allocate (escaping locals, the
-		// bucket node), and a recursive sample would overflow the stack.
-		if memProfileInSample {
-			return
-		}
-		memProfileInSample = true
+		// Check the public rate before touching TLS so disabled profiling has
+		// no per-thread lookup cost.
 		rate := *MemProfileRatePtr
 		if rate <= 0 {
-			memProfileInSample = false
+			return
+		}
+		state := &memProfileState
+		if state.inSample {
 			return
 		}
 		if rate == 1 {
+			state.inSample = true
 			sampleMemProfileStack(size)
-			memProfileInSample = false
+			state.inSample = false
 			return
 		}
 		// Mirror gc's mcache.nextSample: subtract, sample once on
 		// crossing, redraw. Records hold RAW sampled counts — consumers
 		// (pprof, goroot heapsampling.go) apply the Poisson correction
 		// (scaleHeapSample) themselves, exactly like with gc.
-		if memProfileRemaining == 0 {
-			memProfileRemaining = memProfileNextThreshold(rate)
+		if state.remaining == 0 {
+			state.remaining = memProfileNextThreshold(state, rate)
 		}
-		if size < memProfileRemaining {
-			memProfileRemaining -= size
-			memProfileInSample = false
+		if size < state.remaining {
+			state.remaining -= size
 			return
 		}
-		memProfileRemaining = memProfileNextThreshold(rate)
+		state.remaining = memProfileNextThreshold(state, rate)
+		state.inSample = true
 		sampleMemProfileStack(size)
-		memProfileInSample = false
+		state.inSample = false
 		return
 	}
 	sizeClass := memProfileSizeClass(size)
@@ -311,12 +320,13 @@ func memProfileStacks(p []MemProfileRecord) (n int, ok bool) {
 	// each individual snapshot must see a valid immutable list. Snapshot
 	// construction may itself allocate, so suppress recursive sampling only
 	// on this physical thread while the table lock is held.
-	wasInSample := memProfileInSample
-	memProfileInSample = true
+	state := &memProfileState
+	wasInSample := state.inSample
+	state.inSample = true
 	memStackTabLock.lock()
 	n, ok = memProfileStacksLocked(p)
 	memStackTabLock.unlock()
-	memProfileInSample = wasInSample
+	state.inSample = wasInSample
 	return n, ok
 }
 

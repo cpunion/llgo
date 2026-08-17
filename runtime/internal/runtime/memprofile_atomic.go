@@ -6,16 +6,12 @@ import "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 
 type memProfileCounter = uint64
 
-// Native memory-profile sampling state is per physical thread, matching gc's
-// per-M sampling state and keeping recursive allocator entry local to the
-// thread that is currently capturing a stack.
+// Keep the hot-path fields in one TLS object so one address lookup serves the
+// whole allocation decision. The recursion guard remains local to the thread
+// that is currently capturing a stack.
 //
 //llgo:tls
-var (
-	memProfileRemaining uintptr
-	memProfileRandState uint64
-	memProfileInSample  bool
-)
+var memProfileState memProfileThreadState
 
 func memProfileAddObject(p *memProfileCounter) {
 	atomic.Add(p, memProfileCounter(1))
