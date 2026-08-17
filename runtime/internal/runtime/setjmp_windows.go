@@ -5,7 +5,7 @@ package runtime
 import (
 	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 // Windows has no signal-mask variant of setjmp. This is a logical runtime

@@ -21,8 +21,8 @@ package runtime
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	rtdebug "github.com/goplus/llgo/runtime/internal/runtime"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	rtdebug "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 //go:linkname c_installWindowsFaultHandler C.llgo_install_windows_fault_handler

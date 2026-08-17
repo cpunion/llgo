@@ -4,8 +4,8 @@ import (
 	"runtime"
 	"unsafe"
 
-	nativesync "github.com/goplus/llgo/runtime/internal/clite/sync"
-	_ "github.com/goplus/llgo/runtime/internal/runtime"
+	nativesync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
+	_ "github.com/xgo-dev/llgo/runtime/internal/runtime"
 	// The smoke package lives below the LLGo runtime root, whose packages are
 	// excluded from the ordinary need-runtime signal. Import the core runtime
 	// explicitly so its global state is initialized before the low-level test.

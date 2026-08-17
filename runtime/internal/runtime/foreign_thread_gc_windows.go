@@ -2,7 +2,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/clite/bdwgc"
+import "github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
 
 // EnterForeignThread makes a thread created outside the LLGo runtime visible
 // to the collector before it allocates or manipulates Go pointers. The return

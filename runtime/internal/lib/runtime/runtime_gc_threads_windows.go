@@ -2,7 +2,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/clite/bdwgc"
+import "github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
 
 func enableForeignThreadRegistration() {
 	bdwgc.AllowRegisterThreads()
