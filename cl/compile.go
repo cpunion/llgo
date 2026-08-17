@@ -755,13 +755,13 @@ func needsRuntimeStackNoInline(pkg *types.Package, f *ssa.Function) bool {
 	if pkg == nil || f == nil || f.Signature.Recv() != nil {
 		return false
 	}
-	switch pkg.Path() {
-	case "runtime", "github.com/xgo-dev/llgo/runtime/internal/lib/runtime":
+	path := pkg.Path()
+	if isPublicRuntimePath(path) {
 		switch f.Name() {
 		case "Caller", "Callers", "callers":
 			return true
 		}
-	case "github.com/xgo-dev/llgo/runtime/internal/clite/debug":
+	} else if path == "github.com/xgo-dev/llgo/runtime/internal/clite/debug" {
 		return f.Name() == "StackTrace"
 	}
 	return false
@@ -1434,7 +1434,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			return
 		}
 		elem := p.type_(t.Elem(), llssa.InGo)
-		if v.Heap {
+		if v.Heap && p.prog.MemoryProfilingEnabled() {
 			// Heap allocations are memory-profile sample sites; give each
 			// one a statement anchor in tracked functions so sampled
 			// records attribute to the allocating line (heapsampling.go

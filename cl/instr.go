@@ -31,6 +31,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 
 	llssa "github.com/xgo-dev/llgo/ssa"
+	llabi "github.com/xgo-dev/llgo/ssa/abi"
 )
 
 var asmRegisterRegex = regexp.MustCompile(`\{[a-zA-Z]+\}`)
@@ -1497,7 +1498,7 @@ func NewCallerTracking() *CallerTracking {
 // it to LLGo's implementation package.
 func isPublicRuntimePath(path string) bool {
 	return path == "runtime" ||
-		path == "github.com/xgo-dev/llgo/runtime/internal/lib/runtime"
+		path == llabi.PatchPathPrefix+"runtime"
 }
 
 func packageReadsMemProfile(funcs map[*ssa.Function]bool) bool {
@@ -1580,9 +1581,18 @@ func MemProfileConsumer(pkgs []*ssa.Package) string {
 	return ""
 }
 
-func (p *context) omitMemProfileRecordCall(fn *ssa.Function) bool {
-	return !p.prog.MemoryProfilingEnabled() && p.pkg != nil && p.pkg.Path() == llssa.PkgRuntime &&
-		fn != nil && fn.Name() == "recordMemProfileAlloc"
+func (p *context) omitMemProfileProviderCall(fn *ssa.Function) bool {
+	if p.prog.MemoryProfilingEnabled() || p.pkg == nil || fn == nil {
+		return false
+	}
+	path := p.pkg.Path()
+	switch {
+	case path == llssa.PkgRuntime:
+		return fn.Name() == "recordMemProfileAlloc"
+	case isPublicRuntimePath(path):
+		return fn.Name() == "installMemProfileHooks"
+	}
+	return false
 }
 
 func isProgramUniqueFrame(pkg *ssa.Package, fn *ssa.Function) bool {
@@ -2051,10 +2061,10 @@ func isRuntimeCallerFunc(fn *ssa.Function) bool {
 	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
 		return false
 	}
-	switch fn.Pkg.Pkg.Path() {
-	case "runtime", "github.com/xgo-dev/llgo/runtime/internal/lib/runtime":
+	switch path := fn.Pkg.Pkg.Path(); {
+	case isPublicRuntimePath(path):
 		return isRuntimeCallerName(fn.Name())
-	case "runtime/debug":
+	case path == "runtime/debug":
 		return fn.Name() == "Stack"
 	default:
 		return false
@@ -2065,10 +2075,10 @@ func isRuntimeCallerFrameFunc(fn *ssa.Function) bool {
 	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
 		return false
 	}
-	switch fn.Pkg.Pkg.Path() {
-	case "runtime", "github.com/xgo-dev/llgo/runtime/internal/lib/runtime":
+	switch path := fn.Pkg.Pkg.Path(); {
+	case isPublicRuntimePath(path):
 		return isRuntimeCallerFrameName(fn.Name())
-	case "runtime/debug":
+	case path == "runtime/debug":
 		return fn.Name() == "Stack"
 	default:
 		return false
@@ -2079,13 +2089,13 @@ func isRuntimeCallerLookupFunc(fn *ssa.Function) bool {
 	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
 		return false
 	}
-	switch fn.Pkg.Pkg.Path() {
-	case "runtime", "github.com/xgo-dev/llgo/runtime/internal/lib/runtime":
+	switch path := fn.Pkg.Pkg.Path(); {
+	case isPublicRuntimePath(path):
 		switch fn.Name() {
 		case "Caller", "Callers", "Stack":
 			return true
 		}
-	case "runtime/debug":
+	case path == "runtime/debug":
 		return fn.Name() == "Stack"
 	}
 	return false
@@ -2674,8 +2684,8 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		args := p.compileValues(b, args, kind)
 		ret = p.emitDo(b, act, ds, false, llssa.Builtin(fn), llssa.Builder.Call, args...)
 	case *ssa.Function:
-		if p.omitMemProfileRecordCall(cv) {
-			// The allocator hook has no result. Evaluate arguments for
+		if p.omitMemProfileProviderCall(cv) {
+			// These provider calls have no result. Evaluate arguments for
 			// completeness, then omit the call itself even at O0.
 			p.compileValues(b, args, kind)
 			return

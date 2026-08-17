@@ -47,19 +47,26 @@ func TestMemoryProfileConsumerSelectsAllocatorInstrumentation(t *testing.T) {
 	cacheRootFunc = func() string { return cacheDir }
 	defer func() { cacheRootFunc = oldCacheRoot }()
 
-	plain := memoryProfileAllocatorIR(t, `package main
-func main() { println("plain") }
+	plain := memoryProfileProviderIR(t, `package main
+import "runtime"
+func main() { println(runtime.GOOS) }
 `)
-	if strings.Contains(plain, "recordMemProfileAlloc") {
-		t.Fatalf("plain executable allocator retained memory profiling:\n%s", plain)
+	if strings.Contains(plain.allocator, "recordMemProfileAlloc") {
+		t.Fatalf("plain executable allocator retained memory profiling:\n%s", plain.allocator)
+	}
+	if hasMemProfileHookInstall(plain.publicRuntime) {
+		t.Fatalf("plain executable runtime installed memory-profile hooks:\n%s", plain.publicRuntime)
 	}
 
-	profiled := memoryProfileAllocatorIR(t, `package main
+	profiled := memoryProfileProviderIR(t, `package main
 import "runtime"
 func main() { runtime.MemProfile(nil, false) }
 `)
-	if !strings.Contains(profiled, "recordMemProfileAlloc") {
-		t.Fatalf("memory-profile consumer allocator lost recording:\n%s", profiled)
+	if !strings.Contains(profiled.allocator, "recordMemProfileAlloc") {
+		t.Fatalf("memory-profile consumer allocator lost recording:\n%s", profiled.allocator)
+	}
+	if !hasMemProfileHookInstall(profiled.publicRuntime) {
+		t.Fatalf("memory-profile consumer runtime lost hook installation:\n%s", profiled.publicRuntime)
 	}
 }
 
@@ -77,7 +84,12 @@ func TestMemoryProfileLibraryModeSelection(t *testing.T) {
 	}
 }
 
-func memoryProfileAllocatorIR(t *testing.T, source string) string {
+type memoryProfileProviders struct {
+	allocator     string
+	publicRuntime string
+}
+
+func memoryProfileProviderIR(t *testing.T, source string) memoryProfileProviders {
 	t.Helper()
 	dir := t.TempDir()
 	mainFile := filepath.Join(dir, "main.go")
@@ -85,8 +97,11 @@ func memoryProfileAllocatorIR(t *testing.T, source string) string {
 		t.Fatal(err)
 	}
 	conf := NewDefaultConf(ModeGen)
-	var allocator string
+	var providers memoryProfileProviders
 	conf.ModuleHook = func(pkg Package) {
+		if pkg.PkgPath == "runtime" || pkg.PkgPath == altPkgPathPrefix+"runtime" {
+			providers.publicRuntime = pkg.LPkg.String()
+		}
 		if pkg.PkgPath != llssa.PkgRuntime {
 			return
 		}
@@ -98,7 +113,7 @@ func memoryProfileAllocatorIR(t *testing.T, source string) string {
 		}
 		end := strings.Index(ir[start:], "\n}")
 		if end >= 0 {
-			allocator = ir[start : start+end+2]
+			providers.allocator = ir[start : start+end+2]
 		}
 	}
 	pkgs, err := Do([]string{mainFile}, conf)
@@ -108,8 +123,20 @@ func memoryProfileAllocatorIR(t *testing.T, source string) string {
 	if len(pkgs) == 1 && pkgs[0].LPkg != nil {
 		defer pkgs[0].LPkg.Prog.Dispose()
 	}
-	if allocator == "" {
+	if providers.allocator == "" {
 		t.Fatal("runtime AllocZ module was not observed")
 	}
-	return allocator
+	if providers.publicRuntime == "" {
+		t.Fatal("public runtime module was not observed")
+	}
+	return providers
+}
+
+func hasMemProfileHookInstall(ir string) bool {
+	for line := range strings.SplitSeq(ir, "\n") {
+		if strings.Contains(line, "call void") && strings.Contains(line, ".installMemProfileHooks(") {
+			return true
+		}
+	}
+	return false
 }

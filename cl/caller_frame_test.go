@@ -4,6 +4,7 @@
 package cl
 
 import (
+	"fmt"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/goplus/gogen/packages"
 	llssa "github.com/xgo-dev/llgo/ssa"
+	llabi "github.com/xgo-dev/llgo/ssa/abi"
 	gossa "golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -248,7 +250,7 @@ func plain() {}
 		t.Fatal("Version should not be a runtime caller metadata function")
 	}
 
-	rtpkg, _ := buildCallerFrameSSAPackage(t, "github.com/xgo-dev/llgo/runtime/internal/lib/runtime", `package runtime
+	rtpkg, _ := buildCallerFrameSSAPackage(t, llabi.PatchPathPrefix+"runtime", `package runtime
 func Caller(skip int) (uintptr, string, int, bool) { return 0, "", 0, false }
 func FuncForPC(pc uintptr) uintptr { return 0 }
 `)
@@ -731,6 +733,35 @@ func leaf() {}
 				t.Fatalf("pcline metadata should use symbol strings, not function pointers:\n%s", line)
 			}
 		}
+	}
+}
+
+func TestCompileMemoryProfileAllocationPCLineMetadata(t *testing.T) {
+	ssapkg, files := buildCallerFrameSSAPackage(t, "example.com/profileline", `package profileline
+
+var sink *int
+
+func init() {
+//line profile_alloc.go:321
+	sink = new(int)
+}
+`)
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "linux", GOARCH: "amd64"})
+			prog.EnableMemoryProfiling(enabled)
+			prog.EnableFuncInfoMetadata(true)
+			prog.EnableFuncInfoSites(true)
+			pkg, err := NewPackage(prog, ssapkg, files)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ir := pkg.Module().String()
+			got := strings.Contains(ir, "!llgo.pcline") && strings.Contains(ir, `!"profile_alloc.go"`)
+			if got != enabled {
+				t.Fatalf("allocation pcline present = %v, memory profiling = %v\n%s", got, enabled, ir)
+			}
+		})
 	}
 }
 
@@ -1332,9 +1363,9 @@ func TestPackageReadsMemProfileSkipsFunctionWithoutPackage(t *testing.T) {
 
 func TestPublicRuntimePath(t *testing.T) {
 	for path, want := range map[string]bool{
-		"runtime": true,
-		"github.com/xgo-dev/llgo/runtime/internal/lib/runtime": true,
-		"runtime/debug": false,
+		"runtime":                         true,
+		llabi.PatchPathPrefix + "runtime": true,
+		"runtime/debug":                   false,
 	} {
 		if got := isPublicRuntimePath(path); got != want {
 			t.Errorf("isPublicRuntimePath(%q) = %v, want %v", path, got, want)
