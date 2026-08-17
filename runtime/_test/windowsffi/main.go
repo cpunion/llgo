@@ -108,6 +108,19 @@ func expectCallbackPanic(want string, call func()) {
 	panic("syscall callback validation did not panic")
 }
 
+func callbackWith64Args(
+	a00, a01, a02, a03, a04, a05, a06, a07 uintptr,
+	a08, a09, a10, a11, a12, a13, a14, a15 uintptr,
+	a16, a17, a18, a19, a20, a21, a22, a23 uintptr,
+	a24, a25, a26, a27, a28, a29, a30, a31 uintptr,
+	a32, a33, a34, a35, a36, a37, a38, a39 uintptr,
+	a40, a41, a42, a43, a44, a45, a46, a47 uintptr,
+	a48, a49, a50, a51, a52, a53, a54, a55 uintptr,
+	a56, a57, a58, a59, a60, a61, a62, a63 uintptr,
+) uintptr {
+	return a00
+}
+
 func testCallbackValidation() {
 	expectCallbackPanic("compileCallback: expected function with one uintptr-sized result", func() {
 		syscall.NewCallback(42)
@@ -127,6 +140,10 @@ func testCallbackValidation() {
 	if runtime.GOARCH != "386" {
 		expectCallbackPanic("compileCallback: float arguments not supported", func() {
 			syscall.NewCallback(func(float32) uintptr { return 0 })
+		})
+	} else {
+		expectCallbackPanic("compileCallback: function argument frame too large", func() {
+			syscall.NewCallback(callbackWith64Args)
 		})
 	}
 }

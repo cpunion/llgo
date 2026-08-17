@@ -117,10 +117,6 @@ func windowsCallbackFFIType(t *abi.Type) *ffi.Type {
 	return goABIFFIType(t)
 }
 
-func windowsCallbackResultFFIType(t *abi.Type) *ffi.Type {
-	return goABIFFIType(t)
-}
-
 func newWindowsCallbackEntry(fn any, callbackFn *windowsCallbackFunc, ft *abi.FuncType, cleanstack bool) *windowsCallbackEntry {
 	goArgTypes := make([]*ffi.Type, 0, len(ft.In)+1)
 	explicitEnv := false
@@ -143,17 +139,23 @@ func newWindowsCallbackEntry(fn any, callbackFn *windowsCallbackFunc, ft *abi.Fu
 		cArgTypes = append(cArgTypes, argType)
 		frameSize += unsafe.Sizeof(uintptr(0))
 	}
-	if frameSize > windowsCallbackMaxFrame {
-		panic("compileCallback: function argument frame too large")
-	}
-
 	if len(ft.Out) != 1 || ft.Out[0].Size_ != unsafe.Sizeof(uintptr(0)) {
 		panic("compileCallback: expected function with one uintptr-sized result")
 	}
 	if kind := ft.Out[0].Kind(); kind == abi.Float32 || kind == abi.Float64 {
 		panic("compileCallback: float results not supported")
 	}
-	goResultType := windowsCallbackResultFFIType(ft.Out[0])
+	// Go's 386 callback ABI returns through a stack slot, while amd64 and
+	// arm64 return the single word in a register. Include that slot in the
+	// compatibility frame limit used by the standard runtime.
+	if GOARCH == "386" {
+		frameSize += unsafe.Sizeof(uintptr(0))
+	}
+	if frameSize > windowsCallbackMaxFrame {
+		panic("compileCallback: function argument frame too large")
+	}
+
+	goResultType := goABIFFIType(ft.Out[0])
 	goSig, err := ffi.NewSignature(goResultType, goArgTypes...)
 	if err != nil {
 		panic("libffi error: " + err.Error())
