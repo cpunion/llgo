@@ -3,8 +3,9 @@
  * Use of this source code is governed by a BSD-style license available at
  * https://go.dev/LICENSE.
  *
- * Adapted from internal/runtime/syscall/windows/asm_windows_amd64.s and
- * asm_windows_arm64.s for LLGo's C ABI, including explicit COFF unwind data.
+ * Adapted from internal/runtime/syscall/windows/asm_windows_386.s,
+ * asm_windows_amd64.s, and asm_windows_arm64.s for LLGo's C ABI, including
+ * explicit COFF unwind data where the platform uses table-based unwinding.
  */
 
 /*
@@ -171,6 +172,56 @@ llgo_windows_syscall:
 	.seh_endfunclet
 	.seh_endproc
 
+#elif defined(__i386__)
+
+	.text
+	.globl _llgo_windows_syscall
+	.def _llgo_windows_syscall;
+	.scl 2;
+	.type 32;
+	.endef
+_llgo_windows_syscall:
+	pushl %ebp
+	movl %esp, %ebp
+	pushl %ebx
+	pushl %esi
+	pushl %edi
+
+	/* The LLGo C ABI passes the windowsSyscall pointer on the stack. */
+	movl 8(%ebp), %ebx
+
+	/* SetLastError(0) through the x86 TEB. */
+	movl $0, %fs:0x34
+
+	/* Both stdcall and cdecl receive their arguments on the stack. The
+	 * explicit stack restoration after the call accommodates either cleanup
+	 * convention, matching the Go runtime's x86 bridge. */
+	movl 4(%ebx), %ecx
+	testl %ecx, %ecx
+	jz .Lcall_x86
+	movl %ecx, %eax
+	shll $2, %eax
+	subl %eax, %esp
+	movl %esp, %edi
+	movl 8(%ebx), %esi
+	cld
+	rep movsl
+
+.Lcall_x86:
+	call *0(%ebx)
+	leal -12(%ebp), %esp
+
+	movl %eax, 12(%ebx)
+	movl %edx, 16(%ebx)
+	movl %fs:0x34, %eax
+	movl %eax, 20(%ebx)
+
+	popl %edi
+	popl %esi
+	popl %ebx
+	popl %ebp
+	retl
+
 #else
-#error "LLGo Windows SyscallN currently supports amd64 and arm64"
+#error "LLGo Windows SyscallN currently supports 386, amd64, and arm64"
 #endif
