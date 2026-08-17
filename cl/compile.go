@@ -1948,7 +1948,7 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		}
 		if p.options.DebugSymbols && p.localityAllowsGlobalDebug(v) {
 			pos := p.fset.Position(v.Pos())
-			b.DIGlobal(val, v.Name(), pos)
+			b.DIGlobal(p.localityGlobalDebugValue(v, val), v.Name(), pos)
 		}
 		return val
 	case *ssa.Const:
