@@ -37,3 +37,23 @@ func syscall_runtimeUnsetenv(key string) {
 		godebugEnvChanged("")
 	}
 }
+
+//go:linkname os_beforeExit os.runtime_beforeExit
+func os_beforeExit(exitCode int) {}
+
+//go:linkname c_getpagesize C.llgo_getpagesize
+func c_getpagesize() int32
+
+//go:linkname syscall_Getpagesize syscall.Getpagesize
+func syscall_Getpagesize() int {
+	return int(c_getpagesize())
+}
+
+//go:linkname c_exitProcess C.llgo_exit_process
+func c_exitProcess(code uint32)
+
+//go:linkname syscall_Exit syscall.Exit
+//go:nosplit
+func syscall_Exit(code int) {
+	c_exitProcess(uint32(code))
+}
