@@ -21,10 +21,10 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
-	psync "github.com/goplus/llgo/runtime/internal/clite/sync"
-	"github.com/goplus/llgo/runtime/internal/ffi"
-	llruntime "github.com/goplus/llgo/runtime/internal/runtime"
+	"github.com/xgo-dev/llgo/runtime/abi"
+	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
+	"github.com/xgo-dev/llgo/runtime/internal/ffi"
+	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 const windowsCallbackMaxFrame = 64 * unsafe.Sizeof(uintptr(0))
