@@ -59,13 +59,3 @@ func syscall_syscalln(fn, n uintptr, args ...uintptr) (r1, r2, err uintptr) {
 	c_windowsSyscall(&call)
 	return call.r1, call.r2, call.err
 }
-
-// Windows callbacks need a separate C-to-Go ABI thunk and are implemented in
-// the callback/FFI stage of Windows support. Keep the unsupported behavior
-// explicit instead of returning a pointer that would fail nondeterministically.
-//
-//go:linkname syscall_compileCallback syscall.compileCallback
-func syscall_compileCallback(fn any, cleanstack bool) uintptr {
-	_, _ = fn, cleanstack
-	panic("syscall.NewCallback is not supported by LLGo on Windows")
-}
