@@ -237,6 +237,7 @@ func TestRoundTripFile(t *testing.T) {
 	fn := b.Sym("pkg.Fn")
 	dep := b.Sym("runtime.X")
 	b.AddOrdinaryEdge(fn, dep)
+	b.AddIfaceUse(fn, dep)
 
 	pm, err := b.Build()
 	if err != nil {
@@ -268,6 +269,10 @@ func TestRoundTripFile(t *testing.T) {
 	if len(edges) != 1 || edges[0] != dep {
 		t.Errorf("OrdinaryEdges after file round-trip = %v", edges)
 	}
+	demands := pm2.funcDemands(fn)
+	if len(demands) != 1 || demands[0].Kind != DemandUseIface || Symbol(demands[0].Target) != dep {
+		t.Errorf("FuncDemand after file round-trip = %v", demands)
+	}
 	if err := pm2.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -280,6 +285,13 @@ func TestOpenErrors(t *testing.T) {
 	t.Run("short in-memory header", func(t *testing.T) {
 		if _, err := newPackageMeta(make([]byte, headerSize-1)); err == nil || !strings.Contains(err.Error(), "meta: file too small") {
 			t.Fatalf("newPackageMeta error = %v, want short-file error", err)
+		}
+	})
+
+	t.Run("oversized in-memory metadata", func(t *testing.T) {
+		size := uint64(^uint32(0)) + 1
+		if err := validateMetaSize(size); err == nil || !strings.Contains(err.Error(), "meta: file too large") {
+			t.Fatalf("validateMetaSize error = %v, want large-file error", err)
 		}
 	})
 
