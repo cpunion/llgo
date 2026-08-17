@@ -103,12 +103,15 @@ func windowsCallbackFFIType(t *abi.Type) *ffi.Type {
 	case abi.Array:
 		at := t.ArrayType()
 		if at.Len == 1 {
+			// Recurse to validate the member; the complete value is lowered
+			// once after validation below.
 			windowsCallbackFFIType(at.Elem)
 			break
 		}
 		panic("compileCallback: type " + t.String() + " is currently not supported for use in system callbacks")
 	case abi.Struct:
 		for _, field := range t.StructType().Fields {
+			// Validate members before lowering the complete aggregate below.
 			windowsCallbackFFIType(field.Typ)
 		}
 	default:
@@ -137,6 +140,10 @@ func newWindowsCallbackEntry(fn any, callbackFn *windowsCallbackFunc, ft *abi.Fu
 		}
 		cArgIndex[i] = len(cArgTypes)
 		cArgTypes = append(cArgTypes, argType)
+		// The Windows C ABI consumes one word for every supported non-zero
+		// argument. This is intentionally a conservative approximation of
+		// the standard runtime's more tightly packed Go callback frame for
+		// pathological signatures containing many sub-word arguments.
 		frameSize += unsafe.Sizeof(uintptr(0))
 	}
 	if len(ft.Out) != 1 || ft.Out[0].Size_ != unsafe.Sizeof(uintptr(0)) {
