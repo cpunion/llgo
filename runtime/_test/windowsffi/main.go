@@ -28,6 +28,9 @@ type callbackPair struct {
 //go:linkname callPairCallback C.llgo_windows_call_pair_callback
 func callPairCallback(fn uintptr, value callbackPair) uintptr
 
+//go:linkname callNoArgCallback C.llgo_windows_call_no_arg_callback
+func callNoArgCallback(fn uintptr) uintptr
+
 type pair struct {
 	Integer int64
 	Float   float64
@@ -214,6 +217,12 @@ func testSyscallCallbacks() {
 		if got := callPairCallback(pairCallback, callbackPair{Low: 5, High: 7}); got != 412 {
 			panic("Windows callback corrupted a pointer-sized aggregate argument")
 		}
+	}
+
+	type emptyArg struct{}
+	emptyCallback := syscall.NewCallbackCDecl(func(emptyArg) uintptr { return 515 })
+	if got := callNoArgCallback(emptyCallback); got != 515 {
+		panic("Windows callback corrupted a zero-sized argument")
 	}
 }
 
