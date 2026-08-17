@@ -7,3 +7,5 @@ func EnterForeignThread() bool {
 }
 
 func ExitForeignThread(registered bool) {}
+
+func releaseForeignThreadRegistration() {}
