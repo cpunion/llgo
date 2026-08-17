@@ -35,7 +35,8 @@ type windowsCallbackFunc struct {
 }
 
 type windowsCallbackKey struct {
-	fn         unsafe.Pointer
+	code       unsafe.Pointer
+	env        unsafe.Pointer
 	cleanstack bool
 }
 
@@ -217,13 +218,9 @@ func windowsCallbackResultFFIType(t *abi.Type) *ffi.Type {
 	panic("compileCallback: type " + t.String() + " is currently not supported for use in system callbacks")
 }
 
-func newWindowsCallbackEntry(fn any, fnFace *eface, ft *abi.FuncType, cleanstack bool) *windowsCallbackEntry {
+func newWindowsCallbackEntry(fn any, callbackFn *windowsCallbackFunc, ft *abi.FuncType, cleanstack bool) *windowsCallbackEntry {
 	goArgTypes := make([]*ffi.Type, 0, len(ft.In)+1)
 	explicitEnv := false
-	callbackFn := (*windowsCallbackFunc)(fnFace.data)
-	if callbackFn == nil || callbackFn.code == nil {
-		panic("compileCallback: expected function with one uintptr-sized result")
-	}
 	if callbackFn.env != nil && ffi.ClosureEnvExplicit {
 		explicitEnv = true
 		goArgTypes = append(goArgTypes, ffi.TypePointer)
@@ -328,7 +325,13 @@ func syscall_compileCallback(fn any, cleanstack bool) uintptr {
 	if GOARCH != "386" {
 		cleanstack = false
 	}
-	key := windowsCallbackKey{fn: fnFace.data, cleanstack: cleanstack}
+	callbackFn := (*windowsCallbackFunc)(fnFace.data)
+	if callbackFn == nil || callbackFn.code == nil {
+		panic("compileCallback: expected function with one uintptr-sized result")
+	}
+	key := windowsCallbackKey{
+		code: callbackFn.code, env: callbackFn.env, cleanstack: cleanstack,
+	}
 
 	windowsCallbacks.once.Do(initWindowsCallbacks)
 	windowsCallbacks.mu.Lock()
@@ -339,7 +342,7 @@ func syscall_compileCallback(fn any, cleanstack bool) uintptr {
 	}
 	windowsCallbacks.mu.Unlock()
 
-	entry := newWindowsCallbackEntry(fn, fnFace, ft, cleanstack)
+	entry := newWindowsCallbackEntry(fn, callbackFn, ft, cleanstack)
 	windowsCallbacks.mu.Lock()
 	if existing := windowsCallbacks.m[key]; existing != nil {
 		code := uintptr(existing.closure.Fn)
