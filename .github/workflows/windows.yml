@@ -101,10 +101,10 @@ jobs:
             ./internal/meta \
             ./internal/xtool/llvm
           go test -tags="$build_tags" \
-            -run '^TestAcquire(AndReleaseLock|LockConcurrency)$' \
+            -run '^TestAcquire(AndReleaseLock(Errors)?|LockConcurrency)$' \
             ./internal/crosscompile
           go test -tags="$build_tags" \
-            -run '^TestWindowsTargetTriple$' \
+            -run '^Test(WindowsTargetTriple|ARMTargetSpec)$' \
             ./ssa
 
           go build -tags="$build_tags" -o llgo-windows-smoke.exe ./cmd/llgo
