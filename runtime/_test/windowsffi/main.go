@@ -5,7 +5,7 @@ import (
 	"runtime"
 	_ "unsafe"
 
-	_ "github.com/goplus/llgo/runtime/internal/runtime"
+	_ "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 const LLGoFiles = "_wrap/ffi.c"
