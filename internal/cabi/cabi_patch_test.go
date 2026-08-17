@@ -235,6 +235,90 @@ entry:
 	}
 }
 
+func TestCABILoweringPreservesWindowsCOMDAT(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("windows-comdat")
+	defer mod.Dispose()
+	aggregate := ctx.StructType([]llvm.Type{
+		ctx.Int64Type(), ctx.Int64Type(), ctx.Int64Type(),
+	}, false)
+	fn := llvm.AddFunction(mod, "shared", llvm.FunctionType(
+		ctx.VoidType(), []llvm.Type{aggregate}, false,
+	))
+	fn.SetLinkage(llvm.LinkOnceODRLinkage)
+	comdat := mod.Comdat(fn.Name())
+	comdat.SetSelectionKind(llvm.AnyComdatSelectionKind)
+	fn.SetComdat(comdat)
+	b := ctx.NewBuilder()
+	defer b.Dispose()
+	b.SetInsertPointAtEnd(ctx.AddBasicBlock(fn, "entry"))
+	b.CreateRetVoid()
+
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: "amd64"})
+	defer prog.Dispose()
+	tr := NewTransformer(prog, "amd64-unknown-linux-gnu", "", ModeAllFunc, true)
+	tr.TransformModule("test", mod)
+
+	got := mod.NamedFunction("shared")
+	ir := got.String()
+	if !strings.Contains(ir, "ptr") {
+		t.Fatalf("C ABI did not lower the aggregate parameter:\n%s", ir)
+	}
+	if !strings.Contains(ir, "comdat") {
+		t.Fatalf("C ABI lowering lost Windows COMDAT metadata:\n%s", ir)
+	}
+	if kind := got.Comdat().SelectionKind(); kind != llvm.AnyComdatSelectionKind {
+		t.Fatalf("C ABI COMDAT selection = %v, want any", kind)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("transformed Windows COMDAT module is invalid: %v\n%s", err, mod.String())
+	}
+}
+
+func TestWindowsCallbackWrapperUsesCOMDAT(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("windows-callback-comdat")
+	defer mod.Dispose()
+	aggregate := ctx.StructType([]llvm.Type{
+		ctx.Int64Type(), ctx.Int64Type(), ctx.Int64Type(),
+	}, false)
+	callback := llvm.AddFunction(mod, "callback", llvm.FunctionType(
+		ctx.VoidType(), []llvm.Type{aggregate}, false,
+	))
+	b := ctx.NewBuilder()
+	defer b.Dispose()
+	b.SetInsertPointAtEnd(ctx.AddBasicBlock(callback, "entry"))
+	b.CreateRetVoid()
+
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: "amd64"})
+	defer prog.Dispose()
+	tr := NewTransformer(prog, "amd64-unknown-linux-gnu", "", ModeAllFunc, true)
+	wrapper, ok := tr.transformCallbackFunc(mod, callback)
+	if !ok {
+		t.Fatalf("callback wrapper was not required:\n%s", mod.String())
+	}
+	ir := wrapper.String()
+	if !strings.Contains(ir, "comdat") {
+		t.Fatalf("Windows callback wrapper lacks COMDAT metadata:\n%s", ir)
+	}
+	if kind := wrapper.Comdat().SelectionKind(); kind != llvm.AnyComdatSelectionKind {
+		t.Fatalf("Windows callback COMDAT selection = %v, want any", kind)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("Windows callback COMDAT module is invalid: %v\n%s", err, mod.String())
+	}
+}
+
 func TestSetSkipFuncsAndShouldSkipCall(t *testing.T) {
 	tr := &Transformer{}
 	tr.SetSkipFuncs([]string{" foo ", "", "bar"})
