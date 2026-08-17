@@ -11,6 +11,12 @@ typedef int llgo_bool;
 
 typedef llgo_dword(LLGO_WINAPI *llgo_thread_start)(void *parameter);
 typedef llgo_uintptr (*llgo_callback)(llgo_uintptr argument);
+typedef llgo_uintptr(LLGO_WINAPI *llgo_stdcall_callback)(llgo_uintptr argument);
+typedef struct {
+    unsigned int low;
+    unsigned int high;
+} llgo_callback_pair;
+typedef llgo_uintptr (*llgo_pair_callback)(llgo_callback_pair value);
 
 __declspec(dllimport) void *LLGO_WINAPI
 CreateThread(void *attributes, llgo_size_t stack_size,
@@ -22,26 +28,31 @@ __declspec(dllimport) llgo_bool LLGO_WINAPI CloseHandle(void *handle);
 __declspec(dllimport) llgo_dword LLGO_WINAPI GetLastError(void);
 
 typedef struct {
-    llgo_callback callback;
+    union {
+        llgo_callback cdecl;
+        llgo_stdcall_callback stdcall;
+    } callback;
     llgo_uintptr argument;
     llgo_uintptr result;
+    int cleanstack;
 } llgo_callback_context;
 
 static llgo_dword LLGO_WINAPI llgo_foreign_thread_start(void *parameter)
 {
     llgo_callback_context *context = (llgo_callback_context *)parameter;
-    context->result = context->callback(context->argument);
+    if (context->cleanstack)
+        context->result = context->callback.stdcall(context->argument);
+    else
+        context->result = context->callback.cdecl(context->argument);
     return 0;
 }
 
-int llgo_windows_call_foreign_thread(llgo_callback callback,
-                                     llgo_uintptr argument,
-                                     llgo_uintptr *result)
+static int llgo_windows_run_foreign_callback(llgo_callback_context *context,
+                                             llgo_uintptr *result)
 {
     const llgo_dword infinite = 0xffffffffUL;
-    llgo_callback_context context = {callback, argument, 0};
     void *thread = CreateThread(0, 0, llgo_foreign_thread_start,
-                                &context, 0, 0);
+                                context, 0, 0);
     llgo_dword error;
     if (thread == 0)
         return (int)GetLastError();
@@ -51,6 +62,37 @@ int llgo_windows_call_foreign_thread(llgo_callback callback,
         return (int)error;
     }
     CloseHandle(thread);
-    *result = context.result;
+    *result = context->result;
     return 0;
+}
+
+int llgo_windows_call_foreign_thread(llgo_callback callback,
+                                     llgo_uintptr argument,
+                                     llgo_uintptr *result)
+{
+    llgo_callback_context context = {{callback}, argument, 0, 0};
+    return llgo_windows_run_foreign_callback(&context, result);
+}
+
+int llgo_windows_call_foreign_thread_stdcall(llgo_stdcall_callback callback,
+                                             llgo_uintptr argument,
+                                             llgo_uintptr *result)
+{
+    llgo_callback_context context = {{0}, argument, 0, 1};
+    context.callback.stdcall = callback;
+    return llgo_windows_run_foreign_callback(&context, result);
+}
+
+int llgo_windows_call_foreign_thread_cdecl(llgo_callback callback,
+                                           llgo_uintptr argument,
+                                           llgo_uintptr *result)
+{
+    llgo_callback_context context = {{callback}, argument, 0, 0};
+    return llgo_windows_run_foreign_callback(&context, result);
+}
+
+llgo_uintptr llgo_windows_call_pair_callback(llgo_pair_callback callback,
+                                             llgo_callback_pair value)
+{
+    return callback(value);
 }

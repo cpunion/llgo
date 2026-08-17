@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 	"runtime"
+	"syscall"
 	_ "unsafe"
 
 	_ "github.com/xgo-dev/llgo/runtime/internal/runtime"
@@ -12,6 +13,20 @@ const LLGoFiles = "_wrap/ffi.c"
 
 //go:linkname callOnForeignThread C.llgo_windows_call_foreign_thread
 func callOnForeignThread(fn, arg uintptr, result *uintptr) int32
+
+//go:linkname callOnForeignThreadStdcall C.llgo_windows_call_foreign_thread_stdcall
+func callOnForeignThreadStdcall(fn, arg uintptr, result *uintptr) int32
+
+//go:linkname callOnForeignThreadCDecl C.llgo_windows_call_foreign_thread_cdecl
+func callOnForeignThreadCDecl(fn, arg uintptr, result *uintptr) int32
+
+type callbackPair struct {
+	Low  uint32
+	High uint32
+}
+
+//go:linkname callPairCallback C.llgo_windows_call_pair_callback
+func callPairCallback(fn uintptr, value callbackPair) uintptr
 
 type pair struct {
 	Integer int64
@@ -80,6 +95,128 @@ func checkForeignCallback(finalized chan uintptr) {
 	}
 }
 
+func expectCallbackPanic(want string, call func()) {
+	defer func() {
+		if got := recover(); got != want {
+			panic("syscall callback validation returned the wrong panic")
+		}
+	}()
+	call()
+	panic("syscall callback validation did not panic")
+}
+
+func testCallbackValidation() {
+	expectCallbackPanic("compileCallback: expected function with one uintptr-sized result", func() {
+		syscall.NewCallback(42)
+	})
+	expectCallbackPanic("compileCallback: expected function with one uintptr-sized result", func() {
+		syscall.NewCallback(func() {})
+	})
+	expectCallbackPanic("compileCallback: expected function with one uintptr-sized result", func() {
+		syscall.NewCallback(func() uint8 { return 0 })
+	})
+	expectCallbackPanic("compileCallback: argument size is larger than uintptr", func() {
+		syscall.NewCallback(func([2]uintptr) uintptr { return 0 })
+	})
+	expectCallbackPanic("compileCallback: type chan int is currently not supported for use in system callbacks", func() {
+		syscall.NewCallback(func(chan int) uintptr { return 0 })
+	})
+	if runtime.GOARCH != "386" {
+		expectCallbackPanic("compileCallback: float arguments not supported", func() {
+			syscall.NewCallback(func(float32) uintptr { return 0 })
+		})
+	}
+}
+
+func registerStdcallCallback(finalized chan uintptr, deferred, recovered *bool) uintptr {
+	probe := &foreignGCProbe{value: 200}
+	runtime.SetFinalizer(probe, func(value *foreignGCProbe) {
+		finalized <- value.value
+	})
+	callback := func(argument uintptr) uintptr {
+		defer func() { *deferred = true }()
+		func() {
+			defer func() {
+				if value := recover(); value == "Windows syscall callback panic" {
+					*recovered = true
+				}
+			}()
+			panic("Windows syscall callback panic")
+		}()
+		stackProbe := &foreignGCProbe{value: 11}
+		runtime.SetFinalizer(stackProbe, func(value *foreignGCProbe) {
+			finalized <- value.value
+		})
+		runtime.GC()
+		select {
+		case <-finalized:
+			panic("Windows syscall callback lost a live GC root")
+		default:
+		}
+		if stackProbe.value != 11 {
+			panic("Windows syscall callback corrupted a stack root")
+		}
+		runtime.KeepAlive(stackProbe)
+		return probe.value + argument
+	}
+	code := syscall.NewCallback(callback)
+	if code == 0 || syscall.NewCallback(callback) != code {
+		panic("syscall.NewCallback did not cache the callback")
+	}
+	if runtime.GOARCH != "386" && syscall.NewCallbackCDecl(callback) != code {
+		panic("Windows 64-bit callbacks unexpectedly distinguished cdecl")
+	}
+	return code
+}
+
+func testSyscallCallbacks() {
+	testCallbackValidation()
+
+	finalized := make(chan uintptr, 2)
+	deferred := false
+	recovered := false
+	stdcall := registerStdcallCallback(finalized, &deferred, &recovered)
+	runtime.GC()
+	var result uintptr
+	if errno := callOnForeignThreadStdcall(stdcall, 23, &result); errno != 0 || result != 223 {
+		panic("syscall.NewCallback failed on a foreign thread")
+	}
+	if !deferred || !recovered {
+		panic("syscall.NewCallback lost defer or panic/recover state")
+	}
+
+	base := uintptr(300)
+	cdeclFn := func(argument uintptr) uintptr { return base + argument }
+	cdecl := syscall.NewCallbackCDecl(cdeclFn)
+	if cdecl == 0 || syscall.NewCallbackCDecl(cdeclFn) != cdecl {
+		panic("syscall.NewCallbackCDecl did not cache the callback")
+	}
+	stdcallForCDeclFn := syscall.NewCallback(cdeclFn)
+	if runtime.GOARCH == "386" {
+		if stdcallForCDeclFn == cdecl {
+			panic("Windows 386 callbacks did not distinguish stdcall and cdecl")
+		}
+	} else if stdcallForCDeclFn != cdecl {
+		panic("Windows 64-bit callbacks unexpectedly distinguished stdcall")
+	}
+	cdeclFn = nil
+	runtime.GC()
+	result = 0
+	if errno := callOnForeignThreadCDecl(cdecl, 21, &result); errno != 0 || result != 321 {
+		panic("syscall.NewCallbackCDecl failed on a foreign thread")
+	}
+
+	if runtime.GOARCH != "386" {
+		pairBase := uintptr(400)
+		pairCallback := syscall.NewCallbackCDecl(func(value callbackPair) uintptr {
+			return pairBase + uintptr(value.Low) + uintptr(value.High)
+		})
+		if got := callPairCallback(pairCallback, callbackPair{Low: 5, High: 7}); got != 412 {
+			panic("Windows callback corrupted a pointer-sized aggregate argument")
+		}
+	}
+}
+
 func main() {
 	base := int64(40)
 	integer := func(value int64) int64 { return base + value }
@@ -129,6 +266,7 @@ func main() {
 		finalized := make(chan uintptr, 2)
 		checkForeignCallback(finalized)
 	}
+	testSyscallCallbacks()
 
 	println("windows FFI smoke: ok")
 }
