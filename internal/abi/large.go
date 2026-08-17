@@ -114,6 +114,7 @@ func (l largeAggregateLowerer) transformFunc(m llvm.Module, fn llvm.Value) {
 	fn.SetName("")
 	nfn := llvm.AddFunction(m, name, newType)
 	nfn.SetLinkage(fn.Linkage())
+	nfn.SetComdat(fn.Comdat())
 	nfn.SetFunctionCallConv(fn.FunctionCallConv())
 	nfn.AddAttributeAtIndex(1, sretAttribute(ctx, retType))
 	for _, attr := range fn.GetFunctionAttributes() {

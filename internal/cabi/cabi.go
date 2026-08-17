@@ -387,6 +387,7 @@ func (p *Transformer) transformFunc(m llvm.Module, fn llvm.Value) bool {
 		nfn.AddAttributeAtIndex(1, preloweredSRet)
 	}
 	nfn.SetLinkage(fn.Linkage())
+	nfn.SetComdat(fn.Comdat())
 	nfn.SetFunctionCallConv(fn.FunctionCallConv())
 	for _, attr := range fn.GetFunctionAttributes() {
 		nfn.AddAttributeAtIndex(-1, attr)
@@ -696,7 +697,7 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 		return wrapFunc, true
 	}
 	wrapFunc := llvm.AddFunction(m, wrapName, nft)
-	wrapFunc.SetLinkage(llvm.LinkOnceAnyLinkage)
+	p.setODRLinkage(m, wrapFunc, llvm.LinkOnceAnyLinkage)
 	wrapFunc.AddFunctionAttr(funcInlineHint(ctx))
 
 	for i, attr := range attrs {
@@ -772,6 +773,20 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 		b.CreateRet(ret)
 	}
 	return wrapFunc, true
+}
+
+// setODRLinkage gives multiply emitted definitions the COMDAT metadata that
+// COFF linkers require. LLVM weak/linkonce linkage alone becomes a weak
+// external fallback in COFF, which lld-link cannot coalesce across objects.
+func (p *Transformer) setODRLinkage(m llvm.Module, value llvm.Value, linkage llvm.Linkage) {
+	value.SetLinkage(linkage)
+	target := p.prog.Target()
+	if target == nil || target.GOOS != "windows" {
+		return
+	}
+	comdat := m.Comdat(value.Name())
+	comdat.SetSelectionKind(llvm.AnyComdatSelectionKind)
+	value.SetComdat(comdat)
 }
 
 var closureEnvAttributeKinds = []uint{
