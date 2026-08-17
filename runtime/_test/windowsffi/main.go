@@ -198,6 +198,36 @@ func registerStdcallCallback(finalized chan uintptr, deferred, recovered *bool) 
 	return code
 }
 
+//go:noinline
+func makeSyscallCallback(base uintptr) func(uintptr) uintptr {
+	return func(argument uintptr) uintptr { return base + argument }
+}
+
+func testDistinctClosureCallbacks() {
+	first := makeSyscallCallback(600)
+	second := makeSyscallCallback(700)
+	if reflect.ValueOf(first).Pointer() != reflect.ValueOf(second).Pointer() {
+		panic("callback closure test did not share one code entry")
+	}
+
+	firstCode := syscall.NewCallbackCDecl(first)
+	secondCode := syscall.NewCallbackCDecl(second)
+	if firstCode == secondCode {
+		panic("callbacks with distinct closure environments shared a trampoline")
+	}
+	first = nil
+	second = nil
+	runtime.GC()
+
+	var result uintptr
+	if errno := callOnForeignThreadCDecl(firstCode, 1, &result); errno != 0 || result != 601 {
+		panic("first closure callback lost its environment")
+	}
+	if errno := callOnForeignThreadCDecl(secondCode, 2, &result); errno != 0 || result != 702 {
+		panic("second closure callback lost its environment")
+	}
+}
+
 func testSyscallCallbacks() {
 	testCallbackValidation()
 
@@ -250,6 +280,7 @@ func testSyscallCallbacks() {
 	if got := callNoArgCallback(emptyCallback); got != 515 {
 		panic("Windows callback corrupted a zero-sized argument")
 	}
+	testDistinctClosureCallbacks()
 }
 
 func main() {
