@@ -33,8 +33,9 @@ func TestLowerLargeAggregates(t *testing.T) {
 	const testIR = `
 %Large = type [65537 x i8]
 %Small = type [65536 x i8]
+$callee = comdat any
 
-define %Large @callee(ptr nonnull %src) #1 {
+define linkonce_odr %Large @callee(ptr nonnull %src) #1 comdat {
 entry:
   %value = load %Large, ptr %src, align 1
   %first = getelementptr inbounds %Large, ptr %src, i64 0, i64 0
@@ -103,8 +104,14 @@ attributes #1 = { noinline }
 	LowerLargeAggregates(td, mod)
 
 	callee := mod.NamedFunction("callee").String()
-	if !strings.Contains(callee, "define void @callee(ptr sret([65537 x i8])") {
+	if !strings.Contains(callee, "define linkonce_odr void @callee(ptr sret([65537 x i8])") {
 		t.Fatalf("large return was not lowered to sret:\n%s", callee)
+	}
+	if !strings.Contains(callee, "comdat") {
+		t.Fatalf("large return lowering lost COMDAT metadata:\n%s", callee)
+	}
+	if kind := mod.NamedFunction("callee").Comdat().SelectionKind(); kind != llvm.AnyComdatSelectionKind {
+		t.Fatalf("large return COMDAT selection = %v, want any", kind)
 	}
 	if !strings.Contains(callee, "ptr nonnull %") || !strings.Contains(callee, "noinline") {
 		t.Fatalf("callee attributes were not preserved:\n%s", callee)
