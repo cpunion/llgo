@@ -99,7 +99,11 @@ jobs:
           llvm-config --version
           go test -tags="$build_tags" \
             ./internal/meta \
+            ./internal/goarch \
             ./internal/xtool/llvm
+          go test -tags="$build_tags" \
+            -run '^Test(ResolveGOARCHConfig|ResolveBuildConfigInvalidGOARCHValueIsAtomic|GOARCHEnv|GOARCHConfigSeparatesCacheFingerprints)$' \
+            ./internal/build
           go test -tags="$build_tags" \
             -run '^(TestAcquire(AndReleaseLock(Errors)?|LockConcurrency)|TestNativeWindows.*|TestCOFFLTOLevel)$' \
             ./internal/crosscompile
