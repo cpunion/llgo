@@ -3,7 +3,7 @@ package llvm
 import (
 	"runtime"
 
-	archcfg "github.com/goplus/llgo/internal/goarch"
+	archcfg "github.com/xgo-dev/llgo/internal/goarch"
 )
 
 func GetTargetTriple(goos, goarch string) string {
