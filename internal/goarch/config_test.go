@@ -64,14 +64,14 @@ func TestParseARM(t *testing.T) {
 		wantSoft bool
 		wantErr  bool
 	}{
-		{value: "", want: "7"},
-		{value: "5", want: "5", wantSoft: true},
+		{value: "", want: "7,hardfloat"},
+		{value: "5", want: "5,softfloat", wantSoft: true},
 		{value: "5,softfloat", want: "5,softfloat", wantSoft: true},
 		{value: "5,hardfloat", want: "5,hardfloat"},
-		{value: "6", want: "6"},
+		{value: "6", want: "6,hardfloat"},
 		{value: "6,softfloat", want: "6,softfloat", wantSoft: true},
 		{value: "7,hardfloat", want: "7,hardfloat"},
-		{value: "4", want: "7", wantErr: true},
+		{value: "4", want: "7,hardfloat", wantErr: true},
 		{value: "7,softfloat,hardfloat", want: "7,hardfloat", wantErr: true},
 	} {
 		got, err := ParseARM(test.value)

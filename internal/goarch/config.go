@@ -67,19 +67,13 @@ func ResolveAMD64(value string) (string, error) {
 type ARM struct {
 	Version   string
 	SoftFloat bool
-	floatSet  bool
 }
 
 func (f ARM) String() string {
-	value := f.Version
-	if f.floatSet {
-		if f.SoftFloat {
-			value += ",softfloat"
-		} else {
-			value += ",hardfloat"
-		}
+	if f.SoftFloat {
+		return f.Version + ",softfloat"
 	}
-	return value
+	return f.Version + ",hardfloat"
 }
 
 // ParseARM validates and normalizes GOARM. ARMv5 defaults to software floating
@@ -95,12 +89,13 @@ func ParseARM(value string) (ARM, error) {
 		hardFloat = ",hardfloat"
 	)
 	var ret ARM
+	floatSet := false
 	if strings.HasSuffix(value, softFloat) {
 		ret.SoftFloat = true
-		ret.floatSet = true
+		floatSet = true
 		value = strings.TrimSuffix(value, softFloat)
 	} else if strings.HasSuffix(value, hardFloat) {
-		ret.floatSet = true
+		floatSet = true
 		value = strings.TrimSuffix(value, hardFloat)
 	}
 	switch value {
@@ -110,7 +105,7 @@ func ParseARM(value string) (ARM, error) {
 		ret.Version = DefaultARM
 		return ret, fmt.Errorf("invalid GOARM: must start with 5, 6, or 7, and may optionally end in either %q or %q", hardFloat, softFloat)
 	}
-	if !ret.floatSet && ret.Version == "5" {
+	if !floatSet && ret.Version == "5" {
 		ret.SoftFloat = true
 	}
 	return ret, nil
