@@ -133,8 +133,8 @@ func TestAcquireAndReleaseLockErrors(t *testing.T) {
 		if opened == nil {
 			t.Fatal("lock callback did not receive the opened file")
 		}
-		if _, err := opened.Stat(); !errors.Is(err, os.ErrClosed) {
-			t.Fatalf("failed lock file remained open: Stat error = %v", err)
+		if err := opened.Close(); err == nil {
+			t.Fatal("failed lock file remained open")
 		}
 	})
 
