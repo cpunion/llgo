@@ -87,135 +87,38 @@ func windowsCallbackABI(cleanstack bool) ffi.ABI {
 
 func windowsCallbackFFIType(t *abi.Type) *ffi.Type {
 	if t.Size_ == 0 {
-		return ffi.StructOf()
+		return goABIFFIType(t)
 	}
 	if t.Size_ > unsafe.Sizeof(uintptr(0)) {
 		panic("compileCallback: argument size is larger than uintptr")
 	}
 	switch t.Kind() {
-	case abi.Bool:
-		return ffi.TypeBool
-	case abi.Int:
-		return ffi.TypeInt
-	case abi.Int8:
-		return ffi.TypeInt8
-	case abi.Int16:
-		return ffi.TypeInt16
-	case abi.Int32:
-		return ffi.TypeInt32
-	case abi.Int64:
-		return ffi.TypeInt64
-	case abi.Uint:
-		return ffi.TypeUint
-	case abi.Uint8:
-		return ffi.TypeUint8
-	case abi.Uint16:
-		return ffi.TypeUint16
-	case abi.Uint32:
-		return ffi.TypeUint32
-	case abi.Uint64:
-		return ffi.TypeUint64
-	case abi.Uintptr:
-		return ffi.TypeUintptr
-	case abi.Float32:
+	case abi.Bool, abi.Int, abi.Int8, abi.Int16, abi.Int32, abi.Int64,
+		abi.Uint, abi.Uint8, abi.Uint16, abi.Uint32, abi.Uint64, abi.Uintptr,
+		abi.Pointer, abi.UnsafePointer:
+	case abi.Float32, abi.Float64:
 		if GOARCH != "386" {
 			panic("compileCallback: float arguments not supported")
 		}
-		return ffi.TypeFloat32
-	case abi.Float64:
-		if GOARCH != "386" {
-			panic("compileCallback: float arguments not supported")
-		}
-		return ffi.TypeFloat64
-	case abi.Pointer, abi.UnsafePointer:
-		return ffi.TypePointer
 	case abi.Array:
 		at := t.ArrayType()
 		if at.Len == 1 {
-			return ffi.ArrayOf(windowsCallbackFFIType(at.Elem), 1)
+			windowsCallbackFFIType(at.Elem)
+			break
 		}
+		panic("compileCallback: type " + t.String() + " is currently not supported for use in system callbacks")
 	case abi.Struct:
-		return windowsCallbackFFIStructType(t)
-	}
-	panic("compileCallback: type " + t.String() + " is currently not supported for use in system callbacks")
-}
-
-func windowsCallbackFFIStructType(t *abi.Type) *ffi.Type {
-	st := t.StructType()
-	fields := make([]*ffi.Type, 0, len(st.Fields))
-	var off uintptr
-	for _, field := range st.Fields {
-		if field.Offset > off {
-			fields, off = appendWindowsCallbackFFIPadding(fields, off, field.Offset-off)
+		for _, field := range t.StructType().Fields {
+			windowsCallbackFFIType(field.Typ)
 		}
-		if field.Typ.Size_ == 0 {
-			continue
-		}
-		fields = append(fields, windowsCallbackFFIType(field.Typ))
-		off = field.Offset + field.Typ.Size_
+	default:
+		panic("compileCallback: type " + t.String() + " is currently not supported for use in system callbacks")
 	}
-	return ffi.StructOf(fields...)
-}
-
-func appendWindowsCallbackFFIPadding(fields []*ffi.Type, off, size uintptr) ([]*ffi.Type, uintptr) {
-	for size > 0 {
-		switch {
-		case off%8 == 0 && size >= 8:
-			fields = append(fields, ffi.TypeUint64)
-			off += 8
-			size -= 8
-		case off%4 == 0 && size >= 4:
-			fields = append(fields, ffi.TypeUint32)
-			off += 4
-			size -= 4
-		case off%2 == 0 && size >= 2:
-			fields = append(fields, ffi.TypeUint16)
-			off += 2
-			size -= 2
-		default:
-			fields = append(fields, ffi.TypeUint8)
-			off++
-			size--
-		}
-	}
-	return fields, off
+	return goABIFFIType(t)
 }
 
 func windowsCallbackResultFFIType(t *abi.Type) *ffi.Type {
-	switch t.Kind() {
-	case abi.Bool:
-		return ffi.TypeBool
-	case abi.Int:
-		return ffi.TypeInt
-	case abi.Int8:
-		return ffi.TypeInt8
-	case abi.Int16:
-		return ffi.TypeInt16
-	case abi.Int32:
-		return ffi.TypeInt32
-	case abi.Int64:
-		return ffi.TypeInt64
-	case abi.Uint:
-		return ffi.TypeUint
-	case abi.Uint8:
-		return ffi.TypeUint8
-	case abi.Uint16:
-		return ffi.TypeUint16
-	case abi.Uint32:
-		return ffi.TypeUint32
-	case abi.Uint64:
-		return ffi.TypeUint64
-	case abi.Uintptr:
-		return ffi.TypeUintptr
-	case abi.Pointer, abi.UnsafePointer, abi.Chan, abi.Map:
-		return ffi.TypePointer
-	case abi.Array:
-		at := t.ArrayType()
-		return ffi.ArrayOf(windowsCallbackResultFFIType(at.Elem), int(at.Len))
-	case abi.Struct:
-		return windowsCallbackFFIStructType(t)
-	}
-	panic("compileCallback: type " + t.String() + " is currently not supported for use in system callbacks")
+	return goABIFFIType(t)
 }
 
 func newWindowsCallbackEntry(fn any, callbackFn *windowsCallbackFunc, ft *abi.FuncType, cleanstack bool) *windowsCallbackEntry {
