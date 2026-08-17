@@ -2,7 +2,7 @@
 
 package thread
 
-import _ "github.com/goplus/llgo/runtime/internal/clite/bdwgc"
+import _ "github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
 
 const (
 	LLGoFiles   = "_wrap/thread_windows_gc.c"
