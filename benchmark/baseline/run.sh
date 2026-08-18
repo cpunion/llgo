@@ -25,6 +25,7 @@ result_directory="$(cd "$3" && pwd)"
   # suite changes must therefore remain executable against the PR base.
   LLGO_ROOT="$source_root" go run ./benchmark/baseline \
     -root "$source_root" \
+    -harness-root "$harness_root" \
     -llgo "$llgo_output" \
     -out "$result_directory"
 )
@@ -83,41 +84,6 @@ drop_first_benchmark_sample() {
     -cpu=1 \
     ./test/llgoext
 ) | drop_first_benchmark_sample | tee -a "$go_results"
-
-memprofile_noconsumer="$result_directory/bin/memprofile-noconsumer"
-memprofile_enabled="$result_directory/bin/memprofile-enabled"
-(
-  cd "$harness_root"
-  GOMAXPROCS=1 LLGO_ROOT="$source_root" LLGO_FULL_RPATH=true "$llgo_output" build \
-    -o "$memprofile_noconsumer" \
-    ./benchmark/memprofile/noconsumer
-  GOMAXPROCS=1 LLGO_ROOT="$source_root" LLGO_FULL_RPATH=true "$llgo_output" build \
-    -o "$memprofile_enabled" \
-    ./benchmark/memprofile/enabled
-)
-
-# Each executable also warms its allocator internally before timing. These
-# discarded processes additionally remove loader and first-execution effects.
-GOMAXPROCS=1 "$memprofile_noconsumer" >/dev/null 2>&1
-GOMAXPROCS=1 "$memprofile_enabled" rate0 >/dev/null 2>&1
-GOMAXPROCS=1 "$memprofile_enabled" >/dev/null 2>&1
-
-# Rotate the order so every mode occupies each scheduling position across the
-# seven independent process samples.
-for round in {0..6}; do
-  case $((round % 3)) in
-    0) modes=(noconsumer rate0 default) ;;
-    1) modes=(rate0 default noconsumer) ;;
-    2) modes=(default noconsumer rate0) ;;
-  esac
-  for mode in "${modes[@]}"; do
-    case "$mode" in
-      noconsumer) GOMAXPROCS=1 "$memprofile_noconsumer" 2>&1 ;;
-      rate0) GOMAXPROCS=1 "$memprofile_enabled" rate0 2>&1 ;;
-      default) GOMAXPROCS=1 "$memprofile_enabled" 2>&1 ;;
-    esac
-  done
-done | tee -a "$go_results"
 
 (
   cd "$harness_root"

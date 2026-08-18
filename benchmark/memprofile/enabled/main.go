@@ -30,14 +30,13 @@ import (
 func disableGC()
 
 func main() {
-	name := "BenchmarkMemProfileDefault-1"
 	if len(os.Args) == 2 && os.Args[1] == "rate0" {
 		runtime.MemProfileRate = 0
-		name = "BenchmarkMemProfileRate0-1"
 	}
+	// Keep the profiling consumer in this executable without including profile
+	// materialization in the timed allocation region.
+	runtime.MemProfile(nil, false)
 	disableGC()
 	elapsed := runner.Run()
-	println(name, runner.Iterations,
-		float64(elapsed.Nanoseconds())/runner.Iterations, "ns/op")
-	runtime.MemProfile(nil, false)
+	println(elapsed.Nanoseconds())
 }

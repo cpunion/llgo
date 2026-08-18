@@ -5,14 +5,12 @@ site-path: benchmark/baseline
 include:
   - "^BenchmarkProgram/"
   - "^Benchmark(MergeCompilerFlags|MergeLinkerFlags|LookupPCRandom)$"
-  - "^BenchmarkMemProfile(NoConsumer|Rate0|Default)$"
   - "^Benchmark(RuntimeGetG|Global(Read|Write))$"
   - "^Benchmark(DirectCall|InterfaceCall|Defer|Goroutine)$"
   - "^BenchmarkChannel(Buffered|Handoff)$"
 groups:
   programs: "^Program/"
   compiler: "^(MergeCompilerFlags|MergeLinkerFlags|LookupPCRandom)$"
-  memprofile: "^MemProfile(NoConsumer|Rate0|Default)$"
   core:
     match:
       - "^(RuntimeGetG|Global(Read|Write))$"
@@ -43,20 +41,6 @@ views:
         run-ns:
           title: Run
           format: duration-ns
-  memprofile:
-    title: Memory profiling allocation benchmarks
-    select:
-      groups: "^memprofile$"
-      metrics: "^ns/op$"
-    table:
-      rows: [platform, benchmark]
-      columns: [metric]
-      missing: error
-      empty: error
-      dimensions:
-        benchmark:
-          title: Profile path
-          trim-prefix: BenchmarkMemProfile
   core:
     title: Core language and compiler benchmarks
     select:

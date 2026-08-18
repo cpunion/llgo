@@ -30,6 +30,5 @@ func disableGC()
 func main() {
 	disableGC()
 	elapsed := runner.Run()
-	println("BenchmarkMemProfileNoConsumer-1", runner.Iterations,
-		float64(elapsed.Nanoseconds())/runner.Iterations, "ns/op")
+	println(elapsed.Nanoseconds())
 }

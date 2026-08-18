@@ -48,15 +48,37 @@ type metric struct {
 }
 
 type workload struct {
-	name   string
-	source string
-	output string
+	name             string
+	source           string
+	output           string
+	args             []string
+	harnessSource    bool
+	internalDuration bool
 }
 
 var workloads = []workload{
 	{name: "cprintf", source: "benchmark/binary_size/cprintf/main.go", output: "Hello, world\n"},
 	{name: "println", source: "benchmark/binary_size/println/main.go", output: "Hello, world\n"},
 	{name: "fmtprintf", source: "benchmark/binary_size/fmtprintf/main.go", output: "Hello, world\n"},
+	{
+		name:             "memprofile-no-consumer",
+		source:           "benchmark/memprofile/noconsumer",
+		harnessSource:    true,
+		internalDuration: true,
+	},
+	{
+		name:             "memprofile-rate0",
+		source:           "benchmark/memprofile/enabled",
+		args:             []string{"rate0"},
+		harnessSource:    true,
+		internalDuration: true,
+	},
+	{
+		name:             "memprofile-default",
+		source:           "benchmark/memprofile/enabled",
+		harnessSource:    true,
+		internalDuration: true,
+	},
 }
 
 var expectedGoBenchmarks = []string{
@@ -69,9 +91,6 @@ var expectedGoBenchmarks = []string{
 	"BenchmarkGoroutine",
 	"BenchmarkInterfaceCall",
 	"BenchmarkLookupPCRandom",
-	"BenchmarkMemProfileDefault",
-	"BenchmarkMemProfileNoConsumer",
-	"BenchmarkMemProfileRate0",
 	"BenchmarkMergeCompilerFlags",
 	"BenchmarkMergeLinkerFlags",
 	"BenchmarkRuntimeGetG",
@@ -100,10 +119,11 @@ func runCLI(ctx context.Context, args []string) error {
 	flags.SetOutput(io.Discard)
 	mode := flags.String("mode", "collect", "collect, validate, or export")
 	root := flags.String("root", ".", "LLGo repository root")
+	harnessRoot := flags.String("harness-root", ".", "benchmark harness repository root")
 	llgo := flags.String("llgo", "llgo", "LLGo command")
 	out := flags.String("out", filepath.Join("benchmark", "baseline", "out"), "result directory")
-	buildRuns := flags.Int("build-runs", 5, "build repetitions per workload")
-	runRuns := flags.Int("run-runs", 15, "process repetitions per workload")
+	buildRuns := flags.Int("build-runs", 6, "build repetitions per workload")
+	runRuns := flags.Int("run-runs", 18, "process repetitions per workload")
 	benchmarkOutput := flags.String(
 		"benchmark-output",
 		"",
@@ -115,7 +135,7 @@ func runCLI(ctx context.Context, args []string) error {
 
 	switch *mode {
 	case "collect":
-		return collect(ctx, *root, *llgo, *out, *buildRuns, *runRuns)
+		return collectWithHarness(ctx, *root, *harnessRoot, *llgo, *out, *buildRuns, *runRuns)
 	case "validate":
 		return validateArtifact(*out)
 	case "export":
@@ -199,6 +219,12 @@ func formatMetric(value float64) string {
 }
 
 func collect(ctx context.Context, root, llgo, out string, buildRuns, runRuns int) error {
+	return collectWithHarness(ctx, root, root, llgo, out, buildRuns, runRuns)
+}
+
+func collectWithHarness(
+	ctx context.Context, root, harnessRoot, llgo, out string, buildRuns, runRuns int,
+) error {
 	if buildRuns <= 0 || runRuns <= 0 {
 		return errors.New("build and run repetitions must be positive")
 	}
@@ -217,30 +243,60 @@ func collect(ctx context.Context, root, llgo, out string, buildRuns, runRuns int
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
 	}
+	harnessRoot, err = filepath.Abs(harnessRoot)
+	if err != nil {
+		return err
+	}
 
 	env := append(os.Environ(),
 		"GOMAXPROCS=2",
 		"LLGO_ROOT="+root,
 		"LLGO_FULL_RPATH=true",
 	)
-	var sizes, timings []metric
+	type measurement struct {
+		binary         string
+		buildDurations []time.Duration
+		runDurations   []time.Duration
+	}
+	measurements := make([]measurement, len(workloads))
+
+	// Warm every workload before measuring any of them so the first workload
+	// does not pay unique toolchain and filesystem cache costs.
 	for _, item := range workloads {
 		binary := filepath.Join(binDir, item.name)
-		// Keep first-use toolchain and filesystem caches out of the measured
-		// median so the first revision is not systematically disadvantaged.
-		if err := run(ctx, env, io.Discard, llgo, "build", "-o", binary, filepath.Join(root, item.source)); err != nil {
+		sourceRoot := root
+		if item.harnessSource {
+			sourceRoot = harnessRoot
+		}
+		if err := run(ctx, env, io.Discard, llgo, "build", "-o", binary, filepath.Join(sourceRoot, item.source)); err != nil {
 			return fmt.Errorf("warm build %s: %w", item.name, err)
 		}
-		buildDurations := make([]time.Duration, 0, buildRuns)
-		for range buildRuns {
+	}
+
+	// Rotate workload order across rounds to balance runner drift and cache
+	// position instead of consistently favoring the first or last workload.
+	for round := range buildRuns {
+		for offset := range workloads {
+			index := (round + offset) % len(workloads)
+			item := workloads[index]
+			binary := filepath.Join(binDir, item.name)
+			sourceRoot := root
+			if item.harnessSource {
+				sourceRoot = harnessRoot
+			}
 			start := time.Now()
-			if err := run(ctx, env, io.Discard, llgo, "build", "-o", binary, filepath.Join(root, item.source)); err != nil {
+			if err := run(ctx, env, io.Discard, llgo, "build", "-o", binary, filepath.Join(sourceRoot, item.source)); err != nil {
 				return fmt.Errorf("build %s: %w", item.name, err)
 			}
-			buildDurations = append(buildDurations, time.Since(start))
+			measurements[index].buildDurations = append(measurements[index].buildDurations, time.Since(start))
 		}
-		timings = append(timings, durationMetric("compile/"+item.name, buildDurations))
+	}
 
+	var sizes, timings []metric
+	for index, item := range workloads {
+		binary := filepath.Join(binDir, item.name)
+		measurements[index].binary = binary
+		timings = append(timings, durationMetric("compile/"+item.name, measurements[index].buildDurations))
 		size, err := inspectExecutable(binary)
 		if err != nil {
 			return fmt.Errorf("inspect %s: %w", item.name, err)
@@ -253,27 +309,55 @@ func collect(ctx context.Context, root, llgo, out string, buildRuns, runRuns int
 		)
 
 		var output bytes.Buffer
-		if err := run(ctx, env, &output, binary); err != nil {
+		if err := run(ctx, env, &output, binary, item.args...); err != nil {
 			return fmt.Errorf("execute %s: %w", item.name, err)
 		}
-		if got := strings.ReplaceAll(output.String(), "\r\n", "\n"); got != item.output {
-			return fmt.Errorf("execute %s: output %q, want %q", item.name, got, item.output)
-		}
-		runDurations := make([]time.Duration, 0, runRuns)
-		for range runRuns {
-			start := time.Now()
-			if err := run(ctx, env, io.Discard, binary); err != nil {
+		if item.internalDuration {
+			if _, err := parseInternalDuration(output.String()); err != nil {
 				return fmt.Errorf("execute %s: %w", item.name, err)
 			}
-			runDurations = append(runDurations, time.Since(start))
+		} else if got := strings.ReplaceAll(output.String(), "\r\n", "\n"); got != item.output {
+			return fmt.Errorf("execute %s: output %q, want %q", item.name, got, item.output)
 		}
-		timings = append(timings, durationMetric("run/"+item.name, runDurations))
+	}
+
+	for round := range runRuns {
+		for offset := range workloads {
+			index := (round + offset) % len(workloads)
+			item := workloads[index]
+			measurement := &measurements[index]
+			var output bytes.Buffer
+			start := time.Now()
+			if err := run(ctx, env, &output, measurement.binary, item.args...); err != nil {
+				return fmt.Errorf("execute %s: %w", item.name, err)
+			}
+			duration := time.Since(start)
+			if item.internalDuration {
+				duration, err = parseInternalDuration(output.String())
+				if err != nil {
+					return fmt.Errorf("execute %s: %w", item.name, err)
+				}
+			}
+			measurement.runDurations = append(measurement.runDurations, duration)
+		}
+	}
+	for index, item := range workloads {
+		timings = append(timings, durationMetric("run/"+item.name, measurements[index].runDurations))
 	}
 
 	if err := writeMetrics(filepath.Join(out, "size.json"), sizes); err != nil {
 		return err
 	}
 	return writeMetrics(filepath.Join(out, "time.json"), timings)
+}
+
+func parseInternalDuration(output string) (time.Duration, error) {
+	value := strings.TrimSpace(output)
+	nanoseconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || nanoseconds < 0 {
+		return 0, fmt.Errorf("invalid internal duration %q", value)
+	}
+	return time.Duration(nanoseconds), nil
 }
 
 func run(ctx context.Context, env []string, output io.Writer, name string, args ...string) error {
@@ -301,7 +385,7 @@ func durationMetric(name string, values []time.Duration) metric {
 		Value: median,
 		Range: strconv.FormatInt(ordered[0].Nanoseconds(), 10) + ".." +
 			strconv.FormatInt(ordered[len(ordered)-1].Nanoseconds(), 10),
-		Extra: fmt.Sprintf("median of %d consecutive runs", len(ordered)),
+		Extra: fmt.Sprintf("median of %d rotated runs", len(ordered)),
 	}
 }
 

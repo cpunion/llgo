@@ -15,23 +15,23 @@ The program workloads reuse:
 - `benchmark/binary_size/fmtprintf`: `fmt.Printf`.
 
 For each workload, the collector performs an unmeasured warm build, then records
-the median of five builds and fifteen process runs, file size, executable-code
-bytes, allocated non-executable data, and zero-filled data. On ELF, read-only
-constants are included in the data bucket; on Mach-O, `__TEXT` constants are
-included in the text bucket. The Go benchmark stream discards the first
-one-second sample as warmup, then records seven one-second samples of compiler
-helpers and LLGo-generated core-language operations: direct/interface calls,
-defer, channels, `getg`, and global access.
+the median of six builds and eighteen process runs, file size, executable-code
+bytes, allocated non-executable data, and zero-filled data. Workload order is
+rotated between rounds to balance runner drift and cache position. On ELF,
+read-only constants are included in the data bucket; on Mach-O, `__TEXT`
+constants are included in the text bucket. The Go benchmark stream discards the
+first one-second sample as warmup, then records seven one-second samples of
+compiler helpers and LLGo-generated core-language operations: direct/interface
+calls, defer, channels, `getg`, and global access.
 Goroutine creation keeps its bounded 100-iteration sample and likewise discards
 the first of eight runs.
 
-The memory-profile allocation group uses standalone LLGo executables so the
+The program table also includes standalone memory-profile workloads so the
 whole-program no-consumer path is measurable independently of the retained
 profile paths. Every process disables BDWGC, warms with two million allocations,
-then measures forty million escaping 16-byte allocations. Seven independent
-processes are recorded per mode in rotated order; an additional discarded
-process warms loader state. The reported modes are `NoConsumer`, `Rate0`, and
-`Default`.
+then internally times forty million escaping 16-byte allocations. The reported
+duration is the median of eighteen processes. The workloads are
+`memprofile-no-consumer`, `memprofile-rate0`, and `memprofile-default`.
 
 For pull requests, each platform job checks out the recorded base and current
 commits into the same source path, then runs both suites sequentially on the same

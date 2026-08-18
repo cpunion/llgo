@@ -40,7 +40,7 @@ func TestDurationMetric(t *testing.T) {
 	if got.Name != "compile/test" || got.Unit != "ns" || got.Value != 6 {
 		t.Fatalf("durationMetric = %+v", got)
 	}
-	if got.Range != "3..9" || got.Extra != "median of 3 consecutive runs" {
+	if got.Range != "3..9" || got.Extra != "median of 3 rotated runs" {
 		t.Fatalf("duration metadata = %+v", got)
 	}
 	if !slices.Equal(values, []time.Duration{9, 3, 6}) {
@@ -50,6 +50,18 @@ func TestDurationMetric(t *testing.T) {
 	even := durationMetric("compile/even", []time.Duration{8, 2})
 	if even.Value != 5 || even.Range != "2..8" {
 		t.Fatalf("even durationMetric = %+v", even)
+	}
+}
+
+func TestParseInternalDuration(t *testing.T) {
+	got, err := parseInternalDuration(" 123\n")
+	if err != nil || got != 123*time.Nanosecond {
+		t.Fatalf("parseInternalDuration = %v, %v", got, err)
+	}
+	for _, input := range []string{"", "not-a-duration", "-1"} {
+		if _, err := parseInternalDuration(input); err == nil {
+			t.Fatalf("parseInternalDuration(%q) unexpectedly succeeded", input)
+		}
 	}
 }
 
@@ -97,7 +109,7 @@ func TestExportBenchmarks(t *testing.T) {
 		"Unit file-bytes better=lower assume=exact",
 		"Unit build-ns better=lower",
 		"BenchmarkProgram/cprintf 1 1 file-bytes 1 text-bytes 1 data-bytes 1 bss-bytes 1 build-ns 1 run-ns",
-		"BenchmarkMemProfileNoConsumer-1 100 12.5 ns/op",
+		"BenchmarkProgram/memprofile-no-consumer 1 1 file-bytes 1 text-bytes 1 data-bytes 1 bss-bytes 1 build-ns 1 run-ns",
 		"BenchmarkRuntimeGetG-1 100 12.5 ns/op",
 	} {
 		if !strings.Contains(text, want) {
@@ -294,7 +306,7 @@ func TestCollect(t *testing.T) {
 	})
 
 	out := filepath.Join(root, "out")
-	if err := collect(context.Background(), root, fakeLLGo, out, 1, 1); err != nil {
+	if err := collect(context.Background(), root, fakeLLGo, out, 2, 2); err != nil {
 		t.Fatal(err)
 	}
 	goText := makeGoBenchmarkText()
@@ -487,10 +499,20 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-cat > "$out" <<'LLGO_BENCH_PROGRAM'
+case "$out" in
+  *memprofile-*)
+    cat > "$out" <<'LLGO_BENCH_PROGRAM'
+#!/bin/sh
+printf '1\n'
+LLGO_BENCH_PROGRAM
+    ;;
+  *)
+    cat > "$out" <<'LLGO_BENCH_PROGRAM'
 #!/bin/sh
 ` + program + `
 LLGO_BENCH_PROGRAM
+    ;;
+esac
 chmod +x "$out"
 `
 	return writeScript(t, filepath.Join(root, "llgo"), script)

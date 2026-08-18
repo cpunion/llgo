@@ -19,7 +19,7 @@ package runner
 import "time"
 
 const (
-	Iterations = 40_000_000
+	iterations = 40_000_000
 	warmup     = 2_000_000
 )
 
@@ -35,6 +35,6 @@ func allocate(n int) {
 func Run() time.Duration {
 	allocate(warmup)
 	start := time.Now()
-	allocate(Iterations)
+	allocate(iterations)
 	return time.Since(start)
 }
