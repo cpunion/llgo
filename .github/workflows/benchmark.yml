@@ -78,12 +78,14 @@ jobs:
             "$GITHUB_WORKSPACE/.benchmark/results"
 
       - name: Record benchmark result
-        uses: xgo-dev/setup-benchmark-go-action@v1.0.4
+        uses: xgo-dev/setup-benchmark-go-action@v1
         with:
           config: .github/llgo-benchmark.yml
           benchmark-file: .benchmark/results/benchmark.txt
           baseline-benchmark-file: >-
             ${{ github.event_name == 'pull_request' &&
                 '.benchmark/base-results/benchmark.txt' || '' }}
+          sample-pairing: >-
+            ${{ github.event_name == 'pull_request' && 'index' || '' }}
           platform-id: ${{ matrix.id }}
           platform-label: ${{ matrix.display }}
