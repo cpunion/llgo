@@ -368,6 +368,18 @@ func TestCollectPaired(t *testing.T) {
 	}
 }
 
+func TestCollectionStateIndexAlternatesEachWorkload(t *testing.T) {
+	for workloadIndex := range workloads {
+		first := collectionStateIndex(0, workloadIndex, 0, 2)
+		if second := collectionStateIndex(1, workloadIndex, 0, 2); second == first {
+			t.Fatalf("workload %d keeps state %d first across rounds", workloadIndex, first)
+		}
+		if peer := collectionStateIndex(0, workloadIndex, 1, 2); peer == first {
+			t.Fatalf("workload %d state order repeats %d within a round", workloadIndex, first)
+		}
+	}
+}
+
 func TestCollectRejectsInvalidRuns(t *testing.T) {
 	err := collect(context.Background(), ".", "llgo", t.TempDir(), 0, 1)
 	if err == nil || !strings.Contains(err.Error(), "must be positive") {

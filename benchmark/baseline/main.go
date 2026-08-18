@@ -314,7 +314,7 @@ func collectSpecs(ctx context.Context, specs []collectionSpec, buildRuns, runRun
 	// collections alternate which revision runs first for adjacent workloads.
 	for workloadIndex, item := range workloads {
 		for stateOffset := range states {
-			state := &states[(workloadIndex+stateOffset)%len(states)]
+			state := &states[collectionStateIndex(0, workloadIndex, stateOffset, len(states))]
 			if err := buildWorkload(ctx, state, item); err != nil {
 				return collectionError(state, "warm build", item.name, err)
 			}
@@ -329,7 +329,7 @@ func collectSpecs(ctx context.Context, specs []collectionSpec, buildRuns, runRun
 			index := (round + offset) % len(workloads)
 			item := workloads[index]
 			for stateOffset := range states {
-				state := &states[(round+offset+stateOffset)%len(states)]
+				state := &states[collectionStateIndex(round, index, stateOffset, len(states))]
 				start := time.Now()
 				if err := buildWorkload(ctx, state, item); err != nil {
 					return collectionError(state, "build", item.name, err)
@@ -344,7 +344,7 @@ func collectSpecs(ctx context.Context, specs []collectionSpec, buildRuns, runRun
 	// Inspect final binaries and warm every execution path before timing.
 	for workloadIndex, item := range workloads {
 		for stateOffset := range states {
-			state := &states[(workloadIndex+stateOffset)%len(states)]
+			state := &states[collectionStateIndex(0, workloadIndex, stateOffset, len(states))]
 			binary := filepath.Join(state.binDir, item.name)
 			state.measurements[workloadIndex].binary = binary
 			if _, err := inspectExecutable(binary); err != nil {
@@ -361,7 +361,7 @@ func collectSpecs(ctx context.Context, specs []collectionSpec, buildRuns, runRun
 			index := (round + offset) % len(workloads)
 			item := workloads[index]
 			for stateOffset := range states {
-				state := &states[(round+offset+stateOffset)%len(states)]
+				state := &states[collectionStateIndex(round, index, stateOffset, len(states))]
 				measurement := &state.measurements[index]
 				duration, err := executeWorkload(ctx, state, item, measurement.binary)
 				if err != nil {
@@ -378,6 +378,10 @@ func collectSpecs(ctx context.Context, specs []collectionSpec, buildRuns, runRun
 		}
 	}
 	return nil
+}
+
+func collectionStateIndex(round, workloadIndex, stateOffset, stateCount int) int {
+	return (round + workloadIndex + stateOffset) % stateCount
 }
 
 func buildWorkload(ctx context.Context, state *collectionState, item workload) error {
