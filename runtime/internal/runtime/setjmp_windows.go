@@ -8,10 +8,10 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
-// Windows has no signal-mask variant of setjmp. This is a logical runtime
-// declaration: the SSA builder lowers it directly to _setjmp3 or _setjmpex
-// and supplies the architecture-specific hidden frame operand. A Go or C
-// wrapper would save the wrapper's frame, which no longer exists at longjmp.
+// Windows has no signal-mask variant of setjmp. These are logical runtime
+// declarations: the SSA builder lowers x86 targets to their architecture-
+// specific CRT entry and ARM64 to LLGo's ABI-only context entry. The latter
+// avoids UCRT's virtual unwind because Go defers are unwound by LLGo itself.
 //
 //go:linkname Sigsetjmp C.setjmp
 func Sigsetjmp(env *SigjmpBuf, savemask c.Int) c.Int
