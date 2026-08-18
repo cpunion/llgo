@@ -318,6 +318,56 @@ func TestCollect(t *testing.T) {
 	}
 }
 
+func TestCollectPaired(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("fake compiler uses a POSIX shell")
+	}
+	root := t.TempDir()
+	baseRoot := filepath.Join(root, "base")
+	currentRoot := filepath.Join(root, "current")
+	if err := os.MkdirAll(baseRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(currentRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baseLLGo := writeFakeCompiler(t, baseRoot, "printf 'Hello, world\\n'")
+	currentLLGo := writeFakeCompiler(t, currentRoot, "printf 'Hello, world\\n'")
+
+	oldInspect := inspectExecutable
+	inspectExecutable = func(path string) (footprint, error) {
+		info, err := os.Stat(path)
+		if err != nil {
+			return footprint{}, err
+		}
+		return footprint{file: uint64(info.Size()), text: 10, data: 2, bss: 1}, nil
+	}
+	t.Cleanup(func() {
+		inspectExecutable = oldInspect
+	})
+
+	baseOut := filepath.Join(root, "base-out")
+	currentOut := filepath.Join(root, "current-out")
+	err := collectPaired(
+		context.Background(),
+		collectionSpec{name: "base", root: baseRoot, harnessRoot: root, llgo: baseLLGo, out: baseOut},
+		collectionSpec{name: "current", root: currentRoot, harnessRoot: root, llgo: currentLLGo, out: currentOut},
+		2,
+		2,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []string{baseOut, currentOut} {
+		if err := os.WriteFile(filepath.Join(out, "go.txt"), []byte(makeGoBenchmarkText()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateArtifact(out); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestCollectRejectsInvalidRuns(t *testing.T) {
 	err := collect(context.Background(), ".", "llgo", t.TempDir(), 0, 1)
 	if err == nil || !strings.Contains(err.Error(), "must be positive") {
@@ -468,6 +518,10 @@ func TestRunCLI(t *testing.T) {
 	if err := runCLI(context.Background(), []string{"-mode=unknown"}); err == nil ||
 		!strings.Contains(err.Error(), "unknown mode") {
 		t.Fatalf("unknown CLI error = %v", err)
+	}
+	if err := runCLI(context.Background(), []string{"-mode=collect-paired"}); err == nil ||
+		!strings.Contains(err.Error(), "requires base-root") {
+		t.Fatalf("collect-paired CLI error = %v", err)
 	}
 	if err := runCLI(context.Background(), []string{"-not-a-flag"}); err == nil {
 		t.Fatal("runCLI unexpectedly accepted an unknown flag")

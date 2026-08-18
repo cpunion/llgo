@@ -19,12 +19,11 @@ the median of six builds and eighteen process runs, file size, executable-code
 bytes, allocated non-executable data, and zero-filled data. Workload order is
 rotated between rounds to balance runner drift and cache position. On ELF,
 read-only constants are included in the data bucket; on Mach-O, `__TEXT`
-constants are included in the text bucket. The Go benchmark stream discards the
-first one-second sample as warmup, then records seven one-second samples of
-compiler helpers and LLGo-generated core-language operations: direct/interface
-calls, defer, channels, `getg`, and global access.
-Goroutine creation keeps its bounded 100-iteration sample and likewise discards
-the first of eight runs.
+constants are included in the text bucket. The Go benchmark stream performs one
+unrecorded warmup, then records seven one-second samples of compiler helpers and
+LLGo-generated core-language operations: direct/interface calls, defer,
+channels, `getg`, and global access. Goroutine creation keeps its bounded
+100-iteration samples.
 
 The program table also includes standalone memory-profile workloads so the
 whole-program no-consumer path is measurable independently of the retained
@@ -33,15 +32,15 @@ then internally times forty million escaping 16-byte allocations. The reported
 duration is the median of eighteen processes. The workloads are
 `memprofile-no-consumer`, `memprofile-rate0`, and `memprofile-default`.
 
-For pull requests, each platform job checks out the recorded base and current
-commits into the same source path, then runs both suites sequentially on the same
-runner. The pull request comment compares that pair, avoiding differences from
-runner machines and embedded source paths. Dependency setup is shared, and Go's
-build cache can be reused by unchanged packages; main pushes still run the suite
-only once. Very small changes can still be scheduler, frequency, or thermal
-noise and should be confirmed by repeated workflow runs. If a workflow does not
-provide a paired result, the publisher falls back to the latest matching `main`
-data.
+For pull requests, each platform job builds the recorded base and current
+revisions on one runner, then alternates their measurements within every round.
+Compiler and runtime benchmark binaries are built before sampling, so only their
+execution is interleaved. This prevents a phase-wide frequency, thermal, or host
+load change from being attributed entirely to one revision. Dependency setup is
+shared, and Go's build cache can be reused by unchanged packages; main pushes
+still run the suite only once. Very small changes can remain scheduler noise and
+should be confirmed by repeated workflow runs. If a workflow does not provide a
+paired result, the publisher falls back to the latest matching `main` data.
 
 The trusted publisher commits the current result history and generated site to
 the `pages` branch of the configured data repository. Every LLGo repository
