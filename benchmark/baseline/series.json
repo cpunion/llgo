@@ -13,6 +13,17 @@
     },
     {
       "kind": "branch",
+      "id": "5979559204bbf023",
+      "label": "Branch codex/benchmark-action-6-7-integration-20260818",
+      "path": "series/branch/5979559204bbf023/summary.json",
+      "configPath": "series/branch/5979559204bbf023/config.json",
+      "commitPath": "commits/479ec5a2715ae2bd4ce08d725722f1c59a14f1bc.json",
+      "sha": "479ec5a2715ae2bd4ce08d725722f1c59a14f1bc",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/479ec5a2715ae2bd4ce08d725722f1c59a14f1bc",
+      "updatedAt": "2026-08-18T05:25:06.198Z"
+    },
+    {
+      "kind": "branch",
       "id": "0925a687fec25091",
       "label": "Branch codex/closure-env-ffi-call-go",
       "path": "series/branch/0925a687fec25091/history.json",
@@ -62,6 +73,17 @@
       "sha": "67b68cc97f314fda399f149ac1a254cd2aa8e5ed",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/67b68cc97f314fda399f149ac1a254cd2aa8e5ed",
       "updatedAt": "2026-08-18T04:44:41.282Z"
+    },
+    {
+      "kind": "pull",
+      "id": "170",
+      "label": "PR #170",
+      "path": "series/pull/170/summary.json",
+      "configPath": "series/pull/170/config.json",
+      "commitPath": "commits/479ec5a2715ae2bd4ce08d725722f1c59a14f1bc.json",
+      "sha": "479ec5a2715ae2bd4ce08d725722f1c59a14f1bc",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/479ec5a2715ae2bd4ce08d725722f1c59a14f1bc",
+      "updatedAt": "2026-08-18T05:25:06.193Z"
     }
   ]
 }
