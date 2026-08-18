@@ -5,21 +5,24 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "${ROOT_DIR}"
 
-go_list_flags=()
-if [[ -n "${LLGO_TEST_MODFILE:-}" ]]; then
-  go_list_flags+=("-modfile=${LLGO_TEST_MODFILE}")
-fi
+go_list() {
+  if [[ -n "${LLGO_TEST_MODFILE:-}" ]]; then
+    command go list "-modfile=${LLGO_TEST_MODFILE}" "$@"
+  else
+    command go list "$@"
+  fi
+}
 
-module_path="$(go list "${go_list_flags[@]}" -m)"
+module_path="$(go_list -m)"
 
 packages=()
 if [[ $# -eq 0 ]]; then
-  package_output="$(go list "${go_list_flags[@]}" ./test/std/... | sort)"
+  package_output="$(go_list ./test/std/... | sort)"
   while IFS= read -r pkg; do
     [[ -n "${pkg}" ]] && packages+=("${pkg}")
   done <<< "${package_output}"
 else
-  package_output="$(go list "${go_list_flags[@]}" "$@" | sort -u)"
+  package_output="$(go_list "$@" | sort -u)"
   while IFS= read -r pkg; do
     [[ -n "${pkg}" ]] && packages+=("${pkg}")
   done <<< "${package_output}"
@@ -50,7 +53,7 @@ if [[ $# -eq 0 ]]; then
   covered_file="$(mktemp)"
   trap 'rm -f "${expected_file}" "${covered_file}"' EXIT
 
-  go list "${go_list_flags[@]}" std \
+  go_list std \
     | awk '!/(^|\/)internal(\/|$)/ && !/(^|\/)vendor(\/|$)/' \
     | sort -u > "${expected_file}"
   printf '%s\n' "${covered_packages[@]}" | sort -u > "${covered_file}"
