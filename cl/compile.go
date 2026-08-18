@@ -807,8 +807,23 @@ func (p *context) funcInfoPosition(f *ssa.Function) token.Position {
 		}
 	}
 	position := p.goProg.Fset.Position(pos)
-	position.Filename = directiveFilename(p.goProg.Fset, pos, position.Filename)
+	position.Filename = runtimeSourceFilename(
+		p.prog.Target(),
+		directiveFilename(p.goProg.Fset, pos, position.Filename),
+	)
 	return position
+}
+
+// runtimeSourceFilename uses the slash-separated spelling emitted by the Go
+// toolchain for Windows runtime metadata. In particular, log.Lshortfile strips
+// the last slash itself, so storing a native backslash path would expose the
+// full source path. Keep the conversion target-aware because a backslash is a
+// valid filename character on Unix.
+func runtimeSourceFilename(target *llssa.Target, filename string) string {
+	if target != nil && target.GOOS == "windows" {
+		return strings.ReplaceAll(filename, `\`, "/")
+	}
+	return filename
 }
 
 // directiveFilename normalizes a //line-directive-adjusted filename to the
