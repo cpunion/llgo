@@ -1261,3 +1261,18 @@ func TestDirectiveFilename(t *testing.T) {
 		t.Fatal("nil fset must pass through")
 	}
 }
+
+func TestRuntimeSourceFilename(t *testing.T) {
+	windows := &llssa.Target{GOOS: "windows"}
+	linux := &llssa.Target{GOOS: "linux"}
+	const native = `C:\work\pkg\main.go`
+	if got, want := runtimeSourceFilename(windows, native), "C:/work/pkg/main.go"; got != want {
+		t.Fatalf("Windows runtime filename = %q, want %q", got, want)
+	}
+	if got := runtimeSourceFilename(linux, native); got != native {
+		t.Fatalf("Unix runtime filename = %q, want unchanged %q", got, native)
+	}
+	if got := runtimeSourceFilename(nil, native); got != native {
+		t.Fatalf("nil-target runtime filename = %q, want unchanged %q", got, native)
+	}
+}
