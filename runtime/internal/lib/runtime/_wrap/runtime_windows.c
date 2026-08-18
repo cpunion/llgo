@@ -209,6 +209,8 @@ typedef struct {
 } llgo_system_info;
 
 __declspec(dllimport) void LLGO_WINAPI GetSystemInfo(llgo_system_info *info);
+__declspec(dllimport) llgo_dword LLGO_WINAPI
+GetSystemDirectoryA(char *buffer, llgo_dword size);
 __declspec(dllimport) void LLGO_WINAPI ExitProcess(unsigned int code);
 
 int llgo_getpagesize(void)
@@ -216,6 +218,11 @@ int llgo_getpagesize(void)
     llgo_system_info info;
     GetSystemInfo(&info);
     return (int)info.page_size;
+}
+
+llgo_dword llgo_get_system_directory(unsigned char *buffer, llgo_dword size)
+{
+    return GetSystemDirectoryA((char *)buffer, size);
 }
 
 void llgo_exit_process(unsigned int code)
