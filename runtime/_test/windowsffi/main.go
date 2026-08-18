@@ -252,6 +252,23 @@ func testRepeatedForeignThreadCallback() {
 	runtime.GC()
 }
 
+func testForeignThreadCallbackGoexit() {
+	deferred := false
+	callback := syscall.NewCallbackCDecl(func(uintptr) uintptr {
+		defer func() { deferred = true }()
+		runtime.Goexit()
+		return 1
+	})
+	var result uintptr
+	if errno := callOnForeignThreadCDecl(callback, 0, &result); errno != 0 {
+		panic("foreign-thread callback Goexit failed")
+	}
+	if !deferred {
+		panic("foreign-thread callback Goexit skipped defer")
+	}
+	runtime.GC()
+}
+
 func testSyscallCallbacks() {
 	testCallbackValidation()
 
@@ -306,6 +323,7 @@ func testSyscallCallbacks() {
 	}
 	testDistinctClosureCallbacks()
 	testRepeatedForeignThreadCallback()
+	testForeignThreadCallbackGoexit()
 }
 
 func main() {
