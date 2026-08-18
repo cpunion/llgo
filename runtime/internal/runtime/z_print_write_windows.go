@@ -4,7 +4,7 @@ package runtime
 
 import "unsafe"
 
-const platformLLGoFiles = "; _wrap/print_windows.c"
+const platformLLGoFiles = "; _wrap/print_windows.c" + platformSetjmpLLGoFiles
 
 //go:linkname c_printWrite C.llgo_print_write
 func c_printWrite(data unsafe.Pointer, size uintptr)
