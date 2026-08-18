@@ -140,6 +140,17 @@ func applyPrefix(baseName string, buildMode BuildMode, target string, goos strin
 
 // buildOutputPath creates the final output path from baseName, dir and other parameters
 func buildOutputPath(baseName, dir string, conf *Config, multiPkg bool, appExt string) (string, error) {
+	// The go command treats an explicit executable -o file name as exact,
+	// including on Windows: it does not append .exe. Keep LLGo's archive,
+	// shared-library, and embedded-target naming conventions unchanged.
+	if conf.Target == "" && (conf.BuildMode == "" || conf.BuildMode == BuildModeExe) &&
+		!multiPkg && conf.OutFile != "" &&
+		!strings.HasSuffix(conf.OutFile, "/") && !isDir(conf.OutFile) {
+		switch conf.Mode {
+		case ModeBuild, ModeTest:
+			return conf.OutFile, nil
+		}
+	}
 	baseName = applyPrefix(baseName, conf.BuildMode, conf.Target, conf.Goos)
 
 	if dir != "" {
