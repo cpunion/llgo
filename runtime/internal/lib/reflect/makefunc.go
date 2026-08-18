@@ -69,14 +69,7 @@ func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsaf
 		recoverTo:   recoverTo,
 	}
 
-	switch len(ftyp.Out) {
-	case 0:
-		err = closure.Bind(sig, bind0, unsafe.Pointer(userdata))
-	case 1:
-		err = closure.Bind(sig, bind1, unsafe.Pointer(userdata))
-	default:
-		err = closure.Bind(sig, bindn, unsafe.Pointer(userdata))
-	}
+	err = closure.Bind(sig, makeFuncCallback(len(ftyp.Out)), unsafe.Pointer(userdata))
 	if err != nil {
 		panic("libffi error: " + err.Error())
 	}
@@ -99,8 +92,6 @@ var (
 )
 
 func bind0(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
-	registered := runtime.EnterForeignThread()
-	defer runtime.ExitForeignThread(registered)
 	fd := (*funcData)(userdata)
 	ins := make([]Value, fd.nin)
 	for i := 0; i < fd.nin; i++ {
@@ -110,8 +101,6 @@ func bind0(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdat
 }
 
 func bind1(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
-	registered := runtime.EnterForeignThread()
-	defer runtime.ExitForeignThread(registered)
 	fd := (*funcData)(userdata)
 	ins := make([]Value, fd.nin)
 	for i := 0; i < fd.nin; i++ {
@@ -122,8 +111,6 @@ func bind1(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdat
 }
 
 func bindn(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
-	registered := runtime.EnterForeignThread()
-	defer runtime.ExitForeignThread(registered)
 	fd := (*funcData)(userdata)
 	ins := make([]Value, fd.nin)
 	for i := 0; i < fd.nin; i++ {
