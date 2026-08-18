@@ -25,7 +25,7 @@ jobs:
             id: macos
             display: macOS
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       GOMAXPROCS: "2"
       LLGO_ROOT: ${{ github.workspace }}
