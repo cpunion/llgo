@@ -33,6 +33,7 @@ func (storage *windowsFaultContextStorage) context() *windowsFaultContext {
 
 func windowsUnwindOne(context *windowsFaultContext) bool {
 	pc := context.pc()
+	sp := context.sp()
 	if pc < minLegalPC {
 		return false
 	}
@@ -41,7 +42,9 @@ func windowsUnwindOne(context *windowsFaultContext) bool {
 	if entry != nil {
 		var frame uintptr
 		c_windowsVirtualUnwind(imageBase, pc, entry, context, &frame)
-		return context.pc() >= minLegalPC && context.pc() != pc
+		// Recursive calls can return to the same instruction in adjacent
+		// frames. Advancing the stack still proves that the walk progressed.
+		return context.pc() >= minLegalPC && (context.pc() != pc || context.sp() != sp)
 	}
 
 	// Leaf functions have no RUNTIME_FUNCTION entry. Simulate their return:
@@ -51,7 +54,6 @@ func windowsUnwindOne(context *windowsFaultContext) bool {
 		context.setLR(0)
 		return true
 	}
-	sp := context.sp()
 	wordSize := unsafe.Sizeof(uintptr(0))
 	if sp&(wordSize-1) != 0 || !memReadable(sp) {
 		return false
@@ -65,7 +67,7 @@ func windowsUnwindOne(context *windowsFaultContext) bool {
 	return true
 }
 
-func windowsContextCallers(context *windowsFaultContext, skip int, pc []uintptr) int {
+func windowsContextCallers(context *windowsFaultContext, skip int, pc []uintptr, boundToGoText bool) int {
 	n := 0
 	for i := 0; n < len(pc) && i < maxPanicSpliceFrames; i++ {
 		if !windowsUnwindOne(context) {
@@ -76,7 +78,7 @@ func windowsContextCallers(context *windowsFaultContext, skip int, pc []uintptr)
 			skip--
 			continue
 		}
-		if !prebuiltTextContains(ret) {
+		if boundToGoText && !prebuiltTextContains(ret) {
 			break
 		}
 		pc[n] = ret
@@ -94,7 +96,7 @@ func platformCallers(_ uintptr, skip int, pc []uintptr) int {
 	}
 	// The capture wrapper already unwound itself. Drop platformCallers and the
 	// return into fpCallers, matching framePointerCallers' first entry.
-	return windowsContextCallers(context, skip+1, pc)
+	return windowsContextCallers(context, skip+1, pc, true)
 }
 
 func platformFaultCallers(raw unsafe.Pointer, _ uintptr, pc []uintptr) int {
@@ -104,7 +106,12 @@ func platformFaultCallers(raw unsafe.Pointer, _ uintptr, pc []uintptr) int {
 	var storage windowsFaultContextStorage
 	context := storage.context()
 	*context = *(*windowsFaultContext)(raw)
-	return windowsContextCallers(context, 0, pc)
+	// A fault can be the first operation that needs caller information. The
+	// Go PC table is deliberately not initialized from the exception handler,
+	// so do not use it to bound this OS-backed walk. RtlVirtualUnwind supplies
+	// the structural bound; symbolization and the Go/C tail cut happen later
+	// from an ordinary, allocation-safe context.
+	return windowsContextCallers(context, 0, pc, false)
 }
 
 //go:noinline
