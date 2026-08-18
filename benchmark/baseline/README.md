@@ -35,12 +35,13 @@ duration is the median of eighteen processes. The workloads are
 For pull requests, each platform job builds the recorded base and current
 revisions on one runner, then alternates their measurements within every round.
 Compiler and runtime benchmark binaries are built before sampling, so only their
-execution is interleaved. This prevents a phase-wide frequency, thermal, or host
-load change from being attributed entirely to one revision. Dependency setup is
-shared, and Go's build cache can be reused by unchanged packages; main pushes
-still run the suite only once. Very small changes can remain scheduler noise and
-should be confirmed by repeated workflow runs. If a workflow does not provide a
-paired result, the publisher falls back to the latest matching `main` data.
+execution is interleaved and each matching base/current sample remains adjacent.
+This prevents a phase-wide frequency, thermal, or host load change from being
+attributed entirely to one revision. Dependency setup is shared, and Go's build
+cache can be reused by unchanged packages; main pushes still run the suite only
+once. Very small changes can remain scheduler noise and should be confirmed by
+repeated workflow runs. If a workflow does not provide a paired result, the
+publisher falls back to the latest matching `main` data.
 
 The trusted publisher commits the current result history and generated site to
 the `pages` branch of the configured data repository. Every LLGo repository

@@ -9,9 +9,34 @@ fi
 
 harness_root="$(cd "$(dirname "$0")/../.." && pwd)"
 
-clang_benchmarks='^(BenchmarkMergeCompilerFlags|BenchmarkMergeLinkerFlags)$'
-funcinfo_benchmarks='^BenchmarkLookupPCRandom$'
-core_benchmarks='^(BenchmarkRuntimeGetG|BenchmarkGlobal(Read|Write)|Benchmark(DirectCall|InterfaceCall|Defer|ChannelBuffered|ChannelHandoff))$'
+benchmark_names=(
+  MergeCompilerFlags
+  MergeLinkerFlags
+  LookupPCRandom
+  RuntimeGetG
+  GlobalRead
+  GlobalWrite
+  DirectCall
+  InterfaceCall
+  Defer
+  ChannelBuffered
+  ChannelHandoff
+  Goroutine
+)
+benchmark_binaries=(
+  clang
+  clang
+  funcinfo
+  llgoext
+  llgoext
+  llgoext
+  llgoext
+  llgoext
+  llgoext
+  llgoext
+  llgoext
+  llgoext
+)
 
 absolute_output() {
   mkdir -p "$(dirname "$1")"
@@ -63,12 +88,17 @@ run_single() {
 
   local binaries="$result_directory/tests"
   build_benchmark_binaries "$source_root" "$llgo_output" "$binaries"
-  run_benchmark_series "$source_root" "$binaries/clang.test" "$go_results" "$clang_benchmarks" 1s
-  run_benchmark_series "$source_root" "$binaries/funcinfo.test" "$go_results" "$funcinfo_benchmarks" 1s
-  run_benchmark_series "$source_root" "$binaries/llgoext.test" "$go_results" "$core_benchmarks" 1s
-  # Goroutine creation is bounded explicitly because LLGo currently maps one
-  # goroutine to one pthread.
-  run_benchmark_series "$source_root" "$binaries/llgoext.test" "$go_results" '^BenchmarkGoroutine$' 100x
+  local index
+  for index in "${!benchmark_names[@]}"; do
+    local benchtime=1s
+    [[ "${benchmark_names[$index]}" != Goroutine ]] || benchtime=100x
+    run_benchmark_series \
+      "$source_root" \
+      "$binaries/${benchmark_binaries[$index]}.test" \
+      "$go_results" \
+      "^Benchmark${benchmark_names[$index]}$" \
+      "$benchtime"
+  done
 
   export_result "$result_directory"
 }
@@ -189,24 +219,16 @@ run_paired() {
   : > "$base_go"
   : > "$current_go"
 
-  run_benchmark_pair \
-    "$base_root" "$base_binaries/clang.test" "$base_go" \
-    "$current_root" "$current_binaries/clang.test" "$current_go" \
-    "$clang_benchmarks" 1s 0
-  run_benchmark_pair \
-    "$base_root" "$base_binaries/funcinfo.test" "$base_go" \
-    "$current_root" "$current_binaries/funcinfo.test" "$current_go" \
-    "$funcinfo_benchmarks" 1s 1
-  run_benchmark_pair \
-    "$base_root" "$base_binaries/llgoext.test" "$base_go" \
-    "$current_root" "$current_binaries/llgoext.test" "$current_go" \
-    "$core_benchmarks" 1s 2
-  # Goroutine creation is bounded explicitly because LLGo currently maps one
-  # goroutine to one pthread.
-  run_benchmark_pair \
-    "$base_root" "$base_binaries/llgoext.test" "$base_go" \
-    "$current_root" "$current_binaries/llgoext.test" "$current_go" \
-    '^BenchmarkGoroutine$' 100x 3
+  local index
+  for index in "${!benchmark_names[@]}"; do
+    local benchtime=1s
+    [[ "${benchmark_names[$index]}" != Goroutine ]] || benchtime=100x
+    local binary="${benchmark_binaries[$index]}.test"
+    run_benchmark_pair \
+      "$base_root" "$base_binaries/$binary" "$base_go" \
+      "$current_root" "$current_binaries/$binary" "$current_go" \
+      "^Benchmark${benchmark_names[$index]}$" "$benchtime" "$index"
+  done
 
   export_result "$base_result"
   export_result "$current_result"
