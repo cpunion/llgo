@@ -69,12 +69,15 @@ var expectedGoBenchmarks = []string{
 	"BenchmarkGoroutine",
 	"BenchmarkInterfaceCall",
 	"BenchmarkLookupPCRandom",
+	"BenchmarkMemProfileDefault",
+	"BenchmarkMemProfileNoConsumer",
+	"BenchmarkMemProfileRate0",
 	"BenchmarkMergeCompilerFlags",
 	"BenchmarkMergeLinkerFlags",
 	"BenchmarkRuntimeGetG",
 }
 
-const goBenchmarkSamples = 5
+const goBenchmarkSamples = 7
 
 type footprint struct {
 	file uint64
@@ -99,8 +102,8 @@ func runCLI(ctx context.Context, args []string) error {
 	root := flags.String("root", ".", "LLGo repository root")
 	llgo := flags.String("llgo", "llgo", "LLGo command")
 	out := flags.String("out", filepath.Join("benchmark", "baseline", "out"), "result directory")
-	buildRuns := flags.Int("build-runs", 3, "build repetitions per workload")
-	runRuns := flags.Int("run-runs", 7, "process repetitions per workload")
+	buildRuns := flags.Int("build-runs", 5, "build repetitions per workload")
+	runRuns := flags.Int("run-runs", 15, "process repetitions per workload")
 	benchmarkOutput := flags.String(
 		"benchmark-output",
 		"",
