@@ -195,7 +195,6 @@ func newWindowsCallbackEntry(fn any, callbackFn *windowsCallbackFunc, ft *abi.Fu
 
 func callWindowsCallback(_ *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
 	registered := llruntime.EnterForeignThread()
-	defer llruntime.ExitForeignThread(registered)
 
 	entry := (*windowsCallbackEntry)(userdata)
 	var localArgs [65]unsafe.Pointer // 64 callback words plus an explicit env.
@@ -221,6 +220,10 @@ func callWindowsCallback(_ *ffi.Signature, ret unsafe.Pointer, args *unsafe.Poin
 	KeepAlive(entry.fnValue)
 	KeepAlive(entry.goArgTypes)
 	KeepAlive(entry.cArgTypes)
+	// A retained Windows registration is owned by the thread's G lifecycle,
+	// including runtime.Goexit. Keep this off the defer chain so Goexit does
+	// not attempt a Windows longjmp across the libffi callback frame.
+	llruntime.ExitForeignThread(registered)
 }
 
 // syscall_compileCallback converts a Go function to a Windows C callback.
