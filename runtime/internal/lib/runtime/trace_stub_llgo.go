@@ -4,11 +4,17 @@ import (
 	"unsafe"
 )
 
+// LLGo's runtimeNano is normalized to nanoseconds on every hosted target,
+// including Windows where QueryPerformanceCounter is converted using
+// QueryPerformanceFrequency. A fixed divisor therefore gives trace timestamps
+// the same 64 ns resolution as Go's high-resolution nanotime path.
+const traceTimeDiv = 64
+
 //go:linkname traceAdvance runtime.traceAdvance
 func traceAdvance(stopTrace bool) {}
 
 //go:linkname traceClockNow runtime.traceClockNow
-func traceClockNow() uint64 { return 0 }
+func traceClockNow() uint64 { return uint64(runtimeNano()) / traceTimeDiv }
 
 //go:linkname runtime_readTrace runtime/trace.runtime_readTrace
 func runtime_readTrace() []byte { return ReadTrace() }
