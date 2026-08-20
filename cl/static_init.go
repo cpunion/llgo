@@ -143,6 +143,11 @@ func (p *context) collectStaticGlobalInits(pkg *ssa.Package) {
 				})
 			} else if unop, ok := store.Val.(*ssa.UnOp); ok && unop.Op == token.MUL {
 				if alloc, ok := unop.X.(*ssa.Alloc); ok && !alloc.Heap {
+					unopRefs, ok := nonDebugReferrers(unop)
+					if !ok || len(unopRefs) != 1 || unopRefs[0] != store {
+						candidate.invalid = true
+						continue
+					}
 					if !collectAllocStores(alloc, path, &candidate.stores, &candidate.instrs, make(map[*ssa.Alloc]bool)) {
 						candidate.invalid = true
 						continue
@@ -219,6 +224,10 @@ func collectAllocStores(alloc *ssa.Alloc, basePath []staticInitPathElem, out *[]
 			if ref.Op != token.MUL {
 				return false
 			}
+			unopRefs, ok := nonDebugReferrers(ref)
+			if !ok || len(unopRefs) != 1 {
+				return false
+			}
 			*instrs = append(*instrs, ref)
 		case *ssa.FieldAddr:
 			subPath, ok := staticInitStorePathToAlloc(ref, alloc)
@@ -287,6 +296,10 @@ func handleStoreVal(store *ssa.Store, fullPath []staticInitPathElem, out *[]stat
 	}
 	if unop, ok := store.Val.(*ssa.UnOp); ok && unop.Op == token.MUL {
 		if innerAlloc, ok := unop.X.(*ssa.Alloc); ok && !innerAlloc.Heap {
+			unopRefs, ok := nonDebugReferrers(unop)
+			if !ok || len(unopRefs) != 1 || unopRefs[0] != store {
+				return false
+			}
 			return collectAllocStores(innerAlloc, fullPath, out, instrs, visited)
 		}
 	}

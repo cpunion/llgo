@@ -1566,3 +1566,37 @@ func next() int { return 1 }
 		_, _ = staticInitStorePathToAlloc(index, targetAlloc)
 	}
 }
+
+func TestStaticGlobalPointerIndirectionLiteralInit(t *testing.T) {
+	const src = `package staticinit
+
+type Inner struct {
+	A [2]int
+	B string
+}
+
+type Outer struct {
+	I Inner
+	Val int
+}
+
+var G = Outer{
+	I: Inner{
+		A: [2]int{10, 20},
+		B: "hello",
+	},
+	Val: 99,
+}
+
+func Use() int {
+	return G.I.A[0] + G.I.A[1] + len(G.I.B) + G.Val
+}
+`
+	ir := compileWithRewrites(t, src, nil)
+	if strings.Contains(ir, "@staticinit.G = global %staticinit.Outer zeroinitializer") {
+		t.Fatalf("G still uses a zero initializer:\n%s", ir)
+	}
+	if !strings.Contains(ir, `c"hello"`) {
+		t.Fatalf("missing hello in IR:\n%s", ir)
+	}
+}
