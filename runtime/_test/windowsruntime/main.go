@@ -173,5 +173,14 @@ func main() {
 		_ = windowsNilFault()
 		panic("unrecovered Windows fault returned")
 	}
+	// Returning from main must terminate the process even while another
+	// goroutine is blocked. This is observable on Windows because goroutines
+	// are currently backed by host threads.
+	lingeringStarted := make(chan struct{})
+	go func() {
+		close(lingeringStarted)
+		select {}
+	}()
+	<-lingeringStarted
 	println("windows runtime smoke: ok")
 }
