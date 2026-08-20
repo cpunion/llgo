@@ -245,44 +245,58 @@ func collectAllocStores(alloc *ssa.Alloc, basePath []staticInitPathElem, out *[]
 			}
 			*instrs = append(*instrs, ref)
 		case *ssa.FieldAddr:
-			subPath, ok := staticInitStorePathToAlloc(ref, alloc)
-			if !ok {
+			if !collectAddrStores(ref, alloc, basePath, out, instrs, visited) {
 				return false
 			}
-			fieldRefs, ok := nonDebugReferrers(ref)
-			if !ok || len(fieldRefs) != 1 {
-				return false
-			}
-			elemStore, ok := fieldRefs[0].(*ssa.Store)
-			if !ok || elemStore.Addr != ref {
-				return false
-			}
-			if !handleStoreVal(elemStore, appendStaticInitPath(basePath, subPath), out, instrs, visited) {
-				return false
-			}
-			*instrs = append(*instrs, ref, elemStore)
+			*instrs = append(*instrs, ref)
 		case *ssa.IndexAddr:
-			subPath, ok := staticInitStorePathToAlloc(ref, alloc)
-			if !ok {
+			if !collectAddrStores(ref, alloc, basePath, out, instrs, visited) {
 				return false
 			}
-			indexRefs, ok := nonDebugReferrers(ref)
-			if !ok || len(indexRefs) != 1 {
-				return false
-			}
-			elemStore, ok := indexRefs[0].(*ssa.Store)
-			if !ok || elemStore.Addr != ref {
-				return false
-			}
-			if !handleStoreVal(elemStore, appendStaticInitPath(basePath, subPath), out, instrs, visited) {
-				return false
-			}
-			*instrs = append(*instrs, ref, elemStore)
+			*instrs = append(*instrs, ref)
 		case *ssa.Store:
 			if ref.Addr != alloc {
 				return false
 			}
 			if !handleStoreVal(ref, appendStaticInitPath(basePath, nil), out, instrs, visited) {
+				return false
+			}
+			*instrs = append(*instrs, ref)
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// collectAddrStores recursively visits field/index address projections derived from rootAlloc,
+// recording constant stores and intermediate instructions.
+func collectAddrStores(addr ssa.Value, rootAlloc *ssa.Alloc, basePath []staticInitPathElem, out *[]staticInitStore, instrs *[]ssa.Instruction, visited map[*ssa.Alloc]bool) bool {
+	refs, ok := nonDebugReferrers(addr)
+	if !ok {
+		return false
+	}
+	for _, ref := range refs {
+		switch ref := ref.(type) {
+		case *ssa.FieldAddr:
+			if !collectAddrStores(ref, rootAlloc, basePath, out, instrs, visited) {
+				return false
+			}
+			*instrs = append(*instrs, ref)
+		case *ssa.IndexAddr:
+			if !collectAddrStores(ref, rootAlloc, basePath, out, instrs, visited) {
+				return false
+			}
+			*instrs = append(*instrs, ref)
+		case *ssa.Store:
+			if ref.Addr != addr {
+				return false
+			}
+			subPath, ok := staticInitStorePathToAlloc(addr, rootAlloc)
+			if !ok {
+				return false
+			}
+			if !handleStoreVal(ref, appendStaticInitPath(basePath, subPath), out, instrs, visited) {
 				return false
 			}
 			*instrs = append(*instrs, ref)
