@@ -86,6 +86,12 @@ func syscall_Getpagesize() int {
 //go:linkname c_exitProcess C.llgo_exit_process
 func c_exitProcess(code uint32)
 
+//go:linkname runtime_exit runtime.exit
+//go:nosplit
+func runtime_exit(code int32) {
+	c_exitProcess(uint32(code))
+}
+
 //go:linkname syscall_Exit syscall.Exit
 //go:nosplit
 func syscall_Exit(code int) {
