@@ -22,6 +22,7 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/thread"
 )
 
@@ -29,6 +30,12 @@ import (
 // Go runtime, CreateThread owns the thread lifetime; LLGo does not retain a
 // closed HANDLE in the scheduler object.
 type mOS struct{}
+
+//go:linkname runtime_exit runtime.exit
+//go:nosplit
+func runtime_exit(code int32) {
+	cliteos.ExitProcess(uint32(code))
+}
 
 func newosproc(mp *m, stackSize uintptr) int {
 	return int(thread.CreateDetached(

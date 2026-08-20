@@ -25,7 +25,15 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
-const LLGoPackage = "decl"
+const (
+	LLGoFiles   = "_os/os_windows.c"
+	LLGoPackage = "link"
+)
 
 //go:linkname Getenv C.getenv
 func Getenv(name *c.Char) *c.Char
+
+// ExitProcess terminates the process and all of its threads.
+//
+//go:linkname ExitProcess C.llgo_windows_exit_process
+func ExitProcess(code uint32)

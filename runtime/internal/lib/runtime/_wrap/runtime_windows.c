@@ -224,8 +224,6 @@ GetQueuedCompletionStatus(void *port, llgo_dword *bytes,
                           llgo_uintptr *completion_key,
                           llgo_overlapped **overlapped,
                           llgo_dword milliseconds);
-__declspec(dllimport) void LLGO_WINAPI ExitProcess(unsigned int code);
-
 extern int llgo_runtime_windowsSignalCallback(llgo_dword signum);
 
 enum {
@@ -304,9 +302,4 @@ int llgo_iocp_get(llgo_uintptr port, llgo_uintptr *key,
      * caller obtains its operation-specific error with WSA/GetOverlappedResult. */
     *error = ok ? 0 : GetLastError();
     return 1;
-}
-
-void llgo_exit_process(unsigned int code)
-{
-    ExitProcess(code);
 }
