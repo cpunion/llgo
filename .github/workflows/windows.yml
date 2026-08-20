@@ -279,11 +279,13 @@ jobs:
           if ($buildExitCode -ne 0) {
             exit $buildExitCode
           }
+          Write-Host "==> windows-runtime-smoke.exe"
           .\windows-runtime-smoke.exe
           if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+            throw "windows-runtime-smoke.exe exited with code $LASTEXITCODE"
           }
 
+          Write-Host "==> windows-runtime-smoke.exe (unrecovered fault)"
           $env:LLGO_TEST_UNRECOVERED_FAULT = "1"
           $faultOutput = .\windows-runtime-smoke.exe 2>&1 | Out-String
           $faultExitCode = $LASTEXITCODE
@@ -303,11 +305,13 @@ jobs:
             }
           }
 
+          Write-Host "==> windows-stdlib-smoke.exe"
           .\windows-stdlib-smoke.exe
           if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+            throw "windows-stdlib-smoke.exe exited with code $LASTEXITCODE"
           }
 
+          Write-Host "==> windows-stdlib-smoke.exe (os.Exit)"
           $env:LLGO_TEST_OS_EXIT = "1"
           .\windows-stdlib-smoke.exe
           $exitCode = $LASTEXITCODE
@@ -316,19 +320,22 @@ jobs:
             throw "os.Exit(23) returned exit code $exitCode"
           }
 
+          Write-Host "==> windows-ffi-smoke.exe"
           .\windows-ffi-smoke.exe
           if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+            throw "windows-ffi-smoke.exe exited with code $LASTEXITCODE"
           }
 
+          Write-Host "==> windows-empty-smoke.exe"
           .\windows-empty-smoke.exe
           if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+            throw "windows-empty-smoke.exe exited with code $LASTEXITCODE"
           }
 
+          Write-Host "==> windows-core-fault-smoke.exe"
           .\windows-core-fault-smoke.exe
           if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+            throw "windows-core-fault-smoke.exe exited with code $LASTEXITCODE"
           }
 
           # Exercise cmd/llgo's test path with both testing-package behavior
