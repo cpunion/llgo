@@ -267,6 +267,14 @@ jobs:
               .\_test\windowsempty
             $buildExitCode = $LASTEXITCODE
           }
+          if ($buildExitCode -eq 0) {
+            # Recover a hardware-backed nil call without relying on the
+            # optional public-runtime traceback layer.
+            ..\llgo-windows-smoke.exe build `
+              -o ..\windows-core-fault-smoke.exe `
+              .\_test\windowscorefault
+            $buildExitCode = $LASTEXITCODE
+          }
           Pop-Location
           if ($buildExitCode -ne 0) {
             exit $buildExitCode
@@ -314,6 +322,11 @@ jobs:
           }
 
           .\windows-empty-smoke.exe
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          .\windows-core-fault-smoke.exe
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
