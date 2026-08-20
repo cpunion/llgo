@@ -4,7 +4,7 @@ package runtime
 
 import "unsafe"
 
-const platformLLGoFiles = "; _wrap/print_windows.c" + platformSetjmpLLGoFiles
+const platformLLGoFiles = "; _wrap/print_windows.c; _wrap/process_windows.c" + platformSetjmpLLGoFiles
 
 //go:linkname c_printByte C.llgo_print_byte
 func c_printByte(v byte)
