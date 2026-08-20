@@ -18,7 +18,11 @@
 
 package runtime
 
-import _ "unsafe"
+import (
+	_ "unsafe"
+
+	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
+)
 
 //go:linkname c_queryPerformanceCounter C.llgo_query_performance_counter
 func c_queryPerformanceCounter() int64
@@ -83,17 +87,8 @@ func syscall_Getpagesize() int {
 	return int(c_getpagesize())
 }
 
-//go:linkname c_exitProcess C.llgo_exit_process
-func c_exitProcess(code uint32)
-
-//go:linkname runtime_exit runtime.exit
-//go:nosplit
-func runtime_exit(code int32) {
-	c_exitProcess(uint32(code))
-}
-
 //go:linkname syscall_Exit syscall.Exit
 //go:nosplit
 func syscall_Exit(code int) {
-	c_exitProcess(uint32(code))
+	cliteos.ExitProcess(uint32(code))
 }
