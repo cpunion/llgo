@@ -97,7 +97,7 @@ func TestGenMainModuleWindowsExitsAfterMain(t *testing.T) {
 	ir := mod.LPkg.String()
 	assertInOrder(t, ir,
 		`call void @"example.com/foo.main"()`,
-		`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.exit"(i32 0)`,
+		`call void @runtime.exit(i32 0)`,
 	)
 }
 

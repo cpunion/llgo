@@ -122,7 +122,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 	var processExit llssa.Function
 	if ctx.buildConf.Goos == "windows" {
-		processExit = declareRuntimeExit(mainPkg, rtPkgPath+".exit")
+		processExit = declareRuntimeExit(mainPkg, "runtime.exit")
 	}
 
 	var abiInit llssa.Function

@@ -30,16 +30,6 @@ import (
 // closed HANDLE in the scheduler object.
 type mOS struct{}
 
-//go:linkname c_exitProcess C.llgo_core_exit_process
-func c_exitProcess(code uint32)
-
-// exit matches the official runtime entry point used after main returns.
-// ExitProcess terminates every goroutine-backed host thread immediately;
-// returning through the CRT can otherwise wait in runtime library teardown.
-func exit(code int32) {
-	c_exitProcess(uint32(code))
-}
-
 func newosproc(mp *m, stackSize uintptr) int {
 	return int(thread.CreateDetached(
 		stackSize,
