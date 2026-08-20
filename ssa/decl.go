@@ -172,10 +172,16 @@ func (p Package) VarOf(name string) Global {
 
 // Init initializes the global variable with the given value.
 func (g Global) Init(v Expr) {
+	if g.impl.Name() == moduleZeroName {
+		return
+	}
 	g.impl.SetInitializer(v.impl)
 }
 
 func (g Global) InitNil() {
+	if g.impl.Name() == moduleZeroName {
+		return
+	}
 	g.impl.SetInitializer(llvm.ConstNull(g.impl.GlobalValueType()))
 }
 
