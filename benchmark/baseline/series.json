@@ -39,10 +39,10 @@
       "label": "Branch codex/windows-proposal-integration-20260818",
       "path": "series/branch/d1b2b1ef72ac41bf/summary.json",
       "configPath": "series/branch/d1b2b1ef72ac41bf/config.json",
-      "commitPath": "commits/ccd4a03f05999dfb230c4f66293fbd47631838f1.json",
-      "sha": "ccd4a03f05999dfb230c4f66293fbd47631838f1",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/ccd4a03f05999dfb230c4f66293fbd47631838f1",
-      "updatedAt": "2026-08-20T16:35:01.932Z"
+      "commitPath": "commits/d2b4b673bd45cebff83dcd66116d408e3c6eaa5d.json",
+      "sha": "d2b4b673bd45cebff83dcd66116d408e3c6eaa5d",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/d2b4b673bd45cebff83dcd66116d408e3c6eaa5d",
+      "updatedAt": "2026-08-20T17:34:11.133Z"
     },
     {
       "kind": "branch",
@@ -70,10 +70,10 @@
       "label": "PR #169",
       "path": "series/pull/169/summary.json",
       "configPath": "series/pull/169/config.json",
-      "commitPath": "commits/ccd4a03f05999dfb230c4f66293fbd47631838f1.json",
-      "sha": "ccd4a03f05999dfb230c4f66293fbd47631838f1",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/ccd4a03f05999dfb230c4f66293fbd47631838f1",
-      "updatedAt": "2026-08-20T16:35:01.864Z"
+      "commitPath": "commits/d2b4b673bd45cebff83dcd66116d408e3c6eaa5d.json",
+      "sha": "d2b4b673bd45cebff83dcd66116d408e3c6eaa5d",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/d2b4b673bd45cebff83dcd66116d408e3c6eaa5d",
+      "updatedAt": "2026-08-20T17:34:11.078Z"
     },
     {
       "kind": "pull",
