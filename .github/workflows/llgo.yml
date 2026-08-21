@@ -140,32 +140,65 @@ jobs:
   test:
     name: test (${{ matrix.lane }}, ${{ matrix.os }}, LLVM ${{ matrix.llvm }}, Go ${{ matrix.go }}, shard ${{ matrix.shard }})
     continue-on-error: ${{ matrix.lane == 'compatibility' }}
-    timeout-minutes: ${{ startsWith(matrix.os, 'macos') && 45 || 30 }}
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
+      fail-fast: false
       matrix:
-        # Keep compatibility and primary toolchains pinned to exact patches.
-        os:
-          - macos-latest
-          - ubuntu-latest
-        llvm: [19]
-        go: ["1.25.0", "1.26.5"]
-        # In-command package parallelism lets Ubuntu use two shards while
-        # retaining headroom for the serial std build-mode checks.
-        shard: ["0", "1"]
         include:
-          - go: "1.25.0"
-            lane: compatibility
-          - go: "1.26.5"
-            lane: primary
-        exclude:
-          # The full demo lane above exercises Go 1.25 user-project/runtime
-          # compatibility on macOS. Keep the much larger per-package
-          # compatibility matrix on Ubuntu and use one parallel primary shard
-          # on macOS.
-          - os: macos-latest
+          # Keep compatibility and primary toolchains pinned to exact patches.
+          # In-command package parallelism lets Ubuntu use two shards while
+          # retaining headroom for the serial std build-mode checks.
+          - os: ubuntu-latest
+            llvm: 19
             go: "1.25.0"
-          - os: macos-latest
+            lane: compatibility
+            shard: "0"
+            shard_total: "2"
+            test_jobs: "4"
+            timeout: 30
+          - os: ubuntu-latest
+            llvm: 19
+            go: "1.25.0"
+            lane: compatibility
             shard: "1"
+            shard_total: "2"
+            test_jobs: "4"
+            timeout: 30
+          - os: ubuntu-latest
+            llvm: 19
+            go: "1.26.5"
+            lane: primary
+            shard: "0"
+            shard_total: "2"
+            test_jobs: "4"
+            timeout: 30
+          - os: ubuntu-latest
+            llvm: 19
+            go: "1.26.5"
+            lane: primary
+            shard: "1"
+            shard_total: "2"
+            test_jobs: "4"
+            timeout: 30
+          - os: macos-latest
+            llvm: 19
+            go: "1.26.5"
+            lane: primary
+            shard: "0"
+            shard_total: "1"
+            test_jobs: "3"
+            timeout: 45
+          # Windows uses the newest Go 1.26 patch already validated by the
+          # platform work. One matrix lane runs every package; -p=2 keeps the
+          # 8 GB development VM and hosted runner below their memory limit.
+          - os: windows-latest
+            llvm: 19
+            go: "1.26.7"
+            lane: primary
+            shard: "0"
+            shard_total: "1"
+            test_jobs: "2"
+            timeout: 60
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v7
@@ -174,6 +207,7 @@ jobs:
         with:
           llvm-version: ${{matrix.llvm}}
       - name: Install further optional dependencies for demos
+        if: runner.os != 'Windows'
         run: |
           py_deps=(
             numpy # for github.com/goplus/lib/py/numpy
@@ -185,6 +219,7 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: Install
+        shell: bash
         run: |
           go install ./...
           echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> $GITHUB_ENV
@@ -193,13 +228,53 @@ jobs:
         uses: ./.github/actions/setup-go
         with:
           go-version: ${{matrix.go}}
+
+      - name: Check Windows host compiler and ABI support
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_tags=byollvm,llvm19
+          go test -tags="$build_tags" \
+            ./internal/meta \
+            ./internal/goarch \
+            ./internal/xtool/llvm
+          go test -tags="$build_tags" \
+            -run '^Test(ResolveGOARCHConfig|ResolveBuildConfigInvalidGOARCHValueIsAtomic|GOARCHEnv|GOARCHConfigSeparatesCacheFingerprints)$' \
+            ./internal/build
+          go test -tags="$build_tags" \
+            -run '^(TestAcquire(AndReleaseLock(Errors)?|LockConcurrency)|TestNativeWindows.*|TestCOFFLTOLevel|TestConfigureNativeClangRootFlags)$' \
+            ./internal/crosscompile
+          go test -tags="$build_tags" \
+            -run '^Test(WindowsTargetTriple|ARMTargetSpec)$' \
+            ./ssa
+          go test -tags="$build_tags" \
+            -run '^(TestTargetArchAndNewTransformerArchSelection|TestMSVC.*)$' \
+            ./internal/cabi
+          go build -tags="$build_tags" -o llgo-windows-ci.exe ./cmd/llgo
+          ./llgo-windows-ci.exe version
+
+      - name: Check Windows native runtime and FFI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\.github\workflows\test_windows_runtime.ps1 `
+            -LLGo .\llgo-windows-ci.exe
+
       - name: run llgo test
         env:
           SHARD_INDEX: ${{ matrix.shard }}
-          SHARD_TOTAL: ${{ startsWith(matrix.os, 'macos') && '1' || '2' }}
-          TEST_JOBS: ${{ startsWith(matrix.os, 'macos') && '3' || '4' }}
+          SHARD_TOTAL: ${{ matrix.shard_total }}
+          TEST_JOBS: ${{ matrix.test_jobs }}
+        shell: bash
         run: |
           set -euo pipefail
+
+          llgo_cmd=llgo
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            llgo_cmd=./llgo-windows-ci.exe
+          fi
 
           pkgs=()
           while IFS= read -r pkg; do
@@ -229,7 +304,7 @@ jobs:
 
           echo "==> llgo test -p=${TEST_JOBS} (${#selected[@]} packages)"
           SECONDS=0
-          llgo test -p="${TEST_JOBS}" -timeout=20m -bench='^BenchmarkGo126' -benchtime=1x "${selected[@]}"
+          "$llgo_cmd" test -p="${TEST_JOBS}" -timeout=20m -bench='^BenchmarkGo126' -benchtime=1x "${selected[@]}"
           echo "==> llgo test done (${SECONDS}s)"
 
           if [[ "${#std_pkgs[@]}" -ne 0 ]]; then

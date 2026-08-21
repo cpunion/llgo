@@ -22,6 +22,7 @@ import (
 	"context"
 	"debug/elf"
 	"debug/macho"
+	"debug/pe"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -226,7 +227,7 @@ func collect(ctx context.Context, root, llgo, out string, buildRuns, runRuns int
 	)
 	var sizes, timings []metric
 	for _, item := range workloads {
-		binary := filepath.Join(binDir, item.name)
+		binary := nativeExecutable(filepath.Join(binDir, item.name))
 		buildArgs := append([]string{"build"}, item.flags...)
 		buildArgs = append(buildArgs, "-o", binary, filepath.Join(root, item.source))
 		// Keep first-use toolchain and filesystem caches out of the measured
@@ -340,7 +341,20 @@ func executableFootprint(path string) (footprint, error) {
 		return out, nil
 	}
 
+	if f, err := pe.Open(path); err == nil {
+		defer f.Close()
+		addPESections(&out, f.Sections)
+		return out, nil
+	}
+
 	return footprint{}, fmt.Errorf("unsupported executable format: %s", path)
+}
+
+func nativeExecutable(path string) string {
+	if runtime.GOOS == "windows" && filepath.Ext(path) == "" {
+		return path + ".exe"
+	}
+	return path
 }
 
 func addELFSections(out *footprint, sections []*elf.Section) {
@@ -369,6 +383,23 @@ func addMachOSections(out *footprint, sections []*macho.Section) {
 			out.bss += section.Size
 		case strings.HasPrefix(section.Seg, "__DATA"):
 			out.data += section.Size
+		}
+	}
+}
+
+func addPESections(out *footprint, sections []*pe.Section) {
+	for _, section := range sections {
+		size := uint64(section.VirtualSize)
+		if size == 0 {
+			size = uint64(section.Size)
+		}
+		switch {
+		case section.Characteristics&pe.IMAGE_SCN_CNT_UNINITIALIZED_DATA != 0:
+			out.bss += size
+		case section.Characteristics&(pe.IMAGE_SCN_CNT_CODE|pe.IMAGE_SCN_MEM_EXECUTE) != 0:
+			out.text += size
+		case section.Characteristics&pe.IMAGE_SCN_CNT_INITIALIZED_DATA != 0:
+			out.data += size
 		}
 	}
 }
