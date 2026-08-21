@@ -19,6 +19,9 @@ func windowsInvalidAddress() uintptr
 //go:linkname windowsUnrecoveredFault C.llgo_windows_unrecovered_fault
 func windowsUnrecoveredFault() int32
 
+//go:linkname runtimeRand runtime.rand
+func runtimeRand() uint64
+
 //go:noinline
 func windowsNilFault() byte {
 	return *(*byte)(unsafe.Pointer(windowsInvalidAddress()))
@@ -138,6 +141,34 @@ func checkRecover() {
 	panic("windows panic smoke")
 }
 
+func checkRuntimeRandStreams() {
+	const workers = 8
+	start := make(chan struct{})
+	values := make(chan uint64, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			<-start
+			values <- runtimeRand()
+		}()
+	}
+	close(start)
+
+	first := <-values
+	allEqual := true
+	for i := 1; i < workers; i++ {
+		if <-values != first {
+			allEqual = false
+		}
+	}
+	// UCRT rand has per-thread state and starts every unseeded thread from
+	// seed 1. Because LLGo currently runs each goroutine on its own native
+	// thread, using rand directly made all workers emit the same sequence.
+	// That breaks callers such as os.CreateTemp under normal concurrency.
+	if allEqual {
+		panic("Windows goroutines share identical runtime random streams")
+	}
+}
+
 func main() {
 	values := make(chan int)
 	go func() {
@@ -166,6 +197,7 @@ func main() {
 	}
 
 	checkRecover()
+	checkRuntimeRandStreams()
 	checkNilFault()
 	checkConcurrentNilFault()
 	checkGC()
