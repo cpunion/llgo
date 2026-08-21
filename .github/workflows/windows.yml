@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   std-cover:
-    name: standard-library coverage (windows-amd64, Go 1.26.5)
+    name: standard-library coverage (windows-amd64, Go 1.26.7)
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -22,14 +22,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.7"
 
       - name: Check Windows standard-library coverage
         shell: bash
         run: bash doc/_readme/scripts/check_std_cover.sh
 
   host-smoke:
-    name: host smoke (windows-amd64, LLVM 19, Go 1.26.5)
+    name: host smoke (windows-amd64, LLVM 19, Go 1.26.7)
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -44,7 +44,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.7"
 
       - name: Set up LLVM
         # CLANG64 supplies Windows-hosted LLVM libraries used to build llgo.
