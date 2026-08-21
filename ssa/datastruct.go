@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"go/types"
 
+	runtimeabi "github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 )
@@ -582,14 +583,27 @@ func (b Builder) Lookup(x, key Expr, commaOk bool) (ret Expr) {
 	vtyp := prog.Elem(x.Type)
 	kind := mapKeyFastKind(prog, x.raw.Type)
 	arg := b.mapKeyAccessArg(x, key, kind)
+	largeElem := prog.SizeOf(vtyp) > runtimeabi.ZeroValSize
 	if commaOk {
-		vals := b.Call(b.Pkg.rtFunc(kind.accessName(true)), typ, x, arg)
+		access := kind.accessName(true)
+		args := []Expr{typ, x, arg}
+		if largeElem {
+			access = "MapAccess2Fat"
+			args = append(args, b.Pkg.mapZero(vtyp))
+		}
+		vals := b.Call(b.Pkg.rtFunc(access), args...)
 		val := b.Load(Expr{b.impl.CreateExtractValue(vals.impl, 0, ""), prog.Pointer(vtyp)})
 		ok := b.impl.CreateExtractValue(vals.impl, 1, "")
 		t := prog.Struct(vtyp, prog.Bool())
 		return b.aggregateValue(t, val.impl, ok)
 	} else {
-		val := b.Call(b.Pkg.rtFunc(kind.accessName(false)), typ, x, arg)
+		access := kind.accessName(false)
+		args := []Expr{typ, x, arg}
+		if largeElem {
+			access = "MapAccess1Fat"
+			args = append(args, b.Pkg.mapZero(vtyp))
+		}
+		val := b.Call(b.Pkg.rtFunc(access), args...)
 		val.Type = prog.Pointer(vtyp)
 		ret = b.Load(val)
 	}
