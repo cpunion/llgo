@@ -18,11 +18,18 @@ jobs:
   test:
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
-        os:
-          - macos-latest
-          - ubuntu-latest
-        llvm: [19]
+        include:
+          - os: macos-latest
+            llvm: 19
+            go: "1.26.5"
+          - os: ubuntu-latest
+            llvm: 19
+            go: "1.26.5"
+          - os: windows-latest
+            llvm: 19
+            go: "1.26.7"
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v7
@@ -35,6 +42,7 @@ jobs:
         uses: ./.github/actions/setup-embed-deps
 
       - name: Clang information
+        shell: bash
         run: |
           echo $PATH
           which clang
@@ -42,36 +50,42 @@ jobs:
 
       - name: Set up Go
         uses: ./.github/actions/setup-go
+        with:
+          go-version: ${{ matrix.go }}
 
       - name: Install further optional dependencies for demos
-        run: |
-          py_deps=(
-            numpy # for github.com/goplus/lib/py/numpy
-            torch # for github.com/goplus/lib/py/torch
-          )
-          pip3.12 install --break-system-packages "${py_deps[@]}"
-          # Align python3-embed with python-3.12-embed to avoid ABI mismatches.
-          pcdir=$HOME/pc
-          mkdir -p "$pcdir"
-          libdir=$(pkg-config --variable=libdir python-3.12-embed)
-          ln -s "$libdir/pkgconfig/python-3.12-embed.pc" "$pcdir/python3-embed.pc"
-          echo "PKG_CONFIG_PATH=$pcdir:${PKG_CONFIG_PATH}" >> $GITHUB_ENV
-          echo "LLGO_FULL_RPATH=true" >> $GITHUB_ENV
+        uses: ./.github/actions/setup-demo-deps
 
       - name: Set LLGO_ROOT
+        shell: bash
         run: echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> $GITHUB_ENV
 
       - name: Build
-        run: go build -v ./...
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export CGO_CFLAGS="$LLGO_HOST_CGO_CFLAGS"
+            export CGO_CXXFLAGS="$LLGO_HOST_CGO_CXXFLAGS"
+            export CGO_LDFLAGS="$LLGO_HOST_CGO_LDFLAGS"
+          fi
+          go build -v ./...
 
-      # Both platforms upload coverage: OS-specific paths (ELF vs Mach-O
-      # emission, per-OS runtime shims) are otherwise invisible to
-      # codecov/patch and fail it on lines only the other OS executes.
+      # All host platforms upload coverage: OS-specific paths (ELF, Mach-O,
+      # and COFF emission plus per-OS runtime shims) are otherwise invisible
+      # to codecov/patch and fail it on lines only another OS executes.
       - name: Test with coverage
         # 45m: the caller-info acceptance suite (test/go) legitimately grew
         # the covered run past the old 30m budget on macOS runners.
+        shell: bash
         run: |
           set -euo pipefail
+
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export CGO_CFLAGS="$LLGO_HOST_CGO_CFLAGS"
+            export CGO_CXXFLAGS="$LLGO_HOST_CGO_CXXFLAGS"
+            export CGO_LDFLAGS="$LLGO_HOST_CGO_LDFLAGS"
+          fi
 
           # test/go intentionally contains compiler edge cases that make the
           # Go 1.26.5 printf analyzer panic. Keep the normal go test vet gate
@@ -92,6 +106,7 @@ jobs:
         run: go test -v -timeout 60m ./cl -run '^TestRunEmbedEmulator$'
 
       - name: Check std symbol coverage
+        shell: bash
         run: bash doc/_readme/scripts/check_std_cover.sh
 
       - name: Upload coverage reports to Codecov
