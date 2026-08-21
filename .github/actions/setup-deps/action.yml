@@ -178,13 +178,12 @@ runs:
           echo "expected LLVM 19.1.7, got $llvm_version" >&2
           exit 1
         fi
-        native_prefix="$(cygpath -m /clang64)"
         cflags="$(llvm-config --cflags)"
         cxxflags="$(llvm-config --cxxflags)"
         ldflags="$(llvm-config --ldflags --libs all --system-libs)"
-        cflags="${cflags//\/clang64/$native_prefix}"
-        cxxflags="${cxxflags//\/clang64/$native_prefix}"
-        ldflags="${ldflags//\/clang64/$native_prefix}"
+        # llvm-config.exe already returns native absolute paths even when it
+        # is invoked from the MSYS2 shell. Rewriting the /clang64 substring
+        # would duplicate the drive prefix (for example D:/...D:/...).
         # llvm-config emits the library search path and library names on
         # separate lines. GITHUB_ENV treats a continuation line as a new file
         # command, so flatten whitespace before exporting the CGO flag lists.

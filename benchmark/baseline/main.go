@@ -254,13 +254,13 @@ func collect(ctx context.Context, root, llgo, out string, buildRuns, runRuns int
 		buildArgs = append(buildArgs, "-o", binary, filepath.Join(root, item.source))
 		// Keep first-use toolchain and filesystem caches out of the measured
 		// median so the first revision is not systematically disadvantaged.
-		if err := run(ctx, env, io.Discard, llgo, buildArgs...); err != nil {
+		if err := runQuiet(ctx, env, llgo, buildArgs...); err != nil {
 			return fmt.Errorf("warm build %s: %w", item.name, err)
 		}
 		buildDurations := make([]time.Duration, 0, buildRuns)
 		for range buildRuns {
 			start := time.Now()
-			if err := run(ctx, env, io.Discard, llgo, buildArgs...); err != nil {
+			if err := runQuiet(ctx, env, llgo, buildArgs...); err != nil {
 				return fmt.Errorf("build %s: %w", item.name, err)
 			}
 			buildDurations = append(buildDurations, time.Since(start))
@@ -301,6 +301,17 @@ func collect(ctx context.Context, root, llgo, out string, buildRuns, runRuns int
 		return err
 	}
 	return writeMetrics(filepath.Join(out, "time.json"), timings)
+}
+
+func runQuiet(ctx context.Context, env []string, name string, args ...string) error {
+	var output bytes.Buffer
+	if err := run(ctx, env, &output, name, args...); err != nil {
+		if detail := strings.TrimSpace(output.String()); detail != "" {
+			return fmt.Errorf("%w\n%s", err, detail)
+		}
+		return err
+	}
+	return nil
 }
 
 func run(ctx context.Context, env []string, output io.Writer, name string, args ...string) error {
