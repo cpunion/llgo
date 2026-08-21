@@ -51,6 +51,17 @@ enum {
 
 #define LLGO_FLS_OUT_OF_INDEXES ((llgo_dword)0xffffffffUL)
 
+/* ExitProcess runs FLS callbacks after terminating the other threads. Those
+ * threads may have held a collector lock, so an FLS callback must not re-enter
+ * Go or BDWGC once process shutdown begins. The process will reclaim the
+ * deliberately retained sidecar allocation. */
+static llgo_dword llgo_process_exiting;
+
+void llgo_win_thread_begin_process_exit(void)
+{
+    __atomic_store_n(&llgo_process_exiting, 1, __ATOMIC_RELEASE);
+}
+
 typedef void *(*llgo_thread_routine)(void *arg);
 
 typedef struct {
@@ -117,7 +128,8 @@ typedef struct {
 static void LLGO_WINAPI llgo_fls_destructor(void *raw)
 {
     llgo_fls_value value;
-    if (raw == 0)
+    if (raw == 0 ||
+        __atomic_load_n(&llgo_process_exiting, __ATOMIC_ACQUIRE))
         return;
     value = *(llgo_fls_value *)raw;
     if (value.destructor != 0 && value.value != 0)
