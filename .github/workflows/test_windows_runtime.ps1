@@ -14,7 +14,13 @@ if (-not $env:LLGO_MSYS2_LOCATION) {
 }
 
 $root = (Get-Location).Path
-$clangBin = Join-Path $env:LLGO_MSYS2_LOCATION "clang64\bin"
+# GitHub's windows-latest host is amd64 and setup-deps installs clang64. A
+# native arm64 Windows developer host can point at clangarm64 without keeping
+# a divergent copy of this runtime validation script.
+$clangBin = $env:LLGO_MSYS2_CLANG_BIN
+if (-not $clangBin) {
+  $clangBin = Join-Path $env:LLGO_MSYS2_LOCATION "clang64\bin"
+}
 $clangExe = Join-Path $clangBin "clang.exe"
 $llvmNmExe = Join-Path $clangBin "llvm-nm.exe"
 $readObjExe = Join-Path $clangBin "llvm-readobj.exe"
@@ -50,6 +56,7 @@ $stdlib = Join-Path $out "windows-stdlib-smoke.exe"
 $ffi = Join-Path $out "windows-ffi-smoke.exe"
 $empty = Join-Path $out "windows-empty-smoke.exe"
 $coreFault = Join-Path $out "windows-core-fault-smoke.exe"
+$network = Join-Path $out "windows-network-smoke.exe"
 
 # Keep the special-purpose fixtures beside the full test/... matrix. They
 # cover minimal-runtime links and process behavior which a testing binary can
@@ -78,13 +85,17 @@ try {
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
   }
+  & $LLGo build -o $network .\_test\windowsnetwork
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
 } finally {
   Pop-Location
 }
 
 & .\.github\workflows\check_windows_imports.ps1 `
   -ReadObj $readObjExe `
-  -Artifacts @($runtime, $stdlib, $ffi, $empty, $coreFault)
+  -Artifacts @($runtime, $stdlib, $ffi, $empty, $coreFault, $network)
 
 Write-Host "==> windows-runtime-smoke.exe"
 & $runtime
@@ -94,9 +105,19 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "==> windows-runtime-smoke.exe (unrecovered fault)"
 $env:LLGO_TEST_UNRECOVERED_FAULT = "1"
-$faultOutput = & $runtime 2>&1 | Out-String
-$faultExitCode = $LASTEXITCODE
-Remove-Item Env:LLGO_TEST_UNRECOVERED_FAULT
+$savedErrorActionPreference = $ErrorActionPreference
+try {
+  # Windows PowerShell 5 reports redirected native stderr as a terminating
+  # NativeCommandError when ErrorActionPreference is Stop. This invocation is
+  # intentionally expected to fail, and its stderr is the subject of the
+  # assertions below.
+  $ErrorActionPreference = "Continue"
+  $faultOutput = & $runtime 2>&1 | Out-String
+  $faultExitCode = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $savedErrorActionPreference
+  Remove-Item Env:LLGO_TEST_UNRECOVERED_FAULT
+}
 Write-Host $faultOutput
 $normalizedFaultOutput = $faultOutput.Replace('\', '/')
 if ($faultExitCode -eq 0) {
@@ -133,7 +154,8 @@ if ($exitCode -ne 23) {
 foreach ($artifact in @(
   @{ Name = "windows-ffi-smoke.exe"; Path = $ffi },
   @{ Name = "windows-empty-smoke.exe"; Path = $empty },
-  @{ Name = "windows-core-fault-smoke.exe"; Path = $coreFault }
+  @{ Name = "windows-core-fault-smoke.exe"; Path = $coreFault },
+  @{ Name = "windows-network-smoke.exe"; Path = $network }
 )) {
   Write-Host "==> $($artifact.Name)"
   & $artifact.Path
