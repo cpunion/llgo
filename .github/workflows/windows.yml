@@ -279,6 +279,16 @@ jobs:
           if ($buildExitCode -ne 0) {
             exit $buildExitCode
           }
+          $readObjExe = Join-Path $clangBin "llvm-readobj.exe"
+          & .\.github\workflows\check_windows_imports.ps1 `
+            -ReadObj $readObjExe `
+            -Artifacts @(
+              ".\windows-runtime-smoke.exe",
+              ".\windows-stdlib-smoke.exe",
+              ".\windows-ffi-smoke.exe",
+              ".\windows-empty-smoke.exe",
+              ".\windows-core-fault-smoke.exe"
+            )
           Write-Host "==> windows-runtime-smoke.exe"
           .\windows-runtime-smoke.exe
           if ($LASTEXITCODE -ne 0) {
