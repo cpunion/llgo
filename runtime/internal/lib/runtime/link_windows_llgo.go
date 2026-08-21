@@ -21,7 +21,7 @@ package runtime
 import (
 	_ "unsafe"
 
-	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
+	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 // os/proc.go declares this runtime entry point on every platform. Its Windows
@@ -98,5 +98,5 @@ func syscall_Getpagesize() int {
 //go:linkname syscall_Exit syscall.Exit
 //go:nosplit
 func syscall_Exit(code int) {
-	cliteos.ExitProcess(uint32(code))
+	llruntime.ExitProcess(uint32(code))
 }

@@ -23,6 +23,8 @@ import (
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
+	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/thread"
 )
 
@@ -31,10 +33,31 @@ import (
 // closed HANDLE in the scheduler object.
 type mOS struct{}
 
+// processExiting is non-zero after runtime.exit or syscall.Exit starts
+// terminating the process. It serves the same purpose as exiting in the Go
+// runtime. The thread backend separately records the same transition before
+// Windows starts running FLS process-shutdown callbacks.
+var processExiting uint32
+
+// processExitLock is used only to freeze a thread until ExitProcess terminates
+// it. Its zero value is a ready-to-use Windows SRW lock.
+var processExitLock psync.Mutex
+
+// ExitProcess marks the runtime as exiting before asking Windows to terminate
+// all process threads. Keep every Go-facing process exit path behind this
+// helper so newosproc can distinguish shutdown from a real resource failure.
+//
+//go:nosplit
+func ExitProcess(code uint32) {
+	atomic.Store(&processExiting, 1)
+	thread.BeginProcessExit()
+	cliteos.ExitProcess(code)
+}
+
 //go:linkname runtime_exit runtime.exit
 //go:nosplit
 func runtime_exit(code int32) {
-	cliteos.ExitProcess(uint32(code))
+	ExitProcess(uint32(code))
 }
 
 func newosproc(mp *m, stackSize uintptr) int {
@@ -43,6 +66,18 @@ func newosproc(mp *m, stackSize uintptr) int {
 		thread.RoutineFunc(mstart),
 		c.Pointer(unsafe.Pointer(mp)),
 	))
+}
+
+func handleThreadCreateFailureDuringExit() {
+	if atomic.Load(&processExiting) == 0 {
+		return
+	}
+
+	// CreateThread may fail while ExitProcess is tearing down the process.
+	// Match the Go runtime's handling of issue #18253: freeze this thread and
+	// let the exiting thread finish instead of reporting a spurious panic.
+	processExitLock.Lock()
+	processExitLock.Lock()
 }
 
 func exitCurrentM() {

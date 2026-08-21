@@ -44,6 +44,9 @@ func createDetached(stackSize uintptr, routine RoutineFunc, arg c.Pointer) c.Int
 //go:linkname exit C.llgo_win_thread_exit
 func exit()
 
+//go:linkname beginProcessExit C.llgo_win_thread_begin_process_exit
+func beginProcessExit()
+
 //go:linkname keyCreate C.llgo_win_fls_create
 func keyCreate(index *c.Uint) c.Int
 
@@ -64,6 +67,12 @@ func CreateDetached(stackSize uintptr, routine RoutineFunc, arg c.Pointer) c.Int
 
 func Exit() {
 	exit()
+}
+
+// BeginProcessExit prevents Windows process shutdown from invoking Go or
+// BDWGC through the FLS lifecycle callback.
+func BeginProcessExit() {
+	beginProcessExit()
 }
 
 func (key *Key) Create(destructor KeyDestructor) c.Int {

@@ -38,6 +38,8 @@ func newosproc(mp *m, stackSize uintptr) int {
 	return int(ret)
 }
 
+func handleThreadCreateFailureDuringExit() {}
+
 func exitCurrentM() {
 	mp := getg().m
 	mexit(mp)
