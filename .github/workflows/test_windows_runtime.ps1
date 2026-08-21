@@ -111,6 +111,9 @@ foreach ($expected in @(
     throw "unrecovered Windows fault output is missing '$expected'"
   }
 }
+if ($normalizedFaultOutput.Contains("github.com/xgo-dev/llgo/runtime/internal/clite/tls.init")) {
+  throw "unrecovered Windows fault traceback continued past runtime.goexit"
+}
 
 Write-Host "==> windows-stdlib-smoke.exe"
 & $stdlib
