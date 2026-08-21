@@ -1,5 +1,5 @@
-github.com/cpunion/plan9asm v0.0.0-20260821061605-5a61327ef56b h1:h1q0lx++4DQZ0APvmUd88r7HGMMHbRQGZIFfFyJfL94=
-github.com/cpunion/plan9asm v0.0.0-20260821061605-5a61327ef56b/go.mod h1:0yM4CCIp2PyT8h+Ro3Ukro3lHL8ji9mzHEv5yfhOckc=
+github.com/cpunion/plan9asm v0.0.0-20260821062048-d6a2475e30af h1:Br3FnFHsbxzSC9DqHN4cx8dmwDk8mFEKZ46S07wNWYI=
+github.com/cpunion/plan9asm v0.0.0-20260821062048-d6a2475e30af/go.mod h1:0yM4CCIp2PyT8h+Ro3Ukro3lHL8ji9mzHEv5yfhOckc=
 github.com/creack/goselect v0.1.2 h1:2DNy14+JPjRBgPzAd1thbQp4BSIihxcBf0IXhQXDRa0=
 github.com/creack/goselect v0.1.2/go.mod h1:a/NhLweNvqIYMuxcMOuWY516Cimucms3DglDzQP3hKY=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
