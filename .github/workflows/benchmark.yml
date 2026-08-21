@@ -69,12 +69,27 @@ jobs:
 
       - name: Measure pull request base
         if: github.event_name == 'pull_request'
+        id: measure-base
+        # The first Windows-support PR has no runnable Windows compiler in its
+        # base. Keep collecting the PR revision; once the base supports
+        # Windows, this same step succeeds and comparisons start automatically.
+        continue-on-error: ${{ matrix.id == 'windows' }}
         shell: bash
         run: |
           benchmark/baseline/run.sh \
             .benchmark/source \
             .benchmark/base-llgo \
             .benchmark/base-results
+
+      - name: Note unavailable Windows baseline
+        if: >-
+          github.event_name == 'pull_request' &&
+          matrix.id == 'windows' &&
+          steps.measure-base.outcome == 'failure'
+        shell: bash
+        run: |
+          echo '### Windows benchmark baseline' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The pull request base does not yet build on Windows; only the current revision is recorded.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check out pull request head benchmark source
         if: github.event_name == 'pull_request'
@@ -104,6 +119,7 @@ jobs:
           benchmark-file: .benchmark/results/benchmark.txt
           baseline-benchmark-file: >-
             ${{ github.event_name == 'pull_request' &&
+                steps.measure-base.outcome == 'success' &&
                 '.benchmark/base-results/benchmark.txt' || '' }}
           platform-id: ${{ matrix.id }}
           platform-label: ${{ matrix.display }}
