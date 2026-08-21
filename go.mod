@@ -27,4 +27,4 @@ require (
 
 replace github.com/xgo-dev/llgo/runtime => ./runtime
 
-replace github.com/xgo-dev/plan9asm => github.com/cpunion/plan9asm v0.0.0-20260821060749-92458142dcea
+replace github.com/xgo-dev/plan9asm => github.com/cpunion/plan9asm v0.0.0-20260821061605-5a61327ef56b
