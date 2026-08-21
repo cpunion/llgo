@@ -89,7 +89,7 @@ jobs:
         shell: bash
         run: |
           echo '### Windows benchmark baseline' >> "$GITHUB_STEP_SUMMARY"
-          echo 'The pull request base does not yet build on Windows. The current revision is still measured here, but publishing starts after a same-runner base measurement is available.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The pull request base does not yet build on Windows. The current revision is measured and published as new; same-runner comparisons start after the base supports Windows.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check out pull request head benchmark source
         if: github.event_name == 'pull_request'
@@ -113,13 +113,7 @@ jobs:
             .benchmark/results
 
       - name: Record benchmark result
-        # Published pull-request results must always include their same-runner
-        # baseline. The current revision is still measured above when an
-        # initial platform-support change has no runnable base.
-        if: >-
-          github.event_name != 'pull_request' ||
-          steps.measure-base.outcome == 'success'
-        uses: xgo-dev/setup-benchmark-go-action@v1.0.5
+        uses: dastai/setup-benchmark-go-action@6d4d1e394e5b0116de360cabd70c747f6b5507fc
         with:
           config: .github/llgo-benchmark.yml
           benchmark-file: .benchmark/results/benchmark.txt
