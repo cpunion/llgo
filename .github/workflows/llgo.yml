@@ -221,6 +221,11 @@ jobs:
       - name: Install
         shell: bash
         run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export CGO_CFLAGS="$LLGO_HOST_CGO_CFLAGS"
+            export CGO_CXXFLAGS="$LLGO_HOST_CGO_CXXFLAGS"
+            export CGO_LDFLAGS="$LLGO_HOST_CGO_LDFLAGS"
+          fi
           go install ./...
           echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> $GITHUB_ENV
 
@@ -234,6 +239,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          export CGO_CFLAGS="$LLGO_HOST_CGO_CFLAGS"
+          export CGO_CXXFLAGS="$LLGO_HOST_CGO_CXXFLAGS"
+          export CGO_LDFLAGS="$LLGO_HOST_CGO_LDFLAGS"
 
           build_tags=byollvm,llvm19
           go test -tags="$build_tags" \
@@ -272,8 +281,10 @@ jobs:
           set -euo pipefail
 
           llgo_cmd=llgo
+          llgo_test_compiler=
           if [[ "$RUNNER_OS" == Windows ]]; then
             llgo_cmd=./llgo-windows-ci.exe
+            llgo_test_compiler="$(cygpath -w "$PWD/llgo-windows-ci.exe")"
           fi
 
           pkgs=()
@@ -296,15 +307,36 @@ jobs:
           printf '  %s\n' "${selected[@]}"
 
           std_pkgs=()
+          test_pkgs=()
+          windows_host_tool_pkgs=()
           for pkg in "${selected[@]}"; do
             if [[ "${{ matrix.os }}" == ubuntu-latest && "${{ matrix.go }}" == 1.26.5 && "${pkg}" == */test/std/* ]]; then
               std_pkgs+=("${pkg}")
             fi
+            # test/go launches the native Go tool to rebuild LLGo in focused
+            # subprocess tests, so it needs the host LLVM CGO flags. Keep it
+            # in a separate invocation on Windows: leaking those flags into
+            # test/cgo makes MSVC-targeted programs look for LLVM-19.lib.
+            if [[ "$RUNNER_OS" == Windows && "${pkg}" == */test/go ]]; then
+              windows_host_tool_pkgs+=("${pkg}")
+            else
+              test_pkgs+=("${pkg}")
+            fi
           done
 
-          echo "==> llgo test -p=${TEST_JOBS} (${#selected[@]} packages)"
           SECONDS=0
-          "$llgo_cmd" test -p="${TEST_JOBS}" -timeout=20m -bench='^BenchmarkGo126' -benchtime=1x "${selected[@]}"
+          if [[ "${#test_pkgs[@]}" -ne 0 ]]; then
+            echo "==> llgo test -p=${TEST_JOBS} (${#test_pkgs[@]} packages)"
+            "$llgo_cmd" test -p="${TEST_JOBS}" -timeout=20m -bench='^BenchmarkGo126' -benchtime=1x "${test_pkgs[@]}"
+          fi
+          if [[ "${#windows_host_tool_pkgs[@]}" -ne 0 ]]; then
+            echo "==> llgo test with host LLVM flags (${#windows_host_tool_pkgs[@]} package)"
+            CGO_CFLAGS="$LLGO_HOST_CGO_CFLAGS" \
+              CGO_CXXFLAGS="$LLGO_HOST_CGO_CXXFLAGS" \
+              CGO_LDFLAGS="$LLGO_HOST_CGO_LDFLAGS" \
+              LLGO_TEST_COMPILER="$llgo_test_compiler" \
+              "$llgo_cmd" test -p="${TEST_JOBS}" -timeout=20m -bench='^BenchmarkGo126' -benchtime=1x "${windows_host_tool_pkgs[@]}"
+          fi
           echo "==> llgo test done (${SECONDS}s)"
 
           if [[ "${#std_pkgs[@]}" -ne 0 ]]; then
