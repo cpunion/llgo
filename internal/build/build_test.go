@@ -1413,25 +1413,27 @@ func TestApplyBuildModeCompileFlags(t *testing.T) {
 	tests := []struct {
 		name string
 		mode BuildMode
+		goos string
 		in   []string
 		want string
 	}{
-		{name: "shared adds PIC", mode: BuildModeCShared, want: "-fPIC"},
-		{name: "shared preserves flags", mode: BuildModeCShared, in: []string{"-O2"}, want: "-O2 -fPIC"},
-		{name: "shared does not duplicate PIC", mode: BuildModeCShared, in: []string{"-fPIC"}, want: "-fPIC"},
-		{name: "archive remains unchanged", mode: BuildModeCArchive, in: []string{"-O2"}, want: "-O2"},
+		{name: "shared adds PIC", mode: BuildModeCShared, goos: "linux", want: "-fPIC"},
+		{name: "shared preserves flags", mode: BuildModeCShared, goos: "darwin", in: []string{"-O2"}, want: "-O2 -fPIC"},
+		{name: "shared does not duplicate PIC", mode: BuildModeCShared, goos: "linux", in: []string{"-fPIC"}, want: "-fPIC"},
+		{name: "Windows shared does not add unsupported PIC", mode: BuildModeCShared, goos: "windows", in: []string{"-O2"}, want: "-O2"},
+		{name: "archive remains unchanged", mode: BuildModeCArchive, goos: "linux", in: []string{"-O2"}, want: "-O2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			export := crosscompile.Export{CCFLAGS: slices.Clone(tt.in)}
-			applyBuildModeCompileFlags(tt.mode, &export)
+			applyBuildModeCompileFlags(tt.mode, tt.goos, &export)
 			if got := strings.Join(export.CCFLAGS, " "); got != tt.want {
 				t.Fatalf("CCFLAGS = %q, want %q", got, tt.want)
 			}
 		})
 	}
 
-	applyBuildModeCompileFlags(BuildModeCShared, nil)
+	applyBuildModeCompileFlags(BuildModeCShared, "linux", nil)
 }
 
 func TestCHeaderPackagesExcludesStandardRuntime(t *testing.T) {
