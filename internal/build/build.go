@@ -480,7 +480,7 @@ func Build(inv Invocation) ([]Package, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup crosscompile: %w", err)
 	}
-	applyBuildModeCompileFlags(conf.BuildMode, &export)
+	applyBuildModeCompileFlags(conf.BuildMode, conf.Goos, &export)
 	// Update GOOS/GOARCH from export if target was used
 	if conf.Target != "" && export.GOOS != "" {
 		conf.Goos = export.GOOS
@@ -906,8 +906,8 @@ func hasLocalCExports(pkg llssa.Package) bool {
 // applyBuildModeCompileFlags adds code-generation flags that must be present
 // while package C/C++ sources are compiled. Passing -fPIC only to the final
 // shared-library link is too late for objects containing global references.
-func applyBuildModeCompileFlags(mode BuildMode, export *crosscompile.Export) {
-	if mode == BuildModeCShared && export != nil && !slices.Contains(export.CCFLAGS, "-fPIC") {
+func applyBuildModeCompileFlags(mode BuildMode, goos string, export *crosscompile.Export) {
+	if mode == BuildModeCShared && goos != "windows" && export != nil && !slices.Contains(export.CCFLAGS, "-fPIC") {
 		export.CCFLAGS = append(export.CCFLAGS, "-fPIC")
 	}
 }
