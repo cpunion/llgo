@@ -4,12 +4,10 @@ package runtime
 
 import (
 	_ "unsafe"
-
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
-var procPinOnce psync.Once
-var procPinMu psync.Mutex
+var procPinOnce nativeOnce
+var procPinMu nativeMutex
 
 func initProcPinMu() {
 	procPinMu.Init(nil)

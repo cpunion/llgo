@@ -6,18 +6,16 @@ import (
 	"unsafe"
 
 	latomic "sync/atomic"
-
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
 type semaState struct {
-	mu      psync.Mutex
-	cond    psync.Cond
+	mu      nativeMutex
+	cond    nativeCond
 	waiters uint32
 }
 
-var semaOnce psync.Once
-var semaMu psync.Mutex
+var semaOnce nativeOnce
+var semaMu nativeMutex
 var semaMap map[uintptr]*semaState
 
 func initSemaMap() {

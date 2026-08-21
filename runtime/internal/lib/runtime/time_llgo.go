@@ -11,7 +11,6 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/libuv"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
 // Minimal time/timer support for stdlib time on llgo.
@@ -30,7 +29,7 @@ type runtimeTimer struct {
 
 type timerState struct {
 	timer   libuv.Timer
-	mu      psync.Mutex
+	mu      nativeMutex
 	active  bool
 	running bool
 	inited  bool
@@ -39,22 +38,22 @@ type timerState struct {
 
 var (
 	timerLoop  *libuv.Loop
-	timerOnce  psync.Once
+	timerOnce  nativeOnce
 	keepAlive  libuv.Async
 	timerAsync libuv.Async
 
 	// asyncMu guards asyncQueue so asyncTimerEvent objects stay reachable
 	// until the libuv loop drains them.
-	asyncMu    psync.Mutex
+	asyncMu    nativeMutex
 	asyncQueue []*asyncTimerEvent
 
 	asyncTimerChan2State uint32
 
-	timerDebugOnce    psync.Once
+	timerDebugOnce    nativeOnce
 	timerDebugEnabled bool
 
-	timerStateOnce psync.Once
-	timerStateMu   psync.Mutex
+	timerStateOnce nativeOnce
+	timerStateMu   nativeMutex
 	timerStates    map[*runtimeTimer]*timerState
 )
 

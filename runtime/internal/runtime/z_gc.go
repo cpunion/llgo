@@ -23,7 +23,6 @@ import (
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 )
 
@@ -75,8 +74,8 @@ type cleanupSlot struct {
 // pointer in runtime.Cleanup. Slots are reused only after BDWGC invokes the
 // finalizer, and the generation in each id makes stale Cleanup values harmless.
 var cleanupSlots struct {
-	once psync.Once
-	mu   psync.Mutex
+	once nativeOnce
+	mu   nativeMutex
 	all  []*cleanupSlot
 	free unsafe.Pointer
 }

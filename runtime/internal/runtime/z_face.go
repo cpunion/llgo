@@ -21,7 +21,6 @@ import (
 
 	"github.com/xgo-dev/llgo/runtime/abi"
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
 type eface struct {
@@ -78,17 +77,17 @@ var itabTable struct {
 }
 
 func init() {
-	(*sync.Mutex)(&itabTable.mutex).Init(nil)
+	(*nativeMutex)(&itabTable.mutex).Init(nil)
 }
 
-type mutex sync.Mutex
+type mutex nativeMutex
 
 func (m *mutex) Lock() {
-	(*sync.Mutex)(m).Lock()
+	(*nativeMutex)(m).Lock()
 }
 
 func (m *mutex) Unlock() {
-	(*sync.Mutex)(m).Unlock()
+	(*nativeMutex)(m).Unlock()
 }
 
 func findItab(inter *InterfaceType, typ *Type) *Itab {
