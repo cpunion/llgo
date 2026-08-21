@@ -14,6 +14,17 @@ mkdir -p "$(dirname "$2")" "$3"
 llgo_output="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 result_directory="$(cd "$3" && pwd)"
 
+host_cgo_env=()
+if [[ -n "${LLGO_HOST_CGO_CFLAGS:-}" ]]; then
+  host_cgo_env+=("CGO_CFLAGS=$LLGO_HOST_CGO_CFLAGS")
+fi
+if [[ -n "${LLGO_HOST_CGO_CXXFLAGS:-}" ]]; then
+  host_cgo_env+=("CGO_CXXFLAGS=$LLGO_HOST_CGO_CXXFLAGS")
+fi
+if [[ -n "${LLGO_HOST_CGO_LDFLAGS:-}" ]]; then
+  host_cgo_env+=("CGO_LDFLAGS=$LLGO_HOST_CGO_LDFLAGS")
+fi
+
 # An explicit -o path is not given the platform suffix by go build. Keep the
 # compiler executable discoverable by both the MSYS shell and native Go
 # subprocesses when this shared benchmark lane runs on Windows.
@@ -23,7 +34,8 @@ fi
 
 (
   cd "$source_root"
-  LLGO_ROOT="$source_root" go build -p=1 -o "$llgo_output" ./cmd/llgo
+  env "${host_cgo_env[@]}" LLGO_ROOT="$source_root" \
+    go build -p=1 -o "$llgo_output" ./cmd/llgo
 )
 
 (
@@ -40,7 +52,7 @@ go_results="$result_directory/go.txt"
 : > "$go_results"
 (
   cd "$source_root"
-  GOMAXPROCS=1 LLGO_ROOT="$source_root" go test \
+  env "${host_cgo_env[@]}" GOMAXPROCS=1 LLGO_ROOT="$source_root" go test \
     -run '^$' \
     -bench '^(BenchmarkMergeCompilerFlags|BenchmarkMergeLinkerFlags|BenchmarkLookupPCRandom)$' \
     -benchtime=250ms \

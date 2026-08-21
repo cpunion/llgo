@@ -193,9 +193,12 @@ runs:
         cxxflags="${cxxflags//$'\n'/ }"
         ldflags="${ldflags//$'\r'/}"
         ldflags="${ldflags//$'\n'/ }"
-        echo "CGO_CFLAGS=$cflags" >> "$GITHUB_ENV"
-        echo "CGO_CXXFLAGS=$cxxflags" >> "$GITHUB_ENV"
-        echo "CGO_LDFLAGS=$ldflags" >> "$GITHUB_ENV"
+        # These flags link the native Go host compiler against LLVM. Keep
+        # them separate from CGO_*: exporting them globally would leak
+        # -lLLVM-19 into programs later compiled by LLGo for the MSVC ABI.
+        echo "LLGO_HOST_CGO_CFLAGS=$cflags" >> "$GITHUB_ENV"
+        echo "LLGO_HOST_CGO_CXXFLAGS=$cxxflags" >> "$GITHUB_ENV"
+        echo "LLGO_HOST_CGO_LDFLAGS=$ldflags" >> "$GITHUB_ENV"
         clang --version
 
     - name: Install macOS dependencies
