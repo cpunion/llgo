@@ -14,7 +14,9 @@ mkdir -p "$(dirname "$2")" "$3"
 llgo_output="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 result_directory="$(cd "$3" && pwd)"
 
-host_cgo_env=()
+# Keep one common entry so expansion is also valid under macOS Bash 3.2 with
+# nounset enabled; that shell treats an otherwise empty array as unbound.
+host_cgo_env=("LLGO_ROOT=$source_root")
 if [[ -n "${LLGO_HOST_CGO_CFLAGS:-}" ]]; then
   host_cgo_env+=("CGO_CFLAGS=$LLGO_HOST_CGO_CFLAGS")
 fi
@@ -34,7 +36,7 @@ fi
 
 (
   cd "$source_root"
-  env "${host_cgo_env[@]}" LLGO_ROOT="$source_root" \
+  env "${host_cgo_env[@]}" \
     go build -p=1 -o "$llgo_output" ./cmd/llgo
 )
 
@@ -52,7 +54,7 @@ go_results="$result_directory/go.txt"
 : > "$go_results"
 (
   cd "$source_root"
-  env "${host_cgo_env[@]}" GOMAXPROCS=1 LLGO_ROOT="$source_root" go test \
+  env "${host_cgo_env[@]}" GOMAXPROCS=1 go test \
     -run '^$' \
     -bench '^(BenchmarkMergeCompilerFlags|BenchmarkMergeLinkerFlags|BenchmarkLookupPCRandom)$' \
     -benchtime=250ms \
