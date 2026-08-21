@@ -54,6 +54,19 @@ func TestDurationMetric(t *testing.T) {
 	}
 }
 
+func TestWorkloadExpectedOutput(t *testing.T) {
+	item := workload{
+		output:       "default",
+		outputByGOOS: map[string]string{"windows": ""},
+	}
+	if got := item.expectedOutput("linux"); got != "default" {
+		t.Fatalf("Linux output = %q", got)
+	}
+	if got := item.expectedOutput("windows"); got != "" {
+		t.Fatalf("Windows output = %q", got)
+	}
+}
+
 func TestWriteAndValidateMetrics(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "metrics.json")
