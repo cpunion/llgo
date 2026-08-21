@@ -103,6 +103,19 @@ func (p Package) moduleZeroSizedAlloc(elem Type) Expr {
 	return Expr{zerobase, p.Prog.Pointer(elem)}
 }
 
+func (p Package) mapZero(elem Type) Expr {
+	if zero, ok := p.mapZeros[elem.raw.Type]; ok {
+		return Expr{zero, p.Prog.VoidPtr()}
+	}
+	zero := llvm.AddGlobal(p.mod, elem.ll, "")
+	zero.SetInitializer(p.Prog.Zero(elem).impl)
+	zero.SetLinkage(llvm.PrivateLinkage)
+	zero.SetUnnamedAddr(true)
+	zero.SetAlignment(p.Prog.td.ABITypeAlignment(elem.ll))
+	p.mapZeros[elem.raw.Type] = zero
+	return Expr{zero, p.Prog.VoidPtr()}
+}
+
 // setODRLinkage gives multiply emitted definitions the section-group metadata
 // required by COFF. On ELF and Mach-O, LLVM's weak/linkonce linkage is enough;
 // on COFF, omitting COMDAT leaves every object with a separately named weak
