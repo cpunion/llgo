@@ -185,6 +185,15 @@ runs:
         cflags="${cflags//\/clang64/$native_prefix}"
         cxxflags="${cxxflags//\/clang64/$native_prefix}"
         ldflags="${ldflags//\/clang64/$native_prefix}"
+        # llvm-config emits the library search path and library names on
+        # separate lines. GITHUB_ENV treats a continuation line as a new file
+        # command, so flatten whitespace before exporting the CGO flag lists.
+        cflags="${cflags//$'\r'/}"
+        cflags="${cflags//$'\n'/ }"
+        cxxflags="${cxxflags//$'\r'/}"
+        cxxflags="${cxxflags//$'\n'/ }"
+        ldflags="${ldflags//$'\r'/}"
+        ldflags="${ldflags//$'\n'/ }"
         echo "CGO_CFLAGS=$cflags" >> "$GITHUB_ENV"
         echo "CGO_CXXFLAGS=$cxxflags" >> "$GITHUB_ENV"
         echo "CGO_LDFLAGS=$ldflags" >> "$GITHUB_ENV"
