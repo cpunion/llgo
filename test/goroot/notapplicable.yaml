@@ -42,6 +42,9 @@ not_applicable:
   - directive: run
     case: fixedbugs/issue54343.go
     reason: "not applicable: this case observes the exact receiver lifetime of a cleared bound method through a finalizer; LLGo uses conservative BDWGC roots, so exact finalizer timing is not currently an LLGo compatibility goal"
+  - directive: rundir
+    case: typeparam/chansimp.go
+    reason: "not applicable: this case requires a Receiver to become unreachable immediately after its final source-level use so its finalizer closes a channel while the enclosing stack frame remains active; LLGo uses conservative BDWGC stack and register roots that may retain stale pointer-shaped values, so exact last-use liveness and finalizer timing are not currently an LLGo compatibility goal"
   - directive: run
     case: nilptr2.go
     reason: "not applicable: this case requires comprehensive explicit nil checks for dereferences and derived addresses even when LLVM emits no faulting load; LLGo only preserves the required check for unused loads and relies on LLVM and target fault behavior for the remaining address-only forms, so reproducing cmd/compile's complete nil-check insertion is not currently an LLGo compatibility goal"
