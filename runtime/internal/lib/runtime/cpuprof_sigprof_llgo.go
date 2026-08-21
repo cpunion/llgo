@@ -7,7 +7,6 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
 const (
@@ -34,8 +33,8 @@ var (
 	// cpuProfileStateMu is the Go control-plane lock. It serializes native
 	// sampler start/stop and, on Unix, libuv SIGPROF watcher changes. Native
 	// sample collection never acquires it.
-	cpuProfileStateOnce psync.Once
-	cpuProfileStateMu   psync.Mutex
+	cpuProfileStateOnce nativeOnce
+	cpuProfileStateMu   nativeMutex
 
 	cpuProfileRate          int32
 	cpuProfileOpen          uint32

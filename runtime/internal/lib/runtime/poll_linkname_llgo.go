@@ -9,7 +9,6 @@ import (
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 	csyscall "github.com/xgo-dev/llgo/runtime/internal/clite/syscall"
 )
 
@@ -56,9 +55,9 @@ type llgoPollDesc struct {
 	wd int64
 }
 
-var pollOnce psync.Once
+var pollOnce nativeOnce
 var wakeR, wakeW c.Int
-var pollDescMu psync.Mutex
+var pollDescMu nativeMutex
 var pollDescRoots map[uintptr]*llgoPollDesc
 
 func pollInit() {

@@ -6,8 +6,6 @@ package runtime
 
 import (
 	_ "unsafe"
-
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
 // These functions provide runtime/cgo.Handle without pulling in the gc
@@ -55,8 +53,8 @@ func cgoHandleDelete(h uintptr) {
 }
 
 var cgoHandleState struct {
-	once    psync.Once
-	mu      psync.Mutex
+	once    nativeOnce
+	mu      nativeMutex
 	next    uintptr
 	handles map[uintptr]any
 }

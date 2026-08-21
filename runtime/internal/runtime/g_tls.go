@@ -22,7 +22,6 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/thread"
 )
 
 // currentG is the scheduler's physical-thread slot for locating the G that is
@@ -47,9 +46,9 @@ var currentGHasLifecycle bool
 // threads, which have no runtime-owned mexit path.
 var gLifecycleKey = newGLifecycleKey()
 
-func newGLifecycleKey() thread.Key {
-	var key thread.Key
-	if ret := key.Create(thread.KeyDestructor(destroyG)); ret != 0 {
+func newGLifecycleKey() nativeThreadKey {
+	var key nativeThreadKey
+	if ret := key.Create(nativeKeyDestructor(destroyG)); ret != 0 {
 		c.Fprintf(c.Stderr, c.Str("runtime: thread-local key creation failed (error=%d)\n"), ret)
 		panic("runtime: failed to create getg lifecycle key")
 	}

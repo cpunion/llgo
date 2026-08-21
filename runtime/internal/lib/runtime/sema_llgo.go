@@ -6,8 +6,6 @@ import (
 	"unsafe"
 
 	latomic "sync/atomic"
-
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
 // Minimal semaphore + notify list support for stdlib sync on hosted targets.
@@ -120,12 +118,12 @@ type notifyList struct {
 }
 
 type notifyState struct {
-	mu   psync.Mutex
-	cond psync.Cond
+	mu   nativeMutex
+	cond nativeCond
 }
 
-var notifyOnce psync.Once
-var notifyMu psync.Mutex
+var notifyOnce nativeOnce
+var notifyMu nativeMutex
 var notifyMap map[uintptr]*notifyState
 
 func initNotifyMap() {

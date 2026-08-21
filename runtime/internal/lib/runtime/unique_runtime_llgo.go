@@ -4,13 +4,11 @@ package runtime
 
 import (
 	_ "unsafe"
-
-	"github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
 var (
 	uniqueMapCleanup     chan struct{}
-	uniqueMapCleanupOnce sync.Once
+	uniqueMapCleanupOnce nativeOnce
 )
 
 //go:linkname unique_runtime_registerUniqueMapCleanup unique.runtime_registerUniqueMapCleanup

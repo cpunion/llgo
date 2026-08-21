@@ -6,7 +6,6 @@ import (
 	latomic "sync/atomic"
 	_ "unsafe"
 
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
@@ -16,8 +15,8 @@ type weakHandle struct {
 }
 
 var weakState struct {
-	once psync.Once
-	mu   psync.Mutex
+	once nativeOnce
+	mu   nativeMutex
 	m    map[uintptr]*weakHandle
 }
 

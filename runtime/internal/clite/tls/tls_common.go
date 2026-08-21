@@ -46,18 +46,17 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/thread"
 )
 
 type Handle[T any] struct {
-	key        thread.Key
+	key        nativeKey
 	destructor func(*T)
 }
 
 // Alloc creates a handle backed by the host thread-local storage API.
 func Alloc[T any](destructor func(*T)) Handle[T] {
-	var key thread.Key
-	if ret := key.Create(thread.KeyDestructor(slotDestructor[T])); ret != 0 {
+	var key nativeKey
+	if ret := key.Create(nativeKeyDestructor(slotDestructor[T])); ret != 0 {
 		c.Fprintf(c.Stderr, c.Str("tls: thread-local key creation failed (error=%d)\n"), ret)
 		panic("tls: failed to create thread local storage key")
 	}

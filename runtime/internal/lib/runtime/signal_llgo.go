@@ -7,7 +7,6 @@ import (
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/libuv"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/sync"
 )
 
 // Minimal signal support for stdlib os/signal on hosted native targets.
@@ -22,8 +21,8 @@ type sigState struct {
 var (
 	sigInitState uint32
 
-	sigMu     psync.Mutex
-	sigCond   psync.Cond
+	sigMu     nativeMutex
+	sigCond   nativeCond
 	sigQueue  []uint32
 	sigStates map[uint32]*sigState
 )
