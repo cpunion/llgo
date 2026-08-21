@@ -158,6 +158,16 @@ func (c *Cmd) mergeLinkerFlags() []string {
 
 // exec executes the clang command with given arguments.
 func (c *Cmd) exec(args ...string) error {
+	responseFile := ""
+	if useResponseFile(c.app, args) {
+		var err error
+		responseFile, err = writeResponseFile(args)
+		if err != nil {
+			return fmt.Errorf("write clang response file: %w", err)
+		}
+		defer os.Remove(responseFile)
+		args = []string{"@" + responseFile}
+	}
 	cmd := exec.Command(c.app, args...)
 	cmd.Dir = c.Dir
 	if c.Verbose {
@@ -170,6 +180,64 @@ func (c *Cmd) exec(args ...string) error {
 		cmd.Env = c.Env
 	}
 	return cmd.Run()
+}
+
+const windowsCommandLineLimit = 30 * 1024
+
+func useResponseFile(app string, args []string) bool {
+	return useResponseFileForGOOS(runtime.GOOS, app, args)
+}
+
+func useResponseFileForGOOS(goos, app string, args []string) bool {
+	if goos != "windows" {
+		return false
+	}
+	length := len(app)
+	for _, arg := range args {
+		length += 1 + len(arg)
+	}
+	return length > windowsCommandLineLimit
+}
+
+func writeResponseFile(args []string) (name string, err error) {
+	file, err := os.CreateTemp("", "llgo-clang-*.rsp")
+	if err != nil {
+		return "", err
+	}
+	name = file.Name()
+	defer func() {
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			os.Remove(name)
+		}
+	}()
+
+	var content strings.Builder
+	for index, arg := range args {
+		if index != 0 {
+			content.WriteByte(' ')
+		}
+		writeResponseArg(&content, arg)
+	}
+	content.WriteByte('\n')
+	_, err = io.WriteString(file, content.String())
+	return name, err
+}
+
+// writeResponseArg matches Clang's own response-file writer: every argument
+// is quoted, and quotes and backslashes are escaped. The same representation
+// is accepted by Clang's GNU and Windows response-file parsers.
+func writeResponseArg(out *strings.Builder, arg string) {
+	out.WriteByte('"')
+	for _, char := range arg {
+		if char == '"' || char == '\\' {
+			out.WriteByte('\\')
+		}
+		out.WriteRune(char)
+	}
+	out.WriteByte('"')
 }
 
 // CheckLinkArgs validates linking arguments by attempting a test compile.
