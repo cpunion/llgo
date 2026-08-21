@@ -31,7 +31,7 @@ runs:
     - name: Verify ESP QEMU installation
       shell: bash
       run: |
-        which qemu-system-riscv32
-        which qemu-system-xtensa
+        command -v qemu-system-riscv32
+        command -v qemu-system-xtensa
         qemu-system-riscv32 --version
         qemu-system-xtensa --version
