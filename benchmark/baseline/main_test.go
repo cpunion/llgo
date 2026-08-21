@@ -21,6 +21,7 @@ import (
 	"context"
 	"debug/elf"
 	"debug/macho"
+	"debug/pe"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -271,6 +272,21 @@ func TestAddMachOSections(t *testing.T) {
 	})
 	if got.text != 10 || got.data != 60 || got.bss != 80 {
 		t.Fatalf("Mach-O footprint = %+v", got)
+	}
+}
+
+func TestAddPESections(t *testing.T) {
+	var got footprint
+	addPESections(&got, []*pe.Section{
+		{SectionHeader: pe.SectionHeader{VirtualSize: 10, Characteristics: pe.IMAGE_SCN_CNT_CODE}},
+		{SectionHeader: pe.SectionHeader{VirtualSize: 20, Characteristics: pe.IMAGE_SCN_MEM_EXECUTE}},
+		{SectionHeader: pe.SectionHeader{VirtualSize: 30, Characteristics: pe.IMAGE_SCN_CNT_INITIALIZED_DATA}},
+		{SectionHeader: pe.SectionHeader{VirtualSize: 40, Characteristics: pe.IMAGE_SCN_CNT_UNINITIALIZED_DATA}},
+		{SectionHeader: pe.SectionHeader{Size: 50, Characteristics: pe.IMAGE_SCN_CNT_INITIALIZED_DATA}},
+		{SectionHeader: pe.SectionHeader{VirtualSize: 99}},
+	})
+	if got.text != 30 || got.data != 80 || got.bss != 40 {
+		t.Fatalf("PE footprint = %+v", got)
 	}
 }
 

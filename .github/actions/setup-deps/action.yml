@@ -13,6 +13,183 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Set up Windows LLVM environment
+      if: runner.os == 'Windows'
+      id: msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: CLANG64
+        path-type: inherit
+        update: true
+
+    - name: Install Windows dependencies
+      if: runner.os == 'Windows'
+      shell: msys2 {0}
+      env:
+        LLVM_VERSION: "19.1.7"
+        MSYS2_LLVM_PACKAGE_VERSION: "19.1.7-1"
+        MSYS2_LIBUV_PACKAGE_VERSION: "1.52.1-1"
+        MSYS2_GC_PACKAGE_VERSION: "8.2.12-1"
+        MSYS2_LIBATOMIC_OPS_PACKAGE_VERSION: "7.10.0-1"
+      run: |
+        set -euo pipefail
+
+        if [[ "${{ inputs.llvm-version }}" != 19 ]]; then
+          echo "Windows CI currently pins LLVM 19, got ${{ inputs.llvm-version }}" >&2
+          exit 1
+        fi
+
+        repo=https://repo.msys2.org/mingw/clang64
+        prefix=mingw-w64-clang-x86_64
+        packages=(
+          "clang-$MSYS2_LLVM_PACKAGE_VERSION"
+          "clang-libs-$MSYS2_LLVM_PACKAGE_VERSION"
+          "compiler-rt-$MSYS2_LLVM_PACKAGE_VERSION"
+          "llvm-$MSYS2_LLVM_PACKAGE_VERSION"
+          "llvm-libs-$MSYS2_LLVM_PACKAGE_VERSION"
+          "lld-$MSYS2_LLVM_PACKAGE_VERSION"
+          "libc++-$MSYS2_LLVM_PACKAGE_VERSION"
+          "libunwind-$MSYS2_LLVM_PACKAGE_VERSION"
+          "gettext-runtime-0.22.5-2"
+          "libffi-3.4.6-1"
+          "libiconv-1.17-4"
+          "libxml2-2.12.9-2"
+          "xz-5.6.3-3"
+          "zlib-1.3.1-1"
+          "zstd-1.5.6-2"
+          "libuv-$MSYS2_LIBUV_PACKAGE_VERSION"
+          "gc-$MSYS2_GC_PACKAGE_VERSION"
+          "libatomic_ops-$MSYS2_LIBATOMIC_OPS_PACKAGE_VERSION"
+        )
+        urls=()
+        for package in "${packages[@]}"; do
+          urls+=("$repo/$prefix-$package-any.pkg.tar.zst")
+        done
+
+        # MSYS2 renamed the compiler-runtime virtual dependency from gcc-libs
+        # to cc-libs after these LLVM 19 packages were archived. libc++ 19
+        # still provides the required runtime, so satisfy only this metadata
+        # rename instead of upgrading the pinned compiler or disabling all
+        # dependency checks.
+        assumed_cc_runtime="$prefix-cc-libs=$LLVM_VERSION"
+        pacman --noconfirm -U \
+          --assume-installed "$assumed_cc_runtime" \
+          "${urls[@]}"
+
+        for package in clang clang-libs compiler-rt llvm llvm-libs lld libc++ libunwind; do
+          installed="$(pacman -Q "$prefix-$package" | awk '{print $2}')"
+          if [[ "$installed" != "$MSYS2_LLVM_PACKAGE_VERSION" ]]; then
+            echo "expected $package $MSYS2_LLVM_PACKAGE_VERSION, got $installed" >&2
+            exit 1
+          fi
+        done
+        for package_version in \
+          "libuv:$MSYS2_LIBUV_PACKAGE_VERSION" \
+          "gc:$MSYS2_GC_PACKAGE_VERSION" \
+          "libatomic_ops:$MSYS2_LIBATOMIC_OPS_PACKAGE_VERSION"; do
+          package="${package_version%%:*}"
+          expected="${package_version#*:}"
+          installed="$(pacman -Q "$prefix-$package" | awk '{print $2}')"
+          if [[ "$installed" != "$expected" ]]; then
+            echo "expected $package $expected, got $installed" >&2
+            exit 1
+          fi
+        done
+
+        # Hosted runtime timers use libuv. pkgconf supplies the installation
+        # path while the resulting COFF archive is linked with the MSVC ABI.
+        pacman --noconfirm -S --needed \
+          --assume-installed "$assumed_cc_runtime" \
+          "$prefix-pkgconf"
+
+    - name: Configure Windows compiler environment
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+      run: |
+        $ErrorActionPreference = "Stop"
+
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $installPath = & $vswhere -latest -products * `
+          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+          -property installationPath
+        if (-not $installPath) {
+          throw "Visual Studio C++ tools were not found"
+        }
+        Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+        Enter-VsDevShell -VsInstallPath $installPath `
+          -SkipAutomaticLocation `
+          -DevCmdArguments "-arch=x64 -host_arch=x64"
+
+        # Clang targets the MSVC ABI, but it relies on Visual Studio's SDK and
+        # CRT search variables. Persist only the toolchain variables required
+        # by later matrix steps instead of exporting the whole mutable shell.
+        foreach ($name in @(
+          "INCLUDE",
+          "LIB",
+          "LIBPATH",
+          "UCRTVersion",
+          "UniversalCRTSdkDir",
+          "VCINSTALLDIR",
+          "VCToolsInstallDir",
+          "WindowsSdkDir",
+          "WindowsSDKVersion"
+        )) {
+          $value = [Environment]::GetEnvironmentVariable($name)
+          if ($value) {
+            Add-Content -Encoding utf8 $env:GITHUB_ENV "$name=$value"
+          }
+        }
+
+        $clangBin = Join-Path $env:MSYS2_LOCATION "clang64\bin"
+        $clangExe = Join-Path $clangBin "clang.exe"
+        if (-not (Test-Path $clangExe)) {
+          throw "LLVM 19 clang was not found at $clangExe"
+        }
+        Add-Content -Encoding utf8 $env:GITHUB_PATH $clangBin
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "CC=$clangExe"
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "CXX=$(Join-Path $clangBin 'clang++.exe')"
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "CGO_ENABLED=1"
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "LLGO_LLVM_VERSION=19.1.7"
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "LLGO_MSYS2_LOCATION=$env:MSYS2_LOCATION"
+
+        # MSYS2 packages compiler-rt as a GNU-named COFF archive, whereas
+        # Clang's MSVC driver searches the target-specific MSVC layout. Both
+        # names refer to the same archive; provide the expected layout without
+        # changing the selected ABI or linker.
+        $resourceDir = (& $clangExe -print-resource-dir).Trim()
+        $gnuBuiltins = Join-Path $resourceDir "lib\windows\libclang_rt.builtins-x86_64.a"
+        if (-not (Test-Path $gnuBuiltins)) {
+          throw "LLVM 19 compiler-rt archive was not found at $gnuBuiltins"
+        }
+        $msvcRuntimeDir = Join-Path $resourceDir "lib\x86_64-pc-windows-msvc"
+        New-Item -ItemType Directory -Force $msvcRuntimeDir | Out-Null
+        Copy-Item -Force $gnuBuiltins (Join-Path $msvcRuntimeDir "clang_rt.builtins.lib")
+
+    - name: Configure Windows CGO flags
+      if: runner.os == 'Windows'
+      shell: msys2 {0}
+      run: |
+        set -euo pipefail
+
+        llvm_version="$(llvm-config --version)"
+        if [[ "$llvm_version" != 19.1.7 ]]; then
+          echo "expected LLVM 19.1.7, got $llvm_version" >&2
+          exit 1
+        fi
+        native_prefix="$(cygpath -m /clang64)"
+        cflags="$(llvm-config --cflags)"
+        cxxflags="$(llvm-config --cxxflags)"
+        ldflags="$(llvm-config --ldflags --libs all --system-libs)"
+        cflags="${cflags//\/clang64/$native_prefix}"
+        cxxflags="${cxxflags//\/clang64/$native_prefix}"
+        ldflags="${ldflags//\/clang64/$native_prefix}"
+        echo "CGO_CFLAGS=$cflags" >> "$GITHUB_ENV"
+        echo "CGO_CXXFLAGS=$cxxflags" >> "$GITHUB_ENV"
+        echo "CGO_LDFLAGS=$ldflags" >> "$GITHUB_ENV"
+        clang --version
+
     - name: Install macOS dependencies
       if: runner.os == 'macOS'
       shell: bash
