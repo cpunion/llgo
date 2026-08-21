@@ -454,25 +454,29 @@ func (p *context) initLink(line string, prefix int, export bool, f func(inPkgNam
 }
 
 func recvTypeName(typ ast.Expr) string {
+	name, ok := recvTypeNameOK(typ)
+	if !ok {
+		panic("unreachable")
+	}
+	return name
+}
+
+func recvTypeNameOK(typ ast.Expr) (string, bool) {
 retry:
 	switch t := typ.(type) {
 	case *ast.Ident:
-		return t.Name
+		return t.Name, true
 	case *ast.IndexExpr:
-		return trecvTypeName(t.X, t.Index)
+		typ = t.X
+		goto retry
 	case *ast.IndexListExpr:
-		return trecvTypeName(t.X, t.Indices...)
+		typ = t.X
+		goto retry
 	case *ast.ParenExpr:
 		typ = t.X
 		goto retry
 	}
-	panic("unreachable")
-}
-
-// TODO(xsw): support generic type
-func trecvTypeName(t ast.Expr, indices ...ast.Expr) string {
-	_ = indices
-	return t.(*ast.Ident).Name
+	return "", false
 }
 
 // inPkgName:
@@ -482,18 +486,37 @@ func trecvTypeName(t ast.Expr, indices ...ast.Expr) string {
 // - func: pkg.name
 // - method: pkg.(T).name, pkg.(*T).name
 func astFuncName(pkgPath string, fn *ast.FuncDecl) (fullName, inPkgName string) {
+	fullName, inPkgName, ok := astFuncNameOK(pkgPath, fn)
+	if !ok {
+		panic("unreachable")
+	}
+	return fullName, inPkgName
+}
+
+func astFuncNameOK(pkgPath string, fn *ast.FuncDecl) (fullName, inPkgName string, ok bool) {
 	name := fn.Name.Name
-	if recv := fn.Recv; recv != nil && len(recv.List) == 1 {
+	if recv := fn.Recv; recv != nil {
+		if len(recv.List) != 1 {
+			return "", "", false
+		}
 		var method string
 		t := recv.List[0].Type
 		if tp, ok := t.(*ast.StarExpr); ok {
-			method = "(*" + recvTypeName(tp.X) + ")." + name
+			recvName, valid := recvTypeNameOK(tp.X)
+			if !valid {
+				return "", "", false
+			}
+			method = "(*" + recvName + ")." + name
 		} else {
-			method = recvTypeName(t) + "." + name
+			recvName, valid := recvTypeNameOK(t)
+			if !valid {
+				return "", "", false
+			}
+			method = recvName + "." + name
 		}
-		return pkgPath + "." + method, method
+		return pkgPath + "." + method, method, true
 	}
-	return pkgPath + "." + name, name
+	return pkgPath + "." + name, name, true
 }
 
 func typesFuncName(pkgPath string, fn *types.Func) (fullName, inPkgName string) {
@@ -857,7 +880,12 @@ func ParsePkgSyntaxWithOptions(prog llssa.Program, fset *token.FileSet, pkg *typ
 				if err := locality.ValidateFuncBody(fset, decl.Body); err != nil {
 					return err
 				}
-				fullName, inPkgName := astFuncName(pkgPath, decl)
+				fullName, inPkgName, ok := astFuncNameOK(pkgPath, decl)
+				if !ok {
+					// Ill-typed receiver expressions are diagnosed by go/types after
+					// this metadata-only syntax pass.
+					continue
+				}
 				syms[inPkgName] = fullName
 				hasLinkname, err := collectDeclarationDirectivesWithOptions(prog, fset, decl.Doc, fullName, inPkgName, decl.Pos(), options)
 				if err != nil {

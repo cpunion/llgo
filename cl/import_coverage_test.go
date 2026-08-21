@@ -221,6 +221,30 @@ func TestAstAndTypesFuncNameCoverage(t *testing.T) {
 	}
 }
 
+func TestParsePkgSyntaxDefersInvalidReceiverToTypeChecker(t *testing.T) {
+	const src = `package p
+
+import "bufio"
+
+func (b *bufio.Reader) Buffered() int { return -1 }
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "issue5089.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	pkg := types.NewPackage("p", "p")
+	if err := ParsePkgSyntax(prog, fset, pkg, []*ast.File{file}); err != nil {
+		t.Fatalf("ParsePkgSyntax() error = %v", err)
+	}
+	decl := file.Decls[1].(*ast.FuncDecl)
+	if full, inPkg, ok := astFuncNameOK(pkg.Path(), decl); ok {
+		t.Fatalf("astFuncNameOK(invalid receiver) = (%q, %q, true)", full, inPkg)
+	}
+}
+
 func TestParsePkgSyntaxCollectsLinknames(t *testing.T) {
 	cases := []struct {
 		name      string
