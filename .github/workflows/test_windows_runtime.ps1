@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 if (-not (Test-Path $LLGo)) {
   throw "LLGo compiler was not found at $LLGo"
 }
+$LLGo = (Resolve-Path $LLGo).Path
 if (-not $env:LLGO_MSYS2_LOCATION) {
   throw "LLGO_MSYS2_LOCATION is not configured"
 }
@@ -52,26 +53,33 @@ $coreFault = Join-Path $out "windows-core-fault-smoke.exe"
 
 # Keep the special-purpose fixtures beside the full test/... matrix. They
 # cover minimal-runtime links and process behavior which a testing binary can
-# accidentally satisfy through optional standard-library imports.
-& $LLGo build -o $runtime .\runtime\_test\windowsruntime
-if ($LASTEXITCODE -ne 0) {
-  exit $LASTEXITCODE
-}
-& $LLGo build -tags=nogc -o $stdlib .\runtime\_test\windowsstdlib
-if ($LASTEXITCODE -ne 0) {
-  exit $LASTEXITCODE
-}
-& $LLGo build -o $ffi .\runtime\_test\windowsffi
-if ($LASTEXITCODE -ne 0) {
-  exit $LASTEXITCODE
-}
-& $LLGo build -o $empty .\runtime\_test\windowsempty
-if ($LASTEXITCODE -ne 0) {
-  exit $LASTEXITCODE
-}
-& $LLGo build -o $coreFault .\runtime\_test\windowscorefault
-if ($LASTEXITCODE -ne 0) {
-  exit $LASTEXITCODE
+# accidentally satisfy through optional standard-library imports. Build from
+# the nested runtime module so Go resolves its own go.mod rather than treating
+# these packages as missing paths in the repository's main module.
+Push-Location runtime
+try {
+  & $LLGo build -o $runtime .\_test\windowsruntime
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
+  & $LLGo build -tags=nogc -o $stdlib .\_test\windowsstdlib
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
+  & $LLGo build -o $ffi .\_test\windowsffi
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
+  & $LLGo build -o $empty .\_test\windowsempty
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
+  & $LLGo build -o $coreFault .\_test\windowscorefault
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
+} finally {
+  Pop-Location
 }
 
 & .\.github\workflows\check_windows_imports.ps1 `
