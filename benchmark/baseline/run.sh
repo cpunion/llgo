@@ -14,6 +14,13 @@ mkdir -p "$(dirname "$2")" "$3"
 llgo_output="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 result_directory="$(cd "$3" && pwd)"
 
+# An explicit -o path is not given the platform suffix by go build. Keep the
+# compiler executable discoverable by both the MSYS shell and native Go
+# subprocesses when this shared benchmark lane runs on Windows.
+if [[ "$(go env GOOS)" == windows && "$llgo_output" != *.exe ]]; then
+  llgo_output+=.exe
+fi
+
 (
   cd "$source_root"
   LLGO_ROOT="$source_root" go build -p=1 -o "$llgo_output" ./cmd/llgo
