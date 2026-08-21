@@ -1379,6 +1379,10 @@ func TestCSharedExportArgs(t *testing.T) {
 	if got, want := strings.Join(cSharedExportArgs(ctx, pkgs), " "), "-Wl,-u,_Add -Wl,-u,_Zed"; got != want {
 		t.Fatalf("darwin cSharedExportArgs = %q, want %q", got, want)
 	}
+	ctx.buildConf.Goos = "windows"
+	if got, want := strings.Join(cSharedExportArgs(ctx, pkgs), " "), "-Wl,/export:Add -Wl,/export:Zed"; got != want {
+		t.Fatalf("windows cSharedExportArgs = %q, want %q", got, want)
+	}
 	ctx.buildConf.BuildMode = BuildModeExe
 	if got := cSharedExportArgs(ctx, pkgs); got != nil {
 		t.Fatalf("executable cSharedExportArgs = %v, want nil", got)

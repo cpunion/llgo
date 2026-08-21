@@ -1868,9 +1868,15 @@ func cSharedExportArgs(ctx *context, pkgs []*aPackage) []string {
 	slices.Sort(names)
 	args := make([]string, 0, len(names))
 	for _, name := range names {
-		if ctx.buildConf.Goos == "darwin" {
+		switch ctx.buildConf.Goos {
+		case "darwin":
 			args = append(args, "-Wl,-u,_"+name)
-		} else {
+		case "windows":
+			// /export both roots the symbol and writes it to the PE export
+			// table, allowing lld-link to produce the import library needed
+			// by C consumers of -buildmode=c-shared output.
+			args = append(args, "-Wl,/export:"+name)
+		default:
 			args = append(args, "-Wl,--undefined="+name)
 		}
 	}
