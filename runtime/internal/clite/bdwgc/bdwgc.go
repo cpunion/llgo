@@ -22,6 +22,8 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
+const LLGoPackage = "link: $(pkg-config --libs bdw-gc); -lgc"
+
 const (
 	Success = iota
 	Duplicate
