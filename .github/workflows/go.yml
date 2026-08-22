@@ -68,6 +68,14 @@ jobs:
             export CGO_CFLAGS="$LLGO_HOST_CGO_CFLAGS"
             export CGO_CXXFLAGS="$LLGO_HOST_CGO_CXXFLAGS"
             export CGO_LDFLAGS="$LLGO_HOST_CGO_LDFLAGS"
+
+            # LLVM's MinGW distribution includes GNU COFF import archives.
+            # Go's internal linker cannot consume every archive member used by
+            # the race runtime and LLVM, so let the configured Clang toolchain
+            # perform the final link instead of dropping those test packages.
+            link_flags=(-ldflags=-linkmode=external)
+          else
+            link_flags=()
           fi
           go build -v ./...
 
@@ -92,9 +100,10 @@ jobs:
           # for every other package, and disable vet only for that package.
           go list ./... \
             | grep -v '^github.com/xgo-dev/llgo/test/go$' \
-            | xargs go test -timeout 45m -coverprofile="coverage-main.txt" -covermode=atomic \
+            | xargs go test "${link_flags[@]}" -timeout 45m -coverprofile="coverage-main.txt" -covermode=atomic \
                 -bench '^BenchmarkGo126' -benchtime=1x
-          go test -timeout 45m -vet=off -coverprofile="coverage-test-go.txt" -covermode=atomic ./test/go
+          go test "${link_flags[@]}" -timeout 45m -vet=off \
+            -coverprofile="coverage-test-go.txt" -covermode=atomic ./test/go
 
           head -n 1 coverage-main.txt > coverage.txt
           tail -n +2 coverage-main.txt >> coverage.txt
