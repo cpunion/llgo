@@ -84,7 +84,15 @@ jobs:
             # Go's internal linker cannot consume every archive member used by
             # the race runtime and LLVM, so let the configured Clang toolchain
             # perform the final link instead of dropping those test packages.
-            link_flags=(-ldflags=-linkmode=external)
+            # MinGW keeps the Windows address-wait API imports used by Go's
+            # race runtime in libsynchronization rather than libkernel32.
+            link_flags=("-ldflags=-linkmode=external -extldflags=-lsynchronization")
+
+            # Golden tests capture child output through a pipe. Keep C stdio
+            # unbuffered in those generated test executables because the
+            # Windows runtime intentionally uses ExitProcess and therefore
+            # does not run CRT stream teardown.
+            export LLGO_STDIO_NOBUF=1
           fi
 
           # test/go intentionally contains compiler edge cases that make the
