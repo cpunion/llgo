@@ -36,6 +36,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("LLGO_TEST_FAILING_ARCHIVER") == "1" {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "merge failed")
+		os.Exit(7)
+	}
 	old := cacheRootFunc
 	td, _ := os.MkdirTemp("", "llgo-cache-*")
 	cacheRootFunc = func() string { return td }
@@ -1092,7 +1097,7 @@ func TestTestOutputFileLogic(t *testing.T) {
 			conf:        &Config{Mode: ModeTest, OutFile: "/tmp/mytest.test", AppExt: ".test"},
 			multiPkg:    false,
 			wantBase:    "mytest",
-			wantDir:     "/tmp",
+			wantDir:     filepath.Clean("/tmp"),
 			description: "-o with absolute file path: use specified file",
 		},
 		{
@@ -1349,7 +1354,7 @@ func TestLTOEnabledExplicitOverride(t *testing.T) {
 
 func TestArchiverPrefersLLVMArForLTO(t *testing.T) {
 	td := t.TempDir()
-	llvmAr := filepath.Join(td, "llvm-ar")
+	llvmAr := testToolPath(td, "llvm-ar")
 	if err := os.WriteFile(llvmAr, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1495,7 +1500,7 @@ func TestArchiveMergerSelection(t *testing.T) {
 		t.Setenv("LLGO_AR", "")
 		t.Setenv("PATH", "")
 		td := t.TempDir()
-		llvmAr := filepath.Join(td, "llvm-ar")
+		llvmAr := testToolPath(td, "llvm-ar")
 		if err := os.WriteFile(llvmAr, nil, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1510,7 +1515,7 @@ func TestArchiveMergerSelection(t *testing.T) {
 	t.Run("path", func(t *testing.T) {
 		t.Setenv("LLGO_AR", "")
 		td := t.TempDir()
-		llvmAr := filepath.Join(td, "llvm-ar")
+		llvmAr := testToolPath(td, "llvm-ar")
 		if err := os.WriteFile(llvmAr, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1581,11 +1586,12 @@ func TestCreateMergedArchiveFileErrors(t *testing.T) {
 	}
 
 	td := t.TempDir()
-	failingAr := filepath.Join(td, "llvm-ar")
-	if err := os.WriteFile(failingAr, []byte("#!/bin/sh\necho merge failed >&2\nexit 7\n"), 0o755); err != nil {
+	failingAr, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("LLGO_AR", failingAr)
+	t.Setenv("LLGO_TEST_FAILING_ARCHIVER", "1")
 	input := filepath.Join(td, "input.o")
 	if err := os.WriteFile(input, []byte("object"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1593,6 +1599,13 @@ func TestCreateMergedArchiveFileErrors(t *testing.T) {
 	if err := ctx.createMergedArchiveFile(filepath.Join(td, "failed.a"), []string{input}); err == nil || !strings.Contains(err.Error(), "merge failed") {
 		t.Fatalf("createMergedArchiveFile error = %v, want archiver output", err)
 	}
+}
+
+func testToolPath(dir, name string) string {
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(dir, name)
 }
 
 func TestDevLTOGlobalDCEDefaultsToFullLTO(t *testing.T) {

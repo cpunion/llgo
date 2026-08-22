@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/xgo-dev/llgo/internal/mockable"
@@ -30,6 +31,17 @@ func runNative(ctx *context, app, pkgDir, pkgName string, conf *Config, mode Mod
 	// Skip execution if CompileOnly is true
 	if conf.CompileOnly {
 		return nil
+	}
+	physicalApp := app
+	if conf.Goos == "windows" && conf.Target == "" && filepath.Ext(app) == "" {
+		// The linker keeps its conventional .exe beside an exact extensionless
+		// `llgo test -o` result so os/exec can launch it on Windows. Remove only
+		// that driver artifact after execution; the requested output remains.
+		candidate := app + ".exe"
+		if _, err := os.Stat(candidate); err == nil {
+			physicalApp = candidate
+			defer os.Remove(candidate)
+		}
 	}
 
 	switch mode {
@@ -59,7 +71,7 @@ func runNative(ctx *context, app, pkgDir, pkgName string, conf *Config, mode Mod
 		if conf.PrintCommands {
 			fmt.Fprintf(os.Stderr, "%s %s\n", app, strings.Join(args, " "))
 		}
-		cmd := exec.Command(app, args...)
+		cmd := exec.Command(physicalApp, args...)
 		ctx.commands.configure(cmd)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -75,7 +87,7 @@ func runNative(ctx *context, app, pkgDir, pkgName string, conf *Config, mode Mod
 		if conf.PrintCommands {
 			fmt.Fprintf(os.Stderr, "%s %s\n", app, strings.Join(conf.RunArgs, " "))
 		}
-		cmd := exec.Command(app, conf.RunArgs...)
+		cmd := exec.Command(physicalApp, conf.RunArgs...)
 		ctx.commands.configure(cmd)
 		cmd.Dir = pkgDir
 		cmd.Stdout = os.Stdout
