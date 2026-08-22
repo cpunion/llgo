@@ -295,7 +295,16 @@ func nativeSectionFlags(goos string) (ccflags, ldflags []string) {
 		return nil, []string{"-Xlinker", "-dead_strip"}
 	case "windows":
 		return []string{"-fdata-sections", "-ffunction-sections"},
-			[]string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref"}
+			[]string{
+				"-fdata-sections",
+				"-ffunction-sections",
+				"-Wl,/opt:ref",
+				// The Universal CRT defines printf-family entry points inline in
+				// its headers. LLGo's C linknames reference their traditional
+				// external symbols directly, which Microsoft supplies in this
+				// compatibility import library.
+				"-llegacy_stdio_definitions",
+			}
 	default:
 		return []string{"-fdata-sections", "-ffunction-sections"}, []string{
 			"-fdata-sections",
