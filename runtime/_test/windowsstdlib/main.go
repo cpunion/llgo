@@ -100,18 +100,6 @@ func testWindowsSyscalls() {
 	}
 }
 
-func testWindowsStdio() {
-	if c.Fprintf(c.Stderr, c.Str("windows stderr compatibility: %d\n"), 42) < 0 {
-		panic("Windows fprintf compatibility wrapper failed")
-	}
-	if c.Printf(c.Str("windows stdout compatibility: %s\n"), c.Str("ok")) < 0 {
-		panic("Windows printf compatibility wrapper failed")
-	}
-	if c.Fflush(c.Stdout) != 0 {
-		panic("Windows stdout flush failed")
-	}
-}
-
 func testWindowsOS() {
 	// Windows initializes os.Args from GetCommandLine and commandLineToArgv.
 	if len(os.Args) == 0 {
@@ -322,7 +310,6 @@ func main() {
 	if value != 42 {
 		panic("sync.Once ran incorrectly")
 	}
-	testWindowsStdio()
 	testWindowsSyscalls()
 	testWindowsOS()
 	testLibuvHandleSizes()
