@@ -102,12 +102,12 @@ compare_header() {
     local test_name="$3"
 
     if [[ -f "$expected_file" ]]; then
-        if diff -q "$header_file" "$expected_file" >/dev/null 2>&1; then
+        if [[ "$(cksum < "$header_file")" == "$(cksum < "$expected_file")" ]]; then
             print_status "$test_name: Header content matches expected"
             return 0
         else
             print_warning "$test_name: Header content differs from expected"
-            print_warning "Run 'diff $header_file $expected_file' to see differences"
+            print_warning "Header: $header_file; expected: $expected_file"
             return 1
         fi
     else
@@ -141,6 +141,21 @@ fi
 print_status "Starting C header generation tests..."
 print_status "Working directory: $SCRIPT_DIR"
 
+OUTPUT_NAME="export"
+SHARED_LIB="libexport.so"
+case "$OSTYPE" in
+    darwin*)
+        SHARED_LIB="libexport.dylib"
+        ;;
+    msys*|cygwin*|win32*)
+        # Windows build modes use the requested output name verbatim instead
+        # of adding Unix's lib prefix. Request the conventional prefix so the
+        # generated header remains identical on every host.
+        OUTPUT_NAME="libexport"
+        SHARED_LIB="libexport.dll"
+        ;;
+esac
+
 echo ""
 build_failures=0
 run_build_mode_tests=true
@@ -163,20 +178,10 @@ if [[ "$run_build_mode_tests" == true ]]; then
 
 # Test 1: c-shared mode
 print_status "=== Test 1: Building with -buildmode c-shared ==="
-if $LLGO_SCRIPT build -buildmode c-shared -o export .; then
+if $LLGO_SCRIPT build -buildmode c-shared -o "$OUTPUT_NAME" .; then
     print_status "Build succeeded"
 
-    # Check generated files (different extensions on different platforms)
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS
-        check_file "libexport.dylib" "Dynamic library (libexport.dylib)"
-        SHARED_LIB="libexport.dylib"
-    else
-        # Linux and others
-        check_file "libexport.so" "Dynamic library (libexport.so)"
-        SHARED_LIB="libexport.so"
-    fi
-
+    check_file "$SHARED_LIB" "Dynamic library ($SHARED_LIB)"
     check_file "libexport.h" "C header (libexport.h)"
 
     # Compare with expected header if it exists
@@ -216,7 +221,7 @@ fi
 
 # Test 2: c-archive mode
 print_status "=== Test 2: Building with -buildmode c-archive ==="
-if $LLGO_SCRIPT build -buildmode c-archive -o export .; then
+if $LLGO_SCRIPT build -buildmode c-archive -o "$OUTPUT_NAME" .; then
     print_status "Build succeeded"
 
     # Check generated files

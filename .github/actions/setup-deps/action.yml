@@ -100,7 +100,8 @@ runs:
         # path while the resulting COFF archive is linked with the MSVC ABI.
         pacman --noconfirm -S --needed \
           --assume-installed "$assumed_cc_runtime" \
-          "$prefix-pkgconf"
+          "$prefix-pkgconf" \
+          make
 
     - name: Configure Windows compiler environment
       if: runner.os == 'Windows'
