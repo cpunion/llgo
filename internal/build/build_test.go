@@ -281,6 +281,23 @@ func TestDeadcodeTestMainIsReachable(t *testing.T) {
 	if _, err := Build(Invocation{Args: []string{"."}, Config: conf, Dir: fixture}); err != nil {
 		t.Fatal(err)
 	}
+
+	nm, err := exec.Command("nm", "-a", conf.OutFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read test binary symbols: %v\n%s", err, nm)
+	}
+	symbols := string(nm)
+	for _, live := range []string{
+		"deadcodetestmain.initOnlyAnswer.initAnswer",
+		"deadcodetestmain.liveAnswer.Answer",
+	} {
+		if !strings.Contains(symbols, live) {
+			t.Fatalf("live test method %q was dropped:\n%s", live, symbols)
+		}
+	}
+	if strings.Contains(symbols, "deadcodetestmain.deadAnswer.Drop") {
+		t.Fatalf("dead test method was retained:\n%s", symbols)
+	}
 }
 
 func TestDeadcodeBuildColdAndHotPackageCache(t *testing.T) {
