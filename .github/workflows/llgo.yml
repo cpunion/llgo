@@ -376,9 +376,13 @@ jobs:
             llvm: 19
             go: "1.26.7"
             lane: primary
-          # Keep the Go 1.26 user-module compatibility matrix on both host
-          # platforms; release artifact smoke tests alone only cover go 1.26.
+          # Keep the Go 1.26 user-module compatibility matrix on every native
+          # host platform; release artifact smoke tests alone only cover go 1.26.
           - os: macos-latest
+            llvm: 19
+            go: "1.26.7"
+            lane: primary
+          - os: windows-latest
             llvm: 19
             go: "1.26.7"
             lane: primary
