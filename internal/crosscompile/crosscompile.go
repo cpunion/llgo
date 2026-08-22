@@ -51,14 +51,20 @@ type Export struct {
 // Build orchestration consumes this typed capability instead of inferring it
 // from a target name or linker executable.
 type DebugInfoPolicy struct {
-	AlwaysOmit    bool
-	OmitLinkFlags []string
+	AlwaysOmit        bool
+	OmitLinkFlags     []string
+	PreserveLinkFlags []string
 }
 
 func nativeDebugInfoPolicy(goos string) DebugInfoPolicy {
 	switch goos {
 	case "darwin", "linux":
 		return DebugInfoPolicy{OmitLinkFlags: []string{"-Wl,-S"}}
+	case "windows":
+		return DebugInfoPolicy{
+			OmitLinkFlags:     []string{"-Wl,/debug:none"},
+			PreserveLinkFlags: []string{"-Wl,/debug:dwarf"},
+		}
 	default:
 		return DebugInfoPolicy{}
 	}
@@ -71,8 +77,10 @@ var (
 )
 
 var (
-	espClangBaseUrl = "https://github.com/goplus/espressif-llvm-project-prebuilt/releases/download/19.1.2_20250905-3"
-	espClangVersion = "19.1.2_20250905-3"
+	espClangBaseUrl        = "https://github.com/goplus/espressif-llvm-project-prebuilt/releases/download/19.1.2_20250905-3"
+	espClangVersion        = "19.1.2_20250905-3"
+	espClangWindowsBaseUrl = "https://github.com/espressif/llvm-project/releases/download/esp-19.1.2_20250312"
+	espClangWindowsVersion = "19.1.2_20250312"
 )
 
 // cacheRoot can be overridden for testing
@@ -142,15 +150,16 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 	}
 
 	// Try to download ESP Clang if platform is supported
-	platformSuffix := getESPClangPlatform(runtime.GOOS, runtime.GOARCH)
+	platformSuffix := getESPClangHostPlatform(runtime.GOOS, runtime.GOARCH)
 	if platformSuffix != "" {
-		cacheClangDir := filepath.Join(cacheRoot(), "crosscompile", "esp-clang-"+espClangVersion)
+		baseURL, version := espClangDownload(platformSuffix)
+		cacheClangDir := filepath.Join(cacheRoot(), "crosscompile", "esp-clang-"+version)
 		if _, err = os.Stat(cacheClangDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				return
 			}
 			fmt.Fprintln(os.Stderr, "ESP Clang not found in LLGO_ROOT or cache, will download.")
-			if err = checkDownloadAndExtractESPClang(platformSuffix, cacheClangDir); err != nil {
+			if err = checkDownloadAndExtractESPClang(baseURL, version, platformSuffix, cacheClangDir); err != nil {
 				return
 			}
 		}
@@ -162,8 +171,11 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 	return
 }
 
-// getESPClangPlatform returns the platform suffix for ESP Clang downloads
-func getESPClangPlatform(goos, goarch string) string {
+// getESPClangHostPlatform returns the host-platform suffix of an ESP Clang
+// distribution. For example, x86_64-w64-mingw32 describes the ABI of the
+// downloaded compiler executable; it does not select the ABI of code that
+// compiler emits for LLGo's target triple.
+func getESPClangHostPlatform(goos, goarch string) string {
 	switch goos {
 	case "darwin":
 		switch goarch {
@@ -183,11 +195,23 @@ func getESPClangPlatform(goos, goarch string) string {
 		}
 	case "windows":
 		switch goarch {
-		case "amd64":
+		case "amd64", "arm64":
+			// Espressif publishes an x86-64 Windows host toolchain. Windows on
+			// ARM64 runs it through the system's x64 emulation layer.
 			return "x86_64-w64-mingw32"
 		}
 	}
 	return ""
+}
+
+func espClangDownload(platformSuffix string) (baseURL, version string) {
+	if platformSuffix == "x86_64-w64-mingw32" {
+		// The LLGo-hosted 20250905 build does not publish a Windows archive.
+		// Use Espressif's official LLVM 19 Windows build instead of constructing
+		// a URL that can only return 404.
+		return espClangWindowsBaseUrl, espClangWindowsVersion
+	}
+	return espClangBaseUrl, espClangVersion
 }
 
 // ldFlagsFromFileName extracts the library name from a filename for use in linker flags
@@ -217,8 +241,129 @@ func compileWithConfig(
 	return
 }
 
-func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
-	targetTriple := llvm.GetTargetTriple(goos, goarch)
+func nativeLLDFlags(goos string, level optlevel.Level, ltoMode lto.Mode) []string {
+	flags := []string{"-fuse-ld=lld"}
+	if goos == "windows" {
+		flags = append(flags,
+			"-Wl,/errorlimit:0",
+			// Go requires distinct functions to have distinct PCs. lld-link
+			// enables identical COMDAT folding through /opt:icf, so keep it
+			// disabled even when other dead-code elimination is enabled.
+			"-Wl,/opt:noicf",
+		)
+	} else {
+		flags = append(flags,
+			"-Wl,--error-limit=0",
+			// lld's safe mode still folds llgo-emitted same-body functions.
+			"-Wl,--icf=none",
+		)
+	}
+	if !ltoMode.Enabled() {
+		return flags
+	}
+
+	flags = append(flags, ltoMode.ClangFlag())
+	if goos == "windows" {
+		flags = append(flags, "-Wl,/opt:lldlto="+coffLTOLevel(level))
+	} else {
+		// ld.lld accepts the size-oriented --lto-Os/--lto-Oz spellings;
+		// lld-link accepts only the numeric levels mapped above.
+		flags = append(flags, "-Wl,--lto"+level.Flag())
+	}
+	return flags
+}
+
+func coffLTOLevel(level optlevel.Level) string {
+	switch level {
+	case optlevel.O0:
+		return "0"
+	case optlevel.O1:
+		return "1"
+	case optlevel.O3:
+		return "3"
+	default:
+		// lld-link accepts only 0 through 3. -Os and -Oz are preserved in
+		// the input IR through optsize/minsize attributes; use its normal
+		// optimization pipeline for the link-wide setting.
+		return "2"
+	}
+}
+
+func nativeSectionFlags(goos string) (ccflags, ldflags []string) {
+	switch goos {
+	case "darwin":
+		return nil, []string{"-Xlinker", "-dead_strip"}
+	case "windows":
+		return []string{"-fdata-sections", "-ffunction-sections"},
+			[]string{
+				"-fdata-sections",
+				"-ffunction-sections",
+				"-Wl,/opt:ref",
+				// The Universal CRT defines printf-family entry points inline in
+				// its headers. LLGo's C linknames reference their traditional
+				// external symbols directly, which Microsoft supplies in this
+				// compatibility import library.
+				"-llegacy_stdio_definitions",
+			}
+	default:
+		return []string{"-fdata-sections", "-ffunction-sections"}, []string{
+			"-fdata-sections",
+			"-ffunction-sections",
+			"-Xlinker",
+			"--gc-sections",
+			"-latomic",
+			// libpthread & libdl is built-in since glibc 2.34 (2021-08-01); we need to support earlier versions.
+			"-lpthread",
+			"-ldl",
+		}
+	}
+}
+
+// configureNativeTargetFlags configures clang and the native-format linker for
+// a Go operating-system target. The target may differ from the host; SDK and
+// host-library discovery remain the caller's responsibility.
+func configureNativeTargetFlags(export *Export, goos, targetTriple string, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) {
+	export.DebugInfo = nativeDebugInfoPolicy(goos)
+	export.LDFLAGS = []string{
+		"-target", targetTriple,
+		"-Qunused-arguments",
+		"-Wno-unused-command-line-argument",
+	}
+	export.LDFLAGS = append(export.LDFLAGS, nativeLLDFlags(goos, level, ltoMode)...)
+	export.CCFLAGS = []string{
+		level.Flag(),
+		"-target", targetTriple,
+		"-Qunused-arguments",
+		"-Wno-unused-command-line-argument",
+		// Keep frame pointers in C code too: the runtime's physical
+		// unwinder walks fault-site chains through C frames (Go keeps
+		// them via the "frame-pointer"="non-leaf" attribute; x86-64 C
+		// would omit them at -O by default).
+		"-fno-omit-frame-pointer",
+	}
+	if ltoMode.Enabled() {
+		export.CCFLAGS = append(export.CCFLAGS, ltoMode.ClangFlag())
+	}
+	if ltoMode == lto.Full && goGlobalDCE {
+		export.CCFLAGS = append(export.CCFLAGS, "-fvirtual-function-elimination", "-fwhole-program-vtables")
+	}
+}
+
+func configureNativeClangRootFlags(export *Export, goos, clangRoot string) {
+	if clangRoot == "" {
+		return
+	}
+	clangLib := filepath.Join(clangRoot, "lib")
+	clangInc := filepath.Join(clangRoot, "include")
+	export.CFLAGS = append(export.CFLAGS, "-I"+clangInc)
+	export.LDFLAGS = append(export.LDFLAGS, "-L"+clangLib)
+	if goos != "windows" {
+		export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
+	}
+}
+
+func use(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
+	targetTriple := llvm.GetTargetTripleWithGOARM(goos, goarch, goarm)
 	llgoRoot := env.LLGoROOT()
 
 	// Check for ESP Clang support for target-based builds
@@ -235,99 +380,29 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 		export.CC = "clang++"
 	}
 
-	if runtime.GOOS == goos && runtime.GOARCH == goarch {
-		export.DebugInfo = nativeDebugInfoPolicy(goos)
-		// not cross compile
-		// Set up basic flags for non-cross-compile
-		export.LDFLAGS = []string{
-			"-target", targetTriple,
-			"-Qunused-arguments",
-			"-Wno-unused-command-line-argument",
-			"-Wl,--error-limit=0",
-			"-fuse-ld=lld",
-			// ICF stays off: Go semantics require distinct functions to
-			// have distinct pcs (FuncForPC names, function-value identity —
-			// goroot fixedbugs/issue58300). lld's safe mode still folds
-			// llgo-emitted same-body functions, and gc never folds.
-			"-Wl,--icf=none",
-		}
-		if ltoMode.Enabled() {
-			export.LDFLAGS = append(export.LDFLAGS, ltoMode.ClangFlag(), "-Wl,--lto"+level.Flag())
-		}
-		if clangRoot != "" {
-			clangLib := filepath.Join(clangRoot, "lib")
-			clangInc := filepath.Join(clangRoot, "include")
-			export.CFLAGS = append(export.CFLAGS, "-I"+clangInc)
-			export.LDFLAGS = append(export.LDFLAGS, "-L"+clangLib)
-			// Add platform-specific rpath flags
-			switch goos {
-			case "darwin":
-				export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
-			case "linux":
-				export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
-			case "windows":
-				// Windows doesn't support rpath, DLLs should be in PATH or same directory
-			default:
-				// For other Unix-like systems, try the generic rpath
-				export.LDFLAGS = append(export.LDFLAGS, "-Wl,-rpath,"+clangLib)
+	nativeHost := runtime.GOOS == goos && runtime.GOARCH == goarch
+	if nativeHost || goos == "windows" {
+		// Windows uses the same explicit MSVC/COFF target configuration for
+		// native and cross builds. Other native GOOS targets retain their
+		// existing host-only support.
+		configureNativeTargetFlags(&export, goos, targetTriple, level, ltoMode, goGlobalDCE)
+		if nativeHost {
+			configureNativeClangRootFlags(&export, goos, clangRoot)
+			// Add sysroot for macOS only.
+			if goos == "darwin" {
+				sysrootPath, sysrootErr := getMacOSSysroot()
+				if sysrootErr != nil {
+					err = fmt.Errorf("failed to get macOS SDK path: %w", sysrootErr)
+					return
+				}
+				export.CCFLAGS = append(export.CCFLAGS, "--sysroot="+sysrootPath)
+				export.LDFLAGS = append(export.LDFLAGS, "--sysroot="+sysrootPath)
 			}
 		}
-		export.CCFLAGS = []string{
-			level.Flag(),
-			"-target", targetTriple,
-			"-Qunused-arguments",
-			"-Wno-unused-command-line-argument",
-			// Keep frame pointers in C code too: the runtime's physical
-			// unwinder walks fault-site chains through C frames (Go keeps
-			// them via the "frame-pointer"="non-leaf" attribute; x86-64 C
-			// would omit them at -O by default).
-			"-fno-omit-frame-pointer",
-		}
-		if ltoMode.Enabled() {
-			export.CCFLAGS = append(export.CCFLAGS, ltoMode.ClangFlag())
-		}
-		if ltoMode == lto.Full && goGlobalDCE {
-			export.CCFLAGS = append(export.CCFLAGS, "-fvirtual-function-elimination", "-fwhole-program-vtables")
-		}
 
-		// Add sysroot for macOS only
-		if goos == "darwin" {
-			sysrootPath, sysrootErr := getMacOSSysroot()
-			if sysrootErr != nil {
-				err = fmt.Errorf("failed to get macOS SDK path: %w", sysrootErr)
-				return
-			}
-			export.CCFLAGS = append(export.CCFLAGS, []string{"--sysroot=" + sysrootPath}...)
-			export.LDFLAGS = append(export.LDFLAGS, []string{"--sysroot=" + sysrootPath}...)
-		}
-
-		// Add OS-specific flags
-		switch goos {
-		case "darwin": // ld64.lld (macOS)
-			export.LDFLAGS = append(
-				export.LDFLAGS,
-				"-Xlinker", "-dead_strip",
-			)
-		case "windows": // lld-link (Windows)
-			// TODO(lijie): Add options for Windows.
-		default: // ld.lld (Unix)
-			export.CCFLAGS = append(
-				export.CCFLAGS,
-				"-fdata-sections",
-				"-ffunction-sections",
-			)
-			export.LDFLAGS = append(
-				export.LDFLAGS,
-				"-fdata-sections",
-				"-ffunction-sections",
-				"-Xlinker",
-				"--gc-sections",
-				"-latomic",
-				// libpthread & libdl is built-in since glibc 2.34 (2021-08-01); we need to support earlier versions.
-				"-lpthread",
-				"-ldl",
-			)
-		}
+		ccflags, ldflags := nativeSectionFlags(goos)
+		export.CCFLAGS = append(export.CCFLAGS, ccflags...)
+		export.LDFLAGS = append(export.LDFLAGS, ldflags...)
 		return
 	}
 	if goarch != "wasm" {
@@ -484,15 +559,23 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 		return export, fmt.Errorf("target '%s' does not have a valid CPU configuration", targetName)
 	}
 
-	// Check for ESP Clang support for target-based builds
-	clangRoot, err := getESPClangRoot(true)
-	if err != nil {
-		return
+	// Espressif's Windows toolchain only ships the ESP backends. Use the
+	// full MSYS2 LLVM distribution for other embedded targets (for example
+	// ARM and AVR), while retaining the established ESP toolchain selection
+	// on Unix hosts and for ESP targets.
+	var clangRoot string
+	if useSystemClangForTarget(runtime.GOOS, target, config.BuildTags) {
+		export.CC = "clang++"
+	} else {
+		var clangErr error
+		clangRoot, clangErr = getESPClangRoot(true)
+		if clangErr != nil {
+			err = clangErr
+			return
+		}
+		export.ClangRoot = clangRoot
+		export.CC = filepath.Join(clangRoot, "bin", "clang++")
 	}
-
-	// Set ClangRoot and CC if clang is available
-	export.ClangRoot = clangRoot
-	export.CC = filepath.Join(clangRoot, "bin", "clang++")
 
 	// Convert target config to Export - only export necessary fields
 	export.BuildTags = config.BuildTags
@@ -534,9 +617,10 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	ldflags := []string{"-S", "--icf=none"}
 	ccflags := []string{level.Flag()}
 	cflags := []string{"-Wno-override-module", "-Qunused-arguments", "-Wno-unused-command-line-argument"}
-	if config.LLVMTarget != "" {
-		cflags = append(cflags, "--target="+config.LLVMTarget)
-		ccflags = append(ccflags, "--target="+config.LLVMTarget)
+	clangTarget := clangDriverTargetForHost(runtime.GOOS, config.LLVMTarget, config.BuildTags)
+	if clangTarget != "" {
+		cflags = append(cflags, "--target="+clangTarget)
+		ccflags = append(ccflags, "--target="+clangTarget)
 	}
 	// Expand template variables in cflags
 	expandedCFlags := env.ExpandEnvSlice(config.CFlags, envs)
@@ -648,7 +732,10 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 
 	// Handle Linker - keep it for external usage
 	if config.Linker != "" {
-		export.Linker = filepath.Join(clangRoot, "bin", config.Linker)
+		export.Linker = config.Linker
+		if clangRoot != "" {
+			export.Linker = filepath.Join(clangRoot, "bin", config.Linker)
+		}
 	}
 	if config.LinkerScript != "" {
 		ldflags = append(ldflags, "-T", config.LinkerScript)
@@ -715,11 +802,45 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	return export, nil
 }
 
+func useSystemClangForTarget(hostGOOS, targetTriple string, buildTags []string) bool {
+	if hostGOOS != "windows" || strings.HasPrefix(targetTriple, "xtensa") {
+		return false
+	}
+	for _, tag := range buildTags {
+		if tag == "esp" {
+			return false
+		}
+	}
+	return true
+}
+
+// clangDriverTargetForHost returns the target spelling accepted by the host
+// Clang driver. LLGo's Unix ESP toolchains use the historical "xtensa"
+// spelling, but Espressif's official Windows distribution selects its Xtensa
+// multilibs using the canonical GCC-compatible triple.
+func clangDriverTargetForHost(hostGOOS, llvmTarget string, buildTags []string) string {
+	if hostGOOS == "windows" && llvmTarget == "xtensa" {
+		for _, tag := range buildTags {
+			if tag == "esp" {
+				return "xtensa-esp-unknown-elf"
+			}
+		}
+	}
+	return llvmTarget
+}
+
 // Use extends the original Use function to support target-based configuration
 // If targetName is provided, it takes precedence over goos/goarch
 func Use(goos, goarch, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
+	return UseWithGOARM(goos, goarch, "", targetName, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+}
+
+// UseWithGOARM is Use with an explicit Go ARM architecture setting. The
+// setting affects native GOARCH=arm clang and linker triples; named targets
+// retain their target configuration's LLVM triple.
+func UseWithGOARM(goos, goarch, goarm, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
 	if targetName != "" && !strings.HasPrefix(targetName, "wasm") && !strings.HasPrefix(targetName, "wasi") {
 		return UseTarget(targetName, level, ltoMode)
 	}
-	return use(goos, goarch, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+	return use(goos, goarch, goarm, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
 }

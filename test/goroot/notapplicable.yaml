@@ -42,24 +42,16 @@ not_applicable:
   - directive: run
     case: fixedbugs/issue54343.go
     reason: "not applicable: this case observes the exact receiver lifetime of a cleared bound method through a finalizer; LLGo uses conservative BDWGC roots, so exact finalizer timing is not currently an LLGo compatibility goal"
+  - directive: rundir
+    case: typeparam/chansimp.go
+    reason: "not applicable: this case requires a Receiver to become unreachable immediately after its final source-level use so its finalizer closes a channel while the enclosing stack frame remains active; LLGo uses conservative BDWGC stack and register roots that may retain stale pointer-shaped values, so exact last-use liveness and finalizer timing are not currently an LLGo compatibility goal"
   - directive: run
     case: nilptr2.go
     reason: "not applicable: this case requires comprehensive explicit nil checks for dereferences and derived addresses even when LLVM emits no faulting load; LLGo only preserves the required check for unused loads and relies on LLVM and target fault behavior for the remaining address-only forms, so reproducing cmd/compile's complete nil-check insertion is not currently an LLGo compatibility goal"
   - directive: run
     case: nilptr.go
     reason: "not applicable: this case requires explicit nil checks for large-offset array, slice, and struct operations whose derived address may be mapped and therefore not fault; LLGo relies on LLVM and target memory faults for these non-load forms, so reproducing cmd/compile's large-offset nil-check strategy is not currently an LLGo compatibility goal"
-  - platform: darwin/arm64
-    directive: runoutput
-    case: rangegen.go
-    reason: "not applicable: after the LLGo rangefunc return fix, this case is blocked by the upstream golang.org/x/tools/go/ssa labeled-goto defect tracked at https://github.com/golang/go/issues/80860 and fixed by https://github.com/golang/tools/pull/666; duplicating the dependency fix inside LLGo is not an LLGo compatibility goal while LLGo waits to update x/tools"
-  - version: go1.24
-    platform: linux/amd64
-    directive: runoutput
-    case: rangegen.go
-    reason: "not applicable: after the LLGo rangefunc return fix, this case is blocked by the upstream golang.org/x/tools/go/ssa labeled-goto defect tracked at https://github.com/golang/go/issues/80860 and fixed by https://github.com/golang/tools/pull/666; duplicating the dependency fix inside LLGo is not an LLGo compatibility goal while LLGo waits to update x/tools"
-  - version: go1.26
-    platform: linux/amd64
-    directive: runoutput
+  - directive: runoutput
     case: rangegen.go
     reason: "not applicable: after the LLGo rangefunc return fix, this case is blocked by the upstream golang.org/x/tools/go/ssa labeled-goto defect tracked at https://github.com/golang/go/issues/80860 and fixed by https://github.com/golang/tools/pull/666; duplicating the dependency fix inside LLGo is not an LLGo compatibility goal while LLGo waits to update x/tools"
   - version: go1.26
@@ -495,25 +487,16 @@ not_applicable:
     case: fixedbugs/issue69825.go
     reason: "not applicable: -d=libfuzzer selects cmd/compile instrumentation; LLGo relies on LLVM tooling rather than gc's libfuzzer backend mode; supporting this toolchain-specific behavior is not an LLGo compatibility goal"
   - version: go1.24
-    platform: linux/amd64
     directive: run
     case: maymorestack.go
     reason: "not applicable: LLGo uses fixed native stacks, so gc's growable-stack maymorestack debug hook has no corresponding behavior; supporting this toolchain-specific behavior is not an LLGo compatibility goal"
   - version: go1.26
-    platform: linux/amd64
     directive: run
     case: maymorestack.go
     reason: "not applicable: LLGo uses fixed native stacks, so gc's growable-stack maymorestack debug hook has no corresponding behavior; supporting this toolchain-specific behavior is not an LLGo compatibility goal"
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
-    case: maymorestack.go
-    reason: "not applicable: LLGo uses fixed native stacks, so gc's growable-stack maymorestack debug hook has no corresponding behavior; supporting this toolchain-specific behavior is not an LLGo compatibility goal"
-  - version: go1.26
-    platform: darwin/arm64
-    directive: run
-    case: maymorestack.go
-    reason: "not applicable: LLGo uses fixed native stacks, so gc's growable-stack maymorestack debug hook has no corresponding behavior; supporting this toolchain-specific behavior is not an LLGo compatibility goal"
+  - directive: run
+    case: stack.go
+    reason: "not applicable: this case recursively grows through 8,000 large frames to validate cmd/compile's stack-splitting implementation; LLGo maps each goroutine to a native OS thread with a fixed stack, so reproducing Go's growable-stack mechanism is not currently an LLGo compatibility goal"
   - version: go1.26
     directive: errorcheckandrundir
     case: intrinsic.go

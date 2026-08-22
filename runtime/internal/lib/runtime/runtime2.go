@@ -6,8 +6,6 @@ package runtime
 
 import (
 	_ "unsafe"
-
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
 )
 
 // Layout of in-memory per-function information prepared by linker
@@ -98,8 +96,8 @@ type traceError string
 func (e traceError) Error() string { return string(e) }
 
 var (
-	traceInitOnce psync.Once
-	traceMu       psync.Mutex
+	traceInitOnce nativeOnce
+	traceMu       nativeMutex
 
 	traceCh         chan []byte
 	traceDoneCh     chan struct{}

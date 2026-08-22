@@ -1,0 +1,21 @@
+//go:build windows
+
+package runtime
+
+import "unsafe"
+
+const platformLLGoFiles = "; _wrap/print_windows.c; _wrap/fault_windows.c" + platformSetjmpLLGoFiles
+
+//go:linkname c_printByte C.llgo_print_byte
+func c_printByte(v byte)
+
+//go:linkname c_printWrite C.llgo_print_write
+func c_printWrite(data unsafe.Pointer, size uintptr)
+
+func PrintByte(v byte) {
+	c_printByte(v)
+}
+
+func PrintString(s String) {
+	c_printWrite(s.data, uintptr(s.len))
+}

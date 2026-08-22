@@ -6,6 +6,7 @@ package cabi
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -13,9 +14,21 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-func TestDevLTOGlobalDCETargetArchAndNewTransformerArchSelection(t *testing.T) {
+func TestTargetArchAndNewTransformerArchSelection(t *testing.T) {
 	if got := targetArch("riscv64-unknown-linux-gnu"); got != "riscv64" {
 		t.Fatalf("targetArch(triple) = %q, want riscv64", got)
+	}
+	if got := targetArch("x86_64-pc-windows-msvc"); got != "amd64" {
+		t.Fatalf("targetArch(x86_64 triple) = %q, want amd64", got)
+	}
+	if got := targetArch("aarch64-pc-windows-msvc"); got != "arm64" {
+		t.Fatalf("targetArch(aarch64 triple) = %q, want arm64", got)
+	}
+	if got := targetArch("i686-pc-windows-msvc"); got != "386" {
+		t.Fatalf("targetArch(i686 triple) = %q, want 386", got)
+	}
+	if got := targetArch("thumbv7em-none-eabi"); got != "arm" {
+		t.Fatalf("targetArch(thumb triple) = %q, want arm", got)
 	}
 	if got := targetArch("wasm"); got != "wasm" {
 		t.Fatalf("targetArch(single arch) = %q, want wasm", got)
@@ -38,15 +51,18 @@ func TestDevLTOGlobalDCETargetArchAndNewTransformerArchSelection(t *testing.T) {
 			rv, ok := sys.(*TypeInfoRiscv32)
 			return ok && rv.mabi == "ilp32f"
 		}},
-		{"amd64-unknown-linux-gnu", "", "amd64", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoAmd64); return ok }},
-		{"arm64-apple-darwin", "", "arm64", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoArm64); return ok }},
+		{"x86_64-unknown-linux-gnu", "", "amd64", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoAmd64); return ok }},
+		{"aarch64-apple-darwin", "", "arm64", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoArm64); return ok }},
 		{"arm-unknown-linux-gnueabihf", "", "arm", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoArm); return ok }},
-		{"wasm-unknown-wasip1", "", "wasm", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoWasm); return ok }},
+		{"wasm32-unknown-wasip1", "", "wasm", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoWasm); return ok }},
 		{"riscv64-unknown-linux-gnu", "lp64d", "riscv64", func(sys TypeInfoSys) bool {
 			rv, ok := sys.(*TypeInfoRiscv64)
 			return ok && rv.mabi == "lp64d"
 		}},
-		{"386-unknown-linux-gnu", "", "386", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfo386); return ok }},
+		{"i386-unknown-linux-gnu", "", "386", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfo386); return ok }},
+		{"x86_64-pc-windows-msvc", "", "amd64", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoWindowsAmd64); return ok }},
+		{"aarch64-pc-windows-msvc", "", "arm64", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoWindowsArm64); return ok }},
+		{"i686-pc-windows-msvc", "", "386", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoWindows386); return ok }},
 	}
 	for _, tc := range tests {
 		tr := NewTransformer(prog, tc.target, tc.abi, ModeCFunc, true)
@@ -59,6 +75,286 @@ func TestDevLTOGlobalDCETargetArchAndNewTransformerArchSelection(t *testing.T) {
 		if !tc.check(tr.sys) {
 			t.Fatalf("NewTransformer(%q) selected unexpected sys implementation %T", tc.target, tr.sys)
 		}
+	}
+	windowsProg := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: "amd64"})
+	defer windowsProg.Dispose()
+	if tr := NewTransformer(windowsProg, "", "", ModeCFunc, true); tr.arch != "amd64" {
+		t.Fatalf("implicit Windows transformer arch = %q, want amd64", tr.arch)
+	} else if _, ok := tr.sys.(*TypeInfoWindowsAmd64); !ok {
+		t.Fatalf("implicit Windows transformer selected %T, want *TypeInfoWindowsAmd64", tr.sys)
+	}
+}
+
+func TestMSVCTargetDetection(t *testing.T) {
+	tests := []struct {
+		name   string
+		target *llssa.Target
+		triple string
+		want   bool
+	}{
+		{"explicit msvc", nil, "x86_64-pc-windows-msvc", true},
+		{"versioned msvc", nil, "x86_64-pc-windows-msvc19.40", true},
+		{"windows default environment", nil, "x86_64-pc-windows", true},
+		{"mingw", nil, "x86_64-w64-windows-gnu", false},
+		{"mingw short triple", nil, "x86_64-w64-mingw32", false},
+		{"cygwin", nil, "x86_64-pc-windows-cygnus", false},
+		{"linux", nil, "x86_64-unknown-linux-gnu", false},
+		{"implicit windows", &llssa.Target{GOOS: "windows"}, "", true},
+		{"arch-only windows", &llssa.Target{GOOS: "windows"}, "x86_64", true},
+		{"implicit linux", &llssa.Target{GOOS: "linux"}, "", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isMSVCTarget(test.target, test.triple); got != test.want {
+				t.Fatalf("isMSVCTarget(%q) = %v, want %v", test.triple, got, test.want)
+			}
+		})
+	}
+}
+
+func TestMSVCAggregateClassification(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+
+	tests := []struct {
+		name   string
+		goarch string
+		triple string
+		check  func(t *testing.T, ctx llvm.Context, tr *Transformer)
+	}{
+		{
+			name:   "amd64",
+			goarch: "amd64",
+			triple: "x86_64-pc-windows-msvc",
+			check: func(t *testing.T, ctx llvm.Context, tr *Transformer) {
+				checkTypeInfo(t, tr, ctx.VoidType(), 0, AttrVoid, "void")
+				checkTypeInfo(t, tr, ctx.Int32Type(), 1, AttrNone, "i32")
+				checkTypeInfo(t, tr, ctx.StructType(nil, false), 0, AttrWidthType, "i32")
+				checkTypeInfo(t, tr, ctx.StructType(nil, false), 1, AttrWidthType, "i32")
+				for _, width := range []int{1, 2, 4, 8} {
+					aggregate := ctx.StructType([]llvm.Type{ctx.IntType(width * 8)}, false)
+					checkTypeInfo(t, tr, aggregate, 0, AttrWidthType, "i"+strconv.Itoa(width*8))
+					checkTypeInfo(t, tr, aggregate, 1, AttrWidthType, "i"+strconv.Itoa(width*8))
+				}
+				for _, width := range []int{3, 5, 16} {
+					aggregate := ctx.StructType([]llvm.Type{llvm.ArrayType(ctx.Int8Type(), width)}, false)
+					checkTypeInfo(t, tr, aggregate, 0, AttrPointer, "ptr")
+					checkTypeInfo(t, tr, aggregate, 1, AttrPointer, "ptr")
+				}
+				checkTypeInfo(t, tr, ctx.StructType([]llvm.Type{ctx.Int64Type(), ctx.Int64Type()}, false), 0, AttrPointer, "ptr")
+				if tr.sys.SupportByVal() {
+					t.Fatal("Microsoft x64 indirect aggregates must not use byval")
+				}
+			},
+		},
+		{
+			name:   "arm64",
+			goarch: "arm64",
+			triple: "aarch64-pc-windows-msvc",
+			check: func(t *testing.T, ctx llvm.Context, tr *Transformer) {
+				checkTypeInfo(t, tr, ctx.StructType(nil, false), 0, AttrNone, "{}")
+				checkTypeInfo(t, tr, ctx.StructType(nil, false), 1, AttrVoid, "void")
+				odd := ctx.StructType([]llvm.Type{ctx.Int8Type(), ctx.Int8Type(), ctx.Int8Type()}, false)
+				checkTypeInfo(t, tr, odd, 0, AttrWidthType, "i24")
+				checkTypeInfo(t, tr, odd, 1, AttrWidthType, "i64")
+				hfa := ctx.StructType([]llvm.Type{ctx.FloatType(), ctx.FloatType(), ctx.FloatType(), ctx.FloatType()}, false)
+				checkTypeInfo(t, tr, hfa, 0, AttrNone, hfa.String())
+				checkTypeInfo(t, tr, hfa, 1, AttrNone, hfa.String())
+				large := ctx.StructType([]llvm.Type{ctx.Int64Type(), ctx.Int64Type(), ctx.Int64Type()}, false)
+				checkTypeInfo(t, tr, large, 0, AttrPointer, "ptr")
+				checkTypeInfo(t, tr, large, 1, AttrPointer, "ptr")
+			},
+		},
+		{
+			name:   "386",
+			goarch: "386",
+			triple: "i686-pc-windows-msvc",
+			check: func(t *testing.T, ctx llvm.Context, tr *Transformer) {
+				checkTypeInfo(t, tr, ctx.VoidType(), 0, AttrVoid, "void")
+				checkTypeInfo(t, tr, ctx.Int32Type(), 1, AttrNone, "i32")
+				checkTypeInfo(t, tr, ctx.StructType(nil, false), 0, AttrVoid, "void")
+				checkTypeInfo(t, tr, ctx.StructType(nil, false), 1, AttrPointer, "ptr")
+				odd := ctx.StructType([]llvm.Type{ctx.Int8Type(), ctx.Int8Type(), ctx.Int8Type()}, false)
+				checkTypeInfo(t, tr, odd, 0, AttrPointer, "ptr")
+				checkTypeInfo(t, tr, odd, 1, AttrPointer, "ptr")
+				pair := ctx.StructType([]llvm.Type{ctx.Int32Type(), ctx.Int32Type()}, false)
+				checkTypeInfo(t, tr, pair, 0, AttrWidthType, "i64")
+				checkTypeInfo(t, tr, pair, 1, AttrExtract, pair.String())
+				// Clang 19 expands an unpadded pair of 64-bit scalar fields,
+				// but passes padded Win32 aggregates byval at stack alignment 4.
+				unpadded := ctx.StructType([]llvm.Type{ctx.Int64Type(), ctx.DoubleType()}, false)
+				if info := checkTypeInfo(t, tr, unpadded, 1, AttrExtract, unpadded.String()); info.ByValAlign != 0 {
+					t.Fatalf("unpadded aggregate byval alignment = %d, want 0", info.ByValAlign)
+				}
+				internallyPadded := ctx.StructType([]llvm.Type{ctx.Int32Type(), ctx.Int64Type()}, false)
+				if info := checkTypeInfo(t, tr, internallyPadded, 1, AttrPointer, "ptr"); info.ByValAlign != 4 {
+					t.Fatalf("internally padded aggregate byval alignment = %d, want 4", info.ByValAlign)
+				}
+				trailingPadded := ctx.StructType([]llvm.Type{ctx.Int64Type(), ctx.Int32Type()}, false)
+				if info := checkTypeInfo(t, tr, trailingPadded, 1, AttrPointer, "ptr"); info.ByValAlign != 4 {
+					t.Fatalf("trailing padded aggregate byval alignment = %d, want 4", info.ByValAlign)
+				}
+				pointer := ctx.StructType([]llvm.Type{llvm.PointerType(ctx.Int8Type(), 0)}, false)
+				checkTypeInfo(t, tr, pointer, 0, AttrWidthType, "ptr")
+				checkTypeInfo(t, tr, pointer, 1, AttrWidthType, "ptr")
+				if windows386CanExtract(nil) {
+					t.Fatal("empty structure element list must not be expanded")
+				}
+				if windows386CanExtract([]llvm.Type{ctx.StructType([]llvm.Type{ctx.Int32Type()}, false)}) {
+					t.Fatal("nested structures must not be expanded")
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: test.goarch})
+			defer prog.Dispose()
+			tr := NewTransformer(prog, test.triple, "", ModeCFunc, true)
+			ctx := llvm.NewContext()
+			defer ctx.Dispose()
+			test.check(t, ctx, tr)
+		})
+	}
+}
+
+func checkTypeInfo(t *testing.T, tr *Transformer, typ llvm.Type, index int, kind AttrKind, type1 string) *TypeInfo {
+	t.Helper()
+	ftyp := llvm.FunctionType(typ.Context().VoidType(), nil, false)
+	info := tr.GetTypeInfo(typ.Context(), ftyp, typ, index)
+	if info.Kind != kind || info.Type1.String() != type1 {
+		t.Fatalf("GetTypeInfo(%s, index %d) = kind %v, type %s; want kind %v, type %s",
+			typ, index, info.Kind, info.Type1, kind, type1)
+	}
+	return info
+}
+
+func TestMSVCCallAndCallbackLowering(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+
+	const testIR = `
+%Odd = type { i8, i8, i8 }
+%Padded = type { i32, i64 }
+
+declare %Odd @cOdd(%Odd)
+declare void @registerCallback(ptr)
+
+define %Padded @cPadded(%Padded %value) {
+entry:
+  %slot = alloca %Padded, align 8
+  store %Padded %value, ptr %slot, align 8
+  %loaded = load %Padded, ptr %slot, align 8
+  ret %Padded %loaded
+}
+
+define %Odd @"main.call"(%Odd %value) {
+entry:
+  %result = call %Odd @cOdd(%Odd %value)
+  ret %Odd %result
+}
+
+define %Odd @"main.callback"(%Odd %value) {
+entry:
+  ret %Odd %value
+}
+
+define void @"main.passCallback"() {
+entry:
+  call void @registerCallback(ptr @"main.callback")
+  ret void
+}
+`
+	tests := []struct {
+		name        string
+		goarch      string
+		triple      string
+		declaration []string
+		wrapper     []string
+	}{
+		{
+			name: "amd64", goarch: "amd64", triple: "x86_64-pc-windows-msvc",
+			declaration: []string{"declare void @cOdd(ptr sret(%Odd)", "ptr)"},
+			wrapper:     []string{"define linkonce void @\"__llgo_cdecl$main.callback\"(ptr sret(%Odd)", "ptr %"},
+		},
+		{
+			name: "arm64", goarch: "arm64", triple: "aarch64-pc-windows-msvc",
+			declaration: []string{"declare i24 @cOdd(i64)"},
+			wrapper:     []string{"define linkonce i24 @\"__llgo_cdecl$main.callback\"(i64 %"},
+		},
+		{
+			name: "386", goarch: "386", triple: "i686-pc-windows-msvc",
+			declaration: []string{"declare void @cOdd(ptr sret(%Odd)", "ptr byval(%Odd) align 4"},
+			wrapper:     []string{"define linkonce void @\"__llgo_cdecl$main.callback\"(ptr sret(%Odd)", "ptr byval(%Odd) align 4"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := llvm.NewContext()
+			defer ctx.Dispose()
+			path := filepath.Join(t.TempDir(), "msvc.ll")
+			if err := os.WriteFile(path, []byte(testIR), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			buf, err := llvm.NewMemoryBufferFromFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mod, err := ctx.ParseIR(buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mod.Dispose()
+
+			prog := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: test.goarch})
+			defer prog.Dispose()
+			tr := NewTransformer(prog, test.triple, "", ModeCFunc, true)
+			tr.TransformModule("test", mod)
+
+			for _, want := range test.declaration {
+				if got := mod.NamedFunction("cOdd").String(); !strings.Contains(got, want) {
+					t.Fatalf("lowered declaration does not contain %q:\n%s", want, got)
+				}
+			}
+			wrapper := mod.NamedFunction("__llgo_cdecl$main.callback")
+			if wrapper.IsNil() {
+				t.Fatalf("callback wrapper was not generated:\n%s", mod.String())
+			}
+			for _, want := range test.wrapper {
+				if got := wrapper.String(); !strings.Contains(got, want) {
+					t.Fatalf("lowered callback wrapper does not contain %q:\n%s", want, got)
+				}
+			}
+			if got := mod.NamedFunction("main.call").String(); !strings.Contains(got, "call ") || !strings.Contains(got, "@cOdd(") {
+				t.Fatalf("call site was not preserved and lowered:\n%s", got)
+			}
+			if test.goarch == "386" {
+				paddedFn := mod.NamedFunction("cPadded")
+				padded := paddedFn.String()
+				if !strings.Contains(padded, "ptr byval(%Padded) align 4") {
+					t.Fatalf("lowered padded x86 aggregate lost its byval alignment:\n%s", padded)
+				}
+				if !strings.Contains(padded, "ptr %slot, align 8") {
+					t.Fatalf("lowering redirected naturally aligned local accesses to the 4-byte-aligned byval pointer:\n%s", padded)
+				}
+				alignedLoad := false
+				for block := paddedFn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+					for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+						if load := instruction.IsALoadInst(); !load.IsNil() && strings.Contains(load.String(), "load %Padded") && load.Alignment() == 4 {
+							alignedLoad = true
+						}
+					}
+				}
+				if !alignedLoad {
+					t.Fatalf("lowered padded x86 aggregate has no 4-byte-aligned incoming load:\n%s", padded)
+				}
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("MSVC C ABI module is invalid: %v\n%s", err, mod.String())
+			}
+		})
 	}
 }
 
@@ -232,6 +528,90 @@ entry:
 				})
 			}
 		})
+	}
+}
+
+func TestCABILoweringPreservesWindowsCOMDAT(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("windows-comdat")
+	defer mod.Dispose()
+	aggregate := ctx.StructType([]llvm.Type{
+		ctx.Int64Type(), ctx.Int64Type(), ctx.Int64Type(),
+	}, false)
+	fn := llvm.AddFunction(mod, "shared", llvm.FunctionType(
+		ctx.VoidType(), []llvm.Type{aggregate}, false,
+	))
+	fn.SetLinkage(llvm.LinkOnceODRLinkage)
+	comdat := mod.Comdat(fn.Name())
+	comdat.SetSelectionKind(llvm.AnyComdatSelectionKind)
+	fn.SetComdat(comdat)
+	b := ctx.NewBuilder()
+	defer b.Dispose()
+	b.SetInsertPointAtEnd(ctx.AddBasicBlock(fn, "entry"))
+	b.CreateRetVoid()
+
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: "amd64"})
+	defer prog.Dispose()
+	tr := NewTransformer(prog, "amd64-unknown-linux-gnu", "", ModeAllFunc, true)
+	tr.TransformModule("test", mod)
+
+	got := mod.NamedFunction("shared")
+	ir := got.String()
+	if !strings.Contains(ir, "ptr") {
+		t.Fatalf("C ABI did not lower the aggregate parameter:\n%s", ir)
+	}
+	if !strings.Contains(ir, "comdat") {
+		t.Fatalf("C ABI lowering lost Windows COMDAT metadata:\n%s", ir)
+	}
+	if kind := got.Comdat().SelectionKind(); kind != llvm.AnyComdatSelectionKind {
+		t.Fatalf("C ABI COMDAT selection = %v, want any", kind)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("transformed Windows COMDAT module is invalid: %v\n%s", err, mod.String())
+	}
+}
+
+func TestWindowsCallbackWrapperUsesCOMDAT(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	mod := ctx.NewModule("windows-callback-comdat")
+	defer mod.Dispose()
+	aggregate := ctx.StructType([]llvm.Type{
+		ctx.Int64Type(), ctx.Int64Type(), ctx.Int64Type(),
+	}, false)
+	callback := llvm.AddFunction(mod, "callback", llvm.FunctionType(
+		ctx.VoidType(), []llvm.Type{aggregate}, false,
+	))
+	b := ctx.NewBuilder()
+	defer b.Dispose()
+	b.SetInsertPointAtEnd(ctx.AddBasicBlock(callback, "entry"))
+	b.CreateRetVoid()
+
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: "amd64"})
+	defer prog.Dispose()
+	tr := NewTransformer(prog, "amd64-unknown-linux-gnu", "", ModeAllFunc, true)
+	wrapper, ok := tr.transformCallbackFunc(mod, callback)
+	if !ok {
+		t.Fatalf("callback wrapper was not required:\n%s", mod.String())
+	}
+	ir := wrapper.String()
+	if !strings.Contains(ir, "comdat") {
+		t.Fatalf("Windows callback wrapper lacks COMDAT metadata:\n%s", ir)
+	}
+	if kind := wrapper.Comdat().SelectionKind(); kind != llvm.AnyComdatSelectionKind {
+		t.Fatalf("Windows callback COMDAT selection = %v, want any", kind)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("Windows callback COMDAT module is invalid: %v\n%s", err, mod.String())
 	}
 }
 

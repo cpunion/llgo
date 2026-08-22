@@ -4,12 +4,17 @@
 package build
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llgo/internal/flash"
 )
+
+func sameHostPath(got, want string) bool {
+	return got == want || got != "" && want != "" && filepath.Clean(got) == filepath.Clean(want)
+}
 
 func TestBuildOutFmtsWithTarget(t *testing.T) {
 	tests := []struct {
@@ -36,6 +41,17 @@ func TestBuildOutFmtsWithTarget(t *testing.T) {
 				BinaryFormat: "",
 			},
 			wantOut: "myapp",
+		},
+		{
+			name: "embedded target keeps configured output extension",
+			conf: &Config{
+				Mode:    ModeBuild,
+				Target:  "esp32",
+				OutFile: "myapp",
+				AppExt:  ".elf",
+			},
+			pkgName: "hello",
+			wantOut: "myapp.elf",
 		},
 		{
 			name: "build hex format",
@@ -144,7 +160,7 @@ func TestBuildOutFmtsWithTarget(t *testing.T) {
 
 			// Check base output path
 			if tt.wantOut != "" {
-				if result.Out != tt.wantOut {
+				if !sameHostPath(result.Out, tt.wantOut) {
 					t.Errorf("buildOutFmts().Out = %v, want %v", result.Out, tt.wantOut)
 				}
 			} else {
@@ -249,6 +265,16 @@ func TestBuildOutFmtsNativeTarget(t *testing.T) {
 			wantOut:  "myapp.exe",
 		},
 		{
+			name:     "build single pkg with exact extensionless outfile on windows",
+			mode:     ModeBuild,
+			multiPkg: false,
+			outFile:  "myapp",
+			appExt:   ".exe",
+			goos:     "windows",
+			pkgName:  "hello",
+			wantOut:  "myapp",
+		},
+		{
 			name:     "build multi pkg",
 			mode:     ModeBuild,
 			multiPkg: true,
@@ -313,6 +339,16 @@ func TestBuildOutFmtsNativeTarget(t *testing.T) {
 			pkgName:  "hello",
 			wantOut:  "", // Should be temp file
 		},
+		{
+			name:     "test mode with exact extensionless outfile on windows",
+			mode:     ModeTest,
+			multiPkg: false,
+			outFile:  "mytest",
+			appExt:   ".exe",
+			goos:     "windows",
+			pkgName:  "hello",
+			wantOut:  "mytest",
+		},
 	}
 
 	for _, tt := range tests {
@@ -335,7 +371,7 @@ func TestBuildOutFmtsNativeTarget(t *testing.T) {
 
 			// Check base output path
 			if tt.wantOut != "" {
-				if result.Out != tt.wantOut {
+				if !sameHostPath(result.Out, tt.wantOut) {
 					t.Errorf("buildOutFmts().Out = %v, want %v", result.Out, tt.wantOut)
 				}
 			} else {
@@ -401,7 +437,7 @@ func TestBuildOutFmtsPCLN(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.PCLN != tt.want {
+			if !sameHostPath(got.PCLN, tt.want) {
 				t.Fatalf("buildOutFmts().PCLN = %q, want %q", got.PCLN, tt.want)
 			}
 		})
@@ -535,6 +571,17 @@ func TestBuildOutFmtsBuildModes(t *testing.T) {
 			expectedOut: "myapp.exe",
 		},
 		{
+			name:        "exe_build_windows_exact_outfile",
+			pkgName:     "myapp",
+			buildMode:   BuildModeExe,
+			outFile:     "custom-name",
+			mode:        ModeBuild,
+			target:      "",
+			goos:        "windows",
+			appExt:      ".exe",
+			expectedOut: "custom-name",
+		},
+		{
 			name:        "exe_remove_lib_prefix",
 			pkgName:     "libmyapp",
 			buildMode:   BuildModeExe,
@@ -565,7 +612,7 @@ func TestBuildOutFmtsBuildModes(t *testing.T) {
 				t.Fatalf("buildOutFmts failed: %v", err)
 			}
 
-			if result.Out != tt.expectedOut {
+			if !sameHostPath(result.Out, tt.expectedOut) {
 				t.Errorf("buildOutFmts(%q, buildMode=%v, target=%q, goos=%q) = %q, want %q",
 					tt.pkgName, tt.buildMode, tt.target, tt.goos, result.Out, tt.expectedOut)
 			}

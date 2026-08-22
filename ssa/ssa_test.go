@@ -268,12 +268,13 @@ func testFuncInfoMetadataDoesNotPreserveFunctions(t *testing.T) {
 
 	pkg.EmitFuncInfo("main.unused", "main.unused", "unused.go", 7, 1)
 	pkg.EmitFuncInfo("main.negative", "main.negative", "negative.go", -7, -1)
+	pkg.EmitFuncInfoFlags("main.wrapper", "main.wrapper", "wrapper.go", 9, 2, FuncInfoFlagWrapper)
 	ir := pkg.String()
 
 	if !strings.Contains(ir, `!llgo.funcinfo = !{!`) {
 		t.Fatalf("missing %s metadata:\n%s", FuncInfoMetadataName, ir)
 	}
-	for _, want := range []string{`!"main.unused"`, `!"unused.go"`, `i32 7`, `!"main.negative"`, `!"negative.go"`, `i32 0`} {
+	for _, want := range []string{`!"main.unused"`, `!"unused.go"`, `i32 7`, `!"main.negative"`, `!"negative.go"`, `i32 0`, `!"main.wrapper"`, `!"wrapper.go"`, `i32 9, i32 2, i32 1`} {
 		if !strings.Contains(ir, want) {
 			t.Fatalf("missing funcinfo field %s:\n%s", want, ir)
 		}
@@ -2551,7 +2552,10 @@ func TestZeroSizedGlobalEmitsAliasSymbol(t *testing.T) {
 	os.Chdir("../../runtime")
 	defer os.Chdir(wd)
 
-	prog := NewProgram(nil)
+	// This assertion covers the non-COFF ODR definition. Windows deliberately
+	// uses a module-local sentinel and has a dedicated test in coff_comdat_test.
+	prog := NewProgram(&Target{GOOS: "linux", GOARCH: "amd64"})
+	defer prog.Dispose()
 	prog.SetRuntime(func() *types.Package {
 		fset := token.NewFileSet()
 		imp := packages.NewImporter(fset)
@@ -2682,6 +2686,42 @@ func TestTargetMachineAndDataLayout(t *testing.T) {
 		// Test Target().Spec().Triple returns the expected triple
 		if triple := prog.Target().Spec().Triple; triple != tt.triple {
 			t.Fatalf("%s/%s Triple mismatch: got %q, want %q", tt.goos, tt.goarch, triple, tt.triple)
+		}
+	}
+}
+
+func TestWindowsTargetTriple(t *testing.T) {
+	for _, test := range []struct {
+		goarch string
+		want   string
+	}{
+		{"386", "i686-pc-windows-msvc"},
+		{"amd64", "x86_64-pc-windows-msvc"},
+		{"arm64", "aarch64-pc-windows-msvc"},
+	} {
+		target := &Target{GOOS: "windows", GOARCH: test.goarch}
+		if got := target.Spec().Triple; got != test.want {
+			t.Errorf("windows/%s target triple = %q, want %q", test.goarch, got, test.want)
+		}
+	}
+}
+
+func TestARMTargetSpec(t *testing.T) {
+	for _, test := range []struct {
+		goarm       string
+		wantTriple  string
+		wantFeature string
+	}{
+		{"5", "armv5-unknown-linux-gnueabi", "+armv5t"},
+		{"6", "armv6-unknown-linux-gnueabihf", "+armv6"},
+		{"7", "armv7-unknown-linux-gnueabihf", "+armv7-a"},
+	} {
+		spec := (&Target{GOOS: "linux", GOARCH: "arm", GOARM: test.goarm}).Spec()
+		if spec.Triple != test.wantTriple {
+			t.Errorf("linux/arm GOARM=%s triple = %q, want %q", test.goarm, spec.Triple, test.wantTriple)
+		}
+		if !strings.Contains(spec.Features, test.wantFeature) {
+			t.Errorf("linux/arm GOARM=%s features = %q, want %q", test.goarm, spec.Features, test.wantFeature)
 		}
 	}
 }

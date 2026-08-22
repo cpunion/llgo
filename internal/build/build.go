@@ -50,6 +50,7 @@ import (
 	"github.com/xgo-dev/llgo/internal/env"
 	"github.com/xgo-dev/llgo/internal/firmware"
 	"github.com/xgo-dev/llgo/internal/flash"
+	"github.com/xgo-dev/llgo/internal/goarch"
 	"github.com/xgo-dev/llgo/internal/goembed"
 	"github.com/xgo-dev/llgo/internal/header"
 	"github.com/xgo-dev/llgo/internal/lto"
@@ -134,6 +135,10 @@ type ModuleHook func(pkg Package)
 type Config struct {
 	Goos               string
 	Goarch             string
+	GO386              string // 386 floating-point implementation: sse2 or softfloat
+	GOAMD64            string // amd64 microarchitecture level: v1 through v4
+	GOARM              string // arm architecture and floating-point implementation
+	GOARM64            string // arm64 ISA version and optional lse/crypto extensions
 	Target             string // target name (e.g., "rp2040", "wasi") - takes precedence over Goos/Goarch
 	OptLevel           optlevel.Level
 	LTO                lto.Mode
@@ -257,11 +262,14 @@ func resolveBuildConfig(input *Config) (*Config, error) {
 	if conf.Goarch == "" {
 		conf.Goarch = runtime.GOARCH
 	}
-	if conf.AppExt == "" {
-		conf.AppExt = defaultAppExt(conf)
+	if err := resolveGOARCHConfig(conf, os.Getenv); err != nil {
+		return nil, err
 	}
 	if conf.BuildMode == "" {
 		conf.BuildMode = BuildModeExe
+	}
+	if conf.AppExt == "" {
+		conf.AppExt = defaultAppExt(conf)
 	}
 	if conf.BuildMode != BuildModeExe {
 		conf.DeadcodeDrop = false
@@ -285,6 +293,64 @@ func resolveBuildConfig(input *Config) (*Config, error) {
 	}
 	conf.OptLevel = effectiveOptLevel(conf)
 	return conf, nil
+}
+
+func resolveGOARCHConfig(conf *Config, getenv func(string) string) error {
+	if conf.Target != "" {
+		conf.GO386, conf.GOAMD64, conf.GOARM, conf.GOARM64 = "", "", "", ""
+		return nil
+	}
+	go386, goamd64, goarm, goarm64 := conf.GO386, conf.GOAMD64, conf.GOARM, conf.GOARM64
+	conf.GO386, conf.GOAMD64, conf.GOARM, conf.GOARM64 = "", "", "", ""
+	switch conf.Goarch {
+	case "386":
+		if go386 == "" {
+			go386 = getenv("GO386")
+		}
+		value, err := goarch.Resolve386(go386)
+		conf.GO386 = value
+		return err
+	case "amd64":
+		if goamd64 == "" {
+			goamd64 = getenv("GOAMD64")
+		}
+		value, err := goarch.ResolveAMD64(goamd64)
+		conf.GOAMD64 = value
+		return err
+	case "arm":
+		if goarm == "" {
+			goarm = getenv("GOARM")
+		}
+		value, err := goarch.ParseARM(goarm)
+		conf.GOARM = value.String()
+		return err
+	case "arm64":
+		if goarm64 == "" {
+			goarm64 = getenv("GOARM64")
+		}
+		value, err := goarch.ParseARM64(goarm64)
+		conf.GOARM64 = value.String()
+		return err
+	}
+	return nil
+}
+
+func goarchEnv(conf *Config) []string {
+	if conf == nil || conf.Target != "" {
+		return nil
+	}
+	values := []string{"GO386=", "GOAMD64=", "GOARM=", "GOARM64="}
+	switch conf.Goarch {
+	case "386":
+		values[0] += conf.GO386
+	case "amd64":
+		values[1] += conf.GOAMD64
+	case "arm":
+		values[2] += conf.GOARM
+	case "arm64":
+		values[3] += conf.GOARM64
+	}
+	return values
 }
 
 func NewDefaultConf(mode Mode) *Config {
@@ -386,11 +452,14 @@ func Build(inv Invocation) ([]Package, error) {
 		}
 	}
 	environ := os.Environ()
-	commands := commandEnv{dir: dir, environ: environ}
 	conf, err := resolveBuildConfig(inv.Config)
 	if err != nil {
 		return nil, err
 	}
+	// Keep child Go invocations (notably cmptest's baseline) on the same
+	// architecture level as the LLVM build. GOOS/GOARCH retain their existing
+	// per-command handling.
+	commands := commandEnv{dir: dir, environ: withEnv(environ, goarchEnv(conf)...)}
 	buildTrace, err := startBuildTrace(conf.BuildTrace, dir, conf.parallelism())
 	if err != nil {
 		return nil, fmt.Errorf("start build trace: %w", err)
@@ -407,11 +476,11 @@ func Build(inv Invocation) ([]Package, error) {
 	}()
 	// Handle crosscompile configuration first to set correct GOOS/GOARCH
 	forceEspClang := conf.ForceEspClang || conf.Target != ""
-	export, err := crosscompile.Use(conf.Goos, conf.Goarch, conf.Target, IsWasiThreadsEnabled(), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
+	export, err := crosscompile.UseWithGOARM(conf.Goos, conf.Goarch, conf.GOARM, conf.Target, IsWasiThreadsEnabled(), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup crosscompile: %w", err)
 	}
-	applyBuildModeCompileFlags(conf.BuildMode, &export)
+	applyBuildModeCompileFlags(conf.BuildMode, conf.Goos, &export)
 	// Update GOOS/GOARCH from export if target was used
 	if conf.Target != "" && export.GOOS != "" {
 		conf.Goos = export.GOOS
@@ -427,6 +496,10 @@ func Build(inv Invocation) ([]Package, error) {
 	target := &llssa.Target{
 		GOOS:                    conf.Goos,
 		GOARCH:                  conf.Goarch,
+		GO386:                   conf.GO386,
+		GOAMD64:                 conf.GOAMD64,
+		GOARM:                   conf.GOARM,
+		GOARM64:                 conf.GOARM64,
 		Target:                  conf.Target,
 		LLVMTarget:              export.LLVMTarget,
 		OptLevel:                conf.OptLevel,
@@ -456,7 +529,7 @@ func Build(inv Invocation) ([]Package, error) {
 		Dir:        dir,
 		Fset:       token.NewFileSet(),
 		Tests:      conf.Mode == ModeTest,
-		Env:        withEnv(environ, "GOOS="+conf.Goos, "GOARCH="+conf.Goarch),
+		Env:        withEnv(commands.environ, "GOOS="+conf.Goos, "GOARCH="+conf.Goarch),
 	}
 	if conf.Mode == ModeTest {
 		cfg.Mode |= packages.NeedForTest
@@ -833,8 +906,8 @@ func hasLocalCExports(pkg llssa.Package) bool {
 // applyBuildModeCompileFlags adds code-generation flags that must be present
 // while package C/C++ sources are compiled. Passing -fPIC only to the final
 // shared-library link is too late for objects containing global references.
-func applyBuildModeCompileFlags(mode BuildMode, export *crosscompile.Export) {
-	if mode == BuildModeCShared && export != nil && !slices.Contains(export.CCFLAGS, "-fPIC") {
+func applyBuildModeCompileFlags(mode BuildMode, goos string, export *crosscompile.Export) {
+	if mode == BuildModeCShared && goos != "windows" && export != nil && !slices.Contains(export.CCFLAGS, "-fPIC") {
 		export.CCFLAGS = append(export.CCFLAGS, "-fPIC")
 	}
 }
@@ -1531,6 +1604,10 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	if err != nil {
 		return err
 	}
+	cExports, err := linkedCExports(ctx, linkedOrder)
+	if err != nil {
+		return err
+	}
 	entryPkg := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
 		rtInit:        needRuntime,
 		pyInit:        needPyInit,
@@ -1542,7 +1619,12 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 		abiTypes:      ctx.backendAbiTypes(linkedOrder),
 		funcInfo:      funcInfo,
 		pcLineInfo:    pcLineInfo,
+		cExports:      cExports,
 	})
+	if len(cExports) != 0 {
+		llabi.LowerLargeAggregates(ctx.prog.TargetData(), entryPkg.LPkg.Module())
+		ctx.cTransformer.TransformModule(entryPkg.LPkg.Path(), entryPkg.LPkg.Module())
+	}
 	if ctx.buildConf.deadcodeDropEnabled() {
 		if err := applyDeadcodeDropOverrides(linkedOrder, entryPkg, needRuntime, verbose); err != nil {
 			return err
@@ -1563,20 +1645,7 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	linkInputs = append(linkInputs, archiveInputs...)
 
 	if IsFullRpathEnabled() {
-		// Treat every link-time library search path, specified by the -L parameter, as a runtime search path as well.
-		// This is to ensure the final executable can locate libraries with a relocatable install_name
-		// (e.g., "@rpath/libfoo.dylib") at runtime.
-		rpaths := make(map[string]none)
-		for _, arg := range linkArgs {
-			if strings.HasPrefix(arg, "-L") {
-				path := arg[2:]
-				if _, ok := rpaths[path]; ok {
-					continue
-				}
-				rpaths[path] = none{}
-				linkArgs = append(linkArgs, "-rpath", path)
-			}
-		}
+		linkArgs = append(linkArgs, fullRpathArgs(ctx.buildConf.Goos, linkArgs)...)
 	}
 	linkArgs = append(linkArgs, cSharedExportArgs(ctx, linkedOrder)...)
 
@@ -1586,6 +1655,29 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	}
 
 	return nil
+}
+
+func fullRpathArgs(goos string, linkArgs []string) (rpathArgs []string) {
+	// PE images use the normal Windows DLL search order and lld-link does not
+	// recognize the ELF/Mach-O -rpath option.
+	if goos == "windows" {
+		return nil
+	}
+	// Treat every link-time library search path, specified by the -L parameter,
+	// as a runtime search path as well. This ensures that final executables can
+	// locate libraries with relocatable install names such as @rpath/libfoo.dylib.
+	rpaths := make(map[string]none)
+	for _, arg := range linkArgs {
+		if strings.HasPrefix(arg, "-L") {
+			path := arg[2:]
+			if _, ok := rpaths[path]; ok {
+				continue
+			}
+			rpaths[path] = none{}
+			rpathArgs = append(rpathArgs, "-rpath", path)
+		}
+	}
+	return rpathArgs
 }
 
 func linkedPackageMetas(pkgs []Package) []*meta.PackageMeta {
@@ -1623,7 +1715,11 @@ func dceEntryRootCandidates(pkgs []Package, needRuntime bool) []string {
 	// root, so their final linker names must seed the analysis explicitly.
 	var exports []string
 	for _, pkg := range pkgs {
-		for _, name := range pkg.LPkg.ExportFuncs() {
+		for goName, cName := range pkg.LPkg.ExportFuncs() {
+			name := cName
+			if fn := pkg.LPkg.FuncOf(goName); fn != nil && fn.Name() == goName {
+				name = goName
+			}
 			exports = append(exports, name)
 		}
 	}
@@ -1633,6 +1729,54 @@ func dceEntryRootCandidates(pkgs []Package, needRuntime bool) []string {
 		roots = append(roots, llssa.PkgRuntime+".init")
 	}
 	return roots
+}
+
+func linkedCExports(ctx *context, pkgs []Package) ([]cExport, error) {
+	seen := make(map[string]string)
+	var exports []cExport
+	for _, pkg := range pkgs {
+		if !needsWindowsCExportWrappers(ctx, pkg) || pkg.LPkg == nil {
+			continue
+		}
+		for goName, cName := range pkg.LPkg.ExportFuncs() {
+			if strings.Contains(goName, ".") && !strings.HasPrefix(goName, pkg.LPkg.Path()+".") {
+				continue
+			}
+			if previous, ok := seen[cName]; ok {
+				if previous != goName {
+					return nil, fmt.Errorf("C export %q is provided by both %q and %q", cName, previous, goName)
+				}
+				continue
+			}
+			fn := pkg.LPkg.FuncOf(goName)
+			if fn == nil {
+				return nil, fmt.Errorf("C export implementation %q not found", goName)
+			}
+			sig, ok := fn.RawType().(*types.Signature)
+			if !ok || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() > 1 {
+				return nil, fmt.Errorf("C export %q has an unsupported signature", goName)
+			}
+			seen[cName] = goName
+			exports = append(exports, cExport{
+				goName: goName,
+				cName:  cName,
+				sig:    sig,
+			})
+		}
+	}
+	slices.SortFunc(exports, func(a, b cExport) int {
+		if n := strings.Compare(a.cName, b.cName); n != 0 {
+			return n
+		}
+		return strings.Compare(a.goName, b.goName)
+	})
+	return exports, nil
+}
+
+func needsWindowsCExportWrappers(ctx *context, pkg *aPackage) bool {
+	return ctx != nil && ctx.buildConf != nil && pkg != nil && pkg.Package != nil &&
+		ctx.buildConf.Goos == "windows" && ctx.buildConf.Target == "" &&
+		ctx.buildConf.BuildMode == BuildModeCShared && pkg.Name == "main"
 }
 
 func linkedModuleGlobals(pkgs []Package) map[string]none {
@@ -1672,7 +1816,18 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 		return ctx.createMergedArchiveFile(app, objFiles, printCmds)
 	}
 
-	buildArgs := []string{"-o", app}
+	linkOutput := app
+	moveExactWindowsOutput := false
+	if ctx.buildConf.Goos == "windows" && ctx.buildConf.Target == "" &&
+		ctx.buildConf.BuildMode == BuildModeExe && filepath.Ext(app) == "" {
+		// Clang's Windows driver appends .exe when -o has no extension, while
+		// cmd/go treats an explicit -o name as exact. Link to the driver's
+		// conventional name, then publish the requested name after a successful
+		// link. Temporary and implicit outputs already carry conf.AppExt.
+		linkOutput = app + ".exe"
+		moveExactWindowsOutput = true
+	}
+	buildArgs := []string{"-o", linkOutput}
 	buildArgs = append(buildArgs, linkArgs...)
 	siteLayoutArgs, cleanupSiteLayout, err := funcInfoSiteLayoutArgs(ctx, app)
 	if err != nil {
@@ -1680,7 +1835,7 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	}
 	defer cleanupSiteLayout()
 	buildArgs = append(buildArgs, siteLayoutArgs...)
-	buildArgs = append(buildArgs, dwarfLinkerArgs(ctx.buildConf, &ctx.crossCompile)...)
+	buildArgs = append(buildArgs, debugInfoLinkerArgs(ctx.buildConf, &ctx.crossCompile)...)
 	ltoPluginFlags, err := ctx.buildConf.LTOPlugin.LinkerFlags(ctx.buildConf.Goos)
 	if err != nil {
 		return err
@@ -1726,7 +1881,22 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 
 	cmd := ctx.linker()
 	cmd.Verbose = printCmds
-	return cmd.Link(buildArgs...)
+	if err := cmd.Link(buildArgs...); err != nil {
+		return err
+	}
+	if moveExactWindowsOutput {
+		if err := os.Remove(app); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("replace exact Windows output %s: %w", app, err)
+		}
+		if ctx.mode == ModeTest && !ctx.buildConf.CompileOnly {
+			if err := copyFileAtomic(linkOutput, app); err != nil {
+				return fmt.Errorf("publish exact Windows test output %s: %w", app, err)
+			}
+		} else if err := os.Rename(linkOutput, app); err != nil {
+			return fmt.Errorf("publish exact Windows output %s: %w", app, err)
+		}
+	}
+	return nil
 }
 
 // funcInfoSiteLayoutArgs places the ELF entry carrier immediately before .bss,
@@ -1795,9 +1965,15 @@ func cSharedExportArgs(ctx *context, pkgs []*aPackage) []string {
 	slices.Sort(names)
 	args := make([]string, 0, len(names))
 	for _, name := range names {
-		if ctx.buildConf.Goos == "darwin" {
+		switch ctx.buildConf.Goos {
+		case "darwin":
 			args = append(args, "-Wl,-u,_"+name)
-		} else {
+		case "windows":
+			// /export both roots the symbol and writes it to the PE export
+			// table, allowing lld-link to produce the import library needed
+			// by C consumers of -buildmode=c-shared output.
+			args = append(args, "-Wl,/export:"+name)
+		default:
 			args = append(args, "-Wl,--undefined="+name)
 		}
 	}
@@ -1837,14 +2013,8 @@ func linuxExportDynamicArgs(ctx *context) []string {
 // LLVM-aware archive indexes for wasm objects and bitcode members.
 func (c *context) archiver() string {
 	// First check toolchain directory (for cross-compilation)
-	if c.crossCompile.CC != "" {
-		clangDir := filepath.Dir(c.crossCompile.CC)
-		if clangDir != "" {
-			llvmAr := filepath.Join(clangDir, "llvm-ar")
-			if _, err := os.Stat(llvmAr); err == nil {
-				return llvmAr
-			}
-		}
+	if llvmAr := siblingTool(c.crossCompile.CC, "llvm-ar"); llvmAr != "" {
+		return llvmAr
 	}
 	// Allow user override
 	if ar := os.Getenv("LLGO_AR"); ar != "" {
@@ -1865,16 +2035,32 @@ func (c *context) archiveMerger() (string, error) {
 	if ar := os.Getenv("LLGO_AR"); ar != "" {
 		return ar, nil
 	}
-	if c.crossCompile.CC != "" {
-		llvmAr := filepath.Join(filepath.Dir(c.crossCompile.CC), "llvm-ar")
-		if _, err := os.Stat(llvmAr); err == nil {
-			return llvmAr, nil
-		}
+	if llvmAr := siblingTool(c.crossCompile.CC, "llvm-ar"); llvmAr != "" {
+		return llvmAr, nil
 	}
 	if llvmAr, err := exec.LookPath("llvm-ar"); err == nil {
 		return llvmAr, nil
 	}
 	return "", errors.New("llvm-ar is required to create a flat c-archive")
+}
+
+func siblingTool(compiler, name string) string {
+	if compiler == "" {
+		return ""
+	}
+	base := filepath.Join(filepath.Dir(compiler), name)
+	candidates := []string{base}
+	if runtime.GOOS == "windows" {
+		// LLVM's Windows distributions use PE executable suffixes even when
+		// the invoking Clang path was supplied without one.
+		candidates = append([]string{base + ".exe"}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // createMergedArchiveFile combines object files and package archives into one
@@ -2024,9 +2210,14 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 	if err != nil {
 		return nil, fmt.Errorf("load go:embed directives for %s failed: %w", pkgPath, err)
 	}
+	options := ctx.frontendOptions
+	// A Windows DLL cannot initialize the Go runtime while holding the loader
+	// lock. Only the command package needs alternate export symbols, and command
+	// packages are deliberately excluded from the package cache.
+	options.CExportWrappers = needsWindowsCExportWrappers(ctx, aPkg)
 	ret, externs, err := cl.NewPackageExWithEmbedMetaOptions(
 		ctx.prog, ctx.callerTracking, ctx.patches, aPkg.rewriteVars,
-		aPkg.SSA, syntax, embedMap, needMeta, ctx.frontendOptions)
+		aPkg.SSA, syntax, embedMap, needMeta, options)
 	check(err)
 
 	aPkg.LPkg = ret
@@ -2054,6 +2245,30 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	llabi.LowerLargeAggregates(ctx.prog.TargetData(), ret.Module())
 	ctx.cTransformer.TransformModule(ret.Path(), ret.Module())
 	ctx.cTransformer.SetSkipFuncs(nil)
+	pragmaSyntax := append([]*ast.File(nil), pkg.Syntax...)
+	if aPkg.AltPkg != nil {
+		pragmaSyntax = append(pragmaSyntax, aPkg.AltPkg.Syntax...)
+	}
+	if err := lowerWindowsCgoImportPointers(ctx.buildConf.Goos, ctx.buildConf.Goarch, pkgPath, pragmaSyntax, ret.Module()); err != nil {
+		return err
+	}
+	printCmds := ctx.shouldPrintCommands(verbose)
+	if ctx.mode != ModeGen {
+		if aPkg.AltPkg == nil || llruntime.HasAdditiveAltPkg(pkgPath) {
+			asmObjFiles, err := compilePkgSFiles(ctx, aPkg, pkg, printCmds)
+			if err != nil {
+				return err
+			}
+			aPkg.ObjFiles = append(aPkg.ObjFiles, asmObjFiles...)
+		}
+		if aPkg.AltPkg != nil {
+			asmObjFiles, err := compilePkgSFiles(ctx, aPkg, aPkg.AltPkg.Package, printCmds)
+			if err != nil {
+				return err
+			}
+			aPkg.ObjFiles = append(aPkg.ObjFiles, asmObjFiles...)
+		}
+	}
 
 	// Run the default LLVM optimization pipeline selected by the requested -O level.
 	if ctx.passOpt {
@@ -2069,6 +2284,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 			return fmt.Errorf("run LLVM passes failed for %v: %w", pkgPath, err)
 		}
 	}
+	dropUnusedWindowsTestMain(ctx, aPkg, ret.Module())
 	emitFuncInfoEntrySites(ctx, ret)
 	// ModeGen callers consume the in-memory LLVM module directly. They do not
 	// need cgo/link objects or a package archive for a later link step.
@@ -2076,27 +2292,19 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		return nil
 	}
 
-	printCmds := ctx.shouldPrintCommands(verbose)
 	cgoLLFiles, cgoLdflags, err := buildCgo(ctx, aPkg, aPkg.Package.Syntax, externs, printCmds)
 	if err != nil {
 		return fmt.Errorf("build cgo of %v failed: %v", pkgPath, err)
 	}
 	aPkg.ObjFiles = append(aPkg.ObjFiles, cgoLLFiles...)
 	aPkg.ObjFiles = append(aPkg.ObjFiles, concatPkgLinkFiles(ctx, pkg, printCmds)...)
-	if aPkg.AltPkg == nil || llruntime.HasAdditiveAltPkg(pkgPath) {
-		if asmObjFiles, err := compilePkgSFiles(ctx, aPkg, pkg, printCmds); err != nil {
-			return err
-		} else {
-			aPkg.ObjFiles = append(aPkg.ObjFiles, asmObjFiles...)
-		}
-	}
 	if aliasObjs, err := buildGoCgoAliasObjects(ctx, pkgPath, aPkg.Package.Syntax, printCmds); err != nil {
 		return err
 	} else {
 		aPkg.ObjFiles = append(aPkg.ObjFiles, aliasObjs...)
 	}
 	aPkg.LinkArgs = append(aPkg.LinkArgs, cgoLdflags...)
-	aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(ctx.buildConf.Goos, aPkg.Package.Syntax)...)
+	aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(aPkg.Package.Syntax)...)
 	if aPkg.AltPkg != nil {
 		altLLFiles, altLdflags, e := buildCgo(ctx, aPkg, aPkg.AltPkg.Syntax, externs, printCmds)
 		if e != nil {
@@ -2104,18 +2312,13 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		}
 		aPkg.ObjFiles = append(aPkg.ObjFiles, altLLFiles...)
 		aPkg.ObjFiles = append(aPkg.ObjFiles, concatPkgLinkFiles(ctx, aPkg.AltPkg.Package, printCmds)...)
-		if asmObjFiles, err := compilePkgSFiles(ctx, aPkg, aPkg.AltPkg.Package, printCmds); err != nil {
-			return err
-		} else {
-			aPkg.ObjFiles = append(aPkg.ObjFiles, asmObjFiles...)
-		}
 		if aliasObjs, err := buildGoCgoAliasObjects(ctx, pkgPath, aPkg.AltPkg.Syntax, printCmds); err != nil {
 			return err
 		} else {
 			aPkg.ObjFiles = append(aPkg.ObjFiles, aliasObjs...)
 		}
 		aPkg.LinkArgs = append(aPkg.LinkArgs, altLdflags...)
-		aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(ctx.buildConf.Goos, aPkg.AltPkg.Syntax)...)
+		aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(aPkg.AltPkg.Syntax)...)
 	}
 	if pkg.ExportFile != "" {
 		exportFile, exportBuffer, err := exportPackageObject(ctx, pkg.PkgPath, pkg.ExportFile, ret)
@@ -2132,6 +2335,37 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		}
 	}
 	return nil
+}
+
+// dropUnusedWindowsTestMain mirrors cmd/link's treatment of a command package
+// under `go test`. The tested package still contains its source main function,
+// now named <import-path>.main, but the executable entry is the synthetic test
+// main. cmd/link computes Go reachability before diagnosing unresolved symbols,
+// so it can discard an unreferenced source main even when that body contains a
+// one-sided //go:linkname call. lld-link instead resolves every COFF relocation
+// before /OPT:REF section GC and reports the dead call as undefined.
+//
+// Do not rewrite //go:linkname or weaken undefined symbols: either would also
+// hide an error when the source main is genuinely reachable. Remove only this
+// test-specific entry candidate while it is LLVM IR and only after proving that
+// it has no local use, no //go:linkname reference from any loaded test package,
+// and no //export root. Ordinary builds, synthetic test mains, and non-Windows
+// object formats keep their existing behavior.
+func dropUnusedWindowsTestMain(ctx *context, pkg *aPackage, mod gllvm.Module) {
+	if ctx == nil || ctx.prog == nil || ctx.buildConf == nil || pkg == nil || pkg.Package == nil ||
+		ctx.mode != ModeTest || ctx.buildConf.Goos != "windows" || ctx.buildConf.BuildMode != BuildModeExe ||
+		pkg.Name != "main" || pkg.ForTest == "" || mod.IsNil() {
+		return
+	}
+	symbol := pkg.PkgPath + ".main"
+	fn := mod.NamedFunction(symbol)
+	if fn.IsNil() || fn.IsDeclaration() || !fn.FirstUse().IsNil() || ctx.prog.HasLinknameTarget(symbol) {
+		return
+	}
+	if _, exported := ctx.prog.PackageExport(symbol); exported {
+		return
+	}
+	fn.EraseFromParentAsFunction()
 }
 
 func printCompiledPackage(conf *Config, pkg *aPackage) {

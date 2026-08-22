@@ -13,7 +13,6 @@ import (
 
 	"github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/xgo-dev/llgo/runtime/internal/ffi"
 	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
@@ -49,8 +48,8 @@ type finalizerEntry struct {
 }
 
 var finalizerState struct {
-	once psync.Once
-	mu   psync.Mutex
+	once nativeOnce
+	mu   nativeMutex
 	m    map[uintptr]*finalizerEntry
 	head *finalizerEntry
 	tail *finalizerEntry

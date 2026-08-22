@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build darwin || linux || windows
 
 package runtime
 
@@ -6,72 +6,9 @@ import (
 	"unsafe"
 
 	latomic "sync/atomic"
-
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
 )
 
-// Minimal semaphore + notify list support for stdlib sync on llgo/darwin.
-
-type semaState struct {
-	mu      psync.Mutex
-	cond    psync.Cond
-	waiters uint32
-}
-
-var semaOnce psync.Once
-var semaMu psync.Mutex
-var semaMap map[uintptr]*semaState
-
-func initSemaMap() {
-	semaMu.Init(nil)
-	semaMap = make(map[uintptr]*semaState)
-}
-
-func getSemaState(addr *uint32) *semaState {
-	semaOnce.Do(initSemaMap)
-	key := uintptr(unsafe.Pointer(addr))
-	semaMu.Lock()
-	st := semaMap[key]
-	if st == nil {
-		st = &semaState{}
-		st.mu.Init(nil)
-		st.cond.Init(nil)
-		semaMap[key] = st
-	}
-	semaMu.Unlock()
-	return st
-}
-
-func semaAcquire(addr *uint32) {
-	for {
-		v := latomic.LoadUint32(addr)
-		if v != 0 && latomic.CompareAndSwapUint32(addr, v, v-1) {
-			return
-		}
-		st := getSemaState(addr)
-		st.mu.Lock()
-		for {
-			v = latomic.LoadUint32(addr)
-			if v != 0 && latomic.CompareAndSwapUint32(addr, v, v-1) {
-				st.mu.Unlock()
-				return
-			}
-			st.waiters++
-			st.cond.Wait(&st.mu)
-			st.waiters--
-		}
-	}
-}
-
-func semaRelease(addr *uint32) {
-	latomic.AddUint32(addr, 1)
-	st := getSemaState(addr)
-	st.mu.Lock()
-	if st.waiters != 0 {
-		st.cond.Signal()
-	}
-	st.mu.Unlock()
-}
+// Minimal semaphore + notify list support for stdlib sync on hosted targets.
 
 // sync_runtime_Semacquire should be an internal detail, but is linknamed.
 //
@@ -181,12 +118,12 @@ type notifyList struct {
 }
 
 type notifyState struct {
-	mu   psync.Mutex
-	cond psync.Cond
+	mu   nativeMutex
+	cond nativeCond
 }
 
-var notifyOnce psync.Once
-var notifyMu psync.Mutex
+var notifyOnce nativeOnce
+var notifyMu nativeMutex
 var notifyMap map[uintptr]*notifyState
 
 func initNotifyMap() {

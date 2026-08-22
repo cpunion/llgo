@@ -1,4 +1,4 @@
-//go:build !baremetal && !wasm
+//go:build !baremetal && !wasm && !windows
 
 package runtime
 
@@ -40,6 +40,18 @@ func c_faultCaptureDone()
 
 func memReadable(addr uintptr) bool {
 	return c_memReadable(unsafe.Pointer(addr)) != 0
+}
+
+func platformCallers(fp uintptr, skip int, pc []uintptr) int {
+	return framePointerCallers(fp, skip, pc)
+}
+
+func recoverFrameMarks() (uintptr, uintptr) {
+	return framePointerRecoverMarks()
+}
+
+func recoverFrameLive(mark1, mark2 uintptr) bool {
+	return framePointerRecoverFrameLive(mark1, mark2)
 }
 
 func init() {

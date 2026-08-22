@@ -11,7 +11,7 @@ require (
 	github.com/qiniu/x v1.18.3
 	github.com/xgo-dev/llgo/runtime v0.0.0-00010101000000-000000000000
 	github.com/xgo-dev/llvm v0.9.6
-	github.com/xgo-dev/plan9asm v0.3.5
+	github.com/xgo-dev/plan9asm v0.5.0
 	go.bug.st/serial v1.6.4
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.40.0
@@ -26,3 +26,7 @@ require (
 )
 
 replace github.com/xgo-dev/llgo/runtime => ./runtime
+
+replace github.com/goplus/lib => github.com/cpunion/lib v0.0.0-20260822071805-ebe22363a225
+
+replace github.com/xgo-dev/llvm => github.com/cpunion/llvm v0.9.4-0.20260822082621-a7dfe6c95b27

@@ -3,6 +3,7 @@
 package compile
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,22 +75,23 @@ func TestCompile(t *testing.T) {
 
 	t.Run("TmpDir Fail", func(t *testing.T) {
 		tmpDir := filepath.Join(t.TempDir(), "test-compile")
-		os.RemoveAll(tmpDir)
-
-		err := os.Mkdir(tmpDir, 0)
-		if err != nil {
-			t.Error(err)
-			return
+		if err := os.Mkdir(tmpDir, 0o755); err != nil {
+			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
-
-		os.Setenv("TMPDIR", tmpDir)
-		defer os.Unsetenv("TMPDIR")
+		badTempRoot := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(badTempRoot, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// A mode-000 directory is still writable on Windows and by privileged
+		// Unix users. A regular file is never a valid temporary-directory root.
+		t.Setenv("TMPDIR", badTempRoot)
+		t.Setenv("TMP", badTempRoot)
+		t.Setenv("TEMP", badTempRoot)
 
 		group := CompileGroup{
 			OutputFileName: "nop.a",
 		}
-		err = group.Compile(tmpDir, CompileOptions{
+		err := group.Compile(tmpDir, CompileOptions{
 			CC:     "clang",
 			Linker: "lld",
 		})
@@ -204,6 +206,41 @@ func TestCompile(t *testing.T) {
 		})
 		if err != nil {
 			t.Errorf("unexpected result: should nil %v", err)
+		}
+	})
+}
+
+func TestObjectFilePattern(t *testing.T) {
+	if got, want := objectFilePattern(filepath.Join("source tree", "foo:bar.c")), "foo-bar.c-*.o"; got != want {
+		t.Fatalf("objectFilePattern = %q, want %q", got, want)
+	}
+}
+
+func TestWriteArchiveResponseFile(t *testing.T) {
+	t.Run("quoted object paths", func(t *testing.T) {
+		dir := t.TempDir()
+		objFiles := []string{
+			filepath.Join(dir, "first.o"),
+			filepath.Join(dir, "directory with spaces", "second.o"),
+		}
+		responseFile, err := writeArchiveResponseFile(dir, objFiles)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(responseFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf("\"%s\"\n\"%s\"\n", filepath.ToSlash(objFiles[0]), filepath.ToSlash(objFiles[1]))
+		if string(got) != want {
+			t.Fatalf("response file = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("write error", func(t *testing.T) {
+		missingDir := filepath.Join(t.TempDir(), "missing")
+		if _, err := writeArchiveResponseFile(missingDir, []string{"object.o"}); err == nil {
+			t.Fatal("writeArchiveResponseFile succeeded in a missing directory")
 		}
 	})
 }

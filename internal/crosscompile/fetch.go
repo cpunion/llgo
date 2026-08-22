@@ -11,8 +11,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"syscall"
 )
 
 // checkDownloadAndExtractWasiSDK downloads and extracts WASI SDK
@@ -42,7 +42,7 @@ func checkDownloadAndExtractWasiSDK(dir string) (wasiSdkRoot string, err error) 
 }
 
 // checkDownloadAndExtractESPClang downloads and extracts ESP Clang binaries and libraries
-func checkDownloadAndExtractESPClang(platformSuffix, dir string) error {
+func checkDownloadAndExtractESPClang(baseURL, version, platformSuffix, dir string) error {
 	// Check if already exists
 	if _, err := os.Stat(dir); err == nil {
 		return nil
@@ -61,8 +61,8 @@ func checkDownloadAndExtractESPClang(platformSuffix, dir string) error {
 		return nil
 	}
 
-	clangUrl := fmt.Sprintf("%s/clang-esp-%s-%s.tar.xz", espClangBaseUrl, espClangVersion, platformSuffix)
-	description := fmt.Sprintf("ESP Clang %s-%s", espClangVersion, platformSuffix)
+	clangUrl := fmt.Sprintf("%s/clang-esp-%s-%s.tar.xz", baseURL, version, platformSuffix)
+	description := fmt.Sprintf("ESP Clang %s-%s", version, platformSuffix)
 
 	// Use temporary extraction directory for ESP Clang special handling
 	tempExtractDir := dir + ".extract"
@@ -124,6 +124,10 @@ func checkDownloadAndExtractLib(url, dstDir, internalArchiveSrcDir string) error
 
 // acquireLock creates and locks a file to prevent concurrent operations
 func acquireLock(lockPath string) (*os.File, error) {
+	return acquireLockWith(lockPath, lockFileHandle)
+}
+
+func acquireLockWith(lockPath string, lock func(*os.File) error) (*os.File, error) {
 	// Ensure the parent directory exists
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create lock directory: %w", err)
@@ -133,22 +137,32 @@ func acquireLock(lockPath string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lock file: %w", err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lock(lockFile); err != nil {
 		lockFile.Close()
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
 	return lockFile, nil
 }
 
-// releaseLock unlocks and removes the lock file
+// releaseLock unlocks and closes the lock file. The file must remain in place:
+// removing it could let a new caller lock a different file while another caller
+// still holds the original one.
 func releaseLock(lockFile *os.File) error {
 	if lockFile == nil {
 		return nil
 	}
-	lockPath := lockFile.Name()
-	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-	lockFile.Close()
-	os.Remove(lockPath)
+	unlockErr := unlockFileHandle(lockFile)
+	closeErr := lockFile.Close()
+	return lockReleaseError(unlockErr, closeErr)
+}
+
+func lockReleaseError(unlockErr, closeErr error) error {
+	if unlockErr != nil {
+		return fmt.Errorf("failed to release lock: %w", unlockErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to close lock file: %w", closeErr)
+	}
 	return nil
 }
 
@@ -267,9 +281,24 @@ func extractTarGz(tarGzFile, dest string) error {
 }
 
 func extractTarXz(tarXzFile, dest string) error {
-	// Use external tar command to extract .tar.xz files
-	cmd := exec.Command("tar", "-xf", tarXzFile, "-C", dest)
-	return cmd.Run()
+	tarCommand := "tar"
+	if runtime.GOOS == "windows" {
+		// setup-msys2 prepends its POSIX tar.exe to PATH, but this function
+		// passes native C:\... paths from Go. MSYS tar interprets the drive
+		// colon as a remote archive separator and exits 128. Windows' bundled
+		// bsdtar accepts native paths and xz streams directly.
+		if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
+			nativeTar := filepath.Join(systemRoot, "System32", "tar.exe")
+			if _, err := os.Stat(nativeTar); err == nil {
+				tarCommand = nativeTar
+			}
+		}
+	}
+	cmd := exec.Command(tarCommand, "-xf", tarXzFile, "-C", dest)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tar -xf: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func extractZip(zipFile, dest string) error {

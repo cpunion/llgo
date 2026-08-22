@@ -78,11 +78,41 @@ func TestDCEEntryRootCandidatesIncludesCExports(t *testing.T) {
 	lpkg := prog.NewPackage("pkg", "pkg")
 	lpkg.SetExport("main.Z", "Zed")
 	lpkg.SetExport("main.A", "Add")
+	lpkg.NewFunc("main.Z", llssa.NoArgsNoRet, llssa.InGo)
+	lpkg.NewFunc("main.A", llssa.NoArgsNoRet, llssa.InGo)
 	pkgs := []Package{&aPackage{LPkg: lpkg}}
 
-	want := []string{"main.init", "main.main", "Add", "Zed"}
+	want := []string{"main.init", "main.main", "main.A", "main.Z"}
 	if got := dceEntryRootCandidates(pkgs, false); !reflect.DeepEqual(got, want) {
 		t.Fatalf("dceEntryRootCandidates() = %v, want %v", got, want)
+	}
+}
+
+func TestLinkedCExportsIncludesOnlyWindowsSharedMain(t *testing.T) {
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	newExport := func(path, name, goName, cName string) Package {
+		lpkg := prog.NewPackage(path, path)
+		lpkg.SetExport(goName, cName)
+		lpkg.NewFunc(goName, llssa.NoArgsNoRet, llssa.InGo)
+		return &aPackage{
+			Package: &packages.Package{Name: name, PkgPath: path},
+			LPkg:    lpkg,
+		}
+	}
+	ctx := &context{buildConf: &Config{
+		Goos:      "windows",
+		BuildMode: BuildModeCShared,
+	}}
+	exports, err := linkedCExports(ctx, []Package{
+		newExport("main", "main", "main.Exported", "Exported"),
+		newExport("example.com/dep", "dep", "example.com/dep.Callback", "Callback"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exports) != 1 || exports[0].goName != "main.Exported" {
+		t.Fatalf("linked C exports = %+v, want command-package export only", exports)
 	}
 }
 

@@ -21,7 +21,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/xgo-dev/llgo/xtool/safesplit"
@@ -110,7 +112,61 @@ func (c *Cmd) Link(args ...string) error {
 	allArgs := make([]string, 0, len(flags)+len(args))
 	allArgs = append(allArgs, flags...)
 	allArgs = append(allArgs, args...)
+	allArgs = resolveMSVCImportLibraries(c.Dir, allArgs)
 	return c.exec(allArgs...)
+}
+
+// resolveMSVCImportLibraries lets clang's MSVC driver consume GNU-named COFF
+// import archives installed by environments such as MSYS2. Prefer name.lib
+// anywhere on the explicit search path; only replace -lname when
+// libname.dll.a is the sole available spelling.
+func resolveMSVCImportLibraries(baseDir string, args []string) []string {
+	if !slices.ContainsFunc(args, func(arg string) bool {
+		return strings.Contains(arg, "-windows-msvc")
+	}) {
+		return args
+	}
+	var dirs []string
+	for i, arg := range args {
+		switch {
+		case arg == "-L" && i+1 < len(args):
+			dirs = append(dirs, args[i+1])
+		case strings.HasPrefix(arg, "-L") && len(arg) > 2:
+			dirs = append(dirs, arg[2:])
+		}
+	}
+	resolved := args
+	changed := false
+	for i, arg := range args {
+		if !strings.HasPrefix(arg, "-l") || len(arg) <= 2 || arg[2] == ':' {
+			continue
+		}
+		name := arg[2:]
+		if findLibrary(baseDir, dirs, name+".lib") != "" {
+			continue
+		}
+		if archive := findLibrary(baseDir, dirs, "lib"+name+".dll.a"); archive != "" {
+			if !changed {
+				resolved = slices.Clone(args)
+				changed = true
+			}
+			resolved[i] = archive
+		}
+	}
+	return resolved
+}
+
+func findLibrary(baseDir string, dirs []string, name string) string {
+	for _, dir := range dirs {
+		path := filepath.Join(dir, name)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(baseDir, path)
+		}
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	return ""
 }
 
 // mergeCompilerFlags merges environment CCFLAGS/CFLAGS with config flags.
@@ -158,6 +214,16 @@ func (c *Cmd) mergeLinkerFlags() []string {
 
 // exec executes the clang command with given arguments.
 func (c *Cmd) exec(args ...string) error {
+	responseFile := ""
+	if useResponseFile(c.app, args) {
+		var err error
+		responseFile, err = writeResponseFile(args)
+		if err != nil {
+			return fmt.Errorf("write clang response file: %w", err)
+		}
+		defer os.Remove(responseFile)
+		args = []string{"@" + responseFile}
+	}
 	cmd := exec.Command(c.app, args...)
 	cmd.Dir = c.Dir
 	if c.Verbose {
@@ -170,6 +236,64 @@ func (c *Cmd) exec(args ...string) error {
 		cmd.Env = c.Env
 	}
 	return cmd.Run()
+}
+
+const windowsCommandLineLimit = 30 * 1024
+
+func useResponseFile(app string, args []string) bool {
+	return useResponseFileForGOOS(runtime.GOOS, app, args)
+}
+
+func useResponseFileForGOOS(goos, app string, args []string) bool {
+	if goos != "windows" {
+		return false
+	}
+	length := len(app)
+	for _, arg := range args {
+		length += 1 + len(arg)
+	}
+	return length > windowsCommandLineLimit
+}
+
+func writeResponseFile(args []string) (name string, err error) {
+	file, err := os.CreateTemp("", "llgo-clang-*.rsp")
+	if err != nil {
+		return "", err
+	}
+	name = file.Name()
+	defer func() {
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			os.Remove(name)
+		}
+	}()
+
+	var content strings.Builder
+	for index, arg := range args {
+		if index != 0 {
+			content.WriteByte(' ')
+		}
+		writeResponseArg(&content, arg)
+	}
+	content.WriteByte('\n')
+	_, err = io.WriteString(file, content.String())
+	return name, err
+}
+
+// writeResponseArg matches Clang's own response-file writer: every argument
+// is quoted, and quotes and backslashes are escaped. The same representation
+// is accepted by Clang's GNU and Windows response-file parsers.
+func writeResponseArg(out *strings.Builder, arg string) {
+	out.WriteByte('"')
+	for _, char := range arg {
+		if char == '"' || char == '\\' {
+			out.WriteByte('\\')
+		}
+		out.WriteRune(char)
+	}
+	out.WriteByte('"')
 }
 
 // CheckLinkArgs validates linking arguments by attempting a test compile.

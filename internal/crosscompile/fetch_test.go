@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -50,6 +52,42 @@ func createTestTarGz(t *testing.T, files map[string]string) string {
 	return tempFile.Name()
 }
 
+func createTestTarXz(t *testing.T, files map[string]string) string {
+	t.Helper()
+	tarFile, err := os.CreateTemp("", "test*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(tarFile)
+	for name, content := range files {
+		hdr := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(content))}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(tarFile.Name()) })
+
+	compressed, err := exec.Command("xz", "-c", tarFile.Name()).Output()
+	if err != nil {
+		t.Fatalf("compress test tar.xz: %v", err)
+	}
+	xzFile := tarFile.Name() + ".xz"
+	if err := os.WriteFile(xzFile, compressed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(xzFile) })
+	return xzFile
+}
+
 // Helper function to create a test HTTP server
 func createTestServer(t *testing.T, files map[string]string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +102,10 @@ func createTestServer(t *testing.T, files map[string]string) *httptest.Server {
 }
 
 func TestAcquireAndReleaseLock(t *testing.T) {
+	if err := releaseLock(nil); err != nil {
+		t.Fatalf("releaseLock(nil) = %v, want nil", err)
+	}
+
 	tempDir := t.TempDir()
 	lockPath := filepath.Join(tempDir, "test.lock")
 
@@ -83,9 +125,82 @@ func TestAcquireAndReleaseLock(t *testing.T) {
 		t.Errorf("Failed to release lock: %v", err)
 	}
 
-	// Check lock file is removed
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Error("Lock file should be removed after release")
+	// The lock file remains so every caller continues to lock the same file.
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("Lock file should remain after release: %v", err)
+	}
+
+	// A retained lock file can be acquired again.
+	lockFile, err = acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("Failed to reacquire lock: %v", err)
+	}
+	if err := releaseLock(lockFile); err != nil {
+		t.Errorf("Failed to release reacquired lock: %v", err)
+	}
+
+	// A closed handle exercises the platform unlock failure path and verifies
+	// that releaseLock preserves enough context for callers to diagnose it.
+	closedLock, err := acquireLock(filepath.Join(tempDir, "closed.lock"))
+	if err != nil {
+		t.Fatalf("Failed to acquire lock for error test: %v", err)
+	}
+	if err := closedLock.Close(); err != nil {
+		t.Fatalf("Failed to close lock for error test: %v", err)
+	}
+	if err := releaseLock(closedLock); err == nil {
+		t.Fatal("Expected release of a closed lock to fail")
+	} else if !strings.Contains(err.Error(), "failed to release lock") {
+		t.Fatalf("Unexpected closed lock release error: %v", err)
+	}
+}
+
+func TestAcquireAndReleaseLockErrors(t *testing.T) {
+	t.Run("acquire", func(t *testing.T) {
+		wantErr := errors.New("injected lock failure")
+		var opened *os.File
+		got, err := acquireLockWith(filepath.Join(t.TempDir(), "failed.lock"), func(file *os.File) error {
+			opened = file
+			return wantErr
+		})
+		if got != nil || !errors.Is(err, wantErr) {
+			t.Fatalf("acquireLockWith = (%v, %v), want (nil, %v)", got, err, wantErr)
+		}
+		if opened == nil {
+			t.Fatal("lock callback did not receive the opened file")
+		}
+		if err := opened.Close(); err == nil {
+			t.Fatal("failed lock file remained open")
+		}
+	})
+}
+
+func TestLockReleaseError(t *testing.T) {
+	unlockErr := errors.New("unlock")
+	closeErr := errors.New("close")
+	for _, test := range []struct {
+		name      string
+		unlockErr error
+		closeErr  error
+		want      string
+	}{
+		{name: "success"},
+		{name: "unlock", unlockErr: unlockErr, want: "failed to release lock: unlock"},
+		{name: "close", closeErr: closeErr, want: "failed to close lock file: close"},
+		{name: "unlock takes precedence", unlockErr: unlockErr, closeErr: closeErr, want: "failed to release lock: unlock"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := lockReleaseError(test.unlockErr, test.closeErr)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("lockReleaseError() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("lockReleaseError() = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -96,6 +211,7 @@ func TestAcquireLockConcurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	var results []int
 	var resultsMu sync.Mutex
+	var active atomic.Int32
 
 	// Start multiple goroutines trying to acquire the same lock
 	for i := 0; i < 5; i++ {
@@ -109,12 +225,17 @@ func TestAcquireLockConcurrency(t *testing.T) {
 				return
 			}
 
+			if n := active.Add(1); n != 1 {
+				t.Errorf("Goroutine %d entered an occupied critical section (%d active)", id, n)
+			}
+
 			// Hold the lock for a short time
 			resultsMu.Lock()
 			results = append(results, id)
 			resultsMu.Unlock()
 
 			time.Sleep(10 * time.Millisecond)
+			active.Add(-1)
 
 			if err := releaseLock(lockFile); err != nil {
 				t.Errorf("Goroutine %d failed to release lock: %v", id, err)
@@ -173,7 +294,6 @@ func TestExtractTarGz(t *testing.T) {
 	}
 
 	archivePath := createTestTarGz(t, files)
-	defer os.Remove(archivePath)
 
 	// Extract to temp directory
 	tempDir := t.TempDir()
@@ -513,7 +633,7 @@ func TestESPClangExtractionLogic(t *testing.T) {
 	}
 
 	// Test that function skips download for existing directory
-	err = checkDownloadAndExtractESPClang("linux", espClangDir)
+	err = checkDownloadAndExtractESPClang(espClangBaseUrl, espClangVersion, "linux", espClangDir)
 	if err != nil {
 		t.Fatalf("checkDownloadAndExtractESPClang failed: %v", err)
 	}
@@ -595,8 +715,7 @@ func TestESPClangDownloadWhenNotExists(t *testing.T) {
 		"esp-clang/include/esp32.h": "#define ESP32 1",
 	}
 
-	archivePath := createTestTarGz(t, files)
-	defer os.Remove(archivePath)
+	archivePath := createTestTarXz(t, files)
 
 	// Read the archive content
 	archiveContent, err := os.ReadFile(archivePath)
@@ -624,7 +743,7 @@ func TestESPClangDownloadWhenNotExists(t *testing.T) {
 	espClangDir := filepath.Join(tempCacheRoot, "esp-clang-test")
 
 	// Test download and extract when directory doesn't exist
-	err = checkDownloadAndExtractESPClang("linux", espClangDir)
+	err = checkDownloadAndExtractESPClang(espClangBaseUrl, espClangVersion, "linux", espClangDir)
 	if err != nil {
 		t.Fatalf("checkDownloadAndExtractESPClang failed: %v", err)
 	}
@@ -685,22 +804,22 @@ func TestExtractZip(t *testing.T) {
 		}
 	})
 
-	// 3. Test non-writable destination
-	t.Run("UnwritableDestination", func(t *testing.T) {
+	// 3. Test a destination that cannot contain extracted files. Unlike Unix
+	// permission bits, this remains deterministic on Windows and as root.
+	t.Run("NonDirectoryDestination", func(t *testing.T) {
 		// Create test ZIP file
 		if err := createTestZip(zipPath); err != nil {
 			t.Fatal(err)
 		}
 
-		// Create read-only destination directory
-		readOnlyDir := filepath.Join(tempDir, "readonly")
-		if err := os.MkdirAll(readOnlyDir, 0400); err != nil {
+		notDirectory := filepath.Join(tempDir, "not-a-directory")
+		if err := os.WriteFile(notDirectory, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
 
 		// Execute extraction and expect error
-		if err := extractZip(zipPath, readOnlyDir); err == nil {
-			t.Error("Expected error for unwritable destination, got nil")
+		if err := extractZip(zipPath, notDirectory); err == nil {
+			t.Error("Expected error for non-directory destination, got nil")
 		}
 	})
 }

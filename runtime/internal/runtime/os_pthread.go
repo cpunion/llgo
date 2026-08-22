@@ -1,3 +1,5 @@
+//go:build !windows
+
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -62,6 +64,8 @@ func initThreadAttr(attr *pthread.Attr, stackSize uintptr) c.Int {
 	}
 	return 0
 }
+
+func handleThreadCreateFailureDuringExit() {}
 
 func exitCurrentM() {
 	mp := getg().m

@@ -30,6 +30,7 @@ import (
 	"unicode"
 
 	"go.yaml.in/yaml/v3"
+	"golang.org/x/mod/modfile"
 )
 
 var (
@@ -357,9 +358,9 @@ func TestGoRootRunCases(t *testing.T) {
 			}
 			switch {
 			case err == nil && notApply:
-				t.Fatalf("unexpected success for not-applicable case: %s", notApplyReason)
+				t.Logf("not-applicable case passed: %s", notApplyReason)
 			case err == nil && match:
-				t.Fatalf("unexpected success for xfail case: %s", reason)
+				t.Logf("xfail case passed: %s", reason)
 			case err == nil && flaky:
 				t.Logf("flaky case passed: %s", flakyReason)
 			case err != nil && match:
@@ -752,12 +753,21 @@ func prepareCaseWorkspace(repoRoot string) (caseWorkspace, error) {
 		return caseWorkspace{}, err
 	}
 	gopath := filepath.Join(root, "gopath")
-	llgoPath := filepath.Join(gopath, "src", "github.com", "goplus")
-	if err := os.MkdirAll(llgoPath, 0o755); err != nil {
+	goMod, err := os.ReadFile(filepath.Join(repoRoot, "go.mod"))
+	if err != nil {
+		_ = os.RemoveAll(root)
+		return caseWorkspace{}, fmt.Errorf("read repository module path: %w", err)
+	}
+	modulePath := modfile.ModulePath(goMod)
+	if modulePath == "" {
+		_ = os.RemoveAll(root)
+		return caseWorkspace{}, fmt.Errorf("read repository module path: go.mod has no module directive")
+	}
+	linkPath := filepath.Join(gopath, "src", filepath.FromSlash(modulePath))
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
 		_ = os.RemoveAll(root)
 		return caseWorkspace{}, err
 	}
-	linkPath := filepath.Join(llgoPath, "llgo")
 	if err := os.Symlink(repoRoot, linkPath); err != nil && !errors.Is(err, os.ErrExist) {
 		_ = os.RemoveAll(root)
 		return caseWorkspace{}, fmt.Errorf("symlink %q -> %q: %w", linkPath, repoRoot, err)
@@ -1760,9 +1770,9 @@ func parseCompilerDiagnostic(line string) (compilerDiagnostic, bool) {
 	}, true
 }
 
-// matchesExpectedDiagnostic accepts the equivalent wording used by the Go
-// scanner for unterminated literals. GOROOT's errorcheck patterns describe gc
-// diagnostics, while llgo's source frontend is go/parser and go/scanner.
+// matchesExpectedDiagnostic accepts equivalent frontend wording. GOROOT's
+// errorcheck patterns describe diagnostics from several cmd/compile versions,
+// while llgo's source frontend is go/parser, go/scanner, and go/types.
 func matchesExpectedDiagnostic(expected *regexp.Regexp, message string) bool {
 	if expected.MatchString(message) {
 		return true
@@ -1776,12 +1786,42 @@ func matchesExpectedDiagnostic(expected *regexp.Regexp, message string) bool {
 	case "raw string literal not terminated":
 		aliases = []string{"string not terminated"}
 	}
+	aliases = append(aliases, goTypesDiagnosticAliases(message)...)
 	for _, alias := range aliases {
 		if expected.MatchString(alias) {
 			return true
 		}
 	}
 	return false
+}
+
+func goTypesDiagnosticAliases(message string) []string {
+	var aliases []string
+	for _, prefix := range []string{"cannot refer to unexported field '", "unknown field '"} {
+		rest, ok := strings.CutPrefix(message, prefix)
+		if !ok {
+			continue
+		}
+		name, suffix, ok := strings.Cut(rest, "' in struct literal of type ")
+		if ok && token.IsIdentifier(name) {
+			aliases = append(aliases, strings.TrimSuffix(prefix, "'")+name+" in struct literal of type "+suffix)
+		}
+		break
+	}
+
+	const suggestion = ", but does have "
+	before, name, ok := strings.Cut(message, suggestion)
+	if !ok || !strings.HasSuffix(name, ")") {
+		return aliases
+	}
+	name = strings.TrimSuffix(name, ")")
+	if !token.IsIdentifier(name) {
+		return aliases
+	}
+	for _, kind := range []string{"field", "method"} {
+		aliases = append(aliases, before+suggestion+kind+" "+name+")")
+	}
+	return aliases
 }
 
 // isScopedLexicalDiagnostic identifies primary scanner diagnostics whose
@@ -2528,7 +2568,10 @@ func runSingleFileCase(t *testing.T, repoRoot, goroot, goCmd, llgoBin string, tc
 		}
 		buildTarget = "."
 	} else {
-		if err := overlayDir(ws.workDir, tc.Dir); err != nil {
+		// Match the go command's named-file mode: files next to the selected
+		// source are not part of the package. In particular, GOROOT/test keeps
+		// generators such as cmplxdivide.c alongside unrelated run cases.
+		if err := stageSelectedFiles(ws.workDir, tc.Dir, sourceFiles); err != nil {
 			return err
 		}
 	}

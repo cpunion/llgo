@@ -11,6 +11,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	llpackages "github.com/xgo-dev/llgo/internal/packages"
@@ -95,6 +96,44 @@ func Foo()
 	defer modTr.Module.Dispose()
 	if got := len(modTr.Functions); got != 1 {
 		t.Fatalf("TranslateSourceModuleForPkg function count = %d, want 1", got)
+	}
+}
+
+func TestTranslateGOARMTargetTriple(t *testing.T) {
+	pkg := mustTestPackage(t, "example.com/arm", `package arm
+func Foo()
+`)
+	asmPath := filepath.Join(t.TempDir(), "foo_arm.s")
+	asm := []byte("TEXT ·Foo(SB),NOSPLIT,$0-0\n\tRET\n")
+	tr, err := TranslateSourceModuleForPkgWithOptions(pkg, asmPath, asm, "linux", "arm", TranslateOptions{GOARM: "6,softfloat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Module.Dispose()
+	if got, want := tr.Module.Target(), "armv6-unknown-linux-gnueabi"; got != want {
+		t.Fatalf("module target = %q, want %q", got, want)
+	}
+}
+
+func TestTranslateMainPackageUsesCanonicalSymbols(t *testing.T) {
+	pkg := mustTestPackage(t, "example.com/cmd", `package main
+func f()
+func f1()
+`)
+	tr, err := TranslateSourceForPkg(pkg, "f_arm64.s", []byte("TEXT ·f(SB),NOSPLIT,$0-0\n\tRET ·f1(SB)\n"), "windows", "arm64")
+	if err != nil {
+		t.Fatalf("TranslateSourceForPkg: %v", err)
+	}
+	if got := tr.Functions[0].ResolvedSymbol; got != "main.f" {
+		t.Fatalf("resolved main symbol = %q, want main.f", got)
+	}
+	for _, want := range []string{
+		`define void @main.f()`,
+		`call void @main.f1()`,
+	} {
+		if !strings.Contains(tr.LLVMIR, want) {
+			t.Fatalf("main package translation missing %q:\n%s", want, tr.LLVMIR)
+		}
 	}
 }
 

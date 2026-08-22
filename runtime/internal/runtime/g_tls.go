@@ -22,7 +22,6 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
 )
 
 // currentG is the scheduler's physical-thread slot for locating the G that is
@@ -37,7 +36,7 @@ import (
 var currentG uintptr
 
 // currentGHasLifecycle records whether the current G was installed in the
-// pthread destructor sidecar. Runtime-owned M threads leave this false.
+// host TLS destructor sidecar. Runtime-owned M threads leave this false.
 //
 //llgo:tls
 var currentGHasLifecycle bool
@@ -47,10 +46,10 @@ var currentGHasLifecycle bool
 // threads, which have no runtime-owned mexit path.
 var gLifecycleKey = newGLifecycleKey()
 
-func newGLifecycleKey() pthread.Key {
-	var key pthread.Key
-	if ret := key.Create(pthread.KeyDestructor(destroyG)); ret != 0 {
-		c.Fprintf(c.Stderr, c.Str("runtime: pthread_key_create failed (errno=%d)\n"), ret)
+func newGLifecycleKey() nativeThreadKey {
+	var key nativeThreadKey
+	if ret := key.Create(nativeKeyDestructor(destroyG)); ret != 0 {
+		c.Fprintf(c.Stderr, c.Str("runtime: thread-local key creation failed (error=%d)\n"), ret)
 		panic("runtime: failed to create getg lifecycle key")
 	}
 	return key
@@ -63,7 +62,7 @@ func getg() *g {
 	gp := initRuntimeContext(allocRuntimeContext(), nil, _Grunning)
 	if ret := setAutoG(gp); ret != 0 {
 		destroyG(c.Pointer(unsafe.Pointer(gp)))
-		c.Fprintf(c.Stderr, c.Str("runtime: pthread_setspecific failed (errno=%d)\n"), ret)
+		c.Fprintf(c.Stderr, c.Str("runtime: thread-local value installation failed (error=%d)\n"), ret)
 		panic("runtime: failed to install g")
 	}
 	return gp
@@ -73,7 +72,7 @@ func setg(gp *g) {
 	if currentGHasLifecycle {
 		old := (*g)(unsafe.Pointer(currentG))
 		if ret := gLifecycleKey.Set(nil); ret != 0 {
-			c.Fprintf(c.Stderr, c.Str("runtime: pthread_setspecific failed (errno=%d)\n"), ret)
+			c.Fprintf(c.Stderr, c.Str("runtime: thread-local value clear failed (error=%d)\n"), ret)
 			panic("runtime: failed to clear g lifecycle key")
 		}
 		currentGHasLifecycle = false
@@ -115,5 +114,10 @@ func destroyG(ptr c.Pointer) {
 		root := ctx.root
 		ctx.root = nil
 		FreeRoot(root)
+	}
+	// This is the last Go operation in the FLS destructor. A foreign thread
+	// that entered through a callback can now leave the collector safely.
+	if currentGHasLifecycle {
+		releaseForeignThreadRegistration()
 	}
 }

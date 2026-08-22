@@ -1,4 +1,4 @@
-//go:build !nogc
+//go:build !nogc || windows
 
 package runtime
 
@@ -9,11 +9,11 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/ffi"
 )
 
-var finalizerFFITypeClosure = ffi.StructOf(ffi.TypePointer, ffi.TypePointer)
+var goABIFFITypeClosure = ffi.StructOf(ffi.TypePointer, ffi.TypePointer)
 
-// Keep the Go ABI conversion local to finalizers. The low-level ffi package
-// should not depend on runtime/abi.
-func finalizerFFIType(typ *abi.Type) *ffi.Type {
+// Keep Go ABI conversion in the runtime. The low-level ffi package should not
+// depend on runtime/abi.
+func goABIFFIType(typ *abi.Type) *ffi.Type {
 	switch typ.Kind() {
 	case abi.Bool:
 		return ffi.TypeBool
@@ -49,11 +49,11 @@ func finalizerFFIType(typ *abi.Type) *ffi.Type {
 		return ffi.TypeComplex128
 	case abi.Array:
 		at := typ.ArrayType()
-		return ffi.ArrayOf(finalizerFFIType(at.Elem), int(at.Len))
+		return ffi.ArrayOf(goABIFFIType(at.Elem), int(at.Len))
 	case abi.Chan, abi.Map, abi.Pointer, abi.UnsafePointer:
 		return ffi.TypePointer
 	case abi.Func:
-		return finalizerFFITypeClosure
+		return goABIFFITypeClosure
 	case abi.Interface:
 		return ffi.TypeInterface
 	case abi.Slice:
@@ -62,25 +62,25 @@ func finalizerFFIType(typ *abi.Type) *ffi.Type {
 		return ffi.TypeString
 	case abi.Struct:
 		if typ.IsClosure() {
-			return finalizerFFITypeClosure
+			return goABIFFITypeClosure
 		}
-		return finalizerFFIStructType(typ)
+		return goABIFFIStructType(typ)
 	}
 	panic("runtime.SetFinalizer: unsupported result type " + typ.String())
 }
 
-func finalizerFFIStructType(typ *abi.Type) *ffi.Type {
+func goABIFFIStructType(typ *abi.Type) *ffi.Type {
 	st := typ.StructType()
 	fields := make([]*ffi.Type, 0, len(st.Fields))
 	var off uintptr
 	for _, field := range st.Fields {
 		if field.Offset > off {
-			fields, off = appendFinalizerFFIPadding(fields, off, field.Offset-off)
+			fields, off = appendGoABIFFIPadding(fields, off, field.Offset-off)
 		}
 		if field.Typ.Size_ == 0 {
 			continue
 		}
-		fields = append(fields, finalizerFFIType(field.Typ))
+		fields = append(fields, goABIFFIType(field.Typ))
 		off = field.Offset + field.Typ.Size_
 	}
 	// Zero-sized fields do not consume registers in llgo's callable ABI.
@@ -90,7 +90,7 @@ func finalizerFFIStructType(typ *abi.Type) *ffi.Type {
 	return ffi.StructOf(fields...)
 }
 
-func appendFinalizerFFIPadding(fields []*ffi.Type, off, size uintptr) ([]*ffi.Type, uintptr) {
+func appendGoABIFFIPadding(fields []*ffi.Type, off, size uintptr) ([]*ffi.Type, uintptr) {
 	for size > 0 {
 		switch {
 		case off%8 == 0 && size >= 8:
@@ -119,11 +119,11 @@ func finalizerFFIReturnType(results []*abi.Type) *ffi.Type {
 	case 0:
 		return ffi.TypeVoid
 	case 1:
-		return finalizerFFIType(results[0])
+		return goABIFFIType(results[0])
 	default:
 		fields := make([]*ffi.Type, len(results))
 		for i, result := range results {
-			fields[i] = finalizerFFIType(result)
+			fields[i] = goABIFFIType(result)
 		}
 		return ffi.StructOf(fields...)
 	}

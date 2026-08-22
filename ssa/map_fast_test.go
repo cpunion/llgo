@@ -1,8 +1,10 @@
 package ssa
 
 import (
+	"go/importer"
 	"go/token"
 	"go/types"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -88,6 +90,48 @@ func TestMapKeyFastKindLargeElemFallback(t *testing.T) {
 		if got := mapKeyFastKind(prog, mapType); got != mapFastNone {
 			t.Errorf("mapKeyFastKind(map[%v][17]uint64) = %v, want mapFastNone", key, got)
 		}
+	}
+}
+
+func TestMapLookupLargeElementUsesFatZero(t *testing.T) {
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	prog.SetRuntime(func() *types.Package {
+		imp := importer.For("source", nil)
+		pkg, err := imp.Import(PkgRuntime)
+		if err != nil {
+			t.Fatalf("load runtime: %v", err)
+		}
+		return pkg
+	})
+
+	elem := types.NewArray(types.Typ[types.Uint64], 129)
+	mapType := types.NewMap(types.Typ[types.String], elem)
+	params := types.NewTuple(
+		types.NewVar(token.NoPos, nil, "m", mapType),
+		types.NewVar(token.NoPos, nil, "key", types.Typ[types.String]),
+	)
+	pkg := prog.NewPackage("p", "example.com/p")
+	fn := pkg.NewFunc("lookup", types.NewSignatureType(nil, nil, nil, params, nil, false), InGo)
+	b := fn.MakeBody(1)
+	b.Lookup(fn.Param(0), fn.Param(1), false)
+	b.Lookup(fn.Param(0), fn.Param(1), true)
+	b.Return()
+	b.EndBuild()
+
+	ir := pkg.String()
+	for _, want := range []string{
+		`runtime.MapAccess1Fat`,
+		`runtime.MapAccess2Fat`,
+		`private unnamed_addr global [129 x i64] zeroinitializer, align 8`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("large map lookup IR missing %q:\n%s", want, ir)
+		}
+	}
+	if got := strings.Count(ir, "private unnamed_addr global [129 x i64] zeroinitializer"); got != 1 {
+		t.Fatalf("large map lookup emitted %d zero globals, want 1:\n%s", got, ir)
 	}
 }
 

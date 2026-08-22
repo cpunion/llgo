@@ -470,6 +470,20 @@ func (p Program) Linkname(name string) (link string, ok bool) {
 	return
 }
 
+// HasLinknameTarget reports whether a declaration aliases target. It lets
+// build-time dead-code decisions preserve symbols that another package can
+// reference only through //go:linkname.
+func (p Program) HasLinknameTarget(target string) bool {
+	p.packageSyntax.mu.RLock()
+	defer p.packageSyntax.mu.RUnlock()
+	for _, link := range p.packageSyntax.linknames {
+		if link == target {
+			return true
+		}
+	}
+	return false
+}
+
 type closureEnvDirectiveKey struct {
 	fset *token.FileSet
 	name string
@@ -618,6 +632,7 @@ func (p Program) NewPackageEx(name, pkgPath string, metaCollect bool) Package {
 		mod: mod, path: pkgPath, Prog: p, vars: gbls, fns: fns,
 		nullPointerIsValidAttr: nullPointerIsValidAttr,
 		framePointerAttr:       framePointerAttr,
+		mapZeros:               make(map[types.Type]llvm.Value),
 		pyobjs:                 pyobjs, pymods: pymods, strs: strs,
 		di: nil, cu: nil, glbDbgVars: glbDbgVars,
 		export:         make(map[string]string),
@@ -884,13 +899,14 @@ type aPackage struct {
 	cu         CompilationUnit
 	glbDbgVars map[Expr]bool
 
-	vars   map[string]Global
-	fns    map[string]Function
-	pyobjs map[string]PyObjRef
-	pymods map[string]Global
-	strs   map[string]llvm.Value
-	goStrs map[string]llvm.Value
-	fnlink func(string) string
+	vars     map[string]Global
+	fns      map[string]Function
+	pyobjs   map[string]PyObjRef
+	pymods   map[string]Global
+	strs     map[string]llvm.Value
+	goStrs   map[string]llvm.Value
+	mapZeros map[types.Type]llvm.Value
+	fnlink   func(string) string
 
 	iRoutine int
 

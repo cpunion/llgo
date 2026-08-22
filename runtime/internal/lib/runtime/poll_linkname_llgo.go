@@ -9,7 +9,6 @@ import (
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
 	csyscall "github.com/xgo-dev/llgo/runtime/internal/clite/syscall"
 )
 
@@ -56,9 +55,9 @@ type llgoPollDesc struct {
 	wd int64
 }
 
-var pollOnce psync.Once
+var pollOnce nativeOnce
 var wakeR, wakeW c.Int
-var pollDescMu psync.Mutex
+var pollDescMu nativeMutex
 var pollDescRoots map[uintptr]*llgoPollDesc
 
 func pollInit() {
@@ -185,6 +184,12 @@ func poll_runtime_pollOpen(fd uintptr) (uintptr, int) {
 	pollOnce.Do(pollInit)
 	if wakeR < 0 {
 		return 0, int(csyscall.EOPNOTSUPP)
+	}
+	if pollDescriptorUnsupported(c.Int(fd)) {
+		// Linux epoll rejects regular files and directories with EPERM. Match
+		// that contract so internal/poll leaves their runtime context unset and
+		// reports ErrNoDeadline from os.File deadline methods.
+		return 0, int(csyscall.EPERM)
 	}
 	pd := &llgoPollDesc{fd: c.Int(fd)}
 	return pollRootAdd(pd), 0

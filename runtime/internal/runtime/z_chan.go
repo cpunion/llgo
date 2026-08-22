@@ -20,14 +20,13 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
 	"github.com/xgo-dev/llgo/runtime/internal/runtime/math"
 )
 
 // -----------------------------------------------------------------------------
 
 type Chan struct {
-	mutex sync.Mutex
+	mutex nativeMutex
 
 	qcount   int
 	dataqsiz int
@@ -59,16 +58,16 @@ type chanWaiter struct {
 	queued bool
 	status waitStatus
 
-	mutex sync.Mutex
-	cond  sync.Cond
+	mutex nativeMutex
+	cond  nativeCond
 
 	sel       *selectState
 	caseIndex int
 }
 
 type selectState struct {
-	mutex sync.Mutex
-	cond  sync.Cond
+	mutex nativeMutex
+	cond  nativeCond
 
 	status waitStatus
 	chosen int
@@ -497,8 +496,8 @@ func ChanClose(p *Chan) {
 }
 
 func blockForever() {
-	var mutex sync.Mutex
-	var cond sync.Cond
+	var mutex nativeMutex
+	var cond nativeCond
 	mutex.Init(nil)
 	cond.Init(nil)
 	mutex.Lock()

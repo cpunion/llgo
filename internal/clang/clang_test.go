@@ -21,11 +21,99 @@ package clang
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
+
+const clangTestHelperEnv = "GO_WANT_LLGO_CLANG_TEST_HELPER=1"
+
+func init() {
+	if os.Getenv("GO_WANT_LLGO_CLANG_TEST_HELPER") != "1" {
+		return
+	}
+	if len(os.Args) > 1 {
+		fmt.Fprintln(os.Stdout, strings.Join(os.Args[1:], " "))
+	} else if _, err := io.Copy(os.Stdout, os.Stdin); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func newTestCmd(config Config) *Cmd {
+	cmd := New(os.Args[0], config)
+	cmd.Env = append(os.Environ(), clangTestHelperEnv)
+	return cmd
+}
+
+func TestResolveMSVCImportLibraries(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"first", "second"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clangImport := filepath.Join(root, "first", "libclang.dll.a")
+	for _, file := range []string{
+		clangImport,
+		filepath.Join(root, "first", "libnative.dll.a"),
+		filepath.Join(root, "second", "native.lib"),
+	} {
+		if err := os.WriteFile(file, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := []string{"-target", "x86_64-pc-windows-msvc", "-Lfirst", "-L", "second", "-lclang", "-lnative", "-lmissing", "-l:exact.a"}
+	want := []string{"-target", "x86_64-pc-windows-msvc", "-Lfirst", "-L", "second", clangImport, "-lnative", "-lmissing", "-l:exact.a"}
+	if got := resolveMSVCImportLibraries(root, args); !slices.Equal(got, want) {
+		t.Fatalf("resolved libraries = %q, want %q", got, want)
+	}
+	args[1] = "x86_64-w64-windows-gnu"
+	if got := resolveMSVCImportLibraries(root, args); !slices.Equal(got, args) {
+		t.Fatalf("GNU target libraries changed to %q", got)
+	}
+}
+
+func TestWriteResponseFile(t *testing.T) {
+	args := []string{
+		"plain",
+		`C:\path with spaces\object.o`,
+		`quote"and\slash`,
+		"",
+	}
+	name, err := writeResponseFile(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(name)
+	data, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `"plain" "C:\\path with spaces\\object.o" "quote\"and\\slash" ""` + "\n"
+	if got := string(data); got != want {
+		t.Fatalf("response file = %q, want %q", got, want)
+	}
+}
+
+func TestUseResponseFile(t *testing.T) {
+	longArg := strings.Repeat("x", windowsCommandLineLimit)
+	if useResponseFileForGOOS("linux", "clang++", []string{longArg}) {
+		t.Fatal("non-Windows command unexpectedly uses a response file")
+	}
+	if useResponseFileForGOOS("windows", "clang++", []string{"short"}) {
+		t.Fatal("short Windows command unexpectedly uses a response file")
+	}
+	if !useResponseFileForGOOS("windows", "clang++", []string{longArg}) {
+		t.Fatal("long Windows command does not use a response file")
+	}
+}
 
 func TestConfig(t *testing.T) {
 	t.Run("NewConfig", func(t *testing.T) {
@@ -251,12 +339,11 @@ func TestMergeLinkerFlags(t *testing.T) {
 }
 
 func TestCompile(t *testing.T) {
-	// This test uses echo instead of clang to avoid dependency on clang installation
 	config := Config{
 		CCFLAGS: []string{"-Wall"},
 		CFLAGS:  []string{"-std=c99"},
 	}
-	cmd := New("echo", config)
+	cmd := newTestCmd(config)
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -274,11 +361,10 @@ func TestCompile(t *testing.T) {
 }
 
 func TestLink(t *testing.T) {
-	// This test uses echo instead of clang to avoid dependency on clang installation
 	config := Config{
 		LDFLAGS: []string{"-lm"},
 	}
-	cmd := New("echo", config)
+	cmd := newTestCmd(config)
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -297,7 +383,7 @@ func TestLink(t *testing.T) {
 
 func TestVerboseMode(t *testing.T) {
 	config := Config{}
-	cmd := New("echo", config)
+	cmd := newTestCmd(config)
 	cmd.Verbose = true
 
 	// Since verbose output goes to os.Stderr directly, we'll test
@@ -319,8 +405,8 @@ func TestVerboseMode(t *testing.T) {
 
 func TestCmdEnvironment(t *testing.T) {
 	config := Config{}
-	cmd := New("echo", config)
-	cmd.Env = []string{"TEST_VAR=test_value"}
+	cmd := newTestCmd(config)
+	cmd.Env = append(cmd.Env, "TEST_VAR=test_value")
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -332,14 +418,23 @@ func TestCmdEnvironment(t *testing.T) {
 		t.Errorf("Compile failed: %v", err)
 	}
 
-	if len(cmd.Env) != 1 || cmd.Env[0] != "TEST_VAR=test_value" {
+	if !containsEnv(cmd.Env, "TEST_VAR=test_value") {
 		t.Errorf("Expected environment to be set correctly")
 	}
 }
 
+func containsEnv(env []string, want string) bool {
+	for _, value := range env {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCmdIO(t *testing.T) {
 	config := Config{}
-	cmd := New("cat", config) // Use cat to test stdin/stdout
+	cmd := newTestCmd(config)
 
 	input := "test input"
 	cmd.Stdin = strings.NewReader(input)
@@ -347,7 +442,6 @@ func TestCmdIO(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
-	// cat will read from stdin and write to stdout
 	err := cmd.exec() // Call exec directly with no args
 	if err != nil {
 		t.Errorf("exec failed: %v", err)
@@ -361,15 +455,13 @@ func TestCmdIO(t *testing.T) {
 
 func TestCheckLinkArgs(t *testing.T) {
 	t.Run("BasicTest", func(t *testing.T) {
-		// Use echo instead of clang to avoid dependency
 		config := Config{}
-		cmd := New("echo", config)
+		cmd := newTestCmd(config)
 
 		// Redirect output to avoid clutter
 		cmd.Stdout = &bytes.Buffer{}
 		cmd.Stderr = &bytes.Buffer{}
 
-		// This should succeed with echo
 		err := cmd.CheckLinkArgs([]string{"-o"}, false)
 		if err != nil {
 			t.Errorf("CheckLinkArgs failed: %v", err)
@@ -378,7 +470,7 @@ func TestCheckLinkArgs(t *testing.T) {
 
 	t.Run("WasmExtension", func(t *testing.T) {
 		config := Config{}
-		cmd := New("echo", config)
+		cmd := newTestCmd(config)
 
 		cmd.Stdout = &bytes.Buffer{}
 		cmd.Stderr = &bytes.Buffer{}

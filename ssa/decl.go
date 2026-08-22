@@ -87,10 +87,47 @@ func (p Package) moduleZeroSizedAlloc(elem Type) Expr {
 		byteTy := p.Prog.Byte()
 		zerobase = llvm.AddGlobal(p.mod, byteTy.ll, moduleZeroName)
 		zerobase.SetInitializer(llvm.ConstNull(byteTy.ll))
-		zerobase.SetLinkage(llvm.LinkOnceODRLinkage)
+		if p.Prog.target.effectiveGOOS() == "windows" {
+			// COFF aliases remain attached to their defining section. If the
+			// shared sentinel is COMDAT-folded, lld-link can discard the section
+			// behind an externally visible zero-sized global alias while another
+			// object still relocates against that alias. A module-local sentinel
+			// preserves the permitted Go semantics for zero-sized addresses and
+			// keeps every alias in a retained section.
+			zerobase.SetLinkage(llvm.PrivateLinkage)
+		} else {
+			p.setODRLinkage(zerobase, llvm.LinkOnceODRLinkage)
+		}
 		zerobase.SetUnnamedAddr(true)
 	}
 	return Expr{zerobase, p.Prog.Pointer(elem)}
+}
+
+func (p Package) mapZero(elem Type) Expr {
+	if zero, ok := p.mapZeros[elem.raw.Type]; ok {
+		return Expr{zero, p.Prog.VoidPtr()}
+	}
+	zero := llvm.AddGlobal(p.mod, elem.ll, "")
+	zero.SetInitializer(p.Prog.Zero(elem).impl)
+	zero.SetLinkage(llvm.PrivateLinkage)
+	zero.SetUnnamedAddr(true)
+	zero.SetAlignment(p.Prog.td.ABITypeAlignment(elem.ll))
+	p.mapZeros[elem.raw.Type] = zero
+	return Expr{zero, p.Prog.VoidPtr()}
+}
+
+// setODRLinkage gives multiply emitted definitions the section-group metadata
+// required by COFF. On ELF and Mach-O, LLVM's weak/linkonce linkage is enough;
+// on COFF, omitting COMDAT leaves every object with a separately named weak
+// fallback and lld-link rejects the otherwise identical definitions.
+func (p Package) setODRLinkage(value llvm.Value, linkage llvm.Linkage) {
+	value.SetLinkage(linkage)
+	if p.Prog.target.effectiveGOOS() != "windows" {
+		return
+	}
+	comdat := p.mod.Comdat(value.Name())
+	comdat.SetSelectionKind(llvm.AnyComdatSelectionKind)
+	value.SetComdat(comdat)
 }
 
 func (p Package) ownsGlobal(name string) bool {
@@ -329,7 +366,7 @@ func (p Package) newFunc(
 		}
 	}
 	if instantiated {
-		fn.SetLinkage(llvm.LinkOnceAnyLinkage)
+		p.setODRLinkage(fn, llvm.LinkOnceAnyLinkage)
 	}
 	if p.isPreservedName(name) {
 		p.markLLVMUsed(fn)

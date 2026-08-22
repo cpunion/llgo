@@ -5,6 +5,7 @@ package crosscompile
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -21,6 +22,30 @@ const (
 	includePrefix     = "-I"
 	libPrefix         = "-L"
 )
+
+func TestESPClangHostDownload(t *testing.T) {
+	tests := []struct {
+		goos, goarch string
+		wantPlatform string
+		wantVersion  string
+	}{
+		{"darwin", "arm64", "aarch64-apple-darwin", espClangVersion},
+		{"linux", "amd64", "x86_64-linux-gnu", espClangVersion},
+		{"windows", "amd64", "x86_64-w64-mingw32", espClangWindowsVersion},
+		{"windows", "arm64", "x86_64-w64-mingw32", espClangWindowsVersion},
+	}
+	for _, test := range tests {
+		platform := getESPClangHostPlatform(test.goos, test.goarch)
+		if platform != test.wantPlatform {
+			t.Errorf("getESPClangHostPlatform(%q, %q) = %q, want %q", test.goos, test.goarch, platform, test.wantPlatform)
+			continue
+		}
+		_, version := espClangDownload(platform)
+		if version != test.wantVersion {
+			t.Errorf("espClangDownload(%q) version = %q, want %q", platform, version, test.wantVersion)
+		}
+	}
+}
 
 func TestUseCrossCompileSDK(t *testing.T) {
 	// Skip long-running tests unless explicitly enabled
@@ -58,7 +83,7 @@ func TestUseCrossCompileSDK(t *testing.T) {
 		},
 		{
 			name:          "Unsupported Target",
-			goos:          "windows",
+			goos:          "plan9",
 			goarch:        "amd64",
 			expectSDK:     false, // Still false as it won't set up specific SDK
 			expectCCFlags: false, // No cross-compile specific flags
@@ -81,7 +106,7 @@ func TestUseCrossCompileSDK(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			export, err := use(tc.goos, tc.goarch, false, false, optlevel.O2, lto.Off, false)
+			export, err := use(tc.goos, tc.goarch, "", false, false, optlevel.O2, lto.Off, false)
 
 			if err != nil {
 				t.Fatalf("Unexpected error: %v", err)
@@ -220,6 +245,13 @@ func TestUseTarget(t *testing.T) {
 			expectMarch: "-march=rv32imac", // Generic RISC-V32 uses rv32imac (with A extension)
 		},
 		{
+			name:        "ESP32 Target (Xtensa)",
+			targetName:  "esp32",
+			expectError: false,
+			expectLLVM:  "xtensa",
+			expectCPU:   "esp32",
+		},
+		{
 			name:        "ESP32-C3 Target (ESP RISC-V)",
 			targetName:  "esp32c3",
 			expectError: false,
@@ -313,10 +345,48 @@ func TestUseTarget(t *testing.T) {
 					t.Errorf("Expected %s in CCFLAGS, got %v", tc.expectMarch, export.CCFLAGS)
 				}
 			}
-
 			t.Logf("Target %s: BuildTags=%v, CFlags=%v, CCFlags=%v, LDFlags=%v",
 				tc.targetName, export.BuildTags, export.CFLAGS, export.CCFLAGS, export.LDFLAGS)
 		})
+	}
+}
+
+func TestUseSystemClangForTarget(t *testing.T) {
+	for _, test := range []struct {
+		goos      string
+		target    string
+		buildTags []string
+		want      bool
+	}{
+		{goos: "windows", target: "thumbv6m-unknown-unknown-eabi", want: true},
+		{goos: "windows", target: "avr", want: true},
+		{goos: "windows", target: "riscv32-esp-elf", buildTags: []string{"esp"}, want: false},
+		{goos: "windows", target: "xtensa", buildTags: []string{"esp32", "esp"}, want: false},
+		{goos: "windows", target: "xtensa", want: false},
+		{goos: "linux", target: "thumbv6m-unknown-unknown-eabi", want: false},
+	} {
+		if got := useSystemClangForTarget(test.goos, test.target, test.buildTags); got != test.want {
+			t.Errorf("useSystemClangForTarget(%q, %q, %v) = %v, want %v", test.goos, test.target, test.buildTags, got, test.want)
+		}
+	}
+}
+
+func TestClangDriverTargetForHost(t *testing.T) {
+	for _, test := range []struct {
+		goos      string
+		target    string
+		buildTags []string
+		want      string
+	}{
+		{goos: "windows", target: "xtensa", buildTags: []string{"esp32", "esp"}, want: "xtensa-esp-unknown-elf"},
+		{goos: "windows", target: "xtensa", want: "xtensa"},
+		{goos: "windows", target: "riscv32-esp-elf", buildTags: []string{"esp"}, want: "riscv32-esp-elf"},
+		{goos: "linux", target: "xtensa", buildTags: []string{"esp"}, want: "xtensa"},
+		{goos: "darwin", target: "xtensa", buildTags: []string{"esp"}, want: "xtensa"},
+	} {
+		if got := clangDriverTargetForHost(test.goos, test.target, test.buildTags); got != test.want {
+			t.Errorf("clangDriverTargetForHost(%q, %q, %v) = %q, want %q", test.goos, test.target, test.buildTags, got, test.want)
+		}
 	}
 }
 
@@ -344,27 +414,29 @@ func TestUseWithTarget(t *testing.T) {
 		t.Error("Expected LDFLAGS to be set for native build")
 	}
 	wantDebugInfo := nativeDebugInfoPolicy(runtime.GOOS)
-	if export.DebugInfo.AlwaysOmit != wantDebugInfo.AlwaysOmit || !slices.Equal(export.DebugInfo.OmitLinkFlags, wantDebugInfo.OmitLinkFlags) {
+	if export.DebugInfo.AlwaysOmit != wantDebugInfo.AlwaysOmit ||
+		!slices.Equal(export.DebugInfo.OmitLinkFlags, wantDebugInfo.OmitLinkFlags) ||
+		!slices.Equal(export.DebugInfo.PreserveLinkFlags, wantDebugInfo.PreserveLinkFlags) {
 		t.Fatalf("native debug-info policy = %+v, want %+v", export.DebugInfo, wantDebugInfo)
 	}
 }
 
 func TestNativeDebugInfoPolicy(t *testing.T) {
 	tests := []struct {
-		goos      string
-		supported bool
+		goos     string
+		omit     []string
+		preserve []string
 	}{
-		{goos: "darwin", supported: true},
-		{goos: "linux", supported: true},
-		{goos: "windows"},
+		{goos: "darwin", omit: []string{"-Wl,-S"}},
+		{goos: "linux", omit: []string{"-Wl,-S"}},
+		{goos: "windows", omit: []string{"-Wl,/debug:none"}, preserve: []string{"-Wl,/debug:dwarf"}},
 		{goos: "freebsd"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.goos, func(t *testing.T) {
 			policy := nativeDebugInfoPolicy(tt.goos)
-			got := !policy.AlwaysOmit && slices.Equal(policy.OmitLinkFlags, []string{"-Wl,-S"})
-			if got != tt.supported {
-				t.Fatalf("nativeDebugInfoPolicy(%q) = %+v, supported = %v", tt.goos, policy, got)
+			if policy.AlwaysOmit || !slices.Equal(policy.OmitLinkFlags, tt.omit) || !slices.Equal(policy.PreserveLinkFlags, tt.preserve) {
+				t.Fatalf("nativeDebugInfoPolicy(%q) = %+v, want omit=%v preserve=%v", tt.goos, policy, tt.omit, tt.preserve)
 			}
 		})
 	}
@@ -394,8 +466,215 @@ func TestOptimizationFlagPlacement(t *testing.T) {
 	}
 }
 
+func TestNativeWindowsLLDFlags(t *testing.T) {
+	flags := nativeLLDFlags("windows", optlevel.O2, lto.Off)
+	for _, want := range []string{
+		"-fuse-ld=lld",
+		"-Wl,/errorlimit:0",
+		"-Wl,/opt:noicf",
+	} {
+		if !slices.Contains(flags, want) {
+			t.Errorf("native Windows LLD flags = %v, want %q", flags, want)
+		}
+	}
+	for _, unwanted := range []string{"-Wl,--error-limit=0", "-Wl,--icf=none"} {
+		if slices.Contains(flags, unwanted) {
+			t.Errorf("native Windows LLD flags = %v, do not want %q", flags, unwanted)
+		}
+	}
+
+	thin := nativeLLDFlags("windows", optlevel.O3, lto.Thin)
+	for _, want := range []string{"-flto=thin", "-Wl,/opt:lldlto=3"} {
+		if !slices.Contains(thin, want) {
+			t.Errorf("native Windows ThinLTO flags = %v, want %q", thin, want)
+		}
+	}
+	if slices.Contains(thin, "-Wl,--lto-O3") {
+		t.Errorf("native Windows ThinLTO flags = %v, contain ELF LTO syntax", thin)
+	}
+}
+
+func TestCOFFLTOLevel(t *testing.T) {
+	for _, tt := range []struct {
+		level optlevel.Level
+		want  string
+	}{
+		{optlevel.O0, "0"},
+		{optlevel.O1, "1"},
+		{optlevel.O2, "2"},
+		{optlevel.O3, "3"},
+		{optlevel.Os, "2"},
+		{optlevel.Oz, "2"},
+	} {
+		if got := coffLTOLevel(tt.level); got != tt.want {
+			t.Errorf("coffLTOLevel(%s) = %q, want %q", tt.level, got, tt.want)
+		}
+	}
+}
+
+func TestNativeOSFlags(t *testing.T) {
+	for _, test := range []struct {
+		goos        string
+		wantCCFlags []string
+		wantLDFlags []string
+	}{
+		{goos: "darwin", wantLDFlags: []string{"-Xlinker", "-dead_strip"}},
+		{
+			goos:        "windows",
+			wantCCFlags: []string{"-fdata-sections", "-ffunction-sections"},
+			wantLDFlags: []string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref", "-llegacy_stdio_definitions"},
+		},
+		{
+			goos:        "linux",
+			wantCCFlags: []string{"-fdata-sections", "-ffunction-sections"},
+			wantLDFlags: []string{"-fdata-sections", "-ffunction-sections", "-Xlinker", "--gc-sections", "-latomic", "-lpthread", "-ldl"},
+		},
+	} {
+		t.Run(test.goos, func(t *testing.T) {
+			ccflags, ldflags := nativeSectionFlags(test.goos)
+			if !slices.Equal(ccflags, test.wantCCFlags) {
+				t.Errorf("native %s CCFLAGS = %v, want %v", test.goos, ccflags, test.wantCCFlags)
+			}
+			if !slices.Equal(ldflags, test.wantLDFlags) {
+				t.Errorf("native %s LDFLAGS = %v, want %v", test.goos, ldflags, test.wantLDFlags)
+			}
+		})
+	}
+
+	ccflags, ldflags := nativeSectionFlags("windows")
+
+	for _, want := range []string{"-fdata-sections", "-ffunction-sections"} {
+		if !slices.Contains(ccflags, want) {
+			t.Errorf("native Windows CCFLAGS = %v, want %q", ccflags, want)
+		}
+	}
+	for _, want := range []string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref", "-llegacy_stdio_definitions"} {
+		if !slices.Contains(ldflags, want) {
+			t.Errorf("native Windows LDFLAGS = %v, want %q", ldflags, want)
+		}
+	}
+	for _, unwanted := range []string{"--gc-sections", "-latomic", "-lpthread", "-ldl"} {
+		if slices.Contains(ldflags, unwanted) {
+			t.Errorf("native Windows LDFLAGS = %v, do not want %q", ldflags, unwanted)
+		}
+	}
+}
+
+func TestConfigureNativeClangRootFlags(t *testing.T) {
+	clangRoot := filepath.Join("toolchains", "clang")
+	clangLib := filepath.Join(clangRoot, "lib")
+	clangInc := filepath.Join(clangRoot, "include")
+	for _, test := range []struct {
+		goos        string
+		wantLDFlags []string
+	}{
+		{goos: "darwin", wantLDFlags: []string{"-L" + clangLib, "-Wl,-rpath," + clangLib}},
+		{goos: "linux", wantLDFlags: []string{"-L" + clangLib, "-Wl,-rpath," + clangLib}},
+		{goos: "freebsd", wantLDFlags: []string{"-L" + clangLib, "-Wl,-rpath," + clangLib}},
+		{goos: "windows", wantLDFlags: []string{"-L" + clangLib}},
+	} {
+		t.Run(test.goos, func(t *testing.T) {
+			export := Export{}
+			configureNativeClangRootFlags(&export, test.goos, clangRoot)
+			if want := []string{"-I" + clangInc}; !slices.Equal(export.CFLAGS, want) {
+				t.Errorf("native %s CFLAGS = %v, want %v", test.goos, export.CFLAGS, want)
+			}
+			if !slices.Equal(export.LDFLAGS, test.wantLDFlags) {
+				t.Errorf("native %s LDFLAGS = %v, want %v", test.goos, export.LDFLAGS, test.wantLDFlags)
+			}
+		})
+	}
+
+	export := Export{CFLAGS: []string{"existing-cflag"}, LDFLAGS: []string{"existing-ldflag"}}
+	configureNativeClangRootFlags(&export, "windows", "")
+	if !slices.Equal(export.CFLAGS, []string{"existing-cflag"}) || !slices.Equal(export.LDFLAGS, []string{"existing-ldflag"}) {
+		t.Fatalf("empty clang root changed flags: %+v", export)
+	}
+}
+
+func TestNativeWindowsExportFlags(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("requires a native Windows host")
+	}
+
+	export, err := use("windows", runtime.GOARCH, "", false, false, optlevel.O2, lto.Thin, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"-Wl,/errorlimit:0",
+		"-Wl,/opt:noicf",
+		"-Wl,/opt:ref",
+		"-Wl,/opt:lldlto=2",
+		"-llegacy_stdio_definitions",
+	} {
+		if !slices.Contains(export.LDFLAGS, want) {
+			t.Errorf("native Windows LDFLAGS = %v, want %q", export.LDFLAGS, want)
+		}
+	}
+	for _, unwanted := range []string{
+		"-Wl,--error-limit=0",
+		"-Wl,--icf=none",
+		"--gc-sections",
+		"-latomic",
+		"-lpthread",
+		"-ldl",
+	} {
+		if slices.Contains(export.LDFLAGS, unwanted) {
+			t.Errorf("native Windows LDFLAGS = %v, do not want %q", export.LDFLAGS, unwanted)
+		}
+	}
+}
+
+func TestCrossWindowsExportFlags(t *testing.T) {
+	goarch := "amd64"
+	if runtime.GOOS == "windows" && runtime.GOARCH == goarch {
+		goarch = "arm64"
+	}
+	targetTriple := llvm.GetTargetTriple("windows", goarch)
+	export, err := use("windows", goarch, "", false, false, optlevel.O2, lto.Thin, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasFlagValue(export.CCFLAGS, "-target", targetTriple) {
+		t.Errorf("cross-Windows CCFLAGS = %v, want -target %s", export.CCFLAGS, targetTriple)
+	}
+	if !hasFlagValue(export.LDFLAGS, "-target", targetTriple) {
+		t.Errorf("cross-Windows LDFLAGS = %v, want -target %s", export.LDFLAGS, targetTriple)
+	}
+	for _, want := range []string{
+		"-flto=thin",
+		"-Wl,/errorlimit:0",
+		"-Wl,/opt:noicf",
+		"-Wl,/opt:ref",
+		"-Wl,/opt:lldlto=2",
+	} {
+		if !slices.Contains(export.LDFLAGS, want) {
+			t.Errorf("cross-Windows LDFLAGS = %v, want %q", export.LDFLAGS, want)
+		}
+	}
+	for _, unwanted := range []string{
+		"-Wl,--error-limit=0",
+		"-Wl,--icf=none",
+		"--gc-sections",
+		"-latomic",
+		"-lpthread",
+		"-ldl",
+	} {
+		if slices.Contains(export.LDFLAGS, unwanted) {
+			t.Errorf("cross-Windows LDFLAGS = %v, do not want %q", export.LDFLAGS, unwanted)
+		}
+	}
+	wantDebugInfo := nativeDebugInfoPolicy("windows")
+	if !slices.Equal(export.DebugInfo.OmitLinkFlags, wantDebugInfo.OmitLinkFlags) ||
+		!slices.Equal(export.DebugInfo.PreserveLinkFlags, wantDebugInfo.PreserveLinkFlags) {
+		t.Errorf("cross-Windows debug-info policy = %+v, want %+v", export.DebugInfo, wantDebugInfo)
+	}
+}
+
 func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
-	export, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Off, false)
+	export, err := use(runtime.GOOS, runtime.GOARCH, "", false, false, optlevel.O2, lto.Off, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -410,7 +689,7 @@ func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
 		}
 	}
 
-	thin, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Thin, false)
+	thin, err := use(runtime.GOOS, runtime.GOARCH, "", false, false, optlevel.O2, lto.Thin, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -426,11 +705,15 @@ func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
 	if !slices.Contains(thin.LDFLAGS, "-flto=thin") {
 		t.Fatalf("missing thin LTO link driver flag: %v", thin.LDFLAGS)
 	}
-	if !slices.Contains(thin.LDFLAGS, "-Wl,--lto-O2") {
+	wantLTOOpt := "-Wl,--lto-O2"
+	if runtime.GOOS == "windows" {
+		wantLTOOpt = "-Wl,/opt:lldlto=2"
+	}
+	if !slices.Contains(thin.LDFLAGS, wantLTOOpt) {
 		t.Fatalf("missing thin LTO linker opt flag: %v", thin.LDFLAGS)
 	}
 
-	full, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Full, false)
+	full, err := use(runtime.GOOS, runtime.GOARCH, "", false, false, optlevel.O2, lto.Full, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -447,7 +730,7 @@ func TestDevLTOGlobalDCEUseLTOFlagsControlledByOption(t *testing.T) {
 		t.Fatalf("missing full LTO link driver flag: %v", full.LDFLAGS)
 	}
 
-	fullGlobalDCE, err := use(runtime.GOOS, runtime.GOARCH, false, false, optlevel.O2, lto.Full, true)
+	fullGlobalDCE, err := use(runtime.GOOS, runtime.GOARCH, "", false, false, optlevel.O2, lto.Full, true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}

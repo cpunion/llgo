@@ -483,8 +483,12 @@ func main() {
 	want := []string{"main.main", "runtime.main", "runtime.goexit"}
 	for skip, name := range want {
 		pc, _, _, ok := runtime.Caller(skip)
-		if !ok || runtime.FuncForPC(pc).Name() != name {
-			panic("bad runtime caller tail")
+		got := "<missing>"
+		if ok {
+			got = runtime.FuncForPC(pc).Name()
+		}
+		if got != name {
+			panic("bad runtime caller tail: got " + got + ", want " + name)
 		}
 	}
 	os.Stdout.WriteString("CALLER_TAIL_OK\n")
@@ -667,13 +671,16 @@ func acceptanceLLGoBinary(t *testing.T) string {
 	t.Helper()
 	repoRoot := findRepoRoot(t)
 	t.Setenv("LLGO_ROOT", repoRoot)
+	if compiler := configuredLLGoTestCompiler(t); compiler != "" {
+		return compiler
+	}
 	acceptanceLLGoOnce.Do(func() {
 		tmp, err := os.MkdirTemp("", "llgo-acceptance-bin")
 		if err != nil {
 			acceptanceLLGoErr = err.Error()
 			return
 		}
-		bin := filepath.Join(tmp, "llgo")
+		bin := testExecutablePath(tmp, "llgo")
 		build := exec.Command("go", "build", "-o", bin, "./cmd/llgo")
 		build.Dir = repoRoot
 		if bout, berr := build.CombinedOutput(); berr != nil {

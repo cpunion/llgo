@@ -9,6 +9,7 @@ import (
 
 	"github.com/xgo-dev/llgo/internal/packages"
 	intllvm "github.com/xgo-dev/llgo/internal/xtool/llvm"
+	llabi "github.com/xgo-dev/llgo/ssa/abi"
 	gllvm "github.com/xgo-dev/llvm"
 	extplan9asm "github.com/xgo-dev/plan9asm"
 )
@@ -32,6 +33,7 @@ type ModuleTranslation struct {
 
 type TranslateOptions struct {
 	AnnotateSource bool
+	GOARM          string
 }
 
 func TranslateFileForPkg(pkg *packages.Package, sfile string, goos string, goarch string, overlay map[string][]byte) (*FileTranslation, error) {
@@ -77,7 +79,8 @@ func TranslateSourceModuleForPkgWithOptions(pkg *packages.Package, sfile string,
 		return nil, fmt.Errorf("%s: missing types (needed for asm signatures)", pkg.PkgPath)
 	}
 
-	resolve := resolveSymFuncForTarget(pkg.PkgPath, goos, goarch)
+	symbolPkgPath := llabi.PathOf(pkg.Types)
+	resolve := resolveSymFuncForTarget(symbolPkgPath, goos, goarch)
 	keep := func(textSym, resolved string) bool {
 		return shouldKeepResolvedFunc(pkg.PkgPath, goos, goarch, resolved)
 	}
@@ -97,7 +100,7 @@ func TranslateSourceModuleForPkgWithOptions(pkg *packages.Package, sfile string,
 	}
 
 	tr, err := extplan9asm.TranslateGoModule(extplan9asm.GoPackage{
-		Path:    pkg.PkgPath,
+		Path:    symbolPkgPath,
 		Types:   pkg.Types,
 		Imports: imports,
 		Syntax:  pkg.Syntax,
@@ -105,7 +108,7 @@ func TranslateSourceModuleForPkgWithOptions(pkg *packages.Package, sfile string,
 		FileName:       sfile,
 		GOOS:           goos,
 		GOARCH:         goarch,
-		TargetTriple:   intllvm.GetTargetTriple(goos, goarch),
+		TargetTriple:   intllvm.GetTargetTripleWithGOARM(goos, goarch, opt.GOARM),
 		AnnotateSource: opt.AnnotateSource,
 		ResolveSym:     resolve,
 		KeepFunc:       keep,

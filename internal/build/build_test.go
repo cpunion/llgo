@@ -36,6 +36,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("LLGO_TEST_FAILING_ARCHIVER") == "1" {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "merge failed")
+		os.Exit(7)
+	}
 	old := cacheRootFunc
 	td, _ := os.MkdirTemp("", "llgo-cache-*")
 	cacheRootFunc = func() string { return td }
@@ -416,6 +421,17 @@ func TestLinkObjFilesReportsOutputDirectoryError(t *testing.T) {
 	}
 }
 
+func TestFullRpathArgs(t *testing.T) {
+	linkArgs := []string{"-L/first", "-lfoo", "-L/second", "-L/first"}
+	if got := fullRpathArgs("windows", linkArgs); got != nil {
+		t.Fatalf("Windows rpath arguments = %q, want none", got)
+	}
+	want := []string{"-rpath", "/first", "-rpath", "/second"}
+	if got := fullRpathArgs("linux", linkArgs); !slices.Equal(got, want) {
+		t.Fatalf("Linux rpath arguments = %q, want %q", got, want)
+	}
+}
+
 func TestRewritePrebuiltFuncTabEligibilityAndDiagnostic(t *testing.T) {
 	rewritePrebuiltFuncTab(nil, "missing", true)
 	rewritePrebuiltFuncTab(&context{}, "missing", true)
@@ -610,6 +626,47 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 			} {
 				if !selected[name] {
 					t.Errorf("wasm runtime did not select %s", name)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsRuntimeSyscallVersionSelection(t *testing.T) {
+	runtimeDir := filepath.Join(env.LLGoRuntimeDir(), "internal", "lib", "runtime")
+	releaseTags := func(lastMinor int) []string {
+		tags := make([]string, lastMinor)
+		for minor := 1; minor <= lastMinor; minor++ {
+			tags[minor-1] = fmt.Sprintf("go1.%d", minor)
+		}
+		return tags
+	}
+
+	for _, test := range []struct {
+		name         string
+		lastMinor    int
+		wantPreGo126 bool
+	}{
+		{name: "go1.25", lastMinor: 25, wantPreGo126: true},
+		{name: "go1.26", lastMinor: 26, wantPreGo126: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := gobuild.Default
+			ctx.GOOS = "windows"
+			ctx.GOARCH = "amd64"
+			ctx.BuildTags = []string{"llgo"}
+			ctx.ReleaseTags = releaseTags(test.lastMinor)
+
+			for name, want := range map[string]bool{
+				"syscall_windows_llgo.go":           true,
+				"syscall_windows_pre_go126_llgo.go": test.wantPreGo126,
+			} {
+				got, err := ctx.MatchFile(runtimeDir, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != want {
+					t.Errorf("MatchFile(%q) = %v, want %v", name, got, want)
 				}
 			}
 		})
@@ -1040,7 +1097,7 @@ func TestTestOutputFileLogic(t *testing.T) {
 			conf:        &Config{Mode: ModeTest, OutFile: "/tmp/mytest.test", AppExt: ".test"},
 			multiPkg:    false,
 			wantBase:    "mytest",
-			wantDir:     "/tmp",
+			wantDir:     filepath.Clean("/tmp"),
 			description: "-o with absolute file path: use specified file",
 		},
 		{
@@ -1297,7 +1354,7 @@ func TestLTOEnabledExplicitOverride(t *testing.T) {
 
 func TestArchiverPrefersLLVMArForLTO(t *testing.T) {
 	td := t.TempDir()
-	llvmAr := filepath.Join(td, "llvm-ar")
+	llvmAr := testToolPath(td, "llvm-ar")
 	if err := os.WriteFile(llvmAr, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1338,6 +1395,10 @@ func TestCSharedExportArgs(t *testing.T) {
 	if got, want := strings.Join(cSharedExportArgs(ctx, pkgs), " "), "-Wl,-u,_Add -Wl,-u,_Zed"; got != want {
 		t.Fatalf("darwin cSharedExportArgs = %q, want %q", got, want)
 	}
+	ctx.buildConf.Goos = "windows"
+	if got, want := strings.Join(cSharedExportArgs(ctx, pkgs), " "), "-Wl,/export:Add -Wl,/export:Zed"; got != want {
+		t.Fatalf("windows cSharedExportArgs = %q, want %q", got, want)
+	}
 	ctx.buildConf.BuildMode = BuildModeExe
 	if got := cSharedExportArgs(ctx, pkgs); got != nil {
 		t.Fatalf("executable cSharedExportArgs = %v, want nil", got)
@@ -1368,25 +1429,27 @@ func TestApplyBuildModeCompileFlags(t *testing.T) {
 	tests := []struct {
 		name string
 		mode BuildMode
+		goos string
 		in   []string
 		want string
 	}{
-		{name: "shared adds PIC", mode: BuildModeCShared, want: "-fPIC"},
-		{name: "shared preserves flags", mode: BuildModeCShared, in: []string{"-O2"}, want: "-O2 -fPIC"},
-		{name: "shared does not duplicate PIC", mode: BuildModeCShared, in: []string{"-fPIC"}, want: "-fPIC"},
-		{name: "archive remains unchanged", mode: BuildModeCArchive, in: []string{"-O2"}, want: "-O2"},
+		{name: "shared adds PIC", mode: BuildModeCShared, goos: "linux", want: "-fPIC"},
+		{name: "shared preserves flags", mode: BuildModeCShared, goos: "darwin", in: []string{"-O2"}, want: "-O2 -fPIC"},
+		{name: "shared does not duplicate PIC", mode: BuildModeCShared, goos: "linux", in: []string{"-fPIC"}, want: "-fPIC"},
+		{name: "Windows shared does not add unsupported PIC", mode: BuildModeCShared, goos: "windows", in: []string{"-O2"}, want: "-O2"},
+		{name: "archive remains unchanged", mode: BuildModeCArchive, goos: "linux", in: []string{"-O2"}, want: "-O2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			export := crosscompile.Export{CCFLAGS: slices.Clone(tt.in)}
-			applyBuildModeCompileFlags(tt.mode, &export)
+			applyBuildModeCompileFlags(tt.mode, tt.goos, &export)
 			if got := strings.Join(export.CCFLAGS, " "); got != tt.want {
 				t.Fatalf("CCFLAGS = %q, want %q", got, tt.want)
 			}
 		})
 	}
 
-	applyBuildModeCompileFlags(BuildModeCShared, nil)
+	applyBuildModeCompileFlags(BuildModeCShared, "linux", nil)
 }
 
 func TestCHeaderPackagesExcludesStandardRuntime(t *testing.T) {
@@ -1437,7 +1500,7 @@ func TestArchiveMergerSelection(t *testing.T) {
 		t.Setenv("LLGO_AR", "")
 		t.Setenv("PATH", "")
 		td := t.TempDir()
-		llvmAr := filepath.Join(td, "llvm-ar")
+		llvmAr := testToolPath(td, "llvm-ar")
 		if err := os.WriteFile(llvmAr, nil, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1452,7 +1515,7 @@ func TestArchiveMergerSelection(t *testing.T) {
 	t.Run("path", func(t *testing.T) {
 		t.Setenv("LLGO_AR", "")
 		td := t.TempDir()
-		llvmAr := filepath.Join(td, "llvm-ar")
+		llvmAr := testToolPath(td, "llvm-ar")
 		if err := os.WriteFile(llvmAr, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1523,11 +1586,12 @@ func TestCreateMergedArchiveFileErrors(t *testing.T) {
 	}
 
 	td := t.TempDir()
-	failingAr := filepath.Join(td, "llvm-ar")
-	if err := os.WriteFile(failingAr, []byte("#!/bin/sh\necho merge failed >&2\nexit 7\n"), 0o755); err != nil {
+	failingAr, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("LLGO_AR", failingAr)
+	t.Setenv("LLGO_TEST_FAILING_ARCHIVER", "1")
 	input := filepath.Join(td, "input.o")
 	if err := os.WriteFile(input, []byte("object"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1535,6 +1599,13 @@ func TestCreateMergedArchiveFileErrors(t *testing.T) {
 	if err := ctx.createMergedArchiveFile(filepath.Join(td, "failed.a"), []string{input}); err == nil || !strings.Contains(err.Error(), "merge failed") {
 		t.Fatalf("createMergedArchiveFile error = %v, want archiver output", err)
 	}
+}
+
+func testToolPath(dir, name string) string {
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(dir, name)
 }
 
 func TestDevLTOGlobalDCEDefaultsToFullLTO(t *testing.T) {
