@@ -27,12 +27,12 @@ jobs:
         # These are reproducibility pins, not floating series selectors.
         # Upgrade them together in a dedicated toolchain-update PR.
         os: [macos-latest, ubuntu-latest]
-        go-version: ["1.25.0", "1.26.5"]
+        go-version: ["1.25.0", "1.26.7"]
         shard-index: ["0", "1", "2", "3"]
         include:
           - go-version: "1.25.0"
             lane: compatibility
-          - go-version: "1.26.5"
+          - go-version: "1.26.7"
             lane: primary
         # Keep both supported runtime generations on Linux and macOS. Go 1.25
         # is intentionally omitted because it is not a compatibility target.
@@ -205,10 +205,10 @@ jobs:
             echo '| Platform / toolchain | Shards | Selected | Observed | Passed | Failed | Skipped |'
             echo '|---|---:|---:|---:|---:|---:|---:|'
             write_row 'Darwin · Go 1.25.0' darwin/arm64 1.25.0 4
-            write_row 'Darwin · Go 1.26.5' darwin/arm64 1.26.5 4
+            write_row 'Darwin · Go 1.26.7' darwin/arm64 1.26.7 4
             write_row '**Darwin total**' darwin/arm64 '' 8
             write_row 'Linux · Go 1.25.0' linux/amd64 1.25.0 4
-            write_row 'Linux · Go 1.26.5' linux/amd64 1.26.5 4
+            write_row 'Linux · Go 1.26.7' linux/amd64 1.26.7 4
             write_row '**Linux total**' linux/amd64 '' 8
             echo
             echo '_Passed means the runner classification succeeded; expected xfail/not-applicable failures and classified flakes are counted as Passed._'

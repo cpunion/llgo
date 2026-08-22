@@ -23,10 +23,10 @@ jobs:
         include:
           - os: macos-latest
             llvm: 19
-            go: "1.26.5"
+            go: "1.26.7"
           - os: ubuntu-latest
             llvm: 19
-            go: "1.26.5"
+            go: "1.26.7"
           - os: windows-latest
             llvm: 19
             go: "1.26.7"
@@ -64,19 +64,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            export CGO_CFLAGS="$LLGO_HOST_CGO_CFLAGS"
-            export CGO_CXXFLAGS="$LLGO_HOST_CGO_CXXFLAGS"
-            export CGO_LDFLAGS="$LLGO_HOST_CGO_LDFLAGS"
-
-            # LLVM's MinGW distribution includes GNU COFF import archives.
-            # Go's internal linker cannot consume every archive member used by
-            # the race runtime and LLVM, so let the configured Clang toolchain
-            # perform the final link instead of dropping those test packages.
-            link_flags=(-ldflags=-linkmode=external)
-          else
-            link_flags=()
-          fi
           go build -v ./...
 
       # All host platforms upload coverage: OS-specific paths (ELF, Mach-O,
@@ -89,15 +76,20 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Keep this array non-empty: the Bash 3.2 shipped by macOS treats an
+          # empty-array expansion as an unbound variable under `set -u`.
+          link_flags=(-ldflags=)
           if [[ "$RUNNER_OS" == Windows ]]; then
-            export CGO_CFLAGS="$LLGO_HOST_CGO_CFLAGS"
-            export CGO_CXXFLAGS="$LLGO_HOST_CGO_CXXFLAGS"
-            export CGO_LDFLAGS="$LLGO_HOST_CGO_LDFLAGS"
+            # LLVM's MinGW distribution includes GNU COFF import archives.
+            # Go's internal linker cannot consume every archive member used by
+            # the race runtime and LLVM, so let the configured Clang toolchain
+            # perform the final link instead of dropping those test packages.
+            link_flags=(-ldflags=-linkmode=external)
           fi
 
           # test/go intentionally contains compiler edge cases that make the
-          # Go 1.26.5 printf analyzer panic. Keep the normal go test vet gate
-          # for every other package, and disable vet only for that package.
+          # Go 1.26 printf analyzer panic. Keep the normal go test vet gate for
+          # every other package, and disable vet only for that package.
           go list ./... \
             | grep -v '^github.com/xgo-dev/llgo/test/go$' \
             | xargs go test "${link_flags[@]}" -timeout 45m -coverprofile="coverage-main.txt" -covermode=atomic \
