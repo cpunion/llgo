@@ -2,10 +2,4 @@
 
 package runtime
 
-func EnterForeignThread() bool {
-	return false
-}
-
-func ExitForeignThread(registered bool) {}
-
 func releaseForeignThreadRegistration() {}
