@@ -248,7 +248,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          build_tags=byollvm,llvm19
+          # Select LLVM 19 explicitly while retaining the package's own CGO
+          # configuration. byollvm intentionally removes those link flags and
+          # is only appropriate when the caller supplies all LLVM flags.
+          build_tags=llvm19
           go test -tags="$build_tags" \
             ./internal/meta \
             ./internal/goarch \
