@@ -104,6 +104,7 @@ runs:
         pacman --noconfirm -S --needed \
           --assume-installed "$assumed_cc_runtime" \
           "$prefix-pkgconf" \
+          "$prefix-sqlite3" \
           make
 
     - name: Configure Windows compiler environment
