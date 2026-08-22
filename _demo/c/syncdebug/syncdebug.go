@@ -33,7 +33,7 @@ func syncWorker(c.Pointer) c.Pointer {
 		return c.Pointer(c.Str("condition signal failed"))
 	}
 	workerMutex.Unlock()
-	if workerSem.Post() != 0 {
+	if !postWorkerSemaphore() {
 		return c.Pointer(c.Str("semaphore post failed"))
 	}
 	return nil
@@ -52,15 +52,7 @@ func main() {
 	l.w.Write([]byte("\n"))
 	l.mu.Unlock()
 
-	var once llsync.Once
-	onceCount := 0
-	delta := 2
-	if once.Do(func() { onceCount += delta }) != 0 || once.Do(func() { onceCount++ }) != 0 {
-		panic("once failed")
-	}
-	if onceCount != 2 {
-		panic("once ran more than once")
-	}
+	testOnce()
 
 	var rw llsync.RWLock
 	if rw.Init(nil) != 0 {
@@ -76,8 +68,14 @@ func main() {
 	rw.RUnlock()
 	rw.Destroy()
 
-	if workerMutex.Init(nil) != 0 || workerCond.Init(nil) != 0 || workerSem.Init(0, 0) != 0 {
-		panic("worker synchronization init failed")
+	if workerMutex.Init(nil) != 0 {
+		panic("worker mutex init failed")
+	}
+	if workerCond.Init(nil) != 0 {
+		panic("worker condition init failed")
+	}
+	if !initWorkerSemaphore() {
+		panic("worker semaphore init failed")
 	}
 	workerMutex.Lock()
 	var thread pthread.Thread
@@ -90,7 +88,7 @@ func main() {
 		}
 	}
 	workerMutex.Unlock()
-	if workerSem.Wait() != 0 {
+	if !waitWorkerSemaphore() {
 		panic("semaphore wait failed")
 	}
 	var result c.Pointer
@@ -100,7 +98,7 @@ func main() {
 	if result != nil {
 		panic(c.GoString((*c.Char)(result)))
 	}
-	if workerSem.Destroy() != 0 {
+	if !destroyWorkerSemaphore() {
 		panic("semaphore destroy failed")
 	}
 	workerCond.Destroy()
