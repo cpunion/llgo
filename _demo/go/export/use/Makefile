@@ -19,6 +19,7 @@ LLGOFLAGS ?=
 UNAME_S := $(shell uname -s)
 WINDOWS := $(filter MINGW% MSYS% CYGWIN%,$(UNAME_S))
 OUTPUT_NAME = export
+SHARED_LINK_FLAGS = -L.. -lexport
 STATIC_STDLIB_LIBS = $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi) -lresolv
 ifeq ($(UNAME_S),Darwin)
     SHARED_EXT = dylib
@@ -26,9 +27,19 @@ ifeq ($(UNAME_S),Darwin)
 else ifneq ($(WINDOWS),)
     SHARED_EXT = dll
     OUTPUT_NAME = libexport
+    GOARCH = $(shell go env GOARCH)
+    MSVC_TARGET_386 = i686-pc-windows-msvc
+    MSVC_TARGET_amd64 = x86_64-pc-windows-msvc
+    MSVC_TARGET_arm64 = aarch64-pc-windows-msvc
+    CFLAGS += --target=$(MSVC_TARGET_$(GOARCH)) -Wl,/debug:dwarf
+    SHARED_LINK_FLAGS = ../libexport.lib
     PLATFORM_LIBS = -lsynchronization -lws2_32
-    RUNTIME_LIBS = $(shell pkg-config --libs bdw-gc || echo -lgc) $(shell pkg-config --libs libuv || echo -luv)
-    STATIC_STDLIB_LIBS = $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi)
+    MSYS2_LIB_DIR = $(shell pkg-config --variable=libdir bdw-gc)
+    LIBUV_SYSTEM_LIBS = $(filter-out -L% -luv,$(shell pkg-config --libs libuv))
+    # Keep the C consumer on LLGo's MSVC ABI. lld-link accepts the controlled
+    # MSYS2 import archives by path; -l would incorrectly search for *.lib.
+    RUNTIME_LIBS = "$(MSYS2_LIB_DIR)/libgc.dll.a" "$(MSYS2_LIB_DIR)/libpthread.dll.a" "$(MSYS2_LIB_DIR)/libuv.dll.a" $(LIBUV_SYSTEM_LIBS)
+    STATIC_STDLIB_LIBS = "$(MSYS2_LIB_DIR)/libffi.dll.a"
 else
     SHARED_EXT = so
     PLATFORM_LIBS = $(shell pkg-config --libs libunwind 2>/dev/null || echo -lunwind)
@@ -38,7 +49,7 @@ endif
 ifeq ($(LINK_TYPE),shared)
     BUILDMODE = c-shared
     LIBRARY = ../libexport.$(SHARED_EXT)
-    LDFLAGS = -L.. -lexport $(RUNTIME_LIBS) $(PLATFORM_LIBS)
+    LDFLAGS = $(SHARED_LINK_FLAGS) $(RUNTIME_LIBS) $(PLATFORM_LIBS)
     BUILD_MSG = "Building Go shared library..."
     LINK_MSG = "Linking with shared library..."
 else
