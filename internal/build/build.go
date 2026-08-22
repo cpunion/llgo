@@ -265,11 +265,11 @@ func resolveBuildConfig(input *Config) (*Config, error) {
 	if err := resolveGOARCHConfig(conf, os.Getenv); err != nil {
 		return nil, err
 	}
-	if conf.AppExt == "" {
-		conf.AppExt = defaultAppExt(conf)
-	}
 	if conf.BuildMode == "" {
 		conf.BuildMode = BuildModeExe
+	}
+	if conf.AppExt == "" {
+		conf.AppExt = defaultAppExt(conf)
 	}
 	if conf.BuildMode != BuildModeExe {
 		conf.DeadcodeDrop = false
@@ -1755,7 +1755,18 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 		return ctx.createMergedArchiveFile(app, objFiles, printCmds)
 	}
 
-	buildArgs := []string{"-o", app}
+	linkOutput := app
+	moveExactWindowsOutput := false
+	if ctx.buildConf.Goos == "windows" && ctx.buildConf.Target == "" &&
+		ctx.buildConf.BuildMode == BuildModeExe && filepath.Ext(app) == "" {
+		// Clang's Windows driver appends .exe when -o has no extension, while
+		// cmd/go treats an explicit -o name as exact. Link to the driver's
+		// conventional name, then publish the requested name after a successful
+		// link. Temporary and implicit outputs already carry conf.AppExt.
+		linkOutput = app + ".exe"
+		moveExactWindowsOutput = true
+	}
+	buildArgs := []string{"-o", linkOutput}
 	buildArgs = append(buildArgs, linkArgs...)
 	siteLayoutArgs, cleanupSiteLayout, err := funcInfoSiteLayoutArgs(ctx, app)
 	if err != nil {
@@ -1809,7 +1820,22 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 
 	cmd := ctx.linker()
 	cmd.Verbose = printCmds
-	return cmd.Link(buildArgs...)
+	if err := cmd.Link(buildArgs...); err != nil {
+		return err
+	}
+	if moveExactWindowsOutput {
+		if err := os.Remove(app); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("replace exact Windows output %s: %w", app, err)
+		}
+		if ctx.mode == ModeTest && !ctx.buildConf.CompileOnly {
+			if err := copyFileAtomic(linkOutput, app); err != nil {
+				return fmt.Errorf("publish exact Windows test output %s: %w", app, err)
+			}
+		} else if err := os.Rename(linkOutput, app); err != nil {
+			return fmt.Errorf("publish exact Windows output %s: %w", app, err)
+		}
+	}
+	return nil
 }
 
 // funcInfoSiteLayoutArgs places the ELF entry carrier immediately before .bss,
@@ -1926,14 +1952,8 @@ func linuxExportDynamicArgs(ctx *context) []string {
 // LLVM-aware archive indexes for wasm objects and bitcode members.
 func (c *context) archiver() string {
 	// First check toolchain directory (for cross-compilation)
-	if c.crossCompile.CC != "" {
-		clangDir := filepath.Dir(c.crossCompile.CC)
-		if clangDir != "" {
-			llvmAr := filepath.Join(clangDir, "llvm-ar")
-			if _, err := os.Stat(llvmAr); err == nil {
-				return llvmAr
-			}
-		}
+	if llvmAr := siblingTool(c.crossCompile.CC, "llvm-ar"); llvmAr != "" {
+		return llvmAr
 	}
 	// Allow user override
 	if ar := os.Getenv("LLGO_AR"); ar != "" {
@@ -1954,16 +1974,32 @@ func (c *context) archiveMerger() (string, error) {
 	if ar := os.Getenv("LLGO_AR"); ar != "" {
 		return ar, nil
 	}
-	if c.crossCompile.CC != "" {
-		llvmAr := filepath.Join(filepath.Dir(c.crossCompile.CC), "llvm-ar")
-		if _, err := os.Stat(llvmAr); err == nil {
-			return llvmAr, nil
-		}
+	if llvmAr := siblingTool(c.crossCompile.CC, "llvm-ar"); llvmAr != "" {
+		return llvmAr, nil
 	}
 	if llvmAr, err := exec.LookPath("llvm-ar"); err == nil {
 		return llvmAr, nil
 	}
 	return "", errors.New("llvm-ar is required to create a flat c-archive")
+}
+
+func siblingTool(compiler, name string) string {
+	if compiler == "" {
+		return ""
+	}
+	base := filepath.Join(filepath.Dir(compiler), name)
+	candidates := []string{base}
+	if runtime.GOOS == "windows" {
+		// LLVM's Windows distributions use PE executable suffixes even when
+		// the invoking Clang path was supplied without one.
+		candidates = append([]string{base + ".exe"}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // createMergedArchiveFile combines object files and package archives into one
