@@ -296,6 +296,9 @@ else
 fi
 
 LLGO_IWASM="$LLGO_IWASM_DIR/iwasm"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) LLGO_IWASM+=".exe" ;;
+esac
 
 # Build iwasm if it doesn't exist in llgo cache
 if [ ! -f "$LLGO_IWASM" ]; then

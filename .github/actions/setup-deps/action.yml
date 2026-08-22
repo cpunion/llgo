@@ -104,6 +104,7 @@ runs:
         pacman --noconfirm -S --needed \
           --assume-installed "$assumed_cc_runtime" \
           "$prefix-pkgconf" \
+          "$prefix-ninja" \
           "$prefix-sqlite3" \
           make
 
@@ -153,6 +154,9 @@ runs:
           throw "LLVM 19 clang was not found at $clangExe"
         }
         Add-Content -Encoding utf8 $env:GITHUB_PATH $clangBin
+        # WAMR's host-side Windows test runner is built with MSVC. LLGo itself
+        # remains pinned to LLVM 19 by CC and CXX below.
+        Add-Content -Encoding utf8 $env:GITHUB_PATH (Split-Path (Get-Command cl.exe).Source)
         Add-Content -Encoding utf8 $env:GITHUB_ENV "CC=$clangExe"
         Add-Content -Encoding utf8 $env:GITHUB_ENV "CXX=$(Join-Path $clangBin 'clang++.exe')"
         Add-Content -Encoding utf8 $env:GITHUB_ENV "CGO_ENABLED=1"
