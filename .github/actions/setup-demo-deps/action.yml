@@ -68,7 +68,10 @@ runs:
         $libsDir = Join-Path $env:GITHUB_WORKSPACE "_demo\c\cargs\libs"
         $includeDir = Join-Path $libsDir "include"
         $libDir = Join-Path $libsDir "lib"
-        $pcDir = Join-Path $libDir "pkgconfig"
+        # Share one metadata directory with setup-deps. setup-python may
+        # replace PKG_CONFIG_PATH, so re-add this directory afterwards; it
+        # already contains the generated llvm-19.pc.
+        $pcDir = Join-Path $env:RUNNER_TEMP "llgo-pkgconfig"
         New-Item -ItemType Directory -Force $includeDir, $libDir, $pcDir | Out-Null
 
         $source = Join-Path $env:RUNNER_TEMP "cargs.c"
@@ -141,7 +144,7 @@ runs:
           throw "Python import library was not found at $importLibrary"
         }
 
-        $pcDir = Join-Path $env:RUNNER_TEMP "llgo-python-pkgconfig"
+        $pcDir = Join-Path $env:RUNNER_TEMP "llgo-pkgconfig"
         New-Item -ItemType Directory -Force $pcDir | Out-Null
         $pcPrefix = $prefix.Replace('\', '/')
         $pcIncludeDir = $includeDir.Replace('\', '/')
@@ -157,5 +160,3 @@ runs:
         Libs: -L"`${libdir}" -lpython$version
         Cflags: -I"`${includedir}"
         "@ | Set-Content -Encoding ascii (Join-Path $pcDir "python3-embed.pc")
-
-        Add-Content -Encoding utf8 $env:GITHUB_ENV "PKG_CONFIG_PATH=$pcDir;$env:PKG_CONFIG_PATH"
