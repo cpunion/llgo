@@ -17,14 +17,22 @@ LLGOFLAGS ?=
 
 # Platform detection
 UNAME_S := $(shell uname -s)
+WINDOWS := $(filter MINGW% MSYS% CYGWIN%,$(UNAME_S))
+OUTPUT_NAME = export
+STATIC_STDLIB_LIBS = $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi) -lresolv
 ifeq ($(UNAME_S),Darwin)
     SHARED_EXT = dylib
     PLATFORM_LIBS =
+else ifneq ($(WINDOWS),)
+    SHARED_EXT = dll
+    OUTPUT_NAME = libexport
+    PLATFORM_LIBS = -lsynchronization -lws2_32
+    RUNTIME_LIBS = $(shell pkg-config --libs bdw-gc || echo -lgc) $(shell pkg-config --libs libuv || echo -luv)
+    STATIC_STDLIB_LIBS = $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi)
 else
     SHARED_EXT = so
     PLATFORM_LIBS = $(shell pkg-config --libs libunwind 2>/dev/null || echo -lunwind)
 endif
-STATIC_STDLIB_LIBS = $(shell pkg-config --libs libffi 2>/dev/null || echo -lffi) -lresolv
 
 # Library and flags based on link type
 ifeq ($(LINK_TYPE),shared)
@@ -48,7 +56,7 @@ all: build-go $(TARGET)
 # Build the Go library first
 build-go:
 	@echo $(BUILD_MSG)
-	cd .. && ../../../dev/llgo.sh build -buildmode $(BUILDMODE) $(LLGOFLAGS) -o export .
+	cd .. && ../../../dev/llgo.sh build -buildmode $(BUILDMODE) $(LLGOFLAGS) -o $(OUTPUT_NAME) .
 
 # Build the C executable
 $(TARGET): $(SOURCES) $(LIBRARY) $(HEADER)
@@ -60,7 +68,11 @@ run: $(TARGET)
 	@echo "Running C demo..."
 ifeq ($(LINK_TYPE),shared)
 	@echo "Setting library path for shared library..."
+ifneq ($(WINDOWS),)
+	PATH=..:$$PATH ./$(TARGET)
+else
 	LD_LIBRARY_PATH=.. DYLD_LIBRARY_PATH=.. ./$(TARGET)
+endif
 else
 	./$(TARGET)
 endif
@@ -68,7 +80,7 @@ endif
 # Clean build artifacts
 clean:
 	rm -f $(TARGET)
-	rm -f ../libexport.a ../libexport.h ../libexport.so ../libexport.dylib
+	rm -f ../export.dll ../export.lib ../export.h ../libexport.a ../libexport.lib ../libexport.h ../libexport.so ../libexport.dylib ../libexport.dll
 
 # Help target
 help:
