@@ -5,6 +5,7 @@ package compile
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -83,8 +84,11 @@ func TestCompile(t *testing.T) {
 		}
 		defer os.RemoveAll(tmpDir)
 
-		os.Setenv("TMPDIR", tmpDir)
-		defer os.Unsetenv("TMPDIR")
+		tempEnv := "TMPDIR"
+		if runtime.GOOS == "windows" {
+			tempEnv = "TMP"
+		}
+		t.Setenv(tempEnv, tmpDir)
 
 		group := CompileGroup{
 			OutputFileName: "nop.a",
@@ -206,6 +210,12 @@ func TestCompile(t *testing.T) {
 			t.Errorf("unexpected result: should nil %v", err)
 		}
 	})
+}
+
+func TestObjectFilePattern(t *testing.T) {
+	if got, want := objectFilePattern(filepath.Join("source tree", "foo:bar.c")), "foo-bar.c-*.o"; got != want {
+		t.Fatalf("objectFilePattern = %q, want %q", got, want)
+	}
 }
 
 func TestLibConfig_String(t *testing.T) {
