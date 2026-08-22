@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -697,6 +698,12 @@ func TestCOFFFuncInfoEntrySiteIsAssociative(t *testing.T) {
 }
 
 func TestELFFuncInfoMetadataLinksIntoSharedLibrary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// MSYS2's Windows ld.lld is the GNU-compatible COFF frontend and
+		// cannot produce an ELF shared object. The Windows object semantics
+		// remain covered by TestCOFFFuncInfoEntrySiteIsAssociative above.
+		t.Skip("requires an ELF-capable linker")
+	}
 	linker, err := exec.LookPath("ld.lld")
 	if err != nil {
 		t.Skip("ld.lld is required for the ELF shared-library regression test")

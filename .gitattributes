@@ -1,0 +1,3 @@
+**/expect.txt text eol=lf
+**/out.txt text eol=lf
+*.ll text eol=lf

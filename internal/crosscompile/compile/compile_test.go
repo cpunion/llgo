@@ -5,7 +5,6 @@ package compile
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -75,25 +74,23 @@ func TestCompile(t *testing.T) {
 
 	t.Run("TmpDir Fail", func(t *testing.T) {
 		tmpDir := filepath.Join(t.TempDir(), "test-compile")
-		os.RemoveAll(tmpDir)
-
-		err := os.Mkdir(tmpDir, 0)
-		if err != nil {
-			t.Error(err)
-			return
+		if err := os.Mkdir(tmpDir, 0o755); err != nil {
+			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
-
-		tempEnv := "TMPDIR"
-		if runtime.GOOS == "windows" {
-			tempEnv = "TMP"
+		badTempRoot := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(badTempRoot, nil, 0o644); err != nil {
+			t.Fatal(err)
 		}
-		t.Setenv(tempEnv, tmpDir)
+		// A mode-000 directory is still writable on Windows and by privileged
+		// Unix users. A regular file is never a valid temporary-directory root.
+		t.Setenv("TMPDIR", badTempRoot)
+		t.Setenv("TMP", badTempRoot)
+		t.Setenv("TEMP", badTempRoot)
 
 		group := CompileGroup{
 			OutputFileName: "nop.a",
 		}
-		err = group.Compile(tmpDir, CompileOptions{
+		err := group.Compile(tmpDir, CompileOptions{
 			CC:     "clang",
 			Linker: "lld",
 		})
