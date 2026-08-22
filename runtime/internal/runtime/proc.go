@@ -60,7 +60,6 @@ var sched struct {
 func NewProc(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr) {
 	gp := newproc1(fn, arg, getg())
 	if errno := newm(gp.m, stackSize); errno != 0 {
-		handleThreadCreateFailureDuringExit()
 		ctx := gp.context
 		releaseG()
 		gp.startarg = nil

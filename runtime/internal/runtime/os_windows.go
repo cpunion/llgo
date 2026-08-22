@@ -65,11 +65,15 @@ func runtime_exit(code int32) {
 }
 
 func newosproc(mp *m, stackSize uintptr) int {
-	return int(thread.CreateDetached(
+	ret := int(thread.CreateDetached(
 		stackSize,
 		thread.RoutineFunc(mstart),
 		c.Pointer(unsafe.Pointer(mp)),
 	))
+	if ret != 0 {
+		handleThreadCreateFailureDuringExit()
+	}
+	return ret
 }
 
 func handleThreadCreateFailureDuringExit() {

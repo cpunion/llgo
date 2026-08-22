@@ -65,8 +65,6 @@ func initThreadAttr(attr *pthread.Attr, stackSize uintptr) c.Int {
 	return 0
 }
 
-func handleThreadCreateFailureDuringExit() {}
-
 func exitCurrentM() {
 	mp := getg().m
 	mexit(mp)
