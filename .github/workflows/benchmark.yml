@@ -113,7 +113,7 @@ jobs:
             .benchmark/results
 
       - name: Record benchmark result
-        uses: dastai/setup-benchmark-go-action@6d4d1e394e5b0116de360cabd70c747f6b5507fc
+        uses: dastai/setup-benchmark-go-action@17b4bf3a74ce668a9bc2c60abbb39d6571b1610c
         with:
           config: .github/llgo-benchmark.yml
           benchmark-file: .benchmark/results/benchmark.txt
@@ -123,3 +123,120 @@ jobs:
                 '.benchmark/base-results/benchmark.txt' || '' }}
           platform-id: ${{ matrix.id }}
           platform-label: ${{ matrix.display }}
+
+  comment:
+    name: benchmark comment
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    needs: benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: go-benchmark-*
+          path: .benchmark/artifacts
+          merge-multiple: false
+
+      # PR result comments do not persist Pages data, so they may use the
+      # action revision selected by this PR. The separate workflow_run
+      # publisher retains the trusted action and configuration from main.
+      - name: Render benchmark comment
+        id: render
+        uses: dastai/setup-benchmark-go-action/publish@17b4bf3a74ce668a9bc2c60abbb39d6571b1610c
+        with:
+          artifacts: .benchmark/artifacts
+          data-directory: .benchmark/preview
+          trusted-config: .github/llgo-benchmark.yml
+          series-kind: pull
+          series-id: ${{ github.event.pull_request.number }}
+          series-label: PR #${{ github.event.pull_request.number }}
+          expected-source-repository: ${{ github.event.pull_request.head.repo.full_name }}
+          expected-source-sha: ${{ github.event.pull_request.head.sha }}
+          expected-baseline-repository: ${{ github.event.pull_request.base.repo.full_name }}
+          source-ref: ${{ github.event.pull_request.head.ref }}
+          source-url: >-
+            ${{ format(
+                '{0}/{1}/commit/{2}',
+                github.server_url,
+                github.event.pull_request.head.repo.full_name,
+                github.event.pull_request.head.sha) }}
+          source-run-url: >-
+            ${{ format(
+                '{0}/{1}/actions/runs/{2}',
+                github.server_url,
+                github.repository,
+                github.run_id) }}
+          comment-path: ${{ runner.temp }}/go-benchmark-comment.md
+
+      - name: Add report to job summary
+        shell: bash
+        env:
+          COMMENT_PATH: ${{ steps.render.outputs.comment-path }}
+        run: cat "$COMMENT_PATH" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or update PR comment
+        uses: actions/github-script@v8
+        env:
+          COMMENT_PATH: ${{ steps.render.outputs.comment-path }}
+          COMMENT_MARKER: ${{ steps.render.outputs.marker }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const fs = require("fs");
+            const issue_number = Number(process.env.PR_NUMBER);
+            const pull = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: issue_number,
+            });
+            if (
+              pull.data.state !== "open" ||
+              pull.data.head.sha !== process.env.SOURCE_SHA
+            ) {
+              core.info(
+                `Skip stale benchmark comment for ${process.env.SOURCE_SHA}; ` +
+                `pull request is ${pull.data.state} at ${pull.data.head.sha}.`
+              );
+              return;
+            }
+            const body = fs.readFileSync(process.env.COMMENT_PATH, "utf8");
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                per_page: 100,
+              }
+            );
+            const previous = comments.find(
+              (comment) =>
+                comment.user.type === "Bot" &&
+                comment.body.includes(process.env.COMMENT_MARKER)
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body,
+              });
+            }
