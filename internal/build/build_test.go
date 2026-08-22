@@ -416,6 +416,17 @@ func TestLinkObjFilesReportsOutputDirectoryError(t *testing.T) {
 	}
 }
 
+func TestFullRpathArgs(t *testing.T) {
+	linkArgs := []string{"-L/first", "-lfoo", "-L/second", "-L/first"}
+	if got := fullRpathArgs("windows", linkArgs); got != nil {
+		t.Fatalf("Windows rpath arguments = %q, want none", got)
+	}
+	want := []string{"-rpath", "/first", "-rpath", "/second"}
+	if got := fullRpathArgs("linux", linkArgs); !slices.Equal(got, want) {
+		t.Fatalf("Linux rpath arguments = %q, want %q", got, want)
+	}
+}
+
 func TestRewritePrebuiltFuncTabEligibilityAndDiagnostic(t *testing.T) {
 	rewritePrebuiltFuncTab(nil, "missing", true)
 	rewritePrebuiltFuncTab(&context{}, "missing", true)
