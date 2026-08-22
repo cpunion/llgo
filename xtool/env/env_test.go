@@ -56,11 +56,15 @@ func TestExpandEnvToArgsWithConfiguresSubprocess(t *testing.T) {
 
 func TestLookPathInEnvironmentBoundaries(t *testing.T) {
 	dir := t.TempDir()
-	tool := filepath.Join(dir, "fixture-tool")
+	toolName := "fixture-tool"
+	tool := filepath.Join(dir, toolName)
+	if runtime.GOOS == "windows" {
+		tool += ".exe"
+	}
 	if err := os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := lookPathInEnvironment("fixture-tool", dir, []string{"PATH=" + string(os.PathListSeparator)}); got != tool {
+	if got := lookPathInEnvironment(toolName, dir, []string{"PATH=" + string(os.PathListSeparator)}); got != tool {
 		t.Fatalf("lookPathInEnvironment with empty entry = %q, want %q", got, tool)
 	}
 	if got := lookPathInEnvironment(filepath.Join("bin", "tool"), dir, nil); got != filepath.Join("bin", "tool") {
