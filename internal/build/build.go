@@ -1636,20 +1636,7 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	linkInputs = append(linkInputs, archiveInputs...)
 
 	if IsFullRpathEnabled() {
-		// Treat every link-time library search path, specified by the -L parameter, as a runtime search path as well.
-		// This is to ensure the final executable can locate libraries with a relocatable install_name
-		// (e.g., "@rpath/libfoo.dylib") at runtime.
-		rpaths := make(map[string]none)
-		for _, arg := range linkArgs {
-			if strings.HasPrefix(arg, "-L") {
-				path := arg[2:]
-				if _, ok := rpaths[path]; ok {
-					continue
-				}
-				rpaths[path] = none{}
-				linkArgs = append(linkArgs, "-rpath", path)
-			}
-		}
+		linkArgs = append(linkArgs, fullRpathArgs(ctx.buildConf.Goos, linkArgs)...)
 	}
 	linkArgs = append(linkArgs, cSharedExportArgs(ctx, linkedOrder)...)
 
@@ -1659,6 +1646,29 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	}
 
 	return nil
+}
+
+func fullRpathArgs(goos string, linkArgs []string) (rpathArgs []string) {
+	// PE images use the normal Windows DLL search order and lld-link does not
+	// recognize the ELF/Mach-O -rpath option.
+	if goos == "windows" {
+		return nil
+	}
+	// Treat every link-time library search path, specified by the -L parameter,
+	// as a runtime search path as well. This ensures that final executables can
+	// locate libraries with relocatable install names such as @rpath/libfoo.dylib.
+	rpaths := make(map[string]none)
+	for _, arg := range linkArgs {
+		if strings.HasPrefix(arg, "-L") {
+			path := arg[2:]
+			if _, ok := rpaths[path]; ok {
+				continue
+			}
+			rpaths[path] = none{}
+			rpathArgs = append(rpathArgs, "-rpath", path)
+		}
+	}
+	return rpathArgs
 }
 
 func linkedPackageMetas(pkgs []Package) []*meta.PackageMeta {
