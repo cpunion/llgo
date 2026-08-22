@@ -10,18 +10,21 @@ and line metadata used by `runtime.Caller`, `runtime.Callers`,
 `runtime.FuncForPC`, and stack traces or pprof symbolization on the available
 unwinding paths:
 
-- `-pclntab=embedded` keeps the metadata in the executable. This is the
-  default and preserves existing behavior.
+- `-pclntab=embedded` keeps the metadata in the executable. It remains the
+  default fallback for build configurations that cannot emit a sidecar.
 - `-pclntab=external` writes `<executable>.pclntab`. The executable loads that
   optional file on the first safe symbolization request. A missing, stale, or
   corrupt file is a cached soft failure; the program continues with the
-  available native fallback.
+  available native fallback. This is the default for supported native
+  executable builds.
 - `-pclntab=none` does not generate the metadata and does not link the external
   loader or its path/probe code.
 
 `-pclntab=external` is initially supported only for native executable builds
-without `-target` on Darwin/Linux amd64/arm64. `ModeGen`, `c-archive`,
-`c-shared`, named targets, and other OS/architecture combinations reject it.
+without `-target` on Darwin/Linux amd64/arm64. Those builds select it by
+default. `ModeGen`, `c-archive`, `c-shared`, named targets, and other
+OS/architecture combinations default to `embedded`; an explicit external
+request still reports the existing capability error.
 
 The policy is deliberately separate from Go's `-ldflags=-s` and `-w`:
 

@@ -52,6 +52,6 @@ func (f *pclnFlag) Set(value string) error {
 var PCLN pclnFlag
 
 func addPCLNFlag(fs *flag.FlagSet) {
-	PCLN = pclnFlag{Mode: build.PCLNEmbedded}
-	fs.Var(&PCLN, "pclntab", "PCLN metadata mode: embedded, external, or none (default: embedded)")
+	PCLN = pclnFlag{Mode: build.PCLNExternal}
+	fs.Var(&PCLN, "pclntab", "PCLN metadata mode: embedded, external, or none (external requires a supported native executable)")
 }

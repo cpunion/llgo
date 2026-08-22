@@ -187,13 +187,18 @@ func TestBuildLTOFlagInvalid(t *testing.T) {
 }
 
 func TestBuildPCLNFlags(t *testing.T) {
+	t.Setenv("GOBIN", t.TempDir())
+	t.Setenv("GOOS", "linux")
+	t.Setenv("GOARCH", "amd64")
+	t.Setenv("LLGO_FUNCINFO", "")
+	t.Setenv("LLGO_FUNCINFO_SITES", "")
 	tests := []struct {
 		name      string
 		args      []string
 		want      build.PCLNMode
 		specified bool
 	}{
-		{name: "default embedded", want: build.PCLNEmbedded},
+		{name: "default external", want: build.PCLNExternal},
 		{name: "embedded", args: []string{"-pclntab=embedded"}, want: build.PCLNEmbedded, specified: true},
 		{name: "external", args: []string{"-pclntab=external"}, want: build.PCLNExternal, specified: true},
 		{name: "none", args: []string{"-pclntab=none"}, want: build.PCLNNone, specified: true},
@@ -213,7 +218,7 @@ func TestBuildPCLNFlags(t *testing.T) {
 			if PCLN.Mode != tt.want {
 				t.Fatalf("PCLN.Mode = %v, want %v", PCLN.Mode, tt.want)
 			}
-			conf := &build.Config{}
+			conf := build.NewDefaultConf(build.ModeBuild)
 			if err := UpdateConfig(conf); err != nil {
 				t.Fatalf("UpdateConfig error: %v", err)
 			}

@@ -264,7 +264,7 @@ func TestCollectFingerprintIncludesPCLNMode(t *testing.T) {
 	newContext := func(mode PCLNMode) *context {
 		return &context{
 			conf:      &packages.Config{},
-			buildConf: &Config{Goos: "linux", Goarch: "amd64", BuildMode: BuildModeExe, PCLNMode: mode},
+			buildConf: &Config{Goos: "linux", Goarch: "amd64", BuildMode: BuildModeExe, PCLNMode: mode, PCLNModeSet: true},
 		}
 	}
 
@@ -277,7 +277,7 @@ func TestCollectFingerprintIncludesPCLNMode(t *testing.T) {
 		{mode: PCLNNone, want: "none"},
 	}
 	fingerprints := make(map[string]bool, len(tests))
-	var embeddedFingerprint string
+	var externalFingerprint string
 	for _, tt := range tests {
 		pkg := newPkg()
 		if err := newContext(tt.mode).collectFingerprint(pkg); err != nil {
@@ -294,8 +294,8 @@ func TestCollectFingerprintIncludesPCLNMode(t *testing.T) {
 			t.Fatalf("manifest does not contain PCLN_MODE=%s:\n%s", tt.want, pkg.Manifest)
 		}
 		fingerprints[pkg.Fingerprint] = true
-		if tt.mode == PCLNEmbedded {
-			embeddedFingerprint = pkg.Fingerprint
+		if tt.mode == PCLNExternal {
+			externalFingerprint = pkg.Fingerprint
 		}
 	}
 	if len(fingerprints) != len(tests) {
@@ -303,11 +303,13 @@ func TestCollectFingerprintIncludesPCLNMode(t *testing.T) {
 	}
 
 	defaultMode := newPkg()
-	if err := newContext(PCLNMode(0)).collectFingerprint(defaultMode); err != nil {
+	defaultContext := newContext(PCLNEmbedded)
+	defaultContext.buildConf.PCLNModeSet = false
+	if err := defaultContext.collectFingerprint(defaultMode); err != nil {
 		t.Fatal(err)
 	}
-	if defaultMode.Fingerprint != embeddedFingerprint {
-		t.Fatal("zero-value PCLN mode and embedded mode produced different fingerprints")
+	if defaultMode.Fingerprint != externalFingerprint {
+		t.Fatal("default PCLN mode and external mode produced different fingerprints")
 	}
 }
 
@@ -365,10 +367,9 @@ func TestCollectFingerprintCanonicalizesPCLNEnvironment(t *testing.T) {
 	embeddedDefault, embeddedDefaultData := collect(explicitEmbeddedConf, "0", "")
 	embeddedOne, embeddedOneData := collect(explicitEmbeddedConf, "1", "1")
 	embeddedTrue, _ := collect(explicitEmbeddedConf, "", "true")
-	legacyEmbedded, _ := collect(base, "on", "on")
+	defaultExternal, _ := collect(base, "on", "on")
 	if embeddedDefault.Fingerprint != embeddedOne.Fingerprint ||
-		embeddedDefault.Fingerprint != embeddedTrue.Fingerprint ||
-		embeddedDefault.Fingerprint != legacyEmbedded.Fingerprint {
+		embeddedDefault.Fingerprint != embeddedTrue.Fingerprint {
 		t.Fatal("equivalent enabled PCLN inputs produced different fingerprints")
 	}
 	for _, data := range []manifestData{embeddedDefaultData, embeddedOneData} {
@@ -398,6 +399,9 @@ func TestCollectFingerprintCanonicalizesPCLNEnvironment(t *testing.T) {
 	externalLegacyOn, _ := collect(explicitExternalConf, "1", "true")
 	if externalLegacyOff.Fingerprint != externalLegacyOn.Fingerprint {
 		t.Fatal("LLGO_FUNCINFO changed an explicit external fingerprint")
+	}
+	if defaultExternal.Fingerprint != externalLegacyOn.Fingerprint {
+		t.Fatal("default and explicit external modes produced different fingerprints")
 	}
 	if externalLegacyOffData.Common == nil || externalLegacyOffData.Common.PCLNMode != "external" {
 		t.Fatalf("explicit external mode = %+v, want external", externalLegacyOffData.Common)

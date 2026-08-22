@@ -93,19 +93,23 @@ func TestValidatePCLNMode(t *testing.T) {
 }
 
 func TestEffectivePCLNModeLegacyPrecedence(t *testing.T) {
+	native := Config{Goos: "linux", Goarch: "amd64", BuildMode: BuildModeExe}
 	tests := []struct {
 		name     string
 		funcInfo string
 		conf     Config
 		want     PCLNMode
 	}{
-		{name: "default", conf: Config{}, want: PCLNEmbedded},
-		{name: "legacy enabled", funcInfo: "1", conf: Config{}, want: PCLNEmbedded},
-		{name: "legacy disabled", funcInfo: "0", conf: Config{}, want: PCLNNone},
+		{name: "default", conf: native, want: PCLNExternal},
+		{name: "legacy enabled", funcInfo: "1", conf: native, want: PCLNExternal},
+		{name: "legacy disabled", funcInfo: "0", conf: native, want: PCLNNone},
+		{name: "generation fallback", conf: Config{Goos: "linux", Goarch: "amd64", Mode: ModeGen, BuildMode: BuildModeExe}, want: PCLNEmbedded},
+		{name: "named target fallback", conf: Config{Goos: "wasip1", Goarch: "wasm", Target: "wasi", BuildMode: BuildModeExe}, want: PCLNEmbedded},
+		{name: "shared fallback", conf: Config{Goos: "linux", Goarch: "amd64", BuildMode: BuildModeCShared}, want: PCLNEmbedded},
+		{name: "unsupported platform fallback", conf: Config{Goos: "windows", Goarch: "amd64", BuildMode: BuildModeExe}, want: PCLNEmbedded},
 		{name: "explicit embedded wins", funcInfo: "0", conf: Config{PCLNMode: PCLNEmbedded, PCLNModeSet: true}, want: PCLNEmbedded},
 		{name: "explicit external wins", funcInfo: "0", conf: Config{PCLNMode: PCLNExternal, PCLNModeSet: true}, want: PCLNExternal},
 		{name: "explicit none wins", funcInfo: "1", conf: Config{PCLNMode: PCLNNone, PCLNModeSet: true}, want: PCLNNone},
-		{name: "typed external is authoritative", funcInfo: "0", conf: Config{PCLNMode: PCLNExternal}, want: PCLNExternal},
 		{name: "typed none is authoritative", funcInfo: "1", conf: Config{PCLNMode: PCLNNone}, want: PCLNNone},
 	}
 	for _, tt := range tests {
@@ -115,6 +119,11 @@ func TestEffectivePCLNModeLegacyPrecedence(t *testing.T) {
 				t.Fatalf("effectivePCLNMode() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+	t.Setenv(llgoFuncInfo, "")
+	t.Setenv(llgoFuncInfoSites, "0")
+	if got := effectivePCLNMode(&native); got != PCLNEmbedded {
+		t.Fatalf("effectivePCLNMode() with disabled sites = %v, want %v", got, PCLNEmbedded)
 	}
 }
 
@@ -148,10 +157,13 @@ func TestShouldEnablePCLNSites(t *testing.T) {
 
 func TestNewDefaultConfMetadataDefaults(t *testing.T) {
 	t.Setenv("GOBIN", t.TempDir())
+	t.Setenv("GOOS", "linux")
+	t.Setenv("GOARCH", "amd64")
 	t.Setenv(llgoFuncInfo, "")
+	t.Setenv(llgoFuncInfoSites, "")
 	conf := NewDefaultConf(ModeBuild)
-	if got := conf.PCLNMode; got != PCLNEmbedded {
-		t.Fatalf("NewDefaultConf().PCLNMode = %v, want %v", got, PCLNEmbedded)
+	if got := conf.PCLNMode; got != PCLNExternal {
+		t.Fatalf("NewDefaultConf().PCLNMode = %v, want %v", got, PCLNExternal)
 	}
 	if conf.PCLNModeSet {
 		t.Fatal("NewDefaultConf().PCLNModeSet = true, want unresolved legacy default")
@@ -160,6 +172,9 @@ func TestNewDefaultConfMetadataDefaults(t *testing.T) {
 		t.Fatal("NewDefaultConf().OmitDWARFByDefault = false, want safe provisional-DWARF default")
 	}
 	genConf := NewDefaultConf(ModeGen)
+	if got := genConf.PCLNMode; got != PCLNEmbedded {
+		t.Fatalf("NewDefaultConf(ModeGen).PCLNMode = %v, want %v", got, PCLNEmbedded)
+	}
 	if genConf.OmitDWARFByDefault {
 		t.Fatal("NewDefaultConf(ModeGen).OmitDWARFByDefault = true, want no linked-build policy")
 	}

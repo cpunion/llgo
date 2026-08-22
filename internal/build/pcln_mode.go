@@ -22,9 +22,11 @@ import "fmt"
 type PCLNMode uint8
 
 const (
-	// PCLNEmbedded keeps the metadata in the executable. It is the default.
+	// PCLNEmbedded keeps the metadata in the executable. It remains the
+	// fallback for configurations that cannot emit an external sidecar.
 	PCLNEmbedded PCLNMode = iota
-	// PCLNExternal writes the metadata to an optional sidecar file.
+	// PCLNExternal writes the metadata to an optional sidecar file. It is the
+	// default for supported native executable builds.
 	PCLNExternal
 	// PCLNNone omits the metadata and its loading support.
 	PCLNNone
@@ -60,13 +62,40 @@ func (m PCLNMode) validate() error {
 	return nil
 }
 
-// effectivePCLNMode translates the legacy environment escape hatch once at
-// the configuration boundary. An explicit -pclntab value always wins.
+// defaultPCLNMode selects external metadata where the build can emit a
+// sidecar. Other build configurations retain embedded metadata by default;
+// an explicit external request is still rejected by validatePCLNMode.
+func defaultPCLNMode(conf *Config) PCLNMode {
+	if conf == nil || conf.Mode == ModeGen || conf.Target != "" || !IsFuncInfoSitesEnabled() {
+		return PCLNEmbedded
+	}
+	if conf.BuildMode != "" && conf.BuildMode != BuildModeExe {
+		return PCLNEmbedded
+	}
+	switch conf.Goos {
+	case "darwin", "linux":
+	default:
+		return PCLNEmbedded
+	}
+	switch conf.Goarch {
+	case "amd64", "arm64":
+		return PCLNExternal
+	default:
+		return PCLNEmbedded
+	}
+}
+
+// effectivePCLNMode resolves the contextual default and translates the legacy
+// environment escape hatch once at the configuration boundary. An explicit
+// -pclntab value always wins.
 func effectivePCLNMode(conf *Config) PCLNMode {
-	if !conf.PCLNModeSet && conf.PCLNMode == PCLNEmbedded && !IsFuncInfoEnabled() {
+	if conf.PCLNModeSet || conf.PCLNMode == PCLNNone || !conf.PCLNMode.IsValid() {
+		return conf.PCLNMode
+	}
+	if !IsFuncInfoEnabled() {
 		return PCLNNone
 	}
-	return conf.PCLNMode
+	return defaultPCLNMode(conf)
 }
 
 // shouldEnablePCLNSites reports whether compiler-emitted PC anchor records are
