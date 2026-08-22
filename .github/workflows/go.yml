@@ -207,6 +207,9 @@ jobs:
       - name: Run Go method drop tests
         run: go test -tags=dev -timeout 30m -run '^TestBuildAndCheckSymbolsFromTestdrop$' ./cl
 
+      - name: Run test-main reachability regression
+        run: go test -tags=dev -timeout 10m -run '^TestDeadcodeTestMainIsReachable$' ./internal/build
+
       - name: Run Go deadcode-drop demos
         run: |
           LLGO_DEMO_LLGORUN_FLAGS="-deadcodedrop" \

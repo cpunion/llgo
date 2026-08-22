@@ -261,6 +261,28 @@ func TestConcurrentDeadcodeBuildsUseIndependentWorkerContexts(t *testing.T) {
 	}
 }
 
+func TestDeadcodeTestMainIsReachable(t *testing.T) {
+	if !buildenv.Dev {
+		t.Skip("deadcode drop requires a development build")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "internal", "build", "testdata", "deadcodetestmain")
+	t.Setenv("LLGO_ROOT", repoRoot)
+	t.Setenv(llgoBuildCache, "0")
+
+	conf := NewDefaultConf(ModeTest)
+	conf.DeadcodeDrop = true
+	conf.PCLNMode = PCLNNone
+	conf.OutFile = filepath.Join(t.TempDir(), "deadcodetestmain.test")
+	conf.RunArgs = []string{"-test.run=^TestReachable$"}
+	if _, err := Build(Invocation{Args: []string{"."}, Config: conf, Dir: fixture}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeadcodeBuildColdAndHotPackageCache(t *testing.T) {
 	if !buildenv.Dev {
 		t.Skip("deadcode drop requires a development build")

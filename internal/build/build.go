@@ -1603,10 +1603,27 @@ func applyDeadcodeDropOverrides(pkgs []Package, entryPkg Package, needRuntime bo
 		return err
 	}
 
+	// Global method analysis must start from the Go executable entry point. If
+	// its metadata is absent, continuing would treat every method reachable
+	// only from main as dead and can produce a smaller binary that crashes at
+	// startup. A generated test main must retain the "main" identity; the
+	// @ForTest marker instead disambiguates a real main package under test.
+	if !hasDCEExecutableRoot(summary) {
+		if verbose {
+			fmt.Fprintln(os.Stderr, "llgo: deadcode method pruning skipped: main.main is absent from package metadata")
+		}
+		return nil
+	}
+
 	roots := dceEntryRootCandidates(pkgs, needRuntime)
 	liveSlots := deadcode.Analyze(summary, roots)
 	dcepass.EmitStrongTypeOverrides(entryPkg.LPkg.Module(), dceSourceModules(pkgs), liveSlots, verbose)
 	return nil
+}
+
+func hasDCEExecutableRoot(summary *meta.GlobalSummary) bool {
+	root, ok := summary.LookupSymbol("main.main")
+	return ok && summary.HasFacts(root)
 }
 
 func dceSourceModules(pkgs []Package) []gllvm.Module {

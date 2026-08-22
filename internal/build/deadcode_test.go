@@ -1,6 +1,7 @@
 package build
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -60,6 +61,61 @@ func TestApplyDeadcodeDropOverridesWritesStrongTypeOverride(t *testing.T) {
 	}
 }
 
+func TestApplyDeadcodeDropOverridesSkipsMissingGoEntryRoot(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	ctx := &context{
+		prog: llssa.NewProgram(nil),
+		buildConf: &Config{
+			BuildMode: BuildModeExe,
+			Goos:      "linux",
+			Goarch:    "amd64",
+		},
+	}
+	defer ctx.prog.Dispose()
+
+	srcProg := llssa.NewProgram(nil)
+	defer srcProg.Dispose()
+	srcPkg := srcProg.NewPackage("pkg", "pkg")
+	addMethodTypeGlobal(srcPkg.Module(), "_llgo_pkg.T")
+	pkgMeta := buildDeadcodeMetaForRoot(t, "example.com/p.test.main")
+	defer pkgMeta.Close()
+	srcAPkg := &aPackage{
+		Package: &packages.Package{PkgPath: "pkg"},
+		LPkg:    srcPkg,
+		Meta:    pkgMeta,
+	}
+	entryPkg := genMainModule(ctx, llssa.PkgRuntime, &packages.Package{
+		PkgPath:    "pkg",
+		ExportFile: "pkg.a",
+	}, &genConfig{})
+
+	stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderr
+	t.Cleanup(func() { os.Stderr = oldStderr })
+	if err := applyDeadcodeDropOverrides([]Package{srcAPkg}, entryPkg, false, true); err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = oldStderr
+	if err := stderr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	diagnostic, err := os.ReadFile(stderr.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(diagnostic), "deadcode method pruning skipped: main.main is absent") {
+		t.Fatalf("missing diagnostic in stderr: %q", diagnostic)
+	}
+
+	if out := entryPkg.LPkg.Module().String(); strings.Contains(out, `@_llgo_pkg.T = constant`) {
+		t.Fatalf("missing Go entry root unexpectedly emitted a type override:\n%s", out)
+	}
+}
+
 func TestDCEEntryRootCandidates(t *testing.T) {
 	want := []string{"main.init", "main.main"}
 	if got := dceEntryRootCandidates(nil, false); !reflect.DeepEqual(got, want) {
@@ -87,9 +143,16 @@ func TestDCEEntryRootCandidatesIncludesCExports(t *testing.T) {
 }
 
 func buildDeadcodeMeta(t *testing.T) *meta.PackageMeta {
+	return buildDeadcodeMetaForRoot(t, "main.main")
+}
+
+func buildDeadcodeMetaForRoot(t *testing.T, rootName string) *meta.PackageMeta {
 	t.Helper()
 	b := meta.NewBuilder()
-	main := b.Sym("main.main")
+	main := b.Sym(rootName)
+	// Keep an exact main.main reference in the negative fixture. A referenced-
+	// only symbol is not a usable analysis root because it owns no facts.
+	b.AddOrdinaryEdge(main, b.Sym("main.main"))
 	use := b.Sym("pkg.use")
 	typ := b.Sym("_llgo_pkg.T")
 	iface := b.Sym("_llgo_iface$I")
