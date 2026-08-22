@@ -4,6 +4,12 @@ description: "Install dependencies required by the LLGo demo suite"
 runs:
   using: "composite"
   steps:
+    - name: Set up Python 3.12 on Windows
+      if: runner.os == 'Windows'
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+
     - name: Install cargs demo library on Unix
       if: runner.os != 'Windows'
       shell: bash
@@ -98,12 +104,6 @@ runs:
         "@ | Set-Content -Encoding ascii (Join-Path $pcDir "cargs.pc")
 
         Add-Content -Encoding utf8 $env:GITHUB_ENV "PKG_CONFIG_PATH=$pcDir;$env:PKG_CONFIG_PATH"
-
-    - name: Set up Python 3.12 on Windows
-      if: runner.os == 'Windows'
-      uses: actions/setup-python@v6
-      with:
-        python-version: "3.12"
 
     - name: Install Python demo dependencies on Unix
       if: runner.os != 'Windows'
