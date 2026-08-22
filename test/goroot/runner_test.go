@@ -272,6 +272,9 @@ func TestGoRootRunCases(t *testing.T) {
 	goCmd := *flagGoCmd
 	if goCmd == "" {
 		goCmd = filepath.Join(goroot, "bin", "go")
+		if runtime.GOOS == "windows" {
+			goCmd += ".exe"
+		}
 	}
 	if _, err := os.Stat(goCmd); err != nil {
 		t.Fatalf("stat go command %q: %v", goCmd, err)
