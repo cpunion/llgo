@@ -64,6 +64,7 @@ runs:
           "libuv-1.52.1-1"
           "gc-8.2.12-1"
           "libatomic_ops-7.10.0-1"
+          "cjson-1.7.19-1"
         )
         urls=()
         for package in "${packages[@]}"; do
@@ -91,11 +92,11 @@ runs:
             exit 1
           fi
         done
-
         for spec in \
           "libuv=1.52.1-1" \
           "gc=8.2.12-1" \
-          "libatomic_ops=7.10.0-1"; do
+          "libatomic_ops=7.10.0-1" \
+          "cjson=1.7.19-1"; do
           package="${spec%%=*}"
           expected="${spec#*=}"
           installed="$(pacman -Q "$prefix-$package" | awk '{print $2}')"
