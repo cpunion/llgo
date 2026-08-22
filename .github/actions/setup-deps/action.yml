@@ -31,6 +31,7 @@ runs:
         MSYS2_LIBUV_PACKAGE_VERSION: "1.52.1-1"
         MSYS2_GC_PACKAGE_VERSION: "8.2.12-1"
         MSYS2_LIBATOMIC_OPS_PACKAGE_VERSION: "7.10.0-1"
+        MSYS2_CJSON_PACKAGE_VERSION: "1.7.19-1"
       run: |
         set -euo pipefail
 
@@ -60,6 +61,7 @@ runs:
           "libuv-$MSYS2_LIBUV_PACKAGE_VERSION"
           "gc-$MSYS2_GC_PACKAGE_VERSION"
           "libatomic_ops-$MSYS2_LIBATOMIC_OPS_PACKAGE_VERSION"
+          "cjson-$MSYS2_CJSON_PACKAGE_VERSION"
         )
         urls=()
         for package in "${packages[@]}"; do
@@ -86,7 +88,8 @@ runs:
         for package_version in \
           "libuv:$MSYS2_LIBUV_PACKAGE_VERSION" \
           "gc:$MSYS2_GC_PACKAGE_VERSION" \
-          "libatomic_ops:$MSYS2_LIBATOMIC_OPS_PACKAGE_VERSION"; do
+          "libatomic_ops:$MSYS2_LIBATOMIC_OPS_PACKAGE_VERSION" \
+          "cjson:$MSYS2_CJSON_PACKAGE_VERSION"; do
           package="${package_version%%:*}"
           expected="${package_version#*:}"
           installed="$(pacman -Q "$prefix-$package" | awk '{print $2}')"
