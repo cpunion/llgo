@@ -251,7 +251,7 @@ func testFrom(t *testing.T, pkgDir, sel string) {
 	}
 	var v string
 	var prefixes []string
-	withFuncInfoDisabled(func() {
+	withFuncInfoSitesDisabled(func() {
 		if spec.PostABI {
 			generated := llgen.GeneratePostABI(pkgDir)
 			v = generated.Text
@@ -277,7 +277,7 @@ func testIRTargets(t *testing.T, pkgDir string, spec littest.Spec, currentPrefix
 		t.Run(target.String(), func(t *testing.T) {
 			conf := &build.Config{Goos: target.GOOS, Goarch: target.GOARCH}
 			var generated llgen.GeneratedIR
-			withFuncInfoDisabled(func() {
+			withFuncInfoSitesDisabled(func() {
 				if spec.PostABI {
 					generated = llgen.GeneratePostABIWithConf(pkgDir, conf)
 				} else {
@@ -379,7 +379,7 @@ func testRunAndTestFrom(t *testing.T, pkgDir, relPkg, sel string, opts runOption
 
 	var output []byte
 	if checkIR && !irSpec.PostABI {
-		withFuncInfoDisabled(func() {
+		withFuncInfoSitesDisabled(func() {
 			output, err = runWithConf(relPkg, pkgDir, conf)
 		})
 	} else {
@@ -402,7 +402,7 @@ func testRunAndTestFrom(t *testing.T, pkgDir, relPkg, sel string, opts runOption
 	if irSpec.PostABI {
 		// Keep the runtime build and the existing pre-ABI ModuleHook contract
 		// unchanged; obtain the opt-in stage through a separate IR-only compile.
-		withFuncInfoDisabled(func() {
+		withFuncInfoSitesDisabled(func() {
 			generated := llgen.GeneratePostABIWithConf(pkgDir, opts.conf)
 			ir = generated.Text
 			prefixes = filecheck.TargetPrefixes(generated.GOOS, generated.GOARCH, generated.Target)
@@ -788,8 +788,10 @@ func readIRSpec(pkgDir string) (littest.Spec, bool, error) {
 	return littest.FindSpec(pkgDir)
 }
 
-func withFuncInfoDisabled(fn func()) {
-	const key = "LLGO_FUNCINFO"
+func withFuncInfoSitesDisabled(fn func()) {
+	// PC-site anchors insert inline asm between source instructions and disturb
+	// CHECK-NEXT. Keep the function-info tables because this build is also run.
+	const key = "LLGO_FUNCINFO_SITES"
 	old, ok := os.LookupEnv(key)
 	_ = os.Setenv(key, "0")
 	defer func() {
