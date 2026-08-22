@@ -179,7 +179,6 @@ runs:
           exit 1
         fi
         cflags="$(llvm-config --cflags)"
-        cxxflags="$(llvm-config --cxxflags)"
         ldflags="$(llvm-config --ldflags --libs all --system-libs)"
         # llvm-config.exe already returns native absolute paths even when it
         # is invoked from the MSYS2 shell. Rewriting the /clang64 substring
@@ -189,16 +188,23 @@ runs:
         # command, so flatten whitespace before exporting the CGO flag lists.
         cflags="${cflags//$'\r'/}"
         cflags="${cflags//$'\n'/ }"
-        cxxflags="${cxxflags//$'\r'/}"
-        cxxflags="${cxxflags//$'\n'/ }"
         ldflags="${ldflags//$'\r'/}"
         ldflags="${ldflags//$'\n'/ }"
-        # These flags link the native Go host compiler against LLVM. Keep
-        # them separate from CGO_*: exporting them globally would leak
-        # -lLLVM-19 into programs later compiled by LLGo for the MSVC ABI.
-        echo "LLGO_HOST_CGO_CFLAGS=$cflags" >> "$GITHUB_ENV"
-        echo "LLGO_HOST_CGO_CXXFLAGS=$cxxflags" >> "$GITHUB_ENV"
-        echo "LLGO_HOST_CGO_LDFLAGS=$ldflags" >> "$GITHUB_ENV"
+
+        # Keep LLVM's host-only flags scoped to github.com/xgo-dev/llvm via
+        # its Windows pkg-config directive. Global CGO_* flags also affect
+        # unrelated packages and leak into programs compiled by LLGo.
+        pc_dir="$(cygpath -u "$RUNNER_TEMP")/llgo-llvm-pkgconfig"
+        mkdir -p "$pc_dir"
+        printf '%s\n' \
+          'Name: LLGo LLVM 19 host' \
+          'Description: LLVM 19 flags used by the LLGo host compiler' \
+          "Version: $llvm_version" \
+          "Cflags: $cflags" \
+          "Libs: $ldflags" \
+          > "$pc_dir/llgo-llvm-19.pc"
+        pc_dir_native="$(cygpath -m "$pc_dir")"
+        echo "PKG_CONFIG_PATH=$pc_dir_native${PKG_CONFIG_PATH:+;$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
         clang --version
 
     - name: Install macOS dependencies
