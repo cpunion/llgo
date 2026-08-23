@@ -43,7 +43,7 @@ jobs:
             llvm: 19
             go: "1.26.7"
             lane: primary
-          - os: windows-latest
+          - os: windows-2022
             llvm: 19
             go: "1.26.7"
             lane: primary
@@ -147,7 +147,7 @@ jobs:
         run: sudo apt-get install -y lldb-${{matrix.llvm}}
 
       - name: Install Windows LLDB for integration tests
-        if: ${{ matrix.os == 'windows-latest' && matrix.lane == 'primary' }}
+        if: ${{ matrix.os == 'windows-2022' && matrix.lane == 'primary' }}
         shell: msys2 {0}
         env:
           MSYS2_LLDB_PACKAGE_VERSION: "19.1.7-1"
@@ -232,7 +232,7 @@ jobs:
           # Windows uses the newest Go 1.26 patch already validated by the
           # platform work. One matrix lane runs every package; -p=2 keeps the
           # 8 GB development VM and hosted runner below their memory limit.
-          - os: windows-latest
+          - os: windows-2022
             llvm: 19
             go: "1.26.7"
             lane: primary
@@ -382,7 +382,7 @@ jobs:
             llvm: 19
             go: "1.26.7"
             lane: primary
-          - os: windows-latest
+          - os: windows-2022
             llvm: 19
             go: "1.26.7"
             lane: primary

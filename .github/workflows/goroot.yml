@@ -26,11 +26,11 @@ jobs:
       matrix:
         # These are reproducibility pins, not floating series selectors.
         # Upgrade them together in a dedicated toolchain-update PR.
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: [macos-latest, ubuntu-latest, windows-2022]
         go-version: ["1.25.0", "1.26.7"]
         shard-index: ["0", "1", "2", "3"]
         exclude:
-          - os: windows-latest
+          - os: windows-2022
             go-version: "1.25.0"
         include:
           - go-version: "1.25.0"
@@ -104,7 +104,7 @@ jobs:
           platform=linux/amd64
           if [[ "$MATRIX_OS" == "macos-latest" ]]; then
             platform=darwin/arm64
-          elif [[ "$MATRIX_OS" == "windows-latest" ]]; then
+          elif [[ "$MATRIX_OS" == "windows-2022" ]]; then
             platform=windows/amd64
           fi
 

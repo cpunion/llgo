@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: [macos-latest, ubuntu-latest, windows-2022]
         llvm: [19]
     runs-on: ${{matrix.os}}
     steps:

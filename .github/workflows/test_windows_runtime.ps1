@@ -14,7 +14,7 @@ if (-not $env:LLGO_MSYS2_LOCATION) {
 }
 
 $root = (Get-Location).Path
-# GitHub's windows-latest host is amd64 and setup-deps installs clang64. A
+# GitHub's windows-2022 host is amd64 and setup-deps installs clang64. A
 # native arm64 Windows developer host can point at clangarm64 without keeping
 # a divergent copy of this runtime validation script.
 $clangBin = $env:LLGO_MSYS2_CLANG_BIN

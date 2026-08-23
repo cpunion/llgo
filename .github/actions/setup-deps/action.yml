@@ -116,11 +116,14 @@ runs:
         $ErrorActionPreference = "Stop"
 
         $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-        $installPath = & $vswhere -latest -products * `
+        # LLVM 19 predates the Visual Studio 18 STL, which rejects Clang
+        # versions older than 20. Select the latest installed VS 2022 toolset
+        # instead of letting vswhere silently move this pinned lane to VS 18.
+        $installPath = & $vswhere -latest -products * -version '[17.0,18.0)' `
           -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
           -property installationPath
         if (-not $installPath) {
-          throw "Visual Studio C++ tools were not found"
+          throw "Visual Studio 2022 C++ tools required by LLVM 19 were not found"
         }
         Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
         Enter-VsDevShell -VsInstallPath $installPath `
