@@ -389,6 +389,18 @@ func (b Builder) Store(ptr, val Expr) Expr {
 	return Expr{b.impl.CreateStore(val.impl, ptr.impl), b.Prog.Void()}
 }
 
+// Memmove copies size bytes from src to dst while preserving overlap semantics.
+func (b Builder) Memmove(dst, src Expr, size uint64) Expr {
+	prog := b.Prog
+	ret := b.impl.CreateIntrinsic(prog.Void().ll, llvm.LookupIntrinsicID("llvm.memmove"), []llvm.Value{
+		dst.impl,
+		src.impl,
+		prog.IntVal(size, prog.Uintptr()).impl,
+		prog.BoolVal(false).impl,
+	}, "")
+	return Expr{ret, prog.Void()}
+}
+
 // Advance returns the pointer ptr advanced by offset.
 func (b Builder) Advance(ptr Expr, offset Expr) Expr {
 	dbgInstrf("Advance %v, %v\n", ptr.impl, offset.impl)
