@@ -42,8 +42,7 @@ func main() {
 // DARWIN-ARM64-NEXT:   %[[TMP11:[0-9]+]] = call i32 @sigsetjmp(ptr %[[TMP1]], i32 0)
 // LINUX-AMD64-NEXT:   %[[TMP11:[0-9]+]] = call i32 @__sigsetjmp(ptr %[[TMP1]], i32 0)
 // WINDOWS-ARM64-NEXT:   %[[TMP11:[0-9]+]] = call i32 @llgo_setjmp(ptr %[[TMP1]])
-// WINDOWS-AMD64-NEXT:   %[[TMP11FRAME:[0-9]+]] = call ptr @llvm.frameaddress.p0(i32 0)
-// WINDOWS-AMD64-NEXT:   %[[TMP11:[0-9]+]] = call i32 @_setjmpex(ptr %[[TMP1]], ptr %[[TMP11FRAME]])
+// WINDOWS-AMD64-NEXT:   %[[TMP11:[0-9]+]] = call i32 @_setjmpex(ptr %[[TMP1]], ptr null)
 // CHECK-NEXT:   %[[TMP12:[0-9]+]] = icmp eq i32 %[[TMP11]], 0
 // CHECK-NEXT:   br i1 %[[TMP12]], label %_llgo_[[BB4:[0-9]+]], label %_llgo_[[BB5:[0-9]+]]
 // CHECK-EMPTY:

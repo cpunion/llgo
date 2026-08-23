@@ -32,8 +32,7 @@ func main() {
 	// DARWIN-ARM64: [[SETJMP_RESULT:%[0-9]+]] = call i32 @sigsetjmp(ptr [[DEFER_JMPBUF]], i32 0)
 	// LINUX-AMD64: [[SETJMP_RESULT:%[0-9]+]] = call i32 @__sigsetjmp(ptr [[DEFER_JMPBUF]], i32 0)
 	// WINDOWS-ARM64: [[SETJMP_RESULT:%[0-9]+]] = call i32 @llgo_setjmp(ptr [[DEFER_JMPBUF]])
-	// WINDOWS-AMD64: [[SETJMP_FRAME:%[0-9]+]] = call ptr @llvm.frameaddress.p0(i32 0)
-	// WINDOWS-AMD64-NEXT: [[SETJMP_RESULT:%[0-9]+]] = call i32 @_setjmpex(ptr [[DEFER_JMPBUF]], ptr [[SETJMP_FRAME]])
+	// WINDOWS-AMD64: [[SETJMP_RESULT:%[0-9]+]] = call i32 @_setjmpex(ptr [[DEFER_JMPBUF]], ptr null)
 	// CHECK-NEXT: [[FIRST_ENTRY:%[0-9]+]] = icmp eq i32 [[SETJMP_RESULT]], 0
 	// CHECK-NEXT: br i1 [[FIRST_ENTRY]], label %{{.*}}, label %{{.*}}
 
