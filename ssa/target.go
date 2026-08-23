@@ -29,16 +29,16 @@ import (
 // -----------------------------------------------------------------------------
 
 type Target struct {
-	GOOS                    string
-	GOARCH                  string
-	GO386                   string // "sse2" (default) or "softfloat"
-	GOAMD64                 string // "v1" (default), "v2", "v3", or "v4"
-	GOARM                   string // "5", "6", "7" (default)
-	GOARM64                 string // "v8.0" (default) through "v9.5", with optional extensions
-	Target                  string // target name from -target flag (e.g., "esp32", "arm7tdmi", "wasi")
-	LLVMTarget              string // physical LLVM target selected by a target configuration
-	OptLevel                optlevel.Level
-	SaturatingFloatToUint32 bool
+	GOOS                 string
+	GOARCH               string
+	GO386                string // "sse2" (default) or "softfloat"
+	GOAMD64              string // "v1" (default), "v2", "v3", or "v4"
+	GOARM                string // "5", "6", "7" (default)
+	GOARM64              string // "v8.0" (default) through "v9.5", with optional extensions
+	Target               string // target name from -target flag (e.g., "esp32", "arm7tdmi", "wasi")
+	LLVMTarget           string // physical LLVM target selected by a target configuration
+	OptLevel             optlevel.Level
+	SaturatingFloatToInt bool
 }
 
 func (p *Target) effectiveGOOS() string {

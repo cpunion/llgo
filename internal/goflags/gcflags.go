@@ -28,11 +28,11 @@ import (
 // frontend configuration. Raw flags remain in GoBuildFlags for go/packages.
 func applyFrontendGCFlags(conf *build.Config) {
 	type frontendFlags struct {
-		goVersion               string
-		nNoOpt                  bool
-		lNoOpt                  bool
-		saturatingFloatToUint32 bool
-		debug                   compilerDebugFlags
+		goVersion            string
+		nNoOpt               bool
+		lNoOpt               bool
+		saturatingFloatToInt bool
+		debug                compilerDebugFlags
 	}
 	var applicable *frontendFlags
 	for _, buildFlag := range conf.GoBuildFlags {
@@ -63,7 +63,7 @@ func applyFrontendGCFlags(conf *build.Config) {
 				current.debug.apply(strings.TrimPrefix(compilerFlag, "-d="))
 			}
 		}
-		current.saturatingFloatToUint32 = bisectPatternAlwaysEnabled(current.debug["converthash"])
+		current.saturatingFloatToInt = bisectPatternAlwaysEnabled(current.debug["converthash"])
 		applicable = current
 	}
 	if applicable == nil {
@@ -75,7 +75,7 @@ func applyFrontendGCFlags(conf *build.Config) {
 	if applicable.nNoOpt || applicable.lNoOpt {
 		conf.OptLevel = optlevel.O0
 	}
-	conf.SaturatingFloatToUint32 = applicable.saturatingFloatToUint32
+	conf.SaturatingFloatToInt = applicable.saturatingFloatToInt
 }
 
 // compilerDebugFlags stores the last value of each comma-separated -d setting.
