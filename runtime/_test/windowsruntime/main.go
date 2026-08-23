@@ -208,6 +208,10 @@ func main() {
 
 	checkRecover()
 	checkRuntimeRandStreams()
+	checkCoreMapRandStreams()
+	checkProcessAffinityCPUCount()
+	checkUnicodeConsolePrint()
+	checkForeignFaultOnGoThread()
 	checkNilFault()
 	checkConcurrentNilFault()
 	checkGC()

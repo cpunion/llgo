@@ -15,6 +15,19 @@ typedef __UINTPTR_TYPE__ llgo_uintptr;
 #endif
 
 typedef struct {
+    union { llgo_dword oemid; struct { llgo_word arch; llgo_word reserved; }; };
+    llgo_dword page_size;
+    void *min_app_address;
+    void *max_app_address;
+    llgo_uintptr active_processor_mask;
+    llgo_dword num_processors;
+    llgo_dword processor_type;
+    llgo_dword allocation_granularity;
+    llgo_word processor_level;
+    llgo_word processor_revision;
+} llgo_system_info;
+
+typedef struct {
     void *base_address;
     void *allocation_base;
     llgo_dword allocation_protect;
@@ -27,8 +40,10 @@ typedef struct {
     llgo_dword type;
 } llgo_memory_basic_information;
 
-__declspec(dllimport) llgo_dword LLGO_WINAPI
-GetActiveProcessorCount(llgo_word group_number);
+__declspec(dllimport) int LLGO_WINAPI
+GetProcessAffinityMask(void *process, llgo_uintptr *process_mask,
+                       llgo_uintptr *system_mask);
+__declspec(dllimport) void LLGO_WINAPI GetSystemInfo(llgo_system_info *info);
 __declspec(dllimport) llgo_size_t LLGO_WINAPI
 VirtualQuery(const void *address, llgo_memory_basic_information *info,
              llgo_size_t length);
@@ -113,7 +128,6 @@ void *llgo_windows_virtual_unwind(llgo_uintptr image_base, llgo_uintptr pc,
 #endif
 
 enum {
-    llgo_all_processor_groups = 0xffff,
     llgo_mem_commit = 0x1000,
     llgo_page_noaccess = 0x01,
     llgo_page_execute = 0x10,
@@ -122,8 +136,25 @@ enum {
 
 int llgo_maxprocs(void)
 {
-    llgo_dword n = GetActiveProcessorCount(llgo_all_processor_groups);
-    return n == 0 ? 1 : (int)n;
+    llgo_uintptr mask;
+    llgo_uintptr system_mask;
+    int count = 0;
+
+    /* Match Go's getCPUCount: report CPUs available to this process, rather
+     * than all active processors on the machine. */
+    if (GetProcessAffinityMask((void *)(intptr_t)-1, &mask, &system_mask)) {
+        while (mask != 0) {
+            count += (int)(mask & 1);
+            mask >>= 1;
+        }
+        if (count != 0)
+            return count;
+    }
+    {
+        llgo_system_info info;
+        GetSystemInfo(&info);
+        return info.num_processors == 0 ? 1 : (int)info.num_processors;
+    }
 }
 
 int llgo_mem_readable(void *p)
@@ -203,20 +234,6 @@ llgo_uintptr llgo_get_proc_address(llgo_uintptr module,
 
 /* --- Standard library OS bridges (link_windows_llgo.go) ------------------- */
 
-typedef struct {
-    union { llgo_dword oemid; struct { llgo_word arch; llgo_word reserved; }; };
-    llgo_dword page_size;
-    void *min_app_address;
-    void *max_app_address;
-    llgo_uintptr active_processor_mask;
-    llgo_dword num_processors;
-    llgo_dword processor_type;
-    llgo_dword allocation_granularity;
-    llgo_word processor_level;
-    llgo_word processor_revision;
-} llgo_system_info;
-
-__declspec(dllimport) void LLGO_WINAPI GetSystemInfo(llgo_system_info *info);
 __declspec(dllimport) llgo_dword LLGO_WINAPI
 GetSystemDirectoryA(char *buffer, llgo_dword size);
 typedef int (LLGO_WINAPI *llgo_console_handler)(llgo_dword event);
