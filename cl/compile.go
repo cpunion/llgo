@@ -32,6 +32,7 @@ import (
 
 	"github.com/xgo-dev/llgo/cl/blocks"
 	"github.com/xgo-dev/llgo/cl/ssawrap"
+	llabi "github.com/xgo-dev/llgo/internal/abi"
 	"github.com/xgo-dev/llgo/internal/goembed"
 	"github.com/xgo-dev/llgo/internal/typepatch"
 	"golang.org/x/tools/go/ssa"
@@ -1158,6 +1159,109 @@ func skipUnusedArrayDeref(v *ssa.UnOp) bool {
 	return true
 }
 
+func aggregateCopyLoad(v ssa.Value) (*ssa.UnOp, bool) {
+	load, ok := v.(*ssa.UnOp)
+	if !ok || load.Op != token.MUL {
+		return nil, false
+	}
+	switch types.Unalias(load.Type()).Underlying().(type) {
+	case *types.Array, *types.Struct:
+		return load, true
+	}
+	return nil, false
+}
+
+func (p *context) largeAggregateCopyLoad(v ssa.Value) (*ssa.UnOp, llssa.Type, bool) {
+	load, ok := aggregateCopyLoad(v)
+	if !ok {
+		return nil, nil, false
+	}
+	typ := p.type_(load.Type(), llssa.InGo)
+	if p.prog.SizeOf(typ) <= llabi.MaxImplicitStackVarSize {
+		return nil, nil, false
+	}
+	return load, typ, true
+}
+
+func (p *context) soleRefIsLowerableAggregateStore(load *ssa.UnOp) bool {
+	if _, _, ok := p.largeAggregateCopyLoad(load); !ok {
+		return false
+	}
+	refs, ok := nonDebugReferrers(load)
+	if !ok || len(refs) != 1 {
+		return false
+	}
+	store, ok := refs[0].(*ssa.Store)
+	return ok && store.Val == load && aggregateStoreCanDeferLoad(load, store)
+}
+
+// aggregateStoreCanDeferLoad reports whether a large aggregate load can be
+// emitted as a memmove at its sole store. Keeping the load and store adjacent
+// is always safe. Package initialization also commonly evaluates a global
+// array, initializes unrelated fields, and only then stores the enclosing
+// composite. Permit that shape only while no instruction can mutate the
+// source global. This avoids materializing multi-megabyte LLVM SSA values,
+// which LLVM 19's Windows x86 backend cannot reliably select.
+func aggregateStoreCanDeferLoad(load *ssa.UnOp, store *ssa.Store) bool {
+	if load.Block() == nil || load.Block() != store.Block() {
+		return false
+	}
+	instrs := load.Block().Instrs
+	for i, instr := range instrs {
+		if instr != load {
+			continue
+		}
+		if i+1 < len(instrs) && instrs[i+1] == store {
+			return true
+		}
+		source, ok := load.X.(*ssa.Global)
+		if !ok {
+			return false
+		}
+		for _, between := range instrs[i+1:] {
+			if between == store {
+				return true
+			}
+			if !aggregateCopyAllowsDelayAcross(between, source) {
+				return false
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func aggregateCopyAllowsDelayAcross(instr ssa.Instruction, source *ssa.Global) bool {
+	switch instr := instr.(type) {
+	case *ssa.DebugRef, *ssa.FieldAddr, *ssa.IndexAddr:
+		return true
+	case *ssa.UnOp:
+		// Channel receive can synchronize with a source-global mutation.
+		return instr.Op != token.ARROW
+	case *ssa.Store:
+		switch base := aggregateCopyAddrBase(instr.Addr).(type) {
+		case *ssa.Alloc:
+			return true
+		case *ssa.Global:
+			return base != source
+		}
+	}
+	return false
+}
+
+func aggregateCopyAddrBase(v ssa.Value) ssa.Value {
+	for {
+		switch addr := v.(type) {
+		case *ssa.FieldAddr:
+			v = addr.X
+		case *ssa.IndexAddr:
+			v = addr.X
+		default:
+			return v
+		}
+	}
+}
+
 func shouldAssertDirectNilDeref(v *ssa.UnOp) bool {
 	if v.Op != token.MUL {
 		return false
@@ -1426,6 +1530,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		ret = b.BinOp(v.Op, x, y)
 	case *ssa.UnOp:
 		if v.Op == token.MUL {
+			if p.soleRefIsLowerableAggregateStore(v) {
+				return
+			}
 			if _, ok := p.methodNilDerefChecks[v]; ok {
 				return p.compileCheckedDeref(b, v)
 			}
@@ -1883,6 +1990,18 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		if isBlankFieldStore(va) {
 			_ = p.compileValue(b, v.Val)
+			return
+		}
+		if load, typ, ok := p.largeAggregateCopyLoad(v.Val); ok && aggregateStoreCanDeferLoad(load, v) {
+			ptr := p.compileValue(b, va)
+			p.recordPanicSite(b, load.Pos())
+			p.assertNilDerefBase(b, load.X)
+			src := p.compileValue(b, load.X)
+			b.AssertNilDeref(src)
+			if !isKnownNonNilAddr(va) && !isWrapNilCheckCall(va) {
+				p.recordPanicSite(b, v.Pos())
+			}
+			b.Memmove(ptr, src, p.prog.SizeOf(typ))
 			return
 		}
 		if p.rewrites != nil {
