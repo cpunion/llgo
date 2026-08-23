@@ -86,3 +86,45 @@ func TestFloatToIntegerConversionSemantics(t *testing.T) {
 		t.Fatalf("float-to-integer conversions differ from gc\ngc:\n%s\nllgo:\n%s", want, got)
 	}
 }
+
+const saturatingFloatIntConversionProbe = `package main
+
+import "fmt"
+
+//go:noinline
+func id[T any](x T) T { return x }
+
+func emit[T ~float32 | ~float64](x T) {
+	fmt.Println(int32(x), int64(x), uint32(x), uint64(x), int8(x), uint8(x))
+}
+
+func main() {
+	one := id(1.0)
+	emit(id(float32(one / 0)))
+	emit(id(float32(-one / 0)))
+	emit(id(float64(one / 0)))
+	emit(id(float64(-one / 0)))
+}
+`
+
+func TestSaturatingFloatToIntegerConversionSemantics(t *testing.T) {
+	dir := t.TempDir()
+	writeCallerAcceptanceModule(t, dir, map[string]string{"main.go": saturatingFloatIntConversionProbe})
+	cmd := exec.Command(acceptanceLLGoBinary(t), "run", "-gcflags=-d=converthash=qy", "main.go")
+	cmd.Dir = dir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("llgo run failed: %v\n%s", err, stderr.Bytes())
+	}
+	got := string(out)
+	const want = `2147483647 9223372036854775807 4294967295 18446744073709551615 -1 255
+-2147483648 -9223372036854775808 0 0 0 0
+2147483647 9223372036854775807 4294967295 18446744073709551615 -1 255
+-2147483648 -9223372036854775808 0 0 0 0
+`
+	if got != want {
+		t.Fatalf("saturating float-to-integer conversions mismatch\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}

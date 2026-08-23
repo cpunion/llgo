@@ -148,8 +148,8 @@ func TestApplyBuildFlagsFrontendGCFlagSemantics(t *testing.T) {
 			if err := ApplyBuildFlags(conf, tt.flags); err != nil {
 				t.Fatal(err)
 			}
-			if conf.OptLevel != tt.wantLevel || conf.GoVersion != tt.wantGo || conf.SaturatingFloatToUint32 != tt.wantSaturating {
-				t.Fatalf("frontend config = (%v, %q, saturating=%v), want (%v, %q, saturating=%v)", conf.OptLevel, conf.GoVersion, conf.SaturatingFloatToUint32, tt.wantLevel, tt.wantGo, tt.wantSaturating)
+			if conf.OptLevel != tt.wantLevel || conf.GoVersion != tt.wantGo || conf.SaturatingFloatToInt != tt.wantSaturating {
+				t.Fatalf("frontend config = (%v, %q, saturating=%v), want (%v, %q, saturating=%v)", conf.OptLevel, conf.GoVersion, conf.SaturatingFloatToInt, tt.wantLevel, tt.wantGo, tt.wantSaturating)
 			}
 		})
 	}

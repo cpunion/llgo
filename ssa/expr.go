@@ -1089,20 +1089,20 @@ func castInt(b Builder, x llvm.Value, xtyp Type, typ Type) llvm.Value {
 func castFloatToInt(b Builder, x llvm.Value, typ Type) llvm.Value {
 	dstSize := b.Prog.td.TypeAllocSize(typ.ll)
 	target := b.Prog.Target()
-	saturatingUint32 := target.SaturatingFloatToUint32 && typ.kind == vkUnsigned && dstSize == 4
-	// The amd64 lowering only models legacy CVTT semantics. Saturating uint32
-	// conversions must use the guarded unsigned conversion below.
-	if target.effectiveGOARCH() == "amd64" && !saturatingUint32 {
+	saturating := target.SaturatingFloatToInt
+	// The legacy amd64 lowering models CVTT semantics. Go's converthash mode
+	// instead makes float-to-[u]int overflow saturate, like the guarded
+	// conversions used on the other supported architectures.
+	if target.effectiveGOARCH() == "amd64" && !saturating {
 		return castFloatToIntAMD64(b, x, typ, dstSize)
 	}
 	if typ.kind == vkUnsigned {
 		if dstSize < 4 {
-			// Go's converthash transition only changes float-to-uint32.
-			// Preserve the existing signed conversion and truncation for uint8/uint16.
+			// Go converts uint8/uint16 through a signed 32-bit intermediate.
 			tmp := castFloatToSignedInt(b, x, b.Prog.Int32(), 32)
 			return llvm.CreateTrunc(b.impl, tmp, typ.ll)
 		}
-		if dstSize == 4 && !saturatingUint32 {
+		if dstSize == 4 && !saturating {
 			tmp := castFloatToSignedInt(b, x, b.Prog.Int64(), 64)
 			return llvm.CreateTrunc(b.impl, tmp, typ.ll)
 		}
