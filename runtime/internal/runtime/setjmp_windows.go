@@ -9,9 +9,9 @@ import (
 )
 
 // Windows has no signal-mask variant of setjmp. These are logical runtime
-// declarations: the SSA builder lowers x86 targets to their architecture-
-// specific CRT entry and ARM64 to LLGo's ABI-only context entry. The latter
-// avoids UCRT's virtual unwind because Go defers are unwound by LLGo itself.
+// declarations: the SSA builder lowers x86 targets to non-unwinding CRT
+// entries and ARM64 to LLGo's ABI-only context entry. Go defers are unwound
+// by LLGo itself, so the Windows virtual unwinder must not run here.
 //
 //go:linkname Sigsetjmp C.setjmp
 func Sigsetjmp(env *SigjmpBuf, savemask c.Int) c.Int
