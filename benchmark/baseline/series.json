@@ -50,10 +50,10 @@
       "label": "Branch codex/windows-review-fixes-20260823",
       "path": "series/branch/d8add96985a6d759/summary.json",
       "configPath": "series/branch/d8add96985a6d759/config.json",
-      "commitPath": "commits/5498af5d2005953cc7433f99aa4915c24234b10e.json",
-      "sha": "5498af5d2005953cc7433f99aa4915c24234b10e",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/5498af5d2005953cc7433f99aa4915c24234b10e",
-      "updatedAt": "2026-08-23T22:28:34.597Z"
+      "commitPath": "commits/cf155a435101c0f2112275ac384309d4926010bd.json",
+      "sha": "cf155a435101c0f2112275ac384309d4926010bd",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/cf155a435101c0f2112275ac384309d4926010bd",
+      "updatedAt": "2026-08-23T23:54:34.997Z"
     },
     {
       "kind": "branch",
@@ -103,10 +103,10 @@
       "label": "PR #172",
       "path": "series/pull/172/summary.json",
       "configPath": "series/pull/172/config.json",
-      "commitPath": "commits/5498af5d2005953cc7433f99aa4915c24234b10e.json",
-      "sha": "5498af5d2005953cc7433f99aa4915c24234b10e",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/5498af5d2005953cc7433f99aa4915c24234b10e",
-      "updatedAt": "2026-08-23T22:28:34.551Z"
+      "commitPath": "commits/cf155a435101c0f2112275ac384309d4926010bd.json",
+      "sha": "cf155a435101c0f2112275ac384309d4926010bd",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/cf155a435101c0f2112275ac384309d4926010bd",
+      "updatedAt": "2026-08-23T23:54:34.952Z"
     }
   ]
 }
