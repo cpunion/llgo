@@ -782,7 +782,13 @@ func Use() byte { return Large[%d] }
 	if !strings.Contains(ir, want) {
 		t.Fatalf("large array should keep a zero initializer:\n%s", ir)
 	}
-	assertStoreToGlobal(t, ir, "@staticinit.Large")
+	memmove := strings.Index(ir, "call void @llvm.memmove")
+	if memmove < 0 || !strings.Contains(ir[memmove:], "ptr @staticinit.Large,") {
+		t.Fatalf("large array runtime initialization should copy into the global:\n%s", ir)
+	}
+	if strings.Contains(ir, fmt.Sprintf("load [%d x i8]", length)) {
+		t.Fatalf("large array runtime initialization should not materialize an aggregate load:\n%s", ir)
+	}
 }
 
 func TestStaticInitHelperRejectsUnsupportedPaths(t *testing.T) {
