@@ -155,7 +155,14 @@ runs:
         Add-Content -Encoding utf8 $env:GITHUB_PATH $clangBin
         # WAMR's host-side Windows test runner is built with MSVC. LLGo itself
         # remains pinned to LLVM 19 by CC and CXX below.
-        Add-Content -Encoding utf8 $env:GITHUB_PATH (Split-Path (Get-Command cl.exe).Source)
+        # CMake's NMake generator invokes the compiler, resource compiler,
+        # manifest tool, and nmake in later workflow steps. Enter-VsDevShell
+        # only updates this PowerShell process, so persist each native tool
+        # directory explicitly for those steps.
+        @("cl.exe", "nmake.exe", "rc.exe", "mt.exe") |
+          ForEach-Object { Split-Path (Get-Command $_).Source } |
+          Select-Object -Unique |
+          ForEach-Object { Add-Content -Encoding utf8 $env:GITHUB_PATH $_ }
         Add-Content -Encoding utf8 $env:GITHUB_ENV "CC=$clangExe"
         Add-Content -Encoding utf8 $env:GITHUB_ENV "CXX=$(Join-Path $clangBin 'clang++.exe')"
         Add-Content -Encoding utf8 $env:GITHUB_ENV "CGO_ENABLED=1"
