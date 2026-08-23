@@ -42,7 +42,7 @@ case "$(uname -s)" in
         PLATFORM="windows"
         IWASM_NAME="iwasm.exe"
         CMAKE_GENERATOR_ARGS=(
-            -G Ninja
+            -G "NMake Makefiles"
             -D CMAKE_C_COMPILER=cl
             -D CMAKE_CXX_COMPILER=cl
         )
