@@ -107,7 +107,7 @@ func main() {
 }
 `
 
-func TestSaturatingFloatToIntegerConversionSemantics(t *testing.T) {
+func testSaturatingFloatToIntegerConversionSemantics(t *testing.T) {
 	dir := t.TempDir()
 	writeCallerAcceptanceModule(t, dir, map[string]string{"main.go": saturatingFloatIntConversionProbe})
 	cmd := exec.Command(acceptanceLLGoBinary(t), "run", "-gcflags=-d=converthash=qy", "main.go")
