@@ -227,6 +227,22 @@ func TestParsePkgSyntaxDefersInvalidReceiverToTypeChecker(t *testing.T) {
 import "bufio"
 
 func (b *bufio.Reader) Buffered() int { return -1 }
+
+type T struct{}
+
+//go:linkname (*T).ParenPointer C.parenPointer
+func ((*T)) ParenPointer() {}
+
+//go:linkname (*T).InnerParenPointer C.innerParenPointer
+func (*(T)) InnerParenPointer() {}
+
+type G[P any] struct{}
+
+//go:linkname G.Value C.genericValue
+func (G[P]) Value() {}
+
+//go:linkname (*G).Pointer C.genericPointer
+func ((*G[P])) Pointer() {}
 `
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "issue5089.go", src, parser.ParseComments)
@@ -239,9 +255,20 @@ func (b *bufio.Reader) Buffered() int { return -1 }
 	if err := ParsePkgSyntax(prog, fset, pkg, []*ast.File{file}); err != nil {
 		t.Fatalf("ParsePkgSyntax() error = %v", err)
 	}
-	decl := file.Decls[1].(*ast.FuncDecl)
-	if full, inPkg, ok := astFuncNameOK(pkg.Path(), decl); ok {
+	invalid := file.Decls[1].(*ast.FuncDecl)
+	if full, inPkg, ok := astFuncNameOK(pkg.Path(), invalid); ok {
 		t.Fatalf("astFuncNameOK(invalid receiver) = (%q, %q, true)", full, inPkg)
+	}
+	want := map[string]string{
+		pkg.Path() + ".(*T).ParenPointer":      "C.parenPointer",
+		pkg.Path() + ".(*T).InnerParenPointer": "C.innerParenPointer",
+		pkg.Path() + ".G.Value":                "C.genericValue",
+		pkg.Path() + ".(*G).Pointer":           "C.genericPointer",
+	}
+	for fullName, target := range want {
+		if got, ok := prog.Linkname(fullName); !ok || got != target {
+			t.Errorf("linkname %q = (%q,%v), want (%q,true)", fullName, got, ok, target)
+		}
 	}
 }
 

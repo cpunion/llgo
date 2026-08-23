@@ -454,29 +454,38 @@ func (p *context) initLink(line string, prefix int, export bool, f func(inPkgNam
 }
 
 func recvTypeName(typ ast.Expr) string {
-	name, ok := recvTypeNameOK(typ)
+	name, _, ok := recvTypeNameInfo(typ)
 	if !ok {
 		panic("unreachable")
 	}
 	return name
 }
 
-func recvTypeNameOK(typ ast.Expr) (string, bool) {
-retry:
+// recvTypeNameInfo normalizes the parentheses permitted by receiver syntax
+// before deciding whether the receiver is a value or pointer. In particular,
+// valid forms such as ((*T)), (*(T)), and ((*G[P])) must not be discarded by
+// the syntax-only metadata pass while malformed receivers are left to go/types.
+func recvTypeNameInfo(typ ast.Expr) (name string, pointer bool, ok bool) {
+	typ = ast.Unparen(typ)
+	if star, isPointer := typ.(*ast.StarExpr); isPointer {
+		pointer = true
+		typ = ast.Unparen(star.X)
+	}
 	switch t := typ.(type) {
 	case *ast.Ident:
-		return t.Name, true
+		return t.Name, pointer, true
 	case *ast.IndexExpr:
 		typ = t.X
-		goto retry
 	case *ast.IndexListExpr:
 		typ = t.X
-		goto retry
-	case *ast.ParenExpr:
-		typ = t.X
-		goto retry
+	default:
+		return "", false, false
 	}
-	return "", false
+	base, valid := ast.Unparen(typ).(*ast.Ident)
+	if !valid {
+		return "", false, false
+	}
+	return base.Name, pointer, true
 }
 
 // inPkgName:
@@ -496,23 +505,16 @@ func astFuncName(pkgPath string, fn *ast.FuncDecl) (fullName, inPkgName string) 
 func astFuncNameOK(pkgPath string, fn *ast.FuncDecl) (fullName, inPkgName string, ok bool) {
 	name := fn.Name.Name
 	if recv := fn.Recv; recv != nil {
-		if len(recv.List) != 1 {
+		if len(recv.List) != 1 || recv.List[0] == nil {
 			return "", "", false
 		}
-		var method string
-		t := recv.List[0].Type
-		if tp, ok := t.(*ast.StarExpr); ok {
-			recvName, valid := recvTypeNameOK(tp.X)
-			if !valid {
-				return "", "", false
-			}
+		recvName, pointer, valid := recvTypeNameInfo(recv.List[0].Type)
+		if !valid {
+			return "", "", false
+		}
+		method := recvName + "." + name
+		if pointer {
 			method = "(*" + recvName + ")." + name
-		} else {
-			recvName, valid := recvTypeNameOK(t)
-			if !valid {
-				return "", "", false
-			}
-			method = recvName + "." + name
 		}
 		return pkgPath + "." + method, method, true
 	}
