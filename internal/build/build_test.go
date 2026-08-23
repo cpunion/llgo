@@ -1456,6 +1456,21 @@ func TestApplyBuildModeCompileFlags(t *testing.T) {
 	applyBuildModeCompileFlags(BuildModeCShared, "linux", nil)
 }
 
+func TestCSharedLinkArgs(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		want string
+	}{
+		{goos: "linux", want: "-shared -fPIC"},
+		{goos: "darwin", want: "-shared -fPIC"},
+		{goos: "windows", want: "-shared"},
+	} {
+		if got := strings.Join(cSharedLinkArgs(test.goos), " "); got != test.want {
+			t.Errorf("cSharedLinkArgs(%q) = %q, want %q", test.goos, got, test.want)
+		}
+	}
+}
+
 func TestCHeaderPackagesExcludesStandardRuntime(t *testing.T) {
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()

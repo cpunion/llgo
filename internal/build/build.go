@@ -912,6 +912,14 @@ func applyBuildModeCompileFlags(mode BuildMode, goos string, export *crosscompil
 	}
 }
 
+func cSharedLinkArgs(goos string) []string {
+	args := []string{"-shared"}
+	if goos != "windows" {
+		args = append(args, "-fPIC")
+	}
+	return args
+}
+
 // DefaultBuildTags returns the build tags LLGo always enables for a target.
 func DefaultBuildTags(goarch, target string) string {
 	return defaultBuildTags(goarch, target)
@@ -1845,7 +1853,7 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	// Add build mode specific linker arguments
 	switch ctx.buildConf.BuildMode {
 	case BuildModeCShared:
-		buildArgs = append(buildArgs, "-shared", "-fPIC")
+		buildArgs = append(buildArgs, cSharedLinkArgs(ctx.buildConf.Goos)...)
 	case BuildModeExe:
 		if needsLinuxNoPIE(ctx, linkArgs) {
 			buildArgs = append(buildArgs, "-no-pie")
