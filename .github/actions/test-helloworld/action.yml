@@ -38,6 +38,10 @@ runs:
         Hello, LLGo!
         Hello, LLGo!
         Hello LLGo by cpp/std.Str"
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+            # ExitProcess does not flush UCRT streams; keep the C output observable.
+            export LLGO_STDIO_NOBUF=1
+        fi
         OUTPUT=$(llgo run . 2>&1)
         echo "$OUTPUT"
         if echo "$OUTPUT" | grep -qF "$EXPECTED"; then
