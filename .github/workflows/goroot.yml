@@ -24,21 +24,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # These are reproducibility pins, not floating series selectors.
-        # Upgrade them together in a dedicated toolchain-update PR.
+        # GOROOT compatibility tracks the current supported Go release only.
+        # Historical Go versions are intentionally omitted: their xfail and
+        # not-applicable classifications are removed as the corpus advances.
         os: [macos-latest, ubuntu-latest, windows-2022]
-        go-version: ["1.25.0", "1.26.7"]
+        go-version: ["1.26.7"]
         shard-index: ["0", "1", "2", "3"]
-        exclude:
-          - os: windows-2022
-            go-version: "1.25.0"
         include:
-          - go-version: "1.25.0"
-            lane: compatibility
           - go-version: "1.26.7"
             lane: primary
-        # Keep both supported runtime generations on Linux and macOS. Windows
-        # uses only the primary Go version until its native lane is stable.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -212,16 +206,14 @@ jobs:
           {
             echo '## GOROOT run summary'
             echo
-            echo "Received $report_count/20 shard reports."
+            echo "Received $report_count/12 shard reports."
             echo
             echo '| Platform / toolchain | Shards | Selected | Observed | Passed | Failed | Skipped |'
             echo '|---|---:|---:|---:|---:|---:|---:|'
-            write_row 'Darwin · Go 1.25.0' darwin/arm64 1.25.0 4
             write_row 'Darwin · Go 1.26.7' darwin/arm64 1.26.7 4
-            write_row '**Darwin total**' darwin/arm64 '' 8
-            write_row 'Linux · Go 1.25.0' linux/amd64 1.25.0 4
+            write_row '**Darwin total**' darwin/arm64 '' 4
             write_row 'Linux · Go 1.26.7' linux/amd64 1.26.7 4
-            write_row '**Linux total**' linux/amd64 '' 8
+            write_row '**Linux total**' linux/amd64 '' 4
             write_row 'Windows · Go 1.26.7' windows/amd64 1.26.7 4
             echo
             echo '_Passed means the runner classification succeeded; expected xfail/not-applicable failures and classified flakes are counted as Passed._'
@@ -237,8 +229,8 @@ jobs:
             fi
           } >>"$GITHUB_STEP_SUMMARY"
 
-          if [[ "$report_count" -ne 20 ]]; then
-            echo "error: expected 20 shard reports, got $report_count" >&2
+          if [[ "$report_count" -ne 12 ]]; then
+            echo "error: expected 12 shard reports, got $report_count" >&2
             exit 1
           fi
           if [[ "$GOROOT_RESULT" != success ]]; then
