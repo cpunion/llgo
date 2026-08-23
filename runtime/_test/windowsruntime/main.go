@@ -212,6 +212,7 @@ func main() {
 	checkProcessAffinityCPUCount()
 	checkUnicodeConsolePrint()
 	checkForeignFaultOnGoThread()
+	checkNilFunctionFaultOrigin()
 	checkNilFault()
 	checkConcurrentNilFault()
 	checkGC()
