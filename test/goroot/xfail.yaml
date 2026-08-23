@@ -1237,6 +1237,11 @@ flakes:
     case: typeparam/chans.go
     reason: select over the unbuffered channel can either complete or miss the final receive and time out on linux/amd64
   - version: go1.26
+    platform: darwin/arm64
+    directive: run
+    case: typeparam/chans.go
+    reason: conservative BDWGC roots can retain the Ranger receiver, delaying its finalizer and channel close past the test timeout on darwin/arm64
+  - version: go1.26
     platform: windows/amd64
     directive: run
     case: typeparam/chans.go
