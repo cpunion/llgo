@@ -75,15 +75,15 @@ jobs:
           set -x
           source doc/_readme/scripts/install_ubuntu.sh
 
-      - name: Install dependencies on Windows
-        if: startsWith(matrix.os, 'windows')
-        uses: ./.github/actions/setup-deps
-
       - name: Set up Python 3.12 on Windows
         if: startsWith(matrix.os, 'windows')
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Install dependencies on Windows
+        if: startsWith(matrix.os, 'windows')
+        uses: ./.github/actions/setup-deps
 
       - name: Install llgo with tools
         shell: bash
@@ -145,15 +145,15 @@ jobs:
           source doc/_readme/scripts/install_ubuntu.sh
           echo "PATH=/usr/lib/llvm-19/bin:$PATH" >> $GITHUB_ENV
 
-      - name: Install dependencies on Windows
-        if: startsWith(matrix.os, 'windows')
-        uses: ./.github/actions/setup-deps
-
       - name: Set up Python 3.12 on Windows
         if: startsWith(matrix.os, 'windows')
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Install dependencies on Windows
+        if: startsWith(matrix.os, 'windows')
+        uses: ./.github/actions/setup-deps
 
       - name: Install llgo with tools
         shell: bash
