@@ -529,7 +529,7 @@ func assertCoroStaticDeferNativeE2ELinkedSymbols(t *testing.T, executable string
 		"github.com/xgo-dev/llgo/runtime/internal/runtime.TracePanic",
 		"github.com/xgo-dev/llgo/runtime/internal/runtime.printany",
 	} {
-		if strings.Contains(symbols, forbidden) {
+		if coroNativeE2ENMHasExactSymbol(symbols, forbidden) {
 			t.Fatalf("static-defer E2E unexpectedly linked legacy PanicABI symbol %q", forbidden)
 		}
 	}

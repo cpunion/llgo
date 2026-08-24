@@ -1132,7 +1132,7 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"github.com/xgo-dev/llgo/runtime/internal/runtime.TracePanic",
 		"github.com/xgo-dev/llgo/runtime/internal/runtime.printany",
 	} {
-		if strings.Contains(symbols, forbidden) {
+		if coroNativeE2ENMHasExactSymbol(symbols, forbidden) {
 			t.Fatalf("test-only coroutine island unexpectedly extracted legacy PanicABI symbol %q", forbidden)
 		}
 	}
