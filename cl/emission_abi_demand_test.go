@@ -928,6 +928,44 @@ func Use() any { return multiownergen.F(1) }
 	}
 }
 
+func TestEmissionUniverseGenericLocalCapturedClosureKeepsLexicalOwner(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/capturedlocal", `package capturedlocal
+func F[T any](value T) T {
+	type result struct { Value T }
+	results := make(chan result, 1)
+	go func() { results <- result{Value: value} }()
+	return (<-results).Value
+}
+func Use() int { return F[int](1) }
+`)
+	testProg.ssa.Build()
+
+	prog := ssatest.NewProgram(t, nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := pkg.ssa.Func("F")
+	var found bool
+	for local, owner := range universe.localGenericOwners {
+		if local.Obj() == nil || local.Obj().Name() != "result" {
+			continue
+		}
+		found = true
+		if owner == nil {
+			t.Fatal("captured local result has a nil definition owner")
+		}
+		if owner.Origin() != origin || owner.Parent() != nil {
+			t.Fatalf("captured local result owner = %v (parent %v), want F[int]", owner, owner.Parent())
+		}
+	}
+	if !found {
+		t.Fatal("captured generic local result has no frozen definition owner")
+	}
+}
+
 func TestEmissionUniverseDisambiguatesLinkOnceInstancesAcrossUseOwners(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	gen := testProg.addPackage(t, "example.com/emission/crossownergen", `package crossownergen

@@ -4467,9 +4467,23 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 			continue
 		}
 		ctx.goFn = fn
-		if ctx.isGenericLocalType(t.Obj()) {
-			return &ctx
+		if !ctx.isGenericLocalType(t.Obj()) {
+			continue
 		}
+		// Instantiated closures inherit their enclosing generic function's
+		// type arguments. That does not make a closure the definition owner of
+		// a local type declared outside the literal. Prefer the innermost source
+		// function whose own syntax contains the declaration; a function with
+		// known, non-containing syntax is only a consumer. This also keeps a
+		// local type passed to an unrelated generic helper on the frozen-registry
+		// path instead of assigning the helper a false definition ownership.
+		if pos := t.Obj().Pos(); pos.IsValid() {
+			syntax := sourceFunctionSyntax(fn)
+			if syntax == nil || pos < syntax.Pos() || pos > syntax.End() {
+				continue
+			}
+		}
+		return &ctx
 	}
 	return nil
 }
@@ -4677,15 +4691,21 @@ func (p *context) enclosingFunctionSyntax(pos token.Pos) ast.Node {
 	// Instantiated local types may lose their scope parent while a nested
 	// closure still refers to a declaration in its enclosing generic function.
 	for fn := p.goFn; fn != nil; fn = fn.Parent() {
-		syntaxFn := fn
-		if origin := fn.Origin(); origin != nil {
-			syntaxFn = origin
-		}
-		if syntax := syntaxFn.Syntax(); syntax != nil && syntax.Pos() <= pos && pos <= syntax.End() {
+		if syntax := sourceFunctionSyntax(fn); syntax != nil && syntax.Pos() <= pos && pos <= syntax.End() {
 			return syntax
 		}
 	}
 	return nil
+}
+
+func sourceFunctionSyntax(fn *ssa.Function) ast.Node {
+	if fn == nil {
+		return nil
+	}
+	if origin := fn.Origin(); origin != nil {
+		fn = origin
+	}
+	return fn.Syntax()
 }
 
 func isTypeParamObject(obj types.Object) bool {
