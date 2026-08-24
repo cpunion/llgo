@@ -566,7 +566,7 @@ func inferCoroRawLLGoFileExecutorLeaves(
 		if err != nil {
 			continue
 		}
-		if dataLayout, canonical := coroExecutorLeafCanonicalDataLayout(ctx, module); canonical {
+		if dataLayout, alternate := coroExecutorLeafFrontendDataLayout(ctx, module); alternate {
 			if rebound, reboundErr := llvmproof.ProveExecutorLeafForDataLayout(
 				module, function.Name(), dataLayout,
 			); reboundErr == nil {
@@ -585,34 +585,22 @@ func inferCoroRawLLGoFileExecutorLeaves(
 	}
 }
 
-// coroExecutorLeafCanonicalDataLayout recognizes only LLVM 22 wasm Clang's
-// omission of LLGo's explicit i128:128 entry. The llvmproof package still has
-// to prove that every type in each individual call closure has identical ABI
-// layout before that closure may consume this canonical spelling.
-func coroExecutorLeafCanonicalDataLayout(
+// coroExecutorLeafFrontendDataLayout selects LLGo's target-machine spelling
+// when Clang emitted an equivalent data layout. The llvmproof package must
+// still prove identical byte order, pointer width, and ABI layout for every
+// type reachable from each individual call closure before that closure can be
+// rebound. This covers both LLVM 22 wasm's omitted i128 entry and native
+// frontend/Clang spellings which differ only in target-specific address-space
+// entries.
+func coroExecutorLeafFrontendDataLayout(
 	ctx *context,
 	module llvm.Module,
 ) (string, bool) {
-	if ctx == nil || ctx.prog == nil || module.IsNil() ||
-		!strings.HasPrefix(module.Target(), "wasm32-") ||
-		!strings.HasPrefix(ctx.prog.TargetSpec().Triple, "wasm32-") {
+	if ctx == nil || ctx.prog == nil || module.IsNil() {
 		return "", false
 	}
 	expected, observed := ctx.prog.DataLayout(), module.DataLayout()
 	if expected == "" || observed == "" || expected == observed {
-		return "", false
-	}
-	parts := strings.Split(expected, "-")
-	withoutI128 := make([]string, 0, len(parts))
-	removed := 0
-	for _, part := range parts {
-		if part == "i128:128" {
-			removed++
-			continue
-		}
-		withoutI128 = append(withoutI128, part)
-	}
-	if removed != 1 || strings.Join(withoutI128, "-") != observed {
 		return "", false
 	}
 	return expected, true

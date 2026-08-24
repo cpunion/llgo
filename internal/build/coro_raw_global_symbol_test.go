@@ -143,11 +143,17 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 	if err != nil {
 		t.Skip("clang is unavailable")
 	}
+	prog := llssa.NewProgram(&llssa.Target{
+		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
+	})
+	defer prog.Dispose()
 	ctx := &context{
 		buildConf:    &Config{Goos: runtime.GOOS, Goarch: runtime.GOARCH},
 		crossCompile: crosscompile.Export{CC: compiler},
+		prog:         prog,
 	}
 	sources := []string{
+		"../../runtime/internal/runtime/_wrap/coro_g_tls.c",
 		"../../runtime/internal/lib/runtime/_wrap/poll.c",
 		"../../runtime/internal/lib/runtime/_wrap/signal.c",
 		"../../runtime/internal/lib/runtime/_wrap/debugtrap.c",
@@ -156,6 +162,7 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 		"../../runtime/internal/coroworker/_worker/worker.c",
 	}
 	positive := []string{
+		"__llgo_coro_current_g_load_v1",
 		"__llgo_runtime_poll_desc_state_v1",
 		"__llgo_runtime_poll_desc_deadline_v1",
 		"__llgo_runtime_poll_desc_set_deadline_v1",
@@ -171,6 +178,10 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 		"llgo_debugtrap",
 	}
 	negative := []string{
+		// The TLS store deliberately retains its pointer argument. Its one
+		// bottom contract is owned by g_pthread.go; structural inference must
+		// continue to reject it rather than learning that lifetime by name.
+		"__llgo_coro_current_g_store_v1",
 		"__llgo_runtime_poll_fd_stream_v1",
 		"__llgo_runtime_poll_read_attempt_v1",
 		"__llgo_runtime_signal_receive_v1",
@@ -208,6 +219,13 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 					t.Errorf(
 						"executor-leaf proof for %q = %+v, %t",
 						symbol, proof, inferred,
+					)
+				}
+				if symbol == "__llgo_coro_current_g_load_v1" &&
+					proof.LLVMDataLayout != prog.DataLayout() {
+					t.Errorf(
+						"current-G executor-leaf layout = %q, frontend = %q",
+						proof.LLVMDataLayout, prog.DataLayout(),
 					)
 				}
 			}

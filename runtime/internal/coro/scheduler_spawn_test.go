@@ -98,7 +98,7 @@ func beginSpawnTestChildResume(t *testing.T, p *P, g *G, frame *testFrame) Actio
 func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
 	p := new(P)
 	parent := newYieldingTestG(t, "compiler-spawn-parent")
-	_ = beginSpawnTestResume(t, p, parent)
+	parentAction := beginSpawnTestResume(t, p, parent)
 	child := new(G)
 	if BeginSpawnCompilerLocal(parent.g, child, unsafe.Pointer(child), TaskStorageSize(), nil) ||
 		parent.g.spawnChild != nil || child.magic != 0 || child.taskLocal != nil {
@@ -122,11 +122,28 @@ func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
 	}
 	metadata := FrameFromStorage(root.storage)
 	if child.root != metadata || child.active != metadata || child.frames != metadata ||
-		child.state != GRunnable || child.runAction != ActionCheckResume ||
+		child.state != GRunnable || child.runAction != ActionInvalid ||
 		!child.queued || p.readyHead != child || p.readyTail != child ||
 		p.readyCount != 1 || parent.g.spawnChild != nil || child.spawnParent != nil || child.spawnP != nil {
 		t.Fatalf("compiler spawn commit state: child=%+v p=(%p,%p,%d) parent-child=%p",
 			child, p.readyHead, p.readyTail, p.readyCount, parent.g.spawnChild)
+	}
+	// The compiler transaction is private to the source P, but its published
+	// child is an ordinary initial runnable. It must not retain an owner-local
+	// runAction receipt which would make the child ineligible for fleet transfer.
+	yieldSpawnTestG(t, p, parent.g, parent.frame, parentAction)
+	target := new(P)
+	var mailbox RunnableTransferMailbox
+	if !BindRunnableTransferMailbox(&mailbox, target) {
+		t.Fatal("bind compiler-spawn transfer mailbox")
+	}
+	id, ok := PublishPNeutralRunnable(&mailbox, p, child)
+	if !ok || !id.Valid() || p.readyHead != parent.g || child.queued {
+		t.Fatalf("publish compiler-spawn child = (%+v, %t), source head=%p queued=%t",
+			id, ok, p.readyHead, child.queued)
+	}
+	if !ImportPNeutralRunnable(&mailbox, target, id) || target.readyHead != child || !child.queued {
+		t.Fatalf("import compiler-spawn child: target head=%p queued=%t", target.readyHead, child.queued)
 	}
 	runtime.KeepAlive(parent.frame.memory)
 	runtime.KeepAlive(root.memory)

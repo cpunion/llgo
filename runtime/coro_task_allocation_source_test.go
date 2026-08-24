@@ -179,6 +179,8 @@ func TestCoroNativeCurrentGUsesDirectTLSMirror(t *testing.T) {
 
 	gSource := readRuntimePollFile(t, "internal/runtime/g_pthread.go")
 	for _, required := range []string{
+		"func coroCurrentGLoadV1() unsafe.Pointer",
+		"func coroCurrentGStoreV1(unsafe.Pointer)",
 		"if ptr := coroCurrentGLoadV1(); ptr != nil",
 		"if ret := gKey.Set(c.Pointer(unsafe.Pointer(gp))); ret != 0",
 		"func setgCoro(gp *g)",

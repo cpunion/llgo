@@ -374,13 +374,6 @@ func CommitSpawnCompiler(parent, child *G, handle unsafe.Pointer) bool {
 	child.root = root
 	child.active = root
 	child.state = GRunnable
-	// Preserve the exact initial-resume receipt proved by the adjacent compiler
-	// transaction. The bounded selector may consume ActionCheckResume through
-	// beginExecutorRunContinuation instead of replaying BeginRunG's arbitrary-G
-	// ParkState, spawn, task-storage, and frame-graph audit. Generic CommitSpawn
-	// retains ActionInvalid because its independently supplied root did not pass
-	// this compiler-only receipt chain.
-	child.runAction = ActionCheckResume
 	child.spawnParent = nil
 	child.spawnP = nil
 	appendReadyUnchecked(p, child)

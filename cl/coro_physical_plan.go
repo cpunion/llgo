@@ -574,10 +574,10 @@ func (plan *coroPhysicalFunctionPlan) validateCaptureSnapshots() error {
 // retag, while constant retains one immutable SSA literal and its exact target
 // parameter type.
 type coroPhysicalTailForwardArgument struct {
-	sourceParameter int
-	constant        *ssa.Const
-	targetType      types.Type
-	retag           bool
+	sourceParameter   int
+	constant          *ssa.Const
+	targetType        types.Type
+	retagTransportKey string
 }
 
 // coroPhysicalTailForwardPlan proves that a source function contributes no
@@ -596,7 +596,6 @@ type coroPhysicalTailForwardPlan struct {
 func (plan *coroPhysicalTailForwardPlan) validate(
 	function *ssa.Function,
 	whole *coro.SSAPlan,
-	universe *EmissionUniverse,
 ) error {
 	if plan == nil || function == nil || whole == nil || plan.target == nil ||
 		plan.target == function || plan.targetID == "" || len(plan.target.FreeVars) != 0 {
@@ -635,17 +634,15 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 			}
 			sourceType := sourceSig.Params().At(argument.sourceParameter).Type()
 			identical := types.Identical(sourceType, argument.targetType)
-			if identical && argument.retag {
+			if identical && argument.retagTransportKey != "" {
 				return fmt.Errorf("tail-forward argument %d has a redundant source parameter retag", index)
 			}
-			if !identical && (!argument.retag || universe == nil ||
-				coroPhysicalTransportTypeKey(universe, sourceType) !=
-					coroPhysicalTransportTypeKey(universe, argument.targetType)) {
+			if !identical && argument.retagTransportKey == "" {
 				return fmt.Errorf("tail-forward argument %d has an incompatible source parameter retag", index)
 			}
 			continue
 		}
-		if argument.retag {
+		if argument.retagTransportKey != "" {
 			return fmt.Errorf("tail-forward argument %d retags a constant", index)
 		}
 		if argument.constant.Type() == nil ||
@@ -806,7 +803,7 @@ func prepareCoroPhysicalFunctionPlan(
 		plan.atomicCostProof = logical.AtomicCostProof
 		plan.atomicCertificate = logical.AtomicCostCertificate
 	}
-	tailForward, err := planCoroPhysicalTailForward(plan, whole, audit.universe)
+	tailForward, err := planCoroPhysicalTailForward(plan, whole, audit)
 	if err != nil {
 		return nil, err
 	}
@@ -828,12 +825,14 @@ func prepareCoroPhysicalFunctionPlan(
 func planCoroPhysicalTailForward(
 	physical *coroPhysicalFunctionPlan,
 	whole *coro.SSAPlan,
-	universe *EmissionUniverse,
+	audit *coroPhysicalPureSSAAudit,
 ) (*coroPhysicalTailForwardPlan, error) {
 	if physical == nil || physical.function == nil || whole == nil ||
+		audit == nil || audit.fn != physical.function || audit.universe == nil ||
 		physical.cleanup != nil || physical.critical != nil {
 		return nil, nil
 	}
+	universe := audit.universe
 	function := physical.function
 	logical, planned := whole.FunctionPlan(function)
 	if !planned || logical.Emission != coro.EmitCoroutine ||
@@ -959,20 +958,27 @@ scanAdapters:
 		if parameter != nil {
 			sourceIndex, owned := parameterIndex[parameter]
 			retag := !types.Identical(parameter.Type(), targetType)
+			retagTransportKey := ""
+			if retag {
+				sourceKey := coroPhysicalTransportTypeKey(universe, parameter.Type())
+				targetKey := coroPhysicalTransportTypeKey(universe, targetType)
+				if sourceKey != targetKey {
+					return nil, nil
+				}
+				retagTransportKey = sourceKey
+			}
 			if !owned || value.Type() == nil || !types.Identical(value.Type(), targetType) ||
 				(directParameter && retag) || (!directParameter && !retag) ||
-				(retag && (universe == nil ||
-					coroPhysicalTransportTypeKey(universe, parameter.Type()) !=
-						coroPhysicalTransportTypeKey(universe, targetType))) {
+				(retag && retagTransportKey == "") {
 				return nil, nil
 			}
 			if !directParameter {
 				usedAdapters[value] = none{}
 			}
 			arguments[index] = coroPhysicalTailForwardArgument{
-				sourceParameter: sourceIndex,
-				targetType:      targetType,
-				retag:           retag,
+				sourceParameter:   sourceIndex,
+				targetType:        targetType,
+				retagTransportKey: retagTransportKey,
 			}
 			continue
 		}
@@ -1030,7 +1036,7 @@ scanAdapters:
 		targetID: targetPlan.ID,
 		args:     arguments,
 	}
-	if err := forward.validate(function, whole, universe); err != nil {
+	if err := forward.validate(function, whole); err != nil {
 		return nil, fmt.Errorf("tail-forward physical plan: %w", err)
 	}
 	return forward, nil

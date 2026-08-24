@@ -254,7 +254,7 @@ func Spawned(value unsafe.Pointer) { go Call(value) }
 	if physical.tailForward == nil || physical.tailForward.target != target ||
 		len(physical.tailForward.args) != 1 ||
 		physical.tailForward.args[0].sourceParameter != 0 ||
-		!physical.tailForward.args[0].retag {
+		physical.tailForward.args[0].retagTransportKey == "" {
 		t.Fatalf("local-export Root tail-forward = %+v; want exact managed target", physical.tailForward)
 	}
 	rootEntry := requireCoroPhysicalFunction(t, module, pkg.types.Path()+".Root")

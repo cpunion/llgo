@@ -927,12 +927,14 @@ func ResumedExecutorRun(
 // PrepareIssuedExecutorDestroyAfterResume consumes one still-private issued
 // resume and opens its adjacent normal-completion done/destroy interval.
 // The optimization cannot cross panic/cancellation, foreign reentry, producer
-// callback, or a host boundary. A ready peer does not invalidate it: final
-// suspend has already ended user execution, the bounded runner charges destroy
-// as a separate reduction, and the ordinary action commit preserves readyDebt
-// after the adjacent deallocation. Keeping the issued capability live on
-// either clean path removes a duplicate validation, while llvm.coro.done
-// remains an independent guard.
+// callback, an owner-bound root continuation, or a host boundary. Ordinary
+// ready peers do not invalidate it: final suspend ended user execution and the
+// bounded runner preserves their fairness debt after adjacent deallocation.
+// An owner-bound root may instead publish a program-level lifecycle transition
+// (notably normal-main return), so it must run before a completed child crosses
+// command-close ordering. Keeping the issued capability live on the proven
+// path removes a duplicate validation, while llvm.coro.done remains an
+// independent guard.
 //
 // Panic unwinding and foreign reentry deliberately retain their existing
 // separately scheduled destroy paths because those transitions carry an
@@ -954,11 +956,20 @@ func PrepareIssuedExecutorDestroyAfterResume(
 		g.destroyTarget.handle != action.Handle ||
 		g.destroyTarget.state != FrameDestroyPending ||
 		g.park.taskCancelPhase == taskCancelRequested || g.panicUnwind ||
-		p.foreignReentry != nil {
+		p.foreignReentry != nil || executorRunReadyOwnerBoundary(p) {
 		return false
 	}
 	driver.run.issued = ActionCheckDestroy
 	return true
+}
+
+// executorRunReadyOwnerBoundary recognizes the one queue shape whose next
+// resume can terminate or reconfigure the complete program. Runnable affinity
+// is a frozen root property, unlike task storage or frame position, and the
+// OS-thread selector supplies the exact next runnable under lock affinity.
+func executorRunReadyOwnerBoundary(p *P) bool {
+	next := nextOSThreadRunnable(p)
+	return next != nil && next.runnableAffinity == runnableCurrentOwner
 }
 
 // FinishIssuedExecutorDestroyAfterResume consumes the prepared interval after

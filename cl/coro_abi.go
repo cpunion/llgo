@@ -269,6 +269,7 @@ type coroBodyContext struct {
 	frameRetention       *coroFrameRetentionProof
 	critical             *coroCriticalProof
 	terminalResultAllocs map[*ssa.Alloc]llssa.Expr
+	captureSnapshots     coroCaptureSnapshotValues
 	sourceBlockPollFresh bool
 }
 
@@ -644,7 +645,7 @@ func (p *context) beginCoroBody(
 		}
 	}
 	body.coro = b.BeginCoro(coroOptions)
-	p.materializeCoroCaptureSnapshots(b, p.coroEmissionPlan(), 2)
+	body.captureSnapshots = p.materializeCoroCaptureSnapshots(b, p.coroEmissionPlan(), 2)
 	if body.unsupportedRunDecision != nil {
 		// Every zero-ticket gate in this physical body shares one fail-closed
 		// destination. Restore the compiler-owned initial normal continuation
@@ -1331,7 +1332,7 @@ func (p *context) compileCoroTailForwardPhysicalBody(
 		panic("coroutine tail-forward emission requires one exact frozen physical plan")
 	}
 	forward := physical.tailForward
-	if err := forward.validate(function, p.immutablePlan(), p.emissionUniverse); err != nil {
+	if err := forward.validate(function, p.immutablePlan()); err != nil {
 		panic(fmt.Errorf("validate frozen coroutine tail-forward plan: %w", err))
 	}
 	if sourceParamBase != 2 {
@@ -1352,7 +1353,7 @@ func (p *context) compileCoroTailForwardPhysicalBody(
 	for _, argument := range forward.args {
 		if argument.sourceParameter >= 0 {
 			value := p.fn.PhysicalParam(sourceParamBase + argument.sourceParameter)
-			if argument.retag {
+			if argument.retagTransportKey != "" {
 				value = b.ChangeType(p.prog.Type(argument.targetType, llssa.InGo), value)
 			}
 			args = append(args, value)

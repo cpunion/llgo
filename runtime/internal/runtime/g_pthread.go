@@ -37,12 +37,11 @@ var (
 // teardown: the key continues to name the independently allocated physical
 // placeholder for the complete lifetime of a coroutine executor M.
 
-//llgo:coro noblock
 //go:linkname coroCurrentGLoadV1 C.__llgo_coro_current_g_load_v1
 func coroCurrentGLoadV1() unsafe.Pointer
 
-//llgo:coro noblock
 //go:linkname coroCurrentGStoreV1 C.__llgo_coro_current_g_store_v1
+//llgo:coro noblock
 func coroCurrentGStoreV1(unsafe.Pointer)
 
 func init() {

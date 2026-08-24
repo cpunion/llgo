@@ -683,7 +683,7 @@ func (p *context) flattenCoroTailForwardAwait(
 		if forward == nil {
 			return entry, args
 		}
-		if err := forward.validate(entry.function, p.immutablePlan(), p.emissionUniverse); err != nil {
+		if err := forward.validate(entry.function, p.immutablePlan()); err != nil {
 			panic(fmt.Errorf("validate coroutine tail-forward await %q: %w", entry.plan.ID, err))
 		}
 		mapped := make([]llssa.Expr, len(forward.args))
@@ -696,7 +696,7 @@ func (p *context) flattenCoroTailForwardAwait(
 					))
 				}
 				mapped[index] = args[argument.sourceParameter]
-				if argument.retag {
+				if argument.retagTransportKey != "" {
 					mapped[index] = b.ChangeType(
 						p.prog.Type(argument.targetType, llssa.InGo), mapped[index],
 					)

@@ -373,11 +373,11 @@ func (p *context) materializeCoroCaptureSnapshots(
 	b llssa.Builder,
 	plan *coroPhysicalFunctionPlan,
 	environmentPhysicalParam int,
-) {
+) coroCaptureSnapshotValues {
 	if plan == nil || len(plan.captureSnapshots) == 0 {
-		return
+		return nil
 	}
-	if p == nil || p.emissionUniverse == nil || p.coroEmission == nil || p.coroEmission.phase != coroPhysicalEmissionPrologue ||
+	if p == nil || p.emissionUniverse == nil || p.coroEmissionPlan() != plan || p.hasStructuredOutcomePhysicalBody() ||
 		p.goFn == nil || plan.function != p.goFn || b == nil || b.Func != p.fn ||
 		environmentPhysicalParam < 0 {
 		panic("immutable capture snapshots escaped their physical prologue")
@@ -386,6 +386,7 @@ func (p *context) materializeCoroCaptureSnapshots(
 	if err != nil || !hasEnvironment {
 		panic("immutable capture snapshots require one frozen lexical environment")
 	}
+	values := make(coroCaptureSnapshotValues, len(plan.captureSnapshots))
 	environment := b.Load(p.fn.PhysicalParam(environmentPhysicalParam))
 	for _, snapshot := range plan.captureSnapshots {
 		if snapshot.index < 0 || snapshot.index >= len(p.goFn.FreeVars) ||
@@ -394,8 +395,15 @@ func (p *context) materializeCoroCaptureSnapshots(
 		}
 		cell := b.Field(environment, snapshot.index)
 		value := b.LoadKnownNonNil(cell)
-		p.coroEmission.publishCaptureSnapshot(snapshot.free, value)
+		if value.IsNil() {
+			panic("immutable capture snapshot produced no physical prologue value")
+		}
+		if _, duplicate := values[snapshot.free]; duplicate {
+			panic("immutable capture snapshot was materialized more than once")
+		}
+		values[snapshot.free] = value
 	}
+	return values
 }
 
 func (p *context) compileClosureEnvironment() llssa.Expr {

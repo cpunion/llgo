@@ -86,11 +86,12 @@ const (
 )
 
 type outcomePlainBodyContext struct {
-	abi            outcomePlainPhysicalABI
-	task           llssa.Expr
-	resultSlot     llssa.Expr
-	completion     llssa.Expr
-	outcomeScratch llssa.Expr
+	abi              outcomePlainPhysicalABI
+	task             llssa.Expr
+	resultSlot       llssa.Expr
+	completion       llssa.Expr
+	outcomeScratch   llssa.Expr
+	captureSnapshots coroCaptureSnapshotValues
 }
 
 func (body *outcomePlainBodyContext) publish(
@@ -289,7 +290,7 @@ func (p *context) compileOutcomePlainPhysicalBody(
 		resultSlot: p.fn.PhysicalParam(1),
 		completion: b.Convert(p.prog.Pointer(completionType), p.fn.PhysicalParam(2)),
 	}
-	p.materializeCoroCaptureSnapshots(b, physicalPlan, 3)
+	body.captureSnapshots = p.materializeCoroCaptureSnapshots(b, physicalPlan, 3)
 	bodyCapability := newOutcomePlainBodyCapability(body)
 	sourceBlocks := make([]llssa.BasicBlock, len(fn.Blocks))
 	for index := range sourceBlocks {
