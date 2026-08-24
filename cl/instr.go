@@ -2707,6 +2707,8 @@ func isKnownNonNilAddr(v ssa.Value) bool {
 	switch v := v.(type) {
 	case *ssa.Alloc, *ssa.Global:
 		return true
+	case *ssa.FreeVar:
+		return ssaSourceClosureFreeVarCell(v)
 	case *ssa.FieldAddr:
 		return isKnownNonNilAddr(v.X)
 	case *ssa.IndexAddr:

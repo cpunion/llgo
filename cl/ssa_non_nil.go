@@ -118,6 +118,13 @@ func ssaAddressValueProvenNonNilAtRecursive(
 	switch value := address.(type) {
 	case *ssa.Global, *ssa.Alloc:
 		return true
+	case *ssa.FreeVar:
+		// A lexical source closure captures a variable by its storage address.
+		// That cell is formed from an enclosing local/global allocation and can
+		// never be nil, even when the variable's own value is pointer-shaped and
+		// nil. Synthetic wrappers may instead capture receiver values directly,
+		// so keep them outside this structural proof.
+		return value.Parent() == use.Parent() && ssaSourceClosureFreeVarCell(value)
 	case *ssa.FieldAddr:
 		return value.Parent() == use.Parent() &&
 			ssaAddressValueProvenNonNilAtRecursive(value.X, value, visiting)
@@ -134,6 +141,15 @@ func ssaAddressValueProvenNonNilAtRecursive(
 	default:
 		return false
 	}
+}
+
+func ssaSourceClosureFreeVarCell(value *ssa.FreeVar) bool {
+	if value == nil {
+		return false
+	}
+	function := value.Parent()
+	return function != nil && function.Parent() != nil &&
+		function.Synthetic == "" && ssaPointerLike(value.Type())
 }
 
 // ssaFunctionValueProvenNonNilAt proves the language-level guard for an exact

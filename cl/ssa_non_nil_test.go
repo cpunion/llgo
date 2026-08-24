@@ -187,6 +187,44 @@ func TestSSACompletedIndexAddrPreservesBaseNonNilProof(t *testing.T) {
 	}
 }
 
+func TestSSASourceClosureFreeVarCellIsStructurallyNonNil(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+var Sink int
+func Owner(value int) func() {
+	return func() { _ = value; Sink++ }
+}
+`)
+	owner := ssaPkg.Func("Owner")
+	if owner == nil {
+		t.Fatal("SSA package has no Owner")
+	}
+	if len(owner.AnonFuncs) != 1 {
+		t.Fatalf("Owner anonymous functions = %v, want one", owner.AnonFuncs)
+	}
+	closure := owner.AnonFuncs[0]
+	if closure.Parent() != owner || closure.Synthetic != "" || len(closure.FreeVars) != 1 {
+		t.Fatalf("source closure shape: parent=%v synthetic=%q freevars=%d", closure.Parent(), closure.Synthetic, len(closure.FreeVars))
+	}
+	free := closure.FreeVars[0]
+	var deref *ssa.UnOp
+	for _, block := range closure.Blocks {
+		for _, instruction := range block.Instrs {
+			candidate, ok := instruction.(*ssa.UnOp)
+			if ok && candidate.Op == token.MUL && candidate.X == free {
+				deref = candidate
+			}
+		}
+	}
+	if deref == nil || !isKnownNonNilAddr(free) || !ssaAddressValueProvenNonNilAt(free, deref) {
+		t.Fatalf("source closure cell lacks structural non-nil proof: free=%v deref=%v", free, deref)
+	}
+
+	closure.Synthetic = "wrapper"
+	if isKnownNonNilAddr(free) || ssaAddressValueProvenNonNilAt(free, deref) {
+		t.Fatal("synthetic captured value received lexical-cell non-nil authority")
+	}
+}
+
 func TestDominatedNilChecksMatchCodegenAndEmissionFacts(t *testing.T) {
 	ssaPkg, _, files := buildGoSSAPkg(t, ssaDominatingNonNilFixture)
 	prog := newLLSSAProg(t)
