@@ -208,9 +208,10 @@ func (u *EmissionUniverse) coroWorkerAddressOnlyDeclaration(fn *ssa.Function) (b
 // coroInferredPatchWorkerAddressDeclaration recognizes the one annotation-free
 // address catalog under compiler control. Merely naming a user C declaration
 // "_trampoline" is not authority: the canonical declaration must be the exact
-// selected alternate of a source patch. The adapter declaration is already a
-// reviewable allow-list entry; its word ABI is derived later from its closed
-// FuncPCABI0-to-llgo.syscall flow.
+// selected alternate of a legacy package patch or belong to an exact AST file
+// selected by the compiler's GOROOT source-patch overlay. The adapter
+// declaration is already a reviewable allow-list entry; its word ABI is
+// derived later from its closed FuncPCABI0-to-llgo.syscall flow.
 func coroInferredPatchWorkerAddressDeclaration(
 	owner *preparedEmissionPackage,
 	fn *ssa.Function,
@@ -222,7 +223,8 @@ func coroInferredPatchWorkerAddressDeclaration(
 		extractTrampolineCName(fn.Name()) == "" {
 		return false
 	}
-	return owner.hasPatch && owner.fromPatch[fn]
+	return owner.hasPatch && owner.fromPatch[fn] ||
+		owner.compilerSourcePatchDeclaration(fn)
 }
 
 // coroWorkerCallableTarget freezes the accepted producer sources: an explicit
@@ -351,7 +353,7 @@ func coroWorkerCallableTarget(
 		return coroWorkerAddressTarget{}, "target-lacks-workeraddr", nil
 	}
 
-	// The declaration's presence in the selected patch is the reviewed
+	// The declaration's presence in the compiler-selected patch is the reviewed
 	// semantic allow-list entry. Its use through the exact llgo.syscall adapter
 	// supplies may-block/any-thread/no-reentry/borrow-until-complete behavior;
 	// the word width remains deliberately unknown until producer-forward SSA

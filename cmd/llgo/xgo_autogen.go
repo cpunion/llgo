@@ -4,7 +4,10 @@ package main
 
 import (
 	"fmt"
+	"runtime"
+
 	"github.com/goplus/cobra/xcmd"
+	"github.com/qiniu/x/stringutil"
 	"github.com/xgo-dev/llgo/cmd/internal/build"
 	"github.com/xgo-dev/llgo/cmd/internal/clean"
 	"github.com/xgo-dev/llgo/cmd/internal/compile"
@@ -14,8 +17,6 @@ import (
 	"github.com/xgo-dev/llgo/cmd/internal/run"
 	"github.com/xgo-dev/llgo/cmd/internal/test"
 	"github.com/xgo-dev/llgo/internal/env"
-	"github.com/qiniu/x/stringutil"
-	"runtime"
 )
 
 const _ = true

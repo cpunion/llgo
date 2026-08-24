@@ -107,6 +107,9 @@ func (p *context) beginCoroFunctionPreambleEmission(
 	var localityGuards []locality.Kind
 	switch phase {
 	case coroFunctionPreambleEntry:
+		if plan.recoverFrameBinding {
+			helpers = append(helpers, "BindRecoverFrame")
+		}
 		if plan.logicalCallerEntry {
 			helpers = append(helpers, "PushCallerLocationFrame")
 		}

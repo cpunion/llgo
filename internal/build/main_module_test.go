@@ -35,6 +35,8 @@ func TestGenMainModuleExecutable(t *testing.T) {
 			Goarch:    "amd64",
 		},
 	}
+	ctx.prog.EnableFuncInfoMetadata(true)
+	ctx.prog.EnableFuncInfoSites(true)
 	pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
 	bootstrap := &coroProgramBootstrapV1{
 		Version: coroProgramBootstrapVersionV2,
@@ -59,7 +61,11 @@ func TestGenMainModuleExecutable(t *testing.T) {
 	}
 	ir := mod.LPkg.String()
 	checks := []string{
-		"define i32 @main(",
+		"define i32 @" + processEntrySymbol + "(",
+		"define void @runtime.main()",
+		".pushsection llgo_funcinfo_entry",
+		".quad " + uint64Hex(funcInfoSymbolID(runtimeMainSymbol)),
+		".quad " + uint64Hex(funcInfoSymbolID(processEntrySymbol)),
 		"call void @Py_Initialize()",
 		"call void @Py_Finalize()",
 		"call void @\"example.com/foo.init\"()",
@@ -72,6 +78,18 @@ func TestGenMainModuleExecutable(t *testing.T) {
 		}
 	}
 	factory := mod.LPkg.Module().NamedFunction(coroProgramBootstrapFactorySymbolV2).String()
+	funcNames := make(map[string]string)
+	for _, rec := range readFuncInfo(mod.LPkg.Module()) {
+		funcNames[rec.symbol] = rec.name
+	}
+	for symbol, want := range map[string]string{
+		processEntrySymbol: runtimeGoexitName,
+		runtimeMainSymbol:  runtimeMainSymbol,
+	} {
+		if got := funcNames[symbol]; got != want {
+			t.Fatalf("funcinfo name for %q = %q, want %q", symbol, got, want)
+		}
+	}
 	assertInOrder(t, factory,
 		`call void @"example.com/b.init"()`,
 		`call void @"example.com/z.init"()`,
@@ -79,8 +97,8 @@ func TestGenMainModuleExecutable(t *testing.T) {
 		"call void @\"example.com/foo.init\"()",
 		"call void @\"example.com/foo.main\"()",
 	)
-	entry := mod.LPkg.Module().NamedFunction("main").String()
-	assertInOrder(t, entry,
+	startup := mod.LPkg.Module().NamedFunction(runtimeMainSymbol).String()
+	assertInOrder(t, startup,
 		"call void @Py_Initialize()",
 		"call ptr @"+coroProgramBeginSymbolV1,
 		"call void @Py_Finalize()",
@@ -263,7 +281,9 @@ func TestGenMainModuleLibraryInitializesRuntime(t *testing.T) {
 			})
 			ir := mod.LPkg.String()
 			checks := []string{
-				"define internal void @__llgo_runtime_ctor()",
+				"define internal void @__llgo_runtime_ctor(i32 %0, ptr %1)",
+				"store i32 %0, ptr @__llgo_argc",
+				"store ptr %1, ptr @__llgo_argv",
 				"call void @\"github.com/xgo-dev/llgo/runtime/internal/runtime.init\"()",
 				"call void @\"example.com/dep.init\"()",
 				"call void @\"example.com/foo.init\"()",
@@ -278,6 +298,13 @@ func TestGenMainModuleLibraryInitializesRuntime(t *testing.T) {
 					t.Fatalf("library module IR missing %q:\n%s", want, ir)
 				}
 			}
+			assertInOrder(t, ir,
+				"store i32 %0, ptr @__llgo_argc",
+				"store ptr %1, ptr @__llgo_argv",
+				"call void @\"github.com/xgo-dev/llgo/runtime/internal/runtime.init\"()",
+				"call void @\"example.com/dep.init\"()",
+				"call void @\"example.com/foo.init\"()",
+			)
 			if strings.Contains(ir, "define i32 @main") {
 				t.Fatalf("library mode should not emit main function:\n%s", ir)
 			}
@@ -353,6 +380,38 @@ func TestGenMainModuleCoroControlWrappersBuildModes(t *testing.T) {
 			}
 			if test.entry != "" && !strings.Contains(ir, test.entry) {
 				t.Fatalf("entry module IR missing %q:\n%s", test.entry, ir)
+			}
+		})
+	}
+}
+
+func TestGenMainModuleLibraryConstructorArgsByPlatform(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	for _, test := range []struct {
+		goos     string
+		wantArgs bool
+	}{
+		{goos: "linux", wantArgs: true},
+		{goos: "darwin", wantArgs: true},
+		{goos: "windows", wantArgs: false},
+	} {
+		t.Run(test.goos, func(t *testing.T) {
+			ctx := &context{
+				prog: llssa.NewProgram(nil),
+				buildConf: &Config{
+					BuildMode: BuildModeCShared,
+					Goos:      test.goos,
+					Goarch:    "amd64",
+				},
+			}
+			pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
+			ir := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{}).LPkg.String()
+			hasArgSignature := strings.Contains(ir, "define internal void @__llgo_runtime_ctor(i32 %0, ptr %1)")
+			hasArgStores := strings.Contains(ir, "store i32 %0, ptr @__llgo_argc") &&
+				strings.Contains(ir, "store ptr %1, ptr @__llgo_argv")
+			if hasArgSignature != test.wantArgs || hasArgStores != test.wantArgs {
+				t.Fatalf("constructor argument capture = (%v, %v), want %v:\n%s", hasArgSignature, hasArgStores, test.wantArgs, ir)
 			}
 		})
 	}
@@ -1054,13 +1113,18 @@ func TestGenMainModuleInstallsLocalContextWhenNeeded(t *testing.T) {
 			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV2, FunctionID: "main", Target: pkg.PkgPath + ".main"},
 		},
 	}
-	ir := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{coroBootstrap: bootstrap}).LPkg.String()
+	mod := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{coroBootstrap: bootstrap})
+	ir := mod.LPkg.String()
 	assertInOrder(t, ir,
 		"call void @"+coroFrameAllocatorBootstrapSymbolV1,
 		"EnterLocalContext",
-		"call ptr @"+coroProgramBeginSymbolV1,
+		"call void @runtime.main()",
 		"LeaveLocalContext",
 	)
+	runtimeMain := mod.LPkg.Module().NamedFunction(runtimeMainSymbol).String()
+	if !strings.Contains(runtimeMain, "call ptr @"+coroProgramBeginSymbolV1) {
+		t.Fatalf("runtime.main does not start the coroutine program:\n%s", runtimeMain)
+	}
 }
 
 func assertInOrder(t *testing.T, s string, wants ...string) {

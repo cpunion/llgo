@@ -3,6 +3,8 @@ package main
 
 import "github.com/goplus/lib/c"
 
+// AllocaCStrs builds a stack-resident, null-terminated pointer array and copies
+// every Go string into stack storage.
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	// The C vector and each C string outlive an await, so neither may be a

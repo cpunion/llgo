@@ -21,7 +21,6 @@ import (
 	"go/token"
 	"go/types"
 
-	"github.com/xgo-dev/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -88,9 +87,10 @@ func ssaValueProvenNonNilAt(pointer ssa.Value, use ssa.Instruction) bool {
 }
 
 // ssaAddressValueProvenNonNilAt proves that a pointer-producing SSA address
-// constructor cannot yield nil on the path reaching use. Bounds and nil are
-// deliberately independent: an IndexAddr participates only when the shared
-// fixed-array proof removes its bounds fault and its pointer-to-array base is
+// constructor cannot yield nil on the path reaching use. A completed
+// IndexAddr needs no duplicate static bounds proof: if its dynamic bounds
+// check failed, it produced no address and execution cannot reach use. Its
+// result is therefore non-nil whenever its pointer-to-array base is
 // independently known non-nil. This is the single FieldAddr predicate shared
 // by helper inventory, ABI preflight, and final emission.
 func ssaAddressValueProvenNonNilAt(address ssa.Value, use ssa.Instruction) bool {
@@ -122,17 +122,15 @@ func ssaAddressValueProvenNonNilAtRecursive(
 		return value.Parent() == use.Parent() &&
 			ssaAddressValueProvenNonNilAtRecursive(value.X, value, visiting)
 	case *ssa.IndexAddr:
-		if value.Parent() != use.Parent() || value.X == nil || value.Index == nil {
+		if value.Parent() != use.Parent() || value.X == nil {
 			return false
 		}
 		pointer, ok := types.Unalias(value.X.Type()).Underlying().(*types.Pointer)
 		if !ok {
 			return false
 		}
-		array, ok := types.Unalias(pointer.Elem()).Underlying().(*types.Array)
-		return ok && coro.ProveSSAExactSafeFixedArrayIndex(
-			value.Parent(), value.Index, array.Len(), value,
-		) && ssaAddressValueProvenNonNilAtRecursive(value.X, value, visiting)
+		_, ok = types.Unalias(pointer.Elem()).Underlying().(*types.Array)
+		return ok && ssaAddressValueProvenNonNilAtRecursive(value.X, value, visiting)
 	default:
 		return false
 	}

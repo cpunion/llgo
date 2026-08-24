@@ -1,10 +1,11 @@
 package runtime
 
 import (
-	"github.com/xgo-dev/llgo/runtime/abi"
-	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
 	"unsafe"
 	_ "unsafe"
+
+	"github.com/xgo-dev/llgo/runtime/abi"
+	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 func addOff(ptr unsafe.Pointer, off int32) unsafe.Pointer {

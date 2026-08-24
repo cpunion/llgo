@@ -27,3 +27,10 @@ func main() {
 	fn, n := add2()
 	c.Printf(c.Str("%d %d\n"), add()(100, 200), n)
 }
+
+// DARWIN-ARM64-NEXT:   %[[TMP3:[0-9]+]] = call i64 %__llgo_funcval_code(ptr swiftself %[[TMP1]], i64 100, i64 200)
+// LINUX-AMD64-NEXT:   %[[TMP3:[0-9]+]] = call i64 %__llgo_funcval_code(ptr nest %[[TMP1]], i64 100, i64 200)
+// DARWIN-ARM64-NEXT:   %[[TMP8:[0-9]+]] = call i64 %__llgo_funcval_code1(ptr swiftself %[[TMP6]], i64 100, i64 200)
+// LINUX-AMD64-NEXT:   %[[TMP8:[0-9]+]] = call i64 %__llgo_funcval_code1(ptr nest %[[TMP6]], i64 100, i64 200)
+// DARWIN-ARM64-NEXT:   %[[TMP16:[0-9]+]] = call i64 %__llgo_funcval_code2(ptr swiftself %[[TMP14]], i64 100, i64 200)
+// LINUX-AMD64-NEXT:   %[[TMP16:[0-9]+]] = call i64 %__llgo_funcval_code2(ptr nest %[[TMP14]], i64 100, i64 200)

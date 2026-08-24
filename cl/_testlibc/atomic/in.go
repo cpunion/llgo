@@ -10,6 +10,7 @@ import (
 func main() {
 	var v int64
 
+	// All operations target the same slot and retain sequential consistency.
 	// CHECK: store atomic i64 100, ptr [[ADDR:%[0-9]+]] seq_cst, align 8
 	atomic.Store(&v, 100)
 	// CHECK: load atomic i64, ptr [[ADDR]] seq_cst, align 8

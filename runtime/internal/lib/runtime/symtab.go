@@ -1,15 +1,15 @@
 // Copyright 2014 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Use of this source code is governed by a BSD-style license.
+// See LICENSES/Go-BSD-3-Clause.txt at this module root for license terms.
 
 package runtime
 
 import (
+	latomic "sync/atomic"
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	clitedebug "github.com/xgo-dev/llgo/runtime/internal/clite/debug"
-	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
 	rtdebug "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
@@ -219,6 +219,7 @@ var runtimePCSiteEnd *runtimePCSiteRecord
 
 type runtimePCLineFrame struct {
 	pc        uintptr
+	sequence  uintptr
 	entry     uintptr
 	function  string
 	file      string
@@ -1714,6 +1715,7 @@ func initRuntimePCLineFramesOnce() {
 		}
 		*(*runtimePCLineFrame)(unsafe.Add(frameBase, uintptr(nframes)*frameSize)) = runtimePCLineFrame{
 			pc:        pc,
+			sequence:  i,
 			entry:     entry,
 			function:  fc.function,
 			file:      file,
@@ -1782,25 +1784,35 @@ func swapRuntimePCLineFrames(base unsafe.Pointer, i, j int) {
 	*right = tmp
 }
 
+func runtimePCLineFrameLess(left, right *runtimePCLineFrame) bool {
+	if left.pc != right.pc {
+		return left.pc < right.pc
+	}
+	// PC anchors do not emit text bytes, so consecutive source statements can
+	// have the same address after optimization. Preserve their linker-section
+	// order and let deduplication below retain the last emitted statement.
+	return left.sequence < right.sequence
+}
+
 func quickSortRuntimePCLineFrames(base unsafe.Pointer, lo, hi int) {
 	for hi-lo > 16 {
 		mid := int(uint(lo+hi) >> 1)
-		if runtimePCLineFrameAt(base, mid).pc < runtimePCLineFrameAt(base, lo).pc {
+		if runtimePCLineFrameLess(runtimePCLineFrameAt(base, mid), runtimePCLineFrameAt(base, lo)) {
 			swapRuntimePCLineFrames(base, mid, lo)
 		}
-		if runtimePCLineFrameAt(base, hi).pc < runtimePCLineFrameAt(base, mid).pc {
+		if runtimePCLineFrameLess(runtimePCLineFrameAt(base, hi), runtimePCLineFrameAt(base, mid)) {
 			swapRuntimePCLineFrames(base, hi, mid)
 		}
-		if runtimePCLineFrameAt(base, mid).pc < runtimePCLineFrameAt(base, lo).pc {
+		if runtimePCLineFrameLess(runtimePCLineFrameAt(base, mid), runtimePCLineFrameAt(base, lo)) {
 			swapRuntimePCLineFrames(base, mid, lo)
 		}
-		pivot := runtimePCLineFrameAt(base, mid).pc
+		pivot := *runtimePCLineFrameAt(base, mid)
 		i, j := lo, hi
 		for {
-			for runtimePCLineFrameAt(base, i).pc < pivot {
+			for runtimePCLineFrameLess(runtimePCLineFrameAt(base, i), &pivot) {
 				i++
 			}
-			for runtimePCLineFrameAt(base, j).pc > pivot {
+			for runtimePCLineFrameLess(&pivot, runtimePCLineFrameAt(base, j)) {
 				j--
 			}
 			if i >= j {
@@ -1821,7 +1833,7 @@ func quickSortRuntimePCLineFrames(base unsafe.Pointer, lo, hi int) {
 	for i := lo + 1; i <= hi; i++ {
 		x := *runtimePCLineFrameAt(base, i)
 		j := i - 1
-		for j >= lo && runtimePCLineFrameAt(base, j).pc > x.pc {
+		for j >= lo && runtimePCLineFrameLess(&x, runtimePCLineFrameAt(base, j)) {
 			*runtimePCLineFrameAt(base, j+1) = *runtimePCLineFrameAt(base, j)
 			j--
 		}

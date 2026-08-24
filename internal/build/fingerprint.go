@@ -140,6 +140,7 @@ type commonSection struct {
 	EmitDWARF               bool         `yaml:"EMIT_DWARF,omitempty"`
 	PCLNMode                string       `yaml:"PCLN_MODE,omitempty"`
 	DisableBoundsChecks     bool         `yaml:"DISABLE_BOUNDS_CHECKS,omitempty"`
+	SaturatingFloatToUint32 bool         `yaml:"SATURATING_FLOAT_TO_UINT32,omitempty"`
 	LocalContext            bool         `yaml:"LOCAL_CONTEXT,omitempty"`
 	CC                      string       `yaml:"CC,omitempty"`
 	CCFlags                 []string     `yaml:"CCFLAGS,omitempty"`
@@ -158,7 +159,7 @@ func (s *commonSection) empty() bool {
 		s.CoroTargetFeatures == "" && s.CoroTargetABI == "" && s.CoroPointerBits == 0 &&
 		s.CoroEndianness == "" && s.CoroDataLayout == "" &&
 		!s.GoGlobalDCE && !s.EnableLTOPlugin && !s.EmitDWARF && s.PCLNMode == "" &&
-		!s.DisableBoundsChecks && !s.LocalContext &&
+		!s.DisableBoundsChecks && !s.SaturatingFloatToUint32 && !s.LocalContext &&
 		s.CC == "" && len(s.CCFlags) == 0 && len(s.CFlags) == 0 && len(s.LDFlags) == 0 &&
 		s.Linker == "" && len(s.ExtraFiles) == 0
 }

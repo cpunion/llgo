@@ -201,6 +201,7 @@ type coroFunctionPreamblePlan struct {
 	localityGuards        []locality.Kind
 	localContextEntry     bool
 	logicalCallerEntry    bool
+	recoverFrameBinding   bool
 	// emitsGoBody distinguishes a real frontend-emitted Go definition from a
 	// declaration/intrinsic stub whose SSA body exists only for policy and type
 	// analysis. Only the former may acquire a physical outcome-plain entry.
@@ -220,6 +221,7 @@ func sameCoroFunctionPreamblePlan(first, second coroFunctionPreamblePlan) bool {
 		slices.Equal(first.localityGuards, second.localityGuards) &&
 		first.localContextEntry == second.localContextEntry &&
 		first.logicalCallerEntry == second.logicalCallerEntry &&
+		first.recoverFrameBinding == second.recoverFrameBinding &&
 		first.emitsGoBody == second.emitsGoBody
 }
 
@@ -242,7 +244,10 @@ func (plan coroFunctionPreamblePlan) validate() error {
 			return fmt.Errorf("function preamble has noncanonical locality guard order")
 		}
 	}
-	expectedManaged := make([]string, 0, 2)
+	expectedManaged := make([]string, 0, 3)
+	if plan.recoverFrameBinding {
+		expectedManaged = append(expectedManaged, "BindRecoverFrame")
+	}
 	if len(plan.localityGuards) != 0 {
 		expectedManaged = append(expectedManaged, "LocalPackageLogical")
 	}
@@ -264,26 +269,34 @@ func (plan coroFunctionPreamblePlan) loweringRecipe() (coro.RecipeID, error) {
 	if err := plan.validate(); err != nil {
 		return "", err
 	}
+	var recipe coro.RecipeID
 	switch {
 	case plan.logicalCallerEntry && slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread}):
-		return coro.RecipeID("cl.function-preamble.logical-caller-locality.thread.v0"), nil
+		recipe = coro.RecipeID("cl.function-preamble.logical-caller-locality.thread.v0")
 	case plan.logicalCallerEntry && slices.Equal(plan.localityGuards, []locality.Kind{locality.Goroutine}):
-		return coro.RecipeID("cl.function-preamble.logical-caller-locality.goroutine.v0"), nil
+		recipe = coro.RecipeID("cl.function-preamble.logical-caller-locality.goroutine.v0")
 	case plan.logicalCallerEntry && slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread, locality.Goroutine}):
-		return coro.RecipeID("cl.function-preamble.logical-caller-locality.thread-goroutine.v0"), nil
+		recipe = coro.RecipeID("cl.function-preamble.logical-caller-locality.thread-goroutine.v0")
 	case plan.logicalCallerEntry && len(plan.localityGuards) == 0:
-		return coro.RecipeID("cl.function-preamble.logical-caller.v0"), nil
+		recipe = coro.RecipeID("cl.function-preamble.logical-caller.v0")
 	case slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread}):
-		return coro.RecipeID("cl.function-preamble.locality-guards.thread.v0"), nil
+		recipe = coro.RecipeID("cl.function-preamble.locality-guards.thread.v0")
 	case slices.Equal(plan.localityGuards, []locality.Kind{locality.Goroutine}):
-		return coro.RecipeID("cl.function-preamble.locality-guards.goroutine.v0"), nil
+		recipe = coro.RecipeID("cl.function-preamble.locality-guards.goroutine.v0")
 	case slices.Equal(plan.localityGuards, []locality.Kind{locality.Thread, locality.Goroutine}):
-		return coro.RecipeID("cl.function-preamble.locality-guards.thread-goroutine.v0"), nil
+		recipe = coro.RecipeID("cl.function-preamble.locality-guards.thread-goroutine.v0")
 	case len(plan.localityGuards) == 0:
-		return "", nil
+		// A recover binding below may be the only managed preamble operation.
 	default:
 		return "", fmt.Errorf("function preamble has unsupported locality guard recipe")
 	}
+	if !plan.recoverFrameBinding {
+		return recipe, nil
+	}
+	if recipe == "" {
+		return coro.RecipeID("cl.function-preamble.recover-frame.v0"), nil
+	}
+	return coro.RecipeID(strings.TrimSuffix(string(recipe), ".v0") + ".recover-frame.v0"), nil
 }
 
 func prepareCoroEmissionFunctionShape(fn *ssa.Function) (coroEmissionFunctionShape, error) {
@@ -341,6 +354,10 @@ func (builder coroProgramIRBuilder) materializeFunctionPreamble(
 		return fmt.Errorf("prepare emission universe: function preamble requires one exact program IR, builder, owner, and function")
 	}
 	plan := coroFunctionPreamblePlan{emitsGoBody: ftype == goFunc}
+	if ftype == goFunc && ctx.functionUsesRecover(ownerFn) {
+		plan.recoverFrameBinding = true
+		plan.managedRuntimeHelpers = append(plan.managedRuntimeHelpers, "BindRecoverFrame")
+	}
 	needsLocalContext := u.prog != nil && u.prog.NeedsLocalContext()
 	if u.prog != nil && u.logicalLocality {
 		needsLocalContext = u.prog.NeedsLogicalLocalContext()
@@ -397,6 +414,15 @@ func (builder coroProgramIRBuilder) materializeFunctionPreamble(
 				return fmt.Errorf("prepare emission universe: function %q preamble helper %q was not materialized", ownerFn.Name(), helper)
 			}
 			if err := u.recordCoroLoweredCall(ownerFn, helper, target); err != nil {
+				return err
+			}
+			// Logical-caller and locality preamble operations execute in either
+			// managed physical body or the ordinary Go ABI body selected after
+			// ProgramIR freezes. Preserve both occurrence domains even though they
+			// share one logical helper name: the physical body follows the managed
+			// edge above, while the ordinary body consumes this exact raw/plain
+			// mapping without rediscovering target policy during codegen.
+			if err := u.recordCoroPlainLoweredCall(ownerFn, helper, target); err != nil {
 				return err
 			}
 		}
@@ -546,19 +572,13 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 		}
 	}
 	// One source function may need both a plain and a physical coroutine
-	// representation. Channel instructions in the physical representation use
-	// the nonblocking CoroChanTry* edge above, while the plain representation
-	// still lowers to the synchronous ChanSend/ChanRecv helper. Retain that
-	// helper without recording a second physical lowered-call edge: the source
-	// channel instruction already contributes MayPark to coroutine analysis.
-	managed := make(map[string]none, len(sitePlan.managedRuntimeHelpers))
-	for _, helper := range sitePlan.managedRuntimeHelpers {
-		managed[helper.name] = none{}
-	}
+	// representation. Freeze the helper occurrence for each representation,
+	// including when both use the same logical helper and target. The managed
+	// record remains the only physical call edge; the separate plain mapping is
+	// an exact legacy-stack code reference and therefore cannot leak its effect
+	// into the physical body. Different helpers, such as CoroChanTry* versus
+	// ChanSend/ChanRecv, follow the same two-domain rule without special cases.
 	for _, helper := range sitePlan.plainRuntimeHelpers {
-		if _, shared := managed[helper]; shared && !coroCompilerElidesImplicitFaultRuntimeHelper(instr, helper) {
-			continue
-		}
 		target := runtimePkg.ssa.Func(coroRuntimeHelperTargetName(helper))
 		if target == nil {
 			return fmt.Errorf("prepare emission universe: function %q lowers its plain representation to missing runtime helper %q", ownerFn.Name(), helper)
@@ -570,16 +590,11 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 		if err := u.recordCoroPlainLoweredCall(ownerFn, helper, canonical); err != nil {
 			return err
 		}
-		// This helper is called only by the legacy-stack representation. Feed
-		// it through the existing exact synchronous-reference classifier so the
-		// second fixed point gives its closure RawPlainDemand without leaking
-		// its effects into the managed physical body.
-		if err := u.recordABIMethodReferences(ownerFn, []*ssa.Function{canonical}); err != nil {
-			return err
-		}
-		if err := u.recordABISyncReferences(ownerFn, []*ssa.Function{canonical}); err != nil {
-			return err
-		}
+		// Do not publish this representation-only occurrence through the raw ABI
+		// callback classifier. The build fixed point consumes plainLoweredCalls
+		// separately and activates it only when this owner's legacy-stack body is
+		// live; conflating the two would manufacture raw entries and complete raw
+		// closures for helpers used only by a managed physical twin.
 	}
 	return nil
 }
@@ -638,10 +653,42 @@ func coroCompilerElidesImplicitFaultRuntimeHelper(instr ssa.Instruction, helper 
 	case *ssa.FieldAddr:
 		return helper == "AssertNilDeref"
 	case *ssa.Index, *ssa.IndexAddr:
-		return helper == "CheckIndexRange" || helper == "AssertNilDeref"
+		return coroIndexPanicRuntimeHelper(helper) || helper == "AssertNilDeref"
 	default:
 		return false
 	}
+}
+
+func coroIndexPanicRuntimeHelper(helper string) bool {
+	return helper == "PanicIndex" || helper == "PanicIndexU"
+}
+
+// emissionIndexPanicRuntimeHelper mirrors Builder.checkIndex's exact signed
+// panic leaf. The SSA operand retains its source integer signedness even when
+// LLSSA later normalizes it to the target-width int/uint representation.
+func emissionIndexPanicRuntimeHelper(ctx *context, index ssa.Value) string {
+	if index == nil || index.Type() == nil {
+		return "PanicIndex"
+	}
+	typ := index.Type()
+	if ctx != nil {
+		typ = ctx.patchType(typ)
+	}
+	basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+	if ok && basic.Info()&types.IsUnsigned != 0 {
+		return "PanicIndexU"
+	}
+	return "PanicIndex"
+}
+
+// emissionMapRuntimeHelpers projects the effective patched source type through
+// LLSSA's sole generic/fast map ABI selector. Metadata-only universes may lack
+// a physical program and return exact=false; active compilation never does.
+func emissionMapRuntimeHelpers(ctx *context, mapType types.Type) (llssa.MapRuntimeHelperNames, bool) {
+	if ctx == nil || ctx.prog == nil || mapType == nil {
+		return llssa.MapRuntimeHelperNames{}, false
+	}
+	return ctx.prog.MapRuntimeHelpers(ctx.patchType(mapType))
 }
 
 func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.Instruction, managed []string) []string {
@@ -870,6 +917,8 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		case token.MUL:
 			free, _ := v.X.(*ssa.FreeVar)
 			elidedZeroSizedFreeVar := u.closureEnvironments.elidesZeroSizedFreeVar(v.Parent(), free)
+			refs, refsKnown := nonDebugReferrers(v)
+			unused := refsKnown && len(refs) == 0
 			if _, checkedReceiver := ctx.methodNilDerefChecks[v]; checkedReceiver {
 				// compileCheckedDeref preserves the checked pointer through the
 				// value-receiver call and therefore uses the pointer-returning ABI.
@@ -892,6 +941,16 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 				add("AssertNilDeref")
 			}
 			if isInterfaceCompareDeref(v) {
+				emissionAssertNilDerefBaseRuntimeHelpers(v.X, add)
+				add("AssertNilDeref")
+			}
+			if unused && !elidedZeroSizedFreeVar && !ssaAddressValueProvenNonNilAt(v.X, v) {
+				// compileInstrOrValue elides the unused load but must still
+				// evaluate its complete pointer chain and preserve the outer Go
+				// dereference. assertNilDerefBase may emit AssertNilDerefPtr for
+				// an intermediate FieldAddr/UnOp even when the loaded aggregate
+				// itself has non-zero size. A proven non-nil address still has
+				// its producer evaluated, but needs no synthetic fault edge.
 				emissionAssertNilDerefBaseRuntimeHelpers(v.X, add)
 				add("AssertNilDeref")
 			}
@@ -926,7 +985,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 	case *ssa.Index:
 		if !emissionBoundsChecksDisabled(ctx) &&
 			emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v) {
-			add("CheckIndexRange")
+			add(emissionIndexPanicRuntimeHelper(ctx, v.Index))
 		}
 		if emissionIndexNeedsManagedArrayTemporary(ctx, v) {
 			add("AllocZ")
@@ -940,7 +999,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		boundsDisabled := emissionBoundsChecksDisabled(ctx)
 		safeBounds := boundsDisabled || !emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v)
 		if !boundsDisabled && !safeBounds {
-			add("CheckIndexRange")
+			add(emissionIndexPanicRuntimeHelper(ctx, v.Index))
 		}
 		needsNil := false
 		if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer {
@@ -1013,14 +1072,28 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			add("AllocU")
 		}
 	case *ssa.Lookup:
-		// Builder.Lookup always materializes the map key through mapKeyPtr
-		// before calling MapAccess1/MapAccess2. mapKeyPtr owns an AllocU call;
-		// it is not represented by an x/tools SSA instruction.
-		add("AllocU")
-		if v.CommaOk {
-			add("MapAccess2")
+		// Consume LLSSA's exact generic/fast map ABI decision. Only the generic
+		// mapKeyPtr recipe owns an AllocU call; fast scalar, pointer, channel,
+		// and string keys pass their value directly.
+		if helpers, exact := emissionMapRuntimeHelpers(ctx, v.X.Type()); exact {
+			if helpers.KeyNeedsTemporary {
+				add("AllocU")
+			}
+			if v.CommaOk {
+				add(helpers.Access2)
+			} else {
+				add(helpers.Access1)
+			}
 		} else {
-			add("MapAccess1")
+			// Metadata-only/reporting universes have no physical Program. Keep the
+			// conservative generic family there; active compilation always has an
+			// exact target program and takes the branch above.
+			add("AllocU")
+			if v.CommaOk {
+				add("MapAccess2")
+			} else {
+				add("MapAccess1")
+			}
 		}
 	case *ssa.TypeAssert:
 		u.typeAssertRuntimeHelpers(ctx, v, add)
@@ -1059,8 +1132,14 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			}
 		}
 	case *ssa.MapUpdate:
-		// Builder.MapUpdate uses the same mapKeyPtr lowering as Lookup.
-		add("AllocU", "MapAssign")
+		if helpers, exact := emissionMapRuntimeHelpers(ctx, v.Map.Type()); exact {
+			if helpers.KeyNeedsTemporary {
+				add("AllocU")
+			}
+			add(helpers.Assign)
+		} else {
+			add("AllocU", "MapAssign")
+		}
 	case *ssa.Panic:
 		if !coroSyntheticSelectNoCasePanic(v) {
 			add("Panic")
@@ -1930,7 +2009,15 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 	case "panic":
 		add("Panic")
 	case "delete":
-		// The delete builtin also lowers its key through Builder.mapKeyPtr.
+		if len(args) == 2 {
+			if helpers, exact := emissionMapRuntimeHelpers(ctx, args[0].Type()); exact {
+				if helpers.KeyNeedsTemporary {
+					add("AllocU")
+				}
+				add(helpers.Delete)
+				break
+			}
+		}
 		add("AllocU", "MapDelete")
 	case "clear":
 		if len(args) == 1 {

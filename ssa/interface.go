@@ -147,12 +147,12 @@ func (b Builder) unsafeConcreteInterface(rawIntf *types.Interface, concrete Type
 	return b.unsafeIface(itab.impl, data)
 }
 
-func iMethodOf(rawIntf *types.Interface, name string) int {
+func iMethodOf(rawIntf *types.Interface, method *types.Func) int {
+	id := types.Id(method.Pkg(), method.Name())
 	n := rawIntf.NumMethods()
 	for i := 0; i < n; i++ {
 		m := rawIntf.Method(i)
-		if m.Name() == name {
-			// TODO(xsw): check signature
+		if types.Id(m.Pkg(), m.Name()) == id {
 			return i
 		}
 	}
@@ -161,7 +161,7 @@ func iMethodOf(rawIntf *types.Interface, name string) int {
 
 // Imethod returns closure of an interface method.
 func (b Builder) Imethod(intf Expr, method *types.Func) Expr {
-	return b.imethod(intf, method, false)
+	return b.imethod(intf, method, false, false)
 }
 
 // ImethodRawDataKnownNonNil returns an interface method closure whose
@@ -171,10 +171,16 @@ func (b Builder) Imethod(intf Expr, method *types.Func) Expr {
 // entry. This is the zero-copy transport used by target-proven coroutine
 // interface dispatch; ordinary interface calls continue to use Imethod.
 func (b Builder) ImethodRawDataKnownNonNil(intf Expr, method *types.Func) Expr {
-	return b.imethod(intf, method, true)
+	return b.imethod(intf, method, true, false)
 }
 
-func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil bool) Expr {
+// ImethodWithRecoverToken returns an interface method invocation whose code
+// pointer may also be used as recover-frame bookkeeping data.
+func (b Builder) ImethodWithRecoverToken(intf Expr, method *types.Func) Expr {
+	return b.imethod(intf, method, false, true)
+}
+
+func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil, recoverToken bool) Expr {
 	prog := b.Prog
 	intfType := types.Unalias(intf.raw.Type)
 	patchedIntfType := prog.patch(intfType)
@@ -192,7 +198,7 @@ func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil bool)
 		}
 	}
 	tclosure := prog.Type(sig, InGo)
-	i := iMethodOf(rawIntf, method.Name())
+	i := iMethodOf(rawIntf, method)
 	b.recordUseIfaceMethod(rawIntf, i)
 	var data Expr
 	if rawDataKnownNonNil {
@@ -200,11 +206,11 @@ func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil bool)
 	} else {
 		data = b.InlineCall(b.Pkg.rtFunc("IfacePtrData"), intf)
 	}
-	var fn Expr
 	impl := intf.impl
 	itab := Expr{b.faceItab(impl), prog.VoidPtrPtr()}
 	pfn := b.Advance(itab, prog.IntVal(uint64(i+3), prog.Int()))
-	if prog.enableGoGlobalDCE {
+	var fn Expr
+	if prog.enableGoGlobalDCE && !recoverToken {
 		fnType := prog.Elem(pfn.Type)
 		fn = Expr{
 			prog.methodCheckedLoad(b.impl, pfn.impl, methodCapabilityKey(method)),
@@ -212,6 +218,13 @@ func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil bool)
 		}
 	} else {
 		fn = b.Load(pfn)
+		if prog.enableGoGlobalDCE {
+			// A type.checked.load result is a virtual-call capability, not a
+			// general-purpose pointer. Recover bookkeeping needs the same code
+			// address as ordinary data, so retain the capability check while
+			// carrying the raw itab load into the transient invocation pair.
+			prog.methodCheckedLoad(b.impl, pfn.impl, methodCapabilityKey(method))
+		}
 	}
 	// This is a transient interface invocation pair, not a first-class
 	// funcval. The method receiver remains an ordinary ABI parameter.
@@ -536,20 +549,19 @@ func (b Builder) TypeAssert(x Expr, assertedTyp Type, commaOk bool) Expr {
 	blks := b.Func.MakeBlocks(2)
 	b.If(eq, blks[0], blks[1])
 	b.SetBlockEx(blks[1], AtEnd, true)
-	b.Call(b.Pkg.rtFunc("PanicTypeAssert"), tx, b.Str(assertedTyp.RawType().String()), b.Str(typeAssertMissingMethod(assertedTyp)))
+	var source Expr
+	if rawIntf, ok := x.RawType().Underlying().(*types.Interface); ok && rawIntf.NumMethods() > 0 {
+		source = b.abiType(x.RawType())
+	} else {
+		source = b.Prog.Nil(b.Prog.AbiTypePtr())
+	}
+	b.Call(b.Pkg.rtFunc("PanicTypeAssert"), source, tx, tabi)
 	b.Unreachable()
 	b.SetBlockEx(blks[0], AtEnd, true)
 	result := val()
 	b.blk = logical
 	logical.last = blks[0].last
 	return result
-}
-
-func typeAssertMissingMethod(assertedTyp Type) string {
-	if rawIntf, ok := assertedTyp.RawType().Underlying().(*types.Interface); ok && rawIntf.NumMethods() > 0 {
-		return rawIntf.Method(0).Name()
-	}
-	return ""
 }
 
 // ChangeInterface constructs a value of one interface type from a

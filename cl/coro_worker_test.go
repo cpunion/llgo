@@ -409,7 +409,7 @@ func TestCoroWorkerSyscallFailureConventionIdentityIsFrozen(t *testing.T) {
 }
 
 func TestCoroWorkerProductionLinuxDynamicRawSyscallFailsClosed(t *testing.T) {
-	source, err := os.ReadFile("../runtime/internal/lib/syscall/syscall_linux_coro.go")
+	source, err := os.ReadFile("../runtime/_patch/syscall/syscall_linux_coro.go")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -32,7 +32,10 @@ import "unsafe"
 
 type Value struct { N int }
 
+type ArrayValue struct { N int }
+
 var Sink bool
+var ArrayValues [4]ArrayValue
 
 func GuardedEqual(value *Value) *int {
 	if value == nil { return nil }
@@ -62,6 +65,14 @@ func Unguarded(value *Value) *int {
 func Bypass(value *Value) *int {
 	if value != nil { Sink = true }
 	return &value.N
+}
+
+func GlobalArrayIndex(index int) *int {
+	return &ArrayValues[index].N
+}
+
+func PointerArrayIndex(values *[4]ArrayValue, index int) *int {
+	return &values[index].N
 }
 
 func LoadGuarded(value *int) int {
@@ -151,6 +162,27 @@ func TestSSAFunctionDominatingNonNilProofIsExact(t *testing.T) {
 		call := onlySSADynamicCall(t, function)
 		if got := ssaFunctionValueProvenNonNilAt(call.Common().Value, call); got != test.want {
 			t.Errorf("%s dominated function non-nil proof = %t, want %t", test.name, got, test.want)
+		}
+	}
+}
+
+func TestSSACompletedIndexAddrPreservesBaseNonNilProof(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, ssaDominatingNonNilFixture)
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "GlobalArrayIndex", want: true},
+		{name: "PointerArrayIndex"},
+	} {
+		function := ssaPkg.Func(test.name)
+		field := onlySSAFieldAddr(t, function)
+		index, ok := field.X.(*ssa.IndexAddr)
+		if !ok {
+			t.Fatalf("%s FieldAddr base is %T, want *ssa.IndexAddr", test.name, field.X)
+		}
+		if got := ssaAddressValueProvenNonNilAt(index, field); got != test.want {
+			t.Errorf("%s completed IndexAddr non-nil proof = %t, want %t", test.name, got, test.want)
 		}
 	}
 }

@@ -4,6 +4,11 @@ import (
 	"unsafe"
 )
 
+// llgo.funcPCABI0 resolves declarations and non-capturing functions directly,
+// and returns the code pointer (not the environment) for a closure.
+// DARWIN-ARM64-LABEL: define void @"{{.*}}.UseClosure$1"(ptr swiftself
+// LINUX-AMD64-LABEL: define void @"{{.*}}.UseClosure$1"(ptr nest
+
 //go:linkname funcPCABI0 llgo.funcPCABI0
 func funcPCABI0(fn interface{}) uintptr
 

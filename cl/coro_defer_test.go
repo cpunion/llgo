@@ -1328,6 +1328,61 @@ func Root(guard *Guard) { defer guard.release() }
 	}
 }
 
+func TestCoroStaticCleanupDirectPlainOccurrenceAcceptsDispatchValueTarget(t *testing.T) {
+	const source = `package foo
+var Sink func()
+func cleanup() {}
+func Root() { Sink = cleanup; defer cleanup() }
+`
+	prog, universe, plan, root, target := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+	targetPlan, planned := plan.FunctionPlan(target)
+	if !planned || targetPlan.Emission != coro.EmitPlain || targetPlan.FuncRep != coro.Dispatch {
+		t.Fatalf("cleanup target plan = %+v, present=%t; want plain Dispatch value target", targetPlan, planned)
+	}
+	var deferPlan coro.SSACallPlan
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if deferred, ok := instruction.(*ssa.Defer); ok {
+				deferPlan, _ = plan.CallPlan(deferred)
+			}
+		}
+	}
+	if deferPlan.Rep != coro.DirectPlain {
+		t.Fatalf("static cleanup occurrence representation = %s, want direct-plain", deferPlan.Rep)
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].target != target ||
+		cleanup.sites[0].kind != coroStaticCleanupPlain {
+		t.Fatalf("static Dispatch-valued cleanup plan = %+v", cleanup)
+	}
+}
+
+func TestCoroStaticCleanupConsumesWholeProgramNoUnwindCallClosure(t *testing.T) {
+	const source = `package foo
+func leaf() {}
+func cleanup() { leaf() }
+func Root() { defer cleanup() }
+`
+	prog, universe, plan, root, target := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+	targetPlan, planned := plan.FunctionPlan(target)
+	if !planned || targetPlan.Exec.Contains(coro.MayUnwind) {
+		t.Fatalf("cleanup target plan = %+v, present=%t; want inferred whole-program no-unwind proof", targetPlan, planned)
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].target != target ||
+		cleanup.sites[0].kind != coroStaticCleanupPlain {
+		t.Fatalf("static cleanup call-closure plan = %+v", cleanup)
+	}
+}
+
 func TestCoroStaticCleanupPlainTargetQueryRejectsOtherConsumers(t *testing.T) {
 	const source = `package foo
 func cleanup() {}

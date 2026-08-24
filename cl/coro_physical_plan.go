@@ -373,13 +373,20 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		}
 	}
 	switch plan.recipe {
+	case coroPhysicalInstructionStaticArrayRangeDerefElided:
+		// The source range uses only the fixed array length. Its physical body
+		// evaluates neither the dereference nor the plain representation's
+		// recoverable nil checks.
+		if helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
+			return true
+		}
 	case coroPhysicalInstructionFieldAddr, coroPhysicalInstructionDeref,
 		coroPhysicalInstructionImmutableCaptureLoad:
 		if helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
 			return true
 		}
 	case coroPhysicalInstructionIndexAddr, coroPhysicalInstructionIndex:
-		if helper == "CheckIndexRange" || helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
+		if coroIndexPanicRuntimeHelper(helper) || helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
 			return true
 		}
 		if helper == "AllocZ" && plan.reuseValueAddress {

@@ -69,7 +69,7 @@ func TestCoroImplicitIndexBoundsNativeAndWasm32(t *testing.T) {
 					body,
 					coroBoundsFaultKind(coroBoundsFaultIndex, true),
 				)
-				if strings.Contains(body, "CheckIndexRange") || strings.Contains(body, "AssertNilDeref") {
+				if strings.Contains(body, "PanicIndex") || strings.Contains(body, "AssertNilDeref") {
 					t.Fatalf("%s retained a native-stack index helper:\n%s", operation.name, body)
 				}
 				hook := strings.Index(body, "call void @"+coroFaultPrepareHookV2)

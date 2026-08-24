@@ -5,11 +5,12 @@ package runtime
 import (
 	"unsafe"
 
+	latomic "sync/atomic"
+
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
 	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
 	csyscall "github.com/xgo-dev/llgo/runtime/internal/clite/syscall"
-	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
 )
 
 // Minimal runtime netpoll backing for internal/poll.

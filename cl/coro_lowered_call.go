@@ -22,6 +22,7 @@ import (
 
 	"github.com/xgo-dev/llgo/internal/coro"
 	llssa "github.com/xgo-dev/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 // resolveCoroLoweredRuntimeCall replaces one rtFunc call with the exact
@@ -52,20 +53,32 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	// instrumentation and lowering helpers cannot become new authorities.
 	p.observeCoroSiteRuntimeHelper(helper)
 
-	frozenCall, ok, err := p.emissionUniverse.ResolveCoroLoweredCallRecord(p.goFn, helper)
-	if err != nil {
-		panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
-	}
-	target := frozenCall.Target
-	rawPlainOccurrence := ok && frozenCall.RawPlain
+	// ProgramIR freezes both occurrence domains before representation and
+	// demand reach their fixed point. Select by the body being emitted, not by
+	// the target's aggregate FunctionPlan: an ordinary/raw Go ABI body must use
+	// the independently proven legacy-stack entry even when its physical twin
+	// awaits the same logical helper as a managed coroutine.
+	plainDomain := !p.hasCoroPhysicalEmission()
+	frozenCall := coro.SSALoweredCall{}
+	target := (*ssa.Function)(nil)
+	ok := false
+	var err error
 	plainOnly := false
-	if !ok && p.coroBody() == nil {
+	if plainDomain {
 		target, ok, err = p.emissionUniverse.ResolveCoroPlainLoweredCall(p.goFn, helper)
 		if err != nil {
 			panic(fmt.Errorf("coroutine plain lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
 		}
 		plainOnly = ok
 	}
+	if !ok {
+		frozenCall, ok, err = p.emissionUniverse.ResolveCoroLoweredCallRecord(p.goFn, helper)
+		if err != nil {
+			panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
+		}
+		target = frozenCall.Target
+	}
+	rawPlainOccurrence := ok && !plainOnly && frozenCall.RawPlain
 	if !ok || target == nil {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q is absent from the frozen emission universe", helper, p.goFn.Name()))
 	}
@@ -79,7 +92,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		}
 	}
 	explicitStatusLegacyPlain, err := coroExplicitStatusElidedUsesRawPlainEntry(
-		p.hasCoroPhysicalBody(), p.rawPlainBody, frozenCall.ExplicitStatusElided,
+		p.hasStructuredOutcomePhysicalBody(), p.rawPlainBody, frozenCall.ExplicitStatusElided,
 	)
 	if err != nil {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
@@ -155,6 +168,16 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		}
 		return b.Call(fn.Expr, args...), true
 	case coro.EmitCoroutine:
+		if !p.hasStructuredOutcomePhysicalBody() {
+			ownerPlan, _ := p.immutablePlan().FunctionPlan(p.goFn)
+			panic(fmt.Errorf(
+				"coroutine lowered runtime call %q in non-physical owner %q (emission=%s primary=%s representation=%s demand=%s effect=%s) targets managed coroutine %q (%s; demand=%s effect=%s exec=%s; trace=%s)",
+				helper, p.goFn.Name(), ownerPlan.Emission, ownerPlan.Primary,
+				ownerPlan.FuncRep, ownerPlan.Demand, ownerPlan.Effect, targetPlan.ID,
+				target.String(), targetPlan.Demand, targetPlan.Effect, targetPlan.Exec,
+				p.immutablePlan().SuspensionEffectTrace(target, targetPlan.Effect),
+			))
+		}
 		if site := p.coroEmissionSite(); site != nil && site.placement == coroRuntimeHelperAtCleanup {
 			return p.compileCoroCleanupTargetAwait(b, target, args), true
 		}
@@ -175,24 +198,24 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 
 // coroExplicitStatusElidedUsesRawPlainEntry projects one immutable source-panic
 // fact into the body currently being emitted. The graph deliberately retains
-// only raw demand for the legacy runtime.Panic call: a physical coroutine
+// only raw demand for the legacy runtime.Panic call: a structured physical body
 // publishes its outcome and emits no call, while a managed plain primary (or a
 // raw variant) still executes the legacy native-stack helper. Keeping this
 // decision beside entry resolution prevents a plain primary from accidentally
 // requesting a managed helper entry and widening the whole-program coloring.
 func coroExplicitStatusElidedUsesRawPlainEntry(
-	physicalCoroutineBody bool,
+	structuredPhysicalBody bool,
 	rawPlainBody bool,
 	explicitStatusElided bool,
 ) (bool, error) {
 	if !explicitStatusElided {
 		return false, nil
 	}
-	if physicalCoroutineBody {
+	if structuredPhysicalBody {
 		if rawPlainBody {
-			return false, fmt.Errorf("ExplicitStatus-elided helper observed incompatible physical-coroutine and raw-plain body domains")
+			return false, fmt.Errorf("ExplicitStatus-elided helper observed incompatible structured-physical and raw-plain body domains")
 		}
-		return false, fmt.Errorf("ExplicitStatus-elided helper escaped into its physical coroutine body")
+		return false, fmt.Errorf("ExplicitStatus-elided helper escaped into its structured physical body")
 	}
 	if rawPlainBody {
 		return true, nil

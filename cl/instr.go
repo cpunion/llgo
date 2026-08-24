@@ -25,6 +25,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -1161,7 +1162,7 @@ func fnUsesRuntimeCaller(c *CallerTracking, fn *ssa.Function) bool {
 
 // runtimeCallerFuncSet is the per-package tracking set: functions that
 // must keep physical frames (noinline, no tail calls) and get statement
-// anchors at their call sites. Two criteria feed it:
+// anchors at their call sites. Five criteria feed it:
 //
 //  1. the function (transitively, within the package) reaches a
 //     runtime.Caller/Callers call — it consumes caller pcs itself;
@@ -1170,26 +1171,61 @@ func fnUsesRuntimeCaller(c *CallerTracking, fn *ssa.Function) bool {
 //     what the callee's fixed Caller depth attributes, so inlining it
 //     would both mis-attribute the location and, on ELF, drop the
 //     function symbol its pcline sections are link-ordered to.
+//  3. program-unique functions (main.main and package init functions)
+//     already have one logical instance, so retaining their frame is free;
+//  4. //go:noinline functions already retain their frame, so emitting
+//     statement anchors adds no further inlining cost;
+//  5. the function can run below a defer that consumes panic pcs — recover
+//     exposes the panicked call chain after longjmp has removed those physical
+//     frames, so the compiler must keep and annotate the possible callees.
 //
 // Criterion 2 tests membership against the callee package's *base* set
 // (criterion 1 alone), so tracking extends exactly one call level past a
 // pc-consuming package and does not cascade through arbitrary wrapper
 // layers; multi-package wrapper chains remain the P4 inline-tree's job.
 func runtimeCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function]bool {
+	return callerTrackingFuncSetsForPackage(c, pkg).frames
+}
+
+// recoverPanicSiteFuncSet is the subset whose implicit panic instructions
+// need exact PC-line anchors. Caller consumers, program-unique functions, and
+// //go:noinline functions can require stable frames without needing an anchor
+// at every potentially panicking instruction.
+func recoverPanicSiteFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function]bool {
+	return callerTrackingFuncSetsForPackage(c, pkg).recoverPanicSites
+}
+
+func callerTrackingFuncSetsForPackage(c *CallerTracking, pkg *ssa.Package) callerTrackingFuncSets {
 	if pkg == nil {
-		return nil
+		return callerTrackingFuncSets{}
 	}
-	if set, ok := c.extended[pkg]; ok {
-		return set
+	if sets, ok := c.extended[pkg]; ok {
+		return sets
+	}
+	if c.precomputed {
+		panic("caller-tracking function set was not precomputed")
 	}
 	base := runtimeCallerBaseSet(c, pkg)
-	out := make(map[*ssa.Function]bool, len(base))
+	funcs, trackable := collectRuntimeCallerFunctions(pkg)
+	sets := computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkg, funcs, base, trackable, func(dep *ssa.Package) map[*ssa.Function]bool {
+		return runtimeCallerBaseSet(c, dep)
+	})
+	c.extended[pkg] = sets
+	return sets
+}
+
+type callerTrackingFuncSets struct {
+	frames            map[*ssa.Function]bool
+	recoverPanicSites map[*ssa.Function]bool
+}
+
+func computeRuntimeCallerFuncSets(recover *recoverFacts, pkg *ssa.Package, funcs, base, trackable map[*ssa.Function]bool, baseSet func(*ssa.Package) map[*ssa.Function]bool) callerTrackingFuncSets {
+	frames := make(map[*ssa.Function]bool, len(base))
 	for fn := range base {
-		out[fn] = true
+		frames[fn] = true
 	}
-	_, trackable := collectRuntimeCallerFunctions(pkg)
 	for fn := range trackable {
-		if out[fn] {
+		if frames[fn] {
 			continue
 		}
 		// Criterion 3: pin program-unique frames. main.main and package
@@ -1197,7 +1233,7 @@ func runtimeCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function
 		// bottom frames of almost every panic traceback, where an
 		// approximate declaration-adjacent line is most visible.
 		if isProgramUniqueFrame(pkg, fn) {
-			out[fn] = true
+			frames[fn] = true
 			continue
 		}
 		// Criterion 4: //go:noinline functions already keep their frames,
@@ -1205,7 +1241,7 @@ func runtimeCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function
 		// panic-traceback lines become exact instead of
 		// declaration-adjacent.
 		if hasNoInlineDirective(fn) {
-			out[fn] = true
+			frames[fn] = true
 			continue
 		}
 		forEachCall(fn, func(call *ssa.CallCommon) {
@@ -1216,16 +1252,16 @@ func runtimeCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function
 			if !canTrackCallerFramesForPackage(callee.Pkg.Pkg.Path()) {
 				return
 			}
-			if runtimeCallerBaseSet(c, callee.Pkg)[callee] {
-				out[fn] = true
+			if baseSet(callee.Pkg)[callee] {
+				frames[fn] = true
 			}
 		})
 	}
-	if len(out) == 0 {
-		out = nil
+	recoverPanicSites := addRecoverObservableCallees(recover, pkg, funcs, base, frames, trackable, baseSet)
+	if len(frames) == 0 {
+		frames = nil
 	}
-	c.extended[pkg] = out
-	return out
+	return callerTrackingFuncSets{frames: frames, recoverPanicSites: recoverPanicSites}
 }
 
 // runtimeLogicalCallerFuncSet is the demand closure needed to preserve
@@ -1241,12 +1277,23 @@ func runtimeLogicalCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.F
 	if set, ok := c.logical[pkg]; ok {
 		return set
 	}
+	if c.precomputed {
+		panic("logical caller function set was not precomputed")
+	}
 	base := runtimeCallerBaseSet(c, pkg)
+	_, trackable := collectRuntimeCallerFunctions(pkg)
+	out := computeRuntimeLogicalCallerFuncSet(pkg, base, trackable, func(dep *ssa.Package) map[*ssa.Function]bool {
+		return runtimeCallerBaseSet(c, dep)
+	})
+	c.logical[pkg] = out
+	return out
+}
+
+func computeRuntimeLogicalCallerFuncSet(pkg *ssa.Package, base, trackable map[*ssa.Function]bool, baseSet func(*ssa.Package) map[*ssa.Function]bool) map[*ssa.Function]bool {
 	out := make(map[*ssa.Function]bool, len(base))
 	for fn := range base {
 		out[fn] = true
 	}
-	_, trackable := collectRuntimeCallerFunctions(pkg)
 	for fn := range trackable {
 		if out[fn] {
 			continue
@@ -1259,7 +1306,7 @@ func runtimeLogicalCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.F
 			if !canTrackCallerFramesForPackage(callee.Pkg.Pkg.Path()) {
 				return
 			}
-			if runtimeCallerBaseSet(c, callee.Pkg)[callee] {
+			if baseSet(callee.Pkg)[callee] {
 				out[fn] = true
 			}
 		})
@@ -1267,51 +1314,363 @@ func runtimeLogicalCallerFuncSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.F
 	if len(out) == 0 {
 		out = nil
 	}
-	c.logical[pkg] = out
 	return out
 }
 
-// CallerTracking memoizes the per-package caller-tracking sets for one
-// compilation. Like Patches, it is compilation-scoped state owned by the
-// driver: create one per compilation and pass it to every
-// NewPackageExWithEmbed call of that compilation, so cross-package
-// queries (criterion 2 below) hit the memoization. It must not outlive
-// the compilation — the maps are keyed by *ssa.Package with
-// *ssa.Function values, so anything longer-lived would pin every
-// compiled package's go/types and go/ssa graphs. Concurrent drivers call
-// Precompute before workers start and then share the plain maps read-only.
-type CallerTracking struct {
-	base     map[*ssa.Package]map[*ssa.Function]bool
-	extended map[*ssa.Package]map[*ssa.Function]bool
-	logical  map[*ssa.Package]map[*ssa.Function]bool
+// addRecoverObservableCallees keeps the same-package synchronous call/defer
+// subtree below a defer that can inspect caller pcs. These frames are no
+// longer physically live when the deferred function runs after recover;
+// runtime reconstructs them from the panic snapshot, so allowing LLVM to
+// inline them would lose the function identity and its panic-site line. These
+// functions are added to frames and also returned as a distinct set: only the
+// returned set needs
+// anchors at implicit panic instructions.
+func addRecoverObservableCallees(recover *recoverFacts, pkg *ssa.Package, funcs, base, frames, trackable map[*ssa.Function]bool, baseSet func(*ssa.Package) map[*ssa.Function]bool) map[*ssa.Function]bool {
+	if pkg == nil || len(trackable) == 0 {
+		return nil
+	}
+	analysis := &runtimeCallerAnalysis{
+		pkg:       pkg,
+		funcs:     funcs,
+		trackable: trackable,
+		callsites: collectRuntimeCallerCallsites(funcs),
+	}
+	queue := make([]*ssa.Function, 0)
+	seen := make(map[*ssa.Function]bool)
+	isRecoverObserver := func(target *ssa.Function) bool {
+		if target == nil || !recover.needsRecoverScope(target) {
+			return false
+		}
+		if isRuntimeCallerFrameFunc(target) {
+			return true
+		}
+		targetBase := base
+		if target.Pkg != nil && target.Pkg != pkg {
+			targetBase = baseSet(target.Pkg)
+		}
+		return targetBase[target]
+	}
+	add := func(fn *ssa.Function) {
+		if !trackable[fn] || seen[fn] {
+			return
+		}
+		seen[fn] = true
+		frames[fn] = true
+		queue = append(queue, fn)
+	}
+	addCallee := func(fn *ssa.Function, deferred bool) {
+		// A recovering defer is the observer at the edge of this subtree,
+		// not another possible panic site below itself.
+		if deferred && isRecoverObserver(fn) {
+			return
+		}
+		add(fn)
+	}
+	for fn := range trackable {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				deferInstr, ok := instr.(*ssa.Defer)
+				if !ok {
+					continue
+				}
+				targets, resolved := analysis.callTargets(fn, &deferInstr.Call)
+				if !resolved {
+					continue
+				}
+				for target := range targets {
+					if isRecoverObserver(target) {
+						add(fn)
+						break
+					}
+				}
+			}
+		}
+	}
+	if len(queue) == 0 {
+		return nil
+	}
+
+	candidateIndex := newRecoverPanicCandidateIndex(trackable)
+	for len(queue) != 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				var call *ssa.CallCommon
+				isDefer := false
+				switch instr := instr.(type) {
+				case *ssa.Call:
+					call = &instr.Call
+				case *ssa.Defer:
+					// Non-observing deferred calls still run synchronously in
+					// this goroutine while the panic unwinds. Their panic sites
+					// can therefore be seen by a later recovering defer.
+					call = &instr.Call
+					isDefer = true
+				case *ssa.Go:
+					// A go edge starts an independent goroutine with its own
+					// panic/recover chain and cannot be observed by this defer.
+					continue
+				default:
+					continue
+				}
+				if _, builtin := call.Value.(*ssa.Builtin); builtin {
+					continue
+				}
+				targets, resolved := analysis.callTargets(fn, call)
+				if !resolved {
+					// The call can target any same-package function compatible
+					// with the value. Retaining the package-local candidates is
+					// conservative; cross-package callees keep their own policy.
+					for _, candidate := range candidateIndex.compatible(call.Signature()) {
+						addCallee(candidate, isDefer)
+					}
+					continue
+				}
+				for target := range targets {
+					addCallee(target, isDefer)
+				}
+			}
+		}
+	}
+	return seen
 }
 
-// Precompute resolves caller-tracking data before package backends start.
-// Once it returns, callers may share c for concurrent read-only lookups as long
-// as pkgs contains every package that can be passed to this compilation.
+type recoverPanicCandidateGroup struct {
+	signature  *types.Signature
+	candidates []*ssa.Function
+}
+
+type recoverPanicCandidateIndex map[string][]recoverPanicCandidateGroup
+
+// newRecoverPanicCandidateIndex scans trackable once and buckets candidates by
+// fully qualified structural signature. The identical-signature groups retain
+// a collision guard without making each unresolved call rescan the package.
+func newRecoverPanicCandidateIndex(trackable map[*ssa.Function]bool) recoverPanicCandidateIndex {
+	index := make(recoverPanicCandidateIndex)
+	for candidate := range trackable {
+		signature := candidate.Signature
+		key := recoverPanicSignatureKey(signature)
+		groups := index[key]
+		matched := false
+		for i := range groups {
+			if types.Identical(signature, groups[i].signature) {
+				groups[i].candidates = append(groups[i].candidates, candidate)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			groups = append(groups, recoverPanicCandidateGroup{
+				signature:  signature,
+				candidates: []*ssa.Function{candidate},
+			})
+		}
+		index[key] = groups
+	}
+	return index
+}
+
+func (index recoverPanicCandidateIndex) compatible(signature *types.Signature) []*ssa.Function {
+	for _, group := range index[recoverPanicSignatureKey(signature)] {
+		if types.Identical(signature, group.signature) {
+			return group.candidates
+		}
+	}
+	return nil
+}
+
+func recoverPanicSignatureKey(signature *types.Signature) string {
+	return types.TypeString(signature, func(pkg *types.Package) string {
+		return pkg.Path()
+	})
+}
+
+func (a *runtimeCallerAnalysis) callTargets(fn *ssa.Function, call *ssa.CallCommon) (map[*ssa.Function]bool, bool) {
+	if call == nil {
+		return nil, false
+	}
+	if callee := call.StaticCallee(); callee != nil {
+		return map[*ssa.Function]bool{callee: true}, true
+	}
+	if call.Method != nil {
+		return a.interfaceMethodTargets(fn, call.Value, call.Method)
+	}
+	return a.functionValueTargets(fn, call.Value)
+}
+
+// CallerTracking memoizes frontend analyses for one compilation. Like Patches,
+// it is compilation-scoped state owned by the driver: create one per
+// compilation and pass it to every NewPackageExWithEmbed call of that
+// compilation, so cross-package queries hit the same caller-tracking and
+// recover facts. It must not outlive the compilation — the caches are keyed by
+// *ssa.Package and *ssa.Function, so anything longer-lived would pin every
+// compiled package's go/types and go/ssa graphs. Concurrent drivers call
+// Precompute before workers start; recover facts also synchronize lazy queries
+// for nested and synthetic functions that are not package members.
+type CallerTracking struct {
+	base        map[*ssa.Package]map[*ssa.Function]bool
+	extended    map[*ssa.Package]callerTrackingFuncSets
+	logical     map[*ssa.Package]map[*ssa.Function]bool
+	recover     *recoverFacts
+	precomputed bool
+}
+
+// Precompute resolves caller-tracking and recover data before package backends
+// start. Once it returns, callers may share c for concurrent lookups as long as
+// pkgs contains every package that can be passed to this compilation. A later
+// caller-tracking lookup miss panics instead of mutating the shared maps;
+// recover facts retain their own synchronization for nested and synthetic
+// functions that are not package members.
 func (c *CallerTracking) Precompute(pkgs []*ssa.Package) {
 	if c == nil {
 		return
 	}
-	for _, pkg := range pkgs {
-		if pkg != nil {
-			runtimeCallerBaseSet(c, pkg)
+	pkgs = uniqueCallerTrackingPackages(pkgs)
+	if c.precomputed {
+		for _, pkg := range pkgs {
+			if _, ok := c.base[pkg]; !ok {
+				panic("caller-tracking base set was not precomputed")
+			}
+			if _, ok := c.extended[pkg]; !ok {
+				panic("caller-tracking function set was not precomputed")
+			}
+			if _, ok := c.logical[pkg]; !ok {
+				panic("logical caller function set was not precomputed")
+			}
 		}
+		return
 	}
-	for _, pkg := range pkgs {
-		if pkg != nil {
-			runtimeCallerFuncSet(c, pkg)
+	if len(pkgs) == 0 {
+		c.precomputed = true
+		return
+	}
+	c.recoverAnalysis().precompute(pkgs)
+
+	// RuntimeTypes and MethodValue are Program-wide and may lazily populate
+	// shared SSA state. Snapshot and materialize them once in stable package
+	// order before computing package sets. The remaining analysis is kept
+	// serial: interface target resolution may still consult MethodValue, and
+	// scheduling those calls concurrently makes later module layout depend on
+	// worker completion order.
+	runtimeTypes := callerTrackingRuntimeTypes(pkgs)
+	methods := callerTrackingMethods(pkgs, runtimeTypes)
+	analyses := make([]callerTrackingPackageAnalysis, len(pkgs))
+	base := make([]map[*ssa.Function]bool, len(pkgs))
+	extended := make([]callerTrackingFuncSets, len(pkgs))
+	logical := make([]map[*ssa.Function]bool, len(pkgs))
+	index := make(map[*ssa.Package]int, len(pkgs))
+	for i, pkg := range pkgs {
+		index[pkg] = i
+	}
+
+	for i := range pkgs {
+		analyses[i] = analyzeCallerTrackingPackage(pkgs[i], methods[pkgs[i]])
+		base[i] = analyses[i].base
+	}
+	for i := range pkgs {
+		baseSet := func(dep *ssa.Package) map[*ssa.Function]bool {
+			j, ok := index[dep]
+			if !ok {
+				panic("caller-tracking dependency was not precomputed")
+			}
+			return base[j]
 		}
+		extended[i] = computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkgs[i], analyses[i].funcs, base[i], analyses[i].trackable, baseSet)
+		logical[i] = computeRuntimeLogicalCallerFuncSet(pkgs[i], base[i], analyses[i].trackable, baseSet)
+	}
+
+	for i, pkg := range pkgs {
+		c.base[pkg] = base[i]
+	}
+	for i, pkg := range pkgs {
+		c.extended[pkg] = extended[i]
+		c.logical[pkg] = logical[i]
+	}
+	c.precomputed = true
+}
+
+type callerTrackingPackageAnalysis struct {
+	funcs     map[*ssa.Function]bool
+	base      map[*ssa.Function]bool
+	trackable map[*ssa.Function]bool
+}
+
+func analyzeCallerTrackingPackage(pkg *ssa.Package, methods []*ssa.Function) callerTrackingPackageAnalysis {
+	funcs, trackable := collectRuntimeCallerFunctionsWithMethods(pkg, methods)
+	analysis := &runtimeCallerAnalysis{
+		pkg:       pkg,
+		funcs:     funcs,
+		trackable: trackable,
+		callsites: collectRuntimeCallerCallsites(funcs),
+		memo:      make(map[*ssa.Function]bool),
+		visiting:  make(map[*ssa.Function]bool),
+	}
+	return callerTrackingPackageAnalysis{
+		funcs:     funcs,
+		base:      computeRuntimeCallerBaseSetFromAnalysis(analysis),
+		trackable: trackable,
 	}
 }
 
-// NewCallerTracking creates the caller-tracking memoization for one
-// compilation.
+// callerTrackingMethods materializes method wrappers in stable package order
+// before analysis workers start. Program.MethodValue is thread-safe but may
+// lazily create wrappers; doing that in workers would make Program mutation
+// order depend on scheduling and could change later module emission order.
+func callerTrackingMethods(pkgs []*ssa.Package, runtimeTypes map[*ssa.Package][]types.Type) map[*ssa.Package][]*ssa.Function {
+	result := make(map[*ssa.Package][]*ssa.Function, len(pkgs))
+	for _, pkg := range pkgs {
+		result[pkg] = collectRuntimeCallerMethods(pkg, runtimeTypes[pkg])
+	}
+	return result
+}
+
+// callerTrackingRuntimeTypes snapshots Program-wide runtime types once and
+// partitions them by declaring package before workers start. RuntimeTypes
+// computes derived types under Program and method-set locks; calling it from
+// every package worker would serialize the supposedly parallel phase and would
+// repeatedly scan the same whole-program data.
+func callerTrackingRuntimeTypes(pkgs []*ssa.Package) map[*ssa.Package][]types.Type {
+	byProgram := make(map[*ssa.Program]map[*types.Package][]types.Type)
+	result := make(map[*ssa.Package][]types.Type, len(pkgs))
+	for _, pkg := range pkgs {
+		if pkg == nil || pkg.Prog == nil || pkg.Pkg == nil {
+			continue
+		}
+		byPackage, ok := byProgram[pkg.Prog]
+		if !ok {
+			byPackage = make(map[*types.Package][]types.Type)
+			for _, typ := range pkg.Prog.RuntimeTypes() {
+				if owner := typeOwnerPackage(typ); owner != nil {
+					byPackage[owner] = append(byPackage[owner], typ)
+				}
+			}
+			byProgram[pkg.Prog] = byPackage
+		}
+		result[pkg] = byPackage[pkg.Pkg]
+	}
+	return result
+}
+
+func uniqueCallerTrackingPackages(pkgs []*ssa.Package) []*ssa.Package {
+	unique := make([]*ssa.Package, 0, len(pkgs))
+	seen := make(map[*ssa.Package]bool, len(pkgs))
+	for _, pkg := range pkgs {
+		if pkg != nil && !seen[pkg] {
+			seen[pkg] = true
+			unique = append(unique, pkg)
+		}
+	}
+	return unique
+}
+
+// NewCallerTracking creates the frontend-analysis caches for one compilation.
 func NewCallerTracking() *CallerTracking {
 	return &CallerTracking{
 		base:     make(map[*ssa.Package]map[*ssa.Function]bool),
-		extended: make(map[*ssa.Package]map[*ssa.Function]bool),
+		extended: make(map[*ssa.Package]callerTrackingFuncSets),
 		logical:  make(map[*ssa.Package]map[*ssa.Function]bool),
+		recover:  newRecoverFacts(),
 	}
 }
 
@@ -1333,33 +1692,39 @@ func runtimeCallerBaseSet(c *CallerTracking, pkg *ssa.Package) map[*ssa.Function
 	if set, ok := c.base[pkg]; ok {
 		return set
 	}
+	if c.precomputed {
+		panic("caller-tracking base set was not precomputed")
+	}
 	set := computeRuntimeCallerBaseSet(pkg)
 	c.base[pkg] = set
 	return set
 }
 
 func computeRuntimeCallerBaseSet(pkg *ssa.Package) map[*ssa.Function]bool {
-	funcs, trackable := collectRuntimeCallerFunctions(pkg)
-	analysis := &runtimeCallerAnalysis{
-		pkg:       pkg,
-		funcs:     funcs,
-		trackable: trackable,
-		callsites: collectRuntimeCallerCallsites(funcs),
-		memo:      make(map[*ssa.Function]bool),
-		visiting:  make(map[*ssa.Function]bool),
+	var runtimeTypes []types.Type
+	if pkg != nil && pkg.Prog != nil {
+		for _, typ := range pkg.Prog.RuntimeTypes() {
+			if typeBelongsToPackage(typ, pkg.Pkg) {
+				runtimeTypes = append(runtimeTypes, typ)
+			}
+		}
 	}
+	return analyzeCallerTrackingPackage(pkg, collectRuntimeCallerMethods(pkg, runtimeTypes)).base
+}
+
+func computeRuntimeCallerBaseSetFromAnalysis(analysis *runtimeCallerAnalysis) map[*ssa.Function]bool {
 	if !analysis.packageHasRuntimeCaller() {
 		return nil
 	}
 	out := make(map[*ssa.Function]bool)
 	for {
-		ntrack := len(trackable)
-		for fn := range trackable {
+		ntrack := len(analysis.trackable)
+		for fn := range analysis.trackable {
 			if analysis.fnMayReachRuntimeCaller(fn) {
 				out[fn] = true
 			}
 		}
-		if len(trackable) == ntrack {
+		if len(analysis.trackable) == ntrack {
 			break
 		}
 	}
@@ -1379,6 +1744,69 @@ type runtimeCallerAnalysis struct {
 }
 
 func collectRuntimeCallerFunctions(pkg *ssa.Package) (funcs, trackable map[*ssa.Function]bool) {
+	var runtimeTypes []types.Type
+	if pkg != nil && pkg.Prog != nil {
+		runtimeTypes = pkg.Prog.RuntimeTypes()
+	}
+	return collectRuntimeCallerFunctionsWithMethods(pkg, collectRuntimeCallerMethods(pkg, runtimeTypes))
+}
+
+func collectRuntimeCallerMethods(pkg *ssa.Package, runtimeTypes []types.Type) []*ssa.Function {
+	if pkg == nil || pkg.Prog == nil {
+		return nil
+	}
+	type methodType struct {
+		key string
+		typ types.Type
+	}
+	typesToVisit := make([]methodType, 0)
+	seenTypes := make(map[string]bool)
+	addType := func(typ types.Type) {
+		key := types.TypeString(typ, func(owner *types.Package) string {
+			if owner == nil {
+				return ""
+			}
+			return owner.Path()
+		})
+		if !seenTypes[key] {
+			seenTypes[key] = true
+			typesToVisit = append(typesToVisit, methodType{key: key, typ: typ})
+		}
+	}
+	for _, member := range pkg.Members {
+		if typ, ok := member.(*ssa.Type); ok {
+			addType(typ.Type())
+			addType(types.NewPointer(typ.Type()))
+		}
+	}
+	for _, typ := range runtimeTypes {
+		if typeBelongsToPackage(typ, pkg.Pkg) {
+			addType(typ)
+		}
+	}
+	sort.Slice(typesToVisit, func(i, j int) bool {
+		return typesToVisit[i].key < typesToVisit[j].key
+	})
+
+	methods := make([]*ssa.Function, 0)
+	seen := make(map[*ssa.Function]bool)
+	addMethods := func(typ types.Type) {
+		methodSet := pkg.Prog.MethodSets.MethodSet(typ)
+		for i := 0; i < methodSet.Len(); i++ {
+			fn := pkg.Prog.MethodValue(methodSet.At(i))
+			if fn != nil && !seen[fn] {
+				seen[fn] = true
+				methods = append(methods, fn)
+			}
+		}
+	}
+	for _, candidate := range typesToVisit {
+		addMethods(candidate.typ)
+	}
+	return methods
+}
+
+func collectRuntimeCallerFunctionsWithMethods(pkg *ssa.Package, methods []*ssa.Function) (funcs, trackable map[*ssa.Function]bool) {
 	funcs = make(map[*ssa.Function]bool)
 	trackable = make(map[*ssa.Function]bool)
 	var add func(*ssa.Function, bool) bool
@@ -1406,34 +1834,11 @@ func collectRuntimeCallerFunctions(pkg *ssa.Package) (funcs, trackable map[*ssa.
 			add(fn, true)
 		}
 	}
-	if pkg.Prog != nil {
-		// Methods are as trackable as package-level functions: one that
-		// (transitively) calls runtime.Caller needs frames and pcline
-		// labels of its own.
-		addMethods := func(typ types.Type) {
-			methods := pkg.Prog.MethodSets.MethodSet(typ)
-			for i := 0; i < methods.Len(); i++ {
-				add(pkg.Prog.MethodValue(methods.At(i)), true)
-			}
-		}
-		// Named-type methods are not package members and a type used only
-		// concretely never enters RuntimeTypes (slog.(*Logger).Info was
-		// missed exactly this way); collect both receiver forms from the
-		// package's own type declarations.
-		for _, member := range pkg.Members {
-			if t, ok := member.(*ssa.Type); ok {
-				addMethods(t.Type())
-				addMethods(types.NewPointer(t.Type()))
-			}
-		}
-		if pkg.Pkg != nil {
-			for _, typ := range pkg.Prog.RuntimeTypes() {
-				if !typeBelongsToPackage(typ, pkg.Pkg) {
-					continue
-				}
-				addMethods(typ)
-			}
-		}
+	// Methods are as trackable as package-level functions: one that
+	// (transitively) calls runtime.Caller needs frames and pcline labels of its
+	// own. Method wrappers were materialized serially before workers started.
+	for _, method := range methods {
+		add(method, true)
 	}
 	for changed := true; changed; {
 		changed = false
@@ -1481,9 +1886,10 @@ func functionBelongsToPackage(pkg *ssa.Package, fn *ssa.Function) bool {
 }
 
 func typeBelongsToPackage(typ types.Type, pkg *types.Package) bool {
-	if pkg == nil {
-		return false
-	}
+	return pkg != nil && typeOwnerPackage(typ) == pkg
+}
+
+func typeOwnerPackage(typ types.Type) *types.Package {
 	for {
 		if ptr, ok := types.Unalias(typ).(*types.Pointer); ok {
 			typ = ptr.Elem()
@@ -1492,7 +1898,10 @@ func typeBelongsToPackage(typ types.Type, pkg *types.Package) bool {
 		break
 	}
 	named, ok := types.Unalias(typ).(*types.Named)
-	return ok && named.Obj() != nil && named.Obj().Pkg() == pkg
+	if !ok || named.Obj() == nil {
+		return nil
+	}
+	return named.Obj().Pkg()
 }
 
 func (a *runtimeCallerAnalysis) packageHasRuntimeCaller() bool {
@@ -1820,7 +2229,7 @@ func (p *context) shouldEmitLogicalCallerFrames() bool {
 	if !p.shouldTrackCallerFrames() {
 		return false
 	}
-	if emitShadowStackInstrumentation || p.frontendOptions().ShadowStack {
+	if emitShadowStackInstrumentation || p.options.ShadowStack {
 		return true
 	}
 	return p.logicalCallerFuncs[p.goFn] &&
@@ -1881,6 +2290,13 @@ func (p *context) recordCallerLocation(b llssa.Builder, pos token.Pos) {
 
 func (p *context) recordPanicLocation(b llssa.Builder, pos token.Pos) {
 	p.recordRuntimeLocation(b, pos, "RecordPanicLocation")
+}
+
+func (p *context) recordPanicSite(b llssa.Builder, pos token.Pos) {
+	p.recordPanicLocation(b, pos)
+	if p.panicSiteFuncs[p.goFn] {
+		p.emitPCLineLabel(b, pos)
+	}
 }
 
 func (p *context) recordRuntimeLocation(b llssa.Builder, pos token.Pos, fn string) {
@@ -1953,6 +2369,15 @@ func (p *context) emitPCLineLabel(b llssa.Builder, pos token.Pos) {
 	if position.Line <= 0 || position.Filename == "" {
 		return
 	}
+	// Lookup uses the nearest preceding PC anchor. Within one basic block,
+	// another anchor for the same runtime-visible file and line cannot change
+	// the result, even when several implicit panic checks came from one Go
+	// expression.
+	if position.Filename == p.lastPCLineFile && position.Line == p.lastPCLineLine {
+		return
+	}
+	p.lastPCLineFile = position.Filename
+	p.lastPCLineLine = position.Line
 	p.pcLineSeq++
 	id := pcLineID(p.fn.Name(), p.pcLineSeq)
 	label := pcLineLabelName(id)
@@ -2217,12 +2642,39 @@ func (p *context) deferStackOwner(fn *ssa.Function) llssa.Function {
 	return owner
 }
 
-func (p *context) emitDo(b llssa.Builder, act llssa.DoAction, ds *explicitDeferStack, fn llssa.Expr, buildCall func(llssa.Builder, llssa.Expr, ...llssa.Expr) llssa.Expr, args ...llssa.Expr) llssa.Expr {
+func (p *context) emitDo(b llssa.Builder, act llssa.DoAction, ds *explicitDeferStack, mayRecover bool, fn llssa.Expr, buildCall func(llssa.Builder, llssa.Expr, ...llssa.Expr) llssa.Expr, args ...llssa.Expr) llssa.Expr {
 	if ds != nil {
-		b.DeferTo(ds.owner, ds.stack, fn, buildCall, args...)
+		b.DeferToRecover(ds.owner, ds.stack, mayRecover, fn, buildCall, args...)
 		return llssa.Nil
 	}
-	return b.Do(act, fn, buildCall, args...)
+	switch act {
+	case llssa.Call, llssa.Go:
+		if act == llssa.Call && isRecoverTransparentWrapper(p.goFn) {
+			return b.CallRecoverAlias(p.fn.Expr, mayRecover, fn, buildCall, args...)
+		}
+		return b.Do(act, fn, buildCall, args...)
+	default:
+		b.DeferRecover(act, mayRecover, fn, buildCall, args...)
+		return llssa.Nil
+	}
+}
+
+func (p *context) callMayRecover(v ssa.Value) bool {
+	switch v := v.(type) {
+	case *ssa.Builtin:
+		return false
+	case *ssa.Function:
+		return p.needsRecoverScope(v)
+	case *ssa.MakeClosure:
+		if fn, ok := v.Fn.(*ssa.Function); ok {
+			return p.needsRecoverScope(fn)
+		}
+		return true
+	case *ssa.Call:
+		// The deferred callee is the call result, not the factory function.
+		return true
+	}
+	return true
 }
 
 func (p *context) staticArrayLenBuiltinArg(b llssa.Builder, arg ssa.Value) (llssa.Expr, bool) {
@@ -2445,16 +2897,26 @@ func (p *context) callEx(
 	// pointer descriptors at run time.
 	p.pkg.NeedAbiInit |= reflectStaticCallABIInitKind(call)
 	cv := call.Value
+	mayRecover := p.callMayRecover(cv)
 	if mthd := call.Method; mthd != nil {
 		reflectCheck := p.reflectTypeMethodCheck(call, mthd)
 		o := p.compileValue(b, cv)
-		fn := b.Imethod(o, mthd)
+		var fn llssa.Expr
+		needsRecoverToken := act != llssa.Call && act != llssa.Go
+		if act == llssa.Call && isRecoverTransparentWrapper(p.goFn) {
+			needsRecoverToken = true
+		}
+		if needsRecoverToken {
+			fn = b.ImethodWithRecoverToken(o, mthd)
+		} else {
+			fn = b.Imethod(o, mthd)
+		}
 		hasVArg := fnNormal
 		if llssa.HasNameValist(call.Signature()) {
 			hasVArg = fnHasVArg
 		}
 		args := p.compileValues(b, call.Args, hasVArg)
-		ret = p.emitDo(b, act, ds, fn, llssa.Builder.Call, args...)
+		ret = p.emitDo(b, act, ds, true, fn, llssa.Builder.Call, args...)
 		if reflectCheck.Kind&llssa.ReflectTypeMethodByName != 0 && reflectCheck.Name == "" {
 			b.MarkReflectTypeMethodByNameExpr(ret, 1)
 		}
@@ -2585,7 +3047,7 @@ func (p *context) callEx(
 			return
 		}
 		args := p.compileValues(b, args, kind)
-		ret = p.emitDo(b, act, ds, llssa.Builtin(fn), llssa.Builder.Call, args...)
+		ret = p.emitDo(b, act, ds, false, llssa.Builtin(fn), llssa.Builder.Call, args...)
 	case *ssa.Function:
 		aFn, pyFn, ftype := p.compileFunction(cv)
 		// TODO(xsw): check ca != llssa.Call
@@ -2594,19 +3056,19 @@ func (p *context) callEx(
 			p.inCFunc = true
 			args := p.compileValues(b, args, kind)
 			p.inCFunc = false
-			ret = p.emitDo(b, act, ds, aFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDo(b, act, ds, mayRecover, aFn.Expr, llssa.Builder.Call, args...)
 		case goFunc:
 			args := p.compileValues(b, args, kind)
 			args = p.compileManagedGoLinknameCallArguments(
 				b, linknameSource, linknameTarget, args,
 			)
-			ret = p.emitDo(b, act, ds, aFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDo(b, act, ds, mayRecover, aFn.Expr, llssa.Builder.Call, args...)
 			ret, _ = p.compileManagedGoLinknameCallResult(
 				b, linknameSource, linknameTarget, ret,
 			)
 		case pyFunc:
 			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, pyFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDo(b, act, ds, mayRecover, pyFn.Expr, llssa.Builder.Call, args...)
 		case llgoPyList:
 			args := p.compileValues(b, args, fnHasVArg)
 			ret = b.PyList(args...)
@@ -2872,13 +3334,13 @@ func (p *context) callEx(
 		case llgoAtomicLoad, llgoAtomicStore, llgoAtomicLoadUnsafe, llgoAtomicStoreUnsafe,
 			llgoAtomicCmpXchg, llgoAtomicCmpXchgOK, llgoAtomicAddReturnNew:
 			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
+			ret = p.emitDo(b, act, ds, false, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
 				return p.compileAtomicIntrinsic(b, ftype, args)
 			}, args...)
 		default:
 			if ftype >= llgoAtomicOpBase && ftype <= llgoAtomicOpLast {
 				args := p.compileValues(b, args, kind)
-				ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
+				ret = p.emitDo(b, act, ds, false, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
 					return p.compileAtomicIntrinsic(b, ftype, args)
 				}, args...)
 			} else {
@@ -2901,7 +3363,7 @@ func (p *context) callEx(
 		if rawC {
 			p.inCFunc = false
 		}
-		ret = p.emitDo(b, act, ds, fn, llssa.Builder.Call, args...)
+		ret = p.emitDo(b, act, ds, mayRecover, fn, llssa.Builder.Call, args...)
 	}
 	return
 }

@@ -2748,6 +2748,57 @@ func managedCaller() { critical() }
 	}
 }
 
+func TestAnalyzeSSARawPlainCallUsesCanonicalStaticTarget(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_call_alias.go", `package coroid
+func original() {}
+func replacement() {}
+func rawCaller() { original() }
+`)
+	original := packageFunction(t, pkg, "original")
+	replacement := packageFunction(t, pkg, "replacement")
+	rawCaller := packageFunction(t, pkg, "rawCaller")
+	rawCall := onlyNonBuiltinCall(t, rawCaller)
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{rawCaller, replacement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: rawCaller, ManagedDemand: AsyncDemand}}, SSAConfig{
+		EmissionUniverse:     universe,
+		MaxPlainInstructions: -1,
+		ResolveFunction: func(fn *ssa.Function) (*ssa.Function, bool, error) {
+			if fn == original {
+				return replacement, true, nil
+			}
+			return fn, universe.Contains(fn), nil
+		},
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == replacement {
+				return SSAFunctionPolicy{TrustedNoPreempt: true, TrustedNoUnwind: true}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+		ClassifyRawPlainCall: func(_ *ssa.Function, call ssa.CallInstruction) (SSARawPlainCallCertificate, bool, error) {
+			if call == rawCall {
+				return SSARawPlainCallCertificate{ID: "test.raw-critical.canonical.v1"}, true, nil
+			}
+			return SSARawPlainCallCertificate{}, false, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPlan := functionPlanFor(t, plan, replacement)
+	if !replacementPlan.RawPlainDemand || replacementPlan.Emission != EmitRawPlain ||
+		!plan.HasRawPlainVariant(replacement) {
+		t.Fatalf("canonical raw target plan = %+v, variant=%t", replacementPlan, plan.HasRawPlainVariant(replacement))
+	}
+	callPlan, ok := plan.CallPlan(rawCall)
+	if !ok || !callPlan.RawPlain || callPlan.RawPlainCertificate != "test.raw-critical.canonical.v1" ||
+		len(callPlan.Targets) != 1 || callPlan.Targets[0] != replacementPlan.ID {
+		t.Fatalf("canonical raw occurrence CallPlan = %+v, present=%t", callPlan, ok)
+	}
+}
+
 func TestAnalyzeSSARawPlainCallKeepsDormantCertificateWithoutDemand(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "raw_plain_call_dormant.go", `package coroid
 func wait() {}

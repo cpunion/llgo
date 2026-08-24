@@ -1396,13 +1396,28 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatalf("required plain IRQ-unsafe closure plan = %+v, want exact raw-only plain implementation", irqClosure)
 	}
 
+	yieldPlan, err := analyze(func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+		if fn == closureLoop {
+			return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+		}
+		return coro.SSAFunctionPolicy{}, nil
+	})
+	if err != nil {
+		t.Fatalf("required raw closure with managed-only yield: %v", err)
+	}
+	yieldClosure, ok := yieldPlan.FunctionPlan(closureLoop)
+	if !ok || yieldClosure.Emission != coro.EmitRawPlain || !yieldClosure.RawPlainOnly ||
+		!yieldClosure.Effect.Contains(coro.YieldOnly) || !yieldPlan.HasRawPlainVariant(closureLoop) {
+		t.Fatalf("required raw closure with managed-only yield = %+v, present=%t, raw-variant=%t", yieldClosure, ok, yieldPlan.HasRawPlainVariant(closureLoop))
+	}
+
 	conflicts := []struct {
 		name   string
 		target *ssa.Function
 		policy coro.SSAFunctionPolicy
 		want   string
 	}{
-		{name: "effect", target: closureLoop, policy: coro.SSAFunctionPolicy{Effect: coro.MayPark}, want: "required no-suspend policy"},
+		{name: "effect", target: closureLoop, policy: coro.SSAFunctionPolicy{Effect: coro.MayPark}, want: "unsupported declared raw-stack effect"},
 		{name: "exec", target: closureLoop, policy: coro.SSAFunctionPolicy{Exec: coro.ThreadAffine}, want: "required plain execution policy"},
 		{name: "dispatch", target: closureLoop, policy: coro.SSAFunctionPolicy{NeedsDispatch: true}, want: "required direct representation"},
 		{name: "defined external", target: closureLoop, policy: coro.SSAFunctionPolicy{External: coro.ExternalKnown, OverrideExternal: true}, want: "required defined classification"},
@@ -2696,6 +2711,66 @@ func alias() {}
 	}
 	if got := accepted.LoweredCalls(owner); len(got) != 2 || got[0].LogicalName != "runtime.helper" || got[1].LogicalName != "runtime.helper2" {
 		t.Fatalf("accepted lowered calls = %+v", got)
+	}
+}
+
+func TestCoroPlanInputActivatesPlainLoweredCallsOnlyForLivePlainBodies(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/plainlowered", `package plainlowered
+var channel chan int
+func plainOwner() {}
+func coroutineOwner() { <-channel }
+func plainHelper() {}
+func dormantHelper() {}
+`, nil)
+	plainOwner := ssaPkg.Func("plainOwner")
+	coroutineOwner := ssaPkg.Func("coroutineOwner")
+	plainHelper := ssaPkg.Func("plainHelper")
+	dormantHelper := ssaPkg.Func("dormantHelper")
+	universe, err := coro.NewSSAEmissionUniverse(
+		ssaPkg.Prog,
+		[]*ssa.Function{plainOwner, coroutineOwner, plainHelper, dormantHelper},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := CoroPlanInput{
+		Program:          ssaPkg.Prog,
+		EmissionUniverse: universe,
+		plainLoweredCalls: func(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
+			switch owner {
+			case plainOwner:
+				return []coro.SSALoweredCall{{
+					LogicalName: "runtime.plain", Target: plainHelper, RawPlain: true,
+				}}, nil
+			case coroutineOwner:
+				return []coro.SSALoweredCall{{
+					LogicalName: "runtime.dormant", Target: dormantHelper, RawPlain: true,
+				}}, nil
+			default:
+				return nil, nil
+			}
+		},
+	}
+	plan, err := input.Analyze(coro.Roots{
+		{Function: plainOwner, Demand: coro.SyncDemand},
+		{Function: coroutineOwner, Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := plan.FunctionPlan(plainOwner); !ok || got.Emission != coro.EmitPlain {
+		t.Fatalf("plain owner plan = %+v, present=%t", got, ok)
+	}
+	if got, ok := plan.FunctionPlan(coroutineOwner); !ok || got.Emission != coro.EmitCoroutine {
+		t.Fatalf("coroutine owner plan = %+v, present=%t", got, ok)
+	}
+	if got, ok := plan.FunctionPlan(plainHelper); !ok || !got.RawPlainDemand ||
+		!got.RawPlainOnly || got.Emission != coro.EmitRawPlain || !plan.HasRawPlainVariant(plainHelper) {
+		t.Fatalf("live plain helper plan = %+v, present=%t, raw-variant=%t", got, ok, plan.HasRawPlainVariant(plainHelper))
+	}
+	if got, ok := plan.FunctionPlan(dormantHelper); !ok || got.Demand != coro.NoDemand ||
+		got.RawPlainDemand || got.Emission != coro.EmitNone || plan.HasRawPlainVariant(dormantHelper) {
+		t.Fatalf("dormant physical-twin helper plan = %+v, present=%t, raw-variant=%t", got, ok, plan.HasRawPlainVariant(dormantHelper))
 	}
 }
 

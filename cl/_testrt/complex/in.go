@@ -1,5 +1,7 @@
 package main
 
+// Constant arithmetic remains folded, while division is delegated to the
+// runtime and its two components are reassembled for printing.
 type T complex64
 
 func main() {

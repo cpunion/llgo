@@ -8,6 +8,8 @@ import (
 	"github.com/goplus/lib/py/std"
 )
 
+// Direct variadic Max passes the four converted objects to the loaded builtin,
+// and Print consumes the returned object.
 func main() {
 	x := std.Max(py.Float(3.0), py.Float(9.0), py.Float(23.0), py.Float(100.0))
 	std.Print(x)

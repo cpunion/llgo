@@ -27,6 +27,26 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestCoroCFGSubsetCycleIgnoresExcludedDeadSCC(t *testing.T) {
+	entry := &ssa.BasicBlock{Index: 0}
+	deadLoop := &ssa.BasicBlock{Index: 1}
+	exit := &ssa.BasicBlock{Index: 2}
+	entry.Succs = []*ssa.BasicBlock{deadLoop, exit}
+	deadLoop.Succs = []*ssa.BasicBlock{deadLoop}
+	blocks := []*ssa.BasicBlock{entry, deadLoop, exit}
+
+	if !coroCFGSubsetHasCycle(blocks, map[*ssa.BasicBlock]bool{
+		entry: true, deadLoop: true, exit: true,
+	}) {
+		t.Fatal("complete CFG failed to report its dead-loop SCC")
+	}
+	if coroCFGSubsetHasCycle(blocks, map[*ssa.BasicBlock]bool{
+		entry: true, exit: true,
+	}) {
+		t.Fatal("constant-reachable CFG inherited a cycle from an excluded SCC")
+	}
+}
+
 func TestCoroPhysicalPlanRuntimeHelperElisionIsRecipeOwned(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -38,7 +58,8 @@ func TestCoroPhysicalPlanRuntimeHelperElisionIsRecipeOwned(t *testing.T) {
 		{name: "slice two index", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionSlice}, helper: "NewSlice2", want: true},
 		{name: "slice three index", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionSlice}, helper: "NewSlice3Bounds", want: true},
 		{name: "slice keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionSlice}, helper: "AllocU"},
-		{name: "index range", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIndex}, helper: "CheckIndexRange", want: true},
+		{name: "signed index range", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIndex}, helper: "PanicIndex", want: true},
+		{name: "unsigned index range", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIndex}, helper: "PanicIndexU", want: true},
 		{name: "deref nil", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionDeref}, helper: "AssertNilDeref", want: true},
 		{name: "slice conversion", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionSliceToArrayPointer}, helper: "PanicSliceConvert", want: true},
 		{name: "wrapper nil", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionBuiltinNilGuard}, helper: "PanicWrapNilPointer", want: true},

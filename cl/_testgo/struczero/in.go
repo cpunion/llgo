@@ -7,6 +7,8 @@ type bar struct {
 	f  float32
 }
 
+// A comma-ok assertion must pair the asserted value with its success bit and
+// use an all-zero pair on failure, preserving zero values across packages.
 func Bar(v any) (ret foo.Foo, ok bool) {
 	ret, ok = v.(foo.Foo)
 	return

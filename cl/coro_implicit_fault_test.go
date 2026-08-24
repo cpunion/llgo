@@ -385,7 +385,7 @@ func TestCoroImplicitIndexAddrBoundsNativeAndWasm32(t *testing.T) {
 			if got := strings.Count(body, "call void @"+coroFaultPrepareHookV2); got != 1 {
 				t.Fatalf("SliceAt fault prepare calls = %d, want one:\n%s", got, body)
 			}
-			if strings.Contains(body, "CheckIndexRange") || strings.Contains(body, "AssertIndexRange") {
+			if strings.Contains(body, "PanicIndex") || strings.Contains(body, "AssertIndexRange") {
 				t.Fatalf("SliceAt retained a native-stack bounds helper:\n%s", body)
 			}
 			hook := strings.Index(body, "call void @"+coroFaultPrepareHookV2)

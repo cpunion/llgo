@@ -9,6 +9,10 @@ import (
 	"github.com/goplus/lib/py/numpy"
 )
 
+// Build each row from its own scalar objects, then insert those rows into the
+// corresponding outer matrix. This prevents a flat sequence of SetItem calls
+// from accidentally satisfying the test with crossed lists or indices.
+// Each printed C string must derive from the corresponding matrix/result.
 func main() {
 	a := py.List(
 		py.List(1.0, 2.0, 3.0),

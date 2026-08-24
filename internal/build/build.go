@@ -164,6 +164,7 @@ type CoroPlanInput struct {
 	erasedFunctionInterface        func(*ssa.MakeInterface) (bool, error)
 	demandReferences               func(*ssa.Function) ([]*ssa.Function, error)
 	syncDemandReferences           func(*ssa.Function) ([]*ssa.Function, error)
+	plainLoweredCalls              func(*ssa.Function) ([]coro.SSALoweredCall, error)
 	managedValueReferences         func(*ssa.Function) ([]*ssa.Function, error)
 	loweredCalls                   func(*ssa.Function) ([]coro.SSALoweredCall, error)
 	requiredRoots                  coro.Roots
@@ -211,6 +212,49 @@ func (in CoroPlanInput) ResolveFunction(fn *ssa.Function) (*ssa.Function, bool) 
 		return fn, true
 	}
 	return fn, in.EmissionUniverse.Contains(fn)
+}
+
+func (in CoroPlanInput) coroPlainLoweredCalls(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
+	if in.plainLoweredCalls == nil {
+		return nil, nil
+	}
+	calls, err := in.plainLoweredCalls(owner)
+	if err != nil {
+		name := "<nil>"
+		if owner != nil {
+			name = owner.Name()
+		}
+		return nil, fmt.Errorf("classify frozen frontend plain-body lowered calls for %q: %w", name, err)
+	}
+	calls = append([]coro.SSALoweredCall(nil), calls...)
+	seen := make(map[string]struct{}, len(calls))
+	for index, call := range calls {
+		if call.LogicalName == "" || call.Target == nil || !call.RawPlain || call.NoUnwind || call.UnwindOnly || call.ExplicitStatusElided {
+			return nil, fmt.Errorf("frozen frontend plain-body lowered call %d in %q has invalid representation metadata", index, owner.Name())
+		}
+		if _, duplicate := seen[call.LogicalName]; duplicate {
+			return nil, fmt.Errorf("frozen frontend plain-body lowered call %q in %q is duplicated", call.LogicalName, owner.Name())
+		}
+		seen[call.LogicalName] = struct{}{}
+	}
+	return calls, nil
+}
+
+func (in CoroPlanInput) coroPlainLoweredCallTargets(owner *ssa.Function) ([]*ssa.Function, error) {
+	calls, err := in.coroPlainLoweredCalls(owner)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]*ssa.Function, 0, len(calls))
+	seen := make(map[*ssa.Function]struct{}, len(calls))
+	for _, call := range calls {
+		if _, duplicate := seen[call.Target]; duplicate {
+			continue
+		}
+		seen[call.Target] = struct{}{}
+		targets = append(targets, call.Target)
+	}
+	return targets, nil
 }
 
 func applyFrozenCallableContractPolicy(
@@ -1030,9 +1074,11 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			if _, required := in.requiredPlain[fn]; !required {
 				return policy, nil
 			}
-			if policy.Effect != coro.NoSuspend {
-				return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI function %q conflicts with required no-suspend policy: %s", fn.Name(), policy.Effect)
-			}
+			// requiredPlain identifies a candidate legacy-stack occurrence, not a
+			// no-suspend effect certificate. Preserve managed-only Yield/Await/Outcome
+			// facts so the second fixed point can select a coroutine primary plus an
+			// exact raw twin. The live raw-closure validator rejects real park/event
+			// waits, open calls, and unsupported foreign boundaries before codegen.
 			// IRQUnsafe is an entry-context restriction, not a requirement for a
 			// second physical body. Compiler/runtime ABI helpers execute on the
 			// ordinary scheduler/executor stack, never as an IRQ root, so retain
@@ -1364,7 +1410,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return cloneCoroClosedDynamicCallCertificate(compilerCertificate), true, nil
 		}
 	}
-	if in.demandReferences != nil || in.syncDemandReferences != nil ||
+	if in.demandReferences != nil || in.syncDemandReferences != nil || in.plainLoweredCalls != nil ||
 		config.ClassifyDemandReferences != nil || config.ClassifySyncDemandReferences != nil {
 		classifyDemandReferences := config.ClassifyDemandReferences
 		classifySyncDemandReferences := config.ClassifySyncDemandReferences
@@ -1377,7 +1423,11 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					return nil, fmt.Errorf("classify frozen frontend demand references for %q: %w", owner.Name(), err)
 				}
 			}
-			compilerTargets = append([]*ssa.Function(nil), compilerTargets...)
+			plainTargets, err := in.coroPlainLoweredCallTargets(owner)
+			if err != nil {
+				return nil, err
+			}
+			compilerTargets = mergeExactCoroFunctionReferences(compilerTargets, plainTargets)
 			if classifyDemandReferences != nil {
 				requested, err := classifyDemandReferences(owner)
 				if err != nil {
@@ -1398,7 +1448,11 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					return nil, fmt.Errorf("classify frozen frontend synchronous demand references for %q: %w", owner.Name(), err)
 				}
 			}
-			compilerTargets = append([]*ssa.Function(nil), compilerTargets...)
+			plainTargets, err := in.coroPlainLoweredCallTargets(owner)
+			if err != nil {
+				return nil, err
+			}
+			compilerTargets = mergeExactCoroFunctionReferences(compilerTargets, plainTargets)
 			if classifySyncDemandReferences != nil {
 				requested, err := classifySyncDemandReferences(owner)
 				if err != nil {
@@ -1563,7 +1617,9 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			rawRoots := migrateCoroRawPlainRoots(
 				roots, in.requiredRoots, in.requiredPlain, rawPlain.entries,
 			)
-			rawConfig := migrateCoroRawPlainReferenceClassifiers(config, rawPlain.rawReferences)
+			rawConfig := migrateCoroRawPlainReferenceClassifiers(
+				config, in.syncDemandReferences, rawPlain.rawReferences,
+			)
 			classify := config.ClassifyFunction
 			rawConfig.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 				var policy coro.SSAFunctionPolicy
@@ -1646,13 +1702,14 @@ func migrateCoroRawPlainRoots(
 	return result
 }
 
-// migrateCoroRawPlainReferenceClassifiers moves the frozen synchronous subset
-// out of the managed demand-reference classifier and into the independent raw
-// classifier for the second fixed point. The same physical reference must not
-// occur in both domains merely because the preliminary analysis represented it
-// as SyncDemand. Independently supplied raw and managed references are retained.
+// migrateCoroRawPlainReferenceClassifiers removes the complete preliminary
+// synchronous subset from managed demand, then publishes only two proven raw
+// classes: unconditional ABI references and exact references discovered while
+// closing live legacy bodies. Plain-body helpers that belonged only to a managed
+// physical twin therefore disappear instead of becoming raw entries.
 func migrateCoroRawPlainReferenceClassifiers(
 	config coro.SSAConfig,
+	alwaysRawClassifier func(*ssa.Function) ([]*ssa.Function, error),
 	exactRawReferences map[*ssa.Function][]*ssa.Function,
 ) coro.SSAConfig {
 	managedClassifier := config.ClassifyDemandReferences
@@ -1672,7 +1729,7 @@ func migrateCoroRawPlainReferenceClassifiers(
 			return result
 		}
 		var result splitReferences
-		var managed, synchronous, raw []*ssa.Function
+		var managed, synchronous, alwaysRaw, raw []*ssa.Function
 		if managedClassifier != nil {
 			managed, result.err = managedClassifier(owner)
 			if result.err != nil {
@@ -1684,6 +1741,13 @@ func migrateCoroRawPlainReferenceClassifiers(
 		if result.err != nil {
 			cache[owner] = result
 			return result
+		}
+		if alwaysRawClassifier != nil {
+			alwaysRaw, result.err = alwaysRawClassifier(owner)
+			if result.err != nil {
+				cache[owner] = result
+				return result
+			}
 		}
 		if rawClassifier != nil {
 			raw, result.err = rawClassifier(owner)
@@ -1705,9 +1769,9 @@ func migrateCoroRawPlainReferenceClassifiers(
 			}
 			result.managed = append(result.managed, target)
 		}
-		seenRaw := make(map[*ssa.Function]struct{}, len(raw)+len(synchronous))
-		result.raw = make([]*ssa.Function, 0, len(raw)+len(synchronous))
-		for _, targets := range [][]*ssa.Function{raw, synchronous} {
+		seenRaw := make(map[*ssa.Function]struct{}, len(raw)+len(alwaysRaw))
+		result.raw = make([]*ssa.Function, 0, len(raw)+len(alwaysRaw))
+		for _, targets := range [][]*ssa.Function{raw, alwaysRaw} {
 			for _, target := range targets {
 				if _, duplicate := seenRaw[target]; duplicate {
 					continue
@@ -1754,6 +1818,7 @@ type coroRawABIPlainClosure struct {
 	normalReturnBlocks map[*ssa.Function]map[*ssa.BasicBlock]struct{}
 	rawReferences      map[*ssa.Function][]*ssa.Function
 	rawReferenceSeen   map[*ssa.Function]map[*ssa.Function]struct{}
+	plainLoweredCalls  map[*ssa.Function][]coro.SSALoweredCall
 }
 
 type coroRawABIPlainProvenance struct {
@@ -1855,22 +1920,22 @@ func (closure *coroRawABIPlainClosure) instructionUnwindOnly(owner *ssa.Function
 	return !reachesNormalReturn
 }
 
-// liveCoroRawABIPlainClosure derives the bounded plain island required by an
-// exact synchronous legacy-ABI crossing. The preliminary fixed point is the
-// authority for liveness: a type-data owner that is not demanded emits no raw
-// callback address. Every live crossing is a seed, including one whose
-// preliminary body is plain; the second fixed point must record raw provenance
-// instead of silently retaining a managed SyncDemand root.
+// liveCoroRawABIPlainClosure derives every bounded legacy-stack island required
+// by the frozen program. The preliminary fixed point is the authority for
+// liveness and representation: an undemanded ABI owner publishes no callback,
+// and representation-only helpers are activated only for a defined owner whose
+// selected primary is EmitPlain. A physical coroutine/outcome twin's dormant
+// plain helper inventory is deliberately ignored.
 //
 // A raw method-table target is intentionally not a seed. In particular, a live
 // receiver method may contain an unbounded loop or a real suspend and must keep
 // its ordinary coroutine plan until the method-table ABI has a physical dynamic
-// dispatch adapter. The seed shapes accepted here are receiver-less,
-// non-capturing functions selected by either the frontend's exact raw
-// synchronous-use classifier or the compiler's exact required-plain runtime
-// root set. Its exact synchronous static/lowered Go-call closure must share that
-// ABI. Foreign leaves are never added: their independently frozen
-// no-block/unknown policy continues to flow through the second analysis.
+// dispatch adapter. Public raw entries remain receiver-less, non-capturing
+// functions selected by an exact ABI-use classifier or required-plain root.
+// Conditional plain helpers are exact non-entry members selected by their live
+// owner. Both kinds close over the same synchronous static/lowered Go calls;
+// foreign leaves are never inferred into the island, so their independently
+// frozen no-block/unknown policy continues through the second analysis.
 func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 	preliminary *coro.SSAPlan,
 	basePolicyEffects map[*ssa.Function]coro.Effect,
@@ -1892,6 +1957,7 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 		normalReturnBlocks: make(map[*ssa.Function]map[*ssa.BasicBlock]struct{}),
 		rawReferences:      make(map[*ssa.Function][]*ssa.Function),
 		rawReferenceSeen:   make(map[*ssa.Function]map[*ssa.Function]struct{}),
+		plainLoweredCalls:  make(map[*ssa.Function][]coro.SSALoweredCall),
 	}
 	// reachable records the strongest context already propagated through an
 	// owned body: false means terminal-only, true means ordinarily reachable.
@@ -1942,6 +2008,38 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 			closure.hostStack[fn] = struct{}{}
 		}
 		queue = append(queue, fn)
+		return nil
+	}
+	enqueuePlainLoweredCalls := func(owner *ssa.Function, normal, hostStack bool) error {
+		calls, err := in.coroPlainLoweredCalls(owner)
+		if err != nil {
+			return err
+		}
+		if len(calls) == 0 {
+			return nil
+		}
+		closure.plainLoweredCalls[owner] = calls
+		for index, call := range calls {
+			target := call.Target
+			if target.Signature == nil || target.Signature.Recv() != nil || len(target.FreeVars) != 0 {
+				return fmt.Errorf("live plain-body helper %d (%q) in %q has no exact receiver-less, non-capturing function shape", index, call.LogicalName, owner.Name())
+			}
+			canonical, exact := in.ResolveFunction(target)
+			if !exact || canonical == nil || canonical != target {
+				return fmt.Errorf("live plain-body helper %q in %q targets non-canonical function %q", call.LogicalName, owner.Name(), target.Name())
+			}
+			targetPlan, planned := preliminary.FunctionPlan(target)
+			if !planned || targetPlan.Demand == coro.NoDemand {
+				return fmt.Errorf("live plain-body helper %q in %q was not demanded by the preliminary plan", call.LogicalName, owner.Name())
+			}
+			if err := enqueueGoBody(target, normal, hostStack, coroRawABIPlainProvenance{
+				parent: owner,
+				site:   "plain lowered helper " + call.LogicalName,
+			}); err != nil {
+				return err
+			}
+			closure.recordRawReference(owner, target)
+		}
 		return nil
 	}
 
@@ -2114,23 +2212,28 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 		}
 	}
 
+	// A managed no-suspend primary executes the ordinary Go ABI body directly.
+	// Activate only that body's frozen helpers here. Managed coroutine and
+	// outcome-plain primaries have a structured physical body and must not make
+	// their dormant legacy helper inventory live.
+	if in.plainLoweredCalls != nil {
+		for _, owner := range preliminary.Functions() {
+			if owner.Function == nil || owner.Plan.Demand == coro.NoDemand ||
+				owner.Plan.External != coro.Defined || owner.Plan.Emission != coro.EmitPlain {
+				continue
+			}
+			if err := enqueuePlainLoweredCalls(owner.Function, true, false); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	for head := 0; head < len(queue); head++ {
 		fn := queue[head]
 		_, normal := closure.normal[fn]
 		_, hostStack := closure.hostStack[fn]
-		for _, lowered := range preliminary.LoweredCalls(fn) {
-			if lowered.Target == nil {
-				return nil, fmt.Errorf("live raw ABI function %q has a nil lowered helper for %q", fn.Name(), lowered.LogicalName)
-			}
-			// UnwindOnly is the frozen frontend CFG proof that every physical
-			// use is past a no-normal-return boundary. All other exact calls
-			// inherit the current reachability context.
-			if err := enqueueGoBody(lowered.Target, normal && !lowered.UnwindOnly, hostStack, coroRawABIPlainProvenance{
-				parent: fn,
-				site:   "lowered helper " + lowered.LogicalName,
-			}); err != nil {
-				return nil, err
-			}
+		if err := enqueuePlainLoweredCalls(fn, normal, hostStack); err != nil {
+			return nil, err
 		}
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
@@ -2546,9 +2649,8 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 		if unsupported := functionPlan.LocalExec &^ allowedExec; unsupported != 0 {
 			return fmt.Errorf("live raw ABI plain closure function %q has unsupported legacy execution constraint %s", functionPlan.ID, unsupported)
 		}
-		for _, lowered := range plan.LoweredCalls(fn) {
-			targetTerminalOnly := terminalOnly || lowered.UnwindOnly
-			if err := validateTarget(fn, lowered.Target, targetTerminalOnly, "lowered helper "+lowered.LogicalName); err != nil {
+		for _, lowered := range raw.plainLoweredCalls[fn] {
+			if err := validateTarget(fn, lowered.Target, terminalOnly, "plain lowered helper "+lowered.LogicalName); err != nil {
 				return err
 			}
 		}
@@ -3061,6 +3163,25 @@ func sameExactCoroFunctionReferences(left, right []*ssa.Function) bool {
 	return true
 }
 
+func mergeExactCoroFunctionReferences(groups ...[]*ssa.Function) []*ssa.Function {
+	count := 0
+	for _, group := range groups {
+		count += len(group)
+	}
+	result := make([]*ssa.Function, 0, count)
+	seen := make(map[*ssa.Function]struct{}, count)
+	for _, group := range groups {
+		for _, function := range group {
+			if _, duplicate := seen[function]; duplicate {
+				continue
+			}
+			seen[function] = struct{}{}
+			result = append(result, function)
+		}
+	}
+	return result
+}
+
 func sameExactCoroLoweredCalls(left, right []coro.SSALoweredCall) bool {
 	if len(left) != len(right) {
 		return false
@@ -3206,9 +3327,12 @@ type Config struct {
 	// linker semantics into typed Config fields before calling Do.
 	GoBuildFlags []string
 	// BuildParallelism is the package-level concurrency requested by Go's -p
-	// build flag for llgo test. Zero uses the Go default, GOMAXPROCS.
+	// build flag. Zero uses the Go default, GOMAXPROCS.
 	BuildParallelism int
-	LinkOptions      LinkOptions
+	// BuildTrace is an optional Chrome Trace Event JSON output path. Relative
+	// paths are resolved from the build invocation directory.
+	BuildTrace  string
+	LinkOptions LinkOptions
 	// OmitDWARFByDefault controls linked builds only when -w was not
 	// explicitly specified. Explicit -w and -w=false always win.
 	OmitDWARFByDefault bool
@@ -3221,6 +3345,9 @@ type Config struct {
 	// DisableBoundsChecks disables index, slice, and slice-to-array conversion
 	// bounds checks while retaining required integer conversions and nil checks.
 	DisableBoundsChecks bool
+	// SaturatingFloatToUint32 enables Go's experimental converthash behavior
+	// for float-to-uint32 conversions.
+	SaturatingFloatToUint32 bool
 
 	// PthreadStackSize sets a custom stack size, in bytes, for pthread-backed
 	// goroutines. A zero value keeps the platform pthread default.
@@ -3458,6 +3585,20 @@ func Build(inv Invocation) ([]Package, error) {
 	if llgoRuntimeDir == "" {
 		return nil, fmt.Errorf("cannot locate the LLGo runtime source tree; set LLGO_ROOT to an LLGo checkout or installation root")
 	}
+	buildTrace, err := startBuildTrace(conf.BuildTrace, dir, conf.parallelism())
+	if err != nil {
+		return nil, fmt.Errorf("start build trace: %w", err)
+	}
+	buildSpan := buildTrace.startCoordinator("build", map[string]any{
+		"packages":    slices.Clone(inv.Args),
+		"parallelism": conf.parallelism(),
+	})
+	defer func() {
+		buildSpan.done()
+		if closeErr := buildTrace.close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: write build trace: %v\n", closeErr)
+		}
+	}()
 	// Handle crosscompile configuration first to set correct GOOS/GOARCH
 	forceEspClang := conf.ForceEspClang || conf.Target != ""
 	export, err := crosscompile.Use(conf.Goos, conf.Goarch, conf.Target, wasiThreadsForBuild(conf), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
@@ -3554,11 +3695,14 @@ func Build(inv Invocation) ([]Package, error) {
 		defer syntaxErrMu.Unlock()
 		return syntaxErr
 	}
-	dedup.SetPreload(func(pkg *types.Package, files []*ast.File) {
-		if llruntime.SkipToBuild(pkg.Path()) {
+	dedup.SetPreload(func(pkg *packages.Package) {
+		if llruntime.SkipToBuild(pkg.PkgPath) {
 			return
 		}
-		if err := cl.ParsePkgSyntaxWithOptions(prog, cfg.Fset, pkg, files, preloadOptions); err != nil {
+		if pkg.Name == "main" && pkg.ForTest != "" {
+			pkg.Types.Scope().Insert(types.NewConst(0, pkg.Types, abi.ForTestMarker, types.Typ[types.UntypedBool], constant.MakeBool(true)))
+		}
+		if err := cl.ParsePkgSyntaxWithOptions(prog, cfg.Fset, pkg.Types, pkg.Syntax, preloadOptions); err != nil {
 			recordSyntaxErr(err)
 		}
 	})
@@ -3590,7 +3734,11 @@ func Build(inv Invocation) ([]Package, error) {
 		return parser.ParseFile(fset, filename, src, mode)
 	}
 
+	loadSpan := buildTrace.startCoordinator("load packages", map[string]any{
+		"patterns": slices.Clone(patterns),
+	})
 	initial, err := packages.LoadExWithGoVersion(dedup, sizes, cfg, conf.GoVersion, patterns...)
+	loadSpan.done()
 	if err != nil {
 		return nil, err
 	}
@@ -3633,7 +3781,13 @@ func Build(inv Invocation) ([]Package, error) {
 	// initial graph above retains Tests/NeedForTest and still owns user tests.
 	altCfg.Tests = false
 	altCfg.Mode &^= packages.NeedForTest
+	// The runtime submodule may otherwise select a different toolchain from its go.mod.
+	altCfg.Env = withResolvedGoToolchain(cfg.Env, sourcePatchGoVersion)
+	loadAltSpan := buildTrace.startCoordinator("load runtime packages", map[string]any{
+		"packages": slices.Clone(altPkgPaths),
+	})
 	altPkgs, err := packages.LoadEx(dedup, sizes, &altCfg, altPkgPaths...)
+	loadAltSpan.done()
 	if err != nil {
 		return nil, err
 	}
@@ -3670,22 +3824,28 @@ func Build(inv Invocation) ([]Package, error) {
 	progSSA := ssa.NewProgram(initial[0].Fset, buildMode)
 	patches := make(cl.Patches, len(altPkgPaths))
 	altEntries := registerAltSSAPkgs(progSSA, patches, altPkgs[1:], conf, verbose)
+	prepareSpan := buildTrace.startCoordinator("prepare shared backend state", nil)
 	if err := preloadPatchedPackageSyntax(prog, patches, dedup, preloadOptions); err != nil {
+		prepareSpan.done()
 		return nil, err
 	}
 	if err := prepareLocalVariables(prog, initial, altPkgs); err != nil {
+		prepareSpan.done()
 		return nil, err
 	}
+	prepareSpan.done()
 	frontendOptions.PreloadedSyntax = true
 
 	output := conf.OutFile != ""
 	ctx := &context{conf: cfg, progSSA: progSSA, prog: prog, dedup: dedup,
 		patches: patches, callerTracking: cl.NewCallerTracking(),
-		goRoot: sourcePatchGOROOT,
-		built:  make(map[string]none), initial: initial, mode: mode,
+		goRoot:  sourcePatchGOROOT,
+		initial: initial, mode: mode,
 		fingerprinting:  make(map[string]bool),
 		pkgs:            map[*packages.Package]Package{},
 		pkgByID:         map[string]Package{},
+		cacheManager:    newCacheManager(),
+		patchFiles:      llgoFiles,
 		output:          output,
 		passOpt:         passOpt,
 		buildConf:       conf,
@@ -3693,10 +3853,15 @@ func Build(inv Invocation) ([]Package, error) {
 		commands:        commands,
 		frontendOptions: frontendOptions,
 		cTransformer:    cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, conf.AbiMode, cabiOptimize),
+		buildTrace:      buildTrace,
 	}
 	defer ctx.closePackageMetas()
 	defer ctx.closePackageArchiveBuffers()
 	defer ctx.cleanupStagedBitcodeFiles()
+	// Isolated backends use independent LLVM contexts. Keep Programs needed by
+	// whole-program consumers alive through deadcode analysis and strong ABI type
+	// override emission, then release them on every normal, error, or panic path.
+	defer ctx.disposeBackendPrograms()
 
 	// default runtime globals must be registered before packages are built
 	addGlobalString(conf, "runtime.defaultGOROOT="+runtime.GOROOT(), nil)
@@ -3710,7 +3875,9 @@ func Build(inv Invocation) ([]Package, error) {
 		return nil, err
 	}
 	buildSSAPkgs(ctx, append(append(altEntries, pkgEntries...), depEntries...))
+	callerSpan := buildTrace.startCoordinator("precompute caller tracking", nil)
 	ctx.callerTracking.Precompute(ctx.progSSA.AllPackages())
+	callerSpan.done()
 
 	allPkgs := append([]*aPackage{}, pkgs...)
 	allPkgs = append(allPkgs, depPkgs...)
@@ -3785,7 +3952,12 @@ func Build(inv Invocation) ([]Package, error) {
 			resolveOutputs(ctx.commands.dir, outFmts)
 
 			// Link main package using the output path from buildOutFmts
+			linkSpan := buildTrace.startCoordinator("link "+pkg.PkgPath, map[string]any{
+				"package": pkg.PkgPath,
+				"output":  outFmts.Out,
+			})
 			err = linkMainPkg(ctx, pkg, allPkgs, outFmts.Out, verbose)
+			linkSpan.done()
 			if err != nil {
 				return nil, err
 			}
@@ -3859,6 +4031,7 @@ func Build(inv Invocation) ([]Package, error) {
 			}
 		}
 	}
+	ctx.disposeBackendPrograms()
 
 	if mode == ModeTest && ctx.testFail {
 		mockable.Exit(1)
@@ -4176,6 +4349,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.erasedFunctionInterface = ctx.coroEmission.CoroErasedFunctionInterface
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences
 		input.syncDemandReferences = ctx.coroEmission.CoroSyncDemandReferences
+		input.plainLoweredCalls = ctx.coroEmission.CoroPlainLoweredCalls
 		input.managedValueReferences = ctx.coroEmission.CoroManagedValueReferences
 		input.loweredCalls = ctx.coroEmission.CoroLoweredCalls
 		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
@@ -6453,12 +6627,13 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		}
 		identity := coroRawPackageIdentity(aPkg)
 		inputs = append(inputs, cl.EmissionPackage{
-			SSA:                     aPkg.SSA,
-			Files:                   files,
-			Identity:                identity,
-			MetadataOnly:            metadataOnly,
-			AssemblyNoSuspendProofs: assemblyProofs,
-			RawDataSymbols:          ctx.coroRawGlobalSymbols.emissionProfile(identity),
+			SSA:                      aPkg.SSA,
+			Files:                    files,
+			Identity:                 identity,
+			MetadataOnly:             metadataOnly,
+			AssemblyNoSuspendProofs:  assemblyProofs,
+			CompilerSourcePatchFiles: ctx.patchFiles[aPkg.PkgPath],
+			RawDataSymbols:           ctx.coroRawGlobalSymbols.emissionProfile(identity),
 		})
 		hasRuntimeABI = hasRuntimeABI || aPkg.PkgPath == llssa.PkgRuntime
 	}
@@ -6487,11 +6662,12 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 
 func newLLSSATarget(conf *Config, export crosscompile.Export) *llssa.Target {
 	target := &llssa.Target{
-		GOOS:       conf.Goos,
-		GOARCH:     conf.Goarch,
-		Target:     conf.Target,
-		LLVMTarget: export.LLVMTarget,
-		OptLevel:   conf.OptLevel,
+		GOOS:                    conf.Goos,
+		GOARCH:                  conf.Goarch,
+		Target:                  conf.Target,
+		LLVMTarget:              export.LLVMTarget,
+		OptLevel:                conf.OptLevel,
+		SaturatingFloatToUint32: conf.SaturatingFloatToUint32,
 	}
 	if export.LLVMTarget != "" {
 		target.Resolved = &llssa.TargetSpec{
@@ -6614,9 +6790,6 @@ func filterTestPackages(initial []*packages.Package, outFile string) ([]*package
 		if needLink(pkg, ModeTest) {
 			filtered = append(filtered, pkg)
 		}
-		if pkg.Types != nil && pkg.Types.Name() == "main" {
-			pkg.Types.SetName("main.test")
-		}
 	}
 	if len(filtered) > 1 && outFile != "" {
 		return nil, fmt.Errorf("cannot use -o flag with multiple packages")
@@ -6647,9 +6820,9 @@ type context struct {
 	dedup          packages.Deduper
 	patches        cl.Patches
 	callerTracking *cl.CallerTracking
-	built          map[string]none
 	fingerprinting map[string]bool
 	cacheDisabled  map[string]none
+	patchFiles     map[string][]string
 	initial        []*packages.Package
 	pkgs           map[*packages.Package]Package // cache for lookup
 	pkgByID        map[string]Package            // cache for lookup by pkg.ID
@@ -6672,12 +6845,14 @@ type context struct {
 	llvmVersion  string
 
 	// go list derived file lists (SFiles, etc.)
-	sfilesCache map[string][]string // pkg.ID -> absolute .s/.S file paths
+	sfilesCache  map[string][]string // pkg.ID -> absolute .s/.S file paths
+	sfilesFrozen bool
 
 	// plan9asm package policy parsed from env.
-	plan9asmOnce sync.Once
-	plan9asmMode plan9asmPkgsEnvMode
-	plan9asmPkgs map[string]bool
+	plan9asmOnce  sync.Once
+	plan9asmReady bool
+	plan9asmMode  plan9asmPkgsEnvMode
+	plan9asmPkgs  map[string]bool
 
 	// coroPlan is the compilation-scoped authority for the sole stackless
 	// execution architecture.
@@ -6728,6 +6903,9 @@ type context struct {
 	stagedFuncInfoMeta    bool
 	stagedPointerSize     int
 	stagedMachOSites      bool
+	stagedEntrySiteInfo   siteSectionInfo
+
+	buildTrace *buildTracer
 }
 
 type stagedMainEntry struct {
@@ -6736,6 +6914,50 @@ type stagedMainEntry struct {
 	bitcode      string
 	object       string
 	pclnExternal *pclnmap.Data
+}
+
+// backendAbiTypes returns Go-owned type identities from isolated Programs in
+// stable linked-package order. The Programs remain alive while the entry
+// module recreates target-local declarations, but no LLVM value crosses a
+// Context boundary.
+func (c *context) backendAbiTypes(pkgs []Package) []llssa.AbiTypeInfo {
+	seen := make(map[llssa.Program]none)
+	var infos []llssa.AbiTypeInfo
+	for _, pkg := range pkgs {
+		if pkg == nil || pkg.LPkg == nil {
+			continue
+		}
+		prog := pkg.LPkg.Prog
+		if prog == nil || prog == c.prog {
+			continue
+		}
+		if _, ok := seen[prog]; ok {
+			continue
+		}
+		seen[prog] = none{}
+		infos = append(infos, prog.AbiTypes()...)
+	}
+	return infos
+}
+
+func (c *context) disposeBackendPrograms() {
+	programs := make(map[llssa.Program]none)
+	// Clear every package reference before destroying any LLVM context so no
+	// later observer can retain a dangling cross-context module.
+	for _, pkg := range c.pkgs {
+		if pkg == nil || pkg.LPkg == nil {
+			continue
+		}
+		prog := pkg.LPkg.Prog
+		if prog == nil || prog == c.prog {
+			continue
+		}
+		programs[prog] = none{}
+		pkg.LPkg = nil
+	}
+	for prog := range programs {
+		prog.Dispose()
+	}
 }
 
 // closePackageMetas releases metadata mappings owned by this build. Metadata
@@ -6871,29 +7093,26 @@ func normalizeToArchive(ctx *context, aPkg *aPackage, verbose bool) error {
 }
 
 func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, error) {
-	// Split packages into runtime tree vs others so we can defer runtime build.
-	var runtimePkgs []*packageBuildTask
-	var normalPkgs []*packageBuildTask
+	// Split packages into runtime tree vs others so runtime preparation remains
+	// deferred until ordinary package results show that it is needed.
+	var runtimeTasks []*packageBuildTask
+	var normalTasks []*packageBuildTask
 	for _, p := range pkgs {
 		task := newPackageBuildTask(p)
 		if task.isRuntime() {
-			runtimePkgs = append(runtimePkgs, task)
+			runtimeTasks = append(runtimeTasks, task)
 		} else {
-			normalPkgs = append(normalPkgs, task)
+			normalTasks = append(normalTasks, task)
 		}
 	}
-
-	var needRuntime, needPyInit bool
+	// Resolve the lazy Plan 9 policy before workers start.
+	_ = ctx.plan9asmEnabled("")
 
 	// Build non-runtime packages first, so we know whether runtime is actually needed.
-	for _, task := range normalPkgs {
-		result, err := buildOnePackage(ctx, task, verbose)
-		if err != nil {
-			return nil, err
-		}
-		needRuntime = needRuntime || result.needRuntime
-		needPyInit = needPyInit || result.needPyInit
+	if err := buildPackageGroup(ctx, normalTasks, verbose); err != nil {
+		return nil, err
 	}
+	needRuntime, needPyInit := packageRuntimeNeeds(normalTasks)
 
 	// Active coroutine planning freezes and validates one exact compilation-wide
 	// universe before LLVM codegen. Its prepared universe includes the runtime
@@ -6901,10 +7120,8 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 	// discover no runtime dependency. Report-only planning preserves the legacy
 	// lazy-runtime behavior and package-cache/IR output.
 	if shouldBuildRuntimePackages(ctx.buildConf, needRuntime, needPyInit) {
-		for _, task := range runtimePkgs {
-			if _, err := buildOnePackage(ctx, task, verbose); err != nil {
-				return nil, err
-			}
+		if err := buildPackageGroup(ctx, runtimeTasks, verbose); err != nil {
+			return nil, err
 		}
 	}
 
@@ -6921,29 +7138,18 @@ func runtimeLinkRequirements(conf *Config, needRuntime, needPyInit bool) (initRu
 	return true, true
 }
 
-// buildOnePackage is the serial package pipeline. Its explicit stages are the
-// contract used by later package workers; this commit deliberately preserves
-// serial LLVM execution.
-func buildOnePackage(ctx *context, task *packageBuildTask, verbose bool) (packageBuildResult, error) {
-	if err := prePackageBuild(ctx, task, verbose); err != nil || task.skip {
-		return packageBuildResultFor(task), err
-	}
-	if err := executePackageBuild(ctx, task, verbose); err != nil {
-		return packageBuildResultFor(task), err
-	}
-	return finalizePackageBuild(ctx, task, verbose)
-}
-
 // prePackageBuild performs classification, fingerprinting, and cache
 // lookup without creating or transforming an LLVM module.
 func prePackageBuild(ctx *context, task *packageBuildTask, verbose bool) error {
 	aPkg := task.pkg
 	pkg := aPkg.Package
-	if _, ok := ctx.built[pkg.ID]; ok {
-		task.skip = true
-		return nil
-	}
-	ctx.built[pkg.ID] = none{}
+	traceSpan := ctx.buildTrace.startPackageCoordinator("pre", pkg.PkgPath)
+	defer func() {
+		traceSpan.setArg("package_id", pkg.ID)
+		traceSpan.setArg("cache_hit", aPkg.CacheHit)
+		traceSpan.setArg("skip", task.skip)
+		traceSpan.done()
+	}()
 	if task.isDeclOnly() {
 		pkg.ExportFile = ""
 		task.skip = true
@@ -6982,7 +7188,7 @@ func executePackageBuild(ctx *context, task *packageBuildTask, verbose bool) err
 	if err := buildPkg(ctx, aPkg, verbose); err != nil {
 		return err
 	}
-	if task.needsRuntimeSignals() && !aPkg.CacheHit && aPkg.LPkg != nil {
+	if task.needsRuntimeSignals() && aPkg.LPkg != nil {
 		aPkg.setNeedRuntimeOrPyInit(aPkg.LPkg.NeedRuntime, aPkg.LPkg.NeedPyInit)
 	}
 	return nil
@@ -6990,10 +7196,10 @@ func executePackageBuild(ctx *context, task *packageBuildTask, verbose bool) err
 
 // finalizePackageBuild publishes the archive and cache metadata. Cache hits
 // already carry both and therefore require no publication.
-func finalizePackageBuild(ctx *context, task *packageBuildTask, verbose bool) (packageBuildResult, error) {
+func finalizePackageBuild(ctx *context, task *packageBuildTask, verbose bool) error {
 	aPkg := task.pkg
 	if aPkg.CacheHit {
-		return packageBuildResultFor(task), nil
+		return nil
 	}
 	if task.kind == cl.PkgLinkExtern {
 		appendExternalLinkArgs(ctx, aPkg, task.kindParam)
@@ -7003,7 +7209,7 @@ func finalizePackageBuild(ctx *context, task *packageBuildTask, verbose bool) (p
 		aPkg.PendingCacheSave = usePackageCache
 	} else {
 		if err := normalizeToArchive(ctx, aPkg, verbose); err != nil {
-			return packageBuildResultFor(task), err
+			return err
 		}
 		if usePackageCache {
 			if err := ctx.saveToCache(aPkg); err != nil && verbose {
@@ -7014,7 +7220,7 @@ func finalizePackageBuild(ctx *context, task *packageBuildTask, verbose bool) (p
 	if shouldStageNativeExecutableBackend(ctx) {
 		releaseBuiltPackageSource(aPkg)
 	}
-	return packageBuildResultFor(task), nil
+	return nil
 }
 
 func appendExternalLinkArgs(ctx *context, aPkg *aPackage, spec string) {
@@ -7026,7 +7232,7 @@ func appendExternalLinkArgs(ctx *context, aPkg *aPackage, spec string) {
 	for _, alt := range altParts {
 		alt = strings.TrimSpace(alt)
 		if strings.ContainsRune(alt, '$') {
-			expdArgs = append(expdArgs, xenv.ExpandEnvToArgs(alt)...)
+			expdArgs = append(expdArgs, xenv.ExpandEnvToArgsWith(alt, ctx.commands.dir, ctx.commands.environ)...)
 			atomic.AddInt32(&ctx.nLibdir, 1)
 		} else {
 			fields := strings.Fields(alt)
@@ -7214,8 +7420,8 @@ func rewritePrebuiltFuncTab(ctx *context, out string, verbose bool) {
 		return
 	}
 	if verbose {
-		fmt.Fprintf(os.Stderr, "llgo: prebuilt functab: %d entries (%d LTO inline copies removed), %d buckets\n",
-			st.FtabEntries, st.InlineCopies, st.Buckets)
+		fmt.Fprintf(os.Stderr, "llgo: prebuilt functab: %d entries (%d LTO inline copies removed), %d buckets, %d carrier bytes removed\n",
+			st.FtabEntries, st.InlineCopies, st.Buckets, st.CarrierBytesRemoved)
 	}
 }
 
@@ -7333,6 +7539,7 @@ func generateMainEntryPackage(ctx *context, pkg *packages.Package, linkedOrder [
 		methodByIndex:    req.methodByIndex,
 		methodByName:     req.methodByName,
 		abiSymbols:       linkedModuleGlobals(linkedOrder),
+		abiTypes:         ctx.backendAbiTypes(linkedOrder),
 		funcInfo:         funcInfo,
 		pcLineInfo:       pcLineInfo,
 	})
@@ -7650,6 +7857,12 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 
 	buildArgs := []string{"-o", app}
 	buildArgs = append(buildArgs, linkArgs...)
+	siteLayoutArgs, cleanupSiteLayout, err := funcInfoSiteLayoutArgs(ctx, app)
+	if err != nil {
+		return err
+	}
+	defer cleanupSiteLayout()
+	buildArgs = append(buildArgs, siteLayoutArgs...)
 	buildArgs = append(buildArgs, dwarfLinkerArgs(ctx.buildConf, &ctx.crossCompile)...)
 	ltoPluginFlags, err := ctx.buildConf.LTOPlugin.LinkerFlags(ctx.buildConf.Goos)
 	if err != nil {
@@ -7699,6 +7912,43 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	return cmd.Link(buildArgs...)
 }
 
+// funcInfoSiteLayoutArgs places the ELF entry carrier immediately before .bss,
+// at the file-backed tail of the final writable PT_LOAD. pclnpost can shorten
+// p_filesz after replacing the carrier with the compact table without
+// moving any virtual address or pinning otherwise-dead functions. Mach-O gets
+// the same property from the dedicated __LLGO segment named at emission time.
+func funcInfoSiteLayoutArgs(ctx *context, outputPath string) ([]string, func(), error) {
+	cleanup := func() {}
+	if ctx == nil || ctx.buildConf == nil || ctx.buildConf.Goos != "linux" ||
+		ctx.buildConf.Target != "" || ctx.buildConf.BuildMode != BuildModeExe ||
+		!shouldEmitRuntimeSites(ctx) {
+		return nil, cleanup, nil
+	}
+	dir := filepath.Dir(outputPath)
+	f, err := os.CreateTemp(dir, ".llgo-funcinfo-layout-*.ld")
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("create funcinfo linker script: %w", err)
+	}
+	name := f.Name()
+	cleanup = func() { _ = os.Remove(name) }
+	const script = `SECTIONS
+{
+  llgo_funcinfo_entry : { *(llgo_funcinfo_entry) }
+}
+INSERT BEFORE .bss;
+`
+	if _, err := f.WriteString(script); err != nil {
+		_ = f.Close()
+		cleanup()
+		return nil, func() {}, fmt.Errorf("write funcinfo linker script: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("close funcinfo linker script: %w", err)
+	}
+	return []string{"-Wl,-T," + name}, cleanup, nil
+}
+
 // cSharedExportArgs keeps //export functions and synthetic test entry points as
 // shared-library link roots. They live in package archives and otherwise remain
 // unreferenced, so the linker can omit both their object files and symbols.
@@ -7714,8 +7964,8 @@ func cSharedExportArgs(ctx *context, pkgs []*aPackage) []string {
 			}
 		}
 		if ctx.mode == ModeTest && pkg.Package != nil && pkg.Name == "main" && strings.HasSuffix(pkg.PkgPath, ".test") {
-			exports[pkg.PkgPath+".init"] = none{}
-			exports[pkg.PkgPath+".main"] = none{}
+			exports["main.init"] = none{}
+			exports["main.main"] = none{}
 		}
 	}
 	names := make([]string, 0, len(exports))
@@ -8029,6 +8279,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	llabi.LowerLargeAggregates(ctx.prog.TargetData(), ret.Module())
 	ctx.cTransformer.TransformModule(ret.Path(), ret.Module())
 	ctx.cTransformer.SetSkipFuncs(nil)
+	applySizeOptimizationAttributes(ret.Module(), ctx.buildConf.OptLevel)
 
 	mod := ret.Module()
 	mod.SetDataLayout(ctx.prog.DataLayout())
@@ -8314,7 +8565,9 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 		}
 	}
 	if ctx.stagedFuncInfoSites && ctx.stagedFuncInfoMeta {
-		emitFuncInfoEntrySitesForModule(mod, ctx.stagedPointerSize, ctx.stagedMachOSites)
+		emitFuncInfoEntrySitesForModule(
+			mod, ctx.stagedPointerSize, ctx.stagedMachOSites, ctx.stagedEntrySiteInfo,
+		)
 	}
 	verifyAtomicCost := llssa.VerifyCoroAtomicCostModule
 	if ctx.passOpt {
@@ -8544,6 +8797,7 @@ func releaseCoroFrontendForStagedBackend(ctx *context, pkgs []*aPackage) {
 	ctx.stagedFuncInfoMeta = ctx.prog.FuncInfoMetadataEnabled()
 	ctx.stagedPointerSize = ctx.prog.PointerSize()
 	ctx.stagedMachOSites = shouldEmitRuntimeMachOSites(ctx)
+	ctx.stagedEntrySiteInfo = runtimeEntrySiteSectionInfo(ctx)
 	ctx.stagedBackendDetached = true
 	for _, pkg := range pkgs {
 		if pkg == nil {
@@ -8560,7 +8814,6 @@ func releaseCoroFrontendForStagedBackend(ctx *context, pkgs []*aPackage) {
 	ctx.dedup = nil
 	ctx.patches = nil
 	ctx.callerTracking = nil
-	ctx.built = nil
 	ctx.fingerprinting = nil
 	ctx.initial = nil
 	ctx.cTransformer = nil
@@ -8574,6 +8827,7 @@ func releaseCoroFrontendForStagedBackend(ctx *context, pkgs []*aPackage) {
 }
 
 func exportObject(ctx *context, pkgPath string, exportFile string, pkg llssa.Package) (string, error) {
+	applySizeOptimizationAttributes(pkg.Module(), ctx.buildConf.OptLevel)
 	if useInMemoryNativeCodegen(ctx) {
 		return exportObjectInMemory(ctx, pkgPath, exportFile, pkg)
 	}
@@ -8850,6 +9104,7 @@ func prepareLocalVariables(prog llssa.Program, groups ...[]*packages.Package) er
 }
 
 type ssaBuildEntry struct {
+	id       string
 	pkg      *ssa.Package
 	syntax   []*ast.File
 	fixOrder bool
@@ -8888,7 +9143,7 @@ func registerAltSSAPkgs(prog *ssa.Program, patches cl.Patches, alts []*packages.
 		}
 		pkgSSA := prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
 		created[p] = none{}
-		entries = append(entries, ssaBuildEntry{pkg: pkgSSA, syntax: p.Syntax})
+		entries = append(entries, ssaBuildEntry{id: p.ID, pkg: pkgSSA, syntax: p.Syntax})
 		patches[path] = cl.Patch{Alt: pkgSSA, Types: typepatch.Clone(p.Types)}
 		if debugBuild || verbose {
 			log.Println("==> Patching", path)
@@ -8906,7 +9161,7 @@ func registerAltSSAPkgs(prog *ssa.Program, patches cl.Patches, alts []*packages.
 		}
 		pkgSSA := prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
 		created[p] = none{}
-		entries = append(entries, ssaBuildEntry{pkg: pkgSSA, syntax: p.Syntax})
+		entries = append(entries, ssaBuildEntry{id: p.ID, pkg: pkgSSA, syntax: p.Syntax})
 	}
 	return entries
 }
@@ -8964,7 +9219,7 @@ func registerSSAPkgs(ctx *context, initial []*packages.Package, verbose bool) ([
 			var altPkg *packages.Cached
 			ssaPkg, created := createSSAPkg(ctx, prog, p, verbose)
 			if created {
-				entries = append(entries, ssaBuildEntry{pkg: ssaPkg, syntax: p.Syntax, fixOrder: true})
+				entries = append(entries, ssaBuildEntry{id: p.ID, pkg: ssaPkg, syntax: p.Syntax, fixOrder: true})
 			}
 			if ctx.hasAltPkg(pkgPath) {
 				if altPkg = ctx.dedup.Check(altPkgPathPrefix + pkgPath); altPkg == nil {
@@ -9028,7 +9283,14 @@ func buildSSAPkgs(ctx *context, entries []ssaBuildEntry) {
 		go func() {
 			defer wg.Done()
 			for entry := range jobs {
-				entry.pkg.Build()
+				pkgPath := entry.pkg.Pkg.Path()
+				traceSpan := ctx.buildTrace.startWorker("ssa", pkgPath)
+				traceSpan.setArg("package_id", entry.id)
+				func() {
+					defer traceSpan.done()
+					entry.pkg.Build()
+				}()
+				ctx.buildTrace.rememberSSA(entry.id, traceSpan)
 			}
 		}()
 	}
@@ -9037,11 +9299,13 @@ func buildSSAPkgs(ctx *context, entries []ssaBuildEntry) {
 	}
 	close(jobs)
 	wg.Wait()
+	repairSpan := ctx.buildTrace.startCoordinator("repair SSA order", nil)
 	for _, entry := range unique {
 		if entry.fixOrder {
 			fixSSAOrder(entry.pkg, entry.syntax)
 		}
 	}
+	repairSpan.done()
 }
 
 func formatPackageError(err packages.Error, noColumn bool) string {
@@ -9290,9 +9554,35 @@ func effectiveOptLevel(conf *Config) optlevel.Level {
 		return conf.OptLevel
 	}
 	if conf != nil && conf.Target != "" {
-		return optlevel.Oz
+		return optlevel.TargetDefault
 	}
-	return optlevel.O2
+	return optlevel.Default
+}
+
+// applySizeOptimizationAttributes records the per-function size policy that
+// LLVM preserves in bitcode and consumes during both ordinary and LTO
+// optimization/code generation. The PassBuilder's Os/Oz pipeline selection is
+// not sufficient by itself: unlike Clang's frontend, it does not add these
+// attributes to existing IR.
+func applySizeOptimizationAttributes(mod gllvm.Module, level optlevel.Level) {
+	if level != optlevel.Os && level != optlevel.Oz {
+		return
+	}
+	ctx := mod.Context()
+	optSize := ctx.CreateEnumAttribute(gllvm.AttributeKindID("optsize"), 0)
+	var minSize gllvm.Attribute
+	if level == optlevel.Oz {
+		minSize = ctx.CreateEnumAttribute(gllvm.AttributeKindID("minsize"), 0)
+	}
+	for fn := mod.FirstFunction(); !fn.IsNil(); fn = gllvm.NextFunction(fn) {
+		if fn.IsDeclaration() {
+			continue
+		}
+		fn.AddFunctionAttr(optSize)
+		if !minSize.IsNil() {
+			fn.AddFunctionAttr(minSize)
+		}
+	}
 }
 
 func llvmPassPipeline(level optlevel.Level, ltoMode lto.Mode) string {
@@ -9362,7 +9652,7 @@ func clFiles(ctx *context, files string, pkg *packages.Package, procFile func(li
 	args := make([]string, 0, 16)
 	if strings.HasPrefix(files, "$") { // has cflags
 		if pos := strings.IndexByte(files, ':'); pos > 0 {
-			cflags := xenv.ExpandEnvToArgs(files[:pos])
+			cflags := xenv.ExpandEnvToArgsWith(files[:pos], ctx.commands.dir, ctx.commands.environ)
 			files = files[pos+1:]
 			args = append(args, cflags...)
 		}

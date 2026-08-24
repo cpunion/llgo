@@ -381,7 +381,7 @@ func (p *context) compileCoroIndexAddrPlanned(
 }
 
 // compileCoroIndexGuarded implements every concrete x/tools Index container
-// shape without calling the native-stack CheckIndexRange helper. String and
+// shape without calling the native-stack PanicIndex/PanicIndexU helper. String and
 // array values use LLSSA's unchecked value load; slice and *array values use
 // the corresponding unchecked address followed by a typed load. In all cases
 // the address/load is emitted only in the continuation dominated by the Go

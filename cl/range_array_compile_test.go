@@ -143,9 +143,32 @@ func rangeArrayReceive(ch <-chan *[3]int) {
 
 	for _, name := range []string{"rangeArrayCall", "rangeArrayReceive"} {
 		ir := mustNamedFunction(t, m, "foo."+name).String()
-		if !strings.Contains(ir, "AssertNilDeref") {
-			t.Fatalf("%s should preserve its required array pointer nil check:\n%s", name, ir)
+		if got := strings.Count(ir, "AssertNilDeref"); got != 1 {
+			t.Fatalf("%s nil-check count = %d, want 1:\n%s", name, got, ir)
 		}
+	}
+}
+
+func TestRangeGlobalArrayDoesNotInventNilCheck(t *testing.T) {
+	_, m := mustCompileLLPkgFromSrc(t, `
+package foo
+
+type bucket struct { size uintptr }
+
+var buckets = [...]bucket{{16}, {32}, {64}}
+var sink uintptr
+
+func rangeGlobalArray() {
+	for i := range buckets {
+		b := &buckets[i]
+		sink += b.size
+	}
+}
+`)
+
+	ir := mustNamedFunction(t, m, "foo.rangeGlobalArray").String()
+	if strings.Contains(ir, "AssertNilDeref") {
+		t.Fatalf("range over a global array invented a nil check:\n%s", ir)
 	}
 }
 
@@ -370,6 +393,41 @@ func copyArray(p *[5]int) [5]int {
 		if !strings.Contains(ir, "ret i64 5") {
 			t.Fatalf("%s should return static array length 5:\n%s", tc.name, ir)
 		}
+	}
+}
+
+func TestEffectfulArrayDerefWithBuiltinRefKeepsNilCheck(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `
+package foo
+
+func nextArray() *[3]int { return nil }
+
+func discard() { _ = *nextArray() }
+
+func lenSlice(s []int) int { return len(s) }
+`)
+
+	load := findUnOp(t, ssaPkg.Func("discard"), token.MUL, true)
+	refs := load.Referrers()
+	if refs == nil {
+		t.Fatal("array deref has no referrer list")
+	}
+	oldRefs := *refs
+	// Current x/tools folds len(*nextArray()) to a static constant and leaves
+	// the deref unused. Model the builtin ref shape retained by other supported
+	// SSA versions so the compiler compatibility path remains covered.
+	builtin := findBuiltinCall(t, ssaPkg.Func("lenSlice"), "len")
+	*refs = []ssa.Instruction{&ssa.Call{Call: ssa.CallCommon{Value: builtin}}}
+	defer func() { *refs = oldRefs }()
+
+	prog := newLLSSAProg(t)
+	pkg, err := NewPackage(prog, ssaPkg, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir := mustNamedFunction(t, pkg.Module(), "foo.discard").String()
+	if !strings.Contains(ir, "foo.nextArray") || !strings.Contains(ir, "AssertNilDeref") {
+		t.Fatalf("builtin-referenced array deref should retain its call and nil check:\n%s", ir)
 	}
 }
 

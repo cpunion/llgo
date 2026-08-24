@@ -210,7 +210,9 @@ func TestControlledTimerOwnerUsesUnifiedTimerSource(t *testing.T) {
 	for _, contract := range []string{
 		"func __llgo_coro_timer_park_controlled_v2(",
 		"func __llgo_coro_timer_request_controlled_v2(",
-		"coro.PrepareCurrentExecutorControlledTimerPark(",
+		"coro.CurrentExecutorTimerSource(task)",
+		"ensureCoroTimerSourceCapacityV1(",
+		"coro.PrepareSingleControlledTimerParkReserved(",
 		"coroTargetRequestControlledTimerV2(",
 		"catomic.Store(ownerRoute, uint32(wantRoute))",
 	} {
@@ -339,7 +341,7 @@ func TestNativeTimerCapacityIsDemandPagedAndAdmitsStandardLibraryStress(t *testi
 		"coroRuntimeTimerCapacityV1  = 64 * coro.TimerRegistrationPageCapacity",
 		"func ensureCoroTimerOperationCapacityV1(",
 		"page := new(coro.TimerRegistrationPage)",
-		"coro.AttachTimerRegistrationPage(sources.Timers, p, page, nil)",
+		"coro.AttachTimerRegistrationPage(timers, p, page, nil)",
 		"block := new(coro.OperationPageDirectoryBlock)",
 	} {
 		if !strings.Contains(capacity, contract) {
@@ -350,7 +352,7 @@ func TestNativeTimerCapacityIsDemandPagedAndAdmitsStandardLibraryStress(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(timerOwner), "ensureCoroTimerOperationCapacityV1(driver, task, coroRuntimeTimerCapacityV1)") {
+	if !strings.Contains(string(timerOwner), "reservation, capacityOK := ensureCoroTimerSourceCapacityV1(") {
 		t.Error("timer park owner does not demand-grow before its ParkSet transaction")
 	}
 }

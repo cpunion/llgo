@@ -1,5 +1,30 @@
 package main
 
+// Each source section below exercises a different equality lowering. Keep the
+// checks function-scoped and follow the comparison result through to assert so
+// a coincidental helper call elsewhere cannot satisfy the test.
+
+// Function values: the generated closure code pointer is non-nil and that
+// predicate is what reaches assert.
+
+
+// DARWIN-ARM64-LABEL: define void @"main.init#1$2"(ptr swiftself %0){{.*}} {
+// LINUX-AMD64-LABEL: define void @"main.init#1$2"(ptr nest %0){{.*}} {
+
+// Arrays: all three elements participate in equality, and inequality negates
+// the aggregate result rather than changing element semantics.
+
+// Structs delegate string and interface fields to their semantic equality
+// helpers and combine both results before asserting the aggregate result.
+
+// Slices compare with nil through their data pointer. Check the non-empty and
+// zero-length/non-zero-capacity make paths separately.
+
+// Interface equality must feed the assertion directly, including a negated
+// result for unequal dynamic types.
+
+
+
 func test() {}
 
 func assert(cond bool) {

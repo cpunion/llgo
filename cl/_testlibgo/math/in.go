@@ -7,6 +7,7 @@ import (
 
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
+	// Each math result must flow unchanged to the corresponding print.
 	// CHECK: call void @"math.Sqrt$outcome"({{.*}}double 2.000000e+00)
 	// CHECK: [[PRINT:%[0-9]+]] = call ptr @"{{.*}}PrintFloat$coro"
 	// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[PRINT]]

@@ -1120,8 +1120,11 @@ func (b *coroFrameRetentionRootBuilder) classifyExactCoroClosureFreeVar(value *s
 		return true, true
 	}
 	effective, err := b.audit.universe.coroPhysicalEntrySourceSignature(b.audit.fn)
+	environment, hasEnvironment, environmentErr :=
+		b.audit.universe.closureEnvironments.entryEnvironment(b.audit.fn)
 	return false, err == nil && effective != nil && effective.Params().Len() != 0 &&
-		coroPhysicalClosureContextMatches(b.audit.fn, effective.Params().At(0).Type())
+		environmentErr == nil && hasEnvironment && environment != nil &&
+		types.Identical(effective.Params().At(0).Type(), environment.Type())
 }
 
 func (b *coroFrameRetentionRootBuilder) traceSlice(value ssa.Value, use ssa.Instruction, visiting map[ssa.Value]bool) (coroFrameRetentionTrace, bool) {

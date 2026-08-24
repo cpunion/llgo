@@ -62,3 +62,23 @@ func defineCoroNativeE2ENilDerefStubs(prog llssa.Program, pkg llssa.Package, abo
 	body.Call(assertNil.Expr, body.BinOp(token.EQL, assertPtr.Param(0), prog.Nil(prog.VoidPtr())))
 	body.Return(assertPtr.Param(0))
 }
+
+// defineCoroNativeE2EIndexPanicStubs terminates the closed scheduler fixtures
+// at the Go 1.26 signed and unsigned index-panic leaves. These helpers are
+// reached only after LLGo has determined that the bounds check failed.
+func defineCoroNativeE2EIndexPanicStubs(pkg llssa.Package, abort llssa.Function) {
+	for _, helper := range []struct {
+		name      string
+		indexType types.Type
+	}{
+		{name: "PanicIndex", indexType: types.Typ[types.Int]},
+		{name: "PanicIndexU", indexType: types.Typ[types.Uint]},
+	} {
+		function := pkg.NewFunc(llssa.PkgRuntime+"."+helper.name, newSignature(
+			[]types.Type{helper.indexType, types.Typ[types.Int]}, nil,
+		), llssa.InGo)
+		body := function.MakeBody(1)
+		body.Call(abort.Expr)
+		body.Return()
+	}
+}

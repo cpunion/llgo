@@ -1,5 +1,30 @@
 package main
 
+// Cover the distinct deferred function-value forms in this test without
+// pinning the defer-node layout or basic blocks.
+
+
+
+// The captured 42 is stored in the closure environment before the function pair is deferred.
+// When unwound, the deferred function pair is removed, freed, and invoked with its environment.
+// DARWIN-ARM64: call void [[VALUE_RUN_CODE]](ptr swiftself [[VALUE_RUN_ENV]])
+// LINUX-AMD64: call void [[VALUE_RUN_CODE]](ptr nest [[VALUE_RUN_ENV]])
+
+// DARWIN-ARM64-LABEL: define void @"main.testDeferClosureValue$1"(ptr swiftself %0){{.*}} {
+// LINUX-AMD64-LABEL: define void @"main.testDeferClosureValue$1"(ptr nest %0){{.*}} {
+
+// The field value, rather than its declaration, is the pair placed into the defer record.
+// DARWIN-ARM64: call void [[FIELD_RUN_CODE]](ptr swiftself [[FIELD_RUN_ENV]])
+// LINUX-AMD64: call void [[FIELD_RUN_CODE]](ptr nest [[FIELD_RUN_ENV]])
+
+
+// The deferred receiver and second literal are recorded independently.
+
+
+
+// DARWIN-ARM64-LABEL: define void @"main.testDeferStructClosure$1"(ptr swiftself %0, %"{{.*}}String" %1){{.*}} {
+// LINUX-AMD64-LABEL: define void @"main.testDeferStructClosure$1"(ptr nest %0, %"{{.*}}String" %1){{.*}} {
+
 // Test deferred closure and method-value lowering.
 
 // Type for holding a function

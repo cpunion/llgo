@@ -8,7 +8,7 @@ import (
 
 const (
 	LLGoPackage = "link"
-	LLGoFiles   = "_wrap/runtime.c; _wrap/signal.c; _wrap/debugtrap.c; _wrap/fault.c; _wrap/dynunwind.c"
+	LLGoFiles   = "_wrap/runtime.c; _wrap/signal.c; _wrap/debugtrap.c; _wrap/fault.c; _wrap/dynunwind.c; _wrap/profile.c; ../syscall/_wrap/syscall_linux.c"
 )
 
 //go:linkname c_maxprocs C.llgo_maxprocs

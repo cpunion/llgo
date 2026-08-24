@@ -25,7 +25,41 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
+
+func TestCoroPhysicalClosureContextConsumesFrozenEffectiveType(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+type Value struct{ Word uintptr }
+func Outer(value Value) func() { return func() { _ = value } }
+`)
+	outer := ssaPkg.Func("Outer")
+	if outer == nil || len(outer.AnonFuncs) != 1 {
+		t.Fatalf("Outer anonymous functions = %v", outer)
+	}
+	closure := outer.AnonFuncs[0]
+	if len(closure.FreeVars) == 0 {
+		t.Fatal("fixture closure has no capture")
+	}
+	environment := makeClosureCtx(ssaPkg.Pkg, closure.FreeVars, func(types.Type) types.Type {
+		return types.NewPointer(types.Typ[types.Uintptr])
+	})
+	projection := newCoroClosureEnvironmentProjection()
+	projection.facts[closure] = coroClosureEnvironmentFact{environment: environment}
+	universe := &EmissionUniverse{closureEnvironments: projection}
+	effective := llssa.FuncAddCtx(environment, coroPhysicalNormalizeSourceSignature(closure.Signature))
+	plan := coro.FunctionPlan{ID: "foo.Outer$1"}
+	if err := validateCoroPhysicalSSAParameterShape(plan, closure, effective, universe); err != nil {
+		t.Fatalf("frozen effective closure context was rejected: %v", err)
+	}
+
+	rawEnvironment := makeClosureCtx(ssaPkg.Pkg, closure.FreeVars, nil)
+	wrong := llssa.FuncAddCtx(rawEnvironment, coroPhysicalNormalizeSourceSignature(closure.Signature))
+	if err := validateCoroPhysicalSSAParameterShape(plan, closure, wrong, universe); err == nil ||
+		!strings.Contains(err.Error(), "exact typed closure context") {
+		t.Fatalf("raw source closure context mismatch = %v", err)
+	}
+}
 
 func TestCoroPhysicalTransportTypeSeparatesRawCAndManagedFunctions(t *testing.T) {
 	const source = `package foo

@@ -285,11 +285,11 @@ func TestCgoGeneratedTouchMetadataFromCmdCgo(t *testing.T) {
 	defer prog.Dispose()
 	dedup := llpackages.NewDeduper()
 	var preloadErr error
-	dedup.SetPreload(func(pkg *types.Package, files []*ast.File) {
+	dedup.SetPreload(func(pkg *llpackages.Package) {
 		if preloadErr != nil {
 			return
 		}
-		preloadErr = ParsePkgSyntax(prog, fset, pkg, files)
+		preloadErr = ParsePkgSyntax(prog, fset, pkg.Types, pkg.Syntax)
 	})
 	loaded, err := llpackages.LoadEx(dedup, nil, &llpackages.Config{
 		Mode: llpackages.NeedName | llpackages.NeedFiles |
@@ -350,6 +350,49 @@ func TestCgoGeneratedTouchMetadataFromCmdCgo(t *testing.T) {
 		}
 	}
 	t.Fatal("real cmd/cgo output contains no _Cgo_use call")
+}
+
+func TestRecoverCallClassificationHelpers(t *testing.T) {
+	ctx := &context{}
+	if ctx.functionUsesRecover(nil) {
+		t.Fatal("nil function should not report recover use")
+	}
+
+	ssaPkg, _, _ := buildGoSSAPkg(t, `
+package foo
+
+func usesRecover() {
+	recover()
+}
+
+func plain() {}
+`)
+	usesRecover := ssaPkg.Members["usesRecover"].(*gossa.Function)
+	plain := ssaPkg.Members["plain"].(*gossa.Function)
+	if !ctx.functionUsesRecover(usesRecover) {
+		t.Fatal("usesRecover should report direct recover use")
+	}
+	if ctx.functionUsesRecover(plain) {
+		t.Fatal("plain should not report recover use")
+	}
+	if !ctx.callMayRecover(usesRecover) {
+		t.Fatal("function using recover should be recover-capable")
+	}
+	if ctx.callMayRecover(plain) {
+		t.Fatal("plain static function should not be recover-capable")
+	}
+	if !ctx.callMayRecover(&gossa.MakeClosure{}) {
+		t.Fatal("unknown closure target should conservatively be recover-capable")
+	}
+	if !ctx.callMayRecover(&gossa.Call{}) {
+		t.Fatal("function value returned by a call should conservatively be recover-capable")
+	}
+	if !ctx.callMayRecover(nil) {
+		t.Fatal("unknown call value should conservatively be recover-capable")
+	}
+	if !ctx.callMayRecover(&gossa.Function{}) {
+		t.Fatal("bodyless function should conservatively be recover-capable")
+	}
 }
 
 func TestCgoCgocall_InitArgsFromParams(t *testing.T) {

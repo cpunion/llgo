@@ -521,7 +521,18 @@ func coroSemanticEvaluatedCFGHasCycle(
 			}
 		}
 	}
-	state := make(map[*ssa.BasicBlock]uint8, len(evaluated))
+	return coroCFGSubsetHasCycle(blocks, evaluated)
+}
+
+// coroCFGSubsetHasCycle is the shared topology gate for the exact block set
+// selected by ProgramIR. Raw SSA may retain a loop behind a constant-false
+// branch; treating that dead SCC as executable would disagree with both local
+// effect analysis and physical emission.
+func coroCFGSubsetHasCycle(
+	blocks []*ssa.BasicBlock,
+	included map[*ssa.BasicBlock]bool,
+) bool {
+	state := make(map[*ssa.BasicBlock]uint8, len(included))
 	var visit func(*ssa.BasicBlock) bool
 	visit = func(block *ssa.BasicBlock) bool {
 		switch state[block] {
@@ -532,15 +543,15 @@ func coroSemanticEvaluatedCFGHasCycle(
 		}
 		state[block] = 1
 		for _, successor := range block.Succs {
-			if evaluated[successor] && visit(successor) {
+			if included[successor] && visit(successor) {
 				return true
 			}
 		}
 		state[block] = 2
 		return false
 	}
-	for block := range evaluated {
-		if state[block] == 0 && visit(block) {
+	for _, block := range blocks {
+		if included[block] && state[block] == 0 && visit(block) {
 			return true
 		}
 	}

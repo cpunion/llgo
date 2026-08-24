@@ -2076,7 +2076,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := applySSATrustedInlineCallPlans(callPlans, trustedInlineCalls); err != nil {
 		return nil, err
 	}
-	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids); err != nil {
+	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids, canonicalizer); err != nil {
 		return nil, err
 	}
 	if err := applySSAOutcomePlainPlans(

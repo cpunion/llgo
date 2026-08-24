@@ -3,9 +3,10 @@
 package runtime
 
 import (
+	_ "unsafe"
+
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
-	_ "unsafe"
 )
 
 var (

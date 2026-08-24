@@ -29,14 +29,12 @@ import (
 )
 
 func TestLinuxSyscallWorkerAuthorityRequiresExactTrapPolicy(t *testing.T) {
-	goPath := "internal/lib/syscall/syscall_linux_coro.go"
+	goPath := "_patch/syscall/syscall_linux_coro.go"
 	goSource, err := os.ReadFile(goPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		`LLGoPackage = true`,
-		`LLGoFiles   = "_wrap/syscall_linux.c"`,
 		"//go:linkname llgoLinuxFuncPCABI0 llgo.funcPCABI0",
 		"//go:linkname llgoLinuxSyscall4 llgo.syscall",
 		"//go:linkname llgoLinuxSyscall7 llgo.syscall",
@@ -55,10 +53,24 @@ func TestLinuxSyscallWorkerAuthorityRequiresExactTrapPolicy(t *testing.T) {
 		"active managed incoming edge",
 		"Dynamic, fork, exec, exit, and other",
 		"process-control trap numbers have no worker certificate",
+		"linked by runtime's native LLGoFiles manifest",
 	} {
 		if !strings.Contains(string(goSource), required) {
 			t.Errorf("%s lacks fail-closed dynamic-trap marker %q", goPath, required)
 		}
+	}
+	for _, forbidden := range []string{"LLGoPackage", "LLGoFiles   ="} {
+		if strings.Contains(string(goSource), forbidden) {
+			t.Errorf("%s retains alternate-package ownership marker %q", goPath, forbidden)
+		}
+	}
+	nativeManifestPath := "internal/lib/runtime/runtime_default.go"
+	nativeManifest, err := os.ReadFile(nativeManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nativeManifest), "../syscall/_wrap/syscall_linux.c") {
+		t.Errorf("%s does not link the fixed Linux syscall leaves", nativeManifestPath)
 	}
 	for _, forbidden := range []string{
 		"//llgo:coro workeraddr",
@@ -155,13 +167,12 @@ func TestRuntimeWriteCarriesExactWorkerSafetyContract(t *testing.T) {
 }
 
 func TestDarwinSyscallFailureConventionsAreExplicit(t *testing.T) {
-	path := "internal/lib/syscall/syscall_darwin_go126.go"
+	path := "_patch/syscall/syscall_fixed_darwin_go126.go"
 	source, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		`const LLGoPackage = true`,
 		"//go:linkname llgoDarwinFuncPCABI0 llgo.funcPCABI0",
 		"//go:linkname libc_getrlimit_trampoline C.getrlimit",
 		"//go:linkname libc_setrlimit_trampoline C.setrlimit",
@@ -196,6 +207,7 @@ func TestDarwinSyscallFailureConventionsAreExplicit(t *testing.T) {
 		"llgoSyscall3Word(fn, a1, a2, a3)",
 		"llgoSyscall3Pointer(fn, a1, a2, a3)",
 		"func syscall6X(",
+		"selection replaces only those declarations",
 	} {
 		if !strings.Contains(string(source), required) {
 			t.Errorf("%s lacks explicit failure-convention marker %q", path, required)
@@ -207,21 +219,44 @@ func TestDarwinSyscallFailureConventionsAreExplicit(t *testing.T) {
 	if strings.Contains(string(source), "//llgo:coro workeraddr") {
 		t.Errorf("%s retains producer arity directives instead of sink-derived ABI", path)
 	}
+	if strings.Contains(string(source), "LLGoPackage") || strings.Contains(string(source), `"syscall"`) {
+		t.Errorf("%s retains alternate-package or self-import metadata", path)
+	}
 
-	publicPath := "internal/lib/syscall/syscall_darwin.go"
+	publicPath := "_patch/syscall/syscall_darwin.go"
 	publicSource, err := os.ReadFile(publicPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"c_syscall(c.Long(trap), a1, a2, a3)",
-		"c_syscall(c.Long(trap), a1, a2, a3, a4, a5, a6)",
-		"c_syscall(c.Long(trap), a1, a2, a3, a4, a5, a6, a7, a8, a9)",
-		"public trap API on its original direct/plain path",
+		"arbitrary runtime trap word",
 		"exact constant-trap capability proof",
+		"//llgo:rawcritical\nfunc RawSyscall(",
+		"//llgo:rawcritical\nfunc RawSyscall6(",
+		"runtime_syscall3(trap, a1, a2, a3)",
+		"runtime_syscall6(trap, a1, a2, a3, a4, a5, a6)",
+		"runtime_syscall9(trap, a1, a2, a3, a4, a5, a6, a7, a8, a9)",
 	} {
 		if !strings.Contains(string(publicSource), required) {
 			t.Errorf("%s lacks fail-closed public trap marker %q", publicPath, required)
+		}
+	}
+
+	runtimePath := "internal/lib/runtime/syscall_llgo.go"
+	runtimeSource, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"//go:linkname syscall_runtime_syscall3 syscall.runtime_syscall3\n//llgo:rawcritical\nfunc syscall_runtime_syscall3(",
+		"//go:linkname syscall_runtime_syscall6 syscall.runtime_syscall6\n//llgo:rawcritical\nfunc syscall_runtime_syscall6(",
+		"//go:linkname syscall_runtime_syscall9 syscall.runtime_syscall9\n//llgo:rawcritical\nfunc syscall_runtime_syscall9(",
+		"c_syscallN(c.Long(trap), a1, a2, a3)",
+		"c_syscallN(c.Long(trap), a1, a2, a3, a4, a5, a6)",
+		"c_syscallN(c.Long(trap), a1, a2, a3, a4, a5, a6, a7, a8, a9)",
+	} {
+		if !strings.Contains(string(runtimeSource), required) {
+			t.Errorf("%s lacks current-thread syscall bridge marker %q", runtimePath, required)
 		}
 	}
 	for _, forbidden := range []string{
@@ -293,7 +328,7 @@ func TestDarwinRuntimeSyscallLinknameWrappersStayManaged(t *testing.T) {
 }
 
 func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t *testing.T) {
-	path := "internal/lib/syscall/syscall_darwin_worker_catalog_go126.go"
+	path := "_patch/syscall/syscall_darwin_worker_catalog_go126.go"
 	sourceBytes, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -361,7 +396,7 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 		}
 	}{
 		{
-			path:   "internal/lib/syscall/syscall_darwin_worker_catalog_arm64_go126.go",
+			path:   "_patch/syscall/syscall_darwin_worker_catalog_arm64_go126.go",
 			goarch: "arm64",
 			targets: []struct {
 				name     string
@@ -374,7 +409,7 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 			},
 		},
 		{
-			path:   "internal/lib/syscall/syscall_darwin_worker_catalog_amd64_go126.go",
+			path:   "_patch/syscall/syscall_darwin_worker_catalog_amd64_go126.go",
 			goarch: "amd64",
 			targets: []struct {
 				name     string
@@ -443,7 +478,7 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 			t.Errorf("%s lacks catalog invariant %q", path, required)
 		}
 	}
-	legacyBytes, err := os.ReadFile("internal/lib/syscall/syscall_darwin_go126.go")
+	legacyBytes, err := os.ReadFile("_patch/syscall/syscall_fixed_darwin_go126.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,8 +595,8 @@ func TestDarwinInternalSyscallARC4RandomWorkerTargetIsExact(t *testing.T) {
 
 func TestDarwinReaddirWorkerTargetUsesArchitectureSymbol(t *testing.T) {
 	for path, symbol := range map[string]string{
-		"internal/lib/syscall/syscall_darwin_readdir_arm64_go126.go": "C.readdir_r",
-		"internal/lib/syscall/syscall_darwin_readdir_amd64_go126.go": "C.readdir_r$INODE64",
+		"_patch/syscall/syscall_darwin_readdir_arm64_go126.go": "C.readdir_r",
+		"_patch/syscall/syscall_darwin_readdir_amd64_go126.go": "C.readdir_r$INODE64",
 	} {
 		source, err := os.ReadFile(path)
 		if err != nil {

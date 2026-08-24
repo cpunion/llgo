@@ -1,6 +1,6 @@
 // Copyright 2014 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Use of this source code is governed by a BSD-style license.
+// See LICENSES/Go-BSD-3-Clause.txt at this module root for license terms.
 
 package runtime
 
@@ -194,6 +194,19 @@ func typehashImpl(t *_type, p unsafe.Pointer, h uintptr) uintptr {
 //llgo:env
 func typehash(p unsafe.Pointer, h uintptr) uintptr {
 	return typehashImpl((*_type)(closureEnv()), p, h)
+}
+
+// maptypehash hashes one map key without invoking the function value stored in
+// maptype.Hasher. LLGo emits that field as typehash plus the key type as its
+// closure environment, so this static spelling is exactly equivalent while
+// keeping the runtime map core visible to whole-program coroutine analysis.
+//
+// Keep the Hasher field in the runtime ABI: generated type descriptors and
+// reflection still describe the standard callback-shaped metadata. Runtime
+// map operations, like typeequal below, consume the same information directly
+// instead of introducing an opaque dynamic call in every map access.
+func maptypehash(t *maptype, p unsafe.Pointer, h uintptr) uintptr {
+	return typehashImpl(t.Key, p, h)
 }
 
 func memequalptr(p, q unsafe.Pointer) bool {

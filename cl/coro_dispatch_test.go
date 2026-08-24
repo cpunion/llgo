@@ -151,6 +151,8 @@ func TestCoroPlainDispatchCompilesClosedSingletonFunctionValue(t *testing.T) {
 
 func Target(value int) int { return value + 1 }
 
+var Handler = Target
+
 func Apply(fn func(int) int, value int) int {
 	if fn == nil {
 		return 0
@@ -158,7 +160,7 @@ func Apply(fn func(int) int, value int) int {
 	return fn(value)
 }
 
-func Root() int { return Apply(Target, 41) }
+func Root() int { return Apply(Handler, 41) }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
@@ -196,7 +198,10 @@ func Root() int { return Apply(Target, 41) }
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
-	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: ssaPkg.Func("Root"), Demand: coro.SyncDemand}}, coro.SSAConfig{
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: ssaPkg.Func("init"), Demand: coro.SyncDemand},
+		{Function: ssaPkg.Func("Root"), Demand: coro.SyncDemand},
+	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
@@ -257,6 +262,15 @@ func Root() int { return Apply(Target, 41) }
 	if got := strings.Count(ir, "define i64 @foo.Target("); got != 1 {
 		t.Fatalf("Target plain body definitions = %d, want exactly one:\n%s", got, ir)
 	}
+	if !strings.Contains(ir, "@foo.Handler = global") {
+		t.Fatalf("Handler global is absent from descriptor fixture:\n%s", ir)
+	}
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.Contains(line, "@foo.Handler = global") && !strings.Contains(line, "zeroinitializer") {
+			t.Fatalf("Dispatch function value was folded as a raw static initializer: %s\n%s", line, ir)
+		}
+	}
+	assertStoreToGlobal(t, ir, "@foo.Handler")
 }
 
 func TestCoroPlainDispatchTargetShapeFailsClosed(t *testing.T) {

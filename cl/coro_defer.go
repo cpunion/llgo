@@ -1101,8 +1101,14 @@ func resolveCoroStaticCleanupTarget(
 	}
 	switch callPlan.Rep {
 	case coro.DirectPlain:
+		// The exact defer occurrence is a static DirectPlain call even when some
+		// other consumer requires the target's function value to use Dispatch.
+		// FuncRep describes value transport, not an extra indirection for this
+		// already-resolved call; both representations share the one EmitPlain
+		// primary selected below by compileFunction.
 		if targetPlan.External != coro.Defined || targetPlan.Emission != coro.EmitPlain ||
-			targetPlan.Primary != coro.PrimaryPlain || targetPlan.FuncRep != coro.DirectPlain ||
+			targetPlan.Primary != coro.PrimaryPlain ||
+			(targetPlan.FuncRep != coro.DirectPlain && targetPlan.FuncRep != coro.Dispatch) ||
 			targetPlan.Demand == coro.NoDemand || targetPlan.Effect != coro.NoSuspend {
 			return nil, coro.FunctionPlan{}, 0, fmt.Errorf(
 				"plain defer target %q is not one demanded defined bounded plain entry (external=%s emission=%s primary=%s representation=%s effect=%s demand=%s)",
@@ -1203,11 +1209,17 @@ func validateCoroStaticCleanupOperands(common *ssa.CallCommon, target *ssa.Funct
 	return nil
 }
 
-// validateCoroStaticCleanupNoUnwind overrides the planner's deliberately
-// conservative MayUnwind bit only with an exact lowering audit.  It accepts
-// pure SSA plus compiler-elided no-call/structured-park intrinsics.  Managed
-// callees, implicit panic helpers, nested defer, recover, and preemption remain
-// closed until child-frame panic outcomes can be propagated to the drainer.
+// validateCoroStaticCleanupNoUnwind first consumes the planner's whole-program
+// greatest-fixed-point no-unwind proof. That proof already closes ordinary
+// static Go-call chains and exact foreign leaves, so the physical frontend must
+// not reimplement the call-graph analysis or reject a proved wrapper merely
+// because its body contains one managed call.
+//
+// If the planner remains conservative, the validator falls back to an exact
+// lowering audit for owner-local pure SSA plus compiler-elided
+// no-call/structured-park intrinsics. Managed callees, implicit panic helpers,
+// nested defer, recover, and preemption remain closed on that fallback path
+// until child-frame panic outcomes can be propagated to the drainer.
 func validateCoroStaticCleanupNoUnwind(
 	whole *coro.SSAPlan,
 	universe *EmissionUniverse,
@@ -1224,14 +1236,15 @@ func validateCoroStaticCleanupNoUnwind(
 	if plan.Exec&(coro.NeedsCleanupFrame|coro.NeedsPreempt|coro.OpaqueExec) != 0 {
 		return "target requires nested cleanup, preemption, or opaque execution"
 	}
-	for _, info := range blocks.Infos(target.Blocks) {
-		if info.InLoop {
-			return "cyclic cleanup target requires preemption and cancellation masking"
-		}
+	if !plan.Exec.Contains(coro.MayUnwind) {
+		return ""
 	}
 	audit, err := newCoroPhysicalPureSSAAudit(universe, whole, target, frameRetentionABI)
 	if err != nil {
 		return "cannot build pure-SSA audit: " + err.Error()
+	}
+	if coroCFGSubsetHasCycle(target.Blocks, audit.reachableBlocks) {
+		return "cyclic cleanup target requires preemption and cancellation masking"
 	}
 	for _, block := range target.Blocks {
 		for _, instruction := range block.Instrs {

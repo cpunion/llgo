@@ -30,6 +30,7 @@ import (
 	"github.com/xgo-dev/llgo/internal/lto"
 	"github.com/xgo-dev/llgo/internal/meta"
 	"github.com/xgo-dev/llgo/internal/mockable"
+	"github.com/xgo-dev/llgo/internal/optlevel"
 	"github.com/xgo-dev/llgo/internal/packages"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
@@ -99,6 +100,9 @@ func TestResolveBuildConfigDefaultsAndValidation(t *testing.T) {
 	}
 	if resolved.SizeFormat != "text" || resolved.SizeLevel != "module" {
 		t.Fatalf("size report defaults = %q, %q", resolved.SizeFormat, resolved.SizeLevel)
+	}
+	if resolved.OptLevel != optlevel.Os {
+		t.Fatalf("default optimization level = %v, want %v", resolved.OptLevel, optlevel.Os)
 	}
 	if _, err := resolveBuildConfig(&Config{SizeReport: true, SizeLevel: "invalid"}); err == nil {
 		t.Fatal("invalid size-reporting level succeeded")
@@ -216,6 +220,163 @@ func TestConcurrentInvocationsIsolateFrontendOptions(t *testing.T) {
 	}
 }
 
+func TestConcurrentDeadcodeBuildsUseIndependentWorkerContexts(t *testing.T) {
+	if !buildenv.Dev {
+		t.Skip("deadcode drop requires a development build")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "cl", "_testdrop", "direct_method")
+	t.Setenv("LLGO_ROOT", repoRoot)
+	t.Setenv(llgoBuildCache, "0")
+
+	type result struct {
+		output string
+		err    error
+	}
+	results := make(chan result, 2)
+	for i := range 2 {
+		output := filepath.Join(t.TempDir(), fmt.Sprintf("direct-method-%d", i))
+		conf := NewDefaultConf(ModeBuild)
+		conf.DeadcodeDrop = true
+		conf.PCLNMode = PCLNNone
+		conf.BuildParallelism = 2
+		conf.OutFile = output
+		go func() {
+			_, err := Build(Invocation{Args: []string{"."}, Config: conf, Dir: fixture})
+			results <- result{output: output, err: err}
+		}()
+	}
+
+	for range 2 {
+		got := <-results
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		data, err := exec.Command(got.output).CombinedOutput()
+		if err != nil {
+			t.Fatalf("run %s: %v\n%s", got.output, err, data)
+		}
+		if strings.TrimSpace(string(data)) != "42" {
+			t.Fatalf("run %s output = %q, want 42", got.output, data)
+		}
+	}
+}
+
+func TestDeadcodeBuildColdAndHotPackageCache(t *testing.T) {
+	if !buildenv.Dev {
+		t.Skip("deadcode drop requires a development build")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "cl", "_testdrop", "direct_method")
+	t.Setenv("LLGO_ROOT", repoRoot)
+	t.Setenv(llgoBuildCache, "1")
+
+	for _, parallelism := range []int{1, 8} {
+		t.Run(fmt.Sprintf("p%d", parallelism), func(t *testing.T) {
+			oldCacheRoot := cacheRootFunc
+			cacheDir := t.TempDir()
+			cacheRootFunc = func() string { return cacheDir }
+			defer func() { cacheRootFunc = oldCacheRoot }()
+
+			build := func(name string) []Package {
+				output := filepath.Join(t.TempDir(), name)
+				conf := NewDefaultConf(ModeBuild)
+				conf.DeadcodeDrop = true
+				conf.PCLNMode = PCLNNone
+				conf.BuildParallelism = parallelism
+				conf.OutFile = output
+				pkgs, err := Build(Invocation{Args: []string{"."}, Config: conf, Dir: fixture})
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := exec.Command(output).CombinedOutput()
+				if err != nil {
+					t.Fatalf("run %s: %v\n%s", output, err, data)
+				}
+				if strings.TrimSpace(string(data)) != "42" {
+					t.Fatalf("run %s output = %q, want 42", output, data)
+				}
+				return pkgs
+			}
+
+			first := build("cold")
+			for _, pkg := range first {
+				if pkg.CacheHit {
+					t.Fatalf("cold build unexpectedly hit package cache for %s", pkg.PkgPath)
+				}
+			}
+			second := build("hot")
+			cacheHits := 0
+			for _, pkg := range second {
+				if pkg.CacheHit {
+					cacheHits++
+				}
+			}
+			if cacheHits == 0 {
+				t.Fatal("hot build did not reuse any package archives")
+			}
+		})
+	}
+}
+
+func TestGenericLocalTypeColdAndHotPackageCache(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "internal", "build", "testdata", "genericlocalcache")
+	const (
+		cacheRootEnv  = "LLGO_TEST_GENERIC_LOCAL_CACHE_ROOT"
+		cachePhaseEnv = "LLGO_TEST_GENERIC_LOCAL_CACHE_PHASE"
+	)
+	if cacheRoot := os.Getenv(cacheRootEnv); cacheRoot != "" {
+		cacheRootFunc = func() string { return cacheRoot }
+		t.Setenv("LLGO_ROOT", repoRoot)
+		t.Setenv(llgoBuildCache, "1")
+
+		conf := NewDefaultConf(ModeTest)
+		conf.OutFile = filepath.Join(t.TempDir(), os.Getenv(cachePhaseEnv))
+		conf.RunArgs = []string{"-test.run=^TestLocalRuntimeType$"}
+		pkgs, err := Build(Invocation{Args: []string{"."}, Config: conf, Dir: fixture})
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch phase := os.Getenv(cachePhaseEnv); phase {
+		case "cold":
+			for _, pkg := range pkgs {
+				if pkg.CacheHit {
+					t.Fatalf("cold build unexpectedly hit package cache for %s", pkg.PkgPath)
+				}
+			}
+		case "hot":
+			for _, pkg := range pkgs {
+				if pkg.CacheHit {
+					return
+				}
+			}
+			t.Fatal("hot build did not reuse any package archives")
+		default:
+			t.Fatalf("unknown cache phase %q", phase)
+		}
+		return
+	}
+
+	cacheRoot := t.TempDir()
+	for _, phase := range []string{"cold", "hot"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestGenericLocalTypeColdAndHotPackageCache$", "-test.count=1")
+		cmd.Env = append(os.Environ(), cacheRootEnv+"="+cacheRoot, cachePhaseEnv+"="+phase)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s cache build: %v\n%s", phase, err, out)
+		}
+	}
+}
+
 func TestResolveOutputsUsesInvocationDirectory(t *testing.T) {
 	dir := t.TempDir()
 	out := &OutFmtDetails{
@@ -259,11 +420,80 @@ func TestLinkObjFilesReportsOutputDirectoryError(t *testing.T) {
 	}
 }
 
+func TestRewritePrebuiltFuncTabEligibilityAndDiagnostic(t *testing.T) {
+	rewritePrebuiltFuncTab(nil, "missing", true)
+	rewritePrebuiltFuncTab(&context{}, "missing", true)
+
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "linux", GOARCH: "amd64"})
+	defer prog.Dispose()
+	ctx := &context{prog: prog, buildConf: &Config{
+		BuildMode: BuildModeExe,
+		Goos:      "linux",
+		Goarch:    "amd64",
+	}}
+	rewritePrebuiltFuncTab(ctx, "missing", true) // sites disabled
+
+	prog.EnableFuncInfoSites(true)
+	ctx.buildConf.Target = "wasi"
+	rewritePrebuiltFuncTab(ctx, "missing", true)
+	ctx.buildConf.Target = ""
+	ctx.buildConf.BuildMode = BuildModeCShared
+	rewritePrebuiltFuncTab(ctx, "missing", true)
+	ctx.buildConf.BuildMode = BuildModeExe
+
+	t.Setenv("LLGO_PCLNPOST", "0")
+	rewritePrebuiltFuncTab(ctx, "missing", true)
+	t.Setenv("LLGO_PCLNPOST", "1")
+	rewritePrebuiltFuncTab(ctx, "missing", false)
+
+	stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderr
+	t.Cleanup(func() { os.Stderr = oldStderr })
+	rewritePrebuiltFuncTab(ctx, filepath.Join(t.TempDir(), "missing"), true)
+	os.Stderr = oldStderr
+	if err := stderr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(stderr.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("prebuilt functab rewrite skipped")) {
+		t.Fatalf("rewrite diagnostic = %q", got)
+	}
+}
+
 func TestWithEnvLastValueWins(t *testing.T) {
 	got := withEnv([]string{"A=old", "B=keep", "malformed", "A=older"}, "A=new", "C=value")
 	want := []string{"B=keep", "A=new", "C=value"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("withEnv = %q, want %q", got, want)
+	}
+}
+
+func TestWithResolvedGoToolchain(t *testing.T) {
+	tests := []struct {
+		name      string
+		environ   []string
+		goversion string
+		want      []string
+	}{
+		{"replace existing", []string{"PATH=/bin", "GOTOOLCHAIN=auto"}, "go1.25.0", []string{"PATH=/bin", "GOTOOLCHAIN=go1.25.0"}},
+		{"append missing", []string{"PATH=/bin"}, "go1.25.0", []string{"PATH=/bin", "GOTOOLCHAIN=go1.25.0"}},
+		{"preserve development version", []string{"PATH=/bin"}, "devel go1.26-deadbeef", []string{"PATH=/bin"}},
+		{"preserve empty version", []string{"PATH=/bin"}, "", []string{"PATH=/bin"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withResolvedGoToolchain(tt.environ, tt.goversion)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("withResolvedGoToolchain = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -604,25 +834,6 @@ func TestFilterTestPackages(t *testing.T) {
 		}
 		if filtered[0].ID != "foo.test" {
 			t.Fatalf("filtered[0].ID = %q, want %q", filtered[0].ID, "foo.test")
-		}
-	})
-
-	t.Run("rename main package", func(t *testing.T) {
-		mainPkg := pkg("example.com/cmd")
-		mainPkg.Types = types.NewPackage(mainPkg.ID, "main")
-		initial := []*packages.Package{
-			mainPkg,
-			pkg("example.com/cmd.test"),
-		}
-		filtered, err := filterTestPackages(initial, "")
-		if err != nil {
-			t.Fatalf("filterTestPackages returned unexpected error: %v", err)
-		}
-		if len(filtered) != 1 || filtered[0].ID != "example.com/cmd.test" {
-			t.Fatalf("filtered = %#v, want only example.com/cmd.test", filtered)
-		}
-		if got := mainPkg.Types.Name(); got != "main.test" {
-			t.Fatalf("main package name = %q, want %q", got, "main.test")
 		}
 	})
 
@@ -1174,7 +1385,7 @@ func TestCSharedExportArgsKeepsTestMain(t *testing.T) {
 		mode:      ModeTest,
 		buildConf: &Config{BuildMode: BuildModeCShared, Goos: "linux"},
 	}
-	if got, want := strings.Join(cSharedExportArgs(ctx, pkgs), " "), "-Wl,--undefined=example.com/p.test.init -Wl,--undefined=example.com/p.test.main"; got != want {
+	if got, want := strings.Join(cSharedExportArgs(ctx, pkgs), " "), "-Wl,--undefined=main.init -Wl,--undefined=main.main"; got != want {
 		t.Fatalf("test main cSharedExportArgs = %q, want %q", got, want)
 	}
 }

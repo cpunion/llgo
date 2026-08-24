@@ -575,7 +575,7 @@ func (u *EmissionUniverse) functionABITypeDemands(fn *ssa.Function, owner *prepa
 				}
 				closureCtx := exactFunctionContext(closure)
 				closureSig := closureCtx.patchType(closure.Signature).(*types.Signature)
-				closureSig = llssa.FuncAddCtx(makeClosureCtx(closureCtx.goTyps, closure.FreeVars), closureSig)
+				closureSig = llssa.FuncAddCtx(makeClosureCtx(closureCtx.goTyps, closure.FreeVars, closureCtx.patchType), closureSig)
 				if u.prog != nil {
 					closureSig = u.prog.PhysicalFuncDecl(closureSig, llssa.InGo)
 				}

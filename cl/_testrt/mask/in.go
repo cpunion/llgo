@@ -13,6 +13,8 @@ func main() {
 	println(mask_shr8(127, 16))
 }
 
+// The sign bit must survive the two constant shifts, including the explicit
+// overshift select inserted by the lowering.
 func mask(x int8) int32 {
 	return int32(x) << 31 >> 31
 }
@@ -29,6 +31,7 @@ func mask_shl8u(x uint8, y int) uint8 {
 	return x << y
 }
 
+// Signed right shifts clamp an oversized count to width-1, preserving sign.
 func mask_shr(x int, y int) int {
 	return x >> y
 }
@@ -37,6 +40,7 @@ func mask_shr8(x int8, y int) int8 {
 	return x >> y
 }
 
+// Unsigned right shifts instead select zero for an oversized count.
 func mask_shr8u(x uint8, y int) uint8 {
 	return x >> y
 }

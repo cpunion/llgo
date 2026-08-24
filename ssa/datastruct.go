@@ -21,6 +21,7 @@ import (
 	"go/token"
 	"go/types"
 
+	"github.com/xgo-dev/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -289,8 +290,19 @@ func (b Builder) BoundsOperand(idx Expr) (Expr, bool) {
 func (b Builder) checkIndex(idx Expr, max Expr) Expr {
 	idx, check := b.IndexBounds(idx, max)
 	if !check.IsNil() {
-		boundsIdx, signed := b.boundsArg(idx)
-		b.InlineCall(b.Pkg.rtFunc("CheckIndexRange"), check, boundsIdx, b.Prog.BoolVal(signed), max)
+		blks := b.Func.MakeBlocks(2)
+		b.If(check, blks[0], blks[1])
+		b.SetBlockEx(blks[0], AtEnd, false)
+		panicIndex := "PanicIndexU"
+		if idx.kind == vkSigned {
+			panicIndex = "PanicIndex"
+		}
+		b.InlineCall(b.Pkg.rtFunc(panicIndex), idx, max)
+		// Keep the failure path disconnected from the successful continuation,
+		// while retaining a post-call instruction for return-address line info.
+		b.Jump(blks[0])
+		b.SetBlockEx(blks[1], AtEnd, false)
+		b.blk.last = blks[1].last
 	}
 	return idx
 }
@@ -846,18 +858,20 @@ func (b Builder) Lookup(x, key Expr, commaOk bool) (ret Expr) {
 	prog := b.Prog
 	typ := b.abiType(x.raw.Type)
 	vtyp := prog.Elem(x.Type)
-	ptr := b.mapKeyPtr(key)
+	kind := mapKeyFastKind(prog, x.raw.Type)
+	helpers := mapRuntimeHelperNames(kind)
+	arg := b.mapKeyAccessArg(x, key, kind)
 	if commaOk {
-		vals := b.Call(b.Pkg.rtFunc("MapAccess2"), typ, x, ptr)
+		vals := b.Call(b.Pkg.rtFunc(helpers.Access2), typ, x, arg)
 		// The Go runtime map ABI never returns a nil element pointer: a miss
 		// points at its zero-value storage. Do not manufacture a second
-		// source-language nil edge after the exact MapAccess2 call.
+		// source-language nil edge after the exact map-access call.
 		val := b.LoadKnownNonNil(Expr{b.impl.CreateExtractValue(vals.impl, 0, ""), prog.Pointer(vtyp)})
 		ok := b.impl.CreateExtractValue(vals.impl, 1, "")
 		t := prog.Struct(vtyp, prog.Bool())
 		return b.aggregateValue(t, val.impl, ok)
 	} else {
-		val := b.Call(b.Pkg.rtFunc("MapAccess1"), typ, x, ptr)
+		val := b.Call(b.Pkg.rtFunc(helpers.Access1), typ, x, arg)
 		val.Type = prog.Pointer(vtyp)
 		// MapAccess1 follows the same non-nil zero-value-pointer ABI.
 		ret = b.LoadKnownNonNil(val)
@@ -884,17 +898,208 @@ func (b Builder) MapUpdate(m, k, v Expr) {
 	}
 	dbgInstrf("MapUpdate %v[%v] = %v\n", m.impl, k.impl, v.impl)
 	typ := b.abiType(m.raw.Type)
-	ptr := b.mapKeyPtr(k)
-	ret := b.Call(b.Pkg.rtFunc("MapAssign"), typ, m, ptr)
+	kind := mapKeyFastKind(b.Prog, m.raw.Type)
+	helpers := mapRuntimeHelperNames(kind)
+	arg := b.mapKeyAssignArg(m, k, kind)
+	ret := b.Call(b.Pkg.rtFunc(helpers.Assign), typ, m, arg)
 	ret.Type = b.Prog.Pointer(v.Type)
 	b.Store(ret, v)
 }
 
-// key => unsafe.Pointer
-func (b Builder) mapKeyPtr(x Expr) Expr {
-	typ := x.Type
+type mapFastKind uint8
+
+const (
+	mapFastNone mapFastKind = iota
+	mapFast32
+	mapFast64
+	mapFast32Ptr
+	mapFast64Ptr
+	mapFastStr
+)
+
+// MapRuntimeHelperNames is the single lowering decision shared by the LLSSA
+// map emitter and compiler preflight. KeyNeedsTemporary records the generic
+// pointer-key ABI, whose mapKeyPtr recipe allocates and stores one temporary
+// key before the runtime call. Fast scalar, pointer, channel, and string keys
+// pass their value directly and therefore do not emit that allocation.
+type MapRuntimeHelperNames struct {
+	Access1           string
+	Access2           string
+	Assign            string
+	Delete            string
+	KeyNeedsTemporary bool
+}
+
+// MapRuntimeHelpers returns the exact runtime-helper family selected for the
+// effective map type and this program's pointer width. Keeping the decision in
+// LLSSA prevents analysis and physical emission from independently guessing
+// whether a later map lowering uses the generic or fast ABI.
+func (p Program) MapRuntimeHelpers(mapType types.Type) (MapRuntimeHelperNames, bool) {
+	if p == nil || mapType == nil {
+		return MapRuntimeHelperNames{}, false
+	}
+	if _, ok := types.Unalias(mapType).Underlying().(*types.Map); !ok {
+		return MapRuntimeHelperNames{}, false
+	}
+	kind := mapKeyFastKind(p, mapType)
+	return mapRuntimeHelperNames(kind), true
+}
+
+func mapRuntimeHelperNames(kind mapFastKind) MapRuntimeHelperNames {
+	return MapRuntimeHelperNames{
+		Access1:           kind.accessName(false),
+		Access2:           kind.accessName(true),
+		Assign:            kind.assignName(),
+		Delete:            kind.deleteName(),
+		KeyNeedsTemporary: kind == mapFastNone,
+	}
+}
+
+func mapKeyFastKind(prog Program, mapType types.Type) mapFastKind {
+	m, ok := types.Unalias(mapType).Underlying().(*types.Map)
+	if !ok {
+		return mapFastNone
+	}
+	// The specialized runtime map operations return direct bucket storage.
+	// Large values are stored indirectly by the map implementation, so use
+	// the generic operations to preserve their pointer indirection semantics.
+	if prog.SizeOf(prog.rawType(m.Elem())) > abi.MAXELEMSIZE {
+		return mapFastNone
+	}
+	ptrSize := prog.PointerSize()
+	key := types.Unalias(m.Key()).Underlying()
+	switch key := key.(type) {
+	case *types.Basic:
+		switch key.Kind() {
+		case types.Int32, types.Uint32:
+			return mapFast32
+		case types.Int64, types.Uint64:
+			return mapFast64
+		case types.Int, types.Uint, types.Uintptr:
+			if ptrSize == 4 {
+				return mapFast32
+			} else if ptrSize == 8 {
+				return mapFast64
+			}
+		case types.String:
+			return mapFastStr
+		case types.UnsafePointer:
+			if ptrSize == 4 {
+				return mapFast32Ptr
+			} else if ptrSize == 8 {
+				return mapFast64Ptr
+			}
+		}
+	case *types.Pointer, *types.Chan:
+		if ptrSize == 4 {
+			return mapFast32Ptr
+		} else if ptrSize == 8 {
+			return mapFast64Ptr
+		}
+	}
+	return mapFastNone
+}
+
+func (k mapFastKind) accessName(commaOK bool) string {
+	suffix := "1"
+	if commaOK {
+		suffix = "2"
+	}
+	switch k {
+	case mapFast32, mapFast32Ptr:
+		return "MapAccess" + suffix + "Fast32"
+	case mapFast64, mapFast64Ptr:
+		return "MapAccess" + suffix + "Fast64"
+	case mapFastStr:
+		return "MapAccess" + suffix + "FastStr"
+	default:
+		return "MapAccess" + suffix
+	}
+}
+
+func (k mapFastKind) assignName() string {
+	switch k {
+	case mapFast32:
+		return "MapAssignFast32"
+	case mapFast64:
+		return "MapAssignFast64"
+	case mapFast32Ptr:
+		return "MapAssignFast32Ptr"
+	case mapFast64Ptr:
+		return "MapAssignFast64Ptr"
+	case mapFastStr:
+		return "MapAssignFastStr"
+	default:
+		return "MapAssign"
+	}
+}
+
+func (k mapFastKind) deleteName() string {
+	switch k {
+	case mapFast32, mapFast32Ptr:
+		return "MapDeleteFast32"
+	case mapFast64, mapFast64Ptr:
+		return "MapDeleteFast64"
+	case mapFastStr:
+		return "MapDeleteFastStr"
+	default:
+		return "MapDelete"
+	}
+}
+
+func (b Builder) mapKeyAccessArg(m, key Expr, kind mapFastKind) Expr {
+	switch kind {
+	case mapFast32:
+		if key.Type == b.Prog.Uint32() {
+			return key
+		}
+		return b.Convert(b.Prog.Uint32(), key)
+	case mapFast64:
+		if key.Type == b.Prog.Uint64() {
+			return key
+		}
+		return b.Convert(b.Prog.Uint64(), key)
+	case mapFast32Ptr:
+		return Expr{llvm.CreatePtrToInt(b.impl, key.impl, b.Prog.Uint32().ll), b.Prog.Uint32()}
+	case mapFast64Ptr:
+		return Expr{llvm.CreatePtrToInt(b.impl, key.impl, b.Prog.Uint64().ll), b.Prog.Uint64()}
+	case mapFastStr:
+		return key
+	default:
+		return b.mapKeyPtr(m, key)
+	}
+}
+
+func (b Builder) mapKeyAssignArg(m, key Expr, kind mapFastKind) Expr {
+	switch kind {
+	case mapFast32Ptr, mapFast64Ptr:
+		return Expr{castPtr(b.impl, key.impl, b.Prog.VoidPtr().ll), b.Prog.VoidPtr()}
+	default:
+		return b.mapKeyAccessArg(m, key, kind)
+	}
+}
+
+// mapKeyPtr allocates a temporary key value and returns it as unsafe.Pointer.
+// Use the map's declared key type for the allocation; in an instantiated
+// generic function, the expression may still use a type-parameter representation
+// with a different physical size.
+func (b Builder) mapKeyPtr(m, x Expr) Expr {
+	mapType, ok := m.raw.Type.Underlying().(*types.Map)
+	if !ok {
+		panic("mapKeyPtr called with non-map value")
+	}
+	typ := b.Prog.Type(mapType.Key(), InGo)
+	// Generic map bodies can expose either the instantiated key type or the
+	// type-parameter representation at this point. Keep the larger physical
+	// representation so runtime mapassign never reads past the temporary key.
+	if b.Prog.SizeOf(x.Type) > b.Prog.SizeOf(typ) {
+		typ = x.Type
+	}
 	vtyp := b.Prog.VoidPtr()
 	vptr := b.AllocU(typ)
+	if !types.Identical(typ.RawType(), x.RawType()) {
+		x = b.ChangeType(typ, x)
+	}
 	b.Store(vptr, x)
 	return Expr{vptr.impl, vtyp}
 }

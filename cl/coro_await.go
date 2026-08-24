@@ -548,7 +548,11 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 ) coroAwaitedValue {
 	body := p.coroBody()
 	if body == nil || p.compilation == nil || p.immutablePlan() == nil {
-		panic("coroutine child await requires an active physical coroutine body")
+		owner := "<unknown>"
+		if p != nil && p.goFn != nil {
+			owner = p.goFn.String()
+		}
+		panic(fmt.Sprintf("coroutine child await in %q requires an active physical coroutine body", owner))
 	}
 	if b.Func != p.fn {
 		panic("coroutine child await builder does not belong to the active physical coroutine function")

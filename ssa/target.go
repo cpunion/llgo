@@ -29,12 +29,13 @@ import (
 // -----------------------------------------------------------------------------
 
 type Target struct {
-	GOOS       string
-	GOARCH     string
-	GOARM      string // "5", "6", "7" (default)
-	Target     string // target name from -target flag (e.g., "esp32", "arm7tdmi", "wasi")
-	LLVMTarget string // physical LLVM target selected by a target configuration
-	OptLevel   optlevel.Level
+	GOOS                    string
+	GOARCH                  string
+	GOARM                   string // "5", "6", "7" (default)
+	Target                  string // target name from -target flag (e.g., "esp32", "arm7tdmi", "wasi")
+	LLVMTarget              string // physical LLVM target selected by a target configuration
+	OptLevel                optlevel.Level
+	SaturatingFloatToUint32 bool
 
 	// Resolved is the requested LLVM configuration produced by target
 	// resolution. When it is nil, Spec derives the legacy defaults from
@@ -42,6 +43,20 @@ type Target struct {
 	// TargetABI authoritative even when any is intentionally empty. NewProgram
 	// records this requested value separately from the effective in-process target.
 	Resolved *TargetSpec
+}
+
+func (p *Target) effectiveGOOS() string {
+	if p.GOOS == "" {
+		return runtime.GOOS
+	}
+	return p.GOOS
+}
+
+func (p *Target) effectiveGOARCH() string {
+	if p.GOARCH == "" {
+		return runtime.GOARCH
+	}
+	return p.GOARCH
 }
 
 func (p *Target) targetInfo(ctx llvm.Context, spec TargetSpec) (TargetSpec, llvm.TargetData, llvm.TargetMachine) {
@@ -196,9 +211,9 @@ func (p *Target) effectiveOptLevel() optlevel.Level {
 		return p.OptLevel
 	}
 	if p != nil && p.Target != "" {
-		return optlevel.Oz
+		return optlevel.TargetDefault
 	}
-	return optlevel.O2
+	return optlevel.Default
 }
 
 func (p *Target) codeGenOptLevel() llvm.CodeGenOptLevel {
@@ -249,14 +264,8 @@ func (p *Target) useWasmObjectSections() bool {
 }
 
 func (p *Target) useNativeObjectSections() bool {
-	goos := p.GOOS
-	if goos == "" {
-		goos = runtime.GOOS
-	}
-	goarch := p.GOARCH
-	if goarch == "" {
-		goarch = runtime.GOARCH
-	}
+	goos := p.effectiveGOOS()
+	goarch := p.effectiveGOARCH()
 	return p.Target == "" && goos == runtime.GOOS && goarch == runtime.GOARCH && goarch != "wasm"
 }
 

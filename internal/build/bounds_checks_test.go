@@ -20,7 +20,7 @@ func TestDisableBoundsChecksIR(t *testing.T) {
 	checked := boundsChecksModuleIR(t, false)
 	unchecked := boundsChecksModuleIR(t, true)
 
-	for _, helper := range []string{"CheckIndexRange", "StringSlice2", "NewSlice2", "NewSlice3Bounds", "PanicSliceConvert"} {
+	for _, helper := range []string{"PanicIndex", "PanicIndexU", "StringSlice2", "NewSlice2", "NewSlice3Bounds", "PanicSliceConvert"} {
 		if strings.Contains(unchecked.module, helper) {
 			t.Errorf("-B IR unexpectedly contains bounds helper %q", helper)
 		}
@@ -35,7 +35,7 @@ func TestDisableBoundsChecksIR(t *testing.T) {
 		if checkedBody == uncheckedBody {
 			t.Errorf("-B did not change the structured bounds lowering for %s", function)
 		}
-		for _, helper := range []string{"CheckIndexRange", "StringSlice2", "NewSlice2", "NewSlice3Bounds"} {
+		for _, helper := range []string{"PanicIndex", "PanicIndexU", "StringSlice2", "NewSlice2", "NewSlice3Bounds"} {
 			if strings.Contains(uncheckedBody, helper) {
 				t.Errorf("-B %s contains bounds helper %q:\n%s", function, helper, uncheckedBody)
 			}

@@ -9,6 +9,7 @@ import (
 // CHECK: @__llgo_coro_func_descriptor_v1.{{.*}} = {{.*}}ptr @__llgo_coro_func_coro_v1.{{.*}}
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
+	// All Builder operations use one receiver, and the queried values are printed.
 	// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 32)
 	// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.StringToBytes$coro"
 	// CHECK: call ptr @"strings.(*Builder).Write$coro"

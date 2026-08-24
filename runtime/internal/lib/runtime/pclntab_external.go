@@ -5,10 +5,11 @@ package runtime
 import (
 	"unsafe"
 
+	latomic "sync/atomic"
+
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	clitedebug "github.com/xgo-dev/llgo/runtime/internal/clite/debug"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
-	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
 )
 
 const (

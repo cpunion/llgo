@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 )
 
+// Cover the LLVM operations and orderings selected for the four atomic APIs;
+// the runtime golden checks their returned values.
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	var v int64

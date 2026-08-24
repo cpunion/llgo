@@ -1055,6 +1055,21 @@ func (p *context) coroPlainDispatchValuePlan(value ssa.Value) (coro.SSAValuePlan
 	return plan.ValuePlan(value)
 }
 
+// coroFunctionValueRequiresDynamicDescriptor is the representation gate for
+// optimizations that would otherwise synthesize a function value without
+// passing through compileValue. A true result means the exact frozen producer
+// must retain the canonical {descriptor, environment} lowering.
+func (p *context) coroFunctionValueRequiresDynamicDescriptor(value ssa.Value) bool {
+	if value == nil {
+		return false
+	}
+	valuePlan, found := p.coroPlainDispatchValuePlan(value)
+	if !found {
+		return false
+	}
+	return funcRepMapContains(valuePlan.Funcs, coro.Dispatch)
+}
+
 func (p *context) tryCompileCoroPlainDispatchFunctionValue(b llssa.Builder, value *ssa.Function) (llssa.Expr, bool) {
 	valuePlan, found := p.coroPlainDispatchValuePlan(value)
 	if !found || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 || valuePlan.Funcs[0].Rep != coro.Dispatch {

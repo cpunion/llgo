@@ -154,14 +154,10 @@ func Leaf(value uint32) uint32 {
 		t.Fatal("GlobalDebug SSA did not contain a DebugRef")
 	}
 
-	oldDebug, oldDebugSyms := enableDbg, enableDbgSyms
-	EnableDebug(true)
-	EnableDbgSyms(true)
-	defer func() {
-		EnableDebug(oldDebug)
-		EnableDbgSyms(oldDebugSyms)
-	}()
-	prog, pkg := compileCoroLeafPhysicalABIPackage(t, nil, ssaPkg, files)
+	prog, pkg := compileCoroLeafPhysicalABIPackage(t, nil, ssaPkg, files, Options{
+		Debug:        true,
+		DebugSymbols: true,
+	})
 	defer prog.Dispose()
 	module := pkg.Module()
 	defer module.Dispose()
@@ -2057,7 +2053,7 @@ func compileCoroLeafPhysicalABISource(t *testing.T, target *llssa.Target, source
 	return compileCoroLeafPhysicalABIPackage(t, target, ssaPkg, files)
 }
 
-func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPkg *ssa.Package, files []*ast.File) (llssa.Program, llssa.Package) {
+func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPkg *ssa.Package, files []*ast.File, frontendOptions ...Options) (llssa.Program, llssa.Package) {
 	t.Helper()
 	var prog llssa.Program
 	if target == nil {
@@ -2091,10 +2087,16 @@ func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPk
 		prog.Dispose()
 		t.Fatal(err)
 	}
+	var options Options
+	if len(frontendOptions) != 0 {
+		options = frontendOptions[0]
+	}
 	pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
 		Compilation: &Compilation{
 			CoroPlan:         plan,
 			EmissionUniverse: universe},
+		FrontendOptions:    options,
+		FrontendOptionsSet: len(frontendOptions) != 0,
 	})
 	if err != nil {
 		prog.Dispose()

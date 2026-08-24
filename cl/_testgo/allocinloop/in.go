@@ -5,6 +5,9 @@ package main
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   %1 = extractvalue %"{{.*}}String" %0, 1
 // CHECK-NEXT:   ret i64 %1
+// The string literal passed in the loop must not introduce a per-iteration
+// allocation.
+
 func Foo(s string) int {
 	return len(s)
 }

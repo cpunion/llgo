@@ -5,7 +5,8 @@ package runtime
 import (
 	"unsafe"
 
-	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
+	latomic "sync/atomic"
+
 	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
@@ -95,8 +96,6 @@ func ThreadCreateProfile(p []StackRecord) (n int, ok bool) {
 func NumGoroutine() int {
 	return 1
 }
-
-func SetCPUProfileRate(hz int) {}
 
 const funcForPCCacheSets = 1024
 const funcForPCCacheWays = 4

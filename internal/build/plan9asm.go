@@ -25,7 +25,7 @@ import (
 // NOTE: golang.org/x/tools/go/packages.Package does not expose SFiles, so we
 // query `go list -json` here to get the exact filtered set for GOOS/GOARCH.
 func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbose bool) ([]string, error) {
-	if llruntime.SourcePatchReplacesAsmForGOARCH(pkg.PkgPath, ctx.buildConf.Goarch) {
+	if len(ctx.patchFiles[pkg.PkgPath]) != 0 && llruntime.SourcePatchReplacesAsmForGOARCH(pkg.PkgPath, ctx.buildConf.Goarch) {
 		return nil, nil
 	}
 	sfiles, err := pkgSFiles(ctx, pkg)
@@ -87,6 +87,7 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 			llabi.LowerLargeAggregates(ctx.prog.TargetData(), mod)
 			ctx.cTransformer.TransformModule(pkg.PkgPath, mod)
 		}
+		applySizeOptimizationAttributes(mod, ctx.buildConf.OptLevel)
 		ll := mod.String()
 		mod.Dispose()
 
@@ -398,19 +399,22 @@ func cabiSkipFuncsForPlan9Asm(ctx *context, pkgPath string, mod gllvm.Module) []
 }
 
 func (ctx *context) plan9asmEnabled(pkgPath string) bool {
-	ctx.plan9asmOnce.Do(func() {
-		cfg := parsePlan9AsmPkgsEnv(Plan9ASMPkgs())
-		ctx.plan9asmMode = cfg.mode
-		switch cfg.mode {
-		case plan9asmEnvSelected:
-			ctx.plan9asmPkgs = make(map[string]bool, len(cfg.pkgs))
-			for p := range cfg.pkgs {
-				ctx.plan9asmPkgs[p] = true
+	if !ctx.plan9asmReady {
+		ctx.plan9asmOnce.Do(func() {
+			cfg := parsePlan9AsmPkgsEnv(Plan9ASMPkgs())
+			ctx.plan9asmMode = cfg.mode
+			switch cfg.mode {
+			case plan9asmEnvSelected:
+				ctx.plan9asmPkgs = make(map[string]bool, len(cfg.pkgs))
+				for p := range cfg.pkgs {
+					ctx.plan9asmPkgs[p] = true
+				}
+			default:
+				ctx.plan9asmPkgs = make(map[string]bool)
 			}
-		default:
-			ctx.plan9asmPkgs = make(map[string]bool)
-		}
-	})
+			ctx.plan9asmReady = true
+		})
+	}
 
 	switch ctx.plan9asmMode {
 	case plan9asmEnvAll:
@@ -483,26 +487,40 @@ func pkgSFiles(ctx *context, pkg *packages.Package) ([]string, error) {
 	if pkg == nil || pkg.PkgPath == "" {
 		return nil, nil
 	}
-	// Some unit tests construct synthetic packages that are not loadable via
-	// `go list` (PkgPath not in any module, and Dir/Standard/Goroot unset).
-	// In that case, treat the package as having no selected .s files.
-	if pkg.Dir == "" {
-		return nil, nil
-	}
-	// Fast path: if directory has no .s/.S at all, skip `go list`.
-	if pkg.Dir != "" {
-		if ss, _ := filepath.Glob(filepath.Join(pkg.Dir, "*.s")); len(ss) == 0 {
-			if ss, _ := filepath.Glob(filepath.Join(pkg.Dir, "*.S")); len(ss) == 0 {
-				return nil, nil
-			}
-		}
-	}
-
 	if ctx.sfilesCache == nil {
+		if ctx.sfilesFrozen {
+			return nil, fmt.Errorf("package %s assembly files were not prepared before backend execution", pkg.PkgPath)
+		}
 		ctx.sfilesCache = make(map[string][]string)
 	}
 	if v, ok := ctx.sfilesCache[pkg.ID]; ok {
 		return v, nil
+	}
+	// The synthetic test main shares the tested package's directory, so a
+	// directory scan may find assembly files that do not belong to testmain.
+	// Its generated import path (for example, example.com/p.test) is also not
+	// a package that can be queried directly with `go list`.
+	if ctx.mode == ModeTest && pkg.Name == "main" && strings.HasSuffix(pkg.ID, ".test") {
+		ctx.sfilesCache[pkg.ID] = nil
+		return nil, nil
+	}
+	// Some unit tests construct synthetic packages that are not loadable via
+	// `go list` (PkgPath not in any module, and Dir/Standard/Goroot unset).
+	// In that case, treat the package as having no selected .s files.
+	if pkg.Dir == "" {
+		ctx.sfilesCache[pkg.ID] = nil
+		return nil, nil
+	}
+	// Fast path: if directory has no .s/.S at all, skip `go list`.
+	if ss, _ := filepath.Glob(filepath.Join(pkg.Dir, "*.s")); len(ss) == 0 {
+		if ss, _ := filepath.Glob(filepath.Join(pkg.Dir, "*.S")); len(ss) == 0 {
+			ctx.sfilesCache[pkg.ID] = nil
+			return nil, nil
+		}
+	}
+
+	if ctx.sfilesFrozen {
+		return nil, fmt.Errorf("package %s assembly files were not prepared before backend execution", pkg.PkgPath)
 	}
 
 	args := []string{"list", "-json"}

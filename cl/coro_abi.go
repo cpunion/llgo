@@ -1878,16 +1878,14 @@ func validateCoroPhysicalABIForOwner(
 			}
 		}
 	}
-	infos := blocks.Infos(fn.Blocks)
-	hasCyclicBlock := false
-	for _, info := range infos {
-		hasCyclicBlock = hasCyclicBlock || info.InLoop
-	}
+	hasCyclicBlock := coroCFGSubsetHasCycle(fn.Blocks, physical.reachableBlocks)
 	// A RawPlainVariant with a cyclic body can lack NeedsPreempt only when the
 	// frontend's exact compiler-runtime island policy suppressed the scanner
 	// seed. Its raw execution is an intentionally atomic/bounded scheduler
 	// transaction; ordinary source callbacks are not given that policy and keep
 	// NeedsPreempt. The managed primary otherwise requires normal poll lowering.
+	// ProgramIR's constant-reachable subset is authoritative here: raw SSA can
+	// retain a dead loop that neither local effect analysis nor codegen executes.
 	if hasCyclicBlock && !plan.Exec.Contains(coro.NeedsPreempt) && !rawVariant {
 		return fail("cyclic CFG requires needs-preempt execution classification")
 	}
@@ -2693,18 +2691,37 @@ func isCoroProgramManagedEntry(fn *ssa.Function) bool {
 }
 
 func coroMaterializedGenericInstance(fn *ssa.Function) bool {
-	if fn == nil || fn.Origin() == nil || fn.Origin() == fn || len(fn.TypeArgs()) == 0 ||
-		!hasGenericInstantiation(fn) || !coroGroundGenericTypeArgs(fn.TypeArgs()) {
+	if fn == nil || fn.Origin() == nil || fn.Origin() == fn || !hasGenericInstantiation(fn) {
 		return false
 	}
+	typeArgs := fn.TypeArgs()
 	if parent := fn.Parent(); parent != nil {
-		// x/tools materializes a function literal inside each instantiated
-		// generic body. The child keeps the origin's TypeParams metadata, but its
-		// signature, parameters, free variables, and TypeArgs are concrete. Bind
-		// the exception to that exact parent/Origin/AnonFuncs graph; an arbitrary
-		// nested synthetic function cannot acquire a dispatch ABI merely by
-		// carrying TypeArgs.
+		// Current x/tools materializes a function literal inside each
+		// instantiated generic body. A generic-function child repeats its parent's
+		// TypeParams/TypeArgs, while a generic-receiver-method child keeps the
+		// substitution exclusively on Parent(). Bind both current representations
+		// to the complete parent/Origin/AnonFuncs graph; an arbitrary nested
+		// function cannot acquire a dispatch ABI merely from concrete-looking
+		// value types.
 		if !coroMaterializedGenericInstance(parent) || fn.Synthetic != "" || fn.Object() != nil {
+			return false
+		}
+		switch {
+		case len(typeArgs) == 0:
+			if typeParamCount(fn.TypeParams()) != 0 {
+				return false
+			}
+			typeArgs = parent.TypeArgs()
+		case len(typeArgs) == len(parent.TypeArgs()):
+			if typeParamCount(fn.TypeParams()) != len(typeArgs) {
+				return false
+			}
+			for index, argument := range typeArgs {
+				if !types.Identical(argument, parent.TypeArgs()[index]) {
+					return false
+				}
+			}
+		default:
 			return false
 		}
 		if _, ok := fn.Syntax().(*ast.FuncLit); !ok {
@@ -2723,15 +2740,13 @@ func coroMaterializedGenericInstance(fn *ssa.Function) bool {
 				found = true
 			}
 		}
-		if !found || len(fn.TypeArgs()) != len(parent.TypeArgs()) {
+		if !found {
 			return false
 		}
-		for index, argument := range fn.TypeArgs() {
-			if !types.Identical(argument, parent.TypeArgs()[index]) {
-				return false
-			}
-		}
 	} else if !strings.HasPrefix(fn.Synthetic, "instance of ") {
+		return false
+	}
+	if !coroGroundGenericTypeArgs(typeArgs) {
 		return false
 	}
 	// x/tools erases ordinary declaration type parameters from an instantiated
@@ -3324,13 +3339,22 @@ func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Funct
 	}
 	wantEnv := len(fn.FreeVars) != 0
 	explicitEnv := false
+	var environment *types.Var
 	if universe != nil {
 		var envErr error
-		_, wantEnv, envErr = universe.closureEnvironments.entryEnvironment(fn)
+		environment, wantEnv, envErr = universe.closureEnvironments.entryEnvironment(fn)
 		if envErr != nil {
 			return fail("derive hidden environment: %v", envErr)
 		}
 		explicitEnv = universe.closureEnvironments.hasExplicitEnvironment(fn)
+	} else if wantEnv {
+		// Structural leaf-only tests have no prepared ProgramIR. Production
+		// always consumes the frozen effective environment above.
+		var pkg *types.Package
+		if fn.Pkg != nil {
+			pkg = fn.Pkg.Pkg
+		}
+		environment = makeClosureCtx(pkg, fn.FreeVars, nil)
 	}
 	if wantEnv != (offset == 1) {
 		return fail("effective hidden-context=%t does not match required environment=%t", offset == 1, wantEnv)
@@ -3342,7 +3366,7 @@ func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Funct
 			if !types.Identical(contextType, types.Typ[types.UnsafePointer]) {
 				return fail("effective //llgo:env entry context is %v, want unsafe.Pointer", contextType)
 			}
-		case !coroPhysicalClosureContextMatches(fn, contextType):
+		case environment == nil || !types.Identical(contextType, environment.Type()):
 			return fail("effective captured entry has no exact typed closure context")
 		}
 	}
@@ -3434,26 +3458,6 @@ func parameterType(parameter *ssa.Parameter) types.Type {
 		return nil
 	}
 	return parameter.Type()
-}
-
-func coroPhysicalClosureContextMatches(fn *ssa.Function, typ types.Type) bool {
-	if fn == nil || len(fn.FreeVars) == 0 || typ == nil {
-		return false
-	}
-	pointer, ok := types.Unalias(typ).Underlying().(*types.Pointer)
-	if !ok {
-		return false
-	}
-	fields, ok := types.Unalias(pointer.Elem()).Underlying().(*types.Struct)
-	if !ok || fields.NumFields() != len(fn.FreeVars) {
-		return false
-	}
-	for index, free := range fn.FreeVars {
-		if free == nil || !types.Identical(fields.Field(index).Type(), free.Type()) {
-			return false
-		}
-	}
-	return true
 }
 
 func validateCoroLeafPhysicalSignature(plan coro.FunctionPlan, sig *types.Signature) error {

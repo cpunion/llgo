@@ -19,10 +19,15 @@ package pclnpost
 import (
 	"bytes"
 	"crypto/sha256"
+	"debug/macho"
 	"encoding/binary"
+	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -325,12 +330,14 @@ func TestExternalSitesFilterSortAndDedupe(t *testing.T) {
 
 	pcRecords := []siteRecord{
 		{pc: 0x1148, symbolID: 2},
+		{pc: 0x1108, symbolID: 3},
 		{pc: 0x1108, symbolID: 1},
-		{pc: 0x1108, symbolID: 1},
+		{pc: 0x1108, symbolID: 3}, // exact duplicate separated by another ID
 		{pc: 0x1180, symbolID: 3}, // text but no symbol owner
 		{pc: 0x1080, symbolID: 4},
 	}
 	wantPC := []ExternalSite{
+		{PCOffset: 0x108, ID: 3, OwnerSymbol: "example.com/p.A"},
 		{PCOffset: 0x108, ID: 1, OwnerSymbol: "example.com/p.A"},
 		{PCOffset: 0x148, ID: 2, OwnerSymbol: "example.com/p.B"},
 	}
@@ -387,6 +394,57 @@ func TestReplaceExternalBinaryErrorPaths(t *testing.T) {
 	dir := t.TempDir()
 	if err := replaceExternalBinary(dir, []byte("replacement"), false); err == nil {
 		t.Fatal("replaceExternalBinary replaced a directory")
+	}
+	path := dir + "/binary"
+	if err := os.WriteFile(path, []byte("original"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("staged verification failed")
+	if err := replaceBinary(path, []byte("replacement"), false, func(string) error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("replaceBinary verification error = %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "original" {
+		t.Fatalf("failed transaction changed original: %q, %v", got, err)
+	}
+}
+
+func TestReplaceBinarySigningContract(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		path := machoRewriteFixture(t, 4096)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := replaceBinary(path, raw, true, nil); err == nil || !strings.Contains(err.Error(), "cannot safely replace") {
+			t.Fatalf("signed replacement error = %v", err)
+		}
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "signed-test-binary")
+	if err := os.WriteFile(path, raw, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceBinary(path, raw, true, func(staged string) error {
+		mf, err := macho.Open(staged)
+		if err == nil {
+			err = mf.Close()
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if mf, err := macho.Open(path); err != nil {
+		t.Fatalf("reload signed replacement: %v", err)
+	} else {
+		_ = mf.Close()
 	}
 }
 

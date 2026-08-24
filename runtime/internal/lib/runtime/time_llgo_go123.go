@@ -5,12 +5,13 @@ package runtime
 import (
 	"unsafe"
 
+	latomic "sync/atomic"
+
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/libuv"
 	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
 	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
 	ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
-	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
 )
 
 // Minimal time/timer support for stdlib time on llgo.

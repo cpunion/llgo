@@ -16,7 +16,6 @@ func WriteFile(fileName string) IO[error] {
 }
 
 func main() {
-
 	RunIO[Void](func() Future[Void] {
 
 		return func() (ret Void) {
