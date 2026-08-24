@@ -29,6 +29,27 @@ func TestParseDirective(t *testing.T) {
 	}
 }
 
+func TestPrepareCaseWorkspaceUsesCurrentModulePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require privileges on Windows")
+	}
+	repoRoot := t.TempDir()
+	ws, err := prepareCaseWorkspace(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.cleanup()
+
+	linkPath := filepath.Join(ws.gopath, "src", filepath.FromSlash("github.com/xgo-dev/llgo"))
+	target, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("read module link %q: %v", linkPath, err)
+	}
+	if target != repoRoot {
+		t.Fatalf("module link target=%q, want %q", target, repoRoot)
+	}
+}
+
 func TestParseDirectiveWithArgs(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "case.go")

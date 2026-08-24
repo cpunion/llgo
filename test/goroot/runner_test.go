@@ -752,12 +752,11 @@ func prepareCaseWorkspace(repoRoot string) (caseWorkspace, error) {
 		return caseWorkspace{}, err
 	}
 	gopath := filepath.Join(root, "gopath")
-	llgoPath := filepath.Join(gopath, "src", "github.com", "goplus")
-	if err := os.MkdirAll(llgoPath, 0o755); err != nil {
+	linkPath := filepath.Join(gopath, "src", filepath.FromSlash("github.com/xgo-dev/llgo"))
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
 		_ = os.RemoveAll(root)
 		return caseWorkspace{}, err
 	}
-	linkPath := filepath.Join(llgoPath, "llgo")
 	if err := os.Symlink(repoRoot, linkPath); err != nil && !errors.Is(err, os.ErrExist) {
 		_ = os.RemoveAll(root)
 		return caseWorkspace{}, fmt.Errorf("symlink %q -> %q: %w", linkPath, repoRoot, err)
