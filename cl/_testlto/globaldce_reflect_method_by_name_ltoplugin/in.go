@@ -28,10 +28,6 @@ func (S) Drop() string {
 	panic("Drop should be unreachable")
 }
 
-// Keep this helper call visible so the LTO plugin, rather than the pre-link
-// inliner, must recover its finite return set.
-//
-//go:noinline
 func methodName() string {
 	name := "KeepA"
 	if os.Args[0] == "" {
