@@ -22,19 +22,25 @@ func main() {
 // Keep this fixture focused on the channel scheduler contract rather than the
 // incidental block layout produced by LLVM.
 // CHECK-LABEL: define ptr @"main.main$coro"(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.NewChan$coro"
+// CHECK: call void @"{{.*}}/runtime/internal/runtime.NewChan$outcome"(
 // CHECK: call ptr @__llgo_coro_spawn_begin_v1(
 // CHECK: call void @__llgo_coro_spawn_commit_v1(
-// CHECK: CoroChanTryRecv
+// CHECK: call i32 @__llgo_coro_chan_recv_buffer_try_v1(
+// CHECK: call i32 @__llgo_coro_chan_recv_try_park_v2(
 // CHECK: call i8 @llvm.coro.suspend(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.NewChan$coro"
+// CHECK: call i32 @__llgo_coro_chan_resume_v2(
+// CHECK: call void @"{{.*}}/runtime/internal/runtime.NewChan$outcome"(
 // CHECK: call ptr @__llgo_coro_spawn_begin_v1(
 // CHECK: call void @__llgo_coro_spawn_commit_v1(
-// CHECK: CoroChanTryRecv
+// CHECK: call i32 @__llgo_coro_chan_recv_buffer_try_v1(
+// CHECK: call i32 @__llgo_coro_chan_recv_try_park_v2(
 // CHECK: call i8 @llvm.coro.suspend(
+// CHECK: call i32 @__llgo_coro_chan_resume_v2(
 // CHECK-LABEL: define ptr @"main.main$1$coro"(
+// CHECK: call i32 @__llgo_coro_chan_send_buffer_try_v1(
+// CHECK: call i32 @__llgo_coro_chan_send_try_park_v2(
 // CHECK: call i8 @llvm.coro.suspend(
-// CHECK: CoroChanTrySend
+// CHECK: call i32 @__llgo_coro_chan_resume_v2(
 // CHECK-LABEL: define ptr @"main.main$2$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK: CoroChanTryCloseTask
