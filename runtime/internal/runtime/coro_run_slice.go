@@ -388,7 +388,11 @@ func coroReduceExecutorRunActionPreparedV1(
 		} else {
 			distribute, stop, distributionOK = coroTargetReadyDistributionV1(target)
 		}
-		if !distributionOK || distribute && !coroTargetAfterStableRunActionV1(target, p) {
+		distributed := false
+		if distributionOK && distribute {
+			distributed, distributionOK = coroTargetAfterStableRunActionV1(target, p)
+		}
+		if !distributionOK || !coro.CommitExecutorRunActionDistribution(driver, distributed) {
 			return false, false
 		}
 		stopAfterStable = stop

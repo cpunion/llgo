@@ -260,17 +260,20 @@ func nextExecutorRunLocalStep(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	return serviceExecutorRunLocal(driver)
 }
 
-// CommitExecutorRunSourceDistribution closes the optional target-side ready
-// distribution boundary after one complete Source reduction. Source completion
-// records readyDebt before returning so a hot source cannot starve a newly
-// materialized continuation. If the target durably transferred the last such
-// continuation to another demanded route, that debt has been physically paid
-// by the transfer and must not make the now-empty source driver invalid.
+// commitExecutorRunReadyDistribution closes the optional target-side ready
+// distribution boundary after a complete source or action reduction. The
+// target owns P's queue but not the runner cursor: if it durably transferred
+// the last runnable, this commit is the single place which pays the associated
+// ready debt and restores the now-empty driver's header invariant.
 //
-// The target reports only whether a durable transfer was published. It never
-// mutates the runner cursor directly. A remaining local runnable retains the
-// debt and therefore still wins before another source epoch.
-func CommitExecutorRunSourceDistribution(driver *ExecutorDriver, distributed bool) bool {
+// Source completion must have published a debt for every promoted runnable.
+// An action may instead distribute an older runnable after its selected action
+// already paid the prior debt, so requireDebt keeps that stronger source audit
+// without rejecting the action case.
+func commitExecutorRunReadyDistribution(
+	driver *ExecutorDriver,
+	distributed, requireDebt bool,
+) bool {
 	if driver == nil || driver.state != executorDriverActive || driver.p == nil ||
 		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
 		driver.p.current != nil {
@@ -280,7 +283,7 @@ func CommitExecutorRunSourceDistribution(driver *ExecutorDriver, distributed boo
 		return validExecutorDriverHeader(driver)
 	}
 	if !driver.run.readyDebt {
-		return false
+		return !requireDebt && validExecutorDriverHeader(driver)
 	}
 	driver.run.readyDebt = false
 	if validExecutorDriverHeader(driver) {
@@ -290,6 +293,31 @@ func CommitExecutorRunSourceDistribution(driver *ExecutorDriver, distributed boo
 	// already broken; callers must reject the complete source reduction.
 	driver.run.readyDebt = true
 	return false
+}
+
+// CommitExecutorRunSourceDistribution closes the target distribution tail of
+// one complete source reduction. A completed source which exported its last
+// promoted runnable must also export the ready debt created for that runnable.
+func CommitExecutorRunSourceDistribution(driver *ExecutorDriver, distributed bool) bool {
+	return commitExecutorRunReadyDistribution(driver, distributed, true)
+}
+
+// CommitExecutorRunActionDistribution closes the target distribution tail of
+// one complete physical action. This is required even when the action itself
+// is already committed: queue distribution may have removed the final
+// runnable on which the post-action ready-debt invariant depended.
+func CommitExecutorRunActionDistribution(driver *ExecutorDriver, distributed bool) bool {
+	// A live CheckResume/CheckDestroy continuation remains current after its
+	// physical action. No transfer can have occurred while P.current was set,
+	// but the target still closes the optional distribution hook for every
+	// action. Validate that common no-op tail without imposing the empty-P
+	// precondition needed to settle an exported final runnable.
+	if !distributed {
+		return driver != nil && driver.state == executorDriverActive && driver.p != nil &&
+			driver.run.issued == ActionInvalid && driver.poll.phase == executorPollIdle &&
+			validExecutorDriverHeader(driver)
+	}
+	return commitExecutorRunReadyDistribution(driver, distributed, false)
 }
 
 func dispatchExecutorRunReadyAction(

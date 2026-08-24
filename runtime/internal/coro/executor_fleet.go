@@ -556,14 +556,17 @@ func restoreRunnableDemandAfterFailedClaim(slot *executorFleetSlot) bool {
 // DistributePNeutralRunnable services at most one global demand from an exact
 // source owner after a stable physical action. A source normally exports about
 // half of its local runnable queue, bounded by one destination mailbox, so one
-// continuation remains local and a lone G cannot bounce between idle Ps. A
-// Source links remain owner-only: an idle route publishes only a scalar demand
-// and never concurrently reads or mutates the victim queue. Requiring that
-// demand for every transfer is also a physical-service capability: a logical
-// route may be bound before its target starts an M, host turn, or interrupt
-// executor. Target selection scans the fixed route catalog beginning after the
-// source route; a demanded target is protected by its route producer lease
-// until mailbox publication and executor request have both completed.
+// continuation remains local and a lone yielded G cannot bounce between idle
+// Ps. The one safe single-runnable exception is a never-run initial frame: its
+// first physical action permanently leaves the initial state, and an exact
+// target demand proves that a live idle owner can service it. Source links
+// remain owner-only: an idle route publishes only a scalar demand and never
+// concurrently reads or mutates the victim queue. Requiring that demand for
+// every transfer is also a physical-service capability: a logical route may be
+// bound before its target starts an M, host turn, or interrupt executor. Target
+// selection scans the fixed route catalog beginning after the source route; a
+// demanded target is protected by its route producer lease until mailbox
+// publication and executor request have both completed.
 //
 // An empty valid result is ordinary: there was no demand, no surplus, or every
 // demanded mailbox was transiently contended/full. ok=false denotes a broken
@@ -584,15 +587,24 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	if !stableRunnableTransferP(source) {
 		return RunnableDistribution{}, true
 	}
-	if source.readyCount == 1 {
-		return RunnableDistribution{}, true
-	}
 	batchLimit := source.readyCount / 2
+	var candidates [RunnableTransferMailboxCapacity]*G
+	prepared := uint32(0)
+	if source.readyCount == 1 {
+		candidate := source.readyHead
+		if !initialPNeutralRunnable(candidate, true) {
+			return RunnableDistribution{}, true
+		}
+		batchLimit = 1
+		candidates[0] = candidate
+		prepared = 1
+	}
 	if batchLimit > RunnableTransferMailboxCapacity {
 		batchLimit = RunnableTransferMailboxCapacity
 	}
-	var candidates [RunnableTransferMailboxCapacity]*G
-	prepared := collectPNeutralRunnableBatch(source, batchLimit, &candidates)
+	if prepared == 0 {
+		prepared = collectPNeutralRunnableBatch(source, batchLimit, &candidates)
+	}
 	if prepared == 0 {
 		return RunnableDistribution{}, true
 	}

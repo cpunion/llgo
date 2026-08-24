@@ -145,23 +145,23 @@ func coroTargetRefreshRunSliceV1(target coroRunTargetCapabilityV1) (distribute, 
 func coroTargetAfterStableRunActionV1(
 	target coroRunTargetCapabilityV1,
 	source *coro.P,
-) bool {
+) (distributed, ok bool) {
 	state := &coroNativeFleetV1State
 	if source == nil {
-		return coroTargetReadyDistributionFailV1("native ready distribution lacks source owner")
+		return false, coroTargetReadyDistributionFailV1("native ready distribution lacks source owner")
 	}
 	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
 		// Fleet shutdown is a one-way ownership barrier. A peer action which
 		// committed concurrently with program-main return is still valid, but
 		// it must not publish another transfer after the stop boundary.
-		return true
+		return false, true
 	}
 	if state.lifecycle != coroNativeFleetActiveV1 {
-		return coroTargetReadyDistributionFailV1("native ready distribution fleet is not active")
+		return false, coroTargetReadyDistributionFailV1("native ready distribution fleet is not active")
 	}
 	route := uint32(target.sourceRoute)
 	if route == 0 || route > state.domainCount {
-		return coroTargetReadyDistributionFailV1("native ready distribution source route invalid")
+		return false, coroTargetReadyDistributionFailV1("native ready distribution source route invalid")
 	}
 	// coroTargetBeginRunSliceV1 froze this domain under the same stack-scoped
 	// runner capability. DistributePNeutralRunnable independently revalidates
@@ -169,19 +169,19 @@ func coroTargetAfterStableRunActionV1(
 	sourceDomain := &state.domains[route-1]
 	if sourceDomain.lifecycle != coroNativeFleetDomainActiveV1 ||
 		sourceDomain.pOwnerV1() != source || sourceDomain.handle.Route != route {
-		return coroTargetReadyDistributionFailV1("native ready distribution source route mismatch")
+		return false, coroTargetReadyDistributionFailV1("native ready distribution source route mismatch")
 	}
-	distribution, distributed := state.fleet.DistributePNeutralRunnable(
+	distribution, distributionOK := state.fleet.DistributePNeutralRunnable(
 		sourceDomain.handle,
 		source,
 	)
-	if !distributed {
-		return coroTargetReadyDistributionFailV1("native ready distribution core rejected owner")
+	if !distributionOK {
+		return false, coroTargetReadyDistributionFailV1("native ready distribution core rejected owner")
 	}
 	if !distribution.Valid() {
-		return true
+		return false, true
 	}
-	return coroTargetPublishReadyDistributionV1(state, distribution)
+	return true, coroTargetPublishReadyDistributionV1(state, distribution)
 }
 
 func coroTargetPublishReadyDistributionV1(
