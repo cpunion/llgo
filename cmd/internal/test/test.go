@@ -76,7 +76,7 @@ func runCmd(cmd *base.Command, args []string) {
 
 	pkgArgs := cmd.Flag.Args()
 	parallelism := effectiveParallelism(conf.BuildParallelism)
-	if canRunPackagesInParallel(conf, pkgArgs, parallelism) {
+	if canOrchestrateTestPackages(conf, pkgArgs) {
 		pkgs, err := listTestPackages(conf, pkgArgs)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -130,11 +130,12 @@ func runCmd(cmd *base.Command, args []string) {
 	}
 }
 
-func canRunPackagesInParallel(conf *build.Config, pkgArgs []string, parallelism int) bool {
+// canOrchestrateTestPackages reports whether independent package test binaries
+// may be delegated to child llgo processes. The delegation is a build-domain
+// boundary even when -p=1: independent test-main packages must never share one
+// compiler program, SSA plan, or coroutine emission universe.
+func canOrchestrateTestPackages(conf *build.Config, pkgArgs []string) bool {
 	if os.Getenv(parallelWorkerEnv) != "" || conf.Target != "" || conf.CompileOnly || conf.OutFile != "" {
-		return false
-	}
-	if parallelism == 1 {
 		return false
 	}
 	for _, arg := range pkgArgs {
