@@ -74,14 +74,20 @@ func TestAddrinfoKeepsProgramCountersScalarAcrossTheCBoundary(t *testing.T) {
 		for _, required := range []string{
 			"Fbase uintptr",
 			"Saddr uintptr",
+			"func Address() uintptr",
 			"func Addrinfo(addr uintptr, info *Info) c.Int",
 		} {
 			if !strings.Contains(text, required) {
 				t.Errorf("%s lacks scalar address ABI %q", path, required)
 			}
 		}
-		if strings.Contains(text, "func Addrinfo(addr unsafe.Pointer") {
-			t.Errorf("%s exposes a program counter as a GC pointer", path)
+		for _, forbidden := range []string{
+			"func Address() unsafe.Pointer",
+			"func Addrinfo(addr unsafe.Pointer",
+		} {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("%s exposes a program counter as a GC pointer through %q", path, forbidden)
+			}
 		}
 	}
 	nativeSource, err := os.ReadFile("internal/clite/debug/debug.go")
@@ -109,6 +115,8 @@ func TestAddrinfoKeepsProgramCountersScalarAcrossTheCBoundary(t *testing.T) {
 	}
 	cText := string(cSource)
 	for _, required := range []string{
+		"uintptr_t llgo_address()",
+		"return (uintptr_t)__builtin_return_address(0)",
 		"int llgo_addrinfo(uintptr_t addr, Dl_info *info)",
 		"dladdr((void *)addr, info)",
 		"int llgo_stacktrace(int skip, llgo_stacktrace_frame *frames, int capacity)",

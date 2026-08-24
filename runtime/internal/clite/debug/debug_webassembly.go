@@ -20,8 +20,8 @@ type Info struct {
 	Saddr uintptr
 }
 
-func Address() unsafe.Pointer {
-	return nil
+func Address() uintptr {
+	return 0
 }
 
 func Addrinfo(addr uintptr, info *Info) c.Int {

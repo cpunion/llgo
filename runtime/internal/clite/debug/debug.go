@@ -21,7 +21,7 @@ type Info struct {
 }
 
 //go:linkname Address C.llgo_address
-func Address() unsafe.Pointer
+func Address() uintptr
 
 //llgo:coro noblock
 //go:linkname Addrinfo C.llgo_addrinfo

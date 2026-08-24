@@ -15,7 +15,7 @@ type Info struct {
 	Saddr uintptr
 }
 
-func Address() unsafe.Pointer {
+func Address() uintptr {
 	panic("not implemented")
 }
 
