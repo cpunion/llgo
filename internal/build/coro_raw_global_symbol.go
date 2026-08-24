@@ -610,16 +610,26 @@ func coroRawLLVMNM(ctx *context) (string, error) {
 	if ctx == nil {
 		return "", fmt.Errorf("missing build context")
 	}
-	if compiler := strings.TrimSpace(ctx.crossCompile.CC); compiler != "" {
-		candidate := filepath.Join(filepath.Dir(compiler), "llvm-nm")
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
+	compiler := strings.TrimSpace(ctx.crossCompile.CC)
+	// LLVM 22 distributions such as Debian install versioned driver tools in
+	// /usr/bin. LLGo supports LLVM 22 exclusively, so the second name is an
+	// exact toolchain fallback rather than a cross-version guess.
+	names := [...]string{"llvm-nm", "llvm-nm-22"}
+	if compiler != "" {
+		dir := filepath.Dir(compiler)
+		for _, name := range names {
+			candidate := filepath.Join(dir, name)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate, nil
+			}
 		}
 	}
-	if path, err := exec.LookPath("llvm-nm"); err == nil {
-		return path, nil
+	for _, name := range names {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
 	}
-	return "", fmt.Errorf("llvm-nm is unavailable")
+	return "", fmt.Errorf("LLVM 22 llvm-nm is unavailable")
 }
 
 func inventoryCoroDarwinDynimports(

@@ -22,6 +22,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -34,6 +35,20 @@ import (
 	llssa "github.com/goplus/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
+
+func TestCoroRawLLVMNMFindsVersionedLLVM22Sibling(t *testing.T) {
+	temp := t.TempDir()
+	nm := filepath.Join(temp, "llvm-nm-22")
+	if err := os.WriteFile(nm, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", temp)
+	ctx := &context{crossCompile: crosscompile.Export{CC: filepath.Join(temp, "clang-22")}}
+	got, err := coroRawLLVMNM(ctx)
+	if err != nil || got != nm {
+		t.Fatalf("coroRawLLVMNM() = %q, %v; want %q", got, err, nm)
+	}
+}
 
 func TestCoroRawGlobalSymbolInventoryRequiresCompleteAbsence(t *testing.T) {
 	complete := newCompleteCoroRawGlobalSymbolInventory("fixture")
