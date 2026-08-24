@@ -342,7 +342,7 @@ main.main$coro:
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     encoding/binary.littleEndian.Uint16$coro
-    github.com/goplus/llgo/runtime/internal/runtime.AllocZ
+    github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin

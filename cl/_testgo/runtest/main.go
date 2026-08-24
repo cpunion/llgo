@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/goplus/llgo/cl/_testgo/runtest/bar"
-	"github.com/goplus/llgo/cl/_testgo/runtest/foo"
+	"github.com/xgo-dev/llgo/cl/_testgo/runtest/bar"
+	"github.com/xgo-dev/llgo/cl/_testgo/runtest/foo"
 )
 
 func Zoo() int {

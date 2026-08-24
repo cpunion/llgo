@@ -6,7 +6,7 @@ package ssa
 import (
 	"testing"
 
-	"github.com/goplus/llgo/internal/optlevel"
+	"github.com/xgo-dev/llgo/internal/optlevel"
 	"github.com/xgo-dev/llvm"
 )
 

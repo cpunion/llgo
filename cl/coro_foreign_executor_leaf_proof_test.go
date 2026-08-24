@@ -23,8 +23,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 func TestEmissionUniverseBindsInferredForeignExecutorLeafProof(t *testing.T) {

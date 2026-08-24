@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/corodoorbell"
+import "github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 
 func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadline bool) bool {
 	return pipe != nil && deadline == 0 && !hasDeadline && pipe.Wait()

@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // Targets without a multi-route fleet have no useful producer-locality
 // destination. Keeping this a compile-time zero also avoids treating the

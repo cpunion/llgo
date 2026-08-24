@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 )
 
 const coroStdlibAcceptanceEnv = "LLGO_CORO_STDLIB_ACCEPTANCE"
@@ -254,7 +254,7 @@ func TestCoroStdlibSyncAcceptanceConfiguration(t *testing.T) {
 
 func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFixture, packages []Package) {
 	t.Helper()
-	const runtimePackage = "github.com/goplus/llgo/runtime/internal/runtime"
+	const runtimePackage = "github.com/xgo-dev/llgo/runtime/internal/runtime"
 	required := map[string]bool{
 		"coro_native_deferred_replacement_llgo.go":     false,
 		"coro_execution_quota_native_llgo.go":          false,

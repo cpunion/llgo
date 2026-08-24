@@ -27,9 +27,9 @@ import (
 	"strings"
 	"testing"
 
-	llssa "github.com/goplus/llgo/ssa"
-	llabi "github.com/goplus/llgo/ssa/abi"
-	"github.com/goplus/llgo/ssa/ssatest"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	llabi "github.com/xgo-dev/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 	"golang.org/x/tools/go/types/typeutil"

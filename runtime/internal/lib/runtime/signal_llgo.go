@@ -3,10 +3,10 @@
 package runtime
 
 import (
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/libuv"
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/libuv"
+	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
+	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
 )
 
 // Minimal signal support for stdlib os/signal on hosted native targets.

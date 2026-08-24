@@ -7,7 +7,7 @@ _llgo_main.T:
 [OrdinaryEdges]
 *_llgo_main.T:
     _llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 __llgo_coro_root_factory_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934:
     __llgo_coro_root_factory_v1.dfc7f364c7c31c1996dcb4f150ed6934
 __llgo_coro_root_factory_v1.dfc7f364c7c31c1996dcb4f150ed6934:
@@ -18,7 +18,7 @@ __llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0.entries:
     __llgo_coro_root_factory_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934
 _llgo_main.T:
     *_llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
     __llgo_coro_library_effect_v9.208ab9b5dc648747a50b0812e926e3fb
 llvm.used:

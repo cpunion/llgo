@@ -93,7 +93,7 @@ func TestItabCacheUsesCanonicalLockFreePublication(t *testing.T) {
 	llgoAtomic := readAtomicMetadataSource(t, atomicCacheLLGo)
 	for _, required := range []string{
 		"//go:build llgo && !esp32c3",
-		`catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"`,
+		`catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"`,
 		"catomic.Load(address)",
 		"catomic.CompareAndExchange(address, old, new)",
 	} {

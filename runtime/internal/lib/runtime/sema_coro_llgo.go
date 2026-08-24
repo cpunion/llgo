@@ -21,7 +21,7 @@ package runtime
 import (
 	"unsafe"
 
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
+	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
 )
 
 // llgoCoroSemaphoreParkV2 is opaque compiler-spilled ParkState/source storage.

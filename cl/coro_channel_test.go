@@ -25,9 +25,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -195,7 +195,7 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 			selectResume := module.NamedFunction("foo.Select$coro.resume")
 			if selectResume.IsNil() || !strings.Contains(
 				selectResume.String(),
-				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectResume",
 			) {
 				t.Fatalf("CoroSplit lost channel select resume dispatch:\n%s", module.String())
 			}
@@ -211,17 +211,17 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 			emptySelectResume := module.NamedFunction("foo.EmptySelect$coro.resume")
 			if emptySelectResume.IsNil() || !strings.Contains(
 				emptySelectResume.String(),
-				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectResume",
 			) {
 				t.Fatalf("CoroSplit lost empty channel select cancellation dispatch:\n%s", module.String())
 			}
 			trySelectResume := module.NamedFunction("foo.TrySelectThenRecv$coro.resume")
 			if trySelectResume.IsNil() || strings.Count(
 				trySelectResume.String(),
-				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectTry",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectTry",
 			) != 1 || strings.Contains(
 				trySelectResume.String(),
-				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectPark",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectPark",
 			) {
 				t.Fatalf("CoroSplit changed nonblocking channel select into a physical park:\n%s", module.String())
 			}
@@ -247,9 +247,9 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				coroChanResumeHookV2,
 				coroFaultPrepareHookV1,
 				coroFaultPayloadHookV1,
-				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectTry",
-				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectPark",
-				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectTry",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectPark",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectResume",
 			} {
 				if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(symbol)) {
 					t.Fatalf("post-CoroSplit channel object lost ABI symbol %q", symbol)
@@ -382,9 +382,9 @@ func assertCoroSelectBody(t *testing.T, body string) {
 		t.Fatalf("Select coro.suspend calls = %d, want initial + select + final:\n%s", got, body)
 	}
 	for _, symbol := range []string{
-		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectTry",
-		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectPark",
-		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectTry",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectPark",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectResume",
 	} {
 		if got := strings.Count(body, symbol); got != 1 {
 			t.Fatalf("Select references to %q = %d, want 1:\n%s", symbol, got, body)

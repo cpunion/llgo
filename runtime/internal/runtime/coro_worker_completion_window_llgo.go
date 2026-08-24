@@ -19,7 +19,7 @@
 package runtime
 
 import (
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 // Active polling is a bounded opportunity, not a new waiting primitive. It

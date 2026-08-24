@@ -100,11 +100,11 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 				nativeM != test.native || singleM != test.singleM {
 				t.Fatalf("GoFiles = %v, native=%t timer=%t host=%t worker-driver=%t legacy-driver=%t pipe-wait=%t adapter=%t context-adapter=%t fallback=%t native-M=%t single-M=%t", pkg.GoFiles, native, timer, host, workerDriver, legacyDriver, pipeWait, adapter, contextAdapter, fallback, nativeM, singleM)
 			}
-			const doorbell = "github.com/goplus/llgo/runtime/internal/corodoorbell"
+			const doorbell = "github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 			if imported := slices.Contains(pkg.Imports, doorbell); imported != test.doorbellOK {
 				t.Fatalf("Imports = %v, doorbell=%t", pkg.Imports, imported)
 			}
-			const clock = "github.com/goplus/llgo/runtime/internal/coroclock"
+			const clock = "github.com/xgo-dev/llgo/runtime/internal/coroclock"
 			if imported := slices.Contains(pkg.Imports, clock); imported != test.timer {
 				t.Fatalf("Imports = %v, clock=%t", pkg.Imports, imported)
 			}
@@ -154,7 +154,7 @@ func TestCoroNativeFleetTargetBuildSelection(t *testing.T) {
 			t.Errorf("native fleet GoFiles unexpectedly contain %s: %v", forbidden, pkg.GoFiles)
 		}
 	}
-	if !slices.Contains(pkg.Imports, "github.com/goplus/llgo/runtime/internal/corofleet") {
+	if !slices.Contains(pkg.Imports, "github.com/xgo-dev/llgo/runtime/internal/corofleet") {
 		t.Fatalf("native fleet runtime imports lack fixed pthread owner adapter: %v", pkg.Imports)
 	}
 

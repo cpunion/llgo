@@ -21,10 +21,10 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/clite/tls"
-	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/corofleet"
-	"github.com/goplus/llgo/runtime/internal/coroworker"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/tls"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/corofleet"
+	"github.com/xgo-dev/llgo/runtime/internal/coroworker"
 )
 
 // coroNativeForeignBoundaryV1 is native-stack storage for one synchronous

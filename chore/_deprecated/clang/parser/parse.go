@@ -22,7 +22,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/goplus/llgo/xtool/clang/ast"
+	"github.com/xgo-dev/llgo/xtool/clang/ast"
 	jsoniter "github.com/json-iterator/go"
 )
 

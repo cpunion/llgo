@@ -18,7 +18,7 @@
 
 package runtime
 
-import llruntime "github.com/goplus/llgo/runtime/internal/runtime"
+import llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
 
 func llgoSetMaxThreads(in int) int {
 	return llruntime.CoroSetMaxThreads(in)

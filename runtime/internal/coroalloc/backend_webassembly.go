@@ -21,7 +21,7 @@ package coroalloc
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 // Direct GOARCH=wasm package tests and WebAssembly profiles without the

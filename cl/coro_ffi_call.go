@@ -20,7 +20,7 @@ import (
 	"go/token"
 	"go/types"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 // compileCoroFFICall is the managed reflection stack cut. Stock ffi_call

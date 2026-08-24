@@ -16,7 +16,7 @@
 
 package build
 
-import "github.com/goplus/llgo/cl"
+import "github.com/xgo-dev/llgo/cl"
 
 type packageBuildTask struct {
 	pkg       *aPackage

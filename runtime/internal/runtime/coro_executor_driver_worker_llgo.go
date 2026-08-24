@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // The 32-bit POSIX profile has the same bounded pthread worker and pipe
 // doorbell as the full native fleet, but deliberately has no timer or poll

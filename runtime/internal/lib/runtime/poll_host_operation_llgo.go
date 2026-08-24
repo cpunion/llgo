@@ -13,8 +13,8 @@ package runtime
 import (
 	_ "unsafe"
 
-	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
-	llrt "github.com/goplus/llgo/runtime/internal/runtime"
+	catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
+	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 const (

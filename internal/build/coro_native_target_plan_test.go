@@ -27,8 +27,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -495,8 +495,8 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 				)
 			}
 		}
-		const runtimePath = "github.com/goplus/llgo/runtime/internal/runtime"
-		const clitePath = "github.com/goplus/llgo/runtime/internal/clite"
+		const runtimePath = "github.com/xgo-dev/llgo/runtime/internal/runtime"
+		const clitePath = "github.com/xgo-dev/llgo/runtime/internal/clite"
 		validateMigratedRawHost := func(record coroForeignUseDomainRecord, identity string) error {
 			if record.DirectExecutorCertified ||
 				record.NoBlockCertified ||
@@ -856,7 +856,7 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			}
 			return found, nil
 		}
-		const doorbellPath = "github.com/goplus/llgo/runtime/internal/corodoorbell"
+		const doorbellPath = "github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 		for _, want := range []struct {
 			path     string
 			name     string

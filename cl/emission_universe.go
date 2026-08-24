@@ -33,11 +33,11 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/goplus/llgo/cl/ssawrap"
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/typepatch"
-	llssa "github.com/goplus/llgo/ssa"
-	llabi "github.com/goplus/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/cl/ssawrap"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/typepatch"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	llabi "github.com/xgo-dev/llgo/ssa/abi"
 	"golang.org/x/tools/go/ssa"
 )
 

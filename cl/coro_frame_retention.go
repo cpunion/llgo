@@ -25,7 +25,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 

@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 func TestEmissionUniverseFreezesDistinctForeignCallCapabilities(t *testing.T) {

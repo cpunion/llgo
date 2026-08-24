@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // CoroMonotonicNano exposes the current host-published monotonic sample to the
 // shared Timer/Park core and the patched standard-library runtime.

@@ -3,8 +3,8 @@
 package runtime
 
 import (
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	cliteos "github.com/goplus/llgo/runtime/internal/clite/os"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
 	"unsafe"
 )
 

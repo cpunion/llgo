@@ -16,7 +16,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // These are logical target-profile limits, not eager reservations. Every
 // source retains its allocation-free inline page; hosted runtimes attach one

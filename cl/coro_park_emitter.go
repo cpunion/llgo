@@ -19,7 +19,7 @@ package cl
 import (
 	"fmt"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 func (p *context) requireCoroParkV2Body(b llssa.Builder, operation string) *coroBodyContext {

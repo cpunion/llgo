@@ -19,8 +19,8 @@
 package runtime
 
 import (
-	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/coroclock"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coroclock"
 )
 
 // Native keeps the target-neutral 64-slot page granularity. These are logical

@@ -13,7 +13,7 @@ package js
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 // The LLGo JS boundary is an ordinary direct WebAssembly import ABI. It does

@@ -17,8 +17,8 @@ import (
 	"testing"
 
 	"github.com/goplus/gogen/packages"
-	llpackages "github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	llpackages "github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	gossa "golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"

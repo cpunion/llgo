@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/goplus/llgo/internal/packages"
+	"github.com/xgo-dev/llgo/internal/packages"
 )
 
 func TestStdlibInternalCPUX86NoSuspendProof(t *testing.T) {

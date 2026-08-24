@@ -13,13 +13,13 @@ _llgo_main.T:
 [OrdinaryEdges]
 *_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
     _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 *_llgo_iface$anEWstLioBmxcO9rxTXClbAzDIEQLw2tApwq0mcSt88:
     _llgo_iface$anEWstLioBmxcO9rxTXClbAzDIEQLw2tApwq0mcSt88
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 *_llgo_main.T:
     _llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 __llgo$generated$promoted$M$llgo$promoted$v1$31df88eec168d597bf9f5938455d76b4657afe36729f06db3af788ee5ce6db6d$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
@@ -78,12 +78,12 @@ _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
 _llgo_iface$anEWstLioBmxcO9rxTXClbAzDIEQLw2tApwq0mcSt88:
     *_llgo_iface$anEWstLioBmxcO9rxTXClbAzDIEQLw2tApwq0mcSt88
     _llgo_iface$anEWstLioBmxcO9rxTXClbAzDIEQLw2tApwq0mcSt88$imethods
-    github.com/goplus/llgo/runtime/internal/runtime.interequal
+    github.com/xgo-dev/llgo/runtime/internal/runtime.interequal
 _llgo_iface$anEWstLioBmxcO9rxTXClbAzDIEQLw2tApwq0mcSt88$imethods:
     _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
 _llgo_main.T:
     *_llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
     __llgo_coro_library_effect_v9.fbb2c65660e2ac20c8d334452bd539a6
 llvm.used:

@@ -10,7 +10,7 @@
 
 package runtime
 
-import corort "github.com/goplus/llgo/runtime/internal/runtime"
+import corort "github.com/xgo-dev/llgo/runtime/internal/runtime"
 
 // WebAssembly has no synchronous OS clock requirement in the scheduler core.
 // The embedding publishes monotonic time at clean host turns; all standard

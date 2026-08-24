@@ -18,7 +18,7 @@
 
 package runtime
 
-import catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+import catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 
 func coroKeyedAtomicLoadUint32(address *uint32) uint32 {
 	return catomic.Load(address)

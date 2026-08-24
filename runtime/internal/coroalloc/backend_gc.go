@@ -21,7 +21,7 @@ package coroalloc
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/clite/bdwgc"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
 )
 
 const backendKind = "bdwgc"

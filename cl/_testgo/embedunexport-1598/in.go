@@ -1,6 +1,6 @@
 package main
 
-import "github.com/goplus/llgo/cl/_testdata/embedunexport"
+import "github.com/xgo-dev/llgo/cl/_testdata/embedunexport"
 
 // Wrapped embeds *embedunexport.Base to implement embedunexport.Object
 type Wrapped struct {

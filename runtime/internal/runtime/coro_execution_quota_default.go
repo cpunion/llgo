@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // Single-executor and host-pull profiles already have an inherent physical
 // execution limit of one. Their target wrapper, rather than a second quota

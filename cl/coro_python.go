@@ -21,7 +21,7 @@ import (
 	"go/types"
 	"strconv"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 

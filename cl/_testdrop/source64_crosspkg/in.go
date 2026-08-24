@@ -2,13 +2,13 @@
 package main
 
 import (
-	"github.com/goplus/llgo/cl/_testdrop/source64_crosspkg/api"
-	"github.com/goplus/llgo/cl/_testdrop/source64_crosspkg/model"
+	"github.com/xgo-dev/llgo/cl/_testdrop/source64_crosspkg/api"
+	"github.com/xgo-dev/llgo/cl/_testdrop/source64_crosspkg/model"
 )
 
 // SYMBOL-NOT: testdrop/source64_crosspkg/model{{.*}}RuntimeSource{{.*}}Drop
 // SYMBOL-NOT: testdrop/source64_crosspkg/model{{.*}}Uint64Only{{.*}}Uint64
-// SYMBOL-DAG: _llgo_github.com/goplus/llgo/cl/_testdrop/source64_crosspkg/model.RuntimeSource
+// SYMBOL-DAG: _llgo_github.com/xgo-dev/llgo/cl/_testdrop/source64_crosspkg/model.RuntimeSource
 // SYMBOL-NOT: testdrop/source64_crosspkg/model{{.*}}RuntimeSource{{.*}}Drop
 // SYMBOL-NOT: testdrop/source64_crosspkg/model{{.*}}Uint64Only{{.*}}Uint64
 

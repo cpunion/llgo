@@ -21,7 +21,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/goplus/llgo/internal/locality"
+	"github.com/xgo-dev/llgo/internal/locality"
 	"golang.org/x/tools/go/ssa"
 )
 

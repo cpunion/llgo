@@ -1,10 +1,10 @@
 // LITTEST
 package main
 
-import "github.com/goplus/llgo/cl/_testdrop/unexported_method_identity/api"
+import "github.com/xgo-dev/llgo/cl/_testdrop/unexported_method_identity/api"
 
 // SYMBOL-NOT: testdrop/unexported_method_identity{{.*}}Local{{.*}}hidden
-// SYMBOL-DAG: _llgo_github.com/goplus/llgo/cl/_testdrop/unexported_method_identity/api.Good
+// SYMBOL-DAG: _llgo_github.com/xgo-dev/llgo/cl/_testdrop/unexported_method_identity/api.Good
 // SYMBOL-NOT: testdrop/unexported_method_identity{{.*}}Local{{.*}}hidden
 
 var sink any

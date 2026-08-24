@@ -19,16 +19,16 @@ _llgo_main.Box[int]:
 [OrdinaryEdges]
 *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
     _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 *_llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8:
     _llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 *_llgo_int:
     _llgo_int
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 *_llgo_main.Box[int]:
     _llgo_main.Box[int]
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 __llgo_coro_func_coro_v1.method-value.17993ef4d15c31b3.b00bb4f8ab797af5299936e72968e19e:
     main.(*Box[int]).Value$coro
 __llgo_coro_func_coro_v1.method.17993ef4d15c31b3.94f9ceee1e642b161ef7d158ea7a6a74:
@@ -61,17 +61,17 @@ _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA$out:
 _llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8:
     *_llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8
     _llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8$imethods
-    github.com/goplus/llgo/runtime/internal/runtime.interequal
+    github.com/xgo-dev/llgo/runtime/internal/runtime.interequal
 _llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8$imethods:
     _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
 _llgo_int:
     *_llgo_int
-    github.com/goplus/llgo/runtime/internal/runtime.memequal64
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequal64
 _llgo_main.Box[int]:
     *_llgo_main.Box[int]
-    github.com/goplus/llgo/cl/_testmeta/interface_generic.struct$lOhriNu2BrWBR2Mh8k-KggMYlAw0Wx-2ftE2_gNyubg$fields
-    github.com/goplus/llgo/runtime/internal/runtime.structequal
-github.com/goplus/llgo/cl/_testmeta/interface_generic.struct$lOhriNu2BrWBR2Mh8k-KggMYlAw0Wx-2ftE2_gNyubg$fields:
+    github.com/xgo-dev/llgo/cl/_testmeta/interface_generic.struct$lOhriNu2BrWBR2Mh8k-KggMYlAw0Wx-2ftE2_gNyubg$fields
+    github.com/xgo-dev/llgo/runtime/internal/runtime.structequal
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic.struct$lOhriNu2BrWBR2Mh8k-KggMYlAw0Wx-2ftE2_gNyubg$fields:
     _llgo_int
 llvm.compiler.used:
     __llgo_coro_library_effect_v9.349a88354318875c85e801325f95241f
@@ -111,7 +111,7 @@ main.main$coro:
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     __llgo_static_itab.d81035aa8516c1c235056809f89a2ad8
-    github.com/goplus/llgo/runtime/internal/runtime.AllocZ
+    github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin

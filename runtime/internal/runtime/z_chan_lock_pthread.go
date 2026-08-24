@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
+import "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
 
 // channelMutex preserves the native-stack channel implementation for builds
 // that do not select the stackless single-P coroutine executor.

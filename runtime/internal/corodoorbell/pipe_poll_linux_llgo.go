@@ -21,7 +21,7 @@ package corodoorbell
 import (
 	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 // Linux defines nfds_t as unsigned long, whose width follows the target word.

@@ -18,7 +18,7 @@
 
 package runtime
 
-import rtdebug "github.com/goplus/llgo/runtime/internal/runtime"
+import rtdebug "github.com/xgo-dev/llgo/runtime/internal/runtime"
 
 // A stackless target has no physical frame-liveness marker. Visibility of a
 // recovered panic snapshot is instead owned by the scheduler's exact

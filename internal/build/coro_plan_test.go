@@ -35,12 +35,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/crosscompile"
-	"github.com/goplus/llgo/internal/goembed"
-	"github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -3232,7 +3232,7 @@ func TestCoroEmissionCoverageStopsBeforeAnyPackageCodegen(t *testing.T) {
 		return input.Analyze(coro.Roots{{Function: mainFn, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 			Include: func(fn *ssa.Function) (bool, error) {
 				return fn.Pkg == nil || fn.Pkg.Pkg == nil ||
-					fn.Pkg.Pkg.Path() != "github.com/goplus/llgo/internal/build/_testgo/coro_emission/zmiss" ||
+					fn.Pkg.Pkg.Path() != "github.com/xgo-dev/llgo/internal/build/_testgo/coro_emission/zmiss" ||
 					fn.Name() != "Missing", nil
 			},
 		})

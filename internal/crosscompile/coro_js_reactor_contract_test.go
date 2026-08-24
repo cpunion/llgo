@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/targets"
+	"github.com/xgo-dev/llgo/internal/targets"
 )
 
 func TestJSWasmCommandUsesOnlyHostPullCoroutineReactor(t *testing.T) {

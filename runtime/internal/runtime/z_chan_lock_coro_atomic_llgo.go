@@ -18,7 +18,7 @@
 
 package runtime
 
-import catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+import catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 
 func channelMutexCompareAndSwap(address *uint32, old, new uint32) bool {
 	_, swapped := catomic.CompareAndExchange(address, old, new)

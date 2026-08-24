@@ -11,10 +11,10 @@ _llgo_main.T:
 [OrdinaryEdges]
 *_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
     _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 *_llgo_main.T:
     _llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
 __llgo$generated$promoted$M$llgo$promoted$v1$d4c1da4f3f36da19c9cac90397f6d8aad4ce4ffb44ad254b178d5b4230a65694$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
@@ -68,7 +68,7 @@ _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
     *_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
 _llgo_main.T:
     *_llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
     __llgo_coro_library_effect_v9.de20493391fa20646f540b0188360d20
 llvm.used:
@@ -144,9 +144,9 @@ main.use$coro:
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
     _llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.PopCallerLocationFrame$outcome
-    github.com/goplus/llgo/runtime/internal/runtime.PushCallerLocationFrame$outcome
-    github.com/goplus/llgo/runtime/internal/runtime.RecordPanicLocation$outcome
+    github.com/xgo-dev/llgo/runtime/internal/runtime.PopCallerLocationFrame$outcome
+    github.com/xgo-dev/llgo/runtime/internal/runtime.PushCallerLocationFrame$outcome
+    github.com/xgo-dev/llgo/runtime/internal/runtime.RecordPanicLocation$outcome
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin

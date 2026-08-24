@@ -19,9 +19,9 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
-	"github.com/goplus/llgo/runtime/internal/atomiccache"
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/abi"
+	"github.com/xgo-dev/llgo/runtime/internal/atomiccache"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 type eface struct {

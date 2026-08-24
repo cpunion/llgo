@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 
 const boundsChecksFixture = "./testdata/boundschecks"
-const boundsChecksFixturePackage = "github.com/goplus/llgo/internal/build/testdata/boundschecks"
+const boundsChecksFixturePackage = "github.com/xgo-dev/llgo/internal/build/testdata/boundschecks"
 
 func TestDisableBoundsChecksIR(t *testing.T) {
 	checked := boundsChecksModuleIR(t, false)

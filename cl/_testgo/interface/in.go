@@ -1,7 +1,7 @@
 // LITTEST
 package main
 
-import "github.com/goplus/llgo/cl/_testdata/foo"
+import "github.com/xgo-dev/llgo/cl/_testdata/foo"
 
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine

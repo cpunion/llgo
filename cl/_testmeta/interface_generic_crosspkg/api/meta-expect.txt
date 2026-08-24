@@ -1,5 +1,5 @@
 [OrdinaryEdges]
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
     __llgo_coro_await_consume_v1
     __llgo_coro_await_inline_destroy_consume_v4
     __llgo_coro_await_inline_finish_v2
@@ -26,13 +26,13 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
     llvm.coro.suspend
     llvm.fake.use
     llvm.trap
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init:
-    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.init$guard
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.init:
+    github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.init$guard
 llvm.compiler.used:
     __llgo_coro_library_effect_v9.f31cf0fcc6701b8a0bc75e182f32e4f7
 
 [UseIfaceMethod]
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
     _llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8 Value _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
 
 [InterfaceInfo]

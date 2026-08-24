@@ -21,8 +21,8 @@ package corodoorbell
 import (
 	_ "unsafe"
 
-	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
-	csyscall "github.com/goplus/llgo/runtime/internal/clite/syscall"
+	catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
+	csyscall "github.com/xgo-dev/llgo/runtime/internal/clite/syscall"
 )
 
 const (

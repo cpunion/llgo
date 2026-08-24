@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/cl/cltest"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl/cltest"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 func TestWasmImportDirectiveIR(t *testing.T) {

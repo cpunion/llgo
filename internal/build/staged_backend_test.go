@@ -29,10 +29,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/buildenv"
-	"github.com/goplus/llgo/internal/lto"
-	llpackages "github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/buildenv"
+	"github.com/xgo-dev/llgo/internal/lto"
+	llpackages "github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
 

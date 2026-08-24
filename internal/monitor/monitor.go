@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/goplus/llgo/internal/flash"
+	"github.com/xgo-dev/llgo/internal/flash"
 	"github.com/mattn/go-tty"
 	"go.bug.st/serial"
 )

@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // The host profile is a pull ABI, not a platform import masquerading as one.
 // JS/WASM wrappers, WASI reactors, RTOS tasks, and embedded main loops consume

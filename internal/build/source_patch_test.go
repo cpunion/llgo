@@ -14,9 +14,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/env"
-	"github.com/goplus/llgo/internal/packages"
-	llruntime "github.com/goplus/llgo/runtime"
+	"github.com/xgo-dev/llgo/internal/env"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llruntime "github.com/xgo-dev/llgo/runtime"
 )
 
 func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {

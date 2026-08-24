@@ -18,7 +18,7 @@
 
 package runtime
 
-import llruntime "github.com/goplus/llgo/runtime/internal/runtime"
+import llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
 
 func GOMAXPROCS(n int) int {
 	previous := llruntime.CoroGOMAXPROCS(n)

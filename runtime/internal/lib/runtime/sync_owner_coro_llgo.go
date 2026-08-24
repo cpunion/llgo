@@ -3,8 +3,8 @@
 package runtime
 
 import (
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 )
 
 // runtimeMutex protects short owner-local bookkeeping regions in the

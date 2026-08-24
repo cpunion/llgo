@@ -12,7 +12,7 @@ import (
 	"unsafe"
 	"weak"
 
-	"github.com/goplus/llgo/runtime/abi"
+	"github.com/xgo-dev/llgo/runtime/abi"
 )
 
 var zero uintptr

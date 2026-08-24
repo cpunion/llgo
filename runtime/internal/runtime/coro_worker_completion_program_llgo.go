@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // The target profile owns both completion delivery and submission authority.
 // Keeping these decisions in the same mutually exclusive file prevents the

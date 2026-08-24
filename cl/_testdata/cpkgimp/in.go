@@ -1,7 +1,7 @@
 package main
 
 import (
-	c "github.com/goplus/llgo/cl/_testdata/cpkg"
+	c "github.com/xgo-dev/llgo/cl/_testdata/cpkg"
 )
 
 func main() {

@@ -21,8 +21,8 @@ package runtime
 import (
 	"unsafe"
 
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
+	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
+	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
 )
 
 type semaState struct {

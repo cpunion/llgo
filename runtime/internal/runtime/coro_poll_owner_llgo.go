@@ -21,7 +21,7 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 const coroPollParkMagicV2 uint32 = 0x43504c32 // "CPL2"

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"unsafe"
 
-	llgoabi "github.com/goplus/llgo/runtime/abi"
+	llgoabi "github.com/xgo-dev/llgo/runtime/abi"
 )
 
 type kubeReflectTypeInterface struct {

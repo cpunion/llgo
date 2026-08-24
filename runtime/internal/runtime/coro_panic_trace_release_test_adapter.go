@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // The host runtime-adapter island allocates any synthetic frame backing from
 // the Go test heap rather than coroalloc. It still exercises the exact trace

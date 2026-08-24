@@ -21,7 +21,7 @@ package main
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coroalloc"
+	"github.com/xgo-dev/llgo/runtime/internal/coroalloc"
 )
 
 func main() {

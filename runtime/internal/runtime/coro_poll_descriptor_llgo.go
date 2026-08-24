@@ -21,7 +21,7 @@ package runtime
 import (
 	_ "unsafe" // required by go:linkname
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 const (

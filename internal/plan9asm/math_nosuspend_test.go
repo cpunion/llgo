@@ -25,7 +25,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/goplus/llgo/internal/packages"
+	"github.com/xgo-dev/llgo/internal/packages"
 )
 
 func TestStdlibMathArchExpAmd64NoSuspendProof(t *testing.T) {

@@ -57,7 +57,7 @@ func TestReflectIsZeroUsesStaticTypeEqual(t *testing.T) {
 	for _, required := range []string{
 		"if v.typ().Equal != nil && v.typ().Size() <= maxZero {",
 		"if tt.Fields[i].Name_ == \"_\" {",
-		"//go:linkname typeequal github.com/goplus/llgo/runtime/internal/runtime.typeequal",
+		"//go:linkname typeequal github.com/xgo-dev/llgo/runtime/internal/runtime.typeequal",
 		"func typeequal(t *abi.Type, p, q unsafe.Pointer) bool",
 	} {
 		if !strings.Contains(source, required) {

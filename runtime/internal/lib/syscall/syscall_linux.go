@@ -3,7 +3,7 @@
 package syscall
 
 import (
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 func rawSyscallNoError(trap, a1, a2, a3 uintptr) (r1, r2 uintptr) {

@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 )
 
 func TestCoroCallableContractParsesExactDeclarationAndWrapperScopes(t *testing.T) {

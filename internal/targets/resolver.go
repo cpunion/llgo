@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/goplus/llgo/internal/env"
+	"github.com/xgo-dev/llgo/internal/env"
 )
 
 // Resolver provides high-level interface for target configuration resolution

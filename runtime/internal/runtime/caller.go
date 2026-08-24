@@ -17,8 +17,8 @@
 package runtime
 
 import (
-	clitedebug "github.com/goplus/llgo/runtime/internal/clite/debug"
-	"github.com/goplus/llgo/runtime/internal/coro"
+	clitedebug "github.com/xgo-dev/llgo/runtime/internal/clite/debug"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 type CallerFrame struct {

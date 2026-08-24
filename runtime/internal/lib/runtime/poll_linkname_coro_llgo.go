@@ -5,9 +5,9 @@ package runtime
 import (
 	"unsafe" // required by go:linkname
 
-	cliteos "github.com/goplus/llgo/runtime/internal/clite/os"
-	csyscall "github.com/goplus/llgo/runtime/internal/clite/syscall"
-	llrt "github.com/goplus/llgo/runtime/internal/runtime"
+	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
+	csyscall "github.com/xgo-dev/llgo/runtime/internal/clite/syscall"
+	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 // These values match internal/poll/fd_poll_runtime.go.

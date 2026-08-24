@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/clite/tls"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/tls"
 )
 
 // A Pool is a set of temporary objects that may be individually saved and

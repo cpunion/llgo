@@ -32,11 +32,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	"github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -366,7 +366,7 @@ func buildCoroStaticDeferNativeE2EChecks(
 		llssa.InGo,
 	)
 	requestCancel := pkg.NewFunc(
-		"github.com/goplus/llgo/runtime/internal/coro.RequestTaskCancellation",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.RequestTaskCancellation",
 		newSignature([]types.Type{pointer, pointer, types.Typ[types.Uint8]}, []types.Type{types.Typ[types.Bool]}),
 		llssa.InGo,
 	)
@@ -516,7 +516,7 @@ func assertCoroStaticDeferNativeE2ELinkedSymbols(t *testing.T, executable string
 		coroStaticDeferNativeE2ERun,
 		coroStaticDeferNativeE2EContinue,
 		"__llgo_coro_spawn_begin_v1",
-		"github.com/goplus/llgo/runtime/internal/coro.RequestTaskCancellation",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.RequestTaskCancellation",
 		coroNativeE2EMainPhysicalSymbol("main$coro"),
 		coroNativeE2EMainPhysicalSymbol("canceledChild$coro"),
 	} {
@@ -525,9 +525,9 @@ func assertCoroStaticDeferNativeE2ELinkedSymbols(t *testing.T, executable string
 		}
 	}
 	for _, forbidden := range []string{
-		"github.com/goplus/llgo/runtime/internal/runtime.Rethrow",
-		"github.com/goplus/llgo/runtime/internal/runtime.TracePanic",
-		"github.com/goplus/llgo/runtime/internal/runtime.printany",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.Rethrow",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.TracePanic",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.printany",
 	} {
 		if strings.Contains(symbols, forbidden) {
 			t.Fatalf("static-defer E2E unexpectedly linked legacy PanicABI symbol %q", forbidden)

@@ -31,7 +31,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/goplus/llgo/internal/llgen"
+	"github.com/xgo-dev/llgo/internal/llgen"
 	"github.com/goplus/mod"
 	"golang.org/x/mod/modfile"
 )

@@ -19,10 +19,10 @@
 package runtime
 
 import (
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	crand "github.com/goplus/llgo/runtime/internal/clite/math/rand"
-	"github.com/goplus/llgo/runtime/internal/clite/time"
-	"github.com/goplus/llgo/runtime/internal/runtime/math"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	crand "github.com/xgo-dev/llgo/runtime/internal/clite/math/rand"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/time"
+	"github.com/xgo-dev/llgo/runtime/internal/runtime/math"
 )
 
 func fastrand() uint32 {

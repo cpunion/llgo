@@ -33,8 +33,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goplus/llgo/cl"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 var (
@@ -2213,15 +2213,15 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	configureCoroRuntimeIslandPlan(conf, "NewChan")
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
-		"github.com/goplus/llgo/runtime/internal/clite/tls":    true,
-		"github.com/goplus/llgo/runtime/internal/coro":         true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
-		"github.com/goplus/llgo/runtime/internal/coroclock":    true,
-		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
-		"github.com/goplus/llgo/runtime/internal/corofleet":    true,
-		"github.com/goplus/llgo/runtime/internal/corotimer":    true,
-		"github.com/goplus/llgo/runtime/internal/coroworker":   true,
-		"github.com/goplus/llgo/runtime/internal/runtime/math": true,
+		"github.com/xgo-dev/llgo/runtime/internal/clite/tls":    true,
+		"github.com/xgo-dev/llgo/runtime/internal/coro":         true,
+		"github.com/xgo-dev/llgo/runtime/internal/coroalloc":    true,
+		"github.com/xgo-dev/llgo/runtime/internal/coroclock":    true,
+		"github.com/xgo-dev/llgo/runtime/internal/corodoorbell": true,
+		"github.com/xgo-dev/llgo/runtime/internal/corofleet":    true,
+		"github.com/xgo-dev/llgo/runtime/internal/corotimer":    true,
+		"github.com/xgo-dev/llgo/runtime/internal/coroworker":   true,
+		"github.com/xgo-dev/llgo/runtime/internal/runtime/math": true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string

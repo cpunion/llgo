@@ -2,12 +2,12 @@
 package main
 
 import (
-	"github.com/goplus/llgo/cl/_testdrop/iface_flow_crosspkg/api"
-	"github.com/goplus/llgo/cl/_testdrop/iface_flow_crosspkg/factory"
+	"github.com/xgo-dev/llgo/cl/_testdrop/iface_flow_crosspkg/api"
+	"github.com/xgo-dev/llgo/cl/_testdrop/iface_flow_crosspkg/factory"
 )
 
 // SYMBOL-NOT: testdrop/iface_flow_crosspkg/factory{{.*}}T{{.*}}Drop
-// SYMBOL-DAG: _llgo_github.com/goplus/llgo/cl/_testdrop/iface_flow_crosspkg/factory.T
+// SYMBOL-DAG: _llgo_github.com/xgo-dev/llgo/cl/_testdrop/iface_flow_crosspkg/factory.T
 // SYMBOL-NOT: testdrop/iface_flow_crosspkg/factory{{.*}}T{{.*}}Drop
 
 func main() {

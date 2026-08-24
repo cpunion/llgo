@@ -1,6 +1,6 @@
 package main
 
-import "github.com/goplus/llgo/cl/_testdata/foo"
+import "github.com/xgo-dev/llgo/cl/_testdata/foo"
 
 type bar struct {
 	pb *byte

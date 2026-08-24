@@ -3,25 +3,25 @@ package maps
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
+	"github.com/xgo-dev/llgo/runtime/abi"
 )
 
-//go:linkname runtime_fastrand64 github.com/goplus/llgo/runtime/internal/runtime.fastrand64
+//go:linkname runtime_fastrand64 github.com/xgo-dev/llgo/runtime/internal/runtime.fastrand64
 func runtime_fastrand64() uint64
 
-//go:linkname runtime_fatal github.com/goplus/llgo/runtime/internal/runtime.fatal
+//go:linkname runtime_fatal github.com/xgo-dev/llgo/runtime/internal/runtime.fatal
 func runtime_fatal(s string)
 
-//go:linkname runtime_typedmemmove github.com/goplus/llgo/runtime/internal/runtime.Typedmemmove
+//go:linkname runtime_typedmemmove github.com/xgo-dev/llgo/runtime/internal/runtime.Typedmemmove
 func runtime_typedmemmove(typ *abi.Type, dst, src unsafe.Pointer)
 
-//go:linkname runtime_typedmemclr github.com/goplus/llgo/runtime/internal/runtime.Typedmemclr
+//go:linkname runtime_typedmemclr github.com/xgo-dev/llgo/runtime/internal/runtime.Typedmemclr
 func runtime_typedmemclr(typ *abi.Type, ptr unsafe.Pointer)
 
-//go:linkname runtime_newobject github.com/goplus/llgo/runtime/internal/runtime.newobject
+//go:linkname runtime_newobject github.com/xgo-dev/llgo/runtime/internal/runtime.newobject
 func runtime_newobject(typ *abi.Type) unsafe.Pointer
 
-//go:linkname runtime_newarray github.com/goplus/llgo/runtime/internal/runtime.newarray
+//go:linkname runtime_newarray github.com/xgo-dev/llgo/runtime/internal/runtime.newarray
 func runtime_newarray(typ *abi.Type, n int) unsafe.Pointer
 
 func rand() uint64 {

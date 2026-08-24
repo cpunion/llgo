@@ -21,8 +21,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/goplus/llgo/internal/optlevel"
-	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
+	"github.com/xgo-dev/llgo/internal/optlevel"
+	intllvm "github.com/xgo-dev/llgo/internal/xtool/llvm"
 	"github.com/xgo-dev/llvm"
 )
 

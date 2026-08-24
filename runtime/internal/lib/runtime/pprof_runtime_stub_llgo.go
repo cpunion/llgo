@@ -5,8 +5,8 @@ package runtime
 import (
 	"unsafe"
 
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
-	llrt "github.com/goplus/llgo/runtime/internal/runtime"
+	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
+	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 type StackRecord struct {

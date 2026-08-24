@@ -21,8 +21,8 @@ package build
 import (
 	"testing"
 
-	"github.com/goplus/llgo/cl"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/packages"
 )
 

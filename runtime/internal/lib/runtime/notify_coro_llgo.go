@@ -21,7 +21,7 @@ package runtime
 import (
 	"unsafe"
 
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
+	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
 )
 
 // llgoCoroNotifyParkV2 shares the pointer-aligned 256-byte opaque keyed-park

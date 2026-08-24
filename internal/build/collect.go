@@ -27,11 +27,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/env"
-	"github.com/goplus/llgo/internal/meta"
-	"github.com/goplus/llgo/internal/packages"
-	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/env"
+	"github.com/xgo-dev/llgo/internal/meta"
+	"github.com/xgo-dev/llgo/internal/packages"
+	intllvm "github.com/xgo-dev/llgo/internal/xtool/llvm"
 	gopackages "golang.org/x/tools/go/packages"
 )
 

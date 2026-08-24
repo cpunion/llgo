@@ -18,7 +18,7 @@
 
 package runtime
 
-import ct "github.com/goplus/llgo/runtime/internal/clite/time"
+import ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
 
 // nanotime1 keeps the previous behavior on remaining platforms.
 func nanotime1() int64 {

@@ -16,7 +16,7 @@
 
 package runtime
 
-import c "github.com/goplus/llgo/runtime/internal/clite"
+import c "github.com/xgo-dev/llgo/runtime/internal/clite"
 
 // releaseGAndCheckDeadlock is the sole last-goroutine decision shared by the
 // pthread and stackless task lifecycles. Main marks its exit before releasing

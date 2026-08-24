@@ -76,7 +76,7 @@ func TestWebAssemblyTargetsSelectExplicitCollectorBackend(t *testing.T) {
 			if slices.Contains(pkg.TestGoFiles, "backend_gc_test.go") {
 				t.Fatalf("TestGoFiles = %v, unexpectedly selected BDWGC backend test", pkg.TestGoFiles)
 			}
-			if slices.Contains(pkg.Imports, "github.com/goplus/llgo/runtime/internal/clite/bdwgc") {
+			if slices.Contains(pkg.Imports, "github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc") {
 				t.Fatalf("Imports = %v, unexpectedly retained BDWGC", pkg.Imports)
 			}
 		})
@@ -109,10 +109,10 @@ func TestWebAssemblyTargetsSelectExplicitCollectorBackend(t *testing.T) {
 				slices.Contains(pkg.GoFiles, "backend_gc.go") {
 				t.Fatalf("GoFiles = %v, want only the tinygogc WebAssembly backend", pkg.GoFiles)
 			}
-			if !slices.Contains(pkg.Imports, "github.com/goplus/llgo/runtime/internal/runtime/tinygogc") {
+			if !slices.Contains(pkg.Imports, "github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc") {
 				t.Fatalf("Imports = %v, want tinygogc", pkg.Imports)
 			}
-			if slices.Contains(pkg.Imports, "github.com/goplus/llgo/runtime/internal/clite/bdwgc") {
+			if slices.Contains(pkg.Imports, "github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc") {
 				t.Fatalf("Imports = %v, unexpectedly retained BDWGC", pkg.Imports)
 			}
 		})

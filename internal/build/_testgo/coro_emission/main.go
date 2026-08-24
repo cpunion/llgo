@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/goplus/llgo/internal/build/_testgo/coro_emission/aok"
-	"github.com/goplus/llgo/internal/build/_testgo/coro_emission/zmiss"
+	"github.com/xgo-dev/llgo/internal/build/_testgo/coro_emission/aok"
+	"github.com/xgo-dev/llgo/internal/build/_testgo/coro_emission/zmiss"
 )
 
 func main() {

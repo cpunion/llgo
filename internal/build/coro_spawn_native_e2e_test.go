@@ -33,11 +33,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	"github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	llvm "github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -139,7 +139,7 @@ const coroChannelNativeE2ERuntimeShim = `package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 const maxAlloc = ^uintptr(0) >> 1
@@ -214,7 +214,7 @@ func (*PanicNilError) RuntimeError() {}
 // receiver methods above. This closed island never invokes those wrappers, so
 // keep only the exact runtime-helper signature instead of importing z_error's
 // full legacy panic/string dependency graph.
-//go:linkname coroChannelNativeE2EPanicWrapNilPointer github.com/goplus/llgo/runtime/internal/runtime.PanicWrapNilPointer
+//go:linkname coroChannelNativeE2EPanicWrapNilPointer github.com/xgo-dev/llgo/runtime/internal/runtime.PanicWrapNilPointer
 func coroChannelNativeE2EPanicWrapNilPointer(bool, string, string) {}
 
 //go:linkname AllocU C.malloc
@@ -872,11 +872,11 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	configureCoroRuntimeIslandPlan(conf, "NewChan")
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
-		"github.com/goplus/llgo/runtime/internal/coro":         true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
-		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
-		"github.com/goplus/llgo/runtime/internal/coroworker":   true,
-		"github.com/goplus/llgo/runtime/internal/runtime/math": true,
+		"github.com/xgo-dev/llgo/runtime/internal/coro":         true,
+		"github.com/xgo-dev/llgo/runtime/internal/coroalloc":    true,
+		"github.com/xgo-dev/llgo/runtime/internal/corodoorbell": true,
+		"github.com/xgo-dev/llgo/runtime/internal/coroworker":   true,
+		"github.com/xgo-dev/llgo/runtime/internal/runtime/math": true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -1015,7 +1015,7 @@ func configureCoroRuntimeIslandPlan(conf *Config, linkedRuntimeEntries ...string
 				continue
 			}
 			pkgPath := fn.Pkg.Pkg.Path()
-			if pkgPath != "command-line-arguments" && pkgPath != "github.com/goplus/llgo/runtime/internal/coro" {
+			if pkgPath != "command-line-arguments" && pkgPath != "github.com/xgo-dev/llgo/runtime/internal/coro" {
 				continue
 			}
 			if len(fn.Blocks) == 0 && input.functionBackground != nil {
@@ -1034,7 +1034,7 @@ func configureCoroRuntimeIslandPlan(conf *Config, linkedRuntimeEntries ...string
 				(strings.HasPrefix(fn.Name(), "__llgo_coro_") ||
 					strings.HasPrefix(fn.Name(), "Coro") ||
 					linkedRuntimeRoot)
-			externalCoreEntry := pkgPath == "github.com/goplus/llgo/runtime/internal/coro" &&
+			externalCoreEntry := pkgPath == "github.com/xgo-dev/llgo/runtime/internal/coro" &&
 				token.IsExported(fn.Name())
 			if fn.Parent() != nil || fn.Signature == nil || fn.Signature.Recv() != nil ||
 				(!externalRuntimeEntry && !externalCoreEntry) {
@@ -1125,20 +1125,20 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"__llgo_coro_fault_prepare_v1",
 		"__llgo_coro_fault_prepare_v2",
 		"__llgo_coro_fault_payload_v2",
-		"github.com/goplus/llgo/runtime/internal/coro.CommitSpawn",
-		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommit",
-		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommitPair",
-		"github.com/goplus/llgo/runtime/internal/coro.RequestCommandShutdownDrain",
-		"github.com/goplus/llgo/runtime/internal/coro.BeginCommandShutdown",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.CommitSpawn",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.BeginChannelExternalCommit",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.BeginChannelExternalCommitPair",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.RequestCommandShutdownDrain",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.BeginCommandShutdown",
 	} {
 		if !strings.Contains(symbols, required) {
 			t.Fatalf("linked coroutine island is missing production symbol %q:\n%s", required, symbols)
 		}
 	}
 	for _, forbidden := range []string{
-		"github.com/goplus/llgo/runtime/internal/runtime.Rethrow",
-		"github.com/goplus/llgo/runtime/internal/runtime.TracePanic",
-		"github.com/goplus/llgo/runtime/internal/runtime.printany",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.Rethrow",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.TracePanic",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.printany",
 	} {
 		if strings.Contains(symbols, forbidden) {
 			t.Fatalf("test-only coroutine island unexpectedly extracted legacy PanicABI symbol %q", forbidden)

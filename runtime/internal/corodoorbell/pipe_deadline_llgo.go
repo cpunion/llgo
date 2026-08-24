@@ -18,7 +18,7 @@
 
 package corodoorbell
 
-import "github.com/goplus/llgo/runtime/internal/coroclock"
+import "github.com/xgo-dev/llgo/runtime/internal/coroclock"
 
 // WaitDeadline blocks the native executor until either the retained pipe is
 // rung or one absolute monotonic deadline is observed due. A physical poll

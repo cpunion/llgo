@@ -209,8 +209,8 @@ func isKnownNonNilArrayBase(v llvm.Value) bool {
 	if call := v.IsACallInst(); !call.IsNil() {
 		if fn := call.CalledValue().IsAFunction(); !fn.IsNil() {
 			switch fn.Name() {
-			case "github.com/goplus/llgo/runtime/internal/runtime.AllocU",
-				"github.com/goplus/llgo/runtime/internal/runtime.AllocZ":
+			case "github.com/xgo-dev/llgo/runtime/internal/runtime.AllocU",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ":
 				return true
 			}
 		}

@@ -21,8 +21,8 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -369,7 +369,7 @@ func deriveCoroLocalBodyFacts(
 
 func coroRuntimeContextPrimitive(function *ssa.Function) bool {
 	if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil ||
-		llssa.PathOf(function.Pkg.Pkg) != "github.com/goplus/llgo/runtime/internal/runtime" {
+		llssa.PathOf(function.Pkg.Pkg) != "github.com/xgo-dev/llgo/runtime/internal/runtime" {
 		return false
 	}
 	switch function.Name() {

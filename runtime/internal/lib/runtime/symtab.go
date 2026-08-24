@@ -7,10 +7,10 @@ package runtime
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	clitedebug "github.com/goplus/llgo/runtime/internal/clite/debug"
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
-	rtdebug "github.com/goplus/llgo/runtime/internal/runtime"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	clitedebug "github.com/xgo-dev/llgo/runtime/internal/clite/debug"
+	latomic "github.com/xgo-dev/llgo/runtime/internal/lib/sync/atomic"
+	rtdebug "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 // Frames may be used to get function/file/line information for a

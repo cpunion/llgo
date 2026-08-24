@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 func coroTargetPostKeyedOperationV2(id coro.OperationID) bool {
 	if !id.Valid() || id.Source() != coro.OperationSourceManual {

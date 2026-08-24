@@ -4,12 +4,12 @@ package main
 import (
 	"reflect"
 
-	"github.com/goplus/llgo/cl/_testdrop/reflect_dynamic_iface_crosspkg/api"
-	"github.com/goplus/llgo/cl/_testdrop/reflect_dynamic_iface_crosspkg/model"
+	"github.com/xgo-dev/llgo/cl/_testdrop/reflect_dynamic_iface_crosspkg/api"
+	"github.com/xgo-dev/llgo/cl/_testdrop/reflect_dynamic_iface_crosspkg/model"
 )
 
 // SYMBOL-NOT: testdrop/reflect_dynamic_iface_crosspkg/model{{.*}}Unused{{.*}}ReflectKeep
-// SYMBOL-DAG: _llgo_github.com/goplus/llgo/cl/_testdrop/reflect_dynamic_iface_crosspkg/model.Used
+// SYMBOL-DAG: _llgo_github.com/xgo-dev/llgo/cl/_testdrop/reflect_dynamic_iface_crosspkg/model.Used
 // SYMBOL-NOT: testdrop/reflect_dynamic_iface_crosspkg/model{{.*}}Unused{{.*}}ReflectKeep
 
 //go:noinline

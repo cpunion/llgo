@@ -19,7 +19,7 @@
 package coroclock
 
 import (
-	ctime "github.com/goplus/llgo/runtime/internal/clite/time"
+	ctime "github.com/xgo-dev/llgo/runtime/internal/clite/time"
 )
 
 // Linux assigns 1 to CLOCK_MONOTONIC. The shared clite constant carries

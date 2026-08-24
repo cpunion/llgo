@@ -9,7 +9,7 @@ package unique
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
+	"github.com/xgo-dev/llgo/runtime/abi"
 )
 
 // clone makes a copy of value, and may update string values found in value

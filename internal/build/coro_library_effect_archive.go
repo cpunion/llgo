@@ -23,8 +23,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/xtool/ar"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/xtool/ar"
 )
 
 const maxCoroLibraryEffectArchiveBytes = 256 << 20

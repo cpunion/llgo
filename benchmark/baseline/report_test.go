@@ -155,7 +155,7 @@ func writeActionData(t *testing.T, path, sha string, value float64) {
 		core.Commit.ID = sha
 		for _, name := range expectedGoBenchmarks {
 			core.Benches = append(core.Benches, actionBenchmark{
-				Name: name + " (github.com/goplus/llgo/test)", Unit: "ns/op", Value: value,
+				Name: name + " (github.com/xgo-dev/llgo/test)", Unit: "ns/op", Value: value,
 			})
 		}
 		data.Entries[platform+" program binary size"] = []actionBenchmarkSuite{size}

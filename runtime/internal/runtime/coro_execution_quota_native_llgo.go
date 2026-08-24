@@ -19,9 +19,9 @@
 package runtime
 
 import (
-	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/corodoorbell"
-	"github.com/goplus/llgo/runtime/internal/corofleet"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
+	"github.com/xgo-dev/llgo/runtime/internal/corofleet"
 )
 
 const coroNativeMaximumLogicalProcsV1 uint32 = 1<<31 - 1

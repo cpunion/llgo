@@ -18,7 +18,7 @@
 
 package runtime
 
-import ct "github.com/goplus/llgo/runtime/internal/clite/time"
+import ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
 
 // Linux CLOCK_MONOTONIC (see <linux/time.h>), which has nanosecond
 // resolution. Deliberately a local constant: ct.CLOCK_MONOTONIC carries

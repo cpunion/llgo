@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/crosscompile/compile"
-	"github.com/goplus/llgo/internal/lto"
-	"github.com/goplus/llgo/internal/optlevel"
-	"github.com/goplus/llgo/internal/targets"
-	"github.com/goplus/llgo/internal/xtool/llvm"
+	"github.com/xgo-dev/llgo/internal/crosscompile/compile"
+	"github.com/xgo-dev/llgo/internal/lto"
+	"github.com/xgo-dev/llgo/internal/optlevel"
+	"github.com/xgo-dev/llgo/internal/targets"
+	"github.com/xgo-dev/llgo/internal/xtool/llvm"
 )
 
 func TestCompileWithConfigUsesLinkerSpecificNoStdlib(t *testing.T) {
