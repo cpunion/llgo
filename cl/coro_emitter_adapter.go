@@ -363,6 +363,49 @@ func (p *context) tryCompileCoroFreeVar(b llssa.Builder, fn *ssa.Function, index
 	return b.Field(ctx, index), true
 }
 
+// materializeCoroCaptureSnapshots is the sole bridge from a frozen immutable
+// capture proof to physical values. The public closure environment and dynamic
+// funcval ABI remain unchanged: this loads the ordinary pointer-to-cell field
+// exactly once in the physical entry. LLVM CoroSplit then transports a live
+// coroutine value in the stackless frame; outcome-plain bodies keep it in
+// ordinary SSA registers.
+func (p *context) materializeCoroCaptureSnapshots(
+	b llssa.Builder,
+	plan *coroPhysicalFunctionPlan,
+	environmentPhysicalParam int,
+) coroCaptureSnapshotValues {
+	if plan == nil || len(plan.captureSnapshots) == 0 {
+		return nil
+	}
+	if p == nil || p.emissionUniverse == nil || p.coroEmissionPlan() != plan || p.hasStructuredOutcomePhysicalBody() ||
+		p.goFn == nil || plan.function != p.goFn || b == nil || b.Func != p.fn ||
+		environmentPhysicalParam < 0 {
+		panic("immutable capture snapshots escaped their physical prologue")
+	}
+	_, hasEnvironment, err := p.emissionUniverse.closureEnvironments.entryEnvironment(p.goFn)
+	if err != nil || !hasEnvironment {
+		panic("immutable capture snapshots require one frozen lexical environment")
+	}
+	values := make(coroCaptureSnapshotValues, len(plan.captureSnapshots))
+	environment := b.Load(p.fn.PhysicalParam(environmentPhysicalParam))
+	for _, snapshot := range plan.captureSnapshots {
+		if snapshot.index < 0 || snapshot.index >= len(p.goFn.FreeVars) ||
+			snapshot.free != p.goFn.FreeVars[snapshot.index] {
+			panic("immutable capture snapshot lost its frozen free-variable identity")
+		}
+		cell := b.Field(environment, snapshot.index)
+		value := b.LoadKnownNonNil(cell)
+		if value.IsNil() {
+			panic("immutable capture snapshot produced no physical prologue value")
+		}
+		if _, duplicate := values[snapshot.free]; duplicate {
+			panic("immutable capture snapshot was materialized more than once")
+		}
+		values[snapshot.free] = value
+	}
+	return values
+}
+
 func (p *context) compileClosureEnvironment() llssa.Expr {
 	if p.fn == nil || p.goFn == nil {
 		panic("closureEnv(): called outside an env-bearing function")

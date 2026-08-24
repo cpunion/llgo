@@ -77,6 +77,24 @@ func buildCoroNativeDoorbellObject(t *testing.T, temp string) string {
 	return object
 }
 
+// buildCoroCurrentGTLSObject materializes runtime's direct current-G TLS
+// mirror. Source-island E2E tests bypass the ordinary LLGoFiles package link,
+// so they must close this native leaf explicitly just like the allocator,
+// worker, and doorbell leaves above.
+func buildCoroCurrentGTLSObject(t *testing.T, temp string) string {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang is unavailable")
+	}
+	source := filepath.Join("..", "..", "runtime", "internal", "runtime", "_wrap", "coro_g_tls.c")
+	object := filepath.Join(temp, "coro-current-g-tls.o")
+	if output, err := exec.Command(clang, "-std=c11", "-O2", "-c", source, "-o", object).CombinedOutput(); err != nil {
+		t.Fatalf("compile native coroutine current-G TLS leaf: %v\n%s", err, output)
+	}
+	return object
+}
+
 // buildCoroNativePollObject materializes the scalar poll-descriptor and
 // bounded socket-attempt leaf normally owned by runtime's source package.
 func buildCoroNativePollObject(t *testing.T, temp string) string {

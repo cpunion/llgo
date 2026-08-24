@@ -2828,6 +2828,28 @@ func recycleChannelOperationSlot(source *ChannelOperationSource, slot *channelOp
 	if !recycleProducerSourceSlot(&slot.producerSourceSlot) {
 		return false
 	}
+	if id.LocalSlot() == source.scanLimit {
+		for source.scanLimit != 0 {
+			index := source.scanLimit - 1
+			last, slotOK := channelOperationSlotAt(source, index)
+			ready, readyOK := channelOperationReadyAt(source, index)
+			if !slotOK || !readyOK {
+				return false
+			}
+			if ready || !channelOperationReusableSlot(source, last, index) {
+				break
+			}
+			source.scanLimit--
+		}
+		if source.scanLimit == 0 {
+			// A producer publishes the ready catalog and pending hint before
+			// releasing its admission. The owner may consume that catalog in the
+			// same pass which cleared pending, then join and recycle the generation
+			// after the producer restores only the advisory bit. No live prefix means
+			// that all such durable facts are gone, so retire the stale hint here.
+			preemptStore(&source.pending, 0)
+		}
+	}
 	// Preserve the historical lowest-reusable-slot behavior after a lifecycle
 	// completes. The circular cursor is an allocation-burst optimization, not
 	// a change to generation reuse or external-lease retirement semantics.

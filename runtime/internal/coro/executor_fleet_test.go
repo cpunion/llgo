@@ -651,8 +651,8 @@ func TestExecutorFleetDemandDistributesSurplusWithoutBouncingLastRunnable(t *tes
 	}
 }
 
-func TestExecutorFleetDemandKeepsSingleRunnableLocal(t *testing.T) {
-	t.Run("initial", func(t *testing.T) {
+func TestExecutorFleetDemandSharesSingleInitialButKeepsSingleYieldedLocal(t *testing.T) {
+	t.Run("initial-with-demand", func(t *testing.T) {
 		fleet := new(ExecutorFleet)
 		source := bindExecutorFleetManualFixture(t, fleet)
 		target := bindExecutorFleetManualFixture(t, fleet)
@@ -660,10 +660,47 @@ func TestExecutorFleetDemandKeepsSingleRunnableLocal(t *testing.T) {
 		if !Enqueue(source.p, task.g) {
 			t.Fatal("prepare single initial demand")
 		}
+		// A physical action may publish this child while parking its current G.
+		// The action commit records a ready debt before target-side distribution.
+		source.driver.run.readyDebt = true
+		if !validExecutorDriver(source.driver) {
+			t.Fatal("prepare single initial action debt")
+		}
+		if !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+			t.Fatal("publish single initial demand")
+		}
+		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+		if !ok || !distribution.Valid() || distribution.Target != target.handle ||
+			distribution.Count != 1 || source.p.readyHead != nil || source.p.readyTail != nil ||
+			source.p.readyCount != 0 || task.g.queued {
+			t.Fatalf("single initial distribution = %+v/%t source=(%p,%p,%d) queued=%t",
+				distribution, ok, source.p.readyHead, source.p.readyTail, source.p.readyCount,
+				task.g.queued)
+		}
+		if validExecutorDriver(source.driver) ||
+			!CommitExecutorRunActionDistribution(source.driver, true) ||
+			source.driver.run.readyDebt || !validExecutorDriver(source.driver) {
+			t.Fatalf("settle single initial action debt: cursor=%+v valid=%t",
+				source.driver.run, validExecutorDriver(source.driver))
+		}
+		if !fleet.ImportPNeutralRunnable(target.handle, target.p, distribution.Transfer) ||
+			target.p.readyHead != task.g || target.p.readyTail != task.g || !task.g.queued {
+			t.Fatalf("import single initial distribution: target=(%p,%p) queued=%t",
+				target.p.readyHead, target.p.readyTail, task.g.queued)
+		}
+	})
+	t.Run("initial-without-demand", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		source := bindExecutorFleetManualFixture(t, fleet)
+		target := bindExecutorFleetManualFixture(t, fleet)
+		task := newYieldingTestG(t, "fleet-single-initial-no-demand")
+		if !Enqueue(source.p, task.g) {
+			t.Fatal("prepare single initial without demand")
+		}
 		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
 		if !ok || distribution != (RunnableDistribution{}) ||
 			source.p.readyHead != task.g || source.p.readyTail != task.g || !task.g.queued {
-			t.Fatalf("single initial runnable migrated = %+v/%t source=(%p,%p)",
+			t.Fatalf("single initial moved without demand = %+v/%t source=(%p,%p)",
 				distribution, ok, source.p.readyHead, source.p.readyTail)
 		}
 		_ = target

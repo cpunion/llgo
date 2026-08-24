@@ -73,6 +73,18 @@ func TestResumePacketLayoutIsPointerFreeAndCrossTargetStable(t *testing.T) {
 	}
 }
 
+func TestSingleOwnerTimerResumeLayoutIsCompactAndPointerFree(t *testing.T) {
+	if unsafe.Sizeof(SingleOwnerTimerResume{}) != 20 ||
+		unsafe.Alignof(SingleOwnerTimerResume{}) != 4 ||
+		unsafe.Offsetof(SingleOwnerTimerResume{}.source) != 8 ||
+		unsafe.Offsetof(SingleOwnerTimerResume{}.state) != 16 {
+		t.Fatalf("single-owner timer resume layout = size:%d align:%d source:%d state:%d",
+			unsafe.Sizeof(SingleOwnerTimerResume{}), unsafe.Alignof(SingleOwnerTimerResume{}),
+			unsafe.Offsetof(SingleOwnerTimerResume{}.source),
+			unsafe.Offsetof(SingleOwnerTimerResume{}.state))
+	}
+}
+
 func TestTakeIssuedDirectChannelResumeConsumesExactCapabilityOnce(t *testing.T) {
 	for _, test := range []struct {
 		name          string

@@ -117,6 +117,22 @@ func escapeRecursive() { var value transaction; recurseA(&value, false) }
 	}); ok {
 		t.Fatalf("safe allocation crossed a rejected physical callee body: %+v", proof)
 	}
+	begin := packageFunction(t, pkg, "begin")
+	parameterProof, ok := ProveSSABorrowedParameterWithConfig(begin, 0, SSABorrowedAllocationConfig{})
+	if !ok || parameterProof.Function != begin || parameterProof.Index != 0 ||
+		parameterProof.FunctionsVisited == 0 || parameterProof.ParametersProven == 0 {
+		t.Fatalf("managed parameter borrow proof = %+v, present=%t", parameterProof, ok)
+	}
+	if parameterProof, ok := ProveSSABorrowedParameterWithConfig(
+		packageFunction(t, pkg, "recurseA"), 0, SSABorrowedAllocationConfig{},
+	); ok {
+		t.Fatalf("transitively escaping managed parameter received a borrow proof: %+v", parameterProof)
+	}
+	if parameterProof, ok := ProveSSABorrowedParameterWithConfig(
+		packageFunction(t, pkg, "externalWord"), 0, SSABorrowedAllocationConfig{},
+	); ok {
+		t.Fatalf("bodyless parameter received a borrow proof: %+v", parameterProof)
+	}
 	recursiveAlloc := exactHeapAllocation(t, packageFunction(t, pkg, "safeRecursive"))
 	if proof, ok := ProveSSABorrowedAllocation(recursiveAlloc); !ok || proof.ParametersProven == 0 {
 		t.Fatalf("safe recursive borrow proof = %+v, present=%t", proof, ok)

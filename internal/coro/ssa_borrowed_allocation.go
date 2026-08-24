@@ -38,6 +38,18 @@ type SSABorrowedAllocationProof struct {
 	ParametersProven uint32
 }
 
+// SSABorrowedParameterProof certifies that one exact managed-Go parameter is
+// borrowed by its complete static address graph.  It is the occurrence-target
+// counterpart of SSABorrowedAllocationProof: a frontend can first freeze an
+// exact redirected call target, then prove that the corresponding parameter
+// does not retain its caller-owned address beyond the managed call.
+type SSABorrowedParameterProof struct {
+	Function         *ssa.Function
+	Index            int
+	FunctionsVisited uint32
+	ParametersProven uint32
+}
+
 // SSABorrowedAllocationConfig defines which static callee body is authoritative
 // for the final program. Frontends which replace a source SSA body with an
 // intrinsic, foreign symbol, or other physical implementation must reject that
@@ -96,6 +108,37 @@ func ProveSSABorrowedAllocationWithConfig(
 		config:     config,
 	}
 	if !analyzer.proveAddressValue(allocation.Parent(), allocation) {
+		return proof, false
+	}
+	proof.FunctionsVisited = uint32(len(analyzer.functions))
+	for _, state := range analyzer.parameters {
+		if state == ssaBorrowProofAccepted {
+			proof.ParametersProven++
+		}
+	}
+	return proof, true
+}
+
+// ProveSSABorrowedParameterWithConfig derives a closed interprocedural borrow
+// proof for one exact managed-Go parameter.  Body-less, dynamically called,
+// unresolved, or transitively escaping edges fail closed under the same rules
+// as ProveSSABorrowedAllocationWithConfig.
+func ProveSSABorrowedParameterWithConfig(
+	function *ssa.Function,
+	index int,
+	config SSABorrowedAllocationConfig,
+) (SSABorrowedParameterProof, bool) {
+	proof := SSABorrowedParameterProof{Function: function, Index: index}
+	if function == nil || len(function.Blocks) == 0 || index < 0 ||
+		index >= len(function.Params) || function.Params[index] == nil {
+		return proof, false
+	}
+	analyzer := &ssaBorrowedAllocationAnalyzer{
+		parameters: make(map[ssaBorrowParameterKey]ssaBorrowProofState),
+		functions:  make(map[*ssa.Function]struct{}),
+		config:     config,
+	}
+	if !analyzer.proveParameter(function, index) {
 		return proof, false
 	}
 	proof.FunctionsVisited = uint32(len(analyzer.functions))

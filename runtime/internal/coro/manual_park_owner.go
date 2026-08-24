@@ -209,31 +209,33 @@ func PrepareCurrentExecutorManualCleanupParkReserved(
 	caseID uint32,
 	seed uint32,
 ) (ParkTicket, OperationID, ExecutorHandle, bool) {
-	if packet == nil || plan == nil || context == nil || entry == nil ||
+	if packet == nil || plan == nil || context == nil || entry == nil || caseID == 0 ||
 		*packet != (ResumePacket{}) || *plan != (ResumeCleanupPlan{}) ||
 		*entry != (OperationID{}) {
 		return ParkTicket{}, OperationID{}, ExecutorHandle{}, false
 	}
-	ticket, operation, executor, ok := PrepareCurrentExecutorManualParkReserved(
-		driver, g, handle, header, wait, reservation, caseID, seed,
+	if driver == nil || g == nil || driver.magic != executorDriverMagic ||
+		driver.state != executorDriverActive || driver.p == nil || driver.p != g.runP ||
+		driver.sources.manual == nil ||
+		!validManualOperationReservationHeader(driver.sources.manual, driver.p, reservation) {
+		return ParkTicket{}, OperationID{}, ExecutorHandle{}, false
+	}
+	prepared, preflightOK := preflightSingleParkPreparation(g, handle, header, wait, seed)
+	if !preflightOK {
+		return ParkTicket{}, OperationID{}, ExecutorHandle{}, false
+	}
+	prepared.begin()
+	operation, reserved := driver.sources.manual.reserveAndAttachManualSlot(
+		&g.park, prepared.ticket, wait, caseID, reservation,
 	)
-	if !ok {
+	if !reserved || !prepared.commit(operation, caseID) {
 		return ParkTicket{}, OperationID{}, ExecutorHandle{}, false
 	}
+	// prepared.commit performed the transaction's one complete post-build
+	// ParkState/link/frame audit. The fixed keyed descriptor is entirely local
+	// and was scalar-preflighted above, so bind it without walking that same
+	// graph again through the general public preparation layers.
 	*entry = operation
-	state := &g.park
-	if wait.state != waitSetRecordCommitted || wait.work != waitSetWorkIdle ||
-		wait.resume != nil || wait.resumeKind != resumeBindingNone || wait.g != g ||
-		wait.ticket != ticket || g.active == nil || g.active.parkWait != wait ||
-		g.pending.kind != pendingParkSet || g.pending.from != g.active ||
-		state.phase != parkParked || state.ticket != ticket || state.expected != 1 ||
-		state.attached != 1 || state.head == nil || state.head.previous != nil ||
-		state.head.next != nil || state.head.wait != wait || state.head.park != state ||
-		state.head.ticket != ticket || state.head.caseID != caseID ||
-		state.head.operation == nil || state.head.operation.id != operation ||
-		operation.Source() != OperationSourceManual {
-		return ParkTicket{}, OperationID{}, ExecutorHandle{}, false
-	}
 	installWaitSetResumeCleanup(wait, packet, plan, ResumeCleanupBinding{
 		Kind:         ResumeCleanupKeyedPark,
 		Context:      context,
@@ -242,7 +244,7 @@ func PrepareCurrentExecutorManualCleanupParkReserved(
 		RuntimeCount: 1,
 		Stride:       unsafe.Sizeof(OperationID{}),
 	})
-	return ticket, operation, executor, true
+	return prepared.ticket, operation, driver.handle, true
 }
 
 // FinishCurrentExecutorManualPark releases the exact source generation after
@@ -294,7 +296,7 @@ type OwnerLocalManualCompletion struct {
 	driver  *ExecutorDriver
 	wait    *WaitSetRecord
 	plan    *ResumeCleanupPlan
-	id      OperationID
+	slot    *manualOperationSlot
 }
 
 // BeginOwnerLocalManualCompletionCurrent collapses the common same-P,
@@ -332,13 +334,13 @@ func BeginOwnerLocalManualCompletionCurrent(
 	}
 	record := &slot.record
 	wait := record.link.wait
-	admission := ownerLocalCompletionAdmissionForCurrent(driver, wait)
+	admission := ownerLocalAuditedCompletionAdmissionForCurrent(driver, wait)
 	if source.scanLimit != 1 || id.LocalSlot() != 1 || preemptLoad(&source.pending) != 0 ||
 		source.affectedHead != 0 || source.affectedTail != 0 || slot.nextAffected != 0 ||
 		preemptLoad(&slot.mailbox) != uint32(manualOperationMailboxEmpty) ||
 		producerSourceLifecycle(preemptLoad(&slot.state)) != producerSourceActive ||
 		admission == ownerLocalCompletionRejected ||
-		!emptyOwnerLocalCompletion(&driver.local) || driver.poll != (executorPollTransaction{}) {
+		driver.poll != (executorPollTransaction{}) {
 		return OwnerLocalManualCompletion{}, ResumeCleanupStep{}, false, true
 	}
 	plan := (*ResumeCleanupPlan)(wait.resume)
@@ -351,16 +353,17 @@ func BeginOwnerLocalManualCompletionCurrent(
 		entry == nil || *entry != id || plan.context == nil ||
 		record.id != id || record.phase != operationActive ||
 		record.disposition != OperationDispositionPending || record.resolutionApplied ||
-		record.link.operation != record || record.link.park != state ||
-		record.link.ticket != wait.ticket || record.resultState != operationResultEmpty ||
-		state.phase != parkParked || state.resolving || state.expected != 1 || state.attached != 1 ||
+		record.cancelRequested || record.quiesced || record.candidate != 0 ||
+		record.resultState != operationResultEmpty || record.resultTicket != (ParkTicket{}) ||
+		record.link.operation != record || record.link.park != state || record.link.wait != wait ||
+		record.link.ticket != wait.ticket || record.link.caseID != 1 ||
+		record.link.previous != nil || record.link.next != nil ||
+		state.ticket != wait.ticket || state.phase != parkParked || state.resolving || state.directChannel ||
+		state.expected != 1 || state.attached != 1 || state.hasDefault ||
 		state.cancelKind != ParkCancelNone || state.taskCancelKind != TaskCancelNone ||
-		state.taskCancelPhase != taskCancelIdle ||
-		!validOperationCandidate(record) ||
-		operationCandidateMode(record) != OperationCommitIrreversibleCompletion ||
-		operationCandidateState(record) != OperationCommitIdle ||
-		operationCandidateIsPublished(record) ||
-		!operationCandidatePendingResultStorageValid(record) {
+		state.taskCancelPhase != taskCancelIdle || state.outcome != ParkOutcomePending ||
+		state.winnerCase != 0 || state.winnerID != (OperationID{}) || state.winnerRecord != nil ||
+		state.head != &record.link || p.externalWaitCount == 0 {
 		return OwnerLocalManualCompletion{}, ResumeCleanupStep{}, false, true
 	}
 
@@ -409,15 +412,40 @@ func BeginOwnerLocalManualCompletionCurrent(
 		return OwnerLocalManualCompletion{}, ResumeCleanupStep{}, true, false
 	}
 	wait.work = waitSetWorkResolving
-	resolution, result := resolveAffectedOperationPublishedEpoch(record, id)
-	if result != affectedOperationResolved ||
-		resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}) ||
-		source.ApplyOne(p, id, record) != OperationApplyDetached {
+	if preemptLoad(&slot.state) != uint32(producerSourceActive) ||
+		preemptLoad(&slot.mailbox) != uint32(manualOperationMailboxDelivered) ||
+		record.candidate != operationCandidateIrreversiblePublished ||
+		record.resultState != operationResultOwned || record.resultTicket != (ParkTicket{}) ||
+		beginProducerSourceClose(&slot.producerSourceSlot) != producerSourceCloseStarted {
 		return OwnerLocalManualCompletion{}, ResumeCleanupStep{}, true, false
 	}
-	if retry, await, progressOK := finishWaitSetApplyProgress(wait, false, false); !progressOK || retry || await || !beginResumeCleanup(wait, plan) {
-		return OwnerLocalManualCompletion{}, ResumeCleanupStep{}, true, false
-	}
+
+	// The pre-publication gate certified the complete one-link ParkState and no
+	// suspension or owner mutation can occur before this point. Admission is now
+	// sealed, so commit resolution, detach, lease transfer, and cleanup binding
+	// as one no-fail scalar transaction. General cancellation, select, and
+	// cross-owner paths never receive this capability and retain the bounded
+	// resolver plus source Apply protocol.
+	ticket := wait.ticket
+	record.resultTicket = ticket
+	record.disposition = OperationDispositionWinner
+	record.resolutionApplied = true
+	record.phase = operationDetached
+	record.resultState = operationResultLeased
+	record.link = ParkLink{}
+	state.seed = 0
+	state.phase = parkConsumed
+	state.attached = 0
+	state.outcome = ParkOutcomeCompleted
+	state.winnerCase = 1
+	state.winnerID = id
+	state.winnerRecord = nil
+	state.head = nil
+	p.externalWaitCount--
+	plan.outcome = ParkOutcomeCompleted
+	plan.caseID = 1
+	plan.lease = OperationResultLease{id: id, ticket: ticket}
+	plan.phase = resumeCleanupRuntime
 	cleanup = ResumeCleanupStep{
 		Kind:       plan.kind,
 		Context:    plan.context,
@@ -431,7 +459,7 @@ func BeginOwnerLocalManualCompletionCurrent(
 		driver:  driver,
 		wait:    wait,
 		plan:    plan,
-		id:      id,
+		slot:    slot,
 	}
 	return completion, cleanup, true, true
 }
@@ -445,27 +473,69 @@ func FinishOwnerLocalManualCompletionCurrent(
 	completion *OwnerLocalManualCompletion,
 ) bool {
 	if completion == nil || completion.current == nil || completion.driver == nil ||
-		completion.wait == nil || completion.plan == nil || !completion.id.Valid() {
+		completion.wait == nil || completion.plan == nil || completion.slot == nil {
 		return false
 	}
-	current, driver, wait, plan := completion.current, completion.driver, completion.wait, completion.plan
+	current, driver, wait, plan, slot := completion.current, completion.driver, completion.wait, completion.plan, completion.slot
 	p := driver.p
+	id := slot.record.id
 	if driver.magic != executorDriverMagic || driver.state != executorDriverActive ||
 		p == nil || p.executor != driver || p.current != current || current.runP != p ||
 		driver.sources.manual == nil || driver.sources.manual.owner != p ||
-		driver.sources.manual.route != driver.route || completion.id.Route() != driver.route ||
+		driver.sources.manual.route != driver.route || !id.Valid() || id.Route() != driver.route ||
 		wait.resumeKind != resumeBindingCleanup || wait.resume != unsafe.Pointer(plan) ||
 		wait.work != waitSetWorkResolving || plan.phase != resumeCleanupConfirm ||
 		plan.kind != ResumeCleanupKeyedPark || plan.count != 1 || plan.runtime != 1 ||
 		plan.index != 0 || plan.claim != nil || !validTrustedResumeCleanupPlanState(wait, plan) {
 		return false
 	}
-	finalized, cleanupOK := advanceResumeCleanupCore(&driver.sources, p, wait, plan)
-	if !cleanupOK || !finalized || wait.resumeKind != resumeBindingMaterialized ||
-		wait.work != waitSetWorkResolving || wait.g.park.phase != parkMaterialized ||
-		!promoteReadyWaitSet(&driver.sources, p, wait) {
+	entry := resumeCleanupIDAt(plan, 0)
+	leaseID, leaseOK := plan.lease.ID()
+	g, packet := wait.g, plan.packet
+	if g == nil || packet == nil {
 		return false
 	}
+	state, frame := &g.park, g.active
+	schedule := preemptLoad(&p.schedule)
+	if entry == nil || *entry != id || !leaseOK || leaseID != id ||
+		plan.outcome != ParkOutcomeCompleted || plan.caseID != 1 ||
+		plan.result != ResumeResultNone || plan.small != ResumeSmallInvalid ||
+		packet.source != (OperationID{}) || packet.scalar != (ScalarResultPayloadV1{}) ||
+		packet.caseID != 0 || packet.outcome != ParkOutcomePending ||
+		packet.result != ResumeResultNone || packet.small != ResumeSmallInvalid ||
+		state.ticket != wait.ticket || state.phase != parkConsumed || state.resolving || state.directChannel ||
+		state.expected != 1 || state.attached != 0 || state.seed != 0 || state.hasDefault ||
+		state.taskCancelKind != TaskCancelNone || state.taskCancelPhase != taskCancelIdle ||
+		state.cancelKind != ParkCancelNone || state.outcome != ParkOutcomeCompleted ||
+		state.winnerCase != 1 || state.winnerID != id || state.winnerRecord != nil || state.head != nil ||
+		frame == nil || frame.parkWait != wait || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		!validReadyQueueHeader(p) || p.readyCount == ^uint32(0) ||
+		(schedule != scheduleIdle && schedule != scheduleRequested) ||
+		!driver.sources.manual.finishSingleOwnerManualOne(p, id, slot, plan.lease) {
+		return false
+	}
+
+	// Begin certified the complete active-list and G/P graph and the runtime
+	// cleanup step cannot mutate scheduler state. With the exact source slot now
+	// retired, publish the frame-local packet and transfer the waiter directly;
+	// re-entering finalizeResumeCleanup and promoteReadyWaitSet would repeat the
+	// same graph audit after the transaction has become irreversible.
+	plan.lease = OperationResultLease{}
+	*entry = OperationID{}
+	ticket, outcome, caseID := plan.ticket, plan.outcome, plan.caseID
+	materializeConsumedParkStateUnchecked(state, ticket, outcome, caseID)
+	*packet = ResumePacket{
+		ticket:  ticket,
+		caseID:  caseID,
+		outcome: outcome,
+		result:  ResumeResultNone,
+		small:   ResumeSmallInvalid,
+		state:   resumePacketMaterialized,
+	}
+	wait.resume = unsafe.Pointer(packet)
+	wait.resumeKind = resumeBindingMaterialized
+	*plan = ResumeCleanupPlan{}
+	promoteReadyWaitSetUnchecked(p, wait)
 	*completion = OwnerLocalManualCompletion{}
 	return true
 }

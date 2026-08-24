@@ -98,21 +98,22 @@ func beginSpawnTestChildResume(t *testing.T, p *P, g *G, frame *testFrame) Actio
 func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
 	p := new(P)
 	parent := newYieldingTestG(t, "compiler-spawn-parent")
-	_ = beginSpawnTestResume(t, p, parent)
+	parentAction := beginSpawnTestResume(t, p, parent)
 	child := new(G)
-	if !BeginSpawnCompiler(parent.g, child, unsafe.Pointer(child), TaskStorageSize()) {
+	if BeginSpawnCompilerLocal(parent.g, child, unsafe.Pointer(child), TaskStorageSize(), nil) ||
+		parent.g.spawnChild != nil || child.magic != 0 || child.taskLocal != nil {
+		t.Fatal("compiler spawn accepted a nil adjacent task-local context")
+	}
+	local := unsafe.Pointer(new(byte))
+	if !BeginSpawnCompilerLocal(parent.g, child, unsafe.Pointer(child), TaskStorageSize(), local) {
 		t.Fatal("begin compiler spawn")
 	}
 	if parent.g.spawnChild != child || child.spawnParent != parent.g || child.spawnP != p ||
 		child.taskStorage != unsafe.Pointer(child) || child.taskSize != TaskStorageSize() ||
-		child.taskState != taskStorageOwned || !gPreemptStateAtDepthZero(child, preemptIdle) {
+		child.taskState != taskStorageOwned || TaskLocal(child) != local ||
+		!gPreemptStateAtDepthZero(child, preemptIdle) {
 		t.Fatalf("compiler spawn begin state: parent-child=%p child-parent=%p child-p=%p storage=%p size=%d state=%d",
 			parent.g.spawnChild, child.spawnParent, child.spawnP, child.taskStorage, child.taskSize, child.taskState)
-	}
-	local := unsafe.Pointer(new(byte))
-	if !BindTaskLocalCompiler(child, local) || TaskLocal(child) != local ||
-		BindTaskLocalCompiler(child, unsafe.Pointer(new(byte))) {
-		t.Fatal("compiler spawn task-local binding did not publish exactly once")
 	}
 	handle := unsafe.Pointer(new(byte))
 	root, _ := newSpawnTestFrame(t, child, handle, 0, 1)
@@ -121,10 +122,28 @@ func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
 	}
 	metadata := FrameFromStorage(root.storage)
 	if child.root != metadata || child.active != metadata || child.frames != metadata ||
-		child.state != GRunnable || !child.queued || p.readyHead != child || p.readyTail != child ||
+		child.state != GRunnable || child.runAction != ActionInvalid ||
+		!child.queued || p.readyHead != child || p.readyTail != child ||
 		p.readyCount != 1 || parent.g.spawnChild != nil || child.spawnParent != nil || child.spawnP != nil {
 		t.Fatalf("compiler spawn commit state: child=%+v p=(%p,%p,%d) parent-child=%p",
 			child, p.readyHead, p.readyTail, p.readyCount, parent.g.spawnChild)
+	}
+	// The compiler transaction is private to the source P, but its published
+	// child is an ordinary initial runnable. It must not retain an owner-local
+	// runAction receipt which would make the child ineligible for fleet transfer.
+	yieldSpawnTestG(t, p, parent.g, parent.frame, parentAction)
+	target := new(P)
+	var mailbox RunnableTransferMailbox
+	if !BindRunnableTransferMailbox(&mailbox, target) {
+		t.Fatal("bind compiler-spawn transfer mailbox")
+	}
+	id, ok := PublishPNeutralRunnable(&mailbox, p, child)
+	if !ok || !id.Valid() || p.readyHead != parent.g || child.queued {
+		t.Fatalf("publish compiler-spawn child = (%+v, %t), source head=%p queued=%t",
+			id, ok, p.readyHead, child.queued)
+	}
+	if !ImportPNeutralRunnable(&mailbox, target, id) || target.readyHead != child || !child.queued {
+		t.Fatalf("import compiler-spawn child: target head=%p queued=%t", target.readyHead, child.queued)
 	}
 	runtime.KeepAlive(parent.frame.memory)
 	runtime.KeepAlive(root.memory)
@@ -417,6 +436,35 @@ func TestCompletedTaskTransfersContextAndStorageAfterOneTerminalAudit(t *testing
 	}
 	if _, _, _, _, ok := ReleaseCompletedTaskCompiler(g); ok {
 		t.Fatal("completed task transferred twice")
+	}
+}
+
+func TestCompletedTaskReceiptTransfersCleanAttachmentOnce(t *testing.T) {
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("initialize completed task receipt G")
+	}
+	g.taskStorage = unsafe.Pointer(g)
+	g.taskSize = TaskStorageSize()
+	g.taskState = taskStorageOwned
+	local := unsafe.Pointer(new(byte))
+	if !BindTaskLocal(g, local) {
+		t.Fatal("bind completed task receipt context")
+	}
+	receipt := CompletedTaskReleaseReceipt{task: g}
+	g.taskControlLeases = 1
+	if _, _, _, _, ok := ReleaseCompletedTaskReceipt(receipt); ok {
+		t.Fatal("receipt transferred a task with a live control lease")
+	}
+	g.taskControlLeases = 0
+	releasedLocal, raw, size, owned, ok := ReleaseCompletedTaskReceipt(receipt)
+	if !ok || !owned || releasedLocal != local || raw != unsafe.Pointer(g) || size != TaskStorageSize() ||
+		g.taskLocal != nil || g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageReleased {
+		t.Fatalf("receipt transfer = local:%p raw:%p size:%d owned:%t ok:%t state:%d",
+			releasedLocal, raw, size, owned, ok, g.taskState)
+	}
+	if _, _, _, _, ok := ReleaseCompletedTaskReceipt(receipt); ok {
+		t.Fatal("completed task receipt transferred twice")
 	}
 }
 

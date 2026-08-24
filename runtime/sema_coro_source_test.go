@@ -60,6 +60,7 @@ func TestRuntimeSemaphoreSelectsEventDrivenCoroImplementation(t *testing.T) {
 	for _, forbidden := range []string{
 		"legacySemaAcquire",
 		"legacySemaRelease",
+		"latomic.AddUint32(addr, 1)",
 		"psync.",
 		"pthread",
 		".Cond",
@@ -183,7 +184,7 @@ func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 		{
 			name:       "__llgo_coro_sema_release_or_abort_v2",
 			params:     []string{"unsafe.Pointer"},
-			delegates:  "coroKeyedPostOneV2",
+			delegates:  "coroKeyedPostOneLocalV2",
 			exportLine: "//export __llgo_coro_sema_release_or_abort_v2",
 		},
 	}
@@ -212,10 +213,24 @@ func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 			}
 		})
 	}
+	releaseBody := coroTimerOwnerNodeText(t, functions["__llgo_coro_sema_release_or_abort_v2"].Body)
+	for _, marker := range []string{
+		"catomic.Add((*uint32)(addr), 1)",
+		"coroKeyedPostOneLocalV2(",
+		"coroKeyedPostLocalNoWaiterV2",
+		"coroKeyedPostLocalCompletedV2",
+		"coroKeyedPostLocalExternalV2",
+		"coroKeyedPostClaimedExternalV2(handle, operation)",
+	} {
+		if !strings.Contains(releaseBody, marker) {
+			t.Errorf("semaphore release owner lacks local/external split marker %q", marker)
+		}
+	}
 	for _, marker := range []string{
 		"coroPrepareKeyedStateV2(",
 		"coroKeyedParkSemaphoreV2",
-		"coroKeyedPostOneV2(",
+		"coroKeyedPostOneLocalV2(",
+		"coroKeyedPostClaimedExternalV2(",
 		"NoWaiter is ordinary",
 		"//export __llgo_coro_sema_release_or_abort_v2",
 	} {
@@ -229,6 +244,7 @@ func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 		"__llgo_coro_sema_release_or_abort_v1",
 		"PrepareExecutorSemaphoreWait",
 		"RetireCompletedExecutorSemaphoreWait",
+		"coroKeyedPostOneV2(",
 	} {
 		if strings.Contains(source, obsolete) {
 			t.Errorf("%s retains obsolete semaphore path %q", ownerPath, obsolete)

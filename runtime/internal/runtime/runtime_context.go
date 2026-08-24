@@ -138,7 +138,7 @@ func initCoroRuntimeContext(ctx *coroRuntimeContext, callergp *g, status uint32)
 func initCoroRuntimeContextUntracked(ctx *coroRuntimeContext, callergp *g, status uint32) *g {
 	gp := &ctx.g
 	gp.atomicstatus = status
-	gp.goid = nextGoid(gp)
+	gp.goid = nextGoid(gp, callergp)
 	if callergp != nil {
 		gp.parentGoid = callergp.goid
 	}

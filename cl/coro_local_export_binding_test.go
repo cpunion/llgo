@@ -20,41 +20,55 @@ package cl
 
 import (
 	"go/ast"
+	"go/types"
+	"strings"
 	"testing"
 
 	"github.com/goplus/llgo/internal/coro"
+	"github.com/goplus/llgo/internal/goembed"
 	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
 func TestEmissionUniverseRedirectsExactLocalCExportManagedCall(t *testing.T) {
 	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
 	pkg := testProg.addPackage(t, "example.com/emission/localexport", `package localexport
+import "unsafe"
 
 //go:linkname Call C.local_export_v1
-func Call(uintptr) uint32
+func Call(unsafe.Pointer) uint32
 
 //go:linkname PlainCall C.local_export_plain_v1
 func PlainCall(uintptr) uint32
 
 //export local_export_v1
-func local_export_v1(value uintptr) uint32 {
-	if value == 0 {
-		return <-make(chan uint32)
-	}
-	return uint32(value)
+func local_export_v1(value unsafe.Pointer) uint32 {
+	if value == nil { return 0 }
+	return 1
 }
 
 //export local_export_plain_v1
 func local_export_plain_v1(value uintptr) uint32 { return uint32(value) }
 
-func Root(value uintptr) uint32 { return Call(value) }
+type ParkState struct { words [32]uintptr }
+
+//go:linkname park llgo.coroPark
+func park(*ParkState, uint32)
+
+func Root(value *uint32) uint32 { return Call(unsafe.Pointer(value)) }
+func ParkRoot(value *uint32) uint32 {
+	var state ParkState
+	Call(unsafe.Pointer(&state))
+	park(&state, 0)
+	return *value
+}
 func PlainRoot(ready <-chan struct{}, value uintptr) uint32 {
 	<-ready
 	return PlainCall(value)
 }
-func Deferred(value uintptr) { defer Call(value) }
-func Spawned(value uintptr) { go Call(value) }
+func Deferred(value unsafe.Pointer) { defer Call(value) }
+func Spawned(value unsafe.Pointer) { go Call(value) }
 `)
 	testProg.ssa.Build()
 	program := llssa.NewProgram(nil)
@@ -108,6 +122,19 @@ func Spawned(value uintptr) { go Call(value) }
 		{Function: pkg.ssa.Func("PlainRoot"), Demand: coro.SyncDemand},
 	}, coro.SSAConfig{
 		EmissionUniverse: ssaUniverse,
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == declaration || function == pkg.ssa.Func("PlainCall") {
+				return coro.SSAFunctionPolicy{
+					IgnoreBody:       true,
+					External:         coro.ExternalUnknownForeign,
+					OverrideExternal: true,
+				}, nil
+			}
+			if function == target {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
 		ResolveFunction: func(function *ssa.Function) (*ssa.Function, bool, error) {
 			resolved, ok := universe.Resolve(function)
 			return resolved, ok, nil
@@ -132,7 +159,7 @@ func Spawned(value uintptr) { go Call(value) }
 		t.Fatalf("local export managed call plan = %+v, %t; target=%q, %t", callPlan, planned, targetID, targetPlanned)
 	}
 	rootPlan, rootPlanned := plan.FunctionPlan(pkg.ssa.Func("Root"))
-	if !rootPlanned || !rootPlan.Effect.Contains(coro.MayPark) ||
+	if !rootPlanned || !rootPlan.Effect.Contains(coro.YieldOnly) ||
 		rootPlan.LocalExec.Contains(coro.BlockForeign) {
 		t.Fatalf("local export automatic effect propagation = %+v, %t", rootPlan, rootPlanned)
 	}
@@ -151,6 +178,97 @@ func Spawned(value uintptr) { go Call(value) }
 	}
 	if err := validateCoroPhysicalConsumersCapabilities(plan, universe, true, true, true); err != nil {
 		t.Fatalf("managed local export source operand escaped physical validation: %v", err)
+	}
+	parkRoot := pkg.ssa.Func("ParkRoot")
+	parkAudit, err := newCoroPhysicalPureSSAAudit(
+		universe, nil, parkRoot, CoroFrameRetentionParkABIV2,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parkProof := parkAudit.currentFrameRetentionProof()
+	parkAllocations := coroFrameRetentionHeapAllocs(parkRoot)
+	if len(parkAllocations) != 1 || len(parkProof.allocations) != 1 {
+		t.Fatalf(
+			"managed local-export park storage selected %d/%d frame allocations, want 1/1",
+			len(parkProof.allocations), len(parkAllocations),
+		)
+	}
+	if _, retained := parkProof.allocations[parkAllocations[0]]; !retained {
+		t.Fatal("managed local-export prepare did not retain park storage in the coroutine frame")
+	}
+
+	physicalPlan, err := coro.AnalyzeSSA(pkg.ssa.Prog, coro.Roots{
+		{Function: pkg.ssa.Func("Root"), Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse: ssaUniverse,
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == declaration || function == pkg.ssa.Func("PlainCall") {
+				return coro.SSAFunctionPolicy{
+					IgnoreBody:       true,
+					External:         coro.ExternalUnknownForeign,
+					OverrideExternal: true,
+				}, nil
+			}
+			if function == target {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly, RawPlainEntry: true}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+		ResolveFunction: func(function *ssa.Function) (*ssa.Function, bool, error) {
+			resolved, ok := universe.Resolve(function)
+			return resolved, ok, nil
+		},
+		ClassifyStaticCallTarget: func(caller *ssa.Function, direct ssa.CallInstruction) (*ssa.Function, bool, error) {
+			site, frozen, err := universe.CoroCallSitePlan(direct)
+			if err != nil || !frozen {
+				return nil, false, err
+			}
+			return site.ManagedStaticTarget, site.ManagedStaticTarget != nil, nil
+		},
+		FunctionIDs: universe.FunctionIDConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	compilation := &Compilation{
+		CoroPlan: physicalPlan, EmissionUniverse: universe,
+		CoroFrameRetentionABI: CoroFrameRetentionParkABIV2,
+	}
+	enableCoroChildAwaitCompilation(compilation)
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		program, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := compiled.Module()
+	defer module.Dispose()
+	root := pkg.ssa.Func("Root")
+	physical, err := universe.coroProgramIR.physicalFunctionPlan(root, universe.ownerOf(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if physical.tailForward == nil || physical.tailForward.target != target ||
+		len(physical.tailForward.args) != 1 ||
+		physical.tailForward.args[0].sourceParameter != 0 ||
+		physical.tailForward.args[0].retagTransportKey == "" {
+		t.Fatalf("local-export Root tail-forward = %+v; want exact managed target", physical.tailForward)
+	}
+	rootEntry := requireCoroPhysicalFunction(t, module, pkg.types.Path()+".Root")
+	rootBody := rootEntry.String()
+	if strings.Contains(rootBody, "llvm.coro.") ||
+		strings.Contains(rootBody, coroFrameAllocHookV1) ||
+		strings.Contains(rootBody, coroAwaitPrepareInlineHookV4) ||
+		strings.Count(rootBody, "call ptr") != 1 || !strings.Contains(rootBody, "ret ptr") {
+		t.Fatalf("local-export Root retained a frame/await instead of one tail call:\n%s", rootBody)
+	}
+	for _, suffix := range []string{".resume", ".destroy"} {
+		if !module.NamedFunction(pkg.types.Path() + ".Root" + coroPrimarySuffix + suffix).IsNil() {
+			t.Fatalf("frame-free local-export Root acquired %s entry:\n%s", suffix, module.String())
+		}
 	}
 }
 

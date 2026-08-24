@@ -41,7 +41,8 @@ func TestCoroSpawnFusesTaskAndRuntimeContextAllocation(t *testing.T) {
 	for _, required := range []string{
 		"coroalloc.AllocTask(allocationSize)",
 		"coro.Zero(raw, allocationSize)",
-		"coroBindTaskAllocationRuntimeContextCompiler(child, parent)",
+		"coroInitializeTaskAllocationRuntimeContextCompiler(child, parent, ctx)",
+		"coro.BeginSpawnCompilerLocal(parent, child, raw, taskSize, unsafe.Pointer(ctx))",
 		"coroalloc.FreeTask(raw, allocationSize)",
 	} {
 		if !strings.Contains(spawn, required) {
@@ -53,16 +54,15 @@ func TestCoroSpawnFusesTaskAndRuntimeContextAllocation(t *testing.T) {
 		t.Fatal("spawn path retained a separately allocated runtime sidecar")
 	}
 	allocation := strings.Index(spawn, "raw := coroalloc.AllocTask(allocationSize)")
-	initialize := strings.Index(spawn, "child, _, actualSize, allocationOK := coroTaskAllocationAt(raw)")
+	initialize := strings.Index(spawn, "child, ctx, actualSize, allocationOK := coroTaskAllocationAt(raw)")
 	if allocation < 0 || initialize < 0 || allocation >= initialize ||
 		strings.Contains(spawn[allocation:initialize], "coro.Zero(") {
 		t.Fatal("spawn path repeats the allocator's zero-filled storage contract")
 	}
-
 	context := readRuntimePollFile(t, "internal/runtime/coro_task_context.go")
 	for _, required := range []string{
-		"if ctx.g.coroEmbedded {",
-		"ctx == &(*coroTaskAllocation)(unsafe.Pointer(task)).context",
+		"if ctx != &(*coroTaskAllocation)(unsafe.Pointer(task)).context",
+		"embedded := ctx.g.coroEmbedded",
 		"if !embedded {",
 		"FreeRoot(unsafe.Pointer(ctx))",
 	} {
@@ -158,5 +158,46 @@ func TestCoroLogicalContextBorrowsPhysicalMPOnlyWhileRunning(t *testing.T) {
 		if strings.Contains(lifecycle, forbidden) {
 			t.Errorf("logical context retained per-G physical P path %q", forbidden)
 		}
+	}
+}
+
+func TestCoroNativeCurrentGUsesDirectTLSMirror(t *testing.T) {
+	manifest := readRuntimePollFile(t, "internal/runtime/coro_poll_c_llgo.go")
+	if !strings.Contains(manifest, "_wrap/coro_g_tls.c") {
+		t.Fatal("native runtime manifest omits the direct current-G TLS leaf")
+	}
+	cSource := readRuntimePollFile(t, "internal/runtime/_wrap/coro_g_tls.c")
+	for _, required := range []string{
+		"static _Thread_local void *llgo_coro_current_g_v1",
+		"__llgo_coro_current_g_load_v1",
+		"__llgo_coro_current_g_store_v1",
+	} {
+		if !strings.Contains(cSource, required) {
+			t.Errorf("native current-G TLS leaf lacks %q", required)
+		}
+	}
+
+	gSource := readRuntimePollFile(t, "internal/runtime/g_pthread.go")
+	for _, required := range []string{
+		"func coroCurrentGLoadV1() unsafe.Pointer",
+		"func coroCurrentGStoreV1(unsafe.Pointer)",
+		"if ptr := coroCurrentGLoadV1(); ptr != nil",
+		"if ret := gKey.Set(c.Pointer(unsafe.Pointer(gp))); ret != 0",
+		"func setgCoro(gp *g)",
+		"current := (*g)(coroCurrentGLoadV1())",
+	} {
+		if !strings.Contains(gSource, required) {
+			t.Errorf("native current-G ownership lacks %q", required)
+		}
+	}
+
+	lifecycle := readRuntimePollFile(t, "internal/runtime/coro_task_context.go")
+	for _, required := range []string{"setgCoro(gp)", "setgCoro(previous)"} {
+		if !strings.Contains(lifecycle, required) {
+			t.Errorf("logical coroutine switch lacks direct TLS operation %q", required)
+		}
+	}
+	if strings.Contains(lifecycle, "setg(gp)") || strings.Contains(lifecycle, "setg(previous)") {
+		t.Fatal("logical coroutine switch still mutates the pthread destructor key")
 	}
 }

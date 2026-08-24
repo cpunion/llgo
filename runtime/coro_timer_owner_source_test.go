@@ -51,7 +51,7 @@ func TestCoroTimerOwnerV2SourceABI(t *testing.T) {
 		{
 			name:      "__llgo_coro_timer_park_v2",
 			params:    []string{"unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer", "int64"},
-			delegates: "coro.PrepareCurrentExecutorTimerPark",
+			delegates: "coro.PrepareSingleTimerParkReserved",
 			failStop:  true,
 		},
 		{
@@ -60,14 +60,14 @@ func TestCoroTimerOwnerV2SourceABI(t *testing.T) {
 				"unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer",
 				"unsafe.Pointer", "*uint32", "*uint32", "uint32", "int64",
 			},
-			delegates: "coro.PrepareCurrentExecutorControlledTimerPark",
+			delegates: "coro.PrepareSingleControlledTimerParkReserved",
 			failStop:  true,
 		},
 		{
 			name:      "__llgo_coro_timer_resume_v2",
 			params:    []string{"unsafe.Pointer", "unsafe.Pointer"},
 			result:    "uint32",
-			delegates: "coro.TakeResumePacket",
+			delegates: "coro.TakeSingleOwnerTimerResume",
 			failStop:  true,
 		},
 		{
@@ -117,6 +117,10 @@ func TestCoroTimerOwnerV2SourceABI(t *testing.T) {
 	}
 	ownerText := string(data)
 	for _, marker := range []string{
+		"type CoroSleepParkV2 struct {",
+		"resume coro.SingleOwnerTimerResume",
+		"coro.BindSingleOwnerTimerResume(",
+		"coro.TakeSingleOwnerTimerResume(",
 		"packet    coro.ResumePacket",
 		"coro.BindSingleWaitSetResumePacket(",
 		"coro.TakeResumePacket(",

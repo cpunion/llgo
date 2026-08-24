@@ -74,6 +74,8 @@ const (
 	coroNotifyPrepareOrAbortSymbolV2                            = "__llgo_coro_notify_prepare_or_abort_v2"
 	coroNotifyOneOrAbortSymbolV2                                = "__llgo_coro_notify_one_or_abort_v2"
 	coroNotifyAllOrAbortSymbolV2                                = "__llgo_coro_notify_all_or_abort_v2"
+	coroChanSendBufferTrySymbolV1                               = "__llgo_coro_chan_send_buffer_try_v1"
+	coroChanRecvBufferTrySymbolV1                               = "__llgo_coro_chan_recv_buffer_try_v1"
 	coroChanSendTryParkSymbolV2                                 = "__llgo_coro_chan_send_try_park_v2"
 	coroChanRecvTryParkSymbolV2                                 = "__llgo_coro_chan_recv_try_park_v2"
 	coroChanResumeSymbolV2                                      = "__llgo_coro_chan_resume_v2"
@@ -824,7 +826,9 @@ func coroProgramBootstrapHash(ctx *context, version, flags uint32, steps []coroP
 			coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
 			coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
 	}
-	write("channel-v2=" +
+	write("channel-v3=" +
+		coroChanSendBufferTrySymbolV1 + "(channel:ptr,elem:ptr,size:uintptr)->u32;" +
+		coroChanRecvBufferTrySymbolV1 + "(channel:ptr,elem:ptr,size:uintptr)->u32;" +
 		coroChanSendTryParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr,state-id:u32,line:u32)->u32;" +
 		coroChanRecvTryParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr,state-id:u32,line:u32)->u32;" +
 		coroChanResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +

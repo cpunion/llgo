@@ -2292,6 +2292,21 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		physicalInstruction, physicalPlanned := physicalPlan()
 		if v.Op == token.MUL {
+			if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionImmutableCaptureLoad {
+				free, ok := v.X.(*ssa.FreeVar)
+				if !ok || free.Parent() != p.goFn || physicalInstruction.captureSnapshot < 0 ||
+					physicalInstruction.captureSnapshot >= len(p.goFn.FreeVars) ||
+					p.goFn.FreeVars[physicalInstruction.captureSnapshot] != free {
+					panic("immutable capture load lost its frozen free-variable identity")
+				}
+				value, published := p.coroCaptureSnapshot(free)
+				if !published {
+					panic("immutable capture load has no physical prologue value")
+				}
+				observePhysical(coroPhysicalInstructionImmutableCaptureLoad)
+				ret = value
+				break
+			}
 			if physicalPlanned &&
 				physicalInstruction.recipe == coroPhysicalInstructionStaticArrayRangeDerefElided {
 				// ProgramIR has already proved that this is the type-only

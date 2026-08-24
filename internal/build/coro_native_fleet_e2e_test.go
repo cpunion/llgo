@@ -2049,6 +2049,7 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 		}
 		for _, typeName := range []string{
 			"CoroWorkerParkV1",
+			"CoroSleepParkV2",
 			"CoroTimerParkV2",
 			"CoroPollParkV2",
 		} {
@@ -2257,12 +2258,13 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		buildCoroNativeAllocationCacheObject(t, temp),
 		buildCoroNativeWorkerCallObject(t, temp),
 		buildCoroNativeDoorbellObject(t, temp),
+		buildCoroCurrentGTLSObject(t, temp),
 		buildCoroNativePollObject(t, temp),
 		buildCoroNativeFleetOwnerObject(t, temp),
 	)
 	prog.Dispose()
-	if len(objects) != len(allowed)+6 {
-		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, doorbell, poll, and fleet-owner leaves", len(objects), len(allowed))
+	if len(objects) != len(allowed)+7 {
+		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, doorbell, current-G TLS, poll, and fleet-owner leaves", len(objects), len(allowed))
 	}
 	return objects
 }

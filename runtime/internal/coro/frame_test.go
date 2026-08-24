@@ -219,7 +219,7 @@ func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
 	}
 	memory := make([]byte, total)
 	descriptor := &FrameDescriptorV1{Version: 1, ResultAlign: 1, Function: "test.compiler.dynamic"}
-	storage, ok := RegisterFrameCompiler(
+	storage, ok := RegisterFrameCompilerPrepared(
 		g, unsafe.Pointer(&memory[0]), total, size, align, unsafe.Pointer(descriptor),
 	)
 	if !ok {
@@ -228,6 +228,21 @@ func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
 	handle := unsafe.Pointer(new(byte))
 	header := (*HeaderV1)(unsafe.Add(storage, 16))
 	metadata := (*BorrowedFrameStorageV2)(unsafe.Add(storage, 80))
+	if PublishFrameV3Compiler(
+		g, handle, header, storage, unsafe.Pointer(header),
+		unsafe.Pointer(descriptor), nil,
+	) {
+		t.Fatal("published overlapping compiler frame metadata")
+	}
+	if PublishFrameV3Compiler(
+		g, handle, header, storage, unsafe.Add(storage, size-8),
+		unsafe.Pointer(descriptor), nil,
+	) {
+		t.Fatal("published out-of-range compiler frame metadata")
+	}
+	if g.frames != nil {
+		t.Fatal("rejected compiler frame publication mutated frame list")
+	}
 	if !PublishFrameV3Compiler(
 		g, handle, header, storage, unsafe.Pointer(metadata),
 		unsafe.Pointer(descriptor), nil,

@@ -23,7 +23,7 @@ import "unsafe"
 // Bare-metal targets do not necessarily provide the compiler-rt __atomic
 // helpers. Object addresses are sufficient as live G/M/P identifiers for the
 // current task backend and avoid adding libatomic solely for diagnostics.
-func nextGoid(gp *g) uint64 {
+func nextGoid(gp, owner *g) uint64 {
 	return uint64(uintptr(unsafe.Pointer(gp)))
 }
 

@@ -505,6 +505,96 @@ func TestCoroChannelAdapterCleanupCursorBoundsPeerWork(t *testing.T) {
 	}
 }
 
+func TestCoroChannelAdapterBufferedPreflight(t *testing.T) {
+	// clite.Advance is a compiler intrinsic and intentionally remains an
+	// identity stub under the host Go compiler used by this source-island test.
+	// Capacity one still exercises the real wrap-to-zero index transition; the
+	// LLGo end-to-end workload covers multi-slot pointer arithmetic.
+	backing := [1]uint64{}
+	ch := &Chan{
+		dataqsiz: 1,
+		buf:      unsafe.Pointer(&backing[0]),
+		elemsize: int(unsafe.Sizeof(backing[0])),
+	}
+	ch.mutex.Init(nil)
+	first := uint64(0x1122334455667788)
+	if status := __llgo_coro_chan_send_buffer_try_v1(
+		unsafe.Pointer(ch), unsafe.Pointer(&first), unsafe.Sizeof(first),
+	); status != coroChanResumeSendOK {
+		t.Fatalf("buffer preflight send status = %d, want %d", status, coroChanResumeSendOK)
+	}
+	if ch.qcount != 1 || ch.sendx != 0 || backing != [1]uint64{first} {
+		t.Fatalf("buffer preflight sends = count:%d sendx:%d backing:%#v", ch.qcount, ch.sendx, backing)
+	}
+	extra := uint64(1)
+	if status := __llgo_coro_chan_send_buffer_try_v1(
+		unsafe.Pointer(ch), unsafe.Pointer(&extra), unsafe.Sizeof(extra),
+	); status != coroChanResumeInvalid || ch.qcount != 1 {
+		t.Fatalf("full buffer preflight send = status:%d count:%d, want retry/1", status, ch.qcount)
+	}
+
+	ch.closed = true
+	var got uint64
+	if status := __llgo_coro_chan_recv_buffer_try_v1(
+		unsafe.Pointer(ch), unsafe.Pointer(&got), unsafe.Sizeof(got),
+	); status != coroChanResumeRecvOK || got != first {
+		t.Fatalf("buffer preflight receive = status:%d value:%#x, want %d/%#x",
+			status, got, coroChanResumeRecvOK, first)
+	}
+	if ch.qcount != 0 || ch.recvx != 0 || backing != [1]uint64{} {
+		t.Fatalf("buffer preflight receives = count:%d recvx:%d backing:%#v", ch.qcount, ch.recvx, backing)
+	}
+	if status := __llgo_coro_chan_recv_buffer_try_v1(
+		unsafe.Pointer(ch), unsafe.Pointer(&extra), unsafe.Sizeof(extra),
+	); status != coroChanResumeInvalid {
+		t.Fatalf("empty closed buffer preflight status = %d, want retry", status)
+	}
+	if status := __llgo_coro_chan_send_buffer_try_v1(
+		unsafe.Pointer(ch), unsafe.Pointer(&extra), unsafe.Sizeof(extra),
+	); status != coroChanResumeInvalid {
+		t.Fatalf("closed buffer preflight send status = %d, want retry", status)
+	}
+
+	backing32 := [1]uint32{}
+	ch32 := &Chan{dataqsiz: 1, buf: unsafe.Pointer(&backing32[0]), elemsize: int(unsafe.Sizeof(backing32[0]))}
+	ch32.mutex.Init(nil)
+	value32 := uint32(0xaabbccdd)
+	if status := __llgo_coro_chan_send_buffer_try_v1(
+		unsafe.Pointer(ch32), unsafe.Pointer(&value32), unsafe.Sizeof(value32),
+	); status != coroChanResumeSendOK {
+		t.Fatalf("four-byte buffer preflight send status = %d", status)
+	}
+	var recv32 uint32
+	if status := __llgo_coro_chan_recv_buffer_try_v1(
+		unsafe.Pointer(ch32), unsafe.Pointer(&recv32), unsafe.Sizeof(recv32),
+	); status != coroChanResumeRecvOK || recv32 != value32 || backing32[0] != 0 {
+		t.Fatalf("four-byte buffer preflight receive = status:%d value:%#x backing:%#x",
+			status, recv32, backing32[0])
+	}
+
+	backing3 := [1][3]byte{}
+	ch3 := &Chan{dataqsiz: 1, buf: unsafe.Pointer(&backing3[0]), elemsize: len(backing3[0])}
+	ch3.mutex.Init(nil)
+	value3 := [3]byte{1, 2, 3}
+	if status := __llgo_coro_chan_send_buffer_try_v1(
+		unsafe.Pointer(ch3), unsafe.Pointer(&value3), unsafe.Sizeof(value3),
+	); status != coroChanResumeSendOK {
+		t.Fatalf("dynamic-size buffer preflight send status = %d", status)
+	}
+	var recv3 [3]byte
+	if status := __llgo_coro_chan_recv_buffer_try_v1(
+		unsafe.Pointer(ch3), unsafe.Pointer(&recv3), unsafe.Sizeof(recv3),
+	); status != coroChanResumeRecvOK || recv3 != value3 || backing3[0] != [3]byte{} {
+		t.Fatalf("dynamic-size buffer preflight receive = status:%d value:%v backing:%v",
+			status, recv3, backing3[0])
+	}
+	if status := __llgo_coro_chan_send_buffer_try_v1(
+		unsafe.Pointer(ch3), unsafe.Pointer(&value3), unsafe.Sizeof(uint32(0)),
+	); status != coroChanResumeInvalid {
+		t.Fatalf("mismatched buffer preflight size status = %d, want retry", status)
+	}
+}
+
 func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	if size := unsafe.Sizeof(CoroChanParkV1{}); size > 216 {
 		t.Fatalf("compact channel park storage size = %d, want <= 216", size)

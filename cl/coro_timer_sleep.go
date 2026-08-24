@@ -89,7 +89,7 @@ func (p *context) compileCoroTimerSleep(b llssa.Builder, args []ssa.Value) {
 		panic("llgo.coroTimerSleep requires exactly one int64 argument")
 	}
 	delay := p.compileValue(b, args[0])
-	state := b.Alloc(p.prog.RuntimeType("CoroTimerParkV2"), false)
+	state := b.Alloc(p.prog.RuntimeType("CoroSleepParkV2"), false)
 
 	body.emitCoroParkOperation(p, b, coroParkOperation{
 		prepare: func(active llssa.Builder, _, _ uint32) llssa.Expr {

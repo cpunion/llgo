@@ -285,6 +285,12 @@ const (
 	operationCandidateModeBits   = uint8(3 << operationCandidateModeShift)
 	operationCandidateStateShift = operationCandidateModeShift + 2
 	operationCandidateStateBits  = uint8(7 << operationCandidateStateShift)
+	// Irreversible completion has the zero mode, so its published terminal
+	// shape is one exact byte. Owner-local fixed-shape transactions compare it
+	// directly after their complete pre-publication audit instead of decoding
+	// the same mode/state/published fields through three helpers.
+	operationCandidateIrreversiblePublished = operationCandidatePublished |
+		uint8(OperationCommitCommitted)<<operationCandidateStateShift
 )
 
 func operationCandidateMode(record *OperationRecord) OperationCommitMode {

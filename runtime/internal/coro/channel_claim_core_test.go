@@ -444,6 +444,39 @@ func releaseChannelClaimCoreFixture(t *testing.T, fixture *channelClaimCoreFixtu
 	runtime.KeepAlive(fixture.task.frame.memory)
 }
 
+func TestChannelOperationRecycleRetiresConsumedPendingHint(t *testing.T) {
+	fixture := newChannelClaimCoreFixture(t, "channel-retire-pending", []uint32{167}, true, 0)
+	if result := fixture.source.PostReady(fixture.ids[0]); result != ChannelOperationPosted {
+		t.Fatalf("post channel completion = %d", result)
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	pollChannelClaimCoreComplete(t, fixture)
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || !decision.lease.Valid() ||
+		!fixture.source.ConfirmQuiesced(fixture.p, fixture.ids[0]) ||
+		!fixture.source.ResetSelectClaim(fixture.p, fixture.claim) ||
+		!fixture.source.TakeResult(fixture.p, decision.lease) {
+		t.Fatal("finish channel completion before recycle")
+	}
+
+	// Model a producer advisory store which became visible after the pass had
+	// already consumed its ready catalog. Producer quiescence proves the slot can
+	// now retire both the durable generation and this otherwise-stale hint.
+	preemptStore(&fixture.source.pending, 1)
+	if !fixture.source.Recycle(fixture.p, fixture.ids[0]) ||
+		fixture.source.scanLimit != 0 || fixture.source.Pending() {
+		t.Fatalf("recycled channel prefix = %d, pending=%t",
+			fixture.source.scanLimit, fixture.source.Pending())
+	}
+	yieldRunningDriverTask(t, fixture.p, fixture.task, decision.action)
+	closeTestExecutorDriver(t, fixture.driver)
+	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{fixture.task.g: fixture.task})
+	if !fixture.source.CanRelease() || !fixture.registry.CanRelease() {
+		t.Fatal("release channel source after consumed pending hint")
+	}
+	runtime.KeepAlive(fixture.task.frame.memory)
+}
+
 func externallyCommitChannelCandidate(t *testing.T, fixture *channelClaimCoreFixture, index int) {
 	externallyCommitChannelCandidateAtRoute(t, fixture, index, 0)
 }

@@ -108,4 +108,10 @@ type p struct {
 	id     int32
 	status uint32
 	m      *m
+
+	// goidcache amortizes the global atomic used to assign logical G ids. A P
+	// is owned by one M while running, so its current G can consume this range
+	// without additional synchronization.
+	goidcache    uint64
+	goidcacheend uint64
 }

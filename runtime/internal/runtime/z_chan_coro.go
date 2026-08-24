@@ -1740,6 +1740,87 @@ func prepareCoroChanParkStateV2(
 	return driver, route
 }
 
+// __llgo_coro_chan_send_buffer_try_v1 completes only the owner-local buffered
+// send shape. It deliberately has no G, frame, or park arguments: none of that
+// state participates when the buffer has room and there is no receiver to
+// reconcile. A false (invalid) result is only a preflight miss; compiler
+// lowering immediately enters the full single-lock try-or-park transaction,
+// which rechecks the channel and retains every close, cancellation, and waiter
+// rule.
+//
+//export __llgo_coro_chan_send_buffer_try_v1
+func __llgo_coro_chan_send_buffer_try_v1(channel, elem unsafe.Pointer, eltSize uintptr) uint32 {
+	if channel == nil || elem == nil || eltSize > uintptr(^uint(0)>>1) {
+		return coroChanResumeInvalid
+	}
+	ch := (*Chan)(channel)
+	size := int(eltSize)
+	if ch.dataqsiz == 0 || size != ch.elemsize {
+		return coroChanResumeInvalid
+	}
+	ch.mutex.Lock()
+	if ch.closed || ch.recvq.first != nil || ch.qcount >= ch.dataqsiz {
+		ch.mutex.Unlock()
+		return coroChanResumeInvalid
+	}
+	slot := chanBuf(ch, ch.sendx)
+	switch size {
+	case 4:
+		*(*[4]byte)(slot) = *(*[4]byte)(elem)
+	case 8:
+		*(*[8]byte)(slot) = *(*[8]byte)(elem)
+	default:
+		copyChanElem(slot, elem, size)
+	}
+	ch.sendx++
+	if ch.sendx == ch.dataqsiz {
+		ch.sendx = 0
+	}
+	ch.qcount++
+	ch.mutex.Unlock()
+	return coroChanResumeSendOK
+}
+
+// __llgo_coro_chan_recv_buffer_try_v1 is the symmetric owner-local receive
+// preflight. A queued sender requires the full reconciliation transaction, so
+// this leaf consumes a buffered value only when no sender is linked.
+//
+//export __llgo_coro_chan_recv_buffer_try_v1
+func __llgo_coro_chan_recv_buffer_try_v1(channel, elem unsafe.Pointer, eltSize uintptr) uint32 {
+	if channel == nil || elem == nil || eltSize > uintptr(^uint(0)>>1) {
+		return coroChanResumeInvalid
+	}
+	ch := (*Chan)(channel)
+	size := int(eltSize)
+	if ch.dataqsiz == 0 || size != ch.elemsize {
+		return coroChanResumeInvalid
+	}
+	ch.mutex.Lock()
+	if ch.qcount == 0 || ch.sendq.first != nil {
+		ch.mutex.Unlock()
+		return coroChanResumeInvalid
+	}
+	slot := chanBuf(ch, ch.recvx)
+	switch size {
+	case 4:
+		*(*[4]byte)(elem) = *(*[4]byte)(slot)
+		*(*[4]byte)(slot) = [4]byte{}
+	case 8:
+		*(*[8]byte)(elem) = *(*[8]byte)(slot)
+		*(*[8]byte)(slot) = [8]byte{}
+	default:
+		copyChanElem(elem, slot, size)
+		zeroChanRecv(slot, size)
+	}
+	ch.recvx++
+	if ch.recvx == ch.dataqsiz {
+		ch.recvx = 0
+	}
+	ch.qcount--
+	ch.mutex.Unlock()
+	return coroChanResumeRecvOK
+}
+
 // tryOrParkCoroChanV2 is the single-lock compiler transaction for an ordinary
 // one-case channel operation. A ready endpoint returns its typed status without
 // touching the coroutine header or park storage. Only the not-ready edge

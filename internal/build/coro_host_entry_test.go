@@ -74,6 +74,8 @@ func __llgo_coro_critical_exit_v1(unsafe.Pointer) bool { return false }
 func __llgo_coro_os_thread_lock_v1(unsafe.Pointer) {}
 func __llgo_coro_os_thread_unlock_v1(unsafe.Pointer) {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_chan_send_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
+func __llgo_coro_chan_recv_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_send_try_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 { return 0 }
 func __llgo_coro_chan_recv_try_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 { return 0 }
 func __llgo_coro_chan_resume_v2(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
@@ -176,6 +178,8 @@ func __llgo_coro_program_main_return_v1() {}
 		"CoroChanSelectTry",
 		"CoroChanSelectPark",
 		"CoroChanSelectResume",
+		coroChanSendBufferTrySymbolV1,
+		coroChanRecvBufferTrySymbolV1,
 		coroChanSendTryParkSymbolV2,
 		coroChanRecvTryParkSymbolV2,
 		coroChanResumeSymbolV2,

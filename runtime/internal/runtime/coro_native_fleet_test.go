@@ -95,6 +95,13 @@ func coroReleaseCompletedTask(g *coro.G) bool {
 	return coro.ReclaimableG(g)
 }
 
+func coroReleaseCompletedTaskReceipt(
+	g *coro.G,
+	_ coro.CompletedTaskReleaseReceipt,
+) bool {
+	return coroReleaseCompletedTask(g)
+}
+
 //go:linkname testCoroNativeFleetHandleDone C.__llgo_coro_done_v1
 func testCoroNativeFleetHandleDone(handle unsafe.Pointer) bool {
 	task := findCoroNativeFleetRunTestTaskV1(handle)

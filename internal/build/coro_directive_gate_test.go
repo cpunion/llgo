@@ -83,10 +83,11 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		// its descriptor is created O_NONBLOCK, a semantic fact unavailable
 		// from the C signature and therefore not soundly compiler-inferable.
 		"contract": 8,
-		// The final two noblock leaves are the bounded native frame-cache
-		// take/put operations. Their raw C signatures cannot express either the
-		// fixed-size critical section or callback-free ownership transfer.
-		"noblock": 37,
+		// The final three noblock leaves are the bounded native frame-cache
+		// take/put operations and current-G TLS store. Their raw C signatures
+		// cannot express either the fixed-size ownership transfer or that the
+		// pthread key independently roots the pointer retained by the TLS mirror.
+		"noblock": 38,
 		"sync":    28,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -97,7 +98,7 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		)
 	}
 	sort.Strings(manifest)
-	const wantManifestSHA256 = "deb857baa2d1c1d9a1b223bf3af61bb998229732d80bf36c3ce8dd126fefbf5a"
+	const wantManifestSHA256 = "ef4fc06977a42a7133262542688e652ae237d2823ad276e81acd2a760fdc294c"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)

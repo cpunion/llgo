@@ -35,6 +35,8 @@ func coroMaterializeDirectChannelCompletionV1(*coro.DirectChannelCompletion) boo
 // Named-source adapters exercise the target-neutral scheduler without loading
 // runtime2.go and platform getg implementations into the host Go runtime.
 // Linked runtime islands separately verify real logical runtime-G ownership.
+type coroRuntimeContext struct{}
+
 func coroBindRuntimeContext(task, parent *coro.G, main bool) bool {
 	return task != nil
 }
@@ -43,8 +45,8 @@ func coroBindTaskAllocationRuntimeContext(task, parent *coro.G) bool {
 	return task != nil
 }
 
-func coroBindTaskAllocationRuntimeContextCompiler(task, parent *coro.G) bool {
-	return task != nil && parent != nil
+func coroInitializeTaskAllocationRuntimeContextCompiler(task, parent *coro.G, ctx *coroRuntimeContext) bool {
+	return task != nil && parent != nil && ctx != nil && coro.TaskLocal(task) == unsafe.Pointer(ctx)
 }
 
 var coroTestRuntimeContextV1 byte

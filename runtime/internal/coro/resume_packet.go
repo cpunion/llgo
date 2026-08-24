@@ -45,10 +45,63 @@ type resumeBindingKind uint8
 const (
 	resumeBindingNone resumeBindingKind = iota
 	resumeBindingSingle
+	// resumeBindingSingleOwnerTimer certifies the fixed one-operation,
+	// owner-only time.Sleep lane and binds its smaller pointer-free completion
+	// receipt. The timer catalog has no producer which can publish between
+	// preparation and scheduler activation, so the activated wait need not
+	// receive the generic initial affected-set visit. Controlled timers retain
+	// resumeBindingSingle because their generation may be invalidated there.
+	resumeBindingSingleOwnerTimer
 	resumeBindingCleanup
 	resumeBindingMaterialized
 	resumeBindingDirectChannel
 )
+
+type singleOwnerTimerResumeState uint8
+
+const (
+	singleOwnerTimerResumeEmpty singleOwnerTimerResumeState = iota
+	singleOwnerTimerResumeBound
+	singleOwnerTimerResumeCompleted
+	singleOwnerTimerResumeCanceled
+)
+
+// SingleOwnerTimerResume is the compact completion cell for an ordinary
+// one-shot Sleep. Such a timer has no scalar payload, poll status, select
+// default, or external producer. Keeping only its park ticket, pointer-free
+// source identity, and phase avoids carrying the 52-byte general ResumePacket
+// plus duplicate handle/executor identities in every sleeping frame.
+//
+// The source ID remains only as a stale/copy certificate after materialization;
+// the physical generation has already been recycled before the G is runnable.
+type SingleOwnerTimerResume struct {
+	ticket ParkTicket
+	source OperationID
+	state  singleOwnerTimerResumeState
+}
+
+var (
+	_ [20 - unsafe.Sizeof(SingleOwnerTimerResume{})]byte
+	_ [unsafe.Sizeof(SingleOwnerTimerResume{}) - 20]byte
+	_ [4 - unsafe.Alignof(SingleOwnerTimerResume{})]byte
+	_ [unsafe.Alignof(SingleOwnerTimerResume{}) - 4]byte
+)
+
+func validBoundSingleOwnerTimerResume(
+	resume *SingleOwnerTimerResume,
+	ticket ParkTicket,
+) bool {
+	return resume != nil && resume.state == singleOwnerTimerResumeBound &&
+		resume.ticket == ticket && validParkTicket(ticket) && resume.source.Valid() &&
+		resume.source.Source() == OperationSourceTimer
+}
+
+func validMaterializedSingleOwnerTimerResume(resume *SingleOwnerTimerResume) bool {
+	return resume != nil && validParkTicket(resume.ticket) && resume.source.Valid() &&
+		resume.source.Source() == OperationSourceTimer &&
+		(resume.state == singleOwnerTimerResumeCompleted ||
+			resume.state == singleOwnerTimerResumeCanceled)
+}
 
 // ResumePacket is stable storage in the direct-parking LLVM coroutine frame.
 // Bound temporarily identifies one exact old-route source generation.
@@ -212,6 +265,10 @@ func validWaitSetResumeBinding(record *WaitSetRecord) bool {
 		return !record.directChannel && record.resume == nil
 	case resumeBindingSingle:
 		return !record.directChannel && validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
+	case resumeBindingSingleOwnerTimer:
+		return !record.directChannel && validBoundSingleOwnerTimerResume(
+			(*SingleOwnerTimerResume)(record.resume), record.ticket,
+		)
 	case resumeBindingCleanup:
 		plan := (*ResumeCleanupPlan)(record.resume)
 		if record.directChannel && plan != nil && plan.phase == resumeCleanupBound {
@@ -243,6 +300,10 @@ func validTrustedWaitSetResumeBinding(record *WaitSetRecord) bool {
 		return !record.directChannel && record.resume == nil
 	case resumeBindingSingle:
 		return !record.directChannel && validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
+	case resumeBindingSingleOwnerTimer:
+		return !record.directChannel && validBoundSingleOwnerTimerResume(
+			(*SingleOwnerTimerResume)(record.resume), record.ticket,
+		)
 	case resumeBindingCleanup:
 		plan := (*ResumeCleanupPlan)(record.resume)
 		if record.directChannel && plan != nil && plan.phase == resumeCleanupBound {
@@ -267,8 +328,57 @@ func validTrustedWaitSetResumeBinding(record *WaitSetRecord) bool {
 // and typed hchan queue node must be retired before transfer; accepting it here
 // would make a partially neutral G look stealable.
 func BindSingleWaitSetResumePacket(record *WaitSetRecord, packet *ResumePacket, source OperationID) bool {
+	return bindSingleWaitSetResumePacket(record, packet, source, resumeBindingSingle)
+}
+
+// BindSingleOwnerTimerResume binds an ordinary one-shot owner timer and
+// certifies that scheduler activation may omit the otherwise mandatory initial
+// affected-set visit. Timer expiry is discovered only by a later owner catalog
+// pass, and task/command cancellation explicitly queues the active wait. This
+// entry must not be used by controlled timers: their preparation-time control
+// generation check relies on the generic initial visit.
+func BindSingleOwnerTimerResume(
+	record *WaitSetRecord,
+	resume *SingleOwnerTimerResume,
+	source OperationID,
+) bool {
+	if resume == nil || *resume != (SingleOwnerTimerResume{}) ||
+		!source.Valid() || source.Source() != OperationSourceTimer ||
+		!validSingleWaitSetResumeInstall(record, source) {
+		return false
+	}
+	if record.g.park.head == nil || record.g.park.head.caseID != 1 {
+		return false
+	}
+	*resume = SingleOwnerTimerResume{
+		ticket: record.ticket,
+		source: source,
+		state:  singleOwnerTimerResumeBound,
+	}
+	record.resume = unsafe.Pointer(resume)
+	record.resumeKind = resumeBindingSingleOwnerTimer
+	return true
+}
+
+func bindSingleWaitSetResumePacket(
+	record *WaitSetRecord,
+	packet *ResumePacket,
+	source OperationID,
+	kind resumeBindingKind,
+) bool {
+	if kind != resumeBindingSingle {
+		return false
+	}
 	if record == nil || packet == nil || *packet != (ResumePacket{}) ||
-		record.resume != nil || record.resumeKind != resumeBindingNone ||
+		!validSingleWaitSetResumeInstall(record, source) {
+		return false
+	}
+	installSingleWaitSetResumePacket(record, packet, source, kind)
+	return true
+}
+
+func validSingleWaitSetResumeInstall(record *WaitSetRecord, source OperationID) bool {
+	if record == nil || record.resume != nil || record.resumeKind != resumeBindingNone ||
 		record.state != waitSetRecordCommitted || record.work != waitSetWorkIdle ||
 		record.activePrev != nil || record.activeNext != nil || record.workNext != nil ||
 		record.g == nil || !ValidG(record.g) || !validParkTicket(record.ticket) ||
@@ -292,7 +402,6 @@ func BindSingleWaitSetResumePacket(record *WaitSetRecord, packet *ResumePacket, 
 		state.head.next != nil || state.head.operation == nil || state.head.operation.id != source {
 		return false
 	}
-	installSingleWaitSetResumePacket(record, packet, source)
 	return true
 }
 
@@ -304,6 +413,7 @@ func installSingleWaitSetResumePacket(
 	record *WaitSetRecord,
 	packet *ResumePacket,
 	source OperationID,
+	kind resumeBindingKind,
 ) {
 	*packet = ResumePacket{
 		ticket: record.ticket,
@@ -311,7 +421,7 @@ func installSingleWaitSetResumePacket(
 		state:  resumePacketBound,
 	}
 	record.resume = unsafe.Pointer(packet)
-	record.resumeKind = resumeBindingSingle
+	record.resumeKind = kind
 }
 
 func materializeManualResume(
@@ -384,6 +494,74 @@ func materializeTimerResume(
 	return table.RecycleTimerV2(p, handle)
 }
 
+// materializeSingleOwnerTimerResumePacket consumes the apply receipt for an
+// ordinary no-payload timer. promoteReadyWaitSet has already validated the
+// active queue and frame binding; the checks here cover only the resolved park,
+// exact source generation, and bound packet which this closed transaction
+// mutates. Controlled and canceled timers retain the generic lease machine.
+func materializeSingleOwnerTimerResume(
+	sources *ExecutorSourceSet,
+	p *P,
+	record *WaitSetRecord,
+) bool {
+	if sources == nil || sources.timers == nil || p == nil || record == nil || record.g == nil ||
+		record.resumeKind != resumeBindingSingleOwnerTimer || record.work != waitSetWorkResolving {
+		return false
+	}
+	resume, state := (*SingleOwnerTimerResume)(record.resume), &record.g.park
+	if !validBoundSingleOwnerTimerResume(resume, record.ticket) ||
+		resume.source.Route() != sources.route ||
+		state.phase != parkReady || state.ticket != record.ticket || state.resolving ||
+		state.expected != 1 || state.attached != 0 || state.seed != 0 || state.hasDefault ||
+		!validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.head != nil {
+		return false
+	}
+	ticket := record.ticket
+	var outcome ParkOutcome
+	switch state.outcome {
+	case ParkOutcomeCompleted:
+		if state.cancelKind != ParkCancelNone || state.winnerCase == 0 ||
+			state.winnerID != resume.source || state.winnerRecord == nil ||
+			!sources.timers.retireSingleOwnerTimerV2(
+				p, resume.source, state.winnerRecord, ticket,
+			) {
+			return false
+		}
+		outcome = ParkOutcomeCompleted
+		if state.taskCancelPhase == taskCancelRequested {
+			outcome = ParkOutcomeCanceled
+		}
+	case ParkOutcomeCanceled:
+		if state.cancelKind == ParkCancelNone || state.winnerCase != 0 ||
+			state.winnerID != (OperationID{}) || state.winnerRecord != nil {
+			return false
+		}
+		consumed, caseID, lease, ok := ConsumeParkSet(state, ticket)
+		if !ok || consumed != ParkOutcomeCanceled || caseID != 0 || lease.Valid() ||
+			!materializeTimerResume(sources.timers, p, resume.source, lease, true) {
+			return false
+		}
+		outcome = consumed
+	default:
+		return false
+	}
+	kind, phase := state.taskCancelKind, state.taskCancelPhase
+	caseID := uint32(0)
+	resumeState := singleOwnerTimerResumeCanceled
+	if outcome == ParkOutcomeCompleted {
+		caseID = 1
+		resumeState = singleOwnerTimerResumeCompleted
+	}
+	*state = ParkState{
+		ticket: ticket, phase: parkMaterialized,
+		taskCancelKind: kind, taskCancelPhase: phase,
+		outcome: outcome, winnerCase: caseID,
+	}
+	resume.state = resumeState
+	return validMaterializedParkState(state, ticket) &&
+		validMaterializedSingleOwnerTimerResume(resume)
+}
+
 func materializePollResume(
 	source *PollOperationSource,
 	p *P,
@@ -428,9 +606,13 @@ func materializePollResume(
 // logical detach and before ready-queue publication. No source identity is
 // written to the packet after cleanup succeeds.
 func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *WaitSetRecord) bool {
+	if record != nil && record.resumeKind == resumeBindingSingleOwnerTimer {
+		return materializeSingleOwnerTimerResume(sources, p, record)
+	}
 	if sources == nil || !validExecutorSourceSetHeader(sources, p) || record == nil ||
 		!validActiveWaitSetRecordFast(p, record) || record.work != waitSetWorkResolving ||
-		record.g.park.phase != parkReady || record.resumeKind != resumeBindingSingle ||
+		record.g.park.phase != parkReady ||
+		record.resumeKind != resumeBindingSingle ||
 		!validBoundResumePacket((*ResumePacket)(record.resume), record.ticket) {
 		return false
 	}
@@ -529,6 +711,53 @@ func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *Wai
 	}
 	record.resumeKind = resumeBindingMaterialized
 	return validMaterializedResumePacket(packet)
+}
+
+// TakeSingleOwnerTimerResume is the scalar resume prologue for an ordinary
+// Sleep. It consumes the same P-owned RunDecision and ParkState certificate as
+// TakeResumePacket without constructing the general result union.
+func TakeSingleOwnerTimerResume(
+	g *G,
+	resume *SingleOwnerTimerResume,
+) (outcome ParkOutcome, task TaskCancelKind, ok bool) {
+	if !ValidG(g) || g.runP == nil || !validMaterializedSingleOwnerTimerResume(resume) {
+		return ParkOutcomePending, TaskCancelNone, false
+	}
+	expected := resume.ticket
+	p := g.runP
+	if p.current != g || !p.inResume || g.state != GRunning || p.runDecisionTaken ||
+		!expectedAction(p, g, p.action, ActionResume) || !validRunDecision(p.runDecision) {
+		return ParkOutcomePending, TaskCancelNone, false
+	}
+	decision := &p.runDecision
+	physicalOutcome := ParkOutcomeCanceled
+	physicalCase := uint32(0)
+	if resume.state == singleOwnerTimerResumeCompleted {
+		physicalOutcome = ParkOutcomeCompleted
+		physicalCase = 1
+	}
+	if !decision.materialized || decision.directChannel || decision.g != g ||
+		decision.ticket != expected || g.park.phase != parkMaterialized ||
+		g.park.ticket != expected || g.park.outcome != physicalOutcome ||
+		g.park.winnerCase != physicalCase {
+		return ParkOutcomePending, TaskCancelNone, false
+	}
+	if decision.outcome == ParkOutcomeCompleted {
+		if physicalOutcome != ParkOutcomeCompleted || decision.caseID != 1 ||
+			decision.task != TaskCancelNone {
+			return ParkOutcomePending, TaskCancelNone, false
+		}
+	} else if decision.outcome != ParkOutcomeCanceled || decision.caseID != 0 {
+		return ParkOutcomePending, TaskCancelNone, false
+	}
+	if !deliverMaterializedParkResume(&g.park, expected) {
+		return ParkOutcomePending, TaskCancelNone, false
+	}
+	outcome, task = decision.outcome, decision.task
+	*resume = SingleOwnerTimerResume{}
+	p.runDecision = RunDecision{}
+	p.runDecisionTaken = true
+	return outcome, task, true
 }
 
 // TakeDirectChannelResume retains the arbitrary-runner compatibility entry.

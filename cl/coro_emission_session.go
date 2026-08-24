@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 // coroPhysicalEmissionPhase makes installation of a physical body an explicit
@@ -42,6 +43,8 @@ type coroPhysicalBodyCapability struct {
 	coroutine *coroBodyContext
 	outcome   *outcomePlainBodyContext
 }
+
+type coroCaptureSnapshotValues map[*ssa.FreeVar]llssa.Expr
 
 func newCoroPhysicalBodyCapability(body *coroBodyContext) *coroPhysicalBodyCapability {
 	if body == nil {
@@ -272,6 +275,21 @@ func (p *context) coroEmissionSourceParamBase() int {
 		return 0
 	}
 	return p.coroEmission.sourceParamBase
+}
+
+func (p *context) coroCaptureSnapshot(free *ssa.FreeVar) (llssa.Expr, bool) {
+	body := p.activeCoroPhysicalBodyCapability()
+	if body == nil || free == nil {
+		return llssa.Expr{}, false
+	}
+	values := coroCaptureSnapshotValues(nil)
+	if body.coroutine != nil {
+		values = body.coroutine.captureSnapshots
+	} else {
+		values = body.outcome.captureSnapshots
+	}
+	value, ok := values[free]
+	return value, ok && !value.IsNil()
 }
 
 func (p *context) coroEmissionSourceBlock(index int) (llssa.BasicBlock, bool) {

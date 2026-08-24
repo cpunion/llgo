@@ -81,6 +81,36 @@ func reservePollV2Test(
 	return handle, id
 }
 
+func TestPollOperationV2RecycleRetiresConsumedPendingHint(t *testing.T) {
+	p := new(P)
+	sources, poll := bindPollV2TestSources(t, p, RouteID(7), nil)
+	park := beginTimerV2TestPark(t, p, "poll-v2-retire-pending", 1, 199)
+	handle, id := reservePollV2Test(t, p, poll, park, 39, 49)
+	commitTimerV2TestPark(t, p, park)
+	if result := poll.PostPollOperationV2(id, PollOperationReady); result != PollOperationPosted {
+		t.Fatalf("post poll completion = %d", result)
+	}
+	if scan, ok := sources.publishPass(p, 0, true); !ok || scan.poll != 1 || scan.completed != 1 {
+		t.Fatalf("publish poll completion = (%+v, %t)", scan, ok)
+	}
+	if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
+		t.Fatalf("resolve poll completion = (%d, %d, %t)", promoted, visits, ok)
+	}
+	action, outcome, caseID, lease, taskCancel := resumeTimerV2TestPark(t, p, park)
+	result, taken := poll.TakePollOperationV2Result(p, handle, lease)
+	if outcome != ParkOutcomeCompleted || caseID != 39 || taskCancel != TaskCancelNone ||
+		!taken || result != PollOperationReady {
+		t.Fatalf("take poll completion = (%d, %d, %+v, %d, %t)",
+			outcome, caseID, lease, taskCancel, taken)
+	}
+
+	preemptStore(&poll.pending, 1)
+	if !poll.RecyclePollOperationV2(p, handle) || poll.scanLimit != 0 || poll.Pending() {
+		t.Fatalf("recycled poll prefix = %d, pending=%t", poll.scanLimit, poll.Pending())
+	}
+	finishPollV2Test(t, p, sources, poll, park, action)
+}
+
 func TestPollOperationV2EventCancellationClassesAndLateEvent(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -60,6 +60,5 @@ func semaAcquire(addr *uint32) {
 }
 
 func semaRelease(addr *uint32) {
-	latomic.AddUint32(addr, 1)
 	llgoCoroSemaphoreReleaseOrAbortV2(unsafe.Pointer(addr))
 }

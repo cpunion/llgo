@@ -287,10 +287,28 @@ func coroKeyedTicketLessV2(a, b uint32) bool {
 	return int32(a-b) < 0
 }
 
-func coroKeyedPostClaimedV2(handle coroKeyedRegistryHandleV2, operation coro.OperationID) bool {
+type coroKeyedPostLocalResultV2 uint8
+
+const (
+	coroKeyedPostLocalInvalidV2 coroKeyedPostLocalResultV2 = iota
+	coroKeyedPostLocalNoWaiterV2
+	coroKeyedPostLocalCompletedV2
+	coroKeyedPostLocalExternalV2
+)
+
+// coroKeyedPostClaimedLocalV2 consumes the synchronous prefix of one claimed
+// keyed completion. Same-P completion, including typed cleanup and promotion,
+// cannot suspend the producer. Keeping the native-fleet/host request outside
+// this helper lets whole-program effect analysis emit the common prefix as a
+// direct synchronous outcome while the uncommon cross-P suffix remains an
+// ordinary suspend-aware call.
+func coroKeyedPostClaimedLocalV2(
+	handle coroKeyedRegistryHandleV2,
+	operation coro.OperationID,
+) coroKeyedPostLocalResultV2 {
 	switch coroProgramKeyedRegistryV2State.finishPost(handle, operation) {
 	case coroKeyedRegistryPublishRetiredV2:
-		return true
+		return coroKeyedPostLocalCompletedV2
 	case coroKeyedRegistryPublishReadyV2:
 		current, driver, route := coroCurrentTaskV1()
 		if current != nil && driver != nil && route == operation.Route() {
@@ -300,21 +318,45 @@ func coroKeyedPostClaimedV2(handle coroKeyedRegistryHandleV2, operation coro.Ope
 				operation,
 			)
 			if !localOK {
-				return coroProgramKeyedRegistryV2State.publicationRetired(handle)
+				if coroProgramKeyedRegistryV2State.publicationRetired(handle) {
+					return coroKeyedPostLocalCompletedV2
+				}
+				return coroKeyedPostLocalInvalidV2
 			}
 			if local {
-				return coroMaterializePrivateResumeCleanupStepV1(cleanup) &&
-					coro.FinishOwnerLocalManualCompletionCurrent(&completion)
+				if coroMaterializePrivateResumeCleanupStepV1(cleanup) &&
+					coro.FinishOwnerLocalManualCompletionCurrent(&completion) {
+					return coroKeyedPostLocalCompletedV2
+				}
+				return coroKeyedPostLocalInvalidV2
 			}
 		}
-		if coroTargetPostKeyedOperationV2(operation) {
-			return true
-		}
-		// Cancellation may retire the registry and close/recycle the source
-		// between private publication and the target Post. Exact generation
-		// retirement makes that failed Post an ordinary lost wake: semaphore
-		// count or notify ticket remains the durable repair fact.
-		return coroProgramKeyedRegistryV2State.publicationRetired(handle)
+		return coroKeyedPostLocalExternalV2
+	default:
+		return coroKeyedPostLocalInvalidV2
+	}
+}
+
+func coroKeyedPostClaimedExternalV2(
+	handle coroKeyedRegistryHandleV2,
+	operation coro.OperationID,
+) bool {
+	if coroTargetPostKeyedOperationV2(operation) {
+		return true
+	}
+	// Cancellation may retire the registry and close/recycle the source
+	// between private publication and the target Post. Exact generation
+	// retirement makes that failed Post an ordinary lost wake: semaphore count
+	// or notify ticket remains the durable repair fact.
+	return coroProgramKeyedRegistryV2State.publicationRetired(handle)
+}
+
+func coroKeyedPostClaimedV2(handle coroKeyedRegistryHandleV2, operation coro.OperationID) bool {
+	switch coroKeyedPostClaimedLocalV2(handle, operation) {
+	case coroKeyedPostLocalCompletedV2:
+		return true
+	case coroKeyedPostLocalExternalV2:
+		return coroKeyedPostClaimedExternalV2(handle, operation)
 	default:
 		return false
 	}
@@ -332,11 +374,34 @@ func coroKeyedPostExactV2(handle coroKeyedRegistryHandleV2, operation coro.Opera
 }
 
 func coroKeyedPostOneV2(kind coroKeyedParkKindV2, key uintptr, logical uint32, exact bool) (bool, bool) {
+	result, handle, operation := coroKeyedPostOneLocalV2(kind, key, logical, exact)
+	switch result {
+	case coroKeyedPostLocalNoWaiterV2:
+		return false, true
+	case coroKeyedPostLocalCompletedV2:
+		return true, true
+	case coroKeyedPostLocalExternalV2:
+		return true, coroKeyedPostClaimedExternalV2(handle, operation)
+	default:
+		return handle != (coroKeyedRegistryHandleV2{}), false
+	}
+}
+
+func coroKeyedPostOneLocalV2(
+	kind coroKeyedParkKindV2,
+	key uintptr,
+	logical uint32,
+	exact bool,
+) (
+	result coroKeyedPostLocalResultV2,
+	handle coroKeyedRegistryHandleV2,
+	operation coro.OperationID,
+) {
 	handle, operation, found := coroProgramKeyedRegistryV2State.claimOne(kind, key, logical, exact)
 	if !found {
-		return false, true
+		return coroKeyedPostLocalNoWaiterV2, coroKeyedRegistryHandleV2{}, coro.OperationID{}
 	}
-	return true, coroKeyedPostClaimedV2(handle, operation)
+	return coroKeyedPostClaimedLocalV2(handle, operation), handle, operation
 }
 
 func coroKeyedAbortV2(message string) {

@@ -269,6 +269,7 @@ type coroBodyContext struct {
 	frameRetention       *coroFrameRetentionProof
 	critical             *coroCriticalProof
 	terminalResultAllocs map[*ssa.Alloc]llssa.Expr
+	captureSnapshots     coroCaptureSnapshotValues
 	sourceBlockPollFresh bool
 }
 
@@ -587,19 +588,20 @@ func (p *context) beginCoroBody(
 		Promise: header,
 		Frame:   frame,
 		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
-			if abi.framePublishHook != "" {
-				publish := p.pkg.NewFunc(abi.framePublishHook, coroFramePublishSignature(), llssa.InC)
-				b.Call(
-					publish.Expr,
-					task,
-					handle,
-					b.Convert(prog.VoidPtr(), header),
-					storage,
-					b.Convert(prog.VoidPtr(), borrowedFrameMetadata),
-					descriptorPtr,
-					resultSlot,
-				)
+			if abi.framePublishHook == "" {
+				panic("coroutine physical ABI has no initialized frame publication hook")
 			}
+			publish := p.pkg.NewFunc(abi.framePublishHook, coroFramePublishSignature(), llssa.InC)
+			b.Call(
+				publish.Expr,
+				task,
+				handle,
+				b.Convert(prog.VoidPtr(), header),
+				storage,
+				b.Convert(prog.VoidPtr(), borrowedFrameMetadata),
+				descriptorPtr,
+				resultSlot,
+			)
 			// A named result captured by a defer is an ordinary Go heap object,
 			// but x/tools reloads it from compiler-owned RunDefers continuations.
 			// Define only that structurally certified subset after frame/header
@@ -643,6 +645,7 @@ func (p *context) beginCoroBody(
 		}
 	}
 	body.coro = b.BeginCoro(coroOptions)
+	body.captureSnapshots = p.materializeCoroCaptureSnapshots(b, p.coroEmissionPlan(), 2)
 	if body.unsupportedRunDecision != nil {
 		// Every zero-ticket gate in this physical body shares one fail-closed
 		// destination. Restore the compiler-owned initial normal continuation
@@ -1349,7 +1352,11 @@ func (p *context) compileCoroTailForwardPhysicalBody(
 	args = append(args, p.fn.PhysicalParam(0), p.fn.PhysicalParam(1))
 	for _, argument := range forward.args {
 		if argument.sourceParameter >= 0 {
-			args = append(args, p.fn.PhysicalParam(sourceParamBase+argument.sourceParameter))
+			value := p.fn.PhysicalParam(sourceParamBase + argument.sourceParameter)
+			if argument.retagTransportKey != "" {
+				value = b.ChangeType(p.prog.Type(argument.targetType, llssa.InGo), value)
+			}
+			args = append(args, value)
 			continue
 		}
 		args = append(args, p.compileValueAs(b, argument.constant, argument.targetType))
