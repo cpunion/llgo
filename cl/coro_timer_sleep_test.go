@@ -244,11 +244,14 @@ func compileCoroTimerIntrinsicFixture(t *testing.T, target *llssa.Target, source
 		if err != nil {
 			t.Fatal("load runtime failed:", err)
 		}
-		if runtimePackage.Scope().Lookup("CoroTimerParkV2") == nil {
-			name := types.NewTypeName(token.NoPos, runtimePackage, "CoroTimerParkV2", nil)
+		for _, typeName := range []string{"CoroSleepParkV2", "CoroTimerParkV2"} {
+			if runtimePackage.Scope().Lookup(typeName) != nil {
+				continue
+			}
+			name := types.NewTypeName(token.NoPos, runtimePackage, typeName, nil)
 			types.NewNamed(name, types.NewArray(types.Typ[types.Uintptr], 32), nil)
 			if previous := runtimePackage.Scope().Insert(name); previous != nil {
-				t.Fatalf("install Timer V2 test runtime type: duplicate %v", previous)
+				t.Fatalf("install %s test runtime type: duplicate %v", typeName, previous)
 			}
 		}
 		return runtimePackage

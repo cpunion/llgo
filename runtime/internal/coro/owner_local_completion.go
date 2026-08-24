@@ -277,6 +277,50 @@ func ownerLocalDirectCompletionAdmissionForCurrent(
 	return ownerLocalCompletionAffectedHead
 }
 
+// ownerLocalAuditedCompletionAdmissionForCurrent authenticates the active-list
+// and affected-queue portion of an exact same-owner transaction. The caller
+// must audit its source record, ParkState, and resume descriptor immediately
+// after this function and before any irreversible mutation. Splitting those
+// orthogonal halves avoids calling validActiveWaitSetRecordFast, which would
+// validate the same ParkState and cleanup plan a second time.
+func ownerLocalAuditedCompletionAdmissionForCurrent(
+	driver *ExecutorDriver,
+	record *WaitSetRecord,
+) ownerLocalCompletionAdmission {
+	if driver == nil || driver.p == nil || record == nil ||
+		!emptyOwnerLocalCompletion(&driver.local) || record.state != waitSetRecordActive ||
+		!validParkTicket(record.ticket) || record.g == nil || !ValidG(record.g) ||
+		record.g.state != GWaiting || !record.g.waiting || record.g.queued ||
+		record.g.nextReady != nil || record.g.runP != nil ||
+		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
+		record.g.active.parkWait != record {
+		return ownerLocalCompletionRejected
+	}
+	p := driver.p
+	if record.activePrev == nil {
+		if p.parkWaitHead != record {
+			return ownerLocalCompletionRejected
+		}
+	} else if record.activePrev.activeNext != record {
+		return ownerLocalCompletionRejected
+	}
+	if record.activeNext == nil {
+		if p.parkWaitTail != record {
+			return ownerLocalCompletionRejected
+		}
+	} else if record.activeNext.activePrev != record {
+		return ownerLocalCompletionRejected
+	}
+	if record.work == waitSetWorkIdle && record.workNext == nil {
+		return ownerLocalCompletionIdle
+	}
+	if record.work != waitSetWorkQueued || record.workNext != nil ||
+		p.affectedWaitHead != record || p.affectedWaitTail != record {
+		return ownerLocalCompletionRejected
+	}
+	return ownerLocalCompletionAffectedHead
+}
+
 func appendOwnerLocalCompletionUnchecked(
 	driver *ExecutorDriver,
 	record *WaitSetRecord,

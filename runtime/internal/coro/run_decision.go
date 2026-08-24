@@ -102,8 +102,14 @@ func resumeGateStructurallyTaken(g *G) bool {
 		return false
 	}
 	p := g.runP
+	action := p.action
+	// The first gate above already authenticated G and loaded its exact P.
+	// Re-entering expectedAction here used to repeat ValidG, current/runP, and
+	// p.action equality on every compiler hook inside one physical resume.
+	// Inspect only the ActionResume scalar which has not otherwise been proved
+	// by this predicate.
 	return p.current == g && p.inResume && g.state == GRunning &&
-		expectedAction(p, g, p.action, ActionResume) &&
+		action.Kind == ActionResume && action.Flags == 0 && action.Handle != nil &&
 		p.runDecision == (RunDecision{}) && p.runDecisionTaken
 }
 

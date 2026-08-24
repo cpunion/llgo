@@ -336,6 +336,8 @@ func dispatchExecutorRunReadyAction(
 	} else if g.runAction == ActionCheckResume ||
 		g.runAction == ActionInvalid && g.park.phase == parkMaterialized {
 		action, ok = beginExecutorRunContinuation(p, g, peerRunnable)
+	} else if g.runAction == ActionCheckDestroy || g.runAction == ActionPanicDestroy {
+		action, ok = beginExecutorRunDestroyContinuation(p, g, peerRunnable)
 	} else {
 		action, ok = BeginRunG(p, g)
 	}
@@ -922,17 +924,20 @@ func ResumedExecutorRun(
 	return next, true, true
 }
 
-// CanBeginIssuedExecutorDestroyAfterResume reports whether one still-private
-// issued resume may enter its adjacent normal-completion destroy interval.
-// The optimization cannot cross an already-runnable peer, panic/cancellation,
-// foreign reentry, producer callback, or host boundary. Keeping the issued
-// capability live avoids a ready-tail round trip for an otherwise isolated
-// short-lived coroutine, while llvm.coro.done remains an independent guard.
+// PrepareIssuedExecutorDestroyAfterResume consumes one still-private issued
+// resume and opens its adjacent normal-completion done/destroy interval.
+// The optimization cannot cross panic/cancellation, foreign reentry, producer
+// callback, or a host boundary. A ready peer does not invalidate it: final
+// suspend has already ended user execution, the bounded runner charges destroy
+// as a separate reduction, and the ordinary action commit preserves readyDebt
+// after the adjacent deallocation. Keeping the issued capability live on
+// either clean path removes a duplicate validation, while llvm.coro.done
+// remains an independent guard.
 //
 // Panic unwinding and foreign reentry deliberately retain their existing
 // separately scheduled destroy paths because those transitions carry an
 // externally visible control boundary in addition to frame completion.
-func CanBeginIssuedExecutorDestroyAfterResume(
+func PrepareIssuedExecutorDestroyAfterResume(
 	driver *ExecutorDriver,
 	g *G,
 	action Action,
@@ -949,26 +954,39 @@ func CanBeginIssuedExecutorDestroyAfterResume(
 		g.destroyTarget.handle != action.Handle ||
 		g.destroyTarget.state != FrameDestroyPending ||
 		g.park.taskCancelPhase == taskCancelRequested || g.panicUnwind ||
-		p.foreignReentry != nil || driver.run.readyDebt || runnableForOSThreadOwner(p) {
+		p.foreignReentry != nil {
 		return false
 	}
+	driver.run.issued = ActionCheckDestroy
 	return true
 }
 
-// BeginIssuedExecutorDestroyAfterResume consumes the checked private interval
-// after the compiler-owned llvm.coro.done observation succeeds.
-func BeginIssuedExecutorDestroyAfterResume(
+// FinishIssuedExecutorDestroyAfterResume consumes the prepared interval after
+// the compiler-owned llvm.coro.done observation. Prepare already proved the
+// complete mutable P/G/frame relation and no callback or host boundary exists
+// around the observational done query, so this suffix checks only the private
+// issued identity. A false done result restores the original issued resume and
+// leaves the scheduler action unchanged for fail-closed diagnostics.
+func FinishIssuedExecutorDestroyAfterResume(
 	driver *ExecutorDriver,
 	g *G,
 	action Action,
 	done bool,
 ) (Action, bool) {
-	if !done || !CanBeginIssuedExecutorDestroyAfterResume(driver, g, action) {
+	if driver == nil || g == nil || driver.p == nil ||
+		driver.run.issued != ActionCheckDestroy {
 		return Action{}, false
 	}
 	p := driver.p
+	if p.current != g || g.runP != p || p.action != action ||
+		action.Kind != ActionCheckDestroy || action.Handle == nil {
+		return Action{}, false
+	}
+	if !done {
+		driver.run.issued = ActionCheckResume
+		return Action{}, false
+	}
 	next := Action{Kind: ActionDestroy, Handle: action.Handle}
-	driver.run.issued = ActionCheckDestroy
 	p.action = next
 	return next, true
 }
@@ -1031,7 +1049,26 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placemen
 // CommitExecutorRunAction closes an ordinary physical action and retains FIFO
 // ordering for every live continuation.
 func CommitExecutorRunAction(driver *ExecutorDriver, g *G, next Action) bool {
-	return commitExecutorRunAction(driver, g, next, executorRunQueueTail)
+	_, ok := CommitExecutorRunActionCompiler(driver, g, next)
+	return ok
+}
+
+// CommitExecutorRunActionCompiler additionally returns a package-sealed clean
+// completion receipt. commitExecutorRunAction has already proved the complete
+// terminal P/G/action relation; only a task with no park/cancellation or
+// exported task-control residue may bypass the later arbitrary-G reclaim audit.
+func CommitExecutorRunActionCompiler(
+	driver *ExecutorDriver,
+	g *G,
+	next Action,
+) (CompletedTaskReleaseReceipt, bool) {
+	if !commitExecutorRunAction(driver, g, next, executorRunQueueTail) {
+		return CompletedTaskReleaseReceipt{}, false
+	}
+	if next.Kind == ActionComplete && g.park == (ParkState{}) && g.taskControlLeases == 0 {
+		return CompletedTaskReleaseReceipt{task: g}, true
+	}
+	return CompletedTaskReleaseReceipt{}, true
 }
 
 // CommitExecutorRunDomainDestroy settles the handle-free final-root receipt

@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 // coroPhysicalEmissionPhase makes installation of a physical body an explicit
@@ -67,13 +68,14 @@ func (body *coroPhysicalBodyCapability) valid() bool {
 // parameter layout in one session prevents independently installed context
 // fields from describing different functions after a failed or nested emission.
 type coroPhysicalEmissionSession struct {
-	phase           coroPhysicalEmissionPhase
-	plan            *coroPhysicalFunctionPlan
-	body            *coroPhysicalBodyCapability
-	site            *coroSiteEmissionObserver
-	sourceBlocks    []llssa.BasicBlock
-	sourceParamBase int
-	explicitStatus  bool
+	phase            coroPhysicalEmissionPhase
+	plan             *coroPhysicalFunctionPlan
+	body             *coroPhysicalBodyCapability
+	site             *coroSiteEmissionObserver
+	sourceBlocks     []llssa.BasicBlock
+	sourceParamBase  int
+	explicitStatus   bool
+	captureSnapshots map[*ssa.FreeVar]llssa.Expr
 }
 
 // beginCoroManagedPhysicalEmission installs the complete prologue-visible
@@ -133,6 +135,28 @@ func (s *coroPhysicalEmissionSession) bindManagedPhysicalBody(
 	s.body = body
 	s.sourceBlocks = sourceBlocks
 	s.phase = coroPhysicalEmissionBody
+}
+
+// publishCaptureSnapshot installs one ProgramIR-proven immutable capture while
+// the physical prologue still owns the only definition point. A coroutine
+// publishes before its initial suspend; an outcome-plain body publishes in its
+// ordinary entry block. Source lowering can only consume the frozen value once
+// the body capability and source-block projection are bound.
+func (s *coroPhysicalEmissionSession) publishCaptureSnapshot(
+	free *ssa.FreeVar,
+	value llssa.Expr,
+) {
+	if s == nil || s.phase != coroPhysicalEmissionPrologue || s.plan == nil ||
+		free == nil || value.IsNil() {
+		panic("immutable capture snapshot requires one physical prologue value")
+	}
+	if s.captureSnapshots == nil {
+		s.captureSnapshots = make(map[*ssa.FreeVar]llssa.Expr)
+	}
+	if _, duplicate := s.captureSnapshots[free]; duplicate {
+		panic("immutable capture snapshot was published more than once")
+	}
+	s.captureSnapshots[free] = value
 }
 
 func (s *coroPhysicalEmissionSession) completeManagedPhysicalBody(body *coroPhysicalBodyCapability) {
@@ -272,6 +296,14 @@ func (p *context) coroEmissionSourceParamBase() int {
 		return 0
 	}
 	return p.coroEmission.sourceParamBase
+}
+
+func (p *context) coroCaptureSnapshot(free *ssa.FreeVar) (llssa.Expr, bool) {
+	if p == nil || p.coroEmission == nil || p.coroEmission.phase != coroPhysicalEmissionBody || free == nil {
+		return llssa.Expr{}, false
+	}
+	value, ok := p.coroEmission.captureSnapshots[free]
+	return value, ok && !value.IsNil()
 }
 
 func (p *context) coroEmissionSourceBlock(index int) (llssa.BasicBlock, bool) {

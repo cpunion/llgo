@@ -26,9 +26,11 @@ import (
 )
 
 const (
-	coroChanSendTryParkHookV2 = "__llgo_coro_chan_send_try_park_v2"
-	coroChanRecvTryParkHookV2 = "__llgo_coro_chan_recv_try_park_v2"
-	coroChanResumeHookV2      = "__llgo_coro_chan_resume_v2"
+	coroChanSendBufferTryHookV1 = "__llgo_coro_chan_send_buffer_try_v1"
+	coroChanRecvBufferTryHookV1 = "__llgo_coro_chan_recv_buffer_try_v1"
+	coroChanSendTryParkHookV2   = "__llgo_coro_chan_send_try_park_v2"
+	coroChanRecvTryParkHookV2   = "__llgo_coro_chan_recv_try_park_v2"
+	coroChanResumeHookV2        = "__llgo_coro_chan_resume_v2"
 )
 
 const (
@@ -67,6 +69,17 @@ func coroChanTryParkSignatureV2() *types.Signature {
 		types.NewParam(token.NoPos, nil, "size", types.Typ[types.Uintptr]),
 		types.NewParam(token.NoPos, nil, "stateID", types.Typ[types.Uint32]),
 		types.NewParam(token.NoPos, nil, "line", types.Typ[types.Uint32]),
+	)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroChanBufferTrySignatureV1() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "channel", pointer),
+		types.NewParam(token.NoPos, nil, "elem", pointer),
+		types.NewParam(token.NoPos, nil, "size", types.Typ[types.Uintptr]),
 	)
 	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
@@ -112,27 +125,91 @@ func (p *context) newCoroChannelStorage(b llssa.Builder, elemType llssa.Type) (e
 	return
 }
 
+// prepareCoroChanAfterBufferTry keeps the dominant owner-local buffered
+// transaction independent of coroutine metadata. Only a preflight miss enters
+// the complete fused try-or-park hook. The second transaction rechecks the
+// channel under its own lock, so a producer racing the short unlock interval
+// cannot be lost.
+func prepareCoroChanAfterBufferTry(
+	b llssa.Builder,
+	fastStatus llssa.Expr,
+	fastNormal uint64,
+	slow func(llssa.Builder) llssa.Expr,
+	observe func(llssa.Builder, llssa.Expr),
+) llssa.Expr {
+	if b == nil || fastStatus.IsNil() || fastStatus.Type != b.Prog.Uint32() || slow == nil {
+		panic("coroutine channel buffer preflight requires a complete uint32 transaction")
+	}
+	ready, retry, joined := b.Func.MakeBlock(), b.Func.MakeBlock(), b.Func.MakeBlock()
+	b.If(
+		b.BinOp(token.EQL, fastStatus, b.Prog.IntVal(fastNormal, b.Prog.Uint32())),
+		ready,
+		retry,
+	)
+
+	b.SetBlockEx(ready, llssa.AtEnd, false)
+	if observe != nil {
+		observe(b, fastStatus)
+	}
+	b.Jump(joined)
+
+	b.SetBlockEx(retry, llssa.AtEnd, false)
+	slowStatus := slow(b)
+	if slowStatus.IsNil() || slowStatus.Type != b.Prog.Uint32() {
+		panic("coroutine channel try-or-park hook must return uint32")
+	}
+	if observe != nil {
+		observe(b, slowStatus)
+	}
+	shouldSuspend := b.BinOp(
+		token.EQL, slowStatus, b.Prog.IntVal(coroChanResumeInvalid, b.Prog.Uint32()),
+	)
+	b.Jump(joined)
+
+	b.SetBlockContinuation(joined)
+	result := b.Phi(b.Prog.Bool())
+	result.AddIncoming(b, []llssa.BasicBlock{ready, retry}, func(index int, _ llssa.BasicBlock) llssa.Expr {
+		if index == 0 {
+			return b.Prog.BoolVal(false)
+		}
+		return shouldSuspend
+	})
+	return result.Expr
+}
+
 func (p *context) compileCoroChanSend(b llssa.Builder, channel, value llssa.Expr) {
 	body := p.requireCoroChannelBody(b)
 	elem, state := p.newCoroChannelStorage(b, value.Type)
 	b.Store(elem, value)
 	body.emitCoroParkOperation(p, b, coroParkOperation{
 		prepare: func(active llssa.Builder, stateID, sourceLine uint32) llssa.Expr {
-			park := p.pkg.NewFunc(coroChanSendTryParkHookV2, coroChanTryParkSignatureV2(), llssa.InC)
-			status := active.Call(
-				park.Expr,
-				body.task,
-				body.coro.Handle(),
-				active.Convert(active.Prog.VoidPtr(), body.header),
+			fast := p.pkg.NewFunc(coroChanSendBufferTryHookV1, coroChanBufferTrySignatureV1(), llssa.InC)
+			fastStatus := active.Call(
+				fast.Expr,
 				active.Convert(active.Prog.VoidPtr(), channel),
 				active.Convert(active.Prog.VoidPtr(), elem),
-				active.Convert(active.Prog.VoidPtr(), state),
 				active.Prog.IntVal(active.Prog.SizeOf(value.Type), active.Prog.Uintptr()),
-				active.Prog.IntVal(uint64(stateID), active.Prog.Uint32()),
-				active.Prog.IntVal(uint64(sourceLine), active.Prog.Uint32()),
 			)
-			return active.BinOp(
-				token.EQL, status, active.Prog.IntVal(coroChanResumeInvalid, active.Prog.Uint32()),
+			return prepareCoroChanAfterBufferTry(
+				active,
+				fastStatus,
+				coroChanResumeSendOK,
+				func(retry llssa.Builder) llssa.Expr {
+					park := p.pkg.NewFunc(coroChanSendTryParkHookV2, coroChanTryParkSignatureV2(), llssa.InC)
+					return retry.Call(
+						park.Expr,
+						body.task,
+						body.coro.Handle(),
+						retry.Convert(retry.Prog.VoidPtr(), body.header),
+						retry.Convert(retry.Prog.VoidPtr(), channel),
+						retry.Convert(retry.Prog.VoidPtr(), elem),
+						retry.Convert(retry.Prog.VoidPtr(), state),
+						retry.Prog.IntVal(retry.Prog.SizeOf(value.Type), retry.Prog.Uintptr()),
+						retry.Prog.IntVal(uint64(stateID), retry.Prog.Uint32()),
+						retry.Prog.IntVal(uint64(sourceLine), retry.Prog.Uint32()),
+					)
+				},
+				nil,
 			)
 		},
 		resume: func(resume llssa.Builder) llssa.Expr {
@@ -158,29 +235,42 @@ func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, ch
 	recvOKSlot := p.coroFrameAlloca(p.prog.Bool())
 	body.emitCoroParkOperation(p, b, coroParkOperation{
 		prepare: func(active llssa.Builder, stateID, sourceLine uint32) llssa.Expr {
-			park := p.pkg.NewFunc(coroChanRecvTryParkHookV2, coroChanTryParkSignatureV2(), llssa.InC)
-			status := active.Call(
-				park.Expr,
-				body.task,
-				body.coro.Handle(),
-				active.Convert(active.Prog.VoidPtr(), body.header),
+			fast := p.pkg.NewFunc(coroChanRecvBufferTryHookV1, coroChanBufferTrySignatureV1(), llssa.InC)
+			fastStatus := active.Call(
+				fast.Expr,
 				active.Convert(active.Prog.VoidPtr(), channel),
 				active.Convert(active.Prog.VoidPtr(), elem),
-				active.Convert(active.Prog.VoidPtr(), state),
 				active.Prog.IntVal(active.Prog.SizeOf(elemType), active.Prog.Uintptr()),
-				active.Prog.IntVal(uint64(stateID), active.Prog.Uint32()),
-				active.Prog.IntVal(uint64(sourceLine), active.Prog.Uint32()),
 			)
-			active.Store(
-				recvOKSlot,
-				active.BinOp(
-					token.EQL,
-					status,
-					active.Prog.IntVal(coroChanResumeRecvOK, active.Prog.Uint32()),
-				),
-			)
-			return active.BinOp(
-				token.EQL, status, active.Prog.IntVal(coroChanResumeInvalid, active.Prog.Uint32()),
+			return prepareCoroChanAfterBufferTry(
+				active,
+				fastStatus,
+				coroChanResumeRecvOK,
+				func(retry llssa.Builder) llssa.Expr {
+					park := p.pkg.NewFunc(coroChanRecvTryParkHookV2, coroChanTryParkSignatureV2(), llssa.InC)
+					return retry.Call(
+						park.Expr,
+						body.task,
+						body.coro.Handle(),
+						retry.Convert(retry.Prog.VoidPtr(), body.header),
+						retry.Convert(retry.Prog.VoidPtr(), channel),
+						retry.Convert(retry.Prog.VoidPtr(), elem),
+						retry.Convert(retry.Prog.VoidPtr(), state),
+						retry.Prog.IntVal(retry.Prog.SizeOf(elemType), retry.Prog.Uintptr()),
+						retry.Prog.IntVal(uint64(stateID), retry.Prog.Uint32()),
+						retry.Prog.IntVal(uint64(sourceLine), retry.Prog.Uint32()),
+					)
+				},
+				func(observe llssa.Builder, status llssa.Expr) {
+					observe.Store(
+						recvOKSlot,
+						observe.BinOp(
+							token.EQL,
+							status,
+							observe.Prog.IntVal(coroChanResumeRecvOK, observe.Prog.Uint32()),
+						),
+					)
+				},
 			)
 		},
 		resume: func(resume llssa.Builder) llssa.Expr {

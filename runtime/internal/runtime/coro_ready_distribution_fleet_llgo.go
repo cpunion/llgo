@@ -20,6 +20,10 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
+// Keep the stack-scoped target capability at two machine-independent words.
+// Native's fixed fleet routes must remain representable by its compact cache.
+const _ uint16 = coro.ExecutorFleetCapacity
+
 func coroTargetReadyDistributionFailV1(message string) bool {
 	coroRuntimeAbort(message)
 	return false
@@ -78,9 +82,11 @@ func coroTargetBeginRunSliceV1(
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return coroRunTargetCapabilityV1{}, false
 	}
-	if _, ok := coroTargetReadyDistributionDomainV1(source, driver); !ok {
+	sourceDomain, route, ok := coroNativeFleetExecutionDomainV1(driver)
+	if !ok || sourceDomain.pOwnerV1() != source {
 		return coroRunTargetCapabilityV1{}, false
 	}
+	target.sourceRoute = uint16(route)
 	policy := &coroNativeFleetPhysicalOwnerV1State.policyEpoch
 	for {
 		epoch := coroNativeAtomicLoadV1(policy)
@@ -136,9 +142,12 @@ func coroTargetRefreshRunSliceV1(target coroRunTargetCapabilityV1) (distribute, 
 // frozen before any peer M starts, and the program coordinator joins all peer
 // Ms before route close; the fleet's route producer lease therefore needs no
 // additional target-ingress lease around this short publish/request/ring tail.
-func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDriver) bool {
+func coroTargetAfterStableRunActionV1(
+	target coroRunTargetCapabilityV1,
+	source *coro.P,
+) bool {
 	state := &coroNativeFleetV1State
-	if source == nil || driver == nil {
+	if source == nil {
 		return coroTargetReadyDistributionFailV1("native ready distribution lacks source owner")
 	}
 	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
@@ -150,8 +159,16 @@ func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDrive
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return coroTargetReadyDistributionFailV1("native ready distribution fleet is not active")
 	}
-	sourceDomain, ok := coroTargetReadyDistributionDomainV1(source, driver)
-	if !ok {
+	route := uint32(target.sourceRoute)
+	if route == 0 || route > state.domainCount {
+		return coroTargetReadyDistributionFailV1("native ready distribution source route invalid")
+	}
+	// coroTargetBeginRunSliceV1 froze this domain under the same stack-scoped
+	// runner capability. DistributePNeutralRunnable independently revalidates
+	// the exact fleet handle, active slot, and source P before any mutation.
+	sourceDomain := &state.domains[route-1]
+	if sourceDomain.lifecycle != coroNativeFleetDomainActiveV1 ||
+		sourceDomain.pOwnerV1() != source || sourceDomain.handle.Route != route {
 		return coroTargetReadyDistributionFailV1("native ready distribution source route mismatch")
 	}
 	distribution, distributed := state.fleet.DistributePNeutralRunnable(
@@ -193,15 +210,15 @@ func coroTargetPublishReadyDistributionV1(
 // must have published exact runnable demand, so a producer which wakes a peer
 // and then keeps computing never captures that peer behind itself.
 func coroTargetAfterSourceReductionV1(
+	target coroRunTargetCapabilityV1,
 	source *coro.P,
-	driver *coro.ExecutorDriver,
 	progress coro.ExecutorPollProgress,
 ) (distributed, ok bool) {
 	if !progress.Complete || progress.Promoted == 0 {
 		return false, true
 	}
 	state := &coroNativeFleetV1State
-	if source == nil || driver == nil {
+	if source == nil {
 		return false, coroTargetReadyDistributionFailV1("native source distribution lacks source owner")
 	}
 	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
@@ -210,8 +227,13 @@ func coroTargetAfterSourceReductionV1(
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return false, coroTargetReadyDistributionFailV1("native source distribution fleet is not active")
 	}
-	sourceDomain, ok := coroTargetReadyDistributionDomainV1(source, driver)
-	if !ok {
+	route := uint32(target.sourceRoute)
+	if route == 0 || route > state.domainCount {
+		return false, coroTargetReadyDistributionFailV1("native source distribution source route invalid")
+	}
+	sourceDomain := &state.domains[route-1]
+	if sourceDomain.lifecycle != coroNativeFleetDomainActiveV1 ||
+		sourceDomain.pOwnerV1() != source || sourceDomain.handle.Route != route {
 		return false, coroTargetReadyDistributionFailV1("native source distribution route mismatch")
 	}
 	distribution, accepted := state.fleet.DistributeMaterializedRunnableToPreferredRoute(

@@ -2112,3 +2112,137 @@ time `cpunion/llvm-coro` is 101 `xgo-dev/main` commits behind (merge base
 this focused change, synchronize the branch with current upstream main, run all
 repository and selected GOROOT tests, and repeat the performance measurements
 on the synchronized tree.
+
+### Synchronous-return receipt checkpoint
+
+The 2026-08-24 follow-up profiles the remaining exact-static await path after
+the static-outcome and tail-forward work above. LLVM 22 optimization remarks
+confirm that the `sync.WaitGroup.Add` and `sync.WaitGroup.Wait` child frames
+already satisfy `coro_elide_safe` and are elided. Raising the global
+`coro-elide-branch-ratio` therefore does not address the remaining cost and was
+rejected. The hot serial path still publishes the runtime frame, consumes the
+inline-start capability, completes the child, and performs the finish plus
+destroy/consume transaction even when the child returns during its first
+resume.
+
+The retained change narrows those transactions without weakening the generic
+paths:
+
+- the initial-decision helper consumes the exact private receipt produced by
+  inline-prepare instead of repeating the complete lifecycle audit;
+- inline depth is the frozen root/child discriminator for completion prepare;
+- the ordinary `Return` finish and physical destroy/consume paths have compact
+  receipts, while panic, recovery, cancellation, and suspension retain the
+  complete compatibility transaction;
+- destroying a synchronously returned borrowed child unlinks and retires its
+  metadata without clearing it a second time; the next publish initializes the
+  complete borrowed frame before reuse.
+
+A split of the prepare helper itself was measured and fully reverted: it added
+28,784 bytes of Mach-O `__text`, 65,792 file bytes, and about 0.22% retired
+instructions in the high-concurrency case despite a small serial improvement.
+The global elision-threshold variants were likewise discarded. These negative
+results are part of the gate: further helper splitting must improve both the
+serial lifecycle and the concurrent path, or be rejected.
+
+The retained full-LTO/O3 core executable changes as follows:
+
+| Metric | parent | retained candidate | delta |
+| --- | ---: | ---: | ---: |
+| stripped file bytes | 4,602,544 | 4,569,808 | -32,736 (-0.71%) |
+| Mach-O `__text` bytes | 2,524,616 | 2,504,444 | -20,172 (-0.80%) |
+
+Staged `/usr/bin/time -lp` hardware-counter comparisons attribute about 1.0%
+fewer retired instructions to the serial exact-static lifecycle and about
+0.18% fewer to the high-concurrency case; no retained stage showed an
+instruction regression. Cycle counts moved in the same direction but remain
+too sensitive to the loaded host to use as a release threshold.
+
+Nine AB/BA-interleaved same-source process runs against Go 1.26.5 produced the
+following internal-elapsed medians. Ratios are more reliable than the absolute
+times because the host remained loaded throughout the run.
+
+| Workload | Go | LLGo | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| scalar compute, 5,000,000 iterations | 12.621 ms | 11.680 ms | 0.93x |
+| buffered channel, 1,000,000 operations | 30.453 ms | 30.997 ms | 1.02x |
+| two-ready-case `select`, 500,000 operations | 57.077 ms | 38.901 ms | 0.68x |
+| spawn 100 goroutines x 100 rounds | 2.069 ms | 2.886 ms | 1.40x |
+| spawn one goroutine x 1,000,000 rounds | 0.463 s | 2.656 s | 5.73x |
+| spawn 10,000 goroutines x 100 rounds | 613.0 ms | 364.1 ms | 0.59x |
+| unbuffered handoff, 5,000 operations | 1.746 ms | 1.459 ms | 0.84x |
+| timers, 100 x 10 expirations | 12.102 ms | 13.950 ms | 1.15x |
+
+The result separates scheduler throughput from per-lifecycle latency. Static
+compute, ready select, handoff, and bulk-concurrency scheduling now match or
+beat Go on this checkpoint; buffered channels are effectively tied and timers
+remain about 15% slower. The dominant core weakness is repeatedly creating one
+short goroutine and waiting for it before creating the next. That workload
+cannot amortize publication, initial suspend/resume, completion, and physical
+destroy, and remains 5.73x Go even though a million goroutines issued in large
+batches complete 1.68x faster than Go.
+
+The next architectural optimization is therefore a lazy synchronous prefix:
+start an exact-static coroutine body before publishing a physical continuation
+and materialize/link the LLVM frame only if execution actually suspends. It
+must be represented in the frozen physical plan and preserve the generic
+dynamic-call, panic, cancellation, preemption, and debugger paths. More global
+elision tuning or runtime helper proliferation is not an acceptable substitute.
+
+Validation on the retained source includes the complete
+`runtime/internal/coro` package, the focused compiler coroutine suite, five
+production `internal/build` plan/codegen/E2E gates, and full-LTO/O3 execution of
+buffered channel, select, handoff, timer, and parked-task modes. The ordinary
+standard-library I/O fixture also passes with `GOMAXPROCS=1`: 500 `os.File`
+round trips, 5,000 direct-syscall round trips, the sole-M blocking-pipe/timer
+compensation gate, and 500 loopback TCP round trips. The full runtime module
+has only the two already-recorded timer source-string gate mismatches; no new
+runtime semantic failure was introduced by this checkpoint.
+
+### Rejected eager-initial-suspend experiment
+
+The first implementation attempt after the receipt checkpoint made a proven
+exact-static callee enter its source body directly from the LLVM coroutine ramp
+instead of taking the initial suspend. This experiment is deliberately absent
+from the retained implementation. It skipped one scheduler transition, but it
+still allocated and published the LLVM frame before running source code, so it
+did not implement the required lazy materialization boundary.
+
+The unbounded compile-time selection increased the stripped core executable by
+12.0% and Mach-O `__text` by 19.2%; full LTO expanded several standard-library
+coroutine ramps by tens of kilobytes. Limiting the cohort to acyclic functions
+with at most 16 frozen SSA instructions reduced the growth, but still produced
+4,654,432 file bytes (+1.85%) and 2,565,504 text bytes (+2.44%) relative to the
+4,569,808-byte / 2,504,444-byte receipt checkpoint.
+
+Seven AB/BA-interleaved runs also failed the throughput gate. Relative to the
+receipt checkpoint, the bounded candidate was 3.68% slower for one million
+serial spawn-and-wait operations, 4.90% slower for scalar compute, 1.59% slower
+for ready `select`, and 1.39% slower for spawn 100 x 100. Buffered channels
+improved by 3.64%, unbuffered handoff by 1.33%, and timers were effectively
+unchanged (-0.11%). The serial weakness could not improve because spawn roots
+were excluded from the safe-use-closed cohort.
+
+The conditional-initial-suspend builder API, fourth frame-publication ABI,
+ramp-specific await helper, plan/summary/archive fields, and their tests were
+therefore removed together. The retained schemas remain plan digest v35,
+function summary v9, and library-effect summary v9. A replacement must meet a
+stronger architecture gate: create an independent child G, run its proven
+synchronous prefix on the current P, and allocate/publish/enqueue a continuation
+only if the child actually suspends. Mixed or dynamic uses may receive an
+adapter plus an eager entry, but the semantic ProgramIR and effect analysis must
+remain shared. The release gate is less than 1% unjustified text growth, a
+material serial-spawn improvement, no core regression outside measurement
+noise, and preservation of panic, Goexit, cancellation, I/O, deep nesting, and
+ordinary generic-call behavior.
+
+The clean post-removal rebuild produces 4,553,296 file bytes and 2,496,352
+Mach-O text bytes. Replaying the same current runtime source through the frozen
+receipt-checkpoint compiler produces 4,569,792 file bytes and exactly 2,504,444
+text bytes, proving that the rejected ABI was not needed to recover the old
+result. The newer retained physical planner removes only two additional symbols
+from the linked symbol set, the `time.loadTzinfo` ramp and destroy entry. Seven
+AB/BA serial-spawn runs had medians of 900.976 ms for the clean rebuild and
+901.914 ms for the replay (-0.10%, measurement noise), while every bounded core
+workload mode completed successfully. Thus the cleanup restores throughput and
+improves rather than regresses the size gate.

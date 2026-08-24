@@ -302,8 +302,8 @@ func TestCoroManagedDispatchSpawnNativeAndWasm32CoroSplit(t *testing.T) {
 			if got := strings.Count(launcherIR, "call void @"+coroSpawnCommitHookV1); got != 1 {
 				t.Fatalf("captured launcher spawn commit calls = %d, want one:\n%s", got, launcherIR)
 			}
-			if strings.Count(launcherIR, "call void @"+coroFaultPrepareHookV1) < 2 {
-				t.Fatalf("captured launcher FreeVar cell loads lack explicit nil-fault edges:\n%s", launcherIR)
+			if strings.Count(launcherIR, "call void @"+coroFaultPrepareHookV1) < 1 {
+				t.Fatalf("captured launcher dispatch lacks its explicit nil-fault edge:\n%s", launcherIR)
 			}
 			if !strings.Contains(launcherIR, "coro.dispatch.capability.missing") ||
 				!strings.Contains(launcherIR, "call void @llvm.trap()") {

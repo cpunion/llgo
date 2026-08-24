@@ -1191,11 +1191,41 @@ func beginExecutorRunDirectChannelContinuation(p *P, g *G, peerRunnable bool) (A
 }
 
 func beginExecutorRunContinuation(p *P, g *G, peerRunnable bool) (Action, bool) {
+	if g != nil && g.runAction == ActionCheckResume {
+		// pauseExecutorRunAction and CommitSpawnCompiler publish this exact
+		// scheduler-private continuation receipt only after validating the
+		// complete G/ParkState/frame tuple. The bounded selector has just
+		// consumed its ready-queue ownership and no producer can mutate the
+		// owner-only fields before this adjacent begin. Retain the asynchronous
+		// preemption gate, the handle consumed below, and the schedule word; the
+		// remaining graph checks belong to the publication boundary rather than
+		// every resume.
+		if p == nil || !gPreemptEnabledAtDepthZero(g) ||
+			g.active == nil || g.active.handle == nil {
+			return Action{}, false
+		}
+		schedule := preemptLoad(&p.schedule)
+		if schedule != scheduleIdle && schedule != scheduleRequested {
+			return Action{}, false
+		}
+		handle := g.active.handle
+		budget := servicePreemptSafepointBudget
+		if peerRunnable {
+			budget = preemptCheckpointStride
+		}
+		p.current = g
+		p.servicePreemptBudget = budget
+		g.state = GRunning
+		g.runP = p
+		g.runAction = ActionInvalid
+		action := Action{Kind: ActionCheckResume, Handle: handle}
+		p.action = action
+		return action, true
+	}
 	if p == nil || g == nil || p.current != nil || p.inResume || p.inlineAwaitDepth != 0 ||
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		p.servicePreemptBudget != 0 || g.magic != gMagic || g.state != GRunnable ||
-		(g.runAction != ActionCheckResume &&
-			(g.runAction != ActionInvalid || g.park.phase != parkMaterialized)) ||
+		(g.runAction != ActionInvalid || g.park.phase != parkMaterialized) ||
 		g.queued || g.nextReady != nil || g.waiting ||
 		g.runP != nil || g.transferState != runnableTransferGIdle ||
 		!gPreemptEnabledAtDepthZero(g) || g.active == nil || g.active.handle == nil ||
@@ -1218,6 +1248,51 @@ func beginExecutorRunContinuation(p *P, g *G, peerRunnable bool) (Action, bool) 
 	g.runP = p
 	g.runAction = ActionInvalid
 	action := Action{Kind: ActionCheckResume, Handle: handle}
+	p.action = action
+	return action, true
+}
+
+// beginExecutorRunDestroyContinuation consumes the scheduler-private receipt
+// published by pauseExecutorRunAction for a queued done/destroy or panic-unwind
+// continuation. The bounded selector has just removed that exact G from its
+// owner-only ready queue; replaying BeginRunG's arbitrary-G park, spawn and
+// frame-graph audit would duplicate the publication boundary.
+//
+// Task cancellation and preemption are the two facts which may change after
+// publication, so they remain explicit gates. The exact destroy handle is
+// loaded only after those gates and is installed directly into the adjacent
+// no-return physical action interval.
+func beginExecutorRunDestroyContinuation(p *P, g *G, peerRunnable bool) (Action, bool) {
+	if p == nil || g == nil || queuedDestroyBlockedByTaskCancellation(g) ||
+		!gPreemptEnabledAtDepthZero(g) || g.destroyTarget == nil ||
+		g.destroyTarget.handle == nil {
+		return Action{}, false
+	}
+	kind := g.runAction
+	var state GState
+	switch kind {
+	case ActionCheckDestroy:
+		state = GDispatching
+	case ActionPanicDestroy:
+		state = GPanicking
+	default:
+		return Action{}, false
+	}
+	schedule := preemptLoad(&p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested {
+		return Action{}, false
+	}
+	handle := g.destroyTarget.handle
+	budget := servicePreemptSafepointBudget
+	if peerRunnable {
+		budget = preemptCheckpointStride
+	}
+	p.current = g
+	p.servicePreemptBudget = budget
+	g.state = state
+	g.runP = p
+	g.runAction = ActionInvalid
+	action := Action{Kind: kind, Handle: handle}
 	p.action = action
 	return action, true
 }

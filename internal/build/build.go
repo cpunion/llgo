@@ -5255,6 +5255,8 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		"CoroChanSelectTry",
 		"CoroChanSelectPark",
 		"CoroChanSelectResume",
+		coroChanSendBufferTrySymbolV1,
+		coroChanRecvBufferTrySymbolV1,
 		coroChanSendTryParkSymbolV2,
 		coroChanRecvTryParkSymbolV2,
 		coroChanResumeSymbolV2,
@@ -5721,6 +5723,17 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine run-decision ABI %q must have exact func(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) signature", name)
 				}
+			}
+		}
+		if name == coroChanSendBufferTrySymbolV1 || name == coroChanRecvBufferTrySymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 3 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel buffer-try ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 signature", name)
 			}
 		}
 		if name == coroChanSendTryParkSymbolV2 || name == coroChanRecvTryParkSymbolV2 {
@@ -8667,6 +8680,9 @@ func emitObjectToMemoryBuffer(ctx *context, pkg llssa.Package) (gllvm.MemoryBuff
 		buf = gllvm.WriteFullLTOBitcodeToMemoryBuffer(pkg.Module(), ctx.buildConf.Goos != "darwin")
 		kind = "in-memory LLVM full LTO bitcode emission"
 	case lto.Thin:
+		if err := prepareThinLTOEmission(ctx, pkg.Module()); err != nil {
+			return gllvm.MemoryBuffer{}, "", err
+		}
 		buf = gllvm.WriteThinLTOBitcodeToMemoryBuffer(pkg.Module())
 		kind = "in-memory LLVM ThinLTO bitcode emission"
 	default:
@@ -8676,6 +8692,31 @@ func emitObjectToMemoryBuffer(ctx *context, pkg llssa.Package) (gllvm.MemoryBuff
 		}
 	}
 	return buf, kind, nil
+}
+
+// prepareThinLTOEmission gives every anonymous global a stable module-local
+// name before LLVM builds the ThinLTO summary. LLGo deliberately materializes
+// string and constant storage as anonymous private globals. LLVM 22's ThinLTO
+// writer accepts such IR far enough to encode an unnamed summary record, but
+// the importer later assumes that every local GlobalValue has a name and can
+// crash in FunctionImportGlobalProcessing::processGlobalsForThinLTO. Run this
+// as the final pre-emission normalization so globals created after the regular
+// optimization pipeline are covered as well.
+func prepareThinLTOEmission(ctx *context, mod gllvm.Module) error {
+	if ctx == nil || ctx.prog == nil || mod.IsNil() {
+		return errors.New("prepare ThinLTO emission: missing build context or module")
+	}
+	options := gllvm.NewPassBuilderOptions()
+	defer options.Dispose()
+	if err := mod.RunPasses("name-anon-globals", ctx.prog.TargetMachine(), options); err != nil {
+		return fmt.Errorf("prepare ThinLTO emission: name anonymous globals: %w", err)
+	}
+	for global := mod.FirstGlobal(); !global.IsNil(); global = gllvm.NextGlobal(global) {
+		if global.Name() == "" {
+			return errors.New("prepare ThinLTO emission: anonymous global remains after name-anon-globals")
+		}
+	}
+	return nil
 }
 
 func writeObjectBufferToFile(ctx *context, pkgPath, exportFile string, buf gllvm.MemoryBuffer, kind string) (string, error) {

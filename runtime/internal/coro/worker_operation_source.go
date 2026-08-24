@@ -927,7 +927,29 @@ func (source *WorkerOperationSource) Recycle(p *P, id OperationID) bool {
 	slot.nextAffected = 0
 	slot.submitted = false
 	preemptStore(&slot.mailbox, uint32(workerOperationMailboxEmpty))
-	return recycleProducerSourceSlot(&slot.producerSourceSlot)
+	if !recycleProducerSourceSlot(&slot.producerSourceSlot) {
+		return false
+	}
+	if id.LocalSlot() == source.scanLimit {
+		for source.scanLimit != 0 {
+			last, ok := workerOperationSlotAt(source, source.scanLimit-1)
+			if !ok {
+				return false
+			}
+			if producerSourceLifecycle(preemptLoad(&last.state)) != producerSourceFree {
+				break
+			}
+			source.scanLimit--
+		}
+		if source.scanLimit == 0 {
+			// Post publishes pending after its mailbox. A pass may consume that
+			// mailbox after clearing pending but after the producer republishes the
+			// advisory bit. Reaching a zero live prefix after producer quiescence
+			// proves that no worker fact remains and makes that late hint stale.
+			preemptStore(&source.pending, 0)
+		}
+	}
+	return true
 }
 
 func workerOperationSourceEmpty(source *WorkerOperationSource, owner *P) bool {

@@ -44,15 +44,22 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 	if raw == nil {
 		return nil, false
 	}
-	child, _, actualSize, allocationOK := coroTaskAllocationAt(raw)
-	if !allocationOK || actualSize != allocationSize || !coro.BeginSpawnCompiler(parent, child, raw, taskSize) {
+	child, ctx, actualSize, allocationOK := coroTaskAllocationAt(raw)
+	if !allocationOK || actualSize != allocationSize {
 		coro.Zero(raw, allocationSize)
 		if !coroalloc.FreeTask(raw, allocationSize) {
 			return nil, false
 		}
 		return nil, false
 	}
-	if !coroBindTaskAllocationRuntimeContextCompiler(child, parent) {
+	if !coro.BeginSpawnCompilerLocal(parent, child, raw, taskSize, unsafe.Pointer(ctx)) {
+		coro.Zero(raw, allocationSize)
+		if !coroalloc.FreeTask(raw, allocationSize) {
+			return nil, false
+		}
+		return nil, false
+	}
+	if !coroInitializeTaskAllocationRuntimeContextCompiler(child, parent, ctx) {
 		rolled, rolledSize, ok := coro.RollbackSpawn(parent, child)
 		if !ok || rolled != raw || rolledSize != taskSize {
 			return nil, false
@@ -75,6 +82,40 @@ func coroSpawnCommitV1(parentPointer, childPointer, handle unsafe.Pointer) bool 
 // retirement. A platform producer may retain only a POD operation handle, never
 // a child G pointer. The durable source owns that handle until it is quiesced
 // and retired.
+func coroFinishCompletedTaskRelease(
+	g *coroG,
+	local, raw unsafe.Pointer,
+	taskSize uintptr,
+	owned, ok bool,
+) bool {
+	if !ok {
+		return false
+	}
+	if !coroReleaseRuntimeContext(g, local) {
+		return false
+	}
+	if !owned {
+		return raw == nil && taskSize == 0
+	}
+	_, _, allocationSize, allocationOK := coroTaskAllocationAt(raw)
+	if !allocationOK || raw != unsafe.Pointer(g) || taskSize != coro.TaskStorageSize() ||
+		allocationSize != coroTaskAllocationSize {
+		return false
+	}
+	return coroalloc.FreeTask(raw, allocationSize)
+}
+
+func coroReleaseCompletedTaskReceipt(
+	g *coroG,
+	receipt coro.CompletedTaskReleaseReceipt,
+) bool {
+	local, raw, taskSize, owned, ok := coro.ReleaseCompletedTaskReceipt(receipt)
+	if ok {
+		return coroFinishCompletedTaskRelease(g, local, raw, taskSize, owned, true)
+	}
+	return coroReleaseCompletedTask(g)
+}
+
 func coroReleaseCompletedTask(g *coroG) bool {
 	// A compiler resume gate turns task cancellation into ordinary terminal
 	// frame completion after source-specific park cleanup. The cancellation
@@ -87,21 +128,8 @@ func coroReleaseCompletedTask(g *coroG) bool {
 			return false
 		}
 		local, raw, taskSize, owned, ok = coro.ReleaseCompletedTaskCompiler(g)
-		if !ok {
-			return false
-		}
 	}
-	if !coroReleaseRuntimeContext(g, local) {
-		return false
-	}
-	if !owned {
-		return raw == nil && taskSize == 0
-	}
-	_, _, allocationSize, allocationOK := coroTaskAllocationAt(raw)
-	if !allocationOK || raw != unsafe.Pointer(g) || taskSize != coro.TaskStorageSize() {
-		return false
-	}
-	return coroalloc.FreeTask(raw, allocationSize)
+	return coroFinishCompletedTaskRelease(g, local, raw, taskSize, owned, ok)
 }
 
 //export __llgo_coro_spawn_begin_v1

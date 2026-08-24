@@ -43,6 +43,36 @@ func closeTaskControlFixture(t *testing.T, source *TaskControlSource, p *P, id O
 	}
 }
 
+func TestTaskControlRetireConsumesFinalPendingHint(t *testing.T) {
+	p, g := newReadyTaskCancelFixture(t)
+	var source TaskControlSource
+	if !BindTaskControlSource(&source, p) {
+		t.Fatal("bind task control source")
+	}
+	id, ok := RegisterTaskControl(&source, p, g)
+	if !ok || source.Post(id, TaskCancelAbort) != TaskControlPosted ||
+		!BeginCloseTaskControl(&source, p, id) {
+		t.Fatal("register, post, and close task control endpoint")
+	}
+	if delivered, discarded, passOK := source.PublishPass(p); !passOK || delivered != 1 || discarded != 0 {
+		t.Fatalf("publish final task-control request = (%d, %d, %t)", delivered, discarded, passOK)
+	}
+	// Model the advisory half of a request which the final owner pass already
+	// consumed before joining the admitted producer.
+	preemptStore(&source.pending, 1)
+	if !ConfirmTaskControlQuiesced(&source, p, id) || !RetireTaskControl(&source, p, id) ||
+		source.scanLimit != 0 || source.Pending() {
+		t.Fatalf("retired task-control prefix = %d, pending=%t", source.scanLimit, source.Pending())
+	}
+	if !UnbindTaskControlSource(&source, p) || !source.CanRelease() {
+		t.Fatal("release task control source after consumed pending hint")
+	}
+	if kind, claimed := ClaimTaskCancellation(p, g); !claimed || kind != TaskCancelAbort {
+		t.Fatalf("claim delivered task abort = (%d, %t)", kind, claimed)
+	}
+	finishTaskCancelFixture(t, p, g, TaskCancelAbort)
+}
+
 func TestTaskControlSourceDeliversStrongestRequestOnOwner(t *testing.T) {
 	if unsafe.Sizeof(OperationID{}) != 8 {
 		t.Fatalf("task control producer ID size = %d", unsafe.Sizeof(OperationID{}))

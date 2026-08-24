@@ -49,7 +49,11 @@ func coroHandleDestroyCommitted(g *coro.G, handle unsafe.Pointer) bool {
 
 //export __llgo_coro_await_inline_finish_v2
 func __llgo_coro_await_inline_finish_v2(g, parent, child unsafe.Pointer, done bool) bool {
-	switch coro.FinishInlineAwaitCompiler((*coro.G)(g), parent, child, done) {
+	task := (*coro.G)(g)
+	if done && coro.FinishInlineAwaitReturnCompiler(task, parent, child) {
+		return true
+	}
+	switch coro.FinishInlineAwait(task, parent, child, done) {
 	case coro.InlineAwaitSuspend:
 		return false
 	case coro.InlineAwaitDestroy:
@@ -137,13 +141,17 @@ type coroRunPolicyV1 struct {
 type coroRunTargetCapabilityV1 struct {
 	readyDistribution bool
 	physicalReturn    bool
+	sourceRoute       uint16
 	policyEpoch       uint32
 }
 
 // coroRuntimeContextActivationV1 distinguishes a physical-thread install from
-// a nested resume which borrows the same already-installed logical G. The
-// latter occurs when C synchronously calls Go while the parent LLVM resume is
-// still active below the C frame.
+// a nested resume which borrows the same already-installed logical G. For an
+// install, previous names the physical placeholder whose M now names the
+// logical G; for a borrow, previous names that already-installed logical G.
+// This lets leave consume enter's exact graph without looking taskLocal up a
+// second time. The latter case occurs when C synchronously calls Go while the
+// parent LLVM resume is still active below the C frame.
 type coroRuntimeContextActivationV1 struct {
 	previous unsafe.Pointer
 	borrowed bool
@@ -188,10 +196,10 @@ func coroRunPhysicalActionV1(
 			return next, advanced, committed, false
 		}
 		checkDestroy := next
-		if !coro.CanBeginIssuedExecutorDestroyAfterResume(driver, g, checkDestroy) {
+		if !coro.PrepareIssuedExecutorDestroyAfterResume(driver, g, checkDestroy) {
 			return checkDestroy, advanced, committed, false
 		}
-		next, ok = coro.BeginIssuedExecutorDestroyAfterResume(
+		next, ok = coro.FinishIssuedExecutorDestroyAfterResume(
 			driver, g, checkDestroy, coroHandleDone(checkDestroy.Handle),
 		)
 		if !ok {
@@ -333,13 +341,14 @@ func coroReduceExecutorRunActionPreparedV1(
 	} else if policy.lifecycle != nil {
 		return false, false
 	}
+	var releaseReceipt coro.CompletedTaskReleaseReceipt
 	if advanced && !committed && g == policy.main && returnRequested && next.Kind == coro.ActionCheckDestroy {
 		committed = coro.CommitExecutorRunCommandRootDestroy(driver, g, next)
 	} else if advanced && !committed && g == policy.main && running &&
 		coro.CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, g, next) {
 		committed = true
 	} else if advanced && !committed {
-		committed = coro.CommitExecutorRunAction(driver, g, next)
+		releaseReceipt, committed = coro.CommitExecutorRunActionCompiler(driver, g, next)
 	}
 	if !committed {
 		return false, false
@@ -379,7 +388,7 @@ func coroReduceExecutorRunActionPreparedV1(
 		} else {
 			distribute, stop, distributionOK = coroTargetReadyDistributionV1(target)
 		}
-		if !distributionOK || distribute && !coroTargetAfterStableRunActionV1(p, driver) {
+		if !distributionOK || distribute && !coroTargetAfterStableRunActionV1(target, p) {
 			return false, false
 		}
 		stopAfterStable = stop
@@ -416,7 +425,7 @@ func coroReduceExecutorRunActionPreparedV1(
 	case coro.ActionComplete:
 		isMain := g == policy.main
 		retireOwner := coro.ActionRetiresPhysicalOwner(next)
-		if !coroReleaseCompletedTask(g) {
+		if !coroReleaseCompletedTaskReceipt(g, releaseReceipt) {
 			return false, false
 		}
 		if isMain {
@@ -482,7 +491,7 @@ func coroReduceExecutorRunStepV1(
 			return false, false
 		}
 		if distribute {
-			distributed, targetOK = coroTargetAfterSourceReductionV1(p, driver, step.Poll)
+			distributed, targetOK = coroTargetAfterSourceReductionV1(target, p, step.Poll)
 		}
 		if !targetOK || distributed && !step.Poll.Complete ||
 			step.Poll.Complete && !coro.CommitExecutorRunSourceDistribution(driver, distributed) {

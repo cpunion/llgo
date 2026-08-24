@@ -21,11 +21,31 @@ package runtime
 import "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
 
 const (
-	mainExitedBit = uint64(1) << 63
-	gCountMask    = mainExitedBit - 1
+	mainExitedBit  = uint64(1) << 63
+	gCountMask     = mainExitedBit - 1
+	goidCacheBatch = uint64(16)
 )
 
-func nextGoid(gp *g) uint64 {
+func nextGoid(gp, owner *g) uint64 {
+	// Match Go's per-P id allocation shape. The owner is the currently running
+	// parent, not the G being initialized. A detached coroutine and bootstrap
+	// context have no physical P and use the global fallback.
+	if owner != nil {
+		mp := owner.m
+		if mp != nil && mp.curg == owner {
+			pp := mp.p
+			if pp != nil && pp.m == mp {
+				if pp.goidcache == pp.goidcacheend {
+					end := atomic.Add(&sched.goidgen, goidCacheBatch)
+					pp.goidcache = end - goidCacheBatch + 1
+					pp.goidcacheend = end + 1
+				}
+				id := pp.goidcache
+				pp.goidcache++
+				return id
+			}
+		}
+	}
 	return atomic.Add(&sched.goidgen, uint64(1))
 }
 

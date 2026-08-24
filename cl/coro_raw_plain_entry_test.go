@@ -354,7 +354,8 @@ func TestCoroExactManagedGoLinknameAliasNeedsNoRawPlainEntry(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	declarationPkg := testProg.addPackage(t, "example.com/coro/linkdecl", `package linkdecl
 func runtimeHook(value uint32) uint32
-func Root(value uint32) uint32 { return runtimeHook(value) }
+func Forward(value uint32) uint32 { return runtimeHook(value) }
+func Root(value uint32) uint32 { return Forward(value) + 1 }
 `)
 	definitionPkg := testProg.addPackage(t, "example.com/coro/linkdef", `package linkdef
 //go:linkname implementation example.com/coro/linkdecl.runtimeHook
@@ -418,6 +419,12 @@ func implementation(value uint32) uint32 { return value + 1 }
 		t.Fatalf("implementation plan = %+v, present=%t raw-variant=%t; want one managed coroutine primary",
 			implementationPlan, ok, plan.HasRawPlainVariant(implementation))
 	}
+	forward := declarationPkg.ssa.Func("Forward")
+	forwardPlan, ok := plan.FunctionPlan(forward)
+	if !ok || forwardPlan.Emission != coro.EmitCoroutine || forwardPlan.Primary != coro.PrimaryCoroutine {
+		prog.Dispose()
+		t.Fatalf("Forward plan = %+v, present=%t; want one managed coroutine primary", forwardPlan, ok)
+	}
 	// A dynamically transported reference to the same canonical body publishes
 	// a descriptor for the managed primary. The exact declaration/definition
 	// alias remains a managed Go symbol; only validation without the frozen
@@ -479,6 +486,31 @@ func implementation(value uint32) uint32 { return value + 1 }
 	declarationEntry := declarationModule.NamedFunction(baseName + coroPrimarySuffix)
 	if declarationEntry.IsNil() || !declarationEntry.FirstBasicBlock().IsNil() {
 		t.Fatalf("bodyless go:linkname declaration archive did not retain a declaration-only canonical coroutine entry:\n%s", declarationModule.String())
+	}
+	forwardPhysical, err := universe.coroProgramIR.physicalFunctionPlan(
+		forward, universe.ownerOf(forward),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forwardPhysical.tailForward == nil || forwardPhysical.tailForward.target != implementation {
+		t.Fatalf("managed go:linkname Forward tail-forward = %+v; want exact implementation target", forwardPhysical.tailForward)
+	}
+	forwardEntry := declarationModule.NamedFunction("example.com/coro/linkdecl.Forward" + coroPrimarySuffix)
+	if forwardEntry.IsNil() {
+		t.Fatalf("managed go:linkname Forward coroutine entry is absent:\n%s", declarationModule.String())
+	}
+	forwardBody := forwardEntry.String()
+	if strings.Contains(forwardBody, "llvm.coro.") ||
+		strings.Contains(forwardBody, coroFrameAllocHookV1) ||
+		strings.Contains(forwardBody, coroAwaitPrepareInlineHookV4) ||
+		strings.Count(forwardBody, "call ptr") != 1 || !strings.Contains(forwardBody, "ret ptr") {
+		t.Fatalf("managed go:linkname Forward retained a frame/await instead of one tail call:\n%s", forwardBody)
+	}
+	for _, suffix := range []string{".resume", ".destroy"} {
+		if !declarationModule.NamedFunction("example.com/coro/linkdecl.Forward" + coroPrimarySuffix + suffix).IsNil() {
+			t.Fatalf("frame-free managed go:linkname Forward acquired %s entry:\n%s", suffix, declarationModule.String())
+		}
 	}
 	rootBody := declarationModule.NamedFunction("example.com/coro/linkdecl.Root" + coroPrimarySuffix).String()
 	if !strings.Contains(rootBody, "runtimeHook$coro") || strings.Contains(rootBody, "runtimeHook\"(") {

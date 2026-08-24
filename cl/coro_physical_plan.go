@@ -58,6 +58,7 @@ const (
 	coroPhysicalInstructionFrameBitcastAllocation
 	coroPhysicalInstructionFrameAllocaBytes
 	coroPhysicalInstructionHeapCStr
+	coroPhysicalInstructionImmutableCaptureLoad
 )
 
 func (recipe coroPhysicalInstructionRecipe) String() string {
@@ -106,6 +107,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "frame-alloca-bytes"
 	case coroPhysicalInstructionHeapCStr:
 		return "heap-cstr"
+	case coroPhysicalInstructionImmutableCaptureLoad:
+		return "immutable-capture-load"
 	default:
 		return fmt.Sprintf("physical-recipe(%d)", uint8(recipe))
 	}
@@ -332,6 +335,7 @@ type coroPhysicalInstructionPlan struct {
 	boundsGuard               bool
 	boundsDisabled            bool
 	rawInterfaceReceiver      bool
+	captureSnapshot           int
 }
 
 func (plan coroPhysicalInstructionPlan) mayFault() bool {
@@ -369,7 +373,8 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		}
 	}
 	switch plan.recipe {
-	case coroPhysicalInstructionFieldAddr, coroPhysicalInstructionDeref:
+	case coroPhysicalInstructionFieldAddr, coroPhysicalInstructionDeref,
+		coroPhysicalInstructionImmutableCaptureLoad:
 		if helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
 			return true
 		}
@@ -444,17 +449,135 @@ type coroPhysicalFunctionPlan struct {
 	staticOutcome     bool
 	reachableBlocks   map[*ssa.BasicBlock]bool
 	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
+	captureSnapshots  []coroPhysicalCaptureSnapshot
+}
+
+// coroPhysicalCaptureSnapshot is the target-bounded physical projection of an
+// SSA immutable-capture proof. The public closure ABI remains {fn, env} and its
+// environment retains ordinary pointer-to-cell fields; only the physical body
+// snapshots this small proven-stable value before execution or initial
+// suspension. loads is exact source identity, never a codegen rediscovery.
+type coroPhysicalCaptureSnapshot struct {
+	index int
+	free  *ssa.FreeVar
+	loads map[*ssa.UnOp]none
+}
+
+func planCoroPhysicalCaptureSnapshots(
+	audit *coroPhysicalPureSSAAudit,
+) ([]coroPhysicalCaptureSnapshot, map[*ssa.UnOp]int, error) {
+	if audit == nil || audit.fn == nil || audit.ctx == nil || audit.ctx.prog == nil {
+		return nil, nil, nil
+	}
+	proofs := coro.ProveSSAImmutableCaptureSnapshots(audit.fn)
+	if len(proofs) == 0 {
+		return nil, nil, nil
+	}
+	maximumSize := uint64(2 * audit.ctx.prog.PointerSize())
+	snapshots := make([]coroPhysicalCaptureSnapshot, 0, len(proofs))
+	loads := make(map[*ssa.UnOp]int)
+	for _, proof := range proofs {
+		if proof.Index < 0 || proof.Index >= len(audit.fn.FreeVars) ||
+			proof.FreeVar != audit.fn.FreeVars[proof.Index] {
+			return nil, nil, fmt.Errorf("immutable capture proof has an invalid free-variable identity")
+		}
+		pointer, ok := types.Unalias(audit.typeOf(proof.FreeVar.Type())).Underlying().(*types.Pointer)
+		if !ok {
+			return nil, nil, fmt.Errorf("immutable capture %d is not pointer typed", proof.Index)
+		}
+		if err := validateCoroPhysicalSSAValueType(pointer.Elem()); err != nil {
+			continue
+		}
+		physical := audit.ctx.type_(pointer.Elem(), llssa.InGo)
+		size := audit.ctx.prog.SizeOf(physical)
+		// A snapshot trades repeated indirection for one frame value. Keep this
+		// target-bounded and compact: larger captures retain ordinary shared-cell
+		// lowering until a cost model can account for their copy/frame pressure.
+		if size == 0 || size > maximumSize {
+			continue
+		}
+		snapshot := coroPhysicalCaptureSnapshot{
+			index: proof.Index,
+			free:  proof.FreeVar,
+			loads: make(map[*ssa.UnOp]none),
+		}
+		for _, load := range proof.Loads {
+			if load == nil || load.Parent() != audit.fn || load.X != proof.FreeVar ||
+				load.Op != token.MUL || load.Block() == nil {
+				return nil, nil, fmt.Errorf("immutable capture %d has an invalid source load", proof.Index)
+			}
+			if !audit.reachableBlocks[load.Block()] {
+				continue
+			}
+			if previous, duplicate := loads[load]; duplicate && previous != proof.Index {
+				return nil, nil, fmt.Errorf("immutable capture load belongs to two snapshots")
+			}
+			snapshot.loads[load] = none{}
+			loads[load] = proof.Index
+		}
+		if len(snapshot.loads) != 0 {
+			snapshots = append(snapshots, snapshot)
+		}
+	}
+	if len(snapshots) == 0 {
+		return nil, nil, nil
+	}
+	return snapshots, loads, nil
+}
+
+func (plan *coroPhysicalFunctionPlan) validateCaptureSnapshots() error {
+	if plan == nil || plan.function == nil {
+		return fmt.Errorf("immutable capture validation requires one physical function plan")
+	}
+	expected := make(map[*ssa.UnOp]int)
+	previous := -1
+	for _, snapshot := range plan.captureSnapshots {
+		if snapshot.index <= previous || snapshot.index < 0 ||
+			snapshot.index >= len(plan.function.FreeVars) ||
+			snapshot.free != plan.function.FreeVars[snapshot.index] || len(snapshot.loads) == 0 {
+			return fmt.Errorf("immutable capture snapshot has an invalid frozen identity")
+		}
+		previous = snapshot.index
+		for load := range snapshot.loads {
+			if load == nil || load.Parent() != plan.function || load.X != snapshot.free ||
+				load.Op != token.MUL || !plan.reachableBlocks[load.Block()] {
+				return fmt.Errorf("immutable capture %d has an invalid frozen load", snapshot.index)
+			}
+			if _, duplicate := expected[load]; duplicate {
+				return fmt.Errorf("immutable capture load was frozen more than once")
+			}
+			expected[load] = snapshot.index
+			instruction, present := plan.instructions[load]
+			if !present || instruction.recipe != coroPhysicalInstructionImmutableCaptureLoad ||
+				instruction.captureSnapshot != snapshot.index || instruction.nilGuard {
+				return fmt.Errorf("immutable capture %d load has no matching physical recipe", snapshot.index)
+			}
+		}
+	}
+	for source, instruction := range plan.instructions {
+		if instruction.recipe != coroPhysicalInstructionImmutableCaptureLoad {
+			continue
+		}
+		load, ok := source.(*ssa.UnOp)
+		index, expectedLoad := expected[load]
+		if !ok || !expectedLoad || instruction.captureSnapshot != index {
+			return fmt.Errorf("physical immutable-capture recipe has no frozen source proof")
+		}
+	}
+	return nil
 }
 
 // coroPhysicalTailForwardArgument is one frozen source-to-target parameter
 // recipe for a coroutine ramp that can be represented by another ramp. Exactly
 // one arm is selected: sourceParameter indexes the forwarding function's
-// physical source parameters, while constant retains one immutable SSA
-// literal and its exact target parameter type.
+// physical source parameters and may carry one proven representation-identical
+// retag, while constant retains one immutable SSA literal and its exact target
+// parameter type.
 type coroPhysicalTailForwardArgument struct {
 	sourceParameter int
 	constant        *ssa.Const
 	targetType      types.Type
+	retag           bool
 }
 
 // coroPhysicalTailForwardPlan proves that a source function contributes no
@@ -473,6 +596,7 @@ type coroPhysicalTailForwardPlan struct {
 func (plan *coroPhysicalTailForwardPlan) validate(
 	function *ssa.Function,
 	whole *coro.SSAPlan,
+	universe *EmissionUniverse,
 ) error {
 	if plan == nil || function == nil || whole == nil || plan.target == nil ||
 		plan.target == function || plan.targetID == "" || len(plan.target.FreeVars) != 0 {
@@ -506,14 +630,23 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 			return fmt.Errorf("tail-forward argument %d has an invalid frozen recipe", index)
 		}
 		if parameter {
-			if argument.sourceParameter >= sourceSig.Params().Len() ||
-				!types.Identical(
-					sourceSig.Params().At(argument.sourceParameter).Type(),
-					argument.targetType,
-				) {
+			if argument.sourceParameter >= sourceSig.Params().Len() {
 				return fmt.Errorf("tail-forward argument %d has an incompatible source parameter", index)
 			}
+			sourceType := sourceSig.Params().At(argument.sourceParameter).Type()
+			identical := types.Identical(sourceType, argument.targetType)
+			if identical && argument.retag {
+				return fmt.Errorf("tail-forward argument %d has a redundant source parameter retag", index)
+			}
+			if !identical && (!argument.retag || universe == nil ||
+				coroPhysicalTransportTypeKey(universe, sourceType) !=
+					coroPhysicalTransportTypeKey(universe, argument.targetType)) {
+				return fmt.Errorf("tail-forward argument %d has an incompatible source parameter retag", index)
+			}
 			continue
+		}
+		if argument.retag {
+			return fmt.Errorf("tail-forward argument %d retags a constant", index)
 		}
 		if argument.constant.Type() == nil ||
 			(!types.AssignableTo(argument.constant.Type(), argument.targetType) &&
@@ -559,6 +692,11 @@ func prepareCoroPhysicalFunctionPlan(
 		plan.needsPreempt = function.Exec.Contains(coro.NeedsPreempt)
 		plan.staticOutcome = function.StaticOutcome
 	}
+	captureSnapshots, captureLoads, err := planCoroPhysicalCaptureSnapshots(audit)
+	if err != nil {
+		return nil, fmt.Errorf("immutable capture snapshots: %w", err)
+	}
+	plan.captureSnapshots = captureSnapshots
 	preempt, err := planCoroPhysicalPreemption(
 		audit, critical, plan.needsPreempt,
 	)
@@ -577,6 +715,21 @@ func prepareCoroPhysicalFunctionPlan(
 			)
 			if err != nil {
 				return nil, fmt.Errorf("block %d instruction %T: %w", block.Index, instruction, err)
+			}
+			if load, ok := instruction.(*ssa.UnOp); ok {
+				if captureIndex, snapshot := captureLoads[load]; snapshot {
+					switch instructionPlan.recipe {
+					case coroPhysicalInstructionOrdinary, coroPhysicalInstructionDeref:
+					default:
+						return nil, fmt.Errorf(
+							"block %d immutable capture load selected incompatible recipe %s",
+							block.Index, instructionPlan.recipe,
+						)
+					}
+					instructionPlan.recipe = coroPhysicalInstructionImmutableCaptureLoad
+					instructionPlan.nilGuard = false
+					instructionPlan.captureSnapshot = captureIndex
+				}
 			}
 			plan.instructions[instruction] = instructionPlan
 		}
@@ -653,11 +806,14 @@ func prepareCoroPhysicalFunctionPlan(
 		plan.atomicCostProof = logical.AtomicCostProof
 		plan.atomicCertificate = logical.AtomicCostCertificate
 	}
-	tailForward, err := planCoroPhysicalTailForward(plan, whole)
+	tailForward, err := planCoroPhysicalTailForward(plan, whole, audit.universe)
 	if err != nil {
 		return nil, err
 	}
 	plan.tailForward = tailForward
+	if err := plan.validateCaptureSnapshots(); err != nil {
+		return nil, fmt.Errorf("immutable capture snapshots: %w", err)
+	}
 	return plan, nil
 }
 
@@ -665,12 +821,14 @@ func prepareCoroPhysicalFunctionPlan(
 // language after ordinary instruction and call control recipes are frozen. It
 // is not source inlining: the forwarding symbol remains externally callable
 // and merely returns the exact target coroutine handle. Restricting arguments
-// to unchanged parameters and literals makes target invocation independent of
-// the removed frame and prevents code generation from rediscovering SSA value
-// semantics after ProgramIR preflight.
+// to unchanged parameters, one representation-identical parameter retag, and
+// literals makes target invocation independent of the removed frame and
+// prevents code generation from rediscovering SSA value semantics after
+// ProgramIR preflight.
 func planCoroPhysicalTailForward(
 	physical *coroPhysicalFunctionPlan,
 	whole *coro.SSAPlan,
+	universe *EmissionUniverse,
 ) (*coroPhysicalTailForwardPlan, error) {
 	if physical == nil || physical.function == nil || whole == nil ||
 		physical.cleanup != nil || physical.critical != nil {
@@ -694,7 +852,39 @@ func planCoroPhysicalTailForward(
 	if len(instructions) < 2 {
 		return nil, nil
 	}
-	call, ok := instructions[0].(*ssa.Call)
+	adapterParameters := make(map[ssa.Value]*ssa.Parameter)
+	callIndex := 0
+scanAdapters:
+	for callIndex < len(instructions) {
+		var source ssa.Value
+		switch adapter := instructions[callIndex].(type) {
+		case *ssa.ChangeType:
+			source = adapter.X
+		case *ssa.Convert:
+			source = adapter.X
+		default:
+			break scanAdapters
+		}
+		parameter, exact := source.(*ssa.Parameter)
+		instructionPlan, frozen := physical.instructions[instructions[callIndex]]
+		if !exact || parameter == nil || instructionPlan.recipe != coroPhysicalInstructionOrdinary ||
+			!frozen || !instructionPlan.semantic.evaluated || instructionPlan.mayFault() ||
+			instructionPlan.control != coroPhysicalControlNone ||
+			instructionPlan.operation != coroPhysicalOperationNone ||
+			instructionPlan.outcome != coroPhysicalOutcomeNone || instructionPlan.elideValue ||
+			instructions[callIndex].(ssa.Value).Type() == nil || parameter.Type() == nil ||
+			universe == nil ||
+			coroPhysicalTransportTypeKey(universe, parameter.Type()) !=
+				coroPhysicalTransportTypeKey(universe, instructions[callIndex].(ssa.Value).Type()) {
+			return nil, nil
+		}
+		adapterParameters[instructions[callIndex].(ssa.Value)] = parameter
+		callIndex++
+	}
+	if callIndex >= len(instructions) {
+		return nil, nil
+	}
+	call, ok := instructions[callIndex].(*ssa.Call)
 	if !ok || call.Common() == nil || call.Common().IsInvoke() ||
 		call.Common().Method != nil || call.Common().StaticCallee() == nil {
 		return nil, nil
@@ -709,9 +899,32 @@ func planCoroPhysicalTailForward(
 		return nil, nil
 	}
 	target := callPhysical.controlTarget
-	if target == nil || target == function || target != call.Common().StaticCallee() ||
+	rawTarget := call.Common().StaticCallee()
+	if target == nil || target == function || rawTarget == nil ||
 		len(target.FreeVars) != 0 || target.Signature == nil || target.Signature.Variadic() {
 		return nil, nil
+	}
+	if _, ok := whole.FunctionPlan(target); !ok {
+		return nil, nil
+	}
+	if target != rawTarget {
+		if universe == nil {
+			return nil, nil
+		}
+		_, paired, err := universe.managedGoLinknameCallFacade(rawTarget, target)
+		if err != nil {
+			return nil, fmt.Errorf("tail-forward managed go:linkname target: %w", err)
+		}
+		if !paired {
+			site, frozen, err := universe.CoroCallSitePlan(call)
+			if err != nil {
+				return nil, fmt.Errorf("tail-forward managed static target: %w", err)
+			}
+			if !frozen || site.ManagedStaticTarget != target ||
+				site.ManagedStaticTargetCertificate == "" {
+				return nil, nil
+			}
+		}
 	}
 	callPlan, callPlanned := whole.CallPlan(call)
 	targetPlan, targetPlanned := whole.FunctionPlan(target)
@@ -736,16 +949,30 @@ func planCoroPhysicalTailForward(
 		parameterIndex[parameter] = index
 	}
 	arguments := make([]coroPhysicalTailForwardArgument, len(call.Common().Args))
+	usedAdapters := make(map[ssa.Value]none, len(adapterParameters))
 	for index, value := range call.Common().Args {
 		targetType := targetSig.Params().At(index).Type()
-		if parameter, ok := value.(*ssa.Parameter); ok {
+		parameter, directParameter := value.(*ssa.Parameter)
+		if !directParameter {
+			parameter = adapterParameters[value]
+		}
+		if parameter != nil {
 			sourceIndex, owned := parameterIndex[parameter]
-			if !owned || !types.Identical(parameter.Type(), targetType) {
+			retag := !types.Identical(parameter.Type(), targetType)
+			if !owned || value.Type() == nil || !types.Identical(value.Type(), targetType) ||
+				(directParameter && retag) || (!directParameter && !retag) ||
+				(retag && (universe == nil ||
+					coroPhysicalTransportTypeKey(universe, parameter.Type()) !=
+						coroPhysicalTransportTypeKey(universe, targetType))) {
 				return nil, nil
+			}
+			if !directParameter {
+				usedAdapters[value] = none{}
 			}
 			arguments[index] = coroPhysicalTailForwardArgument{
 				sourceParameter: sourceIndex,
 				targetType:      targetType,
+				retag:           retag,
 			}
 			continue
 		}
@@ -761,10 +988,13 @@ func planCoroPhysicalTailForward(
 			targetType:      targetType,
 		}
 	}
+	if len(usedAdapters) != len(adapterParameters) {
+		return nil, nil
+	}
 
 	resultCount := sourceSig.Results().Len()
 	returned := make([]ssa.Value, 0, resultCount)
-	cursor := 1
+	cursor := callIndex + 1
 	switch resultCount {
 	case 0:
 	case 1:
@@ -800,7 +1030,7 @@ func planCoroPhysicalTailForward(
 		targetID: targetPlan.ID,
 		args:     arguments,
 	}
-	if err := forward.validate(function, whole); err != nil {
+	if err := forward.validate(function, whole, universe); err != nil {
 		return nil, fmt.Errorf("tail-forward physical plan: %w", err)
 	}
 	return forward, nil
@@ -842,6 +1072,9 @@ func newCoroPhysicalPlanStage() *coroPhysicalPlanStage {
 func (stage *coroPhysicalPlanStage) freezePhysicalFunctionPlan(plan *coroPhysicalFunctionPlan) error {
 	if stage == nil || plan == nil || plan.function == nil || plan.owner == nil || plan.instructions == nil {
 		return fmt.Errorf("physical plan freeze requires one complete function-owner projection")
+	}
+	if err := plan.validateCaptureSnapshots(); err != nil {
+		return fmt.Errorf("physical plan immutable captures: %w", err)
 	}
 	key := emissionFunctionOwnerKey{function: plan.function, owner: plan.owner}
 	if _, exists := stage.plans[key]; exists {

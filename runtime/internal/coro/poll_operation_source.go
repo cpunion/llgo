@@ -1030,6 +1030,26 @@ func (source *PollOperationSource) RecyclePollOperationV2(p *P, handle PollOpera
 		return false
 	}
 	slot.state = pollOperationFree
+	if handle.Slot == source.scanLimit {
+		for source.scanLimit != 0 {
+			index := source.scanLimit - 1
+			last, slotOK := pollOperationSlotAt(source, index)
+			if !slotOK {
+				return false
+			}
+			if !reusablePollOperationSlot(source, last, index) {
+				break
+			}
+			source.scanLimit--
+		}
+		if source.scanLimit == 0 {
+			// Reactor publication orders mailbox, pending, then admission release.
+			// A pass may consume the mailbox before that pending store becomes
+			// visible and recycle only after joining the producer. With no live poll
+			// generation left, the remaining advisory hint is necessarily stale.
+			preemptStore(&source.pending, 0)
+		}
+	}
 	return true
 }
 

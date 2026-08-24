@@ -99,11 +99,14 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 		if err != nil {
 			t.Fatal("load runtime failed:", err)
 		}
-		if runtimePackage.Scope().Lookup("CoroTimerParkV2") == nil {
-			name := types.NewTypeName(token.NoPos, runtimePackage, "CoroTimerParkV2", nil)
+		for _, typeName := range []string{"CoroSleepParkV2", "CoroTimerParkV2"} {
+			if runtimePackage.Scope().Lookup(typeName) != nil {
+				continue
+			}
+			name := types.NewTypeName(token.NoPos, runtimePackage, typeName, nil)
 			types.NewNamed(name, types.NewArray(types.Typ[types.Uintptr], 32), nil)
 			if previous := runtimePackage.Scope().Insert(name); previous != nil {
-				t.Fatalf("install Timer V2 test runtime type: duplicate %v", previous)
+				t.Fatalf("install %s test runtime type: duplicate %v", typeName, previous)
 			}
 		}
 		return runtimePackage
@@ -277,7 +280,9 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 	assertCoroTimeSleepAwaitsIR(t, "sleepOnce", sleepOncePhysical.String(), sleepSymbol)
 	assertCoroTimeSleepAwaitsIR(t, "sleepZero", sleepZeroPhysical.String(), sleepSymbol)
 	assertCoroTimeSleepAwaitsIR(t, "sleepNegative", sleepNegativePhysical.String(), sleepSymbol)
-	assertCoroTimeSleepAwaitsIR(t, "main", mainPhysical.String(), sleepZeroSymbol, sleepNegativeSymbol, sleepOnceSymbol)
+	// Exact static tail-forward wrappers remain materialized for dynamic use,
+	// but main's physical await sites name their final ramp directly.
+	assertCoroTimeSleepAwaitsIR(t, "main", mainPhysical.String(), sleepSymbol, sleepSymbol, sleepSymbol)
 	runCoroSpawnNativeE2EPasses(t, prog, timePkg.Module())
 	runCoroSpawnNativeE2EPasses(t, prog, mainPkg.Module())
 }
@@ -569,19 +574,30 @@ func assertCoroTimeSleepAwaitsIR(t *testing.T, label, body string, childSymbols 
 	if handoffs != len(childSymbols) && !tailForward {
 		t.Fatalf("%s await handoffs = %d, want %d or one frame-free tail forward:\n%s", label, handoffs, len(childSymbols), body)
 	}
-	previous := -1
+	expectedCounts := make(map[string]int)
 	for _, childSymbol := range childSymbols {
-		child := strings.Index(body, childSymbol)
-		if child <= previous || strings.Count(body, childSymbol) != 1 {
-			t.Fatalf("%s does not call coroutine child %q exactly once in source order:\n%s", label, childSymbol, body)
+		expectedCounts[childSymbol]++
+	}
+	for childSymbol, expected := range expectedCounts {
+		if got := strings.Count(body, childSymbol); got != expected {
+			t.Fatalf("%s calls coroutine child %q %d times, want %d:\n%s", label, childSymbol, got, expected, body)
 		}
-		await := strings.Index(body[child:], coroTimeSleepAwaitHookV1)
+	}
+	searchFrom := 0
+	for _, childSymbol := range childSymbols {
+		relativeChild := strings.Index(body[searchFrom:], childSymbol)
+		if relativeChild < 0 {
+			t.Fatalf("%s does not call coroutine child %q in source order:\n%s", label, childSymbol, body)
+		}
+		child := searchFrom + relativeChild
+		await := strings.Index(body[child+len(childSymbol):], coroTimeSleepAwaitHookV1)
 		if await < 0 && !tailForward {
 			t.Fatalf("%s child %q is not followed by a structured await:\n%s", label, childSymbol, body)
 		}
-		previous = child
 		if await >= 0 {
-			previous += await
+			searchFrom = child + len(childSymbol) + await + len(coroTimeSleepAwaitHookV1)
+		} else {
+			searchFrom = child + len(childSymbol)
 		}
 	}
 }

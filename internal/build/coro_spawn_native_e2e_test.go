@@ -918,10 +918,11 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		buildCoroNativeAllocationCacheObject(t, temp),
 		buildCoroNativeWorkerCallObject(t, temp),
 		buildCoroNativeDoorbellObject(t, temp),
+		buildCoroCurrentGTLSObject(t, temp),
 	)
 	prog.Dispose()
-	if len(objects) != len(allowed)+4 {
-		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, and doorbell leaves", len(objects), len(allowed))
+	if len(objects) != len(allowed)+5 {
+		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, doorbell, and current-G TLS leaves", len(objects), len(allowed))
 	}
 	return objects
 }
@@ -1116,6 +1117,8 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"__llgo_coro_doorbell_poll_one_v1",
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
+		"__llgo_coro_chan_send_buffer_try_v1",
+		"__llgo_coro_chan_recv_buffer_try_v1",
 		"__llgo_coro_chan_send_try_park_v2",
 		"__llgo_coro_chan_recv_try_park_v2",
 		"__llgo_coro_chan_resume_v2",

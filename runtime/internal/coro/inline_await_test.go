@@ -108,24 +108,33 @@ func TestCompilerInlineAwaitCompletesThroughTrustedSuffix(t *testing.T) {
 	) {
 		t.Fatal("publish compiler inline child return")
 	}
-	if got := FinishInlineAwaitCompiler(
-		fixture.g, fixture.parent.handle, fixture.child.handle, true,
-	); got != InlineAwaitDestroy {
-		t.Fatalf("finish compiler inline-await = %d, want destroy", got)
+	if !FinishInlineAwaitReturnCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle,
+	) {
+		t.Fatal("finish compiler inline-await return")
 	}
 	if fixture.p.inlineAwaitDepth != 0 || fixture.g.active != FrameFromStorage(fixture.parent.storage) {
 		t.Fatalf("compiler inline destroy did not restore parent ownership: depth=%d active=%p",
 			fixture.p.inlineAwaitDepth, fixture.g.active)
 	}
+	child := FrameFromStorage(fixture.child.storage)
+	if fixture.g.pending.kind != pendingInlineDestroy ||
+		fixture.g.pending.from != fixture.g.active || fixture.g.pending.target != child {
+		t.Fatalf("compiler inline destroy receipt = %+v, want parent/child phase", fixture.g.pending)
+	}
 	releaseTestFrame(t, fixture.g, fixture.child)
-	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompiler(
+	if fixture.g.pending.kind != pendingInlineDestroy ||
+		fixture.g.pending.from != fixture.g.active || fixture.g.pending.target != nil {
+		t.Fatalf("compiler dynamic free receipt = %+v, want restored-parent phase", fixture.g.pending)
+	}
+	if !CommitInlineAwaitReturnPhysicalDestroyCompiler(
 		fixture.g, fixture.parent.handle, fixture.child.handle,
-	)
-	if !ok || snapshot != (CompletionSnapshot{Status: CompletionReturn}) {
-		t.Fatalf("consume compiler inline child return = (%+v, %t)", snapshot, ok)
+	) {
+		t.Fatal("consume compiler inline child return")
 	}
 	if fixture.parent.header.SuspendReason != uint16(SuspendNone) ||
-		fixture.parent.header.Lifecycle != uint16(FrameActive) {
+		fixture.parent.header.Lifecycle != uint16(FrameActive) ||
+		fixture.g.pending != (pendingTransition{}) {
 		t.Fatalf("compiler inline parent header = (%d, %d), want active",
 			fixture.parent.header.SuspendReason, fixture.parent.header.Lifecycle)
 	}
@@ -174,23 +183,27 @@ func TestCompilerInlineAwaitFusesBorrowedDestroyAndConsume(t *testing.T) {
 	) {
 		t.Fatal("publish borrowed compiler inline child return")
 	}
-	if got := FinishInlineAwaitCompiler(
-		fixture.g, fixture.parent.handle, fixture.child.handle, true,
-	); got != InlineAwaitDestroy {
-		t.Fatalf("finish borrowed compiler inline-await = %d, want destroy", got)
-	}
-	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompiler(
+	if !FinishInlineAwaitReturnCompiler(
 		fixture.g, fixture.parent.handle, fixture.child.handle,
-	)
-	if !ok || snapshot != (CompletionSnapshot{Status: CompletionReturn}) {
-		t.Fatalf("fused borrowed completion = (%+v, %t)", snapshot, ok)
+	) {
+		t.Fatal("finish borrowed compiler inline-await return")
 	}
-	if *child != (Frame{}) || fixture.g.destroyTarget != nil || fixture.g.frames != fixture.g.active ||
+	if fixture.g.pending.kind != pendingInlineDestroy ||
+		fixture.g.pending.from != fixture.g.active || fixture.g.pending.target != child {
+		t.Fatalf("borrowed compiler inline destroy receipt = %+v", fixture.g.pending)
+	}
+	if !CommitInlineAwaitReturnPhysicalDestroyCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle,
+	) {
+		t.Fatal("fused borrowed completion")
+	}
+	if fixture.g.pending != (pendingTransition{}) || fixture.g.destroyTarget != nil ||
+		fixture.g.frames != fixture.g.active || child.state != FrameDestroyed ||
 		fixture.g.active != FrameFromStorage(fixture.parent.storage) ||
 		fixture.g.active.completion != (CompletionRecord{}) ||
 		fixture.parent.header.SuspendReason != uint16(SuspendNone) ||
 		fixture.parent.header.Lifecycle != uint16(FrameActive) {
-		t.Fatalf("fused borrowed completion left residue: child=%+v active=%p frames=%p target=%p completion=%+v header=(%d,%d)",
+		t.Fatalf("fused borrowed completion left reachable residue: child=%+v active=%p frames=%p target=%p completion=%+v header=(%d,%d)",
 			child, fixture.g.active, fixture.g.frames, fixture.g.destroyTarget,
 			fixture.g.active.completion, fixture.parent.header.SuspendReason,
 			fixture.parent.header.Lifecycle)
@@ -209,13 +222,13 @@ func TestCompilerInlineAwaitPanicRetainsCompatibilityProtocol(t *testing.T) {
 	) {
 		t.Fatal("publish compiler inline child panic")
 	}
-	if got := FinishInlineAwaitCompiler(
+	if got := FinishInlineAwait(
 		fixture.g, fixture.parent.handle, fixture.child.handle, true,
 	); got != InlineAwaitDestroy {
 		t.Fatalf("finish panicking compiler inline-await = %d, want destroy", got)
 	}
 	releaseTestFrame(t, fixture.g, fixture.child)
-	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompiler(
+	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompatibilityCompiler(
 		fixture.g, fixture.parent.handle, fixture.child.handle,
 	)
 	if !ok || snapshot != (CompletionSnapshot{
@@ -247,13 +260,13 @@ func TestCompilerInlineAwaitRecoveredReturnUsesCompatibilityProtocol(t *testing.
 	) {
 		t.Fatal("publish recovered compiler inline child return")
 	}
-	if got := FinishInlineAwaitCompiler(
+	if got := FinishInlineAwait(
 		fixture.g, fixture.parent.handle, fixture.child.handle, true,
 	); got != InlineAwaitDestroy {
 		t.Fatalf("finish recovered compiler inline-await = %d, want destroy", got)
 	}
 	releaseTestFrame(t, fixture.g, fixture.child)
-	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompiler(
+	snapshot, ok := CommitInlineAwaitPhysicalDestroyCompatibilityCompiler(
 		fixture.g, fixture.parent.handle, fixture.child.handle,
 	)
 	if !ok || snapshot != (CompletionSnapshot{Status: CompletionReturnRecovered}) {
@@ -271,7 +284,7 @@ func TestCompilerInlineAwaitSlowYieldUsesCheckedDispatch(t *testing.T) {
 	if !PrepareYield(fixture.g, fixture.child.handle, fixture.child.header) {
 		t.Fatal("publish compiler inline child yield")
 	}
-	if got := FinishInlineAwaitCompiler(
+	if got := FinishInlineAwait(
 		fixture.g, fixture.parent.handle, fixture.child.handle, false,
 	); got != InlineAwaitSuspend {
 		t.Fatalf("finish yielding compiler inline child = %d, want suspend", got)

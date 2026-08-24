@@ -33,6 +33,7 @@ type timerParkOwnerFixture struct {
 	timer     TimerRegistrationHandle
 	operation OperationID
 	executor  ExecutorHandle
+	compact   SingleOwnerTimerResume
 }
 
 func newTimerParkOwnerFixture(t *testing.T, name string, deadline int64) *timerParkOwnerFixture {
@@ -57,6 +58,28 @@ func newTimerParkOwnerFixtureWithControl(
 	controller uintptr,
 	control *uint32,
 	expected uint32,
+) *timerParkOwnerFixture {
+	return newTimerParkOwnerFixtureMode(
+		t, name, deadline, controller, control, expected, false,
+	)
+}
+
+func newCompactTimerParkOwnerFixture(
+	t *testing.T,
+	name string,
+	deadline int64,
+) *timerParkOwnerFixture {
+	return newTimerParkOwnerFixtureMode(t, name, deadline, 0, nil, 0, true)
+}
+
+func newTimerParkOwnerFixtureMode(
+	t *testing.T,
+	name string,
+	deadline int64,
+	controller uintptr,
+	control *uint32,
+	expected uint32,
+	compact bool,
 ) *timerParkOwnerFixture {
 	t.Helper()
 	fixture := &timerParkOwnerFixture{p: new(P), task: newYieldingTestG(t, name)}
@@ -105,6 +128,9 @@ func newTimerParkOwnerFixtureWithControl(
 		t.Fatalf("prepare %s Timer V2 park = (%+v, %+v, %+v, %+v, %t)",
 			name, fixture.ticket, fixture.timer, fixture.operation, fixture.executor, prepared)
 	}
+	if compact && !BindSingleOwnerTimerResume(&fixture.wait, &fixture.compact, fixture.operation) {
+		t.Fatalf("bind compact %s Timer V2 resume", name)
+	}
 	parked, ok := Resumed(fixture.p, fixture.task.g, fixture.action)
 	if !ok || parked.Kind != ActionPark {
 		t.Fatalf("commit %s Timer V2 park = (%+v, %t)", name, parked, ok)
@@ -117,6 +143,15 @@ func (fixture *timerParkOwnerFixture) beginResume(t *testing.T) (ParkOutcome, ui
 }
 
 func (fixture *timerParkOwnerFixture) beginResumeAt(t *testing.T, now int64) (ParkOutcome, uint32, OperationResultLease, TaskCancelKind) {
+	fixture.beginResumeActionAt(t, now)
+	outcome, caseID, lease, cancel, taken := TakeRunDecision(fixture.task.g, fixture.ticket)
+	if !taken {
+		t.Fatalf("take %s Timer V2 decision", fixture.task.name)
+	}
+	return outcome, caseID, lease, cancel
+}
+
+func (fixture *timerParkOwnerFixture) beginResumeActionAt(t *testing.T, now int64) {
 	t.Helper()
 	if next, ok := NextRunnableAt(fixture.p, now); !ok || next != fixture.task.g {
 		t.Fatalf("dequeue resumed %s = (%p, %t)", fixture.task.name, next, ok)
@@ -129,11 +164,19 @@ func (fixture *timerParkOwnerFixture) beginResumeAt(t *testing.T, now int64) (Pa
 	if !ok || fixture.action.Kind != ActionResume {
 		t.Fatalf("activate resumed %s = (%+v, %t)", fixture.task.name, fixture.action, ok)
 	}
-	outcome, caseID, lease, cancel, taken := TakeRunDecision(fixture.task.g, fixture.ticket)
+}
+
+func (fixture *timerParkOwnerFixture) beginCompactResumeAt(
+	t *testing.T,
+	now int64,
+) (ParkOutcome, TaskCancelKind) {
+	t.Helper()
+	fixture.beginResumeActionAt(t, now)
+	outcome, cancel, taken := TakeSingleOwnerTimerResume(fixture.task.g, &fixture.compact)
 	if !taken {
-		t.Fatalf("take %s Timer V2 decision", fixture.task.name)
+		t.Fatalf("take compact %s Timer V2 decision", fixture.task.name)
 	}
-	return outcome, caseID, lease, cancel
+	return outcome, cancel
 }
 
 func (fixture *timerParkOwnerFixture) finishShutdown(t *testing.T) {
@@ -216,6 +259,39 @@ func TestCurrentExecutorTimerParkDueResumeRetiresExactSource(t *testing.T) {
 	}
 	fixture.finishPark(t, lease, false)
 	fixture.yieldCloseAndFinish(t)
+}
+
+func TestCompactSingleOwnerTimerResumeRetiresBeforeRunnable(t *testing.T) {
+	fixture := newCompactTimerParkOwnerFixture(t, "timer-compact-due", 50)
+	if fixture.p.affectedWaitHead != nil || fixture.wait.work != waitSetWorkIdle {
+		t.Fatal("ordinary owner timer received an initial affected-set visit")
+	}
+	stale := fixture.compact
+	if timers, promoted, ok := PollExecutorAt(fixture.driver, 50); !ok || timers != 1 || promoted != 1 {
+		t.Fatalf("publish compact timer deadline = (%d, %d, %t)", timers, promoted, ok)
+	}
+	if outcome, cancel := fixture.beginCompactResumeAt(t, 50); outcome != ParkOutcomeCompleted || cancel != TaskCancelNone {
+		t.Fatalf("compact timer decision = (%d, %d)", outcome, cancel)
+	}
+	if _, _, taken := TakeSingleOwnerTimerResume(fixture.task.g, &stale); taken {
+		t.Fatal("copied compact timer receipt replayed after source retirement")
+	}
+	fixture.yieldCloseAndFinish(t)
+}
+
+func TestCompactSingleOwnerTimerResumePreservesShutdown(t *testing.T) {
+	fixture := newCompactTimerParkOwnerFixture(t, "timer-compact-shutdown", 250)
+	main := &G{magic: gMagic, state: GDead}
+	if needed, ok := RequestCommandShutdownDrain(fixture.p, main); !ok || !needed {
+		t.Fatalf("request compact timer shutdown = needed:%t ok:%t", needed, ok)
+	}
+	if timers, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok || timers != 0 || promoted != 1 {
+		t.Fatalf("resolve compact timer shutdown = (%d, %d, %t)", timers, promoted, ok)
+	}
+	if outcome, cancel := fixture.beginCompactResumeAt(t, 0); outcome != ParkOutcomeCanceled || cancel != TaskCancelShutdown {
+		t.Fatalf("compact shutdown decision = (%d, %d)", outcome, cancel)
+	}
+	fixture.finishShutdown(t)
 }
 
 func TestCommandShutdownDrainResumesTimerCleanupBeforeExecutorClose(t *testing.T) {

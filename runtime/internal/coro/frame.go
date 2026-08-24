@@ -143,6 +143,13 @@ const (
 	// its synthetic zero decision. It is never observable at a scheduler
 	// boundary and therefore is not handled by dispatchPending.
 	pendingInlineStart
+	// pendingInlineDestroy is the compiler-private receipt between an inline
+	// child's normal final suspend and the adjacent llvm.coro.destroy commit.
+	// from is the restored parent. target is the child until a dynamic
+	// coro.free callback validates and unlinks it, then becomes nil; a borrowed
+	// child keeps target until the commit unlinks its embedded metadata. Like
+	// pendingInlineStart, this phase cannot cross a scheduler boundary.
+	pendingInlineDestroy
 	pendingComplete
 	pendingYield
 	pendingParkSet
@@ -398,11 +405,35 @@ func RegisterFrameCompiler(
 	g *G, raw unsafe.Pointer, total, size, align uintptr, descriptor unsafe.Pointer,
 ) (unsafe.Pointer, bool) {
 	want, layoutOK := CompilerFrameAllocationSize(size, align)
-	if !ValidG(g) || raw == nil || descriptor == nil || !layoutOK || total != want ||
+	if !layoutOK || total != want {
+		return nil, false
+	}
+	return RegisterFrameCompilerPrepared(g, raw, total, size, align, descriptor)
+}
+
+// RegisterFrameCompilerPrepared consumes the exact total returned by the
+// adjacent CompilerFrameAllocationSize call in the runtime allocator adapter.
+// It still validates every address it will write, but does not recompute the
+// same overflow-safe size formula after the allocator has returned that exact
+// range. Independent callers retain RegisterFrameCompiler's full equality
+// check.
+func RegisterFrameCompilerPrepared(
+	g *G, raw unsafe.Pointer, total, size, align uintptr, descriptor unsafe.Pointer,
+) (unsafe.Pointer, bool) {
+	if !ValidG(g) || raw == nil || descriptor == nil || total == 0 ||
+		align == 0 || align&(align-1) != 0 ||
 		uintptr(raw)%unsafe.Alignof(Frame{}) != 0 {
 		return nil, false
 	}
-	storage, ok := compilerAlignedStorage(raw, align)
+	// AllocFrame is naturally pointer-aligned and the compact receipt is two
+	// words, so the overwhelmingly common pointer/16-byte LLVM alignments need
+	// no general offset calculation. Wider target-specific alignments retain the
+	// overflow-safe helper.
+	storage := unsafe.Add(raw, unsafe.Sizeof(compilerFrameAllocationReceiptV1{}))
+	ok := uintptr(storage)&(align-1) == 0
+	if !ok {
+		storage, ok = compilerAlignedStorage(raw, align)
+	}
 	base, address := uintptr(raw), uintptr(storage)
 	if !ok || address < base || address-base >= total || size > total-(address-base) {
 		return nil, false
@@ -550,18 +581,23 @@ func PublishFrameV3Compiler(
 		return false
 	}
 	if storage != nil {
-		receipt, receiptOK := compilerFrameReceipt(storage)
-		if !receiptOK || receipt.raw == nil || receipt.total == 0 ||
-			uintptr(receipt.raw)%unsafe.Alignof(Frame{}) != 0 ||
-			metadata == unsafe.Pointer(g) || metadata == unsafe.Pointer(header) ||
-			uintptr(metadata)%unsafe.Alignof(Frame{}) != 0 ||
-			uintptr(unsafe.Pointer(header)) < uintptr(storage) || uintptr(metadata) < uintptr(storage) ||
-			!allocationContains(receipt.raw, receipt.total, unsafe.Pointer(receipt), unsafe.Sizeof(*receipt)) ||
-			!allocationContains(receipt.raw, receipt.total, storage, 1) ||
-			!allocationContains(receipt.raw, receipt.total, unsafe.Pointer(header), unsafe.Sizeof(HeaderV1{})) ||
-			!allocationContains(receipt.raw, receipt.total, metadata, unsafe.Sizeof(Frame{})) ||
-			rangesOverlap(unsafe.Pointer(header), unsafe.Sizeof(HeaderV1{}), metadata, unsafe.Sizeof(Frame{})) ||
-			findFrame(g, handle) != nil {
+		receiptSize := unsafe.Sizeof(compilerFrameAllocationReceiptV1{})
+		storageAddress := uintptr(storage)
+		receipt := (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(receiptSize)))
+		base, total := uintptr(receipt.raw), receipt.total
+		// RegisterFrameCompilerPrepared returned this exact storage pointer after
+		// writing the adjacent raw/total receipt, and generated code can only run
+		// the initial-suspend ramp before this publication call. Rechecking that
+		// the receipt and storage describe their own allocation is circular. The
+		// compiler-supplied header and metadata remain independently range-checked
+		// below before either address is written.
+		limit := base + total
+		headerAddress := uintptr(unsafe.Pointer(header))
+		metadataAddress := uintptr(metadata)
+		headerSize, metadataSize := unsafe.Sizeof(HeaderV1{}), unsafe.Sizeof(Frame{})
+		if headerAddress < storageAddress || headerAddress > limit || headerSize > limit-headerAddress ||
+			metadataAddress < storageAddress || metadataAddress > limit || metadataSize > limit-metadataAddress ||
+			headerAddress < metadataAddress+metadataSize && metadataAddress < headerAddress+headerSize {
 			return false
 		}
 		frame := (*Frame)(metadata)
@@ -579,7 +615,7 @@ func PublishFrameV3Compiler(
 		frame.owner = g
 		frame.handle = handle
 		frame.header = header
-		frame.allocationSize = receipt.total
+		frame.allocationSize = total
 		frame.state = FrameInitialSuspended
 		frame.runtimeContext = mode
 		frame.next = g.frames
@@ -761,24 +797,69 @@ func PrepareCompleteStatus(g *G, handle unsafe.Pointer, header *HeaderV1, status
 // Panic, Goexit, cancellation, and any uncertain shape retain the complete
 // status validator below.
 func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1, status CompletionStatus) bool {
-	if status == CompletionReturn && ValidG(g) && resumeGateTaken(g) &&
-		handle != nil && header != nil && g.pending.kind == pendingNone &&
-		g.spawnChild == nil && compilerReleasableParkState(&g.park) &&
-		g.park.taskCancelPhase != taskCancelRequested {
+	if status == CompletionReturn && g != nil && handle != nil && header != nil {
 		frame := g.active
 		if frame != nil && frame.handle == handle && frame.header == header &&
 			frame.owner == g && frame.state == FrameActive &&
 			header.SuspendReason == uint16(SuspendFrameComplete) &&
 			header.Lifecycle == uint16(FrameFinalSuspended) {
-			if frame.parent != nil && awaitCompletionArmedForChild(frame) &&
-				publishAwaitCompletion(frame.parent, CompletionReturn, nil, nil) {
+			// inlineAwaitDepth is already part of the root episode proof. Consume
+			// that same scalar once as the root/inline discriminator instead of
+			// adding an independent parent branch to every root completion. A
+			// child then skips the much larger root G/P/action/park audit, while a
+			// root reaches the remaining proof with depth zero established.
+			p := g.runP
+			if p != nil && p.inlineAwaitDepth != 0 {
+				parent := frame.parent
+				if parent != nil && g.pending.kind == pendingNone &&
+					g.park.taskCancelPhase != taskCancelRequested {
+					record := &parent.completion
+					if record.child == handle && record.status == completionArmed &&
+						record.typeWord == nil && record.dataWord == nil {
+						record.status = CompletionReturn
+						g.pending = pendingTransition{kind: pendingComplete, from: frame}
+						return true
+					}
+				}
+				return PrepareCompleteStatus(g, handle, header, status)
+			}
+
+			// A compiler-created root which has not established any park or task-
+			// cancellation state carries a stronger adjacent certificate than the
+			// arbitrary-caller completion API needs. The current P owns this exact
+			// active resume, the compiler prologue consumed its zero decision, and
+			// the singleton frame graph names the same handle/header pair. Consume
+			// that all-zero root episode directly; every resumed park, pending
+			// preemption, nested frame, cancellation, or malformed graph falls
+			// through to the complete validator below.
+			if g.magic == gMagic && loadGPreempt(g) == preemptIdle &&
+				g.state == GRunning && p != nil && p.current == g && p.inResume &&
+				p.action.Kind == ActionResume &&
+				p.action.Flags == 0 && p.action.Handle == handle &&
+				p.runDecision == (RunDecision{}) && p.runDecisionTaken &&
+				g.pending == (pendingTransition{}) && g.spawnChild == nil &&
+				g.park == (ParkState{}) && frame == g.root &&
+				g.frames == frame && frame.next == nil && header.Parent == nil &&
+				frame.parkWait == nil && emptyCompletionRecord(&frame.completion) {
 				g.pending = pendingTransition{kind: pendingComplete, from: frame}
 				return true
 			}
-			if frame.parent == nil && frame == g.root && g.frames == frame && frame.next == nil &&
+			if ValidG(g) && resumeGateTaken(g) && g.pending.kind == pendingNone &&
+				g.park.taskCancelPhase != taskCancelRequested && g.spawnChild == nil &&
+				compilerReleasableParkState(&g.park) &&
+				frame == g.root && g.frames == frame && frame.next == nil &&
 				header.Parent == nil && frame.parkWait == nil &&
 				emptyCompletionRecord(&frame.completion) &&
 				g.park.taskCancelKind == TaskCancelNone {
+				// A delivered packet has no source, result lease, or remaining
+				// continuation consumer. Once this root publishes its terminal
+				// completion it can never begin another park, so retire the old
+				// ticket/history into the same zero terminal certificate as a task
+				// which never parked. Downstream destroy and task-release receipts
+				// then share one compact path without weakening reusable-G tickets.
+				if g.park.phase == parkDelivered {
+					g.park = ParkState{}
+				}
 				g.pending = pendingTransition{kind: pendingComplete, from: frame}
 				return true
 			}
@@ -888,6 +969,10 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 	frame.panicLine = frame.header.Line
 	frame.header.Lifecycle = uint16(FrameDestroyed)
 	g.destroyTarget = nil
+	if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+		g.pending.from == frame.parent {
+		g.pending.target = nil
+	}
 	return raw, total, true
 }
 
@@ -898,19 +983,29 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 func ReleaseFrameCompiler(
 	g *G, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer,
 ) (metadata, raw unsafe.Pointer, total uintptr, ok bool) {
-	if ValidG(g) && gPreemptEnabledAtDepthZero(g) && storage != nil {
-		want, layoutOK := CompilerFrameAllocationSize(size, align)
+	preempt := uint32(preemptDisabled)
+	if g != nil {
+		preempt = preemptLoad(&g.preempt)
+	}
+	if ValidG(g) && (preempt == preemptIdle || preempt == preemptRequested) && storage != nil &&
+		align != 0 && align&(align-1) == 0 {
 		frame := g.destroyTarget
 		var allocationBase unsafe.Pointer
+		var allocationSize uintptr
 		if frame != nil && frame.header != nil {
 			allocationBase = frame.header.AllocationBase
+			allocationSize = frame.allocationSize
 		}
-		aligned, storageOK := compilerAlignedStorage(allocationBase, align)
-		if frame != nil && layoutOK && storageOK && aligned == storage &&
+		overhead := unsafe.Sizeof(compilerFrameAllocationReceiptV1{})
+		layoutOK := align-1 <= ^uintptr(0)-overhead && allocationSize >= size &&
+			allocationSize-size == overhead+align-1
+		if frame != nil && layoutOK && uintptr(storage)%align == 0 &&
 			FrameFromStorage(storage) == frame && g.frames == frame &&
-			frame.owner == g && frame.header != nil && frame.header.Descriptor == descriptor && frame.allocationSize == want &&
+			frame.owner == g && frame.header != nil && frame.header.Descriptor == descriptor &&
 			frame.state == FrameDestroyPending && frame.parkWait == nil &&
-			allocationContains(allocationBase, want, unsafe.Pointer(frame), unsafe.Sizeof(Frame{})) &&
+			uintptr(allocationBase)%unsafe.Alignof(Frame{}) == 0 &&
+			allocationContains(allocationBase, allocationSize, storage, size) &&
+			allocationContains(allocationBase, allocationSize, unsafe.Pointer(frame), unsafe.Sizeof(Frame{})) &&
 			frame.header.Lifecycle == uint16(FrameDestroyPending) {
 			g.frames = frame.next
 			frame.next = nil
@@ -918,7 +1013,11 @@ func ReleaseFrameCompiler(
 			frame.panicLine = frame.header.Line
 			frame.header.Lifecycle = uint16(FrameDestroyed)
 			g.destroyTarget = nil
-			return unsafe.Pointer(frame), allocationBase, want, true
+			if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+				g.pending.from == frame.parent {
+				g.pending.target = nil
+			}
+			return unsafe.Pointer(frame), allocationBase, allocationSize, true
 		}
 	}
 	legacyRaw, legacyTotal, legacyOK := ReleaseFrame(g, storage, size, align, descriptor)

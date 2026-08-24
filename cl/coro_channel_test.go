@@ -121,6 +121,7 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 
 			sendPhysical := requireCoroPhysicalFunction(t, module, "foo.Send")
 			send := sendPhysical.String()
+			assertCoroChannelBufferPreflight(t, sendPhysical, coroChanSendBufferTryHookV1, coroChanSendTryParkHookV2)
 			assertCoroChannelTryParkUsesCompilerTask(t, sendPhysical, coroChanSendTryParkHookV2)
 			assertCoroChannelParkStateHasNoCallerStore(t, sendPhysical, coroChanSendTryParkHookV2)
 			assertCoroCancellationTerminalStatusPublication(t, sendPhysical)
@@ -142,6 +143,7 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 			for _, name := range []string{"Recv", "RecvOK"} {
 				recvPhysical := requireCoroPhysicalFunction(t, module, "foo."+name)
 				recv := recvPhysical.String()
+				assertCoroChannelBufferPreflight(t, recvPhysical, coroChanRecvBufferTryHookV1, coroChanRecvTryParkHookV2)
 				assertCoroChannelTryParkUsesCompilerTask(t, recvPhysical, coroChanRecvTryParkHookV2)
 				assertCoroChannelParkStateHasNoCallerStore(t, recvPhysical, coroChanRecvTryParkHookV2)
 				assertCoroChannelBody(t, name, recv, coroChanRecvTryParkHookV2, []uint64{
@@ -238,6 +240,8 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 			}
 			defer object.Dispose()
 			for _, symbol := range []string{
+				coroChanSendBufferTryHookV1,
+				coroChanRecvBufferTryHookV1,
 				coroChanSendTryParkHookV2,
 				coroChanRecvTryParkHookV2,
 				coroChanResumeHookV2,
@@ -252,6 +256,44 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func assertCoroChannelBufferPreflight(t *testing.T, function llvm.Value, fastHook, parkHook string) {
+	t.Helper()
+	var fast, park llvm.Value
+	for _, block := range function.BasicBlocks() {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.InstructionOpcode() != llvm.Call {
+				continue
+			}
+			switch instruction.CalledValue().Name() {
+			case fastHook:
+				if !fast.IsNil() {
+					t.Fatalf("%s calls %q more than once:\n%s", function.Name(), fastHook, function.String())
+				}
+				fast = instruction
+			case parkHook:
+				if !park.IsNil() {
+					t.Fatalf("%s calls %q more than once:\n%s", function.Name(), parkHook, function.String())
+				}
+				park = instruction
+			}
+		}
+	}
+	if fast.IsNil() || park.IsNil() {
+		t.Fatalf("%s buffer/park calls = (%v, %v), want both %q and %q:\n%s",
+			function.Name(), !fast.IsNil(), !park.IsNil(), fastHook, parkHook, function.String())
+	}
+	if got := fast.OperandsCount() - 1; got != 3 {
+		t.Fatalf("%s arguments = %d, want channel/element/size:\n%s", fastHook, got, fast.String())
+	}
+	// The physical block order is deterministic at this compiler boundary. The
+	// metadata-bearing park call must remain reachable only after the compact
+	// buffer attempt has returned a miss.
+	body := function.String()
+	if fastIndex, parkIndex := strings.Index(body, "@"+fastHook), strings.Index(body, "@"+parkHook); fastIndex < 0 || parkIndex <= fastIndex {
+		t.Fatalf("%s does not place buffer preflight before try-or-park:\n%s", function.Name(), body)
 	}
 }
 

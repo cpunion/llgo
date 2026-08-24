@@ -79,12 +79,48 @@ func TestOwnerLocalManualCompletionDirectlyMaterializesSingleKeyedPark(t *testin
 		t.Fatalf("dequeue owner-local direct manual producer = (%p,%t)", g, runnable)
 	}
 	producerAction := beginWaitTestResume(t, p, producer)
+	slot, slotOK := manualOperationSlotFor(manual, id)
+	if !slotOK {
+		t.Fatal("locate owner-local direct manual slot")
+	}
+	assertFallback := func(name string, current *G) {
+		t.Helper()
+		beforeRecord, beforePark, beforeWait := slot.record, waiter.g.park, wait
+		beforeMailbox, beforeState := preemptLoad(&slot.mailbox), preemptLoad(&slot.state)
+		beforePending, beforePreempt := preemptLoad(&manual.pending), loadGPreempt(producer.g)
+		beforeHead, beforeTail := p.affectedWaitHead, p.affectedWaitTail
+		completion, cleanup, handled, ok := BeginOwnerLocalManualCompletionCurrent(current, driver, id)
+		if !ok || handled || completion != (OwnerLocalManualCompletion{}) ||
+			cleanup != (ResumeCleanupStep{}) || slot.record != beforeRecord ||
+			waiter.g.park != beforePark || wait != beforeWait ||
+			preemptLoad(&slot.mailbox) != beforeMailbox || preemptLoad(&slot.state) != beforeState ||
+			preemptLoad(&manual.pending) != beforePending || loadGPreempt(producer.g) != beforePreempt ||
+			p.affectedWaitHead != beforeHead || p.affectedWaitTail != beforeTail {
+			t.Fatalf("%s fallback mutated owner-local state: handled=%t ok=%t completion=%+v cleanup=%+v",
+				name, handled, ok, completion, cleanup)
+		}
+	}
+
+	// The compact capability is deliberately unavailable when any orthogonal
+	// general-path semantic is present. Each rejection must be failure-atomic
+	// so the ordinary published-epoch path can still consume the same park.
+	assertFallback("cross-owner", waiter.g)
+	waiter.g.park.cancelKind = ParkCancelOperation
+	assertFallback("cancellation", producer.g)
+	waiter.g.park.cancelKind = ParkCancelNone
+	plan.count = 2
+	assertFallback("multi-event", producer.g)
+	plan.count = 1
+	claim := new(SelectClaim)
+	plan.claim = claim
+	assertFallback("select-claim", producer.g)
+	plan.claim = nil
+
 	completion, cleanup, local, localOK := BeginOwnerLocalManualCompletionCurrent(
 		producer.g,
 		driver,
 		id,
 	)
-	slot, slotOK := manualOperationSlotFor(manual, id)
 	if !localOK || !local || !slotOK || cleanup.Kind != ResumeCleanupKeyedPark ||
 		cleanup.Context != unsafe.Pointer(&token) || cleanup.Index != 0 ||
 		cleanup.WinnerCase != 1 || cleanup.Outcome != ParkOutcomeCompleted ||

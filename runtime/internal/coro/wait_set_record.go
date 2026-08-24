@@ -349,7 +349,7 @@ func activateWaitSetRecordUnchecked(p *P, g *G, record *WaitSetRecord) {
 		p.parkWaitTail.activeNext = record
 	}
 	p.parkWaitTail = record
-	if record.resumeKind == resumeBindingDirectChannel {
+	if record.resumeKind == resumeBindingDirectChannel || record.resumeKind == resumeBindingSingleOwnerTimer {
 		// The hchan node has its own exact completion inbox. Unlike a source-backed
 		// park it cannot have an unobserved catalog fact which requires an initial
 		// affected-set visit.
@@ -475,11 +475,14 @@ func promoteReadyWaitSet(sources *ExecutorSourceSet, p *P, record *WaitSetRecord
 		(schedule != scheduleIdle && schedule != scheduleRequested) {
 		return false
 	}
-	if record.resumeKind == resumeBindingSingle && !materializeSingleResumePacket(sources, p, record) {
+	if (record.resumeKind == resumeBindingSingle || record.resumeKind == resumeBindingSingleOwnerTimer) &&
+		!materializeSingleResumePacket(sources, p, record) {
 		return false
 	}
 	if record.resumeKind == resumeBindingCleanup ||
-		record.g.park.phase == parkMaterialized && record.resumeKind != resumeBindingMaterialized {
+		record.g.park.phase == parkMaterialized &&
+			record.resumeKind != resumeBindingMaterialized &&
+			record.resumeKind != resumeBindingSingleOwnerTimer {
 		return false
 	}
 	promoteReadyWaitSetUnchecked(p, record)

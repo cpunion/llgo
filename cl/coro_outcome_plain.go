@@ -157,6 +157,7 @@ func validateOutcomePlainFrozenPlan(
 		case coroPhysicalInstructionOrdinary,
 			coroPhysicalInstructionFieldAddr,
 			coroPhysicalInstructionDeref,
+			coroPhysicalInstructionImmutableCaptureLoad,
 			coroPhysicalInstructionStaticArrayRangeDerefElided,
 			coroPhysicalInstructionStore:
 		default:
@@ -288,6 +289,7 @@ func (p *context) compileOutcomePlainPhysicalBody(
 		resultSlot: p.fn.PhysicalParam(1),
 		completion: b.Convert(p.prog.Pointer(completionType), p.fn.PhysicalParam(2)),
 	}
+	p.materializeCoroCaptureSnapshots(b, physicalPlan, 3)
 	bodyCapability := newOutcomePlainBodyCapability(body)
 	sourceBlocks := make([]llssa.BasicBlock, len(fn.Blocks))
 	for index := range sourceBlocks {

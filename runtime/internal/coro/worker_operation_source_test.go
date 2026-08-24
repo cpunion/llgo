@@ -147,7 +147,14 @@ func TestWorkerOperationSourcePayloadResolveLifecycleAndReuse(t *testing.T) {
 	} else if winnerID != ids[0] {
 		t.Fatalf("unexpected worker winner: %+v", winnerID)
 	}
+	// Model a producer whose advisory store followed this pass's initial clear.
+	// All exact admissions are already quiesced before Recycle, so retiring the
+	// last live prefix must also retire this otherwise-stale hint.
+	preemptStore(&source.pending, 1)
 	finishWorkerOperations(t, source, p, ids, lease, wantPayload)
+	if source.scanLimit != 0 || source.Pending() {
+		t.Fatalf("recycled worker prefix = %d, pending=%t", source.scanLimit, source.Pending())
+	}
 
 	// Reuse advances the physical generation, and an old producer ID cannot
 	// write into the newly active operation.

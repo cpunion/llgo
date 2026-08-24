@@ -444,10 +444,11 @@ func (a *coroPhysicalPureSSAAudit) proveParkFrameRetention(proof *coroFrameReten
 }
 
 // coroParkBorrowPrepare selects the sole call which initializes one opaque
-// park state before llgo.coroPark. The callable certificate, rather than a C
-// symbol allow-list, proves that the call is executor-safe and borrows the
-// state only until it returns. This is the extension boundary for every keyed
-// event source: adding a source does not change compiler code.
+// park state before llgo.coroPark. A foreign callable certificate, or an exact
+// local-export managed target plus its closed parameter-borrow proof, proves
+// that the call does not retain the state after it returns. This is the
+// extension boundary for every keyed event source: adding a source does not
+// change compiler code or require a symbol allow-list.
 func (a *coroPhysicalPureSSAAudit) coroParkBorrowPrepare(allocation *ssa.Alloc, park *ssa.Call) (*ssa.Call, bool) {
 	if a == nil || a.universe == nil || allocation == nil || park == nil ||
 		allocation.Parent() != a.fn || park.Parent() != a.fn || park.Block() == nil {
@@ -498,11 +499,15 @@ func (a *coroPhysicalPureSSAAudit) coroParkBorrowPrepare(allocation *ssa.Alloc, 
 			}
 			callee := a.universe.canonicalAlias(call.Common().StaticCallee())
 			certificate, certified := a.universe.callableContracts[callee]
-			if callee == nil || !certified || certificate.Scope != coro.CallableContractScopeDeclaration ||
-				certificate.Contract.Progress != coro.ProgressExecutorSafe ||
-				certificate.Contract.Reentry != coro.ReentryNone ||
-				certificate.Contract.Memory != coro.MemoryBorrowUntilReturn ||
-				(certificate.Contract.Affinity != coro.AffinityCallerThread && certificate.Contract.Affinity != coro.AffinityAnyThread) {
+			foreignBorrow := callee != nil && certified &&
+				certificate.Scope == coro.CallableContractScopeDeclaration &&
+				certificate.Contract.Progress == coro.ProgressExecutorSafe &&
+				certificate.Contract.Reentry == coro.ReentryNone &&
+				certificate.Contract.Memory == coro.MemoryBorrowUntilReturn &&
+				(certificate.Contract.Affinity == coro.AffinityCallerThread ||
+					certificate.Contract.Affinity == coro.AffinityAnyThread)
+			_, managedBorrow := proveCoroManagedCallArgumentBorrowedUntilReturn(a.universe, call, 0)
+			if !foreignBorrow && !managedBorrow {
 				return nil, false
 			}
 			prepare = call

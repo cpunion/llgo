@@ -171,7 +171,7 @@ func PrepareCurrentExecutorWorkerParkCompiler(
 	if !ok || !prepared.commit(id, caseID) {
 		return ParkTicket{}, OperationID{}, false
 	}
-	installSingleWaitSetResumePacket(wait, packet, id)
+	installSingleWaitSetResumePacket(wait, packet, id, resumeBindingSingle)
 	if !source.markWorkerReservationSubmitted(p, reservation, id) {
 		return ParkTicket{}, OperationID{}, false
 	}

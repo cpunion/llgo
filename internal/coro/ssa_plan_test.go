@@ -521,6 +521,12 @@ func deadOwner() {
 			t.Fatalf("%s plan = %+v, want demand=%s emission=%s", check.name, got, check.demand, check.emission)
 		}
 	}
+	if spawned := packageFunction(t, pkg, "spawnedTarget"); !plan.IsSpawnTarget(spawned) {
+		t.Fatal("direct go target is absent from the frozen spawn-target set")
+	}
+	if plan.IsSpawnTarget(owner) || plan.IsSpawnTarget(nil) {
+		t.Fatal("ordinary owner or nil function was classified as a spawn target")
+	}
 
 	if len(owner.AnonFuncs) != 1 {
 		t.Fatalf("owner closures = %d, want 1", len(owner.AnonFuncs))
@@ -2347,6 +2353,9 @@ func launch(value int) {
 	if targetPlan.Emission != EmitCoroutine || targetPlan.Primary != PrimaryCoroutine ||
 		targetPlan.FuncRep != Dispatch || targetPlan.Demand != AsyncDemand || !targetPlan.Effect.Contains(YieldOnly) {
 		t.Fatalf("captured managed spawn target = %+v", targetPlan)
+	}
+	if !plan.IsSpawnTarget(target) {
+		t.Fatal("captured closure go target is absent from the frozen spawn-target set")
 	}
 
 	plainOnly, err := AnalyzeSSA(prog, Roots{{Function: launch, Demand: AsyncDemand}}, SSAConfig{

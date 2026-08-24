@@ -546,7 +546,6 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	b llssa.Builder, entry plannedFunctionSymbol, closureContext llssa.Expr, args []llssa.Expr,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) coroAwaitedValue {
-	callee := entry.function
 	body := p.coroBody()
 	if body == nil || p.compilation == nil || p.immutablePlan() == nil {
 		panic("coroutine child await requires an active physical coroutine body")
@@ -554,6 +553,8 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	if b.Func != p.fn {
 		panic("coroutine child await builder does not belong to the active physical coroutine function")
 	}
+	entry, args = p.flattenCoroTailForwardAwait(b, entry, closureContext, args)
+	callee := entry.function
 	callerPlan, ok := p.immutablePlan().FunctionPlan(p.goFn)
 	if !ok {
 		panic("coroutine child await: current function has no compilation plan")
@@ -633,6 +634,85 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	return coroAwaitedValue{
 		value:   value,
 		address: p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()),
+	}
+}
+
+// flattenCoroTailForwardAwait consumes the already-frozen physical proof for
+// an exact static call before LLVM sees the call graph. A frame-free wrapper
+// such as sync.(*WaitGroup).Done returns another coroutine ramp's handle
+// unchanged. Leaving that wrapper in the static await path makes the general
+// inliner expose the nested ramp call only after CoroAnnotationElide has
+// visited it, losing the caller-bounded coro_elide_safe proof and allocating a
+// redundant child frame. Rewriting only proven
+// parameter/representation-retag/literal recipes here
+// preserves the public wrapper symbol for function values, interfaces, and
+// spawned roots while letting the exact static await name the ultimate ramp.
+func (p *context) flattenCoroTailForwardAwait(
+	b llssa.Builder,
+	entry plannedFunctionSymbol,
+	closureContext llssa.Expr,
+	args []llssa.Expr,
+) (plannedFunctionSymbol, []llssa.Expr) {
+	if p == nil || b == nil || b.Func != p.fn || p.immutablePlan() == nil {
+		panic("coroutine tail-forward await requires an active frozen emission")
+	}
+	// Tail-forward physical bodies are deliberately context-free. Special
+	// entry roles and imported summaries retain their published symbol because
+	// neither supplies the ordinary owned-body projection used by this proof.
+	if !closureContext.IsNil() || entry.patchOriginalInit || entry.importedLibrary {
+		return entry, args
+	}
+	if p.immutablePlan().IsSpawnTarget(p.goFn) {
+		return entry, args
+	}
+	seen := make(map[coro.FunctionID]struct{})
+	for {
+		if entry.function == nil || !entry.usesCoroPhysicalABI() || entry.plan.ID == "" {
+			return entry, args
+		}
+		if _, duplicate := seen[entry.plan.ID]; duplicate {
+			panic(fmt.Sprintf("coroutine tail-forward await contains a cycle at %q", entry.plan.ID))
+		}
+		seen[entry.plan.ID] = struct{}{}
+
+		physical, err := entry.sealedPhysicalFunctionPlan()
+		if err != nil {
+			panic(fmt.Errorf("resolve coroutine tail-forward await %q: %w", entry.plan.ID, err))
+		}
+		forward := physical.tailForward
+		if forward == nil {
+			return entry, args
+		}
+		if err := forward.validate(entry.function, p.immutablePlan(), p.emissionUniverse); err != nil {
+			panic(fmt.Errorf("validate coroutine tail-forward await %q: %w", entry.plan.ID, err))
+		}
+		mapped := make([]llssa.Expr, len(forward.args))
+		for index, argument := range forward.args {
+			if argument.sourceParameter >= 0 {
+				if argument.sourceParameter >= len(args) {
+					panic(fmt.Sprintf(
+						"coroutine tail-forward await %q parameter %d is outside %d source arguments",
+						entry.plan.ID, argument.sourceParameter, len(args),
+					))
+				}
+				mapped[index] = args[argument.sourceParameter]
+				if argument.retag {
+					mapped[index] = b.ChangeType(
+						p.prog.Type(argument.targetType, llssa.InGo), mapped[index],
+					)
+				}
+				continue
+			}
+			mapped[index] = p.compileValueAs(b, argument.constant, argument.targetType)
+		}
+		target := p.mustFunctionSymbol(forward.target)
+		if target.plan.ID != forward.targetID || !target.usesCoroPhysicalABI() {
+			panic(fmt.Sprintf(
+				"coroutine tail-forward await %q target no longer resolves to %q",
+				entry.plan.ID, forward.targetID,
+			))
+		}
+		entry, args = target, mapped
 	}
 }
 
@@ -881,7 +961,7 @@ func (p *context) awaitCoroChildWithRecovery(
 	b.Store(dataWord, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(statusWord, p.prog.IntVal(0, p.prog.Uint32()))
 	completedInline := p.emitCoroStaticInlineAwait(
-		b, child, startedInline, typeWord, dataWord, statusWord,
+		b, child, startedInline, p.prog.BoolVal(false), typeWord, dataWord, statusWord,
 	)
 	consume := p.pkg.NewFunc(body.abi.awaitConsumeHook, coroAwaitConsumeSignature(), llssa.InC)
 
@@ -1053,11 +1133,11 @@ func (p *context) awaitCoroChildWithRecovery(
 // in its parent. A declined/deep or genuinely suspended child converges on the
 // existing false result and parent suspend path.
 func (p *context) emitCoroStaticInlineAwait(
-	b llssa.Builder, child, startedInline, typeWord, dataWord, statusWord llssa.Expr,
+	b llssa.Builder, child, startedInline, alreadyRan, typeWord, dataWord, statusWord llssa.Expr,
 ) llssa.Expr {
 	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn || child.IsNil() || startedInline.IsNil() ||
-		typeWord.IsNil() || dataWord.IsNil() || statusWord.IsNil() ||
+		alreadyRan.IsNil() || typeWord.IsNil() || dataWord.IsNil() || statusWord.IsNil() ||
 		body.abi.awaitInlineFinishHook == "" ||
 		body.abi.awaitInlineDestroyConsumeHook == "" {
 		panic("coroutine static inline await has an incomplete physical contract")
@@ -1071,12 +1151,21 @@ func (p *context) emitCoroStaticInlineAwait(
 		llssa.InC,
 	)
 
-	started, declined, destroy, joined := p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock()
+	started := p.fn.MakeBlock()
+	resume := p.fn.MakeBlock()
+	inspect := p.fn.MakeBlock()
+	declined := p.fn.MakeBlock()
+	destroy := p.fn.MakeBlock()
+	joined := p.fn.MakeBlock()
 	parent := body.coro.Handle()
 	b.If(startedInline, started, declined)
 
 	b.SetBlockEx(started, llssa.AtEnd, false)
+	b.If(alreadyRan, inspect, resume)
+	b.SetBlockEx(resume, llssa.AtEnd, false)
 	b.CoroResume(child)
+	b.Jump(inspect)
+	b.SetBlockEx(inspect, llssa.AtEnd, false)
 	done := b.CoroDone(child)
 	b.If(b.Call(finish.Expr, body.task, parent, child, done), destroy, declined)
 

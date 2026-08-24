@@ -26,7 +26,10 @@ import (
 	"github.com/goplus/llgo/runtime/internal/corotimer"
 )
 
-const coroTimerParkMagicV2 uint32 = 0x43544d32 // "CTM2"
+const (
+	coroSleepParkMagicV2 uint32 = 0x43534c32 // "CSL2"
+	coroTimerParkMagicV2 uint32 = 0x43544d32 // "CTM2"
+)
 
 const (
 	coroTimerResumeSuccessV2 uint32 = iota + 1
@@ -50,6 +53,23 @@ type CoroTimerParkV2 struct {
 	executor  coro.ExecutorHandle
 }
 
+// CoroSleepParkV2 is the compact ordinary-Sleep transaction. WaitSetRecord is
+// the unified scheduler/event queue node; SingleOwnerTimerResume is the only
+// result cell because Sleep has no payload, select default, or Stop/Reset
+// controller. Controlled time.Timer retains CoroTimerParkV2 above.
+type CoroSleepParkV2 struct {
+	magic  uint32
+	wait   coro.WaitSetRecord
+	resume coro.SingleOwnerTimerResume
+}
+
+const coroSleepParkSizeV2 = 24 + 8*unsafe.Sizeof(uintptr(0))
+
+var (
+	_ [coroSleepParkSizeV2 - unsafe.Sizeof(CoroSleepParkV2{})]byte
+	_ [unsafe.Sizeof(CoroSleepParkV2{}) - coroSleepParkSizeV2]byte
+)
+
 func validCoroTimerParkV2(state *CoroTimerParkV2) bool {
 	return state != nil && state.magic == coroTimerParkMagicV2 && state.ticket.Valid() &&
 		state.timer.Slot != 0 && state.timer.Generation != 0 &&
@@ -72,43 +92,44 @@ func coroTimerAbortV2(message string) {
 //
 //export __llgo_coro_timer_park_v2
 func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay int64) {
-	state := (*CoroTimerParkV2)(storage)
-	if g == nil || handle == nil || header == nil || state == nil || *state != (CoroTimerParkV2{}) {
+	state := (*CoroSleepParkV2)(storage)
+	if g == nil || handle == nil || header == nil || state == nil || *state != (CoroSleepParkV2{}) {
 		coroTimerAbortV2("invalid coroutine Timer V2 park ABI")
 		return
 	}
 	task := (*coro.G)(g)
-	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorTimerDriver(task)
+	_, owner, timers, wantExecutor, wantRoute, ok := coro.CurrentExecutorTimerSource(task)
 	now, clockOK := CoroMonotonicNano()
 	deadline, deadlineOK := corotimer.DeadlineAfter(now, delay)
-	if !ok || !clockOK || !deadlineOK ||
-		!ensureCoroTimerOperationCapacityV1(driver, task, coroRuntimeTimerCapacityV1) {
+	reservation, capacityOK := ensureCoroTimerSourceCapacityV1(
+		owner, timers, coroRuntimeTimerCapacityV1,
+	)
+	if !ok || !clockOK || !deadlineOK || !capacityOK {
 		coroTimerAbortV2("cannot resolve coroutine Timer V2 owner or deadline")
 		return
 	}
-	ticket, timer, operation, executor, prepared := coro.PrepareCurrentExecutorTimerPark(
-		driver,
+	_, timer, operation, prepared := coro.PrepareSingleTimerParkReserved(
 		task,
 		handle,
 		(*coro.HeaderV1)(header),
+		timers,
 		&state.wait,
 		1,
 		1,
 		deadline,
+		reservation,
 	)
-	if !prepared || executor != wantExecutor || operation.Route() != wantRoute {
+	if !prepared || operation.Route() != wantRoute {
 		coroTimerAbortV2("cannot prepare coroutine Timer V2 park")
 		return
 	}
-	state.magic = coroTimerParkMagicV2
-	state.ticket = ticket
-	state.timer = timer
-	state.operation = operation
-	state.executor = executor
-	if !coro.BindSingleWaitSetResumePacket(&state.wait, &state.packet, operation) {
+	if timer.Slot == 0 || timer.Generation == 0 || wantExecutor.Slot == 0 ||
+		wantExecutor.Generation == 0 ||
+		!coro.BindSingleOwnerTimerResume(&state.wait, &state.resume, operation) {
 		coroTimerAbortV2("cannot bind coroutine Timer V2 resume packet")
 		return
 	}
+	state.magic = coroSleepParkMagicV2
 }
 
 // __llgo_coro_timer_park_controlled_v2 is the standard-library Timer manager
@@ -132,8 +153,11 @@ func __llgo_coro_timer_park_controlled_v2(
 		return
 	}
 	task := (*coro.G)(g)
-	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorTimerDriver(task)
-	if !ok || !ensureCoroTimerOperationCapacityV1(driver, task, coroRuntimeTimerCapacityV1) {
+	_, owner, timers, wantExecutor, wantRoute, ok := coro.CurrentExecutorTimerSource(task)
+	reservation, capacityOK := ensureCoroTimerSourceCapacityV1(
+		owner, timers, coroRuntimeTimerCapacityV1,
+	)
+	if !ok || !capacityOK {
 		coroTimerAbortV2("cannot resolve controlled coroutine Timer V2 owner")
 		return
 	}
@@ -141,11 +165,11 @@ func __llgo_coro_timer_park_controlled_v2(
 	// Stop/Reset either requests this owner or changes control before the
 	// post-attach recheck below; there is no route-publication lost-wake gap.
 	catomic.Store(ownerRoute, uint32(wantRoute))
-	ticket, timer, operation, executor, prepared := coro.PrepareCurrentExecutorControlledTimerPark(
-		driver,
+	ticket, timer, operation, prepared := coro.PrepareSingleControlledTimerParkReserved(
 		task,
 		handle,
 		(*coro.HeaderV1)(header),
+		timers,
 		&state.wait,
 		1,
 		1,
@@ -153,8 +177,9 @@ func __llgo_coro_timer_park_controlled_v2(
 		uintptr(controller),
 		control,
 		expected,
+		reservation,
 	)
-	if !prepared || executor != wantExecutor || operation.Route() != wantRoute {
+	if !prepared || operation.Route() != wantRoute {
 		coroTimerAbortV2("cannot prepare controlled coroutine Timer V2 park")
 		return
 	}
@@ -162,7 +187,7 @@ func __llgo_coro_timer_park_controlled_v2(
 	state.ticket = ticket
 	state.timer = timer
 	state.operation = operation
-	state.executor = executor
+	state.executor = wantExecutor
 	if !coro.BindSingleWaitSetResumePacket(&state.wait, &state.packet, operation) {
 		coroTimerAbortV2("cannot bind controlled coroutine Timer V2 resume packet")
 		return
@@ -176,8 +201,38 @@ func __llgo_coro_timer_park_controlled_v2(
 //
 //export __llgo_coro_timer_resume_v2
 func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 {
+	if g == nil || storage == nil {
+		coroTimerAbortV2("invalid coroutine Timer V2 resume ABI")
+		return 0
+	}
+	if (*CoroSleepParkV2)(storage).magic == coroSleepParkMagicV2 {
+		state := (*CoroSleepParkV2)(storage)
+		outcome, cancel, taken := coro.TakeSingleOwnerTimerResume(
+			(*coro.G)(g), &state.resume,
+		)
+		if !taken {
+			coroTimerAbortV2("invalid coroutine Sleep V2 run decision")
+			return 0
+		}
+		status := uint32(0)
+		switch {
+		case outcome == coro.ParkOutcomeCompleted && cancel == coro.TaskCancelNone:
+			status = coroTimerResumeSuccessV2
+		case outcome == coro.ParkOutcomeCanceled && cancel == coro.TaskCancelNone:
+			status = coroTimerResumeOperationCanceledV2
+		case outcome == coro.ParkOutcomeCanceled && cancel == coro.TaskCancelAbort:
+			status = coroTimerResumeTaskAbortV2
+		case outcome == coro.ParkOutcomeCanceled && cancel == coro.TaskCancelShutdown:
+			status = coroTimerResumeShutdownV2
+		default:
+			coroTimerAbortV2("unsupported coroutine Sleep V2 run decision")
+			return 0
+		}
+		*state = CoroSleepParkV2{}
+		return status
+	}
 	state := (*CoroTimerParkV2)(storage)
-	if g == nil || !validCoroTimerParkV2(state) {
+	if !validCoroTimerParkV2(state) {
 		coroTimerAbortV2("invalid coroutine Timer V2 resume ABI")
 		return 0
 	}

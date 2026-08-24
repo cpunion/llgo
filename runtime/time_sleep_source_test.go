@@ -257,13 +257,18 @@ func TestSleepTimerV2OwnerUsesExactCurrentSource(t *testing.T) {
 	}
 	source := string(data)
 	for _, contract := range []string{
+		"type CoroSleepParkV2 struct {",
 		"type CoroTimerParkV2 struct {",
 		"func __llgo_coro_timer_park_v2(",
 		"func __llgo_coro_timer_resume_v2(",
-		"coro.CurrentExecutorTimerDriver(task)",
-		"coro.PrepareCurrentExecutorTimerPark(",
+		"coro.CurrentExecutorTimerSource(task)",
+		"ensureCoroTimerSourceCapacityV1(",
+		"coro.PrepareSingleTimerParkReserved(",
+		"coro.BindSingleOwnerTimerResume(",
+		"coro.TakeSingleOwnerTimerResume(",
 		"coro.BindSingleWaitSetResumePacket(",
 		"coro.TakeResumePacket(",
+		"resume coro.SingleOwnerTimerResume",
 		"packet    coro.ResumePacket",
 		"coroTimerResumeTaskAbortV2",
 		"coroTimerResumeShutdownV2",

@@ -29,12 +29,23 @@ import "unsafe"
 // suspension. A frame retains only the pointer-free executor handle plus the
 // routed timer OperationID returned by PrepareCurrentExecutorTimerPark.
 func CurrentExecutorTimerDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool) {
+	driver, _, _, handle, route, ok := CurrentExecutorTimerSource(g)
+	return driver, handle, route, ok
+}
+
+// CurrentExecutorTimerSource returns the complete no-suspend owner capability
+// for one compiler timer hook. The caller may preflight/grow the stable table
+// and then call PrepareSingleTimerPark without rediscovering the same
+// G/P/driver/frame graph. No returned pointer may cross llvm.coro.suspend.
+func CurrentExecutorTimerSource(
+	g *G,
+) (*ExecutorDriver, *P, *TimerRegistrationTable, ExecutorHandle, RouteID, bool) {
 	driver, handle, route, ok := currentExecutorParkDriver(g)
 	if !ok || driver.sources.timers == nil || driver.sources.timers.owner != driver.p ||
 		driver.sources.timers.route != route {
-		return nil, ExecutorHandle{}, 0, false
+		return nil, nil, nil, ExecutorHandle{}, 0, false
 	}
-	return driver, handle, route, true
+	return driver, driver.p, driver.sources.timers, handle, route, true
 }
 
 func currentExecutorTimerTable(driver *ExecutorDriver, g *G) (*TimerRegistrationTable, bool) {
@@ -52,10 +63,7 @@ func currentExecutorTimerTable(driver *ExecutorDriver, g *G) (*TimerRegistration
 // timer park. It runs before BeginParkSet so ordinary capacity exhaustion or
 // generation exhaustion cannot strand a partially prepared logical wait.
 func CanReserveTimerV2(p *P, table *TimerRegistrationTable) bool {
-	if table == nil || p == nil || table.owner != p || !table.route.Valid() {
-		return false
-	}
-	_, _, ok := nextReusableTimerRegistrationSlot(table)
+	_, ok := PrepareTimerRegistrationReservation(p, table)
 	return ok
 }
 
@@ -72,8 +80,34 @@ func PrepareSingleTimerPark(
 	seed uint32,
 	deadline int64,
 ) (ParkTicket, TimerRegistrationHandle, OperationID, bool) {
+	if !ValidG(g) {
+		return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
+	}
+	reservation, ok := PrepareTimerRegistrationReservation(g.runP, table)
+	if !ok {
+		return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
+	}
+	return PrepareSingleTimerParkReserved(
+		g, handle, header, table, wait, caseID, seed, deadline, reservation,
+	)
+}
+
+// PrepareSingleTimerParkReserved consumes a free-slot receipt acquired in the
+// same no-suspend owner hook. It avoids repeating the catalog search after the
+// target has already performed capacity admission.
+func PrepareSingleTimerParkReserved(
+	g *G,
+	handle unsafe.Pointer,
+	header *HeaderV1,
+	table *TimerRegistrationTable,
+	wait *WaitSetRecord,
+	caseID uint32,
+	seed uint32,
+	deadline int64,
+	reservation TimerRegistrationReservation,
+) (ParkTicket, TimerRegistrationHandle, OperationID, bool) {
 	return prepareSingleTimerPark(
-		g, handle, header, table, wait, caseID, seed, deadline, 0, nil, 0,
+		g, handle, header, table, wait, caseID, seed, deadline, 0, nil, 0, reservation,
 	)
 }
 
@@ -94,8 +128,38 @@ func PrepareSingleControlledTimerPark(
 	control *uint32,
 	expected uint32,
 ) (ParkTicket, TimerRegistrationHandle, OperationID, bool) {
+	if !ValidG(g) {
+		return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
+	}
+	reservation, ok := PrepareTimerRegistrationReservation(g.runP, table)
+	if !ok {
+		return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
+	}
+	return PrepareSingleControlledTimerParkReserved(
+		g, handle, header, table, wait, caseID, seed, deadline,
+		controller, control, expected, reservation,
+	)
+}
+
+// PrepareSingleControlledTimerParkReserved is the controlled-timer counterpart
+// of PrepareSingleTimerParkReserved.
+func PrepareSingleControlledTimerParkReserved(
+	g *G,
+	handle unsafe.Pointer,
+	header *HeaderV1,
+	table *TimerRegistrationTable,
+	wait *WaitSetRecord,
+	caseID uint32,
+	seed uint32,
+	deadline int64,
+	controller uintptr,
+	control *uint32,
+	expected uint32,
+	reservation TimerRegistrationReservation,
+) (ParkTicket, TimerRegistrationHandle, OperationID, bool) {
 	return prepareSingleTimerPark(
-		g, handle, header, table, wait, caseID, seed, deadline, controller, control, expected,
+		g, handle, header, table, wait, caseID, seed, deadline,
+		controller, control, expected, reservation,
 	)
 }
 
@@ -111,12 +175,17 @@ func prepareSingleTimerPark(
 	controller uintptr,
 	control *uint32,
 	expected uint32,
+	reservation TimerRegistrationReservation,
 ) (ParkTicket, TimerRegistrationHandle, OperationID, bool) {
 	if !ValidG(g) || handle == nil || header == nil || table == nil || wait == nil ||
 		*wait != (WaitSetRecord{}) || caseID == 0 || deadline < 0 || !resumeGateTaken(g) ||
-		g.runP == nil || table.owner != g.runP || !CanReserveTimerV2(g.runP, table) ||
+		g.runP == nil || table.owner != g.runP ||
 		(control == nil && (controller != 0 || expected != 0)) ||
 		(control != nil && (controller == 0 || expected == 0)) {
+		return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
+	}
+	index, slot, operation, ok := validTimerRegistrationReservation(g.runP, table, reservation)
+	if !ok {
 		return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
 	}
 	ticket, ok := BeginParkSet(&g.park, 1, seed)
@@ -125,20 +194,27 @@ func prepareSingleTimerPark(
 	}
 	var timer TimerRegistrationHandle
 	if control == nil {
-		timer, ok = table.ReserveAndAttachTimerV2(g.runP, &g.park, ticket, wait, caseID, deadline)
-	} else {
-		timer, ok = table.ReserveAndAttachControlledTimerV2(
-			g.runP, &g.park, ticket, wait, caseID, deadline, controller, control, expected,
+		timer, operation, ok = table.reserveAndAttachTimerV2At(
+			g.runP, &g.park, ticket, wait, caseID, deadline,
+			0, nil, 0, index, slot, operation,
 		)
+	} else {
+		timer, operation, ok = table.reserveAndAttachTimerV2At(
+			g.runP, &g.park, ticket, wait, caseID, deadline,
+			controller, control, expected, index, slot, operation,
+		)
+		if ok && preemptLoad(control) != expected &&
+			!RequestParkCancel(&g.park, ticket, ParkCancelOperation) {
+			return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
+		}
 	}
-	id, idOK := timerRegistrationIDForHandle(table, timer)
-	if !ok || !idOK {
+	if !ok {
 		return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
 	}
 	if !SealParkSet(&g.park, ticket) || !PrepareParkSet(g, handle, header, ticket, wait) {
 		return ParkTicket{}, TimerRegistrationHandle{}, OperationID{}, false
 	}
-	return ticket, timer, id, true
+	return ticket, timer, operation, true
 }
 
 // PrepareCurrentExecutorTimerPark selects the timer source through the exact

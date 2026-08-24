@@ -108,24 +108,15 @@ func planCoroPlainAllocation(ctx *context, allocation *ssa.Alloc) coroPlainAlloc
 // turning a local allocation classifier into another whole-program plan owner.
 type coroBorrowedAllocationUniverse interface {
 	coroCallArgumentLifetimeUniverse
+	coroCallSitePlanReader
 	Resolve(*ssa.Function) (*ssa.Function, bool)
 	FunctionBackground(*ssa.Function) (llssa.Background, bool, error)
 }
 
-// proveCoroBorrowedAllocation admits only bodies which the frozen emission
-// universe will actually compile as managed Go, or exact call-site plans which
-// prove that a foreign call stops borrowing an argument no later than its
-// logical completion. Source bodies attached to C, Python, or LLVM intrinsic
-// declarations remain type-checking stubs and never constitute memory-
-// semantics evidence themselves.
-func proveCoroBorrowedAllocation(
+func coroBorrowedAllocationProofConfig(
 	universe coroBorrowedAllocationUniverse,
-	allocation *ssa.Alloc,
-) (coro.SSABorrowedAllocationProof, bool) {
-	if universe == nil {
-		return coro.SSABorrowedAllocationProof{Allocation: allocation}, false
-	}
-	return coro.ProveSSABorrowedAllocationWithConfig(allocation, coro.SSABorrowedAllocationConfig{
+) coro.SSABorrowedAllocationConfig {
+	return coro.SSABorrowedAllocationConfig{
 		BorrowedCallArgument: func(call *ssa.Call, _ int) bool {
 			borrowed, err := coroCallArgumentsBorrowedUntilCompletion(universe, call)
 			return err == nil && borrowed
@@ -141,7 +132,59 @@ func proveCoroBorrowedAllocation(
 			}
 			return canonical, true
 		},
-	})
+	}
+}
+
+// proveCoroBorrowedAllocation admits only bodies which the frozen emission
+// universe will actually compile as managed Go, or exact call-site plans which
+// prove that a foreign call stops borrowing an argument no later than its
+// logical completion. Source bodies attached to C, Python, or LLVM intrinsic
+// declarations remain type-checking stubs and never constitute memory-
+// semantics evidence themselves.
+func proveCoroBorrowedAllocation(
+	universe coroBorrowedAllocationUniverse,
+	allocation *ssa.Alloc,
+) (coro.SSABorrowedAllocationProof, bool) {
+	if universe == nil {
+		return coro.SSABorrowedAllocationProof{Allocation: allocation}, false
+	}
+	return coro.ProveSSABorrowedAllocationWithConfig(
+		allocation, coroBorrowedAllocationProofConfig(universe),
+	)
+}
+
+// proveCoroManagedCallArgumentBorrowedUntilReturn consumes only the frozen
+// occurrence target selected for an ordinary managed call through a local C
+// export.  The binding certificate proves the ABI mapping; the independent
+// SSA proof below proves the target parameter's complete address graph.  This
+// keeps caller-owned park state in its coroutine frame without treating the C
+// declaration's inert source stub or symbol name as lifetime evidence.
+func proveCoroManagedCallArgumentBorrowedUntilReturn(
+	universe coroBorrowedAllocationUniverse,
+	call *ssa.Call,
+	index int,
+) (coro.SSABorrowedParameterProof, bool) {
+	if universe == nil || call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+		index < 0 || index >= len(call.Common().Args) {
+		return coro.SSABorrowedParameterProof{}, false
+	}
+	site, frozen, err := universe.CoroCallSitePlan(call)
+	if err != nil || !frozen || site.ManagedStaticTarget == nil ||
+		site.ManagedStaticTargetCertificate == "" {
+		return coro.SSABorrowedParameterProof{}, false
+	}
+	target, resolved := universe.Resolve(site.ManagedStaticTarget)
+	if !resolved || target == nil || target != site.ManagedStaticTarget ||
+		len(target.Blocks) == 0 || index >= len(target.Params) {
+		return coro.SSABorrowedParameterProof{Function: target, Index: index}, false
+	}
+	background, classified, err := universe.FunctionBackground(target)
+	if err != nil || !classified || background != llssa.InGo {
+		return coro.SSABorrowedParameterProof{Function: target, Index: index}, false
+	}
+	return coro.ProveSSABorrowedParameterWithConfig(
+		target, index, coroBorrowedAllocationProofConfig(universe),
+	)
 }
 
 // coroFunctionPreamblePlan freezes compiler-owned operations which have no

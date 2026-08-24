@@ -130,7 +130,12 @@ func __llgo_coro_await_inline_destroy_consume_v4(g, parent, child, typeOut, data
 		coroRuntimeAbort("invalid coroutine inline child outcome output")
 	}
 	task := (*coro.G)(g)
-	snapshot, ok := coro.CommitInlineAwaitPhysicalDestroyCompiler(task, parent, child)
+	if coro.CommitInlineAwaitReturnPhysicalDestroyCompiler(task, parent, child) {
+		*(*unsafe.Pointer)(typeOut) = nil
+		*(*unsafe.Pointer)(dataOut) = nil
+		return uint32(coro.CompletionReturn)
+	}
+	snapshot, ok := coro.CommitInlineAwaitPhysicalDestroyCompatibilityCompiler(task, parent, child)
 	if !ok {
 		coroRuntimeAbort("invalid coroutine inline physical child completion")
 	}

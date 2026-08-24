@@ -668,6 +668,59 @@ func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *Oper
 	return OperationApplyDetached
 }
 
+// finishSingleOwnerManualOne consumes the terminal capability established by
+// BeginOwnerLocalManualCompletionCurrent. Producer admission is already sealed and this
+// owner P cannot suspend between the two calls, so the exact slot may be
+// confirmed, have its result released, and be recycled with one scalar audit
+// instead of rediscovering it independently in ConfirmQuiesced, TakeResult,
+// and Recycle. The general source API remains the boundary for every path that
+// can cross an owner, carry more than one operation, or observe cancellation.
+func (source *ManualOperationSource) finishSingleOwnerManualOne(
+	p *P,
+	id OperationID,
+	slot *manualOperationSlot,
+	lease OperationResultLease,
+) bool {
+	if source == nil || p == nil || source.owner != p || source.route != id.Route() ||
+		id.Source() != OperationSourceManual || id.LocalSlot() != 1 || source.scanLimit != 1 ||
+		slot == nil || slot != &source.slots[0] ||
+		preemptLoad(&source.pending) != 0 || source.affectedHead != 0 || source.affectedTail != 0 ||
+		preemptLoad(&slot.generation) != id.Generation ||
+		preemptLoad(&slot.state) != uint32(producerSourceClosing) ||
+		!producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
+		preemptLoad(&slot.mailbox) != uint32(manualOperationMailboxDelivered) ||
+		slot.nextAffected != 0 || !lease.Valid() || lease.id != id {
+		return false
+	}
+	record := &slot.record
+	if record.id != id || record.phase != operationDetached ||
+		record.disposition != OperationDispositionWinner || !record.resolutionApplied ||
+		record.cancelRequested || record.quiesced ||
+		record.candidate != operationCandidateIrreversiblePublished ||
+		record.resultState != operationResultLeased ||
+		record.resultTicket != lease.ticket || record.link != (ParkLink{}) {
+		return false
+	}
+
+	// No producer can enter after the closed admission word reached zero, and
+	// no second owner mutation can run on this P. These writes are therefore a
+	// single no-fail retirement transaction after the audit above.
+	if !markProducerSourceQuiesced(&slot.producerSourceSlot) {
+		return false
+	}
+	record.quiesced = true
+	record.resultState = operationResultTaken
+	*record = OperationRecord{id: id, phase: operationReusable}
+	slot.nextAffected = 0
+	preemptStore(&slot.mailbox, uint32(manualOperationMailboxEmpty))
+	if !recycleProducerSourceSlot(&slot.producerSourceSlot) {
+		return false
+	}
+	source.scanLimit = 0
+	preemptStore(&source.pending, 0)
+	return true
+}
+
 // ApplyAndDetach is the standalone/legacy convenience path. It intentionally
 // retains its all-capacity scan for callers which do not carry a WaitSetRecord;
 // ExecutorSourceSet never calls it. Physical quiescence is not a prerequisite

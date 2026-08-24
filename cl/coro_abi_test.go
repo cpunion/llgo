@@ -383,6 +383,67 @@ func Parent(value uint32) { Child(value, -1) }
 	}
 }
 
+func TestCoroStaticAwaitFlattensExactTailForwardBeforeElision(t *testing.T) {
+	const source = `package foo
+var Sink uint32
+func Child(value uint32, delta int) {}
+func Forward(value uint32) { Child(value, -1) }
+func Parent(value uint32) { Forward(value); Sink = value }
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, nil, source)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify flattened tail-forward await: %v\n%s", err, module.String())
+	}
+
+	forward := ssaPkg.Func("Forward")
+	physical, err := universe.coroProgramIR.physicalFunctionPlan(forward, universe.ownerOf(forward))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if physical.tailForward == nil || physical.tailForward.target != ssaPkg.Func("Child") {
+		t.Fatalf("Forward physical tail forward = %+v; want exact Child target", physical.tailForward)
+	}
+
+	parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
+	elideKind := llvm.AttributeKindID("coro_elide_safe")
+	if elideKind == 0 {
+		t.Skip("LLVM has no coro_elide_safe attribute")
+	}
+	foundChild := false
+	for block := parent.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			call := instruction.IsACallInst()
+			if call.IsNil() {
+				continue
+			}
+			switch call.CalledValue().Name() {
+			case "foo.Forward$coro":
+				t.Fatalf("static await retained the frame-free forwarding symbol:\n%s", parent.String())
+			case "foo.Child$coro":
+				foundChild = true
+				if call.GetCallSiteEnumAttribute(-1, elideKind).IsNil() {
+					t.Fatalf("flattened Child await lost coro_elide_safe:\n%s", parent.String())
+				}
+			}
+		}
+	}
+	if !foundChild {
+		t.Fatalf("static await did not flatten Forward to Child:\n%s", parent.String())
+	}
+}
+
 func TestCoroNamedFunctionTypeDirectAwait(t *testing.T) {
 	const source = `package foo
 type Task func(uint32) uint32
@@ -2098,6 +2159,15 @@ func prepareCoroChildAwaitPhysicalABISource(
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	parent, child := ssaPkg.Func("Parent"), ssaPkg.Func("Child")
+	parentName, childName := "Parent", "Child"
+	if parent == nil && child == nil {
+		parent, child = ssaPkg.Func("Root"), ssaPkg.Func("child")
+		parentName, childName = "Root", "child"
+	}
+	if parent == nil || child == nil {
+		prog.Dispose()
+		t.Fatal("child-await fixture requires Parent/Child or Root/child")
+	}
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: parent, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
@@ -2113,7 +2183,7 @@ func prepareCoroChildAwaitPhysicalABISource(
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	for name, fn := range map[string]*ssa.Function{"Parent": parent, "Child": child} {
+	for name, fn := range map[string]*ssa.Function{parentName: parent, childName: child} {
 		function, ok := plan.FunctionPlan(fn)
 		if !ok || function.Primary != coro.PrimaryCoroutine || function.FuncRep != coro.DirectCoro || function.Demand != coro.AsyncDemand {
 			prog.Dispose()
@@ -2274,13 +2344,14 @@ func assertCoroV0HeaderStateZero(t *testing.T, body string) {
 func assertCoroV1InitialPublish(t *testing.T, name, body string) {
 	t.Helper()
 	begin := strings.Index(body, "call ptr @llvm.coro.begin")
-	publish := strings.Index(body, "call void @"+coroFramePublishHookV3)
+	hook := coroFramePublishHookV3
+	publish := strings.Index(body, "call void @"+hook)
 	suspend := strings.Index(body, "call i8 @llvm.coro.suspend")
 	if begin < 0 || publish < 0 || suspend < 0 || !(begin < publish && publish < suspend) {
 		t.Fatalf("%s does not publish its v1 frame after coro.begin and before initial suspend:\n%s", name, body)
 	}
 	call := regexp.MustCompile(
-		`call void @` + regexp.QuoteMeta(coroFramePublishHookV3) +
+		`call void @` + regexp.QuoteMeta(hook) +
 			`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^)]+\)`,
 	)
 	if !call.MatchString(body) {
@@ -2773,10 +2844,13 @@ func assertCoroV1InitialRunDecision(t *testing.T, name, body string) {
 	if decisionRelative < 0 {
 		t.Fatalf("%s initial resume has no run-decision gate:\n%s", name, body)
 	}
-	decision := initialSuspend + decisionRelative
-	activate := regexp.MustCompile(`(?s)store i16 0,.*store i16 2,`).FindStringIndex(body[decision:])
+	// The eager-ramp edge bypasses the synthetic scheduler decision and joins
+	// the same activation block directly. LLVM prints that join before the lazy
+	// resume gate even though the latter branches to it, so textual ordering is
+	// no longer a CFG ordering proof.
+	activate := regexp.MustCompile(`(?s)store i16 0,.*store i16 2,`).FindStringIndex(body)
 	if activate == nil {
-		t.Fatalf("%s run-decision gate is not before initial frame activation:\n%s", name, body)
+		t.Fatalf("%s initial resume has no shared frame activation:\n%s", name, body)
 	}
 }
 

@@ -41,26 +41,43 @@ func ensureCoroTimerOperationCapacityV1(
 	limit uint32,
 ) bool {
 	p, sources, ok := coroCurrentExecutorSourcesV1(driver, g)
-	if !ok || sources.Timers == nil || limit == 0 || limit > coro.TimerRegistrationMaximumCapacity {
+	if !ok {
 		return false
 	}
-	if coro.CanReserveTimerV2(p, sources.Timers) {
-		return true
+	_, ok = ensureCoroTimerSourceCapacityV1(p, sources.Timers, limit)
+	return ok
+}
+
+// ensureCoroTimerSourceCapacityV1 consumes a CurrentExecutorTimerSource
+// capability in the same no-suspend runtime hook. The public compatibility
+// wrapper above retains complete arbitrary-caller discovery.
+func ensureCoroTimerSourceCapacityV1(
+	p *coro.P,
+	timers *coro.TimerRegistrationTable,
+	limit uint32,
+) (coro.TimerRegistrationReservation, bool) {
+	if p == nil || timers == nil || limit == 0 || limit > coro.TimerRegistrationMaximumCapacity {
+		return coro.TimerRegistrationReservation{}, false
 	}
-	if coro.TimerRegistrationConfiguredCapacity(sources.Timers) >= limit {
-		return false
+	if reservation, ok := coro.PrepareTimerRegistrationReservation(p, timers); ok {
+		return reservation, true
+	}
+	if coro.TimerRegistrationConfiguredCapacity(timers) >= limit {
+		return coro.TimerRegistrationReservation{}, false
 	}
 	page := new(coro.TimerRegistrationPage)
 	if page == nil {
-		return false
+		return coro.TimerRegistrationReservation{}, false
 	}
-	attached := coro.AttachTimerRegistrationPage(sources.Timers, p, page, nil)
+	attached := coro.AttachTimerRegistrationPage(timers, p, page, nil)
 	if !attached {
 		block := new(coro.OperationPageDirectoryBlock)
-		attached = block != nil && coro.AttachTimerRegistrationPage(sources.Timers, p, page, block)
+		attached = block != nil && coro.AttachTimerRegistrationPage(timers, p, page, block)
 	}
-	return attached &&
-		coro.CanReserveTimerV2(p, sources.Timers)
+	if !attached {
+		return coro.TimerRegistrationReservation{}, false
+	}
+	return coro.PrepareTimerRegistrationReservation(p, timers)
 }
 
 func ensureCoroPollOperationCapacityV1(

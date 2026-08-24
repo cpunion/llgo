@@ -1,5 +1,3 @@
-//go:build llgo && !baremetal && !wasm && !tinygo.wasm
-
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -16,11 +14,20 @@
  * limitations under the License.
  */
 
-package runtime
+/*
+ * The pthread key owns the physical executor thread and its destructor. This
+ * separate C TLS word mirrors only the currently executing logical G, which
+ * may change at every stackless coroutine resume. Keeping the leaf here avoids
+ * a pthread_get/setspecific pair on each logical context switch.
+ */
+static _Thread_local void *llgo_coro_current_g_v1;
 
-// The descriptor and poll leaf implementation belongs to the compiler runtime
-// package that declares and consumes its scheduler-facing symbols. Keeping the
-// C object here also makes those symbols available in programs which use the
-// lightweight internal runtime without importing the standard-library runtime
-// patch package.
-const LLGoFiles = "_wrap/fp.c; ../lib/runtime/_wrap/poll.c; _wrap/coro_panic_report.c; _wrap/coro_g_tls.c"
+void *__llgo_coro_current_g_load_v1(void)
+{
+    return llgo_coro_current_g_v1;
+}
+
+void __llgo_coro_current_g_store_v1(void *g)
+{
+    llgo_coro_current_g_v1 = g;
+}

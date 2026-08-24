@@ -18,7 +18,11 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"unsafe"
+
+	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+)
 
 //export __llgo_coro_sema_prepare_or_abort_v2
 func __llgo_coro_sema_prepare_or_abort_v2(storage, addr unsafe.Pointer) {
@@ -39,8 +43,21 @@ func __llgo_coro_sema_release_or_abort_v2(addr unsafe.Pointer) {
 		coroKeyedAbortV2("coroutine semaphore release has nil key")
 		return
 	}
-	_, ok := coroKeyedPostOneV2(coroKeyedParkSemaphoreV2, uintptr(addr), 0, false)
-	if !ok {
-		coroKeyedAbortV2("coroutine semaphore release failed")
+	// Own the durable semaphore fact in the same physical operation as waiter
+	// selection. This makes the standard-library semaRelease wrapper a pure
+	// tail-forwarder, so exact static calls do not retain a redundant coroutine
+	// frame around this hook.
+	catomic.Add((*uint32)(addr), 1)
+	result, handle, operation := coroKeyedPostOneLocalV2(
+		coroKeyedParkSemaphoreV2, uintptr(addr), 0, false,
+	)
+	switch result {
+	case coroKeyedPostLocalNoWaiterV2, coroKeyedPostLocalCompletedV2:
+		return
+	case coroKeyedPostLocalExternalV2:
+		if coroKeyedPostClaimedExternalV2(handle, operation) {
+			return
+		}
 	}
+	coroKeyedAbortV2("coroutine semaphore release failed")
 }

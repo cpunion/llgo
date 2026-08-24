@@ -338,9 +338,29 @@ func ConfirmTaskControlQuiesced(source *TaskControlSource, p *P, id OperationID)
 
 func RetireTaskControl(source *TaskControlSource, p *P, id OperationID) bool {
 	slot, ok := taskControlSlotFor(source, id)
-	return ok && validTaskControlOwner(source, p) && preemptLoad(&slot.generation) == id.Generation &&
-		producerSourceSlotQuiesced(&slot.producerSourceSlot) && preemptLoad(&slot.request) == uint32(TaskCancelNone) &&
-		slot.task == nil && recycleProducerSourceSlot(&slot.producerSourceSlot)
+	if !ok || !validTaskControlOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
+		!producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
+		preemptLoad(&slot.request) != uint32(TaskCancelNone) || slot.task != nil ||
+		!recycleProducerSourceSlot(&slot.producerSourceSlot) {
+		return false
+	}
+	if id.LocalSlot() == source.scanLimit {
+		for source.scanLimit != 0 {
+			last := &source.slots[source.scanLimit-1]
+			if !taskControlReusableSlot(last) {
+				break
+			}
+			source.scanLimit--
+		}
+		if source.scanLimit == 0 {
+			// Post publishes pending before dropping its producer admission. The
+			// final owner pass can consume the request before that advisory store,
+			// then safely join and retire the endpoint. Once every endpoint is free,
+			// no durable request remains behind a late pending hint.
+			preemptStore(&source.pending, 0)
+		}
+	}
+	return true
 }
 
 func validTaskControlTerminalSlot(source *TaskControlSource, index int, state producerSourceLifecycle) bool {

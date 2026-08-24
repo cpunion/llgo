@@ -40,6 +40,13 @@ func setg(gp *g) {
 	currentG = gp
 }
 
+// Single-context targets and host tests have no independent physical-thread
+// lifetime slot. Their logical coroutine switch is therefore the ordinary
+// current-G store.
+func setgCoro(gp *g) {
+	setg(gp)
+}
+
 func currentGUsesLifecycle() bool {
 	return false
 }

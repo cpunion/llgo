@@ -33,7 +33,7 @@ func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descripto
 	if raw == nil {
 		coroRuntimeAbort("coroutine frame allocation failed")
 	}
-	storage, ok := coro.RegisterFrameCompiler((*coro.G)(g), raw, total, size, align, descriptor)
+	storage, ok := coro.RegisterFrameCompilerPrepared((*coro.G)(g), raw, total, size, align, descriptor)
 	if !ok {
 		if !coroalloc.FreeFrame(raw, total) {
 			coroRuntimeAbort("coroutine frame allocation rollback failed")

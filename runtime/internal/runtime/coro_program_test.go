@@ -256,6 +256,13 @@ func coroReleaseCompletedTask(g *coroG) bool {
 	return true
 }
 
+func coroReleaseCompletedTaskReceipt(
+	g *coroG,
+	_ coro.CompletedTaskReleaseReceipt,
+) bool {
+	return coroReleaseCompletedTask(g)
+}
+
 // The source island has no process-wide G registry. Production main-Goexit
 // accounting is covered by proc_atomic tests; this adapter only needs the
 // lifecycle transition to remain link-complete.

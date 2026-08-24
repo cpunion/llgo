@@ -168,7 +168,8 @@ func startPublishedEpochWait(sources *ExecutorSourceSet, cursor *publishedEpochR
 	if phase != parkParked && phase != parkDetaching && phase != parkReady {
 		return false
 	}
-	discoverChannel := sources != nil && sources.channel != nil
+	discoverChannel := sources != nil &&
+		(sources.channel != nil || wait.resumeKind == resumeBindingSingleOwnerTimer)
 	if phase == parkParked && !discoverChannel &&
 		!beginParkSnapshotResolution(&wait.g.park, wait.ticket, &cursor.park, false) {
 		return false
@@ -619,6 +620,60 @@ func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *
 	return advancePublishedEpochWaitAfterCleared(sources, cursor, p, step)
 }
 
+// resolveSingleOwnerTimerStep consumes the fixed one-case timer tail in one
+// charged common reduction. The owner-only timer source has no callback or
+// TryCommit phase, and resumeBindingSingleOwnerTimer excludes controlled
+// generation invalidation. Multi-event, canceled, and controlled waits never
+// enter this lane and retain the general cursor machine.
+func resolveSingleOwnerTimerStep(
+	sources *ExecutorSourceSet,
+	p *P,
+	cursor *publishedEpochResolveCursor,
+	step *publishedEpochResolveStep,
+) (handled, ok bool) {
+	if sources == nil || sources.timers == nil || cursor == nil || step == nil ||
+		cursor.phase != publishedEpochResolveDiscover || cursor.wait == nil ||
+		cursor.wait.resumeKind != resumeBindingSingleOwnerTimer {
+		return false, false
+	}
+	wait := cursor.wait
+	if wait.g == nil {
+		return true, false
+	}
+	state := &wait.g.park
+	// Once cancellation is sticky, every subsequent Discover step belongs to
+	// the general cursor, including the step after it has consumed the only
+	// link. Declining only while link was non-nil made the next bounded step
+	// re-enter this fast lane and reject its legitimate end cursor.
+	if state.cancelKind != ParkCancelNone || state.taskCancelKind != TaskCancelNone ||
+		state.taskCancelPhase != taskCancelIdle {
+		return false, false
+	}
+	if wait.work != waitSetWorkResolving || cursor.link == nil ||
+		cursor.link != wait.g.park.head || cursor.claim != nil || cursor.forced != nil ||
+		cursor.claimOwned || cursor.hasChannel || cursor.waitRetry || cursor.waitAwait {
+		return true, false
+	}
+	link, record := cursor.link, cursor.link.operation
+	resume := (*SingleOwnerTimerResume)(wait.resume)
+	if !validBoundSingleOwnerTimerResume(resume, wait.ticket) ||
+		record == nil || record.id != resume.source || link.wait != wait {
+		return true, false
+	}
+
+	resolution, resolved := resolveSingleIrreversiblePark(state, wait.ticket, record)
+	if !resolved || !sources.timers.applySingleOwnerTimerV2One(p, record.id, record, wait) {
+		return true, false
+	}
+	if retry, await, settled := finishWaitSetApplyProgress(wait, false, false); !settled || retry || await || !promoteReadyWaitSet(sources, p, wait) {
+		return true, false
+	}
+	step.resolution = resolution
+	step.applyVisits = 1
+	step.promoted = 1
+	return true, advancePublishedEpochWaitAfterCleared(sources, cursor, p, step)
+}
+
 // resolvePublishedEpochStep advances exactly one explicitly charged common
 // resolution action. The caller owns step so its scratch storage remains in
 // the caller's activation instead of becoming a heap-backed named result when
@@ -648,6 +703,9 @@ func resolvePublishedEpochStep(
 		}
 	} else if !validPublishedEpochResolveCursor(cursor, p) {
 		return false
+	}
+	if handled, resolved := resolveSingleOwnerTimerStep(sources, p, cursor, step); handled {
+		return resolved
 	}
 
 	switch cursor.phase {

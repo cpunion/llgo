@@ -30,6 +30,21 @@ var (
 	gKeyReady bool
 )
 
+// The pthread key remains the physical thread's lifetime owner and destructor
+// registration. A stackless logical G, however, changes at every physical
+// llvm.coro.resume. Mirroring that hot current value in native C TLS avoids a
+// pthread_get/setspecific call around every resume without weakening thread
+// teardown: the key continues to name the independently allocated physical
+// placeholder for the complete lifetime of a coroutine executor M.
+
+//llgo:coro noblock
+//go:linkname coroCurrentGLoadV1 C.__llgo_coro_current_g_load_v1
+func coroCurrentGLoadV1() unsafe.Pointer
+
+//llgo:coro noblock
+//go:linkname coroCurrentGStoreV1 C.__llgo_coro_current_g_store_v1
+func coroCurrentGStoreV1(unsafe.Pointer)
+
 func init() {
 	if !coroRuntimeContextBootstrap() {
 		coroRuntimeAbort("failed to create getg key")
@@ -58,7 +73,14 @@ func coroRuntimeContextBootstrap() bool {
 }
 
 func getg() *g {
+	if ptr := coroCurrentGLoadV1(); ptr != nil {
+		return (*g)(ptr)
+	}
+	// A thread which was initialized by an older/native entry path may have a
+	// key owner before its direct TLS mirror is first observed. Populate the
+	// mirror once; every subsequent lookup is the constant-time C TLS leaf.
 	if ptr := gKey.Get(); ptr != nil {
+		coroCurrentGStoreV1(unsafe.Pointer(ptr))
 		return (*g)(ptr)
 	}
 	gp := initRuntimeContextUntracked(allocRuntimeContext(), nil, _Grunning)
@@ -76,7 +98,7 @@ func getg() *g {
 // active. Keeping that cold initialization path out of this function also
 // lets coroutine effect analysis preserve pthread TLS lookup as noblock.
 func getgIfPresent() *g {
-	return (*g)(gKey.Get())
+	return (*g)(coroCurrentGLoadV1())
 }
 
 func setg(gp *g) {
@@ -86,7 +108,20 @@ func setg(gp *g) {
 }
 
 func setgRaw(gp *g) c.Int {
-	return gKey.Set(c.Pointer(unsafe.Pointer(gp)))
+	if ret := gKey.Set(c.Pointer(unsafe.Pointer(gp))); ret != 0 {
+		return ret
+	}
+	coroCurrentGStoreV1(unsafe.Pointer(gp))
+	return 0
+}
+
+// setgCoro switches only the logical G observed by code running inside one
+// physical executor M. The pthread key deliberately remains bound to that M's
+// placeholder so its destructor never takes ownership of an interior spawned-
+// task context. coroEnter/LeaveRuntimeContext prove the balanced interval and
+// restore the placeholder before the executor can return to its host boundary.
+func setgCoro(gp *g) {
+	coroCurrentGStoreV1(unsafe.Pointer(gp))
 }
 
 func destroyG(ptr c.Pointer) {
@@ -94,6 +129,15 @@ func destroyG(ptr c.Pointer) {
 	if gp == nil {
 		return
 	}
+	// A malformed executor which exits inside an unbalanced logical resume must
+	// not free either the physical placeholder or an interior task context. The
+	// normal owner protocol detects the missing resume/leave; this destructor is
+	// only the final fail-safe against turning that violation into a use-after-
+	// free while pthread teardown is unwinding.
+	if current := (*g)(coroCurrentGLoadV1()); current != nil && current != gp {
+		return
+	}
+	coroCurrentGStoreV1(nil)
 	if gp.startarg != nil {
 		// A managed logical G must restore the executor placeholder before
 		// pthread exit. Do not mutate or free either a standalone command

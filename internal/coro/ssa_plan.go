@@ -757,6 +757,7 @@ type SSAPlan struct {
 	rawPlainVariants        map[*ssa.Function]struct{}
 	valuePlans              map[ssa.Value]SSAValuePlan
 	callPlans               map[ssa.CallInstruction]SSACallPlan
+	spawnTargets            map[*ssa.Function]struct{}
 	exactInterfaceReceivers map[*ssa.Call]ssa.Value
 	elidedCalls             map[ssa.CallInstruction]struct{}
 	elidedCallCertificates  map[ssa.CallInstruction]string
@@ -902,6 +903,19 @@ func (p *SSAPlan) RootFactoryRoots() []SSARootPlan {
 		roots = append(roots, root)
 	}
 	return roots
+}
+
+// IsSpawnTarget reports whether a closed or partially closed go statement can
+// create fn as an independently scheduled root in this exact whole-program
+// plan. It is derived from the frozen CallPlans rather than from AsyncDemand:
+// ordinary callees inherit asynchronous entry demand too, but do not have the
+// high-multiplicity/root-lifetime allocation profile of a goroutine target.
+func (p *SSAPlan) IsSpawnTarget(fn *ssa.Function) bool {
+	if p == nil || fn == nil {
+		return false
+	}
+	_, ok := p.spawnTargets[fn]
+	return ok
 }
 
 // FunctionID returns the stable identity assigned to fn.
@@ -1102,7 +1116,6 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if maxPlain == 0 {
 		maxPlain = DefaultMaxPlainInstructions
 	}
-
 	type rootEntryDemand struct {
 		managed Demand
 		raw     bool
@@ -2080,6 +2093,26 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			elidedCallSet[call] = struct{}{}
 		}
 	}
+	spawnTargets := make(map[*ssa.Function]struct{})
+	for call, callPlan := range callPlans {
+		if callPlan.Kind != CallSpawn {
+			continue
+		}
+		for _, targetID := range callPlan.Targets {
+			target := byID[targetID]
+			if target == nil {
+				owner := "<nil>"
+				if call != nil && call.Parent() != nil {
+					owner = call.Parent().Name()
+				}
+				return nil, fmt.Errorf(
+					"coro: spawn CallPlan in %q references unknown target %q",
+					owner, targetID,
+				)
+			}
+			spawnTargets[target] = struct{}{}
+		}
+	}
 	result := &SSAPlan{
 		plan:                    base,
 		roots:                   canonicalRoots,
@@ -2090,6 +2123,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		rawPlainVariants:        make(map[*ssa.Function]struct{}),
 		valuePlans:              valuePlans,
 		callPlans:               callPlans,
+		spawnTargets:            spawnTargets,
 		exactInterfaceReceivers: exactInterfaceReceivers,
 		elidedCalls:             elidedCallSet,
 		elidedCallCertificates:  elidedCallCertificates,

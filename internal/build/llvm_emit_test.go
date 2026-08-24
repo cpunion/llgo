@@ -10,6 +10,7 @@ import (
 	"github.com/goplus/llgo/internal/crosscompile"
 	"github.com/goplus/llgo/internal/lto"
 	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llvm"
 )
 
 func TestUseInMemoryNativeCodegenConf(t *testing.T) {
@@ -59,6 +60,47 @@ func TestUseInMemoryNativeCodegenConf(t *testing.T) {
 			t.Fatal("expected wasm target to keep using clang")
 		}
 	})
+}
+
+func TestThinLTOEmissionNamesAnonymousGlobals(t *testing.T) {
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("p", "example.com/p")
+	byteType := pkg.Module().Context().Int8Type()
+	anonymous := llvm.AddGlobal(pkg.Module(), byteType, "")
+	anonymous.SetInitializer(llvm.ConstInt(byteType, 1, false))
+	anonymous.SetLinkage(llvm.PrivateLinkage)
+	anonymous.SetGlobalConstant(true)
+
+	if global := pkg.Module().FirstGlobal(); global.IsNil() {
+		t.Fatal("fixture has no global")
+	} else if global.Name() != "" {
+		t.Fatalf("fixture first global name = %q, want anonymous", global.Name())
+	}
+	ctx := &context{
+		buildConf: &Config{
+			Goos:   runtime.GOOS,
+			Goarch: runtime.GOARCH,
+			LTO:    lto.Thin,
+		},
+		prog: prog,
+	}
+	buffer, kind, err := emitObjectToMemoryBuffer(ctx, pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buffer.Dispose()
+	if len(buffer.Bytes()) == 0 {
+		t.Fatal("ThinLTO emission returned an empty bitcode buffer")
+	}
+	if !strings.Contains(kind, "ThinLTO") {
+		t.Fatalf("emission kind = %q, want ThinLTO", kind)
+	}
+	for global := pkg.Module().FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+		if global.Name() == "" {
+			t.Fatalf("anonymous global remains after ThinLTO emission: %s", global.String())
+		}
+	}
 }
 
 func TestExportPackageObjectErrors(t *testing.T) {

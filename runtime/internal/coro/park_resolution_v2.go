@@ -412,6 +412,43 @@ func resolveForcedSinglePark(
 	return CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}, true
 }
 
+// resolveSingleIrreversiblePark collapses the fixed decision for one already
+// published irreversible owner-local source. There is no rank choice, source
+// commit handshake, default arm, or loser. Cancellation deliberately stays on
+// the general resolver so its priority and late-task semantics remain shared
+// with multi-event select.
+func resolveSingleIrreversiblePark(
+	state *ParkState,
+	ticket ParkTicket,
+	record *OperationRecord,
+) (CompletionResolution, bool) {
+	if state == nil || state.resolving || state.phase != parkParked || state.ticket != ticket ||
+		!validParkTicket(ticket) || state.cancelKind != ParkCancelNone ||
+		state.taskCancelKind != TaskCancelNone || state.taskCancelPhase != taskCancelIdle ||
+		state.expected != 1 || state.attached != 1 || state.hasDefault ||
+		state.outcome != ParkOutcomePending || state.winnerCase != 0 ||
+		state.winnerID != (OperationID{}) || state.winnerRecord != nil ||
+		state.head == nil || state.head.previous != nil || state.head.next != nil ||
+		state.head.operation != record || record == nil ||
+		!validPendingParkResolutionLink(state, ticket, state.head) ||
+		operationCandidateMode(record) != OperationCommitIrreversibleCompletion ||
+		!operationCandidateIsPublished(record) ||
+		operationCandidateState(record) != OperationCommitCommitted ||
+		record.resultState != operationResultOwned || !commitOperationCandidate(record) {
+		return CompletionResolution{}, false
+	}
+
+	state.seed = 0
+	state.phase = parkDetaching
+	record.resultTicket = ticket
+	record.disposition = OperationDispositionWinner
+	state.outcome = ParkOutcomeCompleted
+	state.winnerCase = record.link.caseID
+	state.winnerID = record.id
+	state.winnerRecord = record
+	return CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}, true
+}
+
 func beginParkSnapshotResolution(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor, fullAudit bool) bool {
 	if cursor == nil || *cursor != (parkResolutionCursor{}) || state == nil || state.resolving ||
 		state.phase != parkParked || state.ticket != ticket || !validParkTicket(ticket) ||

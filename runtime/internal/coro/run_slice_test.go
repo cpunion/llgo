@@ -91,7 +91,10 @@ func TestExecutorRunFusesPrivateNormalCompletionDestroy(t *testing.T) {
 		)
 	}
 	beforeAction, beforeIssued := p.action, driver.run.issued
-	if destroy, fused := BeginIssuedExecutorDestroyAfterResume(
+	if !PrepareIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy) {
+		t.Fatal("prepare unfinished completion destroy")
+	}
+	if destroy, fused := FinishIssuedExecutorDestroyAfterResume(
 		driver, task.g, checkDestroy, false,
 	); fused || destroy != (Action{}) || p.action != beforeAction || driver.run.issued != beforeIssued {
 		t.Fatalf(
@@ -99,7 +102,10 @@ func TestExecutorRunFusesPrivateNormalCompletionDestroy(t *testing.T) {
 			destroy, fused, p.action, driver.run.issued,
 		)
 	}
-	destroy, fused := BeginIssuedExecutorDestroyAfterResume(
+	if !PrepareIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy) {
+		t.Fatal("prepare fused completion destroy")
+	}
+	destroy, fused := FinishIssuedExecutorDestroyAfterResume(
 		driver, task.g, checkDestroy, true,
 	)
 	if !fused || destroy.Kind != ActionDestroy || destroy.Handle != task.handle ||
@@ -131,7 +137,7 @@ func TestExecutorRunFusesPrivateNormalCompletionDestroy(t *testing.T) {
 	}
 }
 
-func TestExecutorRunDoesNotFuseCompletionPastReadyPeer(t *testing.T) {
+func TestExecutorRunFusesCompletionBeforeReadyPeer(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "completion-before-ready-peer")
@@ -154,14 +160,40 @@ func TestExecutorRunDoesNotFuseCompletionPastReadyPeer(t *testing.T) {
 	if !ok || committed || checkDestroy.Kind != ActionCheckDestroy {
 		t.Fatalf("private completion check = (%+v, committed=%t, ok=%t)", checkDestroy, committed, ok)
 	}
-	beforeAction, beforeIssued := p.action, driver.run.issued
-	if CanBeginIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy) {
-		t.Fatal("completion destroy fusion bypassed an already-ready peer")
+	// Model a same-resume publication as well as the peer which was already
+	// runnable at dispatch. The fused destroy must preserve that fairness debt;
+	// final-suspend cleanup cannot consume the peer's scheduling claim.
+	driver.run.readyDebt = true
+	if !PrepareIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy) {
+		t.Fatal("prepare completion destroy before ready peer")
 	}
-	if destroy, fused := BeginIssuedExecutorDestroyAfterResume(driver, task.g, checkDestroy, true); fused ||
-		destroy != (Action{}) || p.action != beforeAction || driver.run.issued != beforeIssued {
-		t.Fatalf("rejected fusion changed private interval = (%+v, fused=%t)", destroy, fused)
+	destroy, fused := FinishIssuedExecutorDestroyAfterResume(
+		driver, task.g, checkDestroy, true,
+	)
+	if !fused || destroy.Kind != ActionDestroy || destroy.Handle != task.handle ||
+		p.action != destroy || driver.run.issued != ActionCheckDestroy {
+		t.Fatalf("fused completion before peer = (%+v, fused=%t, action=%+v, issued=%d)",
+			destroy, fused, p.action, driver.run.issued)
 	}
+	releaseTestFrame(t, task.g, task.frame)
+	completed, ok := DestroyedBounded(p, task.g, destroy)
+	if !ok || completed.Kind != ActionComplete || completed.Handle != nil ||
+		!CommitExecutorRunAction(driver, task.g, completed) {
+		t.Fatalf("commit completion before peer = (%+v, %t)", completed, ok)
+	}
+	if task.g.state != GDead || task.g.runP != nil || p.current != nil || !driver.run.readyDebt ||
+		!peer.g.queued || p.readyHead != peer.g || p.readyTail != peer.g {
+		t.Fatalf("fused completion disturbed peer: task=(state:%d runP:%p) current=%p debt=%t peer=(queued:%t head:%p tail:%p)",
+			task.g.state, task.g.runP, p.current, driver.run.readyDebt,
+			peer.g.queued, p.readyHead, p.readyTail)
+	}
+	step, ok := NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != peer.g ||
+		step.Action.Kind != ActionCheckResume {
+		t.Fatalf("ready peer after fused completion = (%+v, %t)", step, ok)
+	}
+	runtime.KeepAlive(task.frame.memory)
+	runtime.KeepAlive(peer.frame.memory)
 }
 
 func TestExecutorRunResumeRuntimeContextDescriptorCapability(t *testing.T) {

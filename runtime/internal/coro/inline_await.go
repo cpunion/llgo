@@ -57,8 +57,64 @@ const maxInlineAwaitDepth uint8 = 16
 func PrepareInlineAwaitCompiler(
 	g *G, parentHandle, childHandle, recoverType, recoverData unsafe.Pointer,
 ) InlineAwaitDisposition {
+	// The ordinary compiler lane is adjacent to the child ramp's successful
+	// PublishFrameV3Compiler return. The active parent, newest initial child,
+	// and already-consumed resume decision are therefore one private phase
+	// receipt: no scheduler, callback, or producer can enter between them. Keep
+	// the capability, exact frame edge, and depth proof here, but do not replay
+	// the unrelated park/spawn/source audits already established at the outer
+	// resume boundary. Recovery retains the complete lane below because its
+	// payload is a separately supplied language transaction.
+	if recoverType == nil && recoverData == nil && ValidG(g) &&
+		parentHandle != nil && childHandle != nil && g.runP != nil &&
+		g.pending.kind == pendingNone && g.destroyTarget == nil && !g.destroyRoot {
+		p := g.runP
+		parent, child := g.active, g.frames
+		preempt := preemptLoad(&g.preempt)
+		if p.current == g && p.inResume && g.state == GRunning &&
+			p.runDecisionTaken && p.runDecision == (RunDecision{}) &&
+			p.action.Kind == ActionResume && p.action.Flags == 0 &&
+			(preempt == preemptIdle || preempt == preemptRequested) &&
+			parent != nil && child != nil && parent != child &&
+			parent.handle == parentHandle && child.handle == childHandle &&
+			parent.owner == g && child.owner == g &&
+			parent.header != nil && child.header != nil &&
+			parent.state == FrameActive && child.state == FrameInitialSuspended &&
+			parent.header.SuspendReason == uint16(SuspendCall) &&
+			parent.header.Lifecycle == uint16(FrameSuspended) &&
+			child.header.Parent == parentHandle &&
+			child.header.Lifecycle == uint16(FrameInitialSuspended) &&
+			child.parent == nil && emptyCompletionRecord(&parent.completion) {
+			depth := p.inlineAwaitDepth
+			depthOK := depth <= maxInlineAwaitDepth
+			if depthOK {
+				if depth == 0 {
+					depthOK = p.action.Handle == parentHandle
+				} else {
+					outer := parent.parent
+					depthOK = outer != nil && outer.completion.child == parentHandle &&
+						outer.state == FrameSuspended
+				}
+			}
+			if depthOK {
+				parent.completion.child = childHandle
+				parent.completion.status = completionArmed
+				child.parent = parent
+				if depth >= maxInlineAwaitDepth {
+					g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
+					return InlineAwaitDeclined
+				}
+				parent.state = FrameSuspended
+				child.state = FrameActive
+				g.active = child
+				g.pending = pendingTransition{kind: pendingInlineStart, from: parent, target: child}
+				p.inlineAwaitDepth++
+				return InlineAwaitStarted
+			}
+		}
+	}
 	if ValidG(g) && parentHandle != nil && childHandle != nil &&
-		(recoverType != nil || recoverData == nil) && resumeGateTaken(g) &&
+		recoverType != nil && resumeGateTaken(g) &&
 		g.runP != nil && g.pending.kind == pendingNone &&
 		g.destroyTarget == nil && !g.destroyRoot &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
@@ -321,20 +377,15 @@ func takeInlineAwaitInitialDecisionCompiler(g *G) bool {
 	parent, child := pending.from, pending.target
 	if pending.kind != pendingInlineStart || parent == nil || child == nil ||
 		p.inlineAwaitDepth == 0 || p.current != g || !p.inResume ||
-		g.state != GRunning || !p.runDecisionTaken ||
-		p.runDecision != (RunDecision{}) ||
-		p.action.Kind != ActionResume || p.action.Flags != 0 ||
-		g.active != child || child.owner != g || child.parent != parent ||
-		child.state != FrameActive || child.header == nil ||
-		child.header.G != unsafe.Pointer(g) ||
-		child.header.Parent != parent.handle ||
-		child.header.SuspendReason != uint16(SuspendNone) ||
-		child.header.Lifecycle != uint16(FrameInitialSuspended) ||
-		parent.completion.child != child.handle ||
-		parent.completion.status != completionArmed ||
-		!compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth-1) {
+		g.active != child || child.parent != parent {
 		return false
 	}
+	// pendingInlineStart is written only after PrepareInlineAwaitCompiler has
+	// authenticated the exact parent/child headers, completion record, outer
+	// resume action, and depth. No callback or scheduler boundary exists before
+	// this prologue consumes it. Re-reading those fields here used to turn the
+	// private two-pointer receipt back into a second graph audit without adding
+	// a new trust boundary.
 	g.pending = pendingTransition{}
 	return true
 }
@@ -387,19 +438,21 @@ func FinishInlineAwait(
 	return InlineAwaitSuspend
 }
 
-// FinishInlineAwaitCompiler commits the dominant normal-return transaction
-// directly from its private pendingComplete certificate. Slow suspension,
-// panic, cancellation, and any uncertain shape retain FinishInlineAwait's
-// complete graph validation and common dispatch path.
-func FinishInlineAwaitCompiler(
-	g *G, parentHandle, childHandle unsafe.Pointer, done bool,
-) InlineAwaitDisposition {
-	if done && ValidG(g) && parentHandle != nil && childHandle != nil && g.runP != nil {
+// FinishInlineAwaitReturnCompiler commits the dominant normal-return
+// transaction directly from its private pendingComplete certificate. The
+// caller has just observed llvm.coro.done=true; keeping that physical fact out
+// of this scalar receipt consumer makes the ordinary helper independently
+// small. Slow suspension, panic, cancellation, and every uncertain shape use
+// FinishInlineAwait's complete graph validation and common dispatch path.
+func FinishInlineAwaitReturnCompiler(
+	g *G, parentHandle, childHandle unsafe.Pointer,
+) bool {
+	if ValidG(g) && parentHandle != nil && childHandle != nil && g.runP != nil {
 		p := g.runP
-		child := g.active
-		if child != nil {
+		pending := g.pending
+		child := pending.from
+		if child != nil && child == g.active {
 			parent := child.parent
-			pending := g.pending
 			record := (*CompletionRecord)(nil)
 			if parent != nil {
 				record = &parent.completion
@@ -407,28 +460,23 @@ func FinishInlineAwaitCompiler(
 			if parent != nil && record != nil &&
 				parent.handle == parentHandle && child.handle == childHandle &&
 				pending.kind == pendingComplete && pending.from == child && pending.target == nil &&
-				p.inlineAwaitDepth != 0 && p.current == g && p.inResume &&
-				g.state == GRunning && p.runDecisionTaken &&
-				p.runDecision == (RunDecision{}) &&
-				p.action.Kind == ActionResume && p.action.Flags == 0 &&
+				p.inlineAwaitDepth != 0 &&
 				g.destroyTarget == nil && !g.destroyRoot &&
-				child.owner == g && child.state == FrameActive && child.header != nil &&
-				child.header.SuspendReason == uint16(SuspendFrameComplete) &&
-				child.header.Lifecycle == uint16(FrameFinalSuspended) &&
 				record.child == childHandle && record.status == CompletionReturn &&
-				record.typeWord == nil && record.dataWord == nil &&
-				compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth-1) {
-				g.pending = pendingTransition{}
+				record.typeWord == nil && record.dataWord == nil {
 				g.active = parent
 				child.state = FrameDestroyPending
 				child.header.Lifecycle = uint16(FrameDestroyPending)
 				g.destroyTarget = child
+				g.pending = pendingTransition{
+					kind: pendingInlineDestroy, from: parent, target: child,
+				}
 				p.inlineAwaitDepth--
-				return InlineAwaitDestroy
+				return true
 			}
 		}
 	}
-	return FinishInlineAwait(g, parentHandle, childHandle, done)
+	return false
 }
 
 func terminalInlineCompletion(record *CompletionRecord, childHandle unsafe.Pointer) bool {
@@ -504,53 +552,82 @@ func CommitInlineAwaitDestroyCompiler(g *G, parentHandle, childHandle unsafe.Poi
 	return CommitInlineAwaitDestroy(g, parentHandle, childHandle)
 }
 
-// CommitInlineAwaitPhysicalDestroyCompiler consumes the exact
-// llvm.coro.destroy receipt, restores its static parent, and takes the terminal
-// completion in one transaction.
-// The common Return path uses compiler-borrowed metadata at the head of the
-// frame list, so every fallible observation is completed before a no-fail
-// unlink/zero/reactivate suffix. Dynamic storage, panic-trace retention, and
-// non-Return outcomes retain the two complete compatibility transactions.
-func CommitInlineAwaitPhysicalDestroyCompiler(
+// CommitInlineAwaitReturnPhysicalDestroyCompiler consumes the exact ordinary
+// Return receipt after llvm.coro.destroy and restores its static parent. It is
+// deliberately scalar: the compiler ABI already knows this outcome has no
+// interface payload, so the common path need not construct and decompose a
+// CompletionSnapshot before continuing.
+// The common Return path consumes pendingInlineDestroy, which was published by
+// FinishInlineAwaitReturnCompiler after its complete owner/action proof. A dynamic
+// ReleaseFrameCompiler changes only that receipt's target from the exact child
+// to nil after validating and unlinking it; a borrowed child keeps the target
+// until this commit unlinks its embedded metadata. No callback, suspension, or
+// scheduler entry can occur inside either adjacent interval. Every fallible
+// observation is therefore completed before the no-fail reactivate suffix.
+func CommitInlineAwaitReturnPhysicalDestroyCompiler(
 	g *G, parentHandle, childHandle unsafe.Pointer,
-) (CompletionSnapshot, bool) {
-	if ValidG(g) && parentHandle != nil && childHandle != nil &&
-		gPreemptEnabledAtDepthZero(g) && g.runP != nil &&
-		g.destroyTarget != nil && !g.destroyRoot &&
-		g.pending == (pendingTransition{}) {
-		p := g.runP
-		parent, child := g.active, g.destroyTarget
-		if parent != nil && child != nil && parent != child &&
-			parent.handle == parentHandle && child.handle == childHandle &&
-			parent.owner == g && child.owner == g && child.parent == parent &&
-			parent.header != nil && child.header != nil &&
-			parent.state == FrameSuspended && child.state == FrameDestroyPending &&
+) bool {
+	if ValidG(g) && parentHandle != nil && childHandle != nil && !g.destroyRoot {
+		pending := g.pending
+		parent := pending.from
+		if parent != nil && parent.handle == parentHandle && parent.owner == g &&
+			pending.kind == pendingInlineDestroy && parent == g.active &&
+			parent.header != nil && parent.state == FrameSuspended &&
 			parent.header.SuspendReason == uint16(SuspendCall) &&
 			parent.header.Lifecycle == uint16(FrameSuspended) &&
-			child.header.Lifecycle == uint16(FrameDestroyPending) &&
-			child.borrowedStorage && child.allocationSize == 0 && child.parkWait == nil &&
-			child.header.AllocationBase == unsafe.Pointer(child) &&
-			!child.retainPanicTrace && g.frames == child &&
 			parent.completion.child == childHandle &&
 			parent.completion.status == CompletionReturn &&
-			parent.completion.typeWord == nil && parent.completion.dataWord == nil &&
-			p.current == g && p.inResume && g.state == GRunning &&
-			p.runDecisionTaken && p.runDecision == (RunDecision{}) &&
-			p.action.Kind == ActionResume && p.action.Flags == 0 &&
-			compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth) {
-			g.frames = child.next
-			child.next = nil
-			child.state = FrameDestroyed
-			child.header.Lifecycle = uint16(FrameDestroyed)
-			g.destroyTarget = nil
-			Zero(unsafe.Pointer(child), unsafe.Sizeof(Frame{}))
-			parent.state = FrameActive
-			parent.header.SuspendReason = uint16(SuspendNone)
-			parent.header.Lifecycle = uint16(FrameActive)
-			parent.completion = CompletionRecord{}
-			return CompletionSnapshot{Status: CompletionReturn}, true
+			parent.completion.typeWord == nil && parent.completion.dataWord == nil {
+			child := pending.target
+			switch {
+			case child == nil && g.destroyTarget == nil && g.frames == parent:
+				// The dynamic coro.free callback already validated and removed
+				// the newest child. Nothing can enter the scheduler or publish a
+				// second frame between that callback and this compiler hook.
+			case child != nil && g.destroyTarget == child && child != parent &&
+				child.handle == childHandle &&
+				child.owner == g && child.parent == parent && child.header != nil &&
+				child.state == FrameDestroyPending &&
+				child.header.Lifecycle == uint16(FrameDestroyPending) &&
+				child.borrowedStorage && child.allocationSize == 0 && child.parkWait == nil &&
+				child.header.AllocationBase == unsafe.Pointer(child) &&
+				!child.retainPanicTrace && g.frames == child && child.next == parent:
+				g.frames = parent
+				child.next = nil
+				child.state = FrameDestroyed
+				child.header.Lifecycle = uint16(FrameDestroyed)
+				g.destroyTarget = nil
+				// This compiler-private receipt requires an ordinary Return with
+				// no retained panic trace or park payload. After the unlink every
+				// remaining pointer names g, parent, or the dying child storage
+				// itself; none keeps an otherwise dead object alive. The next
+				// PublishFrameV3Compiler clears and initializes the complete
+				// borrowed Frame before relinking it, so clearing the same metadata
+				// area here would be duplicate lifetime work.
+			default:
+				return false
+			}
+			if g.destroyTarget == nil && g.frames == parent {
+				g.pending = pendingTransition{}
+				parent.state = FrameActive
+				parent.header.SuspendReason = uint16(SuspendNone)
+				parent.header.Lifecycle = uint16(FrameActive)
+				parent.completion = CompletionRecord{}
+				return true
+			}
 		}
 	}
+	return false
+}
+
+// CommitInlineAwaitPhysicalDestroyCompatibilityCompiler retains the complete
+// physical/logical destroy and outcome transaction for panic, recovered
+// return, Goexit, cancellation, retained traces, and every non-private shape.
+// The runtime ABI calls it only after the ordinary Return receipt above has
+// declined without mutation.
+func CommitInlineAwaitPhysicalDestroyCompatibilityCompiler(
+	g *G, parentHandle, childHandle unsafe.Pointer,
+) (CompletionSnapshot, bool) {
 	if !CommitFrameDestroyCompiler(g, childHandle) ||
 		!CommitInlineAwaitDestroyCompiler(g, parentHandle, childHandle) {
 		return CompletionSnapshot{}, false
