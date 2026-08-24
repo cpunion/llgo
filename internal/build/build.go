@@ -3657,9 +3657,8 @@ func Build(inv Invocation) ([]Package, error) {
 
 	prog := llssa.NewProgram(target)
 	prog.DisableBoundsChecks(conf.DisableBoundsChecks)
-	programOwnershipTransferred := false
 	defer func() {
-		if !programOwnershipTransferred {
+		if prog != nil {
 			prog.Dispose()
 		}
 	}()
@@ -3917,7 +3916,9 @@ func Build(inv Invocation) ([]Package, error) {
 		// constant, and metadata uniquing tables before any backend process is
 		// allowed to start.
 		prog.Dispose()
+		prog = nil
 		debug.FreeOSMemory()
+		releaseNativeHeap()
 		if err := materializeStagedPackageBackends(ctx, allPkgs, verbose); err != nil {
 			return nil, err
 		}
@@ -3933,13 +3934,14 @@ func Build(inv Invocation) ([]Package, error) {
 				// after Do returns and dispose the shared program themselves. Error
 				// paths retain ownership here so early analysis failures do not leak
 				// the LLVM context, target machine, or target data.
-				programOwnershipTransferred = true
+				prog = nil
 				return []*aPackage{pkg}, nil
 			}
 		}
 		return nil, fmt.Errorf("initial package not found")
 	}
 
+	var executions []linkedOutputExecution
 	for _, pkg := range initial {
 		if needLink(pkg, mode) {
 			name := path.Base(pkg.PkgPath)
@@ -4003,34 +4005,34 @@ func Build(inv Invocation) ([]Package, error) {
 			case ModeInstall:
 				// Native already installed in linkMainPkg
 				if conf.Target != "" {
-					err = flash.FlashDevice(ctx.crossCompile.Device, envMap, ctx.buildConf.Port, verbose)
-					if err != nil {
-						return nil, err
-					}
+					executions = append(executions, linkedOutputExecution{envMap: envMap})
 				}
 
 			case ModeRun, ModeTest, ModeCmpTest:
-				if conf.Target == "" {
-					err = runNative(ctx, outFmts.Out, pkg.Dir, pkg.PkgPath, conf, mode)
-				} else if conf.Emulator {
-					err = runInEmulator(ctx.commands, ctx.crossCompile.Emulator, envMap, pkg.Dir, pkg.PkgPath, conf, mode, verbose)
-				} else {
-					err = flash.FlashDevice(ctx.crossCompile.Device, envMap, ctx.buildConf.Port, verbose)
-					if err != nil {
-						return nil, err
-					}
-					monitorConfig := monitor.MonitorConfig{
-						Port:       ctx.buildConf.Port,
-						Target:     conf.Target,
-						Executable: outFmts.Out,
-						BaudRate:   conf.BaudRate,
-						SerialPort: ctx.crossCompile.Device.SerialPort,
-					}
-					err = monitor.Monitor(monitorConfig, verbose)
-				}
-				if err != nil {
-					return nil, err
-				}
+				executions = append(executions, linkedOutputExecution{
+					app:     outFmts.Out,
+					envMap:  envMap,
+					pkgDir:  pkg.Dir,
+					pkgName: pkg.PkgPath,
+				})
+			}
+		}
+	}
+	if len(executions) != 0 {
+		// Linking is the final compiler consumer. Do not retain LLVM modules,
+		// package graphs, overlays, or whole-program coroutine receipts while a
+		// generated test/application runs: that process may invoke llgo again.
+		ctx.disposeBackendPrograms()
+		if prog != nil {
+			prog.Dispose()
+			prog = nil
+		}
+		releaseBuildStateBeforeExecution(ctx, allPkgs)
+		debug.FreeOSMemory()
+		releaseNativeHeap()
+		for _, execution := range executions {
+			if err := executeLinkedOutput(ctx, execution, conf, mode, verbose); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -4041,6 +4043,43 @@ func Build(inv Invocation) ([]Package, error) {
 	}
 
 	return allPkgs, nil
+}
+
+// linkedOutputExecution is deliberately backend-free. Link and target-format
+// production finish for every root before any generated program is allowed to
+// run, flash, or start an emulator.
+type linkedOutputExecution struct {
+	app     string
+	envMap  map[string]string
+	pkgDir  string
+	pkgName string
+}
+
+func executeLinkedOutput(ctx *context, execution linkedOutputExecution, conf *Config, mode Mode, verbose bool) error {
+	switch mode {
+	case ModeInstall:
+		return flash.FlashDevice(ctx.crossCompile.Device, execution.envMap, ctx.buildConf.Port, verbose)
+	case ModeRun, ModeTest, ModeCmpTest:
+		if conf.Target == "" {
+			return runNative(ctx, execution.app, execution.pkgDir, execution.pkgName, conf, mode)
+		}
+		if conf.Emulator {
+			return runInEmulator(ctx.commands, ctx.crossCompile.Emulator, execution.envMap, execution.pkgDir, execution.pkgName, conf, mode, verbose)
+		}
+		if err := flash.FlashDevice(ctx.crossCompile.Device, execution.envMap, ctx.buildConf.Port, verbose); err != nil {
+			return err
+		}
+		monitorConfig := monitor.MonitorConfig{
+			Port:       ctx.buildConf.Port,
+			Target:     conf.Target,
+			Executable: execution.app,
+			BaudRate:   conf.BaudRate,
+			SerialPort: ctx.crossCompile.Device.SerialPort,
+		}
+		return monitor.Monitor(monitorConfig, verbose)
+	default:
+		return nil
+	}
 }
 
 func llgoTargetTypeSizes(sizes types.Sizes, _, arch, llvmTarget string) types.Sizes {
@@ -6987,6 +7026,87 @@ func (c *context) cleanupStagedBitcodeFiles() {
 	c.stagedBitcodeFiles = nil
 }
 
+// releaseBuildStateBeforeExecution severs every compiler-only ownership edge
+// after all outputs have been linked and converted. The compact command,
+// target, and runtime configuration retained below is the complete state used
+// by executeLinkedOutput.
+//
+// This is a phase boundary, not an opportunistic memory optimization. A test
+// binary is allowed to invoke llgo recursively; retaining the outer compiler's
+// package graph or source overlay would otherwise stack two complete builds in
+// one process tree.
+func releaseBuildStateBeforeExecution(c *context, pkgs []*aPackage) {
+	if c == nil {
+		return
+	}
+	c.closePackageArchiveBuffers()
+	c.closePackageMetas()
+	c.cleanupStagedBitcodeFiles()
+	for _, pkg := range pkgs {
+		if pkg == nil {
+			continue
+		}
+		pkg.LPkg = nil
+		releaseBuiltPackageAnalysis(pkg)
+		pkg.LinkSnapshot = nil
+		pkg.LinkArgs = nil
+		pkg.ObjFiles = nil
+		pkg.CoroLibraryEffectRecords = nil
+		pkg.Fingerprint = ""
+		pkg.Manifest = ""
+		pkg.CoroRootAnchorV1 = ""
+		if pkg.Package != nil {
+			pkg.Package.Imports = nil
+			pkg.Package.Module = nil
+		}
+	}
+
+	c.conf = nil
+	c.progSSA = nil
+	c.prog = nil
+	c.dedup = nil
+	c.patches = nil
+	c.callerTracking = nil
+	c.fingerprinting = nil
+	c.patchFiles = nil
+	c.initial = nil
+	c.pkgs = nil
+	c.pkgByID = nil
+	c.cTransformer = nil
+	c.cacheManager = nil
+	c.sfilesCache = nil
+	c.plan9asmPkgs = nil
+	c.coroPlan = nil
+	c.coroEmission = nil
+	c.coroSSAEmission = nil
+	c.coroRawGlobalSymbols = nil
+	c.coroGlobalFunctionSlots = nil
+	c.coroPlanDigest = ""
+	c.coroPlanMetadata = coro.PlanDigestMetadata{}
+	c.coroLoweringFacts = coro.LoweringFacts{}
+	c.coroLoweringFactsDigest = ""
+	c.coroProgramCapabilities = 0
+	c.coroProgramBootstraps = nil
+	c.clCompilation = nil
+	c.pclnExternal = nil
+	c.stagedMainEntries = nil
+	c.buildTrace = nil
+
+	// Config is already an invocation-local clone. Retain only its small
+	// execution fields; callbacks and overlays can close over the entire source
+	// universe and are never consulted after linking.
+	if c.buildConf != nil {
+		c.buildConf.Overlay = nil
+		c.buildConf.GlobalRewrites = nil
+		c.buildConf.ModuleHook = nil
+		c.buildConf.CoroPlanBuilder = nil
+		c.buildConf.CoroPlanObserver = nil
+		c.buildConf.GoBuildFlags = nil
+		c.buildConf.compilerBuildTags = nil
+		c.buildConf.resolvedTargetBuildTags = nil
+	}
+}
+
 // backendSession owns all LLVM state used to lower one package. The Program
 // shares only the coordinator's already-prepared Go metadata.
 type backendSession struct {
@@ -8726,6 +8846,16 @@ func releaseBuiltPackageSource(pkg *aPackage) {
 	}
 	if pkg.sourceSelection == nil {
 		pkg.sourceSelection = freezePackageSourceSelection(pkg)
+	}
+	releaseBuiltPackageAnalysis(pkg)
+}
+
+// releaseBuiltPackageAnalysis drops source/SSA ownership without constructing
+// the basename receipt needed by the still-pending link phase. Execution calls
+// this only after every output has already been linked.
+func releaseBuiltPackageAnalysis(pkg *aPackage) {
+	if pkg == nil {
+		return
 	}
 	pkg.SSA = nil
 	pkg.rewriteVars = nil
