@@ -94,6 +94,10 @@ func (c *context) packageCacheDisabled(id string) bool {
 func (c *context) collectEnvInputs(m *manifestBuilder) {
 	m.env.Goos = c.buildConf.Goos
 	m.env.Goarch = c.buildConf.Goarch
+	m.env.Go386 = c.buildConf.GO386
+	m.env.Goamd64 = c.buildConf.GOAMD64
+	m.env.Goarm = c.buildConf.GOARM
+	m.env.Goarm64 = c.buildConf.GOARM64
 	if c.hasNonDefaultLLVMConfig() {
 		m.env.LlvmTriple = c.crossCompile.LLVMTarget
 	}
@@ -349,7 +353,7 @@ func (c *context) hasNonDefaultLLVMConfig() bool {
 	if requested.LLVMTarget == "" && requested.CPU == "" && requested.Features == "" && requested.TargetABI == "" {
 		return false
 	}
-	defaults := intllvm.GetTargetSpec(c.buildConf.Goos, c.buildConf.Goarch, "")
+	defaults := intllvm.GetTargetSpec(c.buildConf.Goos, c.buildConf.Goarch, c.buildConf.GOARM)
 	return requested.LLVMTarget != defaults.Triple || requested.CPU != defaults.CPU ||
 		requested.Features != defaults.Features || requested.TargetABI != ""
 }

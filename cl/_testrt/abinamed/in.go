@@ -6,6 +6,15 @@ import (
 	"github.com/xgo-dev/llgo/runtime/abi"
 )
 
+// Converting the two named values to interface{} must select their distinct
+// runtime type descriptors; the test body then exercises lazy pointer-to-this
+// and element links from those descriptors.
+// CHECK-LABEL: define void @main.main(){{.*}} {
+// CHECK: insertvalue %"{{.*}}eface" { ptr @_llgo_main.T,
+// CHECK: insertvalue %"{{.*}}eface" { ptr @"_llgo_{{.*}}/runtime/abi.Type",
+// CHECK: call ptr @"{{.*}}/runtime/abi.(*Type).StructType"
+// CHECK: call ptr @"{{.*}}/runtime/abi.(*Type).Elem"
+
 type T struct {
 	p *T
 	t *abi.Type
@@ -28,8 +37,8 @@ func main() {
 	println(e2.typ.PtrToThis_)
 
 	f0 := e.typ.StructType().Fields[0]
-	if f0.Typ != e.typ.PtrToThis_ {
-		panic("error field 0")
+	if e.typ.PtrToThis_ != nil {
+		panic("methodless pointer-to-this was generated eagerly")
 	}
 	if f0.Typ.Elem() != e.typ {
 		panic("error field 0 elem")

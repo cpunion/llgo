@@ -1698,9 +1698,7 @@ func (b Builder) checkReflect(fn Expr, args []Expr) (check ReflectMethodCheck) {
 		reflectKind = ReflectFuncOf
 	case "reflect.MapOf":
 		reflectKind = ReflectMapOf
-	case "reflect.PointerTo", "reflect.PtrTo":
-		reflectKind = ReflectPointerTo
-	case "reflect.New", "reflect.NewAt", "reflect.Value.Addr":
+	case "reflect.New", "reflect.NewAt", "reflect.PointerTo", "reflect.PtrTo", "reflect.Value.Addr":
 		reflectKind = ReflectPointerTo
 	case "reflect.SliceOf", "reflect.SliceAt", "reflect.Value.Slice":
 		reflectKind = ReflectSliceOf

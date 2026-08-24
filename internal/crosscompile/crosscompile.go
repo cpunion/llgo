@@ -318,7 +318,11 @@ func ltoLinkerOptFlag(level optlevel.Level) string {
 }
 
 func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
-	targetSpec := resolvedLLVMTargetSpec(goos, goarch, wasiThreads)
+	return useWithGOARM(goos, goarch, "", wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+}
+
+func useWithGOARM(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
+	targetSpec := resolvedLLVMTargetSpecWithGOARM(goos, goarch, goarm, wasiThreads)
 	targetTriple := targetSpec.Triple
 	export.GOOS = goos
 	export.GOARCH = goarch
@@ -603,7 +607,11 @@ func wasiMemoryLinkFlags(wasiThreads bool) []string {
 }
 
 func resolvedLLVMTargetSpec(goos, goarch string, wasiThreads bool) llvm.TargetSpec {
-	spec := llvm.GetTargetSpec(goos, goarch, "")
+	return resolvedLLVMTargetSpecWithGOARM(goos, goarch, "", wasiThreads)
+}
+
+func resolvedLLVMTargetSpecWithGOARM(goos, goarch, goarm string, wasiThreads bool) llvm.TargetSpec {
+	spec := llvm.GetTargetSpec(goos, goarch, goarm)
 	if goos == "wasip1" && goarch == "wasm" && wasiThreads && !strings.Contains(spec.Features, "+atomics") {
 		if spec.Features != "" {
 			spec.Features += ","
@@ -894,8 +902,15 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 // Use extends the original Use function to support target-based configuration
 // If targetName is provided, it takes precedence over goos/goarch
 func Use(goos, goarch, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
+	return UseWithGOARM(goos, goarch, "", targetName, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+}
+
+// UseWithGOARM is Use with an explicit Go ARM architecture setting. The
+// setting affects native GOARCH=arm clang and linker triples; named targets
+// retain their target configuration's LLVM triple.
+func UseWithGOARM(goos, goarch, goarm, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
 	if targetName == "" {
-		return use(goos, goarch, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+		return useWithGOARM(goos, goarch, goarm, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
 	}
 	if !strings.HasPrefix(targetName, "wasm") && !strings.HasPrefix(targetName, "wasi") {
 		return UseTarget(targetName, level, ltoMode)
@@ -916,7 +931,7 @@ func Use(goos, goarch, targetName string, wasiThreads, forceEspClang bool, level
 	if config.GOARCH != "wasm" {
 		return UseTarget(targetName, level, ltoMode)
 	}
-	export, err = use(config.GOOS, config.GOARCH, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+	export, err = useWithGOARM(config.GOOS, config.GOARCH, "", wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
 	if err != nil {
 		return export, err
 	}

@@ -42,6 +42,7 @@ func TestGetTargetTriple(t *testing.T) {
 	clangArchMap := map[string][]string{
 		"x86_64":  {"x86-64", "x86_64"},
 		"i386":    {"x86", "i386"},
+		"i686":    {"x86", "i386"},
 		"aarch64": {"aarch64", "arm64"},
 		"arm64":   {"arm64", "aarch64"},
 		"armv7":   {"arm", "thumb"},
@@ -144,8 +145,9 @@ func TestGetTargetTriple(t *testing.T) {
 	checkTriple(t, "linux/arm", "linux", "arm", "armv7-unknown-linux-gnueabihf")
 	checkTriple(t, "darwin/amd64", "darwin", "amd64", "x86_64-apple-macosx")
 	checkTriple(t, "darwin/arm64", "darwin", "arm64", "arm64-apple-macosx")
-	checkTriple(t, "windows/amd64", "windows", "amd64", "x86_64-unknown-windows-gnu")
-	checkTriple(t, "windows/386", "windows", "386", "i386-unknown-windows-gnu")
+	checkTriple(t, "windows/amd64", "windows", "amd64", "x86_64-pc-windows-msvc")
+	checkTriple(t, "windows/386", "windows", "386", "i686-pc-windows-msvc")
+	checkTriple(t, "windows/arm64", "windows", "arm64", "aarch64-pc-windows-msvc")
 	checkTriple(t, "js/wasm", "js", "wasm", "wasm32-unknown-js")
 }
 
@@ -161,7 +163,7 @@ func TestGetTargetSpec(t *testing.T) {
 	}{
 		{"native-style amd64", "linux", "amd64", "", "x86_64-unknown-linux", "x86-64", "+sse2"},
 		{"wasm32", "wasip1", "wasm", "", "wasm32-unknown-wasip1", "generic", "+bulk-memory"},
-		{"armv5", "linux", "arm", "5", "armv5-unknown-linux-gnueabihf", "generic", "+armv5t"},
+		{"armv5", "linux", "arm", "5", "armv5-unknown-linux-gnueabi", "generic", "+armv5t"},
 		{"armv6", "linux", "arm", "6", "armv6-unknown-linux-gnueabihf", "generic", "+armv6"},
 		{"armv7 default", "linux", "arm", "", "armv7-unknown-linux-gnueabihf", "generic", "+armv7-a"},
 	}
@@ -179,5 +181,23 @@ func TestGetTargetSpec(t *testing.T) {
 				t.Fatalf("Features = %q, want it to contain %q", got.Features, tt.feature)
 			}
 		})
+	}
+}
+
+func TestGetTargetTripleWithGOARM(t *testing.T) {
+	for _, test := range []struct {
+		goarm string
+		want  string
+	}{
+		{"5", "armv5-unknown-linux-gnueabi"},
+		{"5,hardfloat", "armv5-unknown-linux-gnueabihf"},
+		{"6", "armv6-unknown-linux-gnueabihf"},
+		{"6,softfloat", "armv6-unknown-linux-gnueabi"},
+		{"7", "armv7-unknown-linux-gnueabihf"},
+		{"", "armv7-unknown-linux-gnueabihf"},
+	} {
+		if got := GetTargetTripleWithGOARM("linux", "arm", test.goarm); got != test.want {
+			t.Errorf("GetTargetTripleWithGOARM(linux, arm, %q) = %q, want %q", test.goarm, got, test.want)
+		}
 	}
 }

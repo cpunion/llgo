@@ -1,9 +1,9 @@
 [OrdinaryEdges]
-__llgo$generated$promoted$Close$llgo$promoted$v1$99ecc0384df167e852f57195384c7142b1e255037df2db2c23f6defe6db377ff$coro:
+__llgo$generated$promoted$Close$llgo$promoted$v1$3865dcb45620992b2c583be63613061bdae3492c7f8bca8b63298c1bdd0d6aa7$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.93980eb480dcf849e3db244c155240dc
+    __llgo_coro_frame_descriptor_v1.2fb1231831ba8cf99ad2c5ea1db19abb
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -20,14 +20,11 @@ __llgo$generated$promoted$Close$llgo$promoted$v1$99ecc0384df167e852f57195384c714
     llvm.coro.suspend
     llvm.fake.use
     llvm.trap
-__llgo$generated$promoted$Close$llgo$promoted$v1$99ecc0384df167e852f57195384c7142b1e255037df2db2c23f6defe6db377ff$outcome:
-    __llgo_coro_wrap_nil_payload_v1
-    github.com/xgo-dev/llgo/cl/_testmeta/interface_imported/api.Source.Close
-__llgo$generated$promoted$Read$llgo$promoted$v1$88cb386361a8853c4f9177ef33616451223a619c8119e5d797370bb0c81dca0d$coro:
+__llgo$generated$promoted$Read$llgo$promoted$v1$77977cd1ff59e9c057965095ffaaa54452747b54ee2bf81ecbe0478e075e8fd3$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.4a7f2c0bc225bc79cd573d16131d24bb
+    __llgo_coro_frame_descriptor_v1.fe7d9a201fd9b27e5a6664388ade8824
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -44,11 +41,8 @@ __llgo$generated$promoted$Read$llgo$promoted$v1$88cb386361a8853c4f9177ef33616451
     llvm.coro.suspend
     llvm.fake.use
     llvm.trap
-__llgo$generated$promoted$Read$llgo$promoted$v1$88cb386361a8853c4f9177ef33616451223a619c8119e5d797370bb0c81dca0d$outcome:
-    __llgo_coro_wrap_nil_payload_v1
-    github.com/xgo-dev/llgo/cl/_testmeta/interface_imported/api.Source.Read
 github.com/xgo-dev/llgo/cl/_testmeta/interface_imported/api.init:
     github.com/xgo-dev/llgo/cl/_testmeta/interface_imported/api.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v9.f818e9affa2aab9d4b5261b58188d851
+    __llgo_coro_library_effect_v9.8c9b2d23db422b70ff05dec934977ca6
 
