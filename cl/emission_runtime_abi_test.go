@@ -298,7 +298,7 @@ func CoroChanTryRecv(task *byte, ch chan int, value *int, size int) (bool, bool)
 func CoroChanTryClose(ch chan int) uint32 { return 0 }
 func CoroChanTryCloseTask(task *byte, ch chan int) uint32 { return 0 }
 type ChanOp struct{}
-func CoroChanSelectTry(ops ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectTry(task *byte, ops ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(ops ...ChanOp) {}
 func CoroChanSelectResume(ops ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func ChanSend(ch chan int, value *int, size int) bool { return false }

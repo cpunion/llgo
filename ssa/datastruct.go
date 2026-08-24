@@ -1376,10 +1376,11 @@ func (b Builder) coroSelectOpsSlice(plan *CoroSelect) Expr {
 }
 
 // CoroChanSelectTry performs the randomized, nonblocking, non-panicking first
-// pass. It returns the runtime tuple (index, recvOK, tryOK, sendClosed).
-func (b Builder) CoroChanSelectTry(plan *CoroSelect) Expr {
+// pass. task is the compiler-carried logical G used for owner-local peer
+// completion. It returns (index, recvOK, tryOK, sendClosed).
+func (b Builder) CoroChanSelectTry(task Expr, plan *CoroSelect) Expr {
 	b.requireCoroSelect(plan)
-	return b.Call(b.Pkg.rtFunc("CoroChanSelectTry"), b.coroSelectOpsSlice(plan))
+	return b.Call(b.Pkg.rtFunc("CoroChanSelectTry"), task, b.coroSelectOpsSlice(plan))
 }
 
 // CoroChanSelectPark installs all physical cases at the compiler's exact

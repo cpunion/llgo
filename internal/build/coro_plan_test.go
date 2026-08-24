@@ -607,7 +607,7 @@ type ChanOp struct{}
 func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
 func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryCloseTask(unsafe.Pointer, *Chan) uint32 { return 0 }
-func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectTry(unsafe.Pointer, ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_panic_prepare_v1() {}
@@ -1486,7 +1486,7 @@ type ChanOp struct{}
 func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
 func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryCloseTask(unsafe.Pointer, *Chan) uint32 { return 0 }
-func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectTry(unsafe.Pointer, ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
@@ -2173,7 +2173,7 @@ type ChanOp struct{}
 func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
 func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryCloseTask(unsafe.Pointer, *Chan) uint32 { return 0 }
-func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectTry(unsafe.Pointer, ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}

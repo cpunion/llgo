@@ -707,13 +707,13 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	chanOpSliceType := types.NewSlice(prog.RuntimeType("ChanOp").RawType())
 	uint32Type := types.Typ[types.Uint32]
 	rawSelectTry := pkg.NewFunc("command-line-arguments.CoroChanSelectTry", newSignature(
-		[]types.Type{chanOpSliceType}, []types.Type{intType, boolType, boolType, boolType},
+		[]types.Type{pointer, chanOpSliceType}, []types.Type{intType, boolType, boolType, boolType},
 	), llssa.InGo)
 	selectTry := pkg.NewFunc(llssa.PkgRuntime+".CoroChanSelectTry", newSignature(
-		[]types.Type{chanOpSliceType}, []types.Type{intType, boolType, boolType, boolType},
+		[]types.Type{pointer, chanOpSliceType}, []types.Type{intType, boolType, boolType, boolType},
 	), llssa.InGo)
 	selectTryBody := selectTry.MakeBody(1)
-	selectTryResult := selectTryBody.Call(rawSelectTry.Expr, selectTry.Param(0))
+	selectTryResult := selectTryBody.Call(rawSelectTry.Expr, selectTry.Param(0), selectTry.Param(1))
 	selectTryBody.Return(
 		selectTryBody.Extract(selectTryResult, 0),
 		selectTryBody.Extract(selectTryResult, 1),

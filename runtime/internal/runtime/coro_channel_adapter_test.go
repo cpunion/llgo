@@ -663,6 +663,233 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 		yieldCoroChannelAdapterFrame(t, p, frame, action)
 	}
 
+	// Reproduce the narrow publish window between CoroChanSelectTry and the
+	// all-channel-locked select park pass. A compact one-case peer may enter the
+	// channel queue during that window. The select must claim that direct peer;
+	// dequeuing it as a legacy pthread waiter would silently strand its G.
+	runSelectParkAgainstDirectPeer := func(t *testing.T, selectSends bool) {
+		t.Helper()
+		directG, runnable := coro.NextRunnable(p)
+		if !runnable || directG == nil {
+			t.Fatalf("dequeue direct peer = (%p, %t)", directG, runnable)
+		}
+		var directFrame *coroChannelAdapterFrame
+		switch directG {
+		case receiver.g:
+			directFrame = receiver
+		case sender.g:
+			directFrame = sender
+		default:
+			t.Fatalf("unexpected direct peer G %p", directG)
+		}
+		directAction := activateCoroChannelAdapterFrame(t, p, directFrame)
+
+		ch := new(Chan)
+		ch.elemsize = int(unsafe.Sizeof(uint32(0)))
+		ch.mutex.Init(nil)
+		dummy := new(Chan)
+		dummy.elemsize = ch.elemsize
+		dummy.mutex.Init(nil)
+		const value = uint32(0x4a5b6c7d)
+		directValue, selectValue := uint32(0), uint32(0)
+		if !selectSends {
+			directValue = value
+		} else {
+			selectValue = value
+		}
+		var directState CoroChanParkV1
+		parkCoroChannelAdapterFrame(
+			t,
+			p,
+			directFrame,
+			directAction,
+			ch,
+			unsafe.Pointer(&directValue),
+			&directState,
+			!selectSends,
+		)
+		if !selectSends && ch.sendq.first != &directState.waiter ||
+			selectSends && ch.recvq.first != &directState.waiter {
+			t.Fatalf("compact direct peer not published: send=%p recv=%p waiter=%p",
+				ch.sendq.first, ch.recvq.first, &directState.waiter)
+		}
+
+		selectG, runnable := coro.NextRunnable(p)
+		if !runnable || selectG == nil || selectG == directG {
+			t.Fatalf("dequeue selector = (%p, %t), direct=%p", selectG, runnable, directG)
+		}
+		var selectFrame *coroChannelAdapterFrame
+		switch selectG {
+		case receiver.g:
+			selectFrame = receiver
+		case sender.g:
+			selectFrame = sender
+		default:
+			t.Fatalf("unexpected selector G %p", selectG)
+		}
+		selectAction := activateCoroChannelAdapterFrame(t, p, selectFrame)
+		ops := []ChanOp{
+			{
+				C: ch, Val: unsafe.Pointer(&selectValue),
+				Size: int32(unsafe.Sizeof(selectValue)), Send: selectSends,
+			},
+			{
+				C: dummy, Val: unsafe.Pointer(&selectValue),
+				Size: int32(unsafe.Sizeof(selectValue)), Send: selectSends,
+			},
+		}
+		var cases [2]CoroChanSelectCaseV1
+		var state CoroChanSelectV1
+		selectFrame.header.SuspendReason = uint16(coro.SuspendPark)
+		selectFrame.header.Lifecycle = uint16(coro.FrameSuspended)
+		prepareCoroChanSelectV1(
+			unsafe.Pointer(selectFrame.g),
+			selectFrame.handle,
+			unsafe.Pointer(selectFrame.header),
+			unsafe.Pointer(&cases[0]),
+			unsafe.Pointer(&state),
+			ops,
+		)
+		if parked, ok := coro.Resumed(p, selectFrame.g, selectAction); !ok || parked.Kind != coro.ActionPark {
+			t.Fatalf("commit mixed select park = (%+v, %t)", parked, ok)
+		}
+		if ch.sendq.first != nil || ch.recvq.first != nil {
+			t.Fatalf("mixed select left matched direct peer queued: send=%p recv=%p",
+				ch.sendq.first, ch.recvq.first)
+		}
+		completed := map[*coro.G]bool{}
+		for cycles := 0; len(completed) != 2; cycles++ {
+			if cycles == 10000 {
+				t.Fatal("mixed select pair did not both reach their channel resume")
+			}
+			var dispatch coro.ExecutorRunStep
+			for reduction := 0; ; reduction++ {
+				step, advanced := coro.NextExecutorRunStep(driver)
+				if !advanced {
+					t.Fatalf("advance mixed select runner at reduction %d", reduction)
+				}
+				switch step.Kind {
+				case coro.ExecutorRunStepSource:
+					if step.Poll.Complete && !coro.CommitExecutorRunSourceDistribution(driver, false) {
+						t.Fatalf("commit mixed select source distribution at reduction %d", reduction)
+					}
+				case coro.ExecutorRunStepMaterialize:
+					if !coroMaterializeResumeCleanupStepV1(step.Cleanup) {
+						t.Fatalf("materialize mixed select cleanup at reduction %d", reduction)
+					}
+				case coro.ExecutorRunStepDirectChannel:
+					if !coroMaterializeDirectChannelCompletionV1(step.Direct) {
+						t.Fatalf("materialize mixed direct peer at reduction %d", reduction)
+					}
+				case coro.ExecutorRunStepDispatch:
+					dispatch = step
+				default:
+					t.Fatalf("unexpected mixed select runner step %d at reduction %d", step.Kind, reduction)
+				}
+				if dispatch.Kind != coro.ExecutorRunStepInvalid {
+					break
+				}
+				if reduction == 10000 {
+					t.Fatal("mixed select runner did not dispatch")
+				}
+			}
+			next := dispatch.G
+			if next == nil || dispatch.Action.Kind != coro.ActionCheckResume {
+				t.Fatalf("dispatch mixed select pair = %+v, completed=%v", dispatch, completed)
+			}
+			actionStep, advanced := coro.NextExecutorRunStep(driver)
+			if !advanced || actionStep.Kind != coro.ExecutorRunStepAction || actionStep.G != next ||
+				actionStep.Action != dispatch.Action {
+				t.Fatalf("activate mixed select pair = (%+v, %t), dispatch=%+v", actionStep, advanced, dispatch)
+			}
+			resume, ok := coro.CheckedExecutorRun(driver, next, actionStep.Action, false)
+			if !ok || resume.Kind != coro.ActionResume || resume.Handle != dispatch.Action.Handle {
+				t.Fatalf("resume mixed select pair = (%+v, %t), dispatch=%+v", resume, ok, dispatch)
+			}
+			var frame *coroChannelAdapterFrame
+			switch next {
+			case directFrame.g:
+				frame = directFrame
+				if !completed[next] {
+					status := coroChanResumeCompatibilityV1(unsafe.Pointer(directFrame.g), unsafe.Pointer(&directState))
+					want := uint32(coroChanResumeRecvOK)
+					if !selectSends {
+						want = coroChanResumeSendOK
+					}
+					if status != want || directState != (CoroChanParkV1{}) {
+						t.Fatalf("mixed direct peer = status:%d state:%+v, want status:%d empty state",
+							status, directState, want)
+					}
+					completed[next] = true
+				}
+			case selectFrame.g:
+				frame = selectFrame
+				if !completed[next] {
+					selected, recvOK, status := CoroChanSelectResume(
+						unsafe.Pointer(selectFrame.g),
+						unsafe.Pointer(&cases[0]),
+						unsafe.Pointer(&state),
+						ops...,
+					)
+					want := uint32(coroChanResumeRecvOK)
+					if selectSends {
+						want = coroChanResumeSendOK
+					}
+					if selected != 0 || !recvOK || status != want {
+						t.Fatalf("mixed select resume = index:%d ok:%t status:%d, want 0,true,%d",
+							selected, recvOK, status, want)
+					}
+					completed[next] = true
+				}
+			default:
+				t.Fatalf("unexpected mixed select pair G %p", next)
+			}
+			if completed[next] && frame.header.SuspendReason == uint16(coro.SuspendYield) {
+				outcome, caseID, lease, task, taken := coro.TakeRunDecision(frame.g, coro.ParkTicket{})
+				if !taken || outcome != coro.ParkOutcomePending || caseID != 0 || lease.Valid() ||
+					task != coro.TaskCancelNone {
+					t.Fatalf("take repeated mixed select decision = (%d,%d,%+v,%d,%t)",
+						outcome, caseID, lease, task, taken)
+				}
+			}
+			frame.header.SuspendReason = uint16(coro.SuspendNone)
+			frame.header.Lifecycle = uint16(coro.FrameActive)
+			frame.header.SuspendReason = uint16(coro.SuspendYield)
+			frame.header.Lifecycle = uint16(coro.FrameSuspended)
+			if !coro.PrepareYield(frame.g, frame.handle, frame.header) {
+				t.Fatal("prepare mixed select pair yield")
+			}
+			yielded, committed, ok := coro.ResumedExecutorRun(driver, p, frame.g, resume)
+			if !ok || !committed || yielded.Kind != coro.ActionYield {
+				t.Fatalf("commit mixed select pair yield = (%+v, %t, %t)", yielded, committed, ok)
+			}
+			if !coro.CommitExecutorRunActionDistribution(driver, false) {
+				t.Fatal("commit mixed select pair action distribution")
+			}
+		}
+		if !coro.EnterExecutorRunCompatibility(driver) {
+			t.Fatal("leave mixed select bounded runner")
+		}
+		if directValue != value || selectValue != value ||
+			ch.sendq.first != nil || ch.recvq.first != nil ||
+			dummy.sendq.first != nil || dummy.recvq.first != nil ||
+			coroProgramChannelSourceV1State.Pending() {
+			t.Fatalf("mixed select retained state: values=(%#x,%#x) channel=(%p,%p) dummy=(%p,%p) pending=%t",
+				directValue, selectValue, ch.sendq.first, ch.recvq.first,
+				dummy.sendq.first, dummy.recvq.first, coroProgramChannelSourceV1State.Pending())
+		}
+	}
+	if !t.Run("select-receive", func(t *testing.T) {
+		runSelectParkAgainstDirectPeer(t, false)
+	}) {
+		t.FailNow()
+	}
+	if !t.Run("select-send", func(t *testing.T) {
+		runSelectParkAgainstDirectPeer(t, true)
+	}) {
+		t.FailNow()
+	}
+
 	ch := new(Chan)
 	ch.elemsize = int(unsafe.Sizeof(uint32(0)))
 	ch.mutex.Init(nil)
