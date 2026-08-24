@@ -1209,6 +1209,9 @@ func (p *context) enterCoroPropagatedPanic(
 		if b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {
 			panic("propagated panic escaped its parent outcome-plain body")
 		}
+		outcome.appendPanicTrace(
+			b, typeWord, dataWord, line, coroLogicalPanicTracePropagate,
+		)
 		outcome.publish(b, coroAwaitCompletionPanic, typeWord, dataWord)
 		return
 	}

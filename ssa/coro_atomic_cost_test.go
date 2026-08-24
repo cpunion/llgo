@@ -187,6 +187,81 @@ func TestVerifyCoroAtomicCostModuleRequiresInjectedInlineAsmCapability(t *testin
 	}
 }
 
+func TestVerifyCoroAtomicCostModuleAcceptsInjectedLogicalPanicTraceAppend(t *testing.T) {
+	ctx, module := newCoroAtomicCostTestModule(t)
+	pointer := llvm.PointerType(ctx.Int8Type(), 0)
+	helperType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{
+		pointer, pointer, pointer, pointer, ctx.Int32Type(), ctx.Int32Type(),
+	}, false)
+	helper := llvm.AddFunction(module, "__llgo_coro_panic_trace_append_v1", helperType)
+	functionType := llvm.FunctionType(ctx.VoidType(), nil, false)
+	function := llvm.AddFunction(module, "pkg.atomic", functionType)
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	entry := ctx.AddBasicBlock(function, "entry")
+	builder.SetInsertPointAtEnd(entry)
+	call := builder.CreateCall(helperType, helper, []llvm.Value{
+		llvm.ConstPointerNull(pointer), llvm.ConstPointerNull(pointer),
+		llvm.ConstPointerNull(pointer), llvm.ConstPointerNull(pointer),
+		llvm.ConstInt(ctx.Int32Type(), 17, false),
+		llvm.ConstInt(ctx.Int32Type(), 1, false),
+	}, "")
+	MarkCoroAtomicBoundedCompilerCall(ctx, call, CoroAtomicLogicalPanicTraceAppendV1)
+	builder.CreateRetVoid()
+	addCoroAtomicCostTestMetadata(ctx, module, function.Name())
+
+	report, err := VerifyCoroAtomicCostModule(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Functions) != 1 || report.Functions[0].Symbol != function.Name() {
+		t.Fatalf("logical panic trace append report = %+v", report)
+	}
+}
+
+func TestVerifyCoroAtomicCostModuleRejectsCopiedLogicalPanicTraceCapability(t *testing.T) {
+	ctx, module := newCoroAtomicCostTestModule(t)
+	pointer := llvm.PointerType(ctx.Int8Type(), 0)
+	helperType := llvm.FunctionType(ctx.VoidType(), []llvm.Type{
+		pointer, pointer, pointer, pointer, ctx.Int32Type(), ctx.Int32Type(),
+	}, false)
+	helper := llvm.AddFunction(module, "__llgo_coro_panic_trace_append_v1", helperType)
+	counterfeit := llvm.AddFunction(module, "pkg.counterfeit", helperType)
+	functionType := llvm.FunctionType(ctx.VoidType(), nil, false)
+	markerSource := llvm.AddFunction(module, "pkg.marker-source", functionType)
+	function := llvm.AddFunction(module, "pkg.atomic", functionType)
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	args := []llvm.Value{
+		llvm.ConstPointerNull(pointer), llvm.ConstPointerNull(pointer),
+		llvm.ConstPointerNull(pointer), llvm.ConstPointerNull(pointer),
+		llvm.ConstInt(ctx.Int32Type(), 17, false),
+		llvm.ConstInt(ctx.Int32Type(), 1, false),
+	}
+	markerEntry := ctx.AddBasicBlock(markerSource, "entry")
+	builder.SetInsertPointAtEnd(markerEntry)
+	marked := builder.CreateCall(helperType, helper, args, "")
+	MarkCoroAtomicBoundedCompilerCall(ctx, marked, CoroAtomicLogicalPanicTraceAppendV1)
+	builder.CreateRetVoid()
+	entry := ctx.AddBasicBlock(function, "entry")
+	builder.SetInsertPointAtEnd(entry)
+	forged := builder.CreateCall(helperType, counterfeit, args, "")
+	kind := ctx.MDKindID(CoroAtomicBoundedCompilerCallMetadataName)
+	fields := marked.Metadata(kind).MDNodeOperands()
+	forged.SetMetadata(kind, ctx.MDNode([]llvm.Metadata{
+		fields[0].ConstantAsMetadata(),
+		ctx.MDString(fields[1].MDString()),
+		ctx.MDString(fields[2].MDString()),
+	}))
+	builder.CreateRetVoid()
+	addCoroAtomicCostTestMetadata(ctx, module, function.Name())
+
+	_, err := VerifyCoroAtomicCostModule(module)
+	if err == nil || !strings.Contains(err.Error(), "mismatched callee ABI") {
+		t.Fatalf("copied logical panic trace capability error = %v", err)
+	}
+}
+
 func TestCoroAtomicDataAnchorInjectsBoundedCapabilityAtCreation(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()

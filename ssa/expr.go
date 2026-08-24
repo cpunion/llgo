@@ -318,6 +318,17 @@ func (b Builder) CoroAtomicDataAnchor(instruction string) {
 	)
 }
 
+// CoroAtomicLogicalPanicTraceAppend emits the one exact terminal-only runtime
+// edge admitted in an outcome body and attaches its construction-time
+// capability. Ordinary calls, including calls to a source declaration with
+// the same spelling, continue through Call and remain uncertified.
+func (b Builder) CoroAtomicLogicalPanicTraceAppend(fn Expr, args ...Expr) {
+	call := b.Call(fn, args...)
+	MarkCoroAtomicBoundedCompilerCall(
+		b.Pkg.mod.Context(), call.impl, CoroAtomicLogicalPanicTraceAppendV1,
+	)
+}
+
 func (b Builder) InlineAsmFull(instruction, constraints string, retType Type, exprs []Expr) Expr {
 	typs := make([]llvm.Type, len(exprs))
 	vals := make([]llvm.Value, len(exprs))

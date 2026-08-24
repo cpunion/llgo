@@ -45,6 +45,7 @@ const (
 	coroProgramContinueSliceSymbolV2                            = "__llgo_coro_program_continue_slice_v2"
 	coroProgramReportPanicSymbolV1                              = "__llgo_coro_program_report_panic_v1"
 	coroPanicTraceReplaceSymbolV1                               = "__llgo_coro_panic_trace_replace_v1"
+	coroPanicTraceAppendSymbolV1                                = "__llgo_coro_panic_trace_append_v1"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 	coroNativeWorkerCompleteSymbolV1                            = "__llgo_coro_native_worker_complete_v1"
 	coroNativeFleetOwnerSymbolV2                                = "__llgo_coro_native_fleet_owner_v2"

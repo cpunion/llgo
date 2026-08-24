@@ -1079,45 +1079,177 @@ type PanicTraceFrameSnapshot struct {
 	Hidden   bool
 }
 
-// ActiveTraceFrame snapshots the compiler descriptor for g's currently
-// executing physical frame. It accepts both the ordinary active header and
-// the narrow park-resume-hook window, where scheduler ownership has resumed
-// the LLVM frame but the compiler intentionally calls its result hook before
-// restoring SuspendNone/FrameActive. It is current-owner-only: callers may use
-// the immutable strings after return, but must not retain or expose the private
-// Frame or Header pointers across a suspension boundary.
-//
-// This is the exact metadata boundary needed when a foreign operation resumes
-// with a fault. The worker owns no G pointer and cannot walk a stackless Go
-// continuation; after resume, the owner can prepend this frame to the bounded
-// native fault identities without reverse-looking-up a function address.
-func ActiveTraceFrame(g *G) (PanicTraceFrameSnapshot, bool) {
+// LogicalPanicTraceMode distinguishes a language operation which starts a new
+// panic from one synchronous outcome frame which merely forwards its child's
+// panic. The distinction cannot be reconstructed from the interface words:
+// panic(x) may replace an older panic(x) with bit-identical payloads.
+type LogicalPanicTraceMode uint32
+
+const (
+	LogicalPanicTraceNew LogicalPanicTraceMode = iota
+	LogicalPanicTracePropagate
+)
+
+// LogicalPanicTraceFrameAllocationSize is the exact target-neutral allocation
+// required for one cold-path logical trace node. Logical outcome functions do
+// not own an LLVM frame; allocating this private Frame only after a panic keeps
+// their normal synchronous call path allocation-free.
+func LogicalPanicTraceFrameAllocationSize() uintptr {
+	return unsafe.Sizeof(Frame{})
+}
+
+func activeLogicalPanicTraceCarrier(g *G) (*Frame, bool) {
 	if !ValidG(g) || !resumeGateTaken(g) || g.state != GRunning ||
-		g.active == nil || g.pending != (pendingTransition{}) || g.destroyTarget != nil ||
-		g.destroyRoot || g.spawnChild != nil {
-		return PanicTraceFrameSnapshot{}, false
+		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroyRoot ||
+		g.queued || g.nextReady != nil || g.waiting ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		!releasableParkState(&g.park) || g.panicUnwind ||
+		!emptyPanicRecord(&g.panicRecord) {
+		return nil, false
 	}
 	frame := g.active
-	header := frame.header
-	activeHeader := header != nil &&
-		header.SuspendReason == uint16(SuspendNone) &&
-		header.Lifecycle == uint16(FrameActive)
-	parkResumeHeader := header != nil &&
-		header.SuspendReason == uint16(SuspendPark) &&
-		header.Lifecycle == uint16(FrameSuspended)
-	var descriptorPointer unsafe.Pointer
-	if header != nil {
-		descriptorPointer = header.Descriptor
+	if frame == nil || frame.owner != g || frame.handle == nil || frame.header == nil ||
+		frame.state != FrameActive || frame.header.G != unsafe.Pointer(g) ||
+		frame.header.SuspendReason != uint16(SuspendNone) ||
+		frame.header.Lifecycle != uint16(FrameActive) {
+		return nil, false
 	}
-	if frame.owner != g || frame.handle == nil || header == nil ||
-		descriptorPointer == nil || frame.state != FrameActive ||
-		header.G != unsafe.Pointer(g) || header.Descriptor != descriptorPointer ||
-		(!activeHeader && !parkResumeHeader) {
-		return PanicTraceFrameSnapshot{}, false
+	return frame, true
+}
+
+// PrepareLogicalPanicTrace validates one compiler-emitted cold-path logical
+// frame. A new panic first detaches any older trace owned by the active
+// physical carrier; the runtime adapter drains those allocations before it
+// allocates the replacement node. Propagation is read-only and requires the
+// exact child identity already retained on this carrier.
+func PrepareLogicalPanicTrace(
+	g *G, mode LogicalPanicTraceMode, typeWord, dataWord unsafe.Pointer,
+) bool {
+	carrier, ok := activeLogicalPanicTraceCarrier(g)
+	if !ok || typeWord == nil || !emptyPanicTrace(g) && !activePanicTrace(g) {
+		return false
+	}
+	switch mode {
+	case LogicalPanicTraceNew:
+		if activePanicTrace(g) && panicTraceCarrier(g) != carrier {
+			return false
+		}
+		return stagePanicTraceDiscard(g)
+	case LogicalPanicTracePropagate:
+		if !activePanicTrace(g) || panicTraceCarrier(g) != carrier {
+			return false
+		}
+		existingType, existingData, valid := panicTraceIdentity(g.panicTraceHead)
+		return valid && existingType == typeWord && existingData == dataWord
+	default:
+		return false
+	}
+}
+
+// RetainLogicalPanicTraceFrame initializes and appends one allocator-owned
+// trace-only Frame for a synchronous outcome body. The tail's parent is the
+// still-live physical carrier; when another logical node is appended, that
+// ancestry edge becomes the trace next edge. This preserves the same chain
+// invariant later used when llvm.coro.destroy appends the physical carrier.
+func RetainLogicalPanicTraceFrame(
+	g *G,
+	raw unsafe.Pointer,
+	total uintptr,
+	descriptorPointer unsafe.Pointer,
+	line uint32,
+	mode LogicalPanicTraceMode,
+	typeWord, dataWord unsafe.Pointer,
+) bool {
+	carrier, ok := activeLogicalPanicTraceCarrier(g)
+	if !ok || raw == nil || total != LogicalPanicTraceFrameAllocationSize() ||
+		uintptr(raw)%unsafe.Alignof(Frame{}) != 0 || descriptorPointer == nil ||
+		typeWord == nil || g.panicTraceCount == ^uint32(0) {
+		return false
 	}
 	descriptor := (*FrameDescriptorV1)(descriptorPointer)
 	if descriptor.Version != 1 ||
-		descriptor.Flags & ^frameDescriptorAllowedFlagsV1 != 0 ||
+		descriptor.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
+		len(descriptor.Function) == 0 {
+		return false
+	}
+	frame := (*Frame)(raw)
+	if *frame != (Frame{}) {
+		return false
+	}
+	switch mode {
+	case LogicalPanicTraceNew:
+		if !emptyPanicTrace(g) {
+			return false
+		}
+	case LogicalPanicTracePropagate:
+		if !activePanicTrace(g) || panicTraceCarrier(g) != carrier {
+			return false
+		}
+		existingType, existingData, valid := panicTraceIdentity(g.panicTraceHead)
+		if !valid || existingType != typeWord || existingData != dataWord {
+			return false
+		}
+	default:
+		return false
+	}
+
+	frame.owner = g
+	frame.handle = raw
+	frame.header = (*HeaderV1)(descriptorPointer)
+	frame.allocationSize = total
+	frame.panicLine = line
+	frame.state = FrameTraceRetained
+	frame.parent = carrier
+	if emptyPanicTrace(g) {
+		frame.completion = CompletionRecord{
+			status:   CompletionPanic,
+			typeWord: typeWord,
+			dataWord: dataWord,
+		}
+		g.panicTraceHead = frame
+	} else {
+		tail := g.panicTraceTail
+		if tail == nil || tail.next != nil || tail.parent != carrier {
+			Zero(raw, total)
+			return false
+		}
+		tail.next = frame
+		// LoadPanicTraceFrame requires every non-tail ancestry edge to equal
+		// its iteration edge. The new tail remains attached to carrier.
+		tail.parent = frame
+	}
+	g.panicTraceTail = frame
+	g.panicTraceCount++
+	return true
+}
+
+func activeTraceFrameSnapshot(g *G, frame *Frame, active bool) (PanicTraceFrameSnapshot, bool) {
+	if frame == nil || frame.owner != g || frame.handle == nil || frame.header == nil ||
+		frame.header.G != unsafe.Pointer(g) || frame.header.Descriptor == nil {
+		return PanicTraceFrameSnapshot{}, false
+	}
+	header := frame.header
+	if active {
+		activeHeader := frame.state == FrameActive &&
+			header.SuspendReason == uint16(SuspendNone) &&
+			header.Lifecycle == uint16(FrameActive)
+		// In the narrow worker-result reconciliation window scheduler ownership
+		// is already active while the spilled header still describes the
+		// preceding park.
+		parkResumeHeader := frame.state == FrameActive &&
+			header.SuspendReason == uint16(SuspendPark) &&
+			header.Lifecycle == uint16(FrameSuspended)
+		if !activeHeader && !parkResumeHeader {
+			return PanicTraceFrameSnapshot{}, false
+		}
+	} else if frame.state != FrameSuspended ||
+		header.SuspendReason != uint16(SuspendCall) ||
+		header.Lifecycle != uint16(FrameSuspended) {
+		return PanicTraceFrameSnapshot{}, false
+	}
+	descriptor := (*FrameDescriptorV1)(header.Descriptor)
+	if descriptor.Version != 1 ||
+		descriptor.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
 		len(descriptor.Function) == 0 {
 		return PanicTraceFrameSnapshot{}, false
 	}
@@ -1127,6 +1259,50 @@ func ActiveTraceFrame(g *G) (PanicTraceFrameSnapshot, bool) {
 		Line:     header.Line,
 		Hidden:   descriptor.Flags&FrameDescriptorTraceHiddenV1 != 0,
 	}, true
+}
+
+func activeTraceOwner(g *G) bool {
+	return ValidG(g) && resumeGateTaken(g) && g.state == GRunning &&
+		g.active != nil && g.pending == (pendingTransition{}) && g.destroyTarget == nil &&
+		!g.destroyRoot && g.spawnChild == nil
+}
+
+// ActiveTraceFrames snapshots the current physical stackless ancestry from
+// the executing leaf toward the command root. Every private parent pointer is
+// checked against the independently spilled compiler handle before its
+// descriptor is exposed. The operation is allocation-free and fail-closed:
+// callers must discard the destination when the returned boolean is false.
+//
+// A foreign worker deliberately owns neither G nor this ancestry. Its result
+// hook may call ActiveTraceFrames after the exact completion returns to the
+// owning executor, joining bounded native fault identities to Go frames without
+// reverse-looking-up function addresses or maintaining a shadow stack.
+func ActiveTraceFrames(g *G, snapshots []PanicTraceFrameSnapshot) (int, bool) {
+	if !activeTraceOwner(g) || len(snapshots) == 0 {
+		return 0, false
+	}
+	child := g.active
+	n := 0
+	for frame := child; frame != nil; frame = frame.parent {
+		if n == len(snapshots) {
+			return 0, false
+		}
+		snapshot, ok := activeTraceFrameSnapshot(g, frame, frame == child)
+		if !ok {
+			return 0, false
+		}
+		parent := frame.parent
+		if parent == nil {
+			if frame != g.root || frame.header.Parent != nil {
+				return 0, false
+			}
+		} else if frame.header.Parent != parent.handle {
+			return 0, false
+		}
+		snapshots[n] = snapshot
+		n++
+	}
+	return n, true
 }
 
 func emptyPanicTrace(g *G) bool {

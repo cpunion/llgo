@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coroalloc"
 )
 
 // coroPanicNilErrorV1 and its empty-interface header are package globals so a
@@ -81,6 +82,40 @@ func __llgo_coro_panic_trace_replace_v1(g, handle unsafe.Pointer) {
 		coroRuntimeAbort("invalid coroutine panic trace replacement")
 	}
 	coroReleaseDiscardedPanicTraceV1(task)
+}
+
+// __llgo_coro_panic_trace_append_v1 retains one logical synchronous outcome
+// frame after a panic has already selected the cold path. New-panic mode may
+// detach an older cleanup trace; propagation mode requires the exact child
+// payload already retained on the same physical carrier. Normal synchronous
+// calls never enter this allocator or mutate task trace state.
+//
+//export __llgo_coro_panic_trace_append_v1
+func __llgo_coro_panic_trace_append_v1(
+	g, descriptor, typeWord, dataWord unsafe.Pointer,
+	line, mode uint32,
+) {
+	typeWord, dataWord = coroNormalizePanicPayloadV1(typeWord, dataWord)
+	task := (*coro.G)(g)
+	traceMode := coro.LogicalPanicTraceMode(mode)
+	if typeWord == nil || !coro.PrepareLogicalPanicTrace(task, traceMode, typeWord, dataWord) {
+		coroRuntimeAbort("invalid logical coroutine panic trace preparation")
+	}
+	coroReleaseDiscardedPanicTraceV1(task)
+	total := coro.LogicalPanicTraceFrameAllocationSize()
+	raw := coroalloc.AllocFrame(total)
+	if raw == nil {
+		coroRuntimeAbort("logical coroutine panic trace allocation failed")
+	}
+	if !coro.RetainLogicalPanicTraceFrame(
+		task, raw, total, descriptor, line, traceMode, typeWord, dataWord,
+	) {
+		coro.Zero(raw, total)
+		if !coroalloc.FreeFrame(raw, total) {
+			coroRuntimeAbort("logical coroutine panic trace rollback failed")
+		}
+		coroRuntimeAbort("invalid logical coroutine panic trace append")
+	}
 }
 
 // __llgo_coro_await_prepare_inline_v4 fuses the compiler-private prepare and

@@ -262,11 +262,11 @@ func StoreSignalFaultPCs(pcs []uintptr) {
 }
 
 // StoreCoroWorkerFaultPCs joins the two bounded native identities returned by
-// the C worker with the resumed coroutine's exact active frame and the current
-// G's compiler-maintained logical callers. The worker never receives this
-// stack or a G pointer: reconstruction happens only after the exact operation
-// resumes on its owning executor. Stored PCs follow Callers' return-PC
-// convention so symbolization uses pc-1 at the fault site and at the
+// the C worker with the resumed coroutine's exact physical stackless ancestry
+// and the current G's compiler-maintained logical callers. The worker never
+// receives this stack or a G pointer: reconstruction happens only after the
+// exact completion returns to its owning executor. Stored PCs follow Callers'
+// return-PC convention so symbolization uses pc-1 at the fault site and at the
 // compiler-known source C entry.
 func StoreCoroWorkerFaultPCs(task *coro.G, faultPC, targetPC uintptr) bool {
 	var pcs [64]uintptr
@@ -288,45 +288,78 @@ func StoreCoroWorkerFaultPCs(task *coro.G, faultPC, targetPC uintptr) bool {
 		return false
 	}
 	native := n
-	active, activeOK := coro.ActiveTraceFrame(task)
+	var active [64]coro.PanicTraceFrameSnapshot
+	activeCount, activeOK := coro.ActiveTraceFrames(task, active[:len(pcs)-n])
 	// A worker result reaches this function only in the exact compiler resume
-	// hook window. Missing task/frame metadata is an ABI violation, not a reason
-	// to publish a silently truncated traceback.
-	if !activeOK {
+	// hook window. Missing or truncated task/frame metadata is an ABI violation,
+	// not a reason to publish a silently truncated traceback.
+	if !activeOK || activeCount == 0 {
 		return false
 	}
-	if !active.Hidden && n < len(pcs) {
-		store := callerLocationStoreForGoroutine()
+	// Worker completion is reduced by the executor outside llvm.coro.resume,
+	// so ambient getg/GLS still belongs to the physical owner. Install the
+	// explicit task sidecar for this bounded diagnostic transaction. The same-M
+	// foreign path may already own it; coroEnterRuntimeContext returns a checked
+	// borrowed activation in that case.
+	activation, contextOK := coroEnterRuntimeContext(task)
+	if !contextOK {
+		return false
+	}
+	store := callerLocationStoreForGoroutine()
+	for _, snapshot := range active[:activeCount] {
+		if snapshot.Hidden {
+			continue
+		}
+		if n == len(pcs) {
+			_ = coroLeaveRuntimeContext(task, activation)
+			return false
+		}
 		frame := store.captureFrame(CallerFrame{
-			Function: active.Function,
-			File:     active.File,
-			Line:     int(active.Line),
+			Function: snapshot.Function,
+			File:     snapshot.File,
+			Line:     int(snapshot.Line),
 		}, callersPCValue)
 		pcs[n] = frame.PC
 		n++
 	}
-	// Skip the synthetic runtime.Callers frame; the remaining entries are the
-	// logical Go callers of the exact active frame captured above.
+	// Skip the synthetic runtime.Callers frame; the remaining entries are any
+	// demand-driven logical callers not represented by physical coroutine
+	// ancestry. Exact location identities keep this cold-path union independent
+	// of native unwinding and target ABI details.
 	logical := n
 	n += Callers(1, pcs[n:])
-	// A future compiler may keep the active leaf in its demand-driven shadow
-	// stack. Prefer the exact scheduler descriptor and remove only an identical
-	// first logical location, keeping this bridge compatible with that change.
-	if !active.Hidden && n > logical {
-		if first, ok := FrameForPC(pcs[logical]); ok &&
-			first.Function == active.Function && first.File == active.File &&
-			first.Line == int(active.Line) {
-			copy(pcs[logical:n-1], pcs[logical+1:n])
-			n--
+	var matched [64]bool
+	write := logical
+	for read := logical; read < n; read++ {
+		candidate, candidateOK := FrameForPC(pcs[read])
+		duplicate := false
+		if candidateOK {
+			for index, snapshot := range active[:activeCount] {
+				if matched[index] || snapshot.Hidden ||
+					candidate.Function != snapshot.Function ||
+					candidate.File != snapshot.File ||
+					candidate.Line != int(snapshot.Line) {
+					continue
+				}
+				matched[index] = true
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			pcs[write] = pcs[read]
+			write++
 		}
 	}
+	n = write
 	StoreFaultPCs(pcs[:n])
-	store := loadPanicPCStore(getg())
-	if store == nil {
-		return false
+	panicStore := loadPanicPCStore(getg())
+	stored := panicStore != nil
+	if stored {
+		panicStore.native = int32(native)
 	}
-	store.native = int32(native)
-	return true
+	left := coroLeaveRuntimeContext(task, activation)
+	return stored && left
 }
 
 func storePanicPCs(pcs []uintptr, armed int32) {

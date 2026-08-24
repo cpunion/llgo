@@ -90,8 +90,31 @@ type outcomePlainBodyContext struct {
 	task             llssa.Expr
 	resultSlot       llssa.Expr
 	completion       llssa.Expr
+	traceDescriptor  llssa.Expr
+	panicTraceAppend llssa.Expr
 	outcomeScratch   llssa.Expr
 	captureSnapshots coroCaptureSnapshotValues
+}
+
+func (body *outcomePlainBodyContext) appendPanicTrace(
+	b llssa.Builder,
+	typeWord, dataWord llssa.Expr,
+	line uint32,
+	mode uint64,
+) {
+	if body == nil || b == nil || body.task.IsNil() || body.traceDescriptor.IsNil() ||
+		body.panicTraceAppend.IsNil() || typeWord.IsNil() || dataWord.IsNil() {
+		panic("outcome-plain panic trace append requires an active logical frame")
+	}
+	b.CoroAtomicLogicalPanicTraceAppend(
+		body.panicTraceAppend,
+		body.task,
+		body.traceDescriptor,
+		b.Convert(b.Prog.VoidPtr(), typeWord),
+		b.Convert(b.Prog.VoidPtr(), dataWord),
+		b.Prog.IntVal(uint64(line), b.Prog.Uint32()),
+		b.Prog.IntVal(mode, b.Prog.Uint32()),
+	)
 }
 
 func (body *outcomePlainBodyContext) publish(
@@ -284,11 +307,22 @@ func (p *context) compileOutcomePlainPhysicalBody(
 
 	b.SetBlock(p.fn.Block(0))
 	completionType := outcomePlainCompletionType(p.prog)
+	entry := p.mustOutcomePlainFunctionSymbol(fn)
+	traceSourceSig, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(fn)
+	if err != nil {
+		panic(fmt.Errorf("derive outcome-plain trace descriptor for %q: %w", entry.plan.ID, err))
+	}
+	traceABI := newCoroPhysicalABI(p, entry, traceSourceSig)
+	traceDescriptor := p.materializeCoroFrameDescriptor(traceABI)
 	body := &outcomePlainBodyContext{
-		abi:        abi,
-		task:       p.fn.PhysicalParam(0),
-		resultSlot: p.fn.PhysicalParam(1),
-		completion: b.Convert(p.prog.Pointer(completionType), p.fn.PhysicalParam(2)),
+		abi:             abi,
+		task:            p.fn.PhysicalParam(0),
+		resultSlot:      p.fn.PhysicalParam(1),
+		completion:      b.Convert(p.prog.Pointer(completionType), p.fn.PhysicalParam(2)),
+		traceDescriptor: b.Convert(p.prog.VoidPtr(), traceDescriptor),
+		panicTraceAppend: p.pkg.NewFunc(
+			traceABI.panicTraceAppendHook, coroPanicTraceAppendSignature(), llssa.InC,
+		).Expr,
 	}
 	body.captureSnapshots = p.materializeCoroCaptureSnapshots(b, physicalPlan, 3)
 	bodyCapability := newOutcomePlainBodyCapability(body)
@@ -352,6 +386,9 @@ func (p *context) compileOutcomePlainPanicPair(b llssa.Builder, typeWord, dataWo
 	if body == nil || b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {
 		panic("outcome-plain panic escaped its exact physical body")
 	}
+	body.appendPanicTrace(
+		b, typeWord, dataWord, p.coroCurrentSourceLine(), coroLogicalPanicTraceNew,
+	)
 	body.publish(b, coroAwaitCompletionPanic, typeWord, dataWord)
 }
 

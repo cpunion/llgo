@@ -140,6 +140,7 @@ const (
 	coroRunDecisionTakeZeroHookV1              = "__llgo_coro_run_decision_take_zero_v1"
 	coroPanicPrepareHookV1                     = "__llgo_coro_panic_prepare_v1"
 	coroPanicTraceReplaceHookV1                = "__llgo_coro_panic_trace_replace_v1"
+	coroPanicTraceAppendHookV1                 = "__llgo_coro_panic_trace_append_v1"
 	coroRecoverTakeHookV1                      = "__llgo_coro_recover_take_v1"
 	coroSpawnBeginHookV1                       = "__llgo_coro_spawn_begin_v1"
 	coroSpawnCommitHookV1                      = "__llgo_coro_spawn_commit_v1"
@@ -172,6 +173,11 @@ const (
 	coroSuspendYield
 	coroSuspendPark
 	coroSuspendPanic
+)
+
+const (
+	coroLogicalPanicTraceNew uint64 = iota
+	coroLogicalPanicTracePropagate
 )
 
 const (
@@ -218,6 +224,7 @@ type coroPhysicalABI struct {
 	runDecisionTakeZeroHook       string
 	panicPrepareHook              string
 	panicTraceReplaceHook         string
+	panicTraceAppendHook          string
 	recoverTakeHook               string
 	completePrepareHook           string
 	physicalSig                   *types.Signature
@@ -319,6 +326,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	runDecisionTakeZeroHook := coroRunDecisionTakeZeroHookV1
 	panicPrepareHook := coroPanicPrepareHookV1
 	panicTraceReplaceHook := coroPanicTraceReplaceHookV1
+	panicTraceAppendHook := coroPanicTraceAppendHookV1
 	recoverTakeHook := coroRecoverTakeHookV1
 	faultPrepareHook := coroFaultPrepareHookV1
 	faultPayloadHook := coroFaultPayloadHookV1
@@ -385,7 +393,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare-inline=%s\x00await-inline-finish=%s\x00await-inline-destroy-consume=%s\x00await-consume-slow=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00panic-trace-append=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare-inline=%s\x00await-inline-finish=%s\x00await-inline-destroy-consume=%s\x00await-consume-slow=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		descriptorFlags,
@@ -396,6 +404,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		panicABI,
 		panicPrepareHook,
 		panicTraceReplaceHook,
+		panicTraceAppendHook,
 		recoverTakeHook,
 		faultPrepareHook,
 		faultPayloadHook,
@@ -448,6 +457,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		runDecisionTakeZeroHook:       runDecisionTakeZeroHook,
 		panicPrepareHook:              panicPrepareHook,
 		panicTraceReplaceHook:         panicTraceReplaceHook,
+		panicTraceAppendHook:          panicTraceAppendHook,
 		recoverTakeHook:               recoverTakeHook,
 		completePrepareHook:           completePrepareHook,
 		physicalSig:                   physicalSig,
@@ -480,14 +490,9 @@ func coroBorrowedFrameMetadataWordsV2(prog llssa.Program) int64 {
 	return int64(12 + 4/pointerSize)
 }
 
-func (p *context) beginCoroBody(
-	b llssa.Builder,
-	abi coroPhysicalABI,
-	terminalResultAllocations []*ssa.Alloc,
-) *coroBodyContext {
-	prog := p.prog
-	resultType := prog.Type(abi.resultSlotType, llssa.InGo)
-	descriptor := p.pkg.NewCoroFrameDescriptor(abi.descriptorName, llssa.CoroFrameDescriptorOptions{
+func (p *context) materializeCoroFrameDescriptor(abi coroPhysicalABI) llssa.Expr {
+	resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
+	return p.pkg.NewCoroFrameDescriptor(abi.descriptorName, llssa.CoroFrameDescriptorOptions{
 		Version:  abi.version,
 		ABIHash:  abi.hash,
 		Flags:    abi.descriptorFlags,
@@ -495,6 +500,15 @@ func (p *context) beginCoroBody(
 		Function: abi.traceFunction,
 		File:     abi.traceFile,
 	})
+}
+
+func (p *context) beginCoroBody(
+	b llssa.Builder,
+	abi coroPhysicalABI,
+	terminalResultAllocations []*ssa.Alloc,
+) *coroBodyContext {
+	prog := p.prog
+	descriptor := p.materializeCoroFrameDescriptor(abi)
 	descriptorPtr := b.Convert(prog.VoidPtr(), descriptor)
 	task := p.fn.PhysicalParam(0)
 	resultSlot := p.fn.PhysicalParam(1)
@@ -826,6 +840,19 @@ func coroPanicTraceReplaceSignature() *types.Signature {
 	params := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "g", pointer),
 		types.NewParam(token.NoPos, nil, "handle", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroPanicTraceAppendSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "descriptor", pointer),
+		types.NewParam(token.NoPos, nil, "typeWord", pointer),
+		types.NewParam(token.NoPos, nil, "dataWord", pointer),
+		types.NewParam(token.NoPos, nil, "line", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "mode", types.Typ[types.Uint32]),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }

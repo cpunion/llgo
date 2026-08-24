@@ -612,6 +612,7 @@ func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.P
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_panic_trace_replace_v1(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_panic_trace_append_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32) {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_prepare_v1() {}
@@ -738,6 +739,7 @@ func atomicExchange(*uint32, uint32) uint32
 		"__llgo_coro_fault_prepare_v2",
 		"__llgo_coro_panic_prepare_v1",
 		coroPanicTraceReplaceSymbolV1,
+		coroPanicTraceAppendSymbolV1,
 		"__llgo_coro_recover_take_v1",
 		"__llgo_coro_fault_payload_v1",
 		"__llgo_coro_fault_payload_v2",
@@ -1125,18 +1127,19 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 	panicHook := ssaPkg.Func("__llgo_coro_panic_prepare_v1")
 	panicTraceReplaceHook := ssaPkg.Func(coroPanicTraceReplaceSymbolV1)
+	panicTraceAppendHook := ssaPkg.Func(coroPanicTraceAppendSymbolV1)
 	recoverHook := ssaPkg.Func("__llgo_coro_recover_take_v1")
 	payloadHook := ssaPkg.Func("__llgo_coro_fault_payload_v1")
 	faultHook := ssaPkg.Func("__llgo_coro_fault_prepare_v1")
 	payloadArgsHook := ssaPkg.Func("__llgo_coro_fault_payload_v2")
 	faultArgsHook := ssaPkg.Func("__llgo_coro_fault_prepare_v2")
-	if panicHook == nil || panicTraceReplaceHook == nil || recoverHook == nil ||
+	if panicHook == nil || panicTraceReplaceHook == nil || panicTraceAppendHook == nil || recoverHook == nil ||
 		payloadHook == nil || faultHook == nil ||
 		payloadArgsHook == nil || faultArgsHook == nil {
 		t.Fatal("explicit-status panic hooks are absent from the runtime fixture")
 	}
 	for _, hook := range []*ssa.Function{
-		panicHook, panicTraceReplaceHook, recoverHook,
+		panicHook, panicTraceReplaceHook, panicTraceAppendHook, recoverHook,
 		payloadHook, faultHook, payloadArgsHook, faultArgsHook,
 	} {
 		if _, ok := requiredPlain[hook]; !ok {
@@ -1153,6 +1156,17 @@ func atomicExchange(*uint32, uint32) uint32
 	if invalidPanicTraceReplaceErr == nil ||
 		!strings.Contains(invalidPanicTraceReplaceErr.Error(), "panic trace replacement ABI") {
 		t.Fatalf("invalid panic trace replacement ABI error = %v", invalidPanicTraceReplaceErr)
+	}
+	originalPanicTraceAppendSignature := panicTraceAppendHook.Signature
+	panicTraceAppendHook.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidPanicTraceAppendErr := requiredCoroProgramRuntimePlan(ctx)
+	panicTraceAppendHook.Signature = originalPanicTraceAppendSignature
+	if invalidPanicTraceAppendErr == nil ||
+		!strings.Contains(invalidPanicTraceAppendErr.Error(), "panic trace append ABI") {
+		t.Fatalf("invalid panic trace append ABI error = %v", invalidPanicTraceAppendErr)
 	}
 	originalPayloadSignature := payloadHook.Signature
 	payloadHook.Signature = types.NewSignatureType(nil, nil, nil,
@@ -1493,6 +1507,7 @@ func __llgo_coro_fault_prepare_v1() {}
 func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_panic_trace_replace_v1(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_panic_trace_append_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32) {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
@@ -2180,6 +2195,7 @@ func __llgo_coro_fault_prepare_v1() {}
 func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_panic_trace_replace_v1(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_panic_trace_append_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32) {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}

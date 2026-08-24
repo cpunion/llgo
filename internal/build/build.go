@@ -5554,6 +5554,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 	names = append(names,
 		"__llgo_coro_panic_prepare_v1",
 		coroPanicTraceReplaceSymbolV1,
+		coroPanicTraceAppendSymbolV1,
 		"__llgo_coro_recover_take_v1",
 		"__llgo_coro_fault_payload_v1",
 		"__llgo_coro_fault_payload_v2",
@@ -5815,6 +5816,24 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf(
 					"coroutine panic trace replacement ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) signature",
+					name,
+				)
+			}
+		}
+		if name == coroPanicTraceAppendSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 6 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(3).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(4).Type(), types.Typ[types.Uint32]) ||
+				!types.Identical(sig.Params().At(5).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine panic trace append ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32) signature",
 					name,
 				)
 			}
