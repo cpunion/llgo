@@ -205,6 +205,25 @@ func (analyzer *ssaBorrowedAllocationAnalyzer) proveAddressValue(
 			return false
 		}
 		for _, reference := range *refs {
+			// Newer x/tools versions lower a composite assignment such as
+			//
+			//     *out = transaction{self: out}
+			//
+			// through one non-escaping local allocation: store the self pointer
+			// into the local, load the complete aggregate, then store that value
+			// into out. Model that exact local memory roundtrip instead of making
+			// the proof depend on x/tools' aggregate spelling. Once admitted, the
+			// scratch allocation and every address/value derived from it remain in
+			// the ordinary taint graph below, so a return, global store, dynamic
+			// call, go/defer edge, or any other escape still fails closed.
+			if store, ok := reference.(*ssa.Store); ok && store.Val == value &&
+				ssaBorrowTypeMayCarryRoot(value.Type(), root.Type()) {
+				if scratch, ok := ssaBorrowLocalScratchAllocation(function, store.Addr); ok && !tainted[scratch] {
+					tainted[scratch] = true
+					interior[scratch] = true
+					queue = append(queue, scratch)
+				}
+			}
 			derived, ok := ssaBorrowDerivedValue(reference, value, root.Type())
 			if !ok || derived == nil || tainted[derived] {
 				continue
@@ -283,6 +302,42 @@ func (analyzer *ssaBorrowedAllocationAnalyzer) proveAddressValue(
 		}
 	}
 	return true
+}
+
+// ssaBorrowLocalScratchAllocation recognizes only an address rooted in one
+// exact non-heap local allocation owned by the function currently being
+// proved. It deliberately excludes heap cells, parameters, globals, loads,
+// Phi nodes, slices, and calls. Pointer-preserving casts are accepted because
+// the complete cast chain is still traversed and audited as part of the taint
+// graph after the root is admitted.
+func ssaBorrowLocalScratchAllocation(function *ssa.Function, address ssa.Value) (*ssa.Alloc, bool) {
+	seen := make(map[ssa.Value]bool)
+	for address != nil && !seen[address] {
+		seen[address] = true
+		switch current := address.(type) {
+		case *ssa.Alloc:
+			return current, current.Parent() == function && !current.Heap && current.Referrers() != nil
+		case *ssa.FieldAddr:
+			address = current.X
+		case *ssa.IndexAddr:
+			address = current.X
+		case *ssa.ChangeType:
+			if !ssaBorrowPointerIdentityType(current.Type()) ||
+				!ssaBorrowPointerIdentityType(current.X.Type()) {
+				return nil, false
+			}
+			address = current.X
+		case *ssa.Convert:
+			if !ssaBorrowPointerIdentityType(current.Type()) ||
+				!ssaBorrowPointerIdentityType(current.X.Type()) {
+				return nil, false
+			}
+			address = current.X
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 func ssaBorrowDerivedInteriorAddress(reference ssa.Instruction, source ssa.Value) bool {

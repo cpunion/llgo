@@ -73,6 +73,11 @@ func borrow(value *transaction) { _ = value.phase }
 func escapeGo() { var value transaction; go borrow(&value) }
 func escapeDefer() { var value transaction; defer borrow(&value) }
 func escapeDynamic(fn func(*transaction)) { var value transaction; fn(&value) }
+func escapeStaged() {
+	var value transaction
+	staged := transaction{self: &value}
+	escaped = staged.self
+}
 
 func recursiveSafe(value *transaction, depth int) {
 	if depth == 0 { return }
@@ -158,7 +163,7 @@ func escapeRecursive() { var value transaction; recurseA(&value, false) }
 	}
 
 	for _, name := range []string{
-		"escapeGlobal", "escapeReturn", "escapeGo", "escapeDefer", "escapeDynamic", "escapeRecursive",
+		"escapeGlobal", "escapeReturn", "escapeGo", "escapeDefer", "escapeDynamic", "escapeStaged", "escapeRecursive",
 	} {
 		allocation := exactHeapAllocation(t, packageFunction(t, pkg, name))
 		if proof, ok := ProveSSABorrowedAllocation(allocation); ok {
