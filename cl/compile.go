@@ -1207,7 +1207,9 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 		return ret
 	}
 	if block.Index == 0 {
-		p.prepareImplicitDeferResults(b, block.Parent())
+		if !p.hasCoroPhysicalBody() {
+			p.prepareImplicitDeferResults(b, block.Parent())
+		}
 		p.emitFunctionPreambleWithCoroPlan(b, block.Parent())
 	}
 	if block.Index == 0 && p.options.Trace && !strings.HasPrefix(fn.Name(), "github.com/xgo-dev/llgo/runtime/internal/runtime.Print") {
@@ -3176,12 +3178,17 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		jmpb := p.jumpTo(v)
 		b.Jump(jmpb)
 	case *ssa.Return:
+		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		runDefers := p.returnNeedsImplicitRunDefers(v)
 		if runDefers {
 			p.spillImplicitDeferResults(b, v)
 			p.recordPanicLocation(b, v.Pos())
 			p.emitPCLineLabel(b, p.deferRunPos(v.Pos()))
-			b.RunDefers()
+			if outcomePlanned && outcome.returnCleanup {
+				p.compileCoroImplicitRunDefers(b)
+			} else {
+				b.RunDefers()
+			}
 		}
 		var results []llssa.Expr
 		if n := len(v.Results); n > 0 {
@@ -3205,10 +3212,12 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.popCallerLocationFrame(b)
 		p.leaveExportedLocalContext(b)
-		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			if outcome.outcome != coroPhysicalOutcomeReturn {
 				panic(fmt.Sprintf("return selected incompatible frozen physical outcome recipe %s", outcome.outcome))
+			}
+			if outcome.returnCleanup != runDefers {
+				panic("return implicit cleanup does not match its frozen physical recipe")
 			}
 			p.observeCoroPhysicalOutcome(v, coroPhysicalOutcomeReturn)
 			p.compileCoroReturn(b, results)

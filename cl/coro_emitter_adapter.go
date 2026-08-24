@@ -329,6 +329,14 @@ func (p *context) compileCoroRunDefers(b llssa.Builder, instruction *ssa.RunDefe
 	body.cleanup.runDefers(b, instruction)
 }
 
+func (p *context) compileCoroImplicitRunDefers(b llssa.Builder) {
+	body := p.coroBody()
+	if body == nil || body.cleanup == nil {
+		panic("coroutine implicit RunDefers escaped its frozen cleanup plan")
+	}
+	body.cleanup.runDefers(b, nil)
+}
+
 func (p *context) compileCoroSyntheticSelectPanic(b llssa.Builder, instruction *ssa.Panic) {
 	body := p.coroBody()
 	if body == nil || instruction == nil {

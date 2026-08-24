@@ -508,6 +508,68 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 	return nil
 }
 
+// finalizeRangeYieldCleanupOwners projects an evaluated range-over-function
+// Defer registration onto the source function that owns its explicit cleanup
+// stack. x/tools places the instruction in a synthetic yield closure, but the
+// owner allocates and drains the records. NeedsCleanupFrame is deliberately a
+// local execution fact, so ordinary call propagation cannot repair that split.
+func (ir *coroProgramIR) finalizeRangeYieldCleanupOwners(u *EmissionUniverse) error {
+	if ir == nil || u == nil {
+		return fmt.Errorf("range-yield cleanup finalization requires one ProgramIR and emission universe")
+	}
+	if ir.callsFrozen {
+		return fmt.Errorf("range-yield cleanup finalization occurred after call SitePlan freeze")
+	}
+	for _, function := range u.functions {
+		if function == nil || function.Synthetic != rangeOverFuncYieldSynthetic {
+			continue
+		}
+		stackOwner := coroExplicitDeferStackOwner(function)
+		if stackOwner == nil || stackOwner == function {
+			return fmt.Errorf("range-yield function %q has no distinct source cleanup owner", function.Name())
+		}
+		var evaluated, observed bool
+		for _, owner := range u.sortedUseOwners(function) {
+			key := emissionFunctionOwnerKey{function: function, owner: owner}
+			semantic, frozen := ir.semanticPlans[key]
+			if !frozen {
+				return fmt.Errorf("range-yield function %q has no frozen semantic owner %q", function.Name(), owner.identity)
+			}
+			ownerEvaluated := false
+			for _, block := range function.Blocks {
+				for _, instruction := range block.Instrs {
+					deferred, ok := instruction.(*ssa.Defer)
+					if !ok || deferred.DeferStack == nil {
+						continue
+					}
+					plan, planned := semantic[instruction]
+					if !planned {
+						return fmt.Errorf("range-yield defer %q has no frozen semantic recipe", deferred.String())
+					}
+					ownerEvaluated = ownerEvaluated || plan.evaluated
+				}
+			}
+			if observed && ownerEvaluated != evaluated {
+				return fmt.Errorf("range-yield function %q has owner-dependent cleanup evaluation", function.Name())
+			}
+			evaluated, observed = ownerEvaluated, true
+		}
+		if !observed || !evaluated {
+			continue
+		}
+		facts, frozen := ir.localBodyFacts[stackOwner]
+		if !frozen {
+			return fmt.Errorf("range-yield cleanup owner %q has no frozen local body facts", stackOwner.Name())
+		}
+		facts.Exec = facts.Exec.Join(coro.NeedsCleanupFrame)
+		facts.OutcomePlainLeaf = false
+		facts.OutcomePlainDAG = false
+		facts.StaticOutcomeLocal = false
+		ir.localBodyFacts[stackOwner] = facts
+	}
+	return nil
+}
+
 func coroSemanticEvaluatedCFGHasCycle(
 	blocks []*ssa.BasicBlock,
 	semantic map[ssa.Instruction]coroSemanticInstructionPlan,

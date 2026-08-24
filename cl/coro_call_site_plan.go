@@ -539,6 +539,9 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 	if err := ir.finalizeOutcomePlainIntrinsicSemantics(u.prog, u.functions, u.sortedUseOwners); err != nil {
 		return fmt.Errorf("finalize outcome-plain intrinsic semantics: %w", err)
 	}
+	if err := ir.finalizeRangeYieldCleanupOwners(u); err != nil {
+		return fmt.Errorf("finalize range-yield cleanup owners: %w", err)
+	}
 	ir.callsFrozen = true
 	// These maps are mutable builder scratch. All production call-site
 	// certificate payloads now live in ProgramIR; retaining a second readable

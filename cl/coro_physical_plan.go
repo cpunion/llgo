@@ -326,6 +326,7 @@ type coroPhysicalInstructionPlan struct {
 	operationControl          CoroControlOperation
 	outcome                   coroPhysicalOutcomeRecipe
 	outcomeFailure            string
+	returnCleanup             bool
 	elideValue                bool
 	reuseValueAddress         bool
 	valueOperand              ssa.Value
@@ -1604,6 +1605,9 @@ func planCoroPhysicalOutcomeInstruction(
 	switch instruction := instruction.(type) {
 	case *ssa.Return:
 		result.outcome = coroPhysicalOutcomeReturn
+		if cleanup != nil {
+			_, result.returnCleanup = cleanup.implicitReturns[instruction]
+		}
 	case *ssa.Defer:
 		if !coroPhysicalCleanupContainsDefer(cleanup, instruction) {
 			result.outcomeFailure = "defer registration is absent from the frozen cleanup plan"

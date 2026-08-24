@@ -69,6 +69,7 @@ type coroStaticCleanupSitePlan struct {
 type coroStaticCleanupPlan struct {
 	sites                     []*coroStaticCleanupSitePlan
 	terminalResultAllocations []*ssa.Alloc
+	implicitReturns           map[*ssa.Return]none
 	dynamic                   bool
 	external                  bool
 	stackOwner                *ssa.Function
@@ -262,9 +263,9 @@ func prepareCoroStaticCleanupPlan(
 		}
 	}
 	byInstruction := make(map[*ssa.Defer]*coroStaticCleanupSitePlan)
+	drainedReturns := make(map[*ssa.Return]none)
 	allSites := make([]*coroStaticCleanupSitePlan, 0)
 	var dynamicTrigger *ssa.Defer
-	runDefers := 0
 	for _, siteFunction := range scanFunctions {
 		siteCaller, planned := whole.FunctionPlan(siteFunction)
 		if !planned {
@@ -438,7 +439,11 @@ func prepareCoroStaticCleanupPlan(
 					if !coroStaticRunDefersReturns(block, instructionIndex) {
 						return nil, fmt.Errorf("RunDefers in block %d is not followed only by named-result reloads and the terminal Return", block.Index)
 					}
-					runDefers++
+					terminal := coroStaticTerminalReturnAfter(block, instructionIndex)
+					if terminal == nil {
+						return nil, fmt.Errorf("RunDefers in block %d lost its validated terminal Return", block.Index)
+					}
+					drainedReturns[terminal] = none{}
 				}
 			}
 		}
@@ -493,8 +498,33 @@ func prepareCoroStaticCleanupPlan(
 	if fn.Recover == nil {
 		return nil, fmt.Errorf("static defer body has no canonical recover block")
 	}
-	if runDefers == 0 && coroStaticCleanupHasReachableNormalReturn(fn) {
-		return nil, fmt.Errorf("static defer body has a reachable normal Return but no RunDefers instruction")
+	implicitReturns := make(map[*ssa.Return]none)
+	reachable := coroPhysicalConstantReachableBlocks(fn)
+	for block := range reachable {
+		if block == nil || block == fn.Recover {
+			continue
+		}
+		for _, instruction := range block.Instrs {
+			returned, ok := instruction.(*ssa.Return)
+			if !ok {
+				continue
+			}
+			if _, drained := drainedReturns[returned]; !drained {
+				implicitReturns[returned] = none{}
+			}
+		}
+	}
+	if len(implicitReturns) != 0 {
+		ownerLocal := false
+		for deferred := range byInstruction {
+			if deferred.Parent() == fn {
+				ownerLocal = true
+				break
+			}
+		}
+		if ownerLocal || len(coroExplicitCleanupFamilySites(fn)) == 0 {
+			return nil, fmt.Errorf("static defer body has a reachable normal Return without a RunDefers instruction")
+		}
 	}
 	if !explicitPanic {
 		return nil, fmt.Errorf("static coroutine defer cleanup requires the explicit-status panic ABI; legacy panic cannot guarantee cleanup")
@@ -522,6 +552,7 @@ func prepareCoroStaticCleanupPlan(
 		return &coroStaticCleanupPlan{
 			sites:                     allSites,
 			terminalResultAllocations: terminalResultAllocations,
+			implicitReturns:           implicitReturns,
 			dynamic:                   true,
 			stackOwner:                fn,
 			dynamicTrigger:            dynamicTrigger,
@@ -533,7 +564,6 @@ func prepareCoroStaticCleanupPlan(
 	// blocks.Infos' Next chain is a topological order outside SCCs.  Defer
 	// sites in SCCs were rejected above, so reversing this list later is the
 	// exact registration order for every path on which two sites both ran.
-	reachable := coroPhysicalConstantReachableBlocks(fn)
 	ordered := make([]*coroStaticCleanupSitePlan, 0, len(byInstruction))
 	for index := 0; index >= 0; index = infos[index].Next {
 		block := fn.Blocks[index]
@@ -556,6 +586,7 @@ func prepareCoroStaticCleanupPlan(
 	return &coroStaticCleanupPlan{
 		sites:                     ordered,
 		terminalResultAllocations: terminalResultAllocations,
+		implicitReturns:           implicitReturns,
 	}, nil
 }
 
@@ -585,6 +616,18 @@ func coroStaticCleanupHasReachableNormalReturn(fn *ssa.Function) bool {
 		}
 	}
 	return false
+}
+
+func coroStaticTerminalReturnAfter(block *ssa.BasicBlock, instructionIndex int) *ssa.Return {
+	if block == nil || instructionIndex < -1 || instructionIndex >= len(block.Instrs) {
+		return nil
+	}
+	for _, instruction := range block.Instrs[instructionIndex+1:] {
+		if returned, ok := instruction.(*ssa.Return); ok {
+			return returned
+		}
+	}
+	return nil
 }
 
 // validateCoroManagedCleanupPlainTargets closes the one unwind hole in

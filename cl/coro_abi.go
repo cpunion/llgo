@@ -1200,6 +1200,11 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	defer finishEmission()
 
 	b.SetBlock(p.fn.Block(0))
+	// Range-over-function defer records are owned by this physical frame even
+	// though their registration instructions live in a synthetic yield child.
+	// Reserve unnamed result spill slots in the ramp so cancellation and every
+	// cleanup continuation are dominated before the initial suspend.
+	p.prepareImplicitDeferResults(b, fn)
 	preparedCleanup := p.beginCoroStaticCleanup(b, cleanupPlan)
 	var cleanup, externalCleanup *coroStaticCleanupState
 	if cleanupPlan != nil && cleanupPlan.external {
