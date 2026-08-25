@@ -46,7 +46,7 @@ func coroHandleResumePhysicalV1(task *coro.G, handle unsafe.Pointer, panicBounda
 	env := (*SigjmpBuf)(c.AllocaSigjmpBuf())
 	*boundary = Defer{}
 	for {
-		landed := Sigsetjmp(env, c.Int(0))
+		landed := c.Sigsetjmp(unsafe.Pointer(env), c.Int(0))
 		if landed == 0 {
 			if !coroPanicBoundaryPush(task, handle, boundary, unsafe.Pointer(env)) {
 				return false

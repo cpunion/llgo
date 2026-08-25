@@ -103,18 +103,41 @@ func TestCoroNativePanicBoundaryIsClosedProgramCapability(t *testing.T) {
 	const source = `package foo
 func Leaf(value uint32) uint32 { return value + 1 }
 `
-	for _, enabled := range []bool{false, true} {
-		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		capabilities coro.ProgramCapabilities
+		frozen       bool
+		want         bool
+	}{
+		{
+			name:         "unfrozen-positive",
+			capabilities: coro.NewProgramCapabilities(false, true),
+			frozen:       false,
+			want:         false,
+		},
+		{
+			name:         "frozen-negative",
+			capabilities: coro.NewProgramCapabilities(false, false),
+			frozen:       true,
+			want:         false,
+		},
+		{
+			name:         "frozen-positive",
+			capabilities: coro.NewProgramCapabilities(false, true),
+			frozen:       true,
+			want:         true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			ssaPkg, _, files := buildGoSSAPkg(t, source)
-			capabilities := coro.NewProgramCapabilities(false, enabled)
 			prog, pkg := compileCoroLeafPhysicalABIPackageWithProgramCapabilities(
-				t, nil, ssaPkg, files, capabilities, true,
+				t, nil, ssaPkg, files, test.capabilities, test.frozen,
 			)
 			defer prog.Dispose()
 			module := pkg.Module()
 			defer module.Dispose()
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
-				t.Fatalf("verify panic-boundary capability=%t: %v\n%s", enabled, err, module.String())
+				t.Fatalf("verify panic-boundary case=%s: %v\n%s", test.name, err, module.String())
 			}
 			ir := module.String()
 			for _, marker := range []string{
@@ -122,8 +145,8 @@ func Leaf(value uint32) uint32 { return value + 1 }
 				coroPanicBoundaryTypeHookV1,
 				coroPanicBoundaryDataReleaseHookV1,
 			} {
-				if got := strings.Contains(ir, marker); got != enabled {
-					t.Fatalf("panic-boundary capability=%t marker %q present=%t:\n%s", enabled, marker, got, ir)
+				if got := strings.Contains(ir, marker); got != test.want {
+					t.Fatalf("panic-boundary case=%s marker %q present=%t, want %t:\n%s", test.name, marker, got, test.want, ir)
 				}
 			}
 		})
@@ -289,7 +312,9 @@ func TestCoroLeafPhysicalABIUsesTargetPointerWidth(t *testing.T) {
 }
 
 func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
-	prog, pkg := compileCoroChildAwaitPhysicalABI(t, nil)
+	prog, pkg := compileCoroChildAwaitPhysicalABIWithProgramCapabilities(
+		t, nil, coro.NewProgramCapabilities(false, true), true,
+	)
 	defer prog.Dispose()
 	module := pkg.Module()
 	defer module.Dispose()
@@ -625,7 +650,12 @@ func Parent(value uint32) uint32 {
 		t.Fatalf("named function retag proof = %v, %v; want exact Child", target, err)
 	}
 
-	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	compilation := &Compilation{
+		CoroPlan:                           plan,
+		EmissionUniverse:                   universe,
+		FinalCoroProgramCapabilities:       coro.NewProgramCapabilities(false, true),
+		FinalCoroProgramCapabilitiesFrozen: true,
+	}
 	enableCoroChildAwaitCompilation(compilation)
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

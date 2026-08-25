@@ -264,7 +264,7 @@ func TestRuntimeCoroResumeBoundaryUsesNativeActivationStorage(t *testing.T) {
 		"boundary := (*Defer)(c.Alloca(unsafe.Sizeof(Defer{})))",
 		"env := (*SigjmpBuf)(c.AllocaSigjmpBuf())",
 		"*boundary = Defer{}",
-		"Sigsetjmp(env, c.Int(0))",
+		"c.Sigsetjmp(unsafe.Pointer(env), c.Int(0))",
 	} {
 		if !strings.Contains(boundary, required) {
 			t.Errorf("%s lacks allocation-free activation marker %q", runtimeFaultBoundarySource, required)
@@ -275,6 +275,7 @@ func TestRuntimeCoroResumeBoundaryUsesNativeActivationStorage(t *testing.T) {
 		"var env SigjmpBuf",
 		"AllocZ(",
 		"AllocU(",
+		"landed := Sigsetjmp(",
 	} {
 		if strings.Contains(boundary, forbidden) {
 			t.Errorf("%s retains heap-backed activation storage %q", runtimeFaultBoundarySource, forbidden)

@@ -42,6 +42,11 @@ func (c *Compilation) coroFunctionProgramCapabilities() (
 			c.coroCapabilitiesErr = err
 			return
 		}
+		plan := c.immutablePlan()
+		if plan == nil {
+			c.coroCapabilitiesErr = fmt.Errorf("coroutine function capabilities require an immutable SSA plan")
+			return
+		}
 		universe := c.immutableEmissionUniverse()
 		if universe == nil || universe.coroProgramIR == nil {
 			c.coroCapabilitiesErr = fmt.Errorf("coroutine function capabilities require a prepared ProgramIR")
@@ -53,7 +58,7 @@ func (c *Compilation) coroFunctionProgramCapabilities() (
 			return
 		}
 		c.coroCapabilitiesByFunc, c.coroCapabilitiesErr = deriveCoroFunctionProgramCapabilities(
-			c.CoroPlan, worker, c.CoroLibraryEffects,
+			plan, worker, c.CoroLibraryEffects,
 		)
 	})
 	return c.coroCapabilitiesByFunc, c.coroCapabilitiesErr

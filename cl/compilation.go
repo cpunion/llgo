@@ -52,8 +52,9 @@ type Compilation struct {
 	CoroTargetCapabilities coro.TargetCapabilities
 	// FinalCoroProgramCapabilities is frozen after closed-world physical
 	// preflight and before any package codegen. The accompanying bit separates
-	// a known empty capability set from isolated frontend tests which do not
-	// own a complete final program and therefore retain conservative lowering.
+	// a known empty capability set from isolated frontend compilations which do
+	// not own a complete final program. Optional closed-world lowering is only
+	// emitted for a frozen positive capability.
 	FinalCoroProgramCapabilities       coro.ProgramCapabilities
 	FinalCoroProgramCapabilitiesFrozen bool
 	// CoroPlanDigest and the ABI identities are populated by the build driver
@@ -153,8 +154,11 @@ func (c *Compilation) CoroHostOperationSupported() bool {
 }
 
 func (c *Compilation) coroPanicBoundaryEmissionEnabled() bool {
-	if c == nil || !c.FinalCoroProgramCapabilitiesFrozen {
+	if c == nil {
 		return true
+	}
+	if !c.FinalCoroProgramCapabilitiesFrozen {
+		return false
 	}
 	if !c.FinalCoroProgramCapabilities.Valid() {
 		panic("invalid final coroutine program capability set")

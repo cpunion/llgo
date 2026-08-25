@@ -1211,7 +1211,7 @@ func (p *context) emitCoroStaticInlineAwait(
 	b.SetBlockEx(started, llssa.AtEnd, false)
 	b.If(alreadyRan, inspect, resume)
 	b.SetBlockEx(resume, llssa.AtEnd, false)
-	p.emitCoroInlineChildResume(b, child)
+	p.emitCoroInlineChildResume(body, b, child)
 	b.Jump(inspect)
 	b.SetBlockEx(inspect, llssa.AtEnd, false)
 	done := b.CoroDone(child)
@@ -1247,8 +1247,7 @@ func (p *context) emitCoroStaticInlineAwait(
 // own generated resume gate instead of abandoning the surrounding parent
 // resume transaction. No boundary or setjmp symbol is emitted on non-native
 // targets.
-func (p *context) emitCoroInlineChildResume(b llssa.Builder, child llssa.Expr) {
-	body := p.coroBody()
+func (p *context) emitCoroInlineChildResume(body *coroBodyContext, b llssa.Builder, child llssa.Expr) {
 	if body == nil || b == nil || b.Func != p.fn || child.IsNil() {
 		panic("inline coroutine child resume has an incomplete physical body")
 	}
