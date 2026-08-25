@@ -2454,7 +2454,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					b.AssertNilDeref(x)
 				}
 			}
-			if plannedDeref || p.loadAddressOwnsNilFault(v.X) {
+			if plannedDeref || p.addressProducerOwnsNilFault(v.X) {
 				// The frozen dereference recipe has already emitted the sole
 				// source-language nil edge or recorded its checked producer.
 				// Likewise, checked FieldAddr/IndexAddr producers own their
@@ -2737,7 +2737,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			if vt := p.type_(unop.Type(), llssa.InGo); vt.RawType() != nil {
 				if p.isLargeNonPointerValue(vt) || p.isZeroSizedValue(vt) {
 					if ptr := p.compileValue(b, unop.X); ptr.Type != nil {
-						producerOwnsFault := p.loadAddressOwnsNilFault(unop.X)
+						producerOwnsFault := p.addressProducerOwnsNilFault(unop.X)
 						derefOwnsFault := p.coroPhysicalProducerHasRecipe(
 							unop, coroPhysicalInstructionDeref,
 						)
@@ -3176,7 +3176,12 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 			}
 			return
 		}
-		store := b.Store(ptr, val)
+		var store llssa.Expr
+		if p.addressProducerOwnsNilFault(va) {
+			store = b.StoreKnownNonNil(ptr, val)
+		} else {
+			store = b.Store(ptr, val)
+		}
 		if p.isRecoverSlotAddr(va) {
 			store.SetVolatile(true)
 		}

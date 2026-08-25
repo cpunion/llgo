@@ -588,6 +588,58 @@ func TestCoroPurePointerEqualityNativeAndWasm32(t *testing.T) {
 	}
 }
 
+func TestCoroStaticNilStoreHelperInventoryIsExact(t *testing.T) {
+	prog, _, universe, root, audit, _ := prepareCoroFrameRootAudit(t, `package foo
+type Box struct { Value uint32 }
+func Root() { var box *Box; box.Value = 7 }
+`, "Root", EmissionUniverseOptions{})
+	defer prog.Dispose()
+
+	var store *ssa.Store
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.Store); ok {
+				store = candidate
+			}
+		}
+	}
+	if store == nil {
+		t.Fatal("fixture has no Store")
+	}
+	if helpers := universe.loweredRuntimeHelpers(audit.ctx, store); len(helpers) != 0 {
+		t.Fatalf("static nil Store address %T %q helpers = %v, want none", store.Addr, store.Addr, helpers)
+	}
+	field, ok := store.Addr.(*ssa.FieldAddr)
+	if !ok {
+		t.Fatalf("static nil Store address = %T %q, want FieldAddr", store.Addr, store.Addr)
+	}
+	if helpers := universe.loweredRuntimeHelpers(audit.ctx, field); len(helpers) != 0 {
+		t.Fatalf("static nil FieldAddr helpers = %v, want none", helpers)
+	}
+	audit.allowImplicitNilFault = true
+	owner := universe.ownerOf(root)
+	fieldPlan, err := planCoroPhysicalInstruction(
+		audit, owner, audit.plan, nil, nil, field, true,
+		coroPhysicalLoweringCapabilities{explicitPanic: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fieldPlan.recipe != coroPhysicalInstructionFieldAddr || !fieldPlan.nilGuard {
+		t.Fatalf("static nil FieldAddr physical plan = %+v, want sole checked-address owner", fieldPlan)
+	}
+	storePlan, err := planCoroPhysicalInstruction(
+		audit, owner, audit.plan, nil, nil, store, true,
+		coroPhysicalLoweringCapabilities{explicitPanic: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storePlan.recipe != coroPhysicalInstructionOrdinary || storePlan.nilGuard {
+		t.Fatalf("static nil Store physical plan = %+v, want ordinary consumer of checked address", storePlan)
+	}
+}
+
 func TestCoroImplicitNilFieldAddrProofSeparatesRootFromAccess(t *testing.T) {
 	prog, _, _, root, audit, proof := prepareCoroFrameRootAudit(t, `package foo
 type Box struct { Value uint32 }

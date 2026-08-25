@@ -158,6 +158,26 @@ func iface(v int) any {
 	}
 }
 
+func TestCompileStaticNilFieldStoreHasOneCheck(t *testing.T) {
+	_, module := mustCompileLLPkgFromSrc(t, `
+package foo
+
+type Box struct { Value uint32 }
+
+func store() {
+	var box *Box
+	box.Value = 7
+}
+`)
+	body := mustNamedFunction(t, module, "foo.store").String()
+	if got := strings.Count(body, "AssertNilDeref"); got != 1 {
+		t.Fatalf("static nil field store checks = %d, want one producer-owned check:\n%s", got, body)
+	}
+	if got := strings.Count(body, "store i32 7"); got != 1 {
+		t.Fatalf("static nil field stores = %d, want one normal-edge store:\n%s", got, body)
+	}
+}
+
 func TestFoldConstComparison(t *testing.T) {
 	a := gossa.NewConst(constant.MakeString("a"), types.Typ[types.String])
 	b := gossa.NewConst(constant.MakeString("b"), types.Typ[types.String])

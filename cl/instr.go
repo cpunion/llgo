@@ -2739,17 +2739,21 @@ func isKnownNonNilAddr(v ssa.Value) bool {
 	return false
 }
 
-// loadAddressOwnsNilFault identifies address-producing SSA instructions whose
-// lowering already owns every source-language failure needed before a load.
+// addressProducerOwnsNilFault identifies address-producing SSA instructions
+// whose lowering already owns every source-language failure needed before a
+// later load or store.
 // IndexAddr always owns its bounds and *array nil rules. FieldAddr owns the nil
-// rule only when its exact frozen physical recipe says so; ordinary field
-// lowering must retain Builder.Load's native static-null fallback.
-func (p *context) loadAddressOwnsNilFault(v ssa.Value) bool {
+// rule when its exact frozen physical recipe says so, or when its literal-nil
+// base made Builder.FieldAddr emit the ordinary static-null fallback. Passing
+// that normal-edge fact to the consumer prevents a duplicate fallback without
+// weakening dynamic pointer fault behavior.
+func (p *context) addressProducerOwnsNilFault(v ssa.Value) bool {
 	switch v := v.(type) {
 	case *ssa.IndexAddr:
 		return true
 	case *ssa.FieldAddr:
-		return p.coroPhysicalProducerHasRecipe(v, coroPhysicalInstructionFieldAddr)
+		return ssaNilConst(v.X) ||
+			p.coroPhysicalProducerHasRecipe(v, coroPhysicalInstructionFieldAddr)
 	default:
 		return false
 	}
