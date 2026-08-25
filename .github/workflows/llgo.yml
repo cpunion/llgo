@@ -28,16 +28,16 @@ jobs:
         # 35-minute demo job.
         include:
           - os: ubuntu-latest
-			llvm: 22
-			go: "1.25.0"
+            llvm: 22
+            go: "1.25.0"
             lane: compatibility
           - os: ubuntu-latest
             llvm: 22
             go: "1.26.5"
             lane: primary
           - os: macos-latest
-			llvm: 22
-			go: "1.25.0"
+            llvm: 22
+            go: "1.25.0"
             lane: compatibility
           - os: macos-latest
             llvm: 22
@@ -147,8 +147,8 @@ jobs:
         os:
           - macos-latest
           - ubuntu-latest
-		llvm: [22]
-		go: ["1.25.0", "1.26.5"]
+        llvm: [22]
+        go: ["1.25.0", "1.26.5"]
         # In-command package parallelism lets Ubuntu use two shards while
         # retaining headroom for the serial std build-mode checks.
         shard: ["0", "1"]
@@ -244,8 +244,8 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-			llvm: 22
-			go: "1.25.0"
+            llvm: 22
+            go: "1.25.0"
             lane: compatibility
           - os: ubuntu-latest
             llvm: 22
