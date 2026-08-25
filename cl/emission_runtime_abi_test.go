@@ -274,6 +274,51 @@ func Box(value string) any { return value }
 	}
 }
 
+func TestEmissionUniverseFreezesZeroSizedMapKeyCallbacksAsSynchronousReferences(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
+func memequal0(p, q unsafe.Pointer) bool { return true }
+func memequal8(p, q unsafe.Pointer) bool { return true }
+func memequal64(p, q unsafe.Pointer) bool { return true }
+func memequalptr(p, q unsafe.Pointer) bool { return true }
+func arrayequal(p, q unsafe.Pointer) bool { return true }
+func structequal(p, q unsafe.Pointer) bool { return true }
+func typehash(p unsafe.Pointer, h uintptr) uintptr { return h }
+func AllocU(size uintptr) unsafe.Pointer { return nil }
+func MapDelete(typ, values, key unsafe.Pointer) {}
+`)
+	callerPkg := testProg.addPackage(t, "example.com/emission/zeromapkey", `package zeromapkey
+type Values map[[0]bool]int
+func Delete(values Values) { delete(values, [0]bool{}) }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := callerPkg.ssa.Func("Delete")
+	synchronous, err := universe.CoroSyncDemandReferences(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, len(synchronous))
+	for index, target := range synchronous {
+		names[index] = target.Name()
+	}
+	slices.Sort(names)
+	want := []string{"arrayequal", "memequal0", "memequal64", "memequal8", "structequal", "typehash"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("Delete synchronous ABI references = %v, want exact generated-descriptor callbacks %v", names, want)
+	}
+}
+
 func TestEmissionUniverseCompleteRuntimeABIRequiresRuntimePackage(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	callerPkg := testProg.addPackage(t, "example.com/emission/runtimeabimissing", `package runtimeabimissing

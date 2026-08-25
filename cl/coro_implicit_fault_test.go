@@ -35,6 +35,11 @@ const coroImplicitNilFaultFixture = `package foo
 
 var Sink uint32
 
+var GlobalArrays struct {
+	Padding [4096]byte
+	Values  [4096]byte
+}
+
 type Box struct { Value uint32 }
 type Empty struct{}
 type ZeroField struct {
@@ -54,6 +59,7 @@ func StaticNil() int { return *(*int)(nil) }
 func StaticNilFieldLoad() uint32 { var box *Box; return box.Value }
 func NullableStore(value *uint32) { *value = 7 }
 func StaticNilStore() { *(*uint32)(nil) = 7 }
+func GlobalArrayStore() { GlobalArrays.Values[0] = 1 }
 
 func Guarded(box *Box) uint32 {
 	if box == nil { return 0 }
@@ -231,6 +237,12 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 					!strings.Contains(body, "store i32 7") {
 					t.Fatalf("%s did not use one structured Store guard followed by the normal-edge store:\n%s", name, body)
 				}
+			}
+			globalArrayStore := requireCoroPhysicalFunction(t, module, "foo.GlobalArrayStore").String()
+			if strings.Contains(globalArrayStore, "AssertNilDeref") ||
+				strings.Contains(globalArrayStore, coroFaultPrepareHookV1) ||
+				strings.Count(globalArrayStore, "store i8 1") != 1 {
+				t.Fatalf("global field array store retained a redundant nil edge or lost its sole store:\n%s", globalArrayStore)
 			}
 			zeroField := functions["ZeroFieldEqual"]
 			zeroFieldPlan, ok := plan.FunctionPlan(zeroField)
@@ -710,6 +722,7 @@ func compileCoroImplicitNilFaultFixture(
 		"StaticNilFieldLoad":   ssaPkg.Func("StaticNilFieldLoad"),
 		"NullableStore":        ssaPkg.Func("NullableStore"),
 		"StaticNilStore":       ssaPkg.Func("StaticNilStore"),
+		"GlobalArrayStore":     ssaPkg.Func("GlobalArrayStore"),
 		"ZeroFieldEqual":       ssaPkg.Func("ZeroFieldEqual"),
 		"Guarded":              ssaPkg.Func("Guarded"),
 		"WithCleanup":          ssaPkg.Func("WithCleanup"),

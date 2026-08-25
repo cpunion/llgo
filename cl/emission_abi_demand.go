@@ -26,20 +26,24 @@ import (
 	"golang.org/x/tools/go/types/typeutil"
 )
 
-// walkEmissionABITypeDemand mirrors the recursive abiType references emitted
+// walkEmissionABITypeDemandEx mirrors the recursive abiType references emitted
 // by ssa/abitype.go. visit is called once for every distinct ABI descriptor,
-// after normalize has mapped the type to the form codegen will use.
+// after normalize has mapped the type to the form codegen will use. The
+// target-specific implicitTypes callback is required to mirror descriptors
+// such as method-bearing PtrToThis and map buckets without guessing here.
 //
 // A named type's extended descriptor is populated from its underlying shape;
 // that shape is therefore traversed for children without becoming a separate
 // descriptor. This distinction is important for local named types whose
 // anonymous underlying struct can otherwise acquire unrelated promoted method
 // wrappers.
-func walkEmissionABITypeDemand(root types.Type, normalize func(types.Type) types.Type, visit func(types.Type) error) error {
-	return walkEmissionABITypeDemandEx(root, normalize, nil, visit)
-}
-
-func walkEmissionABITypeDemandEx(root types.Type, normalize func(types.Type) types.Type, physicalMethodSignature func(types.Type) types.Type, visit func(types.Type) error) error {
+func walkEmissionABITypeDemandEx(
+	root types.Type,
+	normalize func(types.Type) types.Type,
+	physicalMethodSignature func(types.Type) types.Type,
+	implicitTypes func(types.Type) []types.Type,
+	visit func(types.Type) error,
+) error {
 	if root == nil {
 		return fmt.Errorf("ABI type demand has a nil root")
 	}
@@ -120,10 +124,8 @@ func walkEmissionABITypeDemandEx(root types.Type, normalize func(types.Type) typ
 			if err := visitPublic(typ.Elem()); err != nil {
 				return err
 			}
-			// The synthesized bucket descriptor has only non-embedded fields.
-			// It cannot add method functions beyond the key and element demands
-			// already visited here, so method materialization need not construct
-			// the target-size-dependent bucket type.
+			// The target-specific implicit-type callback supplies the synthesized
+			// bucket descriptor; keep target-size policy out of this source walk.
 			return nil
 		case *types.Signature:
 			return visitSignatureChildren(typ)
@@ -169,10 +171,11 @@ func walkEmissionABITypeDemandEx(root types.Type, normalize func(types.Type) typ
 		}
 
 		unaliased := types.Unalias(typ)
-		if _, pointer := unaliased.(*types.Pointer); !pointer {
-			// abiCommonFields always emits PtrToThis for non-pointer types.
-			if err := visitABI(types.NewPointer(typ)); err != nil {
-				return err
+		if implicitTypes != nil {
+			for _, implicit := range implicitTypes(typ) {
+				if err := visitABI(implicit); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -259,7 +262,11 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 		// receiver-less declaration signature passed to abiType.
 		return llabi.PublicType(u.prog.PhysicalType(typ, llssa.InGo))
 	}
-	return walkEmissionABITypeDemandEx(root, ctx.patchType, physicalMethodSignature, func(typ types.Type) error {
+	var implicitTypes func(types.Type) []types.Type
+	if u.prog != nil {
+		implicitTypes = u.prog.ABITypeImplicitDescriptorTypes
+	}
+	return walkEmissionABITypeDemandEx(root, ctx.patchType, physicalMethodSignature, implicitTypes, func(typ types.Type) error {
 		var references []*ssa.Function
 		var managedValues []*ssa.Function
 		var synchronous []*ssa.Function

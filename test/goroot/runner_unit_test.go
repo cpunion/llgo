@@ -635,6 +635,34 @@ var _ = missing // ERROR "undefined: missing"
 	}
 }
 
+func TestCheckExpectedErrorsAcceptsOptionalIdentifierQuotes(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "case.go")
+	source := "package p\nvar _ = struct{}{foo: 0} // ERROR \"unknown field foo\"\n"
+	if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := file + ":2: unknown field 'foo' in struct literal of type struct{}"
+	if err := checkExpectedErrors(output, file, "case.go"); err != nil {
+		t.Fatalf("unquoted gc pattern did not accept quoted go/types identifier: %v", err)
+	}
+}
+
+func TestDiagnosticUnknownFieldQuoteAliasIsNarrow(t *testing.T) {
+	if alias, ok := diagnosticUnknownFieldQuoteAlias("unknown field 'foo' in struct literal"); !ok || alias != "unknown field foo in struct literal" {
+		t.Fatalf("unknown-field alias = %q, %t", alias, ok)
+	}
+	for _, message := range []string{
+		"invalid character 'x'",
+		"unknown field 'foo.bar' in struct literal",
+		"unknown field foo in struct literal",
+	} {
+		if alias, ok := diagnosticUnknownFieldQuoteAlias(message); ok || alias != message {
+			t.Fatalf("diagnostic %q acquired broad alias %q, %t", message, alias, ok)
+		}
+	}
+}
+
 func TestCheckExpectedErrorsNormalizesLexicalDiagnostics(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "case.go")
 	src := `package p

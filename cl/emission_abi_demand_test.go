@@ -295,6 +295,8 @@ func Roots(input map[T]int, value any, wider J) (any, I) {
 }
 
 func TestEmissionABIDemandWalksPtrToThisAndMethods(t *testing.T) {
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
 	pkg := types.NewPackage("example.com/emission/walk", "walk")
 	obj := types.NewTypeName(token.NoPos, pkg, "T", nil)
 	named := types.NewNamed(obj, types.NewStruct(nil, nil), nil)
@@ -303,7 +305,7 @@ func TestEmissionABIDemandWalksPtrToThisAndMethods(t *testing.T) {
 	named.AddMethod(types.NewFunc(token.NoPos, pkg, "PointerMethod", signature))
 
 	var visited typeutil.Map
-	if err := walkEmissionABITypeDemand(named, nil, func(typ types.Type) error {
+	if err := walkEmissionABITypeDemandEx(named, nil, nil, prog.ABITypeImplicitDescriptorTypes, func(typ types.Type) error {
 		visited.Set(typ, true)
 		return nil
 	}); err != nil {
@@ -319,19 +321,24 @@ func TestEmissionABIDemandWalksPtrToThisAndMethods(t *testing.T) {
 }
 
 func TestEmissionABIDemandNamedUnderlyingIsNotDescriptorRoot(t *testing.T) {
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
 	field := types.NewField(token.NoPos, nil, "Value", types.Typ[types.Int], false)
 	underlying := types.NewStruct([]*types.Var{field}, nil)
 	named := types.NewNamed(types.NewTypeName(token.NoPos, nil, "N", nil), underlying, nil)
 
 	var visited typeutil.Map
-	if err := walkEmissionABITypeDemand(named, nil, func(typ types.Type) error {
+	if err := walkEmissionABITypeDemandEx(named, nil, nil, prog.ABITypeImplicitDescriptorTypes, func(typ types.Type) error {
 		visited.Set(typ, true)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if visited.At(named) == nil || visited.At(types.NewPointer(named)) == nil {
-		t.Fatal("named root or its PtrToThis descriptor was not visited")
+	if visited.At(named) == nil {
+		t.Fatal("named root descriptor was not visited")
+	}
+	if visited.At(types.NewPointer(named)) != nil {
+		t.Fatal("methodless named type acquired a redundant PtrToThis descriptor")
 	}
 	if visited.At(underlying) != nil || visited.At(types.NewPointer(underlying)) != nil {
 		t.Fatalf("named underlying container became an independent descriptor: %v", underlying)

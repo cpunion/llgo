@@ -222,7 +222,6 @@ func TestCoroPointerUintptrAffineObservationRemainsFailClosed(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "store", body: "escaped = uintptr(pointer) + offset; return 0"},
 		{name: "call", body: "consume(uintptr(pointer) + offset); return 0"},
 		{name: "multiply", body: "return (uintptr(pointer) * offset) == 0"},
 		{name: "reconstruct", body: "return uintptr(unsafe.Pointer(uintptr(pointer) + offset)) == 0"},

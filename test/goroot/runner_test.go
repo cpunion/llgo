@@ -1759,11 +1759,14 @@ func parseCompilerDiagnostic(line string) (compilerDiagnostic, bool) {
 	}, true
 }
 
-// matchesExpectedDiagnostic accepts the equivalent wording used by the Go
-// scanner for unterminated literals. GOROOT's errorcheck patterns describe gc
-// diagnostics, while llgo's source frontend is go/parser and go/scanner.
+// matchesExpectedDiagnostic accepts equivalent frontend spellings used by
+// go/types, go/parser, and go/scanner. GOROOT's errorcheck patterns describe
+// gc diagnostics and are not consistent about quoting field identifiers.
 func matchesExpectedDiagnostic(expected *regexp.Regexp, message string) bool {
 	if expected.MatchString(message) {
+		return true
+	}
+	if alias, ok := diagnosticUnknownFieldQuoteAlias(message); ok && expected.MatchString(alias) {
 		return true
 	}
 	var aliases []string
@@ -1781,6 +1784,31 @@ func matchesExpectedDiagnostic(expected *regexp.Regexp, message string) bool {
 		}
 	}
 	return false
+}
+
+// diagnosticUnknownFieldQuoteAlias covers the one known gc/go-types wording
+// difference without generally dequoting rune literals or arbitrary diagnostic
+// text. Exact matching is attempted before this fallback.
+func diagnosticUnknownFieldQuoteAlias(message string) (string, bool) {
+	const prefix = "unknown field "
+	start := strings.Index(message, prefix)
+	if start < 0 {
+		return message, false
+	}
+	start += len(prefix)
+	if start >= len(message) || message[start] != '\'' {
+		return message, false
+	}
+	end := strings.IndexByte(message[start+1:], '\'')
+	if end < 0 {
+		return message, false
+	}
+	end += start + 1
+	identifier := message[start+1 : end]
+	if !token.IsIdentifier(identifier) {
+		return message, false
+	}
+	return message[:start] + identifier + message[end+1:], true
 }
 
 // isScopedLexicalDiagnostic identifies primary scanner diagnostics whose

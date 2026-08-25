@@ -2597,7 +2597,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.IndexAddrUnchecked(x, idx)
 		} else if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
 			if _, pointer := types.Unalias(p.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
-				!emissionKnownNonNilArrayBase(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
+				emissionArrayPointerNeedsNilCheck(v.X, v) {
 				// Bounds safety says nothing about the implicit *array
 				// dereference. Keep its ordinary nil fault, routing it through
 				// the explicit outcome only in a physical coroutine body.
@@ -2653,7 +2653,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			case *types.Array:
 				ret = b.IndexUnchecked(x, idx, takeArrayAddr)
 			case *types.Pointer:
-				if !emissionKnownNonNilArrayBase(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
+				if emissionArrayPointerNeedsNilCheck(v.X, v) {
 					b.AssertNilDeref(x)
 				}
 				ret = b.Load(b.IndexAddrUnchecked(x, idx))
