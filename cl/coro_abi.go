@@ -2757,10 +2757,30 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 			return validateCoroExplicitStatusPanicSelectReceive(
 				audit, tuple, value.Index, value.Type(), capabilities,
 			)
+		case *ssa.TypeAssert:
+			if tuple.Parent() != audit.fn || !tuple.CommaOk || value.Index != 0 {
+				return "interface type assertion extract is not the value result of one comma-ok assertion in the current body"
+			}
+			asserted := audit.typeOf(tuple.AssertedType)
+			if _, ok := types.Unalias(asserted).Underlying().(*types.Interface); !ok ||
+				!types.Identical(audit.typeOf(value.Type()), asserted) {
+				return "interface type assertion extract disagrees with its asserted interface type"
+			}
+			if reason := audit.validateTypeAssert(tuple); reason != "" {
+				return "interface type assertion has no outcome-safe lowering: " + reason
+			}
+			// A successful interface assertion forwards the source data word and
+			// replaces only its type/itab word; a failed comma-ok assertion emits
+			// the zero interface. Require the source pair to have the same
+			// post-destroy lifetime proof, while validateTypeAssert above binds a
+			// dynamically created itab to the managed NewItab helper path.
+			return validateCoroExplicitStatusPanicInterfaceValue(
+				audit, tuple.X, capabilities, visiting,
+			)
 		}
 		call, ok := value.Tuple.(*ssa.Call)
 		if !ok || call == nil || call.Parent() != audit.fn || call.Common() == nil {
-			return "interface tuple extract is not produced by one call or channel receive in the current body"
+			return "interface tuple extract has no approved frame-stable producer in the current body"
 		}
 		signature := call.Common().Signature()
 		if signature == nil || signature.Results() == nil ||
