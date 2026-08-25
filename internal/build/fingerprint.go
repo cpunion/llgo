@@ -124,6 +124,10 @@ type commonSection struct {
 	LLVMCPU                 string       `yaml:"LLVM_CPU,omitempty"`
 	LLVMFeatures            string       `yaml:"LLVM_FEATURES,omitempty"`
 	TargetABI               string       `yaml:"TARGET_ABI,omitempty"`
+	PlatformABI             string       `yaml:"PLATFORM_ABI,omitempty"`
+	ObjectFormat            string       `yaml:"OBJECT_FORMAT,omitempty"`
+	DriverFlavor            string       `yaml:"DRIVER_FLAVOR,omitempty"`
+	LinkerFlavor            string       `yaml:"LINKER_FLAVOR,omitempty"`
 	CoroPlanDigest          string       `yaml:"CORO_PLAN_DIGEST,omitempty"`
 	CoroABI                 string       `yaml:"CORO_ABI,omitempty"`
 	CoroSchedulerABI        string       `yaml:"CORO_SCHEDULER_ABI,omitempty"`
@@ -157,7 +161,8 @@ type commonSection struct {
 
 func (s *commonSection) empty() bool {
 	return s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
-		s.LLVMFeatures == "" && s.TargetABI == "" &&
+		s.LLVMFeatures == "" && s.TargetABI == "" && s.PlatformABI == "" && s.ObjectFormat == "" &&
+		s.DriverFlavor == "" && s.LinkerFlavor == "" &&
 		s.CoroPlanDigest == "" && s.CoroABI == "" && s.CoroSchedulerABI == "" && s.CoroPanicABI == "" &&
 		s.CoroFuncRepABI == "" && s.CoroFrameRetentionABI == "" && s.CoroLoweringFactsSchema == "" &&
 		s.CoroLoweringFactsDigest == "" && s.CoroImportedCapsDigest == "" &&

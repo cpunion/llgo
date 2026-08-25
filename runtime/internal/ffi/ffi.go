@@ -12,6 +12,10 @@ type Type = ffi.Type
 
 type Signature = ffi.Cif
 
+type ABI = c.Uint
+
+const DefaultABI ABI = ffi.DefaultAbi
+
 type Error int
 
 // signatureHolder owns every pointer retained by ffi_cif. libffi stores the
@@ -38,6 +42,13 @@ func (s Error) Error() string {
 }
 
 func NewSignature(ret *Type, args ...*Type) (*Signature, error) {
+	return NewSignatureWithABI(DefaultABI, ret, args...)
+}
+
+// NewSignatureWithABI prepares a native call signature using abi. Most calls
+// should use NewSignature; the explicit form is needed for platforms such as
+// windows/386 that expose more than one C calling convention.
+func NewSignatureWithABI(abi ABI, ret *Type, args ...*Type) (*Signature, error) {
 	cif := &signatureHolder{
 		args: append([]*Type(nil), args...),
 		ret:  ret,
@@ -46,7 +57,7 @@ func NewSignature(ret *Type, args ...*Type) (*Signature, error) {
 	if len(cif.args) > 0 {
 		atype = &cif.args[0]
 	}
-	status := ffi.PrepCif(&cif.Signature, ffi.DefaultAbi, c.Uint(len(cif.args)), ret, atype)
+	status := ffi.PrepCif(&cif.Signature, abi, c.Uint(len(cif.args)), ret, atype)
 	if status == ffi.OK {
 		return &cif.Signature, nil
 	}
@@ -62,7 +73,7 @@ func NewSignatureVar(ret *Type, fixed int, args ...*Type) (*Signature, error) {
 	if len(cif.args) > 0 {
 		atype = &cif.args[0]
 	}
-	status := ffi.PrepCifVar(&cif.Signature, ffi.DefaultAbi, c.Uint(fixed), c.Uint(len(cif.args)), ret, atype)
+	status := ffi.PrepCifVar(&cif.Signature, DefaultABI, c.Uint(fixed), c.Uint(len(cif.args)), ret, atype)
 	if status == ffi.OK {
 		return &cif.Signature, nil
 	}
