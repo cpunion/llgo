@@ -290,9 +290,9 @@ func validateCoroExactBoundMethodWrapper(fn *ssa.Function) error {
 // the receiver is the first ordinary parameter and there is no captured
 // environment. Besides an exact declared receiver, Go permits (*T).Method for
 // a value-receiver method; x/tools lowers that one implicit indirection to the
-// exact ssa:wrapnilchk -> load -> static-call sequence validated below.
-// Promoted-field wrappers remain closed until their selection chain has its
-// own audited recipe.
+// exact ssa:wrapnilchk -> load -> static-call sequence validated below. A
+// promoted method expression additionally permits only the canonical receiver
+// field-selection chain resolved by the callable receiver's method set.
 func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	if fn == nil || fn.Pkg != nil || fn.Parent() != nil || fn.Syntax() != nil {
 		return fmt.Errorf("requires one top-level syntax-free generated thunk")
@@ -325,8 +325,21 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	if pointer, ok := types.Unalias(callableReceiver).Underlying().(*types.Pointer); ok {
 		implicitPointerReceiver = types.Identical(pointer.Elem(), methodReceiver)
 	}
+	promotedReceiver := false
+	var promotedReceiverPath []int
 	if !directReceiver && !implicitPointerReceiver {
-		return fmt.Errorf("callable signature is not receiver-first method signature")
+		selection := types.NewMethodSet(callableReceiver).Lookup(object.Pkg(), object.Name())
+		if selection != nil {
+			selected, _ := selection.Obj().(*types.Func)
+			indices := selection.Index()
+			promotedReceiver = len(indices) > 1 && selected == object
+			if promotedReceiver {
+				promotedReceiverPath = append([]int(nil), indices[:len(indices)-1]...)
+			}
+		}
+		if !promotedReceiver {
+			return fmt.Errorf("callable signature is not receiver-first method signature")
+		}
 	}
 	for index := 0; index < methodParams.Len(); index++ {
 		if !types.Identical(params.At(index+1).Type(), methodParams.At(index).Type()) {
@@ -344,6 +357,58 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	var call *ssa.Call
 	var ret *ssa.Return
 	extracts := make(map[int]*ssa.Extract)
+	receiverPath := func(value ssa.Value) ([]int, bool) { return nil, false }
+	receiverPath = func(value ssa.Value) ([]int, bool) {
+		switch value := value.(type) {
+		case *ssa.Parameter:
+			return nil, value == fn.Params[0]
+		case *ssa.Alloc:
+			return nil, receiverAlloc != nil && value == receiverAlloc
+		case *ssa.UnOp:
+			if value.Op != token.MUL {
+				return nil, false
+			}
+			return receiverPath(value.X)
+		case *ssa.FieldAddr:
+			path, ok := receiverPath(value.X)
+			return append(path, value.Field), ok
+		case *ssa.Field:
+			path, ok := receiverPath(value.X)
+			return append(path, value.Field), ok
+		case *ssa.ChangeType:
+			return receiverPath(value.X)
+		case *ssa.Convert:
+			return receiverPath(value.X)
+		case *ssa.Call:
+			common := value.Common()
+			if common == nil {
+				return nil, false
+			}
+			builtin, ok := common.Value.(*ssa.Builtin)
+			if !ok || builtin.Name() != "ssa:wrapnilchk" || len(common.Args) != 3 {
+				return nil, false
+			}
+			return receiverPath(common.Args[0])
+		default:
+			return nil, false
+		}
+	}
+	derived := func(value ssa.Value) bool {
+		_, ok := receiverPath(value)
+		return ok
+	}
+	matchesPromotedReceiver := func(value ssa.Value) bool {
+		path, ok := receiverPath(value)
+		if !ok || len(path) != len(promotedReceiverPath) {
+			return false
+		}
+		for index := range path {
+			if path[index] != promotedReceiverPath[index] {
+				return false
+			}
+		}
+		return true
+	}
 	for _, block := range fn.Blocks {
 		if block == nil {
 			return fmt.Errorf("contains a nil basic block")
@@ -362,10 +427,28 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 				}
 				receiverStore = instruction
 			case *ssa.UnOp:
-				if instruction.Op != token.MUL || receiverLoad != nil {
+				if instruction.Op != token.MUL || !derived(instruction.X) || !promotedReceiver && receiverLoad != nil {
 					return fmt.Errorf("contains a non-canonical receiver load")
 				}
-				receiverLoad = instruction
+				if !promotedReceiver {
+					receiverLoad = instruction
+				}
+			case *ssa.FieldAddr:
+				if !promotedReceiver || !derived(instruction.X) {
+					return fmt.Errorf("contains a field selection outside the promoted receiver chain")
+				}
+			case *ssa.Field:
+				if !promotedReceiver || !derived(instruction.X) {
+					return fmt.Errorf("contains a field selection outside the promoted receiver chain")
+				}
+			case *ssa.ChangeType:
+				if !promotedReceiver || !derived(instruction.X) {
+					return fmt.Errorf("contains a type change outside the promoted receiver chain")
+				}
+			case *ssa.Convert:
+				if !promotedReceiver || !derived(instruction.X) {
+					return fmt.Errorf("contains a conversion outside the promoted receiver chain")
+				}
 			case *ssa.Call:
 				if isWrapNilCheckCall(instruction) {
 					if receiverNilCheck != nil {
@@ -397,7 +480,13 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 		return fmt.Errorf("is not one single-block receiver-spill tail call")
 	}
 	var receiver ssa.Value = fn.Params[0]
-	if implicitPointerReceiver {
+	if promotedReceiver {
+		if (receiverAlloc == nil && (receiverStore != nil || len(fn.Locals) != 0)) ||
+			(receiverAlloc != nil && (receiverStore == nil || len(fn.Locals) != 1 ||
+				fn.Locals[0] != receiverAlloc || receiverStore.Addr != receiverAlloc || receiverStore.Val != fn.Params[0])) {
+			return fmt.Errorf("has an incomplete promoted receiver spill")
+		}
+	} else if implicitPointerReceiver {
 		if receiverNilCheck == nil {
 			return fmt.Errorf("has a non-canonical implicit receiver indirection")
 		}
@@ -424,7 +513,8 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 		return fmt.Errorf("tail call has no CallCommon")
 	}
 	if types.IsInterface(method.Recv().Type()) {
-		if !common.IsInvoke() || common.Value != receiver || common.Method != object || len(common.Args) != len(fn.Params)-1 {
+		if !common.IsInvoke() || common.Method != object || len(common.Args) != len(fn.Params)-1 ||
+			(promotedReceiver && !matchesPromotedReceiver(common.Value)) || (!promotedReceiver && common.Value != receiver) {
 			return fmt.Errorf("interface receiver does not use the exact method invoke")
 		}
 		for index := 1; index < len(fn.Params); index++ {
@@ -435,7 +525,8 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	} else {
 		callee := common.StaticCallee()
 		if common.IsInvoke() || common.Method != nil || callee == nil || callee.Object() != object ||
-			len(common.Args) != len(fn.Params) || common.Args[0] != receiver {
+			len(common.Args) != len(fn.Params) ||
+			(promotedReceiver && !matchesPromotedReceiver(common.Args[0])) || (!promotedReceiver && common.Args[0] != receiver) {
 			return fmt.Errorf("concrete receiver does not use one exact receiver-first static call")
 		}
 		for index := 1; index < len(fn.Params); index++ {

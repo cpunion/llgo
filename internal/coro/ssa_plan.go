@@ -4431,10 +4431,10 @@ func classifyUnknownCall(config SSAConfig, caller *ssa.Function, call ssa.CallIn
 			return 0, fmt.Errorf("coro: unknown call in %q: UnknownManagedInterfaceDispatch requires an interface invoke", caller.Name())
 		}
 		sig := common.Signature()
-		if sig == nil || sig.Variadic() ||
+		if sig == nil ||
 			(sig.TypeParams() != nil && sig.TypeParams().Len() != 0) ||
 			(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() != 0) {
-			return 0, fmt.Errorf("coro: unknown call in %q: managed interface descriptor requires a receiver-free, non-variadic, non-generic call signature", caller.Name())
+			return 0, fmt.Errorf("coro: unknown call in %q: managed interface descriptor requires a receiver-free, non-generic call signature", caller.Name())
 		}
 		if _, ok := types.Unalias(common.Value.Type()).Underlying().(*types.Interface); !ok {
 			return 0, fmt.Errorf("coro: unknown call in %q: managed interface descriptor receiver is not an interface", caller.Name())

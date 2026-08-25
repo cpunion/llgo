@@ -86,6 +86,32 @@ func TestResolveCoroInterfaceDispatchPlanUniqueAsyncWriter(t *testing.T) {
 	}
 }
 
+func TestResolveCoroInterfaceDispatchPlanAcceptsVariadicPackedSlice(t *testing.T) {
+	const source = `package foo
+var gate chan struct{}
+type Summer interface { Sum(...int) int }
+type asyncSummer struct{}
+func (*asyncSummer) Sum(values ...int) int { <-gate; return len(values) }
+func Root(summer Summer) int { return summer.Sum(1, 2, 3) }
+`
+	fixture := buildCoroInterfaceDispatchFixture(t, source, coro.DynamicCHAClosed)
+	defer fixture.program.Dispose()
+
+	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := resolved.sourceCallSignature
+	if signature == nil || !signature.Variadic() || signature.Params().Len() != 1 ||
+		len(fixture.invoke.Common().Args) != 1 ||
+		!types.Identical(fixture.invoke.Common().Args[0].Type(), signature.Params().At(0).Type()) {
+		t.Fatalf("variadic invoke did not retain one packed slice argument: signature=%v args=%v", signature, fixture.invoke.Common().Args)
+	}
+	if len(resolved.candidates) != 1 || !resolved.candidates[0].function.Signature.Variadic() {
+		t.Fatalf("variadic candidates = %+v, want one variadic method", resolved.candidates)
+	}
+}
+
 func TestResolveCoroInterfaceDispatchPlanAcceptsPromotedGenericMethodWrappers(t *testing.T) {
 	const source = `package foo
 type Interface interface { M() }
@@ -167,19 +193,19 @@ type plainMatcher struct{}
 type asyncMatcher struct{}
 type promotedBase struct{}
 type deadPromotedMatcher struct{ promotedBase }
-func (plainMatcher) As(any) bool { return true }
-func (*asyncMatcher) As(any) bool { <-gate; return true }
-func (promotedBase) As(any) bool { return true }
-func keep(flag bool) interface{ As(any) bool } {
+func (plainMatcher) As(...any) bool { return true }
+func (*asyncMatcher) As(...any) bool { <-gate; return true }
+func (promotedBase) As(...any) bool { return true }
+func keep(flag bool) interface{ As(...any) bool } {
 	if flag { return plainMatcher{} }
 	return &asyncMatcher{}
 }
-func Root(value interface{ As(any) bool }, target any, flag bool) bool {
+func Root(value interface{ As(...any) bool }, target any, flag bool) bool {
 	if flag {
 		_, _ = target.(*plainMatcher)
 		_, _ = target.(*asyncMatcher)
 	}
-	return value.As(target)
+	return value.As()
 }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
@@ -198,6 +224,9 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	}
 	root := ssaPkg.Func("Root")
 	invoke := coroInterfaceDispatchFindInvoke(t, root)
+	if !invoke.Common().Signature().Variadic() || len(invoke.Common().Args) != 1 {
+		t.Fatalf("managed variadic invoke was not packed into one slice argument: %v", invoke.Common())
+	}
 	methodTargets := make(map[*ssa.Function]struct{})
 	for _, function := range universe.Functions() {
 		if function != nil && function.Name() == "As" && function.Signature != nil && function.Signature.Recv() != nil {
@@ -631,44 +660,20 @@ func TestResolveCoroInterfaceDispatchPlanFailsClosed(t *testing.T) {
 	}
 }
 
-func TestResolveCoroInterfaceDispatchPlanRejectsVariadicAndABIDirective(t *testing.T) {
-	tests := []struct {
-		name   string
-		source string
-		want   string
-	}{
-		{
-			name: "variadic",
-			source: `package foo
-type Writer interface { Write(...byte) int }
-type Concrete struct{}
-func (Concrete) Write(buffer ...byte) int { return len(buffer) }
-func Root(writer Writer) int { return writer.Write(1, 2) }
-`,
-			want: "variadic method",
-		},
-		{
-			name: "ABI directive",
-			source: `package foo
+func TestResolveCoroInterfaceDispatchPlanRejectsABIDirective(t *testing.T) {
+	const source = `package foo
 import _ "unsafe"
 type Writer interface { Write([]byte) int }
 type Concrete struct{}
 //go:linkname redirectedWrite example.com/redirectedWrite
 func (Concrete) Write(buffer []byte) int { return len(buffer) }
 func Root(writer Writer) int { return writer.Write(nil) }
-`,
-			want: "ABI directive",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := buildCoroInterfaceDispatchFixture(t, test.source, coro.DynamicCHAClosed)
-			defer fixture.program.Dispose()
-			_, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want substring %q", err, test.want)
-			}
-		})
+`
+	fixture := buildCoroInterfaceDispatchFixture(t, source, coro.DynamicCHAClosed)
+	defer fixture.program.Dispose()
+	_, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
+	if err == nil || !strings.Contains(err.Error(), "ABI directive") {
+		t.Fatalf("error = %v, want ABI directive rejection", err)
 	}
 }
 
