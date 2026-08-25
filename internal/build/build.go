@@ -3358,6 +3358,10 @@ type Config struct {
 	// default.
 	PCLNModeSet bool
 	AllowNoBody bool // allow declarations without bodies, as go tool compile does
+	// PackageCompileOnly selects a frontend/package compilation with no
+	// runnable-program roots or bootstrap. It is used by `llgo tool compile`;
+	// unlike CompileOnly, it does not build a complete executable for later use.
+	PackageCompileOnly bool
 	// DisableBoundsChecks disables index, slice, and slice-to-array conversion
 	// bounds checks while retaining required integer conversions and nil checks.
 	DisableBoundsChecks bool
@@ -3468,6 +3472,9 @@ func resolveBuildConfig(input *Config) (*Config, error) {
 	}
 	if conf.BuildMode == "" {
 		conf.BuildMode = BuildModeExe
+	}
+	if conf.PackageCompileOnly && conf.Mode != ModeGen {
+		return nil, fmt.Errorf("package-only compilation requires generation mode")
 	}
 	if conf.AppExt == "" {
 		conf.AppExt = defaultAppExt(conf)
@@ -4896,6 +4903,9 @@ func activeCoroABIVersion(conf *Config) string {
 // contract and legacy native entry.
 func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 	if ctx == nil || ctx.buildConf == nil {
+		return nil, nil
+	}
+	if ctx.buildConf.PackageCompileOnly {
 		return nil, nil
 	}
 	// Isolated planner tests and analysis-only callers may have no linked

@@ -182,6 +182,17 @@ func TestRunCmdBuildsAndReportsErrors(t *testing.T) {
 	}
 }
 
+func TestRunCmdCompilesMainPackageWithoutMain(t *testing.T) {
+	file := t.TempDir() + "/compile_only_main.go"
+	if err := os.WriteFile(file, []byte("package main\nvar Value = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := runCompileCommand(t, []string{"-complete", file})
+	if code != 0 {
+		t.Fatalf("package-only main compile exit code = %d; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
 func runCompileCommand(t *testing.T, args []string) (stdout, stderr string, exitCode int) {
 	t.Helper()
 	outFile, err := os.CreateTemp(t.TempDir(), "stdout")
