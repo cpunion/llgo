@@ -1,5 +1,7 @@
 package main
 
+import _ "unsafe"
+
 const (
 	LLGoFiles = "../wrap/struct_int8.c"
 )

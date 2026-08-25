@@ -13,6 +13,8 @@ import (
 
 var ghead_basic = `package main
 
+import _ "unsafe"
+
 const (
 	LLGoFiles = "../wrap/basic.c"
 )

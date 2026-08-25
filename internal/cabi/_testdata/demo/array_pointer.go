@@ -1,5 +1,7 @@
 package main
 
+import _ "unsafe"
+
 const (
 	LLGoFiles = "../wrap/array_pointer.c"
 )
