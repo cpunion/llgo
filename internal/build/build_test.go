@@ -119,6 +119,9 @@ func TestResolveBuildConfigDefaultsAndValidation(t *testing.T) {
 	if _, err := resolveBuildConfig(&Config{SizeReport: true, SizeLevel: "invalid"}); err == nil {
 		t.Fatal("invalid size-reporting level succeeded")
 	}
+	if _, err := resolveBuildConfig(&Config{Mode: ModeBuild, PackageCompileOnly: true}); err == nil {
+		t.Fatal("package-only compilation outside generation mode succeeded")
+	}
 	if _, err := resolveBuildConfig(nil); err == nil {
 		t.Fatal("nil build config succeeded")
 	}
@@ -1759,6 +1762,36 @@ func F() {}
 		t.Fatalf("Do returned packages = %+v, want one compiled package", pkgs)
 	}
 	pkgs[0].LPkg.Prog.Dispose()
+}
+
+func TestDoPackageCompileOnlyOmitsRunnableCoroCode(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "compile_only_main.go")
+	if err := os.WriteFile(file, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(llgoBuildCache, "0")
+	conf := NewDefaultConf(ModeGen)
+	conf.PackageCompileOnly = true
+	pkgs, err := Do([]string{file}, conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 1 || pkgs[0].LPkg == nil {
+		t.Fatalf("Do returned packages = %+v, want one compiled package", pkgs)
+	}
+	defer pkgs[0].LPkg.Prog.Dispose()
+	module := pkgs[0].LPkg.Module()
+	if !module.NamedFunction("main.main").IsNil() || !module.NamedFunction("main.main$coro").IsNil() {
+		t.Fatalf("package-only module emitted runnable main code:\n%s", module.String())
+	}
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if !function.IsDeclaration() {
+			t.Fatalf("package-only module emitted function body %q:\n%s", function.Name(), module.String())
+		}
+	}
+	if strings.Contains(module.String(), coroProgramBootstrapSymbolV2) {
+		t.Fatalf("package-only module emitted runnable bootstrap state:\n%s", module.String())
+	}
 }
 
 func TestDoOptimizesUnreachableBodylessCalls(t *testing.T) {

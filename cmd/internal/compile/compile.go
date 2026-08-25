@@ -159,6 +159,7 @@ func runCmd(_ *base.Command, args []string) {
 		defer runtime.GOMAXPROCS(previous)
 	}
 	conf := build.NewDefaultConf(build.ModeGen)
+	conf.PackageCompileOnly = true
 	conf.GoVersion = opts.lang
 	conf.NoErrorColumn = opts.noColumns.value != 0
 	conf.AllowNoBody = !opts.complete
