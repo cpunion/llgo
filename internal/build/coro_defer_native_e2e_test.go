@@ -227,6 +227,7 @@ func buildCoroStaticDeferNativeE2EUser(
 		PanicABI:         coro.PanicExplicitStatusABIV0,
 		FuncRepABI:       coro.FuncRepABIV1,
 		EmissionUniverse: universe}
+	freezeCoroNativeE2EProgramCapabilities(t, compilation)
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		cl.PackageOptions{Compilation: compilation},

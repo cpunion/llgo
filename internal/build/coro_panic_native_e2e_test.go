@@ -234,6 +234,7 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		PanicABI:         coro.PanicExplicitStatusABIV0,
 		FuncRepABI:       coro.FuncRepABIV1,
 		EmissionUniverse: universe}
+	freezeCoroNativeE2EProgramCapabilities(t, compilation)
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		cl.PackageOptions{Compilation: compilation},

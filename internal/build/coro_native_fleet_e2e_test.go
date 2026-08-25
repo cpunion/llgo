@@ -2154,6 +2154,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_slice.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_resume_boundary_default.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_execution_quota_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_physical_thread_capacity_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
@@ -2197,6 +2198,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_wait_coro.go"),
 	}...)
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_current_task_route.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_resume_boundary_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_operation_capacity.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_window_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_result_llgo.go")
@@ -2212,7 +2214,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	}
 	configureCoroRuntimeIslandPlan(conf, "NewChan")
 	allowed := map[string]bool{
-		"command-line-arguments":                               true,
+		"command-line-arguments":                                true,
 		"github.com/xgo-dev/llgo/runtime/internal/clite/tls":    true,
 		"github.com/xgo-dev/llgo/runtime/internal/coro":         true,
 		"github.com/xgo-dev/llgo/runtime/internal/coroalloc":    true,

@@ -25,8 +25,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/coro"
 	llssa "github.com/xgo-dev/llgo/ssa"
 )
+
+// freezeCoroNativeE2EProgramCapabilities gives hand-assembled native E2Es the
+// same closed-program transaction as buildCoroPlan: derive the exact optional
+// runtime-service closure before package emission, then freeze it for every
+// package in the fixture. This must not be replaced by a zero-value shortcut,
+// because worker-backed E2Es retain independent worker demand.
+func freezeCoroNativeE2EProgramCapabilities(
+	t *testing.T,
+	compilation *cl.Compilation,
+) coro.ProgramCapabilities {
+	t.Helper()
+	capabilities, err := compilation.CoroProgramCapabilities()
+	if err != nil {
+		t.Fatal("resolve native E2E program capabilities:", err)
+	}
+	compilation.FinalCoroProgramCapabilities = capabilities
+	compilation.FinalCoroProgramCapabilitiesFrozen = true
+	return capabilities
+}
 
 // coroNativeE2ENMHasExactSymbol parses nm's whitespace-delimited symbol
 // column. Darwin prefixes the physical symbol with one underscore; Linux does

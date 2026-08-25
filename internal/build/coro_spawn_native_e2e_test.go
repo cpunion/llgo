@@ -518,16 +518,13 @@ func buildCoroSpawnNativeE2EUserSource(
 		FuncRepABI:             coro.FuncRepABIV1,
 		CoroTargetCapabilities: targetCapabilities,
 		EmissionUniverse:       universe}
+	capabilities = freezeCoroNativeE2EProgramCapabilities(t, compilation)
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		cl.PackageOptions{Compilation: compilation},
 	)
 	if err != nil {
 		t.Fatal(err)
-	}
-	capabilities, err = compilation.CoroProgramCapabilities()
-	if err != nil {
-		t.Fatal("resolve native E2E program capabilities:", err)
 	}
 	module := pkg.Module()
 	runCoroSpawnNativeE2EPasses(t, prog, module)
@@ -802,6 +799,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_slice.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_resume_boundary_default.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_execution_quota_default.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
@@ -832,6 +830,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	}...)
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_slice.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_resume_boundary_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_execution_quota_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_physical_thread_capacity_native_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_channel_request_default.go")
