@@ -247,6 +247,44 @@ func validateCoroManagedDispatchSignatureShape(sig *types.Signature) error {
 	return nil
 }
 
+// coroConcreteManagedCallableSignature strips declaration-only generic
+// receiver metadata from one receiver-free function value after proving that
+// every value crossing the descriptor ABI is fully concrete. x/tools retains
+// RecvTypeParams on the type of an instantiated bound method stored in a
+// variable, even though its receiver is already removed and all parameters and
+// results are ground. That metadata neither changes the Go function type nor
+// the physical descriptor ABI and must not manufacture a second signature.
+func coroConcreteManagedCallableSignature(sig *types.Signature) (*types.Signature, error) {
+	if sig == nil {
+		return nil, fmt.Errorf("missing signature")
+	}
+	if sig.Recv() != nil {
+		return nil, fmt.Errorf("requires an ordinary receiver-free signature")
+	}
+	if typeParamCount(sig.TypeParams()) != 0 {
+		return nil, fmt.Errorf("generic function signatures are not materialized callables")
+	}
+	visiting := make(map[types.Type]bool)
+	for _, tuple := range []struct {
+		role  string
+		value *types.Tuple
+	}{
+		{role: "parameter", value: sig.Params()},
+		{role: "result", value: sig.Results()},
+	} {
+		for index := 0; index < tuple.value.Len(); index++ {
+			if coroTypeContainsUnresolvedTypeParam(tuple.value.At(index).Type(), visiting) {
+				return nil, fmt.Errorf("%s %d type %s contains an unresolved type parameter",
+					tuple.role, index, tuple.value.At(index).Type())
+			}
+		}
+	}
+	if typeParamCount(sig.RecvTypeParams()) == 0 {
+		return sig, nil
+	}
+	return types.NewSignatureType(nil, nil, nil, sig.Params(), sig.Results(), sig.Variadic()), nil
+}
+
 // validateCoroPlainDispatchSignatureShape preserves the deliberately narrow
 // legacy CallCoroPlainDispatch contract. Managed coroutine callers use the
 // capability-aware universal descriptor path above.
@@ -354,14 +392,12 @@ func validateCoroCallableTransportValue(
 			continue
 		}
 		sig, ok := types.Unalias(expected.typ).Underlying().(*types.Signature)
-		if !ok || sig.Recv() != nil {
+		if !ok {
 			return fail("value %q managed function leaf %d requires an ordinary receiver-free signature", value.Name(), index)
 		}
-		if params := sig.TypeParams(); params != nil && params.Len() != 0 {
-			return fail("value %q managed function leaf %d has an unsupported generic signature", value.Name(), index)
-		}
-		if params := sig.RecvTypeParams(); params != nil && params.Len() != 0 {
-			return fail("value %q managed function leaf %d has an unsupported generic receiver signature", value.Name(), index)
+		sig, err = coroConcreteManagedCallableSignature(sig)
+		if err != nil {
+			return fail("value %q managed function leaf %d: %v", value.Name(), index, err)
 		}
 		if err := validateCoroManagedDispatchSignatureShape(sig); err != nil {
 			return fail("value %q managed function leaf %d signature: %v", value.Name(), index, err)
@@ -757,7 +793,9 @@ func validateCoroPlainDispatchCall(plan *coro.SSAPlan, owner *ssa.Function, call
 		if err := validateCoroPlainDispatchTarget(targetFn, targetPlan, universe); err != nil {
 			return fail("%v", err)
 		}
-		if !types.Identical(common.Signature(), targetFn.Signature) {
+		callSignature, callErr := coroConcreteManagedCallableSignature(common.Signature())
+		targetSignature, targetErr := coroConcreteManagedCallableSignature(targetFn.Signature)
+		if callErr != nil || targetErr != nil || !types.Identical(callSignature, targetSignature) {
 			return fail("call signature %s does not match target %q signature %s", common.Signature(), targetPlan.ID, targetFn.Signature)
 		}
 	}

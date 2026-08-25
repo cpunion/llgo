@@ -130,15 +130,9 @@ func validateCoroManagedDispatchCallKind(
 			callPlan.Unresolved,
 		)
 	}
-	sig := common.Signature()
-	if sig == nil || sig.Recv() != nil {
-		return fail("v1 descriptor requires an ordinary receiver-free function signature")
-	}
-	if params := sig.TypeParams(); params != nil && params.Len() != 0 {
-		return fail("v1 descriptor does not support generic signatures")
-	}
-	if params := sig.RecvTypeParams(); params != nil && params.Len() != 0 {
-		return fail("v1 descriptor does not support generic receiver signatures")
+	sig, err := coroConcreteManagedCallableSignature(common.Signature())
+	if err != nil {
+		return fail("v1 descriptor callable signature: %v", err)
 	}
 	if err := validateCoroManagedDispatchSignatureShape(sig); err != nil {
 		return fail("v1 descriptor signature: %v", err)
@@ -175,7 +169,8 @@ func validateCoroManagedDispatchCallKind(
 		if !found || targetPlan.ID != targetID {
 			return fail("target %q has no canonical function plan", targetID)
 		}
-		if target.Signature == nil || !types.Identical(sig, target.Signature) {
+		targetSignature, err := coroConcreteManagedCallableSignature(target.Signature)
+		if err != nil || !types.Identical(sig, targetSignature) {
 			return fail("call signature %s does not match target %q signature %s", sig, targetID, target.Signature)
 		}
 		if err := validateCoroDynamicDispatchTarget(target, targetPlan, universe); err != nil {
