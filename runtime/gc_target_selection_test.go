@@ -264,7 +264,7 @@ func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testin
 			}
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/ffi",
 				[]string{"abi_webassembly.go", "ffi_link_webassembly.go"},
-				[]string{"abi.go", "abi_wasm.go", "ffi_link.go"})
+				[]string{"abi.go", "abi_wasm.go", "config_default.go", "config_windows.go", "ffi_link.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/tls",
 				[]string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})
 			if imports := packages["github.com/xgo-dev/llgo/runtime/internal/clite/tls"].Imports; slices.Contains(imports, "github.com/xgo-dev/llgo/runtime/internal/clite/pthread") {
