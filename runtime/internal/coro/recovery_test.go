@@ -97,6 +97,62 @@ func TestRecoverOutsideArmedScopeReturnsNil(t *testing.T) {
 	fixture.keepAlive()
 }
 
+func TestRecoverTransparentAliasTakesExactAncestorScope(t *testing.T) {
+	typeWord := unsafe.Pointer(new(byte))
+	dataWord := unsafe.Pointer(new(byte))
+	fixture := newInlineAwaitFixtureWithRecovery(t, true, typeWord, dataWord)
+	wrapper := FrameFromStorage(fixture.child.storage)
+	if wrapper == nil {
+		t.Fatal("transparent recover wrapper metadata is absent")
+	}
+	leafFrame := newTestFrame(t, fixture.g, unsafe.Pointer(new(byte)), fixture.child.handle)
+	wrapper.header.SuspendReason = uint16(SuspendCall)
+	wrapper.header.Lifecycle = uint16(FrameSuspended)
+	if disposition := PrepareInlineAwaitCompiler(
+		fixture.g, fixture.child.handle, leafFrame.handle, nil, nil,
+	); disposition != InlineAwaitStarted {
+		t.Fatalf("begin transparent recover leaf = %d, want started", disposition)
+	}
+	if outcome, caseID, task, source, generation, taken := TakeRunDecisionWordsCompiler(
+		fixture.g, 0, 0,
+	); !taken || outcome != 0 || caseID != 0 || task != 0 || source != 0 || generation != 0 {
+		t.Fatalf(
+			"take transparent recover leaf initial gate = (%d, %d, %d, %d, %d, %t)",
+			outcome, caseID, task, source, generation, taken,
+		)
+	}
+	leafFrame.header.SuspendReason = uint16(SuspendNone)
+	leafFrame.header.Lifecycle = uint16(FrameActive)
+
+	if snapshot, recovered, valid := TakeRecover(
+		fixture.g, leafFrame.handle,
+	); !valid || recovered || snapshot != (RecoverSnapshot{}) {
+		t.Fatalf("ordinary nested recover = (%+v, %t, %t), want nil/false/true", snapshot, recovered, valid)
+	}
+	want := RecoverSnapshot{TypeWord: typeWord, DataWord: dataWord}
+	if snapshot, recovered, valid := TakeRecoverAlias(
+		fixture.g, leafFrame.handle,
+	); !valid || !recovered || snapshot != want {
+		t.Fatalf("transparent nested recover = (%+v, %t, %t), want (%+v, true, true)", snapshot, recovered, valid, want)
+	}
+	root := FrameFromStorage(fixture.parent.storage)
+	if root == nil || root.completion.status != completionRecoverTaken ||
+		wrapper.completion.status != completionArmed {
+		t.Fatalf("transparent recover records = root:%+v wrapper:%+v", root.completion, wrapper.completion)
+	}
+	if snapshot, recovered, valid := TakeRecoverAlias(
+		fixture.g, leafFrame.handle,
+	); !valid || recovered || snapshot != (RecoverSnapshot{}) {
+		t.Fatalf("duplicate transparent recover = (%+v, %t, %t)", snapshot, recovered, valid)
+	}
+
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	runtime.KeepAlive(fixture.parent.memory)
+	runtime.KeepAlive(fixture.child.memory)
+	runtime.KeepAlive(leafFrame.memory)
+}
+
 func TestRecoverInRootFrameReturnsNil(t *testing.T) {
 	checked := false
 	fixture := newAwaitCompletionFixtureBeforeAwait(t, func(g *G, parent, _ *testFrame) {

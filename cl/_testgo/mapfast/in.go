@@ -13,47 +13,47 @@ type structKey struct {
 
 var sink int
 
-// CHECK-LABEL: define void @main.testChannel(ptr %0){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssignFast64Ptr"
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1Fast64"
-// CHECK: call { ptr, i1 } @"{{.*}}/runtime/internal/runtime.MapAccess2Fast64"
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.MapDeleteFast64"
-// CHECK-LABEL: define void @main.testFallback(){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssign"
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1"
-// CHECK: call { ptr, i1 } @"{{.*}}/runtime/internal/runtime.MapAccess2"
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.MapDelete"
-// CHECK-LABEL: define void @main.testInt(){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssignFast64"
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1Fast64"
-// CHECK-LABEL: define void @main.testPointer(ptr %0){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssignFast64Ptr"
-// CHECK: ptrtoint ptr %0 to i64
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1Fast64"
-// CHECK: call { ptr, i1 } @"{{.*}}/runtime/internal/runtime.MapAccess2Fast64"
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.MapDeleteFast64"
-// CHECK-LABEL: define void @main.testString(){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssignFastStr"
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1FastStr"
-// CHECK: call { ptr, i1 } @"{{.*}}/runtime/internal/runtime.MapAccess2FastStr"
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.MapDeleteFastStr"
-// CHECK-LABEL: define void @main.testStringFunc(){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssignFastStr"
-// CHECK-LABEL: define void @main.testUint32(){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssignFast32"
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1Fast32"
-// CHECK: call { ptr, i1 } @"{{.*}}/runtime/internal/runtime.MapAccess2Fast32"
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.MapDeleteFast32"
-// CHECK-LABEL: define void @main.testUint64(){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssignFast64"
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1Fast64"
-// CHECK: call { ptr, i1 } @"{{.*}}/runtime/internal/runtime.MapAccess2Fast64"
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.MapDeleteFast64"
-// CHECK-LABEL: define void @main.testUnsafePointer(ptr %0){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAssignFast64Ptr"
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.MapAccess1Fast64"
-// CHECK: call { ptr, i1 } @"{{.*}}/runtime/internal/runtime.MapAccess2Fast64"
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.MapDeleteFast64"
+// CHECK-LABEL: define ptr @"main.testChannel$coro"(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapassign_fast64ptr$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess1_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess2_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapdelete_fast64$coro"
+// CHECK-LABEL: define ptr @"main.testFallback$coro"(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapassign$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess1$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess2$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapdelete$coro"
+// CHECK-LABEL: define ptr @"main.testInt$coro"(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapassign_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess1_fast64$coro"
+// CHECK-LABEL: define ptr @"main.testPointer$coro"(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapassign_fast64ptr$coro"
+// CHECK-DAG: ptrtoint ptr %2 to i64
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess1_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess2_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapdelete_fast64$coro"
+// CHECK-LABEL: define ptr @"main.testString$coro"(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapassign_faststr$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess1_faststr$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess2_faststr$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapdelete_faststr$coro"
+// CHECK-LABEL: define ptr @"main.testStringFunc$coro"(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.mapassign_faststr$coro"
+// CHECK-LABEL: define ptr @"main.testUint32$coro"(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapassign_fast32$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess1_fast32$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess2_fast32$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapdelete_fast32$coro"
+// CHECK-LABEL: define ptr @"main.testUint64$coro"(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapassign_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess1_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess2_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapdelete_fast64$coro"
+// CHECK-LABEL: define ptr @"main.testUnsafePointer$coro"(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapassign_fast64ptr$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess1_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapaccess2_fast64$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.mapdelete_fast64$coro"
 
 func testUint32() {
 	m := make(map[named32]int)

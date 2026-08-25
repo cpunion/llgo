@@ -26,7 +26,7 @@ func main() {
 // These assertions intentionally cover protocol boundaries rather than the
 // scheduler's internal block layout.
 // CHECK-LABEL: define ptr @"main.init$coro"(
-// CHECK: call ptr @"sync.init$coro"(
+// CHECK: call void @"sync.init$outcome"(
 
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @"sync.(*WaitGroup).Add$coro"(

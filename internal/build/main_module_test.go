@@ -516,30 +516,60 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 	llvm.InitializeAllTargets()
 	t.Setenv(llgoStdioNobuf, "")
 	tests := []struct {
-		name      string
-		target    *llssa.Target
-		goos      string
-		goarch    string
-		uintptrIR string
-		entryIR   string
-		entryName string
+		name        string
+		target      *llssa.Target
+		targetName  string
+		buildTags   []string
+		goos        string
+		goarch      string
+		uintptrIR   string
+		entryIR     string
+		entryName   string
+		driverName  string
+		runtimeMain bool
+		skipObject  bool
 	}{
 		{
-			name:      "native",
-			goos:      "linux",
-			goarch:    "amd64",
-			uintptrIR: "i64",
-			entryIR:   "define i32 @main(",
-			entryName: "main",
+			name:        "native",
+			goos:        "linux",
+			goarch:      "amd64",
+			uintptrIR:   "i64",
+			entryIR:     "define i32 @main(",
+			entryName:   "main",
+			driverName:  runtimeMainSymbol,
+			runtimeMain: true,
 		},
 		{
-			name:      "wasm",
-			target:    &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"},
-			goos:      "wasip1",
-			goarch:    "wasm",
-			uintptrIR: "i32",
-			entryIR:   "define hidden i32 @__main_argc_argv(",
-			entryName: "__main_argc_argv",
+			name:       "wasm",
+			target:     &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"},
+			goos:       "wasip1",
+			goarch:     "wasm",
+			uintptrIR:  "i32",
+			entryIR:    "define hidden i32 @__main_argc_argv(",
+			entryName:  "__main_argc_argv",
+			driverName: "__main_argc_argv",
+		},
+		{
+			name: "named wasm",
+			target: &llssa.Target{
+				GOOS:       "linux",
+				GOARCH:     "arm",
+				Target:     "wasm-unknown",
+				LLVMTarget: "wasm32-unknown-unknown",
+				Resolved: &llssa.TargetSpec{
+					Triple: "wasm32-unknown-unknown",
+					CPU:    "generic",
+				},
+			},
+			targetName: "wasm-unknown",
+			buildTags:  []string{"tinygo.wasm", "wasm_unknown"},
+			goos:       "linux",
+			goarch:     "arm",
+			uintptrIR:  "i32",
+			entryIR:    "define i32 @main(",
+			entryName:  "main",
+			driverName: "main",
+			skipObject: true,
 		},
 	}
 	for _, test := range tests {
@@ -549,9 +579,12 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			ctx := &context{
 				prog: prog,
 				buildConf: &Config{
-					BuildMode: BuildModeExe,
-					Goos:      test.goos,
-					Goarch:    test.goarch},
+					BuildMode:               BuildModeExe,
+					Target:                  test.targetName,
+					Goos:                    test.goos,
+					Goarch:                  test.goarch,
+					resolvedTargetBuildTags: test.buildTags,
+				},
 			}
 			const anchor = "__llgo_coro_root_package_v1.0123456789abcdef0123456789abcdef"
 			var programHash [16]byte
@@ -627,11 +660,15 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			}
 
 			mod := entry.LPkg.Module()
+			runtimeMain := mod.NamedFunction(runtimeMainSymbol)
+			if present := !runtimeMain.IsNil(); present != test.runtimeMain {
+				t.Fatalf("runtime.main presence = %t, want %t:\n%s", present, test.runtimeMain, ir)
+			}
 			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
-				assertCoroProgramNativeSliceV2(t, mod, test.entryName)
+				assertCoroProgramNativeSliceV2(t, mod, test.driverName)
 			} else if hostCoroPullRuntimeABI(ctx.buildConf) {
 				assertCoroProgramHostSliceV2(
-					t, mod, test.entryName, wasiCoroCommandRuntimeABI(ctx.buildConf),
+					t, mod, test.driverName, wasiCoroCommandRuntimeABI(ctx.buildConf),
 				)
 				assertCoroHostPullRetentionV1(t, mod, test.entryName)
 			} else {
@@ -675,6 +712,11 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			}
 
 			entryBody := mod.NamedFunction(test.entryName).String()
+			driver := mod.NamedFunction(test.driverName)
+			if driver.IsNil() || driver.IsDeclaration() {
+				t.Fatalf("mixed v2 startup driver %q is missing:\n%s", test.driverName, ir)
+			}
+			driverBody := driver.String()
 			for _, legacyCall := range []string{
 				"call void @\"" + llssa.PkgRuntime + ".init\"()",
 				"call void @\"init$abitypes\"()",
@@ -682,22 +724,36 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 				"call void @\"example.com/foo.init\"()",
 				"call void @\"example.com/foo.main\"()",
 			} {
-				if strings.Contains(entryBody, legacyCall) {
-					t.Fatalf("mixed v2 platform entry retained legacy call %q:\n%s", legacyCall, entryBody)
+				if strings.Contains(driverBody, legacyCall) {
+					t.Fatalf("mixed v2 startup driver retained legacy call %q:\n%s", legacyCall, driverBody)
 				}
 			}
 			driverCall := "call void @" + coroProgramRunSymbolV1
 			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) || hostCoroPullRuntimeABI(ctx.buildConf) {
 				driverCall = "call i32 @" + coroProgramRunSliceSymbolV2
 			}
-			assertInOrder(t, entryBody,
-				"call void @"+coroFrameAllocatorBootstrapSymbolV1+"()",
-				"call void @Py_Initialize()",
-				"call ptr @"+coroProgramBeginSymbolV1,
-				"call ptr @"+coroProgramBootstrapFactorySymbolV2,
-				driverCall,
-				"call void @Py_Finalize()",
-			)
+			if test.driverName == test.entryName {
+				assertInOrder(t, entryBody,
+					"call void @"+coroFrameAllocatorBootstrapSymbolV1+"()",
+					"call void @Py_Initialize()",
+					"call ptr @"+coroProgramBeginSymbolV1,
+					"call ptr @"+coroProgramBootstrapFactorySymbolV2,
+					driverCall,
+					"call void @Py_Finalize()",
+				)
+			} else {
+				assertInOrder(t, entryBody,
+					"call void @"+coroFrameAllocatorBootstrapSymbolV1+"()",
+					"call void @"+test.driverName+"()",
+				)
+				assertInOrder(t, driverBody,
+					"call void @Py_Initialize()",
+					"call ptr @"+coroProgramBeginSymbolV1,
+					"call ptr @"+coroProgramBootstrapFactorySymbolV2,
+					driverCall,
+					"call void @Py_Finalize()",
+				)
+			}
 			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("verify mixed v2 main module before coroutine passes: %v\n%s", err, ir)
 			}
@@ -714,6 +770,9 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 				if regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(intrinsic) + `\b`).MatchString(post) {
 					t.Fatalf("lowered mixed v2 main module still references %s:\n%s", intrinsic, post)
 				}
+			}
+			if test.skipObject {
+				return
 			}
 			object, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
 			if err != nil {

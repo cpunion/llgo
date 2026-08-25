@@ -211,3 +211,33 @@ func isRecoverTransparentWrapper(fn *ssa.Function) bool {
 		strings.HasPrefix(fn.Synthetic, "thunk for ") ||
 		strings.HasPrefix(fn.Synthetic, "bound method wrapper for ")
 }
+
+// recoverCallValueMayRecover classifies the exact callable operand whose code
+// token a transparent wrapper may need to forward. Go functions and closures
+// consume the compilation-wide recover facts; dynamic/interface values remain
+// conservative because their concrete target is selected by a separate frozen
+// dispatch plan.
+func recoverCallValueMayRecover(facts *recoverFacts, value ssa.Value) bool {
+	switch value := value.(type) {
+	case *ssa.Builtin:
+		return false
+	case *ssa.Function:
+		if facts == nil {
+			facts = newRecoverFacts()
+		}
+		return facts.needsRecoverScope(value)
+	case *ssa.MakeClosure:
+		if fn, ok := value.Fn.(*ssa.Function); ok {
+			if facts == nil {
+				facts = newRecoverFacts()
+			}
+			return facts.needsRecoverScope(fn)
+		}
+		return true
+	case *ssa.Call:
+		// The callable is the result of a factory call, not the factory itself.
+		return true
+	default:
+		return true
+	}
+}

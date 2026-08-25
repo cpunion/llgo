@@ -408,8 +408,12 @@ func (p *context) compileCoroStaticOutcomeCall(
 	args := p.compileValues(b, call.Call.Args, p.funcKind(call.Call.Value))
 	source, _ := call.Call.Value.(*ssa.Function)
 	args = p.compileManagedGoLinknameCallArguments(b, source, callee, args)
-	result := p.compileCoroStaticOutcomeTargetCallResult(
+	if instructionPlan.recoverAlias {
+		p.observeCoroPhysicalRecoverAlias(call)
+	}
+	result := p.compileCoroStaticOutcomeTargetCallAliasResult(
 		b, callee, args, instructionPlan.directOutcomeNativeResult,
+		instructionPlan.recoverAlias,
 	)
 	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, result.value)
 	if !retagged {
@@ -439,6 +443,18 @@ func (p *context) compileCoroStaticOutcomeTargetCallResult(
 	callee *ssa.Function,
 	args []llssa.Expr,
 	nativeResult bool,
+) coroAwaitedValue {
+	return p.compileCoroStaticOutcomeTargetCallAliasResult(
+		b, callee, args, nativeResult, false,
+	)
+}
+
+func (p *context) compileCoroStaticOutcomeTargetCallAliasResult(
+	b llssa.Builder,
+	callee *ssa.Function,
+	args []llssa.Expr,
+	nativeResult bool,
+	transparentRecoverAlias bool,
 ) coroAwaitedValue {
 	if !p.hasStructuredOutcomePhysicalBody() || callee == nil || len(callee.FreeVars) != 0 {
 		panic("static outcome target call escaped its context-free structured body")
@@ -492,7 +508,16 @@ func (p *context) compileCoroStaticOutcomeTargetCallResult(
 		b.Convert(p.prog.VoidPtr(), completion),
 	)
 	physicalArgs = append(physicalArgs, args...)
-	b.Call(calleeFn.Expr, physicalArgs...)
+	if transparentRecoverAlias {
+		if !p.hasCoroPhysicalBody() {
+			panic("transparent recover alias cannot execute from an outcome-plain wrapper")
+		}
+		p.callCoroTransparentRecoverAlias(b, calleeFn.Expr, func() llssa.Expr {
+			return b.Call(calleeFn.Expr, physicalArgs...)
+		})
+	} else {
+		b.Call(calleeFn.Expr, physicalArgs...)
+	}
 	p.dispatchOutcomePlainCompletion(b, completion)
 	return coroAwaitedValue{
 		value:   p.loadCoroAwaitResult(b, resultSlot, sourceSig.Results()),

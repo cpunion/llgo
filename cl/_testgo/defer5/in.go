@@ -5,21 +5,9 @@ package main
 // flows through each lowering path without depending on numbered globals.
 
 func main() {
-	// The function installs one defer frame and preserves both the previous
-	// thread frame and the initial resume block used after longjmp.
-	// DARWIN-ARM64: [[SETJMP_RESULT:%[0-9]+]] = call i32 @sigsetjmp(ptr [[DEFER_JMPBUF]], i32 0)
-	// LINUX-AMD64: [[SETJMP_RESULT:%[0-9]+]] = call i32 @__sigsetjmp(ptr [[DEFER_JMPBUF]], i32 0)
-
-
-	// Plain println defers are registered as linked nodes.  Their state and
-	// payload identify A as the outer defer and B as the inner one.
-
-	// The state machine invokes defer 2 first, then enters a recover frame for
-	// defer 1.  Capturing block labels keeps the relation without pinning their
-	// generated numbers.
-
-	// Both linked println nodes are popped, freed, and printed through the
-	// values read from the same defer-head field.
+	// The stackless cleanup state machine invokes defer 2 first, then transfers
+	// the replacement panic through defer 1's recover frame. No native
+	// setjmp/longjmp defer frame is part of this path.
 	defer println("A")
 	defer func() {
 		if e := recover(); e != nil {
@@ -36,13 +24,14 @@ func main() {
 }
 
 // CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK-NOT: sigsetjmp
 // CHECK: call void @__llgo_coro_panic_prepare_v1(
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-LABEL: define ptr @"main.main$1$coro"(
-// CHECK: call void @__llgo_coro_recover_take_v1(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
-// CHECK: call void @__llgo_coro_panic_prepare_v1(
+// CHECK-DAG: call void @__llgo_coro_recover_take_v1(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
+// CHECK-DAG: call void @__llgo_coro_panic_prepare_v1(
 // CHECK-LABEL: define ptr @"main.main$2$coro"(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
-// CHECK: call void @__llgo_coro_panic_prepare_v1(
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
+// CHECK-DAG: call void @__llgo_coro_panic_prepare_v1(

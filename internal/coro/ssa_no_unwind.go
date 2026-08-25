@@ -582,6 +582,13 @@ func (a *ssaExactNoUnwindAnalysis) pointerProvenNonNil(value ssa.Value, use ssa.
 		// Alloc itself is outside the recipe, but recognizing its result here
 		// keeps the pointer rule local and does not make an allocating body pass.
 		return true
+	case *ssa.FreeVar:
+		// A lexical source closure captures a variable through the address of
+		// its compiler-created storage cell. That address is never nil; the
+		// captured value loaded from the cell retains its own independent nil
+		// proof. Synthetic wrappers can carry receiver values directly and are
+		// deliberately excluded from this structural guarantee.
+		return value.Parent() == a.fn && a.sourceClosureFreeVarCell(value)
 	case *ssa.FieldAddr:
 		return a.pointerProvenNonNil(value.X, value)
 	case *ssa.IndexAddr:
@@ -592,6 +599,18 @@ func (a *ssaExactNoUnwindAnalysis) pointerProvenNonNil(value ssa.Value, use ssa.
 		return a.fixedArrayIndexProven(value.X, value.Index, value, use)
 	}
 	return a.valueProvenNonNil(value, use)
+}
+
+func (a *ssaExactNoUnwindAnalysis) sourceClosureFreeVarCell(value *ssa.FreeVar) bool {
+	if value == nil || a == nil || a.fn == nil {
+		return false
+	}
+	function := value.Parent()
+	if function != a.fn || function.Parent() == nil || function.Synthetic != "" {
+		return false
+	}
+	_, pointer := types.Unalias(value.Type()).Underlying().(*types.Pointer)
+	return pointer
 }
 
 // fixedArrayIndexProven accepts only an exact fixed-array representation and

@@ -117,7 +117,13 @@ func (p *context) compileCoroExactInterfaceCall(
 	// makes all operands available before the invoke instruction.
 	arguments = append(arguments, p.compileValue(b, receiver))
 	arguments = append(arguments, p.compileValues(b, call.Common().Args, fnNormal)...)
-	return b.Call(function.Expr, arguments...)
+	if !instructionPlan.recoverAlias {
+		return b.Call(function.Expr, arguments...)
+	}
+	p.observeCoroPhysicalRecoverAlias(call)
+	return p.callCoroTransparentRecoverAlias(b, function.Expr, func() llssa.Expr {
+		return b.Call(function.Expr, arguments...)
+	})
 }
 
 // tryCompileCoroRawPlainExactInterfaceCall reuses the same occurrence-local
@@ -196,8 +202,12 @@ func (p *context) compileCoroExactInterfaceAwait(
 	arguments = append(arguments, p.compileValue(b, receiver))
 	arguments = append(arguments, p.compileValues(b, call.Common().Args, fnNormal)...)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	result := p.compileCoroTargetAwaitWithContextAndRecoveryResult(
+	if instructionPlan.recoverAlias {
+		p.observeCoroPhysicalRecoverAlias(call)
+	}
+	result := p.compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
 		b, target, llssa.Nil, arguments, nil, keepaliveSlots,
+		instructionPlan.recoverAlias,
 	)
 	p.recordCoroValueAddress(call, result.address)
 	return result.value

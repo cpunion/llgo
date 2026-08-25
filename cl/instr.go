@@ -2649,7 +2649,8 @@ func (p *context) emitDo(b llssa.Builder, act llssa.DoAction, ds *explicitDeferS
 	}
 	switch act {
 	case llssa.Call, llssa.Go:
-		if act == llssa.Call && isRecoverTransparentWrapper(p.goFn) {
+		if act == llssa.Call && !p.hasStructuredOutcomePhysicalBody() &&
+			isRecoverTransparentWrapper(p.goFn) {
 			return b.CallRecoverAlias(p.fn.Expr, mayRecover, fn, buildCall, args...)
 		}
 		return b.Do(act, fn, buildCall, args...)
@@ -2659,22 +2660,43 @@ func (p *context) emitDo(b llssa.Builder, act llssa.DoAction, ds *explicitDeferS
 	}
 }
 
-func (p *context) callMayRecover(v ssa.Value) bool {
-	switch v := v.(type) {
-	case *ssa.Builtin:
+func (p *context) coroSourceCallRecoverAliasPlanned(source ssa.CallInstruction) bool {
+	call, ok := source.(*ssa.Call)
+	if !ok || call == nil {
 		return false
-	case *ssa.Function:
-		return p.needsRecoverScope(v)
-	case *ssa.MakeClosure:
-		if fn, ok := v.Fn.(*ssa.Function); ok {
-			return p.needsRecoverScope(fn)
-		}
-		return true
-	case *ssa.Call:
-		// The deferred callee is the call result, not the factory function.
-		return true
 	}
-	return true
+	physical, planned := p.plannedCoroPhysicalRecoverAlias(call)
+	return planned && physical.recoverAlias
+}
+
+// emitDoAtSource is the ordinary-call bridge for a frozen physical
+// transparent wrapper. The token comes from the already-lowered callable
+// value; no symbol or descriptor pointer is reverse-mapped at run time.
+func (p *context) emitDoAtSource(
+	b llssa.Builder, act llssa.DoAction, ds *explicitDeferStack,
+	mayRecover bool, source ssa.CallInstruction, fn llssa.Expr,
+	buildCall func(llssa.Builder, llssa.Expr, ...llssa.Expr) llssa.Expr,
+	args ...llssa.Expr,
+) llssa.Expr {
+	if p.coroSourceCallRecoverAliasPlanned(source) {
+		call, ok := source.(*ssa.Call)
+		if !ok || act != llssa.Call || ds != nil || !p.hasCoroPhysicalBody() {
+			panic("frozen coroutine recover alias escaped one ordinary physical call")
+		}
+		token := b.RecoverCallToken(fn, mayRecover)
+		if token.IsNil() {
+			panic("frozen coroutine recover alias has no compiler-carried target token")
+		}
+		p.observeCoroPhysicalRecoverAlias(call)
+		return p.callCoroTransparentRecoverAlias(b, token, func() llssa.Expr {
+			return buildCall(b, fn, args...)
+		})
+	}
+	return p.emitDo(b, act, ds, mayRecover, fn, buildCall, args...)
+}
+
+func (p *context) callMayRecover(v ssa.Value) bool {
+	return recoverCallValueMayRecover(p.recoverAnalysis(), v)
 }
 
 func (p *context) staticArrayLenBuiltinArg(b llssa.Builder, arg ssa.Value) (llssa.Expr, bool) {
@@ -2905,7 +2927,8 @@ func (p *context) callEx(
 		o := p.compileValue(b, cv)
 		var fn llssa.Expr
 		needsRecoverToken := act != llssa.Call && act != llssa.Go
-		if act == llssa.Call && isRecoverTransparentWrapper(p.goFn) {
+		if act == llssa.Call && (p.coroSourceCallRecoverAliasPlanned(source) ||
+			!p.hasStructuredOutcomePhysicalBody() && isRecoverTransparentWrapper(p.goFn)) {
 			needsRecoverToken = true
 		}
 		if needsRecoverToken {
@@ -2918,7 +2941,7 @@ func (p *context) callEx(
 			hasVArg = fnHasVArg
 		}
 		args := p.compileValues(b, call.Args, hasVArg)
-		ret = p.emitDo(b, act, ds, true, fn, llssa.Builder.Call, args...)
+		ret = p.emitDoAtSource(b, act, ds, true, source, fn, llssa.Builder.Call, args...)
 		if reflectCheck.Kind&llssa.ReflectTypeMethodByName != 0 && reflectCheck.Name == "" {
 			b.MarkReflectTypeMethodByNameExpr(ret, 1)
 		}
@@ -3049,7 +3072,7 @@ func (p *context) callEx(
 			return
 		}
 		args := p.compileValues(b, args, kind)
-		ret = p.emitDo(b, act, ds, false, llssa.Builtin(fn), llssa.Builder.Call, args...)
+		ret = p.emitDoAtSource(b, act, ds, false, source, llssa.Builtin(fn), llssa.Builder.Call, args...)
 	case *ssa.Function:
 		aFn, pyFn, ftype := p.compileFunction(cv)
 		// TODO(xsw): check ca != llssa.Call
@@ -3058,19 +3081,19 @@ func (p *context) callEx(
 			p.inCFunc = true
 			args := p.compileValues(b, args, kind)
 			p.inCFunc = false
-			ret = p.emitDo(b, act, ds, mayRecover, aFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDoAtSource(b, act, ds, mayRecover, source, aFn.Expr, llssa.Builder.Call, args...)
 		case goFunc:
 			args := p.compileValues(b, args, kind)
 			args = p.compileManagedGoLinknameCallArguments(
 				b, linknameSource, linknameTarget, args,
 			)
-			ret = p.emitDo(b, act, ds, mayRecover, aFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDoAtSource(b, act, ds, mayRecover, source, aFn.Expr, llssa.Builder.Call, args...)
 			ret, _ = p.compileManagedGoLinknameCallResult(
 				b, linknameSource, linknameTarget, ret,
 			)
 		case pyFunc:
 			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, mayRecover, pyFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDoAtSource(b, act, ds, mayRecover, source, pyFn.Expr, llssa.Builder.Call, args...)
 		case llgoPyList:
 			args := p.compileValues(b, args, fnHasVArg)
 			ret = b.PyList(args...)
@@ -3365,7 +3388,7 @@ func (p *context) callEx(
 		if rawC {
 			p.inCFunc = false
 		}
-		ret = p.emitDo(b, act, ds, mayRecover, fn, llssa.Builder.Call, args...)
+		ret = p.emitDoAtSource(b, act, ds, mayRecover, source, fn, llssa.Builder.Call, args...)
 	}
 	return
 }

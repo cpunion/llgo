@@ -322,6 +322,14 @@ func coroPhysicalConstantReachableBlocks(fn *ssa.Function) map[*ssa.BasicBlock]b
 		return reachable
 	}
 	queue := []*ssa.BasicBlock{fn.Blocks[0]}
+	if fn.Recover != nil && fn.Recover != fn.Blocks[0] {
+		// x/tools represents the exceptional recover continuation as a second
+		// semantic root with no ordinary CFG predecessor. Both the legacy unwind
+		// path and the explicit-status cleanup drainer can enter it, so treating
+		// it as dead would freeze frontend-unevaluated instructions and let LLVM
+		// optimize a real recovered return through unreachable behavior.
+		queue = append(queue, fn.Recover)
+	}
 	for len(queue) != 0 {
 		block := queue[0]
 		queue = queue[1:]
@@ -513,7 +521,7 @@ func (a *coroPhysicalPureSSAAudit) derefRequiresImplicitNilFault(deref *ssa.UnOp
 	if a == nil || deref == nil || deref.Op != token.MUL {
 		return false
 	}
-	if ssaValueProvenNonNilAt(deref.X, deref) {
+	if ssaAddressValueProvenNonNilAt(deref.X, deref) {
 		return false
 	}
 	if _, _, synthetic := coroSliceToArrayValueDeref(deref, a.typeOf); synthetic {

@@ -52,6 +52,13 @@ func RootRepanic(doPanic bool) {
 	defer CatchAndRepanic()
 	if doPanic { panic(&FirstPayload) }
 }
+
+func DeferRecoverBuiltin() { defer recover() }
+
+func RootNestedBuiltin(doPanic bool) {
+	defer DeferRecoverBuiltin()
+	if doPanic { panic(&FirstPayload) }
+}
 `
 
 func TestCoroExplicitStatusRecoverIRNativeAndWasm32(t *testing.T) {
@@ -103,6 +110,8 @@ func assertCoroRecoverIR(t *testing.T, module llvm.Module, split bool) {
 	rootNil := function("RootRecoverNil")
 	rootRepanic := function("RootRepanic")
 	catchAndRepanic := function("CatchAndRepanic")
+	rootNestedBuiltin := function("RootNestedBuiltin")
+	deferRecoverBuiltin := function("DeferRecoverBuiltin")
 
 	if got := countCoroIRDirectCalls(rootRecover, coroAwaitPrepareInlineHookV4); got != 1 {
 		t.Fatalf("RootRecover await_prepare_v3 calls = %d, want 1 (post-split=%t):\n%s", got, split, rootRecover.String())
@@ -132,8 +141,17 @@ func assertCoroRecoverIR(t *testing.T, module llvm.Module, split bool) {
 	if strings.Contains(catchAndRepanic.String(), "@foo.FirstPayload") {
 		t.Fatalf("CatchAndRepanic retained the recovered payload as its repanic payload (post-split=%t):\n%s", split, catchAndRepanic.String())
 	}
+	if got := countCoroIRDirectCalls(rootNestedBuiltin, coroAwaitPrepareInlineHookV4); got != 1 {
+		t.Fatalf("RootNestedBuiltin await_prepare_v3 calls = %d, want 1 (post-split=%t):\n%s", got, split, rootNestedBuiltin.String())
+	}
+	if got := countCoroIRDirectCalls(deferRecoverBuiltin, coroRecoverTakeHookV1); got != 1 {
+		t.Fatalf("deferred recover builtin take calls = %d, want 1 (post-split=%t):\n%s", got, split, deferRecoverBuiltin.String())
+	}
 
-	for _, value := range []llvm.Value{rootRecover, catch, rootNil, rootRepanic, catchAndRepanic} {
+	for _, value := range []llvm.Value{
+		rootRecover, catch, rootNil, rootRepanic, catchAndRepanic,
+		rootNestedBuiltin, deferRecoverBuiltin,
+	} {
 		if legacy := firstLegacyRecoverCall(value); legacy != "" {
 			t.Fatalf("%s calls legacy recover helper %q (post-split=%t):\n%s", value.Name(), legacy, split, value.String())
 		}
@@ -223,11 +241,13 @@ func compileCoroRecoverIRFixture(
 		t.Fatal(err)
 	}
 	functions := map[string]*ssa.Function{
-		"Catch":           ssaPkg.Func("Catch"),
-		"CatchAndRepanic": ssaPkg.Func("CatchAndRepanic"),
-		"RootRecover":     ssaPkg.Func("RootRecover"),
-		"RootRecoverNil":  ssaPkg.Func("RootRecoverNil"),
-		"RootRepanic":     ssaPkg.Func("RootRepanic"),
+		"Catch":               ssaPkg.Func("Catch"),
+		"CatchAndRepanic":     ssaPkg.Func("CatchAndRepanic"),
+		"RootRecover":         ssaPkg.Func("RootRecover"),
+		"RootRecoverNil":      ssaPkg.Func("RootRecoverNil"),
+		"RootRepanic":         ssaPkg.Func("RootRepanic"),
+		"DeferRecoverBuiltin": ssaPkg.Func("DeferRecoverBuiltin"),
+		"RootNestedBuiltin":   ssaPkg.Func("RootNestedBuiltin"),
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
@@ -237,6 +257,7 @@ func compileCoroRecoverIRFixture(
 		{Function: functions["RootRecover"], Demand: coro.AsyncDemand},
 		{Function: functions["RootRecoverNil"], Demand: coro.AsyncDemand},
 		{Function: functions["RootRepanic"], Demand: coro.AsyncDemand},
+		{Function: functions["RootNestedBuiltin"], Demand: coro.AsyncDemand},
 	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,

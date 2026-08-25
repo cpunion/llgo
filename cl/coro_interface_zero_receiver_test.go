@@ -92,10 +92,14 @@ func Root(runner Runner) int { return runner.Run() }
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
-		EmissionUniverse:     ssaUniverse,
-		FunctionIDs:          functionIDs,
-		DynamicResolution:    coro.DynamicCHAClosed,
-		MaxPlainInstructions: -1,
+		EmissionUniverse:               ssaUniverse,
+		FunctionIDs:                    functionIDs,
+		DynamicResolution:              coro.DynamicCHAClosed,
+		MaxPlainInstructions:           -1,
+		OutcomeMode:                    coro.OutcomeExplicitStatus,
+		ClassifyDemandReferences:       universe.CoroDemandReferences,
+		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
+		ClassifyManagedValueReferences: universe.CoroPlanningMetadata().ManagedValueReferences,
 	})
 	if err != nil {
 		t.Fatal(err)

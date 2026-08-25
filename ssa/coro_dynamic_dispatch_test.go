@@ -112,6 +112,12 @@ func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
 	assertCoroDynamicDispatchGuards(t, ir, "dynamic_coro_call", true)
 	assertCoroDynamicDispatchGuards(t, ir, "dynamic_plain_call", false)
 	assertCoroDynamicDispatchProbeGuards(t, ir, "dynamic_has_coro")
+	assertCoroDynamicDispatchProbeGuards(t, ir, "dynamic_has_coro_and_code")
+	pairProbe := coroPlainDispatchIRFunction(ir, "dynamic_has_coro_and_code")
+	if !regexp.MustCompile(`extractvalue \{ i32, i32, i64, i64, ptr, ptr, i64, i64, ptr \} [^,]+, 8`).MatchString(pairProbe) ||
+		!strings.Contains(pairProbe, "ret { i1, ptr }") {
+		t.Fatalf("dynamic capability/code probe does not return the compiler-injected code identity:\n%s", pairProbe)
+	}
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify dynamic coroutine dispatch module: %v\n%s", err, ir)
 	}
@@ -145,10 +151,18 @@ func TestCoroDynamicDispatchV1RejectsInvalidCapabilitiesAndEntries(t *testing.T)
 
 	physical := fixture.prog.PhysicalFuncDecl(fixture.signature, InGo)
 	badPlain := fixture.pkg.NewFunc("bad_plain_entry", physical, InC)
-	options = fixture.descriptorOptions(CoroDispatchFlagHasPlain)
+	options = fixture.descriptorOptions(CoroDispatchFlagHasPlain | CoroDispatchFlagPlainNoUnwind)
 	options.PlainEntry = badPlain.Expr
 	coroPlainDispatchMustPanicContains(t, "plain entry does not match", func() {
 		fixture.pkg.NewCoroDispatchDescriptor("bad_plain_signature", options)
+	})
+	options = fixture.descriptorOptions(CoroDispatchFlagHasPlain)
+	coroPlainDispatchMustPanicContains(t, "plain-only capability requires PlainNoUnwind", func() {
+		fixture.pkg.NewCoroDispatchDescriptor("plain_without_no_unwind", options)
+	})
+	options = fixture.descriptorOptions(CoroDispatchFlagHasCoro | CoroDispatchFlagPlainNoUnwind)
+	coroPlainDispatchMustPanicContains(t, "PlainNoUnwind requires HasPlain", func() {
+		fixture.pkg.NewCoroDispatchDescriptor("no_unwind_without_plain", options)
 	})
 
 	options = fixture.descriptorOptions(CoroDispatchFlagHasCoro)
@@ -306,7 +320,7 @@ func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
 
 	descriptor := pkg.NewCoroDispatchDescriptor("variadic_descriptor", CoroDispatchDescriptorOptions{
 		Version:    CoroDispatchVersionV1,
-		Flags:      CoroDispatchFlagHasPlain,
+		Flags:      CoroDispatchFlagHasPlain | CoroDispatchFlagPlainNoUnwind,
 		ABIHash:    hash,
 		Signature:  signature,
 		PlainEntry: entry.Expr,
@@ -447,6 +461,17 @@ func newCoroDynamicDispatchTestFixture(t *testing.T) *coroDynamicDispatchTestFix
 	probeBuilder.Return(probeBuilder.CoroDispatchHasCoro(probeCaller.Param(0), callOptions))
 	probeBuilder.EndBuild()
 	probeBuilder.Dispose()
+
+	pairProbeSig := coroPlainDispatchTestSignature(
+		[]types.Type{signature},
+		[]types.Type{types.Typ[types.Bool], types.Typ[types.UnsafePointer]},
+	)
+	pairProbe := pkg.NewFunc("dynamic_has_coro_and_code", pairProbeSig, InGo)
+	pairProbeBuilder := pairProbe.MakeBody(1)
+	hasCoro, codeEntry := pairProbeBuilder.CoroDispatchHasCoroAndCodeEntry(pairProbe.Param(0), callOptions)
+	pairProbeBuilder.Return(hasCoro, codeEntry)
+	pairProbeBuilder.EndBuild()
+	pairProbeBuilder.Dispose()
 	return fixture
 }
 
@@ -481,11 +506,14 @@ func assertCoroDynamicDispatchGuards(t *testing.T, ir, name string, coro bool) {
 		"coro.dispatch.capability.missing",
 		"coro.dispatch.plain.entry.mismatch",
 		"coro.dispatch.coro.entry.mismatch",
+		"coro.dispatch.plain.no-unwind-without-plain",
+		"coro.dispatch.plain-only.no-unwind-missing",
 		"coro.dispatch.nocapture.env.nonnull",
 		"coro.dispatch.hash.invalid",
 		"coro.dispatch.runtime-type.invalid",
 		"coro.dispatch.result.size.invalid",
 		"coro.dispatch.result.align.invalid",
+		"coro.dispatch.code.nil",
 	} {
 		if !strings.Contains(body, guard) {
 			t.Fatalf("dynamic caller %q lacks fail-closed guard %q:\n%s", name, guard, body)
@@ -547,8 +575,9 @@ func assertCoroDynamicDispatchProbeGuards(t *testing.T, ir, name string) {
 		assertCall > descriptorLoad || descriptorLoad > guardBranch {
 		t.Fatalf("dynamic capability probe %q does not validate nil then descriptor before probing:\n%s", name, body)
 	}
-	if !regexp.MustCompile(`and i32 [^,]+, 2`).MatchString(body) ||
-		!regexp.MustCompile(`ret i1 %[^ ]+`).MatchString(body) {
+	returnsCapability := regexp.MustCompile(`ret i1 %[^ ]+`).MatchString(body) ||
+		regexp.MustCompile(`insertvalue \{ i1, ptr \} [^,]+, i1 %[^,]+, 0`).MatchString(body)
+	if !regexp.MustCompile(`and i32 [^,]+, 2`).MatchString(body) || !returnsCapability {
 		t.Fatalf("dynamic capability probe %q does not return the HasCoro flag:\n%s", name, body)
 	}
 }

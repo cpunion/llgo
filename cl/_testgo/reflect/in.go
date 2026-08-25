@@ -27,7 +27,7 @@ import (
 // CHECK: call ptr @"reflect.Value.CallSlice$coro"(
 // CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @"main.callSlice$coro"(
-// CHECK-LABEL: define linkonce ptr @__llgo_coro_func_coro_v1.method-value.{{.*}}(ptr %0, ptr %1, ptr %2, ptr %3, i64 %4) {
+// CHECK-LABEL: define linkonce ptr @__llgo_coro_func_coro_v1.method-value.{{.*}}(ptr %0, ptr %1, ptr %2, ptr %3, i64 %4){{.*}} {
 // CHECK: call ptr @"main.(*T).Add$coro"(ptr %0, ptr %1, ptr %3, i64 %4)
 // CHECK-NOT: __llgo_stub.
 

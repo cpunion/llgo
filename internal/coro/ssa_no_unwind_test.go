@@ -27,6 +27,35 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestAnalyzeSSAExactNoUnwindProvesOnlyLexicalClosureCaptureCells(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "closure_capture_cell.go", `package coroid
+func safe(seed int) func(int) int {
+	return func(value int) int { return seed + value }
+}
+func nullable(pointer *int) func() int {
+	return func() int { return *pointer }
+}
+`)
+	safe := packageFunction(t, pkg, "safe")
+	nullable := packageFunction(t, pkg, "nullable")
+	if len(safe.AnonFuncs) != 1 || len(nullable.AnonFuncs) != 1 {
+		t.Fatalf("anonymous functions = safe:%d nullable:%d, want one each", len(safe.AnonFuncs), len(nullable.AnonFuncs))
+	}
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: safe, Demand: SyncDemand},
+		{Function: nullable, Demand: SyncDemand},
+	}, SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, plan, safe.AnonFuncs[0]); got.Exec.Contains(MayUnwind) {
+		t.Fatalf("safe lexical capture cell remains may-unwind: %+v", got)
+	}
+	if got := functionPlanFor(t, plan, nullable.AnonFuncs[0]); !got.Exec.Contains(MayUnwind) {
+		t.Fatalf("nullable value loaded from a safe capture cell lost may-unwind: %+v", got)
+	}
+}
+
 func TestAnalyzeSSATrustedNoUnwindTrustsOnlyLocalImplicitFaults(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "trusted_no_unwind.go", `package coroid
 func load(value *int) int { return *value }

@@ -63,9 +63,9 @@ func main() {
 // result remain ordinary Go values. expect.txt verifies the complete runtime
 // behavior; these checks cover only the representation boundaries.
 // CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1)
-// CHECK: call ptr @"main.zeroSizedCapture$coro"(
-// CHECK: call ptr @"main.zeroSizedAddressCapture$coro"(
-// CHECK: call ptr @"main.zeroSizedPointerCapture$coro"(
+// CHECK: call void @"main.zeroSizedCapture$outcome"(
+// CHECK: call void @"main.zeroSizedAddressCapture$outcome"(
+// CHECK: call void @"main.zeroSizedPointerCapture$outcome"(
 
 // A nil receiver is a meaningful value and must not be confused with an
 // elidable zero-sized lexical environment.
@@ -89,7 +89,7 @@ func main() {
 // CHECK-NOT: call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(
 // CHECK: { ptr @__llgo_coro_func_descriptor_v1.{{.*}}, ptr null }
 
-// CHECK-LABEL: define ptr @"main.zeroSizedCapture$1$coro"(ptr %0, ptr %1)
+// CHECK-LABEL: define i64 @"main.zeroSizedCapture$1"()
 // CHECK-NOT: AssertNilDeref
 
 // Capturing a pointer remains a real one-word environment, even when the
@@ -97,5 +97,15 @@ func main() {
 // CHECK-LABEL: define ptr @"main.zeroSizedPointerCapture$coro"(ptr %0, ptr %1, ptr %2)
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 8)
 
-// CHECK-LABEL: define ptr @"main.zeroSizedPointerCapture$1$coro"(ptr %0, ptr %1, ptr swiftself %2)
-// CHECK: load { ptr }, ptr %2
+// CHECK-LABEL: define i1 @"main.zeroSizedPointerCapture$1"(ptr swiftself %0)
+// CHECK: load { ptr }, ptr %0
+
+// The interface-method bound wrapper is a real stackless activation. Its
+// ordinary interface call must transfer direct-recover permission from the
+// invocation-unique coroutine handle to the compiler-carried method word;
+// falling back to legacy StartRecoverFrameAlias would use the wrong token and
+// also escape the frozen physical helper plan.
+// CHECK-LABEL: define linkonce ptr @"__llgo$generated$bound$IsNil$bound$llgo$promoted$v1${{.*}}$coro"(
+// CHECK: call ptr @__llgo_coro_recover_alias_begin_v1(ptr %0, ptr %coro.handle, ptr {{%[0-9]+}}, i1 true)
+// CHECK: call i1 {{%[0-9]+}}(ptr {{%[0-9]+}})
+// CHECK: call void @__llgo_coro_recover_alias_end_v1(ptr %0, ptr {{%[0-9]+}})

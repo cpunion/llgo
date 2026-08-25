@@ -971,6 +971,9 @@ func declPatchKeys(decl ast.Decl) []string {
 				out = append(out, spec.Name.Name)
 			case *ast.ValueSpec:
 				for _, name := range spec.Names {
+					if name.Name == "_" {
+						continue
+					}
 					out = append(out, name.Name)
 				}
 			}

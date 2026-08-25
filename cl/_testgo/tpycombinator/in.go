@@ -1,16 +1,16 @@
 // LITTEST darwin/arm64 linux/amd64
 package main
 
-// CHECK-LABEL: define linkonce { ptr, ptr } @"{{.*}}Y[{{.*}}int,int]"(
-// DARWIN-ARM64: call { ptr, ptr } %{{.*}}(ptr swiftself %{{.*}}, [[INT_INTERNAL:%"[^"]+"]] %{{.*}})
-// LINUX-AMD64: call { ptr, ptr } %{{.*}}(ptr nest %{{.*}}, [[INT_INTERNAL:%"[^"]+"]] %{{.*}})
-// DARWIN-ARM64: define linkonce { ptr, ptr } @"{{.*}}Y$1[{{.*}}int,int]"(ptr swiftself %{{.*}}, [[INT_INTERNAL]] %{{.*}})
-// LINUX-AMD64: define linkonce { ptr, ptr } @"{{.*}}Y$1[{{.*}}int,int]"(ptr nest %{{.*}}, [[INT_INTERNAL]] %{{.*}})
-// CHECK-LABEL: define linkonce { ptr, ptr } @"{{.*}}Y[{{.*}}string,string]"(
-// DARWIN-ARM64: call { ptr, ptr } %{{.*}}(ptr swiftself %{{.*}}, [[STRING_INTERNAL:%"[^"]+"]] %{{.*}})
-// LINUX-AMD64: call { ptr, ptr } %{{.*}}(ptr nest %{{.*}}, [[STRING_INTERNAL:%"[^"]+"]] %{{.*}})
-// DARWIN-ARM64: define linkonce { ptr, ptr } @"{{.*}}Y$1[{{.*}}string,string]"(ptr swiftself %{{.*}}, [[STRING_INTERNAL]] %{{.*}})
-// LINUX-AMD64: define linkonce { ptr, ptr } @"{{.*}}Y$1[{{.*}}string,string]"(ptr nest %{{.*}}, [[STRING_INTERNAL]] %{{.*}})
+// CHECK-LABEL: define linkonce ptr @"{{.*}}Y[{{.*}}int,int]$coro"(
+// DARWIN-ARM64: call ptr @"{{.*}}Y$1[{{.*}}int,int]$coro"(ptr %0, ptr %{{.*}}, ptr swiftself %{{.*}}, [[INT_INTERNAL:%"[^"]+"]] %{{.*}})
+// LINUX-AMD64: call ptr @"{{.*}}Y$1[{{.*}}int,int]$coro"(ptr %0, ptr %{{.*}}, ptr nest %{{.*}}, [[INT_INTERNAL:%"[^"]+"]] %{{.*}})
+// DARWIN-ARM64: define linkonce ptr @"{{.*}}Y$1[{{.*}}int,int]$coro"(ptr %0, ptr %1, ptr swiftself %2, [[INT_INTERNAL]] %3)
+// LINUX-AMD64: define linkonce ptr @"{{.*}}Y$1[{{.*}}int,int]$coro"(ptr %0, ptr %1, ptr nest %2, [[INT_INTERNAL]] %3)
+// CHECK-LABEL: define linkonce ptr @"{{.*}}Y[{{.*}}string,string]$coro"(
+// DARWIN-ARM64: call ptr @"{{.*}}Y$1[{{.*}}string,string]$coro"(ptr %0, ptr %{{.*}}, ptr swiftself %{{.*}}, [[STRING_INTERNAL:%"[^"]+"]] %{{.*}})
+// LINUX-AMD64: call ptr @"{{.*}}Y$1[{{.*}}string,string]$coro"(ptr %0, ptr %{{.*}}, ptr nest %{{.*}}, [[STRING_INTERNAL:%"[^"]+"]] %{{.*}})
+// DARWIN-ARM64: define linkonce ptr @"{{.*}}Y$1[{{.*}}string,string]$coro"(ptr %0, ptr %1, ptr swiftself %2, [[STRING_INTERNAL]] %3)
+// LINUX-AMD64: define linkonce ptr @"{{.*}}Y$1[{{.*}}string,string]$coro"(ptr %0, ptr %1, ptr nest %2, [[STRING_INTERNAL]] %3)
 
 func Y[Endo ~func(RecFct) RecFct, RecFct ~func(T) R, T, R any](f Endo) RecFct {
 	type internal[RecFct ~func(T) R, T, R any] func(internal[RecFct, T, R]) RecFct

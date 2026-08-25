@@ -13,13 +13,9 @@ func main() {
 		fmt.Println(err)
 	}()
 	// CHECK-LABEL: define ptr @"main.main$coro"(
-	// CHECK: [[LOOKUP:%[0-9]+]] = call ptr @"github.com/xgo-dev/llgo/runtime/internal/runtime.MapAccess1$coro"({{.*}}ptr @"map[_llgo_int]_llgo_int", ptr null, ptr {{%.*}})
+	// CHECK: call void @__llgo_coro_fault_payload_v2(i32 12, i64 {{%.*}}, i64 0,
+	// CHECK: [[LOOKUP:%[0-9]+]] = call ptr @"github.com/xgo-dev/llgo/runtime/internal/runtime.mapaccess1_fast64$coro"({{.*}}ptr @"map[_llgo_int]_llgo_int", ptr null, i64 0)
 	// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[LOOKUP]]
 	m := [0]map[int]int{}[a][0]
 	print(m)
 }
-
-// DARWIN-ARM64-NEXT:   %[[TMP1:[0-9]+]] = alloca i8, i64 196, align 1
-// LINUX-AMD64-NEXT:   %[[TMP1:[0-9]+]] = alloca i8, i64 200, align 1
-// DARWIN-ARM64-NEXT:   %[[TMP11:[0-9]+]] = call i32 @sigsetjmp(ptr %[[TMP1]], i32 0)
-// LINUX-AMD64-NEXT:   %[[TMP11:[0-9]+]] = call i32 @__sigsetjmp(ptr %[[TMP1]], i32 0)

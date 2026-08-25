@@ -13,7 +13,8 @@ import (
 // CHECK: call ptr @"bytes.(*Buffer).WriteString$coro"
 // CHECK: call void @"bytes.(*Buffer).Bytes$outcome"
 // CHECK: call void @"bytes.(*Buffer).String$outcome"
-// CHECK: call void @"bytes.EqualFold$outcome"
+// CHECK: [[EQUAL_FOLD:%[0-9]+]] = call ptr @"bytes.EqualFold$coro"
+// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[EQUAL_FOLD]]
 func main() {
 	var b bytes.Buffer // A Buffer needs no initialization.
 	b.Write([]byte("Hello "))

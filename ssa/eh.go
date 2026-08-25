@@ -624,18 +624,42 @@ func (b Builder) callRecoverScopedDefer(fn Expr, mayRecover bool, call func()) {
 // CallRecoverAlias invokes fn through a compiler-generated wrapper while
 // preserving the wrapped function as the direct deferred call for recover.
 func (b Builder) CallRecoverAlias(from Expr, mayRecover bool, fn Expr, buildCall func(Builder, Expr, ...Expr) Expr, args ...Expr) Expr {
-	token := b.recoverDeferToken(fn, mayRecover)
+	token := b.RecoverCallToken(fn, mayRecover)
 	if from.IsNil() || token.IsNil() {
 		return buildCall(b, fn, args...)
+	}
+	return b.CallRecoverAliasToken(from, token, func() Expr {
+		return buildCall(b, fn, args...)
+	})
+}
+
+// CallRecoverAliasToken invokes call while a compiler-proved transparent
+// wrapper maps its own code identity to the exact callable identity expected
+// by the target's recover-frame binding. The frontend uses this form when a
+// managed descriptor or a devirtualized call has already supplied the token;
+// ordinary LLSSA callers should prefer CallRecoverAlias.
+func (b Builder) CallRecoverAliasToken(from, token Expr, call func() Expr) Expr {
+	if from.IsNil() || token.IsNil() || call == nil {
+		panic("recover alias requires source, target token, and call")
 	}
 	prev := b.Call(
 		b.Pkg.rtFunc("StartRecoverFrameAlias"),
 		b.PtrCast(b.Prog.VoidPtr(), from),
-		token,
+		b.PtrCast(b.Prog.VoidPtr(), token),
 	)
-	ret := buildCall(b, fn, args...)
+	ret := call()
 	b.Call(b.Pkg.rtFunc("EndRecoverFrameAlias"), prev)
 	return ret
+}
+
+// RecoverCallToken returns the compiler-carried code identity used to scope a
+// direct recover call through fn. It never performs pointer introspection: a
+// declaration/function pointer is already its own identity, while closure and
+// interface-method values carry the identity in their first word. Managed
+// descriptor calls use their validated CodeEntry instead (see
+// CoroDispatchCodeEntry).
+func (b Builder) RecoverCallToken(fn Expr, mayRecover bool) Expr {
+	return b.recoverDeferToken(fn, mayRecover)
 }
 
 func (b Builder) recoverDeferToken(fn Expr, mayRecover bool) Expr {
@@ -797,6 +821,18 @@ func (b Builder) Unreachable() {
 // same function therefore cannot recover the caller's panic.
 func (b Builder) BindRecoverFrame() {
 	token := b.AllocaT(b.Prog.Byte())
+	token = b.PtrCast(b.Prog.VoidPtr(), token)
+	b.BindRecoverFrameToken(token)
+}
+
+// BindRecoverFrameToken gives this invocation the caller-supplied unique
+// identity. Stackless physical functions use their LLVM coroutine handle: it
+// is already invocation-unique, remains live until final destroy, and avoids
+// reserving a second activation byte in every recovering coroutine frame.
+func (b Builder) BindRecoverFrameToken(token Expr) {
+	if token.IsNil() || token.Type == nil {
+		panic("recover frame binding requires a non-nil activation token")
+	}
 	token = b.PtrCast(b.Prog.VoidPtr(), token)
 	b.Func.recoverToken = token
 	b.Call(

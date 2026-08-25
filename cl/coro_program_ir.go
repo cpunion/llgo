@@ -269,6 +269,7 @@ func deriveCoroLocalBodyFacts(
 	}
 	atomicBlocks := make([]coro.SSAAtomicBlockFacts, len(function.Blocks))
 	hasEvaluatedDefer := false
+	hasRecoverBuiltin := false
 	for _, block := range function.Blocks {
 		blockFacts := coro.SSAAtomicBlockFacts{Index: block.Index}
 		for _, successor := range block.Succs {
@@ -287,6 +288,9 @@ func deriveCoroLocalBodyFacts(
 			}
 			if _, deferInstruction := instruction.(*ssa.Defer); deferInstruction {
 				hasEvaluatedDefer = true
+			}
+			if call, ok := instruction.(*ssa.Call); ok && isCoroRecoverBuiltinCall(call) {
+				hasRecoverBuiltin = true
 			}
 			if !plan.staticOutcome {
 				facts.StaticOutcomeLocal = false
@@ -363,6 +367,16 @@ func deriveCoroLocalBodyFacts(
 	if !outcomePlainEligible {
 		facts.OutcomePlainLeaf = false
 		facts.OutcomePlainDAG = false
+	}
+	// Outcome-plain bodies have no LLVM coroutine handle and deliberately do
+	// not own the stackless recover-alias hooks. A direct recover activation or
+	// compiler-transparent wrapper must therefore retain its full coroutine (or
+	// ordinary plain) body; otherwise a later physical call site would have no
+	// invocation-unique token from which to transfer recover permission.
+	if isRecoverTransparentWrapper(function) || hasRecoverBuiltin {
+		facts.OutcomePlainLeaf = false
+		facts.OutcomePlainDAG = false
+		facts.StaticOutcomeLocal = false
 	}
 	return facts, nil
 }
@@ -513,14 +527,17 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 // stack. x/tools places the instruction in a synthetic yield closure, but the
 // owner allocates and drains the records. NeedsCleanupFrame is deliberately a
 // local execution fact, so ordinary call propagation cannot repair that split.
-func (ir *coroProgramIR) finalizeRangeYieldCleanupOwners(u *EmissionUniverse) error {
-	if ir == nil || u == nil {
-		return fmt.Errorf("range-yield cleanup finalization requires one ProgramIR and emission universe")
+func (ir *coroProgramIR) finalizeRangeYieldCleanupOwners(
+	functions []*ssa.Function,
+	sortedUseOwners func(*ssa.Function) []*preparedEmissionPackage,
+) error {
+	if ir == nil || sortedUseOwners == nil {
+		return fmt.Errorf("range-yield cleanup finalization requires one ProgramIR and owner projection")
 	}
 	if ir.callsFrozen {
 		return fmt.Errorf("range-yield cleanup finalization occurred after call SitePlan freeze")
 	}
-	for _, function := range u.functions {
+	for _, function := range functions {
 		if function == nil || function.Synthetic != rangeOverFuncYieldSynthetic {
 			continue
 		}
@@ -529,7 +546,7 @@ func (ir *coroProgramIR) finalizeRangeYieldCleanupOwners(u *EmissionUniverse) er
 			return fmt.Errorf("range-yield function %q has no distinct source cleanup owner", function.Name())
 		}
 		var evaluated, observed bool
-		for _, owner := range u.sortedUseOwners(function) {
+		for _, owner := range sortedUseOwners(function) {
 			key := emissionFunctionOwnerKey{function: function, owner: owner}
 			semantic, frozen := ir.semanticPlans[key]
 			if !frozen {

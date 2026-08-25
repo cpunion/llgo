@@ -253,8 +253,8 @@ func Root(seed int) func(int) int {
 		t.Fatalf("verify captured descriptor producer: %v\n%s", err, module.String())
 	}
 	descriptor := coroDispatchProducerOnlyGlobalWithPrefix(t, module, coroPlainDispatchDescriptorPrefix)
-	if got := descriptor.Initializer().Operand(1).ZExtValue(); got != uint64(llssa.CoroDispatchFlagHasPlain) {
-		t.Fatalf("captured plain descriptor flags = %#x, want HasPlain without NoCapture", got)
+	if got := descriptor.Initializer().Operand(1).ZExtValue(); got != uint64(llssa.CoroDispatchFlagHasPlain|llssa.CoroDispatchFlagPlainNoUnwind) {
+		t.Fatalf("captured plain descriptor flags = %#x, want HasPlain|PlainNoUnwind without NoCapture", got)
 	}
 	thunk := coroDispatchProducerOnlyFunctionWithPrefix(t, module, coroPlainDispatchThunkPrefix)
 	call := coroDispatchProducerOnlyCallTo(t, thunk, "")
@@ -337,7 +337,7 @@ func Root() func() {
 		t.Fatalf("verify zero-sized descriptor producer: %v\n%s", err, module.String())
 	}
 	descriptor := coroDispatchProducerOnlyGlobalWithPrefix(t, module, coroPlainDispatchDescriptorPrefix)
-	wantFlags := uint64(llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagNoCapture)
+	wantFlags := uint64(llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagNoCapture | llssa.CoroDispatchFlagPlainNoUnwind)
 	if got := descriptor.Initializer().Operand(1).ZExtValue(); got != wantFlags {
 		t.Fatalf("zero-sized plain descriptor flags = %#x, want %#x", got, wantFlags)
 	}
@@ -875,8 +875,8 @@ func Root() func(int, []byte) (int, error) { return Target }
 		t.Fatalf("verify multi-result descriptor producer: %v\n%s", err, module.String())
 	}
 	descriptor := coroDispatchProducerOnlyGlobalWithPrefix(t, module, coroPlainDispatchDescriptorPrefix)
-	if got := descriptor.Initializer().Operand(1).ZExtValue(); got != uint64(llssa.CoroDispatchFlagHasPlain|llssa.CoroDispatchFlagNoCapture) {
-		t.Fatalf("multi-result descriptor flags = %#x, want HasPlain|NoCapture", got)
+	if got := descriptor.Initializer().Operand(1).ZExtValue(); got != uint64(llssa.CoroDispatchFlagHasPlain|llssa.CoroDispatchFlagNoCapture|llssa.CoroDispatchFlagPlainNoUnwind) {
+		t.Fatalf("multi-result descriptor flags = %#x, want HasPlain|NoCapture|PlainNoUnwind", got)
 	}
 	if descriptor.Initializer().Operand(6).ZExtValue() == 0 || descriptor.Initializer().Operand(7).ZExtValue() == 0 {
 		t.Fatal("multi-result descriptor did not publish its typed result-slot layout")

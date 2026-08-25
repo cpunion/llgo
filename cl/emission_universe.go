@@ -1178,6 +1178,13 @@ func (u *EmissionUniverse) CoroLibraryEffects() CoroLibraryEffectView {
 	return u.libraryEffects
 }
 
+// CoroPlanningMetadata returns the immutable compiler-analysis projection.
+// Keeping planning-only metadata behind one view prevents every new reference
+// family from widening the direct emission-universe authority surface.
+func (u *EmissionUniverse) CoroPlanningMetadata() CoroPlanningMetadataView {
+	return CoroPlanningMetadataView{index: emissionCanonicalIndex{universe: u}}
+}
+
 // CoroRawABIDirective returns the exact source directive that publishes fn
 // through a raw, non-managed ABI. The prepared universe is the sole authority
 // for separating a real physical crossing from an exact managed Go linkname
@@ -1442,23 +1449,12 @@ func (u *EmissionUniverse) CoroDemandReferences(owner *ssa.Function) ([]*ssa.Fun
 	return u.coroFrozenABIReferences(owner, u.abiMethodReferences, "method")
 }
 
-// CoroManagedValueReferences returns exact managed function values introduced
-// by compiler lowering without a source SSA operand. These values use the
-// canonical descriptor transport and are deliberately disjoint from raw ABI
-// method/code-address references.
-func (u *EmissionUniverse) CoroManagedValueReferences(owner *ssa.Function) ([]*ssa.Function, error) {
-	if u == nil {
-		return nil, fmt.Errorf("coroutine managed value references require a prepared emission universe")
-	}
-	return u.coroFrozenABIReferences(owner, u.managedValueReferences, "managed value")
-}
-
 // CoroSyncDemandReferences returns the exact subset of CoroDemandReferences
 // synchronously called through a raw function signature. ABI equality/hash
 // callbacks have this physical contract; method-table tfn/ifn words do not and
 // are therefore deliberately absent. Representation-only runtime helpers use
-// CoroPlainLoweredCalls instead: they are conditional on a live legacy body and
-// are not raw ABI address publications.
+// CoroPlanningMetadata().PlainLoweredCalls instead: they are conditional on a
+// live legacy body and are not raw ABI address publications.
 //
 // This is a use-site fact frozen while the descriptor is materialized, not an
 // effect or package/name classification of the referenced function body.
@@ -1467,46 +1463,6 @@ func (u *EmissionUniverse) CoroSyncDemandReferences(owner *ssa.Function) ([]*ssa
 		return nil, fmt.Errorf("coroutine ABI synchronous references require a prepared emission universe")
 	}
 	return u.coroFrozenABIReferences(owner, u.abiSyncReferences, "synchronous")
-}
-
-// CoroPlainLoweredCalls returns the exact compiler-inserted helper occurrences
-// in owner's ordinary Go ABI/legacy-stack representation. The same logical
-// name may also appear in CoroLoweredCalls for the managed physical twin. These
-// records are representation references, not managed call edges or published
-// raw entries; the build fixed point activates them only when that body exists.
-func (u *EmissionUniverse) CoroPlainLoweredCalls(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
-	if u == nil || owner == nil {
-		return nil, fmt.Errorf("coroutine plain lowered calls require a prepared universe and exact owner")
-	}
-	canonical := u.canonicalAlias(owner)
-	if canonical == nil || canonical != owner {
-		return nil, fmt.Errorf("coroutine plain lowered-call owner %q is not exact canonical", owner.Name())
-	}
-	if _, frozen := u.required[owner]; !frozen {
-		return nil, fmt.Errorf("coroutine plain lowered-call owner %q is outside the frozen emission universe", owner.Name())
-	}
-	byName := u.plainLoweredCalls[owner]
-	calls := make([]coro.SSALoweredCall, 0, len(byName))
-	for logicalName, target := range byName {
-		if logicalName == "" || !utf8.ValidString(logicalName) || strings.IndexByte(logicalName, 0) >= 0 || target == nil {
-			return nil, fmt.Errorf("coroutine plain lowered call %q in %q has invalid frozen metadata", logicalName, owner.Name())
-		}
-		if canonicalTarget := u.canonicalAlias(target); canonicalTarget == nil || canonicalTarget != target {
-			return nil, fmt.Errorf("coroutine plain lowered call %q in %q has a non-canonical target", logicalName, owner.Name())
-		}
-		if _, frozen := u.required[target]; !frozen {
-			return nil, fmt.Errorf("coroutine plain lowered call %q in %q targets a helper outside the frozen emission universe", logicalName, owner.Name())
-		}
-		calls = append(calls, coro.SSALoweredCall{
-			LogicalName: logicalName,
-			Target:      target,
-			RawPlain:    true,
-		})
-	}
-	sort.Slice(calls, func(i, j int) bool {
-		return calls[i].LogicalName < calls[j].LogicalName
-	})
-	return calls, nil
 }
 
 func (u *EmissionUniverse) coroFrozenABIReferences(

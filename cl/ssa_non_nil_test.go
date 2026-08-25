@@ -218,6 +218,9 @@ func Owner(value int) func() {
 	if deref == nil || !isKnownNonNilAddr(free) || !ssaAddressValueProvenNonNilAt(free, deref) {
 		t.Fatalf("source closure cell lacks structural non-nil proof: free=%v deref=%v", free, deref)
 	}
+	if audit := (&coroPhysicalPureSSAAudit{fn: closure}); audit.derefRequiresImplicitNilFault(deref) {
+		t.Fatal("physical coroutine planning reintroduced a nil fault for a proven lexical capture cell")
+	}
 
 	closure.Synthetic = "wrapper"
 	if isKnownNonNilAddr(free) || ssaAddressValueProvenNonNilAt(free, deref) {

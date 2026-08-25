@@ -147,7 +147,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	legacyPhysicalSelector:    0,
 	legacySplitEmissionState:  0,
 	emissionSessionAccess:     20,
-	bodyCapabilityAccess:      32,
+	bodyCapabilityAccess:      31,
 	// The outcome-plain cohort replaced the coroutine-only begin/bind/complete
 	// entry points with one exclusive managed-body transaction. Keep the legacy
 	// names at zero so a second physical-emission lifecycle cannot grow back.
@@ -198,11 +198,9 @@ var allowedCoroBodyCapabilityFiles = map[string]bool{
 	"cl/coro_emission_session.go":  true,
 	"cl/coro_emitter_adapter.go":   true,
 	"cl/coro_implicit_fault.go":    true,
-	"cl/coro_lowered_call.go":      true,
 	"cl/coro_panic.go":             true,
 	"cl/coro_park_emitter.go":      true,
 	"cl/coro_patch_init.go":        true,
-	"cl/coro_recover.go":           true,
 	"cl/coro_slice_to_array.go":    true,
 	"cl/coro_spawn.go":             true,
 	"cl/coro_unsafe_slice.go":      true,

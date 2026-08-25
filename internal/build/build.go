@@ -313,17 +313,28 @@ func applyFrozenCallableContractPolicy(
 	}
 }
 
-// isCoroManagedDescriptorCall recognizes only the ordinary-call source shape
-// for which cl owns the complete v1 {descriptor, environment} ABI. Spawn has a
-// separate predicate because it selects only the coroutine capability, creates
-// an independent scheduler G, and discards any source results as required by
-// Go.
-func isCoroManagedDescriptorCall(call ssa.CallInstruction) bool {
-	direct, ok := call.(*ssa.Call)
-	if !ok || direct == nil || direct.Common() == nil {
+// isCoroManagedDescriptorCallOrDefer recognizes the ordinary function-value
+// carriers for which cl owns the complete v1 {descriptor, environment} ABI.
+// A defer evaluates the same callee and arguments now, then consumes the
+// descriptor through its cleanup recipe. Spawn has a separate predicate
+// because it creates an independent scheduler G and discards source results.
+func isCoroManagedDescriptorCallOrDefer(call ssa.CallInstruction) bool {
+	switch carrier := call.(type) {
+	case *ssa.Call:
+		if carrier == nil {
+			return false
+		}
+	case *ssa.Defer:
+		if carrier == nil {
+			return false
+		}
+	default:
 		return false
 	}
-	common := direct.Common()
+	if call.Common() == nil {
+		return false
+	}
+	common := call.Common()
 	if common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil {
 		return false
 	}
@@ -512,7 +523,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return target, nil
 		}
 		managedInterface := isCoroManagedInterfaceDescriptorCall(call)
-		managedShape := managedInterface || isCoroManagedDescriptorCall(call) ||
+		managedShape := managedInterface || isCoroManagedDescriptorCallOrDefer(call) ||
 			isCoroManagedDescriptorSpawn(call)
 		if target != coro.UnknownManaged || !managedShape {
 			return target, nil
@@ -4463,8 +4474,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.erasedFunctionInterface = ctx.coroEmission.CoroErasedFunctionInterface
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences
 		input.syncDemandReferences = ctx.coroEmission.CoroSyncDemandReferences
-		input.plainLoweredCalls = ctx.coroEmission.CoroPlainLoweredCalls
-		input.managedValueReferences = ctx.coroEmission.CoroManagedValueReferences
+		planningMetadata := ctx.coroEmission.CoroPlanningMetadata()
+		input.plainLoweredCalls = planningMetadata.PlainLoweredCalls
+		input.managedValueReferences = planningMetadata.ManagedValueReferences
 		input.loweredCalls = ctx.coroEmission.CoroLoweredCalls
 		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
 			if config.CoroABI == "" {
@@ -5555,7 +5567,9 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		"__llgo_coro_panic_prepare_v1",
 		coroPanicTraceReplaceSymbolV1,
 		coroPanicTraceAppendSymbolV1,
-		"__llgo_coro_recover_take_v1",
+		coroRecoverTakeSymbolV1,
+		coroRecoverAliasBeginSymbolV1,
+		coroRecoverAliasEndSymbolV1,
 		"__llgo_coro_fault_payload_v1",
 		"__llgo_coro_fault_payload_v2",
 		"__llgo_coro_spawn_begin_v1",
@@ -5611,6 +5625,57 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.UnsafePointer]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf("coroutine fault payload ABI %q must have exact func(uint32, unsafe.Pointer, unsafe.Pointer) signature", name)
+			}
+		}
+		if name == coroRecoverTakeSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 4 || sig.Results().Len() != 0 ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine recover take ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) signature",
+					name,
+				)
+			}
+			for parameter := 0; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.UnsafePointer]) {
+					return nil, nil, nil, nil, fmt.Errorf(
+						"coroutine recover take ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) signature",
+						name,
+					)
+				}
+			}
+		}
+		if name == coroRecoverAliasBeginSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 4 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(3).Type(), types.Typ[types.Bool]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine recover alias begin ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, bool) unsafe.Pointer signature",
+					name,
+				)
+			}
+		}
+		if name == coroRecoverAliasEndSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 2 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine recover alias end ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) signature",
+					name,
+				)
 			}
 		}
 		if name == "__llgo_coro_fault_prepare_v2" {

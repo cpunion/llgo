@@ -379,6 +379,43 @@ func Parent(value uint32) { Child(value, -1) }
 	}
 }
 
+func TestCoroTailForwardPreservesNestedRecoverBoundary(t *testing.T) {
+	const source = `package foo
+func Child() any { return recover() }
+func Parent() any { return Child() }
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, nil, source)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify nested-recover boundary: %v\n%s", err, module.String())
+	}
+
+	parent := ssaPkg.Func("Parent")
+	physical, err := universe.coroProgramIR.physicalFunctionPlan(parent, universe.ownerOf(parent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if physical.tailForward != nil {
+		t.Fatalf("recover-capable target removed its caller activation: %+v", physical.tailForward)
+	}
+	parentIR := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
+	if !strings.Contains(parentIR, "llvm.coro.begin") ||
+		!strings.Contains(parentIR, coroAwaitPrepareInlineHookV4) {
+		t.Fatalf("nested recover boundary did not retain its own coroutine await frame:\n%s", parentIR)
+	}
+}
+
 func TestCoroStaticAwaitFlattensExactTailForwardBeforeElision(t *testing.T) {
 	const source = `package foo
 var Sink uint32

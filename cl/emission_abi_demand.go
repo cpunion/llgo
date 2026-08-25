@@ -261,6 +261,7 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 	}
 	return walkEmissionABITypeDemandEx(root, ctx.patchType, physicalMethodSignature, func(typ types.Type) error {
 		var references []*ssa.Function
+		var managedValues []*ssa.Function
 		var synchronous []*ssa.Function
 		if u.prog != nil {
 			for _, helper := range u.prog.ABITypeRuntimeFunctions(typ) {
@@ -303,8 +304,13 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 				methods[index] = method
 			}
 			references = append(references, methods...)
+			managedValues = append(managedValues, methods...)
 		}
 		if err := u.recordABIMethodReferences(fn, references); err != nil {
+			return err
+		}
+		if err := (coroProgramIRBuilder{canonical: emissionCanonicalIndex{universe: u}}).
+			recordManagedValueReferences(fn, managedValues); err != nil {
 			return err
 		}
 		return u.recordABISyncReferences(fn, synchronous)

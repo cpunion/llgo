@@ -47,7 +47,7 @@ func validateCoroRawPlainSourceCall(
 	}
 	static := call.Common().StaticCallee()
 	target, resolved := resolve(static)
-	if !resolved || target == nil || target != static {
+	if !resolved || target == nil {
 		return nil, coro.FunctionPlan{}, fmt.Errorf("raw/plain invocation target is not one exact canonical function")
 	}
 	targetPlan, targetPlanned := plan.FunctionPlan(target)
@@ -88,13 +88,14 @@ func (p *context) tryCompileCoroRawPlainCall(b llssa.Builder, call *ssa.Call) (l
 	if err != nil {
 		panic(err)
 	}
-	return p.compileCoroRawPlainTargetCall(b, call, target), true
+	return p.compileCoroRawPlainTargetCall(b, call, target, false), true
 }
 
 func (p *context) compileCoroRawPlainTargetCall(
 	b llssa.Builder,
 	call *ssa.Call,
 	target *ssa.Function,
+	transparentRecoverAlias bool,
 ) llssa.Expr {
 	if p == nil || call == nil || target == nil {
 		panic("raw/plain invocation emission requires one exact source call and frozen target")
@@ -105,5 +106,14 @@ func (p *context) compileCoroRawPlainTargetCall(
 	}
 	p.emitPCLineLabel(b, call.Pos())
 	args := p.compileValues(b, call.Call.Args, fnNormal)
-	return b.Call(function.Expr, args...)
+	if !transparentRecoverAlias {
+		return b.Call(function.Expr, args...)
+	}
+	if !p.hasCoroPhysicalBody() {
+		panic("raw/plain transparent recover alias requires one physical coroutine owner")
+	}
+	p.observeCoroPhysicalRecoverAlias(call)
+	return p.callCoroTransparentRecoverAlias(b, function.Expr, func() llssa.Expr {
+		return b.Call(function.Expr, args...)
+	})
 }

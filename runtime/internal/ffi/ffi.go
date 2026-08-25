@@ -81,16 +81,24 @@ const (
 
 	// These are compiler/runtime ABI bits. Keep the values explicit: placing
 	// them after dispatchVersionV1 in this block must not shift their positions.
-	dispatchHasPlain     uint32 = 1 << 0
-	dispatchHasCoro      uint32 = 1 << 1
-	dispatchNoCapture    uint32 = 1 << 2
-	dispatchRuntimeTyped uint32 = 1 << 3
+	dispatchHasPlain      uint32 = 1 << 0
+	dispatchHasCoro       uint32 = 1 << 1
+	dispatchNoCapture     uint32 = 1 << 2
+	dispatchRuntimeTyped  uint32 = 1 << 3
+	dispatchPlainNoUnwind uint32 = 1 << 4
 
 	dispatchCapabilityMask = dispatchHasPlain | dispatchHasCoro
-	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped
+	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped | dispatchPlainNoUnwind
 )
 
 const dispatchRuntimeTypeMagicV1 uint64 = 0x4c4c474f52545931 // "LLGORTY1"
+
+func validDispatchPlainUnwindFlags(flags uint32) bool {
+	hasPlain := flags&dispatchHasPlain != 0
+	hasCoro := flags&dispatchHasCoro != 0
+	plainNoUnwind := flags&dispatchPlainNoUnwind != 0
+	return (!plainNoUnwind || hasPlain) && (!hasPlain || hasCoro || plainNoUnwind)
+}
 
 // dispatchDescriptorV1 is the runtime view of the compiler-owned universal
 // function descriptor. Keep this layout synchronized with
@@ -140,6 +148,7 @@ func CoroEntry(descriptor unsafe.Pointer) unsafe.Pointer {
 	flags := d.Flags
 	if d.Version != dispatchVersionV1 ||
 		flags&^dispatchKnownFlags != 0 ||
+		!validDispatchPlainUnwindFlags(flags) ||
 		flags&dispatchHasCoro == 0 ||
 		d.CoroEntry == nil ||
 		d.CodeEntry == nil ||
@@ -160,6 +169,7 @@ func CodeEntry(descriptor unsafe.Pointer) unsafe.Pointer {
 	flags := d.Flags
 	if d.Version != dispatchVersionV1 ||
 		flags&^dispatchKnownFlags != 0 ||
+		!validDispatchPlainUnwindFlags(flags) ||
 		flags&dispatchCapabilityMask == 0 ||
 		(flags&dispatchHasPlain != 0) != (d.PlainEntry != nil) ||
 		(flags&dispatchHasCoro != 0) != (d.CoroEntry != nil) ||
@@ -195,6 +205,7 @@ func CallLLGo(
 	runtimeTyped := flags&dispatchRuntimeTyped != 0
 	if d.Version != dispatchVersionV1 ||
 		flags&^dispatchKnownFlags != 0 ||
+		!validDispatchPlainUnwindFlags(flags) ||
 		flags&dispatchCapabilityMask == 0 ||
 		(flags&dispatchHasPlain != 0) != (d.PlainEntry != nil) ||
 		(flags&dispatchHasCoro != 0) != (d.CoroEntry != nil) ||

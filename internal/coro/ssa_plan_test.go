@@ -700,6 +700,53 @@ func outsideFrozenUniverse() {}
 	}
 }
 
+func TestAnalyzeSSAManagedMethodReferencesUseDispatchWithoutInheritingEffects(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_method_references.go", `package coroid
+
+var channel chan int
+
+type worker struct{}
+
+func (worker) dispatch() { <-channel }
+func owner() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	worker := pkg.Pkg.Scope().Lookup("worker").Type()
+	selection := prog.MethodSets.MethodSet(worker).Lookup(pkg.Pkg, "dispatch")
+	if selection == nil {
+		t.Fatal("worker.dispatch selection is nil")
+	}
+	method := prog.MethodValue(selection)
+	if method == nil {
+		t.Fatal("worker.dispatch method value is nil")
+	}
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, method})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := planDigestSSAConfig()
+	config.EmissionUniverse = universe
+	config.ClassifyManagedValueReferences = func(fn *ssa.Function) ([]*ssa.Function, error) {
+		if fn == owner {
+			return []*ssa.Function{method}, nil
+		}
+		return nil, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if ownerPlan.Effect != NoSuspend || ownerPlan.Emission != EmitPlain {
+		t.Fatalf("owner plan = %+v, managed method reference inherited target effects", ownerPlan)
+	}
+	methodPlan := functionPlanFor(t, plan, method)
+	if methodPlan.Demand != AsyncDemand || methodPlan.Emission != EmitCoroutine ||
+		methodPlan.Primary != PrimaryCoroutine || methodPlan.FuncRep != Dispatch {
+		t.Fatalf("method plan = %+v, want one managed coroutine descriptor", methodPlan)
+	}
+}
+
 func TestAnalyzeSSASynchronousDemandReferenceIsExactSubsetAndRetainsPlainABI(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "sync_implicit_references.go", `package coroid
 

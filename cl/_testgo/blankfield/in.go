@@ -16,7 +16,7 @@ type Nested struct {
 	Right int
 }
 
-// CHECK-LABEL: define void @{{(".*blankfield\.main"|main\.main)}}()
+// CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1)
 // CHECK: call i64 @{{(".*blankfield\.sideEffect"|main\.sideEffect)}}()
 // CHECK: call i64 @{{(".*blankfield\.sideEffect"|main\.sideEffect)}}()
 // CHECK: call i64 @{{(".*blankfield\.sideEffect"|main\.sideEffect)}}()

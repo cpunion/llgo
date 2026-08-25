@@ -54,6 +54,7 @@ type coroSiteEmissionObserver struct {
 	seenPhysicalControl         bool
 	seenPhysicalOperation       bool
 	seenPhysicalOutcome         bool
+	seenPhysicalRecoverAlias    bool
 	seenPhysicalNilGuard        bool
 	seenPhysicalBoundsGuard     bool
 	observeFrozenSite           bool
@@ -248,6 +249,7 @@ func (p *context) beginCoroSiteEmissionMode(
 		observer.seenPhysicalControl = physical.control == coroPhysicalControlNone
 		observer.seenPhysicalOperation = physical.operation == coroPhysicalOperationNone
 		observer.seenPhysicalOutcome = physical.outcome == coroPhysicalOutcomeNone
+		observer.seenPhysicalRecoverAlias = !physical.recoverAlias
 	}
 	if observeCall && plan.hasCallPlan {
 		if plan.callPlan.failure != "" {
@@ -347,6 +349,12 @@ func (p *context) beginCoroSiteEmissionMode(
 			panic(fmt.Errorf(
 				"coroutine emission site %q omitted frozen physical outcome recipe %s",
 				instruction.String(), observer.expectedPhysical.outcome,
+			))
+		}
+		if observer.hasExpectedPhysical && !observer.seenPhysicalRecoverAlias {
+			panic(fmt.Errorf(
+				"coroutine emission site %q omitted its frozen transparent recover-alias recipe",
+				instruction.String(),
 			))
 		}
 		if observer.hasExpectedPhysical && observer.expectedPhysical.nilGuard != observer.seenPhysicalNilGuard {
@@ -479,6 +487,39 @@ func (p *context) plannedCoroPhysicalOperation(instruction ssa.Instruction) (cor
 		panic("coroutine physical operation selection has no exact source SitePlan")
 	}
 	return current.expectedPhysical, true
+}
+
+func (p *context) plannedCoroPhysicalRecoverAlias(
+	instruction *ssa.Call,
+) (coroPhysicalInstructionPlan, bool) {
+	if p == nil || p.coroEmissionPlan() == nil {
+		return coroPhysicalInstructionPlan{}, false
+	}
+	current := p.coroEmissionSite()
+	if current == nil || !current.hasExpectedPhysical || current.instruction != instruction {
+		panic("coroutine recover-alias selection has no exact source SitePlan")
+	}
+	return current.expectedPhysical, true
+}
+
+func (p *context) observeCoroPhysicalRecoverAlias(instruction *ssa.Call) {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.hasExpectedPhysical || observer.instruction != instruction {
+		panic("coroutine recover-alias emission has no exact source SitePlan")
+	}
+	if !observer.expectedPhysical.recoverAlias {
+		panic(fmt.Errorf(
+			"coroutine emission site %q emitted an unplanned transparent recover alias",
+			instruction.String(),
+		))
+	}
+	if observer.seenPhysicalRecoverAlias {
+		panic(fmt.Errorf(
+			"coroutine emission site %q emitted its transparent recover alias more than once",
+			instruction.String(),
+		))
+	}
+	observer.seenPhysicalRecoverAlias = true
 }
 
 // selectCoroPhysicalOperation is the shared source-emission gate for inline

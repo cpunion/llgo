@@ -60,7 +60,7 @@ func main() { value.Add(1) }
 		if input.EmissionUniverse != nil && input.localBodyFacts != nil {
 			for _, fn := range input.EmissionUniverse.Functions() {
 				if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Name() != "Add" ||
-					!strings.HasSuffix(fn.Pkg.Pkg.Path(), "/sync/atomic") ||
+					fn.Pkg.Pkg.Path() != "sync/atomic" ||
 					!strings.Contains(fn.String(), "Uint64") {
 					continue
 				}
@@ -104,7 +104,7 @@ func main() { value.Add(1) }
 				}
 			}
 			if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil ||
-				!strings.HasSuffix(fn.Pkg.Pkg.Path(), "/sync/atomic") || fn.Name() != "Add" ||
+				fn.Pkg.Pkg.Path() != "sync/atomic" || fn.Name() != "Add" ||
 				!strings.Contains(fn.String(), "Uint64") {
 				continue
 			}
@@ -140,7 +140,7 @@ func main() { value.Add(1) }
 						}
 					}
 					if !relevant && fn.Pkg != nil && fn.Pkg.Pkg != nil &&
-						strings.HasSuffix(fn.Pkg.Pkg.Path(), "/sync/atomic") && fn.Name() == "Add" {
+						fn.Pkg.Pkg.Path() == "sync/atomic" && fn.Name() == "Add" {
 						relevant = true
 					}
 					if !relevant {

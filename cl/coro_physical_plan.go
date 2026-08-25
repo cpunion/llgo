@@ -309,6 +309,12 @@ type coroPhysicalInstructionPlan struct {
 	controlSignature   *types.Signature
 	controlFailure     string
 	controlFailureHard bool
+	// recoverAlias is the occurrence-local proof that this source call belongs
+	// to a compiler-transparent wrapper and may reach a recover-capable target.
+	// Emission consumes this bit exactly once and selects the physical token
+	// appropriate to its already-frozen control recipe; it must never rescan the
+	// wrapper or target graph during lowering.
+	recoverAlias bool
 	// directOutcomeNativeResult proves that this exact target's result-slot
 	// struct fits the target's native-stack single-object limit. Full LLVM
 	// coroutine callers may use managed frame storage instead; an outcome-plain
@@ -596,9 +602,10 @@ type coroPhysicalTailForwardArgument struct {
 // publication then remain owned by the target frame instead of traversing a
 // redundant parent frame and await transaction.
 type coroPhysicalTailForwardPlan struct {
-	target   *ssa.Function
-	targetID coro.FunctionID
-	args     []coroPhysicalTailForwardArgument
+	target              *ssa.Function
+	targetID            coro.FunctionID
+	args                []coroPhysicalTailForwardArgument
+	recoverBoundarySafe bool
 }
 
 func (plan *coroPhysicalTailForwardPlan) validate(
@@ -608,6 +615,9 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 	if plan == nil || function == nil || whole == nil || plan.target == nil ||
 		plan.target == function || plan.targetID == "" || len(plan.target.FreeVars) != 0 {
 		return fmt.Errorf("tail-forward plan has an incomplete function or target identity")
+	}
+	if !plan.recoverBoundarySafe {
+		return fmt.Errorf("tail-forward plan has no proof that its removed call boundary cannot expose recover")
 	}
 	functionPlan, functionPlanned := whole.FunctionPlan(function)
 	targetPlan, targetPlanned := whole.FunctionPlan(plan.target)
@@ -914,6 +924,15 @@ scanAdapters:
 	if _, ok := whole.FunctionPlan(target); !ok {
 		return nil, nil
 	}
+	// A tail-forward ramp returns the target's handle and deliberately removes
+	// the source activation. If the target can directly recover (including a
+	// compiler-transparent wrapper), making the source a deferred call would
+	// incorrectly promote that nested recover to the direct deferred child.
+	// This gate is independent of current call-site reachability so descriptors
+	// and downstream library consumers cannot observe a different Go boundary.
+	if audit.ctx == nil || audit.ctx.needsRecoverScope(target) {
+		return nil, nil
+	}
 	if target != rawTarget {
 		if universe == nil {
 			return nil, nil
@@ -1040,9 +1059,10 @@ scanAdapters:
 	}
 
 	forward := &coroPhysicalTailForwardPlan{
-		target:   target,
-		targetID: targetPlan.ID,
-		args:     arguments,
+		target:              target,
+		targetID:            targetPlan.ID,
+		args:                arguments,
+		recoverBoundarySafe: true,
 	}
 	if err := forward.validate(function, whole); err != nil {
 		return nil, fmt.Errorf("tail-forward physical plan: %w", err)
@@ -1278,6 +1298,7 @@ func planCoroPhysicalInstruction(
 	planCoroPhysicalControlInstruction(audit, whole, instruction, capabilities, &result)
 	planCoroPhysicalOperationInstruction(audit, whole, instruction, capabilities, &result)
 	planCoroPhysicalOutcomeInstruction(audit, cleanup, instruction, capabilities, &result)
+	result.recoverAlias = planCoroPhysicalRecoverAlias(audit, instruction, result)
 	switch instruction := instruction.(type) {
 	case *ssa.Alloc:
 		switch {
@@ -1566,6 +1587,63 @@ func planCoroPhysicalInstruction(
 		}
 	}
 	return result, nil
+}
+
+// planCoroPhysicalRecoverAlias freezes the only source-language condition
+// under which a normal call frame is transparent to recover. Token selection
+// remains a physical-recipe concern: a direct plain call uses its code entry,
+// an awaited call uses the child handle, and a descriptor plain branch uses
+// the descriptor's compiler-injected CodeEntry metadata.
+func planCoroPhysicalRecoverAlias(
+	audit *coroPhysicalPureSSAAudit,
+	instruction ssa.Instruction,
+	physical coroPhysicalInstructionPlan,
+) bool {
+	call, ok := instruction.(*ssa.Call)
+	if !ok || audit == nil || !isRecoverTransparentWrapper(audit.fn) ||
+		call.Common() == nil {
+		return false
+	}
+	if physical.operation != coroPhysicalOperationNone ||
+		physical.outcome != coroPhysicalOutcomeNone ||
+		physical.control == coroPhysicalControlNilDispatchFault ||
+		audit.plan != nil && audit.plan.ElidesCall(call) {
+		return false
+	}
+
+	var facts *recoverFacts
+	if audit.ctx != nil {
+		facts = audit.ctx.recoverAnalysis()
+	}
+	needs := func(target *ssa.Function) bool {
+		if target == nil {
+			return true
+		}
+		if facts == nil {
+			facts = newRecoverFacts()
+		}
+		return facts.needsRecoverScope(target)
+	}
+	if physical.controlTarget != nil {
+		return needs(physical.controlTarget)
+	}
+	if dispatch := physical.controlInterface; dispatch != nil {
+		for _, candidate := range dispatch.candidates {
+			if needs(candidate.function) {
+				return true
+			}
+		}
+		return false
+	}
+	if target := call.Common().StaticCallee(); target != nil {
+		if audit.universe != nil {
+			if canonical, frozen := audit.universe.Resolve(target); frozen && canonical != nil {
+				target = canonical
+			}
+		}
+		return needs(target)
+	}
+	return recoverCallValueMayRecover(facts, call.Common().Value)
 }
 
 func coroConstantAllocaSize(value ssa.Value) (int64, bool) {

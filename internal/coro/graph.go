@@ -794,9 +794,13 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 		addOutcome := func(id FunctionID) bool {
 			spec := g.functions[id]
 			if spec.External != Defined || managedDemands[id] == NoDemand || !execFlags[id].Contains(MayUnwind) ||
-				(!managedDemands[id].Contains(AsyncDemand) && !effects[id].MaySuspend()) ||
+				(!managedDemands[id].Contains(AsyncDemand) && !effects[id].MaySuspend() && !spec.NeedsDispatch) ||
 				local[id].Contains(OutcomeStructured) {
 				return false
+			}
+			if spec.NeedsDispatch && !managedDemands[id].Contains(AsyncDemand) {
+				managedDemands[id] = managedDemands[id].Join(AsyncDemand)
+				enqueueDemand(id)
 			}
 			local[id] = local[id].Join(OutcomeStructured)
 			next := effects[id].Join(OutcomeStructured)

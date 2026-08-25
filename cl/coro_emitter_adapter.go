@@ -167,7 +167,9 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		if instructionPlan.controlTarget == nil || instructionPlan.controlTargetID == "" {
 			panic("physical raw/plain call has no frozen target identity")
 		}
-		return p.compileCoroRawPlainTargetCall(b, call, instructionPlan.controlTarget), true
+		return p.compileCoroRawPlainTargetCall(
+			b, call, instructionPlan.controlTarget, instructionPlan.recoverAlias,
+		), true
 	case coroPhysicalControlNone:
 		if instructionPlan.operation != coroPhysicalOperationWorkerCgo &&
 			instructionPlan.operation != coroPhysicalOperationWorkerCgoErrno &&

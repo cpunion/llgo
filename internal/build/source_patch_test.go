@@ -983,6 +983,45 @@ func TestNamedWebAssemblyInternalLinuxSyscallFailsClosed(t *testing.T) {
 	}
 }
 
+func TestNamedWebAssemblySyscallSourcePatchExcludesNativeLinuxAdapters(t *testing.T) {
+	overlay, packageFiles, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+		goos:       "linux",
+		goarch:     "arm",
+		goversion:  runtime.Version(),
+		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	selected := make(map[string]bool)
+	for _, filename := range packageFiles["syscall"] {
+		selected[filepath.Base(filename)] = true
+	}
+	for _, name := range []string{
+		"syscall_webassembly.go",
+		"socket_flags_webassembly_unix.go",
+	} {
+		if !selected[name] {
+			t.Errorf("named WebAssembly syscall patch did not select %s; selected %v", name, selected)
+		}
+	}
+	for _, name := range []string{
+		"fork_rawcritical_linux_go126.go",
+		"syscall_linux.go",
+		"syscall_linux_coro.go",
+		"syscall_unix.go",
+	} {
+		if selected[name] {
+			t.Errorf("named WebAssembly syscall patch selected native adapter %s", name)
+		}
+		injected := filepath.Join(runtime.GOROOT(), "src", "syscall", "z_llgo_patch_"+name)
+		if _, ok := overlay[injected]; ok {
+			t.Errorf("named WebAssembly syscall overlay injected native adapter %s", injected)
+		}
+	}
+}
+
 func TestRuntimeHooksUseSourcePatchesInsteadOfAltPkgs(t *testing.T) {
 	for _, pkgPath := range []string{"internal/runtime/maps", "internal/runtime/sys", "sync/atomic", "unique"} {
 		if !llruntime.HasSourcePatchPkg(pkgPath) {
@@ -1360,6 +1399,51 @@ func Experiment() string { return "patched" }
 	}
 	if _, ok := overlay[filepath.Join(srcDir, "demo_windows.go")]; ok {
 		t.Fatal("source for a different target should not be parsed or overlaid")
+	}
+}
+
+func TestApplySourcePatchForPkg_PreservesBlankIotaSeed(t *testing.T) {
+	goroot := t.TempDir()
+	runtimeDir := t.TempDir()
+	const pkgPath = "demo"
+	sourceFile := filepath.Join(goroot, "src", pkgPath, "demo.go")
+	mustWriteFile(t, sourceFile, `package demo
+
+const (
+	_ = iota
+	First
+	Second
+)
+
+func Target() {}
+`)
+	mustWriteFile(t, filepath.Join(runtimeDir, "_patch", pkgPath, "patch.go"), `package demo
+
+var _ [1]byte
+
+func Target() {}
+`)
+
+	changed, overlay, _, err := applySourcePatchForPkg(
+		nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected source patch overlay to change package")
+	}
+	filtered := overlay[sourceFile]
+	if !bytes.Contains(filtered, []byte("_ = iota")) {
+		t.Fatalf("source patch removed the blank iota seed:\n%s", filtered)
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, sourceFile, filtered, 0)
+	if err != nil {
+		t.Fatalf("parse filtered source: %v\n%s", err, filtered)
+	}
+	if _, err := new(types.Config).Check(pkgPath, fset, []*ast.File{parsed}, nil); err != nil {
+		t.Fatalf("type-check filtered source: %v\n%s", err, filtered)
 	}
 }
 

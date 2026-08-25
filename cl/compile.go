@@ -4764,7 +4764,7 @@ func (p *context) resolveMethodLinkname(_ string, method *types.Func, sig *types
 		panic(fmt.Errorf(
 			"resolve ABI method linkname %q with signature %s while compiling %q through target %q (demand sources: %s): %w",
 			method.FullName(), sig, owner, fn.String(),
-			coroDemandReferenceTrace(p.immutableEmissionUniverse(), fn), err,
+			coroDemandReferenceTrace(p.immutableEmissionUniverse(), fn, p.immutablePlan()), err,
 		))
 	}
 	return entry.name

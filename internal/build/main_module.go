@@ -60,7 +60,8 @@ const (
 
 func needsRuntimeMainFrame(ctx *context) bool {
 	conf := ctx.buildConf
-	return conf.BuildMode == BuildModeExe && !isWasmTarget(conf.Goos) && conf.PCLNMode != PCLNNone
+	return conf.BuildMode == BuildModeExe && !hostCoroPullRuntimeABI(conf) &&
+		!isWasmTarget(conf.Goos) && conf.PCLNMode != PCLNNone
 }
 
 // genMainModule generates the main entry module for an llgo program.
@@ -581,6 +582,12 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		entryName = "__main_argc_argv"
 	}
 	sig := newEntrySignature(argvType.RawType())
+	if existing := pkg.FuncOf(entryName); existing != nil {
+		panic(fmt.Sprintf(
+			"program entry symbol %q is already declared with signature %v; want %v",
+			entryName, existing.RawType(), sig,
+		))
+	}
 	fn := pkg.NewFunc(entryName, sig, llssa.InC)
 	fnVal := pkg.Module().NamedFunction(entryName)
 	if entryName != processEntrySymbol {

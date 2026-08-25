@@ -100,7 +100,7 @@ func Allocate() *int { return new(int) }
 	if err != nil || !ok || plain != target {
 		t.Fatalf("complete runtime ABI plain AllocZ = %v, %t, %v; want the same exact target in the legacy-stack domain", plain, ok, err)
 	}
-	plainCalls, err := universe.CoroPlainLoweredCalls(owner)
+	plainCalls, err := universe.CoroPlanningMetadata().PlainLoweredCalls(owner)
 	if err != nil {
 		t.Fatal(err)
 	}

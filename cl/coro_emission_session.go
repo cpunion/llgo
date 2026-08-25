@@ -223,6 +223,41 @@ func (p *context) managedPhysicalTask() llssa.Expr {
 	return body.outcome.task
 }
 
+// coroRecoveryEmission is the complete, immutable capability needed by
+// recover lowering. It deliberately excludes cleanup state, result storage,
+// preemption state, and the rest of coroBodyContext so preamble and recover
+// emitters cannot acquire the mutable physical body merely to obtain a handle
+// or one runtime hook name.
+type coroRecoveryEmission struct {
+	task           llssa.Expr
+	handle         llssa.Expr
+	takeHook       string
+	aliasBeginHook string
+	aliasEndHook   string
+}
+
+func (p *context) activeCoroHandle() llssa.Expr {
+	body := p.activeCoroEmissionBody()
+	if body == nil || body.coro == nil {
+		return llssa.Expr{}
+	}
+	return body.coro.Handle()
+}
+
+func (p *context) activeCoroRecoveryEmission() (coroRecoveryEmission, bool) {
+	body := p.activeCoroEmissionBody()
+	if body == nil || body.coro == nil {
+		return coroRecoveryEmission{}, false
+	}
+	return coroRecoveryEmission{
+		task:           body.task,
+		handle:         body.coro.Handle(),
+		takeHook:       body.abi.recoverTakeHook,
+		aliasBeginHook: body.abi.recoverAliasBeginHook,
+		aliasEndHook:   body.abi.recoverAliasEndHook,
+	}, true
+}
+
 // coroTask and coroCleanup expose narrow capabilities owned by the active
 // full-coroutine emission session. Lowerers that need only one capability must
 // not retain or inspect the complete mutable body.

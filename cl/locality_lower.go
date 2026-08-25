@@ -578,7 +578,11 @@ func (p *context) emitFunctionPreambleWithCoroPlan(
 	finish := p.beginCoroFunctionPreambleEmission(coroFunctionPreambleEntry)
 	defer finish()
 	if p.functionUsesRecover(fn) {
-		b.BindRecoverFrame()
+		if handle := p.activeCoroHandle(); !handle.IsNil() {
+			b.BindRecoverFrameToken(handle)
+		} else {
+			b.BindRecoverFrame()
+		}
 	}
 	p.enterExportedLocalContext(b)
 	p.pushCallerLocationFrame(b, fn)

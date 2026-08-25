@@ -55,8 +55,12 @@ func (p *context) compileCoroManagedDispatchAwait(
 	}
 	args := p.compileValues(b, call.Call.Args, fnNormal)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
+	if instructionPlan.recoverAlias {
+		p.observeCoroPhysicalRecoverAlias(call)
+	}
 	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, call.Call.Signature(), nil, keepaliveSlots, false,
+		b, fn, args, call.Call.Signature(), nil, keepaliveSlots,
+		false, instructionPlan.recoverAlias, false,
 	)
 	p.recordCoroValueAddress(call, result.address)
 	return result.value
@@ -70,7 +74,7 @@ func (p *context) compileCoroManagedDispatchAwaitValue(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	return p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, signature, nil, keepaliveSlots, false,
+		b, fn, args, signature, nil, keepaliveSlots, false, false, false,
 	).value
 }
 
@@ -81,16 +85,18 @@ func (p *context) compileCoroManagedDispatchAwaitValue(
 // retain their existing child-outcome behavior.
 func (p *context) compileCoroManagedDispatchAwaitValueWithRecovery(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
-	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr, recoverAliasChild bool,
 ) llssa.Expr {
 	return p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, signature, cleanup, keepaliveSlots, false,
+		b, fn, args, signature, cleanup, keepaliveSlots,
+		recoverAliasChild, false, false,
 	).value
 }
 
 func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
-	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr, trustedDescriptor bool,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	recoverAliasChild, transparentRecoverAlias, trustedDescriptor bool,
 ) coroAwaitedValue {
 	body := p.coroBody()
 	if body == nil {
@@ -134,7 +140,13 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	coroutineBlock := p.fn.MakeBlock()
 	plainBlock := p.fn.MakeBlock()
 	join := p.fn.MakeBlock()
-	b.If(b.CoroDispatchHasCoro(fn, opts), coroutineBlock, plainBlock)
+	var hasCoro, codeEntry llssa.Expr
+	if transparentRecoverAlias {
+		hasCoro, codeEntry = b.CoroDispatchHasCoroAndCodeEntry(fn, opts)
+	} else {
+		hasCoro = b.CoroDispatchHasCoro(fn, opts)
+	}
+	b.If(hasCoro, coroutineBlock, plainBlock)
 
 	b.SetBlockEx(coroutineBlock, llssa.AtEnd, false)
 	child := b.CallCoroDispatchCoro(
@@ -144,11 +156,32 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		args,
 		opts,
 	)
-	p.awaitCoroChildWithRecovery(b, child, resultSlot, abi.signature.Results(), cleanup, keepaliveSlots)
+	var afterConsume func(llssa.Builder)
+	if cleanup != nil {
+		token := descriptorWord
+		if recoverAliasChild {
+			token = child
+		}
+		afterConsume = p.beginCoroRecoverAliasScope(
+			b, llssa.Nil, token, b.Load(cleanup.panicActive),
+		)
+	} else if transparentRecoverAlias {
+		afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
+	}
+	p.awaitCoroChildWithRecoveryAndConsume(
+		b, child, resultSlot, abi.signature.Results(), cleanup, keepaliveSlots, afterConsume,
+	)
 	b.Jump(join)
 
 	b.SetBlockEx(plainBlock, llssa.AtEnd, false)
-	plainResult := b.CallCoroDispatchPlain(fn, args, opts)
+	var plainResult llssa.Expr
+	if transparentRecoverAlias {
+		plainResult = p.callCoroTransparentRecoverAlias(b, codeEntry, func() llssa.Expr {
+			return b.CallCoroDispatchPlain(fn, args, opts)
+		})
+	} else {
+		plainResult = b.CallCoroDispatchPlain(fn, args, opts)
+	}
 	p.storeCoroDynamicDispatchResult(b, resultSlot, plainResult, abi.signature.Results())
 	b.Jump(join)
 

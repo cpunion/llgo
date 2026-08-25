@@ -174,6 +174,9 @@ func TestCoroRawCAdapterSelectionIsOccurrenceSpecific(t *testing.T) {
 		t.Fatalf("mixed raw occurrence adapter = %+v, recognized=%t", adapter, recognized)
 	}
 	coroAssertRawCAdapterValuePlans(t, plan, change, targetPlan.ID, coro.DirectCoro)
+	if err := validateCoroPhysicalConsumersCapabilities(plan, fixture.universe, true, false, true); err != nil {
+		t.Fatalf("physical consumer preflight rejected the certified raw callback occurrence: %v", err)
+	}
 
 	managedCall := coroRawCAdapterStaticCall(t, owner, target)
 	callPlan, found := plan.CallPlan(managedCall)

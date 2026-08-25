@@ -212,10 +212,14 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
-		EmissionUniverse:     ssaUniverse,
-		FunctionIDs:          functionIDs,
-		DynamicResolution:    coro.DynamicCHAOpen,
-		MaxPlainInstructions: -1,
+		EmissionUniverse:               ssaUniverse,
+		FunctionIDs:                    functionIDs,
+		DynamicResolution:              coro.DynamicCHAOpen,
+		MaxPlainInstructions:           -1,
+		OutcomeMode:                    coro.OutcomeExplicitStatus,
+		ClassifyDemandReferences:       universe.CoroDemandReferences,
+		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
+		ClassifyManagedValueReferences: universe.CoroPlanningMetadata().ManagedValueReferences,
 		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.UnknownTarget, error) {
 			if call == invoke {
 				return coro.UnknownManagedInterfaceDispatch, nil
@@ -276,7 +280,7 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 		t.Fatal("dead promoted target acquired an unrelated closed/raw method-token capability")
 	}
 	if err := validateCoroDynamicDispatchTarget(deadPromoted, deadPlan); err == nil ||
-		!strings.Contains(err.Error(), "methods require receiver-aware dispatch lowering") {
+		!strings.Contains(err.Error(), "coroutine dynamic dispatch ABI") {
 		t.Fatalf("receiver-free function-value validator accepted managed method target: %v", err)
 	}
 	rootPlan, ok := plan.FunctionPlan(root)
@@ -301,9 +305,10 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	}
 	ir := module.String()
 	if !strings.Contains(ir, coroPlainDispatchDescriptorPrefix+"method.") ||
-		!strings.Contains(ir, coroPlainDispatchThunkPrefix+"method.") ||
-		!strings.Contains(ir, coroCoroDispatchThunkPrefix+"method.") {
-		t.Fatalf("plain/coroutine method capabilities were not materialized:\n%s", ir)
+		!strings.Contains(ir, coroCoroDispatchThunkPrefix+"method.") ||
+		!strings.Contains(ir, coroPlainDispatchThunkPrefix+"method-value.") ||
+		!strings.Contains(ir, coroCoroDispatchThunkPrefix+"method-value.") {
+		t.Fatalf("managed method and method-value capabilities were not materialized:\n%s", ir)
 	}
 	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
 	if !strings.Contains(rootIR, "coro.dispatch.version.invalid") ||

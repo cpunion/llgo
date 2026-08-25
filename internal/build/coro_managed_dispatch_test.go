@@ -26,7 +26,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-func TestCoroPlanInputCertifiesOnlyOrdinaryManagedDescriptorCalls(t *testing.T) {
+func TestCoroPlanInputCertifiesManagedDescriptorCallsAndDefers(t *testing.T) {
 	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/manageddispatch", `package manageddispatch
 type I interface { M() }
 func call(fn func(int) int) int { return fn(1) }
@@ -65,7 +65,7 @@ func deferred(fn func()) { defer fn() }
 			t.Fatalf("%s: missing CallPlan", name)
 		}
 		want := coro.UnknownManaged
-		if name == "call" || name == "variadic" {
+		if name == "call" || name == "variadic" || name == "deferred" {
 			want = coro.UnknownManagedDispatch
 		} else if name == "invoke" || name == "invokeDeferred" {
 			want = coro.UnknownManagedInterfaceDispatch

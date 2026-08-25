@@ -9,9 +9,9 @@ type pair struct {
 var state pair
 
 // The right-hand side must be completely evaluated before state is replaced.
-// CHECK-LABEL: define void @main.assignGlobal(){{.*}} {
+// CHECK-LABEL: define ptr @"main.assignGlobal$coro"(
 // CHECK: call i64 @main.first()
-// CHECK: call i64 @main.second()
+// CHECK: call void @"main.second$outcome"(
 // CHECK: store %main.pair %{{[0-9]+}}, ptr @main.state
 func assignGlobal() {
 	state = pair{first(), second()}

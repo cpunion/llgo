@@ -9,10 +9,10 @@ type pair struct {
 var calls int
 
 // Both calls must run before assigning through the nil pointer panics.
-// CHECK-LABEL: define void @main.assignNil(){{.*}} {
+// CHECK-LABEL: define ptr @"main.assignNil$coro"(
 // CHECK: call i64 @main.count()
 // CHECK: call i64 @main.count()
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.AssertNilDeref"
+// CHECK: call void @__llgo_coro_fault_payload_v1(i32 1
 func assignNil() {
 	defer func() {
 		if recover() == nil {

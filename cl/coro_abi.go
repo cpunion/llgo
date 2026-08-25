@@ -35,18 +35,23 @@ import (
 
 const coroSyntheticSelectNoCaseMessage = "blocking select matched no case"
 
-func coroDemandReferenceTrace(universe *EmissionUniverse, target *ssa.Function) string {
+func coroDemandReferenceTrace(universe *EmissionUniverse, target *ssa.Function, plans ...*coro.SSAPlan) string {
 	if universe == nil || target == nil {
 		return "unavailable"
 	}
 	var sources []string
+	var plan *coro.SSAPlan
+	if len(plans) != 0 {
+		plan = plans[0]
+	}
 	for _, owner := range universe.Functions() {
 		if owner == nil {
 			continue
 		}
-		managed, managedErr := universe.CoroDemandReferences(owner)
+		raw, rawErr := universe.CoroDemandReferences(owner)
+		managed, managedErr := universe.CoroPlanningMetadata().ManagedValueReferences(owner)
 		synchronous, syncErr := universe.CoroSyncDemandReferences(owner)
-		if managedErr != nil || syncErr != nil {
+		if rawErr != nil || managedErr != nil || syncErr != nil {
 			continue
 		}
 		contains := func(functions []*ssa.Function) bool {
@@ -57,10 +62,17 @@ func coroDemandReferenceTrace(universe *EmissionUniverse, target *ssa.Function) 
 			}
 			return false
 		}
-		if contains(managed) || contains(synchronous) {
+		if contains(raw) || contains(managed) || contains(synchronous) {
+			ownerPlan := "unplanned"
+			if frozen, ok := plan.FunctionPlan(owner); ok {
+				ownerPlan = fmt.Sprintf(
+					"emission=%s demand=%s managed=%s raw=%t",
+					frozen.Emission, frozen.Demand, frozen.ManagedDemand, frozen.RawPlainDemand,
+				)
+			}
 			sources = append(sources, fmt.Sprintf(
-				"%s(managed-reference=%t sync-reference=%t)",
-				owner.String(), contains(managed), contains(synchronous),
+				"%s(raw-reference=%t managed-value=%t sync-reference=%t %s)",
+				owner.String(), contains(raw), contains(managed), contains(synchronous), ownerPlan,
 			))
 		}
 	}
@@ -142,6 +154,8 @@ const (
 	coroPanicTraceReplaceHookV1                = "__llgo_coro_panic_trace_replace_v1"
 	coroPanicTraceAppendHookV1                 = "__llgo_coro_panic_trace_append_v1"
 	coroRecoverTakeHookV1                      = "__llgo_coro_recover_take_v1"
+	coroRecoverAliasBeginHookV1                = "__llgo_coro_recover_alias_begin_v1"
+	coroRecoverAliasEndHookV1                  = "__llgo_coro_recover_alias_end_v1"
 	coroSpawnBeginHookV1                       = "__llgo_coro_spawn_begin_v1"
 	coroSpawnCommitHookV1                      = "__llgo_coro_spawn_commit_v1"
 	coroCompletePrepareHookV2                  = "__llgo_coro_complete_prepare_v2"
@@ -226,6 +240,8 @@ type coroPhysicalABI struct {
 	panicTraceReplaceHook         string
 	panicTraceAppendHook          string
 	recoverTakeHook               string
+	recoverAliasBeginHook         string
+	recoverAliasEndHook           string
 	completePrepareHook           string
 	physicalSig                   *types.Signature
 	hasEnv                        bool
@@ -328,6 +344,8 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	panicTraceReplaceHook := coroPanicTraceReplaceHookV1
 	panicTraceAppendHook := coroPanicTraceAppendHookV1
 	recoverTakeHook := coroRecoverTakeHookV1
+	recoverAliasBeginHook := coroRecoverAliasBeginHookV1
+	recoverAliasEndHook := coroRecoverAliasEndHookV1
 	faultPrepareHook := coroFaultPrepareHookV1
 	faultPayloadHook := coroFaultPayloadHookV1
 	faultPrepareArgsHook := coroFaultPrepareHookV2
@@ -393,7 +411,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00panic-trace-append=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare-inline=%s\x00await-inline-finish=%s\x00await-inline-destroy-consume=%s\x00await-consume-slow=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00panic-trace-append=%s\x00recover-take=%s\x00recover-alias-begin=%s\x00recover-alias-end=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare-inline=%s\x00await-inline-finish=%s\x00await-inline-destroy-consume=%s\x00await-consume-slow=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		descriptorFlags,
@@ -406,6 +424,8 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		panicTraceReplaceHook,
 		panicTraceAppendHook,
 		recoverTakeHook,
+		recoverAliasBeginHook,
+		recoverAliasEndHook,
 		faultPrepareHook,
 		faultPayloadHook,
 		faultPrepareArgsHook,
@@ -459,6 +479,8 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		panicTraceReplaceHook:         panicTraceReplaceHook,
 		panicTraceAppendHook:          panicTraceAppendHook,
 		recoverTakeHook:               recoverTakeHook,
+		recoverAliasBeginHook:         recoverAliasBeginHook,
+		recoverAliasEndHook:           recoverAliasEndHook,
 		completePrepareHook:           completePrepareHook,
 		physicalSig:                   physicalSig,
 		hasEnv:                        hasEnv,
@@ -1570,7 +1592,7 @@ func validateCoroPhysicalABIForOwner(
 			"requires managed async demand, got aggregate=%s managed=%s raw=%t raw-entry=%t representation=%s emission=%s effect=%s; demand-sources: %s; demand-references: %s; effect-trace: %s",
 			plan.Demand, plan.ManagedDemand, plan.RawPlainDemand, plan.RawPlainEntry,
 			plan.FuncRep, plan.Emission, plan.Effect,
-			whole.DemandTrace(fn), coroDemandReferenceTrace(universe, fn), whole.OpaqueEffectTrace(fn),
+			whole.DemandTrace(fn), coroDemandReferenceTrace(universe, fn, whole), whole.OpaqueEffectTrace(fn),
 		)
 	}
 	rawVariant := whole != nil && whole.HasRawPlainVariant(fn)
@@ -4081,6 +4103,20 @@ func validateCoroPhysicalConsumersCapabilities(
 					// reaches physical emission, so the target's coroutine
 					// primary needs no descriptor conversion at this site.
 					continue
+				}
+				if change, ok := instr.(*ssa.ChangeType); ok && universe != nil {
+					_, recognized, err := resolveCoroRawCChangeType(plan, universe, fn, change)
+					if err != nil {
+						return coroLeafInstructionError(fn, function.Plan, instr,
+							"invalid frozen raw C function adapter: "+err.Error())
+					}
+					if recognized {
+						// The occurrence-local adapter proof owns this function
+						// operand completely. Lowering either emits the target's
+						// frozen raw/plain twin or performs an ABI-identical raw
+						// retag; no managed coroutine function value is materialized.
+						continue
+					}
 				}
 				for _, operand := range instr.Operands(nil) {
 					if operand == nil || *operand == nil {

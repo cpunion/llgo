@@ -37,6 +37,24 @@ func coroMaterializeDirectChannelCompletionV1(*coro.DirectChannelCompletion) boo
 // Linked runtime islands separately verify real logical runtime-G ownership.
 type coroRuntimeContext struct{}
 
+// Recover alias scopes require the complete logical runtime G sidecar. The
+// named-source scheduler adapter intentionally does not model that state, so
+// every alias operation fails closed while ordinary non-aliased recover paths
+// remain available to the target-neutral scheduler tests.
+func coroBeginRecoverAliasRuntimeV1(
+	*coro.G, unsafe.Pointer, unsafe.Pointer, bool,
+) (unsafe.Pointer, bool) {
+	return nil, false
+}
+
+func coroEndRecoverAliasRuntimeV1(*coro.G, unsafe.Pointer) bool {
+	return false
+}
+
+func coroHasRecoverAliasRuntimeV1(*coro.G, unsafe.Pointer) bool {
+	return false
+}
+
 func coroBindRuntimeContext(task, parent *coro.G, main bool) bool {
 	return task != nil
 }

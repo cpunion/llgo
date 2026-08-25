@@ -93,6 +93,8 @@ func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_panic_trace_replace_v1(unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_panic_trace_append_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32) {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_recover_alias_begin_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, bool) unsafe.Pointer { return nil }
+func __llgo_coro_recover_alias_end_v1(unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
@@ -189,7 +191,9 @@ func __llgo_coro_program_main_return_v1() {}
 		"__llgo_coro_panic_prepare_v1",
 		coroPanicTraceReplaceSymbolV1,
 		coroPanicTraceAppendSymbolV1,
-		"__llgo_coro_recover_take_v1",
+		coroRecoverTakeSymbolV1,
+		coroRecoverAliasBeginSymbolV1,
+		coroRecoverAliasEndSymbolV1,
 		"__llgo_coro_fault_payload_v1",
 		"__llgo_coro_fault_payload_v2",
 		"__llgo_coro_spawn_begin_v1",

@@ -161,7 +161,7 @@ func Root(values []byte, index int) byte { return values[index] }
 	if target, ok, err := universe.ResolveCoroPlainLoweredCall(root, "PanicIndex"); err != nil || !ok || target != helper {
 		t.Fatalf("plain PanicIndex = %v, %t, %v; want exact runtime helper", target, ok, err)
 	}
-	plainCalls, err := universe.CoroPlainLoweredCalls(root)
+	plainCalls, err := universe.CoroPlanningMetadata().PlainLoweredCalls(root)
 	if err != nil {
 		t.Fatal(err)
 	}

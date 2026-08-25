@@ -539,7 +539,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 	if err := ir.finalizeOutcomePlainIntrinsicSemantics(u.prog, u.functions, u.sortedUseOwners); err != nil {
 		return fmt.Errorf("finalize outcome-plain intrinsic semantics: %w", err)
 	}
-	if err := ir.finalizeRangeYieldCleanupOwners(u); err != nil {
+	if err := ir.finalizeRangeYieldCleanupOwners(u.functions, u.sortedUseOwners); err != nil {
 		return fmt.Errorf("finalize range-yield cleanup owners: %w", err)
 	}
 	ir.callsFrozen = true

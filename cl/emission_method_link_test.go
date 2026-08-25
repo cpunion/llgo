@@ -73,19 +73,19 @@ func Value() any { return struct{ Base }{} }
 		}
 	}
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: value, Demand: coro.SyncDemand}}, coro.SSAConfig{
-		EmissionUniverse:             ssaUniverse,
-		FunctionIDs:                  universe.FunctionIDConfig(),
-		ClassifyDemandReferences:     universe.CoroDemandReferences,
-		ClassifySyncDemandReferences: universe.CoroSyncDemandReferences,
+		EmissionUniverse:               ssaUniverse,
+		FunctionIDs:                    universe.FunctionIDConfig(),
+		OutcomeMode:                    coro.OutcomeExplicitStatus,
+		ClassifyDemandReferences:       universe.CoroDemandReferences,
+		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
+		ClassifyManagedValueReferences: universe.CoroPlanningMetadata().ManagedValueReferences,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, nil,
-		PackageOptions{Compilation: &Compilation{
-			CoroPlan:         plan,
-			EmissionUniverse: universe}},
+		PackageOptions{Compilation: coroClosedInterfacePlainCompilation(plan, universe)},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -114,15 +114,23 @@ func Value() any { return struct{ Base }{} }
 		if physical == legacy {
 			t.Fatalf("wrapper %s retained colliding legacy symbol %q", fn, legacy)
 		}
-		definition := compiled.FuncOf(physical)
+		functionPlan, planned := plan.FunctionPlan(fn)
+		if !planned || functionPlan.Emission == coro.EmitNone {
+			t.Fatalf("frozen wrapper %q has no emitted function plan: %+v, present=%t", physical, functionPlan, planned)
+		}
+		primary := physical
+		if functionPlan.Emission == coro.EmitCoroutine {
+			primary += coroPrimarySuffix
+		}
+		definition := compiled.FuncOf(primary)
 		if definition == nil || !definition.HasBody() {
-			t.Fatalf("frozen wrapper %q has no emitted body", physical)
+			t.Fatalf("frozen wrapper primary %q has no emitted body", primary)
 		}
 		if old := compiled.FuncOf(legacy); old != nil {
 			t.Fatalf("ABI method table retained legacy wrapper declaration %q", legacy)
 		}
-		if count := strings.Count(ir, physical); count < 2 {
-			t.Fatalf("frozen wrapper %q occurs %d time(s) in IR; want definition and ABI method-table reference", physical, count)
+		if count := strings.Count(ir, primary); count < 2 {
+			t.Fatalf("frozen wrapper primary %q occurs %d time(s) in IR; want definition and descriptor reference", primary, count)
 		}
 		found++
 	}
@@ -193,17 +201,25 @@ func Value() any { return methoddecl.Error("value") }
 	}
 	value := consumer.ssa.Func("Value")
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: value, Demand: coro.SyncDemand}}, coro.SSAConfig{
-		EmissionUniverse:             ssaUniverse,
-		FunctionIDs:                  universe.FunctionIDConfig(),
-		ClassifyDemandReferences:     universe.CoroDemandReferences,
-		ClassifySyncDemandReferences: universe.CoroSyncDemandReferences,
+		EmissionUniverse:               ssaUniverse,
+		FunctionIDs:                    universe.FunctionIDConfig(),
+		OutcomeMode:                    coro.OutcomeExplicitStatus,
+		ClassifyDemandReferences:       universe.CoroDemandReferences,
+		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
+		ClassifyManagedValueReferences: universe.CoroPlanningMetadata().ManagedValueReferences,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	compilation := &Compilation{
-		CoroPlan:         plan,
-		EmissionUniverse: universe}
+	wrapperPlan, planned := plan.FunctionPlan(wrapper)
+	if !planned || wrapperPlan.Emission == coro.EmitNone || wrapperPlan.FuncRep != coro.Dispatch {
+		t.Fatalf("cross-package wrapper plan = %+v, present=%t; want emitted Dispatch", wrapperPlan, planned)
+	}
+	primary, err := universe.CoroLibraryEffects().FunctionEmittedPrimarySymbol(wrapper, wrapperPlan.Emission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilation := coroClosedInterfacePlainCompilation(plan, universe)
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, consumer.ssa, []*ast.File{consumer.file}, nil,
 		PackageOptions{Compilation: compilation},
@@ -211,9 +227,9 @@ func Value() any { return methoddecl.Error("value") }
 	if err != nil {
 		t.Fatal(err)
 	}
-	declaration := compiled.FuncOf(physical)
+	declaration := compiled.FuncOf(primary)
 	if declaration == nil || !declaration.HasBody() {
-		t.Fatalf("consumer wrapper %q = %v; want a linkonce use-site definition", physical, declaration)
+		t.Fatalf("consumer wrapper primary %q = %v; want a linkonce use-site definition", primary, declaration)
 	}
 	if legacy != physical && compiled.FuncOf(legacy) != nil {
 		t.Fatalf("consumer retained legacy wrapper declaration %q", legacy)
@@ -226,14 +242,14 @@ func Value() any { return methoddecl.Error("value") }
 		t.Fatal(err)
 	}
 	definitions := 0
-	if function := declared.FuncOf(physical); function != nil && function.HasBody() {
+	if function := declared.FuncOf(primary); function != nil && function.HasBody() {
 		definitions++
 	}
-	if function := compiled.FuncOf(physical); function != nil && function.HasBody() {
+	if function := compiled.FuncOf(primary); function != nil && function.HasBody() {
 		definitions++
 	}
 	if definitions != 2 {
-		t.Fatalf("wrapper %q definition count across declaring/consumer modules = %d; want one coalescible definition per use site", physical, definitions)
+		t.Fatalf("wrapper primary %q definition count across declaring/consumer modules = %d; want one coalescible definition per use site", primary, definitions)
 	}
 	for moduleName, ir := range map[string]string{
 		"declaring": declared.String(),
@@ -241,13 +257,13 @@ func Value() any { return methoddecl.Error("value") }
 	} {
 		linkOnceDefinition := false
 		for _, line := range strings.Split(ir, "\n") {
-			if strings.Contains(line, "define ") && strings.Contains(line, physical) && strings.Contains(line, "linkonce") {
+			if strings.Contains(line, "define ") && strings.Contains(line, primary) && strings.Contains(line, "linkonce") {
 				linkOnceDefinition = true
 				break
 			}
 		}
 		if !linkOnceDefinition {
-			t.Fatalf("%s wrapper %q is not emitted with linkonce linkage", moduleName, physical)
+			t.Fatalf("%s wrapper primary %q is not emitted with linkonce linkage", moduleName, primary)
 		}
 	}
 }
@@ -309,6 +325,10 @@ func Unreachable() any { return Dead{} }
 	if len(defensive) == 0 || defensive[0] == nil {
 		t.Fatal("caller mutation changed frozen ABI method references")
 	}
+	managed, err := universe.CoroPlanningMetadata().ManagedValueReferences(demanded)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	memberType := func(name string) types.Type {
 		member, ok := pkg.ssa.Members[name].(*ssa.Type)
@@ -350,6 +370,9 @@ func Unreachable() any { return Dead{} }
 		if !hasReference(defensive, target) {
 			t.Fatalf("Demanded references omit exact %s %v", label, target)
 		}
+		if !hasReference(managed, target) {
+			t.Fatalf("Demanded managed descriptor references omit exact %s %v", label, target)
+		}
 	}
 
 	deadReferences, err := universe.CoroDemandReferences(unreachable)
@@ -360,16 +383,24 @@ func Unreachable() any { return Dead{} }
 	if !hasReference(deadReferences, deadMethod) {
 		t.Fatalf("Unreachable references omit exact Dead.Method %v", deadMethod)
 	}
+	deadManaged, err := universe.CoroPlanningMetadata().ManagedValueReferences(unreachable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasReference(deadManaged, deadMethod) {
+		t.Fatalf("Unreachable managed descriptor references omit exact Dead.Method %v", deadMethod)
+	}
 
 	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: demanded, Demand: coro.SyncDemand}}, coro.SSAConfig{
-		EmissionUniverse:             ssaUniverse,
-		FunctionIDs:                  universe.FunctionIDConfig(),
-		ClassifyDemandReferences:     universe.CoroDemandReferences,
-		ClassifySyncDemandReferences: universe.CoroSyncDemandReferences,
+		EmissionUniverse:               ssaUniverse,
+		FunctionIDs:                    universe.FunctionIDConfig(),
+		ClassifyDemandReferences:       universe.CoroDemandReferences,
+		ClassifyManagedValueReferences: universe.CoroPlanningMetadata().ManagedValueReferences,
+		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -380,8 +411,19 @@ func Unreachable() any { return Dead{} }
 	}
 	for _, target := range []*ssa.Function{valueTFN, pointerIFN} {
 		methodPlan, ok := plan.FunctionPlan(target)
-		if !ok || methodPlan.Demand != coro.AsyncDemand || methodPlan.Emission != coro.EmitCoroutine || methodPlan.Primary != coro.PrimaryCoroutine {
+		if !ok || methodPlan.Demand != coro.AsyncDemand || methodPlan.Emission != coro.EmitCoroutine ||
+			methodPlan.Primary != coro.PrimaryCoroutine || methodPlan.FuncRep != coro.Dispatch {
 			t.Fatalf("suspending method %v plan = %+v, present=%v; want demanded coroutine entry", target, methodPlan, ok)
+		}
+	}
+	managedMethods, err := analyzeCoroManagedInterfaceDispatchPlan(plan, universe, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []*ssa.Function{valueTFN, pointerIFN} {
+		targetPlan, _ := plan.FunctionPlan(target)
+		if !managedMethods.acceptsTarget(target, targetPlan) {
+			t.Fatalf("managed Method.Tfn_ plan omits receiver descriptor target %q", targetPlan.ID)
 		}
 	}
 	deadPlan, ok := plan.FunctionPlan(deadMethod)
