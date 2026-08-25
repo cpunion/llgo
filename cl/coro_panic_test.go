@@ -381,6 +381,45 @@ func Root(value any, trigger bool) { if trigger { panic(value) } }
 	}
 }
 
+func TestCoroExplicitStatusPanicAcceptsFrameStableInterfaceTypeAssertResult(t *testing.T) {
+	const source = `package foo
+func Root(value any) {
+	payload, _ := value.(any)
+	panic(payload)
+}
+`
+	prog, _, universe, root, audit, _ := prepareCoroFrameRootAudit(
+		t, source, "Root", EmissionUniverseOptions{},
+	)
+	defer prog.Dispose()
+	var payload *ssa.Extract
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			extract, ok := instruction.(*ssa.Extract)
+			if !ok || extract.Index != 0 {
+				continue
+			}
+			if _, ok := extract.Tuple.(*ssa.TypeAssert); ok {
+				payload = extract
+			}
+		}
+	}
+	if payload == nil {
+		t.Fatal("fixture has no interface type-assert value extract")
+	}
+	assertion := payload.Tuple.(*ssa.TypeAssert)
+	if helpers := universe.loweredRuntimeHelpers(audit.ctx, assertion); len(helpers) != 0 {
+		t.Fatalf("same-interface type assertion acquired runtime helpers: %v", helpers)
+	}
+	if reason := validateCoroExplicitStatusPanicInterfaceValue(
+		audit, payload, coroPhysicalLoweringCapabilities{explicitPanic: true}, make(map[ssa.Value]bool),
+	); reason != "" {
+		var dump bytes.Buffer
+		ssa.WriteFunction(&dump, root)
+		t.Fatalf("frame-stable interface type-assert result rejected: %s\n%s", reason, dump.String())
+	}
+}
+
 func TestCoroExplicitStatusPanicAcceptsStableClosureInterfaceLoad(t *testing.T) {
 	const source = `package foo
 type state struct { payload any }
