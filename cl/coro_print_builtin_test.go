@@ -265,6 +265,9 @@ func TestCoroPrintBuiltinManagedBatchNativeAndWasm32(t *testing.T) {
 			if got := strings.Count(body, "call i8 @llvm.coro.suspend"); got != 4 {
 				t.Fatalf("physical suspend sites = %d, want initial + two batch awaits + final (4):\n%s", got, body)
 			}
+			if got := strings.Count(body, "call void @"+coroPanicPrepareHookV1); got != 1 {
+				t.Fatalf("shared non-return await dispatches = %d panic paths, want one per physical body:\n%s", got, body)
+			}
 
 			for _, module := range []llvm.Module{runtimeModule, fooModule} {
 				runCoroABITestPipeline(t, fixture.prog, module)

@@ -505,13 +505,13 @@ func (p *context) compileCoroTargetAwaitWithContext(
 }
 
 func (p *context) compileCoroCleanupTargetAwait(
-	b llssa.Builder, callee *ssa.Function, args []llssa.Expr,
+	b llssa.Builder, callee *ssa.Function, args, keepalive []llssa.Expr,
 ) llssa.Expr {
 	body := p.coroBody()
 	if body == nil || body.cleanup == nil {
 		panic("coroutine cleanup await requires the active static cleanup drainer")
 	}
-	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, llssa.Nil, args, body.cleanup, nil)
+	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, llssa.Nil, args, body.cleanup, keepalive)
 }
 
 func (p *context) compileCoroTargetAwaitWithContextAndRecovery(
@@ -999,11 +999,12 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 	typeWord := b.FieldAddr(outcomeScratch, outcomePlainCompletionTypeWord)
 	dataWord := b.FieldAddr(outcomeScratch, outcomePlainCompletionDataWord)
 	statusWord := b.FieldAddr(outcomeScratch, outcomePlainCompletionStatus)
-	b.Store(typeWord, p.prog.Nil(p.prog.VoidPtr()))
-	b.Store(dataWord, p.prog.Nil(p.prog.VoidPtr()))
-	b.Store(statusWord, p.prog.IntVal(0, p.prog.Uint32()))
+	// The ramp zeroes this pointer-bearing record once, before its first
+	// suspension. Both the inline-destroy and resumed consume hooks then define
+	// every word on all returning paths, so clearing it again at each call site
+	// only enlarges the state machine.
 	completedInline := p.emitCoroStaticInlineAwait(
-		b, child, startedInline, p.prog.BoolVal(false), typeWord, dataWord, statusWord,
+		b, child, startedInline, typeWord, dataWord, statusWord,
 	)
 	consume := p.pkg.NewFunc(body.abi.awaitConsumeHook, coroAwaitConsumeSignature(), llssa.InC)
 
@@ -1123,6 +1124,23 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 	}
 	status := b.Load(statusWord)
 	p.emitCoroKeepaliveSlots(b, keepaliveSlots)
+	if cleanup == nil && body.cleanup == nil && afterConsume == nil {
+		// All non-Return outcomes terminate this no-cleanup source path. Keep
+		// their status switch and completion protocol once per physical body;
+		// emitting the same Panic/Abort/Shutdown/Goexit fanout at every static
+		// await materially multiplies both presplit IR and final machine code.
+		// suspendForChild has already published this site's line in the parent
+		// header, and activation deliberately leaves that diagnostic field intact.
+		returned := p.fn.MakeBlock()
+		isReturn := b.BinOp(
+			token.EQL,
+			status,
+			p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()),
+		)
+		b.IfWithBranchWeights(isReturn, returned, p.sharedCoroAwaitTerminalBlock(body), 1000, 1)
+		b.SetBlockContinuation(returned)
+		return p.loadCoroAwaitResult(b, resultSlot, results)
+	}
 	returned := p.fn.MakeBlock()
 	panicked := p.fn.MakeBlock()
 	aborted := p.fn.MakeBlock()
@@ -1174,6 +1192,60 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 	return p.loadCoroAwaitResult(b, resultSlot, results)
 }
 
+// sharedCoroAwaitTerminalBlock owns the non-return outcome fanout for ordinary
+// child awaits in a no-cleanup physical body. One consumed child transaction is
+// active at a time, so the function-wide outcome scratch and header line form
+// an exact predecessor-independent payload. No edge from this block returns to
+// source execution.
+func (p *context) sharedCoroAwaitTerminalBlock(body *coroBodyContext) llssa.BasicBlock {
+	if body == nil || body.cleanup != nil || body.header.IsNil() || body.outcomeScratch.IsNil() ||
+		body.completion == nil || body.finalSuspend == nil || p.fn == nil {
+		panic("shared coroutine await terminal dispatch requires a no-cleanup physical body")
+	}
+	if body.awaitTerminal != nil {
+		return body.awaitTerminal
+	}
+	body.awaitTerminal = p.fn.MakeBlock()
+	b := p.fn.NewBuilder()
+	defer b.Dispose()
+	b.SetBlock(body.awaitTerminal)
+
+	status := b.Load(b.FieldAddr(body.outcomeScratch, outcomePlainCompletionStatus))
+	panicked := p.fn.MakeBlock()
+	aborted := p.fn.MakeBlock()
+	shutdown := p.fn.MakeBlock()
+	goexited := p.fn.MakeBlock()
+	invalid := p.fn.MakeBlock()
+	dispatch := b.Switch(status, invalid)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionPanic, p.prog.Uint32()), panicked)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionAbort, p.prog.Uint32()), aborted)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionShutdown, p.prog.Uint32()), shutdown)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionGoexit, p.prog.Uint32()), goexited)
+	dispatch.End(b)
+
+	b.SetBlockEx(panicked, llssa.AtEnd, false)
+	if body.panicPrepare.IsNil() {
+		b.Unreachable()
+	} else {
+		body.panicWithLine(
+			b,
+			b.Load(b.FieldAddr(body.outcomeScratch, outcomePlainCompletionTypeWord)),
+			b.Load(b.FieldAddr(body.outcomeScratch, outcomePlainCompletionDataWord)),
+			b.Load(b.FieldAddr(body.header, coroHeaderLine)),
+		)
+	}
+
+	b.SetBlockEx(aborted, llssa.AtEnd, false)
+	body.enterCancellation(b, coroAwaitCompletionAbort)
+	b.SetBlockEx(shutdown, llssa.AtEnd, false)
+	body.enterCancellation(b, coroAwaitCompletionShutdown)
+	b.SetBlockEx(goexited, llssa.AtEnd, false)
+	body.enterGoexit(b)
+	b.SetBlockEx(invalid, llssa.AtEnd, false)
+	b.Unreachable()
+	return body.awaitTerminal
+}
+
 // emitCoroStaticInlineAwait keeps LLVM's handle operations in the exact static
 // caller while the runtime owns only scheduler-state transitions. Besides
 // removing one opaque runtime round trip, this is the shape required for LLVM
@@ -1181,11 +1253,11 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 // in its parent. A declined/deep or genuinely suspended child converges on the
 // existing false result and parent suspend path.
 func (p *context) emitCoroStaticInlineAwait(
-	b llssa.Builder, child, startedInline, alreadyRan, typeWord, dataWord, statusWord llssa.Expr,
+	b llssa.Builder, child, startedInline, typeWord, dataWord, statusWord llssa.Expr,
 ) llssa.Expr {
 	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn || child.IsNil() || startedInline.IsNil() ||
-		alreadyRan.IsNil() || typeWord.IsNil() || dataWord.IsNil() || statusWord.IsNil() ||
+		typeWord.IsNil() || dataWord.IsNil() || statusWord.IsNil() ||
 		body.abi.awaitInlineFinishHook == "" ||
 		body.abi.awaitInlineDestroyConsumeHook == "" {
 		panic("coroutine static inline await has an incomplete physical contract")
@@ -1199,21 +1271,15 @@ func (p *context) emitCoroStaticInlineAwait(
 		llssa.InC,
 	)
 
-	started := p.fn.MakeBlock()
 	resume := p.fn.MakeBlock()
-	inspect := p.fn.MakeBlock()
 	declined := p.fn.MakeBlock()
 	destroy := p.fn.MakeBlock()
 	joined := p.fn.MakeBlock()
 	parent := body.coro.Handle()
-	b.If(startedInline, started, declined)
+	b.If(startedInline, resume, declined)
 
-	b.SetBlockEx(started, llssa.AtEnd, false)
-	b.If(alreadyRan, inspect, resume)
 	b.SetBlockEx(resume, llssa.AtEnd, false)
 	p.emitCoroInlineChildResume(body, b, child)
-	b.Jump(inspect)
-	b.SetBlockEx(inspect, llssa.AtEnd, false)
 	done := b.CoroDone(child)
 	b.If(b.Call(finish.Expr, body.task, parent, child, done), destroy, declined)
 

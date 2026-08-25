@@ -190,16 +190,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 			))
 		}
 		if site := p.coroEmissionSite(); site != nil && site.placement == coroRuntimeHelperAtCleanup {
-			if len(printKeepaliveSlots) == 0 {
-				return p.compileCoroCleanupTargetAwait(b, target, args), true
-			}
-			body := p.coroBody()
-			if body == nil || body.cleanup == nil {
-				panic("coroutine cleanup print batch keepalive has no active cleanup drainer")
-			}
-			return p.compileCoroTargetAwaitWithContextAndRecovery(
-				b, target, llssa.Nil, args, body.cleanup, printKeepaliveSlots,
-			), true
+			return p.compileCoroCleanupTargetAwait(b, target, args, printKeepaliveSlots), true
 		}
 		if len(printKeepaliveSlots) != 0 {
 			return p.compileCoroTargetAwaitWithKeepalive(b, target, args, printKeepaliveSlots), true
