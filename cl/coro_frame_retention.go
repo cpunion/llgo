@@ -1278,6 +1278,13 @@ func (b *coroFrameRetentionRootBuilder) exactUintptrRoundtripUses(root ssa.Value
 					if !xProvenance {
 						return nil, false
 					}
+				case token.AND_NOT:
+					// Clearing a bounded contiguous set of low alignment bits keeps
+					// the allocation-bearing address word. The address must be the
+					// left operand: mask &^ address does not preserve provenance.
+					if !xProvenance || !coroConstantContiguousLowBitMask(other) {
+						return nil, false
+					}
 				default:
 					return nil, false
 				}

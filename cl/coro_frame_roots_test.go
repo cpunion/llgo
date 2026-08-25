@@ -562,6 +562,75 @@ func Root(header *Header, offset uintptr) unsafe.Pointer {
 	}
 }
 
+func TestCoroFrameExactUintptrRoundtripWithLowBitClearIsFrozen(t *testing.T) {
+	prog, _, _, root, audit, proof := prepareCoroFrameRootAudit(t, `package foo
+import "unsafe"
+func Root(pointer unsafe.Pointer) unsafe.Pointer {
+	word := uintptr(pointer)
+	word += 2
+	word -= 1
+	return unsafe.Pointer(word &^ 1)
+}
+`, "Root", EmissionUniverseOptions{})
+	defer prog.Dispose()
+	pointerWords := 0
+	reconstruction := false
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if handled, reason := audit.validate(instruction); handled && reason != "" {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, root)
+				t.Fatalf("low-bit-clear roundtrip instruction %T %q rejected: %s\n%s", instruction, instruction, reason, dump.String())
+			}
+			conversion, ok := instruction.(*ssa.Convert)
+			if !ok {
+				continue
+			}
+			if coroFrameRetentionPointerToUintptr(conversion) {
+				pointerWords++
+				if !proof.provesTraceableUintptr(conversion) {
+					t.Fatalf("pointer word %q has no exact roundtrip provenance", conversion)
+				}
+			}
+			if coroFrameRetentionUintptrLike(conversion.X.Type()) && coroFrameRetentionPointerLike(conversion.Type()) {
+				reconstruction = true
+				if !proof.provesTraceableUintptr(conversion.X) {
+					t.Fatalf("pointer reconstruction %q has no exact source provenance", conversion)
+				}
+			}
+		}
+	}
+	if pointerWords != 1 || !reconstruction {
+		t.Fatalf("roundtrip facts pointer words=%d reconstruction=%t, want 1/true", pointerWords, reconstruction)
+	}
+}
+
+func TestCoroFrameUintptrRoundtripRejectsNonConstantLowBitClear(t *testing.T) {
+	prog, _, _, root, audit, _ := prepareCoroFrameRootAudit(t, `package foo
+import "unsafe"
+func Root(pointer unsafe.Pointer, mask uintptr) unsafe.Pointer {
+	return unsafe.Pointer(uintptr(pointer) &^ mask)
+}
+`, "Root", EmissionUniverseOptions{})
+	defer prog.Dispose()
+	foundRejection := false
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			conversion, ok := instruction.(*ssa.Convert)
+			if !ok || !coroFrameRetentionUintptrLike(conversion.X.Type()) || !coroFrameRetentionPointerLike(conversion.Type()) {
+				continue
+			}
+			foundRejection = true
+			if reason := audit.validateConvert(conversion); !strings.Contains(reason, "has no traceable exact pointer provenance") {
+				t.Fatalf("dynamic low-bit-clear reconstruction rejection = %q", reason)
+			}
+		}
+	}
+	if !foundRejection {
+		t.Fatal("fixture has no rejected pointer reconstruction")
+	}
+}
+
 func TestCoroFramePointerDistanceIsAnExactScalarTerminal(t *testing.T) {
 	prog, _, _, root, audit, proof := prepareCoroFrameRootAudit(t, `package foo
 import "unsafe"
