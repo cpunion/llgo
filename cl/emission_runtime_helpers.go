@@ -1007,7 +1007,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 				needsNil = emissionArrayPointerNeedsNilCheck(v.X, v)
 			} else {
 				needsNil = !emissionKnownNonNilArrayBase(v.X) &&
-					!(safeBounds && ssaValueProvenNonNilAt(v.X, v))
+					!(safeBounds && ssaAddressValueProvenNonNilAt(v.X, v))
 			}
 		}
 		if needsNil {
