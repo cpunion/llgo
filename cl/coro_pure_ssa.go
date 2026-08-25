@@ -3072,12 +3072,9 @@ func (a *coroPhysicalPureSSAAudit) validateDeleteBuiltin(call *ssa.Call) string 
 	return a.requireFrozenStructuredRuntimeHelpers(call, required...)
 }
 
-// validatePrintBuiltin freezes Builder.PrintEx's exact lowering. Printing is
-// not classified as a pure/no-block operation: every emitted Print* helper is
-// an ordinary owner-scoped managed edge. Consequently a helper that reaches a
-// potentially blocking host output call must itself be represented by a
-// coroutine (and awaited here); only a plan-proven NoSuspend/NoUnwind helper
-// may remain a direct plain call.
+// validatePrintBuiltin freezes Builder.PrintEx's exact batch lowering.
+// Printing is not classified as pure/no-block: the one PrintBatchV1 edge must
+// be represented by a managed coroutine whenever host output may block.
 func (a *coroPhysicalPureSSAAudit) validatePrintBuiltin(call *ssa.Call, name string) string {
 	if call == nil || call.Common() == nil || name != "print" && name != "println" {
 		return "print builtin has an invalid call shape"
@@ -3086,7 +3083,6 @@ func (a *coroPhysicalPureSSAAudit) validatePrintBuiltin(call *ssa.Call, name str
 	if !ok || builtin.Name() != name {
 		return "print validation requires the exact builtin call"
 	}
-	helperSet := make(map[string]struct{}, len(call.Common().Args)+1)
 	for index, argument := range call.Common().Args {
 		if argument == nil {
 			return fmt.Sprintf("%s builtin argument %d is nil", name, index)
@@ -3096,32 +3092,20 @@ func (a *coroPhysicalPureSSAAudit) validatePrintBuiltin(call *ssa.Call, name str
 		if helper == "" {
 			return fmt.Sprintf("%s builtin argument %d has unsupported type %s", name, index, typ)
 		}
-		helperSet[helper] = struct{}{}
 		if err := validateCoroPhysicalSSAValueType(typ); err != nil {
 			return fmt.Sprintf("%s builtin argument %d has unsupported physical type: %v", name, index, err)
 		}
 	}
 
-	// print() emits nothing. println(), including println(), always emits the
-	// trailing newline through PrintByte, so it remains a managed helper edge.
+	// print() emits nothing. println(), including println(), always routes its
+	// trailing newline through the single batch edge.
 	if name == "print" && len(call.Common().Args) == 0 {
 		return ""
-	}
-	if name == "println" {
-		helperSet["PrintByte"] = struct{}{}
 	}
 	if a == nil || a.ctx == nil || a.universe == nil {
 		return "structured runtime helper validation requires a frozen emission universe"
 	}
-	expected := make([]string, 0, len(helperSet))
-	for helper := range helperSet {
-		expected = append(expected, helper)
-	}
-	sort.Strings(expected)
-	if len(expected) == 0 {
-		return name + " builtin has no exact lowered runtime helper inventory"
-	}
-	return a.requireFrozenStructuredRuntimeHelpers(call, expected...)
+	return a.requireFrozenStructuredRuntimeHelpers(call, "PrintBatchV1")
 }
 
 // validateMinMaxBuiltin mirrors Builder.compareSelect: ordered scalar values

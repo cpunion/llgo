@@ -39,10 +39,21 @@ type String struct {
 	Len int
 }
 
-func PrintByte(byte) {}
-func PrintInt(int64) {}
-func PrintFloat(float64) {}
-func PrintString(String) {}
+type Slice struct {
+	Data unsafe.Pointer
+	Len int
+	Cap int
+}
+
+type PrintArgV1 struct {
+	Kind uint8
+	Pointer unsafe.Pointer
+	Aux unsafe.Pointer
+	Word uint64
+	Extra uint64
+}
+
+func PrintBatchV1([]PrintArgV1, uint8) {}
 `
 
 const coroPrintFixture = `package foo
@@ -123,7 +134,7 @@ func TestCoroPointerDerivedScalarTransformResultsRemainFailClosed(t *testing.T) 
 	}
 }
 
-func TestCoroPrintBuiltinManagedHelpersNativeAndWasm32(t *testing.T) {
+func TestCoroPrintBuiltinManagedBatchNativeAndWasm32(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, target := range []struct {
 		name   string
@@ -190,14 +201,12 @@ func TestCoroPrintBuiltinManagedHelpersNativeAndWasm32(t *testing.T) {
 				}
 			}
 
-			for _, name := range []string{"PrintByte", "PrintFloat", "PrintInt", "PrintString"} {
-				helper := fixture.runtimePkg.ssa.Func(name)
-				plan, ok := fixture.plan.FunctionPlan(helper)
-				if !ok || plan.External != coro.Defined || plan.Emission != coro.EmitCoroutine ||
-					plan.Primary != coro.PrimaryCoroutine || plan.FuncRep != coro.DirectCoro ||
-					!plan.Demand.Contains(coro.AsyncDemand) || !plan.Effect.MaySuspend() {
-					t.Fatalf("%s plan = %+v, present=%t; want demanded managed helper", name, plan, ok)
-				}
+			helper := fixture.runtimePkg.ssa.Func("PrintBatchV1")
+			helperPlan, ok := fixture.plan.FunctionPlan(helper)
+			if !ok || helperPlan.External != coro.Defined || helperPlan.Emission != coro.EmitCoroutine ||
+				helperPlan.Primary != coro.PrimaryCoroutine || helperPlan.FuncRep != coro.DirectCoro ||
+				!helperPlan.Demand.Contains(coro.AsyncDemand) || !helperPlan.Effect.MaySuspend() {
+				t.Fatalf("PrintBatchV1 plan = %+v, present=%t; want demanded managed helper", helperPlan, ok)
 			}
 
 			compilation := &Compilation{CoroPlan: fixture.plan, EmissionUniverse: fixture.universe}
@@ -228,13 +237,17 @@ func TestCoroPrintBuiltinManagedHelpersNativeAndWasm32(t *testing.T) {
 			}
 
 			body := requireCoroPhysicalFunction(t, fooModule, "foo.Root").String()
-			for _, helper := range []string{"runtime.PrintByte$coro", "runtime.PrintFloat$coro", "runtime.PrintInt$coro", "runtime.PrintString$coro"} {
-				if !strings.Contains(body, helper) {
-					t.Fatalf("print owner lacks managed helper %q:\n%s", helper, body)
-				}
+			const scratch = "alloca [5 x %\"github.com/xgo-dev/llgo/runtime/internal/runtime.PrintArgV1\"]"
+			if got := strings.Count(body, scratch); got != 1 {
+				t.Fatalf("max-capacity print scratch count = %d, want exactly one:\n%s", got, body)
 			}
-			if got := strings.Count(body, "runtime.PrintString$coro"); got != 2 {
-				t.Fatalf("PrintString calls = %d, want 2:\n%s", got, body)
+			if got := strings.Count(body, "runtime.PrintBatchV1$coro"); got != 2 {
+				t.Fatalf("PrintBatchV1 calls = %d, want one per source builtin (2):\n%s", got, body)
+			}
+			for _, old := range []string{"runtime.PrintByte$coro", "runtime.PrintFloat$coro", "runtime.PrintInt$coro", "runtime.PrintString$coro"} {
+				if strings.Contains(body, old) {
+					t.Fatalf("print owner retained per-operand managed helper %q:\n%s", old, body)
+				}
 			}
 			if !strings.Contains(body, "ptrtoint") {
 				t.Fatalf("print owner lost pointer-to-integer transport:\n%s", body)
@@ -246,8 +259,11 @@ func TestCoroPrintBuiltinManagedHelpersNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s is not one call-free plain scalar transform:\n%s", transform, plain.String())
 				}
 			}
-			if got := strings.Count(body, "call i1 @"+coroAwaitPrepareInlineHookV4); got != 7 {
-				t.Fatalf("print helper awaits = %d, want 7:\n%s", got, body)
+			if got := strings.Count(body, "call i1 @"+coroAwaitPrepareInlineHookV4); got != 2 {
+				t.Fatalf("print batch awaits = %d, want one per source builtin (2):\n%s", got, body)
+			}
+			if got := strings.Count(body, "call i8 @llvm.coro.suspend"); got != 4 {
+				t.Fatalf("physical suspend sites = %d, want initial + two batch awaits + final (4):\n%s", got, body)
 			}
 
 			for _, module := range []llvm.Module{runtimeModule, fooModule} {
@@ -313,10 +329,7 @@ func prepareCoroPrintTestPlan(t *testing.T, target *llssa.Target, loweredCalls, 
 	}
 	root := fooPkg.ssa.Func("Root")
 	helpers := map[*ssa.Function]bool{
-		runtimePkg.ssa.Func("PrintByte"):   true,
-		runtimePkg.ssa.Func("PrintFloat"):  true,
-		runtimePkg.ssa.Func("PrintInt"):    true,
-		runtimePkg.ssa.Func("PrintString"): true,
+		runtimePkg.ssa.Func("PrintBatchV1"): true,
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1

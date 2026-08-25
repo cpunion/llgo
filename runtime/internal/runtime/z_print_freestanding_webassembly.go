@@ -25,15 +25,16 @@ import "unsafe"
 // WASI Preview 1 cannot perform a potentially blocking diagnostic write from
 // the executor stack. A component or custom embedding can provide output at a
 // higher boundary.
-func PrintBool(bool)              {}
-func PrintByte(byte)              {}
-func PrintUint(uint64)            {}
-func PrintInt(int64)              {}
-func PrintFloat(float64)          {}
-func PrintComplex(complex128)     {}
-func PrintHex(uint64)             {}
-func PrintPointer(unsafe.Pointer) {}
-func PrintString(String)          {}
-func PrintSlice(Slice)            {}
-func PrintEface(Eface)            {}
-func PrintIface(Iface)            {}
+func PrintBatchV1([]PrintArgV1, uint8) {}
+func PrintBool(bool)                   {}
+func PrintByte(byte)                   {}
+func PrintUint(uint64)                 {}
+func PrintInt(int64)                   {}
+func PrintFloat(float64)               {}
+func PrintComplex(complex128)          {}
+func PrintHex(uint64)                  {}
+func PrintPointer(unsafe.Pointer)      {}
+func PrintString(String)               {}
+func PrintSlice(Slice)                 {}
+func PrintEface(Eface)                 {}
+func PrintIface(Iface)                 {}

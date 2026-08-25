@@ -21,9 +21,65 @@ package runtime
 import (
 	"unsafe"
 
+	"github.com/xgo-dev/llgo/runtime/abi"
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/bitcast"
 )
+
+// PrintBatchV1 emits one complete source-level print/println operation. The
+// compiler deliberately gives the caller a single managed child edge; this
+// loop keeps the number of static suspension sites independent of operand
+// count while the existing Print* leaves retain their blocking-I/O semantics.
+func PrintBatchV1(args []PrintArgV1, flags uint8) {
+	newline := flags&abi.PrintFlagNewlineV1 != 0
+	for index := range args {
+		if newline && index != 0 {
+			PrintByte(' ')
+		}
+		arg := args[index]
+		switch abi.PrintKindV1(arg.kind) {
+		case abi.PrintBoolV1:
+			PrintBool(arg.word != 0)
+		case abi.PrintIntV1:
+			PrintInt(int64(arg.word))
+		case abi.PrintUintV1:
+			PrintUint(arg.word)
+		case abi.PrintFloatV1:
+			PrintFloat(bitcast.ToFloat64(int64(arg.word)))
+		case abi.PrintComplexV1:
+			PrintComplex(complex(
+				bitcast.ToFloat64(int64(arg.word)),
+				bitcast.ToFloat64(int64(arg.extra)),
+			))
+		case abi.PrintPointerV1:
+			PrintPointer(arg.pointer)
+		case abi.PrintStringV1:
+			PrintString(String{arg.pointer, int(arg.word)})
+		case abi.PrintSliceV1:
+			PrintSlice(Slice{arg.pointer, int(arg.word), int(arg.extra)})
+		case abi.PrintEfaceV1:
+			PrintEface(Eface{(*_type)(arg.pointer), arg.aux})
+		case abi.PrintIfaceV1:
+			PrintIface(Iface{(*itab)(arg.pointer), arg.aux})
+		default:
+			// Only the compiler creates this internal descriptor. Stop rather
+			// than interpreting a mismatched ABI as a different physical type.
+			args[index].pointer = nil
+			args[index].aux = nil
+			return
+		}
+		// The caller reuses one max-capacity frame scratch. Clear its pointer
+		// words after the operand is consumed so a later shorter print does not
+		// retain objects referenced only by an older operation.
+		args[index].pointer = nil
+		args[index].aux = nil
+		arg.pointer = nil
+		arg.aux = nil
+	}
+	if newline {
+		PrintByte('\n')
+	}
+}
 
 func PrintBool(v bool) {
 	if v {

@@ -2035,11 +2035,11 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 			}
 		}
 	case "print", "println":
-		for _, arg := range args {
-			add(runtimePrintHelper(ctx.patchType(arg.Type())))
-		}
-		if builtin.Name() == "println" {
-			add("PrintByte")
+		// Builder.PrintEx packs every operand into one function-frame scratch
+		// and emits one managed batch edge. print() remains a true no-op;
+		// println(), including println(), uses the batch for its newline.
+		if builtin.Name() == "println" || len(args) != 0 {
+			add("PrintBatchV1")
 		}
 	case "String", "Slice":
 		add("AssertRuntimeError")
