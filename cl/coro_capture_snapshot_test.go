@@ -47,7 +47,7 @@ func TestCoroImmutableCaptureSnapshotNativeAndWasm32CoroSplit(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			prog, pkg, plan, _, _, target, _ := compileCoroCapturedStaticCleanupFixtureSource(
-				t, test.target, coroImmutableCaptureSnapshotFixture,
+				t, test.target, coroImmutableCaptureSnapshotFixture, true,
 			)
 			defer prog.Dispose()
 			module := pkg.Module()

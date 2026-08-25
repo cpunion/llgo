@@ -1570,6 +1570,31 @@ func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
 	return
 }
 
+// CallClosureEntry calls one statically known environment-bearing Go entry.
+// Unlike Call on a function value, it does not construct, split, or dynamically
+// dispatch a {code, environment} carrier. Compiler-owned relocations such as a
+// stackless static defer already have both capabilities separately and can use
+// this exact edge without introducing a temporary funcval.
+func (b Builder) CallClosureEntry(fn, env Expr, args ...Expr) Expr {
+	if fn.kind != vkFuncDecl || fn.impl.IsAFunction().IsNil() {
+		panic("ssa: direct closure entry must be a statically known function")
+	}
+	entry := b.Pkg.FuncOf(fn.impl.Name())
+	if entry == nil || !entry.NeedsEnv() {
+		panic("ssa: direct closure entry has no environment-bearing declaration")
+	}
+	sig, ok := fn.raw.Type.(*types.Signature)
+	if !ok {
+		panic("ssa: direct closure entry has no Go signature")
+	}
+	if env.IsNil() || env.Type == nil || env.Type.ll.Context().C != b.Prog.ctx.C ||
+		env.Type.ll.TypeKind() != llvm.PointerTypeKind {
+		panic("ssa: direct closure entry requires a pointer environment from the same program")
+	}
+	params := llvmParams(0, args, sig.Params(), b)
+	return b.callDirectClosureEntry(fn, env, sig, params)
+}
+
 func (b Builder) resolveRuntimeCall(fn Expr, args []Expr) (ret Expr, resolved bool) {
 	resolver := b.Pkg.runtimeCall
 	if resolver == nil || b.resolvingRuntimeCalls[fn.Type] {
@@ -1599,14 +1624,7 @@ func (b Builder) callClosure(fn, data Expr, sig *types.Signature, args []Expr) (
 	// Convert arguments once before splitting the dynamic call edge. Conversion
 	// may itself emit code and must not be duplicated into both successors.
 	params := llvmParams(0, args, sig.Params(), b)
-	envParams := make([]llvm.Value, len(params)+1)
-	envParams[0] = data.impl
-	copy(envParams[1:], params)
-
 	noEnvType := prog.FuncDecl(sig, InC).ll
-	envParam := types.NewParam(token.NoPos, nil, "$env", types.Typ[types.UnsafePointer])
-	envSig := FuncAddCtx(envParam, sig)
-	envType := prog.FuncDecl(envSig, InC).ll
 
 	// A known code pointer uses the entry metadata directly. This preserves the
 	// exact prototype and avoids the identity barrier needed by dynamic native
@@ -1617,10 +1635,14 @@ func (b Builder) callClosure(fn, data Expr, sig *types.Signature, args []Expr) (
 			ret.impl = llvm.CreateCall(b.impl, noEnvType, fn.impl, params)
 			return
 		}
-		ret.impl = llvm.CreateCall(b.impl, envType, fn.impl, envParams)
-		prog.markClosureEnvCall(ret.impl, 0)
-		return
+		return b.callDirectClosureEntry(fn, data, sig, params)
 	}
+	envParams := make([]llvm.Value, len(params)+1)
+	envParams[0] = data.impl
+	copy(envParams[1:], params)
+	envParam := types.NewParam(token.NoPos, nil, "$env", types.Typ[types.UnsafePointer])
+	envSig := FuncAddCtx(envParam, sig)
+	envType := prog.FuncDecl(envSig, InC).ll
 
 	// On native hidden-context ABIs, the environment occupies a dedicated
 	// register even when it is nil. Ordinary Go and C entries simply ignore
@@ -1676,6 +1698,21 @@ func (b Builder) callClosure(fn, data Expr, sig *types.Signature, args []Expr) (
 	if logicalBlock.last == entryBlock {
 		logicalBlock.last = blks[2].last
 	}
+	return
+}
+
+func (b Builder) callDirectClosureEntry(
+	fn, env Expr, sig *types.Signature, params []llvm.Value,
+) (ret Expr) {
+	prog := b.Prog
+	ret.Type = prog.retType(sig)
+	envParams := make([]llvm.Value, len(params)+1)
+	envParams[0] = env.impl
+	copy(envParams[1:], params)
+	envParam := types.NewParam(token.NoPos, nil, "$env", types.Typ[types.UnsafePointer])
+	envSig := FuncAddCtx(envParam, sig)
+	ret.impl = llvm.CreateCall(b.impl, prog.FuncDecl(envSig, InC).ll, fn.impl, envParams)
+	prog.markClosureEnvCall(ret.impl, 0)
 	return
 }
 
