@@ -882,11 +882,10 @@ func validateCoroManagedInterfaceDescriptorTarget(
 		return fail("unsupported emission %s", functionPlan.Emission)
 	}
 	genericInstance := coroMaterializedGenericCallable(target)
-	if target.Signature.Variadic() ||
-		(typeParamCount(target.Signature.TypeParams()) != 0 ||
-			typeParamCount(target.Signature.RecvTypeParams()) != 0 ||
-			len(target.TypeArgs()) != 0 || target.Origin() != nil) && !genericInstance {
-		return fail("variadic or generic method ABI is not implemented")
+	if (typeParamCount(target.Signature.TypeParams()) != 0 ||
+		typeParamCount(target.Signature.RecvTypeParams()) != 0 ||
+		len(target.TypeArgs()) != 0 || target.Origin() != nil) && !genericInstance {
+		return fail("generic method ABI is not implemented")
 	}
 	directive, err := coroRawABIDirective(target, universe)
 	if err != nil {
@@ -897,6 +896,9 @@ func validateCoroManagedInterfaceDescriptorTarget(
 	}
 	if logicalSignature == nil || logicalSignature.Recv() != nil {
 		return fail("missing receiver-free logical signature")
+	}
+	if logicalSignature.Variadic() != target.Signature.Variadic() {
+		return fail("logical and target signatures disagree on the variadic method contract")
 	}
 	if universe == nil {
 		return fail("requires a prepared emission universe")
@@ -915,7 +917,8 @@ func validateCoroManagedInterfaceDescriptorTarget(
 	targetLogical := coroInterfaceDispatchCanonicalSignature(types.NewSignatureType(
 		nil, nil, nil, types.NewTuple(params...), effective.Results(), effective.Variadic(),
 	))
-	if !coroInterfaceDispatchSignaturesIdentical(logicalSignature, targetLogical, universe.emissionTypeKeys.strictABI) {
+	physicalLogical := coroInterfaceDispatchCanonicalSignature(coroPhysicalNormalizeSourceSignature(logicalSignature))
+	if !coroInterfaceDispatchSignaturesIdentical(physicalLogical, targetLogical, universe.emissionTypeKeys.strictABI) {
 		return fail("logical signature %s does not match effective target signature %s", logicalSignature, targetLogical)
 	}
 	return nil

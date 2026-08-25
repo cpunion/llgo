@@ -212,6 +212,72 @@ func TestClosureEnvMetadataRejectsInvalidUses(t *testing.T) {
 	}
 }
 
+func TestDirectClosureEntryCallHasNoFuncvalScaffolding(t *testing.T) {
+	Initialize(InitAllTargets | InitAllTargetInfos | InitAllTargetMCs)
+	for _, test := range []struct {
+		name      string
+		target    *Target
+		attribute string
+	}{
+		{name: "native", target: &Target{GOOS: "linux", GOARCH: "amd64"}, attribute: "nest"},
+		{name: "wasm32", target: &Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog := NewProgram(test.target)
+			defer prog.Dispose()
+			pkg := prog.NewPackage("p", "example.com/p")
+
+			params := types.NewTuple(types.NewVar(token.NoPos, nil, "value", types.Typ[types.Int]))
+			results := types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Int]))
+			sig := types.NewSignatureType(nil, nil, nil, params, results, false)
+			envType := types.NewPointer(types.NewStruct([]*types.Var{
+				types.NewField(token.NoPos, nil, "captured", types.Typ[types.Int], false),
+			}, nil))
+			env := types.NewParam(token.NoPos, nil, "$env", envType)
+			entry := pkg.NewEnvFunc("example.com/p.cleanup", sig, InGo, env, false)
+			entryBody := entry.MakeBody(1)
+			entryBody.Return(entry.Param(0))
+
+			callerParams := types.NewTuple(
+				types.NewVar(token.NoPos, nil, "env", envType),
+				types.NewVar(token.NoPos, nil, "value", types.Typ[types.Int]),
+			)
+			caller := pkg.NewFunc(
+				"example.com/p.callCleanup",
+				types.NewSignatureType(nil, nil, nil, callerParams, results, false),
+				InGo,
+			)
+			body := caller.MakeBody(1)
+			body.Return(body.CallClosureEntry(entry.Expr, caller.Param(0), caller.Param(1)))
+
+			calls := 0
+			for block := caller.impl.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+				for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+					call := instruction.IsACallInst()
+					if call.IsNil() {
+						continue
+					}
+					calls++
+					if call.CalledValue().Name() != "example.com/p.cleanup" || call.OperandsCount()-1 != 2 {
+						t.Fatalf("direct closure call = %s, want cleanup(env, value)", call.String())
+					}
+					if test.attribute != "" && call.GetCallSiteEnumAttribute(1, llvm.AttributeKindID(test.attribute)).IsNil() {
+						t.Fatalf("direct closure call lacks %s environment attribute: %s", test.attribute, call.String())
+					}
+				}
+			}
+			ir := pkg.String()
+			if calls != 1 || strings.Contains(ir, "insertvalue") || strings.Contains(ir, "extractvalue") ||
+				strings.Contains(ir, "asm sideeffect") || strings.Contains(ir, "icmp ne ptr") {
+				t.Fatalf("direct closure call retained funcval scaffolding (calls=%d):\n%s", calls, ir)
+			}
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("direct closure call module is invalid: %v\n%s", err, ir)
+			}
+		})
+	}
+}
+
 func TestWasmDynamicClosureUsesTwoExplicitTypedEdges(t *testing.T) {
 	Initialize(InitAllTargets | InitAllTargetInfos | InitAllTargetMCs)
 	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})

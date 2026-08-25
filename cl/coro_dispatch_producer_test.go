@@ -195,6 +195,71 @@ var Twice = (*Number).Twice
 	}
 }
 
+func TestCoroExactVariadicMethodExpressionThunkShape(t *testing.T) {
+	const source = `package foo
+type Number int
+func (number Number) Sum(values ...int) int { return len(values) }
+var Sum = (*Number).Sum
+`
+	ssaPkg, _, _ := buildGoSSAPkg(t, source)
+	var thunk *ssa.Function
+	for function := range ssautil.AllFunctions(ssaPkg.Prog) {
+		if function != nil && function.Name() == "Sum$thunk" {
+			thunk = function
+			break
+		}
+	}
+	if thunk == nil {
+		t.Fatal("fixture has no variadic method-expression thunk")
+	}
+	if err := validateCoroExactMethodExpressionThunk(thunk); err != nil {
+		var dump bytes.Buffer
+		ssa.WriteFunction(&dump, thunk)
+		t.Fatalf("canonical variadic method-expression thunk rejected: %v\nsignature=%v object=%v\n%s", err, thunk.Signature, thunk.Object().Type(), dump.String())
+	}
+}
+
+func TestCoroExactPromotedVariadicMethodExpressionThunkShape(t *testing.T) {
+	const source = `package foo
+type Base int
+func (*Base) Sum(values ...int) int { return len(values) }
+type Number struct { *Base; Other *Base }
+var Sum = Number.Sum
+`
+	ssaPkg, _, _ := buildGoSSAPkg(t, source)
+	var thunk *ssa.Function
+	for function := range ssautil.AllFunctions(ssaPkg.Prog) {
+		if function != nil && function.Name() == "Sum$thunk" && strings.Contains(function.String(), "Number") {
+			thunk = function
+			break
+		}
+	}
+	if thunk == nil {
+		t.Fatal("fixture has no promoted variadic method-expression thunk")
+	}
+	if err := validateCoroExactMethodExpressionThunk(thunk); err != nil {
+		var dump bytes.Buffer
+		ssa.WriteFunction(&dump, thunk)
+		t.Fatalf("canonical promoted variadic method-expression thunk rejected: %v\nsignature=%v object=%v\n%s", err, thunk.Signature, thunk.Object().Type(), dump.String())
+	}
+	var selected *ssa.FieldAddr
+	for _, block := range thunk.Blocks {
+		for _, instruction := range block.Instrs {
+			if field, ok := instruction.(*ssa.FieldAddr); ok {
+				selected = field
+				break
+			}
+		}
+	}
+	if selected == nil || selected.Field != 0 {
+		t.Fatalf("promoted thunk field selection = %v, want embedded field 0", selected)
+	}
+	selected.Field = 1
+	if err := validateCoroExactMethodExpressionThunk(thunk); err == nil {
+		t.Fatal("promoted thunk using a same-typed non-embedded field was accepted")
+	}
+}
+
 func TestCoroDynamicDispatchProducerCapturedPlainClosure(t *testing.T) {
 	const source = `package foo
 func Root(seed int) func(int) int {

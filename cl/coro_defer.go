@@ -1136,10 +1136,7 @@ func resolveCoroStaticCleanupTarget(
 	// validateCoroStaticCleanupOperands below freezes the exact packed shape.
 	if closure != nil {
 		if err := validateCoroCapturedClosureProducer(whole, closure, targetPlan); err != nil {
-			return nil, coro.FunctionPlan{}, 0, fmt.Errorf("captured coroutine defer: %w", err)
-		}
-		if callPlan.Rep != coro.DirectCoro {
-			return nil, coro.FunctionPlan{}, 0, fmt.Errorf("captured MakeClosure defer requires direct coroutine representation, got %s", callPlan.Rep)
+			return nil, coro.FunctionPlan{}, 0, fmt.Errorf("captured static defer: %w", err)
 		}
 	}
 	if target.Signature.Recv() != nil {
@@ -1186,11 +1183,11 @@ func resolveCoroStaticCleanupTarget(
 // validateCoroCapturedClosureProducer separates the representation of one
 // closure value from the representation selected at an exact call site. A
 // MakeClosure that also escapes through storage must publish the canonical
-// Dispatch descriptor, while a defer whose operand is that exact producer
-// still has a closed DirectCoro CallPlan. Both physical closure carriers are
-// two words and retain the same environment in field one; the static
-// await/cleanup lowerer consumes only that environment and the frozen target,
-// never the producer's code word.
+// Dispatch descriptor, while a defer whose operand is that exact producer has
+// a closed DirectPlain or DirectCoro CallPlan according to the target effect.
+// Both physical closure carriers are two words and retain the same environment
+// in field one; the static cleanup lowerer consumes only that environment and
+// the frozen target, never the producer's code word.
 func validateCoroCapturedClosureProducer(
 	whole *coro.SSAPlan,
 	closure *ssa.MakeClosure,
@@ -1222,11 +1219,23 @@ func validateCoroCapturedClosureProducer(
 	if leaf.Transport != coro.ManagedTransport {
 		return fmt.Errorf("uses non-managed transport %s", leaf.Transport)
 	}
-	if leaf.Rep != coro.DirectCoro && leaf.Rep != coro.Dispatch {
+	switch leaf.Rep {
+	case coro.DirectPlain:
+		if targetPlan.Emission != coro.EmitPlain || targetPlan.Primary != coro.PrimaryPlain ||
+			targetPlan.Effect != coro.NoSuspend {
+			return fmt.Errorf("plain producer target uses incompatible plan emission=%s primary=%s effect=%s", targetPlan.Emission, targetPlan.Primary, targetPlan.Effect)
+		}
+	case coro.DirectCoro:
+		if targetPlan.Emission != coro.EmitCoroutine || targetPlan.Primary != coro.PrimaryCoroutine ||
+			targetPlan.Effect == coro.NoSuspend {
+			return fmt.Errorf("coroutine producer target uses incompatible plan emission=%s primary=%s effect=%s", targetPlan.Emission, targetPlan.Primary, targetPlan.Effect)
+		}
+	case coro.Dispatch:
+		if targetPlan.FuncRep != coro.Dispatch {
+			return fmt.Errorf("descriptor producer target uses non-dispatch representation %s", targetPlan.FuncRep)
+		}
+	default:
 		return fmt.Errorf("uses unsupported value representation %s", leaf.Rep)
-	}
-	if leaf.Rep == coro.Dispatch && targetPlan.FuncRep != coro.Dispatch {
-		return fmt.Errorf("descriptor producer target uses non-dispatch representation %s", targetPlan.FuncRep)
 	}
 	targetPresent := false
 	for _, candidate := range leaf.Targets {
@@ -1458,8 +1467,8 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 			}
 		}
 		if sitePlan.closureEnvironment != nil {
-			if sitePlan.kind != coroStaticCleanupCoroutine || p.emissionUniverse == nil {
-				panic("captured static cleanup requires a prepared coroutine target")
+			if (sitePlan.kind != coroStaticCleanupPlain && sitePlan.kind != coroStaticCleanupCoroutine) || p.emissionUniverse == nil {
+				panic("captured static cleanup requires a prepared closure target")
 			}
 			contextType := p.prog.Type(sitePlan.closureEnvironment.Type(), llssa.InGo)
 			if !state.external {
@@ -1602,7 +1611,7 @@ func (s *coroStaticCleanupState) registerAt(
 		closure := p.compileValue(b, site.plan.closure)
 		if site.plan.closureEnvironment != nil {
 			if !s.external && site.closureContext.IsNil() {
-				panic("captured coroutine defer has no closure-context slot")
+				panic("captured static defer has no closure-context slot")
 			}
 			closureContext = b.Field(closure, 1)
 			if !s.dynamic {
@@ -2044,7 +2053,14 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		if function == nil || kind != goFunc {
 			panic(fmt.Sprintf("coroutine plain cleanup target %q did not resolve to a Go entry", site.plan.targetPlan.ID))
 		}
-		b.Call(function.Expr, args...)
+		if site.plan.closureEnvironment != nil {
+			if site.closureContext.IsNil() {
+				panic("captured plain cleanup lost its closure-context slot")
+			}
+			b.CallClosureEntry(function.Expr, b.Load(site.closureContext), args...)
+		} else {
+			b.Call(function.Expr, args...)
+		}
 		return true
 	case coroStaticCleanupCoroutine:
 		closureContext := llssa.Nil

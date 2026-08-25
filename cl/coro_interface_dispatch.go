@@ -171,9 +171,6 @@ func coroInterfaceDispatchSourceSignature(common *ssa.CallCommon) (*types.Signat
 	if signature == nil || methodSignature == nil || !types.Identical(signature, methodSignature) {
 		return nil, fmt.Errorf("coroutine interface dispatch call signature %v does not match method signature %v", signature, methodSignature)
 	}
-	if signature.Variadic() {
-		return nil, fmt.Errorf("coroutine interface dispatch variadic method %q is not implemented", common.Method.Id())
-	}
 	if list := signature.TypeParams(); list != nil && list.Len() != 0 {
 		return nil, fmt.Errorf("coroutine interface dispatch generic call signature is not materialized")
 	}
@@ -250,9 +247,6 @@ func validateCoroInterfaceDispatchCandidate(
 	}
 	if target.Parent() != nil || len(target.FreeVars) != 0 {
 		return fail("captured or nested methods require an environment adapter")
-	}
-	if target.Signature.Variadic() {
-		return fail("variadic methods are not implemented")
 	}
 	directive, err := coroRawABIDirective(target, universe)
 	if err != nil {

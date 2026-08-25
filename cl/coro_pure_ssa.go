@@ -2148,7 +2148,14 @@ func coroPointerUintptrLowBitMaskResult(address ssa.Value, operation *ssa.BinOp)
 	if yAddress {
 		maskValue = operation.X
 	}
-	mask, ok := maskValue.(*ssa.Const)
+	return coroConstantContiguousLowBitMask(maskValue)
+}
+
+// coroConstantContiguousLowBitMask recognizes a target-width-independent
+// alignment mask. Keeping this predicate shared prevents scalar observation
+// and exact pointer-roundtrip proofs from accepting different mask domains.
+func coroConstantContiguousLowBitMask(value ssa.Value) bool {
+	mask, ok := value.(*ssa.Const)
 	if !ok || mask.Value == nil {
 		return false
 	}
