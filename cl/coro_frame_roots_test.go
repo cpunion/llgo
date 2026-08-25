@@ -710,22 +710,6 @@ func Root(pointer *byte) int64 { return int64(uintptr(unsafe.Pointer(pointer))) 
 `,
 		},
 		{
-			name: "word store escape",
-			source: `package foo
-import "unsafe"
-var escaped uintptr
-func Root(pointer *byte) { escaped = uintptr(unsafe.Pointer(pointer)) }
-`,
-		},
-		{
-			name: "converted integer store escape",
-			source: `package foo
-import "unsafe"
-var escaped int64
-func Root(pointer *byte) { escaped = int64(uintptr(unsafe.Pointer(pointer))) }
-`,
-		},
-		{
 			name: "foreign word escape",
 			source: `package foo
 import "unsafe"
@@ -861,6 +845,122 @@ func TestCoroPointerUintptrAlignmentObservationIsScalarTerminal(t *testing.T) {
 			if !found {
 				t.Fatal("fixture has no pointer-to-uintptr conversion")
 			}
+		})
+	}
+}
+
+func TestCoroPointerUintptrIntegerStoreIsScalarTerminal(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		sinkType string
+		body     string
+		want     bool
+	}{
+		{name: "direct store", body: "Sink = uintptr(pointer)", want: true},
+		{name: "affine store", body: "Sink = uintptr(pointer) + 1", want: true},
+		{name: "converted store", sinkType: "int64", body: "Sink = int64(uintptr(pointer))", want: true},
+		{name: "pointer reconstruction", body: "word := uintptr(pointer); Sink = word; _ = unsafe.Pointer(word)"},
+		{name: "call transport", body: "consume(uintptr(pointer))"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sinkType := test.sinkType
+			if sinkType == "" {
+				sinkType = "uintptr"
+			}
+			ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+import "unsafe"
+var Sink `+sinkType+`
+func consume(uintptr) {}
+func Root(pointer unsafe.Pointer) { `+test.body+` }
+`)
+			root := ssaPkg.Func("Root")
+			var conversion *ssa.Convert
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Convert)
+					if ok && coroFrameRetentionPointerToUintptr(candidate) {
+						conversion = candidate
+					}
+				}
+			}
+			if conversion == nil {
+				t.Fatal("fixture has no pointer-to-uintptr conversion")
+			}
+			if got := coroPointerUintptrScalarTerminal(conversion); got != test.want {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, root)
+				t.Fatalf("integer-store scalar terminal = %t, want %t\n%s", got, test.want, dump.String())
+			}
+		})
+	}
+
+	prog, ssaPkg, universe, root, _, _ := prepareCoroFrameRootAudit(t, `package foo
+import "unsafe"
+var Sink uintptr
+func Root(pointer unsafe.Pointer) { Sink = uintptr(pointer) + 1 }
+`, "Root", EmissionUniverseOptions{})
+	defer prog.Dispose()
+	plan := analyzeCoroFrameRetentionFixture(t, ssaPkg, universe, root, -1)
+	rootPlan, planned := plan.FunctionPlan(root)
+	if !planned || rootPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("integer-store Root plan = %+v, present=%t; want coroutine", rootPlan, planned)
+	}
+	audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, CoroFrameRetentionParkABIV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			conversion, ok := instruction.(*ssa.Convert)
+			if !ok || !coroFrameRetentionPointerToUintptr(conversion) {
+				continue
+			}
+			if !coroPointerUintptrScalarTerminal(conversion) {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, root)
+				t.Fatalf("prepared integer store lacks structural scalar-terminal proof\n%s", dump.String())
+			}
+			if reason := audit.validateConvert(conversion); reason != "" {
+				t.Fatalf("integer-store pointer word rejected: %s", reason)
+			}
+			return
+		}
+	}
+	t.Fatal("audited fixture has no pointer-to-uintptr conversion")
+}
+
+func TestCoroPointerUintptrMapKeyIsScalarTerminal(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "lookup", body: "_ = Values[uintptr(pointer)]", want: true},
+		{name: "affine update", body: "Values[uintptr(pointer)+1] = 1", want: true},
+		{name: "map value", body: "Values[0] = uintptr(pointer)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+import "unsafe"
+var Values map[uintptr]uintptr
+func Root(pointer unsafe.Pointer) { `+test.body+` }
+`)
+			root := ssaPkg.Func("Root")
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					conversion, ok := instruction.(*ssa.Convert)
+					if !ok || !coroFrameRetentionPointerToUintptr(conversion) {
+						continue
+					}
+					if got := coroPointerUintptrMapKeyTerminal(conversion); got != test.want {
+						var dump bytes.Buffer
+						ssa.WriteFunction(&dump, root)
+						t.Fatalf("map-key scalar terminal = %t, want %t\n%s", got, test.want, dump.String())
+					}
+					return
+				}
+			}
+			t.Fatal("fixture has no pointer-to-uintptr conversion")
 		})
 	}
 }

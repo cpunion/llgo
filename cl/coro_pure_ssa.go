@@ -1927,7 +1927,8 @@ func coroRuntimeConversionHelper(source, target types.Type) string {
 // coroPointerUintptrScalarTerminal recognizes an address word whose complete
 // semantic lifetime ends in an integer comparison, a bounded low-bit alignment
 // mask, as one operand of an exact pointer-distance expression,
-// uintptr(end)-uintptr(start), as a scalar map key, or at a direct Go return.
+// uintptr(end)-uintptr(start), as a scalar map key or integer store, or at a
+// direct Go return.
 // None of these terminals authorizes pointer reconstruction. A low-bit mask
 // destroys the address identity and its result is an ordinary integer; the
 // source address word must have no other semantic use. If a safepoint splits
@@ -1941,7 +1942,8 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 	if value == nil || !rootIsInstruction || root.Block() == nil || value.Referrers() == nil {
 		return false
 	}
-	if coroPointerUintptrReturnTerminal(value) || coroPointerUintptrMapKeyTerminal(value) {
+	if coroPointerUintptrReturnTerminal(value) || coroPointerUintptrMapKeyTerminal(value) ||
+		coroPointerUintptrStoreTerminal(value) {
 		return true
 	}
 	uses := 0
@@ -2009,6 +2011,115 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 	return uses != 0
 }
 
+// coroPointerUintptrStoreTerminal accepts an integer-only value chain whose
+// every path ends in a Store to the exact integer type. Storage ends this
+// compiler-visible pointer lifetime: a later load is an ordinary integer and
+// does not acquire uintptr-to-pointer reconstruction authority. This mirrors a
+// direct uintptr return while covering package state such as numeric sentinels.
+// Calls, Phi merging, a second pointer-derived operand, and every non-integer
+// consumer remain fail-closed.
+func coroPointerUintptrStoreTerminal(root ssa.Value) bool {
+	return coroPointerUintptrIntegerChainTerminal(root, true, func(value ssa.Value, reference ssa.Instruction) bool {
+		store, ok := reference.(*ssa.Store)
+		if !ok || store.Val != value || store.Addr == nil || store.Addr.Type() == nil {
+			return false
+		}
+		pointer, ok := types.Unalias(store.Addr.Type()).Underlying().(*types.Pointer)
+		return ok && types.Identical(pointer.Elem(), value.Type())
+	})
+}
+
+// coroPointerUintptrIntegerChainTerminal is the shared fail-closed propagation
+// engine for forward-only integer observations. Each value may flow through
+// ordinary integer arithmetic with one non-pointer-derived operand. The caller
+// owns the final consumer rule and explicitly decides whether integer type
+// conversions are part of that terminal's contract.
+func coroPointerUintptrIntegerChainTerminal(
+	root ssa.Value,
+	allowIntegerConversions bool,
+	terminal func(ssa.Value, ssa.Instruction) bool,
+) bool {
+	if root == nil || !coroFrameRetentionIntegerLike(root.Type()) || terminal == nil {
+		return false
+	}
+	const (
+		coroIntegerChainVisiting uint8 = 1
+		coroIntegerChainAccepted uint8 = 2
+		coroIntegerChainRejected uint8 = 3
+	)
+	state := make(map[ssa.Value]uint8)
+	var visit func(ssa.Value) bool
+	visit = func(value ssa.Value) bool {
+		switch state[value] {
+		case coroIntegerChainVisiting, coroIntegerChainRejected:
+			return false
+		case coroIntegerChainAccepted:
+			return true
+		}
+		state[value] = coroIntegerChainVisiting
+		refs := value.Referrers()
+		if refs == nil {
+			state[value] = coroIntegerChainRejected
+			return false
+		}
+		uses := 0
+		for _, reference := range *refs {
+			switch instruction := reference.(type) {
+			case *ssa.DebugRef:
+				continue
+			case *ssa.BinOp:
+				if (instruction.X != value && instruction.Y != value) ||
+					!coroFrameRetentionIntegerLike(instruction.Type()) {
+					state[value] = coroIntegerChainRejected
+					return false
+				}
+				switch instruction.Op {
+				case token.ADD, token.SUB, token.MUL, token.QUO, token.REM,
+					token.AND, token.OR, token.XOR, token.AND_NOT, token.SHL, token.SHR:
+				default:
+					state[value] = coroIntegerChainRejected
+					return false
+				}
+				other := instruction.X
+				if other == value {
+					other = instruction.Y
+				}
+				if other == value || !coroFrameRetentionIntegerLike(other.Type()) ||
+					coroFrameRetentionIntegerHasPointerProvenance(other, make(map[ssa.Value]bool)) ||
+					!visit(instruction) {
+					state[value] = coroIntegerChainRejected
+					return false
+				}
+			case *ssa.ChangeType:
+				if !allowIntegerConversions || instruction.X != value ||
+					!coroFrameRetentionIntegerLike(instruction.Type()) || !visit(instruction) {
+					state[value] = coroIntegerChainRejected
+					return false
+				}
+			case *ssa.Convert:
+				if !allowIntegerConversions || instruction.X != value ||
+					!coroFrameRetentionIntegerLike(instruction.Type()) || !visit(instruction) {
+					state[value] = coroIntegerChainRejected
+					return false
+				}
+			default:
+				if !terminal(value, reference) {
+					state[value] = coroIntegerChainRejected
+					return false
+				}
+			}
+			uses++
+		}
+		if uses == 0 {
+			state[value] = coroIntegerChainRejected
+			return false
+		}
+		state[value] = coroIntegerChainAccepted
+		return true
+	}
+	return visit(root)
+}
+
 // coroPointerUintptrLowBitMaskResult recognizes the alignment-class
 // scalarization used by packages such as hash/crc32:
 //
@@ -2054,82 +2165,16 @@ func coroPointerUintptrLowBitMaskResult(address ssa.Value, operation *ssa.BinOp)
 // operand, but never with a second pointer-derived integer. Phi merging,
 // returns, calls, stores, and use as a map value are deliberately excluded.
 func coroPointerUintptrMapKeyTerminal(root ssa.Value) bool {
-	if root == nil || !coroFrameRetentionIntegerLike(root.Type()) {
-		return false
-	}
-	const (
-		coroMapKeyVisiting uint8 = 1
-		coroMapKeyAccepted uint8 = 2
-		coroMapKeyRejected uint8 = 3
-	)
-	state := make(map[ssa.Value]uint8)
-	var visit func(ssa.Value) bool
-	visit = func(value ssa.Value) bool {
-		switch state[value] {
-		case coroMapKeyVisiting, coroMapKeyRejected:
-			return false
-		case coroMapKeyAccepted:
-			return true
-		}
-		state[value] = coroMapKeyVisiting
-		refs := value.Referrers()
-		if refs == nil {
-			state[value] = coroMapKeyRejected
+	return coroPointerUintptrIntegerChainTerminal(root, false, func(value ssa.Value, reference ssa.Instruction) bool {
+		switch instruction := reference.(type) {
+		case *ssa.Lookup:
+			return instruction.Index == value && coroPointerUintptrExactMapKey(instruction.X, value)
+		case *ssa.MapUpdate:
+			return instruction.Key == value && coroPointerUintptrExactMapKey(instruction.Map, value)
+		default:
 			return false
 		}
-		uses := 0
-		for _, reference := range *refs {
-			switch instruction := reference.(type) {
-			case *ssa.DebugRef:
-			case *ssa.BinOp:
-				if instruction.X != value && instruction.Y != value ||
-					!coroFrameRetentionIntegerLike(instruction.Type()) {
-					state[value] = coroMapKeyRejected
-					return false
-				}
-				switch instruction.Op {
-				case token.ADD, token.SUB, token.MUL, token.QUO, token.REM,
-					token.AND, token.OR, token.XOR, token.AND_NOT, token.SHL, token.SHR:
-				default:
-					state[value] = coroMapKeyRejected
-					return false
-				}
-				other := instruction.X
-				if other == value {
-					other = instruction.Y
-				}
-				if other == value || !coroFrameRetentionIntegerLike(other.Type()) ||
-					coroFrameRetentionIntegerHasPointerProvenance(other, make(map[ssa.Value]bool)) ||
-					!visit(instruction) {
-					state[value] = coroMapKeyRejected
-					return false
-				}
-				uses++
-			case *ssa.Lookup:
-				if instruction.Index != value || !coroPointerUintptrExactMapKey(instruction.X, value) {
-					state[value] = coroMapKeyRejected
-					return false
-				}
-				uses++
-			case *ssa.MapUpdate:
-				if instruction.Key != value || !coroPointerUintptrExactMapKey(instruction.Map, value) {
-					state[value] = coroMapKeyRejected
-					return false
-				}
-				uses++
-			default:
-				state[value] = coroMapKeyRejected
-				return false
-			}
-		}
-		if uses == 0 {
-			state[value] = coroMapKeyRejected
-			return false
-		}
-		state[value] = coroMapKeyAccepted
-		return true
-	}
-	return visit(root)
+	})
 }
 
 func coroPointerUintptrExactMapKey(mapping, key ssa.Value) bool {
