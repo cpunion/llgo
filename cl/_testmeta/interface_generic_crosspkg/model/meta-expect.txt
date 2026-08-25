@@ -1,12 +1,12 @@
 [OrdinaryEdges]
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$coro:
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.8337f2521f777dd678dbfe55843a1e12
+    __llgo_coro_frame_descriptor_v1.cf670b183bf254a383106f9facace6a2
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1
-    github.com/goplus/llgo/runtime/internal/runtime.AllocZ
+    github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
@@ -17,16 +17,16 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$c
     llvm.coro.suspend
     llvm.fake.use
     llvm.trap
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$outcome:
-    github.com/goplus/llgo/runtime/internal/runtime.AllocZ
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewStringBox$coro:
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewIntBox$outcome:
+    github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewStringBox$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.d16058f627b8fed50a658448216fde88
+    __llgo_coro_frame_descriptor_v1.04e1e8a22eb887446ba7b145ecf4664e
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1
-    github.com/goplus/llgo/runtime/internal/runtime.AllocZ
+    github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
@@ -37,13 +37,13 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewStringBo
     llvm.coro.suspend
     llvm.fake.use
     llvm.trap
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewStringBox$outcome:
-    github.com/goplus/llgo/runtime/internal/runtime.AllocZ
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.UseStringBox$coro:
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.NewStringBox$outcome:
+    github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.UseStringBox$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.27f024396d385b154b09917e1d3ee8f5
+    __llgo_coro_frame_descriptor_v1.3aa6baa9afdcf1ad5d9c50847259ad71
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1
@@ -57,8 +57,8 @@ github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.UseStringBo
     llvm.coro.suspend
     llvm.fake.use
     llvm.trap
-github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init:
-    github.com/goplus/llgo/cl/_testmeta/interface_generic_crosspkg/model.init$guard
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.init:
+    github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v9.193790f9099cf3611aeeeebc9dd8808f
+    __llgo_coro_library_effect_v9.55cf82338af7f3c3ceb45c3fa10cf131
 

@@ -28,9 +28,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -129,7 +129,7 @@ func TestCoroPureSSAPhysicalABIV1NativeAndWasm(t *testing.T) {
 				t.Fatalf("Root pure SSA coroutine lacks typed Pair field addressing:\n%s", rootIR)
 			}
 			for _, forbidden := range []string{
-				"CheckIndexRange", "AssertNilDeref", "AllocU", "AllocZ", "NewSlice2", "NewSlice3Bounds", "NewItab",
+				"PanicIndex", "PanicIndexU", "AssertNilDeref", "AllocU", "AllocZ", "NewSlice2", "NewSlice3Bounds", "NewItab",
 			} {
 				if strings.Contains(rootIR, forbidden) {
 					t.Fatalf("Root pure SSA lowering introduced hidden helper %q:\n%s", forbidden, rootIR)

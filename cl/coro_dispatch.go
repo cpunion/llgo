@@ -25,8 +25,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -68,7 +68,7 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 	externalPlain := false
 	if fn != nil && len(fn.Blocks) == 0 && plan.External == coro.ExternalKnown &&
 		plan.Emission == coro.EmitExternal && plan.Primary == coro.PrimaryExternal &&
-		plan.Effect == coro.NoSuspend && plan.Exec&(coro.BlockForeign|coro.NeedsPreempt|coro.ThreadAffine) == 0 &&
+		plan.Effect == coro.NoSuspend && plan.Exec&(coro.BlockForeign|coro.NeedsPreempt|coro.ThreadAffine|coro.MayUnwind) == 0 &&
 		!plan.Exec.IsOpaque() && universe != nil {
 		certificate, certified, err := universe.CoroForeignNoBlockCertificate(fn)
 		if err != nil {
@@ -112,15 +112,15 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 	}
 	switch plan.Emission {
 	case coro.EmitPlain:
-		if plan.Primary != coro.PrimaryPlain || plan.Effect != coro.NoSuspend {
-			return fail("plain capability requires one exact non-suspending primary, got primary=%s effect=%s", plan.Primary, plan.Effect)
+		if plan.Primary != coro.PrimaryPlain || plan.Effect != coro.NoSuspend || plan.Exec.Contains(coro.MayUnwind) {
+			return fail("plain capability requires one exact non-suspending no-unwind primary, got primary=%s effect=%s exec=%s", plan.Primary, plan.Effect, plan.Exec)
 		}
 	case coro.EmitCoroutine:
 		if plan.Primary != coro.PrimaryCoroutine || !plan.Effect.MaySuspend() {
 			return fail("coroutine capability requires one suspending primary, got primary=%s effect=%s", plan.Primary, plan.Effect)
 		}
 	case coro.EmitRawPlain:
-		if !rawPlainOnly {
+		if !rawPlainOnly || plan.Exec.Contains(coro.MayUnwind) {
 			return fail("raw-plain capability requires one exact raw-only primary, got raw-only=%t managed=%s raw=%t primary=%s representation=%s",
 				plan.RawPlainOnly, plan.ManagedDemand, plan.RawPlainDemand, plan.Primary, plan.FuncRep)
 		}
@@ -553,8 +553,17 @@ func validateCoroPlainDispatchConsumers(
 						return err
 					}
 				}
+				var staticCalleeValue ssa.Value
+				if call, ok := instr.(ssa.CallInstruction); ok && call.Common() != nil &&
+					call.Common().StaticCallee() != nil {
+					// A static callee is an SSA operand for graph purposes, but
+					// lowering emits its planned entry directly. It is not a
+					// runtime function-value producer and must not be validated as
+					// a receiver-free descriptor (notably for direct method calls).
+					staticCalleeValue = call.Common().Value
+				}
 				for _, operand := range instr.Operands(nil) {
-					if operand != nil && *operand != nil {
+					if operand != nil && *operand != nil && *operand != staticCalleeValue {
 						if err := validateCoroPlainDispatchValue(plan, fn, *operand, universe); err != nil {
 							return err
 						}
@@ -698,7 +707,10 @@ func validateCoroPlainDispatchValue(plan *coro.SSAPlan, owner *ssa.Function, val
 			return fmt.Errorf("coroutine plain dispatch ABI: function %q: value %q: %w", owner.Name(), value.Name(), err)
 		}
 		if err := validateCoroDynamicDispatchTarget(target, targetPlan, universe); err != nil {
-			return err
+			return fmt.Errorf(
+				"coroutine plain dispatch ABI: function %q: value %q target %q: %w",
+				owner.Name(), value.Name(), targetPlan.ID, err,
+			)
 		}
 	}
 	return nil
@@ -1055,6 +1067,21 @@ func (p *context) coroPlainDispatchValuePlan(value ssa.Value) (coro.SSAValuePlan
 	return plan.ValuePlan(value)
 }
 
+// coroFunctionValueRequiresDynamicDescriptor is the representation gate for
+// optimizations that would otherwise synthesize a function value without
+// passing through compileValue. A true result means the exact frozen producer
+// must retain the canonical {descriptor, environment} lowering.
+func (p *context) coroFunctionValueRequiresDynamicDescriptor(value ssa.Value) bool {
+	if value == nil {
+		return false
+	}
+	valuePlan, found := p.coroPlainDispatchValuePlan(value)
+	if !found {
+		return false
+	}
+	return funcRepMapContains(valuePlan.Funcs, coro.Dispatch)
+}
+
 func (p *context) tryCompileCoroPlainDispatchFunctionValue(b llssa.Builder, value *ssa.Function) (llssa.Expr, bool) {
 	valuePlan, found := p.coroPlainDispatchValuePlan(value)
 	if !found || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 || valuePlan.Funcs[0].Rep != coro.Dispatch {
@@ -1210,7 +1237,7 @@ func (p *context) emitCoroDynamicDispatchValue(
 		var plainEntry, coroEntry llssa.Expr
 		switch entry.plan.Emission {
 		case coro.EmitPlain, coro.EmitRawPlain, coro.EmitExternal:
-			flags |= llssa.CoroDispatchFlagHasPlain
+			flags |= llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagPlainNoUnwind
 			plainEntry = p.newCoroDynamicDispatchEntryThunk(
 				coroPlainDispatchThunkPrefix+targetKey, plainTarget, abi, entry.plan.Emission, closureCtx,
 			)
@@ -1464,7 +1491,7 @@ func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Cal
 	if err := validateCoroPlainDispatchCall(p.immutablePlan(), call.Parent(), call, callPlan, p.immutableEmissionUniverse()); err != nil {
 		panic(err)
 	}
-	return p.emitCoroPlainDispatchCall(b, call, false), true
+	return p.emitCoroPlainDispatchCall(b, call, false, false), true
 }
 
 func (p *context) compileCoroPhysicalPlainDispatch(
@@ -1473,7 +1500,10 @@ func (p *context) compileCoroPhysicalPlainDispatch(
 	if !p.hasCoroPhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlPlainDispatch {
 		panic("coroutine plain dispatch escaped its frozen physical control recipe")
 	}
-	return p.emitCoroPlainDispatchCall(b, call, true)
+	if instructionPlan.recoverAlias {
+		p.observeCoroPhysicalRecoverAlias(call)
+	}
+	return p.emitCoroPlainDispatchCall(b, call, true, instructionPlan.recoverAlias)
 }
 
 // compileCoroPhysicalNilDispatchFault owns a closed nil-only function call
@@ -1498,7 +1528,9 @@ func (p *context) compileCoroPhysicalNilDispatchFault(
 	return p.zeroResult(call.Call.Signature().Results())
 }
 
-func (p *context) emitCoroPlainDispatchCall(b llssa.Builder, call *ssa.Call, physical bool) llssa.Expr {
+func (p *context) emitCoroPlainDispatchCall(
+	b llssa.Builder, call *ssa.Call, physical, transparentRecoverAlias bool,
+) llssa.Expr {
 	p.emitPCLineLabel(b, call.Pos())
 	fn := p.compileValue(b, call.Call.Value)
 	args := p.compileValues(b, call.Call.Args, fnNormal)
@@ -1521,5 +1553,16 @@ func (p *context) emitCoroPlainDispatchCall(b llssa.Builder, call *ssa.Call, phy
 		p.compileCoroImplicitNilAccessGuard(b, b.Field(fn, 0))
 		opts.DescriptorNonNil = true
 	}
-	return b.CallCoroPlainDispatch(fn, args, opts)
+	if !transparentRecoverAlias {
+		return b.CallCoroPlainDispatch(fn, args, opts)
+	}
+	codeEntry := b.CoroDispatchCodeEntry(fn, llssa.CoroDispatchCallOptions{
+		Version:          opts.Version,
+		ABIHash:          opts.ABIHash,
+		Result:           opts.Result,
+		DescriptorNonNil: opts.DescriptorNonNil,
+	})
+	return p.callCoroTransparentRecoverAlias(b, codeEntry, func() llssa.Expr {
+		return b.CallCoroPlainDispatch(fn, args, opts)
+	})
 }

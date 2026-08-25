@@ -24,9 +24,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -39,12 +39,12 @@ func seq(yield func(int) bool) {
 	}
 }
 func save(int) {}
-func Root() {
-	defer save(9)
+func Root(stop int) int {
 	for i := range seq {
 		defer save(i)
-		if i == 2 { panic("boom") }
+		if i == stop { return 10 + i }
 	}
+	return 20
 }
 `
 	testProgram := newEmissionTestProgram()
@@ -72,6 +72,14 @@ func memequalptr(left, right *byte) bool { return false }
 	if err != nil {
 		t.Fatal(err)
 	}
+	rootFacts, err := universe.CoroLocalBodyFacts(ssaPkg.Func("Root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rootFacts.Exec.Contains(coro.NeedsCleanupFrame) || rootFacts.OutcomePlainLeaf ||
+		rootFacts.OutcomePlainDAG || rootFacts.StaticOutcomeLocal {
+		t.Fatalf("rangefunc-only defer owner facts = %+v, want a cleanup-bearing coroutine body", rootFacts)
+	}
 	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +101,7 @@ func memequalptr(left, right *byte) bool { return false }
 		DynamicResolution:    coro.DynamicCHAClosed,
 		MaxPlainInstructions: -1,
 		ClassifyLoweredCalls: universe.CoroLoweredCalls,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			if function == runtimePackage.ssa.Func("Panic") ||
 				function == runtimePackage.ssa.Func("strequal") ||

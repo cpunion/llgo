@@ -19,9 +19,8 @@
 package runtime
 
 import (
+	latomic "sync/atomic"
 	_ "unsafe"
-
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 )
 
 const coroSignalNoneV1 = ^uint32(0)

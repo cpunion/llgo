@@ -43,10 +43,17 @@ const (
 	// static function type; reflection additionally validates the exact type
 	// pointer before invoking such a descriptor.
 	CoroDispatchFlagRuntimeTyped
+	// CoroDispatchFlagPlainNoUnwind certifies that the plain entry cannot
+	// unwind through its caller's native activation. Managed dispatch always
+	// prefers HasCoro; a descriptor with only HasPlain must carry this bit so
+	// coroutine cleanup and ordinary dynamic-await fallback remain structured.
+	CoroDispatchFlagPlainNoUnwind
 
 	CoroDispatchCapabilityMaskV1 = CoroDispatchFlagHasPlain | CoroDispatchFlagHasCoro
-	CoroDispatchKnownFlagsV1     = CoroDispatchCapabilityMaskV1 | CoroDispatchFlagNoCapture | CoroDispatchFlagRuntimeTyped
-	CoroPlainDispatchFlagsV1     = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture
+	CoroDispatchKnownFlagsV1     = CoroDispatchCapabilityMaskV1 | CoroDispatchFlagNoCapture |
+		CoroDispatchFlagRuntimeTyped | CoroDispatchFlagPlainNoUnwind
+	CoroPlainDispatchFlagsV1 = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture |
+		CoroDispatchFlagPlainNoUnwind
 )
 
 const CoroDispatchRuntimeTypeMagicV1 uint64 = 0x4c4c474f52545931 // "LLGORTY1"

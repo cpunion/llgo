@@ -21,8 +21,8 @@ import (
 	"go/token"
 	"go/types"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -412,8 +412,12 @@ func (p *context) compileCoroStaticAwait(
 		}
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	result := p.compileCoroTargetAwaitWithContextAndRecoveryResult(
+	if instructionPlan.recoverAlias {
+		p.observeCoroPhysicalRecoverAlias(call)
+	}
+	result := p.compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
 		b, callee, closureContext, args, nil, keepaliveSlots,
+		instructionPlan.recoverAlias,
 	)
 	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, result.value)
 	if !retagged {
@@ -523,8 +527,19 @@ func (p *context) compileCoroTargetAwaitWithContextAndRecoveryResult(
 	b llssa.Builder, callee *ssa.Function, closureContext llssa.Expr, args []llssa.Expr,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) coroAwaitedValue {
+	return p.compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
+		b, callee, closureContext, args, cleanup, keepaliveSlots, false,
+	)
+}
+
+func (p *context) compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
+	b llssa.Builder, callee *ssa.Function, closureContext llssa.Expr, args []llssa.Expr,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	transparentRecoverAlias bool,
+) coroAwaitedValue {
 	return p.compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		b, p.mustFunctionSymbol(callee), closureContext, args, cleanup, keepaliveSlots,
+		transparentRecoverAlias,
 	)
 }
 
@@ -538,17 +553,22 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	return p.compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
-		b, entry, closureContext, args, cleanup, keepaliveSlots,
+		b, entry, closureContext, args, cleanup, keepaliveSlots, false,
 	).value
 }
 
 func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	b llssa.Builder, entry plannedFunctionSymbol, closureContext llssa.Expr, args []llssa.Expr,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	transparentRecoverAlias bool,
 ) coroAwaitedValue {
 	body := p.coroBody()
 	if body == nil || p.compilation == nil || p.immutablePlan() == nil {
-		panic("coroutine child await requires an active physical coroutine body")
+		owner := "<unknown>"
+		if p != nil && p.goFn != nil {
+			owner = p.goFn.String()
+		}
+		panic(fmt.Sprintf("coroutine child await in %q requires an active physical coroutine body", owner))
 	}
 	if b.Func != p.fn {
 		panic("coroutine child await builder does not belong to the active physical coroutine function")
@@ -628,8 +648,16 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	// frame in its static parent; dynamic/function-value calls never reach this
 	// proof point.
 	b.MarkCoroElideSafe(child)
-	value := p.awaitCoroChildWithRecovery(
-		b, child, resultSlot, sourceSig.Results(), cleanup, keepaliveSlots,
+	var afterConsume func(llssa.Builder)
+	if cleanup != nil {
+		afterConsume = p.beginCoroRecoverAliasScope(
+			b, llssa.Nil, child, b.Load(cleanup.panicActive),
+		)
+	} else if transparentRecoverAlias {
+		afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
+	}
+	value := p.awaitCoroChildWithRecoveryAndConsume(
+		b, child, resultSlot, sourceSig.Results(), cleanup, keepaliveSlots, afterConsume,
 	)
 	return coroAwaitedValue{
 		value:   value,
@@ -917,6 +945,20 @@ func (p *context) awaitCoroChildWithRecovery(
 	b llssa.Builder, child, resultSlot llssa.Expr, results *types.Tuple,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
+	return p.awaitCoroChildWithRecoveryAndConsume(
+		b, child, resultSlot, results, cleanup, keepaliveSlots, nil,
+	)
+}
+
+// awaitCoroChildWithRecoveryAndConsume lets a compiler-owned lexical scope
+// reconcile immediately after the child CompletionRecord has been consumed,
+// before any Return/Panic/cancellation status can leave this call site. The
+// callback is emitted on both the ordinary and cancellation resume lanes.
+func (p *context) awaitCoroChildWithRecoveryAndConsume(
+	b llssa.Builder, child, resultSlot llssa.Expr, results *types.Tuple,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	afterConsume func(llssa.Builder),
+) llssa.Expr {
 	body := p.coroBody()
 	if body == nil {
 		panic("coroutine child await requires an active PhysicalABIV1 body")
@@ -1013,6 +1055,9 @@ func (p *context) awaitCoroChildWithRecovery(
 		cancelBuilder.Convert(p.prog.VoidPtr(), typeWord),
 		cancelBuilder.Convert(p.prog.VoidPtr(), dataWord),
 	)
+	if afterConsume != nil {
+		afterConsume(cancelBuilder)
+	}
 	p.emitCoroKeepaliveSlots(cancelBuilder, keepaliveSlots)
 	if ownerCleanup := body.cleanup; ownerCleanup == nil {
 		cancelBuilder.Jump(body.completion)
@@ -1073,6 +1118,9 @@ func (p *context) awaitCoroChildWithRecovery(
 	// terminal outcome therefore lives in scheduler-owned parent metadata, not
 	// in the result slot or child promise.  Consume exactly once before reading
 	// results or allowing another child transaction to start.
+	if afterConsume != nil {
+		afterConsume(b)
+	}
 	status := b.Load(statusWord)
 	p.emitCoroKeepaliveSlots(b, keepaliveSlots)
 	returned := p.fn.MakeBlock()
@@ -1205,6 +1253,9 @@ func (p *context) enterCoroPropagatedPanic(
 		if b == nil || b.Func != p.fn || typeWord.IsNil() || dataWord.IsNil() {
 			panic("propagated panic escaped its parent outcome-plain body")
 		}
+		outcome.appendPanicTrace(
+			b, typeWord, dataWord, line, coroLogicalPanicTracePropagate,
+		)
 		outcome.publish(b, coroAwaitCompletionPanic, typeWord, dataWord)
 		return
 	}

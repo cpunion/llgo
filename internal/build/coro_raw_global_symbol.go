@@ -28,12 +28,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/llvmproof"
-	"github.com/goplus/llgo/internal/packages"
-	llplan9asm "github.com/goplus/llgo/internal/plan9asm"
-	llruntime "github.com/goplus/llgo/runtime"
-	xenv "github.com/goplus/llgo/xtool/env"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/llvmproof"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llplan9asm "github.com/xgo-dev/llgo/internal/plan9asm"
+	llruntime "github.com/xgo-dev/llgo/runtime"
+	xenv "github.com/xgo-dev/llgo/xtool/env"
 	"github.com/xgo-dev/llvm"
 )
 

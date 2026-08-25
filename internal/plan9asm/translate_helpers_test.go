@@ -14,7 +14,7 @@ import (
 	"reflect"
 	"testing"
 
-	llpackages "github.com/goplus/llgo/internal/packages"
+	llpackages "github.com/xgo-dev/llgo/internal/packages"
 	extplan9asm "github.com/xgo-dev/plan9asm"
 )
 
@@ -96,6 +96,22 @@ func Foo()
 	defer modTr.Module.Dispose()
 	if got := len(modTr.Functions); got != 1 {
 		t.Fatalf("TranslateSourceModuleForPkg function count = %d, want 1", got)
+	}
+}
+
+func TestTranslateGOARMTargetTriple(t *testing.T) {
+	pkg := mustTestPackage(t, "example.com/arm", `package arm
+func Foo()
+`)
+	asmPath := filepath.Join(t.TempDir(), "foo_arm.s")
+	asm := []byte("TEXT ·Foo(SB),NOSPLIT,$0-0\n\tRET\n")
+	tr, err := TranslateSourceModuleForPkgWithOptions(pkg, asmPath, asm, "linux", "arm", TranslateOptions{GOARM: "6,softfloat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Module.Dispose()
+	if got, want := tr.Module.Target(), "armv6-unknown-linux-gnueabi"; got != want {
+		t.Fatalf("module target = %q, want %q", got, want)
 	}
 }
 

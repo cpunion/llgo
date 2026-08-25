@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goplus/llgo/cmd/internal/compilerhash"
-	"github.com/goplus/llgo/internal/build"
-	"github.com/goplus/llgo/internal/buildenv"
-	"github.com/goplus/llgo/internal/lto"
-	"github.com/goplus/llgo/internal/optlevel"
+	"github.com/xgo-dev/llgo/cmd/internal/compilerhash"
+	"github.com/xgo-dev/llgo/internal/build"
+	"github.com/xgo-dev/llgo/internal/buildenv"
+	"github.com/xgo-dev/llgo/internal/lto"
+	"github.com/xgo-dev/llgo/internal/optlevel"
 )
 
 var OutputFile string
@@ -48,6 +48,7 @@ var SizeFormat string
 var SizeLevel string
 var ForceRebuild bool
 var PrintCommands bool
+var BuildTrace string
 var DeadcodeDrop bool
 var PthreadStackSize byteSizeFlag
 var OptLevel optlevel.Level
@@ -199,7 +200,7 @@ func AddOptLevelFlags(fs *flag.FlagSet) {
 	fs.BoolFunc("O3", "Optimize aggressively", optLevelBoolFunc(optlevel.O3, "-O3"))
 	fs.BoolFunc("Os", "Optimize for size", optLevelBoolFunc(optlevel.Os, "-Os"))
 	fs.BoolFunc("Oz", "Optimize aggressively for size", optLevelBoolFunc(optlevel.Oz, "-Oz"))
-	fs.Func("O", "Optimization level (0,1,2,3,s,z)", func(val string) error {
+	fs.Func("O", "Optimization level (0,1,2,3,s,z; default s for host, z for targets)", func(val string) error {
 		level, err := optlevel.Parse(val)
 		if err != nil {
 			return err
@@ -234,6 +235,14 @@ func AddBuildFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&SizeReport, "size", false, "Print size report after build (default format=text, level=module)")
 	fs.StringVar(&SizeFormat, "size-format", "", "Size report format (text,json). Default text.")
 	fs.StringVar(&SizeLevel, "size-level", "", "Size report aggregation level (full,module,package). Default module.")
+}
+
+// AddBuildTraceFlag adds the build-scheduler trace flag. It is intentionally
+// separate from AddBuildFlags because only "llgo build" owns a single trace
+// output file; test and run may coordinate multiple child invocations.
+func AddBuildTraceFlag(fs *flag.FlagSet) {
+	BuildTrace = ""
+	fs.StringVar(&BuildTrace, "debug-trace", "", "Write a Chrome/Perfetto build-scheduler trace to file")
 }
 
 func AddBuildModeFlags(fs *flag.FlagSet) {

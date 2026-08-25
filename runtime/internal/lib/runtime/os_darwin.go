@@ -3,8 +3,8 @@ package runtime
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	cos "github.com/goplus/llgo/runtime/internal/clite/os"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	cos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
 )
 
 func sysctlbynameInt32(name []byte) (int32, int32) {

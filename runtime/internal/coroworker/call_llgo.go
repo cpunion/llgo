@@ -28,8 +28,8 @@ package coroworker
 import (
 	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/pthread"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
 )
 
 // Create starts exactly one scheduler-owned native worker with default pthread

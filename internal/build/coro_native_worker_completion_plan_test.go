@@ -24,8 +24,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -93,7 +93,7 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T) {
 				got, plan.HasRawPlainVariant(completion))
 		}
 
-		const workerPath = "github.com/goplus/llgo/runtime/internal/coroworker"
+		const workerPath = "github.com/xgo-dev/llgo/runtime/internal/coroworker"
 		// QueueWaitTake is the obsolete Go worker loop replaced by the native
 		// worker completion ingress above. Call remains an active external leaf
 		// for the dynamically proved LockOSThread same-M path; it is covered by

@@ -22,9 +22,9 @@ import (
 	"go/types"
 	"strings"
 
-	"github.com/goplus/llgo/internal/locality"
-	localitylayout "github.com/goplus/llgo/internal/locality/layout"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/locality"
+	localitylayout "github.com/xgo-dev/llgo/internal/locality/layout"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -577,6 +577,13 @@ func (p *context) emitFunctionPreambleWithCoroPlan(
 ) {
 	finish := p.beginCoroFunctionPreambleEmission(coroFunctionPreambleEntry)
 	defer finish()
+	if p.functionUsesRecover(fn) {
+		if handle := p.activeCoroHandle(); !handle.IsNil() {
+			b.BindRecoverFrameToken(handle)
+		} else {
+			b.BindRecoverFrame()
+		}
+	}
 	p.enterExportedLocalContext(b)
 	p.pushCallerLocationFrame(b, fn)
 }

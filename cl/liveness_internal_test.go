@@ -170,7 +170,7 @@ func functionAllocs(fn *ssa.Function) []*ssa.Alloc {
 }
 
 func TestRuntimeSetFinalizerDetection(t *testing.T) {
-	ssapkg := buildSSAPackageWithPath(t, "github.com/goplus/llgo/runtime/livetest", "livetest", `package livetest
+	ssapkg := buildSSAPackageWithPath(t, "github.com/xgo-dev/llgo/runtime/livetest", "livetest", `package livetest
 
 import rt "runtime"
 
@@ -227,7 +227,7 @@ func none(p *int) {}
 		t.Fatal("command-line-arguments package with SetFinalizer should enable conservative clears")
 	}
 
-	methodPkg := buildSSAPackageWithPath(t, "github.com/goplus/llgo/runtime/methodlive", "methodlive", `package methodlive
+	methodPkg := buildSSAPackageWithPath(t, "github.com/xgo-dev/llgo/runtime/methodlive", "methodlive", `package methodlive
 
 import rt "runtime"
 
@@ -241,7 +241,7 @@ func (setter) install(p *int) {
 		t.Error("method-only SetFinalizer use should be detected")
 	}
 
-	genericMethodPkg := buildSSAPackageWithPath(t, "github.com/goplus/llgo/runtime/genericmethodlive", "genericmethodlive", `package genericmethodlive
+	genericMethodPkg := buildSSAPackageWithPath(t, "github.com/xgo-dev/llgo/runtime/genericmethodlive", "genericmethodlive", `package genericmethodlive
 
 import rt "runtime"
 
@@ -967,7 +967,7 @@ func main() {
 }
 
 func TestCompileConservativeLivenessClears(t *testing.T) {
-	ssapkg, files := buildSSAPackageWithPathAndFiles(t, "github.com/goplus/llgo/runtime/livetest", "main", `package main
+	ssapkg, files := buildSSAPackageWithPathAndFiles(t, "github.com/xgo-dev/llgo/runtime/livetest", "main", `package main
 
 import rt "runtime"
 

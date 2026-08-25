@@ -18,7 +18,7 @@
 
 package coro
 
-import "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+import "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 
 // Darwin/Linux amd64 and arm64 are the first targets whose native i64 atomic
 // load/store/cmpxchg lowering is certified bounded inside an executor-safe

@@ -21,7 +21,7 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 // The isolated scheduler/fleet adapter tests do not link the typed hchan
@@ -36,6 +36,24 @@ func coroMaterializeDirectChannelCompletionV1(*coro.DirectChannelCompletion) boo
 // runtime2.go and platform getg implementations into the host Go runtime.
 // Linked runtime islands separately verify real logical runtime-G ownership.
 type coroRuntimeContext struct{}
+
+// Recover alias scopes require the complete logical runtime G sidecar. The
+// named-source scheduler adapter intentionally does not model that state, so
+// every alias operation fails closed while ordinary non-aliased recover paths
+// remain available to the target-neutral scheduler tests.
+func coroBeginRecoverAliasRuntimeV1(
+	*coro.G, unsafe.Pointer, unsafe.Pointer, bool,
+) (unsafe.Pointer, bool) {
+	return nil, false
+}
+
+func coroEndRecoverAliasRuntimeV1(*coro.G, unsafe.Pointer) bool {
+	return false
+}
+
+func coroHasRecoverAliasRuntimeV1(*coro.G, unsafe.Pointer) bool {
+	return false
+}
 
 func coroBindRuntimeContext(task, parent *coro.G, main bool) bool {
 	return task != nil

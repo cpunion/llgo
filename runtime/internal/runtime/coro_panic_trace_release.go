@@ -19,8 +19,8 @@
 package runtime
 
 import (
-	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/coroalloc"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coroalloc"
 )
 
 // coroReleaseDiscardedPanicTraceV1 is shared by frame completion, explicit

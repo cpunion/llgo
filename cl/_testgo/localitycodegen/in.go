@@ -16,9 +16,8 @@ package main
 // CHECK: call void @"{{.*}}LeaveLocalContext"(
 // CHECK: ret ptr
 // CHECK-LABEL: define ptr @"main.__llgo_local_dispatch_tls_0$coro"(
-// CHECK: call ptr @"main.__llgo_local_init_0$coro"(
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
-// CHECK: call i8 @llvm.coro.suspend(
+// CHECK: [[LOCAL_INIT_HANDLE:%.*]] = call ptr @"main.__llgo_local_init_0$coro"(
+// CHECK-NEXT: ret ptr [[LOCAL_INIT_HANDLE]]
 // CHECK-LABEL: define ptr @"main.__llgo_local_init_0$coro"(
 // CHECK: call ptr @main.newPointer()
 // CHECK: call void @"{{.*}}LocalPackageLogical$outcome"(

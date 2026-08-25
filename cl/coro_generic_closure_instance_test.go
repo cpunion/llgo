@@ -22,12 +22,79 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestCoroMaterializedTwoArgumentGenericClosureInstance(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+type Map[K comparable, V any] struct{}
+func (m *Map[K, V]) All() func(func(K, V) bool) {
+	return func(yield func(K, V) bool) { var k K; var v V; yield(k, v) }
+}
+func Root(m *Map[any, any]) { m.All()(func(any, any) bool { return true }) }
+`)
+	root := ssaPkg.Func("Root")
+	var instance *ssa.Function
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(*ssa.Call); ok && call.Common().StaticCallee() != nil &&
+				call.Common().StaticCallee().Name() == "All" {
+				instance = call.Common().StaticCallee()
+			}
+		}
+	}
+	if instance == nil || len(instance.AnonFuncs) != 1 {
+		t.Fatalf("two-argument generic instance = %v", instance)
+	}
+	closure := instance.AnonFuncs[0]
+	if !coroMaterializedGenericInstance(instance) || !coroMaterializedGenericInstance(closure) {
+		t.Fatalf("two-argument generic materialization rejected: parent=%v closure=%v", instance, closure)
+	}
+	if len(instance.TypeArgs()) != 2 || closure.Parent() != instance || closure.Origin() == nil ||
+		len(closure.TypeArgs()) != 0 || typeParamCount(closure.TypeParams()) != 0 {
+		t.Fatalf("nested generic substitution is not owned exclusively by its parent: parent=%v closure=%v", instance, closure)
+	}
+}
+
+func TestCoroMaterializedDeepGenericClosureInstance(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func OnceValue[T any](f func() T) func() T {
+	return func() T {
+		invoke := func() { _ = f() }
+		invoke()
+		return f()
+	}
+}
+func Root() string { return OnceValue[string](func() string { return "ok" })() }
+`)
+	root := ssaPkg.Func("Root")
+	var instance *ssa.Function
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(*ssa.Call); ok && call.Common().StaticCallee() != nil {
+				callee := call.Common().StaticCallee()
+				if origin := callee.Origin(); origin != nil && origin.Name() == "OnceValue" {
+					instance = callee
+				}
+			}
+		}
+	}
+	if instance == nil || len(instance.AnonFuncs) != 1 || len(instance.AnonFuncs[0].AnonFuncs) != 1 {
+		t.Fatalf("deep generic instance graph = %v", instance)
+	}
+	outer := instance.AnonFuncs[0]
+	inner := outer.AnonFuncs[0]
+	if !coroMaterializedGenericInstance(instance) || !coroMaterializedGenericInstance(outer) ||
+		!coroMaterializedGenericInstance(inner) {
+		t.Fatalf("deep generic materialization rejected: instance=%v outer=(origin=%v args=%v params=%d parent=%v) inner=(origin=%v args=%v params=%d parent=%v)",
+			instance, outer.Origin(), outer.TypeArgs(), typeParamCount(outer.TypeParams()), outer.Parent(),
+			inner.Origin(), inner.TypeArgs(), typeParamCount(inner.TypeParams()), inner.Parent())
+	}
+}
 
 func TestCoroMaterializedGenericClosureInstance(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
@@ -76,9 +143,10 @@ func Root(b *Box[int]) { b.All()(Yield) }
 			if !coroMaterializedGenericInstance(instance) || !coroMaterializedGenericInstance(closure) {
 				t.Fatalf("materialized generic instance=%t closure=%t", coroMaterializedGenericInstance(instance), coroMaterializedGenericInstance(closure))
 			}
-			if typeParamCount(closure.TypeParams()) == 0 || typeParamCount(closure.Signature.TypeParams()) != 0 ||
-				closure.Parent() != instance || closure.Origin() == nil || len(closure.TypeArgs()) != 1 {
-				t.Fatalf("generic closure metadata is not the expected stale-declaration/concrete-signature shape: %+v", closure)
+			if typeParamCount(closure.TypeParams()) != 0 || typeParamCount(closure.Signature.TypeParams()) != 0 ||
+				closure.Parent() != instance || closure.Origin() == nil || len(closure.TypeArgs()) != 0 ||
+				len(instance.TypeArgs()) != 1 {
+				t.Fatalf("generic closure metadata is not the expected parent-owned substitution shape: %+v", closure)
 			}
 			var innerCall *ssa.Call
 			for _, block := range closure.Blocks {

@@ -5,8 +5,8 @@ package debug
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/abi"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 const (
@@ -20,8 +20,8 @@ type Info struct {
 	Saddr uintptr
 }
 
-func Address() unsafe.Pointer {
-	return nil
+func Address() uintptr {
+	return 0
 }
 
 func Addrinfo(addr uintptr, info *Info) c.Int {

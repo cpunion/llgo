@@ -21,7 +21,7 @@ package coro
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 )
 
 // Keep these operations as target-lowered sequentially consistent uint32

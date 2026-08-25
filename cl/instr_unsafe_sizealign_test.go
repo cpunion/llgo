@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -224,7 +224,7 @@ func Use(value int) uintptr { return Offset(value) }
 		testProg := newEmissionTestProgram()
 		testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
 		runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
-func CheckIndexRange(ok bool, index int64, signed bool, length int) {}
+func PanicIndex(index int, length int) {}
 `)
 		callerPkg := testProg.addPackage(t, "example.com/emission/overlaps", `package overlaps
 import "unsafe"
@@ -254,9 +254,9 @@ func Use(a, b []Record) bool { return Overlaps(a, b) }
 		} else if len(calls) != 0 {
 			t.Fatalf("physical generic overlaps lowered calls = %+v; want current-frame implicit faults only", calls)
 		}
-		rangeHelper := runtimePkg.ssa.Func("CheckIndexRange")
-		if target, ok, err := universe.ResolveCoroPlainLoweredCall(instance, "CheckIndexRange"); err != nil || !ok || target != rangeHelper {
-			t.Fatalf("plain generic overlaps CheckIndexRange = %v, %t, %v; want exact runtime helper", target, ok, err)
+		rangeHelper := runtimePkg.ssa.Func("PanicIndex")
+		if target, ok, err := universe.ResolveCoroPlainLoweredCall(instance, "PanicIndex"); err != nil || !ok || target != rangeHelper {
+			t.Fatalf("plain generic overlaps PanicIndex = %v, %t, %v; want exact runtime helper", target, ok, err)
 		}
 
 		ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
@@ -325,8 +325,8 @@ func Shared(values []Record) (uintptr, Record) {
 			{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
 			{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
 		}, EmissionUniverseOptions{CompleteRuntimeABI: true})
-		if err == nil || !strings.Contains(err.Error(), `missing runtime helper "CheckIndexRange"`) {
-			t.Fatalf("shared real index preparation error = %v; want missing CheckIndexRange", err)
+		if err == nil || !strings.Contains(err.Error(), `missing runtime helper "PanicIndex"`) {
+			t.Fatalf("shared real index preparation error = %v; want missing PanicIndex", err)
 		}
 	})
 }

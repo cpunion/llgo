@@ -24,8 +24,8 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 // coroTLSField identifies one exact field of one concrete SSA struct type.

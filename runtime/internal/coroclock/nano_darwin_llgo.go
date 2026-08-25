@@ -21,7 +21,7 @@ package coroclock
 import (
 	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 // CLOCK_UPTIME_RAW is the nanosecond-resolution monotonic clock used by Go's

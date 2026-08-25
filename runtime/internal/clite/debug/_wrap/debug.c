@@ -11,8 +11,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
-void *llgo_address() {
-    return __builtin_return_address(0);
+uintptr_t llgo_address() {
+    return (uintptr_t)__builtin_return_address(0);
 }
 
 int llgo_addrinfo(uintptr_t addr, Dl_info *info) {

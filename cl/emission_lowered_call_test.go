@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -192,6 +192,9 @@ func Use(m map[int]int, key int, value I) {
 `)
 	testProg.ssa.Build()
 	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe.prog = prog
 	fn := pkg.ssa.Func("Use")
 	ctx, err := universe.functionABIContext(fn, owner)
 	if err != nil {
@@ -205,9 +208,18 @@ func Use(m map[int]int, key int, value I) {
 			}
 		}
 	}
-	for _, helper := range []string{"AllocU", "MapAccess1", "MapAccess2", "MapAssign", "MapDelete", "IfacePtrData"} {
+	mapHelpers, exact := prog.MapRuntimeHelpers(fn.Signature.Params().At(0).Type())
+	if !exact || mapHelpers.KeyNeedsTemporary {
+		t.Fatalf("map[int]int helper plan = %+v, %t; want one direct fast-key family", mapHelpers, exact)
+	}
+	for _, helper := range []string{mapHelpers.Access1, mapHelpers.Access2, mapHelpers.Assign, mapHelpers.Delete, "IfacePtrData"} {
 		if !got[helper] {
 			t.Errorf("lowered runtime helpers %v omit %q", got, helper)
+		}
+	}
+	for _, helper := range []string{"AllocU", "MapAccess1", "MapAccess2", "MapAssign", "MapDelete"} {
+		if got[helper] {
+			t.Errorf("fast map lowering unexpectedly retained generic helper %q in %v", helper, got)
 		}
 	}
 }
@@ -347,7 +359,7 @@ func GuardedFieldAddress(bucket *Bucket) *uint64 {
 			for _, instruction := range block.Instrs {
 				for _, helper := range universe.loweredRuntimeHelpers(ctx, instruction) {
 					switch helper {
-					case "CheckIndexRange":
+					case "PanicIndex", "PanicIndexU":
 						hasRange = true
 					case "AssertNilDeref":
 						hasNil = true
@@ -356,7 +368,7 @@ func GuardedFieldAddress(bucket *Bucket) *uint64 {
 			}
 		}
 		if hasRange != test.wantRange {
-			t.Errorf("%s CheckIndexRange edge = %v, want %v", test.name, hasRange, test.wantRange)
+			t.Errorf("%s index panic edge = %v, want %v", test.name, hasRange, test.wantRange)
 		}
 		if hasNil != test.wantNil {
 			t.Errorf("%s AssertNilDeref edge = %v, want %v", test.name, hasNil, test.wantNil)
@@ -427,7 +439,8 @@ func Convert(value []int) *[4]int { return (*[4]int)(value) }
 	universe.prog = prog
 
 	noBoundsHelpers := map[string]struct{}{
-		"CheckIndexRange":   {},
+		"PanicIndex":        {},
+		"PanicIndexU":       {},
 		"StringSlice2":      {},
 		"NewSlice2":         {},
 		"NewSlice3Bounds":   {},

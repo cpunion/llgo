@@ -10,7 +10,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // The host profile owns one exact route. Publish the manual-source completion
 // before requesting a pointer-free Schedule obligation from the pull adapter;

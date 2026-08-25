@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle) bool {
 	return coro.BindExecutorSourceCatalog(driver, p, registry, handle, coro.ExecutorSourceCatalog{

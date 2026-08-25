@@ -22,7 +22,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 )
 
 const (

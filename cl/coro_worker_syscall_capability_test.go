@@ -23,9 +23,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/typepatch"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/typepatch"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -247,6 +247,69 @@ func TestCoroWorkerSyscallConditionalIncomingPlanNarrowing(t *testing.T) {
 	}
 	if err := validateCoroWorkerSyscallCall(rawOnly, universe, call); err != nil {
 		t.Fatalf("raw-only uncertified incoming path rejected: %v", err)
+	}
+	var elidedIncoming *ssa.Call
+	for _, block := range rawCaller.Blocks {
+		for _, instruction := range block.Instrs {
+			candidate, ok := instruction.(*ssa.Call)
+			if !ok || candidate.Common() == nil {
+				continue
+			}
+			resolved, exact := universe.Resolve(candidate.Common().StaticCallee())
+			if exact && resolved == carrier {
+				elidedIncoming = candidate
+			}
+		}
+	}
+	if elidedIncoming == nil {
+		t.Fatal("raw-only incompatible caller has no exact carrier call")
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(pkg.ssa.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	elided, err := coro.AnalyzeSSA(pkg.ssa.Prog, coro.Roots{
+		{Function: pkg.ssa.Func("ThroughMixedCarrierOK"), Demand: coro.AsyncDemand},
+		{Function: rawCaller, RawPlainDemand: true},
+	}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          universe.FunctionIDConfig(),
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn == carrier {
+				return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (bool, error) {
+			if candidate == elidedIncoming {
+				return true, nil
+			}
+			semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(candidate)
+			return intrinsic && semantics.ElidesManagedCall(), err
+		},
+		ClassifyElidedCallCertificate: func(_ *ssa.Function, candidate ssa.CallInstruction) (string, error) {
+			if candidate == elidedIncoming {
+				return "frontend-unevaluated-worker-incoming-v1", nil
+			}
+			certificate, certified, err := universe.CoroWorkerSyscallCertificate(candidate)
+			if err != nil || !certified {
+				return "", err
+			}
+			return certificate.ID, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !elided.ElidesCall(elidedIncoming) {
+		t.Fatal("frontend-unevaluated worker incoming edge was not frozen as elided")
+	}
+	if _, planned := elided.CallPlan(elidedIncoming); planned {
+		t.Fatal("frontend-elided worker incoming edge unexpectedly retained a CallPlan")
+	}
+	if err := validateCoroWorkerSyscallCall(elided, universe, call); err != nil {
+		t.Fatalf("frontend-elided uncertified incoming path rejected: %v", err)
 	}
 	mixed := analyze(coro.Roots{
 		{Function: pkg.ssa.Func("ThroughMixedCarrierOK"), Demand: coro.AsyncDemand},

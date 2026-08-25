@@ -7,6 +7,8 @@ type data struct {
 	a []int
 }
 
+// First read every len/cap operation from the same zero-valued struct.
+// Then construct and query the populated value, preserving channel/map/slice identities.
 func main() {
 	d := &data{}
 	println(len(d.s), len(d.c), len(d.m), len(d.a), cap(d.c), cap(d.a))

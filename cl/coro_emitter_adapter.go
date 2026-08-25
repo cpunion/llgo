@@ -19,7 +19,7 @@ package cl
 import (
 	"fmt"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -167,7 +167,9 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		if instructionPlan.controlTarget == nil || instructionPlan.controlTargetID == "" {
 			panic("physical raw/plain call has no frozen target identity")
 		}
-		return p.compileCoroRawPlainTargetCall(b, call, instructionPlan.controlTarget), true
+		return p.compileCoroRawPlainTargetCall(
+			b, call, instructionPlan.controlTarget, instructionPlan.recoverAlias,
+		), true
 	case coroPhysicalControlNone:
 		if instructionPlan.operation != coroPhysicalOperationWorkerCgo &&
 			instructionPlan.operation != coroPhysicalOperationWorkerCgoErrno &&
@@ -327,6 +329,14 @@ func (p *context) compileCoroRunDefers(b llssa.Builder, instruction *ssa.RunDefe
 		panic("coroutine RunDefers escaped its frozen cleanup plan")
 	}
 	body.cleanup.runDefers(b, instruction)
+}
+
+func (p *context) compileCoroImplicitRunDefers(b llssa.Builder) {
+	body := p.coroBody()
+	if body == nil || body.cleanup == nil {
+		panic("coroutine implicit RunDefers escaped its frozen cleanup plan")
+	}
+	body.cleanup.runDefers(b, nil)
 }
 
 func (p *context) compileCoroSyntheticSelectPanic(b llssa.Builder, instruction *ssa.Panic) {

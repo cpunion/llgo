@@ -13,8 +13,8 @@ import (
 	"testing"
 
 	"github.com/goplus/gogen/packages"
-	"github.com/goplus/llgo/internal/typepatch"
-	"github.com/goplus/llgo/ssa/ssatest"
+	"github.com/xgo-dev/llgo/internal/typepatch"
+	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -102,6 +102,9 @@ func localType[T any]() any {
 	if !ok {
 		t.Fatalf("patchLocalGenericNamed(%v) was not patched", local)
 	}
+	if pos := patched.Obj().Pos(); pos.IsValid() {
+		t.Fatalf("patched local generic type position = %v, want token.NoPos", pos)
+	}
 	name := patched.Obj().Name()
 	if !strings.Contains(name, "[") || strings.Contains(name, "·") {
 		t.Fatalf("patched local generic name = %q, want type args without ordinal suffix", name)
@@ -133,6 +136,102 @@ func localType[T any]() any {
 
 	if got := typeListArgs(nil, ctx.typeArgName); got != nil {
 		t.Fatalf("typeListArgs(nil) = %v, want nil", got)
+	}
+}
+
+func TestGenericLocalRecursiveClosureContextTypePatch(t *testing.T) {
+	ssapkg := buildSSAPackage(t, `package foo
+
+func Y[Endo ~func(RecFct) RecFct, RecFct ~func(T) R, T, R any](f Endo) RecFct {
+	type internal[RecFct ~func(T) R, T, R any] func(internal[RecFct, T, R]) RecFct
+	g := func(h internal[RecFct, T, R]) RecFct {
+		return func(t T) R { return f(h(h))(t) }
+	}
+	return g(g)
+}
+
+func use() {
+	intFn := Y(func(recur func(int) int) func(int) int { return recur })
+	stringFn := Y(func(recur func(string) string) func(string) string { return recur })
+	_ = intFn(1)
+	_ = stringFn("")
+}
+`)
+
+	y := ssapkg.Func("Y")
+	if y == nil {
+		t.Fatal("generic Y function not found")
+	}
+	names := make(map[types.BasicKind]string)
+	for instance := range ssautil.AllFunctions(ssapkg.Prog) {
+		if instance == nil || instance.Origin() != y {
+			continue
+		}
+		args := instance.TypeArgs()
+		if len(args) < 3 {
+			t.Fatalf("Y instance type arguments = %v, want T argument", args)
+		}
+		basic, ok := args[2].(*types.Basic)
+		if !ok || basic.Kind() != types.Int && basic.Kind() != types.String {
+			t.Fatalf("Y instance T = %v, want int or string", args[2])
+		}
+
+		if len(instance.AnonFuncs) == 0 {
+			t.Fatal("Y instance outer closure not found")
+		}
+		outer := instance.AnonFuncs[0]
+		if len(outer.AnonFuncs) == 0 {
+			t.Fatal("Y instance inner closure not found")
+		}
+		inner := outer.AnonFuncs[0]
+
+		ctx := &context{goFn: outer}
+		patched := ctx.patchType(outer.Signature).(*types.Signature)
+		param := findLocalNamed(patched.Params().At(0).Type(), ssapkg.Pkg)
+		if param == nil {
+			t.Fatalf("patched Y outer closure parameter = %v, want local named function type", patched.Params().At(0).Type())
+		}
+
+		hIndex := -1
+		for i, freeVar := range inner.FreeVars {
+			if freeVar.Name() == "h" {
+				hIndex = i
+				break
+			}
+		}
+		if hIndex < 0 {
+			t.Fatalf("Y inner closure free variables = %v, want h", inner.FreeVars)
+		}
+		closureCtx := ctx.makeClosureCtx(inner, ssapkg.Pkg, inner.FreeVars)
+		ptr, ok := closureCtx.Type().(*types.Pointer)
+		if !ok {
+			t.Fatalf("closure context type = %T, want pointer", closureCtx.Type())
+		}
+		fields, ok := ptr.Elem().(*types.Struct)
+		if !ok {
+			t.Fatalf("closure context element = %T, want struct", ptr.Elem())
+		}
+		hType := findLocalNamed(fields.Field(hIndex).Type(), ssapkg.Pkg)
+		if hType == nil {
+			t.Fatalf("closure context h field = %v, want local named function type", fields.Field(hIndex).Type())
+		}
+
+		name := param.Obj().Name()
+		if !strings.Contains(name, ";") {
+			t.Fatalf("patched outer parameter name = %q, want outer and own type arguments", name)
+		}
+		if hName := hType.Obj().Name(); hName != name {
+			t.Fatalf("patched h field name = %q, want outer parameter name %q", hName, name)
+		}
+		names[basic.Kind()] = name
+	}
+	intName, hasInt := names[types.Int]
+	stringName, hasString := names[types.String]
+	if !hasInt || !hasString {
+		t.Fatalf("patched local type names = %v, want int and string instances", names)
+	}
+	if intName == stringName {
+		t.Fatalf("int and string instances share patched local type name %q", intName)
 	}
 }
 
@@ -315,9 +414,6 @@ func use() {
 	}
 	if ctx.inCurrentFunction(token.NoPos) {
 		t.Fatal("invalid position should not be inside current function")
-	}
-	if (&context{}).currentFunctionSyntax() != nil {
-		t.Fatal("currentFunctionSyntax without goFn should be nil")
 	}
 	if (&context{}).localTypeOrdinalBySyntax(token.Pos(1)) != 0 {
 		t.Fatal("localTypeOrdinalBySyntax without current function should be zero")

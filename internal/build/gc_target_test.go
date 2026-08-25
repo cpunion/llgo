@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/crosscompile"
 )
 
 func TestTargetGCBuildTags(t *testing.T) {

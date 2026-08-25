@@ -9,14 +9,16 @@ import (
 // CHECK: @__llgo_coro_func_descriptor_v1.{{.*}} = {{.*}}ptr @__llgo_coro_func_coro_v1.{{.*}}
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
+	// All Builder operations use one receiver, and the queried values are printed.
 	// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 32)
-	// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.StringToBytes$coro"
-	// CHECK: call ptr @"strings.(*Builder).Write$coro"
-	// CHECK: call ptr @"strings.(*Builder).WriteString$coro"
-	// CHECK: call ptr @"strings.(*Builder).Len$coro"
-	// CHECK: call ptr @"strings.(*Builder).Cap$coro"
-	// CHECK: call ptr @"strings.(*Builder).String$coro"
-	// CHECK: call ptr @"strings.IndexFunc$coro"({{.*}}{ ptr, ptr } { ptr @__llgo_coro_func_descriptor_v1.{{.*}}, ptr null })
+	// CHECK: call void @"{{.*}}/runtime/internal/runtime.StringToBytes$outcome"
+	// CHECK: call void @"strings.(*Builder).Write$outcome"
+	// CHECK: call void @"strings.(*Builder).WriteString$outcome"
+	// CHECK: call void @"strings.(*Builder).Len$outcome"
+	// CHECK: call void @"strings.(*Builder).Cap$outcome"
+	// CHECK: call void @"strings.(*Builder).String$outcome"
+	// CHECK: [[INDEX:%[0-9]+]] = call ptr @"strings.indexFunc$coro"({{.*}}{ ptr, ptr } { ptr @__llgo_coro_func_descriptor_v1.{{.*}}, ptr null }
+	// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[INDEX]]
 	var b strings.Builder
 	b.Write([]byte("Hello "))
 	b.WriteString("World")

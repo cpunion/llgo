@@ -32,7 +32,10 @@ import "unsafe"
 
 type Value struct { N int }
 
+type ArrayValue struct { N int }
+
 var Sink bool
+var ArrayValues [4]ArrayValue
 
 func GuardedEqual(value *Value) *int {
 	if value == nil { return nil }
@@ -62,6 +65,14 @@ func Unguarded(value *Value) *int {
 func Bypass(value *Value) *int {
 	if value != nil { Sink = true }
 	return &value.N
+}
+
+func GlobalArrayIndex(index int) *int {
+	return &ArrayValues[index].N
+}
+
+func PointerArrayIndex(values *[4]ArrayValue, index int) *int {
+	return &values[index].N
 }
 
 func LoadGuarded(value *int) int {
@@ -152,6 +163,68 @@ func TestSSAFunctionDominatingNonNilProofIsExact(t *testing.T) {
 		if got := ssaFunctionValueProvenNonNilAt(call.Common().Value, call); got != test.want {
 			t.Errorf("%s dominated function non-nil proof = %t, want %t", test.name, got, test.want)
 		}
+	}
+}
+
+func TestSSACompletedIndexAddrPreservesBaseNonNilProof(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, ssaDominatingNonNilFixture)
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "GlobalArrayIndex", want: true},
+		{name: "PointerArrayIndex"},
+	} {
+		function := ssaPkg.Func(test.name)
+		field := onlySSAFieldAddr(t, function)
+		index, ok := field.X.(*ssa.IndexAddr)
+		if !ok {
+			t.Fatalf("%s FieldAddr base is %T, want *ssa.IndexAddr", test.name, field.X)
+		}
+		if got := ssaAddressValueProvenNonNilAt(index, field); got != test.want {
+			t.Errorf("%s completed IndexAddr non-nil proof = %t, want %t", test.name, got, test.want)
+		}
+	}
+}
+
+func TestSSASourceClosureFreeVarCellIsStructurallyNonNil(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+var Sink int
+func Owner(value int) func() {
+	return func() { _ = value; Sink++ }
+}
+`)
+	owner := ssaPkg.Func("Owner")
+	if owner == nil {
+		t.Fatal("SSA package has no Owner")
+	}
+	if len(owner.AnonFuncs) != 1 {
+		t.Fatalf("Owner anonymous functions = %v, want one", owner.AnonFuncs)
+	}
+	closure := owner.AnonFuncs[0]
+	if closure.Parent() != owner || closure.Synthetic != "" || len(closure.FreeVars) != 1 {
+		t.Fatalf("source closure shape: parent=%v synthetic=%q freevars=%d", closure.Parent(), closure.Synthetic, len(closure.FreeVars))
+	}
+	free := closure.FreeVars[0]
+	var deref *ssa.UnOp
+	for _, block := range closure.Blocks {
+		for _, instruction := range block.Instrs {
+			candidate, ok := instruction.(*ssa.UnOp)
+			if ok && candidate.Op == token.MUL && candidate.X == free {
+				deref = candidate
+			}
+		}
+	}
+	if deref == nil || !isKnownNonNilAddr(free) || !ssaAddressValueProvenNonNilAt(free, deref) {
+		t.Fatalf("source closure cell lacks structural non-nil proof: free=%v deref=%v", free, deref)
+	}
+	if audit := (&coroPhysicalPureSSAAudit{fn: closure}); audit.derefRequiresImplicitNilFault(deref) {
+		t.Fatal("physical coroutine planning reintroduced a nil fault for a proven lexical capture cell")
+	}
+
+	closure.Synthetic = "wrapper"
+	if isKnownNonNilAddr(free) || ssaAddressValueProvenNonNilAt(free, deref) {
+		t.Fatal("synthetic captured value received lexical-cell non-nil authority")
 	}
 }
 

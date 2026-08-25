@@ -32,11 +32,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	"github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -416,13 +416,13 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 		types.NewField(token.NoPos, nil, "TypeWord", pointer, false),
 		types.NewField(token.NoPos, nil, "DataWord", pointer, false),
 	}, nil)
-	loadPanicRecord := pkg.NewFunc("github.com/goplus/llgo/runtime/internal/coro.LoadPanicRecord", newSignature(
+	loadPanicRecord := pkg.NewFunc("github.com/xgo-dev/llgo/runtime/internal/coro.LoadPanicRecord", newSignature(
 		[]types.Type{pointer}, []types.Type{panicRecordType, types.Typ[types.Bool]},
 	), llssa.InGo)
-	deadG := pkg.NewFunc("github.com/goplus/llgo/runtime/internal/coro.DeadG", newSignature(
+	deadG := pkg.NewFunc("github.com/xgo-dev/llgo/runtime/internal/coro.DeadG", newSignature(
 		[]types.Type{pointer}, []types.Type{types.Typ[types.Bool]},
 	), llssa.InGo)
-	reclaimableG := pkg.NewFunc("github.com/goplus/llgo/runtime/internal/coro.ReclaimableG", newSignature(
+	reclaimableG := pkg.NewFunc("github.com/xgo-dev/llgo/runtime/internal/coro.ReclaimableG", newSignature(
 		[]types.Type{pointer}, []types.Type{types.Typ[types.Bool]},
 	), llssa.InGo)
 	payload := pkg.NewVar(coroNativeE2EMainPhysicalSymbol("GlobalPayload"), types.NewPointer(types.Typ[types.Byte]), llssa.InGo)
@@ -497,15 +497,7 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	// and resolve unreachable core allocation edges directly to libc, matching
 	// the closed-static-spawn island.
 	defineCoroNativeE2ENilDerefStubs(prog, pkg, abort)
-	checkIndexRange := pkg.NewFunc(llssa.PkgRuntime+".CheckIndexRange", newSignature(
-		[]types.Type{types.Typ[types.Bool], types.Typ[types.Int64], types.Typ[types.Bool], types.Typ[types.Int]}, nil,
-	), llssa.InGo)
-	rangeBody := checkIndexRange.MakeBody(3)
-	rangeFail, rangeValid := checkIndexRange.Block(1), checkIndexRange.Block(2)
-	rangeBody.If(checkIndexRange.Param(0), rangeFail, rangeValid)
-	rangeBody.SetBlock(rangeFail).Call(abort.Expr)
-	rangeBody.Return()
-	rangeBody.SetBlock(rangeValid).Return()
+	defineCoroNativeE2EIndexPanicStubs(pkg, abort)
 	uintptrType := types.Typ[types.Uintptr]
 	malloc := pkg.NewFunc("malloc", newSignature([]types.Type{uintptrType}, []types.Type{pointer}), llssa.InC)
 	calloc := pkg.NewFunc("calloc", newSignature([]types.Type{uintptrType, uintptrType}, []types.Type{pointer}), llssa.InC)
@@ -573,9 +565,9 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		coroProgramReportPanicSymbolV1,
 		"command-line-arguments.coroProgramRunSliceV2",
 		coroPanicNativeE2EDestroyObserve,
-		"github.com/goplus/llgo/runtime/internal/coro.PreparePanic",
-		"github.com/goplus/llgo/runtime/internal/coro.PanicDestroyed",
-		"github.com/goplus/llgo/runtime/internal/coro.LoadPanicRecord",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.PreparePanic",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.PanicDestroyed",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.LoadPanicRecord",
 		coroNativeE2EMainPhysicalSymbol("panicChild$outcome"),
 		coroNativeE2EMainPhysicalSymbol("panicLeaf$outcome"),
 	} {
@@ -584,12 +576,12 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		}
 	}
 	for _, forbidden := range []string{
-		"github.com/goplus/llgo/runtime/internal/runtime.Panic",
-		"github.com/goplus/llgo/runtime/internal/runtime.Rethrow",
-		"github.com/goplus/llgo/runtime/internal/runtime.TracePanic",
-		"github.com/goplus/llgo/runtime/internal/runtime.printany",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.Panic",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.Rethrow",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.TracePanic",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.printany",
 	} {
-		if strings.Contains(symbols, forbidden) {
+		if coroNativeE2ENMHasExactSymbol(symbols, forbidden) {
 			t.Fatalf("test-only coroutine panic island unexpectedly extracted legacy PanicABI symbol %q", forbidden)
 		}
 	}

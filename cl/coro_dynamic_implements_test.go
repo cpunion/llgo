@@ -23,9 +23,9 @@ import (
 	"go/types"
 	"testing"
 
-	"github.com/goplus/llgo/internal/typepatch"
-	"github.com/goplus/llgo/ssa/abi"
-	"github.com/goplus/llgo/ssa/ssatest"
+	"github.com/xgo-dev/llgo/internal/typepatch"
+	"github.com/xgo-dev/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"golang.org/x/tools/go/ssa"
 )
 

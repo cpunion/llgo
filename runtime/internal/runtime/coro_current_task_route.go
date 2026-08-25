@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // coroCurrentTaskRouteV1 resolves producer locality only while a managed
 // stackless resume owns the exact executor. Native goroutines, independent

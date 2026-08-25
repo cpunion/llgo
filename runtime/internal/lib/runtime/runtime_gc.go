@@ -5,9 +5,9 @@ package runtime
 import (
 	"runtime"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/bdwgc"
-	"github.com/goplus/llgo/runtime/internal/coroalloc"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
+	"github.com/xgo-dev/llgo/runtime/internal/coroalloc"
 )
 
 func init() {

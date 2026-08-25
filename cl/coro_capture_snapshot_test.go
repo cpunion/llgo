@@ -20,8 +20,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -46,7 +46,7 @@ func TestCoroImmutableCaptureSnapshotNativeAndWasm32CoroSplit(t *testing.T) {
 		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			prog, pkg, plan, _, _, target := compileCoroCapturedStaticCleanupFixtureSource(
+			prog, pkg, plan, _, _, target, _ := compileCoroCapturedStaticCleanupFixtureSource(
 				t, test.target, coroImmutableCaptureSnapshotFixture,
 			)
 			defer prog.Dispose()

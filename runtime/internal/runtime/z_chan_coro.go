@@ -19,7 +19,7 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 const (
@@ -900,9 +900,82 @@ func finishCurrentCoroChannelCommit(
 	return commitCoroChannelExternalV1(transaction, waiter.coro, status, context)
 }
 
-func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
+// commitCoroDirectPairLocked closes the race between a select's nonblocking
+// first pass and its all-channel locked park transaction. A peer may publish a
+// compact one-case waiter in that interval. Such a waiter is not a pthread
+// waiter and cannot be claimed by claimWaiter: its cancellation arbitration is
+// the DirectChannelCompletion state word.
+//
+// The select endpoint is acquired first and remains reversible while the
+// direct endpoint is acquired. No typed payload or waiter status changes until
+// both claims succeed. currentResolved reports that another case already won
+// the select; the caller must restore the untouched direct peer and let the
+// compiler suspend into the already-published select decision.
+func commitCoroDirectPairLocked(
+	send, recv *chanWaiter,
+	eltSize int,
+	task *coro.G,
+) (result coroChanMatchResult, currentResolved bool) {
+	if send == nil || recv == nil || send == recv || task == nil || !send.send || recv.send ||
+		send.ch == nil || send.ch != recv.ch || send.size != eltSize || recv.size != eltSize {
+		return coroChanMatchInvalid, false
+	}
+	current, direct := send, recv
+	currentStatus, directStatus := waitSendOK, waitRecvOK
+	if send.coro == nil {
+		current, direct = recv, send
+		currentStatus, directStatus = waitRecvOK, waitSendOK
+	}
+	if current.coro == nil || current.direct != nil || direct.coro != nil || direct.direct == nil ||
+		!validCoroChanOperationV1(current.coro, current) {
+		return coroChanMatchInvalid, false
+	}
+
+	var transaction coro.ChannelExternalCommit
+	classified, context := beginCoroChannelExternalWithContextV1(
+		current,
+		currentStatus,
+		&transaction,
+		coroChannelExternalContextForTaskV1(task),
+	)
+	if classified == coroChanMatchDiscarded {
+		return coroChanMatchDiscarded, true
+	}
+	if classified != coroChanMatchCommitted {
+		return classified, false
+	}
+
+	switch coro.BeginDirectChannelCompletion(direct.direct) {
+	case coro.DirectChannelCompletionBeginCanceled:
+		if !transaction.Abort() {
+			return coroChanMatchInvalid, false
+		}
+		return coroChanMatchDiscarded, false
+	case coro.DirectChannelCompletionBeginAcquired:
+	default:
+		if !transaction.Abort() {
+			return coroChanMatchInvalid, false
+		}
+		return coroChanMatchInvalid, false
+	}
+	if !transaction.BeginEffect() {
+		_ = coro.AbortDirectChannelCompletion(direct.direct)
+		return coroChanMatchInvalid, false
+	}
+
+	copyChanElem(recv.elem, send.elem, eltSize)
+	current.status = currentStatus
+	direct.status = directStatus
+	if !commitCoroChannelExternalV1(&transaction, current.coro, currentStatus, context) ||
+		!finishDirectCoroChannelCompletionV1(direct, directStatus, &context) {
+		return coroChanMatchInvalid, false
+	}
+	return coroChanMatchCommitted, false
+}
+
+func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter, task *coro.G) (ready bool, ok bool) {
 	if ch == nil || !validCoroChanOperationV1(waiter.coro, waiter) || waiter.ch != ch || !waiter.send ||
-		waiter.size != ch.elemsize {
+		waiter.size != ch.elemsize || task == nil {
 		return false, false
 	}
 	if ch.closed {
@@ -917,6 +990,24 @@ func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 		peer := ch.recvq.dequeue()
 		if peer == nil {
 			break
+		}
+		if peer.direct != nil {
+			result, currentResolved := commitCoroDirectPairLocked(waiter, peer, ch.elemsize, task)
+			if currentResolved {
+				ch.recvq.enqueueFront(peer)
+				return true, true
+			}
+			switch result {
+			case coroChanMatchCommitted:
+				return true, true
+			case coroChanMatchDiscarded:
+				continue
+			case coroChanMatchRetry:
+				ch.recvq.enqueueFront(peer)
+				return false, true
+			default:
+				return false, false
+			}
 		}
 		if peer.coro != nil {
 			switch result := commitCoroPairLocked(waiter, peer, ch.elemsize); result {
@@ -982,9 +1073,9 @@ func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 	return false, true
 }
 
-func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
+func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter, task *coro.G) (ready bool, ok bool) {
 	if ch == nil || !validCoroChanOperationV1(waiter.coro, waiter) || waiter.ch != ch || waiter.send ||
-		waiter.size != ch.elemsize {
+		waiter.size != ch.elemsize || task == nil {
 		return false, false
 	}
 	if ch.dataqsiz == 0 {
@@ -992,6 +1083,24 @@ func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 			peer := ch.sendq.dequeue()
 			if peer == nil {
 				break
+			}
+			if peer.direct != nil {
+				result, currentResolved := commitCoroDirectPairLocked(peer, waiter, ch.elemsize, task)
+				if currentResolved {
+					ch.sendq.enqueueFront(peer)
+					return true, true
+				}
+				switch result {
+				case coroChanMatchCommitted:
+					return true, true
+				case coroChanMatchDiscarded:
+					continue
+				case coroChanMatchRetry:
+					ch.sendq.enqueueFront(peer)
+					return false, true
+				default:
+					return false, false
+				}
 			}
 			if peer.coro != nil {
 				switch result := commitCoroPairLocked(peer, waiter, ch.elemsize); result {
@@ -1269,12 +1378,21 @@ func reconcileBufferedChanLocked(
 	}
 }
 
-// CoroChanSelectTry is the nonblocking first pass for compiler-owned blocking
-// select. A closed send deliberately falls through to the physical park path:
-// that path turns it into an explicit resume status instead of unwinding a Go
-// panic through an active LLVM coroutine frame.
-func CoroChanSelectTry(ops ...ChanOp) (isel int, recvOK, tryOK, sendClosed bool) {
+// CoroChanSelectTry is the nonblocking first pass for a compiler-owned select.
+// The hidden task preserves the current executor capability when a ready case
+// completes an already parked peer. Without it, an owner-local direct-channel
+// completion is routed through the target request gate; the running executor
+// can then coalesce that request until its bounded poll fallback instead of
+// making the peer immediately runnable. A closed send deliberately falls
+// through to the physical park path, which reports an explicit resume status
+// instead of unwinding through an active LLVM coroutine frame.
+func CoroChanSelectTry(g unsafe.Pointer, ops ...ChanOp) (isel int, recvOK, tryOK, sendClosed bool) {
 	isel = -1
+	if g == nil {
+		coroRuntimeAbort("invalid coroutine channel select try task")
+		return
+	}
+	task := (*coro.G)(g)
 	if len(ops) == 0 {
 		return
 	}
@@ -1290,16 +1408,26 @@ func CoroChanSelectTry(ops ...ChanOp) (isel int, recvOK, tryOK, sendClosed bool)
 			return
 		}
 		op.C.mutex.Lock()
+		var resolved coroChanExternalCommitContextV1
+		context := (*coroChanExternalCommitContextV1)(nil)
 		if op.Send {
+			if op.C.recvq.first != nil {
+				resolved = coroChannelExternalContextForTaskV1(task)
+				context = &resolved
+			}
 			var closed bool
-			tryOK, closed = chanTrySendLocked(op.C, op.Val, int(op.Size))
+			tryOK, closed = chanTrySendLockedWithContext(op.C, op.Val, int(op.Size), context)
 			recvOK = true
 			op.C.mutex.Unlock()
 			if closed {
 				return -1, false, false, true
 			}
 		} else {
-			recvOK, tryOK = chanTryRecvLocked(op.C, op.Val, int(op.Size))
+			if op.C.sendq.first != nil {
+				resolved = coroChannelExternalContextForTaskV1(task)
+				context = &resolved
+			}
+			recvOK, tryOK = chanTryRecvLockedWithContext(op.C, op.Val, int(op.Size), context)
 			op.C.mutex.Unlock()
 		}
 		if tryOK {
@@ -1507,9 +1635,9 @@ func prepareCoroChanSelectV1(
 		candidate := coroChanSelectCaseAt(candidates, uintptr(index))
 		var ready bool
 		if op.Send {
-			ready, ok = coroChanTrySendLocked(op.C, &candidate.waiter)
+			ready, ok = coroChanTrySendLocked(op.C, &candidate.waiter, task)
 		} else {
-			ready, ok = coroChanTryRecvLocked(op.C, &candidate.waiter)
+			ready, ok = coroChanTryRecvLocked(op.C, &candidate.waiter, task)
 		}
 		if !ok {
 			unlockCoroChanSelectChannels(candidates, ops)

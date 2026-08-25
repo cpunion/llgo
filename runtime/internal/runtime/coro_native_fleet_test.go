@@ -27,7 +27,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 // The source-island fleet test does not compile the typed hchan adapter.

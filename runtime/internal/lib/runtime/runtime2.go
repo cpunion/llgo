@@ -1,8 +1,10 @@
 // Copyright 2009 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Use of this source code is governed by a BSD-style license.
+// See LICENSES/Go-BSD-3-Clause.txt at this module root for license terms.
 
 package runtime
+
+import _ "unsafe"
 
 // Layout of in-memory per-function information prepared by linker
 // See https://golang.org/s/go12symtab.
@@ -12,11 +14,16 @@ type _func struct {
 	unused [8]byte
 }
 
+//go:linkname goid github.com/xgo-dev/llgo/runtime/internal/runtime.goid
+func goid() uint64
+
 func Stack(buf []byte, all bool) int {
 	var pcs [64]uintptr
 	n := Callers(0, pcs[:])
 	out := make([]byte, 0, 1024)
-	out = append(out, "goroutine 1 [running]:\n"...)
+	out = append(out, "goroutine "...)
+	out = appendInt(out, int(goid()))
+	out = append(out, " [running]:\n"...)
 	frames := CallersFrames(pcs[:n])
 	for {
 		frame, more := frames.Next()

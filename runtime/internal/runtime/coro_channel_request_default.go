@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // Non-fleet targets own exactly route 1. OperationID still participates in
 // validation so a stale or accidentally foreign endpoint cannot fall back to

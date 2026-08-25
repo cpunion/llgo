@@ -179,22 +179,24 @@ func externalPCLineSites(info *binaryInfo, records []siteRecord) []ExternalSite 
 			OwnerSymbol: sym.name,
 		})
 	}
-	sort.Slice(sites, func(i, j int) bool {
-		if sites[i].PCOffset != sites[j].PCOffset {
-			return sites[i].PCOffset < sites[j].PCOffset
-		}
-		if sites[i].ID != sites[j].ID {
-			return sites[i].ID < sites[j].ID
-		}
-		return sites[i].OwnerSymbol < sites[j].OwnerSymbol
+	// Preserve linker-section order for records at the same PC. Consecutive
+	// zero-byte anchors use that order to make the last source statement win.
+	sort.SliceStable(sites, func(i, j int) bool {
+		return sites[i].PCOffset < sites[j].PCOffset
 	})
 	if len(sites) < 2 {
 		return sites
 	}
-	out := sites[:1]
-	for _, site := range sites[1:] {
-		last := out[len(out)-1]
-		if site.PCOffset == last.PCOffset && site.ID == last.ID && site.OwnerSymbol == last.OwnerSymbol {
+	out := sites[:0]
+	for _, site := range sites {
+		duplicate := false
+		for i := len(out) - 1; i >= 0 && out[i].PCOffset == site.PCOffset; i-- {
+			if out[i].ID == site.ID && out[i].OwnerSymbol == site.OwnerSymbol {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
 			continue
 		}
 		out = append(out, site)
@@ -275,6 +277,13 @@ func DetachExternal(path string, identity [sha256.Size]byte) error {
 }
 
 func replaceExternalBinary(path string, raw []byte, sign bool) (err error) {
+	return replaceBinary(path, raw, sign, nil)
+}
+
+func replaceBinary(path string, raw []byte, sign bool, verify func(string) error) (err error) {
+	if sign && runtime.GOOS != "darwin" {
+		return fmt.Errorf("cannot safely replace a signed Mach-O on %s", runtime.GOOS)
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -304,13 +313,30 @@ func replaceExternalBinary(path string, raw []byte, sign bool) (err error) {
 		return err
 	}
 	tmp = nil
-	if sign && runtime.GOOS == "darwin" {
+	if sign {
 		if output, err := exec.Command("codesign", "-f", "-s", "-", tmpPath).CombinedOutput(); err != nil {
 			return fmt.Errorf("codesign: %v: %s", err, output)
+		}
+		if signed, err := os.OpenFile(tmpPath, os.O_RDWR, 0); err != nil {
+			return err
+		} else if err := signed.Sync(); err != nil {
+			_ = signed.Close()
+			return err
+		} else if err := signed.Close(); err != nil {
+			return err
+		}
+	}
+	if verify != nil {
+		if err := verify(tmpPath); err != nil {
+			return fmt.Errorf("verify staged binary: %w", err)
 		}
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }

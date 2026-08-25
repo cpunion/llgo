@@ -5,7 +5,7 @@ package runtime
 import (
 	"unsafe"
 
-	cliteos "github.com/goplus/llgo/runtime/internal/clite/os"
+	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
 )
 
 //go:linkname libc_fstat_trampoline C.fstat

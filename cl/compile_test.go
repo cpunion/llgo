@@ -28,13 +28,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/cl/cltest"
-	"github.com/goplus/llgo/internal/build"
-	"github.com/goplus/llgo/internal/buildenv"
-	"github.com/goplus/llgo/internal/cabi"
-	"github.com/goplus/llgo/internal/llgen"
-	"github.com/goplus/llgo/internal/lto"
-	llvmenv "github.com/goplus/llgo/xtool/env/llvm"
+	"github.com/xgo-dev/llgo/cl/cltest"
+	"github.com/xgo-dev/llgo/internal/build"
+	"github.com/xgo-dev/llgo/internal/buildenv"
+	"github.com/xgo-dev/llgo/internal/cabi"
+	"github.com/xgo-dev/llgo/internal/llgen"
+	"github.com/xgo-dev/llgo/internal/lto"
+	llvmenv "github.com/xgo-dev/llgo/xtool/env/llvm"
 )
 
 func testCompile(t *testing.T, src, expected string) {
@@ -79,11 +79,13 @@ var embedTargetConfigs = []embedTargetConfig{
 				"./_testgo/cgomacro",    // fast fail: build constraints exclude all Go files (cgo)
 				"./_testgo/cgopython",   // fast fail: build constraints exclude all Go files (cgo)
 				"./_testgo/chan",        // timeout: emulator did not auto-exit
+				"./_testgo/complitnil",  // baremetal terminates on the nil-pointer panic before deferred recovery
 				"./_testgo/cursor",      // panic: internal/bytealg: selected .s files require plan9asm translation
 				"./_testgo/defer4",      // unexpected output: got "fatal error", expected "recover: panic message"
 				"./_testgo/goexit",      // llgo panic: unsatisfied import internal/runtime/sys
 				"./_testgo/indexerr",    // unexpected output: len(dst)=12, len(src)=0 (got "fatal error")
 				"./_testgo/makeslice",   // unexpected output: len(dst)=23, len(src)=0 (got "fatal error\\nmust error")
+				"./_testgo/mapindirect", // ld.lld: error: undefined symbol: __atomic_fetch_or_4
 				"./_testgo/reflect",     // llgo panic: unsatisfied import internal/runtime/sys
 				"./_testgo/reflectconv", // llgo panic: unsatisfied import internal/sync
 				"./_testgo/reflectfn",   // llgo panic: unsatisfied import internal/runtime/sys
@@ -93,6 +95,8 @@ var embedTargetConfigs = []embedTargetConfig{
 				"./_testgo/selects",     // timeout: emulator did not auto-exit
 				"./_testgo/sigsegv",     // unexpected output: got "0/main", expected recover nil-pointer message
 				"./_testgo/syncmap",     // llgo panic: unsatisfied import internal/runtime/sys
+				// Baremetal terminates after an outermost panic is recovered.
+				"./_testgo/nesteddeferpanic",
 			},
 			"./_testlibc": {
 				"./_testlibc/argv",     // timeout: emulator panic (Load access fault), no auto-exit
@@ -116,6 +120,8 @@ var embedTargetConfigs = []embedTargetConfig{
 				"./_testrt/unreachable", // timeout: emulator panic (Instruction access fault), no auto-exit
 
 				"./_testrt/reflectclosureenv", // baseline embedded runtime cannot build this reflect path
+				"./_testrt/ptrtothislazy",     // baseline embedded runtime cannot build this reflect path
+				"./_testrt/ptrtothislazynew",  // baseline embedded runtime cannot build this reflect path
 			},
 			"./_testdata": {
 				"./_testdata/debug", // llgo panic: unsatisfied import internal/runtime/sys
@@ -126,19 +132,23 @@ var embedTargetConfigs = []embedTargetConfig{
 		target: "esp32",
 		ignoreByDir: map[string][]string{
 			"./_testgo": {
-				"./_testgo/abimethod", // panic: internal/bytealg selected .s files require plan9asm translation
-				"./_testgo/alias",     // unexpected output
-				"./_testgo/cgodefer",  // panic: cannot build SSA for packages
-				"./_testgo/cgopython", // panic: cannot build SSA for packages
-				"./_testgo/cursor",    // panic: internal/bytealg: selected .s files require plan9asm translation
-				"./_testgo/defer4",    // runtime output: fatal error
-				"./_testgo/indexerr",  // runtime output: fatal error
-				"./_testgo/invoke",    // unexpected output
-				"./_testgo/makeslice", // runtime output: fatal error
-				"./_testgo/multiret",  // unexpected output
-				"./_testgo/select",    // timeout: emulator did not auto-exit
-				"./_testgo/sigsegv",   // unexpected output
-				"./_testgo/struczero", // timeout: emulator did not auto-exit
+				"./_testgo/abimethod",   // panic: internal/bytealg selected .s files require plan9asm translation
+				"./_testgo/alias",       // unexpected output
+				"./_testgo/cgodefer",    // panic: cannot build SSA for packages
+				"./_testgo/cgopython",   // panic: cannot build SSA for packages
+				"./_testgo/complitnil",  // baremetal terminates on the nil-pointer panic before deferred recovery
+				"./_testgo/cursor",      // panic: internal/bytealg: selected .s files require plan9asm translation
+				"./_testgo/defer4",      // runtime output: fatal error
+				"./_testgo/indexerr",    // runtime output: fatal error
+				"./_testgo/invoke",      // unexpected output
+				"./_testgo/makeslice",   // runtime output: fatal error
+				"./_testgo/mapindirect", // fatal error: error in backend: Incomplete scavenging after 2nd pass
+				"./_testgo/multiret",    // unexpected output
+				"./_testgo/select",      // timeout: emulator did not auto-exit
+				"./_testgo/sigsegv",     // unexpected output
+				"./_testgo/struczero",   // timeout: emulator did not auto-exit
+				// Baremetal terminates after an outermost panic is recovered.
+				"./_testgo/nesteddeferpanic",
 			},
 			"./_testlibc": {
 				"./_testlibc/atomic",   // unexpected output
@@ -160,6 +170,8 @@ var embedTargetConfigs = []embedTargetConfig{
 				"./_testrt/typalias", // panic: runtime index out of range
 
 				"./_testrt/reflectclosureenv", // baseline embedded runtime cannot build this reflect path
+				"./_testrt/ptrtothislazy",     // baseline embedded runtime cannot build this reflect path
+				"./_testrt/ptrtothislazynew",  // baseline embedded runtime cannot build this reflect path
 			},
 			"./_testdata": {
 				"./_testdata/cpkgimp", // unexpected output

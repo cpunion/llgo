@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"sync"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"go/types"
 )
 

@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/goplus/llgo/internal/packages"
+	"github.com/xgo-dev/llgo/internal/packages"
 )
 
 func TestSelectedSFilesSkipsTestAsm(t *testing.T) {
@@ -204,5 +204,57 @@ printf '{"Dir":"%s","SFiles":["chacha8_stub.s"]}\n' "$PACKAGE_DIR"
 		if len(got) != 0 {
 			t.Fatalf("%s/%s chacha8rand SFiles = %v, want none", conf.Goos, conf.Goarch, got)
 		}
+	}
+}
+
+func TestPkgSFilesSkipsSyntheticTestMain(t *testing.T) {
+	pkgDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pkgDir, "asm.s"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &context{
+		mode:      ModeTest,
+		buildConf: &Config{Goos: "linux", Goarch: "amd64"},
+	}
+	got, err := pkgSFiles(ctx, &packages.Package{
+		ID:      "example.com/p.test",
+		PkgPath: "example.com/p.test",
+		Name:    "main",
+		Dir:     pkgDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("pkgSFiles = %v, want nil", got)
+	}
+	if cached, ok := ctx.sfilesCache["example.com/p.test"]; !ok || cached != nil {
+		t.Fatalf("synthetic test main cache entry = %v, %v; want nil, true", cached, ok)
+	}
+}
+
+func TestPlan9AsmEnabledInitializesSelectedPackages(t *testing.T) {
+	t.Setenv(llgoPlan9ASMPkgs, "example.com/first, example.com/second")
+	ctx := &context{buildConf: &Config{}}
+	if !ctx.plan9asmEnabled("example.com/first") {
+		t.Fatal("selected Plan 9 assembly package was disabled")
+	}
+	if ctx.plan9asmEnabled("example.com/other") {
+		t.Fatal("unselected Plan 9 assembly package was enabled")
+	}
+	if !ctx.plan9asmReady || ctx.plan9asmMode != plan9asmEnvSelected || !ctx.plan9asmPkgs["example.com/second"] {
+		t.Fatalf("prepared Plan 9 assembly policy = mode %v, packages %v", ctx.plan9asmMode, ctx.plan9asmPkgs)
+	}
+}
+
+func TestPkgSFilesRejectsNilFrozenCache(t *testing.T) {
+	ctx := &context{sfilesFrozen: true}
+	_, err := pkgSFiles(ctx, &packages.Package{
+		ID:      "example.com/unprepared",
+		PkgPath: "example.com/unprepared",
+	})
+	if err == nil {
+		t.Fatal("nil frozen SFiles cache accepted an unprepared package")
 	}
 }

@@ -35,7 +35,7 @@ import (
 	"unsafe"
 
 	"github.com/goplus/gogen/packages"
-	rtabi "github.com/goplus/llgo/runtime/abi"
+	rtabi "github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -1001,40 +1001,64 @@ func TestRecordTypeChildren(t *testing.T) {
 
 	const want = `[TypeChildren]
 pkg.array:
-    *[4]_llgo_uint8
     _llgo_uint8
-pkg.basic:
-    *_llgo_int
 pkg.channel:
-    *chan _llgo_string
     _llgo_string
-pkg.emptySignature:
-    *_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
 pkg.map:
-    *map[_llgo_string]_llgo_int
     _llgo_int
     _llgo_string
 pkg.named:
-    *_llgo_example.com/pkg.Named
     _llgo_bool
 pkg.pointer:
     _llgo_int
 pkg.signature:
-    *_llgo_func$ZJJ9zC4Iq-CB1QSlO9vdPouqa3YC-lLDsE6RcJPWFiQ
     _llgo_bool
     _llgo_int
     _llgo_string
 pkg.slice:
-    *[]_llgo_bool
     _llgo_bool
 pkg.struct:
-    *_llgo_struct$0VM4HVYYqIuvLFTFnW5tNIahdvhuRgu-SencVQDPbzk
     _llgo_int
     _llgo_string
 
 `
 	if got := pm.String(); got != want {
 		t.Fatalf("metadata mismatch\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestAbiTypeLazyPtrToThis(t *testing.T) {
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+
+	goPkg := types.NewPackage("example.com/pkg", "pkg")
+	plain := types.NewNamed(types.NewTypeName(token.NoPos, goPkg, "Plain", nil), types.NewStruct(nil, nil), nil)
+	withMethod := types.NewNamed(types.NewTypeName(token.NoPos, goPkg, "WithMethod", nil), types.NewStruct(nil, nil), nil)
+	recv := types.NewVar(token.NoPos, goPkg, "", types.NewPointer(withMethod))
+	withMethod.AddMethod(types.NewFunc(token.NoPos, goPkg, "M", types.NewSignatureType(recv, nil, nil, nil, nil, false)))
+
+	pkg := prog.NewPackageEx("pkg", goPkg.Path(), true)
+	fn := pkg.NewFunc("use", types.NewSignatureType(nil, nil, nil, nil, nil, false), InGo)
+	b := fn.MakeBody(1)
+	b.abiType(plain)
+	b.abiType(withMethod)
+	b.Return()
+
+	plainPtrName, _ := prog.abi.TypeName(types.NewPointer(plain))
+	if got := pkg.VarOf(plainPtrName); got != nil {
+		t.Fatalf("methodless pointer descriptor %q was generated eagerly", plainPtrName)
+	}
+	methodPtrName, _ := prog.abi.TypeName(types.NewPointer(withMethod))
+	if got := pkg.VarOf(methodPtrName); got == nil {
+		t.Fatalf("pointer descriptor with methods %q was not generated", methodPtrName)
 	}
 }
 
@@ -1070,12 +1094,8 @@ func TestRecordMethodSlots(t *testing.T) {
 	const want = `[TypeChildren]
 *_llgo_example.com/pkg.T:
     _llgo_example.com/pkg.T
-*_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
-    _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
 _llgo_example.com/pkg.T:
     *_llgo_example.com/pkg.T
-_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
-    *_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
 
 [MethodInfo]
 *_llgo_example.com/pkg.T:
@@ -1129,6 +1149,31 @@ func TestReflectSliceAtDemandsSliceTypeInit(t *testing.T) {
 
 	if got := pkg.NeedAbiInit & ReflectSliceOf; got == 0 {
 		t.Fatal("reflect.SliceAt did not retain slice type-construction metadata")
+	}
+}
+
+func TestReflectPointerOperationsDemandPointerTypeInit(t *testing.T) {
+	for _, name := range []string{
+		"reflect.New",
+		"reflect.NewAt",
+		"reflect.PointerTo",
+		"reflect.PtrTo",
+		"reflect.Value.Addr",
+	} {
+		t.Run(name, func(t *testing.T) {
+			prog := NewProgram(nil)
+			defer prog.Dispose()
+			pkg := prog.NewPackage("pkg", "pkg")
+			operation := pkg.NewFunc(name, NoArgsNoRet, InGo)
+			caller := pkg.NewFunc("pkg.call", NoArgsNoRet, InGo)
+			b := caller.MakeBody(1)
+			b.Call(operation.Expr)
+			b.Return()
+
+			if got := pkg.NeedAbiInit & ReflectPointerTo; got == 0 {
+				t.Fatalf("%s did not retain pointer type-construction metadata", name)
+			}
+		})
 	}
 }
 
@@ -1239,6 +1284,61 @@ func TestDevLTOGlobalDCEAbiTypeFakeUsesRecordedDuringAbiTypeBuild(t *testing.T) 
 	if !containsLLVMValueNameSuffix(mapFakeUses, ".typehash") {
 		t.Fatalf("map abi type fake uses = %v, want typehash", mapFakeUses)
 	}
+
+	// Indirect map keys and elements are represented by pointers in the
+	// runtime bucket, so the ABI descriptor must report pointer-sized fields.
+	large := types.NewArray(types.Typ[types.Uint64], 17)
+	b.abiType(types.NewMap(large, large))
+}
+
+func TestMapKeyPtrCoverage(t *testing.T) {
+	prog := NewProgram(nil)
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+	pkg := prog.NewPackage("main", "main")
+	key := types.NewArray(types.Typ[types.Int], 2)
+	keyObj := types.NewTypeName(token.NoPos, nil, "Key", nil)
+	namedKey := types.NewNamed(keyObj, key, nil)
+	mapType := types.NewMap(namedKey, types.Typ[types.Int])
+	sig := types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewVar(token.NoPos, nil, "m", mapType),
+			types.NewVar(token.NoPos, nil, "k", key),
+		), nil, false)
+	fn := pkg.NewFunc("mapKeyPtr", sig, InGo)
+	b := fn.MakeBody(1)
+
+	// The map uses the named key while the expression uses its underlying
+	// array type. This exercises the ChangeType path in mapKeyPtr.
+	ptr := b.mapKeyPtr(fn.Param(0), fn.Param(1))
+	if ptr.RawType() != types.Typ[types.UnsafePointer] {
+		t.Fatalf("mapKeyPtr type = %v, want unsafe.Pointer", ptr.RawType())
+	}
+	b.Return()
+
+	// Exercise the defensive paths as well. A mismatched, larger expression
+	// reaches the size-preserving branch before ChangeType rejects it.
+	func() {
+		defer func() { _ = recover() }()
+		smallMap := types.NewMap(types.Typ[types.Int], types.Typ[types.Int])
+		smallSig := types.NewSignatureType(nil, nil, nil, types.NewTuple(
+			types.NewVar(token.NoPos, nil, "m", smallMap),
+			types.NewVar(token.NoPos, nil, "k", key),
+		), nil, false)
+		smallFn := pkg.NewFunc("mapKeyPtrLarger", smallSig, InGo)
+		smallBody := smallFn.MakeBody(1)
+		smallBody.mapKeyPtr(smallFn.Param(0), smallFn.Param(1))
+	}()
+	func() {
+		defer func() { _ = recover() }()
+		b.mapKeyPtr(fn.Param(1), fn.Param(1))
+	}()
 }
 
 func containsLLVMValueNameSuffix(values []llvm.Value, suffix string) bool {
@@ -1624,7 +1724,7 @@ func TestMakeClosureWithCtx(t *testing.T) {
 	for _, want := range []string{
 		"define i64 @inner(ptr ",
 		"i64 %1)",
-		`call ptr @"github.com/goplus/llgo/runtime/internal/runtime.AllocU"(i64 8)`,
+		`call ptr @"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocU"(i64 8)`,
 		"insertvalue { ptr, ptr } { ptr @inner, ptr undef }",
 	} {
 		if !strings.Contains(ir, want) {
@@ -1700,7 +1800,7 @@ func TestIfaceMethodClosureCallIR(t *testing.T) {
 	defer pm.Close()
 	const wantMeta = `[OrdinaryEdges]
 caller:
-    github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData
+    github.com/xgo-dev/llgo/runtime/internal/runtime.IfacePtrData
 
 [UseIfaceMethod]
 caller:
@@ -1718,13 +1818,13 @@ _llgo_iface$Yoe3OCWqNu8XXGUO_vekWtum96Bix1ffdbPGjVhQ1pI:
 	expected := strings.ReplaceAll(`; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
 
-%"github.com/goplus/llgo/runtime/internal/runtime.iface" = type { ptr, ptr }
+%"github.com/xgo-dev/llgo/runtime/internal/runtime.iface" = type { ptr, ptr }
 
 ; Function Attrs: null_pointer_is_valid
-define i64 @caller(%"github.com/goplus/llgo/runtime/internal/runtime.iface" %0) #0 {
+define i64 @caller(%"github.com/xgo-dev/llgo/runtime/internal/runtime.iface" %0) #0 {
 _llgo_0:
-  %1 = call ptr @"github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData"(%"github.com/goplus/llgo/runtime/internal/runtime.iface" %0)
-  %2 = extractvalue %"github.com/goplus/llgo/runtime/internal/runtime.iface" %0, 0
+  %1 = call ptr @"github.com/xgo-dev/llgo/runtime/internal/runtime.IfacePtrData"(%"github.com/xgo-dev/llgo/runtime/internal/runtime.iface" %0)
+  %2 = extractvalue %"github.com/xgo-dev/llgo/runtime/internal/runtime.iface" %0, 0
   %3 = getelementptr ptr, ptr %2, i64 3
   %4 = load ptr, ptr %3, align 8
   %5 = insertvalue { ptr, ptr } undef, ptr %4, 0
@@ -1736,7 +1836,7 @@ _llgo_0:
 }
 
 ; Function Attrs: null_pointer_is_valid
-declare ptr @"github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData"(%"github.com/goplus/llgo/runtime/internal/runtime.iface") #0
+declare ptr @"github.com/xgo-dev/llgo/runtime/internal/runtime.IfacePtrData"(%"github.com/xgo-dev/llgo/runtime/internal/runtime.iface") #0
 
 attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
 `, "{{CTXATTR}}", closureContextIRAttr(prog))
@@ -2016,7 +2116,8 @@ func TestInterfaceHelpers(t *testing.T) {
 	rawIface := types.NewInterfaceType([]*types.Func{rawMeth}, nil)
 	rawIface.Complete()
 
-	if got := iMethodOf(rawIface, "missing"); got != -1 {
+	missingMethod := types.NewFunc(0, nil, "missing", rawSig)
+	if got := iMethodOf(rawIface, missingMethod); got != -1 {
 		t.Fatalf("iMethodOf missing: got %d", got)
 	}
 
@@ -2681,10 +2782,10 @@ func TestGlobalStrings(t *testing.T) {
 	assertPkg(t, pkg, `; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
 
-%"github.com/goplus/llgo/runtime/internal/runtime.String" = type { ptr, i64 }
+%"github.com/xgo-dev/llgo/runtime/internal/runtime.String" = type { ptr, i64 }
 
-@"foo/bar.a" = global %"github.com/goplus/llgo/runtime/internal/runtime.String" zeroinitializer, align 8
-@"foo/bar.b" = global %"github.com/goplus/llgo/runtime/internal/runtime.String" zeroinitializer, align 8
+@"foo/bar.a" = global %"github.com/xgo-dev/llgo/runtime/internal/runtime.String" zeroinitializer, align 8
+@"foo/bar.b" = global %"github.com/xgo-dev/llgo/runtime/internal/runtime.String" zeroinitializer, align 8
 @"foo/bar.c" = global i64 100, align 8
 `)
 	err := pkg.Undefined("foo/bar.a", "foo/bar.b")
@@ -2699,11 +2800,11 @@ source_filename = "foo/bar"
 	assertPkg(t, pkg, `; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
 
-%"github.com/goplus/llgo/runtime/internal/runtime.String" = type { ptr, i64 }
+%"github.com/xgo-dev/llgo/runtime/internal/runtime.String" = type { ptr, i64 }
 
 @"foo/bar.c" = global i64 100, align 8
-@"foo/bar.a" = external global %"github.com/goplus/llgo/runtime/internal/runtime.String"
-@"foo/bar.b" = external global %"github.com/goplus/llgo/runtime/internal/runtime.String"
+@"foo/bar.a" = external global %"github.com/xgo-dev/llgo/runtime/internal/runtime.String"
+@"foo/bar.b" = external global %"github.com/xgo-dev/llgo/runtime/internal/runtime.String"
 `)
 	global := prog.NewPackage("", "global")
 	global.AddGlobalString("foo/bar.a", "1.0")
@@ -2711,12 +2812,12 @@ source_filename = "foo/bar"
 	assertPkg(t, global, `; ModuleID = 'global'
 source_filename = "global"
 
-%"github.com/goplus/llgo/runtime/internal/runtime.String" = type { ptr, i64 }
+%"github.com/xgo-dev/llgo/runtime/internal/runtime.String" = type { ptr, i64 }
 
 @0 = private unnamed_addr constant [3 x i8] c"1.0", align 1
-@"foo/bar.a" = global %"github.com/goplus/llgo/runtime/internal/runtime.String" { ptr @0, i64 3 }, align 8
+@"foo/bar.a" = global %"github.com/xgo-dev/llgo/runtime/internal/runtime.String" { ptr @0, i64 3 }, align 8
 @1 = private unnamed_addr constant [4 x i8] c"info", align 1
-@"foo/bar.b" = global %"github.com/goplus/llgo/runtime/internal/runtime.String" { ptr @1, i64 4 }, align 8
+@"foo/bar.b" = global %"github.com/xgo-dev/llgo/runtime/internal/runtime.String" { ptr @1, i64 4 }, align 8
 `)
 }
 
@@ -2736,8 +2837,10 @@ func TestZeroSizedGlobalEmitsAliasSymbol(t *testing.T) {
 		return pkg
 	})
 	pkg := prog.NewPackage("bar", "foo/bar")
-	typ := types.NewPointer(types.NewArray(types.Typ[types.Int], 0))
+	elem := types.NewArray(types.Typ[types.Int], 0)
+	typ := types.NewPointer(elem)
 	a := pkg.NewVar("foo/bar.a", typ, InGo)
+	a.Init(prog.Zero(prog.Type(elem, InGo)))
 	a.InitNil()
 	pkg.NewVar("other/pkg.a", typ, InGo)
 	assertPkg(t, pkg, `; ModuleID = 'foo/bar'
@@ -2861,6 +2964,42 @@ func TestTargetMachineAndDataLayout(t *testing.T) {
 	}
 }
 
+func TestARMTargetSpec(t *testing.T) {
+	for _, test := range []struct {
+		goarm       string
+		wantTriple  string
+		wantFeature string
+	}{
+		{"5", "armv5-unknown-linux-gnueabi", "+armv5t"},
+		{"6", "armv6-unknown-linux-gnueabihf", "+armv6"},
+		{"7", "armv7-unknown-linux-gnueabihf", "+armv7-a"},
+	} {
+		spec := (&Target{GOOS: "linux", GOARCH: "arm", GOARM: test.goarm}).Spec()
+		if spec.Triple != test.wantTriple {
+			t.Errorf("linux/arm GOARM=%s triple = %q, want %q", test.goarm, spec.Triple, test.wantTriple)
+		}
+		if !strings.Contains(spec.Features, test.wantFeature) {
+			t.Errorf("linux/arm GOARM=%s features = %q, want %q", test.goarm, spec.Features, test.wantFeature)
+		}
+	}
+}
+
+func TestWindowsTargetTriple(t *testing.T) {
+	for _, test := range []struct {
+		goarch string
+		want   string
+	}{
+		{"386", "i686-pc-windows-msvc"},
+		{"amd64", "x86_64-pc-windows-msvc"},
+		{"arm64", "aarch64-pc-windows-msvc"},
+	} {
+		target := &Target{GOOS: "windows", GOARCH: test.goarch}
+		if got := target.Spec().Triple; got != test.want {
+			t.Errorf("windows/%s target triple = %q, want %q", test.goarch, got, test.want)
+		}
+	}
+}
+
 func TestAbiTables(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
@@ -2923,7 +3062,7 @@ func TestAbiTables(t *testing.T) {
 	s := fn.impl.String()
 	if !strings.Contains(s, `define void @"foo/bar.init$abitables"()`) ||
 		!strings.Contains(s, `@"foo/bar.init$abitables$slice"`) ||
-		!strings.Contains(s, `@"github.com/goplus/llgo/runtime/internal/runtime.typelist"`) {
+		!strings.Contains(s, `@"github.com/xgo-dev/llgo/runtime/internal/runtime.typelist"`) {
 		t.Fatal("error abi tables", s)
 	}
 }
@@ -2983,6 +3122,57 @@ func TestInitAbiTypesForSubset(t *testing.T) {
 	}
 	if got := allArray.GlobalValueType().ArrayLength(); got != len(prog.abiSymbol) {
 		t.Fatalf("full abi array length = %d, want %d", got, len(prog.abiSymbol))
+	}
+}
+
+func TestRegisterAbiTypesAcrossPrograms(t *testing.T) {
+	runtimePkg, err := importer.For("source", nil).Import(PkgRuntime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newProgram := func() Program {
+		prog := NewProgram(nil)
+		prog.sizes = types.SizesFor("gc", runtime.GOARCH)
+		prog.SetRuntime(runtimePkg)
+		return prog
+	}
+
+	source := newProgram()
+	defer source.Dispose()
+	sourcePkg := source.NewPackage("source", "example.com/source")
+	sourceFn := sourcePkg.NewFunc("source", NoArgsNoRet, InC)
+	sourceBuilder := sourceFn.MakeBody(1)
+	sourceBuilder.abiType(types.NewSlice(types.Typ[types.Int]))
+	named := types.NewNamed(
+		types.NewTypeName(token.NoPos, types.NewPackage("example.com/source", "source"), "Named", nil),
+		types.NewStruct(nil, nil),
+		nil,
+	)
+	sourceBuilder.abiType(named)
+	sourceBuilder.Return()
+	infos := source.AbiTypes()
+	if len(infos) == 0 {
+		t.Fatal("source Program produced no ABI type snapshot")
+	}
+
+	target := newProgram()
+	defer target.Dispose()
+	targetPkg := target.NewPackage("target", "example.com/target")
+	targetPkg.RegisterAbiTypes(infos)
+	targetPkg.RegisterAbiTypes(append(infos, AbiTypeInfo{}))
+	for _, info := range infos {
+		if _, ok := target.abiSymbol[info.Name]; !ok {
+			t.Fatalf("target Program did not recreate ABI type %q", info.Name)
+		}
+	}
+	if targetPkg.InitAbiTypes("init$abitypes") == nil {
+		t.Fatal("recreated ABI types did not produce typelist initializer")
+	}
+	for _, info := range infos {
+		global := targetPkg.Module().NamedGlobal(info.Name)
+		if global.IsNil() || !global.IsDeclaration() {
+			t.Fatalf("target descriptor %q is not an external declaration", info.Name)
+		}
 	}
 }
 

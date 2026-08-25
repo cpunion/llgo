@@ -42,6 +42,38 @@ func validRecoverActiveFrame(g *G, child *Frame) bool {
 		child.header.Parent == parent.handle && awaitCompletionArmedForChild(child)
 }
 
+func validRecoverTaskActivation(g *G) bool {
+	return ValidG(g) && resumeGateTaken(g) && g.state == GRunning &&
+		g.runP != nil && g.pending == (pendingTransition{}) && g.destroyTarget == nil &&
+		!g.destroyRoot && g.spawnChild == nil && releasableParkState(&g.park) &&
+		validRecoverActiveFrame(g, g.active)
+}
+
+// RecoverAliasScopeActive validates the compiler-owned boundary at which a
+// dynamic deferred descriptor may temporarily publish its transparent-wrapper
+// identity. The scope itself lives in the logical runtime G; this predicate
+// deliberately adds no pointer or flag to every scheduler G or physical frame.
+func RecoverAliasScopeActive(g *G) bool {
+	return validRecoverTaskActivation(g)
+}
+
+func validRecoverAliasAncestor(g *G, child *Frame) bool {
+	if !ValidG(g) || child == nil || child.owner != g || child.handle == nil ||
+		child.header == nil || child.state != FrameSuspended ||
+		child.header.G != unsafe.Pointer(g) ||
+		child.header.SuspendReason != uint16(SuspendCall) ||
+		child.header.Lifecycle != uint16(FrameSuspended) || child.parent == nil ||
+		child.header.Parent != child.parent.handle {
+		return false
+	}
+	parent := child.parent
+	return parent.owner == g && parent.handle != nil && parent.header != nil &&
+		parent.state == FrameSuspended && parent.header.G == unsafe.Pointer(g) &&
+		parent.header.SuspendReason == uint16(SuspendCall) &&
+		parent.header.Lifecycle == uint16(FrameSuspended) &&
+		awaitCompletionArmedForChild(child)
+}
+
 // TakeRecover implements the predeclared recover operation for an active
 // physical coroutine. The direct-call capability is encoded in the immediate
 // parent's in-flight CompletionRecord, so no second frame record, TLS lookup,
@@ -49,41 +81,64 @@ func validRecoverActiveFrame(g *G, child *Frame) bool {
 // call that must return nil, including roots, managed helpers, and a second
 // recover in the same deferred child.
 func TakeRecover(g *G, childHandle unsafe.Pointer) (snapshot RecoverSnapshot, recovered, valid bool) {
-	if !ValidG(g) || !resumeGateTaken(g) || childHandle == nil || g.state != GRunning ||
-		g.runP == nil || g.pending != (pendingTransition{}) || g.destroyTarget != nil ||
-		g.destroyRoot || g.spawnChild != nil || !releasableParkState(&g.park) {
+	return takeRecover(g, childHandle, false)
+}
+
+// TakeRecoverAlias is the transparent-wrapper counterpart of TakeRecover. It
+// may cross ordinary managed awaits only after the runtime has proved that the
+// current physical activation owns the exact token installed by
+// StartRecoverFrameAlias. The first recover-armed ancestor remains the sole
+// payload owner, so successful recovery naturally publishes
+// CompletionReturnRecovered when the original deferred descriptor returns.
+func TakeRecoverAlias(g *G, childHandle unsafe.Pointer) (snapshot RecoverSnapshot, recovered, valid bool) {
+	return takeRecover(g, childHandle, true)
+}
+
+func takeRecover(g *G, childHandle unsafe.Pointer, transparent bool) (snapshot RecoverSnapshot, recovered, valid bool) {
+	if childHandle == nil || !validRecoverTaskActivation(g) {
 		return RecoverSnapshot{}, false, false
 	}
 	child := findFrame(g, childHandle)
-	if !validRecoverActiveFrame(g, child) {
+	if child != g.active {
 		return RecoverSnapshot{}, false, false
 	}
 	if child.parent == nil {
+		if transparent {
+			return RecoverSnapshot{}, false, false
+		}
 		return RecoverSnapshot{}, false, true
 	}
-	record := &child.parent.completion
-	if record.child != childHandle {
-		return RecoverSnapshot{}, false, false
-	}
-	switch record.status {
-	case completionArmed:
-		if record.typeWord != nil || record.dataWord != nil {
+	for {
+		record := &child.parent.completion
+		if record.child != child.handle {
 			return RecoverSnapshot{}, false, false
 		}
-		return RecoverSnapshot{}, false, true
-	case completionRecoverArmed:
-		if record.typeWord == nil {
+		switch record.status {
+		case completionArmed:
+			if record.typeWord != nil || record.dataWord != nil {
+				return RecoverSnapshot{}, false, false
+			}
+			if !transparent {
+				return RecoverSnapshot{}, false, true
+			}
+			child = child.parent
+			if child.parent == nil || !validRecoverAliasAncestor(g, child) {
+				return RecoverSnapshot{}, false, false
+			}
+		case completionRecoverArmed:
+			if record.typeWord == nil {
+				return RecoverSnapshot{}, false, false
+			}
+			record.status = completionRecoverTaken
+			return RecoverSnapshot{TypeWord: record.typeWord, DataWord: record.dataWord}, true, true
+		case completionRecoverTaken:
+			if record.typeWord == nil {
+				return RecoverSnapshot{}, false, false
+			}
+			return RecoverSnapshot{}, false, true
+		default:
 			return RecoverSnapshot{}, false, false
 		}
-		record.status = completionRecoverTaken
-		return RecoverSnapshot{TypeWord: record.typeWord, DataWord: record.dataWord}, true, true
-	case completionRecoverTaken:
-		if record.typeWord == nil {
-			return RecoverSnapshot{}, false, false
-		}
-		return RecoverSnapshot{}, false, true
-	default:
-		return RecoverSnapshot{}, false, false
 	}
 }
 

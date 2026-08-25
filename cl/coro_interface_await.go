@@ -21,8 +21,8 @@ import (
 	"go/token"
 	"go/types"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -68,6 +68,9 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 	env := b.Field(methodValue, 1)
 	args := p.compileValues(b, call.Call.Args, fnNormal)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
+	if instructionPlan.recoverAlias {
+		p.observeCoroPhysicalRecoverAlias(call)
+	}
 
 	resultCount := dispatch.sourceCallSignature.Results().Len()
 	var resultSlot llssa.Expr
@@ -120,9 +123,18 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 		var result llssa.Expr
 		switch candidate.plan.Emission {
 		case coro.EmitCoroutine:
-			result = p.compileCoroTargetAwaitWithKeepalive(b, candidate.function, physical, keepaliveSlots)
+			result = p.compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
+				b, candidate.function, llssa.Nil, physical, nil, keepaliveSlots,
+				instructionPlan.recoverAlias,
+			).value
 		case coro.EmitPlain:
-			result = b.Call(entry.Expr, physical...)
+			if instructionPlan.recoverAlias {
+				result = p.callCoroTransparentRecoverAlias(b, entry.Expr, func() llssa.Expr {
+					return b.Call(entry.Expr, physical...)
+				})
+			} else {
+				result = b.Call(entry.Expr, physical...)
+			}
 		default:
 			panic(fmt.Sprintf("coroutine interface dispatch: target %q has emission %s", candidate.id, candidate.plan.Emission))
 		}

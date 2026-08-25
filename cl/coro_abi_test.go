@@ -29,9 +29,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -154,14 +154,10 @@ func Leaf(value uint32) uint32 {
 		t.Fatal("GlobalDebug SSA did not contain a DebugRef")
 	}
 
-	oldDebug, oldDebugSyms := enableDbg, enableDbgSyms
-	EnableDebug(true)
-	EnableDbgSyms(true)
-	defer func() {
-		EnableDebug(oldDebug)
-		EnableDbgSyms(oldDebugSyms)
-	}()
-	prog, pkg := compileCoroLeafPhysicalABIPackage(t, nil, ssaPkg, files)
+	prog, pkg := compileCoroLeafPhysicalABIPackage(t, nil, ssaPkg, files, Options{
+		Debug:        true,
+		DebugSymbols: true,
+	})
 	defer prog.Dispose()
 	module := pkg.Module()
 	defer module.Dispose()
@@ -380,6 +376,43 @@ func Parent(value uint32) { Child(value, -1) }
 		if module.NamedFunction("foo.Child$coro" + suffix).IsNil() {
 			t.Fatalf("tail-forward target lost split %s entry:\n%s", suffix, module.String())
 		}
+	}
+}
+
+func TestCoroTailForwardPreservesNestedRecoverBoundary(t *testing.T) {
+	const source = `package foo
+func Child() any { return recover() }
+func Parent() any { return Child() }
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, nil, source)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify nested-recover boundary: %v\n%s", err, module.String())
+	}
+
+	parent := ssaPkg.Func("Parent")
+	physical, err := universe.coroProgramIR.physicalFunctionPlan(parent, universe.ownerOf(parent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if physical.tailForward != nil {
+		t.Fatalf("recover-capable target removed its caller activation: %+v", physical.tailForward)
+	}
+	parentIR := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
+	if !strings.Contains(parentIR, "llvm.coro.begin") ||
+		!strings.Contains(parentIR, coroAwaitPrepareInlineHookV4) {
+		t.Fatalf("nested recover boundary did not retain its own coroutine await frame:\n%s", parentIR)
 	}
 }
 
@@ -2057,7 +2090,7 @@ func compileCoroLeafPhysicalABISource(t *testing.T, target *llssa.Target, source
 	return compileCoroLeafPhysicalABIPackage(t, target, ssaPkg, files)
 }
 
-func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPkg *ssa.Package, files []*ast.File) (llssa.Program, llssa.Package) {
+func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPkg *ssa.Package, files []*ast.File, frontendOptions ...Options) (llssa.Program, llssa.Package) {
 	t.Helper()
 	var prog llssa.Program
 	if target == nil {
@@ -2091,10 +2124,16 @@ func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPk
 		prog.Dispose()
 		t.Fatal(err)
 	}
+	var options Options
+	if len(frontendOptions) != 0 {
+		options = frontendOptions[0]
+	}
 	pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
 		Compilation: &Compilation{
 			CoroPlan:         plan,
 			EmissionUniverse: universe},
+		FrontendOptions:    options,
+		FrontendOptionsSet: len(frontendOptions) != 0,
 	})
 	if err != nil {
 		prog.Dispose()

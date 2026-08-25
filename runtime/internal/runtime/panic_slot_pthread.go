@@ -21,7 +21,7 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/clite/pthread"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
 )
 
 type panicSlot struct {

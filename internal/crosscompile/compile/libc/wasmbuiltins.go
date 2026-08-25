@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/goplus/llgo/internal/crosscompile/compile"
+	"github.com/xgo-dev/llgo/internal/crosscompile/compile"
 )
 
 const wasmBuiltinsRevision = "1dfe5c302d1c5ab621f7abf04620fae92700fd22"

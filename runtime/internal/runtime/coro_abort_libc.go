@@ -21,7 +21,7 @@ package runtime
 import (
 	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 // These private declarations are used only after a fatal runtime invariant has

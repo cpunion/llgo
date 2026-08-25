@@ -23,10 +23,10 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	"github.com/goplus/llgo/internal/typepatch"
-	"github.com/goplus/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	"github.com/xgo-dev/llgo/internal/typepatch"
+	"github.com/xgo-dev/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )

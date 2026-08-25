@@ -23,8 +23,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -69,7 +69,7 @@ func TestCoroImplicitIndexBoundsNativeAndWasm32(t *testing.T) {
 					body,
 					coroBoundsFaultKind(coroBoundsFaultIndex, true),
 				)
-				if strings.Contains(body, "CheckIndexRange") || strings.Contains(body, "AssertNilDeref") {
+				if strings.Contains(body, "PanicIndex") || strings.Contains(body, "AssertNilDeref") {
 					t.Fatalf("%s retained a native-stack index helper:\n%s", operation.name, body)
 				}
 				hook := strings.Index(body, "call void @"+coroFaultPrepareHookV2)

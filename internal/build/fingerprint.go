@@ -100,6 +100,10 @@ func (m orderedStringMap) MarshalYAML() (interface{}, error) {
 type envSection struct {
 	Goos             string           `yaml:"GOOS,omitempty"`
 	Goarch           string           `yaml:"GOARCH,omitempty"`
+	Go386            string           `yaml:"GO386,omitempty"`
+	Goamd64          string           `yaml:"GOAMD64,omitempty"`
+	Goarm            string           `yaml:"GOARM,omitempty"`
+	Goarm64          string           `yaml:"GOARM64,omitempty"`
 	GoVersion        string           `yaml:"GO_VERSION,omitempty"`
 	LlgoVersion      string           `yaml:"LLGO_VERSION,omitempty"`
 	LlgoCompilerHash string           `yaml:"LLGO_COMPILER_HASH,omitempty"`
@@ -109,7 +113,7 @@ type envSection struct {
 }
 
 func (s *envSection) empty() bool {
-	return s.Goos == "" && s.Goarch == "" && s.LlvmTriple == "" && s.LlgoVersion == "" && s.LlgoCompilerHash == "" && s.GoVersion == "" && s.LlvmVersion == "" && len(s.Vars) == 0
+	return s.Goos == "" && s.Goarch == "" && s.Go386 == "" && s.Goamd64 == "" && s.Goarm == "" && s.Goarm64 == "" && s.LlvmTriple == "" && s.LlgoVersion == "" && s.LlgoCompilerHash == "" && s.GoVersion == "" && s.LlvmVersion == "" && len(s.Vars) == 0
 }
 
 type commonSection struct {
@@ -140,6 +144,7 @@ type commonSection struct {
 	EmitDWARF               bool         `yaml:"EMIT_DWARF,omitempty"`
 	PCLNMode                string       `yaml:"PCLN_MODE,omitempty"`
 	DisableBoundsChecks     bool         `yaml:"DISABLE_BOUNDS_CHECKS,omitempty"`
+	SaturatingFloatToUint32 bool         `yaml:"SATURATING_FLOAT_TO_UINT32,omitempty"`
 	LocalContext            bool         `yaml:"LOCAL_CONTEXT,omitempty"`
 	CC                      string       `yaml:"CC,omitempty"`
 	CCFlags                 []string     `yaml:"CCFLAGS,omitempty"`
@@ -158,7 +163,7 @@ func (s *commonSection) empty() bool {
 		s.CoroTargetFeatures == "" && s.CoroTargetABI == "" && s.CoroPointerBits == 0 &&
 		s.CoroEndianness == "" && s.CoroDataLayout == "" &&
 		!s.GoGlobalDCE && !s.EnableLTOPlugin && !s.EmitDWARF && s.PCLNMode == "" &&
-		!s.DisableBoundsChecks && !s.LocalContext &&
+		!s.DisableBoundsChecks && !s.SaturatingFloatToUint32 && !s.LocalContext &&
 		s.CC == "" && len(s.CCFlags) == 0 && len(s.CFlags) == 0 && len(s.LDFlags) == 0 &&
 		s.Linker == "" && len(s.ExtraFiles) == 0
 }

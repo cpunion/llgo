@@ -19,7 +19,7 @@ package cl
 import (
 	"go/types"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -37,9 +37,9 @@ func isCoroRecoverBuiltinCall(call *ssa.Call) bool {
 // the retained panic pair or two nil words. Constructing the empty interface
 // directly keeps this operation allocation-free on every target.
 func (p *context) compileCoroRecover(b llssa.Builder, call *ssa.CallCommon) llssa.Expr {
-	body := p.coroBody()
-	if body == nil || !p.coroEmissionExplicitStatus() ||
-		b.Func != p.fn || call == nil || len(call.Args) != 0 || body.abi.recoverTakeHook == "" {
+	recovery, ok := p.activeCoroRecoveryEmission()
+	if !ok || !p.coroEmissionExplicitStatus() ||
+		b.Func != p.fn || call == nil || len(call.Args) != 0 || recovery.takeHook == "" {
 		panic("coroutine recover requires an exact explicit-status physical call")
 	}
 	result := call.Signature().Results()
@@ -56,11 +56,11 @@ func (p *context) compileCoroRecover(b llssa.Builder, call *ssa.CallCommon) llss
 	dataWord := p.coroFrameAlloca(p.prog.VoidPtr())
 	b.Store(typeWord, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(dataWord, p.prog.Nil(p.prog.VoidPtr()))
-	take := p.pkg.NewFunc(body.abi.recoverTakeHook, coroRecoverTakeSignature(), llssa.InC)
+	take := p.pkg.NewFunc(recovery.takeHook, coroRecoverTakeSignature(), llssa.InC)
 	b.Call(
 		take.Expr,
-		body.task,
-		body.coro.Handle(),
+		recovery.task,
+		recovery.handle,
 		b.Convert(p.prog.VoidPtr(), typeWord),
 		b.Convert(p.prog.VoidPtr(), dataWord),
 	)
@@ -79,6 +79,90 @@ func coroRecoverTakeSignature() *types.Signature {
 		types.NewParam(noPos, nil, "child", pointer),
 		types.NewParam(noPos, nil, "typeOut", pointer),
 		types.NewParam(noPos, nil, "dataOut", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroRecoverAliasBeginSignature() *types.Signature {
+	const noPos = 0
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(noPos, nil, "g", pointer),
+		types.NewParam(noPos, nil, "expected", pointer),
+		types.NewParam(noPos, nil, "token", pointer),
+		types.NewParam(noPos, nil, "active", types.Typ[types.Bool]),
+	)
+	results := types.NewTuple(types.NewParam(noPos, nil, "previous", pointer))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func (p *context) beginCoroRecoverAliasScope(
+	b llssa.Builder, expected, token, active llssa.Expr,
+) func(llssa.Builder) {
+	recovery, ok := p.activeCoroRecoveryEmission()
+	if !ok || b == nil || b.Func != p.fn || token.IsNil() || active.IsNil() ||
+		recovery.aliasBeginHook == "" || recovery.aliasEndHook == "" {
+		panic("coroutine recover-alias scope requires an exact physical ABI")
+	}
+	if expected.IsNil() {
+		expected = p.prog.Nil(p.prog.VoidPtr())
+	}
+	begin := p.pkg.NewFunc(
+		recovery.aliasBeginHook, coroRecoverAliasBeginSignature(), llssa.InC,
+	)
+	previous := b.Call(
+		begin.Expr,
+		recovery.task,
+		b.Convert(p.prog.VoidPtr(), expected),
+		b.Convert(p.prog.VoidPtr(), token),
+		active,
+	)
+	end := p.pkg.NewFunc(
+		recovery.aliasEndHook, coroRecoverAliasEndSignature(), llssa.InC,
+	)
+	return func(done llssa.Builder) {
+		if done == nil || done.Func != p.fn {
+			panic("coroutine recover-alias scope ended outside its physical body")
+		}
+		done.Call(end.Expr, recovery.task, previous)
+	}
+}
+
+// beginCoroTransparentRecoverAliasScope transfers direct-recover permission
+// from the active wrapper activation to one exact target token. The caller has
+// already consumed the source instruction's frozen recoverAlias fact; this
+// helper owns only the stackless runtime scope and may therefore be used once
+// in each mutually exclusive dispatch branch.
+func (p *context) beginCoroTransparentRecoverAliasScope(
+	b llssa.Builder, token llssa.Expr,
+) func(llssa.Builder) {
+	recovery, ok := p.activeCoroRecoveryEmission()
+	if !ok || token.IsNil() {
+		panic("transparent coroutine recover alias requires an active handle and target token")
+	}
+	return p.beginCoroRecoverAliasScope(
+		b, recovery.handle, token, p.prog.BoolVal(true),
+	)
+}
+
+func (p *context) callCoroTransparentRecoverAlias(
+	b llssa.Builder, token llssa.Expr, call func() llssa.Expr,
+) llssa.Expr {
+	if call == nil {
+		panic("transparent coroutine recover alias requires a call")
+	}
+	end := p.beginCoroTransparentRecoverAliasScope(b, token)
+	result := call()
+	end(b)
+	return result
+}
+
+func coroRecoverAliasEndSignature() *types.Signature {
+	const noPos = 0
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(noPos, nil, "g", pointer),
+		types.NewParam(noPos, nil, "previous", pointer),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }

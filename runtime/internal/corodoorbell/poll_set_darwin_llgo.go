@@ -5,7 +5,7 @@ package corodoorbell
 import (
 	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 // Darwin's nfds_t is unsigned int, unlike Linux's target-word-sized type.

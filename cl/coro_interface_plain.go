@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"go/types"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -148,6 +148,16 @@ func analyzeCoroClosedInterfacePlainPlan(
 	// no invoke or descriptor capability: the scan below still rejects any live
 	// first-class value or non-interface dynamic consumer of the same method.
 	if err := freezeCoroDormantInterfaceDispatchTargets(plan, universe, result); err != nil {
+		return nil, err
+	}
+	// ABI type discovery is deliberately demand-independent: a dormant body can
+	// expose the exact Method.Tfn_ values that it would put in a type descriptor,
+	// and function-value flow consequently selects Dispatch before graph demand
+	// removes that body. If the same receiver method is independently live only
+	// through static calls, no descriptor exists at code generation time. Freeze
+	// that exact dormant cause just like an EmitNone interface invoke; the emitted
+	// consumer scan below still rejects any live first-class or dynamic use.
+	if err := freezeCoroDormantManagedMethodValueTargets(plan, universe.CoroPlanningMetadata(), result); err != nil {
 		return nil, err
 	}
 	firstClassUse := make(map[coro.FunctionID]string)
@@ -317,6 +327,55 @@ func analyzeCoroClosedInterfacePlainPlan(
 		}
 	}
 	return result, nil
+}
+
+func freezeCoroDormantManagedMethodValueTargets(
+	plan *coro.SSAPlan,
+	metadata CoroPlanningMetadataView,
+	result *coroClosedInterfacePlainPlan,
+) error {
+	if plan == nil || result == nil {
+		return fmt.Errorf("dormant managed method values require an exact plan, emission universe, and receiver plan")
+	}
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission != coro.EmitNone {
+			continue
+		}
+		references, err := metadata.ManagedValueReferences(owner.Function)
+		if err != nil {
+			return err
+		}
+		for _, target := range references {
+			if target == nil || target.Signature == nil || target.Signature.Recv() == nil {
+				continue
+			}
+			targetPlan, found := plan.FunctionPlan(target)
+			if !found || targetPlan.ID == "" {
+				return fmt.Errorf("dormant managed method target %q has no exact function plan", target.Name())
+			}
+			// A target which is itself dead has no entry to validate. It remains in
+			// ProgramIR/digest metadata so later demand changes are reproducible, but
+			// cannot authorize a physical receiver ABI in this compilation.
+			if targetPlan.Emission == coro.EmitNone {
+				continue
+			}
+			if targetPlan.External != coro.Defined || targetPlan.FuncRep != coro.Dispatch ||
+				len(target.Blocks) == 0 || target.Parent() != nil || len(target.FreeVars) != 0 {
+				return fmt.Errorf(
+					"dormant managed method target %q is not one exact emitted receiver-only Dispatch body",
+					targetPlan.ID,
+				)
+			}
+			if previous := result.targets[targetPlan.ID]; previous != nil && previous != target {
+				return fmt.Errorf(
+					"dormant managed method target %q resolves to both %q and %q",
+					targetPlan.ID, previous.Name(), target.Name(),
+				)
+			}
+			result.targets[targetPlan.ID] = target
+		}
+	}
+	return nil
 }
 
 func freezeCoroDormantInterfaceDispatchTargets(

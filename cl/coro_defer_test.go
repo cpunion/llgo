@@ -24,9 +24,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -175,6 +175,9 @@ func Root() {
 	defer prog.Dispose()
 
 	reachable := coroPhysicalConstantReachableBlocks(root)
+	if root.Recover == nil || !reachable[root.Recover] {
+		t.Fatal("implicit Recover continuation is absent from semantic reachability")
+	}
 	allDefers, reachableDefers := 0, 0
 	for _, block := range root.Blocks {
 		for _, instruction := range block.Instrs {
@@ -272,7 +275,7 @@ func TestCoroCapturedStaticCleanupIRNativeAndWasm32(t *testing.T) {
 		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			prog, pkg, plan, root, closure, target := compileCoroCapturedStaticCleanupFixture(t, test.target)
+			prog, pkg, plan, root, closure, target, universe := compileCoroCapturedStaticCleanupFixture(t, test.target)
 			defer prog.Dispose()
 			module := pkg.Module()
 			defer module.Dispose()
@@ -286,12 +289,13 @@ func TestCoroCapturedStaticCleanupIRNativeAndWasm32(t *testing.T) {
 			if !targetOK || targetPlan.Emission != coro.EmitCoroutine || targetPlan.FuncRep != coro.DirectCoro {
 				t.Fatalf("captured cleanup target plan = %+v, present=%t", targetPlan, targetOK)
 			}
-			cleanup, err := prepareCoroStaticCleanupPlan(root, plan, nil, "", true)
+			cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].closure != closure ||
-				cleanup.sites[0].target != target || cleanup.sites[0].kind != coroStaticCleanupCoroutine {
+				cleanup.sites[0].closureEnvironment == nil || cleanup.sites[0].target != target ||
+				cleanup.sites[0].kind != coroStaticCleanupCoroutine {
 				t.Fatalf("captured static cleanup plan = %+v", cleanup)
 			}
 
@@ -313,6 +317,29 @@ func TestCoroCapturedStaticCleanupIRNativeAndWasm32(t *testing.T) {
 	}
 }
 
+func TestCoroCapturedStaticCleanupZeroSizedArgumentUsesFrameProof(t *testing.T) {
+	const source = `package foo
+type marker struct{}
+var Sink uint32
+
+func Root(value uint32) {
+	defer func(marker, uint32) { Sink = value }(marker{}, value)
+}
+`
+	prog, pkg, _, _, _, _, _ := compileCoroCapturedStaticCleanupFixtureSource(t, nil, source)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	physical := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	if strings.Contains(physical, "AssertNilDeref") {
+		t.Fatalf("compiler-owned zero-sized cleanup slot retained a nil-deref helper:\n%s", physical)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify zero-sized cleanup slot: %v\n%s", err, module.String())
+	}
+}
+
 func TestCoroEscapingCapturedStaticCleanupRetainsDirectDeferIRNativeAndWasm32(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
@@ -323,7 +350,7 @@ func TestCoroEscapingCapturedStaticCleanupRetainsDirectDeferIRNativeAndWasm32(t 
 		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			prog, pkg, plan, root, closure, target := compileCoroCapturedStaticCleanupFixtureSource(
+			prog, pkg, plan, root, closure, target, universe := compileCoroCapturedStaticCleanupFixtureSource(
 				t, test.target, coroEscapingCapturedStaticCleanupIRFixture,
 			)
 			defer prog.Dispose()
@@ -357,12 +384,13 @@ func TestCoroEscapingCapturedStaticCleanupRetainsDirectDeferIRNativeAndWasm32(t 
 				callPlan.Targets[0] != targetPlan.ID {
 				t.Fatalf("escaping cleanup defer call plan = %+v, present=%t", callPlan, callOK)
 			}
-			cleanup, err := prepareCoroStaticCleanupPlan(root, plan, nil, "", true)
+			cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if cleanup == nil || len(cleanup.sites) != 1 ||
 				cleanup.sites[0].closure != closure ||
+				cleanup.sites[0].closureEnvironment == nil ||
 				cleanup.sites[0].kind != coroStaticCleanupCoroutine {
 				t.Fatalf("escaping captured cleanup plan = %+v", cleanup)
 			}
@@ -1083,7 +1111,10 @@ func compileCoroStaticCleanupIRFixture(
 func compileCoroCapturedStaticCleanupFixture(
 	t *testing.T,
 	targetMachine *llssa.Target,
-) (llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.MakeClosure, *ssa.Function) {
+) (
+	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function,
+	*ssa.MakeClosure, *ssa.Function, *EmissionUniverse,
+) {
 	return compileCoroCapturedStaticCleanupFixtureSource(
 		t, targetMachine, coroCapturedStaticCleanupIRFixture,
 	)
@@ -1093,7 +1124,10 @@ func compileCoroCapturedStaticCleanupFixtureSource(
 	t *testing.T,
 	targetMachine *llssa.Target,
 	source string,
-) (llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.MakeClosure, *ssa.Function) {
+) (
+	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function,
+	*ssa.MakeClosure, *ssa.Function, *EmissionUniverse,
+) {
 	t.Helper()
 	testProgram := newEmissionTestProgram()
 	testProgram.ssa.CreatePackage(types.Unsafe, nil, nil, true)
@@ -1186,7 +1220,7 @@ func AllocZ(size uintptr) unsafe.Pointer {
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	return prog, pkg, plan, root, closure, cleanupTarget
+	return prog, pkg, plan, root, closure, cleanupTarget, universe
 }
 
 func compileCoroDynamicCleanupFixture(
@@ -1328,6 +1362,94 @@ func Root(guard *Guard) { defer guard.release() }
 	}
 }
 
+func TestCoroStaticCleanupDirectPlainOccurrenceAcceptsDispatchValueTarget(t *testing.T) {
+	const source = `package foo
+var Sink func()
+func cleanup() {}
+func Root() { Sink = cleanup; defer cleanup() }
+`
+	prog, universe, plan, root, target := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+	targetPlan, planned := plan.FunctionPlan(target)
+	if !planned || targetPlan.Emission != coro.EmitPlain || targetPlan.FuncRep != coro.Dispatch {
+		t.Fatalf("cleanup target plan = %+v, present=%t; want plain Dispatch value target", targetPlan, planned)
+	}
+	var deferPlan coro.SSACallPlan
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if deferred, ok := instruction.(*ssa.Defer); ok {
+				deferPlan, _ = plan.CallPlan(deferred)
+			}
+		}
+	}
+	if deferPlan.Rep != coro.DirectPlain {
+		t.Fatalf("static cleanup occurrence representation = %s, want direct-plain", deferPlan.Rep)
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].target != target ||
+		cleanup.sites[0].kind != coroStaticCleanupPlain {
+		t.Fatalf("static Dispatch-valued cleanup plan = %+v", cleanup)
+	}
+}
+
+func TestCoroStaticCleanupConsumesWholeProgramNoUnwindCallClosure(t *testing.T) {
+	const source = `package foo
+func leaf() {}
+func cleanup() { leaf() }
+func Root() { defer cleanup() }
+`
+	prog, universe, plan, root, target := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+	targetPlan, planned := plan.FunctionPlan(target)
+	if !planned || targetPlan.Exec.Contains(coro.MayUnwind) {
+		t.Fatalf("cleanup target plan = %+v, present=%t; want inferred whole-program no-unwind proof", targetPlan, planned)
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].target != target ||
+		cleanup.sites[0].kind != coroStaticCleanupPlain {
+		t.Fatalf("static cleanup call-closure plan = %+v", cleanup)
+	}
+}
+
+func TestCoroStaticCleanupConsumesDynamicPlainNoUnwindDescriptor(t *testing.T) {
+	const source = `package foo
+func Root(value uint32, first bool) {
+	left := func() { _ = value }
+	right := func() { _ = value + 1 }
+	selected := left
+	if !first { selected = right }
+	defer selected()
+}
+`
+	prog, universe, plan, root, _ := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 ||
+		cleanup.sites[0].kind != coroStaticCleanupDispatch ||
+		cleanup.sites[0].callPlan.Rep != coro.Dispatch {
+		t.Fatalf("dynamic plain cleanup descriptor plan = %+v", cleanup)
+	}
+	for _, targetID := range cleanup.sites[0].callPlan.Targets {
+		target, found := plan.Function(targetID)
+		if !found {
+			t.Fatalf("dynamic plain cleanup target %q is absent", targetID)
+		}
+		targetPlan, found := plan.FunctionPlan(target)
+		if !found || targetPlan.Emission != coro.EmitPlain || targetPlan.Exec.Contains(coro.MayUnwind) {
+			t.Fatalf("dynamic plain cleanup target %q plan = %+v, present=%t", targetID, targetPlan, found)
+		}
+	}
+}
+
 func TestCoroStaticCleanupPlainTargetQueryRejectsOtherConsumers(t *testing.T) {
 	const source = `package foo
 func cleanup() {}
@@ -1366,20 +1488,6 @@ func Root(value uint32) { defer func() { _ = value }() }
 `,
 			explicit: true,
 			want:     "unsupported value representation direct-plain",
-		},
-		{
-			name: "dynamic plain closure without no-unwind proof",
-			source: `package foo
-func Root(value uint32, first bool) {
-	left := func() { _ = value }
-	right := func() { _ = value + 1 }
-	selected := left
-	if !first { selected = right }
-	defer selected()
-}
-`,
-			explicit: true,
-			want:     "no-unwind proof",
 		},
 		{
 			name: "loop registration without frozen dynamic helpers",

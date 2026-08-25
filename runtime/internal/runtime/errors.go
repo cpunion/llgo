@@ -1,13 +1,13 @@
 // Copyright 2014 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Use of this source code is governed by a BSD-style license.
+// See LICENSES/Go-BSD-3-Clause.txt at this module root for license terms.
 
 package runtime
 
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
+	"github.com/xgo-dev/llgo/runtime/abi"
 )
 
 // A boundsError represents an indexing or slicing operation gone wrong.
@@ -96,12 +96,6 @@ func boundsAbove(x int64, signed bool, y int64) bool {
 	return uint64(x) > uint64(y)
 }
 
-func CheckIndexRange(b bool, x int64, signed bool, y int) {
-	if b {
-		panicBounds(x, signed, y, boundsIndex)
-	}
-}
-
 func appendIntStr(b []byte, v int64, signed bool) []byte {
 	if signed && v < 0 {
 		b = append(b, '-')
@@ -164,36 +158,19 @@ type TypeAssertionError struct {
 
 func (*TypeAssertionError) RuntimeError() {}
 
-func PanicTypeAssert(concrete *_type, asserted string, missingMethod string) {
-	if concrete == nil {
-		panic(errorString("interface conversion: interface is nil, not " + asserted))
-	}
-	if missingMethod != "" {
-		panic(errorString("interface conversion: " + concrete.String() + " is not " + asserted + ": missing method " + missingMethod))
-	}
-	cs := concrete.String()
-	msg := "interface conversion: interface is " + cs + ", not " + asserted
-	if sameTypeAssertName(concrete, cs, asserted) {
-		msg += " (types from different scopes)"
-	}
-	panic(errorString(msg))
-}
-
-func sameTypeAssertName(concrete *_type, concreteString, asserted string) bool {
-	if concreteString == asserted {
-		return true
-	}
-	pkg := pkgpath(concrete)
-	return pkg != "" && hasPrefix(asserted, pkg+".") && typeNameSuffix(concreteString) == typeNameSuffix(asserted)
-}
-
-func typeNameSuffix(name string) string {
-	for i := len(name) - 1; i >= 0; i-- {
-		if name[i] == '.' {
-			return name[i+1:]
+func PanicTypeAssert(source, concrete, asserted *_type) {
+	missingMethod := ""
+	if concrete != nil {
+		if missing, _ := interfaceImplementation(asserted, concrete); missing != nil {
+			missingMethod = missing.Name()
 		}
 	}
-	return name
+	panic(&TypeAssertionError{
+		_interface:    source,
+		concrete:      concrete,
+		asserted:      asserted,
+		missingMethod: missingMethod,
+	})
 }
 
 func (e *TypeAssertionError) Error() string {

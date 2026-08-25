@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // The fleet ingress retains its route lease across exact source publication,
 // executor request, and physical doorbell delivery. No descriptor callback

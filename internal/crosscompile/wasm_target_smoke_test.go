@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/clang"
-	"github.com/goplus/llgo/internal/lto"
-	"github.com/goplus/llgo/internal/optlevel"
+	"github.com/xgo-dev/llgo/internal/clang"
+	"github.com/xgo-dev/llgo/internal/lto"
+	"github.com/xgo-dev/llgo/internal/optlevel"
 )
 
 // TestFreestandingWasmTargetToolchainSmoke is an opt-in integration test. It

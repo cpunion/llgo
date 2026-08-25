@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"go/types"
 
-	llssa "github.com/goplus/llgo/ssa"
-	llabi "github.com/goplus/llgo/ssa/abi"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	llabi "github.com/xgo-dev/llgo/ssa/abi"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/types/typeutil"
 )
@@ -261,6 +261,7 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 	}
 	return walkEmissionABITypeDemandEx(root, ctx.patchType, physicalMethodSignature, func(typ types.Type) error {
 		var references []*ssa.Function
+		var managedValues []*ssa.Function
 		var synchronous []*ssa.Function
 		if u.prog != nil {
 			for _, helper := range u.prog.ABITypeRuntimeFunctions(typ) {
@@ -303,8 +304,13 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 				methods[index] = method
 			}
 			references = append(references, methods...)
+			managedValues = append(managedValues, methods...)
 		}
 		if err := u.recordABIMethodReferences(fn, references); err != nil {
+			return err
+		}
+		if err := (coroProgramIRBuilder{canonical: emissionCanonicalIndex{universe: u}}).
+			recordManagedValueReferences(fn, managedValues); err != nil {
 			return err
 		}
 		return u.recordABISyncReferences(fn, synchronous)
@@ -575,7 +581,7 @@ func (u *EmissionUniverse) functionABITypeDemands(fn *ssa.Function, owner *prepa
 				}
 				closureCtx := exactFunctionContext(closure)
 				closureSig := closureCtx.patchType(closure.Signature).(*types.Signature)
-				closureSig = llssa.FuncAddCtx(makeClosureCtx(closureCtx.goTyps, closure.FreeVars), closureSig)
+				closureSig = llssa.FuncAddCtx(makeClosureCtx(closureCtx.goTyps, closure.FreeVars, closureCtx.patchType), closureSig)
 				if u.prog != nil {
 					closureSig = u.prog.PhysicalFuncDecl(closureSig, llssa.InGo)
 				}

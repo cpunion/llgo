@@ -25,7 +25,7 @@ import (
 	"go/types"
 	"sort"
 
-	"github.com/goplus/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -112,6 +112,17 @@ func directIfaceType(t types.Type) bool {
 	return false
 }
 
+// staticPtrToThis reports whether *T must have a statically generated type
+// descriptor. Runtime reflection can synthesize descriptors for methodless
+// pointer types, but it cannot synthesize their method metadata.
+func staticPtrToThis(t types.Type) (types.Type, bool) {
+	if _, ok := types.Unalias(t).(*types.Pointer); ok {
+		return nil, false
+	}
+	ptr := types.NewPointer(t)
+	return ptr, types.NewMethodSet(ptr).Len() != 0
+}
+
 func (b Builder) abiCommonFields(t types.Type, name string, hasUncommon bool, global llvm.Value) (fields []llvm.Value) {
 	prog := b.Prog
 	ab := prog.abi
@@ -162,10 +173,11 @@ func (b Builder) abiCommonFields(t types.Type, name string, hasUncommon bool, gl
 	// Str_       string
 	fields = append(fields, b.Str(ab.Str(t)).impl)
 	// PtrToThis_ *Type
-	if _, ok := t.(*types.Pointer); ok {
+	ptr, static := staticPtrToThis(t)
+	if !static {
 		fields = append(fields, prog.Nil(prog.AbiTypePtr()).impl)
 	} else {
-		fields = append(fields, b.abiType(types.NewPointer(t)).impl)
+		fields = append(fields, b.abiType(ptr).impl)
 	}
 	return
 }
@@ -387,13 +399,10 @@ func (b Builder) recordTypeChildren(parentName string, t types.Type) {
 
 func (b Builder) directTypeChildren(t types.Type) []types.Type {
 	children := b.structuralTypeChildren(t)
-	underlying := types.Unalias(t).Underlying()
-	// PtrToThis lets reflection derive *T from an addressable T. Interface
-	// descriptors intentionally stay out of this type-child relation.
-	if _, ok := underlying.(*types.Pointer); !ok {
-		if _, ok := underlying.(*types.Interface); !ok {
-			children = append(children, types.NewPointer(t))
-		}
+	// Runtime reflection can lazily derive methodless *T descriptors. Keep the
+	// type-child edge only when the static descriptor carries method metadata.
+	if ptr, static := staticPtrToThis(t); static {
+		children = append(children, ptr)
 	}
 	return children
 }
@@ -484,6 +493,21 @@ func (b Builder) abiUncommonMethodSet(t types.Type) (mset *types.MethodSet, ok b
 			if prog.compileMethods != nil {
 				prog.compileMethods(b.Pkg, t)
 			}
+			return mset, true
+		}
+	}
+	return
+}
+
+func abiUncommonMethodSetForDeclaration(t types.Type) (mset *types.MethodSet, ok bool) {
+	switch t := types.Unalias(t).(type) {
+	case *types.Named:
+		if _, isInterface := t.Underlying().(*types.Interface); isInterface {
+			return &types.MethodSet{}, true
+		}
+		return types.NewMethodSet(t), true
+	case *types.Struct, *types.Pointer:
+		if mset := types.NewMethodSet(t); mset.Len() != 0 {
 			return mset, true
 		}
 	}
@@ -689,7 +713,9 @@ func (b Builder) abiMethodFunc(anonymous bool, mPkg *types.Package, method *type
 }
 
 func (b Builder) abiMethodName(anonymous bool, mPkg *types.Package, method *types.Func, mSig *types.Signature) string {
-	mName := method.Name()
+	// Promoted unexported methods retain their declaring-package identity even
+	// when this wrapper is emitted for a receiver in another package.
+	mName := MethodSymbolName(mPkg, method, method.Name())
 	var fullName string
 	if anonymous {
 		fullName = b.Pkg.Path() + "." + types.TypeString(mSig.Recv().Type(), abi.PathOf) + "." + mName
@@ -779,6 +805,65 @@ func (b Builder) abiType(t types.Type) Expr {
 		b.recordAbiTypeFakeUses(g.impl)
 	}
 	return ret
+}
+
+// AbiTypes snapshots the runtime type descriptors materialized by this
+// Program without retaining any LLVM-owned values.
+func (p Program) AbiTypes() []AbiTypeInfo {
+	if len(p.abiSymbol) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(p.abiSymbol))
+	for name := range p.abiSymbol {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	ret := make([]AbiTypeInfo, 0, len(names))
+	for _, name := range names {
+		sym := p.abiSymbol[name]
+		ret = append(ret, AbiTypeInfo{Name: name, Raw: sym.Raw})
+	}
+	return ret
+}
+
+// RegisterAbiTypes declares runtime type descriptors owned by other Programs.
+// It records only Go type identity and target-local LLVM types; descriptor
+// definitions remain in the package modules that materialized them.
+func (p Package) RegisterAbiTypes(infos []AbiTypeInfo) {
+	builder := &aBuilder{Prog: p.Prog, Pkg: p}
+	for _, info := range infos {
+		if info.Raw == nil {
+			continue
+		}
+		if _, ok := p.Prog.abiSymbol[info.Name]; ok {
+			continue
+		}
+
+		t := info.Raw
+		mset, hasUncommon := abiUncommonMethodSetForDeclaration(t)
+		var methods []*types.Selection
+		if hasUncommon {
+			methods = builder.abiInterfaceMethods(mset)
+		}
+		rt := p.Prog.rtNamed(p.Prog.abi.RuntimeName(t))
+		var typ types.Type = rt
+		if hasUncommon {
+			ut := p.Prog.rtNamed("uncommonType")
+			mt := p.Prog.rtNamed("Method")
+			typ = types.NewStruct([]*types.Var{
+				types.NewVar(token.NoPos, nil, "T", rt),
+				types.NewVar(token.NoPos, nil, "U", ut),
+				types.NewVar(token.NoPos, nil, "M", types.NewArray(mt, int64(len(methods)))),
+			}, nil)
+		}
+		p.Prog.abiSymbol[info.Name] = &AbiSymbol{
+			Name:    info.Name,
+			PkgPath: p.Path(),
+			Raw:     t,
+			Typ:     p.Prog.Type(types.NewPointer(typ), InGo),
+			MSet:    mset,
+		}
+	}
 }
 
 func (p Package) getAbiTypesFor(name string, filter func(sym *AbiSymbol) bool) Expr {

@@ -37,10 +37,10 @@ type gcStats struct {
 	GCSys      uint64
 }
 
-//go:linkname gcCollect github.com/goplus/llgo/runtime/internal/runtime/tinygogc.GC
+//go:linkname gcCollect github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.GC
 func gcCollect() uintptr
 
-//go:linkname readGCStats github.com/goplus/llgo/runtime/internal/runtime/tinygogc.ReadGCStats
+//go:linkname readGCStats github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.ReadGCStats
 func readGCStats() gcStats
 
 func fail(msg string) bool {
@@ -976,6 +976,11 @@ func testNestedStructPointers() bool {
 	}
 
 	globalNested = nil
+	// This collector scans stack words conservatively. On Xtensa, a dead
+	// register-window spill can keep the deepest nested pointer alive for one
+	// cycle. The first collection also overwrites that spill, so verify complete
+	// reclamation after a settling cycle instead of requiring precise-GC behavior.
+	collectAndPrint("nested-drop-first")
 	_, afterDrop := collectAndPrint("nested-drop")
 	// 3 nested + 3 node = 6 objects (at minimum)
 	if afterDrop.Frees < after.Frees+6 {

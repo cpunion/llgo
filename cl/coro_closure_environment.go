@@ -22,7 +22,7 @@ import (
 	"go/token"
 	"go/types"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -114,7 +114,7 @@ func (p *coroClosureEnvironmentProjection) freeze(
 		if owner.pkgTypes == nil {
 			return fmt.Errorf("coroutine physical ABI: captured function %q has no emission owner", fn.Name())
 		}
-		fact.environment = makeClosureCtx(owner.pkgTypes, fn.FreeVars)
+		fact.environment = makeClosureCtx(owner.pkgTypes, fn.FreeVars, effectiveType)
 	case explicit:
 		fact.environment = types.NewParam(token.NoPos, nil, "$env", types.Typ[types.UnsafePointer])
 	}

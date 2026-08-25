@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/atomiccache"
+	"github.com/xgo-dev/llgo/runtime/internal/atomiccache"
 )
 
 type weakHandle = atomiccache.WeakHandle

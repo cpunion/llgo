@@ -34,7 +34,7 @@ func main() {
 
 // Package initialization is part of the same managed startup chain.
 // CHECK-LABEL: define ptr @"main.init$coro"(
-// CHECK: call ptr @"sync.init$coro"(
+// CHECK: call void @"sync.init$outcome"(
 
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @"main.f$coro"(

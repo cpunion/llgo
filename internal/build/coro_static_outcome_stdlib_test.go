@@ -27,7 +27,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -60,7 +60,7 @@ func main() { value.Add(1) }
 		if input.EmissionUniverse != nil && input.localBodyFacts != nil {
 			for _, fn := range input.EmissionUniverse.Functions() {
 				if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Name() != "Add" ||
-					!strings.HasSuffix(fn.Pkg.Pkg.Path(), "/sync/atomic") ||
+					fn.Pkg.Pkg.Path() != "sync/atomic" ||
 					!strings.Contains(fn.String(), "Uint64") {
 					continue
 				}
@@ -104,7 +104,7 @@ func main() { value.Add(1) }
 				}
 			}
 			if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil ||
-				!strings.HasSuffix(fn.Pkg.Pkg.Path(), "/sync/atomic") || fn.Name() != "Add" ||
+				fn.Pkg.Pkg.Path() != "sync/atomic" || fn.Name() != "Add" ||
 				!strings.Contains(fn.String(), "Uint64") {
 				continue
 			}
@@ -140,7 +140,7 @@ func main() { value.Add(1) }
 						}
 					}
 					if !relevant && fn.Pkg != nil && fn.Pkg.Pkg != nil &&
-						strings.HasSuffix(fn.Pkg.Pkg.Path(), "/sync/atomic") && fn.Name() == "Add" {
+						fn.Pkg.Pkg.Path() == "sync/atomic" && fn.Name() == "Add" {
 						relevant = true
 					}
 					if !relevant {
@@ -193,7 +193,7 @@ func main() {
 		"(*sync.WaitGroup).Add",
 		"(*sync.WaitGroup).Done",
 		"runtime.semaRelease",
-		"github.com/goplus/llgo/runtime/internal/runtime.coroKeyedPostOneV2",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.coroKeyedPostOneV2",
 	}
 	seen := make(map[string]coro.FunctionPlan)
 	frozenFacts := make(map[string]coro.SSAFunctionBodyFacts)
@@ -280,7 +280,7 @@ func main() {
 				}
 			}
 		}
-		for _, rootName := range []string{"(*sync.WaitGroup).Add", "github.com/goplus/llgo/runtime/internal/lib/runtime.sync_fatal", "github.com/goplus/llgo/runtime/internal/lib/runtime.sync_runtime_Semrelease"} {
+		for _, rootName := range []string{"(*sync.WaitGroup).Add", "github.com/xgo-dev/llgo/runtime/internal/lib/runtime.sync_fatal", "github.com/xgo-dev/llgo/runtime/internal/lib/runtime.sync_runtime_Semrelease"} {
 			var root *ssa.Function
 			for _, function := range plan.Functions() {
 				if function.Function != nil && function.Function.String() == rootName {
@@ -325,7 +325,7 @@ func main() {
 		}
 		for _, function := range plan.Functions() {
 			fn := function.Function
-			if fn == nil || fn.String() != "github.com/goplus/llgo/runtime/internal/runtime.StringCat" {
+			if fn == nil || fn.String() != "github.com/xgo-dev/llgo/runtime/internal/runtime.StringCat" {
 				continue
 			}
 			t.Logf("StringCat owner plan=%+v facts=%+v", function.Plan, allFacts[fn])

@@ -536,6 +536,23 @@ func TestAnalyzeExplicitStatusColorsOnlyAsyncMayUnwindBodies(t *testing.T) {
 	}
 }
 
+func TestAnalyzeExplicitStatusColorsDispatchMayUnwindBodies(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{
+		ID: "callback", Demand: SyncDemand, Exec: MayUnwind, NeedsDispatch: true,
+	})
+
+	plan, err := g.AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: OutcomeExplicitStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback := mustLookup(t, plan, "callback")
+	if callback.ManagedDemand != BothDemand || callback.Effect != OutcomeStructured ||
+		callback.Emission != EmitCoroutine || callback.Primary != PrimaryCoroutine || callback.FuncRep != Dispatch {
+		t.Fatalf("dispatchable may-unwind callback = %+v; want coroutine-only managed capability", callback)
+	}
+}
+
 func TestAnalyzeExplicitStatusColorsDirectAndUnwindChildren(t *testing.T) {
 	g := NewGraph()
 	for _, spec := range []FunctionSpec{

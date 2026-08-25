@@ -19,7 +19,7 @@ package cl
 import (
 	"fmt"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 )
 
 // CoroControlOperation is the target-independent semantic identity of an

@@ -5,8 +5,8 @@ package debug
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/abi"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 const (
@@ -21,7 +21,7 @@ type Info struct {
 }
 
 //go:linkname Address C.llgo_address
-func Address() unsafe.Pointer
+func Address() uintptr
 
 //llgo:coro noblock
 //go:linkname Addrinfo C.llgo_addrinfo

@@ -1,8 +1,8 @@
 //go:build !nogc && !baremetal && !llgo_wasm_gc
 
 // Copyright 2009 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Use of this source code is governed by a BSD-style license.
+// See LICENSES/Go-BSD-3-Clause.txt at this module root for license terms.
 
 // Garbage collector: finalizers and block profiling.
 
@@ -11,10 +11,11 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
-	"github.com/goplus/llgo/runtime/internal/clite/bdwgc"
-	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
-	"github.com/goplus/llgo/runtime/internal/ffi"
+	"github.com/xgo-dev/llgo/runtime/abi"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
+	"github.com/xgo-dev/llgo/runtime/internal/ffi"
+	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 type finalizerClosure struct {
@@ -22,16 +23,33 @@ type finalizerClosure struct {
 	env        unsafe.Pointer
 }
 
+type finalizerInterfaceArg struct {
+	typeOrItab unsafe.Pointer
+	data       unsafe.Pointer
+}
+
+const (
+	finalizerStopped        int32 = 1
+	finalizerInterfaceState       = 2
+)
+
 type finalizerEntry struct {
-	fn      any
-	cleanup func()
-	obj     unsafe.Pointer
+	fn       any
+	cleanup  func()
+	plainCIF *ffi.Signature
+	coroCIF  *ffi.Signature
+
+	resultSize  uintptr
+	resultAlign uintptr
+	retSize     uintptr
+	arg         unsafe.Pointer // object pointer or preallocated interface header
+
 	key     uintptr
 	tracked bool
 	next    unsafe.Pointer // *finalizerEntry; atomic producer/consumer link
 	prevFn  bdwgc.FinalizerFunc
 	prevCb  unsafe.Pointer
-	stop    int32
+	state   int32
 }
 
 // finalizerRegistryGate is a scheduler-aware managed-owner lock. Its holder
@@ -74,36 +92,11 @@ var finalizerState struct {
 	draining  uint32
 }
 
-var (
-	finalizerPlainCIF *ffi.Signature
-	finalizerCoroCIF  *ffi.Signature
-)
-
 func initFinalizerState() {
 	finalizerState.m = make(map[uintptr]*finalizerEntry)
 	stub := &finalizerState.queueStub
 	finalizerState.queueHead = unsafe.Pointer(stub)
 	finalizerState.queueTail = stub
-
-	var err error
-	finalizerPlainCIF, err = ffi.NewSignature(
-		ffi.TypeVoid,
-		ffi.TypePointer, // closure environment
-		ffi.TypePointer, // finalizer argument
-	)
-	if err != nil {
-		panic("runtime: cannot prepare plain finalizer signature")
-	}
-	finalizerCoroCIF, err = ffi.NewSignature(
-		ffi.TypePointer, // initially suspended child handle
-		ffi.TypePointer, // current G
-		ffi.TypePointer, // result slot
-		ffi.TypePointer, // closure environment
-		ffi.TypePointer, // finalizer argument
-	)
-	if err != nil {
-		panic("runtime: cannot prepare coroutine finalizer signature")
-	}
 }
 
 func init() {
@@ -127,7 +120,6 @@ func SetFinalizer(obj any, finalizer any) {
 	}
 
 	key := hideFinalizerPtr(objPtr)
-
 	finalizerFace := (*eface)(unsafe.Pointer(&finalizer))
 	var entry *finalizerEntry
 	if finalizerFace._type != nil {
@@ -135,15 +127,31 @@ func SetFinalizer(obj any, finalizer any) {
 		if ft == nil {
 			throw("runtime.SetFinalizer: second argument is " + finalizerFace._type.String() + ", not a function")
 		}
-		if len(ft.In) != 1 || ft.In[0] != objFace._type {
+		if ft.Variadic() {
+			throw("runtime.SetFinalizer: cannot pass " + objFace._type.String() + " to finalizer " + finalizerFace._type.String() + " because dotdotdot")
+		}
+		if len(ft.In) != 1 {
 			throw("runtime.SetFinalizer: cannot pass " + objFace._type.String() + " to finalizer " + finalizerFace._type.String())
 		}
-		entry = &finalizerEntry{fn: finalizer, key: key, tracked: true}
+		argFFIType, interfaceTypeOrItab, ok := prepareFinalizerArgument(objFace._type, ft.In[0])
+		if !ok {
+			throw("runtime.SetFinalizer: cannot pass " + objFace._type.String() + " to finalizer " + finalizerFace._type.String())
+		}
+		plainCIF, coroCIF, resultSize, resultAlign, retSize := newFinalizerDispatchSignatures(ft, argFFIType)
+		entry = &finalizerEntry{
+			fn: finalizer, plainCIF: plainCIF, coroCIF: coroCIF,
+			resultSize: resultSize, resultAlign: resultAlign, retSize: retSize,
+			key: key, tracked: true,
+		}
+		if interfaceTypeOrItab != nil {
+			entry.state = finalizerInterfaceState
+			entry.arg = unsafe.Pointer(&finalizerInterfaceArg{typeOrItab: interfaceTypeOrItab})
+		}
 	}
 
 	finalizerState.registry.Lock()
 	if old := finalizerState.m[key]; old != nil {
-		atomic.Store(&old.stop, 1)
+		atomic.Store(&old.state, finalizerStopped)
 		delete(finalizerState.m, key)
 		restoreFinalizer(objPtr, old)
 	}
@@ -175,8 +183,30 @@ func addCleanupPtr(ptr unsafe.Pointer, cleanup func()) (cancel func()) {
 	entry := &finalizerEntry{cleanup: cleanup}
 	registerFinalizerEntry(ptr, entry)
 	return func() {
-		atomic.Store(&entry.stop, 1)
+		atomic.Store(&entry.state, finalizerStopped)
 	}
+}
+
+func prepareFinalizerArgument(objType, argType *abi.Type) (*ffi.Type, unsafe.Pointer, bool) {
+	if argType == objType {
+		return ffi.TypePointer, nil, true
+	}
+	switch argType.Kind() {
+	case abi.Pointer:
+		if (argType.Uncommon() == nil || objType.Uncommon() == nil) && argType.Elem() == objType.Elem() {
+			return ffi.TypePointer, nil, true
+		}
+	case abi.Interface:
+		if llruntime.Implements(argType, objType) {
+			interfaceType := argType.InterfaceType()
+			typeOrItab := unsafe.Pointer(objType)
+			if len(interfaceType.Methods) != 0 {
+				typeOrItab = unsafe.Pointer(llruntime.NewItab(interfaceType, objType))
+			}
+			return ffi.TypeInterface, typeOrItab, true
+		}
+	}
+	return nil, nil, false
 }
 
 func ifacePointerData(e *eface) unsafe.Pointer {
@@ -187,35 +217,46 @@ func ifacePointerData(e *eface) unsafe.Pointer {
 }
 
 func finalizerFuncType(t *abi.Type) *abi.FuncType {
-	if t.IsClosure() {
-		st := t.StructType()
-		if st == nil || len(st.Fields) == 0 {
-			return nil
-		}
-		return st.Fields[0].Typ.FuncType()
+	if !t.IsClosure() {
+		return nil
 	}
-	return t.FuncType()
+	st := t.StructType()
+	if st == nil || len(st.Fields) == 0 {
+		return nil
+	}
+	return st.Fields[0].Typ.FuncType()
 }
 
-func callFinalizer(fn any, ptr unsafe.Pointer) {
-	face := (*eface)(unsafe.Pointer(&fn))
+func callFinalizer(entry *finalizerEntry, hasInterfaceArg bool) {
+	face := (*eface)(unsafe.Pointer(&entry.fn))
 	closure := (*finalizerClosure)(face.data)
 	ft := finalizerFuncType(face._type)
 	if closure == nil || closure.descriptor == nil || ft == nil {
 		throw("runtime: invalid finalizer function value")
 	}
-	arg := ptr
+	var ret unsafe.Pointer
+	if entry.retSize != 0 {
+		ret = llruntime.AllocU(entry.retSize)
+	}
+	arg := entry.arg
+	if !hasInterfaceArg {
+		ptr := entry.arg
+		arg = unsafe.Pointer(&ptr)
+	}
 	ffi.CallLLGo(
-		finalizerPlainCIF,
-		finalizerCoroCIF,
+		entry.plainCIF,
+		entry.coroCIF,
 		closure.descriptor,
 		closure.env,
 		unsafe.Pointer(ft),
-		nil,
-		0,
-		1,
-		unsafe.Pointer(&arg),
+		ret,
+		entry.resultSize,
+		entry.resultAlign,
+		arg,
 	)
+	KeepAlive(entry.fn)
+	KeepAlive(entry.plainCIF)
+	KeepAlive(entry.coroCIF)
 }
 
 // enqueueFinalizerEntry is the complete raw-callback publication path. It is
@@ -280,14 +321,19 @@ func setFinalizerCallback(ptr unsafe.Pointer, cb unsafe.Pointer) {
 	if prevFn != nil {
 		prevFn(ptr, prevCb)
 	}
-	if atomic.Load(&entry.stop) == 1 {
+	state := atomic.Load(&entry.state)
+	if state == finalizerStopped {
 		return
 	}
 
 	// Keep the object alive until runFinalizers invokes the Go finalizer or
 	// cleanup. Do not allocate, lock, or invoke arbitrary Go code here; BDWGC
 	// calls this while collecting.
-	entry.obj = ptr
+	if state == finalizerInterfaceState {
+		(*finalizerInterfaceArg)(entry.arg).data = ptr
+	} else {
+		entry.arg = ptr
+	}
 	enqueueFinalizerEntry(entry)
 }
 
@@ -330,14 +376,15 @@ func runFinalizers() {
 			finalizerState.registry.Unlock()
 		}
 
-		if atomic.Load(&entry.stop) != 1 {
+		state := atomic.Load(&entry.state)
+		if state != finalizerStopped {
 			if entry.cleanup != nil {
 				entry.cleanup()
 			} else {
-				callFinalizer(entry.fn, entry.obj)
+				callFinalizer(entry, state == finalizerInterfaceState)
 			}
 		}
-		entry.obj = nil
+		entry.arg = nil
 		entry.fn = nil
 		entry.cleanup = nil
 	}

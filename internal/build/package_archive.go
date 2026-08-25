@@ -21,7 +21,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 	gllvm "github.com/xgo-dev/llvm"
 )
 

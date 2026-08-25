@@ -21,8 +21,8 @@ package cl
 import (
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/meta"
-	"github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/meta"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -21,8 +21,13 @@ func TestApplyDeadcodeDropOverridesWritesStrongTypeOverride(t *testing.T) {
 			Goarch:    "amd64",
 		},
 	}
+	defer ctx.prog.Dispose()
 
-	srcPkg := ctx.prog.NewPackage("pkg", "pkg")
+	// Isolated package workers and the synthetic entry module deliberately use
+	// different LLVM contexts. Keep this test faithful to that production path.
+	srcProg := llssa.NewProgram(nil)
+	defer srcProg.Dispose()
+	srcPkg := srcProg.NewPackage("pkg", "pkg")
 	addMethodTypeGlobal(srcPkg.Module(), "_llgo_pkg.T")
 	pkgMeta := buildDeadcodeMeta(t)
 	defer pkgMeta.Close()
@@ -52,6 +57,9 @@ func TestApplyDeadcodeDropOverridesWritesStrongTypeOverride(t *testing.T) {
 	}
 	if strings.Contains(out, `ptr @"pkg.(*T).N"`) || strings.Contains(out, `ptr @pkg.T.N`) {
 		t.Fatalf("dead method slot still references N functions:\n%s", out)
+	}
+	if err := llvm.VerifyModule(entryPkg.LPkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("cross-context strong type override produced invalid entry module: %v\n%s", err, out)
 	}
 }
 
@@ -123,7 +131,7 @@ func addMethodTypeGlobal(mod llvm.Module, name string) {
 	ptrTy := llvm.PointerType(fnTy, 0)
 	stringTy := ctx.StructCreateNamed("runtime/internal/runtime.String")
 	stringTy.StructSetBody([]llvm.Type{llvm.PointerType(ctx.Int8Type(), 0), ctx.Int64Type()}, false)
-	methodTy := ctx.StructCreateNamed("github.com/goplus/llgo/runtime/abi.Method")
+	methodTy := ctx.StructCreateNamed("github.com/xgo-dev/llgo/runtime/abi.Method")
 	methodTy.StructSetBody([]llvm.Type{stringTy, ptrTy, ptrTy, ptrTy}, false)
 
 	mtyp := llvm.AddGlobal(mod, ptrTy, "mtyp")

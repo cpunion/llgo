@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // coroNativeMActivateDeferredReplacementV1 is the request-side half of a
 // demand-free native syscall handoff. It resolves only stable directory state;

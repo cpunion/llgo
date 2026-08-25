@@ -198,6 +198,19 @@ func (b Builder) CallCoroDispatchPlain(
 func (b Builder) CoroDispatchHasCoro(
 	fn Expr, opts CoroDispatchCallOptions,
 ) Expr {
+	hasCoro, _ := b.CoroDispatchHasCoroAndCodeEntry(fn, opts)
+	return hasCoro
+}
+
+// CoroDispatchHasCoroAndCodeEntry performs the same descriptor validation as
+// CoroDispatchHasCoro and also returns its compiler-injected physical code
+// identity. The code entry is metadata, never a callable entry: transparent
+// recover lowering uses it as the exact token expected by the selected plain
+// body's BindRecoverFrame operation, without reverse-mapping a descriptor
+// pointer at run time.
+func (b Builder) CoroDispatchHasCoroAndCodeEntry(
+	fn Expr, opts CoroDispatchCallOptions,
+) (Expr, Expr) {
 	call := b.prepareCoroDispatchCall(fn, nil, opts, 0)
 	hasCoro := llvm.CreateAnd(
 		b.impl, call.flags.impl,
@@ -209,7 +222,15 @@ func (b Builder) CoroDispatchHasCoro(
 			b.Prog.IntVal(0, b.Prog.Uint32()).impl,
 		),
 		Type: b.Prog.Bool(),
-	}
+	}, call.code
+}
+
+// CoroDispatchCodeEntry validates fn and returns the descriptor's physical
+// code identity. It is used only at a compiler-frozen plain dispatch site that
+// needs a transparent-recover token; calls continue through the typed plain or
+// coroutine entry and never through this value.
+func (b Builder) CoroDispatchCodeEntry(fn Expr, opts CoroDispatchCallOptions) Expr {
+	return b.prepareCoroDispatchCall(fn, nil, opts, 0).code
 }
 
 // CallCoroDispatchCoro validates a dynamic descriptor and invokes its typed
@@ -235,6 +256,7 @@ func (b Builder) CallCoroDispatchCoro(
 
 type coroDispatchPreparedCall struct {
 	entry     Expr
+	code      Expr
 	env       Expr
 	flags     Expr
 	signature *types.Signature
@@ -288,7 +310,7 @@ func (b Builder) prepareCoroDispatchCall(
 	} else {
 		descriptor = b.Load(descriptorPtr)
 	}
-	fields := make([]Expr, 8)
+	fields := make([]Expr, 9)
 	for i := range fields {
 		fields[i] = b.Field(descriptor, i)
 	}
@@ -296,6 +318,7 @@ func (b Builder) prepareCoroDispatchCall(
 		prepared := coroDispatchPreparedCall{
 			env:       env,
 			flags:     fields[1],
+			code:      fields[8],
 			signature: sig,
 		}
 		if capability == CoroDispatchFlagHasPlain {
@@ -355,6 +378,23 @@ func (b Builder) prepareCoroDispatchCall(
 		b.impl, llvm.IntNE, fields[5].impl, llvm.ConstNull(fields[5].impl.Type()),
 	)
 	addInvalid("coro.dispatch.coro.entry.mismatch", llvm.CreateXor(b.impl, coroFlag, coroEntry))
+	plainNoUnwind := llvm.CreateICmp(
+		b.impl, llvm.IntNE,
+		llvm.CreateAnd(b.impl, flags, b.Prog.IntVal(uint64(CoroDispatchFlagPlainNoUnwind), b.Prog.Uint32()).impl),
+		zeroFlags,
+	)
+	addInvalid(
+		"coro.dispatch.plain.no-unwind-without-plain",
+		llvm.CreateAnd(b.impl, plainNoUnwind, llvm.CreateNot(b.impl, plainFlag)),
+	)
+	addInvalid(
+		"coro.dispatch.plain-only.no-unwind-missing",
+		llvm.CreateAnd(
+			b.impl,
+			plainFlag,
+			llvm.CreateAnd(b.impl, llvm.CreateNot(b.impl, coroFlag), llvm.CreateNot(b.impl, plainNoUnwind)),
+		),
+	)
 	noCapture := llvm.CreateICmp(
 		b.impl, llvm.IntNE,
 		llvm.CreateAnd(b.impl, flags, b.Prog.IntVal(uint64(CoroDispatchFlagNoCapture), b.Prog.Uint32()).impl),
@@ -408,11 +448,16 @@ func (b Builder) prepareCoroDispatchCall(
 		"coro.dispatch.result.align.invalid", fields[7].impl,
 		b.Prog.IntVal(b.Prog.AlignOf(opts.Result), b.Prog.Uintptr()).impl,
 	)
+	addInvalid(
+		"coro.dispatch.code.nil",
+		llvm.CreateICmp(b.impl, llvm.IntEQ, fields[8].impl, llvm.ConstNull(fields[8].impl.Type())),
+	)
 	b.coroPlainDispatchTrapIf(invalid)
 
 	prepared := coroDispatchPreparedCall{
 		env:       env,
 		flags:     fields[1],
+		code:      fields[8],
 		signature: sig,
 	}
 	if capability == CoroDispatchFlagHasPlain {
@@ -545,6 +590,15 @@ func validateCoroDispatchContract(version, flags uint32) {
 	}
 	if flags&CoroDispatchCapabilityMaskV1 == 0 {
 		panic("ssa: coroutine dispatch flags require HasPlain or HasCoro")
+	}
+	hasPlain := flags&CoroDispatchFlagHasPlain != 0
+	hasCoro := flags&CoroDispatchFlagHasCoro != 0
+	plainNoUnwind := flags&CoroDispatchFlagPlainNoUnwind != 0
+	if plainNoUnwind && !hasPlain {
+		panic("ssa: coroutine dispatch PlainNoUnwind requires HasPlain")
+	}
+	if hasPlain && !hasCoro && !plainNoUnwind {
+		panic("ssa: coroutine dispatch plain-only capability requires PlainNoUnwind")
 	}
 }
 

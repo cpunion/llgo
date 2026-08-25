@@ -26,8 +26,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/crosscompile"
-	"github.com/goplus/llgo/internal/packages"
+	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/packages"
 	gllvm "github.com/xgo-dev/llvm"
 )
 
@@ -157,7 +157,7 @@ func TestNormalizeToArchiveFailsWithoutObjectFallback(t *testing.T) {
 			buffer: memoryBuf,
 		}},
 	}
-	_, err := finalizePackageBuild(ctx, &packageBuildTask{pkg: pkg}, false)
+	err := finalizePackageBuild(ctx, &packageBuildTask{pkg: pkg}, false)
 	if err == nil {
 		t.Fatal("finalizePackageBuild succeeded with a missing member")
 	}

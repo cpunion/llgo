@@ -24,9 +24,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -385,7 +385,7 @@ func TestCoroImplicitIndexAddrBoundsNativeAndWasm32(t *testing.T) {
 			if got := strings.Count(body, "call void @"+coroFaultPrepareHookV2); got != 1 {
 				t.Fatalf("SliceAt fault prepare calls = %d, want one:\n%s", got, body)
 			}
-			if strings.Contains(body, "CheckIndexRange") || strings.Contains(body, "AssertIndexRange") {
+			if strings.Contains(body, "PanicIndex") || strings.Contains(body, "AssertIndexRange") {
 				t.Fatalf("SliceAt retained a native-stack bounds helper:\n%s", body)
 			}
 			hook := strings.Index(body, "call void @"+coroFaultPrepareHookV2)

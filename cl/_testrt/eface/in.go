@@ -3,7 +3,7 @@ package main
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
+	"github.com/xgo-dev/llgo/runtime/abi"
 )
 
 func (t *T) Invoke() {
@@ -41,6 +41,7 @@ type eface struct {
 	data  unsafe.Pointer
 }
 
+// Every source value is boxed with its own descriptor and that exact eface is dumped.
 func main() {
 	dump(true)
 	dump(0)

@@ -16,7 +16,7 @@
 
 package cl
 
-import llssa "github.com/goplus/llgo/ssa"
+import llssa "github.com/xgo-dev/llgo/ssa"
 
 func prepareStacklessEmissionUniverse(
 	prog llssa.Program, patches Patches, inputs []EmissionPackage,

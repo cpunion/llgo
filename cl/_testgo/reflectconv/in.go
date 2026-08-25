@@ -13,30 +13,31 @@ import (
 
 // This is intentionally a broad reflect-conversion source fixture. Keep its
 // IR contract at the semantic boundaries: reflection stays on the managed
-// coroutine path, each child is awaited, and main preserves the source call
-// order. Register numbering and expanded reflect internals are not contracts.
+// coroutine path and each child is awaited. Runtime output preserves source
+// semantics; LLVM basic-block print order, register numbering, and expanded
+// reflect internals are not contracts.
 //
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.TestConvert$coro"(
-// CHECK: call ptr @"reflect.Value.CanConvert$coro"(
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
-// CHECK: call ptr @"reflect.Value.Convert$coro"(
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
-// CHECK: call ptr @"reflect.Value.Interface$coro"(
-// CHECK: call ptr @"reflect.Value.Set$coro"(
-// CHECK: call i8 @llvm.coro.suspend(
+// CHECK-DAG: call ptr @"reflect.Value.CanConvert$coro"(
+// CHECK-DAG: call i1 @__llgo_coro_await_prepare_inline_v4(
+// CHECK-DAG: call ptr @"reflect.Value.Convert$coro"(
+// CHECK-DAG: call i1 @__llgo_coro_await_prepare_inline_v4(
+// CHECK-DAG: call ptr @"reflect.{{Value.Interface|valueInterface}}$coro"(
+// CHECK-DAG: call ptr @"reflect.Value.Set$coro"(
+// CHECK-DAG: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define ptr @"main.TestConvertNaNs$coro"(
-// CHECK: call ptr @"reflect.Value.Convert$coro"(
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
+// CHECK-DAG: call ptr @"reflect.Value.Convert$coro"(
+// CHECK-DAG: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-LABEL: define ptr @"main.TestConvertPanic$coro"(
-// CHECK: call ptr @"reflect.Value.CanConvert$coro"(
-// CHECK: call ptr @"reflect.Value.Convert$coro"(
-// CHECK: call i8 @llvm.coro.suspend(
+// CHECK-DAG: call ptr @"reflect.Value.CanConvert$coro"(
+// CHECK-DAG: call ptr @"reflect.Value.Convert$coro"(
+// CHECK-DAG: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define ptr @"main.TestConvertSlice2Array$coro"(
-// CHECK: call ptr @"reflect.Value.Convert$coro"(
-// CHECK: call ptr @"reflect.Value.Set$coro"(
-// CHECK: call i8 @llvm.coro.suspend(
+// CHECK-DAG: call ptr @"reflect.Value.Convert$coro"(
+// CHECK-DAG: call ptr @"reflect.Value.Set$coro"(
+// CHECK-DAG: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @"main.TestConvert$coro"(
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(

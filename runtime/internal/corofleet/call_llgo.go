@@ -26,8 +26,8 @@ package corofleet
 import (
 	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/pthread"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
 )
 
 // OwnerCount returns the initial logical execution limit clamped to

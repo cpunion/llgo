@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"runtime"
 
-	dep "github.com/goplus/llgo/cl/_testgo/rewrite/dep"
+	dep "github.com/xgo-dev/llgo/cl/_testgo/rewrite/dep"
 )
 
 // Rewritten globals and runtime strings keep their ordinary data ABI, while
@@ -19,11 +19,11 @@ import (
 // CHECK-LABEL: define ptr @"main.init$coro"(
 // CHECK: call ptr @"fmt.init$coro"(
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
-// CHECK: call ptr @"github.com/goplus/llgo/cl/_testgo/rewrite/dep.init$coro"(
+// CHECK: call ptr @"github.com/xgo-dev/llgo/cl/_testgo/rewrite/dep.init$coro"(
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @"main.printLine$coro"(
-// CHECK: call ptr @"github.com/goplus/llgo/cl/_testgo/rewrite/dep.PrintVar$coro"(
+// CHECK: call ptr @"github.com/xgo-dev/llgo/cl/_testgo/rewrite/dep.PrintVar$coro"(
 // CHECK: call %"{{.*}}String" @runtime.GOROOT()
 // CHECK: call ptr @"main.printLine$coro"(
 // CHECK: call %"{{.*}}String" @runtime.Version()

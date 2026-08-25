@@ -10,8 +10,9 @@ func traceAdvance(stopTrace bool) {}
 //go:linkname traceClockNow runtime.traceClockNow
 func traceClockNow() uint64 { return 0 }
 
+//llgo:managedlink
 //go:linkname runtime_readTrace runtime/trace.runtime_readTrace
-func runtime_readTrace() []byte { return nil }
+func runtime_readTrace() []byte { return ReadTrace() }
 
 //go:linkname trace_userTaskCreate runtime/trace.userTaskCreate
 func trace_userTaskCreate(id, parentID uint64, taskType string) {}

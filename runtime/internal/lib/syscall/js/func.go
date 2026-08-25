@@ -1,6 +1,6 @@
 // Copyright 2018 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Use of this source code is governed by a BSD-style license.
+// See LICENSES/Go-BSD-3-Clause.txt at this module root for license terms.
 
 //go:build js && wasm && (!llgo || !llgo_coro)
 
@@ -9,7 +9,7 @@ package js
 import (
 	"sync"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
 var (

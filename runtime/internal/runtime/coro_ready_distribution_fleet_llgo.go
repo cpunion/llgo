@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // Keep the stack-scoped target capability at two machine-independent words.
 // Native's fixed fleet routes must remain representable by its compact cache.

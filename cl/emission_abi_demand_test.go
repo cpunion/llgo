@@ -27,9 +27,9 @@ import (
 	"strings"
 	"testing"
 
-	llssa "github.com/goplus/llgo/ssa"
-	llabi "github.com/goplus/llgo/ssa/abi"
-	"github.com/goplus/llgo/ssa/ssatest"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	llabi "github.com/xgo-dev/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 	"golang.org/x/tools/go/types/typeutil"
@@ -925,6 +925,44 @@ func Use() any { return multiownergen.F(1) }
 		} else if physical != name {
 			t.Fatalf("same exact F[int] has owner-dependent physical names %q and %q", physical, name)
 		}
+	}
+}
+
+func TestEmissionUniverseGenericLocalCapturedClosureKeepsLexicalOwner(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/capturedlocal", `package capturedlocal
+func F[T any](value T) T {
+	type result struct { Value T }
+	results := make(chan result, 1)
+	go func() { results <- result{Value: value} }()
+	return (<-results).Value
+}
+func Use() int { return F[int](1) }
+`)
+	testProg.ssa.Build()
+
+	prog := ssatest.NewProgram(t, nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := pkg.ssa.Func("F")
+	var found bool
+	for local, owner := range universe.localGenericOwners {
+		if local.Obj() == nil || local.Obj().Name() != "result" {
+			continue
+		}
+		found = true
+		if owner == nil {
+			t.Fatal("captured local result has a nil definition owner")
+		}
+		if owner.Origin() != origin || owner.Parent() != nil {
+			t.Fatalf("captured local result owner = %v (parent %v), want F[int]", owner, owner.Parent())
+		}
+	}
+	if !found {
+		t.Fatal("captured generic local result has no frozen definition owner")
 	}
 }
 

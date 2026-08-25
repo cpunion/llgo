@@ -22,8 +22,8 @@ import (
 	"fmt"
 	"go/types"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -98,7 +98,14 @@ func (p *context) emitCoroMethodValueDescriptor(
 	var plainEntry, coroEntry llssa.Expr
 	switch physicalEmission {
 	case coro.EmitPlain:
-		flags |= llssa.CoroDispatchFlagHasPlain
+		if entry.plan.Exec.Contains(coro.MayUnwind) {
+			return llssa.Nil, fmt.Errorf(
+				"coroutine method value descriptor target %q (%s) has no plain no-unwind capability: emission=%s effect=%s exec=%s demand=%s",
+				entry.plan.ID, entry.function.String(), entry.plan.Emission, entry.plan.Effect,
+				entry.plan.Exec, entry.plan.Demand,
+			)
+		}
+		flags |= llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagPlainNoUnwind
 		plainEntry = p.newCoroDynamicDispatchEntryThunk(
 			coroPlainDispatchThunkPrefix+targetKey, physical.Expr, abi, coro.EmitPlain, nil,
 		)
@@ -136,13 +143,15 @@ func (p *context) emitCoroMethodValueDescriptor(
 	return descriptor, nil
 }
 
-// coroManagedInterfaceDispatchPlan freezes the exact method families whose
-// ABI Method.Ifn_ word uses the universal {descriptor, receiver-environment}
-// transport. A family keeps the existing receiver-aware plain Ifn_ only when
-// every emitted use is an ordinary closed invoke and every exact target is a
-// bounded no-unwind plain body. Any other use selects the descriptor transport
-// for the whole family: ABI type data has one Ifn_ word per concrete method, so
-// selecting a representation per call site would split panic/outcome semantics.
+// coroManagedInterfaceDispatchPlan freezes the exact method families whose ABI
+// Method.Ifn_ word uses the universal {descriptor, receiver-environment}
+// transport, plus the exact receiver targets whose Method.Tfn_ word is exposed
+// as a normal receiver-first Go function descriptor. A family keeps the
+// existing receiver-aware plain Ifn_ only when every emitted use is an ordinary
+// closed invoke and every exact target is a bounded no-unwind plain body. Any
+// other use selects the descriptor transport for the whole family: ABI type
+// data has one Ifn_ word per concrete method, so selecting a representation per
+// call site would split panic/outcome semantics.
 type coroManagedInterfaceDispatchPlan struct {
 	calls            map[ssa.CallInstruction]struct{}
 	rawReceiverCalls map[ssa.CallInstruction]struct{}
@@ -236,6 +245,45 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	}
 	if plan == nil {
 		return nil, fmt.Errorf("managed interface descriptor requires a compilation plan")
+	}
+	if universe == nil {
+		return nil, fmt.Errorf("managed interface descriptor requires a prepared emission universe")
+	}
+
+	// Method.Tfn_ is always a first-class Go function value. ABI type lowering
+	// records those compiler-created values explicitly, because there is no SSA
+	// operand from which ordinary value flow could discover them. Freeze their
+	// receiver-aware capability here; the receiver-free descriptor validator
+	// must continue to reject methods, while emitCoroMethodValueDescriptor owns
+	// the normalized receiver-first ABI.
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone {
+			continue
+		}
+		references, err := universe.CoroPlanningMetadata().ManagedValueReferences(owner.Function)
+		if err != nil {
+			return nil, err
+		}
+		for _, target := range references {
+			if target.Signature == nil || target.Signature.Recv() == nil {
+				continue
+			}
+			targetPlan, found := plan.FunctionPlan(target)
+			if !found || targetPlan.ID == "" || targetPlan.Demand == coro.NoDemand ||
+				targetPlan.Emission == coro.EmitNone || targetPlan.FuncRep != coro.Dispatch {
+				return nil, fmt.Errorf(
+					"managed method value target %q from %q has no demanded Dispatch capability",
+					target.Name(), owner.Function.Name(),
+				)
+			}
+			if previous := result.targets[targetPlan.ID]; previous != nil && previous != target {
+				return nil, fmt.Errorf(
+					"managed method value target %q resolves to both %q and %q",
+					targetPlan.ID, previous.Name(), target.Name(),
+				)
+			}
+			result.targets[targetPlan.ID] = target
+		}
 	}
 
 	// Decide the transport per method family before recording any call or
@@ -585,8 +633,12 @@ func (p *context) compileCoroManagedInterfaceAwait(
 	if !found || callPlan.Rep != coro.Dispatch {
 		panic("managed interface await lost its frozen Dispatch CallPlan")
 	}
+	if instructionPlan.recoverAlias {
+		p.observeCoroPhysicalRecoverAlias(call)
+	}
 	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, method, args, instructionPlan.controlSignature, nil, keepaliveSlots, !callPlan.Open,
+		b, method, args, instructionPlan.controlSignature, nil, keepaliveSlots,
+		false, instructionPlan.recoverAlias, !callPlan.Open,
 	)
 	p.recordCoroValueAddress(call, result.address)
 	return result.value
@@ -742,7 +794,7 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	var plainEntry, coroEntry llssa.Expr
 	switch entry.plan.Emission {
 	case coro.EmitPlain:
-		flags |= llssa.CoroDispatchFlagHasPlain
+		flags |= llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagPlainNoUnwind
 		plainEntry = p.newCoroDynamicDispatchEntryThunk(
 			coroPlainDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, receiver,
 		)
@@ -809,7 +861,7 @@ func validateCoroManagedInterfaceDescriptorTarget(
 			return fail("plain capability has incompatible representation %s", functionPlan.FuncRep)
 		}
 		if functionPlan.Primary != coro.PrimaryPlain || functionPlan.Effect != coro.NoSuspend ||
-			functionPlan.Exec.Contains(coro.NeedsPreempt) {
+			functionPlan.Exec.Contains(coro.NeedsPreempt|coro.MayUnwind) {
 			return fail("plain capability is not exact bounded no-suspend, got primary=%s effect=%s exec=%s",
 				functionPlan.Primary, functionPlan.Effect, functionPlan.Exec)
 		}

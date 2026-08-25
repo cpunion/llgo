@@ -19,7 +19,8 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coroalloc"
 )
 
 // coroPanicNilErrorV1 and its empty-interface header are package globals so a
@@ -81,6 +82,40 @@ func __llgo_coro_panic_trace_replace_v1(g, handle unsafe.Pointer) {
 		coroRuntimeAbort("invalid coroutine panic trace replacement")
 	}
 	coroReleaseDiscardedPanicTraceV1(task)
+}
+
+// __llgo_coro_panic_trace_append_v1 retains one logical synchronous outcome
+// frame after a panic has already selected the cold path. New-panic mode may
+// detach an older cleanup trace; propagation mode requires the exact child
+// payload already retained on the same physical carrier. Normal synchronous
+// calls never enter this allocator or mutate task trace state.
+//
+//export __llgo_coro_panic_trace_append_v1
+func __llgo_coro_panic_trace_append_v1(
+	g, descriptor, typeWord, dataWord unsafe.Pointer,
+	line, mode uint32,
+) {
+	typeWord, dataWord = coroNormalizePanicPayloadV1(typeWord, dataWord)
+	task := (*coro.G)(g)
+	traceMode := coro.LogicalPanicTraceMode(mode)
+	if typeWord == nil || !coro.PrepareLogicalPanicTrace(task, traceMode, typeWord, dataWord) {
+		coroRuntimeAbort("invalid logical coroutine panic trace preparation")
+	}
+	coroReleaseDiscardedPanicTraceV1(task)
+	total := coro.LogicalPanicTraceFrameAllocationSize()
+	raw := coroalloc.AllocFrame(total)
+	if raw == nil {
+		coroRuntimeAbort("logical coroutine panic trace allocation failed")
+	}
+	if !coro.RetainLogicalPanicTraceFrame(
+		task, raw, total, descriptor, line, traceMode, typeWord, dataWord,
+	) {
+		coro.Zero(raw, total)
+		if !coroalloc.FreeFrame(raw, total) {
+			coroRuntimeAbort("logical coroutine panic trace rollback failed")
+		}
+		coroRuntimeAbort("invalid logical coroutine panic trace append")
+	}
 }
 
 // __llgo_coro_await_prepare_inline_v4 fuses the compiler-private prepare and
@@ -145,9 +180,45 @@ func __llgo_coro_await_inline_destroy_consume_v4(g, parent, child, typeOut, data
 	return uint32(snapshot.Status)
 }
 
+// __llgo_coro_recover_alias_begin_v1 installs one exact transparent-call
+// token. A cleanup drainer passes expected=nil and its compiler-owned panic
+// overlay bit. A compiler-generated transparent wrapper passes its current
+// handle as expected and active=true, so only an already eligible wrapper can
+// transfer permission to its exact child. The scope reuses the logical runtime
+// G's existing recoverFrame word and adds no storage to ordinary scheduler
+// tasks or physical frames.
+//
+//export __llgo_coro_recover_alias_begin_v1
+func __llgo_coro_recover_alias_begin_v1(g, expected, token unsafe.Pointer, active bool) unsafe.Pointer {
+	task := (*coro.G)(g)
+	if token == nil || !coro.RecoverAliasScopeActive(task) {
+		coroRuntimeAbort("invalid coroutine recover alias begin")
+	}
+	previous, ok := coroBeginRecoverAliasRuntimeV1(task, expected, token, active)
+	if !ok {
+		coroRuntimeAbort("invalid coroutine recover alias begin")
+	}
+	return previous
+}
+
+// __llgo_coro_recover_alias_end_v1 closes the lexical descriptor scope after
+// the child completion has been consumed on either the normal or cancellation
+// lane. A transparent wrapper may have replaced the descriptor by its target
+// activation; restoration deliberately accepts either state.
+//
+//export __llgo_coro_recover_alias_end_v1
+func __llgo_coro_recover_alias_end_v1(g, previous unsafe.Pointer) {
+	task := (*coro.G)(g)
+	if !coro.RecoverAliasScopeActive(task) || !coroEndRecoverAliasRuntimeV1(task, previous) {
+		coroRuntimeAbort("invalid coroutine recover alias end")
+	}
+}
+
 // __llgo_coro_recover_take_v1 implements one syntactic recover in the active
 // physical frame. A valid but non-direct call writes a nil empty interface;
-// malformed scheduler ownership aborts instead of consulting legacy TLS.
+// malformed scheduler ownership aborts instead of consulting legacy panic
+// state. A handle token installed by BindRecoverFrame authorizes only the
+// exact current activation to cross an explicit transparent-wrapper chain.
 //
 //export __llgo_coro_recover_take_v1
 func __llgo_coro_recover_take_v1(g, child, typeOut, dataOut unsafe.Pointer) {
@@ -156,7 +227,14 @@ func __llgo_coro_recover_take_v1(g, child, typeOut, dataOut unsafe.Pointer) {
 	}
 	*(*unsafe.Pointer)(typeOut) = nil
 	*(*unsafe.Pointer)(dataOut) = nil
-	snapshot, recovered, valid := coro.TakeRecover((*coro.G)(g), child)
+	task := (*coro.G)(g)
+	var snapshot coro.RecoverSnapshot
+	var recovered, valid bool
+	if coroHasRecoverAliasRuntimeV1(task, child) {
+		snapshot, recovered, valid = coro.TakeRecoverAlias(task, child)
+	} else {
+		snapshot, recovered, valid = coro.TakeRecover(task, child)
+	}
 	if !valid {
 		coroRuntimeAbort("invalid coroutine recover take")
 	}

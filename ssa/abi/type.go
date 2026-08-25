@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goplus/llgo/runtime/abi"
+	"github.com/xgo-dev/llgo/runtime/abi"
 )
 
 const (
@@ -14,7 +14,7 @@ const (
 )
 
 func (b *Builder) MapBucket(t *types.Map) types.Type {
-	return MapBucketType(t, b.Sizes)
+	return b.mapBucketType(t)
 }
 
 func (b *Builder) MapFlags(t *types.Map) (flags int) {

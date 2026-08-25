@@ -22,9 +22,9 @@ import (
 	"go/ast"
 	"testing"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 func TestCoroPlanInputTotalCallableIdentityKeepsUnknownAndLegacyExecutionConservative(t *testing.T) {

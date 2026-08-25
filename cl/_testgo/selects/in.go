@@ -9,13 +9,19 @@ package main
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @__llgo_coro_spawn_begin_v1(
 // CHECK: call void @__llgo_coro_spawn_commit_v1(
-// CHECK: call i1 @"{{.*}}CoroChanTrySend"(
+// CHECK: call i32 @__llgo_coro_chan_send_buffer_try_v1(
+// CHECK: call i32 @__llgo_coro_chan_send_try_park_v2(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK: call i32 @__llgo_coro_chan_resume_v2(
 // CHECK: call { i64, i1, i1, i1 } @"{{.*}}CoroChanSelectTry"(
 // CHECK: call void @"{{.*}}CoroChanSelectPark"(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK: call { i64, i1, i32 } @"{{.*}}CoroChanSelectResume"(
 // CHECK-LABEL: define ptr @"main.main$1$coro"(ptr %0, ptr %1, ptr swiftself %2)
-// CHECK: call { i1, i1 } @"{{.*}}CoroChanTryRecv"(
+// CHECK: call i32 @__llgo_coro_chan_recv_buffer_try_v1(
+// CHECK: call i32 @__llgo_coro_chan_recv_try_park_v2(
+// CHECK: call i8 @llvm.coro.suspend(
+// CHECK: call i32 @__llgo_coro_chan_resume_v2(
 // CHECK: call { i64, i1, i1, i1 } @"{{.*}}CoroChanSelectTry"(
 // CHECK: call void @"{{.*}}CoroChanSelectPark"(
 // CHECK: call i8 @llvm.coro.suspend(

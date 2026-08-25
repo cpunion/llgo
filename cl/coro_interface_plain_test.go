@@ -24,11 +24,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	"github.com/goplus/llgo/internal/typepatch"
-	llssa "github.com/goplus/llgo/ssa"
-	"github.com/goplus/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	"github.com/xgo-dev/llgo/internal/typepatch"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -195,6 +195,119 @@ func Root(value concrete) string {
 	}
 	if ir := module.String(); strings.Contains(ir, coroPlainDispatchDescriptorPrefix) || strings.Contains(ir, coroPlainDispatchThunkPrefix) {
 		t.Fatalf("dormant invoke incorrectly materialized a function-value descriptor:\n%s", ir)
+	}
+}
+
+func TestCoroDormantABITypeDescriptorDoesNotTurnStaticMethodIntoFunctionValue(t *testing.T) {
+	const source = `package foo
+var gate chan struct{}
+type value int
+func (v value) Method() int { return int(v) }
+func dormant(v value) any { return v }
+func Root(v value) int {
+	<-gate
+	return v.Method()
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	program := newLLSSAProg(t)
+	defer program.Dispose()
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Root")
+	dormant := ssaPkg.Func("dormant")
+	var method *ssa.Function
+	for _, function := range universe.Functions() {
+		if function != nil && function.Name() == "Method" && function.Signature != nil && function.Signature.Recv() != nil {
+			method = function
+			break
+		}
+	}
+	if root == nil || dormant == nil || method == nil {
+		t.Fatalf("fixture functions root=%v dormant=%v method=%v", root, dormant, method)
+	}
+	contains := func(functions []*ssa.Function, target *ssa.Function) bool {
+		for _, function := range functions {
+			if function == target {
+				return true
+			}
+		}
+		return false
+	}
+	dormantManaged, err := universe.CoroPlanningMetadata().ManagedValueReferences(dormant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootManaged, err := universe.CoroPlanningMetadata().ManagedValueReferences(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(dormantManaged, method) || contains(rootManaged, method) {
+		t.Fatalf("method descriptor provenance: dormant=%v root=%v", dormantManaged, rootManaged)
+	}
+
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:               ssaUniverse,
+		FunctionIDs:                    functionIDs,
+		DynamicResolution:              coro.DynamicCHAClosed,
+		MaxPlainInstructions:           -1,
+		OutcomeMode:                    coro.OutcomeExplicitStatus,
+		ClassifyDemandReferences:       universe.CoroDemandReferences,
+		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
+		ClassifyManagedValueReferences: universe.CoroPlanningMetadata().ManagedValueReferences,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dormantPlan, ok := plan.FunctionPlan(dormant)
+	if !ok || dormantPlan.Emission != coro.EmitNone {
+		t.Fatalf("dormant plan = %+v, present=%t; want EmitNone", dormantPlan, ok)
+	}
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok || methodPlan.Emission == coro.EmitNone || methodPlan.FuncRep != coro.Dispatch {
+		t.Fatalf("static method plan = %+v, present=%t; want emitted Dispatch selected only by dormant descriptor", methodPlan, ok)
+	}
+	managed, err := analyzeCoroManagedInterfaceDispatchPlan(plan, universe, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managed.acceptsTarget(method, methodPlan) {
+		t.Fatalf("dormant descriptor unexpectedly became an active managed method target %q", methodPlan.ID)
+	}
+	receivers, err := analyzeCoroClosedInterfacePlainPlan(plan, universe, false, true, managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receivers.acceptsTarget(method, methodPlan) {
+		t.Fatalf("dormant ABI type proof omitted exact static receiver target %q", methodPlan.ID)
+	}
+
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: coroClosedInterfacePlainCompilation(plan, universe)},
+	)
+	if err != nil {
+		t.Fatalf("compile static method with dormant ABI descriptor source: %v", err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify static method with dormant ABI descriptor source: %v\n%s", err, module.String())
+	}
+	if ir := module.String(); strings.Contains(ir, "method-value.") {
+		t.Fatalf("dormant ABI type descriptor unexpectedly materialized a method function value:\n%s", ir)
 	}
 }
 
@@ -668,11 +781,14 @@ func (*noCopy) Lock() {}
 		{Function: root, Demand: coro.AsyncDemand},
 		{Function: lock, Demand: coro.SyncDemand},
 	}, coro.SSAConfig{
-		EmissionUniverse:     ssaUniverse,
-		FunctionIDs:          functionIDs,
-		DynamicResolution:    coro.DynamicCHAClosed,
-		MaxPlainInstructions: -1,
-		OutcomeMode:          coro.OutcomeExplicitStatus,
+		EmissionUniverse:               ssaUniverse,
+		FunctionIDs:                    functionIDs,
+		DynamicResolution:              coro.DynamicCHAClosed,
+		MaxPlainInstructions:           -1,
+		OutcomeMode:                    coro.OutcomeExplicitStatus,
+		ClassifyDemandReferences:       universe.CoroDemandReferences,
+		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
+		ClassifyManagedValueReferences: universe.CoroPlanningMetadata().ManagedValueReferences,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -760,7 +876,7 @@ func prepareCoroClosedInterfacePlainPlan(t *testing.T, prog llssa.Program, ssaPk
 		OutcomeMode:                    coro.OutcomeExplicitStatus,
 		ClassifyDemandReferences:       universe.CoroDemandReferences,
 		ClassifySyncDemandReferences:   universe.CoroSyncDemandReferences,
-		ClassifyManagedValueReferences: universe.CoroManagedValueReferences,
+		ClassifyManagedValueReferences: universe.CoroPlanningMetadata().ManagedValueReferences,
 	})
 	if err != nil {
 		t.Fatal(err)

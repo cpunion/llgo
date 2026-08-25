@@ -13,8 +13,8 @@
 package runtime
 
 import (
-	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
-	"github.com/goplus/llgo/runtime/internal/coro"
+	catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 func coroHostOperationControlAdvanceEpochV1(cell *coroHostOperationControlLaneV1) bool {

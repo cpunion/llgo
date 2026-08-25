@@ -10,14 +10,14 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/goplus/llgo/internal/crosscompile/compile"
-	"github.com/goplus/llgo/internal/env"
-	"github.com/goplus/llgo/internal/flash"
-	"github.com/goplus/llgo/internal/lto"
-	"github.com/goplus/llgo/internal/optlevel"
-	"github.com/goplus/llgo/internal/targets"
-	"github.com/goplus/llgo/internal/xtool/llvm"
-	envllvm "github.com/goplus/llgo/xtool/env/llvm"
+	"github.com/xgo-dev/llgo/internal/crosscompile/compile"
+	"github.com/xgo-dev/llgo/internal/env"
+	"github.com/xgo-dev/llgo/internal/flash"
+	"github.com/xgo-dev/llgo/internal/lto"
+	"github.com/xgo-dev/llgo/internal/optlevel"
+	"github.com/xgo-dev/llgo/internal/targets"
+	"github.com/xgo-dev/llgo/internal/xtool/llvm"
+	envllvm "github.com/xgo-dev/llgo/xtool/env/llvm"
 )
 
 type Export struct {
@@ -302,8 +302,27 @@ func validateLibcTargetCompatibility(config *targets.Config) error {
 	return nil
 }
 
+// ltoLinkerOptFlag maps LLGo's optimization level to lld's numeric LTO
+// optimizer level. lld accepts only O0 through O3 here; Os/Oz are carried by
+// the optsize/minsize function attributes in LLGo's bitcode and use O2 as
+// LLVM's corresponding speed level.
+func ltoLinkerOptFlag(level optlevel.Level) string {
+	switch level {
+	case optlevel.O0, optlevel.O1, optlevel.O2, optlevel.O3:
+		return "--lto-" + level.Name()
+	case optlevel.Os, optlevel.Oz:
+		return "--lto-O2"
+	default:
+		return ""
+	}
+}
+
 func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
-	targetSpec := resolvedLLVMTargetSpec(goos, goarch, wasiThreads)
+	return useWithGOARM(goos, goarch, "", wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+}
+
+func useWithGOARM(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
+	targetSpec := resolvedLLVMTargetSpecWithGOARM(goos, goarch, goarm, wasiThreads)
 	targetTriple := targetSpec.Triple
 	export.GOOS = goos
 	export.GOARCH = goarch
@@ -360,7 +379,10 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 			"-Wl,--icf=none",
 		}
 		if ltoMode.Enabled() {
-			export.LDFLAGS = append(export.LDFLAGS, ltoMode.ClangFlag(), "-Wl,--lto"+level.Flag())
+			export.LDFLAGS = append(export.LDFLAGS, ltoMode.ClangFlag())
+			if optFlag := ltoLinkerOptFlag(level); optFlag != "" {
+				export.LDFLAGS = append(export.LDFLAGS, "-Wl,"+optFlag)
+			}
 		}
 		if clangRoot != "" {
 			clangLib := filepath.Join(clangRoot, "lib")
@@ -585,7 +607,11 @@ func wasiMemoryLinkFlags(wasiThreads bool) []string {
 }
 
 func resolvedLLVMTargetSpec(goos, goarch string, wasiThreads bool) llvm.TargetSpec {
-	spec := llvm.GetTargetSpec(goos, goarch, "")
+	return resolvedLLVMTargetSpecWithGOARM(goos, goarch, "", wasiThreads)
+}
+
+func resolvedLLVMTargetSpecWithGOARM(goos, goarch, goarm string, wasiThreads bool) llvm.TargetSpec {
+	spec := llvm.GetTargetSpec(goos, goarch, goarm)
 	if goos == "wasip1" && goarch == "wasm" && wasiThreads && !strings.Contains(spec.Features, "+atomics") {
 		if spec.Features != "" {
 			spec.Features += ","
@@ -699,7 +725,9 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	cflags = append(cflags, expandedCFlags...)
 
 	if config.Linker == "ld.lld" && ltoMode.Enabled() {
-		ldflags = append(ldflags, "--lto"+level.Flag())
+		if optFlag := ltoLinkerOptFlag(level); optFlag != "" {
+			ldflags = append(ldflags, optFlag)
+		}
 		cflags = append(cflags, ltoMode.ClangFlag())
 		ccflags = append(ccflags, ltoMode.ClangFlag())
 	}
@@ -874,8 +902,15 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 // Use extends the original Use function to support target-based configuration
 // If targetName is provided, it takes precedence over goos/goarch
 func Use(goos, goarch, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
+	return UseWithGOARM(goos, goarch, "", targetName, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+}
+
+// UseWithGOARM is Use with an explicit Go ARM architecture setting. The
+// setting affects native GOARCH=arm clang and linker triples; named targets
+// retain their target configuration's LLVM triple.
+func UseWithGOARM(goos, goarch, goarm, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
 	if targetName == "" {
-		return use(goos, goarch, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+		return useWithGOARM(goos, goarch, goarm, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
 	}
 	if !strings.HasPrefix(targetName, "wasm") && !strings.HasPrefix(targetName, "wasi") {
 		return UseTarget(targetName, level, ltoMode)
@@ -896,7 +931,7 @@ func Use(goos, goarch, targetName string, wasiThreads, forceEspClang bool, level
 	if config.GOARCH != "wasm" {
 		return UseTarget(targetName, level, ltoMode)
 	}
-	export, err = use(config.GOOS, config.GOARCH, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+	export, err = useWithGOARM(config.GOOS, config.GOARCH, "", wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
 	if err != nil {
 		return export, err
 	}

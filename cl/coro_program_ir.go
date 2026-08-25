@@ -21,8 +21,8 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -269,6 +269,7 @@ func deriveCoroLocalBodyFacts(
 	}
 	atomicBlocks := make([]coro.SSAAtomicBlockFacts, len(function.Blocks))
 	hasEvaluatedDefer := false
+	hasRecoverBuiltin := false
 	for _, block := range function.Blocks {
 		blockFacts := coro.SSAAtomicBlockFacts{Index: block.Index}
 		for _, successor := range block.Succs {
@@ -287,6 +288,9 @@ func deriveCoroLocalBodyFacts(
 			}
 			if _, deferInstruction := instruction.(*ssa.Defer); deferInstruction {
 				hasEvaluatedDefer = true
+			}
+			if call, ok := instruction.(*ssa.Call); ok && isCoroRecoverBuiltinCall(call) {
+				hasRecoverBuiltin = true
 			}
 			if !plan.staticOutcome {
 				facts.StaticOutcomeLocal = false
@@ -364,12 +368,22 @@ func deriveCoroLocalBodyFacts(
 		facts.OutcomePlainLeaf = false
 		facts.OutcomePlainDAG = false
 	}
+	// Outcome-plain bodies have no LLVM coroutine handle and deliberately do
+	// not own the stackless recover-alias hooks. A direct recover activation or
+	// compiler-transparent wrapper must therefore retain its full coroutine (or
+	// ordinary plain) body; otherwise a later physical call site would have no
+	// invocation-unique token from which to transfer recover permission.
+	if isRecoverTransparentWrapper(function) || hasRecoverBuiltin {
+		facts.OutcomePlainLeaf = false
+		facts.OutcomePlainDAG = false
+		facts.StaticOutcomeLocal = false
+	}
 	return facts, nil
 }
 
 func coroRuntimeContextPrimitive(function *ssa.Function) bool {
 	if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil ||
-		llssa.PathOf(function.Pkg.Pkg) != "github.com/goplus/llgo/runtime/internal/runtime" {
+		llssa.PathOf(function.Pkg.Pkg) != "github.com/xgo-dev/llgo/runtime/internal/runtime" {
 		return false
 	}
 	switch function.Name() {
@@ -508,6 +522,71 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 	return nil
 }
 
+// finalizeRangeYieldCleanupOwners projects an evaluated range-over-function
+// Defer registration onto the source function that owns its explicit cleanup
+// stack. x/tools places the instruction in a synthetic yield closure, but the
+// owner allocates and drains the records. NeedsCleanupFrame is deliberately a
+// local execution fact, so ordinary call propagation cannot repair that split.
+func (ir *coroProgramIR) finalizeRangeYieldCleanupOwners(
+	functions []*ssa.Function,
+	sortedUseOwners func(*ssa.Function) []*preparedEmissionPackage,
+) error {
+	if ir == nil || sortedUseOwners == nil {
+		return fmt.Errorf("range-yield cleanup finalization requires one ProgramIR and owner projection")
+	}
+	if ir.callsFrozen {
+		return fmt.Errorf("range-yield cleanup finalization occurred after call SitePlan freeze")
+	}
+	for _, function := range functions {
+		if function == nil || function.Synthetic != rangeOverFuncYieldSynthetic {
+			continue
+		}
+		stackOwner := coroExplicitDeferStackOwner(function)
+		if stackOwner == nil || stackOwner == function {
+			return fmt.Errorf("range-yield function %q has no distinct source cleanup owner", function.Name())
+		}
+		var evaluated, observed bool
+		for _, owner := range sortedUseOwners(function) {
+			key := emissionFunctionOwnerKey{function: function, owner: owner}
+			semantic, frozen := ir.semanticPlans[key]
+			if !frozen {
+				return fmt.Errorf("range-yield function %q has no frozen semantic owner %q", function.Name(), owner.identity)
+			}
+			ownerEvaluated := false
+			for _, block := range function.Blocks {
+				for _, instruction := range block.Instrs {
+					deferred, ok := instruction.(*ssa.Defer)
+					if !ok || deferred.DeferStack == nil {
+						continue
+					}
+					plan, planned := semantic[instruction]
+					if !planned {
+						return fmt.Errorf("range-yield defer %q has no frozen semantic recipe", deferred.String())
+					}
+					ownerEvaluated = ownerEvaluated || plan.evaluated
+				}
+			}
+			if observed && ownerEvaluated != evaluated {
+				return fmt.Errorf("range-yield function %q has owner-dependent cleanup evaluation", function.Name())
+			}
+			evaluated, observed = ownerEvaluated, true
+		}
+		if !observed || !evaluated {
+			continue
+		}
+		facts, frozen := ir.localBodyFacts[stackOwner]
+		if !frozen {
+			return fmt.Errorf("range-yield cleanup owner %q has no frozen local body facts", stackOwner.Name())
+		}
+		facts.Exec = facts.Exec.Join(coro.NeedsCleanupFrame)
+		facts.OutcomePlainLeaf = false
+		facts.OutcomePlainDAG = false
+		facts.StaticOutcomeLocal = false
+		ir.localBodyFacts[stackOwner] = facts
+	}
+	return nil
+}
+
 func coroSemanticEvaluatedCFGHasCycle(
 	blocks []*ssa.BasicBlock,
 	semantic map[ssa.Instruction]coroSemanticInstructionPlan,
@@ -521,7 +600,18 @@ func coroSemanticEvaluatedCFGHasCycle(
 			}
 		}
 	}
-	state := make(map[*ssa.BasicBlock]uint8, len(evaluated))
+	return coroCFGSubsetHasCycle(blocks, evaluated)
+}
+
+// coroCFGSubsetHasCycle is the shared topology gate for the exact block set
+// selected by ProgramIR. Raw SSA may retain a loop behind a constant-false
+// branch; treating that dead SCC as executable would disagree with both local
+// effect analysis and physical emission.
+func coroCFGSubsetHasCycle(
+	blocks []*ssa.BasicBlock,
+	included map[*ssa.BasicBlock]bool,
+) bool {
+	state := make(map[*ssa.BasicBlock]uint8, len(included))
 	var visit func(*ssa.BasicBlock) bool
 	visit = func(block *ssa.BasicBlock) bool {
 		switch state[block] {
@@ -532,15 +622,15 @@ func coroSemanticEvaluatedCFGHasCycle(
 		}
 		state[block] = 1
 		for _, successor := range block.Succs {
-			if evaluated[successor] && visit(successor) {
+			if included[successor] && visit(successor) {
 				return true
 			}
 		}
 		state[block] = 2
 		return false
 	}
-	for block := range evaluated {
-		if state[block] == 0 && visit(block) {
+	for _, block := range blocks {
+		if included[block] && state[block] == 0 && visit(block) {
 			return true
 		}
 	}

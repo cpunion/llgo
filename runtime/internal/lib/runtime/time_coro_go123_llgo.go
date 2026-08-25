@@ -19,10 +19,10 @@
 package runtime
 
 import (
+	latomic "sync/atomic"
 	"unsafe"
 
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
-	corort "github.com/goplus/llgo/runtime/internal/runtime"
+	corort "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 const (

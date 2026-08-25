@@ -10,7 +10,7 @@
 
 package runtime
 
-import corort "github.com/goplus/llgo/runtime/internal/runtime"
+import corort "github.com/xgo-dev/llgo/runtime/internal/runtime"
 
 func coroRealtime() (sec int64, nsec int32) {
 	sec, nsec, ok := corort.CoroWallTime()

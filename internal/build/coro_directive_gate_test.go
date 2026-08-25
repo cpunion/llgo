@@ -98,7 +98,11 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		)
 	}
 	sort.Strings(manifest)
-	const wantManifestSHA256 = "ef4fc06977a42a7133262542688e652ae237d2823ad276e81acd2a760fdc294c"
+	// The Go 1.26 source-patch migration moved the one Darwin mmap declaration
+	// from runtime/internal/lib/syscall to runtime/_patch/syscall. Its owner and
+	// exact bottom contract are unchanged; the complete 8/38/28 inventory is
+	// otherwise byte-for-byte identical to the preceding snapshot.
+	const wantManifestSHA256 = "6b03eaced1bc0c9f5120c316167611b80e6903139206c705f9c3d91c9bf010f1"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)

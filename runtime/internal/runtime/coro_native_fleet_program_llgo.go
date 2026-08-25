@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
 // coroNativeFleetStartProgramV1 adopts the already-bound program executor as
 // route 1 and creates count-1 independent fleet-owned routes. The program

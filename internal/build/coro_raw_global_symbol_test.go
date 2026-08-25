@@ -29,10 +29,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/crosscompile"
-	"github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -357,8 +357,8 @@ func TestCoroRawGlobalSymbolInventoryPlan9AltSelection(t *testing.T) {
 		t.Fatal("replacement Alt unexpectedly retained original Plan9 SFiles")
 	}
 	additive := &aPackage{
-		Package: &packages.Package{PkgPath: "internal/runtime/sys"},
-		AltPkg:  &packages.Cached{Package: &packages.Package{PkgPath: "internal/runtime/sys"}},
+		Package: &packages.Package{PkgPath: "internal/syscall/unix"},
+		AltPkg:  &packages.Cached{Package: &packages.Package{PkgPath: "internal/syscall/unix"}},
 	}
 	if !coroRawIncludesOriginalPlan9(additive) {
 		t.Fatal("additive Alt unexpectedly omitted original Plan9 SFiles")

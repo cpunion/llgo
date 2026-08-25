@@ -54,7 +54,7 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 				} else if err != nil {
 					t.Fatalf("decode go list stream: %v", err)
 				}
-				if pkg.ImportPath == "github.com/goplus/llgo/runtime/internal/clite/bdwgc" {
+				if pkg.ImportPath == "github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc" {
 					t.Fatal("leaking target dependency graph retained BDWGC")
 				}
 				packages[pkg.ImportPath] = struct{ GoFiles []string }{GoFiles: pkg.GoFiles}
@@ -76,15 +76,15 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 					}
 				}
 			}
-			assertFiles("github.com/goplus/llgo/runtime/internal/runtime", []string{"z_nogc.go"}, []string{"z_gc.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/runtime", []string{"z_nogc.go"}, []string{"z_gc.go"})
 			if target.name == "wasip1" {
-				assertFiles("github.com/goplus/llgo/runtime/internal/runtime",
+				assertFiles("github.com/xgo-dev/llgo/runtime/internal/runtime",
 					[]string{"coro_abort_freestanding_webassembly.go"},
 					[]string{"coro_abort_libc.go"})
 			}
-			assertFiles("github.com/goplus/llgo/runtime/internal/lib/runtime", []string{"runtime_nogc.go", "mfinal_nogc.go"}, []string{"runtime_gc.go", "mfinal.go"})
-			assertFiles("github.com/goplus/llgo/runtime/internal/clite/pthread", []string{"pthread_nogc.go"}, []string{"pthread_gc.go"})
-			assertFiles("github.com/goplus/llgo/runtime/internal/clite/tls", []string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/lib/runtime", []string{"runtime_nogc.go", "mfinal_nogc.go"}, []string{"runtime_gc.go", "mfinal.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/pthread", []string{"pthread_nogc.go"}, []string{"pthread_gc.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/tls", []string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})
 		})
 	}
 }
@@ -123,7 +123,7 @@ func TestConservativeWebAssemblyProfileSelectsTinyGoGC(t *testing.T) {
 		} else if err != nil {
 			t.Fatalf("decode go list stream: %v", err)
 		}
-		if pkg.ImportPath == "github.com/goplus/llgo/runtime/internal/clite/bdwgc" {
+		if pkg.ImportPath == "github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc" {
 			t.Fatal("conservative WebAssembly dependency graph retained BDWGC")
 		}
 		packages[pkg.ImportPath] = packageFiles{GoFiles: pkg.GoFiles, Imports: pkg.Imports}
@@ -146,27 +146,27 @@ func TestConservativeWebAssemblyProfileSelectsTinyGoGC(t *testing.T) {
 		}
 	}
 	assertFiles(
-		"github.com/goplus/llgo/runtime/internal/runtime",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime",
 		[]string{"z_gc_tinygogc.go", "z_defer_tinygogc.go"},
 		[]string{"z_gc.go", "z_nogc.go", "z_defer_gc.go"},
 	)
 	assertFiles(
-		"github.com/goplus/llgo/runtime/internal/lib/runtime",
+		"github.com/xgo-dev/llgo/runtime/internal/lib/runtime",
 		[]string{"runtime_gc_tinygogc.go", "mfinal_nogc.go"},
 		[]string{"runtime_gc.go", "runtime_nogc.go", "mfinal.go"},
 	)
 	assertFiles(
-		"github.com/goplus/llgo/runtime/internal/coroalloc",
+		"github.com/xgo-dev/llgo/runtime/internal/coroalloc",
 		[]string{"backend_tinygogc.go"},
 		[]string{"backend_webassembly.go", "backend_gc.go", "backend_nogc.go"},
 	)
 	assertFiles(
-		"github.com/goplus/llgo/runtime/internal/runtime/tinygogc",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc",
 		[]string{"gc.go", "gc_tinygo.go", "gc_wasm.go", "rooted.go"},
 		nil,
 	)
 	assertFiles(
-		"github.com/goplus/llgo/runtime/internal/clite/pthread",
+		"github.com/xgo-dev/llgo/runtime/internal/clite/pthread",
 		[]string{"pthread_nogc.go"},
 		[]string{"pthread_gc.go"},
 	)
@@ -233,7 +233,7 @@ func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testin
 					}
 				}
 			}
-			assertFiles("github.com/goplus/llgo/runtime/internal/runtime", []string{
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/runtime", []string{
 				"coro_abort_freestanding_webassembly.go",
 				"panic_slot_single.go",
 				"panic_traceback_freestanding_webassembly.go",
@@ -250,23 +250,24 @@ func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testin
 				"z_thread.go",
 				"z_webassembly.go",
 			})
-			assertFiles("github.com/goplus/llgo/runtime/internal/lib/runtime",
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/lib/runtime",
 				[]string{"rand_freestanding_webassembly.go", "runtime_webassembly.go", "zgoarch_webassembly.go"},
 				[]string{"rand.go", "runtime_default.go", "time_debug_coro.go", "zgoarch_wasm.go"})
 			for _, forbidden := range []string{
-				"github.com/goplus/llgo/runtime/internal/clite/libuv",
-				"github.com/goplus/llgo/runtime/internal/clite/os",
-				"github.com/goplus/llgo/runtime/internal/clite/pthread",
+				"github.com/xgo-dev/llgo/runtime/internal/clite/libuv",
+				"github.com/xgo-dev/llgo/runtime/internal/clite/os",
+				"github.com/xgo-dev/llgo/runtime/internal/clite/pthread",
 			} {
-				if imports := packages["github.com/goplus/llgo/runtime/internal/lib/runtime"].Imports; slices.Contains(imports, forbidden) {
+				if imports := packages["github.com/xgo-dev/llgo/runtime/internal/lib/runtime"].Imports; slices.Contains(imports, forbidden) {
 					t.Errorf("freestanding patched runtime imports %s: %v", forbidden, imports)
 				}
 			}
-			assertFiles("github.com/goplus/llgo/runtime/internal/clite/ffi",
-				[]string{"abi_webassembly.go"}, []string{"abi.go", "abi_wasm.go"})
-			assertFiles("github.com/goplus/llgo/runtime/internal/clite/tls",
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/ffi",
+				[]string{"abi_webassembly.go", "ffi_link_webassembly.go"},
+				[]string{"abi.go", "abi_wasm.go", "ffi_link.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/tls",
 				[]string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})
-			if imports := packages["github.com/goplus/llgo/runtime/internal/clite/tls"].Imports; slices.Contains(imports, "github.com/goplus/llgo/runtime/internal/clite/pthread") {
+			if imports := packages["github.com/xgo-dev/llgo/runtime/internal/clite/tls"].Imports; slices.Contains(imports, "github.com/xgo-dev/llgo/runtime/internal/clite/pthread") {
 				t.Errorf("logical WebAssembly TLS imports pthread: %v", imports)
 			}
 		})

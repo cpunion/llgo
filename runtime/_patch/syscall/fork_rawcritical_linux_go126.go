@@ -1,4 +1,4 @@
-//go:build linux && go1.26
+//go:build linux && go1.26 && !tinygo.wasm
 
 package syscall
 

@@ -25,8 +25,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -327,8 +327,13 @@ func coroWorkerAddressFunctionIdentity(universe *EmissionUniverse, fn *ssa.Funct
 		pkgPath = llssa.PathOf(fn.Pkg.Pkg)
 		provenance = "original"
 		if universe != nil {
-			if owner := universe.ownerOf(fn); owner != nil && owner.hasPatch && fn.Pkg == owner.patch.Alt {
-				provenance = "alternate-patch"
+			if owner := universe.ownerOf(fn); owner != nil {
+				switch {
+				case owner.compilerSourcePatchDeclaration(fn):
+					provenance = "compiler-source-patch"
+				case owner.hasPatch && fn.Pkg == owner.patch.Alt:
+					provenance = "alternate-patch"
+				}
 			}
 		}
 	}
@@ -1321,6 +1326,14 @@ func validateCoroWorkerSyscallCall(plan *coro.SSAPlan, universe *EmissionUnivers
 			// Conditional certificates deliberately retain every static wrapper
 			// edge. An unused wrapper cannot supply a runtime function word and is
 			// the only case in which an uncertified edge may be ignored.
+			continue
+		}
+		if plan.ElidesCall(edge.call) {
+			// Callable-shadow certificates are frozen before the whole-program
+			// plan and deliberately retain raw SSA from constant-dead/frontend-
+			// unevaluated paths. The exact ElidesCall occurrence is the later
+			// physical statement that this edge emits no call and therefore cannot
+			// supply a runtime function word. It has no CallPlan by construction.
 			continue
 		}
 		carrierPlan, carrierPlanned := plan.FunctionPlan(edge.carrier)

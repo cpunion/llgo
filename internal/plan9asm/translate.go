@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/goplus/llgo/internal/packages"
-	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
+	"github.com/xgo-dev/llgo/internal/packages"
+	intllvm "github.com/xgo-dev/llgo/internal/xtool/llvm"
 	gllvm "github.com/xgo-dev/llvm"
 	extplan9asm "github.com/xgo-dev/plan9asm"
 )
@@ -32,6 +32,7 @@ type ModuleTranslation struct {
 
 type TranslateOptions struct {
 	AnnotateSource bool
+	GOARM          string
 }
 
 func TranslateFileForPkg(pkg *packages.Package, sfile string, goos string, goarch string, overlay map[string][]byte) (*FileTranslation, error) {
@@ -105,7 +106,7 @@ func TranslateSourceModuleForPkgWithOptions(pkg *packages.Package, sfile string,
 		FileName:       sfile,
 		GOOS:           goos,
 		GOARCH:         goarch,
-		TargetTriple:   intllvm.GetTargetTriple(goos, goarch),
+		TargetTriple:   intllvm.GetTargetTripleWithGOARM(goos, goarch, opt.GOARM),
 		AnnotateSource: opt.AnnotateSource,
 		ResolveSym:     resolve,
 		KeepFunc:       keep,

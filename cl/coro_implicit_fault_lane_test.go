@@ -24,8 +24,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -71,7 +71,7 @@ func Root() *byte { return new(byte) }
 		t.Fatalf("heap allocation helper inventory = %q, want AllocZ", helpers)
 	}
 	if reason := audit.requireOnlyCompilerElidedRuntimeHelpers(
-		allocation, "CheckIndexRange", "AssertNilDeref",
+		allocation, "PanicIndex", "PanicIndexU", "AssertNilDeref",
 	); !strings.Contains(reason, "non-elided runtime helper(s) AllocZ") {
 		t.Fatalf("unexpected implicit-fault helper inventory rejection = %q", reason)
 	}
@@ -125,8 +125,8 @@ func Root(values []byte, index int) byte { return values[index] }
 	if proof == nil || !proof.provesGuardableStableAddress(indexAddr, indexAddr) {
 		t.Fatal("dynamic slice IndexAddr lacks its guardable frame-retention proof")
 	}
-	if helpers := strings.Join(universe.loweredRuntimeHelpers(audit.ctx, indexAddr), ","); helpers != "CheckIndexRange" {
-		t.Fatalf("dynamic slice IndexAddr helpers = %q, want CheckIndexRange", helpers)
+	if helpers := strings.Join(universe.loweredRuntimeHelpers(audit.ctx, indexAddr), ","); helpers != "PanicIndex" {
+		t.Fatalf("dynamic slice IndexAddr helpers = %q, want PanicIndex", helpers)
 	}
 	if reason := audit.validateIndexAddr(indexAddr); !strings.Contains(reason, "index base is not a fixed-array pointer") {
 		t.Fatalf("IndexAddr without ExplicitStatus rejection = %q", reason)
@@ -137,10 +137,10 @@ func Root(values []byte, index int) byte { return values[index] }
 	}
 }
 
-func TestEmissionUniverseImplicitIndexPlainHelperRetainsRawDemand(t *testing.T) {
+func TestEmissionUniverseImplicitIndexPlainHelperIsRepresentationOnly(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
-func CheckIndexRange(ok bool, index int64, signed bool, length int) {}
+func PanicIndex(index int, length int) {}
 `)
 	callerPkg := testProg.addPackage(t, "example.com/emission/implicitplain", `package implicitplain
 func Root(values []byte, index int) byte { return values[index] }
@@ -157,9 +157,22 @@ func Root(values []byte, index int) byte { return values[index] }
 		t.Fatal(err)
 	}
 	root := callerPkg.ssa.Func("Root")
-	helper := runtimePkg.ssa.Func("CheckIndexRange")
-	if target, ok, err := universe.ResolveCoroPlainLoweredCall(root, "CheckIndexRange"); err != nil || !ok || target != helper {
-		t.Fatalf("plain CheckIndexRange = %v, %t, %v; want exact runtime helper", target, ok, err)
+	helper := runtimePkg.ssa.Func("PanicIndex")
+	if target, ok, err := universe.ResolveCoroPlainLoweredCall(root, "PanicIndex"); err != nil || !ok || target != helper {
+		t.Fatalf("plain PanicIndex = %v, %t, %v; want exact runtime helper", target, ok, err)
+	}
+	plainCalls, err := universe.CoroPlanningMetadata().PlainLoweredCalls(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plainCalls) != 1 || plainCalls[0].LogicalName != "PanicIndex" ||
+		plainCalls[0].Target != helper || !plainCalls[0].RawPlain {
+		t.Fatalf("plain Index lowered calls = %+v; want one exact representation-only PanicIndex", plainCalls)
+	}
+	if references, err := universe.CoroSyncDemandReferences(root); err != nil {
+		t.Fatal(err)
+	} else if len(references) != 0 {
+		t.Fatalf("plain Index helper leaked into raw ABI references: %v", references)
 	}
 	if calls, err := universe.CoroLoweredCalls(root); err != nil {
 		t.Fatal(err)
@@ -191,8 +204,8 @@ func Root(values []byte, index int) byte { return values[index] }
 		t.Fatalf("physical Index owner plan = %+v, present=%t; want coroutine without helper await", rootPlan, ok)
 	}
 	helperPlan, ok := plan.FunctionPlan(helper)
-	if !ok || helperPlan.ManagedDemand != coro.NoDemand || !helperPlan.RawPlainDemand ||
-		!helperPlan.RawPlainOnly || helperPlan.Emission != coro.EmitRawPlain || !plan.HasRawPlainVariant(helper) {
-		t.Fatalf("plain CheckIndexRange plan = %+v, present=%t, raw-variant=%t", helperPlan, ok, plan.HasRawPlainVariant(helper))
+	if !ok || helperPlan.Demand != coro.NoDemand || helperPlan.RawPlainDemand ||
+		helperPlan.Emission != coro.EmitNone || plan.HasRawPlainVariant(helper) {
+		t.Fatalf("dormant plain PanicIndex plan = %+v, present=%t, raw-variant=%t", helperPlan, ok, plan.HasRawPlainVariant(helper))
 	}
 }

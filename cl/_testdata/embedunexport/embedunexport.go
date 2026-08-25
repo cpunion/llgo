@@ -11,9 +11,11 @@ type Base struct {
 	name string
 }
 
+
 func (b *Base) Name() string {
 	return b.name
 }
+
 
 func (b *Base) setName(name string) {
 	b.name = name

@@ -9,7 +9,7 @@ import (
 // CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @{{.*}}reflect.FuncOf$coro{{.*}}(ptr %0, ptr %{{.*}},
 // CHECK: call ptr @{{.*}}reflect.MakeFunc$coro{{.*}}(ptr %0, ptr %{{.*}},
-// CHECK: call ptr @{{.*}}reflect.Value.Interface$coro{{.*}}(ptr %0, ptr %{{.*}},
+// CHECK: call ptr @{{.*}}reflect.valueInterface$coro{{.*}}(ptr %0, ptr %{{.*}},
 // CHECK: call ptr @{{.*}}runtime.MatchesClosure$coro{{.*}}(ptr %0, ptr %{{.*}},
 // CHECK: call i1 @{{.*}}runtime.StringEqual{{.*}}(
 // CHECK: call ptr %{{.*}}(ptr %0, ptr %{{.*}}, ptr %{{.*}}, %"{{.*}}String" { ptr @{{.*}}, i64 3 }, i64 2)
@@ -28,7 +28,7 @@ func main() {
 // CHECK-LABEL: define ptr @"main.main$1$coro"(ptr %0, ptr %1, %"{{.*}}Slice" %2){{.*}} {
 // CHECK: call void @__llgo_coro_complete_prepare_v2
 // CHECK: call ptr @{{.*}}reflect.Value.String$coro{{.*}}(
-// CHECK: call ptr @{{.*}}reflect.Value.Int$coro{{.*}}(
+// CHECK: call void @{{.*}}reflect.Value.Int$outcome{{.*}}(
 // CHECK: call ptr @{{.*}}strings.Repeat$coro{{.*}}(
 // CHECK: call ptr @{{.*}}reflect.ValueOf$coro{{.*}}(
 // CHECK: }

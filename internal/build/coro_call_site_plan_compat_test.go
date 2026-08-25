@@ -17,7 +17,7 @@
 package build
 
 import (
-	"github.com/goplus/llgo/cl"
+	"github.com/xgo-dev/llgo/cl"
 	"golang.org/x/tools/go/ssa"
 )
 

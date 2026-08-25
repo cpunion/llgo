@@ -357,7 +357,7 @@ func TestExplicitPanicRetainsDescriptorTraceDeepestToRoot(t *testing.T) {
 	}
 }
 
-func TestActiveTraceFrameUsesCurrentCompilerDescriptor(t *testing.T) {
+func TestActiveTraceFramesUsesCurrentCompilerDescriptor(t *testing.T) {
 	fixture := newExplicitPanicFixture(t, 1)
 	frame := fixture.frames[0]
 	descriptor := &FrameDescriptorV1{
@@ -374,31 +374,209 @@ func TestActiveTraceFrameUsesCurrentCompilerDescriptor(t *testing.T) {
 		File:     "/src/main.go",
 		Line:     17,
 	}
-	if got, ok := ActiveTraceFrame(fixture.g); !ok || got != want {
+	snapshot := func() (PanicTraceFrameSnapshot, bool) {
+		var frames [1]PanicTraceFrameSnapshot
+		n, ok := ActiveTraceFrames(fixture.g, frames[:])
+		return frames[0], ok && n == 1
+	}
+	if got, ok := snapshot(); !ok || got != want {
 		t.Fatalf("active trace frame = (%+v, %t), want %+v", got, ok, want)
 	}
 	frame.header.SuspendReason = uint16(SuspendPark)
 	frame.header.Lifecycle = uint16(FrameSuspended)
-	if got, ok := ActiveTraceFrame(fixture.g); !ok || got != want {
+	if got, ok := snapshot(); !ok || got != want {
 		t.Fatalf("park-resume trace frame = (%+v, %t), want %+v", got, ok, want)
 	}
 	frame.header.SuspendReason = uint16(SuspendNone)
-	if got, ok := ActiveTraceFrame(fixture.g); ok || got != (PanicTraceFrameSnapshot{}) {
+	if got, ok := snapshot(); ok || got != (PanicTraceFrameSnapshot{}) {
 		t.Fatalf("incoherent active trace header accepted: %+v", got)
 	}
 	frame.header.Lifecycle = uint16(FrameActive)
 
 	descriptor.Flags = FrameDescriptorTraceHiddenV1
 	want.Hidden = true
-	if got, ok := ActiveTraceFrame(fixture.g); !ok || got != want {
+	if got, ok := snapshot(); !ok || got != want {
 		t.Fatalf("hidden active trace frame = (%+v, %t), want %+v", got, ok, want)
 	}
 	descriptor.Flags |= 1 << 31
-	if got, ok := ActiveTraceFrame(fixture.g); ok || got != (PanicTraceFrameSnapshot{}) {
+	if got, ok := snapshot(); ok || got != (PanicTraceFrameSnapshot{}) {
 		t.Fatalf("invalid active trace descriptor accepted: %+v", got)
 	}
 	runtime.KeepAlive(descriptor)
 	runtime.KeepAlive(frame.memory)
+}
+
+func TestActiveTraceFramesWalksValidatedStacklessAncestry(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 3)
+	descriptors := []*FrameDescriptorV1{
+		{Version: 1, Function: "main.root", File: "/src/main.go"},
+		{Version: 1, Function: "main.parent", File: "/src/main.go"},
+		{Version: 1, Function: "main.leaf", File: "/src/main.go"},
+	}
+	for index, frame := range fixture.frames {
+		frame.descriptor = unsafe.Pointer(descriptors[index])
+		frame.header.Descriptor = frame.descriptor
+		frame.header.Line = uint32((index + 1) * 10)
+	}
+
+	wants := []PanicTraceFrameSnapshot{
+		{Function: "main.leaf", File: "/src/main.go", Line: 30},
+		{Function: "main.parent", File: "/src/main.go", Line: 20},
+		{Function: "main.root", File: "/src/main.go", Line: 10},
+	}
+	got := make([]PanicTraceFrameSnapshot, len(wants))
+	if n, ok := ActiveTraceFrames(fixture.g, got); !ok || n != len(wants) {
+		t.Fatalf("active trace ancestry count = (%d, %t), want (%d, true)", n, ok, len(wants))
+	}
+	for index, want := range wants {
+		if got[index] != want {
+			t.Fatalf("active trace ancestry frame %d = %+v, want %+v", index, got[index], want)
+		}
+	}
+	if n, ok := ActiveTraceFrames(fixture.g, got[:len(got)-1]); ok || n != 0 {
+		t.Fatalf("short active trace destination accepted = (%d, %t)", n, ok)
+	}
+
+	parent := fixture.frames[1]
+	savedParent := parent.header.Parent
+	parent.header.Parent = nil
+	if n, ok := ActiveTraceFrames(fixture.g, got); ok || n != 0 {
+		t.Fatalf("broken compiler parent edge accepted = (%d, %t)", n, ok)
+	}
+	parent.header.Parent = savedParent
+
+	runtime.KeepAlive(descriptors)
+	for _, frame := range fixture.frames {
+		runtime.KeepAlive(frame.memory)
+	}
+}
+
+func TestLogicalPanicTraceColdPathJoinsPhysicalCarrier(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 1)
+	carrier := fixture.frames[0]
+	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	descriptors := []*FrameDescriptorV1{
+		{Version: 1, Function: "main.leaf", File: "/src/main.go"},
+		{Version: 1, Function: "main.parent", File: "/src/main.go"},
+		{Version: 1, Function: "main.root", File: "/src/main.go"},
+	}
+	carrier.descriptor = unsafe.Pointer(descriptors[2])
+	carrier.header.Descriptor = carrier.descriptor
+	carrier.header.Line = 31
+
+	type logicalAllocation struct {
+		words []uintptr
+		raw   unsafe.Pointer
+	}
+	allocate := func() logicalAllocation {
+		total := LogicalPanicTraceFrameAllocationSize()
+		words := make([]uintptr, (total+unsafe.Sizeof(uintptr(0))-1)/unsafe.Sizeof(uintptr(0)))
+		return logicalAllocation{words: words, raw: unsafe.Pointer(&words[0])}
+	}
+	leaf := allocate()
+	if !PrepareLogicalPanicTrace(fixture.g, LogicalPanicTraceNew, typeWord, dataWord) ||
+		!RetainLogicalPanicTraceFrame(
+			fixture.g, leaf.raw, LogicalPanicTraceFrameAllocationSize(),
+			unsafe.Pointer(descriptors[0]), 11, LogicalPanicTraceNew, typeWord, dataWord,
+		) {
+		t.Fatal("retain new logical panic trace")
+	}
+	parent := allocate()
+	if !PrepareLogicalPanicTrace(fixture.g, LogicalPanicTracePropagate, typeWord, dataWord) ||
+		!RetainLogicalPanicTraceFrame(
+			fixture.g, parent.raw, LogicalPanicTraceFrameAllocationSize(),
+			unsafe.Pointer(descriptors[1]), 22, LogicalPanicTracePropagate, typeWord, dataWord,
+		) {
+		t.Fatal("append propagated logical panic trace")
+	}
+	if panicTraceCarrier(fixture.g) != FrameFromStorage(carrier.storage) {
+		t.Fatal("logical trace lost its live physical carrier")
+	}
+
+	fixture.publish(t, typeWord, dataWord)
+	action := fixture.beginPanicDestroy(t)
+	if action.Kind != ActionDestroy || action.Handle != carrier.handle {
+		t.Fatalf("logical trace physical destroy = %+v", action)
+	}
+	raw, total, ok := ReleaseFrame(
+		fixture.g, carrier.storage, carrier.size, carrier.align, carrier.descriptor,
+	)
+	if !ok || !RetainPanicTraceFrame(fixture.g, raw, total) {
+		t.Fatal("append physical carrier to logical trace")
+	}
+	action, ok = fixture.commitDestroyed(action)
+	if !ok || action.Kind != ActionPanicComplete {
+		t.Fatalf("commit logical trace physical destroy = (%+v, %t)", action, ok)
+	}
+
+	wants := []PanicTraceFrameSnapshot{
+		{Function: "main.leaf", File: "/src/main.go", Line: 11},
+		{Function: "main.parent", File: "/src/main.go", Line: 22},
+		{Function: "main.root", File: "/src/main.go", Line: 31},
+	}
+	cursor := FirstPanicTraceFrame(fixture.g)
+	for index, want := range wants {
+		got, next, valid := LoadPanicTraceFrame(fixture.g, cursor)
+		if !valid || got != want {
+			t.Fatalf("logical panic frame %d = (%+v, %t), want %+v", index, got, valid, want)
+		}
+		cursor = next
+	}
+	if cursor != nil {
+		t.Fatal("logical panic trace contains an unexpected tail")
+	}
+	runtime.KeepAlive(leaf.words)
+	runtime.KeepAlive(parent.words)
+	runtime.KeepAlive(descriptors)
+	runtime.KeepAlive(carrier.memory)
+}
+
+func TestLogicalPanicTraceNewModeReplacesIdenticalPayload(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 1)
+	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	descriptor := &FrameDescriptorV1{Version: 1, Function: "main.replacement"}
+	total := LogicalPanicTraceFrameAllocationSize()
+	oldWords := make([]uintptr, (total+unsafe.Sizeof(uintptr(0))-1)/unsafe.Sizeof(uintptr(0)))
+	oldRaw := unsafe.Pointer(&oldWords[0])
+	if !PrepareLogicalPanicTrace(fixture.g, LogicalPanicTraceNew, typeWord, dataWord) ||
+		!RetainLogicalPanicTraceFrame(
+			fixture.g, oldRaw, total, unsafe.Pointer(descriptor), 7,
+			LogicalPanicTraceNew, typeWord, dataWord,
+		) {
+		t.Fatal("retain original logical panic trace")
+	}
+	if !PrepareLogicalPanicTrace(fixture.g, LogicalPanicTraceNew, typeWord, dataWord) ||
+		!PanicTraceDiscardPending(fixture.g) {
+		t.Fatal("identical-payload new panic did not stage replacement")
+	}
+	raw, released, ok := TakeDiscardedPanicTraceFrame(fixture.g)
+	if !ok || raw != oldRaw || released != total {
+		t.Fatalf("replacement release = (%p, %d, %t), want (%p, %d)", raw, released, ok, oldRaw, total)
+	}
+	Zero(raw, released)
+	if raw, released, ok = TakeDiscardedPanicTraceFrame(fixture.g); !ok || raw != nil || released != 0 {
+		t.Fatalf("replacement drain = (%p, %d, %t)", raw, released, ok)
+	}
+	newWords := make([]uintptr, len(oldWords))
+	if !RetainLogicalPanicTraceFrame(
+		fixture.g, unsafe.Pointer(&newWords[0]), total, unsafe.Pointer(descriptor), 9,
+		LogicalPanicTraceNew, typeWord, dataWord,
+	) {
+		t.Fatal("retain identical-payload replacement trace")
+	}
+	got, next, valid := LoadPanicTraceFrame(fixture.g, FirstPanicTraceFrame(fixture.g))
+	// The terminal panic record is not published yet, so public iteration must
+	// remain closed even though the private replacement chain is ready.
+	if valid || next != nil || got != (PanicTraceFrameSnapshot{}) {
+		t.Fatalf("pre-terminal logical trace escaped: (%+v, %p, %t)", got, next, valid)
+	}
+	if fixture.g.panicTraceCount != 1 || fixture.g.panicTraceHead.panicLine != 9 {
+		t.Fatal("replacement logical trace did not own exactly the new node")
+	}
+	runtime.KeepAlive(oldWords)
+	runtime.KeepAlive(newWords)
+	runtime.KeepAlive(descriptor)
+	runtime.KeepAlive(fixture.frames[0].memory)
 }
 
 func TestTerminalReplacementStagesDifferentPayloadTraceForRelease(t *testing.T) {

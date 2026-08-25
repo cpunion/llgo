@@ -19,9 +19,9 @@
 package runtime
 
 import (
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/corofleet"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/corofleet"
 )
 
 // coroNativeReplacementDrainRouteV1 keeps progress and return safety

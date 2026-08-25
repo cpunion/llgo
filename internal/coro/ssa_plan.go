@@ -572,16 +572,17 @@ type SSAConfig struct {
 	// owned, non-ignored bodies and copies the returned slice before use.
 	ClassifyDemandReferences func(owner *ssa.Function) ([]*ssa.Function, error)
 
-	// ClassifyManagedValueReferences supplies exact context-free Go function
-	// values materialized by frontend lowering without a source SSA operand.
+	// ClassifyManagedValueReferences supplies exact noncapturing Go function or
+	// method values materialized by frontend lowering without a source SSA operand.
 	// Unlike ClassifyDemandReferences these are canonical managed descriptors,
 	// not raw ABI method/code words: they force Dispatch representation and
 	// propagate ordinary managed entry demand, but not a call edge or effects.
 	//
 	// Every returned target must be a non-nil exact canonical member of the
-	// effective emission universe with a receiver-free function signature and no
-	// captures. The classifier is owner scoped and its result is copied before
-	// validation.
+	// effective emission universe with a body and no captures. A receiver method
+	// is valid because descriptor lowering normalizes its receiver into the raw
+	// first argument. The classifier is owner scoped and its result is copied
+	// before validation.
 	ClassifyManagedValueReferences func(owner *ssa.Function) ([]*ssa.Function, error)
 
 	// ClassifySyncDemandReferences selects the exact subset of
@@ -2076,7 +2077,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := applySSATrustedInlineCallPlans(callPlans, trustedInlineCalls); err != nil {
 		return nil, err
 	}
-	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids); err != nil {
+	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids, canonicalizer); err != nil {
 		return nil, err
 	}
 	if err := applySSAOutcomePlainPlans(
@@ -2985,10 +2986,9 @@ func classifySSAManagedValueReferences(
 					target.Name(), owner.Name(),
 				)
 			}
-			if target.Signature == nil || target.Signature.Recv() != nil ||
-				len(target.FreeVars) != 0 || len(target.Blocks) == 0 {
+			if target.Signature == nil || len(target.FreeVars) != 0 || len(target.Blocks) == 0 {
 				return nil, nil, fmt.Errorf(
-					"coro: managed function-value target %q in %q is not one bodyful context-free package function",
+					"coro: managed function-value target %q in %q is not one bodyful noncapturing Go function or method",
 					target.Name(), owner.Name(),
 				)
 			}

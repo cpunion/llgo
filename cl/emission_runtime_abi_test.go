@@ -20,11 +20,12 @@ package cl
 
 import (
 	"go/ast"
+	"go/types"
 	"slices"
 	"strings"
 	"testing"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -94,6 +95,72 @@ func Allocate() *int { return new(int) }
 	}
 	if len(lowered) != 1 || lowered[0].LogicalName != "AllocZ" || lowered[0].Target != target {
 		t.Fatalf("complete runtime ABI lowered calls = %+v; want exact AllocZ target", lowered)
+	}
+	plain, ok, err := universe.ResolveCoroPlainLoweredCall(owner, "AllocZ")
+	if err != nil || !ok || plain != target {
+		t.Fatalf("complete runtime ABI plain AllocZ = %v, %t, %v; want the same exact target in the legacy-stack domain", plain, ok, err)
+	}
+	plainCalls, err := universe.CoroPlanningMetadata().PlainLoweredCalls(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plainCalls) != 1 || plainCalls[0].LogicalName != "AllocZ" || plainCalls[0].Target != target || !plainCalls[0].RawPlain {
+		t.Fatalf("complete runtime ABI plain lowered calls = %+v; want exact representation-only AllocZ", plainCalls)
+	}
+	syncReferences, err := universe.CoroSyncDemandReferences(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(syncReferences, target) {
+		t.Fatalf("complete runtime ABI synchronous raw references = %v; representation-only AllocZ must not be published as raw ABI", syncReferences)
+	}
+}
+
+func TestEmissionUniverseFreezesRecoverFrameBindingAsFunctionPreamble(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
+func BindRecoverFrame(function, activation unsafe.Pointer) {}
+func Recover(activation unsafe.Pointer) any { return nil }
+`)
+	callerPkg := testProg.addPackage(t, "example.com/emission/recoverpreamble", `package recoverpreamble
+func Recovering() any { return recover() }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := callerPkg.ssa.Func("Recovering")
+	ownerPackage := universe.packages[callerPkg.ssa]
+	preamble, err := universe.coroProgramIR.functionPreambleForOwner(owner, ownerPackage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preamble.recoverFrameBinding ||
+		!slices.Equal(preamble.managedRuntimeHelpers, []string{"BindRecoverFrame"}) {
+		t.Fatalf("recover preamble = %+v; want one exact frame binding", preamble)
+	}
+	if recipe, err := preamble.loweringRecipe(); err != nil || recipe != "cl.function-preamble.recover-frame.v0" {
+		t.Fatalf("recover preamble recipe = %q, %v", recipe, err)
+	}
+	target := runtimePkg.ssa.Func("BindRecoverFrame")
+	if managed, ok, err := universe.ResolveCoroLoweredCall(owner, "BindRecoverFrame"); err != nil || !ok || managed != target {
+		t.Fatalf("managed recover binding = %v, %t, %v; want exact runtime target", managed, ok, err)
+	}
+	if plain, ok, err := universe.ResolveCoroPlainLoweredCall(owner, "BindRecoverFrame"); err != nil || !ok || plain != target {
+		t.Fatalf("plain recover binding = %v, %t, %v; want exact runtime target", plain, ok, err)
+	}
+	if references, err := universe.CoroSyncDemandReferences(owner); err != nil {
+		t.Fatal(err)
+	} else if slices.Contains(references, target) {
+		t.Fatalf("recover preamble binding leaked into raw ABI references: %v", references)
 	}
 }
 
@@ -231,7 +298,7 @@ func CoroChanTryRecv(task *byte, ch chan int, value *int, size int) (bool, bool)
 func CoroChanTryClose(ch chan int) uint32 { return 0 }
 func CoroChanTryCloseTask(task *byte, ch chan int) uint32 { return 0 }
 type ChanOp struct{}
-func CoroChanSelectTry(ops ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectTry(task *byte, ops ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(ops ...ChanOp) {}
 func CoroChanSelectResume(ops ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func ChanSend(ch chan int, value *int, size int) bool { return false }

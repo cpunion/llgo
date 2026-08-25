@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/goplus/llgo/cmd/internal/base"
-	"github.com/goplus/llgo/cmd/internal/flags"
-	"github.com/goplus/llgo/internal/build"
-	"github.com/goplus/llgo/internal/mockable"
+	"github.com/xgo-dev/llgo/cmd/internal/base"
+	"github.com/xgo-dev/llgo/cmd/internal/flags"
+	"github.com/xgo-dev/llgo/internal/build"
+	"github.com/xgo-dev/llgo/internal/mockable"
 )
 
 // llgo build
@@ -42,6 +42,7 @@ func init() {
 	flags.AddCommonFlags(&Cmd.Flag)
 	flags.AddCompilerVerboseFlag(&Cmd.Flag)
 	flags.AddBuildFlags(&Cmd.Flag)
+	flags.AddBuildTraceFlag(&Cmd.Flag)
 	flags.AddBuildModeFlags(&Cmd.Flag)
 	flags.AddEmulatorFlags(&Cmd.Flag)
 	flags.AddEmbeddedFlags(&Cmd.Flag)
@@ -59,6 +60,7 @@ func runCmd(cmd *base.Command, args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		mockable.Exit(1)
 	}
+	conf.BuildTrace = flags.BuildTrace
 	if err := flags.ApplyGoBuildFlags(conf, goBuildFlags.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		mockable.Exit(1)

@@ -26,9 +26,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -45,6 +45,10 @@ const (
 	coroProgramContinueSliceSymbolV2                            = "__llgo_coro_program_continue_slice_v2"
 	coroProgramReportPanicSymbolV1                              = "__llgo_coro_program_report_panic_v1"
 	coroPanicTraceReplaceSymbolV1                               = "__llgo_coro_panic_trace_replace_v1"
+	coroPanicTraceAppendSymbolV1                                = "__llgo_coro_panic_trace_append_v1"
+	coroRecoverTakeSymbolV1                                     = "__llgo_coro_recover_take_v1"
+	coroRecoverAliasBeginSymbolV1                               = "__llgo_coro_recover_alias_begin_v1"
+	coroRecoverAliasEndSymbolV1                                 = "__llgo_coro_recover_alias_end_v1"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 	coroNativeWorkerCompleteSymbolV1                            = "__llgo_coro_native_worker_complete_v1"
 	coroNativeFleetOwnerSymbolV2                                = "__llgo_coro_native_fleet_owner_v2"

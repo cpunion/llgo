@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/typepatch"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/typepatch"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 

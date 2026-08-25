@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"go/types"
 
-	"github.com/goplus/llgo/cl/ssawrap"
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/cl/ssawrap"
+	"github.com/xgo-dev/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 

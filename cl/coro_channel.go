@@ -21,7 +21,7 @@ import (
 	"go/token"
 	"go/types"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -354,7 +354,7 @@ func (p *context) compileCoroChanSelect(b llssa.Builder, states []*llssa.SelectS
 	defer frame.Dispose()
 	frame.SetBlockEx(p.fn.Block(0), llssa.AtStart, true)
 	plan := b.NewCoroSelectInFrame(frame, states)
-	attempt := b.CoroChanSelectTry(plan)
+	attempt := b.CoroChanSelectTry(body.task, plan)
 	chosenSlot := p.coroFrameAlloca(b.Prog.Int())
 	recvOKSlot := p.coroFrameAlloca(b.Prog.Bool())
 	b.Store(chosenSlot, b.Extract(attempt, 0))
@@ -395,7 +395,7 @@ func (p *context) compileCoroChanSelect(b llssa.Builder, states []*llssa.SelectS
 func (p *context) compileCoroChanTrySelect(b llssa.Builder, states []*llssa.SelectState) llssa.Expr {
 	body := p.requireCoroChannelBody(b)
 	plan := b.NewCoroSelect(states)
-	attempt := b.CoroChanSelectTry(plan)
+	attempt := b.CoroChanSelectTry(body.task, plan)
 	closed := b.Func.MakeBlock()
 	normal := b.Func.MakeBlock()
 	b.If(b.Extract(attempt, 3), closed, normal)

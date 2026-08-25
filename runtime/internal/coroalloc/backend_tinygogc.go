@@ -21,7 +21,7 @@ package coroalloc
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/runtime/tinygogc"
+	"github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc"
 )
 
 const backendKind = "tinygogc"

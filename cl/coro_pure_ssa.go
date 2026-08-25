@@ -24,8 +24,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -322,6 +322,14 @@ func coroPhysicalConstantReachableBlocks(fn *ssa.Function) map[*ssa.BasicBlock]b
 		return reachable
 	}
 	queue := []*ssa.BasicBlock{fn.Blocks[0]}
+	if fn.Recover != nil && fn.Recover != fn.Blocks[0] {
+		// x/tools represents the exceptional recover continuation as a second
+		// semantic root with no ordinary CFG predecessor. Both the legacy unwind
+		// path and the explicit-status cleanup drainer can enter it, so treating
+		// it as dead would freeze frontend-unevaluated instructions and let LLVM
+		// optimize a real recovered return through unreachable behavior.
+		queue = append(queue, fn.Recover)
+	}
 	for len(queue) != 0 {
 		block := queue[0]
 		queue = queue[1:]
@@ -513,7 +521,7 @@ func (a *coroPhysicalPureSSAAudit) derefRequiresImplicitNilFault(deref *ssa.UnOp
 	if a == nil || deref == nil || deref.Op != token.MUL {
 		return false
 	}
-	if ssaValueProvenNonNilAt(deref.X, deref) {
+	if ssaAddressValueProvenNonNilAt(deref.X, deref) {
 		return false
 	}
 	if _, _, synthetic := coroSliceToArrayValueDeref(deref, a.typeOf); synthetic {
@@ -621,13 +629,13 @@ func (a *coroPhysicalPureSSAAudit) validateIndexAddr(index *ssa.IndexAddr) strin
 	if a.allowImplicitNilFault {
 		proof := a.currentFrameRetentionProof()
 		if proof != nil && proof.provesGuardableStableAddress(index, index) {
-			// ExplicitStatus codegen replaces CheckIndexRange (and a possible
+			// ExplicitStatus codegen replaces PanicIndex/PanicIndexU (and a possible
 			// *array nil helper) with compiler-owned terminal branches before the
 			// unchecked address is formed.
-			return a.requireOnlyCompilerElidedRuntimeHelpers(index, "CheckIndexRange", "AssertNilDeref")
+			return a.requireOnlyCompilerElidedRuntimeHelpers(index, "PanicIndex", "PanicIndexU", "AssertNilDeref")
 		}
 	}
-	return a.requireNoRuntimeHelpersExcept(index, "CheckIndexRange", "AssertNilDeref")
+	return a.requireNoRuntimeHelpersExcept(index, "PanicIndex", "PanicIndexU", "AssertNilDeref")
 }
 
 func (a *coroPhysicalPureSSAAudit) validateIndex(index *ssa.Index) string {
@@ -656,10 +664,10 @@ func (a *coroPhysicalPureSSAAudit) validateIndex(index *ssa.Index) string {
 		// before an unchecked load.
 		if a.ctx != nil && emissionIndexNeedsManagedArrayTemporary(a.ctx, index) {
 			return a.requireCompilerElidedAndDirectNoSuspendRuntimeHelper(
-				index, "AllocZ", "CheckIndexRange", "AssertNilDeref",
+				index, "AllocZ", "PanicIndex", "PanicIndexU", "AssertNilDeref",
 			)
 		}
-		return a.requireOnlyCompilerElidedRuntimeHelpers(index, "CheckIndexRange", "AssertNilDeref")
+		return a.requireOnlyCompilerElidedRuntimeHelpers(index, "PanicIndex", "PanicIndexU", "AssertNilDeref")
 	}
 	array, ok := types.Unalias(a.typeOf(index.X.Type())).Underlying().(*types.Array)
 	if !ok || !coroConstantIndexInBounds(index.Index, array.Len()) {
@@ -1212,11 +1220,20 @@ func (a *coroPhysicalPureSSAAudit) validateLookup(lookup *ssa.Lookup) string {
 			return "Lookup " + name + " has unsupported type: " + err.Error()
 		}
 	}
-	helper := "MapAccess1"
-	if lookup.CommaOk {
-		helper = "MapAccess2"
+	helpers, exact := emissionMapRuntimeHelpers(a.ctx, lookup.X.Type())
+	if !exact {
+		return "Lookup has no exact LLSSA map runtime-helper plan"
 	}
-	return a.requireFrozenStructuredRuntimeHelpers(lookup, "AllocU", helper)
+	required := make([]string, 0, 2)
+	if helpers.KeyNeedsTemporary {
+		required = append(required, "AllocU")
+	}
+	if lookup.CommaOk {
+		required = append(required, helpers.Access2)
+	} else {
+		required = append(required, helpers.Access1)
+	}
+	return a.requireFrozenStructuredRuntimeHelpers(lookup, required...)
 }
 
 func (a *coroPhysicalPureSSAAudit) validateMapUpdate(update *ssa.MapUpdate) string {
@@ -1240,7 +1257,16 @@ func (a *coroPhysicalPureSSAAudit) validateMapUpdate(update *ssa.MapUpdate) stri
 			return "MapUpdate " + name + " has unsupported type: " + err.Error()
 		}
 	}
-	return a.requireFrozenStructuredRuntimeHelpers(update, "AllocU", "MapAssign")
+	helpers, exact := emissionMapRuntimeHelpers(a.ctx, update.Map.Type())
+	if !exact {
+		return "MapUpdate has no exact LLSSA map runtime-helper plan"
+	}
+	required := make([]string, 0, 2)
+	if helpers.KeyNeedsTemporary {
+		required = append(required, "AllocU")
+	}
+	required = append(required, helpers.Assign)
+	return a.requireFrozenStructuredRuntimeHelpers(update, required...)
 }
 
 func (a *coroPhysicalPureSSAAudit) validateRange(rng *ssa.Range) string {
@@ -3007,7 +3033,7 @@ func (a *coroPhysicalPureSSAAudit) validateUnsafeDataBuiltin(call *ssa.Call, nam
 }
 
 // validateDeleteBuiltin binds the language builtin to the same owner-scoped
-// map-key allocation and MapDelete helpers used by ordinary LLSSA lowering.
+// generic/fast map helper plan used by ordinary LLSSA lowering.
 // In particular, delete is not assumed non-blocking: each helper must still be
 // proven plain/no-unwind or represented as a managed coroutine child.
 func (a *coroPhysicalPureSSAAudit) validateDeleteBuiltin(call *ssa.Call) string {
@@ -3034,7 +3060,16 @@ func (a *coroPhysicalPureSSAAudit) validateDeleteBuiltin(call *ssa.Call) string 
 			return "delete " + name + " has unsupported type: " + err.Error()
 		}
 	}
-	return a.requireFrozenStructuredRuntimeHelpers(call, "AllocU", "MapDelete")
+	helpers, exact := emissionMapRuntimeHelpers(a.ctx, mapping.Type())
+	if !exact {
+		return "delete has no exact LLSSA map runtime-helper plan"
+	}
+	required := make([]string, 0, 2)
+	if helpers.KeyNeedsTemporary {
+		required = append(required, "AllocU")
+	}
+	required = append(required, helpers.Delete)
+	return a.requireFrozenStructuredRuntimeHelpers(call, required...)
 }
 
 // validatePrintBuiltin freezes Builder.PrintEx's exact lowering. Printing is
@@ -3502,16 +3537,51 @@ func (a *coroPhysicalPureSSAAudit) plannedRuntimeHelpers(instr ssa.Instruction) 
 	if a == nil || a.ctx == nil || a.universe == nil || instr == nil {
 		return nil, "runtime helper validation requires an exact frozen site plan"
 	}
-	helpers, err := a.universe.coroProgramIR.plannedRuntimeHelpers(a.ctx, instr)
+	site, err := a.universe.coroProgramIR.sitePlan(a.ctx, instr)
 	if err != nil {
 		return nil, "load frozen runtime helper site plan: " + err.Error()
 	}
-	semantic := helpers[:0]
-	for _, helper := range helpers {
+	semantic := make([]string, 0, len(site.managedRuntimeHelpers))
+	locality := make([]string, 0, 2)
+	for _, planned := range site.managedRuntimeHelpers {
+		helper := planned.name
 		if coroLogicalCallerRuntimeHelper(helper) {
 			continue
 		}
+		switch helper {
+		case "LocalPackageLogical", "EnsureLogicalLocalInitializer":
+			// Logical locality is an orthogonal compiler-inserted prefix around
+			// the source operation. Its exact helper edges and func() dispatcher
+			// values are already frozen in this SitePlan; validate that prefix
+			// once here, then let the opcode-specific audit reason only about the
+			// helpers introduced by the source operation itself.
+			locality = append(locality, helper)
+			continue
+		}
 		semantic = append(semantic, helper)
+	}
+	if len(locality) != 0 || len(site.localityDispatchers) != 0 {
+		expected := []string{"LocalPackageLogical"}
+		if len(site.localityDispatchers) != 0 {
+			expected = append(expected, "EnsureLogicalLocalInitializer")
+		}
+		if reason := a.requireFrozenStructuredRuntimeHelperInventory(instr, locality, expected...); reason != "" {
+			return nil, "logical locality helper prefix: " + reason
+		}
+		for _, dispatcher := range site.localityDispatchers {
+			if dispatcher == nil || a.plan == nil {
+				return nil, "logical locality dispatcher lacks an exact managed value plan"
+			}
+			function, planned := a.plan.FunctionPlan(dispatcher)
+			value, valuePlanned := a.plan.ValuePlan(dispatcher)
+			if !planned || function.Demand == coro.NoDemand || function.FuncRep != coro.Dispatch ||
+				!valuePlanned || value.Value != dispatcher || len(value.Funcs) != 1 ||
+				value.Funcs[0].Rep != coro.Dispatch || value.Funcs[0].Transport != coro.ManagedTransport ||
+				value.Funcs[0].MayBeNil || len(value.Funcs[0].Targets) != 1 ||
+				value.Funcs[0].Targets[0] != function.ID {
+				return nil, "logical locality dispatcher lacks its exact demanded managed Dispatch value"
+			}
+		}
 	}
 	return semantic, ""
 }

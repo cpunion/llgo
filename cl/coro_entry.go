@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"go/types"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -704,12 +704,20 @@ func (c *Compilation) preflightCoroPlan() error {
 					if err := ownerEntry.checkSupportedWithPhysicalPlan(func(plan *coroPhysicalFunctionPlan) error {
 						return physicalStage.freezePhysicalFunctionPlan(plan)
 					}); err != nil {
-						c.coroPreflightErr = err
+						c.coroPreflightErr = fmt.Errorf(
+							"%w; demand trace: %s; ABI reference trace: %s",
+							err, plan.DemandTrace(function.Function),
+							coroDemandReferenceTrace(universe, function.Function, plan),
+						)
 						return
 					}
 				}
 			} else if err := entry.checkSupported(); err != nil {
-				c.coroPreflightErr = err
+				c.coroPreflightErr = fmt.Errorf(
+					"%w; demand trace: %s; ABI reference trace: %s",
+					err, plan.DemandTrace(function.Function),
+					coroDemandReferenceTrace(universe, function.Function, plan),
+				)
 				return
 			}
 			if function.Plan.Emission == coro.EmitCoroutine || function.Plan.Emission == coro.EmitOutcomePlain {
@@ -731,17 +739,17 @@ func (c *Compilation) preflightCoroPlan() error {
 			return
 		}
 		if err := validateCoroRawPlainConsumers(plan, universe, true); err != nil {
-			c.coroPreflightErr = err
+			c.coroPreflightErr = fmt.Errorf("coroutine raw/plain consumer preflight: %w", err)
 			return
 		}
-		c.coroPreflightErr = validateCoroPhysicalConsumersCapabilities(plan, universe, true, true, true)
-		if c.coroPreflightErr != nil {
+		if err := validateCoroPhysicalConsumersCapabilities(plan, universe, true, true, true); err != nil {
+			c.coroPreflightErr = fmt.Errorf("coroutine physical consumer preflight: %w", err)
 			return
 		}
-		c.coroPreflightErr = validateCoroPlainDispatchConsumers(
+		if err := validateCoroPlainDispatchConsumers(
 			plan, universe, c.coroClosedInterfacePlain, c.coroManagedInterface,
-		)
-		if c.coroPreflightErr != nil {
+		); err != nil {
+			c.coroPreflightErr = fmt.Errorf("coroutine managed dispatch consumer preflight: %w", err)
 			return
 		}
 		if err := universe.coroProgramIR.commitPhysicalFunctionPlans(physicalStage, physicalExpected); err != nil {

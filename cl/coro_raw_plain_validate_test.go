@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -66,6 +66,80 @@ func Host() int { return A() }
 	err = rawPlainValidationCompilation(plan, universe, false).preflightCoroPlan()
 	if err == nil || !strings.Contains(err.Error(), "raw plain static call target disagrees with its frozen CallPlan target") {
 		t.Fatalf("forged raw static edge preflight error = %v", err)
+	}
+}
+
+func TestCoroRawPlainSourceCallAcceptsExactCanonicalAlias(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func Original() int { return 1 }
+func Replacement() int { return 2 }
+func Host() int { return Original() }
+`)
+	host := ssaPkg.Func("Host")
+	original := ssaPkg.Func("Original")
+	replacement := ssaPkg.Func("Replacement")
+	var staticCall *ssa.Call
+	for _, block := range host.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common().StaticCallee() == original {
+				staticCall = call
+			}
+		}
+	}
+	if staticCall == nil {
+		t.Fatal("Host has no static Original call")
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{host, replacement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(fn *ssa.Function) (*ssa.Function, bool, error) {
+		if fn == original {
+			return replacement, true, nil
+		}
+		return fn, ssaUniverse.Contains(fn), nil
+	}
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: host, ManagedDemand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			MaxPlainInstructions: -1,
+			ResolveFunction:      resolve,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == replacement {
+					return coro.SSAFunctionPolicy{TrustedNoPreempt: true, TrustedNoUnwind: true}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyRawPlainCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.SSARawPlainCallCertificate, bool, error) {
+				if call == staticCall {
+					return coro.SSARawPlainCallCertificate{ID: "test.raw-critical.canonical.v1"}, true, nil
+				}
+				return coro.SSARawPlainCallCertificate{}, false, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _, err := validateCoroRawPlainSourceCall(
+		plan,
+		func(fn *ssa.Function) (*ssa.Function, bool) {
+			canonical, ok, resolveErr := resolve(fn)
+			if resolveErr != nil {
+				t.Fatal(resolveErr)
+			}
+			return canonical, ok
+		},
+		staticCall,
+	)
+	if err != nil {
+		t.Fatalf("validate exact canonical alias: %v", err)
+	}
+	if target != replacement {
+		t.Fatalf("raw/plain target=%v, want canonical replacement %v", target, replacement)
 	}
 }
 

@@ -21,7 +21,7 @@ import (
 	"runtime"
 	"strings"
 
-	llssa "github.com/goplus/llgo/ssa"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 const coroWorkerNativeTargetRequirement = "native Darwin/Linux pthread worker adapter"

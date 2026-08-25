@@ -2,15 +2,15 @@
 package main
 
 import (
-	"github.com/goplus/llgo/cl/_testdrop/generic_interface_func_crosspkg/api"
-	"github.com/goplus/llgo/cl/_testdrop/generic_interface_func_crosspkg/model"
+	"github.com/xgo-dev/llgo/cl/_testdrop/generic_interface_func_crosspkg/api"
+	"github.com/xgo-dev/llgo/cl/_testdrop/generic_interface_func_crosspkg/model"
 )
 
 // SYMBOL-NOT: testdrop/generic_interface_func_crosspkg/model{{.*}}Box{{.*}}int{{.*}}Drop
 // SYMBOL-NOT: testdrop/generic_interface_func_crosspkg/model{{.*}}Box{{.*}}uint{{.*}}Drop
 // SYMBOL-NOT: testdrop/generic_interface_func_crosspkg/model{{.*}}Box{{.*}}string{{.*}}Value
-// SYMBOL-DAG: _llgo_github.com/goplus/llgo/cl/_testdrop/generic_interface_func_crosspkg/model.Box[int]
-// SYMBOL-DAG: _llgo_github.com/goplus/llgo/cl/_testdrop/generic_interface_func_crosspkg/model.Box[uint]
+// SYMBOL-DAG: _llgo_github.com/xgo-dev/llgo/cl/_testdrop/generic_interface_func_crosspkg/model.Box[int]
+// SYMBOL-DAG: _llgo_github.com/xgo-dev/llgo/cl/_testdrop/generic_interface_func_crosspkg/model.Box[uint]
 // SYMBOL-NOT: testdrop/generic_interface_func_crosspkg/model{{.*}}Box{{.*}}int{{.*}}Drop
 // SYMBOL-NOT: testdrop/generic_interface_func_crosspkg/model{{.*}}Box{{.*}}uint{{.*}}Drop
 // SYMBOL-NOT: testdrop/generic_interface_func_crosspkg/model{{.*}}Box{{.*}}string{{.*}}Value

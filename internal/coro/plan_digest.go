@@ -1158,9 +1158,8 @@ func (p *SSAPlan) validateDigestManagedValueReference(owner FunctionID, index in
 	if !planned {
 		return fmt.Errorf("coro: %s targets a function outside the plan", formatDigestValueSite(site))
 	}
-	if target.Signature == nil || target.Signature.Recv() != nil ||
-		len(target.FreeVars) != 0 || len(target.Blocks) == 0 {
-		return fmt.Errorf("coro: %s no longer targets one bodyful context-free package function", formatDigestValueSite(site))
+	if target.Signature == nil || len(target.FreeVars) != 0 || len(target.Blocks) == 0 {
+		return fmt.Errorf("coro: %s no longer targets one bodyful noncapturing Go function or method", formatDigestValueSite(site))
 	}
 	plan, valuePlanned := p.valuePlans[target]
 	if !valuePlanned || plan.Value != target || len(plan.Funcs) != 1 ||

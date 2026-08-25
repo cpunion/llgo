@@ -21,10 +21,10 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	clitedebug "github.com/goplus/llgo/runtime/internal/clite/debug"
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/abi"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	clitedebug "github.com/xgo-dev/llgo/runtime/internal/clite/debug"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 const coroTerminalPanicFrameLimit = 4096

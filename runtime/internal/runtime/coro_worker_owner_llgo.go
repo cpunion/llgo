@@ -21,8 +21,8 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/coroworker"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coroworker"
 )
 
 const coroWorkerParkMagicV1 uint32 = 0x43574b31 // "CWK1"

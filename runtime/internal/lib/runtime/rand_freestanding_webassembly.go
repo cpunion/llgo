@@ -21,7 +21,7 @@ package runtime
 import (
 	_ "unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/runtime/math"
+	"github.com/xgo-dev/llgo/runtime/internal/runtime/math"
 )
 
 var fastRandState uint32 = 0x9e3779b9

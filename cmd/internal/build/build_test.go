@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/mockable"
+	"github.com/xgo-dev/llgo/internal/mockable"
 )
 
 func TestRunCmdPassesGoBuildFlags(t *testing.T) {
@@ -55,5 +55,15 @@ func TestRunCmdPassesGoBuildFlags(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "missing") {
 		t.Fatalf("stderr = %q, want missing-package diagnostic", data)
+	}
+}
+
+func TestBuildCommandHasSchedulerTraceFlag(t *testing.T) {
+	flag := Cmd.Flag.Lookup("debug-trace")
+	if flag == nil {
+		t.Fatal("llgo build has no -debug-trace flag")
+	}
+	if !strings.Contains(flag.Usage, "Chrome/Perfetto") {
+		t.Fatalf("-debug-trace usage = %q", flag.Usage)
 	}
 }

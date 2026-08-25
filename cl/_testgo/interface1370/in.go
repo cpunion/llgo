@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/goplus/llgo/cl/_testdata/geometry1370"
+	"github.com/xgo-dev/llgo/cl/_testdata/geometry1370"
 )
 
 func main() {

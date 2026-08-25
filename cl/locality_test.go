@@ -10,13 +10,17 @@ import (
 	"strings"
 	"testing"
 
-	llssa "github.com/goplus/llgo/ssa"
-	"github.com/goplus/llgo/ssa/abi"
-	"github.com/goplus/llgo/ssa/ssatest"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"golang.org/x/tools/go/ssa"
 )
 
 func compileLocalitySource(t *testing.T, src string) (llssa.Program, string) {
+	return compileLocalitySourceWithOptions(t, src, Options{})
+}
+
+func compileLocalitySourceWithOptions(t *testing.T, src string, options Options) (llssa.Program, string) {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "locality.go", src, parser.ParseComments)
@@ -33,7 +37,7 @@ func compileLocalitySource(t *testing.T, src string) (llssa.Program, string) {
 	prog := ssatest.NewProgramEx(t, nil, imp)
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
 	prog.SetRuntime(localityRuntimePackage())
-	if err := ParsePkgSyntax(prog, fset, pkg, files); err != nil {
+	if err := ParsePkgSyntaxWithOptions(prog, fset, pkg, files, options); err != nil {
 		t.Fatal(err)
 	}
 	if err := PrepareLocalVariables(prog, fset, pkg, info, files); err != nil {
@@ -42,7 +46,9 @@ func compileLocalitySource(t *testing.T, src string) (llssa.Program, string) {
 	goProg := ssa.NewProgram(fset, ssa.SanityCheckFunctions)
 	ssaPkg := goProg.CreatePackage(pkg, files, info, true)
 	ssaPkg.Build()
-	compiled, err := NewPackage(prog, ssaPkg, files)
+	compiled, _, err := NewPackageExWithEmbedMetaOptions(
+		prog, nil, nil, nil, ssaPkg, files, nil, false, options,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +205,7 @@ func values() (int, *int, int, *int) {
 	if got := strings.Count(ir, `@"example.com/locality.__llgo_local_cache" = thread_local global ptr null`); got != 1 {
 		t.Fatalf("package block caches = %d, want 1:\n%s", got, ir)
 	}
-	if got := strings.Count(ir, `call ptr @"github.com/goplus/llgo/runtime/internal/runtime.LocalPackage"`); got != 1 {
+	if got := strings.Count(ir, `call ptr @"github.com/xgo-dev/llgo/runtime/internal/runtime.LocalPackage"`); got != 1 {
 		t.Fatalf("LocalPackage calls = %d, want one accessor definition:\n%s", got, ir)
 	}
 	values := llvmFunction(t, ir, "example.com/locality.values")
@@ -218,11 +224,7 @@ func values() (int, *int, int, *int) {
 }
 
 func TestLocalityDebugInfoOnlyUsesFixedGlobals(t *testing.T) {
-	EnableDebug(true)
-	EnableDbgSyms(true)
-	defer EnableDebug(false)
-	defer EnableDbgSyms(false)
-	_, ir := compileLocalitySource(t, `package locality
+	_, ir := compileLocalitySourceWithOptions(t, `package locality
 
 //llgo:tls
 var direct int
@@ -231,7 +233,7 @@ var direct int
 var pointer *int
 
 func values() (int, *int) { return direct, pointer }
-`)
+`, Options{Debug: true, DebugSymbols: true})
 
 	direct := `@"example.com/locality.direct" = thread_local global i64`
 	start := strings.Index(ir, direct)

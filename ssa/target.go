@@ -21,20 +21,25 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/goplus/llgo/internal/optlevel"
-	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
+	archcfg "github.com/xgo-dev/llgo/internal/goarch"
+	"github.com/xgo-dev/llgo/internal/optlevel"
+	intllvm "github.com/xgo-dev/llgo/internal/xtool/llvm"
 	"github.com/xgo-dev/llvm"
 )
 
 // -----------------------------------------------------------------------------
 
 type Target struct {
-	GOOS       string
-	GOARCH     string
-	GOARM      string // "5", "6", "7" (default)
-	Target     string // target name from -target flag (e.g., "esp32", "arm7tdmi", "wasi")
-	LLVMTarget string // physical LLVM target selected by a target configuration
-	OptLevel   optlevel.Level
+	GOOS                    string
+	GOARCH                  string
+	GO386                   string // "sse2" (default) or "softfloat"
+	GOAMD64                 string // "v1" (default), "v2", "v3", or "v4"
+	GOARM                   string // "5", "6", "7" (default), with optional float mode
+	GOARM64                 string // "v8.0" (default) through "v9.5", with optional extensions
+	Target                  string // target name from -target flag (e.g., "esp32", "arm7tdmi", "wasi")
+	LLVMTarget              string // physical LLVM target selected by a target configuration
+	OptLevel                optlevel.Level
+	SaturatingFloatToUint32 bool
 
 	// Resolved is the requested LLVM configuration produced by target
 	// resolution. When it is nil, Spec derives the legacy defaults from
@@ -42,6 +47,20 @@ type Target struct {
 	// TargetABI authoritative even when any is intentionally empty. NewProgram
 	// records this requested value separately from the effective in-process target.
 	Resolved *TargetSpec
+}
+
+func (p *Target) effectiveGOOS() string {
+	if p.GOOS == "" {
+		return runtime.GOOS
+	}
+	return p.GOOS
+}
+
+func (p *Target) effectiveGOARCH() string {
+	if p.GOARCH == "" {
+		return runtime.GOARCH
+	}
+	return p.GOARCH
 }
 
 func (p *Target) targetInfo(ctx llvm.Context, spec TargetSpec) (TargetSpec, llvm.TargetData, llvm.TargetMachine) {
@@ -196,9 +215,9 @@ func (p *Target) effectiveOptLevel() optlevel.Level {
 		return p.OptLevel
 	}
 	if p != nil && p.Target != "" {
-		return optlevel.Oz
+		return optlevel.TargetDefault
 	}
-	return optlevel.O2
+	return optlevel.Default
 }
 
 func (p *Target) codeGenOptLevel() llvm.CodeGenOptLevel {
@@ -249,14 +268,8 @@ func (p *Target) useWasmObjectSections() bool {
 }
 
 func (p *Target) useNativeObjectSections() bool {
-	goos := p.GOOS
-	if goos == "" {
-		goos = runtime.GOOS
-	}
-	goarch := p.GOARCH
-	if goarch == "" {
-		goarch = runtime.GOARCH
-	}
+	goos := p.effectiveGOOS()
+	goarch := p.effectiveGOARCH()
 	return p.Target == "" && goos == runtime.GOOS && goarch == runtime.GOARCH && goarch != "wasm"
 }
 
@@ -271,6 +284,13 @@ type TargetSpec struct {
 	TargetABI string
 }
 
+func (p *Target) goArchitectureSetting(value string) string {
+	if p.Target != "" {
+		return ""
+	}
+	return value
+}
+
 func (p *Target) Spec() TargetSpec {
 	if p.Resolved != nil && p.Resolved.Triple != "" {
 		return *p.Resolved
@@ -278,13 +298,79 @@ func (p *Target) Spec() TargetSpec {
 	return p.defaultSpec()
 }
 
-func (p *Target) defaultSpec() TargetSpec {
-	resolved := intllvm.GetTargetSpec(p.GOOS, p.GOARCH, p.GOARM)
-	return TargetSpec{
-		Triple:   resolved.Triple,
-		CPU:      resolved.CPU,
-		Features: resolved.Features,
+func (p *Target) defaultSpec() (spec TargetSpec) {
+	// Configure based on GOOS/GOARCH environment variables (falling back to
+	// runtime.GOOS/runtime.GOARCH), and generate a LLVM target based on it.
+	goarch := p.effectiveGOARCH()
+	goos := p.effectiveGOOS()
+	goarm := p.goArchitectureSetting(p.GOARM)
+	spec.Triple = intllvm.GetTargetTripleWithGOARM(goos, goarch, goarm)
+	// Build validates these settings before constructing Target. Spec also
+	// accepts hand-built Targets, so it intentionally uses each resolver's
+	// documented Go-default fallback when its error cannot be returned here.
+	switch goarch {
+	case "386":
+		spec.CPU = "pentium4"
+		go386, _ := archcfg.Resolve386(p.goArchitectureSetting(p.GO386))
+		if go386 == "softfloat" {
+			spec.Features = "+cx8,+fxsr,+mmx,+soft-float,-sse,-sse2,-x87"
+		} else {
+			spec.Features = "+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
+		}
+	case "amd64":
+		goamd64, _ := archcfg.ResolveAMD64(p.goArchitectureSetting(p.GOAMD64))
+		spec.CPU = "x86-64"
+		if goamd64 != "v1" {
+			spec.CPU += "-" + goamd64
+		}
+		spec.Features = "+cx8,+fxsr,+mmx,+sse,+sse2,+x87"
+	case "arm":
+		spec.CPU = "generic"
+		arm, _ := archcfg.ParseARM(goarm)
+		switch arm.Version {
+		case "5":
+			if arm.SoftFloat {
+				spec.Features = "+armv5t,+strict-align,-aes,-bf16,-d32,-dotprod,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fp64,-fpregs,-fullfp16,-mve.fp,-neon,-sha2,-thumb-mode,-vfp2,-vfp2sp,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
+			} else {
+				// GOARM=5,hardfloat explicitly enables VFPv2 without also
+				// carrying contradictory disable tokens for the same features.
+				spec.Features = "+armv5t,+strict-align,-aes,-bf16,-d32,-dotprod,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,+fp64,+fpregs,-fullfp16,-mve.fp,-neon,-sha2,-thumb-mode,+vfp2,+vfp2sp,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
+			}
+		case "6":
+			spec.Features = "+armv6,+dsp,+fp64,+strict-align,+vfp2,+vfp2sp,-aes,-d32,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fullfp16,-neon,-sha2,-thumb-mode,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
+		case "7":
+			spec.Features = "+armv7-a,+d32,+dsp,+fp64,+neon,+vfp2,+vfp2sp,+vfp3,+vfp3d16,+vfp3d16sp,+vfp3sp,-aes,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fullfp16,-sha2,-thumb-mode,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp"
+		}
+		if arm.SoftFloat {
+			spec.Features += ",+soft-float"
+		}
+	case "arm64":
+		spec.CPU = "generic"
+		arm64, _ := archcfg.ParseARM64(p.goArchitectureSetting(p.GOARM64))
+		archFeature := arm64.Version + "a"
+		if arm64.Version == "v9.0" {
+			archFeature = "v9a"
+		}
+		features := make([]string, 0, 5)
+		if arm64.Version != "v8.0" {
+			features = append(features, "+"+archFeature)
+		}
+		features = append(features, "+neon")
+		if arm64.LSE {
+			features = append(features, "+lse")
+		}
+		if arm64.Crypto {
+			features = append(features, "+crypto")
+		}
+		if goos != "darwin" { // windows, linux
+			features = append(features, "-fmv")
+		}
+		spec.Features = strings.Join(features, ",")
+	case "wasm":
+		spec.CPU = "generic"
+		spec.Features = "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext"
 	}
+	return
 }
 
 func StripModuleTarget(ir string) string {

@@ -1,35 +1,25 @@
-[TypeChildren]
-*_llgo_main.T:
-    _llgo_main.T
-_llgo_main.T:
-    *_llgo_main.T
-
 [OrdinaryEdges]
-*_llgo_main.T:
-    _llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
-__llgo_coro_root_factory_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934:
-    __llgo_coro_root_factory_v1.dfc7f364c7c31c1996dcb4f150ed6934
-__llgo_coro_root_factory_v1.dfc7f364c7c31c1996dcb4f150ed6934:
+__llgo_coro_root_factory_descriptor_v1.5b659650cbbdadf33d4a19e563539612:
+    __llgo_coro_root_factory_v1.5b659650cbbdadf33d4a19e563539612
+__llgo_coro_root_factory_v1.5b659650cbbdadf33d4a19e563539612:
     main.main$coro
-__llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0:
-    __llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0.entries
-__llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0.entries:
-    __llgo_coro_root_factory_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934
+__llgo_coro_root_package_v1.4827d45545048f78a3f19faf8084cd5d:
+    __llgo_coro_root_package_v1.4827d45545048f78a3f19faf8084cd5d.entries
+__llgo_coro_root_package_v1.4827d45545048f78a3f19faf8084cd5d.entries:
+    __llgo_coro_root_factory_descriptor_v1.5b659650cbbdadf33d4a19e563539612
 _llgo_main.T:
-    *_llgo_main.T
-    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+    github.com/xgo-dev/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
-    __llgo_coro_library_effect_v9.208ab9b5dc648747a50b0812e926e3fb
+    __llgo_coro_library_effect_v9.b3c30f12f502a16629abee7010fb9992
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934
-    __llgo_coro_root_package_v1.fff8b72a1093cef85d3dcc7a8af92aa0
+    __llgo_coro_root_factory_descriptor_v1.5b659650cbbdadf33d4a19e563539612
+    __llgo_coro_root_package_v1.4827d45545048f78a3f19faf8084cd5d
 main.init:
     main.init$guard
 main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.dfc7f364c7c31c1996dcb4f150ed6934
+    __llgo_coro_frame_descriptor_v1.5b659650cbbdadf33d4a19e563539612
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1

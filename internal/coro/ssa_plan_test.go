@@ -700,6 +700,53 @@ func outsideFrozenUniverse() {}
 	}
 }
 
+func TestAnalyzeSSAManagedMethodReferencesUseDispatchWithoutInheritingEffects(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_method_references.go", `package coroid
+
+var channel chan int
+
+type worker struct{}
+
+func (worker) dispatch() { <-channel }
+func owner() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	worker := pkg.Pkg.Scope().Lookup("worker").Type()
+	selection := prog.MethodSets.MethodSet(worker).Lookup(pkg.Pkg, "dispatch")
+	if selection == nil {
+		t.Fatal("worker.dispatch selection is nil")
+	}
+	method := prog.MethodValue(selection)
+	if method == nil {
+		t.Fatal("worker.dispatch method value is nil")
+	}
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, method})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := planDigestSSAConfig()
+	config.EmissionUniverse = universe
+	config.ClassifyManagedValueReferences = func(fn *ssa.Function) ([]*ssa.Function, error) {
+		if fn == owner {
+			return []*ssa.Function{method}, nil
+		}
+		return nil, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if ownerPlan.Effect != NoSuspend || ownerPlan.Emission != EmitPlain {
+		t.Fatalf("owner plan = %+v, managed method reference inherited target effects", ownerPlan)
+	}
+	methodPlan := functionPlanFor(t, plan, method)
+	if methodPlan.Demand != AsyncDemand || methodPlan.Emission != EmitCoroutine ||
+		methodPlan.Primary != PrimaryCoroutine || methodPlan.FuncRep != Dispatch {
+		t.Fatalf("method plan = %+v, want one managed coroutine descriptor", methodPlan)
+	}
+}
+
 func TestAnalyzeSSASynchronousDemandReferenceIsExactSubsetAndRetainsPlainABI(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "sync_implicit_references.go", `package coroid
 
@@ -2745,6 +2792,57 @@ func managedCaller() { critical() }
 		managedPlan.Open || len(managedPlan.Targets) != 1 ||
 		managedPlan.Targets[0] != criticalPlan.ID {
 		t.Fatalf("managed occurrence CallPlan = %+v, present=%t", managedPlan, ok)
+	}
+}
+
+func TestAnalyzeSSARawPlainCallUsesCanonicalStaticTarget(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_call_alias.go", `package coroid
+func original() {}
+func replacement() {}
+func rawCaller() { original() }
+`)
+	original := packageFunction(t, pkg, "original")
+	replacement := packageFunction(t, pkg, "replacement")
+	rawCaller := packageFunction(t, pkg, "rawCaller")
+	rawCall := onlyNonBuiltinCall(t, rawCaller)
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{rawCaller, replacement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: rawCaller, ManagedDemand: AsyncDemand}}, SSAConfig{
+		EmissionUniverse:     universe,
+		MaxPlainInstructions: -1,
+		ResolveFunction: func(fn *ssa.Function) (*ssa.Function, bool, error) {
+			if fn == original {
+				return replacement, true, nil
+			}
+			return fn, universe.Contains(fn), nil
+		},
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == replacement {
+				return SSAFunctionPolicy{TrustedNoPreempt: true, TrustedNoUnwind: true}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+		ClassifyRawPlainCall: func(_ *ssa.Function, call ssa.CallInstruction) (SSARawPlainCallCertificate, bool, error) {
+			if call == rawCall {
+				return SSARawPlainCallCertificate{ID: "test.raw-critical.canonical.v1"}, true, nil
+			}
+			return SSARawPlainCallCertificate{}, false, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPlan := functionPlanFor(t, plan, replacement)
+	if !replacementPlan.RawPlainDemand || replacementPlan.Emission != EmitRawPlain ||
+		!plan.HasRawPlainVariant(replacement) {
+		t.Fatalf("canonical raw target plan = %+v, variant=%t", replacementPlan, plan.HasRawPlainVariant(replacement))
+	}
+	callPlan, ok := plan.CallPlan(rawCall)
+	if !ok || !callPlan.RawPlain || callPlan.RawPlainCertificate != "test.raw-critical.canonical.v1" ||
+		len(callPlan.Targets) != 1 || callPlan.Targets[0] != replacementPlan.ID {
+		t.Fatalf("canonical raw occurrence CallPlan = %+v, present=%t", callPlan, ok)
 	}
 }
 

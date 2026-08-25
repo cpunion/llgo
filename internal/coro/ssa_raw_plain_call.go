@@ -110,6 +110,7 @@ func applySSARawPlainCallPlans(
 	plans map[ssa.CallInstruction]SSACallPlan,
 	certificates map[ssa.CallInstruction]SSARawPlainCallCertificate,
 	ids map[*ssa.Function]FunctionID,
+	canonicalizer *ssaFunctionCanonicalizer,
 ) error {
 	for call, certificate := range certificates {
 		plan, ok := plans[call]
@@ -128,10 +129,19 @@ func applySSARawPlainCallPlans(
 				plan.InvocationPolicy, plan.InvocationContract, plan.InvocationABI, plan.InvocationCertificate,
 			)
 		}
-		target := call.Common().StaticCallee()
+		target, resolved, err := canonicalizer.resolve(call.Common().StaticCallee())
+		if err != nil {
+			return fmt.Errorf("coro: resolve raw-plain static target in %q: %w", call.Parent().Name(), err)
+		}
+		if !resolved || target == nil {
+			return fmt.Errorf("coro: raw-plain call in %q lost its exact canonical static target", call.Parent().Name())
+		}
 		targetID, exact := ids[target]
 		if !exact || targetID != plan.Targets[0] {
-			return fmt.Errorf("coro: raw-plain call in %q disagrees with its exact static target", call.Parent().Name())
+			return fmt.Errorf(
+				"coro: raw-plain call in %q disagrees with its exact canonical static target %q (identified=%t target=%q planned=%q)",
+				call.Parent().Name(), target.Name(), exact, targetID, plan.Targets[0],
+			)
 		}
 		ownerID, exact := ids[call.Parent()]
 		ownerPlan, ownerPlanned := base.Lookup(ownerID)

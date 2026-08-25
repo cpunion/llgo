@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/clite/libuv"
+import "github.com/xgo-dev/llgo/runtime/internal/clite/libuv"
 
 func timerDebug() bool                   { return false }
 func timerDebugLoop(string, *libuv.Loop) {}

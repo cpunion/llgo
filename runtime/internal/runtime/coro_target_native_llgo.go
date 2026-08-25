@@ -19,8 +19,8 @@
 package runtime
 
 import (
-	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/corodoorbell"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 )
 
 type coroNativeTargetStateV1 struct {

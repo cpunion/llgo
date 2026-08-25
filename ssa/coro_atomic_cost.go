@@ -42,8 +42,14 @@ const (
 	CoroAtomicBoundedCompilerCallMetadataName = "llgo.coro.atomic_bounded_compiler_call"
 	// CoroAtomicCompilerDataAnchorV1 is the zero-runtime-work inline-assembly
 	// fragment used to publish funcinfo/pclntab data records next to a body.
-	CoroAtomicCompilerDataAnchorV1  = "llgo.compiler.data-anchor.v1"
-	coroAtomicBoundedCompilerCallV1 = 1
+	CoroAtomicCompilerDataAnchorV1 = "llgo.compiler.data-anchor.v1"
+	// CoroAtomicLogicalPanicTraceAppendV1 is the exact compiler-injected,
+	// terminal-only runtime edge used after an outcome body has selected Panic.
+	// It never returns to ordinary source execution. The verifier admits only
+	// its frozen symbol and six-argument ABI; a source call with a similar type
+	// or name cannot acquire this metadata during ordinary lowering.
+	CoroAtomicLogicalPanicTraceAppendV1 = "llgo.compiler.logical-panic-trace-append.v1"
+	coroAtomicBoundedCompilerCallV1     = 1
 
 	// LLVMCallBr is part of the stable llvm-c Opcode ABI but is not yet
 	// exported by the Go binding. Treat it as an unsupported call/control
@@ -60,14 +66,28 @@ func MarkCoroAtomicBoundedCompilerCall(ctx llvm.Context, call llvm.Value, identi
 		panic("ssa: invalid bounded compiler call")
 	}
 	callee := call.CalledValue()
-	if callee.IsNil() || callee.IsAInlineAsm().IsNil() ||
-		identity != CoroAtomicCompilerDataAnchorV1 {
+	if callee.IsNil() {
 		panic("ssa: invalid bounded compiler call")
+	}
+	var digest string
+	switch identity {
+	case CoroAtomicCompilerDataAnchorV1:
+		if callee.IsAInlineAsm().IsNil() {
+			panic("ssa: invalid bounded compiler data-anchor call")
+		}
+		digest = coroAtomicInlineAsmDigest(identity, callee)
+	case CoroAtomicLogicalPanicTraceAppendV1:
+		if !isCoroAtomicLogicalPanicTraceAppendCall(call) {
+			panic("ssa: invalid logical panic trace append call")
+		}
+		digest = coroAtomicNamedCompilerCallDigest(identity, call)
+	default:
+		panic("ssa: unknown bounded compiler call identity")
 	}
 	call.SetMetadata(ctx.MDKindID(CoroAtomicBoundedCompilerCallMetadataName), ctx.MDNode([]llvm.Metadata{
 		llvm.ConstInt(ctx.Int32Type(), coroAtomicBoundedCompilerCallV1, false).ConstantAsMetadata(),
 		ctx.MDString(identity),
-		ctx.MDString(coroAtomicInlineAsmDigest(identity, callee)),
+		ctx.MDString(digest),
 	}))
 }
 
@@ -407,6 +427,13 @@ func projectCoroAtomicLLVMFunction(
 				if isCoroAtomicFixedIntegerIntrinsic(instruction) {
 					continue
 				}
+				bounded, err := isCoroAtomicBoundedCompilerCall(instruction, boundedCompilerCallKind)
+				if err != nil {
+					return projection, fmt.Errorf("ssa: atomic-cost LLVM function %q: %w", function.Name(), err)
+				}
+				if bounded {
+					continue
+				}
 				if isCoroAtomicConstantMemoryIntrinsic(callee) {
 					if instruction.OperandsCount() < 3 || instruction.Operand(2).IsAConstantInt().IsNil() ||
 						instruction.Operand(2).Type().IntTypeWidth() > 64 {
@@ -423,13 +450,6 @@ func projectCoroAtomicLLVMFunction(
 					continue
 				}
 				if callee == "" {
-					bounded, err := isCoroAtomicBoundedCompilerCall(instruction, boundedCompilerCallKind)
-					if err != nil {
-						return projection, fmt.Errorf("ssa: atomic-cost LLVM function %q: %w", function.Name(), err)
-					}
-					if bounded {
-						continue
-					}
 					return projection, fmt.Errorf(
 						"ssa: atomic-cost LLVM function %q contains an indirect or inline-assembly call: %s",
 						function.Name(), instruction.String(),
@@ -523,7 +543,7 @@ func isCoroAtomicFixedIntegerIntrinsic(call llvm.Value) bool {
 
 func isCoroAtomicBoundedCompilerCall(call llvm.Value, metadataKind int) (bool, error) {
 	callee := call.CalledValue()
-	if callee.IsNil() || callee.IsAInlineAsm().IsNil() {
+	if callee.IsNil() {
 		return false, nil
 	}
 	node := call.Metadata(metadataKind)
@@ -541,14 +561,70 @@ func isCoroAtomicBoundedCompilerCall(call llvm.Value, metadataKind int) (bool, e
 		return false, fmt.Errorf("contains unsupported bounded compiler-call metadata version %d", fields[0].ZExtValue())
 	}
 	identity := fields[1].MDString()
-	if identity != CoroAtomicCompilerDataAnchorV1 {
+	var want string
+	switch identity {
+	case CoroAtomicCompilerDataAnchorV1:
+		if callee.IsAInlineAsm().IsNil() {
+			return false, fmt.Errorf("bounded compiler data-anchor call is not inline assembly")
+		}
+		want = coroAtomicInlineAsmDigest(identity, callee)
+	case CoroAtomicLogicalPanicTraceAppendV1:
+		if !isCoroAtomicLogicalPanicTraceAppendCall(call) {
+			return false, fmt.Errorf("bounded logical panic trace append has a mismatched callee ABI")
+		}
+		want = coroAtomicNamedCompilerCallDigest(identity, call)
+	default:
 		return false, fmt.Errorf("contains unknown bounded compiler-call identity %q", identity)
 	}
-	want := coroAtomicInlineAsmDigest(identity, callee)
 	if fields[2].MDString() != want {
 		return false, fmt.Errorf("bounded compiler call %q has a mismatched content digest", identity)
 	}
 	return true, nil
+}
+
+func isCoroAtomicLogicalPanicTraceAppendCall(call llvm.Value) bool {
+	callee := call.CalledValue()
+	functionType := call.CalledFunctionType()
+	if callee.IsNil() || !callee.IsAInlineAsm().IsNil() ||
+		callee.Name() != "__llgo_coro_panic_trace_append_v1" ||
+		functionType.IsNil() || functionType.TypeKind() != llvm.FunctionTypeKind ||
+		functionType.IsFunctionVarArg() ||
+		functionType.ReturnType().TypeKind() != llvm.VoidTypeKind {
+		return false
+	}
+	parameters := functionType.ParamTypes()
+	if len(parameters) != 6 {
+		return false
+	}
+	for index := 0; index != 4; index++ {
+		if parameters[index].TypeKind() != llvm.PointerTypeKind {
+			return false
+		}
+	}
+	for index := 4; index != 6; index++ {
+		if parameters[index].TypeKind() != llvm.IntegerTypeKind ||
+			parameters[index].IntTypeWidth() != 32 {
+			return false
+		}
+	}
+	return true
+}
+
+func coroAtomicNamedCompilerCallDigest(identity string, call llvm.Value) string {
+	payload, err := json.Marshal(struct {
+		Identity string `json:"identity"`
+		Callee   string `json:"callee"`
+		Type     string `json:"type"`
+	}{
+		Identity: identity,
+		Callee:   call.CalledValue().Name(),
+		Type:     call.CalledFunctionType().String(),
+	})
+	if err != nil {
+		panic("ssa: marshal named compiler-call certificate: " + err.Error())
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
 }
 
 func coroAtomicInlineAsmDigest(identity string, asm llvm.Value) string {

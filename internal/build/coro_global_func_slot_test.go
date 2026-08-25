@@ -25,9 +25,9 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 func TestCoroGlobalFunctionSlotNilOnlyProof(t *testing.T) {
@@ -373,7 +373,16 @@ func install() {}
 	if proof := fixture.ctx.coroGlobalFunctionSlots[call]; len(proof.inactive) != 0 {
 		t.Fatalf("generic factory-result proof has conditional hazards: %+v", proof.inactive)
 	}
-	plan, err := analyzeCoroGlobalFunctionSlotFixture(fixture, fixture.pkg.Func("useOptional"))
+	plan, err := fixture.input.Analyze(coro.Roots{{Function: fixture.pkg.Func("useOptional"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		FunctionIDs:          fixture.functionIDs,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn == target {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

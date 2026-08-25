@@ -22,9 +22,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -60,9 +60,9 @@ func TestCoroZeroSizedChannelResultsUseKnownNonNilStorage(t *testing.T) {
 	}
 	selected := requireCoroPhysicalFunction(t, module, "foo.Select").String()
 	for _, helper := range []string{
-		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectTry",
-		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectPark",
-		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectTry",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectPark",
+		"github.com/xgo-dev/llgo/runtime/internal/runtime.CoroChanSelectResume",
 	} {
 		if !strings.Contains(selected, helper) {
 			t.Fatalf("zero-sized select result lacks %q:\n%s", helper, selected)

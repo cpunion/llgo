@@ -1,6 +1,6 @@
 package main
 
-import "github.com/goplus/llgo/cl/_testdata/importpkg/stdio"
+import "github.com/xgo-dev/llgo/cl/_testdata/importpkg/stdio"
 
 var hello = [...]int8{'H', 'e', 'l', 'l', 'o', '\n', 0}
 

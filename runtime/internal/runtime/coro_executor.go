@@ -19,7 +19,7 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 // The first production runner owns one statically addressed executor domain.

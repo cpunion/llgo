@@ -10,7 +10,7 @@
 
 package runtime
 
-import ct "github.com/goplus/llgo/runtime/internal/clite/time"
+import ct "github.com/xgo-dev/llgo/runtime/internal/clite/time"
 
 func coroRealtime() (sec int64, nsec int32) {
 	var value ct.Timespec

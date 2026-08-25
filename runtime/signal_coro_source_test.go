@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -133,8 +134,8 @@ func TestRuntimeSignalCoroAdapterIsSignalSafeAndEventDriven(t *testing.T) {
 
 func TestRuntimePanicPCSnapshotIsLazyAndSignalSafe(t *testing.T) {
 	runtime2 := readRuntimePollFile(t, "internal/runtime/runtime2.go")
-	if !strings.Contains(runtime2, "panicPCs *panicPCStore") ||
-		strings.Contains(runtime2, "panicPCs panicPCStore") {
+	if !regexp.MustCompile(`panicPCs\s+\*panicPCStore`).MatchString(runtime2) ||
+		regexp.MustCompile(`panicPCs\s+panicPCStore`).MatchString(runtime2) {
 		t.Fatal("runtime G does not keep the bounded panic PC payload out of line")
 	}
 

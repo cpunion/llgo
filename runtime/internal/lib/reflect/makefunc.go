@@ -15,8 +15,8 @@
  */
 
 // Copyright 2012 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Use of this source code is governed by a BSD-style license.
+// See LICENSES/Go-BSD-3-Clause.txt at this module root for license terms.
 
 // MakeFunc implementation.
 
@@ -26,10 +26,10 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/abi"
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/ffi"
-	llruntime "github.com/goplus/llgo/runtime/internal/runtime"
+	"github.com/xgo-dev/llgo/runtime/abi"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/ffi"
+	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 type funcData struct {
@@ -40,9 +40,16 @@ type funcData struct {
 	nin         int
 	invokeCIF   *ffi.Signature
 	invokeEntry unsafe.Pointer
+
+	recoverFrom unsafe.Pointer
+	recoverTo   unsafe.Pointer
 }
 
 func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
+	return makeFunc(typ, fn, ValueOf(fn).UnsafePointer())
+}
+
+func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsafe.Pointer) Value {
 	if typ.Kind() != Func {
 		panic("reflect: call of MakeFunc with non-Func type")
 	}
@@ -57,7 +64,6 @@ func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 	if err != nil {
 		panic(err)
 	}
-
 	invokeCIF, err := ffi.NewSignature(
 		ffi.TypePointer,
 		ffi.TypePointer, ffi.TypePointer, ffi.TypePointer,
@@ -93,6 +99,7 @@ func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 		tout:        outs,
 		invokeCIF:   invokeCIF,
 		invokeEntry: ffi.CoroEntry(invokerWords.fn),
+		recoverTo:   recoverTo,
 	}
 	err = closure.Bind(entryCIF, bindCoro, unsafe.Pointer(userdata))
 	if err != nil {
@@ -101,6 +108,10 @@ func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 	descriptor := ffi.NewRuntimeCoroDescriptor(
 		unsafe.Pointer(t), closure.Fn, resultSize, resultAlign,
 	)
+	// A direct defer records the descriptor stored in the returned func value.
+	// makeFuncInvoke transparently remaps it to the physical identity of fn so
+	// that fn's recover activation can bind exactly as for an ordinary call.
+	userdata.recoverFrom = descriptor
 
 	// keep alive for bdw-gc
 	keepMutex.Lock()
@@ -141,7 +152,6 @@ func bindCoro(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, user
 		*(*unsafe.Pointer)(ret) = nil
 		return
 	}
-
 	g := *(*unsafe.Pointer)(ffi.Index(args, 0))
 	out := *(*unsafe.Pointer)(ffi.Index(args, 1))
 	values := copyMakeFuncArgs(fd, args)
@@ -203,7 +213,7 @@ func makeFuncInvoke(fd *funcData, ret, values unsafe.Pointer) {
 	if fd.nin != 0 {
 		ins = unsafe.Slice((*Value)(values), fd.nin)
 	}
-	outs := validateMakeFuncResults(fd.fn(ins), fd.ftyp, fd.tout)
+	outs := validateMakeFuncResults(fd.call(ins), fd.ftyp, fd.tout)
 	if ret == nil {
 		return
 	}
@@ -215,6 +225,16 @@ func makeFuncInvoke(fd *funcData, ret, values unsafe.Pointer) {
 		storeMakeFuncResult(add(ret, offset, ""), out, typ, size)
 		offset += size
 	}
+}
+
+// call crosses the libffi entry stub as a transparent wrapper. This mirrors
+// the Go runtime's treatment of reflect.makeFuncStub and methodValueCall as
+// wrapper frames when deciding whether recover is called directly.
+func (fd *funcData) call(in []Value) []Value {
+	prev := llruntime.StartRecoverFrameAlias(fd.recoverFrom, fd.recoverTo)
+	out := fd.fn(in)
+	llruntime.EndRecoverFrameAlias(prev)
+	return out
 }
 
 func validateMakeFuncResults(out []Value, ftyp *abi.FuncType, touts []*abi.Type) []Value {
@@ -364,7 +384,7 @@ func makeMethodValue(op string, v Value) Value {
 	rcvr = ValueOf(valueInterface(rcvr, false))
 	ftyp := v.Type()
 	variadic := ftyp.common().FuncType().Variadic()
-	bound := MakeFunc(ftyp, func(args []Value) []Value {
+	bound := makeFunc(ftyp, func(args []Value) []Value {
 		in := make([]Value, len(args)+1)
 		in[0] = rcvr
 		copy(in[1:], args)
@@ -372,7 +392,7 @@ func makeMethodValue(op string, v Value) Value {
 			return method.CallSlice(in)
 		}
 		return method.Call(in)
-	})
+	}, method.UnsafePointer())
 	bound.flag |= v.flag & flagRO
 	return bound
 }

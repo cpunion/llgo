@@ -27,8 +27,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/env"
-	llruntime "github.com/goplus/llgo/runtime"
+	"github.com/xgo-dev/llgo/internal/env"
+	llruntime "github.com/xgo-dev/llgo/runtime"
 )
 
 func TestNativeCoroInternalPollReadWriteSourcePatch(t *testing.T) {

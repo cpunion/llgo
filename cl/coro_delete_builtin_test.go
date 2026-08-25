@@ -50,6 +50,19 @@ func Root(values map[uint32]uint64, key uint32) { delete(values, key) }
 	if err != nil {
 		t.Fatal(err)
 	}
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	audit.ctx = &context{
+		prog:   prog,
+		goFn:   root,
+		goProg: ssaPkg.Prog,
+		goTyps: ssaPkg.Pkg,
+		goPkg:  ssaPkg,
+	}
+	helpers, exact := emissionMapRuntimeHelpers(audit.ctx, call.Common().Args[0].Type())
+	if !exact || helpers.Delete == "" || helpers.KeyNeedsTemporary {
+		t.Fatalf("delete map helper plan = %+v, exact=%t; want direct uint32 fast-key family", helpers, exact)
+	}
 	handled, reason := audit.validate(call)
 	if !handled || !strings.Contains(reason, "structured runtime helper validation requires a frozen emission universe") {
 		t.Fatalf("delete audit = handled %t, reason %q; want exact managed-helper gate", handled, reason)

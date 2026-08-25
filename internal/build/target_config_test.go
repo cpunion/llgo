@@ -7,11 +7,11 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/goplus/llgo/internal/crosscompile"
-	"github.com/goplus/llgo/internal/optlevel"
-	"github.com/goplus/llgo/internal/targets"
-	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/optlevel"
+	"github.com/xgo-dev/llgo/internal/targets"
+	intllvm "github.com/xgo-dev/llgo/internal/xtool/llvm"
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 func TestCoroPlanDigestMetadataUsesEffectiveLLVMTarget(t *testing.T) {

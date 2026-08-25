@@ -16,7 +16,7 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coroalloc"
+import "github.com/xgo-dev/llgo/runtime/internal/coroalloc"
 
 //export __llgo_coro_frame_allocator_bootstrap_v1
 func __llgo_coro_frame_allocator_bootstrap_v1() {

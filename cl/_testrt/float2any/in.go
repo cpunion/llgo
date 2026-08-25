@@ -17,6 +17,8 @@ type u64parts struct {
 	hi uint32
 }
 
+// check32 must test the dynamic type and then inspect the data pointer from the
+// same interface value; the decimal constant is pi32bits.
 func check32(v any) {
 	switch v.(type) {
 	case float32:

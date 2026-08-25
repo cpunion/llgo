@@ -35,12 +35,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/crosscompile"
-	"github.com/goplus/llgo/internal/goembed"
-	"github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/cl"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -607,12 +607,15 @@ type ChanOp struct{}
 func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
 func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryCloseTask(unsafe.Pointer, *Chan) uint32 { return 0 }
-func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectTry(unsafe.Pointer, ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_panic_trace_replace_v1(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_panic_trace_append_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32) {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_recover_alias_begin_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, bool) unsafe.Pointer { return nil }
+func __llgo_coro_recover_alias_end_v1(unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_prepare_v1() {}
 func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
@@ -738,7 +741,10 @@ func atomicExchange(*uint32, uint32) uint32
 		"__llgo_coro_fault_prepare_v2",
 		"__llgo_coro_panic_prepare_v1",
 		coroPanicTraceReplaceSymbolV1,
-		"__llgo_coro_recover_take_v1",
+		coroPanicTraceAppendSymbolV1,
+		coroRecoverTakeSymbolV1,
+		coroRecoverAliasBeginSymbolV1,
+		coroRecoverAliasEndSymbolV1,
 		"__llgo_coro_fault_payload_v1",
 		"__llgo_coro_fault_payload_v2",
 		"__llgo_coro_spawn_begin_v1",
@@ -1125,18 +1131,23 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 	panicHook := ssaPkg.Func("__llgo_coro_panic_prepare_v1")
 	panicTraceReplaceHook := ssaPkg.Func(coroPanicTraceReplaceSymbolV1)
-	recoverHook := ssaPkg.Func("__llgo_coro_recover_take_v1")
+	panicTraceAppendHook := ssaPkg.Func(coroPanicTraceAppendSymbolV1)
+	recoverHook := ssaPkg.Func(coroRecoverTakeSymbolV1)
+	recoverAliasBeginHook := ssaPkg.Func(coroRecoverAliasBeginSymbolV1)
+	recoverAliasEndHook := ssaPkg.Func(coroRecoverAliasEndSymbolV1)
 	payloadHook := ssaPkg.Func("__llgo_coro_fault_payload_v1")
 	faultHook := ssaPkg.Func("__llgo_coro_fault_prepare_v1")
 	payloadArgsHook := ssaPkg.Func("__llgo_coro_fault_payload_v2")
 	faultArgsHook := ssaPkg.Func("__llgo_coro_fault_prepare_v2")
-	if panicHook == nil || panicTraceReplaceHook == nil || recoverHook == nil ||
+	if panicHook == nil || panicTraceReplaceHook == nil || panicTraceAppendHook == nil || recoverHook == nil ||
+		recoverAliasBeginHook == nil || recoverAliasEndHook == nil ||
 		payloadHook == nil || faultHook == nil ||
 		payloadArgsHook == nil || faultArgsHook == nil {
 		t.Fatal("explicit-status panic hooks are absent from the runtime fixture")
 	}
 	for _, hook := range []*ssa.Function{
-		panicHook, panicTraceReplaceHook, recoverHook,
+		panicHook, panicTraceReplaceHook, panicTraceAppendHook, recoverHook,
+		recoverAliasBeginHook, recoverAliasEndHook,
 		payloadHook, faultHook, payloadArgsHook, faultArgsHook,
 	} {
 		if _, ok := requiredPlain[hook]; !ok {
@@ -1153,6 +1164,17 @@ func atomicExchange(*uint32, uint32) uint32
 	if invalidPanicTraceReplaceErr == nil ||
 		!strings.Contains(invalidPanicTraceReplaceErr.Error(), "panic trace replacement ABI") {
 		t.Fatalf("invalid panic trace replacement ABI error = %v", invalidPanicTraceReplaceErr)
+	}
+	originalPanicTraceAppendSignature := panicTraceAppendHook.Signature
+	panicTraceAppendHook.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidPanicTraceAppendErr := requiredCoroProgramRuntimePlan(ctx)
+	panicTraceAppendHook.Signature = originalPanicTraceAppendSignature
+	if invalidPanicTraceAppendErr == nil ||
+		!strings.Contains(invalidPanicTraceAppendErr.Error(), "panic trace append ABI") {
+		t.Fatalf("invalid panic trace append ABI error = %v", invalidPanicTraceAppendErr)
 	}
 	originalPayloadSignature := payloadHook.Signature
 	payloadHook.Signature = types.NewSignatureType(nil, nil, nil,
@@ -1396,13 +1418,28 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatalf("required plain IRQ-unsafe closure plan = %+v, want exact raw-only plain implementation", irqClosure)
 	}
 
+	yieldPlan, err := analyze(func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+		if fn == closureLoop {
+			return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+		}
+		return coro.SSAFunctionPolicy{}, nil
+	})
+	if err != nil {
+		t.Fatalf("required raw closure with managed-only yield: %v", err)
+	}
+	yieldClosure, ok := yieldPlan.FunctionPlan(closureLoop)
+	if !ok || yieldClosure.Emission != coro.EmitRawPlain || !yieldClosure.RawPlainOnly ||
+		!yieldClosure.Effect.Contains(coro.YieldOnly) || !yieldPlan.HasRawPlainVariant(closureLoop) {
+		t.Fatalf("required raw closure with managed-only yield = %+v, present=%t, raw-variant=%t", yieldClosure, ok, yieldPlan.HasRawPlainVariant(closureLoop))
+	}
+
 	conflicts := []struct {
 		name   string
 		target *ssa.Function
 		policy coro.SSAFunctionPolicy
 		want   string
 	}{
-		{name: "effect", target: closureLoop, policy: coro.SSAFunctionPolicy{Effect: coro.MayPark}, want: "required no-suspend policy"},
+		{name: "effect", target: closureLoop, policy: coro.SSAFunctionPolicy{Effect: coro.MayPark}, want: "unsupported declared raw-stack effect"},
 		{name: "exec", target: closureLoop, policy: coro.SSAFunctionPolicy{Exec: coro.ThreadAffine}, want: "required plain execution policy"},
 		{name: "dispatch", target: closureLoop, policy: coro.SSAFunctionPolicy{NeedsDispatch: true}, want: "required direct representation"},
 		{name: "defined external", target: closureLoop, policy: coro.SSAFunctionPolicy{External: coro.ExternalKnown, OverrideExternal: true}, want: "required defined classification"},
@@ -1471,14 +1508,17 @@ type ChanOp struct{}
 func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
 func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryCloseTask(unsafe.Pointer, *Chan) uint32 { return 0 }
-func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectTry(unsafe.Pointer, ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
 func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_panic_trace_replace_v1(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_panic_trace_append_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32) {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_recover_alias_begin_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, bool) unsafe.Pointer { return nil }
+func __llgo_coro_recover_alias_end_v1(unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
@@ -2158,14 +2198,17 @@ type ChanOp struct{}
 func CoroChanTrySend(unsafe.Pointer, *Chan, unsafe.Pointer, int) bool { return false }
 func CoroChanTryRecv(unsafe.Pointer, *Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
 func CoroChanTryCloseTask(unsafe.Pointer, *Chan) uint32 { return 0 }
-func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectTry(unsafe.Pointer, ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
 func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_panic_trace_replace_v1(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_panic_trace_append_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32) {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_recover_alias_begin_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, bool) unsafe.Pointer { return nil }
+func __llgo_coro_recover_alias_end_v1(unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
@@ -2696,6 +2739,66 @@ func alias() {}
 	}
 	if got := accepted.LoweredCalls(owner); len(got) != 2 || got[0].LogicalName != "runtime.helper" || got[1].LogicalName != "runtime.helper2" {
 		t.Fatalf("accepted lowered calls = %+v", got)
+	}
+}
+
+func TestCoroPlanInputActivatesPlainLoweredCallsOnlyForLivePlainBodies(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/plainlowered", `package plainlowered
+var channel chan int
+func plainOwner() {}
+func coroutineOwner() { <-channel }
+func plainHelper() {}
+func dormantHelper() {}
+`, nil)
+	plainOwner := ssaPkg.Func("plainOwner")
+	coroutineOwner := ssaPkg.Func("coroutineOwner")
+	plainHelper := ssaPkg.Func("plainHelper")
+	dormantHelper := ssaPkg.Func("dormantHelper")
+	universe, err := coro.NewSSAEmissionUniverse(
+		ssaPkg.Prog,
+		[]*ssa.Function{plainOwner, coroutineOwner, plainHelper, dormantHelper},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := CoroPlanInput{
+		Program:          ssaPkg.Prog,
+		EmissionUniverse: universe,
+		plainLoweredCalls: func(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
+			switch owner {
+			case plainOwner:
+				return []coro.SSALoweredCall{{
+					LogicalName: "runtime.plain", Target: plainHelper, RawPlain: true,
+				}}, nil
+			case coroutineOwner:
+				return []coro.SSALoweredCall{{
+					LogicalName: "runtime.dormant", Target: dormantHelper, RawPlain: true,
+				}}, nil
+			default:
+				return nil, nil
+			}
+		},
+	}
+	plan, err := input.Analyze(coro.Roots{
+		{Function: plainOwner, Demand: coro.SyncDemand},
+		{Function: coroutineOwner, Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := plan.FunctionPlan(plainOwner); !ok || got.Emission != coro.EmitPlain {
+		t.Fatalf("plain owner plan = %+v, present=%t", got, ok)
+	}
+	if got, ok := plan.FunctionPlan(coroutineOwner); !ok || got.Emission != coro.EmitCoroutine {
+		t.Fatalf("coroutine owner plan = %+v, present=%t", got, ok)
+	}
+	if got, ok := plan.FunctionPlan(plainHelper); !ok || !got.RawPlainDemand ||
+		!got.RawPlainOnly || got.Emission != coro.EmitRawPlain || !plan.HasRawPlainVariant(plainHelper) {
+		t.Fatalf("live plain helper plan = %+v, present=%t, raw-variant=%t", got, ok, plan.HasRawPlainVariant(plainHelper))
+	}
+	if got, ok := plan.FunctionPlan(dormantHelper); !ok || got.Demand != coro.NoDemand ||
+		got.RawPlainDemand || got.Emission != coro.EmitNone || plan.HasRawPlainVariant(dormantHelper) {
+		t.Fatalf("dormant physical-twin helper plan = %+v, present=%t, raw-variant=%t", got, ok, plan.HasRawPlainVariant(dormantHelper))
 	}
 }
 
@@ -3232,7 +3335,7 @@ func TestCoroEmissionCoverageStopsBeforeAnyPackageCodegen(t *testing.T) {
 		return input.Analyze(coro.Roots{{Function: mainFn, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 			Include: func(fn *ssa.Function) (bool, error) {
 				return fn.Pkg == nil || fn.Pkg.Pkg == nil ||
-					fn.Pkg.Pkg.Path() != "github.com/goplus/llgo/internal/build/_testgo/coro_emission/zmiss" ||
+					fn.Pkg.Pkg.Path() != "github.com/xgo-dev/llgo/internal/build/_testgo/coro_emission/zmiss" ||
 					fn.Name() != "Missing", nil
 			},
 		})

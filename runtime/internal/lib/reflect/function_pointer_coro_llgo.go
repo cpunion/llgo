@@ -5,7 +5,7 @@ package reflect
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/ffi"
+	"github.com/xgo-dev/llgo/runtime/internal/ffi"
 )
 
 func functionCodePointer(descriptor unsafe.Pointer) unsafe.Pointer {

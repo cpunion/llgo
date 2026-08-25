@@ -29,10 +29,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/buildenv"
-	"github.com/goplus/llgo/internal/lto"
-	llpackages "github.com/goplus/llgo/internal/packages"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/buildenv"
+	"github.com/xgo-dev/llgo/internal/lto"
+	llpackages "github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -209,7 +209,9 @@ func TestStagedBackendPhaseOrderIsMandatory(t *testing.T) {
 		"stageMainEntryBitcodes(ctx, initial, allPkgs)",
 		"releaseCoroFrontendForStagedBackend(ctx, allPkgs)",
 		"prog.Dispose()",
+		"prog = nil",
 		"debug.FreeOSMemory()",
+		"releaseNativeHeap()",
 		"materializeStagedPackageBackends(ctx, allPkgs, verbose)",
 	}
 	previous := -1
@@ -226,5 +228,129 @@ func TestStagedBackendPhaseOrderIsMandatory(t *testing.T) {
 	if !strings.Contains(text, "backend.ParseBitcodeFile(pkg.StagedBitcode)") ||
 		!strings.Contains(text, "lowerCoroPackageModuleWithProgram(backend, pkg.PkgPath, mod)") {
 		t.Fatal("detached backend no longer owns bitcode parsing and coroutine lowering")
+	}
+}
+
+func TestLinkedExecutionPhaseReleasesCompilerState(t *testing.T) {
+	staged := filepath.Join(t.TempDir(), "staged.bc")
+	if err := os.WriteFile(staged, []byte("bitcode"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dependency := &llpackages.Package{ID: "dep", PkgPath: "example.com/dep"}
+	source := &llpackages.Package{
+		ID:              "root",
+		Name:            "main",
+		PkgPath:         "example.com/root",
+		Imports:         map[string]*llpackages.Package{dependency.PkgPath: dependency},
+		Syntax:          []*ast.File{{}},
+		TypesInfo:       &types.Info{},
+		TypesSizes:      types.SizesFor("gc", runtime.GOARCH),
+		Types:           types.NewPackage("example.com/root", "main"),
+		Fset:            token.NewFileSet(),
+		GoFiles:         []string{"root.go"},
+		CompiledGoFiles: []string{"root.go"},
+	}
+	pkg := &aPackage{
+		Package:                  source,
+		LinkArgs:                 []string{"-lm"},
+		ObjFiles:                 []string{"root.o"},
+		LinkSnapshot:             &packageLinkSnapshot{definedGlobals: []string{"root.global"}},
+		CoroLibraryEffectRecords: []byte("effects"),
+		Fingerprint:              "fingerprint",
+		Manifest:                 "manifest",
+		CoroRootAnchorV1:         "anchor",
+	}
+	conf := &Config{
+		RunArgs:        []string{"-test.run=TestNested"},
+		Overlay:        map[string][]byte{"root.go": []byte("package main")},
+		GlobalRewrites: map[string]Rewrites{"main": {"value": "replacement"}},
+		GoBuildFlags:   []string{"-tags=fixture"},
+	}
+	ctx := &context{
+		conf:                  &llpackages.Config{},
+		fingerprinting:        map[string]bool{"root": true},
+		patchFiles:            map[string][]string{"root": {"root.go"}},
+		initial:               []*llpackages.Package{source},
+		pkgs:                  map[*llpackages.Package]Package{source: pkg},
+		pkgByID:               map[string]Package{source.ID: pkg},
+		buildConf:             conf,
+		commands:              commandEnv{dir: "/execution"},
+		coroPlanDigest:        "digest",
+		coroProgramBootstraps: map[string]*coroProgramBootstrapV1{"root": {}},
+		stagedBitcodeFiles:    map[string]none{staged: {}},
+		stagedMainEntries:     map[string]*stagedMainEntry{"root": {}},
+	}
+
+	releaseBuildStateBeforeExecution(ctx, []*aPackage{pkg})
+
+	if ctx.conf != nil || ctx.pkgs != nil || ctx.pkgByID != nil || ctx.initial != nil ||
+		ctx.patchFiles != nil || ctx.fingerprinting != nil || ctx.coroPlanDigest != "" ||
+		ctx.coroProgramBootstraps != nil || ctx.stagedMainEntries != nil {
+		t.Fatalf("compiler ownership survived execution boundary: %+v", ctx)
+	}
+	if ctx.buildConf != conf || ctx.commands.dir != "/execution" ||
+		!slices.Equal(ctx.buildConf.RunArgs, []string{"-test.run=TestNested"}) {
+		t.Fatalf("compact execution state was not preserved: conf=%p commands=%+v", ctx.buildConf, ctx.commands)
+	}
+	if ctx.buildConf.Overlay != nil || ctx.buildConf.GlobalRewrites != nil || ctx.buildConf.GoBuildFlags != nil {
+		t.Fatalf("build-only config survived execution boundary: %+v", ctx.buildConf)
+	}
+	if pkg.LinkSnapshot != nil || pkg.sourceSelection != nil || pkg.LinkArgs != nil || pkg.ObjFiles != nil ||
+		pkg.CoroLibraryEffectRecords != nil || pkg.Fingerprint != "" || pkg.Manifest != "" ||
+		pkg.CoroRootAnchorV1 != "" {
+		t.Fatalf("package compiler state survived execution boundary: %+v", pkg)
+	}
+	if source.Imports != nil || source.Syntax != nil || source.TypesInfo != nil || source.Types != nil || source.Fset != nil {
+		t.Fatalf("loaded package graph survived execution boundary: %+v", source)
+	}
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Fatalf("staged bitcode survived execution boundary: %v", err)
+	}
+}
+
+func TestLinkedExecutionPhaseOrderIsMandatory(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("build.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	start := strings.Index(text, "var executions []linkedOutputExecution")
+	if start < 0 {
+		t.Fatal("cannot locate linked-output phase")
+	}
+	end := strings.Index(text[start:], "\n\tif mode == ModeTest")
+	if end < 0 {
+		t.Fatal("cannot locate linked-output phase end")
+	}
+	block := text[start : start+end]
+	ordered := []string{
+		"linkMainPkg(ctx, pkg, allPkgs, outFmts.Out, verbose)",
+		"executions = append(executions",
+		"prog.Dispose()",
+		"prog = nil",
+		"releaseBuildStateBeforeExecution(ctx, allPkgs)",
+		"debug.FreeOSMemory()",
+		"releaseNativeHeap()",
+		"executeLinkedOutput(ctx, execution, conf, mode, verbose)",
+	}
+	previous := -1
+	for _, needle := range ordered {
+		index := strings.Index(block, needle)
+		if index < 0 {
+			t.Fatalf("mandatory linked-output phase %q is absent", needle)
+		}
+		if index <= previous {
+			t.Fatalf("mandatory linked-output phases are out of order at %q", needle)
+		}
+		previous = index
+	}
+	if strings.Contains(text, "programOwnershipTransferred") {
+		t.Fatal("boolean LLVM ownership receipt can retain the disposed Program through deferred cleanup")
+	}
+	beforeRelease := block[:strings.Index(block, "releaseBuildStateBeforeExecution(ctx, allPkgs)")]
+	for _, forbidden := range []string{"runNative(ctx", "runInEmulator(", "flash.FlashDevice(", "monitor.Monitor("} {
+		if strings.Contains(beforeRelease, forbidden) {
+			t.Fatalf("execution operation %q remains interleaved with linking", forbidden)
+		}
 	}
 }

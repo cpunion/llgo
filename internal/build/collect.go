@@ -27,11 +27,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/env"
-	"github.com/goplus/llgo/internal/meta"
-	"github.com/goplus/llgo/internal/packages"
-	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/env"
+	"github.com/xgo-dev/llgo/internal/meta"
+	"github.com/xgo-dev/llgo/internal/packages"
+	intllvm "github.com/xgo-dev/llgo/internal/xtool/llvm"
 	gopackages "golang.org/x/tools/go/packages"
 )
 
@@ -94,6 +94,10 @@ func (c *context) packageCacheDisabled(id string) bool {
 func (c *context) collectEnvInputs(m *manifestBuilder) {
 	m.env.Goos = c.buildConf.Goos
 	m.env.Goarch = c.buildConf.Goarch
+	m.env.Go386 = c.buildConf.GO386
+	m.env.Goamd64 = c.buildConf.GOAMD64
+	m.env.Goarm = c.buildConf.GOARM
+	m.env.Goarm64 = c.buildConf.GOARM64
 	if c.hasNonDefaultLLVMConfig() {
 		m.env.LlvmTriple = c.crossCompile.LLVMTarget
 	}
@@ -159,6 +163,7 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	m.common.EmitDWARF = shouldEmitDebugInfo(c.buildConf, &c.crossCompile)
 	m.common.PCLNMode = effectivePCLNMode(c.buildConf).String()
 	m.common.DisableBoundsChecks = c.buildConf.DisableBoundsChecks
+	m.common.SaturatingFloatToUint32 = c.buildConf.SaturatingFloatToUint32
 	m.common.LocalContext = c.prog != nil && c.prog.NeedsLocalContext()
 
 	// Compiler configuration
@@ -348,7 +353,7 @@ func (c *context) hasNonDefaultLLVMConfig() bool {
 	if requested.LLVMTarget == "" && requested.CPU == "" && requested.Features == "" && requested.TargetABI == "" {
 		return false
 	}
-	defaults := intllvm.GetTargetSpec(c.buildConf.Goos, c.buildConf.Goarch, "")
+	defaults := intllvm.GetTargetSpec(c.buildConf.Goos, c.buildConf.Goarch, c.buildConf.GOARM)
 	return requested.LLVMTarget != defaults.Triple || requested.CPU != defaults.CPU ||
 		requested.Features != defaults.Features || requested.TargetABI != ""
 }

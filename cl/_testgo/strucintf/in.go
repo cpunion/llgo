@@ -1,6 +1,6 @@
 package main
 
-import "github.com/goplus/llgo/cl/_testdata/foo"
+import "github.com/xgo-dev/llgo/cl/_testdata/foo"
 
 func Foo() any {
 	return struct{ v int }{1}

@@ -24,7 +24,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 // The keyed registry is exercised as a named production-source island. These

@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/goplus/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -527,7 +527,7 @@ func coroImplicitPanicFacts(helperNames []string) []coro.ImplicitPanicFact {
 		switch helper {
 		case "AssertNilDeref", "AssertNilDerefPtr":
 			kind = "nil-deref"
-		case "CheckIndexRange":
+		case "PanicIndex", "PanicIndexU":
 			kind = "index-range"
 		case "PanicSliceConvert":
 			kind = "slice-convert"

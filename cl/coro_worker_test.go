@@ -29,9 +29,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/goembed"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -409,7 +409,7 @@ func TestCoroWorkerSyscallFailureConventionIdentityIsFrozen(t *testing.T) {
 }
 
 func TestCoroWorkerProductionLinuxDynamicRawSyscallFailsClosed(t *testing.T) {
-	source, err := os.ReadFile("../runtime/internal/lib/syscall/syscall_linux_coro.go")
+	source, err := os.ReadFile("../runtime/_patch/syscall/syscall_linux_coro.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,10 +417,16 @@ func TestCoroWorkerProductionLinuxDynamicRawSyscallFailsClosed(t *testing.T) {
 	if strings.Count(string(source), packageClause) != 1 {
 		t.Fatal("production Linux syscall source has an unexpected package clause")
 	}
-	// Compile the production declarations and function bodies verbatim. Only
-	// the package name changes so its stdlib syscall type import is not a
-	// self-import in this isolated compiler test.
+	// Compile the production declarations and function bodies verbatim. The
+	// patch is normally overlaid onto GOROOT's syscall package, whose unchanged
+	// files provide Errno; reproduce only that package-owned type after changing
+	// the package name for this isolated compiler test.
 	fixtureSource := strings.Replace(string(source), packageClause, "package syscallfixture\n", 1)
+	const importClause = "import _ \"unsafe\"\n"
+	if strings.Count(fixtureSource, importClause) != 1 {
+		t.Fatal("production Linux syscall source has an unexpected import clause")
+	}
+	fixtureSource = strings.Replace(fixtureSource, importClause, importClause+"\ntype Errno uintptr\n", 1)
 	ssaPkg, _, files := buildGoSSAPkg(t, fixtureSource)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()

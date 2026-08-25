@@ -11,7 +11,7 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 const coroHostOperationParkMagicV1 uint32 = 0x43484f31         // "CHO1"

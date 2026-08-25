@@ -18,6 +18,8 @@ func countState(c *counter) stateFn {
 	return countState
 }
 
+// DARWIN-ARM64: %[[NEXT_STATE:[0-9]+]] = call %main.stateFn %__llgo_funcval_code(ptr swiftself %[[STATE_ENV]], ptr %[[COUNTER_OBJ]])
+// LINUX-AMD64: %[[NEXT_STATE:[0-9]+]] = call %main.stateFn %__llgo_funcval_code(ptr nest %[[STATE_ENV]], ptr %[[COUNTER_OBJ]])
 func main() {
 	c := &counter{max: 5, state: countState}
 

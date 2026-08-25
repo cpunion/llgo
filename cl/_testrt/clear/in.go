@@ -1,5 +1,6 @@
 package clear
 
+
 func Clear() {
 	a := []int{1, 2, 3, 4}
 	clear(a)

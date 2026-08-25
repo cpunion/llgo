@@ -13,7 +13,6 @@ type CFunc func(*int)
 type Callback[T any] func(*T)
 
 func main() {
-
 	var fn1 Func = func(v *int) {
 		println(*v)
 	}

@@ -21,8 +21,8 @@ package runtime
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/coro"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 func coroRuntimeContextParent(task, parent *coro.G) (*g, bool) {
@@ -168,6 +168,61 @@ func validCoroRuntimeContext(ctx *coroRuntimeContext) bool {
 
 func validCoroRuntimeTaskContext(task *coro.G, ctx *coroRuntimeContext) bool {
 	return ctx != nil && validCoroRuntimeTaskG(task, &ctx.g)
+}
+
+func coroRecoverRuntimeGV1(task *coro.G) (*g, bool) {
+	ctx := (*coroRuntimeContext)(coro.TaskLocal(task))
+	if !validCoroRuntimeTaskContext(task, ctx) {
+		return nil, false
+	}
+	gp := &ctx.g
+	// A physical body which otherwise needs no runtime context deliberately
+	// resumes without installing its logical G in pthread TLS. Recover aliases
+	// are nevertheless task-owned metadata: taskLocal is the stable sidecar
+	// identity across both attached and detached resumes. Accept only those two
+	// complete lifecycle shapes instead of consulting the ambient executor G.
+	switch readgstatus(gp) {
+	case _Grunnable:
+		if gp.m != nil {
+			return nil, false
+		}
+	case _Grunning:
+		if gp.m == nil || gp.m.curg != gp || gp.m.p == nil ||
+			gp.m.p.m != gp.m || readpstatus(gp.m.p) != _Prunning {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	return gp, true
+}
+
+func coroBeginRecoverAliasRuntimeV1(
+	task *coro.G, expected, token unsafe.Pointer, active bool,
+) (unsafe.Pointer, bool) {
+	gp, ok := coroRecoverRuntimeGV1(task)
+	if !ok || gp.recoverPanic != nil {
+		return nil, false
+	}
+	previous := gp.recoverFrame
+	if active && (expected == nil || previous == expected) {
+		gp.recoverFrame = token
+	}
+	return previous, true
+}
+
+func coroEndRecoverAliasRuntimeV1(task *coro.G, previous unsafe.Pointer) bool {
+	gp, ok := coroRecoverRuntimeGV1(task)
+	if !ok || gp.recoverPanic != nil {
+		return false
+	}
+	gp.recoverFrame = previous
+	return true
+}
+
+func coroHasRecoverAliasRuntimeV1(task *coro.G, token unsafe.Pointer) bool {
+	gp, ok := coroRecoverRuntimeGV1(task)
+	return ok && gp.recoverFrame == token
 }
 
 // validCoroRuntimeTaskG validates a task sidecar starting from the logical G.

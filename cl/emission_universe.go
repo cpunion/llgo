@@ -33,11 +33,11 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/goplus/llgo/cl/ssawrap"
-	"github.com/goplus/llgo/internal/coro"
-	"github.com/goplus/llgo/internal/typepatch"
-	llssa "github.com/goplus/llgo/ssa"
-	llabi "github.com/goplus/llgo/ssa/abi"
+	"github.com/xgo-dev/llgo/cl/ssawrap"
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/typepatch"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	llabi "github.com/xgo-dev/llgo/ssa/abi"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -50,6 +50,12 @@ type EmissionPackage struct {
 	Identity                string // stable build package identity; required for same-path variants
 	MetadataOnly            bool   // freeze frontend directives/ownership without selecting definitions
 	AssemblyNoSuspendProofs []CoroAssemblyNoSuspendProof
+	// CompilerSourcePatchFiles is the exact build-selected set of source files
+	// injected by the compiler's GOROOT source-patch overlay. The universe
+	// validates every entry against adjusted AST positions and freezes only
+	// token spans; later coroutine analysis never grants authority from a path
+	// or declaration name alone.
+	CompilerSourcePatchFiles []string
 	// RawDataSymbols is the build-owned profile of non-Go linker inputs
 	// attributed to this exact package identity. Only a complete profile can
 	// authorize internal linkage for an otherwise private Go data cell.
@@ -140,12 +146,108 @@ type preparedEmissionPackage struct {
 	metadataOnly      bool
 	assemblyNoSuspend map[string]CoroAssemblyNoSuspendProof
 	rawDataSymbols    CoroRawDataSymbolProfile
+	// compilerSourcePatchSpans are exact AST-file spans validated from the
+	// build-owned source-patch input. They are the only annotation-free
+	// authority for normal-package declarations injected by that pipeline.
+	compilerSourcePatchSpans []emissionSourceSpan
 	// Source-only lowering facts are package invariants. Emission planning
 	// creates a lightweight context for every reachable function; rescanning
 	// the complete package AST in each context is quadratic on standard-library
 	// packages.
 	addrOfFieldAddrs        map[token.Pos]none
 	sourceUsesRuntimeCaller bool
+}
+
+type emissionSourceSpan struct {
+	start token.Pos
+	end   token.Pos
+}
+
+func normalizeCompilerSourcePatchFilename(filename string) string {
+	return filepath.Clean(filepath.FromSlash(filename))
+}
+
+func freezeCompilerSourcePatchSpans(
+	fset *token.FileSet,
+	files []*ast.File,
+	requested []string,
+) ([]emissionSourceSpan, error) {
+	if len(requested) == 0 {
+		return nil, nil
+	}
+	if fset == nil {
+		return nil, fmt.Errorf("compiler source-patch files require a file set")
+	}
+	required := make(map[string]none, len(requested))
+	for _, filename := range requested {
+		if filename == "" {
+			return nil, fmt.Errorf("compiler source-patch file path is empty")
+		}
+		normalized := normalizeCompilerSourcePatchFilename(filename)
+		if _, duplicate := required[normalized]; duplicate {
+			return nil, fmt.Errorf("duplicate compiler source-patch file %q", filename)
+		}
+		required[normalized] = none{}
+	}
+
+	matches := make(map[string]int, len(required))
+	spans := make([]emissionSourceSpan, 0, len(required))
+	for _, file := range files {
+		if file == nil || !file.Package.IsValid() || !file.End().IsValid() {
+			continue
+		}
+		position := fset.PositionFor(file.Package, true)
+		if position.Filename == "" {
+			continue
+		}
+		normalized := normalizeCompilerSourcePatchFilename(position.Filename)
+		if _, selected := required[normalized]; !selected {
+			continue
+		}
+		matches[normalized]++
+		spans = append(spans, emissionSourceSpan{start: file.Pos(), end: file.End()})
+	}
+
+	paths := make([]string, 0, len(required))
+	for filename := range required {
+		paths = append(paths, filename)
+	}
+	slices.Sort(paths)
+	for _, filename := range paths {
+		switch matches[filename] {
+		case 1:
+		case 0:
+			return nil, fmt.Errorf("compiler source-patch file %q has no exact input AST", filename)
+		default:
+			return nil, fmt.Errorf("compiler source-patch file %q matches %d input AST files", filename, matches[filename])
+		}
+	}
+	slices.SortFunc(spans, func(left, right emissionSourceSpan) int {
+		if left.start < right.start {
+			return -1
+		}
+		if left.start > right.start {
+			return 1
+		}
+		return 0
+	})
+	return spans, nil
+}
+
+func (p *preparedEmissionPackage) compilerSourcePatchDeclaration(fn *ssa.Function) bool {
+	if p == nil || fn == nil || len(p.compilerSourcePatchSpans) == 0 {
+		return false
+	}
+	decl, _ := fn.Syntax().(*ast.FuncDecl)
+	if decl == nil || !decl.Pos().IsValid() || !decl.End().IsValid() {
+		return false
+	}
+	for _, span := range p.compilerSourcePatchSpans {
+		if decl.Pos() >= span.start && decl.End() <= span.end {
+			return true
+		}
+	}
+	return false
 }
 
 // EmissionUniverse is an immutable set of canonical exact SSA functions and
@@ -829,24 +931,31 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		if err != nil {
 			return nil, fmt.Errorf("prepare emission universe: package %q: %w", identity, err)
 		}
+		compilerSourcePatchSpans, err := freezeCompilerSourcePatchSpans(
+			u.goProg.Fset, input.Files, input.CompilerSourcePatchFiles,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("prepare emission universe: package %q: %w", identity, err)
+		}
 		prepared := &preparedEmissionPackage{
-			order:                   i,
-			identity:                identity,
-			ssa:                     input.SSA,
-			files:                   append([]*ast.File(nil), input.Files...),
-			pkgPath:                 pkgPath,
-			oldTypes:                input.SSA.Pkg,
-			pkgTypes:                input.SSA.Pkg,
-			skips:                   cloneNoneMap(scan.skips),
-			skipall:                 scan.skipall,
-			winners:                 make(map[string]*ssa.Function),
-			selected:                make(map[*ssa.Function]none),
-			fromPatch:               make(map[*ssa.Function]bool),
-			metadataOnly:            input.MetadataOnly,
-			assemblyNoSuspend:       assemblyNoSuspend,
-			rawDataSymbols:          rawDataSymbols,
-			addrOfFieldAddrs:        collectAddrOfFieldSelectors(input.Files),
-			sourceUsesRuntimeCaller: filesUseRuntimeCaller(input.Files),
+			order:                    i,
+			identity:                 identity,
+			ssa:                      input.SSA,
+			files:                    append([]*ast.File(nil), input.Files...),
+			pkgPath:                  pkgPath,
+			oldTypes:                 input.SSA.Pkg,
+			pkgTypes:                 input.SSA.Pkg,
+			skips:                    cloneNoneMap(scan.skips),
+			skipall:                  scan.skipall,
+			winners:                  make(map[string]*ssa.Function),
+			selected:                 make(map[*ssa.Function]none),
+			fromPatch:                make(map[*ssa.Function]bool),
+			metadataOnly:             input.MetadataOnly,
+			assemblyNoSuspend:        assemblyNoSuspend,
+			rawDataSymbols:           rawDataSymbols,
+			compilerSourcePatchSpans: compilerSourcePatchSpans,
+			addrOfFieldAddrs:         collectAddrOfFieldSelectors(input.Files),
+			sourceUsesRuntimeCaller:  filesUseRuntimeCaller(input.Files),
 		}
 		if patch, ok := patches[pkgPath]; ok {
 			if patch.Alt == nil || patch.Types == nil {
@@ -1067,6 +1176,13 @@ func (u *EmissionUniverse) CoroLibraryEffects() CoroLibraryEffectView {
 		return CoroLibraryEffectView{}
 	}
 	return u.libraryEffects
+}
+
+// CoroPlanningMetadata returns the immutable compiler-analysis projection.
+// Keeping planning-only metadata behind one view prevents every new reference
+// family from widening the direct emission-universe authority surface.
+func (u *EmissionUniverse) CoroPlanningMetadata() CoroPlanningMetadataView {
+	return CoroPlanningMetadataView{index: emissionCanonicalIndex{universe: u}}
 }
 
 // CoroRawABIDirective returns the exact source directive that publishes fn
@@ -1318,9 +1434,8 @@ func (u *EmissionUniverse) CoroGlobalPhysicalIdentity(global *ssa.Global) (ident
 }
 
 // CoroDemandReferences returns exact functions embedded or synchronously
-// referenced only by a plain frontend representation while lowering owner.
-// This covers equality/hash helpers, method-table tfn/ifn entries, and
-// representation-only runtime helpers. These are
+// referenced through a raw frontend ABI while lowering owner. This covers
+// equality/hash helpers and method-table tfn/ifn entries. These are
 // demand-only references: a demanded owner must materialize the selected raw
 // bodies, but taking their addresses does not inherit their effects.
 //
@@ -1334,21 +1449,12 @@ func (u *EmissionUniverse) CoroDemandReferences(owner *ssa.Function) ([]*ssa.Fun
 	return u.coroFrozenABIReferences(owner, u.abiMethodReferences, "method")
 }
 
-// CoroManagedValueReferences returns exact managed function values introduced
-// by compiler lowering without a source SSA operand. These values use the
-// canonical descriptor transport and are deliberately disjoint from raw ABI
-// method/code-address references.
-func (u *EmissionUniverse) CoroManagedValueReferences(owner *ssa.Function) ([]*ssa.Function, error) {
-	if u == nil {
-		return nil, fmt.Errorf("coroutine managed value references require a prepared emission universe")
-	}
-	return u.coroFrozenABIReferences(owner, u.managedValueReferences, "managed value")
-}
-
 // CoroSyncDemandReferences returns the exact subset of CoroDemandReferences
 // synchronously called through a raw function signature. ABI equality/hash
-// callbacks and plain-representation helpers have this physical contract;
-// method-table tfn/ifn words do not and are therefore deliberately absent.
+// callbacks have this physical contract; method-table tfn/ifn words do not and
+// are therefore deliberately absent. Representation-only runtime helpers use
+// CoroPlanningMetadata().PlainLoweredCalls instead: they are conditional on a
+// live legacy body and are not raw ABI address publications.
 //
 // This is a use-site fact frozen while the descriptor is materialized, not an
 // effect or package/name classification of the referenced function body.
@@ -1532,10 +1638,11 @@ func (u *EmissionUniverse) ResolveCoroLoweredCall(owner *ssa.Function, logicalNa
 	return call.Target, ok, err
 }
 
-// ResolveCoroPlainLoweredCall returns one helper emitted only by an owner's
-// legacy-stack representation. Such a helper is deliberately absent from
-// CoroLoweredCalls: it contributes raw-plain demand but must not propagate its
-// effect into the managed physical coroutine.
+// ResolveCoroPlainLoweredCall returns one helper occurrence emitted by an
+// owner's legacy-stack representation. The same logical helper may also have a
+// managed record in CoroLoweredCalls when both representations emit it. This
+// mapping contributes raw-plain demand but never propagates its effect into the
+// managed physical coroutine.
 func (u *EmissionUniverse) ResolveCoroPlainLoweredCall(owner *ssa.Function, logicalName string) (*ssa.Function, bool, error) {
 	if u == nil || owner == nil {
 		return nil, false, fmt.Errorf("coroutine plain lowered calls require a prepared universe and exact owner")

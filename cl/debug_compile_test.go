@@ -12,51 +12,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/internal/optlevel"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/optlevel"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
-
-func TestFrontendOptions(t *testing.T) {
-	oldDebug := enableDbg
-	oldDebugSymbols := enableDbgSyms
-	oldTrace := enableCallTracing
-	oldExportRename := enableExportRename
-	t.Cleanup(func() {
-		enableDbg = oldDebug
-		enableDbgSyms = oldDebugSymbols
-		enableCallTracing = oldTrace
-		enableExportRename = oldExportRename
-	})
-
-	EnableDebug(true)
-	EnableDbgSyms(true)
-	EnableTrace(true)
-	EnableExportRename(true)
-	t.Setenv("LLGO_SHADOW_STACK", "1")
-
-	wantLegacy := Options{
-		Debug:        true,
-		DebugSymbols: true,
-		Trace:        true,
-		ExportRename: true,
-		ShadowStack:  true,
-	}
-	if got := (&context{}).frontendOptions(); got != wantLegacy {
-		t.Fatalf("frontendOptions() = %+v, want legacy options %+v", got, wantLegacy)
-	}
-	if got := (*context)(nil).frontendOptions(); got != wantLegacy {
-		t.Fatalf("nil frontendOptions() = %+v, want legacy options %+v", got, wantLegacy)
-	}
-
-	wantExplicit := Options{Trace: true}
-	ctx := &context{options: wantExplicit, optionsSet: true}
-	if got := ctx.frontendOptions(); got != wantExplicit {
-		t.Fatalf("frontendOptions() = %+v, want explicit options %+v", got, wantExplicit)
-	}
-}
 
 func TestCompileDebugMetadata(t *testing.T) {
 	const source = `package debugcompile

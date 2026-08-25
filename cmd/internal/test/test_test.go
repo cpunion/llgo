@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/goplus/llgo/cmd/internal/flags"
-	"github.com/goplus/llgo/internal/build"
+	"github.com/xgo-dev/llgo/cmd/internal/flags"
+	"github.com/xgo-dev/llgo/internal/build"
 )
 
 func TestBuildFlagsWiring(t *testing.T) {
@@ -133,34 +133,38 @@ func TestBuildParallelChildArgs(t *testing.T) {
 	}
 }
 
-func TestCanRunPackagesInParallel(t *testing.T) {
+func TestCanOrchestrateTestPackages(t *testing.T) {
 	resetTestFlags()
 	t.Setenv(parallelWorkerEnv, "")
 	conf := build.NewDefaultConf(build.ModeTest)
 	conf.BuildParallelism = 2
-	if !canRunPackagesInParallel(conf, []string{"./..."}, 2) {
-		t.Fatal("ordinary package pattern cannot run in parallel")
+	if !canOrchestrateTestPackages(conf, []string{"./..."}) {
+		t.Fatal("ordinary package pattern cannot use package orchestration")
+	}
+	conf.BuildParallelism = 1
+	if !canOrchestrateTestPackages(conf, []string{"./..."}) {
+		t.Fatal("ordinary package pattern cannot use sequential build-domain isolation")
 	}
 
 	flags.TestCoverProfile = "cover.out"
-	if canRunPackagesInParallel(conf, []string{"./..."}, 2) {
-		t.Fatal("shared coverage profile can run in parallel")
+	if canOrchestrateTestPackages(conf, []string{"./..."}) {
+		t.Fatal("shared coverage profile can use package orchestration")
 	}
 	flags.TestCoverProfile = ""
 
-	if canRunPackagesInParallel(conf, []string{"one_test.go"}, 2) {
-		t.Fatal("Go file arguments can run in parallel")
+	if canOrchestrateTestPackages(conf, []string{"one_test.go"}) {
+		t.Fatal("Go file arguments can use package orchestration")
 	}
 	conf.CompileOnly = true
-	if canRunPackagesInParallel(conf, []string{"./..."}, 2) {
-		t.Fatal("-c can run in parallel")
+	if canOrchestrateTestPackages(conf, []string{"./..."}) {
+		t.Fatal("-c can use package orchestration")
 	}
 }
 
 func TestListTestPackages(t *testing.T) {
 	conf := build.NewDefaultConf(build.ModeTest)
 	conf.BuildParallelism = 2
-	pkg := "github.com/goplus/llgo/internal/goflags"
+	pkg := "github.com/xgo-dev/llgo/internal/goflags"
 	got, err := listTestPackages(conf, []string{pkg, pkg})
 	if err != nil {
 		t.Fatal(err)

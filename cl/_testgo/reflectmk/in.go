@@ -25,7 +25,7 @@ import (
 // CHECK-DAG: call ptr @"reflect.PointerTo$coro"(
 // CHECK-DAG: call ptr @"reflect.SliceOf$coro"(
 // CHECK-DAG: call ptr @"reflect.StructOf$coro"(
-// CHECK-DAG: call void @"reflect.Value.Method$outcome"(
+// CHECK-DAG: call ptr @"reflect.Value.Method$coro"(
 // CHECK-DAG: call ptr @"reflect.Value.MethodByName$coro"(
 // CHECK-DAG: call ptr @"reflect.Value.Call$coro"(
 // CHECK-LABEL: define ptr @"main.method$coro"(ptr %0, ptr %1, i64 %2){{.*}} {
@@ -33,7 +33,7 @@ import (
 // CHECK-LABEL: define ptr @"main.methodByName$coro"(ptr %0, ptr %1, %"{{.*}}String" %2){{.*}} {
 // CHECK: call ptr @"reflect.Value.MethodByName$coro"(
 // CHECK: call ptr @"reflect.Value.Call$coro"(
-// CHECK-LABEL: define linkonce ptr @__llgo_coro_func_coro_v1.method-value.{{.*}}(ptr %0, ptr %1, ptr %2, %main.Point %3) {
+// CHECK-LABEL: define linkonce ptr @__llgo_coro_func_coro_v1.method-value.{{.*}}(ptr %0, ptr %1, ptr %2, %main.Point %3){{.*}} {
 // CHECK: call ptr @"main.Point.String$coro"(ptr %0, ptr %1, %main.Point %3)
 // CHECK-NOT: __llgo_stub.
 

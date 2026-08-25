@@ -3,9 +3,8 @@
 package runtime
 
 import (
+	latomic "sync/atomic"
 	"unsafe"
-
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 )
 
 // Standard-library semaphore entry points dispatch to a capability-selected

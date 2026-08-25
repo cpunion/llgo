@@ -21,8 +21,8 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -538,6 +538,9 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 	}
 	if err := ir.finalizeOutcomePlainIntrinsicSemantics(u.prog, u.functions, u.sortedUseOwners); err != nil {
 		return fmt.Errorf("finalize outcome-plain intrinsic semantics: %w", err)
+	}
+	if err := ir.finalizeRangeYieldCleanupOwners(u.functions, u.sortedUseOwners); err != nil {
+		return fmt.Errorf("finalize range-yield cleanup owners: %w", err)
 	}
 	ir.callsFrozen = true
 	// These maps are mutable builder scratch. All production call-site

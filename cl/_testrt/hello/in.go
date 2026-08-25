@@ -1,6 +1,6 @@
 package main
 
-import "github.com/goplus/llgo/cl/_testrt/hello/libc"
+import "github.com/xgo-dev/llgo/cl/_testrt/hello/libc"
 
 var format = [...]int8{'H', 'e', 'l', 'l', 'o', ' ', '%', 'd', '\n', 0}
 

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"unsafe"
 
-	rabi "github.com/goplus/llgo/runtime/abi"
+	rabi "github.com/xgo-dev/llgo/runtime/abi"
 )
 
 func newCoverageBuilder() *Builder {
@@ -152,6 +152,30 @@ func TestMapBucketSlotSizesUsePointersForLargeValues(t *testing.T) {
 				t.Errorf("%s/%s slots = (%d, %d), want (%d, %d)",
 					arch, test.name, key, elem, test.wantKey, test.wantElem)
 			}
+		}
+	}
+}
+
+func TestMapIndirectLayoutCoverage(t *testing.T) {
+	b := newCoverageBuilder()
+	large := types.NewArray(types.Typ[types.Uint64], 17) // 136 bytes
+	mapType := types.NewMap(large, large)
+
+	if got := b.MapFlags(mapType); got&3 != 3 {
+		t.Fatalf("MapFlags(large, large) = %#x, want both indirect flags", got)
+	}
+
+	bucket, ok := b.MapBucket(mapType).Underlying().(*types.Struct)
+	if !ok {
+		t.Fatalf("MapBucket(large, large) returned %T, want struct", b.MapBucket(mapType))
+	}
+	for _, field := range []int{1, 2} {
+		array, ok := bucket.Field(field).Type().(*types.Array)
+		if !ok {
+			t.Fatalf("bucket field %d has type %v, want array", field, bucket.Field(field).Type())
+		}
+		if _, ok := array.Elem().(*types.Pointer); !ok {
+			t.Fatalf("bucket field %d element is %v, want pointer", field, array.Elem())
 		}
 	}
 }

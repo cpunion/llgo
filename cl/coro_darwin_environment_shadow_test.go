@@ -20,6 +20,7 @@ package cl
 
 import (
 	"go/ast"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +48,22 @@ func Setenv(name, value uintptr) uintptr {
 
 func Unsetenv(name uintptr) uintptr {
 	r1, _, _ := syscall1Int32(funcPCABI0(libc_unsetenv_trampoline), name)
+	return r1
+}
+`
+
+const coroCompilerSourcePatchWorkerFixture = `package sourcepatchworker
+
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+
+//llgo:link syscall3Int32 llgo.syscall32
+func syscall3Int32(fn, a1, a2, a3 uintptr) (uintptr, uintptr, uintptr)
+
+func libc_getpid_trampoline()
+
+func Getpid() uintptr {
+	r1, _, _ := syscall3Int32(funcPCABI0(libc_getpid_trampoline), 0, 0, 0)
 	return r1
 }
 `
@@ -101,4 +118,90 @@ func TestCoroDarwinEnvironmentWorkerPublishesExactCallableShadows(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestCoroCompilerSourcePatchInfersExactWorkerAddressDeclaration(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	const packagePath = "example.com/emission/sourcepatchworker"
+	pkg := testProg.addPackage(t, packagePath, coroCompilerSourcePatchWorkerFixture)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	prog.SetLinkname(packagePath+".libc_getpid_trampoline", "C.getpid")
+	filename := testProg.fset.PositionFor(pkg.file.Package, true).Filename
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{
+			SSA:                      pkg.ssa,
+			Files:                    []*ast.File{pkg.file},
+			CompilerSourcePatchFiles: []string{filename},
+		}},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis, err := AnalyzeCoroCallableShadows(universe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer := exactIntrinsicOpcodeCall(t, universe, pkg.ssa.Func("Getpid"), llgoFuncPCABI0)
+	shadow, ok := analysis.Producer(producer)
+	if !ok || shadow.Target == nil || shadow.Target.Name() != "libc_getpid_trampoline" ||
+		shadow.PhysicalSymbol != "getpid" || shadow.ContractCertificateID == "" ||
+		shadow.ABI != (CoroCallableShadowABI{Family: coroCallableShadowWorkerSyscallFamily, WordArgs: 3}) {
+		reason, rejected := analysis.ProducerRejection(producer)
+		t.Fatalf("source-patch callable shadow = %+v, %t; rejection=%q,%t", shadow, ok, reason, rejected)
+	}
+	call := exactWorkerSyscallCall(t, universe, pkg.ssa.Func("Getpid"))
+	certificate, certified, err := universe.CoroWorkerSyscallCertificate(call)
+	if err != nil || !certified || certificate.ID == "" || certificate.StaticTargetCount != 1 {
+		t.Fatalf("source-patch worker certificate = %+v, %t, %v", certificate, certified, err)
+	}
+}
+
+func TestCoroCompilerSourcePatchWorkerAddressAuthorityFailsClosed(t *testing.T) {
+	build := func(t *testing.T, sourcePatchFiles []string) (*EmissionUniverse, emissionTestPackage, error) {
+		t.Helper()
+		testProg := newEmissionTestProgram()
+		const packagePath = "example.com/emission/sourcepatchworkerclosed"
+		pkg := testProg.addPackage(t, packagePath, coroCompilerSourcePatchWorkerFixture)
+		testProg.ssa.Build()
+		prog := newLLSSAProg(t)
+		t.Cleanup(prog.Dispose)
+		prog.SetLinkname(packagePath+".libc_getpid_trampoline", "C.getpid")
+		universe, err := prepareStacklessEmissionUniverseWithOptions(
+			prog, nil, []EmissionPackage{{
+				SSA:                      pkg.ssa,
+				Files:                    []*ast.File{pkg.file},
+				CompilerSourcePatchFiles: sourcePatchFiles,
+			}},
+			EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		)
+		return universe, pkg, err
+	}
+
+	t.Run("ordinary source has no authority", func(t *testing.T) {
+		universe, pkg, err := build(t, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		analysis, err := AnalyzeCoroCallableShadows(universe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		producer := exactIntrinsicOpcodeCall(t, universe, pkg.ssa.Func("Getpid"), llgoFuncPCABI0)
+		if _, ok := analysis.Producer(producer); ok {
+			t.Fatal("ordinary source unexpectedly gained source-patch worker-address authority")
+		}
+		if reason, ok := analysis.ProducerRejection(producer); !ok || reason != "target-lacks-workeraddr" {
+			t.Fatalf("ordinary-source rejection = %q, %t; want target-lacks-workeraddr", reason, ok)
+		}
+	})
+
+	t.Run("unmatched build input", func(t *testing.T) {
+		_, _, err := build(t, []string{"not-the-selected-source-patch.go"})
+		if err == nil || !strings.Contains(err.Error(), "has no exact input AST") {
+			t.Fatalf("unmatched source-patch input error = %v", err)
+		}
+	})
 }

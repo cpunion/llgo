@@ -4,7 +4,7 @@ import (
 	"unsafe"
 
 	"github.com/goplus/lib/c"
-	q "github.com/goplus/llgo/cl/_testrt/qsortfn/qsort"
+	q "github.com/xgo-dev/llgo/cl/_testrt/qsortfn/qsort"
 )
 
 func main() {

@@ -23,7 +23,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 // The source-island program test does not compile the typed hchan adapter.
@@ -219,7 +219,7 @@ var activeCoroProgramDriver *coroProgramTestDriverV1
 // can exercise the program adapter independently; coroalloc's own tests and
 // compiler IR tests cover the real bootstrap boundary.
 //
-//go:linkname testCoroAllocatorBootstrapState github.com/goplus/llgo/runtime/internal/coroalloc.state
+//go:linkname testCoroAllocatorBootstrapState github.com/xgo-dev/llgo/runtime/internal/coroalloc.state
 var testCoroAllocatorBootstrapState uint8
 
 // coro_program.go aborts through the full LLGo runtime. The named-source host
