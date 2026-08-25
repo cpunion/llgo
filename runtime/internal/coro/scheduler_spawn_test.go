@@ -321,6 +321,43 @@ func TestSpawnBeginRollbackIsExactlyOnce(t *testing.T) {
 	runtime.KeepAlive(child)
 }
 
+func TestSpawnInheritsPanicBoundaryCapability(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		begin func(parent, child *G, storage unsafe.Pointer, size uintptr) bool
+	}{
+		{name: "validated", begin: BeginSpawn},
+		{name: "compiler", begin: BeginSpawnCompiler},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := new(P)
+			parent := newYieldingTestGConfigured(t, "capability-parent", true)
+			if !Enqueue(p, parent.g) {
+				t.Fatal("enqueue capability parent")
+			}
+			if got, ok := NextRunnable(p); !ok || got != parent.g {
+				t.Fatal("dequeue capability parent")
+			}
+			action := beginSpawnTestResume(t, p, parent)
+
+			child := new(G)
+			if !test.begin(parent.g, child, unsafe.Pointer(child), TaskStorageSize()) ||
+				!PanicBoundaryCapability(child) {
+				t.Fatal("spawned child did not inherit panic-boundary capability")
+			}
+			if _, _, ok := RollbackSpawn(parent.g, child); !ok {
+				t.Fatal("rollback inherited-capability child")
+			}
+			completeSpawnTestG(t, p, parent.g, parent.frame, action)
+			if !TerminalG(p, parent.g) {
+				t.Fatal("capability parent did not become terminal")
+			}
+			runtime.KeepAlive(parent.frame.memory)
+			runtime.KeepAlive(child)
+		})
+	}
+}
+
 func TestSpawnCommitDiscardedResultAtomicAndTaskReclaim(t *testing.T) {
 	p := new(P)
 	parent := newYieldingTestG(t, "commit-parent")

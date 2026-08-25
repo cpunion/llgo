@@ -183,24 +183,195 @@ func Worker(enabled bool) {
 	plan := physical.instructions[unreachable]
 	plan.operation = coroPhysicalOperationWorkerSyscall
 	physical.instructions[unreachable] = plan
-	capabilities, err := commit().programCapabilities()
-	if err != nil || capabilities.Worker() {
-		t.Fatalf("unreachable worker capability = (%v, %v), want no worker", capabilities, err)
+	seeds, err := commit().workerProgramCapabilitySeeds()
+	if err != nil || seeds[function] {
+		t.Fatalf("unreachable worker capability = (%t, %v), want no worker", seeds[function], err)
 	}
 
 	plan = physical.instructions[reachable]
 	plan.operation = coroPhysicalOperationNativeSyscall
 	physical.instructions[reachable] = plan
-	capabilities, err = commit().programCapabilities()
-	if err != nil || capabilities.Worker() {
-		t.Fatalf("reachable native syscall capability = (%v, %v), want no worker", capabilities, err)
+	seeds, err = commit().workerProgramCapabilitySeeds()
+	if err != nil || seeds[function] {
+		t.Fatalf("reachable native syscall capability = (%t, %v), want no worker", seeds[function], err)
 	}
 
 	plan.operation = coroPhysicalOperationWorkerCgo
 	physical.instructions[reachable] = plan
-	capabilities, err = commit().programCapabilities()
-	if err != nil || !capabilities.Worker() {
-		t.Fatalf("reachable worker capability = (%v, %v), want worker", capabilities, err)
+	seeds, err = commit().workerProgramCapabilitySeeds()
+	if err != nil || !seeds[function] {
+		t.Fatalf("reachable worker capability = (%t, %v), want worker", seeds[function], err)
+	}
+}
+
+func TestCoroProgramPanicOnFaultDemandUsesReachableEmission(t *testing.T) {
+	analyze := func(source string) bool {
+		t.Helper()
+		ssaPkg, _, files := buildGoSSAPkg(t, source)
+		prog := newLLSSAProg(t)
+		defer prog.Dispose()
+		universe, err := prepareStacklessEmissionUniverse(
+			prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := coro.AnalyzeSSA(
+			ssaPkg.Prog,
+			coro.Roots{{Function: ssaPkg.Func("Root"), Demand: coro.AsyncDemand}},
+			coro.SSAConfig{
+				EmissionUniverse:     ssaUniverse,
+				FunctionIDs:          universe.FunctionIDConfig(),
+				MaxPlainInstructions: -1,
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		capabilities, err := deriveCoroFunctionProgramCapabilities(plan, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return capabilities[ssaPkg.Func("Root")].PanicOnFault()
+	}
+
+	if analyze(`package foo
+func Root(values []int) { _ = len(values) }
+`) {
+		t.Fatal("program with only a builtin call acquired the capability")
+	}
+	if analyze(`package foo
+import "runtime/debug"
+func dead() { debug.SetPanicOnFault(true) }
+func Root() {}
+`) {
+		t.Fatal("unreachable runtime/debug.SetPanicOnFault acquired the capability")
+	}
+	if !analyze(`package foo
+import "runtime/debug"
+func Root() { debug.SetPanicOnFault(true) }
+`) {
+		t.Fatal("reachable runtime/debug.SetPanicOnFault did not acquire the capability")
+	}
+	if !analyze(`package foo
+import "runtime/debug"
+func Root() { set := debug.SetPanicOnFault; set(true) }
+`) {
+		t.Fatal("dynamically called runtime/debug.SetPanicOnFault did not acquire the capability")
+	}
+}
+
+func TestCoroFunctionProgramCapabilitiesPropagateImportedAndPhysicalSeeds(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
+func Leaf() {}
+func Root() { Leaf() }
+func Dead() {}
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: ssaPkg.Func("Root"), Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          universe.FunctionIDConfig(),
+			MaxPlainInstructions: -1,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := ssaPkg.Func("Leaf")
+	capabilities, err := deriveCoroFunctionProgramCapabilities(
+		plan,
+		map[*ssa.Function]bool{leaf: true},
+		map[*ssa.Function]coro.LibraryEffectFunction{
+			leaf: {ProgramCapabilities: coro.NewProgramCapabilities(false, true)},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root := capabilities[ssaPkg.Func("Root")]; !root.Worker() || !root.PanicOnFault() {
+		t.Fatalf("root capabilities = %#x, want imported panic + physical worker closure", root)
+	}
+	if dead := capabilities[ssaPkg.Func("Dead")]; dead != 0 {
+		t.Fatalf("unreachable sibling acquired capabilities %#x", dead)
+	}
+}
+
+func TestCoroFunctionProgramCapabilitiesPropagateBodylessExternalSeed(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
+func Imported()
+func Root() { Imported() }
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported := ssaPkg.Func("Imported")
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: ssaPkg.Func("Root"), Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          universe.FunctionIDConfig(),
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function != imported {
+					return coro.SSAFunctionPolicy{}, nil
+				}
+				return coro.SSAFunctionPolicy{
+					Effect:           coro.MayPark,
+					Exec:             coro.MayUnwind,
+					ManagedEntry:     coro.ManagedEntryCoroutine,
+					IgnoreBody:       true,
+					External:         coro.ExternalKnown,
+					OverrideExternal: true,
+				}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if importedPlan, ok := plan.FunctionPlan(imported); !ok || importedPlan.Emission != coro.EmitExternal {
+		t.Fatalf("bodyless imported function plan = (%+v, %t), want EmitExternal", importedPlan, ok)
+	}
+	capabilities, err := deriveCoroFunctionProgramCapabilities(
+		plan,
+		nil,
+		map[*ssa.Function]coro.LibraryEffectFunction{
+			imported: {ProgramCapabilities: coro.NewProgramCapabilities(false, true)},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root := capabilities[ssaPkg.Func("Root")]; !root.PanicOnFault() {
+		t.Fatalf("bodyless imported capability did not reach caller: %#x", root)
 	}
 }
 

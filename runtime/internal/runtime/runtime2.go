@@ -101,6 +101,19 @@ type m struct {
 	p    *p
 	id   int64
 	os   mOS
+
+	// signalFaultPC is the one allocation-free fault-site word captured while
+	// a stackless logical G is installed on this physical executor. It is
+	// promoted to the G's lazy full panic store after longjmp/recover leaves the
+	// signal callback. Keeping it on M supports concurrent recoverable faults
+	// without adding the 64-PC store to every coroutine allocation.
+	signalFaultPC [1]uintptr
+	// signalFaultState packs native boundary depth, fault presence, the
+	// first-panic capture gate, and the paniconfault policy observed at the
+	// interrupted instruction. One word preserves the M layout on both 32- and
+	// 64-bit targets and survives synchronous defer execution until the boundary
+	// stages this exact fault.
+	signalFaultState uint32
 }
 
 // p represents the scheduling resources attached to an M. The pthread backend

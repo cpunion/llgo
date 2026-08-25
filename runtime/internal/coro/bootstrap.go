@@ -39,15 +39,20 @@ type ProgramCapabilitiesV2 uint32
 
 const (
 	ProgramCapabilityWorkerV2 ProgramCapabilitiesV2 = 1 << iota
+	ProgramCapabilityPanicOnFaultV2
 )
 
 func (capabilities ProgramCapabilitiesV2) Valid() bool {
-	const known = ProgramCapabilityWorkerV2
+	const known = ProgramCapabilityWorkerV2 | ProgramCapabilityPanicOnFaultV2
 	return capabilities&^known == 0
 }
 
 func (capabilities ProgramCapabilitiesV2) Worker() bool {
 	return capabilities&ProgramCapabilityWorkerV2 != 0
+}
+
+func (capabilities ProgramCapabilitiesV2) PanicOnFault() bool {
+	return capabilities&ProgramCapabilityPanicOnFaultV2 != 0
 }
 
 // ProgramStepKindV1 identifies how one compiler-emitted bootstrap step must be

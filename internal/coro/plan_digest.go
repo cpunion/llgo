@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v35"
+const PlanDigestSchema = "llgo.coro.plan-digest.v36"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -125,6 +125,7 @@ type PlanDigestMetadata struct {
 	FrameRetentionABI   string `json:"frame_retention_abi,omitempty"`
 	LoweringFactsSchema string `json:"lowering_facts_schema"`
 	LoweringFactsDigest string `json:"lowering_facts_digest"`
+	ImportedCapsDigest  string `json:"imported_program_capabilities_digest,omitempty"`
 	TargetTriple        string `json:"target_triple"`
 	TargetCPU           string `json:"target_cpu"`
 	TargetFeatures      string `json:"target_features"`
@@ -762,6 +763,13 @@ func (m PlanDigestMetadata) validate() error {
 	decodedFacts, err := hex.DecodeString(m.LoweringFactsDigest)
 	if err != nil || len(decodedFacts) != sha256.Size || hex.EncodeToString(decodedFacts) != m.LoweringFactsDigest {
 		return fmt.Errorf("coro: plan digest lowering-facts digest is not a canonical SHA-256 digest")
+	}
+	if m.ImportedCapsDigest != "" {
+		decoded, err := hex.DecodeString(m.ImportedCapsDigest)
+		if err != nil || len(decoded) != sha256.Size ||
+			hex.EncodeToString(decoded) != m.ImportedCapsDigest {
+			return fmt.Errorf("coro: plan digest imported program-capabilities digest is not a canonical SHA-256 digest")
+		}
 	}
 	switch m.FrameRetentionABI {
 	case "":

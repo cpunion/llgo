@@ -1178,24 +1178,24 @@ func (ir *coroProgramIR) physicalFunctionPlan(function *ssa.Function, owner *pre
 	return plan, nil
 }
 
-// programCapabilities projects optional target-service demand only after the
-// complete physical plan transaction has committed. Logical WaitForeign or a
-// target's ability to host workers is insufficient: same-M episodes and dead
-// source blocks must not start a worker pool. Conversely every reachable
-// worker transaction below is the exact recipe codegen will emit.
-func (ir *coroProgramIR) programCapabilities() (coro.ProgramCapabilities, error) {
+// workerProgramCapabilitySeeds projects exact local worker demand only after
+// the complete physical plan transaction has committed. Logical WaitForeign
+// or a target's ability to host workers is insufficient: same-M episodes and
+// dead source blocks must not start a worker pool. Call-graph propagation and
+// imported producer facts are joined separately by Compilation.
+func (ir *coroProgramIR) workerProgramCapabilitySeeds() (map[*ssa.Function]bool, error) {
 	if ir == nil || !ir.physicalPlansSealed {
-		return 0, fmt.Errorf("coroutine program capabilities require sealed physical plans")
+		return nil, fmt.Errorf("coroutine program capabilities require sealed physical plans")
 	}
-	worker := false
+	worker := make(map[*ssa.Function]bool)
 	for key, function := range ir.physicalPlans {
 		if key.function == nil || key.owner == nil || function == nil ||
 			function.function != key.function || function.owner != key.owner {
-			return 0, fmt.Errorf("coroutine program capabilities found an incomplete physical owner")
+			return nil, fmt.Errorf("coroutine program capabilities found an incomplete physical owner")
 		}
 		for instruction, plan := range function.instructions {
 			if instruction == nil || instruction.Parent() != function.function || instruction.Block() == nil {
-				return 0, fmt.Errorf("coroutine program capabilities found an incomplete physical instruction")
+				return nil, fmt.Errorf("coroutine program capabilities found an incomplete physical instruction")
 			}
 			if !function.reachableBlocks[instruction.Block()] {
 				continue
@@ -1205,15 +1205,11 @@ func (ir *coroProgramIR) programCapabilities() (coro.ProgramCapabilities, error)
 				coroPhysicalOperationWorkerForeign,
 				coroPhysicalOperationWorkerCgo,
 				coroPhysicalOperationWorkerCgoErrno:
-				worker = true
+				worker[key.function] = true
 			}
 		}
 	}
-	capabilities := coro.NewProgramCapabilities(worker)
-	if !capabilities.Valid() {
-		return 0, fmt.Errorf("coroutine program capabilities are invalid")
-	}
-	return capabilities, nil
+	return worker, nil
 }
 
 // physicalFunctionPlanForEmission resolves the frozen definition projection

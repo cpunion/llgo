@@ -79,6 +79,7 @@ func Recover(token unsafe.Pointer) (ret any) {
 	}
 	ptr := gp.recoverPanic
 	if ptr != nil && ptr == gp.panic_ {
+		promoteSignalFaultPC()
 		node := (*panicNode)(ptr)
 		gp.panic_ = node.prev
 		gp.recoverFrame = nil
@@ -169,6 +170,7 @@ func (gp *g) panicIsSuspended(ptr unsafe.Pointer) bool {
 // while unwinding. LLGo stores Goexit separately on g, so it performs the
 // equivalent state transition before starting its longjmp unwind.
 func (gp *g) abortPanics() {
+	discardSignalFaultPC()
 	discarded := gp.panic_ != nil
 	for gp.panic_ != nil {
 		node := (*panicNode)(gp.panic_)
@@ -244,10 +246,22 @@ var PanicRecovered func()
 // PanicSignal converts a hardware signal into the same Go panic the
 // legacy signal handler raised.
 func PanicSignal(sig int) {
+	PanicSignalAt(sig, 0, false)
+}
+
+// PanicSignalAt converts a hardware signal and, for a non-nil memory fault
+// admitted by SetPanicOnFault, preserves the best-effort fault address.
+func PanicSignalAt(sig int, addr uintptr, addressable bool) {
 	switch sig {
 	case 8: // SIGFPE
 		panic(errorString("integer divide by zero"))
 	default: // SIGSEGV, SIGBUS
+		if addressable {
+			panic(errorAddressString{
+				msg:  "invalid memory address or nil pointer dereference",
+				addr: addr,
+			})
+		}
 		panic(errorString("invalid memory address or nil pointer dereference"))
 	}
 }

@@ -410,7 +410,7 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 		// a later emitter cannot honor.
 		if functionPlan.RawPlainDemand {
 			return fmt.Errorf(
-				"coroutine library effect %q has consumer raw-plain demand, which library summary v8 does not lower",
+				"coroutine library effect %q has consumer raw-plain demand, which the current library summary does not lower",
 				fact.ID,
 			)
 		}
@@ -421,7 +421,7 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 		// descriptor in this consumer; reject only an active crossing.
 		if fact.FuncRep == coro.Dispatch && functionPlan.Emission != coro.EmitNone {
 			return fmt.Errorf(
-				"coroutine library effect %q requires an external Dispatch producer, which library summary v8 does not publish",
+				"coroutine library effect %q requires an external Dispatch producer, which the current library summary does not publish",
 				fact.ID,
 			)
 		}
@@ -701,6 +701,10 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			}
 			rawPlainSymbol = entry.baseName
 		}
+		programCapabilities, err := p.compilation.coroFunctionProgramCapability(function)
+		if err != nil {
+			return fmt.Errorf("coroutine library summary: program capabilities for %q: %w", functionPlan.ID, err)
+		}
 		fact := coro.LibraryEffectFunction{
 			ID:                    functionPlan.ID,
 			ABIHash:               abiHash,
@@ -715,6 +719,7 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			StaticOutcome:         functionPlan.StaticOutcome,
 			PrimarySymbol:         entry.name,
 			RawPlainSymbol:        rawPlainSymbol,
+			ProgramCapabilities:   programCapabilities,
 			OutcomePlainSymbol: func() string {
 				if functionPlan.HasStaticOutcome() {
 					return entry.baseName + coroOutcomePlainPrimarySuffix

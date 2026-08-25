@@ -771,11 +771,26 @@ func (c *Compilation) CoroProgramCapabilities() (coro.ProgramCapabilities, error
 	if err := c.preflightCoroPlan(); err != nil {
 		return 0, err
 	}
-	universe := c.immutableEmissionUniverse()
-	if universe == nil || universe.coroProgramIR == nil {
-		return 0, fmt.Errorf("coroutine program capabilities require a prepared ProgramIR")
+	capabilities, err := c.coroFunctionProgramCapabilities()
+	if err != nil {
+		return 0, err
 	}
-	return universe.coroProgramIR.programCapabilities()
+	plan := c.immutablePlan()
+	if plan == nil {
+		return 0, fmt.Errorf("coroutine program capabilities require an immutable SSA plan")
+	}
+	var result coro.ProgramCapabilities
+	for function, functionCapabilities := range capabilities {
+		functionPlan, planned := plan.FunctionPlan(function)
+		if !planned || functionPlan.Emission == coro.EmitNone {
+			continue
+		}
+		result |= functionCapabilities
+	}
+	if !result.Valid() {
+		return 0, fmt.Errorf("coroutine program capabilities are invalid")
+	}
+	return result, nil
 }
 
 func (p *context) mustFunctionSymbol(fn *ssa.Function) plannedFunctionSymbol {

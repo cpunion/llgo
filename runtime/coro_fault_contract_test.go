@@ -42,3 +42,22 @@ func TestCoroImplicitFaultContract(t *testing.T) {
 		t.Fatalf("implicit coroutine fault contract: %v\n%s", err, output)
 	}
 }
+
+// TestCoroPanicBoundaryContract exercises the real runtime transport in a
+// named production-source island. Logical scheduler ownership comes from the
+// production coro package; only the ambient LLGo g/defer prefix is supplied by
+// the host adapter.
+func TestCoroPanicBoundaryContract(t *testing.T) {
+	cmd := exec.Command(
+		"go", "test",
+		"-tags=coro_panic_boundary_adapter_test",
+		"coro_panic_boundary.go", "coro_panic_boundary_test_adapter.go",
+		"coro_panic_boundary_test.go",
+		"-run", "^TestCoroPanicBoundary",
+		"-count=1",
+	)
+	cmd.Dir = "internal/runtime"
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("coroutine panic-boundary contract: %v\n%s", err, output)
+	}
+}

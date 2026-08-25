@@ -171,7 +171,7 @@ func PrepareInlineAwaitCompiler(
 	return BeginInlineAwaitCompiler(g, parentHandle, childHandle)
 }
 
-func validInlineAwaitEdge(parent, child *Frame) bool {
+func validInlineAwaitEdgeShape(parent, child *Frame) bool {
 	if parent == nil || child == nil || parent == child || parent.handle == nil ||
 		child.handle == nil || parent.header == nil || child.header == nil ||
 		child.parent != parent || child.header.Parent != parent.handle ||
@@ -180,10 +180,14 @@ func validInlineAwaitEdge(parent, child *Frame) bool {
 		parent.header.Lifecycle != uint16(FrameSuspended) {
 		return false
 	}
-	record := &parent.completion
-	if record.child != child.handle {
+	return parent.completion.child == child.handle
+}
+
+func validInlineAwaitEdge(parent, child *Frame) bool {
+	if !validInlineAwaitEdgeShape(parent, child) {
 		return false
 	}
+	record := &parent.completion
 	switch record.status {
 	case completionArmed:
 		return record.typeWord == nil && record.dataWord == nil
@@ -216,6 +220,34 @@ func inlineAwaitChildBelow(leaf, root *Frame) *Frame {
 
 func validInlineAwaitAncestry(leaf, root *Frame) bool {
 	return inlineAwaitChildBelow(leaf, root) != nil
+}
+
+// validInlineAwaitReturningAncestry is the post-llvm.coro.resume counterpart
+// of validInlineAwaitAncestry. Before the generated caller invokes
+// FinishInlineAwait, the leaf may already have published its terminal result
+// into the immediate parent's completion record. That one edge is no longer
+// armed, but it still names the exact live native call which is returning;
+// every older edge must remain in the ordinary armed form.
+func validInlineAwaitReturningAncestry(leaf, root *Frame) bool {
+	if leaf == nil || root == nil || leaf == root {
+		return false
+	}
+	first := true
+	for child := leaf; child != nil && child.parent != nil; child = child.parent {
+		parent := child.parent
+		valid := validInlineAwaitEdge(parent, child)
+		if !valid && first && validInlineAwaitEdgeShape(parent, child) {
+			valid = terminalInlineCompletion(&parent.completion, child.handle)
+		}
+		if !valid {
+			return false
+		}
+		if parent == root {
+			return true
+		}
+		first = false
+	}
+	return false
 }
 
 // validInlineAwaitParentDepth checks the O(1) inductive edge owned by one

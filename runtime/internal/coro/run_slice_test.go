@@ -35,7 +35,7 @@ func runnerYieldAction(t *testing.T, driver *ExecutorDriver, step ExecutorRunSte
 	if step.Kind != ExecutorRunStepAction || step.G != task.g || step.Action.Kind != ActionCheckResume {
 		t.Fatalf("runner yield action = %+v", step)
 	}
-	resume, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
+	resume, _, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
 	if !ok || resume.Kind != ActionResume || resume.Handle != task.handle {
 		t.Fatalf("runner yield check = (%+v, %t)", resume, ok)
 	}
@@ -64,6 +64,20 @@ func runnerNextPhysicalAction(t *testing.T, driver *ExecutorDriver, task *yieldi
 	return step
 }
 
+func TestIssuedResumeCarriesImmutablePanicBoundaryCapability(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestGConfigured(t, "panic-boundary", true)
+	if !PanicBoundaryCapability(task.g) || !Enqueue(p, task.g) {
+		t.Fatal("panic-boundary task was not initialized and enqueued")
+	}
+	_ = runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, _, panicBoundary, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
+	if !ok || !panicBoundary || resume.Kind != ActionResume || resume.Handle != task.handle {
+		t.Fatalf("issued panic-boundary resume = (%+v, boundary=%t, ok=%t)", resume, panicBoundary, ok)
+	}
+}
+
 func TestExecutorRunFusesPrivateNormalCompletionDestroy(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)
@@ -72,7 +86,7 @@ func TestExecutorRunFusesPrivateNormalCompletionDestroy(t *testing.T) {
 		t.Fatal("enqueue fused completion task")
 	}
 	_ = runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
-	resume, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
+	resume, _, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
 	if !ok || resume.Kind != ActionResume || resume.Handle != task.handle {
 		t.Fatalf("begin fused completion resume = (%+v, %t)", resume, ok)
 	}
@@ -146,7 +160,7 @@ func TestExecutorRunFusesCompletionBeforeReadyPeer(t *testing.T) {
 		t.Fatal("enqueue completion task and ready peer")
 	}
 	_ = runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
-	resume, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
+	resume, _, _, ok := BeginIssuedExecutorResumeRuntimeContext(driver, task.g)
 	if !ok {
 		t.Fatal("begin completion resume")
 	}

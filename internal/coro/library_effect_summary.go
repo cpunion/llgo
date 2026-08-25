@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v9"
+	LibraryEffectSummaryVersion = "v10"
 
 	// LibraryEffectSummarySchema is the producer ABI summary embedded in LLGo
 	// package objects and archives. It is deliberately independent from the
@@ -55,7 +55,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 9,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 10,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -104,6 +104,11 @@ type LibraryEffectFunction struct {
 	// orthogonal to AtomicCostProof and never replaces the coroutine primary.
 	StaticOutcome bool   `json:"static_outcome"`
 	PrimarySymbol string `json:"primary_symbol"`
+	// ProgramCapabilities is the transitive optional-runtime-service demand of
+	// this exact producer entry. Unlike target capabilities, these bits describe
+	// what executing the function can require. A consumer propagates them through
+	// its own call graph instead of rescanning unavailable library bodies.
+	ProgramCapabilities ProgramCapabilities `json:"program_capabilities"`
 	// OutcomePlainSymbol is the exact synchronous static-call entry certified by
 	// AtomicCostProof. It equals PrimarySymbol when outcome-plain is primary and
 	// names a separate twin when ManagedEntry remains coroutine.
@@ -312,6 +317,9 @@ func (function LibraryEffectFunction) validate() error {
 	}
 	if err := function.AtomicCostProof.Validate(); err != nil {
 		return err
+	}
+	if !function.ProgramCapabilities.Valid() {
+		return fmt.Errorf("coro: library function %q has invalid program capabilities %#x", function.ID, function.ProgramCapabilities)
 	}
 	if function.Primary == PrimaryExternal {
 		return fmt.Errorf("coro: library function %q has no producer-owned primary", function.ID)

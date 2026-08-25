@@ -6,7 +6,10 @@ import (
 	"runtime/debug"
 	"syscall"
 	"testing"
+	"unsafe"
 )
+
+var faultCleanupSink byte
 
 func faultCopy(dst, src []byte) (n int, err error) {
 	defer func() {
@@ -20,6 +23,16 @@ func faultCopy(dst, src []byte) (n int, err error) {
 		n++
 	}
 	return
+}
+
+func faultDuringPanicCleanup(src []byte) (recovered any) {
+	defer func() {
+		recovered = recover()
+	}()
+	defer func() {
+		faultCleanupSink = src[0]
+	}()
+	panic("superseded by cleanup fault")
 }
 
 func TestRecoverAfterFaultPreservesNamedResult(t *testing.T) {
@@ -45,5 +58,24 @@ func TestRecoverAfterFaultPreservesNamedResult(t *testing.T) {
 	}
 	if want := len(data)/2 - offset; n != want {
 		t.Fatalf("copy returned %d, want %d", n, want)
+	}
+	addressable, ok := err.(interface{ Addr() uintptr })
+	wantAddress := uintptr(unsafe.Pointer(&data[len(data)/2]))
+	if !ok || addressable.Addr() != wantAddress {
+		t.Fatalf("fault address = (%#x, %t), want %#x", func() uintptr {
+			if !ok {
+				return 0
+			}
+			return addressable.Addr()
+		}(), ok, wantAddress)
+	}
+	faultCleanupSink = 1
+	if recovered := faultDuringPanicCleanup(hole); recovered == nil {
+		t.Fatal("fault during panic cleanup was not recovered")
+	} else if _, ok := recovered.(error); !ok {
+		t.Fatalf("cleanup fault recovered %T, want runtime error", recovered)
+	}
+	if faultCleanupSink != 1 {
+		t.Fatalf("cleanup fault load unexpectedly completed: sink=%d", faultCleanupSink)
 	}
 }

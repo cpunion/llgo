@@ -31,11 +31,13 @@ import (
 )
 
 const (
-	runtimeSignalLegacySource = "internal/lib/runtime/signal_llgo.go"
-	runtimeSignalCoroSource   = "internal/lib/runtime/signal_coro_llgo.go"
-	runtimeSignalCSource      = "internal/lib/runtime/_wrap/signal.c"
-	runtimeFaultLegacySource  = "internal/lib/runtime/fault_unwind_llgo.go"
-	runtimeFaultCoroSource    = "internal/lib/runtime/fault_unwind_coro_llgo.go"
+	runtimeSignalLegacySource  = "internal/lib/runtime/signal_llgo.go"
+	runtimeSignalCoroSource    = "internal/lib/runtime/signal_coro_llgo.go"
+	runtimeSignalCSource       = "internal/lib/runtime/_wrap/signal.c"
+	runtimeFaultLegacySource   = "internal/lib/runtime/fault_unwind_llgo.go"
+	runtimeFaultCoroSource     = "internal/lib/runtime/fault_unwind_coro_llgo.go"
+	runtimeFaultCSource        = "internal/lib/runtime/_wrap/fault.c"
+	runtimeFaultBoundarySource = "internal/runtime/coro_resume_boundary_native_llgo.go"
 )
 
 func TestRuntimeSignalCoroAdapterIsSignalSafeAndEventDriven(t *testing.T) {
@@ -50,9 +52,43 @@ func TestRuntimeSignalCoroAdapterIsSignalSafeAndEventDriven(t *testing.T) {
 		t.Fatalf("%s does not exclude the complete native coroutine profile", runtimeFaultLegacySource)
 	}
 	faultCoro := readRuntimePollFile(t, runtimeFaultCoroSource)
-	if !strings.Contains(faultCoro, "func faultTraceback(skip int) bool") ||
-		strings.Contains(faultCoro, "c_installFaultHandler") || strings.Contains(faultCoro, "rtdebug.PanicSignal") {
-		t.Fatalf("%s does not provide the signal-stack-free traceback fallback", runtimeFaultCoroSource)
+	for _, required := range []string{
+		"C.llgo_install_coro_fault_handler",
+		"c_installCoroFaultHandler(onCoroFault)",
+		"rtdebug.StoreCoroSignalFault(pc+1, addr, policy)",
+		"if disposition == rtdebug.CoroSignalFaultReject {",
+		"c_coroFaultCaptureDone()",
+		"disposition == rtdebug.CoroSignalFaultPanicAddress",
+		"func faultTraceback(skip int) bool",
+	} {
+		if !strings.Contains(faultCoro, required) {
+			t.Errorf("%s lacks stackless fault landing marker %q", runtimeFaultCoroSource, required)
+		}
+	}
+	if strings.Contains(faultCoro, "StoreSignalFaultPCs") ||
+		strings.Contains(faultCoro, "var faultPCs") {
+		t.Fatalf("%s retains a slice/global fault snapshot on the coroutine signal path", runtimeFaultCoroSource)
+	}
+	faultC := readRuntimePollFile(t, runtimeFaultCSource)
+	for _, required := range []string{
+		"static _Thread_local volatile sig_atomic_t llgo_coro_in_fault",
+		"static uint32_t llgo_fault_policy",
+		"LLGO_FAULT_PANIC_DEFAULT",
+		"LLGO_FAULT_MEMORY",
+		"static int llgo_fault_is_async",
+		"code == SI_USER",
+		"code == SI_QUEUE",
+		"code == SI_TIMER",
+		"code == SI_TKILL",
+		"if (!llgo_coro_fault_mode)",
+		"llgo_dynunwind_capture(uctx)",
+		"void llgo_install_coro_fault_handler",
+		"signal(sig, SIG_DFL)",
+		"raise(sig)",
+	} {
+		if !strings.Contains(faultC, required) {
+			t.Errorf("%s lacks coroutine fault-mode marker %q", runtimeFaultCSource, required)
+		}
 	}
 
 	coro := readRuntimePollFile(t, runtimeSignalCoroSource)
@@ -138,6 +174,14 @@ func TestRuntimePanicPCSnapshotIsLazyAndSignalSafe(t *testing.T) {
 		regexp.MustCompile(`panicPCs\s+panicPCStore`).MatchString(runtime2) {
 		t.Fatal("runtime G does not keep the bounded panic PC payload out of line")
 	}
+	for _, required := range []string{
+		"signalFaultPC [1]uintptr",
+		"signalFaultState uint32",
+	} {
+		if !strings.Contains(runtime2, required) {
+			t.Errorf("runtime M lacks signal-safe coroutine fault state %q", required)
+		}
+	}
 
 	context := readRuntimePollFile(t, "internal/runtime/runtime_context.go")
 	for _, required := range []string{
@@ -158,17 +202,84 @@ func TestRuntimePanicPCSnapshotIsLazyAndSignalSafe(t *testing.T) {
 		"func StoreSignalFaultPCs(pcs []uintptr)",
 		"p := signalSafePanicPCStore(getg())",
 		"storePanicPCsInto(p, pcs, 1)",
-		"p := ensurePanicPCStore(getg())",
+		"func StoreCoroSignalFault(pc, addr uintptr, policy uint32) uint32",
+		"mp := signalFaultM(getg())",
+		"mp.signalFaultPC[0] = pc",
+		"signalFaultBoundaryMask",
+		"func signalFaultBoundaryEnter() bool",
+		"func signalFaultBoundaryExit() bool",
+		"admitted := policy&coroSignalFaultPanicDefault != 0 ||",
+		"mp.signalFaultState |= signalFaultStatePanic",
+		"func signalFaultPanicAdmitted() bool",
+		"func promoteSignalFaultPC()",
+		"p.pcs[0] = pc",
+		"p := ensurePanicPCStore(gp)",
 	} {
 		if !strings.Contains(caller, required) {
 			t.Errorf("panic PC capture lacks %q", required)
 		}
 	}
+	scalarStart := strings.Index(caller, "func StoreCoroSignalFault(pc, addr uintptr, policy uint32) uint32")
+	if scalarStart < 0 {
+		t.Fatal("cannot isolate scalar coroutine fault capture")
+	}
+	scalarEnd := strings.Index(caller[scalarStart:], "func signalFaultM")
+	if scalarEnd < 0 {
+		t.Fatal("cannot isolate scalar coroutine fault capture")
+	}
+	scalar := caller[scalarStart : scalarStart+scalarEnd]
+	for _, forbidden := range []string{"signalSafePanicPCStore", "ensurePanicPCStore", "AllocRoot"} {
+		if strings.Contains(scalar, forbidden) {
+			t.Errorf("scalar coroutine signal capture retained unsafe operation %q", forbidden)
+		}
+	}
+	boundaryTransport := readRuntimePollFile(t, "internal/runtime/coro_panic_boundary.go")
+	for _, required := range []string{"signalFaultPanicAdmitted()", "promoteSignalFaultPC()"} {
+		if !strings.Contains(boundaryTransport, required) {
+			t.Fatalf("coroutine nonlocal boundary lacks signal snapshot transition %q", required)
+		}
+	}
+	panicRuntime := readRuntimePollFile(t, "internal/runtime/z_rt.go")
+	for _, required := range []string{"promoteSignalFaultPC()", "discardSignalFaultPC()"} {
+		if !strings.Contains(panicRuntime, required) {
+			t.Errorf("legacy panic/recover bridge lacks signal snapshot transition %q", required)
+		}
+	}
 
 	faultLegacy := readRuntimePollFile(t, runtimeFaultLegacySource)
 	if !strings.Contains(faultLegacy, "rtdebug.StoreSignalFaultPCs(faultPCs[:n])") ||
+		!strings.Contains(faultLegacy, "func onFault(pc, fp, addr uintptr, sig int32, policy uint32)") ||
+		!strings.Contains(faultLegacy, "rtdebug.PanicSignalAt(int(sig), addr, addressable)") ||
 		strings.Contains(faultLegacy, "rtdebug.StoreFaultPCs(faultPCs[:n])") {
 		t.Fatal("legacy signal callback can reach the allocating panic PC path")
+	}
+}
+
+func TestRuntimeCoroResumeBoundaryUsesNativeActivationStorage(t *testing.T) {
+	boundary := readRuntimePollFile(t, runtimeFaultBoundarySource)
+	for _, required := range []string{
+		"if !panicBoundary {",
+		"coroHandleResume(handle)",
+		"if !coroPanicBoundaryCapability(task)",
+		"boundary := (*Defer)(c.Alloca(unsafe.Sizeof(Defer{})))",
+		"env := (*SigjmpBuf)(c.AllocaSigjmpBuf())",
+		"*boundary = Defer{}",
+		"c.Sigsetjmp(unsafe.Pointer(env), c.Int(0))",
+	} {
+		if !strings.Contains(boundary, required) {
+			t.Errorf("%s lacks allocation-free activation marker %q", runtimeFaultBoundarySource, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"var boundary Defer",
+		"var env SigjmpBuf",
+		"AllocZ(",
+		"AllocU(",
+		"landed := Sigsetjmp(",
+	} {
+		if strings.Contains(boundary, forbidden) {
+			t.Errorf("%s retains heap-backed activation storage %q", runtimeFaultBoundarySource, forbidden)
+		}
 	}
 }
 

@@ -116,6 +116,10 @@ type G struct {
 	// owner, and refusing cross-P publication keeps that owner implicit in
 	// ordinary queue/run state rather than adding a P pointer to every G.
 	runnableAffinity runnableOwnerAffinity
+	// panicBoundary is one immutable closed-program capability bit. It occupies
+	// tail padding and is inherited by every spawned G, so the hot issued-resume
+	// transaction can return it without consulting runtime sidecar state.
+	panicBoundary bool
 }
 
 type runnableOwnerAffinity uint8
@@ -358,7 +362,7 @@ func expectedAction(p *P, g *G, action Action, kind ActionKind) bool {
 func InitG(g *G) bool {
 	if g == nil || g.magic != 0 || !gPreemptStateAtDepthZero(g, preemptDisabled) || g.state != GNew || g.taskControlLeases != 0 ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle || g.osThreadLockDepth != 0 ||
-		g.runnableAffinity != runnableAnyOwner ||
+		g.runnableAffinity != runnableAnyOwner || g.panicBoundary ||
 		g.frames != nil || g.active != nil || g.root != nil ||
 		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
 		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
@@ -393,6 +397,28 @@ func BindRunnableOwner(g *G) bool {
 	}
 	g.runnableAffinity = runnableCurrentOwner
 	return true
+}
+
+// BindPanicBoundaryCapability attaches the final program's immutable native
+// fault-landing demand to a freshly initialized root. Spawn paths inherit it
+// before publishing each child, so it is never mutated while a G is runnable.
+func BindPanicBoundaryCapability(g *G) bool {
+	if !ValidG(g) || g.state != GNew || g.panicBoundary ||
+		g.root != nil || g.active != nil || g.frames != nil ||
+		g.queued || g.nextReady != nil || g.waiting || g.runP != nil ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		!validLiveTaskStorage(g) {
+		return false
+	}
+	g.panicBoundary = true
+	return true
+}
+
+// PanicBoundaryCapability is a read-only compiler/runtime gate for an exact
+// logical task. It says only that this final program can enable panic-on-fault;
+// the current Go policy bit remains runtime-owned.
+func PanicBoundaryCapability(g *G) bool {
+	return ValidG(g) && g.panicBoundary
 }
 
 // RequestPreempt coalesces one asynchronous request while g's atomic preemption
@@ -1508,10 +1534,10 @@ func CheckedExecutorRunRuntimeContext(
 func BeginIssuedExecutorResumeRuntimeContext(
 	driver *ExecutorDriver,
 	g *G,
-) (next Action, needsRuntimeContext bool, ok bool) {
+) (next Action, needsRuntimeContext, panicBoundary, ok bool) {
 	if driver == nil || g == nil || driver.p == nil ||
 		driver.run.issued != ActionCheckResume {
-		return Action{}, false, false
+		return Action{}, false, false, false
 	}
 	p := driver.p
 	action := p.action
@@ -1519,7 +1545,7 @@ func BeginIssuedExecutorResumeRuntimeContext(
 		p.inlineAwaitDepth != 0 || action.Kind != ActionCheckResume ||
 		action.Flags != 0 || action.Handle == nil || g.state != GRunning || g.active == nil ||
 		g.active.handle != action.Handle {
-		return Action{}, false, false
+		return Action{}, false, false, false
 	}
 	mode := g.active.runtimeContext
 	if mode == frameRuntimeContextUnknown {
@@ -1530,7 +1556,7 @@ func BeginIssuedExecutorResumeRuntimeContext(
 		var valid bool
 		mode, valid = descriptorRuntimeContextMode(descriptor)
 		if !valid {
-			return Action{}, false, false
+			return Action{}, false, false, false
 		}
 	}
 	needsRuntimeContext = mode != frameRuntimeContextNotRequired
@@ -1550,13 +1576,13 @@ func BeginIssuedExecutorResumeRuntimeContext(
 			directChannel: true,
 		}
 	} else if !prepareIssuedRunDecision(p, g) {
-		return Action{}, false, false
+		return Action{}, false, false, false
 	}
 	g.active.state = FrameActive
 	p.inResume = true
 	next = Action{Kind: ActionResume, Handle: action.Handle}
 	p.action = next
-	return next, needsRuntimeContext, true
+	return next, needsRuntimeContext, g.panicBoundary, true
 }
 
 // Resumed commits the return from a direct llvm.coro.resume call. Coroutine

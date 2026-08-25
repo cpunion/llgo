@@ -158,6 +158,7 @@ func BeginSpawn(parent, child *G, storage unsafe.Pointer, size uintptr) bool {
 	if !InitG(child) {
 		return false
 	}
+	child.panicBoundary = parent.panicBoundary
 	child.taskStorage = storage
 	child.taskSize = size
 	child.taskState = taskStorageOwned
@@ -215,6 +216,7 @@ func beginSpawnCompiler(
 		return false
 	}
 	child.magic = gMagic
+	child.panicBoundary = parent.panicBoundary
 	child.taskStorage = storage
 	child.taskSize = size
 	child.taskState = taskStorageOwned

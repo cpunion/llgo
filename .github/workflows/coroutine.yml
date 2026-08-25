@@ -25,6 +25,7 @@ jobs:
           - { llvm: 22, go: "1.26.5", lane: "compat", check: "test (LLVM 22, Go 1.26.5)" }
           - { llvm: 22, go: "1.26.5", lane: "integration", check: "test integration (LLVM 22, Go 1.26.5)" }
           - { llvm: 22, go: "1.26.5", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.26.5)" }
+          - { llvm: 22, go: "1.26.5", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.26.5)" }
           - { llvm: 22, go: "1.26.5", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.26.5)" }
           - { llvm: 22, go: "1.26.5", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.26.5)" }
           - { llvm: 22, go: "1.26.5", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.26.5)" }
@@ -338,6 +339,29 @@ jobs:
           for test in "${tests[@]}"; do
             go test ./internal/build -run "^${test}$" -timeout=10m -count=1
           done
+
+      - name: Test native coroutine fault landing
+        if: matrix.lane == 'fault-e2e'
+        run: |
+          # Exercise the complete standard runtime and a real protected-page
+          # signal. This also covers enabling panic-on-fault and faulting again
+          # in the same physical root resume, which IR-only tests cannot prove.
+          go build -o /tmp/llgo-coro-fault ./cmd/llgo
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            /tmp/llgo-coro-fault build -p=1 -trimpath \
+            -o /tmp/llgo-coro-fault-gate ./test/go/testdata/coro_fault_landing
+          timeout 30s /tmp/llgo-coro-fault-gate
+          if timeout 30s env LLGO_CORO_REJECT_FAULT=1 /tmp/llgo-coro-fault-gate \
+              >/tmp/llgo-coro-fault-reject.log 2>&1; then
+            echo 'unexpected non-nil fault returned successfully'
+            cat /tmp/llgo-coro-fault-reject.log
+            exit 1
+          fi
+          if grep -Fq 'unexpected non-nil fault recovered' \
+              /tmp/llgo-coro-fault-reject.log; then
+            cat /tmp/llgo-coro-fault-reject.log
+            exit 1
+          fi
 
       - name: Test native linked coroutine islands
         if: matrix.lane == 'native-e2e'
