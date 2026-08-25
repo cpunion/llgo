@@ -305,6 +305,7 @@ type coroBodyContext struct {
 	// permanent CoroSplit field per call site without adding a runtime lookup or
 	// dynamic lifetime protocol.
 	outcomeScratch       llssa.Expr
+	awaitTerminal        llssa.BasicBlock
 	nextState            uint32
 	terminalState        uint32
 	needsPreempt         bool

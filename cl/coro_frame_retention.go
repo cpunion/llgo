@@ -1498,12 +1498,10 @@ func (b *coroFrameRetentionRootBuilder) exactScalarBitcastTransform(call *ssa.Ca
 }
 
 // boundedUintptrCallKind extends the ordinary exact-call proof with one
-// compiler-owned composite lowering: builtin print/println.  The builtin does
-// not have an SSA StaticCallee, but LLSSA lowers each operand through one
-// owner-scoped runtime Print* edge.  Admit a pointer-derived integer operand
-// only when the complete builtin lowering is frozen and the helper for this
-// exact operand is a demanded coroutine child.  A plain, foreign, elided, or
-// otherwise unresolved helper is not a uintptr keepalive terminal.
+// compiler-owned composite lowering: builtin print/println. The builtin has no
+// SSA StaticCallee, but LLSSA packs every operand into typed frame storage and
+// awaits one owner-scoped PrintBatchV1 child. Admit a pointer-derived scalar
+// only when that exact batch edge is frozen as a demanded managed child.
 func (b *coroFrameRetentionRootBuilder) boundedUintptrCallKind(call ssa.CallInstruction, value ssa.Value) (coroFrameRetentionCallKindV1, bool) {
 	if kind, bounded := b.boundedCallInstructionKind(call); bounded {
 		return kind, true
@@ -1552,20 +1550,19 @@ func (b *coroFrameRetentionRootBuilder) boundedManagedPrintArgument(call *ssa.Ca
 			continue
 		}
 		found = true
-		helper := runtimePrintHelper(b.audit.typeOf(argument.Type()))
-		target, planned := b.audit.plan.ResolveLoweredCall(b.audit.fn, helper)
-		if !planned || target == nil {
-			return false
-		}
-		plan, planned := b.audit.plan.FunctionPlan(target)
-		if !planned || plan.External != coro.Defined || plan.Emission != coro.EmitCoroutine ||
-			plan.Primary != coro.PrimaryCoroutine ||
-			(plan.FuncRep != coro.DirectCoro && plan.FuncRep != coro.Dispatch) ||
-			!plan.Demand.Contains(coro.AsyncDemand) || !plan.Effect.MaySuspend() {
-			return false
-		}
 	}
-	return found
+	if !found {
+		return false
+	}
+	target, planned := b.audit.plan.ResolveLoweredCall(b.audit.fn, "PrintBatchV1")
+	if !planned || target == nil {
+		return false
+	}
+	plan, planned := b.audit.plan.FunctionPlan(target)
+	return planned && plan.External == coro.Defined && plan.Emission == coro.EmitCoroutine &&
+		plan.Primary == coro.PrimaryCoroutine &&
+		(plan.FuncRep == coro.DirectCoro || plan.FuncRep == coro.Dispatch) &&
+		plan.Demand.Contains(coro.AsyncDemand) && plan.Effect.MaySuspend()
 }
 
 func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFrameRetentionCallKindV1, bool) {

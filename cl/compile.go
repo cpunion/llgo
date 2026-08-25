@@ -157,6 +157,8 @@ type context struct {
 	loaded               map[*types.Package]*pkgInfo // loaded packages
 	bvals                map[ssa.Value]llssa.Expr    // block values
 	coroValueAddrs       map[ssa.Value]llssa.Expr    // compiler-owned addresses for awaited aggregate values
+	coroPrintScratch     llssa.Expr                  // one max-capacity PrintArgV1 array in the active coroutine frame
+	coroPrintScratchCap  int                         // -1 until the active body first needs print storage
 	methodNilDerefChecks map[*ssa.UnOp]none
 	patchOriginalInitIf  *ssa.If                     // exact synthetic guard whose successors are logically inverted
 	unevaluatedSSA       map[ssa.Instruction]none    // values used only by unsafe.Sizeof/Alignof/Offsetof
@@ -887,6 +889,9 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			p.locality.function = localityFunction{}
 			p.state = state // restore pkgState when compiling funcBody
 			oldCoroValueAddrs := p.coroValueAddrs
+			oldCoroPrintScratch, oldCoroPrintScratchCap := p.coroPrintScratch, p.coroPrintScratchCap
+			p.coroPrintScratch = llssa.Nil
+			p.coroPrintScratchCap = -1
 			if f.Recover != nil {
 				p.recoverSlots = make(map[*ssa.Alloc]none)
 			} else {
@@ -896,6 +901,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldRawPlainBody
 				p.physicalReachable = oldPhysicalReachable
 				p.coroValueAddrs = oldCoroValueAddrs
+				p.coroPrintScratch, p.coroPrintScratchCap = oldCoroPrintScratch, oldCoroPrintScratchCap
 				p.locality.function = oldLocalityFunction
 				p.recoverSlots = oldRecoverSlots
 				p.implicitDeferResults = oldImplicitDeferResults

@@ -52,6 +52,17 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	// exact SitePlan observation at this one shared boundary so individual
 	// instrumentation and lowering helpers cannot become new authorities.
 	p.observeCoroSiteRuntimeHelper(helper)
+	var printKeepaliveSlots []llssa.Expr
+	if helper == "PrintBatchV1" {
+		// Print batching replaces several per-operand managed calls with one
+		// child. Preserve the source builtin's exact pointer-derived scalar
+		// roots across that child just as the old individual Print* awaits did.
+		// Relocated deferred builtins consume already-captured cleanup fields and
+		// deliberately do not recompile their original SSA operands here.
+		if source := p.coroCurrentSourceCall(); source != nil {
+			printKeepaliveSlots = p.compileCoroCallKeepaliveSlots(b, source)
+		}
+	}
 
 	// ProgramIR freezes both occurrence domains before representation and
 	// demand reach their fixed point. Select by the body being emitted, not by
@@ -179,7 +190,10 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 			))
 		}
 		if site := p.coroEmissionSite(); site != nil && site.placement == coroRuntimeHelperAtCleanup {
-			return p.compileCoroCleanupTargetAwait(b, target, args), true
+			return p.compileCoroCleanupTargetAwait(b, target, args, printKeepaliveSlots), true
+		}
+		if len(printKeepaliveSlots) != 0 {
+			return p.compileCoroTargetAwaitWithKeepalive(b, target, args, printKeepaliveSlots), true
 		}
 		return p.compileCoroTargetAwait(b, target, args), true
 	case coro.EmitRawPlain:

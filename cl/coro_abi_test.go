@@ -3187,6 +3187,22 @@ func assertCoroStaticChildAwait(t *testing.T, parent string, nativeFaultBoundary
 		return true
 	}
 	resumeCall := "call void @llvm.coro.resume"
+	if strings.Contains(suffix, "br i1 false") {
+		t.Fatalf("Parent static inline await retained a constant-false already-ran branch:\n%s", parent)
+	}
+	prepareEnd := strings.IndexByte(suffix, '\n')
+	prepareBranch := -1
+	if prepareEnd >= 0 {
+		prepareBranch = strings.Index(suffix[prepareEnd:], "br i1 ")
+	}
+	if prepareEnd < 0 || prepareBranch < 0 {
+		t.Fatalf("Parent static inline await has no prepare-to-dispatch region:\n%s", parent)
+	}
+	prepareBranch += prepareEnd
+	prepareToDispatch := suffix[prepareEnd:prepareBranch]
+	if regexp.MustCompile(`store (?:ptr null|i32 0),`).MatchString(prepareToDispatch) {
+		t.Fatalf("Parent static inline await redundantly initializes outcome words which both consume hooks define:\n%s", prepareToDispatch)
+	}
 	resumeBlock := blockContaining(resumeCall)
 	doneCall := "call i1 @llvm.coro.done"
 	finishCall := "call i1 @" + coroAwaitInlineFinishHookV2

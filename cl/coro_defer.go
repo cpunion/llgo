@@ -2089,8 +2089,12 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		}
 		p.recordCallerLocationForCall(b, &deferred.Call)
 		switch site.plan.builtin {
-		case "delete", "copy", "clear", "print", "println":
+		case "delete", "copy", "clear":
 			b.Call(llssa.Builtin(site.plan.builtin), args...)
+			finishSite()
+			return true
+		case "print", "println":
+			p.compileCoroPrintValues(b, site.plan.builtin, args)
 			finishSite()
 			return true
 		case "close":

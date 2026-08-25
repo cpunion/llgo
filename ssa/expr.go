@@ -24,6 +24,7 @@ import (
 	"go/types"
 	"log"
 
+	runtimeabi "github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -2079,59 +2080,134 @@ func (b Builder) Println(args ...Expr) (ret Expr) {
 func (b Builder) PrintEx(ln bool, args ...Expr) (ret Expr) {
 	prog := b.Prog
 	ret.Type = prog.Void()
-	for i, arg := range args {
-		if ln && i > 0 {
-			b.InlineCall(b.Pkg.rtFunc("PrintByte"), prog.IntVal(' ', prog.Byte()))
-		}
-		var fn string
-		typ := arg.Type
-		switch arg.kind {
-		case vkBool:
-			fn = "PrintBool"
-		case vkSigned:
-			fn = "PrintInt"
-			typ = prog.Int64()
-		case vkUnsigned:
-			fn = "PrintUint"
-			typ = prog.Uint64()
-		case vkFloat:
-			fn = "PrintFloat"
-			typ = prog.Float64()
-		case vkSlice:
-			fn = "PrintSlice"
-		case vkClosure:
-			arg = b.Field(arg, 0)
-			fallthrough
-		case vkPtr, vkFuncPtr, vkFuncDecl:
-			fn = "PrintPointer"
-			typ = prog.VoidPtr()
-		case vkString:
-			fn = "PrintString"
-		case vkEface:
-			fn = "PrintEface"
-		case vkIface:
-			fn = "PrintIface"
-		case vkComplex:
-			fn = "PrintComplex"
-			typ = prog.Complex128()
-		case vkChan:
-			fn = "PrintPointer"
-			typ = prog.VoidPtr()
-		case vkMap:
-			fn = "PrintPointer"
-			typ = prog.VoidPtr()
-		default:
-			panic(fmt.Errorf("illegal types for operand: print %v", arg.RawType()))
-		}
-		if typ != arg.Type {
-			arg = b.Convert(typ, arg)
-		}
-		b.InlineCall(b.Pkg.rtFunc(fn), arg)
+	if !ln && len(args) == 0 {
+		return
 	}
+	argType := prog.rtType("PrintArgV1")
+	storage := prog.Nil(prog.Pointer(argType))
+	if len(args) != 0 {
+		// Keep compiler-created storage in the physical entry. This is ordinary
+		// native-stack storage in a synchronous body and a CoroSplit-owned frame
+		// field in a stackless body. cl supplies a shared max-capacity scratch for
+		// production coroutine bodies through PrintExInStorage; this fallback is
+		// also safe for isolated LLSSA users and compiler-created wrappers.
+		arrayType := prog.rawType(types.NewArray(argType.RawType(), int64(len(args))))
+		alloc := b.Func.NewBuilder()
+		alloc.SetBlockEx(b.Func.Block(0), AtStart, true)
+		array := alloc.AllocaT(arrayType)
+		storage = Expr{array.impl, prog.Pointer(argType)}
+		alloc.Dispose()
+	}
+	return b.PrintExInStorage(storage, len(args), ln, args...)
+}
+
+// PrintExInStorage lowers one complete source print/println operation into a
+// single compiler-owned PrintBatchV1 call. storage must name capacity
+// PrintArgV1 elements whose lifetime includes the managed child completion.
+// A physical coroutine frontend uses one function-wide maximum-size scratch,
+// avoiding both per-operation heap allocation and per-site frame growth.
+func (b Builder) PrintExInStorage(storage Expr, capacity int, ln bool, args ...Expr) (ret Expr) {
+	prog := b.Prog
+	ret.Type = prog.Void()
+	if !ln && len(args) == 0 {
+		return
+	}
+	if capacity < len(args) {
+		panic(fmt.Sprintf("print batch storage capacity %d is smaller than %d operands", capacity, len(args)))
+	}
+	argType := prog.rtType("PrintArgV1")
+	if len(args) != 0 {
+		if storage.IsNil() || !types.Identical(
+			storage.RawType(), types.NewPointer(argType.RawType()),
+		) {
+			panic("print batch requires typed PrintArgV1 storage")
+		}
+		for index, arg := range args {
+			descriptor := b.printArgV1(argType, arg)
+			b.Store(b.Advance(storage, prog.Val(index)), descriptor)
+		}
+	}
+	batchType := prog.Slice(argType)
+	batch := prog.Zero(batchType)
+	if len(args) != 0 {
+		size := prog.Val(len(args))
+		batch = b.unsafeSlice(storage, size.impl, size.impl)
+		batch.Type = batchType
+	}
+	flags := uint64(0)
 	if ln {
-		b.InlineCall(b.Pkg.rtFunc("PrintByte"), prog.IntVal('\n', prog.Byte()))
+		flags = uint64(runtimeabi.PrintFlagNewlineV1)
 	}
+	b.InlineCall(b.Pkg.rtFunc("PrintBatchV1"), batch, prog.IntVal(flags, prog.Byte()))
 	return
+}
+
+func (b Builder) printArgV1(argType Type, arg Expr) Expr {
+	prog := b.Prog
+	kind := runtimeabi.PrintInvalidV1
+	pointer := prog.Nil(prog.VoidPtr())
+	aux := pointer
+	word := prog.IntVal(0, prog.Uint64())
+	extra := word
+	toWord := func(value Expr) Expr {
+		return b.Convert(prog.Uint64(), value)
+	}
+	floatWord := func(value Expr) Expr {
+		value = b.Convert(prog.Float64(), value)
+		return Expr{llvm.CreateBitCast(b.impl, value.impl, prog.Uint64().ll), prog.Uint64()}
+	}
+	switch arg.kind {
+	case vkBool:
+		kind = runtimeabi.PrintBoolV1
+		word = Expr{llvm.CreateZExt(b.impl, arg.impl, prog.Uint64().ll), prog.Uint64()}
+	case vkSigned:
+		kind = runtimeabi.PrintIntV1
+		word = toWord(b.Convert(prog.Int64(), arg))
+	case vkUnsigned:
+		kind = runtimeabi.PrintUintV1
+		word = toWord(arg)
+	case vkFloat:
+		kind = runtimeabi.PrintFloatV1
+		word = floatWord(arg)
+	case vkComplex:
+		kind = runtimeabi.PrintComplexV1
+		value := b.Convert(prog.Complex128(), arg)
+		word = floatWord(b.Field(value, 0))
+		extra = floatWord(b.Field(value, 1))
+	case vkClosure:
+		kind = runtimeabi.PrintPointerV1
+		pointer = b.Convert(prog.VoidPtr(), b.Field(arg, 0))
+	case vkPtr, vkFuncPtr, vkFuncDecl, vkChan, vkMap:
+		kind = runtimeabi.PrintPointerV1
+		pointer = b.Convert(prog.VoidPtr(), arg)
+	case vkString:
+		kind = runtimeabi.PrintStringV1
+		pointer = b.Convert(prog.VoidPtr(), b.StringData(arg))
+		word = toWord(b.StringLen(arg))
+	case vkSlice:
+		kind = runtimeabi.PrintSliceV1
+		pointer = b.Convert(prog.VoidPtr(), b.SliceData(arg))
+		word = toWord(b.SliceLen(arg))
+		extra = toWord(b.SliceCap(arg))
+	case vkEface:
+		kind = runtimeabi.PrintEfaceV1
+		pointer = b.Convert(prog.VoidPtr(), b.InterfaceTypeWord(arg))
+		aux = b.InterfaceData(arg)
+	case vkIface:
+		kind = runtimeabi.PrintIfaceV1
+		pointer = b.InterfaceTypeWord(arg)
+		aux = b.InterfaceData(arg)
+	default:
+		panic(fmt.Errorf("illegal types for operand: print %v", arg.RawType()))
+	}
+	return b.Aggregate(
+		argType,
+		prog.IntVal(uint64(kind), prog.Byte()),
+		pointer,
+		aux,
+		word,
+		extra,
+	)
 }
 
 // -----------------------------------------------------------------------------

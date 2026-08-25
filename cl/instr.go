@@ -3040,6 +3040,13 @@ func (p *context) callEx(
 				ret = p.compileCoroRecover(b, call)
 				return
 			}
+		} else if (fn == "print" || fn == "println") && act == llssa.Call && ds == nil &&
+			p.hasCoroPhysicalBody() {
+			if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+				panic(fmt.Sprintf("%s selected incompatible frozen physical recipe %s", fn, physicalInstruction.recipe))
+			}
+			ret = p.compileCoroPrintBuiltin(b, fn, args)
+			return
 		} else if fn == "close" && len(args) == 1 && act == llssa.Call {
 			sourceCall := p.coroCurrentSourceCall()
 			operation, operationPlanned := p.plannedCoroPhysicalOperation(sourceCall)
