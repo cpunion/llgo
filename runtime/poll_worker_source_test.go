@@ -50,6 +50,7 @@ const (
 	runtimeCoroWorkerCSource                 = "internal/coroworker/_worker/worker.c"
 	runtimeCoroWorkerHeaderSource            = "internal/coroworker/_worker/worker.h"
 	runtimeCoroOSThreadForeignSource         = "internal/runtime/coro_os_thread_foreign_llgo.go"
+	runtimeCoroOSThreadForeignPipeSource     = "internal/runtime/coro_os_thread_foreign_pipe_llgo.go"
 	runtimePthreadSyncSource                 = "internal/clite/pthread/sync/sync.go"
 	runtimePthreadGCSource                   = "internal/clite/pthread/pthread_gc.go"
 	runtimePthreadNoGCSource                 = "internal/clite/pthread/pthread_nogc.go"
@@ -530,6 +531,9 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 	}
 
 	entrance := readRuntimePollFile(t, runtimeCoroOSThreadForeignSource)
+	if !strings.Contains(strings.SplitN(entrance, "\n", 2)[0], "llgo_coro_native_timer") {
+		t.Fatalf("%s is not restricted to the timer-capable native fleet", runtimeCoroOSThreadForeignSource)
+	}
 	requireRuntimeAnnotationFreeCDeclarations(t, runtimeCoroOSThreadForeignSource, "coroWorkerCallWordsV2")
 	for _, required := range []string{
 		"C wrapper owns its scratch",
@@ -658,6 +662,26 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		strings.Contains(entrance, "coroworker.Call(") ||
 		strings.Contains(entrance, "coroworker.CallWords(") {
 		t.Errorf("%s does not use the scalar Go-to-C ABI for both synchronous native calls", runtimeCoroOSThreadForeignSource)
+	}
+	pipeOnly := readRuntimePollFile(t, runtimeCoroOSThreadForeignPipeSource)
+	for _, required := range []string{
+		"!llgo_coro_native_timer",
+		"//export __llgo_coro_os_thread_foreign_call_v1",
+		"locked-thread foreign call requires timer-capable native fleet",
+	} {
+		if !strings.Contains(pipeOnly, required) {
+			t.Errorf("%s lacks fail-closed pipe-only marker %q", runtimeCoroOSThreadForeignPipeSource, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"coroWorkerCallWordsV2(",
+		"coroNativeForeignBoundaryV1",
+		"coroNativeMAllocateReplacementV1(",
+		"coroworker.Call",
+	} {
+		if strings.Contains(pipeOnly, forbidden) {
+			t.Errorf("%s attempts unsupported same-M execution through %q", runtimeCoroOSThreadForeignPipeSource, forbidden)
+		}
 	}
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
 	for _, required := range []string{
