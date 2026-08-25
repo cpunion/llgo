@@ -20,12 +20,12 @@ func targetArch(llvmTarget string) string {
 		llvmTarget = llvmTarget[:pos]
 	}
 	switch llvmTarget {
-	case "i386", "i486", "i586", "i686":
-		return "386"
 	case "x86_64":
 		return "amd64"
 	case "aarch64":
 		return "arm64"
+	case "i386", "i486", "i586", "i686":
+		return "386"
 	case "wasm32", "wasm64":
 		return "wasm"
 	}
@@ -33,6 +33,33 @@ func targetArch(llvmTarget string) string {
 		return "arm"
 	}
 	return llvmTarget
+}
+
+// isMSVCTarget treats an absent or unknown Windows environment as MSVC. This
+// matches the default target convention used for GOOS=windows; explicit GNU,
+// MinGW, and Cygwin environments retain their non-MSVC ABI.
+func isMSVCTarget(target *ssa.Target, llvmTarget string) bool {
+	if llvmTarget == "" {
+		return target != nil && target.GOOS == "windows"
+	}
+	parts := strings.Split(strings.ToLower(llvmTarget), "-")
+	if len(parts) == 1 {
+		return target != nil && target.GOOS == "windows"
+	}
+	windows := false
+	msvc := false
+	gnu := false
+	for _, part := range parts[1:] {
+		switch {
+		case part == "windows" || part == "win32":
+			windows = true
+		case strings.HasPrefix(part, "msvc"):
+			msvc = true
+		case strings.Contains(part, "mingw") || strings.HasPrefix(part, "gnu") || strings.Contains(part, "cygwin") || part == "cygnus":
+			gnu = true
+		}
+	}
+	return windows && (msvc || !gnu)
 }
 
 func NewTransformer(prog ssa.Program, llvmTarget string, targetAbi string, mode Mode, optimize bool) *Transformer {
@@ -47,6 +74,19 @@ func NewTransformer(prog ssa.Program, llvmTarget string, targetAbi string, mode 
 		arch:     arch,
 		mode:     mode,
 		optimize: optimize,
+	}
+	if isMSVCTarget(target, llvmTarget) {
+		switch arch {
+		case "amd64":
+			tr.sys = &TypeInfoWindowsAmd64{tr}
+		case "arm64":
+			tr.sys = &TypeInfoWindowsArm64{&TypeInfoArm64{tr}}
+		case "386":
+			tr.sys = &TypeInfoWindows386{tr}
+		}
+		if tr.sys != nil {
+			return tr
+		}
 	}
 	switch arch {
 	case "xtensa":
@@ -250,12 +290,13 @@ func (p *FuncInfo) HasWrap() bool {
 }
 
 type TypeInfo struct {
-	Type  llvm.Type
-	Kind  AttrKind
-	Type1 llvm.Type // AttrWidthType
-	Type2 llvm.Type // AttrWidthType2
-	Size  int
-	Align int
+	Type       llvm.Type
+	Kind       AttrKind
+	Type1      llvm.Type // AttrWidthType
+	Type2      llvm.Type // AttrWidthType2
+	Size       int
+	Align      int
+	ByValAlign int // explicit stack alignment for AttrPointer parameters
 }
 
 func byvalAttribute(ctx llvm.Context, typ llvm.Type) llvm.Attribute {
@@ -266,6 +307,10 @@ func byvalAttribute(ctx llvm.Context, typ llvm.Type) llvm.Attribute {
 func sretAttribute(ctx llvm.Context, typ llvm.Type) llvm.Attribute {
 	id := llvm.AttributeKindID("sret")
 	return ctx.CreateTypeAttribute(id, typ)
+}
+
+func alignAttribute(ctx llvm.Context, align int) llvm.Attribute {
+	return ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align))
 }
 
 func funcInlineHint(ctx llvm.Context) llvm.Attribute {
@@ -340,10 +385,13 @@ func (p *Transformer) GetFuncInfo(ctx llvm.Context, typ llvm.Type) (info FuncInf
 
 func (p *Transformer) transformFuncType(
 	ctx llvm.Context, info *FuncInfo,
-) (llvm.Type, map[int]llvm.Attribute, []int) {
+) (llvm.Type, map[int][]llvm.Attribute, []int) {
 	var paramTypes []llvm.Type
 	var returnType llvm.Type
-	attrs := make(map[int]llvm.Attribute)
+	attrs := make(map[int][]llvm.Attribute)
+	addAttr := func(index int, attr llvm.Attribute) {
+		attrs[index] = append(attrs[index], attr)
+	}
 	// paramMap maps each zero-based source parameter to its one-based
 	// transformed LLVM attribute index. Zero means that the source parameter
 	// was elided. ABI-treatment attributes such as nest/swiftself live on
@@ -353,7 +401,7 @@ func (p *Transformer) transformFuncType(
 	case AttrPointer:
 		returnType = ctx.VoidType()
 		paramTypes = append(paramTypes, info.Return.Type1)
-		attrs[1] = sretAttribute(ctx, info.Return.Type)
+		addAttr(1, sretAttribute(ctx, info.Return.Type))
 	case AttrWidthType:
 		returnType = info.Return.Type1
 	case AttrWidthType2:
@@ -374,7 +422,11 @@ func (p *Transformer) transformFuncType(
 		case AttrPointer:
 			paramTypes = append(paramTypes, ti.Type1)
 			if p.sys.SupportByVal() {
-				attrs[len(paramTypes)] = byvalAttribute(ctx, ti.Type)
+				index := len(paramTypes)
+				addAttr(index, byvalAttribute(ctx, ti.Type))
+				if ti.ByValAlign != 0 {
+					addAttr(index, alignAttribute(ctx, ti.ByValAlign))
+				}
 			}
 		case AttrWidthType2:
 			paramTypes = append(paramTypes, ti.Type1, ti.Type2)
@@ -400,8 +452,10 @@ func (p *Transformer) transformFunc(m llvm.Module, fn llvm.Value) bool {
 	fname := fn.Name()
 	fn.SetName("")
 	nfn := llvm.AddFunction(m, fname, nft)
-	for i, attr := range attrs {
-		nfn.AddAttributeAtIndex(i, attr)
+	for i, list := range attrs {
+		for _, attr := range list {
+			nfn.AddAttributeAtIndex(i, attr)
+		}
 	}
 	copyClosureEnvFunctionAttrs(fn, nfn, paramMap)
 	if !preloweredSRet.IsNil() {
@@ -447,6 +501,14 @@ func containsCoroID(fn llvm.Value) bool {
 		}
 	}
 	return false
+}
+
+func loadIndirectParam(b llvm.Builder, info *TypeInfo, ptr llvm.Value) llvm.Value {
+	value := b.CreateLoad(info.Type, ptr, "")
+	if info.ByValAlign != 0 {
+		value.SetAlignment(info.ByValAlign)
+	}
+	return value
 }
 
 func (p *Transformer) transformFuncBody(
@@ -498,9 +560,9 @@ func (p *Transformer) transformFuncBody(
 			// %2 = alloca %typ, align 8
 			// call void @llvm.memset(ptr %2, i8 0, i64 36, i1 false)
 			// store %typ %1, ptr %2, align 4
-			nv = b.CreateLoad(ti.Type, params[index], "")
+			nv = loadIndirectParam(b, ti, params[index])
 			// replace %0 to %2
-			if allowParamAllocaForwarding {
+			if allowParamAllocaForwarding && (ti.ByValAlign == 0 || ti.ByValAlign >= ti.Align) {
 				replaceAllocaInstrs(fn.Param(i), params[index])
 			}
 		case AttrWidthType:
@@ -659,13 +721,24 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 			}
 		}
 	}
+	if info.Type.IsFunctionVarArg() {
+		// CallBase stores the callee as its final operand. LLGo does not emit
+		// operand bundles here, so the operands between the fixed parameters
+		// and the callee are exactly the already-promoted C varargs.
+		for i, n := operandCount, call.OperandsCount()-1; i < n; i++ {
+			nparams = append(nparams, call.Operand(i))
+		}
+	}
 
 	// updateCallAttr receives the replacement call, but closure-context
 	// attributes must be read from the original call before it is erased.
 	updateCallAttr := func(replacement llvm.Value) {
+		replacement.SetInstructionCallConv(call.InstructionCallConv())
 		copyCallSiteFunctionAttrs(call, replacement)
-		for i, attr := range attrs {
-			replacement.AddCallSiteAttribute(i, attr)
+		for i, list := range attrs {
+			for _, attr := range list {
+				replacement.AddCallSiteAttribute(i, attr)
+			}
 		}
 		if !preloweredSRet.IsNil() {
 			replacement.AddCallSiteAttribute(1, preloweredSRet)
@@ -751,8 +824,10 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 	wrapFunc.SetLinkage(llvm.LinkOnceAnyLinkage)
 	wrapFunc.AddFunctionAttr(funcInlineHint(ctx))
 
-	for i, attr := range attrs {
-		wrapFunc.AddAttributeAtIndex(i, attr)
+	for i, list := range attrs {
+		for _, attr := range list {
+			wrapFunc.AddAttributeAtIndex(i, attr)
+		}
 	}
 	copyClosureEnvFunctionAttrs(fn, wrapFunc, paramMap)
 
@@ -773,7 +848,7 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 		case AttrVoid:
 			// none
 		case AttrPointer:
-			nparams = append(nparams, b.CreateLoad(ti.Type, params[index], ""))
+			nparams = append(nparams, loadIndirectParam(b, ti, params[index]))
 		case AttrWidthType:
 			iptr := llvm.CreateAlloca(b, ti.Type1)
 			b.CreateStore(params[index], iptr)

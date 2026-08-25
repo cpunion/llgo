@@ -140,6 +140,10 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 		m.common.LLVMFeatures = c.crossCompile.Features
 	}
 	m.common.TargetABI = c.crossCompile.TargetABI
+	m.common.PlatformABI = string(c.crossCompile.Toolchain.ABI)
+	m.common.ObjectFormat = string(c.crossCompile.Toolchain.ObjectFormat)
+	m.common.DriverFlavor = string(c.crossCompile.Toolchain.Driver)
+	m.common.LinkerFlavor = string(c.crossCompile.Toolchain.Linker)
 	m.common.GoGlobalDCE = c.buildConf.goGlobalDCEEnabled()
 	if c.coroPlanDigest != "" {
 		metadata := c.coroPlanMetadata
