@@ -24,7 +24,6 @@ import (
 	"go/types"
 	"log"
 
-	llabi "github.com/xgo-dev/llgo/internal/abi"
 	runtimeabi "github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llvm"
 )
@@ -899,29 +898,7 @@ func (b Builder) binOp(
 				return Expr{llvm.CreateICmp(b.impl, pred, x.impl, y.impl), tret}
 			}
 		case vkArray:
-			typ := x.raw.Type.Underlying().(*types.Array)
-			elem := b.Prog.Elem(x.Type)
-			if b.Prog.SizeOf(x.Type) <= llabi.MaxImplicitStackVarSize/2 &&
-				arrayEqualityInlineCost(typ, maxInlineArrayEqualityCost+1) > maxInlineArrayEqualityCost {
-				ret := b.arrayEqualLoop(x, y, typ.Len())
-				if op == token.NEQ {
-					ret.impl = llvm.CreateNot(b.impl, ret.impl)
-				}
-				return ret
-			}
-			ret := prog.BoolVal(true)
-			for i, n := 0, int(typ.Len()); i < n; i++ {
-				fx := b.impl.CreateExtractValue(x.impl, i, "")
-				fy := b.impl.CreateExtractValue(y.impl, i, "")
-				r := b.BinOp(token.EQL, Expr{fx, elem}, Expr{fy, elem})
-				ret = Expr{b.impl.CreateAnd(ret.impl, r.impl, ""), tret}
-			}
-			switch op {
-			case token.EQL:
-				return ret
-			case token.NEQ:
-				return Expr{b.impl.CreateNot(ret.impl, ""), tret}
-			}
+			return b.arrayBinOp(op, x, y, Nil, Nil)
 		case vkStruct:
 			typ := x.raw.Type.Underlying().(*types.Struct)
 			ret := prog.BoolVal(true)
@@ -970,102 +947,94 @@ func (b Builder) binOp(
 	panic("todo")
 }
 
-const (
-	maxInlineArrayEqualityCost int64 = 32
-	stringArrayEqualityCost    int64 = 4
-	interfaceArrayEqualityCost int64 = 16
-)
-
-// arrayEqualityInlineCost estimates the scalar-equivalent cost of recursive
-// extractvalue lowering. Runtime helper leaves carry a larger weight than
-// target-local comparisons. It saturates at limit so large and nested arrays
-// cannot overflow while selecting the compact loop recipe.
-func arrayEqualityInlineCost(typ types.Type, limit int64) int64 {
-	if limit <= 0 {
-		return 0
+// inlineArrayEqual reports whether comparing an array element by element is
+// cheaper than calling its equality algorithm. Keep this aligned with the Go
+// compiler's comparison lowering: a single element is always safe to inline,
+// while only small arrays of scalar values are expanded.
+func (b Builder) inlineArrayEqual(t *types.Array) bool {
+	n := t.Len()
+	if n <= 1 {
+		return true
 	}
-	switch underlying := types.Unalias(typ).Underlying().(type) {
-	case *types.Array:
-		if underlying.Len() == 0 {
-			return 0
-		}
-		element := arrayEqualityInlineCost(underlying.Elem(), limit)
-		if element == 0 {
-			return 0
-		}
-		if underlying.Len() >= (limit+element-1)/element {
-			return limit
-		}
-		return underlying.Len() * element
-	case *types.Struct:
-		var cost int64
-		for index := 0; index < underlying.NumFields(); index++ {
-			field := underlying.Field(index)
-			if field.Name() == "_" {
-				continue
-			}
-			remaining := limit - cost
-			cost += arrayEqualityInlineCost(field.Type(), remaining)
-			if cost >= limit {
-				return limit
-			}
-		}
-		return cost
-	case *types.Basic:
-		if underlying.Kind() == types.String {
-			return min(stringArrayEqualityCost, limit)
-		}
-		return 1
-	case *types.Interface:
-		return min(interfaceArrayEqualityCost, limit)
-	default:
-		return 1
+	basic, ok := t.Elem().Underlying().(*types.Basic)
+	if !ok || basic.Info()&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) == 0 {
+		return false
 	}
+	return n <= 4 || uint64(b.Prog.abi.Size(t)) <= uint64(2*b.Prog.PointerSize())
 }
 
-// arrayEqualLoop compares a large fixed array with one reusable element
-// lowering site. Its caller bounds the two compiler-owned scratch values to
-// MaxImplicitStackVarSize in total. The mismatch edge exits immediately,
-// preserving Go's left-to-right interface panic behavior while avoiding one
-// helper/coroutine await expansion per element.
-func (b Builder) arrayEqualLoop(x, y Expr, length int64) Expr {
+// ArrayBinOp compares two array values while reusing their backing addresses
+// when the frontend has proved that those addresses still hold the loaded
+// values. A nil address falls back to a value-preserving temporary.
+func (b Builder) ArrayBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
+	if x.kind != vkArray || y.kind != vkArray {
+		panic("ArrayBinOp requires array operands")
+	}
+	if op != token.EQL && op != token.NEQ {
+		panic("ArrayBinOp requires an equality operator")
+	}
+	return b.arrayBinOp(op, x, y, xaddr, yaddr)
+}
+
+func (b Builder) arrayBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
 	prog := b.Prog
-	logical := b.blk
-	left := b.AllocaT(x.Type)
-	right := b.AllocaT(y.Type)
-	b.Store(left, x)
-	b.Store(right, y)
-
-	blocks := b.Func.MakeBlocks(3)
-	header, body, done := blocks[0], blocks[1], blocks[2]
-	b.Jump(header)
-
-	b.SetBlockEx(header, AtEnd, false)
-	index := b.Phi(prog.Int())
-	b.If(b.BinOp(token.LSS, index.Expr, prog.IntVal(uint64(length), prog.Int())), body, done)
-
-	b.SetBlockEx(body, AtEnd, true)
-	leftElem := b.Load(b.IndexAddrUnchecked(left, index.Expr))
-	rightElem := b.Load(b.IndexAddrUnchecked(right, index.Expr))
-	equal := b.BinOp(token.EQL, leftElem, rightElem)
-	body = b.blk
-	nextIndex := b.BinOp(token.ADD, index.Expr, prog.IntVal(1, prog.Int()))
-	b.If(equal, header, done)
-	index.AddIncoming(b, []BasicBlock{logical, body}, func(i int, _ BasicBlock) Expr {
-		if i == 0 {
-			return prog.IntVal(0, prog.Int())
+	tret := prog.Bool()
+	typ := x.raw.Type.Underlying().(*types.Array)
+	if b.inlineArrayEqual(typ) {
+		elem := prog.Elem(x.Type)
+		ret := prog.BoolVal(true)
+		for i, n := 0, int(typ.Len()); i < n; i++ {
+			fx := b.impl.CreateExtractValue(x.impl, i, "")
+			fy := b.impl.CreateExtractValue(y.impl, i, "")
+			r := b.BinOp(token.EQL, Expr{fx, elem}, Expr{fy, elem})
+			ret = Expr{b.impl.CreateAnd(ret.impl, r.impl, ""), tret}
 		}
-		return nextIndex
-	})
+		if op == token.NEQ {
+			ret.impl = llvm.CreateNot(b.impl, ret.impl)
+		}
+		return ret
+	}
+	ret := b.callArrayEqual(x, y, xaddr, yaddr, typ)
+	if op == token.NEQ {
+		ret.impl = llvm.CreateNot(b.impl, ret.impl)
+	}
+	return ret
+}
 
-	b.SetBlockEx(done, AtEnd, false)
-	result := b.Phi(prog.Bool())
-	result.AddIncoming(b, []BasicBlock{header, body}, func(i int, _ BasicBlock) Expr {
-		return prog.BoolVal(i == 0)
-	})
-	b.blk = logical
-	b.blk.last = done.last
-	return result.Expr
+func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array) Expr {
+	prog := b.Prog
+	var sp Expr
+	if xaddr.IsNil() || yaddr.IsNil() {
+		sp = b.StackSave()
+	}
+	if xaddr.IsNil() {
+		xaddr = b.toPtr(x)
+	} else {
+		xaddr = b.PtrCast(prog.VoidPtr(), xaddr)
+	}
+	if yaddr.IsNil() {
+		yaddr = b.toPtr(y)
+	} else {
+		yaddr = b.PtrCast(prog.VoidPtr(), yaddr)
+	}
+	var ret Expr
+	if prog.abi.IsRegularMemory(t) {
+		ret = b.Call(
+			b.Pkg.rtFunc("memequal"),
+			xaddr,
+			yaddr,
+			prog.IntVal(prog.SizeOf(x.Type), prog.Uintptr()),
+			prog.IntVal(prog.AlignOf(x.Type), prog.Byte()),
+		)
+	} else {
+		equal := b.Pkg.rtEnvFunc("arrayequal")
+		equal = b.aggregateValue(prog.Type(equalFunc, InGo), equal.impl, b.abiType(x.raw.Type).impl)
+		ret = b.Call(equal, xaddr, yaddr)
+	}
+	if !sp.IsNil() {
+		b.StackRestore(sp)
+	}
+	return ret
 }
 
 // The UnOp instruction yields the result of (op x).

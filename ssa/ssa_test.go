@@ -2651,49 +2651,52 @@ attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
 `)
 }
 
-func TestArrayEqualityLowering(t *testing.T) {
+func TestArrayEqualLowering(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
 	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
 		return pkg
 	})
-	pkg := prog.NewPackage("bar", "foo/bar")
-	makeEquality := func(name string, element types.Type, length int64) Function {
-		array := types.NewArray(element, length)
-		params := types.NewTuple(
-			types.NewVar(0, nil, "left", array),
-			types.NewVar(0, nil, "right", array),
+	pkg := prog.NewPackage("main", "main")
+	compare := func(name string, elem types.Type, n int64, op token.Token) llvm.Value {
+		array := types.NewArray(elem, n)
+		sig := types.NewSignatureType(nil, nil, nil,
+			types.NewTuple(
+				types.NewVar(token.NoPos, nil, "x", array),
+				types.NewVar(token.NoPos, nil, "y", array),
+			),
+			types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Bool])),
+			false,
 		)
-		results := types.NewTuple(types.NewVar(0, nil, "", types.Typ[types.Bool]))
-		fn := pkg.NewFunc(name, types.NewSignatureType(nil, nil, nil, params, results, false), InGo)
-		body := fn.MakeBody(1)
-		body.Return(body.BinOp(token.EQL, fn.Param(0), fn.Param(1)))
-		return fn
+		fn := pkg.NewFunc(name, sig, InGo)
+		b := fn.MakeBody(1)
+		b.Return(b.BinOp(op, fn.Param(0), fn.Param(1)))
+		return pkg.Module().NamedFunction(name)
 	}
 
-	small := makeEquality("small", types.Typ[types.Int], maxInlineArrayEqualityCost)
-	large := makeEquality("large", types.Typ[types.Int], maxInlineArrayEqualityCost+1)
-	largeInterface := makeEquality("largeInterface", types.NewInterfaceType(nil, nil).Complete(), 32)
+	small := compare("small", types.Typ[types.Uint8], 4, token.EQL).String()
+	if strings.Contains(small, "memequal") || strings.Contains(small, "arrayequal") {
+		t.Fatalf("small scalar array comparison was not inlined:\n%s", small)
+	}
+	large := compare("large", types.Typ[types.Uint8], 1024, token.NEQ).String()
+	if !strings.Contains(large, ".memequal") || strings.Contains(large, "extractvalue [1024 x i8]") {
+		t.Fatalf("large regular-memory array comparison was not lowered to memequal:\n%s", large)
+	}
+	nonMemory := compare("nonmemory", types.Typ[types.Float64], 5, token.EQL).String()
+	if !strings.Contains(nonMemory, ".arrayequal") || strings.Contains(nonMemory, "extractvalue [5 x double]") {
+		t.Fatalf("non-memory array comparison was not lowered to arrayequal:\n%s", nonMemory)
+	}
+	interfaceArray := compare("interfaceArray", types.NewInterfaceType(nil, nil).Complete(), 32, token.EQL).String()
+	if !strings.Contains(interfaceArray, ".arrayequal") || strings.Contains(interfaceArray, "extractvalue [32 x") {
+		t.Fatalf("large interface array comparison was not lowered to arrayequal:\n%s", interfaceArray)
+	}
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
-		t.Fatalf("verify array equality lowering: %v\n%s", err, pkg.String())
-	}
-
-	smallIR := small.impl.String()
-	if !strings.Contains(smallIR, "extractvalue [32 x i64]") || strings.Contains(smallIR, "phi i64") {
-		t.Fatalf("small array equality is not inline:\n%s", smallIR)
-	}
-	largeIR := large.impl.String()
-	if !strings.Contains(largeIR, "phi i64") ||
-		!strings.Contains(largeIR, "getelementptr inbounds i64") ||
-		strings.Contains(largeIR, "extractvalue") {
-		t.Fatalf("large array equality is not a compact loop:\n%s", largeIR)
-	}
-	interfaceIR := largeInterface.impl.String()
-	if got := strings.Count(interfaceIR, "EfaceEqual"); got != 1 {
-		t.Fatalf("large interface-array equality helper sites = %d, want 1:\n%s", got, interfaceIR)
+		t.Fatalf("array comparison module is invalid: %v\n%s", err, pkg.String())
 	}
 }
 
