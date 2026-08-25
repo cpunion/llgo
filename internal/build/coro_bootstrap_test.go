@@ -140,7 +140,7 @@ func TestSelectCoroProgramBootstrapV2PublishesAndBindsWorkerDemand(t *testing.T)
 		t.Fatalf("bootstrap without worker demand flags = %#x, want zero", withoutWorker.Flags)
 	}
 
-	fixture.ctx.coroProgramCapabilities = coro.NewProgramCapabilities(true)
+	fixture.ctx.coroProgramCapabilities = coro.NewProgramCapabilities(true, false)
 	withWorker, err := selectCoroProgramBootstrapV2(fixture.ctx, fixture.mainPackage)
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +150,28 @@ func TestSelectCoroProgramBootstrapV2PublishesAndBindsWorkerDemand(t *testing.T)
 	}
 	if withWorker.StepHash == withoutWorker.StepHash {
 		t.Fatalf("bootstrap hash ignored program capabilities: %x", withWorker.StepHash)
+	}
+
+	fixture.ctx.coroProgramCapabilities = coro.NewProgramCapabilities(false, true)
+	withPanicOnFault, err := selectCoroProgramBootstrapV2(fixture.ctx, fixture.mainPackage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withPanicOnFault.Flags != coroProgramCapabilityPanicOnFaultV2 {
+		t.Fatalf("bootstrap panic-on-fault flags = %#x, want %#x",
+			withPanicOnFault.Flags, coroProgramCapabilityPanicOnFaultV2)
+	}
+	if withPanicOnFault.StepHash == withoutWorker.StepHash || withPanicOnFault.StepHash == withWorker.StepHash {
+		t.Fatalf("bootstrap hash did not independently bind panic-on-fault: %x", withPanicOnFault.StepHash)
+	}
+
+	fixture.ctx.coroProgramCapabilities = coro.NewProgramCapabilities(true, true)
+	withBoth, err := selectCoroProgramBootstrapV2(fixture.ctx, fixture.mainPackage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := coroProgramCapabilityWorkerV2 | coroProgramCapabilityPanicOnFaultV2; withBoth.Flags != want {
+		t.Fatalf("bootstrap combined flags = %#x, want %#x", withBoth.Flags, want)
 	}
 }
 

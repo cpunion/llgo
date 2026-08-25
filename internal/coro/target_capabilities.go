@@ -69,12 +69,16 @@ type ProgramCapabilities uint8
 
 const (
 	programCapabilityWorker ProgramCapabilities = 1 << iota
+	programCapabilityPanicOnFault
 )
 
-func NewProgramCapabilities(worker bool) ProgramCapabilities {
+func NewProgramCapabilities(worker, panicOnFault bool) ProgramCapabilities {
 	var capabilities ProgramCapabilities
 	if worker {
 		capabilities |= programCapabilityWorker
+	}
+	if panicOnFault {
+		capabilities |= programCapabilityPanicOnFault
 	}
 	return capabilities
 }
@@ -83,7 +87,15 @@ func (capabilities ProgramCapabilities) Worker() bool {
 	return capabilities&programCapabilityWorker != 0
 }
 
+// PanicOnFault reports whether the final reachable program can enable
+// runtime/debug.SetPanicOnFault. Native stackless resumes need a signal
+// landing from their first instruction because the call may enable recovery
+// and fault again before another suspension boundary is crossed.
+func (capabilities ProgramCapabilities) PanicOnFault() bool {
+	return capabilities&programCapabilityPanicOnFault != 0
+}
+
 func (capabilities ProgramCapabilities) Valid() bool {
-	const known = programCapabilityWorker
+	const known = programCapabilityWorker | programCapabilityPanicOnFault
 	return capabilities&^known == 0
 }

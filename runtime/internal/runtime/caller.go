@@ -225,9 +225,23 @@ func Callers(skip int, pcs []uintptr) int {
 }
 
 func SavePanicCallerFrames() {
+	gp := getg()
+	if mp := signalFaultM(gp); mp != nil && mp.signalFaultState&signalFaultStatePresent != 0 {
+		if mp.signalFaultState&signalFaultStateArmed != 0 {
+			// This is the PanicSignal raised by the signal callback itself. Keep
+			// the one interrupted PC in M until control has left signal context;
+			// allocating the lazy G snapshot here could deadlock an interrupted
+			// allocator.
+			mp.signalFaultState &^= signalFaultStateArmed
+			return
+		}
+		// A newer panic raised by a defer supersedes the original fault before
+		// its boundary/recover promotion point.
+		clearSignalFaultPC(mp)
+	}
 	// A fault handler stores the fault-site snapshot right before it
 	// panics; the regular capture here must not overwrite it.
-	p := loadPanicPCStore(getg())
+	p := loadPanicPCStore(gp)
 	if p != nil && p.armed != 0 {
 		p.armed = 0
 		return
@@ -259,6 +273,137 @@ func StoreSignalFaultPCs(pcs []uintptr) {
 	if p != nil {
 		storePanicPCsInto(p, pcs, 1)
 	}
+}
+
+const (
+	signalFaultStatePresent uint32 = 1 << iota
+	signalFaultStateArmed
+	signalFaultStatePanic
+	signalFaultBoundaryUnit
+)
+
+const signalFaultBoundaryMask uint32 = ^(signalFaultBoundaryUnit - 1)
+
+const (
+	coroSignalFaultPanicDefault uint32 = 1 << iota
+	coroSignalFaultMemory
+)
+
+const (
+	CoroSignalFaultReject uint32 = iota
+	CoroSignalFaultPanic
+	CoroSignalFaultPanicAddress
+)
+
+// StoreCoroSignalFault is the scalar coroutine-fault form. Keeping the single
+// interrupted PC out of a temporary slice prevents conservative address
+// escape from introducing a managed allocation on the native signal stack.
+// pc is the return-address-convention value; state remains authoritative when
+// an architecture cannot provide an interrupted program counter.
+func StoreCoroSignalFault(pc, addr uintptr, policy uint32) uint32 {
+	gp := getg()
+	mp := signalFaultM(gp)
+	const knownPolicy = coroSignalFaultPanicDefault | coroSignalFaultMemory
+	if mp == nil || mp.signalFaultState&signalFaultBoundaryMask == 0 ||
+		policy == 0 || policy&^knownPolicy != 0 {
+		return CoroSignalFaultReject
+	}
+	mp.signalFaultPC[0] = pc
+	mp.signalFaultState = mp.signalFaultState&signalFaultBoundaryMask |
+		signalFaultStatePresent | signalFaultStateArmed
+	// C has already classified platform si_code values and excluded user-raised
+	// signals. Default faults (integer FPE and certified nil-page memory) always
+	// panic. SetPanicOnFault additionally admits another memory address and is
+	// the only case whose runtime error advertises Addr.
+	admitted := policy&coroSignalFaultPanicDefault != 0 ||
+		policy&coroSignalFaultMemory != 0 && gp.paniconfault
+	if !admitted {
+		return CoroSignalFaultReject
+	}
+	mp.signalFaultState |= signalFaultStatePanic
+	if policy&coroSignalFaultMemory != 0 &&
+		policy&coroSignalFaultPanicDefault == 0 && gp.paniconfault {
+		return CoroSignalFaultPanicAddress
+	}
+	return CoroSignalFaultPanic
+}
+
+func signalFaultM(gp *g) *m {
+	if gp == nil || gp.m == nil || gp.m.curg != gp {
+		return nil
+	}
+	return gp.m
+}
+
+func clearSignalFaultPC(mp *m) {
+	if mp == nil {
+		return
+	}
+	mp.signalFaultPC[0] = 0
+	mp.signalFaultState &= signalFaultBoundaryMask
+}
+
+func signalFaultBoundaryEnter() bool {
+	mp := signalFaultM(getg())
+	if mp == nil || mp.signalFaultState&signalFaultBoundaryMask == signalFaultBoundaryMask {
+		return false
+	}
+	mp.signalFaultState += signalFaultBoundaryUnit
+	return true
+}
+
+func signalFaultBoundaryExit() bool {
+	mp := signalFaultM(getg())
+	if mp == nil || mp.signalFaultState&signalFaultBoundaryMask == 0 {
+		return false
+	}
+	mp.signalFaultState -= signalFaultBoundaryUnit
+	return true
+}
+
+func signalFaultBoundaryActive() bool {
+	mp := signalFaultM(getg())
+	return mp != nil && mp.signalFaultState&signalFaultBoundaryMask != 0
+}
+
+// signalFaultPanicAdmitted returns the policy captured at the interrupted
+// instruction. An ordinary escaping panic has no scalar signal snapshot and
+// is therefore admitted independently of SetPanicOnFault.
+func signalFaultPanicAdmitted() bool {
+	mp := signalFaultM(getg())
+	return mp == nil || mp.signalFaultState&signalFaultStatePresent == 0 ||
+		mp.signalFaultState&signalFaultStatePanic != 0
+}
+
+// promoteSignalFaultPC moves the one signal-safe M word into the current
+// logical G's lazy panic store only after execution has escaped the signal
+// callback. This is the allocation-permitted stage/recover path.
+func promoteSignalFaultPC() {
+	gp := getg()
+	mp := signalFaultM(gp)
+	if mp == nil {
+		return
+	}
+	pc := mp.signalFaultPC[0]
+	clearSignalFaultPC(mp)
+	if pc == 0 {
+		return
+	}
+	p := ensurePanicPCStore(gp)
+	if p == nil {
+		return
+	}
+	p.pcs[0] = pc
+	p.n = 1
+	p.armed = 0
+	p.fault = 1
+	p.native = 0
+	p.recFP1 = 0
+	p.recFP2 = 0
+}
+
+func discardSignalFaultPC() {
+	clearSignalFaultPC(signalFaultM(getg()))
 }
 
 // StoreCoroWorkerFaultPCs joins the two bounded native identities returned by
@@ -387,14 +532,22 @@ func storePanicPCsInto(p *panicPCStore, pcs []uintptr, armed int32) {
 // PanicPCsAreFault reports whether the stored snapshot came from a
 // hardware-fault context (captured without the program-text bound).
 func PanicPCsAreFault() bool {
-	p := loadPanicPCStore(getg())
-	return p != nil && p.fault != 0
+	gp := getg()
+	p := loadPanicPCStore(gp)
+	mp := signalFaultM(gp)
+	return p != nil && p.fault != 0 ||
+		mp != nil && mp.signalFaultState&signalFaultStatePresent != 0
 }
 
 // PanicPCs returns the goroutine's captured panic pcs (nil when none).
 func PanicPCs() []uintptr {
-	p := loadPanicPCStore(getg())
+	gp := getg()
+	p := loadPanicPCStore(gp)
 	if p == nil || p.n == 0 {
+		if mp := signalFaultM(gp); mp != nil &&
+			mp.signalFaultState&signalFaultStatePresent != 0 && mp.signalFaultPC[0] != 0 {
+			return mp.signalFaultPC[:]
+		}
 		return nil
 	}
 	return p.pcs[:p.n]

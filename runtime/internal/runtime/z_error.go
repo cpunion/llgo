@@ -31,6 +31,21 @@ func (e errorString) Error() string {
 	return "runtime error: " + string(e)
 }
 
+type errorAddressString struct {
+	msg  string
+	addr uintptr
+}
+
+func (e errorAddressString) RuntimeError() {}
+
+func (e errorAddressString) Error() string {
+	return "runtime error: " + e.msg
+}
+
+// Addr returns the best-effort memory address supplied for a non-nil fault
+// admitted by runtime/debug.SetPanicOnFault.
+func (e errorAddressString) Addr() uintptr { return e.addr }
+
 type plainError string
 
 func (e plainError) RuntimeError() {}

@@ -125,7 +125,8 @@ const (
 	// Program bootstrap capabilities are closed-world physical demand, not
 	// target support. Keep these values synchronized with ssa and
 	// runtime/internal/coro; the bootstrap hash binds the complete bitset.
-	coroProgramCapabilityWorkerV2 uint32 = 1 << 0
+	coroProgramCapabilityWorkerV2       uint32 = 1 << 0
+	coroProgramCapabilityPanicOnFaultV2 uint32 = 1 << 1
 )
 
 type coroProgramBootstrapStepV1 struct {
@@ -156,6 +157,9 @@ func coroProgramCapabilityFlagsV2(capabilities coro.ProgramCapabilities) (uint32
 	var flags uint32
 	if capabilities.Worker() {
 		flags |= coroProgramCapabilityWorkerV2
+	}
+	if capabilities.PanicOnFault() {
+		flags |= coroProgramCapabilityPanicOnFaultV2
 	}
 	return flags, nil
 }
@@ -758,7 +762,8 @@ func coroProgramBootstrapHash(ctx *context, version, flags uint32, steps []coroP
 	}
 	write("llgo.coro.program-bootstrap.v" + strconv.FormatUint(uint64(version), 10))
 	write(strconv.FormatUint(uint64(version), 10))
-	if unknown := flags &^ coroProgramCapabilityWorkerV2; unknown != 0 {
+	const known = coroProgramCapabilityWorkerV2 | coroProgramCapabilityPanicOnFaultV2
+	if unknown := flags &^ known; unknown != 0 {
 		return [16]byte{}, fmt.Errorf("coroutine program bootstrap has unknown capability flags %#x", unknown)
 	}
 	write("flags=" + strconv.FormatUint(uint64(flags), 10))
@@ -858,6 +863,7 @@ func coroProgramBootstrapHash(ctx *context, version, flags uint32, steps []coroP
 	write(metadata.FrameRetentionABI)
 	write(metadata.LoweringFactsSchema)
 	write(metadata.LoweringFactsDigest)
+	write(metadata.ImportedCapsDigest)
 	write(target.Triple)
 	write(target.CPU)
 	write(target.Features)

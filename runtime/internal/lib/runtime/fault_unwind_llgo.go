@@ -18,7 +18,7 @@ import (
 // C frames down through the Go callers.
 
 //go:linkname c_installFaultHandler C.llgo_install_fault_handler
-func c_installFaultHandler(cb func(uintptr, uintptr, int32))
+func c_installFaultHandler(cb func(uintptr, uintptr, uintptr, int32, uint32))
 
 //go:linkname c_dynunwindPCBuf C.llgo_dynunwind_pcbuf
 func c_dynunwindPCBuf() unsafe.Pointer
@@ -62,7 +62,12 @@ var (
 	faultNameIdx [64]int32
 )
 
-func onFault(pc, fp uintptr, sig int32) {
+func onFault(pc, fp, addr uintptr, sig int32, policy uint32) {
+	if policy == 0 {
+		// User-generated fatal signals remain signals; returning asks the C
+		// trampoline to restore the default disposition and re-raise.
+		return
+	}
 	faultActive = 1
 	faultN = 0
 	if fpUnwindAvailable() {
@@ -112,7 +117,12 @@ func onFault(pc, fp uintptr, sig int32) {
 	// Capture done: re-arm the recursion guard before this fault turns
 	// into an ordinary (recoverable) panic.
 	c_faultCaptureDone()
-	rtdebug.PanicSignal(int(sig))
+	const (
+		faultPolicyPanicDefault uint32 = 1 << iota
+		faultPolicyMemory
+	)
+	addressable := policy&faultPolicyMemory != 0 && policy&faultPolicyPanicDefault == 0
+	rtdebug.PanicSignalAt(int(sig), addr, addressable)
 }
 
 func clearFaultTraceback() {

@@ -151,6 +151,7 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 		m.common.CoroFrameRetentionABI = metadata.FrameRetentionABI
 		m.common.CoroLoweringFactsSchema = metadata.LoweringFactsSchema
 		m.common.CoroLoweringFactsDigest = metadata.LoweringFactsDigest
+		m.common.CoroImportedCapsDigest = metadata.ImportedCapsDigest
 		m.common.CoroTargetTriple = metadata.TargetTriple
 		m.common.CoroTargetCPU = metadata.TargetCPU
 		m.common.CoroTargetFeatures = metadata.TargetFeatures
@@ -403,6 +404,10 @@ func (c *context) canUsePackageCache() bool {
 		return false
 	}
 	metadata := c.coroPlanMetadata
+	importedCapabilitiesDigest, err := coroImportedProgramCapabilitiesDigest(c.coroImportedLibraryEffects)
+	if err != nil || metadata.ImportedCapsDigest != importedCapabilitiesDigest {
+		return false
+	}
 	return c.clCompilation.CoroWorkerSupported() == c.buildConf.coroWorkerSupported() &&
 		c.clCompilation.CoroABI == metadata.CoroABI &&
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&

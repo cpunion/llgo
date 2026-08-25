@@ -231,6 +231,7 @@ func TestCoroBuilderPerSuspendAfterResumeOverride(t *testing.T) {
 	defer b.Dispose()
 	defaultCalls := 0
 	overrideCalls := 0
+	landingCalls := 0
 	coro := b.BeginCoro(CoroOptions{
 		Frame: CoroFrameOps{
 			Alloc: func(Builder, Expr, Expr) Expr { return prog.Nil(prog.VoidPtr()) },
@@ -239,6 +240,11 @@ func TestCoroBuilderPerSuspendAfterResumeOverride(t *testing.T) {
 		AfterResume: func(b Builder) {
 			defaultCalls++
 			b.Call(pkg.NewFunc("default_resume_gate", functionSignature(nil, nil), InC).Expr)
+		},
+		ResumeLandingDispatch: func(b Builder, normal BasicBlock) {
+			landingCalls++
+			b.Call(pkg.NewFunc("resume_landing_gate", functionSignature(nil, nil), InC).Expr)
+			b.Jump(normal)
 		},
 	})
 	logical := fn.MakeBlock()
@@ -256,16 +262,17 @@ func TestCoroBuilderPerSuspendAfterResumeOverride(t *testing.T) {
 	}); got != logical {
 		t.Fatal("override suspend did not preserve its logical block")
 	}
-	if defaultCalls != 2 || overrideCalls != 1 {
-		t.Fatalf("resume callbacks before final suspend = default:%d override:%d, want 2/1", defaultCalls, overrideCalls)
+	if defaultCalls != 2 || overrideCalls != 1 || landingCalls != 3 {
+		t.Fatalf("resume callbacks before final suspend = landing:%d default:%d override:%d, want 3/2/1", landingCalls, defaultCalls, overrideCalls)
 	}
 	coro.Finish()
 	b.EndBuild()
-	if defaultCalls != 2 || overrideCalls != 1 {
-		t.Fatalf("final suspend invoked a resume callback: default:%d override:%d", defaultCalls, overrideCalls)
+	if defaultCalls != 2 || overrideCalls != 1 || landingCalls != 3 {
+		t.Fatalf("final suspend invoked a resume callback: landing:%d default:%d override:%d", landingCalls, defaultCalls, overrideCalls)
 	}
 	ir := pkg.Module().String()
-	if strings.Count(ir, "call void @default_resume_gate") != 2 || strings.Count(ir, "call void @exact_resume_gate") != 1 {
+	if strings.Count(ir, "call void @resume_landing_gate") != 3 ||
+		strings.Count(ir, "call void @default_resume_gate") != 2 || strings.Count(ir, "call void @exact_resume_gate") != 1 {
 		t.Fatalf("default and per-suspend override were not mutually exclusive:\n%s", ir)
 	}
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
@@ -395,6 +402,7 @@ func TestCoroElideStaticChildFrameContract(t *testing.T) {
 	doneProbe := pkg.NewFunc("coro_elide_done_probe", functionSignature(
 		[]types.Type{types.Typ[types.Bool]}, nil,
 	), InC)
+	landingProbe := pkg.NewFunc("coro_elide_landing_probe", functionSignature(nil, nil), InC)
 
 	child := pkg.NewFunc("coro_elide_child", coroHandleSignature(), InGo)
 	childBuilder := child.MakeBody(1)
@@ -442,7 +450,28 @@ func TestCoroElideStaticChildFrameContract(t *testing.T) {
 	if !parentBuilder.MarkCoroElideSafe(handle) {
 		t.Fatal("LLVM 22 rejected an exact coroutine elision proof")
 	}
+	// A native fault/defer boundary is scoped to one inline child resume and
+	// never survives a parent suspension. Keep this returns-twice edge in the
+	// LLVM 22 elision gate: an implementation which accidentally obscures the
+	// direct coro.resume or forces the child back to dynamic allocation is not a
+	// viable stackless fault landing design.
+	jumpBuffer := parentBuilder.Alloca(parentBuilder.Prog.IntVal(256, parentBuilder.Prog.Uintptr()))
+	jumpResult := parentBuilder.Sigsetjmp(jumpBuffer, parentBuilder.Prog.IntVal(0, parentBuilder.Prog.CInt()))
+	resumeChild := parent.MakeBlock()
+	landed := parent.MakeBlock()
+	inspectChild := parent.MakeBlock()
+	parentBuilder.If(
+		parentBuilder.BinOp(token.EQL, jumpResult, parentBuilder.Prog.IntVal(0, parentBuilder.Prog.CInt())),
+		resumeChild,
+		landed,
+	)
+	parentBuilder.SetBlock(resumeChild)
 	parentBuilder.CoroResume(handle)
+	parentBuilder.Jump(inspectChild)
+	parentBuilder.SetBlock(landed)
+	parentBuilder.Call(landingProbe.Expr)
+	parentBuilder.Jump(inspectChild)
+	parentBuilder.SetBlock(inspectChild)
 	done := parentBuilder.CoroDone(handle)
 	parentBuilder.CoroDestroy(handle)
 	parentBuilder.Call(doneProbe.Expr, done)
@@ -1742,7 +1771,7 @@ func TestCoroProgramBootstrapV2MixedStartupTable(t *testing.T) {
 	}
 	bootstrap := pkg.NewCoroProgramBootstrap("__llgo_coro_program_bootstrap_v2", CoroProgramBootstrapOptions{
 		Version: 2,
-		Flags:   CoroProgramBootstrapFlagWorkerV2,
+		Flags:   CoroProgramBootstrapFlagWorkerV2 | CoroProgramBootstrapFlagPanicOnFaultV2,
 		ABIHash: [16]byte{
 			0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
 			0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
@@ -1755,8 +1784,8 @@ func TestCoroProgramBootstrapV2MixedStartupTable(t *testing.T) {
 	if got := initializer.Operand(0).ZExtValue(); got != 2 {
 		t.Fatalf("bootstrap version = %d, want 2", got)
 	}
-	if got := initializer.Operand(1).ZExtValue(); got != uint64(CoroProgramBootstrapFlagWorkerV2) {
-		t.Fatalf("bootstrap flags = %#x, want worker capability", got)
+	if want := uint64(CoroProgramBootstrapFlagWorkerV2 | CoroProgramBootstrapFlagPanicOnFaultV2); initializer.Operand(1).ZExtValue() != want {
+		t.Fatalf("bootstrap flags = %#x, want %#x", initializer.Operand(1).ZExtValue(), want)
 	}
 	if got := initializer.Operand(4).ZExtValue(); got != uint64(len(steps)) {
 		t.Fatalf("bootstrap step count = %d, want %d", got, len(steps))
@@ -1827,7 +1856,7 @@ func TestCoroProgramBootstrapV2RejectsShapeAndRoles(t *testing.T) {
 		}
 	}
 	badFlags := valid
-	badFlags.Flags = CoroProgramBootstrapFlagWorkerV2 << 1
+	badFlags.Flags = CoroProgramBootstrapFlagPanicOnFaultV2 << 1
 	mustPanicContains(t, "unknown capability flags", func() {
 		pkg.NewCoroProgramBootstrap("v2_bad_capability_flags", badFlags)
 	})

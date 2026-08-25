@@ -131,6 +131,9 @@ func testLibraryEffectSummary(t *testing.T, pkg string, reverse bool) LibraryEff
 			ManagedEntry:   ManagedEntryCoroutine,
 			PrimarySymbol:  pkg + ".Beta$coro",
 			RawPlainSymbol: pkg + ".Beta",
+			ProgramCapabilities: NewProgramCapabilities(
+				true, true,
+			),
 		},
 	}
 	alpha := functions[0]
@@ -213,6 +216,9 @@ func TestLibraryEffectSummaryCanonicalRecordAndImportPolicy(t *testing.T) {
 	function, ok := index.Lookup("llgo.function.v0:beta")
 	if !ok {
 		t.Fatal("imported library function is missing")
+	}
+	if !function.ProgramCapabilities.Worker() || !function.ProgramCapabilities.PanicOnFault() {
+		t.Fatalf("imported library function lost transitive program capabilities: %#x", function.ProgramCapabilities)
 	}
 	policy, err := function.ImportedPolicy()
 	if err != nil {
@@ -406,6 +412,13 @@ func TestLibraryEffectSummaryFailsClosed(t *testing.T) {
 	invalid.Functions[0].Effect = MayPark
 	if _, err := invalid.MarshalStable(); err == nil || !strings.Contains(err.Error(), "disagrees") {
 		t.Fatalf("effect/primary mismatch error = %v", err)
+	}
+
+	invalid = summary
+	invalid.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
+	invalid.Functions[0].ProgramCapabilities = ProgramCapabilities(1 << 7)
+	if _, err := invalid.MarshalStable(); err == nil || !strings.Contains(err.Error(), "program capabilities") {
+		t.Fatalf("invalid program-capability error = %v", err)
 	}
 }
 

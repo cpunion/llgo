@@ -2225,8 +2225,8 @@ were excluded from the safe-use-closed cohort.
 
 The conditional-initial-suspend builder API, fourth frame-publication ABI,
 ramp-specific await helper, plan/summary/archive fields, and their tests were
-therefore removed together. The retained schemas remain plan digest v35,
-function summary v9, and library-effect summary v9. A replacement must meet a
+therefore removed together. The retained schemas remain plan digest v36,
+function summary v9, and library-effect summary v10. A replacement must meet a
 stronger architecture gate: create an independent child G, run its proven
 synchronous prefix on the current P, and allocate/publish/enqueue a continuation
 only if the child actually suspends. Mixed or dynamic uses may receive an

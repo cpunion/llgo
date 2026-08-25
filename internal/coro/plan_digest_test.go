@@ -313,8 +313,8 @@ import (
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v35" {
-		t.Fatalf("plan digest schema = %q, want runtime-context proof schema v35", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v36" {
+		t.Fatalf("plan digest schema = %q, want imported-capability schema v36", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {
@@ -1438,6 +1438,7 @@ func TestCoroPlanDigestMetadataValidation(t *testing.T) {
 		{"wrong lowering-facts schema", func(m *PlanDigestMetadata) { m.LoweringFactsSchema += ".other" }, "lowering-facts schema"},
 		{"empty lowering-facts digest", func(m *PlanDigestMetadata) { m.LoweringFactsDigest = "" }, "lowering-facts digest"},
 		{"invalid lowering-facts digest", func(m *PlanDigestMetadata) { m.LoweringFactsDigest = strings.Repeat("g", sha256.Size*2) }, "lowering-facts digest"},
+		{"invalid imported capabilities digest", func(m *PlanDigestMetadata) { m.ImportedCapsDigest = strings.Repeat("g", sha256.Size*2) }, "program-capabilities digest"},
 		{"empty triple", func(m *PlanDigestMetadata) { m.TargetTriple = "" }, "target triple is empty"},
 		{"invalid CPU UTF-8", func(m *PlanDigestMetadata) { m.TargetCPU = string([]byte{0xff}) }, "target CPU is not valid UTF-8"},
 		{"NUL feature", func(m *PlanDigestMetadata) { m.TargetFeatures = "+simd\x00-bad" }, "target features contains NUL"},
@@ -1485,6 +1486,7 @@ func TestCoroPlanDigestMetadataMutationsChangeDigest(t *testing.T) {
 		{"panic ABI", func(m *PlanDigestMetadata) { m.PanicABI += ".changed" }},
 		{"func rep ABI", func(m *PlanDigestMetadata) { m.FuncRepABI += ".changed" }},
 		{"lowering facts", func(m *PlanDigestMetadata) { m.LoweringFactsDigest = strings.Repeat("1", sha256.Size*2) }},
+		{"imported capabilities", func(m *PlanDigestMetadata) { m.ImportedCapsDigest = strings.Repeat("2", sha256.Size*2) }},
 		{"triple", func(m *PlanDigestMetadata) { m.TargetTriple = "wasm32-unknown-unknown" }},
 		{"CPU", func(m *PlanDigestMetadata) { m.TargetCPU = "generic" }},
 		{"features", func(m *PlanDigestMetadata) { m.TargetFeatures += ",+atomics" }},

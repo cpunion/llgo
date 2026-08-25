@@ -264,6 +264,7 @@ func coroProgramBeginOwnedV1(manifest, expectedFactory unsafe.Pointer) (unsafe.P
 	}
 	coroProgramCapabilitiesV2State = capabilities
 	if !coroInitG(&coroProgramGV1State) ||
+		(capabilities.PanicOnFault() && !coro.BindPanicBoundaryCapability(&coroProgramGV1State)) ||
 		!coro.BindRunnableOwner(&coroProgramGV1State) ||
 		!coroProgramBindExecutorV1() ||
 		!coroBindRuntimeContext(&coroProgramGV1State, nil, true) {

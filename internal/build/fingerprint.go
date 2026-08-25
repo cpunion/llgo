@@ -132,6 +132,7 @@ type commonSection struct {
 	CoroFrameRetentionABI   string       `yaml:"CORO_FRAME_RETENTION_ABI,omitempty"`
 	CoroLoweringFactsSchema string       `yaml:"CORO_LOWERING_FACTS_SCHEMA,omitempty"`
 	CoroLoweringFactsDigest string       `yaml:"CORO_LOWERING_FACTS_DIGEST,omitempty"`
+	CoroImportedCapsDigest  string       `yaml:"CORO_IMPORTED_PROGRAM_CAPABILITIES_DIGEST,omitempty"`
 	CoroTargetTriple        string       `yaml:"CORO_TARGET_TRIPLE,omitempty"`
 	CoroTargetCPU           string       `yaml:"CORO_TARGET_CPU,omitempty"`
 	CoroTargetFeatures      string       `yaml:"CORO_TARGET_FEATURES,omitempty"`
@@ -159,7 +160,8 @@ func (s *commonSection) empty() bool {
 		s.LLVMFeatures == "" && s.TargetABI == "" &&
 		s.CoroPlanDigest == "" && s.CoroABI == "" && s.CoroSchedulerABI == "" && s.CoroPanicABI == "" &&
 		s.CoroFuncRepABI == "" && s.CoroFrameRetentionABI == "" && s.CoroLoweringFactsSchema == "" &&
-		s.CoroLoweringFactsDigest == "" && s.CoroTargetTriple == "" && s.CoroTargetCPU == "" &&
+		s.CoroLoweringFactsDigest == "" && s.CoroImportedCapsDigest == "" &&
+		s.CoroTargetTriple == "" && s.CoroTargetCPU == "" &&
 		s.CoroTargetFeatures == "" && s.CoroTargetABI == "" && s.CoroPointerBits == 0 &&
 		s.CoroEndianness == "" && s.CoroDataLayout == "" &&
 		!s.GoGlobalDCE && !s.EnableLTOPlugin && !s.EmitDWARF && s.PCLNMode == "" &&

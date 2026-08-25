@@ -32,10 +32,17 @@ type yieldingTestG struct {
 }
 
 func newYieldingTestG(t *testing.T, name string) *yieldingTestG {
+	return newYieldingTestGConfigured(t, name, false)
+}
+
+func newYieldingTestGConfigured(t *testing.T, name string, panicBoundary bool) *yieldingTestG {
 	t.Helper()
 	g := new(G)
 	if !InitG(g) {
 		t.Fatalf("initialize G %s", name)
+	}
+	if panicBoundary && !BindPanicBoundaryCapability(g) {
+		t.Fatalf("bind panic boundary capability for G %s", name)
 	}
 	handle := unsafe.Pointer(new(byte))
 	frame := newTestFrame(t, g, handle, nil)

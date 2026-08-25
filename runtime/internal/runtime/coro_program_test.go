@@ -689,6 +689,21 @@ func TestCoroProgramV1BeginRunAndDestroy(t *testing.T) {
 	runtime.KeepAlive(manifest)
 }
 
+func TestCoroProgramBeginBindsPanicOnFaultCapabilityToRoot(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV2()
+	manifest.bootstrap.Flags = uint32(coro.ProgramCapabilityPanicOnFaultV2)
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok || gPointer != unsafe.Pointer(&coroProgramGV1State) ||
+		!coro.PanicBoundaryCapability(&coroProgramGV1State) {
+		t.Fatalf("panic-on-fault program root = (%p, ok=%t, capability=%t)",
+			gPointer, ok, coro.PanicBoundaryCapability(&coroProgramGV1State))
+	}
+	runtime.KeepAlive(manifest)
+}
+
 func TestCoroProgramTaskControlPODIngressCancelsRunningRoot(t *testing.T) {
 	resetCoroProgramTestStateV1(t)
 	manifest := newCoroProgramTestManifestV2()

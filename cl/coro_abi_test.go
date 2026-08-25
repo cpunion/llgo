@@ -99,6 +99,79 @@ func Leaf() {}
 	}
 }
 
+func TestCoroNativePanicBoundaryIsClosedProgramCapability(t *testing.T) {
+	const source = `package foo
+func Leaf(value uint32) uint32 { return value + 1 }
+`
+	for _, enabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+			ssaPkg, _, files := buildGoSSAPkg(t, source)
+			capabilities := coro.NewProgramCapabilities(false, enabled)
+			prog, pkg := compileCoroLeafPhysicalABIPackageWithProgramCapabilities(
+				t, nil, ssaPkg, files, capabilities, true,
+			)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify panic-boundary capability=%t: %v\n%s", enabled, err, module.String())
+			}
+			ir := module.String()
+			for _, marker := range []string{
+				coroPanicBoundaryTakeHookV1,
+				coroPanicBoundaryTypeHookV1,
+				coroPanicBoundaryDataReleaseHookV1,
+			} {
+				if got := strings.Contains(ir, marker); got != enabled {
+					t.Fatalf("panic-boundary capability=%t marker %q present=%t:\n%s", enabled, marker, got, ir)
+				}
+			}
+		})
+	}
+}
+
+func TestCoroPanicBoundaryIsAbsentFromStacklessPortableTargets(t *testing.T) {
+	const source = `package foo
+func Leaf(value uint32) uint32 { return value + 1 }
+`
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+		{name: "baremetal", target: &llssa.Target{GOOS: "none", GOARCH: "arm", Target: "cortex-m"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ssaPkg, _, files := buildGoSSAPkg(t, source)
+			prog, pkg := compileCoroLeafPhysicalABIPackageWithProgramCapabilities(
+				t, test.target, ssaPkg, files,
+				coro.NewProgramCapabilities(false, true), true,
+			)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify %s panic-boundary exclusion: %v\n%s", test.name, err, module.String())
+			}
+			ir := module.String()
+			for _, forbidden := range []string{
+				coroPanicBoundaryEnabledHookV1,
+				coroPanicBoundaryPushHookV1,
+				coroPanicBoundaryPopHookV1,
+				coroPanicBoundaryStageHookV1,
+				coroPanicBoundaryTakeHookV1,
+				coroPanicBoundaryTypeHookV1,
+				coroPanicBoundaryDataReleaseHookV1,
+				"sigsetjmp",
+			} {
+				if strings.Contains(ir, forbidden) {
+					t.Fatalf("%s retained native panic-boundary marker %q:\n%s", test.name, forbidden, ir)
+				}
+			}
+		})
+	}
+}
+
 func TestCoroLeafPhysicalABICoroSplit(t *testing.T) {
 	prog, pkg := compileCoroLeafPhysicalABI(t, nil)
 	defer prog.Dispose()
@@ -244,6 +317,13 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	for _, hook := range []string{
 		coroFrameAllocHookV1,
 		coroFramePublishHookV3,
+		coroPanicBoundaryEnabledHookV1,
+		coroPanicBoundaryPushHookV1,
+		coroPanicBoundaryPopHookV1,
+		coroPanicBoundaryStageHookV1,
+		coroPanicBoundaryTakeHookV1,
+		coroPanicBoundaryTypeHookV1,
+		coroPanicBoundaryDataReleaseHookV1,
 		coroAwaitPrepareInlineHookV4,
 		coroAwaitInlineFinishHookV2,
 		coroAwaitInlineDestroyConsumeHookV4,
@@ -297,7 +377,7 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 		assertCoroV1InitialRunDecision(t, name, body)
 		assertCoroV1Completion(t, name, body)
 	}
-	assertCoroStaticChildAwait(t, parentIR)
+	assertCoroStaticChildAwait(t, parentIR, true)
 
 	descriptor := regexp.MustCompile(
 		`(?m)^@__llgo_coro_frame_descriptor_v1\.[0-9a-f]+ = linkonce_odr unnamed_addr constant `,
@@ -308,6 +388,38 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	for _, forbidden := range []string{"@malloc", "@free(", "stacksave", "stackrestore", "pthread"} {
 		if strings.Contains(ir, forbidden) {
 			t.Fatalf("child-await lowering introduced forbidden stack/runtime coupling %q:\n%s", forbidden, ir)
+		}
+	}
+}
+
+func TestCoroChildAwaitOmitsNativeBoundaryWithoutProgramCapability(t *testing.T) {
+	capabilities := coro.NewProgramCapabilities(false, false)
+	prog, pkg := compileCoroChildAwaitPhysicalABIWithProgramCapabilities(t, nil, capabilities, true)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify capability-negative child await: %v\n%s", err, module.String())
+	}
+	ir := module.String()
+	for _, forbidden := range []string{
+		coroPanicBoundaryEnabledHookV1,
+		coroPanicBoundaryPushHookV1,
+		coroPanicBoundaryPopHookV1,
+		coroPanicBoundaryStageHookV1,
+		coroPanicBoundaryTakeHookV1,
+		coroPanicBoundaryTypeHookV1,
+		coroPanicBoundaryDataReleaseHookV1,
+		"sigsetjmp",
+	} {
+		if strings.Contains(ir, forbidden) {
+			t.Fatalf("capability-negative child await retained %q:\n%s", forbidden, ir)
+		}
+	}
+	parent := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
+	for _, operation := range []string{"llvm.coro.resume", "llvm.coro.done", "llvm.coro.destroy"} {
+		if got := strings.Count(parent, "@"+operation); got != 1 {
+			t.Fatalf("capability-negative parent %s calls = %d, want 1:\n%s", operation, got, parent)
 		}
 	}
 }
@@ -531,7 +643,7 @@ func Parent(value uint32) uint32 {
 	if !strings.Contains(parentIR, `@"foo.Child$coro"`) {
 		t.Fatalf("named function call did not lower to its exact child await:\n%s", parentIR)
 	}
-	assertCoroStaticChildAwait(t, parentIR)
+	assertCoroStaticChildAwait(t, parentIR, true)
 	runCoroABITestPipeline(t, prog, module)
 }
 
@@ -1410,7 +1522,22 @@ func TestCoroChildAwaitPhysicalABIV1Wasm32(t *testing.T) {
 	if !regexp.MustCompile(`call ptr @llvm\.coro\.promise\(ptr [^,]+, i32 4, i1 false\)`).MatchString(parentIR) {
 		t.Fatalf("wasm child header lookup does not use wasm32 ABI alignment and from=false:\n%s", parentIR)
 	}
-	assertCoroStaticChildAwait(t, parentIR)
+	assertCoroStaticChildAwait(t, parentIR, false)
+	for _, forbidden := range []string{
+		coroPanicBoundaryEnabledHookV1,
+		coroPanicBoundaryPushHookV1,
+		coroPanicBoundaryPopHookV1,
+		coroPanicBoundaryStageHookV1,
+		coroPanicBoundaryTakeHookV1,
+		coroPanicBoundaryTypeHookV1,
+		coroPanicBoundaryDataReleaseHookV1,
+		"sigsetjmp",
+		"__sigsetjmp",
+	} {
+		if strings.Contains(ir, forbidden) {
+			t.Fatalf("wasm child-await module retained native fault-boundary marker %q:\n%s", forbidden, ir)
+		}
+	}
 	runCoroABITestPipeline(t, prog, module)
 	post := module.String()
 	for _, function := range []string{"foo.Parent$coro", "foo.Child$coro"} {
@@ -2091,6 +2218,20 @@ func compileCoroLeafPhysicalABISource(t *testing.T, target *llssa.Target, source
 }
 
 func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPkg *ssa.Package, files []*ast.File, frontendOptions ...Options) (llssa.Program, llssa.Package) {
+	return compileCoroLeafPhysicalABIPackageWithProgramCapabilities(
+		t, target, ssaPkg, files, 0, false, frontendOptions...,
+	)
+}
+
+func compileCoroLeafPhysicalABIPackageWithProgramCapabilities(
+	t *testing.T,
+	target *llssa.Target,
+	ssaPkg *ssa.Package,
+	files []*ast.File,
+	capabilities coro.ProgramCapabilities,
+	frozen bool,
+	frontendOptions ...Options,
+) (llssa.Program, llssa.Package) {
 	t.Helper()
 	var prog llssa.Program
 	if target == nil {
@@ -2130,8 +2271,11 @@ func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPk
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
 		Compilation: &Compilation{
-			CoroPlan:         plan,
-			EmissionUniverse: universe},
+			CoroPlan:                           plan,
+			EmissionUniverse:                   universe,
+			FinalCoroProgramCapabilities:       capabilities,
+			FinalCoroProgramCapabilitiesFrozen: frozen,
+		},
 		FrontendOptions:    options,
 		FrontendOptionsSet: len(frontendOptions) != 0,
 	})
@@ -2143,11 +2287,22 @@ func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPk
 }
 
 func compileCoroChildAwaitPhysicalABI(t *testing.T, target *llssa.Target) (llssa.Program, llssa.Package) {
+	return compileCoroChildAwaitPhysicalABIWithProgramCapabilities(t, target, 0, false)
+}
+
+func compileCoroChildAwaitPhysicalABIWithProgramCapabilities(
+	t *testing.T,
+	target *llssa.Target,
+	capabilities coro.ProgramCapabilities,
+	frozen bool,
+) (llssa.Program, llssa.Package) {
 	t.Helper()
 	prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABI(t, target)
 	compilation := &Compilation{
-		CoroPlan:         plan,
-		EmissionUniverse: universe,
+		CoroPlan:                           plan,
+		EmissionUniverse:                   universe,
+		FinalCoroProgramCapabilities:       capabilities,
+		FinalCoroProgramCapabilitiesFrozen: frozen,
 	}
 	enableCoroChildAwaitCompilation(compilation)
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -2735,6 +2890,21 @@ func assertCoroRunDecisionResumeOnly(t *testing.T, module llvm.Module, rampName 
 		t.Fatalf("post-CoroSplit module has no function %q:\n%s", resumeName, module.String())
 	}
 	assertCoroScalarRunDecisionCalls(t, resumeName, resume.String(), want)
+	panicLanding := module.NamedFunction(coroPanicBoundaryTakeHookV1)
+	if panicLanding.IsNil() {
+		if strings.Contains(resume.String(), coroPanicBoundaryTakeHookV1) {
+			t.Fatalf("%s references an undeclared native panic landing:\n%s", resumeName, resume.String())
+		}
+		return
+	}
+	for _, name := range []string{rampName, rampName + ".destroy"} {
+		if functionHasReachableDirectCall(module.NamedFunction(name), coroPanicBoundaryTakeHookV1) {
+			t.Fatalf("native panic landing is reachable outside the resume entry in %s:\n%s", name, module.NamedFunction(name).String())
+		}
+	}
+	if got := strings.Count(resume.String(), "call ptr @"+coroPanicBoundaryTakeHookV1); got != want {
+		t.Fatalf("%s native panic landing calls = %d, want %d:\n%s", resumeName, got, want, resume.String())
+	}
 }
 
 // functionHasReachableDirectCall follows only executable CFG edges. LLVM's
@@ -2883,6 +3053,10 @@ func assertCoroV1InitialRunDecision(t *testing.T, name, body string) {
 	if decisionRelative < 0 {
 		t.Fatalf("%s initial resume has no run-decision gate:\n%s", name, body)
 	}
+	landingRelative := strings.Index(body[initialSuspend:], "call ptr @"+coroPanicBoundaryTakeHookV1)
+	if landingRelative < 0 || landingRelative >= decisionRelative {
+		t.Fatalf("%s initial resume does not run panic landing before its run-decision gate:\n%s", name, body)
+	}
 	// The eager-ramp edge bypasses the synthetic scheduler decision and joins
 	// the same activation block directly. LLVM prints that join before the lazy
 	// resume gate even though the latter branches to it, so textual ordering is
@@ -2907,7 +3081,7 @@ func assertCoroV1Completion(t *testing.T, name, body string) {
 	}
 }
 
-func assertCoroStaticChildAwait(t *testing.T, parent string) {
+func assertCoroStaticChildAwait(t *testing.T, parent string, nativeFaultBoundary bool) {
 	t.Helper()
 	childCall := regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\(`).FindStringIndex(parent)
 	publish := strings.Index(parent, "call void @"+coroFramePublishHookV3)
@@ -2943,18 +3117,76 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 	if decisionRelative < 0 {
 		t.Fatalf("Parent slow edge does not take its run decision after await resume:\n%s", parent)
 	}
+	landingRelative := strings.Index(parent[awaitSuspend:], "call ptr @"+coroPanicBoundaryTakeHookV1)
+	if nativeFaultBoundary && (landingRelative < 0 || landingRelative >= decisionRelative) {
+		t.Fatalf("Parent slow edge does not run panic landing before its run decision:\n%s", parent)
+	}
 	if !regexp.MustCompile(`(?s)call i1 @` + regexp.QuoteMeta(coroAwaitPrepareInlineHookV4) +
 		`.*xor i1 .*true.*br i1`).MatchString(parent[await:]) {
 		t.Fatalf("Parent does not branch to the slow suspend on an incomplete inline await:\n%s", parent)
 	}
-	resume := strings.Index(parent[await:], "call void @llvm.coro.resume")
-	done := strings.Index(parent[await:], "call i1 @llvm.coro.done")
-	finish := strings.Index(parent[await:], "call i1 @"+coroAwaitInlineFinishHookV2)
-	destroy := strings.Index(parent[await:], "call void @llvm.coro.destroy")
-	inlineCommit := strings.Index(parent[await:], "call i32 @"+coroAwaitInlineDestroyConsumeHookV4)
-	if resume < 0 || done <= resume || finish <= done || destroy <= finish ||
-		inlineCommit <= destroy {
-		t.Fatalf("Parent static-inline ownership order is not resume -> done -> finish -> destroy -> fused destroy/consume:\n%s", parent)
+	suffix := parent[await:]
+	blockContaining := func(needle string) string {
+		index := strings.Index(suffix, needle)
+		if index < 0 {
+			return ""
+		}
+		start := strings.LastIndex(suffix[:index], "\n\n")
+		if start < 0 {
+			start = 0
+		} else {
+			start += 2
+		}
+		end := strings.Index(suffix[index:], "\n\n")
+		if end < 0 {
+			end = len(suffix)
+		} else {
+			end += index
+		}
+		return suffix[start:end]
+	}
+	ordered := func(block string, needles ...string) bool {
+		position := -1
+		for _, needle := range needles {
+			next := strings.Index(block, needle)
+			if next <= position {
+				return false
+			}
+			position = next
+		}
+		return true
+	}
+	resumeCall := "call void @llvm.coro.resume"
+	resumeBlock := blockContaining(resumeCall)
+	doneCall := "call i1 @llvm.coro.done"
+	finishCall := "call i1 @" + coroAwaitInlineFinishHookV2
+	doneBlock := blockContaining(doneCall)
+	destroyCall := "call void @llvm.coro.destroy"
+	inlineCommitCall := "call i32 @" + coroAwaitInlineDestroyConsumeHookV4
+	destroyBlock := blockContaining(destroyCall)
+	if resumeBlock == "" || !ordered(doneBlock, doneCall, finishCall) ||
+		!ordered(destroyBlock, destroyCall, inlineCommitCall) {
+		t.Fatalf("Parent static-inline ownership lacks resume, done -> finish, or destroy -> fused consume blocks:\n%s", parent)
+	}
+	pushCall := "call void @" + coroPanicBoundaryPushHookV1
+	popCall := "call void @" + coroPanicBoundaryPopHookV1
+	stageCall := "call void @" + coroPanicBoundaryStageHookV1
+	enabledCall := "call i1 @" + coroPanicBoundaryEnabledHookV1
+	if nativeFaultBoundary {
+		pushIndex := strings.Index(suffix, pushCall)
+		resumeIndex := strings.Index(suffix, resumeCall)
+		popIndex := strings.Index(suffix, popCall)
+		if !strings.Contains(suffix, enabledCall) || pushIndex < 0 || resumeIndex <= pushIndex ||
+			popIndex <= resumeIndex || !strings.Contains(suffix, stageCall) ||
+			strings.Count(suffix, resumeCall) != 1 {
+			t.Fatalf("Parent native static-inline ownership does not contain enabled -> conditional push -> one resume -> pop and landing stage:\n%s", parent)
+		}
+		if !regexp.MustCompile(`call i32 @(?:__)?sigsetjmp\(ptr [^,]+, i32 0\)`).MatchString(suffix) {
+			t.Fatalf("Parent native static-inline boundary does not use target sigjmp storage with savemask=0:\n%s", parent)
+		}
+	} else if strings.Contains(suffix, enabledCall) || strings.Contains(suffix, pushCall) || strings.Contains(suffix, popCall) ||
+		strings.Contains(suffix, stageCall) {
+		t.Fatalf("Parent non-native static-inline ownership retained a native fault boundary:\n%s", parent)
 	}
 	if !regexp.MustCompile(`(?s)call i32 @` + regexp.QuoteMeta(coroAwaitInlineDestroyConsumeHookV4) +
 		`.*store i32 .*load i32.*switch i32`).MatchString(parent[await:]) {

@@ -192,6 +192,7 @@ func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 		{"panic ABI", func(m *coro.PlanDigestMetadata) { m.PanicABI += ".next" }},
 		{"func rep ABI", func(m *coro.PlanDigestMetadata) { m.FuncRepABI += ".next" }},
 		{"lowering facts", func(m *coro.PlanDigestMetadata) { m.LoweringFactsDigest = strings.Repeat("1", 64) }},
+		{"imported capabilities", func(m *coro.PlanDigestMetadata) { m.ImportedCapsDigest = strings.Repeat("2", 64) }},
 		{"triple", func(m *coro.PlanDigestMetadata) { m.TargetTriple = "wasm32-unknown-unknown" }},
 		{"CPU", func(m *coro.PlanDigestMetadata) { m.TargetCPU = "generic" }},
 		{"features", func(m *coro.PlanDigestMetadata) { m.TargetFeatures = "" }},

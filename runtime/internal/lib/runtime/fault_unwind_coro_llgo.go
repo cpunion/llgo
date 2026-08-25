@@ -18,11 +18,47 @@
 
 package runtime
 
-// The stackless coroutine architecture does not install the legacy SA_SIGINFO
-// callback that walks a native stack and turns a hardware fault into a Go
-// panic. Language nil/bounds/divide faults use compiler-owned ExplicitStatus
-// edges instead. Keep the ordinary panic traceback hook link-complete while
-// reporting that no legacy hardware-fault snapshot exists.
+import (
+	_ "unsafe"
+
+	rtdebug "github.com/xgo-dev/llgo/runtime/internal/runtime"
+)
+
+//go:linkname c_installCoroFaultHandler C.llgo_install_coro_fault_handler
+func c_installCoroFaultHandler(cb func(uintptr, uintptr, uintptr, int32, uint32))
+
+//go:linkname c_coroFaultCaptureDone C.llgo_fault_capture_done
+func c_coroFaultCaptureDone()
+
+func init() {
+	c_installCoroFaultHandler(onCoroFault)
+}
+
+// onCoroFault enters the ordinary synchronous panic machinery while the
+// nearest physical llvm.coro.resume owns a synthetic defer boundary. Plain Go
+// frames below that boundary retain their existing defer/recover semantics;
+// an unhandled panic is staged and converted by the compiler resume gate.
+func onCoroFault(pc, _, addr uintptr, sig int32, policy uint32) {
+	// A zero interrupted PC is still a real signal event on targets whose
+	// ucontext adapter does not expose that register. The packed M state keeps
+	// the policy authoritative even when the diagnostic PC is unavailable.
+	disposition := rtdebug.StoreCoroSignalFault(pc+1, addr, policy)
+	if disposition == rtdebug.CoroSignalFaultReject {
+		// Returning to the C trampoline restores the default disposition and
+		// re-raises this exact signal. In particular, no Go defer/recover can
+		// turn an unexpected non-nil fault into a panic without opt-in.
+		return
+	}
+	// Re-arm the handler and unblock fault signals before PanicSignal can
+	// siglongjmp to the native coroutine boundary.
+	c_coroFaultCaptureDone()
+	rtdebug.PanicSignalAt(
+		int(sig), addr, disposition == rtdebug.CoroSignalFaultPanicAddress,
+	)
+}
+
+// Stackless terminal reporting consumes the task/runtime panic-PC store. The
+// legacy package-global dynunwind snapshot is deliberately not consulted.
 func faultTraceback(skip int) bool {
 	_ = skip
 	return false

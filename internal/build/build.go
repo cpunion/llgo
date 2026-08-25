@@ -4316,6 +4316,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		return err
 	}
 	ctx.coroProgramBootstraps = nil
+	ctx.coroImportedLibraryEffects = nil
 	if ctx.buildConf.BuildMode == BuildModeCArchive {
 		return fmt.Errorf("enable coroutine child await: c-archive requires flattened package members and an explicit host bootstrap extraction contract")
 	}
@@ -4356,6 +4357,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			return fmt.Errorf("prepare coroutine library foreign callables: %w", err)
 		}
 	}
+	ctx.coroImportedLibraryEffects = maps.Clone(importedLibraryEffects)
 	analyzedPlans := make(map[*coro.SSAPlan]struct{})
 	var analyzedPlansMu sync.Mutex
 	var requiredRoots coro.Roots
@@ -4571,6 +4573,8 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			return fmt.Errorf("freeze coroutine program capabilities: %w", err)
 		}
 		ctx.coroProgramCapabilities = programCapabilities
+		ctx.clCompilation.FinalCoroProgramCapabilities = programCapabilities
+		ctx.clCompilation.FinalCoroProgramCapabilitiesFrozen = true
 	}
 	if ctx.prog != nil {
 		ctx.prog.SetLogicalLocality(true)
@@ -6754,6 +6758,10 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 	default:
 		return coro.PlanDigestMetadata{}, fmt.Errorf("unsupported LLVM byte order")
 	}
+	importedCapabilitiesDigest, err := coroImportedProgramCapabilitiesDigest(ctx.coroImportedLibraryEffects)
+	if err != nil {
+		return coro.PlanDigestMetadata{}, fmt.Errorf("digest imported coroutine program capabilities: %w", err)
+	}
 	return coro.PlanDigestMetadata{
 		CoroABI:             activeCoroABIVersion(ctx.buildConf),
 		SchedulerABI:        activeCoroSchedulerABIVersion(ctx.buildConf),
@@ -6761,6 +6769,7 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 		FuncRepABI:          activeCoroFuncRepABIVersion(ctx.buildConf),
 		LoweringFactsSchema: ctx.coroLoweringFacts.Schema,
 		LoweringFactsDigest: ctx.coroLoweringFactsDigest,
+		ImportedCapsDigest:  importedCapabilitiesDigest,
 		TargetTriple:        target.Triple,
 		TargetCPU:           target.CPU,
 		TargetFeatures:      target.Features,
@@ -7080,6 +7089,10 @@ type context struct {
 	coroPlanMetadata            coro.PlanDigestMetadata
 	coroLoweringFacts           coro.LoweringFacts
 	coroLoweringFactsDigest     string
+	// coroImportedLibraryEffects is retained until link/bootstrap hashing so
+	// per-function optional-service facts participate in every cache and entry
+	// identity which can observe their generated-code consequences.
+	coroImportedLibraryEffects map[*ssa.Function]coro.LibraryEffectFunction
 	// coroProgramCapabilities is the closed-world projection of optional
 	// physical runtime services. It is frozen by cl preflight before bootstrap
 	// selection and survives only as hashed entry-module flags.
@@ -7249,6 +7262,7 @@ func releaseBuildStateBeforeExecution(c *context, pkgs []*aPackage) {
 	c.coroPlanMetadata = coro.PlanDigestMetadata{}
 	c.coroLoweringFacts = coro.LoweringFacts{}
 	c.coroLoweringFactsDigest = ""
+	c.coroImportedLibraryEffects = nil
 	c.coroProgramCapabilities = 0
 	c.coroProgramBootstraps = nil
 	c.clCompilation = nil

@@ -174,20 +174,30 @@ func coroRunPhysicalActionV1(
 ) (next coro.Action, advanced, committed, fusedDestroy bool) {
 	switch action.Kind {
 	case coro.ActionCheckResume:
-		next, needsRuntimeContext, ok := coro.BeginIssuedExecutorResumeRuntimeContext(driver, g)
+		next, needsRuntimeContext, panicBoundary, ok := coro.BeginIssuedExecutorResumeRuntimeContext(driver, g)
 		if !ok {
 			return coro.Action{}, false, false, false
 		}
+		needsRuntimeContext = needsRuntimeContext || panicBoundary
 		if needsRuntimeContext {
 			activation, entered := coroEnterRuntimeContextFrom(g, runtimeContext)
 			if !entered {
 				return coro.Action{}, false, false, false
 			}
-			coroHandleResume(next.Handle)
+			if panicBoundary {
+				if !coroHandleResumePhysicalV1(g, next.Handle, true) {
+					return coro.Action{}, false, false, false
+				}
+			} else {
+				coroHandleResume(next.Handle)
+			}
 			if !coroLeaveRuntimeContext(g, activation) {
 				return coro.Action{}, false, false, false
 			}
 		} else {
+			// Keep the overwhelmingly common path identical to the pre-boundary
+			// scheduler: SetPanicOnFault is the sole reason to pay for the
+			// synthetic native defer/sigsetjmp island.
 			coroHandleResume(next.Handle)
 		}
 		next, committed, advanced = coro.ResumedExecutorRun(driver, p, g, next)

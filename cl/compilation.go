@@ -50,6 +50,12 @@ type Compilation struct {
 	CoroPlan               *coro.SSAPlan
 	CoroPlanObserver       CoroPlanObserver
 	CoroTargetCapabilities coro.TargetCapabilities
+	// FinalCoroProgramCapabilities is frozen after closed-world physical
+	// preflight and before any package codegen. The accompanying bit separates
+	// a known empty capability set from isolated frontend tests which do not
+	// own a complete final program and therefore retain conservative lowering.
+	FinalCoroProgramCapabilities       coro.ProgramCapabilities
+	FinalCoroProgramCapabilitiesFrozen bool
 	// CoroPlanDigest and the ABI identities are populated by the build driver
 	// after whole-program analysis and participate in every package archive
 	// fingerprint. They are required before an active compilation may register
@@ -58,7 +64,8 @@ type Compilation struct {
 	// CoroPlanMetadata is the frozen target/ABI input used to construct the
 	// whole-program digest. Package codegen projects only its reusable
 	// target-wide fields into the separate library effect summary; private
-	// lowering facts and final-program demand never cross that boundary.
+	// lowering facts stay local, while exact per-function optional-service
+	// demand crosses archives through producer facts.
 	CoroPlanMetadata        coro.PlanDigestMetadata
 	CoroLoweringFacts       coro.LoweringFacts
 	CoroLoweringFactsDigest string
@@ -94,6 +101,9 @@ type Compilation struct {
 	coroPreflightErr         error
 	coroFactsValidation      sync.Once
 	coroFactsValidationErr   error
+	coroCapabilities         sync.Once
+	coroCapabilitiesByFunc   map[*ssa.Function]coro.ProgramCapabilities
+	coroCapabilitiesErr      error
 	coroClosedInterfacePlain *coroClosedInterfacePlainPlan
 	coroManagedInterface     *coroManagedInterfaceDispatchPlan
 }
@@ -140,6 +150,16 @@ func (c *Compilation) CoroWorkerSupported() bool {
 
 func (c *Compilation) CoroHostOperationSupported() bool {
 	return c != nil && c.CoroTargetCapabilities.HostOperation()
+}
+
+func (c *Compilation) coroPanicBoundaryEmissionEnabled() bool {
+	if c == nil || !c.FinalCoroProgramCapabilitiesFrozen {
+		return true
+	}
+	if !c.FinalCoroProgramCapabilities.Valid() {
+		panic("invalid final coroutine program capability set")
+	}
+	return c.FinalCoroProgramCapabilities.PanicOnFault()
 }
 
 func (c *Compilation) validateCoroTargetCapabilities() error {

@@ -156,6 +156,13 @@ const (
 	coroRecoverTakeHookV1                      = "__llgo_coro_recover_take_v1"
 	coroRecoverAliasBeginHookV1                = "__llgo_coro_recover_alias_begin_v1"
 	coroRecoverAliasEndHookV1                  = "__llgo_coro_recover_alias_end_v1"
+	coroPanicBoundaryEnabledHookV1             = "__llgo_coro_panic_boundary_enabled_v1"
+	coroPanicBoundaryPushHookV1                = "__llgo_coro_panic_boundary_push_v1"
+	coroPanicBoundaryPopHookV1                 = "__llgo_coro_panic_boundary_pop_v1"
+	coroPanicBoundaryStageHookV1               = "__llgo_coro_panic_boundary_stage_v1"
+	coroPanicBoundaryTakeHookV1                = "__llgo_coro_panic_boundary_take_v1"
+	coroPanicBoundaryTypeHookV1                = "__llgo_coro_panic_boundary_type_v1"
+	coroPanicBoundaryDataReleaseHookV1         = "__llgo_coro_panic_boundary_data_release_v1"
 	coroSpawnBeginHookV1                       = "__llgo_coro_spawn_begin_v1"
 	coroSpawnCommitHookV1                      = "__llgo_coro_spawn_commit_v1"
 	coroCompletePrepareHookV2                  = "__llgo_coro_complete_prepare_v2"
@@ -242,6 +249,13 @@ type coroPhysicalABI struct {
 	recoverTakeHook               string
 	recoverAliasBeginHook         string
 	recoverAliasEndHook           string
+	panicBoundaryEnabledHook      string
+	panicBoundaryPushHook         string
+	panicBoundaryPopHook          string
+	panicBoundaryStageHook        string
+	panicBoundaryTakeHook         string
+	panicBoundaryTypeHook         string
+	panicBoundaryDataReleaseHook  string
 	completePrepareHook           string
 	physicalSig                   *types.Signature
 	hasEnv                        bool
@@ -258,6 +272,7 @@ type coroBodyContext struct {
 	cleanup                *coroStaticCleanupState
 	externalCleanup        *coroStaticCleanupState
 	header                 llssa.Expr
+	handle                 llssa.Expr
 	task                   llssa.Expr
 	resultSlot             llssa.Expr
 	completion             llssa.BasicBlock
@@ -274,6 +289,11 @@ type coroBodyContext struct {
 	shutdownRunDecision    llssa.BasicBlock
 	panicPrepare           llssa.Expr
 	panicTraceReplace      llssa.Expr
+	panicBoundaryTake      llssa.Expr
+	panicBoundaryType      llssa.Expr
+	panicBoundaryData      llssa.Expr
+	panicBoundaryLanding   llssa.BasicBlock
+	panicBoundaryIncoming  []coroPanicBoundaryIncoming
 	completePrepare        llssa.Expr
 	terminalStatus         llssa.Expr
 	preemptCountdown       llssa.Expr
@@ -294,6 +314,21 @@ type coroBodyContext struct {
 	terminalResultAllocs map[*ssa.Alloc]llssa.Expr
 	captureSnapshots     coroCaptureSnapshotValues
 	sourceBlockPollFresh bool
+}
+
+type coroPanicBoundaryIncoming struct {
+	block llssa.BasicBlock
+	token llssa.Expr
+}
+
+// coroNativePanicBoundaryTarget is deliberately narrower than the language
+// coroutine target set. The current fault transport requires POSIX signals,
+// sigsetjmp/siglongjmp, and a native runtime implementation; named embedded
+// targets and WebAssembly must contain neither the hooks nor their stack cost.
+// The worker target gate currently certifies exactly that Darwin/Linux native
+// envelope, but this is only a shared target proof, not a worker dependency.
+func coroNativePanicBoundaryTarget(p *context) bool {
+	return p != nil && p.prog != nil && validateCoroWorkerNativeProgramTarget(p.prog) == nil
 }
 
 func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *types.Signature) coroPhysicalABI {
@@ -346,6 +381,13 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	recoverTakeHook := coroRecoverTakeHookV1
 	recoverAliasBeginHook := coroRecoverAliasBeginHookV1
 	recoverAliasEndHook := coroRecoverAliasEndHookV1
+	panicBoundaryEnabledHook := ""
+	panicBoundaryPushHook := ""
+	panicBoundaryPopHook := ""
+	panicBoundaryStageHook := ""
+	panicBoundaryTakeHook := ""
+	panicBoundaryTypeHook := ""
+	panicBoundaryDataReleaseHook := ""
 	faultPrepareHook := coroFaultPrepareHookV1
 	faultPayloadHook := coroFaultPayloadHookV1
 	faultPrepareArgsHook := coroFaultPrepareHookV2
@@ -374,6 +416,16 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		return llssa.PathOf(pkg)
 	}
 	target := p.prog.TargetSpec()
+	if coroNativePanicBoundaryTarget(p) &&
+		(p.compilation == nil || p.compilation.coroPanicBoundaryEmissionEnabled()) {
+		panicBoundaryEnabledHook = coroPanicBoundaryEnabledHookV1
+		panicBoundaryPushHook = coroPanicBoundaryPushHookV1
+		panicBoundaryPopHook = coroPanicBoundaryPopHookV1
+		panicBoundaryStageHook = coroPanicBoundaryStageHookV1
+		panicBoundaryTakeHook = coroPanicBoundaryTakeHookV1
+		panicBoundaryTypeHook = coroPanicBoundaryTypeHookV1
+		panicBoundaryDataReleaseHook = coroPanicBoundaryDataReleaseHookV1
+	}
 	traceFunction := ""
 	traceFile := ""
 	if entry.function != nil {
@@ -411,7 +463,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00panic-trace-append=%s\x00recover-take=%s\x00recover-alias-begin=%s\x00recover-alias-end=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare-inline=%s\x00await-inline-finish=%s\x00await-inline-destroy-consume=%s\x00await-consume-slow=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00descriptor-flags=%#x\x00trace-function=%s\x00trace-file=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00panic-trace-replace=%s\x00panic-trace-append=%s\x00recover-take=%s\x00recover-alias-begin=%s\x00recover-alias-end=%s\x00panic-boundary-enabled=%s\x00panic-boundary-push=%s\x00panic-boundary-pop=%s\x00panic-boundary-stage=%s\x00panic-boundary-take=%s\x00panic-boundary-type=%s\x00panic-boundary-data-release=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00frame-publish=%s\x00await-prepare-inline=%s\x00await-inline-finish=%s\x00await-inline-destroy-consume=%s\x00await-consume-slow=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00preempt-stride=%d\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		descriptorFlags,
@@ -426,6 +478,13 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		recoverTakeHook,
 		recoverAliasBeginHook,
 		recoverAliasEndHook,
+		panicBoundaryEnabledHook,
+		panicBoundaryPushHook,
+		panicBoundaryPopHook,
+		panicBoundaryStageHook,
+		panicBoundaryTakeHook,
+		panicBoundaryTypeHook,
+		panicBoundaryDataReleaseHook,
 		faultPrepareHook,
 		faultPayloadHook,
 		faultPrepareArgsHook,
@@ -481,6 +540,13 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		recoverTakeHook:               recoverTakeHook,
 		recoverAliasBeginHook:         recoverAliasBeginHook,
 		recoverAliasEndHook:           recoverAliasEndHook,
+		panicBoundaryEnabledHook:      panicBoundaryEnabledHook,
+		panicBoundaryPushHook:         panicBoundaryPushHook,
+		panicBoundaryPopHook:          panicBoundaryPopHook,
+		panicBoundaryStageHook:        panicBoundaryStageHook,
+		panicBoundaryTakeHook:         panicBoundaryTakeHook,
+		panicBoundaryTypeHook:         panicBoundaryTypeHook,
+		panicBoundaryDataReleaseHook:  panicBoundaryDataReleaseHook,
 		completePrepareHook:           completePrepareHook,
 		physicalSig:                   physicalSig,
 		hasEnv:                        hasEnv,
@@ -617,6 +683,26 @@ func (p *context) beginCoroBody(
 			abi.panicTraceReplaceHook, coroPanicTraceReplaceSignature(), llssa.InC,
 		).Expr
 	}
+	panicBoundaryEnabled := abi.panicBoundaryTakeHook != ""
+	if panicBoundaryEnabled != (abi.panicBoundaryEnabledHook != "") ||
+		panicBoundaryEnabled != (abi.panicBoundaryPushHook != "") ||
+		panicBoundaryEnabled != (abi.panicBoundaryPopHook != "") ||
+		panicBoundaryEnabled != (abi.panicBoundaryStageHook != "") ||
+		panicBoundaryEnabled != (abi.panicBoundaryTypeHook != "") ||
+		panicBoundaryEnabled != (abi.panicBoundaryDataReleaseHook != "") {
+		panic("coroutine native panic boundary has an incomplete ABI hook set")
+	}
+	if panicBoundaryEnabled {
+		body.panicBoundaryTake = p.pkg.NewFunc(
+			abi.panicBoundaryTakeHook, coroPanicBoundaryTakeSignature(), llssa.InC,
+		).Expr
+		body.panicBoundaryType = p.pkg.NewFunc(
+			abi.panicBoundaryTypeHook, coroPanicBoundaryTokenSignature(), llssa.InC,
+		).Expr
+		body.panicBoundaryData = p.pkg.NewFunc(
+			abi.panicBoundaryDataReleaseHook, coroPanicBoundaryTokenSignature(), llssa.InC,
+		).Expr
+	}
 	if abi.preemptPollHook != "" {
 		body.preemptPoll = p.pkg.NewFunc(abi.preemptPollHook, coroPreemptPollSignature(), llssa.InC).Expr
 	}
@@ -624,6 +710,10 @@ func (p *context) beginCoroBody(
 		Promise: header,
 		Frame:   frame,
 		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
+			// BeginCoro invokes ResumeLandingDispatch while constructing the
+			// initial suspend, before it returns the CoroBuilder to this frontend.
+			// Retain the exact handle here rather than consulting body.coro early.
+			body.handle = handle
 			if abi.framePublishHook == "" {
 				panic("coroutine physical ABI has no initialized frame publication hook")
 			}
@@ -665,6 +755,9 @@ func (p *context) beginCoroBody(
 				p.bvals[allocation] = value
 			}
 		},
+	}
+	if panicBoundaryEnabled {
+		coroOptions.ResumeLandingDispatch = body.dispatchPanicBoundary
 	}
 	if !body.runDecisionTakeZero.IsNil() {
 		coroOptions.AfterResumeDispatch = func(b llssa.Builder, normal llssa.BasicBlock) {
@@ -879,6 +972,51 @@ func coroPanicTraceAppendSignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
+func coroPanicBoundaryPushSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+		types.NewParam(token.NoPos, nil, "boundary", pointer),
+		types.NewParam(token.NoPos, nil, "env", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroPanicBoundaryEnabledSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(types.NewParam(token.NoPos, nil, "g", pointer))
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "enabled", types.Typ[types.Bool]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroPanicBoundaryCloseSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+		types.NewParam(token.NoPos, nil, "boundary", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroPanicBoundaryTakeSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+	)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "token", pointer))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroPanicBoundaryTokenSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(types.NewParam(token.NoPos, nil, "token", pointer))
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "word", pointer))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
 func (c *coroBodyContext) publishState(
 	b llssa.Builder,
 	reason, lifecycle uint64,
@@ -901,6 +1039,83 @@ func (c *coroBodyContext) activate(b llssa.Builder) {
 		panic("coroutine activation has no private preemption countdown")
 	}
 	b.Store(c.preemptCountdown, prog.IntVal(coroPreemptCheckpointStride, prog.Uint32()))
+}
+
+// dispatchPanicBoundary is the mandatory first gate on every native physical
+// resume. The runtime returns nil on the ordinary path. A staged legacy panic
+// takes a cold, site-private forwarding edge so the eventual shared landing
+// can recover its SSA token with one phi and without adding a field to every
+// stackless coroutine frame.
+func (c *coroBodyContext) dispatchPanicBoundary(b llssa.Builder, normal llssa.BasicBlock) {
+	if c == nil || b.Func == nil || normal == nil || c.handle.IsNil() || c.task.IsNil() ||
+		c.panicBoundaryTake.IsNil() || c.panicBoundaryType.IsNil() || c.panicBoundaryData.IsNil() {
+		panic("coroutine panic boundary resume gate has an incomplete physical contract")
+	}
+	if c.panicBoundaryLanding == nil {
+		c.panicBoundaryLanding = b.Func.MakeBlock()
+	}
+	forward := b.Func.MakeBlock()
+	panicToken := b.Call(c.panicBoundaryTake, c.task, c.handle)
+	hasPanic := b.BinOp(token.NEQ, panicToken, b.Prog.Nil(b.Prog.VoidPtr()))
+	b.IfWithBranchWeights(hasPanic, forward, normal, 1, 1000)
+
+	bridge := b.Func.NewBuilder()
+	defer bridge.Dispose()
+	bridge.SetBlock(forward)
+	bridge.Jump(c.panicBoundaryLanding)
+	c.panicBoundaryIncoming = append(c.panicBoundaryIncoming, coroPanicBoundaryIncoming{
+		block: forward,
+		token: panicToken,
+	})
+}
+
+// bindPanicBoundaryLanding materializes the one cold language landing after
+// every source and cleanup suspend has registered its gate. continuation==0
+// proves source execution and starts the ordinary defer/recover drainer;
+// every nonzero continuation is already inside that drainer, so the new panic
+// replaces its current overlay while preserving the cleanup base.
+func (c *coroBodyContext) bindPanicBoundaryLanding(b llssa.Builder) {
+	if c == nil || c.panicBoundaryTake.IsNil() {
+		return
+	}
+	if c.panicBoundaryLanding == nil || len(c.panicBoundaryIncoming) == 0 ||
+		c.panicBoundaryType.IsNil() || c.panicBoundaryData.IsNil() {
+		panic("coroutine panic boundary has no complete resume landing")
+	}
+	blocks := make([]llssa.BasicBlock, len(c.panicBoundaryIncoming))
+	for i := range c.panicBoundaryIncoming {
+		blocks[i] = c.panicBoundaryIncoming[i].block
+	}
+	b.SetBlock(c.panicBoundaryLanding)
+	merged := b.Phi(b.Prog.VoidPtr())
+	merged.AddIncoming(b, blocks, func(i int, _ llssa.BasicBlock) llssa.Expr {
+		return c.panicBoundaryIncoming[i].token
+	})
+	typeWord := b.Call(c.panicBoundaryType, merged.Expr)
+	dataWord := b.Call(c.panicBoundaryData, merged.Expr)
+	if c.cleanup == nil {
+		c.panic(b, typeWord, dataWord, 0)
+		return
+	}
+
+	fromSource := b.Func.MakeBlock()
+	fromCleanup := b.Func.MakeBlock()
+	isSource := b.BinOp(
+		token.EQL,
+		b.Load(c.cleanup.continuation),
+		b.Prog.IntVal(0, b.Prog.Uint32()),
+	)
+	b.If(isSource, fromSource, fromCleanup)
+
+	b.SetBlock(fromSource)
+	c.cleanup.enterPanic(b, typeWord, dataWord, 0)
+
+	b.SetBlock(fromCleanup)
+	if c.panicTraceReplace.IsNil() {
+		panic("cleanup-local coroutine panic boundary requires the trace-replacement hook")
+	}
+	b.Call(c.panicTraceReplace, c.task, c.handle)
+	c.cleanup.replacePanic(b, typeWord, dataWord, 0)
 }
 
 // dispatchZeroRunDecision emits the exactly-once compiler resume gate for a
@@ -1196,6 +1411,7 @@ func (c *coroBodyContext) panicWithLine(
 
 func (c *coroBodyContext) finish(b llssa.Builder) {
 	c.coro.Finish()
+	c.bindPanicBoundaryLanding(b)
 }
 
 func (p *context) storeCoroLeafResult(b llssa.Builder, abi coroPhysicalABI, resultSlot llssa.Expr, results []llssa.Expr) {

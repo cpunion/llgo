@@ -74,7 +74,17 @@ type CoroOptions struct {
 	// shared cleanup block captured by the callback. AfterResume and
 	// AfterResumeDispatch are mutually exclusive.
 	AfterResumeDispatch CoroResumeDispatch
-	AllocationAlign     uint32
+	// ResumeLandingDispatch runs first on every non-final case-0 resume edge,
+	// including sites which replace AfterResumeDispatch. It is the structured
+	// landing point for a physical event which must bypass the site's ordinary
+	// run-decision protocol (for example a native panic caught at the surrounding
+	// resume boundary). normal is a fresh compiler-owned block containing the
+	// selected default/per-site resume callback. The callback must terminate its
+	// gate and may branch only to normal or to a frontend-owned shared landing
+	// destination. Unlike AfterResume and AfterResumeDispatch, this callback is
+	// additive rather than mutually exclusive.
+	ResumeLandingDispatch CoroResumeDispatch
+	AllocationAlign       uint32
 }
 
 // CoroResumeDispatch emits a terminating decision in a non-final coroutine
@@ -222,6 +232,11 @@ type CoroProgramBootstrapOptions struct {
 // at least one reachable bounded-worker transaction. It is program demand,
 // not a declaration that the selected target supports workers.
 const CoroProgramBootstrapFlagWorkerV2 uint32 = 1 << 0
+
+// CoroProgramBootstrapFlagPanicOnFaultV2 says that the final reachable
+// program can enable runtime/debug.SetPanicOnFault. Native stackless runtimes
+// use it to provision resume landings before the first enabling call executes.
+const CoroProgramBootstrapFlagPanicOnFaultV2 uint32 = 1 << 1
 
 // NewCoroFrameDescriptor defines a link-once constant descriptor with layout:
 //
@@ -643,7 +658,8 @@ func (p Package) NewCoroProgramBootstrap(
 		}
 		roles = []uint32{CoroProgramStepInit, CoroProgramStepMain}
 	case 2:
-		if unknown := opts.Flags &^ CoroProgramBootstrapFlagWorkerV2; unknown != 0 {
+		const known = CoroProgramBootstrapFlagWorkerV2 | CoroProgramBootstrapFlagPanicOnFaultV2
+		if unknown := opts.Flags &^ known; unknown != 0 {
 			panic(fmt.Sprintf("ssa: coroutine program bootstrap version 2 has unknown capability flags %#x", unknown))
 		}
 		if len(opts.Steps) < coroProgramStepMinimumV2 {
@@ -885,6 +901,7 @@ type CoroBuilder struct {
 	initialResumeBlk    BasicBlock
 	afterResume         func(Builder)
 	afterResumeDispatch CoroResumeDispatch
+	resumeLanding       CoroResumeDispatch
 	finished            bool
 }
 
@@ -959,6 +976,7 @@ func (b Builder) BeginCoro(opts CoroOptions) *CoroBuilder {
 		cleanupBlk:          cleanupBlk,
 		afterResume:         opts.AfterResume,
 		afterResumeDispatch: opts.AfterResumeDispatch,
+		resumeLanding:       opts.ResumeLandingDispatch,
 	}
 	if callback := opts.BeforeInitialSuspend; callback != nil {
 		callbackPoint := captureCoroFrameCallbackPoint(b)
@@ -1211,7 +1229,11 @@ func (c *CoroBuilder) emitSuspendWithCallbacks(
 	b := c.b
 	prog := b.Prog
 	resumeBlk := b.Func.MakeBlock()
-	normalBlk := resumeBlk
+	dispatchBlk := resumeBlk
+	if !final && c.resumeLanding != nil {
+		dispatchBlk = b.Func.MakeBlock()
+	}
+	normalBlk := dispatchBlk
 	if !final && dispatch != nil {
 		// A terminating dispatch needs a destination that it cannot accidentally
 		// populate. Keeping normal distinct also lets this helper restore the
@@ -1239,6 +1261,12 @@ func (c *CoroBuilder) emitSuspendWithCallbacks(
 		}))
 	}
 	b.SetBlock(resumeBlk)
+	if !final && c.resumeLanding != nil {
+		callbackPoint := captureCoroFrameCallbackPoint(b)
+		c.resumeLanding(b, dispatchBlk)
+		callbackPoint.ensureResumeDispatch(b)
+		b.SetBlock(dispatchBlk)
+	}
 	if !final && dispatch != nil {
 		callbackPoint := captureCoroFrameCallbackPoint(b)
 		dispatch(b, normalBlk)
