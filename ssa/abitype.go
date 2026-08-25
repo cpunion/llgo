@@ -88,8 +88,33 @@ func (p Program) ABITypeRuntimeFunctions(t types.Type) []string {
 	if name := p.abi.EqualName(t); name != "" {
 		ret = append(ret, name)
 	}
-	if _, ok := types.Unalias(t).(*types.Map); ok {
+	if _, ok := abiTypeExtendedShape(t).(*types.Map); ok {
 		ret = append(ret, "typehash")
+	}
+	return ret
+}
+
+func abiTypeExtendedShape(t types.Type) types.Type {
+	shape := types.Unalias(t)
+	if named, ok := shape.(*types.Named); ok {
+		return named.Underlying()
+	}
+	return shape
+}
+
+// ABITypeImplicitDescriptorTypes returns descriptors that abiType materializes even
+// though they are not ordinary source-level children of t. Keep this as the
+// planner-facing mirror of abiCommonFields and abiExtendedFields: callers can
+// traverse these types with the same descriptor walk they use for explicit
+// fields without duplicating target-size or method-set decisions.
+func (p Program) ABITypeImplicitDescriptorTypes(t types.Type) []types.Type {
+	ret := make([]types.Type, 0, 2)
+	if ptr, static := staticPtrToThis(t); static {
+		ret = append(ret, ptr)
+	}
+	shape := abiTypeExtendedShape(t)
+	if mapType, ok := shape.(*types.Map); ok {
+		ret = append(ret, p.abi.MapBucket(mapType))
 	}
 	return ret
 }
