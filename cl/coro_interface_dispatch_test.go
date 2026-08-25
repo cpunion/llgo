@@ -112,6 +112,92 @@ func Root(summer Summer) int { return summer.Sum(1, 2, 3) }
 	}
 }
 
+func TestCoroVariadicInterfaceCodegenSharesOnePackedDescriptorAcrossCallSites(t *testing.T) {
+	const source = `package foo
+var gate chan struct{}
+var one = []int{1}
+var three = []int{2, 3, 4}
+type Summer interface { Value(...int) int }
+type summer struct{ marker byte }
+func (summer) Value(values ...int) int { <-gate; return len(values) }
+func Root(value Summer, concrete bool) int {
+	if concrete { value = summer{} }
+	return value.Value(one...) + value.Value(three...)
+}
+`
+	program, pkg, plan, _, method, _ := compileCoroClosedInterfacePlainFixture(
+		t, source, coro.DynamicCHAClosed,
+	)
+	defer program.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	methodPlan, planned := plan.FunctionPlan(method)
+	if !planned || methodPlan.Emission != coro.EmitCoroutine || methodPlan.Primary != coro.PrimaryCoroutine {
+		t.Fatalf("variadic method plan = %+v, present=%t", methodPlan, planned)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify variadic interface codegen: %v\n%s", err, module.String())
+	}
+
+	descriptors := 0
+	for global := module.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+		if strings.HasPrefix(global.Name(), coroPlainDispatchDescriptorPrefix+"method.") {
+			descriptors++
+		}
+	}
+	var thunk llvm.Value
+	thunks := 0
+	plainThunks := 0
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		switch {
+		case strings.HasPrefix(function.Name(), coroCoroDispatchThunkPrefix+"method."):
+			thunks++
+			thunk = function
+		case strings.HasPrefix(function.Name(), coroPlainDispatchThunkPrefix+"method."):
+			plainThunks++
+		}
+	}
+	if descriptors != 1 || thunks != 1 || plainThunks != 0 {
+		t.Fatalf(
+			"two variadic call sites emitted descriptors=%d coro-thunks=%d plain-thunks=%d, want one shared descriptor/thunk and no alternate\n%s",
+			descriptors, thunks, plainThunks, module.String(),
+		)
+	}
+	if got := thunk.ParamsCount(); got != 4 {
+		t.Fatalf("shared variadic method thunk parameters = %d, want (g,out,receiver,packed-slice)\n%s", got, thunk.String())
+	}
+	methodBody := module.NamedFunction("foo.summer.Value$coro")
+	if methodBody.IsNil() {
+		t.Fatalf("variadic method has no single coroutine primary:\n%s", module.String())
+	}
+	call := coroDispatchProducerOnlyCallTo(t, thunk, "")
+	receiverAdapter := call.CalledValue()
+	if receiverAdapter.IsNil() ||
+		!strings.Contains(receiverAdapter.Name(), "$generated$promoted$Value$llgo$promoted$v1$") ||
+		!strings.HasSuffix(receiverAdapter.Name(), "$coro") {
+		t.Fatalf("shared variadic thunk receiver adapter = %q, want one promoted coroutine entry:\n%s", receiverAdapter.Name(), thunk.String())
+	}
+	receiverAdapters := 0
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if strings.Contains(function.Name(), "$generated$promoted$Value$llgo$promoted$v1$") &&
+			strings.HasSuffix(function.Name(), "$coro") {
+			receiverAdapters++
+		}
+	}
+	if receiverAdapters != 1 {
+		t.Fatalf("two variadic call sites emitted %d promoted receiver adapters, want one shared adapter\n%s", receiverAdapters, module.String())
+	}
+	coroDispatchProducerOnlyCallTo(t, receiverAdapter, methodBody.Name())
+	if got := call.OperandsCount() - 1; got != 4 {
+		t.Fatalf("shared variadic thunk forwards %d operands, want (g,out,receiver,packed-slice):\n%s", got, thunk.String())
+	}
+	if !module.NamedFunction("foo.summer.Value").IsNil() ||
+		!module.NamedFunction("foo.summer.Value$plain").IsNil() {
+		t.Fatalf("variadic coroutine method retained a redundant plain primary/alternate:\n%s", module.String())
+	}
+}
+
 func TestResolveCoroInterfaceDispatchPlanAcceptsPromotedGenericMethodWrappers(t *testing.T) {
 	const source = `package foo
 type Interface interface { M() }
