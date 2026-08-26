@@ -33,12 +33,15 @@ const (
 	emissionStrictABITypeGraphKeyPrefix  = "strict-abi-graph-sha256-v1:"
 	emissionIdentityFreeTypeGraphSchema  = "llgo.emission.identity-free-abi-type-graph.v1"
 	emissionIdentityFreeTypeGraphPrefix  = "identity-free-abi-graph-sha256-v1:"
+	emissionCFunctionTypeGraphSchema     = "llgo.emission.c-function-abi-type-graph.v2"
+	emissionCFunctionTypeGraphPrefix     = "c-function-abi-graph-sha256-v2:"
 )
 
 type emissionTypeGraphOptions struct {
 	omitTupleNames          bool
 	expandNamed             bool
 	omitStructFieldMetadata bool
+	opaquePointers          bool
 }
 
 type emissionTypeKeyMode uint8
@@ -48,6 +51,7 @@ const (
 	emissionTypeKeyStrictABI
 	emissionTypeKeyGoLinknameABI
 	emissionTypeKeyIdentityFreeABI
+	emissionTypeKeyCFunctionABI
 )
 
 type emissionTypeKeyCacheKey struct {
@@ -73,6 +77,8 @@ func structuralEmissionTypeKeyForMode(mode emissionTypeKeyMode, typ types.Type) 
 		return structuralGoLinknameABITypeKey(typ)
 	case emissionTypeKeyIdentityFreeABI:
 		return structuralNamedIdentityFreeABITypeKey(typ)
+	case emissionTypeKeyCFunctionABI:
+		return structuralCFunctionABITypeKey(typ)
 	default:
 		panic("cl: unknown structural emission type-key mode")
 	}
@@ -127,7 +133,7 @@ func (c *emissionTypeKeyCache) goLinknameABI(typ types.Type) string {
 }
 
 func (c *emissionTypeKeyCache) cFunctionABI(typ types.Type) string {
-	return c.key(emissionTypeKeyIdentityFreeABI, typ)
+	return c.key(emissionTypeKeyCFunctionABI, typ)
 }
 
 func (p *context) cachedStrictEmissionTypeKey(typ types.Type) string {
@@ -268,8 +274,16 @@ func (b *emissionTypeGraphBuilder) describe(typ types.Type) emissionTypeGraphNod
 	}
 	switch typ := typ.(type) {
 	case *types.Basic:
+		if b.options.opaquePointers && typ.Kind() == types.UnsafePointer {
+			text("opaque-pointer")
+			break
+		}
 		text("basic", strconv.Itoa(int(typ.Kind())), typ.Name())
 	case *types.Pointer:
+		if b.options.opaquePointers {
+			text("opaque-pointer")
+			break
+		}
 		text("pointer")
 		edge(typ.Elem())
 	case *types.Array:

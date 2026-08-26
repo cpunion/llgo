@@ -4841,13 +4841,38 @@ func structuralGoLinknameABITypeKey(typ types.Type) string {
 }
 
 // structuralCFunctionABITypeKey models the physical callable ABI of a C
-// declaration. Package-level Go named identity, field names, tags, and
-// parameter names do not survive into that ABI. In particular, a named
-// //llgo:type C callback and an equivalent anonymous callback type are one
-// function-pointer parameter, not conflicting declarations of the outer C
-// symbol.
+// declaration. Package-level Go named identity, field names, tags, parameter
+// names, and LLVM opaque-pointer pointee types do not survive into that ABI.
+// Callback signatures remain structural contracts even though their machine
+// value is a pointer: they describe how C may call back through that value.
 func structuralCFunctionABITypeKey(typ types.Type) string {
-	return structuralNamedIdentityFreeABITypeKey(typ)
+	if signature, ok := types.Unalias(typ).(*types.Signature); ok {
+		typ = normalizeGoLinknameABISignature(signature)
+	}
+	return compactStructuralTypeGraphKey(
+		typ,
+		emissionCFunctionTypeGraphSchema,
+		emissionCFunctionTypeGraphPrefix,
+		emissionTypeGraphOptions{
+			omitTupleNames:          true,
+			expandNamed:             true,
+			omitStructFieldMetadata: true,
+			opaquePointers:          true,
+		},
+	)
+}
+
+func structuralCFunctionParameterABITypeKey(signature *types.Signature) string {
+	signature = normalizeGoLinknameABISignature(signature)
+	parametersOnly := types.NewSignatureType(
+		nil,
+		nil,
+		nil,
+		signature.Params(),
+		types.NewTuple(),
+		signature.Variadic(),
+	)
+	return structuralCFunctionABITypeKey(parametersOnly)
 }
 
 func structuralNamedIdentityFreeABITypeKey(typ types.Type) string {
@@ -8301,10 +8326,56 @@ func (u *EmissionUniverse) validateGeneratedWrapperPhysicalCollisions() error {
 }
 
 type coroForeignPhysicalABI struct {
-	kind            int
-	symbol          string
-	signature       string
-	llvmIRSignature string
+	kind              int
+	symbol            string
+	signature         string
+	parameterABI      string
+	resultCount       int
+	discardableResult bool
+	llvmIRSignature   string
+}
+
+func coroForeignPhysicalABIViewsCompatible(authority coroForeignPhysicalABI, views map[coroForeignPhysicalABI]none) bool {
+	for view := range views {
+		if view.signature == authority.signature {
+			continue
+		}
+		// A C declaration may intentionally discard a returned status value.
+		// LLVM opaque-pointer calls permit that view without changing the
+		// machine argument ABI. Two value-producing views must still agree
+		// exactly because neither declaration proves which value C returns.
+		if authority.kind == cFunc && view.kind == cFunc &&
+			authority.parameterABI == view.parameterABI &&
+			(authority.resultCount == 0 && view.discardableResult ||
+				view.resultCount == 0 && authority.discardableResult) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func coroForeignDiscardableResult(signature *types.Signature) bool {
+	if signature == nil || signature.Results().Len() != 1 {
+		return false
+	}
+	typ := types.Unalias(signature.Results().At(0).Type())
+	for {
+		named, ok := typ.(*types.Named)
+		if !ok {
+			break
+		}
+		typ = types.Unalias(named.Underlying())
+	}
+	switch typ := typ.(type) {
+	case *types.Pointer:
+		return true
+	case *types.Basic:
+		return typ.Kind() == types.UnsafePointer ||
+			typ.Info()&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) != 0
+	default:
+		return false
+	}
 }
 
 // freezeCoroForeignCallCertificates binds coroutine declaration directives to
@@ -8316,6 +8387,7 @@ type coroForeignPhysicalABI struct {
 func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 	abiByFunction := make(map[*ssa.Function]coroForeignPhysicalABI)
 	signaturesBySymbol := make(map[string]map[string]none)
+	abisBySymbol := make(map[string]map[coroForeignPhysicalABI]none)
 	for _, fn := range u.functions {
 		owners := u.sortedUseOwners(fn)
 		var abi coroForeignPhysicalABI
@@ -8329,30 +8401,36 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 				continue
 			}
 			llvmIRSignature := ""
+			parameterABI := ""
+			resultCount := 0
+			discardableResult := false
 			if ftype == cFunc {
+				state, stateFrozen := u.ownerStates[fn][owner]
+				if !stateFrozen {
+					return fmt.Errorf(
+						"prepare emission universe: C declaration %q has no frozen provenance for owner %q",
+						fn.Name(), owner.identity,
+					)
+				}
+				ctx := u.effectiveTypeContext(owner, fn)
+				if ctx == nil {
+					return fmt.Errorf(
+						"prepare emission universe: C declaration %q has no effective type context for owner %q",
+						fn.Name(), owner.identity,
+					)
+				}
+				ctx.state = state.state
+				patchedSignature, ok := ctx.patchType(fn.Signature).(*types.Signature)
+				if !ok {
+					return fmt.Errorf(
+						"prepare emission universe: C declaration %q has a non-signature effective type for owner %q",
+						fn.Name(), owner.identity,
+					)
+				}
+				parameterABI = structuralCFunctionParameterABITypeKey(patchedSignature)
+				resultCount = patchedSignature.Results().Len()
+				discardableResult = coroForeignDiscardableResult(patchedSignature)
 				if _, needsLLVMABI := u.executorLeafProofs[symbol]; needsLLVMABI {
-					state, stateFrozen := u.ownerStates[fn][owner]
-					if !stateFrozen {
-						return fmt.Errorf(
-							"prepare emission universe: C declaration %q has no frozen provenance for owner %q",
-							fn.Name(), owner.identity,
-						)
-					}
-					ctx := u.effectiveTypeContext(owner, fn)
-					if ctx == nil {
-						return fmt.Errorf(
-							"prepare emission universe: C declaration %q has no effective type context for owner %q",
-							fn.Name(), owner.identity,
-						)
-					}
-					ctx.state = state.state
-					patchedSignature, ok := ctx.patchType(fn.Signature).(*types.Signature)
-					if !ok {
-						return fmt.Errorf(
-							"prepare emission universe: C declaration %q has a non-signature effective type for owner %q",
-							fn.Name(), owner.identity,
-						)
-					}
 					llvmIRSignature = u.prog.PhysicalFuncDeclIRType(
 						patchedSignature,
 						llssa.InC,
@@ -8360,10 +8438,13 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 				}
 			}
 			candidate := coroForeignPhysicalABI{
-				kind:            ftype,
-				symbol:          symbol,
-				signature:       signature,
-				llvmIRSignature: llvmIRSignature,
+				kind:              ftype,
+				symbol:            symbol,
+				signature:         signature,
+				parameterABI:      parameterABI,
+				resultCount:       resultCount,
+				discardableResult: discardableResult,
+				llvmIRSignature:   llvmIRSignature,
 			}
 			if haveABI && candidate != abi {
 				return fmt.Errorf("prepare emission universe: declaration %q has owner-dependent physical ABI while freezing coroutine call metadata", fn.Name())
@@ -8395,6 +8476,12 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 			signaturesBySymbol[inventorySymbol] = signatures
 		}
 		signatures[abi.signature] = none{}
+		views := abisBySymbol[inventorySymbol]
+		if views == nil {
+			views = make(map[coroForeignPhysicalABI]none)
+			abisBySymbol[inventorySymbol] = views
+		}
+		views[abi] = none{}
 	}
 
 	// Declaration-scoped generic contracts are bound to one total callable
@@ -8524,7 +8611,7 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 			return fmt.Errorf("prepare emission universe: %s on bodyless managed Go declaration %q is unsupported; only noblock can publish an executor-safe managed capability", directive, fn.Name())
 		}
 		inventorySymbol := fmt.Sprintf("%d:%s", abi.kind, abi.symbol)
-		if signatures := signaturesBySymbol[inventorySymbol]; len(signatures) != 1 {
+		if !coroForeignPhysicalABIViewsCompatible(abi, abisBySymbol[inventorySymbol]) {
 			return fmt.Errorf("prepare emission universe: %s physical symbol %q has conflicting frozen ABI signatures", directive, abi.symbol)
 		}
 		if previous, exists := directiveBySymbol[inventorySymbol]; exists && previous != directive {

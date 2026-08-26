@@ -148,6 +148,78 @@ func root(named Callback, anonymous func(*int, *int)) {
 	}
 }
 
+func TestEmissionUniverseCPhysicalABIErasesNamedPointeeIdentity(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/pointerabi", `package pointerabi
+
+type Mutex struct{ state uintptr }
+type Attr struct{ state uintptr }
+type LibraryMutex struct{ opaque [2]uintptr }
+type LibraryAttr struct{ opaque [3]uintptr }
+
+//llgo:coro sync
+//go:linkname RuntimeView C.same_pointer_abi
+func RuntimeView(*Mutex, *Attr) int
+
+//go:linkname LibraryView C.same_pointer_abi
+func LibraryView(*LibraryMutex, *LibraryAttr) int
+
+func root(m *Mutex, a *Attr, lm *LibraryMutex, la *LibraryAttr) int {
+	return RuntimeView(m, a) + LibraryView(lm, la)
+}
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "pointer-abi-owner",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, ok, err := universe.CoroForeignSyncCertificate(pkg.ssa.Func("RuntimeView"))
+	if err != nil || !ok || certificate.ID == "" || certificate.ABISignature == "" {
+		t.Fatalf("named pointee sync certificate = %+v, %t, %v", certificate, ok, err)
+	}
+}
+
+func TestEmissionUniverseCPhysicalABIAllowsDiscardedStatusView(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/discardstatus", `package discardstatus
+
+type RuntimeMutex struct{ state uintptr }
+type LibraryMutex struct{ opaque [4]uintptr }
+
+//llgo:coro noblock
+//go:linkname RuntimeUnlock C.same_unlock_abi
+func RuntimeUnlock(*RuntimeMutex) int
+
+//go:linkname LibraryUnlock C.same_unlock_abi
+func LibraryUnlock(*LibraryMutex)
+
+func root(runtime *RuntimeMutex, library *LibraryMutex) {
+	_ = RuntimeUnlock(runtime)
+	LibraryUnlock(library)
+}
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "discard-status-owner",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, ok, err := universe.CoroForeignNoBlockCertificate(pkg.ssa.Func("RuntimeUnlock"))
+	if err != nil || !ok || certificate.ID == "" {
+		t.Fatalf("status-returning certificate = %+v, %t, %v", certificate, ok, err)
+	}
+	if certificate, ok, err := universe.CoroForeignNoBlockCertificate(pkg.ssa.Func("LibraryUnlock")); err != nil || ok {
+		t.Fatalf("discarding view inherited declaration-scoped certificate = %+v, %t, %v", certificate, ok, err)
+	}
+}
+
 func TestEmissionUniverseForeignCallCapabilitiesFailClosed(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -188,6 +260,19 @@ func Wait(int) int
 //go:linkname Conflict C.same_worker
 func Conflict(string) string
 func root() { _ = Wait(1); _ = Conflict("") }
+`,
+			wantErr: "conflicting frozen ABI signatures",
+		},
+		{
+			name: "discarded aggregate result changes physical ABI",
+			source: `package bad
+type Large struct { A, B, C uintptr }
+//llgo:coro sync
+//go:linkname Returning C.same_large_result
+func Returning(int) Large
+//go:linkname Discarding C.same_large_result
+func Discarding(int)
+func root() { _ = Returning(1); Discarding(2) }
 `,
 			wantErr: "conflicting frozen ABI signatures",
 		},

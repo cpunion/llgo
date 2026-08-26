@@ -729,7 +729,8 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 			arguments := call.Common().Args
 			specializedWorkerVarargs := false
 			if kind == coroFrameRetentionCallWorkerV1 {
-				if direct, ok := call.(*ssa.Call); ok {
+				switch direct := call.(type) {
+				case *ssa.Call:
 					shape, recognized, err := validateCoroWorkerForeignCallWithAuthority(
 						b.audit.foreignCallAuthority(),
 						direct, b.audit.universe.prog.PointerSize(),
@@ -743,6 +744,22 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 						// LLVM value.
 						arguments = shape.arguments
 						specializedWorkerVarargs = true
+					}
+				case *ssa.Defer:
+					// Cleanup planning has already specialized a C variadic defer
+					// into its exact typed worker record. Consume that immutable
+					// recipe instead of rescanning the erased synthetic []any Slice,
+					// which deliberately has no emitted LLVM value.
+					if b.audit.cleanup != nil {
+						for _, site := range b.audit.cleanup.sites {
+							if site == nil || site.instruction != direct ||
+								site.kind != coroStaticCleanupForeignWorker || site.foreignWorker == nil {
+								continue
+							}
+							arguments = site.arguments
+							specializedWorkerVarargs = site.foreignWorker.variadic
+							break
+						}
 					}
 				}
 			}
