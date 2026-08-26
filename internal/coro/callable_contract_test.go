@@ -149,6 +149,44 @@ func TestCallableContractDirectExecutorCompatible(t *testing.T) {
 	}
 }
 
+func TestManagedIngressReentryIsIndependentFromCallbackReentry(t *testing.T) {
+	base := CallableContract{
+		ID: "test.v1", Progress: ProgressMayBlock,
+		Affinity: AffinityCallerThread, Reentry: ReentryManagedIngress,
+		Memory: MemoryByValue,
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if flags := CallableContractExecConstraints(base); !flags.Contains(NeedsRuntimeContext) ||
+		flags.Contains(OpaqueExec) {
+		t.Fatalf("managed ingress execution constraints = %s", flags)
+	}
+	callback := base
+	callback.ID = "callback.v1"
+	callback.Reentry = ReentryManagedCallback
+	if err := ValidateCallableContractRefinement(callback, base); err == nil {
+		t.Fatal("managed callback unexpectedly refined an independent managed ingress")
+	}
+	if err := ValidateCallableContractRefinement(base, callback); err == nil {
+		t.Fatal("managed ingress unexpectedly refined an independent managed callback")
+	}
+	joined := joinCallableContracts([]CallableContract{base, callback})
+	if joined.Reentry != ReentryUnknown {
+		t.Fatalf("managed ingress/callback join = %s, want unknown", joined.Reentry)
+	}
+	none := base
+	none.ID = "none.v1"
+	none.Reentry = ReentryNone
+	if err := ValidateCallableContractRefinement(none, base); err != nil {
+		t.Fatalf("no-reentry contract did not refine managed ingress: %v", err)
+	}
+	joined = joinCallableContracts([]CallableContract{base, none})
+	if joined.Reentry != ReentryManagedIngress {
+		t.Fatalf("managed ingress/none join = %s", joined.Reentry)
+	}
+}
+
 func TestCallableContractFactsFailClosed(t *testing.T) {
 	for _, test := range []struct {
 		name string

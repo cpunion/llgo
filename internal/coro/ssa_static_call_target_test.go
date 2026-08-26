@@ -189,18 +189,36 @@ func runtimeInit() { exported() }
 	}
 }
 
-func TestSSAPlanRootFactoryRootsExcludePackageEmissionEntry(t *testing.T) {
+func TestSSAPlanRootFactoryRootsPreserveOrthogonalEntryRoles(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "package_emission_factories.go", `package coroid
 var channel chan int
 func libraryEntry() { <-channel }
 func scheduledEntry() { <-channel }
+func emissionRawEntry() { <-channel }
 `)
 	libraryEntry := packageFunction(t, pkg, "libraryEntry")
 	scheduledEntry := packageFunction(t, pkg, "scheduledEntry")
+	emissionRawEntry := packageFunction(t, pkg, "emissionRawEntry")
 	plan, err := AnalyzeSSA(prog, Roots{
 		{Function: libraryEntry, ManagedDemand: AsyncDemand, EmissionEntry: true},
+		{
+			Function: libraryEntry, ManagedDemand: AsyncDemand, IngressEntry: true,
+			IngressCertificate: strings.Repeat("a", 64),
+		},
+		{
+			Function: scheduledEntry, ManagedDemand: AsyncDemand, IngressEntry: true,
+			IngressCertificate: strings.Repeat("b", 64),
+		},
 		{Function: scheduledEntry, ManagedDemand: AsyncDemand},
-	}, SSAConfig{MaxPlainInstructions: -1})
+		{Function: emissionRawEntry, ManagedDemand: AsyncDemand, EmissionEntry: true},
+		{Function: emissionRawEntry, RawPlainDemand: true},
+	}, func() SSAConfig {
+		config := planDigestSSAConfig()
+		config.ClassifyFunction = func(function *ssa.Function) (SSAFunctionPolicy, error) {
+			return SSAFunctionPolicy{RawPlainEntry: function == emissionRawEntry}, nil
+		}
+		return config
+	}())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,12 +227,56 @@ func scheduledEntry() { <-channel }
 		t.Fatalf("root factory roots = %+v, want scheduledEntry only", factories)
 	}
 	roots := plan.Roots()
-	if len(roots) != 2 {
-		t.Fatalf("roots = %+v, want two entries", roots)
+	if len(roots) != 3 {
+		t.Fatalf("roots = %+v, want three entries", roots)
 	}
 	for _, root := range roots {
-		if root.Function == libraryEntry && !root.EmissionEntry {
-			t.Fatalf("library entry lost its emission-only role: %+v", root)
+		switch root.Function {
+		case libraryEntry:
+			if !root.EmissionEntry || !root.IngressEntry || root.ScheduledEntry ||
+				root.IngressCertificate != strings.Repeat("a", 64) {
+				t.Fatalf("library entry lost an emission/ingress role: %+v", root)
+			}
+		case scheduledEntry:
+			if root.EmissionEntry || !root.IngressEntry || !root.ScheduledEntry ||
+				root.IngressCertificate != strings.Repeat("b", 64) {
+				t.Fatalf("scheduled entry lost a scheduler/ingress role: %+v", root)
+			}
+		case emissionRawEntry:
+			if !root.EmissionEntry || root.IngressEntry || root.ScheduledEntry ||
+				!root.RawPlainDemand {
+				t.Fatalf("raw-only crossing polluted the emission role: %+v", root)
+			}
+		}
+	}
+	document, err := plan.canonicalPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Roots) != 3 {
+		t.Fatalf("digest roots = %+v", document.Roots)
+	}
+	for _, root := range document.Roots {
+		function, ok := plan.byID[root.Function]
+		if !ok {
+			t.Fatalf("digest root %q has no exact function", root.Function)
+		}
+		switch function {
+		case libraryEntry:
+			if !root.EmissionEntry || !root.IngressEntry || root.ScheduledEntry ||
+				root.IngressCertificate != strings.Repeat("a", 64) {
+				t.Fatalf("digest lost library entry roles: %+v", root)
+			}
+		case scheduledEntry:
+			if root.EmissionEntry || !root.IngressEntry || !root.ScheduledEntry ||
+				root.IngressCertificate != strings.Repeat("b", 64) {
+				t.Fatalf("digest lost scheduled entry roles: %+v", root)
+			}
+		case emissionRawEntry:
+			if !root.EmissionEntry || root.IngressEntry || root.ScheduledEntry ||
+				!root.RawPlainDemand {
+				t.Fatalf("digest gave a raw-only crossing a scheduled role: %+v", root)
+			}
 		}
 	}
 }

@@ -64,14 +64,22 @@ func coroArchiveTestSummary(t *testing.T, pkg string) coro.LibraryEffectSummary 
 			FuncRep:       coro.DirectPlain,
 			Primary:       coro.PrimaryPlain,
 			ManagedEntry:  coro.ManagedEntryPlain,
-			PrimarySymbol: pkg + ".F",
+			PrimarySymbol: pkg + ".F$managed",
+			ExportIngress: true,
 		}},
 		ExportBindings: []coro.LibraryEffectExportBinding{{
 			Symbol:               pkg + "_F",
 			ABIHash:              strings.Repeat("b", 64),
 			Function:             functionID,
 			ManagedPrimary:       coro.PrimaryPlain,
-			ManagedPrimarySymbol: pkg + ".F",
+			ManagedPrimarySymbol: pkg + ".F$managed",
+		}},
+		ExportIngresses: []coro.LibraryEffectExportIngress{{
+			Symbol:      pkg + "_F",
+			ABIHash:     strings.Repeat("b", 64),
+			Function:    functionID,
+			AdapterABI:  coro.LibraryEffectExportIngressABIV1,
+			Certificate: strings.Repeat("c", 64),
 		}},
 	}
 }
@@ -152,7 +160,8 @@ func TestReadCoroLibraryEffectArchive(t *testing.T) {
 	if !found || len(summaries) != 1 ||
 		summaries[0].Package != "example/library" ||
 		len(summaries[0].Functions) != 1 ||
-		len(summaries[0].ExportBindings) != 1 {
+		len(summaries[0].ExportBindings) != 1 ||
+		len(summaries[0].ExportIngresses) != 1 {
 		t.Fatalf("archive summaries = %+v, found=%t", summaries, found)
 	}
 

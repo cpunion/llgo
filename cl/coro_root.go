@@ -86,6 +86,21 @@ func validateCoroRootEntries(plan *coro.SSAPlan) error {
 				function.ManagedDemand, function.RawPlainDemand, root.ManagedDemand, root.RawPlainDemand,
 			)
 		}
+		if !root.ScheduledEntry && !root.EmissionEntry && !root.IngressEntry &&
+			!root.RawPlainDemand {
+			return fmt.Errorf("coroutine root %q has no physical entry role", root.ID)
+		}
+		if root.IngressEntry {
+			if !root.ManagedDemand.Contains(coro.AsyncDemand) || root.RawPlainDemand ||
+				root.IngressCertificate == "" || function.RawPlainDemand ||
+				function.RawPlainEntry {
+				return fmt.Errorf(
+					"coroutine ingress root %q requires async managed-only demand and one certificate (root-managed=%s root-raw=%t function-raw=%t raw-entry=%t)",
+					root.ID, root.ManagedDemand, root.RawPlainDemand,
+					function.RawPlainDemand, function.RawPlainEntry,
+				)
+			}
+		}
 		if len(root.Function.FreeVars) != 0 {
 			return fmt.Errorf(
 				"coroutine root %q (%s) must be non-capturing; parent=%v freevars=%d, captured environments are supplied only by dynamic descriptors",
@@ -117,7 +132,8 @@ func validateCoroRootEntries(plan *coro.SSAPlan) error {
 				)
 			}
 		case coro.EmitOutcomePlain:
-			if !root.EmissionEntry || root.RawPlainDemand ||
+			if !root.EmissionEntry || root.IngressEntry || root.ScheduledEntry ||
+				root.RawPlainDemand ||
 				root.ManagedDemand != coro.AsyncDemand ||
 				function.ManagedEntry != coro.ManagedEntryOutcomePlain ||
 				function.FuncRep != coro.DirectCoro {
@@ -137,7 +153,8 @@ func validateCoroRootEntries(plan *coro.SSAPlan) error {
 			if root.ManagedDemand.Contains(coro.AsyncDemand) && !function.ManagedDemand.Contains(coro.AsyncDemand) {
 				return fmt.Errorf("coroutine root factory %q has async root demand absent from managed demand %s", root.ID, function.ManagedDemand)
 			}
-			if root.ManagedDemand.Contains(coro.AsyncDemand) && function.FuncRep != coro.DirectCoro {
+			if root.ScheduledEntry && root.ManagedDemand.Contains(coro.AsyncDemand) &&
+				function.FuncRep != coro.DirectCoro {
 				return fmt.Errorf(
 					"coroutine root factory %q requires direct-coro representation, got %s",
 					root.ID, function.FuncRep,

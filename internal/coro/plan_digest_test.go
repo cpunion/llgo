@@ -313,8 +313,8 @@ import (
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v37" {
-		t.Fatalf("plan digest schema = %q, want emission-entry schema v37", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v38" {
+		t.Fatalf("plan digest schema = %q, want foreign-ingress schema v38", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {
@@ -1095,6 +1095,7 @@ func TestCoroPlanDigestCanonicalTargetsAndPlanMutations(t *testing.T) {
 			addedRoot = SSARootPlan{
 				Function: function.Function, ID: function.Plan.ID, Demand: function.Plan.Demand,
 				ManagedDemand: function.Plan.ManagedDemand, RawPlainDemand: function.Plan.RawPlainDemand,
+				ScheduledEntry: true,
 			}
 			break
 		}

@@ -75,11 +75,16 @@ const (
 	ReentryUnknown         ReentryClass = "unknown"
 	ReentryNone            ReentryClass = "none"
 	ReentryManagedCallback ReentryClass = "managed-callback"
+	// ReentryManagedIngress permits a synchronous call through a separately
+	// compiler-certified managed ingress symbol. Unlike ManagedCallback it does
+	// not claim that a function-typed argument carries the reentry target.
+	ReentryManagedIngress ReentryClass = "managed-ingress"
 )
 
 func (value ReentryClass) Validate() error {
 	switch value {
-	case ReentryUnknown, ReentryNone, ReentryManagedCallback:
+	case ReentryUnknown, ReentryNone, ReentryManagedCallback,
+		ReentryManagedIngress:
 		return nil
 	default:
 		return fmt.Errorf("coro: invalid callable reentry class %q", value)
@@ -307,8 +312,9 @@ func validateSHA256Hex(name, value string) error {
 // physical lowering cannot otherwise enforce. Thread-affine affinities remain
 // explicit. Unknown reentry and unknown/retained memory require a future
 // adapter/lifetime recipe, so OpaqueExec keeps lowering fail-closed. Exact
-// managed-callback declarations are instead consumed by the compiler-owned
-// ForeignReentry recipe; the contract does not itself grant that recipe.
+// managed-callback and managed-ingress declarations are instead consumed by
+// compiler-owned ForeignReentry recipes; the contract does not itself grant
+// either recipe.
 // This grants no worker, raw-plain, or trusted-inline capability.
 func CallableContractExecConstraints(contract CallableContract) ExecFlags {
 	var flags ExecFlags
@@ -319,7 +325,7 @@ func CallableContractExecConstraints(contract CallableContract) ExecFlags {
 	switch contract.Reentry {
 	case ReentryUnknown:
 		flags |= OpaqueExec
-	case ReentryManagedCallback:
+	case ReentryManagedCallback, ReentryManagedIngress:
 		// A direct same-thread C call may reenter generated Go while the outer
 		// physical frame is live. The callback must observe that frame's logical
 		// G rather than the executor placeholder, so retain the ambient runtime
@@ -688,7 +694,16 @@ func joinReentry(left, right ReentryClass) ReentryClass {
 	if left == ReentryUnknown || right == ReentryUnknown {
 		return ReentryUnknown
 	}
-	return ReentryManagedCallback
+	if left == ReentryNone {
+		return right
+	}
+	if right == ReentryNone {
+		return left
+	}
+	// Parameter-carried callbacks and separately certified ingress symbols are
+	// independent physical capabilities. Their union is not represented by one
+	// declaration contract yet, so retain the conservative unknown join.
+	return ReentryUnknown
 }
 
 func joinMemory(left, right MemoryClass) MemoryClass {
@@ -716,7 +731,7 @@ func memoryRank(value MemoryClass) int {
 func callableContractRefines(refined, base CallableContract) bool {
 	return progressRefines(refined.Progress, base.Progress) &&
 		affinityRefines(refined.Affinity, base.Affinity) &&
-		reentryRank(refined.Reentry) <= reentryRank(base.Reentry) &&
+		reentryRefines(refined.Reentry, base.Reentry) &&
 		memoryRank(refined.Memory) <= memoryRank(base.Memory)
 }
 
@@ -765,15 +780,8 @@ func affinityRefines(refined, base AffinityClass) bool {
 	return false
 }
 
-func reentryRank(value ReentryClass) int {
-	switch value {
-	case ReentryNone:
-		return 0
-	case ReentryManagedCallback:
-		return 1
-	default:
-		return 2
-	}
+func reentryRefines(refined, base ReentryClass) bool {
+	return refined == base || base == ReentryUnknown || refined == ReentryNone
 }
 
 func sameCallableContractBehavior(left, right CallableContract) bool {

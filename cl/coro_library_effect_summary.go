@@ -189,6 +189,9 @@ func (view CoroLibraryEffectView) ValidateFunction(
 	primary := base
 	switch fact.ManagedEntry {
 	case coro.ManagedEntryPlain:
+		if fact.ExportIngress {
+			primary += coroIngressManagedSuffix
+		}
 	case coro.ManagedEntryCoroutine:
 		primary += coroPrimarySuffix
 	case coro.ManagedEntryOutcomePlain:
@@ -614,6 +617,7 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 	functions := make([]coro.LibraryEffectFunction, 0, len(p.emissionOwner.selected))
 	foreignCallables := make([]coro.LibraryEffectForeignCallable, 0)
 	exportBindings := make([]coro.LibraryEffectExportBinding, 0)
+	exportIngresses := make([]coro.LibraryEffectExportIngress, 0)
 	seen := make(map[coro.FunctionID]struct{}, len(p.emissionOwner.selected))
 	seenForeign := make(map[coro.FunctionID]struct{})
 	managedFacts := make(map[coro.FunctionID]coro.LibraryEffectFunction)
@@ -720,6 +724,10 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			PrimarySymbol:         entry.name,
 			RawPlainSymbol:        rawPlainSymbol,
 			ProgramCapabilities:   programCapabilities,
+			ExportIngress: func() bool {
+				_, ingress := plan.ForeignIngressRoot(function)
+				return ingress
+			}(),
 			OutcomePlainSymbol: func() string {
 				if functionPlan.HasStaticOutcome() {
 					return entry.baseName + coroOutcomePlainPrimarySuffix
@@ -761,6 +769,23 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			ManagedPrimary:       fact.Primary,
 			ManagedPrimarySymbol: fact.PrimarySymbol,
 		})
+		if root, ingress := plan.ForeignIngressRoot(function); ingress {
+			certificate, certified :=
+				universe.coroExportIngressCertificate(function)
+			if !certified || certificate.ID == "" ||
+				certificate.ID != root.IngressCertificate ||
+				certificate.PhysicalSymbol != symbol {
+				return fmt.Errorf(
+					"coroutine library summary: export ingress %q escaped its frozen certificate",
+					symbol,
+				)
+			}
+			exportIngresses = append(exportIngresses, coro.LibraryEffectExportIngress{
+				Symbol: symbol, ABIHash: abiHash, Function: functionPlan.ID,
+				AdapterABI:  coro.LibraryEffectExportIngressABIV1,
+				Certificate: certificate.ID,
+			})
+		}
 	}
 	summary := coro.LibraryEffectSummary{
 		Schema:           coro.LibraryEffectSummarySchema,
@@ -769,6 +794,7 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		Functions:        functions,
 		ForeignCallables: foreignCallables,
 		ExportBindings:   exportBindings,
+		ExportIngresses:  exportIngresses,
 	}
 	record, err := summary.MarshalRecord()
 	if err != nil {

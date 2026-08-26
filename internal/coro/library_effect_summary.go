@@ -29,7 +29,13 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v11"
+	LibraryEffectSummaryVersion = "v12"
+
+	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
+	// C-to-managed adapter published by LibraryEffectExportIngress. It is
+	// independent from a declarative export binding: only this record proves
+	// that the physical C symbol owns the managed child transaction.
+	LibraryEffectExportIngressABIV1 = "llgo.coro.export-ingress.v1"
 
 	// LibraryEffectSummarySchema is the producer ABI summary embedded in LLGo
 	// package objects and archives. It is deliberately independent from the
@@ -55,7 +61,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 11,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 12,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -114,6 +120,11 @@ type LibraryEffectFunction struct {
 	// names a separate twin when ManagedEntry remains coroutine.
 	OutcomePlainSymbol string `json:"outcome_plain_symbol,omitempty"`
 	RawPlainSymbol     string `json:"raw_plain_symbol,omitempty"`
+	// ExportIngress states that the producer's physical base symbol is owned by
+	// a separately published export-ingress adapter. A plain managed primary
+	// therefore uses the compiler's private managed suffix. Summary validation
+	// requires a matching versioned LibraryEffectExportIngress record.
+	ExportIngress bool `json:"export_ingress,omitempty"`
 }
 
 func (function LibraryEffectFunction) HasStaticOutcome() bool {
@@ -205,6 +216,45 @@ type LibraryEffectExportBinding struct {
 	ManagedPrimarySymbol string      `json:"managed_primary_symbol"`
 }
 
+// LibraryEffectExportIngress is the authorizing half of one source export.
+// The matching LibraryEffectExportBinding freezes source intent; this record
+// additionally proves that code generation emitted the exact versioned
+// adapter under Symbol. Certificate is the compiler-frozen symbol, C ABI,
+// managed target, and link-identity digest carried by the whole-program plan.
+type LibraryEffectExportIngress struct {
+	Symbol      string     `json:"symbol"`
+	ABIHash     string     `json:"abi_hash"`
+	Function    FunctionID `json:"function"`
+	AdapterABI  string     `json:"adapter_abi"`
+	Certificate string     `json:"certificate"`
+}
+
+// Validate checks one pointer-free generated export-ingress capability.
+func (ingress LibraryEffectExportIngress) Validate() error {
+	return ingress.validate()
+}
+
+func (ingress LibraryEffectExportIngress) validate() error {
+	if err := validateStableIdentityText("library export ingress symbol", ingress.Symbol); err != nil {
+		return err
+	}
+	if err := validateSHA256Hex("library export ingress ABI hash", ingress.ABIHash); err != nil {
+		return err
+	}
+	if err := ingress.Function.validate(); err != nil {
+		return err
+	}
+	if ingress.AdapterABI != LibraryEffectExportIngressABIV1 {
+		return fmt.Errorf(
+			"coro: library export ingress %q has adapter ABI %q, want %q",
+			ingress.Symbol, ingress.AdapterABI, LibraryEffectExportIngressABIV1,
+		)
+	}
+	return validateSHA256Hex(
+		"library export ingress certificate", ingress.Certificate,
+	)
+}
+
 // Validate checks one pointer-free export-to-managed binding.
 func (binding LibraryEffectExportBinding) Validate() error {
 	return binding.validate()
@@ -244,6 +294,7 @@ type LibraryEffectSummary struct {
 	Functions        []LibraryEffectFunction        `json:"functions"`
 	ForeignCallables []LibraryEffectForeignCallable `json:"foreign_callables"`
 	ExportBindings   []LibraryEffectExportBinding   `json:"export_bindings"`
+	ExportIngresses  []LibraryEffectExportIngress   `json:"export_ingresses"`
 }
 
 func (metadata LibraryEffectMetadata) validate() error {
@@ -399,6 +450,12 @@ func (function LibraryEffectFunction) validate() error {
 			return err
 		}
 	}
+	if function.ExportIngress && function.RawPlainSymbol != "" {
+		return fmt.Errorf(
+			"coro: library function %q publishes both export ingress and a raw-plain entry",
+			function.ID,
+		)
+	}
 	return nil
 }
 
@@ -438,7 +495,7 @@ func (summary LibraryEffectSummary) Verify() error {
 		}
 		foreignIdentities[callable.Identity.ID] = struct{}{}
 	}
-	exportSymbols := make(map[string]struct{}, len(summary.ExportBindings))
+	exportSymbols := make(map[string]LibraryEffectExportBinding, len(summary.ExportBindings))
 	exportFunctions := make(map[FunctionID]struct{}, len(summary.ExportBindings))
 	for index, binding := range summary.ExportBindings {
 		if err := binding.validate(); err != nil {
@@ -458,11 +515,55 @@ func (summary LibraryEffectSummary) Verify() error {
 		if _, duplicate := exportSymbols[binding.Symbol]; duplicate {
 			return fmt.Errorf("coro: duplicate library export symbol %q", binding.Symbol)
 		}
-		exportSymbols[binding.Symbol] = struct{}{}
+		exportSymbols[binding.Symbol] = binding
 		if _, duplicate := exportFunctions[binding.Function]; duplicate {
 			return fmt.Errorf("coro: managed function %q has duplicate library exports", binding.Function)
 		}
 		exportFunctions[binding.Function] = struct{}{}
+	}
+	ingressSymbols := make(map[string]struct{}, len(summary.ExportIngresses))
+	ingressFunctions := make(map[FunctionID]struct{}, len(summary.ExportIngresses))
+	for index, ingress := range summary.ExportIngresses {
+		if err := ingress.validate(); err != nil {
+			return fmt.Errorf("coro: library export ingress %d: %w", index, err)
+		}
+		binding, bound := exportSymbols[ingress.Symbol]
+		if !bound || binding.Function != ingress.Function ||
+			binding.ABIHash != ingress.ABIHash {
+			return fmt.Errorf(
+				"coro: library export ingress %q has no exact source binding",
+				ingress.Symbol,
+			)
+		}
+		function, emitted := managed[ingress.Function]
+		if !emitted || !function.ExportIngress {
+			return fmt.Errorf(
+				"coro: library export ingress %q has no matching managed function capability",
+				ingress.Symbol,
+			)
+		}
+		if _, duplicate := ingressSymbols[ingress.Symbol]; duplicate {
+			return fmt.Errorf("coro: duplicate library export ingress symbol %q", ingress.Symbol)
+		}
+		ingressSymbols[ingress.Symbol] = struct{}{}
+		if _, duplicate := ingressFunctions[ingress.Function]; duplicate {
+			return fmt.Errorf(
+				"coro: managed function %q has duplicate library export ingress capabilities",
+				ingress.Function,
+			)
+		}
+		ingressFunctions[ingress.Function] = struct{}{}
+	}
+	for id, function := range managed {
+		if !function.ExportIngress {
+			continue
+		}
+		if _, published := ingressFunctions[id]; !published {
+			return fmt.Errorf(
+				"coro: library function %q marks export ingress without a versioned adapter capability",
+				id,
+			)
+		}
 	}
 	return nil
 }
@@ -475,6 +576,7 @@ func (summary LibraryEffectSummary) canonical() (LibraryEffectSummary, error) {
 	ret.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
 	ret.ForeignCallables = append([]LibraryEffectForeignCallable(nil), summary.ForeignCallables...)
 	ret.ExportBindings = append([]LibraryEffectExportBinding(nil), summary.ExportBindings...)
+	ret.ExportIngresses = append([]LibraryEffectExportIngress(nil), summary.ExportIngresses...)
 	if ret.Functions == nil {
 		ret.Functions = make([]LibraryEffectFunction, 0)
 	}
@@ -483,6 +585,9 @@ func (summary LibraryEffectSummary) canonical() (LibraryEffectSummary, error) {
 	}
 	if ret.ExportBindings == nil {
 		ret.ExportBindings = make([]LibraryEffectExportBinding, 0)
+	}
+	if ret.ExportIngresses == nil {
+		ret.ExportIngresses = make([]LibraryEffectExportIngress, 0)
 	}
 	sort.Slice(ret.Functions, func(i, j int) bool {
 		return ret.Functions[i].ID < ret.Functions[j].ID
@@ -498,6 +603,12 @@ func (summary LibraryEffectSummary) canonical() (LibraryEffectSummary, error) {
 			return ret.ExportBindings[i].Symbol < ret.ExportBindings[j].Symbol
 		}
 		return ret.ExportBindings[i].Function < ret.ExportBindings[j].Function
+	})
+	sort.Slice(ret.ExportIngresses, func(i, j int) bool {
+		if ret.ExportIngresses[i].Symbol != ret.ExportIngresses[j].Symbol {
+			return ret.ExportIngresses[i].Symbol < ret.ExportIngresses[j].Symbol
+		}
+		return ret.ExportIngresses[i].Function < ret.ExportIngresses[j].Function
 	})
 	return ret, nil
 }
@@ -604,6 +715,7 @@ func ParseLibraryEffectSummaryRecords(data []byte) ([]LibraryEffectSummary, erro
 	foreignFunctions := make(map[FunctionID]string)
 	foreignIdentities := make(map[string]string)
 	exportSymbols := make(map[string]string)
+	ingressSymbols := make(map[string]string)
 	for offset := 0; offset < len(data); {
 		if len(data)-offset < libraryEffectSummaryRecordHeaderSize {
 			return nil, fmt.Errorf("coro: truncated library effect summary record at offset %d", offset)
@@ -673,6 +785,15 @@ func ParseLibraryEffectSummaryRecords(data []byte) ([]LibraryEffectSummary, erro
 			}
 			exportSymbols[binding.Symbol] = summary.Package
 		}
+		for _, ingress := range summary.ExportIngresses {
+			if previous, duplicate := ingressSymbols[ingress.Symbol]; duplicate {
+				return nil, fmt.Errorf(
+					"coro: library export ingress symbol %q appears in packages %q and %q",
+					ingress.Symbol, previous, summary.Package,
+				)
+			}
+			ingressSymbols[ingress.Symbol] = summary.Package
+		}
 		summaries = append(summaries, summary)
 		offset = end
 	}
@@ -725,6 +846,7 @@ type LibraryEffectIndex struct {
 	foreignFunctions  map[FunctionID]LibraryEffectForeignCallable
 	foreignIdentities map[string]LibraryEffectForeignCallable
 	exportSymbols     map[string]LibraryEffectExportBinding
+	ingressSymbols    map[string]LibraryEffectExportIngress
 }
 
 func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEffectMetadata) (*LibraryEffectIndex, error) {
@@ -733,6 +855,7 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 		foreignFunctions:  make(map[FunctionID]LibraryEffectForeignCallable),
 		foreignIdentities: make(map[string]LibraryEffectForeignCallable),
 		exportSymbols:     make(map[string]LibraryEffectExportBinding),
+		ingressSymbols:    make(map[string]LibraryEffectExportIngress),
 	}
 	for summaryIndex, summary := range summaries {
 		canonical, err := summary.canonical()
@@ -763,6 +886,15 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 				return nil, fmt.Errorf("coro: duplicate imported library export symbol %q", binding.Symbol)
 			}
 			index.exportSymbols[binding.Symbol] = binding
+		}
+		for _, ingress := range canonical.ExportIngresses {
+			if _, duplicate := index.ingressSymbols[ingress.Symbol]; duplicate {
+				return nil, fmt.Errorf(
+					"coro: duplicate imported library export ingress symbol %q",
+					ingress.Symbol,
+				)
+			}
+			index.ingressSymbols[ingress.Symbol] = ingress
 		}
 	}
 	return index, nil
@@ -805,4 +937,17 @@ func (index *LibraryEffectIndex) LookupExport(symbol string) (LibraryEffectExpor
 	}
 	binding, ok := index.exportSymbols[symbol]
 	return binding, ok
+}
+
+// LookupExportIngress returns the exact versioned adapter capability for one
+// external C symbol. Absence means that a declarative export binding does not
+// authorize managed ingress lowering.
+func (index *LibraryEffectIndex) LookupExportIngress(
+	symbol string,
+) (LibraryEffectExportIngress, bool) {
+	if index == nil {
+		return LibraryEffectExportIngress{}, false
+	}
+	ingress, ok := index.ingressSymbols[symbol]
+	return ingress, ok
 }

@@ -2172,6 +2172,18 @@ func buildRequiredCoroRuntimeFixtureSource(
 	validateRuntimePlan bool,
 ) requiredCoroRuntimeFixture {
 	t.Helper()
+	return buildRequiredCoroRuntimeFixtureSourceOptions(
+		t, body, validateRuntimePlan, false,
+	)
+}
+
+func buildRequiredCoroRuntimeFixtureSourceOptions(
+	t *testing.T,
+	body string,
+	validateRuntimePlan bool,
+	completeRuntimeABI bool,
+) requiredCoroRuntimeFixture {
+	t.Helper()
 	source := `package runtime
 import "unsafe"
 func __llgo_coro_program_begin_v1() { install() }
@@ -2219,12 +2231,12 @@ func __llgo_coro_program_main_return_v1() {}
 	prog := llssa.NewProgram(nil)
 	t.Cleanup(prog.Dispose)
 	cl.ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files)
-	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+	emission, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA:            ssaPkg,
 		Files:          files,
 		Identity:       llssa.PkgRuntime,
 		RawDataSymbols: cl.CoroRawDataSymbolProfile{Complete: true},
-	}})
+	}}, cl.EmissionUniverseOptions{CompleteRuntimeABI: completeRuntimeABI})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3289,6 +3301,137 @@ func TestCoroEntryResolutionBuildsPreparedRuntimePackages(t *testing.T) {
 				t.Fatalf("shouldBuildRuntimePackages = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestMergeCoroRequiredRootsPreservesOrthogonalEntryRoles(t *testing.T) {
+	pkg, _ := buildCoroPlanTestPackage(t, "example.com/rootroles", `package rootroles
+func combined() {}
+func emissionRaw() {}
+`, nil)
+	combined := pkg.Func("combined")
+	emissionRaw := pkg.Func("emissionRaw")
+	certificate := strings.Repeat("a", 64)
+	merged, err := mergeCoroRequiredRoots(coro.Roots{
+		{Function: combined, ManagedDemand: coro.AsyncDemand, EmissionEntry: true},
+		{
+			Function: combined, ManagedDemand: coro.AsyncDemand,
+			IngressEntry: true, IngressCertificate: certificate,
+		},
+		{Function: combined, ManagedDemand: coro.AsyncDemand},
+		{Function: emissionRaw, RawPlainDemand: true},
+		{Function: emissionRaw, ManagedDemand: coro.AsyncDemand, EmissionEntry: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 2 {
+		t.Fatalf("merged roots = %+v, want two canonical functions", merged)
+	}
+	for _, root := range merged {
+		switch root.Function {
+		case combined:
+			if !root.ScheduledEntry || !root.EmissionEntry || !root.IngressEntry ||
+				root.IngressCertificate != certificate || root.RawPlainDemand {
+				t.Fatalf("combined root roles = %+v", root)
+			}
+		case emissionRaw:
+			if root.ScheduledEntry || !root.EmissionEntry || root.IngressEntry ||
+				!root.RawPlainDemand || root.ManagedDemand != coro.AsyncDemand {
+				t.Fatalf("emission/raw root roles = %+v", root)
+			}
+		default:
+			t.Fatalf("unexpected merged root %+v", root)
+		}
+	}
+	_, err = mergeCoroRequiredRoots(coro.Roots{
+		{
+			Function: combined, ManagedDemand: coro.AsyncDemand,
+			IngressEntry: true, IngressCertificate: certificate,
+		},
+		{
+			Function: combined, ManagedDemand: coro.AsyncDemand,
+			IngressEntry: true, IngressCertificate: strings.Repeat("b", 64),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicting ingress certificates") {
+		t.Fatalf("conflicting ingress merge error = %v", err)
+	}
+}
+
+func TestRequiredCoroRawABIEntryRootsPreservesCompilerOwnedExports(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixtureSourceOptions(
+		t, requiredCoroPhysicalRuntimeFixture+`
+//export user_export_v1
+func user_export_v1(value int32) int32 { return value + 1 }
+
+//export compiler_export_v1
+func compiler_export_v1(value int32) int32 { return value + 2 }
+
+func install() {}
+`, true, true)
+	emission := fixture.ctx.coroEmission
+	userExport := fixture.pkg.Func("user_export_v1")
+	compilerExport := fixture.pkg.Func("compiler_export_v1")
+	fixture.ctx.buildConf = &Config{Goos: "darwin", Goarch: "arm64"}
+	application, _ := buildCoroPlanTestPackage(t, "example.com/exportingress", `package exportingress
+//export application_export_v1
+func application_export_v1(value int32) int32 { return value + 1 }
+`, nil)
+	applicationExport := application.Func("application_export_v1")
+	if !coroExportIngressTargetAllowed(
+		fixture.ctx.buildConf, true, applicationExport, false,
+	) {
+		t.Fatal("native application export was excluded from managed ingress")
+	}
+	for name, allowed := range map[string]bool{
+		"raw host":           coroExportIngressTargetAllowed(fixture.ctx.buildConf, true, applicationExport, true),
+		"incomplete runtime": coroExportIngressTargetAllowed(fixture.ctx.buildConf, false, applicationExport, false),
+		"runtime package":    coroExportIngressTargetAllowed(fixture.ctx.buildConf, true, userExport, false),
+		"unsupported target": coroExportIngressTargetAllowed(&Config{Goos: "wasip1", Goarch: "wasm"}, true, applicationExport, false),
+	} {
+		if allowed {
+			t.Fatalf("%s unexpectedly enabled managed export ingress", name)
+		}
+	}
+	certificate, certified, certificateErr := emission.CoroExportIngressCertificate(userExport)
+	if certificateErr != nil || !certified || certificate == "" ||
+		!emission.CompleteRuntimeABI() ||
+		!fixture.ctx.buildConf.coroTargetCapabilities().NativeFleet() {
+		t.Fatalf(
+			"export ingress preconditions = certificate:%q/%t/%v complete:%t capabilities:%v",
+			certificate, certified, certificateErr, emission.CompleteRuntimeABI(),
+			fixture.ctx.buildConf.coroTargetCapabilities(),
+		)
+	}
+	roots, requiredPlain, err := requiredCoroRawABIEntryRoots(
+		fixture.ctx, map[*ssa.Function]struct{}{compilerExport: {}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 2 || len(requiredPlain) != 2 {
+		t.Fatalf("raw ABI roots = %+v, required plain = %+v", roots, requiredPlain)
+	}
+	for _, root := range roots {
+		switch root.Function {
+		case userExport:
+			if root.IngressEntry || !root.RawPlainDemand || root.ManagedDemand != coro.NoDemand {
+				t.Fatalf("compiler runtime export root = %+v", root)
+			}
+			if _, raw := requiredPlain[userExport]; !raw {
+				t.Fatal("compiler runtime export left the raw/plain closure")
+			}
+		case compilerExport:
+			if root.IngressEntry || !root.RawPlainDemand || root.ManagedDemand != coro.NoDemand {
+				t.Fatalf("compiler-owned raw host export root = %+v", root)
+			}
+			if _, raw := requiredPlain[compilerExport]; !raw {
+				t.Fatal("compiler-owned raw host export left the raw/plain closure")
+			}
+		default:
+			t.Fatalf("unexpected raw ABI root %+v", root)
+		}
 	}
 }
 

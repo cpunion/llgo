@@ -27,6 +27,8 @@ import (
 
 const coroPrimarySuffix = "$coro"
 
+const coroIngressManagedSuffix = "$managed"
+
 // plannedFunctionSymbol is the single symbol selected for an SSA function.
 // Emission selects whether this compilation materializes a body/declaration;
 // FuncRep only describes escaped function values and never authorizes a
@@ -198,6 +200,13 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 		entry.name += coroPrimarySuffix
 	} else if plan.Emission == coro.EmitOutcomePlain {
 		entry.name += coroOutcomePlainPrimarySuffix
+	} else if plan.Emission == coro.EmitPlain {
+		if _, ingress := whole.ForeignIngressRoot(fn); ingress {
+			// The exact base symbol belongs to the generated C ABI adapter. A
+			// non-suspending Go primary remains one plain body under a private,
+			// deterministic spelling; no coroutine body or raw twin is created.
+			entry.name += coroIngressManagedSuffix
+		}
 	}
 	return entry, nil
 }
@@ -639,6 +648,10 @@ func (c *Compilation) preflightCoroPlan() error {
 			return
 		}
 		if err := c.validateCoroLibraryEffects(); err != nil {
+			c.coroPreflightErr = err
+			return
+		}
+		if err := validateCoroExportIngressRoots(plan, universe, c.CoroTargetCapabilities); err != nil {
 			c.coroPreflightErr = err
 			return
 		}

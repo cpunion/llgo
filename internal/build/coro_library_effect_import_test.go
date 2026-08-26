@@ -93,14 +93,22 @@ func TestLoadCoroLibraryEffectIndexFromImportCfg(t *testing.T) {
 			FuncRep:       coro.DirectPlain,
 			Primary:       coro.PrimaryPlain,
 			ManagedEntry:  coro.ManagedEntryPlain,
-			PrimarySymbol: "example/library.F",
+			PrimarySymbol: "example/library.F$managed",
+			ExportIngress: true,
 		}},
 		ExportBindings: []coro.LibraryEffectExportBinding{{
 			Symbol:               "library_F",
 			ABIHash:              strings.Repeat("b", 64),
 			Function:             functionID,
 			ManagedPrimary:       coro.PrimaryPlain,
-			ManagedPrimarySymbol: "example/library.F",
+			ManagedPrimarySymbol: "example/library.F$managed",
+		}},
+		ExportIngresses: []coro.LibraryEffectExportIngress{{
+			Symbol:      "library_F",
+			ABIHash:     strings.Repeat("b", 64),
+			Function:    functionID,
+			AdapterABI:  coro.LibraryEffectExportIngressABIV1,
+			Certificate: strings.Repeat("c", 64),
 		}},
 	}
 	record, err := summary.MarshalRecord()
@@ -128,12 +136,17 @@ func TestLoadCoroLibraryEffectIndexFromImportCfg(t *testing.T) {
 		t.Fatalf("consumer metadata = %+v, want %+v", consumer, metadata)
 	}
 	fact, found := index.Lookup(functionID)
-	if !found || fact.PrimarySymbol != "example/library.F" {
+	if !found || fact.PrimarySymbol != "example/library.F$managed" || !fact.ExportIngress {
 		t.Fatalf("imported fact = %+v, found=%t", fact, found)
 	}
 	export, found := index.LookupExport("library_F")
 	if !found || export.Function != functionID {
 		t.Fatalf("imported export = %+v, found=%t", export, found)
+	}
+	ingress, found := index.LookupExportIngress("library_F")
+	if !found || ingress.Function != functionID ||
+		ingress.AdapterABI != coro.LibraryEffectExportIngressABIV1 {
+		t.Fatalf("imported export ingress = %+v, found=%t", ingress, found)
 	}
 
 	plain := filepath.Join(t.TempDir(), "export-data")

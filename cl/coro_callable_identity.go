@@ -163,7 +163,7 @@ func (u *EmissionUniverse) freezeCoroCallableIdentityCertificates() error {
 		}
 		u.callableIdentities[canonical] = certificate
 	}
-	bindings, err := freezeCoroLocalExportBindings(coroLocalExportBindingFreezeInput{
+	bindings, ingressTargets, err := freezeCoroLocalExportBindings(coroLocalExportBindingFreezeInput{
 		functions:             u.functions,
 		callableIdentities:    u.callableIdentities,
 		linkIdentities:        u.linkIdentities,
@@ -178,7 +178,7 @@ func (u *EmissionUniverse) freezeCoroCallableIdentityCertificates() error {
 		return err
 	}
 	u.localExportBindings = bindings
-	return nil
+	return u.freezeCoroExportIngressCertificates(ingressTargets)
 }
 
 func derivedCoroCallableTypedABI(signature string) string {

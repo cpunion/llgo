@@ -330,6 +330,7 @@ type EmissionUniverse struct {
 	callableContracts       map[*ssa.Function]CoroCallableContractCertificate
 	callableDefaults        map[*ssa.Function]none
 	localExportBindings     map[*ssa.Function]coroLocalExportBinding
+	exportIngressBindings   map[*ssa.Function]coroExportIngressCertificate
 	noPreempt               map[*ssa.Function]string
 	noUnwind                map[*ssa.Function]string
 	rawCritical             map[*ssa.Function]string
@@ -865,6 +866,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		callableContracts:       make(map[*ssa.Function]CoroCallableContractCertificate),
 		callableDefaults:        make(map[*ssa.Function]none),
 		localExportBindings:     make(map[*ssa.Function]coroLocalExportBinding),
+		exportIngressBindings:   make(map[*ssa.Function]coroExportIngressCertificate),
 		noPreempt:               make(map[*ssa.Function]string),
 		noUnwind:                make(map[*ssa.Function]string),
 		rawCritical:             make(map[*ssa.Function]string),
