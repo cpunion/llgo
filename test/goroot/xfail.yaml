@@ -1253,10 +1253,6 @@ xfails:
     reason: llgo parser uses a different malformed-package-clause diagnostic
   - version: go1.26
     directive: errorcheck
-    case: fixedbugs/issue20789.go
-    reason: llgo parser does not emit the expected malformed-name diagnostic
-  - version: go1.26
-    directive: errorcheck
     case: fixedbugs/bug050.go
     reason: llgo parser emits an additional malformed-declaration diagnostic
   - version: go1.26
