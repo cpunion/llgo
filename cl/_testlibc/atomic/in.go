@@ -14,7 +14,6 @@ func main() {
 	// CHECK: store atomic i64 100, ptr [[ADDR:%[0-9]+]] seq_cst, align 8
 	atomic.Store(&v, 100)
 	// CHECK: load atomic i64, ptr [[ADDR]] seq_cst, align 8
-	// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1
 	c.Printf(c.Str("store: %ld\n"), atomic.Load(&v))
 	// CHECK: atomicrmw add ptr [[ADDR]], i64 1 seq_cst, align 8
 	ret := atomic.Add(&v, 1)
@@ -30,5 +29,8 @@ func main() {
 
 	// CHECK: atomicrmw sub ptr [[ADDR]], i64 1 seq_cst, align 8
 	ret = atomic.Sub(&v, 1)
+	// The worker call can be emitted in a later basic block than the atomic
+	// operations even though it executes between them.
+	// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1
 	c.Printf(c.Str("ret: %ld, v: %ld\n"), ret, v)
 }
