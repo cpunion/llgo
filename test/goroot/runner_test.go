@@ -378,7 +378,8 @@ func TestGoRootRunCases(t *testing.T) {
 func writeStdlibImportCfg(t *testing.T, goCmd string) string {
 	t.Helper()
 	cmd := exec.Command(goCmd, "list", "-export", "-f", "{{if .Export}}packagefile {{.ImportPath}}={{.Export}}{{end}}", "std")
-	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=")
+	cmd.Dir = t.TempDir()
+	cmd.Env = baselineGoEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("list stdlib exports with %s: %v\n%s", goCmd, err, output)
@@ -406,7 +407,7 @@ func repoRoot(t *testing.T) string {
 func loadToolchainEnv(t *testing.T, goCmd string) toolchainEnv {
 	t.Helper()
 	cmd := exec.Command(goCmd, "env", "-json", "GOOS", "GOARCH", "GOVERSION", "CGO_ENABLED")
-	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=")
+	cmd.Env = baselineGoEnv()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -786,6 +787,8 @@ func runnerEnv(repoRoot, goroot, gopath string, extra []string) []string {
 			env[i] = "GOENV=off"
 		case strings.HasPrefix(item, "GOFLAGS="):
 			env[i] = "GOFLAGS="
+		case strings.HasPrefix(item, "GOTOOLCHAIN="):
+			env[i] = "GOTOOLCHAIN=local"
 		case strings.HasPrefix(item, "LLGO_ROOT="):
 			env[i] = "LLGO_ROOT=" + repoRoot
 		case strings.HasPrefix(item, "GOPATH="):
@@ -803,6 +806,7 @@ func runnerEnv(repoRoot, goroot, gopath string, extra []string) []string {
 	env = appendIfMissing(env, "GOROOT="+goroot)
 	env = appendIfMissing(env, "GOENV=off")
 	env = appendIfMissing(env, "GOFLAGS=")
+	env = appendIfMissing(env, "GOTOOLCHAIN=local")
 	env = appendIfMissing(env, "LLGO_ROOT="+repoRoot)
 	env = appendIfMissing(env, "GOPATH="+gopath)
 	env = appendIfMissing(env, "GO111MODULE=off")
@@ -810,6 +814,13 @@ func runnerEnv(repoRoot, goroot, gopath string, extra []string) []string {
 		env = upsertEnv(env, kv)
 	}
 	return env
+}
+
+func baselineGoEnv() []string {
+	env := append([]string{}, os.Environ()...)
+	env = upsertEnv(env, "GOENV=off")
+	env = upsertEnv(env, "GOFLAGS=")
+	return upsertEnv(env, "GOTOOLCHAIN=local")
 }
 
 func appendIfMissing(env []string, kv string) []string {
