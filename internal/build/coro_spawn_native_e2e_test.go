@@ -393,7 +393,7 @@ func buildCoroSpawnNativeE2EUserSource(
 	if targetCapabilities.NativeFleet() {
 		for _, function := range universe.Functions() {
 			certificate, certified, certificateErr :=
-				universe.CoroExportIngressCertificate(function)
+				universe.CoroPlanningMetadata().ExportIngressCertificate(function)
 			if certificateErr != nil {
 				t.Fatal(certificateErr)
 			}

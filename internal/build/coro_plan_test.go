@@ -3304,6 +3304,59 @@ func TestCoroEntryResolutionBuildsPreparedRuntimePackages(t *testing.T) {
 	}
 }
 
+func TestRequiredCoroGenerationEntryRootsUseFrozenManagedEligibility(t *testing.T) {
+	const pkgPath = "example.com/cgogeneration"
+	ssaPkg, files := buildCoroPlanTestPackage(t, pkgPath, `package cgogeneration
+import "unsafe"
+func ordinary() {}
+func _Cfunc_demo() {}
+func _Cmacro_demo() {}
+//go:cgo_unsafe_args
+func _cgo_cmalloc(uint64) unsafe.Pointer { return nil }
+func _C2func_demo() (int, error) { return 0, nil }
+`, nil)
+	prog := llssa.NewProgram(nil)
+	t.Cleanup(prog.Dispose)
+	if err := cl.ParsePkgSyntax(prog, ssaPkg.Prog.Fset, ssaPkg.Pkg, files); err != nil {
+		t.Fatal(err)
+	}
+	emission, err := cl.PrepareEmissionUniverse(
+		prog, nil, []cl.EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested := &packages.Package{ID: pkgPath, PkgPath: pkgPath}
+	built := &aPackage{Package: requested, SSA: ssaPkg}
+	ctx := &context{
+		mode: ModeGen, buildConf: NewDefaultConf(ModeGen),
+		initial:      []*packages.Package{requested},
+		pkgs:         map[*packages.Package]Package{requested: built},
+		pkgByID:      map[string]Package{pkgPath: built},
+		coroEmission: emission,
+	}
+	roots, err := requiredCoroGenerationEntryRoots(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]coro.Root, len(roots))
+	for _, root := range roots {
+		got[root.Function.Name()] = root
+	}
+	for _, name := range []string{"init", "ordinary", "_C2func_demo"} {
+		root, present := got[name]
+		if !present || !root.EmissionEntry || root.IngressEntry ||
+			root.RawPlainDemand || root.Demand != coro.AsyncDemand {
+			t.Errorf("managed generation root %s = %+v, present=%t", name, root, present)
+		}
+	}
+	for _, name := range []string{"_Cfunc_demo", "_Cmacro_demo", "_cgo_cmalloc"} {
+		if root, present := got[name]; present {
+			t.Errorf("raw cgo adapter %s acquired managed generation root %+v", name, root)
+		}
+	}
+}
+
 func TestMergeCoroRequiredRootsPreservesOrthogonalEntryRoles(t *testing.T) {
 	pkg, _ := buildCoroPlanTestPackage(t, "example.com/rootroles", `package rootroles
 func combined() {}
@@ -3394,7 +3447,7 @@ func application_export_v1(value int32) int32 { return value + 1 }
 			t.Fatalf("%s unexpectedly enabled managed export ingress", name)
 		}
 	}
-	certificate, certified, certificateErr := emission.CoroExportIngressCertificate(userExport)
+	certificate, certified, certificateErr := emission.CoroPlanningMetadata().ExportIngressCertificate(userExport)
 	if certificateErr != nil || !certified || certificate == "" ||
 		!emission.CompleteRuntimeABI() ||
 		!fixture.ctx.buildConf.coroTargetCapabilities().NativeFleet() {

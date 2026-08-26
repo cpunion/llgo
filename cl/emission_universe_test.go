@@ -1813,6 +1813,42 @@ func Closure() func() { return func() {} }
 	}
 }
 
+func TestEmissionUniverseFreezesManagedGenerationEntryEligibility(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/generationentry", `package generationentry
+func ordinary() {}
+func _Cfunc_demo() {}
+func _Cmacro_demo() {}
+//go:cgo_unsafe_args
+func _cgo_cmalloc(uint64) uintptr { return 0 }
+func _C2func_demo() (int, error) { return 0, nil }
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{
+		"ordinary":     true,
+		"_C2func_demo": true,
+		"_Cfunc_demo":  false,
+		"_Cmacro_demo": false,
+		"_cgo_cmalloc": false,
+	} {
+		got, err := universe.CoroPlanningMetadata().ManagedGenerationEntry(pkg.ssa.Func(name))
+		if err != nil {
+			t.Fatalf("ManagedGenerationEntry(%s): %v", name, err)
+		}
+		if got != want {
+			t.Errorf("ManagedGenerationEntry(%s) = %t, want %t", name, got, want)
+		}
+	}
+}
+
 func TestEmissionUniverseIntrinsicWrapperNamesIncludeCanonicalCallee(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	one := testProg.addPackage(t, "example.com/emission/intrinsicnameone", `package intrinsicnameone

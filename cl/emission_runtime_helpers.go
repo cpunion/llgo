@@ -206,6 +206,13 @@ type coroFunctionPreamblePlan struct {
 	// declaration/intrinsic stub whose SSA body exists only for policy and type
 	// analysis. Only the former may acquire a physical outcome-plain entry.
 	emitsGoBody bool
+	// managedGenerationEntry distinguishes an independently callable managed
+	// Go definition from one compiler-generated raw/native-stack adapter. Both
+	// have frontend-emitted Go bodies, but a generated cgo worker adapter enters
+	// the plan only through its exact ProgramIR worker certificate and raw
+	// closure; giving it an additional ModeGen async root would manufacture an
+	// unsupported managed primary.
+	managedGenerationEntry bool
 }
 
 func cloneCoroFunctionPreamblePlan(plan coroFunctionPreamblePlan) coroFunctionPreamblePlan {
@@ -222,7 +229,8 @@ func sameCoroFunctionPreamblePlan(first, second coroFunctionPreamblePlan) bool {
 		first.localContextEntry == second.localContextEntry &&
 		first.logicalCallerEntry == second.logicalCallerEntry &&
 		first.recoverFrameBinding == second.recoverFrameBinding &&
-		first.emitsGoBody == second.emitsGoBody
+		first.emitsGoBody == second.emitsGoBody &&
+		first.managedGenerationEntry == second.managedGenerationEntry
 }
 
 func (plan coroFunctionPreamblePlan) validate() error {
@@ -261,6 +269,9 @@ func (plan coroFunctionPreamblePlan) validate() error {
 	if plan.localContextEntry !=
 		slices.Equal(plan.plainRuntimeHelpers, []string{"EnterLocalContext"}) {
 		return fmt.Errorf("native local-context entry requires exactly plain EnterLocalContext")
+	}
+	if plan.managedGenerationEntry && !plan.emitsGoBody {
+		return fmt.Errorf("managed generation entry requires one frontend-emitted Go body")
 	}
 	return nil
 }
@@ -353,7 +364,11 @@ func (builder coroProgramIRBuilder) materializeFunctionPreamble(
 	if u == nil || u.coroProgramIR == nil || ctx == nil || ownerFn == nil || ownerPkg == nil {
 		return fmt.Errorf("prepare emission universe: function preamble requires one exact program IR, builder, owner, and function")
 	}
-	plan := coroFunctionPreamblePlan{emitsGoBody: ftype == goFunc}
+	plan := coroFunctionPreamblePlan{
+		emitsGoBody: ftype == goFunc,
+		managedGenerationEntry: ftype == goFunc &&
+			!isGeneratedCgoWorkerAdapterName(ownerFn.Name()),
+	}
 	if ftype == goFunc && ctx.functionUsesRecover(ownerFn) {
 		plan.recoverFrameBinding = true
 		plan.managedRuntimeHelpers = append(plan.managedRuntimeHelpers, "BindRecoverFrame")

@@ -56,7 +56,7 @@ func export_suspend_v1(value int32) int32 { return value + 2 }
 	roots := make(coro.Roots, 0, 2)
 	for _, function := range []*ssa.Function{plain, suspending} {
 		certificate, certified, certificateErr :=
-			universe.CoroExportIngressCertificate(function)
+			universe.CoroPlanningMetadata().ExportIngressCertificate(function)
 		if certificateErr != nil || !certified || certificate == "" {
 			prog.Dispose()
 			t.Fatalf(
@@ -313,7 +313,7 @@ func duplicate_export_v1(value int32) int32 { return value + 2 }
 	}
 	for _, pkg := range []emissionTestPackage{first, second} {
 		function := pkg.ssa.Func("duplicate_export_v1")
-		certificate, certified, err := universe.CoroExportIngressCertificate(function)
+		certificate, certified, err := universe.CoroPlanningMetadata().ExportIngressCertificate(function)
 		if err != nil || certified || certificate != "" {
 			t.Fatalf(
 				"ambiguous export target %q certificate = %q, %t, %v; want absent",

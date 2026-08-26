@@ -2188,7 +2188,14 @@ func buildCoroNativeFleetE2EBoundaryObject(t *testing.T, clang, temp string) str
 	t.Helper()
 	source := filepath.Join("testdata", "coro_native_fleet_e2e.c")
 	object := filepath.Join(temp, "coro-native-fleet-e2e-boundary.o")
-	if output, err := exec.Command(clang, "-std=c11", "-O2", "-pthread", "-c", source, "-o", object).CombinedOutput(); err != nil {
+	// The shared archive contains an optional export-ingress bridge. Keep each
+	// C boundary independently collectible so ordinary fleet programs do not
+	// inherit that bridge's unresolved application symbol. The export-ingress
+	// E2E references the bridge and therefore still proves exact symbol binding.
+	if output, err := exec.Command(
+		clang, "-std=c11", "-O2", "-ffunction-sections", "-pthread",
+		"-c", source, "-o", object,
+	).CombinedOutput(); err != nil {
 		t.Fatalf("compile native coroutine fleet E2E boundary: %v\n%s", err, output)
 	}
 	return object
