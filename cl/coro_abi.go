@@ -2660,9 +2660,9 @@ func validateCoroExplicitStatusPanic(
 	if !emissionDirectIfaceType(source) {
 		return ""
 	}
-	if constant, ok := boxed.X.(*ssa.Const); ok && constant.Value == nil {
-		// A typed nil pointer still produces a non-nil interface type word and
-		// carries no frame-owned storage in its data word.
+	if coroExplicitStatusZeroDirectPanicPayload(boxed.X) {
+		// A typed nil pointer or an exactly zero direct wrapper still produces a
+		// non-nil interface type word, but carries no referent in its data word.
 		return ""
 	}
 	switch types.Unalias(source).Underlying().(type) {
@@ -2690,6 +2690,101 @@ func validateCoroExplicitStatusPanic(
 		// certificate before the child may be destroyed.
 		return "explicit-status direct panic payload has no post-destroy lifetime proof"
 	}
+}
+
+// coroExplicitStatusZeroDirectPanicPayload recognizes only a direct interface
+// data word which is exactly zero. x/tools may materialize the zero value of an
+// instantiated one-field wrapper through a local cell instead of forwarding a
+// Const to MakeInterface. Accept that form only when one whole-cell zero store
+// dominates the load and the complete address graph is read-only. This proves
+// the published word has no child-frame referent without granting arbitrary
+// direct wrappers a post-destroy lifetime.
+func coroExplicitStatusZeroDirectPanicPayload(value ssa.Value) bool {
+	if constant, ok := value.(*ssa.Const); ok {
+		return constant.Value == nil
+	}
+	load, ok := value.(*ssa.UnOp)
+	if !ok || load.Op != token.MUL || load.X == nil {
+		return false
+	}
+	allocation, ok := load.X.(*ssa.Alloc)
+	if !ok || allocation.Parent() != load.Parent() {
+		return false
+	}
+	initialized := false
+	refs := allocation.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, reference := range *refs {
+		store, ok := reference.(*ssa.Store)
+		if !ok || store.Addr != allocation {
+			continue
+		}
+		constant, ok := store.Val.(*ssa.Const)
+		if !ok || constant.Value != nil {
+			return false
+		}
+		initialized = initialized || coroExplicitStatusInstructionDominates(store, load)
+	}
+	return initialized && coroExplicitStatusReadOnlyZeroAddress(allocation, make(map[ssa.Value]bool))
+}
+
+func coroExplicitStatusInstructionDominates(definition, use ssa.Instruction) bool {
+	if definition == nil || use == nil || definition.Block() == nil || use.Block() == nil {
+		return false
+	}
+	if definition.Block() != use.Block() {
+		return definition.Block().Dominates(use.Block())
+	}
+	for _, instruction := range definition.Block().Instrs {
+		switch instruction {
+		case definition:
+			return true
+		case use:
+			return false
+		}
+	}
+	return false
+}
+
+func coroExplicitStatusReadOnlyZeroAddress(address ssa.Value, visiting map[ssa.Value]bool) bool {
+	if address == nil || visiting[address] {
+		return false
+	}
+	visiting[address] = true
+	defer delete(visiting, address)
+	refs := address.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, reference := range *refs {
+		switch reference := reference.(type) {
+		case *ssa.DebugRef:
+			continue
+		case *ssa.Store:
+			constant, ok := reference.Val.(*ssa.Const)
+			if reference.Addr != address || !ok || constant.Value != nil {
+				return false
+			}
+		case *ssa.UnOp:
+			if reference.Op != token.MUL || reference.X != address {
+				return false
+			}
+		case *ssa.FieldAddr:
+			if reference.X != address || !coroExplicitStatusReadOnlyZeroAddress(reference, visiting) {
+				return false
+			}
+		case *ssa.IndexAddr:
+			if reference.X != address || !coroFrameRetentionExactZeroIndex(reference.Index) ||
+				!coroExplicitStatusReadOnlyZeroAddress(reference, visiting) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // validateCoroExplicitStatusPanicInterfaceValue accepts an already-built
