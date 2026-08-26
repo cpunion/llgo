@@ -658,7 +658,7 @@ func isPredOp(op token.Token) bool {
 // AND OR XOR SHL SHR AND_NOT   & | ^ << >> &^
 // EQL NEQ LSS LEQ GTR GEQ      == != < <= > >=
 func (b Builder) BinOp(op token.Token, x, y Expr) Expr {
-	return b.binOp(op, x, y, false)
+	return b.binOp(op, x, y, false, false)
 }
 
 // BinOpWithNonZeroDivisor emits an integer division or remainder for which the
@@ -666,10 +666,24 @@ func (b Builder) BinOp(op token.Token, x, y Expr) Expr {
 // the ordinary Go signed-overflow lowering, but omits the otherwise redundant
 // AssertDivideByZero edge. Calls with any other operator retain BinOp semantics.
 func (b Builder) BinOpWithNonZeroDivisor(op token.Token, x, y Expr) Expr {
-	return b.binOp(op, x, y, true)
+	return b.binOp(op, x, y, true, false)
 }
 
-func (b Builder) binOp(op token.Token, x, y Expr, divisorProvenNonZero bool) Expr {
+// BinOpWithNonNegativeShiftCount emits a shift for which the caller has
+// already proved that y is non-negative at this instruction. It keeps the
+// ordinary Go oversized-count lowering, but omits the otherwise redundant
+// AssertNegativeShift edge. Calls with any other operator retain BinOp
+// semantics.
+func (b Builder) BinOpWithNonNegativeShiftCount(op token.Token, x, y Expr) Expr {
+	return b.binOp(op, x, y, false, true)
+}
+
+func (b Builder) binOp(
+	op token.Token,
+	x, y Expr,
+	divisorProvenNonZero bool,
+	shiftCountProvenNonNegative bool,
+) Expr {
 	dbgInstrf("BinOp %d, %v, %v\n", op, x.impl, y.impl)
 	switch {
 	case isMathOp(op): // op: + - * / %
@@ -785,7 +799,7 @@ func (b Builder) binOp(op token.Token, x, y Expr, divisorProvenNonZero bool) Exp
 		case token.AND_NOT:
 			return Expr{llvm.CreateAnd(b.impl, x.impl, llvm.CreateNot(b.impl, y.impl)), x.Type}
 		case token.SHL, token.SHR:
-			if needsNegativeCheck(y) {
+			if !shiftCountProvenNonNegative && needsNegativeCheck(y) {
 				zero := llvm.ConstInt(y.ll, 0, false)
 				check := Expr{llvm.CreateICmp(b.impl, llvm.IntSLT, y.impl, zero), b.Prog.Bool()}
 				b.InlineCall(b.Pkg.rtFunc("AssertNegativeShift"), check)

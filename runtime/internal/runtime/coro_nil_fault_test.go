@@ -294,6 +294,7 @@ func TestCoroFaultPayloadV1KindsAreStableDistinctAndAllocationFree(t *testing.T)
 		{name: "unsafe-string-nil", kind: coroFaultUnsafeStringNilV1, value: &coroUnsafeStringNilErrorV1},
 		{name: "slice-convert", kind: coroFaultSliceConvertV1, value: &coroSliceConvertErrorV1},
 		{name: "integer-divide-by-zero", kind: coroFaultIntegerDivideByZeroV1, value: &coroIntegerDivideByZeroErrorV1},
+		{name: "negative-shift", kind: coroFaultNegativeShiftV1, value: &shiftError},
 	}
 	words := make(map[uint32][2]unsafe.Pointer, len(tests))
 	for _, test := range tests {
@@ -319,8 +320,8 @@ func TestCoroFaultPayloadV1KindsAreStableDistinctAndAllocationFree(t *testing.T)
 			runtime.KeepAlive(*test.value)
 		})
 	}
-	for left := uint32(coroFaultNilV1); left <= coroFaultIntegerDivideByZeroV1; left++ {
-		for right := left + 1; right <= coroFaultIntegerDivideByZeroV1; right++ {
+	for left := uint32(coroFaultNilV1); left <= coroFaultNegativeShiftV1; left++ {
+		for right := left + 1; right <= coroFaultNegativeShiftV1; right++ {
 			if words[left] == words[right] {
 				t.Fatalf("fault kinds %d and %d share payload words: (%p, %p)",
 					left, right, words[left][0], words[left][1])
@@ -342,6 +343,9 @@ func TestCoroFaultPayloadV1KindsAreStableDistinctAndAllocationFree(t *testing.T)
 	}
 	if got, want := coroIntegerDivideByZeroErrorV1.Error(), "runtime error: integer divide by zero"; got != want {
 		t.Fatalf("integer divide-by-zero message = %q, want %q", got, want)
+	}
+	if got, want := shiftError.Error(), "runtime error: negative shift amount"; got != want {
+		t.Fatalf("negative-shift message = %q, want %q", got, want)
 	}
 }
 

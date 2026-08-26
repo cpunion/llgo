@@ -2493,13 +2493,14 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 			return a.requireOnlyCompilerElidedRuntimeHelpers(op, "AssertDivideByZero")
 		}
 	case token.SHL, token.SHR:
-		if signedIntegerMayBeNegative(op.Y) {
-			// Builder.BinOp emits exactly one AssertNegativeShift predicate
-			// before the LLVM shift. Under ExplicitStatus that potentially
-			// panicking helper must be a managed outcome child, so a negative
-			// count enters the parent's ordinary panic/cleanup path without
-			// unwinding a native stack through the live coroutine frame.
-			return a.requireFrozenOutcomeRuntimeHelper(op, "AssertNegativeShift")
+		if !ssaIntegerValueProvenNonNegativeAt(op.Y, op) {
+			if !a.allowImplicitNilFault {
+				return "shift by a potentially negative count requires the explicit-status panic ABI"
+			}
+			// The physical recipe emits one target-neutral negative-count fault
+			// edge and lowers the normal edge with that proof. Retain the logical
+			// helper in effect analysis, but do not demand or emit a helper body.
+			return a.requireOnlyCompilerElidedRuntimeHelpers(op, "AssertNegativeShift")
 		}
 	}
 	return a.requireNoRuntimeHelpers(op)

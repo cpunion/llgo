@@ -69,6 +69,8 @@ func TestCoroPhysicalPlanRuntimeHelperElisionIsRecipeOwned(t *testing.T) {
 		{name: "interface nil", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionInterfaceNilCompare}, helper: "EfaceEqual", want: true},
 		{name: "integer divide by zero", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIntegerDivideByZeroGuard}, helper: "AssertDivideByZero", want: true},
 		{name: "integer divide keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIntegerDivideByZeroGuard}, helper: "AssertNegativeShift"},
+		{name: "negative shift", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionNegativeShiftGuard}, helper: "AssertNegativeShift", want: true},
+		{name: "negative shift keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionNegativeShiftGuard}, helper: "AssertDivideByZero"},
 		{name: "frame allocation", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionFrameAllocation}, helper: "AllocZ", want: true},
 		{name: "frame allocation keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionFrameAllocation}, helper: "AllocU"},
 		{name: "borrowed allocation", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionBorrowedAllocation}, helper: "AllocZ", want: true},

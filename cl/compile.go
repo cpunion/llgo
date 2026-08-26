@@ -2285,7 +2285,8 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			break
 		}
 		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary &&
-			physicalInstruction.recipe != coroPhysicalInstructionIntegerDivideByZeroGuard {
+			physicalInstruction.recipe != coroPhysicalInstructionIntegerDivideByZeroGuard &&
+			physicalInstruction.recipe != coroPhysicalInstructionNegativeShiftGuard {
 			panic(fmt.Sprintf("BinOp selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		}
 		if value, ok := foldConstComparison(v); ok {
@@ -2313,8 +2314,16 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			isZero := b.BinOp(token.EQL, y, zero)
 			p.compileCoroFaultConditionGuard(b, isZero, coroFaultIntegerDivideByZeroV1)
 			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
+		} else if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionNegativeShiftGuard {
+			observePhysical(coroPhysicalInstructionNegativeShiftGuard)
+			zero := p.prog.Zero(y.Type)
+			isNegative := b.BinOp(token.LSS, y, zero)
+			p.compileCoroFaultConditionGuard(b, isNegative, coroFaultNegativeShiftV1)
+			ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
 		} else if (v.Op == token.QUO || v.Op == token.REM) && ssaIntegerValueProvenNonZeroAt(v.Y, v) {
 			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
+		} else if (v.Op == token.SHL || v.Op == token.SHR) && ssaIntegerValueProvenNonNegativeAt(v.Y, v) {
+			ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
 		} else {
 			ret = b.BinOp(v.Op, x, y)
 		}

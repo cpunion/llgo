@@ -1686,7 +1686,7 @@ func (u *EmissionUniverse) binOpRuntimeHelpers(ctx *context, op *ssa.BinOp, add 
 				add("AssertDivideByZero")
 			}
 		}
-		if (op.Op == token.SHL || op.Op == token.SHR) && signedIntegerMayBeNegative(op.Y) {
+		if (op.Op == token.SHL || op.Op == token.SHR) && !ssaIntegerValueProvenNonNegativeAt(op.Y, op) {
 			add("AssertNegativeShift")
 		}
 	case *types.Interface:

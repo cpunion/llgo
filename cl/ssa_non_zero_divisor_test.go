@@ -117,6 +117,104 @@ func TestSSAIntegerNonZeroDivisorDominanceProofIsExact(t *testing.T) {
 	}
 }
 
+const ssaDominatingNonNegativeShiftFixture = `package foo
+var Sink uint64
+func GuardedFalse(x uint64, count int) uint64 {
+	if count < 0 { return 0 }
+	return x << count
+}
+func GuardedTrue(x uint64, count int) uint64 {
+	if count >= 0 { return x << count }
+	return 0
+}
+func GuardedPositive(x uint64, count int) uint64 {
+	if count > 0 { return x << count }
+	return 0
+}
+func GuardedNonPositive(x uint64, count int) uint64 {
+	if count <= 0 { return 0 }
+	return x << count
+}
+func GuardedEqualZero(x uint64, count int) uint64 {
+	if count == 0 { return x << count }
+	return 0
+}
+func GuardedNotEqualZero(x uint64, count int) uint64 {
+	if count != 0 { return 0 }
+	return x << count
+}
+func ZeroOnLeftFalse(x uint64, count int) uint64 {
+	if 0 > count { return 0 }
+	return x << count
+}
+func ZeroOnLeftTrue(x uint64, count int) uint64 {
+	if 0 <= count { return x << count }
+	return 0
+}
+func NonDominatingSibling(x uint64, count int, left bool) uint64 {
+	if left {
+		if count >= 0 { Sink = uint64(count) }
+	} else {
+		return x << count
+	}
+	return 0
+}
+func Unguarded(x uint64, count int) uint64 { return x << count }
+func Unsigned(x uint64, count uint) uint64 { return x << count }
+func Constant(x uint64) uint64 { return x << 3 }
+`
+
+func TestSSAIntegerNonNegativeShiftDominanceProofAndCodegenAreExact(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, ssaDominatingNonNegativeShiftFixture)
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "GuardedFalse", want: true},
+		{name: "GuardedTrue", want: true},
+		{name: "GuardedPositive", want: true},
+		{name: "GuardedNonPositive", want: true},
+		{name: "GuardedEqualZero", want: true},
+		{name: "GuardedNotEqualZero", want: true},
+		{name: "ZeroOnLeftFalse", want: true},
+		{name: "ZeroOnLeftTrue", want: true},
+		{name: "NonDominatingSibling", want: false},
+		{name: "Unguarded", want: false},
+		{name: "Unsigned", want: true},
+		{name: "Constant", want: true},
+	}
+	for _, test := range tests {
+		shift := onlySSAIntegerShift(t, ssaPkg.Func(test.name))
+		if got := ssaIntegerValueProvenNonNegativeAt(shift.Y, shift); got != test.want {
+			t.Errorf("%s dominated non-negative shift proof = %t, want %t", test.name, got, test.want)
+		}
+	}
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	pkg, err := NewPackage(prog, ssaPkg, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	universe := &EmissionUniverse{prog: prog}
+	for _, test := range tests {
+		function := ssaPkg.Func(test.name)
+		shift := onlySSAIntegerShift(t, function)
+		ctx := &context{prog: prog, goFn: function, goProg: ssaPkg.Prog, goTyps: ssaPkg.Pkg, goPkg: ssaPkg}
+		wantHelper := !test.want
+		if got := stringSliceContains(universe.loweredRuntimeHelpers(ctx, shift), "AssertNegativeShift"); got != wantHelper {
+			t.Errorf("%s emission negative-shift helper = %t, want %t", test.name, got, wantHelper)
+		}
+		body := pkg.Module().NamedFunction("foo." + test.name).String()
+		if got := strings.Contains(body, "AssertNegativeShift"); got != wantHelper {
+			t.Errorf("%s physical negative-shift helper = %t, want %t:\n%s", test.name, got, wantHelper, body)
+		}
+		if got := strings.Count(body, " shl "); got != 1 {
+			t.Errorf("%s physical shift count = %d, want 1:\n%s", test.name, got, body)
+		}
+	}
+}
+
 func TestSSAFloatDivisionNeedsNoIntegerDivisorProof(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 func Divide(x, divisor float64) float64 { return x / divisor }
@@ -241,6 +339,30 @@ func onlySSAIntegerDivision(t *testing.T, function *ssa.Function) *ssa.BinOp {
 	}
 	if found == nil {
 		t.Fatalf("%s has no integer division", function.Name())
+	}
+	return found
+}
+
+func onlySSAIntegerShift(t *testing.T, function *ssa.Function) *ssa.BinOp {
+	t.Helper()
+	if function == nil {
+		t.Fatal("missing SSA function")
+	}
+	var found *ssa.BinOp
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			operation, ok := instruction.(*ssa.BinOp)
+			if !ok || operation.Op != token.SHL && operation.Op != token.SHR {
+				continue
+			}
+			if found != nil {
+				t.Fatalf("%s has multiple integer shifts", function.Name())
+			}
+			found = operation
+		}
+	}
+	if found == nil {
+		t.Fatalf("%s has no integer shift", function.Name())
 	}
 	return found
 }

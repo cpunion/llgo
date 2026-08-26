@@ -52,6 +52,7 @@ const (
 	coroPhysicalInstructionUnsafeSlice
 	coroPhysicalInstructionInterfaceNilCompare
 	coroPhysicalInstructionIntegerDivideByZeroGuard
+	coroPhysicalInstructionNegativeShiftGuard
 	coroPhysicalInstructionTerminalResultAllocation
 	coroPhysicalInstructionFrameAllocation
 	coroPhysicalInstructionBorrowedAllocation
@@ -95,6 +96,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "interface-nil-compare"
 	case coroPhysicalInstructionIntegerDivideByZeroGuard:
 		return "integer-divide-by-zero-guard"
+	case coroPhysicalInstructionNegativeShiftGuard:
+		return "negative-shift-guard"
 	case coroPhysicalInstructionTerminalResultAllocation:
 		return "terminal-result-allocation"
 	case coroPhysicalInstructionFrameAllocation:
@@ -350,7 +353,8 @@ func (plan coroPhysicalInstructionPlan) mayFault() bool {
 		plan.recipe == coroPhysicalInstructionFieldAddr ||
 		plan.recipe == coroPhysicalInstructionDeref ||
 		plan.recipe == coroPhysicalInstructionBuiltinNilGuard ||
-		plan.recipe == coroPhysicalInstructionIntegerDivideByZeroGuard
+		plan.recipe == coroPhysicalInstructionIntegerDivideByZeroGuard ||
+		plan.recipe == coroPhysicalInstructionNegativeShiftGuard
 }
 
 // elidesRuntimeHelper reports whether this frozen physical recipe replaces one
@@ -426,6 +430,10 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		}
 	case coroPhysicalInstructionIntegerDivideByZeroGuard:
 		if helper == "AssertDivideByZero" {
+			return true
+		}
+	case coroPhysicalInstructionNegativeShiftGuard:
+		if helper == "AssertNegativeShift" {
 			return true
 		}
 	case coroPhysicalInstructionFrameAllocation, coroPhysicalInstructionBorrowedAllocation:
@@ -1568,6 +1576,11 @@ func planCoroPhysicalInstruction(
 			(instruction.Op == token.QUO || instruction.Op == token.REM) &&
 			!ssaIntegerValueProvenNonZeroAt(instruction.Y, instruction) {
 			result.recipe = coroPhysicalInstructionIntegerDivideByZeroGuard
+			break
+		}
+		if explicitPanic && (instruction.Op == token.SHL || instruction.Op == token.SHR) &&
+			!ssaIntegerValueProvenNonNegativeAt(instruction.Y, instruction) {
+			result.recipe = coroPhysicalInstructionNegativeShiftGuard
 			break
 		}
 		if (instruction.Op == token.EQL || instruction.Op == token.NEQ) &&

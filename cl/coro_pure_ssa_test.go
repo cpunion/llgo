@@ -700,11 +700,11 @@ func Root(value uint64, count int) uint64 { return value >> count }
 	if helpers := universe.loweredRuntimeHelpers(audit.ctx, shift); strings.Join(helpers, ",") != "AssertNegativeShift" {
 		t.Fatalf("signed shift helpers = %v; want AssertNegativeShift", helpers)
 	}
-	if handled, reason := audit.validate(shift); !handled || reason != "potentially panicking runtime helper requires the explicit-status panic ABI" {
+	if handled, reason := audit.validate(shift); !handled || reason != "shift by a potentially negative count requires the explicit-status panic ABI" {
 		t.Fatalf("signed shift without ExplicitStatus = handled %t, reason %q", handled, reason)
 	}
 	audit.allowImplicitNilFault = true
-	if handled, reason := audit.validate(shift); !handled || reason != "runtime helper capability validation requires a frozen emission universe" {
+	if handled, reason := audit.validate(shift); !handled || reason != "" {
 		t.Fatalf("signed shift with ExplicitStatus = handled %t, reason %q", handled, reason)
 	}
 }
