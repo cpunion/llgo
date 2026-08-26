@@ -62,10 +62,10 @@ func validateCoroExactRangeYield(fn *ssa.Function) error {
 	if signature.Recv() != nil || signature.Variadic() ||
 		typeParamCount(signature.TypeParams()) != 0 ||
 		typeParamCount(signature.RecvTypeParams()) != 0 ||
-		signature.Params() == nil || signature.Params().Len() > 2 ||
+		(signature.Params() != nil && signature.Params().Len() > 2) ||
 		signature.Results() == nil || signature.Results().Len() != 1 ||
 		!types.Identical(signature.Results().At(0).Type(), types.Typ[types.Bool]) {
-		return fmt.Errorf("range-yield signature is not func([value[, value]]) bool")
+		return fmt.Errorf("range-yield signature %s is not func([value[, value]]) bool", signature)
 	}
 	if len(fn.FreeVars) == 0 {
 		return fmt.Errorf("range-yield body has no compiler state capture")
@@ -75,6 +75,9 @@ func validateCoroExactRangeYield(fn *ssa.Function) error {
 		return fmt.Errorf("range-yield body has no leading *int state cell")
 	}
 	for _, tuple := range []*types.Tuple{signature.Params(), signature.Results()} {
+		if tuple == nil {
+			continue
+		}
 		for index := 0; index < tuple.Len(); index++ {
 			typ := tuple.At(index).Type()
 			if coroTypeContainsUnresolvedTypeParam(typ, make(map[types.Type]bool)) {

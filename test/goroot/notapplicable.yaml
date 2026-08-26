@@ -540,6 +540,10 @@ not_applicable:
     case: fixedbugs/issue20014.go
     reason: "not applicable: fieldtrack is private cmd/compile and cmd/link metadata; LLGo's LLVM and native linker pipeline does not consume it; supporting this toolchain-specific behavior is not an LLGo compatibility goal"
   - version: go1.26
+    directive: runindir
+    case: fixedbugs/issue11656.go
+    reason: "not applicable: this case injects native instructions into writable data, reinterprets their address as a gc-layout function value, and requires gc traceback unwinding through that artificial PC; the upstream case explicitly excludes GoLLVM, and reproducing this gc-specific ABI and unwinder behavior is not an LLGo compatibility goal"
+  - version: go1.26
     platform: darwin/arm64
     directive: buildrundir
     case: retjmp.go
