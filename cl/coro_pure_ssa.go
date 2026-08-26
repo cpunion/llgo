@@ -1961,9 +1961,9 @@ func coroRuntimeConversionHelper(source, target types.Type) string {
 
 // coroPointerUintptrScalarTerminal recognizes an address word whose complete
 // semantic lifetime ends in an integer comparison, a bounded low-bit alignment
-// mask, as one operand of an exact pointer-distance expression,
-// uintptr(end)-uintptr(start), as a scalar map key or integer store, or at a
-// direct Go return.
+// mask, a destructive scalar-address difference, as one operand of an exact
+// pointer-distance expression, uintptr(end)-uintptr(start), as a scalar map key
+// or integer store, or at a direct Go return.
 // None of these terminals authorizes pointer reconstruction. A low-bit mask
 // destroys the address identity and its result is an ordinary integer; the
 // source address word must have no other semantic use. If a safepoint splits
@@ -2015,6 +2015,10 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 				}
 				uses++
 			case token.SUB:
+				if coroPointerUintptrScalarMinusAddressResult(value, instruction) {
+					uses++
+					break
+				}
 				left, leftOK := instruction.X.(*ssa.Convert)
 				right, rightOK := instruction.Y.(*ssa.Convert)
 				if leftOK && rightOK &&
@@ -2044,6 +2048,23 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 		return uses == 1
 	}
 	return uses != 0
+}
+
+// coroPointerUintptrScalarMinusAddressResult recognizes scalar-address as the
+// point where one explicit address word becomes an ordinary integer distance.
+// The scalar operand must have no visible pointer provenance. The enclosing
+// use-graph walk rejects every unsupported consumer of the address conversion;
+// any later integer-to-pointer conversion is checked independently and receives
+// no provenance from this terminal.
+func coroPointerUintptrScalarMinusAddressResult(address ssa.Value, operation *ssa.BinOp) bool {
+	root, ok := address.(ssa.Instruction)
+	return ok && root.Block() != nil && operation != nil &&
+		operation.Block() == root.Block() && operation.Op == token.SUB &&
+		operation.Y == address && operation.X != address &&
+		coroFrameRetentionUintptrLike(address.Type()) &&
+		coroFrameRetentionUintptrLike(operation.X.Type()) &&
+		coroFrameRetentionUintptrLike(operation.Type()) &&
+		!coroFrameRetentionIntegerHasPointerProvenance(operation.X, make(map[ssa.Value]bool))
 }
 
 // coroPointerUintptrStoreTerminal accepts an integer-only value chain whose
