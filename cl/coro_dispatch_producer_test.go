@@ -171,6 +171,47 @@ var Cleanup = (*Counter).Release
 	thunk.Synthetic = original
 }
 
+func TestCoroExactEmbeddedInterfaceMethodExpressionThunkShape(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{"anonymous", `package foo
+type Summer interface { Sum([]int, int) int }
+var Sum = (interface { Summer }).Sum
+`},
+		{"named", `package foo
+type Summer interface { Sum([]int, int) int }
+type Extended interface { Summer }
+var Sum = Extended.Sum
+`},
+		{"instantiated", `package foo
+type Summer[T any] interface { Sum(T) T }
+var Sum = (interface { Summer[int] }).Sum
+`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ssaPkg, _, _ := buildGoSSAPkg(t, test.source)
+			var thunk *ssa.Function
+			for function := range ssautil.AllFunctions(ssaPkg.Prog) {
+				if function != nil && function.Name() == "Sum$thunk" {
+					thunk = function
+					break
+				}
+			}
+			if thunk == nil {
+				t.Fatal("fixture has no embedded-interface method-expression thunk")
+			}
+			if err := validateCoroExactMethodExpressionThunk(thunk); err != nil {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, thunk)
+				t.Fatalf("canonical embedded-interface method-expression thunk rejected: %v\nsignature=%v object=%v\n%s", err, thunk.Signature, thunk.Object().Type(), dump.String())
+			}
+		})
+	}
+}
+
 func TestCoroExactMethodExpressionThunkImplicitIndirectionShape(t *testing.T) {
 	const source = `package foo
 type Number int

@@ -292,7 +292,9 @@ func validateCoroExactBoundMethodWrapper(fn *ssa.Function) error {
 // a value-receiver method; x/tools lowers that one implicit indirection to the
 // exact ssa:wrapnilchk -> load -> static-call sequence validated below. A
 // promoted method expression additionally permits only the canonical receiver
-// field-selection chain resolved by the callable receiver's method set.
+// field-selection chain resolved by the callable receiver's method set. An
+// embedded interface exposes its selected method directly, without such a
+// field-selection chain.
 func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	if fn == nil || fn.Pkg != nil || fn.Parent() != nil || fn.Syntax() != nil {
 		return fmt.Errorf("requires one top-level syntax-free generated thunk")
@@ -325,6 +327,7 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	if pointer, ok := types.Unalias(callableReceiver).Underlying().(*types.Pointer); ok {
 		implicitPointerReceiver = types.Identical(pointer.Elem(), methodReceiver)
 	}
+	embeddedInterfaceReceiver := false
 	promotedReceiver := false
 	var promotedReceiverPath []int
 	if !directReceiver && !implicitPointerReceiver {
@@ -332,12 +335,14 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 		if selection != nil {
 			selected, _ := selection.Obj().(*types.Func)
 			indices := selection.Index()
-			promotedReceiver = len(indices) > 1 && selected == object
+			embeddedInterfaceReceiver = types.IsInterface(callableReceiver) &&
+				types.IsInterface(methodReceiver) && selected == object
+			promotedReceiver = !embeddedInterfaceReceiver && len(indices) > 1 && selected == object
 			if promotedReceiver {
 				promotedReceiverPath = append([]int(nil), indices[:len(indices)-1]...)
 			}
 		}
-		if !promotedReceiver {
+		if !embeddedInterfaceReceiver && !promotedReceiver {
 			return fmt.Errorf("callable signature is not receiver-first method signature")
 		}
 	}
