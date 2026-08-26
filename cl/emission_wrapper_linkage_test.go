@@ -152,3 +152,77 @@ func TestEmissionUniverseRejectsConflictingWrapperObjectsWithOnePhysicalSymbol(t
 		t.Fatal("conflicting wrapper bodies/ABIs sharing one physical symbol were accepted")
 	}
 }
+
+func TestEmissionUniverseCoalescesEquivalentNilCheckThunks(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "main", `package main
+type S string
+type T string
+func (S) val() int { return 1 }
+func (T) val() int { return 2 }
+func Use() int {
+	var s S
+	var value T
+	method := (*S).val
+	other := (*T).val
+	return method(&s) + other(&value)
+}
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var thunk, other *ssa.Function
+	for _, function := range universe.Functions() {
+		params := function.Signature.Params()
+		if wrapperKind(function) != "thunk" || function.Name() != "val$thunk" || params == nil || params.Len() == 0 {
+			continue
+		}
+		pointer, ok := types.Unalias(params.At(0).Type()).(*types.Pointer)
+		if !ok {
+			continue
+		}
+		named, ok := types.Unalias(pointer.Elem()).(*types.Named)
+		if !ok || named.Obj() == nil {
+			continue
+		}
+		switch named.Obj().Name() {
+		case "S":
+			if thunk != nil {
+				t.Fatal("prepared fixture retained duplicate val nil-check thunks")
+			}
+			thunk = function
+		case "T":
+			other = function
+		}
+	}
+	if thunk == nil || other == nil {
+		t.Fatal("prepared fixture has no exact val and other nil-check thunk pair")
+	}
+	owner := universe.packages[pkg.ssa]
+	callIdentity, callStatic, err := universe.wrapperCallIdentity(owner, thunk, pkgNormal)
+	if err != nil || callIdentity == "" || !callStatic {
+		t.Fatalf("nil-check thunk semantic call identity = %q, %t, %v; want exact static callee", callIdentity, callStatic, err)
+	}
+	otherIdentity, otherStatic, err := universe.wrapperCallIdentity(owner, other, pkgNormal)
+	if err != nil || otherIdentity == "" || !otherStatic || otherIdentity == callIdentity {
+		t.Fatalf("distinct nil-check thunk semantic call identity = %q, %t, %v; want a distinct exact static callee", otherIdentity, otherStatic, err)
+	}
+	if universe.samePromotedWrapperLinkIdentity(owner, thunk, other) {
+		t.Fatal("distinct nil-check thunks shared one link identity")
+	}
+	copyThunk := new(ssa.Function)
+	*copyThunk = *thunk
+	if err := universe.selectFunction(owner, copyThunk, pkgNormal, false); err != nil {
+		t.Fatalf("select equivalent nil-check thunk: %v", err)
+	}
+	canonical, resolved := universe.Resolve(copyThunk)
+	if !resolved || canonical != thunk {
+		t.Fatalf("equivalent nil-check thunk resolved to %v, %t; want canonical %v", canonical, resolved, thunk)
+	}
+}
