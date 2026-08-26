@@ -38,6 +38,13 @@ int32_t __llgo_coro_native_fleet_e2e_reentry_v1(
     return callback(value) + callback(value + 1);
 }
 
+extern int32_t __llgo_coro_native_fleet_e2e_export_v1(int32_t value);
+
+int32_t __llgo_coro_native_fleet_e2e_call_export_v1(int32_t value) {
+    return __llgo_coro_native_fleet_e2e_export_v1(value) +
+           __llgo_coro_native_fleet_e2e_export_v1(value + 1);
+}
+
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_active_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_maximum_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_blocked_state_v1;

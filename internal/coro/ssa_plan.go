@@ -77,6 +77,18 @@ type Root struct {
 	// from selecting a smaller synchronous-status implementation. It is valid
 	// only for a pure AsyncDemand managed root with no raw crossing.
 	EmissionEntry bool
+	// IngressEntry selects one compiler-generated foreign-to-managed adapter.
+	// The adapter constructs and synchronously drives the exact managed child,
+	// so this demand needs neither a legacy raw/plain body nor a generic root
+	// factory descriptor. IngressCertificate binds the physical symbol, C ABI,
+	// and managed target before code addresses exist.
+	IngressEntry       bool
+	IngressCertificate string
+	// ScheduledEntry is normally inferred for a root with neither of the two
+	// specialized roles above. Root mergers set it explicitly when an ordinary
+	// scheduler/root-factory demand shares a canonical function with an ingress
+	// or package-emission entry.
+	ScheduledEntry bool
 }
 
 // Roots is a set of externally established SSA entry demands.
@@ -745,12 +757,18 @@ type SSAFunctionPlan struct {
 // SSARootPlan records one canonical externally established entry demand.
 // Duplicate and aliased input roots are joined before this record is created.
 type SSARootPlan struct {
-	Function       *ssa.Function
-	ID             FunctionID
-	Demand         Demand
-	ManagedDemand  Demand
-	RawPlainDemand bool
-	EmissionEntry  bool
+	Function           *ssa.Function
+	ID                 FunctionID
+	Demand             Demand
+	ManagedDemand      Demand
+	RawPlainDemand     bool
+	EmissionEntry      bool
+	IngressEntry       bool
+	IngressCertificate string
+	// ScheduledEntry records that at least one joined ordinary root needs the
+	// generic root-factory path. It is independent of package-emission and
+	// foreign-ingress roles, which may name the same canonical function.
+	ScheduledEntry bool
 }
 
 // SSAPlan is the compilation-scoped whole-program result. Its maps remain
@@ -901,7 +919,7 @@ func (p *SSAPlan) RootFactoryRoots() []SSARootPlan {
 	}
 	roots := make([]SSARootPlan, 0, len(p.roots))
 	for _, root := range p.roots {
-		if root.EmissionEntry || !root.ManagedDemand.Contains(AsyncDemand) {
+		if !root.ScheduledEntry || !root.ManagedDemand.Contains(AsyncDemand) {
 			continue
 		}
 		function, ok := p.FunctionPlan(root.Function)
@@ -911,6 +929,27 @@ func (p *SSAPlan) RootFactoryRoots() []SSARootPlan {
 		roots = append(roots, root)
 	}
 	return roots
+}
+
+// ForeignIngressRoot returns the exact generated-adapter capability for fn.
+// The certificate is already part of the canonical plan digest; callers must
+// additionally replay it against the frontend's immutable symbol/ABI binding.
+func (p *SSAPlan) ForeignIngressRoot(fn *ssa.Function) (SSARootPlan, bool) {
+	if p == nil || fn == nil {
+		return SSARootPlan{}, false
+	}
+	id, identified := p.byFunction[fn]
+	if !identified {
+		return SSARootPlan{}, false
+	}
+	index := sort.Search(len(p.roots), func(index int) bool {
+		return p.roots[index].ID >= id
+	})
+	if index < len(p.roots) && p.roots[index].ID == id &&
+		p.roots[index].IngressEntry {
+		return p.roots[index], true
+	}
+	return SSARootPlan{}, false
 }
 
 // IsSpawnTarget reports whether a closed or partially closed go statement can
@@ -1125,9 +1164,12 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		maxPlain = DefaultMaxPlainInstructions
 	}
 	type rootEntryDemand struct {
-		managed   Demand
-		raw       bool
-		scheduled bool
+		managed     Demand
+		raw         bool
+		scheduled   bool
+		emission    bool
+		ingress     bool
+		certificate string
 	}
 	rootDemand := make(map[*ssa.Function]rootEntryDemand, len(roots))
 	for i, root := range roots {
@@ -1157,16 +1199,41 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		if managed == NoDemand && !root.RawPlainDemand {
 			return nil, fmt.Errorf("coro: root %d function %q has no demand", i, root.Function.Name())
 		}
-		if root.EmissionEntry && (managed != AsyncDemand || root.RawPlainDemand) {
+		if root.EmissionEntry && !managed.Contains(AsyncDemand) {
 			return nil, fmt.Errorf(
-				"coro: root %d function %q emission entry requires async managed demand without a raw crossing",
+				"coro: root %d function %q emission entry requires async managed demand",
+				i, root.Function.Name(),
+			)
+		}
+		if root.IngressEntry {
+			if !managed.Contains(AsyncDemand) || root.RawPlainDemand || root.IngressCertificate == "" {
+				return nil, fmt.Errorf(
+					"coro: root %d function %q ingress entry requires async managed demand, no raw crossing, and one certificate",
+					i, root.Function.Name(),
+				)
+			}
+		} else if root.IngressCertificate != "" {
+			return nil, fmt.Errorf(
+				"coro: root %d function %q has an ingress certificate without an ingress entry",
 				i, root.Function.Name(),
 			)
 		}
 		joined := rootDemand[canonical]
 		joined.managed = joined.managed.Join(managed)
 		joined.raw = joined.raw || root.RawPlainDemand
-		joined.scheduled = joined.scheduled || !root.EmissionEntry
+		joined.scheduled = joined.scheduled || root.ScheduledEntry ||
+			managed != NoDemand && !root.EmissionEntry && !root.IngressEntry
+		joined.emission = joined.emission || root.EmissionEntry
+		joined.ingress = joined.ingress || root.IngressEntry
+		if root.IngressEntry {
+			if joined.certificate != "" && joined.certificate != root.IngressCertificate {
+				return nil, fmt.Errorf(
+					"coro: root function %q has conflicting ingress certificates",
+					root.Function.Name(),
+				)
+			}
+			joined.certificate = root.IngressCertificate
+		}
 		rootDemand[canonical] = joined
 	}
 
@@ -1481,7 +1548,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		canonicalRoots = append(canonicalRoots, SSARootPlan{
 			Function: fn, ID: id,
 			Demand: aggregateDemand(demand.managed, demand.raw), ManagedDemand: demand.managed, RawPlainDemand: demand.raw,
-			EmissionEntry: !demand.scheduled,
+			EmissionEntry:      demand.emission,
+			IngressEntry:       demand.ingress,
+			IngressCertificate: demand.certificate, ScheduledEntry: demand.scheduled,
 		})
 	}
 	sort.Slice(canonicalRoots, func(i, j int) bool { return canonicalRoots[i].ID < canonicalRoots[j].ID })
@@ -2280,13 +2349,16 @@ func applySSAOutcomePlainPlans(
 		ids[function] = id
 	}
 	for _, root := range roots {
-		if root.EmissionEntry {
+		if root.IngressEntry || root.ScheduledEntry {
+			// A foreign ingress or ordinary scheduler root must preserve the
+			// managed primary. The generated ingress adapter constructs a child
+			// which may park; it cannot select a synchronous outcome-only entry.
+			primaryBlocked[root.ID] = true
+		} else if root.EmissionEntry {
 			// A package-generation entry is an exact future static caller from a
 			// consumer archive. It may therefore select the same bounded
 			// outcome-primary ABI as a direct call observed in this package.
 			direct[root.ID] = true
-		} else {
-			primaryBlocked[root.ID] = true
 		}
 	}
 	for reference := range graph.references {

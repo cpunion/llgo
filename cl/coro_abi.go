@@ -1893,7 +1893,8 @@ func validateCoroPhysicalABIForOwner(
 	if directiveErr != nil {
 		return fail("classify ABI directive: %v", directiveErr)
 	}
-	if directive != "" && !(plan.RawPlainEntry && rawVariant) &&
+	_, exportIngress := whole.ForeignIngressRoot(fn)
+	if directive != "" && !(plan.RawPlainEntry && rawVariant) && !exportIngress &&
 		!(cgoErrnoWorker && directive == "//go:cgo_unsafe_args") {
 		return fail("ABI directive %q requires a root or foreign adapter", directive)
 	}

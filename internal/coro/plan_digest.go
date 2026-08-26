@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v37"
+const PlanDigestSchema = "llgo.coro.plan-digest.v38"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -150,11 +150,14 @@ type planDigestDocument struct {
 }
 
 type planDigestRoot struct {
-	Function       FunctionID `json:"function"`
-	Demand         uint8      `json:"demand"`
-	ManagedDemand  uint8      `json:"managed_demand"`
-	RawPlainDemand bool       `json:"raw_plain_demand"`
-	EmissionEntry  bool       `json:"emission_entry,omitempty"`
+	Function           FunctionID `json:"function"`
+	Demand             uint8      `json:"demand"`
+	ManagedDemand      uint8      `json:"managed_demand"`
+	RawPlainDemand     bool       `json:"raw_plain_demand"`
+	ScheduledEntry     bool       `json:"scheduled_entry,omitempty"`
+	EmissionEntry      bool       `json:"emission_entry,omitempty"`
+	IngressEntry       bool       `json:"ingress_entry,omitempty"`
+	IngressCertificate string     `json:"ingress_certificate,omitempty"`
 }
 
 type planDigestFunction struct {
@@ -837,8 +840,22 @@ func (p *SSAPlan) canonicalDigestRoots() ([]planDigestRoot, error) {
 		if root.ManagedDemand == NoDemand && !root.RawPlainDemand {
 			return nil, fmt.Errorf("coro: SSA root plan %d has no demand", index)
 		}
-		if root.EmissionEntry && (root.ManagedDemand != AsyncDemand || root.RawPlainDemand) {
+		if root.EmissionEntry && !root.ManagedDemand.Contains(AsyncDemand) {
 			return nil, fmt.Errorf("coro: SSA root plan %d has an invalid emission entry", index)
+		}
+		if root.IngressEntry {
+			if !root.ManagedDemand.Contains(AsyncDemand) || root.RawPlainDemand {
+				return nil, fmt.Errorf("coro: SSA root plan %d has an invalid ingress entry", index)
+			}
+			if err := validateSHA256Hex("plan ingress certificate", root.IngressCertificate); err != nil {
+				return nil, fmt.Errorf("coro: SSA root plan %d: %w", index, err)
+			}
+		} else if root.IngressCertificate != "" {
+			return nil, fmt.Errorf("coro: SSA root plan %d has an ingress certificate without an ingress entry", index)
+		}
+		if !root.ScheduledEntry && !root.EmissionEntry && !root.IngressEntry &&
+			!root.RawPlainDemand {
+			return nil, fmt.Errorf("coro: SSA root plan %d has no entry role", index)
 		}
 		if index != 0 && previous >= root.ID {
 			return nil, fmt.Errorf("coro: SSA root plans are not in strict FunctionID order")
@@ -859,7 +876,9 @@ func (p *SSAPlan) canonicalDigestRoots() ([]planDigestRoot, error) {
 		}
 		ret = append(ret, planDigestRoot{
 			Function: root.ID, Demand: uint8(root.Demand), ManagedDemand: uint8(root.ManagedDemand),
-			RawPlainDemand: root.RawPlainDemand, EmissionEntry: root.EmissionEntry,
+			RawPlainDemand: root.RawPlainDemand, ScheduledEntry: root.ScheduledEntry,
+			EmissionEntry: root.EmissionEntry, IngressEntry: root.IngressEntry,
+			IngressCertificate: root.IngressCertificate,
 		})
 	}
 	return ret, nil

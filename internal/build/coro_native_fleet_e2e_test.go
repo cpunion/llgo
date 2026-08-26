@@ -134,6 +134,45 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetExportIngressE2ESource = `package main
+
+import _ "unsafe"
+
+var Ready chan int32
+var Result int32
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=managed-ingress memory=by-value
+//go:linkname callExport C.__llgo_coro_native_fleet_e2e_call_export_v1
+func callExport(int32) int32
+
+//export __llgo_coro_native_fleet_e2e_export_v1
+func __llgo_coro_native_fleet_e2e_export_v1(value int32) int32 {
+	return value + <-Ready
+}
+
+func Setup() {
+	Ready = make(chan int32)
+	Result = 0
+}
+
+func sender() {
+	Ready <- 10
+	Ready <- 20
+}
+
+func main() {
+	go sender()
+	Result = callExport(1)
+}
+
+func Check() int32 {
+	if Result != 33 {
+		return 126
+	}
+	return 0
+}
+`
+
 const coroNativeFleetSameMForeignE2ESource = `package main
 
 import _ "unsafe"
@@ -1864,6 +1903,16 @@ func TestCoroNativeFleetManagedForeignReentryParksCallbackE2E(t *testing.T) {
 		t,
 		coroNativeFleetForeignReentryE2ESource,
 		"managed-foreign-reentry",
+		true,
+		1,
+	)
+}
+
+func TestCoroNativeFleetExportIngressParksByGlobalSymbolE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetExportIngressE2ESource,
+		"export-ingress-global-symbol",
 		true,
 		1,
 	)

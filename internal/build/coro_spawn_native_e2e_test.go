@@ -385,11 +385,28 @@ func buildCoroSpawnNativeE2EUserSource(
 	}
 	functionIDs.SchedulerABI = schedulerABI
 	functionIDs.ArchiveReady = true
-	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+	roots := coro.Roots{
 		{Function: mainFn, Demand: coro.AsyncDemand},
 		{Function: setupFn, Demand: coro.SyncDemand},
 		{Function: checkFn, Demand: coro.SyncDemand},
-	}, coro.SSAConfig{
+	}
+	if targetCapabilities.NativeFleet() {
+		for _, function := range universe.Functions() {
+			certificate, certified, certificateErr :=
+				universe.CoroExportIngressCertificate(function)
+			if certificateErr != nil {
+				t.Fatal(certificateErr)
+			}
+			if !certified {
+				continue
+			}
+			roots = append(roots, coro.Root{
+				Function: function, ManagedDemand: coro.AsyncDemand,
+				IngressEntry: true, IngressCertificate: certificate,
+			})
+		}
+	}
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, roots, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
@@ -1000,6 +1017,21 @@ func configureCoroRuntimeIslandPlan(conf *Config, linkedRuntimeEntries ...string
 		if input.requiredHostPlain == nil {
 			input.requiredHostPlain = make(map[*ssa.Function]struct{})
 		}
+		// ModeGen normally publishes source bodies plus compiler runtime entries
+		// for an archive consumer. This closed runtime island has no such consumer:
+		// it owns the complete raw-host ABI installed below, and every internal
+		// body is reached through that exact raw closure. Discard the generic root
+		// inventory instead of mixing managed scheduler roots into a native-stack
+		// setjmp boundary.
+		input.requiredRoots = nil
+		for _, use := range input.requiredDirectPlain {
+			if use.target == nil {
+				continue
+			}
+			input.requiredRoots = append(input.requiredRoots, coro.Root{
+				Function: use.target, ManagedDemand: coro.SyncDemand,
+			})
+		}
 		rootCount := 0
 		for _, fn := range input.EmissionUniverse.Functions() {
 			if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
@@ -1031,7 +1063,9 @@ func configureCoroRuntimeIslandPlan(conf *Config, linkedRuntimeEntries ...string
 				(!externalRuntimeEntry && !externalCoreEntry) {
 				continue
 			}
-			input.requiredRoots = append(input.requiredRoots, coro.Root{Function: fn, Demand: coro.SyncDemand})
+			input.requiredRoots = append(input.requiredRoots, coro.Root{
+				Function: fn, RawPlainDemand: true,
+			})
 			input.requiredPlain[fn] = struct{}{}
 			input.requiredHostPlain[fn] = struct{}{}
 			rootCount++

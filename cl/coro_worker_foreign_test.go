@@ -915,6 +915,13 @@ func TestCoroManagedReentryPlainCallbackUsesThinCoroutineRamp(t *testing.T) {
 	if ramp.IsNil() || adapter.IsNil() {
 		t.Fatalf("plain callback lacks a thin ramp or C adapter:\n%s", module.String())
 	}
+	if ramp.Linkage() != llvm.LinkOnceAnyLinkage ||
+		adapter.Linkage() != llvm.LinkOnceAnyLinkage {
+		t.Fatalf(
+			"content-addressed callback ramp/adapter linkage = %v/%v, want linkonce",
+			ramp.Linkage(), adapter.Linkage(),
+		)
+	}
 	if !strings.Contains(ramp.String(), "@foreignworker.callback") ||
 		!strings.Contains(ramp.String(), "llvm.coro.") {
 		t.Fatalf("thin ramp does not call the sole plain primary:\n%s", ramp.String())
@@ -1249,6 +1256,11 @@ func TestCoroStaticForeignCallAuthoritySelectsExecutionMode(t *testing.T) {
 			want: coro.ReentryManagedCallback,
 		},
 		{
+			name: "any thread managed ingress", affinity: "any-thread",
+			reentry: "managed-ingress", wantMode: coroForeignCallModeSameM,
+			want: coro.ReentryManagedIngress,
+		},
+		{
 			name: "caller thread no reentry", affinity: "caller-thread",
 			reentry: "none", wantMode: coroForeignCallModeSameM,
 			want: coro.ReentryNone,
@@ -1257,6 +1269,11 @@ func TestCoroStaticForeignCallAuthoritySelectsExecutionMode(t *testing.T) {
 			name: "caller thread managed callback", affinity: "caller-thread",
 			reentry: "managed-callback", wantMode: coroForeignCallModeSameM,
 			want: coro.ReentryManagedCallback,
+		},
+		{
+			name: "caller thread managed ingress", affinity: "caller-thread",
+			reentry: "managed-ingress", wantMode: coroForeignCallModeSameM,
+			want: coro.ReentryManagedIngress,
 		},
 	}
 	for _, test := range tests {

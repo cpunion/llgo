@@ -4403,7 +4403,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		requiredGlobalFunctionSlots = ctx.coroGlobalFunctionSlots
 	}
 	if ctx.coroEmission != nil {
-		rawABIRoots, rawABIPlain, err := requiredCoroRawABIEntryRoots(ctx)
+		rawABIRoots, rawABIPlain, err := requiredCoroRawABIEntryRoots(ctx, requiredHostPlain)
 		if err != nil {
 			return err
 		}
@@ -4441,7 +4441,10 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		return err
 	}
 	requiredRoots = append(requiredRoots, patchInitRoots...)
-	requiredRoots = mergeCoroRequiredRoots(requiredRoots)
+	requiredRoots, err = mergeCoroRequiredRoots(requiredRoots)
+	if err != nil {
+		return err
+	}
 	input := CoroPlanInput{
 		Program:                     ctx.progSSA,
 		requiredRoots:               requiredRoots,
@@ -4631,24 +4634,42 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 // body may be both a compiler-owned synchronous entry and an exported raw ABI
 // entry; retaining two Root records is semantically redundant and obscures
 // which one physical entry the plan must expose.
-func mergeCoroRequiredRoots(roots coro.Roots) coro.Roots {
+func mergeCoroRequiredRoots(roots coro.Roots) (coro.Roots, error) {
 	result := make(coro.Roots, 0, len(roots))
 	byFunction := make(map[*ssa.Function]int, len(roots))
 	for _, root := range roots {
 		if index, duplicate := byFunction[root.Function]; duplicate {
-			result[index].Demand = result[index].Demand.Join(root.Demand)
-			result[index].ManagedDemand = result[index].ManagedDemand.Join(root.ManagedDemand)
-			result[index].RawPlainDemand = result[index].RawPlainDemand || root.RawPlainDemand
-			// EmissionEntry is the weaker, non-scheduled role. Any independently
-			// established root for the same function must retain scheduler/raw
-			// semantics after the duplicate capabilities are joined.
-			result[index].EmissionEntry = result[index].EmissionEntry && root.EmissionEntry
+			existing := &result[index]
+			existingManaged := existing.Demand.Join(existing.ManagedDemand)
+			incomingManaged := root.Demand.Join(root.ManagedDemand)
+			existingScheduled := existing.ScheduledEntry ||
+				existingManaged != coro.NoDemand &&
+					!existing.EmissionEntry && !existing.IngressEntry
+			incomingScheduled := root.ScheduledEntry ||
+				incomingManaged != coro.NoDemand &&
+					!root.EmissionEntry && !root.IngressEntry
+			existing.Demand = existing.Demand.Join(root.Demand)
+			existing.ManagedDemand = existing.ManagedDemand.Join(root.ManagedDemand)
+			existing.RawPlainDemand = existing.RawPlainDemand || root.RawPlainDemand
+			existing.ScheduledEntry = existingScheduled || incomingScheduled
+			existing.IngressEntry = existing.IngressEntry || root.IngressEntry
+			existing.EmissionEntry = existing.EmissionEntry || root.EmissionEntry
+			if root.IngressCertificate != "" {
+				if existing.IngressCertificate != "" &&
+					existing.IngressCertificate != root.IngressCertificate {
+					return nil, fmt.Errorf(
+						"coroutine roots for %q have conflicting ingress certificates",
+						root.Function.Name(),
+					)
+				}
+				existing.IngressCertificate = root.IngressCertificate
+			}
 			continue
 		}
 		byFunction[root.Function] = len(result)
 		result = append(result, root)
 	}
-	return result
+	return result, nil
 }
 
 func appendCoroDirectPlainRoots(roots coro.Roots, uses []requiredCoroDirectPlainCallArgument) coro.Roots {
@@ -5061,13 +5082,18 @@ func requiredCoroGenerationEntryRoots(ctx *context) (coro.Roots, error) {
 	return roots, nil
 }
 
-// requiredCoroRawABIEntryRoots turns each source-level physical export or
-// alias into an explicit raw root before analysis. EmissionUniverse already
+// requiredCoroRawABIEntryRoots turns each source-level physical alias into an
+// explicit raw root before analysis. A certified //export instead becomes an
+// exact managed ingress root when the selected target owns that implementation.
+// EmissionUniverse already
 // froze the distinction between an ordinary managed Go linkname pair and a
 // real external ABI crossing; using that exact certificate here keeps
 // planning and codegen from independently guessing from comments. Bodyless C
 // declarations remain foreign leaves and therefore do not become Go roots.
-func requiredCoroRawABIEntryRoots(ctx *context) (coro.Roots, map[*ssa.Function]struct{}, error) {
+func requiredCoroRawABIEntryRoots(
+	ctx *context,
+	rawHostPlain map[*ssa.Function]struct{},
+) (coro.Roots, map[*ssa.Function]struct{}, error) {
 	if ctx == nil || ctx.coroEmission == nil {
 		return nil, nil, nil
 	}
@@ -5079,6 +5105,23 @@ func requiredCoroRawABIEntryRoots(ctx *context) (coro.Roots, map[*ssa.Function]s
 			return nil, nil, fmt.Errorf("classify coroutine raw ABI entry %q: %w", fn.Name(), err)
 		}
 		if directive == "" {
+			continue
+		}
+		ingressCertificate, ingressCandidate, certificateErr :=
+			ctx.coroEmission.CoroExportIngressCertificate(fn)
+		if certificateErr != nil {
+			return nil, nil, fmt.Errorf(
+				"classify coroutine export ingress %q: %w", fn.Name(), certificateErr,
+			)
+		}
+		_, rawHost := rawHostPlain[fn]
+		if ingressCandidate && coroExportIngressTargetAllowed(
+			ctx.buildConf, ctx.coroEmission.CompleteRuntimeABI(), fn, rawHost,
+		) {
+			roots = append(roots, coro.Root{
+				Function: fn, ManagedDemand: coro.AsyncDemand,
+				IngressEntry: true, IngressCertificate: ingressCertificate,
+			})
 			continue
 		}
 		managedCgoErrno := 0
@@ -5126,6 +5169,30 @@ func requiredCoroRawABIEntryRoots(ctx *context) (coro.Roots, map[*ssa.Function]s
 		plain[fn] = struct{}{}
 	}
 	return roots, plain, nil
+}
+
+func coroExportIngressTargetAllowed(
+	conf *Config,
+	completeRuntimeABI bool,
+	fn *ssa.Function,
+	rawHost bool,
+) bool {
+	if conf == nil || !completeRuntimeABI || fn == nil || rawHost ||
+		!conf.coroTargetCapabilities().NativeFleet() {
+		return false
+	}
+	if fn.Pkg == nil || fn.Pkg.Pkg == nil {
+		return false
+	}
+	path := llssa.PathOf(fn.Pkg.Pkg)
+	// The LLGo runtime tree and Go's compiler-owned runtime package publish
+	// physical hooks with //export, but those symbols are the raw scheduler/ABI
+	// implementation itself. They are never public C-to-managed application
+	// ingress, even when a pre-root closure did not happen to reach a particular
+	// hook. Package ownership is frozen source authority here; relying only on
+	// reachability lets an unused runtime hook silently change ABI when
+	// application roots change.
+	return path != "runtime" && !isRuntimePkg(path)
 }
 
 // requiredCoroPatchInitEntryRoots preserves the public half of every patched

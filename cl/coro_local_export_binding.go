@@ -51,6 +51,18 @@ type coroLocalExportTargetGroup struct {
 	targets []*ssa.Function
 }
 
+// coroLocalExportIngressTarget is the unique bodyful side of one exact local
+// //export publication. The local-call binder and foreign-ingress planner must
+// consume the same frozen symbol/ABI inventory instead of independently
+// reparsing source directives. Two definitions with the same physical symbol
+// leave this capability absent, even if their typed ABI views differ.
+type coroLocalExportIngressTarget struct {
+	FunctionIdentity     string
+	LinkIdentity         string
+	PhysicalSymbol       string
+	PhysicalABISignature string
+}
+
 // coroLocalExportManagedCallTarget selects the local Go implementation only
 // for one exact managed call, defer, or spawn occurrence. It deliberately does
 // not alias the declaration: raw code-address transport and a raw/plain
@@ -167,12 +179,16 @@ type coroLocalExportBindingFreezeInput struct {
 // address, or link order.
 func freezeCoroLocalExportBindings(
 	input coroLocalExportBindingFreezeInput,
-) (map[*ssa.Function]coroLocalExportBinding, error) {
+) (
+	map[*ssa.Function]coroLocalExportBinding,
+	map[*ssa.Function]coroLocalExportIngressTarget,
+	error,
+) {
 	bindings := make(map[*ssa.Function]coroLocalExportBinding)
 	if input.canonicalAlias == nil || input.functionSortKey == nil ||
 		input.freezeCallableShape == nil || input.entrySourceSignature == nil ||
 		input.finalFunctionIdentity == nil || input.cFunctionABITypeKey == nil {
-		return nil, fmt.Errorf("prepare emission universe: local export binding freezer has incomplete builder inputs")
+		return nil, nil, fmt.Errorf("prepare emission universe: local export binding freezer has incomplete builder inputs")
 	}
 
 	functions := append([]*ssa.Function(nil), input.functions...)
@@ -183,10 +199,12 @@ func freezeCoroLocalExportBindings(
 
 	targets := make(map[string]*coroLocalExportTargetGroup)
 	targetABI := make(map[*ssa.Function]string)
+	ingressCandidates := make(map[*ssa.Function]coroLocalExportIngressTarget)
+	ingressSymbols := make(map[string][]*ssa.Function)
 	for _, function := range functions {
 		canonical := input.canonicalAlias(function)
 		if canonical == nil {
-			return nil, fmt.Errorf("prepare emission universe: local export target inventory contains cyclic aliases")
+			return nil, nil, fmt.Errorf("prepare emission universe: local export target inventory contains cyclic aliases")
 		}
 		if canonical != function || len(canonical.Blocks) == 0 || len(canonical.FreeVars) != 0 {
 			continue
@@ -223,6 +241,33 @@ func freezeCoroLocalExportBindings(
 		}
 		group.targets = append(group.targets, canonical)
 		targetABI[canonical] = abi
+		if canonical.Parent() != nil ||
+			!validateCoroExportIngressSignature(effective) ||
+			effective.Results().Len() > 1 {
+			continue
+		}
+		functionIdentity := input.finalFunctionIdentity(canonical)
+		linkIdentity := input.linkIdentities[canonical]
+		if functionIdentity == "" || functionIdentity == "<nil>" ||
+			functionIdentity == "<cyclic-alias>" || linkIdentity == "" {
+			return nil, nil, fmt.Errorf(
+				"prepare emission universe: export ingress target %q has incomplete frozen identity",
+				canonical.Name(),
+			)
+		}
+		ingressCandidates[canonical] = coroLocalExportIngressTarget{
+			FunctionIdentity:     functionIdentity,
+			LinkIdentity:         linkIdentity,
+			PhysicalSymbol:       symbol,
+			PhysicalABISignature: abi,
+		}
+		ingressSymbols[symbol] = append(ingressSymbols[symbol], canonical)
+	}
+	ingressTargets := make(map[*ssa.Function]coroLocalExportIngressTarget)
+	for function, target := range ingressCandidates {
+		if len(ingressSymbols[target.PhysicalSymbol]) == 1 {
+			ingressTargets[function] = target
+		}
 	}
 
 	declarations := make([]*ssa.Function, 0, len(input.callableIdentities))
@@ -235,7 +280,7 @@ func freezeCoroLocalExportBindings(
 	for _, declaration := range declarations {
 		canonical := input.canonicalAlias(declaration)
 		if canonical == nil {
-			return nil, fmt.Errorf("prepare emission universe: local export declaration inventory contains cyclic aliases")
+			return nil, nil, fmt.Errorf("prepare emission universe: local export declaration inventory contains cyclic aliases")
 		}
 		if canonical != declaration {
 			continue
@@ -246,14 +291,14 @@ func freezeCoroLocalExportBindings(
 		}
 		legacy, err := coroForeignCallDirectiveFor(canonical)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"prepare emission universe: local export declaration policy on %q: %w",
 				canonical.Name(), err,
 			)
 		}
 		_, explicitContract, err := coroCallableContractCertificateFor(canonical)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"prepare emission universe: local export declaration contract on %q: %w",
 				canonical.Name(), err,
 			)
@@ -280,7 +325,7 @@ func freezeCoroLocalExportBindings(
 		targetLinkIdentity := input.linkIdentities[target]
 		if targetFunctionIdentity == "" || targetFunctionIdentity == "<nil>" ||
 			targetFunctionIdentity == "<cyclic-alias>" || targetLinkIdentity == "" {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"prepare emission universe: local export target %q has no exact frozen identity",
 				target.Name(),
 			)
@@ -305,7 +350,7 @@ func freezeCoroLocalExportBindings(
 			certificate: certificate,
 		}
 	}
-	return bindings, nil
+	return bindings, ingressTargets, nil
 }
 
 // exactLocalCExportSymbol accepts only one direct, bodyful //export source

@@ -239,25 +239,25 @@ __llgo$generated$promoted$Uint64$llgo$promoted$v1$8768d5ca729c35c6bcd1cd1810d254
     llvm.fake.use
     llvm.memset.p0.i64
     llvm.trap
-__llgo_coro_root_factory_descriptor_v1.1d1ede92f07d70d80a1d42c53f506414:
-    __llgo_coro_root_factory_v1.1d1ede92f07d70d80a1d42c53f506414
 __llgo_coro_root_factory_descriptor_v1.75f3bf26f1afb94f15be26fb4270ec53:
     __llgo_coro_root_factory_v1.75f3bf26f1afb94f15be26fb4270ec53
-__llgo_coro_root_factory_v1.1d1ede92f07d70d80a1d42c53f506414:
-    main.main$coro
+__llgo_coro_root_factory_descriptor_v1.832089ae1cc8174b2c4a86a7572a6bd5:
+    __llgo_coro_root_factory_v1.832089ae1cc8174b2c4a86a7572a6bd5
 __llgo_coro_root_factory_v1.75f3bf26f1afb94f15be26fb4270ec53:
     main.init$coro
-__llgo_coro_root_package_v1.6264ebd612a1e12a2cb562cf19423fce:
-    __llgo_coro_root_package_v1.6264ebd612a1e12a2cb562cf19423fce.entries
-__llgo_coro_root_package_v1.6264ebd612a1e12a2cb562cf19423fce.entries:
-    __llgo_coro_root_factory_descriptor_v1.1d1ede92f07d70d80a1d42c53f506414
+__llgo_coro_root_factory_v1.832089ae1cc8174b2c4a86a7572a6bd5:
+    main.main$coro
+__llgo_coro_root_package_v1.d50438563c4af2630d4ded1af473e094:
+    __llgo_coro_root_package_v1.d50438563c4af2630d4ded1af473e094.entries
+__llgo_coro_root_package_v1.d50438563c4af2630d4ded1af473e094.entries:
     __llgo_coro_root_factory_descriptor_v1.75f3bf26f1afb94f15be26fb4270ec53
+    __llgo_coro_root_factory_descriptor_v1.832089ae1cc8174b2c4a86a7572a6bd5
 llvm.compiler.used:
-    __llgo_coro_library_effect_v11.c768a81bc6bedbc9f83d3567fef7ad52
+    __llgo_coro_library_effect_v12.889824299fe453eca5f1a0f5d7cf2685
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.1d1ede92f07d70d80a1d42c53f506414
     __llgo_coro_root_factory_descriptor_v1.75f3bf26f1afb94f15be26fb4270ec53
-    __llgo_coro_root_package_v1.6264ebd612a1e12a2cb562cf19423fce
+    __llgo_coro_root_factory_descriptor_v1.832089ae1cc8174b2c4a86a7572a6bd5
+    __llgo_coro_root_package_v1.d50438563c4af2630d4ded1af473e094
 main.init$coro:
     __llgo_coro_await_consume_v1
     __llgo_coro_await_inline_destroy_consume_v4
@@ -295,7 +295,7 @@ main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.1d1ede92f07d70d80a1d42c53f506414
+    __llgo_coro_frame_descriptor_v1.832089ae1cc8174b2c4a86a7572a6bd5
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1

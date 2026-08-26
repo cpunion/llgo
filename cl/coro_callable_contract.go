@@ -299,6 +299,8 @@ func setCoroCallableReentry(contract *coro.CallableContract, value string) error
 		contract.Reentry = coro.ReentryNone
 	case "managed-callback":
 		contract.Reentry = coro.ReentryManagedCallback
+	case "managed-ingress":
+		contract.Reentry = coro.ReentryManagedIngress
 	default:
 		return invalidCoroCallableContractValue("reentry", value)
 	}

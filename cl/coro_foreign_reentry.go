@@ -205,20 +205,6 @@ func (p *context) coroForeignReentryAdapter(
 		panic("coroutine foreign reentry adapter requires one exact non-capturing callback")
 	}
 	entry := p.mustFunctionSymbol(target)
-	sourceSignature, err := p.emissionUniverse.coroPhysicalSourceSignature(target)
-	if err != nil {
-		panic(fmt.Errorf("coroutine foreign reentry callback ABI: %w", err))
-	}
-	if sourceSignature == nil || !types.Identical(
-		coroPhysicalNormalizeSourceSignature(callbackSignature),
-		coroPhysicalNormalizeSourceSignature(sourceSignature),
-	) {
-		panic("coroutine foreign reentry adapter target and callback signatures differ")
-	}
-	abi := newCoroPhysicalABI(p, entry, sourceSignature)
-	childEntry := p.coroForeignReentryTargetEntry(
-		target, entry, sourceSignature, abi,
-	)
 	key := framedEmissionKey(
 		"cl-coro-foreign-reentry-adapter-v1",
 		string(entry.plan.ID),
@@ -227,12 +213,52 @@ func (p *context) coroForeignReentryAdapter(
 		strconv.Itoa(p.prog.PointerSize()),
 	)
 	name := coroForeignReentryAdapterPrefixV1 + emissionDigest(key)
-	adapter := p.pkg.NewFuncEx(name, callbackSignature, llssa.InC, false, true)
+	return p.coroForeignIngressAdapter(target, callbackSignature, name, true)
+}
+
+// coroForeignIngressAdapter emits the common exact C-to-managed transaction.
+// The caller supplies a compiler-frozen physical name: a callback occurrence
+// uses a content-addressed private symbol, while //export uses its exact public
+// C symbol. Only the private occurrence is linkonce; a public export remains a
+// strong definition so the linker cannot silently coalesce competing source
+// exports. Both paths share the same typed child construction and completion
+// handling and never recover a target from a code address.
+func (p *context) coroForeignIngressAdapter(
+	target *ssa.Function,
+	physicalSignature *types.Signature,
+	name string,
+	linkOnce bool,
+) llssa.Function {
+	if p == nil || p.emissionUniverse == nil || target == nil || name == "" ||
+		physicalSignature == nil || physicalSignature.Recv() != nil ||
+		physicalSignature.Variadic() || len(target.FreeVars) != 0 {
+		panic("coroutine foreign ingress adapter requires one exact typed target")
+	}
+	entry := p.mustFunctionSymbol(target)
+	sourceSignature, err := p.emissionUniverse.coroPhysicalSourceSignature(target)
+	if err != nil {
+		panic(fmt.Errorf("coroutine foreign ingress target ABI: %w", err))
+	}
+	if sourceSignature == nil || !types.Identical(
+		coroPhysicalNormalizeSourceSignature(physicalSignature),
+		coroPhysicalNormalizeSourceSignature(sourceSignature),
+	) {
+		panic("coroutine foreign ingress target and physical signatures differ")
+	}
+	abi := newCoroPhysicalABI(p, entry, sourceSignature)
+	adapter := p.pkg.NewFuncEx(name, physicalSignature, llssa.InC, false, linkOnce)
 	if adapter.HasBody() {
 		return adapter
 	}
 
+	// Claim the public/private adapter symbol before resolving its managed
+	// child. A plain target may ask the ordinary function compiler for an
+	// already-created primary, which revisits export finalization; HasBody then
+	// closes that recursion without a side table or a second emission path.
 	b := adapter.MakeBody(1)
+	childEntry := p.coroForeignReentryTargetEntry(
+		target, entry, sourceSignature, abi,
+	)
 	parentSlot := b.AllocaT(p.prog.VoidPtr())
 	typeSlot := b.AllocaT(p.prog.VoidPtr())
 	dataSlot := b.AllocaT(p.prog.VoidPtr())
@@ -247,13 +273,13 @@ func (p *context) coroForeignReentryAdapter(
 	)
 	task := b.Call(acquire.Expr, parentSlot)
 	resultSlot := b.AllocaT(p.prog.Type(abi.resultSlotType, llssa.InGo))
-	callArgs := make([]llssa.Expr, 0, callbackSignature.Params().Len()+2)
+	callArgs := make([]llssa.Expr, 0, physicalSignature.Params().Len()+2)
 	callArgs = append(
 		callArgs,
 		task,
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 	)
-	for index := 0; index < callbackSignature.Params().Len(); index++ {
+	for index := 0; index < physicalSignature.Params().Len(); index++ {
 		callArgs = append(callArgs, adapter.Param(index))
 	}
 	child := b.Call(childEntry.Expr, callArgs...)

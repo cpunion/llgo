@@ -245,6 +245,72 @@ func TestLibraryEffectSummaryCanonicalRecordAndImportPolicy(t *testing.T) {
 	}
 }
 
+func TestLibraryEffectSummaryPublishesVersionedExportIngress(t *testing.T) {
+	summary := testLibraryEffectSummary(t, "example/ingress", false)
+	binding := &summary.ExportBindings[0]
+	for index := range summary.Functions {
+		function := &summary.Functions[index]
+		if function.ID != binding.Function {
+			continue
+		}
+		function.ExportIngress = true
+		function.PrimarySymbol = "example/ingress_alpha$managed"
+		binding.ManagedPrimarySymbol = function.PrimarySymbol
+	}
+	ingress := LibraryEffectExportIngress{
+		Symbol: binding.Symbol, ABIHash: binding.ABIHash,
+		Function: binding.Function, AdapterABI: LibraryEffectExportIngressABIV1,
+		Certificate: strings.Repeat("4", 64),
+	}
+	summary.ExportIngresses = []LibraryEffectExportIngress{ingress}
+	record, err := summary.MarshalRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseLibraryEffectSummaryRecords(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := NewLibraryEffectIndex(parsed, testLibraryEffectMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported, ok := index.LookupExportIngress(ingress.Symbol); !ok || imported != ingress {
+		t.Fatalf("imported export ingress = %+v, %t; want %+v", imported, ok, ingress)
+	}
+
+	for name, mutate := range map[string]func(*LibraryEffectSummary){
+		"missing adapter": func(invalid *LibraryEffectSummary) {
+			invalid.ExportIngresses = nil
+		},
+		"stale certificate": func(invalid *LibraryEffectSummary) {
+			invalid.ExportIngresses[0].Certificate = ""
+		},
+		"wrong adapter ABI": func(invalid *LibraryEffectSummary) {
+			invalid.ExportIngresses[0].AdapterABI = "llgo.coro.export-ingress.future"
+		},
+		"binding mismatch": func(invalid *LibraryEffectSummary) {
+			invalid.ExportIngresses[0].ABIHash = strings.Repeat("5", 64)
+		},
+		"missing function marker": func(invalid *LibraryEffectSummary) {
+			for index := range invalid.Functions {
+				invalid.Functions[index].ExportIngress = false
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := summary
+			invalid.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
+			invalid.ExportBindings = append([]LibraryEffectExportBinding(nil), summary.ExportBindings...)
+			invalid.ExportIngresses = append([]LibraryEffectExportIngress(nil), summary.ExportIngresses...)
+			mutate(&invalid)
+			if _, err := invalid.MarshalStable(); err == nil {
+				t.Fatalf("invalid export ingress was accepted: %+v", invalid)
+			}
+		})
+	}
+}
+
 func TestLibraryEffectSummaryPublishesNoUnwindStaticOutcome(t *testing.T) {
 	summary := testLibraryEffectSummary(t, "example/native", false)
 	function := LibraryEffectFunction{

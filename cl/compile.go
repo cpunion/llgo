@@ -658,6 +658,11 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		entry.plan.HasStaticOutcome() {
 		p.compileOutcomePlainFunction(entry.function)
 	}
+	if entry.planned && p.ownsFunctionEmission(entry.function) {
+		if _, ingress := p.immutablePlan().ForeignIngressRoot(entry.function); ingress {
+			p.compileCoroExportIngressAdapter(entry.function)
+		}
+	}
 	return fn, py, kind
 }
 

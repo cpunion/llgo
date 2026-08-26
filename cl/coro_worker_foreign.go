@@ -642,10 +642,18 @@ func (a coroStaticForeignCallAuthority) authorize(
 				mode: coroForeignCallModeSameM, reentry: contract.Reentry,
 				exec: exec,
 			}, nil
+		case coro.ReentryManagedIngress:
+			// A separately exported managed ingress has no callback argument to
+			// rewrite, but it needs the identical parent-M detach/reentry episode.
+			return coroStaticForeignCallAuthorization{
+				mode: coroForeignCallModeSameM, reentry: contract.Reentry,
+				exec: exec,
+			}, nil
 		}
 	case coro.AffinityCallerThread:
 		switch contract.Reentry {
-		case coro.ReentryNone, coro.ReentryManagedCallback:
+		case coro.ReentryNone, coro.ReentryManagedCallback,
+			coro.ReentryManagedIngress:
 			return coroStaticForeignCallAuthorization{
 				mode: coroForeignCallModeSameM, reentry: contract.Reentry,
 				exec: exec,
