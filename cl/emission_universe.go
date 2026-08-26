@@ -4400,8 +4400,9 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 					}
 				case u.samePromotedWrapperLinkIdentity(prepared, winner, fn):
 					// Existing cl codegen merges these on the same LLVM symbol: local,
-					// structurally identical, or generic promoted wrappers may be synthesized more than once, but
-					// have one final name/signature and the same exact static callee.
+					// structurally identical, or generic promoted wrappers may be synthesized
+					// more than once, but have one final name/signature, the same exact
+					// semantic callee, and the same complete deterministic body.
 					// This is a symbol-provenance rule, not a guessed layout/body
 					// equivalence rule.
 					canonical = winner
@@ -4727,9 +4728,9 @@ func (u *EmissionUniverse) samePromotedWrapperLinkIdentity(owner *preparedEmissi
 	if u.structuralWrapperABIKey(owner, left) != u.structuralWrapperABIKey(owner, right) {
 		return false
 	}
-	leftCall, _, leftErr := u.wrapperCallIdentity(owner, left, pkgNormal)
-	rightCall, _, rightErr := u.wrapperCallIdentity(owner, right, pkgNormal)
-	if leftErr != nil || rightErr != nil || leftCall == "" || leftCall != rightCall {
+	leftCall, leftStatic, leftErr := u.wrapperCallIdentity(owner, left, pkgNormal)
+	rightCall, rightStatic, rightErr := u.wrapperCallIdentity(owner, right, pkgNormal)
+	if leftErr != nil || rightErr != nil || leftCall == "" || leftCall != rightCall || leftStatic != rightStatic {
 		return false
 	}
 	return deterministicSSABody(left) == deterministicSSABody(right)
@@ -6149,10 +6150,16 @@ func (u *EmissionUniverse) wrapperCallIdentity(prepared *preparedEmissionPackage
 			if !ok {
 				continue
 			}
+			candidate := call.Common()
+			if builtin, ok := candidate.Value.(*ssa.Builtin); ok && builtin.Name() == "ssa:wrapnilchk" {
+				// This compiler-generated receiver check is wrapper scaffolding, not
+				// the thunk's semantic target. deterministicSSABody still includes it.
+				continue
+			}
 			if common != nil {
 				return "", false, nil
 			}
-			common = call.Common()
+			common = candidate
 		}
 	}
 	if common == nil {
