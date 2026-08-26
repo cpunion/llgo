@@ -15,11 +15,9 @@ host_skips:
   - directive: run
     case: chan/goroutines.go
     reason: the test intentionally creates enough goroutines to exhaust LLGo's one-thread-per-goroutine host limit
-  - version: go1.24
-    platform: darwin/arm64
-    directive: run
+  - directive: run
     case: chanlinear.go
-    reason: go1.24 goroot run is host-sensitive on darwin/arm64
+    reason: the test repeatedly doubles a goroutine-per-channel workload and can exhaust LLGo's one-thread-per-goroutine host limit
   - version: go1.24
     platform: darwin/arm64
     directive: runoutput
@@ -59,12 +57,6 @@ timeouts:
     case: abi/uglyfib.go
     timeout: 1m
     reason: uglyfib runs close to the default timeout on loaded linux/amd64 runners
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: chanlinear.go
-    timeout: 1m
-    reason: go1.26 chanlinear needs extra runtime slack on loaded linux/amd64 runners
   - version: go1.24
     platform: linux/amd64
     directive: run
@@ -88,11 +80,6 @@ flakes:
     directive: run
     case: fixedbugs/issue79186.go
     reason: the RWMutex stress test passes when the host is idle but can exceed its timeout under sustained CPU contention
-  - version: go1.26
-    platform: darwin/arm64
-    directive: run
-    case: chanlinear.go
-    reason: the timing-based linearity check can pass or report chanSelect as too slow on darwin/arm64
   - version: go1.26
     platform: linux/amd64
     directive: run

@@ -251,6 +251,31 @@ func TestTypeparamChansIsGloballyFlaky(t *testing.T) {
 	}
 }
 
+func TestChanlinearIsGloballyHostSkipped(t *testing.T) {
+	repo := repoRoot(t)
+	xfails := loadXFailConfig(t, repo, filepath.Join("test", "goroot", "xfail.yaml"))
+	tc := testCase{RelPath: "chanlinear.go", Directive: "run"}
+
+	for _, target := range []struct {
+		version  string
+		platform string
+	}{
+		{version: "go1.24.11", platform: "darwin/arm64"},
+		{version: "go1.25.0", platform: "linux/amd64"},
+		{version: "go1.26.5", platform: "darwin/arm64"},
+	} {
+		if match, _ := xfails.MatchHostSkip(target.version, target.platform, tc); !match {
+			t.Errorf("chanlinear.go did not match host skip for %s/%s", target.version, target.platform)
+		}
+		if _, reason, match := xfails.MatchTimeout(target.version, target.platform, tc); match {
+			t.Errorf("chanlinear.go still matched timeout for %s/%s: %s", target.version, target.platform, reason)
+		}
+		if match, reason := xfails.MatchFlaky(target.version, target.platform, tc); match {
+			t.Errorf("chanlinear.go still matched flake for %s/%s: %s", target.version, target.platform, reason)
+		}
+	}
+}
+
 func TestFlakyMatch(t *testing.T) {
 	cfg := xfailConfig{
 		Flakes: []xfailEntry{{
