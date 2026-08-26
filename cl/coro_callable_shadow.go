@@ -247,9 +247,12 @@ func coroWorkerCallableTarget(
 	}
 	physical := extractTrampolineCName(target.Name())
 	if physical == "" {
-		return coroWorkerAddressTarget{}, "", fmt.Errorf(
-			"worker callable target %q has no FuncPCABI0 C trampoline lowering", target.Name(),
-		)
+		// FuncPCABI0 is also a valid typed C code-address observation. A normal
+		// C declaration has no word-call trampoline contract and therefore cannot
+		// issue a worker capability, but merely publishing its address must not
+		// abort the package-wide provenance inventory. Preserve an exact rejected
+		// producer; any later llgo.syscall sink still fails closed with this reason.
+		return coroWorkerAddressTarget{}, "typed-c-code-address-is-not-worker-callable", nil
 	}
 	physical = remapTrampolineCNameForTarget(universe.prog.Target(), physical)
 

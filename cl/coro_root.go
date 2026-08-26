@@ -116,6 +116,17 @@ func validateCoroRootEntries(plan *coro.SSAPlan) error {
 					root.ID, function.FuncRep,
 				)
 			}
+		case coro.EmitOutcomePlain:
+			if !root.EmissionEntry || root.RawPlainDemand ||
+				root.ManagedDemand != coro.AsyncDemand ||
+				function.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+				function.FuncRep != coro.DirectCoro {
+				return fmt.Errorf(
+					"outcome-plain coroutine entry %q requires one non-scheduled package emission root (root-managed=%s root-raw=%t emission-entry=%t managed-entry=%s representation=%s)",
+					root.ID, root.ManagedDemand, root.RawPlainDemand, root.EmissionEntry,
+					function.ManagedEntry, function.FuncRep,
+				)
+			}
 		case coro.EmitCoroutine:
 			if root.ManagedDemand.Contains(coro.SyncDemand) && !function.RawPlainEntry {
 				return fmt.Errorf(

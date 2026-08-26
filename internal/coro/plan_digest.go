@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v36"
+const PlanDigestSchema = "llgo.coro.plan-digest.v37"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -154,6 +154,7 @@ type planDigestRoot struct {
 	Demand         uint8      `json:"demand"`
 	ManagedDemand  uint8      `json:"managed_demand"`
 	RawPlainDemand bool       `json:"raw_plain_demand"`
+	EmissionEntry  bool       `json:"emission_entry,omitempty"`
 }
 
 type planDigestFunction struct {
@@ -836,6 +837,9 @@ func (p *SSAPlan) canonicalDigestRoots() ([]planDigestRoot, error) {
 		if root.ManagedDemand == NoDemand && !root.RawPlainDemand {
 			return nil, fmt.Errorf("coro: SSA root plan %d has no demand", index)
 		}
+		if root.EmissionEntry && (root.ManagedDemand != AsyncDemand || root.RawPlainDemand) {
+			return nil, fmt.Errorf("coro: SSA root plan %d has an invalid emission entry", index)
+		}
 		if index != 0 && previous >= root.ID {
 			return nil, fmt.Errorf("coro: SSA root plans are not in strict FunctionID order")
 		}
@@ -853,7 +857,10 @@ func (p *SSAPlan) canonicalDigestRoots() ([]planDigestRoot, error) {
 		if !plan.ManagedDemand.Contains(root.ManagedDemand) || root.RawPlainDemand && !plan.RawPlainDemand {
 			return nil, fmt.Errorf("coro: root %q demand managed=%s raw=%t is not contained in function demand managed=%s raw=%t", root.ID, root.ManagedDemand, root.RawPlainDemand, plan.ManagedDemand, plan.RawPlainDemand)
 		}
-		ret = append(ret, planDigestRoot{Function: root.ID, Demand: uint8(root.Demand), ManagedDemand: uint8(root.ManagedDemand), RawPlainDemand: root.RawPlainDemand})
+		ret = append(ret, planDigestRoot{
+			Function: root.ID, Demand: uint8(root.Demand), ManagedDemand: uint8(root.ManagedDemand),
+			RawPlainDemand: root.RawPlainDemand, EmissionEntry: root.EmissionEntry,
+		})
 	}
 	return ret, nil
 }

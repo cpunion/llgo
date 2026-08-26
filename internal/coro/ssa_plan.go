@@ -71,6 +71,12 @@ type Root struct {
 	// RawPlainDemand selects exact legacy-stack reachability without creating a
 	// managed entry demand.
 	RawPlainDemand bool
+	// EmissionEntry selects a package-generation entry which must contribute
+	// managed demand but is not an independently scheduled task. Such an entry
+	// owns no root factory and does not prevent the outcome-plain fixed point
+	// from selecting a smaller synchronous-status implementation. It is valid
+	// only for a pure AsyncDemand managed root with no raw crossing.
+	EmissionEntry bool
 }
 
 // Roots is a set of externally established SSA entry demands.
@@ -744,6 +750,7 @@ type SSARootPlan struct {
 	Demand         Demand
 	ManagedDemand  Demand
 	RawPlainDemand bool
+	EmissionEntry  bool
 }
 
 // SSAPlan is the compilation-scoped whole-program result. Its maps remain
@@ -894,7 +901,7 @@ func (p *SSAPlan) RootFactoryRoots() []SSARootPlan {
 	}
 	roots := make([]SSARootPlan, 0, len(p.roots))
 	for _, root := range p.roots {
-		if !root.ManagedDemand.Contains(AsyncDemand) {
+		if root.EmissionEntry || !root.ManagedDemand.Contains(AsyncDemand) {
 			continue
 		}
 		function, ok := p.FunctionPlan(root.Function)
@@ -1118,8 +1125,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		maxPlain = DefaultMaxPlainInstructions
 	}
 	type rootEntryDemand struct {
-		managed Demand
-		raw     bool
+		managed   Demand
+		raw       bool
+		scheduled bool
 	}
 	rootDemand := make(map[*ssa.Function]rootEntryDemand, len(roots))
 	for i, root := range roots {
@@ -1149,9 +1157,16 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		if managed == NoDemand && !root.RawPlainDemand {
 			return nil, fmt.Errorf("coro: root %d function %q has no demand", i, root.Function.Name())
 		}
+		if root.EmissionEntry && (managed != AsyncDemand || root.RawPlainDemand) {
+			return nil, fmt.Errorf(
+				"coro: root %d function %q emission entry requires async managed demand without a raw crossing",
+				i, root.Function.Name(),
+			)
+		}
 		joined := rootDemand[canonical]
 		joined.managed = joined.managed.Join(managed)
 		joined.raw = joined.raw || root.RawPlainDemand
+		joined.scheduled = joined.scheduled || !root.EmissionEntry
 		rootDemand[canonical] = joined
 	}
 
@@ -1466,6 +1481,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		canonicalRoots = append(canonicalRoots, SSARootPlan{
 			Function: fn, ID: id,
 			Demand: aggregateDemand(demand.managed, demand.raw), ManagedDemand: demand.managed, RawPlainDemand: demand.raw,
+			EmissionEntry: !demand.scheduled,
 		})
 	}
 	sort.Slice(canonicalRoots, func(i, j int) bool { return canonicalRoots[i].ID < canonicalRoots[j].ID })
@@ -2264,7 +2280,14 @@ func applySSAOutcomePlainPlans(
 		ids[function] = id
 	}
 	for _, root := range roots {
-		primaryBlocked[root.ID] = true
+		if root.EmissionEntry {
+			// A package-generation entry is an exact future static caller from a
+			// consumer archive. It may therefore select the same bounded
+			// outcome-primary ABI as a direct call observed in this package.
+			direct[root.ID] = true
+		} else {
+			primaryBlocked[root.ID] = true
+		}
 	}
 	for reference := range graph.references {
 		primaryBlocked[reference.target] = true

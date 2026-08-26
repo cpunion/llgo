@@ -70,6 +70,61 @@ func MisuseAsWorker(a0 uintptr) uintptr {
 }
 `
 
+const coroCallableShadowTypedCCodeAddressFixture = `package typedccodeaddr
+
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+
+//llgo:link raw llgo.syscall
+func raw(fn, a0 uintptr) (uintptr, uintptr, uintptr)
+
+//llgo:link write C.write
+func write(fd int, buf uintptr, count int) int
+
+func Observe() uintptr { return funcPCABI0(write) }
+
+func MisuseAsWorker(a0 uintptr) uintptr {
+	r1, _, _ := raw(funcPCABI0(write), a0)
+	return r1
+}
+`
+
+func TestCoroCallableShadowRejectsTypedCAddressWithoutAbortingInventory(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/typedccodeaddr", coroCallableShadowTypedCCodeAddressFixture)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis, err := AnalyzeCoroCallableShadows(universe)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const wantReason = "typed-c-code-address-is-not-worker-callable"
+	for _, name := range []string{"Observe", "MisuseAsWorker"} {
+		producer := exactIntrinsicOpcodeCall(t, universe, pkg.ssa.Func(name), llgoFuncPCABI0)
+		if shadow, ok := analysis.Producer(producer); ok {
+			t.Fatalf("%s typed C address unexpectedly received worker shadow %+v", name, shadow)
+		}
+		if reason, ok := analysis.ProducerRejection(producer); !ok || reason != wantReason {
+			t.Fatalf("%s typed C address rejection = %q, %t; want %q", name, reason, ok, wantReason)
+		}
+	}
+
+	call := exactWorkerSyscallCall(t, universe, pkg.ssa.Func("MisuseAsWorker"))
+	sink, ok := analysis.Sink(call)
+	if !ok || sink.Certified || sink.Reason != wantReason || len(sink.Candidates) != 0 {
+		t.Fatalf("typed C address worker sink = %+v, %t; want exact fail-closed rejection", sink, ok)
+	}
+}
+
 func TestCoroCallableShadowClassifiesManagedFuncPCAsCodeAddressOnly(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	pkg := testProg.addPackage(t, "example.com/emission/managedcodeaddr", coroCallableShadowManagedCodeAddressFixture)

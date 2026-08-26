@@ -248,6 +248,54 @@ func Worker(enabled bool) {
 	}
 }
 
+func TestCoroProgramCapabilitiesIncludeFrozenWorkerCleanup(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func foreign()
+func Root() { defer foreign() }
+`)
+	function := ssaPkg.Func("Root")
+	owner := &preparedEmissionPackage{identity: "foo"}
+	physical := &coroPhysicalFunctionPlan{
+		function: function, owner: owner,
+		reachableBlocks: make(map[*ssa.BasicBlock]bool),
+		instructions:    make(map[ssa.Instruction]coroPhysicalInstructionPlan),
+	}
+	var deferred *ssa.Defer
+	for _, block := range function.Blocks {
+		physical.reachableBlocks[block] = true
+		for _, instruction := range block.Instrs {
+			physical.instructions[instruction] = coroPhysicalInstructionPlan{}
+			if candidate, ok := instruction.(*ssa.Defer); ok {
+				deferred = candidate
+			}
+		}
+	}
+	if deferred == nil {
+		t.Fatal("worker cleanup fixture has no defer")
+	}
+	physical.cleanup = &coroStaticCleanupPlan{sites: []*coroStaticCleanupSitePlan{{
+		instruction: deferred,
+		kind:        coroStaticCleanupForeignWorker,
+		foreignWorker: &coroWorkerForeignCallShape{
+			mode: coroForeignCallModeWorker,
+		},
+	}}}
+	stage := newCoroPhysicalPlanStage()
+	if err := stage.freezePhysicalFunctionPlan(physical); err != nil {
+		t.Fatal(err)
+	}
+	ir := newCoroProgramIR()
+	ir.callsFrozen = true
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if err := ir.commitPhysicalFunctionPlans(stage, map[emissionFunctionOwnerKey]none{key: {}}); err != nil {
+		t.Fatal(err)
+	}
+	seeds, err := ir.programCapabilitySeeds()
+	if err != nil || !seeds[function].Worker() {
+		t.Fatalf("worker cleanup capability = (%#x, %v), want worker", seeds[function], err)
+	}
+}
+
 func TestCoroProgramCapabilitiesUseOnlyReachableNativeFaultRecipes(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 func Probe() byte { return 1 }

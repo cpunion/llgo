@@ -820,6 +820,14 @@ func (b Builder) DICopyCurrentDebugLocation(from Builder) {
 }
 
 func (b Builder) DebugFunction(f Function, funcScope *types.Scope, pos token.Position, bodyPos token.Position) {
+	b.DebugFunctionNamed(f, f.Name(), f.Name(), funcScope, pos, bodyPos)
+}
+
+// DebugFunctionNamed attaches source-facing and linker-facing names to f.
+// Lowering may give one Go function a physical coroutine or adapter suffix;
+// debuggers should still present the logical Go name while symbol lookup uses
+// the exact emitted linkage name.
+func (b Builder) DebugFunctionNamed(f Function, name, linkageName string, funcScope *types.Scope, pos token.Position, bodyPos token.Position) {
 	b.diFuncScope = funcScope
 	p := f
 	if p.diFunc == nil {
@@ -836,8 +844,8 @@ func (b Builder) DebugFunction(f Function, funcScope *types.Scope, pos token.Pos
 		})
 		dif := llvm.DIFunction{
 			Type:         diFuncType,
-			Name:         p.Name(),
-			LinkageName:  p.Name(),
+			Name:         name,
+			LinkageName:  linkageName,
 			File:         b.di().file(pos.Filename).ll,
 			Line:         pos.Line,
 			ScopeLine:    bodyPos.Line,

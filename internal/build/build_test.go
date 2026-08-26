@@ -1863,6 +1863,52 @@ func TestDoPackageCompileOnlyOmitsRunnableCoroCode(t *testing.T) {
 	}
 }
 
+func TestDoModeGenEmitsRequestedPackageSourceBodiesWithoutMain(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "generation_roots.go")
+	if err := os.WriteFile(file, []byte(`package main
+
+func Exported(value int) int { return hidden(value) }
+func hidden(value int) int   { return value + 1 }
+
+func MayPanic(value any, fail bool) int {
+	if fail { panic(value) }
+	return 1
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(llgoBuildCache, "0")
+	conf := NewDefaultConf(ModeGen)
+	pkgs, err := Do([]string{file}, conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 1 || pkgs[0].LPkg == nil {
+		t.Fatalf("Do returned packages = %+v, want one generated package", pkgs)
+	}
+	defer pkgs[0].LPkg.Prog.Dispose()
+	module := pkgs[0].LPkg.Module()
+	for _, name := range []string{"main.Exported", "main.hidden"} {
+		function := module.NamedFunction(name)
+		if function.IsNil() || function.IsDeclaration() {
+			t.Fatalf("ModeGen omitted source body %q:\n%s", name, module.String())
+		}
+	}
+	if function := module.NamedFunction("main.MayPanic"); !function.IsNil() {
+		t.Fatalf("ModeGen emitted a redundant plain MayPanic body:\n%s", module.String())
+	}
+	if function := module.NamedFunction("main.MayPanic$outcome"); function.IsNil() || function.IsDeclaration() {
+		t.Fatalf("ModeGen omitted required MayPanic outcome entry:\n%s", module.String())
+	}
+	if strings.Contains(module.String(), coroProgramBootstrapSymbolV2) {
+		t.Fatalf("IR generation emitted runnable bootstrap state:\n%s", module.String())
+	}
+	if strings.Contains(module.String(), "__llgo_coro_root_factory_") ||
+		strings.Contains(module.String(), "__llgo_coro_root_package_") {
+		t.Fatalf("IR generation emitted scheduler root factories for package entries:\n%s", module.String())
+	}
+}
+
 func TestDoOptimizesUnreachableBodylessCalls(t *testing.T) {
 	conf := NewDefaultConf(ModeGen)
 	conf.AllowNoBody = true

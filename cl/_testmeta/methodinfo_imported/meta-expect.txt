@@ -1,23 +1,23 @@
 [OrdinaryEdges]
-__llgo_coro_root_factory_descriptor_v1.50a9fec3ef256a44a911c7c6c3d0afc6:
-    __llgo_coro_root_factory_v1.50a9fec3ef256a44a911c7c6c3d0afc6
-__llgo_coro_root_factory_descriptor_v1.7242c457f23a2cfb7932196901d14226:
-    __llgo_coro_root_factory_v1.7242c457f23a2cfb7932196901d14226
-__llgo_coro_root_factory_v1.50a9fec3ef256a44a911c7c6c3d0afc6:
+__llgo_coro_root_factory_descriptor_v1.4721ff734fa7ecda76b5c81929653ba0:
+    __llgo_coro_root_factory_v1.4721ff734fa7ecda76b5c81929653ba0
+__llgo_coro_root_factory_descriptor_v1.4c23332bfa6e346e89a2af0de2c8c136:
+    __llgo_coro_root_factory_v1.4c23332bfa6e346e89a2af0de2c8c136
+__llgo_coro_root_factory_v1.4721ff734fa7ecda76b5c81929653ba0:
     main.init$coro
-__llgo_coro_root_factory_v1.7242c457f23a2cfb7932196901d14226:
+__llgo_coro_root_factory_v1.4c23332bfa6e346e89a2af0de2c8c136:
     main.main$coro
-__llgo_coro_root_package_v1.3a1f7089a23ccc0566b03dfc81419cdb:
-    __llgo_coro_root_package_v1.3a1f7089a23ccc0566b03dfc81419cdb.entries
-__llgo_coro_root_package_v1.3a1f7089a23ccc0566b03dfc81419cdb.entries:
-    __llgo_coro_root_factory_descriptor_v1.50a9fec3ef256a44a911c7c6c3d0afc6
-    __llgo_coro_root_factory_descriptor_v1.7242c457f23a2cfb7932196901d14226
+__llgo_coro_root_package_v1.fba5af7e2efcf99b121825492342fa57:
+    __llgo_coro_root_package_v1.fba5af7e2efcf99b121825492342fa57.entries
+__llgo_coro_root_package_v1.fba5af7e2efcf99b121825492342fa57.entries:
+    __llgo_coro_root_factory_descriptor_v1.4721ff734fa7ecda76b5c81929653ba0
+    __llgo_coro_root_factory_descriptor_v1.4c23332bfa6e346e89a2af0de2c8c136
 llvm.compiler.used:
-    __llgo_coro_library_effect_v9.2a28014a3a7d37f281e89de3c25c125e
+    __llgo_coro_library_effect_v11.160d1b97324cbb60c9b6af8e415ee41d
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.50a9fec3ef256a44a911c7c6c3d0afc6
-    __llgo_coro_root_factory_descriptor_v1.7242c457f23a2cfb7932196901d14226
-    __llgo_coro_root_package_v1.3a1f7089a23ccc0566b03dfc81419cdb
+    __llgo_coro_root_factory_descriptor_v1.4721ff734fa7ecda76b5c81929653ba0
+    __llgo_coro_root_factory_descriptor_v1.4c23332bfa6e346e89a2af0de2c8c136
+    __llgo_coro_root_package_v1.fba5af7e2efcf99b121825492342fa57
 main.init$coro:
     __llgo_coro_await_consume_v1
     __llgo_coro_await_inline_destroy_consume_v4
@@ -25,7 +25,7 @@ main.init$coro:
     __llgo_coro_await_prepare_inline_v4
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.50a9fec3ef256a44a911c7c6c3d0afc6
+    __llgo_coro_frame_descriptor_v1.4721ff734fa7ecda76b5c81929653ba0
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -56,7 +56,7 @@ main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.7242c457f23a2cfb7932196901d14226
+    __llgo_coro_frame_descriptor_v1.4c23332bfa6e346e89a2af0de2c8c136
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1

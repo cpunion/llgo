@@ -115,6 +115,7 @@ func TestEmissionUniverseStructuralTypeKeyCacheIsSessionLocalAndModeSeparated(t 
 		{mode: emissionTypeKeyStrictABI, want: structuralEmissionABITypeKey(typ)},
 		{mode: emissionTypeKeyGoLinknameABI, want: structuralGoLinknameABITypeKey(typ)},
 		{mode: emissionTypeKeyIdentityFreeABI, want: structuralNamedIdentityFreeABITypeKey(typ)},
+		{mode: emissionTypeKeyCFunctionABI, want: structuralCFunctionABITypeKey(typ)},
 	}
 	for _, test := range tests {
 		if got := universe.emissionTypeKeys.key(test.mode, typ); got != test.want {

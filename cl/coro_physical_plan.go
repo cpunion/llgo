@@ -1237,6 +1237,31 @@ func (ir *coroProgramIR) programCapabilitySeeds() (map[*ssa.Function]coro.Progra
 				seeds[key.function] |= coro.NativeDefaultFaultBoundaryProgramCapability()
 			}
 		}
+		if function.cleanup != nil {
+			for index, site := range function.cleanup.sites {
+				if site == nil || site.instruction == nil ||
+					site.instruction.Parent() != function.function ||
+					site.instruction.Block() == nil ||
+					!function.reachableBlocks[site.instruction.Block()] {
+					return nil, fmt.Errorf(
+						"coroutine program capabilities found incomplete cleanup site %d in %q",
+						index, function.function.Name(),
+					)
+				}
+				switch site.kind {
+				case coroStaticCleanupCgoWorker:
+					if site.cgoWorker == nil {
+						return nil, fmt.Errorf("coroutine program capabilities found a cgo worker cleanup without its typed shape")
+					}
+					seeds[key.function] |= coro.NewProgramCapabilities(true, false)
+				case coroStaticCleanupForeignWorker:
+					if site.foreignWorker == nil || site.foreignWorker.mode != coroForeignCallModeWorker {
+						return nil, fmt.Errorf("coroutine program capabilities found a foreign worker cleanup without its bounded-worker shape")
+					}
+					seeds[key.function] |= coro.NewProgramCapabilities(true, false)
+				}
+			}
+		}
 	}
 	// Plain and raw-plain bodies have no physical function plan, but execute
 	// synchronously inside their managed caller's current native resume. Their

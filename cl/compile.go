@@ -920,7 +920,11 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			if dbgEnabled {
 				pos := p.goProg.Fset.Position(f.Pos())
 				bodyPos := p.getFuncBodyPos(f)
-				b.DebugFunction(fn, debugFunctionScope(f), pos, bodyPos)
+				logicalName := fn.Name()
+				if pkgTypes != nil {
+					logicalName = funcInfoDisplayName(funcName(pkgTypes, f, false))
+				}
+				b.DebugFunctionNamed(fn, logicalName, fn.Name(), debugFunctionScope(f), pos, bodyPos)
 			}
 			// Function bodies are emitted by deferred initializers on one shared
 			// context. Reset cgo side-channel state at execution time as well as

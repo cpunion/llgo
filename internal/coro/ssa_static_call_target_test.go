@@ -189,6 +189,36 @@ func runtimeInit() { exported() }
 	}
 }
 
+func TestSSAPlanRootFactoryRootsExcludePackageEmissionEntry(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "package_emission_factories.go", `package coroid
+var channel chan int
+func libraryEntry() { <-channel }
+func scheduledEntry() { <-channel }
+`)
+	libraryEntry := packageFunction(t, pkg, "libraryEntry")
+	scheduledEntry := packageFunction(t, pkg, "scheduledEntry")
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: libraryEntry, ManagedDemand: AsyncDemand, EmissionEntry: true},
+		{Function: scheduledEntry, ManagedDemand: AsyncDemand},
+	}, SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factories := plan.RootFactoryRoots()
+	if len(factories) != 1 || factories[0].Function != scheduledEntry {
+		t.Fatalf("root factory roots = %+v, want scheduledEntry only", factories)
+	}
+	roots := plan.Roots()
+	if len(roots) != 2 {
+		t.Fatalf("roots = %+v, want two entries", roots)
+	}
+	for _, root := range roots {
+		if root.Function == libraryEntry && !root.EmissionEntry {
+			t.Fatalf("library entry lost its emission-only role: %+v", root)
+		}
+	}
+}
+
 func onlyStaticTargetTestCall(
 	t *testing.T,
 	owner, target *ssa.Function,
