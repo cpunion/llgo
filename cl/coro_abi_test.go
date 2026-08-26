@@ -737,12 +737,15 @@ func Parent(value uint32) { Child(value, -1) }
 		t.Fatal(err)
 	}
 	guardedIR.functionPreambles[parentKey] = guardedPreamble
-	guardedUniverse := *universe
-	guardedUniverse.coroProgramIR = &guardedIR
-	forward, err := planCoroPhysicalTailForward(physical, plan, &coroPhysicalPureSSAAudit{
-		universe: &guardedUniverse,
-		fn:       parentSSA,
-	})
+	forward, err := func() (*coroPhysicalTailForwardPlan, error) {
+		originalIR := universe.coroProgramIR
+		universe.coroProgramIR = &guardedIR
+		defer func() { universe.coroProgramIR = originalIR }()
+		return planCoroPhysicalTailForward(physical, plan, &coroPhysicalPureSSAAudit{
+			universe: universe,
+			fn:       parentSSA,
+		})
+	}()
 	if err != nil {
 		t.Fatal(err)
 	}
