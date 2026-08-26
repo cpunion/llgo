@@ -234,6 +234,43 @@ func f() {}
 	}
 }
 
+func TestDebugFunctionNamedSeparatesLogicalAndLinkageNames(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "named.go", `package p
+func f() {}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typesPkg, err := (&types.Config{}).Check("example.com/p", fset, []*ast.File{file}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prog := NewProgram(&Target{OptLevel: optlevel.O0})
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	pkg := prog.NewPackage("p", "example.com/p")
+	pkg.InitDebug("p", "example.com/p", fset)
+	decl := file.Decls[0].(*ast.FuncDecl)
+	object := typesPkg.Scope().Lookup("f").(*types.Func)
+	const logical = "example.com/p.f"
+	const linkage = "example.com/p.f$coro"
+	fn := pkg.NewFunc(linkage, object.Type().(*types.Signature), InGo)
+	builder := fn.MakeBody(1)
+	defer builder.Dispose()
+	bodyPos := fset.Position(decl.Body.Lbrace)
+	builder.DebugFunctionNamed(fn, logical, linkage, object.Scope(), fset.Position(object.Pos()), bodyPos)
+	builder.Return()
+	builder.EndBuild()
+	pkg.FinalizeDebug()
+
+	ir := pkg.Module().String()
+	if !strings.Contains(ir, `!DISubprogram(name: "`+logical+`", linkageName: "`+linkage+`"`) {
+		t.Fatalf("separate logical/linkage debug names missing:\n%s", ir)
+	}
+}
+
 func newDebugRuntimePackage() *types.Package {
 	pkg := types.NewPackage(PkgRuntime, "runtime")
 	unsafePointer := types.Typ[types.UnsafePointer]
