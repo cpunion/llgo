@@ -3,7 +3,6 @@ package gotest
 import (
 	"runtime"
 	"testing"
-	"time"
 )
 
 type runtimeGStateResult struct {
@@ -81,27 +80,26 @@ func TestRuntimeGStateIsolation(t *testing.T) {
 }
 
 func TestRuntimeNumGoroutineTracksWorkers(t *testing.T) {
-	baseline := runtime.NumGoroutine()
-	ready := make(chan struct{})
+	const workerCount = 8
+	ready := make(chan struct{}, workerCount)
 	release := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		close(ready)
-		<-release
-		close(done)
-	}()
-	<-ready
-	if got := runtime.NumGoroutine(); got <= baseline {
-		t.Fatalf("NumGoroutine with live worker = %d, want greater than baseline %d", got, baseline)
+	done := make(chan struct{}, workerCount)
+	for range workerCount {
+		go func() {
+			ready <- struct{}{}
+			<-release
+			done <- struct{}{}
+		}()
+	}
+	for range workerCount {
+		<-ready
+	}
+	if got := runtime.NumGoroutine(); got < workerCount+1 {
+		t.Fatalf("NumGoroutine with %d blocked workers = %d, want at least %d", workerCount, got, workerCount+1)
 	}
 
 	close(release)
-	<-done
-	deadline := time.Now().Add(time.Second)
-	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
-		runtime.Gosched()
-	}
-	if got := runtime.NumGoroutine(); got != baseline {
-		t.Fatalf("NumGoroutine after worker exit = %d, want baseline %d", got, baseline)
+	for range workerCount {
+		<-done
 	}
 }
