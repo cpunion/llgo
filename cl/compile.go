@@ -1149,6 +1149,25 @@ func (p *context) debugRef(b llssa.Builder, v *ssa.DebugRef) {
 			return
 		}
 	} else {
+		if function, ok := v.X.(*ssa.Function); ok && p.compilation != nil {
+			canonical := function
+			if universe := p.immutableEmissionUniverse(); universe != nil {
+				resolved, present := universe.Resolve(function)
+				if !present {
+					return
+				}
+				canonical = resolved
+			}
+			if plan := p.immutablePlan(); plan != nil {
+				functionPlan, emitted := plan.FunctionPlan(canonical)
+				if !emitted || functionPlan.Emission == coro.EmitNone {
+					// A function constant referenced only by GlobalDebug metadata has
+					// no executable value. Debug emission must not manufacture an
+					// entry or descriptor which the frozen program deliberately elided.
+					return
+				}
+			}
+		}
 		value = p.compileValue(b, v.X)
 	}
 	fn := v.Parent()

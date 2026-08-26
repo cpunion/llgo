@@ -42,6 +42,7 @@ var GlobalArrays struct {
 
 type Box struct { Value uint32 }
 type Empty struct{}
+func (value Empty) Self() Empty { return value }
 type ZeroField struct {
 	Value uint32
 	Empty struct{}
@@ -133,6 +134,11 @@ func StaticArrayRange(value *[3]int) {
 func NextArray() *[3]int { return nil }
 func EffectfulArrayRange() {
 	for index := range *NextArray() { Sink += uint32(index) }
+}
+
+func ExactClosureZeroResult() Empty {
+	callback := Empty{}.Self
+	return callback()
 }
 `
 
@@ -257,6 +263,38 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 			guarded := requireCoroPhysicalFunction(t, module, "foo.Guarded").String()
 			if strings.Contains(guarded, coroFaultPrepareHookV1) || strings.Contains(guarded, "AssertNilDeref") {
 				t.Fatalf("dominated non-nil FieldAddr retained a runtime/terminal guard:\n%s", guarded)
+			}
+			exactClosureFunction := functions["ExactClosureZeroResult"]
+			var exactClosureCall *ssa.Call
+			var exactClosureTarget *ssa.Function
+			for _, block := range exactClosureFunction.Blocks {
+				for _, instruction := range block.Instrs {
+					call, ok := instruction.(*ssa.Call)
+					if !ok {
+						continue
+					}
+					closure, ok := call.Call.Value.(*ssa.MakeClosure)
+					if !ok {
+						continue
+					}
+					exactClosureCall = call
+					exactClosureTarget, _ = closure.Fn.(*ssa.Function)
+				}
+			}
+			if exactClosureCall == nil || exactClosureTarget == nil {
+				t.Fatalf("exact closure call was not retained in SSA: call=%v target=%v",
+					exactClosureCall, exactClosureTarget)
+			}
+			callPlan, callPlanned := plan.CallPlan(exactClosureCall)
+			if !callPlanned || callPlan.MayBeNil {
+				t.Fatalf("exact closure call lacks its frozen non-nil proof: call=%v target=%v plan=%+v present=%t",
+					exactClosureCall, exactClosureTarget, callPlan, callPlanned)
+			}
+			exactClosureBody := requireCoroPhysicalFunction(t, module, "foo.ExactClosureZeroResult").String()
+			if strings.Contains(exactClosureBody, "AssertNilDeref") ||
+				strings.Contains(exactClosureBody, coroFaultPrepareHookV1) ||
+				strings.Count(exactClosureBody, "call %foo.Empty ") != 1 {
+				t.Fatalf("exact non-nil closure did not lower to one direct call with zero fault edges:\n%s", exactClosureBody)
 			}
 			cleanup := requireCoroPhysicalFunction(t, module, "foo.WithCleanup").String()
 			payload := strings.Index(cleanup, "call void @"+coroFaultPayloadHookV1)
@@ -715,44 +753,45 @@ func compileCoroImplicitNilFaultFixture(
 		t.Fatal(err)
 	}
 	functions := map[string]*ssa.Function{
-		"Nullable":             ssaPkg.Func("Nullable"),
-		"EmptyLoad":            ssaPkg.Func("EmptyLoad"),
-		"InterfaceCompare":     ssaPkg.Func("InterfaceCompare"),
-		"StaticNil":            ssaPkg.Func("StaticNil"),
-		"StaticNilFieldLoad":   ssaPkg.Func("StaticNilFieldLoad"),
-		"NullableStore":        ssaPkg.Func("NullableStore"),
-		"StaticNilStore":       ssaPkg.Func("StaticNilStore"),
-		"GlobalArrayStore":     ssaPkg.Func("GlobalArrayStore"),
-		"ZeroFieldEqual":       ssaPkg.Func("ZeroFieldEqual"),
-		"Guarded":              ssaPkg.Func("Guarded"),
-		"WithCleanup":          ssaPkg.Func("WithCleanup"),
-		"RecoverFault":         ssaPkg.Func("RecoverFault"),
-		"WithRecover":          ssaPkg.Func("WithRecover"),
-		"StringAt":             ssaPkg.Func("StringAt"),
-		"ConstantStringAt":     ssaPkg.Func("ConstantStringAt"),
-		"ArrayAt":              ssaPkg.Func("ArrayAt"),
-		"SliceAt":              ssaPkg.Func("SliceAt"),
-		"SliceAtUnsigned":      ssaPkg.Func("SliceAtUnsigned"),
-		"StaticNilSliceAt":     ssaPkg.Func("StaticNilSliceAt"),
-		"SliceHigh":            ssaPkg.Func("SliceHigh"),
-		"ArrayHigh":            ssaPkg.Func("ArrayHigh"),
-		"StringHigh":           ssaPkg.Func("StringHigh"),
-		"SliceLowUnsigned":     ssaPkg.Func("SliceLowUnsigned"),
-		"SliceFullMaxUnsigned": ssaPkg.Func("SliceFullMaxUnsigned"),
-		"ArrayFullMax":         ssaPkg.Func("ArrayFullMax"),
-		"SliceFullHigh":        ssaPkg.Func("SliceFullHigh"),
-		"SliceFullLow":         ssaPkg.Func("SliceFullLow"),
-		"Divide":               ssaPkg.Func("Divide"),
-		"Remainder":            ssaPkg.Func("Remainder"),
-		"DivideConstantZero":   ssaPkg.Func("DivideConstantZero"),
-		"GuardedDivide":        ssaPkg.Func("GuardedDivide"),
-		"DivideWithCleanup":    ssaPkg.Func("DivideWithCleanup"),
-		"DivideWithRecover":    ssaPkg.Func("DivideWithRecover"),
-		"PointerEqual":         ssaPkg.Func("PointerEqual"),
-		"ValueReceiverCall":    ssaPkg.Func("ValueReceiverCall"),
-		"StaticArrayRange":     ssaPkg.Func("StaticArrayRange"),
-		"NextArray":            ssaPkg.Func("NextArray"),
-		"EffectfulArrayRange":  ssaPkg.Func("EffectfulArrayRange"),
+		"Nullable":               ssaPkg.Func("Nullable"),
+		"EmptyLoad":              ssaPkg.Func("EmptyLoad"),
+		"InterfaceCompare":       ssaPkg.Func("InterfaceCompare"),
+		"StaticNil":              ssaPkg.Func("StaticNil"),
+		"StaticNilFieldLoad":     ssaPkg.Func("StaticNilFieldLoad"),
+		"NullableStore":          ssaPkg.Func("NullableStore"),
+		"StaticNilStore":         ssaPkg.Func("StaticNilStore"),
+		"GlobalArrayStore":       ssaPkg.Func("GlobalArrayStore"),
+		"ZeroFieldEqual":         ssaPkg.Func("ZeroFieldEqual"),
+		"Guarded":                ssaPkg.Func("Guarded"),
+		"WithCleanup":            ssaPkg.Func("WithCleanup"),
+		"RecoverFault":           ssaPkg.Func("RecoverFault"),
+		"WithRecover":            ssaPkg.Func("WithRecover"),
+		"StringAt":               ssaPkg.Func("StringAt"),
+		"ConstantStringAt":       ssaPkg.Func("ConstantStringAt"),
+		"ArrayAt":                ssaPkg.Func("ArrayAt"),
+		"SliceAt":                ssaPkg.Func("SliceAt"),
+		"SliceAtUnsigned":        ssaPkg.Func("SliceAtUnsigned"),
+		"StaticNilSliceAt":       ssaPkg.Func("StaticNilSliceAt"),
+		"SliceHigh":              ssaPkg.Func("SliceHigh"),
+		"ArrayHigh":              ssaPkg.Func("ArrayHigh"),
+		"StringHigh":             ssaPkg.Func("StringHigh"),
+		"SliceLowUnsigned":       ssaPkg.Func("SliceLowUnsigned"),
+		"SliceFullMaxUnsigned":   ssaPkg.Func("SliceFullMaxUnsigned"),
+		"ArrayFullMax":           ssaPkg.Func("ArrayFullMax"),
+		"SliceFullHigh":          ssaPkg.Func("SliceFullHigh"),
+		"SliceFullLow":           ssaPkg.Func("SliceFullLow"),
+		"Divide":                 ssaPkg.Func("Divide"),
+		"Remainder":              ssaPkg.Func("Remainder"),
+		"DivideConstantZero":     ssaPkg.Func("DivideConstantZero"),
+		"GuardedDivide":          ssaPkg.Func("GuardedDivide"),
+		"DivideWithCleanup":      ssaPkg.Func("DivideWithCleanup"),
+		"DivideWithRecover":      ssaPkg.Func("DivideWithRecover"),
+		"PointerEqual":           ssaPkg.Func("PointerEqual"),
+		"ValueReceiverCall":      ssaPkg.Func("ValueReceiverCall"),
+		"StaticArrayRange":       ssaPkg.Func("StaticArrayRange"),
+		"NextArray":              ssaPkg.Func("NextArray"),
+		"EffectfulArrayRange":    ssaPkg.Func("EffectfulArrayRange"),
+		"ExactClosureZeroResult": ssaPkg.Func("ExactClosureZeroResult"),
 	}
 	roots := make(coro.Roots, 0, len(functions))
 	for _, function := range functions {

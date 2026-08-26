@@ -218,10 +218,8 @@ func validateCoroManagedDispatchAwaitShape(
 			callPlan.Kind, callPlan.Rep, callPlan.Open, callPlan.Unresolved,
 		)
 	}
-	sig := common.Signature()
-	if sig == nil || sig.Recv() != nil ||
-		typeParamCount(sig.TypeParams()) != 0 || typeParamCount(sig.RecvTypeParams()) != 0 {
-		return fail("call signature must be receiver-free and non-generic")
+	if _, err := coroConcreteManagedCallableSignature(common.Signature()); err != nil {
+		return fail("call signature is not one concrete receiver-free callable: %v", err)
 	}
 	valuePlan, ok := plan.ValuePlan(common.Value)
 	if !ok || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 ||

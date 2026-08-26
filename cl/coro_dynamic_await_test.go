@@ -25,8 +25,10 @@ import (
 
 	"github.com/xgo-dev/llgo/internal/coro"
 	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 func TestCoroManagedDispatchAwaitEmitsCapabilityBranchesAndChildHandoff(t *testing.T) {
@@ -172,6 +174,159 @@ func Apply(callback func(int) int, value int) int {
 				t.Fatalf("verify managed descriptor %s branch after CoroSplit: %v\n%s", test.name, err, module.String())
 			}
 		})
+	}
+}
+
+func TestCoroInstantiatedBoundMethodsUseOneConcreteDescriptorEach(t *testing.T) {
+	const source = `package foo
+type Foo[T any] struct { value T }
+func Seed() {}
+func (foo Foo[T]) Get() T { Seed(); return foo.value }
+var NewInt = Foo[int]{value: 1}.Get
+var NewString = Foo[string]{value: "x"}.Get
+func Root() { _ = NewInt(); _ = NewString() }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	initFn, root, seed := ssaPkg.Func("init"), ssaPkg.Func("Root"), ssaPkg.Func("Seed")
+	wrappers := make(map[string]*ssa.Function)
+	for function := range ssautil.AllFunctions(ssaPkg.Prog) {
+		if function == nil || !strings.HasPrefix(function.Synthetic, "bound method wrapper for ") ||
+			len(function.FreeVars) != 1 {
+			continue
+		}
+		receiver := function.FreeVars[0].Type().String()
+		switch {
+		case strings.Contains(receiver, "Foo[int]"):
+			wrappers["int"] = function
+		case strings.Contains(receiver, "Foo[string]"):
+			wrappers["string"] = function
+		}
+	}
+	calls := make(map[string]*ssa.Call)
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Common().StaticCallee() != nil {
+				continue
+			}
+			switch call.Type().String() {
+			case "int":
+				calls["int"] = call
+			case "string":
+				calls["string"] = call
+			}
+		}
+	}
+	if len(wrappers) != 2 || len(calls) != 2 {
+		t.Fatalf("fixture wrappers=%v calls=%v, want int and string", wrappers, calls)
+	}
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: initFn, Demand: coro.SyncDemand}, {Function: root, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function == seed {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyClosedDynamicCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.SSAClosedDynamicCallCertificate, bool, error) {
+				for kind, dynamic := range calls {
+					if call == dynamic {
+						return coro.SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{wrappers[kind]}}, true, nil
+					}
+				}
+				return coro.SSAClosedDynamicCallCertificate{}, false, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, wrapper := range wrappers {
+		functionPlan, found := plan.FunctionPlan(wrapper)
+		if !found || functionPlan.FuncRep != coro.Dispatch || functionPlan.Emission != coro.EmitCoroutine ||
+			functionPlan.Primary != coro.PrimaryCoroutine || plan.HasRawPlainVariant(wrapper) {
+			t.Fatalf("%s bound wrapper plan = %+v, present=%t raw-plain=%t; want one coroutine descriptor primary",
+				kind, functionPlan, found, plan.HasRawPlainVariant(wrapper))
+		}
+		callPlan, found := plan.CallPlan(calls[kind])
+		if !found || callPlan.Rep != coro.Dispatch || callPlan.Open || len(callPlan.Targets) != 1 {
+			t.Fatalf("%s dynamic CallPlan = %+v, present=%t; want one closed descriptor target", kind, callPlan, found)
+		}
+	}
+
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	compilation.PanicABI = coro.PanicExplicitStatusABIV0
+	compilation.FuncRepABI = coro.FuncRepABIV1
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatalf("compile instantiated bound methods: %v", err)
+	}
+	module := compiled.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify instantiated bound methods: %v\n%s", err, module.String())
+	}
+
+	descriptors, hashes := 0, make(map[[2]uint64]struct{})
+	for global := module.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+		if !strings.HasPrefix(global.Name(), coroPlainDispatchDescriptorPrefix) {
+			continue
+		}
+		descriptors++
+		initializer := global.Initializer()
+		if got := initializer.Operand(1).ZExtValue(); got != uint64(llssa.CoroDispatchFlagHasCoro) {
+			t.Fatalf("instantiated bound descriptor flags = %#x, want captured HasCoro only", got)
+		}
+		if initializer.Operand(4).IsAConstantPointerNull().IsNil() ||
+			!initializer.Operand(5).IsAConstantPointerNull().IsNil() {
+			t.Fatalf("instantiated bound descriptor publishes a redundant plain entry or lacks its coroutine entry: %v", initializer)
+		}
+		hashes[[2]uint64{initializer.Operand(2).ZExtValue(), initializer.Operand(3).ZExtValue()}] = struct{}{}
+	}
+	coroThunks, plainThunks := 0, 0
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		switch {
+		case strings.HasPrefix(function.Name(), coroCoroDispatchThunkPrefix):
+			coroThunks++
+		case strings.HasPrefix(function.Name(), coroPlainDispatchThunkPrefix):
+			plainThunks++
+		}
+	}
+	if descriptors != 2 || len(hashes) != 2 || coroThunks != 2 || plainThunks != 0 {
+		t.Fatalf("instantiated bound emission descriptors=%d unique-hashes=%d coro-thunks=%d plain-thunks=%d; want 2,2,2,0\n%s",
+			descriptors, len(hashes), coroThunks, plainThunks, module.String())
+	}
+	for kind, wrapper := range wrappers {
+		name, err := universe.physicalName(ssaPkg, wrapper, funcName(ssaPkg.Pkg, wrapper, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !module.NamedFunction(name).IsNil() || module.NamedFunction(name+coroPrimarySuffix).IsNil() {
+			t.Fatalf("%s bound wrapper did not emit exactly its coroutine primary %q\n%s", kind, name+coroPrimarySuffix, module.String())
+		}
 	}
 }
 

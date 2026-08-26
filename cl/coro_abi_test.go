@@ -287,6 +287,52 @@ func Leaf(value uint32) uint32 {
 	}
 }
 
+func TestCoroGlobalDebugDoesNotMaterializeUndemandedFunction(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkgWithMode(t, `package foo
+func hidden() {}
+func Leaf(value uint32) uint32 {
+	local := hidden
+	_ = local
+	return value + 1
+}
+`, ssa.SanityCheckFunctions|ssa.InstantiateGenerics|ssa.GlobalDebug)
+	leaf, hidden := ssaPkg.Func("Leaf"), ssaPkg.Func("hidden")
+	functionDebugRef := false
+	for _, block := range leaf.Blocks {
+		for _, instruction := range block.Instrs {
+			debug, ok := instruction.(*ssa.DebugRef)
+			if ok && debug.X == hidden {
+				functionDebugRef = true
+			}
+		}
+	}
+	if !functionDebugRef {
+		t.Fatal("GlobalDebug SSA did not retain the undemanded function constant")
+	}
+
+	prog, pkg := compileCoroLeafPhysicalABIPackage(t, nil, ssaPkg, files, Options{
+		Debug:        true,
+		DebugSymbols: true,
+	})
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if strings.HasPrefix(function.Name(), "foo.hidden") {
+			t.Fatalf("debug metadata materialized undemanded function %q:\n%s", function.Name(), module.String())
+		}
+	}
+	for global := module.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+		if strings.HasPrefix(global.Name(), coroPlainDispatchDescriptorPrefix) {
+			t.Fatalf("debug metadata materialized an undemanded function descriptor %q:\n%s", global.Name(), module.String())
+		}
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify debug coroutine with elided function constant: %v\n%s", err, module.String())
+	}
+}
+
 func TestCoroLeafPhysicalABIUsesTargetPointerWidth(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	prog, pkg := compileCoroLeafPhysicalABI(t, &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
@@ -414,6 +460,31 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 		if strings.Contains(ir, forbidden) {
 			t.Fatalf("child-await lowering introduced forbidden stack/runtime coupling %q:\n%s", forbidden, ir)
 		}
+	}
+}
+
+func TestCoroChildAwaitPhysicalABIGlobalDebug(t *testing.T) {
+	prog, pkg := compileCoroChildAwaitPhysicalABIWithProgramCapabilities(
+		t, nil, coro.NewProgramCapabilities(false, false), true,
+		Options{Debug: true, DebugSymbols: true},
+	)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify debug child-await coroutines: %v\n%s", err, module.String())
+	}
+	parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
+	parentIR := parent.String()
+	if got := strings.Count(parentIR, "call void @"+coroPanicPrepareHookV1); got != 1 {
+		t.Fatalf("debug child-await shared terminal panic calls = %d, want 1:\n%s", got, parentIR)
+	}
+	located := regexp.MustCompile(
+		`call void @` + regexp.QuoteMeta(coroPanicPrepareHookV1) + `\([^\n]+\), !dbg ![0-9]+`,
+	)
+	if !located.MatchString(parentIR) {
+		t.Fatalf("debug child-await shared terminal panic call has no source location:\n%s", parentIR)
 	}
 }
 
@@ -2325,6 +2396,7 @@ func compileCoroChildAwaitPhysicalABIWithProgramCapabilities(
 	target *llssa.Target,
 	capabilities coro.ProgramCapabilities,
 	frozen bool,
+	frontendOptions ...Options,
 ) (llssa.Program, llssa.Package) {
 	t.Helper()
 	prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABI(t, target)
@@ -2335,9 +2407,17 @@ func compileCoroChildAwaitPhysicalABIWithProgramCapabilities(
 		FinalCoroProgramCapabilitiesFrozen: frozen,
 	}
 	enableCoroChildAwaitCompilation(compilation)
+	var options Options
+	if len(frontendOptions) != 0 {
+		options = frontendOptions[0]
+	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
-		PackageOptions{Compilation: compilation},
+		PackageOptions{
+			Compilation:        compilation,
+			FrontendOptions:    options,
+			FrontendOptionsSet: len(frontendOptions) != 0,
+		},
 	)
 	if err != nil {
 		prog.Dispose()

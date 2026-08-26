@@ -1137,7 +1137,7 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 			status,
 			p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()),
 		)
-		b.IfWithBranchWeights(isReturn, returned, p.sharedCoroAwaitTerminalBlock(body), 1000, 1)
+		b.IfWithBranchWeights(isReturn, returned, p.sharedCoroAwaitTerminalBlock(b, body), 1000, 1)
 		b.SetBlockContinuation(returned)
 		return p.loadCoroAwaitResult(b, resultSlot, results)
 	}
@@ -1197,8 +1197,9 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 // active at a time, so the function-wide outcome scratch and header line form
 // an exact predecessor-independent payload. No edge from this block returns to
 // source execution.
-func (p *context) sharedCoroAwaitTerminalBlock(body *coroBodyContext) llssa.BasicBlock {
-	if body == nil || body.cleanup != nil || body.header.IsNil() || body.outcomeScratch.IsNil() ||
+func (p *context) sharedCoroAwaitTerminalBlock(source llssa.Builder, body *coroBodyContext) llssa.BasicBlock {
+	if source == nil || source.Func != p.fn || body == nil || body.cleanup != nil ||
+		body.header.IsNil() || body.outcomeScratch.IsNil() ||
 		body.completion == nil || body.finalSuspend == nil || p.fn == nil {
 		panic("shared coroutine await terminal dispatch requires a no-cleanup physical body")
 	}
@@ -1208,6 +1209,7 @@ func (p *context) sharedCoroAwaitTerminalBlock(body *coroBodyContext) llssa.Basi
 	body.awaitTerminal = p.fn.MakeBlock()
 	b := p.fn.NewBuilder()
 	defer b.Dispose()
+	b.DICopyCurrentDebugLocation(source)
 	b.SetBlock(body.awaitTerminal)
 
 	status := b.Load(b.FieldAddr(body.outcomeScratch, outcomePlainCompletionStatus))

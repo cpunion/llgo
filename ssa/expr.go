@@ -1495,6 +1495,21 @@ func (b Builder) InlineCall(fn Expr, args ...Expr) (ret Expr) {
 //	t2 = println(t0, t1)
 //	t4 = t3()
 func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
+	return b.call(fn, false, args...)
+}
+
+// CallClosureKnownNonNil calls a Go function value whose code word is proven
+// non-nil by the frontend's SSA/control-flow analysis. It suppresses only the
+// zero-sized-result nil-call guard; callable ABI selection remains identical
+// to Call.
+func (b Builder) CallClosureKnownNonNil(fn Expr, args ...Expr) (ret Expr) {
+	if fn.kind != vkClosure {
+		panic("ssa: known-non-nil closure call requires a Go function value")
+	}
+	return b.call(fn, true, args...)
+}
+
+func (b Builder) call(fn Expr, closureNonNil bool, args ...Expr) (ret Expr) {
 	dbgInstrCall("Call", fn, args)
 	if ret, resolved := b.resolveRuntimeCall(fn, args); resolved {
 		return ret
@@ -1517,7 +1532,7 @@ func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
 		data = b.Field(fn, 1)
 		fn = b.Field(fn, 0)
 		sig = fn.raw.Type.(*types.Signature)
-		return b.callClosure(fn, data, sig, args)
+		return b.callClosure(fn, data, sig, args, closureNonNil)
 	case vkIfaceMethod:
 		data = b.Field(fn, 1)
 		fn = b.Field(fn, 0)
@@ -1614,10 +1629,12 @@ func (b Builder) resolveRuntimeCall(fn Expr, args []Expr) (ret Expr, resolved bo
 	return resolver(b, helper, fn, args)
 }
 
-func (b Builder) callClosure(fn, data Expr, sig *types.Signature, args []Expr) (ret Expr) {
+func (b Builder) callClosure(
+	fn, data Expr, sig *types.Signature, args []Expr, closureNonNil bool,
+) (ret Expr) {
 	prog := b.Prog
 	ret.Type = prog.retType(sig)
-	if sig.Results().Len() == 1 && prog.SizeOf(ret.Type) == 0 {
+	if !closureNonNil && sig.Results().Len() == 1 && prog.SizeOf(ret.Type) == 0 {
 		b.AssertNilDeref(fn)
 	}
 

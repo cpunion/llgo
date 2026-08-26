@@ -2699,6 +2699,31 @@ func (p *context) callMayRecover(v ssa.Value) bool {
 	return recoverCallValueMayRecover(p.recoverAnalysis(), v)
 }
 
+// dynamicCallValueKnownNonNil consumes only source SSA and the immutable
+// CallPlan. Exact functions/closures are non-nil producers; otherwise the
+// whole-program nilability fixed point or a dominating source guard must prove
+// the same fact. LLVM pointer identity is deliberately not inspected here.
+func (p *context) dynamicCallValueKnownNonNil(
+	call *ssa.CallCommon, source ssa.CallInstruction,
+) bool {
+	if call == nil || call.Value == nil {
+		return false
+	}
+	switch call.Value.(type) {
+	case *ssa.Function, *ssa.MakeClosure:
+		return true
+	}
+	if source != nil {
+		if plan := p.immutablePlan(); plan != nil {
+			if callPlan, planned := plan.CallPlan(source); planned && !callPlan.MayBeNil {
+				return true
+			}
+		}
+		return ssaFunctionValueProvenNonNilAt(call.Value, source)
+	}
+	return false
+}
+
 func (p *context) staticArrayLenBuiltinArg(b llssa.Builder, arg ssa.Value) (llssa.Expr, bool) {
 	var arr *types.Array
 	var sideEffect ssa.Value
@@ -3399,7 +3424,11 @@ func (p *context) callEx(
 		if rawC {
 			p.inCFunc = false
 		}
-		ret = p.emitDoAtSource(b, act, ds, mayRecover, source, fn, llssa.Builder.Call, args...)
+		buildCall := llssa.Builder.Call
+		if !rawC && p.dynamicCallValueKnownNonNil(call, source) {
+			buildCall = llssa.Builder.CallClosureKnownNonNil
+		}
+		ret = p.emitDoAtSource(b, act, ds, mayRecover, source, fn, buildCall, args...)
 	}
 	return
 }

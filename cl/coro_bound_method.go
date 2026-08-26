@@ -524,7 +524,14 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 		}
 	} else {
 		callee := common.StaticCallee()
-		if common.IsInvoke() || common.Method != nil || callee == nil || callee.Object() != object ||
+		calleeMethod, _ := calleeObject(callee).(*types.Func)
+		exactCalleeObject := calleeMethod == object
+		if !exactCalleeObject && calleeMethod != nil &&
+			coroMaterializedGenericInstance(callee) && calleeMethod.Origin() == object.Origin() &&
+			types.Identical(calleeMethod.Type(), object.Type()) {
+			exactCalleeObject = true
+		}
+		if common.IsInvoke() || common.Method != nil || callee == nil || !exactCalleeObject ||
 			len(common.Args) != len(fn.Params) ||
 			(promotedReceiver && !matchesPromotedReceiver(common.Args[0])) || (!promotedReceiver && common.Args[0] != receiver) {
 			return fmt.Errorf("concrete receiver does not use one exact receiver-first static call")

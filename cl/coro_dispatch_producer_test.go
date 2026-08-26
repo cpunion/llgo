@@ -260,6 +260,126 @@ var Sum = Number.Sum
 	}
 }
 
+func TestCoroExactInstantiatedPromotedMethodExpressionThunkShape(t *testing.T) {
+	const source = `package foo
+type E1 struct{}
+func (E1) M() int { return 0 }
+type E2[_ any] struct{}
+func (*E2[_]) N() int { return 1 }
+type T[X any] struct { E1; *E2[*X] }
+func F[X any]() { call(T[X].M, T[X].N) }
+func call[X any](fns ...func(T[X]) int) {}
+func Root() { F[string]() }
+`
+	ssaPkg, _, _ := buildGoSSAPkg(t, source)
+	found := make(map[string]bool)
+	for function := range ssautil.AllFunctions(ssaPkg.Prog) {
+		if function == nil || !strings.HasSuffix(function.Name(), "$thunk") ||
+			!strings.Contains(function.String(), "T[string]") {
+			continue
+		}
+		found[function.Name()] = true
+		if err := validateCoroExactMethodExpressionThunk(function); err != nil {
+			var dump bytes.Buffer
+			ssa.WriteFunction(&dump, function)
+			t.Fatalf("instantiated promoted thunk rejected: %v\n%s", err, dump.String())
+		}
+		object, _ := function.Object().(*types.Func)
+		if object == nil {
+			t.Fatalf("instantiated promoted thunk %s has no method object", function)
+		}
+		var callee *ssa.Function
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(*ssa.Call)
+				if !ok || call.Common().StaticCallee() == nil {
+					continue
+				}
+				if callee != nil {
+					t.Fatalf("instantiated promoted thunk %s has more than one static call", function)
+				}
+				callee = call.Common().StaticCallee()
+			}
+		}
+		calleeMethod, _ := calleeObject(callee).(*types.Func)
+		if callee == nil || calleeMethod == nil || !types.Identical(calleeMethod.Type(), object.Type()) {
+			t.Fatalf("instantiated promoted thunk %s does not have one concrete type-identical callee", function)
+		}
+		if function.Name() == "N$thunk" {
+			if calleeMethod == object || calleeMethod.Origin() != object.Origin() ||
+				!coroMaterializedGenericInstance(callee) {
+				t.Fatalf("generic N thunk/callee identity was not proved by distinct instances of one origin: thunk=%p callee=%p", object, calleeMethod)
+			}
+		} else if function.Name() == "M$thunk" && calleeMethod != object {
+			t.Fatal("non-generic M thunk did not retain exact method-object identity")
+		}
+	}
+	if !found["M$thunk"] || !found["N$thunk"] || len(found) != 2 {
+		t.Fatalf("instantiated promoted thunks = %v, want exactly M$thunk and N$thunk", found)
+	}
+}
+
+func TestCoroExactInstantiatedBoundMethodWrapperShape(t *testing.T) {
+	const source = `package foo
+type Foo[T any] struct { value T }
+func (foo Foo[T]) Get() *T { return &foo.value }
+var NewInt = Foo[int]{value: 1}.Get
+var NewString = Foo[string]{value: "x"}.Get
+func Root() { _ = NewInt(); _ = NewString() }
+func Generic[T any](fn func(T), value T) { fn(value) }
+`
+	ssaPkg, _, _ := buildGoSSAPkg(t, source)
+	dynamicCalls := 0
+	for _, block := range ssaPkg.Func("Root").Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Common().StaticCallee() != nil {
+				continue
+			}
+			dynamicCalls++
+			signature := call.Common().Signature()
+			if typeParamCount(signature.TypeParams()) != 0 || typeParamCount(signature.RecvTypeParams()) != 1 {
+				t.Fatalf("instantiated bound call signature metadata = %v; want one stale receiver parameter only", signature)
+			}
+			concrete, err := coroConcreteManagedCallableSignature(signature)
+			if err != nil || typeParamCount(concrete.RecvTypeParams()) != 0 || concrete.Params().Len() != 0 || concrete.Results().Len() != 1 ||
+				coroTypeContainsUnresolvedTypeParam(concrete.Results().At(0).Type(), make(map[types.Type]bool)) {
+				t.Fatalf("instantiated bound call did not normalize to one ground callable: signature=%v concrete=%v err=%v", signature, concrete, err)
+			}
+		}
+	}
+	if dynamicCalls != 2 {
+		t.Fatalf("instantiated bound dynamic calls = %d, want 2", dynamicCalls)
+	}
+	genericCall := onlyCoroManagedDispatchValidationCall(t, ssaPkg.Func("Generic"))
+	if concrete, err := coroConcreteManagedCallableSignature(genericCall.Common().Signature()); err == nil || concrete != nil {
+		t.Fatalf("unmaterialized generic callable was accepted as concrete: %v", concrete)
+	}
+	wrapperCount := 0
+	var genericOrigin *types.Func
+	for function := range ssautil.AllFunctions(ssaPkg.Prog) {
+		if function == nil || !strings.HasPrefix(function.Synthetic, "bound method wrapper for ") {
+			continue
+		}
+		wrapperCount++
+		if err := validateCoroExactBoundMethodWrapper(function); err != nil {
+			t.Fatalf("instantiated bound wrapper %s rejected: %v", function, err)
+		}
+		object, _ := function.Object().(*types.Func)
+		if object == nil || typeParamCount(function.Signature.RecvTypeParams()) != 0 {
+			t.Fatalf("instantiated bound wrapper %s has non-concrete identity/signature", function)
+		}
+		if genericOrigin == nil {
+			genericOrigin = object.Origin()
+		} else if object.Origin() != genericOrigin {
+			t.Fatalf("instantiated bound wrappers do not share one generic method origin: %v != %v", object.Origin(), genericOrigin)
+		}
+	}
+	if wrapperCount != 2 {
+		t.Fatalf("instantiated bound wrappers = %d, want 2", wrapperCount)
+	}
+}
+
 func TestCoroDynamicDispatchProducerCapturedPlainClosure(t *testing.T) {
 	const source = `package foo
 func Root(seed int) func(int) int {
