@@ -372,6 +372,90 @@ func (p *Transformer) Alignof(typ llvm.Type) int {
 	return int(p.td.ABITypeAlignment(typ))
 }
 
+// tryPackSingleValueAggregate lowers the common ABI case where an aggregate is
+// only a type wrapper around one scalar.  Keeping this conversion in SSA avoids
+// introducing a store/load pair that survives in deliberately unoptimized
+// DWARF builds.  The size equality gate excludes wrappers with observable ABI
+// padding; aggregates with multiple leaves retain the general memory packing
+// path below.
+func (p *Transformer) tryPackSingleValueAggregate(
+	b llvm.Builder, value llvm.Value, logical, carrier llvm.Type,
+) (llvm.Value, bool) {
+	typ := logical
+	pathDepth := 0
+	for {
+		var element llvm.Type
+		switch typ.TypeKind() {
+		case llvm.StructTypeKind:
+			if typ.StructElementTypesCount() != 1 {
+				return llvm.Value{}, false
+			}
+			element = typ.StructElementTypes()[0]
+		case llvm.ArrayTypeKind:
+			if typ.ArrayLength() != 1 {
+				return llvm.Value{}, false
+			}
+			element = typ.ElementType()
+		default:
+			goto extracted
+		}
+		if p.Sizeof(typ) != p.Sizeof(element) {
+			return llvm.Value{}, false
+		}
+		typ = element
+		pathDepth++
+	}
+
+extracted:
+	if pathDepth == 0 {
+		return llvm.Value{}, false
+	}
+	conversion := 0 // 0: identity, 1: zext, 2: ptrtoint, 3: bitcast
+	if typ != carrier {
+		if carrier.TypeKind() != llvm.IntegerTypeKind {
+			return llvm.Value{}, false
+		}
+		carrierWidth := carrier.IntTypeWidth()
+		switch typ.TypeKind() {
+		case llvm.IntegerTypeKind:
+			if typ.IntTypeWidth() >= carrierWidth {
+				return llvm.Value{}, false
+			}
+			// When the physical register is wider than the logical allocation,
+			// zero extension places the source bytes correctly only on little-endian
+			// targets. Equal allocation widths are independent of byte order.
+			if p.Sizeof(carrier) > p.Sizeof(logical) && p.td.ByteOrder() != llvm.LittleEndian {
+				return llvm.Value{}, false
+			}
+			conversion = 1
+		case llvm.PointerTypeKind:
+			if p.Sizeof(typ)*8 != carrierWidth {
+				return llvm.Value{}, false
+			}
+			conversion = 2
+		case llvm.FloatTypeKind, llvm.DoubleTypeKind:
+			if p.Sizeof(typ)*8 != carrierWidth {
+				return llvm.Value{}, false
+			}
+			conversion = 3
+		default:
+			return llvm.Value{}, false
+		}
+	}
+	for i := 0; i < pathDepth; i++ {
+		value = b.CreateExtractValue(value, 0, "")
+	}
+	switch conversion {
+	case 1:
+		value = llvm.CreateZExt(b, value, carrier)
+	case 2:
+		value = llvm.CreatePtrToInt(b, value, carrier)
+	case 3:
+		value = llvm.CreateBitCast(b, value, carrier)
+	}
+	return value, true
+}
+
 func (p *Transformer) GetFuncInfo(ctx llvm.Context, typ llvm.Type) (info FuncInfo) {
 	info.Type = typ
 	info.Return = p.GetTypeInfo(ctx, typ, typ.ReturnType(), 0)
@@ -703,10 +787,41 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 			b.CreateStore(param, ptr)
 			nparams = append(nparams, ptr)
 		case AttrWidthType:
-			ptr := createAlloca(ti.Type)
+			// Some ABIs widen a small aggregate to a full register. AArch64,
+			// for example, passes {i32} in i64. Materializing only the source
+			// aggregate and then loading the wider carrier reads beyond the
+			// alloca. Optimized builds used to hide that undefined padding,
+			// while debug builds could pass stale upper bits to the callee.
+			// On little-endian targets with an integer carrier, load exactly the
+			// source allocation width and make the ABI's zero extension explicit.
+			// Besides avoiding the out-of-bounds load, this lowers to a naturally
+			// zero-extending W-register operation on AArch64 instead of a zeroed
+			// stack slot. Keep the storage form as the general fallback for empty,
+			// big-endian, and non-integer carriers.
+			if packed, ok := p.tryPackSingleValueAggregate(b, param, ti.Type, ti.Type1); ok {
+				nparams = append(nparams, packed)
+				break
+			}
+			sourceSize := p.Sizeof(ti.Type)
+			carrierSize := p.Sizeof(ti.Type1)
+			if sourceSize > 0 && carrierSize > sourceSize &&
+				ti.Type1.TypeKind() == llvm.IntegerTypeKind && p.td.ByteOrder() == llvm.LittleEndian {
+				ptr := createAlloca(ti.Type)
+				b.CreateStore(param, ptr)
+				sourceType := ctx.IntType(sourceSize * 8)
+				bitsPtr := b.CreateBitCast(ptr, llvm.PointerType(sourceType, 0), "")
+				bits := b.CreateLoad(sourceType, bitsPtr, "")
+				bits.SetAlignment(ti.Align)
+				nparams = append(nparams, llvm.CreateZExt(b, bits, ti.Type1))
+				break
+			}
+			carrier := createAlloca(ti.Type1)
+			if carrierSize > sourceSize {
+				b.CreateStore(llvm.ConstNull(ti.Type1), carrier)
+			}
+			ptr := b.CreateBitCast(carrier, llvm.PointerType(ti.Type, 0), "")
 			b.CreateStore(param, ptr)
-			iptr := b.CreateBitCast(ptr, llvm.PointerType(ti.Type1, 0), "")
-			nparams = append(nparams, b.CreateLoad(ti.Type1, iptr, ""))
+			nparams = append(nparams, b.CreateLoad(ti.Type1, carrier, ""))
 		case AttrWidthType2:
 			ptr := createAlloca(ti.Type)
 			b.CreateStore(param, ptr)

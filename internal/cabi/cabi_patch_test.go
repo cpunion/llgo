@@ -387,6 +387,67 @@ entry:
 	}
 }
 
+func TestArm64SmallAggregateCallUsesExactWidthZeroExtension(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+
+	const testIR = `
+%Handle = type { i32 }
+
+declare void @consume(%Handle)
+
+define void @caller(i32 %raw) {
+entry:
+	%value = insertvalue %Handle undef, i32 %raw, 0
+  call void @consume(%Handle %value)
+  ret void
+}
+`
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	path := filepath.Join(t.TempDir(), "arm64_small_aggregate.ll")
+	if err := os.WriteFile(path, []byte(testIR), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buf, err := llvm.NewMemoryBufferFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mod, err := ctx.ParseIR(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mod.Dispose()
+
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "darwin", GOARCH: "arm64"})
+	defer prog.Dispose()
+	NewTransformer(prog, "arm64-apple-darwin", "", ModeAllFunc, false).TransformModule("test", mod)
+
+	caller := mod.NamedFunction("caller")
+	if caller.IsNil() {
+		t.Fatal("transformed caller not found")
+	}
+	ir := caller.String()
+	for _, unwanted := range []string{"alloca ", "store ", "load "} {
+		if strings.Contains(ir, unwanted) {
+			t.Fatalf("small aggregate call retained redundant memory operation %q:\n%s", unwanted, ir)
+		}
+	}
+	for _, want := range []string{
+		"extractvalue %Handle",
+		"zext i32",
+		"call void @consume(i64",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("small aggregate call is missing %q:\n%s", want, ir)
+		}
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("transformed module is invalid: %v\n%s", err, mod.String())
+	}
+}
+
 func TestMSVC386CallingConventionLowering(t *testing.T) {
 	llvm.InitializeAllTargets()
 	llvm.InitializeAllTargetMCs()
