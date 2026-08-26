@@ -158,11 +158,7 @@ jobs:
 
   goroot-summary:
     name: GOROOT summary
-    if: >-
-      always() &&
-      (github.event_name != 'pull_request' ||
-      (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
-      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'go-test-compat')))
+    if: always() && needs.goroot.result != 'skipped'
     needs: goroot
     runs-on: ubuntu-latest
     steps:
