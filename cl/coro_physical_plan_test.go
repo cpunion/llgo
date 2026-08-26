@@ -296,6 +296,81 @@ func Root() { defer foreign() }
 	}
 }
 
+func TestCoroProgramCapabilitiesIncludeRangeYieldWorkerCleanup(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func seq(yield func(int) bool) { _ = yield(1) }
+func foreign(int)
+func Root() {
+	defer foreign(-1)
+	for value := range seq {
+		defer foreign(value)
+	}
+}
+`)
+	function := ssaPkg.Func("Root")
+	if function == nil || len(function.AnonFuncs) != 1 {
+		t.Fatal("range-yield worker cleanup fixture is incomplete")
+	}
+	yield := function.AnonFuncs[0]
+	if err := validateCoroExactRangeYield(yield); err != nil {
+		t.Fatalf("validate range-yield worker cleanup fixture: %v", err)
+	}
+	deferred := func(fn *ssa.Function) *ssa.Defer {
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				if candidate, ok := instruction.(*ssa.Defer); ok {
+					return candidate
+				}
+			}
+		}
+		return nil
+	}
+	ownerDefer, yieldDefer := deferred(function), deferred(yield)
+	if ownerDefer == nil || yieldDefer == nil {
+		t.Fatal("range-yield worker cleanup fixture has no owner and yield defer pair")
+	}
+	workerSite := func(instruction *ssa.Defer) *coroStaticCleanupSitePlan {
+		return &coroStaticCleanupSitePlan{
+			instruction: instruction,
+			kind:        coroStaticCleanupForeignWorker,
+			foreignWorker: &coroWorkerForeignCallShape{
+				mode: coroForeignCallModeWorker,
+			},
+		}
+	}
+	owner := &preparedEmissionPackage{identity: "foo"}
+	physical := &coroPhysicalFunctionPlan{
+		function:        function,
+		owner:           owner,
+		reachableBlocks: coroPhysicalConstantReachableBlocks(function),
+		instructions:    make(map[ssa.Instruction]coroPhysicalInstructionPlan),
+		cleanup: &coroStaticCleanupPlan{
+			sites:      []*coroStaticCleanupSitePlan{workerSite(ownerDefer), workerSite(yieldDefer)},
+			stackOwner: function,
+			dynamic:    true,
+		},
+	}
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			physical.instructions[instruction] = coroPhysicalInstructionPlan{}
+		}
+	}
+	stage := newCoroPhysicalPlanStage()
+	if err := stage.freezePhysicalFunctionPlan(physical); err != nil {
+		t.Fatal(err)
+	}
+	ir := newCoroProgramIR()
+	ir.callsFrozen = true
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if err := ir.commitPhysicalFunctionPlans(stage, map[emissionFunctionOwnerKey]none{key: {}}); err != nil {
+		t.Fatal(err)
+	}
+	seeds, err := ir.programCapabilitySeeds()
+	if err != nil || !seeds[function].Worker() {
+		t.Fatalf("range-yield worker cleanup capability = (%#x, %v), want worker", seeds[function], err)
+	}
+}
+
 func TestCoroProgramCapabilitiesUseOnlyReachableNativeFaultRecipes(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 func Probe() byte { return 1 }

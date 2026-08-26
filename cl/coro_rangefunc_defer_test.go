@@ -148,6 +148,12 @@ func memequalptr(left, right *byte) bool { return false }
 	if !strings.Contains(yield, "AllocU") || strings.Contains(yield, "FreeDeferNode") {
 		t.Fatalf("rangefunc yield does not publish into the owner stack without draining it:\n%s", yield)
 	}
+	if count := strings.Count(root, "FreeDeferNode"); count != 1 {
+		t.Fatalf("rangefunc owner emits %d cleanup-node releases, want one shared drainer:\n%s", count, root)
+	}
+	if count := strings.Count(yield, "AllocU"); count != 1 {
+		t.Fatalf("rangefunc yield emits %d cleanup-node allocations, want one registration path:\n%s", count, yield)
+	}
 	runCoroABITestPipeline(t, program, module)
 	if module.NamedFunction("foo.Root$coro.resume").IsNil() ||
 		module.NamedFunction("foo.Root$1$coro.resume").IsNil() {

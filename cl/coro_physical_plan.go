@@ -1238,11 +1238,17 @@ func (ir *coroProgramIR) programCapabilitySeeds() (map[*ssa.Function]coro.Progra
 			}
 		}
 		if function.cleanup != nil {
+			cleanupReachable := map[*ssa.Function]map[*ssa.BasicBlock]bool{
+				function.function: function.reachableBlocks,
+			}
+			if !function.cleanup.external {
+				for _, member := range coroExplicitCleanupFamily(function.function)[1:] {
+					cleanupReachable[member] = coroPhysicalConstantReachableBlocks(member)
+				}
+			}
 			for index, site := range function.cleanup.sites {
-				if site == nil || site.instruction == nil ||
-					site.instruction.Parent() != function.function ||
-					site.instruction.Block() == nil ||
-					!function.reachableBlocks[site.instruction.Block()] {
+				if site == nil || site.instruction == nil || site.instruction.Block() == nil ||
+					!cleanupReachable[site.instruction.Parent()][site.instruction.Block()] {
 					return nil, fmt.Errorf(
 						"coroutine program capabilities found incomplete cleanup site %d in %q",
 						index, function.function.Name(),
