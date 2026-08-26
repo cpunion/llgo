@@ -1285,6 +1285,69 @@ func init() {}
 	}
 }
 
+func TestCoroProgramManagedEntryUsesExactEmissionRoleWithoutRunner(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package main
+
+func main() {}
+`)
+	mainFunction := ssaPkg.Func("main")
+	packageInit := ssaPkg.Func("init")
+	if mainFunction == nil || packageInit == nil {
+		t.Fatalf("fixture program entries = main:%v init:%v", mainFunction, packageInit)
+	}
+	analyze := func(roots coro.Roots) *coro.SSAPlan {
+		t.Helper()
+		plan, err := coro.AnalyzeSSA(ssaPkg.Prog, roots, coro.SSAConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	emissionRoot := coro.Root{Function: mainFunction, ManagedDemand: coro.AsyncDemand, EmissionEntry: true}
+	scheduledRoot := coro.Root{Function: mainFunction, ManagedDemand: coro.AsyncDemand}
+	ingressRoot := coro.Root{
+		Function: mainFunction, ManagedDemand: coro.AsyncDemand, IngressEntry: true,
+		IngressCertificate: strings.Repeat("a", 64),
+	}
+	for _, test := range []struct {
+		name       string
+		roots      coro.Roots
+		programRun bool
+		want       bool
+	}{
+		{name: "pure package emission", roots: coro.Roots{emissionRoot}, want: true},
+		{name: "scheduled without runner", roots: coro.Roots{scheduledRoot}},
+		{name: "scheduled with runner", roots: coro.Roots{scheduledRoot}, programRun: true, want: true},
+		{name: "ingress without runner", roots: coro.Roots{ingressRoot}},
+		{name: "ingress with runner", roots: coro.Roots{ingressRoot}, programRun: true, want: true},
+		{name: "joined emission scheduled without runner", roots: coro.Roots{emissionRoot, scheduledRoot}},
+		{name: "joined emission scheduled with runner", roots: coro.Roots{emissionRoot, scheduledRoot}, programRun: true, want: true},
+		{
+			name: "name without root and runner", roots: coro.Roots{{
+				Function: packageInit, ManagedDemand: coro.AsyncDemand, EmissionEntry: true,
+			}}, programRun: true, want: true,
+		},
+		{
+			name: "name without root or runner", roots: coro.Roots{{
+				Function: packageInit, ManagedDemand: coro.AsyncDemand, EmissionEntry: true,
+			}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan := analyze(test.roots)
+			if got := hasCoroProgramManagedEntryCapability(mainFunction, plan, test.programRun); got != test.want {
+				t.Fatalf("program-entry capability = %t, want %t", got, test.want)
+			}
+		})
+	}
+	if hasCoroProgramManagedEntryCapability(mainFunction, nil, false) {
+		t.Fatal("function spelling acquired a package-generation exception without a plan")
+	}
+	if !hasCoroProgramManagedEntryCapability(mainFunction, nil, true) {
+		t.Fatal("runnable lowering rejected an ordinary program initializer")
+	}
+}
+
 func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {

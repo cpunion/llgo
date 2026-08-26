@@ -154,9 +154,32 @@ func main() { value.Add(1) }
 			}
 		}
 	}
-	_, err := Do([]string{source}, conf)
+	pkgs, err := Do([]string{source}, conf)
 	if err != nil {
 		t.Fatalf("compile stdlib static-outcome fixture: %v", err)
+	}
+	if len(pkgs) != 1 || pkgs[0].LPkg == nil {
+		t.Fatalf("Do returned packages = %+v, want one generated package", pkgs)
+	}
+	defer pkgs[0].LPkg.Prog.Dispose()
+	module := pkgs[0].LPkg.Module()
+	ir := module.String()
+	if function := module.NamedFunction("main.main$outcome"); function.IsNil() || function.IsDeclaration() {
+		t.Fatalf("ModeGen omitted main's required outcome body:\n%s", ir)
+	}
+	for _, name := range []string{"main.main", "main.main$coro"} {
+		if function := module.NamedFunction(name); !function.IsNil() {
+			t.Fatalf("ModeGen main outcome emitted redundant entry %q:\n%s", name, ir)
+		}
+	}
+	for _, redundant := range []string{
+		coroProgramBootstrapSymbolV2,
+		"__llgo_coro_root_factory_",
+		"__llgo_coro_root_package_",
+	} {
+		if strings.Contains(ir, redundant) {
+			t.Fatalf("ModeGen main outcome emitted redundant runnable artifact %q:\n%s", redundant, ir)
+		}
 	}
 	if !found {
 		t.Fatalf("sync/atomic.(*Uint64).Add is absent from the whole-program coroutine plan (%d Add candidates): %s", candidates, diagnostic)

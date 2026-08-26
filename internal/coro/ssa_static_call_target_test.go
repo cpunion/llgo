@@ -231,6 +231,10 @@ func emissionRawEntry() { <-channel }
 		t.Fatalf("roots = %+v, want three entries", roots)
 	}
 	for _, root := range roots {
+		exact, rooted := plan.Root(root.Function)
+		if !rooted || exact != root {
+			t.Fatalf("exact root lookup = %+v, %t, want %+v", exact, rooted, root)
+		}
 		switch root.Function {
 		case libraryEntry:
 			if !root.EmissionEntry || !root.IngressEntry || root.ScheduledEntry ||
@@ -247,6 +251,25 @@ func emissionRawEntry() { <-channel }
 				!root.RawPlainDemand {
 				t.Fatalf("raw-only crossing polluted the emission role: %+v", root)
 			}
+		}
+	}
+	if root, rooted := plan.Root(nil); rooted || root != (SSARootPlan{}) {
+		t.Fatalf("nil root lookup = %+v, %t", root, rooted)
+	}
+	if root, rooted := plan.Root(packageFunction(t, pkg, "init")); rooted || root != (SSARootPlan{}) {
+		t.Fatalf("non-root lookup = %+v, %t", root, rooted)
+	}
+	for _, test := range []struct {
+		function *ssa.Function
+		want     bool
+	}{
+		{function: libraryEntry, want: true},
+		{function: scheduledEntry, want: true},
+		{function: emissionRawEntry},
+	} {
+		root, found := plan.ForeignIngressRoot(test.function)
+		if found != test.want || found && (!root.IngressEntry || root.Function != test.function) {
+			t.Fatalf("foreign ingress lookup for %q = %+v, %t, want found=%t", test.function.Name(), root, found, test.want)
 		}
 	}
 	document, err := plan.canonicalPlanDigest(validPlanDigestMetadata())
