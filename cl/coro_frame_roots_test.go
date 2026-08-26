@@ -1235,7 +1235,7 @@ func Root(pointer unsafe.Pointer) { `+test.body+` }
 	}
 }
 
-func TestCoroPointerUintptrLowBitMaskIsScalarTerminal(t *testing.T) {
+func TestCoroPointerUintptrDestructiveScalarizationIsScalarTerminal(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		body string
@@ -1243,6 +1243,8 @@ func TestCoroPointerUintptrLowBitMaskIsScalarTerminal(t *testing.T) {
 	}{
 		{name: "low mask", body: "return uintptr(pointer) & 7", want: true},
 		{name: "commuted low mask", body: "return 7 & uintptr(pointer)", want: true},
+		{name: "scalar minus address", body: "return mask - uintptr(pointer)", want: true},
+		{name: "address minus scalar return", body: "return uintptr(pointer) - mask"},
 		{name: "and not preserves address", body: "return uintptr(pointer) &^ 7"},
 		{name: "dynamic mask", body: "return uintptr(pointer) & mask"},
 		{name: "sparse mask", body: "return uintptr(pointer) & 5"},
@@ -1274,43 +1276,94 @@ func Root(pointer unsafe.Pointer, mask uintptr) uintptr { `+test.body+` }
 			if got := coroPointerUintptrScalarTerminal(conversion); got != test.want {
 				var dump bytes.Buffer
 				ssa.WriteFunction(&dump, root)
-				t.Fatalf("low-bit-mask scalar terminal = %t, want %t\n%s", got, test.want, dump.String())
+				t.Fatalf("destructive scalar terminal = %t, want %t\n%s", got, test.want, dump.String())
 			}
 		})
 	}
 }
 
-func TestCoroPointerUintptrLowBitMaskDoesNotAuthorizeReconstruction(t *testing.T) {
-	prog, _, _, root, audit, _ := prepareCoroFrameRootAudit(t, `package foo
+func TestCoroPointerUintptrScalarMinusAddressUsesParkFrameRetention(t *testing.T) {
+	prog, ssaPkg, universe, root, _, _ := prepareCoroFrameRootAudit(t, `package foo
 import "unsafe"
-func Root(pointer unsafe.Pointer) unsafe.Pointer {
-	return unsafe.Pointer(uintptr(pointer) & 7)
+func Root(scalar uintptr, pointer unsafe.Pointer) uintptr {
+	return scalar - uintptr(pointer)
 }
 `, "Root", EmissionUniverseOptions{})
 	defer prog.Dispose()
-	foundMask, foundReconstruction := false, false
+	plan := analyzeCoroFrameRetentionFixture(t, ssaPkg, universe, root, -1)
+	rootPlan, planned := plan.FunctionPlan(root)
+	if !planned || rootPlan.Emission != coro.EmitCoroutine || !rootPlan.Effect.Contains(coro.MayPark) {
+		t.Fatalf("scalar-minus-address plan = %+v, present=%t; want may-park coroutine", rootPlan, planned)
+	}
+	var conversion *ssa.Convert
 	for _, block := range root.Blocks {
 		for _, instruction := range block.Instrs {
-			conversion, ok := instruction.(*ssa.Convert)
-			if !ok {
-				continue
-			}
-			if coroFrameRetentionPointerToUintptr(conversion) {
-				foundMask = coroPointerUintptrScalarTerminal(conversion)
-				continue
-			}
-			if coroFrameRetentionUintptrLike(conversion.X.Type()) && coroFrameRetentionPointerLike(conversion.Type()) {
-				foundReconstruction = true
-				if reason := audit.validateConvert(conversion); !strings.Contains(reason, "has no traceable exact pointer provenance") {
-					t.Fatalf("masked pointer reconstruction rejection = %q", reason)
-				}
+			candidate, ok := instruction.(*ssa.Convert)
+			if ok && coroFrameRetentionPointerToUintptr(candidate) {
+				conversion = candidate
 			}
 		}
 	}
-	if !foundMask || !foundReconstruction {
-		var dump bytes.Buffer
-		ssa.WriteFunction(&dump, root)
-		t.Fatalf("mask proof=%t reconstruction=%t, want true/true\n%s", foundMask, foundReconstruction, dump.String())
+	if conversion == nil || !coroPointerUintptrScalarTerminal(conversion) {
+		t.Fatal("fixture has no structural scalar-minus-address terminal")
+	}
+	withoutRetention, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := withoutRetention.validateConvert(conversion); !strings.Contains(reason, "structural scalar terminal") {
+		t.Fatalf("suspending plan without frame retention rejection = %q", reason)
+	}
+	withRetention, err := newCoroPhysicalPureSSAAudit(universe, plan, root, CoroFrameRetentionParkABIV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := withRetention.validateConvert(conversion); reason != "" {
+		t.Fatalf("park-retained scalar-minus-address rejected: %s", reason)
+	}
+}
+
+func TestCoroPointerUintptrDestructiveScalarizationDoesNotAuthorizeReconstruction(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		expression string
+	}{
+		{name: "low bit mask", expression: "uintptr(pointer) & 7"},
+		{name: "scalar minus address", expression: "scalar - uintptr(pointer)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, _, _, root, audit, _ := prepareCoroFrameRootAudit(t, `package foo
+import "unsafe"
+func Root(pointer unsafe.Pointer, scalar uintptr) unsafe.Pointer {
+	return unsafe.Pointer(`+test.expression+`)
+}
+`, "Root", EmissionUniverseOptions{})
+			defer prog.Dispose()
+			foundScalarization, foundReconstruction := false, false
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					conversion, ok := instruction.(*ssa.Convert)
+					if !ok {
+						continue
+					}
+					if coroFrameRetentionPointerToUintptr(conversion) {
+						foundScalarization = coroPointerUintptrScalarTerminal(conversion)
+						continue
+					}
+					if coroFrameRetentionUintptrLike(conversion.X.Type()) && coroFrameRetentionPointerLike(conversion.Type()) {
+						foundReconstruction = true
+						if reason := audit.validateConvert(conversion); !strings.Contains(reason, "has no traceable exact pointer provenance") {
+							t.Fatalf("destructively scalarized pointer reconstruction rejection = %q", reason)
+						}
+					}
+				}
+			}
+			if !foundScalarization || !foundReconstruction {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, root)
+				t.Fatalf("scalarization proof=%t reconstruction=%t, want true/true\n%s", foundScalarization, foundReconstruction, dump.String())
+			}
+		})
 	}
 }
 
