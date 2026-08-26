@@ -293,6 +293,7 @@ type coroBodyContext struct {
 	panicBoundaryType      llssa.Expr
 	panicBoundaryData      llssa.Expr
 	panicBoundaryLanding   llssa.BasicBlock
+	panicBoundaryMerged    llssa.Phi
 	panicBoundaryIncoming  []coroPanicBoundaryIncoming
 	completePrepare        llssa.Expr
 	terminalStatus         llssa.Expr
@@ -304,7 +305,14 @@ type coroBodyContext struct {
 	// returns synchronously. Keeping one directly addressed record avoids one
 	// permanent CoroSplit field per call site without adding a runtime lookup or
 	// dynamic lifetime protocol.
-	outcomeScratch       llssa.Expr
+	outcomeScratch llssa.Expr
+	// channelParkScratch is the one direct-channel transaction record shared
+	// by every send/receive site in this physical coroutine. Source execution
+	// cannot overlap two direct parks in one frame: a published waiter suspends
+	// the coroutine, and the resume transaction clears the record before the
+	// next source continuation runs. Keeping one typed record avoids one large
+	// CoroSplit field per static channel operation.
+	channelParkScratch   llssa.Expr
 	awaitTerminal        llssa.BasicBlock
 	nextState            uint32
 	terminalState        uint32
@@ -418,7 +426,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	}
 	target := p.prog.TargetSpec()
 	if coroNativePanicBoundaryTarget(p) &&
-		(p.compilation == nil || p.compilation.coroPanicBoundaryEmissionEnabled()) {
+		(p.compilation == nil || p.compilation.coroPanicBoundaryEmissionEnabled(entry.function)) {
 		panicBoundaryEnabledHook = coroPanicBoundaryEnabledHookV1
 		panicBoundaryPushHook = coroPanicBoundaryPushHookV1
 		panicBoundaryPopHook = coroPanicBoundaryPopHookV1
@@ -1023,10 +1031,24 @@ func (c *coroBodyContext) publishState(
 	reason, lifecycle uint64,
 	_ uint32, line uint32,
 ) {
+	c.publishStateValue(
+		b, reason, lifecycle,
+		b.Prog.IntVal(uint64(line), b.Prog.Uint32()),
+	)
+}
+
+func (c *coroBodyContext) publishStateValue(
+	b llssa.Builder,
+	reason, lifecycle uint64,
+	line llssa.Expr,
+) {
+	if line.IsNil() {
+		panic("coroutine published state has no source line")
+	}
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(reason, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(lifecycle, prog.Uint16()))
-	b.Store(b.FieldAddr(c.header, coroHeaderLine), prog.IntVal(uint64(line), prog.Uint32()))
+	b.Store(b.FieldAddr(c.header, coroHeaderLine), line)
 }
 
 func (c *coroBodyContext) activate(b llssa.Builder) {
@@ -1054,6 +1076,14 @@ func (c *coroBodyContext) dispatchPanicBoundary(b llssa.Builder, normal llssa.Ba
 	}
 	if c.panicBoundaryLanding == nil {
 		c.panicBoundaryLanding = b.Func.MakeBlock()
+		// Materialize the landing's sole PHI while the new block is empty.
+		// LLVM 22 debug records are attached to the following instruction; if
+		// the PHI is inserted only at finish time, an earlier dbg_declare in
+		// this shared cleanup block becomes illegally attached to the PHI.
+		landing := b.Func.NewBuilder()
+		landing.SetBlock(c.panicBoundaryLanding)
+		c.panicBoundaryMerged = landing.Phi(b.Prog.VoidPtr())
+		landing.Dispose()
 	}
 	forward := b.Func.MakeBlock()
 	panicToken := b.Call(c.panicBoundaryTake, c.task, c.handle)
@@ -1079,7 +1109,7 @@ func (c *coroBodyContext) bindPanicBoundaryLanding(b llssa.Builder) {
 	if c == nil || c.panicBoundaryTake.IsNil() {
 		return
 	}
-	if c.panicBoundaryLanding == nil || len(c.panicBoundaryIncoming) == 0 ||
+	if c.panicBoundaryLanding == nil || c.panicBoundaryMerged.IsNil() || len(c.panicBoundaryIncoming) == 0 ||
 		c.panicBoundaryType.IsNil() || c.panicBoundaryData.IsNil() {
 		panic("coroutine panic boundary has no complete resume landing")
 	}
@@ -1088,7 +1118,7 @@ func (c *coroBodyContext) bindPanicBoundaryLanding(b llssa.Builder) {
 		blocks[i] = c.panicBoundaryIncoming[i].block
 	}
 	b.SetBlock(c.panicBoundaryLanding)
-	merged := b.Phi(b.Prog.VoidPtr())
+	merged := c.panicBoundaryMerged
 	merged.AddIncoming(b, blocks, func(i int, _ llssa.BasicBlock) llssa.Expr {
 		return c.panicBoundaryIncoming[i].token
 	})
@@ -1218,14 +1248,14 @@ func (c *coroBodyContext) enterCancellation(b llssa.Builder, status uint64) {
 	}
 }
 
-func (c *coroBodyContext) suspendForChild(b llssa.Builder, line uint32) uint32 {
+func (c *coroBodyContext) suspendForChild(b llssa.Builder, line llssa.Expr) uint32 {
 	if c.abi.version < coroPhysicalABIVersionV1 {
 		panic("coroutine child suspension requires PhysicalABIV1")
 	}
 	stateID := c.nextState
 	c.nextState++
 	c.instructions = 0
-	c.publishState(b, coroSuspendCall, coroLifecycleSuspended, stateID, line)
+	c.publishStateValue(b, coroSuspendCall, coroLifecycleSuspended, line)
 	return stateID
 }
 
@@ -2072,6 +2102,11 @@ func validateCoroPhysicalABIForOwner(
 	if err != nil {
 		return fail("cannot audit pure SSA lowering: %v", err)
 	}
+	// The frame-retention proof consumes the same immutable cleanup recipe as
+	// lowering. In particular, a deferred uintptr transport is already retained
+	// by its typed cleanup argument record and must not acquire a duplicate
+	// keepalive slot merely to prove that lifetime.
+	pureSSA.cleanup = cleanupPlan
 	pureSSA.libraryForeign = libraryForeign
 	if cgoErrnoWorker {
 		if err := validateCoroCgoErrnoWorkerOwner(whole, pureSSA.ctx, fn); err != nil {

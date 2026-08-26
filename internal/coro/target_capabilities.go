@@ -69,33 +69,65 @@ type ProgramCapabilities uint8
 
 const (
 	programCapabilityWorker ProgramCapabilities = 1 << iota
-	programCapabilityPanicOnFault
+	programCapabilityDynamicPanicOnFault
+	programCapabilityNativeDefaultFaultBoundary
 )
 
-func NewProgramCapabilities(worker, panicOnFault bool) ProgramCapabilities {
+// NewProgramCapabilities constructs the worker and dynamic-fault service
+// demands. The exact static native-fault demand has a separate constructor so
+// callers cannot accidentally broaden it to every coroutine in the program.
+// dynamicPanicOnFault means runtime/debug.SetPanicOnFault is reachable and may
+// change the current G's policy before any later native resume. Exact
+// low-address accesses use NativeDefaultFaultBoundaryProgramCapability
+// instead, so their landing can remain function-local after call propagation.
+func NewProgramCapabilities(worker, dynamicPanicOnFault bool) ProgramCapabilities {
 	var capabilities ProgramCapabilities
 	if worker {
 		capabilities |= programCapabilityWorker
 	}
-	if panicOnFault {
-		capabilities |= programCapabilityPanicOnFault
+	if dynamicPanicOnFault {
+		capabilities |= programCapabilityDynamicPanicOnFault
 	}
 	return capabilities
+}
+
+// NativeDefaultFaultBoundaryProgramCapability is the exact static demand of
+// an operation which relies on Go's default low-address signal conversion.
+// It is deliberately separate from dynamic SetPanicOnFault policy: reverse
+// call propagation can prove the complete set of physical resumes which need
+// this landing without adding hooks to unrelated coroutines.
+func NativeDefaultFaultBoundaryProgramCapability() ProgramCapabilities {
+	return programCapabilityNativeDefaultFaultBoundary
 }
 
 func (capabilities ProgramCapabilities) Worker() bool {
 	return capabilities&programCapabilityWorker != 0
 }
 
-// PanicOnFault reports whether the final reachable program can enable
-// runtime/debug.SetPanicOnFault. Native stackless resumes need a signal
-// landing from their first instruction because the call may enable recovery
-// and fault again before another suspension boundary is crossed.
+// DynamicPanicOnFault reports whether reachable runtime code can change the
+// current G's fault policy. Native stackless resumes then need a landing from
+// their first instruction because the policy call may enable recovery and
+// fault again before another suspension boundary is crossed.
+func (capabilities ProgramCapabilities) DynamicPanicOnFault() bool {
+	return capabilities&programCapabilityDynamicPanicOnFault != 0
+}
+
+// NativeDefaultFaultBoundary reports exact statically propagated demand for
+// Go's default low-address signal conversion.
+func (capabilities ProgramCapabilities) NativeDefaultFaultBoundary() bool {
+	return capabilities&programCapabilityNativeDefaultFaultBoundary != 0
+}
+
+// PanicOnFault reports whether the final reachable program needs any native
+// hardware-fault landing support. Bootstrap/runtime service selection consumes
+// this union; physical code emission retains the distinction above.
 func (capabilities ProgramCapabilities) PanicOnFault() bool {
-	return capabilities&programCapabilityPanicOnFault != 0
+	return capabilities.DynamicPanicOnFault() || capabilities.NativeDefaultFaultBoundary()
 }
 
 func (capabilities ProgramCapabilities) Valid() bool {
-	const known = programCapabilityWorker | programCapabilityPanicOnFault
+	const known = programCapabilityWorker |
+		programCapabilityDynamicPanicOnFault |
+		programCapabilityNativeDefaultFaultBoundary
 	return capabilities&^known == 0
 }

@@ -1492,7 +1492,7 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 				nodeFields = append(nodeFields, argumentType)
 			}
 		}
-		keepaliveSources := p.coroCallKeepaliveSources(sitePlan.instruction)
+		keepaliveSources := p.coroCallKeepaliveStorageSources(sitePlan.instruction)
 		if len(keepaliveSources) != 0 {
 			site.keepaliveField = len(nodeFields)
 		}
@@ -1842,9 +1842,9 @@ func (s *coroStaticCleanupState) setPanicOverlay(
 // child handoff. Selects avoid a second runtime hook and keep normal cleanup on
 // the same CompletionRecord transaction with nil recovery words.
 func (s *coroStaticCleanupState) recoverAwaitArguments(
-	p *context, b llssa.Builder,
-) (mode, typeWord, dataWord llssa.Expr) {
-	if s == nil || p == nil || p.coroBody() == nil {
+	p *context, b llssa.Builder, line llssa.Expr,
+) (mode, typeWord, dataWord, traceLine llssa.Expr) {
+	if s == nil || p == nil || p.coroBody() == nil || line.IsNil() {
 		panic("coroutine cleanup recovery arguments require an active drainer")
 	}
 	active := b.Load(s.panicActive)
@@ -1855,6 +1855,10 @@ func (s *coroStaticCleanupState) recoverAwaitArguments(
 	)
 	typeWord = b.SelectValue(active, b.Load(s.panicType), b.Prog.Nil(b.Prog.VoidPtr()))
 	dataWord = b.SelectValue(active, b.Load(s.panicData), b.Prog.Nil(b.Prog.VoidPtr()))
+	// A recovering deferred child must expose the source line which started the
+	// panic, not its compiler-relocated cleanup call site. Reuse the existing
+	// panic overlay word; normal/cancellation cleanup keeps the source fallback.
+	traceLine = b.SelectValue(active, b.Load(s.panicLine), line)
 	return
 }
 
@@ -2103,7 +2107,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		if deferred == nil {
 			panic("coroutine deferred builtin lost its source Defer instruction")
 		}
-		p.recordCallerLocationForCall(b, &deferred.Call)
+		p.recordCallerLocationForCall(b, deferred)
 		switch site.plan.builtin {
 		case "delete", "copy", "clear":
 			b.Call(llssa.Builtin(site.plan.builtin), args...)

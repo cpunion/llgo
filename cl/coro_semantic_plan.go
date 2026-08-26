@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/constant"
 	"go/token"
 	"go/types"
 
@@ -48,6 +49,12 @@ type coroSemanticInstructionPlan struct {
 	// unbounded synchronous outcome twin. Calls still require a whole-program
 	// exact-target proof; this bit only closes the local lowering vocabulary.
 	staticOutcome bool
+	// nativeFaultBoundary is the target-independent fact that this evaluated
+	// source instruction performs a real access through an exact non-zero low
+	// absolute address. A plain body and a coroutine body consume the same
+	// frozen fact; the latter may refine it only when physical lowering removes
+	// the access entirely.
+	nativeFaultBoundary bool
 }
 
 func coroOutcomePlainBasicInfo(typ types.Type) types.BasicInfo {
@@ -156,6 +163,76 @@ func coroOutcomePlainScalarConvert(instruction *ssa.Convert) bool {
 	return fromInline && toInline
 }
 
+const coroNativeDefaultFaultAddressLimit = uint64(0x1000)
+
+// coroSemanticInstructionNeedsNativeFaultBoundary recognizes the narrow
+// source operation classified by the native signal handler as a default Go
+// memory panic. It deliberately excludes unused loads and universally
+// zero-sized values, so capability propagation never retains a sigsetjmp
+// landing for an instruction which produces no memory access.
+func coroSemanticInstructionNeedsNativeFaultBoundary(instruction ssa.Instruction) bool {
+	var address ssa.Value
+	var valueType types.Type
+	switch instruction := instruction.(type) {
+	case *ssa.UnOp:
+		if instruction.Op != token.MUL {
+			return false
+		}
+		if refs, known := nonDebugReferrers(instruction); known && len(refs) == 0 {
+			return false
+		}
+		address, valueType = instruction.X, instruction.Type()
+	case *ssa.Store:
+		address = instruction.Addr
+		if instruction.Val != nil {
+			valueType = instruction.Val.Type()
+		}
+	default:
+		return false
+	}
+	if valueType == nil || emissionUniversallyZeroSizedType(valueType) {
+		return false
+	}
+	constantAddress := coroLowAbsoluteAddressConstant(address, make(map[ssa.Value]bool))
+	if constantAddress == nil {
+		return false
+	}
+	isAddress, nonNil := coroFrameRetentionConstantAddress(constantAddress)
+	if !isAddress || !nonNil || constantAddress.Value == nil ||
+		constantAddress.Value.Kind() != constant.Int {
+		return false
+	}
+	word, exact := constant.Uint64Val(constantAddress.Value)
+	return exact && word < coroNativeDefaultFaultAddressLimit
+}
+
+// coroLowAbsoluteAddressConstant peels only representation-preserving pointer
+// conversions. In particular it accepts x/tools' usual unsafe.Pointer
+// constant -> *T Convert chain without treating integer arithmetic, a Phi, or
+// an arbitrary pointer-producing call as an exact absolute address.
+func coroLowAbsoluteAddressConstant(value ssa.Value, visiting map[ssa.Value]bool) *ssa.Const {
+	if value == nil || visiting[value] {
+		return nil
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	switch value := value.(type) {
+	case *ssa.Const:
+		return value
+	case *ssa.ChangeType:
+		if value.X != nil && coroFrameRetentionPointerLike(value.Type()) &&
+			coroFrameRetentionPointerLike(value.X.Type()) {
+			return coroLowAbsoluteAddressConstant(value.X, visiting)
+		}
+	case *ssa.Convert:
+		if value.X != nil && coroFrameRetentionPointerLike(value.Type()) &&
+			coroFrameRetentionPointerLike(value.X.Type()) {
+			return coroLowAbsoluteAddressConstant(value.X, visiting)
+		}
+	}
+	return nil
+}
+
 // planCoroSemanticInstruction is the only raw-SSA semantic recipe classifier.
 // It runs while the emission closure is still open. Analysis, preflight and
 // emission consume the frozen result and must not repeat this switch.
@@ -169,6 +246,7 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 	defer func() {
 		if err == nil {
 			plan.evaluated = true
+			plan.nativeFaultBoundary = coroSemanticInstructionNeedsNativeFaultBoundary(instruction)
 		}
 	}()
 	ordinary := func(recipe string) (coroSemanticInstructionPlan, error) {

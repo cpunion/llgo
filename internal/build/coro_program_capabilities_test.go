@@ -56,6 +56,15 @@ func TestImportedProgramCapabilitiesDigestIsCanonicalAndCapabilitySensitive(t *t
 	if err != nil || changed == first {
 		t.Fatalf("changed imported capability digest = %q, %v; baseline %q", changed, err, first)
 	}
+	alphaFact.ProgramCapabilities = coro.NewProgramCapabilities(true, false) |
+		coro.NativeDefaultFaultBoundaryProgramCapability()
+	nativeDefaultFault, err := coroImportedProgramCapabilitiesDigest(map[*ssa.Function]coro.LibraryEffectFunction{
+		alpha: alphaFact,
+		beta:  betaFact,
+	})
+	if err != nil || nativeDefaultFault == first || nativeDefaultFault == changed {
+		t.Fatalf("native-default-fault imported capability digest = %q, %v; dynamic=%q combined=%q", nativeDefaultFault, err, first, changed)
+	}
 	zero, err := coroImportedProgramCapabilitiesDigest(map[*ssa.Function]coro.LibraryEffectFunction{
 		alpha: {ID: alphaFact.ID},
 	})

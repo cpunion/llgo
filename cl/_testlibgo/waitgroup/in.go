@@ -35,14 +35,14 @@ func main() {
 // CHECK: call ptr @__llgo_coro_spawn_begin_v1(
 // CHECK: call void @__llgo_coro_spawn_commit_v1(
 // CHECK: call ptr @"sync.(*WaitGroup).Wait$coro"(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"(
 
 // Captured goroutine bodies use the explicit environment parameter and await
 // their deferred Done calls through the same protocol.
 // CHECK-LABEL: define ptr @"main.main$1$coro"(ptr %0, ptr %1, ptr swiftself %2)
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"(
 // CHECK: call ptr @"sync.(*WaitGroup).Done$coro"(
 
 // CHECK-LABEL: define ptr @"main.main$2$coro"(ptr %0, ptr %1, ptr swiftself %2)
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"(
 // CHECK: call ptr @"sync.(*WaitGroup).Done$coro"(

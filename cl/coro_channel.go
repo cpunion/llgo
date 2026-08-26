@@ -110,16 +110,22 @@ func (p *context) requireCoroChannelBody(b llssa.Builder) *coroBodyContext {
 func (p *context) newCoroChannelStorage(b llssa.Builder, elemType llssa.Type) (elem, state llssa.Expr) {
 	// These addresses may be published to hchan immediately before suspend.
 	// Allocate them in the physical ramp entry so no waiter can retain a
-	// resume-local M stack address. The coroutine frame allocator zero-fills the
-	// complete frame, and channel resume clears state before the same static
-	// instruction can execute again in a loop.
+	// resume-local M stack address. Element storage remains typed per operation;
+	// the large transaction record is shared because source execution cannot
+	// overlap direct parks in one physical frame. The coroutine frame allocator
+	// zero-fills the initial record, and channel resume clears it before any
+	// subsequent source operation can use it.
 	elem = p.coroFrameAlloca(elemType)
-	stateType := p.prog.RuntimeType("CoroChanParkV1")
-	state = p.coroFrameAlloca(stateType)
+	body := p.requireCoroChannelBody(b)
+	if body.channelParkScratch.IsNil() {
+		body.channelParkScratch = p.coroFrameAlloca(p.prog.RuntimeType("CoroChanParkV1"))
+	}
+	state = body.channelParkScratch
 	b.Store(elem, b.Prog.Zero(elemType))
 	// State is unreachable until the conditional park hook runs, and that hook
 	// initializes the complete CoroChanParkV1 before publishing any frame
-	// pointer. Resume clears it before a loop can reuse this static operation.
+	// pointer. Resume clears it before a loop or another static operation can
+	// reuse the shared record.
 	// Eagerly zeroing the large aggregate here made both successful try paths
 	// and actual parks pay for a store which the runtime immediately repeated.
 	return

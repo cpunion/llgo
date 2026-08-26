@@ -47,6 +47,48 @@ func TestCoroCFGSubsetCycleIgnoresExcludedDeadSCC(t *testing.T) {
 	}
 }
 
+func TestCoroPhysicalConstantReachabilityFoldsSwitchComparison(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/coro/constantswitch", `package constantswitch
+func fail()
+func Root() {
+	switch 5 {
+	case 3, 4, 5, 6, 7:
+	case 0, 1, 2:
+		fail()
+	default:
+		fail()
+	}
+}
+`)
+	testProg.ssa.Build()
+	root := pkg.ssa.Func("Root")
+	reachable := coroPhysicalConstantReachableBlocks(root)
+	all, live := 0, 0
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Common().StaticCallee() == nil || call.Common().StaticCallee().Name() != "fail" {
+				continue
+			}
+			all++
+			if reachable[block] {
+				live++
+				t.Logf("reachable fail call in block %d: %s", block.Index, block.String())
+				for _, blockInstruction := range block.Instrs {
+					t.Logf("  %T %s", blockInstruction, blockInstruction.String())
+				}
+			}
+		}
+	}
+	if all != 2 || live != 0 {
+		var dump strings.Builder
+		root.WriteTo(&dump)
+		t.Logf("Root SSA:\n%s", dump.String())
+		t.Fatalf("constant switch fail calls = all:%d reachable:%d, want all:2 reachable:0", all, live)
+	}
+}
+
 func TestCoroPhysicalPlanRuntimeHelperElisionIsRecipeOwned(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -185,29 +227,72 @@ func Worker(enabled bool) {
 	plan := physical.instructions[unreachable]
 	plan.operation = coroPhysicalOperationWorkerSyscall
 	physical.instructions[unreachable] = plan
-	seeds, err := commit().workerProgramCapabilitySeeds()
-	if err != nil || seeds[function] {
-		t.Fatalf("unreachable worker capability = (%t, %v), want no worker", seeds[function], err)
+	seeds, err := commit().programCapabilitySeeds()
+	if err != nil || seeds[function].Worker() {
+		t.Fatalf("unreachable worker capability = (%t, %v), want no worker", seeds[function].Worker(), err)
 	}
 
 	plan = physical.instructions[reachable]
 	plan.operation = coroPhysicalOperationNativeSyscall
 	physical.instructions[reachable] = plan
-	seeds, err = commit().workerProgramCapabilitySeeds()
-	if err != nil || seeds[function] {
-		t.Fatalf("reachable native syscall capability = (%t, %v), want no worker", seeds[function], err)
+	seeds, err = commit().programCapabilitySeeds()
+	if err != nil || seeds[function].Worker() {
+		t.Fatalf("reachable native syscall capability = (%t, %v), want no worker", seeds[function].Worker(), err)
 	}
 
 	plan.operation = coroPhysicalOperationWorkerCgo
 	physical.instructions[reachable] = plan
-	seeds, err = commit().workerProgramCapabilitySeeds()
-	if err != nil || !seeds[function] {
-		t.Fatalf("reachable worker capability = (%t, %v), want worker", seeds[function], err)
+	seeds, err = commit().programCapabilitySeeds()
+	if err != nil || !seeds[function].Worker() {
+		t.Fatalf("reachable worker capability = (%t, %v), want worker", seeds[function].Worker(), err)
+	}
+}
+
+func TestCoroProgramCapabilitiesUseOnlyReachableNativeFaultRecipes(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func Probe() byte { return 1 }
+`)
+	function := ssaPkg.Func("Probe")
+	owner := &preparedEmissionPackage{identity: "foo"}
+	instruction := function.Blocks[0].Instrs[0]
+	physical := &coroPhysicalFunctionPlan{
+		function:        function,
+		owner:           owner,
+		reachableBlocks: map[*ssa.BasicBlock]bool{instruction.Block(): true},
+		instructions:    map[ssa.Instruction]coroPhysicalInstructionPlan{instruction: {nativeFaultBoundary: true}},
+	}
+	stage := newCoroPhysicalPlanStage()
+	if err := stage.freezePhysicalFunctionPlan(physical); err != nil {
+		t.Fatal(err)
+	}
+	ir := newCoroProgramIR()
+	ir.callsFrozen = true
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if err := ir.commitPhysicalFunctionPlans(stage, map[emissionFunctionOwnerKey]none{key: {}}); err != nil {
+		t.Fatal(err)
+	}
+	seeds, err := ir.programCapabilitySeeds()
+	if err != nil || !seeds[function].NativeDefaultFaultBoundary() ||
+		seeds[function].DynamicPanicOnFault() || seeds[function].Worker() {
+		t.Fatalf("native fault capability = (%#x, %v), want panic boundary only", seeds[function], err)
+	}
+
+	plain := newCoroProgramIR()
+	plain.callsFrozen = true
+	plain.physicalPlansSealed = true
+	plain.siteOwners[key] = none{}
+	plain.semanticPlans[key] = map[ssa.Instruction]coroSemanticInstructionPlan{
+		instruction: {evaluated: true, nativeFaultBoundary: true},
+	}
+	seeds, err = plain.programCapabilitySeeds()
+	if err != nil || !seeds[function].NativeDefaultFaultBoundary() ||
+		seeds[function].DynamicPanicOnFault() || seeds[function].Worker() {
+		t.Fatalf("plain native fault capability = (%#x, %v), want panic boundary only", seeds[function], err)
 	}
 }
 
 func TestCoroProgramPanicOnFaultDemandUsesReachableEmission(t *testing.T) {
-	analyze := func(source string) bool {
+	analyze := func(source string) coro.ProgramCapabilities {
 		t.Helper()
 		ssaPkg, _, files := buildGoSSAPkg(t, source)
 		prog := newLLSSAProg(t)
@@ -238,32 +323,32 @@ func TestCoroProgramPanicOnFaultDemandUsesReachableEmission(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return capabilities[ssaPkg.Func("Root")].PanicOnFault()
+		return capabilities[ssaPkg.Func("Root")]
 	}
 
-	if analyze(`package foo
+	if capabilities := analyze(`package foo
 func Root(values []int) { _ = len(values) }
-`) {
-		t.Fatal("program with only a builtin call acquired the capability")
+`); capabilities.PanicOnFault() {
+		t.Fatalf("program with only a builtin call acquired capabilities %#x", capabilities)
 	}
-	if analyze(`package foo
+	if capabilities := analyze(`package foo
 import "runtime/debug"
 func dead() { debug.SetPanicOnFault(true) }
 func Root() {}
-`) {
-		t.Fatal("unreachable runtime/debug.SetPanicOnFault acquired the capability")
+`); capabilities.PanicOnFault() {
+		t.Fatalf("unreachable runtime/debug.SetPanicOnFault acquired capabilities %#x", capabilities)
 	}
-	if !analyze(`package foo
+	if capabilities := analyze(`package foo
 import "runtime/debug"
 func Root() { debug.SetPanicOnFault(true) }
-`) {
-		t.Fatal("reachable runtime/debug.SetPanicOnFault did not acquire the capability")
+`); !capabilities.DynamicPanicOnFault() || capabilities.NativeDefaultFaultBoundary() {
+		t.Fatalf("reachable runtime/debug.SetPanicOnFault capabilities = %#x, want dynamic policy only", capabilities)
 	}
-	if !analyze(`package foo
+	if capabilities := analyze(`package foo
 import "runtime/debug"
 func Root() { set := debug.SetPanicOnFault; set(true) }
-`) {
-		t.Fatal("dynamically called runtime/debug.SetPanicOnFault did not acquire the capability")
+`); !capabilities.DynamicPanicOnFault() || capabilities.NativeDefaultFaultBoundary() {
+		t.Fatalf("dynamically called runtime/debug.SetPanicOnFault capabilities = %#x, want dynamic policy only", capabilities)
 	}
 }
 
@@ -300,15 +385,18 @@ func Dead() {}
 	leaf := ssaPkg.Func("Leaf")
 	capabilities, err := deriveCoroFunctionProgramCapabilities(
 		plan,
-		map[*ssa.Function]bool{leaf: true},
+		map[*ssa.Function]coro.ProgramCapabilities{
+			leaf: coro.NewProgramCapabilities(true, false),
+		},
 		map[*ssa.Function]coro.LibraryEffectFunction{
-			leaf: {ProgramCapabilities: coro.NewProgramCapabilities(false, true)},
+			leaf: {ProgramCapabilities: coro.NativeDefaultFaultBoundaryProgramCapability()},
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if root := capabilities[ssaPkg.Func("Root")]; !root.Worker() || !root.PanicOnFault() {
+	if root := capabilities[ssaPkg.Func("Root")]; !root.Worker() ||
+		!root.NativeDefaultFaultBoundary() || root.DynamicPanicOnFault() {
 		t.Fatalf("root capabilities = %#x, want imported panic + physical worker closure", root)
 	}
 	if dead := capabilities[ssaPkg.Func("Dead")]; dead != 0 {
@@ -366,13 +454,14 @@ func Root() { Imported() }
 		plan,
 		nil,
 		map[*ssa.Function]coro.LibraryEffectFunction{
-			imported: {ProgramCapabilities: coro.NewProgramCapabilities(false, true)},
+			imported: {ProgramCapabilities: coro.NativeDefaultFaultBoundaryProgramCapability()},
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if root := capabilities[ssaPkg.Func("Root")]; !root.PanicOnFault() {
+	if root := capabilities[ssaPkg.Func("Root")]; !root.NativeDefaultFaultBoundary() ||
+		root.DynamicPanicOnFault() {
 		t.Fatalf("bodyless imported capability did not reach caller: %#x", root)
 	}
 }

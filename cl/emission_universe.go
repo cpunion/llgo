@@ -5597,6 +5597,17 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 				definitions = definitions[:1]
 			}
 		}
+		if len(definitions) > 1 && mutuallyExclusiveSyntheticTestMainDefinitions(key, definitions, u.ownerOf) {
+			// One `llgo test ./...` build owns several independently linked test
+			// executables in the same SSA/emission universe. The build-injected
+			// ForTest marker proves that each main.main is a Go-generated test
+			// entry and therefore a mutually exclusive linker definition. All are
+			// explicit AsyncDemand roots, while runtime.main_main needs one exact
+			// representative only to freeze their common managed-call ABI. Keep
+			// every definition in the universe; select the deterministic first one
+			// solely for that bodyless declaration contract.
+			definitions = definitions[:1]
+		}
 		if len(definitions) > 1 {
 			_, symbol, _, _ := splitManagedSymbolKey(key)
 			diagnostics := make([]string, len(definitions))
@@ -5671,6 +5682,52 @@ func (u *EmissionUniverse) sameCopiedTestVariantDefinition(left, right *ssa.Func
 	}
 	return emissionFunctionSortKey(left) == emissionFunctionSortKey(right) &&
 		deterministicSSABody(left) == deterministicSSABody(right)
+}
+
+// mutuallyExclusiveSyntheticTestMainDefinitions recognizes only build-owned
+// Go test mains. Their common physical symbol is linked once per output, never
+// together; choosing one representative for runtime.main_main does not merge
+// or discard the actual definitions. Ordinary same-symbol functions remain
+// ambiguous and fail closed in freezeBodylessGoLinknameAliases.
+func mutuallyExclusiveSyntheticTestMainDefinitions(
+	key string,
+	definitions []*ssa.Function,
+	ownerOf func(*ssa.Function) *preparedEmissionPackage,
+) bool {
+	functionType, symbol, _, valid := splitManagedSymbolKey(key)
+	if ownerOf == nil || !valid || functionType != goFunc || symbol != "main.main" || len(definitions) < 2 {
+		return false
+	}
+	owners := make(map[*preparedEmissionPackage]none, len(definitions))
+	for _, function := range definitions {
+		if !syntheticTestMainDefinition(function) {
+			return false
+		}
+		owner := ownerOf(function)
+		if owner == nil || owner.metadataOnly || owner.ssa != function.Pkg ||
+			owner.pkgPath != function.Pkg.Pkg.Path() {
+			return false
+		}
+		if _, duplicate := owners[owner]; duplicate {
+			return false
+		}
+		owners[owner] = none{}
+	}
+	return true
+}
+
+func syntheticTestMainDefinition(function *ssa.Function) bool {
+	if function == nil || function.Name() != "main" || len(function.Blocks) == 0 ||
+		function.Parent() != nil || function.Pkg == nil || function.Pkg.Pkg == nil ||
+		function.Pkg.Pkg.Name() != "main" || !strings.HasSuffix(function.Pkg.Pkg.Path(), ".test") ||
+		function.Signature == nil || function.Signature.Recv() != nil || function.Signature.Variadic() ||
+		function.Signature.Params().Len() != 0 || function.Signature.Results().Len() != 0 ||
+		function.Signature.TypeParams() != nil && function.Signature.TypeParams().Len() != 0 ||
+		function.Signature.RecvTypeParams() != nil && function.Signature.RecvTypeParams().Len() != 0 {
+		return false
+	}
+	marker, ok := function.Pkg.Pkg.Scope().Lookup(llabi.ForTestMarker).(*types.Const)
+	return ok && marker.Val() != nil && marker.Val().Kind() == constant.Bool && constant.BoolVal(marker.Val())
 }
 
 func (u *EmissionUniverse) copiedTestVariantDefinitionLess(left, right *ssa.Function) bool {

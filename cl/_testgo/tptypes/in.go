@@ -12,9 +12,9 @@ package main
 // CHECK: call void @"main.(*Slice{{\[\[\]string,string\]}}).Append$outcome"(
 // CHECK: call void @"main.(*Slice{{\[\[\]int,int\]}}).Append$outcome"(
 // CHECK: call void @"main.(*Slice{{\[\[\]int,int\]}}).Append2$outcome"(
-// CHECK: call ptr @"{{.*}}PrintInt$coro"(
+// CHECK: call ptr @"{{.*}}PrintBatchV1$coro"(
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
-// CHECK: call ptr @"{{.*}}PrintString$coro"(
+// CHECK: call ptr @"{{.*}}PrintBatchV1$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define linkonce ptr @"main.(*Slice{{\[\[\]int,int\]}}).Append$coro"(
 // CHECK: call void @"{{.*}}SliceAppend$outcome"(

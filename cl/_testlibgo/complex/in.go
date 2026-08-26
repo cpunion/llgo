@@ -9,7 +9,7 @@ import (
 func f(c, z complex128) {
 	// CHECK: [[ABS:%[0-9]+]] = call ptr @"math/cmplx.Abs$coro"
 	// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[ABS]]
-	// CHECK: [[PRINT:%[0-9]+]] = call ptr @"{{.*}}PrintFloat$coro"
+	// CHECK: [[PRINT:%[0-9]+]] = call ptr @"{{.*}}PrintBatchV1$coro"
 	// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4({{.*}}ptr [[PRINT]]
 	println("abs(3+4i):", cmplx.Abs(c))
 	// CHECK: extractvalue { double, double } %3, 0

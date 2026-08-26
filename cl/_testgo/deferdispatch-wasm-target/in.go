@@ -17,5 +17,7 @@ func main() {
 // CHECK: call i32 @llvm.coro.size.i32()
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK: call void @__llgo_coro_panic_prepare_v1(
-// CHECK: runtime.PrintString{{(\$coro)?}}
-// CHECK: runtime.PrintString{{(\$coro)?}}
+// WASI may keep the leaf batch printer plain; the source defer still owns one
+// batch call per println and no per-operand print helper.
+// CHECK: runtime.PrintBatchV1{{(\$coro)?}}
+// CHECK: runtime.PrintBatchV1{{(\$coro)?}}

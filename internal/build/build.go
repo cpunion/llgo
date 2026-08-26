@@ -2845,9 +2845,9 @@ func (in CoroPlanInput) closedStaticSpawnTarget(owner *ssa.Function, spawn *ssa.
 		return nil, fmt.Errorf("target %q is a generic declaration", target.Name())
 	}
 	sig := target.Signature
-	if sig == nil || sig.Variadic() ||
+	if sig == nil ||
 		typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 {
-		return nil, fmt.Errorf("target %q must have a non-variadic, non-generic signature", target.Name())
+		return nil, fmt.Errorf("target %q must have a non-generic signature", target.Name())
 	}
 	if redirected && !spawnWrapper && !types.Identical(common.Signature(), sig) {
 		return nil, fmt.Errorf("target %q does not preserve the source spawn signature", target.Name())
@@ -3788,7 +3788,7 @@ func Build(inv Invocation) ([]Package, error) {
 		if llruntime.SkipToBuild(pkg.PkgPath) {
 			return
 		}
-		if pkg.Name == "main" && pkg.ForTest != "" {
+		if buildOwnedTestMainVariant(pkg, conf.Mode) {
 			pkg.Types.Scope().Insert(types.NewConst(0, pkg.Types, abi.ForTestMarker, types.Typ[types.UntypedBool], constant.MakeBool(true)))
 		}
 		if err := cl.ParsePkgSyntaxWithOptions(prog, cfg.Fset, pkg.Types, pkg.Syntax, preloadOptions); err != nil {
@@ -4200,6 +4200,8 @@ const (
 	coroNativePipeBuildTag  = "llgo_coro_native_pipe"
 	coroNativeTimerBuildTag = "llgo_coro_native_timer"
 	coroWasmGCBuildTag      = "llgo_wasm_gc"
+	pclnExternalBuildTag    = "llgo_pclntab_external"
+	pclnNoneBuildTag        = "llgo_pclntab_none"
 	closureEnvNestBuildTag  = "llgo_closure_env_nest"
 	closureEnvSwiftBuildTag = "llgo_closure_env_swiftself"
 	closureEnvExplicitTag   = "llgo_closure_env_explicit"
@@ -4259,20 +4261,23 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 
 	target := newLLSSATarget(conf, export)
 	tags := []string{"llgo", "math_big_pure_go", "purego", target.ClosureEnvBuildTag()}
-	if conf.PCLNMode == PCLNExternal {
+	switch conf.PCLNMode {
+	case PCLNExternal:
 		// The loader is part of the package ABI and therefore of the package
 		// cache key. Embedded and none builds compile no sidecar probing code.
-		tags = append(tags, "llgo_pclntab_external")
+		tags = append(tags, pclnExternalBuildTag)
+	case PCLNNone:
+		// Compile metadata-disabled public APIs to an immediate miss. A distinct
+		// compiler-owned tag avoids retaining either a runtime mode branch or
+		// the external loader in the generated program.
+		tags = append(tags, pclnNoneBuildTag)
 	}
 	if conf.AbiMode == cabi.ModeAllFunc {
 		tags = append(tags, "llgo_abi_2")
 	}
-	// The stackless runtime does not yet have a RawCritical bridge that can
-	// turn a synchronous hardware fault into a G-owned panic completion.
-	// Exclude the legacy pthread-TLS/SJLJ SIGSEGV recovery hook instead of
-	// admitting a signal callback that can allocate, block, or retain the
-	// native signal stack. Language-level nil/bounds/divide checks remain
-	// explicit compiler operations.
+	// Select the sole stackless runtime. Native hardware faults use its
+	// compiler-gated coroutine landing; language-level nil/bounds/divide faults
+	// remain allocation-free explicit-status operations on every target.
 	tags = append(tags, "llgo_coro")
 	if nativeCoroDoorbellRuntimeABI(conf) {
 		// Do not infer POSIX capability from GOOS alone. Several embedded
@@ -4308,6 +4313,7 @@ func rejectCompilerReservedBuildTags(source string, tags []string) error {
 	for _, tag := range tags {
 		switch tag {
 		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroWasmGCBuildTag,
+			pclnExternalBuildTag, pclnNoneBuildTag,
 			closureEnvNestBuildTag, closureEnvSwiftBuildTag, closureEnvExplicitTag:
 			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
 		}
@@ -7016,6 +7022,29 @@ func needLink(pkg *packages.Package, mode Mode) bool {
 		return strings.HasSuffix(pkg.ID, ".test")
 	}
 	return pkg.Name == "main"
+}
+
+// buildOwnedTestMainVariant identifies only Go-generated test package
+// variants whose package-level main symbols are linked into mutually
+// exclusive test executables. ForTest covers a tested package variant whose
+// source package itself is named main. The synthetic test driver has an empty
+// ForTest field, so additionally require ModeTest, its linker-root identity,
+// and the testing-internal dependency injected by cmd/go. Ordinary packages
+// cannot import testing/internal/testdeps through Go's internal visibility
+// rule and therefore cannot acquire this compiler-owned marker merely by
+// choosing an import path ending in ".test".
+func buildOwnedTestMainVariant(pkg *packages.Package, mode Mode) bool {
+	if pkg == nil || pkg.Name != "main" {
+		return false
+	}
+	if pkg.ForTest != "" {
+		return true
+	}
+	if mode != ModeTest || !needLink(pkg, mode) || pkg.PkgPath != pkg.ID {
+		return false
+	}
+	_, syntheticDriver := pkg.Imports["testing/internal/testdeps"]
+	return syntheticDriver
 }
 
 func filterTestPackages(initial []*packages.Package, outFile string) ([]*packages.Package, error) {

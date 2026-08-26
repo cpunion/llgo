@@ -23,7 +23,9 @@ func callerLocation(file string, line int) (string, int) {
 
 //go:noinline
 func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
-	ensureRuntimePCLN()
+	if !ensureRuntimePCLN() {
+		return 0, "", 0, false
+	}
 	// A visible panic snapshot overlays the ordinary stack. It must be spliced
 	// before consulting the compiler shadow stack; the latter is intentionally
 	// non-empty for stackless coroutines but cannot contain frames already
@@ -73,7 +75,9 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 
 //go:noinline
 func Callers(skip int, pc []uintptr) int {
-	ensureRuntimePCLN()
+	if !ensureRuntimePCLN() {
+		return 0
+	}
 	if len(panicSplicePCs()) != 0 {
 		n := 0
 		if rtdebug.CoroPanicRecoverActive() {

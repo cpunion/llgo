@@ -30,7 +30,7 @@ func main() {
 // CHECK-LABEL: define ptr @"main.fail$coro"(
 // CHECK: call void @__llgo_coro_frame_publish_v3(
 // CHECK: call void @__llgo_coro_panic_prepare_v1(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define ptr @"main.main$coro"(
@@ -38,4 +38,4 @@ func main() {
 // CHECK: call ptr @"main.fail$coro"(
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-LABEL: define ptr @"main.main$1$coro"(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"

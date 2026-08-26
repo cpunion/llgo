@@ -2226,7 +2226,7 @@ were excluded from the safe-use-closed cohort.
 The conditional-initial-suspend builder API, fourth frame-publication ABI,
 ramp-specific await helper, plan/summary/archive fields, and their tests were
 therefore removed together. The retained schemas remain plan digest v36,
-function summary v9, and library-effect summary v10. A replacement must meet a
+function summary v9, and library-effect summary v11. A replacement must meet a
 stronger architecture gate: create an independent child G, run its proven
 synchronous prefix on the current P, and allocate/publish/enqueue a continuation
 only if the child actually suspends. Mixed or dynamic uses may receive an
@@ -2246,3 +2246,84 @@ AB/BA serial-spawn runs had medians of 900.976 ms for the clean rebuild and
 901.914 ms for the replay (-0.10%, measurement noise), while every bounded core
 workload mode completed successfully. Thus the cleanup restores throughput and
 improves rather than regresses the size gate.
+
+### Function-local native fault landing checkpoint
+
+The native fault capability previously joined two different facts into one
+program-wide bit. A reachable `runtime/debug.SetPanicOnFault` really is dynamic:
+it may change the current G's policy before any later resume, so every native
+resume needs a landing. An exact non-zero low-address load/store is different.
+Its default Go fault behavior is a compiler-known local seed, and the frozen
+ProgramIR call graph already propagates that seed to every physical caller.
+
+The retained implementation therefore carries three orthogonal compiler facts:
+worker demand, dynamic panic-on-fault policy, and static native-default fault
+landing. Library-effect summary v11 preserves the distinction across archives.
+The runtime bootstrap still exposes only one fault-service flag, the union of
+the two fault facts, because the signal service itself is identical. Physical
+ABI hook selection uses the dynamic bit globally and the static bit per
+function. This adds no runtime state, adapter, or coroutine-frame field.
+
+Two otherwise identical `pclntab=none` Darwin arm64 executables use observable
+loads from exact addresses 4096 (no default low-address landing) and 1 (landing
+required). Full LTO and LLVM 22 produce:
+
+| Artifact | file bytes | Mach-O `__text` | direct calls to boundary hooks |
+| --- | ---: | ---: | ---: |
+| pre-change address-1 build (global emission) | 684,576 | 440,756 | 52 |
+| retained address-4096 negative control | 684,576 | 438,264 | 0 |
+| retained address-1 build (function-local emission) | 684,576 | 438,340 | 3 |
+
+Thus the exact static capability now costs 76 text bytes over the negative
+control instead of 2,492 bytes. The three calls are the required take/type/data
+transaction in `main.main$coro.resume`; unrelated runtime coroutines contain no
+landing calls. Both retained artifacts have the same 25 physical frame
+descriptors and two root factories, so the optimization did not replace code
+with duplicate metadata or adapters. The existing CoroSplit gate also confirms
+that enabling the landing changes no frame allocation size.
+
+The compiler test builds two coroutine roots in one closed program and requires
+the faulting root to contain all three landing calls while the unrelated root
+contains none. The external-PCLN exact-address fixture still recovers the real
+hardware fault and performs its subsequent metadata load successfully. Dynamic
+`SetPanicOnFault` remains covered separately and retains the conservative
+all-resume policy required by its semantics.
+
+The same audit also rebuilt the import-free `pure_compute` fixture at the
+pre-shard `7e6ac0385` baseline and at this checkpoint, using independent cold
+caches, `pclntab=none`, LLVM 22 full LTO, and stripped outputs. Coroutine shape
+is unchanged: both binaries contain 16 ramp/resume/destroy triplets, 25 shared
+frame descriptors, two root factories, zero direct fault-boundary calls, and
+zero worker park/resume calls. The normalized linked-symbol delta is exactly
+five shared cold-path functions: three descriptor/retained-trace walkers and
+two runtime Caller/Callers reconciliation helpers. There is no new adapter,
+coroutine entry, descriptor, or root.
+
+| Metric | `7e6ac0385` | retained checkpoint | delta |
+| --- | ---: | ---: | ---: |
+| stripped file bytes | 684,128 | 684,576 | +448 |
+| Mach-O `__text` bytes | 437,404 | 438,328 | +924 |
+| Mach-O text constants | 19,161 | 19,201 | +40 |
+
+The five helpers have multiple callers and replace repeated validation loops;
+their combined standalone extents exceed the net text delta, confirming that
+the extraction consolidates code rather than merely adding wrappers. This is
+the accepted compatibility cost of lazy recovered-stack reconstruction. It is
+paid once in the fixed panic/runtime support and adds neither per-function code
+nor per-goroutine storage.
+
+The import-free `pure_handoff` fixture provides the corresponding frame gate.
+Both revisions emit exactly 17 ramp/resume/destroy triplets, 28 descriptors,
+and no fault-boundary call. Sharing one direct-channel transaction record per
+physical frame changes the two application frames as follows:
+
+| Physical coroutine | `7e6ac0385` frame | retained frame | delta |
+| --- | ---: | ---: | ---: |
+| `main.main` | 920 B | 504 B | -416 B (-45.2%) |
+| `main.main$1` | 656 B | 448 B | -208 B (-31.7%) |
+
+The application ramps/resumes shrink by 36 text bytes in total. The complete
+binary moves from 440,908 to 441,796 text bytes (+888), exactly the +924-byte
+shared traceback cost above minus those 36 bytes. This closes the accounting:
+there is no unexplained per-channel adapter, descriptor, or code-size growth,
+while every live handoff goroutine keeps a materially smaller stackless frame.

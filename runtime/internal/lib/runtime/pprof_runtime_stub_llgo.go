@@ -122,7 +122,9 @@ func cachedFuncForPC(entry *unsafe.Pointer, pc uintptr) *Func {
 func FuncForPC(pc uintptr) *Func {
 	// External metadata must be installed before consulting either cache:
 	// caching a pre-load miss would otherwise survive a successful load.
-	ensureRuntimePCLN()
+	if !ensureRuntimePCLN() {
+		return nil
+	}
 	if fn := cachedFuncForPC(&funcForPCLast, pc); fn != nil {
 		return fn
 	}

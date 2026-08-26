@@ -18,14 +18,13 @@ package main
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.main$1$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
-// CHECK: call ptr @"{{.*}}PrintString$coro"(
+// CHECK: call ptr @"{{.*}}PrintBatchV1$coro"(
 // CHECK: store i1 true
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.println$wrapper$llgo$builtin-spawn$v1${{.*}}$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
-// CHECK: call ptr @"{{.*}}PrintString$coro"(
-// CHECK: call ptr @"{{.*}}PrintByte$coro"(
+// CHECK: call ptr @"{{.*}}PrintBatchV1$coro"(
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 

@@ -10,7 +10,7 @@ import (
 // native closure bodies retain the target hidden-context attribute.
 // CHECK: @__llgo_coro_func_descriptor_v1.{{.*}} = linkonce_odr unnamed_addr constant
 // CHECK-LABEL: define ptr @"main.demo$coro"(ptr %0, ptr %1){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"(
 // CHECK: call void @__llgo_coro_complete_prepare_v2
 func demo() {
 	println("demo")
@@ -36,6 +36,6 @@ func main() {
 
 // CHECK-LABEL: define ptr @"main.main$1$coro"(ptr %0, ptr %1, ptr swiftself %2){{.*}} {
 // CHECK: load { ptr }, ptr %2
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintInt$coro"(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"(
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
 // CHECK-NOT: __llgo_stub.

@@ -1223,6 +1223,27 @@ func RetainLogicalPanicTraceFrame(
 	return true
 }
 
+func descriptorTraceFrameSnapshot(
+	descriptorPointer unsafe.Pointer,
+	line uint32,
+) (PanicTraceFrameSnapshot, bool) {
+	if descriptorPointer == nil {
+		return PanicTraceFrameSnapshot{}, false
+	}
+	descriptor := (*FrameDescriptorV1)(descriptorPointer)
+	if descriptor.Version != 1 ||
+		descriptor.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
+		len(descriptor.Function) == 0 {
+		return PanicTraceFrameSnapshot{}, false
+	}
+	return PanicTraceFrameSnapshot{
+		Function: descriptor.Function,
+		File:     descriptor.File,
+		Line:     line,
+		Hidden:   descriptor.Flags&FrameDescriptorTraceHiddenV1 != 0,
+	}, true
+}
+
 func activeTraceFrameSnapshot(g *G, frame *Frame, active bool) (PanicTraceFrameSnapshot, bool) {
 	if frame == nil || frame.owner != g || frame.handle == nil || frame.header == nil ||
 		frame.header.G != unsafe.Pointer(g) || frame.header.Descriptor == nil {
@@ -1247,24 +1268,45 @@ func activeTraceFrameSnapshot(g *G, frame *Frame, active bool) (PanicTraceFrameS
 		header.Lifecycle != uint16(FrameSuspended) {
 		return PanicTraceFrameSnapshot{}, false
 	}
-	descriptor := (*FrameDescriptorV1)(header.Descriptor)
-	if descriptor.Version != 1 ||
-		descriptor.Flags&^frameDescriptorAllowedFlagsV1 != 0 ||
-		len(descriptor.Function) == 0 {
-		return PanicTraceFrameSnapshot{}, false
-	}
-	return PanicTraceFrameSnapshot{
-		Function: descriptor.Function,
-		File:     descriptor.File,
-		Line:     header.Line,
-		Hidden:   descriptor.Flags&FrameDescriptorTraceHiddenV1 != 0,
-	}, true
+	return descriptorTraceFrameSnapshot(header.Descriptor, header.Line)
 }
 
 func activeTraceOwner(g *G) bool {
 	return ValidG(g) && resumeGateTaken(g) && g.state == GRunning &&
 		g.active != nil && g.pending == (pendingTransition{}) && g.destroyTarget == nil &&
 		!g.destroyRoot && g.spawnChild == nil
+}
+
+func physicalTraceFrames(
+	g *G,
+	child *Frame,
+	activeLeaf bool,
+	snapshots []PanicTraceFrameSnapshot,
+) (int, bool) {
+	if child == nil || len(snapshots) == 0 {
+		return 0, false
+	}
+	n := 0
+	for frame := child; frame != nil; frame = frame.parent {
+		if n == len(snapshots) {
+			return 0, false
+		}
+		snapshot, ok := activeTraceFrameSnapshot(g, frame, activeLeaf && frame == child)
+		if !ok {
+			return 0, false
+		}
+		parent := frame.parent
+		if parent == nil {
+			if frame != g.root || frame.header.Parent != nil {
+				return 0, false
+			}
+		} else if frame.header.Parent != parent.handle {
+			return 0, false
+		}
+		snapshots[n] = snapshot
+		n++
+	}
+	return n, true
 }
 
 // ActiveTraceFrames snapshots the current physical stackless ancestry from
@@ -1281,28 +1323,7 @@ func ActiveTraceFrames(g *G, snapshots []PanicTraceFrameSnapshot) (int, bool) {
 	if !activeTraceOwner(g) || len(snapshots) == 0 {
 		return 0, false
 	}
-	child := g.active
-	n := 0
-	for frame := child; frame != nil; frame = frame.parent {
-		if n == len(snapshots) {
-			return 0, false
-		}
-		snapshot, ok := activeTraceFrameSnapshot(g, frame, frame == child)
-		if !ok {
-			return 0, false
-		}
-		parent := frame.parent
-		if parent == nil {
-			if frame != g.root || frame.header.Parent != nil {
-				return 0, false
-			}
-		} else if frame.header.Parent != parent.handle {
-			return 0, false
-		}
-		snapshots[n] = snapshot
-		n++
-	}
-	return n, true
+	return physicalTraceFrames(g, g.active, true, snapshots)
 }
 
 func emptyPanicTrace(g *G) bool {
@@ -1627,22 +1648,13 @@ func FirstPanicTraceFrame(g *G) unsafe.Pointer {
 	return unsafe.Pointer(g.panicTraceHead)
 }
 
-// LoadPanicTraceFrame validates and snapshots one cursor retained by
-// RetainPanicTraceFrame. next is nil only for the exact tail.
-func LoadPanicTraceFrame(g *G, cursor unsafe.Pointer) (snapshot PanicTraceFrameSnapshot, next unsafe.Pointer, ok bool) {
-	if !ValidG(g) || cursor == nil || !publishedPanicRecord(&g.panicRecord) {
-		return PanicTraceFrameSnapshot{}, nil, false
-	}
-	frame := (*Frame)(cursor)
-	if frame.owner != g || frame.state != FrameTraceRetained || frame.header == nil ||
+func retainedPanicTraceFrame(
+	g *G,
+	frame *Frame,
+) (snapshot PanicTraceFrameSnapshot, next *Frame, ok bool) {
+	if frame == nil || frame.owner != g || frame.state != FrameTraceRetained || frame.header == nil ||
 		frame.borrowedStorage && frame.allocationSize != 0 ||
 		!frame.borrowedStorage && frame.allocationSize == 0 {
-		return PanicTraceFrameSnapshot{}, nil, false
-	}
-	descriptor := (*FrameDescriptorV1)(unsafe.Pointer(frame.header))
-	if descriptor.Version != 1 ||
-		descriptor.Flags & ^frameDescriptorAllowedFlagsV1 != 0 ||
-		len(descriptor.Function) == 0 {
 		return PanicTraceFrameSnapshot{}, nil, false
 	}
 	if frame == g.panicTraceTail {
@@ -1652,10 +1664,20 @@ func LoadPanicTraceFrame(g *G, cursor unsafe.Pointer) (snapshot PanicTraceFrameS
 	} else if frame.next == nil || frame.parent != frame.next {
 		return PanicTraceFrameSnapshot{}, nil, false
 	}
-	return PanicTraceFrameSnapshot{
-		Function: descriptor.Function,
-		File:     descriptor.File,
-		Line:     frame.panicLine,
-		Hidden:   descriptor.Flags&FrameDescriptorTraceHiddenV1 != 0,
-	}, unsafe.Pointer(frame.next), true
+	snapshot, ok = descriptorTraceFrameSnapshot(unsafe.Pointer(frame.header), frame.panicLine)
+	if !ok {
+		return PanicTraceFrameSnapshot{}, nil, false
+	}
+	return snapshot, frame.next, true
+}
+
+// LoadPanicTraceFrame validates and snapshots one cursor retained by
+// RetainPanicTraceFrame. next is nil only for the exact tail.
+func LoadPanicTraceFrame(g *G, cursor unsafe.Pointer) (snapshot PanicTraceFrameSnapshot, next unsafe.Pointer, ok bool) {
+	if !ValidG(g) || cursor == nil || !publishedPanicRecord(&g.panicRecord) ||
+		!activePanicTrace(g) {
+		return PanicTraceFrameSnapshot{}, nil, false
+	}
+	snapshot, frameNext, ok := retainedPanicTraceFrame(g, (*Frame)(cursor))
+	return snapshot, unsafe.Pointer(frameNext), ok
 }

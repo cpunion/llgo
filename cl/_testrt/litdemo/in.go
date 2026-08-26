@@ -30,7 +30,7 @@ func add(x, y int) int {
 
 // CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call i64 @"main.main$1"
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintInt$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i8 @llvm.coro.suspend
 
 func main() {

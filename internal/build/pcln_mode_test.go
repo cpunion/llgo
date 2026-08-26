@@ -22,10 +22,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	buildfuncinfo "github.com/xgo-dev/llgo/internal/build/funcinfo"
+	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llgo/internal/pclnmap"
 )
 
@@ -143,6 +145,42 @@ func TestShouldEnablePCLNSites(t *testing.T) {
 	t.Setenv(llgoFuncInfoSites, "0")
 	if shouldEnablePCLNSites(&Config{Goos: "linux", PCLNMode: PCLNExternal}, true, true) {
 		t.Fatal("LLGO_FUNCINFO_SITES=0 did not disable sites")
+	}
+}
+
+func TestEffectiveBuildTagsSelectsOnePCLNRuntimeCapability(t *testing.T) {
+	tests := []struct {
+		mode PCLNMode
+		want string
+	}{
+		{mode: PCLNEmbedded},
+		{mode: PCLNExternal, want: pclnExternalBuildTag},
+		{mode: PCLNNone, want: pclnNoneBuildTag},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode.String(), func(t *testing.T) {
+			tags, err := effectiveBuildTags(&Config{Goos: "linux", Goarch: "amd64", PCLNMode: tt.mode}, crosscompile.Export{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			effective := strings.Split(tags, ",")
+			for _, capability := range []string{pclnExternalBuildTag, pclnNoneBuildTag} {
+				if got, want := slices.Contains(effective, capability), capability == tt.want; got != want {
+					t.Fatalf("effective tags = %q, %s present=%t, want %t", tags, capability, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestEffectiveBuildTagsRejectsForgedPCLNRuntimeCapability(t *testing.T) {
+	for _, tag := range []string{pclnExternalBuildTag, pclnNoneBuildTag} {
+		t.Run(tag, func(t *testing.T) {
+			_, err := effectiveBuildTags(&Config{Tags: tag}, crosscompile.Export{})
+			if err == nil || !strings.Contains(err.Error(), tag) || !strings.Contains(err.Error(), "compiler-reserved capability") {
+				t.Fatalf("forged PCLN tag error = %v", err)
+			}
+		})
 	}
 }
 
@@ -268,5 +306,33 @@ func TestFilterExternalPCLNJoins(t *testing.T) {
 	wantPCSites := []pclnmap.Site{{PCOffset: 0x110, ID: 101}, {PCOffset: 0x130, ID: 202}}
 	if !reflect.DeepEqual(data.PCSites, wantPCSites) {
 		t.Fatalf("pcline sites = %#v, want %#v", data.PCSites, wantPCSites)
+	}
+}
+
+func TestExternalOwnerFuncIndexJoinsOnlyExactCoroSplitParts(t *testing.T) {
+	const want = uint32(7)
+	symbols := map[uint64]uint32{
+		funcInfoSymbolID("example.com/p.F$coro"): want,
+	}
+	tests := []struct {
+		name  string
+		goos  string
+		owner string
+		want  uint32
+	}{
+		{name: "ramp", goos: "linux", owner: "example.com/p.F$coro", want: want},
+		{name: "resume", goos: "linux", owner: "example.com/p.F$coro.resume", want: want},
+		{name: "destroy", goos: "linux", owner: "example.com/p.F$coro.destroy", want: want},
+		{name: "Mach-O resume", goos: "darwin", owner: "__example.com/p.F$coro.resume", want: want},
+		{name: "ordinary suffix", goos: "linux", owner: "example.com/p.F.resume"},
+		{name: "suffix extension", goos: "linux", owner: "example.com/p.F$coro.resume.copy"},
+		{name: "foreign coroutine", goos: "linux", owner: "example.com/p.G$coro.resume"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := externalOwnerFuncIndex(symbols, tt.owner, tt.goos); got != tt.want {
+				t.Fatalf("externalOwnerFuncIndex(%q, %q) = %d, want %d", tt.owner, tt.goos, got, tt.want)
+			}
+		})
 	}
 }

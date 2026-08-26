@@ -54,7 +54,8 @@ type Compilation struct {
 	// preflight and before any package codegen. The accompanying bit separates
 	// a known empty capability set from isolated frontend compilations which do
 	// not own a complete final program. Optional closed-world lowering is only
-	// emitted for a frozen positive capability.
+	// emitted for a frozen positive capability, including exact physical fault
+	// recipes as well as explicit runtime service calls.
 	FinalCoroProgramCapabilities       coro.ProgramCapabilities
 	FinalCoroProgramCapabilitiesFrozen bool
 	// CoroPlanDigest and the ABI identities are populated by the build driver
@@ -153,7 +154,7 @@ func (c *Compilation) CoroHostOperationSupported() bool {
 	return c != nil && c.CoroTargetCapabilities.HostOperation()
 }
 
-func (c *Compilation) coroPanicBoundaryEmissionEnabled() bool {
+func (c *Compilation) coroPanicBoundaryEmissionEnabled(function *ssa.Function) bool {
 	if c == nil {
 		return true
 	}
@@ -163,7 +164,17 @@ func (c *Compilation) coroPanicBoundaryEmissionEnabled() bool {
 	if !c.FinalCoroProgramCapabilities.Valid() {
 		panic("invalid final coroutine program capability set")
 	}
-	return c.FinalCoroProgramCapabilities.PanicOnFault()
+	if c.FinalCoroProgramCapabilities.DynamicPanicOnFault() {
+		return true
+	}
+	if !c.FinalCoroProgramCapabilities.NativeDefaultFaultBoundary() {
+		return false
+	}
+	capabilities, err := c.coroFunctionProgramCapability(function)
+	if err != nil {
+		panic(fmt.Sprintf("resolve native fault-boundary demand: %v", err))
+	}
+	return capabilities.NativeDefaultFaultBoundary()
 }
 
 func (c *Compilation) validateCoroTargetCapabilities() error {

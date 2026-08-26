@@ -37,10 +37,9 @@ func (m *M[T]) check(align, offset1, offset2 uintptr) {
 }
 
 // The generic unsafe layout builtins are type-only operations, but the
-// diagnostic paths use managed print helpers. Keep this check focused on the
-// stable semantic boundary: Offsetof/Alignof remain uintptr (PrintUint), each
-// managed helper is awaited, and both instantiated layouts retain their exact
-// generic instantiations remain distinct.
+// diagnostic paths use one managed batch per source println. Keep this check
+// focused on the stable semantic boundary: Offsetof/Alignof remain uintptr,
+// each batch is awaited, and both instantiated layouts remain distinct.
 
 // CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
 // CHECK: call ptr @"main.(*M[bool]).check$coro"
@@ -49,29 +48,17 @@ func (m *M[T]) check(align, offset1, offset2 uintptr) {
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
 
 // CHECK-LABEL: define linkonce ptr @"main.(*M[bool]).check$coro"(ptr %0, ptr %1, ptr %2, i64 %3, i64 %4, i64 %5){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
 
 // CHECK-LABEL: define linkonce ptr @"main.(*M[int64]).check$coro"(ptr %0, ptr %1, ptr %2, i64 %3, i64 %4, i64 %5){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintUint$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
