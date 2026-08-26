@@ -7,7 +7,7 @@ github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.e28b811cbaa6b37f13584038b8309842
+    __llgo_coro_frame_descriptor_v1.3ee07e2ecf9f873971da862d38e98906
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -30,7 +30,7 @@ github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
 github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.init:
     github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v9.0899252964772d27e5c8d618604f4333
+    __llgo_coro_library_effect_v11.f26bc0db02d5258f9eaf289b36492f6a
 
 [UseIfaceMethod]
 github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:

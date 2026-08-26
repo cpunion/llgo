@@ -496,13 +496,21 @@ func caller(value any, fail bool) int { return leaf(value, fail) }
 		return facts, nil
 	}
 	for _, test := range []struct {
-		name     string
-		roots    Roots
-		max      int
-		wantTwin bool
+		name        string
+		roots       Roots
+		max         int
+		wantTwin    bool
+		wantPrimary bool
 	}{
 		{name: "budget disabled", roots: Roots{{Function: caller, ManagedDemand: AsyncDemand}}, max: -1},
 		{name: "explicit root", roots: Roots{{Function: leaf, ManagedDemand: AsyncDemand}}, max: 64, wantTwin: true},
+		{
+			name: "package emission entry",
+			roots: Roots{{
+				Function: leaf, ManagedDemand: AsyncDemand, EmissionEntry: true,
+			}},
+			max: 64, wantPrimary: true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			plan, err := AnalyzeSSA(prog, test.roots, SSAConfig{
@@ -514,7 +522,12 @@ func caller(value any, fail bool) int { return leaf(value, fail) }
 				t.Fatal(err)
 			}
 			got := functionPlanFor(t, plan, leaf)
-			if test.wantTwin {
+			if test.wantPrimary {
+				if got.Emission != EmitOutcomePlain || got.ManagedEntry != ManagedEntryOutcomePlain ||
+					!got.AtomicCostProof.ProvesOutcomePlain() || got.AtomicCost == 0 {
+					t.Fatalf("package emission leaf plan = %+v, want one outcome-plain primary", got)
+				}
+			} else if test.wantTwin {
 				if got.Emission != EmitCoroutine || got.ManagedEntry != ManagedEntryCoroutine ||
 					!got.AtomicCostProof.ProvesOutcomePlain() || got.AtomicCost == 0 {
 					t.Fatalf("root leaf plan = %+v, want coroutine primary plus static outcome entry", got)

@@ -36,7 +36,7 @@ func (p *SSAPlan) DemandTrace(target *ssa.Function) string {
 	for _, root := range p.roots {
 		if root.Function == target || identified && root.ID == targetID {
 			sources = append(sources, fmt.Sprintf(
-				"root(%s managed=%s raw=%t)", root.Function, root.ManagedDemand, root.RawPlainDemand,
+				"root(%s managed=%s raw=%t emission=%t)", root.Function, root.ManagedDemand, root.RawPlainDemand, root.EmissionEntry,
 			))
 		}
 	}

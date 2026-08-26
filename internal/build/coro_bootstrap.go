@@ -187,7 +187,7 @@ func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootst
 	if ctx == nil || ctx.buildConf == nil {
 		return nil, nil
 	}
-	if ctx.buildConf.PackageCompileOnly {
+	if ctx.buildConf.PackageCompileOnly || ctx.mode == ModeGen {
 		return map[string]*coroProgramBootstrapV1{}, nil
 	}
 	if ctx.buildConf.BuildMode != BuildModeExe {

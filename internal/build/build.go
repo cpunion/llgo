@@ -4426,6 +4426,11 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		requiredDirectPlain = appendUniqueCoroDirectPlainCallArguments(requiredDirectPlain, directPlain...)
 	}
 	requiredRoots = appendCoroDirectPlainRoots(requiredRoots, requiredDirectPlain)
+	generationRoots, err := requiredCoroGenerationEntryRoots(ctx)
+	if err != nil {
+		return err
+	}
+	requiredRoots = append(requiredRoots, generationRoots...)
 	managedEntryRoots, err := requiredCoroProgramManagedEntryRoots(ctx)
 	if err != nil {
 		return err
@@ -4634,6 +4639,10 @@ func mergeCoroRequiredRoots(roots coro.Roots) coro.Roots {
 			result[index].Demand = result[index].Demand.Join(root.Demand)
 			result[index].ManagedDemand = result[index].ManagedDemand.Join(root.ManagedDemand)
 			result[index].RawPlainDemand = result[index].RawPlainDemand || root.RawPlainDemand
+			// EmissionEntry is the weaker, non-scheduled role. Any independently
+			// established root for the same function must retain scheduler/raw
+			// semantics after the duplicate capabilities are joined.
+			result[index].EmissionEntry = result[index].EmissionEntry && root.EmissionEntry
 			continue
 		}
 		byFunction[root.Function] = len(result)
@@ -4911,7 +4920,7 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil, nil
 	}
-	if ctx.buildConf.PackageCompileOnly {
+	if ctx.buildConf.PackageCompileOnly || ctx.mode == ModeGen {
 		return nil, nil
 	}
 	// Isolated planner tests and analysis-only callers may have no linked
@@ -5001,6 +5010,53 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 				return nil, err
 			}
 		}
+	}
+	return roots, nil
+}
+
+// requiredCoroGenerationEntryRoots preserves ModeGen's historical contract:
+// the requested package is an IR-generation unit, not a runnable closed
+// program. Every bodyful source-level function in that package is therefore an
+// independently callable managed Go entry. An emission entry contributes
+// AsyncDemand so effect propagation selects the correct physical managed entry,
+// but is not a scheduler root: it owns no root factory and does not prevent a
+// non-suspending body from using the compact outcome/plain implementation.
+// Nested closures are reached from their source owners and must not become
+// unrelated public roots.
+//
+// PackageCompileOnly deliberately keeps its separate go-tool-compatible
+// declaration-only contract and consequently contributes no generation roots.
+func requiredCoroGenerationEntryRoots(ctx *context) (coro.Roots, error) {
+	if ctx == nil || ctx.buildConf == nil || ctx.coroEmission == nil ||
+		ctx.mode != ModeGen || ctx.buildConf.PackageCompileOnly {
+		return nil, nil
+	}
+	requested := make(map[*ssa.Package]struct{}, len(ctx.initial))
+	for _, pkg := range ctx.initial {
+		built := contextPackage(ctx, pkg)
+		if built == nil || built.SSA == nil {
+			return nil, fmt.Errorf("coroutine generation roots: requested package %q has no exact SSA package", pkg.ID)
+		}
+		requested[built.SSA] = struct{}{}
+	}
+	var roots coro.Roots
+	for _, function := range ctx.coroEmission.Functions() {
+		if function == nil || function.Pkg == nil || function.Parent() != nil || len(function.Blocks) == 0 {
+			continue
+		}
+		if _, selected := requested[function.Pkg]; !selected {
+			continue
+		}
+		goBody, err := frozenGoEmittedBody(ctx.coroEmission, function)
+		if err != nil {
+			return nil, fmt.Errorf("classify coroutine generation root %q: %w", function.Name(), err)
+		}
+		if !goBody {
+			continue
+		}
+		roots = append(roots, coro.Root{
+			Function: function, Demand: coro.AsyncDemand, EmissionEntry: true,
+		})
 	}
 	return roots, nil
 }
