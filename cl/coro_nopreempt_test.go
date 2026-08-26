@@ -22,6 +22,8 @@ import (
 	"go/ast"
 	"strings"
 	"testing"
+
+	"golang.org/x/tools/go/ssa"
 )
 
 func TestEmissionUniverseFreezesExactNoPreemptDirective(t *testing.T) {
@@ -67,6 +69,47 @@ func Plain() {}
 	}
 	if certificate, certified, err := universe.CoroNoUnwindCertificate(pkg.ssa.Func("Plain")); err != nil || certified || certificate != "" {
 		t.Fatalf("Plain no-unwind certificate = %q, %t, %v; want absent", certificate, certified, err)
+	}
+}
+
+func TestEmissionUniverseDoesNotPublishRawCriticalForConstantDeadCall(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/rawcriticaldead", `package rawcriticaldead
+//llgo:rawcritical
+func Raw() {}
+func Root() {
+	switch "darwin" {
+	case "darwin":
+		return
+	default:
+		Raw()
+	}
+}
+`)
+	testProg.ssa.Build()
+	root := pkg.ssa.Func("Root")
+	var dead *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common().StaticCallee() == pkg.ssa.Func("Raw") {
+				dead = call
+			}
+		}
+	}
+	if dead == nil || coroPhysicalConstantReachableBlocks(root)[dead.Block()] {
+		t.Fatalf("raw-critical fixture call = %v, want one constant-dead occurrence", dead)
+	}
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, frozen, err := universe.CoroCallSitePlan(dead)
+	if err != nil || !frozen || plan.Elision != CoroCallElidedFrontendUnevaluated || plan.RawPlain {
+		t.Fatalf("constant-dead raw-critical SitePlan = %+v, %t, %v; want frontend-unevaluated without raw/plain demand", plan, frozen, err)
 	}
 }
 

@@ -131,9 +131,8 @@ func testLibraryEffectSummary(t *testing.T, pkg string, reverse bool) LibraryEff
 			ManagedEntry:   ManagedEntryCoroutine,
 			PrimarySymbol:  pkg + ".Beta$coro",
 			RawPlainSymbol: pkg + ".Beta",
-			ProgramCapabilities: NewProgramCapabilities(
-				true, true,
-			),
+			ProgramCapabilities: NewProgramCapabilities(true, true) |
+				NativeDefaultFaultBoundaryProgramCapability(),
 		},
 	}
 	alpha := functions[0]
@@ -217,7 +216,9 @@ func TestLibraryEffectSummaryCanonicalRecordAndImportPolicy(t *testing.T) {
 	if !ok {
 		t.Fatal("imported library function is missing")
 	}
-	if !function.ProgramCapabilities.Worker() || !function.ProgramCapabilities.PanicOnFault() {
+	if !function.ProgramCapabilities.Worker() ||
+		!function.ProgramCapabilities.DynamicPanicOnFault() ||
+		!function.ProgramCapabilities.NativeDefaultFaultBoundary() {
 		t.Fatalf("imported library function lost transitive program capabilities: %#x", function.ProgramCapabilities)
 	}
 	policy, err := function.ImportedPolicy()

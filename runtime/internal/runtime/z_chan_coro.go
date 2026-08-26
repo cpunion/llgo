@@ -64,11 +64,12 @@ type coroChanCleanupCursorV1 struct {
 	deliver bool
 }
 
-// CoroChanParkV1 is compiler-spilled storage for one direct blocking channel
-// operation. It is not a Future/Task object and is never separately allocated:
-// LLGo emits one typed alloca which LLVM CoroSplit retains only on the slow
-// path. The hchan queue points at waiter while source admission pins this exact
-// coroutine frame through commit or cancellation cleanup.
+// CoroChanParkV1 is compiler-spilled storage for one active direct blocking
+// channel operation. It is not a Future/Task object and is never separately
+// allocated: LLGo emits one typed alloca per physical coroutine and reuses it
+// across non-overlapping source sites. LLVM CoroSplit retains the record only
+// on the slow path. The hchan queue points at waiter while source admission
+// pins this exact coroutine frame through commit or cancellation cleanup.
 //
 // The type is exported solely so the compiler can request its target layout
 // from the frozen runtime package. Its fields remain runtime-private and no Go

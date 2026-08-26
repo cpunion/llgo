@@ -167,6 +167,20 @@ func externalOwnerFuncIndex(symbols map[uint64]uint32, owner, goos string) uint3
 		if index := symbols[funcInfoSymbolID(owner)]; index != 0 {
 			return index
 		}
+		// LLVM 22 CoroSplit moves every body statement after the initial
+		// suspend into a compiler-owned part. Those .resume/.destroy symbols
+		// deliberately share the source function's one funcinfo record; treating
+		// them as unrelated LTO hosts drops virtually every coroutine pcline
+		// site from an external sidecar. Only normalize an exact part suffix on
+		// an LLGo physical coroutine, so a user function named F.resume cannot
+		// acquire F's metadata accidentally.
+		for _, suffix := range []string{".resume", ".destroy"} {
+			if base, ok := strings.CutSuffix(owner, suffix); ok && strings.HasSuffix(base, "$coro") {
+				if index := symbols[funcInfoSymbolID(base)]; index != 0 {
+					return index
+				}
+			}
+		}
 		// Mach-O has one C-mangling underscore, while debug/macho's
 		// suffix-shared string table can expose one more or less. Try the same
 		// candidate sequence as pclnpost.canonicalOwner, stopping as soon as a

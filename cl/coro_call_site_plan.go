@@ -198,6 +198,40 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 				if !critical {
 					continue
 				}
+				// ProgramIR's frozen constant-CFG projection is authoritative for
+				// occurrence capabilities too. A target-specific standard-library
+				// branch may retain a RawSyscall call in raw SSA even though the
+				// selected GOOS makes it unevaluated. Publishing RawCritical for
+				// that dead occurrence would overlap the frontend-unevaluated
+				// elision below and, more importantly, manufacture a raw/plain
+				// demand for code which is never emitted.
+				evaluated, observed := false, false
+				for _, owner := range u.sortedUseOwners(caller) {
+					key := emissionFunctionOwnerKey{function: caller, owner: owner}
+					semantic, frozen := ir.semanticPlans[key][call]
+					if !frozen {
+						return fmt.Errorf(
+							"prepare emission universe: raw-critical call in %q has no frozen semantic SitePlan for owner %q",
+							caller.Name(), owner.identity,
+						)
+					}
+					if observed && evaluated != semantic.evaluated {
+						return fmt.Errorf(
+							"prepare emission universe: raw-critical call in %q has owner-dependent evaluation",
+							caller.Name(),
+						)
+					}
+					evaluated, observed = semantic.evaluated, true
+				}
+				if !observed {
+					return fmt.Errorf(
+						"prepare emission universe: raw-critical call in %q has no frozen semantic owner",
+						caller.Name(),
+					)
+				}
+				if !evaluated {
+					continue
+				}
 				if target == nil || target == caller {
 					return fmt.Errorf(
 						"prepare emission universe: raw-critical call in %q has an invalid recursive target",
@@ -447,7 +481,9 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						if frontendUnevaluated || noInit || patchRedirect || cgoWorkerCertified ||
 							pythonOperation || intrinsic || managedStatic {
 							classifyErr = fmt.Errorf(
-								"raw-critical call overlaps an elided, redirected, generated-worker, or intrinsic recipe",
+								"raw-critical call %q overlaps an elided, redirected, generated-worker, or intrinsic recipe (frontend-unevaluated=%t no-init=%t patch-redirect=%t cgo-worker=%t python=%t intrinsic=%t managed-static=%t)",
+								call.String(), frontendUnevaluated, noInit, patchRedirect,
+								cgoWorkerCertified, pythonOperation, intrinsic, managedStatic,
 							)
 						} else {
 							plan.RawPlain = true

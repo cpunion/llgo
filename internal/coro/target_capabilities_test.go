@@ -18,19 +18,28 @@ package coro
 
 import "testing"
 
-func TestProgramCapabilitiesKeepWorkerAndPanicOnFaultOrthogonal(t *testing.T) {
+func TestProgramCapabilitiesKeepWorkerAndFaultDemandsOrthogonal(t *testing.T) {
 	for _, test := range []struct {
-		worker, panicOnFault bool
+		worker, dynamicPanicOnFault, nativeDefaultFaultBoundary bool
 	}{
 		{},
 		{worker: true},
-		{panicOnFault: true},
-		{worker: true, panicOnFault: true},
+		{dynamicPanicOnFault: true},
+		{nativeDefaultFaultBoundary: true},
+		{worker: true, dynamicPanicOnFault: true},
+		{worker: true, nativeDefaultFaultBoundary: true},
+		{dynamicPanicOnFault: true, nativeDefaultFaultBoundary: true},
+		{worker: true, dynamicPanicOnFault: true, nativeDefaultFaultBoundary: true},
 	} {
-		capabilities := NewProgramCapabilities(test.worker, test.panicOnFault)
+		capabilities := NewProgramCapabilities(test.worker, test.dynamicPanicOnFault)
+		if test.nativeDefaultFaultBoundary {
+			capabilities |= NativeDefaultFaultBoundaryProgramCapability()
+		}
 		if !capabilities.Valid() || capabilities.Worker() != test.worker ||
-			capabilities.PanicOnFault() != test.panicOnFault {
-			t.Fatalf("capabilities(%t, %t) = %#x", test.worker, test.panicOnFault, capabilities)
+			capabilities.DynamicPanicOnFault() != test.dynamicPanicOnFault ||
+			capabilities.NativeDefaultFaultBoundary() != test.nativeDefaultFaultBoundary ||
+			capabilities.PanicOnFault() != (test.dynamicPanicOnFault || test.nativeDefaultFaultBoundary) {
+			t.Fatalf("capabilities(%t, %t, %t) = %#x", test.worker, test.dynamicPanicOnFault, test.nativeDefaultFaultBoundary, capabilities)
 		}
 	}
 	if invalid := ProgramCapabilities(1 << 7); invalid.Valid() {

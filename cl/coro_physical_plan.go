@@ -343,9 +343,15 @@ type coroPhysicalInstructionPlan struct {
 	bound                     int64
 	nilGuard                  bool
 	boundsGuard               bool
-	boundsDisabled            bool
-	rawInterfaceReceiver      bool
-	captureSnapshot           int
+	// nativeFaultBoundary records one reachable physical memory operation
+	// whose exact low absolute address is deliberately left to the native
+	// fault signal path. It is metadata only: the closed-program capability
+	// projection consumes it before codegen, so ordinary programs retain no
+	// signal landing hooks or per-resume boundary cost.
+	nativeFaultBoundary  bool
+	boundsDisabled       bool
+	rawInterfaceReceiver bool
+	captureSnapshot      int
 }
 
 func (plan coroPhysicalInstructionPlan) mayFault() bool {
@@ -855,11 +861,22 @@ func planCoroPhysicalTailForward(
 ) (*coroPhysicalTailForwardPlan, error) {
 	if physical == nil || physical.function == nil || whole == nil ||
 		audit == nil || audit.fn != physical.function || audit.universe == nil ||
+		physical.owner == nil || audit.universe.coroProgramIR == nil ||
 		physical.cleanup != nil || physical.critical != nil {
 		return nil, nil
 	}
 	universe := audit.universe
 	function := physical.function
+	preamble, err := universe.coroProgramIR.functionPreambleForOwner(function, physical.owner)
+	if err != nil {
+		return nil, fmt.Errorf("tail-forward function preamble: %w", err)
+	}
+	// A frame-free ramp cannot erase managed source-entry semantics. Plain
+	// EnterLocalContext belongs only to the separate native entry and therefore
+	// does not block forwarding the scheduler-owned physical entry.
+	if len(preamble.managedRuntimeHelpers) != 0 {
+		return nil, nil
+	}
 	logical, planned := whole.FunctionPlan(function)
 	if !planned || logical.Emission != coro.EmitCoroutine ||
 		logical.ManagedEntry != coro.ManagedEntryCoroutine || logical.Recursive ||
@@ -1186,16 +1203,17 @@ func (ir *coroProgramIR) physicalFunctionPlan(function *ssa.Function, owner *pre
 	return plan, nil
 }
 
-// workerProgramCapabilitySeeds projects exact local worker demand only after
-// the complete physical plan transaction has committed. Logical WaitForeign
-// or a target's ability to host workers is insufficient: same-M episodes and
-// dead source blocks must not start a worker pool. Call-graph propagation and
-// imported producer facts are joined separately by Compilation.
-func (ir *coroProgramIR) workerProgramCapabilitySeeds() (map[*ssa.Function]bool, error) {
+// programCapabilitySeeds projects exact local optional-service demand only
+// after the complete physical plan transaction has committed. Logical effects
+// or target support are insufficient: only reachable emitted recipes may
+// start a worker fleet or retain the native signal-landing boundary. Call-graph
+// propagation and imported producer facts are joined separately by
+// Compilation.
+func (ir *coroProgramIR) programCapabilitySeeds() (map[*ssa.Function]coro.ProgramCapabilities, error) {
 	if ir == nil || !ir.physicalPlansSealed {
 		return nil, fmt.Errorf("coroutine program capabilities require sealed physical plans")
 	}
-	worker := make(map[*ssa.Function]bool)
+	seeds := make(map[*ssa.Function]coro.ProgramCapabilities)
 	for key, function := range ir.physicalPlans {
 		if key.function == nil || key.owner == nil || function == nil ||
 			function.function != key.function || function.owner != key.owner {
@@ -1213,11 +1231,38 @@ func (ir *coroProgramIR) workerProgramCapabilitySeeds() (map[*ssa.Function]bool,
 				coroPhysicalOperationWorkerForeign,
 				coroPhysicalOperationWorkerCgo,
 				coroPhysicalOperationWorkerCgoErrno:
-				worker[key.function] = true
+				seeds[key.function] |= coro.NewProgramCapabilities(true, false)
+			}
+			if plan.nativeFaultBoundary {
+				seeds[key.function] |= coro.NativeDefaultFaultBoundaryProgramCapability()
 			}
 		}
 	}
-	return worker, nil
+	// Plain and raw-plain bodies have no physical function plan, but execute
+	// synchronously inside their managed caller's current native resume. Their
+	// frozen semantic low-address access therefore demands the same outer
+	// landing. Physical bodies use the refined flag above and are skipped here
+	// so one source instruction has exactly one capability authority.
+	for key, instructions := range ir.semanticPlans {
+		if key.function == nil || key.owner == nil {
+			return nil, fmt.Errorf("coroutine program capabilities found an incomplete semantic owner")
+		}
+		if _, frozen := ir.siteOwners[key]; !frozen {
+			return nil, fmt.Errorf("coroutine program capabilities found an unfrozen semantic owner")
+		}
+		if _, physical := ir.physicalPlans[key]; physical {
+			continue
+		}
+		for instruction, plan := range instructions {
+			if instruction == nil || instruction.Parent() != key.function {
+				return nil, fmt.Errorf("coroutine program capabilities found an incomplete semantic instruction")
+			}
+			if plan.evaluated && plan.nativeFaultBoundary {
+				seeds[key.function] |= coro.NativeDefaultFaultBoundaryProgramCapability()
+			}
+		}
+	}
+	return seeds, nil
 }
 
 // physicalFunctionPlanForEmission resolves the frozen definition projection
@@ -1595,7 +1640,26 @@ func planCoroPhysicalInstruction(
 			}
 		}
 	}
+	result.nativeFaultBoundary = coroPhysicalInstructionNeedsNativeFaultBoundary(instruction, result)
 	return result, nil
+}
+
+// coroPhysicalInstructionNeedsNativeFaultBoundary recognizes the narrow
+// source form that cannot use the ordinary explicit nil edge: a real load or
+// store through an exact non-zero low absolute pointer. The native handler
+// classifies this range as a default Go memory panic. Keeping the decision in
+// the frozen physical SitePlan avoids both raw-SSA rediscovery and the much
+// larger cost of enabling sigsetjmp around every program's resume.
+func coroPhysicalInstructionNeedsNativeFaultBoundary(
+	instruction ssa.Instruction,
+	plan coroPhysicalInstructionPlan,
+) bool {
+	if instruction == nil || !plan.semantic.nativeFaultBoundary || plan.elideValue || plan.nilGuard ||
+		plan.recipe == coroPhysicalInstructionStaticArrayRangeDerefElided ||
+		plan.recipe == coroPhysicalInstructionImmutableCaptureLoad {
+		return false
+	}
+	return true
 }
 
 // planCoroPhysicalRecoverAlias freezes the only source-language condition

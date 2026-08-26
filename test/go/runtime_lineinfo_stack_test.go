@@ -39,6 +39,10 @@ import (
 func main() {
 	checkCaller()
 	checkCallerSkip()
+	checkCallerForwardF()
+	checkDeferredCaller()
+	checkRecoveredCaller()
+	checkRecoveredOutcomeCaller()
 	checkFrames() // FRAMES_MAIN_MARK
 	checkFuncForPC()
 	checkFuncForPCFunctionValue()
@@ -66,6 +70,116 @@ func helperCallerSkip() {
 	if !ok || !strings.HasSuffix(file, "main.go") || line != CALLER_SKIP_LINE {
 		panic("bad caller skip: " + file + ":" + strconv.Itoa(line))
 	}
+}
+
+func checkCallerForwardF() {
+	checkCallerForwardG() // CALLER_FORWARD_F_MARK
+}
+
+func checkCallerForwardG() {
+	checkCallerForwardH() // CALLER_FORWARD_G_MARK
+}
+
+func checkCallerForwardH() {
+	wants := []struct {
+		skip int
+		name string
+		line int
+	}{
+		{1, "main.checkCallerForwardG", CALLER_FORWARD_G_LINE},
+		{2, "main.checkCallerForwardF", CALLER_FORWARD_F_LINE},
+	}
+	for _, want := range wants {
+		pc, file, line, ok := runtime.Caller(want.skip)
+		fn := runtime.FuncForPC(pc)
+		if !ok || fn == nil || fn.Name() != want.name ||
+			!strings.HasSuffix(file, "main.go") || line != want.line {
+			name := "<nil>"
+			if fn != nil {
+				name = fn.Name()
+			}
+			panic("bad forwarded caller: " + name + " " + file + ":" + strconv.Itoa(line))
+		}
+	}
+}
+
+func checkDeferredCaller() {
+	var file string
+	var line int
+	func() {
+		defer func() {
+			_, file, line, _ = runtime.Caller(1)
+		}()
+	}() // DEFER_CALLER_MARK
+	if !strings.HasSuffix(file, "main.go") || line != DEFER_CALLER_LINE {
+		panic("bad deferred caller: " + file + ":" + strconv.Itoa(line))
+	}
+}
+
+func checkRecoveredCaller() {
+	defer func() {
+		if recover() == nil {
+			panic("missing recovered caller panic")
+		}
+		for skip := 0; skip < 32; skip++ {
+			pc, file, line, ok := runtime.Caller(skip)
+			if !ok {
+				break
+			}
+			fn := runtime.FuncForPC(pc)
+			if fn == nil || fn.Name() != "main.checkRecoveredCallerPanic" {
+				continue
+			}
+			if !strings.HasSuffix(file, "main.go") || line != RECOVERED_PANIC_LINE {
+				panic("bad recovered caller: " + file + ":" + strconv.Itoa(line))
+			}
+			return
+		}
+		panic("recovered panic caller is absent")
+	}()
+	checkRecoveredCallerPanic()
+}
+
+func checkRecoveredCallerPanic() {
+	var left *struct{ ready chan int }
+	var right chan int
+	select {
+	case <-left.ready: // RECOVERED_PANIC_MARK
+	case <-right:
+	}
+}
+
+type recoveredOutcomeWrapper struct {
+	values []int
+}
+
+func (wrapper recoveredOutcomeWrapper) get(index int) int {
+	return wrapper.values[index]
+}
+
+func checkRecoveredOutcomeCaller() {
+	defer func() {
+		if recover() == nil {
+			panic("missing recovered outcome panic")
+		}
+		for skip := 0; skip < 32; skip++ {
+			pc, file, line, ok := runtime.Caller(skip)
+			if !ok {
+				break
+			}
+			fn := runtime.FuncForPC(pc)
+			if fn == nil || fn.Name() != "main.checkRecoveredOutcomeCaller" {
+				continue
+			}
+			if !strings.HasSuffix(file, "main.go") || line != RECOVERED_OUTCOME_LINE {
+				panic("bad recovered outcome caller: " + file + ":" + strconv.Itoa(line))
+			}
+			return
+		}
+		panic("recovered outcome caller is absent")
+	}()
+	wrapper := recoveredOutcomeWrapper{values: []int{0}}
+	_ = wrapper.get(1) // RECOVERED_OUTCOME_MARK
 }
 
 //go:noinline
@@ -197,8 +311,13 @@ func checkPanicStack() {
 
 func TestRuntimeLineInfoAndStack(t *testing.T) {
 	source := runtimeLineInfoProbe
+	source = strings.ReplaceAll(source, "DEFER_CALLER_LINE", strconv.Itoa(markerLine(source, "DEFER_CALLER_MARK")))
 	source = strings.ReplaceAll(source, "CALLER_LINE", strconv.Itoa(markerLine(source, "CALLER_MARK")))
 	source = strings.ReplaceAll(source, "CALLER_SKIP_LINE", strconv.Itoa(markerLine(source, "CALLER_SKIP_MARK")))
+	source = strings.ReplaceAll(source, "CALLER_FORWARD_F_LINE", strconv.Itoa(markerLine(source, "CALLER_FORWARD_F_MARK")))
+	source = strings.ReplaceAll(source, "CALLER_FORWARD_G_LINE", strconv.Itoa(markerLine(source, "CALLER_FORWARD_G_MARK")))
+	source = strings.ReplaceAll(source, "RECOVERED_PANIC_LINE", strconv.Itoa(markerLine(source, "RECOVERED_PANIC_MARK")))
+	source = strings.ReplaceAll(source, "RECOVERED_OUTCOME_LINE", strconv.Itoa(markerLine(source, "RECOVERED_OUTCOME_MARK")))
 	source = strings.ReplaceAll(source, "FRAMES_MAIN_LINE", strconv.Itoa(markerLine(source, "FRAMES_MAIN_MARK")))
 	source = strings.ReplaceAll(source, "FRAMES_CHECK_LINE", strconv.Itoa(markerLine(source, "FRAMES_CHECK_MARK")))
 	source = strings.ReplaceAll(source, "FUNC_FILELINE_LINE", strconv.Itoa(markerLine(source, "FUNC_FILELINE_MARK")))

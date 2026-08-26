@@ -142,27 +142,21 @@ func takeRecover(g *G, childHandle unsafe.Pointer, transparent bool) (snapshot R
 	}
 }
 
-// RecoverTraceActive reports whether the currently executing physical frame
-// is the deferred child which consumed its parent's panic or an exact managed
-// descendant of that child. The CompletionRecord already owns this scope from
-// recover through the child's terminal return, so stackless traceback
-// visibility needs no native frame marker, TLS side table, or additional per-G
-// state.
-func RecoverTraceActive(g *G) bool {
+func recoverTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Pointer, ok bool) {
 	// This is a read-only observation used from runtime.Callers, which may be
 	// inside a compiler/runtime critical section. The active-frame and exact
 	// ancestry validation below are sufficient; requiring the suspension gate
 	// here would incorrectly hide the scope precisely while stack inspection
 	// has preemption masked.
 	if !ValidG(g) || g.state != GRunning {
-		return false
+		return nil, nil, nil, false
 	}
 	child := g.active
 	if child == nil || child.owner != g || child.handle == nil || child.header == nil ||
 		child.state != FrameActive || child.header.G != unsafe.Pointer(g) ||
 		child.header.SuspendReason != uint16(SuspendNone) ||
 		child.header.Lifecycle != uint16(FrameActive) {
-		return false
+		return nil, nil, nil, false
 	}
 	// Calls made by the recovering deferred function may themselves be managed
 	// children (debug.Stack -> runtime.Callers is one real example). Walk the
@@ -170,19 +164,81 @@ func RecoverTraceActive(g *G) bool {
 	for ; child.parent != nil; child = child.parent {
 		record := &child.parent.completion
 		if emptyCompletionRecord(record) {
-			return false
+			return nil, nil, nil, false
 		}
 		if record.child != child.handle {
-			return false
+			return nil, nil, nil, false
 		}
 		switch record.status {
 		case completionArmed, completionRecoverArmed:
 			continue
 		case completionRecoverTaken:
-			return record.typeWord != nil
+			if record.typeWord == nil {
+				return nil, nil, nil, false
+			}
+			return child.parent, record.typeWord, record.dataWord, true
 		default:
-			return false
+			return nil, nil, nil, false
 		}
 	}
-	return false
+	return nil, nil, nil, false
+}
+
+// RecoverTraceActive reports whether the currently executing physical frame
+// is the deferred child which consumed its parent's panic or an exact managed
+// descendant of that child. The CompletionRecord already owns this scope from
+// recover through the child's terminal return, so stackless traceback
+// visibility needs no native frame marker, TLS side table, or additional per-G
+// state.
+func RecoverTraceActive(g *G) bool {
+	_, _, _, ok := recoverTraceScope(g)
+	return ok
+}
+
+// RecoverTraceFrames joins the retained panic path to its still-live recovery
+// owner and suspended ancestors. The resulting deepest-to-root sequence is the
+// exact snapshot runtime.Caller needs after panic propagation has destroyed
+// the original LLVM coroutine frames. No second trace is stored in G: callers
+// materialize their target-specific PC view only after recover succeeds.
+func RecoverTraceFrames(g *G, snapshots []PanicTraceFrameSnapshot) (int, bool) {
+	owner, typeWord, dataWord, scopeOK := recoverTraceScope(g)
+	if !scopeOK || len(snapshots) == 0 {
+		return 0, false
+	}
+	// A panic caught before any physical child is destroyed has no retained
+	// prefix to splice; its complete caller chain is still live. This is a
+	// successful empty snapshot, distinct from a malformed non-empty trace.
+	if emptyPanicTrace(g) {
+		return 0, true
+	}
+	if !activePanicTrace(g) || panicTraceCarrier(g) != owner {
+		return 0, false
+	}
+	traceType, traceData, identityOK := panicTraceIdentity(g.panicTraceHead)
+	if !identityOK || traceType != typeWord || traceData != dataWord {
+		return 0, false
+	}
+
+	n := 0
+	frame := g.panicTraceHead
+	for count := uint32(0); count < g.panicTraceCount; count++ {
+		if frame == nil || n == len(snapshots) {
+			return 0, false
+		}
+		snapshot, next, ok := retainedPanicTraceFrame(g, frame)
+		if !ok {
+			return 0, false
+		}
+		snapshots[n] = snapshot
+		n++
+		frame = next
+	}
+	if frame != nil || n == len(snapshots) {
+		return 0, false
+	}
+	physicalCount, physicalOK := physicalTraceFrames(g, owner, false, snapshots[n:])
+	if !physicalOK {
+		return 0, false
+	}
+	return n + physicalCount, true
 }

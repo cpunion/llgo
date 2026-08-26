@@ -196,8 +196,9 @@ func coroRunPhysicalActionV1(
 			}
 		} else {
 			// Keep the overwhelmingly common path identical to the pre-boundary
-			// scheduler: SetPanicOnFault is the sole reason to pay for the
-			// synthetic native defer/sigsetjmp island.
+			// scheduler: only a dynamically enabled fault policy or an exact
+			// compiler-proven default-fault access pays for the synthetic native
+			// defer/sigsetjmp island.
 			coroHandleResume(next.Handle)
 		}
 		next, committed, advanced = coro.ResumedExecutorRun(driver, p, g, next)

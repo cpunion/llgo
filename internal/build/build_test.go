@@ -867,6 +867,75 @@ func TestFilterTestPackages(t *testing.T) {
 	})
 }
 
+func TestBuildOwnedTestMainVariant(t *testing.T) {
+	testdeps := &packages.Package{ID: "testing/internal/testdeps", PkgPath: "testing/internal/testdeps"}
+	tests := []struct {
+		name string
+		pkg  *packages.Package
+		mode Mode
+		want bool
+	}{
+		{
+			name: "synthetic test driver",
+			pkg: &packages.Package{
+				ID:      "example.com/lib.test",
+				PkgPath: "example.com/lib.test",
+				Name:    "main",
+				Imports: map[string]*packages.Package{"testing/internal/testdeps": testdeps},
+			},
+			mode: ModeTest,
+			want: true,
+		},
+		{
+			name: "main package test variant",
+			pkg: &packages.Package{
+				ID:      "example.com/cmd [example.com/cmd.test]",
+				PkgPath: "example.com/cmd",
+				Name:    "main",
+				ForTest: "example.com/cmd",
+			},
+			mode: ModeTest,
+			want: true,
+		},
+		{
+			name: "ordinary dot-test main",
+			pkg: &packages.Package{
+				ID:      "example.com/tool.test",
+				PkgPath: "example.com/tool.test",
+				Name:    "main",
+			},
+			mode: ModeTest,
+		},
+		{
+			name: "synthetic shape outside test mode",
+			pkg: &packages.Package{
+				ID:      "example.com/lib.test",
+				PkgPath: "example.com/lib.test",
+				Name:    "main",
+				Imports: map[string]*packages.Package{"testing/internal/testdeps": testdeps},
+			},
+			mode: ModeBuild,
+		},
+		{
+			name: "external test package",
+			pkg: &packages.Package{
+				ID:      "example.com/lib_test [example.com/lib.test]",
+				PkgPath: "example.com/lib_test",
+				Name:    "lib_test",
+				ForTest: "example.com/lib",
+			},
+			mode: ModeTest,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := buildOwnedTestMainVariant(test.pkg, test.mode); got != test.want {
+				t.Fatalf("buildOwnedTestMainVariant() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 const (
 	rewriteMainPkg = "github.com/xgo-dev/llgo/cl/_testgo/rewrite"
 	rewriteDepPkg  = rewriteMainPkg + "/dep"
@@ -1806,6 +1875,9 @@ func TestDoOptimizesUnreachableBodylessCalls(t *testing.T) {
 	}
 	defer pkgs[0].LPkg.Prog.Dispose()
 	mod := pkgs[0].LPkg.Module()
+	if ir := mod.String(); strings.Contains(ir, "call void @main.fail") {
+		t.Fatalf("constant-dead bodyless call reached generated IR before optimization:\n%s", ir)
+	}
 	mod.SetDataLayout(pkgs[0].LPkg.Prog.DataLayout())
 	mod.SetTarget(pkgs[0].LPkg.Prog.Target().Spec().Triple)
 	pbo := llvm.NewPassBuilderOptions()

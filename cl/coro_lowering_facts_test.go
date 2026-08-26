@@ -142,6 +142,78 @@ func TestCompilationBuildCoroLoweringFactsReportIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestCoroLoweringFactsBindNativeDefaultFaultBoundary(t *testing.T) {
+	build := func(source string) (CoroLoweringFactsReport, coro.FunctionLoweringFacts) {
+		t.Helper()
+		ssaPkg, _, files := buildGoSSAPkg(t, source)
+		prog := newLLSSAProg(t)
+		t.Cleanup(prog.Dispose)
+		universe, err := prepareStacklessEmissionUniverse(
+			prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files, Identity: "fault-boundary"}},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		functionIDs := universe.FunctionIDConfig()
+		functionIDs.CoroABI = coro.PhysicalABIV1
+		functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+		root := ssaPkg.Func("Root")
+		plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			FunctionIDs:          functionIDs,
+			EmissionUniverse:     ssaUniverse,
+			ClassifyLocalBody:    universe.CoroLocalBodyFacts,
+			ClassifyLoweredCalls: universe.CoroLoweredCalls,
+			MaxPlainInstructions: -1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := (&Compilation{CoroPlan: plan, EmissionUniverse: universe}).BuildCoroLoweringFactsReport()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootID, ok := plan.FunctionID(root)
+		if !ok {
+			t.Fatal("Root has no FunctionID")
+		}
+		return report, loweringFactsFunctionByID(t, report.Facts, rootID)
+	}
+
+	positive, positiveFacts := build(`package foo
+import "unsafe"
+func Root() byte { return *(*byte)(unsafe.Pointer(uintptr(1))) }
+`)
+	negative, negativeFacts := build(`package foo
+func Root() byte { return 1 }
+`)
+	const contract = coro.ContractID("llgo.coro.native-default-fault-boundary.v0")
+	count := func(facts coro.FunctionLoweringFacts) int {
+		found := 0
+		for _, fact := range facts.Sites {
+			if fact.Contract == contract {
+				found++
+				if fact.Recipe != "cl.ssa.native-default-fault-boundary.v0" || fact.Class != coro.OpLowered {
+					t.Fatalf("native fault lowering fact = %+v", fact)
+				}
+			}
+		}
+		return found
+	}
+	if got := count(positiveFacts); got != 1 {
+		t.Fatalf("low absolute address boundary facts = %d, want one", got)
+	}
+	if got := count(negativeFacts); got != 0 {
+		t.Fatalf("ordinary pointer boundary facts = %d, want zero", got)
+	}
+	if positive.Digest == negative.Digest {
+		t.Fatal("native fault boundary did not affect the lowering/cache digest")
+	}
+}
+
 func TestCoroLoweringFactsRecordsConditionalManagedStoreDecision(t *testing.T) {
 	for _, test := range []struct {
 		name       string

@@ -971,11 +971,12 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 	recoverMode := p.prog.IntVal(coroAwaitRecoverNone, p.prog.Uint32())
 	recoverType := p.prog.Nil(p.prog.VoidPtr())
 	recoverData := p.prog.Nil(p.prog.VoidPtr())
-	if cleanup != nil {
-		recoverMode, recoverType, recoverData = cleanup.recoverAwaitArguments(p, b)
-	}
 	line := p.coroCurrentSourceLine()
-	body.suspendForChild(b, line)
+	publishedLine := p.prog.IntVal(uint64(line), p.prog.Uint32())
+	if cleanup != nil {
+		recoverMode, recoverType, recoverData, publishedLine = cleanup.recoverAwaitArguments(p, b, publishedLine)
+	}
+	body.suspendForChild(b, publishedLine)
 
 	if body.abi.awaitPrepareInlineHook == "" {
 		panic("coroutine child await has no scheduler handoff hook")

@@ -2342,16 +2342,43 @@ func (p *context) coroCurrentSourceLine() uint32 {
 	return uint32(position.Line)
 }
 
-func (p *context) recordCallerLocationForCall(b llssa.Builder, call *ssa.CallCommon) {
-	if call == nil {
+// logicalCallerLocationPos is the single source of the source position used
+// by both caller-helper planning and emission. Call instructions own the
+// position of their CallCommon, while deferred execution is attributed to the
+// owner's closing brace just like gc. Keeping this normalization here avoids
+// freezing a SitePlan from an invalid synthetic RunDefers position and then
+// silently suppressing the helper that emission can otherwise materialize.
+func (p *context) logicalCallerLocationPos(instruction ssa.Instruction) token.Pos {
+	if instruction == nil {
+		return token.NoPos
+	}
+	switch value := instruction.(type) {
+	case ssa.CallInstruction:
+		if call := value.Common(); call != nil {
+			return call.Pos()
+		}
+	case *ssa.RunDefers:
+		return p.deferRunPos(value.Pos())
+	case *ssa.Return:
+		if p.returnNeedsImplicitRunDefers(value) {
+			return p.deferRunPos(value.Pos())
+		}
+	}
+	return instruction.Pos()
+}
+
+func (p *context) recordCallerLocationForCall(b llssa.Builder, instruction ssa.CallInstruction) {
+	if instruction == nil || instruction.Common() == nil {
 		return
 	}
+	call := instruction.Common()
+	pos := p.logicalCallerLocationPos(instruction)
 	callee := call.StaticCallee()
 	if isRuntimeCallerLookupFunc(callee) {
-		p.recordCallerLocation(b, call.Pos())
+		p.recordCallerLocation(b, pos)
 		return
 	}
-	p.recordPanicLocation(b, call.Pos())
+	p.recordPanicLocation(b, pos)
 }
 
 func (p *context) emitPCLineLabel(b llssa.Builder, pos token.Pos) {

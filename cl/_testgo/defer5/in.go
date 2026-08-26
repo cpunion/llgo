@@ -26,12 +26,12 @@ func main() {
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK-NOT: sigsetjmp
 // CHECK: call void @__llgo_coro_panic_prepare_v1(
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK-LABEL: define ptr @"main.main$1$coro"(
 // CHECK-DAG: call void @__llgo_coro_recover_take_v1(
-// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK-DAG: call void @__llgo_coro_panic_prepare_v1(
 // CHECK-LABEL: define ptr @"main.main$2$coro"(
-// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"
+// CHECK-DAG: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 // CHECK-DAG: call void @__llgo_coro_panic_prepare_v1(

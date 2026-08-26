@@ -28,8 +28,8 @@ type CallerFrame struct {
 	File      string
 	Line      int
 	StartLine int
-	// captured memoizes the interned synthetic PC base (seq << 2) for this
-	// exact frame content. It is cleared whenever the frame's line info
+	// captured memoizes the interned synthetic PC base for this exact frame
+	// content. It is cleared whenever the frame's line info
 	// changes, so repeated Caller/Callers walks over an unchanged stack skip
 	// the intern hash probe entirely. Only meaningful inside shadow-stack
 	// slots; ignored by frame comparison and hashing.
@@ -39,11 +39,32 @@ type CallerFrame struct {
 const callerLocationLimit = 4096
 
 const (
-	callerPCMask     = uintptr(3)
-	callerPCValue    = uintptr(1)
-	callersPCValue   = uintptr(3)
-	callerPCHashInit = 64
+	callerPCMask         = uintptr(3)
+	callerPCValue        = uintptr(1)
+	callersPCValue       = uintptr(3)
+	callerPCHashInit     = 64
+	callerPCSyntheticTop = ^uintptr(0) &^ callerPCMask
 )
+
+// Synthetic PCs occupy a descending, word-aligned namespace below the
+// all-ones sentinel. Keeping them above ordinary program text preserves the
+// runtime.Caller contract that Func.Entry() <= pc while the low two bits keep
+// Caller and Callers return-PC conventions distinct. Sequence zero and the
+// all-ones word remain invalid sentinels.
+func callerSyntheticPCBase(seq uintptr) uintptr {
+	if seq == 0 || seq > callerPCSyntheticTop>>2 {
+		return 0
+	}
+	return callerPCSyntheticTop - (seq << 2)
+}
+
+func callerSyntheticPCSequence(pc uintptr) uintptr {
+	base := pc &^ callerPCMask
+	if base >= callerPCSyntheticTop {
+		return 0
+	}
+	return (callerPCSyntheticTop - base) >> 2
+}
 
 type callerLocationStore struct {
 	frames        []CallerFrame
@@ -394,16 +415,148 @@ func promoteSignalFaultPC() {
 		return
 	}
 	p.pcs[0] = pc
-	p.n = 1
-	p.armed = 0
-	p.fault = 1
-	p.native = 0
-	p.recFP1 = 0
-	p.recFP2 = 0
+	commitPanicPCStore(p, 1, 0, 1, 0)
 }
 
 func discardSignalFaultPC() {
 	clearSignalFaultPC(signalFaultM(getg()))
+}
+
+// appendCoroTracePCs materializes compiler descriptors in the current logical
+// G's existing synthetic-PC namespace. Hidden scheduler frames consume no PC.
+func appendCoroTracePCs(
+	store *callerLocationStore,
+	pcs []uintptr,
+	snapshots []coro.PanicTraceFrameSnapshot,
+) (int, bool) {
+	if store == nil {
+		return 0, false
+	}
+	n := 0
+	for _, snapshot := range snapshots {
+		if snapshot.Hidden {
+			continue
+		}
+		if n == len(pcs) {
+			return 0, false
+		}
+		frame := store.captureFrame(CallerFrame{
+			Function: snapshot.Function,
+			File:     snapshot.File,
+			Line:     int(snapshot.Line),
+		}, callersPCValue)
+		pcs[n] = frame.PC
+		n++
+	}
+	return n, true
+}
+
+func callerFrameMatchesCoroTrace(
+	frame CallerFrame,
+	snapshot coro.PanicTraceFrameSnapshot,
+) bool {
+	return !snapshot.Hidden &&
+		frame.Function == snapshot.Function &&
+		frame.File == snapshot.File &&
+		frame.Line == int(snapshot.Line)
+}
+
+// matchingCoroWorkerFaultPCs proves that a lazy panic-PC store belongs to the
+// currently recovered retained trace. The native prefix itself cannot prove
+// an episode identity, so at least one compiler-synthesized Go suffix frame
+// must match exact function/file/line metadata before it may be preserved.
+func matchingCoroWorkerFaultPCs(
+	p *panicPCStore,
+	snapshots []coro.PanicTraceFrameSnapshot,
+) bool {
+	if p == nil || p.fault == 0 || p.native <= 0 || p.n <= p.native ||
+		p.n > int32(len(p.pcs)) {
+		return false
+	}
+	for index := int(p.native); index < int(p.n); index++ {
+		candidate, ok := FrameForPC(p.pcs[index])
+		if !ok {
+			continue
+		}
+		for _, snapshot := range snapshots {
+			if callerFrameMatchesCoroTrace(candidate, snapshot) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchingCoroRecoverTracePCs recognizes an already materialized stackless
+// recovery trace. Exact frame count and descriptor identity make repeated
+// runtime.Caller/Callers queries allocation- and copy-free without adding an
+// episode field to G or panicPCStore.
+func matchingCoroRecoverTracePCs(
+	p *panicPCStore,
+	snapshots []coro.PanicTraceFrameSnapshot,
+) bool {
+	if p == nil || p.fault != 0 || p.native != 0 || p.n < 0 || p.n > int32(len(p.pcs)) {
+		return false
+	}
+	visible := 0
+	for _, snapshot := range snapshots {
+		if !snapshot.Hidden {
+			visible++
+		}
+	}
+	if int(p.n) != visible {
+		return false
+	}
+	index := 0
+	for _, snapshot := range snapshots {
+		if snapshot.Hidden {
+			continue
+		}
+		frame, ok := FrameForPC(p.pcs[index])
+		if !ok || !callerFrameMatchesCoroTrace(frame, snapshot) {
+			return false
+		}
+		index++
+	}
+	return true
+}
+
+// materializeCoroRecoverTracePCs converts compiler-retained frame descriptors
+// into the current logical G's synthetic-PC namespace on first observation.
+// recover itself stays free of traceback work; programs which never inspect a
+// recovered panic stack pay no allocation, interning, or generated call.
+func materializeCoroRecoverTracePCs(
+	gp *g,
+	task *coro.G,
+	p *panicPCStore,
+) (*panicPCStore, bool) {
+	var snapshots [64]coro.PanicTraceFrameSnapshot
+	n, ok := coro.RecoverTraceFrames(task, snapshots[:])
+	if !ok {
+		return nil, false
+	}
+	if n == 0 {
+		return p, true
+	}
+	trace := snapshots[:n]
+	if matchingCoroWorkerFaultPCs(p, trace) || matchingCoroRecoverTracePCs(p, trace) {
+		p.armed = 0
+		p.recFP1 = 0
+		p.recFP2 = 0
+		return p, true
+	}
+	p = ensurePanicPCStore(gp)
+	if p == nil {
+		return nil, false
+	}
+	store := callerLocationStoreForGoroutine()
+	count, ok := appendCoroTracePCs(store, p.pcs[:], trace)
+	if !ok || count == 0 {
+		commitPanicPCStore(p, 0, 0, 0, 0)
+		return nil, false
+	}
+	commitPanicPCStore(p, count, 0, 0, 0)
+	return p, true
 }
 
 // StoreCoroWorkerFaultPCs joins the two bounded native identities returned by
@@ -451,22 +604,12 @@ func StoreCoroWorkerFaultPCs(task *coro.G, faultPC, targetPC uintptr) bool {
 		return false
 	}
 	store := callerLocationStoreForGoroutine()
-	for _, snapshot := range active[:activeCount] {
-		if snapshot.Hidden {
-			continue
-		}
-		if n == len(pcs) {
-			_ = coroLeaveRuntimeContext(task, activation)
-			return false
-		}
-		frame := store.captureFrame(CallerFrame{
-			Function: snapshot.Function,
-			File:     snapshot.File,
-			Line:     int(snapshot.Line),
-		}, callersPCValue)
-		pcs[n] = frame.PC
-		n++
+	traceCount, traceOK := appendCoroTracePCs(store, pcs[n:], active[:activeCount])
+	if !traceOK {
+		_ = coroLeaveRuntimeContext(task, activation)
+		return false
 	}
+	n += traceCount
 	// Skip the synthetic runtime.Callers frame; the remaining entries are any
 	// demand-driven logical callers not represented by physical coroutine
 	// ancestry. Exact location identities keep this cold-path union independent
@@ -480,10 +623,7 @@ func StoreCoroWorkerFaultPCs(task *coro.G, faultPC, targetPC uintptr) bool {
 		duplicate := false
 		if candidateOK {
 			for index, snapshot := range active[:activeCount] {
-				if matched[index] || snapshot.Hidden ||
-					candidate.Function != snapshot.Function ||
-					candidate.File != snapshot.File ||
-					candidate.Line != int(snapshot.Line) {
+				if matched[index] || !callerFrameMatchesCoroTrace(candidate, snapshot) {
 					continue
 				}
 				matched[index] = true
@@ -521,10 +661,14 @@ func storePanicPCsInto(p *panicPCStore, pcs []uintptr, armed int32) {
 		n = len(p.pcs)
 	}
 	copy(p.pcs[:n], pcs)
+	commitPanicPCStore(p, n, armed, armed, 0)
+}
+
+func commitPanicPCStore(p *panicPCStore, n int, armed, fault, native int32) {
 	p.n = int32(n)
 	p.armed = armed
-	p.fault = armed
-	p.native = 0
+	p.fault = fault
+	p.native = native
 	p.recFP1 = 0
 	p.recFP2 = 0
 }
@@ -543,6 +687,13 @@ func PanicPCsAreFault() bool {
 func PanicPCs() []uintptr {
 	gp := getg()
 	p := loadPanicPCStore(gp)
+	if task := currentCoroRuntimeTask(gp); task != nil && coro.RecoverTraceActive(task) {
+		var ok bool
+		p, ok = materializeCoroRecoverTracePCs(gp, task, p)
+		if !ok {
+			return nil
+		}
+	}
 	if p == nil || p.n == 0 {
 		if mp := signalFaultM(gp); mp != nil &&
 			mp.signalFaultState&signalFaultStatePresent != 0 && mp.signalFaultPC[0] != 0 {
@@ -585,12 +736,20 @@ func PanicActive() bool {
 // coroutine never needs to manufacture or retain a pthread stack address.
 func CoroPanicRecoverActive() bool {
 	gp := getg()
+	task := currentCoroRuntimeTask(gp)
+	return task != nil && coro.RecoverTraceActive(task)
+}
+
+func currentCoroRuntimeTask(gp *g) *coro.G {
 	if gp == nil || gp.startfn != nil || gp.startarg == nil || gp.context == nil {
-		return false
+		return nil
 	}
 	task := (*coro.G)(gp.startarg)
 	ctx := (*coroRuntimeContext)(coro.TaskLocal(task))
-	return ctx == gp.context && validCoroRuntimeTaskContext(task, ctx) && coro.RecoverTraceActive(task)
+	if ctx != gp.context || !validCoroRuntimeTaskContext(task, ctx) {
+		return nil
+	}
+	return task
 }
 
 func BindCallerLocation(pc uintptr, rawName string) {
@@ -679,12 +838,12 @@ func syntheticFrameForPC(pc uintptr) (CallerFrame, bool) {
 	if store == nil {
 		return CallerFrame{}, false
 	}
-	seq := pc >> 2
+	seq := callerSyntheticPCSequence(pc)
 	if seq == 0 || seq > uintptr(len(store.synthetic)) {
 		return CallerFrame{}, false
 	}
 	frame := store.synthetic[seq-1]
-	if frame.PC>>2 != seq {
+	if callerSyntheticPCSequence(frame.PC) != seq {
 		return CallerFrame{}, false
 	}
 	frame.PC = pc
@@ -707,7 +866,7 @@ func (s *callerLocationStore) captureFrame(frame CallerFrame, pcValue uintptr) C
 	idx := s.internSyntheticFrame(frame)
 	rec := s.synthetic[idx]
 	seq := uintptr(idx + 1)
-	rec.PC = (seq << 2) | pcValue
+	rec.PC = callerSyntheticPCBase(seq) | pcValue
 	if rec.Entry == 0 {
 		rec.Entry = rec.PC
 	}
@@ -722,7 +881,7 @@ func (s *callerLocationStore) capturePC(frame *CallerFrame, pcValue uintptr) uin
 		return frame.captured | pcValue
 	}
 	idx := s.internSyntheticFrame(*frame)
-	base := uintptr(idx+1) << 2
+	base := callerSyntheticPCBase(uintptr(idx + 1))
 	frame.captured = base
 	return base | pcValue
 }
@@ -730,7 +889,8 @@ func (s *callerLocationStore) capturePC(frame *CallerFrame, pcValue uintptr) uin
 // captureFrameAt is capturePC plus the full frame copy Caller needs.
 func (s *callerLocationStore) captureFrameAt(frame *CallerFrame, pcValue uintptr) CallerFrame {
 	pc := s.capturePC(frame, pcValue)
-	rec := s.synthetic[(pc>>2)-1]
+	seq := callerSyntheticPCSequence(pc)
+	rec := s.synthetic[seq-1]
 	rec.PC = pc
 	if rec.Entry == 0 {
 		rec.Entry = rec.PC
@@ -742,7 +902,7 @@ func (s *callerLocationStore) captureFrameAt(frame *CallerFrame, pcValue uintptr
 // runtime.main) in the per-store cache slot.
 func (s *callerLocationStore) staticPC(frame CallerFrame, cache *uintptr, pcValue uintptr) uintptr {
 	if *cache == 0 {
-		*cache = uintptr(s.internSyntheticFrame(frame)+1) << 2
+		*cache = callerSyntheticPCBase(uintptr(s.internSyntheticFrame(frame) + 1))
 	}
 	return *cache | pcValue
 }
@@ -759,7 +919,7 @@ func (s *callerLocationStore) internSyntheticFrame(frame CallerFrame) int {
 	for {
 		idx := s.syntheticHash[slot]
 		if idx == 0 {
-			frame.PC = (uintptr(len(s.synthetic)+1) << 2) | callerPCValue
+			frame.PC = callerSyntheticPCBase(uintptr(len(s.synthetic)+1)) | callerPCValue
 			s.synthetic = append(s.synthetic, frame)
 			s.syntheticHash[slot] = uintptr(len(s.synthetic))
 			return len(s.synthetic) - 1

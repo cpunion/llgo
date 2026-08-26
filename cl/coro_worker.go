@@ -488,18 +488,15 @@ func (p *context) compileCoroWorkerWordCall(
 	return coroWorkerWordResultV1{r1: b.Load(r1), r2: b.Load(r2), errno: b.Load(errno)}
 }
 
-// compileCoroCallKeepaliveSlots spills the exact typed owners which the
-// frame-retention proof binds to one suspending call into ramp-entry slots.
-// Compiler-owned resume/cancellation dispatch can enter a continuation through
-// an edge on which the source SSA value does not dominate. Reloading the slot
-// in that continuation preserves both valid LLVM SSA and the typed owner until
-// the physical completion/retirement boundary.
-func (p *context) coroCallKeepaliveSources(call ssa.CallInstruction) []ssa.Value {
+// coroCallKeepaliveStorageSources selects only the proof values that need an
+// additional frame slot. Cleanup and spawn transports return none because
+// their ordinary records already own the same lifetime.
+func (p *context) coroCallKeepaliveStorageSources(call ssa.CallInstruction) []ssa.Value {
 	plan := p.coroEmissionPlan()
 	if plan == nil || plan.frameRetention == nil || call == nil {
 		return nil
 	}
-	return plan.frameRetention.exactCallKeepaliveSources(call)
+	return plan.frameRetention.exactCallKeepaliveStorageSources(call)
 }
 
 func (p *context) coroCallKeepaliveStorageType(source ssa.Value) llssa.Type {
@@ -516,7 +513,7 @@ func (p *context) compileCoroCallKeepaliveValues(
 	b llssa.Builder,
 	call ssa.CallInstruction,
 ) []llssa.Expr {
-	sources := p.coroCallKeepaliveSources(call)
+	sources := p.coroCallKeepaliveStorageSources(call)
 	values := make([]llssa.Expr, len(sources))
 	for index, source := range sources {
 		value := p.compileValue(b, source)
@@ -532,8 +529,14 @@ func (p *context) compileCoroCallKeepaliveValues(
 	return values
 }
 
+// compileCoroCallKeepaliveSlots spills the exact typed owners which the
+// frame-retention proof binds to one suspending call into ramp-entry slots.
+// Compiler-owned resume/cancellation dispatch can enter a continuation through
+// an edge on which the source SSA value does not dominate. Reloading the slot
+// in that continuation preserves both valid LLVM SSA and the typed owner until
+// the physical completion/retirement boundary.
 func (p *context) compileCoroCallKeepaliveSlots(b llssa.Builder, call ssa.CallInstruction) []llssa.Expr {
-	sources := p.coroCallKeepaliveSources(call)
+	sources := p.coroCallKeepaliveStorageSources(call)
 	values := p.compileCoroCallKeepaliveValues(b, call)
 	if len(values) != len(sources) {
 		panic("coroutine keepalive values lost their exact sources")

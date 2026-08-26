@@ -138,7 +138,8 @@ func loadExternalPCLN() bool {
 	}
 	defer cliteos.Close(fd)
 	var st cliteos.StatT
-	if cliteos.Fstat(fd, &st) != 0 || st.Size < int64(externalPCLNHeaderSize) || st.Size > externalPCLNMaxSize {
+	statResult, _ := coroPollFstat(int32(fd), &st)
+	if uint32(statResult) == ^uint32(0) || st.Size < int64(externalPCLNHeaderSize) || st.Size > externalPCLNMaxSize {
 		return false
 	}
 	raw := make([]byte, int(st.Size))

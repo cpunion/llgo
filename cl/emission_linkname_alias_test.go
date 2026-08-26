@@ -22,6 +22,7 @@ package cl
 import (
 	"crypto/sha256"
 	"go/ast"
+	"go/constant"
 	"go/types"
 	"strings"
 	"testing"
@@ -1012,6 +1013,78 @@ func implementation(value int) int { return value + 2 }
 		})
 		if err == nil || !strings.Contains(err.Error(), "multiple emitted Go definitions") {
 			t.Fatalf("PrepareEmissionUniverse error = %v; want distinct same-path definition rejection", err)
+		}
+	})
+}
+
+func TestEmissionUniverseGoLinknameSyntheticTestMainsAreMutuallyExclusive(t *testing.T) {
+	const declarationSource = `package runtimedecl
+//go:linkname main_main main.main
+func main_main()
+`
+	const firstSource = `package main
+//go:linkname main main.main
+func main() { first() }
+func first() {}
+`
+	const secondSource = `package main
+//go:linkname main main.main
+func main() { second() }
+func second() {}
+`
+
+	t.Run("build-owned test markers select one ABI representative", func(t *testing.T) {
+		testProg := newEmissionTestProgram()
+		declaration := testProg.addPackage(t, "example.com/emission/runtimedecl", declarationSource)
+		first := testProg.addPackage(t, "example.com/emission/first.test", firstSource)
+		second := testProg.addPackage(t, "example.com/emission/second.test", secondSource)
+		for _, testMain := range []emissionTestPackage{first, second} {
+			marker := types.NewConst(
+				0, testMain.types, abi.ForTestMarker,
+				types.Typ[types.UntypedBool], constant.MakeBool(true),
+			)
+			if previous := testMain.types.Scope().Insert(marker); previous != nil {
+				t.Fatalf("test-main marker conflicts with %v", previous)
+			}
+		}
+		testProg.ssa.Build()
+
+		prog := llssa.NewProgram(nil)
+		defer prog.Dispose()
+		universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+			{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+			{SSA: first.ssa, Files: []*ast.File{first.file}, Identity: "first linked test"},
+			{SSA: second.ssa, Files: []*ast.File{second.file}, Identity: "second linked test"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		declared := declaration.ssa.Func("main_main")
+		firstMain, secondMain := first.ssa.Func("main"), second.ssa.Func("main")
+		if resolved, ok := universe.Resolve(declared); !ok || resolved != firstMain {
+			t.Fatalf("Resolve(runtime.main_main) = %v, %t; want first test ABI representative %v, true", resolved, ok, firstMain)
+		}
+		if !universe.Contains(firstMain) || !universe.Contains(secondMain) {
+			t.Fatal("mutually exclusive test-main definitions were collapsed or discarded")
+		}
+	})
+
+	t.Run("source-shaped mains without build markers remain ambiguous", func(t *testing.T) {
+		testProg := newEmissionTestProgram()
+		declaration := testProg.addPackage(t, "example.com/emission/runtimedecl", declarationSource)
+		first := testProg.addPackage(t, "example.com/emission/first.test", firstSource)
+		second := testProg.addPackage(t, "example.com/emission/second.test", secondSource)
+		testProg.ssa.Build()
+
+		prog := llssa.NewProgram(nil)
+		defer prog.Dispose()
+		_, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+			{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+			{SSA: first.ssa, Files: []*ast.File{first.file}, Identity: "unmarked first"},
+			{SSA: second.ssa, Files: []*ast.File{second.file}, Identity: "unmarked second"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "multiple emitted Go definitions") {
+			t.Fatalf("PrepareEmissionUniverse error = %v; want unmarked test-main ambiguity", err)
 		}
 	})
 }

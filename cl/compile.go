@@ -1021,11 +1021,19 @@ func funcInfoDisplayName(goName string) string {
 }
 
 func hasNoInlineDirective(f *ssa.Function) bool {
+	return hasAttachedFunctionDirective(f, "//go:noinline")
+}
+
+func hasUintptrEscapesDirective(f *ssa.Function) bool {
+	return hasAttachedFunctionDirective(f, "//go:uintptrescapes")
+}
+
+func hasAttachedFunctionDirective(f *ssa.Function, directive string) bool {
 	for f != nil {
 		decl, _ := f.Syntax().(*ast.FuncDecl)
 		if decl != nil && decl.Doc != nil {
 			for _, c := range decl.Doc.List {
-				if c.Text == "//go:noinline" {
+				if c.Text == directive {
 					return true
 				}
 			}
@@ -2204,7 +2212,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	}
 	switch v := iv.(type) {
 	case *ssa.Call:
-		p.recordCallerLocationForCall(b, &v.Call)
+		p.recordCallerLocationForCall(b, v)
 		if value, handled := p.tryCompileCoroPatchInitRedirect(b, v); handled {
 			ret = value
 		} else if value, handled := p.tryCompileCoroRawPlainCall(b, v); handled {
@@ -3221,8 +3229,9 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		runDefers := p.returnNeedsImplicitRunDefers(v)
 		if runDefers {
 			p.spillImplicitDeferResults(b, v)
-			p.recordPanicLocation(b, v.Pos())
-			p.emitPCLineLabel(b, p.deferRunPos(v.Pos()))
+			runPos := p.logicalCallerLocationPos(v)
+			p.recordPanicLocation(b, runPos)
+			p.emitPCLineLabel(b, runPos)
 			if outcomePlanned && outcome.returnCleanup {
 				p.compileCoroImplicitRunDefers(b)
 			} else {
@@ -3283,7 +3292,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.recordPanicSite(b, v.Pos())
 		b.MapUpdate(m, key, val)
 	case *ssa.Defer:
-		p.recordCallerLocationForCall(b, &v.Call)
+		p.recordCallerLocationForCall(b, v)
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			if outcome.outcome != coroPhysicalOutcomeDeferRegister {
@@ -3299,14 +3308,15 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.callInstruction(b, p.blkInfos[v.Block().Index].Kind, v)
 	case *ssa.Go:
-		p.recordCallerLocationForCall(b, &v.Call)
+		p.recordCallerLocationForCall(b, v)
 		if p.tryCompileCoroClosedStaticSpawn(b, v) {
 			return
 		}
 		p.callInstruction(b, llssa.Go, v)
 	case *ssa.RunDefers:
-		p.recordPanicLocation(b, v.Pos())
-		p.emitPCLineLabel(b, p.deferRunPos(v.Pos()))
+		runPos := p.logicalCallerLocationPos(v)
+		p.recordPanicLocation(b, runPos)
+		p.emitPCLineLabel(b, runPos)
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
 		if outcomePlanned {
 			if p.hasStructuredOutcomePhysicalBody() && outcome.semantic.evaluated &&

@@ -165,6 +165,23 @@ func TestSelectCoroProgramBootstrapV2PublishesAndBindsWorkerDemand(t *testing.T)
 		t.Fatalf("bootstrap hash did not independently bind panic-on-fault: %x", withPanicOnFault.StepHash)
 	}
 
+	// The runtime needs one signal service for either source of demand. Keep the
+	// distinction in compiler/library facts only; a second bootstrap flag would
+	// add protocol state without changing runtime behavior.
+	fixture.ctx.coroProgramCapabilities = coro.NativeDefaultFaultBoundaryProgramCapability()
+	withNativeDefaultFault, err := selectCoroProgramBootstrapV2(fixture.ctx, fixture.mainPackage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withNativeDefaultFault.Flags != coroProgramCapabilityPanicOnFaultV2 {
+		t.Fatalf("bootstrap native-default-fault flags = %#x, want %#x",
+			withNativeDefaultFault.Flags, coroProgramCapabilityPanicOnFaultV2)
+	}
+	if withNativeDefaultFault.StepHash != withPanicOnFault.StepHash {
+		t.Fatalf("equivalent runtime fault services produced distinct bootstrap hashes: native=%x dynamic=%x",
+			withNativeDefaultFault.StepHash, withPanicOnFault.StepHash)
+	}
+
 	fixture.ctx.coroProgramCapabilities = coro.NewProgramCapabilities(true, true)
 	withBoth, err := selectCoroProgramBootstrapV2(fixture.ctx, fixture.mainPackage)
 	if err != nil {

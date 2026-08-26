@@ -238,10 +238,10 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 		return nil, FunctionPlan{}, fmt.Errorf("target %q is a generic declaration", targetPlan.ID)
 	}
 	sig := target.Signature
-	if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+	if sig == nil || sig.Recv() != nil ||
 		(sig.TypeParams() != nil && sig.TypeParams().Len() != 0) ||
 		(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() != 0) {
-		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-variadic, non-generic signature", targetPlan.ID)
+		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-generic signature", targetPlan.ID)
 	}
 	if redirected && direct && !types.Identical(common.Signature(), sig) {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q does not preserve the source spawn signature", targetPlan.ID)

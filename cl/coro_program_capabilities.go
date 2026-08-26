@@ -25,11 +25,12 @@ import (
 )
 
 // coroFunctionProgramCapabilities computes the reusable per-function closure
-// of optional runtime services. Local physical recipes provide worker seeds,
-// the runtime/debug API provides the panic-on-fault seed, and bodyless archive
-// declarations provide producer-owned transitive seeds. All ordinary, dynamic,
-// interface, spawn, and compiler-lowered propagation reuses the frozen
-// CallPlan rather than rediscovering targets during package codegen.
+// of optional runtime services. Local physical recipes provide worker and
+// exact native-default-fault seeds, the runtime/debug API provides the dynamic
+// panic-on-fault seed, and bodyless archive declarations provide producer-owned
+// transitive seeds. All ordinary, dynamic, interface, spawn, and
+// compiler-lowered propagation reuses the frozen CallPlan rather than
+// rediscovering targets during package codegen.
 func (c *Compilation) coroFunctionProgramCapabilities() (
 	map[*ssa.Function]coro.ProgramCapabilities,
 	error,
@@ -52,13 +53,13 @@ func (c *Compilation) coroFunctionProgramCapabilities() (
 			c.coroCapabilitiesErr = fmt.Errorf("coroutine function capabilities require a prepared ProgramIR")
 			return
 		}
-		worker, err := universe.coroProgramIR.workerProgramCapabilitySeeds()
+		local, err := universe.coroProgramIR.programCapabilitySeeds()
 		if err != nil {
 			c.coroCapabilitiesErr = err
 			return
 		}
 		c.coroCapabilitiesByFunc, c.coroCapabilitiesErr = deriveCoroFunctionProgramCapabilities(
-			plan, worker, c.CoroLibraryEffects,
+			plan, local, c.CoroLibraryEffects,
 		)
 	})
 	return c.coroCapabilitiesByFunc, c.coroCapabilitiesErr
@@ -83,7 +84,7 @@ func (c *Compilation) coroFunctionProgramCapability(
 
 func deriveCoroFunctionProgramCapabilities(
 	plan *coro.SSAPlan,
-	worker map[*ssa.Function]bool,
+	local map[*ssa.Function]coro.ProgramCapabilities,
 	imported map[*ssa.Function]coro.LibraryEffectFunction,
 ) (map[*ssa.Function]coro.ProgramCapabilities, error) {
 	if plan == nil {
@@ -127,10 +128,16 @@ func deriveCoroFunctionProgramCapabilities(
 		if _, duplicate := capabilities[function]; duplicate {
 			return nil, fmt.Errorf("coroutine function capability plan repeats %q", function.Name())
 		}
-		panicOnFault := function.Pkg != nil && function.Pkg.Pkg != nil &&
+		panicOnFaultAPI := function.Pkg != nil && function.Pkg.Pkg != nil &&
 			llssa.PathOf(function.Pkg.Pkg) == "runtime/debug" &&
 			function.Name() == "SetPanicOnFault"
-		capability := coro.NewProgramCapabilities(worker[function], panicOnFault)
+		capability := local[function]
+		if !capability.Valid() {
+			return nil, fmt.Errorf("local function %q has invalid program capabilities %#x", function.Name(), capability)
+		}
+		if panicOnFaultAPI {
+			capability |= coro.NewProgramCapabilities(false, true)
+		}
 		if fact, ok := imported[function]; ok {
 			if !fact.ProgramCapabilities.Valid() {
 				return nil, fmt.Errorf("imported function %q has invalid program capabilities %#x", function.Name(), fact.ProgramCapabilities)
@@ -139,9 +146,9 @@ func deriveCoroFunctionProgramCapabilities(
 		}
 		capabilities[function] = capability
 	}
-	for function := range worker {
+	for function := range local {
 		if _, planned := capabilities[function]; !planned {
-			return nil, fmt.Errorf("worker capability seed targets unplanned function %q", function.Name())
+			return nil, fmt.Errorf("local capability seed targets unplanned function %q", function.Name())
 		}
 	}
 	for function := range imported {

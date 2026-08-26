@@ -322,6 +322,16 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		return coro.LoweringFact{}, false, nil
 	}
 	class, recipe, effect, exec, materialized := semantic.class, semantic.recipe, semantic.effect, semantic.exec, semantic.materialized
+	if semantic.nativeFaultBoundary {
+		// This sparse fact binds the closed-program capability and therefore
+		// every package cache key to the exact low-address access. The emitted
+		// load/store remains ordinary LLVM; only the native resume landing is a
+		// nonlocal lowering decision.
+		class = coro.OpLowered
+		recipe = coro.RecipeID("cl.ssa.native-default-fault-boundary.v0")
+		contract = coro.ContractID("llgo.coro.native-default-fault-boundary.v0")
+		materialized = true
+	}
 	functionUses := []coro.FunctionValueFact{}
 	if store, ok := instruction.(*ssa.Store); ok {
 		if target, conditional := plan.ConditionalManagedStoreTarget(store); conditional {

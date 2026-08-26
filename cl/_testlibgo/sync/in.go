@@ -30,7 +30,7 @@ func main() {
 // CHECK: call i8 @llvm.coro.suspend(
 
 // CHECK-LABEL: define ptr @"main.f$1$coro"(ptr %0, ptr %1, ptr swiftself %2)
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintString$coro"(
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"(
 
 // Package initialization is part of the same managed startup chain.
 // CHECK-LABEL: define ptr @"main.init$coro"(

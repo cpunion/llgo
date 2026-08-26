@@ -273,6 +273,14 @@ func TestPCLNModeNativeIntegration(t *testing.T) {
 				if tt.mode == PCLNExternal {
 					verifyPCLNIntegrationSignature(t, bin)
 				}
+				// PCLN packaging is a compile-time capability, not a runtime mode.
+				// The external loader owns an atomic state word which cannot be
+				// inlined away; its symbol is therefore an exact generated-code
+				// gate proving embedded/none builds retain no loader state or I/O
+				// path.
+				if got, want := pclnIntegrationHasSymbol(t, bin, "externalPCLNState"), tt.mode == PCLNExternal; got != want {
+					t.Fatalf("external PCLN loader retained = %t, want %t", got, want)
+				}
 				sidecar := bin + ".pclntab"
 				_, err := os.Stat(sidecar)
 				if tt.wantSidecar && err != nil {
@@ -406,8 +414,12 @@ func TestPCLNExternalPureCLibraryIdentityRetentionIntegration(t *testing.T) {
 	if got := runPCLNIntegrationBinary(t, bin); got != "pure-c-pclntab\n" {
 		t.Fatalf("pure lib/c output = %q", got)
 	}
-	if pclnIntegrationHasLLGoRuntime(t, bin) {
-		t.Fatal("pure lib/c fixture unexpectedly linked the LLGo runtime")
+	// The single stackless architecture deliberately links its scheduler into
+	// every executable. External packaging itself must still not root the
+	// sidecar loader when no symbolization API is reachable. This distinguishes
+	// the fixed architecture cost from actual generated-code redundancy.
+	if pclnIntegrationHasSymbol(t, bin, "externalPCLNState") {
+		t.Fatal("pure lib/c fixture unexpectedly retained the external PCLN loader")
 	}
 	raw, err := os.ReadFile(bin + ".pclntab")
 	if err != nil {
@@ -504,9 +516,8 @@ func writePCLNIntegrationSource(t *testing.T, source string) string {
 	return "file=" + path
 }
 
-func pclnIntegrationHasLLGoRuntime(t *testing.T, path string) bool {
+func pclnIntegrationHasSymbol(t *testing.T, path, substring string) bool {
 	t.Helper()
-	const runtimeSymbol = "github.com/xgo-dev/llgo/runtime/internal/runtime."
 	switch runtime.GOOS {
 	case "linux":
 		f, err := elf.Open(path)
@@ -519,7 +530,7 @@ func pclnIntegrationHasLLGoRuntime(t *testing.T, path string) bool {
 			t.Fatal(err)
 		}
 		for _, sym := range syms {
-			if strings.Contains(sym.Name, runtimeSymbol) {
+			if strings.Contains(sym.Name, substring) {
 				return true
 			}
 		}
@@ -533,7 +544,7 @@ func pclnIntegrationHasLLGoRuntime(t *testing.T, path string) bool {
 			t.Fatal("Mach-O has no symbol table")
 		}
 		for _, sym := range f.Symtab.Syms {
-			if strings.Contains(sym.Name, runtimeSymbol) {
+			if strings.Contains(sym.Name, substring) {
 				return true
 			}
 		}

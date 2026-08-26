@@ -11,7 +11,7 @@ import "github.com/xgo-dev/llgo/cl/_testdata/foo"
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call ptr @"{{.*}}NewItab$coro"(
-// CHECK: call ptr @"{{.*}}PrintString$coro"(
+// CHECK: call ptr @"{{.*}}PrintBatchV1$coro"(
 // CHECK: call ptr %{{[0-9]+}}(ptr %0,
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr @"{{.*}}NewItab$coro"(

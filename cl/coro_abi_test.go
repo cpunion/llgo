@@ -153,6 +153,138 @@ func Leaf(value uint32) uint32 { return value + 1 }
 	}
 }
 
+func TestCoroNativeDefaultFaultBoundaryIsFunctionLocal(t *testing.T) {
+	const source = `package foo
+import "unsafe"
+
+func Fault() byte { return *(*byte)(unsafe.Pointer(uintptr(1))) }
+func Unrelated(value uint32) uint32 { return value + 1 }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fault, unrelated := ssaPkg.Func("Fault"), ssaPkg.Func("Unrelated")
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{
+			{Function: fault, Demand: coro.AsyncDemand},
+			{Function: unrelated, Demand: coro.AsyncDemand},
+		},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          universe.FunctionIDConfig(),
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function == fault || function == unrelated {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	capabilities, err := compilation.CoroProgramCapabilities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.NativeDefaultFaultBoundary() || capabilities.DynamicPanicOnFault() {
+		t.Fatalf("closed-program fault capabilities = %#x, want native default only", capabilities)
+	}
+	compilation.FinalCoroProgramCapabilities = capabilities
+	compilation.FinalCoroProgramCapabilitiesFrozen = true
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify function-local native-default fault module: %v\n%s", err, module.String())
+	}
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "Fault", want: true},
+		{name: "Unrelated"},
+	} {
+		physical := module.NamedFunction("foo." + test.name + "$coro")
+		if physical.IsNil() {
+			t.Fatalf("function-local fault case=%s has no physical entry:\n%s", test.name, module.String())
+		}
+		for _, marker := range []string{
+			coroPanicBoundaryTakeHookV1,
+			coroPanicBoundaryTypeHookV1,
+			coroPanicBoundaryDataReleaseHookV1,
+		} {
+			if got := strings.Contains(physical.String(), marker); got != test.want {
+				t.Fatalf("function-local fault case=%s marker %q present=%t, want %t:\n%s", test.name, marker, got, test.want, physical.String())
+			}
+		}
+	}
+}
+
+func TestCoroNativePanicBoundaryAddsNoCoroutineFrameStorage(t *testing.T) {
+	const source = `package foo
+func Leaf(value uint32) uint32 { return value + 1 }
+`
+	frameSize := make(map[bool]uint64)
+	for _, enabled := range []bool{false, true} {
+		ssaPkg, _, files := buildGoSSAPkg(t, source)
+		capabilities := coro.NewProgramCapabilities(false, enabled)
+		prog, pkg := compileCoroLeafPhysicalABIPackageWithProgramCapabilities(
+			t, nil, ssaPkg, files, capabilities, true,
+		)
+		module := pkg.Module()
+		leaf := module.NamedFunction("foo.Leaf$coro")
+		if leaf.IsNil() {
+			module.Dispose()
+			prog.Dispose()
+			t.Fatal("missing coroutine leaf")
+		}
+		body := leaf.String()
+		for _, hook := range []string{
+			coroPanicBoundaryTakeHookV1,
+			coroPanicBoundaryTypeHookV1,
+			coroPanicBoundaryDataReleaseHookV1,
+		} {
+			got := strings.Count(body, "call ptr @"+hook)
+			want := 0
+			if enabled {
+				want = 1
+			}
+			if got != want {
+				module.Dispose()
+				prog.Dispose()
+				t.Fatalf("enabled=%t hook %s calls = %d, want %d:\n%s", enabled, hook, got, want, body)
+			}
+		}
+		runCoroABITestPipeline(t, prog, module)
+		frameSize[enabled] = coroFrameAllocationSize(t, module.NamedFunction("foo.Leaf$coro"), prog.PointerSize()*8)
+		module.Dispose()
+		prog.Dispose()
+	}
+	if frameSize[true] != frameSize[false] {
+		t.Fatalf("native panic boundary changed coroutine frame size: disabled=%d enabled=%d", frameSize[false], frameSize[true])
+	}
+}
+
 func TestCoroPanicBoundaryIsAbsentFromStacklessPortableTargets(t *testing.T) {
 	const source = `package foo
 func Leaf(value uint32) uint32 { return value + 1 }
@@ -584,6 +716,38 @@ func Parent(value uint32) { Child(value, -1) }
 		if module.NamedFunction("foo.Child$coro" + suffix).IsNil() {
 			t.Fatalf("tail-forward target lost split %s entry:\n%s", suffix, module.String())
 		}
+	}
+
+	// Tail forwarding may remove only a semantically empty source activation.
+	// Exercise that planner boundary against a cloned frozen ProgramIR so the
+	// ordinary one-call ramp above remains the exact code-generation baseline.
+	guardedIR := *universe.coroProgramIR
+	guardedIR.functionPreambles = make(
+		map[emissionFunctionOwnerKey]coroFunctionPreamblePlan,
+		len(universe.coroProgramIR.functionPreambles),
+	)
+	for key, preamble := range universe.coroProgramIR.functionPreambles {
+		guardedIR.functionPreambles[key] = cloneCoroFunctionPreamblePlan(preamble)
+	}
+	parentKey := emissionFunctionOwnerKey{function: parentSSA, owner: owner}
+	guardedPreamble := guardedIR.functionPreambles[parentKey]
+	guardedPreamble.logicalCallerEntry = true
+	guardedPreamble.managedRuntimeHelpers = []string{"PushCallerLocationFrame"}
+	if err := guardedPreamble.validate(); err != nil {
+		t.Fatal(err)
+	}
+	guardedIR.functionPreambles[parentKey] = guardedPreamble
+	guardedUniverse := *universe
+	guardedUniverse.coroProgramIR = &guardedIR
+	forward, err := planCoroPhysicalTailForward(physical, plan, &coroPhysicalPureSSAAudit{
+		universe: &guardedUniverse,
+		fn:       parentSSA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forward != nil {
+		t.Fatalf("tail-forward erased a managed logical-caller preamble: %+v", forward)
 	}
 }
 

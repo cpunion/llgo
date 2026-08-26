@@ -875,7 +875,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		add("EnsureLogicalLocalInitializer")
 	}
 	if ctx.shouldEmitLogicalCallerFrames() {
-		_, recordableLocation := runtimeLocationPosition(ctx.fset, instr.Pos())
+		_, recordableLocation := runtimeLocationPosition(ctx.fset, ctx.logicalCallerLocationPos(instr))
 		addLocation := func(helper string) {
 			if recordableLocation {
 				add(helper)

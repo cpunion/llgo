@@ -51,6 +51,13 @@ func RecvOK(ch chan uint32) (uint32, bool) {
 	return value, ok
 }
 
+func Sequential(first, second chan uint32, value uint32) uint32 {
+	first <- value
+	received := <-second
+	first <- received
+	return received
+}
+
 func Select(first, second chan uint32, value uint32) (int, uint32, bool) {
 	select {
 	case first <- value:
@@ -156,6 +163,9 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s coroutine lacks try-or-park receive helper:\n%s", name, recv)
 				}
 			}
+			assertCoroSequentialChannelParkScratch(
+				t, requireCoroPhysicalFunction(t, module, "foo.Sequential"), 3,
+			)
 			selectBody := requireCoroPhysicalFunction(t, module, "foo.Select").String()
 			assertCoroSelectBody(t, selectBody)
 			emptySelectBody := requireCoroPhysicalFunction(t, module, "foo.EmptySelect").String()
@@ -183,7 +193,7 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 			}
 
 			runCoroABITestPipeline(t, prog, module)
-			for _, name := range []string{"foo.Send$coro", "foo.Recv$coro", "foo.RecvOK$coro"} {
+			for _, name := range []string{"foo.Send$coro", "foo.Recv$coro", "foo.RecvOK$coro", "foo.Sequential$coro"} {
 				resume := module.NamedFunction(name + ".resume")
 				if resume.IsNil() || !strings.Contains(resume.String(), "call i32 @"+coroChanResumeHookV2) {
 					t.Fatalf("CoroSplit lost channel resume dispatch in %s:\n%s", name, module.String())
@@ -369,6 +379,46 @@ func assertCoroChannelParkStateHasNoCallerStore(t *testing.T, function llvm.Valu
 	}
 }
 
+// assertCoroSequentialChannelParkScratch freezes the physical lifetime fact
+// behind direct channel storage: one coroutine cannot publish a second direct
+// waiter before the first resume transaction has consumed and cleared its
+// record. Distinct static operations must therefore reuse one frame alloca
+// instead of multiplying CoroChanParkV1 by the number of source sites.
+func assertCoroSequentialChannelParkScratch(t *testing.T, function llvm.Value, wantCalls int) {
+	t.Helper()
+	var shared llvm.Value
+	calls := 0
+	for _, block := range function.BasicBlocks() {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.InstructionOpcode() != llvm.Call {
+				continue
+			}
+			switch instruction.CalledValue().Name() {
+			case coroChanSendTryParkHookV2, coroChanRecvTryParkHookV2:
+			default:
+				continue
+			}
+			if instruction.OperandsCount()-1 != 9 {
+				t.Fatalf("%s direct park arguments = %d, want 9:\n%s",
+					function.Name(), instruction.OperandsCount()-1, instruction.String())
+			}
+			state := coroChannelPointerBase(instruction.Operand(5))
+			if state.IsAAllocaInst().IsNil() {
+				t.Fatalf("%s direct park state is not frame storage:\n%s", function.Name(), instruction.String())
+			}
+			if shared.IsNil() {
+				shared = state
+			} else if state != shared {
+				t.Fatalf("%s allocated a second direct-channel park record:\n%s", function.Name(), function.String())
+			}
+			calls++
+		}
+	}
+	if calls != wantCalls {
+		t.Fatalf("%s direct park calls = %d, want %d:\n%s", function.Name(), calls, wantCalls, function.String())
+	}
+}
+
 func coroChannelPointerBase(value llvm.Value) llvm.Value {
 	for !value.IsABitCastInst().IsNil() && value.OperandsCount() == 1 {
 		value = value.Operand(0)
@@ -504,6 +554,7 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 	}
 	functions := []*ssa.Function{
 		ssaPkg.Func("Send"), ssaPkg.Func("Recv"), ssaPkg.Func("RecvOK"),
+		ssaPkg.Func("Sequential"),
 		ssaPkg.Func("Select"), ssaPkg.Func("TrySelectThenRecv"), ssaPkg.Func("EmptySelect"),
 		ssaPkg.Func("SendWithCleanup"), ssaPkg.Func("SelectWithCleanup"),
 	}

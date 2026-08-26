@@ -40,11 +40,13 @@ func ArgFirst(value uint32) uint32 { return value + 1 }
 func ArgSecond(value uint32) uint32 { return value + 2 }
 func Plain(first, second uint32) { Sink = first + second }
 func Async(value uint32) { Sink = value }
+func Variadic(first uint32, rest ...uint32) { Sink = first + uint32(len(rest)) }
 
-func Parent(value uint32) {
+func Parent(value uint32, packed []uint32) {
 	Plain(value, value)
 	go Plain(ArgFirst(value), ArgSecond(value))
 	go Async(value)
+	go Variadic(value, packed...)
 }
 `
 
@@ -165,6 +167,28 @@ func TestCoroClosedStaticSpawnNativeAndWasm32(t *testing.T) {
 				asyncPlan.FuncRep != coro.DirectCoro || asyncPlan.Demand != coro.AsyncDemand {
 				t.Fatalf("Async spawn plan = %+v", asyncPlan)
 			}
+			variadic := ssaPkg.Func("Variadic")
+			variadicPlan, _ := plan.FunctionPlan(variadic)
+			if variadic == nil || variadic.Signature == nil || !variadic.Signature.Variadic() ||
+				variadicPlan.Emission != coro.EmitCoroutine || variadicPlan.Primary != coro.PrimaryCoroutine ||
+				variadicPlan.FuncRep != coro.DirectCoro || variadicPlan.Demand != coro.AsyncDemand {
+				t.Fatalf("Variadic spawn plan = %+v, function=%v", variadicPlan, variadic)
+			}
+			var variadicSpawn *ssa.Go
+			for _, block := range ssaPkg.Func("Parent").Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Go)
+					if ok && candidate.Common().StaticCallee() == variadic {
+						variadicSpawn = candidate
+					}
+				}
+			}
+			if variadicSpawn == nil || len(variadicSpawn.Common().Args) != 2 {
+				t.Fatalf("variadic spawn = %v, want one scalar and one packed slice", variadicSpawn)
+			}
+			if _, ok := types.Unalias(variadicSpawn.Common().Args[1].Type()).Underlying().(*types.Slice); !ok {
+				t.Fatalf("variadic spawn final argument = %s, want the SSA-packed slice", variadicSpawn.Common().Args[1].Type())
+			}
 
 			ir := module.String()
 			parent := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
@@ -200,17 +224,17 @@ func TestCoroClosedStaticSpawnNativeAndWasm32(t *testing.T) {
 				!(first < second && second < begin && begin < plainRoot && plainRoot < commit && commit < poll) {
 				t.Fatalf("argument/begin/root/commit/safepoint order is invalid:\n%s", parent)
 			}
-			if got := strings.Count(parent, "call ptr @"+coroSpawnBeginHookV1); got != 2 {
-				t.Fatalf("spawn begin calls = %d, want two:\n%s", got, parent)
+			if got := strings.Count(parent, "call ptr @"+coroSpawnBeginHookV1); got != 3 {
+				t.Fatalf("spawn begin calls = %d, want three:\n%s", got, parent)
 			}
-			if got := strings.Count(parent, "call void @"+coroSpawnCommitHookV1); got != 2 {
-				t.Fatalf("spawn commit calls = %d, want two:\n%s", got, parent)
+			if got := strings.Count(parent, "call void @"+coroSpawnCommitHookV1); got != 3 {
+				t.Fatalf("spawn commit calls = %d, want three:\n%s", got, parent)
 			}
-			if got := strings.Count(parent, "call i1 @"+coroPreemptPollHookV1); got != 2 {
-				t.Fatalf("post-commit explicit preempt polls = %d, want two:\n%s", got, parent)
+			if got := strings.Count(parent, "call i1 @"+coroPreemptPollHookV1); got != 3 {
+				t.Fatalf("post-commit explicit preempt polls = %d, want three:\n%s", got, parent)
 			}
-			if got := strings.Count(parent, "call void @"+coroYieldPrepareHookV1); got != 2 {
-				t.Fatalf("post-commit parent yield handoffs = %d, want two:\n%s", got, parent)
+			if got := strings.Count(parent, "call void @"+coroYieldPrepareHookV1); got != 3 {
+				t.Fatalf("post-commit parent yield handoffs = %d, want three:\n%s", got, parent)
 			}
 			if !regexp.MustCompile(`call ptr @"?foo\.Async\$coro"?\(`).MatchString(parent) {
 				t.Fatalf("suspendable target is not called through its unique physical root:\n%s", parent)
@@ -221,6 +245,40 @@ func TestCoroClosedStaticSpawnNativeAndWasm32(t *testing.T) {
 			if got := len(regexp.MustCompile(`call ptr @"?foo\.Plain\$coro"?\(`).FindAllStringIndex(parent, -1)); got != 2 {
 				t.Fatalf("sync await + spawn calls to the one Plain primary = %d, want two:\n%s", got, parent)
 			}
+			variadicRoot := module.NamedFunction("foo.Variadic" + coroPrimarySuffix)
+			if variadicRoot.IsNil() || !module.NamedFunction("foo.Variadic").IsNil() {
+				t.Fatalf("variadic target did not retain exactly one coroutine primary:\n%s", ir)
+			}
+			params := variadicRoot.Params()
+			if len(params) != 4 {
+				t.Fatalf("variadic physical parameters = %d, want g/out/scalar/slice:\n%s", len(params), variadicRoot.String())
+			}
+			sliceType := params[3].Type()
+			if sliceType.TypeKind() != llvm.StructTypeKind {
+				t.Fatalf("variadic final physical parameter = %s, want one canonical slice struct", sliceType.String())
+			}
+			elements := sliceType.StructElementTypes()
+			if len(elements) != 3 ||
+				elements[0].TypeKind() != llvm.PointerTypeKind ||
+				elements[1].TypeKind() != llvm.IntegerTypeKind ||
+				elements[2].TypeKind() != llvm.IntegerTypeKind {
+				t.Fatalf("variadic final physical parameter = %s, want one canonical pointer/len/cap slice", sliceType.String())
+			}
+			variadicCalls := 0
+			for _, block := range requireCoroPhysicalFunction(t, module, "foo.Parent").BasicBlocks() {
+				for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+					if instruction.InstructionOpcode() != llvm.Call || instruction.CalledValue().Name() != "foo.Variadic"+coroPrimarySuffix {
+						continue
+					}
+					variadicCalls++
+					if instruction.OperandsCount()-1 != 4 || instruction.Operand(3).Type().C != sliceType.C {
+						t.Fatalf("variadic spawn call did not pass g/out/scalar plus exactly one canonical slice:\n%s", instruction.String())
+					}
+				}
+			}
+			if variadicCalls != 1 {
+				t.Fatalf("variadic spawn physical calls = %d, want exactly one direct call and no adapter:\n%s", variadicCalls, parent)
+			}
 			for _, forbidden := range []string{"CreateThread", "InitThreadAttr", "DestroyThreadAttr", "._llgo_routine$", "pthread", "AllocRoot"} {
 				if strings.Contains(ir, forbidden) {
 					t.Fatalf("closed static spawn leaked legacy native-stack lowering %q:\n%s", forbidden, ir)
@@ -228,7 +286,7 @@ func TestCoroClosedStaticSpawnNativeAndWasm32(t *testing.T) {
 			}
 
 			runCoroABITestPipeline(t, prog, module)
-			for _, name := range []string{"foo.Parent$coro", "foo.Plain$coro", "foo.Async$coro"} {
+			for _, name := range []string{"foo.Parent$coro", "foo.Plain$coro", "foo.Async$coro", "foo.Variadic$coro"} {
 				for _, suffix := range []string{".resume", ".destroy"} {
 					if module.NamedFunction(name + suffix).IsNil() {
 						t.Fatalf("CoroSplit did not create %s%s:\n%s", name, suffix, module.String())
@@ -965,7 +1023,7 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	parent, plain, async := ssaPkg.Func("Parent"), ssaPkg.Func("Plain"), ssaPkg.Func("Async")
+	parent, plain, async, variadic := ssaPkg.Func("Parent"), ssaPkg.Func("Plain"), ssaPkg.Func("Async"), ssaPkg.Func("Variadic")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
@@ -975,7 +1033,7 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
-			if fn == parent || fn == plain || fn == async {
+			if fn == parent || fn == plain || fn == async || fn == variadic {
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 			}
 			return coro.SSAFunctionPolicy{}, nil

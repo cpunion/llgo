@@ -139,6 +139,38 @@ func buildCallerFrameSSAPackage(t *testing.T, pkgPath, src string) (*gossa.Packa
 	return ssapkg, files
 }
 
+func TestLogicalCallerLocationPosUsesOwnerClosingBrace(t *testing.T) {
+	ssaPkg, fset, _ := buildGoSSAPkg(t, `package foo
+func f() {
+	func() {
+		defer func() {}()
+	}()
+}
+`)
+	owner := ssaPkg.Func("f").AnonFuncs[0]
+	var runDefers *gossa.RunDefers
+	for _, block := range owner.Blocks {
+		for _, instruction := range block.Instrs {
+			if run, ok := instruction.(*gossa.RunDefers); ok {
+				runDefers = run
+			}
+		}
+	}
+	if runDefers == nil {
+		t.Fatal("anonymous defer owner has no RunDefers instruction")
+	}
+	ctx := &context{goFn: owner, fset: fset}
+	got := fset.Position(ctx.logicalCallerLocationPos(runDefers)).Line
+	syntax, ok := owner.Syntax().(*ast.FuncLit)
+	if !ok || syntax.Body == nil {
+		t.Fatalf("anonymous defer owner syntax = %T, want *ast.FuncLit with a body", owner.Syntax())
+	}
+	want := fset.Position(syntax.Body.Rbrace).Line
+	if got != want {
+		t.Fatalf("defer run line = %d, want owner closing brace line %d", got, want)
+	}
+}
+
 func newLLSSAProgForTarget(t *testing.T, target *llssa.Target) llssa.Program {
 	t.Helper()
 	prog := llssa.NewProgram(target)

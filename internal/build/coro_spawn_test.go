@@ -19,6 +19,7 @@
 package build
 
 import (
+	"go/types"
 	"strings"
 	"testing"
 
@@ -32,15 +33,19 @@ func TestCoroPlanInputClosedStaticSpawnSeedsOwnerAndPreservesTargetPrimary(t *te
 var channel chan int
 func plain(value int) { _ = value }
 func suspending() { <-channel }
+func variadic(first int, rest ...int) { _, _ = first, rest }
 func launchPlain(value int) { plain(value); go plain(value) }
 func launchSuspending() { go suspending() }
+func launchVariadic(value int) { go variadic(value, value + 1, value + 2) }
 `, nil)
 	launchPlain := ssaPkg.Func("launchPlain")
 	launchSuspending := ssaPkg.Func("launchSuspending")
+	launchVariadic := ssaPkg.Func("launchVariadic")
 	input := CoroPlanInput{Program: ssaPkg.Prog}
 	plan, err := input.Analyze(coro.Roots{
 		{Function: launchPlain, Demand: coro.AsyncDemand},
 		{Function: launchSuspending, Demand: coro.AsyncDemand},
+		{Function: launchVariadic, Demand: coro.AsyncDemand},
 	}, coro.SSAConfig{MaxPlainInstructions: -1})
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +61,12 @@ func launchSuspending() { go suspending() }
 		suspendingPlan.FuncRep != coro.DirectCoro || suspendingPlan.Demand != coro.AsyncDemand {
 		t.Fatalf("suspending spawn target = %+v", suspendingPlan)
 	}
-	for _, owner := range []*ssa.Function{launchPlain, launchSuspending} {
+	variadicPlan, _ := plan.FunctionPlan(ssaPkg.Func("variadic"))
+	if variadicPlan.Emission != coro.EmitCoroutine || variadicPlan.Primary != coro.PrimaryCoroutine ||
+		variadicPlan.FuncRep != coro.DirectCoro || variadicPlan.Demand != coro.AsyncDemand {
+		t.Fatalf("variadic spawn target = %+v", variadicPlan)
+	}
+	for _, owner := range []*ssa.Function{launchPlain, launchSuspending, launchVariadic} {
 		ownerPlan, _ := plan.FunctionPlan(owner)
 		if ownerPlan.DeclaredEffect != coro.YieldOnly || !ownerPlan.LocalEffect.Contains(coro.YieldOnly) ||
 			!ownerPlan.Effect.Contains(coro.YieldOnly) || ownerPlan.Emission != coro.EmitCoroutine ||
@@ -70,6 +80,14 @@ func launchSuspending() { go suspending() }
 			}
 			if _, _, err := plan.ResolveClosedStaticSpawn(spawn); err != nil {
 				t.Fatalf("resolve %s spawn: %v", owner.Name(), err)
+			}
+			if owner == launchVariadic {
+				if len(spawn.Common().Args) != 2 {
+					t.Fatalf("variadic spawn arguments = %d, want scalar plus one SSA-packed slice", len(spawn.Common().Args))
+				}
+				if _, ok := types.Unalias(spawn.Common().Args[1].Type()).Underlying().(*types.Slice); !ok {
+					t.Fatalf("variadic spawn final argument = %s, want slice", spawn.Common().Args[1].Type())
+				}
 			}
 			callPlan, ok := plan.CallPlan(spawn)
 			if !ok || callPlan.Kind != coro.CallSpawn || callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 {

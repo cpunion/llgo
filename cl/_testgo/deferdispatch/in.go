@@ -18,6 +18,6 @@ func main() {
 // CHECK: call i64 @llvm.coro.size.i64()
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK: call void @__llgo_coro_panic_prepare_v1(
-// CHECK: runtime.PrintString{{(\$coro)?}}
+// CHECK: runtime.PrintBatchV1$coro
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
-// CHECK: runtime.PrintString{{(\$coro)?}}
+// CHECK: runtime.PrintBatchV1$coro

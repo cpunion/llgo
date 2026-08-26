@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v10"
+	LibraryEffectSummaryVersion = "v11"
 
 	// LibraryEffectSummarySchema is the producer ABI summary embedded in LLGo
 	// package objects and archives. It is deliberately independent from the
@@ -55,7 +55,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 10,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 11,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size

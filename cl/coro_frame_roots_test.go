@@ -153,6 +153,142 @@ func TestCoroFrameExactRootsAndUintptrKeepaliveAreFrozen(t *testing.T) {
 	}
 }
 
+func TestCoroUintptrEscapesVariadicBoundariesReuseTransportStorage(t *testing.T) {
+	const source = `package foo
+import "unsafe"
+
+//go:uintptrescapes
+func Child(first uintptr, rest ...uintptr) {
+	_ = *(*byte)(unsafe.Pointer(first))
+	for _, word := range rest { _ = *(*byte)(unsafe.Pointer(word)) }
+}
+
+func Deferred(pointer *byte) {
+	defer Child(uintptr(unsafe.Pointer(pointer)), uintptr(unsafe.Pointer(pointer)))
+}
+
+func Spawned(pointer *byte) {
+	go Child(uintptr(unsafe.Pointer(pointer)), uintptr(unsafe.Pointer(pointer)))
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred, spawned, child := ssaPkg.Func("Deferred"), ssaPkg.Func("Spawned"), ssaPkg.Func("Child")
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: deferred, Demand: coro.AsyncDemand},
+		{Function: spawned, Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == deferred || function == spawned || function == child {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(
+		deferred, plan, universe, CoroFrameRetentionParkABIV2, true,
+	)
+	if err != nil || cleanup == nil || len(cleanup.sites) != 1 {
+		t.Fatalf("deferred cleanup plan = %v, err=%v", cleanup, err)
+	}
+
+	for _, test := range []struct {
+		owner *ssa.Function
+		kind  coroFrameRetentionCallKindV1
+	}{
+		{owner: deferred, kind: coroFrameRetentionCallCleanupCaptureV1},
+		{owner: spawned, kind: coroFrameRetentionCallSpawnTransferV1},
+	} {
+		audit, err := newCoroPhysicalPureSSAAudit(universe, plan, test.owner, CoroFrameRetentionParkABIV2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if test.owner == deferred {
+			audit.cleanup = cleanup
+		}
+		proof := audit.currentFrameRetentionProof()
+		var boundary ssa.CallInstruction
+		pointerWords := 0
+		for _, block := range test.owner.Blocks {
+			for _, instruction := range block.Instrs {
+				if call, ok := instruction.(ssa.CallInstruction); ok {
+					switch call.(type) {
+					case *ssa.Defer, *ssa.Go:
+						boundary = call
+					}
+				}
+				conversion, ok := instruction.(*ssa.Convert)
+				if !ok || !coroFrameRetentionPointerToUintptr(conversion) {
+					continue
+				}
+				pointerWords++
+				if !proof.provesTraceableUintptr(conversion) || audit.validateConvert(conversion) != "" {
+					t.Fatalf("%s pointer word %q has no exact boundary proof", test.owner.Name(), conversion)
+				}
+			}
+		}
+		fact, found := proof.callKeepalives[boundary]
+		uintptrSources, sliceSources := 0, 0
+		for _, source := range fact.sources {
+			if coroFrameRetentionUintptrLike(source.Type()) {
+				uintptrSources++
+			}
+			if _, ok := types.Unalias(source.Type()).Underlying().(*types.Slice); ok {
+				sliceSources++
+			}
+		}
+		if boundary == nil || !found || fact.kind != test.kind || pointerWords != 2 ||
+			uintptrSources != 2 || sliceSources != 1 || len(fact.sources) != 3 {
+			t.Fatalf("%s boundary fact=%+v present=%t pointer-words=%d", test.owner.Name(), fact, found, pointerWords)
+		}
+		if storage := proof.exactCallKeepaliveStorageSources(boundary); len(storage) != 0 {
+			t.Fatalf("%s duplicated %d uintptr values outside its ordinary transport record", test.owner.Name(), len(storage))
+		}
+	}
+
+	childAudit, err := newCoroPhysicalPureSSAAudit(universe, plan, child, CoroFrameRetentionParkABIV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childProof := childAudit.currentFrameRetentionProof()
+	reconstructed := 0
+	for _, block := range child.Blocks {
+		for _, instruction := range block.Instrs {
+			conversion, ok := instruction.(*ssa.Convert)
+			if !ok || conversion.X == nil || !coroFrameRetentionUintptrLike(conversion.X.Type()) ||
+				!coroFrameRetentionPointerLike(conversion.Type()) {
+				continue
+			}
+			reconstructed++
+			if !childProof.provesTraceableUintptr(conversion.X) || childAudit.validateConvert(conversion) != "" {
+				t.Fatalf("directive-backed reconstruction %q lost its exact argument carrier", conversion)
+			}
+		}
+	}
+	if reconstructed != 2 {
+		t.Fatalf("directive-backed reconstructions = %d, want direct plus variadic element", reconstructed)
+	}
+}
+
 func TestCoroFrameExactRootsRemainFailClosed(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -421,6 +557,71 @@ func Root(base *byte, offset uintptr) byte {
 	if dereference == nil || !proof.provesDominatedStableAddress(dereference.X, dereference) {
 		t.Fatal("guarded unsafe.Add dereference has no exact address-retention proof")
 	}
+}
+
+func TestCoroFrameExactRootsAbsoluteUnsafePointerNeedsNoRoot(t *testing.T) {
+	prog, _, _, root, audit, proof := prepareCoroFrameRootAudit(t, `package foo
+import "unsafe"
+func Root() byte { return *(*byte)(unsafe.Pointer(uintptr(1))) }
+`, "Root", EmissionUniverseOptions{})
+	defer prog.Dispose()
+	var dereference *ssa.UnOp
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if handled, reason := audit.validate(instruction); handled && reason != "" {
+				t.Fatalf("absolute-address instruction %T %q rejected: %s", instruction, instruction, reason)
+			}
+			if load, ok := instruction.(*ssa.UnOp); ok && load.Op == token.MUL {
+				dereference = load
+			}
+		}
+	}
+	if dereference == nil || !proof.provesDominatedStableAddress(dereference.X, dereference) {
+		t.Fatal("non-zero absolute address has no exact non-nil proof")
+	}
+	fact, ok := proof.stableAddresses[coroFrameRetentionAddressUse{value: dereference.X, use: dereference}]
+	if !ok || !fact.nonNil || len(fact.roots) != 0 || len(fact.evidence) != 0 {
+		t.Fatalf("absolute-address fact = %+v, present=%t; want root- and evidence-free non-nil fact", fact, ok)
+	}
+	if roots := proof.exactRetainedRoots(); len(roots) != 0 {
+		t.Fatalf("absolute address manufactured retained roots: %v", rootNames(roots))
+	}
+	semantic, err := planCoroSemanticInstruction(dereference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !semantic.nativeFaultBoundary || !coroPhysicalInstructionNeedsNativeFaultBoundary(
+		dereference, coroPhysicalInstructionPlan{semantic: semantic},
+	) {
+		t.Fatalf("non-zero low absolute address %T %v lost its native fault boundary seed", dereference.X, dereference.X)
+	}
+}
+
+func TestCoroFrameExactRootsZeroUnsafePointerKeepsNilFault(t *testing.T) {
+	prog, _, _, root, audit, proof := prepareCoroFrameRootAudit(t, `package foo
+import "unsafe"
+func Root() byte { return *(*byte)(unsafe.Pointer(uintptr(0))) }
+`, "Root", EmissionUniverseOptions{})
+	defer prog.Dispose()
+	audit.allowImplicitNilFault = true
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			load, ok := instruction.(*ssa.UnOp)
+			if !ok || load.Op != token.MUL {
+				continue
+			}
+			if reason := audit.validateUnOp(load); reason != "" {
+				t.Fatalf("zero absolute address rejected instead of guarded: %s", reason)
+			}
+			if !proof.provesGuardableStableAddress(load.X, load) ||
+				proof.provesDominatedStableAddress(load.X, load) ||
+				!proof.requiresImplicitNilFault(load.X, load) {
+				t.Fatal("zero absolute address did not retain its sole explicit nil-fault edge")
+			}
+			return
+		}
+	}
+	t.Fatal("zero absolute-address fixture has no typed load")
 }
 
 func TestCoroFrameExactRootsAcceptGuardedMergedPointer(t *testing.T) {
