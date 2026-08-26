@@ -278,6 +278,93 @@ func ssaIntegerValueProvenNonZeroAt(value ssa.Value, use ssa.Instruction) bool {
 	return ssaIntegerValueProvenNonZeroAtRecursive(value, use, make(map[ssa.Value]bool))
 }
 
+// ssaIntegerValueProvenNonNegativeAt accepts an unsigned value, a
+// non-negative integer constant, or an exact comparison against zero whose
+// non-negative successor dominates use. It intentionally does not infer from
+// names, unrelated values, or a non-dominating sibling branch.
+func ssaIntegerValueProvenNonNegativeAt(value ssa.Value, use ssa.Instruction) bool {
+	if value == nil || !ssaIntegerValue(value) {
+		return false
+	}
+	if !signedIntegerMayBeNegative(value) {
+		return true
+	}
+	return ssaDominatingIntegerComparisonAt(value, use, ssaIntegerComparisonNonNegativeSuccessor)
+}
+
+func ssaDominatingIntegerComparisonAt(
+	value ssa.Value,
+	use ssa.Instruction,
+	proofSuccessor func(*ssa.BinOp, ssa.Value, *ssa.BasicBlock) *ssa.BasicBlock,
+) bool {
+	if value == nil || use == nil || use.Parent() == nil || use.Block() == nil || proofSuccessor == nil {
+		return false
+	}
+	for _, block := range use.Parent().Blocks {
+		if block == nil || len(block.Instrs) == 0 || len(block.Succs) != 2 {
+			continue
+		}
+		branch, ok := block.Instrs[len(block.Instrs)-1].(*ssa.If)
+		if !ok || branch.Parent() != use.Parent() {
+			continue
+		}
+		comparison, ok := branch.Cond.(*ssa.BinOp)
+		if !ok {
+			continue
+		}
+		successor := proofSuccessor(comparison, value, block)
+		if successor != nil && successor.Dominates(use.Block()) {
+			return true
+		}
+	}
+	return false
+}
+
+func ssaIntegerComparisonNonNegativeSuccessor(
+	comparison *ssa.BinOp,
+	value ssa.Value,
+	block *ssa.BasicBlock,
+) *ssa.BasicBlock {
+	if comparison == nil || value == nil || block == nil || len(block.Succs) != 2 {
+		return nil
+	}
+	op := comparison.Op
+	valueOnLeft := comparison.X == value
+	var other ssa.Value
+	if valueOnLeft {
+		other = comparison.Y
+	} else if comparison.Y == value {
+		other = comparison.X
+	} else {
+		return nil
+	}
+	zero, ok := other.(*ssa.Const)
+	if !ok || zero.Value == nil || !ssaIntegerValue(zero) || constant.Sign(zero.Value) != 0 {
+		return nil
+	}
+	if !valueOnLeft {
+		switch op {
+		case token.LSS:
+			op = token.GTR
+		case token.LEQ:
+			op = token.GEQ
+		case token.GTR:
+			op = token.LSS
+		case token.GEQ:
+			op = token.LEQ
+		}
+	}
+	// After normalization the comparison is value op 0. The selected edge
+	// must exclude every negative value, not merely make zero possible.
+	switch op {
+	case token.EQL, token.GTR, token.GEQ:
+		return block.Succs[0]
+	case token.NEQ, token.LSS, token.LEQ:
+		return block.Succs[1]
+	}
+	return nil
+}
+
 func ssaIntegerValueProvenNonZeroAtRecursive(value ssa.Value, use ssa.Instruction, visiting map[ssa.Value]bool) bool {
 	if constantIntegerKnownNonZero(value) {
 		return true
@@ -309,24 +396,7 @@ func ssaIntegerValueProvenNonZeroAtRecursive(value ssa.Value, use ssa.Instructio
 		return true
 	}
 
-	for _, block := range use.Parent().Blocks {
-		if block == nil || len(block.Instrs) == 0 || len(block.Succs) != 2 {
-			continue
-		}
-		branch, ok := block.Instrs[len(block.Instrs)-1].(*ssa.If)
-		if !ok || branch.Parent() != use.Parent() {
-			continue
-		}
-		comparison, ok := branch.Cond.(*ssa.BinOp)
-		if !ok {
-			continue
-		}
-		successor := ssaIntegerComparisonNonZeroSuccessor(comparison, value, block)
-		if successor != nil && successor.Dominates(use.Block()) {
-			return true
-		}
-	}
-	return false
+	return ssaDominatingIntegerComparisonAt(value, use, ssaIntegerComparisonNonZeroSuccessor)
 }
 
 // ssaIntegerValueProvenPositiveByLoopBoundAt recognizes the canonical loop

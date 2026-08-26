@@ -70,7 +70,7 @@ func AssertRuntimeError(b bool, msg string) {
 
 func AssertNegativeShift(b bool) {
 	if b {
-		panic(errorString("negative shift amount"))
+		panic(shiftError)
 	}
 }
 

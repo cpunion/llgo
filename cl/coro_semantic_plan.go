@@ -18,7 +18,6 @@ package cl
 
 import (
 	"fmt"
-	"go/constant"
 	"go/token"
 	"go/types"
 
@@ -99,7 +98,7 @@ func coroOutcomePlainScalarBinOp(instruction *ssa.BinOp) bool {
 	case token.AND, token.OR, token.XOR, token.AND_NOT:
 		return info&types.IsInteger != 0
 	case token.SHL, token.SHR:
-		return info&types.IsInteger != 0 && coroOutcomePlainNonNegativeShiftCount(instruction.Y)
+		return info&types.IsInteger != 0 && ssaIntegerValueProvenNonNegativeAt(instruction.Y, instruction)
 	case token.EQL, token.NEQ:
 		return info&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) != 0 ||
 			coroOutcomePlainPointerLike(instruction.X.Type())
@@ -108,17 +107,6 @@ func coroOutcomePlainScalarBinOp(instruction *ssa.BinOp) bool {
 	default:
 		return false
 	}
-}
-
-func coroOutcomePlainNonNegativeShiftCount(value ssa.Value) bool {
-	if value == nil {
-		return false
-	}
-	if coroOutcomePlainBasicInfo(value.Type())&types.IsUnsigned != 0 {
-		return true
-	}
-	literal, ok := value.(*ssa.Const)
-	return ok && literal.Value != nil && constant.Sign(literal.Value) >= 0
 }
 
 func coroOutcomePlainScalarUnOp(instruction *ssa.UnOp) bool {

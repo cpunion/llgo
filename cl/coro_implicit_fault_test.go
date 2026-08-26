@@ -121,6 +121,23 @@ func DivideWithRecover(value, divisor int64) (result int64) {
 	return value / divisor
 }
 
+func ShiftLeft(value uint64, count int) uint64 { return value << count }
+func ShiftRight(value int64, count int) int64 { return value >> count }
+func ShiftWithCleanup(value uint64, count int) uint64 {
+	defer Cleanup()
+	return value << count
+}
+func ShiftWithRecover(value uint64, count int) (result uint64) {
+	defer RecoverFault()
+	return value << count
+}
+func ShiftGuarded(value uint64, count int) uint64 {
+	if count < 0 { return 0 }
+	return value << count
+}
+func ShiftUnsigned(value uint64, count uint) uint64 { return value << count }
+func ShiftConstant(value uint64) uint64 { return value << 3 }
+
 func PointerEqual(first, second *Box) bool { return first == second }
 
 type ValueReceiver struct { Value uint32 }
@@ -402,6 +419,115 @@ func TestCoroIntegerDivideByZeroUsesStructuredFaultNativeAndWasm32(t *testing.T)
 				if resume.IsNil() || strings.Contains(resume.String(), "AssertDivideByZero") ||
 					strings.Count(resume.String(), "call void @"+coroFaultPrepareHookV1) != 1 {
 					t.Fatalf("post-split %s lost its structured divide-by-zero fault:\n%s", name, module.String())
+				}
+			}
+		})
+	}
+}
+
+func TestCoroNegativeShiftUsesOneStructuredFaultNativeAndWasm32(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg, plan, functions := compileCoroImplicitNilFaultFixture(t, test.target)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify structured negative shift before CoroSplit: %v\n%s", err, module.String())
+			}
+			dynamicShifts := []struct {
+				name   string
+				opcode string
+			}{
+				{name: "ShiftLeft", opcode: " shl "},
+				{name: "ShiftRight", opcode: " ashr "},
+			}
+			for _, shift := range dynamicShifts {
+				functionPlan, ok := plan.FunctionPlan(functions[shift.name])
+				if !ok || functionPlan.Emission != coro.EmitCoroutine ||
+					!functionPlan.Exec.Contains(coro.MayUnwind) {
+					t.Fatalf("%s plan = %+v, present=%t; want may-unwind coroutine", shift.name, functionPlan, ok)
+				}
+				body := requireCoroPhysicalFunction(t, module, "foo."+shift.name).String()
+				if strings.Contains(body, "AssertNegativeShift") ||
+					strings.Contains(body, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
+					strings.Count(body, "call void @"+coroFaultPrepareHookV1) != 1 ||
+					strings.Count(body, "icmp slt") != 1 ||
+					strings.Count(body, "icmp uge") != 1 ||
+					strings.Count(body, shift.opcode) != 1 ||
+					!strings.Contains(body, fmt.Sprintf("i32 %d", coroFaultNegativeShiftV1)) {
+					t.Fatalf("%s did not use exactly one inline guard and one structured fault:\n%s", shift.name, body)
+				}
+			}
+
+			for _, test := range []struct {
+				name       string
+				deferAwait int
+			}{
+				{name: "ShiftWithCleanup"},
+				{name: "ShiftWithRecover", deferAwait: 1},
+			} {
+				body := requireCoroPhysicalFunction(t, module, "foo."+test.name).String()
+				if strings.Contains(body, "AssertNegativeShift") ||
+					strings.Count(body, "call i1 @"+coroAwaitPrepareInlineHookV4) != test.deferAwait ||
+					strings.Contains(body, "call void @"+coroFaultPrepareHookV1) ||
+					strings.Count(body, "call void @"+coroFaultPayloadHookV1) != 1 ||
+					strings.Count(body, "icmp slt") != 1 ||
+					strings.Count(body, " shl ") != 1 ||
+					!strings.Contains(body, fmt.Sprintf("i32 %d", coroFaultNegativeShiftV1)) {
+					t.Fatalf("%s did not route one negative-shift fault through cleanup/recover:\n%s", test.name, body)
+				}
+			}
+
+			for _, name := range []string{"ShiftUnsigned", "ShiftConstant"} {
+				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
+				if strings.Contains(body, "AssertNegativeShift") ||
+					strings.Contains(body, coroFaultPrepareHookV1) ||
+					strings.Contains(body, coroFaultPayloadHookV1) ||
+					strings.Contains(body, "icmp slt") ||
+					strings.Count(body, " shl ") != 1 {
+					t.Fatalf("%s retained a redundant negative-count path:\n%s", name, body)
+				}
+			}
+			guarded := requireCoroPhysicalFunction(t, module, "foo.ShiftGuarded").String()
+			if strings.Contains(guarded, "AssertNegativeShift") ||
+				strings.Contains(guarded, coroFaultPrepareHookV1) ||
+				strings.Contains(guarded, coroFaultPayloadHookV1) ||
+				strings.Count(guarded, "icmp slt") != 1 ||
+				strings.Count(guarded, " shl ") != 1 {
+				t.Fatalf("dominated non-negative shift retained a second guard or fault path:\n%s", guarded)
+			}
+			if strings.Contains(module.String(), "AssertNegativeShift") {
+				t.Fatalf("structured shift module retained an unused helper symbol:\n%s", module.String())
+			}
+
+			runCoroABITestPipeline(t, prog, module)
+			faultFrame := module.GetTypeByName("foo.ShiftLeft$coro.Frame")
+			guardedFrame := module.GetTypeByName("foo.ShiftGuarded$coro.Frame")
+			if faultFrame.IsNil() || guardedFrame.IsNil() {
+				t.Fatalf("post-split shift frame type is absent:\n%s", module.String())
+			}
+			faultFrameSize := prog.TargetData().TypeAllocSize(faultFrame)
+			guardedFrameSize := prog.TargetData().TypeAllocSize(guardedFrame)
+			if faultFrameSize != guardedFrameSize {
+				t.Fatalf("negative-shift guard added frame storage: fault=%d, guarded=%d", faultFrameSize, guardedFrameSize)
+			}
+			for _, shift := range dynamicShifts {
+				resume := module.NamedFunction("foo." + shift.name + "$coro.resume")
+				if resume.IsNil() || strings.Contains(resume.String(), "AssertNegativeShift") ||
+					strings.Count(resume.String(), "call void @"+coroFaultPrepareHookV1) != 1 ||
+					strings.Count(resume.String(), "icmp slt") != 1 ||
+					strings.Count(resume.String(), "icmp uge") != 1 ||
+					strings.Count(resume.String(), shift.opcode) != 1 {
+					t.Fatalf("post-split %s lost its single structured negative-shift fault:\n%s", shift.name, module.String())
 				}
 			}
 		})
@@ -786,6 +912,13 @@ func compileCoroImplicitNilFaultFixture(
 		"GuardedDivide":          ssaPkg.Func("GuardedDivide"),
 		"DivideWithCleanup":      ssaPkg.Func("DivideWithCleanup"),
 		"DivideWithRecover":      ssaPkg.Func("DivideWithRecover"),
+		"ShiftLeft":              ssaPkg.Func("ShiftLeft"),
+		"ShiftRight":             ssaPkg.Func("ShiftRight"),
+		"ShiftWithCleanup":       ssaPkg.Func("ShiftWithCleanup"),
+		"ShiftWithRecover":       ssaPkg.Func("ShiftWithRecover"),
+		"ShiftGuarded":           ssaPkg.Func("ShiftGuarded"),
+		"ShiftUnsigned":          ssaPkg.Func("ShiftUnsigned"),
+		"ShiftConstant":          ssaPkg.Func("ShiftConstant"),
 		"PointerEqual":           ssaPkg.Func("PointerEqual"),
 		"ValueReceiverCall":      ssaPkg.Func("ValueReceiverCall"),
 		"StaticArrayRange":       ssaPkg.Func("StaticArrayRange"),

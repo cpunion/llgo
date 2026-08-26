@@ -42,6 +42,7 @@ var coroChannelCloseClosedErrorV1 = error(plainError("close of closed channel"))
 var coroUnsafeStringLenErrorV1 = error(errorString("unsafe.String: len out of range"))
 var coroUnsafeStringNilErrorV1 = error(errorString("unsafe.String: nil pointer with non-zero length"))
 var coroIntegerDivideByZeroErrorV1 = error(errorString("integer divide by zero"))
+var shiftError = error(errorString("negative shift amount"))
 
 // V1 remains the allocation-free payload for operand-free faults. Slice
 // conversion uses the parameterized V2 hook below because Go's boundsError
@@ -71,10 +72,11 @@ const (
 	coroFaultUnsafeStringNilV1
 	coroFaultSliceConvertV1
 	coroFaultIntegerDivideByZeroV1
+	coroFaultNegativeShiftV1
 )
 
 const (
-	coroFaultBoundsBaseV2  uint32 = coroFaultIntegerDivideByZeroV1 + 1
+	coroFaultBoundsBaseV2  uint32 = coroFaultNegativeShiftV1 + 1
 	coroFaultBoundsLimitV2        = coroFaultBoundsBaseV2 + 2*8
 )
 
@@ -176,6 +178,8 @@ func coroFaultPayloadV1(kind uint32) (typeWord, dataWord unsafe.Pointer) {
 		return coroErrorFaultPayloadV1(&coroSliceConvertErrorV1)
 	case coroFaultIntegerDivideByZeroV1:
 		return coroErrorFaultPayloadV1(&coroIntegerDivideByZeroErrorV1)
+	case coroFaultNegativeShiftV1:
+		return coroErrorFaultPayloadV1(&shiftError)
 	default:
 		return nil, nil
 	}
