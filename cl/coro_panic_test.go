@@ -295,6 +295,21 @@ func Root(value *uint32, trigger bool) { if trigger { panic(value) } }
 			want: "may outlive its coroutine frame",
 		},
 		{
+			name: "zero direct pointer wrapper",
+			source: `package foo
+type Box[T any] struct { value *T }
+func Root() { value := Box[any]{}; if value.value != nil { panic(value) } }
+`,
+		},
+		{
+			name: "unproven direct pointer wrapper",
+			source: `package foo
+type Box[T any] struct { value *T }
+func Root(value *any) { payload := Box[any]{}; payload.value = value; if payload.value != nil { panic(payload) } }
+`,
+			want: "direct panic payload has no post-destroy lifetime proof",
+		},
+		{
 			name: "cleanup frame",
 			source: `package foo
 var Payload uint32
@@ -328,7 +343,9 @@ func Root(trigger bool) { defer cleanup(); if trigger { panic(&Payload) } }
 			err = validateCoroPhysicalABIWithUniverseCapabilities(root, plan, nil, universe, true, false, false, true)
 			if test.want == "" {
 				if err != nil {
-					t.Fatalf("preflight error = %v, want constant-backed payload acceptance", err)
+					var dump bytes.Buffer
+					ssa.WriteFunction(&dump, root)
+					t.Fatalf("preflight error = %v, want payload acceptance\n%s", err, dump.String())
 				}
 				return
 			}
