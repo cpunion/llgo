@@ -651,7 +651,7 @@ func (c *Compilation) preflightCoroPlan() error {
 			c.coroPreflightErr = err
 			return
 		}
-		if err := validateCoroExportIngressRoots(plan, universe, c.CoroTargetCapabilities); err != nil {
+		if err := c.validateCoroExportIngressRoots(); err != nil {
 			c.coroPreflightErr = err
 			return
 		}

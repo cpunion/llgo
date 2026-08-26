@@ -177,8 +177,15 @@ func (u *EmissionUniverse) freezeCoroCallableIdentityCertificates() error {
 	if err != nil {
 		return err
 	}
+	ingressBindings, err := freezeCoroExportIngressCertificates(
+		emissionCanonicalIndex{universe: u}, ingressTargets,
+	)
+	if err != nil {
+		return err
+	}
 	u.localExportBindings = bindings
-	return u.freezeCoroExportIngressCertificates(ingressTargets)
+	u.exportIngressBindings = ingressBindings
+	return nil
 }
 
 func derivedCoroCallableTypedABI(signature string) string {

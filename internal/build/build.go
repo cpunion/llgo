@@ -5038,10 +5038,13 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 // requiredCoroGenerationEntryRoots preserves ModeGen's historical contract:
 // the requested package is an IR-generation unit, not a runnable closed
 // program. Every bodyful source-level function in that package is therefore an
-// independently callable managed Go entry. An emission entry contributes
-// AsyncDemand so effect propagation selects the correct physical managed entry,
-// but is not a scheduler root: it owns no root factory and does not prevent a
-// non-suspending body from using the compact outcome/plain implementation.
+// independently callable managed Go entry. Compiler-generated cgo worker
+// adapters are the deliberate exception: ProgramIR publishes them only through
+// an exact worker certificate and raw/native-stack closure. An emission entry
+// contributes AsyncDemand so effect propagation selects the correct physical
+// managed entry, but is not a scheduler root: it owns no root factory and does
+// not prevent a non-suspending body from using the compact outcome/plain
+// implementation.
 // Nested closures are reached from their source owners and must not become
 // unrelated public roots.
 //
@@ -5061,6 +5064,7 @@ func requiredCoroGenerationEntryRoots(ctx *context) (coro.Roots, error) {
 		requested[built.SSA] = struct{}{}
 	}
 	var roots coro.Roots
+	planningMetadata := ctx.coroEmission.CoroPlanningMetadata()
 	for _, function := range ctx.coroEmission.Functions() {
 		if function == nil || function.Pkg == nil || function.Parent() != nil || len(function.Blocks) == 0 {
 			continue
@@ -5068,11 +5072,11 @@ func requiredCoroGenerationEntryRoots(ctx *context) (coro.Roots, error) {
 		if _, selected := requested[function.Pkg]; !selected {
 			continue
 		}
-		goBody, err := frozenGoEmittedBody(ctx.coroEmission, function)
+		managedEntry, err := planningMetadata.ManagedGenerationEntry(function)
 		if err != nil {
 			return nil, fmt.Errorf("classify coroutine generation root %q: %w", function.Name(), err)
 		}
-		if !goBody {
+		if !managedEntry {
 			continue
 		}
 		roots = append(roots, coro.Root{
@@ -5108,7 +5112,7 @@ func requiredCoroRawABIEntryRoots(
 			continue
 		}
 		ingressCertificate, ingressCandidate, certificateErr :=
-			ctx.coroEmission.CoroExportIngressCertificate(fn)
+			ctx.coroEmission.CoroPlanningMetadata().ExportIngressCertificate(fn)
 		if certificateErr != nil {
 			return nil, nil, fmt.Errorf(
 				"classify coroutine export ingress %q: %w", fn.Name(), certificateErr,

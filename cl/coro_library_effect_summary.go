@@ -771,7 +771,7 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		})
 		if root, ingress := plan.ForeignIngressRoot(function); ingress {
 			certificate, certified :=
-				universe.coroExportIngressCertificate(function)
+				universe.CoroPlanningMetadata().exportIngressCertificate(function)
 			if !certified || certificate.ID == "" ||
 				certificate.ID != root.IngressCertificate ||
 				certificate.PhysicalSymbol != symbol {

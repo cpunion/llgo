@@ -39,53 +39,20 @@ type coroExportIngressCertificate struct {
 	PhysicalABISignature string
 }
 
-// CoroExportIngressCertificate returns the immutable candidate binding for an
-// exact bodyful //export definition. Target selection still decides whether
-// the current platform has a physical ingress implementation; a certificate
-// alone never authorizes code generation.
-func (u *EmissionUniverse) CoroExportIngressCertificate(
-	fn *ssa.Function,
-) (certificateID string, certified bool, err error) {
-	if u == nil || fn == nil {
-		return "", false, fmt.Errorf("coroutine export ingress certificate requires one prepared function")
-	}
-	canonical, ok := u.Resolve(fn)
-	if !ok || canonical == nil || canonical != fn {
-		return "", false, fmt.Errorf(
-			"coroutine export ingress function %q is not one canonical emitted definition",
-			fn.Name(),
-		)
-	}
-	certificate, certified := u.exportIngressBindings[canonical]
-	return certificate.ID, certified, nil
-}
-
-func (u *EmissionUniverse) coroExportIngressCertificate(
-	fn *ssa.Function,
-) (coroExportIngressCertificate, bool) {
-	if u == nil || fn == nil {
-		return coroExportIngressCertificate{}, false
-	}
-	canonical := u.canonicalAlias(fn)
-	if canonical == nil || canonical != fn {
-		return coroExportIngressCertificate{}, false
-	}
-	certificate, ok := u.exportIngressBindings[canonical]
-	return certificate, ok
-}
-
-func (u *EmissionUniverse) freezeCoroExportIngressCertificates(
+func freezeCoroExportIngressCertificates(
+	index emissionCanonicalIndex,
 	targets map[*ssa.Function]coroLocalExportIngressTarget,
-) error {
+) (map[*ssa.Function]coroExportIngressCertificate, error) {
+	u := index.universe
 	if u == nil {
-		return fmt.Errorf("prepare emission universe: cannot freeze export ingress certificates in a nil universe")
+		return nil, fmt.Errorf("prepare emission universe: cannot freeze export ingress certificates in a nil universe")
 	}
 	bindings := make(map[*ssa.Function]coroExportIngressCertificate)
 	for function, target := range targets {
 		if function == nil || u.canonicalAlias(function) != function ||
 			target.FunctionIdentity == "" || target.LinkIdentity == "" ||
 			target.PhysicalSymbol == "" || target.PhysicalABISignature == "" {
-			return fmt.Errorf("prepare emission universe: export ingress target inventory is incomplete")
+			return nil, fmt.Errorf("prepare emission universe: export ingress target inventory is incomplete")
 		}
 		certificate := coroExportIngressCertificate{
 			FunctionIdentity:     target.FunctionIdentity,
@@ -102,8 +69,7 @@ func (u *EmissionUniverse) freezeCoroExportIngressCertificates(
 		))
 		bindings[function] = certificate
 	}
-	u.exportIngressBindings = bindings
-	return nil
+	return bindings, nil
 }
 
 func validateCoroExportIngressSignature(signature *types.Signature) bool {
@@ -112,25 +78,27 @@ func validateCoroExportIngressSignature(signature *types.Signature) bool {
 		typeParamCount(signature.RecvTypeParams()) == 0
 }
 
-func validateCoroExportIngressRoots(
-	plan *coro.SSAPlan,
-	universe *EmissionUniverse,
-	capabilities coro.TargetCapabilities,
-) error {
+func (c *Compilation) validateCoroExportIngressRoots() error {
+	if c == nil {
+		return fmt.Errorf("coroutine export ingress validation requires one compilation")
+	}
+	plan := c.immutablePlan()
+	universe := c.immutableEmissionUniverse()
 	if plan == nil || universe == nil {
 		return fmt.Errorf("coroutine export ingress validation requires one plan and emission universe")
 	}
+	certificates := universe.CoroPlanningMetadata()
 	for _, root := range plan.Roots() {
 		if !root.IngressEntry {
 			continue
 		}
-		if !capabilities.NativeFleet() {
+		if !c.CoroTargetCapabilities.NativeFleet() {
 			return fmt.Errorf(
 				"coroutine export ingress %q requires the native fleet runtime capability",
 				root.ID,
 			)
 		}
-		certificate, certified := universe.coroExportIngressCertificate(root.Function)
+		certificate, certified := certificates.exportIngressCertificate(root.Function)
 		if !certified || certificate.ID == "" || certificate.ID != root.IngressCertificate {
 			return fmt.Errorf(
 				"coroutine export ingress %q does not match its frozen certificate",
@@ -184,7 +152,7 @@ func (p *context) compileCoroExportIngressAdapter(
 	}
 	root, planned := plan.ForeignIngressRoot(target)
 	certificate, certified :=
-		p.emissionUniverse.coroExportIngressCertificate(target)
+		p.emissionUniverse.CoroPlanningMetadata().exportIngressCertificate(target)
 	if !planned || !certified || root.IngressCertificate == "" ||
 		root.IngressCertificate != certificate.ID || certificate.PhysicalSymbol == "" {
 		panic("coroutine export ingress escaped its frozen certificate")

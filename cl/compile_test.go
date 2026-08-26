@@ -639,6 +639,18 @@ func TestCgofullGeneratesC2func(t *testing.T) {
 			t.Fatalf("C2 lowering does not use the coroutine worker boundary %s", symbol)
 		}
 	}
+	for _, line := range strings.Split(ir, "\n") {
+		if !strings.HasPrefix(line, "define ") ||
+			!strings.Contains(line, "._Cfunc_") &&
+				!strings.Contains(line, "._Cmacro_") &&
+				!strings.Contains(line, "._cgo_cmalloc") {
+			continue
+		}
+		if strings.Contains(line, "$coro") || strings.Contains(line, "$managed") ||
+			strings.Contains(line, "$raw") {
+			t.Fatalf("generated cgo worker adapter acquired a second physical body: %s", line)
+		}
+	}
 }
 
 func TestGoPkgMath(t *testing.T) {

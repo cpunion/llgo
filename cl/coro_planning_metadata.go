@@ -34,6 +34,94 @@ type CoroPlanningMetadataView struct {
 	index emissionCanonicalIndex
 }
 
+// ManagedGenerationEntry reports whether ModeGen may publish fn as an
+// independently callable managed Go entry. It is narrower than InGo: cmd/cgo
+// worker adapters also have frontend-emitted Go bodies, but their only valid
+// entry is the exact raw/native-stack target carried by a frozen worker call
+// certificate. The answer is frozen per emission owner in ProgramIR; build
+// must not reconstruct it from a function name or source directive.
+func (view CoroPlanningMetadataView) ManagedGenerationEntry(fn *ssa.Function) (bool, error) {
+	u := view.index.universe
+	if u == nil || u.coroProgramIR == nil {
+		return false, fmt.Errorf("coroutine managed generation entry: nil emission universe or ProgramIR")
+	}
+	if fn == nil {
+		return false, fmt.Errorf("coroutine managed generation entry: nil function")
+	}
+	canonical := u.canonicalAlias(fn)
+	if canonical == nil {
+		return false, fmt.Errorf("coroutine managed generation entry: function has cyclic canonical aliases")
+	}
+	if _, required := u.required[canonical]; !required {
+		return false, fmt.Errorf(
+			"coroutine managed generation entry: function %q is absent from the frozen emission universe",
+			canonical.Name(),
+		)
+	}
+	owners := u.sortedUseOwners(canonical)
+	if len(owners) == 0 {
+		return false, fmt.Errorf(
+			"coroutine managed generation entry: function %q has no frozen owner",
+			canonical.Name(),
+		)
+	}
+	eligible := false
+	for index, owner := range owners {
+		preamble, err := u.coroProgramIR.functionPreambleForOwner(canonical, owner)
+		if err != nil {
+			return false, fmt.Errorf(
+				"coroutine managed generation entry: function %q owner %q: %w",
+				canonical.Name(), owner.identity, err,
+			)
+		}
+		if index != 0 && eligible != preamble.managedGenerationEntry {
+			return false, fmt.Errorf(
+				"coroutine managed generation entry: function %q has owner-dependent eligibility",
+				canonical.Name(),
+			)
+		}
+		eligible = preamble.managedGenerationEntry
+	}
+	return eligible, nil
+}
+
+// ExportIngressCertificate returns the immutable candidate binding for an
+// exact bodyful //export definition. Target selection still decides whether
+// the current platform has a physical ingress implementation; a certificate
+// alone never authorizes code generation.
+func (view CoroPlanningMetadataView) ExportIngressCertificate(
+	fn *ssa.Function,
+) (certificateID string, certified bool, err error) {
+	u := view.index.universe
+	if u == nil || fn == nil {
+		return "", false, fmt.Errorf("coroutine export ingress certificate requires one prepared function")
+	}
+	canonical, ok := u.Resolve(fn)
+	if !ok || canonical == nil || canonical != fn {
+		return "", false, fmt.Errorf(
+			"coroutine export ingress function %q is not one canonical emitted definition",
+			fn.Name(),
+		)
+	}
+	certificate, certified := u.exportIngressBindings[canonical]
+	return certificate.ID, certified, nil
+}
+
+func (view CoroPlanningMetadataView) exportIngressCertificate(
+	fn *ssa.Function,
+) (coroExportIngressCertificate, bool) {
+	u := view.index.universe
+	if u == nil || fn == nil {
+		return coroExportIngressCertificate{}, false
+	}
+	canonical := u.canonicalAlias(fn)
+	if canonical == nil || canonical != fn {
+		return coroExportIngressCertificate{}, false
+	}
+	certificate, ok := u.exportIngressBindings[canonical]
+	return certificate, ok
+}
+
 // ManagedValueReferences returns exact managed function values introduced by
 // compiler lowering without a source SSA operand. They use descriptor
 // transport and are disjoint from raw ABI method/code-address references.

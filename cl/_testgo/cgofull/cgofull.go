@@ -185,12 +185,20 @@ func runPy() {
 // CHECK: call void @__llgo_coro_worker_park_v1(
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK: call i32 @__llgo_coro_worker_resume_v1(
+// CHECK-LABEL: define i32 @"go_callback$managed"(i32
+// CHECK: EnterLocalContext
+// CHECK: LeaveLocalContext
 // CHECK-LABEL: define i32 @go_callback(i32
+// CHECK: call ptr @__llgo_coro_foreign_reentry_acquire_v1(
+// CHECK: call ptr @__llgo_coro_foreign_reentry_plain_ramp_v1_
+// CHECK: call i32 @__llgo_coro_foreign_reentry_run_v1(
+// CHECK-LABEL: define i32 @"go_callback_not_use_in_go$managed"(i32
 // CHECK: EnterLocalContext
 // CHECK: LeaveLocalContext
 // CHECK-LABEL: define i32 @go_callback_not_use_in_go(i32
-// CHECK: EnterLocalContext
-// CHECK: LeaveLocalContext
+// CHECK: call ptr @__llgo_coro_foreign_reentry_acquire_v1(
+// CHECK: call ptr @__llgo_coro_foreign_reentry_plain_ramp_v1_
+// CHECK: call i32 @__llgo_coro_foreign_reentry_run_v1(
 // CHECK-LABEL: define ptr @"main.main$coro"(
 // CHECK: call void @__llgo_coro_worker_park_v1(
 // CHECK: call i8 @llvm.coro.suspend(
