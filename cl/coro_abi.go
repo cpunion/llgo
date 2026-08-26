@@ -1779,7 +1779,7 @@ func validateCoroPhysicalABIForOwner(
 		if explicitPanic {
 			return fmt.Errorf("coroutine physical ABI: function %q: explicit-status panic requires PhysicalABIV1 child-await lowering", plan.ID)
 		}
-		if err := validateCoroLeafPhysicalABI(fn, plan); err != nil {
+		if err := validateCoroLeafPhysicalABI(fn, plan, whole, programRun); err != nil {
 			return err
 		}
 		if accept == nil {
@@ -1901,7 +1901,7 @@ func validateCoroPhysicalABIForOwner(
 	if isCgoExternSymbol(fn) && !cgoErrnoWorker {
 		return fail("cgo entry requires a foreign adapter")
 	}
-	programEntry := programRun && isCoroProgramManagedEntry(fn)
+	programEntry := hasCoroProgramManagedEntryCapability(fn, whole, programRun)
 	genericInstance := coroMaterializedGenericCallable(fn)
 	boundMethodWrapper := false
 	if strings.HasPrefix(fn.Synthetic, "bound method wrapper for ") {
@@ -2083,7 +2083,7 @@ func validateCoroPhysicalABIForOwner(
 		return fail("generic instances require a frozen instantiated ABI")
 	}
 	if isCoroProgramManagedEntry(fn) && !programEntry {
-		return fail("program roots require scheduler bootstrap lowering")
+		return fail("program-named bodies require runnable lowering or an exact pure package-emission root")
 	}
 	physicalSourceSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
 	if universe != nil {
@@ -3017,6 +3017,29 @@ func isCoroProgramManagedEntry(fn *ssa.Function) bool {
 	return name == "main" && fn.Pkg != nil && fn.Pkg.Pkg != nil && fn.Pkg.Pkg.Name() == "main"
 }
 
+// hasCoroProgramManagedEntryCapability validates the physical role of a
+// top-level main/init body. Runnable lowering retains package initializers
+// reached as ordinary callees; they are not necessarily explicit roots. Without
+// that capability, only an exact pure package-emission root may publish an
+// outcome/plain body without manufacturing a runnable bootstrap. Function
+// spelling alone never grants that package-generation exception.
+func hasCoroProgramManagedEntryCapability(fn *ssa.Function, whole *coro.SSAPlan, programRun bool) bool {
+	if !isCoroProgramManagedEntry(fn) {
+		return false
+	}
+	if programRun {
+		return true
+	}
+	if whole == nil {
+		return false
+	}
+	root, rooted := whole.Root(fn)
+	if !rooted || !root.ManagedDemand.Contains(coro.AsyncDemand) {
+		return false
+	}
+	return root.EmissionEntry && !root.ScheduledEntry && !root.IngressEntry
+}
+
 func coroMaterializedGenericInstance(fn *ssa.Function) bool {
 	if fn == nil || fn.Origin() == nil || fn.Origin() == fn || !hasGenericInstantiation(fn) {
 		return false
@@ -3450,10 +3473,10 @@ func resolveCoroStaticPlainCall(plan *coro.SSAPlan, call ssa.CallInstruction) (*
 	return target, targetPlan, nil
 }
 
-// validateCoroLeafPhysicalABI preserves the v0 leaf-only acceptance boundary
-// and diagnostics. Enabling later physical ABI capabilities must not silently
-// change an archive still identified as PhysicalABIV0/SchedulerNoneABIV0.
-func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error {
+// validateCoroLeafPhysicalABI preserves the v0 leaf-only instruction and
+// signature boundary. Program-entry authorization is shared with v1 because
+// explicit root roles are fixed before selecting a physical ABI version.
+func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, programRun bool) error {
 	fail := func(format string, args ...any) error {
 		return fmt.Errorf("coroutine physical ABI: function %q: %s", plan.ID, fmt.Sprintf(format, args...))
 	}
@@ -3511,8 +3534,8 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 	if list := fn.TypeArgs(); len(list) != 0 && !genericInstance {
 		return fail("generic instances require a frozen instantiated ABI")
 	}
-	if isCoroProgramManagedEntry(fn) {
-		return fail("program roots require scheduler bootstrap lowering")
+	if isCoroProgramManagedEntry(fn) && !hasCoroProgramManagedEntryCapability(fn, whole, programRun) {
+		return fail("program-named bodies require runnable lowering or an exact pure package-emission root")
 	}
 	if len(fn.Blocks) != 1 {
 		return fail("requires exactly one basic block, got %d", len(fn.Blocks))

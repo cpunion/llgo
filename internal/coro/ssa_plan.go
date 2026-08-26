@@ -907,6 +907,27 @@ func (p *SSAPlan) Roots() []SSARootPlan {
 	return append([]SSARootPlan(nil), p.roots...)
 }
 
+// Root returns the canonical joined explicit root for fn. The result is a
+// value copy, so consumers can inspect orthogonal entry roles without gaining
+// mutable access to the plan. It deliberately requires the exact SSA function
+// identity already frozen by AnalyzeSSA; display names are not capabilities.
+func (p *SSAPlan) Root(fn *ssa.Function) (SSARootPlan, bool) {
+	if p == nil || fn == nil {
+		return SSARootPlan{}, false
+	}
+	id, identified := p.byFunction[fn]
+	if !identified {
+		return SSARootPlan{}, false
+	}
+	index := sort.Search(len(p.roots), func(index int) bool {
+		return p.roots[index].ID >= id
+	})
+	if index < len(p.roots) && p.roots[index].ID == id {
+		return p.roots[index], true
+	}
+	return SSARootPlan{}, false
+}
+
 // RootFactoryRoots returns the exact explicit roots which own a managed
 // coroutine factory descriptor. A raw-only root can share a function whose
 // aggregate plan also has an independently demanded coroutine primary; that
@@ -935,19 +956,9 @@ func (p *SSAPlan) RootFactoryRoots() []SSARootPlan {
 // The certificate is already part of the canonical plan digest; callers must
 // additionally replay it against the frontend's immutable symbol/ABI binding.
 func (p *SSAPlan) ForeignIngressRoot(fn *ssa.Function) (SSARootPlan, bool) {
-	if p == nil || fn == nil {
-		return SSARootPlan{}, false
-	}
-	id, identified := p.byFunction[fn]
-	if !identified {
-		return SSARootPlan{}, false
-	}
-	index := sort.Search(len(p.roots), func(index int) bool {
-		return p.roots[index].ID >= id
-	})
-	if index < len(p.roots) && p.roots[index].ID == id &&
-		p.roots[index].IngressEntry {
-		return p.roots[index], true
+	root, rooted := p.Root(fn)
+	if rooted && root.IngressEntry {
+		return root, true
 	}
 	return SSARootPlan{}, false
 }
