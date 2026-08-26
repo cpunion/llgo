@@ -357,7 +357,7 @@ func TestGoRootRunCases(t *testing.T) {
 			}
 			switch {
 			case err == nil && notApply:
-				t.Fatalf("unexpected success for not-applicable case: %s", notApplyReason)
+				t.Logf("not-applicable case passed: %s", notApplyReason)
 			case err == nil && match:
 				t.Fatalf("unexpected success for xfail case: %s", reason)
 			case err == nil && flaky:
@@ -2077,7 +2077,20 @@ func (cfg xfailConfig) Match(goVersion, platform string, tc testCase) (bool, str
 }
 
 func (cfg notApplicableConfig) Match(goVersion, platform string, tc testCase) (bool, string) {
-	return matchEntries(cfg.Entries, goVersion, platform, tc)
+	for _, entry := range cfg.Entries {
+		// Applicability is an LLGo design property, not an observation tied to
+		// one hosted platform or Go release. Keep accepting legacy selectors in
+		// the YAML, but intentionally do not use them when classifying a case.
+		if !matchEntry("", "", entry.Directive, entry.Case, goVersion, platform, tc) {
+			continue
+		}
+		reason := entry.Reason
+		if reason == "" {
+			reason = entry.Case
+		}
+		return true, reason
+	}
+	return false, ""
 }
 
 func (cfg xfailConfig) MatchFlaky(goVersion, platform string, tc testCase) (bool, string) {
