@@ -3,6 +3,7 @@ package gotest
 import (
 	"runtime"
 	"testing"
+	"time"
 )
 
 type runtimeGStateResult struct {
@@ -76,5 +77,31 @@ func TestRuntimeGStateIsolation(t *testing.T) {
 	}()
 	if recovered != "main panic" {
 		t.Fatalf("main goroutine recovered %v, want %q", recovered, "main panic")
+	}
+}
+
+func TestRuntimeNumGoroutineTracksWorkers(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(ready)
+		<-release
+		close(done)
+	}()
+	<-ready
+	if got := runtime.NumGoroutine(); got <= baseline {
+		t.Fatalf("NumGoroutine with live worker = %d, want greater than baseline %d", got, baseline)
+	}
+
+	close(release)
+	<-done
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if got := runtime.NumGoroutine(); got != baseline {
+		t.Fatalf("NumGoroutine after worker exit = %d, want baseline %d", got, baseline)
 	}
 }
