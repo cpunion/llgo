@@ -164,9 +164,9 @@ func TestNotApplicableMatch(t *testing.T) {
 		}},
 	}
 	tc := testCase{RelPath: "writebarrier.go", Directive: "errorcheck"}
-	match, reason := cfg.Match("go1.26.5", "linux/amd64", tc)
+	match, reason := cfg.Match("go1.25.0", "darwin/arm64", tc)
 	if !match {
-		t.Fatal("expected not-applicable match")
+		t.Fatal("expected not-applicable match independent of version and platform")
 	}
 	if reason != "not applicable: this case checks gc write barriers; LLGo uses a collector without those barriers, so reproducing them is not an LLGo compatibility goal" {
 		t.Fatalf("reason=%q, want not-applicable reason", reason)
@@ -182,8 +182,6 @@ func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 	}
 
 	type selector struct {
-		version   string
-		platform  string
 		directive string
 		casePath  string
 	}
@@ -192,7 +190,7 @@ func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 		if strings.HasPrefix(entry.Reason, "not applicable:") {
 			t.Fatalf("xfail entry %q has a not-applicable reason", entry.Case)
 		}
-		xfailSelectors[selector{entry.Version, entry.Platform, entry.Directive, entry.Case}] = struct{}{}
+		xfailSelectors[selector{entry.Directive, entry.Case}] = struct{}{}
 	}
 	for _, entry := range notApplicable.Entries {
 		if !strings.HasPrefix(entry.Reason, "not applicable:") {
@@ -204,7 +202,7 @@ func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 		if !strings.Contains(entry.Reason, "compatibility goal") {
 			t.Fatalf("not-applicable entry %q has reason %q without explaining why support is not planned", entry.Case, entry.Reason)
 		}
-		key := selector{entry.Version, entry.Platform, entry.Directive, entry.Case}
+		key := selector{entry.Directive, entry.Case}
 		if _, ok := xfailSelectors[key]; ok {
 			t.Fatalf("expectation selector appears in both files: %+v", key)
 		}

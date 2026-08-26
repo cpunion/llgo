@@ -1,9 +1,7 @@
 host_skips:
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
+  - directive: run
     case: fixedbugs/issue16016.go
-    reason: go1.24 goroot run is host-sensitive on linux/amd64
+    reason: the test intentionally creates enough goroutines to exhaust LLGo's one-thread-per-goroutine host limit
   - version: go1.24
     platform: darwin/arm64
     directive: runoutput
@@ -14,11 +12,9 @@ host_skips:
     directive: runoutput
     case: rangegen.go
     reason: go1.26 rangegen generated build exceeds the darwin/arm64 hosted runner memory budget
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
+  - directive: run
     case: chan/goroutines.go
-    reason: go1.24 goroot run is host-sensitive on linux/amd64
+    reason: the test intentionally creates enough goroutines to exhaust LLGo's one-thread-per-goroutine host limit
   - version: go1.24
     platform: darwin/arm64
     directive: run
@@ -144,6 +140,17 @@ flakes:
     case: fixedbugs/issue25897a.go
     reason: reflect-generated goroutines under a single-P continuous-GC loop can complete or exceed the 1m run timeout on darwin/arm64
 xfails:
+  - directive: runoutput
+    case: index0.go
+    reason: LLVM 19 crashes in target object emission while compiling the generated index stress program
+  - directive: run
+    case: fixedbugs/issue34123.go
+    reason: LLGo reports the deferred recovery frame two source lines earlier than cmd/compile
+  - version: go1.26
+    platform: linux/amd64
+    directive: run
+    case: convert5.go
+    reason: LLGo does not match Go 1.26 linux/amd64 saturation results for out-of-range floating-point conversions
   - version: go1.26
     directive: errorcheck
     case: fixedbugs/issue4776.go
@@ -169,17 +176,6 @@ xfails:
     case: bombad.go
     reason: llgo parser recovery emits additional byte-order-mark diagnostics
 
-  - platform: darwin/arm64
-    directive: run
+  - directive: run
     case: heapsampling.go
-    reason: latest main goroot run failure on darwin/arm64
-  - version: go1.24
-    platform: linux/amd64
-    directive: run
-    case: heapsampling.go
-    reason: go1.24 goroot run failure on linux/amd64
-  - version: go1.26
-    platform: linux/amd64
-    directive: run
-    case: heapsampling.go
-    reason: go1.26 goroot run failure on linux/amd64
+    reason: LLGo does not currently report the heap-profile samples required by this runtime test
