@@ -19,6 +19,7 @@ jobs:
     name: self-host (${{ matrix.os }}, LLVM ${{ matrix.llvm }}, Go ${{ matrix.go }})
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         os:
           - macos-latest
@@ -68,16 +69,16 @@ jobs:
           set -euo pipefail
 
           test "$(command -v llgo)" = "$RUNNER_TEMP/llgo-stage2/llgo"
-          llgo test -timeout=10m ./test/std/io/ioutil
-          llgo test -timeout=10m -run '^TestRuntimeGMPLinks$' ./test/llgoext
+          LLGO_BUILD_CACHE=off llgo test -timeout=10m ./test/std/io/ioutil
+          LLGO_BUILD_CACHE=off llgo test -timeout=10m -run '^TestRuntimeGMPLinks$' ./test/llgoext
 
       - name: Run demos with stage 2
         run: |
           set -euo pipefail
 
           test "$(command -v llgo)" = "$RUNNER_TEMP/llgo-stage2/llgo"
-          (cd _demo/go && llgo run ./defer)
-          (cd _demo/c && llgo run ./hello)
+          (cd _demo/go && LLGO_BUILD_CACHE=off llgo run ./defer)
+          (cd _demo/c && LLGO_BUILD_CACHE=off llgo run ./hello)
 
   llgo:
     name: llgo (${{ matrix.lane }}, ${{ matrix.os }}, LLVM ${{ matrix.llvm }}, Go ${{ matrix.go }})
