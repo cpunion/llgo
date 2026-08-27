@@ -350,7 +350,12 @@ func prepareCoroStaticCleanupPlan(
 						kind = coroStaticCleanupForeignWorker
 					} else if !intrinsic {
 						if builtin, ok := instruction.Call.Value.(*ssa.Builtin); ok {
-							builtinName, err = validateCoroDeferredBuiltinCleanup(instruction, dynamicCleanup)
+							var typeContext *context
+							if universe != nil {
+								owner := universe.ownerOf(instruction.Parent())
+								typeContext = universe.effectiveTypeContext(owner, instruction.Parent())
+							}
+							builtinName, err = validateCoroDeferredBuiltinCleanup(typeContext, instruction, dynamicCleanup)
 							if err != nil {
 								return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
 							}
@@ -944,7 +949,11 @@ func validateCoroStaticCleanupRecoverBlock(fn *ssa.Function) error {
 // order by the common cleanup record; the named operation executes only when
 // the drainer pops that record. Builtins with result-only expression semantics
 // never reach an ssa.Defer and remain rejected here.
-func validateCoroDeferredBuiltinCleanup(instruction *ssa.Defer, dynamicCleanup bool) (string, error) {
+func validateCoroDeferredBuiltinCleanup(
+	ctx *context,
+	instruction *ssa.Defer,
+	dynamicCleanup bool,
+) (string, error) {
 	if instruction == nil || instruction.Common() == nil || instruction.DeferStack != nil {
 		return "", fmt.Errorf("builtin cleanup requires one owner-local defer")
 	}
@@ -971,7 +980,10 @@ func validateCoroDeferredBuiltinCleanup(instruction *ssa.Defer, dynamicCleanup b
 			return "", fmt.Errorf("deferred delete has no exact map/key operand shape")
 		}
 		if dynamicCleanup {
-			return "", fmt.Errorf("deferred delete in a dynamic cleanup owner requires distinct record/key allocation roles")
+			helpers, exact := emissionMapRuntimeHelpers(ctx, common.Args[0].Type())
+			if !exact || helpers.KeyNeedsTemporary {
+				return "", fmt.Errorf("deferred delete in a dynamic cleanup owner requires distinct record/key allocation roles")
+			}
 		}
 	case "copy":
 		if err := requireArity(2); err != nil {

@@ -1641,6 +1641,75 @@ func Root() { defer cleanup() }
 	}
 }
 
+func TestCoroDeferredDeleteDynamicCleanupUsesExactMapKeyABI(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		wantErr bool
+	}{
+		{
+			name: "fast integer key",
+			source: `package foo
+func Root(limit int) {
+	mapping := map[int]bool{}
+	for key := 0; key < limit; key++ { defer delete(mapping, key) }
+}
+`,
+		},
+		{
+			name: "generic composite key",
+			source: `package foo
+type Key struct { value int }
+func Root(limit int) {
+	mapping := map[Key]bool{}
+	for key := 0; key < limit; key++ { defer delete(mapping, Key{key}) }
+}
+`,
+			wantErr: true,
+		},
+		{
+			name: "generic large value map",
+			source: `package foo
+func Root(limit int) {
+	mapping := map[int][1024]byte{}
+	for key := 0; key < limit; key++ { defer delete(mapping, key) }
+}
+`,
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog, universe, _, root, _ := buildCoroStaticCleanupPlanFixture(t, test.source)
+			defer prog.Dispose()
+			var deferred *ssa.Defer
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					if candidate, ok := instruction.(*ssa.Defer); ok {
+						deferred = candidate
+						break
+					}
+				}
+			}
+			if deferred == nil {
+				t.Fatal("dynamic delete fixture has no defer")
+			}
+			owner := universe.ownerOf(deferred.Parent())
+			ctx := universe.effectiveTypeContext(owner, deferred.Parent())
+			name, err := validateCoroDeferredBuiltinCleanup(ctx, deferred, true)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "distinct record/key allocation roles") {
+					t.Fatalf("dynamic deferred delete error = %v, want allocation-role rejection", err)
+				}
+				return
+			}
+			if err != nil || name != "delete" {
+				t.Fatalf("dynamic deferred delete recipe = %q, err=%v", name, err)
+			}
+		})
+	}
+}
+
 func TestCoroStaticCleanupPlanComposesNestedCoroutineTarget(t *testing.T) {
 	const source = `package foo
 var ready chan struct{}
