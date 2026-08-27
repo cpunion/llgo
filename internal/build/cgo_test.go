@@ -156,6 +156,15 @@ printf '%s\n' '-I/request/include -DREQUEST="request value"'
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseCgoDeclWithCommandEnv(pkg-config) = %#v, want %#v", got, want)
 	}
+	active := decls[0]
+	active.tag = ""
+	cflags, cxxflags, ldflags, err := selectCgoFlags(commands, nil, []cgoDecl{active})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cflags, want[0].cflags) || len(cxxflags) != 0 || !reflect.DeepEqual(ldflags, want[0].ldflags) {
+		t.Fatalf("selectCgoFlags() = %v, %v, %v, want %v, [], %v", cflags, cxxflags, ldflags, want[0].cflags, want[0].ldflags)
+	}
 
 	for _, arg := range []string{"--libs", "--cflags"} {
 		t.Run("failed "+arg, func(t *testing.T) {
@@ -163,6 +172,9 @@ printf '%s\n' '-I/request/include -DREQUEST="request value"'
 			decl := cgoDecl{pkgConfig: "request"}
 			if _, err := resolveCgoPkgConfig(commands, decl); err == nil || !strings.Contains(err.Error(), "pkg-config") {
 				t.Fatalf("resolveCgoPkgConfig() error = %v, want pkg-config failure", err)
+			}
+			if _, _, _, err := selectCgoFlags(commands, nil, []cgoDecl{decl}); err == nil || !strings.Contains(err.Error(), "pkg-config") {
+				t.Fatalf("selectCgoFlags() error = %v, want pkg-config failure", err)
 			}
 		})
 	}
