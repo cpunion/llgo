@@ -2411,20 +2411,20 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 		// already established that relation; require exact underlying identity
 		// here so the recursive LLSSA layouts and helper leaves still coincide.
 		if !types.Identical(types.Unalias(left).Underlying(), types.Unalias(right).Underlying()) ||
-			!coroAggregateEqualityRuntimeHelpers(left, make(map[types.Type]bool), helperSet) {
+			!coroAggregateEqualityRuntimeHelpers(a.ctx.prog, left, make(map[types.Type]bool), helperSet) {
 			return "aggregate equality is not an exact supported comparable layout"
+		}
+		if coroAggregateEqualityNeedsManagedScratch(a.ctx, op) {
+			helperSet[llssa.ArrayEqualScratchAllocZ] = struct{}{}
 		}
 		for _, typ := range []types.Type{left, right, a.typeOf(op.Type())} {
 			if err := validateCoroPhysicalSSAValueType(typ); err != nil {
 				return "aggregate equality has unsupported physical value type: " + err.Error()
 			}
 		}
-		// LLSSA Builder.BinOp recursively extracts array elements and non-blank
-		// struct fields, combines their comparisons, and negates once for !=.
-		// Scalar leaves stay inline. String/interface leaves use the same frozen
-		// StringEqual/EfaceEqual/IfaceType edges as direct comparisons, so bind
-		// the complete unique helper inventory to the owner-scoped plan instead
-		// of rejecting an otherwise ordinary Go comparable aggregate.
+		// LLSSA recursively extracts inline arrays and non-blank struct fields,
+		// while larger arrays use one exact memory, numeric, or typed helper edge.
+		// Bind that complete unique helper inventory to the owner-scoped plan.
 		helpers := make([]string, 0, len(helperSet))
 		for helper := range helperSet {
 			helpers = append(helpers, helper)
@@ -2624,16 +2624,29 @@ func coroPureAggregateType(typ types.Type) bool {
 	}
 }
 
-// coroAggregateEqualityRuntimeHelpers mirrors the complete comparable
-// aggregate recursion in LLSSA Builder.BinOp and records its unique logical
-// helper leaves. StringEqual is non-panicking; EfaceEqual may panic for a
-// dynamically uncomparable payload and is therefore accepted only later by
-// the structured ExplicitStatus helper gate. Blank struct fields are not
-// compared by Go or LLSSA and contribute no leaf requirement.
+// coroAggregateEqualityRuntimeHelpers mirrors LLSSA's complete comparable
+// aggregate lowering and records its unique logical helpers. Structs and
+// element-wise arrays recurse; memory and direct numeric arrays contribute the
+// exact shared helper selected by Program.ArrayEqualRuntimeHelper. Blank struct
+// fields contribute no requirement.
 func coroAggregateEqualityRuntimeHelpers(
+	prog llssa.Program,
 	typ types.Type,
 	visiting map[types.Type]bool,
 	helpers map[string]struct{},
+) bool {
+	return walkCoroAggregateEqualityLowering(prog, typ, visiting, func(helper string) {
+		helpers[helper] = struct{}{}
+	})
+}
+
+// walkCoroAggregateEqualityLowering is the shared frontend projection of
+// LLSSA aggregate comparison lowering.
+func walkCoroAggregateEqualityLowering(
+	prog llssa.Program,
+	typ types.Type,
+	visiting map[types.Type]bool,
+	visit func(helper string),
 ) bool {
 	if typ == nil || visiting[typ] {
 		return false
@@ -2643,7 +2656,7 @@ func coroAggregateEqualityRuntimeHelpers(
 	switch underlying := types.Unalias(typ).Underlying().(type) {
 	case *types.Basic:
 		if underlying.Kind() == types.String {
-			helpers["StringEqual"] = struct{}{}
+			visit("StringEqual")
 			return true
 		}
 		return underlying.Kind() == types.UnsafePointer ||
@@ -2651,21 +2664,37 @@ func coroAggregateEqualityRuntimeHelpers(
 	case *types.Pointer, *types.Chan:
 		return true
 	case *types.Interface:
-		helpers["EfaceEqual"] = struct{}{}
+		visit("EfaceEqual")
 		underlying.Complete()
 		if !underlying.Empty() {
-			helpers["IfaceType"] = struct{}{}
+			visit("IfaceType")
 		}
 		return true
 	case *types.Array:
-		return coroAggregateEqualityRuntimeHelpers(underlying.Elem(), visiting, helpers)
+		helper := ""
+		if prog != nil {
+			helper = prog.ArrayEqualRuntimeHelper(underlying)
+		} else if !llssa.CanInlineArrayEqual(underlying) {
+			// A metadata-only universe has no target layout. Direct numeric
+			// arrays still have an exact target-independent helper; every other
+			// array is represented by its element-wise helper inventory.
+			helper = llssa.ArrayEqualNumericRuntimeHelper(underlying)
+		}
+		if helper != "" {
+			visit(helper)
+			return true
+		}
+		if underlying.Len() == 0 {
+			return true
+		}
+		return walkCoroAggregateEqualityLowering(prog, underlying.Elem(), visiting, visit)
 	case *types.Struct:
 		for index := 0; index < underlying.NumFields(); index++ {
 			field := underlying.Field(index)
 			if field.Name() == "_" {
 				continue
 			}
-			if !coroAggregateEqualityRuntimeHelpers(field.Type(), visiting, helpers) {
+			if !walkCoroAggregateEqualityLowering(prog, field.Type(), visiting, visit) {
 				return false
 			}
 		}
@@ -4118,12 +4147,14 @@ func (a *coroPhysicalPureSSAAudit) allHelpersHaveCoroSafeLowering(helpers []stri
 
 // validRawPlainLoweredCall verifies the plan half of a compiler-owned
 // raw/plain occurrence. The live-closure validator has already proved every
-// reachable Go/C leaf and marks both the callable entry and its exact raw body;
-// aggregate managed Effect/Exec facts deliberately remain unchanged because a
-// separate managed consumer may still need a coroutine entry.
+// reachable Go/C leaf and marks the exact raw body. RawPlainEntry is not
+// required: it is the stronger address-publication capability, whereas this
+// occurrence is one private direct call. Aggregate managed Effect/Exec facts
+// deliberately remain unchanged because a separate managed consumer may still
+// need a coroutine entry.
 func (a *coroPhysicalPureSSAAudit) validRawPlainLoweredCall(call coro.SSALoweredCall, plan coro.FunctionPlan) bool {
 	return a != nil && a.plan != nil && call.RawPlain && !call.NoUnwind && !call.UnwindOnly && !call.ExplicitStatusElided &&
-		call.Target != nil && plan.External == coro.Defined && plan.RawPlainDemand && plan.RawPlainEntry &&
+		call.Target != nil && plan.External == coro.Defined && plan.RawPlainDemand &&
 		a.plan.HasRawPlainVariant(call.Target) &&
 		(plan.Emission == coro.EmitRawPlain || plan.Emission == coro.EmitPlain || plan.Emission == coro.EmitCoroutine)
 }

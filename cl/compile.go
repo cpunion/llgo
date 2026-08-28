@@ -2323,26 +2323,48 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				break
 			}
 		}
-		x := p.compileValueAs(b, v.X, v.Y.Type())
-		y := p.compileValueAs(b, v.Y, v.X.Type())
-		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIntegerDivideByZeroGuard {
-			observePhysical(coroPhysicalInstructionIntegerDivideByZeroGuard)
-			zero := p.prog.Zero(y.Type)
-			isZero := b.BinOp(token.EQL, y, zero)
-			p.compileCoroFaultConditionGuard(b, isZero, coroFaultIntegerDivideByZeroV1)
-			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
-		} else if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionNegativeShiftGuard {
-			observePhysical(coroPhysicalInstructionNegativeShiftGuard)
-			zero := p.prog.Zero(y.Type)
-			isNegative := b.BinOp(token.LSS, y, zero)
-			p.compileCoroFaultConditionGuard(b, isNegative, coroFaultNegativeShiftV1)
-			ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
-		} else if (v.Op == token.QUO || v.Op == token.REM) && ssaIntegerValueProvenNonZeroAt(v.Y, v) {
-			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
-		} else if (v.Op == token.SHL || v.Op == token.SHR) && ssaIntegerValueProvenNonNegativeAt(v.Y, v) {
-			ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
+		if typ, ok := v.X.Type().Underlying().(*types.Array); ok && (v.Op == token.EQL || v.Op == token.NEQ) {
+			xaddr, yaddr := llssa.Nil, llssa.Nil
+			if !llssa.CanInlineArrayEqual(typ) {
+				xaddr = p.arrayCompareAddr(b, v.X)
+				yaddr = p.arrayCompareAddr(b, v.Y)
+			}
+			var x, y llssa.Expr
+			if xaddr.IsNil() {
+				x = p.compileValueAs(b, v.X, v.Y.Type())
+			} else {
+				// ArrayBinOp consumes the proven-stable address, so retain only a
+				// typed placeholder instead of materializing the aggregate load.
+				x = p.prog.Zero(p.type_(v.Y.Type(), llssa.InGo))
+			}
+			if yaddr.IsNil() {
+				y = p.compileValueAs(b, v.Y, v.X.Type())
+			} else {
+				y = p.prog.Zero(p.type_(v.X.Type(), llssa.InGo))
+			}
+			ret = b.ArrayBinOp(v.Op, x, y, xaddr, yaddr)
 		} else {
-			ret = b.BinOp(v.Op, x, y)
+			x := p.compileValueAs(b, v.X, v.Y.Type())
+			y := p.compileValueAs(b, v.Y, v.X.Type())
+			if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIntegerDivideByZeroGuard {
+				observePhysical(coroPhysicalInstructionIntegerDivideByZeroGuard)
+				zero := p.prog.Zero(y.Type)
+				isZero := b.BinOp(token.EQL, y, zero)
+				p.compileCoroFaultConditionGuard(b, isZero, coroFaultIntegerDivideByZeroV1)
+				ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
+			} else if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionNegativeShiftGuard {
+				observePhysical(coroPhysicalInstructionNegativeShiftGuard)
+				zero := p.prog.Zero(y.Type)
+				isNegative := b.BinOp(token.LSS, y, zero)
+				p.compileCoroFaultConditionGuard(b, isNegative, coroFaultNegativeShiftV1)
+				ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
+			} else if (v.Op == token.QUO || v.Op == token.REM) && ssaIntegerValueProvenNonZeroAt(v.Y, v) {
+				ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
+			} else if (v.Op == token.SHL || v.Op == token.SHR) && ssaIntegerValueProvenNonNegativeAt(v.Y, v) {
+				ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
+			} else {
+				ret = b.BinOp(v.Op, x, y)
+			}
 		}
 	case *ssa.UnOp:
 		if v.Op != token.ARROW {
@@ -2373,6 +2395,12 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				// have been emitted), but form neither a load nor a nil fault.
 				observePhysical(coroPhysicalInstructionStaticArrayRangeDerefElided)
 				p.compileValue(b, v.X)
+				return
+			}
+			if canElideArrayCompareLoad(v) {
+				if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+					panic(fmt.Sprintf("stable array comparison load selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+				}
 				return
 			}
 			plannedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
@@ -3111,6 +3139,121 @@ func (p *context) compileRangeNext(
 		fieldTypes[index] = target
 	}
 	return b.Aggregate(p.prog.Struct(fieldTypes...), fields...)
+}
+
+func (p *context) arrayCompareAddr(b llssa.Builder, v ssa.Value) llssa.Expr {
+	addr, ok := immutableLocalArrayLoadAddr(v)
+	if !ok {
+		return llssa.Nil
+	}
+	return p.compileValue(b, addr)
+}
+
+// canElideArrayCompareLoad reports whether every executable use of load is a
+// non-inline equality comparison that can read this operand from proven-stable
+// local storage. Such comparisons never consume the aggregate value itself, so
+// generating its load only increases the pre-optimization IR. The other
+// operand may independently require a value-preserving snapshot.
+func canElideArrayCompareLoad(load *ssa.UnOp) bool {
+	if load == nil || load.Op != token.MUL {
+		return false
+	}
+	typ, ok := load.Type().Underlying().(*types.Array)
+	if !ok || llssa.CanInlineArrayEqual(typ) {
+		return false
+	}
+	if _, ok := immutableLocalArrayLoadAddr(load); !ok {
+		return false
+	}
+	refs, available := nonDebugReferrers(load)
+	if !available || len(refs) == 0 {
+		return false
+	}
+	for _, ref := range refs {
+		bin, ok := ref.(*ssa.BinOp)
+		if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
+			return false
+		}
+		switch {
+		case bin.X == load:
+		case bin.Y == load:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// immutableLocalArrayLoadAddr recognizes array values loaded from a local
+// allocation that cannot change after the load. Reusing the allocation lets
+// equality helpers read the value in place, as cmd/compile does for its
+// addressable comparison operands, and avoids scalarizing a copied array.
+func immutableLocalArrayLoadAddr(v ssa.Value) (ssa.Value, bool) {
+	load, ok := v.(*ssa.UnOp)
+	if !ok || load.Op != token.MUL {
+		return nil, false
+	}
+	if _, ok := load.Type().Underlying().(*types.Array); !ok {
+		return nil, false
+	}
+	alloc, ok := load.X.(*ssa.Alloc)
+	if !ok || alloc.Heap {
+		return nil, false
+	}
+	if !immutableArrayAddrUses(alloc, load, make(map[ssa.Value]bool)) {
+		return nil, false
+	}
+	return load.X, true
+}
+
+func immutableArrayAddrUses(ptr ssa.Value, load *ssa.UnOp, seen map[ssa.Value]bool) bool {
+	if seen[ptr] {
+		return true
+	}
+	seen[ptr] = true
+	refs, available := nonDebugReferrers(ptr)
+	if !available {
+		return false
+	}
+	for _, ref := range refs {
+		switch ref := ref.(type) {
+		case *ssa.IndexAddr:
+			if ref.X != ptr || !immutableArrayAddrUses(ref, load, seen) {
+				return false
+			}
+		case *ssa.FieldAddr:
+			if ref.X != ptr || !immutableArrayAddrUses(ref, load, seen) {
+				return false
+			}
+		case *ssa.UnOp:
+			if ref.X != ptr || ref.Op != token.MUL {
+				return false
+			}
+		case *ssa.Store:
+			if ref.Addr != ptr || !instructionPrecedes(ref, load) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func instructionPrecedes(before, after ssa.Instruction) bool {
+	block := before.Block()
+	if block == nil || block != after.Block() {
+		return false
+	}
+	for _, instr := range block.Instrs {
+		if instr == before {
+			return true
+		}
+		if instr == after {
+			break
+		}
+	}
+	return false
 }
 
 func (p *context) assertNilDerefBase(b llssa.Builder, addr ssa.Value) {

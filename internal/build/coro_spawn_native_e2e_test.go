@@ -660,6 +660,7 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	// panic path; this closed island instead aborts on the impossible invalid
 	// branch without linking that unrelated runtime closure.
 	defineCoroNativeE2EIndexPanicStubs(pkg, abort)
+	defineCoroNativeE2EMemEqualStub(prog, pkg)
 	// Compiling the complete production core object also leaves relocations for
 	// ordinary runtime allocation helpers in currently unreachable panic-status
 	// code. Resolve those helpers directly to libc so archive extraction cannot

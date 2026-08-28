@@ -485,6 +485,51 @@ func arrayequalImpl(x *arraytype, p, q unsafe.Pointer) bool {
 	return true
 }
 
+// The compiler uses these static helpers for large arrays whose direct
+// element type is numeric but not regular memory. Keep them separate from
+// arrayequalImpl: their exact operations cannot panic, so stackless lowering
+// may execute the bounded comparison as one private raw call without losing
+// float/complex element semantics.
+func arrayequalFloat32(p, q unsafe.Pointer, length uintptr) bool {
+	for i := uintptr(0); i < length; i++ {
+		offset := i * 4
+		if !f32equal(add(p, offset), add(q, offset)) {
+			return false
+		}
+	}
+	return true
+}
+
+func arrayequalFloat64(p, q unsafe.Pointer, length uintptr) bool {
+	for i := uintptr(0); i < length; i++ {
+		offset := i * 8
+		if !f64equal(add(p, offset), add(q, offset)) {
+			return false
+		}
+	}
+	return true
+}
+
+func arrayequalComplex64(p, q unsafe.Pointer, length uintptr) bool {
+	for i := uintptr(0); i < length; i++ {
+		offset := i * 8
+		if !c64equal(add(p, offset), add(q, offset)) {
+			return false
+		}
+	}
+	return true
+}
+
+func arrayequalComplex128(p, q unsafe.Pointer, length uintptr) bool {
+	for i := uintptr(0); i < length; i++ {
+		offset := i * 16
+		if !c128equal(add(p, offset), add(q, offset)) {
+			return false
+		}
+	}
+	return true
+}
+
 //llgo:env
 func arrayequal(p, q unsafe.Pointer) bool {
 	return arrayequalImpl((*arraytype)(closureEnv()), p, q)

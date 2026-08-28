@@ -499,6 +499,7 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	// the closed-static-spawn island.
 	defineCoroNativeE2ENilDerefStubs(prog, pkg, abort)
 	defineCoroNativeE2EIndexPanicStubs(pkg, abort)
+	defineCoroNativeE2EMemEqualStub(prog, pkg)
 	uintptrType := types.Typ[types.Uintptr]
 	malloc := pkg.NewFunc("malloc", newSignature([]types.Type{uintptrType}, []types.Type{pointer}), llssa.InC)
 	calloc := pkg.NewFunc("calloc", newSignature([]types.Type{uintptrType, uintptrType}, []types.Type{pointer}), llssa.InC)

@@ -375,6 +375,44 @@ func Root(left Value) bool { return left != array() }
 			helpers: "EfaceEqual",
 		},
 		{
+			name: "regular memory array",
+			source: `package foo
+type Value struct { Bytes [5]byte }
+func Root(left, right Value) bool { return left == right }
+`,
+			helpers: "memequal",
+		},
+		{
+			name: "oversized regular memory array",
+			source: `package foo
+func Root(left, right [65537]byte) bool { return left == right }
+`,
+			helpers: "ArrayEqualScratchAllocZ,memequal",
+		},
+		{
+			name: "combined regular memory array scratch budget",
+			source: `package foo
+func Root(left, right [40000]byte) bool { return left == right }
+`,
+			helpers: "ArrayEqualScratchAllocZ,memequal",
+		},
+		{
+			name: "oversized nested regular memory array",
+			source: `package foo
+type Value struct { Bytes [65537]byte }
+func Root(left, right Value) bool { return left == right }
+`,
+			helpers: "ArrayEqualScratchAllocZ,memequal",
+		},
+		{
+			name: "non-regular scalar array",
+			source: `package foo
+type Value struct { Floats [5]float64 }
+func Root(left, right Value) bool { return left == right }
+`,
+			helpers: "arrayequalFloat64",
+		},
+		{
 			name: "nonempty interface field",
 			source: `package foo
 type Stringer interface { String() string }
@@ -409,6 +447,188 @@ func Root(left, right Value) bool { return left == right }
 				t.Fatal("helper-backed fixture has no aggregate equality")
 			}
 		})
+	}
+}
+
+func TestCoroPureArrayEqualityUsesPlannedRawPlainHelpers(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
+func memequal(left, right unsafe.Pointer, size uintptr, align uint8) bool {
+	return left == right || size == 0 || align == 0
+}
+func arrayequalFloat64(left, right unsafe.Pointer, length uintptr) bool {
+	return left == right || length == 0
+}
+func AllocZ(size uintptr) unsafe.Pointer { return nil }
+`)
+	fooPkg := testProg.addPackage(t, "foo", `package foo
+func Plain(left, right [1024]byte) bool { return left == right }
+func Numeric(left, right [5]float64) bool { return left == right }
+func Huge(left, right [65537]byte) bool { return left == right }
+func Physical(left, right [1024]byte) bool { return left == right }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	prog.SetRuntime(runtimePkg.types)
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: fooPkg.ssa, Files: []*ast.File{fooPkg.file}},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(fooPkg.ssa.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := fooPkg.ssa.Func("Plain")
+	numeric := fooPkg.ssa.Func("Numeric")
+	huge := fooPkg.ssa.Func("Huge")
+	physical := fooPkg.ssa.Func("Physical")
+	memequal := runtimePkg.ssa.Func("memequal")
+	arrayequalFloat64 := runtimePkg.ssa.Func("arrayequalFloat64")
+	allocZ := runtimePkg.ssa.Func("AllocZ")
+	occurrences := []struct {
+		owner  *ssa.Function
+		name   string
+		target *ssa.Function
+	}{
+		{owner: plain, name: "memequal", target: memequal},
+		{owner: numeric, name: "arrayequalFloat64", target: arrayequalFloat64},
+		{owner: huge, name: "memequal", target: memequal},
+		{owner: physical, name: "memequal", target: memequal},
+	}
+	for _, occurrence := range occurrences {
+		if target, frozen, err := universe.ResolveCoroPlainLoweredCall(occurrence.owner, occurrence.name); err != nil || !frozen || target != occurrence.target {
+			t.Fatalf("%s plain array equality helper %s = %v, frozen=%t, err=%v; want exact runtime target", occurrence.owner.Name(), occurrence.name, target, frozen, err)
+		}
+		references, err := universe.CoroSyncDemandReferences(occurrence.owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, reference := range references {
+			if reference == occurrence.target {
+				t.Fatalf("%s private %s occurrence was published as a raw ABI synchronous reference", occurrence.owner.Name(), occurrence.name)
+			}
+		}
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(fooPkg.ssa.Prog, coro.Roots{
+		{Function: plain, Demand: coro.AsyncDemand},
+		{Function: numeric, Demand: coro.AsyncDemand},
+		{Function: huge, Demand: coro.AsyncDemand},
+		{Function: physical, Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn == physical || fn == memequal || fn == arrayequalFloat64 {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, occurrence := range occurrences {
+		helper, planned := plan.ResolveLoweredCall(occurrence.owner, occurrence.name)
+		if !planned || helper != occurrence.target {
+			t.Fatalf("%s array equality %s edge = %v, present=%t; want exact runtime helper", occurrence.owner.Name(), occurrence.name, helper, planned)
+		}
+		call, planned := plan.ResolveLoweredCallRecord(occurrence.owner, occurrence.name)
+		if !planned || call.Target != occurrence.target || !call.RawPlain {
+			t.Fatalf("%s array equality %s call = %+v, present=%t; want exact raw/plain occurrence", occurrence.owner.Name(), occurrence.name, call, planned)
+		}
+	}
+	if helper, planned := plan.ResolveLoweredCall(huge, llssa.ArrayEqualScratchAllocZ); !planned || helper != allocZ {
+		t.Fatalf("Huge array equality scratch edge = %v, present=%t; want exact runtime AllocZ helper", helper, planned)
+	}
+	if call, planned := plan.ResolveLoweredCallRecord(huge, llssa.ArrayEqualScratchAllocZ); !planned || call.Target != allocZ || !call.RawPlain {
+		t.Fatalf("Huge array equality scratch call = %+v, present=%t; want private raw/plain occurrence", call, planned)
+	}
+	for _, owner := range []*ssa.Function{plain, numeric, huge} {
+		plainPlan, planned := plan.FunctionPlan(owner)
+		if !planned || plainPlan.Effect != coro.NoSuspend || plainPlan.Emission != coro.EmitPlain ||
+			plainPlan.Primary != coro.PrimaryPlain || plainPlan.FuncRep != coro.DirectPlain {
+			t.Fatalf("%s plan = %+v, present=%t; want one uncolored plain body", owner.Name(), plainPlan, planned)
+		}
+	}
+	physicalPlan, planned := plan.FunctionPlan(physical)
+	if !planned || physicalPlan.Effect != coro.YieldOnly || physicalPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("Physical plan = %+v, present=%t; want independently colored coroutine body", physicalPlan, planned)
+	}
+	for _, helper := range []*ssa.Function{memequal, arrayequalFloat64, allocZ} {
+		helperPlan, planned := plan.FunctionPlan(helper)
+		if !planned || helperPlan.External != coro.Defined || helperPlan.Emission != coro.EmitRawPlain ||
+			helperPlan.ManagedDemand != coro.NoDemand || !helperPlan.RawPlainDemand ||
+			helperPlan.RawPlainEntry || !helperPlan.RawPlainOnly || helperPlan.Primary != coro.PrimaryPlain ||
+			helperPlan.FuncRep != coro.DirectPlain || !plan.HasRawPlainVariant(helper) {
+			t.Fatalf("%s plan = %+v, present=%t; want one demanded raw/plain body", helper.Name(), helperPlan, planned)
+		}
+	}
+
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, fooPkg.ssa, []*ast.File{fooPkg.file}, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify array equality before CoroSplit: %v\n%s", err, module.String())
+	}
+	plainBody := module.NamedFunction("foo.Plain").String()
+	if !module.NamedFunction("foo.Plain$coro").IsNil() {
+		t.Fatalf("plain array equality manufactured a coroutine body:\n%s", module.String())
+	}
+	numericBody := module.NamedFunction("foo.Numeric").String()
+	if !module.NamedFunction("foo.Numeric$coro").IsNil() {
+		t.Fatalf("numeric array equality manufactured a coroutine body:\n%s", module.String())
+	}
+	physicalBody := requireCoroPhysicalFunction(t, module, "foo.Physical").String()
+	for _, occurrence := range []struct {
+		name   string
+		body   string
+		helper string
+	}{
+		{name: "plain", body: plainBody, helper: "runtime.memequal"},
+		{name: "numeric", body: numericBody, helper: "runtime.arrayequalFloat64"},
+		{name: "physical", body: physicalBody, helper: "runtime.memequal"},
+	} {
+		if got := strings.Count(occurrence.body, occurrence.helper); got != 1 || strings.Contains(occurrence.body, occurrence.helper+"$coro") {
+			t.Fatalf("%s array equality helper calls = %d, want 1:\n%s", occurrence.name, got, occurrence.body)
+		}
+		for _, forbidden := range []string{"extractvalue [", "icmp eq i8"} {
+			if strings.Contains(occurrence.body, forbidden) {
+				t.Fatalf("%s array equality retained redundant lowering %q:\n%s", occurrence.name, forbidden, occurrence.body)
+			}
+		}
+	}
+	hugeBody := module.NamedFunction("foo.Huge").String()
+	if strings.Count(hugeBody, "runtime.AllocZ") != 2 ||
+		strings.Count(hugeBody, "runtime.memequal") != 1 ||
+		strings.Contains(hugeBody, "alloca [65537 x i8]") ||
+		strings.Contains(hugeBody, "llvm.stacksave") || strings.Contains(hugeBody, "llvm.memset") {
+		t.Fatalf("huge planned array equality emitted redundant or unplanned storage:\n%s", hugeBody)
+	}
+	runCoroABITestPipeline(t, prog, module)
+	if resume := module.NamedFunction("foo.Physical$coro.resume"); resume.IsNil() {
+		t.Fatalf("CoroSplit did not materialize array equality resume entry:\n%s", module.String())
 	}
 }
 

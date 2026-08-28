@@ -109,7 +109,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// Filled from the 2026-07-22 executable fleet checkpoint. These values may
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
 	currentCoro:               0,
-	planAuthority:             296,
+	planAuthority:             294,
 	stagedFeatureGate:         0,
 	legacyWait:                0,
 	nativeFork:                0,

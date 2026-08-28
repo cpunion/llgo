@@ -91,6 +91,35 @@ func Address(value *T) *int { return &value.Field }
 	}
 }
 
+func TestEmissionABITypeDemandSkipsLoopLoweredArrayEqualityDescriptors(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/arrayequal", `package arrayequal
+type Item struct { Value float64 }
+func (Item) Method() {}
+type Outer struct { Values [5]Item }
+type Named [5]Item
+func Nested(left, right Outer) bool { return left == right }
+func NamedArray(left, right Named) bool { return left == right }
+func Memory(left, right [5]byte) bool { return left == right }
+func Numeric(left, right [5]float64) bool { return left == right }
+func Inline(left, right [1]Item) bool { return left == right }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	universe.prog = prog
+	for _, name := range []string{"Nested", "NamedArray", "Memory", "Numeric", "Inline"} {
+		demands, err := universe.functionABITypeDemands(pkg.ssa.Func(name), owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(demands) != 0 {
+			t.Fatalf("%s ABI demands = %v; compact array equality must not materialize a full type descriptor", name, demands)
+		}
+	}
+}
+
 func emissionABIDemandContains(typesList []types.Type, want types.Type) bool {
 	for _, got := range typesList {
 		if types.Identical(got, want) {
