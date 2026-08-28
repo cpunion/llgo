@@ -107,6 +107,7 @@ jobs:
           set -euo pipefail
 
           go_test=(go test)
+          test_go_flags=()
           if [[ "$RUNNER_OS" == Windows ]]; then
             # Go's internal linker cannot consume every GNU COFF import
             # archive used by the race runtime and LLVM. Use the configured
@@ -115,6 +116,12 @@ jobs:
             go_test+=("-ldflags=-linkmode=external -extldflags=-lsynchronization")
             export LLGO_REQUIRE_MSVC=1
             export LLGO_STDIO_NOBUF=1
+
+            # test/go deliberately raises access violations. If one escapes
+            # unexpectedly, retain the active test name and runtime stacks in
+            # the job log instead of reporting only exit status 0xc0000005.
+            test_go_flags+=("-v")
+            export GOTRACEBACK=system
           fi
 
           # test/go intentionally contains compiler edge cases that make the
@@ -124,7 +131,7 @@ jobs:
             | grep -v '^github.com/xgo-dev/llgo/test/go$' \
             | xargs "${go_test[@]}" -timeout 45m -coverprofile="coverage-main.txt" -covermode=atomic \
                 -bench '^BenchmarkGo126' -benchtime=1x
-          "${go_test[@]}" -timeout 45m -vet=off \
+          "${go_test[@]}" "${test_go_flags[@]}" -timeout 45m -vet=off \
             -coverprofile="coverage-test-go.txt" -covermode=atomic ./test/go
 
           head -n 1 coverage-main.txt > coverage.txt
