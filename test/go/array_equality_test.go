@@ -98,3 +98,18 @@ func TestArrayEqualityPropagatesInterfacePanic(t *testing.T) {
 	b := [2]any{[]int{1}, 0}
 	_ = a == b
 }
+
+func TestArrayStructEqualityPropagatesLastFieldPanic(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("comparing the last interface field containing a slice did not panic")
+		}
+	}()
+	type guarded struct {
+		tag     int
+		payload any
+	}
+	a := [2]guarded{{tag: 0, payload: []int{1}}}
+	b := [2]guarded{{tag: 0, payload: []int{1}}}
+	_ = a == b
+}
