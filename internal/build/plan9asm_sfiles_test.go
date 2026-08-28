@@ -15,11 +15,12 @@ import (
 
 func TestSelectedSFilesSkipsTestAsm(t *testing.T) {
 	dir := "/tmp/pkg"
-	got := selectedSFiles(dir, []string{
-		"abi_test.s",
-		"stub.s",
-		"helper.S",
-		"compare_test.S",
+	got := selectedSFiles([]string{
+		filepath.Join(dir, "abi_test.s"),
+		filepath.Join(dir, "stub.s"),
+		filepath.Join(dir, "helper.S"),
+		filepath.Join(dir, "compare_test.S"),
+		filepath.Join(dir, "helper.c"),
 	})
 	want := []string{
 		filepath.Join(dir, "stub.s"),
@@ -43,11 +44,11 @@ func TestPlan9AsmSFilesExcludesCPreprocessedAssembly(t *testing.T) {
 }
 
 func TestSelectedSFilesHandlesEmptyInput(t *testing.T) {
-	if got := selectedSFiles("", []string{"stub.s"}); got != nil {
-		t.Fatalf("selectedSFiles(empty dir) = %#v, want nil", got)
-	}
-	if got := selectedSFiles("/tmp/pkg", nil); got != nil {
+	if got := selectedSFiles(nil); got != nil {
 		t.Fatalf("selectedSFiles(nil files) = %#v, want nil", got)
+	}
+	if got := selectedSFiles([]string{"helper.c"}); got != nil {
+		t.Fatalf("selectedSFiles(non-assembly files) = %#v, want nil", got)
 	}
 }
 
@@ -104,53 +105,19 @@ func TestPlan9AsmEnabledByDefaultForNamedWebAssemblyBytealg(t *testing.T) {
 	}
 }
 
-func TestPkgSFilesUsesPackageLoadDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses a shell script as a fake go command")
-	}
-
-	loadDir := t.TempDir()
-	expectedLoadDir, err := filepath.EvalSymlinks(loadDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestPkgSFilesUsesLoadedOtherFiles(t *testing.T) {
 	pkgDir := t.TempDir()
 	sfile := filepath.Join(pkgDir, "asm_amd64.s")
-	if err := os.WriteFile(sfile, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	binDir := t.TempDir()
-	goCmd := filepath.Join(binDir, "go")
-	script := `#!/bin/sh
-if [ "$PWD" != "$EXPECTED_GO_LIST_DIR" ]; then
-	echo "go list ran in $PWD; want $EXPECTED_GO_LIST_DIR" >&2
-	exit 1
-fi
-if [ "$PACKAGE_LOAD_ENV" != "used" ]; then
-	echo "go list did not inherit the package load environment" >&2
-	exit 1
-fi
-printf '{"Dir":"%s","SFiles":["asm_amd64.s"]}\n' "$PACKAGE_DIR"
-`
-	if err := os.WriteFile(goCmd, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("EXPECTED_GO_LIST_DIR", expectedLoadDir)
-	t.Setenv("PACKAGE_DIR", pkgDir)
+	t.Setenv("PATH", t.TempDir()) // pkgSFiles must not invoke a second go list.
 
 	ctx := &context{
-		conf: &packages.Config{
-			Dir: loadDir,
-			Env: append(os.Environ(), "PACKAGE_LOAD_ENV=used"),
-		},
 		buildConf: &Config{Goos: "linux", Goarch: "amd64"},
 	}
 	got, err := pkgSFiles(ctx, &packages.Package{
-		ID:      "example.com/asm",
-		PkgPath: "example.com/asm",
-		Dir:     pkgDir,
+		ID:         "example.com/asm",
+		PkgPath:    "example.com/asm",
+		Dir:        pkgDir,
+		OtherFiles: []string{sfile, filepath.Join(pkgDir, "helper.c")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -161,24 +128,11 @@ printf '{"Dir":"%s","SFiles":["asm_amd64.s"]}\n' "$PACKAGE_DIR"
 }
 
 func TestPkgSFilesNonWasmChachaUsesSourcePatch(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses a shell script as a fake go command")
-	}
-
 	pkgDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(pkgDir, "chacha8_stub.s"), []byte("TEXT ·block(SB),NOSPLIT,$0-0\n"), 0o644); err != nil {
+	sfile := filepath.Join(pkgDir, "chacha8_stub.s")
+	if err := os.WriteFile(sfile, []byte("TEXT ·block(SB),NOSPLIT,$0-0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	binDir := t.TempDir()
-	goCmd := filepath.Join(binDir, "go")
-	script := `#!/bin/sh
-printf '{"Dir":"%s","SFiles":["chacha8_stub.s"]}\n' "$PACKAGE_DIR"
-`
-	if err := os.WriteFile(goCmd, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("PACKAGE_DIR", pkgDir)
 
 	for _, conf := range []*Config{
 		{
@@ -190,13 +144,13 @@ printf '{"Dir":"%s","SFiles":["chacha8_stub.s"]}\n' "$PACKAGE_DIR"
 		{Goos: runtime.GOOS, Goarch: runtime.GOARCH},
 	} {
 		ctx := &context{
-			conf:      &packages.Config{Env: os.Environ()},
 			buildConf: conf,
 		}
 		got, err := pkgSFiles(ctx, &packages.Package{
-			ID:      "internal/chacha8rand",
-			PkgPath: "internal/chacha8rand",
-			Dir:     pkgDir,
+			ID:         "internal/chacha8rand",
+			PkgPath:    "internal/chacha8rand",
+			Dir:        pkgDir,
+			OtherFiles: []string{sfile},
 		})
 		if err != nil {
 			t.Fatal(err)
