@@ -278,6 +278,12 @@ else
           echo "SKIP $d (c/pthread exposes the native POSIX API and is not applicable to Windows)"
           continue
           ;;
+        ./_demo/py/tensor)
+          if [ "${LLGO_WINDOWS_NO_TORCH:-0}" = "1" ]; then
+            echo "SKIP $d (PyTorch does not publish Windows ARM64 or win32 wheels)"
+            continue
+          fi
+          ;;
       esac
     fi
     if is_model_demo "$d" && [ "${LLGO_RUN_MODEL_DEMOS:-0}" != "1" ]; then
