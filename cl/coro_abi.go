@@ -3105,19 +3105,41 @@ func isCoroProgramManagedEntry(fn *ssa.Function) bool {
 		fn.Signature == nil || fn.Signature.Recv() != nil {
 		return false
 	}
-	name := fn.Name()
-	if name == "init" || strings.HasPrefix(name, "init#") {
+	if fn.Name() == "init" {
+		return fn.Synthetic == "package initializer"
+	}
+	if isCoroDeclaredPackageInit(fn) {
 		return true
 	}
-	return name == "main" && fn.Pkg != nil && fn.Pkg.Pkg != nil && fn.Pkg.Pkg.Name() == "main"
+	return fn.Name() == "main" && fn.Pkg.Pkg.Name() == "main"
+}
+
+func isCoroDeclaredPackageInit(fn *ssa.Function) bool {
+	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Parent() != nil ||
+		fn.Signature == nil || fn.Signature.Recv() != nil || fn.Synthetic != "" ||
+		!strings.HasPrefix(fn.Name(), "init#") {
+		return false
+	}
+	ordinal := strings.TrimPrefix(fn.Name(), "init#")
+	if ordinal == "" {
+		return false
+	}
+	for _, digit := range ordinal {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	object := fn.Object()
+	return object != nil && object.Name() == "init" && object.Pkg() == fn.Pkg.Pkg
 }
 
 // hasCoroProgramManagedEntryCapability validates the physical role of a
 // top-level main/init body. Runnable lowering retains package initializers
 // reached as ordinary callees; they are not necessarily explicit roots. Without
-// that capability, only an exact pure package-emission root may publish an
-// outcome/plain body without manufacturing a runnable bootstrap. Function
-// spelling alone never grants that package-generation exception.
+// that capability, an exact declared init may consume an outcome/plain body only
+// through its synthetic package initializer's frozen direct-managed edge. An
+// independent main or synthetic initializer still requires an exact pure
+// package-emission root. Function spelling alone never grants either exception.
 func hasCoroProgramManagedEntryCapability(fn *ssa.Function, whole *coro.SSAPlan, programRun bool) bool {
 	if !isCoroProgramManagedEntry(fn) {
 		return false
@@ -3128,11 +3150,53 @@ func hasCoroProgramManagedEntryCapability(fn *ssa.Function, whole *coro.SSAPlan,
 	if whole == nil {
 		return false
 	}
+	if hasCoroDeclaredPackageInitOutcomeCapability(fn, whole) {
+		return true
+	}
 	root, rooted := whole.Root(fn)
 	if !rooted || !root.ManagedDemand.Contains(coro.AsyncDemand) {
 		return false
 	}
 	return root.EmissionEntry && !root.ScheduledEntry && !root.IngressEntry
+}
+
+func hasCoroDeclaredPackageInitOutcomeCapability(fn *ssa.Function, whole *coro.SSAPlan) bool {
+	if !isCoroDeclaredPackageInit(fn) || whole == nil {
+		return false
+	}
+	targetPlan, planned := whole.FunctionPlan(fn)
+	if !planned || targetPlan.External != coro.Defined ||
+		targetPlan.Emission != coro.EmitOutcomePlain ||
+		targetPlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+		targetPlan.FuncRep != coro.DirectCoro ||
+		!targetPlan.ManagedDemand.Contains(coro.AsyncDemand) {
+		return false
+	}
+	packageInit := fn.Pkg.Func("init")
+	if packageInit == nil || packageInit.Synthetic != "package initializer" ||
+		packageInit.Pkg != fn.Pkg {
+		return false
+	}
+	initPlan, planned := whole.FunctionPlan(packageInit)
+	if !planned || initPlan.External != coro.Defined ||
+		initPlan.FuncRep != coro.DirectCoro ||
+		!initPlan.ManagedDemand.Contains(coro.AsyncDemand) {
+		return false
+	}
+	switch initPlan.Emission {
+	case coro.EmitCoroutine:
+		if initPlan.ManagedEntry != coro.ManagedEntryCoroutine {
+			return false
+		}
+	case coro.EmitOutcomePlain:
+		if initPlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+			!hasCoroProgramManagedEntryCapability(packageInit, whole, false) {
+			return false
+		}
+	default:
+		return false
+	}
+	return whole.HasExactManagedStaticCall(packageInit, fn)
 }
 
 func coroMaterializedGenericInstance(fn *ssa.Function) bool {

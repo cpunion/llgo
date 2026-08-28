@@ -132,6 +132,36 @@ func (p *SSAPlan) CallPlan(call ssa.CallInstruction) (SSACallPlan, bool) {
 	return plan, true
 }
 
+// HasExactManagedStaticCall reports whether caller owns a frozen ordinary
+// direct-managed call to target. The query stays inside SSAPlan so consumers
+// do not reconstruct a reverse call edge by rescanning source SSA.
+func (p *SSAPlan) HasExactManagedStaticCall(caller, target *ssa.Function) bool {
+	if p == nil || caller == nil || target == nil {
+		return false
+	}
+	if _, found := p.byFunction[caller]; !found {
+		return false
+	}
+	targetID, found := p.byFunction[target]
+	if !found {
+		return false
+	}
+	for call, plan := range p.callPlans {
+		common := call.Common()
+		if call.Parent() != caller || common == nil || common.IsInvoke() ||
+			common.StaticCallee() != target || plan.Call != call ||
+			plan.Kind != CallDirect || plan.Rep != DirectCoro ||
+			plan.Transport != ManagedTransport || plan.Open || plan.MayBeNil ||
+			plan.SyncDispatch || plan.RawPlain || len(plan.Targets) != 1 {
+			continue
+		}
+		if plan.Targets[0] == targetID {
+			return true
+		}
+	}
+	return false
+}
+
 // ResolveExactInterfaceCall returns the one concrete SSA receiver and method
 // target proven for an occurrence-local interface invoke. The certificate is
 // deliberately narrower than a closed CHA CallPlan: it exists only when the

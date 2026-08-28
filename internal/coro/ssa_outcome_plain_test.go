@@ -64,6 +64,9 @@ func caller(value any, fail bool) int {
 	if callerPlan.Emission != EmitCoroutine || callerPlan.AtomicCostProof != AtomicCostUnproven {
 		t.Fatalf("caller plan = %+v, want ordinary coroutine caller", callerPlan)
 	}
+	if !plan.HasExactManagedStaticCall(caller, leaf) || plan.HasExactManagedStaticCall(leaf, caller) {
+		t.Fatal("outcome-plain call edge lost its exact frozen caller/target direction")
+	}
 	if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err != nil {
 		t.Fatalf("digest proven outcome-plain plan: %v", err)
 	}
