@@ -2727,9 +2727,10 @@ func TestArrayEqualLowering(t *testing.T) {
 	nestedStruct := compare("nestedStruct", nestedStructElement, 2, token.EQL, 0).String()
 	if strings.Count(nestedStruct, "/runtime/internal/runtime.AllocZ") != 2 ||
 		strings.Count(nestedStruct, ".arrayequalFloat64") != 1 ||
+		strings.Count(nestedStruct, "phi i1") != 1 ||
 		strings.Contains(nestedStruct, "load [5000 x double]") ||
 		strings.Contains(nestedStruct, "alloca [5000 x double]") {
-		t.Fatalf("nested struct array loop did not propagate its field addresses:\n%s", nestedStruct)
+		t.Fatalf("nested struct array loop retained aggregate loads or a single-field trampoline:\n%s", nestedStruct)
 	}
 	nonMemory := compare("nonmemory", types.Typ[types.Float64], 5, token.EQL, 0).String()
 	if !strings.Contains(nonMemory, ".arrayequalFloat64") || strings.Contains(nonMemory, "extractvalue [5 x double]") || strings.Contains(nonMemory, ".arrayequalImpl") {

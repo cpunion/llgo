@@ -1059,11 +1059,7 @@ func (b Builder) structBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
 	if len(fields) == 0 {
 		return prog.BoolVal(op == token.EQL)
 	}
-	logical := b.blk
-	blocks := b.Func.MakeBlocks(len(fields) + 1)
-	continuations, done := blocks[:len(fields)], blocks[len(fields)]
-	mismatchBlocks := make([]BasicBlock, 0, len(fields))
-	for fieldIndex, index := range fields {
+	fieldEqual := func(index int) Expr {
 		fieldType := prog.Type(typ.Field(index).Type(), InGo)
 		leftAddr, rightAddr := Nil, Nil
 		var left, right Expr
@@ -1087,19 +1083,37 @@ func (b Builder) structBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
 		} else {
 			right = Expr{b.impl.CreateExtractValue(y.impl, index, ""), fieldType}
 		}
-		equal := b.aggregateBinOp(token.EQL, left, right, leftAddr, rightAddr)
+		return b.aggregateBinOp(token.EQL, left, right, leftAddr, rightAddr)
+	}
+	if len(fields) == 1 {
+		ret := fieldEqual(fields[0])
+		if op == token.NEQ {
+			ret.impl = llvm.CreateNot(b.impl, ret.impl)
+		}
+		return ret
+	}
+	logical := b.blk
+	blocks := b.Func.MakeBlocks(len(fields))
+	continuations, done := blocks[:len(fields)-1], blocks[len(fields)-1]
+	mismatchBlocks := make([]BasicBlock, 0, len(fields)-1)
+	for fieldIndex, index := range fields[:len(fields)-1] {
+		equal := fieldEqual(index)
 		mismatchBlocks = append(mismatchBlocks, b.blk)
 		next := continuations[fieldIndex]
 		b.If(equal, next, done)
 		b.SetBlockEx(next, AtEnd, true)
 	}
-	matched := b.blk
+	lastEqual := fieldEqual(fields[len(fields)-1])
+	last := b.blk
 	b.Jump(done)
 	b.SetBlockEx(done, AtEnd, false)
-	predecessors := append(mismatchBlocks, matched)
+	predecessors := append(mismatchBlocks, last)
 	result := b.Phi(prog.Bool())
 	result.AddIncoming(b, predecessors, func(index int, _ BasicBlock) Expr {
-		return prog.BoolVal(index == len(mismatchBlocks))
+		if index == len(mismatchBlocks) {
+			return lastEqual
+		}
+		return prog.BoolVal(false)
 	})
 	b.blk = logical
 	b.blk.last = done.last
