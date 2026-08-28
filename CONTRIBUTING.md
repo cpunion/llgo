@@ -23,6 +23,13 @@ the linked fork CI. The reviewer adds `need-review` to authorize the relevant
 full CI in `xgo-dev/llgo`. Pushing another commit reruns fork CI and invalidates
 the fork-PR evidence until both pull requests point to the same commit again.
 
+Until `need-review` is present, the upstream `full CI authorization` check
+fails intentionally. Repository maintainers must configure this check as a
+required status check on the default branch so a pull request cannot merge
+without reviewer-authorized full CI. The `need-review` label must also be
+created once in `xgo-dev/llgo`; only users with triage or write permission
+should be able to apply it.
+
 ## Request GOROOT compatibility tests
 
 GOROOT is an expensive opt-in suite. Fork labels are not inherited from the
