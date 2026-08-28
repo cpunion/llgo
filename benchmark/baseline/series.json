@@ -61,10 +61,10 @@
       "label": "Branch codex/windows-r9-native-toolchain-20260827",
       "path": "series/branch/5fedd9daaf878e96/summary.json",
       "configPath": "series/branch/5fedd9daaf878e96/config.json",
-      "commitPath": "commits/e063d5fc62177419f8d1d7a1c036f4f6915a7375.json",
-      "sha": "e063d5fc62177419f8d1d7a1c036f4f6915a7375",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/e063d5fc62177419f8d1d7a1c036f4f6915a7375",
-      "updatedAt": "2026-08-28T15:21:58.248Z"
+      "commitPath": "commits/5c5f4a58b901a6e065996569e0a8feaf54a89dea.json",
+      "sha": "5c5f4a58b901a6e065996569e0a8feaf54a89dea",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/5c5f4a58b901a6e065996569e0a8feaf54a89dea",
+      "updatedAt": "2026-08-28T15:56:11.897Z"
     },
     {
       "kind": "branch",
@@ -147,10 +147,10 @@
       "label": "PR #202",
       "path": "series/pull/202/summary.json",
       "configPath": "series/pull/202/config.json",
-      "commitPath": "commits/e063d5fc62177419f8d1d7a1c036f4f6915a7375.json",
-      "sha": "e063d5fc62177419f8d1d7a1c036f4f6915a7375",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/e063d5fc62177419f8d1d7a1c036f4f6915a7375",
-      "updatedAt": "2026-08-28T15:21:58.204Z"
+      "commitPath": "commits/5c5f4a58b901a6e065996569e0a8feaf54a89dea.json",
+      "sha": "5c5f4a58b901a6e065996569e0a8feaf54a89dea",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/5c5f4a58b901a6e065996569e0a8feaf54a89dea",
+      "updatedAt": "2026-08-28T15:56:11.866Z"
     }
   ]
 }
