@@ -1,0 +1,46 @@
+name: CI Gate
+
+on:
+  workflow_call:
+    outputs:
+      run:
+        description: Whether the calling workflow may allocate heavy runners.
+        value: ${{ jobs.gate.outputs.run }}
+      reason:
+        description: Human-readable gate decision.
+        value: ${{ jobs.gate.outputs.reason }}
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      reason: ${{ steps.gate.outputs.reason }}
+    steps:
+      - name: Check out gate implementation
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - id: gate
+        name: Decide whether heavy CI may run
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_REPOSITORY_IS_FORK: ${{ github.event.repository.fork }}
+          CI_REF_TYPE: ${{ github.ref_type }}
+          CI_REF_NAME: ${{ github.ref_name }}
+          CI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CI_EVENT_ACTION: ${{ github.event.action }}
+          CI_EVENT_LABEL: ${{ github.event.label.name }}
+          CI_PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: python3 .github/scripts/ci_gate.py >> "$GITHUB_OUTPUT"
+
+      - name: Report decision
+        env:
+          CI_GATE_REASON: ${{ steps.gate.outputs.reason }}
+        run: echo "::notice title=CI gate::$CI_GATE_REASON"
