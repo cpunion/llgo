@@ -57,7 +57,7 @@ type panicPCStore struct {
 
 // g holds state owned by one LLGo goroutine.
 //
-// The current pthread backend gives every G its own M and P. Fields that only
+// The current host-thread backend gives every G its own M and P. Fields that only
 // make sense once LLGo can suspend and resume a G (saved registers, wait state,
 // and stack roots) belong here when those facilities are added.
 type g struct {
@@ -93,9 +93,8 @@ type g struct {
 	coroEmbedded bool
 }
 
-// m represents the host execution resource running Go code. The platform
-// thread handle is deliberately confined to mOS so other backends do not leak
-// pthread types into the scheduler core.
+// m represents the host execution resource running Go code. Platform-specific
+// scheduler state is confined to mOS so it does not leak into the common core.
 type m struct {
 	curg *g
 	p    *p
@@ -116,7 +115,7 @@ type m struct {
 	signalFaultState uint32
 }
 
-// p represents the scheduling resources attached to an M. The pthread backend
+// p represents the scheduling resources attached to an M. The host-thread backend
 // currently binds one P to one M; a later M:N scheduler can retain this object
 // while replacing that fixed binding with a P pool and run queues.
 type p struct {

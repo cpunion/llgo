@@ -22,9 +22,9 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 	"github.com/xgo-dev/llgo/runtime/internal/corofleet"
+	threadpkg "github.com/xgo-dev/llgo/runtime/internal/thread"
 )
 
 const (
@@ -78,8 +78,8 @@ type coroNativeMOwnerV1 struct {
 	deferred coro.DeferredExecutorHandoff
 	resume   coro.ExecutorResumeHandoff
 
-	thread pthread.Thread
-	self   pthread.Thread
+	thread threadpkg.Thread
+	self   threadpkg.Thread
 	token  uint32
 	handle coro.ExecutorFleetHandle
 	baton  coro.ExecutionDomainHandoffHandle
@@ -287,7 +287,7 @@ func coroNativeMStopCleanFactoryV1() bool {
 	slot := coroNativeAtomicLoadV1(&coroNativeMDirectoryV1State.active[0])
 	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
 	if ownerOK && owner.token != 0 && owner.self != nil &&
-		pthread.Equal(owner.self, pthread.Self()) != 0 {
+		threadpkg.Equal(owner.self, threadpkg.Self()) != 0 {
 		if owner.handle.Route != 1 ||
 			coroNativeMOwnerLifecycleLoadV1(owner) !=
 				coroNativeMOwnerSuccessorActiveV1 {
@@ -332,7 +332,7 @@ func coroNativeMDirectoryStartV1(program coro.ExecutorFleetHandle) bool {
 		owner.handle = handle
 		coroNativeAtomicStoreV1(&directory.active[route-1], route)
 		if route == 1 {
-			self := pthread.Self()
+			self := threadpkg.Self()
 			if self == nil {
 				coroNativeAtomicStoreV1(&directory.state, uint32(coroNativeMDirectoryFailedV1))
 				return false
@@ -485,7 +485,7 @@ func coroNativeMCurrentOwnerV1(
 	ok bool,
 ) {
 	owner, domain, slot, epoch, ok = coroNativeMActiveOwnerV1(driver)
-	if !ok || pthread.Equal(owner.self, pthread.Self()) == 0 {
+	if !ok || threadpkg.Equal(owner.self, threadpkg.Self()) == 0 {
 		return nil, nil, 0, 0, false
 	}
 	return owner, domain, slot, epoch, true
@@ -501,7 +501,7 @@ func coroNativeMCurrentOwnerAtRouteV1(
 	ok bool,
 ) {
 	owner, domain, slot, epoch, ok = coroNativeMActiveOwnerAtRouteV1(driver, route)
-	if !ok || pthread.Equal(owner.self, pthread.Self()) == 0 {
+	if !ok || threadpkg.Equal(owner.self, threadpkg.Self()) == 0 {
 		return nil, nil, 0, 0, false
 	}
 	return owner, domain, slot, epoch, true
@@ -584,7 +584,7 @@ func coroNativeMClaimSuccessorV1(
 		owner.self != nil || !owner.deferred.Idle() {
 		return nil, nil, nil, false
 	}
-	self := pthread.Self()
+	self := threadpkg.Self()
 	if self == nil {
 		return nil, nil, nil, false
 	}
@@ -899,7 +899,7 @@ func coroNativeMClaimReplacementV1(
 		!owner.deferred.Idle() {
 		return nil, nil, nil, false, false
 	}
-	self := pthread.Self()
+	self := threadpkg.Self()
 	if self == nil {
 		return nil, nil, nil, false, false
 	}
@@ -1157,7 +1157,7 @@ func coroTargetRetirePhysicalOwnerV1(
 		coroRuntimeAbort("native coroutine physical owner capacity release failed")
 		return false
 	}
-	pthread.Exit(c.Pointer(nil))
+	threadpkg.Exit()
 	for {
 	}
 }

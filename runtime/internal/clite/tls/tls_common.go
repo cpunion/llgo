@@ -16,12 +16,12 @@
  * limitations under the License.
  */
 
-// Package tls provides generic thread-local storage backed by POSIX pthread
-// TLS. When built with the GC-enabled configuration (llgo && !nogc), TLS slots
-// are automatically registered with the BDWGC garbage collector so pointers
-// stored in thread-local state remain visible to the collector. Builds without
-// GC integration (llgo && nogc) simply fall back to pthread TLS without root
-// registration.
+// Package tls provides generic storage backed by the host thread-local
+// storage API. When built with the GC-enabled configuration (llgo && !nogc),
+// TLS slots are automatically registered with the BDWGC garbage collector so
+// pointers stored in thread-local state remain visible to the collector.
+// Builds without GC integration (llgo && nogc) simply use host TLS without
+// root registration.
 //
 // Basic usage:
 //
@@ -39,10 +39,10 @@
 //
 // Build tags:
 //   - llgo && !nogc: Enables GC-aware slot registration via BDWGC
-//   - llgo && nogc:  Disables GC integration; TLS acts as plain pthread TLS
+//   - llgo && nogc:  Disables GC integration; TLS acts as plain host TLS
 //
 // Logical WebAssembly targets use the single-host-thread implementation in
-// tls_webassembly.go and never acquire a pthread dependency merely because a
+// tls_webassembly.go and never acquire a host-thread dependency merely because a
 // named target reuses a Linux/ARM frontend.
 package tls
 
@@ -50,11 +50,11 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
+	"github.com/xgo-dev/llgo/runtime/internal/thread"
 )
 
 type Handle[T any] struct {
-	key        pthread.Key
+	key        thread.Key
 	destructor func(*T)
 }
 
@@ -64,23 +64,25 @@ type Handle[T any] struct {
 // also lets the compiler prove its C callback closure without function-value
 // dispatch.
 type StaticHandle[T any] struct {
-	key pthread.Key
+	key thread.Key
 }
 
-// Alloc creates a TLS handle backed by pthread TLS.
+// Alloc creates a handle backed by the host thread-local storage API.
 func Alloc[T any](destructor func(*T)) Handle[T] {
-	var key pthread.Key
-	if ret := key.Create(pthread.KeyDestructor(slotDestructor[T])); ret != 0 {
-		panic("tls: pthread_key_create failed")
+	var key thread.Key
+	if ret := key.Create(thread.KeyDestructor(slotDestructor[T])); ret != 0 {
+		c.Fprintf(c.Stderr, c.Str("tls: thread-local key creation failed (error=%d)\n"), ret)
+		panic("tls: failed to create thread local storage key")
 	}
 	return Handle[T]{key: key, destructor: destructor}
 }
 
 // AllocStatic creates a TLS handle with fixed, callback-free cleanup.
 func AllocStatic[T any]() StaticHandle[T] {
-	var key pthread.Key
-	if ret := key.Create(pthread.KeyDestructor(staticSlotDestructor[T])); ret != 0 {
-		panic("tls: pthread_key_create failed")
+	var key thread.Key
+	if ret := key.Create(thread.KeyDestructor(staticSlotDestructor[T])); ret != 0 {
+		c.Fprintf(c.Stderr, c.Str("tls: thread-local key creation failed (error=%d)\n"), ret)
+		panic("tls: failed to create thread local storage key")
 	}
 	return StaticHandle[T]{key: key}
 }
@@ -112,7 +114,7 @@ func (h StaticHandle[T]) Clear() {
 	clear[T](h.key)
 }
 
-func get[T any](key pthread.Key) T {
+func get[T any](key thread.Key) T {
 	if ptr := key.Get(); ptr != nil {
 		return (*slot[T])(ptr).value
 	}
@@ -120,12 +122,12 @@ func get[T any](key pthread.Key) T {
 	return zero
 }
 
-func set[T any](key pthread.Key, destructor func(*T), value T) {
+func set[T any](key thread.Key, destructor func(*T), value T) {
 	s := ensureSlot(key, destructor)
 	s.value = value
 }
 
-func clear[T any](key pthread.Key) {
+func clear[T any](key thread.Key) {
 	if ptr := key.Get(); ptr != nil {
 		s := (*slot[T])(ptr)
 		var zero T
@@ -133,11 +135,7 @@ func clear[T any](key pthread.Key) {
 	}
 }
 
-func (h Handle[T]) ensureSlot() *slot[T] {
-	return ensureSlot(h.key, h.destructor)
-}
-
-func ensureSlot[T any](key pthread.Key, destructor func(*T)) *slot[T] {
+func ensureSlot[T any](key thread.Key, destructor func(*T)) *slot[T] {
 	if ptr := key.Get(); ptr != nil {
 		return (*slot[T])(ptr)
 	}
@@ -154,7 +152,8 @@ func ensureSlot[T any](key pthread.Key, destructor func(*T)) *slot[T] {
 	}
 	if ret := key.Set(mem); ret != 0 {
 		c.Free(mem)
-		panic("tls: pthread_setspecific failed")
+		c.Fprintf(c.Stderr, c.Str("tls: thread-local value installation failed (error=%d)\n"), ret)
+		panic("tls: failed to set thread local storage value")
 	}
 	registerSlot(s)
 	return s

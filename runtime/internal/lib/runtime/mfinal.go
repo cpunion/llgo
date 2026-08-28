@@ -13,9 +13,9 @@ import (
 
 	"github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/xgo-dev/llgo/runtime/internal/ffi"
 	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
+	"github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 )
 
 type finalizerClosure struct {

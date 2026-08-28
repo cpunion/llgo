@@ -19,9 +19,9 @@
 package runtime
 
 import (
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 	"github.com/xgo-dev/llgo/runtime/internal/coroworker"
+	threadpkg "github.com/xgo-dev/llgo/runtime/internal/thread"
 )
 
 const (
@@ -51,7 +51,7 @@ const (
 // workers inspect a G, ParkState, WaitSetRecord, or LLVM coroutine handle. No
 // managed producer edge acquires a pthread mutex.
 type coroNativeWorkerPoolV1 struct {
-	threads  [coroNativeWorkerThreadCountV1]pthread.Thread
+	threads  [coroNativeWorkerThreadCountV1]threadpkg.Thread
 	delivery coroNativeWorkerDeliveryV1
 	handle   coro.ExecutorHandle
 	route    coro.RouteID
@@ -75,7 +75,7 @@ func coroNativeWorkerPoolJoinCreatedV1(state *coroNativeWorkerPoolV1) bool {
 	ok := true
 	for index := uint32(0); index < state.created; index++ {
 		thread := state.threads[index]
-		if thread == nil || pthread.Join(thread, nil) != 0 ||
+		if thread == nil || threadpkg.Join(thread, nil) != 0 ||
 			!coroTargetReleasePhysicalThreadV1() {
 			ok = false
 		}

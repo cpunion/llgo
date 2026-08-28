@@ -19,10 +19,10 @@
 package runtime
 
 import (
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 	"github.com/xgo-dev/llgo/runtime/internal/coroclock"
 	"github.com/xgo-dev/llgo/runtime/internal/corofleet"
+	threadpkg "github.com/xgo-dev/llgo/runtime/internal/thread"
 )
 
 const (
@@ -665,7 +665,7 @@ func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32 {
 			coroRuntimeAbort("native coroutine fleet peer publication invalid")
 			return 0
 		}
-		owner.self = pthread.Self()
+		owner.self = threadpkg.Self()
 		peer := &state.peers[route-2]
 		// handle is published before pthread_create and remains immutable until
 		// join. Do not gate entry on the aggregate lifecycle: a program which

@@ -222,7 +222,7 @@ func TestCoroHostTargetOwnedReactorSourceContract(t *testing.T) {
 			t.Errorf("host target lacks owned-reactor contract %q", required)
 		}
 	}
-	for _, forbidden := range []string{"internal/clite/pthread", "internal/clite/libuv", "internal/clite/bdwgc", "internal/corodoorbell"} {
+	for _, forbidden := range []string{"internal/thread", "internal/clite/libuv", "internal/clite/bdwgc", "internal/corodoorbell"} {
 		if strings.Contains(target, forbidden) || strings.Contains(driver, forbidden) {
 			t.Errorf("host adapter imports forbidden backend %q", forbidden)
 		}

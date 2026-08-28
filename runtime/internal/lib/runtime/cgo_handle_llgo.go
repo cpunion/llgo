@@ -5,8 +5,9 @@
 package runtime
 
 import (
-	catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 	_ "unsafe"
+
+	catomic "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 )
 
 // These functions provide runtime/cgo.Handle without pulling in the gc

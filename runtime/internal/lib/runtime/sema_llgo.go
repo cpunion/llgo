@@ -1,4 +1,4 @@
-//go:build darwin || linux || wasm || tinygo.wasm
+//go:build darwin || linux || windows || wasm || tinygo.wasm
 
 package runtime
 

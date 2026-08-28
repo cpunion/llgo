@@ -51,9 +51,10 @@ const (
 	runtimeCoroWorkerHeaderSource            = "internal/coroworker/_worker/worker.h"
 	runtimeCoroOSThreadForeignSource         = "internal/runtime/coro_os_thread_foreign_llgo.go"
 	runtimeCoroOSThreadForeignPipeSource     = "internal/runtime/coro_os_thread_foreign_pipe_llgo.go"
-	runtimePthreadSyncSource                 = "internal/clite/pthread/sync/sync.go"
-	runtimePthreadGCSource                   = "internal/clite/pthread/pthread_gc.go"
-	runtimePthreadNoGCSource                 = "internal/clite/pthread/pthread_nogc.go"
+	runtimeSyncSource                        = "internal/sync/sync_unix.go"
+	runtimeThreadSource                      = "internal/thread/thread_unix.go"
+	runtimeThreadGCSource                    = "internal/thread/thread_unix_gc.go"
+	runtimeThreadNoGCSource                  = "internal/thread/thread_unix_nogc.go"
 )
 
 func requireRuntimeAnnotationFreeCDeclarations(t *testing.T, path string, names ...string) {
@@ -469,7 +470,7 @@ func TestRuntimeCoroWorkerKeepsPthreadCreationCertificateOwnerScoped(t *testing.
 	requireRuntimeAnnotationFreeCDeclarations(t, runtimeCoroWorkerCallSource, "Create")
 	for _, required := range []string{
 		"//go:linkname Create C.__llgo_coro_worker_create_v1",
-		"func Create(thread *pthread.Thread) c.Int",
+		"func Create(native *thread.Thread) c.Int",
 		"No arbitrary Go callback address is accepted",
 		"compiler-owned raw-host occurrence executes that conservative may-block",
 		"ordinary managed occurrence would",
@@ -494,21 +495,28 @@ func TestRuntimeCoroWorkerKeepsPthreadCreationCertificateOwnerScoped(t *testing.
 
 	// The general API accepts arbitrary callbacks and therefore never inherits
 	// the scheduler-owned declaration's exact certificate.
-	for _, path := range []string{runtimePthreadGCSource, runtimePthreadNoGCSource} {
-		text := readRuntimePollFile(t, path)
-		if strings.Contains(text, "//llgo:coro noblock\n//go:linkname Create ") {
-			t.Fatalf("general pthread.Create in %s acquired a coroutine noblock certificate", path)
+	threadSource := readRuntimePollFile(t, runtimeThreadSource)
+	if !strings.Contains(threadSource, "func Join(native Thread, retval *c.Pointer) c.Int") ||
+		!strings.Contains(threadSource, "audited raw-host shutdown closure") {
+		t.Fatalf("blocking thread.Join in %s lacks its inferred raw-host operation contract", runtimeThreadSource)
+	}
+	for _, capability := range []string{"sync", "noblock", "worker", "schedulerwait"} {
+		if strings.Contains(threadSource, "//llgo:coro "+capability+"\nfunc Join(") {
+			t.Fatalf("blocking thread.Join in %s acquired obsolete or incorrect %s declaration capability", runtimeThreadSource, capability)
 		}
-		if !strings.Contains(text, "//go:linkname Join ") ||
-			!strings.Contains(text, "direct execution is inferred from the raw-host") {
-			t.Fatalf("blocking pthread.Join in %s lacks its inferred raw-host operation contract", path)
+	}
+	for _, path := range []string{runtimeThreadGCSource, runtimeThreadNoGCSource} {
+		text := readRuntimePollFile(t, path)
+		if !strings.Contains(text, "//go:linkname create C.") ||
+			!strings.Contains(text, "//go:linkname join C.") {
+			t.Fatalf("native thread bindings in %s are incomplete", path)
 		}
 		for _, capability := range []string{"sync", "noblock", "worker", "schedulerwait"} {
-			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname Create ") {
-				t.Fatalf("general pthread.Create in %s acquired a coroutine %s capability", path, capability)
+			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname create ") {
+				t.Fatalf("general thread create in %s acquired a coroutine %s capability", path, capability)
 			}
-			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname Join ") {
-				t.Fatalf("blocking pthread.Join in %s acquired obsolete or incorrect %s declaration capability", path, capability)
+			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname join ") {
+				t.Fatalf("blocking thread join in %s acquired obsolete or incorrect %s declaration capability", path, capability)
 			}
 		}
 	}
@@ -775,14 +783,11 @@ func TestRuntimeNativeSyscallDeferredReplacementUsesStableRequestGate(t *testing
 	}
 }
 
-func TestRuntimePthreadPrimitivesKeepPhysicalWaitSemantics(t *testing.T) {
-	text := readRuntimePollFile(t, runtimePthreadSyncSource)
+func TestRuntimeHostPrimitivesKeepPhysicalWaitSemantics(t *testing.T) {
+	text := readRuntimePollFile(t, runtimeSyncSource)
 	for _, symbol := range []string{
-		"c_pthread_mutex_lock",
-		"c_pthread_rwlock_rdlock",
-		"c_pthread_rwlock_wrlock",
-		"c_pthread_cond_wait",
-		"c_pthread_cond_timedwait",
+		"pthreadMutexLock",
+		"pthreadCondWait",
 	} {
 		if !strings.Contains(text, "//go:linkname "+symbol+" ") {
 			t.Errorf("blocking pthread primitive %s lacks its exact declaration", symbol)
@@ -805,15 +810,13 @@ func TestRuntimePthreadPrimitivesKeepPhysicalWaitSemantics(t *testing.T) {
 		}
 	}
 	defaultSymbols := []string{
-		"c_pthread_mutex_destroy",
-		"c_pthread_rwlock_init",
-		"c_pthread_rwlock_destroy",
-		"c_pthread_cond_init",
-		"c_pthread_cond_destroy",
-		"c_pthread_cond_signal",
-		"c_pthread_cond_broadcast",
+		"pthreadMutexDestroy",
+		"pthreadCondInit",
+		"pthreadCondDestroy",
+		"pthreadCondSignal",
+		"pthreadCondBroadcast",
 	}
-	requireRuntimeAnnotationFreeCDeclarations(t, runtimePthreadSyncSource, defaultSymbols...)
+	requireRuntimeAnnotationFreeCDeclarations(t, runtimeSyncSource, defaultSymbols...)
 	for _, symbol := range defaultSymbols {
 		if !strings.Contains(text, "//go:linkname "+symbol+" ") {
 			t.Errorf("pthread lifecycle/notification primitive %s lacks its exact declaration", symbol)

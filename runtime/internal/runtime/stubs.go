@@ -7,8 +7,8 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/xgo-dev/llgo/runtime/internal/runtime/math"
+	"github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 )
 
 //go:nosplit

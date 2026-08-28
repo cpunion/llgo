@@ -1,4 +1,4 @@
-//go:build !baremetal && !wasm && !tinygo.wasm
+//go:build !baremetal && !wasm && !tinygo.wasm && !windows
 
 package runtime
 

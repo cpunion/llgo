@@ -21,7 +21,7 @@ package runtime
 import (
 	"unsafe"
 
-	catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
+	catomic "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 )
 
 //export __llgo_coro_notify_prepare_or_abort_v2
