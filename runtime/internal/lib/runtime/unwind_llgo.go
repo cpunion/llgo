@@ -3,21 +3,18 @@
 package runtime
 
 import (
+	"unsafe"
+
 	rtdebug "github.com/xgo-dev/llgo/runtime/internal/runtime"
-	_ "unsafe"
 )
 
-// cCallerFrameMark returns the caller's native frame as an opaque scalar. The
-// mark is never reconstructed as a Go pointer.
+// c_framepointer returns its caller's frame pointer while the C helper frame
+// is still alive. Only the legacy native and Win32 platform implementations
+// consume it; the stackless Darwin/Linux path copies or tests the complete
+// chain inside a synchronous C leaf instead.
 //
-//go:linkname cCallerFrameMark C.llgo_caller_frame_mark
-func cCallerFrameMark() uintptr
-
-// cFrameChainContains performs the complete native-frame liveness walk on the
-// current stack and exposes only the boolean result to Go.
-//
-//go:linkname cFrameChainContains C.llgo_frame_chain_contains
-func cFrameChainContains(mark uintptr) int32
+//go:linkname c_framepointer C.llgo_framepointer
+func c_framepointer() unsafe.Pointer
 
 func init() {
 	rtdebug.PanicTraceback = panicTraceback
@@ -25,47 +22,19 @@ func init() {
 	rtdebug.RecoverMark = recoverMark
 }
 
-// recoverMark records the recovering deferred frame (and one above, for
-// wrapper-reached recover) so the panic snapshot stays spliceable while
-// that frame is live. After siglongjmp the frame-pointer chain two levels
-// up can point into a stale/reused stack region that is sometimes
-// unmapped; probe each slot before dereferencing — an unguarded read here
-// self-faults ~7% of the time, converting to a nil-deref panic that
-// corrupts the value the recover was extracting (goroot reflectmake flake).
-func recoverMark() {
-	// Record this function's frame address: it sits below the recovering
-	// deferred frame, and the liveness gate tests interval containment, so
-	// the exact level does not matter.
-	mark := cCallerFrameMark()
-	if mark == 0 {
-		return
-	}
-	rtdebug.MarkPanicRecoverFPs(mark, 0)
-}
+const maxPanicSpliceFrames = 4096
 
-// panicSplicePCs returns the snapshot when it is observable: either the
-// panic is still in flight, or the deferred frame that recovered it is
-// still live on the physical chain (gc keeps panic frames on the stack
-// exactly that long).
-func panicSplicePCs() []uintptr {
-	pcs := rtdebug.PanicPCs()
-	if len(pcs) == 0 {
-		return nil
+// callerFramePointer returns the frame of its Go caller. llgo_framepointer
+// returns this helper's frame; consume its saved link immediately, before
+// another call can reuse the slot.
+//
+//go:noinline
+func callerFramePointer() uintptr {
+	fp := uintptr(c_framepointer())
+	if fp == 0 {
+		return 0
 	}
-	if rtdebug.PanicActive() || rtdebug.CoroPanicRecoverActive() {
-		return pcs
-	}
-	mark, _ := rtdebug.PanicRecoverFPs()
-	if mark == 0 {
-		return nil
-	}
-	// The C leaf performs interval containment over the live chain. Keeping
-	// that walk outside Go prevents a native stack pointer from crossing a
-	// coroutine safepoint.
-	if cFrameChainContains(mark) != 0 {
-		return pcs
-	}
-	return nil
+	return *(*uintptr)(unsafe.Pointer(fp))
 }
 
 // trimPlumbingPCs drops leading pcs attributed to the LLGo runtime core
@@ -283,35 +252,6 @@ func panicTraceback(skip int) bool {
 // maxFPStride is shared with the signal-fault snapshot walker. A decoded parent
 // further away than any plausible native frame is a corrupt chain.
 const maxFPStride = 1 << 20
-
-// fpCallers walks the frame-pointer chain and fills pc with return
-// addresses, Go-style: pc[0] is the return address in the frame `skip`
-// levels above the caller of fpCallers. Every LLGo-compiled function keeps
-// x29/rbp chained ("frame-pointer"="non-leaf" is set on all Go functions),
-// so unlike the shadow stack this sees every physical frame; the walk stops
-// at the first frame that breaks the chain discipline (e.g. foreign C code
-// compiled without frame pointers).
-//
-// The clite walker (runtime/internal/clite/debug/_wrap/debug.c
-// llgo_stacktrace) implements the same chain discipline and guards for the
-// pre-table paths (unrecovered-panic dump, last-resort Callers fallback);
-// keep the two in sync when changing the walk rules.
-//
-//go:noinline
-func fpCallers(skip int, pc []uintptr) int {
-	if len(pc) == 0 {
-		return 0
-	}
-	// The walk bound needs the frame table's text range; make sure it is
-	// built (no-op when the prebuilt table was adopted at startup).
-	initRuntimeFuncPCFrames()
-	textLow, textHigh, ok := prebuiltTextBounds()
-	if !ok {
-		return 0
-	}
-	// PhysicalCallers adds one core-runtime wrapper frame.
-	return rtdebug.PhysicalCallers(skip+1, pc, textLow, textHigh)
-}
 
 // runtimeFPChain is emitted next to the funcinfo table (one per binary,
 // internal/build emitFuncInfoTable) and records whether this binary's Go

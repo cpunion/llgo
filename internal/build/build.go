@@ -7296,7 +7296,7 @@ type context struct {
 	stagedFuncInfoSites   bool
 	stagedFuncInfoMeta    bool
 	stagedPointerSize     int
-	stagedMachOSites      bool
+	stagedSiteFormat      siteObjectFormat
 	stagedEntrySiteInfo   siteSectionInfo
 
 	// stripDarwinLTOLocals is set by the final executable link plan. LTO has
@@ -9129,7 +9129,7 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	}
 	if ctx.stagedFuncInfoSites && ctx.stagedFuncInfoMeta {
 		emitFuncInfoEntrySitesForModule(
-			mod, ctx.stagedPointerSize, ctx.stagedMachOSites, ctx.stagedEntrySiteInfo,
+			mod, ctx.stagedPointerSize, ctx.stagedSiteFormat, ctx.stagedEntrySiteInfo,
 		)
 	}
 	verifyAtomicCost := llssa.VerifyCoroAtomicCostModule
@@ -9369,7 +9369,7 @@ func releaseCoroFrontendForStagedBackend(ctx *context, pkgs []*aPackage) {
 	ctx.stagedFuncInfoSites = shouldEmitRuntimeSites(ctx)
 	ctx.stagedFuncInfoMeta = ctx.prog.FuncInfoMetadataEnabled()
 	ctx.stagedPointerSize = ctx.prog.PointerSize()
-	ctx.stagedMachOSites = shouldEmitRuntimeMachOSites(ctx)
+	ctx.stagedSiteFormat = runtimeSiteObjectFormat(ctx)
 	ctx.stagedEntrySiteInfo = runtimeEntrySiteSectionInfo(ctx)
 	ctx.stagedBackendDetached = true
 	for _, pkg := range pkgs {

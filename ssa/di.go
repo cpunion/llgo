@@ -861,7 +861,7 @@ func (b Builder) DebugFunctionNamed(f Function, name, linkageName string, funcSc
 		uint(bodyPos.Line),
 		uint(bodyPos.Column),
 		p.diFunc.ll,
-		f.impl.InstructionDebugLoc(),
+		llvm.Metadata{},
 	)
 }
 

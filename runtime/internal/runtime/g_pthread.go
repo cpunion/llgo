@@ -60,7 +60,7 @@ func coroRuntimeContextBootstrap() bool {
 		return true
 	}
 	var key thread.Key
-	if ret := key.Create(thread.KeyDestructor(destroyG)); ret != 0 {
+	if ret := key.Create(gLifecycleDestructor(thread.KeyDestructor(destroyG))); ret != 0 {
 		// The caller owns the terminal diagnostic. Formatting through stdio here
 		// would turn an unrecoverable pre-scheduler failure into an asynchronous
 		// worker transaction even though there is no scheduler which can resume it.

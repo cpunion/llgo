@@ -26,9 +26,7 @@ func destroyWindowsG(ptr c.Pointer) {
 	destroyG(ptr)
 	// This is the last Go operation in the FLS destructor. A foreign thread
 	// that entered through a callback can now leave the collector safely.
-	if currentGHasLifecycle {
-		releaseForeignThreadRegistration()
-	}
+	releaseForeignThreadRegistration()
 }
 
 // EnterForeignThread makes a thread created outside the LLGo runtime visible
@@ -38,9 +36,10 @@ func EnterForeignThread() bool {
 	if foreignThreadGCRegistrationOwned {
 		return false
 	}
-	// Runtime-created threads are registered by GC_CreateThread. Their G has
-	// no FLS lifecycle because mexit/GC_ExitThread owns teardown.
-	if currentG != 0 && !currentGHasLifecycle {
+	// A thread already executing an LLGo G was either created through the
+	// collector-aware thread backend or registered by an earlier foreign
+	// entry. The observation-only lookup must not allocate a G here.
+	if getgIfPresent() != nil {
 		return false
 	}
 	if bdwgc.ThreadIsRegistered() != 0 {
@@ -75,7 +74,7 @@ func EnterForeignThread() bool {
 // an FLS lifecycle. The lifecycle destructor releases it after its last Go/GC
 // operation. The fallback covers an entry that could not install a lifecycle.
 func ExitForeignThread(registered bool) {
-	if registered && !currentGUsesLifecycle() {
+	if registered && getgIfPresent() == nil {
 		releaseForeignThreadRegistration()
 	}
 }
