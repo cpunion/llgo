@@ -57,6 +57,17 @@
     },
     {
       "kind": "branch",
+      "id": "5fedd9daaf878e96",
+      "label": "Branch codex/windows-r9-native-toolchain-20260827",
+      "path": "series/branch/5fedd9daaf878e96/summary.json",
+      "configPath": "series/branch/5fedd9daaf878e96/config.json",
+      "commitPath": "commits/8a35599be251f662be083abd09b01f3edf9877d2.json",
+      "sha": "8a35599be251f662be083abd09b01f3edf9877d2",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/8a35599be251f662be083abd09b01f3edf9877d2",
+      "updatedAt": "2026-08-28T13:59:12.610Z"
+    },
+    {
+      "kind": "branch",
       "id": "d8add96985a6d759",
       "label": "Branch codex/windows-review-fixes-20260823",
       "path": "series/branch/d8add96985a6d759/summary.json",
@@ -129,6 +140,17 @@
       "sha": "daef162f1a64c460d0f3681c562f645612a388e8",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/daef162f1a64c460d0f3681c562f645612a388e8",
       "updatedAt": "2026-08-24T14:30:58.660Z"
+    },
+    {
+      "kind": "pull",
+      "id": "202",
+      "label": "PR #202",
+      "path": "series/pull/202/summary.json",
+      "configPath": "series/pull/202/config.json",
+      "commitPath": "commits/8a35599be251f662be083abd09b01f3edf9877d2.json",
+      "sha": "8a35599be251f662be083abd09b01f3edf9877d2",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/8a35599be251f662be083abd09b01f3edf9877d2",
+      "updatedAt": "2026-08-28T13:59:12.567Z"
     }
   ]
 }
