@@ -2406,7 +2406,11 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 		(coroPureAggregateType(a.typeOf(op.X.Type())) || coroPureAggregateType(a.typeOf(op.Y.Type()))) {
 		left, right := a.typeOf(op.X.Type()), a.typeOf(op.Y.Type())
 		helperSet := make(map[string]struct{})
-		if !types.Identical(left, right) ||
+		// Go equality permits a named aggregate and its unnamed underlying type
+		// when one operand is assignable to the other. The type-checked SSA has
+		// already established that relation; require exact underlying identity
+		// here so the recursive LLSSA layouts and helper leaves still coincide.
+		if !types.Identical(types.Unalias(left).Underlying(), types.Unalias(right).Underlying()) ||
 			!coroAggregateEqualityRuntimeHelpers(left, make(map[types.Type]bool), helperSet) {
 			return "aggregate equality is not an exact supported comparable layout"
 		}

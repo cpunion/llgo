@@ -366,6 +366,15 @@ func Root(left, right Value) bool { return left != right }
 			helpers: "EfaceEqual",
 		},
 		{
+			name: "named and unnamed interface array",
+			source: `package foo
+type Value [2]any
+func array() [2]any { return [2]any{} }
+func Root(left Value) bool { return left != array() }
+`,
+			helpers: "EfaceEqual",
+		},
+		{
 			name: "nonempty interface field",
 			source: `package foo
 type Stringer interface { String() string }

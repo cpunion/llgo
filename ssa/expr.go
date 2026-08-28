@@ -24,6 +24,7 @@ import (
 	"go/types"
 	"log"
 
+	llabi "github.com/xgo-dev/llgo/internal/abi"
 	runtimeabi "github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llvm"
 )
@@ -900,6 +901,14 @@ func (b Builder) binOp(
 		case vkArray:
 			typ := x.raw.Type.Underlying().(*types.Array)
 			elem := b.Prog.Elem(x.Type)
+			if b.Prog.SizeOf(x.Type) <= llabi.MaxImplicitStackVarSize/2 &&
+				arrayEqualityInlineCost(typ, maxInlineArrayEqualityCost+1) > maxInlineArrayEqualityCost {
+				ret := b.arrayEqualLoop(x, y, typ.Len())
+				if op == token.NEQ {
+					ret.impl = llvm.CreateNot(b.impl, ret.impl)
+				}
+				return ret
+			}
 			ret := prog.BoolVal(true)
 			for i, n := 0, int(typ.Len()); i < n; i++ {
 				fx := b.impl.CreateExtractValue(x.impl, i, "")
@@ -959,6 +968,104 @@ func (b Builder) binOp(
 		}
 	}
 	panic("todo")
+}
+
+const (
+	maxInlineArrayEqualityCost int64 = 32
+	stringArrayEqualityCost    int64 = 4
+	interfaceArrayEqualityCost int64 = 16
+)
+
+// arrayEqualityInlineCost estimates the scalar-equivalent cost of recursive
+// extractvalue lowering. Runtime helper leaves carry a larger weight than
+// target-local comparisons. It saturates at limit so large and nested arrays
+// cannot overflow while selecting the compact loop recipe.
+func arrayEqualityInlineCost(typ types.Type, limit int64) int64 {
+	if limit <= 0 {
+		return 0
+	}
+	switch underlying := types.Unalias(typ).Underlying().(type) {
+	case *types.Array:
+		if underlying.Len() == 0 {
+			return 0
+		}
+		element := arrayEqualityInlineCost(underlying.Elem(), limit)
+		if element == 0 {
+			return 0
+		}
+		if underlying.Len() >= (limit+element-1)/element {
+			return limit
+		}
+		return underlying.Len() * element
+	case *types.Struct:
+		var cost int64
+		for index := 0; index < underlying.NumFields(); index++ {
+			field := underlying.Field(index)
+			if field.Name() == "_" {
+				continue
+			}
+			remaining := limit - cost
+			cost += arrayEqualityInlineCost(field.Type(), remaining)
+			if cost >= limit {
+				return limit
+			}
+		}
+		return cost
+	case *types.Basic:
+		if underlying.Kind() == types.String {
+			return min(stringArrayEqualityCost, limit)
+		}
+		return 1
+	case *types.Interface:
+		return min(interfaceArrayEqualityCost, limit)
+	default:
+		return 1
+	}
+}
+
+// arrayEqualLoop compares a large fixed array with one reusable element
+// lowering site. Its caller bounds the two compiler-owned scratch values to
+// MaxImplicitStackVarSize in total. The mismatch edge exits immediately,
+// preserving Go's left-to-right interface panic behavior while avoiding one
+// helper/coroutine await expansion per element.
+func (b Builder) arrayEqualLoop(x, y Expr, length int64) Expr {
+	prog := b.Prog
+	logical := b.blk
+	left := b.AllocaT(x.Type)
+	right := b.AllocaT(y.Type)
+	b.Store(left, x)
+	b.Store(right, y)
+
+	blocks := b.Func.MakeBlocks(3)
+	header, body, done := blocks[0], blocks[1], blocks[2]
+	b.Jump(header)
+
+	b.SetBlockEx(header, AtEnd, false)
+	index := b.Phi(prog.Int())
+	b.If(b.BinOp(token.LSS, index.Expr, prog.IntVal(uint64(length), prog.Int())), body, done)
+
+	b.SetBlockEx(body, AtEnd, true)
+	leftElem := b.Load(b.IndexAddrUnchecked(left, index.Expr))
+	rightElem := b.Load(b.IndexAddrUnchecked(right, index.Expr))
+	equal := b.BinOp(token.EQL, leftElem, rightElem)
+	body = b.blk
+	nextIndex := b.BinOp(token.ADD, index.Expr, prog.IntVal(1, prog.Int()))
+	b.If(equal, header, done)
+	index.AddIncoming(b, []BasicBlock{logical, body}, func(i int, _ BasicBlock) Expr {
+		if i == 0 {
+			return prog.IntVal(0, prog.Int())
+		}
+		return nextIndex
+	})
+
+	b.SetBlockEx(done, AtEnd, false)
+	result := b.Phi(prog.Bool())
+	result.AddIncoming(b, []BasicBlock{header, body}, func(i int, _ BasicBlock) Expr {
+		return prog.BoolVal(i == 0)
+	})
+	b.blk = logical
+	b.blk.last = done.last
+	return result.Expr
 }
 
 // The UnOp instruction yields the result of (op x).
