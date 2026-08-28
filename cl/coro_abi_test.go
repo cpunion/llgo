@@ -1348,6 +1348,51 @@ func main() {}
 	}
 }
 
+func TestCoroDeclaredInitOutcomeUsesSyntheticInitializerCapability(t *testing.T) {
+	const source = `package main
+func init() {
+	var value uintptr
+	converted := float32(value)
+	_ = uintptr(converted)
+}
+func main() {}
+`
+	prog, ssaPkg, _, universe, plan := prepareCoroProgramInitTestPlan(t, source)
+	defer prog.Dispose()
+
+	packageInit := ssaPkg.Func("init")
+	declaredInit := ssaPkg.Func("init#1")
+	if packageInit == nil || declaredInit == nil || !isCoroDeclaredPackageInit(declaredInit) {
+		t.Fatalf("fixture initializers = package:%v declared:%v", packageInit, declaredInit)
+	}
+	declaredPlan, planned := plan.FunctionPlan(declaredInit)
+	if !planned || declaredPlan.Emission != coro.EmitOutcomePlain ||
+		declaredPlan.ManagedEntry != coro.ManagedEntryOutcomePlain {
+		t.Fatalf("declared init plan = %+v, present=%t; want outcome-plain", declaredPlan, planned)
+	}
+	if !plan.HasExactManagedStaticCall(packageInit, declaredInit) {
+		t.Fatal("declared init has no frozen direct-managed package-initializer edge")
+	}
+	if !hasCoroProgramManagedEntryCapability(declaredInit, plan, false) {
+		t.Fatal("declared init outcome body lost its synthetic-initializer capability")
+	}
+	if hasCoroProgramManagedEntryCapability(declaredInit, nil, false) {
+		t.Fatal("declared init spelling acquired an outcome capability without a plan")
+	}
+	entry := plannedFunctionSymbol{
+		function:      declaredInit,
+		plan:          declaredPlan,
+		planned:       true,
+		physical:      true,
+		physicalOwner: universe.ownerOf(declaredInit),
+		coroPlan:      plan,
+		emission:      universe,
+	}
+	if err := entry.checkSupported(); err != nil {
+		t.Fatalf("validate declared init outcome body: %v", err)
+	}
+}
+
 func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
@@ -3670,7 +3715,9 @@ func prepareCoroProgramInitTestPlan(
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: packageInit, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
-		MaxPlainInstructions: -1,
+		MaxPlainInstructions: 64,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			switch {
 			case fn == yield:
