@@ -55,6 +55,22 @@ func parameters(x, y [32]byte) bool {
 	return x == y
 }
 
+func hugeParameters(x, y [65537]byte) bool {
+	return x == y
+}
+
+func budgetParameters(x, y [40000]byte) bool {
+	return x == y
+}
+
+type hugeBox struct {
+	values [65537]byte
+}
+
+func hugeStructParameters(x, y hugeBox) bool {
+	return x == y
+}
+
 func scalar(p *int) int {
 	return *p
 }
@@ -103,7 +119,8 @@ func heap() bool {
 		for _, block := range ssaPkg.Func(name).Blocks {
 			for _, instr := range block.Instrs {
 				if bin, ok := instr.(*ssa.BinOp); ok && bin.Op == token.EQL {
-					if _, ok := bin.X.Type().Underlying().(*types.Array); ok {
+					switch bin.X.Type().Underlying().(type) {
+					case *types.Array, *types.Struct:
 						return bin
 					}
 				}
@@ -129,12 +146,33 @@ func heap() bool {
 	if _, ok := immutableLocalArrayLoadAddr(snapshot.Y); !ok {
 		t.Fatal("unchanged snapshot operand was not recognized")
 	}
-	if canElideArrayCompareLoad(snapshot.X.(*ssa.UnOp)) || canElideArrayCompareLoad(snapshot.Y.(*ssa.UnOp)) {
-		t.Fatal("comparison without two stable addresses was eligible for load elision")
+	if canElideArrayCompareLoad(snapshot.X.(*ssa.UnOp)) {
+		t.Fatal("mutable snapshot operand was eligible for load elision")
+	}
+	if !canElideArrayCompareLoad(snapshot.Y.(*ssa.UnOp)) {
+		t.Fatal("independently stable operand was not eligible for load elision")
 	}
 	parameters := findCompare("parameters")
 	if _, ok := immutableLocalArrayLoadAddr(parameters.X); ok {
 		t.Fatal("array parameter was treated as reusable local storage")
+	}
+	if coroAggregateEqualityNeedsManagedScratch(nil, parameters) {
+		t.Fatal("array comparison without a compilation context required managed scratch")
+	}
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	ctx := &context{prog: prog}
+	if coroAggregateEqualityNeedsManagedScratch(ctx, parameters) {
+		t.Fatal("small array parameters required managed scratch")
+	}
+	if !coroAggregateEqualityNeedsManagedScratch(ctx, findCompare("hugeParameters")) {
+		t.Fatal("oversized array parameters did not require managed scratch")
+	}
+	if !coroAggregateEqualityNeedsManagedScratch(ctx, findCompare("budgetParameters")) {
+		t.Fatal("combined array snapshots exceeding the temporary budget did not require managed scratch")
+	}
+	if !coroAggregateEqualityNeedsManagedScratch(ctx, findCompare("hugeStructParameters")) {
+		t.Fatal("oversized nested array parameters did not require managed scratch")
 	}
 	var scalarLoad *ssa.UnOp
 	for _, block := range ssaPkg.Func("scalar").Blocks {
@@ -226,6 +264,32 @@ func heap() bool {
 	snapshotIR := mustNamedFunction(t, mod, "foo.snapshot").String()
 	if !strings.Contains(snapshotIR, ".memequal") || !strings.Contains(snapshotIR, "store [32 x i8]") || !strings.Contains(snapshotIR, "stacksave") {
 		t.Fatalf("mutable source did not preserve the loaded array snapshot:\n%s", snapshotIR)
+	}
+	if got := strings.Count(snapshotIR, "load [32 x i8]"); got != 2 {
+		// One load initializes x from its composite literal and one snapshots x
+		// before the mutation; the independently stable y needs no load.
+		t.Fatalf("mixed-stability comparison has %d aggregate loads, want only literal initialization and mutable snapshot:\n%s", got, snapshotIR)
+	}
+	if got := strings.Count(snapshotIR, "call void @llvm.memset"); got != 3 {
+		t.Fatalf("mixed-stability comparison has %d zeroing calls, want only its three source allocations:\n%s", got, snapshotIR)
+	}
+	hugeIR := mustNamedFunction(t, mod, "foo.hugeParameters").String()
+	if got := strings.Count(hugeIR, "runtime.AllocZ"); got != 2 ||
+		strings.Contains(hugeIR, "alloca [65537 x i8]") ||
+		strings.Contains(hugeIR, "llvm.stacksave") || strings.Contains(hugeIR, "llvm.memset") {
+		t.Fatalf("oversized array comparison did not use exactly two planned managed snapshots:\n%s", hugeIR)
+	}
+	budgetIR := mustNamedFunction(t, mod, "foo.budgetParameters").String()
+	if got := strings.Count(budgetIR, "runtime.AllocZ"); got != 1 ||
+		strings.Count(budgetIR, "alloca [40000 x i8]") != 1 ||
+		!strings.Contains(budgetIR, "llvm.stacksave") || strings.Contains(budgetIR, "llvm.memset") {
+		t.Fatalf("combined temporary budget did not pack one snapshot on stack and one in managed storage:\n%s", budgetIR)
+	}
+	hugeStructIR := mustNamedFunction(t, mod, "foo.hugeStructParameters").String()
+	if got := strings.Count(hugeStructIR, "runtime.AllocZ"); got != 2 ||
+		strings.Contains(hugeStructIR, "alloca [65537 x i8]") ||
+		strings.Contains(hugeStructIR, "llvm.stacksave") || strings.Contains(hugeStructIR, "llvm.memset") {
+		t.Fatalf("oversized nested-array comparison did not use exactly two planned managed snapshots:\n%s", hugeStructIR)
 	}
 	if strings.Contains(immutableIR, "load [32 x i8]") {
 		t.Fatalf("immutable comparison retained unused aggregate loads:\n%s", immutableIR)

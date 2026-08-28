@@ -2330,15 +2330,17 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				yaddr = p.arrayCompareAddr(b, v.Y)
 			}
 			var x, y llssa.Expr
-			if !xaddr.IsNil() && !yaddr.IsNil() {
-				// The runtime helper consumes the proven-stable addresses. Keep
-				// typed placeholders for ArrayBinOp without materializing the
-				// otherwise unused aggregate loads.
-				x = p.prog.Zero(p.type_(v.X.Type(), llssa.InGo))
-				y = p.prog.Zero(p.type_(v.Y.Type(), llssa.InGo))
-			} else {
+			if xaddr.IsNil() {
 				x = p.compileValueAs(b, v.X, v.Y.Type())
+			} else {
+				// ArrayBinOp consumes the proven-stable address, so retain only a
+				// typed placeholder instead of materializing the aggregate load.
+				x = p.prog.Zero(p.type_(v.Y.Type(), llssa.InGo))
+			}
+			if yaddr.IsNil() {
 				y = p.compileValueAs(b, v.Y, v.X.Type())
+			} else {
+				y = p.prog.Zero(p.type_(v.X.Type(), llssa.InGo))
 			}
 			ret = b.ArrayBinOp(v.Op, x, y, xaddr, yaddr)
 		} else {
@@ -3148,9 +3150,10 @@ func (p *context) arrayCompareAddr(b llssa.Builder, v ssa.Value) llssa.Expr {
 }
 
 // canElideArrayCompareLoad reports whether every executable use of load is a
-// non-inline equality comparison whose two operands can both be read from
-// proven-stable local storage. Such comparisons never consume the aggregate
-// value itself, so generating its load only increases the pre-optimization IR.
+// non-inline equality comparison that can read this operand from proven-stable
+// local storage. Such comparisons never consume the aggregate value itself, so
+// generating its load only increases the pre-optimization IR. The other
+// operand may independently require a value-preserving snapshot.
 func canElideArrayCompareLoad(load *ssa.UnOp) bool {
 	if load == nil || load.Op != token.MUL {
 		return false
@@ -3171,16 +3174,10 @@ func canElideArrayCompareLoad(load *ssa.UnOp) bool {
 		if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
 			return false
 		}
-		var other ssa.Value
 		switch {
 		case bin.X == load:
-			other = bin.Y
 		case bin.Y == load:
-			other = bin.X
 		default:
-			return false
-		}
-		if _, ok := immutableLocalArrayLoadAddr(other); !ok {
 			return false
 		}
 	}

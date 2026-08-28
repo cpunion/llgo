@@ -2697,8 +2697,39 @@ func TestArrayEqualLowering(t *testing.T) {
 		t.Fatalf("medium scalar array comparison was expanded element by element:\n%s", medium)
 	}
 	large := compare("large", types.Typ[types.Uint8], 1024, token.NEQ, 0).String()
-	if !strings.Contains(large, ".memequal") || strings.Contains(large, "extractvalue [1024 x i8]") {
+	if !strings.Contains(large, ".memequal") || strings.Contains(large, "extractvalue [1024 x i8]") ||
+		strings.Contains(large, "llvm.memset") || strings.Count(large, "alloca [1024 x i8]") != 2 {
 		t.Fatalf("large regular-memory array comparison was not lowered to memequal:\n%s", large)
+	}
+	oversized := compare("oversized", types.Typ[types.Uint8], 65537, token.EQL, 0).String()
+	if strings.Count(oversized, "/runtime/internal/runtime.AllocZ") != 2 ||
+		!strings.Contains(oversized, ".memequal") || strings.Contains(oversized, "alloca [65537 x i8]") ||
+		strings.Contains(oversized, "llvm.stacksave") || strings.Contains(oversized, "llvm.memset") {
+		t.Fatalf("oversized regular-memory array comparison did not use two managed snapshots:\n%s", oversized)
+	}
+	budgeted := compare("budgeted", types.Typ[types.Uint8], 40000, token.EQL, 0).String()
+	if strings.Count(budgeted, "/runtime/internal/runtime.AllocZ") != 1 ||
+		strings.Count(budgeted, "alloca [40000 x i8]") != 1 ||
+		!strings.Contains(budgeted, "llvm.stacksave") || strings.Contains(budgeted, "llvm.memset") {
+		t.Fatalf("combined array scratch budget did not use one stack and one managed snapshot:\n%s", budgeted)
+	}
+	nestedArrayElement := types.NewArray(types.Typ[types.Float64], 5000)
+	nestedArray := compare("nestedArray", nestedArrayElement, 2, token.EQL, 0).String()
+	if strings.Count(nestedArray, "/runtime/internal/runtime.AllocZ") != 2 ||
+		strings.Count(nestedArray, ".arrayequalFloat64") != 1 ||
+		strings.Contains(nestedArray, "load [5000 x double]") ||
+		strings.Contains(nestedArray, "alloca [5000 x double]") {
+		t.Fatalf("nested array loop did not reuse its indexed element addresses:\n%s", nestedArray)
+	}
+	nestedStructElement := types.NewStruct(
+		[]*types.Var{types.NewField(token.NoPos, nil, "Values", nestedArrayElement, false)}, nil,
+	)
+	nestedStruct := compare("nestedStruct", nestedStructElement, 2, token.EQL, 0).String()
+	if strings.Count(nestedStruct, "/runtime/internal/runtime.AllocZ") != 2 ||
+		strings.Count(nestedStruct, ".arrayequalFloat64") != 1 ||
+		strings.Contains(nestedStruct, "load [5000 x double]") ||
+		strings.Contains(nestedStruct, "alloca [5000 x double]") {
+		t.Fatalf("nested struct array loop did not propagate its field addresses:\n%s", nestedStruct)
 	}
 	nonMemory := compare("nonmemory", types.Typ[types.Float64], 5, token.EQL, 0).String()
 	if !strings.Contains(nonMemory, ".arrayequalFloat64") || strings.Contains(nonMemory, "extractvalue [5 x double]") || strings.Contains(nonMemory, ".arrayequalImpl") {

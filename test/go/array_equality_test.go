@@ -73,6 +73,19 @@ func TestArrayEqualityUsesElementSemantics(t *testing.T) {
 	if a == b {
 		t.Fatal("arrays with unequal first elements compared equal")
 	}
+
+	// Struct fields obey the same left-to-right short circuit inside an array
+	// element. The unequal tag must suppress the dynamically uncomparable
+	// payload field.
+	type guarded struct {
+		tag     int
+		payload any
+	}
+	left := [2]guarded{{tag: 0, payload: []int{1}}}
+	right := [2]guarded{{tag: 1, payload: []int{1}}}
+	if left == right {
+		t.Fatal("arrays with unequal leading struct fields compared equal")
+	}
 }
 
 func TestArrayEqualityPropagatesInterfacePanic(t *testing.T) {

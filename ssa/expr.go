@@ -24,6 +24,7 @@ import (
 	"go/types"
 	"log"
 
+	llabi "github.com/xgo-dev/llgo/internal/abi"
 	runtimeabi "github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llvm"
 )
@@ -898,26 +899,9 @@ func (b Builder) binOp(
 				return Expr{llvm.CreateICmp(b.impl, pred, x.impl, y.impl), tret}
 			}
 		case vkArray:
-			return b.arrayBinOp(op, x, y, Nil, Nil)
+			return b.aggregateBinOp(op, x, y, Nil, Nil)
 		case vkStruct:
-			typ := x.raw.Type.Underlying().(*types.Struct)
-			ret := prog.BoolVal(true)
-			for i, n := 0, typ.NumFields(); i < n; i++ {
-				if typ.Field(i).Name() == "_" {
-					continue
-				}
-				ft := prog.Type(typ.Field(i).Type(), InGo)
-				fx := b.impl.CreateExtractValue(x.impl, i, "")
-				fy := b.impl.CreateExtractValue(y.impl, i, "")
-				r := b.BinOp(token.EQL, Expr{fx, ft}, Expr{fy, ft})
-				ret = Expr{b.impl.CreateAnd(ret.impl, r.impl, ""), tret}
-			}
-			switch op {
-			case token.EQL:
-				return ret
-			case token.NEQ:
-				return Expr{b.impl.CreateNot(ret.impl, ""), tret}
-			}
+			return b.aggregateBinOp(op, x, y, Nil, Nil)
 		case vkSlice:
 			dx := b.impl.CreateExtractValue(x.impl, 0, "")
 			dy := b.impl.CreateExtractValue(y.impl, 0, "")
@@ -1009,6 +993,12 @@ func ArrayEqualNumericRuntimeHelper(t *types.Array) string {
 	}
 }
 
+// ArrayEqualScratchAllocZ is the logical identity of an oversized
+// compiler-owned array snapshot. Its physical implementation is runtime.AllocZ
+// but keeping a distinct identity lets whole-program planning prove the exact
+// private raw/plain occurrence independently of source heap allocations.
+const ArrayEqualScratchAllocZ = "ArrayEqualScratchAllocZ"
+
 // ArrayBinOp compares two array values while reusing their backing addresses
 // when the frontend has proved that those addresses still hold the loaded
 // values. A nil address falls back to a value-preserving temporary.
@@ -1020,6 +1010,104 @@ func (b Builder) ArrayBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
 		panic("ArrayBinOp requires an equality operator")
 	}
 	return b.arrayBinOp(op, x, y, xaddr, yaddr)
+}
+
+func (b Builder) aggregateBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
+	switch x.kind {
+	case vkArray:
+		return b.arrayBinOp(op, x, y, xaddr, yaddr)
+	case vkStruct:
+		return b.structBinOp(op, x, y, xaddr, yaddr)
+	default:
+		return b.BinOp(op, x, y)
+	}
+}
+
+// aggregateEqualityNeedsValue reports whether a comparison still needs the
+// aggregate SSA value when a stable address is available. Structs and
+// non-inline arrays can recursively consume addresses; tiny inline arrays need
+// one bounded load before their extractvalue comparisons.
+func aggregateEqualityNeedsValue(typ Type) bool {
+	switch typ.kind {
+	case vkStruct:
+		return false
+	case vkArray:
+		return CanInlineArrayEqual(typ.raw.Type.Underlying().(*types.Array))
+	default:
+		return true
+	}
+}
+
+func (b Builder) structBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
+	if op != token.EQL && op != token.NEQ {
+		panic("structBinOp requires an equality operator")
+	}
+	prog := b.Prog
+	typ := x.raw.Type.Underlying().(*types.Struct)
+	if !xaddr.IsNil() {
+		xaddr = b.PtrCast(prog.Pointer(x.Type), xaddr)
+	}
+	if !yaddr.IsNil() {
+		yaddr = b.PtrCast(prog.Pointer(y.Type), yaddr)
+	}
+	fields := make([]int, 0, typ.NumFields())
+	for index := 0; index < typ.NumFields(); index++ {
+		if typ.Field(index).Name() != "_" {
+			fields = append(fields, index)
+		}
+	}
+	if len(fields) == 0 {
+		return prog.BoolVal(op == token.EQL)
+	}
+	logical := b.blk
+	blocks := b.Func.MakeBlocks(len(fields) + 1)
+	continuations, done := blocks[:len(fields)], blocks[len(fields)]
+	mismatchBlocks := make([]BasicBlock, 0, len(fields))
+	for fieldIndex, index := range fields {
+		fieldType := prog.Type(typ.Field(index).Type(), InGo)
+		leftAddr, rightAddr := Nil, Nil
+		var left, right Expr
+		if !xaddr.IsNil() {
+			leftAddr = b.FieldAddrKnownNonNil(xaddr, index)
+			if aggregateEqualityNeedsValue(fieldType) {
+				left = b.Load(leftAddr)
+			} else {
+				left = prog.Zero(fieldType)
+			}
+		} else {
+			left = Expr{b.impl.CreateExtractValue(x.impl, index, ""), fieldType}
+		}
+		if !yaddr.IsNil() {
+			rightAddr = b.FieldAddrKnownNonNil(yaddr, index)
+			if aggregateEqualityNeedsValue(fieldType) {
+				right = b.Load(rightAddr)
+			} else {
+				right = prog.Zero(fieldType)
+			}
+		} else {
+			right = Expr{b.impl.CreateExtractValue(y.impl, index, ""), fieldType}
+		}
+		equal := b.aggregateBinOp(token.EQL, left, right, leftAddr, rightAddr)
+		mismatchBlocks = append(mismatchBlocks, b.blk)
+		next := continuations[fieldIndex]
+		b.If(equal, next, done)
+		b.SetBlockEx(next, AtEnd, true)
+	}
+	matched := b.blk
+	b.Jump(done)
+	b.SetBlockEx(done, AtEnd, false)
+	predecessors := append(mismatchBlocks, matched)
+	result := b.Phi(prog.Bool())
+	result.AddIncoming(b, predecessors, func(index int, _ BasicBlock) Expr {
+		return prog.BoolVal(index == len(mismatchBlocks))
+	})
+	b.blk = logical
+	b.blk.last = done.last
+	ret := result.Expr
+	if op == token.NEQ {
+		ret.impl = llvm.CreateNot(b.impl, ret.impl)
+	}
+	return ret
 }
 
 func (b Builder) arrayBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
@@ -1055,20 +1143,15 @@ func (b Builder) arrayBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
 
 func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array, helper string) Expr {
 	prog := b.Prog
+	xManaged, yManaged := b.arrayEqualScratchPlan(x, y, xaddr, yaddr)
 	var sp Expr
-	if xaddr.IsNil() || yaddr.IsNil() {
+	if xaddr.IsNil() && !xManaged || yaddr.IsNil() && !yManaged {
 		sp = b.StackSave()
 	}
-	if xaddr.IsNil() {
-		xaddr = b.toPtr(x)
-	} else {
-		xaddr = b.PtrCast(prog.VoidPtr(), xaddr)
-	}
-	if yaddr.IsNil() {
-		yaddr = b.toPtr(y)
-	} else {
-		yaddr = b.PtrCast(prog.VoidPtr(), yaddr)
-	}
+	xaddr = b.arrayEqualOperandAddr(x, xaddr, xManaged)
+	yaddr = b.arrayEqualOperandAddr(y, yaddr, yManaged)
+	xaddr = b.PtrCast(prog.VoidPtr(), xaddr)
+	yaddr = b.PtrCast(prog.VoidPtr(), yaddr)
 	var ret Expr
 	switch helper {
 	case "memequal":
@@ -1095,6 +1178,58 @@ func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array, helper 
 	return ret
 }
 
+// ArrayEqualGoTypeNeedsManagedScratch reports whether missingAddresses copies
+// of typ exceed the complete compiler-temporary native-stack budget. It is the
+// frontend projection of arrayEqualScratchPlan.
+func (p Program) ArrayEqualGoTypeNeedsManagedScratch(typ types.Type, missingAddresses int) bool {
+	if typ == nil || missingAddresses <= 0 {
+		return false
+	}
+	size := p.PhysicalSizeOfGoType(typ)
+	return size < 0 || uint64(size) > llabi.MaxImplicitStackVarSize/uint64(missingAddresses)
+}
+
+// arrayEqualScratchPlan packs missing snapshots into one bounded native-stack
+// budget and moves only the overflow to managed storage. Array operands have
+// identical layouts, but keeping the calculation per operand also handles a
+// future assignable representation without changing the materialization API.
+func (b Builder) arrayEqualScratchPlan(x, y, xaddr, yaddr Expr) (xManaged, yManaged bool) {
+	remaining := uint64(llabi.MaxImplicitStackVarSize)
+	managed := func(value, addr Expr) bool {
+		if !addr.IsNil() {
+			return false
+		}
+		size := b.Prog.SizeOf(value.Type)
+		if size > remaining {
+			return true
+		}
+		remaining -= size
+		return false
+	}
+	xManaged = managed(x, xaddr)
+	yManaged = managed(y, yaddr)
+	return
+}
+
+// arrayEqualOperandAddr materializes an address only when the frontend could
+// not preserve one. Small snapshots use an uninitialized typed stack slot: the
+// following full-width store must not be preceded by Alloc's redundant zeroing.
+// Snapshots that overflow the shared temporary budget use an explicit managed
+// allocation so a plain function cannot silently consume an unbounded native
+// stack.
+func (b Builder) arrayEqualOperandAddr(value, addr Expr, managed bool) Expr {
+	if !addr.IsNil() {
+		return b.PtrCast(b.Prog.Pointer(value.Type), addr)
+	}
+	if managed {
+		addr = b.AllocZAs(value.Type, ArrayEqualScratchAllocZ)
+	} else {
+		addr = b.AllocaT(value.Type)
+	}
+	b.Store(addr, value)
+	return addr
+}
+
 // arrayEqualLoop compares a fixed array with one reusable element-lowering
 // site. This avoids both per-element IR expansion and a full runtime type
 // descriptor. The latter is important for named runtime aggregates: equality
@@ -1107,18 +1242,9 @@ func (b Builder) arrayEqualLoop(x, y, xaddr, yaddr Expr, length int64) Expr {
 	logical := b.blk
 	xPointer := prog.Pointer(x.Type)
 	yPointer := prog.Pointer(y.Type)
-	if xaddr.IsNil() {
-		xaddr = b.AllocaT(x.Type)
-		b.Store(xaddr, x)
-	} else {
-		xaddr = b.PtrCast(xPointer, xaddr)
-	}
-	if yaddr.IsNil() {
-		yaddr = b.AllocaT(y.Type)
-		b.Store(yaddr, y)
-	} else {
-		yaddr = b.PtrCast(yPointer, yaddr)
-	}
+	xManaged, yManaged := b.arrayEqualScratchPlan(x, y, xaddr, yaddr)
+	xaddr = b.PtrCast(xPointer, b.arrayEqualOperandAddr(x, xaddr, xManaged))
+	yaddr = b.PtrCast(yPointer, b.arrayEqualOperandAddr(y, yaddr, yManaged))
 
 	blocks := b.Func.MakeBlocks(3)
 	header, body, done := blocks[0], blocks[1], blocks[2]
@@ -1129,9 +1255,15 @@ func (b Builder) arrayEqualLoop(x, y, xaddr, yaddr Expr, length int64) Expr {
 	b.If(b.BinOp(token.LSS, index.Expr, prog.IntVal(uint64(length), prog.Int())), body, done)
 
 	b.SetBlockEx(body, AtEnd, true)
-	leftElem := b.Load(b.IndexAddrUnchecked(xaddr, index.Expr))
-	rightElem := b.Load(b.IndexAddrUnchecked(yaddr, index.Expr))
-	equal := b.BinOp(token.EQL, leftElem, rightElem)
+	leftElemAddr := b.IndexAddrUnchecked(xaddr, index.Expr)
+	rightElemAddr := b.IndexAddrUnchecked(yaddr, index.Expr)
+	elementType := prog.Elem(x.Type)
+	leftElem, rightElem := prog.Zero(elementType), prog.Zero(elementType)
+	if aggregateEqualityNeedsValue(elementType) {
+		leftElem = b.Load(leftElemAddr)
+		rightElem = b.Load(rightElemAddr)
+	}
+	equal := b.aggregateBinOp(token.EQL, leftElem, rightElem, leftElemAddr, rightElemAddr)
 	body = b.blk
 	nextIndex := b.BinOp(token.ADD, index.Expr, prog.IntVal(1, prog.Int()))
 	b.If(equal, header, done)

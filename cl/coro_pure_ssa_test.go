@@ -383,6 +383,28 @@ func Root(left, right Value) bool { return left == right }
 			helpers: "memequal",
 		},
 		{
+			name: "oversized regular memory array",
+			source: `package foo
+func Root(left, right [65537]byte) bool { return left == right }
+`,
+			helpers: "ArrayEqualScratchAllocZ,memequal",
+		},
+		{
+			name: "combined regular memory array scratch budget",
+			source: `package foo
+func Root(left, right [40000]byte) bool { return left == right }
+`,
+			helpers: "ArrayEqualScratchAllocZ,memequal",
+		},
+		{
+			name: "oversized nested regular memory array",
+			source: `package foo
+type Value struct { Bytes [65537]byte }
+func Root(left, right Value) bool { return left == right }
+`,
+			helpers: "ArrayEqualScratchAllocZ,memequal",
+		},
+		{
 			name: "non-regular scalar array",
 			source: `package foo
 type Value struct { Floats [5]float64 }
@@ -440,10 +462,12 @@ func memequal(left, right unsafe.Pointer, size uintptr, align uint8) bool {
 func arrayequalFloat64(left, right unsafe.Pointer, length uintptr) bool {
 	return left == right || length == 0
 }
+func AllocZ(size uintptr) unsafe.Pointer { return nil }
 `)
 	fooPkg := testProg.addPackage(t, "foo", `package foo
 func Plain(left, right [1024]byte) bool { return left == right }
 func Numeric(left, right [5]float64) bool { return left == right }
+func Huge(left, right [65537]byte) bool { return left == right }
 func Physical(left, right [1024]byte) bool { return left == right }
 `)
 	testProg.ssa.Build()
@@ -463,9 +487,11 @@ func Physical(left, right [1024]byte) bool { return left == right }
 	}
 	plain := fooPkg.ssa.Func("Plain")
 	numeric := fooPkg.ssa.Func("Numeric")
+	huge := fooPkg.ssa.Func("Huge")
 	physical := fooPkg.ssa.Func("Physical")
 	memequal := runtimePkg.ssa.Func("memequal")
 	arrayequalFloat64 := runtimePkg.ssa.Func("arrayequalFloat64")
+	allocZ := runtimePkg.ssa.Func("AllocZ")
 	occurrences := []struct {
 		owner  *ssa.Function
 		name   string
@@ -473,6 +499,7 @@ func Physical(left, right [1024]byte) bool { return left == right }
 	}{
 		{owner: plain, name: "memequal", target: memequal},
 		{owner: numeric, name: "arrayequalFloat64", target: arrayequalFloat64},
+		{owner: huge, name: "memequal", target: memequal},
 		{owner: physical, name: "memequal", target: memequal},
 	}
 	for _, occurrence := range occurrences {
@@ -496,6 +523,7 @@ func Physical(left, right [1024]byte) bool { return left == right }
 	plan, err := coro.AnalyzeSSA(fooPkg.ssa.Prog, coro.Roots{
 		{Function: plain, Demand: coro.AsyncDemand},
 		{Function: numeric, Demand: coro.AsyncDemand},
+		{Function: huge, Demand: coro.AsyncDemand},
 		{Function: physical, Demand: coro.AsyncDemand},
 	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -523,7 +551,13 @@ func Physical(left, right [1024]byte) bool { return left == right }
 			t.Fatalf("%s array equality %s call = %+v, present=%t; want exact raw/plain occurrence", occurrence.owner.Name(), occurrence.name, call, planned)
 		}
 	}
-	for _, owner := range []*ssa.Function{plain, numeric} {
+	if helper, planned := plan.ResolveLoweredCall(huge, llssa.ArrayEqualScratchAllocZ); !planned || helper != allocZ {
+		t.Fatalf("Huge array equality scratch edge = %v, present=%t; want exact runtime AllocZ helper", helper, planned)
+	}
+	if call, planned := plan.ResolveLoweredCallRecord(huge, llssa.ArrayEqualScratchAllocZ); !planned || call.Target != allocZ || !call.RawPlain {
+		t.Fatalf("Huge array equality scratch call = %+v, present=%t; want private raw/plain occurrence", call, planned)
+	}
+	for _, owner := range []*ssa.Function{plain, numeric, huge} {
 		plainPlan, planned := plan.FunctionPlan(owner)
 		if !planned || plainPlan.Effect != coro.NoSuspend || plainPlan.Emission != coro.EmitPlain ||
 			plainPlan.Primary != coro.PrimaryPlain || plainPlan.FuncRep != coro.DirectPlain {
@@ -534,7 +568,7 @@ func Physical(left, right [1024]byte) bool { return left == right }
 	if !planned || physicalPlan.Effect != coro.YieldOnly || physicalPlan.Emission != coro.EmitCoroutine {
 		t.Fatalf("Physical plan = %+v, present=%t; want independently colored coroutine body", physicalPlan, planned)
 	}
-	for _, helper := range []*ssa.Function{memequal, arrayequalFloat64} {
+	for _, helper := range []*ssa.Function{memequal, arrayequalFloat64, allocZ} {
 		helperPlan, planned := plan.FunctionPlan(helper)
 		if !planned || helperPlan.External != coro.Defined || helperPlan.Emission != coro.EmitRawPlain ||
 			helperPlan.ManagedDemand != coro.NoDemand || !helperPlan.RawPlainDemand ||
@@ -584,6 +618,13 @@ func Physical(left, right [1024]byte) bool { return left == right }
 				t.Fatalf("%s array equality retained redundant lowering %q:\n%s", occurrence.name, forbidden, occurrence.body)
 			}
 		}
+	}
+	hugeBody := module.NamedFunction("foo.Huge").String()
+	if strings.Count(hugeBody, "runtime.AllocZ") != 2 ||
+		strings.Count(hugeBody, "runtime.memequal") != 1 ||
+		strings.Contains(hugeBody, "alloca [65537 x i8]") ||
+		strings.Contains(hugeBody, "llvm.stacksave") || strings.Contains(hugeBody, "llvm.memset") {
+		t.Fatalf("huge planned array equality emitted redundant or unplanned storage:\n%s", hugeBody)
 	}
 	runCoroABITestPipeline(t, prog, module)
 	if resume := module.NamedFunction("foo.Physical$coro.resume"); resume.IsNil() {

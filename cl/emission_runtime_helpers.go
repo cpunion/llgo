@@ -642,6 +642,9 @@ type coroCompilerLoweredRuntimeHelperPolicy struct {
 // atomically. Keep that occurrence plain until computation itself has a
 // resumable continuation model; invalid pointers and sizes are impossible
 // because LLSSA derives every operand from the compared values and exact type.
+// An oversized snapshot allocation follows the same private raw/plain lane:
+// ArrayBinOp needs its pointer synchronously, and the frozen AllocZ closure is
+// the authority proving that direct occurrence.
 func coroCompilerLoweredRuntimeHelperPolicyFor(instr ssa.Instruction, helper string) coroCompilerLoweredRuntimeHelperPolicy {
 	policy := coroCompilerLoweredRuntimeHelperPolicy{plainRepresentation: true}
 	switch helper {
@@ -650,7 +653,8 @@ func coroCompilerLoweredRuntimeHelperPolicyFor(instr ssa.Instruction, helper str
 		policy.rawPlain = true
 		policy.plainRepresentation = false
 		policy.rawABIReference = true
-	case "memequal", "arrayequalFloat32", "arrayequalFloat64", "arrayequalComplex64", "arrayequalComplex128":
+	case "memequal", "arrayequalFloat32", "arrayequalFloat64", "arrayequalComplex64", "arrayequalComplex128",
+		llssa.ArrayEqualScratchAllocZ:
 		binop, ok := instr.(*ssa.BinOp)
 		policy.rawPlain = ok && (binop.Op == token.EQL || binop.Op == token.NEQ) &&
 			coroPureAggregateType(binop.X.Type())
@@ -1621,7 +1625,7 @@ func emissionCallNeedsManagedCoroResultSlot(ctx *context, call *ssa.Call) bool {
 }
 
 func coroRuntimeHelperTargetName(logicalName string) string {
-	if logicalName == coroManagedFrameSlotAllocZCall {
+	if logicalName == coroManagedFrameSlotAllocZCall || logicalName == llssa.ArrayEqualScratchAllocZ {
 		return "AllocZ"
 	}
 	return logicalName
@@ -1737,25 +1741,87 @@ func (u *EmissionUniverse) binOpRuntimeHelpers(ctx *context, op *ssa.BinOp, add 
 				add("IfaceType")
 			}
 		}
-	case *types.Array:
+	case *types.Array, *types.Struct:
 		if op.Op == token.EQL || op.Op == token.NEQ {
 			helpers := make(map[string]struct{})
 			if coroAggregateEqualityRuntimeHelpers(ctx.prog, typ, make(map[types.Type]bool), helpers) {
-				for helper := range helpers {
-					add(helper)
+				if coroAggregateEqualityNeedsManagedScratch(ctx, op) {
+					helpers[llssa.ArrayEqualScratchAllocZ] = struct{}{}
 				}
-			}
-		}
-	case *types.Struct:
-		if op.Op == token.EQL || op.Op == token.NEQ {
-			helpers := make(map[string]struct{})
-			if coroAggregateEqualityRuntimeHelpers(ctx.prog, typ, make(map[types.Type]bool), helpers) {
 				for helper := range helpers {
 					add(helper)
 				}
 			}
 		}
 	}
+}
+
+// coroAggregateEqualityNeedsManagedScratch mirrors the address materialization
+// in LLSSA aggregate equality. A top-level array operand may reuse
+// proven-stable local storage. Once a loop has materialized its outer array,
+// element and struct-field addresses propagate through every nested aggregate;
+// a top-level struct still starts as a value because the frontend has no source
+// address for it. Only snapshots over the shared native-stack budget introduce
+// ArrayEqualScratchAllocZ.
+func coroAggregateEqualityNeedsManagedScratch(ctx *context, op *ssa.BinOp) bool {
+	if ctx == nil || ctx.prog == nil || op == nil || op.X == nil || op.Y == nil {
+		return false
+	}
+	typ := ctx.patchType(op.X.Type())
+	leftAddress, rightAddress := false, false
+	if _, ok := types.Unalias(typ).Underlying().(*types.Array); ok {
+		_, leftAddress = immutableLocalArrayLoadAddr(op.X)
+		_, rightAddress = immutableLocalArrayLoadAddr(op.Y)
+	}
+	return coroEqualityTypeNeedsManagedScratch(
+		ctx.prog, typ, leftAddress, rightAddress, make(map[types.Type]bool),
+	)
+}
+
+func coroEqualityTypeNeedsManagedScratch(
+	prog llssa.Program,
+	typ types.Type,
+	leftAddress, rightAddress bool,
+	visiting map[types.Type]bool,
+) bool {
+	if prog == nil || typ == nil || visiting[typ] {
+		return false
+	}
+	visiting[typ] = true
+	defer delete(visiting, typ)
+
+	switch underlying := types.Unalias(typ).Underlying().(type) {
+	case *types.Array:
+		if llssa.CanInlineArrayEqual(underlying) {
+			return false
+		}
+		missingAddresses := 0
+		if !leftAddress {
+			missingAddresses++
+		}
+		if !rightAddress {
+			missingAddresses++
+		}
+		if prog.ArrayEqualGoTypeNeedsManagedScratch(typ, missingAddresses) {
+			return true
+		}
+		if prog.ArrayEqualRuntimeHelper(underlying) != "" {
+			return false
+		}
+		return coroEqualityTypeNeedsManagedScratch(
+			prog, underlying.Elem(), true, true, visiting,
+		)
+	case *types.Struct:
+		for index := 0; index < underlying.NumFields(); index++ {
+			field := underlying.Field(index)
+			if field.Name() != "_" && coroEqualityTypeNeedsManagedScratch(
+				prog, field.Type(), leftAddress, rightAddress, visiting,
+			) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func constantIntegerKnownNonZero(value ssa.Value) bool {

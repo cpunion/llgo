@@ -2414,6 +2414,9 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 			!coroAggregateEqualityRuntimeHelpers(a.ctx.prog, left, make(map[types.Type]bool), helperSet) {
 			return "aggregate equality is not an exact supported comparable layout"
 		}
+		if coroAggregateEqualityNeedsManagedScratch(a.ctx, op) {
+			helperSet[llssa.ArrayEqualScratchAllocZ] = struct{}{}
+		}
 		for _, typ := range []types.Type{left, right, a.typeOf(op.Type())} {
 			if err := validateCoroPhysicalSSAValueType(typ); err != nil {
 				return "aggregate equality has unsupported physical value type: " + err.Error()
