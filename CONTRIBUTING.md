@@ -15,20 +15,23 @@ LLGo uses fork-first CI so work-in-progress commits do not consume the
    pass. Keep this pull request available for the upstream reviewer.
 4. Open the upstream pull request from the same feature branch. Complete the
    fork-CI checkbox and paste the fork test PR URL in the template. The
-   `PR Metadata` check verifies that both pull requests use the same head
-   repository and commit.
+   `review readiness` check verifies the required template format and that
+   both pull requests use the same head repository, branch, and commit.
 
-After the lightweight upstream checks pass, a reviewer inspects the change and
-the linked fork CI. The reviewer adds `need-review` to authorize the relevant
-full CI in `xgo-dev/llgo`. Pushing another commit reruns fork CI and invalidates
-the fork-PR evidence until both pull requests point to the same commit again.
+The pull request is not ready for review while `review readiness` fails. After
+the lightweight upstream checks pass, a reviewer inspects the change and the
+linked fork CI. The reviewer adds `need-review` to authorize the relevant full
+CI in `xgo-dev/llgo`. Pushing another commit reruns fork CI and invalidates the
+fork-PR evidence until both pull requests point to the same branch and commit
+again.
 
 Until `need-review` is present, the upstream `full CI authorization` check
-fails intentionally. Repository maintainers must configure this check as a
-required status check on the default branch so a pull request cannot merge
-without reviewer-authorized full CI. The `need-review` label must also be
-created once in `xgo-dev/llgo`; only users with triage or write permission
-should be able to apply it.
+fails intentionally. Repository maintainers must configure both `review
+readiness` and `full CI authorization` as required status checks on the default
+branch so a pull request cannot merge with an incomplete template or without
+reviewer-authorized full CI. The `need-review` label must also be created once
+in `xgo-dev/llgo`; only users with triage or write permission should be able to
+apply it.
 
 ## Request GOROOT compatibility tests
 

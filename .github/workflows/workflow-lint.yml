@@ -6,16 +6,14 @@ on:
     paths:
       - ".github/actionlint.yaml"
       - ".github/actions/**"
-      - ".github/scripts/ci_gate.py"
-      - ".github/scripts/test_ci_gate.py"
+      - ".github/scripts/**"
       - ".github/workflows/**"
   pull_request:
     branches: ["**"]
     paths:
       - ".github/actionlint.yaml"
       - ".github/actions/**"
-      - ".github/scripts/ci_gate.py"
-      - ".github/scripts/test_ci_gate.py"
+      - ".github/scripts/**"
       - ".github/workflows/**"
 
 permissions:
@@ -36,3 +34,5 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -shellcheck= -pyflakes=
       - name: Test CI gate decisions
         run: python3 .github/scripts/test_ci_gate.py
+      - name: Test PR metadata validation
+        run: node --test .github/scripts/test_pr_metadata.js

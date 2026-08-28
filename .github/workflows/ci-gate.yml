@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   gate:
@@ -26,6 +27,34 @@ jobs:
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
 
+      - id: review-readiness
+        name: Validate review readiness
+        if: github.event_name == 'pull_request' && github.repository == 'xgo-dev/llgo'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ github.token }}
+          result-encoding: string
+          script: |
+            const path = require('path');
+            const {validatePullRequest} = require(path.join(
+              process.env.GITHUB_WORKSPACE,
+              '.github/scripts/pr_metadata.js',
+            ));
+
+            try {
+              const evidence = await validatePullRequest({
+                body: context.payload.pull_request.body,
+                upstreamRepository: context.payload.repository.full_name,
+                source: context.payload.pull_request,
+                github,
+              });
+              core.notice(`Review-ready fork evidence: ${evidence.url}`);
+              return 'true';
+            } catch (error) {
+              core.notice(`Full CI remains blocked: ${error.message}`);
+              return 'false';
+            }
+
       - id: gate
         name: Decide whether heavy CI may run
         env:
@@ -38,6 +67,7 @@ jobs:
           CI_EVENT_ACTION: ${{ github.event.action }}
           CI_EVENT_LABEL: ${{ github.event.label.name }}
           CI_PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          CI_REVIEW_READY: ${{ steps.review-readiness.outputs.result }}
         run: python3 .github/scripts/ci_gate.py >> "$GITHUB_OUTPUT"
 
       - name: Report decision

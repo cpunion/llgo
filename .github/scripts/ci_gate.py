@@ -22,6 +22,7 @@ class Event:
     action: str = ""
     event_label: str = ""
     pr_labels: frozenset[str] = frozenset()
+    review_ready: bool = False
 
 
 def decide(event: Event) -> tuple[bool, str]:
@@ -45,6 +46,9 @@ def decide(event: Event) -> tuple[bool, str]:
 
     if event.repository != UPSTREAM_REPOSITORY:
         return False, "fork pull requests reuse the feature-branch push CI"
+
+    if not event.review_ready:
+        return False, "pull request template and matching fork CI evidence are not review-ready"
 
     if REVIEW_LABEL not in event.pr_labels:
         return False, f"waiting for the {REVIEW_LABEL} label"
@@ -72,6 +76,7 @@ def _event_from_environment() -> Event:
         action=os.environ.get("CI_EVENT_ACTION", ""),
         event_label=os.environ.get("CI_EVENT_LABEL", ""),
         pr_labels=labels,
+        review_ready=os.environ.get("CI_REVIEW_READY", "").lower() == "true",
     )
 
 

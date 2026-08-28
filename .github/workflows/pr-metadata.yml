@@ -9,15 +9,63 @@ permissions:
   pull-requests: read
 
 jobs:
+  review-readiness:
+    name: review readiness
+    if: github.repository == 'xgo-dev/llgo'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out metadata validator
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts/pr_metadata.js
+          sparse-checkout-cone-mode: false
+      - name: Validate fork test PR
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const path = require('path');
+            const {validatePullRequest} = require(path.join(
+              process.env.GITHUB_WORKSPACE,
+              '.github/scripts/pr_metadata.js',
+            ));
+
+            try {
+              const evidence = await validatePullRequest({
+                body: context.payload.pull_request.body,
+                upstreamRepository: context.payload.repository.full_name,
+                source: context.payload.pull_request,
+                github,
+              });
+              core.notice(
+                `Fork CI evidence matches ${context.payload.pull_request.head.label}` +
+                `@${context.payload.pull_request.head.sha}: ${evidence.url}`,
+              );
+            } catch (error) {
+              core.setFailed(error.message);
+            }
+
   full-ci-authorization:
     name: full CI authorization
-    if: github.repository == 'xgo-dev/llgo'
+    needs: review-readiness
+    if: always() && github.repository == 'xgo-dev/llgo'
     runs-on: ubuntu-latest
     steps:
       - name: Require reviewer authorization
         env:
+          REVIEW_READY: ${{ needs.review-readiness.result == 'success' }}
           HAS_NEED_REVIEW: ${{ contains(github.event.pull_request.labels.*.name, 'need-review') }}
         run: |
+          if [[ "$REVIEW_READY" != "true" ]]; then
+            {
+              echo "### Review is blocked"
+              echo
+              echo "Complete the pull request template and link fork CI from the same repository, branch, and commit."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Review blocked::The review readiness check must pass before reviewer authorization."
+            exit 1
+          fi
+
           if [[ "$HAS_NEED_REVIEW" != "true" ]]; then
             {
               echo "### Full CI is blocked"
@@ -32,49 +80,5 @@ jobs:
           {
             echo "### Full CI authorized"
             echo
-            echo "The \`need-review\` label is present. Relevant full workflows are authorized for this SHA."
+            echo "The template and fork evidence passed review readiness, and the \`need-review\` label is present."
           } >> "$GITHUB_STEP_SUMMARY"
-
-  fork-ci-evidence:
-    name: fork CI evidence
-    if: github.repository == 'xgo-dev/llgo'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate fork test PR
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const body = context.payload.pull_request.body || '';
-            const checked = /-\s*\[[xX]\]\s*I created a test PR in my fork and its relevant CI passed\./.test(body);
-            if (!checked) {
-              core.setFailed('Check the fork-CI confirmation in the pull request template.');
-              return;
-            }
-
-            const match = body.match(/Fork test PR:\s*(https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+))/i);
-            if (!match) {
-              core.setFailed('Provide a valid GitHub fork pull request URL after "Fork test PR:".');
-              return;
-            }
-
-            const [, url, owner, repo, numberText] = match;
-            const number = Number(numberText);
-            const source = context.payload.pull_request;
-
-            const {data: fork} = await github.rest.repos.get({owner, repo});
-            if (!fork.fork || fork.parent?.full_name !== context.payload.repository.full_name) {
-              core.setFailed(`${url} is not a pull request in a fork of ${context.payload.repository.full_name}.`);
-              return;
-            }
-
-            const {data: testPR} = await github.rest.pulls.get({owner, repo, pull_number: number});
-            if (testPR.head.repo?.full_name !== source.head.repo?.full_name) {
-              core.setFailed(`Fork test PR head repository ${testPR.head.repo?.full_name} does not match ${source.head.repo?.full_name}.`);
-              return;
-            }
-            if (testPR.head.sha !== source.head.sha) {
-              core.setFailed(`Fork test PR checks ${testPR.head.sha}, but this PR uses ${source.head.sha}.`);
-              return;
-            }
-
-            core.notice(`Fork CI evidence matches ${source.head.sha}: ${url}`);

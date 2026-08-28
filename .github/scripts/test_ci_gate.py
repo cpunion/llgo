@@ -61,6 +61,16 @@ class GateTests(unittest.TestCase):
             repository="xgo-dev/llgo",
             action="synchronize",
             pr_labels=frozenset({"need-review"}),
+            review_ready=True,
+        )
+
+    def test_upstream_pr_requires_review_ready_metadata(self) -> None:
+        self.assert_gate(
+            False,
+            name="pull_request",
+            repository="xgo-dev/llgo",
+            action="synchronize",
+            pr_labels=frozenset({"need-review"}),
         )
 
     def test_only_need_review_label_restarts_full_ci(self) -> None:
@@ -72,6 +82,7 @@ class GateTests(unittest.TestCase):
             action="labeled",
             event_label="need-review",
             pr_labels=labels,
+            review_ready=True,
         )
         self.assert_gate(
             False,
@@ -80,6 +91,7 @@ class GateTests(unittest.TestCase):
             action="labeled",
             event_label="go-test-compat",
             pr_labels=labels,
+            review_ready=True,
         )
 
     def test_fork_pr_does_not_duplicate_push_ci(self) -> None:
