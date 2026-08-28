@@ -146,3 +146,26 @@ func defineCoroNativeE2EIndexPanicStubs(pkg llssa.Package, abort llssa.Function)
 		body.Return()
 	}
 }
+
+// defineCoroNativeE2EMemEqualStub gives deliberately closed native runtime
+// islands the production runtime.memequal byte-comparison contract without
+// pulling in the legacy alg/runtime closure. Keep this shared at the closed
+// island boundary: compact regular-memory array comparisons may be introduced
+// anywhere in the production scheduler sources as their implementation
+// evolves.
+func defineCoroNativeE2EMemEqualStub(prog llssa.Program, pkg llssa.Package) {
+	pointer := types.Typ[types.UnsafePointer]
+	uintptrType := types.Typ[types.Uintptr]
+	memcmp := pkg.NewFunc("memcmp", newSignature(
+		[]types.Type{pointer, pointer, uintptrType}, []types.Type{types.Typ[types.Int32]},
+	), llssa.InC)
+	memequal := pkg.NewFunc(llssa.PkgRuntime+".memequal", newSignature(
+		[]types.Type{pointer, pointer, uintptrType, types.Typ[types.Uint8]}, []types.Type{types.Typ[types.Bool]},
+	), llssa.InGo)
+	body := memequal.MakeBody(1)
+	body.Return(body.BinOp(
+		token.EQL,
+		body.Call(memcmp.Expr, memequal.Param(0), memequal.Param(1), memequal.Param(2)),
+		prog.IntVal(0, prog.Int32()),
+	))
+}

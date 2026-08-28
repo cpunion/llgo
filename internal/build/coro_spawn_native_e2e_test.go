@@ -660,6 +660,7 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	// panic path; this closed island instead aborts on the impossible invalid
 	// branch without linking that unrelated runtime closure.
 	defineCoroNativeE2EIndexPanicStubs(pkg, abort)
+	defineCoroNativeE2EMemEqualStub(prog, pkg)
 	// Compiling the complete production core object also leaves relocations for
 	// ordinary runtime allocation helpers in currently unreachable panic-status
 	// code. Resolve those helpers directly to libc so archive extraction cannot
@@ -780,21 +781,6 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	panicBody := panicStub.MakeBody(1)
 	panicBody.Call(abort.Expr)
 	panicBody.Return()
-	// Compact regular-memory array comparisons share runtime.memequal. Keep
-	// this deliberately closed runtime island independent of the legacy alg
-	// object while preserving the production helper's byte-equality semantics.
-	memcmp := pkg.NewFunc("memcmp", newSignature(
-		[]types.Type{pointer, pointer, uintptrType}, []types.Type{types.Typ[types.Int32]},
-	), llssa.InC)
-	memequal := pkg.NewFunc(llssa.PkgRuntime+".memequal", newSignature(
-		[]types.Type{pointer, pointer, uintptrType, types.Typ[types.Uint8]}, []types.Type{boolType},
-	), llssa.InGo)
-	memequalBody := memequal.MakeBody(1)
-	memequalBody.Return(memequalBody.BinOp(
-		token.EQL,
-		memequalBody.Call(memcmp.Expr, memequal.Param(0), memequal.Param(1), memequal.Param(2)),
-		prog.IntVal(0, prog.Int32()),
-	))
 	for _, name := range []string{"memequalptr", "strequal"} {
 		equal := pkg.NewFunc(llssa.PkgRuntime+"."+name, newSignature(
 			[]types.Type{pointer, pointer}, []types.Type{boolType},
