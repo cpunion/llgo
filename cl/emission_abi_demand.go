@@ -18,7 +18,6 @@ package cl
 
 import (
 	"fmt"
-	"go/token"
 	"go/types"
 
 	llssa "github.com/xgo-dev/llgo/ssa"
@@ -534,27 +533,6 @@ func (u *EmissionUniverse) functionABITypeDemands(fn *ssa.Function, owner *prepa
 
 	for _, instruction := range lowered {
 		switch instruction := instruction.(type) {
-		case *ssa.BinOp:
-			if instruction.Op != token.EQL && instruction.Op != token.NEQ {
-				break
-			}
-			if !coroPureAggregateType(ctx.patchType(instruction.X.Type())) {
-				break
-			}
-			physicalType := physical(instruction.X.Type())
-			if !walkCoroAggregateEqualityLowering(
-				u.prog, physicalType, make(map[types.Type]bool),
-				func(_ string, descriptorType types.Type) {
-					if descriptorType != nil {
-						// arrayequalImpl receives this exact nested descriptor as an
-						// explicit argument. Freeze its methods and helper references
-						// before effect planning, never during code generation.
-						addPhysical(descriptorType)
-					}
-				},
-			) {
-				return nil, fmt.Errorf("ABI type demand cannot lower aggregate comparison of %v", physicalType)
-			}
 		case *ssa.MakeMap:
 			add(instruction.Type())
 		case *ssa.Lookup:

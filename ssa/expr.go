@@ -964,10 +964,11 @@ func CanInlineArrayEqual(t *types.Array) bool {
 	return n <= 4
 }
 
-// ArrayEqualRuntimeHelper returns the exact runtime helper used for a
-// non-inline array comparison. An empty result means the comparison is
-// element-wise. Keep helper selection here so frontend effect planning and
-// LLSSA emission cannot drift apart.
+// ArrayEqualRuntimeHelper returns the exact shared runtime helper used for an
+// array comparison. An empty result selects element-wise lowering: tiny arrays
+// are expanded and larger non-memory arrays use one compiler-generated loop.
+// Keep helper selection here so frontend effect planning and LLSSA emission
+// cannot drift apart.
 func (p Program) ArrayEqualRuntimeHelper(t *types.Array) string {
 	if t == nil {
 		panic("ssa: array equality lowering requires an array type")
@@ -978,13 +979,15 @@ func (p Program) ArrayEqualRuntimeHelper(t *types.Array) string {
 	if p.abi.IsRegularMemory(t) {
 		return "memequal"
 	}
-	if helper := arrayEqualNumericRuntimeHelper(t); helper != "" {
+	if helper := ArrayEqualNumericRuntimeHelper(t); helper != "" {
 		return helper
 	}
-	return "arrayequalImpl"
+	return ""
 }
 
-func arrayEqualNumericRuntimeHelper(t *types.Array) string {
+// ArrayEqualNumericRuntimeHelper returns the target-independent shared helper
+// for a direct float or complex element type.
+func ArrayEqualNumericRuntimeHelper(t *types.Array) string {
 	if t == nil {
 		return ""
 	}
@@ -1037,14 +1040,20 @@ func (b Builder) arrayBinOp(op token.Token, x, y, xaddr, yaddr Expr) Expr {
 		}
 		return ret
 	}
-	ret := b.callArrayEqual(x, y, xaddr, yaddr, typ)
+	helper := prog.ArrayEqualRuntimeHelper(typ)
+	var ret Expr
+	if helper == "" {
+		ret = b.arrayEqualLoop(x, y, xaddr, yaddr, typ.Len())
+	} else {
+		ret = b.callArrayEqual(x, y, xaddr, yaddr, typ, helper)
+	}
 	if op == token.NEQ {
 		ret.impl = llvm.CreateNot(b.impl, ret.impl)
 	}
 	return ret
 }
 
-func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array) Expr {
+func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array, helper string) Expr {
 	prog := b.Prog
 	var sp Expr
 	if xaddr.IsNil() || yaddr.IsNil() {
@@ -1061,7 +1070,7 @@ func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array) Expr {
 		yaddr = b.PtrCast(prog.VoidPtr(), yaddr)
 	}
 	var ret Expr
-	switch helper := prog.ArrayEqualRuntimeHelper(t); helper {
+	switch helper {
 	case "memequal":
 		ret = b.Call(
 			b.Pkg.rtFunc(helper),
@@ -1070,19 +1079,13 @@ func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array) Expr {
 			prog.IntVal(prog.SizeOf(x.Type), prog.Uintptr()),
 			prog.IntVal(prog.AlignOf(x.Type), prog.Byte()),
 		)
-	case "arrayequalImpl":
-		// Pass the statically known descriptor as an ordinary argument. The
-		// helper then remains visible to whole-program effect analysis; an
-		// environment-bearing function value would hide this edge from the
-		// compiler-owned runtime-call resolver.
-		ret = b.Call(b.Pkg.rtFunc(helper), b.abiType(x.raw.Type), xaddr, yaddr)
 	case "arrayequalFloat32", "arrayequalFloat64", "arrayequalComplex64", "arrayequalComplex128":
 		ret = b.Call(
 			b.Pkg.rtFunc(helper), xaddr, yaddr,
 			prog.IntVal(uint64(t.Len()), prog.Uintptr()),
 		)
 	case "":
-		panic("ssa: inline array equality reached the runtime helper path")
+		panic("ssa: element-wise array equality reached the runtime helper path")
 	default:
 		panic("ssa: unknown array equality runtime helper " + helper)
 	}
@@ -1090,6 +1093,63 @@ func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array) Expr {
 		b.StackRestore(sp)
 	}
 	return ret
+}
+
+// arrayEqualLoop compares a fixed array with one reusable element-lowering
+// site. This avoids both per-element IR expansion and a full runtime type
+// descriptor. The latter is important for named runtime aggregates: equality
+// needs only their element operations, not every method value in their method
+// sets. A proven-stable source address is read in place; otherwise the value is
+// spilled once into typed storage that coroutine splitting can retain across a
+// suspending element comparison.
+func (b Builder) arrayEqualLoop(x, y, xaddr, yaddr Expr, length int64) Expr {
+	prog := b.Prog
+	logical := b.blk
+	xPointer := prog.Pointer(x.Type)
+	yPointer := prog.Pointer(y.Type)
+	if xaddr.IsNil() {
+		xaddr = b.AllocaT(x.Type)
+		b.Store(xaddr, x)
+	} else {
+		xaddr = b.PtrCast(xPointer, xaddr)
+	}
+	if yaddr.IsNil() {
+		yaddr = b.AllocaT(y.Type)
+		b.Store(yaddr, y)
+	} else {
+		yaddr = b.PtrCast(yPointer, yaddr)
+	}
+
+	blocks := b.Func.MakeBlocks(3)
+	header, body, done := blocks[0], blocks[1], blocks[2]
+	b.Jump(header)
+
+	b.SetBlockEx(header, AtEnd, false)
+	index := b.Phi(prog.Int())
+	b.If(b.BinOp(token.LSS, index.Expr, prog.IntVal(uint64(length), prog.Int())), body, done)
+
+	b.SetBlockEx(body, AtEnd, true)
+	leftElem := b.Load(b.IndexAddrUnchecked(xaddr, index.Expr))
+	rightElem := b.Load(b.IndexAddrUnchecked(yaddr, index.Expr))
+	equal := b.BinOp(token.EQL, leftElem, rightElem)
+	body = b.blk
+	nextIndex := b.BinOp(token.ADD, index.Expr, prog.IntVal(1, prog.Int()))
+	b.If(equal, header, done)
+	index.AddIncoming(b, []BasicBlock{logical, body}, func(i int, _ BasicBlock) Expr {
+		if i == 0 {
+			return prog.IntVal(0, prog.Int())
+		}
+		return nextIndex
+	})
+
+	b.SetBlockEx(done, AtEnd, false)
+	result := b.Phi(prog.Bool())
+	result.AddIncoming(b, []BasicBlock{header, body}, func(i int, _ BasicBlock) Expr {
+		return prog.BoolVal(i == 0)
+	})
+	b.blk = logical
+	b.blk.last = done.last
+	return result.Expr
 }
 
 // The UnOp instruction yields the result of (op x).

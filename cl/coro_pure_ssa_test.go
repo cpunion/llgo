@@ -347,7 +347,7 @@ func Root(left, right Value) bool { return left == right }
 type Value struct { Text [2]string }
 func Root(left, right Value) bool { return left != right }
 `,
-			helpers: "arrayequalImpl",
+			helpers: "StringEqual",
 		},
 		{
 			name: "interface field",
@@ -363,7 +363,7 @@ func Root(left, right Value) bool { return left == right }
 type Value struct { Payload [2]any }
 func Root(left, right Value) bool { return left != right }
 `,
-			helpers: "arrayequalImpl",
+			helpers: "EfaceEqual",
 		},
 		{
 			name: "named and unnamed interface array",
@@ -372,7 +372,7 @@ type Value [2]any
 func array() [2]any { return [2]any{} }
 func Root(left Value) bool { return left != array() }
 `,
-			helpers: "arrayequalImpl",
+			helpers: "EfaceEqual",
 		},
 		{
 			name: "regular memory array",

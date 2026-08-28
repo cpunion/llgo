@@ -2719,8 +2719,9 @@ func TestArrayEqualLowering(t *testing.T) {
 		}
 	}
 	interfaceArray := compare("interfaceArray", types.NewInterfaceType(nil, nil).Complete(), 32, token.EQL, 0).String()
-	if !strings.Contains(interfaceArray, ".arrayequalImpl") || strings.Contains(interfaceArray, "extractvalue [32 x") {
-		t.Fatalf("large interface array comparison was not lowered to arrayequalImpl:\n%s", interfaceArray)
+	if !strings.Contains(interfaceArray, ".EfaceEqual") || !strings.Contains(interfaceArray, "phi i64") ||
+		strings.Contains(interfaceArray, ".arrayequalImpl") || strings.Contains(interfaceArray, "extractvalue [32 x") {
+		t.Fatalf("large interface array comparison was not lowered to one compact element loop:\n%s", interfaceArray)
 	}
 
 	array := types.NewArray(types.Typ[types.Uint8], 4)

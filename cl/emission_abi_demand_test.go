@@ -91,7 +91,7 @@ func Address(value *T) *int { return &value.Field }
 	}
 }
 
-func TestEmissionABITypeDemandFindsNestedTypedArrayEquality(t *testing.T) {
+func TestEmissionABITypeDemandSkipsLoopLoweredArrayEqualityDescriptors(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	pkg := testProg.addPackage(t, "example.com/emission/arrayequal", `package arrayequal
 type Item struct { Value float64 }
@@ -109,31 +109,13 @@ func Inline(left, right [1]Item) bool { return left == right }
 	defer prog.Dispose()
 	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
 	universe.prog = prog
-	outer := pkg.types.Scope().Lookup("Outer").Type().Underlying().(*types.Struct)
-	nestedArray := outer.Field(0).Type()
-	namedArray := pkg.types.Scope().Lookup("Named").Type()
-	for _, test := range []struct {
-		name string
-		want types.Type
-	}{
-		{name: "Nested", want: nestedArray},
-		{name: "NamedArray", want: namedArray},
-	} {
-		demands, err := universe.functionABITypeDemands(pkg.ssa.Func(test.name), owner)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !emissionABIDemandContains(demands, test.want) {
-			t.Fatalf("%s ABI demands = %v; want exact typed array descriptor %v", test.name, demands, test.want)
-		}
-	}
-	for _, name := range []string{"Memory", "Numeric", "Inline"} {
+	for _, name := range []string{"Nested", "NamedArray", "Memory", "Numeric", "Inline"} {
 		demands, err := universe.functionABITypeDemands(pkg.ssa.Func(name), owner)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(demands) != 0 {
-			t.Fatalf("%s ABI demands = %v; want no array equality descriptor", name, demands)
+			t.Fatalf("%s ABI demands = %v; compact array equality must not materialize a full type descriptor", name, demands)
 		}
 	}
 }

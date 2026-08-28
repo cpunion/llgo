@@ -78,6 +78,16 @@ func structs() bool {
 	return x == y
 }
 
+type textItem struct {
+	value string
+}
+
+func textItems() bool {
+	x := [32]textItem{{value: "left"}}
+	y := [32]textItem{{value: "right"}}
+	return x == y
+}
+
 var escaped *[32]byte
 
 func heap() bool {
@@ -193,6 +203,13 @@ func heap() bool {
 	if _, ok := immutableLocalArrayLoadAddr(structs.Y); !ok {
 		t.Fatal("second immutable struct array with field stores was not recognized")
 	}
+	textItems := findCompare("textItems")
+	if _, ok := immutableLocalArrayLoadAddr(textItems.X); !ok {
+		t.Fatal("immutable non-regular array was not recognized")
+	}
+	if _, ok := immutableLocalArrayLoadAddr(textItems.Y); !ok {
+		t.Fatal("second immutable non-regular array was not recognized")
+	}
 	heap := findCompare("heap")
 	if _, ok := immutableLocalArrayLoadAddr(heap.X); ok {
 		t.Fatal("escaping heap array was treated as reusable local storage")
@@ -212,6 +229,15 @@ func heap() bool {
 	}
 	if strings.Contains(immutableIR, "load [32 x i8]") {
 		t.Fatalf("immutable comparison retained unused aggregate loads:\n%s", immutableIR)
+	}
+	textItemsIR := mustNamedFunction(t, mod, "foo.textItems").String()
+	if got := strings.Count(textItemsIR, "alloca [32 x"); got != 2 {
+		t.Fatalf("non-regular comparison has %d array allocations, want only its two source values:\n%s", got, textItemsIR)
+	}
+	if !strings.Contains(textItemsIR, "phi i64") || strings.Count(textItemsIR, ".StringEqual") != 1 ||
+		strings.Contains(textItemsIR, "store [32 x") || strings.Contains(textItemsIR, ".arrayequalImpl") ||
+		strings.Contains(textItemsIR, "stacksave") {
+		t.Fatalf("non-regular comparison was not one address-reusing element loop:\n%s", textItemsIR)
 	}
 	smallIR := mustNamedFunction(t, mod, "foo.small").String()
 	if strings.Contains(smallIR, ".memequal") || strings.Contains(smallIR, "stacksave") {

@@ -2623,28 +2623,27 @@ func coroPureAggregateType(typ types.Type) bool {
 
 // coroAggregateEqualityRuntimeHelpers mirrors LLSSA's complete comparable
 // aggregate lowering and records its unique logical helpers. Structs and
-// inline arrays recurse; non-inline arrays contribute exactly the helper
-// selected by Program.ArrayEqualRuntimeHelper. Blank struct fields contribute
-// no requirement.
+// element-wise arrays recurse; memory and direct numeric arrays contribute the
+// exact shared helper selected by Program.ArrayEqualRuntimeHelper. Blank struct
+// fields contribute no requirement.
 func coroAggregateEqualityRuntimeHelpers(
 	prog llssa.Program,
 	typ types.Type,
 	visiting map[types.Type]bool,
 	helpers map[string]struct{},
 ) bool {
-	return walkCoroAggregateEqualityLowering(prog, typ, visiting, func(helper string, _ types.Type) {
+	return walkCoroAggregateEqualityLowering(prog, typ, visiting, func(helper string) {
 		helpers[helper] = struct{}{}
 	})
 }
 
 // walkCoroAggregateEqualityLowering is the shared frontend projection of
-// LLSSA aggregate comparison lowering. descriptorType is non-nil only for a
-// helper whose call materializes that exact ABI type descriptor.
+// LLSSA aggregate comparison lowering.
 func walkCoroAggregateEqualityLowering(
 	prog llssa.Program,
 	typ types.Type,
 	visiting map[types.Type]bool,
-	visit func(helper string, descriptorType types.Type),
+	visit func(helper string),
 ) bool {
 	if typ == nil || visiting[typ] {
 		return false
@@ -2654,7 +2653,7 @@ func walkCoroAggregateEqualityLowering(
 	switch underlying := types.Unalias(typ).Underlying().(type) {
 	case *types.Basic:
 		if underlying.Kind() == types.String {
-			visit("StringEqual", nil)
+			visit("StringEqual")
 			return true
 		}
 		return underlying.Kind() == types.UnsafePointer ||
@@ -2662,30 +2661,24 @@ func walkCoroAggregateEqualityLowering(
 	case *types.Pointer, *types.Chan:
 		return true
 	case *types.Interface:
-		visit("EfaceEqual", nil)
+		visit("EfaceEqual")
 		underlying.Complete()
 		if !underlying.Empty() {
-			visit("IfaceType", nil)
+			visit("IfaceType")
 		}
 		return true
 	case *types.Array:
 		helper := ""
-		if llssa.CanInlineArrayEqual(underlying) {
-			// Keep the empty inline recipe without requiring a target Program.
-		} else if prog == nil {
-			// Metadata-only universes have no target layout. Preserve a safe
-			// typed-helper superset; active compilation always has a Program and
-			// selects exact memory and numeric helpers where possible.
-			helper = "arrayequalImpl"
-		} else {
+		if prog != nil {
 			helper = prog.ArrayEqualRuntimeHelper(underlying)
+		} else if !llssa.CanInlineArrayEqual(underlying) {
+			// A metadata-only universe has no target layout. Direct numeric
+			// arrays still have an exact target-independent helper; every other
+			// array is represented by its element-wise helper inventory.
+			helper = llssa.ArrayEqualNumericRuntimeHelper(underlying)
 		}
 		if helper != "" {
-			descriptor := types.Type(nil)
-			if helper == "arrayequalImpl" {
-				descriptor = typ
-			}
-			visit(helper, descriptor)
+			visit(helper)
 			return true
 		}
 		if underlying.Len() == 0 {
