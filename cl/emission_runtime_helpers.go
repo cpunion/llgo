@@ -562,9 +562,17 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: function %q runtime helper %q: %w", ownerFn.Name(), helper, err)
 		}
-		if coroCompilerRawPlainLoweredRuntimeHelper(u, helper) {
+		policy := coroCompilerLoweredRuntimeHelperPolicyFor(instr, helper)
+		if policy.rawPlain {
 			if err := u.recordCoroRawPlainLoweredCall(ownerFn, helper, canonical); err != nil {
 				return err
+			}
+			if !policy.rawABIReference {
+				// This is a private direct call, not an ABI word publication. The
+				// RawPlain lowered-call edge itself demands and closes the helper's
+				// legacy body; recording it as an ABI synchronous reference would
+				// incorrectly require the stronger public RawPlainEntry capability.
+				continue
 			}
 			// The exact raw occurrence is an executable code reference, not a
 			// managed call edge. Feed it through the existing frozen raw-demand
@@ -614,25 +622,40 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 	return nil
 }
 
-// coroCompilerRawPlainLoweredRuntimeHelper classifies the typed channel
-// primitives whose call occurrences are owned completely by coroutine
-// lowering. They execute as bounded try/park/resume transactions on the
-// current executor stack. In particular park is between state publication and
-// llvm.coro.suspend, and resume is inside a terminating resume gate, so neither
-// occurrence may grow a managed child-await edge. The exact target is still
-// frozen per owner by recordCoroRawPlainLoweredCall and its complete raw
-// closure is validated by the whole-program plan.
-func coroCompilerRawPlainLoweredRuntimeHelper(u *EmissionUniverse, helper string) bool {
-	if u == nil {
-		return false
-	}
+type coroCompilerLoweredRuntimeHelperPolicy struct {
+	rawPlain            bool
+	plainRepresentation bool
+	rawABIReference     bool
+}
+
+// coroCompilerLoweredRuntimeHelperPolicyFor classifies call occurrences owned
+// completely by compiler lowering. The default helper has managed and plain
+// representations. A rawPlain helper deliberately executes on the current
+// executor stack; its exact target is still frozen per owner and its complete
+// raw closure is validated by the whole-program plan.
+//
+// Typed channel primitives are bounded try/park/resume transactions around an
+// llvm.coro.suspend gate. A regular-memory or direct numeric aggregate equality
+// is one infallible comparison: importing the helper's loop-derived
+// NeedsPreempt effect would turn every containing Go function into a coroutine,
+// even though the current static-call outcome path executes the comparison
+// atomically. Keep that occurrence plain until computation itself has a
+// resumable continuation model; invalid pointers and sizes are impossible
+// because LLSSA derives every operand from the compared values and exact type.
+func coroCompilerLoweredRuntimeHelperPolicyFor(instr ssa.Instruction, helper string) coroCompilerLoweredRuntimeHelperPolicy {
+	policy := coroCompilerLoweredRuntimeHelperPolicy{plainRepresentation: true}
 	switch helper {
 	case "CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryCloseTask",
 		"CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume":
-		return true
-	default:
-		return false
+		policy.rawPlain = true
+		policy.plainRepresentation = false
+		policy.rawABIReference = true
+	case "memequal", "arrayequalFloat32", "arrayequalFloat64", "arrayequalComplex64", "arrayequalComplex128":
+		binop, ok := instr.(*ssa.BinOp)
+		policy.rawPlain = ok && (binop.Op == token.EQL || binop.Op == token.NEQ) &&
+			coroPureAggregateType(binop.X.Type())
 	}
+	return policy
 }
 
 // coroLogicalCallerRuntimeHelper identifies demand-driven diagnostic
@@ -732,7 +755,7 @@ func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.I
 		if plainStackCStr && helper == "AllocU" {
 			continue
 		}
-		if !coroCompilerRawPlainLoweredRuntimeHelper(u, helper) {
+		if coroCompilerLoweredRuntimeHelperPolicyFor(instr, helper).plainRepresentation {
 			add(helper)
 		}
 	}
@@ -1716,37 +1739,20 @@ func (u *EmissionUniverse) binOpRuntimeHelpers(ctx *context, op *ssa.BinOp, add 
 		}
 	case *types.Array:
 		if op.Op == token.EQL || op.Op == token.NEQ {
-			u.compositeCompareRuntimeHelpers(ctx, typ.Elem(), add)
-		}
-	case *types.Struct:
-		if op.Op == token.EQL || op.Op == token.NEQ {
-			for i := 0; i < typ.NumFields(); i++ {
-				if typ.Field(i).Name() != "_" {
-					u.compositeCompareRuntimeHelpers(ctx, typ.Field(i).Type(), add)
+			helpers := make(map[string]struct{})
+			if coroAggregateEqualityRuntimeHelpers(ctx.prog, typ, make(map[types.Type]bool), helpers) {
+				for helper := range helpers {
+					add(helper)
 				}
 			}
 		}
-	}
-}
-
-func (u *EmissionUniverse) compositeCompareRuntimeHelpers(ctx *context, typ types.Type, add func(...string)) {
-	typ = types.Unalias(ctx.patchType(typ)).Underlying()
-	switch typ := typ.(type) {
-	case *types.Basic:
-		if typ.Kind() == types.String {
-			add("StringEqual")
-		}
-	case *types.Interface:
-		add("EfaceEqual")
-		if !typ.Empty() {
-			add("IfaceType")
-		}
-	case *types.Array:
-		u.compositeCompareRuntimeHelpers(ctx, typ.Elem(), add)
 	case *types.Struct:
-		for i := 0; i < typ.NumFields(); i++ {
-			if typ.Field(i).Name() != "_" {
-				u.compositeCompareRuntimeHelpers(ctx, typ.Field(i).Type(), add)
+		if op.Op == token.EQL || op.Op == token.NEQ {
+			helpers := make(map[string]struct{})
+			if coroAggregateEqualityRuntimeHelpers(ctx.prog, typ, make(map[types.Type]bool), helpers) {
+				for helper := range helpers {
+					add(helper)
+				}
 			}
 		}
 	}

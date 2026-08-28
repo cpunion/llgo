@@ -2341,26 +2341,28 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				y = p.compileValueAs(b, v.Y, v.X.Type())
 			}
 			ret = b.ArrayBinOp(v.Op, x, y, xaddr, yaddr)
-		} else if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIntegerDivideByZeroGuard {
-			observePhysical(coroPhysicalInstructionIntegerDivideByZeroGuard)
-			zero := p.prog.Zero(y.Type)
-			isZero := b.BinOp(token.EQL, y, zero)
-			p.compileCoroFaultConditionGuard(b, isZero, coroFaultIntegerDivideByZeroV1)
-			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
-		} else if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionNegativeShiftGuard {
-			observePhysical(coroPhysicalInstructionNegativeShiftGuard)
-			zero := p.prog.Zero(y.Type)
-			isNegative := b.BinOp(token.LSS, y, zero)
-			p.compileCoroFaultConditionGuard(b, isNegative, coroFaultNegativeShiftV1)
-			ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
-		} else if (v.Op == token.QUO || v.Op == token.REM) && ssaIntegerValueProvenNonZeroAt(v.Y, v) {
-			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
-		} else if (v.Op == token.SHL || v.Op == token.SHR) && ssaIntegerValueProvenNonNegativeAt(v.Y, v) {
-			ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
 		} else {
 			x := p.compileValueAs(b, v.X, v.Y.Type())
 			y := p.compileValueAs(b, v.Y, v.X.Type())
-			ret = b.BinOp(v.Op, x, y)
+			if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIntegerDivideByZeroGuard {
+				observePhysical(coroPhysicalInstructionIntegerDivideByZeroGuard)
+				zero := p.prog.Zero(y.Type)
+				isZero := b.BinOp(token.EQL, y, zero)
+				p.compileCoroFaultConditionGuard(b, isZero, coroFaultIntegerDivideByZeroV1)
+				ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
+			} else if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionNegativeShiftGuard {
+				observePhysical(coroPhysicalInstructionNegativeShiftGuard)
+				zero := p.prog.Zero(y.Type)
+				isNegative := b.BinOp(token.LSS, y, zero)
+				p.compileCoroFaultConditionGuard(b, isNegative, coroFaultNegativeShiftV1)
+				ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
+			} else if (v.Op == token.QUO || v.Op == token.REM) && ssaIntegerValueProvenNonZeroAt(v.Y, v) {
+				ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
+			} else if (v.Op == token.SHL || v.Op == token.SHR) && ssaIntegerValueProvenNonNegativeAt(v.Y, v) {
+				ret = b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
+			} else {
+				ret = b.BinOp(v.Op, x, y)
+			}
 		}
 	case *ssa.UnOp:
 		if v.Op != token.ARROW {

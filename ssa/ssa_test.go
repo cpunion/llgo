@@ -2701,12 +2701,26 @@ func TestArrayEqualLowering(t *testing.T) {
 		t.Fatalf("large regular-memory array comparison was not lowered to memequal:\n%s", large)
 	}
 	nonMemory := compare("nonmemory", types.Typ[types.Float64], 5, token.EQL, 0).String()
-	if !strings.Contains(nonMemory, ".arrayequal") || strings.Contains(nonMemory, "extractvalue [5 x double]") {
-		t.Fatalf("non-memory array comparison was not lowered to arrayequal:\n%s", nonMemory)
+	if !strings.Contains(nonMemory, ".arrayequalFloat64") || strings.Contains(nonMemory, "extractvalue [5 x double]") || strings.Contains(nonMemory, ".arrayequalImpl") {
+		t.Fatalf("non-memory numeric array comparison was not lowered to its static helper:\n%s", nonMemory)
 	}
-	interfaceArray := compare("interfaceArray", types.NewInterfaceType(nil, nil).Complete(), 32, token.EQL).String()
-	if !strings.Contains(interfaceArray, ".arrayequal") || strings.Contains(interfaceArray, "extractvalue [32 x") {
-		t.Fatalf("large interface array comparison was not lowered to arrayequal:\n%s", interfaceArray)
+	for _, numeric := range []struct {
+		name   string
+		elem   types.Type
+		helper string
+	}{
+		{name: "float32Array", elem: types.Typ[types.Float32], helper: "arrayequalFloat32"},
+		{name: "complex64Array", elem: types.Typ[types.Complex64], helper: "arrayequalComplex64"},
+		{name: "complex128Array", elem: types.Typ[types.Complex128], helper: "arrayequalComplex128"},
+	} {
+		body := compare(numeric.name, numeric.elem, 5, token.EQL, 0).String()
+		if !strings.Contains(body, "."+numeric.helper) || strings.Contains(body, "extractvalue [5 x") {
+			t.Fatalf("%s comparison was not lowered to %s:\n%s", numeric.name, numeric.helper, body)
+		}
+	}
+	interfaceArray := compare("interfaceArray", types.NewInterfaceType(nil, nil).Complete(), 32, token.EQL, 0).String()
+	if !strings.Contains(interfaceArray, ".arrayequalImpl") || strings.Contains(interfaceArray, "extractvalue [32 x") {
+		t.Fatalf("large interface array comparison was not lowered to arrayequalImpl:\n%s", interfaceArray)
 	}
 
 	array := types.NewArray(types.Typ[types.Uint8], 4)

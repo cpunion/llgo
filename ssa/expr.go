@@ -964,6 +964,48 @@ func CanInlineArrayEqual(t *types.Array) bool {
 	return n <= 4
 }
 
+// ArrayEqualRuntimeHelper returns the exact runtime helper used for a
+// non-inline array comparison. An empty result means the comparison is
+// element-wise. Keep helper selection here so frontend effect planning and
+// LLSSA emission cannot drift apart.
+func (p Program) ArrayEqualRuntimeHelper(t *types.Array) string {
+	if t == nil {
+		panic("ssa: array equality lowering requires an array type")
+	}
+	if CanInlineArrayEqual(t) {
+		return ""
+	}
+	if p.abi.IsRegularMemory(t) {
+		return "memequal"
+	}
+	if helper := arrayEqualNumericRuntimeHelper(t); helper != "" {
+		return helper
+	}
+	return "arrayequalImpl"
+}
+
+func arrayEqualNumericRuntimeHelper(t *types.Array) string {
+	if t == nil {
+		return ""
+	}
+	basic, ok := types.Unalias(t.Elem()).Underlying().(*types.Basic)
+	if !ok {
+		return ""
+	}
+	switch basic.Kind() {
+	case types.Float32:
+		return "arrayequalFloat32"
+	case types.Float64:
+		return "arrayequalFloat64"
+	case types.Complex64:
+		return "arrayequalComplex64"
+	case types.Complex128:
+		return "arrayequalComplex128"
+	default:
+		return ""
+	}
+}
+
 // ArrayBinOp compares two array values while reusing their backing addresses
 // when the frontend has proved that those addresses still hold the loaded
 // values. A nil address falls back to a value-preserving temporary.
@@ -1019,18 +1061,30 @@ func (b Builder) callArrayEqual(x, y, xaddr, yaddr Expr, t *types.Array) Expr {
 		yaddr = b.PtrCast(prog.VoidPtr(), yaddr)
 	}
 	var ret Expr
-	if prog.abi.IsRegularMemory(t) {
+	switch helper := prog.ArrayEqualRuntimeHelper(t); helper {
+	case "memequal":
 		ret = b.Call(
-			b.Pkg.rtFunc("memequal"),
+			b.Pkg.rtFunc(helper),
 			xaddr,
 			yaddr,
 			prog.IntVal(prog.SizeOf(x.Type), prog.Uintptr()),
 			prog.IntVal(prog.AlignOf(x.Type), prog.Byte()),
 		)
-	} else {
-		equal := b.Pkg.rtEnvFunc("arrayequal")
-		equal = b.aggregateValue(prog.Type(equalFunc, InGo), equal.impl, b.abiType(x.raw.Type).impl)
-		ret = b.Call(equal, xaddr, yaddr)
+	case "arrayequalImpl":
+		// Pass the statically known descriptor as an ordinary argument. The
+		// helper then remains visible to whole-program effect analysis; an
+		// environment-bearing function value would hide this edge from the
+		// compiler-owned runtime-call resolver.
+		ret = b.Call(b.Pkg.rtFunc(helper), b.abiType(x.raw.Type), xaddr, yaddr)
+	case "arrayequalFloat32", "arrayequalFloat64", "arrayequalComplex64", "arrayequalComplex128":
+		ret = b.Call(
+			b.Pkg.rtFunc(helper), xaddr, yaddr,
+			prog.IntVal(uint64(t.Len()), prog.Uintptr()),
+		)
+	case "":
+		panic("ssa: inline array equality reached the runtime helper path")
+	default:
+		panic("ssa: unknown array equality runtime helper " + helper)
 	}
 	if !sp.IsNil() {
 		b.StackRestore(sp)

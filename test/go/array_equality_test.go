@@ -48,6 +48,23 @@ func TestArrayEqualityUsesElementSemantics(t *testing.T) {
 	if x == x {
 		t.Fatal("array comparison treated NaN as regular memory")
 	}
+	x32 := [5]float32{float32(math.NaN())}
+	if x32 == x32 {
+		t.Fatal("float32 array comparison treated NaN as regular memory")
+	}
+	c64 := [5]complex64{complex(float32(math.NaN()), 0)}
+	if c64 == c64 {
+		t.Fatal("complex64 array comparison treated NaN as regular memory")
+	}
+	c128 := [5]complex128{complex(math.NaN(), 0)}
+	if c128 == c128 {
+		t.Fatal("complex128 array comparison treated NaN as regular memory")
+	}
+	positiveZero := [5]float64{0}
+	negativeZero := [5]float64{math.Copysign(0, -1)}
+	if positiveZero != negativeZero {
+		t.Fatal("float array comparison distinguished positive and negative zero")
+	}
 
 	// Array equality stops at the first unequal element. Comparing the second
 	// interface value would panic because slices are not comparable.
@@ -56,4 +73,15 @@ func TestArrayEqualityUsesElementSemantics(t *testing.T) {
 	if a == b {
 		t.Fatal("arrays with unequal first elements compared equal")
 	}
+}
+
+func TestArrayEqualityPropagatesInterfacePanic(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("comparing interface arrays containing slices did not panic")
+		}
+	}()
+	a := [2]any{[]int{1}, 0}
+	b := [2]any{[]int{1}, 0}
+	_ = a == b
 }
