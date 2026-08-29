@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -116,14 +115,7 @@ func llgoIRFromProbe(t *testing.T, name, src string) string {
 	}
 	cmd := exec.Command(commandName, args...)
 	cmd.Dir = root
-	// llgen is a host-side inspection tool. Cross-architecture Windows jobs
-	// intentionally keep an amd64 host compiler while activating an ARM64 or
-	// 386 target for the programs under test. Do not let that target profile
-	// make the host helper reject its own compiler architecture.
-	cmd.Env = append(os.Environ(), "GOOS="+runtime.GOOS, "GOARCH="+runtime.GOARCH)
-	if runtime.GOOS == "windows" {
-		cmd.Env = append(cmd.Env, "CC=clang", "CXX=clang++")
-	}
+	cmd.Env = os.Environ()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate LLGo IR: %v\n%s", err, output)
 	}
