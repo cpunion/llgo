@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -109,13 +110,28 @@ func llgoIRFromProbe(t *testing.T, name, src string) string {
 
 	commandName := "go"
 	args := []string{"run", "./chore/llgen", filepath.ToSlash(dir)}
+	usingSiblingTool := false
 	if tool := configuredLLGoSiblingTool(t, "llgen"); tool != "" {
 		commandName = tool
 		args = []string{filepath.ToSlash(dir)}
+		usingSiblingTool = true
 	}
 	cmd := exec.Command(commandName, args...)
 	cmd.Dir = root
-	cmd.Env = os.Environ()
+	// llgen inspects IR with the architecture of its host process. A
+	// cross-architecture test job may activate another Windows target for the
+	// programs under test, so keep the helper on GOHOSTARCH. When a prebuilt
+	// sibling tool is available it needs no Go link step; select the matching
+	// host Clang without discarding linker flags needed by the go-run fallback.
+	cmd.Env = append(os.Environ(), "GOOS="+runtime.GOOS, "GOARCH="+runtime.GOARCH)
+	if runtime.GOOS == "windows" && usingSiblingTool {
+		cc, cxx := "clang", "clang++"
+		if hostRoot := os.Getenv("LLGO_MINGW_HOST_ROOT"); hostRoot != "" {
+			cc = filepath.Join(hostRoot, "bin", "clang.exe")
+			cxx = filepath.Join(hostRoot, "bin", "clang++.exe")
+		}
+		cmd.Env = append(cmd.Env, "CC="+cc, "CXX="+cxx)
+	}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate LLGo IR: %v\n%s", err, output)
 	}
