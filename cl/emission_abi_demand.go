@@ -424,8 +424,8 @@ func (u *EmissionUniverse) functionABITypeDemands(fn *ssa.Function, owner *prepa
 			}
 			return functionDeclType(function, background)
 		}
-		if _, constant := value.(*ssa.Const); constant && background == llssa.InC && u.prog != nil {
-			return u.prog.PhysicalType(ctx.patchType(value.Type()), llssa.InC)
+		if _, constant := value.(*ssa.Const); constant && llssa.IsNativeFuncBackground(background) && u.prog != nil {
+			return u.prog.PhysicalType(ctx.patchType(value.Type()), background)
 		}
 		return physical(value.Type())
 	}
@@ -469,8 +469,8 @@ func (u *EmissionUniverse) functionABITypeDemands(fn *ssa.Function, owner *prepa
 			switch ftype {
 			case goFunc:
 				background = llssa.InGo
-			case cFunc:
-				background = llssa.InC
+			case cFunc, stdcallFunc:
+				background = llssa.Background(ftype)
 			default:
 				// Python calls and compiler intrinsics do not reach
 				// Builder.Call's llvmParams/checkExpr path.

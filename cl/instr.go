@@ -3178,7 +3178,7 @@ func (p *context) callEx(
 		aFn, pyFn, ftype := p.compileFunction(cv)
 		// TODO(xsw): check ca != llssa.Call
 		switch ftype {
-		case cFunc:
+		case cFunc, stdcallFunc:
 			p.inCFunc = true
 			args := p.compileValues(b, args, kind)
 			p.inCFunc = false
@@ -3480,7 +3480,7 @@ func (p *context) callEx(
 			p.completeCoroIntrinsicCallEmission(ftype, coroIntrinsicCallSemantics(ftype))
 		}
 	default:
-		rawC := p.prog.TypeBackground(cv.Type()) == llssa.InC
+		rawC := llssa.IsNativeFuncBackground(p.prog.TypeBackground(cv.Type()))
 		if rawC {
 			p.inCFunc = true
 		}

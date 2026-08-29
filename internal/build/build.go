@@ -567,7 +567,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				if err != nil {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen frontend ABI for %q: %w", fn.Name(), err)
 				}
-				frontendC = classified && background == llssa.InC
+				frontendC = classified && llssa.IsNativeFuncBackground(background)
 				frontendPython = classified && background == llssa.InPython
 				frontendManagedBodyless = classified && background == llssa.InGo && len(fn.Blocks) == 0
 			}
@@ -1141,7 +1141,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			// bound. requiredHostPlain is frozen before those callbacks are merged.
 			_, compilerRuntimeIsland := in.requiredHostPlain[fn]
 			policy.TrustedNoPreempt = compilerRuntimeIsland
-			if classified && background == llssa.InC {
+			if classified && llssa.IsNativeFuncBackground(background) {
 				if !policy.IgnoreBody || !policy.OverrideExternal || (policy.External != coro.ExternalUnknownForeign && policy.External != coro.ExternalKnown) {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI C declaration %q conflicts with frozen foreign classification: %s", fn.Name(), policy.External)
 				}
@@ -4476,7 +4476,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			if _, signature := types.Unalias(typ).Underlying().(*types.Signature); !signature {
 				return false, nil
 			}
-			return ctx.prog.TypeBackground(typ) == llssa.InC, nil
+			return llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(typ)), nil
 		}
 		input.foreignNoBlock = ctx.coroEmission.CoroForeignNoBlockCertificate
 		input.foreignSync = ctx.coroEmission.CoroForeignSyncCertificate
@@ -6438,7 +6438,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				}
 				for argument, value := range call.Common().Args {
 					parameter, ok := staticCallArgumentParameterType(call, argument)
-					if !ok || ctx.prog.TypeBackground(parameter) != llssa.InC {
+					if !ok || !llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(parameter)) {
 						continue
 					}
 					if _, signature := types.Unalias(parameter).Underlying().(*types.Signature); !signature {
@@ -6580,7 +6580,7 @@ func requiredCoroDirectPlainCallArgumentsWithLibrary(
 							callee.Name(), function.Name(), backgroundErr,
 						)
 					}
-					rawCDeclaration = classified && background == llssa.InC
+					rawCDeclaration = classified && llssa.IsNativeFuncBackground(background)
 					if rawCDeclaration {
 						callable, certified, certificateErr :=
 							coroCallableContractWithLibrary(
@@ -6600,7 +6600,7 @@ func requiredCoroDirectPlainCallArgumentsWithLibrary(
 				}
 				for argument, value := range call.Common().Args {
 					parameter, ok := staticCallArgumentParameterType(call, argument)
-					if !ok || !rawCDeclaration && ctx.prog.TypeBackground(parameter) != llssa.InC {
+					if !ok || !rawCDeclaration && !llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(parameter)) {
 						continue
 					}
 					if _, signature := types.Unalias(parameter).Underlying().(*types.Signature); !signature {
@@ -6768,7 +6768,7 @@ func provenCoroDirectPlainStaticClosureWithLibrary(
 				raw := call.Common().StaticCallee()
 				if raw == nil {
 					if !call.Common().IsInvoke() && call.Common().Method == nil &&
-						ctx.prog.TypeBackground(call.Common().Value.Type()) == llssa.InC {
+						llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(call.Common().Value.Type())) {
 						// The callable address is already a one-word C value. Its
 						// behavior remains conservatively foreign in the fixed-point
 						// plan; this prefilter establishes only that no managed
@@ -6797,7 +6797,7 @@ func provenCoroDirectPlainStaticClosureWithLibrary(
 					if err != nil {
 						return nil, false, err
 					}
-					if !classified || background != llssa.InC {
+					if !classified || !llssa.IsNativeFuncBackground(background) {
 						return nil, false, nil
 					}
 					_, noBlock, err := ctx.coroEmission.CoroForeignNoBlockCertificate(callee)
@@ -7022,6 +7022,7 @@ func newLLSSATarget(conf *Config, export crosscompile.Export) *llssa.Target {
 		LLVMTarget:              export.LLVMTarget,
 		OptLevel:                conf.OptLevel,
 		SaturatingFloatToUint32: conf.SaturatingFloatToUint32,
+		CABIOnly:                conf.AbiMode == cabi.ModeCFunc,
 	}
 	defaultSpec := target.Spec()
 	resolvedTarget := conf.Target != "" || export.TargetABI != "" ||

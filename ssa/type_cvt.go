@@ -63,6 +63,7 @@ const (
 	InGo
 	InC
 	InPython
+	InStdcall
 )
 
 // TypeBackground reports the explicitly recorded background of typ. Go type
@@ -95,6 +96,9 @@ func (p Program) Type(typ types.Type, bg Background) Type {
 // LLVM lowering without constructing its LLVM type. This is useful to freeze
 // compilation-wide metadata before the runtime LLVM package is initialized.
 func (p Program) PhysicalType(typ types.Type, bg Background) types.Type {
+	if bg == InStdcall {
+		p.validateStdcallType(typ)
+	}
 	if bg == InGo {
 		typ, _ = p.gocvt.cvtType(typ)
 	}
@@ -110,6 +114,9 @@ func (p Program) FuncDecl(sig *types.Signature, bg Background) Type {
 // PhysicalFuncDecl converts a source function signature to the raw declaration
 // signature used by LLVM lowering without constructing an LLVM function type.
 func (p Program) PhysicalFuncDecl(sig *types.Signature, bg Background) *types.Signature {
+	if bg == InStdcall {
+		p.validateStdcallSignature(sig)
+	}
 	recv := sig.Recv()
 	if bg == InGo {
 		sig = p.gocvt.cvtFunc(sig, recv)
@@ -222,7 +229,7 @@ func namedLinkname(t *types.Named) string {
 
 func (p goTypes) shouldConvertNamed(t *types.Named) bool {
 	background, ok := p.packageSyntax.typeBackground(namedLinkname(t))
-	return !ok || background != InC
+	return !ok || !IsNativeFuncBackground(background)
 }
 
 func (p goTypes) cvtNamed(t *types.Named) (raw *types.Named, cvt bool) {

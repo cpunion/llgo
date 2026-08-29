@@ -200,7 +200,7 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 			continue
 		}
 		shape, ok := shapes[canonical]
-		if !ok || shape.kind != cFunc || shape.physicalSymbol == "" || shape.typedABISignature == "" {
+		if !ok || !isNativeFuncKind(shape.kind) || shape.physicalSymbol == "" || shape.typedABISignature == "" {
 			continue
 		}
 		parsed := defaultCoroForeignDeclarationContract()
@@ -233,7 +233,7 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 		identity := CoroCallableIdentityCertificate{}
 		switch scope {
 		case CoroCallableContractScopeDeclaration:
-			if shape.kind != cFunc || shape.physicalSymbol == "" || shape.typedABISignature == "" {
+			if !isNativeFuncKind(shape.kind) || shape.physicalSymbol == "" || shape.typedABISignature == "" {
 				return fmt.Errorf("prepare emission universe: callable declaration contract on %q requires an exact frozen C declaration and physical ABI", declaration.Name())
 			}
 			var identityOK bool

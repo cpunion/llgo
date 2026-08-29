@@ -40,6 +40,7 @@ const (
 type coroWorkerForeignCallShape struct {
 	target       *ssa.Function
 	calleeType   types.Type
+	background   llssa.Background
 	calleeField  int
 	signature    *types.Signature
 	record       *types.Struct
@@ -98,7 +99,7 @@ func coroWorkerArgumentWordType(universe *EmissionUniverse, typ types.Type, poin
 		return true
 	}
 	if universe == nil || universe.prog == nil || pointerSize <= 0 ||
-		universe.prog.TypeBackground(typ) != llssa.InC {
+		!llssa.IsNativeFuncBackground(universe.prog.TypeBackground(typ)) {
 		return false
 	}
 	signature, ok := types.Unalias(typ).Underlying().(*types.Signature)
@@ -171,7 +172,7 @@ func coroWorkerForeignRecordValueType(
 		return argument
 	case *types.Signature:
 		return argument && universe.prog != nil &&
-			universe.prog.TypeBackground(typ) == llssa.InC &&
+			llssa.IsNativeFuncBackground(universe.prog.TypeBackground(typ)) &&
 			!underlying.Variadic()
 	case *types.Array:
 		visiting[typ] = true
@@ -840,7 +841,7 @@ func validateCoroWorkerForeignCallWithAuthority(
 			}
 			if !targetPlanned ||
 				targetPlan.External != coro.ExternalUnknownForeign ||
-				!classified || background != llssa.InC {
+				!classified || !llssa.IsNativeFuncBackground(background) {
 				return shape, false, nil
 			}
 		}
@@ -881,9 +882,10 @@ func validateCoroWorkerForeignCallWithAuthority(
 	if backgroundErr != nil {
 		return shape, true, fmt.Errorf("classify target frontend ABI: %w", backgroundErr)
 	}
-	if !classified || background != llssa.InC {
+	if !classified || !llssa.IsNativeFuncBackground(background) {
 		return shape, true, fmt.Errorf("target is not one exact frontend C declaration")
 	}
+	shape.background = background
 	if isCoroPythonBindingDeclaration(target) && !isCoroProgramManagedEntry(call.Parent()) {
 		return shape, true, fmt.Errorf(
 			"Python binding call in %q has no compiler-owned program-root owner realm",
@@ -1071,6 +1073,10 @@ func validateCoroWorkerDynamicForeignCall(
 		return shape, true, fmt.Errorf("derive dynamic call-site ABI: %w", contextErr)
 	}
 	calleeType := ownerContext.patchType(common.Value.Type())
+	background := universe.prog.TypeBackground(calleeType)
+	if !llssa.IsNativeFuncBackground(background) {
+		return shape, true, fmt.Errorf("dynamic raw C callee has no exact native function background")
+	}
 	signature, ok := types.Unalias(calleeType).Underlying().(*types.Signature)
 	if !ok || signature == nil || signature.Recv() != nil || signature.Variadic() ||
 		coroWorkerTypeParamLen(signature.TypeParams()) != 0 ||
@@ -1122,6 +1128,7 @@ func validateCoroWorkerDynamicForeignCall(
 		}
 	}
 	shape.calleeType = calleeType
+	shape.background = background
 	shape.calleeField = 0
 	shape.arguments = append([]ssa.Value(nil), common.Args...)
 	shape.signature = signature
@@ -1144,6 +1151,7 @@ func coroWorkerForeignThunkSignature() *types.Signature {
 func (p *context) coroWorkerForeignThunk(shape coroWorkerForeignCallShape, target llssa.Function) llssa.Function {
 	dynamic := shape.calleeType != nil
 	if p == nil || shape.signature == nil || shape.record == nil ||
+		!llssa.IsNativeFuncBackground(shape.background) ||
 		dynamic && (shape.target != nil || shape.calleeField < 0 || target != nil) ||
 		!dynamic && (shape.target == nil || target == nil) {
 		panic("coroutine foreign worker thunk requires an exact target, signature, and call record")
@@ -1155,6 +1163,7 @@ func (p *context) coroWorkerForeignThunk(shape coroWorkerForeignCallShape, targe
 	key := framedEmissionKey(
 		"cl-coro-worker-foreign-thunk-v1",
 		targetName,
+		strconv.Itoa(int(shape.background)),
 		p.cachedStrictEmissionABITypeKey(shape.calleeType),
 		p.cachedStrictEmissionABITypeKey(shape.signature),
 		strconv.Itoa(p.prog.PointerSize()),
@@ -1254,7 +1263,7 @@ func (p *context) compileCoroWorkerForeignTransaction(
 	if !dynamic {
 		var kind int
 		target, _, kind = p.compileFunction(shape.target)
-		if kind != cFunc || target == nil {
+		if !isNativeFuncKind(kind) || llssa.Background(kind) != shape.background || target == nil {
 			panic("coroutine foreign worker transaction lost its exact C target")
 		}
 	}

@@ -173,6 +173,6 @@ func (p *context) compileCoroExportIngressAdapter(
 		panic("coroutine export ingress public symbol collides with its managed primary")
 	}
 	return p.coroForeignIngressAdapter(
-		target, signature, certificate.PhysicalSymbol, false,
+		target, signature, llssa.InC, certificate.PhysicalSymbol, false,
 	)
 }

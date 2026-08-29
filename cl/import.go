@@ -854,6 +854,7 @@ const (
 	goFunc      = int(llssa.InGo)
 	cFunc       = int(llssa.InC)
 	pyFunc      = int(llssa.InPython)
+	stdcallFunc = int(llssa.InStdcall)
 	llgoInstr   = -1
 
 	llgoInstrBase   = 0x80
@@ -988,6 +989,10 @@ const (
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )
+
+func isNativeFuncKind(kind int) bool {
+	return llssa.IsNativeFuncBackground(llssa.Background(kind))
+}
 
 func recvNamed(typ types.Type) *types.Named {
 	if named := recvNamedOk(typ); named != nil {
@@ -1191,6 +1196,9 @@ func (p *context) funcName(fn *ssa.Function) (*types.Package, string, int) {
 		if strings.HasPrefix(v, "C.") {
 			return nil, v[2:], cFunc
 		}
+		if strings.HasPrefix(v, "stdcall.") {
+			return nil, v[len("stdcall."):], stdcallFunc
+		}
 		if strings.HasPrefix(v, "py.") {
 			return pkg, v[3:], pyFunc
 		}
@@ -1261,6 +1269,9 @@ func (p *context) varName(pkg *types.Package, v *ssa.Global) (vName string, vtyp
 	// TODO(lijie): need a bettery way to process linkname (maybe alias)
 	if !isCgoCfpvar(v.Name()) && !isCgoVar(v.Name()) {
 		if v, ok := p.prog.Linkname(name); ok {
+			if strings.HasPrefix(v, "stdcall.") {
+				panic(fmt.Errorf("stdcall linkname namespace applies only to functions: %s", name))
+			}
 			if strings.HasPrefix(v, "go:") {
 				if llssa.PathOf(pkg) == "runtime" {
 					return v, goVar, true
@@ -1443,6 +1454,8 @@ func toBackground(bg string) llssa.Background {
 	switch bg {
 	case "C":
 		return llssa.InC
+	case "stdcall":
+		return llssa.InStdcall
 	}
 	return llssa.InGo
 }

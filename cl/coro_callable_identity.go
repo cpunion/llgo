@@ -112,14 +112,14 @@ func (u *EmissionUniverse) freezeCoroCallableIdentityCertificates() error {
 			managedC := false
 			for _, owner := range u.sortedUseOwners(canonical) {
 				kind, _, _, ok := splitManagedSymbolKey(u.finalKeys[emissionFunctionOwnerKey{function: canonical, owner: owner}])
-				managedC = managedC || ok && kind == cFunc
+				managedC = managedC || ok && isNativeFuncKind(kind)
 			}
 			if managedC {
 				return fmt.Errorf("prepare emission universe: callable identity on %q: %w", canonical.Name(), err)
 			}
 			continue
 		}
-		if shape.kind != cFunc {
+		if !isNativeFuncKind(shape.kind) {
 			continue
 		}
 		if shape.physicalSymbol == "" || shape.typedABISignature == "" {

@@ -40,6 +40,7 @@ type Target struct {
 	LLVMTarget              string // physical LLVM target selected by a target configuration
 	OptLevel                optlevel.Level
 	SaturatingFloatToUint32 bool
+	CABIOnly                bool // C ABI lowering is limited to native function boundaries (-abi=1)
 
 	// Resolved is the requested LLVM configuration produced by target
 	// resolution. When it is nil, Spec derives the legacy defaults from

@@ -246,7 +246,7 @@ func (view CoroLibraryEffectView) ValidateForeignCallable(
 	if err != nil {
 		return fmt.Errorf("coroutine library foreign callable %q frontend classification: %w", fact.Function, err)
 	}
-	if !classified || background != llssa.InC {
+	if !classified || !llssa.IsNativeFuncBackground(background) {
 		return fmt.Errorf("coroutine library foreign callable %q does not name one frontend C declaration", fact.Function)
 	}
 	if err := fact.Validate(); err != nil {

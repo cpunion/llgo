@@ -73,7 +73,7 @@ func proveCoroTLSDestructorClosedDynamicCalls(ctx *context) (map[ssa.CallInstruc
 				}
 				for argument, value := range call.Common().Args {
 					parameter, ok := staticCallArgumentParameterType(call, argument)
-					if !ok || ctx.prog.TypeBackground(parameter) != llssa.InC {
+					if !ok || !llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(parameter)) {
 						continue
 					}
 					if _, functionType := types.Unalias(parameter).Underlying().(*types.Signature); !functionType {

@@ -140,7 +140,7 @@ func (p *goProgram) layoutType(typ types.Type) types.Type {
 		return p.layoutType(types.Unalias(typ))
 	case *types.Named:
 		prog := Program(unsafe.Pointer(p))
-		if background, ok := prog.packageTypeBackground(namedLinkname(typ)); ok && background == InC {
+		if background, ok := prog.packageTypeBackground(namedLinkname(typ)); ok && IsNativeFuncBackground(background) {
 			return typ
 		}
 		return p.layoutType(typ.Underlying())
@@ -707,6 +707,9 @@ func isPkgScope(parent, pkgScope *types.Scope) bool {
 }
 
 func (p Program) toNamed(raw *types.Named) Type {
+	if background, ok := p.packageTypeBackground(namedLinkname(raw)); ok && background == InStdcall {
+		p.validateStdcallType(raw)
+	}
 	name := p.llvmNameOf(raw)
 	if typ, ok := p.named[name]; ok {
 		if namedTypeEquivalent(typ.raw.Type, raw) || p.namedStructLayoutEquivalent(typ, raw) {

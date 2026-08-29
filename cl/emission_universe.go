@@ -1898,6 +1898,8 @@ func (u *EmissionUniverse) FunctionBackground(fn *ssa.Function) (background llss
 		return llssa.InGo, true, nil
 	case cFunc:
 		return llssa.InC, true, nil
+	case stdcallFunc:
+		return llssa.InStdcall, true, nil
 	case pyFunc:
 		return llssa.InPython, true, nil
 	case ignoredFunc, llgoInstr:
@@ -4694,7 +4696,7 @@ func (u *EmissionUniverse) recordFunctionKind(fn *ssa.Function, owner *preparedE
 		return fmt.Errorf("prepare emission universe: cannot record frontend function kind without an exact function and owner")
 	}
 	switch kind {
-	case ignoredFunc, goFunc, cFunc, pyFunc, llgoInstr:
+	case ignoredFunc, goFunc, cFunc, stdcallFunc, pyFunc, llgoInstr:
 	default:
 		return fmt.Errorf("prepare emission universe: function %q has unknown frontend function kind %d", fn.Name(), kind)
 	}
@@ -6050,7 +6052,7 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 	}
 	// Parameter and result names are source/debug metadata, not callable ABI.
 	// Patch replacements may legitimately omit or rename them.
-	if ftype == cFunc {
+	if isNativeFuncKind(ftype) {
 		sig = u.emissionTypeKeys.cFunctionABI(patchedSignature)
 	} else {
 		sig = u.emissionTypeKeys.strictABI(patchedSignature)
@@ -6574,7 +6576,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				directFunction := false
 				if change, converted := instr.(*ssa.ChangeType); converted && change.X == target {
 					effective := u.effectiveType(owner, fn, change.Type(), false)
-					directFunction = u.prog.TypeBackground(effective) == llssa.InC
+					directFunction = llssa.IsNativeFuncBackground(u.prog.TypeBackground(effective))
 				}
 				if err := materializeTarget(target, directFunction); err != nil {
 					return fmt.Errorf(
@@ -8367,7 +8369,7 @@ func coroForeignPhysicalABIViewsCompatible(authority coroForeignPhysicalABI, vie
 		// LLVM opaque-pointer calls permit that view without changing the
 		// machine argument ABI. Two value-producing views must still agree
 		// exactly because neither declaration proves which value C returns.
-		if authority.kind == cFunc && view.kind == cFunc &&
+		if authority.kind == view.kind && isNativeFuncKind(authority.kind) &&
 			authority.parameterABI == view.parameterABI &&
 			(authority.resultCount == 0 && view.discardableResult ||
 				view.resultCount == 0 && authority.discardableResult) {
@@ -8420,14 +8422,14 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 			key := u.finalKeys[ownerKey]
 			ftype, symbol, signature, ok := splitManagedSymbolKey(key)
 			managedBodyless := ftype == goFunc && bodylessManagedGoDeclaration(fn)
-			if !ok || ftype != cFunc && !managedBodyless {
+			if !ok || !isNativeFuncKind(ftype) && !managedBodyless {
 				continue
 			}
 			llvmIRSignature := ""
 			parameterABI := ""
 			resultCount := 0
 			discardableResult := false
-			if ftype == cFunc {
+			if isNativeFuncKind(ftype) {
 				state, stateFrozen := u.ownerStates[fn][owner]
 				if !stateFrozen {
 					return fmt.Errorf(
@@ -8456,7 +8458,7 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 				if _, needsLLVMABI := u.executorLeafProofs[symbol]; needsLLVMABI {
 					llvmIRSignature = u.prog.PhysicalFuncDeclIRType(
 						patchedSignature,
-						llssa.InC,
+						llssa.Background(ftype),
 					)
 				}
 			}
@@ -8554,7 +8556,7 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		canonical := u.canonicalAlias(fn)
 		abi, ok := abiByFunction[canonical]
 		if directive == coroForeignCallNone {
-			if !ok || abi.kind != cFunc {
+			if !ok || !isNativeFuncKind(abi.kind) {
 				continue
 			}
 			proof, inferred := u.executorLeafProofs[abi.symbol]
