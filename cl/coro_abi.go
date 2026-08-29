@@ -1830,6 +1830,8 @@ func validateCoroPhysicalABIForOwner(
 		(plan.FuncRep == coro.DirectCoro || outcomePlainTwin && plan.FuncRep == coro.Dispatch) &&
 		(plan.Effect == coro.OutcomeStructured || outcomePlainTwin &&
 			plan.Effect&^(coro.AwaitStructured|coro.OutcomeStructured|coro.MayPark) == 0)
+	staticPackageInitOutcome := outcomePlainPrimary && fn.Name() == "init" &&
+		fn.Synthetic == "package initializer"
 	if plan.Emission != coro.EmitCoroutine && !outcomePlain ||
 		plan.FuncRep != coro.DirectCoro && !managedDispatchTarget && !rawMethodDispatchToken {
 		return fail("requires a direct coroutine/outcome or capability-certified Dispatch emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
@@ -2070,7 +2072,7 @@ func validateCoroPhysicalABIForOwner(
 	capturedRawVariant := rawVariant && len(fn.FreeVars) != 0
 	if fn.Synthetic != "" && !genericInstance && !boundMethodWrapper && !methodExpressionThunk && !methodWrapper && !methodTokenWrapper &&
 		!intrinsicSpawnCarrier && !builtinSpawnCarrier && !managedForeignValueWrapper && !rangeYield && !capturedRawVariant &&
-		!(programEntry && fn.Name() == "init" && fn.Synthetic == "package initializer") {
+		!(programEntry && fn.Name() == "init" && fn.Synthetic == "package initializer") && !staticPackageInitOutcome {
 		return fail("synthetic function %q is outside the leaf ABI", fn.Synthetic)
 	}
 	if list := fn.TypeParams(); list != nil && list.Len() != 0 && !genericInstance && !rangeYield {
@@ -2082,7 +2084,7 @@ func validateCoroPhysicalABIForOwner(
 	if list := fn.TypeArgs(); len(list) != 0 && !genericInstance && !rangeYield {
 		return fail("generic instances require a frozen instantiated ABI")
 	}
-	if isCoroProgramManagedEntry(fn) && !programEntry {
+	if isCoroProgramManagedEntry(fn) && !programEntry && !staticPackageInitOutcome {
 		return fail("program-named bodies require runnable lowering or an exact pure package-emission root")
 	}
 	physicalSourceSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
@@ -3149,6 +3151,14 @@ func hasCoroProgramManagedEntryCapability(fn *ssa.Function, whole *coro.SSAPlan,
 	}
 	if whole == nil {
 		return false
+	}
+	if fn.Name() == "init" && fn.Synthetic == "package initializer" {
+		if function, planned := whole.FunctionPlan(fn); planned &&
+			function.External == coro.Defined && function.Emission == coro.EmitOutcomePlain &&
+			function.ManagedEntry == coro.ManagedEntryOutcomePlain &&
+			function.FuncRep == coro.DirectCoro && function.HasStaticOutcome() {
+			return true
+		}
 	}
 	if hasCoroDeclaredPackageInitOutcomeCapability(fn, whole) {
 		return true

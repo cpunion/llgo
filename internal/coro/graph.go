@@ -239,16 +239,21 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 		return fmt.Errorf("coro: function %q: managed entry %s requires an external-known producer", spec.ID, spec.ManagedEntry)
 	}
 	if spec.StaticOutcome {
-		if spec.External != ExternalKnown || spec.ManagedEntry != ManagedEntryCoroutine ||
+		if spec.External != ExternalKnown ||
+			(spec.ManagedEntry != ManagedEntryCoroutine && spec.ManagedEntry != ManagedEntryOutcomePlain) ||
 			spec.AtomicCostProof != AtomicCostUnproven || spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" ||
 			spec.Seed&^(AwaitStructured|OutcomeStructured|MayPark) != 0 ||
 			spec.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
 			return fmt.Errorf("coro: function %q: invalid imported unbounded static outcome capability", spec.ID)
 		}
+		if spec.ManagedEntry == ManagedEntryOutcomePlain && spec.Seed != OutcomeStructured {
+			return fmt.Errorf("coro: function %q: unbounded outcome-plain primary has effect %s", spec.ID, spec.Seed)
+		}
 	}
 	switch spec.AtomicCostProof {
 	case AtomicCostUnproven:
-		if spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" || spec.ManagedEntry == ManagedEntryOutcomePlain {
+		if spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" ||
+			spec.ManagedEntry == ManagedEntryOutcomePlain && !spec.StaticOutcome {
 			return fmt.Errorf("coro: function %q: outcome entry/cost requires an atomic-cost proof", spec.ID)
 		}
 	case AtomicCostLeaf, AtomicCostDAG:

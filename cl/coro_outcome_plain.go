@@ -30,9 +30,9 @@ import (
 const coroOutcomePlainPrimarySuffix = "$outcome"
 
 // outcomePlainPhysicalABI is the synchronous hidden ABI for a logically
-// outcome-structured bounded body. The caller owns both result and completion
-// storage; the callee returns normally after publishing exactly one terminal
-// status.
+// outcome-structured bounded or exact-static unbounded body. The caller owns
+// both result and completion storage; the callee returns normally after
+// publishing exactly one terminal status.
 // No parameter is an LLVM coroutine handle and this ABI emits no coro
 // intrinsic, ramp, resume, or destroy symbol.
 type outcomePlainPhysicalABI struct {

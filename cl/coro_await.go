@@ -332,7 +332,7 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 		caller.ManagedEntry == coro.ManagedEntryCoroutine
 	callerOutcome := caller.Emission == coro.EmitOutcomePlain &&
 		caller.ManagedEntry == coro.ManagedEntryOutcomePlain &&
-		caller.AtomicCostProof.ProvesOutcomePlain() && caller.AtomicCost != 0
+		caller.HasStaticOutcome() && (caller.StaticOutcome || caller.AtomicCost != 0)
 	if !callerCoroutine && !callerOutcome {
 		return fmt.Errorf("caller emission is %s, want a structured physical entry", caller.Emission)
 	}
@@ -344,7 +344,7 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 		target.Emission == coro.EmitOutcomePlain &&
 		target.ManagedEntry == coro.ManagedEntryOutcomePlain &&
 		target.Primary == coro.PrimaryCoroutine &&
-		target.AtomicCostProof.ProvesOutcomePlain() && target.AtomicCost != 0
+		target.HasStaticOutcome() && (target.StaticOutcome || target.AtomicCost != 0)
 	imported := target.External == coro.ExternalKnown &&
 		target.Emission == coro.EmitExternal &&
 		target.Primary == coro.PrimaryExternal &&

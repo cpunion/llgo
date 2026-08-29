@@ -551,6 +551,11 @@ func nativeBlock() int { return 7 }
 	config := planDigestSSAConfig()
 	config.OutcomeMode = OutcomeExplicitStatus
 	config.MaxPlainInstructions = -1
+	config.ClassifyLocalBody = func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		facts.StaticOutcomeLocal = true
+		return facts, nil
+	}
 	config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
 		if fn == nativeBlock {
 			return SSAFunctionPolicy{Effect: MayPark, TrustedNoUnwind: true}, nil
@@ -582,5 +587,74 @@ func nativeBlock() int { return 7 }
 	}
 	if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err != nil {
 		t.Fatalf("digest no-unwind native-block plan: %v", err)
+	}
+}
+
+func TestAnalyzeSSAStaticOutcomeUsesOnePrimaryForExactChain(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_outcome_primary.go", `package coroid
+
+func leaf(value any, fail bool) int {
+	if fail { panic(value) }
+	return 7
+}
+func middle(value any, fail bool) int { return leaf(value, fail) }
+func root(value any, fail bool) int { return middle(value, fail) }
+`)
+	leaf := packageFunction(t, pkg, "leaf")
+	middle := packageFunction(t, pkg, "middle")
+	root := packageFunction(t, pkg, "root")
+	config := planDigestSSAConfig()
+	config.OutcomeMode = OutcomeExplicitStatus
+	config.MaxPlainInstructions = -1
+	config.ClassifyLocalBody = func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		facts.StaticOutcomeLocal = true
+		return facts, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, function := range []*ssa.Function{leaf, middle} {
+		got := functionPlanFor(t, plan, function)
+		if got.Emission != EmitOutcomePlain || got.ManagedEntry != ManagedEntryOutcomePlain ||
+			!got.StaticOutcome || got.AtomicCostProof != AtomicCostUnproven ||
+			got.FuncRep != DirectCoro || got.Effect != OutcomeStructured {
+			t.Fatalf("exact-static %s plan = %+v, want one unbounded outcome primary", function.Name(), got)
+		}
+	}
+	rootPlan := functionPlanFor(t, plan, root)
+	if rootPlan.Emission != EmitCoroutine || rootPlan.ManagedEntry != ManagedEntryCoroutine ||
+		!rootPlan.StaticOutcome {
+		t.Fatalf("scheduled root plan = %+v, want coroutine primary plus outcome twin", rootPlan)
+	}
+	if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err != nil {
+		t.Fatalf("digest unbounded outcome-primary plan: %v", err)
+	}
+}
+
+func TestAnalyzeSSAStaticOutcomeRetainsCoroutineForFunctionValue(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_outcome_dispatch.go", `package coroid
+
+func leaf(value any, fail bool) int {
+	if fail { panic(value) }
+	return 7
+}
+var Saved = leaf
+func root(value any, fail bool) int { return leaf(value, fail) }
+`)
+	leaf := packageFunction(t, pkg, "leaf")
+	root := packageFunction(t, pkg, "root")
+	config := planDigestSSAConfig()
+	config.OutcomeMode = OutcomeExplicitStatus
+	config.MaxPlainInstructions = -1
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := functionPlanFor(t, plan, leaf)
+	if got.Emission != EmitCoroutine || got.ManagedEntry != ManagedEntryCoroutine ||
+		got.FuncRep != Dispatch {
+		t.Fatalf("function-value leaf plan = %+v, want retained dynamic coroutine primary", got)
 	}
 }

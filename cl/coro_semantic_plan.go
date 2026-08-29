@@ -46,7 +46,7 @@ type coroSemanticInstructionPlan struct {
 	// ProgramIR by analysis and physical emission.
 	outcomePlainLeaf bool
 	// staticOutcome records that this local instruction can participate in an
-	// unbounded synchronous outcome twin. Calls still require a whole-program
+	// unbounded synchronous outcome entry. Calls still require a whole-program
 	// exact-target proof; this bit only closes the local lowering vocabulary.
 	staticOutcome bool
 	// nativeFaultBoundary is the target-independent fact that this evaluated

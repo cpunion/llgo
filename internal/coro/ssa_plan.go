@@ -108,9 +108,9 @@ type SSAFunctionPolicy struct {
 	// AtomicCostCertificate binds a producer-owned path proof to its exact
 	// FunctionID, CFG projection and transitive callee certificates.
 	AtomicCostCertificate string
-	// StaticOutcome carries a producer-owned unbounded synchronous twin for an
-	// ExternalKnown declaration. Local bodies derive the same capability from
-	// ProgramIR after effect and CallPlan finalization.
+	// StaticOutcome carries a producer-owned unbounded synchronous entry for an
+	// ExternalKnown declaration. It may be primary or a coroutine twin; local
+	// bodies derive the same capability after effect and CallPlan finalization.
 	StaticOutcome bool
 	// CallableIdentityCertificate is the execution-policy-neutral identity of
 	// one exact managed C declaration. It may coexist with either a generic
@@ -2176,12 +2176,15 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids, canonicalizer); err != nil {
 		return nil, err
 	}
+	outcomePrimaryUses := classifySSAOutcomePrimaryUses(graph, canonicalRoots, byID, callPlans, loweredCalls)
 	if err := applySSAOutcomePlainPlans(
-		base, graph, canonicalRoots, byID, localBodyFacts, callPlans, loweredCalls, maxPlain,
+		base, byID, localBodyFacts, callPlans, loweredCalls, outcomePrimaryUses, maxPlain,
 	); err != nil {
 		return nil, err
 	}
-	if err := applySSAStaticOutcomePlans(base, byID, localBodyFacts, callPlans, loweredCalls, elidedCalls); err != nil {
+	if err := applySSAStaticOutcomePlans(
+		base, byID, localBodyFacts, callPlans, loweredCalls, elidedCalls, outcomePrimaryUses,
+	); err != nil {
 		return nil, err
 	}
 	elidedCallSet := make(map[ssa.CallInstruction]struct{}, len(elidedCalls))
@@ -2315,6 +2318,74 @@ func validateSSAImportedOutcomePlainCosts(plan *Plan, maxAtomicCost int) error {
 	return nil
 }
 
+type ssaOutcomePrimaryUses struct {
+	direct  map[FunctionID]bool
+	blocked map[FunctionID]bool
+}
+
+func classifySSAOutcomePrimaryUses(
+	graph *Graph,
+	roots []SSARootPlan,
+	byID map[FunctionID]*ssa.Function,
+	callPlans map[ssa.CallInstruction]SSACallPlan,
+	loweredCalls map[*ssa.Function][]SSALoweredCall,
+) ssaOutcomePrimaryUses {
+	uses := ssaOutcomePrimaryUses{
+		direct:  make(map[FunctionID]bool),
+		blocked: make(map[FunctionID]bool),
+	}
+	ids := make(map[*ssa.Function]FunctionID, len(byID))
+	for id, function := range byID {
+		ids[function] = id
+	}
+	for _, root := range roots {
+		if root.IngressEntry || root.ScheduledEntry {
+			// A foreign ingress or ordinary scheduler root must preserve the
+			// managed coroutine entry. The generated ingress adapter constructs a
+			// child which may park; it cannot select a synchronous outcome entry.
+			uses.blocked[root.ID] = true
+		} else if root.EmissionEntry {
+			// A package-generation entry is an exact future static caller from a
+			// consumer archive. It may select the same outcome-primary ABI as a
+			// direct call observed in this package.
+			uses.direct[root.ID] = true
+		}
+	}
+	if graph != nil {
+		for reference := range graph.references {
+			uses.blocked[reference.target] = true
+		}
+	}
+	for call, plan := range callPlans {
+		exactStatic := call != nil && call.Common() != nil && call.Common().StaticCallee() != nil &&
+			plan.Kind == CallDirect && plan.Rep == DirectCoro && plan.Transport == ManagedTransport &&
+			!plan.Open && !plan.MayBeNil && !plan.SyncDispatch && !plan.RawPlain && len(plan.Targets) == 1
+		if exactStatic {
+			uses.direct[plan.Targets[0]] = true
+		}
+		for _, target := range plan.Targets {
+			if !exactStatic {
+				uses.blocked[target] = true
+			}
+		}
+	}
+	for _, calls := range loweredCalls {
+		for _, call := range calls {
+			if call.Target == nil {
+				continue
+			}
+			if id, ok := ids[call.Target]; ok {
+				uses.blocked[id] = true
+			}
+		}
+	}
+	return uses
+}
+
+func (uses ssaOutcomePrimaryUses) allows(plan FunctionPlan) bool {
+	return plan.FuncRep == DirectCoro && uses.direct[plan.ID] && !uses.blocked[plan.ID]
+}
+
 // applySSAOutcomePlainPlans selects the source-call-free V0 leaves and then a
 // closed direct-call DAG over those leaves and imported producer proofs. The
 // local ProgramIR projection is necessary but insufficient: every counted call
@@ -2326,30 +2397,25 @@ func validateSSAImportedOutcomePlainCosts(plan *Plan, maxAtomicCost int) error {
 // predecessor.
 //
 // Roots, spawns, compiler-lowered incoming calls, first-class references, raw
-// entries, recursion and open execution remain ordinary LLVM coroutines. Local
-// The path proof consumes ProgramIR's block-local costs and successor indexes;
+// entries, recursion and open execution remain ordinary LLVM coroutines. The
+// path proof consumes ProgramIR's block-local costs and successor indexes;
 // analysis does not rescan raw SSA or build a second CFG.
 func applySSAOutcomePlainPlans(
 	base *Plan,
-	graph *Graph,
-	roots []SSARootPlan,
 	byID map[FunctionID]*ssa.Function,
 	localBodyFacts map[*ssa.Function]SSAFunctionBodyFacts,
 	callPlans map[ssa.CallInstruction]SSACallPlan,
 	loweredCalls map[*ssa.Function][]SSALoweredCall,
+	primaryUses ssaOutcomePrimaryUses,
 	maxAtomicCost int,
 ) error {
-	if base == nil || graph == nil {
+	if base == nil {
 		return fmt.Errorf("coro: outcome-plain planning requires a complete graph plan")
 	}
 	// A disabled instruction budget cannot prove a finite target/profile bound.
 	if maxAtomicCost < 0 {
 		return nil
 	}
-	// primaryBlocked records uses which require the ordinary coroutine entry.
-	// They no longer suppress a separately proven static outcome entry.
-	primaryBlocked := make(map[FunctionID]bool)
-	direct := make(map[FunctionID]bool)
 	type outcomeCall struct {
 		instruction ssa.CallInstruction
 		target      FunctionID
@@ -2358,22 +2424,6 @@ func applySSAOutcomePlainPlans(
 	ids := make(map[*ssa.Function]FunctionID, len(byID))
 	for id, function := range byID {
 		ids[function] = id
-	}
-	for _, root := range roots {
-		if root.IngressEntry || root.ScheduledEntry {
-			// A foreign ingress or ordinary scheduler root must preserve the
-			// managed primary. The generated ingress adapter constructs a child
-			// which may park; it cannot select a synchronous outcome-only entry.
-			primaryBlocked[root.ID] = true
-		} else if root.EmissionEntry {
-			// A package-generation entry is an exact future static caller from a
-			// consumer archive. It may therefore select the same bounded
-			// outcome-primary ABI as a direct call observed in this package.
-			direct[root.ID] = true
-		}
-	}
-	for reference := range graph.references {
-		primaryBlocked[reference.target] = true
 	}
 	for call, plan := range callPlans {
 		exactStatic := call != nil && call.Common() != nil && call.Common().StaticCallee() != nil &&
@@ -2384,27 +2434,10 @@ func applySSAOutcomePlainPlans(
 				outgoing[owner] = append(outgoing[owner], outcomeCall{instruction: call, target: plan.Targets[0]})
 			}
 		}
-		for _, target := range plan.Targets {
-			if exactStatic {
-				direct[target] = true
-			} else {
-				primaryBlocked[target] = true
-			}
-		}
-	}
-	for _, calls := range loweredCalls {
-		for _, call := range calls {
-			if call.Target == nil {
-				continue
-			}
-			if id, ok := ids[call.Target]; ok {
-				primaryBlocked[id] = true
-			}
-		}
 	}
 	eligible := func(plan FunctionPlan, function *ssa.Function, facts SSAFunctionBodyFacts, classified bool) bool {
 		if function == nil || len(function.FreeVars) != 0 || !classified || facts.HasCycle || facts.AtomicPath == nil ||
-			facts.InstructionCount <= 0 || !direct[plan.ID] {
+			facts.InstructionCount <= 0 || !primaryUses.direct[plan.ID] {
 			return false
 		}
 		for _, lowered := range loweredCalls[function] {
@@ -2431,7 +2464,7 @@ func applySSAOutcomePlainPlans(
 		// synchronous outcome ABI its managed primary as before. Otherwise retain
 		// the coroutine primary and emit the same proven outcome body as a static
 		// twin; exact direct calls select it while dynamic calls keep their ABI.
-		if !primaryBlocked[plan.ID] && plan.FuncRep == DirectCoro {
+		if primaryUses.allows(plan) {
 			plan.Emission = EmitOutcomePlain
 			plan.ManagedEntry = ManagedEntryOutcomePlain
 			// Every AwaitStructured dependency was proven to be a synchronous
@@ -2516,11 +2549,12 @@ func applySSAOutcomePlainPlans(
 }
 
 // applySSAStaticOutcomePlans closes the exact-static no-suspend call graph
-// after the bounded atomic cohort has been selected. The resulting twin uses
+// after the bounded atomic cohort has been selected. The resulting entry uses
 // the same explicit-status outcome ABI but deliberately carries no atomic cost
-// certificate: a source CFG loop may compute for an unbounded interval. This
-// is currently permitted only at exact static call sites; dynamic/function-
-// value callers retain the ordinary preemptible coroutine primary.
+// certificate: a source CFG loop may compute for an unbounded interval. A
+// target reached only by exact static calls uses it as its sole body; dynamic,
+// scheduler, ingress, raw, and open callers retain a coroutine primary plus
+// this exact-static twin.
 func applySSAStaticOutcomePlans(
 	base *Plan,
 	byID map[FunctionID]*ssa.Function,
@@ -2528,6 +2562,7 @@ func applySSAStaticOutcomePlans(
 	callPlans map[ssa.CallInstruction]SSACallPlan,
 	loweredCalls map[*ssa.Function][]SSALoweredCall,
 	elidedCalls map[ssa.CallInstruction]bool,
+	primaryUses ssaOutcomePrimaryUses,
 ) error {
 	if base == nil {
 		return fmt.Errorf("coro: static-outcome planning requires a complete graph plan")
@@ -2692,6 +2727,19 @@ func applySSAStaticOutcomePlans(
 			plan.DeclaredExec &^= NeedsCleanupFrame
 			plan.LocalExec &^= NeedsCleanupFrame
 			plan.Exec &^= NeedsCleanupFrame
+		}
+		// An exact-static, non-root, non-escaping function needs only the
+		// synchronous outcome body. Keep a coroutine twin solely when a scheduler,
+		// foreign ingress, function value, open call, raw entry, or compiler-lowered
+		// caller can actually reach that ABI. Removing AwaitStructured here is a
+		// physical consequence of the already closed outcome call graph, not a new
+		// effect inference: every structured callee is invoked synchronously below.
+		if primaryUses.allows(plan) && !plan.RawPlainDemand && !plan.RawPlainEntry &&
+			plan.Effect.Contains(OutcomeStructured) &&
+			plan.Effect&^(AwaitStructured|OutcomeStructured) == 0 {
+			plan.Emission = EmitOutcomePlain
+			plan.ManagedEntry = ManagedEntryOutcomePlain
+			plan.Effect = OutcomeStructured
 		}
 		if err := validateManagedEntryPlan(plan); err != nil {
 			return fmt.Errorf("coro: select unbounded static outcome %q: %w", plan.ID, err)

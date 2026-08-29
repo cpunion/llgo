@@ -395,6 +395,28 @@ func TestLibraryEffectSummaryCarriesOutcomePlainCapability(t *testing.T) {
 		policy.AtomicCostCertificate != function.AtomicCostCertificate {
 		t.Fatalf("imported outcome policy = %+v", policy)
 	}
+	unbounded := summary
+	unbounded.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
+	unbounded.Functions[0].AtomicCost = 0
+	unbounded.Functions[0].AtomicCostProof = AtomicCostUnproven
+	unbounded.Functions[0].AtomicCostCertificate = ""
+	unbounded.Functions[0].StaticOutcome = true
+	unboundedData, err := unbounded.MarshalStable()
+	if err != nil {
+		t.Fatalf("marshal unbounded outcome primary: %v", err)
+	}
+	unboundedParsed, err := ParseLibraryEffectSummary(unboundedData)
+	if err != nil {
+		t.Fatalf("parse unbounded outcome primary: %v", err)
+	}
+	unboundedPolicy, err := unboundedParsed.Functions[0].ImportedPolicy()
+	if err != nil {
+		t.Fatalf("import unbounded outcome primary: %v", err)
+	}
+	if unboundedPolicy.ManagedEntry != ManagedEntryOutcomePlain ||
+		!unboundedPolicy.StaticOutcome || unboundedPolicy.AtomicCostProof != AtomicCostUnproven {
+		t.Fatalf("imported unbounded outcome policy = %+v", unboundedPolicy)
+	}
 	dag := summary
 	dag.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
 	dag.Functions[0].AtomicCostProof = AtomicCostDAG

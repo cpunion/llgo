@@ -251,7 +251,8 @@ func (p *context) resolvePatchOriginalInitOutcomeSymbol(fn *ssa.Function) (plann
 		return plannedFunctionSymbol{}, fmt.Errorf("patch original initializer %q has no synchronous outcome capability", entry.plan.ID)
 	}
 	entry.name = entry.baseName + coroOutcomePlainPrimarySuffix
-	entry.outcomePlainTwin = true
+	entry.outcomePlainTwin = entry.plan.Emission != coro.EmitOutcomePlain ||
+		entry.plan.ManagedEntry != coro.ManagedEntryOutcomePlain
 	return entry, nil
 }
 
@@ -312,7 +313,8 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmitte
 	case coro.EmitOutcomePlain:
 		if plan.External != coro.Defined || !hasEmittedBody || plan.Primary != coro.PrimaryCoroutine ||
 			plan.FuncRep != coro.DirectCoro || plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
-			!plan.AtomicCostProof.ProvesOutcomePlain() || plan.AtomicCost == 0 {
+			!plan.HasStaticOutcome() ||
+			!plan.StaticOutcome && plan.AtomicCost == 0 {
 			return fmt.Errorf(
 				"coroutine entry resolution: outcome-plain emission %q (%s) has external=%s emitted-body=%t primary=%s representation=%s atomic-proof=%s cost=%d",
 				plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody, plan.Primary,
@@ -564,8 +566,9 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			return err
 		}
 		if e.libraryEffect.ManagedEntry == coro.ManagedEntryOutcomePlain {
-			if !e.plan.AtomicCostProof.ProvesOutcomePlain() || e.plan.AtomicCost == 0 ||
-				e.plan.Effect != coro.OutcomeStructured || e.plan.Exec&^coro.MayUnwind != 0 {
+			if !e.plan.HasStaticOutcome() || !e.plan.StaticOutcome && e.plan.AtomicCost == 0 ||
+				e.plan.Effect != coro.OutcomeStructured ||
+				!e.plan.StaticOutcome && e.plan.Exec&^coro.MayUnwind != 0 {
 				return fmt.Errorf("external outcome-plain emission %q has an invalid producer capability", e.plan.ID)
 			}
 		}
@@ -818,15 +821,16 @@ func (p *context) mustFunctionSymbol(fn *ssa.Function) plannedFunctionSymbol {
 }
 
 // mustOutcomePlainFunctionSymbol selects the proof-carrying synchronous entry
-// used only by one exact static call. It never changes the managed primary
-// published through a function value, method table, interface, or reflection.
+// used by one exact static call. It is the managed primary only when analysis
+// proved there is no function-value, method-table, interface, reflection,
+// scheduler, raw, or ingress consumer.
 func (p *context) mustOutcomePlainFunctionSymbol(fn *ssa.Function) plannedFunctionSymbol {
 	entry, err := p.resolveFunctionSymbol(fn)
 	if err == nil {
 		err = entry.checkSupported()
 	}
 	if err == nil && !entry.hasOutcomePlainCapability() {
-		err = fmt.Errorf("outcome-plain static entry %q has no frozen atomic-cost capability", entry.plan.ID)
+		err = fmt.Errorf("outcome-plain static entry %q has no frozen outcome capability", entry.plan.ID)
 	}
 	if err == nil {
 		if entry.importedLibrary {

@@ -693,7 +693,7 @@ func TestCoroOutcomePlainDAGLargeResultFallsBackBeforeEmission(t *testing.T) {
 	runCoroABITestPipeline(t, prog, module)
 }
 
-func TestCoroOutcomePlainPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
+func TestCoroOutcomePlainPrimaryAvoidsCoroutineWithoutAtomicBudget(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
 		name   string
@@ -703,94 +703,78 @@ func TestCoroOutcomePlainPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			baselineProg, baselinePkg, baselinePlan, _, baselineLeaf :=
+			unboundedProg, unboundedPkg, unboundedPlan, _, unboundedLeaf :=
 				compileCoroOutcomePlainFixtureWithBudget(t, test.target, -1)
-			defer baselineProg.Dispose()
-			baselineModule := baselinePkg.Module()
-			defer baselineModule.Dispose()
-			optimizedProg, optimizedPkg, optimizedPlan, _, optimizedLeaf :=
+			defer unboundedProg.Dispose()
+			unboundedModule := unboundedPkg.Module()
+			defer unboundedModule.Dispose()
+			boundedProg, boundedPkg, boundedPlan, _, boundedLeaf :=
 				compileCoroOutcomePlainFixtureWithBudget(t, test.target, 64)
-			defer optimizedProg.Dispose()
-			optimizedModule := optimizedPkg.Module()
-			defer optimizedModule.Dispose()
+			defer boundedProg.Dispose()
+			boundedModule := boundedPkg.Module()
+			defer boundedModule.Dispose()
 
-			baselineLeafPlan, baselineFound := baselinePlan.FunctionPlan(baselineLeaf)
-			optimizedLeafPlan, optimizedFound := optimizedPlan.FunctionPlan(optimizedLeaf)
-			if !baselineFound || baselineLeafPlan.Emission != coro.EmitCoroutine ||
-				!baselineLeafPlan.HasStaticOutcome() {
-				t.Fatalf("baseline Leaf plan = %+v, present=%t; want coroutine primary plus static outcome twin", baselineLeafPlan, baselineFound)
+			unboundedLeafPlan, unboundedFound := unboundedPlan.FunctionPlan(unboundedLeaf)
+			boundedLeafPlan, boundedFound := boundedPlan.FunctionPlan(boundedLeaf)
+			if !unboundedFound || unboundedLeafPlan.Emission != coro.EmitOutcomePlain ||
+				!unboundedLeafPlan.StaticOutcome || unboundedLeafPlan.AtomicCostProof != coro.AtomicCostUnproven {
+				t.Fatalf("unbounded Leaf plan = %+v, present=%t; want one unbounded outcome primary", unboundedLeafPlan, unboundedFound)
 			}
-			if !optimizedFound || optimizedLeafPlan.Emission != coro.EmitOutcomePlain {
-				t.Fatalf("optimized Leaf plan = %+v, present=%t; want outcome-plain", optimizedLeafPlan, optimizedFound)
-			}
-
-			runCoroABITestPipeline(t, baselineProg, baselineModule)
-			runCoroABITestPipeline(t, optimizedProg, optimizedModule)
-			llssa.RemoveKeepAliveCallsAfterCoroSplit(baselineModule)
-			llssa.RemoveKeepAliveCallsAfterCoroSplit(optimizedModule)
-			baselineIR := baselineModule.String()
-			optimizedIR := optimizedModule.String()
-
-			baselineResume := baselineModule.NamedFunction("foo.Leaf$coro.resume")
-			baselineDestroy := baselineModule.NamedFunction("foo.Leaf$coro.destroy")
-			if baselineResume.IsNil() || baselineDestroy.IsNil() {
-				t.Fatalf("coroutine baseline did not materialize Leaf resume/destroy:\n%s", baselineIR)
-			}
-			if !optimizedModule.NamedFunction("foo.Leaf$outcome.resume").IsNil() ||
-				!optimizedModule.NamedFunction("foo.Leaf$outcome.destroy").IsNil() {
-				t.Fatalf("outcome-plain optimization retained Leaf resume/destroy:\n%s", optimizedIR)
-			}
-			baselineRamp := baselineModule.NamedFunction("foo.Leaf$coro").String()
-			optimizedLeafIR := optimizedModule.NamedFunction("foo.Leaf$outcome").String()
-			if !strings.Contains(baselineRamp, coroFrameAllocHookV1) ||
-				strings.Contains(optimizedLeafIR, coroFrameAllocHookV1) {
-				t.Fatalf("Leaf frame-allocation boundary baseline=%t optimized=%t",
-					strings.Contains(baselineRamp, coroFrameAllocHookV1),
-					strings.Contains(optimizedLeafIR, coroFrameAllocHookV1))
-			}
-			baselineParent := baselineModule.NamedFunction("foo.Parent$coro.resume").String()
-			optimizedParent := optimizedModule.NamedFunction("foo.Parent$coro.resume").String()
-			baselineAwaitCalls := strings.Count(baselineParent, coroAwaitPrepareInlineHookV4) +
-				strings.Count(baselineParent, coroAwaitConsumeHookV1)
-			optimizedAwaitCalls := strings.Count(optimizedParent, coroAwaitPrepareInlineHookV4) +
-				strings.Count(optimizedParent, coroAwaitConsumeHookV1)
-			if baselineAwaitCalls != 0 || optimizedAwaitCalls != 0 ||
-				!strings.Contains(baselineParent, "foo.Leaf$outcome") ||
-				!strings.Contains(optimizedParent, "foo.Leaf$outcome") {
-				t.Fatalf("static Leaf call retained a scheduling boundary: baseline calls=%d optimized calls=%d", baselineAwaitCalls, optimizedAwaitCalls)
+			if !boundedFound || boundedLeafPlan.Emission != coro.EmitOutcomePlain ||
+				!boundedLeafPlan.AtomicCostProof.ProvesOutcomePlain() || boundedLeafPlan.StaticOutcome {
+				t.Fatalf("bounded Leaf plan = %+v, present=%t; want one bounded outcome primary", boundedLeafPlan, boundedFound)
 			}
 
-			optimizeCoroOutcomeCostModule(t, baselineProg, baselineModule)
-			optimizeCoroOutcomeCostModule(t, optimizedProg, optimizedModule)
-			baselineObject, err := baselineProg.TargetMachine().EmitToMemoryBuffer(baselineModule, llvm.ObjectFile)
+			for _, fixture := range []struct {
+				name   string
+				prog   llssa.Program
+				module llvm.Module
+			}{
+				{name: "unbounded", prog: unboundedProg, module: unboundedModule},
+				{name: "bounded", prog: boundedProg, module: boundedModule},
+			} {
+				runCoroABITestPipeline(t, fixture.prog, fixture.module)
+				llssa.RemoveKeepAliveCallsAfterCoroSplit(fixture.module)
+				ir := fixture.module.String()
+				if !fixture.module.NamedFunction("foo.Leaf$coro").IsNil() ||
+					!fixture.module.NamedFunction("foo.Leaf$coro.resume").IsNil() ||
+					!fixture.module.NamedFunction("foo.Leaf$coro.destroy").IsNil() {
+					t.Fatalf("%s outcome primary retained a redundant Leaf coroutine:\n%s", fixture.name, ir)
+				}
+				leafIR := fixture.module.NamedFunction("foo.Leaf$outcome").String()
+				parentIR := fixture.module.NamedFunction("foo.Parent$coro.resume").String()
+				awaitCalls := strings.Count(parentIR, coroAwaitPrepareInlineHookV4) +
+					strings.Count(parentIR, coroAwaitConsumeHookV1)
+				if leafIR == "" || strings.Contains(leafIR, coroFrameAllocHookV1) ||
+					awaitCalls != 0 || !strings.Contains(parentIR, "foo.Leaf$outcome") {
+					t.Fatalf("%s static Leaf call retained a frame/scheduling boundary: await calls=%d", fixture.name, awaitCalls)
+				}
+			}
+
+			optimizeCoroOutcomeCostModule(t, unboundedProg, unboundedModule)
+			optimizeCoroOutcomeCostModule(t, boundedProg, boundedModule)
+			unboundedObject, err := unboundedProg.TargetMachine().EmitToMemoryBuffer(unboundedModule, llvm.ObjectFile)
 			if err != nil {
-				t.Fatalf("emit coroutine baseline object: %v\n%s", err, baselineModule.String())
+				t.Fatalf("emit unbounded outcome object: %v\n%s", err, unboundedModule.String())
 			}
-			defer baselineObject.Dispose()
-			optimizedObject, err := optimizedProg.TargetMachine().EmitToMemoryBuffer(optimizedModule, llvm.ObjectFile)
+			defer unboundedObject.Dispose()
+			boundedObject, err := boundedProg.TargetMachine().EmitToMemoryBuffer(boundedModule, llvm.ObjectFile)
 			if err != nil {
-				t.Fatalf("emit outcome-plain object: %v\n%s", err, optimizedModule.String())
+				t.Fatalf("emit bounded outcome object: %v\n%s", err, boundedModule.String())
 			}
-			defer optimizedObject.Dispose()
-			baselineBytes, optimizedBytes := len(baselineObject.Bytes()), len(optimizedObject.Bytes())
-			if baselineBytes == 0 || optimizedBytes == 0 {
-				t.Fatalf("empty cost-comparison object baseline=%d optimized=%d", baselineBytes, optimizedBytes)
-			}
-			if len(optimizedIR) >= len(baselineIR) || optimizedBytes >= baselineBytes {
-				t.Fatalf(
-					"outcome-plain did not reduce the exact fixture: IR baseline=%d optimized=%d object baseline=%d optimized=%d",
-					len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes,
-				)
+			defer boundedObject.Dispose()
+			if len(unboundedObject.Bytes()) == 0 || len(boundedObject.Bytes()) == 0 {
+				t.Fatal("outcome-primary fixture emitted an empty object")
 			}
 			t.Logf(
-				"post-split fixture: IR baseline=%d optimized=%d; O2 object baseline=%d optimized=%d; static call is flat in both, optimized primary eliminates Leaf frame/resume/destroy=1/1/1",
-				len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes,
+				"post-split outcome-primary objects: unbounded=%d bounded=%d; both eliminate Leaf frame/resume/destroy",
+				len(unboundedObject.Bytes()), len(boundedObject.Bytes()),
 			)
 		})
 	}
 }
 
-func TestCoroOutcomePlainDAGPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
+func TestCoroOutcomePlainDAGPrimaryAvoidsRedundantCoroutines(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
 		name   string
@@ -812,8 +796,9 @@ func TestCoroOutcomePlainDAGPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 			defer optimizedModule.Dispose()
 
 			for _, fn := range []*ssa.Function{baselineMiddle, baselineLeaf} {
-				if got, found := baselinePlan.FunctionPlan(fn); !found || got.Emission != coro.EmitCoroutine {
-					t.Fatalf("baseline %s plan = %+v, present=%t; want coroutine", fn.Name(), got, found)
+				if got, found := baselinePlan.FunctionPlan(fn); !found || got.Emission != coro.EmitOutcomePlain ||
+					!got.StaticOutcome || got.AtomicCostProof != coro.AtomicCostUnproven {
+					t.Fatalf("unbounded %s plan = %+v, present=%t; want one outcome primary", fn.Name(), got, found)
 				}
 			}
 			if got, found := optimizedPlan.FunctionPlan(optimizedMiddle); !found ||
@@ -831,12 +816,14 @@ func TestCoroOutcomePlainDAGPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 			llssa.RemoveKeepAliveCallsAfterCoroSplit(optimizedModule)
 			for _, name := range []string{"foo.Middle", "foo.Leaf"} {
 				for _, suffix := range []string{".resume", ".destroy"} {
-					if baselineModule.NamedFunction(name + "$coro" + suffix).IsNil() {
-						t.Fatalf("baseline is missing %s%s", name+"$coro", suffix)
+					if !baselineModule.NamedFunction(name+"$coro"+suffix).IsNil() ||
+						!optimizedModule.NamedFunction(name+"$outcome"+suffix).IsNil() {
+						t.Fatalf("outcome primary retained %s helper %s", name, suffix)
 					}
-					if !optimizedModule.NamedFunction(name + "$outcome" + suffix).IsNil() {
-						t.Fatalf("optimized module retained %s%s", name+"$outcome", suffix)
-					}
+				}
+				if !baselineModule.NamedFunction(name+"$coro").IsNil() ||
+					!optimizedModule.NamedFunction(name+"$coro").IsNil() {
+					t.Fatalf("outcome primary retained redundant coroutine ramp %s", name)
 				}
 			}
 			baselineIR, optimizedIR := baselineModule.String(), optimizedModule.String()
@@ -853,14 +840,11 @@ func TestCoroOutcomePlainDAGPhysicalCostAgainstCoroutineBaseline(t *testing.T) {
 			}
 			defer optimizedObject.Dispose()
 			baselineBytes, optimizedBytes := len(baselineObject.Bytes()), len(optimizedObject.Bytes())
-			if len(optimizedIR) >= len(baselineIR) || optimizedBytes >= baselineBytes {
-				t.Fatalf(
-					"outcome DAG did not reduce the exact fixture: IR baseline=%d optimized=%d object baseline=%d optimized=%d",
-					len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes,
-				)
+			if len(baselineIR) == 0 || len(optimizedIR) == 0 || baselineBytes == 0 || optimizedBytes == 0 {
+				t.Fatal("outcome DAG emitted an empty module or object")
 			}
 			t.Logf(
-				"post-split DAG fixture: IR baseline=%d optimized=%d; O2 object baseline=%d optimized=%d; eliminated frames/resume/destroy=2/2/2",
+				"post-split DAG fixture: IR unbounded=%d bounded=%d; O2 object unbounded=%d bounded=%d; both eliminate frames/resume/destroy=2/2/2",
 				len(baselineIR), len(optimizedIR), baselineBytes, optimizedBytes,
 			)
 		})
