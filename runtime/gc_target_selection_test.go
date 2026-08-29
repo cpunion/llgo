@@ -33,7 +33,7 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 	for _, target := range targets {
 		t.Run(target.name, func(t *testing.T) {
 			cmd := exec.Command("go", "list", "-deps", "-json", "-tags="+target.tags,
-				"./internal/runtime", "./internal/lib/runtime", "./internal/thread", "./internal/clite/tls")
+				"./internal/runtime", "./internal/lib/runtime", "./internal/thread", "./internal/clite/tls", "./internal/clite/os")
 			cmd.Dir = moduleRoot
 			cmd.Env = append(os.Environ(), "GOOS="+target.goos, "GOARCH="+target.goarch, "CGO_ENABLED=0")
 			output, err := cmd.Output()
@@ -85,6 +85,7 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/lib/runtime", []string{"runtime_nogc.go", "mfinal_nogc.go"}, []string{"runtime_gc.go", "mfinal.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/thread", []string{"thread_unix_nogc.go"}, []string{"thread_unix_gc.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/tls", []string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/os", []string{"os_freestanding.go"}, []string{"os_other.go", "os_darwin.go"})
 		})
 	}
 }

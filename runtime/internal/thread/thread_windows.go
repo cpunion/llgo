@@ -47,15 +47,18 @@ func exit()
 //go:linkname beginProcessExit C.llgo_win_thread_begin_process_exit
 func beginProcessExit()
 
+//llgo:coro sync
 //go:linkname keyCreate C.llgo_win_fls_create
 func keyCreate(index *c.Uint) c.Int
 
 //go:linkname keyDelete C.llgo_win_fls_delete
 func keyDelete(index c.Uint) c.Int
 
+//llgo:coro noblock
 //go:linkname keyGet C.llgo_win_fls_get
 func keyGet(index c.Uint) c.Pointer
 
+//llgo:coro noblock
 //go:linkname keySet C.llgo_win_fls_set
 func keySet(index c.Uint, destructor KeyDestructor, value c.Pointer) c.Int
 
@@ -75,7 +78,6 @@ func BeginProcessExit() {
 	beginProcessExit()
 }
 
-//llgo:coro sync
 func (key *Key) Create(destructor KeyDestructor) c.Int {
 	key.index = invalidKey
 	if ret := keyCreate(&key.index); ret != 0 {
@@ -92,7 +94,6 @@ func (key Key) Delete() c.Int {
 	return keyDelete(key.index)
 }
 
-//llgo:coro noblock
 func (key Key) Get() c.Pointer {
 	if key.index == invalidKey {
 		return nil
@@ -100,7 +101,6 @@ func (key Key) Get() c.Pointer {
 	return keyGet(key.index)
 }
 
-//llgo:coro noblock
 func (key Key) Set(value c.Pointer) c.Int {
 	if key.index == invalidKey {
 		return 87 // ERROR_INVALID_PARAMETER

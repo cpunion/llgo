@@ -1,7 +1,7 @@
-//go:build !darwin && !windows && !tinygo.wasm
+//go:build tinygo.wasm
 
 /*
- * Copyright (c) 2024 The XGo Authors (xgo.dev). All rights reserved.
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,20 +18,14 @@
 
 package os
 
-import (
-	_ "unsafe"
+import c "github.com/xgo-dev/llgo/runtime/internal/clite"
 
-	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-)
+// Freestanding WebAssembly routes file and network operations through the
+// coroutine host protocol. It must not compile the hosted _os/os.c bridge or
+// acquire a libc/sysroot dependency merely to expose the shared declarations.
+const LLGoPackage = "link"
 
-const (
-	LLGoFiles   = "_os/os.c"
-	LLGoPackage = "link"
-)
-
-const (
-	PATH_MAX = 4096
-)
+const PATH_MAX = 4096
 
 type (
 	ModeT uint32
@@ -41,5 +35,5 @@ type (
 	DevT  uint64
 )
 
-//go:linkname Clearenv C.clearenv
-func Clearenv() c.Int
+// A freestanding instance owns no process-global libc environment.
+func Clearenv() c.Int { return 0 }
