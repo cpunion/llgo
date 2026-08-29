@@ -125,6 +125,51 @@ func install() {}
 	}
 }
 
+func TestCoroGlobalFunctionSlotRawCallbackInfersSyncDispatch(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func()
+
+var optional func()
+
+func installC(CCallback) {}
+func target() {}
+func callback() { optional() }
+func install() {
+	optional = target
+	installC(CCallback(callback))
+}
+`)
+	call, certificate := onlyCoroGlobalFunctionSlotCertificate(t, fixture, "callback")
+	target := fixture.pkg.Func("target")
+	if !certificate.MayBeNil || certificate.SyncDispatch ||
+		len(certificate.Targets) != 1 || certificate.Targets[0] != target {
+		t.Fatalf("raw callback global-slot certificate = %+v, want an initially managed exact target", certificate)
+	}
+	plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, ok := plan.CallPlan(call)
+	targetID, identified := plan.FunctionID(target)
+	if !ok || !identified || callPlan.Open || !callPlan.SyncDispatch ||
+		!callPlan.MayBeNil || len(callPlan.Targets) != 1 || callPlan.Targets[0] != targetID {
+		t.Fatalf("raw callback global-slot CallPlan = %+v, target=%q/%t; want closed synchronous dispatch", callPlan, targetID, identified)
+	}
+	callbackPlan := functionPlanForBuildTest(t, plan, fixture.pkg.Func("callback"))
+	if callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand ||
+		!callbackPlan.RawPlainOnly || callbackPlan.Emission != coro.EmitRawPlain ||
+		callbackPlan.Primary != coro.PrimaryPlain || callbackPlan.Effect != coro.NoSuspend ||
+		callbackPlan.Exec.Contains(coro.NeedsPreempt) {
+		t.Fatalf("raw callback plan = %+v, want one synchronous raw-only body", callbackPlan)
+	}
+	targetPlan := functionPlanForBuildTest(t, plan, target)
+	if targetPlan.FuncRep != coro.Dispatch || targetPlan.Effect != coro.NoSuspend ||
+		targetPlan.Exec.Contains(coro.NeedsPreempt) {
+		t.Fatalf("global-slot target plan = %+v, want a safe descriptor target", targetPlan)
+	}
+}
+
 func TestCoroGlobalFunctionSlotExportedCellUsesClosedWriterWorld(t *testing.T) {
 	fixture := buildRequiredCoroRuntimeFixture(t, `
 var Optional func()

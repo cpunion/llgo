@@ -119,8 +119,8 @@ func TestCoroPhysicalPlanRuntimeHelperElisionIsRecipeOwned(t *testing.T) {
 		{name: "borrowed allocation keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionBorrowedAllocation}, helper: "AllocU"},
 		{name: "panic outcome", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomePanic}, helper: "Panic", want: true},
 		{name: "recover outcome", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomeRecover}, helper: "Recover", want: true},
-		{name: "return without cleanup", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomeReturn}, helper: "RecordPanicLocation", want: true},
-		{name: "return with cleanup", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomeReturn, returnCleanup: true}, helper: "RecordPanicLocation"},
+		{name: "return without cleanup", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomeReturn}, helper: "UpdateLogicalCallerLocation", want: true},
+		{name: "return with cleanup", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomeReturn, returnCleanup: true}, helper: "UpdateLogicalCallerLocation"},
 		{name: "return keeps unrelated", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomeReturn}, helper: "PopCallerLocationFrame"},
 	}
 	for _, test := range tests {
@@ -1125,7 +1125,7 @@ func TestCoroPhysicalCodegenRejectsMissingCommittedPlan(t *testing.T) {
 	defer prog.Dispose()
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	if err := compilation.preflightCoroPlan(); err != nil {
 		t.Fatal(err)
 	}

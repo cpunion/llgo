@@ -17,6 +17,8 @@
 package runtime
 
 import (
+	"unsafe"
+
 	clitedebug "github.com/xgo-dev/llgo/runtime/internal/clite/debug"
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
@@ -78,7 +80,18 @@ type callerLocationStore struct {
 	goexitPCBase  uintptr
 }
 
-func PushCallerLocationFrame(entry uintptr, name, file string, startLine int) {
+// callerLocationToken is compiler-owned storage for one stable logical-frame
+// identity. Keeping the store plus an index rather than a slice-element pointer
+// lets nested calls grow and relocate store.stack without invalidating callers.
+type callerLocationToken struct {
+	store      unsafe.Pointer
+	frameIndex int
+}
+
+// PushCallerLocationFrame installs one logical frame and, for a managed
+// physical caller, fills its compiler-owned token. Plain callers pass nil and
+// continue to use the entry-based Record helpers.
+func PushCallerLocationFrame(tokenPointer unsafe.Pointer, entry uintptr, name, file string, startLine int) {
 	store := callerLocationStoreForGoroutine()
 	store.stack = append(store.stack, CallerFrame{
 		PC:        entry,
@@ -88,6 +101,11 @@ func PushCallerLocationFrame(entry uintptr, name, file string, startLine int) {
 		Line:      startLine,
 		StartLine: startLine,
 	})
+	if tokenPointer != nil {
+		token := (*callerLocationToken)(tokenPointer)
+		token.store = unsafe.Pointer(store)
+		token.frameIndex = len(store.stack) - 1
+	}
 }
 
 func PopCallerLocationFrame(entry uintptr) {
@@ -124,6 +142,40 @@ func RecordPanicLocation(entry uintptr, name, file string, line int) {
 	}
 	updateCurrentFrame(entry, name, file, line)
 	recordPCLocation(0, entry, name, file, line)
+}
+
+// UpdateLogicalCallerLocation updates the exact token-selected frame in the
+// stackless goroutine's logical shadow stack. Unlike RecordCallerLocation and
+// RecordPanicLocation, it deliberately does not maintain the native-PC lookup
+// table: a managed physical body has no native caller frame to bind at this
+// source site. Keeping this operation allocation-free and O(1) lets the
+// compiler publish an exact source location without introducing a nested
+// coroutine at every potentially panicking instruction.
+//
+// The compiler emits this helper only while the matching managed function is
+// active. The bounds and entry checks make an uninitialized token or a broken
+// stack invariant fail closed instead of corrupting another frame.
+//
+//llgo:nounwind
+func UpdateLogicalCallerLocation(tokenPointer unsafe.Pointer, entry uintptr, file string, line int) {
+	if tokenPointer == nil || entry == 0 || line <= 0 {
+		return
+	}
+	token := (*callerLocationToken)(tokenPointer)
+	if token.store == nil || token.frameIndex < 0 {
+		return
+	}
+	store := (*callerLocationStore)(token.store)
+	if token.frameIndex >= len(store.stack) {
+		return
+	}
+	frame := &store.stack[token.frameIndex]
+	if frame.Entry != entry {
+		return
+	}
+	frame.File = file
+	frame.Line = line
+	frame.captured = 0
 }
 
 func updateCurrentFrame(entry uintptr, name, file string, line int) {

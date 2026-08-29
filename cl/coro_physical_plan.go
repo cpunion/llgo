@@ -324,25 +324,35 @@ type coroPhysicalInstructionPlan struct {
 	// DAG caller has no suspension-capable allocator fallback and must require
 	// this frozen target-layout fact.
 	directOutcomeNativeResult bool
-	operation                 coroPhysicalOperationRecipe
-	operationFailure          string
-	operationWorker           *coroWorkerForeignCallShape
-	operationPythonTarget     *ssa.Function
-	operationPythonOpcode     int
-	operationCgo              *coroWorkerCgoCallShape
-	operationCgoErrno         *coroWorkerCgoErrnoCallShape
-	operationHost             coroHostOperationCallShape
-	operationControl          CoroControlOperation
-	outcome                   coroPhysicalOutcomeRecipe
-	outcomeFailure            string
-	returnCleanup             bool
-	elideValue                bool
-	reuseValueAddress         bool
-	valueOperand              ssa.Value
-	container                 coroPhysicalContainerKind
-	bound                     int64
-	nilGuard                  bool
-	boundsGuard               bool
+	// structuredOutcomeOnly proves that every target reachable at this exact
+	// descriptor/interface occurrence publishes a synchronous outcome entry.
+	// It authorizes the physical emitter to call that capability directly,
+	// without manufacturing an unreachable plain/coroutine probe branch.
+	structuredOutcomeOnly bool
+	// structuredCoroutineOnly is the symmetric proof for a closed descriptor
+	// occurrence whose complete target family publishes the coroutine ABI. The
+	// emitter still performs the ordinary child transaction, but loads only the
+	// structured entry and emits no impossible plain/outcome successors.
+	structuredCoroutineOnly bool
+	operation               coroPhysicalOperationRecipe
+	operationFailure        string
+	operationWorker         *coroWorkerForeignCallShape
+	operationPythonTarget   *ssa.Function
+	operationPythonOpcode   int
+	operationCgo            *coroWorkerCgoCallShape
+	operationCgoErrno       *coroWorkerCgoErrnoCallShape
+	operationHost           coroHostOperationCallShape
+	operationControl        CoroControlOperation
+	outcome                 coroPhysicalOutcomeRecipe
+	outcomeFailure          string
+	returnCleanup           bool
+	elideValue              bool
+	reuseValueAddress       bool
+	valueOperand            ssa.Value
+	container               coroPhysicalContainerKind
+	bound                   int64
+	nilGuard                bool
+	boundsGuard             bool
 	// nativeFaultBoundary records one reachable physical memory operation
 	// whose exact low absolute address is deliberately left to the native
 	// fault signal path. It is metadata only: the closed-program capability
@@ -454,7 +464,7 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		// post-analysis cleanup plan is the exact authority for this physical
 		// body: when it owns no implicit return cleanup, no RunDefers call can
 		// panic here and its provisional location update must disappear too.
-		return helper == "RecordPanicLocation" && !plan.returnCleanup
+		return helper == "UpdateLogicalCallerLocation" && !plan.returnCleanup
 	case coroPhysicalOutcomePanic:
 		return helper == "Panic"
 	case coroPhysicalOutcomeRecover:
@@ -693,6 +703,69 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 	return nil
 }
 
+// planCoroPhysicalExactInterfaceMakeElision derives interface-box removal from
+// the already selected physical call recipe. This keeps devirtualization and
+// value transport under one authority: logical target classification is never
+// repeated independently for the MakeInterface producer.
+func planCoroPhysicalExactInterfaceMakeElision(
+	plan *coroPhysicalFunctionPlan,
+	whole *coro.SSAPlan,
+) error {
+	if plan == nil {
+		return fmt.Errorf("exact interface construction elision requires one physical function plan")
+	}
+	// A nil whole-program plan is supported by narrow structural preflights.
+	// They cannot prove an exact interface target, so retain the ordinary box;
+	// production emission always supplies the frozen whole-program plan.
+	if whole == nil {
+		return nil
+	}
+	for instruction, instructionPlan := range plan.instructions {
+		box, ok := instruction.(*ssa.MakeInterface)
+		if !ok {
+			continue
+		}
+		call, structural := coroExactInterfaceMakeInvoke(box)
+		if !structural {
+			continue
+		}
+		invoke, found := plan.instructions[call]
+		if !found {
+			return fmt.Errorf("exact interface construction has no frozen invoke plan")
+		}
+		logicalElision, err := coroProveExactInterfaceMakeElision(whole, box)
+		if err != nil {
+			return fmt.Errorf("exact interface construction elision proof: %w", err)
+		}
+		switch invoke.control {
+		case coroPhysicalControlExactInterfaceCall,
+			coroPhysicalControlExactInterfaceAwait,
+			coroPhysicalControlDirectOutcome:
+		default:
+			if logicalElision {
+				return fmt.Errorf(
+					"exact interface construction proof selected incompatible frozen invoke %s (target=%q failure=%q)",
+					invoke.control, invoke.controlTargetID, invoke.controlFailure,
+				)
+			}
+			continue
+		}
+		if !logicalElision {
+			return fmt.Errorf("frozen %s invoke has no exact interface construction proof", invoke.control)
+		}
+		if invoke.controlTarget == nil || invoke.controlTargetID == "" ||
+			invoke.controlReceiver != box.X {
+			return fmt.Errorf("exact interface construction disagrees with its frozen %s invoke", invoke.control)
+		}
+		instructionPlan.recipe = coroPhysicalInstructionOrdinary
+		instructionPlan.elideValue = true
+		instructionPlan.nilGuard = false
+		instructionPlan.boundsGuard = false
+		plan.instructions[instruction] = instructionPlan
+	}
+	return nil
+}
+
 func prepareCoroPhysicalFunctionPlan(
 	audit *coroPhysicalPureSSAAudit,
 	owner *preparedEmissionPackage,
@@ -769,6 +842,9 @@ func prepareCoroPhysicalFunctionPlan(
 			}
 			plan.instructions[instruction] = instructionPlan
 		}
+	}
+	if err := planCoroPhysicalExactInterfaceMakeElision(plan, whole); err != nil {
+		return nil, err
 	}
 	for instruction, instructionPlan := range plan.instructions {
 		index, ok := instruction.(*ssa.Index)
@@ -1614,14 +1690,6 @@ func planCoroPhysicalInstruction(
 			result.elideValue = true
 		}
 	case *ssa.MakeInterface:
-		elided, err := coroPlannedExactInterfaceMakeElision(whole, instruction)
-		if err != nil {
-			return result, fmt.Errorf("exact interface construction elision: %w", err)
-		}
-		if elided {
-			result.elideValue = true
-			break
-		}
 		if coroSyntheticSelectNoCaseBox(instruction) {
 			result.recipe = coroPhysicalInstructionSyntheticSelectNoCaseBox
 			break
@@ -1850,15 +1918,21 @@ func planCoroPhysicalOutcomeInstruction(
 			return
 		}
 		if !found || frozen.failure != "" || !frozen.plan.Intrinsic ||
-			frozen.opcode != llgoCoroGoexit ||
 			frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineOutcome {
 			return
 		}
 		if !capabilities.explicitPanic {
-			result.outcomeFailure = "Goexit requires the explicit-status outcome ABI"
+			result.outcomeFailure = "terminal intrinsic requires the explicit-status outcome ABI"
 			return
 		}
-		result.outcome = coroPhysicalOutcomeGoexit
+		switch frozen.opcode {
+		case llgoCoroGoexit:
+			result.outcome = coroPhysicalOutcomeGoexit
+		case llgoCoroPropagatePanic:
+			result.outcome = coroPhysicalOutcomePanic
+		default:
+			result.outcomeFailure = "terminal intrinsic has no frozen physical outcome recipe"
+		}
 	}
 }
 
@@ -2201,6 +2275,30 @@ func planCoroPhysicalControlInstruction(
 				result.rawInterfaceReceiver = true
 				return
 			}
+			if exact && targetPlan.HasStaticOutcome() {
+				targetSignature := coroPhysicalNormalizeSourceSignature(target.Signature)
+				if audit.universe != nil {
+					targetSignature, err = audit.universe.coroPhysicalSourceSignature(target)
+				}
+				if err == nil {
+					err = validateCoroLeafPhysicalSignature(targetPlan, targetSignature)
+				}
+				if err != nil {
+					result.controlFailure = "exact interface outcome signature: " + err.Error()
+					return
+				}
+				result.control = coroPhysicalControlDirectOutcome
+				result.controlTarget = target
+				result.controlTargetID = targetPlan.ID
+				result.controlReceiver = receiver
+				result.rawInterfaceReceiver = true
+				if audit.ctx != nil && audit.ctx.prog != nil {
+					result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(
+						newOutcomePlainPhysicalABI(targetSignature).resultSlotType,
+					)
+				}
+				return
+			}
 			if exact && coroExactInterfaceTargetDirectAwait(targetPlan) {
 				result.control = coroPhysicalControlExactInterfaceAwait
 				result.controlTarget = target
@@ -2229,6 +2327,14 @@ func planCoroPhysicalControlInstruction(
 				}
 				result.control = coroPhysicalControlManagedInterfaceAwait
 				result.controlSignature = signature
+				published := coroManagedDispatchPublishedStructuredEntry(whole, callPlan)
+				result.structuredOutcomeOnly = published == coro.ManagedEntryOutcomePlain
+				result.structuredCoroutineOnly = published == coro.ManagedEntryCoroutine
+				if result.structuredOutcomeOnly && audit.ctx != nil && audit.ctx.prog != nil {
+					result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(
+						newOutcomePlainPhysicalABI(signature).resultSlotType,
+					)
+				}
 				result.rawInterfaceReceiver =
 					capabilities.managedInterface.acceptsRawReceiverCall(instruction)
 				return
@@ -2249,17 +2355,24 @@ func planCoroPhysicalControlInstruction(
 				return
 			}
 			if !coroInterfaceDispatchNeedsAwait(dispatch) {
-				result.controlFailure = "unsupported interface invoke: closed interface dispatch has no coroutine target"
+				result.controlFailure = "unsupported interface invoke: closed interface dispatch has no structured target"
 				return
 			}
 			result.control = coroPhysicalControlClosedInterfaceAwait
 			result.controlInterface = dispatch
+			_, result.structuredOutcomeOnly =
+				coroInterfaceDispatchStaticOutcomeCandidate(dispatch)
+			if result.structuredOutcomeOnly && audit.ctx != nil && audit.ctx.prog != nil {
+				result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(
+					newOutcomePlainPhysicalABI(dispatch.sourceCallSignature).resultSlotType,
+				)
+			}
 			return
 		}
 		if callPlanned && callPlan.Rep == coro.Dispatch && common != nil && common.StaticCallee() == nil {
 			result.controlFailureHard = true
 			if !capabilities.managedDispatch {
-				result.controlFailure = "managed descriptor call requires the v1 descriptor dispatch capability"
+				result.controlFailure = "managed descriptor call requires the v2 descriptor dispatch capability"
 				return
 			}
 			// A closed empty target set is an exact nil-only function value, not
@@ -2294,6 +2407,14 @@ func planCoroPhysicalControlInstruction(
 				return
 			}
 			result.control = coroPhysicalControlDispatchAwait
+			published := coroManagedDispatchPublishedStructuredEntry(whole, callPlan)
+			result.structuredOutcomeOnly = published == coro.ManagedEntryOutcomePlain
+			result.structuredCoroutineOnly = published == coro.ManagedEntryCoroutine
+			if result.structuredOutcomeOnly && audit.ctx != nil && audit.ctx.prog != nil {
+				result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(
+					newOutcomePlainPhysicalABI(common.Signature()).resultSlotType,
+				)
+			}
 			return
 		}
 		callerPlan, found := whole.FunctionPlan(audit.fn)
@@ -2369,7 +2490,7 @@ func planCoroPhysicalControlInstruction(
 			result.controlTargetID = targetPlan.ID
 		case coro.Dispatch:
 			if !capabilities.managedDispatch {
-				result.controlFailure = "managed descriptor spawn requires the v1 descriptor dispatch capability"
+				result.controlFailure = "managed descriptor spawn requires the v2 descriptor dispatch capability"
 				return
 			}
 			if instruction.Common() != nil && instruction.Common().IsInvoke() &&

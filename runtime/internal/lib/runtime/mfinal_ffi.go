@@ -151,23 +151,35 @@ func newFinalizerFFISignature(ft *abi.FuncType, explicitEnv bool, argType *ffi.T
 	return sig, paramTypes, retSize
 }
 
-// newFinalizerDispatchSignatures describes the two canonical managed function
-// descriptor entries. The plain entry receives (env,arg); the coroutine entry
+// newFinalizerDispatchSignatures describes the three canonical managed
+// function descriptor entries. The plain entry receives (env,arg), the
+// outcome entry receives (g,out,completion,env,arg), and the coroutine entry
 // receives (g,out,env,arg) and returns its initially suspended child handle.
 // Result layout is the LLGo physical tuple layout recorded in the descriptor,
 // while retSize also covers any wider temporary storage libffi may write.
 func newFinalizerDispatchSignatures(ft *abi.FuncType, argType *ffi.Type) (
-	plain, coro *ffi.Signature,
+	plain, outcome, coro *ffi.Signature,
 	resultSize, resultAlign, retSize uintptr,
 ) {
 	plain, _, retSize = newFinalizerFFISignature(ft, true, argType)
-	coroArgs := []*ffi.Type{
+	outcomeArgs := []*ffi.Type{
+		ffi.TypePointer,
 		ffi.TypePointer,
 		ffi.TypePointer,
 		ffi.TypePointer,
 		argType,
 	}
 	var err error
+	outcome, err = ffi.NewSignature(ffi.TypeVoid, outcomeArgs...)
+	if err != nil {
+		panic(err)
+	}
+	coroArgs := []*ffi.Type{
+		ffi.TypePointer,
+		ffi.TypePointer,
+		ffi.TypePointer,
+		argType,
+	}
 	coro, err = ffi.NewSignature(ffi.TypePointer, coroArgs...)
 	if err != nil {
 		panic(err)

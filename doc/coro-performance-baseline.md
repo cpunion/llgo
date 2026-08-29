@@ -2327,3 +2327,89 @@ binary moves from 440,908 to 441,796 text bytes (+888), exactly the +924-byte
 shared traceback cost above minus those 36 bytes. This closes the accounting:
 there is no unexplained per-channel adapter, descriptor, or code-size growth,
 while every live handoff goroutine keeps a materially smaller stackless frame.
+
+### FuncRep v2 outcome-dispatch and caller-token checkpoint
+
+This 2026-08-30 checkpoint uses the working tree after `ca8088050`, LLVM 22,
+Go 1.26.0 for LLGo's toolchain, and Go 1.27.0 for the same-source gc
+comparison. LLGo benchmark artifacts use `-O3 -lto=full -s -w`; timings are
+seven AB/BA-interleaved process runs with `GOMAXPROCS=1` and elapsed time
+measured inside the common workload. Compiler and generated-program runs were
+bounded by RSS guards.
+
+FuncRep v2 keeps one nine-field descriptor. It has an optional plain entry,
+one structured-entry word whose outcome/coroutine interpretations are mutually
+exclusive, result size/alignment, and one code entry. Closed outcome-only or
+coroutine-only consumers use a narrow lowering that loads only the required
+structured field; the universal path snapshots and validates the descriptor
+once before branching. An archive consumer can construct one descriptor and
+one typed thunk over the producer's published physical primary without cloning
+the source body or reverse-mapping a code address.
+
+The caller-location transaction now reserves one zeroed
+`{unsafe.Pointer, int}` token per logical caller function. Every call-site push
+and completion update uses that same 16-byte token. A compiler IR gate rejects
+per-site tokens, multiple zeroing, address disagreement, and the legacy
+five-argument/record helper path. A forced fresh `-a -Os` rebuild of the
+representative `reflectmk` executable has the same no-LTO file size and 12
+fewer `__text` bytes than the checkpoint immediately before this token
+consolidation, so this correctness change introduced no artifact growth.
+
+| Artifact | file bytes | Mach-O `__TEXT` | Mach-O `__text` |
+| --- | ---: | ---: | ---: |
+| current `reflectmk`, no LTO | 6,225,232 | 4,063,232 | 3,224,236 |
+| current `reflectmk`, full LTO | 4,699,280 | 4,046,848 | 3,205,724 |
+| LLGo main `reflectmk`, no LTO | 1,753,552 | 999,424 | 559,324 |
+| current same-source workload, full LTO | 4,109,888 | 3,063,808 | 2,475,328 |
+| Go 1.27 same-source workload | 1,365,970 | 1,179,648 | 557,780 |
+
+The current no-LTO `reflectmk` contains exactly 1,932 resume/destroy pairs.
+Approximate `__text` attribution before the final propagation cleanup was 353,976 bytes
+(11.0%) to ramps, 2,154,540 (66.8%) to resumes, 62,668 (1.9%) to destroys,
+161,068 (5.0%) to outcome bodies, and 494,892 to everything else. The largest
+remaining bodies are CoroSplit resumes such as `unicode.init` (101,776 bytes)
+and `reflect.StructOf` (39,952 bytes), not descriptor thunks or caller tokens.
+This makes the outstanding code-size problem explicit: improve whole-program
+effect/emission selection and post-CoroSplit optimization rather than adding a
+second adapter family.
+
+| Same-source workload | Go 1.27 | LLGo coroutine | LLGo / Go |
+| --- | ---: | ---: | ---: |
+| scalar compute, 5,000,000 iterations | 8.235 ms | 7.727 ms | 0.94x |
+| buffered channel, 1,000,000 operations | 16.076 ms | 16.365 ms | 1.02x |
+| two-ready-case `select`, 500,000 operations | 27.082 ms | 18.310 ms | 0.68x |
+| spawn 100 goroutines x 100 rounds | 0.886 ms | 1.773 ms | 2.00x |
+| spawn one goroutine x 1,000,000 rounds | 172.314 ms | 1,240.489 ms | 7.20x |
+| spawn 10,000 goroutines x 100 rounds | 184.684 ms | 189.388 ms | 1.03x |
+| unbuffered handoff, 5,000 operations | 0.799 ms | 0.699 ms | 0.88x |
+| timers, 100 x 10 expirations | 12.456 ms | 13.552 ms | 1.09x |
+
+Static compute, ready select, handoff, buffered channels, timers, and large
+batch scheduling are now tied with or faster than Go within the limits of this
+local run. The remaining throughput weakness is not general scheduler capacity:
+it is the fixed create/publish/initial-resume/complete/destroy cost of very
+short goroutines that are joined before another is created. Spawn 100 x 100
+partly exposes the same latency, while one million goroutines issued in large
+batches amortize it and are effectively tied.
+
+The generated-code gate covers the exact descriptor field layout and flags,
+one-time validation, structured-only field demand, absence of impossible
+plain/outcome/coroutine branches, absence of redundant outcome/coroutine
+primaries, and one caller token per function. The complete metadata matrix was
+then regenerated only after normalizing every 128-bit symbol hash and proving
+the old and new graphs byte-identical; the subsequent full `_testmeta` run
+passed. Thus the ABI hash now includes all three callable forms without hiding
+a structural metadata or code-emission change.
+
+The subsequent outcome-only reflection gate invokes the same function both
+directly and through `reflect.Value.Call`, then propagates its panic to an
+outer `recover`. Outcome completion is consumed inline in `CallLLGo`; the
+compiler-owned propagation marker and the former single-use consumer helper
+are both absent from the unstripped final symbol table. Relative to the exact
+pre-cleanup `-a -Os -trimpath -s -w` artifact, the final file is 352 bytes
+smaller, `__text` is 512 bytes smaller, and one ramp/resume/destroy family is
+gone while all 599 outcome entries remain. This closes the panic path without
+adding another dynamic thunk or managed child frame. The matched `-Os`, full
+LTO rebuild keeps `__TEXT` unchanged and reduces `__text` by another 628 bytes;
+its 16-byte file growth is outside mapped segments in Mach-O alignment/signing
+data, not generated program code.

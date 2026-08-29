@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v12"
+	LibraryEffectSummaryVersion = "v13"
 
 	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
 	// C-to-managed adapter published by LibraryEffectExportIngress. It is
@@ -61,7 +61,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 12,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 13,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -106,8 +106,9 @@ type LibraryEffectFunction struct {
 	AtomicCost            uint64           `json:"atomic_cost"`
 	AtomicCostProof       AtomicCostProof  `json:"atomic_cost_proof"`
 	AtomicCostCertificate string           `json:"atomic_cost_certificate"`
-	// StaticOutcome publishes an unbounded exact-static synchronous twin. It is
-	// orthogonal to AtomicCostProof and never replaces the coroutine primary.
+	// StaticOutcome publishes an unbounded exact-static synchronous entry. It is
+	// orthogonal to AtomicCostProof and may be the sole managed body when no
+	// coroutine or dynamic consumer exists.
 	StaticOutcome bool   `json:"static_outcome"`
 	PrimarySymbol string `json:"primary_symbol"`
 	// ProgramCapabilities is the transitive optional-runtime-service demand of
@@ -116,8 +117,8 @@ type LibraryEffectFunction struct {
 	// its own call graph instead of rescanning unavailable library bodies.
 	ProgramCapabilities ProgramCapabilities `json:"program_capabilities"`
 	// OutcomePlainSymbol is the exact synchronous static-call entry certified by
-	// AtomicCostProof. It equals PrimarySymbol when outcome-plain is primary and
-	// names a separate twin when ManagedEntry remains coroutine.
+	// AtomicCostProof or StaticOutcome. It equals PrimarySymbol when outcome-plain
+	// is primary and names a separate twin when ManagedEntry remains coroutine.
 	OutcomePlainSymbol string `json:"outcome_plain_symbol,omitempty"`
 	RawPlainSymbol     string `json:"raw_plain_symbol,omitempty"`
 	// ExportIngress states that the producer's physical base symbol is owned by
@@ -404,8 +405,10 @@ func (function LibraryEffectFunction) validate() error {
 			return fmt.Errorf("coro: library function %q has a coroutine entry with %s primary", function.ID, function.Primary)
 		}
 	case ManagedEntryOutcomePlain:
-		if function.Primary != PrimaryCoroutine || function.FuncRep != DirectCoro ||
-			function.Effect != OutcomeStructured || function.Exec&^MayUnwind != 0 {
+		if function.Primary != PrimaryCoroutine ||
+			(function.FuncRep != DirectCoro && function.FuncRep != Dispatch) ||
+			function.Effect != OutcomeStructured ||
+			!function.StaticOutcome && function.Exec&^MayUnwind != 0 {
 			return fmt.Errorf("coro: library function %q has an invalid outcome-plain entry capability", function.ID)
 		}
 	}
@@ -425,11 +428,15 @@ func (function LibraryEffectFunction) validate() error {
 		return fmt.Errorf("coro: library function %q has an outcome symbol without an atomic-cost proof", function.ID)
 	}
 	if function.StaticOutcome {
-		if function.AtomicCostProof.ProvesOutcomePlain() || function.ManagedEntry != ManagedEntryCoroutine ||
+		if function.AtomicCostProof.ProvesOutcomePlain() ||
+			(function.ManagedEntry != ManagedEntryCoroutine && function.ManagedEntry != ManagedEntryOutcomePlain) ||
 			function.Primary != PrimaryCoroutine ||
 			function.Effect&^(AwaitStructured|OutcomeStructured|MayPark) != 0 ||
 			function.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
 			return fmt.Errorf("coro: library function %q has an invalid unbounded static outcome capability", function.ID)
+		}
+		if function.ManagedEntry == ManagedEntryOutcomePlain && function.Effect != OutcomeStructured {
+			return fmt.Errorf("coro: library function %q has an unbounded outcome primary with effect %s", function.ID, function.Effect)
 		}
 		if err := validateStableIdentityText("library function outcome-plain symbol", function.OutcomePlainSymbol); err != nil {
 			return err

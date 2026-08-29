@@ -236,9 +236,17 @@ func validateCoroInterfaceDispatchCandidate(
 		if plan.Exec.IsOpaque() {
 			return fail("coroutine candidate execution constraints %s are opaque", plan.Exec)
 		}
+	case plan.Emission == coro.EmitOutcomePlain && plan.Primary == coro.PrimaryCoroutine:
+		if plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+			plan.Effect != coro.OutcomeStructured || !plan.HasStaticOutcome() {
+			return fail(
+				"outcome candidate has managed=%s effect=%s static=%t",
+				plan.ManagedEntry, plan.Effect, plan.HasStaticOutcome(),
+			)
+		}
 	default:
 		return fail(
-			"requires either a plain/no-suspend or coroutine/async body, got emission=%s primary=%s demand=%s effect=%s",
+			"requires a plain/no-suspend, outcome, or coroutine/async body, got emission=%s primary=%s demand=%s effect=%s",
 			plan.Emission, plan.Primary, plan.Demand, plan.Effect,
 		)
 	}

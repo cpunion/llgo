@@ -260,7 +260,7 @@ func (c *Compilation) validateStacklessCoroABIIdentity(required bool) error {
 		{"coroutine", c.CoroABI, coro.PhysicalABIV1},
 		{"scheduler", c.SchedulerABI, wantScheduler},
 		{"panic", c.PanicABI, coro.PanicExplicitStatusABIV0},
-		{"function representation", c.FuncRepABI, coro.FuncRepABIV1},
+		{"function representation", c.FuncRepABI, coro.FuncRepABIV2},
 	}
 	if !required {
 		populated := false

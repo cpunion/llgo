@@ -9,8 +9,8 @@ import (
 // Keep this fixture focused on reflection semantics and stable stackless ABI
 // invariants. expect.txt makes every failed constructor/method assertion a
 // runtime failure; these checks cover the descriptor/coroutine representation.
-// CHECK: @__llgo_coro_func_descriptor_v1.method-value.{{.*}} = linkonce_odr unnamed_addr constant
-// CHECK: @__llgo_coro_func_descriptor_v1.method.{{.*}} = linkonce_odr unnamed_addr constant
+// CHECK: @__llgo_coro_func_descriptor_v2.method-value.{{.*}} = linkonce_odr unnamed_addr constant
+// CHECK: @__llgo_coro_func_descriptor_v2.method.{{.*}} = linkonce_odr unnamed_addr constant
 // CHECK-LABEL: define ptr @"main.Point.String$coro"(ptr %0, ptr %1, %main.Point %2){{.*}} {
 // CHECK: call ptr @"fmt.Sprintf$coro"(
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
@@ -33,7 +33,7 @@ import (
 // CHECK-LABEL: define ptr @"main.methodByName$coro"(ptr %0, ptr %1, %"{{.*}}String" %2){{.*}} {
 // CHECK: call ptr @"reflect.Value.MethodByName$coro"(
 // CHECK: call ptr @"reflect.Value.Call$coro"(
-// CHECK-LABEL: define linkonce ptr @__llgo_coro_func_coro_v1.method-value.{{.*}}(ptr %0, ptr %1, ptr %2, %main.Point %3){{.*}} {
+// CHECK-LABEL: define linkonce ptr @__llgo_coro_func_coro_v2.method-value.{{.*}}(ptr %0, ptr %1, ptr %2, %main.Point %3){{.*}} {
 // CHECK: call ptr @"main.Point.String$coro"(ptr %0, ptr %1, %main.Point %3)
 // CHECK-NOT: __llgo_stub.
 

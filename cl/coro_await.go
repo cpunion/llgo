@@ -332,7 +332,7 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 		caller.ManagedEntry == coro.ManagedEntryCoroutine
 	callerOutcome := caller.Emission == coro.EmitOutcomePlain &&
 		caller.ManagedEntry == coro.ManagedEntryOutcomePlain &&
-		caller.AtomicCostProof.ProvesOutcomePlain() && caller.AtomicCost != 0
+		caller.HasStaticOutcome() && (caller.StaticOutcome || caller.AtomicCost != 0)
 	if !callerCoroutine && !callerOutcome {
 		return fmt.Errorf("caller emission is %s, want a structured physical entry", caller.Emission)
 	}
@@ -344,7 +344,7 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 		target.Emission == coro.EmitOutcomePlain &&
 		target.ManagedEntry == coro.ManagedEntryOutcomePlain &&
 		target.Primary == coro.PrimaryCoroutine &&
-		target.AtomicCostProof.ProvesOutcomePlain() && target.AtomicCost != 0
+		target.HasStaticOutcome() && (target.StaticOutcome || target.AtomicCost != 0)
 	imported := target.External == coro.ExternalKnown &&
 		target.Emission == coro.EmitExternal &&
 		target.Primary == coro.PrimaryExternal &&
@@ -902,12 +902,17 @@ func (p *context) structuredOutcomeAlloca(typ llssa.Type, zeroed bool) llssa.Exp
 }
 
 // structuredOutcomeScratch returns the one status/interface record owned by
-// the active physical body. Every consumer completes before source execution
-// can begin another transaction in the same frame: outcome-plain calls are
-// synchronous, and a coroutine child keeps its parent suspended until the
-// scheduler-owned completion has been consumed. The record therefore has a
-// function-wide non-overlapping lifetime even when several source call sites
-// survive CoroSplit.
+// the active physical body. Every producer defines all three words before its
+// consumer runs. A coroutine frame still needs a one-time zero initialization
+// because the pointer-bearing record can be scanned while the parent is
+// suspended before its first completion. An outcome-plain body cannot suspend
+// around its synchronous child call, so native stack storage is deliberately
+// left uninitialized and the child publication immediately overwrites it.
+//
+// Every consumer completes before source execution can begin another
+// transaction in the same frame, giving the record a function-wide
+// non-overlapping lifetime even when several source call sites survive
+// CoroSplit.
 func (p *context) structuredOutcomeScratch() llssa.Expr {
 	if !p.hasStructuredOutcomePhysicalBody() || p.fn == nil {
 		panic("structured outcome scratch requires an active physical body")
@@ -920,7 +925,7 @@ func (p *context) structuredOutcomeScratch() llssa.Expr {
 		if coroutine {
 			*slot = p.coroFrameAlloc(outcomePlainCompletionType(p.prog))
 		} else {
-			*slot = p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), true)
+			*slot = p.structuredOutcomeAlloca(outcomePlainCompletionType(p.prog), false)
 		}
 	}
 	return *slot

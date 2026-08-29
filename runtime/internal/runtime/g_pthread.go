@@ -38,6 +38,7 @@ var (
 // placeholder for the complete lifetime of a coroutine executor M.
 
 //go:linkname coroCurrentGLoadV1 C.__llgo_coro_current_g_load_v1
+//llgo:coro noblock
 func coroCurrentGLoadV1() unsafe.Pointer
 
 //go:linkname coroCurrentGStoreV1 C.__llgo_coro_current_g_store_v1

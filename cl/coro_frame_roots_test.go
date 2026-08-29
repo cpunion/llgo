@@ -1426,6 +1426,149 @@ func Gap(header *reflect.StringHeader, bytes []byte) {
 	}
 }
 
+func TestCoroFrameReflectSliceHeaderDataRoundtripIsFrozen(t *testing.T) {
+	prog, _, _, root, audit, proof := prepareCoroFrameRootAudit(t, `package main
+import (
+	"fmt"
+	"reflect"
+	"unsafe"
+)
+func main() {
+	var slice = []byte("abc")
+	header := *(*reflect.SliceHeader)(unsafe.Pointer(&slice))
+	direct := unsafe.Pointer(unsafe.SliceData(slice))
+	if direct != unsafe.Pointer(header.Data) {
+		panic(fmt.Errorf("unsafe.SliceData %p != %p", direct, unsafe.Pointer(header.Data)))
+	}
+}
+`, "main", EmissionUniverseOptions{})
+	defer prog.Dispose()
+	reconstructions := 0
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			conversion, ok := instruction.(*ssa.Convert)
+			if !ok || conversion.X == nil ||
+				!coroFrameRetentionUintptrLike(conversion.X.Type()) ||
+				!coroFrameRetentionPointerLike(conversion.Type()) {
+				continue
+			}
+			reconstructions++
+			if !proof.provesTraceableUintptr(conversion.X) || audit.validateConvert(conversion) != "" {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, root)
+				t.Fatalf("reflect.SliceHeader Data reconstruction %q lacks exact provenance\n%s", conversion, dump.String())
+			}
+		}
+	}
+	if reconstructions != 2 {
+		t.Fatalf("reflect.SliceHeader Data reconstructions = %d, want 2", reconstructions)
+	}
+}
+
+func TestCoroFrameReflectSliceHeaderDataRoundtripRejectsOpenForms(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "lookalike",
+			source: `package foo
+import "unsafe"
+type header struct { Data uintptr; Len, Cap int }
+func Root(slice []byte) unsafe.Pointer {
+	header := *(*header)(unsafe.Pointer(&slice))
+	return unsafe.Pointer(header.Data)
+}
+`,
+		},
+		{
+			name: "mutated-data",
+			source: `package foo
+import (
+	"reflect"
+	"unsafe"
+)
+func Root(slice []byte, word uintptr) unsafe.Pointer {
+	header := *(*reflect.SliceHeader)(unsafe.Pointer(&slice))
+	header.Data = word
+	return unsafe.Pointer(header.Data)
+}
+`,
+		},
+		{
+			name: "escaped-header",
+			source: `package foo
+import (
+	"reflect"
+	"unsafe"
+)
+var escaped *reflect.SliceHeader
+func Root(slice []byte) unsafe.Pointer {
+	header := *(*reflect.SliceHeader)(unsafe.Pointer(&slice))
+	escaped = &header
+	return unsafe.Pointer(header.Data)
+}
+`,
+		},
+		{
+			name: "string-header",
+			source: `package foo
+import (
+	"reflect"
+	"unsafe"
+)
+func Root(value string) unsafe.Pointer {
+	header := *(*reflect.StringHeader)(unsafe.Pointer(&value))
+	return unsafe.Pointer(header.Data)
+}
+`,
+		},
+		{
+			name: "reassigned-slice-cell",
+			source: `package foo
+import (
+	"reflect"
+	"unsafe"
+)
+func Root(left, right []byte) unsafe.Pointer {
+	cell := left
+	header := *(*reflect.SliceHeader)(unsafe.Pointer(&cell))
+	cell = right
+	return unsafe.Pointer(header.Data)
+}
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog, _, _, root, audit, proof := prepareCoroFrameRootAudit(
+				t, test.source, "Root", EmissionUniverseOptions{},
+			)
+			defer prog.Dispose()
+			reconstructions := 0
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					conversion, ok := instruction.(*ssa.Convert)
+					if !ok || conversion.X == nil ||
+						!coroFrameRetentionUintptrLike(conversion.X.Type()) ||
+						!coroFrameRetentionPointerLike(conversion.Type()) {
+						continue
+					}
+					reconstructions++
+					if proof.provesTraceableUintptr(conversion.X) || audit.validateConvert(conversion) == "" {
+						var dump bytes.Buffer
+						ssa.WriteFunction(&dump, root)
+						t.Fatalf("open reflect-header form acquired provenance at %q\n%s", conversion, dump.String())
+					}
+				}
+			}
+			if reconstructions != 1 {
+				t.Fatalf("uintptr-to-pointer reconstructions = %d, want 1", reconstructions)
+			}
+		})
+	}
+}
+
 func TestCoroConstantUintptrAddress(t *testing.T) {
 	pkg, _, _ := buildGoSSAPkg(t, `package foo
 import "unsafe"

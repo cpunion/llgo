@@ -31,11 +31,32 @@ func coroInterfaceDispatchNeedsAwait(dispatch *coroInterfaceDispatchPlan) bool {
 		return false
 	}
 	for _, candidate := range dispatch.candidates {
-		if candidate.plan.Emission == coro.EmitCoroutine {
+		// Plain-only candidate sets retain the compact legacy invoke path. An
+		// outcome-primary candidate also needs this receiver-aware structured
+		// dispatcher even though its selected call completes synchronously: its
+		// terminal status must be propagated through the coroutine parent rather
+		// than called through the incompatible itab method ABI.
+		if candidate.plan.Emission == coro.EmitCoroutine ||
+			candidate.plan.Emission == coro.EmitOutcomePlain {
 			return true
 		}
 	}
 	return false
+}
+
+// coroInterfaceDispatchStaticOutcomeCandidate returns the sole candidate whose
+// synchronous outcome capability closes a monomorphic interface call. The
+// exact singleton gate is shared by static-outcome validation and emission;
+// neither layer is allowed to reinterpret a polymorphic candidate set as one
+// bounded/native-stack call.
+func coroInterfaceDispatchStaticOutcomeCandidate(
+	dispatch *coroInterfaceDispatchPlan,
+) (*coroInterfaceDispatchCandidate, bool) {
+	if dispatch == nil || len(dispatch.candidates) != 1 ||
+		!dispatch.candidates[0].plan.HasStaticOutcome() {
+		return nil, false
+	}
+	return &dispatch.candidates[0], true
 }
 
 // compileCoroInterfaceDispatchAwait lowers a closed interface invoke into
@@ -44,7 +65,8 @@ func coroInterfaceDispatchNeedsAwait(dispatch *coroInterfaceDispatchPlan) bool {
 // a $coro root whose physical signature cannot be called as a legacy method.
 // Each selected target is therefore invoked through its planned primary entry;
 // coroutine candidates use the same structured child-await transaction as a
-// static synchronous-style Go call, while plain candidates remain direct.
+// static synchronous-style Go call, outcome candidates use the synchronous
+// completion transaction, and plain candidates remain direct.
 //
 // This is the closed-world bridge to the canonical {descriptor,env} ABI. Once
 // itab emission stores that descriptor directly, the candidate chain reduces
@@ -52,13 +74,20 @@ func coroInterfaceDispatchNeedsAwait(dispatch *coroInterfaceDispatchPlan) bool {
 func (p *context) compileCoroInterfaceDispatchAwait(
 	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if !p.hasCoroPhysicalBody() || call == nil || call.Common() == nil || !call.Common().IsInvoke() ||
+	if !p.hasStructuredOutcomePhysicalBody() || call == nil || call.Common() == nil || !call.Common().IsInvoke() ||
 		instructionPlan.control != coroPhysicalControlClosedInterfaceAwait {
 		panic("coroutine interface dispatch escaped its frozen physical control recipe")
 	}
 	dispatch := instructionPlan.controlInterface
 	if dispatch == nil || !coroInterfaceDispatchNeedsAwait(dispatch) {
 		panic("coroutine interface dispatch has an incomplete frozen physical control recipe")
+	}
+	outcomeParent := p.hasOutcomePlainPhysicalBody()
+	if outcomeParent {
+		if _, exact := coroInterfaceDispatchStaticOutcomeCandidate(dispatch); !exact ||
+			!instructionPlan.directOutcomeNativeResult {
+			panic("outcome-plain interface dispatch lacks one native-safe static outcome candidate")
+		}
 	}
 	p.emitPCLineLabel(b, call.Pos())
 	// Preserve source evaluation order and the existing nil-interface check.
@@ -76,7 +105,12 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 	resultCount := dispatch.sourceCallSignature.Results().Len()
 	var resultSlot llssa.Expr
 	if resultCount != 0 {
-		resultSlot = p.coroResultSlot(p.type_(call.Type(), llssa.InGo))
+		resultType := p.type_(call.Type(), llssa.InGo)
+		if outcomeParent {
+			resultSlot = p.structuredOutcomeAlloca(resultType, false)
+		} else {
+			resultSlot = p.coroResultSlot(resultType)
+		}
 	}
 	join := p.fn.MakeBlock()
 	next := p.fn.MakeBlock()
@@ -122,8 +156,17 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 		physical = append(physical, receiver)
 		physical = append(physical, args...)
 		var result llssa.Expr
-		switch candidate.plan.Emission {
-		case coro.EmitCoroutine:
+		switch {
+		case candidate.plan.HasStaticOutcome():
+			awaited := p.compileCoroStaticOutcomeTargetCallAliasResult(
+				b, candidate.function, physical, outcomeParent,
+				instructionPlan.recoverAlias,
+			)
+			result = awaited.value
+			markCoroReflectTypeMethodByNameCalls(
+				b, reflectCheck, awaited.physicalCalls,
+			)
+		case candidate.plan.Emission == coro.EmitCoroutine:
 			awaited := p.compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
 				b, candidate.function, llssa.Nil, physical, nil, keepaliveSlots,
 				instructionPlan.recoverAlias,
@@ -132,7 +175,10 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 			markCoroReflectTypeMethodByNameCalls(
 				b, reflectCheck, awaited.physicalCalls,
 			)
-		case coro.EmitPlain:
+		case candidate.plan.Emission == coro.EmitPlain:
+			if outcomeParent {
+				panic(fmt.Sprintf("outcome-plain interface dispatch: target %q is not outcome-structured", candidate.id))
+			}
 			if instructionPlan.recoverAlias {
 				result = p.callCoroTransparentRecoverAlias(b, entry.Expr, func() llssa.Expr {
 					return b.Call(entry.Expr, physical...)

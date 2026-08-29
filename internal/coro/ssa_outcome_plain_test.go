@@ -551,6 +551,11 @@ func nativeBlock() int { return 7 }
 	config := planDigestSSAConfig()
 	config.OutcomeMode = OutcomeExplicitStatus
 	config.MaxPlainInstructions = -1
+	config.ClassifyLocalBody = func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		facts.StaticOutcomeLocal = true
+		return facts, nil
+	}
 	config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
 		if fn == nativeBlock {
 			return SSAFunctionPolicy{Effect: MayPark, TrustedNoUnwind: true}, nil
@@ -582,5 +587,213 @@ func nativeBlock() int { return 7 }
 	}
 	if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err != nil {
 		t.Fatalf("digest no-unwind native-block plan: %v", err)
+	}
+}
+
+func TestAnalyzeSSAStaticOutcomeUsesOnePrimaryForExactChain(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_outcome_primary.go", `package coroid
+
+func leaf(value any, fail bool) int {
+	if fail { panic(value) }
+	return 7
+}
+func middle(value any, fail bool) int { return leaf(value, fail) }
+func root(value any, fail bool) int { return middle(value, fail) }
+`)
+	leaf := packageFunction(t, pkg, "leaf")
+	middle := packageFunction(t, pkg, "middle")
+	root := packageFunction(t, pkg, "root")
+	config := planDigestSSAConfig()
+	config.OutcomeMode = OutcomeExplicitStatus
+	config.MaxPlainInstructions = -1
+	config.ClassifyLocalBody = func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		facts.StaticOutcomeLocal = true
+		return facts, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, function := range []*ssa.Function{leaf, middle} {
+		got := functionPlanFor(t, plan, function)
+		if got.Emission != EmitOutcomePlain || got.ManagedEntry != ManagedEntryOutcomePlain ||
+			!got.StaticOutcome || got.AtomicCostProof != AtomicCostUnproven ||
+			got.FuncRep != DirectCoro || got.Effect != OutcomeStructured {
+			t.Fatalf("exact-static %s plan = %+v, want one unbounded outcome primary", function.Name(), got)
+		}
+	}
+	rootPlan := functionPlanFor(t, plan, root)
+	if rootPlan.Emission != EmitCoroutine || rootPlan.ManagedEntry != ManagedEntryCoroutine ||
+		!rootPlan.StaticOutcome {
+		t.Fatalf("scheduled root plan = %+v, want coroutine primary plus outcome twin", rootPlan)
+	}
+	if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err != nil {
+		t.Fatalf("digest unbounded outcome-primary plan: %v", err)
+	}
+}
+
+func TestAnalyzeSSAStaticOutcomeRetainsCoroutineForFunctionValue(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_outcome_dispatch.go", `package coroid
+
+func leaf(value any, fail bool) int {
+	if fail { panic(value) }
+	return 7
+}
+var Saved = leaf
+func root(value any, fail bool) int { return leaf(value, fail) }
+`)
+	leaf := packageFunction(t, pkg, "leaf")
+	root := packageFunction(t, pkg, "root")
+	config := planDigestSSAConfig()
+	config.OutcomeMode = OutcomeExplicitStatus
+	config.MaxPlainInstructions = -1
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := functionPlanFor(t, plan, leaf)
+	if got.Emission != EmitCoroutine || got.ManagedEntry != ManagedEntryCoroutine ||
+		got.FuncRep != Dispatch {
+		t.Fatalf("function-value leaf plan = %+v, want retained dynamic coroutine primary", got)
+	}
+}
+
+func TestAnalyzeSSAStaticOutcomeRejectsUnpublishedDescriptorTwin(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_outcome_descriptor_twin.go", `package coroid
+
+func leaf(value any, fail bool) int {
+	if fail { panic(value) }
+	return 7
+}
+func invoke(fn func(any, bool) int, value any, fail bool) int {
+	return fn(value, fail)
+}
+func root(value any, fail bool) int {
+	defer leaf(value, fail)
+	_ = leaf(value, fail)
+	return invoke(leaf, value, fail)
+}
+`)
+	leaf := packageFunction(t, pkg, "leaf")
+	invoke := packageFunction(t, pkg, "invoke")
+	root := packageFunction(t, pkg, "root")
+	config := planDigestSSAConfig()
+	config.OutcomeMode = OutcomeExplicitStatus
+	config.MaxPlainInstructions = 64
+	config.ClassifyLocalBody = func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		facts.OutcomePlainLeaf = fn == leaf
+		return facts, nil
+	}
+	config.ClassifyClosedDynamicCall = func(owner *ssa.Function, call ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+		if owner == invoke && call.Common() != nil && call.Common().StaticCallee() == nil {
+			return SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{leaf}}, true, nil
+		}
+		return SSAClosedDynamicCallCertificate{}, false, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPlan := functionPlanFor(t, plan, leaf)
+	if leafPlan.Emission != EmitCoroutine || leafPlan.ManagedEntry != ManagedEntryCoroutine ||
+		leafPlan.AtomicCostProof != AtomicCostLeaf || !leafPlan.HasStaticOutcome() {
+		t.Fatalf("leaf plan = %+v, want coroutine descriptor plus exact-call outcome twin", leafPlan)
+	}
+	invokePlan := functionPlanFor(t, plan, invoke)
+	if invokePlan.Emission != EmitCoroutine || invokePlan.ManagedEntry != ManagedEntryCoroutine ||
+		invokePlan.HasStaticOutcome() {
+		t.Fatalf("invoke plan = %+v, want coroutine body because leaf's outcome twin is absent from its descriptor", invokePlan)
+	}
+}
+
+func TestAnalyzeSSAOutcomePlainDispatchPrimaryRequiresSynchronousCalls(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		source          string
+		closedDynamic   bool
+		managedABIRef   bool
+		wantOutcomeBody bool
+	}{
+		{
+			name: "ordinary", closedDynamic: true, wantOutcomeBody: true,
+			source: `package coroid
+func leaf(value any, fail bool) int { if fail { panic(value) }; return 7 }
+func invoke(fn func(any, bool) int, value any, fail bool) int { return fn(value, fail) }
+func root(value any, fail bool) int { return invoke(leaf, value, fail) }
+`,
+		},
+		{
+			name: "defer", closedDynamic: true,
+			source: `package coroid
+func leaf(value any, fail bool) int { if fail { panic(value) }; return 7 }
+func invoke(fn func(any, bool) int, value any, fail bool) int { defer fn(value, fail); return 0 }
+func root(value any, fail bool) int { return invoke(leaf, value, fail) }
+`,
+		},
+		{
+			name: "managed ABI descriptor reference", closedDynamic: true, managedABIRef: true, wantOutcomeBody: true,
+			source: `package coroid
+func leaf(value any, fail bool) int { if fail { panic(value) }; return 7 }
+func invoke(fn func(any, bool) int, value any, fail bool) int { return fn(value, fail) }
+func root(value any, fail bool) int { return invoke(leaf, value, fail) }
+`,
+		},
+		{
+			name: "spawn",
+			source: `package coroid
+func leaf(value any, fail bool) int { if fail { panic(value) }; return 7 }
+var Saved = leaf
+func root(value any, fail bool) { go leaf(value, fail) }
+`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg := buildCoroTestSSA(t, "outcome_plain_dispatch_"+test.name+".go", test.source)
+			leaf := packageFunction(t, pkg, "leaf")
+			root := packageFunction(t, pkg, "root")
+			config := planDigestSSAConfig()
+			config.OutcomeMode = OutcomeExplicitStatus
+			config.MaxPlainInstructions = 64
+			config.ClassifyLocalBody = func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+				facts := scanSSAFunctionBody(fn)
+				facts.OutcomePlainLeaf = fn == leaf
+				return facts, nil
+			}
+			if test.closedDynamic {
+				config.ClassifyClosedDynamicCall = func(owner *ssa.Function, call ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+					if owner.Name() != "invoke" || call.Common() == nil || call.Common().StaticCallee() != nil {
+						return SSAClosedDynamicCallCertificate{}, false, nil
+					}
+					return SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{leaf}}, true, nil
+				}
+			}
+			if test.managedABIRef {
+				config.ClassifyDemandReferences = func(owner *ssa.Function) ([]*ssa.Function, error) {
+					if owner == root {
+						return []*ssa.Function{leaf}, nil
+					}
+					return nil, nil
+				}
+			}
+			plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := functionPlanFor(t, plan, leaf)
+			if got.FuncRep != Dispatch {
+				t.Fatalf("leaf representation = %s, want Dispatch", got.FuncRep)
+			}
+			if test.wantOutcomeBody {
+				if got.Emission != EmitOutcomePlain || got.ManagedEntry != ManagedEntryOutcomePlain ||
+					got.AtomicCostProof != AtomicCostLeaf || got.Effect != OutcomeStructured {
+					t.Fatalf("ordinary descriptor leaf plan = %+v, want one outcome primary", got)
+				}
+			} else if got.Emission != EmitCoroutine || got.ManagedEntry != ManagedEntryCoroutine ||
+				got.AtomicCostProof != AtomicCostUnproven {
+				t.Fatalf("%s descriptor leaf plan = %+v, want only the required coroutine primary", test.name, got)
+			}
+		})
 	}
 }

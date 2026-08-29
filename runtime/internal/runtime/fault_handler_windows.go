@@ -18,20 +18,39 @@ const (
 	windowsMinPanicOnFaultAddress          = 0x1000
 )
 
+// WindowsFaultSnapshotFunc is invoked synchronously from the native Windows
+// exception stack. Its single-pointer C transport prevents this raw boundary
+// from manufacturing a managed descriptor dispatch that could suspend.
+//
+//llgo:type C
+type WindowsFaultSnapshotFunc func(unsafe.Pointer) bool
+
 // WindowsFaultSnapshot, when set by the public runtime package, first reports
 // whether the fault PC belongs to Go text and then records the fault context.
 // A false result leaves exceptions raised by native code to Windows' handler
 // chain, matching the Go runtime's isgoexception check.
-var WindowsFaultSnapshot func(unsafe.Pointer) bool
+var WindowsFaultSnapshot WindowsFaultSnapshotFunc
 
+//llgo:type C
+type windowsFaultCallback func(unsafe.Pointer, uint32, uintptr)
+
+// Registration stores cb for later exception delivery but the registration
+// call itself completes synchronously on the initializing thread. The callback
+// has a process lifetime and is not a borrowed coroutine-frame value.
+//
+//llgo:coro sync
 //go:linkname installWindowsFaultHandler C.llgo_install_windows_fault_handler
-func installWindowsFaultHandler(cb func(unsafe.Pointer, uint32, uintptr)) c.Int
+func installWindowsFaultHandler(cb windowsFaultCallback) c.Int
 
+// This only clears the current thread's fault-recursion guard immediately
+// before the non-local panic transfer.
+//
+//llgo:coro noblock
 //go:linkname windowsFaultCaptureDone C.llgo_windows_fault_capture_done
 func windowsFaultCaptureDone()
 
 func init() {
-	if installWindowsFaultHandler(onWindowsFault) == 0 {
+	if installWindowsFaultHandler(windowsFaultCallback(onWindowsFault)) == 0 {
 		panic("runtime: failed to install Windows fault handler")
 	}
 }
@@ -48,7 +67,12 @@ func onWindowsFault(context unsafe.Pointer, code uint32, address uintptr) {
 	if memoryFault && address >= windowsMinPanicOnFaultAddress && !PanicOnFault() {
 		return
 	}
-	if WindowsFaultSnapshot != nil && !WindowsFaultSnapshot(context) {
+	// Snapshot the callback once. Besides making concurrent publication
+	// semantics explicit, this gives the raw-C call exactly the value whose
+	// non-nil guard dominates it; reloading the global for the call would not
+	// be the same SSA value and could not carry that proof.
+	snapshot := WindowsFaultSnapshot
+	if snapshot != nil && !snapshot(context) {
 		return
 	}
 

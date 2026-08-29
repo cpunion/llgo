@@ -75,9 +75,9 @@ func main() {
 // Capturing the address of a zero-sized local uses the one canonical non-nil
 // sentinel both in the returned closure and in the separately returned value.
 // No environment allocation is required.
-// CHECK-LABEL: define ptr @"main.zeroSizedAddressCapture$coro"(ptr %0, ptr %1)
+// CHECK-LABEL: define void @"main.zeroSizedAddressCapture$outcome"(ptr %0, ptr %1, ptr %2)
 // CHECK-NOT: call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(
-// CHECK: { ptr @__llgo_coro_func_descriptor_v1.{{.*}}, ptr null }
+// CHECK: { ptr @__llgo_coro_func_descriptor_v2.{{.*}}, ptr null }
 // CHECK: store ptr @"__llgo.moduleZeroSizedAlloc$"
 
 // CHECK-LABEL: define ptr @"main.zeroSizedAddressCapture$1"()
@@ -85,16 +85,16 @@ func main() {
 
 // An all-zero-sized capture has no physical environment parameter. Its load is
 // statically backed by the sentinel and must not retain a nil-deref helper.
-// CHECK-LABEL: define ptr @"main.zeroSizedCapture$coro"(ptr %0, ptr %1)
+// CHECK-LABEL: define void @"main.zeroSizedCapture$outcome"(ptr %0, ptr %1, ptr %2)
 // CHECK-NOT: call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(
-// CHECK: { ptr @__llgo_coro_func_descriptor_v1.{{.*}}, ptr null }
+// CHECK: { ptr @__llgo_coro_func_descriptor_v2.{{.*}}, ptr null }
 
 // CHECK-LABEL: define i64 @"main.zeroSizedCapture$1"()
 // CHECK-NOT: AssertNilDeref
 
 // Capturing a pointer remains a real one-word environment, even when the
 // pointee type has size zero: nil/non-nil is semantically observable.
-// CHECK-LABEL: define ptr @"main.zeroSizedPointerCapture$coro"(ptr %0, ptr %1, ptr %2)
+// CHECK-LABEL: define void @"main.zeroSizedPointerCapture$outcome"(ptr %0, ptr %1, ptr %2, ptr %3)
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 8)
 
 // CHECK-LABEL: define i1 @"main.zeroSizedPointerCapture$1"(ptr swiftself %0)

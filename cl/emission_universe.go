@@ -539,8 +539,10 @@ const (
 	// task remains runnable. It seeds YieldOnly rather than MayPark and is used
 	// for explicit scheduler handoff/backoff, not event waiting.
 	CoroIntrinsicCallInlineYield
-	// CoroIntrinsicCallInlineOutcome erases a payload-free terminal intrinsic
-	// and enters the current frame's structured cleanup/completion protocol.
+	// CoroIntrinsicCallInlineOutcome erases a terminal intrinsic and enters the
+	// current frame's structured cleanup/completion protocol. Its exact opcode
+	// freezes whether the outcome is payload-free or propagates an existing
+	// panic pair.
 	// It has no normal continuation and seeds OutcomeStructured.
 	CoroIntrinsicCallInlineOutcome
 )
@@ -1435,11 +1437,11 @@ func (u *EmissionUniverse) CoroGlobalPhysicalIdentity(global *ssa.Global) (ident
 	return frozen, true, nil
 }
 
-// CoroDemandReferences returns exact functions embedded or synchronously
-// referenced through a raw frontend ABI while lowering owner. This covers
-// equality/hash helpers and method-table tfn/ifn entries. These are
-// demand-only references: a demanded owner must materialize the selected raw
-// bodies, but taking their addresses does not inherit their effects.
+// CoroDemandReferences returns exact functions referenced while lowering
+// owner's frontend ABI. This covers raw equality/hash helpers and managed
+// method-table tfn/ifn descriptors. These are demand-only references: a
+// demanded owner must materialize the selected capability, but publishing it
+// does not inherit the target's effects.
 //
 // The map is completed together with the emission universe, before coroutine
 // analysis or LLVM codegen. Results are sorted by the frozen frontend identity
@@ -2428,6 +2430,12 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineOutcome, true, nil
+	case llgoCoroPropagatePanic:
+		// The shared exact-shape verifier above owns this opcode. Reaching the
+		// dedicated switch would mean its registry and verifier drifted apart.
+		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+			"llgo.coroPropagatePanic escaped its exact call-shape verifier",
+		)
 	case llgoCoroOSThreadLock, llgoCoroOSThreadUnlock:
 		if err := verifyCoroExactVoidIntrinsicCallSite(direct, "llgo coroutine OS-thread affinity marker"); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
@@ -3174,6 +3182,10 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// closureEnv projects the compiler-owned environment parameter of the
 		// current entry. It emits neither a call nor scheduler state.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoCoroCurrentTask:
+		// Typed-FFI adapters receive the active physical task directly. The
+		// intrinsic emits no call and is valid only in their managed owner.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoAllocaCStr, llgoAllocaCStrs:
 		// The C-string allocation intrinsics lower their size arithmetic and
 		// storage directly, then call runtime.AllocU/CStrCopy in a physical
@@ -3244,7 +3256,7 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCoroCriticalExit:
 		return CoroIntrinsicCallInlineYield
-	case llgoCoroGoexit:
+	case llgoCoroGoexit, llgoCoroPropagatePanic:
 		return CoroIntrinsicCallInlineOutcome
 	case llgoCoroOSThreadLock, llgoCoroOSThreadUnlock:
 		return CoroIntrinsicCallInlineYield
@@ -3510,6 +3522,21 @@ func coroExactIntrinsicShapeForOpcode(opcode int) (coroExactIntrinsicShape, bool
 				{anyPointer: true},
 				{anyPointer: true},
 				{anyPointer: true},
+			},
+		}, true
+	case llgoCoroCurrentTask:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroCurrentTask",
+			signature: "func() unsafe.Pointer",
+			result:    &coroIntrinsicTypeShape{basic: types.UnsafePointer},
+		}, true
+	case llgoCoroPropagatePanic:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroPropagatePanic",
+			signature: "func(unsafe.Pointer, unsafe.Pointer)",
+			parameters: []coroIntrinsicTypeShape{
+				{basic: types.UnsafePointer},
+				{basic: types.UnsafePointer},
 			},
 		}, true
 	default:

@@ -907,7 +907,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	if box == nil || box.X == nil {
 		return "incomplete interface construction"
 	}
-	if elided, err := coroPlannedExactInterfaceMakeElision(a.plan, box); err != nil {
+	if elided, err := coroProveExactInterfaceMakeElision(a.plan, box); err != nil {
 		return "exact interface construction elision: " + err.Error()
 	} else if elided {
 		return ""
@@ -1632,6 +1632,14 @@ func coroPointerUintptrReflectHeaderStoreTerminal(value ssa.Value) bool {
 }
 
 func coroReflectHeaderDataAddress(address ssa.Value) bool {
+	return coroReflectHeaderDataAddressOfKind(address, "")
+}
+
+func coroReflectSliceHeaderDataAddress(address ssa.Value) bool {
+	return coroReflectHeaderDataAddressOfKind(address, "SliceHeader")
+}
+
+func coroReflectHeaderDataAddressOfKind(address ssa.Value, required string) bool {
 	field, ok := address.(*ssa.FieldAddr)
 	if !ok || field.X == nil {
 		return false
@@ -1643,7 +1651,8 @@ func coroReflectHeaderDataAddress(address ssa.Value) bool {
 	named, ok := types.Unalias(pointer.Elem()).(*types.Named)
 	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil ||
 		named.Obj().Pkg().Path() != "reflect" ||
-		named.Obj().Name() != "StringHeader" && named.Obj().Name() != "SliceHeader" {
+		named.Obj().Name() != "StringHeader" && named.Obj().Name() != "SliceHeader" ||
+		required != "" && named.Obj().Name() != required {
 		return false
 	}
 	structure, ok := named.Underlying().(*types.Struct)
@@ -2527,7 +2536,7 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 			// LLSSA implements Go's scale-safe complex division through this
 			// exact helper. It neither has an integer-style zero-divisor panic
 			// nor needs a special physical recipe; the normal owner-scoped
-			// lowered-call resolver selects its proven plain or coroutine entry.
+			// lowered-call resolver selects its proven managed physical entry.
 			return a.requireFrozenExactRuntimeHelper(op, "Complex128Div")
 		}
 		return a.requireNoRuntimeHelpers(op)

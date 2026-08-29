@@ -31,11 +31,12 @@ import (
 )
 
 const (
-	coroPlainDispatchVersion          = llssa.CoroPlainDispatchVersionV1
-	coroPlainDispatchFlags            = llssa.CoroPlainDispatchFlagsV1
-	coroPlainDispatchDescriptorPrefix = "__llgo_coro_func_descriptor_v1."
-	coroPlainDispatchThunkPrefix      = "__llgo_coro_func_plain_v1."
-	coroCoroDispatchThunkPrefix       = "__llgo_coro_func_coro_v1."
+	coroPlainDispatchVersion          = llssa.CoroPlainDispatchVersionV2
+	coroPlainDispatchFlags            = llssa.CoroPlainDispatchFlagsV2
+	coroPlainDispatchDescriptorPrefix = "__llgo_coro_func_descriptor_v2."
+	coroPlainDispatchThunkPrefix      = "__llgo_coro_func_plain_v2."
+	coroOutcomeDispatchThunkPrefix    = "__llgo_coro_func_outcome_v2."
+	coroCoroDispatchThunkPrefix       = "__llgo_coro_func_coro_v2."
 )
 
 // coroPlainDispatchABI is deliberately target independent of the selected
@@ -50,9 +51,10 @@ type coroPlainDispatchABI struct {
 }
 
 // validateCoroDynamicDispatchTarget validates the single primary published by
-// a v1 function descriptor. Capability and capture are properties of the
+// a v2 function descriptor. Capability and capture are properties of the
 // descriptor/produced value, not reasons to clone the source body: a plain
-// primary publishes HasPlain and a coroutine primary publishes HasCoro.
+// primary publishes HasPlain, an explicit-status primary publishes HasOutcome,
+// and a coroutine primary publishes HasCoro.
 func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan, universes ...*EmissionUniverse) error {
 	var universe *EmissionUniverse
 	if len(universes) != 0 {
@@ -66,32 +68,32 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 		return fmt.Errorf("coroutine dynamic dispatch ABI: function %q (%s): %s", name, plan.ID, fmt.Sprintf(format, args...))
 	}
 	externalPlain := false
+	externalStructured := false
 	if fn != nil && len(fn.Blocks) == 0 && plan.External == coro.ExternalKnown &&
 		plan.Emission == coro.EmitExternal && plan.Primary == coro.PrimaryExternal &&
-		plan.Effect == coro.NoSuspend && plan.Exec&(coro.BlockForeign|coro.NeedsPreempt|coro.ThreadAffine|coro.MayUnwind) == 0 &&
-		!plan.Exec.IsOpaque() && universe != nil {
-		certificate, certified, err := universe.CoroForeignNoBlockCertificate(fn)
-		if err != nil {
-			return fail("classify external managed noblock capability: %v", err)
-		}
-		externalPlain = certified && certificate.ID != ""
-		if !externalPlain {
-			callable, callableCertified, err :=
-				universe.CoroCallableContractCertificate(fn)
-			if err != nil {
-				return fail(
-					"classify external managed callable capability: %v",
-					err,
-				)
+		!plan.Exec.IsOpaque() {
+		switch plan.ManagedEntry {
+		case coro.ManagedEntryCoroutine:
+			externalStructured = plan.FuncRep == coro.Dispatch && plan.Effect.MaySuspend()
+		case coro.ManagedEntryOutcomePlain:
+			externalStructured = plan.FuncRep == coro.Dispatch && plan.Effect == coro.OutcomeStructured &&
+				plan.HasStaticOutcome()
+		case coro.ManagedEntryPlain:
+			if plan.Effect != coro.NoSuspend ||
+				plan.Exec&(coro.BlockForeign|coro.NeedsPreempt|coro.ThreadAffine|coro.MayUnwind) != 0 ||
+				plan.FuncRep != coro.Dispatch {
+				break
 			}
-			externalPlain = callableCertified &&
-				callable.Scope == coro.CallableContractScopeDeclaration &&
-				coro.CallableContractDirectExecutorCompatible(
-					callable.Contract,
-				)
+			// A compatibility-checked imported Go-library fact is the producer's
+			// exact no-suspend/no-unwind contract. FuncRep ABI v2 lets each consumer
+			// synthesize the content-addressed descriptor/thunk from that fact and
+			// the published primary. Re-querying C-boundary certificates here would
+			// duplicate weaker evidence and could not strengthen this Go ABI proof.
+			externalPlain = true
 		}
 	}
-	if fn == nil || !externalPlain && (plan.External != coro.Defined || len(fn.Blocks) == 0) {
+	if fn == nil || !externalPlain && !externalStructured &&
+		(plan.External != coro.Defined || len(fn.Blocks) == 0) {
 		adapterDiagnostic := ""
 		if universe != nil && fn != nil {
 			adapter, adapted, adapterErr := universe.CoroManagedFunctionValueTarget(fn)
@@ -119,19 +121,30 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 		if plan.Primary != coro.PrimaryCoroutine || !plan.Effect.MaySuspend() {
 			return fail("coroutine capability requires one suspending primary, got primary=%s effect=%s", plan.Primary, plan.Effect)
 		}
+	case coro.EmitOutcomePlain:
+		if plan.Primary != coro.PrimaryCoroutine || plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+			plan.Effect != coro.OutcomeStructured || !plan.HasStaticOutcome() {
+			return fail(
+				"outcome capability requires one exact explicit-status primary, got primary=%s managed=%s effect=%s static=%t",
+				plan.Primary, plan.ManagedEntry, plan.Effect, plan.HasStaticOutcome(),
+			)
+		}
+		if len(fn.FreeVars) != 0 {
+			return fail("outcome descriptor v2 requires a context-free target")
+		}
 	case coro.EmitRawPlain:
 		if !rawPlainOnly || plan.Exec.Contains(coro.MayUnwind) {
 			return fail("raw-plain capability requires one exact raw-only primary, got raw-only=%t managed=%s raw=%t primary=%s representation=%s",
 				plan.RawPlainOnly, plan.ManagedDemand, plan.RawPlainDemand, plan.Primary, plan.FuncRep)
 		}
 	case coro.EmitExternal:
-		if !externalPlain {
+		if !externalPlain && !externalStructured {
 			return fail(
-				"external capability requires one exact direct executor-safe certificate",
+				"external capability requires one exact executor-safe certificate or imported structured entry",
 			)
 		}
 	default:
-		return fail("requires one plain or coroutine primary, got emission=%s primary=%s", plan.Emission, plan.Primary)
+		return fail("requires one plain, outcome, or coroutine primary, got emission=%s primary=%s", plan.Emission, plan.Primary)
 	}
 	if fn.Signature == nil || fn.Signature.Recv() != nil {
 		return fail("methods require receiver-aware dispatch lowering")
@@ -198,9 +211,9 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 	return nil
 }
 
-// validateCoroPlainDispatchTarget is the first consumer slice's stricter
-// contract. It deliberately remains no-capture/plain-only until ordinary
-// dynamic call lowering is switched to the shared capability-aware API.
+// validateCoroPlainDispatchTarget is the specialized v2 plain-only contract.
+// It remains no-capture/plain-only for the compact synchronous call path;
+// capability-aware managed dispatch uses validateCoroDynamicDispatchTarget.
 func validateCoroPlainDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan, universes ...*EmissionUniverse) error {
 	var universe *EmissionUniverse
 	if len(universes) != 0 {
@@ -931,14 +944,14 @@ func newCoroPlainDispatchEffectiveABI(p *context, patched *types.Signature) (cor
 		return llssa.PathOf(pkg)
 	}
 	var key strings.Builder
-	writeDispatchHashField(&key, "domain", "llgo.coro.func-dispatch.v1")
+	writeDispatchHashField(&key, "domain", "llgo.coro.func-dispatch.v2")
 	writeDispatchHashField(&key, "version", strconv.FormatUint(uint64(coroPlainDispatchVersion), 10))
 	// Capability and capture are runtime descriptor flags, not signature ABI.
-	// An open caller cannot know whether its producer is plain/coroutine or
-	// captured, so all compatible producers must share this hash.
-	writeDispatchHashField(&key, "closure", "two-pointer:descriptor,env;plain=(env,args)->results;coro=(g,out,env,args)->handle")
+	// An open caller cannot know whether its producer is plain, outcome,
+	// coroutine, or captured, so all compatible producers must share this hash.
+	writeDispatchHashField(&key, "closure", "two-pointer:descriptor,env;plain=(env,args)->results;outcome=(g,out,completion,env,args)->void;coro=(g,out,env,args)->handle")
 	writeDispatchHashField(&key, "panic", activeCompilationABI(p.compilation, func(c *Compilation) string { return c.PanicABI }, coro.PanicLegacyABIV0))
-	writeDispatchHashField(&key, "func-rep", activeCompilationABI(p.compilation, func(c *Compilation) string { return c.FuncRepABI }, coro.FuncRepABIV1))
+	writeDispatchHashField(&key, "func-rep", activeCompilationABI(p.compilation, func(c *Compilation) string { return c.FuncRepABI }, coro.FuncRepABIV2))
 	target := p.prog.TargetSpec()
 	writeDispatchHashField(&key, "triple", target.Triple)
 	writeDispatchHashField(&key, "cpu", target.CPU)
@@ -1259,7 +1272,7 @@ func (p *context) emitCoroDynamicDispatchValue(
 		// A plain dispatch thunk emits a physical call, so retain the retagged
 		// (env,args) carrier there as well. Coroutine primaries already expose their
 		// complete (g,out,env,args) physical signature through the coroutine ABI.
-		if entry.plan.Emission != coro.EmitCoroutine {
+		if entry.plan.Emission == coro.EmitPlain || entry.plan.Emission == coro.EmitRawPlain || entry.plan.Emission == coro.EmitExternal {
 			plainTarget = carrier
 		}
 		if rawPhysical != nil {
@@ -1269,21 +1282,37 @@ func (p *context) emitCoroDynamicDispatchValue(
 	targetHash := sha256.Sum256([]byte(entry.plan.ID))
 	targetKey := hex.EncodeToString(targetHash[:8]) + "." + hex.EncodeToString(abi.hash[:])
 	result := p.prog.Type(abi.resultSlotType, llssa.InC)
+	physicalEmission := entry.plan.Emission
+	if physicalEmission == coro.EmitExternal {
+		switch entry.plan.ManagedEntry {
+		case coro.ManagedEntryPlain:
+			physicalEmission = coro.EmitPlain
+		case coro.ManagedEntryOutcomePlain:
+			physicalEmission = coro.EmitOutcomePlain
+		case coro.ManagedEntryCoroutine:
+			physicalEmission = coro.EmitCoroutine
+		default:
+			panic(fmt.Errorf(
+				"coroutine dynamic dispatch ABI: external target %q has no managed physical entry",
+				entry.plan.ID,
+			))
+		}
+	}
 	descriptorName := coroPlainDispatchDescriptorPrefix + targetKey
 	descriptor, found := p.coroPlainDescriptors[descriptorName]
 	if !found {
 		flags := uint32(0)
-		var plainEntry, coroEntry llssa.Expr
-		switch entry.plan.Emission {
-		case coro.EmitPlain, coro.EmitRawPlain, coro.EmitExternal:
+		var plainEntry, outcomeEntry, coroEntry llssa.Expr
+		switch physicalEmission {
+		case coro.EmitPlain, coro.EmitRawPlain:
 			flags |= llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagPlainNoUnwind
 			plainEntry = p.newCoroDynamicDispatchEntryThunk(
-				coroPlainDispatchThunkPrefix+targetKey, plainTarget, abi, entry.plan.Emission, closureCtx,
+				coroPlainDispatchThunkPrefix+targetKey, plainTarget, abi, physicalEmission, closureCtx,
 			)
 		case coro.EmitCoroutine:
 			flags |= llssa.CoroDispatchFlagHasCoro
 			coroEntry = p.newCoroDynamicDispatchEntryThunk(
-				coroCoroDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, closureCtx,
+				coroCoroDispatchThunkPrefix+targetKey, physical.Expr, abi, physicalEmission, closureCtx,
 			)
 			if rawPhysical != nil {
 				flags |= llssa.CoroDispatchFlagHasPlain
@@ -1291,6 +1320,11 @@ func (p *context) emitCoroDynamicDispatchValue(
 					coroPlainDispatchThunkPrefix+targetKey, rawPlainTarget, abi, coro.EmitRawPlain, closureCtx,
 				)
 			}
+		case coro.EmitOutcomePlain:
+			flags |= llssa.CoroDispatchFlagHasOutcome
+			outcomeEntry = p.newCoroDynamicDispatchEntryThunk(
+				coroOutcomeDispatchThunkPrefix+targetKey, physical.Expr, abi, physicalEmission, closureCtx,
+			)
 		default:
 			panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q has unsupported emission %s", entry.plan.ID, entry.plan.Emission))
 		}
@@ -1298,14 +1332,15 @@ func (p *context) emitCoroDynamicDispatchValue(
 			flags |= llssa.CoroDispatchFlagNoCapture
 		}
 		descriptor = p.pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
-			Version:    coroPlainDispatchVersion,
-			Flags:      flags,
-			ABIHash:    abi.hash,
-			Signature:  abi.signature,
-			PlainEntry: plainEntry,
-			CoroEntry:  coroEntry,
-			CodeEntry:  physical.Expr,
-			Result:     result,
+			Version:      coroPlainDispatchVersion,
+			Flags:        flags,
+			ABIHash:      abi.hash,
+			Signature:    abi.signature,
+			PlainEntry:   plainEntry,
+			OutcomeEntry: outcomeEntry,
+			CoroEntry:    coroEntry,
+			CodeEntry:    physical.Expr,
+			Result:       result,
 		})
 		if p.coroPlainDescriptors == nil {
 			p.coroPlainDescriptors = make(map[string]llssa.Expr)
@@ -1335,6 +1370,8 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 	switch emission {
 	case coro.EmitPlain, coro.EmitRawPlain, coro.EmitExternal:
 		thunkSig = p.prog.CoroDispatchPlainEntrySignature(abi.signature)
+	case coro.EmitOutcomePlain:
+		thunkSig = p.prog.CoroDispatchOutcomeEntrySignature(abi.signature)
 	case coro.EmitCoroutine:
 		thunkSig = p.prog.CoroDispatchCoroEntrySignature(abi.signature)
 	default:
@@ -1372,6 +1409,20 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 			targetParam++
 		}
 		thunkSourceBase = 3
+	} else if emission == coro.EmitOutcomePlain {
+		if targetSig.Results().Len() != 0 {
+			panic(fmt.Errorf(
+				"coroutine dynamic dispatch ABI: thunk %q outcome target %q returns values (signature=%s)",
+				name, target.Name(), types.TypeString(targetSig, nil),
+			))
+		}
+		for i := 0; i < 3; i++ {
+			if targetSig.Params().Len() <= targetParam || !types.Identical(targetSig.Params().At(targetParam).Type(), types.Typ[types.UnsafePointer]) {
+				panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target hidden parameter %d is not unsafe.Pointer", name, i))
+			}
+			targetParam++
+		}
+		thunkSourceBase = 4
 	} else if !coroDispatchTargetTupleCompatible(
 		targetSig.Results(), source.Results(), abi.goLinknameFunctionFacade,
 	) {
@@ -1425,14 +1476,18 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		}
 	}
 	b := thunk.MakeBody(1)
-	physicalArgs := make([]llssa.Expr, 0, source.Params().Len()+3)
+	physicalArgs := make([]llssa.Expr, 0, source.Params().Len()+4)
 	if emission == coro.EmitCoroutine {
 		physicalArgs = append(physicalArgs, thunk.PhysicalParam(0), thunk.PhysicalParam(1))
+	} else if emission == coro.EmitOutcomePlain {
+		physicalArgs = append(physicalArgs, thunk.PhysicalParam(0), thunk.PhysicalParam(1), thunk.PhysicalParam(2))
 	}
 	if closureCtx != nil {
 		envIndex := 0
 		if emission == coro.EmitCoroutine {
 			envIndex = 2
+		} else if emission == coro.EmitOutcomePlain {
+			envIndex = 3
 		}
 		physicalArgs = append(physicalArgs, b.Convert(p.prog.Type(closureCtx, llssa.InC), thunk.PhysicalParam(envIndex)))
 	}
@@ -1453,6 +1508,8 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		// The coroutine entry returns only its scheduler handle. Source results
 		// are written through the structurally compatible opaque out slot.
 		b.Return(ret)
+	} else if emission == coro.EmitOutcomePlain {
+		b.Return()
 	} else {
 		switch targetSig.Results().Len() {
 		case 0:

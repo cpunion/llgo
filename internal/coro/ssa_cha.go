@@ -40,6 +40,7 @@ func restrictedSSACHACandidatesWithImplements(
 		func(candidate types.Type, iface *types.Interface) (bool, error) {
 			return implements(candidate, iface), nil
 		},
+		nil,
 	)
 	if err != nil {
 		// The adapter above cannot return an error. Keep the bool-only helper for
@@ -53,13 +54,16 @@ func restrictedSSACHACandidatesWithImplements(
 func restrictedSSACHACandidatesWithDynamicImplements(
 	functions []*ssa.Function,
 	implements func(types.Type, *types.Interface) (bool, error),
+	addressTaken map[*ssa.Function]bool,
 ) (map[ssa.CallInstruction]map[*ssa.Function]struct{}, error) {
 	if implements == nil {
 		return nil, fmt.Errorf("coro: restricted CHA has nil dynamic implements resolver")
 	}
+	if addressTaken == nil {
+		addressTaken = restrictedSSAAddressTakenFunctions(functions)
+	}
 	var funcsBySignature typeutil.Map
 	methodsByID := make(map[string][]*ssa.Function)
-	addressTaken := restrictedSSAAddressTakenFunctions(functions)
 	for _, fn := range functions {
 		if fn == nil || fn.Signature == nil {
 			continue
@@ -160,6 +164,42 @@ func restrictedSSACHACandidatesWithDynamicImplements(
 
 func restrictedSSAAddressTakenFunctions(functions []*ssa.Function) map[*ssa.Function]bool {
 	return restrictedSSAAddressTakenFunctionsExcluding(functions, nil)
+}
+
+// restrictedSSAManagedAddressTakenFunctions completes source publications with
+// their effective managed identities. A frozen body may name an external
+// declaration while the emission universe contains only its canonical or
+// compiler-owned adapter, so source-only CHA would omit the callable body.
+func restrictedSSAManagedAddressTakenFunctions(
+	functions []*ssa.Function,
+	canonicalizer *ssaFunctionCanonicalizer,
+	resolver SSAManagedFunctionValueResolver,
+) (map[*ssa.Function]bool, error) {
+	addressTaken := restrictedSSAAddressTakenFunctions(functions)
+	if len(addressTaken) == 0 || (resolver == nil && canonicalizer == nil) {
+		return addressTaken, nil
+	}
+	sources := make([]*ssa.Function, 0, len(addressTaken))
+	for source := range addressTaken {
+		sources = append(sources, source)
+	}
+	for _, source := range sources {
+		target, err := resolveSSAManagedFunctionValueTarget(resolver, source)
+		if err != nil {
+			return nil, fmt.Errorf("coro: resolve address-taken managed target %q: %w", source.Name(), err)
+		}
+		if canonicalizer != nil {
+			canonical, resolved, err := canonicalizer.resolve(target)
+			if err != nil {
+				return nil, fmt.Errorf("coro: canonicalize address-taken managed target %q: %w", target.Name(), err)
+			}
+			if resolved && canonical != nil {
+				target = canonical
+			}
+		}
+		addressTaken[target] = true
+	}
+	return addressTaken, nil
 }
 
 // restrictedSSAAddressTakenFunctionsExcluding is the managed scalar-function

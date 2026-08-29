@@ -837,6 +837,8 @@ var llgoInstrs = map[string]int{
 	"coroOSThreadLock":        llgoCoroOSThreadLock,
 	"coroOSThreadUnlock":      llgoCoroOSThreadUnlock,
 	"coroFFICall":             llgoCoroFFICall,
+	"coroCurrentTask":         llgoCoroCurrentTask,
+	"coroPropagatePanic":      llgoCoroPropagatePanic,
 	"coroHostOperation":       llgoCoroHostOperation,
 	"controlExit":             llgoControlExit,
 	"controlTrap":             llgoControlTrap,
@@ -2263,7 +2265,8 @@ func (p *context) shouldEmitLogicalCallerFrames() bool {
 func (p *context) plannedLogicalCallerRuntimeHelper(helper string) bool {
 	switch helper {
 	case "PushCallerLocationFrame", "RecordCallerLocation",
-		"RecordPanicLocation", "PopCallerLocationFrame":
+		"RecordPanicLocation", "UpdateLogicalCallerLocation",
+		"PopCallerLocationFrame":
 	default:
 		panic(fmt.Sprintf("invalid logical caller runtime helper %q", helper))
 	}
@@ -2286,6 +2289,7 @@ func (p *context) plannedLogicalCallerRuntimeHelper(helper string) bool {
 }
 
 func (p *context) pushCallerLocationFrame(b llssa.Builder, fn *ssa.Function) {
+	p.logicalCallerToken = llssa.Expr{}
 	if fn == nil {
 		return
 	}
@@ -2298,8 +2302,24 @@ func (p *context) pushCallerLocationFrame(b llssa.Builder, fn *ssa.Function) {
 		directiveFilename(p.fset, fn.Pos(), pos.Filename, p.sourceLine),
 	)
 	entry := b.Convert(p.prog.Uintptr(), p.fn.Expr)
+	tokenPointer := p.prog.Nil(p.prog.VoidPtr())
+	if p.hasCoroPhysicalEmission() {
+		// The preamble Push is itself an outcome operation. Its failure arm may
+		// enter deferred cleanup without passing through its normal continuation,
+		// so an SSA tuple returned there cannot dominate every later location
+		// update. Keep one zeroed token in the physical entry instead. CoroSplit
+		// retains it only while live, and a failed Push leaves cleanup with a
+		// fail-closed nil store.
+		tokenType := p.prog.Type(types.NewStruct([]*types.Var{
+			types.NewField(token.NoPos, nil, "store", types.Typ[types.UnsafePointer], false),
+			types.NewField(token.NoPos, nil, "frameIndex", types.Typ[types.Int], false),
+		}, nil), llssa.InGo)
+		p.logicalCallerToken = p.structuredOutcomeAlloca(tokenType, true)
+		tokenPointer = b.Convert(p.prog.VoidPtr(), p.logicalCallerToken)
+	}
 	b.Call(
 		p.runtimeFunc("PushCallerLocationFrame", pushCallerLocationFrameSig()),
+		tokenPointer,
 		entry,
 		b.Str(p.runtimeCallerFrameName()),
 		b.Str(pos.Filename),
@@ -2323,9 +2343,6 @@ func (p *context) recordPanicSite(b llssa.Builder, pos token.Pos) {
 }
 
 func (p *context) recordRuntimeLocation(b llssa.Builder, pos token.Pos, fn string) {
-	if !p.plannedLogicalCallerRuntimeHelper(fn) {
-		return
-	}
 	position, recordable := runtimeLocationPosition(p.fset, pos)
 	if !recordable {
 		return
@@ -2335,6 +2352,26 @@ func (p *context) recordRuntimeLocation(b llssa.Builder, pos token.Pos, fn strin
 		directiveFilename(p.fset, pos, position.Filename, p.sourceLine),
 	)
 	if position.Filename == "" {
+		return
+	}
+	if p.hasCoroPhysicalEmission() {
+		const helper = "UpdateLogicalCallerLocation"
+		if !p.plannedLogicalCallerRuntimeHelper(helper) {
+			return
+		}
+		if p.logicalCallerToken.IsNil() {
+			panic("logical caller source-location update has no function-entry token")
+		}
+		b.Call(
+			p.runtimeFunc(helper, updateLogicalCallerLocationSig()),
+			b.Convert(p.prog.VoidPtr(), p.logicalCallerToken),
+			b.Convert(p.prog.Uintptr(), p.fn.Expr),
+			b.Str(position.Filename),
+			p.prog.IntVal(uint64(position.Line), p.prog.Int()),
+		)
+		return
+	}
+	if !p.plannedLogicalCallerRuntimeHelper(fn) {
 		return
 	}
 	b.Call(
@@ -2582,7 +2619,7 @@ func (p *context) runtimeFunc(name string, sig *types.Signature) llssa.Expr {
 	if p.compilation != nil && p.emissionUniverse != nil &&
 		p.emissionUniverse.CompleteRuntimeABI() {
 		// Production hidden helper calls must use the rtFunc marker so the
-		// package RuntimeCallResolver can select the frozen plain/coroutine/raw
+		// package RuntimeCallResolver can select the frozen plain/outcome/coroutine/raw
 		// physical entry. Creating an ordinary declaration here bypasses that
 		// resolver and leaves a legacy synchronous symbol call even when the
 		// whole-program plan selected EmitCoroutine.
@@ -2598,6 +2635,7 @@ func (p *context) runtimeFunc(name string, sig *types.Signature) llssa.Expr {
 func pushCallerLocationFrameSig() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil,
 		types.NewTuple(
+			types.NewVar(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
 			types.NewVar(token.NoPos, nil, "entry", types.Typ[types.Uintptr]),
 			types.NewVar(token.NoPos, nil, "name", types.Typ[types.String]),
 			types.NewVar(token.NoPos, nil, "file", types.Typ[types.String]),
@@ -2613,6 +2651,19 @@ func recordRuntimeLocationSig() *types.Signature {
 		types.NewTuple(
 			types.NewVar(token.NoPos, nil, "entry", types.Typ[types.Uintptr]),
 			types.NewVar(token.NoPos, nil, "name", types.Typ[types.String]),
+			types.NewVar(token.NoPos, nil, "file", types.Typ[types.String]),
+			types.NewVar(token.NoPos, nil, "line", types.Typ[types.Int]),
+		),
+		nil,
+		false,
+	)
+}
+
+func updateLogicalCallerLocationSig() *types.Signature {
+	return types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewVar(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
+			types.NewVar(token.NoPos, nil, "entry", types.Typ[types.Uintptr]),
 			types.NewVar(token.NoPos, nil, "file", types.Typ[types.String]),
 			types.NewVar(token.NoPos, nil, "line", types.Typ[types.Int]),
 		),
@@ -3418,12 +3469,34 @@ func (p *context) callEx(
 			// their source tail. Keep that tail structurally well-formed but
 			// unreachable after Goexit entered the terminal cleanup protocol.
 			b.SetBlockContinuation(p.fn.MakeBlock())
+		case llgoCoroPropagatePanic:
+			if act != llssa.Call || ds != nil || len(args) != 2 {
+				panic("llgo.coroPropagatePanic requires an exact direct two-argument call")
+			}
+			if !p.selectCoroPhysicalOutcome(sourceCall, coroPhysicalOutcomePanic) {
+				panic("llgo.coroPropagatePanic has no frozen terminal outcome recipe")
+			}
+			words := p.compileValues(b, args, kind)
+			p.enterCoroPropagatedPanic(
+				b, words[0], words[1], p.coroCurrentSourceLine(),
+			)
+			// The propagated outcome terminates this physical path. Preserve the
+			// synthetic SSA tail only as an unreachable structural continuation.
+			b.SetBlockContinuation(p.fn.MakeBlock())
 		case llgoCoroFFICall:
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroFFICall requires an exact direct call")
 			}
 			args := p.compileValues(b, args, kind)
 			p.compileCoroFFICall(b, args)
+		case llgoCoroCurrentTask:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo.coroCurrentTask requires an exact direct zero-argument call")
+			}
+			ret = p.coroTask()
+			if ret.IsNil() {
+				panic("llgo.coroCurrentTask requires an active physical coroutine")
+			}
 		case llgoCoroHostOperation:
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroHostOperation requires an exact direct call")

@@ -27,7 +27,7 @@ import (
 // validateCoroExactRangeYield recognizes the compiler-owned callback body
 // synthesized for Go's range-over-function statement. It is a normal managed
 // descriptor: the iterator invokes it synchronously in the same logical G, and
-// the universal descriptor selects a plain or coroutine primary from its
+// the universal descriptor selects a plain, outcome, or coroutine primary from its
 // ordinary inferred effects.
 //
 // The proof is structural rather than name-based. Source code cannot create a

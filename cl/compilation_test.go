@@ -43,7 +43,7 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 			CoroABI:               coro.PhysicalABIV1,
 			SchedulerABI:          coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:              coro.PanicExplicitStatusABIV0,
-			FuncRepABI:            coro.FuncRepABIV1,
+			FuncRepABI:            coro.FuncRepABIV2,
 			CoroFrameRetentionABI: CoroFrameRetentionParkABIV2,
 		}
 	}
@@ -140,7 +140,7 @@ func F() int { return 42 }
 		CoroABI:          coro.PhysicalABIV1,
 		SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:         coro.PanicExplicitStatusABIV0,
-		FuncRepABI:       coro.FuncRepABIV1,
+		FuncRepABI:       coro.FuncRepABIV2,
 		EmissionUniverse: universe}
 	installCoroLoweringFactsForTest(t, compilation)
 	mismatchedFacts := &Compilation{
@@ -260,7 +260,7 @@ func F(value int) int { return Foreign(value) + 1 }
 		CoroABI:        coro.PhysicalABIV1,
 		SchedulerABI:   coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:       coro.PanicExplicitStatusABIV0,
-		FuncRepABI:     coro.FuncRepABIV1,
+		FuncRepABI:     coro.FuncRepABIV2,
 		TargetTriple:   prog.TargetSpec().Triple,
 		TargetCPU:      prog.TargetSpec().CPU,
 		TargetFeatures: prog.TargetSpec().Features,

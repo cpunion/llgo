@@ -428,6 +428,7 @@ func rewriteSource(src, srcPath, pkgPath, modulePath, ir string, cfg generationC
 		}
 		offset := eof
 		if name, ok := trimPkgPrefix(fn.symbol, pkgPath); ok {
+			name = sourceFunctionName(name)
 			if pos, found := anchors[name]; found {
 				offset = pos
 			}
@@ -493,6 +494,7 @@ func rewriteVariantSource(src, srcPath, pkgPath, modulePath string, variants []i
 		}
 		offset := eof
 		if name, ok := trimPkgPrefix(base.symbol, pkgPath); ok {
+			name = sourceFunctionName(name)
 			if pos, found := anchors[name]; found {
 				offset = pos
 			}
@@ -715,6 +717,15 @@ func (cfg generationConfig) matchesFunction(symbol, pkgPath string) bool {
 	if dot := strings.LastIndex(symbol, "."); dot >= 0 && dot+1 < len(symbol) {
 		candidates = append(candidates, symbol[dot+1:])
 	}
+	// An outcome-primary entry is the sole managed implementation of its Go
+	// source function, not an auxiliary coroutine resume/destroy helper. Let
+	// source-oriented --function filters keep naming the Go declaration while
+	// the emitted CHECK still records the exact physical $outcome symbol.
+	for count, index := len(candidates), 0; index < count; index++ {
+		if logical := sourceFunctionName(candidates[index]); logical != candidates[index] {
+			candidates = append(candidates, logical)
+		}
+	}
 	for _, re := range cfg.functionREs {
 		for _, candidate := range candidates {
 			if re.MatchString(candidate) {
@@ -723,6 +734,10 @@ func (cfg generationConfig) matchesFunction(symbol, pkgPath string) bool {
 		}
 	}
 	return false
+}
+
+func sourceFunctionName(physical string) string {
+	return strings.TrimSuffix(physical, "$outcome")
 }
 
 func collectAnchors(src string, fset *token.FileSet, file *ast.File) (map[string]int, int) {

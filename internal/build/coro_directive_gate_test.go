@@ -84,11 +84,16 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		// from the C signature and therefore not soundly compiler-inferable.
 		"contract": 8,
 		// The residual noblock leaves include the bounded native frame-cache
-		// take/put operations, current-G TLS store, and hosted TLS primitives.
-		// Their raw C signatures cannot express the fixed-size ownership transfer,
-		// independent pthread/FLS lifetime root, or non-waiting access contract.
-		"noblock": 36,
-		"sync":    29,
+		// take/put operations, current-G TLS load/store, hosted TLS primitives,
+		// and the Windows UCRT/fault-recursion accessors. Their raw C signatures
+		// cannot express the fixed-size ownership transfer, independent
+		// pthread/FLS lifetime root, or non-waiting access contract.
+		"noblock": 39,
+		// The three additional synchronous leaves cover same-thread BDWGC
+		// unregister plus Windows fault-handler registration and process entropy.
+		// Moving any of them to a worker would change thread ownership or startup
+		// ordering; their C signatures cannot prove those semantics.
+		"sync": 32,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf(
@@ -101,8 +106,8 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 	// The Go 1.26 source-patch migration moved the Darwin mmap declaration, and
 	// the hosted thread/sync unification replaced legacy pthread owners. Windows
 	// FLS effects are attached to the raw declarations rather than their Go
-	// wrappers. This digest freezes the reviewed 8/36/29 bottom-contract set.
-	const wantManifestSHA256 = "0f737ef2eedc8a14d41f2c64c13c4c63b70dc51d477aeb8959ea9ca1093c8930"
+	// wrappers. This digest freezes the reviewed 8/39/32 bottom-contract set.
+	const wantManifestSHA256 = "0f18207bcde95b376a5bec8352b7756ea7d8c5b0033247b977d36ac3222a7161"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)

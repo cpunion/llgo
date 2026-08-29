@@ -723,7 +723,7 @@ func compileCoroStaticSpawnTransportFixture(t *testing.T, target *llssa.Target) 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -800,7 +800,7 @@ func compileCoroClosedStaticMethodSpawnFixture(t *testing.T, target *llssa.Targe
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -905,7 +905,7 @@ func compileCoroManagedDispatchSpawnFixture(t *testing.T, target *llssa.Target) 
 	enableCoroPreemptCompilation(compilation)
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -1050,7 +1050,7 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1}
+		FuncRepABI:   coro.FuncRepABIV2}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},

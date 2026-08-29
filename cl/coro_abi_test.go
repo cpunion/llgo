@@ -2366,7 +2366,7 @@ func Plain(value uint32) uint32 {
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -2546,7 +2546,7 @@ func Leaf(value uint32) uint32 { return value + 1 }
 			CoroABI:          coro.PhysicalABIV1,
 			SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:         coro.PanicExplicitStatusABIV0,
-			FuncRepABI:       coro.FuncRepABIV1,
+			FuncRepABI:       coro.FuncRepABIV2,
 			EmissionUniverse: universe}
 		installCoroLoweringFactsForTest(t, compilation)
 		pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
@@ -2852,7 +2852,7 @@ func enableCoroChildAwaitCompilation(compilation *Compilation) {
 	compilation.CoroABI = coro.PhysicalABIV1
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 }
 
 func enableCoroPreemptCompilation(compilation *Compilation) {

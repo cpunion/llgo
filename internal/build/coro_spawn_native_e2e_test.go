@@ -532,7 +532,7 @@ func buildCoroSpawnNativeE2EUserSource(
 		CoroABI:                coro.PhysicalABIV1,
 		SchedulerABI:           schedulerABI,
 		PanicABI:               coro.PanicExplicitStatusABIV0,
-		FuncRepABI:             coro.FuncRepABIV1,
+		FuncRepABI:             coro.FuncRepABIV2,
 		CoroTargetCapabilities: targetCapabilities,
 		EmissionUniverse:       universe}
 	capabilities = freezeCoroNativeE2EProgramCapabilities(t, compilation)

@@ -225,7 +225,7 @@ func buildCoroStaticDeferNativeE2EUser(
 		CoroABI:          coro.PhysicalABIV1,
 		SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:         coro.PanicExplicitStatusABIV0,
-		FuncRepABI:       coro.FuncRepABIV1,
+		FuncRepABI:       coro.FuncRepABIV2,
 		EmissionUniverse: universe}
 	freezeCoroNativeE2EProgramCapabilities(t, compilation)
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(

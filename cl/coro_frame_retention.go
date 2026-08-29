@@ -682,14 +682,21 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 	// one exact bounded managed-child/worker call. Returning, storing, general
 	// arithmetic on, dynamically dispatching, or passing it to an arbitrary
 	// foreign declaration leaves it uncertified. The conversion chain is
-	// deliberately one-way: converting an integer alias back to a pointer is
-	// still admitted only by the separate exact same-expression roundtrip proof
-	// below.
+	// deliberately one-way. The standard library's legacy read-only
+	// reflect.SliceHeader observation is the only memory-shaped reverse proof;
+	// arbitrary headers, mutation, escape, and StringHeader remain rejected.
 	for _, block := range b.audit.fn.Blocks {
 		for _, instruction := range block.Instrs {
 			conversion, ok := instruction.(*ssa.Convert)
-			if ok && coroFrameRetentionPointerToUintptr(conversion) {
+			if !ok {
+				continue
+			}
+			switch {
+			case coroFrameRetentionPointerToUintptr(conversion):
 				b.proveUintptrKeepalive(conversion)
+			case conversion.X != nil && coroFrameRetentionUintptrLike(conversion.X.Type()) &&
+				coroFrameRetentionPointerLike(conversion.Type()):
+				b.proveReflectSliceHeaderDataRoundtrip(conversion)
 			}
 		}
 	}
@@ -1250,6 +1257,101 @@ func (b *coroFrameRetentionRootBuilder) proveUintptrKeepalive(conversion *ssa.Co
 		}
 		b.mergeCallFact(call, use.kind, trace.roots, b.sortedValueSet(use.sources))
 	}
+}
+
+// proveReflectSliceHeaderDataRoundtrip recognizes the standard library's
+// exact read-only slice -> reflect.SliceHeader -> Data -> pointer observation.
+// Requiring two closed, single-initialization local cells prevents this
+// memory-shaped exception from becoming general uintptr provenance.
+func (b *coroFrameRetentionRootBuilder) proveReflectSliceHeaderDataRoundtrip(reconstruction *ssa.Convert) {
+	word, ok := reconstruction.X.(*ssa.UnOp)
+	if !ok || word.Op != token.MUL || !coroSSAInstructionDominates(word, reconstruction) {
+		return
+	}
+	field, ok := word.X.(*ssa.FieldAddr)
+	if !ok || !coroReflectSliceHeaderDataAddress(field) {
+		return
+	}
+	header, ok := field.X.(*ssa.Alloc)
+	if !ok || header.Parent() != b.audit.fn {
+		return
+	}
+	headerStore, exact := coroFrameRetentionExactReadOnlyCell(header, word)
+	if !exact {
+		return
+	}
+	headerLoad, ok := headerStore.Val.(*ssa.UnOp)
+	if !ok || headerLoad.Op != token.MUL {
+		return
+	}
+	slice := coroFrameRetentionDirectAllocRoot(headerLoad.X, make(map[ssa.Value]bool))
+	if slice == nil || slice.Parent() != b.audit.fn {
+		return
+	}
+	pointer, ok := types.Unalias(slice.Type()).Underlying().(*types.Pointer)
+	if !ok || !coroFrameRetentionSliceLike(pointer.Elem()) {
+		return
+	}
+	sliceStore, exact := coroFrameRetentionExactReadOnlyCell(slice, headerLoad)
+	if !exact || !coroFrameRetentionSliceLike(sliceStore.Val.Type()) {
+		return
+	}
+	trace, traced := b.traceSlice(sliceStore.Val, sliceStore, make(map[ssa.Value]bool))
+	if !traced {
+		return
+	}
+	b.proof.uintptrValues[word] = coroFrameRetentionUintptrFact{roots: b.sortedValues(trace.roots)}
+}
+
+// coroFrameRetentionExactReadOnlyCell freezes one local initialization plus
+// pointer-preserving address projections and loads. Any mutation through an
+// alias, address escape/call transport, or second Store fails closed.
+func coroFrameRetentionExactReadOnlyCell(cell *ssa.Alloc, use ssa.Instruction) (*ssa.Store, bool) {
+	if cell == nil || use == nil || cell.Parent() != use.Parent() {
+		return nil, false
+	}
+	var store *ssa.Store
+	seen := make(map[ssa.Value]bool)
+	var readOnly func(ssa.Value, bool) bool
+	readOnly = func(address ssa.Value, root bool) bool {
+		if address == nil || seen[address] || address.Referrers() == nil {
+			return false
+		}
+		seen[address] = true
+		for _, reference := range *address.Referrers() {
+			switch instruction := reference.(type) {
+			case *ssa.DebugRef:
+			case *ssa.Store:
+				if !root || store != nil || instruction.Addr != address {
+					return false
+				}
+				store = instruction
+			case *ssa.UnOp:
+				if instruction.Op != token.MUL || instruction.X != address {
+					return false
+				}
+			case *ssa.FieldAddr:
+				if instruction.X != address || !readOnly(instruction, false) {
+					return false
+				}
+			case *ssa.ChangeType:
+				if instruction.X != address || !coroFrameRetentionPointerLike(instruction.Type()) ||
+					!coroFrameRetentionPointerLike(address.Type()) || !readOnly(instruction, false) {
+					return false
+				}
+			case *ssa.Convert:
+				if instruction.X != address || !coroFrameRetentionPointerLike(instruction.Type()) ||
+					!coroFrameRetentionPointerLike(address.Type()) || !readOnly(instruction, false) {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	exact := readOnly(cell, true)
+	return store, exact && store != nil && coroSSAInstructionDominates(store, use)
 }
 
 // exactUintptrRoundtripUses recognizes the deliberately narrow SSA image of

@@ -1617,6 +1617,93 @@ func straight(a int) int { a++; a++; a++; return a }
 	}
 }
 
+func TestAnalyzeSSAPackageInitializerSkipsOnlyLocalStaticCostSeed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "package_init_cost.go", `package coroid
+var values = [4]int{1, 2, 3, 4}
+`)
+	initializer := packageFunction(t, pkg, "init")
+	if !isSSAPackageInitializer(initializer) {
+		t.Fatalf("initializer identity = name=%q synthetic=%q signature=%v", initializer.Name(), initializer.Synthetic, initializer.Signature)
+	}
+	facts := scanSSAFunctionBody(initializer)
+	if facts.InstructionCount <= 1 || facts.HasCycle {
+		t.Fatalf("initializer facts = %+v, want a long straight-line synthetic body", facts)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: initializer, Demand: AsyncDemand}}, SSAConfig{MaxPlainInstructions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := functionPlanFor(t, plan, initializer)
+	if got.Exec.Contains(NeedsPreempt) || got.Effect.Contains(YieldOnly) || got.Emission != EmitPlain {
+		t.Fatalf("bounded synthetic initializer plan = %+v, want no local instruction-budget preemption", got)
+	}
+}
+
+func TestAnalyzeSSAPackageInitializerKeepsCalleePreemptionEffect(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "package_init_callee_preempt.go", `package coroid
+func spin() { for {} }
+var value = func() int { spin(); return 1 }()
+`)
+	initializer := packageFunction(t, pkg, "init")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: initializer, Demand: AsyncDemand}}, SSAConfig{MaxPlainInstructions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := functionPlanFor(t, plan, initializer)
+	if !got.Effect.Contains(YieldOnly) || got.Emission != EmitCoroutine {
+		t.Fatalf("synthetic initializer callee-preemption plan = %+v, want propagated coroutine suspension", got)
+	}
+}
+
+func TestSSAClassifiedDemandReferencesPinOnlyRawSynchronousSubset(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "demand_reference_kind.go", `package coroid
+func owner() {}
+func managedMethodDescriptor() {}
+func rawEqualityCallback() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	managed := packageFunction(t, pkg, "managedMethodDescriptor")
+	raw := packageFunction(t, pkg, "rawEqualityCallback")
+	functions := []*ssa.Function{owner, managed, raw}
+	included := make(map[*ssa.Function]bool, len(functions))
+	ids := make(map[*ssa.Function]FunctionID, len(functions))
+	for _, function := range functions {
+		included[function] = true
+		ids[function] = FunctionID(function.Name())
+	}
+	graph := NewGraph()
+	err := addSSAClassifiedDemandReferences(
+		graph, functions, included, ids, newSSAFunctionCanonicalizer(prog, SSAConfig{}),
+		SSAConfig{
+			ClassifyDemandReferences: func(function *ssa.Function) ([]*ssa.Function, error) {
+				if function == owner {
+					return []*ssa.Function{managed, raw}, nil
+				}
+				return nil, nil
+			},
+			ClassifySyncDemandReferences: func(function *ssa.Function) ([]*ssa.Function, error) {
+				if function == owner {
+					return []*ssa.Function{raw}, nil
+				}
+				return nil, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[FunctionID]ReferenceEdge)
+	for _, reference := range graph.references {
+		seen[reference.Target] = reference
+	}
+	if reference, ok := seen[ids[managed]]; !ok || reference.PhysicalABI || reference.SyncOnly || reference.RawPlain {
+		t.Fatalf("managed descriptor reference = %+v, present=%t; want reachability-only managed reference", reference, ok)
+	}
+	if reference, ok := seen[ids[raw]]; !ok || !reference.PhysicalABI || !reference.SyncOnly || reference.RawPlain {
+		t.Fatalf("raw callback reference = %+v, present=%t; want pinned synchronous physical ABI", reference, ok)
+	}
+}
+
 func TestAnalyzeSSATrustedNoPreemptClearsOnlyScannerSeed(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "trusted_no_preempt.go", `package coroid
 func trustedLoop() { for {} }
@@ -1997,6 +2084,91 @@ func rawCall(fn raw) { fn() }
 	}
 	if resolverCalls != 1 {
 		t.Fatalf("managed resolver calls = %d, want 1 (raw C call must bypass it)", resolverCalls)
+	}
+}
+
+func TestAnalyzeSSACHAClosedIncludesEffectiveManagedPublication(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_adapter_publication.go", `package coroid
+func foreign()
+func adapter() {}
+func invoke(fn func()) { fn() }
+func seed() { invoke(foreign) }
+`)
+	foreign := packageFunction(t, pkg, "foreign")
+	adapter := packageFunction(t, pkg, "adapter")
+	invoke := packageFunction(t, pkg, "invoke")
+	seed := packageFunction(t, pkg, "seed")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{adapter, invoke, seed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		configure func(*SSAConfig)
+	}{
+		{
+			name: "managed adapter",
+			configure: func(config *SSAConfig) {
+				config.ResolveManagedFunctionValue = func(fn *ssa.Function) (*ssa.Function, bool, error) {
+					if fn == foreign {
+						return adapter, true, nil
+					}
+					return nil, false, nil
+				}
+			},
+		},
+		{
+			name: "canonical alias",
+			configure: func(config *SSAConfig) {
+				config.ResolveFunction = func(fn *ssa.Function) (*ssa.Function, bool, error) {
+					if fn == foreign {
+						return adapter, true, nil
+					}
+					return fn, true, nil
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := SSAConfig{
+				DynamicResolution: DynamicCHAClosed,
+				EmissionUniverse:  universe,
+				ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+					if call.Common().StaticCallee() == nil {
+						return UnknownManagedDispatch, nil
+					}
+					return UnknownManaged, nil
+				},
+			}
+			test.configure(&config)
+			publications, publicationErr := restrictedSSAManagedAddressTakenFunctions(
+				universe.functions, newSSAFunctionCanonicalizer(prog, config), config.ResolveManagedFunctionValue,
+			)
+			if publicationErr != nil {
+				t.Fatal(publicationErr)
+			}
+			if !publications[adapter] {
+				t.Fatalf("effective managed publication set = %v; want adapter %s", publications, adapter)
+			}
+			plan, err := AnalyzeSSA(prog, Roots{{Function: seed, Demand: AsyncDemand}}, config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := onlyNonBuiltinCall(t, invoke)
+			got, ok := plan.CallPlan(call)
+			adapterID, identified := plan.FunctionID(adapter)
+			if !ok || !identified || got.Open || got.Rep != Dispatch || len(got.Targets) != 1 || got.Targets[0] != adapterID {
+				t.Fatalf("managed-adapter dynamic CallPlan = %+v, present=%t adapter=%q identified=%t", got, ok, adapterID, identified)
+			}
+			if _, present := plan.FunctionPlan(foreign); present {
+				t.Fatal("source external declaration unexpectedly entered the emission plan")
+			}
+			valuePlan, present := plan.ValuePlan(foreign)
+			if !present || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Targets) != 1 ||
+				valuePlan.Funcs[0].Targets[0] != adapterID {
+				t.Fatalf("managed source ValuePlan = %+v, present=%t; want adapter %q", valuePlan, present, adapterID)
+			}
+		})
 	}
 }
 

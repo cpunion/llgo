@@ -244,7 +244,7 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 		CoroABI:               coro.PhysicalABIV1,
 		SchedulerABI:          coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:              coro.PanicExplicitStatusABIV0,
-		FuncRepABI:            coro.FuncRepABIV1,
+		FuncRepABI:            coro.FuncRepABIV2,
 		EmissionUniverse:      emission}
 	freezeCoroNativeE2EProgramCapabilities(t, compilation)
 	timePkg, _, err := cl.NewPackageExWithEmbedOptions(

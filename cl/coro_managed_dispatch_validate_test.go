@@ -46,11 +46,11 @@ func TestCoroManagedDispatchValidationRequiresCapability(t *testing.T) {
 
 	if err := validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
 		fn, functionPlan, plan, nil, true, false, false, false, "", false, false, false,
-	); err == nil || !strings.Contains(err.Error(), "requires the v1 descriptor dispatch capability") {
+	); err == nil || !strings.Contains(err.Error(), "requires the v2 descriptor dispatch capability") {
 		t.Fatalf("physical gate-off error = %v", err)
 	}
 	if err := validateCoroPhysicalConsumersCapabilities(plan, nil, true, false, false); err == nil ||
-		!strings.Contains(err.Error(), "requires the v1 descriptor dispatch capability") {
+		!strings.Contains(err.Error(), "requires the v2 descriptor dispatch capability") {
 		t.Fatalf("consumer gate-off error = %v", err)
 	}
 

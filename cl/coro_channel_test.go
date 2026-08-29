@@ -583,7 +583,7 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1}
+		FuncRepABI:   coro.FuncRepABIV2}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -600,7 +600,7 @@ func TestCoroChannelCompilationCapabilityFailsClosed(t *testing.T) {
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: "invalid-scheduler",
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1}
+		FuncRepABI:   coro.FuncRepABIV2}
 	if err := compilation.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
 		t.Fatalf("channel scheduler identity error = %v", err)
 	}

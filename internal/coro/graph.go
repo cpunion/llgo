@@ -116,6 +116,13 @@ type CallEdge struct {
 type ReferenceEdge struct {
 	Owner  FunctionID
 	Target FunctionID
+	// PhysicalABI marks a demand-only raw code address embedded in a
+	// frontend/runtime ABI, such as an equality/hash callback. It still uses
+	// managed demand for graph reachability, but the target must keep the
+	// physical entry required by that ABI rather than collapsing to an
+	// outcome-only descriptor primary. Method-table tfn/ifn values transported
+	// through the universal managed descriptor deliberately leave this clear.
+	PhysicalABI bool
 	// SyncOnly is an exact frontend ABI proof that this reference is consumed
 	// only through a managed synchronous descriptor/plain entry. It retains the
 	// target's managed plain demand without inheriting the owner's coroutine
@@ -173,10 +180,11 @@ type edgeKey struct {
 }
 
 type referenceKey struct {
-	owner    FunctionID
-	target   FunctionID
-	syncOnly bool
-	rawPlain bool
+	owner       FunctionID
+	target      FunctionID
+	physicalABI bool
+	syncOnly    bool
+	rawPlain    bool
 }
 
 type unknownKey struct {
@@ -239,16 +247,21 @@ func (g *Graph) AddFunction(spec FunctionSpec) error {
 		return fmt.Errorf("coro: function %q: managed entry %s requires an external-known producer", spec.ID, spec.ManagedEntry)
 	}
 	if spec.StaticOutcome {
-		if spec.External != ExternalKnown || spec.ManagedEntry != ManagedEntryCoroutine ||
+		if spec.External != ExternalKnown ||
+			(spec.ManagedEntry != ManagedEntryCoroutine && spec.ManagedEntry != ManagedEntryOutcomePlain) ||
 			spec.AtomicCostProof != AtomicCostUnproven || spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" ||
 			spec.Seed&^(AwaitStructured|OutcomeStructured|MayPark) != 0 ||
 			spec.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
 			return fmt.Errorf("coro: function %q: invalid imported unbounded static outcome capability", spec.ID)
 		}
+		if spec.ManagedEntry == ManagedEntryOutcomePlain && spec.Seed != OutcomeStructured {
+			return fmt.Errorf("coro: function %q: unbounded outcome-plain primary has effect %s", spec.ID, spec.Seed)
+		}
 	}
 	switch spec.AtomicCostProof {
 	case AtomicCostUnproven:
-		if spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" || spec.ManagedEntry == ManagedEntryOutcomePlain {
+		if spec.AtomicCost != 0 || spec.AtomicCostCertificate != "" ||
+			spec.ManagedEntry == ManagedEntryOutcomePlain && !spec.StaticOutcome {
 			return fmt.Errorf("coro: function %q: outcome entry/cost requires an atomic-cost proof", spec.ID)
 		}
 	case AtomicCostLeaf, AtomicCostDAG:
@@ -342,7 +355,10 @@ func (g *Graph) AddReference(edge ReferenceEdge) error {
 	if edge.SyncOnly && edge.RawPlain {
 		return fmt.Errorf("coro: reference from %q to %q is both managed sync-only and raw-plain", edge.Owner, edge.Target)
 	}
-	key := referenceKey{owner: edge.Owner, target: edge.Target, syncOnly: edge.SyncOnly, rawPlain: edge.RawPlain}
+	key := referenceKey{
+		owner: edge.Owner, target: edge.Target, physicalABI: edge.PhysicalABI,
+		syncOnly: edge.SyncOnly, rawPlain: edge.RawPlain,
+	}
 	g.references[key] = edge
 	return nil
 }
@@ -1052,6 +1068,9 @@ func (g *Graph) sortedReferences() ([]ReferenceEdge, error) {
 		}
 		if references[i].RawPlain != references[j].RawPlain {
 			return !references[i].RawPlain && references[j].RawPlain
+		}
+		if references[i].PhysicalABI != references[j].PhysicalABI {
+			return !references[i].PhysicalABI && references[j].PhysicalABI
 		}
 		return !references[i].SyncOnly && references[j].SyncOnly
 	})

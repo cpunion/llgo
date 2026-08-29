@@ -48,23 +48,24 @@ const (
 )
 
 type coroStaticCleanupSitePlan struct {
-	instruction        *ssa.Defer
-	target             *ssa.Function
-	targetPlan         coro.FunctionPlan
-	kind               coroStaticCleanupTargetKind
-	closure            *ssa.MakeClosure
-	closureEnvironment *types.Var
-	descriptor         ssa.Value
-	interfaceReceiver  ssa.Value
-	interfaceMethod    *types.Func
-	signature          *types.Signature
-	callPlan           coro.SSACallPlan
-	intrinsic          int
-	builtin            string
-	cgoWorker          *coroWorkerCgoCallShape
-	foreignWorker      *coroWorkerForeignCallShape
-	arguments          []ssa.Value
-	tag                uint32
+	instruction             *ssa.Defer
+	target                  *ssa.Function
+	targetPlan              coro.FunctionPlan
+	kind                    coroStaticCleanupTargetKind
+	closure                 *ssa.MakeClosure
+	closureEnvironment      *types.Var
+	descriptor              ssa.Value
+	interfaceReceiver       ssa.Value
+	interfaceMethod         *types.Func
+	signature               *types.Signature
+	callPlan                coro.SSACallPlan
+	structuredCoroutineOnly bool
+	intrinsic               int
+	builtin                 string
+	cgoWorker               *coroWorkerCgoCallShape
+	foreignWorker           *coroWorkerForeignCallShape
+	arguments               []ssa.Value
+	tag                     uint32
 }
 
 type coroStaticCleanupPlan struct {
@@ -424,6 +425,8 @@ func prepareCoroStaticCleanupPlan(
 							return nil, fmt.Errorf("defer in block %d: managed descriptor cleanup lost its CallPlan", block.Index)
 						}
 						site.callPlan = callPlan
+						site.structuredCoroutineOnly =
+							coroManagedDispatchPublishedCoroutineOnly(whole, callPlan)
 						if instruction.Common().IsInvoke() {
 							if callPlan.Open {
 								if err := validateCoroManagedInterfaceDispatchCall(
@@ -654,10 +657,11 @@ func coroStaticTerminalReturnAfter(block *ssa.BasicBlock, instructionIndex int) 
 // cleanup-time descriptor dispatch. A coroutine capability reports Panic via
 // its child CompletionRecord; a plain capability executes inline in the
 // drainer and therefore must have the same exact no-unwind proof as a static
-// plain defer. The v1 descriptor ABI requires PlainNoUnwind on every
-// plain-only producer, while managed dispatch always selects HasCoro when
-// present. Open sets can therefore rely on the validated producer capability;
-// closed targets retain the stronger whole-program audit below.
+// plain defer. The v2 descriptor ABI requires PlainNoUnwind whenever cleanup
+// can select a plain entry; a published structured outcome/coroutine entry
+// carries completion explicitly. Open sets can therefore rely on the validated
+// producer capability; closed targets retain the stronger whole-program audit
+// below.
 func validateCoroManagedCleanupPlainTargets(
 	whole *coro.SSAPlan,
 	universe *EmissionUniverse,
@@ -1144,7 +1148,7 @@ func resolveCoroStaticCleanupTarget(
 	// has already evaluated and packed the trailing arguments into the final
 	// []T operand before the Defer instruction. The frame record retains that
 	// ordinary slice value, and coroPhysicalNormalizeSourceSignature clears
-	// the source-only variadic marker for the eventual plain/coroutine call.
+	// the source-only variadic marker for the eventual managed physical call.
 	// validateCoroStaticCleanupOperands below freezes the exact packed shape.
 	if closure != nil {
 		if err := validateCoroCapturedClosureProducer(whole, closure, targetPlan); err != nil {
@@ -2092,9 +2096,14 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		if site.descriptor.IsNil() || site.plan.signature == nil {
 			panic("managed descriptor cleanup lost its typed descriptor/signature")
 		}
-		p.compileCoroManagedDispatchAwaitValueWithRecovery(
-			b, b.Load(site.descriptor), args, site.plan.signature, s, nil,
-			site.plan.interfaceReceiver != nil,
+		p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
+			b, b.Load(site.descriptor), args, site.plan.signature,
+			coroManagedDispatchAwaitOptions{
+				cleanup:                 s,
+				recoverAliasChild:       site.plan.interfaceReceiver != nil,
+				trustedDescriptor:       site.plan.structuredCoroutineOnly,
+				structuredCoroutineOnly: site.plan.structuredCoroutineOnly,
+			},
 		)
 		return true
 	case coroStaticCleanupIntrinsic:

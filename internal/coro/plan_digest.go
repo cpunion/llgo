@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v38"
+const PlanDigestSchema = "llgo.coro.plan-digest.v39"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -104,11 +104,11 @@ const (
 	// other unsupported language shapes remain independently fail-closed.
 	PanicExplicitStatusABIV0 = "llgo.coro.panic.explicit-status.v0"
 	FuncRepABIV0             = "llgo.coro.func-rep.v0"
-	// FuncRepABIV1 introduces an explicit descriptor/context representation for
-	// dynamically consumed Go function values. The first producer/consumer slice
-	// supports only one no-capture, non-suspending plain body; unsupported value
-	// shapes and call capabilities remain fail-closed.
-	FuncRepABIV1 = "llgo.coro.func-rep.v1"
+	// FuncRepABIV2 publishes the universal nine-word descriptor with mutually
+	// exclusive plain, synchronous explicit-status, and LLVM-coroutine entries.
+	// Capability selection is typed and the environment remains a separate word;
+	// no symbol-address reverse lookup participates in dynamic dispatch.
+	FuncRepABIV2 = "llgo.coro.func-rep.v2"
 	// FrameRetentionParkABIV2 identifies the sole generic Park state lifetime
 	// proof. Source-specific symbols are deliberately absent from this ABI.
 	FrameRetentionParkABIV2 = "llgo.coro.frame-retention.park.v2"
@@ -663,13 +663,7 @@ func (p *SSAPlan) canonicalDigestPackageInitDependencyOrdinals(
 }
 
 func isDigestPackageInitializer(function *ssa.Function) bool {
-	if function == nil || function.Name() != "init" || function.Synthetic != "package initializer" ||
-		function.Pkg == nil || function.Pkg.Pkg == nil ||
-		function.Signature == nil || function.Signature.Recv() != nil {
-		return false
-	}
-	params, results := function.Signature.Params(), function.Signature.Results()
-	return (params == nil || params.Len() == 0) && (results == nil || results.Len() == 0)
+	return isSSAPackageInitializer(function)
 }
 
 func comparePlanDigestInstructionSite(

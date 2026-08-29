@@ -155,7 +155,7 @@ func validateCoroRawPlainConsumers(plan *coro.SSAPlan, universe *EmissionUnivers
 						continue
 					}
 					if !plainDispatch {
-						return coroLeafInstructionError(fn, functionPlan, instruction, "raw plain synchronous descriptor call requires the v1 plain dispatch capability")
+						return coroLeafInstructionError(fn, functionPlan, instruction, "raw plain synchronous descriptor call requires the v2 descriptor dispatch capability")
 					}
 					if !callPlan.SyncDispatch {
 						return coroLeafInstructionError(fn, functionPlan, instruction, "raw plain body has a dynamic call without an exact SyncDispatch certificate")

@@ -29,6 +29,7 @@ const (
 // The Universal CRT exposes standard streams through __acrt_iob_func rather
 // than the Unix stdin/stdout/stderr data symbols.
 //
+//llgo:coro noblock
 //go:linkname acrtIobFunc C.__acrt_iob_func
 func acrtIobFunc(index Uint) FilePtr
 

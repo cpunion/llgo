@@ -36,7 +36,7 @@ func memReadable(addr uintptr) bool {
 }
 
 func init() {
-	rtdebug.WindowsFaultSnapshot = storeWindowsFaultSnapshot
+	rtdebug.WindowsFaultSnapshot = rtdebug.WindowsFaultSnapshotFunc(storeWindowsFaultSnapshot)
 }
 
 func storeWindowsFaultSnapshot(context unsafe.Pointer) bool {

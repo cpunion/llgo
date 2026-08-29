@@ -892,7 +892,7 @@ func coroClosedInterfacePlainCompilation(plan *coro.SSAPlan, universe *EmissionU
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1}
+		FuncRepABI:   coro.FuncRepABIV2}
 }
 
 func assertCoroManagedClosedInterfaceIR(t *testing.T, ir string) {

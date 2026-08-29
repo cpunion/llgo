@@ -313,8 +313,8 @@ import (
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v38" {
-		t.Fatalf("plan digest schema = %q, want foreign-ingress schema v38", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v39" {
+		t.Fatalf("plan digest schema = %q, want descriptor-outcome schema v39", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {

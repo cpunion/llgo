@@ -2,9 +2,11 @@
 
 状态：实现中（可验证无栈原型；尚非完整 Go runtime）
 
-更新：2026-08-10
+更新：2026-08-30
 
-当前审查基线：`cpunion/llgo:llvm-coro` @ `158350a0e`，加本节记录的同步完成事务
+当前审查基线：`cpunion/llgo:llvm-coro` 的 `ca8088050` 后续 FuncRep v2
+工作树；本轮记录 outcome dispatch、跨 archive descriptor 消费与 caller-token
+收敛结果
 
 集成状态：Phase 36 hard-cutover、P-neutral result materialization 与 demand-driven
 work sharing、native 固定有界物理 topology、动态 managed-execution quota 和标准
@@ -31,7 +33,7 @@ process-lifetime clean thread factory隔离replacement创建和已锁M的可继�
 2. 每个 `G` 都是无栈协程：没有私有、可增长、可复制或长期保留的 native stack；所有跨 suspend 存活的控制状态和值只存在于 LLVM coroutine frame 和显式 runtime 对象中。
 3. 明确同步的短小函数只生成普通同步实现；明确异步或需要抢占的函数只生成 coroutine 实现。
 4. 静态可判定调用全部在编译期选择入口。只有真正的 hard sync ABI 调用 coroutine 时使用薄 `blockOn` 边界，不复制函数体；普通 managed caller 会被 effect 传播为 coroutine 并透明 await。
-5. 只有函数值流入开放存储或动态调用边界，例如func value、`any`、interface、reflect、未知包或C回调，才生成运行时描述符。Descriptor只发布唯一primary的plain或coro capability；hard-sync crossing由consumer生成薄root adapter，不复制函数体。
+5. 只有函数值流入开放存储或动态调用边界，例如func value、`any`、interface、reflect、未知包或C回调，才生成运行时描述符。FuncRep v2 descriptor保留可选plain entry和唯一structured entry；后者在outcome与coroutine之间互斥。只物化consumer实际需要的capability，hard-sync crossing由consumer生成薄root adapter，不复制函数体。
 6. 不使用 R12、TLS mode flag 或全局 `coroDepth` 判断当前调用模式。调用模式是编译计划和调用点的显式属性。
 7. 调度对象是逻辑 goroutine `G`，不是裸 LLVM coroutine handle。一个 `G` 可拥有由普通异步调用形成的 coroutine frame chain。
 8. 调度器采用编译器辅助的安全点抢占：时钟、线程或中断异步提出抢占请求，编译器插入的 poll 在安全点执行 `llvm.coro.suspend`。用户代码不需要显式 yield。
@@ -87,7 +89,7 @@ process-lifetime clean thread factory隔离replacement创建和已锁M的可继�
 
 - 普通同步 direct call。
 - 创建同一 G 的 child coroutine frame 并透明 await。
-- 通过动态 descriptor选择plain/coro entry；hard-sync ABI统一经过root boundary adapter。
+- 通过动态 descriptor选择plain/outcome/coroutine entry；hard-sync ABI统一经过root boundary adapter。
 - 仅在 C/host 等 hard sync boundary 执行 `blockOn`。
 
 因此本文后续的 “Sync function” 和 “Coroutine function” 都是 codegen/ABI 分类，不是两种 Go 语言函数，也不改变调用者看到的 API。
@@ -268,7 +270,7 @@ Stackless 不等于零内存。每个 suspended call 仍需要一个显式 frame
 | Resume episode | Scheduler 恢复一个 frame，直到它再次 suspend/complete 并返回 scheduler 的一次有界执行片段 |
 | Primary body | 一个源函数唯一的主要实现；同步或 coroutine 二选一 |
 | Adapter | ABI边界的薄包装，例如 `blockOn(newG(rootFactory, record))` |
-| Dynamic descriptor | 开放调用边界保存 sync/coro 入口能力的描述符 |
+| Dynamic descriptor | 开放调用边界保存 plain/outcome/coroutine 入口能力的描述符 |
 | G / Task | 一个 Go 语言层 goroutine |
 | Frame | 一次 coroutine 函数调用的 LLVM heap frame |
 | Frame chain | 一个 G 内由普通 async call/await 形成的父子 frame 链 |
@@ -507,7 +509,7 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - `CoroPlanDigest` 绑定某次最终程序分析、consumer demand、精确 call/value site 和私有 lowering facts，只用于本次 codegen/cache；
 - `LibraryEffectSummary` 嵌入每个实际产出 package object/archive，发布下游继续染色所需、且该产物确实提供的事实。它不能携带或复用最终程序 demand，也不能把未发射的 entry 声称为可用。
 
-当前 `llgo.coro.library-effect-summary.v6` 已硬切并实现以下producer闭环：
+当前 `llgo.coro.library-effect-summary.v13` 已硬切并实现以下producer闭环：
 
 - canonical JSON 记录 package identity、FunctionID、最终 SuspendEffect/ExecFlags、FuncRep、
   primary kind/physical symbol、精确 managed entry、可选 raw-plain symbol、结构 ABI hash，
@@ -527,10 +529,10 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
   `MaxAtomicCost`时重新校验该producer cost，缺失proof或超预算均fail closed，不会退化成
   无界同步执行；imported DAG proof可以作为本地bottom-up DAG的已证明callee，并把producer证书绑定到
   每个精确call occurrence；
-- v6同时硬切outcome completion状态词汇，包含不在原子body内分配panic payload的`FaultNil`；旧schema不能把未知状态解释为普通panic或return；
+- v13保留硬切后的outcome completion状态词汇，包含不在原子body内分配panic payload的`FaultNil`；旧schema不能把未知状态解释为普通panic或return；
 - 缺失metadata继续保持opaque，损坏、ABI错配、重复ID或有fact但物理能力不匹配均fail closed，绝不能解释成`NoSuspend`。
 
-v6 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
+v13 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
 
 后续版本仍需补充producer capability，而不是consumer最终计划：
 
@@ -542,7 +544,7 @@ v6 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 
 - method dispatch descriptor。
 - 高阶参数 effect constraint，例如 `effect(Apply) = localEffect ∪ effect(param0)`。
 
-`Demand`、root集合、call-site选择和`CoroPlanDigest`永远不进入producer摘要；它们属于最终consumer。当前v5的managed crossing只放行已精确预检的direct plain/direct coro/outcome-plain静态调用；外部`Dispatch` producer和raw-plain consumer均明确拒绝，export binding也不授予ingress能力，直到descriptor、递归function-value layout及外部adapter lowering成为版本化archive ABI。独立library构建还必须把所有ABI-reachable API作为publication roots；不能仅发布本次构建中恰好被内部caller demand的函数。
+`Demand`、root集合、call-site选择和`CoroPlanDigest`永远不进入producer摘要；它们属于最终consumer。当前v13 managed crossing除精确的direct plain/direct coroutine/outcome静态入口外，也接受summary认证的外部`Dispatch` producer。Consumer依据`FuncRep`、`ManagedEntry`、结构ABI hash和producer物理符号生成一个v2 descriptor及typed薄thunk；它不复制source body，也不从代码地址反查能力。Raw-plain consumer只有在producer明确发布`RawPlainSymbol`时才成立；普通export binding本身仍不授予ingress，只有独立的版本化export-ingress记录可以授予该能力。独立library构建还必须把所有ABI-reachable API作为publication roots；不能仅发布本次构建中恰好被内部caller demand的函数。
 
 未知摘要或 ABI 版本不匹配时：
 
@@ -554,7 +556,7 @@ v6 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 
 
 分析结果受反向 caller 和最终程序影响，因此每包 cache fingerprint 必须加入稳定 `CoroPlanDigest`。否则同一包在两个应用中得到不同 Sync/Async/Dispatch 计划时可能错误复用 archive。
 
-正确性不能依赖最终链接程序重新解释预编译archive中的function-value或嵌套aggregate布局。所有ABI-visible/open package boundary递归使用稳定canonical Dispatch，只发布producer的plain/coro primary capability；未知未来hard consumer在实际crossing处生成CallbackHandle/typed root adapter。`CoroPlanDigest` 只允许驱动包内entry pruning、devirtualization和cache校验，不能改变已经发布的字段、参数或返回值物理表示。这样 `llgo tool compile` 生成的标准库archive可被未知后续caller安全复用。
+正确性不能依赖最终链接程序重新解释预编译archive中的function-value或嵌套aggregate布局。所有ABI-visible/open package boundary递归使用稳定canonical Dispatch；producer发布唯一managed primary（plain、outcome或coroutine）及其结构事实，consumer只在需要函数对象时包一层稳定v2 descriptor。未知未来hard consumer在实际crossing处生成CallbackHandle/typed root adapter。`CoroPlanDigest` 只允许驱动包内entry pruning、devirtualization和cache校验，不能改变已经发布的字段、参数或返回值物理表示。这样 `llgo tool compile` 生成的标准库archive可被未知后续caller安全复用。
 
 ### 7.9 编译器指令
 
@@ -736,7 +738,7 @@ Itab method slot 保存 `*MethodInvoke`。Concrete method 的 primary body仍遵
 - Function value box 到开放 `any` 时必须是 Dispatch。
 - Type assert 回 func 后保持 Dispatch，除非优化器证明 box/assert 封闭并消除。
 - `reflect.Value.Call`、`Method`、`MakeFunc` 是 open-world 动态边界。
-- Managed lowering的reflect call读取coro/plain entry；hard-sync lowering创建BoundaryRecord/root G后blockOn。
+- Managed lowering的reflect call读取plain/outcome/coroutine entry；hard-sync lowering创建BoundaryRecord/root G后blockOn。
 - libffi 只能调用对应 ABI。不能把 coroutine ramp 当作普通返回值函数。
 - `MakeFunc` 不应依赖运行时生成可执行代码作为唯一方案。WASM、Harvard 架构 MCU 和无可执行 RAM 目标对链接时已知 signature 使用编译器预生成的 trampoline，运行时只创建 `{descriptor, env}` 数据。
 - `reflect.FuncOf` 可构造链接时未知签名。Native 可使用 libffi/架构 universal trampoline；AOT target 只有在存在 universal packed ABI 时才能完全支持，否则必须限制为已注册 signature 并报告 capability error，不能假设静态 trampoline 能覆盖任意运行时类型。
@@ -2055,7 +2057,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - 当前 Phase 35 已实现普通Go blocking/nonblocking多事件`select`的可编译运行版本。编译器按源码语义先求值并物化所有`ChanOp`，fast probe随机起点；blocking slow path在同一LLVM frame中保存typed candidate array和共享state，只创建一个logical wait/claim并在真正`suspend`前发布所有非nil case。runtime按channel地址用candidate内置heap-sort顺序加锁，不创建临时slice/接口对象；winner与所有loser经过exact detach、claim reset、result lease Take/Discard和slot recycle。receive/send、nil case、empty `select{}`取消、closed send显式panic、普通Try操作互操作、physical select与physical direct sender配对、select后立即再次park、TaskCancelAbort均有定向覆盖。nonblocking select只调用Try，不产生select park/resume。
 - Phase 35 的native+nogc最终链接E2E实际执行两case select、后续direct rendezvous和buffer fast path，正常约3秒内完成；host adapter通过`-race -shuffle`，JS/Wasm adapter实际运行通过，native64/wasm32均通过pre/post-CoroSplit verify和object emission。开发中同时修复了direct receive resume status block错误跳回logical block首部、重放receive前副作用的问题；status现在进入compiler-owned physical continuation。
 - Phase 35 仍是有界可运行原型而不是完整Go channel/select：`ChannelOperationSource`仍为每个single-P executor固定4个同时live physical slot，因此超过4个非nil case或高并发占满slot会fail-stop；尚无stable paged catalog、P-neutral packet/multi-P迁移、`reflect.Select`动态descriptor端到端、完整GC precise root或标准库`sync`slow path。本阶段冻结范围只保证当前direct channel与普通源码select可编译、链接、运行和确定性清理，不把这些后续能力混入同一PR。
-- outcome-plain leaf/direct-call DAG现已冻结path-sensitive ProgramIR projection和transitive SHA-256 certificate；physical planner从direct-outcome recipe重建同一证明，library-effect-summary v6跨archive传递。实际LLVM CFG/call DAG在CoroSplit前后各验证一次，未知helper、间接call、循环、dynamic alloca/EH及变量长度memory intrinsic均fail closed，常量长度memory intrinsic计入abstract LLVM work report；InstCombine可能由整数compare/select形成的标量`umin/umax/smin/smax`仅在LLVM intrinsic identity、canonical name、两个同型参数、同型返回及不超过64位全部匹配时按一个work unit接纳。该证据只关闭无切换outcome body的结构成本，不代表scheduler/runtime所有source路径或最终机器周期已经获得post-LLVM证书。
+- outcome-plain leaf/direct-call DAG现已冻结path-sensitive ProgramIR projection和transitive SHA-256 certificate；physical planner从direct-outcome recipe重建同一证明，library-effect-summary v13跨archive传递。实际LLVM CFG/call DAG在CoroSplit前后各验证一次，未知helper、间接call、循环、dynamic alloca/EH及变量长度memory intrinsic均fail closed，常量长度memory intrinsic计入abstract LLVM work report；InstCombine可能由整数compare/select形成的标量`umin/umax/smin/smax`仅在LLVM intrinsic identity、canonical name、两个同型参数、同型返回及不超过64位全部匹配时按一个work unit接纳。该证据只关闭无切换outcome body的结构成本，不代表scheduler/runtime所有source路径或最终机器周期已经获得post-LLVM证书。
 - 当前Phase 36 / PR #45把实验性多入口路径收敛为唯一stackless profile和冻结的
   `ProgramIR -> physical operation recipe -> emitter`事实流。普通函数仍只有一个primary；
   只有进入func value、interface、reflect或其他开放动态边界的callable才发布descriptor。
@@ -2068,6 +2070,13 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
   最终typed thunk才把普通`env`参数送入目标context寄存器，因此没有libffi/C栈跨越
   suspend。WASM、baremetal和无可执行内存环境的runtime-created MakeFunc签名仍是明确
   AOT capability缺口。
+- FuncRep v2的native reflect路径现在也覆盖同步outcome entry的正常返回和panic。
+  `CallLLGo`在退出stock `ffi_call`后，直接在发起调用的同一physical frame校验
+  completion；Panic通过编译器内建的既有payload传播语义进入cleanup，而不是重新执行
+  source `panic`并重复发布logical trace。该内建在lowering中完全消失，不保留可调用符号；
+  Goexit和allocation-free nil fault继续复用各自既有terminal路径。真实
+  `reflect.Value.Call`用例已覆盖普通结果和外层`recover`，因此没有libffi/C frame跨越
+  outcome传播，也没有为单用途consumer创建额外child coroutine。
 - ForeignWait已统一复用一个有界worker park/resume事务。编译器在冻结阶段从forward
   provenance生成typed record与exact certificate，不在runtime从函数地址反查语义。
   ordinary generated `_Cfunc_*`、C method、varargs和静态C pointer result已进入该路径；

@@ -34,10 +34,11 @@ const (
 )
 
 type finalizerEntry struct {
-	fn       any
-	cleanup  func()
-	plainCIF *ffi.Signature
-	coroCIF  *ffi.Signature
+	fn         any
+	cleanup    func()
+	plainCIF   *ffi.Signature
+	outcomeCIF *ffi.Signature
+	coroCIF    *ffi.Signature
 
 	resultSize  uintptr
 	resultAlign uintptr
@@ -141,9 +142,9 @@ func SetFinalizer(obj any, finalizer any) {
 		if !ok {
 			throw("runtime.SetFinalizer: cannot pass " + objFace._type.String() + " to finalizer " + finalizerFace._type.String())
 		}
-		plainCIF, coroCIF, resultSize, resultAlign, retSize := newFinalizerDispatchSignatures(ft, argFFIType)
+		plainCIF, outcomeCIF, coroCIF, resultSize, resultAlign, retSize := newFinalizerDispatchSignatures(ft, argFFIType)
 		entry = &finalizerEntry{
-			fn: finalizer, plainCIF: plainCIF, coroCIF: coroCIF,
+			fn: finalizer, plainCIF: plainCIF, outcomeCIF: outcomeCIF, coroCIF: coroCIF,
 			resultSize: resultSize, resultAlign: resultAlign, retSize: retSize,
 			key: key, tracked: true,
 		}
@@ -280,6 +281,7 @@ func callFinalizer(entry *finalizerEntry, hasInterfaceArg bool) {
 	}
 	ffi.CallLLGo(
 		entry.plainCIF,
+		entry.outcomeCIF,
 		entry.coroCIF,
 		closure.descriptor,
 		closure.env,
@@ -291,6 +293,7 @@ func callFinalizer(entry *finalizerEntry, hasInterfaceArg bool) {
 	)
 	KeepAlive(entry.fn)
 	KeepAlive(entry.plainCIF)
+	KeepAlive(entry.outcomeCIF)
 	KeepAlive(entry.coroCIF)
 }
 

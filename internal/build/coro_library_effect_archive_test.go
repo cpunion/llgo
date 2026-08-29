@@ -49,7 +49,7 @@ func coroArchiveTestSummary(t *testing.T, pkg string) coro.LibraryEffectSummary 
 			CoroABI:            coro.PhysicalABIV1,
 			SchedulerABI:       coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			PanicABI:           coro.PanicExplicitStatusABIV0,
-			FuncRepABI:         coro.FuncRepABIV1,
+			FuncRepABI:         coro.FuncRepABIV2,
 			TargetTriple:       "x86_64-unknown-linux-gnu",
 			PointerBits:        64,
 			Endianness:         "little",

@@ -180,11 +180,16 @@ type context struct {
 	runtimeCallerFuncs   map[*ssa.Function]bool
 	logicalCallerFuncs   map[*ssa.Function]bool
 	panicSiteFuncs       map[*ssa.Function]bool
-	compilation          *Compilation
-	emissionUniverse     *EmissionUniverse
-	emissionOwner        *preparedEmissionPackage
-	cacheRegistration    bool // cached archive: skip observers; emitted IR is transient
-	pcLineSeq            uint64
+	// logicalCallerToken is one zeroed, function-lifetime {store,index} slot in
+	// the active managed physical body. Its ramp-entry address dominates source,
+	// resume, and panic-cleanup paths; PushCallerLocationFrame fills it only after
+	// installing the frame, and UpdateLogicalCallerLocation consumes it opaquely.
+	logicalCallerToken llssa.Expr
+	compilation        *Compilation
+	emissionUniverse   *EmissionUniverse
+	emissionOwner      *preparedEmissionPackage
+	cacheRegistration  bool // cached archive: skip observers; emitted IR is transient
+	pcLineSeq          uint64
 	// The runtime PC-line table stores file and line, but not column. Reset
 	// these fields at each SSA block boundary so repeated checks on one source
 	// line can share an anchor without crossing control-flow edges.

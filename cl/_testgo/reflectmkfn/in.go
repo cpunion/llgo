@@ -11,8 +11,10 @@ import (
 // CHECK: call ptr @{{.*}}reflect.MakeFunc$coro{{.*}}(ptr %0, ptr %{{.*}},
 // CHECK: call ptr @{{.*}}reflect.valueInterface$coro{{.*}}(ptr %0, ptr %{{.*}},
 // CHECK: call ptr @{{.*}}runtime.MatchesClosure$coro{{.*}}(ptr %0, ptr %{{.*}},
-// CHECK: call i1 @{{.*}}runtime.StringEqual{{.*}}(
 // CHECK: call ptr %{{.*}}(ptr %0, ptr %{{.*}}, ptr %{{.*}}, %"{{.*}}String" { ptr @{{.*}}, i64 3 }, i64 2)
+// CHECK: call void %{{.*}}(ptr %0, ptr %{{.*}}, ptr %{{.*}}, ptr %{{.*}}, %"{{.*}}String" { ptr @{{.*}}, i64 3 }, i64 2)
+// CHECK: call %"{{.*}}String" %{{.*}}(ptr %{{.*}}, %"{{.*}}String" { ptr @{{.*}}, i64 3 }, i64 2)
+// CHECK: call i1 @{{.*}}runtime.StringEqual{{.*}}(
 func main() {
 	typ := reflect.FuncOf([]reflect.Type{reflect.TypeOf(""), reflect.TypeOf(0)}, []reflect.Type{reflect.TypeOf("")}, false)
 	fn := reflect.MakeFunc(typ, func(args []reflect.Value) []reflect.Value {

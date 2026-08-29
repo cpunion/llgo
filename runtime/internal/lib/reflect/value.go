@@ -2642,7 +2642,7 @@ func (v Value) call(op string, in []Value) (out []Value) {
 		panic("reflect.Value.Call: wrong argument count")
 	}
 
-	ffiArgs := make([]*ffi.Type, 0, len(tin)+3)
+	ffiArgs := make([]*ffi.Type, 0, len(tin)+4)
 	for i := 0; i < ioff; i++ {
 		ffiArgs = append(ffiArgs, toFFIType(tin[i]))
 	}
@@ -2663,6 +2663,16 @@ func (v Value) call(op string, in []Value) (out []Value) {
 	plainArgs[0] = ffi.TypePointer
 	copy(plainArgs[1:], ffiArgs)
 	plainSig, err := ffi.NewSignature(retType, plainArgs...)
+	if err != nil {
+		panic(err)
+	}
+	outcomeArgs := make([]*ffi.Type, len(ffiArgs)+4)
+	outcomeArgs[0] = ffi.TypePointer
+	outcomeArgs[1] = ffi.TypePointer
+	outcomeArgs[2] = ffi.TypePointer
+	outcomeArgs[3] = ffi.TypePointer
+	copy(outcomeArgs[4:], ffiArgs)
+	outcomeSig, err := ffi.NewSignature(ffi.TypeVoid, outcomeArgs...)
 	if err != nil {
 		panic(err)
 	}
@@ -2693,7 +2703,7 @@ func (v Value) call(op string, in []Value) (out []Value) {
 	}
 
 	ffi.CallLLGo(
-		plainSig, coroSig,
+		plainSig, outcomeSig, coroSig,
 		fn, env, unsafe.Pointer(ft), ret,
 		resultSize, resultAlign,
 		args...,

@@ -32,8 +32,9 @@ func main() {
 // CHECK-LABEL: define ptr @"main.f$1$coro"(ptr %0, ptr %1, ptr swiftself %2)
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"(
 
-// Package initialization is part of the same managed startup chain.
-// CHECK-LABEL: define ptr @"main.init$coro"(
+// Package initialization remains synchronous and uses the explicit outcome
+// entry; only the call chain which can park needs coroutine frames.
+// CHECK-LABEL: define void @"main.init$outcome"(
 // CHECK: call void @"sync.init$outcome"(
 
 // CHECK-LABEL: define ptr @"main.main$coro"(

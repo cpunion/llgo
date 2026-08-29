@@ -669,7 +669,8 @@ func coroCompilerLoweredRuntimeHelperPolicyFor(instr ssa.Instruction, helper str
 func coroLogicalCallerRuntimeHelper(helper string) bool {
 	switch helper {
 	case "PushCallerLocationFrame", "PopCallerLocationFrame",
-		"RecordCallerLocation", "RecordPanicLocation":
+		"RecordCallerLocation", "RecordPanicLocation",
+		"UpdateLogicalCallerLocation":
 		return true
 	default:
 		return false
@@ -757,6 +758,17 @@ func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.I
 			continue
 		}
 		if plainStackCStr && helper == "AllocU" {
+			continue
+		}
+		if helper == "UpdateLogicalCallerLocation" {
+			// A managed physical body owns only a logical shadow-stack frame;
+			// its legacy-stack twin still needs the original native-PC record.
+			if call, ok := instr.(ssa.CallInstruction); ok && call.Common() != nil &&
+				isRuntimeCallerLookupFunc(call.Common().StaticCallee()) {
+				add("RecordCallerLocation")
+			} else {
+				add("RecordPanicLocation")
+			}
 			continue
 		}
 		if coroCompilerLoweredRuntimeHelperPolicyFor(instr, helper).plainRepresentation {
@@ -918,30 +930,25 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 	}
 	if ctx.shouldEmitLogicalCallerFrames() {
 		_, recordableLocation := runtimeLocationPosition(ctx.fset, ctx.logicalCallerLocationPos(instr))
-		addLocation := func(helper string) {
+		addLocation := func() {
 			if recordableLocation {
-				add(helper)
+				add("UpdateLogicalCallerLocation")
 			}
 		}
 		switch v := instr.(type) {
 		case ssa.CallInstruction:
-			if common := v.Common(); common != nil &&
-				isRuntimeCallerLookupFunc(common.StaticCallee()) {
-				addLocation("RecordCallerLocation")
-			} else {
-				addLocation("RecordPanicLocation")
-			}
+			addLocation()
 		case *ssa.UnOp:
 			if v.Op != token.ARROW {
-				addLocation("RecordPanicLocation")
+				addLocation()
 			}
 		case *ssa.FieldAddr, *ssa.IndexAddr, *ssa.Index, *ssa.Slice,
 			*ssa.TypeAssert, *ssa.SliceToArrayPointer, *ssa.MapUpdate,
 			*ssa.RunDefers, *ssa.Panic, *ssa.Send:
-			addLocation("RecordPanicLocation")
+			addLocation()
 		case *ssa.Return:
 			if ctx.returnNeedsImplicitRunDefers(v) {
-				addLocation("RecordPanicLocation")
+				addLocation()
 			}
 			add("PopCallerLocationFrame")
 		}

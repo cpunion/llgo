@@ -796,6 +796,14 @@ func cloneCoroClosedDynamicCallCertificate(certificate coro.SSAClosedDynamicCall
 	}
 }
 
+func cloneCoroGlobalFunctionSlotProof(proof coroGlobalFunctionSlotProof) coroGlobalFunctionSlotProof {
+	proof.members = append([]*ssa.Global(nil), proof.members...)
+	proof.certificate = cloneCoroClosedDynamicCallCertificate(proof.certificate)
+	proof.stores = append([]coroGlobalFunctionSlotStoreProof(nil), proof.stores...)
+	proof.inactive = append([]coroGlobalFunctionSlotHazard(nil), proof.inactive...)
+	return proof
+}
+
 func sameCoroClosedDynamicCallCertificate(left, right coro.SSAClosedDynamicCallCertificate) bool {
 	if left.MayBeNil != right.MayBeNil || left.SyncDispatch != right.SyncDispatch ||
 		len(left.Targets) != len(right.Targets) || len(left.SyncOnlyCallArguments) != len(right.SyncOnlyCallArguments) {

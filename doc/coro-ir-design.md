@@ -938,9 +938,12 @@ canonical emission package key与Go source import path映射到稳定SSA坐标�
 `llgo.coro.plan-digest.v30`；该映射只稳定cache identity，不改变initializer执行顺序；v30
 另外冻结exact interface receiver occurrence，使其direct lowering进入cache identity。2026-08-01的
 `outcome-plain V0`把物理managed entry kind和atomic cost/proof纳入FunctionPlan、canonical digest与摘要，
-随后path-sensitive certificate把ProgramIR CFG/call坐标及transitive callee证书纳入计划，当前
-`PlanDigestSchema`为`llgo.coro.plan-digest.v33`，诊断/传输plan summary为v7；v33把
-`AtomicCostLeaf`/`AtomicCostDAG`的content-addressed proof纳入cache identity。
+随后path-sensitive certificate把ProgramIR CFG/call坐标及transitive callee证书纳入计划，v33把
+`AtomicCostLeaf`/`AtomicCostDAG`的content-addressed proof纳入cache identity。之后依次冻结
+static-outcome/runtime fast path、scheduler handoff、native fault landing、package generation entry和
+certified export ingress；FuncRep v2又把plain/outcome/coroutine互斥descriptor capability及
+outcome-primary选择纳入identity。当前`PlanDigestSchema`为
+`llgo.coro.plan-digest.v39`，诊断/传输plan summary为v10。
 
 后续不预留空v22/v23字段，也不沿用历史v9/v10标号。只在某一层的canonical事实真正进入
 production plan/cache identity时，从届时当前schema递增一次。每次升级都验证：任一相关fact
@@ -956,24 +959,24 @@ digest/Merkle汇总，避免把所有普通operand/type再次序列化进全局d
 
 不能用仅供诊断的 summary代替独立archive ABI，也不能让linker重新解释未知producer的function-value物理布局。
 
-当前已硬切到`llgo.coro.library-effect-summary.v6`。每个package
+当前已硬切到`llgo.coro.library-effect-summary.v13`。每个package
 object保留一份compiler-only section，package archive另外加入保留名`__.LLGOCORO`的最小native/Wasm
 sidecar；因此importer不需要解析Full/Thin LTO bitcode。`importcfg packagefile`导入路径会先精确校验
 target/runtime ABI、稳定FunctionID、结构函数ABI和物理符号，再把命中的bodyless managed-Go declaration
 作为Effect/Exec seed送回同一SSA fixed point，所有普通Go caller由分析自动染色，不要求源码注释。
 
-v6保留v5的精确C declaration identity/typed ABI/可选contract、C export绑定、Go outcome capability及
-`AtomicCostCertificate`，并硬切新增的`FaultNil` completion状态词汇。因此bodyless importer能精确声明并调用`$outcome`，而不从
+v13保留精确C declaration identity/typed ABI/可选contract、C export绑定、Go outcome capability及
+`AtomicCostCertificate`、`FaultNil` completion状态词汇、程序能力传播和版本化export-ingress能力。因此bodyless importer能精确声明并调用`$outcome`，而不从
 `PrimaryCoroutine`或代码地址猜测它与`$coro`共享物理签名；active consumer的有限
-`MaxPlainInstructions`小于producer cost时直接拒绝，不能跨archive静默扩大no-poll gap。v6允许
+`MaxPlainInstructions`小于producer cost时直接拒绝，不能跨archive静默扩大no-poll gap。v13允许
 `AtomicCostLeaf`和`AtomicCostDAG`，imported DAG也可作为本地bottom-up DAG的已证明callee。C export symbol到managed primary的
 声明绑定。它们不包含consumer选择，也不通过代码地址反查；export binding本身不授予ingress adapter或raw
 entry能力。该summary不发布consumer Demand、root、call-site选择或`CoroPlanDigest`。缺失记录保持opaque；
 损坏、重复或ABI不匹配均fail closed。当前consumer把managed record用于自动染色并放行静态direct
-plain/direct coro入口，也把exact foreign record的producer identity/contract附着到typed C declaration；
+plain/outcome/coroutine入口；对外部`Dispatch` producer，consumer依据summary生成唯一v2 descriptor和typed薄thunk，指向producer已发布的物理primary，不复制body也不反查地址。它也把exact foreign record的producer identity/contract附着到typed C declaration；
 它只替换自动生成的保守default，显式本地冲突失败，identity-only不授权operation。所有Go caller仍由同一
 fixed point染色，worker/same-M调用recipe仍由consumer的typed-call/physical gate选择；再次归档会原样重发
-producer fact。export record继续等待统一ingress adapter gate。跨archive Dispatch descriptor和raw-plain crossing仍明确拒绝。真正的独立
+producer fact。普通export binding继续不授权执行，只有匹配的v13版本化export-ingress记录证明adapter已经生成；raw-plain crossing仍要求producer显式发布对应物理符号。真正的独立
 library模式还必须在producer侧把exported、address-taken、method及其他ABI-reachable函数设为publication
 roots，并为开放function-value边界发布递归FuncRep/layout capability，不能拿一次最终程序恰好产生的
 demand代替library ABI。

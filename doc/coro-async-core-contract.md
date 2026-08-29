@@ -2,7 +2,7 @@
 
 状态：设计冻结前的实现审查稿
 
-更新：2026-07-26
+更新：2026-08-30
 
 关联总体设计：[`llvm-coro-runtime-design.md`](./llvm-coro-runtime-design.md)
 
@@ -47,7 +47,7 @@ LLGo 的异步能力必须先形成一套与 continuation backend 解耦的公�
 - C/host callback registry；
 - 无法闭合目标集合的动态调用。
 
-一个 descriptor 可以发布 plain primary、coroutine primary或consumer生成的薄 adapter capability，但不得包含两份 source body。
+FuncRep v2 descriptor可以发布可选plain entry，并在outcome与coroutine之间发布唯一structured entry；consumer也可以围绕archive已发布的物理primary生成typed薄adapter。它不得包含两份source body，outcome与coroutine也不得同时占用structured entry。
 
 ### 2.3 新 API 不创建新 compiler semantic family
 
@@ -98,7 +98,7 @@ Import 时 summary 参与与源码函数相同的固定点；link 时验证版�
 | plain | plain direct | 普通 direct call |
 | coroutine | plain direct | 当前 resume episode 内普通 direct call |
 | coroutine | coroutine direct | 创建/取得 child continuation并 structured await |
-| coroutine | descriptor | 检查 capability；plain slot直接调用，coro slot创建 child并 await |
+| coroutine | descriptor | 检查 capability；plain slot直接调用，outcome slot同步提交显式结果，coro slot创建child并await |
 | hard-sync boundary | coroutine | typed root/reentry adapter；不复制 body |
 | plain managed body | 可能 coroutine 的开放动态值 | caller必须先被固定点染色，或在不允许的 hard boundary诊断 |
 
@@ -606,7 +606,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 
 以下是Phase 22 head当时尚未达到核心完成条件的部分；其中已变化的项目同时标出当前head边界：
 
-- Phase 22的descriptor codegen只有受限plain V1。当前head已有dynamic child await、function descriptor/capability、closure/capture、method以及receiver-aware open/closed managed interface dispatch的定向覆盖，不再是plain V1-only；native `reflect.Value.Call/CallSlice`、`MakeFunc`、绑定方法值及timer挂起也已通过typed descriptor/libffi边界运行。仍未完成的是producer archive/open-world summary、WASM/baremetal AOT reflect trampoline、runtime未知签名、reflect.Select以及完整dynamic/GOROOT矩阵。
+- Phase 22的descriptor codegen只有受限plain V1。当前head已硬切FuncRep v2，覆盖dynamic child await、plain/outcome/coroutine capability、closure/capture、method以及receiver-aware open/closed managed interface dispatch；archive summary也能让consumer为外部Dispatch producer生成唯一descriptor和typed薄thunk。Native `reflect.Value.Call/CallSlice`、`MakeFunc`、绑定方法值及timer挂起已通过typed descriptor/libffi边界运行。仍未完成的是完整open-world publication/function-leaf schema、WASM/baremetal AOT reflect trampoline、runtime未知签名、`reflect.Select`以及完整dynamic/GOROOT矩阵。
 - package Summary明确不是producer archive ABI；独立预编译标准库的effect传播尚无最终contract。
 - Phase 22的physical coroutine lowering仍是pure-SSA子集。当前head已覆盖method/closure/generic的多个管理路径、常用builtin、slice/aggregate、implicit fault和指针provenance；但完整variadic/recursive/defer/recover/Goexit/cleanup、所有runtime helper和全部Go语言矩阵仍fail closed或待验收。
 - suspended frame没有精确GC root map和write barrier contract。
