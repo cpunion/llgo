@@ -1281,7 +1281,15 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 					return types.Implements(candidate, iface), nil
 				}
 			}
-			dynamicCandidates, err = restrictedSSACHACandidatesWithDynamicImplements(universe.functions, implements)
+			managedPublications, publicationErr := restrictedSSAManagedAddressTakenFunctions(
+				universe.functions, canonicalizer, config.ResolveManagedFunctionValue,
+			)
+			if publicationErr != nil {
+				return nil, publicationErr
+			}
+			dynamicCandidates, err = restrictedSSACHACandidatesWithDynamicImplements(
+				universe.functions, implements, managedPublications,
+			)
 			if err != nil {
 				return nil, err
 			}
