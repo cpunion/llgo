@@ -66,12 +66,13 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 		return emissionIntrinsicNoValues, nil
 
 	case llgoAdvance, llgoIndex,
-		llgoSigsetjmp, llgoSiglongjmp,
+		llgoSigsetjmp, llgoSiglongjmp, llgoLongjmp,
 		llgoCgoGoStringN, llgoCgoGoBytes:
 		return emissionIntrinsicFirstTwoValues, nil
 
 	case llgoAlloca, llgoAllocaCStr, llgoAllocCStr, llgoAllocaCStrs,
 		llgoString, llgoStringData,
+		llgoSetjmp,
 		llgoCgoCString, llgoCgoCBytes, llgoCgoGoString, llgoCgoCMalloc,
 		llgoCgoCgocall, llgoCgoUse, llgoCgoKeepAlive:
 		return emissionIntrinsicFirstValue, nil

@@ -635,17 +635,34 @@ func (p *context) compileTypedControlOperation(
 	b llssa.Builder,
 	args []ssa.Value,
 	kind int,
+	opcode int,
 	operation CoroControlOperation,
 ) (ret llssa.Expr) {
 	compiled := p.compileValues(b, args, kind)
 	switch operation {
 	case CoroControlReturnsTwice:
-		if len(compiled) == 2 {
+		switch opcode {
+		case llgoSigsetjmp:
+			if len(compiled) != 2 {
+				break
+			}
 			return b.Sigsetjmp(compiled[0], compiled[1])
+		case llgoSetjmp:
+			if len(compiled) != 1 {
+				break
+			}
+			return b.Setjmp(compiled[0])
 		}
 	case CoroControlNonlocalJump:
-		if len(compiled) == 2 {
+		if len(compiled) != 2 {
+			break
+		}
+		switch opcode {
+		case llgoSiglongjmp:
 			b.Siglongjmp(compiled[0], compiled[1])
+			return
+		case llgoLongjmp:
+			b.Longjmp(compiled[0], compiled[1])
 			return
 		}
 	case CoroControlProcessFork:
@@ -831,6 +848,8 @@ var llgoInstrs = map[string]int{
 	"sigjmpbuf":               llgoSigjmpbuf,
 	"sigsetjmp":               llgoSigsetjmp,
 	"siglongjmp":              llgoSiglongjmp,
+	"setjmp":                  llgoSetjmp,
+	"longjmp":                 llgoLongjmp,
 	"deferData":               llgoDeferData,
 	"unreachable":             llgoUnreachable,
 
@@ -3259,14 +3278,14 @@ func (p *context) callEx(
 			ret = p.string(b, args)
 		case llgoStringData:
 			ret = p.stringData(b, args)
-		case llgoSigsetjmp, llgoSiglongjmp,
+		case llgoSigsetjmp, llgoSiglongjmp, llgoSetjmp, llgoLongjmp,
 			llgoControlFork, llgoControlExecve, llgoControlExit, llgoControlTrap:
 			if act != llssa.Call || ds != nil || sourceCall == nil {
 				panic("typed control intrinsic requires an exact direct call")
 			}
 			operation := coroControlOperationForIntrinsic(ftype)
 			p.selectTypedControlOperation(sourceCall, operation)
-			ret = p.compileTypedControlOperation(b, args, kind, operation)
+			ret = p.compileTypedControlOperation(b, args, kind, ftype, operation)
 			if operation.Terminal() {
 				b.Unreachable()
 				// The type-checked source tail remains in x/tools SSA. Detach it

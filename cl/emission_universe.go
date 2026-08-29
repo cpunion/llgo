@@ -2090,7 +2090,7 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 				"emission universe intrinsic call semantics: legacy llgo setjmp/longjmp call %q lowers directly to a target C leaf and requires a non-legacy coroutine PanicABI", direct.String(),
 			)
 		}
-		if err := verifyCoroTypedControlShape(controlOperation, direct); err != nil {
+		if err := verifyCoroTypedControlShape(opcode, controlOperation, direct); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
@@ -3196,7 +3196,7 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 	case llgoSigjmpbuf:
 		// sigjmpbuf is a target-sized LLVM alloca and has no callable edge.
 		return CoroIntrinsicCallInlineNoSuspend
-	case llgoSigsetjmp, llgoSiglongjmp,
+	case llgoSigsetjmp, llgoSiglongjmp, llgoSetjmp, llgoLongjmp,
 		llgoControlFork, llgoControlExecve, llgoControlExit, llgoControlTrap:
 		// ProgramIR freezes the exact typed control operation at the source
 		// occurrence. Native setjmp/longjmp and process leaf symbol spellings
@@ -3742,7 +3742,7 @@ func verifyCoroSigjmpBufferShape(direct *ssa.Call) error {
 	return nil
 }
 
-func verifyCoroTypedControlShape(operation CoroControlOperation, direct *ssa.Call) error {
+func verifyCoroTypedControlShape(opcode int, operation CoroControlOperation, direct *ssa.Call) error {
 	if direct == nil || direct.Common() == nil || direct.Common().IsInvoke() ||
 		direct.Common().Method != nil {
 		return fmt.Errorf("emission universe intrinsic call semantics: llgo control operation %s must be an exact direct call", operation)
@@ -3763,15 +3763,29 @@ func verifyCoroTypedControlShape(operation CoroControlOperation, direct *ssa.Cal
 	var expected shape
 	switch operation {
 	case CoroControlReturnsTwice:
-		expected = shape{
-			parameters: []coroIntrinsicTypeShape{{basic: types.UnsafePointer}, int32Shape},
-			result:     &int32Shape,
-			text:       "func(unsafe.Pointer, int32) int32",
+		if opcode == llgoSetjmp {
+			expected = shape{
+				parameters: []coroIntrinsicTypeShape{{anyPointer: true}},
+				result:     &int32Shape,
+				text:       "func(pointer) int32",
+			}
+		} else {
+			expected = shape{
+				parameters: []coroIntrinsicTypeShape{{basic: types.UnsafePointer}, int32Shape},
+				result:     &int32Shape,
+				text:       "func(unsafe.Pointer, int32) int32",
+			}
 		}
 	case CoroControlNonlocalJump:
+		pointerShape := coroIntrinsicTypeShape{basic: types.UnsafePointer}
+		pointerText := "unsafe.Pointer"
+		if opcode == llgoLongjmp {
+			pointerShape = coroIntrinsicTypeShape{anyPointer: true}
+			pointerText = "pointer"
+		}
 		expected = shape{
-			parameters: []coroIntrinsicTypeShape{{basic: types.UnsafePointer}, int32Shape},
-			text:       "func(unsafe.Pointer, int32)",
+			parameters: []coroIntrinsicTypeShape{pointerShape, int32Shape},
+			text:       fmt.Sprintf("func(%s, int32)", pointerText),
 		}
 	case CoroControlProcessFork:
 		expected = shape{result: &int32Shape, text: "func() int32"}

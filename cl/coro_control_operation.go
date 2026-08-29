@@ -95,9 +95,9 @@ func (operation CoroControlOperation) NativeActivationBound() bool {
 
 func coroControlOperationForIntrinsic(opcode int) CoroControlOperation {
 	switch opcode {
-	case llgoSigsetjmp:
+	case llgoSigsetjmp, llgoSetjmp:
 		return CoroControlReturnsTwice
-	case llgoSiglongjmp:
+	case llgoSiglongjmp, llgoLongjmp:
 		return CoroControlNonlocalJump
 	case llgoControlFork:
 		return CoroControlProcessFork

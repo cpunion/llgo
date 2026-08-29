@@ -633,6 +633,10 @@ func TestRunAndTestFromTestlibc(t *testing.T) {
 		ignore = append(ignore,
 			"./_testlibc/demangle", // Linux demangle symbol differs (itaniumDemangle linkage mismatch).
 		)
+	} else if runtime.GOOS == "windows" {
+		ignore = append(ignore,
+			"./_testlibc/once", // POSIX pthread_once has no Windows ABI counterpart; Windows synchronization is covered by goplus/lib.
+		)
 	}
 	cltest.RunAndTestFromDir(t, "", "./_testlibc", ignore)
 }

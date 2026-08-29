@@ -2,10 +2,11 @@
 package main
 
 /*
-#cgo !windows pkg-config: python3-embed
+#cgo pkg-config: python3-embed
 #ifdef _WIN32
-// This compile-only fixture validates C-call lowering without requiring a
-// Python SDK on the Windows builder.
+// Keep the Windows declaration surface local so cross-target IR tests do not
+// depend on Windows Python SDK headers. Native runs still obtain the Python
+// import library from python3-embed above.
 void Py_Initialize(void);
 void Py_Finalize(void);
 int PyRun_SimpleString(const char *command);
