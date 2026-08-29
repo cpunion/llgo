@@ -2,10 +2,16 @@
 set -e
 
 mode="host"
-if [ "${1:-}" = "--embedded" ]; then
-  mode="embedded"
-  shift
-fi
+case "${1:-}" in
+  --embedded)
+    mode="embedded"
+    shift
+    ;;
+  --embedded-build-only)
+    mode="embedded-build-only"
+    shift
+    ;;
+esac
 
 # llgo run subdirectories under _demo that contain *.go files
 jobs="${LLGO_DEMO_JOBS:-1}"
@@ -23,7 +29,7 @@ tmp_root="$(mktemp -d)"
 trap 'rm -rf "$tmp_root"' EXIT
 
 cases=()
-if [ "$mode" = "embedded" ]; then
+if [ "$mode" != "host" ]; then
   while IFS= read -r dir; do
     cases+=("$dir")
   done < <(find ./_demo/go ./_demo/c -name '*.go' -print | xargs -n1 dirname | sort -u)
@@ -38,8 +44,10 @@ fi
 
 embedded_targets=()
 emulator=0
-if [ "$mode" = "embedded" ]; then
-  emulator=1
+if [ "$mode" != "host" ]; then
+  if [ "$mode" = "embedded" ]; then
+    emulator=1
+  fi
   embedded_targets=(esp32 esp32c3-basic)
 fi
 
@@ -258,7 +266,7 @@ run_dirs=()
 run_targets=()
 run_labels=()
 
-if [ "$mode" = "embedded" ]; then
+if [ "$mode" != "host" ]; then
   for target in "${embedded_targets[@]}"; do
     for d in "${cases[@]}"; do
       if should_ignore "$d" "$target"; then
@@ -308,7 +316,11 @@ run_case() {
   else
     echo "Testing $dir"
   fi
-  cmd=(llgo run)
+  if [ "$mode" = "embedded-build-only" ]; then
+    cmd=(llgo build -o "$tmp_root/firmware-${BASHPID}.elf")
+  else
+    cmd=(llgo run)
+  fi
   cmd+=("${llgo_run_flags[@]}")
   if [ -n "$target" ]; then
     cmd+=("-target=$target")
