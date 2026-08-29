@@ -156,9 +156,13 @@ var (
 )
 
 var (
-	espClangBaseUrl = "https://github.com/goplus/espressif-llvm-project-prebuilt/releases/download/19.1.2_20250905-3"
-	espClangVersion = "19.1.2_20250905-3"
+	espClangBaseUrl        = "https://github.com/goplus/espressif-llvm-project-prebuilt/releases/download/19.1.2_20250905-3"
+	espClangVersion        = "19.1.2_20250905-3"
+	espClangWindowsBaseUrl = "https://github.com/espressif/llvm-project/releases/download/esp-19.1.2_20250312"
+	espClangWindowsVersion = "19.1.2_20250312"
 )
+
+const espClangWindowsPlatform = "x86_64-w64-mingw32"
 
 // cacheRoot can be overridden for testing
 var cacheRoot = env.LLGoCacheDir
@@ -229,13 +233,14 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 	// Try to download ESP Clang if platform is supported
 	platformSuffix := getESPClangPlatform(runtime.GOOS, runtime.GOARCH)
 	if platformSuffix != "" {
-		cacheClangDir := filepath.Join(cacheRoot(), "crosscompile", "esp-clang-"+espClangVersion)
+		baseURL, version := espClangDownload(platformSuffix)
+		cacheClangDir := filepath.Join(cacheRoot(), "crosscompile", "esp-clang-"+version)
 		if _, err = os.Stat(cacheClangDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				return
 			}
 			fmt.Fprintln(os.Stderr, "ESP Clang not found in LLGO_ROOT or cache, will download.")
-			if err = checkDownloadAndExtractESPClang(platformSuffix, cacheClangDir); err != nil {
+			if err = checkDownloadAndExtractESPClang(baseURL, version, platformSuffix, cacheClangDir); err != nil {
 				return
 			}
 		}
@@ -247,12 +252,11 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 	return
 }
 
-// getLLVM22Toolchain resolves the host LLVM tools used for WebAssembly. LLGo
-// emits LLVM 22 IR, so handing that IR to the target-specific ESP LLVM 19
-// bundle is not a compatibility path: LLVM 22 attributes such as
-// captures(none) and target_mem0 are rejected by its parser. The command entry
-// installs the validated LLVM 22 bin directory in PATH; repeat that validation
-// here so library callers receive the same fail-closed contract.
+// getLLVM22Toolchain resolves the general-purpose host LLVM tools. LLGo emits
+// LLVM 22 IR, so handing that IR to an older target-specific bundle is not a
+// compatibility path. The command entry installs the validated LLVM 22 bin
+// directory in PATH; repeat that validation here so library callers receive
+// the same fail-closed contract.
 func getLLVM22Toolchain(linker string) (root, bin, cc, linkerPath string, err error) {
 	return resolveLLVM22Toolchain(linker, envllvm.SetupPath, exec.LookPath)
 }
@@ -263,11 +267,11 @@ func resolveLLVM22Toolchain(
 	lookup func(string) (string, error),
 ) (root, bin, cc, linkerPath string, err error) {
 	if err = setup(); err != nil {
-		err = fmt.Errorf("select LLVM 22 WebAssembly toolchain: %w", err)
+		err = fmt.Errorf("select LLVM 22 toolchain: %w", err)
 		return
 	}
 	if cc, err = lookup("clang++"); err != nil {
-		err = fmt.Errorf("select LLVM 22 WebAssembly compiler: %w", err)
+		err = fmt.Errorf("select LLVM 22 compiler: %w", err)
 		return
 	}
 	bin = filepath.Dir(cc)
@@ -314,11 +318,23 @@ func getESPClangPlatform(goos, goarch string) string {
 		}
 	case "windows":
 		switch goarch {
-		case "amd64":
-			return "x86_64-w64-mingw32"
+		case "amd64", "arm64":
+			// Espressif publishes an x86-64 Windows host toolchain. Windows on
+			// ARM64 runs it through the system's x64 emulation layer.
+			return espClangWindowsPlatform
 		}
 	}
 	return ""
+}
+
+func espClangDownload(platformSuffix string) (baseURL, version string) {
+	if platformSuffix == espClangWindowsPlatform {
+		// The LLGo-hosted 20250905 build does not publish a Windows archive.
+		// Use Espressif's official LLVM 19 Windows build instead of constructing
+		// a URL that can only return 404.
+		return espClangWindowsBaseUrl, espClangWindowsVersion
+	}
+	return espClangBaseUrl, espClangVersion
 }
 
 // ldFlagsFromFileName extracts the library name from a filename for use in linker flags
@@ -765,11 +781,12 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 		return export, fmt.Errorf("target '%s' has incompatible libc/toolchain configuration: %w", targetName, err)
 	}
 
-	// The in-process frontend and every WebAssembly IR consumer share LLVM 22.
-	// Non-wasm embedded targets may still require the ESP backend for target
-	// instruction support, but it must never parse LLGo's LLVM 22 wasm IR.
+	// The in-process frontend, every WebAssembly IR consumer, and the general
+	// Windows cross toolchain share LLVM 22. ESP targets retain their dedicated
+	// backend for target instruction support.
 	var clangRoot string
-	if strings.HasPrefix(target, "wasm") {
+	if strings.HasPrefix(target, "wasm") ||
+		useSystemClangForTarget(runtime.GOOS, target, config.BuildTags) {
 		clangRoot, export.ClangBinPath, export.CC, export.Linker, err =
 			getLLVM22Toolchain(config.Linker)
 		if err != nil {
@@ -784,7 +801,6 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 		export.ClangBinPath = filepath.Join(clangRoot, "bin")
 	}
 	export.ClangRoot = clangRoot
-
 	// Convert target config to Export - only export necessary fields
 	export.BuildTags = config.BuildTags
 	export.GC = config.GC
@@ -838,9 +854,10 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	}
 	ccflags := []string{level.Flag()}
 	cflags := []string{"-Wno-override-module", "-Qunused-arguments", "-Wno-unused-command-line-argument"}
-	if config.LLVMTarget != "" {
-		cflags = append(cflags, "--target="+config.LLVMTarget)
-		ccflags = append(ccflags, "--target="+config.LLVMTarget)
+	clangTarget := clangDriverTargetForHost(runtime.GOOS, config.LLVMTarget, config.BuildTags)
+	if clangTarget != "" {
+		cflags = append(cflags, "--target="+clangTarget)
+		ccflags = append(ccflags, "--target="+clangTarget)
 	}
 	// Expand template variables in cflags
 	expandedCFlags := env.ExpandEnvSlice(config.CFlags, envs)
@@ -952,7 +969,8 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 		}
 	}
 
-	// Handle Linker - keep it for external usage
+	// Handle Linker - keep it for external usage. A validated LLVM 22 path
+	// selected above is already exact; only target-specific roots need joining.
 	if config.Linker != "" && export.Linker == "" {
 		export.Linker = filepath.Join(clangRoot, "bin", config.Linker)
 	}
@@ -1019,6 +1037,33 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	export.LDFLAGS = append(ldflags, expandedLDFlags...)
 
 	return export, nil
+}
+
+func useSystemClangForTarget(hostGOOS, targetTriple string, buildTags []string) bool {
+	if hostGOOS != "windows" || strings.HasPrefix(targetTriple, "xtensa") {
+		return false
+	}
+	for _, tag := range buildTags {
+		if tag == "esp" {
+			return false
+		}
+	}
+	return true
+}
+
+// clangDriverTargetForHost returns the target spelling accepted by the host
+// Clang driver. LLGo's Unix ESP toolchains use the historical "xtensa"
+// spelling, but Espressif's official Windows distribution selects its Xtensa
+// multilibs using the canonical GCC-compatible triple.
+func clangDriverTargetForHost(hostGOOS, llvmTarget string, buildTags []string) string {
+	if hostGOOS == "windows" && llvmTarget == "xtensa" {
+		for _, tag := range buildTags {
+			if tag == "esp" {
+				return "xtensa-esp-unknown-elf"
+			}
+		}
+	}
+	return llvmTarget
 }
 
 // Use extends the original Use function to support target-based configuration
