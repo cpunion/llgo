@@ -26,7 +26,7 @@ import (
 )
 
 func TestCgoMallocWrapperSymbols(t *testing.T) {
-	if strings.TrimSpace(runGoCmd(t, "", "env", "CGO_ENABLED")) != "1" {
+	if strings.TrimSpace(runHostGoCmd(t, "", "env", "CGO_ENABLED")) != "1" {
 		t.Skip("cgo is disabled")
 	}
 	if _, err := exec.LookPath("clang"); err != nil {
@@ -55,12 +55,92 @@ func main() {
 		t.Fatal(err)
 	}
 
-	runGoCmd(t, dir, "run", mainFile)
+	runHostGoCmd(t, dir, "run", mainFile)
 
 	root := findLLGoRoot(t)
 	llgo := acceptanceLLGoBinary(t)
 	t.Setenv("LLGO_ROOT", root)
 	runLLGoWithoutHostCgoFlags(t, dir, llgo, "run", mainFile)
+}
+
+func runHostGoCmd(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("go", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = hostCgoEnv(t)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("host go %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String()
+}
+
+// hostCgoEnv keeps helper programs on the Go toolchain's host architecture.
+// Cross-target LLGo jobs intentionally set GOARCH, CC, and cgo flags for the
+// program under test; inheriting them makes an ordinary host `go run` try to
+// link Go's host objects with the target linker.
+func hostCgoEnv(t *testing.T) []string {
+	cc, cxx := "clang", "clang++"
+	if hostOS, _ := goHostTarget(t); hostOS == "windows" {
+		// The Go Windows host linker expects a GNU-compatible C toolchain;
+		// plain clang selects link.exe and cannot consume Go's linker script.
+		cc, cxx = "gcc", "g++"
+		if hostRoot := os.Getenv("LLGO_MINGW_HOST_ROOT"); hostRoot != "" {
+			cc = filepath.Join(hostRoot, "bin", "clang.exe")
+			cxx = filepath.Join(hostRoot, "bin", "clang++.exe")
+		}
+	}
+	return hostGoEnvWithCompiler(t, cc, cxx)
+}
+
+// hostLLGoToolEnv configures an already-built LLGo helper for the Go host
+// architecture. Unlike hostCgoEnv, its compiler must be Clang because LLGo
+// inspects the driver when selecting the native Windows ABI.
+func hostLLGoToolEnv(t *testing.T) []string {
+	cc, cxx := "clang", "clang++"
+	if hostOS, _ := goHostTarget(t); hostOS == "windows" {
+		if hostRoot := os.Getenv("LLGO_MINGW_HOST_ROOT"); hostRoot != "" {
+			cc = filepath.Join(hostRoot, "bin", "clang.exe")
+			cxx = filepath.Join(hostRoot, "bin", "clang++.exe")
+		}
+	}
+	return hostGoEnvWithCompiler(t, cc, cxx)
+}
+
+func hostGoEnvWithCompiler(t *testing.T, cc, cxx string) []string {
+	t.Helper()
+	hostOS, hostArch := goHostTarget(t)
+
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, value := range os.Environ() {
+		name, _, _ := strings.Cut(value, "=")
+		upper := strings.ToUpper(name)
+		if upper == "GOOS" || upper == "GOARCH" || upper == "CC" || upper == "CXX" ||
+			(strings.HasPrefix(upper, "CGO_") && strings.HasSuffix(upper, "FLAGS")) {
+			continue
+		}
+		env = append(env, value)
+	}
+	return append(env, "GOOS="+hostOS, "GOARCH="+hostArch, "CC="+cc, "CXX="+cxx)
+}
+
+func goHostTarget(t *testing.T) (goos, goarch string) {
+	t.Helper()
+	query := exec.Command("go", "env", "GOHOSTOS", "GOHOSTARCH")
+	query.Env = os.Environ()
+	out, err := query.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query Go host target: %v\n%s", err, out)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 {
+		t.Fatalf("go env GOHOSTOS GOHOSTARCH returned %q", out)
+	}
+	return fields[0], fields[1]
 }
 
 func runLLGoWithoutHostCgoFlags(t *testing.T, dir, llgo string, args ...string) {
