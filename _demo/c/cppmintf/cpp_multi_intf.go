@@ -18,12 +18,12 @@ func NewBar(a c.Int) *Bar {
 		Callback: foo.Callback{
 			ICalc: foo.ICalc{
 				Vptr: &foo.ICalcVtbl{
-					Calc: c.Func((*Bar).sqrt),
+					Calc: callbackCalc(),
 				},
 			},
 			IVal: foo.IVal{
 				Vptr: &foo.IValVtbl{
-					Val: c.Func(bar_IVal_getA),
+					Val: callbackVal(),
 				},
 			},
 		},
