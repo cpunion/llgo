@@ -95,6 +95,7 @@ func coroNativeTaskContextRuntimeSources() []string {
 	return []string{
 		filepath.Join(root, "coro_task_allocation.go"),
 		filepath.Join(root, "coro_task_context.go"),
+		filepath.Join(root, "recover_frame.go"),
 		filepath.Join(root, "runtime_context.go"),
 		filepath.Join(root, "runtime2.go"),
 		filepath.Join(root, "proc_atomic.go"),

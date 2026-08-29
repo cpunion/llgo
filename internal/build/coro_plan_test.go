@@ -562,6 +562,7 @@ func __llgo_coro_foreign_reentry_acquire_v1(*unsafe.Pointer) unsafe.Pointer { re
 func __llgo_coro_foreign_reentry_run_v1(unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_foreign_reentry_failure_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_same_m_foreign_call_v1(unsafe.Pointer, uintptr, uintptr) {}
+func __llgo_coro_same_m_foreign_reentry_call_v2(unsafe.Pointer, uintptr, uintptr, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay int64) {}
 func __llgo_coro_timer_park_controlled_v2(g, handle, header, storage, controller unsafe.Pointer, control, ownerRoute *uint32, expected uint32, deadline int64) {}
 func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
@@ -862,6 +863,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroForeignReentryRunSymbolV1,
 		coroForeignReentryFailureSymbolV1,
 		coroSameMForeignCallSymbolV1,
+		coroSameMForeignReentryCallSymbolV2,
 		coroTimerParkSymbolV2,
 		coroTimerParkControlledSymbolV2,
 		coroTimerResumeSymbolV2,
@@ -890,6 +892,17 @@ func atomicExchange(*uint32, uint32) uint32
 		if root.Function == nil || root.Function.Name() != wantTimerRoots[index] || root.Demand != wantDemand {
 			t.Fatalf("native timer root %d = %+v, want %s/%s", index, root, wantTimerRoots[index], wantDemand)
 		}
+	}
+	sameMReentryFn := ssaPkg.Func(coroSameMForeignReentryCallSymbolV2)
+	originalSameMReentrySignature := sameMReentryFn.Signature
+	sameMReentryFn.Signature = types.NewSignatureType(nil, nil, nil,
+		originalSameMReentrySignature.Params(),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uintptr])), false)
+	_, _, _, _, invalidSameMReentryErr := requiredCoroProgramRuntimePlan(timerCtx)
+	sameMReentryFn.Signature = originalSameMReentrySignature
+	if invalidSameMReentryErr == nil ||
+		!strings.Contains(invalidSameMReentryErr.Error(), "same-M foreign-reentry ABI") {
+		t.Fatalf("invalid same-M foreign-reentry ABI error = %v", invalidSameMReentryErr)
 	}
 	runSliceFn := ssaPkg.Func(coroProgramRunSliceSymbolV2)
 	originalRunSliceSignature := runSliceFn.Signature

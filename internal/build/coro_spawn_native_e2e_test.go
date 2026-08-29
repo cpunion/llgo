@@ -410,7 +410,9 @@ func buildCoroSpawnNativeE2EUserSource(
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
 		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			effect := coro.NoSuspend
 			if _, required := spawnSeeded[fn]; required {
@@ -634,6 +636,23 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	), llssa.InC)
 	setup := pkg.NewFunc(setupSymbol, newSignature(nil, nil), llssa.InGo)
 	check := pkg.NewFunc(checkSymbol, newSignature(nil, []types.Type{types.Typ[types.Int32]}), llssa.InGo)
+	// The production runtime sources are compiled as one closed named-file
+	// command-line package. Bridge the compiler-owned recover preamble symbol to
+	// the exact small production helper without pulling z_rt's legacy panic
+	// implementation into this explicit-status runtime island.
+	rawBindRecoverFrame := pkg.NewFunc("command-line-arguments.BindRecoverFrame", newSignature(
+		[]types.Type{pointer, pointer}, nil,
+	), llssa.InGo)
+	bindRecoverFrame := pkg.NewFunc(llssa.PkgRuntime+".BindRecoverFrame", newSignature(
+		[]types.Type{pointer, pointer}, nil,
+	), llssa.InGo)
+	bindRecoverFrameBody := bindRecoverFrame.MakeBody(1)
+	bindRecoverFrameBody.Call(
+		rawBindRecoverFrame.Expr,
+		bindRecoverFrame.Param(0),
+		bindRecoverFrame.Param(1),
+	)
+	bindRecoverFrameBody.Return()
 	// The production scheduler core is intentionally compiled without the full
 	// standard-library runtime package in its coroutine plan. LLGo's ordinary
 	// pointer checks name this legacy helper even though every valid scheduler

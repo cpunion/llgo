@@ -109,11 +109,23 @@ func finishForeignReentryChild(
 ) CompletionSnapshot {
 	t.Helper()
 	switch status {
-	case CompletionReturn:
+	case CompletionReturn, CompletionGoexit, CompletionAbort, CompletionShutdown:
+		if status == CompletionAbort || status == CompletionShutdown {
+			kind := TaskCancelAbort
+			if status == CompletionShutdown {
+				kind = TaskCancelShutdown
+			}
+			if !RequestTaskCancellation(p, task.g, kind) {
+				t.Fatalf("request foreign-reentry child cancellation %d", kind)
+			}
+			if claimed, ok := ClaimTaskCancellation(p, task.g); !ok || claimed != kind {
+				t.Fatalf("claim foreign-reentry child cancellation = (%d, %t), want %d", claimed, ok, kind)
+			}
+		}
 		child.header.SuspendReason = uint16(SuspendFrameComplete)
 		child.header.Lifecycle = uint16(FrameFinalSuspended)
-		if !PrepareComplete(task.g, child.handle, child.header) {
-			t.Fatal("publish foreign-reentry child return")
+		if !PrepareCompleteStatus(task.g, child.handle, child.header, status) {
+			t.Fatalf("publish foreign-reentry child completion %d", status)
 		}
 	case CompletionPanic:
 		child.header.SuspendReason = uint16(SuspendPanic)
@@ -146,6 +158,69 @@ func finishForeignReentryChild(
 		t.Fatal("consume foreign-reentry completion")
 	}
 	return snapshot
+}
+
+func TestForeignReentryTransportsPayloadFreeCompletionStatuses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status CompletionStatus
+	}{
+		{name: "goexit", status: CompletionGoexit},
+		{name: "abort", status: CompletionAbort},
+		{name: "shutdown", status: CompletionShutdown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newForeignReentryFixture(t, false)
+			resume := activateForeignReentryChild(
+				t, fixture.p, fixture.driver, fixture.task, fixture.child,
+			)
+			snapshot := finishForeignReentryChild(
+				t,
+				fixture.p,
+				fixture.driver,
+				fixture.task,
+				fixture.child,
+				resume,
+				&fixture.record,
+				test.status,
+				nil,
+				nil,
+			)
+			if snapshot != (CompletionSnapshot{Status: test.status}) {
+				t.Fatalf("foreign-reentry completion = %+v, want status %d", snapshot, test.status)
+			}
+			fixture.restore(t)
+			fixture.keepAlive()
+		})
+	}
+}
+
+func TestValidCompletionSnapshotCoversForeignEscapeOutcomes(t *testing.T) {
+	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	for _, test := range []struct {
+		name     string
+		snapshot CompletionSnapshot
+		want     bool
+	}{
+		{name: "return", snapshot: CompletionSnapshot{Status: CompletionReturn}, want: true},
+		{name: "recovered return", snapshot: CompletionSnapshot{Status: CompletionReturnRecovered}, want: true},
+		{name: "panic", snapshot: CompletionSnapshot{Status: CompletionPanic, TypeWord: typeWord, DataWord: dataWord}, want: true},
+		{name: "panic nil data", snapshot: CompletionSnapshot{Status: CompletionPanic, TypeWord: typeWord}, want: true},
+		{name: "abort", snapshot: CompletionSnapshot{Status: CompletionAbort}, want: true},
+		{name: "shutdown", snapshot: CompletionSnapshot{Status: CompletionShutdown}, want: true},
+		{name: "goexit", snapshot: CompletionSnapshot{Status: CompletionGoexit}, want: true},
+		{name: "none", snapshot: CompletionSnapshot{}, want: false},
+		{name: "return payload", snapshot: CompletionSnapshot{Status: CompletionReturn, TypeWord: typeWord}, want: false},
+		{name: "panic nil type", snapshot: CompletionSnapshot{Status: CompletionPanic, DataWord: dataWord}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ValidCompletionSnapshot(test.snapshot); got != test.want {
+				t.Fatalf("ValidCompletionSnapshot(%+v) = %t, want %t", test.snapshot, got, test.want)
+			}
+		})
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
 }
 
 func (fixture *foreignReentryFixture) completeReturn(

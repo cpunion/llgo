@@ -95,6 +95,7 @@ const (
 	coroForeignReentryRunSymbolV1                               = "__llgo_coro_foreign_reentry_run_v1"
 	coroForeignReentryFailureSymbolV1                           = "__llgo_coro_foreign_reentry_failure_v1"
 	coroSameMForeignCallSymbolV1                                = "__llgo_coro_same_m_foreign_call_v1"
+	coroSameMForeignReentryCallSymbolV2                         = "__llgo_coro_same_m_foreign_reentry_call_v2"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.

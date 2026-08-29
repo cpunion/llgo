@@ -1189,7 +1189,7 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 			status,
 			p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()),
 		)
-		b.IfWithBranchWeights(isReturn, returned, p.sharedCoroAwaitTerminalBlock(b, body), 1000, 1)
+		b.IfWithBranchWeights(isReturn, returned, p.sharedCoroTerminalBlock(b, body), 1000, 1)
 		b.SetBlockContinuation(returned)
 		return p.loadCoroAwaitResult(b, resultSlot, results)
 	}
@@ -1244,12 +1244,12 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 	return p.loadCoroAwaitResult(b, resultSlot, results)
 }
 
-// sharedCoroAwaitTerminalBlock owns the non-return outcome fanout for ordinary
-// child awaits in a no-cleanup physical body. One consumed child transaction is
-// active at a time, so the function-wide outcome scratch and header line form
-// an exact predecessor-independent payload. No edge from this block returns to
-// source execution.
-func (p *context) sharedCoroAwaitTerminalBlock(source llssa.Builder, body *coroBodyContext) llssa.BasicBlock {
+// sharedCoroTerminalBlock owns the non-return outcome fanout for structured
+// operations in a no-cleanup physical body. One child or foreign-reentry
+// transaction is active at a time, so the function-wide outcome scratch and
+// header line form an exact predecessor-independent payload. No edge from this
+// block returns to source execution.
+func (p *context) sharedCoroTerminalBlock(source llssa.Builder, body *coroBodyContext) llssa.BasicBlock {
 	if source == nil || source.Func != p.fn || body == nil || body.cleanup != nil ||
 		body.header.IsNil() || body.outcomeScratch.IsNil() ||
 		body.completion == nil || body.finalSuspend == nil || p.fn == nil {
