@@ -61,10 +61,10 @@
       "label": "Branch codex/windows-r10-msvc-arch-20260829",
       "path": "series/branch/34dc512d70d6d135/summary.json",
       "configPath": "series/branch/34dc512d70d6d135/config.json",
-      "commitPath": "commits/e42e3c0f6971641727c79b7b88857f47e5e54ccb.json",
-      "sha": "e42e3c0f6971641727c79b7b88857f47e5e54ccb",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/e42e3c0f6971641727c79b7b88857f47e5e54ccb",
-      "updatedAt": "2026-08-29T19:37:14.246Z"
+      "commitPath": "commits/b658908ca361ea39638cf6ec0d8ea1c3ff2cd158.json",
+      "sha": "b658908ca361ea39638cf6ec0d8ea1c3ff2cd158",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/b658908ca361ea39638cf6ec0d8ea1c3ff2cd158",
+      "updatedAt": "2026-08-29T21:00:11.278Z"
     },
     {
       "kind": "branch",
@@ -169,10 +169,10 @@
       "label": "PR #208",
       "path": "series/pull/208/summary.json",
       "configPath": "series/pull/208/config.json",
-      "commitPath": "commits/e42e3c0f6971641727c79b7b88857f47e5e54ccb.json",
-      "sha": "e42e3c0f6971641727c79b7b88857f47e5e54ccb",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/e42e3c0f6971641727c79b7b88857f47e5e54ccb",
-      "updatedAt": "2026-08-29T19:37:14.144Z"
+      "commitPath": "commits/b658908ca361ea39638cf6ec0d8ea1c3ff2cd158.json",
+      "sha": "b658908ca361ea39638cf6ec0d8ea1c3ff2cd158",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/b658908ca361ea39638cf6ec0d8ea1c3ff2cd158",
+      "updatedAt": "2026-08-29T21:00:11.180Z"
     }
   ]
 }
