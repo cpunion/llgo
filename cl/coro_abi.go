@@ -2725,12 +2725,12 @@ func coroExplicitStatusZeroDirectPanicPayload(value ssa.Value) bool {
 		if !ok || constant.Value != nil {
 			return false
 		}
-		initialized = initialized || coroExplicitStatusInstructionDominates(store, load)
+		initialized = initialized || coroSSAInstructionDominates(store, load)
 	}
 	return initialized && coroExplicitStatusReadOnlyZeroAddress(allocation, make(map[ssa.Value]bool))
 }
 
-func coroExplicitStatusInstructionDominates(definition, use ssa.Instruction) bool {
+func coroSSAInstructionDominates(definition, use ssa.Instruction) bool {
 	if definition == nil || use == nil || definition.Block() == nil || use.Block() == nil {
 		return false
 	}

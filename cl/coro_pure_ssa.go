@@ -1632,6 +1632,14 @@ func coroPointerUintptrReflectHeaderStoreTerminal(value ssa.Value) bool {
 }
 
 func coroReflectHeaderDataAddress(address ssa.Value) bool {
+	return coroReflectHeaderDataAddressOfKind(address, "")
+}
+
+func coroReflectSliceHeaderDataAddress(address ssa.Value) bool {
+	return coroReflectHeaderDataAddressOfKind(address, "SliceHeader")
+}
+
+func coroReflectHeaderDataAddressOfKind(address ssa.Value, required string) bool {
 	field, ok := address.(*ssa.FieldAddr)
 	if !ok || field.X == nil {
 		return false
@@ -1643,7 +1651,8 @@ func coroReflectHeaderDataAddress(address ssa.Value) bool {
 	named, ok := types.Unalias(pointer.Elem()).(*types.Named)
 	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil ||
 		named.Obj().Pkg().Path() != "reflect" ||
-		named.Obj().Name() != "StringHeader" && named.Obj().Name() != "SliceHeader" {
+		named.Obj().Name() != "StringHeader" && named.Obj().Name() != "SliceHeader" ||
+		required != "" && named.Obj().Name() != required {
 		return false
 	}
 	structure, ok := named.Underlying().(*types.Struct)
