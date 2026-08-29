@@ -28,8 +28,10 @@ import (
 func NewProc(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr) {
 	gp := newproc1(fn, arg, getg())
 	if errno := newm(gp.m, stackSize); errno != 0 {
-		ctx := gp.context
+		ctx := (*runtimeContext)(unsafe.Pointer(gp.context))
 		releaseG()
+		gp.startarg = nil
+		ctx.startRoot = nil
 		FreeRoot(arg)
 		FreeRoot(unsafe.Pointer(ctx))
 		panic("runtime: failed to create new OS thread")
@@ -48,6 +50,7 @@ func newproc1(fn goroutineFunc, arg unsafe.Pointer, callergp *g) *g {
 	gp := initRuntimeContext(ctx, callergp, _Grunnable)
 	gp.startfn = fn
 	gp.startarg = arg
+	ctx.startRoot = arg
 	return gp
 }
 
@@ -96,8 +99,11 @@ func mexit(mp *m) {
 	}
 	gp := mp.curg
 	pp := mp.p
-	ctx := gp.context
+	core := gp.context
+	ctx := (*runtimeContext)(unsafe.Pointer(core))
 	root := unsafe.Pointer(ctx)
+	startRoot := ctx.startRoot
+	ctx.startRoot = nil
 	releaseGAndCheckDeadlock()
 
 	casgstatus(gp, _Grunning, _Gdead)
@@ -111,6 +117,9 @@ func mexit(mp *m) {
 	releasePanicPCStore(gp)
 
 	setg(nil)
+	if startRoot != nil {
+		FreeRoot(startRoot)
+	}
 	FreeRoot(root)
 }
 
@@ -134,5 +143,11 @@ func GMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, ps
 // Execution tests use it to wait until the logical main G has completed mexit
 // before allowing the last worker to return.
 func GStateForTesting() (count uint64, mainExited bool) {
-	return gStateForTesting()
+	return gState()
+}
+
+// NumGoroutine reports the number of registered logical runtime contexts.
+func NumGoroutine() int {
+	count, _ := gState()
+	return int(count)
 }

@@ -63,7 +63,10 @@ type Options struct {
 	DebugSymbols bool
 	Trace        bool
 	ExportRename bool
-	ShadowStack  bool
+	// CExportWrappers keeps //export implementations under their Go symbols;
+	// the final-link module supplies the public C entry points.
+	CExportWrappers bool
+	ShadowStack     bool
 	// PreloadedSyntax means all Program-side source metadata was collected
 	// before lowering and is now shared read-only by backend Programs.
 	PreloadedSyntax bool
@@ -3474,13 +3477,25 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		b.Jump(jmpb)
 	case *ssa.Return:
 		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
-		runDefers := p.returnNeedsImplicitRunDefers(v)
+		var runDefers bool
+		if outcomePlanned {
+			if outcome.outcome != coroPhysicalOutcomeReturn {
+				panic(fmt.Sprintf("return selected incompatible frozen physical outcome recipe %s", outcome.outcome))
+			}
+			// A physical body consumes the exact post-analysis cleanup fact. Do
+			// not re-run the source-level nested-defer heuristic while emission
+			// state is active: that would make helper selection depend on mutable
+			// lowering context rather than the frozen instruction recipe.
+			runDefers = outcome.returnCleanup
+		} else {
+			runDefers = p.returnNeedsImplicitRunDefers(v)
+		}
 		if runDefers {
 			p.spillImplicitDeferResults(b, v)
 			runPos := p.logicalCallerLocationPos(v)
 			p.recordPanicLocation(b, runPos)
 			p.emitPCLineLabel(b, runPos)
-			if outcomePlanned && outcome.returnCleanup {
+			if outcomePlanned {
 				p.compileCoroImplicitRunDefers(b)
 			} else {
 				b.RunDefers()
@@ -3509,12 +3524,6 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.popCallerLocationFrame(b)
 		p.leaveExportedLocalContext(b)
 		if outcomePlanned {
-			if outcome.outcome != coroPhysicalOutcomeReturn {
-				panic(fmt.Sprintf("return selected incompatible frozen physical outcome recipe %s", outcome.outcome))
-			}
-			if outcome.returnCleanup != runDefers {
-				panic("return implicit cleanup does not match its frozen physical recipe")
-			}
 			p.observeCoroPhysicalOutcome(v, coroPhysicalOutcomeReturn)
 			p.compileCoroReturn(b, results)
 			return

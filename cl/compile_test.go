@@ -531,17 +531,16 @@ func TestValidSelectOutputLines(t *testing.T) {
 }
 
 func selectOutputLines(output string) []string {
-	// The writers in _testgo/select intentionally race. Two complete writes can
-	// therefore be observed in one captured line (for example "100exit") even
-	// though each individual token is valid. Consume only whole strings made
-	// from the known tokens; unrelated compiler/emulator diagnostics remain
-	// ignored, while an unknown suffix cannot be mistaken for a valid event.
-	tokens := [...]string{"exit", "ch1", "ch2", "100", "200"}
+	// Concurrent writers can coalesce complete tokens or split an integer around
+	// another token. Accept only lines made from complete known tokens and decimal
+	// fragments: this recognizes "1exit"/"00" without treating words in compiler
+	// or emulator diagnostics as select events.
+	tokens := [...]string{"100", "200", "ch1", "ch2", "exit"}
 	var lines []string
 	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
+		rest := strings.TrimSpace(line)
 		var parsed []string
-		rest := line
+		valid := true
 		for rest != "" {
 			matched := false
 			for _, token := range tokens {
@@ -552,12 +551,17 @@ func selectOutputLines(output string) []string {
 					break
 				}
 			}
-			if !matched {
-				parsed = nil
-				break
+			if matched {
+				continue
 			}
+			if rest[0] >= '0' && rest[0] <= '9' {
+				rest = rest[1:]
+				continue
+			}
+			valid = false
+			break
 		}
-		if len(parsed) != 0 {
+		if valid && len(parsed) != 0 {
 			lines = append(lines, parsed...)
 		}
 	}
@@ -568,6 +572,37 @@ func TestSelectOutputLinesSplitsCoalescedWrites(t *testing.T) {
 	output := "runtime warning\n100exit\nch1\n200unknown\n"
 	if got, want := selectOutputLines(output), []string{"100", "exit", "ch1"}; !slices.Equal(got, want) {
 		t.Fatalf("selectOutputLines() = %q, want %q", got, want)
+	}
+}
+
+func TestSelectOutputLinesAllowsConcurrentPrints(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			name:   "split integer print",
+			output: "1exit\nexit\n00\n",
+			want:   "exit exit",
+		},
+		{
+			name:   "coalesced string prints",
+			output: "ch1exit\n",
+			want:   "ch1 exit",
+		},
+		{
+			name:   "coalesced integer and string prints",
+			output: "100ch2\n",
+			want:   "100 ch2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := strings.Join(selectOutputLines(tt.output), " "); got != tt.want {
+				t.Fatalf("selectOutputLines() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

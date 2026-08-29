@@ -448,6 +448,13 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		}
 	}
 	switch plan.outcome {
+	case coroPhysicalOutcomeReturn:
+		// The pre-analysis helper inventory must conservatively account for a
+		// source Return whose nested range-function body contains a defer. The
+		// post-analysis cleanup plan is the exact authority for this physical
+		// body: when it owns no implicit return cleanup, no RunDefers call can
+		// panic here and its provisional location update must disappear too.
+		return helper == "RecordPanicLocation" && !plan.returnCleanup
 	case coroPhysicalOutcomePanic:
 		return helper == "Panic"
 	case coroPhysicalOutcomeRecover:

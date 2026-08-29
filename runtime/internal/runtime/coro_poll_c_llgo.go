@@ -23,4 +23,4 @@ package runtime
 // C object here also makes those symbols available in programs which use the
 // lightweight internal runtime without importing the standard-library runtime
 // patch package.
-const LLGoFiles = "_wrap/fp.c; ../lib/runtime/_wrap/poll.c; _wrap/coro_panic_report.c; _wrap/coro_g_tls.c" + platformSetjmpLLGoFiles + platformFaultLLGoFiles
+const LLGoFiles = "_wrap/fp.c; ../lib/runtime/_wrap/poll.c; _wrap/coro_panic_report.c; _wrap/coro_g_tls.c" + platformSetjmpLLGoFiles + platformFaultLLGoFiles + platformLLGoFiles

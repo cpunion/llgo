@@ -1,6 +1,5 @@
 package main
 
-
 func main() {
 	var m int = 200
 	fn := func(n int) int {

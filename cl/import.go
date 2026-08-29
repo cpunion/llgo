@@ -1181,6 +1181,11 @@ func (p *context) funcName(fn *ssa.Function) (*types.Package, string, int) {
 		return nil, intrinsicName, llgoInstr
 	}
 	if v, ok := p.prog.Linkname(orgName); ok {
+		if p.options.CExportWrappers {
+			if export, ok := p.pkg.ExportFuncs()[orgName]; ok && export == v {
+				return pkg, funcName(pkg, fn, false), goFunc
+			}
+		}
 		if strings.HasPrefix(v, "C.") {
 			return nil, v[2:], cFunc
 		}

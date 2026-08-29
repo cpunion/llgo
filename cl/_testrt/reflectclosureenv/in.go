@@ -6,9 +6,6 @@ type receiver struct {
 	base int
 }
 
-
-
-
 // The direct and nested integer closures are boxed and called with the same nine arguments.
 // MakeFunc receives the type of the nine-argument literal and the slice callback main$2.
 // MethodByName is performed on receiver{base: 10} and checked with the same arguments.
@@ -17,21 +14,14 @@ type receiver struct {
 // DARWIN-ARM64-DAG: [[METHOD_GOT:%.*]] = call i64 [[METHOD_CODE]](ptr swiftself [[METHOD_ENV]], i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8, i64 9)
 // LINUX-AMD64-DAG: [[METHOD_GOT:%.*]] = call i64 [[METHOD_CODE]](ptr nest [[METHOD_ENV]], i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8, i64 9)
 
-
-
-
 // DARWIN-ARM64-LABEL: define double @"main.makeFloatSum$1"(ptr swiftself %0, double %1, double %2, double %3, double %4, double %5, double %6, double %7, double %8, double %9){{.*}} {
 // LINUX-AMD64-LABEL: define double @"main.makeFloatSum$1"(ptr nest %0, double %1, double %2, double %3, double %4, double %5, double %6, double %7, double %8, double %9){{.*}} {
-
 
 // DARWIN-ARM64-LABEL: define i64 @"main.makeNestedSum$1"(ptr swiftself %0, i64 %1, i64 %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9){{.*}} {
 // LINUX-AMD64-LABEL: define i64 @"main.makeNestedSum$1"(ptr nest %0, i64 %1, i64 %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9){{.*}} {
 
-
 // DARWIN-ARM64-LABEL: define i64 @"main.makeSum$1"(ptr swiftself %0, i64 %1, i64 %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9){{.*}} {
 // LINUX-AMD64-LABEL: define i64 @"main.makeSum$1"(ptr nest %0, i64 %1, i64 %2, i64 %3, i64 %4, i64 %5, i64 %6, i64 %7, i64 %8, i64 %9){{.*}} {
-
-
 
 func (r receiver) Sum(a, b, c, d, e, f, g, h, i int) int {
 	return r.base + a + b + c + d + e + f + g + h + i

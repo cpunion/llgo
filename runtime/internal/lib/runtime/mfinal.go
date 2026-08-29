@@ -44,12 +44,13 @@ type finalizerEntry struct {
 	retSize     uintptr
 	arg         unsafe.Pointer // object pointer or preallocated interface header
 
-	key     uintptr
-	tracked bool
-	next    unsafe.Pointer // *finalizerEntry; atomic producer/consumer link
-	prevFn  bdwgc.FinalizerFunc
-	prevCb  unsafe.Pointer
-	state   int32
+	key       uintptr
+	tracked   bool
+	cleanupID uint64
+	next      unsafe.Pointer // *finalizerEntry; atomic producer/consumer link
+	prevFn    bdwgc.FinalizerFunc
+	prevCb    unsafe.Pointer
+	state     int32
 }
 
 // finalizerRegistryGate is a scheduler-aware managed-owner lock. Its holder
@@ -79,8 +80,10 @@ func (gate *finalizerRegistryGate) Unlock() {
 var finalizerState struct {
 	// registry serializes m in managed code. Raw collector callbacks never
 	// inspect either field; their ingress queue remains independent below.
-	registry finalizerRegistryGate
-	m        map[uintptr]*finalizerEntry
+	registry    finalizerRegistryGate
+	m           map[uintptr]*finalizerEntry
+	cleanups    map[uint64]*finalizerEntry
+	cleanupNext uint64
 
 	// queueHead is the producer end of an intrusive MPSC queue. queueTail is
 	// owned by the one managed runFinalizers consumer. The permanent stub lets
@@ -94,6 +97,7 @@ var finalizerState struct {
 
 func initFinalizerState() {
 	finalizerState.m = make(map[uintptr]*finalizerEntry)
+	finalizerState.cleanups = make(map[uint64]*finalizerEntry)
 	stub := &finalizerState.queueStub
 	finalizerState.queueHead = unsafe.Pointer(stub)
 	finalizerState.queueTail = stub
@@ -185,6 +189,37 @@ func addCleanupPtr(ptr unsafe.Pointer, cleanup func()) (cancel func()) {
 	return func() {
 		atomic.Store(&entry.state, finalizerStopped)
 	}
+}
+
+// addCancelableCleanupPtr uses the same collector-ingress queue as finalizers.
+// The pointer-free id preserves runtime.Cleanup's public layout without letting
+// arbitrary Go code run in a raw BDWGC callback.
+func addCancelableCleanupPtr(ptr unsafe.Pointer, cleanup func()) uint64 {
+	finalizerState.registry.Lock()
+	id := finalizerState.cleanupNext + 1
+	for id == 0 || finalizerState.cleanups[id] != nil {
+		id++
+	}
+	finalizerState.cleanupNext = id
+	entry := &finalizerEntry{cleanup: cleanup, cleanupID: id}
+	registerFinalizerEntry(ptr, entry)
+	finalizerState.cleanups[id] = entry
+	finalizerState.registry.Unlock()
+	return id
+}
+
+func stopCleanupPtr(id uint64) {
+	if id == 0 {
+		return
+	}
+	finalizerState.registry.Lock()
+	entry := finalizerState.cleanups[id]
+	if entry != nil {
+		if _, stopped := atomic.CompareAndExchange(&entry.state, int32(0), finalizerStopped); stopped {
+			delete(finalizerState.cleanups, id)
+		}
+	}
+	finalizerState.registry.Unlock()
 }
 
 func prepareFinalizerArgument(objType, argType *abi.Type) (*ffi.Type, unsafe.Pointer, bool) {
@@ -376,12 +411,24 @@ func runFinalizers() {
 			finalizerState.registry.Unlock()
 		}
 
-		state := atomic.Load(&entry.state)
-		if state != finalizerStopped {
-			if entry.cleanup != nil {
+		if entry.cleanupID != 0 {
+			finalizerState.registry.Lock()
+			if finalizerState.cleanups[entry.cleanupID] == entry {
+				delete(finalizerState.cleanups, entry.cleanupID)
+			}
+			_, run := atomic.CompareAndExchange(&entry.state, int32(0), finalizerStopped)
+			finalizerState.registry.Unlock()
+			if run {
 				entry.cleanup()
-			} else {
-				callFinalizer(entry, state == finalizerInterfaceState)
+			}
+		} else {
+			state := atomic.Load(&entry.state)
+			if state != finalizerStopped {
+				if entry.cleanup != nil {
+					entry.cleanup()
+				} else {
+					callFinalizer(entry, state == finalizerInterfaceState)
+				}
 			}
 		}
 		entry.arg = nil

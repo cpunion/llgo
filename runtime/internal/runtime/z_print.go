@@ -89,10 +89,6 @@ func PrintBool(v bool) {
 	printGoString("false")
 }
 
-func PrintByte(v byte) {
-	c.Fputc(c.Int(v), c.Stderr)
-}
-
 func PrintUint(v uint64) {
 	var buf [32]byte
 	n := c.Snprintf(
@@ -140,10 +136,6 @@ func PrintPointer(p unsafe.Pointer) {
 	PrintHex(uint64(bitcast.FromPointer(p)))
 }
 
-func PrintString(s String) {
-	c.Fwrite(s.data, 1, uintptr(s.len), c.Stderr)
-}
-
 // printGoString writes the length-delimited Go representation directly.
 // Besides avoiding an unnecessary copy and trailing NUL, this keeps builtin
 // printing valid in a stackless coroutine: llvm.coro cannot retain a
@@ -160,9 +152,8 @@ func printFormattedBuffer(data unsafe.Pointer, n c.Int, capacity uintptr) {
 	if count >= capacity {
 		count = capacity - 1
 	}
-	c.Fwrite(data, 1, count, c.Stderr)
+	PrintString(String{data: data, len: int(count)})
 }
-
 func PrintSlice(s Slice) {
 	print("[", s.len, "/", s.cap, "]", s.data)
 }

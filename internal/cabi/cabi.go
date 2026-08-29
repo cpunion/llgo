@@ -62,6 +62,18 @@ func isMSVCTarget(target *ssa.Target, llvmTarget string) bool {
 	return windows && (msvc || !gnu)
 }
 
+func isCOFFTarget(target *ssa.Target, llvmTarget string) bool {
+	if llvmTarget == "" || !strings.Contains(llvmTarget, "-") {
+		return target != nil && target.GOOS == "windows"
+	}
+	for _, part := range strings.Split(strings.ToLower(llvmTarget), "-")[1:] {
+		if part == "windows" || part == "win32" || strings.Contains(part, "mingw") || strings.Contains(part, "cygwin") {
+			return true
+		}
+	}
+	return false
+}
+
 func NewTransformer(prog ssa.Program, llvmTarget string, targetAbi string, mode Mode, optimize bool) *Transformer {
 	target := prog.Target()
 	arch := target.GOARCH
@@ -72,6 +84,7 @@ func NewTransformer(prog ssa.Program, llvmTarget string, targetAbi string, mode 
 		prog:     prog,
 		td:       prog.TargetData(),
 		arch:     arch,
+		coff:     isCOFFTarget(target, llvmTarget),
 		mode:     mode,
 		optimize: optimize,
 	}
@@ -113,6 +126,7 @@ type Transformer struct {
 	prog     ssa.Program
 	td       llvm.TargetData
 	arch     string
+	coff     bool
 	sys      TypeInfoSys
 	mode     Mode
 	optimize bool
@@ -546,6 +560,7 @@ func (p *Transformer) transformFunc(m llvm.Module, fn llvm.Value) bool {
 		nfn.AddAttributeAtIndex(1, preloweredSRet)
 	}
 	nfn.SetLinkage(fn.Linkage())
+	nfn.SetComdat(fn.Comdat())
 	nfn.SetFunctionCallConv(fn.FunctionCallConv())
 	for _, attr := range fn.GetFunctionAttributes() {
 		nfn.AddAttributeAtIndex(-1, attr)
@@ -682,7 +697,8 @@ func (p *Transformer) transformFuncBody(
 		index++
 	}
 
-	if info.Return.Kind >= AttrPointer {
+	voidAggregateReturn := info.Return.Kind == AttrVoid && info.Return.Type.TypeKind() != llvm.VoidTypeKind
+	if info.Return.Kind >= AttrPointer || voidAggregateReturn {
 		var retInstrs []llvm.Value
 		bb := nfn.FirstBasicBlock()
 		for !bb.IsNil() {
@@ -700,6 +716,8 @@ func (p *Transformer) transformFuncBody(
 			b.SetInsertPointBefore(instr)
 			var rv llvm.Value
 			switch info.Return.Kind {
+			case AttrVoid:
+				rv = b.CreateRetVoid()
 			case AttrPointer:
 				// %typ @fn()
 				// %2 = load %typ, ptr %1
@@ -869,8 +887,15 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 	var instr llvm.Value
 	switch info.Return.Kind {
 	case AttrVoid:
-		instr = llvm.CreateCall(b, nft, nfn, nparams)
-		updateCallAttr(instr)
+		loweredCall := llvm.CreateCall(b, nft, nfn, nparams)
+		updateCallAttr(loweredCall)
+		if info.Return.Type.TypeKind() == llvm.VoidTypeKind {
+			instr = loweredCall
+		} else {
+			// The target ABI omits zero-sized aggregate results. Preserve the
+			// original SSA value for users even though no value crosses the ABI.
+			instr = llvm.ConstNull(info.Return.Type)
+		}
 	case AttrPointer:
 		ret := createAlloca(info.Return.Type)
 		call := llvm.CreateCall(b, nft, nfn, append([]llvm.Value{ret}, nparams...))
@@ -937,6 +962,11 @@ func (p *Transformer) transformCallbackFunc(m llvm.Module, fn llvm.Value) (wrap 
 	}
 	wrapFunc := llvm.AddFunction(m, wrapName, nft)
 	wrapFunc.SetLinkage(llvm.LinkOnceAnyLinkage)
+	if p.coff {
+		comdat := m.Comdat(wrapName)
+		comdat.SetSelectionKind(llvm.AnyComdatSelectionKind)
+		wrapFunc.SetComdat(comdat)
+	}
 	wrapFunc.AddFunctionAttr(funcInlineHint(ctx))
 
 	for i, list := range attrs {

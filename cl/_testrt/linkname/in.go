@@ -21,9 +21,9 @@ func setInfo(*m, string)
 func info(m) string
 
 func main() {
-	print(c.Str("a"), c.Str("b"), c.Str("c"), c.Str("d"))
-	print(c.Str("1"), c.Str("2"), c.Str("3"), c.Str("4"))
 	var m m
 	setInfo(&m, "hello")
 	println(info(m))
+	print(c.Str("a"), c.Str("b"), c.Str("c"), c.Str("d"))
+	print(c.Str("1"), c.Str("2"), c.Str("3"), c.Str("4"))
 }

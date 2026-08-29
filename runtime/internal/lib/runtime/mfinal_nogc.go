@@ -31,3 +31,7 @@ func SetFinalizer(obj any, finalizer any) {}
 func addCleanupPtr(_ unsafe.Pointer, _ func()) (cancel func()) {
 	return func() {}
 }
+
+func addCancelableCleanupPtr(_ unsafe.Pointer, _ func()) uint64 { return 0 }
+
+func stopCleanupPtr(uint64) {}

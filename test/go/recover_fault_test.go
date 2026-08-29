@@ -35,11 +35,17 @@ func faultDuringPanicCleanup(src []byte) (recovered any) {
 	panic("superseded by cleanup fault")
 }
 
+func sameFaultAddress(got uintptr, address unsafe.Pointer) bool {
+	return got == uintptr(address)
+}
+
 func TestRecoverAfterFaultPreservesNamedResult(t *testing.T) {
 	old := debug.SetPanicOnFault(true)
 	defer debug.SetPanicOnFault(old)
 
-	data, _ := protectedMemory(t, 16, 8, 4)
+	const protectedPage, protectedPages = 8, 4
+	data, pageSize := protectedMemory(t, 16, protectedPage, protectedPages)
+	hole := data[protectedPage*pageSize : (protectedPage+protectedPages)*pageSize]
 
 	const offset = 5
 	n, err := faultCopy(data[offset:], make([]byte, len(data)))
@@ -51,14 +57,12 @@ func TestRecoverAfterFaultPreservesNamedResult(t *testing.T) {
 		t.Fatalf("copy returned %d, want %d", n, want)
 	}
 	addressable, ok := err.(interface{ Addr() uintptr })
-	wantAddress := uintptr(unsafe.Pointer(&data[len(data)/2]))
-	if !ok || addressable.Addr() != wantAddress {
-		t.Fatalf("fault address = (%#x, %t), want %#x", func() uintptr {
-			if !ok {
-				return 0
-			}
-			return addressable.Addr()
-		}(), ok, wantAddress)
+	if !ok {
+		t.Fatalf("fault has type %T without Addr method", err)
+	}
+	got := addressable.Addr()
+	if address := unsafe.Pointer(&data[len(data)/2]); !sameFaultAddress(got, address) {
+		t.Fatalf("fault address = %#x, want %p", got, address)
 	}
 	faultCleanupSink = 1
 	if recovered := faultDuringPanicCleanup(hole); recovered == nil {
