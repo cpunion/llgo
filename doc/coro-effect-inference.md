@@ -696,13 +696,15 @@ when its environment may be released.  The binding generator supplies only
 this bottom timing/lifetime fact; callback positions, ABIs, adapters, and
 managed target identities remain compiler-derived.
 
-### 7.4 Library summary v6
+### 7.4 Library summary v13
 
-`llgo.coro.library-effect-summary.v6` is now the hard-cut producer schema.
+`llgo.coro.library-effect-summary.v13` is now the hard-cut producer schema.
 `CallableContractFacts` is not embedded unchanged because it also contains
-consumer call-site invocations.  v6 retains the three v5 collections and also
-hard-cuts the outcome completion vocabulary so an older importer cannot accept
-the allocation-free `FaultNil` status as an unknown terminal result:
+consumer call-site invocations. v13 retains the outcome completion vocabulary
+and adds the exact program-capability, FuncRep v2, external descriptor, and
+versioned export-ingress facts needed by the current consumer. An older
+importer cannot accept the allocation-free `FaultNil` status or reinterpret a
+structured entry under a different callable ABI:
 
 1. **Managed functions**: the existing FunctionID, ABI hash, inferred effect,
    execution flags, representation, physically emitted primary entries, exact
@@ -713,9 +715,10 @@ the allocation-free `FaultNil` status as an unknown terminal result:
    ABI hash, target-neutral behavior contract, proof kind/digest, and any
    trusted refinement.
 3. **Export bindings**: physical C symbol and ABI hash mapped to an exact
-   managed FunctionID and primary.  The current record is declarative and
-   grants no raw-entry or ingress capability; a generated adapter must publish
-   and pass a separate versioned gate before lowering may call it.
+   managed FunctionID and primary. The binding is declarative and grants no
+   raw-entry or ingress capability.
+4. **Export ingresses**: the separate versioned proof that code generation
+   emitted the exact C-to-managed adapter for a matching binding.
 
 The existing target triple, data layout, coroutine/scheduler/panic/function
 representation ABIs, and target capabilities remain part of the enclosing
@@ -738,6 +741,13 @@ re-published unchanged if that consumer produces another archive; it is never
 reconstructed from a code address or silently replaced by the consumer's
 default.
 
+An imported `Dispatch` function is also a closed producer/consumer path. The
+consumer checks the producer's FuncRep, managed-entry kind, structural ABI hash,
+and physical symbol, then emits one v2 descriptor and one typed thin thunk over
+that symbol. Plain, outcome, and coroutine are the only three capabilities;
+outcome and coroutine share one mutually exclusive structured-entry word. No
+source body, alternate primary, or address lookup is introduced.
+
 An imported outcome-plain entry is usable only when the producer publishes a
 non-zero leaf or direct-call-DAG proof, its content-addressed path certificate,
 and the consumer's finite `MaxAtomicCost` budget contains its recorded cost. A
@@ -746,10 +756,10 @@ certificate/proof or over-budget value fails planning closed. Because the
 producer publishes one exact primary ABI, a consumer cannot silently substitute
 an unavailable coroutine entry.
 
-Export bindings remain serialized and indexed but non-authorizing.  They do
-not permit a raw entry, global alias, or C-to-Go ingress adapter until the
-separate versioned ingress capability is generated and verified.  Metadata
-availability by itself is not an execution capability.
+Export bindings remain serialized and indexed but non-authorizing. They do not
+permit a raw entry, global alias, or C-to-Go ingress adapter by themselves.
+Only the matching v13 versioned ingress record proves the generated adapter;
+metadata availability by itself is not an execution capability.
 
 ### 7.5 Unified foreign ingress
 

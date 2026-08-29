@@ -312,7 +312,8 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmitte
 		}
 	case coro.EmitOutcomePlain:
 		if plan.External != coro.Defined || !hasEmittedBody || plan.Primary != coro.PrimaryCoroutine ||
-			plan.FuncRep != coro.DirectCoro || plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+			(plan.FuncRep != coro.DirectCoro && plan.FuncRep != coro.Dispatch) ||
+			plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
 			!plan.HasStaticOutcome() ||
 			!plan.StaticOutcome && plan.AtomicCost == 0 {
 			return fmt.Errorf(
@@ -450,7 +451,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 				variant := e.coroPlan != nil && e.coroPlan.HasRawPlainVariant(e.function)
 				return validatePlannedRawPlainVariant(e.function, e.plan, variant)
 			}
-			if e.plan.Emission != coro.EmitCoroutine {
+			if e.plan.Emission != coro.EmitCoroutine && e.plan.Emission != coro.EmitOutcomePlain {
 				return fmt.Errorf("coroutine entry resolution: raw/interface target %q has unsupported emission %s", e.plan.ID, e.plan.Emission)
 			}
 		} else {
@@ -509,6 +510,9 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 		if err := validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, true); err != nil {
 			return err
 		}
+		rawMethodToken := e.interfacePlain.acceptsTarget(e.function, e.plan) ||
+			e.managedInterface.acceptsTarget(e.function, e.plan)
+		managedDispatchTarget := e.plan.FuncRep == coro.Dispatch && !rawMethodToken
 		if accept == nil && e.emission != nil && e.emission.coroProgramIR != nil &&
 			e.emission.coroProgramIR.physicalPlansSealed {
 			physical, err := e.sealedPhysicalFunctionPlan()
@@ -519,7 +523,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 		}
 		return validateCoroPhysicalABIForOwner(
 			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, true, false,
-			false, true, e.frameRetentionABI, false, false, false,
+			false, true, e.frameRetentionABI, false, managedDispatchTarget, rawMethodToken,
 			e.interfacePlain, e.managedInterface, e.libraryForeign,
 			func(plan *coroPhysicalFunctionPlan) error {
 				if err := validateOutcomePlainFrozenPlan(plan, e.plan); err != nil {
@@ -532,11 +536,31 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			},
 		)
 	}
-	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
-		if !e.importedLibrary || e.libraryEffect.Primary != coro.PrimaryCoroutine ||
-			(e.libraryEffect.ManagedEntry != coro.ManagedEntryCoroutine &&
-				e.libraryEffect.ManagedEntry != coro.ManagedEntryOutcomePlain) {
-			return fmt.Errorf("external coroutine emission %q requires a preflighted library coroutine entry", e.plan.ID)
+	if e.plan.Emission == coro.EmitExternal {
+		if !e.importedLibrary {
+			switch e.plan.ManagedEntry {
+			case coro.ManagedEntryOutcomePlain:
+				return fmt.Errorf(
+					"external outcome-plain emission %q requires a preflighted library entry",
+					e.plan.ID,
+				)
+			case coro.ManagedEntryCoroutine:
+				return fmt.Errorf(
+					"external coroutine emission %q requires a preflighted library entry",
+					e.plan.ID,
+				)
+			default:
+				// A plain/unknown foreign declaration keeps the existing direct
+				// external symbol path. Descriptor-backed plain declarations were
+				// already checked above against their exact executor-safe contract;
+				// only structured Go entries require producer library metadata.
+				return nil
+			}
+		}
+		if e.libraryEffect.ManagedEntry != coro.ManagedEntryPlain &&
+			e.libraryEffect.ManagedEntry != coro.ManagedEntryCoroutine &&
+			e.libraryEffect.ManagedEntry != coro.ManagedEntryOutcomePlain {
+			return fmt.Errorf("external managed emission %q requires a preflighted library entry", e.plan.ID)
 		}
 		if e.plan.External != coro.ExternalKnown ||
 			e.plan.Primary != coro.PrimaryExternal ||
@@ -571,6 +595,10 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 				!e.plan.StaticOutcome && e.plan.Exec&^coro.MayUnwind != 0 {
 				return fmt.Errorf("external outcome-plain emission %q has an invalid producer capability", e.plan.ID)
 			}
+		}
+		if e.libraryEffect.ManagedEntry == coro.ManagedEntryPlain &&
+			(e.plan.Effect != coro.NoSuspend || e.plan.Exec.Contains(coro.MayUnwind)) {
+			return fmt.Errorf("external plain emission %q has an invalid producer capability", e.plan.ID)
 		}
 		return validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, true)
 	}
@@ -821,9 +849,8 @@ func (p *context) mustFunctionSymbol(fn *ssa.Function) plannedFunctionSymbol {
 }
 
 // mustOutcomePlainFunctionSymbol selects the proof-carrying synchronous entry
-// used by one exact static call. It is the managed primary only when analysis
-// proved there is no function-value, method-table, interface, reflection,
-// scheduler, raw, or ingress consumer.
+// used by an exact static call or a v2 descriptor consumer. Analysis chooses
+// whether it is the managed primary or a twin while preserving one source body.
 func (p *context) mustOutcomePlainFunctionSymbol(fn *ssa.Function) plannedFunctionSymbol {
 	entry, err := p.resolveFunctionSymbol(fn)
 	if err == nil {

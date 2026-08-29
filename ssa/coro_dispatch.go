@@ -27,14 +27,16 @@ import (
 )
 
 // Coroutine dynamic-dispatch versions and capability flags are linker-visible
-// ABI. CoroPlainDispatchVersionV1 remains the compatibility name used by the
-// first plain-only frontend slice.
-const CoroDispatchVersionV1 uint32 = 1
+// ABI. V2 adds an explicit-status outcome capability while retaining the
+// compact nine-field descriptor: outcome and coroutine entries are mutually
+// exclusive uses of the same structured-entry word.
+const CoroDispatchVersionV2 uint32 = 2
 
-const CoroPlainDispatchVersionV1 = CoroDispatchVersionV1
+const CoroPlainDispatchVersionV2 = CoroDispatchVersionV2
 
 const (
 	CoroDispatchFlagHasPlain uint32 = 1 << iota
+	CoroDispatchFlagHasOutcome
 	CoroDispatchFlagHasCoro
 	CoroDispatchFlagNoCapture
 	// CoroDispatchFlagRuntimeTyped marks a runtime-created descriptor whose
@@ -45,22 +47,23 @@ const (
 	CoroDispatchFlagRuntimeTyped
 	// CoroDispatchFlagPlainNoUnwind certifies that the plain entry cannot
 	// unwind through its caller's native activation. Managed dispatch always
-	// prefers HasCoro; a descriptor with only HasPlain must carry this bit so
-	// coroutine cleanup and ordinary dynamic-await fallback remain structured.
+	// prefers a published HasOutcome/HasCoro structured entry; a descriptor
+	// with only HasPlain must carry this bit so coroutine cleanup and ordinary
+	// dynamic-await fallback remain structured.
 	CoroDispatchFlagPlainNoUnwind
 
-	CoroDispatchCapabilityMaskV1 = CoroDispatchFlagHasPlain | CoroDispatchFlagHasCoro
-	CoroDispatchKnownFlagsV1     = CoroDispatchCapabilityMaskV1 | CoroDispatchFlagNoCapture |
+	CoroDispatchCapabilityMaskV2 = CoroDispatchFlagHasPlain | CoroDispatchFlagHasOutcome | CoroDispatchFlagHasCoro
+	CoroDispatchKnownFlagsV2     = CoroDispatchCapabilityMaskV2 | CoroDispatchFlagNoCapture |
 		CoroDispatchFlagRuntimeTyped | CoroDispatchFlagPlainNoUnwind
-	CoroPlainDispatchFlagsV1 = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture |
+	CoroPlainDispatchFlagsV2 = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture |
 		CoroDispatchFlagPlainNoUnwind
 )
 
-const CoroDispatchRuntimeTypeMagicV1 uint64 = 0x4c4c474f52545931 // "LLGORTY1"
+const CoroDispatchRuntimeTypeMagicV2 uint64 = 0x4c4c474f52545932 // "LLGORTY2"
 
-const coroPlainDispatchThunkPrefix = "__llgo_coro_func_plain_v1."
+const coroPlainDispatchThunkPrefix = "__llgo_coro_func_plain_v2."
 
-// CoroPlainDispatchThunkName derives the dedicated v1 thunk symbol for one
+// CoroPlainDispatchThunkName derives the dedicated v2 thunk symbol for one
 // target-specific symbol identity. The frontend should pass its final planned
 // symbol name, which is the only place target FunctionID identity belongs.
 func CoroPlainDispatchThunkName(targetSymbol string) string {
@@ -70,7 +73,7 @@ func CoroPlainDispatchThunkName(targetSymbol string) string {
 	return coroPlainDispatchThunkPrefix + targetSymbol
 }
 
-// CoroPlainDispatchDescriptorOptions describes one v1 plain-only function
+// CoroPlainDispatchDescriptorOptions describes one v2 plain-only function
 // descriptor. ABIHash is supplied by the frontend and deliberately does not
 // include the target FunctionID. Target identity belongs only in Name and
 // ThunkName, which lets identical ABI contracts share the same hash.
@@ -89,7 +92,7 @@ type CoroPlainDispatchDescriptorOptions struct {
 	Result      Type
 }
 
-// CoroPlainDispatchCallOptions is the caller's exact expected v1 contract.
+// CoroPlainDispatchCallOptions is the caller's exact expected v2 contract.
 // Result is the canonical result-slot layout used by the ABI hash and layout
 // guards; it is distinct from the direct LLVM call's return type.
 type CoroPlainDispatchCallOptions struct {
@@ -106,10 +109,10 @@ type CoroPlainDispatchCallOptions struct {
 // NewCoroPlainDispatchDescriptor defines a link-once constant descriptor:
 //
 //	{ version i32, flags i32, hashLo i64, hashHi i64,
-//	  plainEntry ptr, coroEntry ptr, resultSize uintptr,
+//	  plainEntry ptr, structuredEntry ptr, resultSize uintptr,
 //	  resultAlign uintptr, codeEntry ptr }
 //
-// plainEntry is a target-specific context thunk and coroEntry is null. The
+// plainEntry is a target-specific context thunk and structuredEntry is null. The
 // descriptor is returned as a pointer. Hash words use big-endian byte order so
 // their textual IR form is deterministic across hosts.
 func (p Package) NewCoroPlainDispatchDescriptor(
@@ -197,7 +200,7 @@ func (b Builder) MakeCoroPlainDispatchValue(
 	)
 }
 
-// CallCoroPlainDispatch validates and calls an ordinary v1 plain-only dynamic
+// CallCoroPlainDispatch validates and calls the specialized v2 plain-only dynamic
 // function value. A nil descriptor uses the same recoverable Go nil-call panic
 // path as the legacy closure call. Invalid or forged non-nil representation
 // state traps. All checks precede the descriptor entry call; success performs
@@ -437,16 +440,16 @@ func coroPlainDispatchThunkCalls(thunk Function, target llvm.Value) bool {
 }
 
 func validateCoroPlainDispatchContract(version, flags uint32) {
-	if version != CoroPlainDispatchVersionV1 {
+	if version != CoroPlainDispatchVersionV2 {
 		panic(fmt.Sprintf(
 			"ssa: coroutine plain dispatch version is %d, want %d",
-			version, CoroPlainDispatchVersionV1,
+			version, CoroPlainDispatchVersionV2,
 		))
 	}
-	if flags != CoroPlainDispatchFlagsV1 {
+	if flags != CoroPlainDispatchFlagsV2 {
 		panic(fmt.Sprintf(
 			"ssa: coroutine plain dispatch flags are %#x, want exact HasPlain|NoCapture (%#x)",
-			flags, CoroPlainDispatchFlagsV1,
+			flags, CoroPlainDispatchFlagsV2,
 		))
 	}
 }

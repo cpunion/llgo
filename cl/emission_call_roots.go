@@ -62,7 +62,7 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 		llgoSigjmpbuf, llgoDeferData, llgoUnreachable, llgoStackSave,
 		llgoCoroYield, llgoCoroCriticalEnter, llgoCoroCriticalExit,
 		llgoCoroGoexit, llgoCoroOSThreadLock, llgoCoroOSThreadUnlock,
-		llgoControlTrap, llgoControlFork, llgoClosureEnv:
+		llgoControlTrap, llgoControlFork, llgoClosureEnv, llgoCoroCurrentTask:
 		return emissionIntrinsicNoValues, nil
 
 	case llgoAdvance, llgoIndex,
@@ -94,7 +94,7 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 		llgoAtomicCmpXchgOK, llgoAtomicAddReturnNew,
 		llgoAtomicLoadUnsafe, llgoAtomicStoreUnsafe,
 		llgoCoroPark, llgoCoroTimerSleep, llgoCoroPollWait, llgoCoroControlledTimerWait,
-		llgoCoroFFICall, llgoCoroHostOperation,
+		llgoCoroFFICall, llgoCoroPropagatePanic, llgoCoroHostOperation,
 		llgoControlExit, llgoControlExecve:
 		return emissionIntrinsicCompileValues, nil
 	default:

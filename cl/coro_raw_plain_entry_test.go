@@ -320,7 +320,7 @@ func Host(fn func(int) int, value int) int {
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -824,7 +824,7 @@ func Parent(seed *Box, value int) int { return Dual(seed, value) }
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

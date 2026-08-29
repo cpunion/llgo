@@ -62,7 +62,9 @@ func TestFuncInfoTableMaterializesMetadataWithoutFunctionPointers(t *testing.T) 
 	entry := genMainModule(ctx, llssa.PkgRuntime, &packages.Package{
 		PkgPath:    "example.com/main",
 		ExportFile: "main.a",
-	}, &genConfig{funcInfo: records})
+	}, &genConfig{
+		funcInfo: records, coroBootstrap: testDirectCoroBootstrap("example.com/main"),
+	})
 	ir := entry.LPkg.String()
 	for _, want := range []string{
 		"@__llgo_funcinfo_table = global ptr",
@@ -270,7 +272,9 @@ func TestFuncInfoTableMaterializesEntrySites(t *testing.T) {
 	entry := genMainModule(ctx, llssa.PkgRuntime, &packages.Package{
 		PkgPath:    "example.com/main",
 		ExportFile: "main.a",
-	}, &genConfig{funcInfo: records})
+	}, &genConfig{
+		funcInfo: records, coroBootstrap: testDirectCoroBootstrap("example.com/main"),
+	})
 	ir := entry.LPkg.String()
 	for _, want := range []string{
 		"@__llgo_funcinfo_entry_start = global ptr @__start_llgo_funcinfo_entry",
@@ -294,7 +298,9 @@ func TestFuncInfoTableMaterializesEntrySites(t *testing.T) {
 	ltoEntry := genMainModule(ltoCtx, llssa.PkgRuntime, &packages.Package{
 		PkgPath:    "example.com/main",
 		ExportFile: "main.a",
-	}, &genConfig{funcInfo: records})
+	}, &genConfig{
+		funcInfo: records, coroBootstrap: testDirectCoroBootstrap("example.com/main"),
+	})
 	ltoIR := ltoEntry.LPkg.String()
 	for _, want := range []string{
 		"@__llgo_funcinfo_entry_start = global ptr @__start_llgo_funcinfo_entry",
@@ -358,7 +364,10 @@ func TestFuncInfoTableSitesDisabledKeepsTables(t *testing.T) {
 	entry := genMainModule(ctx, llssa.PkgRuntime, &packages.Package{
 		PkgPath:    "example.com/main",
 		ExportFile: "main.a",
-	}, &genConfig{funcInfo: records, pcLineInfo: pcLines})
+	}, &genConfig{
+		funcInfo: records, pcLineInfo: pcLines,
+		coroBootstrap: testDirectCoroBootstrap("example.com/main"),
+	})
 	ir := entry.LPkg.String()
 	// The metadata tables must still materialize...
 	for _, want := range []string{
@@ -411,7 +420,10 @@ func TestFuncInfoTableMaterializesPCLineMetadata(t *testing.T) {
 	entry := genMainModule(ctx, llssa.PkgRuntime, &packages.Package{
 		PkgPath:    "example.com/main",
 		ExportFile: "main.a",
-	}, &genConfig{funcInfo: records, pcLineInfo: pcLines})
+	}, &genConfig{
+		funcInfo: records, pcLineInfo: pcLines,
+		coroBootstrap: testDirectCoroBootstrap("example.com/main"),
+	})
 	ir := entry.LPkg.String()
 	for _, want := range []string{
 		"@__llgo_pcline_table = global ptr",
@@ -474,7 +486,9 @@ func TestFuncInfoTablePoolsRepeatedStrings(t *testing.T) {
 	entry := genMainModule(ctx, llssa.PkgRuntime, &packages.Package{
 		PkgPath:    "example.com/main",
 		ExportFile: "main.a",
-	}, &genConfig{funcInfo: records})
+	}, &genConfig{
+		funcInfo: records, coroBootstrap: testDirectCoroBootstrap("example.com/main"),
+	})
 	if got := strings.Count(entry.LPkg.String(), `shared.go\00`); got != 1 {
 		t.Fatalf("shared file string emitted %d times, want 1", got)
 	}
@@ -494,7 +508,7 @@ func TestFuncInfoTableEmptyDefinitions(t *testing.T) {
 	entry := genMainModule(ctx, llssa.PkgRuntime, &packages.Package{
 		PkgPath:    "example.com/main",
 		ExportFile: "main.a",
-	}, &genConfig{})
+	}, &genConfig{coroBootstrap: testDirectCoroBootstrap("example.com/main")})
 	ir := entry.LPkg.String()
 	for _, want := range []string{
 		"@__llgo_funcinfo_table = global ptr null",

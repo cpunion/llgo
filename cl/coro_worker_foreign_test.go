@@ -348,7 +348,7 @@ func TestCoroWorkerDynamicRawCCodePointerUsesTypedThunk(t *testing.T) {
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+		FuncRepABI:   coro.FuncRepABIV2, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		fixture.prog, nil, nil, nil, fixture.ssaPkg, fixture.files, goembed.VarMap{},
@@ -423,7 +423,7 @@ func TestCoroWorkerClosedDefaultForeignCallUsesTypedThunk(t *testing.T) {
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+		FuncRepABI:   coro.FuncRepABIV2, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		fixture.prog, nil, nil, nil, fixture.ssaPkg, fixture.files, goembed.VarMap{},
@@ -575,7 +575,7 @@ func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
 		CoroABI:                coro.PhysicalABIV1,
 		SchedulerABI:           coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:               coro.PanicExplicitStatusABIV0,
-		FuncRepABI:             coro.FuncRepABIV1,
+		FuncRepABI:             coro.FuncRepABIV2,
 		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -682,7 +682,7 @@ func TestCoroCallerThreadForeignCallUsesSameMEpisode(t *testing.T) {
 		CoroABI:                coro.PhysicalABIV1,
 		SchedulerABI:           coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:               coro.PanicExplicitStatusABIV0,
-		FuncRepABI:             coro.FuncRepABIV1,
+		FuncRepABI:             coro.FuncRepABIV2,
 		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -845,7 +845,7 @@ func TestImportedLibraryForeignCallableDrivesPhysicalSameMEpisode(t *testing.T) 
 		CoroABI:        coro.PhysicalABIV1,
 		SchedulerABI:   functionIDs.SchedulerABI,
 		PanicABI:       coro.PanicExplicitStatusABIV0,
-		FuncRepABI:     coro.FuncRepABIV1,
+		FuncRepABI:     coro.FuncRepABIV2,
 		TargetTriple:   consumer.prog.TargetSpec().Triple,
 		TargetCPU:      consumer.prog.TargetSpec().CPU,
 		TargetFeatures: consumer.prog.TargetSpec().Features,
@@ -959,7 +959,7 @@ func TestCoroManagedReentryPlainCallbackUsesThinCoroutineRamp(t *testing.T) {
 		CoroABI:                coro.PhysicalABIV1,
 		SchedulerABI:           coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:               coro.PanicExplicitStatusABIV0,
-		FuncRepABI:             coro.FuncRepABIV1,
+		FuncRepABI:             coro.FuncRepABIV2,
 		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(

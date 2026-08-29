@@ -1,12 +1,9 @@
 // LITTEST
 package foo
 
-// Bar and F are dynamically publishable and may panic while boxing, so each
-// has one coroutine primary and one allocation-preserving outcome entry. There
-// is no third plain source body and no scheduler-root factory in ModeGen.
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testdata/foo.Bar$coro"(ptr %0, ptr %1){{.*}} {
-// CHECK: call token @llvm.coro.id
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 8)
+// Bar and F are synchronously published and may panic while boxing, so each
+// collapses to one allocation-preserving outcome entry. There is no redundant
+// coroutine body, plain source body, or scheduler-root factory in ModeGen.
 
 func Bar() any {
 	return struct{ V int }{1}
@@ -17,10 +14,6 @@ func Bar() any {
 // CHECK: store %"{{.*}}/runtime/internal/runtime.eface" %{{[0-9]+}}, ptr %{{[0-9]+}}, align 8
 // CHECK: store i32 1, ptr %{{[0-9]+}}, align 4
 // CHECK-NEXT: ret void
-
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testdata/foo.F$coro"(ptr %0, ptr %1){{.*}} {
-// CHECK: call token @llvm.coro.id
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 8)
 
 func F() any {
 	return struct{ v int }{1}

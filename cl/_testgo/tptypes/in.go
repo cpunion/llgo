@@ -16,11 +16,11 @@ package main
 // CHECK: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: call ptr @"{{.*}}PrintBatchV1$coro"(
 // CHECK: call i8 @llvm.coro.suspend(
-// CHECK-LABEL: define linkonce ptr @"main.(*Slice{{\[\[\]int,int\]}}).Append$coro"(
+// CHECK-LABEL: define linkonce void @"main.(*Slice{{\[\[\]int,int\]}}).Append$outcome"(
 // CHECK: call void @"{{.*}}SliceAppend$outcome"(
-// CHECK-LABEL: define linkonce ptr @"main.(*Slice{{\[\[\]int,int\]}}).Append2$coro"(
+// CHECK-LABEL: define linkonce void @"main.(*Slice{{\[\[\]int,int\]}}).Append2$outcome"(
 // CHECK: call void @"{{.*}}SliceAppend$outcome"(
-// CHECK-LABEL: define linkonce ptr @"main.(*Slice{{\[\[\]string,string\]}}).Append$coro"(
+// CHECK-LABEL: define linkonce void @"main.(*Slice{{\[\[\]string,string\]}}).Append$outcome"(
 // CHECK: call void @"{{.*}}SliceAppend$outcome"(
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine

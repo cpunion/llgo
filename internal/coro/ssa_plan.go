@@ -34,6 +34,21 @@ import (
 // SSAConfig.MaxPlainInstructions is zero. A negative value disables this seed.
 const DefaultMaxPlainInstructions = 128
 
+// isSSAPackageInitializer identifies the compiler-owned top-level function
+// which sequences dependency initialization and package variable expressions.
+// Its own CFG contains only bounded code synthesized from declarations; loops
+// and other unbounded source computation remain in called functions and retain
+// their independently analyzed effects.
+func isSSAPackageInitializer(function *ssa.Function) bool {
+	if function == nil || function.Name() != "init" || function.Synthetic != "package initializer" ||
+		function.Pkg == nil || function.Pkg.Pkg == nil || function.Parent() != nil ||
+		function.Signature == nil || function.Signature.Recv() != nil {
+		return false
+	}
+	params, results := function.Signature.Params(), function.Signature.Results()
+	return (params == nil || params.Len() == 0) && (results == nil || results.Len() == 0)
+}
+
 // DynamicResolution selects how AnalyzeSSA resolves interface and function
 // value calls. The default avoids a potentially quadratic CHA graph and keeps
 // every dynamic call conservatively open.
@@ -665,8 +680,10 @@ type SSAFunctionBodyFacts struct {
 	// instruction belongs to the initial return/explicit-panic leaf cohort. It
 	// proves no source call, defer, implicit-fault adapter, wait, spawn, or other
 	// physical operation is hidden behind InstructionCount. Whole-program
-	// analysis still rejects roots, dynamic references, recursion, raw entries,
-	// and compiler-inserted calls before selecting EmitOutcomePlain.
+	// analysis still rejects scheduler/ingress roots, recursion, raw entries,
+	// compiler-inserted calls, and every open or non-synchronous dynamic use
+	// before selecting EmitOutcomePlain. A closed v2 descriptor target is
+	// eligible when all of its known calls consume the outcome capability.
 	OutcomePlainLeaf bool
 	// OutcomePlainDAG admits the leaf recipes plus an ordinary source Call and
 	// Extract. It is only a local syntax/semantic projection: whole-program
@@ -1648,6 +1665,12 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := flow.validateRawFunctionAddressCallArguments(rawFunctionAddressCallArguments); err != nil {
 		return nil, fmt.Errorf("coro: validate trusted raw function-address call arguments: %w", err)
 	}
+	rawCConversionTargets, err := classifySSAExactRawCConversions(
+		bodyFunctions, includedSet, canonicalizer, flow,
+	)
+	if err != nil {
+		return nil, err
+	}
 	rawFunctionAddressEntries := make(map[*ssa.Function]struct{}, len(rawFunctionAddressCallArguments))
 	rawFunctionAddressTargets := make(map[ssaCallArgumentUse]*ssa.Function, len(rawFunctionAddressCallArguments))
 	for _, use := range rawFunctionAddressCallArguments {
@@ -1742,7 +1765,16 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 					localBodyFacts[fn] = bodyFacts
 				}
 				bodyEffect, bodyExec := bodyFacts.Effect, bodyFacts.Exec
-				if bodyFacts.HasCycle || maxPlain >= 0 && bodyFacts.InstructionCount > maxPlain {
+				// A synthetic package initializer can be very large solely because a
+				// generated composite/map literal expands into thousands of bounded
+				// stores. Turning that straight-line declaration machinery into one
+				// stackless state per poll dominates generated code and linker memory.
+				// Exempt only its local instruction-count seed. CFG cycles, explicit
+				// policy, and every called function's resulting suspension effect remain
+				// authoritative and continue to propagate through the graph.
+				budgetNeedsPreempt := maxPlain >= 0 && bodyFacts.InstructionCount > maxPlain &&
+					!isSSAPackageInitializer(fn)
+				if bodyFacts.HasCycle || budgetNeedsPreempt {
 					bodyExec = bodyExec.Join(NeedsPreempt)
 				}
 				if exactNoUnwind[fn] {
@@ -2139,7 +2171,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		graph, bodyFunctions, includedSet, ids, flow,
 		directPlainCallArguments, rawDirectPlainCallArguments,
 		rawFunctionAddressCallArguments, staticCodeAddressCallArguments, syncOnlyDescriptorArguments,
-		conditionalStores,
+		conditionalStores, rawCConversionTargets,
 	); err != nil {
 		return nil, err
 	}
@@ -2176,14 +2208,17 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids, canonicalizer); err != nil {
 		return nil, err
 	}
-	outcomePrimaryUses := classifySSAOutcomePrimaryUses(graph, canonicalRoots, byID, callPlans, loweredCalls)
+	outcomePrimaryUses := classifySSAOutcomePrimaryUses(
+		graph, canonicalRoots, byID, callPlans, loweredCalls, exactInterfaceReceivers,
+	)
 	if err := applySSAOutcomePlainPlans(
 		base, byID, localBodyFacts, callPlans, loweredCalls, outcomePrimaryUses, maxPlain,
 	); err != nil {
 		return nil, err
 	}
 	if err := applySSAStaticOutcomePlans(
-		base, byID, localBodyFacts, callPlans, loweredCalls, elidedCalls, outcomePrimaryUses,
+		base, byID, localBodyFacts, callPlans, loweredCalls, elidedCalls,
+		exactInterfaceReceivers, outcomePrimaryUses,
 	); err != nil {
 		return nil, err
 	}
@@ -2319,8 +2354,9 @@ func validateSSAImportedOutcomePlainCosts(plan *Plan, maxAtomicCost int) error {
 }
 
 type ssaOutcomePrimaryUses struct {
-	direct  map[FunctionID]bool
-	blocked map[FunctionID]bool
+	direct   map[FunctionID]bool
+	dispatch map[FunctionID]bool
+	blocked  map[FunctionID]bool
 }
 
 func classifySSAOutcomePrimaryUses(
@@ -2329,10 +2365,12 @@ func classifySSAOutcomePrimaryUses(
 	byID map[FunctionID]*ssa.Function,
 	callPlans map[ssa.CallInstruction]SSACallPlan,
 	loweredCalls map[*ssa.Function][]SSALoweredCall,
+	exactInterfaceReceivers map[*ssa.Call]ssa.Value,
 ) ssaOutcomePrimaryUses {
 	uses := ssaOutcomePrimaryUses{
-		direct:  make(map[FunctionID]bool),
-		blocked: make(map[FunctionID]bool),
+		direct:   make(map[FunctionID]bool),
+		dispatch: make(map[FunctionID]bool),
+		blocked:  make(map[FunctionID]bool),
 	}
 	ids := make(map[*ssa.Function]FunctionID, len(byID))
 	for id, function := range byID {
@@ -2352,19 +2390,41 @@ func classifySSAOutcomePrimaryUses(
 		}
 	}
 	if graph != nil {
-		for reference := range graph.references {
-			uses.blocked[reference.target] = true
+		for _, reference := range graph.references {
+			// A raw address still requires the legacy physical entry. Ordinary
+			// managed references merely explain why FuncRep is Dispatch; the exact
+			// call occurrences below decide whether that descriptor is consumed in
+			// a synchronous or scheduler context.
+			if reference.RawPlain || reference.PhysicalABI {
+				uses.blocked[reference.Target] = true
+			}
 		}
 	}
 	for call, plan := range callPlans {
-		exactStatic := call != nil && call.Common() != nil && call.Common().StaticCallee() != nil &&
-			plan.Kind == CallDirect && plan.Rep == DirectCoro && plan.Transport == ManagedTransport &&
-			!plan.Open && !plan.MayBeNil && !plan.SyncDispatch && !plan.RawPlain && len(plan.Targets) == 1
+		exactInterface := ssaOutcomeExactInterfaceCall(call, exactInterfaceReceivers)
+		exactStatic := call != nil && call.Common() != nil &&
+			plan.Kind == CallDirect && plan.Transport == ManagedTransport &&
+			!plan.Open && (!plan.MayBeNil || exactInterface) &&
+			!plan.SyncDispatch && !plan.RawPlain && len(plan.Targets) == 1 &&
+			(call.Common().StaticCallee() != nil && plan.Rep == DirectCoro ||
+				exactInterface && plan.Rep == Dispatch)
 		if exactStatic {
 			uses.direct[plan.Targets[0]] = true
 		}
+		synchronousDispatch := call != nil && call.Common() != nil && !exactInterface &&
+			plan.Kind == CallDirect && plan.Rep == Dispatch &&
+			plan.Transport == ManagedTransport && !plan.SyncDispatch &&
+			!plan.RawPlain && len(plan.Targets) != 0
 		for _, target := range plan.Targets {
-			if !exactStatic {
+			switch {
+			case exactStatic:
+			case synchronousDispatch:
+				uses.dispatch[target] = true
+			default:
+				// Spawn, defer, raw, and every unsupported transport retain a
+				// real coroutine primary. In particular, a descriptor target may be
+				// selected as outcome-only only when every known invocation consumes
+				// it synchronously through the v2 capability probe.
 				uses.blocked[target] = true
 			}
 		}
@@ -2382,8 +2442,38 @@ func classifySSAOutcomePrimaryUses(
 	return uses
 }
 
+func ssaOutcomeExactInterfaceCall(
+	call ssa.CallInstruction,
+	exactInterfaceReceivers map[*ssa.Call]ssa.Value,
+) bool {
+	direct, ok := call.(*ssa.Call)
+	return ok && direct != nil && exactInterfaceReceivers[direct] != nil
+}
+
 func (uses ssaOutcomePrimaryUses) allows(plan FunctionPlan) bool {
-	return plan.FuncRep == DirectCoro && uses.direct[plan.ID] && !uses.blocked[plan.ID]
+	if uses.blocked[plan.ID] {
+		return false
+	}
+	switch plan.FuncRep {
+	case DirectCoro:
+		return uses.direct[plan.ID]
+	case Dispatch:
+		return uses.dispatch[plan.ID]
+	default:
+		return false
+	}
+}
+
+// needsAtomicOutcome reports whether a bounded outcome body has an actual
+// consumer. Exact static callers may use a twin even when another ABI keeps the
+// coroutine primary. Descriptor callers can use the outcome body only when no
+// physical/scheduler use blocks making it the descriptor's sole structured
+// primary; v2 intentionally never publishes outcome and coroutine together.
+func (uses ssaOutcomePrimaryUses) needsAtomicOutcome(plan FunctionPlan) bool {
+	if uses.direct[plan.ID] {
+		return true
+	}
+	return plan.FuncRep == Dispatch && uses.dispatch[plan.ID] && !uses.blocked[plan.ID]
 }
 
 // applySSAOutcomePlainPlans selects the source-call-free V0 leaves and then a
@@ -2396,10 +2486,12 @@ func (uses ssaOutcomePrimaryUses) allows(plan FunctionPlan) bool {
 // call-graph acyclicity proof: no member of a cycle can become available to its
 // predecessor.
 //
-// Roots, spawns, compiler-lowered incoming calls, first-class references, raw
-// entries, recursion and open execution remain ordinary LLVM coroutines. The
-// path proof consumes ProgramIR's block-local costs and successor indexes;
-// analysis does not rescan raw SSA or build a second CFG.
+// Scheduler/ingress roots, spawns, compiler-lowered incoming calls, raw
+// entries, recursion and open execution remain ordinary LLVM coroutines. A
+// first-class target may use outcome as its sole primary only when every known
+// invocation is a synchronous closed v2 descriptor call; any other use blocks
+// that collapse. The path proof consumes ProgramIR's block-local costs and
+// successor indexes; analysis does not rescan raw SSA or build a second CFG.
 func applySSAOutcomePlainPlans(
 	base *Plan,
 	byID map[FunctionID]*ssa.Function,
@@ -2437,7 +2529,7 @@ func applySSAOutcomePlainPlans(
 	}
 	eligible := func(plan FunctionPlan, function *ssa.Function, facts SSAFunctionBodyFacts, classified bool) bool {
 		if function == nil || len(function.FreeVars) != 0 || !classified || facts.HasCycle || facts.AtomicPath == nil ||
-			facts.InstructionCount <= 0 || !primaryUses.direct[plan.ID] {
+			facts.InstructionCount <= 0 || !primaryUses.needsAtomicOutcome(plan) {
 			return false
 		}
 		for _, lowered := range loweredCalls[function] {
@@ -2460,10 +2552,10 @@ func applySSAOutcomePlainPlans(
 		plan.AtomicCost = cost
 		plan.AtomicCostProof = proof
 		plan.AtomicCostCertificate = certificate
-		// A target with no dynamic/root/raw entry obligation can make the
-		// synchronous outcome ABI its managed primary as before. Otherwise retain
-		// the coroutine primary and emit the same proven outcome body as a static
-		// twin; exact direct calls select it while dynamic calls keep their ABI.
+		// A target reached exclusively by exact static calls or synchronous v2
+		// descriptor dispatch can make the outcome ABI its managed primary.
+		// Scheduler/defer/raw obligations retain the coroutine primary and expose
+		// this proof only as an exact-static outcome twin.
 		if primaryUses.allows(plan) {
 			plan.Emission = EmitOutcomePlain
 			plan.ManagedEntry = ManagedEntryOutcomePlain
@@ -2562,6 +2654,7 @@ func applySSAStaticOutcomePlans(
 	callPlans map[ssa.CallInstruction]SSACallPlan,
 	loweredCalls map[*ssa.Function][]SSALoweredCall,
 	elidedCalls map[ssa.CallInstruction]bool,
+	exactInterfaceReceivers map[*ssa.Call]ssa.Value,
 	primaryUses ssaOutcomePrimaryUses,
 ) error {
 	if base == nil {
@@ -2572,7 +2665,8 @@ func applySSAStaticOutcomePlans(
 		ids[function] = id
 	}
 	type staticCall struct {
-		target FunctionID
+		targets  []FunctionID
+		dispatch bool
 	}
 	outgoing := make(map[FunctionID][]staticCall)
 	sourceOutgoing := make(map[FunctionID]int)
@@ -2594,16 +2688,34 @@ func applySSAStaticOutcomePlans(
 		if !owned || !evaluatedCalls[call] {
 			continue
 		}
-		exact := call != nil && call.Common() != nil &&
+		common := call.Common()
+		exactInterface := ssaOutcomeExactInterfaceCall(call, exactInterfaceReceivers)
+		exactStatic := call != nil && common != nil &&
 			callPlan.Kind == CallDirect && callPlan.Transport == ManagedTransport &&
-			!callPlan.Open && !callPlan.MayBeNil && !callPlan.SyncDispatch && !callPlan.RawPlain &&
+			!callPlan.Open && (!callPlan.MayBeNil || exactInterface) &&
+			!callPlan.SyncDispatch && !callPlan.RawPlain &&
 			len(callPlan.Targets) == 1 &&
-			(callPlan.Rep == DirectCoro || callPlan.Rep == DirectPlain)
-		if !exact {
+			(callPlan.Rep == DirectCoro || callPlan.Rep == DirectPlain ||
+				exactInterface && callPlan.Rep == Dispatch)
+		// A closed managed descriptor call is equally exact for unbounded
+		// static-outcome closure when every frozen candidate publishes a
+		// synchronous outcome capability. The descriptor (including an interface
+		// itab descriptor) selects one candidate at run time and preserves the nil
+		// fault, but no candidate can park.
+		// Bounded atomic-cost planning remains singleton/direct until its
+		// certificate schema can bind a complete target set and worst-case cost.
+		exactDispatch := call != nil && common != nil && !exactInterface && common.StaticCallee() == nil &&
+			callPlan.Kind == CallDirect && callPlan.Rep == Dispatch &&
+			callPlan.Transport == ManagedTransport && !callPlan.Open &&
+			!callPlan.SyncDispatch && !callPlan.RawPlain && len(callPlan.Targets) != 0
+		if !exactStatic && !exactDispatch {
 			invalidCall[owner] = true
 			continue
 		}
-		outgoing[owner] = append(outgoing[owner], staticCall{target: callPlan.Targets[0]})
+		outgoing[owner] = append(outgoing[owner], staticCall{
+			targets:  append([]FunctionID(nil), callPlan.Targets...),
+			dispatch: exactDispatch,
+		})
 		sourceOutgoing[owner]++
 	}
 	// Compiler-inserted calls participate in the same exact closure. A terminal
@@ -2638,7 +2750,7 @@ func applySSAStaticOutcomePlans(
 				invalidCall[owner] = true
 				continue
 			}
-			outgoing[owner] = append(outgoing[owner], staticCall{target: targetID})
+			outgoing[owner] = append(outgoing[owner], staticCall{targets: []FunctionID{targetID}})
 		}
 	}
 
@@ -2696,13 +2808,33 @@ func applySSAStaticOutcomePlans(
 		changed = false
 		for id := range eligible {
 			for _, call := range outgoing[id] {
-				target, found := base.Lookup(call.target)
-				plainUnsafe := target.ManagedEntry == ManagedEntryPlain &&
-					(target.Effect.MaySuspend() || target.Exec.Contains(MayUnwind))
-				coroutineUnavailable := (target.ManagedEntry == ManagedEntryCoroutine ||
-					target.ManagedEntry == ManagedEntryOutcomePlain) &&
-					!target.HasStaticOutcome() && !eligible[target.ID]
-				if !found || target.ManagedEntry == ManagedEntryNone || plainUnsafe || coroutineUnavailable {
+				callAvailable := len(call.targets) != 0
+				for _, targetID := range call.targets {
+					target, found := base.Lookup(targetID)
+					available := found && target.ManagedEntry != ManagedEntryNone
+					if call.dispatch {
+						// A v2 descriptor publishes one structured ABI. A coroutine
+						// primary may own an exact-call outcome twin, but that twin is
+						// not stored in the descriptor and therefore cannot close a
+						// synchronous dynamic caller. Plain/outcome mixing is likewise
+						// left to a future explicit non-coroutine dispatch recipe.
+						available = available &&
+							target.ManagedEntry == ManagedEntryOutcomePlain &&
+							target.HasStaticOutcome()
+					} else {
+						plainUnsafe := target.ManagedEntry == ManagedEntryPlain &&
+							(target.Effect.MaySuspend() || target.Exec.Contains(MayUnwind))
+						structuredUnavailable := (target.ManagedEntry == ManagedEntryCoroutine ||
+							target.ManagedEntry == ManagedEntryOutcomePlain) &&
+							!target.HasStaticOutcome() && !eligible[target.ID]
+						available = available && !plainUnsafe && !structuredUnavailable
+					}
+					if !available {
+						callAvailable = false
+						break
+					}
+				}
+				if !callAvailable {
 					delete(eligible, id)
 					changed = true
 					break
@@ -3071,7 +3203,12 @@ func addSSAClassifiedDemandReferences(
 		}
 		for _, target := range targets {
 			_, syncOnly := synchronous[target]
-			if err := graph.AddReference(ReferenceEdge{Owner: ids[owner], Target: ids[target], SyncOnly: syncOnly}); err != nil {
+			if err := graph.AddReference(ReferenceEdge{
+				// The synchronous subset is the exact raw equality/hash callback
+				// domain. Remaining ABI references are managed method descriptors:
+				// they demand reachability but do not pin a coroutine code entry.
+				Owner: ids[owner], Target: ids[target], PhysicalABI: syncOnly, SyncOnly: syncOnly,
+			}); err != nil {
 				return fmt.Errorf("coro: add demand-only function reference from %q to %q: %w", owner.Name(), target.Name(), err)
 			}
 		}
@@ -3184,6 +3321,63 @@ func addSSAManagedValueReferenceEdges(
 		}
 	}
 	return nil
+}
+
+// classifySSAExactRawCConversions recognizes the transport boundary which Go
+// syntax spells as CCallback(fn): an exact context-free managed function is
+// converted to one frontend-declared raw C code pointer. The type-directed
+// function flow has already proved that the two sides use different physical
+// transports. Such a conversion is itself an address publication, even when a
+// Go wrapper returns or stores the pointer before a later C call; it therefore
+// needs raw/plain demand without manufacturing a managed function-value use.
+//
+// Non-exact or open conversions remain unclassified and fail later at the raw
+// adapter preflight. This helper grants no dynamic descriptor-to-C conversion.
+func classifySSAExactRawCConversions(
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	canonicalizer *ssaFunctionCanonicalizer,
+	flow *ssaFuncFlow,
+) (map[ssa.Value]*ssa.Function, error) {
+	result := make(map[ssa.Value]*ssa.Function)
+	for _, owner := range functions {
+		for _, block := range owner.Blocks {
+			for _, instruction := range block.Instrs {
+				value, ok := instruction.(ssa.Value)
+				if !ok {
+					continue
+				}
+				var source ssa.Value
+				switch conversion := value.(type) {
+				case *ssa.ChangeType:
+					source = conversion.X
+				case *ssa.Convert:
+					source = conversion.X
+				default:
+					continue
+				}
+				if !flow.rawCValue(value) || flow.rawCValue(source) {
+					continue
+				}
+				target, exact := exactSSAContextFreeFunctionValue(source)
+				if !exact || target == nil {
+					continue
+				}
+				canonical, resolved, err := canonicalizer.resolve(target)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"coro: resolve exact raw-C conversion target %q in %q: %w",
+						target.Name(), owner.Name(), err,
+					)
+				}
+				if !resolved || canonical == nil || !included[canonical] {
+					continue
+				}
+				result[value] = canonical
+			}
+		}
+	}
+	return result, nil
 }
 
 func addSSAClassifiedRawPlainReferences(
@@ -3307,6 +3501,7 @@ func addSSAReferenceEdges(
 	staticCodeAddressCallArguments []ssaCallArgumentUse,
 	syncOnlyDescriptorCallArguments []ssaCallArgumentUse,
 	conditionalStores map[*ssa.Store]*ssa.Function,
+	rawCConversionTargets map[ssa.Value]*ssa.Function,
 ) error {
 	syncOnlyArguments := make(map[ssaCallArgumentUse]struct{}, len(directPlainCallArguments))
 	rawPlainArguments := make(map[ssaCallArgumentUse]struct{}, len(rawDirectPlainCallArguments)+len(rawFunctionAddressCallArguments))
@@ -3395,6 +3590,25 @@ func addSSAReferenceEdges(
 				if _, debug := instruction.(*ssa.DebugRef); debug {
 					continue
 				}
+				var rawCConversionSource ssa.Value
+				if value, ok := instruction.(ssa.Value); ok {
+					if target := rawCConversionTargets[value]; target != nil {
+						if err := graph.AddReference(ReferenceEdge{
+							Owner: ids[owner], Target: ids[target], RawPlain: true,
+						}); err != nil {
+							return fmt.Errorf(
+								"coro: add inferred raw-C conversion reference from %q to %q: %w",
+								owner.Name(), target.Name(), err,
+							)
+						}
+						switch conversion := value.(type) {
+						case *ssa.ChangeType:
+							rawCConversionSource = conversion.X
+						case *ssa.Convert:
+							rawCConversionSource = conversion.X
+						}
+					}
+				}
 				call, callInstruction := instruction.(ssa.CallInstruction)
 				if callInstruction && call.Common() != nil {
 					for argument, value := range call.Common().Args {
@@ -3429,6 +3643,12 @@ func addSSAReferenceEdges(
 				}
 				for _, operand := range operands {
 					if operand == nil || *operand == nil || operand == calleeOperand {
+						continue
+					}
+					if rawCConversionSource != nil && *operand == rawCConversionSource {
+						// The conversion above is the physical publication. Retaining its
+						// source as an ordinary managed value would emit an unused managed
+						// twin for a raw-only callback.
 						continue
 					}
 					if store, ok := instruction.(*ssa.Store); ok && operand == &store.Val {
@@ -3486,7 +3706,9 @@ func addSSAReferenceEdges(
 						}
 					}
 					for _, target := range sortedSSACandidates(flow.materializedTargets(*operand), ids, included) {
-						if err := graph.AddReference(ReferenceEdge{Owner: ids[owner], Target: ids[target]}); err != nil {
+						if err := graph.AddReference(ReferenceEdge{
+							Owner: ids[owner], Target: ids[target], RawPlain: flow.rawCValue(*operand),
+						}); err != nil {
 							return fmt.Errorf("coro: add SSA function reference from %q to %q: %w", owner.Name(), target.Name(), err)
 						}
 					}

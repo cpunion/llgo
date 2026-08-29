@@ -49,7 +49,10 @@ func coroExactInterfaceMakeInvoke(box *ssa.MakeInterface) (*ssa.Call, bool) {
 	return call, true
 }
 
-func coroPlannedExactInterfaceMakeElision(
+// coroProveExactInterfaceMakeElision is the analysis-side permission to omit
+// interface allocation helpers. Physical planning independently binds that
+// permission to the selected occurrence-local call recipe before emission.
+func coroProveExactInterfaceMakeElision(
 	plan *coro.SSAPlan,
 	box *ssa.MakeInterface,
 ) (bool, error) {
@@ -65,6 +68,7 @@ func coroPlannedExactInterfaceMakeElision(
 		return false, nil
 	}
 	return coroExactInterfaceTargetDirectPlain(targetPlan) ||
+		targetPlan.HasStaticOutcome() ||
 		coroExactInterfaceTargetDirectAwait(targetPlan), nil
 }
 
@@ -81,7 +85,7 @@ func (p *context) compileCoroExactInterfaceCall(
 	call *ssa.Call,
 	instructionPlan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if !p.hasCoroPhysicalBody() || call == nil ||
+	if !p.hasStructuredOutcomePhysicalBody() || call == nil ||
 		instructionPlan.control != coroPhysicalControlExactInterfaceCall ||
 		instructionPlan.controlTarget == nil ||
 		instructionPlan.controlTargetID == "" ||
@@ -221,6 +225,55 @@ func (p *context) compileCoroExactInterfaceAwait(
 	}
 	result := p.compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
 		b, target, llssa.Nil, arguments, nil, keepaliveSlots,
+		instructionPlan.recoverAlias,
+	)
+	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
+	markCoroReflectTypeMethodByNameCalls(b, reflectCheck, result.physicalCalls)
+	b.EmitReflectTypeMethodCheckedLoad(result.value, reflectCheck)
+	p.recordCoroValueAddress(call, result.address)
+	return result.value
+}
+
+// compileCoroExactInterfaceOutcome emits the same synchronous outcome
+// transaction as an exact static call, with the concrete receiver proven by
+// the occurrence-local interface-flow certificate prepended to its arguments.
+// No interface value, itab lookup, or descriptor capability probe survives.
+func (p *context) compileCoroExactInterfaceOutcome(
+	b llssa.Builder,
+	call *ssa.Call,
+	instructionPlan coroPhysicalInstructionPlan,
+) llssa.Expr {
+	if !p.hasStructuredOutcomePhysicalBody() || call == nil ||
+		instructionPlan.control != coroPhysicalControlDirectOutcome ||
+		instructionPlan.controlTarget == nil ||
+		instructionPlan.controlTargetID == "" ||
+		instructionPlan.controlReceiver == nil {
+		panic("exact interface outcome escaped its frozen physical control recipe")
+	}
+	plan := p.compilation.immutablePlan()
+	if plan == nil {
+		panic("exact interface outcome has no immutable compilation plan")
+	}
+	receiver, target, targetPlan, exact, err := plan.ResolveExactInterfaceCall(call)
+	if err != nil {
+		panic(err)
+	}
+	if !exact || receiver != instructionPlan.controlReceiver ||
+		target != instructionPlan.controlTarget ||
+		targetPlan.ID != instructionPlan.controlTargetID ||
+		!targetPlan.HasStaticOutcome() {
+		panic("exact interface outcome disagrees with its frozen physical control recipe")
+	}
+
+	p.emitPCLineLabel(b, call.Pos())
+	arguments := make([]llssa.Expr, 0, len(call.Common().Args)+1)
+	arguments = append(arguments, p.compileValue(b, receiver))
+	arguments = append(arguments, p.compileValues(b, call.Common().Args, fnNormal)...)
+	if instructionPlan.recoverAlias {
+		p.observeCoroPhysicalRecoverAlias(call)
+	}
+	result := p.compileCoroStaticOutcomeTargetCallAliasResult(
+		b, target, arguments, instructionPlan.directOutcomeNativeResult,
 		instructionPlan.recoverAlias,
 	)
 	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)

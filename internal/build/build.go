@@ -314,7 +314,7 @@ func applyFrozenCallableContractPolicy(
 }
 
 // isCoroManagedDescriptorCallOrDefer recognizes the ordinary function-value
-// carriers for which cl owns the complete v1 {descriptor, environment} ABI.
+// carriers for which cl owns the complete v2 {descriptor, environment} ABI.
 // A defer evaluates the same callee and arguments now, then consumes the
 // descriptor through its cleanup recipe. Spawn has a separate predicate
 // because it creates an independent scheduler G and discards source results.
@@ -411,6 +411,20 @@ func isCoroManagedDescriptorSpawn(call ssa.CallInstruction) bool {
 // structural identity resolver is composed with builder identity policy.
 // Builders use this helper instead of calling AnalyzeSSA directly.
 func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.SSAPlan, error) {
+	if len(in.requiredClosedDynamic) != 0 {
+		closed := make(map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate, len(in.requiredClosedDynamic))
+		for call, certificate := range in.requiredClosedDynamic {
+			closed[call] = cloneCoroClosedDynamicCallCertificate(certificate)
+		}
+		in.requiredClosedDynamic = closed
+	}
+	if len(in.requiredGlobalFunctionSlots) != 0 {
+		globalSlots := make(map[ssa.CallInstruction]coroGlobalFunctionSlotProof, len(in.requiredGlobalFunctionSlots))
+		for call, proof := range in.requiredGlobalFunctionSlots {
+			globalSlots[call] = cloneCoroGlobalFunctionSlotProof(proof)
+		}
+		in.requiredGlobalFunctionSlots = globalSlots
+	}
 	// Keep the builder/frontend policy that exists before context-dependent
 	// intrinsic effects are added. A raw-plain variant shares the source SSA
 	// body, but an exact worker syscall call has different physical semantics:
@@ -2103,6 +2117,75 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 		}
 	}
 
+	// A type-directed Go-function -> raw-C ChangeType is already an exact
+	// physical address publication in the SSA plan. It may be returned or stored
+	// by an ordinary Go wrapper before the eventual C boundary, so requiring the
+	// conversion to appear directly as a classified call argument would lose
+	// valid callbacks such as TLS/FLS destructors. Seed every live, closed
+	// conversion here; the second fixed point marks only its target as a public
+	// RawPlainEntry and keeps the source operand out of managed demand.
+	for _, owner := range preliminary.Functions() {
+		if owner.Function == nil || owner.Plan.Demand == coro.NoDemand {
+			continue
+		}
+		for _, block := range owner.Function.Blocks {
+			for _, instruction := range block.Instrs {
+				value, ok := instruction.(ssa.Value)
+				if !ok {
+					continue
+				}
+				var source ssa.Value
+				switch conversion := value.(type) {
+				case *ssa.ChangeType:
+					source = conversion.X
+				case *ssa.Convert:
+					source = conversion.X
+				default:
+					continue
+				}
+				resultPlan, resultOK := preliminary.ValuePlan(value)
+				sourcePlan, sourceOK := preliminary.ValuePlan(source)
+				if !resultOK || !sourceOK || len(resultPlan.Funcs) != 1 || len(sourcePlan.Funcs) != 1 {
+					continue
+				}
+				resultLeaf, sourceLeaf := resultPlan.Funcs[0], sourcePlan.Funcs[0]
+				if len(resultLeaf.Path) != 0 || len(sourceLeaf.Path) != 0 ||
+					resultLeaf.Transport != coro.RawCCodePointer || sourceLeaf.Transport != coro.ManagedTransport {
+					continue
+				}
+				if resultLeaf.MayBeNil || len(resultLeaf.Targets) != 1 ||
+					len(sourceLeaf.Targets) != 1 || sourceLeaf.Targets[0] != resultLeaf.Targets[0] {
+					return nil, fmt.Errorf(
+						"live raw-C conversion %q in %q has no exact non-nil singleton target",
+						value.Name(), owner.Function.Name(),
+					)
+				}
+				target, found := preliminary.Function(resultLeaf.Targets[0])
+				if !found || target == nil || target.Signature == nil || len(target.FreeVars) != 0 {
+					return nil, fmt.Errorf(
+						"live raw-C conversion %q in %q has no owned context-free target",
+						value.Name(), owner.Function.Name(),
+					)
+				}
+				targetPlan, planned := preliminary.FunctionPlan(target)
+				if !planned || !targetPlan.RawPlainDemand {
+					return nil, fmt.Errorf(
+						"live raw-C conversion target %q in %q lacks inferred raw provenance",
+						target.Name(), owner.Function.Name(),
+					)
+				}
+				if err := enqueueGoBody(target, true, false, coroRawABIPlainProvenance{
+					parent: owner.Function,
+					site:   "typed raw-C function conversion",
+				}); err != nil {
+					return nil, err
+				}
+				closure.entries[target] = struct{}{}
+				closure.recordRawReference(owner.Function, target)
+			}
+		}
+	}
+
 	// A required-plain compiler/runtime ABI root is a physical synchronous
 	// crossing just like a published raw callback address. New C callback roots
 	// already carry RawPlainDemand; older compiler-runtime crossings enter the
@@ -2343,6 +2426,48 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 					}
 				}
 				if call.Common().StaticCallee() == nil {
+					certificate, closed := closure.closedDynamic[call]
+					if closed && !call.Common().IsInvoke() && call.Common().Method == nil &&
+						!callPlan.Open && callPlan.MayBeNil == certificate.MayBeNil &&
+						len(callPlan.Targets) == len(certificate.Targets) {
+						// The global/field flow proof closes the descriptor target set.
+						// The preliminary plan may still carry OutcomeStructured solely
+						// because this call has not yet received its SyncDispatch edge, so
+						// admit that one provisional bit to break the fixed-point cycle.
+						// The rebuilt SSA plan subsequently requires Effect == NoSuspend,
+						// no preemption, and one descriptor-backed EmitPlain primary before
+						// code generation. Upgrade only this exact occurrence; ordinary
+						// readers of the same descriptor retain managed await semantics.
+						synchronous := true
+						for index, target := range certificate.Targets {
+							targetID, identified := preliminary.FunctionID(target)
+							targetPlan, targetPlanned := preliminary.FunctionPlan(target)
+							if !identified || callPlan.Targets[index] != targetID || !targetPlanned ||
+								targetPlan.External != coro.Defined || targetPlan.FuncRep != coro.Dispatch ||
+								targetPlan.Effect&^coro.OutcomeStructured != coro.NoSuspend ||
+								targetPlan.Exec.Contains(coro.NeedsPreempt) {
+								synchronous = false
+								break
+							}
+						}
+						if synchronous {
+							priorCertificate := certificate
+							certificate.SyncDispatch = true
+							closure.closedDynamic[call] = cloneCoroClosedDynamicCallCertificate(certificate)
+							if proof, globalSlot := in.requiredGlobalFunctionSlots[call]; globalSlot {
+								if proof.call != call || !sameCoroClosedDynamicCallCertificate(
+									proof.certificate, priorCertificate,
+								) {
+									return nil, fmt.Errorf(
+										"live raw ABI global function-slot call in %q lost its frozen proof before synchronous refinement",
+										fn.Name(),
+									)
+								}
+								proof.certificate = cloneCoroClosedDynamicCallCertificate(certificate)
+								in.requiredGlobalFunctionSlots[call] = proof
+							}
+						}
+					}
 					continue
 				}
 				if callPlan.Kind == coro.CallForeign {
@@ -2722,7 +2847,11 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 					certificate, closed := raw.closedDynamic[call]
 					if !closed || call.Common().IsInvoke() || call.Common().Method != nil || callPlan.Open || !callPlan.SyncDispatch ||
 						callPlan.MayBeNil != certificate.MayBeNil || len(callPlan.Targets) != len(certificate.Targets) {
-						return fmt.Errorf("live raw ABI plain closure function %q (%s) has dynamic/open call %q", functionPlan.ID, fn.String(), call.String())
+						return fmt.Errorf(
+							"live raw ABI plain closure function %q (%s) has dynamic/open call %q (closed=%t sync=%t open=%t targets=%d certificate-targets=%d)",
+							functionPlan.ID, fn.String(), call.String(), closed, callPlan.SyncDispatch,
+							callPlan.Open, len(callPlan.Targets), len(certificate.Targets),
+						)
 					}
 					for index, target := range certificate.Targets {
 						targetID, found := plan.FunctionID(target)
@@ -5241,7 +5370,7 @@ func activeCoroPanicABIVersion(conf *Config) string {
 }
 
 func activeCoroFuncRepABIVersion(conf *Config) string {
-	return coro.FuncRepABIV1
+	return coro.FuncRepABIV2
 }
 
 // nativeCoroDoorbellRuntimeABI mirrors the production target file selection

@@ -3,15 +3,18 @@ package main
 
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
-// CHECK-LABEL: define ptr @"main.New$coro"(
+// CHECK-LABEL: define void @"main.New$outcome"(
 // CHECK: call ptr @"{{.*}}AllocZ"(
-// CHECK: insertvalue %"{{.*}}iface" { ptr @__llgo_static_itab.
-// CHECK: call i8 @llvm.coro.suspend(
+// CHECK: insertvalue %"{{.*}}iface" { ptr @{{.*}}, ptr undef }, ptr
+// CHECK: store i32 1
+// CHECK: ret void
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
-// CHECK-LABEL: define ptr @"main.(*errorString).Error$coro"(
-// CHECK: call i8 @llvm.coro.suspend(
+// CHECK-LABEL: define void @"main.(*errorString).Error$outcome"(
+// CHECK-NOT: call i8 @llvm.coro.suspend(
 // CHECK: load %"{{.*}}String"
+// CHECK: store i32 1
+// CHECK: ret void
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.main$coro"(

@@ -223,6 +223,7 @@ func TestImportedLibraryEntriesUsePublishedPhysicalDeclarations(t *testing.T) {
 	const source = `package foo
 func Imported(value uint32) uint32
 func Caller(value uint32) uint32 { return Imported(value) + 1 }
+func Export() func(uint32) uint32 { return Imported }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
@@ -241,7 +242,7 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 		CoroABI:        coro.PhysicalABIV1,
 		SchedulerABI:   coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:       coro.PanicExplicitStatusABIV0,
-		FuncRepABI:     coro.FuncRepABIV1,
+		FuncRepABI:     coro.FuncRepABIV2,
 		TargetTriple:   prog.TargetSpec().Triple,
 		TargetCPU:      prog.TargetSpec().CPU,
 		TargetFeatures: prog.TargetSpec().Features,
@@ -273,6 +274,7 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 	}
 	imported := ssaPkg.Func("Imported")
 	caller := ssaPkg.Func("Caller")
+	export := ssaPkg.Func("Export")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = libraryMetadata.CoroABI
 	functionIDs.SchedulerABI = libraryMetadata.SchedulerABI
@@ -293,14 +295,17 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 		ID:            importedID,
 		ABIHash:       abiHash,
 		Effect:        coro.MayPark,
-		FuncRep:       coro.DirectCoro,
+		FuncRep:       coro.Dispatch,
 		Primary:       coro.PrimaryCoroutine,
 		ManagedEntry:  coro.ManagedEntryCoroutine,
 		PrimarySymbol: baseSymbol + coroPrimarySuffix,
 	}
 	plan, err := coro.AnalyzeSSA(
 		ssaPkg.Prog,
-		coro.Roots{{Function: caller, Demand: coro.AsyncDemand}},
+		coro.Roots{
+			{Function: caller, Demand: coro.AsyncDemand},
+			{Function: export, Demand: coro.SyncDemand},
+		},
 		coro.SSAConfig{
 			EmissionUniverse:     ssaUniverse,
 			FunctionIDs:          functionIDs,
@@ -319,7 +324,7 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 	importedPlan, found := plan.FunctionPlan(imported)
 	if !found || importedPlan.External != coro.ExternalKnown ||
 		importedPlan.Emission != coro.EmitExternal ||
-		importedPlan.FuncRep != coro.DirectCoro ||
+		importedPlan.FuncRep != coro.Dispatch ||
 		importedPlan.Effect != fact.Effect {
 		t.Fatalf("imported plan = %+v, present=%t", importedPlan, found)
 	}
@@ -407,14 +412,17 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 		ID:            plainID,
 		ABIHash:       plainABIHash,
 		Effect:        coro.NoSuspend,
-		FuncRep:       coro.DirectPlain,
+		FuncRep:       coro.Dispatch,
 		Primary:       coro.PrimaryPlain,
 		ManagedEntry:  coro.ManagedEntryPlain,
 		PrimarySymbol: plainBaseSymbol,
 	}
 	plainPlan, err := coro.AnalyzeSSA(
 		ssaPkg.Prog,
-		coro.Roots{{Function: caller, Demand: coro.SyncDemand}},
+		coro.Roots{
+			{Function: caller, Demand: coro.SyncDemand},
+			{Function: export, Demand: coro.SyncDemand},
+		},
 		coro.SSAConfig{
 			EmissionUniverse:     plainSSAUniverse,
 			FunctionIDs:          plainFunctionIDs,
@@ -433,7 +441,7 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 	plainImportedPlan, found := plainPlan.FunctionPlan(imported)
 	if !found || plainImportedPlan.External != coro.ExternalKnown ||
 		plainImportedPlan.Emission != coro.EmitExternal ||
-		plainImportedPlan.FuncRep != coro.DirectPlain ||
+		plainImportedPlan.FuncRep != coro.Dispatch ||
 		plainImportedPlan.Effect != coro.NoSuspend {
 		t.Fatalf("plain imported plan = %+v, present=%t", plainImportedPlan, found)
 	}
@@ -453,6 +461,32 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 	plainModule := plainPkg.Module()
 	if err := llvm.VerifyModule(plainModule, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify imported plain consumer: %v\n%s", err, plainModule.String())
+	}
+	plainDescriptor := coroDispatchProducerOnlyGlobalWithPrefix(t, plainModule, coroPlainDispatchDescriptorPrefix)
+	plainInitializer := plainDescriptor.Initializer()
+	wantPlainFlags := uint64(llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagNoCapture | llssa.CoroDispatchFlagPlainNoUnwind)
+	if got := plainInitializer.Operand(1).ZExtValue(); got != wantPlainFlags {
+		t.Fatalf("imported plain descriptor flags = %#x, want %#x\n%s", got, wantPlainFlags, plainModule.String())
+	}
+	plainThunk := plainInitializer.Operand(4)
+	if plainThunk.IsAFunction().IsNil() || !strings.HasPrefix(plainThunk.Name(), coroPlainDispatchThunkPrefix) {
+		t.Fatalf("imported plain descriptor entry = %v, want one plain thunk\n%s", plainThunk, plainModule.String())
+	}
+	if plainInitializer.Operand(5).IsAConstantPointerNull().IsNil() {
+		t.Fatalf("imported plain descriptor unexpectedly publishes a structured entry:\n%s", plainModule.String())
+	}
+	if code := plainInitializer.Operand(8); code.IsAFunction().IsNil() || code.Name() != plainFact.PrimarySymbol {
+		t.Fatalf("imported plain descriptor code entry = %v, want %q\n%s", code, plainFact.PrimarySymbol, plainModule.String())
+	}
+	plainCall := coroDispatchProducerOnlyCallTo(t, plainThunk, plainFact.PrimarySymbol)
+	if got := plainCall.OperandsCount() - 1; got != 1 {
+		t.Fatalf("imported plain thunk target arguments = %d, want one source argument\n%s", got, plainModule.String())
+	}
+	for function := plainModule.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if strings.HasPrefix(function.Name(), coroOutcomeDispatchThunkPrefix) ||
+			strings.HasPrefix(function.Name(), coroCoroDispatchThunkPrefix) {
+			t.Fatalf("imported plain descriptor emitted an unused structured thunk %q\n%s", function.Name(), plainModule.String())
+		}
 	}
 	plainDeclaration := plainModule.NamedFunction(plainFact.PrimarySymbol)
 	if plainDeclaration.IsNil() || !plainDeclaration.FirstBasicBlock().IsNil() {
@@ -505,6 +539,31 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 	module := pkg.Module()
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify imported coroutine consumer: %v\n%s", err, module.String())
+	}
+	descriptor := coroDispatchProducerOnlyGlobalWithPrefix(t, module, coroPlainDispatchDescriptorPrefix)
+	initializer := descriptor.Initializer()
+	wantFlags := uint64(llssa.CoroDispatchFlagHasCoro | llssa.CoroDispatchFlagNoCapture)
+	if got := initializer.Operand(1).ZExtValue(); got != wantFlags {
+		t.Fatalf("imported coroutine descriptor flags = %#x, want %#x\n%s", got, wantFlags, module.String())
+	}
+	if initializer.Operand(4).IsAConstantPointerNull().IsNil() {
+		t.Fatalf("imported coroutine descriptor unexpectedly publishes a plain entry:\n%s", module.String())
+	}
+	coroThunk := initializer.Operand(5)
+	if coroThunk.IsAFunction().IsNil() || !strings.HasPrefix(coroThunk.Name(), coroCoroDispatchThunkPrefix) {
+		t.Fatalf("imported coroutine descriptor structured entry = %v, want one coroutine thunk\n%s", coroThunk, module.String())
+	}
+	if code := initializer.Operand(8); code.IsAFunction().IsNil() || code.Name() != fact.PrimarySymbol {
+		t.Fatalf("imported coroutine descriptor code entry = %v, want %q\n%s", code, fact.PrimarySymbol, module.String())
+	}
+	call := coroDispatchProducerOnlyCallTo(t, coroThunk, fact.PrimarySymbol)
+	if got := call.OperandsCount() - 1; got != 3 {
+		t.Fatalf("imported coroutine thunk target arguments = %d, want g+out+source argument\n%s", got, module.String())
+	}
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if strings.HasPrefix(function.Name(), coroOutcomeDispatchThunkPrefix) {
+			t.Fatalf("imported coroutine descriptor emitted an unused outcome thunk %q\n%s", function.Name(), module.String())
+		}
 	}
 	declaration := module.NamedFunction(fact.PrimarySymbol)
 	if declaration.IsNil() || !declaration.FirstBasicBlock().IsNil() {
@@ -991,7 +1050,7 @@ func TestCoroEntryResolutionPreflightRejectsMissingPlanAndCache(t *testing.T) {
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1,
+		FuncRepABI:   coro.FuncRepABIV2,
 	}
 	if err := cacheCompilation.validateCoroCacheIdentity(); err == nil || !strings.Contains(err.Error(), "CoroPlanDigest") {
 		t.Fatalf("cache identity error = %v, want missing CoroPlanDigest rejection", err)

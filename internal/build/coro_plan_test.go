@@ -430,7 +430,7 @@ func root(value *int) { _ = Advance(value, 1) }
 			}
 			metadata := coro.PlanDigestMetadata{
 				CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
-				PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV1,
+				PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV2,
 				LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 				TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 				Endianness: "little", DataLayout: "e-p:64:64",
@@ -520,7 +520,7 @@ func root(token *WaitToken, ticket WaitTicket) uint32 {
 	}
 	metadata := coro.PlanDigestMetadata{
 		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
-		PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV1,
+		PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV2,
 		LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",
@@ -1382,7 +1382,7 @@ func atomicExchange(*uint32, uint32) uint32
 
 	metadata := coro.PlanDigestMetadata{
 		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
-		PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV1,
+		PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV2,
 		LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",
@@ -1468,7 +1468,7 @@ func TestStacklessArchitectureHasOneABIIdentity(t *testing.T) {
 	if got := activeCoroPanicABIVersion(conf); got != coro.PanicExplicitStatusABIV0 {
 		t.Fatalf("panic ABI = %q", got)
 	}
-	if got := activeCoroFuncRepABIVersion(conf); got != coro.FuncRepABIV1 {
+	if got := activeCoroFuncRepABIVersion(conf); got != coro.FuncRepABIV2 {
 		t.Fatalf("function representation ABI = %q", got)
 	}
 }
@@ -1557,18 +1557,11 @@ func TestRequiredCoroProgramRuntimePlanDirectPlainCFunctionArgument(t *testing.T
 //llgo:type C
 type CCallback func()
 
-var dynamic func()
-
 func installC(CCallback) {}
 func syncCallback() { for i := 0; i < 2; i++ {} }
 func managedCaller() { syncCallback() }
-func dynamicCallback() { dynamic() }
-func dynamicTargetA() {}
-func dynamicTargetB() {}
-func keepDynamicOpen() { dynamic = dynamicTargetA; dynamic = dynamicTargetB }
 func install() {
 	installC(CCallback(syncCallback))
-	installC(CCallback(dynamicCallback))
 }
 `)
 	if len(fixture.directPlain) != 1 {
@@ -1576,17 +1569,12 @@ func install() {
 	}
 	use := fixture.directPlain[0]
 	syncCallback := fixture.pkg.Func("syncCallback")
-	dynamicCallback := fixture.pkg.Func("dynamicCallback")
 	if use.target != syncCallback || use.call.Parent() != fixture.pkg.Func("install") || use.argument != 0 {
 		t.Fatalf("required direct-plain callback = %+v, want install arg0 -> syncCallback", use)
 	}
 	if _, ok := fixture.requiredPlain[syncCallback]; !ok {
 		t.Fatal("sync C callback was not added to the required plain island")
 	}
-	if _, ok := fixture.requiredPlain[dynamicCallback]; ok {
-		t.Fatal("dynamic C callback incorrectly entered the required plain island")
-	}
-
 	plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
 	if err != nil {
 		t.Fatal(err)
@@ -1616,45 +1604,32 @@ func install() {
 		mixedCallback.Emission != coro.EmitPlain {
 		t.Fatalf("managed/raw C callback plan = %+v, want one shared no-suspend plain body", mixedCallback)
 	}
-	dynamicPlan, ok := plan.FunctionPlan(dynamicCallback)
-	if !ok || dynamicPlan.Effect.IsOpaque() ||
-		!dynamicPlan.Effect.Contains(coro.AwaitStructured|coro.OutcomeStructured) ||
-		dynamicPlan.Exec.IsOpaque() || dynamicPlan.FuncRep != coro.DirectCoro || dynamicPlan.RawPlainDemand {
-		t.Fatalf("dynamic C callback plan = %+v, want a closed-dynamic managed blocker without a raw entry", dynamicPlan)
-	}
+}
 
-	var dynamicUse ssa.CallInstruction
-	for _, block := range fixture.pkg.Func("install").Blocks {
-		for _, instruction := range block.Instrs {
-			call, ok := instruction.(ssa.CallInstruction)
-			if !ok || call == use.call {
-				continue
-			}
-			if target, ok := exactCoroStaticFunctionValue(fixture.ctx, call.Common().Args[0]); ok && target == dynamicCallback {
-				dynamicUse = call
-			}
-		}
+func TestCoroPlanInfersWrappedRawCConversionEntry(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func()
+
+func installC(CCallback) {}
+func callback() {}
+func wrappedCallback() CCallback { return CCallback(callback) }
+func install() { installC(wrappedCallback()) }
+`)
+	if len(fixture.directPlain) != 0 {
+		t.Fatalf("wrapped callback unexpectedly required a direct call-argument certificate: %+v", fixture.directPlain)
 	}
-	if dynamicUse == nil {
-		t.Fatal("dynamic C callback use not found")
+	plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err = fixture.analyze(coro.SSAConfig{
-		MaxPlainInstructions: -1,
-		ClassifyDirectPlainCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
-			return call == dynamicUse && argument == 0, nil
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "builder cannot authorize direct-plain ABI") {
-		t.Fatalf("unauthorized builder direct-plain error = %v", err)
-	}
-	_, err = fixture.analyze(coro.SSAConfig{
-		MaxPlainInstructions: -1,
-		ClassifyRawDirectPlainCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
-			return call == dynamicUse && argument == 0, nil
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "builder cannot authorize raw direct-plain ABI") {
-		t.Fatalf("unauthorized builder raw direct-plain error = %v", err)
+	callback := fixture.pkg.Func("callback")
+	callbackPlan := functionPlanForBuildTest(t, plan, callback)
+	if callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand ||
+		!callbackPlan.RawPlainOnly || !callbackPlan.RawPlainEntry ||
+		callbackPlan.Emission != coro.EmitRawPlain || callbackPlan.Primary != coro.PrimaryPlain ||
+		callbackPlan.FuncRep != coro.DirectPlain || !plan.HasRawPlainVariant(callback) {
+		t.Fatalf("inferred wrapped raw callback plan = %+v, want one public raw-only entry", callbackPlan)
 	}
 }
 
@@ -1895,6 +1870,25 @@ func install() { installC(CCallback(callback)) }
 		}
 		if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "real local suspend effect may-park") {
 			t.Fatalf("suspending callback error = %v", err)
+		}
+	})
+
+	t.Run("open dynamic body through wrapped conversion", func(t *testing.T) {
+		fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func(func())
+
+func installC(CCallback) {}
+func callback(dynamic func()) { dynamic() }
+func wrappedCallback() CCallback { return CCallback(callback) }
+func install() { installC(wrappedCallback()) }
+`)
+		if len(fixture.directPlain) != 0 {
+			t.Fatalf("wrapped dynamic callback unexpectedly acquired a direct argument certificate: %+v", fixture.directPlain)
+		}
+		if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil ||
+			!strings.Contains(err.Error(), "dynamic/open call") {
+			t.Fatalf("wrapped dynamic callback error = %v, want raw-closure rejection", err)
 		}
 	})
 }
@@ -2451,7 +2445,7 @@ func Leaf(value uint32) uint32 { return value + 1 }
 			CoroABI:                 coro.PhysicalABIV1,
 			SchedulerABI:            coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:                coro.PanicExplicitStatusABIV0,
-			FuncRepABI:              coro.FuncRepABIV1,
+			FuncRepABI:              coro.FuncRepABIV2,
 			EmissionUniverse:        universe}
 		lpkg, _, err := cl.NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, cl.PackageOptions{
 			Compilation: compilation,
@@ -2962,8 +2956,8 @@ func TestActiveCoroABIVersions(t *testing.T) {
 		panicABI  string
 		funcRep   string
 	}{
-		{"compile-time architecture", nil, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
-		{"target config", &Config{}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"compile-time architecture", nil, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV2},
+		{"target config", &Config{}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV2},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

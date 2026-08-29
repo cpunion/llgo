@@ -39,7 +39,7 @@ type coroPlainDispatchTestFixture struct {
 	thunkName2  string
 }
 
-func TestCoroPlainDispatchV1TargetLayoutAndLowering(t *testing.T) {
+func TestCoroPlainDispatchV2TargetLayoutAndLowering(t *testing.T) {
 	Initialize(InitAll)
 	tests := []struct {
 		name              string
@@ -119,8 +119,8 @@ func TestCoroPlainDispatchV1TargetLayoutAndLowering(t *testing.T) {
 				t.Fatalf("descriptor initializer is not a nine-field constant: %v", initializer)
 			}
 			wantFixed := []uint64{
-				uint64(CoroPlainDispatchVersionV1),
-				uint64(CoroPlainDispatchFlagsV1),
+				uint64(CoroPlainDispatchVersionV2),
+				uint64(CoroPlainDispatchFlagsV2),
 				0x0102030405060708,
 				0x090a0b0c0d0e0f10,
 			}
@@ -235,7 +235,7 @@ func TestCoroPlainDispatchV1TargetLayoutAndLowering(t *testing.T) {
 	}
 }
 
-func TestCoroPlainDispatchV1RejectsNonExactContract(t *testing.T) {
+func TestCoroPlainDispatchV2RejectsNonExactContract(t *testing.T) {
 	Initialize(InitAll)
 	fixture := newCoroPlainDispatchTestFixture(t, nil)
 	options := fixture.descriptorOptions("plain_target", "__llgo_stub.plain_target")
@@ -343,8 +343,8 @@ func newCoroPlainDispatchTestFixture(t *testing.T, target *Target) *coroPlainDis
 	}
 	target1 := makeTarget("plain_target")
 	target2 := makeTarget("plain_target_2")
-	thunkName := "__llgo_coro_func_plain_v1.target1"
-	thunkName2 := "__llgo_coro_func_plain_v1.target2"
+	thunkName := "__llgo_coro_func_plain_v2.target1"
+	thunkName2 := "__llgo_coro_func_plain_v2.target2"
 	fixture := &coroPlainDispatchTestFixture{
 		prog:       prog,
 		pkg:        pkg,
@@ -376,8 +376,8 @@ func newCoroPlainDispatchTestFixture(t *testing.T, target *Target) *coroPlainDis
 	cb := caller.MakeBody(1)
 	ret := cb.CallCoroPlainDispatch(
 		caller.Param(0), []Expr{caller.Param(1)}, CoroPlainDispatchCallOptions{
-			Version: CoroPlainDispatchVersionV1,
-			Flags:   CoroPlainDispatchFlagsV1,
+			Version: CoroPlainDispatchVersionV2,
+			Flags:   CoroPlainDispatchFlagsV2,
 			ABIHash: hash,
 			Result:  result,
 		},
@@ -396,8 +396,8 @@ func (f *coroPlainDispatchTestFixture) descriptorOptions(
 		panic("missing plain dispatch test target " + targetName)
 	}
 	return CoroPlainDispatchDescriptorOptions{
-		Version:     CoroPlainDispatchVersionV1,
-		Flags:       CoroPlainDispatchFlagsV1,
+		Version:     CoroPlainDispatchVersionV2,
+		Flags:       CoroPlainDispatchFlagsV2,
 		ABIHash:     f.hash,
 		PlainTarget: target.Expr,
 		Signature:   f.signature,

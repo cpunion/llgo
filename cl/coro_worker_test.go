@@ -712,7 +712,7 @@ func compileCoroWorkerSourceFixture(
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+		FuncRepABI:   coro.FuncRepABIV2, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

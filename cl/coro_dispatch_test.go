@@ -234,7 +234,7 @@ func Root() int { return Apply(Handler, 41) }
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1}},
+			FuncRepABI:   coro.FuncRepABIV2}},
 	)
 	if err != nil {
 		t.Fatalf("compile plain dispatch package: %v", err)
@@ -373,7 +373,7 @@ func Root() int {
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1}},
+			FuncRepABI:   coro.FuncRepABIV2}},
 	)
 	if err != nil {
 		t.Fatalf("compile zero-binding descriptor closure: %v", err)

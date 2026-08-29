@@ -335,6 +335,76 @@ func TestCoroOutcomePlainLeafNativeAndWasm32(t *testing.T) {
 	}
 }
 
+func TestCoroStaticOutcomeExactInterfaceCallsPlainTargetWithoutBoxing(t *testing.T) {
+	const source = `package foo
+
+var fail bool
+
+type Value interface { Value() int }
+type concrete struct { value int }
+
+func (value concrete) Value() int { return value.value }
+
+func Root() int {
+	var value Value = concrete{value: 42}
+	result := value.Value()
+	if fail { panic("fail") }
+	return result
+}
+`
+	prog, pkg, plan, ssaPkg := compileCoroOutcomePlainSourceWithResolution(
+		t, nil, source, "Root", 64, coro.DynamicCHAClosed,
+	)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	root := ssaPkg.Func("Root")
+	rootPlan, found := plan.FunctionPlan(root)
+	if !found || !rootPlan.StaticOutcome || !rootPlan.HasStaticOutcome() {
+		t.Fatalf("Root plan = %+v, present=%t; want static outcome capability", rootPlan, found)
+	}
+	var invoke *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(*ssa.Call); ok && call.Common().IsInvoke() {
+				invoke = call
+			}
+		}
+	}
+	receiver, target, targetPlan, exact, err := plan.ResolveExactInterfaceCall(invoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exact || receiver == nil || target == nil ||
+		!coroExactInterfaceTargetDirectPlain(targetPlan) {
+		t.Fatalf(
+			"exact interface call = receiver:%v target:%v target-plan:%+v exact:%t",
+			receiver, target, targetPlan, exact,
+		)
+	}
+
+	body := module.NamedFunction("foo.Root" + coroOutcomePlainPrimarySuffix)
+	if body.IsNil() {
+		t.Fatalf("Root outcome body is absent:\n%s", module.String())
+	}
+	ir := body.String()
+	if !strings.Contains(ir, `@foo.concrete.Value(`) {
+		t.Fatalf("Root outcome body did not call the exact plain method:\n%s", ir)
+	}
+	for _, forbidden := range []string{
+		"AllocU", "IfacePtrData", "Imethod", "NewItab",
+		coroPlainDispatchDescriptorPrefix, "$coro", "llvm.coro.",
+	} {
+		if strings.Contains(ir, forbidden) {
+			t.Fatalf("Root outcome body retained %q after exact interface lowering:\n%s", forbidden, ir)
+		}
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify exact interface outcome module: %v\n%s", err, module.String())
+	}
+}
+
 func TestCoroOutcomePlainCrossPackageMethodDeclarationUsesPhysicalABI(t *testing.T) {
 	const producerPath = "example.com/outcome/producer"
 	testProg := newEmissionTestProgram()
@@ -873,6 +943,7 @@ func Middle(value uint32, payload any, fail bool) uint32 {
 func Caller(value uint32, payload any, fail bool) uint32 {
 	return Middle(value, payload, fail)
 }
+func Export() func(uint32, any, bool) uint32 { return Imported }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
@@ -891,7 +962,7 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 		CoroABI:        coro.PhysicalABIV1,
 		SchedulerABI:   coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:       coro.PanicExplicitStatusABIV0,
-		FuncRepABI:     coro.FuncRepABIV1,
+		FuncRepABI:     coro.FuncRepABIV2,
 		TargetTriple:   prog.TargetSpec().Triple,
 		TargetCPU:      prog.TargetSpec().CPU,
 		TargetFeatures: prog.TargetSpec().Features,
@@ -925,7 +996,7 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 	functionIDs.CoroABI = libraryMetadata.CoroABI
 	functionIDs.SchedulerABI = libraryMetadata.SchedulerABI
 	functionIDs.ArchiveReady = true
-	imported, middle, caller := ssaPkg.Func("Imported"), ssaPkg.Func("Middle"), ssaPkg.Func("Caller")
+	imported, middle, caller, export := ssaPkg.Func("Imported"), ssaPkg.Func("Middle"), ssaPkg.Func("Caller"), ssaPkg.Func("Export")
 	importedID, err := coro.StableFunctionID(imported, functionIDs)
 	if err != nil {
 		t.Fatal(err)
@@ -943,7 +1014,7 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 		ABIHash:               abiHash,
 		Effect:                coro.OutcomeStructured,
 		Exec:                  coro.MayUnwind,
-		FuncRep:               coro.DirectCoro,
+		FuncRep:               coro.Dispatch,
 		Primary:               coro.PrimaryCoroutine,
 		ManagedEntry:          coro.ManagedEntryOutcomePlain,
 		AtomicCost:            3,
@@ -954,7 +1025,10 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 	}
 	plan, err := coro.AnalyzeSSA(
 		ssaPkg.Prog,
-		coro.Roots{{Function: caller, Demand: coro.AsyncDemand}},
+		coro.Roots{
+			{Function: caller, Demand: coro.AsyncDemand},
+			{Function: export, Demand: coro.SyncDemand},
+		},
 		coro.SSAConfig{
 			EmissionUniverse:     ssaUniverse,
 			FunctionIDs:          functionIDs,
@@ -974,6 +1048,7 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 	}
 	importedPlan, found := plan.FunctionPlan(imported)
 	if !found || importedPlan.Emission != coro.EmitExternal ||
+		importedPlan.FuncRep != coro.Dispatch ||
 		importedPlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
 		importedPlan.AtomicCost != fact.AtomicCost || importedPlan.AtomicCostProof != fact.AtomicCostProof ||
 		importedPlan.AtomicCostCertificate != fact.AtomicCostCertificate {
@@ -1003,6 +1078,31 @@ func Caller(value uint32, payload any, fail bool) uint32 {
 	defer module.Dispose()
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify imported outcome-plain consumer: %v\n%s", err, module.String())
+	}
+	descriptor := coroDispatchProducerOnlyGlobalWithPrefix(t, module, coroPlainDispatchDescriptorPrefix)
+	initializer := descriptor.Initializer()
+	wantFlags := uint64(llssa.CoroDispatchFlagHasOutcome | llssa.CoroDispatchFlagNoCapture)
+	if got := initializer.Operand(1).ZExtValue(); got != wantFlags {
+		t.Fatalf("imported outcome descriptor flags = %#x, want %#x\n%s", got, wantFlags, module.String())
+	}
+	if initializer.Operand(4).IsAConstantPointerNull().IsNil() {
+		t.Fatalf("imported outcome descriptor unexpectedly publishes a plain entry:\n%s", module.String())
+	}
+	outcomeThunk := initializer.Operand(5)
+	if outcomeThunk.IsAFunction().IsNil() || !strings.HasPrefix(outcomeThunk.Name(), coroOutcomeDispatchThunkPrefix) {
+		t.Fatalf("imported outcome descriptor structured entry = %v, want one outcome thunk\n%s", outcomeThunk, module.String())
+	}
+	if code := initializer.Operand(8); code.IsAFunction().IsNil() || code.Name() != fact.PrimarySymbol {
+		t.Fatalf("imported outcome descriptor code entry = %v, want %q\n%s", code, fact.PrimarySymbol, module.String())
+	}
+	call := coroDispatchProducerOnlyCallTo(t, outcomeThunk, fact.PrimarySymbol)
+	if got := call.OperandsCount() - 1; got != 6 {
+		t.Fatalf("imported outcome thunk target arguments = %d, want g+out+completion+3 source arguments\n%s", got, module.String())
+	}
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if strings.HasPrefix(function.Name(), coroCoroDispatchThunkPrefix) {
+			t.Fatalf("imported outcome descriptor emitted an unused coroutine thunk %q\n%s", function.Name(), module.String())
+		}
 	}
 	requireCoroAtomicCostReport(t, module, 1)
 	declaration := module.NamedFunction(fact.PrimarySymbol)
@@ -1092,6 +1192,18 @@ func compileCoroOutcomePlainSource(
 	source, rootName string,
 	maxPlainInstructions int,
 ) (llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Package) {
+	return compileCoroOutcomePlainSourceWithResolution(
+		t, target, source, rootName, maxPlainInstructions, coro.DynamicUnknownOnly,
+	)
+}
+
+func compileCoroOutcomePlainSourceWithResolution(
+	t *testing.T,
+	target *llssa.Target,
+	source, rootName string,
+	maxPlainInstructions int,
+	dynamicResolution coro.DynamicResolution,
+) (llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Package) {
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	var prog llssa.Program
@@ -1121,9 +1233,10 @@ func compileCoroOutcomePlainSource(
 		prog.Dispose()
 		t.Fatalf("outcome-plain fixture root %q is absent", rootName)
 	}
-	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+	config := coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
+		DynamicResolution:    dynamicResolution,
 		MaxPlainInstructions: maxPlainInstructions,
 		OutcomeMode:          coro.OutcomeExplicitStatus,
 		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
@@ -1132,7 +1245,15 @@ func compileCoroOutcomePlainSource(
 			callPlan, found, err := universe.CoroCallSitePlan(call)
 			return found && callPlan.ElidesCall(), err
 		},
-	})
+	}
+	if dynamicResolution != coro.DynamicUnknownOnly {
+		config.ClassifyDemandReferences = universe.CoroDemandReferences
+		config.ClassifySyncDemandReferences = universe.CoroSyncDemandReferences
+		config.ClassifyManagedValueReferences = universe.CoroPlanningMetadata().ManagedValueReferences
+	}
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, config,
+	)
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)

@@ -986,6 +986,14 @@ const (
 	llgoControlFork   = llgoInstrBase + 0x5a
 	llgoControlExecve = llgoInstrBase + 0x5b
 	llgoClosureEnv    = llgoInstrBase + 0x5c
+	// llgoCoroCurrentTask injects the active physical task into typed-FFI
+	// adapters. It emits no call, TLS lookup, or scheduler state.
+	llgoCoroCurrentTask = llgoInstrBase + 0x5d
+	// llgoCoroPropagatePanic re-publishes an already retained empty-interface
+	// panic pair through the current structured parent. Unlike source panic it
+	// does not start or replace a logical panic trace; typed-FFI outcome
+	// consumers use it after a synchronous descriptor has published Panic.
+	llgoCoroPropagatePanic = llgoInstrBase + 0x5e
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )

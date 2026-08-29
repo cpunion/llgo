@@ -1,9 +1,9 @@
 [OrdinaryEdges]
-__llgo$generated$promoted$Close$llgo$promoted$v1$3865dcb45620992b2c583be63613061bdae3492c7f8bca8b63298c1bdd0d6aa7$coro:
+__llgo$generated$promoted$Close$llgo$promoted$v1$72334ca22a27a268328efdb5fe4d34d0845cd682c5fc9d8d43bc25e9746cb4c0$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.e01a8bc3d67bc354c4733781da9609b6
+    __llgo_coro_frame_descriptor_v1.444abee163ce4e84d29e9a88d7852a1a
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -20,11 +20,11 @@ __llgo$generated$promoted$Close$llgo$promoted$v1$3865dcb45620992b2c583be63613061
     llvm.coro.suspend
     llvm.fake.use
     llvm.trap
-__llgo$generated$promoted$Read$llgo$promoted$v1$77977cd1ff59e9c057965095ffaaa54452747b54ee2bf81ecbe0478e075e8fd3$coro:
+__llgo$generated$promoted$Read$llgo$promoted$v1$23e8e0293d6c7fcc7c88c208674f491b845c542d9ae12a6e4d8d88fbb342d113$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.63ad0b625ca4179f4f08621af4589725
+    __llgo_coro_frame_descriptor_v1.4f5480fbdcf12ad1b4c044c500f7f0bf
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -44,5 +44,5 @@ __llgo$generated$promoted$Read$llgo$promoted$v1$77977cd1ff59e9c057965095ffaaa544
 github.com/xgo-dev/llgo/cl/_testmeta/interface_imported/api.init:
     github.com/xgo-dev/llgo/cl/_testmeta/interface_imported/api.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v12.bf6d76f28d609e7cac4525460bb69cba
+    __llgo_coro_library_effect_v13.5823ec39e04796cd29a9bbde8861b900
 

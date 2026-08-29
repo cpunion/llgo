@@ -29,7 +29,7 @@ import (
 // Keeping these as ordinary bodyful Go linkname definitions is important for
 // coroutine planning. The emission universe can pair each bodyless stdlib hook
 // with this exact source implementation and route managed callers to the sole
-// planned plain/coroutine primary instead of treating the declaration as an
+// planned managed primary instead of treating the declaration as an
 // open dynamic ABI boundary.
 
 //go:linkname atomic_storePointer internal/runtime/atomic.storePointer

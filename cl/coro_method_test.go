@@ -201,6 +201,10 @@ func Root(waiter Waiter) uint32 { <-gate; return waiter.Wait() }
 			t.Fatalf("closed pointer-receiver interface await retained %q:\n%s", forbidden, rootIR)
 		}
 	}
+	if strings.Contains(rootIR, "load { i32, i32, i64, i64, ptr, ptr, i64, i64, ptr }") ||
+		!strings.Contains(rootIR, ", i32 0, i32 5") {
+		t.Fatalf("closed pointer-receiver interface await did not select only its coroutine descriptor entry:\n%s", rootIR)
+	}
 	if strings.Contains(rootIR, "IfacePtrData") {
 		t.Fatalf("pointer-receiver interface await retained redundant receiver normalization:\n%s", rootIR)
 	}
@@ -368,5 +372,5 @@ func coroStaticMethodCompilation(plan *coro.SSAPlan, universe *EmissionUniverse)
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1}
+		FuncRepABI:   coro.FuncRepABIV2}
 }

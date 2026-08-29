@@ -31,7 +31,7 @@ import (
 // snapshots. This schema is intentionally not an archive ABI: producer
 // artifacts use the separate LibraryEffectSummarySchema, and cache identity
 // uses PlanDigestSchema.
-const SummarySchema = "llgo.coro.plan.v9"
+const SummarySchema = "llgo.coro.plan.v10"
 
 // SummaryMetadata identifies ABI and target properties that affect an
 // experimental plan snapshot. Empty fields are permitted during early

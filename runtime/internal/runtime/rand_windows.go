@@ -14,6 +14,12 @@ const windowsRandIncrement = uint64(0xa0761d6478bd642f)
 
 var windowsRandProcessSeed = newWindowsRandProcessSeed()
 
+// The Windows entropy shim owns its temporary module handle and completes the
+// system RNG request before returning. It cannot retain data or resume through
+// LLGo's scheduler; Windows currently has no bounded worker adapter, so this
+// same-thread startup/runtime boundary is an explicit synchronous contract.
+//
+//llgo:coro sync
 //go:linkname c_windowsRandom C.llgo_windows_random
 func c_windowsRandom(data unsafe.Pointer, size uintptr) c.Int
 

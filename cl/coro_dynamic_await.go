@@ -26,15 +26,70 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// compileCoroManagedDispatchAwait lowers an open Go function-value call
+// coroManagedDispatchPublishedStructuredEntry returns the one structured ABI
+// actually stored in every descriptor reachable at a closed managed call.
+// HasStaticOutcome alone is insufficient: a coroutine primary may also emit an
+// exact-call outcome twin while its shared function/interface descriptor still
+// publishes the coroutine ABI. Mixed target families retain universal dispatch.
+func coroManagedDispatchPublishedStructuredEntry(
+	plan *coro.SSAPlan,
+	callPlan coro.SSACallPlan,
+) coro.ManagedEntryKind {
+	if plan == nil || (callPlan.Kind != coro.CallDirect && callPlan.Kind != coro.CallDefer) ||
+		callPlan.Rep != coro.Dispatch ||
+		callPlan.Transport != coro.ManagedTransport || callPlan.Open ||
+		callPlan.SyncDispatch || callPlan.RawPlain || len(callPlan.Targets) == 0 {
+		return coro.ManagedEntryNone
+	}
+	published := coro.ManagedEntryNone
+	for _, targetID := range callPlan.Targets {
+		target, found := plan.Function(targetID)
+		if !found || target == nil {
+			return coro.ManagedEntryNone
+		}
+		targetPlan, found := plan.FunctionPlan(target)
+		if !found || targetPlan.ID != targetID {
+			return coro.ManagedEntryNone
+		}
+		entry := targetPlan.ManagedEntry
+		switch entry {
+		case coro.ManagedEntryCoroutine:
+		case coro.ManagedEntryOutcomePlain:
+			if !targetPlan.HasStaticOutcome() {
+				return coro.ManagedEntryNone
+			}
+		default:
+			return coro.ManagedEntryNone
+		}
+		if published == coro.ManagedEntryNone {
+			published = entry
+		} else if published != entry {
+			return coro.ManagedEntryNone
+		}
+	}
+	return published
+}
+
+func coroManagedDispatchPublishedOutcomeOnly(plan *coro.SSAPlan, callPlan coro.SSACallPlan) bool {
+	return coroManagedDispatchPublishedStructuredEntry(plan, callPlan) == coro.ManagedEntryOutcomePlain
+}
+
+func coroManagedDispatchPublishedCoroutineOnly(plan *coro.SSAPlan, callPlan coro.SSACallPlan) bool {
+	return coroManagedDispatchPublishedStructuredEntry(plan, callPlan) == coro.ManagedEntryCoroutine
+}
+
+// compileCoroManagedDispatchAwait lowers one managed Go function-value call
 // carried by the universal {descriptor, environment} representation. The
 // descriptor publishes exactly the capability of its one primary body:
-// bounded plain targets execute inline, while coroutine targets enter the
-// same scheduler-owned child transaction as an exact static await.
+// bounded plain targets execute inline, explicit-status targets complete a
+// synchronous outcome transaction, and coroutine targets enter the same
+// scheduler-owned child transaction as an exact static await.
 func (p *context) compileCoroManagedDispatchAwait(
 	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if !p.hasCoroPhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlDispatchAwait {
+	if !p.hasStructuredOutcomePhysicalBody() || call == nil ||
+		instructionPlan.control != coroPhysicalControlDispatchAwait ||
+		p.hasOutcomePlainPhysicalBody() && !instructionPlan.structuredOutcomeOnly {
 		panic("coroutine managed dispatch await escaped its frozen physical control recipe")
 	}
 
@@ -54,16 +109,107 @@ func (p *context) compileCoroManagedDispatchAwait(
 		))
 	}
 	args := p.compileValues(b, call.Call.Args, fnNormal)
-	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	if instructionPlan.recoverAlias {
 		p.observeCoroPhysicalRecoverAlias(call)
 	}
-	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, call.Call.Signature(), nil, keepaliveSlots,
-		false, instructionPlan.recoverAlias, false,
-	)
+	var result coroAwaitedValue
+	if instructionPlan.structuredOutcomeOnly {
+		result = p.compileCoroManagedDispatchOutcomeOnlyValueResult(
+			b, fn, args, call.Call.Signature(), instructionPlan.recoverAlias,
+			false, instructionPlan.directOutcomeNativeResult,
+		)
+	} else {
+		keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
+		result = p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
+			b, fn, args, call.Call.Signature(), coroManagedDispatchAwaitOptions{
+				keepaliveSlots:          keepaliveSlots,
+				transparentRecoverAlias: instructionPlan.recoverAlias,
+				trustedDescriptor:       instructionPlan.structuredCoroutineOnly,
+				structuredCoroutineOnly: instructionPlan.structuredCoroutineOnly,
+			},
+		)
+	}
 	p.recordCoroValueAddress(call, result.address)
 	return result.value
+}
+
+// compileCoroManagedDispatchOutcomeOnlyValueResult lowers one closed
+// descriptor occurrence whose complete target set publishes only synchronous
+// outcome entries. Unlike the universal three-way dispatcher it emits no
+// impossible plain/coroutine branches and allocates no keepalive/suspend state.
+func (p *context) compileCoroManagedDispatchOutcomeOnlyValueResult(
+	b llssa.Builder,
+	fn llssa.Expr,
+	args []llssa.Expr,
+	signature *types.Signature,
+	transparentRecoverAlias bool,
+	descriptorNonNil bool,
+	nativeResult bool,
+) coroAwaitedValue {
+	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn {
+		panic("outcome-only descriptor call requires one structured physical parent")
+	}
+	if p.hasOutcomePlainPhysicalBody() && (!nativeResult || transparentRecoverAlias) {
+		panic("outcome-only descriptor call escaped its native-stack or recover proof")
+	}
+	abi, err := newCoroPlainDispatchABI(p, signature)
+	if err != nil {
+		panic(fmt.Errorf("outcome-only managed dispatch: %w", err))
+	}
+	resultSlot := p.prog.Nil(p.prog.VoidPtr())
+	if abi.signature.Results().Len() != 0 {
+		resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
+		if p.hasCoroPhysicalBody() {
+			resultSlot = p.coroResultSlot(resultType)
+		} else {
+			resultSlot = p.structuredOutcomeAlloca(resultType, false)
+		}
+	}
+	if !descriptorNonNil {
+		descriptorWord := b.Field(fn, 0)
+		p.compileCoroImplicitNilAccessGuard(b, descriptorWord)
+	}
+	selection := b.PrepareCoroDispatchStructuredOnly(fn, llssa.CoroDispatchCallOptions{
+		Version:           coroPlainDispatchVersion,
+		ABIHash:           abi.hash,
+		Result:            p.prog.Type(abi.resultSlotType, llssa.InC),
+		DescriptorNonNil:  true,
+		TrustedDescriptor: true,
+	}, transparentRecoverAlias)
+	completion := p.structuredOutcomeScratch()
+	callOutcome := func() llssa.Expr {
+		return b.CallPreparedCoroDispatchOutcomeOnly(
+			selection,
+			p.managedPhysicalTask(),
+			b.Convert(p.prog.VoidPtr(), resultSlot),
+			b.Convert(p.prog.VoidPtr(), completion),
+			args,
+		)
+	}
+	var physicalCall llssa.Expr
+	if transparentRecoverAlias {
+		physicalCall = p.callCoroTransparentRecoverAlias(b, selection.CodeEntry(), callOutcome)
+	} else {
+		physicalCall = callOutcome()
+	}
+	p.dispatchOutcomePlainCompletion(b, completion)
+	return coroAwaitedValue{
+		value:   p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results()),
+		address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
+		physicalCalls: []coroPhysicalCall{{
+			call: physicalCall, argCount: len(args) + 4, resultArg: 1,
+		}},
+	}
+}
+
+type coroManagedDispatchAwaitOptions struct {
+	cleanup                 *coroStaticCleanupState
+	keepaliveSlots          []llssa.Expr
+	recoverAliasChild       bool
+	transparentRecoverAlias bool
+	trustedDescriptor       bool
+	descriptorNonNil        bool
+	structuredCoroutineOnly bool
 }
 
 // compileCoroManagedDispatchAwaitValue is the one capability probe and child
@@ -74,29 +220,13 @@ func (p *context) compileCoroManagedDispatchAwaitValue(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	return p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, signature, nil, keepaliveSlots, false, false, false,
-	).value
-}
-
-// compileCoroManagedDispatchAwaitValueWithRecovery is the cleanup-aware core
-// of descriptor dispatch. A deferred coroutine target must be a direct child
-// of the owner whose drainer supplied cleanup; introducing a wrapper child
-// would break Go's direct-recover rule. Ordinary descriptor calls pass nil and
-// retain their existing child-outcome behavior.
-func (p *context) compileCoroManagedDispatchAwaitValueWithRecovery(
-	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
-	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr, recoverAliasChild bool,
-) llssa.Expr {
-	return p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, fn, args, signature, cleanup, keepaliveSlots,
-		recoverAliasChild, false, false,
+		b, fn, args, signature, coroManagedDispatchAwaitOptions{keepaliveSlots: keepaliveSlots},
 	).value
 }
 
 func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
-	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
-	recoverAliasChild, transparentRecoverAlias, trustedDescriptor bool,
+	options coroManagedDispatchAwaitOptions,
 ) coroAwaitedValue {
 	body := p.coroBody()
 	if body == nil {
@@ -108,11 +238,11 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	}
 	resultLayout := p.prog.Type(abi.resultSlotType, llssa.InC)
 	resultSlot := p.coroResultSlot(p.prog.Type(abi.resultSlotType, llssa.InGo))
-	opts := llssa.CoroDispatchCallOptions{
+	dispatchOptions := llssa.CoroDispatchCallOptions{
 		Version:           coroPlainDispatchVersion,
 		ABIHash:           abi.hash,
 		Result:            resultLayout,
-		TrustedDescriptor: trustedDescriptor,
+		TrustedDescriptor: options.trustedDescriptor,
 	}
 	// Descriptor validation would otherwise introduce a hidden
 	// runtime.AssertNilDeref call after the whole-program helper closure was
@@ -125,62 +255,109 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	// preserves Go's rule that invoking a nil deferred function panics while
 	// running the deferred call. A cleanup-internal nil replaces the current
 	// panic overlay without replacing its normal/RunDefers/cancellation base.
-	if cleanup == nil {
+	if options.descriptorNonNil {
+		// Interface method lookup has already proved both the itab and its
+		// compiler-owned method descriptor non-nil.
+	} else if options.cleanup == nil {
 		p.compileCoroImplicitNilAccessGuard(b, descriptorWord)
 	} else {
 		fault := p.fn.MakeBlock()
 		nonNil := p.fn.MakeBlock()
 		b.If(b.BinOp(token.EQL, descriptorWord, p.prog.Nil(descriptorWord.Type)), fault, nonNil)
 		b.SetBlockEx(fault, llssa.AtEnd, false)
-		cleanup.replaceFault(p, b, coroFaultNilV1)
+		options.cleanup.replaceFault(p, b, coroFaultNilV1)
 		b.SetBlockContinuation(nonNil)
 	}
-	opts.DescriptorNonNil = true
+	dispatchOptions.DescriptorNonNil = true
+	awaitChild := func(child llssa.Expr) {
+		var afterConsume func(llssa.Builder)
+		if options.cleanup != nil {
+			token := descriptorWord
+			if options.recoverAliasChild {
+				token = child
+			}
+			afterConsume = p.beginCoroRecoverAliasScope(
+				b, llssa.Nil, token, b.Load(options.cleanup.panicActive),
+			)
+		} else if options.transparentRecoverAlias {
+			afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
+		}
+		p.awaitCoroChildWithRecoveryAndConsume(
+			b, child, resultSlot, abi.signature.Results(), options.cleanup,
+			options.keepaliveSlots, afterConsume,
+		)
+	}
+	if options.structuredCoroutineOnly {
+		if !dispatchOptions.TrustedDescriptor {
+			panic("coroutine-only descriptor await requires a trusted publication proof")
+		}
+		selection := b.PrepareCoroDispatchStructuredOnly(fn, dispatchOptions, false)
+		child := b.CallPreparedCoroDispatchCoroOnly(
+			selection,
+			body.task,
+			b.Convert(p.prog.VoidPtr(), resultSlot),
+			args,
+		)
+		awaitChild(child)
+		return coroAwaitedValue{
+			value:   p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results()),
+			address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
+			physicalCalls: []coroPhysicalCall{{
+				call: child, argCount: len(args) + 3, resultArg: 1,
+			}},
+		}
+	}
 
 	coroutineBlock := p.fn.MakeBlock()
+	nonCoroutineBlock := p.fn.MakeBlock()
+	outcomeBlock := p.fn.MakeBlock()
 	plainBlock := p.fn.MakeBlock()
 	join := p.fn.MakeBlock()
-	var hasCoro, codeEntry llssa.Expr
-	if transparentRecoverAlias {
-		hasCoro, codeEntry = b.CoroDispatchHasCoroAndCodeEntry(fn, opts)
-	} else {
-		hasCoro = b.CoroDispatchHasCoro(fn, opts)
-	}
-	b.If(hasCoro, coroutineBlock, plainBlock)
+	selection := b.PrepareCoroDispatchCall(fn, dispatchOptions)
+	hasOutcome, hasCoro, codeEntry := selection.HasOutcome(), selection.HasCoro(), selection.CodeEntry()
+	b.If(hasCoro, coroutineBlock, nonCoroutineBlock)
+
+	b.SetBlockEx(nonCoroutineBlock, llssa.AtEnd, false)
+	b.If(hasOutcome, outcomeBlock, plainBlock)
 
 	b.SetBlockEx(coroutineBlock, llssa.AtEnd, false)
-	child := b.CallCoroDispatchCoro(
-		fn,
+	child := b.CallPreparedCoroDispatchCoro(
+		selection,
 		body.task,
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 		args,
-		opts,
 	)
-	var afterConsume func(llssa.Builder)
-	if cleanup != nil {
-		token := descriptorWord
-		if recoverAliasChild {
-			token = child
-		}
-		afterConsume = p.beginCoroRecoverAliasScope(
-			b, llssa.Nil, token, b.Load(cleanup.panicActive),
+	awaitChild(child)
+	b.Jump(join)
+
+	b.SetBlockEx(outcomeBlock, llssa.AtEnd, false)
+	completion := p.structuredOutcomeScratch()
+	callOutcome := func() llssa.Expr {
+		return b.CallPreparedCoroDispatchOutcome(
+			selection,
+			body.task,
+			b.Convert(p.prog.VoidPtr(), resultSlot),
+			b.Convert(p.prog.VoidPtr(), completion),
+			args,
 		)
-	} else if transparentRecoverAlias {
-		afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 	}
-	p.awaitCoroChildWithRecoveryAndConsume(
-		b, child, resultSlot, abi.signature.Results(), cleanup, keepaliveSlots, afterConsume,
-	)
+	var outcomeCall llssa.Expr
+	if options.transparentRecoverAlias {
+		outcomeCall = p.callCoroTransparentRecoverAlias(b, codeEntry, callOutcome)
+	} else {
+		outcomeCall = callOutcome()
+	}
+	p.dispatchOutcomePlainCompletionWithRecovery(b, completion, options.cleanup)
 	b.Jump(join)
 
 	b.SetBlockEx(plainBlock, llssa.AtEnd, false)
 	var plainResult llssa.Expr
-	if transparentRecoverAlias {
+	if options.transparentRecoverAlias {
 		plainResult = p.callCoroTransparentRecoverAlias(b, codeEntry, func() llssa.Expr {
-			return b.CallCoroDispatchPlain(fn, args, opts)
+			return b.CallPreparedCoroDispatchPlain(selection, args)
 		})
 	} else {
-		plainResult = b.CallCoroDispatchPlain(fn, args, opts)
+		plainResult = b.CallPreparedCoroDispatchPlain(selection, args)
 	}
 	p.storeCoroDynamicDispatchResult(b, resultSlot, plainResult, abi.signature.Results())
 	b.Jump(join)
@@ -191,6 +368,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
 		physicalCalls: []coroPhysicalCall{
 			{call: child, argCount: len(args) + 3, resultArg: 1},
+			{call: outcomeCall, argCount: len(args) + 4, resultArg: 1},
 			{call: plainResult, argCount: len(args) + 1, resultArg: -1},
 		},
 	}
@@ -210,8 +388,14 @@ func validateCoroManagedDispatchAwaitShape(
 		return fail("requires one exact ordinary call in the compilation plan")
 	}
 	ownerPlan, ok := plan.FunctionPlan(owner)
-	if !ok || ownerPlan.Emission != coro.EmitCoroutine || ownerPlan.Primary != coro.PrimaryCoroutine {
-		return fail("owner is not one coroutine primary")
+	coroutineOwner := ok && ownerPlan.Emission == coro.EmitCoroutine &&
+		ownerPlan.Primary == coro.PrimaryCoroutine
+	outcomeOwner := ok && ownerPlan.Emission == coro.EmitOutcomePlain &&
+		ownerPlan.ManagedEntry == coro.ManagedEntryOutcomePlain &&
+		ownerPlan.Primary == coro.PrimaryCoroutine && ownerPlan.HasStaticOutcome() &&
+		coroManagedDispatchPublishedOutcomeOnly(plan, callPlan)
+	if !coroutineOwner && !outcomeOwner {
+		return fail("owner is neither a coroutine primary nor an outcome-only descriptor parent")
 	}
 	common := call.Common()
 	if callPlan.Kind != coro.CallDirect || callPlan.Rep != coro.Dispatch || callPlan.Transport != coro.ManagedTransport ||

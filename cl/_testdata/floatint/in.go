@@ -6,78 +6,123 @@ func f32ToI32(v float32) int32       { return int32(v) }
 func f32ToU32(v float32) uint32      { return uint32(v) }
 func f64ToUintptr(v float64) uintptr { return uintptr(v) }
 
-// CHECK-LABEL: define i32 @main.f32ToI32(
-// CHECK-SAME: float %[[TMP0:[0-9]+]]){{.*}} {
+// CHECK-LABEL: define void @"main.f32ToI32$outcome"(
+// CHECK-SAME: ptr %[[TMP0:[0-9]+]], ptr %[[TMP1:[0-9]+]], ptr %[[TMP2:[0-9]+]], float %[[TMP3:[0-9]+]]){{.*}} {
 // CHECK-NEXT: _llgo_[[BB0:[0-9]+]]:
-// ARM64-NEXT:   %[[TMP1:[0-9]+]] = fcmp ole float %[[TMP0]], 0xC1E0000000000000
-// AMD64-NEXT:   %[[TMP1:[0-9]+]] = fcmp olt float %[[TMP0]], 0xC1E0000000000000
-// CHECK-NEXT:   %[[TMP2:[0-9]+]] = fcmp oge float %[[TMP0]], 0x41E0000000000000
-// CHECK-NEXT:   %[[TMP3:[0-9]+]] = fcmp uno float %[[TMP0]], %[[TMP0]]
-// ARM64-NEXT:   %[[TMP4:[0-9]+]] = select i1 %[[TMP1]], float 0.000000e+00, float %[[TMP0]]
-// ARM64-NEXT:   %[[TMP5:[0-9]+]] = select i1 %[[TMP2]], float 0.000000e+00, float %[[TMP4]]
-// ARM64-NEXT:   %[[TMP6:[0-9]+]] = select i1 %[[TMP3]], float 0.000000e+00, float %[[TMP5]]
-// AMD64-NEXT:   %[[TMP4:[0-9]+]] = or i1 %[[TMP1]], %[[TMP2]]
-// AMD64-NEXT:   %[[TMP5:[0-9]+]] = or i1 %[[TMP4]], %[[TMP3]]
-// AMD64-NEXT:   %[[TMP6:[0-9]+]] = select i1 %[[TMP5]], float 0.000000e+00, float %[[TMP0]]
-// CHECK-NEXT:   %[[TMP7:[0-9]+]] = fptosi float %[[TMP6]] to i32
-// ARM64-NEXT:   %[[TMP8:[0-9]+]] = select i1 %[[TMP1]], i32 -2147483648, i32 %[[TMP7]]
-// ARM64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP2]], i32 2147483647, i32 %[[TMP8]]
-// ARM64-NEXT:   %[[TMP10:[0-9]+]] = select i1 %[[TMP3]], i32 0, i32 %[[TMP9]]
-// ARM64-NEXT:   ret i32 %[[TMP10]]
-// AMD64-NEXT:   %[[TMP8:[0-9]+]] = select i1 %[[TMP5]], i32 -2147483648, i32 %[[TMP7]]
-// AMD64-NEXT:   ret i32 %[[TMP8]]
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define i32 @main.f32ToU32(
-// CHECK-SAME: float %[[TMP0:[0-9]+]]){{.*}} {
-// CHECK-NEXT: _llgo_[[BB0:[0-9]+]]:
-// ARM64-NEXT:   %[[TMP1:[0-9]+]] = fcmp ole float %[[TMP0]], 0xC3E0000000000000
-// AMD64-NEXT:   %[[TMP1:[0-9]+]] = fcmp olt float %[[TMP0]], 0xC3E0000000000000
-// CHECK-NEXT:   %[[TMP2:[0-9]+]] = fcmp oge float %[[TMP0]], 0x43E0000000000000
-// CHECK-NEXT:   %[[TMP3:[0-9]+]] = fcmp uno float %[[TMP0]], %[[TMP0]]
-// ARM64-NEXT:   %[[TMP4:[0-9]+]] = select i1 %[[TMP1]], float 0.000000e+00, float %[[TMP0]]
-// ARM64-NEXT:   %[[TMP5:[0-9]+]] = select i1 %[[TMP2]], float 0.000000e+00, float %[[TMP4]]
-// ARM64-NEXT:   %[[TMP6:[0-9]+]] = select i1 %[[TMP3]], float 0.000000e+00, float %[[TMP5]]
-// AMD64-NEXT:   %[[TMP4:[0-9]+]] = or i1 %[[TMP1]], %[[TMP2]]
-// AMD64-NEXT:   %[[TMP5:[0-9]+]] = or i1 %[[TMP4]], %[[TMP3]]
-// AMD64-NEXT:   %[[TMP6:[0-9]+]] = select i1 %[[TMP5]], float 0.000000e+00, float %[[TMP0]]
-// CHECK-NEXT:   %[[TMP7:[0-9]+]] = fptosi float %[[TMP6]] to i64
-// ARM64-NEXT:   %[[TMP8:[0-9]+]] = select i1 %[[TMP1]], i64 -9223372036854775808, i64 %[[TMP7]]
-// ARM64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP2]], i64 9223372036854775807, i64 %[[TMP8]]
-// ARM64-NEXT:   %[[TMP10:[0-9]+]] = select i1 %[[TMP3]], i64 0, i64 %[[TMP9]]
-// ARM64-NEXT:   %[[TMP11:[0-9]+]] = trunc i64 %[[TMP10]] to i32
-// ARM64-NEXT:   ret i32 %[[TMP11]]
-// AMD64-NEXT:   %[[TMP8:[0-9]+]] = select i1 %[[TMP5]], i64 -9223372036854775808, i64 %[[TMP7]]
-// AMD64-NEXT:   %[[TMP9:[0-9]+]] = trunc i64 %[[TMP8]] to i32
-// AMD64-NEXT:   ret i32 %[[TMP9]]
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define i64 @main.f64ToUintptr(
-// CHECK-SAME: double %[[TMP0:[0-9]+]]){{.*}} {
-// CHECK-NEXT: _llgo_[[BB0:[0-9]+]]:
-// ARM64-NEXT:   %[[TMP1:[0-9]+]] = fcmp olt double %[[TMP0]], 0.000000e+00
-// ARM64-NEXT:   %[[TMP2:[0-9]+]] = fcmp oge double %[[TMP0]], 0x43F0000000000000
-// ARM64-NEXT:   %[[TMP3:[0-9]+]] = fcmp uno double %[[TMP0]], %[[TMP0]]
-// ARM64-NEXT:   %[[TMP4:[0-9]+]] = select i1 %[[TMP1]], double 0.000000e+00, double %[[TMP0]]
-// ARM64-NEXT:   %[[TMP5:[0-9]+]] = select i1 %[[TMP2]], double 0.000000e+00, double %[[TMP4]]
-// ARM64-NEXT:   %[[TMP6:[0-9]+]] = select i1 %[[TMP3]], double 0.000000e+00, double %[[TMP5]]
-// ARM64-NEXT:   %[[TMP7:[0-9]+]] = fptoui double %[[TMP6]] to i64
-// ARM64-NEXT:   %[[TMP8:[0-9]+]] = select i1 %[[TMP2]], i64 -1, i64 %[[TMP7]]
-// ARM64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP1]], i64 0, i64 %[[TMP8]]
-// ARM64-NEXT:   %[[TMP10:[0-9]+]] = select i1 %[[TMP3]], i64 0, i64 %[[TMP9]]
-// ARM64-NEXT:   ret i64 %[[TMP10]]
-// AMD64-NEXT:   %[[TMP1:[0-9]+]] = fcmp oge double %[[TMP0]], 0x43E0000000000000
-// AMD64-NEXT:   %[[TMP2:[0-9]+]] = fsub double %[[TMP0]], 0x43E0000000000000
-// AMD64-NEXT:   %[[TMP3:[0-9]+]] = select i1 %[[TMP1]], double %[[TMP2]], double %[[TMP0]]
-// AMD64-NEXT:   %[[TMP4:[0-9]+]] = fcmp olt double %[[TMP3]], 0xC3E0000000000000
-// AMD64-NEXT:   %[[TMP5:[0-9]+]] = fcmp oge double %[[TMP3]], 0x43E0000000000000
-// AMD64-NEXT:   %[[TMP6:[0-9]+]] = fcmp uno double %[[TMP3]], %[[TMP3]]
+// ARM64-NEXT:   %[[TMP4:[0-9]+]] = fcmp ole float %[[TMP3]], 0xC1E0000000000000
+// AMD64-NEXT:   %[[TMP4:[0-9]+]] = fcmp olt float %[[TMP3]], 0xC1E0000000000000
+// CHECK-NEXT:   %[[TMP5:[0-9]+]] = fcmp oge float %[[TMP3]], 0x41E0000000000000
+// CHECK-NEXT:   %[[TMP6:[0-9]+]] = fcmp uno float %[[TMP3]], %[[TMP3]]
+// ARM64-NEXT:   %[[TMP7:[0-9]+]] = select i1 %[[TMP4]], float 0.000000e+00, float %[[TMP3]]
+// ARM64-NEXT:   %[[TMP8:[0-9]+]] = select i1 %[[TMP5]], float 0.000000e+00, float %[[TMP7]]
+// ARM64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP6]], float 0.000000e+00, float %[[TMP8]]
 // AMD64-NEXT:   %[[TMP7:[0-9]+]] = or i1 %[[TMP4]], %[[TMP5]]
 // AMD64-NEXT:   %[[TMP8:[0-9]+]] = or i1 %[[TMP7]], %[[TMP6]]
-// AMD64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP8]], double 0.000000e+00, double %[[TMP3]]
-// AMD64-NEXT:   %[[TMP10:[0-9]+]] = fptosi double %[[TMP9]] to i64
+// AMD64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP8]], float 0.000000e+00, float %[[TMP3]]
+// CHECK-NEXT:   %[[TMP10:[0-9]+]] = fptosi float %[[TMP9]] to i32
+// ARM64-NEXT:   %[[TMP11:[0-9]+]] = select i1 %[[TMP4]], i32 -2147483648, i32 %[[TMP10]]
+// ARM64-NEXT:   %[[TMP12:[0-9]+]] = select i1 %[[TMP5]], i32 2147483647, i32 %[[TMP11]]
+// ARM64-NEXT:   %[[TMP13:[0-9]+]] = select i1 %[[TMP6]], i32 0, i32 %[[TMP12]]
+// ARM64-NEXT:   %[[TMP14:[0-9]+]] = getelementptr inbounds nuw { i32 }, ptr %[[TMP1]], i32 0, i32 0
+// ARM64-NEXT:   store i32 %[[TMP13]], ptr %[[TMP14]], align 4
+// ARM64-NEXT:   %[[TMP15:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 1
+// ARM64-NEXT:   store ptr null, ptr %[[TMP15]], align 8
+// ARM64-NEXT:   %[[TMP16:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 2
+// ARM64-NEXT:   store ptr null, ptr %[[TMP16]], align 8
+// ARM64-NEXT:   %[[TMP17:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 0
+// ARM64-NEXT:   store i32 1, ptr %[[TMP17]], align 4
+// AMD64-NEXT:   %[[TMP11:[0-9]+]] = select i1 %[[TMP8]], i32 -2147483648, i32 %[[TMP10]]
+// AMD64-NEXT:   %[[TMP12:[0-9]+]] = getelementptr inbounds nuw { i32 }, ptr %[[TMP1]], i32 0, i32 0
+// AMD64-NEXT:   store i32 %[[TMP11]], ptr %[[TMP12]], align 4
+// AMD64-NEXT:   %[[TMP13:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 1
+// AMD64-NEXT:   store ptr null, ptr %[[TMP13]], align 8
+// AMD64-NEXT:   %[[TMP14:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 2
+// AMD64-NEXT:   store ptr null, ptr %[[TMP14]], align 8
+// AMD64-NEXT:   %[[TMP15:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 0
+// AMD64-NEXT:   store i32 1, ptr %[[TMP15]], align 4
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
+
+// CHECK-LABEL: define void @"main.f32ToU32$outcome"(
+// CHECK-SAME: ptr %[[TMP0:[0-9]+]], ptr %[[TMP1:[0-9]+]], ptr %[[TMP2:[0-9]+]], float %[[TMP3:[0-9]+]]){{.*}} {
+// CHECK-NEXT: _llgo_[[BB0:[0-9]+]]:
+// ARM64-NEXT:   %[[TMP4:[0-9]+]] = fcmp ole float %[[TMP3]], 0xC3E0000000000000
+// AMD64-NEXT:   %[[TMP4:[0-9]+]] = fcmp olt float %[[TMP3]], 0xC3E0000000000000
+// CHECK-NEXT:   %[[TMP5:[0-9]+]] = fcmp oge float %[[TMP3]], 0x43E0000000000000
+// CHECK-NEXT:   %[[TMP6:[0-9]+]] = fcmp uno float %[[TMP3]], %[[TMP3]]
+// ARM64-NEXT:   %[[TMP7:[0-9]+]] = select i1 %[[TMP4]], float 0.000000e+00, float %[[TMP3]]
+// ARM64-NEXT:   %[[TMP8:[0-9]+]] = select i1 %[[TMP5]], float 0.000000e+00, float %[[TMP7]]
+// ARM64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP6]], float 0.000000e+00, float %[[TMP8]]
+// AMD64-NEXT:   %[[TMP7:[0-9]+]] = or i1 %[[TMP4]], %[[TMP5]]
+// AMD64-NEXT:   %[[TMP8:[0-9]+]] = or i1 %[[TMP7]], %[[TMP6]]
+// AMD64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP8]], float 0.000000e+00, float %[[TMP3]]
+// CHECK-NEXT:   %[[TMP10:[0-9]+]] = fptosi float %[[TMP9]] to i64
+// ARM64-NEXT:   %[[TMP11:[0-9]+]] = select i1 %[[TMP4]], i64 -9223372036854775808, i64 %[[TMP10]]
+// ARM64-NEXT:   %[[TMP12:[0-9]+]] = select i1 %[[TMP5]], i64 9223372036854775807, i64 %[[TMP11]]
+// ARM64-NEXT:   %[[TMP13:[0-9]+]] = select i1 %[[TMP6]], i64 0, i64 %[[TMP12]]
+// ARM64-NEXT:   %[[TMP14:[0-9]+]] = trunc i64 %[[TMP13]] to i32
+// ARM64-NEXT:   %[[TMP15:[0-9]+]] = getelementptr inbounds nuw { i32 }, ptr %[[TMP1]], i32 0, i32 0
+// ARM64-NEXT:   store i32 %[[TMP14]], ptr %[[TMP15]], align 4
+// ARM64-NEXT:   %[[TMP16:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 1
+// ARM64-NEXT:   store ptr null, ptr %[[TMP16]], align 8
+// ARM64-NEXT:   %[[TMP17:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 2
+// ARM64-NEXT:   store ptr null, ptr %[[TMP17]], align 8
+// ARM64-NEXT:   %[[TMP18:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 0
+// ARM64-NEXT:   store i32 1, ptr %[[TMP18]], align 4
 // AMD64-NEXT:   %[[TMP11:[0-9]+]] = select i1 %[[TMP8]], i64 -9223372036854775808, i64 %[[TMP10]]
-// AMD64-NEXT:   %[[TMP12:[0-9]+]] = select i1 %[[TMP1]], i64 -9223372036854775808, i64 0
-// AMD64-NEXT:   %[[TMP13:[0-9]+]] = or i64 %[[TMP11]], %[[TMP12]]
-// AMD64-NEXT:   ret i64 %[[TMP13]]
+// AMD64-NEXT:   %[[TMP12:[0-9]+]] = trunc i64 %[[TMP11]] to i32
+// AMD64-NEXT:   %[[TMP13:[0-9]+]] = getelementptr inbounds nuw { i32 }, ptr %[[TMP1]], i32 0, i32 0
+// AMD64-NEXT:   store i32 %[[TMP12]], ptr %[[TMP13]], align 4
+// AMD64-NEXT:   %[[TMP14:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 1
+// AMD64-NEXT:   store ptr null, ptr %[[TMP14]], align 8
+// AMD64-NEXT:   %[[TMP15:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 2
+// AMD64-NEXT:   store ptr null, ptr %[[TMP15]], align 8
+// AMD64-NEXT:   %[[TMP16:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 0
+// AMD64-NEXT:   store i32 1, ptr %[[TMP16]], align 4
+// CHECK-NEXT:   ret void
+// CHECK-NEXT: }
+
+// CHECK-LABEL: define void @"main.f64ToUintptr$outcome"(
+// CHECK-SAME: ptr %[[TMP0:[0-9]+]], ptr %[[TMP1:[0-9]+]], ptr %[[TMP2:[0-9]+]], double %[[TMP3:[0-9]+]]){{.*}} {
+// CHECK-NEXT: _llgo_[[BB0:[0-9]+]]:
+// ARM64-NEXT:   %[[TMP4:[0-9]+]] = fcmp olt double %[[TMP3]], 0.000000e+00
+// ARM64-NEXT:   %[[TMP5:[0-9]+]] = fcmp oge double %[[TMP3]], 0x43F0000000000000
+// ARM64-NEXT:   %[[TMP6:[0-9]+]] = fcmp uno double %[[TMP3]], %[[TMP3]]
+// ARM64-NEXT:   %[[TMP7:[0-9]+]] = select i1 %[[TMP4]], double 0.000000e+00, double %[[TMP3]]
+// ARM64-NEXT:   %[[TMP8:[0-9]+]] = select i1 %[[TMP5]], double 0.000000e+00, double %[[TMP7]]
+// ARM64-NEXT:   %[[TMP9:[0-9]+]] = select i1 %[[TMP6]], double 0.000000e+00, double %[[TMP8]]
+// ARM64-NEXT:   %[[TMP10:[0-9]+]] = fptoui double %[[TMP9]] to i64
+// ARM64-NEXT:   %[[TMP11:[0-9]+]] = select i1 %[[TMP5]], i64 -1, i64 %[[TMP10]]
+// ARM64-NEXT:   %[[TMP12:[0-9]+]] = select i1 %[[TMP4]], i64 0, i64 %[[TMP11]]
+// ARM64-NEXT:   %[[TMP13:[0-9]+]] = select i1 %[[TMP6]], i64 0, i64 %[[TMP12]]
+// ARM64-NEXT:   %[[TMP14:[0-9]+]] = getelementptr inbounds nuw { i64 }, ptr %[[TMP1]], i32 0, i32 0
+// ARM64-NEXT:   store i64 %[[TMP13]], ptr %[[TMP14]], align 8
+// ARM64-NEXT:   %[[TMP15:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 1
+// ARM64-NEXT:   store ptr null, ptr %[[TMP15]], align 8
+// ARM64-NEXT:   %[[TMP16:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 2
+// ARM64-NEXT:   store ptr null, ptr %[[TMP16]], align 8
+// ARM64-NEXT:   %[[TMP17:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 0
+// ARM64-NEXT:   store i32 1, ptr %[[TMP17]], align 4
+// AMD64-NEXT:   %[[TMP4:[0-9]+]] = fcmp oge double %[[TMP3]], 0x43E0000000000000
+// AMD64-NEXT:   %[[TMP5:[0-9]+]] = fsub double %[[TMP3]], 0x43E0000000000000
+// AMD64-NEXT:   %[[TMP6:[0-9]+]] = select i1 %[[TMP4]], double %[[TMP5]], double %[[TMP3]]
+// AMD64-NEXT:   %[[TMP7:[0-9]+]] = fcmp olt double %[[TMP6]], 0xC3E0000000000000
+// AMD64-NEXT:   %[[TMP8:[0-9]+]] = fcmp oge double %[[TMP6]], 0x43E0000000000000
+// AMD64-NEXT:   %[[TMP9:[0-9]+]] = fcmp uno double %[[TMP6]], %[[TMP6]]
+// AMD64-NEXT:   %[[TMP10:[0-9]+]] = or i1 %[[TMP7]], %[[TMP8]]
+// AMD64-NEXT:   %[[TMP11:[0-9]+]] = or i1 %[[TMP10]], %[[TMP9]]
+// AMD64-NEXT:   %[[TMP12:[0-9]+]] = select i1 %[[TMP11]], double 0.000000e+00, double %[[TMP6]]
+// AMD64-NEXT:   %[[TMP13:[0-9]+]] = fptosi double %[[TMP12]] to i64
+// AMD64-NEXT:   %[[TMP14:[0-9]+]] = select i1 %[[TMP11]], i64 -9223372036854775808, i64 %[[TMP13]]
+// AMD64-NEXT:   %[[TMP15:[0-9]+]] = select i1 %[[TMP4]], i64 -9223372036854775808, i64 0
+// AMD64-NEXT:   %[[TMP16:[0-9]+]] = or i64 %[[TMP14]], %[[TMP15]]
+// AMD64-NEXT:   %[[TMP17:[0-9]+]] = getelementptr inbounds nuw { i64 }, ptr %[[TMP1]], i32 0, i32 0
+// AMD64-NEXT:   store i64 %[[TMP16]], ptr %[[TMP17]], align 8
+// AMD64-NEXT:   %[[TMP18:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 1
+// AMD64-NEXT:   store ptr null, ptr %[[TMP18]], align 8
+// AMD64-NEXT:   %[[TMP19:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 2
+// AMD64-NEXT:   store ptr null, ptr %[[TMP19]], align 8
+// AMD64-NEXT:   %[[TMP20:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 0
+// AMD64-NEXT:   store i32 1, ptr %[[TMP20]], align 4
+// CHECK-NEXT:   ret void
 // CHECK-NEXT: }

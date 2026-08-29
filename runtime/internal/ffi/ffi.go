@@ -88,42 +88,58 @@ func CallRaw(cif *Signature, fn, ret unsafe.Pointer, args *unsafe.Pointer) {
 }
 
 const (
-	dispatchVersionV1 uint32 = 1
+	dispatchVersionV2 uint32 = 2
 
 	// These are compiler/runtime ABI bits. Keep the values explicit: placing
-	// them after dispatchVersionV1 in this block must not shift their positions.
+	// them after dispatchVersionV2 in this block must not shift their positions.
 	dispatchHasPlain      uint32 = 1 << 0
-	dispatchHasCoro       uint32 = 1 << 1
-	dispatchNoCapture     uint32 = 1 << 2
-	dispatchRuntimeTyped  uint32 = 1 << 3
-	dispatchPlainNoUnwind uint32 = 1 << 4
+	dispatchHasOutcome    uint32 = 1 << 1
+	dispatchHasCoro       uint32 = 1 << 2
+	dispatchNoCapture     uint32 = 1 << 3
+	dispatchRuntimeTyped  uint32 = 1 << 4
+	dispatchPlainNoUnwind uint32 = 1 << 5
 
-	dispatchCapabilityMask = dispatchHasPlain | dispatchHasCoro
+	dispatchCapabilityMask = dispatchHasPlain | dispatchHasOutcome | dispatchHasCoro
 	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped | dispatchPlainNoUnwind
 )
 
-const dispatchRuntimeTypeMagicV1 uint64 = 0x4c4c474f52545931 // "LLGORTY1"
+const dispatchRuntimeTypeMagicV2 uint64 = 0x4c4c474f52545932 // "LLGORTY2"
 
 func validDispatchPlainUnwindFlags(flags uint32) bool {
 	hasPlain := flags&dispatchHasPlain != 0
+	hasOutcome := flags&dispatchHasOutcome != 0
 	hasCoro := flags&dispatchHasCoro != 0
 	plainNoUnwind := flags&dispatchPlainNoUnwind != 0
-	return (!plainNoUnwind || hasPlain) && (!hasPlain || hasCoro || plainNoUnwind)
+	return !(hasOutcome && hasCoro) &&
+		(!plainNoUnwind || hasPlain) &&
+		(!hasPlain || hasOutcome || hasCoro || plainNoUnwind)
 }
 
-// dispatchDescriptorV1 is the runtime view of the compiler-owned universal
+// dispatchDescriptorV2 is the runtime view of the compiler-owned universal
 // function descriptor. Keep this layout synchronized with
 // ssa.Program.coroDispatchDescriptorType.
-type dispatchDescriptorV1 struct {
-	Version     uint32
-	Flags       uint32
-	HashLo      uint64
-	HashHi      uint64
-	PlainEntry  unsafe.Pointer
-	CoroEntry   unsafe.Pointer
-	ResultSize  uintptr
-	ResultAlign uintptr
-	CodeEntry   unsafe.Pointer
+type dispatchDescriptorV2 struct {
+	Version         uint32
+	Flags           uint32
+	HashLo          uint64
+	HashHi          uint64
+	PlainEntry      unsafe.Pointer
+	StructuredEntry unsafe.Pointer
+	ResultSize      uintptr
+	ResultAlign     uintptr
+	CodeEntry       unsafe.Pointer
+}
+
+func validDispatchEntries(d *dispatchDescriptorV2) bool {
+	if d == nil {
+		return false
+	}
+	hasPlain := d.Flags&dispatchHasPlain != 0
+	hasOutcome := d.Flags&dispatchHasOutcome != 0
+	hasCoro := d.Flags&dispatchHasCoro != 0
+	return !(hasOutcome && hasCoro) &&
+		hasPlain == (d.PlainEntry != nil) &&
+		(hasOutcome || hasCoro) == (d.StructuredEntry != nil)
 }
 
 // NewRuntimeCoroDescriptor creates the trusted dynamic descriptor used by
@@ -136,15 +152,15 @@ func NewRuntimeCoroDescriptor(
 	if runtimeType == nil || coroEntry == nil || resultAlign == 0 {
 		panic("llgo: invalid runtime coroutine descriptor")
 	}
-	return unsafe.Pointer(&dispatchDescriptorV1{
-		Version:     dispatchVersionV1,
-		Flags:       dispatchHasCoro | dispatchRuntimeTyped,
-		HashLo:      uint64(bitcast.FromPointer(runtimeType)),
-		HashHi:      dispatchRuntimeTypeMagicV1,
-		CoroEntry:   coroEntry,
-		ResultSize:  resultSize,
-		ResultAlign: resultAlign,
-		CodeEntry:   coroEntry,
+	return unsafe.Pointer(&dispatchDescriptorV2{
+		Version:         dispatchVersionV2,
+		Flags:           dispatchHasCoro | dispatchRuntimeTyped,
+		HashLo:          uint64(bitcast.FromPointer(runtimeType)),
+		HashHi:          dispatchRuntimeTypeMagicV2,
+		StructuredEntry: coroEntry,
+		ResultSize:      resultSize,
+		ResultAlign:     resultAlign,
+		CodeEntry:       coroEntry,
 	})
 }
 
@@ -155,18 +171,17 @@ func CoroEntry(descriptor unsafe.Pointer) unsafe.Pointer {
 	if descriptor == nil {
 		panic("llgo: nil managed function descriptor")
 	}
-	d := (*dispatchDescriptorV1)(descriptor)
+	d := (*dispatchDescriptorV2)(descriptor)
 	flags := d.Flags
-	if d.Version != dispatchVersionV1 ||
+	if d.Version != dispatchVersionV2 ||
 		flags&^dispatchKnownFlags != 0 ||
 		!validDispatchPlainUnwindFlags(flags) ||
+		!validDispatchEntries(d) ||
 		flags&dispatchHasCoro == 0 ||
-		d.CoroEntry == nil ||
-		d.CodeEntry == nil ||
-		(flags&dispatchHasPlain != 0) != (d.PlainEntry != nil) {
+		d.CodeEntry == nil {
 		panic("llgo: invalid managed function descriptor")
 	}
-	return d.CoroEntry
+	return d.StructuredEntry
 }
 
 // CodeEntry returns the compiler-injected physical function identity carried
@@ -176,14 +191,13 @@ func CodeEntry(descriptor unsafe.Pointer) unsafe.Pointer {
 	if descriptor == nil {
 		return nil
 	}
-	d := (*dispatchDescriptorV1)(descriptor)
+	d := (*dispatchDescriptorV2)(descriptor)
 	flags := d.Flags
-	if d.Version != dispatchVersionV1 ||
+	if d.Version != dispatchVersionV2 ||
 		flags&^dispatchKnownFlags != 0 ||
 		!validDispatchPlainUnwindFlags(flags) ||
 		flags&dispatchCapabilityMask == 0 ||
-		(flags&dispatchHasPlain != 0) != (d.PlainEntry != nil) ||
-		(flags&dispatchHasCoro != 0) != (d.CoroEntry != nil) ||
+		!validDispatchEntries(d) ||
 		d.CodeEntry == nil {
 		panic("llgo: invalid managed function descriptor")
 	}
@@ -192,18 +206,46 @@ func CodeEntry(descriptor unsafe.Pointer) unsafe.Pointer {
 
 // coroFFICall is a compiler-owned stack cut. Its source ABI contains only the
 // values known to reflection; lowering stores the current G into gslot, calls
-// stock ffi_call to create the child through descriptor.CoroEntry, and awaits
-// the returned handle after ffi_call has left the native stack.
+// stock ffi_call to create the child through descriptor.StructuredEntry, and
+// awaits the returned handle after ffi_call has left the native stack.
 //
 //go:linkname coroFFICall llgo.coroFFICall
 func coroFFICall(cif *Signature, fn, out unsafe.Pointer, gslot *unsafe.Pointer, args *unsafe.Pointer)
 
+//go:linkname coroCurrentTask llgo.coroCurrentTask
+func coroCurrentTask() unsafe.Pointer
+
+//go:linkname coroGoexit llgo.coroGoexit
+func coroGoexit()
+
+// coroPropagatePanic transports the already retained panic identity from one
+// synchronous managed descriptor outcome into this physical parent. It is not
+// source panic: compiler lowering preserves the existing logical trace rather
+// than replacing it with a second panic publication.
+//
+//go:linkname coroPropagatePanic llgo.coroPropagatePanic
+func coroPropagatePanic(typeWord, dataWord unsafe.Pointer)
+
+const (
+	dispatchOutcomeReturn   uint32 = 1
+	dispatchOutcomePanic    uint32 = 2
+	dispatchOutcomeGoexit   uint32 = 6
+	dispatchOutcomeFaultNil uint32 = 7
+)
+
+type dispatchOutcomeCompletion struct {
+	status   uint32
+	typeWord unsafe.Pointer
+	dataWord unsafe.Pointer
+}
+
 // CallLLGo invokes one managed {descriptor, environment} function value.
-// plainCIF describes (env,args...)->results. coroCIF describes
-// (g,out,env,args...)->handle. Both are ordinary target-C-ABI signatures, so
+// plainCIF describes (env,args...)->results, outcomeCIF describes
+// (g,out,completion,env,args...)->void, and coroCIF describes
+// (g,out,env,args...)->handle. All are ordinary target-C-ABI signatures, so
 // stock libffi remains the sole dynamic ABI classifier.
 func CallLLGo(
-	plainCIF, coroCIF *Signature,
+	plainCIF, outcomeCIF, coroCIF *Signature,
 	descriptor, env, runtimeType, ret unsafe.Pointer,
 	resultSize, resultAlign uintptr,
 	args ...unsafe.Pointer,
@@ -211,35 +253,82 @@ func CallLLGo(
 	if descriptor == nil {
 		panic("reflect.Value.Call: call of nil function")
 	}
-	d := (*dispatchDescriptorV1)(descriptor)
+	d := (*dispatchDescriptorV2)(descriptor)
 	flags := d.Flags
 	runtimeTyped := flags&dispatchRuntimeTyped != 0
-	if d.Version != dispatchVersionV1 ||
+	if d.Version != dispatchVersionV2 ||
 		flags&^dispatchKnownFlags != 0 ||
 		!validDispatchPlainUnwindFlags(flags) ||
 		flags&dispatchCapabilityMask == 0 ||
-		(flags&dispatchHasPlain != 0) != (d.PlainEntry != nil) ||
-		(flags&dispatchHasCoro != 0) != (d.CoroEntry != nil) ||
+		!validDispatchEntries(d) ||
 		flags&dispatchNoCapture != 0 && env != nil ||
 		d.CodeEntry == nil ||
 		runtimeTyped && (runtimeType == nil ||
 			d.HashLo != uint64(bitcast.FromPointer(runtimeType)) ||
-			d.HashHi != dispatchRuntimeTypeMagicV1) ||
+			d.HashHi != dispatchRuntimeTypeMagicV2) ||
 		d.ResultSize != resultSize ||
 		d.ResultAlign != resultAlign {
 		panic("llgo: invalid managed function descriptor")
 	}
 
-	if flags&dispatchHasCoro != 0 {
-		if coroCIF == nil {
-			panic("llgo: missing coroutine reflection signature")
-		}
-		// A zero-result coroutine still records an out pointer in its frame
-		// header. Keep that pointer non-nil even though the child never stores
-		// through it.
+	if flags&(dispatchHasOutcome|dispatchHasCoro) != 0 {
+		// Every structured entry receives a non-nil out pointer, including a
+		// zero-result function which never stores through it.
 		var empty byte
 		if ret == nil {
 			ret = unsafe.Pointer(&empty)
+		}
+	}
+	if flags&dispatchHasOutcome != 0 {
+		if outcomeCIF == nil {
+			panic("llgo: missing outcome reflection signature")
+		}
+		g := coroCurrentTask()
+		if g == nil {
+			panic("llgo: managed outcome call has no current task")
+		}
+		out := ret
+		completion := dispatchOutcomeCompletion{}
+		completionPtr := unsafe.Pointer(&completion)
+		ctxt := env
+		argv := make([]unsafe.Pointer, len(args)+4)
+		argv[0] = unsafe.Pointer(&g)
+		argv[1] = unsafe.Pointer(&out)
+		argv[2] = unsafe.Pointer(&completionPtr)
+		argv[3] = unsafe.Pointer(&ctxt)
+		copy(argv[4:], args)
+		ffi.Call(outcomeCIF, d.StructuredEntry, nil, &argv[0])
+		// Consume the synchronous outcome in the same physical frame that
+		// entered ffi.Call. A panic trace published by StructuredEntry is owned
+		// by this frame; routing it through a Go helper would manufacture a child
+		// activation which has no authority to propagate that retained trace.
+		switch completion.status {
+		case dispatchOutcomeReturn:
+			if completion.typeWord == nil && completion.dataWord == nil {
+				return
+			}
+		case dispatchOutcomePanic:
+			if completion.typeWord != nil {
+				coroPropagatePanic(completion.typeWord, completion.dataWord)
+				return
+			}
+		case dispatchOutcomeGoexit:
+			if completion.typeWord == nil && completion.dataWord == nil {
+				coroGoexit()
+				return
+			}
+		case dispatchOutcomeFaultNil:
+			if completion.typeWord == nil && completion.dataWord == nil {
+				var ptr *byte
+				_ = *ptr
+				return
+			}
+		}
+		panic("llgo: invalid managed function outcome")
+	}
+	if flags&dispatchHasCoro != 0 {
+		if coroCIF == nil {
+			panic("llgo: missing coroutine reflection signature")
 		}
 		var g unsafe.Pointer
 		out := ret
@@ -249,7 +338,7 @@ func CallLLGo(
 		argv[1] = unsafe.Pointer(&out)
 		argv[2] = unsafe.Pointer(&ctxt)
 		copy(argv[3:], args)
-		coroFFICall(coroCIF, d.CoroEntry, ret, &g, &argv[0])
+		coroFFICall(coroCIF, d.StructuredEntry, ret, &g, &argv[0])
 		return
 	}
 

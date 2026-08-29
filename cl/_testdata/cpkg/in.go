@@ -4,7 +4,7 @@ package C
 // The managed package stage retains the plain add export and the declarative
 // coroutine/export summary. The versioned synchronous C ingress adapter is a
 // separate whole-program capability gate.
-// CHECK: {{^}}@llvm.compiler.used = appending global [2 x ptr] [ptr @add, ptr @__llgo_coro_library_effect_v12.{{[0-9a-f]+}}], section "llvm.metadata"{{$}}
+// CHECK: {{^}}@llvm.compiler.used = appending global [2 x ptr] [ptr @add, ptr @__llgo_coro_library_effect_v13.{{[0-9a-f]+}}], section "llvm.metadata"{{$}}
 // CHECK: {{^}}@llvm.used = appending global [1 x ptr] [ptr @add], section "llvm.metadata"{{$}}
 
 // CHECK-LABEL: define void @"Double$outcome"(ptr %0, ptr %1, ptr %2, double %3){{.*}} {

@@ -83,7 +83,7 @@ func (p *context) emitCoroMethodValueDescriptor(
 		}
 		physicalEmission = coro.EmitPlain
 	}
-	if physicalEmission != coro.EmitPlain && physicalEmission != coro.EmitCoroutine {
+	if physicalEmission != coro.EmitPlain && physicalEmission != coro.EmitOutcomePlain && physicalEmission != coro.EmitCoroutine {
 		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q has unsupported emission %s", entry.plan.ID, entry.plan.Emission)
 	}
 
@@ -95,7 +95,7 @@ func (p *context) emitCoroMethodValueDescriptor(
 	}
 
 	flags := uint32(llssa.CoroDispatchFlagNoCapture)
-	var plainEntry, coroEntry llssa.Expr
+	var plainEntry, outcomeEntry, coroEntry llssa.Expr
 	switch physicalEmission {
 	case coro.EmitPlain:
 		if entry.plan.Exec.Contains(coro.MayUnwind) {
@@ -124,17 +124,23 @@ func (p *context) emitCoroMethodValueDescriptor(
 				coroPlainDispatchThunkPrefix+targetKey, raw.Expr, abi, coro.EmitRawPlain, nil,
 			)
 		}
+	case coro.EmitOutcomePlain:
+		flags |= llssa.CoroDispatchFlagHasOutcome
+		outcomeEntry = p.newCoroDynamicDispatchEntryThunk(
+			coroOutcomeDispatchThunkPrefix+targetKey, physical.Expr, abi, coro.EmitOutcomePlain, nil,
+		)
 	}
 
 	descriptor := p.pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
-		Version:    coroPlainDispatchVersion,
-		Flags:      flags,
-		ABIHash:    abi.hash,
-		Signature:  abi.signature,
-		PlainEntry: plainEntry,
-		CoroEntry:  coroEntry,
-		CodeEntry:  physical.Expr,
-		Result:     p.prog.Type(abi.resultSlotType, llssa.InC),
+		Version:      coroPlainDispatchVersion,
+		Flags:        flags,
+		ABIHash:      abi.hash,
+		Signature:    abi.signature,
+		PlainEntry:   plainEntry,
+		OutcomeEntry: outcomeEntry,
+		CoroEntry:    coroEntry,
+		CodeEntry:    physical.Expr,
+		Result:       p.prog.Type(abi.resultSlotType, llssa.InC),
 	})
 	if p.coroPlainDescriptors == nil {
 		p.coroPlainDescriptors = make(map[string]llssa.Expr)
@@ -293,7 +299,7 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	// per-invocation descriptor capability/ABI validation cost.
 	managedFamilies := make(map[string]struct{})
 	for _, owner := range plan.Functions() {
-		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine) {
+		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitOutcomePlain && owner.Plan.Emission != coro.EmitCoroutine) {
 			continue
 		}
 		for _, block := range owner.Function.Blocks {
@@ -322,7 +328,7 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	// resolved to exact candidates. Families proven all-plain above are omitted
 	// so their ordinary receiver-aware itab path remains intact.
 	for _, owner := range plan.Functions() {
-		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine) {
+		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitOutcomePlain && owner.Plan.Emission != coro.EmitCoroutine) {
 			continue
 		}
 		for _, block := range owner.Function.Blocks {
@@ -440,7 +446,7 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	// transport. An open call in another execution domain cannot safely share an
 	// Ifn_ word and therefore fails before LLVM emission.
 	for _, owner := range plan.Functions() {
-		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine) {
+		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitOutcomePlain && owner.Plan.Emission != coro.EmitCoroutine) {
 			continue
 		}
 		for _, block := range owner.Function.Blocks {
@@ -576,7 +582,7 @@ func validateCoroManagedInterfaceDispatchCall(
 func (p *context) tryCompileCoroManagedInterfaceDispatch(
 	b llssa.Builder, call *ssa.Call,
 ) (llssa.Expr, bool) {
-	if call == nil || call.Common() == nil || p.hasCoroPhysicalBody() ||
+	if call == nil || call.Common() == nil || p.hasStructuredOutcomePhysicalBody() ||
 		p.compilation == nil || p.immutablePlan() == nil || p.compilation.coroManagedInterface == nil {
 		return llssa.Nil, false
 	}
@@ -623,14 +629,14 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 func (p *context) compileCoroManagedInterfaceAwait(
 	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if !p.hasCoroPhysicalBody() || call == nil || call.Common() == nil ||
-		instructionPlan.control != coroPhysicalControlManagedInterfaceAwait || instructionPlan.controlSignature == nil {
+	if !p.hasStructuredOutcomePhysicalBody() || call == nil || call.Common() == nil ||
+		instructionPlan.control != coroPhysicalControlManagedInterfaceAwait || instructionPlan.controlSignature == nil ||
+		p.hasOutcomePlainPhysicalBody() && !instructionPlan.structuredOutcomeOnly {
 		panic("managed interface await escaped its frozen physical control recipe")
 	}
 	method, args := p.compileCoroManagedInterfaceOperands(
 		b, call, instructionPlan.rawInterfaceReceiver,
 	)
-	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	plan := p.compilation.immutablePlan()
 	if plan == nil {
 		panic("managed interface await has no immutable compilation plan")
@@ -642,10 +648,25 @@ func (p *context) compileCoroManagedInterfaceAwait(
 	if instructionPlan.recoverAlias {
 		p.observeCoroPhysicalRecoverAlias(call)
 	}
-	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-		b, method, args, instructionPlan.controlSignature, nil, keepaliveSlots,
-		false, instructionPlan.recoverAlias, !callPlan.Open,
-	)
+	var result coroAwaitedValue
+	if instructionPlan.structuredOutcomeOnly {
+		result = p.compileCoroManagedDispatchOutcomeOnlyValueResult(
+			b, method, args, instructionPlan.controlSignature,
+			instructionPlan.recoverAlias, true,
+			instructionPlan.directOutcomeNativeResult,
+		)
+	} else {
+		keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
+		result = p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
+			b, method, args, instructionPlan.controlSignature, coroManagedDispatchAwaitOptions{
+				keepaliveSlots:          keepaliveSlots,
+				transparentRecoverAlias: instructionPlan.recoverAlias,
+				trustedDescriptor:       !callPlan.Open,
+				descriptorNonNil:        true,
+				structuredCoroutineOnly: instructionPlan.structuredCoroutineOnly,
+			},
+		)
+	}
 	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
 	markCoroReflectTypeMethodByNameCalls(b, reflectCheck, result.physicalCalls)
 	b.EmitReflectTypeMethodCheckedLoad(result.value, reflectCheck)
@@ -730,7 +751,7 @@ func (p *context) resolveCoroRawMethodSymbol(
 	}
 	target := p.resolveInterfaceMethodSSA(method, signature)
 	entry := p.mustFunctionSymbol(target)
-	if entry.plan.Emission != coro.EmitCoroutine {
+	if entry.plan.Emission != coro.EmitCoroutine && entry.plan.Emission != coro.EmitOutcomePlain {
 		return entry.name, true
 	}
 	if entry.plan.RawPlainEntry {
@@ -800,7 +821,7 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 		return descriptor, nil
 	}
 	flags := uint32(0)
-	var plainEntry, coroEntry llssa.Expr
+	var plainEntry, outcomeEntry, coroEntry llssa.Expr
 	switch entry.plan.Emission {
 	case coro.EmitPlain:
 		flags |= llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagPlainNoUnwind
@@ -812,20 +833,26 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 		coroEntry = p.newCoroDynamicDispatchEntryThunk(
 			coroCoroDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, receiver,
 		)
+	case coro.EmitOutcomePlain:
+		flags |= llssa.CoroDispatchFlagHasOutcome
+		outcomeEntry = p.newCoroDynamicDispatchEntryThunk(
+			coroOutcomeDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, receiver,
+		)
 	default:
 		return llssa.Nil, fmt.Errorf("managed interface descriptor target %q has unsupported emission %s", entry.plan.ID, entry.plan.Emission)
 	}
 	// The descriptor environment is the dynamic receiver supplied by
 	// IfacePtrData, so NoCapture must remain clear even for a top-level method.
 	descriptor := p.pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
-		Version:    coroPlainDispatchVersion,
-		Flags:      flags,
-		ABIHash:    abi.hash,
-		Signature:  abi.signature,
-		PlainEntry: plainEntry,
-		CoroEntry:  coroEntry,
-		CodeEntry:  physical.Expr,
-		Result:     p.prog.Type(abi.resultSlotType, llssa.InC),
+		Version:      coroPlainDispatchVersion,
+		Flags:        flags,
+		ABIHash:      abi.hash,
+		Signature:    abi.signature,
+		PlainEntry:   plainEntry,
+		OutcomeEntry: outcomeEntry,
+		CoroEntry:    coroEntry,
+		CodeEntry:    physical.Expr,
+		Result:       p.prog.Type(abi.resultSlotType, llssa.InC),
 	})
 	if p.coroPlainDescriptors == nil {
 		p.coroPlainDescriptors = make(map[string]llssa.Expr)
@@ -886,6 +913,18 @@ func validateCoroManagedInterfaceDescriptorTarget(
 			!functionPlan.Effect.MaySuspend() {
 			return fail("coroutine capability has primary=%s demand=%s effect=%s",
 				functionPlan.Primary, functionPlan.Demand, functionPlan.Effect)
+		}
+	case coro.EmitOutcomePlain:
+		if functionPlan.FuncRep != coro.DirectCoro && functionPlan.FuncRep != coro.Dispatch {
+			return fail("outcome capability has incompatible representation %s", functionPlan.FuncRep)
+		}
+		if functionPlan.Primary != coro.PrimaryCoroutine ||
+			functionPlan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+			functionPlan.Effect != coro.OutcomeStructured || !functionPlan.HasStaticOutcome() {
+			return fail(
+				"outcome capability has primary=%s managed=%s effect=%s static=%t",
+				functionPlan.Primary, functionPlan.ManagedEntry, functionPlan.Effect, functionPlan.HasStaticOutcome(),
+			)
 		}
 	default:
 		return fail("unsupported emission %s", functionPlan.Emission)

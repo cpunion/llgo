@@ -36,17 +36,24 @@ func TestCoroManagedDispatchAwaitEmitsCapabilityBranchesAndChildHandoff(t *testi
 
 func Plain(value int) int { return value + 1 }
 func Async(value int) int { return value + 2 }
+var outcomePanic any
+func Outcome(value int) int {
+	if value < 0 { panic(outcomePanic) }
+	return value + 3
+}
 
 func Apply(callback func(int) int, value int) int {
 	return callback(value)
 }
 `
 	for _, test := range []struct {
-		name string
-		open bool
+		name          string
+		open          bool
+		outcomeTarget bool
 	}{
 		{name: "open managed fallback", open: true},
 		{name: "closed coroutine singleton"},
+		{name: "closed outcome singleton", outcomeTarget: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ssaPkg, _, files := buildGoSSAPkg(t, source)
@@ -63,6 +70,7 @@ func Apply(callback func(int) int, value int) int {
 			apply := ssaPkg.Func("Apply")
 			plain := ssaPkg.Func("Plain")
 			async := ssaPkg.Func("Async")
+			outcome := ssaPkg.Func("Outcome")
 			dynamicCall := onlyCoroManagedDispatchValidationCall(t, apply)
 			functionIDs := universe.FunctionIDConfig()
 			functionIDs.CoroABI = coro.PhysicalABIV1
@@ -74,7 +82,9 @@ func Apply(callback func(int) int, value int) int {
 				coro.SSAConfig{
 					EmissionUniverse:     ssaUniverse,
 					FunctionIDs:          functionIDs,
-					MaxPlainInstructions: -1,
+					OutcomeMode:          coro.OutcomeExplicitStatus,
+					MaxPlainInstructions: 64,
+					ClassifyLocalBody:    universe.CoroLocalBodyFacts,
 					ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 						switch fn {
 						case plain:
@@ -93,7 +103,11 @@ func Apply(callback func(int) int, value int) int {
 					},
 					ClassifyClosedDynamicCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.SSAClosedDynamicCallCertificate, bool, error) {
 						if !test.open && call == dynamicCall {
-							return coro.SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{async}}, true, nil
+							target := async
+							if test.outcomeTarget {
+								target = outcome
+							}
+							return coro.SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}}, true, nil
 						}
 						return coro.SSAClosedDynamicCallCertificate{}, false, nil
 					},
@@ -114,16 +128,20 @@ func Apply(callback func(int) int, value int) int {
 				t.Fatalf("Apply callback CallPlan = %+v; want one closed coroutine target", callPlan)
 			}
 			if !test.open {
-				functionPlan, present := plan.FunctionPlan(async)
-				if !present || functionPlan.FuncRep != coro.Dispatch || functionPlan.Emission != coro.EmitCoroutine {
-					t.Fatalf("Async plan = %+v, present=%t; want coroutine Dispatch target", functionPlan, present)
+				target, wantEmission := async, coro.EmitCoroutine
+				if test.outcomeTarget {
+					target, wantEmission = outcome, coro.EmitOutcomePlain
+				}
+				functionPlan, present := plan.FunctionPlan(target)
+				if !present || functionPlan.FuncRep != coro.Dispatch || functionPlan.Emission != wantEmission {
+					t.Fatalf("%s plan = %+v, present=%t; want %s Dispatch target", target.Name(), functionPlan, present, wantEmission)
 				}
 			}
 
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroPreemptCompilation(compilation)
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
-			compilation.FuncRepABI = coro.FuncRepABIV1
+			compilation.FuncRepABI = coro.FuncRepABIV2
 			compiled, _, err := NewPackageExWithEmbedOptions(
 				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 				PackageOptions{Compilation: compilation},
@@ -141,28 +159,73 @@ func Apply(callback func(int) int, value int) int {
 				!strings.Contains(applyIR, "call void @"+coroFaultPrepareHookV1) {
 				t.Fatalf("Apply did not lower the nullable descriptor through its structured coroutine fault edge:\n%s", applyIR)
 			}
-			// The capability probe validates the shared descriptor and branches on the
-			// HasCoro bit (2) before either capability-specific indirect call.
-			probe := regexp.MustCompile(`(?s)and i32 [^\n]+, 2.*icmp ne i32 [^\n]+, 0.*br i1`).FindStringIndex(applyIR)
-			if probe == nil {
-				t.Fatalf("Apply has no HasCoro capability probe and branch:\n%s", applyIR)
-			}
+			// An open call retains universal descriptor selection. A closed family
+			// with one published structured capability loads only that entry word:
+			// regenerating impossible branches would make every statically closed
+			// funcval pay for open-world dispatch.
+			outcomeProbe := regexp.MustCompile(`(?s)and i32 [^\n]+, 2.*icmp ne i32 [^\n]+, 0`).FindStringIndex(applyIR)
+			coroProbe := regexp.MustCompile(`(?s)and i32 [^\n]+, 4.*icmp ne i32 [^\n]+, 0`).FindStringIndex(applyIR)
 			plainCall := regexp.MustCompile(`call i64 %[-a-zA-Z$._0-9]+\(ptr [^,]+, i64 [^)]+\)`).FindStringIndex(applyIR)
+			outcomeCall := regexp.MustCompile(`call void %[-a-zA-Z$._0-9]+\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i64 [^)]+\)`).FindStringIndex(applyIR)
 			coroCall := regexp.MustCompile(`call ptr %[-a-zA-Z$._0-9]+\(ptr [^,]+, ptr [^,]+, ptr [^,]+, i64 [^)]+\)`).FindStringIndex(applyIR)
-			if plainCall == nil || coroCall == nil {
-				t.Fatalf("Apply is missing plain/coroutine descriptor branches (plain=%v coro=%v):\n%s", plainCall, coroCall, applyIR)
-			}
-			if !strings.Contains(applyIR, "@llvm.coro.promise") ||
-				!strings.Contains(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
-				!strings.Contains(applyIR, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4) {
-				t.Fatalf("Apply coroutine descriptor branch does not enter the shared child-await handoff:\n%s", applyIR)
-			}
-			await := strings.Index(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4)
-			if await < coroCall[0] || strings.Index(applyIR[await:], "call i8 @llvm.coro.suspend") < 0 {
-				t.Fatalf("Apply does not publish, try inline completion, and retain its dynamic-child slow suspend:\n%s", applyIR)
-			}
-			if !regexp.MustCompile(`store i64 [^,]+, ptr `).MatchString(applyIR[plainCall[0]:]) {
-				t.Fatalf("Apply plain branch does not merge its result through the shared result slot:\n%s", applyIR)
+			if test.outcomeTarget {
+				if outcomeProbe != nil || coroProbe != nil || plainCall != nil || coroCall != nil || outcomeCall == nil {
+					t.Fatalf("closed outcome Apply retained impossible descriptor paths (outcomeProbe=%v coroProbe=%v plain=%v outcome=%v coro=%v):\n%s",
+						outcomeProbe, coroProbe, plainCall, outcomeCall, coroCall, applyIR)
+				}
+				if strings.Contains(applyIR, "load { i32, i32, i64, i64, ptr, ptr, i64, i64, ptr }") ||
+					strings.Contains(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
+					strings.Contains(applyIR, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4) {
+					t.Fatalf("closed outcome Apply retained full descriptor or child-handoff machinery:\n%s", applyIR)
+				}
+				descriptorFields := regexp.MustCompile(
+					`getelementptr inbounds[^\n]+\{ i32, i32, i64, i64, ptr, ptr, i64, i64, ptr \}[^\n]+i32 0, i32 ([0-9]+)`,
+				).FindAllStringSubmatch(applyIR, -1)
+				if len(descriptorFields) != 1 || descriptorFields[0][1] != "5" {
+					t.Fatalf("closed outcome Apply descriptor fields = %v, want only structured entry 5:\n%s", descriptorFields, applyIR)
+				}
+				outcomeBody := module.NamedFunction("foo.Outcome" + coroOutcomePlainPrimarySuffix)
+				if outcomeBody.IsNil() || strings.Contains(outcomeBody.String(), "llvm.coro.") ||
+					!module.NamedFunction("foo.Outcome"+coroPrimarySuffix).IsNil() {
+					t.Fatalf("Outcome descriptor did not emit exactly one stackless synchronous body:\n%s", module.String())
+				}
+			} else if !test.open {
+				if outcomeProbe != nil || coroProbe != nil || plainCall != nil || outcomeCall != nil || coroCall == nil {
+					t.Fatalf("closed coroutine Apply retained impossible descriptor paths (outcomeProbe=%v coroProbe=%v plain=%v outcome=%v coro=%v):\n%s",
+						outcomeProbe, coroProbe, plainCall, outcomeCall, coroCall, applyIR)
+				}
+				if strings.Contains(applyIR, "load { i32, i32, i64, i64, ptr, ptr, i64, i64, ptr }") ||
+					!strings.Contains(applyIR, ", i32 0, i32 5") ||
+					!strings.Contains(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
+					!strings.Contains(applyIR, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4) {
+					t.Fatalf("closed coroutine Apply did not use one narrow structured entry plus child handoff:\n%s", applyIR)
+				}
+				await := strings.Index(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4)
+				if await < coroCall[0] || strings.Index(applyIR[await:], "call i8 @llvm.coro.suspend") < 0 {
+					t.Fatalf("closed coroutine Apply does not publish and retain its dynamic-child slow suspend:\n%s", applyIR)
+				}
+			} else {
+				if outcomeProbe == nil || coroProbe == nil {
+					t.Fatalf("Apply has no outcome/coroutine capability probes (outcome=%v coro=%v):\n%s", outcomeProbe, coroProbe, applyIR)
+				}
+				if loads := strings.Count(applyIR, "load { i32, i32, i64, i64, ptr, ptr, i64, i64, ptr }"); loads != 1 {
+					t.Fatalf("Apply descriptor aggregate loads = %d, want one validated selection shared by all branches:\n%s", loads, applyIR)
+				}
+				if plainCall == nil || outcomeCall == nil || coroCall == nil {
+					t.Fatalf("Apply is missing plain/outcome/coroutine descriptor branches (plain=%v outcome=%v coro=%v):\n%s", plainCall, outcomeCall, coroCall, applyIR)
+				}
+				if !strings.Contains(applyIR, "@llvm.coro.promise") ||
+					!strings.Contains(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4) ||
+					!strings.Contains(applyIR, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4) {
+					t.Fatalf("Apply coroutine descriptor branch does not enter the shared child-await handoff:\n%s", applyIR)
+				}
+				await := strings.Index(applyIR, "call i1 @"+coroAwaitPrepareInlineHookV4)
+				if await < coroCall[0] || strings.Index(applyIR[await:], "call i8 @llvm.coro.suspend") < 0 {
+					t.Fatalf("Apply does not publish, try inline completion, and retain its dynamic-child slow suspend:\n%s", applyIR)
+				}
+				if !regexp.MustCompile(`store i64 [^,]+, ptr `).MatchString(applyIR[plainCall[0]:]) {
+					t.Fatalf("Apply plain branch does not merge its result through the shared result slot:\n%s", applyIR)
+				}
 			}
 
 			runCoroABITestPipeline(t, prog, module)
@@ -174,6 +237,133 @@ func Apply(callback func(int) int, value int) int {
 				t.Fatalf("verify managed descriptor %s branch after CoroSplit: %v\n%s", test.name, err, module.String())
 			}
 		})
+	}
+}
+
+func TestCoroManagedDispatchDoesNotInterpretCoroutineDescriptorAsOutcomeTwin(t *testing.T) {
+	const source = `package foo
+
+var panicValue any
+
+func Target() {
+	if panicValue != nil { panic(panicValue) }
+}
+
+func Root(callback func()) {
+	Target()
+	callback()
+}
+
+func Block(callback func()) { defer callback() }
+
+func Seed() {
+	Block(Target)
+	Root(Target)
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, block := ssaPkg.Func("Root"), ssaPkg.Func("Block")
+	target, seed := ssaPkg.Func("Target"), ssaPkg.Func("Seed")
+	var dynamicCall *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common() != nil && call.Common().StaticCallee() == nil {
+				if dynamicCall != nil {
+					t.Fatal("Root has more than one dynamic call")
+				}
+				dynamicCall = call
+			}
+		}
+	}
+	if dynamicCall == nil {
+		t.Fatal("Root has no dynamic call")
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: seed, ManagedDemand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			OutcomeMode:          coro.OutcomeExplicitStatus,
+			MaxPlainInstructions: 64,
+			ClassifyLocalBody:    universe.CoroLocalBodyFacts,
+			ClassifyClosedDynamicCall: func(owner *ssa.Function, call ssa.CallInstruction) (coro.SSAClosedDynamicCallCertificate, bool, error) {
+				if (owner == root || owner == block) && call.Common() != nil && call.Common().StaticCallee() == nil {
+					return coro.SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}}, true, nil
+				}
+				return coro.SSAClosedDynamicCallCertificate{}, false, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPlan, found := plan.FunctionPlan(target)
+	if !found || targetPlan.Emission != coro.EmitCoroutine ||
+		targetPlan.ManagedEntry != coro.ManagedEntryCoroutine ||
+		!targetPlan.HasStaticOutcome() {
+		t.Fatalf("Target plan = %+v, present=%t; want coroutine primary with an exact-call outcome twin", targetPlan, found)
+	}
+	callPlan, found := plan.CallPlan(dynamicCall)
+	if !found || callPlan.Open || callPlan.Rep != coro.Dispatch || len(callPlan.Targets) != 1 {
+		t.Fatalf("dynamic CallPlan = %+v, present=%t; want one closed descriptor target", callPlan, found)
+	}
+	if coroManagedDispatchPublishedOutcomeOnly(plan, callPlan) {
+		t.Fatal("coroutine-primary descriptor was accepted as an outcome-only publication")
+	}
+	if !coroManagedDispatchPublishedCoroutineOnly(plan, callPlan) {
+		t.Fatal("closed coroutine-primary descriptor did not select its narrow publication")
+	}
+
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	compilation.PanicABI = coro.PanicExplicitStatusABIV0
+	compilation.FuncRepABI = coro.FuncRepABIV2
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatalf("compile dual-capability descriptor target: %v", err)
+	}
+	module := compiled.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify dual-capability descriptor target: %v\n%s", err, module.String())
+	}
+	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	if strings.Contains(rootIR, " and i32 ") ||
+		strings.Contains(rootIR, "load { i32, i32, i64, i64, ptr, ptr") ||
+		!strings.Contains(rootIR, ", i32 0, i32 5") ||
+		!regexp.MustCompile(`call ptr %[-a-zA-Z$._0-9]+\(ptr [^,]+, ptr [^,]+, ptr [^)]+\)`).MatchString(rootIR) ||
+		!strings.Contains(rootIR, "call i1 @"+coroAwaitPrepareInlineHookV4) {
+		t.Fatalf("Root did not lower the closed descriptor to one narrow coroutine path:\n%s", rootIR)
+	}
+	blockIR := requireCoroPhysicalFunction(t, module, "foo.Block").String()
+	if strings.Contains(blockIR, "load { i32, i32, i64, i64, ptr, ptr") ||
+		!strings.Contains(blockIR, ", i32 0, i32 5") ||
+		!regexp.MustCompile(`call ptr %[-a-zA-Z$._0-9]+\(ptr [^,]+, ptr [^,]+, ptr [^)]+\)`).MatchString(blockIR) {
+		t.Fatalf("deferred closed descriptor did not use one narrow coroutine entry:\n%s", blockIR)
+	}
+	runCoroABITestPipeline(t, prog, module)
+	if resume := module.NamedFunction("foo.Root$coro.resume"); resume.IsNil() {
+		t.Fatalf("CoroSplit did not retain Root's dynamic child handoff:\n%s", module.String())
 	}
 }
 
@@ -277,7 +467,7 @@ func Root() { _ = NewInt(); _ = NewString() }
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -427,7 +617,7 @@ func Apply(
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},

@@ -25,7 +25,8 @@ func main() {
 // WaitGroup calls and both goroutines share the managed coroutine scheduler.
 // These assertions intentionally cover protocol boundaries rather than the
 // scheduler's internal block layout.
-// CHECK-LABEL: define ptr @"main.init$coro"(
+// Startup initialization is synchronous and needs only its outcome entry.
+// CHECK-LABEL: define void @"main.init$outcome"(
 // CHECK: call void @"sync.init$outcome"(
 
 // CHECK-LABEL: define ptr @"main.main$coro"(

@@ -1,25 +1,25 @@
 [OrdinaryEdges]
-__llgo_coro_root_factory_descriptor_v1.72c2ac2ba5c23e23041473367b19ae1a:
-    __llgo_coro_root_factory_v1.72c2ac2ba5c23e23041473367b19ae1a
-__llgo_coro_root_factory_v1.72c2ac2ba5c23e23041473367b19ae1a:
+__llgo_coro_root_factory_descriptor_v1.2cfcdd339726a4ab6adc385519d8a639:
+    __llgo_coro_root_factory_v1.2cfcdd339726a4ab6adc385519d8a639
+__llgo_coro_root_factory_v1.2cfcdd339726a4ab6adc385519d8a639:
     main.main$coro
-__llgo_coro_root_package_v1.6996228fc3c2ec25372e63e961da270b:
-    __llgo_coro_root_package_v1.6996228fc3c2ec25372e63e961da270b.entries
-__llgo_coro_root_package_v1.6996228fc3c2ec25372e63e961da270b.entries:
-    __llgo_coro_root_factory_descriptor_v1.72c2ac2ba5c23e23041473367b19ae1a
+__llgo_coro_root_package_v1.6c1df353791d01a20a03a4c1eb2f3d55:
+    __llgo_coro_root_package_v1.6c1df353791d01a20a03a4c1eb2f3d55.entries
+__llgo_coro_root_package_v1.6c1df353791d01a20a03a4c1eb2f3d55.entries:
+    __llgo_coro_root_factory_descriptor_v1.2cfcdd339726a4ab6adc385519d8a639
 _llgo_main.T:
     github.com/xgo-dev/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
-    __llgo_coro_library_effect_v12.5df02b214d260028b40470111f68755a
+    __llgo_coro_library_effect_v13.990e1bfeda4bf6f05887de5b77cd1415
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.72c2ac2ba5c23e23041473367b19ae1a
-    __llgo_coro_root_package_v1.6996228fc3c2ec25372e63e961da270b
+    __llgo_coro_root_factory_descriptor_v1.2cfcdd339726a4ab6adc385519d8a639
+    __llgo_coro_root_package_v1.6c1df353791d01a20a03a4c1eb2f3d55
 main.init:
     main.init$guard
 main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.72c2ac2ba5c23e23041473367b19ae1a
+    __llgo_coro_frame_descriptor_v1.2cfcdd339726a4ab6adc385519d8a639
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1

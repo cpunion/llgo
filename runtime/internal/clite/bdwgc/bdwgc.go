@@ -58,6 +58,13 @@ func RegisterMyThread(base *StackBase) c.Int
 //go:linkname ThreadIsRegistered C.GC_thread_is_registered
 func ThreadIsRegistered() c.Int
 
+// UnregisterMyThread must finish on the current foreign thread: moving it to
+// the worker fleet would unregister the worker instead of the FLS-destructor
+// thread whose collector registration is being released. It may take an
+// internal collector lock, but it neither parks through the LLGo scheduler nor
+// retains caller-frame pointers after return.
+//
+//llgo:coro sync
 //go:linkname UnregisterMyThread C.GC_unregister_my_thread
 func UnregisterMyThread() c.Int
 

@@ -25,32 +25,34 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-// CoroDispatchDescriptorOptions describes the shared v1 dynamic function
+// CoroDispatchDescriptorOptions describes the shared v2 dynamic function
 // descriptor primitive. Signature is the logical Go signature and Result is
 // its canonical result-slot layout. Entry functions already have their final
 // physical C ABI:
 //
-//	plain: (env, args...) -> results
-//	coro:  (g, out, env, args...) -> handle
+//	plain:   (env, args...) -> results
+//	outcome: (g, out, completion, env, args...) -> void
+//	coro:    (g, out, env, args...) -> handle
 //
-// An entry is required exactly when its HasPlain or HasCoro flag is present.
+// An entry is required exactly when its matching capability flag is present.
 // NoCapture asserts that every value carrying this descriptor has a nil env.
 type CoroDispatchDescriptorOptions struct {
-	Version    uint32
-	Flags      uint32
-	ABIHash    [16]byte
-	Signature  *types.Signature
-	PlainEntry Expr
-	CoroEntry  Expr
+	Version      uint32
+	Flags        uint32
+	ABIHash      [16]byte
+	Signature    *types.Signature
+	PlainEntry   Expr
+	OutcomeEntry Expr
+	CoroEntry    Expr
 	// CodeEntry is the compiler-known physical function identity returned by
 	// reflection. It is never invoked through the descriptor dispatch ABI.
 	CodeEntry Expr
 	Result    Type
 }
 
-// CoroDispatchCallOptions is the caller's exact v1 ABI contract. Capability is
-// selected by CallCoroDispatchPlain or CallCoroDispatchCoro rather than copied
-// into this structure, so a coro call accepts both coro-only and dual entries.
+// CoroDispatchCallOptions is the caller's exact v2 ABI contract. Capability is
+// selected by the typed dispatch operation rather than copied into this
+// structure.
 type CoroDispatchCallOptions struct {
 	Version uint32
 	ABIHash [16]byte
@@ -67,6 +69,46 @@ type CoroDispatchCallOptions struct {
 	// unless DescriptorNonNil is also set, but it does not repeat those invariant
 	// checks on every invocation.
 	TrustedDescriptor bool
+}
+
+// CoroDispatchSelection is one validated immutable descriptor snapshot. Its
+// fields are deliberately opaque: frontend lowering may branch on the two
+// structured capabilities and then invoke the matching typed entry, but it
+// cannot reinterpret descriptor words or recover metadata from an address.
+// Keeping the selected entries live across successor blocks also prevents each
+// branch from reloading and revalidating the complete nine-word descriptor.
+type CoroDispatchSelection struct {
+	prepared   coroDispatchPreparedCall
+	hasOutcome Expr
+	hasCoro    Expr
+}
+
+func (selection CoroDispatchSelection) HasOutcome() Expr { return selection.hasOutcome }
+func (selection CoroDispatchSelection) HasCoro() Expr    { return selection.hasCoro }
+func (selection CoroDispatchSelection) CodeEntry() Expr  { return selection.prepared.code }
+
+// CoroDispatchStructuredOnlySelection is the narrow descriptor snapshot used
+// by a frozen closed call whose complete target set is proven to publish one
+// exact structured ABI (outcome or coroutine). It deliberately carries no
+// capability flags or plain entry: those values are impossible at this
+// occurrence and loading them would turn a direct call back into universal
+// dispatch.
+//
+// CodeEntry is loaded only when the frontend requests it for transparent
+// recover bookkeeping. Other narrow calls therefore read exactly the
+// structured entry word from descriptor storage.
+type CoroDispatchStructuredOnlySelection struct {
+	prepared      coroDispatchPreparedCall
+	codeRequested bool
+}
+
+// CodeEntry returns the optional physical identity requested while preparing
+// this selection. It must not be used as a dispatch target.
+func (selection CoroDispatchStructuredOnlySelection) CodeEntry() Expr {
+	if !selection.codeRequested || selection.prepared.code.IsNil() {
+		panic("ssa: structured-only coroutine dispatch code identity was not requested")
+	}
+	return selection.prepared.code
 }
 
 // NewCoroDispatchDescriptor defines one link-once nine-field descriptor. It
@@ -96,15 +138,25 @@ func (p Package) NewCoroDispatchDescriptor(
 		opts.Flags&CoroDispatchFlagHasPlain != 0,
 		"plain",
 	)
+	outcome := p.validateCoroDispatchEntry(
+		opts.OutcomeEntry,
+		p.Prog.CoroDispatchOutcomeEntrySignature(opts.Signature),
+		opts.Flags&CoroDispatchFlagHasOutcome != 0,
+		"outcome",
+	)
 	coro := p.validateCoroDispatchEntry(
 		opts.CoroEntry,
 		p.Prog.CoroDispatchCoroEntrySignature(opts.Signature),
 		opts.Flags&CoroDispatchFlagHasCoro != 0,
 		"coroutine",
 	)
+	structured := outcome
+	if structured.IsNil() {
+		structured = coro
+	}
 	code := p.validateCoroDispatchCodeEntry(opts.CodeEntry)
 	if descriptor := p.VarOf(name); descriptor != nil {
-		if p.matchesCoroDispatchDescriptor(descriptor, plain, coro, code, opts) {
+		if p.matchesCoroDispatchDescriptor(descriptor, plain, structured, code, opts) {
 			return descriptor.Expr
 		}
 		panic(fmt.Sprintf("ssa: coroutine dispatch symbol %q conflicts with an existing descriptor", name))
@@ -114,7 +166,7 @@ func (p Package) NewCoroDispatchDescriptor(
 		panic(fmt.Sprintf("ssa: coroutine dispatch symbol %q already exists", name))
 	}
 	return p.newCoroDispatchDescriptorGlobal(
-		name, opts.Version, opts.Flags, opts.ABIHash, plain, coro, code, opts.Result,
+		name, opts.Version, opts.Flags, opts.ABIHash, plain, structured, code, opts.Result,
 	)
 }
 
@@ -146,6 +198,20 @@ func (p Program) CoroDispatchCoroEntrySignature(sig *types.Signature) *types.Sig
 		panic("ssa: coroutine dispatch coroutine entry: " + err.Error())
 	}
 	return coroDispatchCoroEntrySignature(p.PhysicalFuncDecl(sig, InGo))
+}
+
+// CoroDispatchOutcomeEntrySignature returns the final C-ABI signature for a
+// logical Go function's explicit-status descriptor entry:
+// (g,out,completion,env,args...)->void. Outcome and coroutine entries share
+// one descriptor word and are distinguished by mutually exclusive flags.
+func (p Program) CoroDispatchOutcomeEntrySignature(sig *types.Signature) *types.Signature {
+	if sig == nil {
+		panic("ssa: coroutine dispatch outcome entry requires a signature")
+	}
+	if err := validateCoroDispatchSignature(sig); err != nil {
+		panic("ssa: coroutine dispatch outcome entry: " + err.Error())
+	}
+	return coroDispatchOutcomeEntrySignature(p.PhysicalFuncDecl(sig, InGo))
 }
 
 // MakeCoroDispatchValue constructs the canonical function value
@@ -180,6 +246,23 @@ func (b Builder) CallCoroDispatchPlain(
 	fn Expr, args []Expr, opts CoroDispatchCallOptions,
 ) (ret Expr) {
 	call := b.prepareCoroDispatchCall(fn, args, opts, CoroDispatchFlagHasPlain)
+	return b.callPreparedCoroDispatchPlain(call, args)
+}
+
+// CallPreparedCoroDispatchPlain invokes the plain entry selected by
+// PrepareCoroDispatchCall. It must execute only on the !HasOutcome && !HasCoro
+// successor of that exact selection.
+func (b Builder) CallPreparedCoroDispatchPlain(
+	selection CoroDispatchSelection, args []Expr,
+) Expr {
+	call := b.requireCoroDispatchSelection(selection, args, "plain")
+	call.entry = call.plain
+	return b.callPreparedCoroDispatchPlain(call, args)
+}
+
+func (b Builder) callPreparedCoroDispatchPlain(
+	call coroDispatchPreparedCall, args []Expr,
+) (ret Expr) {
 	plainSig := coroDispatchPlainEntrySignature(call.signature)
 	ret.Type = b.Prog.retType(call.signature)
 	ret.impl = llvm.CreateCall(
@@ -189,7 +272,7 @@ func (b Builder) CallCoroDispatchPlain(
 	return
 }
 
-// CoroDispatchHasCoro validates a dynamic descriptor's shared v1 contract and
+// CoroDispatchHasCoro validates a dynamic descriptor's shared v2 contract and
 // reports whether it publishes a coroutine entry. Unlike the two dispatch
 // operations, this capability probe accepts any valid non-empty capability
 // set: in particular, a valid plain-only descriptor returns false instead of
@@ -202,6 +285,13 @@ func (b Builder) CoroDispatchHasCoro(
 	return hasCoro
 }
 
+// CoroDispatchHasOutcome reports whether a validated descriptor publishes an
+// explicit-status synchronous entry.
+func (b Builder) CoroDispatchHasOutcome(fn Expr, opts CoroDispatchCallOptions) Expr {
+	hasOutcome, _, _ := b.CoroDispatchCapabilitiesAndCodeEntry(fn, opts)
+	return hasOutcome
+}
+
 // CoroDispatchHasCoroAndCodeEntry performs the same descriptor validation as
 // CoroDispatchHasCoro and also returns its compiler-injected physical code
 // identity. The code entry is metadata, never a callable entry: transparent
@@ -211,18 +301,106 @@ func (b Builder) CoroDispatchHasCoro(
 func (b Builder) CoroDispatchHasCoroAndCodeEntry(
 	fn Expr, opts CoroDispatchCallOptions,
 ) (Expr, Expr) {
+	_, hasCoro, code := b.CoroDispatchCapabilitiesAndCodeEntry(fn, opts)
+	return hasCoro, code
+}
+
+// CoroDispatchCapabilitiesAndCodeEntry validates the shared descriptor once
+// and returns its two structured capabilities plus physical code identity.
+func (b Builder) CoroDispatchCapabilitiesAndCodeEntry(
+	fn Expr, opts CoroDispatchCallOptions,
+) (Expr, Expr, Expr) {
+	selection := b.PrepareCoroDispatchCall(fn, opts)
+	return selection.HasOutcome(), selection.HasCoro(), selection.CodeEntry()
+}
+
+// PrepareCoroDispatchCall validates and snapshots one descriptor before a
+// frontend emits its capability branch. Calls in the mutually exclusive
+// successors must use the CallPreparedCoroDispatch* operations with this exact
+// value; no successor reloads descriptor storage or repeats its contract.
+func (b Builder) PrepareCoroDispatchCall(
+	fn Expr, opts CoroDispatchCallOptions,
+) CoroDispatchSelection {
 	call := b.prepareCoroDispatchCall(fn, nil, opts, 0)
+	hasOutcome := llvm.CreateAnd(
+		b.impl, call.flags.impl,
+		b.Prog.IntVal(uint64(CoroDispatchFlagHasOutcome), b.Prog.Uint32()).impl,
+	)
 	hasCoro := llvm.CreateAnd(
 		b.impl, call.flags.impl,
 		b.Prog.IntVal(uint64(CoroDispatchFlagHasCoro), b.Prog.Uint32()).impl,
 	)
-	return Expr{
-		impl: llvm.CreateICmp(
-			b.impl, llvm.IntNE, hasCoro,
-			b.Prog.IntVal(0, b.Prog.Uint32()).impl,
-		),
-		Type: b.Prog.Bool(),
-	}, call.code
+	boolean := func(value llvm.Value) Expr {
+		return Expr{
+			impl: llvm.CreateICmp(
+				b.impl, llvm.IntNE, value,
+				b.Prog.IntVal(0, b.Prog.Uint32()).impl,
+			),
+			Type: b.Prog.Bool(),
+		}
+	}
+	return CoroDispatchSelection{
+		prepared:   call,
+		hasOutcome: boolean(hasOutcome),
+		hasCoro:    boolean(hasCoro),
+	}
+}
+
+// PrepareCoroDispatchStructuredOnly snapshots only the words required by a
+// compiler-frozen single-structured-capability call. TrustedDescriptor is
+// mandatory. Unlike PrepareCoroDispatchCall, this operation intentionally
+// omits runtime schema, hash, layout, and capability probes because
+// whole-program/library metadata has already proved the exact descriptor
+// family at this occurrence.
+//
+// needCodeEntry should be true only for transparent-recover bookkeeping. The
+// returned selection invokes only the typed structured entry.
+func (b Builder) PrepareCoroDispatchStructuredOnly(
+	fn Expr, opts CoroDispatchCallOptions, needCodeEntry bool,
+) CoroDispatchStructuredOnlySelection {
+	if !opts.TrustedDescriptor {
+		panic("ssa: structured-only coroutine dispatch requires a trusted descriptor proof")
+	}
+	if opts.Version != CoroDispatchVersionV2 {
+		panic(fmt.Sprintf(
+			"ssa: coroutine dispatch version is %d, want %d",
+			opts.Version, CoroDispatchVersionV2,
+		))
+	}
+	if fn.IsNil() || fn.kind != vkClosure && fn.kind != vkIfaceMethod {
+		panic("ssa: coroutine dispatch call requires a function or interface-method pair")
+	}
+	sig, ok := b.Prog.Field(fn.Type, 0).RawType().(*types.Signature)
+	if !ok {
+		panic("ssa: coroutine dispatch call has no function signature")
+	}
+	if err := validateCoroDispatchPhysicalSignature(sig); err != nil {
+		panic("ssa: coroutine dispatch call: " + err.Error())
+	}
+	validateCoroDispatchResult(b.Prog, opts.Result, "call")
+
+	descriptorWord := b.Field(fn, 0)
+	if !opts.DescriptorNonNil {
+		b.AssertNilDeref(descriptorWord)
+	}
+	descriptor := Expr{
+		descriptorWord.impl,
+		b.Prog.Pointer(b.Prog.coroDispatchDescriptorType()),
+	}
+	structured := b.LoadKnownNonNil(b.FieldAddrKnownNonNil(descriptor, 5))
+	prepared := coroDispatchPreparedCall{
+		entry:      structured,
+		structured: structured,
+		env:        b.Field(fn, 1),
+		signature:  sig,
+	}
+	if needCodeEntry {
+		prepared.code = b.LoadKnownNonNil(b.FieldAddrKnownNonNil(descriptor, 8))
+	}
+	return CoroDispatchStructuredOnlySelection{
+		prepared:      prepared,
+		codeRequested: needCodeEntry,
+	}
 }
 
 // CoroDispatchCodeEntry validates fn and returns the descriptor's physical
@@ -240,6 +418,22 @@ func (b Builder) CallCoroDispatchCoro(
 	fn, g, out Expr, args []Expr, opts CoroDispatchCallOptions,
 ) (ret Expr) {
 	call := b.prepareCoroDispatchCall(fn, args, opts, CoroDispatchFlagHasCoro)
+	return b.callPreparedCoroDispatchCoro(call, g, out, args)
+}
+
+// CallPreparedCoroDispatchCoro invokes the coroutine entry on the HasCoro
+// successor of one exact prepared selection.
+func (b Builder) CallPreparedCoroDispatchCoro(
+	selection CoroDispatchSelection, g, out Expr, args []Expr,
+) Expr {
+	call := b.requireCoroDispatchSelection(selection, args, "coroutine")
+	call.entry = call.structured
+	return b.callPreparedCoroDispatchCoro(call, g, out, args)
+}
+
+func (b Builder) callPreparedCoroDispatchCoro(
+	call coroDispatchPreparedCall, g, out Expr, args []Expr,
+) (ret Expr) {
 	g = b.requireCoroDispatchPointer(g, "g")
 	out = b.requireCoroDispatchPointer(out, "out")
 	coroSig := coroDispatchCoroEntrySignature(call.signature)
@@ -254,24 +448,120 @@ func (b Builder) CallCoroDispatchCoro(
 	return
 }
 
+// CallCoroDispatchOutcome validates a dynamic descriptor and invokes its
+// synchronous explicit-status entry. The caller owns result and completion
+// storage and consumes the published terminal state immediately.
+func (b Builder) CallCoroDispatchOutcome(
+	fn, g, out, completion Expr, args []Expr, opts CoroDispatchCallOptions,
+) (ret Expr) {
+	call := b.prepareCoroDispatchCall(fn, args, opts, CoroDispatchFlagHasOutcome)
+	return b.callPreparedCoroDispatchOutcome(call, g, out, completion, args)
+}
+
+// CallPreparedCoroDispatchOutcome invokes the synchronous explicit-status
+// entry on the HasOutcome successor of one exact prepared selection.
+func (b Builder) CallPreparedCoroDispatchOutcome(
+	selection CoroDispatchSelection, g, out, completion Expr, args []Expr,
+) Expr {
+	call := b.requireCoroDispatchSelection(selection, args, "outcome")
+	call.entry = call.structured
+	return b.callPreparedCoroDispatchOutcome(call, g, out, completion, args)
+}
+
+// CallPreparedCoroDispatchOutcomeOnly invokes the sole typed entry carried by
+// one frozen outcome-only selection.
+func (b Builder) CallPreparedCoroDispatchOutcomeOnly(
+	selection CoroDispatchStructuredOnlySelection,
+	g, out, completion Expr,
+	args []Expr,
+) Expr {
+	call := b.requireCoroDispatchStructuredOnlySelection(selection, args, "outcome")
+	return b.callPreparedCoroDispatchOutcome(call, g, out, completion, args)
+}
+
+// CallPreparedCoroDispatchCoroOnly invokes the sole typed entry carried by one
+// frozen coroutine-only selection.
+func (b Builder) CallPreparedCoroDispatchCoroOnly(
+	selection CoroDispatchStructuredOnlySelection,
+	g, out Expr,
+	args []Expr,
+) Expr {
+	call := b.requireCoroDispatchStructuredOnlySelection(selection, args, "coroutine")
+	return b.callPreparedCoroDispatchCoro(call, g, out, args)
+}
+
+func (b Builder) requireCoroDispatchStructuredOnlySelection(
+	selection CoroDispatchStructuredOnlySelection, args []Expr, capability string,
+) coroDispatchPreparedCall {
+	call := selection.prepared
+	if call.signature == nil || call.entry.IsNil() || call.structured.IsNil() || call.env.IsNil() {
+		panic("ssa: prepared structured-only " + capability + " dispatch call has an incomplete selection")
+	}
+	if len(args) != call.signature.Params().Len() {
+		panic(fmt.Sprintf(
+			"ssa: prepared structured-only %s dispatch call has %d arguments, want %d",
+			capability, len(args), call.signature.Params().Len(),
+		))
+	}
+	return call
+}
+
+func (b Builder) callPreparedCoroDispatchOutcome(
+	call coroDispatchPreparedCall, g, out, completion Expr, args []Expr,
+) (ret Expr) {
+	g = b.requireCoroDispatchPointer(g, "g")
+	out = b.requireCoroDispatchPointer(out, "out")
+	completion = b.requireCoroDispatchPointer(completion, "completion")
+	outcomeSig := coroDispatchOutcomeEntrySignature(call.signature)
+	physicalArgs := make([]Expr, 0, len(args)+4)
+	physicalArgs = append(physicalArgs, g, out, completion, call.env)
+	physicalArgs = append(physicalArgs, args...)
+	ret.Type = b.Prog.Void()
+	ret.impl = llvm.CreateCall(
+		b.impl, b.Prog.FuncDecl(outcomeSig, InC).ll, call.entry.impl,
+		llvmParams(0, physicalArgs, outcomeSig.Params(), b),
+	)
+	return
+}
+
 type coroDispatchPreparedCall struct {
-	entry     Expr
-	code      Expr
-	env       Expr
-	flags     Expr
-	signature *types.Signature
+	entry      Expr
+	plain      Expr
+	structured Expr
+	code       Expr
+	env        Expr
+	flags      Expr
+	signature  *types.Signature
+}
+
+func (b Builder) requireCoroDispatchSelection(
+	selection CoroDispatchSelection, args []Expr, capability string,
+) coroDispatchPreparedCall {
+	call := selection.prepared
+	if call.signature == nil || call.env.IsNil() || call.flags.IsNil() ||
+		call.plain.IsNil() || call.structured.IsNil() || call.code.IsNil() {
+		panic("ssa: prepared coroutine dispatch " + capability + " call has an incomplete selection")
+	}
+	if len(args) != call.signature.Params().Len() {
+		panic(fmt.Sprintf(
+			"ssa: prepared coroutine dispatch %s call has %d arguments, want %d",
+			capability, len(args), call.signature.Params().Len(),
+		))
+	}
+	return call
 }
 
 func (b Builder) prepareCoroDispatchCall(
 	fn Expr, args []Expr, opts CoroDispatchCallOptions, capability uint32,
 ) coroDispatchPreparedCall {
-	if opts.Version != CoroDispatchVersionV1 {
+	if opts.Version != CoroDispatchVersionV2 {
 		panic(fmt.Sprintf(
 			"ssa: coroutine dispatch version is %d, want %d",
-			opts.Version, CoroDispatchVersionV1,
+			opts.Version, CoroDispatchVersionV2,
 		))
 	}
-	if capability != 0 && capability != CoroDispatchFlagHasPlain && capability != CoroDispatchFlagHasCoro {
+	if capability != 0 && capability != CoroDispatchFlagHasPlain &&
+		capability != CoroDispatchFlagHasOutcome && capability != CoroDispatchFlagHasCoro {
 		panic("ssa: coroutine dispatch call requires one known capability")
 	}
 	if fn.IsNil() || fn.kind != vkClosure && fn.kind != vkIfaceMethod {
@@ -316,14 +606,16 @@ func (b Builder) prepareCoroDispatchCall(
 	}
 	if opts.TrustedDescriptor {
 		prepared := coroDispatchPreparedCall{
-			env:       env,
-			flags:     fields[1],
-			code:      fields[8],
-			signature: sig,
+			plain:      fields[4],
+			structured: fields[5],
+			env:        env,
+			flags:      fields[1],
+			code:       fields[8],
+			signature:  sig,
 		}
 		if capability == CoroDispatchFlagHasPlain {
 			prepared.entry = fields[4]
-		} else if capability == CoroDispatchFlagHasCoro {
+		} else if capability == CoroDispatchFlagHasOutcome || capability == CoroDispatchFlagHasCoro {
 			prepared.entry = fields[5]
 		}
 		return prepared
@@ -345,12 +637,12 @@ func (b Builder) prepareCoroDispatchCall(
 	zeroFlags := b.Prog.IntVal(0, b.Prog.Uint32()).impl
 	unknown := llvm.CreateAnd(
 		b.impl, flags,
-		b.Prog.IntVal(uint64(^uint32(CoroDispatchKnownFlagsV1)), b.Prog.Uint32()).impl,
+		b.Prog.IntVal(uint64(^uint32(CoroDispatchKnownFlagsV2)), b.Prog.Uint32()).impl,
 	)
 	addInvalid("coro.dispatch.flags.unknown", llvm.CreateICmp(b.impl, llvm.IntNE, unknown, zeroFlags))
 	capabilities := llvm.CreateAnd(
 		b.impl, flags,
-		b.Prog.IntVal(uint64(CoroDispatchCapabilityMaskV1), b.Prog.Uint32()).impl,
+		b.Prog.IntVal(uint64(CoroDispatchCapabilityMaskV2), b.Prog.Uint32()).impl,
 	)
 	addInvalid("coro.dispatch.flags.empty", llvm.CreateICmp(b.impl, llvm.IntEQ, capabilities, zeroFlags))
 	if capability != 0 {
@@ -369,15 +661,22 @@ func (b Builder) prepareCoroDispatchCall(
 		b.impl, llvm.IntNE, fields[4].impl, llvm.ConstNull(fields[4].impl.Type()),
 	)
 	addInvalid("coro.dispatch.plain.entry.mismatch", llvm.CreateXor(b.impl, plainFlag, plainEntry))
+	outcomeFlag := llvm.CreateICmp(
+		b.impl, llvm.IntNE,
+		llvm.CreateAnd(b.impl, flags, b.Prog.IntVal(uint64(CoroDispatchFlagHasOutcome), b.Prog.Uint32()).impl),
+		zeroFlags,
+	)
 	coroFlag := llvm.CreateICmp(
 		b.impl, llvm.IntNE,
 		llvm.CreateAnd(b.impl, flags, b.Prog.IntVal(uint64(CoroDispatchFlagHasCoro), b.Prog.Uint32()).impl),
 		zeroFlags,
 	)
-	coroEntry := llvm.CreateICmp(
+	structuredEntry := llvm.CreateICmp(
 		b.impl, llvm.IntNE, fields[5].impl, llvm.ConstNull(fields[5].impl.Type()),
 	)
-	addInvalid("coro.dispatch.coro.entry.mismatch", llvm.CreateXor(b.impl, coroFlag, coroEntry))
+	structuredFlag := b.impl.CreateOr(outcomeFlag, coroFlag, "")
+	addInvalid("coro.dispatch.structured.entry.mismatch", llvm.CreateXor(b.impl, structuredFlag, structuredEntry))
+	addInvalid("coro.dispatch.structured.flags.conflict", llvm.CreateAnd(b.impl, outcomeFlag, coroFlag))
 	plainNoUnwind := llvm.CreateICmp(
 		b.impl, llvm.IntNE,
 		llvm.CreateAnd(b.impl, flags, b.Prog.IntVal(uint64(CoroDispatchFlagPlainNoUnwind), b.Prog.Uint32()).impl),
@@ -392,7 +691,7 @@ func (b Builder) prepareCoroDispatchCall(
 		llvm.CreateAnd(
 			b.impl,
 			plainFlag,
-			llvm.CreateAnd(b.impl, llvm.CreateNot(b.impl, coroFlag), llvm.CreateNot(b.impl, plainNoUnwind)),
+			llvm.CreateAnd(b.impl, llvm.CreateNot(b.impl, structuredFlag), llvm.CreateNot(b.impl, plainNoUnwind)),
 		),
 	)
 	noCapture := llvm.CreateICmp(
@@ -430,7 +729,7 @@ func (b Builder) prepareCoroDispatchCall(
 	)
 	runtimeMagicMismatch := llvm.CreateICmp(
 		b.impl, llvm.IntNE, fields[3].impl,
-		b.Prog.IntVal(CoroDispatchRuntimeTypeMagicV1, b.Prog.Uint64()).impl,
+		b.Prog.IntVal(CoroDispatchRuntimeTypeMagicV2, b.Prog.Uint64()).impl,
 	)
 	addInvalid(
 		"coro.dispatch.runtime-type.invalid",
@@ -455,14 +754,16 @@ func (b Builder) prepareCoroDispatchCall(
 	b.coroPlainDispatchTrapIf(invalid)
 
 	prepared := coroDispatchPreparedCall{
-		env:       env,
-		flags:     fields[1],
-		code:      fields[8],
-		signature: sig,
+		plain:      fields[4],
+		structured: fields[5],
+		env:        env,
+		flags:      fields[1],
+		code:       fields[8],
+		signature:  sig,
 	}
 	if capability == CoroDispatchFlagHasPlain {
 		prepared.entry = fields[4]
-	} else if capability == CoroDispatchFlagHasCoro {
+	} else if capability == CoroDispatchFlagHasOutcome || capability == CoroDispatchFlagHasCoro {
 		prepared.entry = fields[5]
 	}
 	return prepared
@@ -481,7 +782,11 @@ func (p Package) validateCoroDispatchEntry(
 ) llvm.Value {
 	if entry.IsNil() {
 		if required {
-			panic("ssa: coroutine dispatch descriptor requires a " + role + " entry")
+			article := "a "
+			if role == "outcome" {
+				article = "an "
+			}
+			panic("ssa: coroutine dispatch descriptor requires " + article + role + " entry")
 		}
 		return llvm.Value{}
 	}
@@ -511,15 +816,15 @@ func (p Package) validateCoroDispatchCodeEntry(entry Expr) llvm.Value {
 
 func (p Package) newCoroDispatchDescriptorGlobal(
 	name string, version, flags uint32, hash [16]byte,
-	plain, coro, code llvm.Value, result Type,
+	plain, structured, code llvm.Value, result Type,
 ) Expr {
 	descriptorType := p.Prog.coroDispatchDescriptorType()
 	descriptor := p.NewVarEx(name, p.Prog.Pointer(descriptorType))
 	if plain.IsNil() {
 		plain = p.Prog.Nil(p.Prog.VoidPtr()).impl
 	}
-	if coro.IsNil() {
-		coro = p.Prog.Nil(p.Prog.VoidPtr()).impl
+	if structured.IsNil() {
+		structured = p.Prog.Nil(p.Prog.VoidPtr()).impl
 	}
 	fields := []llvm.Value{
 		p.Prog.IntVal(uint64(version), p.Prog.Uint32()).impl,
@@ -527,7 +832,7 @@ func (p Package) newCoroDispatchDescriptorGlobal(
 		p.Prog.IntVal(binary.BigEndian.Uint64(hash[:8]), p.Prog.Uint64()).impl,
 		p.Prog.IntVal(binary.BigEndian.Uint64(hash[8:]), p.Prog.Uint64()).impl,
 		plain,
-		coro,
+		structured,
 		p.Prog.IntVal(p.Prog.SizeOf(result), p.Prog.Uintptr()).impl,
 		p.Prog.IntVal(p.Prog.AlignOf(result), p.Prog.Uintptr()).impl,
 		code,
@@ -540,7 +845,7 @@ func (p Package) newCoroDispatchDescriptorGlobal(
 }
 
 func (p Package) matchesCoroDispatchDescriptor(
-	descriptor Global, plain, coro, code llvm.Value, opts CoroDispatchDescriptorOptions,
+	descriptor Global, plain, structured, code llvm.Value, opts CoroDispatchDescriptorOptions,
 ) bool {
 	if descriptor == nil || !p.isCoroDispatchDescriptor(descriptor.Expr) {
 		return false
@@ -560,7 +865,7 @@ func (p Package) matchesCoroDispatchDescriptor(
 			return false
 		}
 	}
-	for i, want := range []llvm.Value{plain, coro} {
+	for i, want := range []llvm.Value{plain, structured} {
 		got := initializer.Operand(4 + i)
 		if want.IsNil() {
 			if got.IsAConstantPointerNull().IsNil() {
@@ -579,25 +884,29 @@ func (p Package) matchesCoroDispatchDescriptor(
 }
 
 func validateCoroDispatchContract(version, flags uint32) {
-	if version != CoroDispatchVersionV1 {
+	if version != CoroDispatchVersionV2 {
 		panic(fmt.Sprintf(
 			"ssa: coroutine dispatch version is %d, want %d",
-			version, CoroDispatchVersionV1,
+			version, CoroDispatchVersionV2,
 		))
 	}
-	if unknown := flags &^ CoroDispatchKnownFlagsV1; unknown != 0 {
+	if unknown := flags &^ CoroDispatchKnownFlagsV2; unknown != 0 {
 		panic(fmt.Sprintf("ssa: coroutine dispatch flags contain unknown bits %#x", unknown))
 	}
-	if flags&CoroDispatchCapabilityMaskV1 == 0 {
-		panic("ssa: coroutine dispatch flags require HasPlain or HasCoro")
+	if flags&CoroDispatchCapabilityMaskV2 == 0 {
+		panic("ssa: coroutine dispatch flags require HasPlain, HasOutcome, or HasCoro")
 	}
 	hasPlain := flags&CoroDispatchFlagHasPlain != 0
+	hasOutcome := flags&CoroDispatchFlagHasOutcome != 0
 	hasCoro := flags&CoroDispatchFlagHasCoro != 0
+	if hasOutcome && hasCoro {
+		panic("ssa: coroutine dispatch outcome and coroutine capabilities are mutually exclusive")
+	}
 	plainNoUnwind := flags&CoroDispatchFlagPlainNoUnwind != 0
 	if plainNoUnwind && !hasPlain {
 		panic("ssa: coroutine dispatch PlainNoUnwind requires HasPlain")
 	}
-	if hasPlain && !hasCoro && !plainNoUnwind {
+	if hasPlain && !hasOutcome && !hasCoro && !plainNoUnwind {
 		panic("ssa: coroutine dispatch plain-only capability requires PlainNoUnwind")
 	}
 }
@@ -644,5 +953,18 @@ func coroDispatchCoroEntrySignature(sig *types.Signature) *types.Signature {
 	result := types.NewParam(token.NoPos, nil, "__llgo_handle", types.Typ[types.UnsafePointer])
 	return types.NewSignatureType(
 		nil, nil, nil, types.NewTuple(params...), types.NewTuple(result), false,
+	)
+}
+
+func coroDispatchOutcomeEntrySignature(sig *types.Signature) *types.Signature {
+	params := make([]*types.Var, 0, sig.Params().Len()+4)
+	for _, name := range []string{"__llgo_g", "__llgo_out", "__llgo_completion", "__llgo_env"} {
+		params = append(params, types.NewParam(token.NoPos, nil, name, types.Typ[types.UnsafePointer]))
+	}
+	for i := 0; i < sig.Params().Len(); i++ {
+		params = append(params, sig.Params().At(i))
+	}
+	return types.NewSignatureType(
+		nil, nil, nil, types.NewTuple(params...), types.NewTuple(), false,
 	)
 }

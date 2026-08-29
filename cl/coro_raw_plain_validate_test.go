@@ -373,7 +373,7 @@ func rawPlainValidationCompilation(plan *coro.SSAPlan, universe *EmissionUnivers
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	if plainDispatch {
-		compilation.FuncRepABI = coro.FuncRepABIV1
+		compilation.FuncRepABI = coro.FuncRepABIV2
 	}
 	return compilation
 }

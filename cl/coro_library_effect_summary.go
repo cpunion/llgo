@@ -417,17 +417,13 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 				fact.ID,
 			)
 		}
-		// The v8 managed-function record publishes the primary and optional static
-		// outcome entry. Descriptor construction is an
-		// independently versioned ABI and cannot be inferred from FuncRep width.
-		// An undemanded declaration emits nothing and therefore needs no
-		// descriptor in this consumer; reject only an active crossing.
-		if fact.FuncRep == coro.Dispatch && functionPlan.Emission != coro.EmitNone {
-			return fmt.Errorf(
-				"coroutine library effect %q requires an external Dispatch producer, which the current library summary does not publish",
-				fact.ID,
-			)
-		}
+		// FuncRep ABI v2 deliberately does not publish a producer-owned descriptor
+		// address. The compatibility-checked representation, managed-entry kind,
+		// structural ABI hash, and exact primary symbol are sufficient for every
+		// consumer to emit the same content-addressed linkonce descriptor and thin
+		// typed thunk. This keeps archive metadata pointer-free and avoids one
+		// permanent descriptor in libraries whose callers never form a function
+		// value.
 	}
 	for function, fact := range c.CoroLibraryForeignCallables {
 		if function == nil {

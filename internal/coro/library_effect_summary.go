@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v12"
+	LibraryEffectSummaryVersion = "v13"
 
 	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
 	// C-to-managed adapter published by LibraryEffectExportIngress. It is
@@ -61,7 +61,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 12,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 13,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -405,7 +405,8 @@ func (function LibraryEffectFunction) validate() error {
 			return fmt.Errorf("coro: library function %q has a coroutine entry with %s primary", function.ID, function.Primary)
 		}
 	case ManagedEntryOutcomePlain:
-		if function.Primary != PrimaryCoroutine || function.FuncRep != DirectCoro ||
+		if function.Primary != PrimaryCoroutine ||
+			(function.FuncRep != DirectCoro && function.FuncRep != Dispatch) ||
 			function.Effect != OutcomeStructured ||
 			!function.StaticOutcome && function.Exec&^MayUnwind != 0 {
 			return fmt.Errorf("coro: library function %q has an invalid outcome-plain entry capability", function.ID)

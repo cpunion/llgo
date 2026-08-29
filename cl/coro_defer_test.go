@@ -1424,7 +1424,7 @@ func FreeDeferNode(pointer unsafe.Pointer) {
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},

@@ -32,7 +32,10 @@ import (
 func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Instruction) bool {
 	body := p.coroBody()
 	if body == nil {
-		return false
+		if !p.hasOutcomePlainPhysicalBody() {
+			return false
+		}
+		return p.compileCoroValueElisionPrologue(instr)
 	}
 	if _, debug := instr.(*ssa.DebugRef); debug {
 		p.compileInstr(b, instr)
@@ -64,6 +67,10 @@ func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Inst
 	if !outerCriticalEnter {
 		body.sourceBlockPollFresh = false
 	}
+	return p.compileCoroValueElisionPrologue(instr)
+}
+
+func (p *context) compileCoroValueElisionPrologue(instr ssa.Instruction) bool {
 	switch instr := instr.(type) {
 	case *ssa.ChangeType, *ssa.MakeInterface:
 		plan := p.coroEmissionPlan()
@@ -139,7 +146,14 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		if physical := p.coroEmissionPlan(); physical != nil {
 			staticOutcome = physical.staticOutcome
 		}
-		if instructionPlan.control != coroPhysicalControlNone ||
+		structuredOutcomeCall := instructionPlan.structuredOutcomeOnly &&
+			(instructionPlan.control == coroPhysicalControlDispatchAwait ||
+				instructionPlan.control == coroPhysicalControlManagedInterfaceAwait ||
+				instructionPlan.control == coroPhysicalControlClosedInterfaceAwait)
+		staticPlainInterfaceCall := staticOutcome &&
+			instructionPlan.control == coroPhysicalControlExactInterfaceCall
+		if instructionPlan.control != coroPhysicalControlNone &&
+			!structuredOutcomeCall && !staticPlainInterfaceCall ||
 			!staticOutcome && !coroOutcomePlainLeafSemanticRecipe(instructionPlan.semantic) {
 			panic(fmt.Sprintf("outcome-plain DAG call selected incompatible frozen control recipe %s", instructionPlan.control))
 		}

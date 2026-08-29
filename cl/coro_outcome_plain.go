@@ -243,7 +243,7 @@ func validateStaticOutcomeFrozenPlan(plan *coroPhysicalFunctionPlan, logical cor
 				!physical.operationControl.NativeActivationBound() ||
 			physical.operation == coroPhysicalOperationNativeSyscall &&
 				physical.semantic.recipe == coro.RecipeID("cl.intrinsic.inline-native-block.v1")
-		if !operationSupported || physical.controlFailureHard ||
+		if !operationSupported || physical.controlFailureHard && physical.controlFailure != "" ||
 			physical.operationFailure != "" || physical.outcomeFailure != "" {
 			return fmt.Errorf(
 				"static-outcome function %q instruction %T %q selected an invalid physical recipe (operation=%s control=%s hard=%t operation-failure=%q outcome-failure=%q)",
@@ -269,9 +269,30 @@ func validateStaticOutcomeFrozenPlan(plan *coroPhysicalFunctionPlan, logical cor
 				// ordinary call to be a closed no-unwind plain target.
 				continue
 			}
-			if physical.control != coroPhysicalControlDirectOutcome || physical.controlTarget == nil ||
-				physical.controlTargetID == "" || !physical.directOutcomeNativeResult {
-				return fmt.Errorf("static-outcome call %q lacks an exact synchronous target", call.String())
+			if physical.control == coroPhysicalControlExactInterfaceCall &&
+				physical.controlTarget != nil && physical.controlTargetID != "" &&
+				physical.controlReceiver != nil {
+				// The occurrence-local interface proof devirtualized this call to
+				// the same closed no-unwind plain ABI. Its nonzero control recipe
+				// records receiver transport, not a suspension transaction.
+				continue
+			}
+			exactOutcome := physical.control == coroPhysicalControlDirectOutcome &&
+				physical.controlTarget != nil && physical.controlTargetID != ""
+			if physical.control == coroPhysicalControlClosedInterfaceAwait {
+				_, exactOutcome = coroInterfaceDispatchStaticOutcomeCandidate(physical.controlInterface)
+			}
+			if physical.control == coroPhysicalControlManagedInterfaceAwait ||
+				physical.control == coroPhysicalControlDispatchAwait {
+				exactOutcome = physical.structuredOutcomeOnly
+			}
+			if !exactOutcome || !physical.directOutcomeNativeResult {
+				return fmt.Errorf(
+					"static-outcome call %q lacks an exact synchronous target (control=%s target=%q structured=%t native-result=%t failure=%q)",
+					call.String(), physical.control, physical.controlTargetID,
+					physical.structuredOutcomeOnly, physical.directOutcomeNativeResult,
+					physical.controlFailure,
+				)
 			}
 		} else if physical.control != coroPhysicalControlNone {
 			return fmt.Errorf("static-outcome instruction %T selected unsupported control %s", instruction, physical.control)
@@ -399,6 +420,12 @@ func (p *context) compileCoroStaticOutcomeCall(
 ) llssa.Expr {
 	if !p.hasStructuredOutcomePhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlDirectOutcome {
 		panic("outcome-plain call escaped its frozen direct control recipe")
+	}
+	if instructionPlan.controlReceiver != nil {
+		if call.Common() == nil || !call.Common().IsInvoke() {
+			panic("direct outcome receiver belongs to a non-interface call")
+		}
+		return p.compileCoroExactInterfaceOutcome(b, call, instructionPlan)
 	}
 	callee := instructionPlan.controlTarget
 	if callee == nil || len(callee.FreeVars) != 0 {
@@ -537,6 +564,18 @@ func (p *context) compileCoroStaticOutcomeTargetCallAliasResult(
 // transaction and leaves b in the child's Return continuation. Every other
 // terminal state is propagated into the current structured parent.
 func (p *context) dispatchOutcomePlainCompletion(b llssa.Builder, completion llssa.Expr) {
+	p.dispatchOutcomePlainCompletionWithRecovery(b, completion, nil)
+}
+
+// dispatchOutcomePlainCompletionWithRecovery is the cleanup-aware form used
+// when a synchronous outcome descriptor is invoked from a popped defer record.
+// Outcome bodies cannot own a cleanup/recover frame, so CompletionReturn never
+// consumes the caller's panic overlay. A panic or nil fault raised by the
+// deferred target replaces that overlay, while Goexit preserves the ordinary
+// cleanup base through the parent's existing terminal path.
+func (p *context) dispatchOutcomePlainCompletionWithRecovery(
+	b llssa.Builder, completion llssa.Expr, cleanup *coroStaticCleanupState,
+) {
 	if !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn || completion.IsNil() {
 		panic("outcome-plain completion dispatch escaped its structured parent")
 	}
@@ -557,11 +596,19 @@ func (p *context) dispatchOutcomePlainCompletion(b llssa.Builder, completion lls
 	b.SetBlockEx(panicked, llssa.AtEnd, false)
 	typeWord := b.Load(b.FieldAddr(completion, outcomePlainCompletionTypeWord))
 	dataWord := b.Load(b.FieldAddr(completion, outcomePlainCompletionDataWord))
-	p.enterCoroPropagatedPanic(b, typeWord, dataWord, line)
+	if cleanup == nil {
+		p.enterCoroPropagatedPanic(b, typeWord, dataWord, line)
+	} else {
+		cleanup.replacePanic(b, typeWord, dataWord, line)
+	}
 	b.SetBlockEx(goexited, llssa.AtEnd, false)
 	p.enterCoroPropagatedGoexit(b)
 	b.SetBlockEx(faulted, llssa.AtEnd, false)
-	p.enterCoroPropagatedNilFault(b)
+	if cleanup == nil {
+		p.enterCoroPropagatedNilFault(b)
+	} else {
+		cleanup.replaceFault(p, b, coroFaultNilV1)
+	}
 	b.SetBlockEx(invalid, llssa.AtEnd, false)
 	b.Unreachable()
 	b.SetBlockContinuation(returned)

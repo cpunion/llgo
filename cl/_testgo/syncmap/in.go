@@ -9,7 +9,7 @@ import (
 // Standard-library synchronization methods and the callback passed through a
 // function value remain on the managed coroutine/descriptor ABI.
 //
-// CHECK: @__llgo_coro_func_descriptor_v1.{{.*}} = linkonce_odr unnamed_addr constant
+// CHECK: @__llgo_coro_func_descriptor_v2.{{.*}} = linkonce_odr unnamed_addr constant
 // CHECK-NOT: NewProc
 // CHECK-NOT: _llgo_routine
 // CHECK-LABEL: define ptr @"main.main$coro"(
@@ -18,7 +18,7 @@ import (
 // CHECK: call ptr @"sync.(*Map).Load$coro"(
 // CHECK: call ptr @"fmt.Println$coro"(
 // CHECK: call ptr @"sync.(*Map).Range$coro"(
-// CHECK-SAME: { ptr, ptr } { ptr @__llgo_coro_func_descriptor_v1.{{.*}}, ptr null }
+// CHECK-SAME: { ptr, ptr } { ptr @__llgo_coro_func_descriptor_v2.{{.*}}, ptr null }
 // CHECK: call i8 @llvm.coro.suspend(
 // CHECK-LABEL: define ptr @"main.main$1$coro"(
 // CHECK: call ptr @"fmt.Printf$coro"(

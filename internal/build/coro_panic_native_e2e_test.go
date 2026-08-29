@@ -232,7 +232,7 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		CoroABI:          coro.PhysicalABIV1,
 		SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:         coro.PanicExplicitStatusABIV0,
-		FuncRepABI:       coro.FuncRepABIV1,
+		FuncRepABI:       coro.FuncRepABIV2,
 		EmissionUniverse: universe}
 	freezeCoroNativeE2EProgramCapabilities(t, compilation)
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
@@ -244,19 +244,22 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	}
 	module := pkg.Module()
 	presplit := module.String()
-	// Both direct outcome call sites retain a fail-closed panic arm and the
-	// awaiting parent republishes the consumed child payload. Together with the
-	// declaration this produces four symbol references and exactly three calls.
+	// The two physical-caller -> outcome-plain boundaries retain fail-closed
+	// panic arms. The outcome-only child -> middle -> leaf DAG propagates the
+	// explicit status directly and must not prepare the same panic again.
+	// Together with the declaration this produces three symbol references and
+	// exactly two calls.
 	if references, calls := strings.Count(presplit, "@__llgo_coro_panic_prepare_v1"),
-		strings.Count(presplit, "call void @__llgo_coro_panic_prepare_v1"); references != 4 || calls != 3 {
-		t.Fatalf("compiled explicit panic prepare-hook references/calls = %d/%d, want 4/3:\n%s", references, calls, presplit)
+		strings.Count(presplit, "call void @__llgo_coro_panic_prepare_v1"); references != 3 || calls != 2 {
+		t.Fatalf("compiled explicit panic prepare-hook references/calls = %d/%d, want 3/2:\n%s", references, calls, presplit)
 	}
 	if strings.Contains(presplit, llssa.PkgRuntime+".Panic") {
 		t.Fatalf("compiled explicit panic retained the legacy runtime.Panic edge:\n%s", presplit)
 	}
-	if !strings.Contains(presplit, "panicMiddle$outcome") || !strings.Contains(presplit, "panicLeaf$outcome") ||
-		strings.Contains(presplit, "panicMiddle$coro") || strings.Contains(presplit, "panicLeaf$coro") {
-		t.Fatalf("compiled explicit panic did not collapse the outcome-plain DAG:\n%s", presplit)
+	for _, name := range []string{"panicChild", "panicMiddle", "panicLeaf"} {
+		if !strings.Contains(presplit, name+"$outcome") || strings.Contains(presplit, name+"$coro") {
+			t.Fatalf("compiled explicit panic did not collapse %s into the outcome-only DAG:\n%s", name, presplit)
+		}
 	}
 	runCoroSpawnNativeE2EPasses(t, prog, module)
 	ir := module.String()

@@ -8,11 +8,11 @@ _llgo_main.T:
 *_llgo_main.T:
     _llgo_main.T
     github.com/xgo-dev/llgo/runtime/internal/runtime.memequalptr
-__llgo$generated$promoted$M$llgo$promoted$v1$305a31ded9e5b6701a77b2b294db89910c70e5af5e856bc7eb12e0fde08b4a89$coro:
+__llgo$generated$promoted$M$llgo$promoted$v1$bd734c651f9c74c2a29883b38e325f9c96b9e9318f0d2ed3e6e56fb561827911$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.13c708baa4ff512dc8f6bb58c066431d
+    __llgo_coro_frame_descriptor_v1.00cf932377bad7fc21583f8a912e9b39
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -29,11 +29,11 @@ __llgo$generated$promoted$M$llgo$promoted$v1$305a31ded9e5b6701a77b2b294db89910c7
     llvm.fake.use
     llvm.trap
     main.T.M
-__llgo$generated$promoted$N$llgo$promoted$v1$c5043a31d513e700694c9fccde8b46d61206de38114cf7d898423f0aac363916$coro:
+__llgo$generated$promoted$N$llgo$promoted$v1$d53c6835ec4e4028ab055149a94770a5d74009aee8e136b12a7916975230f1af$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.ec4ab24ca8143b44f7ca7ba97982f9e0
+    __llgo_coro_frame_descriptor_v1.b21a0cdc86e7c7b7d6e92dda2a0ff347
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -50,66 +50,66 @@ __llgo$generated$promoted$N$llgo$promoted$v1$c5043a31d513e700694c9fccde8b46d6120
     llvm.fake.use
     llvm.trap
     main.T.N
-__llgo_coro_func_coro_v1.method-value.50b35b8073e22054.ab9126c81700848f6b2436efb97ef747:
-    __llgo$generated$promoted$M$llgo$promoted$v1$305a31ded9e5b6701a77b2b294db89910c70e5af5e856bc7eb12e0fde08b4a89$coro
-__llgo_coro_func_coro_v1.method-value.c46364e60db9144d.ab9126c81700848f6b2436efb97ef747:
-    __llgo$generated$promoted$N$llgo$promoted$v1$c5043a31d513e700694c9fccde8b46d61206de38114cf7d898423f0aac363916$coro
-__llgo_coro_func_coro_v1.method.50b35b8073e22054.dfdace59aa77dc7749541c4da1cb15aa:
-    __llgo$generated$promoted$M$llgo$promoted$v1$305a31ded9e5b6701a77b2b294db89910c70e5af5e856bc7eb12e0fde08b4a89$coro
-__llgo_coro_func_coro_v1.method.c46364e60db9144d.dfdace59aa77dc7749541c4da1cb15aa:
-    __llgo$generated$promoted$N$llgo$promoted$v1$c5043a31d513e700694c9fccde8b46d61206de38114cf7d898423f0aac363916$coro
-__llgo_coro_func_descriptor_v1.method-value.2a86fcd6b886cd4b.779cffa94cfa288d5a1e6954a0b0a271:
-    __llgo_coro_func_plain_v1.method-value.2a86fcd6b886cd4b.779cffa94cfa288d5a1e6954a0b0a271
+__llgo_coro_func_coro_v2.method-value.5a4e399ef8508d1b.c9f0e44f14b08db23cf8139ed94807ff:
+    __llgo$generated$promoted$M$llgo$promoted$v1$bd734c651f9c74c2a29883b38e325f9c96b9e9318f0d2ed3e6e56fb561827911$coro
+__llgo_coro_func_coro_v2.method-value.7ab56a39bf59e51a.c9f0e44f14b08db23cf8139ed94807ff:
+    __llgo$generated$promoted$N$llgo$promoted$v1$d53c6835ec4e4028ab055149a94770a5d74009aee8e136b12a7916975230f1af$coro
+__llgo_coro_func_coro_v2.method.5a4e399ef8508d1b.9fb766caed74e5777fbc5c7228dce9f3:
+    __llgo$generated$promoted$M$llgo$promoted$v1$bd734c651f9c74c2a29883b38e325f9c96b9e9318f0d2ed3e6e56fb561827911$coro
+__llgo_coro_func_coro_v2.method.7ab56a39bf59e51a.9fb766caed74e5777fbc5c7228dce9f3:
+    __llgo$generated$promoted$N$llgo$promoted$v1$d53c6835ec4e4028ab055149a94770a5d74009aee8e136b12a7916975230f1af$coro
+__llgo_coro_func_descriptor_v2.method-value.2a86fcd6b886cd4b.390b368aeeca8f19ac75a8a7e367d45b:
+    __llgo_coro_func_plain_v2.method-value.2a86fcd6b886cd4b.390b368aeeca8f19ac75a8a7e367d45b
     main.T.N
-__llgo_coro_func_descriptor_v1.method-value.50b35b8073e22054.ab9126c81700848f6b2436efb97ef747:
-    __llgo$generated$promoted$M$llgo$promoted$v1$305a31ded9e5b6701a77b2b294db89910c70e5af5e856bc7eb12e0fde08b4a89$coro
-    __llgo_coro_func_coro_v1.method-value.50b35b8073e22054.ab9126c81700848f6b2436efb97ef747
-__llgo_coro_func_descriptor_v1.method-value.bad04fa459105134.779cffa94cfa288d5a1e6954a0b0a271:
-    __llgo_coro_func_plain_v1.method-value.bad04fa459105134.779cffa94cfa288d5a1e6954a0b0a271
+__llgo_coro_func_descriptor_v2.method-value.5a4e399ef8508d1b.c9f0e44f14b08db23cf8139ed94807ff:
+    __llgo$generated$promoted$M$llgo$promoted$v1$bd734c651f9c74c2a29883b38e325f9c96b9e9318f0d2ed3e6e56fb561827911$coro
+    __llgo_coro_func_coro_v2.method-value.5a4e399ef8508d1b.c9f0e44f14b08db23cf8139ed94807ff
+__llgo_coro_func_descriptor_v2.method-value.7ab56a39bf59e51a.c9f0e44f14b08db23cf8139ed94807ff:
+    __llgo$generated$promoted$N$llgo$promoted$v1$d53c6835ec4e4028ab055149a94770a5d74009aee8e136b12a7916975230f1af$coro
+    __llgo_coro_func_coro_v2.method-value.7ab56a39bf59e51a.c9f0e44f14b08db23cf8139ed94807ff
+__llgo_coro_func_descriptor_v2.method-value.bad04fa459105134.390b368aeeca8f19ac75a8a7e367d45b:
+    __llgo_coro_func_plain_v2.method-value.bad04fa459105134.390b368aeeca8f19ac75a8a7e367d45b
     main.T.M
-__llgo_coro_func_descriptor_v1.method-value.c46364e60db9144d.ab9126c81700848f6b2436efb97ef747:
-    __llgo$generated$promoted$N$llgo$promoted$v1$c5043a31d513e700694c9fccde8b46d61206de38114cf7d898423f0aac363916$coro
-    __llgo_coro_func_coro_v1.method-value.c46364e60db9144d.ab9126c81700848f6b2436efb97ef747
-__llgo_coro_func_descriptor_v1.method.50b35b8073e22054.dfdace59aa77dc7749541c4da1cb15aa:
-    __llgo$generated$promoted$M$llgo$promoted$v1$305a31ded9e5b6701a77b2b294db89910c70e5af5e856bc7eb12e0fde08b4a89$coro
-    __llgo_coro_func_coro_v1.method.50b35b8073e22054.dfdace59aa77dc7749541c4da1cb15aa
-__llgo_coro_func_descriptor_v1.method.c46364e60db9144d.dfdace59aa77dc7749541c4da1cb15aa:
-    __llgo$generated$promoted$N$llgo$promoted$v1$c5043a31d513e700694c9fccde8b46d61206de38114cf7d898423f0aac363916$coro
-    __llgo_coro_func_coro_v1.method.c46364e60db9144d.dfdace59aa77dc7749541c4da1cb15aa
-__llgo_coro_func_plain_v1.method-value.2a86fcd6b886cd4b.779cffa94cfa288d5a1e6954a0b0a271:
+__llgo_coro_func_descriptor_v2.method.5a4e399ef8508d1b.9fb766caed74e5777fbc5c7228dce9f3:
+    __llgo$generated$promoted$M$llgo$promoted$v1$bd734c651f9c74c2a29883b38e325f9c96b9e9318f0d2ed3e6e56fb561827911$coro
+    __llgo_coro_func_coro_v2.method.5a4e399ef8508d1b.9fb766caed74e5777fbc5c7228dce9f3
+__llgo_coro_func_descriptor_v2.method.7ab56a39bf59e51a.9fb766caed74e5777fbc5c7228dce9f3:
+    __llgo$generated$promoted$N$llgo$promoted$v1$d53c6835ec4e4028ab055149a94770a5d74009aee8e136b12a7916975230f1af$coro
+    __llgo_coro_func_coro_v2.method.7ab56a39bf59e51a.9fb766caed74e5777fbc5c7228dce9f3
+__llgo_coro_func_plain_v2.method-value.2a86fcd6b886cd4b.390b368aeeca8f19ac75a8a7e367d45b:
     main.T.N
-__llgo_coro_func_plain_v1.method-value.bad04fa459105134.779cffa94cfa288d5a1e6954a0b0a271:
+__llgo_coro_func_plain_v2.method-value.bad04fa459105134.390b368aeeca8f19ac75a8a7e367d45b:
     main.T.M
-__llgo_coro_method_raw_trap_v1.2729c7b578802290a52af4b412d8b16d:
+__llgo_coro_method_raw_trap_v1.9cc5684865baeb9e546778e56ed803a8:
     llvm.trap
-__llgo_coro_method_raw_trap_v1.ad98eeed55c4f722ba273836aba7dacc:
+__llgo_coro_method_raw_trap_v1.d7dda17d2ac3b48760c198622f412d23:
     llvm.trap
-__llgo_coro_root_factory_descriptor_v1.56f79260c30a4992f6ce16e7a2a52eca:
-    __llgo_coro_root_factory_v1.56f79260c30a4992f6ce16e7a2a52eca
-__llgo_coro_root_factory_v1.56f79260c30a4992f6ce16e7a2a52eca:
+__llgo_coro_root_factory_descriptor_v1.bfa1fe7969171674de42ab91ef1f8bf7:
+    __llgo_coro_root_factory_v1.bfa1fe7969171674de42ab91ef1f8bf7
+__llgo_coro_root_factory_v1.bfa1fe7969171674de42ab91ef1f8bf7:
     main.main$coro
-__llgo_coro_root_package_v1.24b1380a4100a81541bc68f995acdde7:
-    __llgo_coro_root_package_v1.24b1380a4100a81541bc68f995acdde7.entries
-__llgo_coro_root_package_v1.24b1380a4100a81541bc68f995acdde7.entries:
-    __llgo_coro_root_factory_descriptor_v1.56f79260c30a4992f6ce16e7a2a52eca
-__llgo_static_itab.da57c1150fa5f8b8b0ee8029ae1e7eba:
-    __llgo_coro_func_descriptor_v1.method.50b35b8073e22054.dfdace59aa77dc7749541c4da1cb15aa
-    __llgo_coro_func_descriptor_v1.method.c46364e60db9144d.dfdace59aa77dc7749541c4da1cb15aa
-    _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo
-    _llgo_main.T
+__llgo_coro_root_package_v1.b758097b7a19aa2377e94facd295b1c2:
+    __llgo_coro_root_package_v1.b758097b7a19aa2377e94facd295b1c2.entries
+__llgo_coro_root_package_v1.b758097b7a19aa2377e94facd295b1c2.entries:
+    __llgo_coro_root_factory_descriptor_v1.bfa1fe7969171674de42ab91ef1f8bf7
 _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo:
     _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo$imethods
     github.com/xgo-dev/llgo/runtime/internal/runtime.interequal
 _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo$imethods:
     _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+_llgo_itab$da57c1150fa5f8b8b0ee8029ae1e7eba:
+    __llgo_coro_func_descriptor_v2.method.5a4e399ef8508d1b.9fb766caed74e5777fbc5c7228dce9f3
+    __llgo_coro_func_descriptor_v2.method.7ab56a39bf59e51a.9fb766caed74e5777fbc5c7228dce9f3
+    _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo
+    _llgo_main.T
 _llgo_main.T:
     *_llgo_main.T
     github.com/xgo-dev/llgo/runtime/internal/runtime.memequal0
 llvm.compiler.used:
-    __llgo_coro_library_effect_v12.e0aeda413508e4c2fd33dc94efa175e9
+    __llgo_coro_library_effect_v13.53f759ed056295fdc5edc780b6e64f2d
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.56f79260c30a4992f6ce16e7a2a52eca
-    __llgo_coro_root_package_v1.24b1380a4100a81541bc68f995acdde7
+    __llgo_coro_root_factory_descriptor_v1.bfa1fe7969171674de42ab91ef1f8bf7
+    __llgo_coro_root_package_v1.b758097b7a19aa2377e94facd295b1c2
 main.init:
     main.init$guard
 main.main$coro:
@@ -119,12 +119,12 @@ main.main$coro:
     __llgo_coro_await_prepare_inline_v4
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.56f79260c30a4992f6ce16e7a2a52eca
+    __llgo_coro_frame_descriptor_v1.bfa1fe7969171674de42ab91ef1f8bf7
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
     __llgo_coro_run_decision_take_zero_v1
-    __llgo_static_itab.da57c1150fa5f8b8b0ee8029ae1e7eba
+    _llgo_itab$da57c1150fa5f8b8b0ee8029ae1e7eba
     llvm.coro.align.i64
     llvm.coro.alloc
     llvm.coro.begin
@@ -149,7 +149,7 @@ main.use$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.af6294bec4c738aa68b7a44f1e1b65d4
+    __llgo_coro_frame_descriptor_v1.aeba7bf9776d35ce90955b9a7dc9dd4c
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -181,11 +181,11 @@ main.use$coro:
 
 [MethodInfo]
 *_llgo_main.T:
-    0 M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method.50b35b8073e22054.dfdace59aa77dc7749541c4da1cb15aa __llgo_coro_func_descriptor_v1.method-value.50b35b8073e22054.ab9126c81700848f6b2436efb97ef747
-    1 N _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method.c46364e60db9144d.dfdace59aa77dc7749541c4da1cb15aa __llgo_coro_func_descriptor_v1.method-value.c46364e60db9144d.ab9126c81700848f6b2436efb97ef747
+    0 M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v2.method.5a4e399ef8508d1b.9fb766caed74e5777fbc5c7228dce9f3 __llgo_coro_func_descriptor_v2.method-value.5a4e399ef8508d1b.c9f0e44f14b08db23cf8139ed94807ff
+    1 N _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v2.method.7ab56a39bf59e51a.9fb766caed74e5777fbc5c7228dce9f3 __llgo_coro_func_descriptor_v2.method-value.7ab56a39bf59e51a.c9f0e44f14b08db23cf8139ed94807ff
 _llgo_main.T:
-    0 M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method.50b35b8073e22054.dfdace59aa77dc7749541c4da1cb15aa __llgo_coro_func_descriptor_v1.method-value.bad04fa459105134.779cffa94cfa288d5a1e6954a0b0a271
-    1 N _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method.c46364e60db9144d.dfdace59aa77dc7749541c4da1cb15aa __llgo_coro_func_descriptor_v1.method-value.2a86fcd6b886cd4b.779cffa94cfa288d5a1e6954a0b0a271
+    0 M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v2.method.5a4e399ef8508d1b.9fb766caed74e5777fbc5c7228dce9f3 __llgo_coro_func_descriptor_v2.method-value.bad04fa459105134.390b368aeeca8f19ac75a8a7e367d45b
+    1 N _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v2.method.7ab56a39bf59e51a.9fb766caed74e5777fbc5c7228dce9f3 __llgo_coro_func_descriptor_v2.method-value.2a86fcd6b886cd4b.390b368aeeca8f19ac75a8a7e367d45b
 
 [InterfaceInfo]
 _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo:

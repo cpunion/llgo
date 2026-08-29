@@ -456,7 +456,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	coroABI := coro.PhysicalABIV1
 	schedulerABI := coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	panicABI := coro.PanicExplicitStatusABIV0
-	funcRepABI := coro.FuncRepABIV1
+	funcRepABI := coro.FuncRepABIV2
 	if p.compilation != nil {
 		if p.compilation.CoroABI != "" {
 			coroABI = p.compilation.CoroABI
@@ -1827,7 +1827,7 @@ func validateCoroPhysicalABIForOwner(
 		plan.HasStaticOutcome() && !plan.Recursive &&
 		(plan.AtomicCostProof.ProvesOutcomePlain() && plan.AtomicCost != 0 && plan.Exec&^coro.MayUnwind == 0 ||
 			plan.StaticOutcome && plan.Exec&(coro.BlockForeign|coro.ThreadAffine|coro.NeedsCleanupFrame|coro.OpaqueExec) == 0) &&
-		(plan.FuncRep == coro.DirectCoro || outcomePlainTwin && plan.FuncRep == coro.Dispatch) &&
+		(plan.FuncRep == coro.DirectCoro || plan.FuncRep == coro.Dispatch) &&
 		(plan.Effect == coro.OutcomeStructured || outcomePlainTwin &&
 			plan.Effect&^(coro.AwaitStructured|coro.OutcomeStructured|coro.MayPark) == 0)
 	staticPackageInitOutcome := outcomePlainPrimary && fn.Name() == "init" &&
@@ -2169,7 +2169,7 @@ func validateCoroPhysicalABIForOwner(
 				awaits++
 			case coroStaticCleanupDispatch:
 				if !managedDispatch {
-					return fail("managed descriptor defer requires the v1 descriptor dispatch capability")
+					return fail("managed descriptor defer requires the v2 descriptor dispatch capability")
 				}
 				if site.callPlan.Open || coroDispatchCallHasCoroutineTarget(whole, site.callPlan) {
 					awaits++
@@ -2411,11 +2411,23 @@ func validateCoroPhysicalABIForOwner(
 						} else if intrinsic && semantics == CoroIntrinsicCallInlineYield {
 							yields++
 						} else if intrinsic && semantics == CoroIntrinsicCallInlineOutcome {
-							if instructionPlan.outcome != coroPhysicalOutcomeGoexit {
+							switch frozen.opcode {
+							case llgoCoroGoexit:
+								if instructionPlan.outcome != coroPhysicalOutcomeGoexit {
+									return coroLeafInstructionError(fn, plan, instr,
+										"Goexit intrinsic has no frozen outcome recipe")
+								}
+								goexits++
+							case llgoCoroPropagatePanic:
+								if instructionPlan.outcome != coroPhysicalOutcomePanic {
+									return coroLeafInstructionError(fn, plan, instr,
+										"panic propagation intrinsic has no frozen outcome recipe")
+								}
+								panics++
+							default:
 								return coroLeafInstructionError(fn, plan, instr,
-									"terminal intrinsic has no frozen Goexit outcome recipe")
+									"terminal intrinsic has no recognized outcome opcode")
 							}
-							goexits++
 						}
 						if intrinsic {
 							if isLLGoSyscallIntrinsic(frozen.opcode) &&
@@ -2448,11 +2460,24 @@ func validateCoroPhysicalABIForOwner(
 				}
 				if instr.Common().IsInvoke() {
 					switch instructionPlan.control {
-					case coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait,
-						coroPhysicalControlExactInterfaceAwait:
+					case coroPhysicalControlClosedInterfaceAwait:
+						if _, synchronous := coroInterfaceDispatchStaticOutcomeCandidate(
+							instructionPlan.controlInterface,
+						); !synchronous {
+							awaits++
+						}
+						continue
+					case coroPhysicalControlManagedInterfaceAwait:
+						if !instructionPlan.structuredOutcomeOnly {
+							awaits++
+						}
+						continue
+					case coroPhysicalControlExactInterfaceAwait:
 						awaits++
 						continue
 					case coroPhysicalControlExactInterfaceCall:
+						continue
+					case coroPhysicalControlDirectOutcome:
 						continue
 					case coroPhysicalControlNone:
 						if instructionPlan.controlFailureHard {
@@ -2474,7 +2499,9 @@ func validateCoroPhysicalABIForOwner(
 				case coroPhysicalControlRawPlainCall:
 					continue
 				case coroPhysicalControlDispatchAwait:
-					awaits++
+					if !instructionPlan.structuredOutcomeOnly {
+						awaits++
+					}
 					continue
 				default:
 					if instructionPlan.controlFailureHard {
@@ -4011,7 +4038,7 @@ func validateCoroLeafPhysicalSignature(plan coro.FunctionPlan, sig *types.Signat
 
 // validateCoroPhysicalFunctionValueABI keeps function-valued transport on the
 // one compilation-wide representation path. The generic LLGo type converter
-// supplies the canonical two-pointer closure layout, while FuncRepABIV1's
+// supplies the canonical two-pointer closure layout, while FuncRepABIV2's
 // ValuePlan validation decides whether the first word is a direct entry or a
 // descriptor. Accepting the width here must not create a second, unplanned
 // function representation at a coroutine boundary.
@@ -4326,7 +4353,7 @@ func validateCoroPhysicalConsumersCapabilities(
 						}
 					case coro.Dispatch:
 						if !managedDispatch {
-							return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor spawn requires the v1 descriptor dispatch capability")
+							return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor spawn requires the v2 descriptor dispatch capability")
 						}
 						if _, err := plan.ResolveManagedSpawn(spawn); err != nil {
 							return coroLeafInstructionError(fn, function.Plan, instr, "unsupported managed descriptor spawn: "+err.Error())
@@ -4380,7 +4407,7 @@ func validateCoroPhysicalConsumersCapabilities(
 									callPlan.Unresolved == coro.UnknownManagedInterfaceDispatch {
 									if !managedDispatch {
 										return coroLeafInstructionError(fn, function.Plan, instr,
-											"managed interface invoke requires the v1 descriptor dispatch capability")
+											"managed interface invoke requires the v2 descriptor dispatch capability")
 									}
 									if err := validateCoroManagedInterfaceDispatchCall(plan, universe, fn, call, callPlan); err != nil {
 										return coroLeafInstructionError(fn, function.Plan, instr,
@@ -4487,7 +4514,7 @@ func validateCoroPhysicalConsumersCapabilities(
 						call.Common().StaticCallee() == nil && !call.Common().IsInvoke() {
 						if deferred, cleanup := call.(*ssa.Defer); cleanup {
 							if !managedDispatch {
-								return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor defer requires the v1 descriptor dispatch capability")
+								return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor defer requires the v2 descriptor dispatch capability")
 							}
 							if !childAwait || function.Plan.Emission != coro.EmitCoroutine {
 								return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor defer requires coroutine child-await lowering")
@@ -4505,7 +4532,7 @@ func validateCoroPhysicalConsumersCapabilities(
 						}
 						if callPlan.SyncDispatch {
 							if !managedDispatch {
-								return coroLeafInstructionError(fn, function.Plan, instr, "synchronous descriptor call requires the v1 plain dispatch capability")
+								return coroLeafInstructionError(fn, function.Plan, instr, "synchronous descriptor call requires the v2 descriptor dispatch capability")
 							}
 							if err := validateCoroPlainDispatchCall(plan, fn, call, callPlan, universe); err != nil {
 								return coroLeafInstructionError(fn, function.Plan, instr, "invalid synchronous descriptor call: "+err.Error())
@@ -4518,7 +4545,7 @@ func validateCoroPhysicalConsumersCapabilities(
 							))
 						}
 						if !managedDispatch {
-							return coroLeafInstructionError(fn, function.Plan, instr, "open managed descriptor call requires the v1 descriptor dispatch capability")
+							return coroLeafInstructionError(fn, function.Plan, instr, "open managed descriptor call requires the v2 descriptor dispatch capability")
 						}
 						if !childAwait || function.Plan.Emission != coro.EmitCoroutine {
 							return coroLeafInstructionError(fn, function.Plan, instr, "open managed descriptor call requires coroutine child-await lowering")

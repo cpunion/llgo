@@ -14,12 +14,12 @@ import "fmt"
 // CHECK-NOT: call i1 @__llgo_coro_await_prepare_inline_v4(
 // CHECK: load i32
 // CHECK: call i8 @llvm.coro.suspend(
-// CHECK-LABEL: define ptr @"main.returnStateAndMut$coro"(
+// CHECK-LABEL: define void @"main.returnStateAndMut$outcome"(
 // CHECK: store i64 1
 // CHECK: call void @"main.(*state).mutate$outcome"(
-// CHECK: call void @__llgo_coro_complete_prepare_v2(
 // CHECK: load %main.state
 // CHECK: store %main.state
+// CHECK: store i32 1
 // CHECK-LABEL: define void @"main.(*state).mutate$outcome"(
 // CHECK: store i64 %4
 // CHECK: load i64

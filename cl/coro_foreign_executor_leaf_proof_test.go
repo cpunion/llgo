@@ -118,13 +118,14 @@ func root(value uintptr) uint64 { return Leaf(value) }
 	if err := validateCoroDynamicDispatchTarget(
 		leaf,
 		coro.FunctionPlan{
-			ID:       "inferred-leaf",
-			External: coro.ExternalKnown,
-			Effect:   coro.NoSuspend,
-			Exec:     coro.IRQUnsafe,
-			FuncRep:  coro.Dispatch,
-			Emission: coro.EmitExternal,
-			Primary:  coro.PrimaryExternal,
+			ID:           "inferred-leaf",
+			External:     coro.ExternalKnown,
+			Effect:       coro.NoSuspend,
+			Exec:         coro.IRQUnsafe,
+			FuncRep:      coro.Dispatch,
+			Emission:     coro.EmitExternal,
+			ManagedEntry: coro.ManagedEntryPlain,
+			Primary:      coro.PrimaryExternal,
 		},
 		universe,
 	); err != nil {

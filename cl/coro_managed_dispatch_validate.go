@@ -24,7 +24,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// validateCoroManagedDispatchCall proves the source and plan half of the v1
+// validateCoroManagedDispatchCall proves the source and plan half of the v2
 // universal {descriptor, environment} call contract. Capability ownership is
 // intentionally checked by each physical consumer: this helper cannot turn a
 // disabled frontend feature into an accepted lowering.
@@ -34,7 +34,7 @@ import (
 // universal descriptor representation. A closed Dispatch call needs no
 // unknown-domain certificate: its exact descriptor targets were frozen by
 // value flow, but it uses the same physical capability dispatch (notably when
-// a callback parameter can carry both plain and coroutine producers).
+// a callback parameter can carry plain, outcome, and coroutine producers).
 func validateCoroManagedDispatchCall(
 	plan *coro.SSAPlan,
 	owner *ssa.Function,
@@ -132,10 +132,10 @@ func validateCoroManagedDispatchCallKind(
 	}
 	sig, err := coroConcreteManagedCallableSignature(common.Signature())
 	if err != nil {
-		return fail("v1 descriptor callable signature: %v", err)
+		return fail("v2 descriptor callable signature: %v", err)
 	}
 	if err := validateCoroManagedDispatchSignatureShape(sig); err != nil {
-		return fail("v1 descriptor signature: %v", err)
+		return fail("v2 descriptor signature: %v", err)
 	}
 
 	valuePlan, found := plan.ValuePlan(common.Value)

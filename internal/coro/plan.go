@@ -359,7 +359,8 @@ func validateManagedEntryPlan(plan FunctionPlan) error {
 		}
 	case ManagedEntryOutcomePlain:
 		if plan.Effect != OutcomeStructured ||
-			plan.FuncRep != DirectCoro || plan.Recursive || plan.RawPlainDemand ||
+			(plan.FuncRep != DirectCoro && plan.FuncRep != Dispatch) ||
+			plan.Recursive || plan.RawPlainDemand ||
 			plan.RawPlainEntry || plan.RawPlainOnly {
 			return fmt.Errorf(
 				"coro: function %q has invalid outcome-plain managed entry (effect=%s exec=%s representation=%s recursive=%t raw=%t)",

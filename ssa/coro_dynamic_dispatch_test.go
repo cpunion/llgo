@@ -26,18 +26,20 @@ import (
 )
 
 type coroDynamicDispatchTestFixture struct {
-	prog       Program
-	pkg        Package
-	signature  *types.Signature
-	result     Type
-	hash       [16]byte
-	plainEntry Function
-	coroEntry  Function
-	coroOnly   Expr
-	dual       Expr
+	prog         Program
+	pkg          Package
+	signature    *types.Signature
+	result       Type
+	hash         [16]byte
+	plainEntry   Function
+	outcomeEntry Function
+	coroEntry    Function
+	outcomeOnly  Expr
+	coroOnly     Expr
+	dual         Expr
 }
 
-func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
+func TestCoroDynamicDispatchV2LLVM22CapturedStructuredEntries(t *testing.T) {
 	fixture := newCoroDynamicDispatchTestFixture(t)
 	prog, pkg := fixture.prog, fixture.pkg
 
@@ -46,9 +48,12 @@ func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
 		descriptor Expr
 		flags      uint64
 		plain      bool
+		structured Function
+		code       Function
 	}{
-		{"coro-only", fixture.coroOnly, uint64(CoroDispatchFlagHasCoro), false},
-		{"plain+coro", fixture.dual, uint64(CoroDispatchFlagHasPlain | CoroDispatchFlagHasCoro), true},
+		{"outcome-only", fixture.outcomeOnly, uint64(CoroDispatchFlagHasOutcome), false, fixture.outcomeEntry, fixture.outcomeEntry},
+		{"coro-only", fixture.coroOnly, uint64(CoroDispatchFlagHasCoro), false, fixture.coroEntry, fixture.coroEntry},
+		{"plain+coro", fixture.dual, uint64(CoroDispatchFlagHasPlain | CoroDispatchFlagHasCoro), true, fixture.coroEntry, fixture.coroEntry},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			initializer := test.descriptor.impl.Initializer()
@@ -66,9 +71,9 @@ func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
 			} else if initializer.Operand(4).IsAConstantPointerNull().IsNil() {
 				t.Fatalf("coro-only descriptor has a plain entry: %v", initializer.Operand(4))
 			}
-			coro := coroPlainDispatchFunction(initializer.Operand(5))
-			if coro.IsNil() || coro.C != fixture.coroEntry.impl.C {
-				t.Fatalf("coro entry = %v, want %s", coro, fixture.coroEntry.Name())
+			structured := coroPlainDispatchFunction(initializer.Operand(5))
+			if structured.IsNil() || structured.C != test.structured.impl.C {
+				t.Fatalf("structured entry = %v, want %s", structured, test.structured.Name())
 			}
 			if got, want := initializer.Operand(6).ZExtValue(), prog.SizeOf(fixture.result); got != want {
 				t.Fatalf("result size = %d, want %d", got, want)
@@ -77,8 +82,8 @@ func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
 				t.Fatalf("result align = %d, want %d", got, want)
 			}
 			code := coroPlainDispatchFunction(initializer.Operand(8))
-			if code.IsNil() || code.C != fixture.coroEntry.impl.C {
-				t.Fatalf("code identity = %v, want %s", code, fixture.coroEntry.Name())
+			if code.IsNil() || code.C != test.code.impl.C {
+				t.Fatalf("code identity = %v, want %s", code, test.code.Name())
 			}
 		})
 	}
@@ -100,6 +105,10 @@ func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
 	if !regexp.MustCompile(`define ptr @captured_coro_entry\(ptr [^,]+, ptr [^,]+, ptr [^,]+, i32 `).MatchString(coroBody) {
 		t.Fatalf("coro entry does not have (g,out,env,args)->handle ABI:\n%s", coroBody)
 	}
+	outcomeBody := coroPlainDispatchIRFunction(ir, fixture.outcomeEntry.Name())
+	if !regexp.MustCompile(`define void @captured_outcome_entry\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i32 `).MatchString(outcomeBody) {
+		t.Fatalf("outcome entry does not have (g,out,completion,env,args)->void ABI:\n%s", outcomeBody)
+	}
 	producer := coroPlainDispatchIRFunction(ir, "captured_dispatch_value")
 	if !strings.Contains(producer, "ret { ptr, ptr } { ptr @dual_descriptor, ptr @captured_env }") {
 		t.Fatalf("captured value is not canonical {descriptor,nonnil-env}:\n%s", producer)
@@ -109,10 +118,12 @@ func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
 		t.Fatalf("coro-only value is not canonical {descriptor,nonnil-env}:\n%s", coroOnlyProducer)
 	}
 
-	assertCoroDynamicDispatchGuards(t, ir, "dynamic_coro_call", true)
-	assertCoroDynamicDispatchGuards(t, ir, "dynamic_plain_call", false)
+	assertCoroDynamicDispatchGuards(t, ir, "dynamic_coro_call", "coro")
+	assertCoroDynamicDispatchGuards(t, ir, "dynamic_outcome_call", "outcome")
+	assertCoroDynamicDispatchGuards(t, ir, "dynamic_plain_call", "plain")
 	assertCoroDynamicDispatchProbeGuards(t, ir, "dynamic_has_coro")
 	assertCoroDynamicDispatchProbeGuards(t, ir, "dynamic_has_coro_and_code")
+	assertCoroDynamicDispatchProbeGuards(t, ir, "dynamic_capabilities_and_code")
 	pairProbe := coroPlainDispatchIRFunction(ir, "dynamic_has_coro_and_code")
 	if !regexp.MustCompile(`extractvalue \{ i32, i32, i64, i64, ptr, ptr, i64, i64, ptr \} [^,]+, 8`).MatchString(pairProbe) ||
 		!strings.Contains(pairProbe, "ret { i1, ptr }") {
@@ -123,11 +134,11 @@ func TestCoroDynamicDispatchV1LLVM22CapturedCoroAndDualEntries(t *testing.T) {
 	}
 }
 
-func TestCoroDynamicDispatchV1RejectsInvalidCapabilitiesAndEntries(t *testing.T) {
+func TestCoroDynamicDispatchV2RejectsInvalidCapabilitiesAndEntries(t *testing.T) {
 	fixture := newCoroDynamicDispatchTestFixture(t)
 
 	options := fixture.descriptorOptions(0)
-	coroPlainDispatchMustPanicContains(t, "require HasPlain or HasCoro", func() {
+	coroPlainDispatchMustPanicContains(t, "require HasPlain, HasOutcome, or HasCoro", func() {
 		fixture.pkg.NewCoroDispatchDescriptor("zero_flags", options)
 	})
 	options = fixture.descriptorOptions(CoroDispatchFlagHasCoro | 1<<31)
@@ -142,6 +153,15 @@ func TestCoroDynamicDispatchV1RejectsInvalidCapabilitiesAndEntries(t *testing.T)
 	options.CoroEntry = Nil
 	coroPlainDispatchMustPanicContains(t, "requires a coroutine entry", func() {
 		fixture.pkg.NewCoroDispatchDescriptor("missing_coro", options)
+	})
+	options = fixture.descriptorOptions(CoroDispatchFlagHasOutcome)
+	options.OutcomeEntry = Nil
+	coroPlainDispatchMustPanicContains(t, "requires an outcome entry", func() {
+		fixture.pkg.NewCoroDispatchDescriptor("missing_outcome", options)
+	})
+	options = fixture.descriptorOptions(CoroDispatchFlagHasOutcome | CoroDispatchFlagHasCoro)
+	coroPlainDispatchMustPanicContains(t, "mutually exclusive", func() {
+		fixture.pkg.NewCoroDispatchDescriptor("outcome_and_coro", options)
 	})
 	options = fixture.descriptorOptions(CoroDispatchFlagHasCoro)
 	options.PlainEntry = fixture.plainEntry.Expr
@@ -183,7 +203,7 @@ func TestCoroDispatchDescriptorNonNilSuppressesImplicitLoadNilCheck(t *testing.T
 	)
 	probeBuilder := probe.MakeBody(1)
 	probeBuilder.Return(probeBuilder.CoroDispatchHasCoro(zero, CoroDispatchCallOptions{
-		Version:          CoroDispatchVersionV1,
+		Version:          CoroDispatchVersionV2,
 		ABIHash:          fixture.hash,
 		Result:           fixture.result,
 		DescriptorNonNil: true,
@@ -201,8 +221,8 @@ func TestCoroDispatchDescriptorNonNilSuppressesImplicitLoadNilCheck(t *testing.T
 		zero,
 		[]Expr{fixture.prog.IntVal(1, fixture.prog.Uint32())},
 		CoroPlainDispatchCallOptions{
-			Version:          CoroPlainDispatchVersionV1,
-			Flags:            CoroPlainDispatchFlagsV1,
+			Version:          CoroPlainDispatchVersionV2,
+			Flags:            CoroPlainDispatchFlagsV2,
 			ABIHash:          fixture.hash,
 			Result:           fixture.result,
 			DescriptorNonNil: true,
@@ -232,7 +252,7 @@ func TestCoroDispatchDescriptorNonNilSuppressesImplicitLoadNilCheck(t *testing.T
 func TestCoroDispatchTrustedDescriptorSkipsRepeatedContractValidation(t *testing.T) {
 	fixture := newCoroDynamicDispatchTestFixture(t)
 	callOptions := CoroDispatchCallOptions{
-		Version:           CoroDispatchVersionV1,
+		Version:           CoroDispatchVersionV2,
 		ABIHash:           fixture.hash,
 		Result:            fixture.result,
 		TrustedDescriptor: true,
@@ -282,6 +302,131 @@ func TestCoroDispatchTrustedDescriptorSkipsRepeatedContractValidation(t *testing
 	}
 }
 
+func TestCoroDispatchStructuredOnlySelectionLoadsOnlyRequiredWords(t *testing.T) {
+	fixture := newCoroDynamicDispatchTestFixture(t)
+	options := CoroDispatchCallOptions{
+		Version:           CoroDispatchVersionV2,
+		ABIHash:           fixture.hash,
+		Result:            fixture.result,
+		DescriptorNonNil:  true,
+		TrustedDescriptor: true,
+	}
+	params := []types.Type{
+		fixture.signature,
+		types.Typ[types.UnsafePointer],
+		types.Typ[types.UnsafePointer],
+		types.Typ[types.UnsafePointer],
+		types.Typ[types.Uint32],
+	}
+	makeCaller := func(name string, needCode bool) {
+		var results []types.Type
+		if needCode {
+			results = []types.Type{types.Typ[types.UnsafePointer]}
+		}
+		fn := fixture.pkg.NewFunc(name, coroPlainDispatchTestSignature(params, results), InGo)
+		b := fn.MakeBody(1)
+		selection := b.PrepareCoroDispatchStructuredOnly(fn.Param(0), options, needCode)
+		b.CallPreparedCoroDispatchOutcomeOnly(
+			selection,
+			fn.Param(1), fn.Param(2), fn.Param(3),
+			[]Expr{fn.Param(4)},
+		)
+		if needCode {
+			b.Return(selection.CodeEntry())
+		} else {
+			b.Return()
+		}
+		b.EndBuild()
+		b.Dispose()
+	}
+	makeCaller("outcome_only_narrow_call", false)
+	makeCaller("outcome_only_narrow_call_with_code", true)
+	coroCaller := fixture.pkg.NewFunc(
+		"coroutine_only_narrow_call",
+		coroPlainDispatchTestSignature(
+			[]types.Type{
+				fixture.signature,
+				types.Typ[types.UnsafePointer],
+				types.Typ[types.UnsafePointer],
+				types.Typ[types.Uint32],
+			},
+			[]types.Type{types.Typ[types.UnsafePointer]},
+		),
+		InGo,
+	)
+	coroBuilder := coroCaller.MakeBody(1)
+	coroSelection := coroBuilder.PrepareCoroDispatchStructuredOnly(coroCaller.Param(0), options, false)
+	handle := coroBuilder.CallPreparedCoroDispatchCoroOnly(
+		coroSelection,
+		coroCaller.Param(1), coroCaller.Param(2),
+		[]Expr{coroCaller.Param(3)},
+	)
+	coroBuilder.Return(handle)
+	coroBuilder.EndBuild()
+	coroBuilder.Dispose()
+
+	ir := fixture.pkg.String()
+	for _, test := range []struct {
+		name     string
+		wantCode bool
+		coro     bool
+	}{
+		{name: "outcome_only_narrow_call"},
+		{name: "outcome_only_narrow_call_with_code", wantCode: true},
+		{name: "coroutine_only_narrow_call", coro: true},
+	} {
+		body := coroPlainDispatchIRFunction(ir, test.name)
+		if body == "" {
+			t.Fatalf("missing narrow structured-only caller %q:\n%s", test.name, ir)
+		}
+		for _, forbidden := range []string{
+			"load { i32, i32, i64, i64, ptr, ptr",
+			"coro.dispatch.flags",
+			"coro.dispatch.version",
+			"coro.dispatch.hash",
+			" and i32 ",
+			"AssertNilDeref",
+			", i32 0, i32 4",
+			", i32 0, i32 6",
+			", i32 0, i32 7",
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("narrow structured-only caller %q retained %q:\n%s", test.name, forbidden, body)
+			}
+		}
+		if !strings.Contains(body, ", i32 0, i32 5") {
+			t.Fatalf("narrow structured-only caller %q did not load the structured entry word:\n%s", test.name, body)
+		}
+		gotCode := strings.Contains(body, ", i32 0, i32 8")
+		if gotCode != test.wantCode {
+			t.Fatalf("narrow structured-only caller %q code-entry load = %t, want %t:\n%s", test.name, gotCode, test.wantCode, body)
+		}
+		fields := regexp.MustCompile(`getelementptr[^\n]*, i32 0, i32 ([0-9]+)`).FindAllStringSubmatch(body, -1)
+		wantFields := []string{"5"}
+		if test.wantCode {
+			wantFields = append(wantFields, "8")
+		}
+		if len(fields) != len(wantFields) {
+			t.Fatalf("narrow structured-only caller %q descriptor field loads = %v, want %v:\n%s", test.name, fields, wantFields, body)
+		}
+		for index, field := range fields {
+			if len(field) != 2 || field[1] != wantFields[index] {
+				t.Fatalf("narrow structured-only caller %q descriptor field load %d = %v, want %s:\n%s", test.name, index, field, wantFields[index], body)
+			}
+		}
+		callPattern := `call void %[^(]+\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i32 `
+		if test.coro {
+			callPattern = `call ptr %[^(]+\(ptr [^,]+, ptr [^,]+, ptr [^,]+, i32 `
+		}
+		if !regexp.MustCompile(callPattern).MatchString(body) {
+			t.Fatalf("narrow structured-only caller %q has no typed call:\n%s", test.name, body)
+		}
+	}
+	if err := llvm.VerifyModule(fixture.pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify narrow outcome-only module: %v\n%s", err, ir)
+	}
+}
+
 func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
 	Initialize(InitAll)
 	prog := NewProgram(nil)
@@ -319,7 +464,7 @@ func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
 	entryBuilder.Dispose()
 
 	descriptor := pkg.NewCoroDispatchDescriptor("variadic_descriptor", CoroDispatchDescriptorOptions{
-		Version:    CoroDispatchVersionV1,
+		Version:    CoroDispatchVersionV2,
 		Flags:      CoroDispatchFlagHasPlain | CoroDispatchFlagPlainNoUnwind,
 		ABIHash:    hash,
 		Signature:  signature,
@@ -340,7 +485,7 @@ func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
 	b := caller.MakeBody(1)
 	fn := b.MakeCoroDispatchValue(signature, descriptor, Nil)
 	value := b.CallCoroDispatchPlain(fn, []Expr{caller.Param(1)}, CoroDispatchCallOptions{
-		Version:          CoroDispatchVersionV1,
+		Version:          CoroDispatchVersionV2,
 		ABIHash:          hash,
 		Result:           result,
 		DescriptorNonNil: true,
@@ -389,11 +534,19 @@ func newCoroDynamicDispatchTestFixture(t *testing.T) *coroDynamicDispatchTestFix
 	cb.Return(coroEntry.Param(2))
 	cb.EndBuild()
 	cb.Dispose()
+	outcomeEntry := pkg.NewFunc("captured_outcome_entry", prog.CoroDispatchOutcomeEntrySignature(signature), InC)
+	ob := outcomeEntry.MakeBody(1)
+	ob.Return()
+	ob.EndBuild()
+	ob.Dispose()
 
 	fixture := &coroDynamicDispatchTestFixture{
 		prog: prog, pkg: pkg, signature: signature, result: result, hash: hash,
-		plainEntry: plainEntry, coroEntry: coroEntry,
+		plainEntry: plainEntry, outcomeEntry: outcomeEntry, coroEntry: coroEntry,
 	}
+	fixture.outcomeOnly = pkg.NewCoroDispatchDescriptor(
+		"outcome_only_descriptor", fixture.descriptorOptions(CoroDispatchFlagHasOutcome),
+	)
 	fixture.coroOnly = pkg.NewCoroDispatchDescriptor(
 		"coro_only_descriptor", fixture.descriptorOptions(CoroDispatchFlagHasCoro),
 	)
@@ -413,10 +566,11 @@ func newCoroDynamicDispatchTestFixture(t *testing.T) *coroDynamicDispatchTestFix
 		b.Dispose()
 	}
 	makeValue("captured_dispatch_value", fixture.dual)
+	makeValue("captured_outcome_only_value", fixture.outcomeOnly)
 	makeValue("captured_coro_only_value", fixture.coroOnly)
 
 	callOptions := CoroDispatchCallOptions{
-		Version: CoroDispatchVersionV1,
+		Version: CoroDispatchVersionV2,
 		ABIHash: hash,
 		Result:  result,
 	}
@@ -438,6 +592,26 @@ func newCoroDynamicDispatchTestFixture(t *testing.T) *coroDynamicDispatchTestFix
 	ccb.Return(handle)
 	ccb.EndBuild()
 	ccb.Dispose()
+
+	outcomeCallerSig := coroPlainDispatchTestSignature(
+		[]types.Type{
+			signature,
+			types.Typ[types.UnsafePointer],
+			types.Typ[types.UnsafePointer],
+			types.Typ[types.UnsafePointer],
+			types.Typ[types.Uint32],
+		},
+		nil,
+	)
+	outcomeCaller := pkg.NewFunc("dynamic_outcome_call", outcomeCallerSig, InGo)
+	ob = outcomeCaller.MakeBody(1)
+	ob.CallCoroDispatchOutcome(
+		outcomeCaller.Param(0), outcomeCaller.Param(1), outcomeCaller.Param(2),
+		outcomeCaller.Param(3), []Expr{outcomeCaller.Param(4)}, callOptions,
+	)
+	ob.Return()
+	ob.EndBuild()
+	ob.Dispose()
 
 	plainCallerSig := coroPlainDispatchTestSignature(
 		[]types.Type{signature, types.Typ[types.Uint32]},
@@ -472,28 +646,46 @@ func newCoroDynamicDispatchTestFixture(t *testing.T) *coroDynamicDispatchTestFix
 	pairProbeBuilder.Return(hasCoro, codeEntry)
 	pairProbeBuilder.EndBuild()
 	pairProbeBuilder.Dispose()
+
+	tripleProbeSig := coroPlainDispatchTestSignature(
+		[]types.Type{signature},
+		[]types.Type{types.Typ[types.Bool], types.Typ[types.Bool], types.Typ[types.UnsafePointer]},
+	)
+	tripleProbe := pkg.NewFunc("dynamic_capabilities_and_code", tripleProbeSig, InGo)
+	tripleProbeBuilder := tripleProbe.MakeBody(1)
+	hasOutcome, hasCoro, codeEntry := tripleProbeBuilder.CoroDispatchCapabilitiesAndCodeEntry(
+		tripleProbe.Param(0), callOptions,
+	)
+	tripleProbeBuilder.Return(hasOutcome, hasCoro, codeEntry)
+	tripleProbeBuilder.EndBuild()
+	tripleProbeBuilder.Dispose()
 	return fixture
 }
 
 func (f *coroDynamicDispatchTestFixture) descriptorOptions(flags uint32) CoroDispatchDescriptorOptions {
 	options := CoroDispatchDescriptorOptions{
-		Version:   CoroDispatchVersionV1,
+		Version:   CoroDispatchVersionV2,
 		Flags:     flags,
 		ABIHash:   f.hash,
 		Signature: f.signature,
-		CodeEntry: f.coroEntry.Expr,
 		Result:    f.result,
 	}
 	if flags&CoroDispatchFlagHasPlain != 0 {
 		options.PlainEntry = f.plainEntry.Expr
+		options.CodeEntry = f.plainEntry.Expr
 	}
 	if flags&CoroDispatchFlagHasCoro != 0 {
 		options.CoroEntry = f.coroEntry.Expr
+		options.CodeEntry = f.coroEntry.Expr
+	}
+	if flags&CoroDispatchFlagHasOutcome != 0 {
+		options.OutcomeEntry = f.outcomeEntry.Expr
+		options.CodeEntry = f.outcomeEntry.Expr
 	}
 	return options
 }
 
-func assertCoroDynamicDispatchGuards(t *testing.T, ir, name string, coro bool) {
+func assertCoroDynamicDispatchGuards(t *testing.T, ir, name, capability string) {
 	t.Helper()
 	body := coroPlainDispatchIRFunction(ir, name)
 	if body == "" {
@@ -505,7 +697,8 @@ func assertCoroDynamicDispatchGuards(t *testing.T, ir, name string, coro bool) {
 		"coro.dispatch.flags.empty",
 		"coro.dispatch.capability.missing",
 		"coro.dispatch.plain.entry.mismatch",
-		"coro.dispatch.coro.entry.mismatch",
+		"coro.dispatch.structured.entry.mismatch",
+		"coro.dispatch.structured.flags.conflict",
 		"coro.dispatch.plain.no-unwind-without-plain",
 		"coro.dispatch.plain-only.no-unwind-missing",
 		"coro.dispatch.nocapture.env.nonnull",
@@ -529,11 +722,20 @@ func assertCoroDynamicDispatchGuards(t *testing.T, ir, name string, coro bool) {
 		assertCall > descriptorLoad || descriptorLoad > guardBranch {
 		t.Fatalf("dynamic caller %q does not validate nil then descriptor before dispatch:\n%s", name, body)
 	}
-	if coro {
+	switch capability {
+	case "coro":
 		if !regexp.MustCompile(`call ptr %[^(]+\(ptr [^,]+, ptr [^,]+, ptr [^,]+, i32 `).MatchString(body) {
 			t.Fatalf("dynamic coro caller has no typed (g,out,env,args)->handle call:\n%s", body)
 		}
 		return
+	case "outcome":
+		if !regexp.MustCompile(`call void %[^(]+\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i32 `).MatchString(body) {
+			t.Fatalf("dynamic outcome caller has no typed (g,out,completion,env,args)->void call:\n%s", body)
+		}
+		return
+	case "plain":
+	default:
+		t.Fatalf("unknown capability %q", capability)
 	}
 	if !regexp.MustCompile(`call i32 %[^(]+\(ptr [^,]+, i32 `).MatchString(body) {
 		t.Fatalf("dynamic plain caller has no typed (env,args)->results call:\n%s", body)
@@ -551,7 +753,8 @@ func assertCoroDynamicDispatchProbeGuards(t *testing.T, ir, name string) {
 		"coro.dispatch.flags.unknown",
 		"coro.dispatch.flags.empty",
 		"coro.dispatch.plain.entry.mismatch",
-		"coro.dispatch.coro.entry.mismatch",
+		"coro.dispatch.structured.entry.mismatch",
+		"coro.dispatch.structured.flags.conflict",
 		"coro.dispatch.nocapture.env.nonnull",
 		"coro.dispatch.hash.invalid",
 		"coro.dispatch.runtime-type.invalid",
@@ -576,8 +779,8 @@ func assertCoroDynamicDispatchProbeGuards(t *testing.T, ir, name string) {
 		t.Fatalf("dynamic capability probe %q does not validate nil then descriptor before probing:\n%s", name, body)
 	}
 	returnsCapability := regexp.MustCompile(`ret i1 %[^ ]+`).MatchString(body) ||
-		regexp.MustCompile(`insertvalue \{ i1, ptr \} [^,]+, i1 %[^,]+, 0`).MatchString(body)
-	if !regexp.MustCompile(`and i32 [^,]+, 2`).MatchString(body) || !returnsCapability {
+		regexp.MustCompile(`insertvalue \{ i1(?:, i1)?, ptr \} [^,]+, i1 %[^,]+, 0`).MatchString(body)
+	if !regexp.MustCompile(`and i32 [^,]+, 4`).MatchString(body) || !returnsCapability {
 		t.Fatalf("dynamic capability probe %q does not return the HasCoro flag:\n%s", name, body)
 	}
 }

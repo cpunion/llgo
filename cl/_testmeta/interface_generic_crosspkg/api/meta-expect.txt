@@ -1,39 +1,14 @@
 [OrdinaryEdges]
-github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
-    __llgo_coro_await_consume_v1
-    __llgo_coro_await_inline_destroy_consume_v4
-    __llgo_coro_await_inline_finish_v2
-    __llgo_coro_await_prepare_inline_v4
-    __llgo_coro_complete_prepare_v2
-    __llgo_coro_fault_prepare_v1
-    __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.b77150eaa35c1a29bfff50441686976f
-    __llgo_coro_frame_free_v1
-    __llgo_coro_frame_publish_v3
-    __llgo_coro_panic_prepare_v1
-    __llgo_coro_run_decision_take_zero_v1
-    llvm.coro.align.i64
-    llvm.coro.alloc
-    llvm.coro.begin
-    llvm.coro.destroy
-    llvm.coro.done
-    llvm.coro.end
-    llvm.coro.free
-    llvm.coro.id
-    llvm.coro.promise
-    llvm.coro.resume
-    llvm.coro.size.i64
-    llvm.coro.suspend
-    llvm.fake.use
-    llvm.memset.p0.i64
-    llvm.trap
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$outcome:
+    __llgo_coro_frame_descriptor_v1.5eceb9922e1a7a46861692f6dd318fe8
+    __llgo_coro_panic_trace_append_v1
 github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.init:
     github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.init$guard
 llvm.compiler.used:
-    __llgo_coro_library_effect_v12.5cb8d6d596e480f7920282e6616a6113
+    __llgo_coro_library_effect_v13.9fd417b5ef40235ff33e5f03a4490351
 
 [UseIfaceMethod]
-github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$coro:
+github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$outcome:
     _llgo_iface$Jvxc0PCI_drlfK7S5npMGdZkQLeRkQ_x2e2CifPE6w8 Value _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
 
 [InterfaceInfo]

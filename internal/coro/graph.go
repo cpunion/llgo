@@ -116,6 +116,13 @@ type CallEdge struct {
 type ReferenceEdge struct {
 	Owner  FunctionID
 	Target FunctionID
+	// PhysicalABI marks a demand-only raw code address embedded in a
+	// frontend/runtime ABI, such as an equality/hash callback. It still uses
+	// managed demand for graph reachability, but the target must keep the
+	// physical entry required by that ABI rather than collapsing to an
+	// outcome-only descriptor primary. Method-table tfn/ifn values transported
+	// through the universal managed descriptor deliberately leave this clear.
+	PhysicalABI bool
 	// SyncOnly is an exact frontend ABI proof that this reference is consumed
 	// only through a managed synchronous descriptor/plain entry. It retains the
 	// target's managed plain demand without inheriting the owner's coroutine
@@ -173,10 +180,11 @@ type edgeKey struct {
 }
 
 type referenceKey struct {
-	owner    FunctionID
-	target   FunctionID
-	syncOnly bool
-	rawPlain bool
+	owner       FunctionID
+	target      FunctionID
+	physicalABI bool
+	syncOnly    bool
+	rawPlain    bool
 }
 
 type unknownKey struct {
@@ -347,7 +355,10 @@ func (g *Graph) AddReference(edge ReferenceEdge) error {
 	if edge.SyncOnly && edge.RawPlain {
 		return fmt.Errorf("coro: reference from %q to %q is both managed sync-only and raw-plain", edge.Owner, edge.Target)
 	}
-	key := referenceKey{owner: edge.Owner, target: edge.Target, syncOnly: edge.SyncOnly, rawPlain: edge.RawPlain}
+	key := referenceKey{
+		owner: edge.Owner, target: edge.Target, physicalABI: edge.PhysicalABI,
+		syncOnly: edge.SyncOnly, rawPlain: edge.RawPlain,
+	}
 	g.references[key] = edge
 	return nil
 }
@@ -1057,6 +1068,9 @@ func (g *Graph) sortedReferences() ([]ReferenceEdge, error) {
 		}
 		if references[i].RawPlain != references[j].RawPlain {
 			return !references[i].RawPlain && references[j].RawPlain
+		}
+		if references[i].PhysicalABI != references[j].PhysicalABI {
+			return !references[i].PhysicalABI && references[j].PhysicalABI
 		}
 		return !references[i].SyncOnly && references[j].SyncOnly
 	})

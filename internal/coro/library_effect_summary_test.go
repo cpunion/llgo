@@ -46,7 +46,7 @@ func testLibraryEffectMetadata() LibraryEffectMetadata {
 		CoroABI:            PhysicalABIV1,
 		SchedulerABI:       SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:           PanicExplicitStatusABIV0,
-		FuncRepABI:         FuncRepABIV1,
+		FuncRepABI:         FuncRepABIV2,
 		TargetTriple:       "x86_64-unknown-linux-gnu",
 		PointerBits:        64,
 		Endianness:         "little",

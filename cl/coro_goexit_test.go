@@ -44,6 +44,41 @@ func Root() {
 }
 `
 
+const coroPropagatePanicTestSource = `package foo
+
+import "unsafe"
+
+//go:linkname propagatePanic llgo.coroPropagatePanic
+func propagatePanic(typeWord, dataWord unsafe.Pointer)
+
+func Root(typeWord, dataWord unsafe.Pointer) {
+	propagatePanic(typeWord, dataWord)
+}
+`
+
+func TestCoroPropagatePanicCallSemantics(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, coroPropagatePanicTestSource)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := findStaticCall(t, ssaPkg.Func("Root"), "propagatePanic")
+	semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
+	if err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineOutcome {
+		t.Fatalf(
+			"panic propagation semantics = %v, %t, %v; want InlineOutcome, true, nil",
+			semantics, intrinsic, err,
+		)
+	}
+	if opcode, ok := llgoInstrs["coroPropagatePanic"]; !ok || opcode != llgoCoroPropagatePanic {
+		t.Fatalf("panic propagation opcode = %d, %t; want %d, true", opcode, ok, llgoCoroPropagatePanic)
+	}
+}
+
 func TestCoroGoexitCurrentFrameNativeAndWasm32(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {

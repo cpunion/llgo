@@ -469,7 +469,7 @@ func Root(seed int) func(int) int {
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1}},
+			FuncRepABI:   coro.FuncRepABIV2}},
 	)
 	if err != nil {
 		t.Fatalf("compile captured descriptor producer: %v", err)
@@ -553,7 +553,7 @@ func Root() func() {
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1}},
+			FuncRepABI:   coro.FuncRepABIV2}},
 	)
 	if err != nil {
 		t.Fatalf("compile zero-sized descriptor producer: %v", err)
@@ -682,7 +682,7 @@ func Root() { slot = Target }
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1}},
+			FuncRepABI:   coro.FuncRepABIV2}},
 	)
 	if err != nil {
 		t.Fatalf("compile dormant conditional descriptor producer: %v", err)
@@ -769,7 +769,7 @@ func Managed() { Target() }
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.FuncRepABI = coro.FuncRepABIV1
+	compilation.FuncRepABI = coro.FuncRepABIV2
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -826,7 +826,7 @@ func TestCoroDynamicDispatchProducerCoroThunkDropsNilEnvironment(t *testing.T) {
 	thunkExpr := ctx.newCoroDynamicDispatchEntryThunk(thunkName, target.Expr, abi, coro.EmitCoroutine, nil)
 	descriptorName := coroPlainDispatchDescriptorPrefix + "focused"
 	descriptor := pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
-		Version:   llssa.CoroDispatchVersionV1,
+		Version:   llssa.CoroDispatchVersionV2,
 		Flags:     llssa.CoroDispatchFlagHasCoro | llssa.CoroDispatchFlagNoCapture,
 		Signature: logical,
 		CoroEntry: thunkExpr,
@@ -919,7 +919,7 @@ func TestCoroDynamicDispatchProducerCapturedCoroThunkInsertsEnvironment(t *testi
 	thunkExpr := ctx.newCoroDynamicDispatchEntryThunk(thunkName, target.Expr, abi, coro.EmitCoroutine, producerClosureCtx)
 	descriptorName := coroPlainDispatchDescriptorPrefix + "captured"
 	pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
-		Version:   llssa.CoroDispatchVersionV1,
+		Version:   llssa.CoroDispatchVersionV2,
 		Flags:     llssa.CoroDispatchFlagHasCoro,
 		Signature: logical,
 		CoroEntry: thunkExpr,
@@ -1025,7 +1025,7 @@ func Root(which bool) func(int) int {
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1}},
+			FuncRepABI:   coro.FuncRepABIV2}},
 	)
 	if err != nil {
 		t.Fatalf("compile multi-target descriptor producer: %v", err)
@@ -1091,7 +1091,7 @@ func Root() func(int, []byte) (int, error) { return Target }
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1}},
+			FuncRepABI:   coro.FuncRepABIV2}},
 	)
 	if err != nil {
 		t.Fatalf("compile multi-result descriptor producer: %v", err)

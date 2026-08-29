@@ -103,7 +103,7 @@ func analyzeCoroClosedInterfacePlainPlan(
 	// references before scanning SSA consumers so they are not mistaken for
 	// descriptor-backed Go function values.
 	for _, owner := range plan.Functions() {
-		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine && !plan.HasRawPlainVariant(owner.Function)) {
+		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitOutcomePlain && owner.Plan.Emission != coro.EmitCoroutine && !plan.HasRawPlainVariant(owner.Function)) {
 			continue
 		}
 		references, err := universe.CoroDemandReferences(owner.Function)
@@ -124,19 +124,20 @@ func analyzeCoroClosedInterfacePlainPlan(
 				return nil, fmt.Errorf("raw ABI method target %q has no compilation plan", target)
 			}
 			_, rawSyncTarget := syncTargets[target]
-			asyncMethodToken := !rawSyncTarget && target.Signature != nil && target.Signature.Recv() != nil && targetPlan.Emission == coro.EmitCoroutine
+			structuredMethodToken := !rawSyncTarget && target.Signature != nil && target.Signature.Recv() != nil &&
+				(targetPlan.Emission == coro.EmitCoroutine || targetPlan.Emission == coro.EmitOutcomePlain)
 			if rawSyncTarget {
 				if err := validateCoroRawABIEntryTarget(target, targetPlan); err != nil {
 					return nil, err
 				}
-			} else if asyncMethodToken {
+			} else if structuredMethodToken {
 				if err := validateCoroRawABIMethodTokenTarget(target, targetPlan); err != nil {
 					return nil, fmt.Errorf("%w; opaque trace: %s", err, plan.OpaqueEffectTrace(target))
 				}
 			} else if err := validateCoroRawABIPlainTarget(target, targetPlan); err != nil {
 				return nil, err
 			}
-			if asyncMethodToken || targetPlan.FuncRep == coro.Dispatch {
+			if structuredMethodToken || targetPlan.FuncRep == coro.Dispatch {
 				result.targets[targetPlan.ID] = target
 			}
 		}
@@ -186,7 +187,7 @@ func analyzeCoroClosedInterfacePlainPlan(
 	}
 
 	for _, owner := range plan.Functions() {
-		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine && !plan.HasRawPlainVariant(owner.Function)) {
+		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitOutcomePlain && owner.Plan.Emission != coro.EmitCoroutine && !plan.HasRawPlainVariant(owner.Function)) {
 			continue
 		}
 		fn := owner.Function
@@ -522,11 +523,11 @@ func validateCoroRawABIPlainTarget(target *ssa.Function, plan coro.FunctionPlan)
 	return nil
 }
 
-// validateCoroRawABIMethodTokenTarget accepts the one non-callable use of an
-// async receiver method's ordinary itab word. In a closed coroutine invoke the
-// word is only a stable discriminator: codegen compares it with the exact
-// method symbol, then invokes the planned coroutine primary through structured
-// child-await. It must never be called with the legacy raw method signature.
+// validateCoroRawABIMethodTokenTarget accepts the one non-callable use of a
+// structured receiver method's ordinary itab word. The word is either replaced
+// by the universal descriptor or used only as a stable discriminator; it must
+// never be called with the legacy raw method signature. A coroutine primary and
+// an outcome-only descriptor primary are therefore equally valid here.
 //
 // Receiver-less equality/hash callbacks are deliberately excluded because the
 // runtime calls those words directly. A first-class or otherwise unverified
@@ -543,11 +544,12 @@ func validateCoroRawABIMethodTokenTarget(target *ssa.Function, plan coro.Functio
 		len(target.Blocks) == 0 || len(target.FreeVars) != 0 {
 		return fail("requires one defined non-capturing receiver body")
 	}
-	if plan.External != coro.Defined || plan.Emission != coro.EmitCoroutine || plan.Primary != coro.PrimaryCoroutine ||
+	structuredEmission := plan.Emission == coro.EmitCoroutine || plan.Emission == coro.EmitOutcomePlain
+	if plan.External != coro.Defined || !structuredEmission || plan.Primary != coro.PrimaryCoroutine ||
 		plan.Demand == coro.NoDemand || !plan.Effect.MaySuspend() || plan.Effect.IsOpaque() ||
 		(plan.FuncRep != coro.DirectCoro && plan.FuncRep != coro.Dispatch) {
 		return fail(
-			"requires a demanded defined non-opaque coroutine body, got external=%s emission=%s primary=%s demand=%s representation=%s effect=%s",
+			"requires a demanded defined non-opaque structured body, got external=%s emission=%s primary=%s demand=%s representation=%s effect=%s",
 			plan.External, plan.Emission, plan.Primary, plan.Demand, plan.FuncRep, plan.Effect,
 		)
 	}

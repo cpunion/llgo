@@ -129,7 +129,7 @@ func compileCoroZeroSizedChannelFixture(t *testing.T) (llssa.Program, llssa.Pack
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1}
+		FuncRepABI:   coro.FuncRepABIV2}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},

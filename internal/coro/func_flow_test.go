@@ -437,6 +437,9 @@ func rawTarget() { <-channel }
 func rawOwner() { sink(rawTarget) }
 func managedOwner() { rawTarget() }
 
+func wrappedTarget() {}
+func wrappedCallback() CCallback { return CCallback(wrappedTarget) }
+
 func rawToGoTarget() {}
 func rawToGoOwner() {
 	var callback CCallback = rawToGoTarget
@@ -462,6 +465,20 @@ func openOwner(callback CCallback) { sink(callback) }
 	classifyRawType := func(typ types.Type) (bool, error) {
 		named, ok := types.Unalias(typ).(*types.Named)
 		return ok && named.Obj() != nil && named.Obj().Name() == "CCallback", nil
+	}
+	wrapped := packageFunction(t, pkg, "wrappedCallback")
+	wrappedTarget := packageFunction(t, pkg, "wrappedTarget")
+	wrappedPlan, err := AnalyzeSSA(prog, Roots{{Function: wrapped, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyRawCFunctionType: classifyRawType,
+		MaxPlainInstructions:     -1,
+	})
+	if err != nil {
+		t.Fatalf("inferred wrapped raw callback: %v", err)
+	}
+	if got := functionPlanFor(t, wrappedPlan, wrappedTarget); got.ManagedDemand != NoDemand ||
+		!got.RawPlainDemand || !got.RawPlainOnly || got.Emission != EmitRawPlain ||
+		got.Primary != PrimaryPlain || got.FuncRep != DirectPlain || !wrappedPlan.HasRawPlainVariant(wrappedTarget) {
+		t.Fatalf("inferred wrapped raw callback plan = %+v, want one raw-only body", got)
 	}
 
 	plan, err := AnalyzeSSA(prog, Roots{{Function: rawOwner, Demand: AsyncDemand}}, SSAConfig{
