@@ -3036,9 +3036,7 @@ func (p *context) callEx(
 		}
 		args := p.compileValues(b, call.Args, hasVArg)
 		ret = p.emitDoAtSource(b, act, ds, true, source, fn, llssa.Builder.Call, args...)
-		if reflectCheck.Kind&llssa.ReflectTypeMethodByName != 0 && reflectCheck.Name == "" {
-			b.MarkReflectTypeMethodByNameExpr(ret, 1)
-		}
+		markReflectTypeMethodByNameCall(b, ret, reflectCheck, 1, -1)
 		b.EmitReflectTypeMethodCheckedLoad(ret, reflectCheck)
 		return
 	}
@@ -3551,25 +3549,29 @@ func reflectStaticCallABIInitKind(call *ssa.CallCommon) int {
 	return 0
 }
 
-// recordReflectValueMethodCall records source-level reflect.Value method
-// selection independently from its physical call representation. Coroutine
-// direct awaits replace the logical callee before llssa.Builder.Call can run
-// checkReflect, but the DCE demand still belongs to the emitted physical owner.
-func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommon) {
-	if p == nil || p.pkg == nil || owner == "" || call == nil {
-		return
+type reflectValueMethodSelection struct {
+	method   string
+	argument ssa.Value
+}
+
+// reflectValueMethodSelectionOf extracts the source semantic identity shared
+// by metadata collection and physical-call annotation. In particular, neither
+// consumer needs to infer reflect semantics from a rewritten $coro symbol.
+func reflectValueMethodSelectionOf(call *ssa.CallCommon) (reflectValueMethodSelection, bool) {
+	if call == nil {
+		return reflectValueMethodSelection{}, false
 	}
 	target := call.StaticCallee()
 	if target == nil {
-		return
+		return reflectValueMethodSelection{}, false
 	}
 	object, ok := target.Object().(*types.Func)
 	if !ok || object == nil || object.Pkg() == nil || object.Pkg().Path() != "reflect" {
-		return
+		return reflectValueMethodSelection{}, false
 	}
 	signature, ok := object.Type().(*types.Signature)
 	if !ok || signature.Recv() == nil {
-		return
+		return reflectValueMethodSelection{}, false
 	}
 	receiver := types.Unalias(signature.Recv().Type())
 	if pointer, ok := receiver.(*types.Pointer); ok {
@@ -3579,12 +3581,43 @@ func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommo
 	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil ||
 		named.Obj().Pkg().Path() != "reflect" || named.Obj().Name() != "Value" ||
 		len(call.Args) != 2 {
+		return reflectValueMethodSelection{}, false
+	}
+	if object.Name() != "Method" && object.Name() != "MethodByName" {
+		return reflectValueMethodSelection{}, false
+	}
+	return reflectValueMethodSelection{method: object.Name(), argument: call.Args[1]}, true
+}
+
+func reflectValueMethodByNameCheck(call *ssa.CallCommon) (llssa.ReflectMethodCheck, bool) {
+	selection, ok := reflectValueMethodSelectionOf(call)
+	if !ok || selection.method != "MethodByName" {
+		return llssa.ReflectMethodCheck{}, false
+	}
+	if name, constant := constStr(selection.argument); constant {
+		return llssa.ReflectMethodCheck{Kind: llssa.ReflectMethodByName, Name: name}, true
+	}
+	return llssa.ReflectMethodCheck{
+		Kind: llssa.ReflectMethodDynamic | llssa.ReflectMethodByName,
+	}, true
+}
+
+// recordReflectValueMethodCall records source-level reflect.Value method
+// selection independently from its physical call representation. Coroutine
+// direct awaits replace the logical callee before llssa.Builder.Call can run
+// checkReflect, but the DCE demand still belongs to the emitted physical owner.
+func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommon) {
+	if p == nil || p.pkg == nil || owner == "" {
+		return
+	}
+	selection, ok := reflectValueMethodSelectionOf(call)
+	if !ok {
 		return
 	}
 
-	switch object.Name() {
+	switch selection.method {
 	case "Method":
-		if index, ok := constInt(call.Args[1]); ok {
+		if index, ok := constInt(selection.argument); ok {
 			p.pkg.RecordReflectMethodByIndex(owner, index)
 			p.pkg.NeedAbiInit |= llssa.ReflectMethodByIndex
 			return
@@ -3592,7 +3625,7 @@ func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommo
 		p.pkg.MarkReflectMethod(owner)
 		p.pkg.NeedAbiInit |= llssa.ReflectMethodDynamic
 	case "MethodByName":
-		if name, ok := constStr(call.Args[1]); ok {
+		if name, ok := constStr(selection.argument); ok {
 			p.pkg.RecordReflectMethodByName(owner, name)
 			p.pkg.NeedAbiInit |= llssa.ReflectMethodByName
 			return
@@ -3658,6 +3691,30 @@ func (p *context) reflectTypeMethodCheck(call *ssa.CallCommon, method *types.Fun
 	}
 	p.pkg.NeedAbiInit |= check.Kind
 	return
+}
+
+// markReflectTypeMethodByNameCall attaches one source-level dynamic
+// Type.MethodByName selection to the exact call instruction that implements
+// it. resultArgIndex is non-negative only for compiler-owned physical ABIs
+// whose result slot is an explicit argument rather than an ordinary return or
+// C ABI sret value.
+func markReflectTypeMethodByNameCall(
+	b llssa.Builder, physicalCall llssa.Expr, check llssa.ReflectMethodCheck,
+	nameArgIndex, resultArgIndex int,
+) {
+	if check.Kind&llssa.ReflectTypeMethodByName == 0 || check.Name != "" {
+		return
+	}
+	if physicalCall.IsNil() || nameArgIndex < 0 {
+		panic("dynamic reflect.Type.MethodByName lost its physical call")
+	}
+	if resultArgIndex >= 0 {
+		b.MarkReflectTypeMethodByNamePhysicalExpr(
+			physicalCall, nameArgIndex, resultArgIndex,
+		)
+		return
+	}
+	b.MarkReflectTypeMethodByNameExpr(physicalCall, nameArgIndex)
 }
 
 func isReflectType(t types.Type) bool {

@@ -42,6 +42,28 @@ func testCompile(t *testing.T, src, expected string) {
 	cltest.TestCompileEx(t, src, "foo.go", expected, false)
 }
 
+func matchingIRLines(ir string, requireAll bool, needles ...string) string {
+	var matched []string
+	for _, line := range strings.Split(ir, "\n") {
+		lineMatches := requireAll
+		for _, needle := range needles {
+			contains := strings.Contains(line, needle)
+			if requireAll && !contains {
+				lineMatches = false
+				break
+			}
+			if !requireAll && contains {
+				lineMatches = true
+				break
+			}
+		}
+		if lineMatches {
+			matched = append(matched, line)
+		}
+	}
+	return strings.Join(matched, "\n")
+}
+
 func requireEmbedTest(t *testing.T) {
 	t.Helper()
 	if os.Getenv("LLGO_EMBED_TESTS") != "1" {
@@ -211,6 +233,8 @@ func TestRunAndTestFromTestlto(t *testing.T) {
 	conf := build.NewDefaultConf(build.ModeRun)
 	conf.LTO = lto.Full
 	ignore := []string{
+		"./_testlto/globaldce_static_itab_devirt",
+		"./_testlto/globaldce_static_itab_partial_root",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_concat",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_global",
@@ -251,6 +275,8 @@ var testltoSymbolChecks = []string{
 }
 
 var testltoLTOPluginTests = []string{
+	"globaldce_static_itab_devirt",
+	"globaldce_static_itab_partial_root",
 	"globaldce_reflect_type_method_metadata_only",
 	"globaldce_reflect_method_by_name_ltoplugin",
 	"globaldce_reflect_method_by_name_ltoplugin_concat",
@@ -358,10 +384,16 @@ func runTestltoLTOPluginAggregateABI(t *testing.T, fixture string) string {
 	if len(pkgs) != 1 {
 		t.Fatalf("generate aggregate string module: got %d packages", len(pkgs))
 	}
+	if rawIR := pkgs[0].LPkg.String(); !strings.Contains(rawIR, `ptr "llgo.reflect.methodbyname.result"="1"`) {
+		t.Fatalf("physical MethodByName result slot was not marked before C ABI lowering:\n%s", rawIR)
+	}
 	cabi.NewTransformer(pkgs[0].LPkg.Prog, "arm64-unknown-linux", "", cabi.ModeAllFunc, true).
 		TransformModule(pkgs[0].PkgPath, pkgs[0].LPkg.Module())
 	aggregateIR := pkgs[0].LPkg.String()
 	pkgs[0].LPkg.Prog.Dispose()
+	if !strings.Contains(aggregateIR, `ptr "llgo.reflect.methodbyname.result"="1"`) {
+		t.Fatalf("physical MethodByName result slot marker was lost during C ABI lowering:\n%s", aggregateIR)
+	}
 	if !strings.Contains(aggregateIR, `runtime.String" "llgo.reflect.methodbyname.name"`) {
 		t.Fatalf("MethodByName string argument was not captured in aggregate form:\n%s", aggregateIR)
 	}
@@ -398,6 +430,116 @@ func TestBuildAndCheckSymbolsFromTestltoLTOPluginAggregateABI(t *testing.T) {
 		"./_testlto/_globaldce_reflect_method_by_name_ltoplugin_string_abi_unknown")
 	if strings.Contains(unknownResult, `metadata !"go.method.type.reflect"`) {
 		t.Fatalf("aggregate ABI output retained a generic type Func marker\n%s", unknownResult)
+	}
+}
+
+func TestBuildAndCheckSymbolsFromTestltoLTOPluginGeneratedStaticItab(t *testing.T) {
+	conf := testltoLTOPluginConf(t, build.ModeGen)
+	conf.PCLNMode = build.PCLNNone
+	pkgs, err := build.Do([]string{"./_testlto/globaldce_static_itab_devirt"}, conf)
+	if err != nil {
+		t.Fatalf("generate static itab module: %v", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("generate static itab module: got %d packages", len(pkgs))
+	}
+	defer pkgs[0].LPkg.Prog.Dispose()
+	generated := pkgs[0].LPkg.String()
+	for _, want := range []string{
+		`_llgo_itab$`,
+		`!llgo.static.itab.slot`,
+		`@llvm.type.checked.load`,
+	} {
+		if !strings.Contains(generated, want) {
+			t.Fatalf("generated static itab module is missing %s:\n%s", want, generated)
+		}
+	}
+	for _, line := range strings.Split(generated, "\n") {
+		if strings.Contains(line, `@llvm.compiler.used`) && strings.Contains(line, `_llgo_itab$`) {
+			t.Fatalf("generated module preserves the static itab as a redundant template:\n%s", line)
+		}
+	}
+	const definition = ` = private unnamed_addr constant { ptr, ptr, i32, [1 x ptr] }`
+	if got := strings.Count(generated, definition); got != 1 {
+		t.Fatalf("generated module has %d static itab definitions, want one:\n%s", got, generated)
+	}
+
+	opt := filepath.Join(llvmenv.New("").BinDir(), "opt")
+	cmd := exec.Command(opt, "-load-pass-plugin="+conf.LTOPlugin.Path,
+		"-passes=internalize,llgo-lto-pre-globaldce", "-S", "-o", "-")
+	cmd.Stdin = strings.NewReader(generated)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run LTO plugin for generated static itab: %v\n%s", err, out)
+	}
+	optimized := string(out)
+	if staticLoads := matchingIRLines(optimized, true,
+		`call { ptr, i1 } @llvm.type.checked.load`, `!"go.method.M:func() int"`); staticLoads != "" {
+		t.Fatalf("generated static interface call was not devirtualized:\n%s",
+			matchingIRLines(optimized, false, "llgo-lto-plugin:", "unresolved in", "_llgo_itab$", "type.checked.load", `main.callM$coro`))
+	}
+	if !strings.Contains(optimized, `A.M`) {
+		t.Fatalf("generated static interface call lost its concrete target:\n%s", optimized)
+	}
+	for _, line := range strings.Split(optimized, "\n") {
+		if strings.Contains(line, `@llvm.compiler.used`) && strings.Contains(line, `_llgo_itab$`) {
+			t.Fatalf("LTO plugin preserves the static itab as a redundant template:\n%s", line)
+		}
+	}
+	if strings.Count(optimized, definition) != 1 {
+		t.Fatalf("LTO plugin introduced or duplicated a static itab:\n%s", optimized)
+	}
+}
+
+func TestBuildAndCheckSymbolsFromTestltoLTOPluginPartialStaticItabDevirt(t *testing.T) {
+	conf := testltoLTOPluginConf(t, build.ModeGen)
+	const input = `
+target datalayout = "e-p:64:64-i64:64-n8:16:32:64-S128"
+target triple = "x86_64-unknown-linux-gnu"
+
+@interface.I = constant i8 0
+@type.A = constant i8 0
+@_llgo_itab$A = private constant { ptr, ptr, i32, [1 x ptr] } { ptr @interface.I, ptr @type.A, i32 0, [1 x ptr] [ptr @A.M] }, !llgo.static.itab.slot !0
+
+declare { ptr, i1 } @llvm.type.checked.load(ptr, i32, metadata)
+declare void @sink(ptr)
+
+define void @A.M(ptr %recv) {
+entry:
+	ret void
+}
+
+define void @test(ptr %dynamic.itab) {
+entry:
+	%static.load = call { ptr, i1 } @llvm.type.checked.load(ptr @_llgo_itab$A, i32 24, metadata !"go.method.M:func()")
+	%static.fn = extractvalue { ptr, i1 } %static.load, 0
+	call void @sink(ptr %static.fn)
+	%dynamic.load = call { ptr, i1 } @llvm.type.checked.load(ptr %dynamic.itab, i32 24, metadata !"go.method.M:func()")
+	%dynamic.fn = extractvalue { ptr, i1 } %dynamic.load, 0
+	call void @sink(ptr %dynamic.fn)
+	ret void
+}
+
+!0 = !{i64 24, !"go.method.M:func()"}
+`
+	opt := filepath.Join(llvmenv.New("").BinDir(), "opt")
+	cmd := exec.Command(opt, "-load-pass-plugin="+conf.LTOPlugin.Path,
+		"-passes=llgo-lto-pre-globaldce", "-S", "-o", "-")
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run LTO plugin for partial static itab devirtualization: %v\n%s", err, out)
+	}
+	result := string(out)
+	if got := strings.Count(result, "call { ptr, i1 } @llvm.type.checked.load"); got != 1 {
+		t.Fatalf("got %d checked loads after partial devirtualization, want 1\n%s", got, result)
+	}
+	if !strings.Contains(result, "ptr @A.M") {
+		t.Fatalf("static itab load was not resolved to A.M\n%s", result)
+	}
+	if !strings.Contains(result,
+		`@llvm.type.checked.load(ptr %dynamic.itab, i32 24, metadata !"go.method.M:func()")`) {
+		t.Fatalf("dynamic checked load was not preserved\n%s", result)
 	}
 }
 

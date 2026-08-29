@@ -76,7 +76,7 @@ func abiTypeHash(name string) uint32 {
 
 func staticItabSymbol(packagePath, interfaceName, concreteName string) string {
 	digest := sha256.Sum256([]byte(packagePath + "\x00" + interfaceName + "\x00" + concreteName))
-	return "__llgo_static_itab." + hex.EncodeToString(digest[:16])
+	return "_llgo_itab$" + hex.EncodeToString(digest[:16])
 }
 
 // ABITypeRuntimeFunctions returns the logical runtime functions whose

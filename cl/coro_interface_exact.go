@@ -117,13 +117,21 @@ func (p *context) compileCoroExactInterfaceCall(
 	// makes all operands available before the invoke instruction.
 	arguments = append(arguments, p.compileValue(b, receiver))
 	arguments = append(arguments, p.compileValues(b, call.Common().Args, fnNormal)...)
+	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
+	var result llssa.Expr
 	if !instructionPlan.recoverAlias {
-		return b.Call(function.Expr, arguments...)
+		result = b.Call(function.Expr, arguments...)
+	} else {
+		p.observeCoroPhysicalRecoverAlias(call)
+		result = p.callCoroTransparentRecoverAlias(b, function.Expr, func() llssa.Expr {
+			return b.Call(function.Expr, arguments...)
+		})
 	}
-	p.observeCoroPhysicalRecoverAlias(call)
-	return p.callCoroTransparentRecoverAlias(b, function.Expr, func() llssa.Expr {
-		return b.Call(function.Expr, arguments...)
-	})
+	markReflectTypeMethodByNameCall(
+		b, result, reflectCheck, len(arguments)-1, -1,
+	)
+	b.EmitReflectTypeMethodCheckedLoad(result, reflectCheck)
+	return result
 }
 
 // tryCompileCoroRawPlainExactInterfaceCall reuses the same occurrence-local
@@ -166,7 +174,13 @@ func (p *context) tryCompileCoroRawPlainExactInterfaceCall(
 	arguments := make([]llssa.Expr, 0, len(call.Common().Args)+1)
 	arguments = append(arguments, p.compileValue(b, receiver))
 	arguments = append(arguments, p.compileValues(b, call.Common().Args, fnNormal)...)
-	return b.Call(function.Expr, arguments...), true
+	result := b.Call(function.Expr, arguments...)
+	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
+	markReflectTypeMethodByNameCall(
+		b, result, reflectCheck, len(arguments)-1, -1,
+	)
+	b.EmitReflectTypeMethodCheckedLoad(result, reflectCheck)
+	return result, true
 }
 
 func (p *context) compileCoroExactInterfaceAwait(
@@ -209,6 +223,9 @@ func (p *context) compileCoroExactInterfaceAwait(
 		b, target, llssa.Nil, arguments, nil, keepaliveSlots,
 		instructionPlan.recoverAlias,
 	)
+	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
+	markCoroReflectTypeMethodByNameCalls(b, reflectCheck, result.physicalCalls)
+	b.EmitReflectTypeMethodCheckedLoad(result.value, reflectCheck)
 	p.recordCoroValueAddress(call, result.address)
 	return result.value
 }

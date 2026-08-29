@@ -415,6 +415,10 @@ func (p *context) compileCoroStaticOutcomeCall(
 		b, callee, args, instructionPlan.directOutcomeNativeResult,
 		instructionPlan.recoverAlias,
 	)
+	if reflectCheck, ok := reflectValueMethodByNameCheck(call.Common()); ok {
+		markCoroReflectValueMethodByNameCalls(b, reflectCheck, result.physicalCalls)
+		b.EmitReflectValueMethodCheckedLoad(result.value, reflectCheck)
+	}
 	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, result.value)
 	if !retagged {
 		if !result.address.IsNil() {
@@ -508,20 +512,24 @@ func (p *context) compileCoroStaticOutcomeTargetCallAliasResult(
 		b.Convert(p.prog.VoidPtr(), completion),
 	)
 	physicalArgs = append(physicalArgs, args...)
+	var physicalCall llssa.Expr
 	if transparentRecoverAlias {
 		if !p.hasCoroPhysicalBody() {
 			panic("transparent recover alias cannot execute from an outcome-plain wrapper")
 		}
-		p.callCoroTransparentRecoverAlias(b, calleeFn.Expr, func() llssa.Expr {
+		physicalCall = p.callCoroTransparentRecoverAlias(b, calleeFn.Expr, func() llssa.Expr {
 			return b.Call(calleeFn.Expr, physicalArgs...)
 		})
 	} else {
-		b.Call(calleeFn.Expr, physicalArgs...)
+		physicalCall = b.Call(calleeFn.Expr, physicalArgs...)
 	}
 	p.dispatchOutcomePlainCompletion(b, completion)
 	return coroAwaitedValue{
 		value:   p.loadCoroAwaitResult(b, resultSlot, sourceSig.Results()),
 		address: p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()),
+		physicalCalls: []coroPhysicalCall{{
+			call: physicalCall, argCount: len(physicalArgs), resultArg: 1,
+		}},
 	}
 }
 

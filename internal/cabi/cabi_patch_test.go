@@ -1114,11 +1114,11 @@ func TestReflectMethodByNameNameArgAttributeRemapped(t *testing.T) {
 %String = type { ptr, i64 }
 %Value = type { ptr, ptr, i64 }
 
-declare void @callee(%Value, %String)
+declare void @callee(ptr, %Value, %String)
 
-define void @caller(%Value %v, %String %name) {
+define void @caller(ptr %result, %Value %v, %String %name) {
 entry:
-  call void @callee(%Value %v, %String "llgo.reflect.methodbyname.name"="1" %name) #0
+  call void @callee(ptr "llgo.reflect.methodbyname.result"="1" %result, %Value %v, %String "llgo.reflect.methodbyname.name"="1" %name) #0
   ret void
 }
 
@@ -1159,6 +1159,9 @@ attributes #0 = { "llgo.reflect.methodbyname"="value" }
 	}
 	if strings.Contains(ir, `i64 "llgo.reflect.methodbyname.name"="1"`) {
 		t.Fatalf("reflect MethodByName name marker should not be remapped to string length:\n%s", ir)
+	}
+	if !strings.Contains(ir, `ptr "llgo.reflect.methodbyname.result"="1"`) {
+		t.Fatalf("reflect MethodByName result marker was not preserved:\n%s", ir)
 	}
 }
 

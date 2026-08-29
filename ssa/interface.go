@@ -126,6 +126,23 @@ func (b Builder) staticItab(rawIntf *types.Interface, concrete Type, tintf, typ 
 	global.SetGlobalConstant(true)
 	global.SetUnnamedAddr(true)
 	global.SetAlignment(prog.td.ABITypeAlignment(runtimeItab.ll))
+	if prog.enableGoGlobalDCE && prog.enableLTOPluginMarker {
+		// The LTO plugin may replace a checked interface-method load only after
+		// matching both its byte offset and method capability. Attach that proof
+		// to the runtime itab itself; a second analysis-only vtable would duplicate
+		// every method entry and could diverge from coroutine dispatch metadata.
+		slotKind := prog.ctx.MDKindID("llgo.static.itab.slot")
+		funOffset := uint64(prog.td.ElementOffset(layout, 3))
+		stride := uint64(prog.td.TypeAllocSize(textField.ll))
+		for index := range methods {
+			method := rawIntf.Method(index)
+			node := prog.ctx.MDNode([]llvm.Metadata{
+				llvm.ConstInt(prog.Int64().ll, funOffset+uint64(index)*stride, false).ConstantAsMetadata(),
+				prog.ctx.MDString(methodCapabilityKey(method)),
+			})
+			global.AddMetadata(slotKind, node)
+		}
+	}
 	ret := Expr{global, prog.Pointer(runtimeItab)}
 	if b.Pkg.staticItabs == nil {
 		b.Pkg.staticItabs = make(map[staticItabKey]Expr)

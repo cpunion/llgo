@@ -248,7 +248,14 @@ func strequal(p, q unsafe.Pointer) bool {
 func interequal(p, q unsafe.Pointer) bool {
 	x := *(*iface)(p)
 	y := *(*iface)(q)
-	return x.tab == y.tab && ifaceeq(x.tab, x.data, y.data)
+	if x.tab == nil || y.tab == nil {
+		return x.tab == y.tab
+	}
+	// LLGo emits immutable itabs for statically known conversions while
+	// reflection and dynamic assertions intern runtime itabs. Pointer identity
+	// is therefore an implementation detail, not the Go equality criterion;
+	// the canonical dynamic type descriptor is the semantic identity.
+	return x.tab._type == y.tab._type && ifaceeq(x.tab, x.data, y.data)
 }
 func nilinterequal(p, q unsafe.Pointer) bool {
 	x := *(*eface)(p)

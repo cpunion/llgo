@@ -785,6 +785,7 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 		returnArgOffset = 1
 	}
 	remappedReflectMethodByNameArgAttrIndex := -1
+	remappedReflectMethodByNameResultAttrIndex := -1
 	var nparams []llvm.Value
 	for i := 0; i < operandCount; i++ {
 		param := call.Operand(i)
@@ -792,6 +793,10 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 		reflectMethodByNameArgAttr := call.GetCallSiteStringAttribute(i+1, "llgo.reflect.methodbyname.name")
 		if !reflectMethodByNameArgAttr.IsNil() {
 			remappedReflectMethodByNameArgAttrIndex = returnArgOffset + len(nparams) + 1
+		}
+		reflectMethodByNameResultAttr := call.GetCallSiteStringAttribute(i+1, "llgo.reflect.methodbyname.result")
+		if !reflectMethodByNameResultAttr.IsNil() {
+			remappedReflectMethodByNameResultAttrIndex = returnArgOffset + len(nparams) + 1
 		}
 		switch ti.Kind {
 		default:
@@ -879,6 +884,11 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 		if remappedReflectMethodByNameArgAttrIndex >= 0 {
 			replacement.AddCallSiteAttribute(remappedReflectMethodByNameArgAttrIndex, ctx.CreateStringAttribute(
 				"llgo.reflect.methodbyname.name", "1",
+			))
+		}
+		if remappedReflectMethodByNameResultAttrIndex >= 0 {
+			replacement.AddCallSiteAttribute(remappedReflectMethodByNameResultAttrIndex, ctx.CreateStringAttribute(
+				"llgo.reflect.methodbyname.result", "1",
 			))
 		}
 		copyClosureEnvCallAttrs(call, replacement, paramMap)

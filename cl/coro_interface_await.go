@@ -67,6 +67,7 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 	methodWord := b.Convert(p.prog.VoidPtr(), b.Field(methodValue, 0))
 	env := b.Field(methodValue, 1)
 	args := p.compileValues(b, call.Call.Args, fnNormal)
+	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	if instructionPlan.recoverAlias {
 		p.observeCoroPhysicalRecoverAlias(call)
@@ -123,10 +124,14 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 		var result llssa.Expr
 		switch candidate.plan.Emission {
 		case coro.EmitCoroutine:
-			result = p.compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
+			awaited := p.compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
 				b, candidate.function, llssa.Nil, physical, nil, keepaliveSlots,
 				instructionPlan.recoverAlias,
-			).value
+			)
+			result = awaited.value
+			markCoroReflectTypeMethodByNameCalls(
+				b, reflectCheck, awaited.physicalCalls,
+			)
 		case coro.EmitPlain:
 			if instructionPlan.recoverAlias {
 				result = p.callCoroTransparentRecoverAlias(b, entry.Expr, func() llssa.Expr {
@@ -135,6 +140,9 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 			} else {
 				result = b.Call(entry.Expr, physical...)
 			}
+			markReflectTypeMethodByNameCall(
+				b, result, reflectCheck, len(physical)-1, -1,
+			)
 		default:
 			panic(fmt.Sprintf("coroutine interface dispatch: target %q has emission %s", candidate.id, candidate.plan.Emission))
 		}
@@ -162,5 +170,6 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 	}
 	result := b.LoadKnownNonNil(resultSlot)
 	p.recordCoroValueAddress(call, resultSlot)
+	b.EmitReflectTypeMethodCheckedLoad(result, reflectCheck)
 	return result
 }
