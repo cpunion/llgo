@@ -38,6 +38,35 @@ int32_t __llgo_coro_native_fleet_e2e_reentry_v1(
     return callback(value) + callback(value + 1);
 }
 
+static _Atomic uint32_t llgo_coro_native_fleet_e2e_reentry_after_v2;
+
+void __llgo_coro_native_fleet_e2e_reentry_escape_reset_v2(void) {
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_reentry_after_v2,
+        0,
+        memory_order_seq_cst);
+}
+
+uintptr_t __llgo_coro_native_fleet_e2e_reentry_escape_after_v2(void) {
+    return (uintptr_t)atomic_load_explicit(
+        &llgo_coro_native_fleet_e2e_reentry_after_v2,
+        memory_order_seq_cst);
+}
+
+int32_t __llgo_coro_native_fleet_e2e_reentry_escape_v2(
+    llgo_coro_native_fleet_e2e_callback_v1 callback,
+    int32_t value) {
+    if (callback == NULL) {
+        return INT32_MIN;
+    }
+    int32_t result = callback(value);
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_reentry_after_v2,
+        1,
+        memory_order_seq_cst);
+    return result;
+}
+
 extern int32_t __llgo_coro_native_fleet_e2e_export_v1(int32_t value);
 
 int32_t __llgo_coro_native_fleet_e2e_call_export_v1(int32_t value) {

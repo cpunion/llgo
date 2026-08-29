@@ -591,7 +591,8 @@ func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
 		t.Fatalf("verify managed-reentry coroutine: %v\n%s", err, module.String())
 	}
 	root := requireCoroPhysicalFunction(t, module, "foreignworker.Root").String()
-	if !strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
+	if strings.Count(root, "@"+coroSameMForeignReentryCallHookV2) != 1 ||
+		strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
 		strings.Contains(root, "@"+coroWorkerParkHookV1) ||
 		strings.Contains(root, "@foreign_managed_reentry_probe") {
 		t.Fatalf("Root did not select the managed-reentry boundary:\n%s", root)
@@ -628,6 +629,9 @@ func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
 	}
 	if !strings.Contains(adapterText, "foreignworker.callback$coro") {
 		t.Errorf("managed callback adapter lacks the exact coroutine target:\n%s", adapterText)
+	}
+	if !strings.Contains(adapterText, "i32 5, label") {
+		t.Errorf("managed callback adapter does not reconstruct recovered return:\n%s", adapterText)
 	}
 	if thunk.IsNil() ||
 		!strings.Contains(thunk.String(), "@foreign_managed_reentry_probe") {
@@ -698,7 +702,8 @@ func TestCoroCallerThreadForeignCallUsesSameMEpisode(t *testing.T) {
 		t.Fatalf("verify same-M foreign coroutine: %v\n%s", err, module.String())
 	}
 	root := requireCoroPhysicalFunction(t, module, "foreignworker.Root").String()
-	if !strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
+	if strings.Count(root, "@"+coroSameMForeignCallHookV1) != 1 ||
+		strings.Contains(root, "@"+coroSameMForeignReentryCallHookV2) ||
 		strings.Contains(root, "@"+coroWorkerParkHookV1) ||
 		strings.Contains(root, "@foreign_caller_thread_probe") {
 		t.Fatalf("Root did not select the same-M foreign episode:\n%s", root)
@@ -905,7 +910,8 @@ func TestImportedLibraryForeignCallableDrivesPhysicalSameMEpisode(t *testing.T) 
 	root := requireCoroPhysicalFunction(
 		t, module, "foreignworker.Root",
 	).String()
-	if !strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
+	if strings.Count(root, "@"+coroSameMForeignCallHookV1) != 1 ||
+		strings.Contains(root, "@"+coroSameMForeignReentryCallHookV2) ||
 		strings.Contains(root, "@"+coroWorkerParkHookV1) ||
 		strings.Contains(root, "@foreign_caller_thread_probe") {
 		t.Fatalf("imported metadata did not select the same-M episode:\n%s", root)
@@ -989,6 +995,12 @@ func TestCoroManagedReentryPlainCallbackUsesThinCoroutineRamp(t *testing.T) {
 	}
 	if ramp.IsNil() || adapter.IsNil() {
 		t.Fatalf("plain callback lacks a thin ramp or C adapter:\n%s", module.String())
+	}
+	root := requireCoroPhysicalFunction(t, module, "foreignworker.Root").String()
+	if strings.Count(root, "@"+coroSameMForeignReentryCallHookV2) != 1 ||
+		strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
+		strings.Contains(root, "@"+coroWorkerParkHookV1) {
+		t.Fatalf("plain managed callback did not select the outcome-aware same-M boundary:\n%s", root)
 	}
 	if ramp.Linkage() != llvm.LinkOnceAnyLinkage ||
 		adapter.Linkage() != llvm.LinkOnceAnyLinkage {

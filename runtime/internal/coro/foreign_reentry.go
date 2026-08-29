@@ -72,6 +72,14 @@ func validCompletionSnapshot(snapshot CompletionSnapshot) bool {
 	}
 }
 
+// ValidCompletionSnapshot reports whether snapshot is one complete,
+// self-contained child outcome. Native foreign-reentry adapters use this
+// narrow validator before transporting a non-return outcome across the C
+// stack; it grants no ownership or consumption right over the payload.
+func ValidCompletionSnapshot(snapshot CompletionSnapshot) bool {
+	return validCompletionSnapshot(snapshot)
+}
+
 func completionSnapshot(record *CompletionRecord) (CompletionSnapshot, bool) {
 	if record == nil || record.child == nil {
 		return CompletionSnapshot{}, false

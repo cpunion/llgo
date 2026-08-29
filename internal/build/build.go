@@ -5758,6 +5758,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 			coroForeignReentryRunSymbolV1,
 			coroForeignReentryFailureSymbolV1,
 			coroSameMForeignCallSymbolV1,
+			coroSameMForeignReentryCallSymbolV2,
 		)
 	}
 	if hostCoroPullRuntimeABI(ctx.buildConf) {
@@ -6101,6 +6102,25 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf(
 					"coroutine same-M foreign-call ABI %q must have exact func(unsafe.Pointer, uintptr, uintptr) signature",
+					name,
+				)
+			}
+		}
+		if name == coroSameMForeignReentryCallSymbolV2 {
+			sig := fn.Signature
+			pointerPointer := types.NewPointer(types.Typ[types.UnsafePointer])
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 5 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Params().At(3).Type(), pointerPointer) ||
+				!types.Identical(sig.Params().At(4).Type(), pointerPointer) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine same-M foreign-reentry ABI %q must have exact func(unsafe.Pointer, uintptr, uintptr, *unsafe.Pointer, *unsafe.Pointer) uint32 signature",
 					name,
 				)
 			}

@@ -552,6 +552,8 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		"native entersyscall/exitsyscall",
 		"!coro.CurrentOSThreadLocked(task)",
 		"type coroNativeForeignBoundaryV1 struct",
+		"landing             unsafe.Pointer",
+		"escape              coro.CompletionSnapshot",
 		"coroNativeForeignBoundaryTLSV1      tls.StaticHandle[*coroNativeForeignBoundaryV1]",
 		"func coroNativeForeignBoundaryTLSStartV1() bool",
 		"tls.AllocStatic[*coroNativeForeignBoundaryV1]()",
@@ -581,6 +583,11 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		"coro.ConsumeForeignReentryCompletion(&record)",
 		"//export __llgo_coro_foreign_reentry_run_v1",
 		"//export __llgo_coro_foreign_reentry_failure_v1",
+		"c.Siglongjmp(boundary.landing, c.Int(1))",
+		"//export __llgo_coro_same_m_foreign_reentry_call_v2",
+		"boundary.landing = c.AllocaSigjmpBuf()",
+		"landed := c.Sigsetjmp(boundary.landing, c.Int(0))",
+		"coro.ValidCompletionSnapshot(snapshot)",
 		"//export __llgo_coro_same_m_foreign_call_v1",
 		"boundary.beginV1(task, coro.ExecutorResumeHandoffSameMForeign, false)",
 		"if !callOK",
@@ -667,9 +674,24 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		t.Errorf("%s does not bracket same-M C with detach/release/create/return/recycle/restore", runtimeCoroOSThreadForeignSource)
 	}
 	if strings.Count(entrance, "callOK := coroWorkerCallWordsV2(") != 2 ||
+		strings.Count(entrance, "coroWorkerCallWordsV2(") != 4 ||
 		strings.Contains(entrance, "coroworker.Call(") ||
 		strings.Contains(entrance, "coroworker.CallWords(") {
 		t.Errorf("%s does not use the scalar Go-to-C ABI for both synchronous native calls", runtimeCoroOSThreadForeignSource)
+	}
+	reentryCallEntry := strings.Index(entrance, "func __llgo_coro_same_m_foreign_reentry_call_v2(")
+	compactCallEntry := strings.Index(entrance, "func __llgo_coro_same_m_foreign_call_v1(")
+	wordCallEntry := strings.Index(entrance, "func coroNativeForeignWordCallV1(")
+	if reentryCallEntry < 0 || compactCallEntry <= reentryCallEntry || wordCallEntry <= compactCallEntry {
+		t.Fatalf("%s does not retain ordered outcome-aware/compact/word same-M boundaries", runtimeCoroOSThreadForeignSource)
+	}
+	outcomeAware := entrance[reentryCallEntry:compactCallEntry]
+	compact := entrance[compactCallEntry:wordCallEntry]
+	if strings.Count(outcomeAware, "c.AllocaSigjmpBuf()") != 1 ||
+		strings.Count(outcomeAware, "c.Sigsetjmp(") != 1 ||
+		strings.Contains(compact, "c.AllocaSigjmpBuf()") ||
+		strings.Contains(compact, "c.Sigsetjmp(") {
+		t.Errorf("%s does not isolate nonlocal landing cost to managed reentry", runtimeCoroOSThreadForeignSource)
 	}
 	pipeOnly := readRuntimePollFile(t, runtimeCoroOSThreadForeignPipeSource)
 	for _, required := range []string{

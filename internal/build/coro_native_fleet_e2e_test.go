@@ -134,6 +134,126 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetForeignReentryEscapeE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed int32
+var Done chan int32
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=managed-callback memory=borrow-until-return
+//go:linkname foreignReentryEscape C.__llgo_coro_native_fleet_e2e_reentry_escape_v2
+func foreignReentryEscape(func(int32) int32, int32) int32
+
+//llgo:coro noblock
+//go:linkname foreignReentryEscapeReset C.__llgo_coro_native_fleet_e2e_reentry_escape_reset_v2
+func foreignReentryEscapeReset()
+
+//llgo:coro noblock
+//go:linkname foreignReentryEscapeAfter C.__llgo_coro_native_fleet_e2e_reentry_escape_after_v2
+func foreignReentryEscapeAfter() uintptr
+
+//go:linkname coroGoexit llgo.coroGoexit
+func coroGoexit()
+
+func panicCallback(int32) int32 {
+	panic("foreign-reentry-panic")
+}
+
+func normalCallback(value int32) int32 {
+	return value + 1
+}
+
+func nestedPanicCallback(value int32) int32 {
+	return foreignReentryEscape(panicCallback, value)
+}
+
+func goexitCallback(int32) int32 {
+	coroGoexit()
+	return -1
+}
+
+func recoverForeignPanic() {
+	defer func() {
+		_ = recover()
+	}()
+	_ = foreignReentryEscape(panicCallback, 1)
+	Failed = 133
+}
+
+func recoverNestedForeignPanic() {
+	defer func() {
+		_ = recover()
+	}()
+	_ = foreignReentryEscape(nestedPanicCallback, 2)
+	Failed = 139
+}
+
+func runForeignGoexit() {
+	defer func() { Done <- 1 }()
+	_ = foreignReentryEscape(goexitCallback, 2)
+	Done <- 2
+}
+
+func checkNormal(value int32) {
+	foreignReentryEscapeReset()
+	if result := foreignReentryEscape(normalCallback, value); result != value+1 {
+		Failed = 134
+		return
+	}
+	if foreignReentryEscapeAfter() != 1 {
+		Failed = 135
+	}
+}
+
+func Setup() {
+	Failed = 0
+	Done = make(chan int32)
+	foreignReentryEscapeReset()
+}
+
+func main() {
+	foreignReentryEscapeReset()
+	recoverForeignPanic()
+	if Failed != 0 {
+		return
+	}
+	if foreignReentryEscapeAfter() != 0 {
+		Failed = 136
+		return
+	}
+	foreignReentryEscapeReset()
+	recoverNestedForeignPanic()
+	if Failed != 0 {
+		return
+	}
+	if foreignReentryEscapeAfter() != 0 {
+		Failed = 140
+		return
+	}
+	checkNormal(3)
+	if Failed != 0 {
+		return
+	}
+
+	foreignReentryEscapeReset()
+	go runForeignGoexit()
+	if result := <-Done; result != 1 {
+		Failed = 137
+		return
+	}
+	if foreignReentryEscapeAfter() != 0 {
+		Failed = 138
+		return
+	}
+	checkNormal(5)
+}
+
+func Check() int32 {
+	return Failed
+}
+`
+
 const coroNativeFleetExportIngressE2ESource = `package main
 
 import _ "unsafe"
@@ -1908,6 +2028,16 @@ func TestCoroNativeFleetManagedForeignReentryParksCallbackE2E(t *testing.T) {
 	)
 }
 
+func TestCoroNativeFleetManagedForeignReentryEscapesNonReturnE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetForeignReentryEscapeE2ESource,
+		"managed-foreign-reentry-non-return",
+		true,
+		1,
+	)
+}
+
 func TestCoroNativeFleetExportIngressParksByGlobalSymbolE2E(t *testing.T) {
 	runCoroNativeFleetE2E(
 		t,
@@ -2268,7 +2398,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		coroNativePipeBuildTag,
 		coroNativeTimerBuildTag,
 	}
-	configureCoroRuntimeIslandPlan(conf, "NewChan")
+	configureCoroRuntimeIslandPlan(conf, "NewChan", "BindRecoverFrame")
 	allowed := map[string]bool{
 		"command-line-arguments":                                true,
 		"github.com/xgo-dev/llgo/runtime/internal/clite/tls":    true,
@@ -2295,6 +2425,10 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		module := pkg.LPkg.Module()
 		if module.IsNil() {
 			return
+		}
+		if pkg.ID == "command-line-arguments" &&
+			module.NamedFunction("command-line-arguments.BindRecoverFrame").IsNil() {
+			t.Fatal("native fleet runtime island lost the recover-frame binding root")
 		}
 		name := fmt.Sprintf("fleet-runtime-%03d-%s.o", len(objects), sanitizeCoroSpawnNativeE2EObjectName(pkg.ID))
 		objects = append(objects, emitCoroSpawnNativeE2EObject(t, pkg.LPkg.Prog, module, filepath.Join(temp, name)))

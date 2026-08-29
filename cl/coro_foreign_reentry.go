@@ -22,6 +22,7 @@ import (
 	"go/types"
 	"strconv"
 
+	"github.com/xgo-dev/llgo/internal/coro"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
@@ -33,6 +34,7 @@ const (
 	coroForeignReentryRunHookV1         = "__llgo_coro_foreign_reentry_run_v1"
 	coroForeignReentryFailureHookV1     = "__llgo_coro_foreign_reentry_failure_v1"
 	coroSameMForeignCallHookV1          = "__llgo_coro_same_m_foreign_call_v1"
+	coroSameMForeignReentryCallHookV2   = "__llgo_coro_same_m_foreign_reentry_call_v2"
 )
 
 func (p *context) coroForeignReentryTargetEntry(
@@ -191,6 +193,22 @@ func coroSameMForeignCallSignature() *types.Signature {
 	)
 }
 
+func coroSameMForeignReentryCallSignatureV2() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	pointerPointer := types.NewPointer(pointer)
+	params := []*types.Var{
+		types.NewParam(token.NoPos, nil, "task", pointer),
+		types.NewParam(token.NoPos, nil, "thunk", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "record", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "typeOut", pointerPointer),
+		types.NewParam(token.NoPos, nil, "dataOut", pointerPointer),
+	}
+	status := types.NewVar(token.NoPos, nil, "status", types.Typ[types.Uint32])
+	return types.NewSignatureType(
+		nil, nil, nil, types.NewTuple(params...), types.NewTuple(status), false,
+	)
+}
+
 // coroForeignReentryAdapter emits one exact raw C ABI entry for one exact
 // managed Go callback. It never clones the callback body and never performs
 // address-to-function recovery: its physical target and signature are part of
@@ -310,6 +328,10 @@ func (p *context) coroForeignIngressAdapter(
 		p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()),
 		returned,
 	)
+	dispatch.Case(
+		p.prog.IntVal(coroAwaitCompletionReturnRecovered, p.prog.Uint32()),
+		returned,
+	)
 	dispatch.End(b)
 
 	b.SetBlockEx(failed, llssa.AtEnd, false)
@@ -333,6 +355,71 @@ func (p *context) coroForeignIngressAdapter(
 	b.EndBuild()
 	b.Dispose()
 	return adapter
+}
+
+// dispatchCoroSameMForeignReentryCompletion transfers one outcome which has
+// already escaped the synchronous C stack into the current managed parent.
+// The shared frame record is also used by ordinary child awaits; source
+// execution cannot overlap the two transactions, so no per-call payload slot
+// or runtime lookup is needed.
+func (p *context) dispatchCoroSameMForeignReentryCompletion(
+	b llssa.Builder,
+	status llssa.Expr,
+) {
+	body := p.requireCoroWorkerBody(b)
+	if status.IsNil() || !types.Identical(status.RawType(), p.prog.Uint32().RawType()) {
+		panic("same-M foreign-reentry completion has no exact status")
+	}
+	outcome := p.structuredOutcomeScratch()
+	b.Store(b.FieldAddr(outcome, outcomePlainCompletionStatus), status)
+	line := p.coroCurrentSourceLine()
+	b.Store(
+		b.FieldAddr(body.header, coroHeaderLine),
+		p.prog.IntVal(uint64(line), p.prog.Uint32()),
+	)
+	returned := p.fn.MakeBlock()
+	if body.cleanup == nil {
+		isReturn := b.BinOp(
+			token.EQL,
+			status,
+			p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()),
+		)
+		b.IfWithBranchWeights(
+			isReturn, returned, p.sharedCoroTerminalBlock(b, body), 1000, 1,
+		)
+		b.SetBlockContinuation(returned)
+		return
+	}
+
+	panicked := p.fn.MakeBlock()
+	aborted := p.fn.MakeBlock()
+	shutdown := p.fn.MakeBlock()
+	goexited := p.fn.MakeBlock()
+	invalid := p.fn.MakeBlock()
+	dispatch := b.Switch(status, invalid)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()), returned)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionPanic, p.prog.Uint32()), panicked)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionAbort, p.prog.Uint32()), aborted)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionShutdown, p.prog.Uint32()), shutdown)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionGoexit, p.prog.Uint32()), goexited)
+	dispatch.End(b)
+
+	b.SetBlockEx(panicked, llssa.AtEnd, false)
+	p.enterCoroPropagatedPanic(
+		b,
+		b.Load(b.FieldAddr(outcome, outcomePlainCompletionTypeWord)),
+		b.Load(b.FieldAddr(outcome, outcomePlainCompletionDataWord)),
+		line,
+	)
+	b.SetBlockEx(aborted, llssa.AtEnd, false)
+	body.enterCancellation(b, coroAwaitCompletionAbort)
+	b.SetBlockEx(shutdown, llssa.AtEnd, false)
+	body.enterCancellation(b, coroAwaitCompletionShutdown)
+	b.SetBlockEx(goexited, llssa.AtEnd, false)
+	p.enterCoroPropagatedGoexit(b)
+	b.SetBlockEx(invalid, llssa.AtEnd, false)
+	b.Unreachable()
+	b.SetBlockContinuation(returned)
 }
 
 func (p *context) compileCoroSameMForeignCall(
@@ -381,19 +468,43 @@ func (p *context) compileCoroSameMForeignCall(
 	if task.IsNil() {
 		panic("coroutine same-M foreign call has no active physical body")
 	}
-	invoke := p.pkg.NewFunc(
-		coroSameMForeignCallHookV1,
-		coroSameMForeignCallSignature(),
-		llssa.InC,
-	)
-	b.Call(
-		invoke.Expr,
-		task,
-		b.Convert(p.prog.Uintptr(), thunk.Expr),
-		b.Convert(p.prog.Uintptr(), record),
-	)
+	var completionStatus llssa.Expr
+	switch shape.reentry {
+	case coro.ReentryNone:
+		invoke := p.pkg.NewFunc(
+			coroSameMForeignCallHookV1,
+			coroSameMForeignCallSignature(),
+			llssa.InC,
+		)
+		b.Call(
+			invoke.Expr,
+			task,
+			b.Convert(p.prog.Uintptr(), thunk.Expr),
+			b.Convert(p.prog.Uintptr(), record),
+		)
+	case coro.ReentryManagedCallback, coro.ReentryManagedIngress:
+		outcome := p.structuredOutcomeScratch()
+		invoke := p.pkg.NewFunc(
+			coroSameMForeignReentryCallHookV2,
+			coroSameMForeignReentryCallSignatureV2(),
+			llssa.InC,
+		)
+		completionStatus = b.Call(
+			invoke.Expr,
+			task,
+			b.Convert(p.prog.Uintptr(), thunk.Expr),
+			b.Convert(p.prog.Uintptr(), record),
+			b.FieldAddr(outcome, outcomePlainCompletionTypeWord),
+			b.FieldAddr(outcome, outcomePlainCompletionDataWord),
+		)
+	default:
+		panic("coroutine same-M foreign lowering has no exact reentry class")
+	}
 	p.emitCoroKeepaliveSlots(b, keepaliveSlots)
 	b.KeepAlive(record)
+	if !completionStatus.IsNil() {
+		p.dispatchCoroSameMForeignReentryCompletion(b, completionStatus)
+	}
 	if shape.result == nil {
 		return llssa.Expr{}
 	}

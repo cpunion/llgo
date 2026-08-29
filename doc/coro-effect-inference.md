@@ -491,7 +491,7 @@ semantics above.  In particular, the absence of a function-typed parameter
 does not prove `nocallback`: C can call an exported Go adapter through global
 state.
 
-### 4.3 Same-M checkpoint and remaining callback work
+### 4.3 Same-M callback checkpoint and remaining ingress work
 
 The native implementation now has one orthogonal same-M foreign episode for:
 
@@ -503,17 +503,30 @@ There is no second scheduler and no runtime function-address reverse lookup.
 An end-to-end gate verifies that a caller-thread C function stays on its
 original M while a replacement M continues managed work.
 
-This checkpoint is necessary but not yet sufficient to make every unannotated
-C declaration callback-capable.  The remaining compatibility work is:
+The callback-argument and exported-Go-function cases now both have exact
+compiler-generated adapters.  The compiler publishes the exported ingress
+binding in the v13 library summary and consumes the same certificate across an
+archive boundary.  A reentry-capable same-M call alone pays for one native
+`sigsetjmp`; the no-reentry V1 boundary remains a compact direct call.  Normal
+and recovered return reconstruct the C result.  Panic, `Goexit`, `Abort`, and
+`Shutdown` stage one typed completion snapshot and `siglongjmp` to that exact
+outer activation; it strongly rejoins the replacement M, restores the LLVM
+resume, and enters the existing compiler cleanup routes.  Native linked gates
+exercise recoverable panic, `Goexit`, subsequent boundary reuse, and a callback
+that parks on the ordinary scheduler.  Component tests cover the complete
+terminal status set and nesting.
 
-1. generate reentry-aware C ABI adapters for exported Go callbacks even when
-   the callback is not passed as an argument of the current call;
-2. bind each adapter to its exact managed target at compile time and publish
-   that binding in library metadata;
-3. reconcile panic, `Goexit`, cancellation, and teardown across the C stack
-   instead of using the current fail-closed non-return outcome;
-4. join contracts for closed dynamic C target sets and reject an open target
+This checkpoint is still not sufficient to make every unannotated C
+declaration callback-capable.  The remaining compatibility work is:
+
+1. implement runtime-owned and foreign-created-thread ingress when no active
+   same-M boundary exists; a standalone exported adapter currently fails closed
+   on an escaping non-return outcome;
+2. add retained-callback lifetime/teardown ownership without an address lookup;
+3. join contracts for closed dynamic C target sets and reject an open target
    whose ABI cannot be proved;
+4. define the equivalent non-return policy for WASM/host, RTOS, and baremetal
+   adapters which cannot use the native boundary-owned nonlocal transfer;
 5. only then switch the unannotated typed-C default from the temporary
    any-thread/no-reentry worker policy to the conservative target policy above.
 
@@ -783,8 +796,7 @@ and closure context are still derived from the typed adapter.  Retained
 callbacks additionally own an explicit lifetime token so unregister/destroy
 can release the function value and environment.
 
-The current reentry adapter accepts only ordinary return.  Completion handling
-must be expanded as follows:
+The native same-M reentry adapter now handles completion as follows:
 
 - return and recovered-return reconstruct C results;
 - an unrecovered panic during a nested Go-to-C-to-Go episode performs a
@@ -794,13 +806,18 @@ must be expanded as follows:
   managed G, but is fatal for a callback entering from a foreign-created
   thread, matching the Go runtime constraint;
 - scheduler cancellation is not injected through an active synchronous C
-  stack.  It is recorded and observed after the episode returns.  Explicit Go
-  cancellation through channels or contexts remains ordinary callback code.
+  stack.  An already-claimed callback `Abort` or `Shutdown` is transported as a
+  terminal completion; an unrelated request remains sticky and is observed at
+  the next legal managed checkpoint.  Explicit Go cancellation through
+  channels or contexts remains ordinary callback code.
 
 The nonlocal exit is an implementation mechanism of the ingress adapter, not a
-contract on each C function.  Native targets may use a boundary-owned unwind
-record; targets without a safe nonlocal transfer reject escaping panic/Goexit
-at that crossing and preserve diagnostics rather than returning silently to C.
+contract on each C function.  It exists only while an outcome-aware same-M V2
+boundary has published its exact landing in TLS; the V1 no-reentry boundary and
+standalone external export cannot accidentally consume it.  Native targets use
+this boundary-owned unwind record.  Targets without a safe nonlocal transfer
+reject escaping panic/Goexit at that crossing and preserve diagnostics rather
+than returning silently to C.
 
 ### 7.6 The five bottom operation families
 

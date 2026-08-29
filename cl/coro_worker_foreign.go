@@ -55,6 +55,7 @@ type coroWorkerForeignCallShape struct {
 	// adapter is generated directly from this shape.
 	reentryCallbacks map[int]*ssa.Function
 	mode             coroForeignCallMode
+	reentry          coro.ReentryClass
 	nilGuard         bool
 	variadic         bool
 }
@@ -1035,6 +1036,7 @@ func validateCoroWorkerForeignCallWithAuthority(
 	}
 	shape.target = target
 	shape.mode = mode
+	shape.reentry = authorization.reentry
 	shape.arguments = append([]ssa.Value(nil), arguments...)
 	shape.calleeField = -1
 	shape.signature = recordSignature
