@@ -76,13 +76,13 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 					}
 				}
 			}
-			assertFiles("github.com/xgo-dev/llgo/runtime/internal/runtime", []string{"z_nogc.go"}, []string{"z_gc.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/runtime", []string{"z_nogc.go"}, []string{"procpin.go", "z_gc.go"})
 			if target.name == "wasip1" {
 				assertFiles("github.com/xgo-dev/llgo/runtime/internal/runtime",
 					[]string{"coro_abort_freestanding_webassembly.go"},
 					[]string{"coro_abort_libc.go"})
 			}
-			assertFiles("github.com/xgo-dev/llgo/runtime/internal/lib/runtime", []string{"runtime_nogc.go", "mfinal_nogc.go"}, []string{"runtime_gc.go", "mfinal.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/lib/runtime", []string{"runtime_nogc.go", "mfinal_nogc.go", "sync_runtime_procpin_stub_llgo.go"}, []string{"runtime_gc.go", "mfinal.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/thread", []string{"thread_unix_nogc.go"}, []string{"thread_unix_gc.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/tls", []string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/os", []string{"os_freestanding.go"}, []string{"os_other.go", "os_darwin.go"})
@@ -256,12 +256,15 @@ func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testin
 				[]string{"rand.go", "runtime_default.go", "time_debug_coro.go", "zgoarch_wasm.go"})
 			for _, forbidden := range []string{
 				"github.com/xgo-dev/llgo/runtime/internal/clite/libuv",
-				"github.com/xgo-dev/llgo/runtime/internal/clite/os",
 				"github.com/xgo-dev/llgo/runtime/internal/thread",
 			} {
 				if imports := packages["github.com/xgo-dev/llgo/runtime/internal/lib/runtime"].Imports; slices.Contains(imports, forbidden) {
 					t.Errorf("freestanding patched runtime imports %s: %v", forbidden, imports)
 				}
+			}
+			if target.name != "wasip1" {
+				assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/os",
+					[]string{"os_freestanding.go"}, []string{"os_other.go", "os_darwin.go"})
 			}
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/ffi",
 				[]string{"abi_webassembly.go", "ffi_link_webassembly.go"},

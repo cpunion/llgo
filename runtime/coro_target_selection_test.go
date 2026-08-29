@@ -111,6 +111,9 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			if imported := slices.Contains(pkg.Imports, clock); imported != test.timer {
 				t.Fatalf("Imports = %v, clock=%t", pkg.Imports, imported)
 			}
+			if test.name == "baremetal-host" && slices.Contains(pkg.GoFiles, "procpin.go") {
+				t.Fatalf("single-executor bare-metal target selected hosted procPin: %v", pkg.GoFiles)
+			}
 		})
 	}
 }

@@ -1,9 +1,8 @@
-//go:build !darwin && !linux && !windows
+//go:build (!darwin && !linux && !windows) || baremetal || tinygo.wasm
 
 package runtime
 
 import (
-	_ "sync/atomic"
 	_ "unsafe"
 )
 
@@ -15,9 +14,3 @@ func sync_runtime_procPin() int { return 0 }
 
 //go:linkname sync_runtime_procUnpin sync.runtime_procUnpin
 func sync_runtime_procUnpin() {}
-
-//go:linkname atomic_runtime_procPin sync/atomic.runtime_procPin
-func atomic_runtime_procPin() int { return 0 }
-
-//go:linkname atomic_runtime_procUnpin sync/atomic.runtime_procUnpin
-func atomic_runtime_procUnpin() {}

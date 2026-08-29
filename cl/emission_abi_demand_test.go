@@ -1426,11 +1426,11 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 		"atomicSub", "atomicAnd", "atomicNand", "atomicOr", "atomicXor",
 		"atomicMax", "atomicMin", "atomicUMax", "atomicUMin")
 	add(emissionIntrinsicFirstValue,
-		"alloca", "allocCStr", "allocaCStr", "allocaCStrs", "string",
+		"alloca", "allocCStr", "allocaCStr", "allocaCStrs", "string", "setjmp",
 		"stringData", "_Cfunc_CString", "_Cfunc_CBytes", "_Cfunc_GoString",
 		"_Cfunc__CMalloc", "_cgo_runtime_cgocall", "cgoUse", "cgoKeepAlive")
 	add(emissionIntrinsicFirstTwoValues,
-		"advance", "index", "sigsetjmp", "siglongjmp", "_Cfunc_GoStringN",
+		"advance", "index", "longjmp", "sigsetjmp", "siglongjmp", "_Cfunc_GoStringN",
 		"_Cfunc_GoBytes")
 	add(emissionIntrinsicFixedBeforeVArg, "pyList", "pyTuple")
 	add(emissionIntrinsicFuncAddr, "funcAddr")
