@@ -107,7 +107,18 @@ func llgoIRFromProbe(t *testing.T, name, src string) string {
 		}
 	}
 
-	runGoCmd(t, root, "run", "./chore/llgen", filepath.ToSlash(dir))
+	commandName := "go"
+	args := []string{"run", "./chore/llgen", filepath.ToSlash(dir)}
+	if tool := configuredLLGoSiblingTool(t, "llgen"); tool != "" {
+		commandName = tool
+		args = []string{filepath.ToSlash(dir)}
+	}
+	cmd := exec.Command(commandName, args...)
+	cmd.Dir = root
+	cmd.Env = os.Environ()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate LLGo IR: %v\n%s", err, output)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "llgo_autogen.ll"))
 	if err != nil {
 		t.Fatal(err)

@@ -41,9 +41,7 @@ func TestDWARFReturnOrderSemantics(t *testing.T) {
 	if err := os.WriteFile(source, []byte(dwarfReturnOrderProbe), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(
-		"go", "run", "./cmd/llgo", "run", "-ldflags=-w=false", source,
-	)
+	cmd := exec.Command(acceptanceLLGoBinary(t), "run", "-ldflags=-w=false", source)
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(),
 		"LLGO_ROOT="+repoRoot,

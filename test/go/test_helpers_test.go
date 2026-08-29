@@ -18,6 +18,7 @@ package gotest
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -45,6 +46,35 @@ func configuredLLGoTestCompiler(t *testing.T) string {
 	return abs
 }
 
+func configuredLLGoSiblingTool(t *testing.T, name string) string {
+	t.Helper()
+	compiler := configuredLLGoTestCompiler(t)
+	if compiler == "" {
+		return ""
+	}
+	tool := filepath.Join(filepath.Dir(compiler), name+filepath.Ext(compiler))
+	info, err := os.Stat(tool)
+	if err != nil {
+		t.Fatalf("stat configured LLGo tool %s: %v", name, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("configured LLGo tool %s points to a directory: %s", name, tool)
+	}
+	return tool
+}
+
+func runLLGoTestCommand(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command(acceptanceLLGoBinary(t), args...)
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llgo %v failed: %v\n%s", args, err, output)
+	}
+	return output
+}
+
 func TestConfiguredLLGoTestCompiler(t *testing.T) {
 	t.Setenv(llgoTestCompilerEnv, "")
 	if got := configuredLLGoTestCompiler(t); got != "" {
@@ -62,6 +92,20 @@ func TestConfiguredLLGoTestCompiler(t *testing.T) {
 	}
 	if got := configuredLLGoTestCompiler(t); got != want {
 		t.Fatalf("configured compiler = %q, want %q", got, want)
+	}
+
+	dir := t.TempDir()
+	ext := filepath.Ext(executable)
+	compiler := filepath.Join(dir, "llgo"+ext)
+	tool := filepath.Join(dir, "llgen"+ext)
+	for _, path := range []string{compiler, tool} {
+		if err := os.WriteFile(path, []byte("test"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(llgoTestCompilerEnv, compiler)
+	if got := configuredLLGoSiblingTool(t, "llgen"); got != tool {
+		t.Fatalf("configured sibling tool = %q, want %q", got, tool)
 	}
 }
 

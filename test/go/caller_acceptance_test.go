@@ -706,3 +706,4 @@ func runLLGoInModule(t *testing.T, dir string, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
+

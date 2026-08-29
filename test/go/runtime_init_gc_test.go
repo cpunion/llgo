@@ -61,5 +61,6 @@ func main() {
 	runGoCmd(t, dir, "run", mainFile)
 
 	root := findLLGoRoot(t)
-	runGoCmd(t, root, "run", "./cmd/llgo", "run", mainFile)
+	t.Setenv("LLGO_ROOT", root)
+	runLLGoTestCommand(t, root, "run", mainFile)
 }

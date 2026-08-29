@@ -106,7 +106,7 @@ func TestGenericNestedLocalRuntimeTypeNamesForCommandLineMain(t *testing.T) {
 		t.Fatalf("go probe output = %q, want %q", goOut, want)
 	}
 	t.Setenv("LLGO_ROOT", repoRoot)
-	llgoOut := runGenericLocalProbe(t, repoRoot, "go", "run", "./cmd/llgo", "run", file)
+	llgoOut := runGenericLocalProbe(t, repoRoot, acceptanceLLGoBinary(t), "run", file)
 	if llgoOut != goOut {
 		t.Fatalf("llgo probe output = %q, want go output %q", llgoOut, goOut)
 	}

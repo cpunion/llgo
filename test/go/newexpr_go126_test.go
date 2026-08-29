@@ -72,5 +72,5 @@ func TestNewExpressionInitializesAllocatedValue(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	runStringConversionProbe(t, dir, "go", "run", file)
 	t.Setenv("LLGO_ROOT", repoRoot)
-	runStringConversionProbe(t, repoRoot, "go", "run", "./cmd/llgo", "run", file)
+	runStringConversionProbe(t, repoRoot, acceptanceLLGoBinary(t), "run", file)
 }
