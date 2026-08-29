@@ -314,11 +314,6 @@ type LocaleT = Pointer
 
 // -----------------------------------------------------------------------------
 
-//go:linkname Usleep C.usleep
-func Usleep(useconds Uint) Int
-
-// -----------------------------------------------------------------------------
-
 type Option struct {
 	Name   *Char
 	HasArg Int

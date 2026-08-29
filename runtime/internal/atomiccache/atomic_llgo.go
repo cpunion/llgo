@@ -21,7 +21,7 @@ package atomiccache
 import (
 	"unsafe"
 
-	catomic "github.com/xgo-dev/llgo/runtime/internal/clite/sync/atomic"
+	catomic "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 )
 
 func loadPointer(address *unsafe.Pointer) unsafe.Pointer {

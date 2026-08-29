@@ -67,6 +67,17 @@ func Root(fd FD, pointer unsafe.Pointer, count Count) FD {
 }
 `
 
+const coroWorkerStdcallForeignTestSource = `package foreignworker
+
+import _ "unsafe"
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete
+//go:linkname foreign stdcall.foreign_word_probe
+func foreign(int32) int32
+
+func Root(value int32) int32 { return foreign(value) }
+`
+
 const coroWorkerDynamicForeignTestSource = `package foreignworker
 
 //llgo:type C
@@ -148,9 +159,22 @@ func Root(value uintptr) uintptr { return foreign(value) }
 }
 
 func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) preparedCoroWorkerForeignFixture {
+	return prepareCoroWorkerForeignFixtureForTarget(t, source, rootName, nil)
+}
+
+func prepareCoroWorkerForeignFixtureForTarget(
+	t *testing.T,
+	source, rootName string,
+	target *llssa.Target,
+) preparedCoroWorkerForeignFixture {
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
-	prog := newLLSSAProg(t)
+	var prog llssa.Program
+	if target == nil {
+		prog = newLLSSAProg(t)
+	} else {
+		prog = newLLSSAProgForTarget(t, target)
+	}
 	prog.SetRuntime(func() *types.Package {
 		runtimePackage, err := importer.For("source", nil).Import(llssa.PkgRuntime)
 		if err != nil {
@@ -199,9 +223,9 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 			foreign := false
 			if target := call.Common().StaticCallee(); target != nil {
 				background, classified, backgroundErr := universe.FunctionBackground(target)
-				foreign = backgroundErr == nil && classified && background == llssa.InC
+				foreign = backgroundErr == nil && classified && llssa.IsNativeFuncBackground(background)
 			} else if !call.Common().IsInvoke() && call.Common().Method == nil {
-				foreign = prog.TypeBackground(call.Common().Value.Type()) == llssa.InC
+				foreign = llssa.IsNativeFuncBackground(prog.TypeBackground(call.Common().Value.Type()))
 			}
 			if foreign {
 				if foreignCall != nil {
@@ -229,7 +253,7 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 			if backgroundErr != nil {
 				return coro.SSAFunctionPolicy{}, backgroundErr
 			}
-			if classified && background == llssa.InC {
+			if classified && llssa.IsNativeFuncBackground(background) {
 				worker, workerCertified, workerErr := universe.CoroForeignWorkerCertificate(fn)
 				if workerErr != nil {
 					return coro.SSAFunctionPolicy{}, workerErr
@@ -280,7 +304,7 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 		},
 		ClassifyRawCFunctionType: func(typ types.Type) (bool, error) {
 			_, signature := types.Unalias(typ).Underlying().(*types.Signature)
-			return signature && prog.TypeBackground(typ) == llssa.InC, nil
+			return signature && llssa.IsNativeFuncBackground(prog.TypeBackground(typ)), nil
 		},
 	})
 	if err != nil {
@@ -461,6 +485,57 @@ func TestCoroWorkerClosedDefaultForeignCallUsesTypedThunk(t *testing.T) {
 	if resume.IsNil() || !strings.Contains(resume.String(), "call i32 @"+coroWorkerResumeHookV1) ||
 		!strings.Contains(resume.String(), "call void (...) @llvm.fake.use(ptr") {
 		t.Fatalf("CoroSplit lost foreign worker resume:\n%s", module.String())
+	}
+}
+
+func TestCoroWorkerStdcallUsesTypedThunkCallingConvention(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	fixture := prepareCoroWorkerForeignFixtureForTarget(
+		t, coroWorkerStdcallForeignTestSource, "Root",
+		&llssa.Target{GOOS: "windows", GOARCH: "386"},
+	)
+	defer fixture.prog.Dispose()
+
+	target := fixture.call.Common().StaticCallee()
+	background, classified, err := fixture.universe.FunctionBackground(target)
+	if err != nil || !classified || background != llssa.InStdcall {
+		t.Fatalf("stdcall target background = %v/%t, error=%v", background, classified, err)
+	}
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil || shape.target == nil || shape.background != llssa.InStdcall ||
+		shape.mode != coroForeignCallModeWorker {
+		t.Fatalf("stdcall worker shape = %+v, recognized=%t, error=%v", shape, recognized, err)
+	}
+	rootPlan, planned := fixture.plan.FunctionPlan(fixture.root)
+	if !planned || rootPlan.Emission != coro.EmitCoroutine || !rootPlan.Effect.Contains(coro.WaitForeign) {
+		t.Fatalf("stdcall root plan = %+v, present=%t; want WaitForeign coroutine", rootPlan, planned)
+	}
+
+	// Windows does not yet advertise a complete managed worker runtime. Emit
+	// the already-frozen typed thunk in isolation so this test checks the ABI
+	// lowering without bypassing that target-capability gate.
+	pkg := fixture.prog.NewPackage("stdcallworker", "test/stdlibworker")
+	native := pkg.NewFunc("foreign_word_probe", shape.signature, llssa.InStdcall)
+	compiler := context{prog: fixture.prog, pkg: pkg}
+	thunk := compiler.coroWorkerForeignThunk(shape, native)
+	module := pkg.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify isolated stdcall worker thunk: %v\n%s", err, module.String())
+	}
+	if thunk == nil {
+		t.Fatal("isolated stdcall worker thunk was not emitted")
+	}
+	thunkIR := module.NamedFunction(thunk.Name()).String()
+	callPattern := regexp.MustCompile(
+		`call x86_stdcallcc i32 @foreign_word_probe\(i32`,
+	)
+	if got := len(callPattern.FindAllStringIndex(thunkIR, -1)); got != 1 {
+		t.Fatalf("typed worker thunk lost x86 stdcallcc:\n%s", module.String())
+	}
+	if strings.Contains(module.String(), ".__llgo_stdcall$") {
+		t.Fatalf("direct stdcall worker thunk emitted a redundant ABI adapter:\n%s", module.String())
 	}
 }
 

@@ -39,6 +39,11 @@ type runtimeContext struct {
 	coroRuntimeContext
 	m m
 	p p
+
+	// startRoot keeps a native goroutine's compiler-generated startup record
+	// scanned until its entry call has returned. Stackless tasks carry their
+	// arguments in the task allocation and never pay for this field.
+	startRoot unsafe.Pointer
 }
 
 const runtimeContextCoreOffset = unsafe.Offsetof(runtimeContext{}.coroRuntimeContext)

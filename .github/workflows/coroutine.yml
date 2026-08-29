@@ -22,20 +22,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { llvm: 22, go: "1.26.5", lane: "compat", check: "test (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "integration", check: "test integration (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "target-core", check: "test target adapters (LLVM 22, Go 1.26.5)" }
-          - { llvm: 22, go: "1.26.5", lane: "target-js-wasm", check: "test JS/WASM command reactor (LLVM 22)" }
-          - { llvm: 22, go: "1.26.5", lane: "target-wasi-command", check: "test WASI command reactor (LLVM 22)" }
-          - { llvm: 22, go: "1.26.5", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, LLVM 22)" }
-          - { llvm: 22, go: "1.26.5", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, LLVM 22)" }
+          - { llvm: 22, go: "1.26.7", lane: "compat", check: "test (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "integration", check: "test integration (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "target-core", check: "test target adapters (LLVM 22, Go 1.26.7)" }
+          - { llvm: 22, go: "1.26.7", lane: "target-js-wasm", check: "test JS/WASM command reactor (LLVM 22)" }
+          - { llvm: 22, go: "1.26.7", lane: "target-wasi-command", check: "test WASI command reactor (LLVM 22)" }
+          - { llvm: 22, go: "1.26.7", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, LLVM 22)" }
+          - { llvm: 22, go: "1.26.7", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, LLVM 22)" }
     steps:
       - uses: actions/checkout@v7
 

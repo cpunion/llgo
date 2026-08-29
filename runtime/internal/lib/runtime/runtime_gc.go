@@ -16,6 +16,7 @@ func init() {
 	if !coroalloc.Bootstrap() {
 		c.Exit(2)
 	}
+	enableForeignThreadRegistration()
 }
 
 func ReadMemStats(m *runtime.MemStats) {

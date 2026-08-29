@@ -1898,6 +1898,8 @@ func (u *EmissionUniverse) FunctionBackground(fn *ssa.Function) (background llss
 		return llssa.InGo, true, nil
 	case cFunc:
 		return llssa.InC, true, nil
+	case stdcallFunc:
+		return llssa.InStdcall, true, nil
 	case pyFunc:
 		return llssa.InPython, true, nil
 	case ignoredFunc, llgoInstr:
@@ -2090,7 +2092,7 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 				"emission universe intrinsic call semantics: legacy llgo setjmp/longjmp call %q lowers directly to a target C leaf and requires a non-legacy coroutine PanicABI", direct.String(),
 			)
 		}
-		if err := verifyCoroTypedControlShape(controlOperation, direct); err != nil {
+		if err := verifyCoroTypedControlShape(opcode, controlOperation, direct); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
@@ -3196,7 +3198,7 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 	case llgoSigjmpbuf:
 		// sigjmpbuf is a target-sized LLVM alloca and has no callable edge.
 		return CoroIntrinsicCallInlineNoSuspend
-	case llgoSigsetjmp, llgoSiglongjmp,
+	case llgoSigsetjmp, llgoSiglongjmp, llgoSetjmp, llgoLongjmp,
 		llgoControlFork, llgoControlExecve, llgoControlExit, llgoControlTrap:
 		// ProgramIR freezes the exact typed control operation at the source
 		// occurrence. Native setjmp/longjmp and process leaf symbol spellings
@@ -3742,7 +3744,7 @@ func verifyCoroSigjmpBufferShape(direct *ssa.Call) error {
 	return nil
 }
 
-func verifyCoroTypedControlShape(operation CoroControlOperation, direct *ssa.Call) error {
+func verifyCoroTypedControlShape(opcode int, operation CoroControlOperation, direct *ssa.Call) error {
 	if direct == nil || direct.Common() == nil || direct.Common().IsInvoke() ||
 		direct.Common().Method != nil {
 		return fmt.Errorf("emission universe intrinsic call semantics: llgo control operation %s must be an exact direct call", operation)
@@ -3763,15 +3765,29 @@ func verifyCoroTypedControlShape(operation CoroControlOperation, direct *ssa.Cal
 	var expected shape
 	switch operation {
 	case CoroControlReturnsTwice:
-		expected = shape{
-			parameters: []coroIntrinsicTypeShape{{basic: types.UnsafePointer}, int32Shape},
-			result:     &int32Shape,
-			text:       "func(unsafe.Pointer, int32) int32",
+		if opcode == llgoSetjmp {
+			expected = shape{
+				parameters: []coroIntrinsicTypeShape{{anyPointer: true}},
+				result:     &int32Shape,
+				text:       "func(pointer) int32",
+			}
+		} else {
+			expected = shape{
+				parameters: []coroIntrinsicTypeShape{{basic: types.UnsafePointer}, int32Shape},
+				result:     &int32Shape,
+				text:       "func(unsafe.Pointer, int32) int32",
+			}
 		}
 	case CoroControlNonlocalJump:
+		pointerShape := coroIntrinsicTypeShape{basic: types.UnsafePointer}
+		pointerText := "unsafe.Pointer"
+		if opcode == llgoLongjmp {
+			pointerShape = coroIntrinsicTypeShape{anyPointer: true}
+			pointerText = "pointer"
+		}
 		expected = shape{
-			parameters: []coroIntrinsicTypeShape{{basic: types.UnsafePointer}, int32Shape},
-			text:       "func(unsafe.Pointer, int32)",
+			parameters: []coroIntrinsicTypeShape{pointerShape, int32Shape},
+			text:       fmt.Sprintf("func(%s, int32)", pointerText),
 		}
 	case CoroControlProcessFork:
 		expected = shape{result: &int32Shape, text: "func() int32"}
@@ -4680,7 +4696,7 @@ func (u *EmissionUniverse) recordFunctionKind(fn *ssa.Function, owner *preparedE
 		return fmt.Errorf("prepare emission universe: cannot record frontend function kind without an exact function and owner")
 	}
 	switch kind {
-	case ignoredFunc, goFunc, cFunc, pyFunc, llgoInstr:
+	case ignoredFunc, goFunc, cFunc, stdcallFunc, pyFunc, llgoInstr:
 	default:
 		return fmt.Errorf("prepare emission universe: function %q has unknown frontend function kind %d", fn.Name(), kind)
 	}
@@ -6036,7 +6052,7 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 	}
 	// Parameter and result names are source/debug metadata, not callable ABI.
 	// Patch replacements may legitimately omit or rename them.
-	if ftype == cFunc {
+	if isNativeFuncKind(ftype) {
 		sig = u.emissionTypeKeys.cFunctionABI(patchedSignature)
 	} else {
 		sig = u.emissionTypeKeys.strictABI(patchedSignature)
@@ -6560,7 +6576,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				directFunction := false
 				if change, converted := instr.(*ssa.ChangeType); converted && change.X == target {
 					effective := u.effectiveType(owner, fn, change.Type(), false)
-					directFunction = u.prog.TypeBackground(effective) == llssa.InC
+					directFunction = llssa.IsNativeFuncBackground(u.prog.TypeBackground(effective))
 				}
 				if err := materializeTarget(target, directFunction); err != nil {
 					return fmt.Errorf(
@@ -8353,7 +8369,7 @@ func coroForeignPhysicalABIViewsCompatible(authority coroForeignPhysicalABI, vie
 		// LLVM opaque-pointer calls permit that view without changing the
 		// machine argument ABI. Two value-producing views must still agree
 		// exactly because neither declaration proves which value C returns.
-		if authority.kind == cFunc && view.kind == cFunc &&
+		if authority.kind == view.kind && isNativeFuncKind(authority.kind) &&
 			authority.parameterABI == view.parameterABI &&
 			(authority.resultCount == 0 && view.discardableResult ||
 				view.resultCount == 0 && authority.discardableResult) {
@@ -8406,14 +8422,14 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 			key := u.finalKeys[ownerKey]
 			ftype, symbol, signature, ok := splitManagedSymbolKey(key)
 			managedBodyless := ftype == goFunc && bodylessManagedGoDeclaration(fn)
-			if !ok || ftype != cFunc && !managedBodyless {
+			if !ok || !isNativeFuncKind(ftype) && !managedBodyless {
 				continue
 			}
 			llvmIRSignature := ""
 			parameterABI := ""
 			resultCount := 0
 			discardableResult := false
-			if ftype == cFunc {
+			if isNativeFuncKind(ftype) {
 				state, stateFrozen := u.ownerStates[fn][owner]
 				if !stateFrozen {
 					return fmt.Errorf(
@@ -8442,7 +8458,7 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 				if _, needsLLVMABI := u.executorLeafProofs[symbol]; needsLLVMABI {
 					llvmIRSignature = u.prog.PhysicalFuncDeclIRType(
 						patchedSignature,
-						llssa.InC,
+						llssa.Background(ftype),
 					)
 				}
 			}
@@ -8540,7 +8556,7 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		canonical := u.canonicalAlias(fn)
 		abi, ok := abiByFunction[canonical]
 		if directive == coroForeignCallNone {
-			if !ok || abi.kind != cFunc {
+			if !ok || !isNativeFuncKind(abi.kind) {
 				continue
 			}
 			proof, inferred := u.executorLeafProofs[abi.symbol]

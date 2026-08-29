@@ -101,7 +101,7 @@ func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsaf
 		invokeEntry: ffi.CoroEntry(invokerWords.fn),
 		recoverTo:   recoverTo,
 	}
-	err = closure.Bind(entryCIF, bindCoro, unsafe.Pointer(userdata))
+	err = closure.Bind(entryCIF, bindMakeFuncCoro, unsafe.Pointer(userdata))
 	if err != nil {
 		panic("libffi error: " + err.Error())
 	}

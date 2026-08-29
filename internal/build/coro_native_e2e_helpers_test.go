@@ -100,6 +100,7 @@ func coroNativeTaskContextRuntimeSources() []string {
 		filepath.Join(root, "proc_atomic.go"),
 		filepath.Join(root, "proc_release.go"),
 		filepath.Join(root, "g_pthread.go"),
+		filepath.Join(root, "foreign_thread_stub_default.go"),
 		filepath.Join(root, "local_context.go"),
 	}
 }

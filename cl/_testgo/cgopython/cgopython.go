@@ -3,27 +3,45 @@ package main
 
 /*
 #cgo pkg-config: python3-embed
+#ifdef _WIN32
+// Keep the Windows declaration surface local so cross-target IR tests do not
+// depend on Windows Python SDK headers. Native runs still obtain the Python
+// import library from python3-embed above.
+void Py_Initialize(void);
+void Py_Finalize(void);
+int PyRun_SimpleString(const char *command);
+#else
 #include <Python.h>
+#endif
 */
 import "C"
 
 import "runtime"
 
-// Generated C adapters remain synchronous native-stack entries. Their managed
-// caller chooses the physical execution domain.
+// Generated C adapters remain synchronous native-stack entries. Each adapter
+// performs exactly one typed call through its cgo slot; worker and coroutine
+// dispatch belongs to the managed caller and is not duplicated here.
 //
-// CHECK-LABEL: define i32 @main._Cfunc_PyRun_SimpleString
-// CHECK: call i32 %
-// CHECK-LABEL: define [0 x i8] @main._Cfunc_Py_Finalize
-// CHECK: call [0 x i8] %
-// CHECK-LABEL: define [0 x i8] @main._Cfunc_Py_Initialize
-// CHECK: call [0 x i8] %
-//
-// The source main keeps standard synchronous Go syntax. LockOSThread is an
-// ordinary managed call; every potentially blocking C call then branches on
-// the exact current-G affinity state. The locked edge invokes the foreign
-// thunk on this executor M, while the unlocked edge retains the normal bounded
-// worker transaction.
+// CHECK-LABEL: define i32 @main._Cfunc_PyRun_SimpleString(ptr %0){{.*}} {
+// CHECK: [[RUN_SLOT:%[0-9]+]] = load ptr, ptr @main._cgo_{{.*}}_Cfunc_PyRun_SimpleString
+// CHECK-NEXT: [[RUN_TARGET:%[0-9]+]] = load ptr, ptr [[RUN_SLOT]]
+// CHECK-NEXT: [[RUN_RESULT:%[0-9]+]] = call i32 [[RUN_TARGET]](ptr %0)
+// CHECK-NEXT: ret i32 [[RUN_RESULT]]
+// CHECK-LABEL: define [0 x i8] @main._Cfunc_Py_Finalize(){{.*}} {
+// CHECK: [[FINALIZE_SLOT:%[0-9]+]] = load ptr, ptr @main._cgo_{{.*}}_Cfunc_Py_Finalize
+// CHECK-NEXT: [[FINALIZE_TARGET:%[0-9]+]] = load ptr, ptr [[FINALIZE_SLOT]]
+// CHECK-NEXT: [[FINALIZE_RESULT:%[0-9]+]] = call [0 x i8] [[FINALIZE_TARGET]]()
+// CHECK-NEXT: ret [0 x i8] [[FINALIZE_RESULT]]
+// CHECK-LABEL: define [0 x i8] @main._Cfunc_Py_Initialize(){{.*}} {
+// CHECK: [[INIT_SLOT:%[0-9]+]] = load ptr, ptr @main._cgo_{{.*}}_Cfunc_Py_Initialize
+// CHECK-NEXT: [[INIT_TARGET:%[0-9]+]] = load ptr, ptr [[INIT_SLOT]]
+// CHECK-NEXT: [[INIT_RESULT:%[0-9]+]] = call [0 x i8] [[INIT_TARGET]]()
+// CHECK-NEXT: ret [0 x i8] [[INIT_RESULT]]
+
+// The source keeps normal synchronous Go syntax. LockOSThread is a managed
+// call; every potentially blocking C call branches on the exact current-G
+// affinity state. The locked edge invokes the foreign thunk on this executor
+// M, while the unlocked edge retains the bounded worker transaction.
 //
 // CHECK-LABEL: define ptr @"main.main$coro"
 // CHECK: call token @llvm.coro.id

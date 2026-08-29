@@ -2,7 +2,6 @@ package main
 
 import "github.com/goplus/lib/c"
 
-
 type mSpanList struct {
 	first *mspan
 	last  *mspan

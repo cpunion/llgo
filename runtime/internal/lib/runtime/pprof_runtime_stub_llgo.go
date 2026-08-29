@@ -1,4 +1,4 @@
-//go:build darwin || linux || wasm
+//go:build darwin || linux || wasm || windows
 
 package runtime
 
@@ -94,7 +94,7 @@ func ThreadCreateProfile(p []StackRecord) (n int, ok bool) {
 }
 
 func NumGoroutine() int {
-	return 1
+	return llrt.NumGoroutine()
 }
 
 const funcForPCCacheSets = 1024

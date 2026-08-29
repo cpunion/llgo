@@ -62,7 +62,7 @@ func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 			target.Name(),
 		)
 	}
-	if kind != cFunc {
+	if !isNativeFuncKind(kind) {
 		return false, nil
 	}
 	if target.Signature == nil || target.Signature.Recv() != nil {

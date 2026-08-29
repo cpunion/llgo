@@ -567,7 +567,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				if err != nil {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen frontend ABI for %q: %w", fn.Name(), err)
 				}
-				frontendC = classified && background == llssa.InC
+				frontendC = classified && llssa.IsNativeFuncBackground(background)
 				frontendPython = classified && background == llssa.InPython
 				frontendManagedBodyless = classified && background == llssa.InGo && len(fn.Blocks) == 0
 			}
@@ -1141,7 +1141,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			// bound. requiredHostPlain is frozen before those callbacks are merged.
 			_, compilerRuntimeIsland := in.requiredHostPlain[fn]
 			policy.TrustedNoPreempt = compilerRuntimeIsland
-			if classified && background == llssa.InC {
+			if classified && llssa.IsNativeFuncBackground(background) {
 				if !policy.IgnoreBody || !policy.OverrideExternal || (policy.External != coro.ExternalUnknownForeign && policy.External != coro.ExternalKnown) {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI C declaration %q conflicts with frozen foreign classification: %s", fn.Name(), policy.External)
 				}
@@ -4476,7 +4476,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			if _, signature := types.Unalias(typ).Underlying().(*types.Signature); !signature {
 				return false, nil
 			}
-			return ctx.prog.TypeBackground(typ) == llssa.InC, nil
+			return llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(typ)), nil
 		}
 		input.foreignNoBlock = ctx.coroEmission.CoroForeignNoBlockCertificate
 		input.foreignSync = ctx.coroEmission.CoroForeignSyncCertificate
@@ -6438,7 +6438,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				}
 				for argument, value := range call.Common().Args {
 					parameter, ok := staticCallArgumentParameterType(call, argument)
-					if !ok || ctx.prog.TypeBackground(parameter) != llssa.InC {
+					if !ok || !llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(parameter)) {
 						continue
 					}
 					if _, signature := types.Unalias(parameter).Underlying().(*types.Signature); !signature {
@@ -6580,7 +6580,7 @@ func requiredCoroDirectPlainCallArgumentsWithLibrary(
 							callee.Name(), function.Name(), backgroundErr,
 						)
 					}
-					rawCDeclaration = classified && background == llssa.InC
+					rawCDeclaration = classified && llssa.IsNativeFuncBackground(background)
 					if rawCDeclaration {
 						callable, certified, certificateErr :=
 							coroCallableContractWithLibrary(
@@ -6600,7 +6600,7 @@ func requiredCoroDirectPlainCallArgumentsWithLibrary(
 				}
 				for argument, value := range call.Common().Args {
 					parameter, ok := staticCallArgumentParameterType(call, argument)
-					if !ok || !rawCDeclaration && ctx.prog.TypeBackground(parameter) != llssa.InC {
+					if !ok || !rawCDeclaration && !llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(parameter)) {
 						continue
 					}
 					if _, signature := types.Unalias(parameter).Underlying().(*types.Signature); !signature {
@@ -6768,7 +6768,7 @@ func provenCoroDirectPlainStaticClosureWithLibrary(
 				raw := call.Common().StaticCallee()
 				if raw == nil {
 					if !call.Common().IsInvoke() && call.Common().Method == nil &&
-						ctx.prog.TypeBackground(call.Common().Value.Type()) == llssa.InC {
+						llssa.IsNativeFuncBackground(ctx.prog.TypeBackground(call.Common().Value.Type())) {
 						// The callable address is already a one-word C value. Its
 						// behavior remains conservatively foreign in the fixed-point
 						// plan; this prefilter establishes only that no managed
@@ -6797,7 +6797,7 @@ func provenCoroDirectPlainStaticClosureWithLibrary(
 					if err != nil {
 						return nil, false, err
 					}
-					if !classified || background != llssa.InC {
+					if !classified || !llssa.IsNativeFuncBackground(background) {
 						return nil, false, nil
 					}
 					_, noBlock, err := ctx.coroEmission.CoroForeignNoBlockCertificate(callee)
@@ -7022,6 +7022,7 @@ func newLLSSATarget(conf *Config, export crosscompile.Export) *llssa.Target {
 		LLVMTarget:              export.LLVMTarget,
 		OptLevel:                conf.OptLevel,
 		SaturatingFloatToUint32: conf.SaturatingFloatToUint32,
+		CABIOnly:                conf.AbiMode == cabi.ModeCFunc,
 	}
 	defaultSpec := target.Spec()
 	resolvedTarget := conf.Target != "" || export.TargetABI != "" ||
@@ -7296,7 +7297,7 @@ type context struct {
 	stagedFuncInfoSites   bool
 	stagedFuncInfoMeta    bool
 	stagedPointerSize     int
-	stagedMachOSites      bool
+	stagedSiteFormat      siteObjectFormat
 	stagedEntrySiteInfo   siteSectionInfo
 
 	// stripDarwinLTOLocals is set by the final executable link plan. LTO has
@@ -7994,6 +7995,10 @@ func generateMainEntryPackage(ctx *context, pkg *packages.Package, linkedOrder [
 	if err != nil {
 		return nil, err
 	}
+	cExports, err := linkedCExports(ctx, linkedOrder)
+	if err != nil {
+		return nil, err
+	}
 	var coroBootstrap *coroProgramBootstrapV1
 	if ctx.buildConf.BuildMode == BuildModeExe {
 		coroBootstrap = ctx.coroProgramBootstraps[pkg.ID]
@@ -8023,7 +8028,12 @@ func generateMainEntryPackage(ctx *context, pkg *packages.Package, linkedOrder [
 		abiTypes:         ctx.backendAbiTypes(linkedOrder),
 		funcInfo:         funcInfo,
 		pcLineInfo:       pcLineInfo,
+		cExports:         cExports,
 	})
+	if len(cExports) != 0 {
+		llabi.LowerLargeAggregates(ctx.prog.TargetData(), entryPkg.LPkg.Module())
+		ctx.cTransformer.TransformModule(entryPkg.LPkg.Path(), entryPkg.LPkg.Module())
+	}
 	// Native coroutine builds stage the entry module before releasing the
 	// frontend and LLVM context. Apply method-liveness overrides at this shared
 	// generation boundary so staged and direct backends both freeze the same
@@ -8248,7 +8258,13 @@ func dceEntryRootCandidates(ctx *context, pkgs []Package, needRuntime bool) ([]s
 	// root, so their final linker names must seed the analysis explicitly.
 	var exports []string
 	for _, pkg := range pkgs {
-		exports = append(exports, packageExportFunctionNames(pkg)...)
+		for goName, cName := range pkg.LPkg.ExportFuncs() {
+			name := cName
+			if fn := pkg.LPkg.FuncOf(goName); fn != nil && fn.Name() == goName {
+				name = goName
+			}
+			exports = append(exports, name)
+		}
 	}
 	slices.Sort(exports)
 	roots = append(roots, exports...)
@@ -8318,6 +8334,51 @@ func coroDCEEntryRootCandidates(ctx *context) ([]string, error) {
 	}
 	slices.Sort(roots)
 	return roots, nil
+}
+
+func linkedCExports(ctx *context, pkgs []Package) ([]cExport, error) {
+	seen := make(map[string]string)
+	var exports []cExport
+	for _, pkg := range pkgs {
+		if !needsWindowsCExportWrappers(ctx, pkg) || pkg.LPkg == nil {
+			continue
+		}
+		for goName, cName := range pkg.LPkg.ExportFuncs() {
+			if strings.Contains(goName, ".") && !strings.HasPrefix(goName, pkg.LPkg.Path()+".") {
+				continue
+			}
+			if previous, ok := seen[cName]; ok {
+				if previous != goName {
+					return nil, fmt.Errorf("C export %q is provided by both %q and %q", cName, previous, goName)
+				}
+				continue
+			}
+			fn := pkg.LPkg.FuncOf(goName)
+			if fn == nil {
+				return nil, fmt.Errorf("C export implementation %q not found", goName)
+			}
+			sig, ok := fn.RawType().(*types.Signature)
+			if !ok || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() > 1 {
+				return nil, fmt.Errorf("C export %q has an unsupported signature", goName)
+			}
+			seen[cName] = goName
+			exports = append(exports, cExport{
+				goName: goName,
+				cName:  cName,
+				sig:    sig,
+			})
+		}
+	}
+	slices.SortFunc(exports, func(a, b cExport) int {
+		return strings.Compare(a.cName, b.cName)
+	})
+	return exports, nil
+}
+
+func needsWindowsCExportWrappers(ctx *context, pkg *aPackage) bool {
+	return ctx != nil && ctx.buildConf != nil && pkg != nil && pkg.Package != nil &&
+		ctx.buildConf.Goos == "windows" && ctx.buildConf.Target == "" &&
+		ctx.buildConf.BuildMode == BuildModeCShared && pkg.Name == "main"
 }
 
 func linkedModuleGlobals(pkgs []Package) map[string]none {
@@ -8758,11 +8819,16 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 	if err != nil {
 		return nil, fmt.Errorf("load go:embed directives for %s failed: %w", pkgPath, err)
 	}
+	options := ctx.frontendOptions
+	// A Windows DLL cannot initialize the Go runtime while holding the loader
+	// lock. Only the command package needs alternate export symbols, and command
+	// packages are deliberately excluded from the package cache.
+	options.CExportWrappers = needsWindowsCExportWrappers(ctx, aPkg)
 	ret, externs, err := cl.NewPackageExWithEmbedOptions(ctx.prog, ctx.callerTracking, ctx.patches, aPkg.rewriteVars, aPkg.SSA, syntax, embedMap, cl.PackageOptions{
 		Compilation:        ctx.clCompilation,
 		CacheHit:           aPkg.CacheHit,
 		MetaCollect:        needMeta,
-		FrontendOptions:    ctx.frontendOptions,
+		FrontendOptions:    options,
 		FrontendOptionsSet: true,
 	})
 	if err != nil {
@@ -8833,11 +8899,38 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	llabi.LowerLargeAggregates(ctx.prog.TargetData(), ret.Module())
 	ctx.cTransformer.TransformModule(ret.Path(), ret.Module())
 	ctx.cTransformer.SetSkipFuncs(nil)
+	if ctx.buildConf.Goos == "windows" {
+		pragmaSyntax := append([]*ast.File(nil), pkg.Syntax...)
+		if aPkg.AltPkg != nil {
+			pragmaSyntax = append(pragmaSyntax, aPkg.AltPkg.Syntax...)
+		}
+		if err := lowerWindowsCgoImportPointers(ctx.buildConf.Goos, ctx.buildConf.Goarch, pkgPath, pragmaSyntax, ret.Module()); err != nil {
+			return err
+		}
+	}
 	applySizeOptimizationAttributes(ret.Module(), ctx.buildConf.OptLevel)
+	printCmds := ctx.shouldPrintCommands(verbose)
+	if ctx.mode != ModeGen {
+		if aPkg.AltPkg == nil || llruntime.HasAdditiveAltPkg(pkgPath) {
+			asmObjFiles, err := compilePkgSFiles(ctx, aPkg, pkg, printCmds)
+			if err != nil {
+				return err
+			}
+			aPkg.ObjFiles = append(aPkg.ObjFiles, asmObjFiles...)
+		}
+		if aPkg.AltPkg != nil {
+			asmObjFiles, err := compilePkgSFiles(ctx, aPkg, aPkg.AltPkg.Package, printCmds)
+			if err != nil {
+				return err
+			}
+			aPkg.ObjFiles = append(aPkg.ObjFiles, asmObjFiles...)
+		}
+	}
 
 	mod := ret.Module()
 	mod.SetDataLayout(ctx.prog.DataLayout())
 	mod.SetTarget(ctx.prog.TargetSpec().Triple)
+	dropUnusedWindowsTestMain(ctx, aPkg, mod)
 	stageBackend := shouldStageNativeExecutableBackend(ctx)
 	wholeProgramCoroLTO := shouldDeferCoroLoweringToFullLTO(ctx)
 	// Coroutine splitting is a mandatory correctness pass, not an optimization.
@@ -8887,27 +8980,19 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		return nil
 	}
 
-	printCmds := ctx.shouldPrintCommands(verbose)
 	cgoLLFiles, cgoLdflags, err := buildCgo(ctx, aPkg, aPkg.Package.Syntax, externs, printCmds)
 	if err != nil {
 		return fmt.Errorf("build cgo of %v failed: %v", pkgPath, err)
 	}
 	aPkg.ObjFiles = append(aPkg.ObjFiles, cgoLLFiles...)
 	aPkg.ObjFiles = append(aPkg.ObjFiles, concatPkgLinkFiles(ctx, pkg, printCmds)...)
-	if aPkg.AltPkg == nil || llruntime.HasAdditiveAltPkg(pkgPath) {
-		if asmObjFiles, err := compilePkgSFiles(ctx, aPkg, pkg, printCmds); err != nil {
-			return err
-		} else {
-			aPkg.ObjFiles = append(aPkg.ObjFiles, asmObjFiles...)
-		}
-	}
 	if aliasObjs, err := buildGoCgoAliasObjects(ctx, pkgPath, aPkg.Package.Syntax, printCmds); err != nil {
 		return err
 	} else {
 		aPkg.ObjFiles = append(aPkg.ObjFiles, aliasObjs...)
 	}
 	aPkg.LinkArgs = append(aPkg.LinkArgs, cgoLdflags...)
-	aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(ctx.buildConf.Goos, aPkg.Package.Syntax)...)
+	aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(aPkg.Package.Syntax)...)
 	if aPkg.AltPkg != nil {
 		altLLFiles, altLdflags, e := buildCgo(ctx, aPkg, aPkg.AltPkg.Syntax, externs, printCmds)
 		if e != nil {
@@ -8915,18 +9000,13 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		}
 		aPkg.ObjFiles = append(aPkg.ObjFiles, altLLFiles...)
 		aPkg.ObjFiles = append(aPkg.ObjFiles, concatPkgLinkFiles(ctx, aPkg.AltPkg.Package, printCmds)...)
-		if asmObjFiles, err := compilePkgSFiles(ctx, aPkg, aPkg.AltPkg.Package, printCmds); err != nil {
-			return err
-		} else {
-			aPkg.ObjFiles = append(aPkg.ObjFiles, asmObjFiles...)
-		}
 		if aliasObjs, err := buildGoCgoAliasObjects(ctx, pkgPath, aPkg.AltPkg.Syntax, printCmds); err != nil {
 			return err
 		} else {
 			aPkg.ObjFiles = append(aPkg.ObjFiles, aliasObjs...)
 		}
 		aPkg.LinkArgs = append(aPkg.LinkArgs, altLdflags...)
-		aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(ctx.buildConf.Goos, aPkg.AltPkg.Syntax)...)
+		aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(aPkg.AltPkg.Syntax)...)
 	}
 	// ModeGen transfers the live frontend module to its caller for IR/LIT
 	// inspection. It neither links nor consumes a package archive, and emitting
@@ -9041,6 +9121,37 @@ func validateCoroPackageStaticAllocas(pkgPath string, mod gllvm.Module) error {
 	return nil
 }
 
+// dropUnusedWindowsTestMain mirrors cmd/link's treatment of a command package
+// under `go test`. The tested package still contains its source main function,
+// now named <import-path>.main, but the executable entry is the synthetic test
+// main. cmd/link computes Go reachability before diagnosing unresolved symbols,
+// so it can discard an unreferenced source main even when that body contains a
+// one-sided //go:linkname call. lld-link instead resolves every COFF relocation
+// before /OPT:REF section GC and reports the dead call as undefined.
+//
+// Do not rewrite //go:linkname or weaken undefined symbols: either would also
+// hide an error when the source main is genuinely reachable. Remove only this
+// test-specific entry candidate while it is LLVM IR and only after proving that
+// it has no local use, no //go:linkname reference from any loaded test package,
+// and no //export root. Ordinary builds, synthetic test mains, and non-Windows
+// object formats keep their existing behavior.
+func dropUnusedWindowsTestMain(ctx *context, pkg *aPackage, mod gllvm.Module) {
+	if ctx == nil || ctx.prog == nil || ctx.buildConf == nil || pkg == nil || pkg.Package == nil ||
+		ctx.mode != ModeTest || ctx.buildConf.Goos != "windows" || ctx.buildConf.BuildMode != BuildModeExe ||
+		pkg.Name != "main" || pkg.ForTest == "" || mod.IsNil() {
+		return
+	}
+	symbol := pkg.PkgPath + ".main"
+	fn := mod.NamedFunction(symbol)
+	if fn.IsNil() || fn.IsDeclaration() || !fn.FirstUse().IsNil() || ctx.prog.HasLinknameTarget(symbol) {
+		return
+	}
+	if _, exported := ctx.prog.PackageExport(symbol); exported {
+		return
+	}
+	fn.EraseFromParentAsFunction()
+}
+
 func printCompiledPackage(conf *Config, pkg *aPackage) {
 	if conf.PrintPackages && !pkg.CacheHit {
 		fmt.Fprintln(os.Stderr, pkg.PkgPath)
@@ -9120,7 +9231,7 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	}
 	if ctx.stagedFuncInfoSites && ctx.stagedFuncInfoMeta {
 		emitFuncInfoEntrySitesForModule(
-			mod, ctx.stagedPointerSize, ctx.stagedMachOSites, ctx.stagedEntrySiteInfo,
+			mod, ctx.stagedPointerSize, ctx.stagedSiteFormat, ctx.stagedEntrySiteInfo,
 		)
 	}
 	verifyAtomicCost := llssa.VerifyCoroAtomicCostModule
@@ -9360,7 +9471,7 @@ func releaseCoroFrontendForStagedBackend(ctx *context, pkgs []*aPackage) {
 	ctx.stagedFuncInfoSites = shouldEmitRuntimeSites(ctx)
 	ctx.stagedFuncInfoMeta = ctx.prog.FuncInfoMetadataEnabled()
 	ctx.stagedPointerSize = ctx.prog.PointerSize()
-	ctx.stagedMachOSites = shouldEmitRuntimeMachOSites(ctx)
+	ctx.stagedSiteFormat = runtimeSiteObjectFormat(ctx)
 	ctx.stagedEntrySiteInfo = runtimeEntrySiteSectionInfo(ctx)
 	ctx.stagedBackendDetached = true
 	for _, pkg := range pkgs {

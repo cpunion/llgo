@@ -2280,6 +2280,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		"github.com/xgo-dev/llgo/runtime/internal/corotimer":    true,
 		"github.com/xgo-dev/llgo/runtime/internal/coroworker":   true,
 		"github.com/xgo-dev/llgo/runtime/internal/runtime/math": true,
+		"github.com/xgo-dev/llgo/runtime/internal/thread":       true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string

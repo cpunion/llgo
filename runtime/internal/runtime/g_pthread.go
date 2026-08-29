@@ -22,11 +22,11 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
+	"github.com/xgo-dev/llgo/runtime/internal/thread"
 )
 
 var (
-	gKey      pthread.Key
+	gKey      thread.Key
 	gKeyReady bool
 )
 
@@ -59,8 +59,8 @@ func coroRuntimeContextBootstrap() bool {
 	if gKeyReady {
 		return true
 	}
-	var key pthread.Key
-	if ret := key.Create(pthread.KeyDestructor(destroyG)); ret != 0 {
+	var key thread.Key
+	if ret := key.Create(gLifecycleDestructor(thread.KeyDestructor(destroyG))); ret != 0 {
 		// The caller owns the terminal diagnostic. Formatting through stdio here
 		// would turn an unrecoverable pre-scheduler failure into an asynchronous
 		// worker transaction even though there is no scheduler which can resume it.

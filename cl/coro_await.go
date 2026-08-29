@@ -419,6 +419,10 @@ func (p *context) compileCoroStaticAwait(
 		b, callee, closureContext, args, nil, keepaliveSlots,
 		instructionPlan.recoverAlias,
 	)
+	if reflectCheck, ok := reflectValueMethodByNameCheck(call.Common()); ok {
+		markCoroReflectValueMethodByNameCalls(b, reflectCheck, result.physicalCalls)
+		b.EmitReflectValueMethodCheckedLoad(result.value, reflectCheck)
+	}
 	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, result.value)
 	if !retagged {
 		p.recordCoroValueAddress(call, result.address)
@@ -467,9 +471,48 @@ func (p *context) tryCompileCoroDirectClosureValue(
 	return b.MakeClosureValue(p.type_(closure.Type(), llssa.InGo), code, env), true
 }
 
+type coroPhysicalCall struct {
+	call      llssa.Expr
+	argCount  int
+	resultArg int
+}
+
+func markCoroReflectValueMethodByNameCalls(
+	b llssa.Builder, check llssa.ReflectMethodCheck, calls []coroPhysicalCall,
+) {
+	if check.Kind&llssa.ReflectMethodDynamic == 0 {
+		return
+	}
+	if len(calls) == 0 {
+		panic("dynamic reflect.Value.MethodByName lost its physical call")
+	}
+	for _, physical := range calls {
+		b.MarkReflectValueMethodByNamePhysicalExpr(
+			physical.call, physical.argCount-1, physical.resultArg,
+		)
+	}
+}
+
+func markCoroReflectTypeMethodByNameCalls(
+	b llssa.Builder, check llssa.ReflectMethodCheck, calls []coroPhysicalCall,
+) {
+	if check.Kind&llssa.ReflectTypeMethodByName == 0 || check.Name != "" {
+		return
+	}
+	if len(calls) == 0 {
+		panic("dynamic reflect.Type.MethodByName lost its physical dispatch call")
+	}
+	for _, physical := range calls {
+		markReflectTypeMethodByNameCall(
+			b, physical.call, check, physical.argCount-1, physical.resultArg,
+		)
+	}
+}
+
 type coroAwaitedValue struct {
-	value   llssa.Expr
-	address llssa.Expr
+	value         llssa.Expr
+	address       llssa.Expr
+	physicalCalls []coroPhysicalCall
 }
 
 func (p *context) recordCoroValueAddress(value ssa.Value, address llssa.Expr) {
@@ -662,6 +705,9 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	return coroAwaitedValue{
 		value:   value,
 		address: p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()),
+		physicalCalls: []coroPhysicalCall{{
+			call: child, argCount: len(callArgs), resultArg: 1,
+		}},
 	}
 }
 

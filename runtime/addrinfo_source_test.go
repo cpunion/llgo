@@ -117,7 +117,7 @@ func TestAddrinfoKeepsProgramCountersScalarAcrossTheCBoundary(t *testing.T) {
 	for _, required := range []string{
 		"uintptr_t llgo_address()",
 		"return (uintptr_t)__builtin_return_address(0)",
-		"int llgo_addrinfo(uintptr_t addr, Dl_info *info)",
+		"int llgo_addrinfo(uintptr_t addr, llgo_dl_info *info)",
 		"dladdr((void *)addr, info)",
 		"int llgo_stacktrace(int skip, llgo_stacktrace_frame *frames, int capacity)",
 		"fn(ctx, (void *)pc, offset, (void *)fp",

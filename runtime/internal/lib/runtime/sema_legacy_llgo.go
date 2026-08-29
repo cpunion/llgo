@@ -22,7 +22,7 @@ import (
 	latomic "sync/atomic"
 	"unsafe"
 
-	psync "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
+	psync "github.com/xgo-dev/llgo/runtime/internal/sync"
 )
 
 type semaState struct {

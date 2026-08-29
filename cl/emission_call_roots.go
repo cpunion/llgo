@@ -66,12 +66,13 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 		return emissionIntrinsicNoValues, nil
 
 	case llgoAdvance, llgoIndex,
-		llgoSigsetjmp, llgoSiglongjmp,
+		llgoSigsetjmp, llgoSiglongjmp, llgoLongjmp,
 		llgoCgoGoStringN, llgoCgoGoBytes:
 		return emissionIntrinsicFirstTwoValues, nil
 
 	case llgoAlloca, llgoAllocaCStr, llgoAllocCStr, llgoAllocaCStrs,
 		llgoString, llgoStringData,
+		llgoSetjmp,
 		llgoCgoCString, llgoCgoCBytes, llgoCgoGoString, llgoCgoCMalloc,
 		llgoCgoCgocall, llgoCgoUse, llgoCgoKeepAlive:
 		return emissionIntrinsicFirstValue, nil
@@ -306,7 +307,7 @@ func (u *EmissionUniverse) callValueRoots(ctx *context, call *ssa.CallCommon) ([
 		_, name, ftype := ctx.funcName(callee)
 		roots := []emissionCallValueRoot{{value: callee, directFunction: true}}
 		switch ftype {
-		case goFunc, cFunc, pyFunc:
+		case goFunc, cFunc, stdcallFunc, pyFunc:
 			arguments, err := emissionCompileValuesRoots(call.Args, kind)
 			if err != nil {
 				return nil, err
@@ -375,7 +376,7 @@ func emissionCallVArgValue(ctx *context, call *ssa.CallCommon) (ssa.Value, bool,
 	kind := ctx.funcKind(function)
 	_, name, ftype := ctx.funcName(function)
 	switch ftype {
-	case goFunc, cFunc, pyFunc:
+	case goFunc, cFunc, stdcallFunc, pyFunc:
 		if kind == fnHasVArg {
 			return last()
 		}

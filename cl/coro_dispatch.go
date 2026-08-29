@@ -511,7 +511,8 @@ func coroCallableLeafTransport(universe *EmissionUniverse, typ types.Type) (coro
 	if typ == nil {
 		return coro.ManagedTransport, fmt.Errorf("has no source type")
 	}
-	if universe == nil || universe.prog == nil || universe.prog.TypeBackground(typ) != llssa.InC {
+	if universe == nil || universe.prog == nil ||
+		!llssa.IsNativeFuncBackground(universe.prog.TypeBackground(typ)) {
 		return coro.ManagedTransport, nil
 	}
 	if _, signature := types.Unalias(typ).Underlying().(*types.Signature); !signature {

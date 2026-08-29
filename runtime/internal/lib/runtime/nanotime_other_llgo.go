@@ -1,4 +1,4 @@
-//go:build !darwin && !linux && !baremetal && !wasm && !tinygo.wasm
+//go:build !darwin && !linux && !windows && !baremetal && !wasm && !tinygo.wasm
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

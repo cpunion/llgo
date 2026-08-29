@@ -27,7 +27,7 @@ import (
 	_ "unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
+	"github.com/xgo-dev/llgo/runtime/internal/thread"
 )
 
 // OwnerCount returns the initial logical execution limit clamped to
@@ -52,14 +52,14 @@ func StartFactory() c.Int
 // mask, namespace, cwd/fs view, credentials, or similar inherited state.
 //
 //go:linkname CreateOwner C.__llgo_coro_fleet_owner_create_v3
-func CreateOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
+func CreateOwner(native *thread.Thread, token *uint32, slot uint32) c.Int
 
 // TryReuseOwner assigns one acknowledged standby pthread to slot. Zero means
 // reused, one means the bounded cache was empty, and every other value is an
 // invariant failure. No pthread is created by this operation.
 //
 //go:linkname TryReuseOwner C.__llgo_coro_fleet_owner_try_reuse_v1
-func TryReuseOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
+func TryReuseOwner(native *thread.Thread, token *uint32, slot uint32) c.Int
 
 // RequestReuseOwner assigns a standby pthread without waiting for it to enter
 // Go or claim the execution-domain handoff. Zero means queued, one means the
@@ -67,7 +67,7 @@ func TryReuseOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
 // thread/token/slot request must subsequently be canceled or released.
 //
 //go:linkname RequestReuseOwner C.__llgo_coro_fleet_owner_request_reuse_v1
-func RequestReuseOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
+func RequestReuseOwner(native *thread.Thread, token *uint32, slot uint32) c.Int
 
 // CancelReuseOwner withdraws an exact queued RequestReuseOwner. Zero means the
 // standby pthread had not begun dispatch and is already back in the cache; one
@@ -75,7 +75,7 @@ func RequestReuseOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
 // release protocol. Every other value is an invariant failure.
 //
 //go:linkname CancelReuseOwner C.__llgo_coro_fleet_owner_cancel_reuse_v1
-func CancelReuseOwner(thread pthread.Thread, token, slot uint32) c.Int
+func CancelReuseOwner(native thread.Thread, token, slot uint32) c.Int
 
 // OwnerReady completes CreateOwner only after the new raw owner has claimed
 // its stable scalar directory slot and execution route.
@@ -87,14 +87,14 @@ func OwnerReady(slot uint32) c.Int
 // record. The caller releases one SetMaxThreads reservation only after success.
 //
 //go:linkname JoinOwner C.__llgo_coro_fleet_owner_join_v1
-func JoinOwner(thread pthread.Thread, token uint32) c.Int
+func JoinOwner(native thread.Thread, token uint32) c.Int
 
 // ReleaseOwner acknowledges that one temporary replacement has returned from
 // Go and may be cached. Zero retains the live pthread in standby; one means
 // the bounded cache was full and the adapter strongly joined it.
 //
 //go:linkname ReleaseOwner C.__llgo_coro_fleet_owner_release_v1
-func ReleaseOwner(thread pthread.Thread, token, slot uint32) c.Int
+func ReleaseOwner(native thread.Thread, token, slot uint32) c.Int
 
 // RetireSelf detaches a permanently tainted owner record before pthread_exit.
 // The process entry thread has no factory record and never calls this leaf.

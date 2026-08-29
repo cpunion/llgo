@@ -111,6 +111,9 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			if imported := slices.Contains(pkg.Imports, clock); imported != test.timer {
 				t.Fatalf("Imports = %v, clock=%t", pkg.Imports, imported)
 			}
+			if test.name == "baremetal-host" && slices.Contains(pkg.GoFiles, "procpin.go") {
+				t.Fatalf("single-executor bare-metal target selected hosted procPin: %v", pkg.GoFiles)
+			}
 		})
 	}
 }
@@ -222,7 +225,7 @@ func TestCoroHostTargetOwnedReactorSourceContract(t *testing.T) {
 			t.Errorf("host target lacks owned-reactor contract %q", required)
 		}
 	}
-	for _, forbidden := range []string{"internal/clite/pthread", "internal/clite/libuv", "internal/clite/bdwgc", "internal/corodoorbell"} {
+	for _, forbidden := range []string{"internal/thread", "internal/clite/libuv", "internal/clite/bdwgc", "internal/corodoorbell"} {
 		if strings.Contains(target, forbidden) || strings.Contains(driver, forbidden) {
 			t.Errorf("host adapter imports forbidden backend %q", forbidden)
 		}

@@ -383,7 +383,7 @@ func TestCoroNativePhysicalThreadCapacityCoversEveryRuntimeThreadCreator(t *test
 	worker := readRuntimePollFile(t, "internal/runtime/coro_worker_native_llgo.go")
 	reserveWorker := strings.Index(worker, "if !coroTargetReservePhysicalThreadV1()")
 	createWorker := strings.Index(worker, "if coroworker.Create(&state.threads[index])")
-	joinWorker := strings.Index(worker, "pthread.Join(thread, nil)")
+	joinWorker := strings.Index(worker, "threadpkg.Join(thread, nil)")
 	releaseWorker := strings.Index(worker, "!coroTargetReleasePhysicalThreadV1()")
 	if reserveWorker < 0 || createWorker <= reserveWorker ||
 		joinWorker < 0 || releaseWorker <= joinWorker {

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/xgo-dev/llgo/internal/env"
@@ -45,7 +46,7 @@ func checkDownloadAndExtractWasiSDK(dir string) (wasiSdkRoot string, err error) 
 }
 
 // checkDownloadAndExtractESPClang downloads and extracts ESP Clang binaries and libraries
-func checkDownloadAndExtractESPClang(platformSuffix, dir string) error {
+func checkDownloadAndExtractESPClang(baseURL, version, platformSuffix, dir string) error {
 	// Check if already exists
 	if _, err := os.Stat(dir); err == nil {
 		return nil
@@ -64,8 +65,8 @@ func checkDownloadAndExtractESPClang(platformSuffix, dir string) error {
 		return nil
 	}
 
-	clangUrl := fmt.Sprintf("%s/clang-esp-%s-%s.tar.xz", espClangBaseUrl, espClangVersion, platformSuffix)
-	description := fmt.Sprintf("ESP Clang %s-%s", espClangVersion, platformSuffix)
+	clangUrl := fmt.Sprintf("%s/clang-esp-%s-%s.tar.xz", baseURL, version, platformSuffix)
+	description := fmt.Sprintf("ESP Clang %s-%s", version, platformSuffix)
 
 	// Use temporary extraction directory for ESP Clang special handling
 	tempExtractDir := dir + ".extract"
@@ -302,9 +303,53 @@ func extractTarGz(tarGzFile, dest string) error {
 }
 
 func extractTarXz(tarXzFile, dest string) error {
-	// Use external tar command to extract .tar.xz files
-	cmd := exec.Command("tar", "-xf", tarXzFile, "-C", dest)
-	return cmd.Run()
+	tarCommand := "tar"
+	tarArgs := []string{"-xf", tarXzFile, "-C", dest}
+	if runtime.GOOS == "windows" {
+		var xzCommand string
+		tarCommand, xzCommand = windowsTarXzTools(
+			os.Getenv("LLGO_MSYS2_LOCATION"), os.Getenv("SystemRoot"),
+		)
+		if xzCommand != "" {
+			// Windows' bundled bsdtar takes more than 25 minutes to unpack the
+			// 2.7 GiB ESP toolchain on hosted runners. MSYS2 GNU tar does it in
+			// about a minute, but needs --force-local for native drive paths.
+			tarArgs = []string{
+				"--force-local",
+				"--use-compress-program=" + filepath.ToSlash(xzCommand),
+				"-xf", filepath.ToSlash(tarXzFile),
+				"-C", filepath.ToSlash(dest),
+			}
+		}
+	}
+	cmd := exec.Command(tarCommand, tarArgs...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tar -xf: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func windowsTarXzTools(msysRoot, systemRoot string) (tarCommand, xzCommand string) {
+	if msysRoot != "" {
+		binDir := filepath.Join(msysRoot, "usr", "bin")
+		msysTar := filepath.Join(binDir, "tar.exe")
+		msysXz := filepath.Join(binDir, "xz.exe")
+		if fileExists(msysTar) && fileExists(msysXz) {
+			return msysTar, msysXz
+		}
+	}
+	if systemRoot != "" {
+		nativeTar := filepath.Join(systemRoot, "System32", "tar.exe")
+		if fileExists(nativeTar) {
+			return nativeTar, ""
+		}
+	}
+	return "tar", ""
+}
+
+func fileExists(name string) bool {
+	_, err := os.Stat(name)
+	return err == nil
 }
 
 func extractZip(zipFile, dest string) error {

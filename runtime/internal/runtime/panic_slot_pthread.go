@@ -21,11 +21,11 @@ package runtime
 import (
 	"unsafe"
 
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
+	"github.com/xgo-dev/llgo/runtime/internal/thread"
 )
 
 type panicSlot struct {
-	key pthread.Key
+	key thread.Key
 }
 
 func (slot *panicSlot) Create() {

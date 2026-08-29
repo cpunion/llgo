@@ -146,7 +146,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 			panic(fmt.Errorf("coroutine raw/plain lowered runtime call %q in %q targets %q without an exact raw-plain variant", helper, p.goFn.Name(), targetPlan.ID))
 		}
 		fn, _, kind := p.compileRawPlainFunction(target)
-		if fn == nil || kind != goFunc && kind != cFunc {
+		if fn == nil || kind != goFunc && !isNativeFuncKind(kind) {
 			panic(fmt.Errorf("coroutine raw/plain lowered runtime call %q in %q target %q did not resolve to a raw-callable Go/C entry", helper, p.goFn.Name(), targetPlan.ID))
 		}
 		return b.Call(fn.Expr, args...), true
@@ -156,7 +156,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 			panic(fmt.Errorf("coroutine lowered runtime call %q in raw plain body %q targets managed coroutine %q without a raw plain variant", helper, p.goFn.Name(), targetPlan.ID))
 		}
 		fn, _, kind := p.compileRawPlainFunction(target)
-		if fn == nil || kind != goFunc && kind != cFunc {
+		if fn == nil || kind != goFunc && !isNativeFuncKind(kind) {
 			panic(fmt.Errorf("coroutine lowered runtime call %q in raw plain body %q target %q did not resolve to a raw-callable Go/C entry", helper, p.goFn.Name(), targetPlan.ID))
 		}
 		return b.Call(fn.Expr, args...), true

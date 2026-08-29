@@ -11,7 +11,7 @@ func main() {
 	// input only,no return value
 	asmFull("# test value {value}", map[string]any{"value": 42})
 	// input with return value
-	res1 := asmFull("mov {}, {value}", map[string]any{
+	res1 := asmFull(moveInstruction, map[string]any{
 		"value": 42,
 	})
 	println("Result:", res1)

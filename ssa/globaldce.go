@@ -16,12 +16,13 @@ const (
 	reflectValuePtrFieldIndex   = 1
 	reflectMethodFuncFieldIndex = 3
 
-	reflectValueMethodTypeID    = "go.method.value.reflect"
-	reflectTypeMethodTypeID     = "go.method.type.reflect"
-	reflectMethodByNameCallAttr = "llgo.reflect.methodbyname"
-	reflectMethodByNameArgAttr  = "llgo.reflect.methodbyname.name"
-	reflectMethodByNameValue    = "value"
-	reflectMethodByNameType     = "type"
+	reflectValueMethodTypeID      = "go.method.value.reflect"
+	reflectTypeMethodTypeID       = "go.method.type.reflect"
+	reflectMethodByNameCallAttr   = "llgo.reflect.methodbyname"
+	reflectMethodByNameArgAttr    = "llgo.reflect.methodbyname.name"
+	reflectMethodByNameResultAttr = "llgo.reflect.methodbyname.result"
+	reflectMethodByNameValue      = "value"
+	reflectMethodByNameType       = "type"
 )
 
 type ReflectMethodCheck struct {
@@ -195,6 +196,46 @@ func (b Builder) MarkReflectMethodByNameCall(call llvm.Value, kind string, nameA
 
 func (b Builder) MarkReflectValueMethodByNameCall(call llvm.Value, nameArgIndex int) {
 	b.MarkReflectMethodByNameCall(call, reflectMethodByNameValue, nameArgIndex)
+}
+
+// MarkReflectValueMethodByNamePhysicalExpr attaches the MethodByName contract
+// to a physical coroutine call. Its compiler-owned result slot is not a C ABI
+// sret argument, so identify that parameter explicitly for the LTO consumer.
+// The exact call instruction remains inside the llssa abstraction.
+func (b Builder) MarkReflectValueMethodByNamePhysicalExpr(
+	call Expr, nameArgIndex, resultArgIndex int,
+) {
+	b.markReflectMethodByNamePhysicalExpr(
+		call, reflectMethodByNameValue, nameArgIndex, resultArgIndex,
+	)
+}
+
+// MarkReflectTypeMethodByNamePhysicalExpr is the reflect.Type counterpart of
+// MarkReflectValueMethodByNamePhysicalExpr. Interface devirtualization may
+// lower Type.MethodByName directly to a coroutine ramp, whose compiler-owned
+// result slot is likewise distinct from an ordinary C ABI sret parameter.
+func (b Builder) MarkReflectTypeMethodByNamePhysicalExpr(
+	call Expr, nameArgIndex, resultArgIndex int,
+) {
+	b.markReflectMethodByNamePhysicalExpr(
+		call, reflectMethodByNameType, nameArgIndex, resultArgIndex,
+	)
+}
+
+func (b Builder) markReflectMethodByNamePhysicalExpr(
+	call Expr, kind string, nameArgIndex, resultArgIndex int,
+) {
+	if call.IsNil() {
+		return
+	}
+	b.MarkReflectMethodByNameCall(call.impl, kind, nameArgIndex)
+	if !b.Prog.enableLTOPluginMarker {
+		return
+	}
+	call.impl.AddCallSiteAttribute(
+		resultArgIndex+1,
+		b.Prog.ctx.CreateStringAttribute(reflectMethodByNameResultAttr, "1"),
+	)
 }
 
 func (b Builder) MarkReflectTypeMethodByNameCall(call llvm.Value, nameArgIndex int) {

@@ -1,5 +1,6 @@
 #include "LLGOLTOPasses.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -33,6 +34,8 @@ static constexpr char ReflectMethodByNameCallAttr[] =
     "llgo.reflect.methodbyname";
 static constexpr char ReflectMethodByNameArgAttr[] =
     "llgo.reflect.methodbyname.name";
+static constexpr char ReflectMethodByNameResultAttr[] =
+    "llgo.reflect.methodbyname.result";
 static constexpr char ReflectMethodByNameValueKind[] = "value";
 static constexpr char ReflectMethodByNameTypeKind[] = "type";
 static constexpr char ReflectValueMethodTypeID[] = "go.method.value.reflect";
@@ -41,13 +44,23 @@ static constexpr char ReflectValueMethodTypeIDPrefix[] =
     "go.method.value.reflect.";
 static constexpr char ReflectTypeMethodTypeIDPrefix[] =
     "go.method.type.reflect.";
+static constexpr char StaticItabSlotMetadata[] = "llgo.static.itab.slot";
 static constexpr char RuntimeStringCatSuffix[] =
     "runtime/internal/runtime.StringCat";
+static constexpr char RuntimeStringCatOutcomeSuffix[] =
+    "runtime/internal/runtime.StringCat$outcome";
 static constexpr char RuntimeStringSlice2Suffix[] =
     "runtime/internal/runtime.StringSlice2";
+static constexpr char RuntimePushCallerLocationOutcomeSuffix[] =
+    "runtime/internal/runtime.PushCallerLocationFrame$outcome";
+static constexpr char RuntimeRecordPanicLocationCoroSuffix[] =
+    "runtime/internal/runtime.RecordPanicLocation$coro";
+static constexpr char RuntimePopCallerLocationCoroSuffix[] =
+    "runtime/internal/runtime.PopCallerLocationFrame$coro";
 static constexpr unsigned MaxReflectMethodNames = 32;
 static constexpr unsigned MaxStringAnalysisDepth = 12;
 static constexpr unsigned MaxConstantGEPChoices = 32;
+static constexpr unsigned MaxReflectFuncAnalysisDepth = 48;
 
 // Keep the replacement bounded. The pass is only meant to refine cases where
 // optimization has exposed a small finite set of names. If the set grows too
@@ -167,6 +180,13 @@ bool isRuntimeStringCat(CallBase *CB) {
   return Callee && Callee->getName().ends_with(RuntimeStringCatSuffix);
 }
 
+bool isRuntimeStringCatOutcome(CallBase *CB) {
+  if (!CB)
+    return false;
+  Function *Callee = CB->getCalledFunction();
+  return Callee && Callee->getName().ends_with(RuntimeStringCatOutcomeSuffix);
+}
+
 bool isRuntimeStringSlice2(CallBase *CB) {
   if (!CB)
     return false;
@@ -245,6 +265,52 @@ bool collectStringSetFromStringSlice2(CallBase *CB, const DataLayout &DL,
   return true;
 }
 
+bool isCoroSourceLocationIdentityCall(CallBase *CB) {
+  if (!CB)
+    return false;
+  Function *Callee = CB->getCalledFunction();
+  if (!Callee)
+    return false;
+  StringRef Name = Callee->getName();
+  return Name.ends_with(RuntimePushCallerLocationOutcomeSuffix) ||
+         Name.ends_with(RuntimeRecordPanicLocationCoroSuffix) ||
+         Name.ends_with(RuntimePopCallerLocationCoroSuffix);
+}
+
+// A physical coroutine records its source function PC in compiler-owned
+// diagnostics. That ptrtoint use observes identity but cannot invoke the ramp,
+// so it must not make an otherwise closed direct-call argument flow appear to
+// escape. Refuse every other non-call use.
+bool isCoroSourceLocationIdentityUse(User *U) {
+  auto *Op = dyn_cast<Operator>(U);
+  if (!Op || Op->getOpcode() != Instruction::PtrToInt || U->user_empty())
+    return false;
+  for (User *Next : U->users()) {
+    auto *CB = dyn_cast<CallBase>(Next);
+    if (!CB || CB->getCalledOperand() == U ||
+        !isCoroSourceLocationIdentityCall(CB))
+      return false;
+  }
+  return true;
+}
+
+bool collectDirectCallers(Function *F, SmallVectorImpl<CallBase *> &Callers) {
+  if (!F)
+    return false;
+  for (User *U : F->users()) {
+    auto *CB = dyn_cast<CallBase>(U);
+    if (!CB) {
+      if (isCoroSourceLocationIdentityUse(U))
+        continue;
+      return false;
+    }
+    if (CB->getCalledOperand()->stripPointerCasts() != F)
+      return false;
+    Callers.push_back(CB);
+  }
+  return !Callers.empty();
+}
+
 bool hasOnlyReadUses(User *U, SmallPtrSetImpl<User *> &Seen,
                      bool FollowGlobalPointerLoads = false) {
   if (!Seen.insert(U).second)
@@ -254,8 +320,7 @@ bool hasOnlyReadUses(User *U, SmallPtrSetImpl<User *> &Seen,
     if (!Load->isSimple())
       return false;
     if (!FollowGlobalPointerLoads || !Load->getType()->isPointerTy() ||
-        !isa<GlobalVariable>(
-            Load->getPointerOperand()->stripPointerCasts()))
+        !isa<GlobalVariable>(Load->getPointerOperand()->stripPointerCasts()))
       return true;
     for (User *Next : Load->users()) {
       if (!hasOnlyReadUses(Next, Seen, false))
@@ -391,6 +456,30 @@ bool addIntegerChoice(SmallVectorImpl<uint64_t> &Choices, uint64_t Value) {
   return true;
 }
 
+bool collectIntegerChoicesFromFunctionAggregateArg(
+    ExtractValueInst *Extract, SmallVectorImpl<uint64_t> &Choices,
+    unsigned Depth) {
+  auto Index = singleExtractValueIndex(Extract);
+  auto *Arg =
+      Extract ? dyn_cast<Argument>(Extract->getAggregateOperand()) : nullptr;
+  if (!Index || !Arg || !Arg->getType()->isStructTy())
+    return false;
+
+  SmallVector<CallBase *, 8> Callers;
+  if (!collectDirectCallers(Arg->getParent(), Callers))
+    return false;
+  for (CallBase *CB : Callers) {
+    if (Arg->getArgNo() >= CB->arg_size())
+      return false;
+    Value *Actual = CB->getArgOperand(Arg->getArgNo());
+    SmallVector<unsigned, 1> Indices{*Index};
+    Value *Element = FindInsertedValue(Actual, Indices);
+    if (!Element || !collectIntegerChoices(Element, Choices, Depth + 1))
+      return false;
+  }
+  return true;
+}
+
 bool collectIntegerChoices(Value *V, SmallVectorImpl<uint64_t> &Choices,
                            unsigned Depth) {
   if (Depth > MaxStringAnalysisDepth)
@@ -400,6 +489,32 @@ bool collectIntegerChoices(Value *V, SmallVectorImpl<uint64_t> &Choices,
     if (C->isNegative())
       return false;
     return addIntegerChoice(Choices, C->getZExtValue());
+  }
+
+  if (auto *Extract = dyn_cast<ExtractValueInst>(V)) {
+    if (collectIntegerChoicesFromFunctionAggregateArg(Extract, Choices, Depth))
+      return true;
+  }
+
+  if (auto *Cmp = dyn_cast<ICmpInst>(V)) {
+    SmallVector<uint64_t, 4> LHSChoices;
+    SmallVector<uint64_t, 4> RHSChoices;
+    if (!collectIntegerChoices(Cmp->getOperand(0), LHSChoices, Depth + 1) ||
+        !collectIntegerChoices(Cmp->getOperand(1), RHSChoices, Depth + 1))
+      return false;
+    auto *IntegerTy = dyn_cast<IntegerType>(Cmp->getOperand(0)->getType());
+    if (!IntegerTy)
+      return false;
+    unsigned BitWidth = IntegerTy->getBitWidth();
+    for (uint64_t LHS : LHSChoices) {
+      for (uint64_t RHS : RHSChoices) {
+        bool Result = ICmpInst::compare(
+            APInt(BitWidth, LHS), APInt(BitWidth, RHS), Cmp->getPredicate());
+        if (!addIntegerChoice(Choices, Result ? 1 : 0))
+          return false;
+      }
+    }
+    return true;
   }
 
   if (auto *ZExt = dyn_cast<ZExtInst>(V)) {
@@ -580,15 +695,15 @@ bool collectIndexConstants(Value *Index, SmallVectorImpl<Constant *> &Constants,
   return true;
 }
 
-std::optional<uint64_t>
-firstIndexArrayBound(ArrayRef<Constant *> Bases, Type *ElemTy,
-                     const DataLayout &DL) {
+std::optional<uint64_t> firstIndexArrayBound(ArrayRef<Constant *> Bases,
+                                             Type *ElemTy,
+                                             const DataLayout &DL) {
   std::optional<uint64_t> Bound;
   for (Constant *Base : Bases) {
     int64_t Offset = 0;
     Value *Root = GetPointerBaseWithConstantOffset(Base, Offset, DL);
-    auto *GV = Root ? dyn_cast<GlobalVariable>(Root->stripPointerCasts())
-                    : nullptr;
+    auto *GV =
+        Root ? dyn_cast<GlobalVariable>(Root->stripPointerCasts()) : nullptr;
     auto *ArrayTy = GV ? dyn_cast<ArrayType>(GV->getValueType()) : nullptr;
     if (!ArrayTy || ArrayTy->getElementType() != ElemTy || Offset != 0)
       return std::nullopt;
@@ -886,13 +1001,7 @@ bool collectStringSetFromFunctionStringArg(Value *Ptr, Value *Len,
     return false;
 
   SmallVector<CallBase *, 8> Callers;
-  for (User *U : F->users()) {
-    auto *CB = dyn_cast<CallBase>(U);
-    if (!CB || CB->getCalledFunction() != F)
-      return false;
-    Callers.push_back(CB);
-  }
-  if (Callers.empty())
+  if (!collectDirectCallers(F, Callers))
     return false;
 
   for (CallBase *CB : Callers) {
@@ -900,7 +1009,8 @@ bool collectStringSetFromFunctionStringArg(Value *Ptr, Value *Len,
       return false;
     Value *CallPtr = CB->getArgOperand(PtrArgNo);
     Value *CallLen = CB->getArgOperand(LenArgNo);
-    if (!CallPtr->getType()->isPointerTy() || !CallLen->getType()->isIntegerTy())
+    if (!CallPtr->getType()->isPointerTy() ||
+        !CallLen->getType()->isIntegerTy())
       return false;
     if (!collectStringSet(CallPtr, CallLen, DL, Names, Depth + 1))
       return false;
@@ -921,16 +1031,12 @@ bool collectStringSetFromFunctionStringValueArg(
 
   unsigned ArgNo = Arg->getArgNo();
   SmallVector<CallBase *, 8> Callers;
-  for (User *U : F->users()) {
-    auto *CB = dyn_cast<CallBase>(U);
-    if (!CB || CB->getCalledFunction() != F || ArgNo >= CB->arg_size())
-      return false;
-    Callers.push_back(CB);
-  }
-  if (Callers.empty())
+  if (!collectDirectCallers(F, Callers))
     return false;
 
   for (CallBase *CB : Callers) {
+    if (ArgNo >= CB->arg_size())
+      return false;
     Value *CallValue = CB->getArgOperand(ArgNo);
     if (!CallValue->getType()->isStructTy() ||
         !collectStringSetFromStringValue(CallValue, DL, Names, Depth + 1))
@@ -944,13 +1050,14 @@ bool collectStringSetFromFunctionStringValueArg(
 // names remains visible to the MethodByName refinement without depending on
 // the inliner. Unknown or recursive return flows still fail closed through the
 // existing depth bound.
-bool collectStringSetFromDirectCallReturn(
-    CallBase *CB, const DataLayout &DL,
-    SmallVectorImpl<std::string> &Names, unsigned Depth) {
+bool collectStringSetFromDirectCallReturn(CallBase *CB, const DataLayout &DL,
+                                          SmallVectorImpl<std::string> &Names,
+                                          unsigned Depth) {
   if (!CB)
     return false;
 
-  auto *Callee = dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
+  auto *Callee =
+      dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
   if (!Callee || Callee->isDeclaration())
     return false;
 
@@ -966,6 +1073,58 @@ bool collectStringSetFromDirectCallReturn(
     SawReturn = true;
   }
   return SawReturn;
+}
+
+bool samePointerLocation(Value *LHS, Value *RHS, const DataLayout &DL) {
+  int64_t LHSOffset = 0;
+  int64_t RHSOffset = 0;
+  Value *LHSBase = GetPointerBaseWithConstantOffset(LHS, LHSOffset, DL);
+  Value *RHSBase = GetPointerBaseWithConstantOffset(RHS, RHSOffset, DL);
+  return LHSBase && LHSBase == RHSBase && LHSOffset == RHSOffset;
+}
+
+// Outcome-plain string helpers publish their value through one compiler-owned
+// result slot. Recover the nearest dominating StringCat transaction for a load
+// from that exact slot; any ambiguous producer leaves the generic reflect root
+// intact.
+bool collectStringSetFromStringCatOutcomeLoad(
+    LoadInst *Load, const DataLayout &DL, SmallVectorImpl<std::string> &Names,
+    unsigned Depth) {
+  if (!Load || !Load->isSimple())
+    return false;
+  Function *F = Load->getFunction();
+  if (!F)
+    return false;
+
+  DominatorTree DT(*F);
+  CallBase *Producer = nullptr;
+  for (BasicBlock &BB : *F) {
+    for (Instruction &I : BB) {
+      auto *CB = dyn_cast<CallBase>(&I);
+      if (!isRuntimeStringCatOutcome(CB) || CB->arg_size() < 4 ||
+          !samePointerLocation(CB->getArgOperand(1), Load->getPointerOperand(),
+                               DL) ||
+          !DT.dominates(CB, Load))
+        continue;
+      if (!Producer || DT.dominates(Producer, CB)) {
+        Producer = CB;
+        continue;
+      }
+      if (!DT.dominates(CB, Producer))
+        return false;
+    }
+  }
+  if (!Producer)
+    return false;
+
+  SmallVector<std::string, 4> Prefixes;
+  SmallVector<std::string, 4> Suffixes;
+  unsigned NextArgIndex = 3;
+  if (!consumeStringCallArgument(Producer, NextArgIndex, DL, Prefixes, Depth) ||
+      !consumeStringCallArgument(Producer, NextArgIndex, DL, Suffixes, Depth) ||
+      NextArgIndex != Producer->arg_size())
+    return false;
+  return addConcatenatedNames(Names, Prefixes, Suffixes);
 }
 
 bool collectStringSetFromStringValue(Value *StringValue, const DataLayout &DL,
@@ -989,6 +1148,8 @@ bool collectStringSetFromStringValue(Value *StringValue, const DataLayout &DL,
   if (auto *Load = dyn_cast<LoadInst>(StringValue)) {
     if (Constant *Folded = foldConstantLoad(Load, DL))
       return collectStringSetFromStringConstant(Folded, DL, Names, Depth + 1);
+    if (collectStringSetFromStringCatOutcomeLoad(Load, DL, Names, Depth))
+      return true;
   }
 
   if (collectStringSetFromFunctionStringValueArg(StringValue, DL, Names, Depth))
@@ -1032,6 +1193,55 @@ bool collectExtractedStringSet(Value *Ptr, Value *Len, const DataLayout &DL,
     return false;
   return collectStringSetFromStringValue(PtrExtract->getAggregateOperand(), DL,
                                          Names, Depth + 1);
+}
+
+// Recover a bounded view whose pointer originates in field zero of an
+// aggregate LLGo string. Coroutine lowering keeps source strings aggregate in
+// physical signatures, while slice lowering materializes the pointer offset
+// and result length separately. Resolve the original aggregate through its
+// direct callers, then apply the exact byte view.
+bool collectStringSetFromAggregatePointer(Value *Ptr, Value *Len,
+                                          const DataLayout &DL,
+                                          SmallVectorImpl<std::string> &Names,
+                                          unsigned Depth) {
+  int64_t Offset = 0;
+  Value *Base = GetPointerBaseWithConstantOffset(Ptr, Offset, DL);
+  auto *Extract =
+      Base ? dyn_cast<ExtractValueInst>(Base->stripPointerCasts()) : nullptr;
+  auto Index = singleExtractValueIndex(Extract);
+  if (Offset < 0 || !Index || *Index != 0)
+    return false;
+
+  SmallVector<std::string, 4> Sources;
+  if (!collectStringSetFromStringValue(Extract->getAggregateOperand(), DL,
+                                       Sources, Depth + 1))
+    return false;
+  SmallVector<uint64_t, 4> Lengths;
+  if (!collectIntegerChoices(Len, Lengths, Depth + 1))
+    return false;
+
+  uint64_t Start = static_cast<uint64_t>(Offset);
+  for (const std::string &Source : Sources) {
+    for (uint64_t Length : Lengths) {
+      if (Start > Source.size() || Length > Source.size() - Start ||
+          !addName(Names, StringRef(Source).substr(Start, Length)))
+        return false;
+    }
+  }
+  return true;
+}
+
+std::optional<bool> singleBooleanChoice(Value *Condition) {
+  SmallVector<uint64_t, 2> Choices;
+  if (!collectIntegerChoices(Condition, Choices) || Choices.empty())
+    return std::nullopt;
+  bool Result = Choices.front() != 0;
+  for (unsigned I = 1; I != Choices.size(); ++I) {
+    uint64_t Choice = Choices[I];
+    if ((Choice != 0) != Result)
+      return std::nullopt;
+  }
+  return Result;
 }
 
 // Collect every possible string from a lowered (ptr, len) pair.
@@ -1083,15 +1293,29 @@ bool collectStringSet(Value *Ptr, Value *Len, const DataLayout &DL,
   if (collectExtractedStringSet(Ptr, Len, DL, Names, Depth))
     return true;
 
+  if (collectStringSetFromAggregatePointer(Ptr, Len, DL, Names, Depth))
+    return true;
+
   auto *PtrSel = dyn_cast<SelectInst>(Ptr);
   auto *LenSel = dyn_cast<SelectInst>(Len);
   if (PtrSel && LenSel && PtrSel->getCondition() == LenSel->getCondition()) {
+    if (auto Choice = singleBooleanChoice(PtrSel->getCondition())) {
+      return collectStringSet(
+          *Choice ? PtrSel->getTrueValue() : PtrSel->getFalseValue(),
+          *Choice ? LenSel->getTrueValue() : LenSel->getFalseValue(), DL, Names,
+          Depth + 1);
+    }
     return collectStringSet(PtrSel->getTrueValue(), LenSel->getTrueValue(), DL,
                             Names, Depth + 1) &&
            collectStringSet(PtrSel->getFalseValue(), LenSel->getFalseValue(),
                             DL, Names, Depth + 1);
   }
   if (PtrSel && isa<ConstantInt>(Len)) {
+    if (auto Choice = singleBooleanChoice(PtrSel->getCondition())) {
+      return collectStringSet(*Choice ? PtrSel->getTrueValue()
+                                      : PtrSel->getFalseValue(),
+                              Len, DL, Names, Depth + 1);
+    }
     return collectStringSet(PtrSel->getTrueValue(), Len, DL, Names,
                             Depth + 1) &&
            collectStringSet(PtrSel->getFalseValue(), Len, DL, Names, Depth + 1);
@@ -1164,6 +1388,228 @@ std::optional<StringRef> checkedLoadTypeID(CallBase *CheckedLoad) {
   if (!TypeID)
     return std::nullopt;
   return TypeID->getString();
+}
+
+std::optional<StringRef> typeTestTypeID(CallBase *TypeTest) {
+  if (!TypeTest || TypeTest->arg_size() < 2)
+    return std::nullopt;
+  auto *Callee = TypeTest->getCalledFunction();
+  if (!Callee || Callee->getIntrinsicID() != Intrinsic::type_test)
+    return std::nullopt;
+  auto *MDValue = dyn_cast<MetadataAsValue>(TypeTest->getArgOperand(1));
+  auto *TypeID = MDValue ? dyn_cast<MDString>(MDValue->getMetadata()) : nullptr;
+  return TypeID ? std::optional<StringRef>(TypeID->getString()) : std::nullopt;
+}
+
+Constant *resolveStaticItabSlot(Value *Pointer, uint64_t ExtraOffset,
+                                StringRef TypeID, const DataLayout &DL) {
+  int64_t PointerOffset = 0;
+  Value *Base = GetPointerBaseWithConstantOffset(Pointer, PointerOffset, DL);
+  if (!Base || PointerOffset < 0)
+    return nullptr;
+  auto *GV = dyn_cast<GlobalVariable>(Base->stripPointerCasts());
+  if (!GV || !GV->getName().starts_with("_llgo_itab$") ||
+      !canReadGlobalInitializer(GV))
+    return nullptr;
+  uint64_t Offset = static_cast<uint64_t>(PointerOffset) + ExtraOffset;
+
+  bool HasMatchingSlot = false;
+  unsigned SlotKind = GV->getContext().getMDKindID(StaticItabSlotMetadata);
+  SmallVector<std::pair<unsigned, MDNode *>, 16> Metadata;
+  GV->getAllMetadata(Metadata);
+  for (auto [Kind, Node] : Metadata) {
+    if (Kind != SlotKind || Node->getNumOperands() < 2)
+      continue;
+    auto *OffsetMD = dyn_cast<ConstantAsMetadata>(Node->getOperand(0));
+    auto *ID = dyn_cast<MDString>(Node->getOperand(1));
+    auto *OffsetC =
+        OffsetMD ? dyn_cast<ConstantInt>(OffsetMD->getValue()) : nullptr;
+    if (OffsetC && ID && OffsetC->getZExtValue() == Offset &&
+        ID->getString() == TypeID) {
+      HasMatchingSlot = true;
+      break;
+    }
+  }
+  if (!HasMatchingSlot)
+    return nullptr;
+
+  Constant *Target = constantAtByteOffset(GV->getInitializer(), Offset,
+                                          Pointer->getType(), DL);
+  if (!Target || Target->isNullValue())
+    return nullptr;
+  return Target;
+}
+
+std::optional<uint64_t> checkedLoadOffset(CallBase *CheckedLoad) {
+  if (!CheckedLoad || CheckedLoad->arg_size() < 2)
+    return std::nullopt;
+  auto *Offset = dyn_cast<ConstantInt>(CheckedLoad->getArgOperand(1));
+  if (!Offset || Offset->isNegative())
+    return std::nullopt;
+  return Offset->getZExtValue();
+}
+
+Constant *collectStaticItabArgumentTarget(Argument *Arg,
+                                          ArrayRef<unsigned> ExtractIndices,
+                                          uint64_t PointerOffset,
+                                          uint64_t LoadOffset, StringRef TypeID,
+                                          const DataLayout &DL) {
+  Function *F = Arg->getParent();
+  if (!F->hasLocalLinkage())
+    return nullptr;
+  Constant *Target = nullptr;
+  bool SawCall = false;
+  for (User *U : F->users()) {
+    auto *CB = dyn_cast<CallBase>(U);
+    if (!CB || CB->getCalledOperand()->stripPointerCasts() != F ||
+        Arg->getArgNo() >= CB->arg_size())
+      return nullptr;
+    Value *Actual = CB->getArgOperand(Arg->getArgNo());
+    if (!ExtractIndices.empty()) {
+      Actual = FindInsertedValue(Actual, ExtractIndices);
+      if (!Actual)
+        return nullptr;
+    }
+    Constant *Slot =
+        resolveStaticItabSlot(Actual, PointerOffset + LoadOffset, TypeID, DL);
+    if (!Slot)
+      return nullptr;
+    Constant *Candidate = dyn_cast<Constant>(Slot->stripPointerCasts());
+    if (!Candidate)
+      return nullptr;
+    if (Target && Candidate != Target)
+      return nullptr;
+    Target = Candidate;
+    SawCall = true;
+  }
+  return SawCall ? Target : nullptr;
+}
+
+bool devirtualizeStaticItabCalls(Module &M, const DataLayout &DL) {
+  struct Replacement {
+    CallBase *CheckedLoad;
+    Constant *Target;
+  };
+  const bool Verbose = std::getenv("LLGO_LTO_PLUGIN_VERBOSE") != nullptr;
+  SmallVector<Replacement, 32> Candidates;
+  DenseMap<StringRef, unsigned> CheckedLoadsByTypeID;
+  DenseMap<StringRef, unsigned> TypeTestsByTypeID;
+  DenseMap<StringRef, unsigned> CandidatesByTypeID;
+  DenseMap<StringRef, SmallVector<CallBase *, 4>> CheckedLoadSitesByTypeID;
+  SmallPtrSet<CallBase *, 32> CandidateLoads;
+  for (Function &F : M) {
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        auto *CheckedLoad = dyn_cast<CallBase>(&I);
+        if (Verbose) {
+          if (auto TypeID = typeTestTypeID(CheckedLoad)) {
+            if (TypeID->starts_with("go.method.") &&
+                *TypeID != ReflectValueMethodTypeID &&
+                !TypeID->starts_with(ReflectValueMethodTypeIDPrefix) &&
+                *TypeID != ReflectTypeMethodTypeID &&
+                !TypeID->starts_with(ReflectTypeMethodTypeIDPrefix))
+              ++TypeTestsByTypeID[*TypeID];
+            continue;
+          }
+        }
+        auto TypeID = checkedLoadTypeID(CheckedLoad);
+        auto LoadOffset = checkedLoadOffset(CheckedLoad);
+        bool IsReflect =
+            TypeID && (*TypeID == ReflectValueMethodTypeID ||
+                       TypeID->starts_with(ReflectValueMethodTypeIDPrefix) ||
+                       *TypeID == ReflectTypeMethodTypeID ||
+                       TypeID->starts_with(ReflectTypeMethodTypeIDPrefix));
+        if (!TypeID || !TypeID->starts_with("go.method.") || IsReflect)
+          continue;
+        if (Verbose) {
+          ++CheckedLoadsByTypeID[*TypeID];
+          CheckedLoadSitesByTypeID[*TypeID].push_back(CheckedLoad);
+        }
+        if (!LoadOffset || CheckedLoad->arg_empty())
+          continue;
+        auto *ResultTy = dyn_cast<StructType>(CheckedLoad->getType());
+        if (!ResultTy || ResultTy->getNumElements() != 2)
+          continue;
+
+        Constant *Target = nullptr;
+        if (Constant *Slot = resolveStaticItabSlot(
+                CheckedLoad->getArgOperand(0), *LoadOffset, *TypeID, DL)) {
+          Target = Slot;
+        } else {
+          int64_t PointerOffset = 0;
+          Value *Base = GetPointerBaseWithConstantOffset(
+              CheckedLoad->getArgOperand(0), PointerOffset, DL);
+          SmallVector<unsigned, 4> ExtractIndices;
+          Value *ArgumentBase = Base ? Base->stripPointerCasts() : nullptr;
+          while (auto *Extract =
+                     dyn_cast_or_null<ExtractValueInst>(ArgumentBase)) {
+            ExtractIndices.insert(ExtractIndices.begin(), Extract->idx_begin(),
+                                  Extract->idx_end());
+            ArgumentBase = Extract->getAggregateOperand();
+          }
+          auto *Arg = PointerOffset >= 0
+                          ? dyn_cast_or_null<Argument>(ArgumentBase)
+                          : nullptr;
+          if (Arg) {
+            Target = collectStaticItabArgumentTarget(
+                Arg, ExtractIndices, static_cast<uint64_t>(PointerOffset),
+                *LoadOffset, *TypeID, DL);
+          }
+        }
+        if (Target) {
+          Candidates.push_back({CheckedLoad, Target});
+          if (Verbose) {
+            ++CandidatesByTypeID[*TypeID];
+            CandidateLoads.insert(CheckedLoad);
+          }
+        }
+      }
+    }
+  }
+
+  // Devirtualize each proven static-itab context independently. A remaining
+  // checked load or type test with the same signature-wide type ID still keeps
+  // the broad method root alive, but that must not prevent a known call site
+  // from becoming a direct call. Once the final dynamic use disappears, the
+  // type ID loses all IR users and the broad root goes away naturally.
+  if (Verbose) {
+    for (auto [TypeID, Total] : CheckedLoadsByTypeID) {
+      unsigned Count = CandidatesByTypeID.lookup(TypeID);
+      unsigned TypeTests = TypeTestsByTypeID.lookup(TypeID);
+      if (Count == Total && TypeTests == 0)
+        errs() << "llgo-lto-plugin: removed method root " << TypeID << " ("
+               << Count << " checked loads)\n";
+      else
+        errs() << "llgo-lto-plugin: kept method root " << TypeID
+               << " (resolved " << Count << " of " << Total
+               << " checked loads, " << TypeTests << " type tests)\n";
+      if ((Count != Total || TypeTests != 0) &&
+          (Total <= 16 || Count + 2 >= Total)) {
+        for (CallBase *CheckedLoad : CheckedLoadSitesByTypeID[TypeID]) {
+          if (CandidateLoads.contains(CheckedLoad))
+            continue;
+          errs() << "  unresolved in " << CheckedLoad->getFunction()->getName()
+                 << ": base=" << *CheckedLoad->getArgOperand(0) << '\n';
+        }
+      }
+    }
+  }
+
+  for (Replacement &R : Candidates) {
+    CallBase *CheckedLoad = R.CheckedLoad;
+    Constant *Target = R.Target;
+    auto *ResultTy = cast<StructType>(CheckedLoad->getType());
+    IRBuilder<> B(CheckedLoad);
+    Value *Result = PoisonValue::get(ResultTy);
+    Result = B.CreateInsertValue(Result, Target, {0});
+    Result = B.CreateInsertValue(Result, B.getTrue(), {1});
+    CheckedLoad->replaceAllUsesWith(Result);
+    CheckedLoad->eraseFromParent();
+  }
+  if (!Candidates.empty() && Verbose)
+    errs() << "llgo-lto-plugin: devirtualized " << Candidates.size()
+           << " static itab calls\n";
+  return !Candidates.empty();
 }
 
 // Remove the original broad marker:
@@ -1243,6 +1689,430 @@ bool isReflectMethodCheckedLoad(CallBase *CheckedLoad,
   return TypeID && *TypeID == GenericTypeID;
 }
 
+bool isReflectTypeMethodCheckedLoad(CallBase *CheckedLoad) {
+  auto TypeID = checkedLoadTypeID(CheckedLoad);
+  return TypeID && (*TypeID == ReflectTypeMethodTypeID ||
+                    TypeID->starts_with(ReflectTypeMethodTypeIDPrefix));
+}
+
+std::optional<uint64_t> aggregateByteOffset(Type *Ty,
+                                            ArrayRef<unsigned> Indices,
+                                            const DataLayout &DL) {
+  uint64_t Offset = 0;
+  for (unsigned Index : Indices) {
+    if (auto *StructTy = dyn_cast<StructType>(Ty)) {
+      if (!StructTy->isSized() || Index >= StructTy->getNumElements())
+        return std::nullopt;
+      Offset += DL.getStructLayout(StructTy)->getElementOffset(Index);
+      Ty = StructTy->getElementType(Index);
+      continue;
+    }
+    if (auto *ArrayTy = dyn_cast<ArrayType>(Ty)) {
+      if (Index >= ArrayTy->getNumElements())
+        return std::nullopt;
+      Type *ElemTy = ArrayTy->getElementType();
+      Offset += Index * DL.getTypeAllocSize(ElemTy);
+      Ty = ElemTy;
+      continue;
+    }
+    return std::nullopt;
+  }
+  return Offset;
+}
+
+struct ReflectFuncStorage {
+  AllocaInst *Base;
+  uint64_t Offset;
+  uint64_t Size;
+};
+
+bool regionsOverlap(uint64_t AOffset, uint64_t ASize, uint64_t BOffset,
+                    uint64_t BSize) {
+  if (ASize == 0 || BSize == 0)
+    return false;
+  if (AOffset < BOffset)
+    return BOffset - AOffset < ASize;
+  return AOffset - BOffset < BSize;
+}
+
+// Recover the byte occupied by Method.Func's code pointer. The frontend emits
+// the checked-load from an extract of a value loaded out of the Method result,
+// so this walk is independent of the concrete Go ABI aggregate shape.
+std::optional<ReflectFuncStorage> findReflectFuncStorage(CallBase *CheckedLoad,
+                                                         const DataLayout &DL) {
+  if (!isReflectTypeMethodCheckedLoad(CheckedLoad) || CheckedLoad->arg_empty())
+    return std::nullopt;
+
+  Value *V = CheckedLoad->getArgOperand(0);
+  uint64_t Offset = 0;
+  uint64_t Size = DL.getTypeStoreSize(V->getType());
+  for (unsigned Depth = 0; Depth != MaxReflectFuncAnalysisDepth; ++Depth) {
+    if (auto *Cast = dyn_cast<CastInst>(V)) {
+      if (!isa<BitCastInst>(Cast) && !isa<AddrSpaceCastInst>(Cast))
+        return std::nullopt;
+      if (DL.getTypeStoreSize(Cast->getType()) !=
+          DL.getTypeStoreSize(Cast->getOperand(0)->getType()))
+        return std::nullopt;
+      V = Cast->getOperand(0);
+      continue;
+    }
+    if (auto *Extract = dyn_cast<ExtractElementInst>(V)) {
+      auto *Index = dyn_cast<ConstantInt>(Extract->getIndexOperand());
+      auto *VectorTy =
+          dyn_cast<FixedVectorType>(Extract->getVectorOperand()->getType());
+      if (!Index || Index->isNegative() || !VectorTy ||
+          Index->getZExtValue() >= VectorTy->getNumElements())
+        return std::nullopt;
+      Offset += Index->getZExtValue() *
+                DL.getTypeAllocSize(VectorTy->getElementType());
+      V = Extract->getVectorOperand();
+      continue;
+    }
+    if (auto *Extract = dyn_cast<ExtractValueInst>(V)) {
+      auto ExtractOffset = aggregateByteOffset(
+          Extract->getAggregateOperand()->getType(), Extract->getIndices(), DL);
+      if (!ExtractOffset)
+        return std::nullopt;
+      Offset += *ExtractOffset;
+      V = Extract->getAggregateOperand();
+      continue;
+    }
+    if (auto *Insert = dyn_cast<InsertValueInst>(V)) {
+      auto InsertOffset =
+          aggregateByteOffset(Insert->getType(), Insert->getIndices(), DL);
+      if (!InsertOffset)
+        return std::nullopt;
+      uint64_t InsertSize =
+          DL.getTypeStoreSize(Insert->getInsertedValueOperand()->getType());
+      if (regionsOverlap(Offset, Size, *InsertOffset, InsertSize)) {
+        if (*InsertOffset > Offset || Size > InsertSize ||
+            Offset - *InsertOffset > InsertSize - Size)
+          return std::nullopt;
+        Offset -= *InsertOffset;
+        V = Insert->getInsertedValueOperand();
+      } else {
+        V = Insert->getAggregateOperand();
+      }
+      continue;
+    }
+    if (auto *Freeze = dyn_cast<FreezeInst>(V)) {
+      V = Freeze->getOperand(0);
+      continue;
+    }
+    auto *Load = dyn_cast<LoadInst>(V);
+    if (!Load || !Load->isSimple())
+      return std::nullopt;
+
+    uint64_t LoadSize = DL.getTypeStoreSize(Load->getType());
+    if (Offset > LoadSize || Size > LoadSize - Offset)
+      return std::nullopt;
+    int64_t LoadOffset = 0;
+    Value *Base = GetPointerBaseWithConstantOffset(Load->getPointerOperand(),
+                                                   LoadOffset, DL);
+    auto *Alloca =
+        Base ? dyn_cast<AllocaInst>(Base->stripPointerCasts()) : nullptr;
+    if (!Alloca || Alloca->isArrayAllocation() || LoadOffset < 0)
+      return std::nullopt;
+    uint64_t AllocaSize = DL.getTypeAllocSize(Alloca->getAllocatedType());
+    uint64_t FinalOffset = static_cast<uint64_t>(LoadOffset);
+    if (FinalOffset > AllocaSize || Offset > AllocaSize - FinalOffset ||
+        Size > AllocaSize - FinalOffset - Offset)
+      return std::nullopt;
+    return ReflectFuncStorage{Alloca, FinalOffset + Offset, Size};
+  }
+  return std::nullopt;
+}
+
+struct TrackedReflectFuncRegion {
+  Value *Base;
+  uint64_t Offset;
+  uint64_t Size;
+};
+
+bool markReflectFuncRegionSeen(SmallVectorImpl<TrackedReflectFuncRegion> &Seen,
+                               Value *Base, uint64_t Offset, uint64_t Size) {
+  for (const TrackedReflectFuncRegion &Region : Seen) {
+    if (Region.Base == Base && Region.Offset == Offset && Region.Size == Size)
+      return false;
+  }
+  Seen.push_back({Base, Offset, Size});
+  return true;
+}
+
+// Follow only the bytes containing Method.Func's code pointer. Loads turn a
+// storage region into an SSA-value region; local stores turn it back into a
+// storage region. Extracts of sibling Method fields do not overlap and are
+// ignored. Any call, return, non-local store, pointer escape, non-constant
+// offset, or unrecognized IR shape fails closed and keeps the checked-load.
+class ReflectFuncUseAnalysis {
+  const DataLayout &DL;
+  SmallVector<TrackedReflectFuncRegion, 32> SeenStorage;
+  SmallVector<TrackedReflectFuncRegion, 64> SeenValues;
+
+  bool analyzeValue(Value *V, uint64_t Offset, uint64_t Size, unsigned Depth) {
+    if (Depth > MaxReflectFuncAnalysisDepth)
+      return false;
+    if (!markReflectFuncRegionSeen(SeenValues, V, Offset, Size))
+      return true;
+
+    for (User *U : V->users()) {
+      if (auto *Extract = dyn_cast<ExtractElementInst>(U)) {
+        if (Extract->getVectorOperand() != V)
+          return false;
+        auto *Index = dyn_cast<ConstantInt>(Extract->getIndexOperand());
+        auto *VectorTy = dyn_cast<FixedVectorType>(V->getType());
+        if (!Index || Index->isNegative() || !VectorTy ||
+            Index->getZExtValue() >= VectorTy->getNumElements())
+          return false;
+        uint64_t ElemOffset = Index->getZExtValue() *
+                              DL.getTypeAllocSize(VectorTy->getElementType());
+        uint64_t ElemSize = DL.getTypeStoreSize(Extract->getType());
+        if (!regionsOverlap(Offset, Size, ElemOffset, ElemSize))
+          continue;
+        uint64_t Start = std::max(Offset, ElemOffset);
+        uint64_t End = std::min(Offset + Size, ElemOffset + ElemSize);
+        if (!analyzeValue(Extract, Start - ElemOffset, End - Start, Depth + 1))
+          return false;
+        continue;
+      }
+
+      if (auto *Extract = dyn_cast<ExtractValueInst>(U)) {
+        if (Extract->getAggregateOperand() != V)
+          return false;
+        auto ElemOffset =
+            aggregateByteOffset(V->getType(), Extract->getIndices(), DL);
+        if (!ElemOffset)
+          return false;
+        uint64_t ElemSize = DL.getTypeStoreSize(Extract->getType());
+        if (!regionsOverlap(Offset, Size, *ElemOffset, ElemSize))
+          continue;
+        uint64_t Start = std::max(Offset, *ElemOffset);
+        uint64_t End = std::min(Offset + Size, *ElemOffset + ElemSize);
+        if (!analyzeValue(Extract, Start - *ElemOffset, End - Start, Depth + 1))
+          return false;
+        continue;
+      }
+
+      if (auto *Insert = dyn_cast<InsertValueInst>(U)) {
+        auto ElemOffset =
+            aggregateByteOffset(Insert->getType(), Insert->getIndices(), DL);
+        if (!ElemOffset)
+          return false;
+        uint64_t ElemSize =
+            DL.getTypeStoreSize(Insert->getInsertedValueOperand()->getType());
+        if (Insert->getAggregateOperand() == V) {
+          if (!regionsOverlap(Offset, Size, *ElemOffset, ElemSize)) {
+            if (!analyzeValue(Insert, Offset, Size, Depth + 1))
+              return false;
+          } else if (!(*ElemOffset <= Offset &&
+                       Offset + Size <= *ElemOffset + ElemSize)) {
+            return false;
+          }
+          continue;
+        }
+        if (Insert->getInsertedValueOperand() == V) {
+          if (!analyzeValue(Insert, *ElemOffset + Offset, Size, Depth + 1))
+            return false;
+          continue;
+        }
+        return false;
+      }
+
+      if (auto *Store = dyn_cast<StoreInst>(U)) {
+        if (Store->getValueOperand() != V || !Store->isSimple())
+          return false;
+        int64_t StoreOffset = 0;
+        Value *StoreBase = GetPointerBaseWithConstantOffset(
+            Store->getPointerOperand(), StoreOffset, DL);
+        auto *Alloca =
+            StoreBase ? dyn_cast<AllocaInst>(StoreBase->stripPointerCasts())
+                      : nullptr;
+        if (!Alloca || Alloca->isArrayAllocation() || StoreOffset < 0)
+          return false;
+        uint64_t DestOffset = static_cast<uint64_t>(StoreOffset);
+        uint64_t AllocaSize = DL.getTypeAllocSize(Alloca->getAllocatedType());
+        if (DestOffset > AllocaSize || Offset > AllocaSize - DestOffset ||
+            Size > AllocaSize - DestOffset - Offset ||
+            !analyzeStorage(Alloca, DestOffset + Offset, Size, Depth + 1))
+          return false;
+        continue;
+      }
+
+      if (auto *Cast = dyn_cast<CastInst>(U)) {
+        if ((!isa<BitCastInst>(Cast) && !isa<AddrSpaceCastInst>(Cast)) ||
+            DL.getTypeStoreSize(Cast->getType()) !=
+                DL.getTypeStoreSize(V->getType()) ||
+            !analyzeValue(Cast, Offset, Size, Depth + 1))
+          return false;
+        continue;
+      }
+      if (auto *Freeze = dyn_cast<FreezeInst>(U)) {
+        if (!analyzeValue(Freeze, Offset, Size, Depth + 1))
+          return false;
+        continue;
+      }
+      if (auto *Phi = dyn_cast<PHINode>(U)) {
+        if (!analyzeValue(Phi, Offset, Size, Depth + 1))
+          return false;
+        continue;
+      }
+      if (auto *Select = dyn_cast<SelectInst>(U)) {
+        if ((Select->getTrueValue() != V && Select->getFalseValue() != V) ||
+            !analyzeValue(Select, Offset, Size, Depth + 1))
+          return false;
+        continue;
+      }
+
+      if (auto *CB = dyn_cast<CallBase>(U)) {
+        if (auto *II = dyn_cast<IntrinsicInst>(CB);
+            II && II->getIntrinsicID() == Intrinsic::fake_use)
+          continue;
+        if (!CB->arg_empty() && CB->getArgOperand(0) == V &&
+            isReflectTypeMethodCheckedLoad(CB))
+          continue;
+        return false;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  bool analyzeStoragePointer(Value *Ptr, AllocaInst *Base, uint64_t Offset,
+                             uint64_t Size,
+                             SmallPtrSetImpl<Value *> &SeenPointers,
+                             unsigned Depth) {
+    if (Depth > MaxReflectFuncAnalysisDepth)
+      return false;
+    if (!SeenPointers.insert(Ptr).second)
+      return true;
+
+    for (User *U : Ptr->users()) {
+      if (isa<GetElementPtrInst>(U) || isa<BitCastInst>(U) ||
+          isa<AddrSpaceCastInst>(U)) {
+        auto *Derived = cast<Value>(U);
+        int64_t DerivedOffset = 0;
+        Value *DerivedBase =
+            GetPointerBaseWithConstantOffset(Derived, DerivedOffset, DL);
+        if (!DerivedBase || DerivedBase->stripPointerCasts() != Base ||
+            DerivedOffset < 0 ||
+            !analyzeStoragePointer(Derived, Base, Offset, Size, SeenPointers,
+                                   Depth + 1))
+          return false;
+        continue;
+      }
+
+      if (auto *Load = dyn_cast<LoadInst>(U)) {
+        if (Load->getPointerOperand() != Ptr || !Load->isSimple())
+          return false;
+        int64_t LoadOffset = 0;
+        Value *LoadBase = GetPointerBaseWithConstantOffset(
+            Load->getPointerOperand(), LoadOffset, DL);
+        if (!LoadBase || LoadBase->stripPointerCasts() != Base ||
+            LoadOffset < 0)
+          return false;
+        uint64_t LoadStart = static_cast<uint64_t>(LoadOffset);
+        uint64_t LoadSize = DL.getTypeStoreSize(Load->getType());
+        if (!regionsOverlap(Offset, Size, LoadStart, LoadSize))
+          continue;
+        uint64_t Start = std::max(Offset, LoadStart);
+        uint64_t End = std::min(Offset + Size, LoadStart + LoadSize);
+        if (!analyzeValue(Load, Start - LoadStart, End - Start, Depth + 1))
+          return false;
+        continue;
+      }
+
+      if (auto *Store = dyn_cast<StoreInst>(U)) {
+        if (Store->getPointerOperand() == Ptr &&
+            Store->getValueOperand() != Ptr && Store->isSimple())
+          continue;
+        return false;
+      }
+
+      if (auto *II = dyn_cast<IntrinsicInst>(U)) {
+        if (II->getIntrinsicID() == Intrinsic::lifetime_start ||
+            II->getIntrinsicID() == Intrinsic::lifetime_end ||
+            II->getIntrinsicID() == Intrinsic::fake_use)
+          continue;
+      }
+
+      if (auto *CB = dyn_cast<CallBase>(U)) {
+        if (CB->getCalledOperand() == Ptr)
+          return false;
+        bool HasResultUse = false;
+        bool OnlyResultUses = true;
+        for (unsigned I = 0, E = CB->arg_size(); I != E; ++I) {
+          if (CB->getArgOperand(I) == Ptr) {
+            Attribute ResultAttr =
+                CB->getParamAttr(I, ReflectMethodByNameResultAttr);
+            if (!CB->paramHasAttr(I, Attribute::StructRet) &&
+                !ResultAttr.isStringAttribute()) {
+              OnlyResultUses = false;
+              break;
+            }
+            HasResultUse = true;
+          }
+        }
+        if (HasResultUse && OnlyResultUses)
+          continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  bool analyzeStorage(AllocaInst *Base, uint64_t Offset, uint64_t Size,
+                      unsigned Depth) {
+    if (Depth > MaxReflectFuncAnalysisDepth)
+      return false;
+    if (!markReflectFuncRegionSeen(SeenStorage, Base, Offset, Size))
+      return true;
+    SmallPtrSet<Value *, 32> SeenPointers;
+    return analyzeStoragePointer(Base, Base, Offset, Size, SeenPointers,
+                                 Depth + 1);
+  }
+
+public:
+  explicit ReflectFuncUseAnalysis(const DataLayout &DL) : DL(DL) {}
+
+  bool isUnobserved(const ReflectFuncStorage &Storage) {
+    return analyzeStorage(Storage.Base, Storage.Offset, Storage.Size, 0);
+  }
+};
+
+bool eraseUnobservedReflectTypeMethodFuncs(Module &M, const DataLayout &DL) {
+  SmallVector<CallBase *, 16> CheckedLoads;
+  for (Function &F : M) {
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        auto *CB = dyn_cast<CallBase>(&I);
+        if (isReflectTypeMethodCheckedLoad(CB))
+          CheckedLoads.push_back(CB);
+      }
+    }
+  }
+
+  SmallVector<CallBase *, 16> ToErase;
+  for (CallBase *CheckedLoad : CheckedLoads) {
+    auto Storage = findReflectFuncStorage(CheckedLoad, DL);
+    if (!Storage)
+      continue;
+    ReflectFuncUseAnalysis Analysis(DL);
+    if (Analysis.isUnobserved(*Storage))
+      ToErase.push_back(CheckedLoad);
+  }
+
+  for (CallBase *CheckedLoad : ToErase) {
+    if (!eraseGenericCheckedLoad(CheckedLoad))
+      report_fatal_error(
+          "llgo-lto-plugin: failed to erase unobserved reflect Method.Func "
+          "check");
+  }
+  if (!ToErase.empty() && std::getenv("LLGO_LTO_PLUGIN_VERBOSE"))
+    errs() << "llgo-lto-plugin: erased " << ToErase.size()
+           << " unobserved reflect Type Method.Func checks\n";
+  return !ToErase.empty();
+}
+
 Value *getSRetArg(CallBase *CB) {
   for (unsigned I = 0, E = CB->arg_size(); I != E; ++I) {
     if (CB->paramHasAttr(I, Attribute::StructRet))
@@ -1253,6 +2123,15 @@ Value *getSRetArg(CallBase *CB) {
 
 Value *getSRetStorage(CallBase *CB) {
   Value *SRet = getSRetArg(CB);
+  if (!SRet) {
+    for (unsigned I = 0, E = CB->arg_size(); I != E; ++I) {
+      Attribute Attr = CB->getParamAttr(I, ReflectMethodByNameResultAttr);
+      if (Attr.isStringAttribute()) {
+        SRet = CB->getArgOperand(I);
+        break;
+      }
+    }
+  }
   return SRet ? SRet->stripPointerCasts() : nullptr;
 }
 
@@ -1311,6 +2190,10 @@ void collectSRetReflectMethodCheckedLoads(
 class LLGOLTOPreGlobalDCEPass : public PassInfoMixin<LLGOLTOPreGlobalDCEPass> {
 public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
+    const DataLayout &DL = M.getDataLayout();
+    bool Changed = devirtualizeStaticItabCalls(M, DL);
+    Changed |= eraseUnobservedReflectTypeMethodFuncs(M, DL);
+
     SmallVector<CallBase *, 16> Calls;
     for (Function &F : M) {
       for (BasicBlock &BB : F) {
@@ -1323,8 +2206,6 @@ public:
       }
     }
 
-    bool Changed = false;
-    const DataLayout &DL = M.getDataLayout();
     DenseMap<CallBase *, Value *> SRetStorageByCall;
     DenseMap<Value *, SmallVector<CallBase *, 4>> CallsBySRetStorage;
     for (CallBase *ReflectCall : Calls) {

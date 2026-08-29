@@ -32,59 +32,46 @@ runs:
         set -euo pipefail
 
         llvm_major="${{ inputs.llvm-version }}"
-        case "$llvm_major" in
-          19)
-            llvm_version=19.1.7
-            package_version=19.1.7-1
-            ;;
-          *)
-            echo "unsupported Windows LLVM version: $llvm_major" >&2
-            exit 1
-            ;;
-        esac
+        if [[ "$llvm_major" != 22 ]]; then
+          echo "unsupported Windows LLVM version: $llvm_major; LLGo requires LLVM 22" >&2
+          exit 1
+        fi
 
-        repo=https://repo.msys2.org/mingw/clang64
         prefix=mingw-w64-clang-x86_64
         packages=(
-          "clang-$package_version"
-          "clang-libs-$package_version"
-          "compiler-rt-$package_version"
-          "llvm-$package_version"
-          "llvm-libs-$package_version"
-          "lld-$package_version"
-          "libc++-$package_version"
-          "libunwind-$package_version"
-          "gettext-runtime-0.22.5-2"
-          "libffi-3.4.6-1"
-          "libiconv-1.17-4"
-          "libxml2-2.12.9-2"
-          "xz-5.6.3-3"
-          "zlib-1.3.1-1"
-          "zstd-1.5.6-2"
+          clang
+          clang-libs
+          compiler-rt
+          llvm
+          llvm-libs
+          lld
+          libc++
+          libunwind
         )
-        urls=()
+        toolchain_packages=()
         for package in "${packages[@]}"; do
-          urls+=("$repo/$prefix-$package-any.pkg.tar.zst")
+          toolchain_packages+=("$prefix-$package")
         done
-
-        # LLVM 19 packages predate MSYS2's compiler-runtime dependency rename
-        # from gcc-libs to cc-libs. libc++ 19 already supplies the runtime, so
-        # satisfy only the renamed package metadata while installing the
-        # archived, mutually compatible package set.
-        assumed_cc_runtime="$prefix-cc-libs=$llvm_version"
-        pacman --noconfirm -U \
-          --assume-installed "$assumed_cc_runtime" \
-          "${urls[@]}"
         pacman --noconfirm -S --needed \
-          --assume-installed "$assumed_cc_runtime" \
-          "$prefix-pkgconf"
+          "${toolchain_packages[@]}" \
+          "$prefix-pkgconf" \
+          "$prefix-sqlite3" \
+          "$prefix-libuv" \
+          "$prefix-gc" \
+          "$prefix-libatomic_ops" \
+          "$prefix-cjson" \
+          make
 
         for package in clang clang-libs compiler-rt llvm llvm-libs lld libc++ libunwind; do
-          installed="$(pacman -Q "$prefix-$package" | awk '{print $2}')"
-          if [[ "$installed" != "$package_version" ]]; then
-            echo "expected $package $package_version, got $installed" >&2
-            exit 1
-          fi
+          pacman -Q "$prefix-$package"
+        done
+        llvm_version="$(llvm-config --version | tr -d '\r')"
+        if [[ "${llvm_version%%.*}" != "$llvm_major" ]]; then
+          echo "expected LLVM $llvm_major, got $llvm_version" >&2
+          exit 1
+        fi
+        for package in libuv gc libatomic_ops cjson; do
+          pacman -Q "$prefix-$package"
         done
 
         # The released LLVM binding discovers its host flags through
@@ -111,16 +98,22 @@ runs:
           "Libs: $ldflags" \
           > "$pc_dir/llvm-$llvm_major.pc"
 
+        # setup-msys2 configures its dedicated bash shell, but a later native
+        # PowerShell step would otherwise fall back to Strawberry Perl's
+        # pkg-config and miss the CLANG64 metadata. Export native path
+        # spellings so every caller of this composite action resolves the same
+        # compiler and package database, independent of its shell.
+        mingw_bin="$(cygpath -w "$MINGW_PREFIX/bin")"
+        pc_dir_windows="$(cygpath -w "$pc_dir")"
+        printf '%s\n' "$mingw_bin" >> "$GITHUB_PATH"
+
         {
           echo "CC=clang"
           echo "CXX=clang++"
           echo "CGO_ENABLED=1"
+          echo "PKG_CONFIG_PATH=$pc_dir_windows"
         } >> "$GITHUB_ENV"
 
-        if [[ "$(llvm-config --version)" != "$llvm_version" ]]; then
-          echo "expected LLVM $llvm_version, got $(llvm-config --version)" >&2
-          exit 1
-        fi
         pkg-config --modversion "llvm-$llvm_major"
 
     - name: Configure Windows SDK and MSVC tools
@@ -132,14 +125,12 @@ runs:
         $ErrorActionPreference = "Stop"
 
         $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-        # LLVM 19 predates the Visual Studio 18 STL compatibility floor. Keep
-        # this pinned lane on VS 2022 instead of selecting a newer toolset
-        # merely because the runner image also happens to contain one.
+        # The Windows lane intentionally targets the VS 2022 ABI and SDK.
         $installPath = & $vswhere -latest -products * -version '[17.0,18.0)' `
           -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
           -property installationPath
         if (-not $installPath) {
-          throw "Visual Studio 2022 C++ tools required by LLVM 19 were not found"
+          throw "Visual Studio 2022 C++ tools required by LLVM 22 were not found"
         }
         Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
         Enter-VsDevShell -VsInstallPath $installPath `
@@ -165,22 +156,29 @@ runs:
             Add-Content -Encoding utf8 $env:GITHUB_ENV "$name=$value"
           }
         }
-        @("cl.exe", "lib.exe", "link.exe", "rc.exe", "mt.exe") |
+        # CMake's NMake generator used by WAMR needs nmake in later workflow
+        # steps; Enter-VsDevShell only updates this action process.
+        @("cl.exe", "lib.exe", "link.exe", "nmake.exe", "rc.exe", "mt.exe") |
           ForEach-Object { Split-Path (Get-Command $_).Source } |
           Select-Object -Unique |
           ForEach-Object { Add-Content -Encoding utf8 $env:GITHUB_PATH $_ }
+
+        # LLGo uses MSYS2's GNU tar+xz to unpack the large ESP toolchain in
+        # about a minute; Windows' bundled bsdtar can exceed 25 minutes on a
+        # hosted runner. Keep the location explicit for native Go processes.
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "LLGO_MSYS2_LOCATION=$env:MSYS2_LOCATION"
 
         # MSYS2 stores compiler-rt under its GNU archive name. Clang's MSVC
         # target searches the equivalent target-specific COFF layout, so make
         # the same archive visible there without changing its ABI or contents.
         $clang = Join-Path $env:MSYS2_LOCATION "clang64\bin\clang.exe"
         if (-not (Test-Path $clang)) {
-          throw "LLVM 19 clang was not found at $clang"
+          throw "LLVM 22 clang was not found at $clang"
         }
         $resourceDir = (& $clang -print-resource-dir).Trim()
         $gnuBuiltins = Join-Path $resourceDir "lib\windows\libclang_rt.builtins-x86_64.a"
         if (-not (Test-Path $gnuBuiltins)) {
-          throw "LLVM 19 compiler-rt archive was not found at $gnuBuiltins"
+          throw "LLVM 22 compiler-rt archive was not found at $gnuBuiltins"
         }
         $msvcRuntimeDir = Join-Path $resourceDir "lib\x86_64-pc-windows-msvc"
         New-Item -ItemType Directory -Force $msvcRuntimeDir | Out-Null

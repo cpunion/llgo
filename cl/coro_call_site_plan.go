@@ -69,7 +69,7 @@ func classifyCoroCallArgumentsBorrowedUntilCompletion(
 	if err != nil {
 		return false, fmt.Errorf("freeze C argument lifetime for %q: %w", callee.Name(), err)
 	}
-	if shape.kind != cFunc {
+	if !isNativeFuncKind(shape.kind) {
 		return false, nil
 	}
 	parsed, present, err := coroCallableContractCertificateFor(callee)

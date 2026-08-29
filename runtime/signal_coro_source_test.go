@@ -286,22 +286,25 @@ func TestRuntimeCoroResumeBoundaryUsesNativeActivationStorage(t *testing.T) {
 func TestRuntimeSignalSourceSelectionUsesCompleteNativeCapability(t *testing.T) {
 	native := []string{"llgo", "llgo_coro", "llgo_coro_native_pipe", "llgo_coro_native_timer"}
 	tests := []struct {
-		name      string
-		goos      string
-		buildTags []string
-		legacy    bool
-		coro      bool
+		name         string
+		goos         string
+		buildTags    []string
+		legacySignal bool
+		legacyFault  bool
+		coro         bool
 	}{
-		{name: "ordinary linux", goos: "linux", legacy: true},
-		{name: "ordinary darwin", goos: "darwin", legacy: true},
-		{name: "partial coroutine profile", goos: "linux", buildTags: []string{"llgo", "llgo_coro"}, legacy: true},
-		{name: "missing pipe", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_native_timer"}, legacy: true},
-		{name: "missing timer", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_native_pipe"}, legacy: true},
+		{name: "ordinary linux", goos: "linux", legacySignal: true, legacyFault: true},
+		{name: "ordinary darwin", goos: "darwin", legacySignal: true, legacyFault: true},
+		{name: "partial coroutine profile", goos: "linux", buildTags: []string{"llgo", "llgo_coro"}, legacySignal: true, legacyFault: true},
+		{name: "missing pipe", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_native_timer"}, legacySignal: true, legacyFault: true},
+		{name: "missing timer", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_native_pipe"}, legacySignal: true, legacyFault: true},
 		{name: "complete linux", goos: "linux", buildTags: native, coro: true},
 		{name: "complete darwin", goos: "darwin", buildTags: native, coro: true},
-		{name: "adapter selects legacy", goos: "linux", buildTags: append(slices.Clone(native), "coro_runtime_adapter_test"), legacy: true},
+		{name: "adapter selects legacy", goos: "linux", buildTags: append(slices.Clone(native), "coro_runtime_adapter_test"), legacySignal: true, legacyFault: true},
 		{name: "baremetal owns signals", goos: "linux", buildTags: append(slices.Clone(native), "baremetal")},
-		{name: "unsupported target keeps legacy", goos: "windows", buildTags: native, legacy: true},
+		// Windows keeps the legacy signal facade but owns hardware faults through
+		// its vectored-exception implementation instead of fault_unwind_llgo.go.
+		{name: "windows owns faults", goos: "windows", buildTags: native, legacySignal: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -310,9 +313,9 @@ func TestRuntimeSignalSourceSelectionUsesCompleteNativeCapability(t *testing.T) 
 			ctx.GOARCH = "amd64"
 			ctx.BuildTags = slices.Clone(test.buildTags)
 			for file, want := range map[string]bool{
-				filepath.Base(runtimeSignalLegacySource): test.legacy,
+				filepath.Base(runtimeSignalLegacySource): test.legacySignal,
 				filepath.Base(runtimeSignalCoroSource):   test.coro,
-				filepath.Base(runtimeFaultLegacySource):  test.legacy,
+				filepath.Base(runtimeFaultLegacySource):  test.legacyFault,
 				filepath.Base(runtimeFaultCoroSource):    test.coro,
 			} {
 				got, err := ctx.MatchFile(filepath.Dir(runtimeSignalCoroSource), file)

@@ -1,9 +1,6 @@
 // LITTEST
 package main
 
-// Bind the four messages so the checks below prove which defer/panic payload
-// flows through each lowering path without depending on numbered globals.
-
 func main() {
 	// The stackless cleanup state machine invokes defer 2 first, then transfers
 	// the replacement panic through defer 1's recover frame. No native

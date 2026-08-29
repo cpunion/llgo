@@ -327,12 +327,13 @@ func testFuncInfoMetadataDoesNotPreserveFunctions(t *testing.T) {
 
 	pkg.EmitFuncInfo("main.unused", "main.unused", "unused.go", 7, 1)
 	pkg.EmitFuncInfo("main.negative", "main.negative", "negative.go", -7, -1)
+	pkg.EmitFuncInfoFlags("main.wrapper", "main.wrapper", "wrapper.go", 9, 2, FuncInfoFlagWrapper)
 	ir := pkg.String()
 
 	if !strings.Contains(ir, `!llgo.funcinfo = !{!`) {
 		t.Fatalf("missing %s metadata:\n%s", FuncInfoMetadataName, ir)
 	}
-	for _, want := range []string{`!"main.unused"`, `!"unused.go"`, `i32 7`, `!"main.negative"`, `!"negative.go"`, `i32 0`} {
+	for _, want := range []string{`!"main.unused"`, `!"unused.go"`, `i32 7`, `!"main.negative"`, `!"negative.go"`, `i32 0`, `!"main.wrapper"`, `!"wrapper.go"`, `i32 9, i32 2, i32 1`} {
 		if !strings.Contains(ir, want) {
 			t.Fatalf("missing funcinfo field %s:\n%s", want, ir)
 		}
@@ -754,6 +755,85 @@ func TestDevLTOGlobalDCEMethodCheckedLoadEmitsIntrinsicAndAssume(t *testing.T) {
 	}
 }
 
+func TestDevLTOGlobalDCEConcreteInterfaceAnnotatesSingleRuntimeItab(t *testing.T) {
+	requireGoGlobalDCE(t)
+
+	prog := NewProgram(nil)
+	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
+	prog.EnableGoGlobalDCE(true)
+	prog.EnableLTOPluginMarkers(true)
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+	pkgTypes := types.NewPackage("example.com/staticitab", "staticitab")
+	concrete := types.NewNamed(
+		types.NewTypeName(token.NoPos, pkgTypes, "T", nil),
+		types.NewStruct(nil, nil), nil)
+	recv := types.NewVar(token.NoPos, pkgTypes, "", concrete)
+	methodSig := types.NewSignatureType(recv, nil, nil, nil, nil, false)
+	concrete.AddMethod(types.NewFunc(token.NoPos, pkgTypes, "M", methodSig))
+	concrete.AddMethod(types.NewFunc(token.NoPos, pkgTypes, "N", methodSig))
+	interfaceMethodSig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	interfaceMethodM := types.NewFunc(token.NoPos, pkgTypes, "M", interfaceMethodSig)
+	interfaceMethodN := types.NewFunc(token.NoPos, pkgTypes, "N", interfaceMethodSig)
+	intf := types.NewInterfaceType([]*types.Func{interfaceMethodM, interfaceMethodN}, nil)
+	intf.Complete()
+
+	pkg := prog.NewPackage("staticitab", pkgTypes.Path())
+	returns := types.NewTuple(types.NewVar(token.NoPos, nil, "", intf))
+	fn := pkg.NewFunc("Make", types.NewSignatureType(nil, nil, nil, nil, returns, false), InGo)
+	b := fn.MakeBody(1)
+	interfaceType := prog.Type(intf, InGo)
+	concreteType := prog.Type(concrete, InGo)
+	b.Return(b.MakeInterface(interfaceType, prog.Zero(concreteType)))
+	first := b.staticItab(intf, concreteType, b.abiType(intf), b.abiType(concrete))
+	second := b.staticItab(intf, concreteType, b.abiType(intf), b.abiType(concrete))
+	if first.impl.C != second.impl.C || len(pkg.staticItabs) != 1 {
+		t.Fatal("runtime static itab was not reused")
+	}
+	if !CanBuildStaticItab(intf, concrete) {
+		t.Fatal("statically known concrete type did not select a static itab")
+	}
+	if CanBuildStaticItab(intf, intf) {
+		t.Fatal("dynamic interface concrete type selected a static itab")
+	}
+	empty := types.NewInterfaceType(nil, nil).Complete()
+	if CanBuildStaticItab(empty, concrete) {
+		t.Fatal("empty interface selected a runtime itab")
+	}
+	b.EndBuild()
+	pkg.MaterializePreserveSyms()
+
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatal(err)
+	}
+	ir := pkg.String()
+	for _, want := range []string{
+		`_llgo_itab$`,
+		`!"go.method.M:func()"`,
+		`!"go.method.N:func()"`,
+		`!llgo.static.itab.slot`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("missing %s in static itab IR:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, `@llvm.compiler.used`) {
+		t.Fatalf("runtime static itab was redundantly preserved as an analysis template:\n%s", ir)
+	}
+	if strings.Contains(ir, `.NewItab"`) {
+		t.Fatalf("static concrete-to-interface conversion builds an itab at runtime:\n%s", ir)
+	}
+	const definition = ` = private unnamed_addr constant { ptr, ptr, i32, [2 x ptr] }`
+	if got := strings.Count(ir, definition); got != 1 {
+		t.Fatalf("got %d runtime static itab definitions, want exactly one:\n%s", got, ir)
+	}
+}
+
 func TestDevLTOGlobalDCEReflectMethodByNameCallMarkers(t *testing.T) {
 	requireGoGlobalDCE(t)
 
@@ -790,6 +870,17 @@ func TestDevLTOGlobalDCEReflectMethodByNameCallMarkers(t *testing.T) {
 	}
 	if attr := call.GetCallSiteStringAttribute(3, reflectMethodByNameArgAttr); attr.IsNil() || attr.GetStringValue() != "1" {
 		t.Fatalf("reflect MethodByName name-arg marker = %v, want 1", attr)
+	}
+	b.MarkReflectValueMethodByNamePhysicalExpr(Expr{impl: call, Type: prog.VoidPtr()}, 2, 1)
+	if attr := call.GetCallSiteStringAttribute(2, reflectMethodByNameResultAttr); attr.IsNil() || attr.GetStringValue() != "1" {
+		t.Fatalf("reflect MethodByName result-arg marker = %v, want 1", attr)
+	}
+	b.MarkReflectTypeMethodByNamePhysicalExpr(Expr{impl: call, Type: prog.VoidPtr()}, 2, 1)
+	if attr := call.GetCallSiteStringAttribute(-1, reflectMethodByNameCallAttr); attr.IsNil() || attr.GetStringValue() != reflectMethodByNameType {
+		t.Fatalf("reflect Type.MethodByName call marker = %v, want %q", attr, reflectMethodByNameType)
+	}
+	if attr := call.GetCallSiteStringAttribute(2, reflectMethodByNameResultAttr); attr.IsNil() || attr.GetStringValue() != "1" {
+		t.Fatalf("reflect Type.MethodByName result-arg marker = %v, want 1", attr)
 	}
 
 	b.MarkReflectTypeMethodByNameCall(llvm.ConstPointerNull(prog.tyVoidPtr()), 0)
@@ -2987,7 +3078,10 @@ func TestZeroSizedGlobalEmitsAliasSymbol(t *testing.T) {
 	os.Chdir("../../runtime")
 	defer os.Chdir(wd)
 
-	prog := NewProgram(nil)
+	// This assertion covers the non-COFF ODR definition. Windows deliberately
+	// uses a module-local sentinel and has a dedicated test in coff_comdat_test.
+	prog := NewProgram(&Target{GOOS: "linux", GOARCH: "amd64"})
+	defer prog.Dispose()
 	prog.SetRuntime(func() *types.Package {
 		fset := token.NewFileSet()
 		imp := packages.NewImporter(fset)
@@ -3046,7 +3140,10 @@ func TestGlobalConstLiterals(t *testing.T) {
 }
 
 func TestSetjmpReturnsTwice(t *testing.T) {
-	prog := NewProgram(nil)
+	// Keep this generic C setjmp check independent of the test host. Windows
+	// uses architecture-specific UCRT entry points, which are covered by the
+	// Windows ABI tests in eh_patch_test.go.
+	prog := NewProgram(&Target{GOOS: "linux", GOARCH: "amd64"})
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	// func test(jmpbuf unsafe.Pointer) int32

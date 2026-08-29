@@ -362,7 +362,7 @@ func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error)
 			fn.Name(),
 		)
 	}
-	frozenIgnored := classified && (background == llssa.InC || background == llssa.InPython) ||
+	frozenIgnored := classified && (llssa.IsNativeFuncBackground(background) || background == llssa.InPython) ||
 		assemblyCertified || managedBodylessNoBlock || importedLibrary
 	if ignored != frozenIgnored {
 		return false, fmt.Errorf("coroutine entry resolution: function %q ignored-body=%t conflicts with frozen frontend background classified=%t kind=%d", fn.Name(), ignored, classified, background)

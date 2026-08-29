@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -97,6 +98,37 @@ func TestWriteGNUResponseArg(t *testing.T) {
 	}
 }
 
+func TestResolveMSVCImportLibraries(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"first", "second"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clangImport := filepath.Join(root, "first", "libclang.dll.a")
+	for _, file := range []string{
+		clangImport,
+		filepath.Join(root, "first", "libnative.dll.a"),
+		filepath.Join(root, "second", "native.lib"),
+	} {
+		if err := os.WriteFile(file, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := []string{"-target", "x86_64-pc-windows-msvc", "-Lfirst", "-L", "second", "-lclang", "-lnative", "-lmissing", "-l:exact.a"}
+	// Keep -lnative because the MSVC driver resolves it as native.lib across
+	// the complete search path, even though an earlier directory contains the
+	// GNU-only libnative.dll.a spelling.
+	want := []string{"-target", "x86_64-pc-windows-msvc", "-Lfirst", "-L", "second", clangImport, "-lnative", "-lmissing", "-l:exact.a"}
+	if got := resolveMSVCImportLibraries(root, args); !slices.Equal(got, want) {
+		t.Fatalf("resolved libraries = %q, want %q", got, want)
+	}
+	args[1] = "x86_64-w64-windows-gnu"
+	if got := resolveMSVCImportLibraries(root, args); !slices.Equal(got, args) {
+		t.Fatalf("GNU target libraries changed to %q", got)
+	}
+}
+
 func TestWriteResponseFile(t *testing.T) {
 	args := []string{"plain", `C:\path with spaces\object.o`, `quote"and\slash`, `trailing\`, ""}
 	for _, tt := range []struct {
@@ -121,6 +153,34 @@ func TestWriteResponseFile(t *testing.T) {
 				t.Fatalf("response file = %q, want %q", got, tt.want)
 			}
 		})
+	}
+
+	missingTemp := filepath.Join(t.TempDir(), "missing")
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(key, missingTemp)
+	}
+	if _, err := writeResponseFile(args, ResponseFileGNU); err == nil {
+		t.Fatal("writeResponseFile succeeded with a missing temporary directory")
+	}
+	closed, err := os.CreateTemp(t.TempDir(), "closed-*.rsp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedName := closed.Name()
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeResponseFileTo(closed, args, ResponseFileGNU); err == nil {
+		t.Fatal("writeResponseFileTo succeeded with a closed file")
+	}
+	if _, err := os.Stat(closedName); !os.IsNotExist(err) {
+		t.Fatalf("failed response file was not removed: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		err := New("clang", Config{}).exec(strings.Repeat("x", windowsCommandLineLimit))
+		if err == nil || !strings.Contains(err.Error(), "write clang response file") {
+			t.Fatalf("long Windows command error = %v, want response-file error", err)
+		}
 	}
 }
 

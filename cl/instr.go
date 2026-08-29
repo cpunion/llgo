@@ -635,17 +635,34 @@ func (p *context) compileTypedControlOperation(
 	b llssa.Builder,
 	args []ssa.Value,
 	kind int,
+	opcode int,
 	operation CoroControlOperation,
 ) (ret llssa.Expr) {
 	compiled := p.compileValues(b, args, kind)
 	switch operation {
 	case CoroControlReturnsTwice:
-		if len(compiled) == 2 {
+		switch opcode {
+		case llgoSigsetjmp:
+			if len(compiled) != 2 {
+				break
+			}
 			return b.Sigsetjmp(compiled[0], compiled[1])
+		case llgoSetjmp:
+			if len(compiled) != 1 {
+				break
+			}
+			return b.Setjmp(compiled[0])
 		}
 	case CoroControlNonlocalJump:
-		if len(compiled) == 2 {
+		if len(compiled) != 2 {
+			break
+		}
+		switch opcode {
+		case llgoSiglongjmp:
 			b.Siglongjmp(compiled[0], compiled[1])
+			return
+		case llgoLongjmp:
+			b.Longjmp(compiled[0], compiled[1])
 			return
 		}
 	case CoroControlProcessFork:
@@ -831,6 +848,8 @@ var llgoInstrs = map[string]int{
 	"sigjmpbuf":               llgoSigjmpbuf,
 	"sigsetjmp":               llgoSigsetjmp,
 	"siglongjmp":              llgoSiglongjmp,
+	"setjmp":                  llgoSetjmp,
+	"longjmp":                 llgoLongjmp,
 	"deferData":               llgoDeferData,
 	"unreachable":             llgoUnreachable,
 
@@ -2274,6 +2293,10 @@ func (p *context) pushCallerLocationFrame(b llssa.Builder, fn *ssa.Function) {
 		return
 	}
 	pos := p.fset.Position(fn.Pos())
+	pos.Filename = runtimeSourceFilename(
+		p.prog.Target(),
+		directiveFilename(p.fset, fn.Pos(), pos.Filename, p.sourceLine),
+	)
 	entry := b.Convert(p.prog.Uintptr(), p.fn.Expr)
 	b.Call(
 		p.runtimeFunc("PushCallerLocationFrame", pushCallerLocationFrameSig()),
@@ -2305,6 +2328,13 @@ func (p *context) recordRuntimeLocation(b llssa.Builder, pos token.Pos, fn strin
 	}
 	position, recordable := runtimeLocationPosition(p.fset, pos)
 	if !recordable {
+		return
+	}
+	position.Filename = runtimeSourceFilename(
+		p.prog.Target(),
+		directiveFilename(p.fset, pos, position.Filename, p.sourceLine),
+	)
+	if position.Filename == "" {
 		return
 	}
 	b.Call(
@@ -2392,7 +2422,10 @@ func (p *context) emitPCLineLabel(b llssa.Builder, pos token.Pos) {
 	position := p.fset.Position(pos)
 	// Normalize before the emptiness check: an empty //line directive
 	// filename must anchor as "??" (gc's spelling), not lose its anchor.
-	position.Filename = directiveFilename(p.fset, pos, position.Filename)
+	position.Filename = runtimeSourceFilename(
+		target,
+		directiveFilename(p.fset, pos, position.Filename, p.sourceLine),
+	)
 	if position.Line <= 0 || position.Filename == "" {
 		return
 	}
@@ -2429,12 +2462,18 @@ func (p *context) emitPCLineLabel(b llssa.Builder, pos token.Pos) {
 	// latter without rewriting symbol names embedded in inline-asm strings.
 	// Mach-O uses a live_support section plus one linker-private atom symbol per
 	// record so -dead_strip keeps a record exactly when the function containing
-	// its label is live.
+	// its label is live. COFF uses an associative COMDAT tied to the function
+	// section containing the local anchor, so /OPT:REF has the same behavior.
 	pushSection := ".pushsection llgo_pcline,\"awo\",@progbits," + asmLabel
 	recordSymbol := ""
-	if target.GOOS == "darwin" {
+	switch target.GOOS {
+	case "darwin":
 		pushSection = ".pushsection __DATA,__llgo_pcl,regular,live_support"
 		recordSymbol = "l_llgo_pcline_rec_${:uid}:\n"
+	case "windows":
+		// '$' is an inline-asm escape. '$$m' reaches the COFF assembler as
+		// the '$m' subsection suffix used for lexicographic merging.
+		pushSection = ".pushsection .llgopcl$$m,\"dr\",associative," + asmLabel
 	}
 	b.CoroAtomicDataAnchor(
 		asmLabel + ":\n" +
@@ -2455,11 +2494,10 @@ func canEmitPCLineLabelsForTarget(target *llssa.Target) bool {
 	if target.Target != "" || target.GOARCH == "wasm" {
 		return false
 	}
-	// ELF uses SHF_LINK_ORDER associated sections; Mach-O uses plain
-	// __DATA,__llgo_pcl sections (safe because LLGo's global DCE runs at the
-	// IR level). Other object formats need separate support.
+	// ELF uses SHF_LINK_ORDER associated sections; Mach-O uses live_support;
+	// COFF uses associative COMDAT sections.
 	switch target.GOOS {
-	case "linux", "darwin":
+	case "linux", "darwin", "windows":
 		return true
 	}
 	return false
@@ -2998,9 +3036,7 @@ func (p *context) callEx(
 		}
 		args := p.compileValues(b, call.Args, hasVArg)
 		ret = p.emitDoAtSource(b, act, ds, true, source, fn, llssa.Builder.Call, args...)
-		if reflectCheck.Kind&llssa.ReflectTypeMethodByName != 0 && reflectCheck.Name == "" {
-			b.MarkReflectTypeMethodByNameExpr(ret, 1)
-		}
+		markReflectTypeMethodByNameCall(b, ret, reflectCheck, 1, -1)
 		b.EmitReflectTypeMethodCheckedLoad(ret, reflectCheck)
 		return
 	}
@@ -3140,7 +3176,7 @@ func (p *context) callEx(
 		aFn, pyFn, ftype := p.compileFunction(cv)
 		// TODO(xsw): check ca != llssa.Call
 		switch ftype {
-		case cFunc:
+		case cFunc, stdcallFunc:
 			p.inCFunc = true
 			args := p.compileValues(b, args, kind)
 			p.inCFunc = false
@@ -3240,14 +3276,14 @@ func (p *context) callEx(
 			ret = p.string(b, args)
 		case llgoStringData:
 			ret = p.stringData(b, args)
-		case llgoSigsetjmp, llgoSiglongjmp,
+		case llgoSigsetjmp, llgoSiglongjmp, llgoSetjmp, llgoLongjmp,
 			llgoControlFork, llgoControlExecve, llgoControlExit, llgoControlTrap:
 			if act != llssa.Call || ds != nil || sourceCall == nil {
 				panic("typed control intrinsic requires an exact direct call")
 			}
 			operation := coroControlOperationForIntrinsic(ftype)
 			p.selectTypedControlOperation(sourceCall, operation)
-			ret = p.compileTypedControlOperation(b, args, kind, operation)
+			ret = p.compileTypedControlOperation(b, args, kind, ftype, operation)
 			if operation.Terminal() {
 				b.Unreachable()
 				// The type-checked source tail remains in x/tools SSA. Detach it
@@ -3442,7 +3478,7 @@ func (p *context) callEx(
 			p.completeCoroIntrinsicCallEmission(ftype, coroIntrinsicCallSemantics(ftype))
 		}
 	default:
-		rawC := p.prog.TypeBackground(cv.Type()) == llssa.InC
+		rawC := llssa.IsNativeFuncBackground(p.prog.TypeBackground(cv.Type()))
 		if rawC {
 			p.inCFunc = true
 		}
@@ -3513,25 +3549,29 @@ func reflectStaticCallABIInitKind(call *ssa.CallCommon) int {
 	return 0
 }
 
-// recordReflectValueMethodCall records source-level reflect.Value method
-// selection independently from its physical call representation. Coroutine
-// direct awaits replace the logical callee before llssa.Builder.Call can run
-// checkReflect, but the DCE demand still belongs to the emitted physical owner.
-func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommon) {
-	if p == nil || p.pkg == nil || owner == "" || call == nil {
-		return
+type reflectValueMethodSelection struct {
+	method   string
+	argument ssa.Value
+}
+
+// reflectValueMethodSelectionOf extracts the source semantic identity shared
+// by metadata collection and physical-call annotation. In particular, neither
+// consumer needs to infer reflect semantics from a rewritten $coro symbol.
+func reflectValueMethodSelectionOf(call *ssa.CallCommon) (reflectValueMethodSelection, bool) {
+	if call == nil {
+		return reflectValueMethodSelection{}, false
 	}
 	target := call.StaticCallee()
 	if target == nil {
-		return
+		return reflectValueMethodSelection{}, false
 	}
 	object, ok := target.Object().(*types.Func)
 	if !ok || object == nil || object.Pkg() == nil || object.Pkg().Path() != "reflect" {
-		return
+		return reflectValueMethodSelection{}, false
 	}
 	signature, ok := object.Type().(*types.Signature)
 	if !ok || signature.Recv() == nil {
-		return
+		return reflectValueMethodSelection{}, false
 	}
 	receiver := types.Unalias(signature.Recv().Type())
 	if pointer, ok := receiver.(*types.Pointer); ok {
@@ -3541,12 +3581,43 @@ func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommo
 	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil ||
 		named.Obj().Pkg().Path() != "reflect" || named.Obj().Name() != "Value" ||
 		len(call.Args) != 2 {
+		return reflectValueMethodSelection{}, false
+	}
+	if object.Name() != "Method" && object.Name() != "MethodByName" {
+		return reflectValueMethodSelection{}, false
+	}
+	return reflectValueMethodSelection{method: object.Name(), argument: call.Args[1]}, true
+}
+
+func reflectValueMethodByNameCheck(call *ssa.CallCommon) (llssa.ReflectMethodCheck, bool) {
+	selection, ok := reflectValueMethodSelectionOf(call)
+	if !ok || selection.method != "MethodByName" {
+		return llssa.ReflectMethodCheck{}, false
+	}
+	if name, constant := constStr(selection.argument); constant {
+		return llssa.ReflectMethodCheck{Kind: llssa.ReflectMethodByName, Name: name}, true
+	}
+	return llssa.ReflectMethodCheck{
+		Kind: llssa.ReflectMethodDynamic | llssa.ReflectMethodByName,
+	}, true
+}
+
+// recordReflectValueMethodCall records source-level reflect.Value method
+// selection independently from its physical call representation. Coroutine
+// direct awaits replace the logical callee before llssa.Builder.Call can run
+// checkReflect, but the DCE demand still belongs to the emitted physical owner.
+func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommon) {
+	if p == nil || p.pkg == nil || owner == "" {
+		return
+	}
+	selection, ok := reflectValueMethodSelectionOf(call)
+	if !ok {
 		return
 	}
 
-	switch object.Name() {
+	switch selection.method {
 	case "Method":
-		if index, ok := constInt(call.Args[1]); ok {
+		if index, ok := constInt(selection.argument); ok {
 			p.pkg.RecordReflectMethodByIndex(owner, index)
 			p.pkg.NeedAbiInit |= llssa.ReflectMethodByIndex
 			return
@@ -3554,7 +3625,7 @@ func (p *context) recordReflectValueMethodCall(owner string, call *ssa.CallCommo
 		p.pkg.MarkReflectMethod(owner)
 		p.pkg.NeedAbiInit |= llssa.ReflectMethodDynamic
 	case "MethodByName":
-		if name, ok := constStr(call.Args[1]); ok {
+		if name, ok := constStr(selection.argument); ok {
 			p.pkg.RecordReflectMethodByName(owner, name)
 			p.pkg.NeedAbiInit |= llssa.ReflectMethodByName
 			return
@@ -3620,6 +3691,30 @@ func (p *context) reflectTypeMethodCheck(call *ssa.CallCommon, method *types.Fun
 	}
 	p.pkg.NeedAbiInit |= check.Kind
 	return
+}
+
+// markReflectTypeMethodByNameCall attaches one source-level dynamic
+// Type.MethodByName selection to the exact call instruction that implements
+// it. resultArgIndex is non-negative only for compiler-owned physical ABIs
+// whose result slot is an explicit argument rather than an ordinary return or
+// C ABI sret value.
+func markReflectTypeMethodByNameCall(
+	b llssa.Builder, physicalCall llssa.Expr, check llssa.ReflectMethodCheck,
+	nameArgIndex, resultArgIndex int,
+) {
+	if check.Kind&llssa.ReflectTypeMethodByName == 0 || check.Name != "" {
+		return
+	}
+	if physicalCall.IsNil() || nameArgIndex < 0 {
+		panic("dynamic reflect.Type.MethodByName lost its physical call")
+	}
+	if resultArgIndex >= 0 {
+		b.MarkReflectTypeMethodByNamePhysicalExpr(
+			physicalCall, nameArgIndex, resultArgIndex,
+		)
+		return
+	}
+	b.MarkReflectTypeMethodByNameExpr(physicalCall, nameArgIndex)
 }
 
 func isReflectType(t types.Type) bool {

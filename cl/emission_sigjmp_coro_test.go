@@ -91,6 +91,67 @@ func Use() int32 {
 	}
 }
 
+func TestDirectSetjmpIntrinsicsFreezeNativeTypedControl(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
+func Sigsetjmp(unsafe.Pointer, int32) int32 { return 0 }
+func Siglongjmp(unsafe.Pointer, int32) {}
+`)
+	callerPkg := testProg.addPackage(t, "example.com/emission/setjmp", `package setjmp
+type JmpBuf [256]byte
+//llgo:link Setjmp llgo.setjmp
+func Setjmp(*JmpBuf) int32
+//llgo:link Longjmp llgo.longjmp
+func Longjmp(*JmpBuf, int32)
+func Use(buf *JmpBuf) int32 {
+	value := Setjmp(buf)
+	if value == 0 { Longjmp(buf, 1) }
+	return value
+}
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := callerPkg.ssa.Func("Use")
+	want := map[string]CoroControlOperation{
+		"Setjmp":  CoroControlReturnsTwice,
+		"Longjmp": CoroControlNonlocalJump,
+	}
+	seen := make(map[string]bool, len(want))
+	for _, call := range allocaCStrTestCalls(owner) {
+		callee := call.Common().StaticCallee()
+		if callee == nil {
+			continue
+		}
+		expected, relevant := want[callee.Name()]
+		if !relevant {
+			continue
+		}
+		plan, frozen, planErr := universe.CoroCallSitePlan(call)
+		if planErr != nil || !frozen || !plan.Intrinsic ||
+			plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend ||
+			plan.Elision != CoroCallElidedIntrinsic ||
+			plan.ControlOperation != expected || !plan.ControlOperation.NativeActivationBound() {
+			t.Fatalf("typed setjmp call %q plan = %+v, %v, %v; want native control %s", call, plan, frozen, planErr, expected)
+		}
+		seen[callee.Name()] = true
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Fatalf("typed setjmp operation %s was not frozen", name)
+		}
+	}
+}
+
 func TestProcessControlIntrinsicsFreezeExactTypedOperations(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	pkg := testProg.addPackage(t, "example.com/emission/control", `package control

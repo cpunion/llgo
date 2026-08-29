@@ -858,11 +858,23 @@ func (b Builder) Lookup(x, key Expr, commaOk bool) (ret Expr) {
 	prog := b.Prog
 	typ := b.abiType(x.raw.Type)
 	vtyp := prog.Elem(x.Type)
+	vsize := prog.SizeOf(vtyp)
 	kind := mapKeyFastKind(prog, x.raw.Type)
-	helpers := mapRuntimeHelperNames(kind)
 	arg := b.mapKeyAccessArg(x, key, kind)
+	helpers, exact := prog.MapRuntimeHelpers(x.raw.Type)
+	if !exact {
+		panic("Lookup requires a map runtime-helper plan")
+	}
+	name := helpers.Access1
 	if commaOk {
-		vals := b.Call(b.Pkg.rtFunc(helpers.Access2), typ, x, arg)
+		name = helpers.Access2
+	}
+	args := []Expr{typ, x, arg}
+	if vsize > abi.ZeroValSize {
+		args = append(args, b.Pkg.mapZeroAddr(vsize, prog.td.ABITypeAlignment(vtyp.ll)))
+	}
+	if commaOk {
+		vals := b.Call(b.Pkg.rtFunc(name), args...)
 		// The Go runtime map ABI never returns a nil element pointer: a miss
 		// points at its zero-value storage. Do not manufacture a second
 		// source-language nil edge after the exact map-access call.
@@ -871,7 +883,7 @@ func (b Builder) Lookup(x, key Expr, commaOk bool) (ret Expr) {
 		t := prog.Struct(vtyp, prog.Bool())
 		return b.aggregateValue(t, val.impl, ok)
 	} else {
-		val := b.Call(b.Pkg.rtFunc(helpers.Access1), typ, x, arg)
+		val := b.Call(b.Pkg.rtFunc(name), args...)
 		val.Type = prog.Pointer(vtyp)
 		// MapAccess1 follows the same non-nil zero-value-pointer ABI.
 		ret = b.LoadKnownNonNil(val)
@@ -938,11 +950,17 @@ func (p Program) MapRuntimeHelpers(mapType types.Type) (MapRuntimeHelperNames, b
 	if p == nil || mapType == nil {
 		return MapRuntimeHelperNames{}, false
 	}
-	if _, ok := types.Unalias(mapType).Underlying().(*types.Map); !ok {
+	m, ok := types.Unalias(mapType).Underlying().(*types.Map)
+	if !ok {
 		return MapRuntimeHelperNames{}, false
 	}
 	kind := mapKeyFastKind(p, mapType)
-	return mapRuntimeHelperNames(kind), true
+	helpers := mapRuntimeHelperNames(kind)
+	if p.SizeOf(p.rawType(m.Elem())) > abi.ZeroValSize {
+		helpers.Access1 = "MapAccess1Fat"
+		helpers.Access2 = "MapAccess2Fat"
+	}
+	return helpers, true
 }
 
 func mapRuntimeHelperNames(kind mapFastKind) MapRuntimeHelperNames {

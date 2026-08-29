@@ -18,7 +18,7 @@
 
 package runtime
 
-import "github.com/xgo-dev/llgo/runtime/internal/clite/pthread/sync"
+import "github.com/xgo-dev/llgo/runtime/internal/sync"
 
 // These aliases retain the original native-thread waiter implementation for
 // the non-coroutine runtime. They are deliberately separate from channelMutex:

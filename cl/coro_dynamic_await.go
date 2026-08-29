@@ -189,6 +189,10 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	return coroAwaitedValue{
 		value:   p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results()),
 		address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
+		physicalCalls: []coroPhysicalCall{
+			{call: child, argCount: len(args) + 3, resultArg: 1},
+			{call: plainResult, argCount: len(args) + 1, resultArg: -1},
+		},
 	}
 }
 

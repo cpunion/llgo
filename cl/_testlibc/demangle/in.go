@@ -20,6 +20,8 @@ func main() {
 }
 
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_foreign_thunk_v1_
-// CHECK: call ptr @_ZN4llvm15itaniumDemangleENSt3__117basic_string_viewIcNS0_11char_traitsIcEEEEb(%"{{.*}}/runtime/internal/runtime.String" {{%.*}}, i1 {{%.*}})
+// DARWIN: call ptr @_ZN4llvm15itaniumDemangleENSt3__117basic_string_viewIcNS0_11char_traitsIcEEEEb(%"{{.*}}/runtime/internal/runtime.String" {{%.*}}, i1 {{%.*}})
+// LINUX: call ptr @_ZN4llvm15itaniumDemangleENSt3__117basic_string_viewIcNS0_11char_traitsIcEEEEb(%"{{.*}}/runtime/internal/runtime.String" {{%.*}}, i1 {{%.*}})
+// WINDOWS: call ptr @"github.com/goplus/lib/cpp/llvm.ItaniumDemangle"(%"{{.*}}/runtime/internal/runtime.String" {{%.*}}, i1 {{%.*}})
 // CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_foreign_thunk_v1_
 // CHECK: call i32 (ptr, ...) @printf(ptr {{%.*}}, ptr {{%.*}})

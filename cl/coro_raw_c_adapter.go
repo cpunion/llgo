@@ -119,7 +119,7 @@ func resolveCoroRawCChangeType(
 		if backgroundErr != nil {
 			return fail("classify static source background: %v", backgroundErr)
 		}
-		if resolved && canonical != nil && classified && background == llssa.InC {
+		if resolved && canonical != nil && classified && llssa.IsNativeFuncBackground(background) {
 			if sourceLeaf.Rep != coro.DirectPlain || sourceLeaf.MayBeNil || resultLeaf.MayBeNil ||
 				len(sourceLeaf.Targets) != 1 || len(resultLeaf.Targets) != 1 ||
 				sourceLeaf.Targets[0] != resultLeaf.Targets[0] {

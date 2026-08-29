@@ -29,7 +29,7 @@ import (
 	_ "unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/clite/pthread"
+	"github.com/xgo-dev/llgo/runtime/internal/thread"
 )
 
 // Create starts exactly one scheduler-owned native worker with default pthread
@@ -42,7 +42,7 @@ import (
 // retain its foreign-wait policy.
 //
 //go:linkname Create C.__llgo_coro_worker_create_v1
-func Create(thread *pthread.Thread) c.Int
+func Create(native *thread.Thread) c.Int
 
 // QueueInit constructs the one native worker transport. Initialization may
 // enter the platform semaphore implementation, so it is an inferred

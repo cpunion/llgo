@@ -7,7 +7,6 @@ package main
 // Function values: the generated closure code pointer is non-nil and that
 // predicate is what reaches assert.
 
-
 // DARWIN-ARM64-LABEL: define void @"main.init#1$2"(ptr swiftself %0){{.*}} {
 // LINUX-AMD64-LABEL: define void @"main.init#1$2"(ptr nest %0){{.*}} {
 
@@ -22,8 +21,6 @@ package main
 
 // Interface equality must feed the assertion directly, including a negated
 // result for unequal dynamic types.
-
-
 
 func test() {}
 

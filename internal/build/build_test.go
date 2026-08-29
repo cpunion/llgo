@@ -42,6 +42,28 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "merge failed")
 		os.Exit(7)
 	}
+	if mode := os.Getenv("LLGO_TEST_LINKER_HELPER"); mode != "" {
+		if mode == "fail" {
+			fmt.Fprintln(os.Stderr, "link failed")
+			os.Exit(8)
+		}
+		var output string
+		for i := 1; i+1 < len(os.Args); i++ {
+			if os.Args[i] == "-o" {
+				output = os.Args[i+1]
+				break
+			}
+		}
+		if output == "" {
+			fmt.Fprintln(os.Stderr, "missing -o")
+			os.Exit(9)
+		}
+		if err := os.WriteFile(output, []byte("linked"), 0o666); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(10)
+		}
+		os.Exit(0)
+	}
 	old := cacheRootFunc
 	td, _ := os.MkdirTemp("", "llgo-cache-*")
 	cacheRootFunc = func() string { return td }
@@ -435,6 +457,82 @@ func TestLinkObjFilesReportsOutputDirectoryError(t *testing.T) {
 	}
 }
 
+func TestWindowsLinkObjFilesExactOutput(t *testing.T) {
+	newContext := func(mode Mode) *context {
+		return &context{
+			mode: mode,
+			buildConf: &Config{
+				Goos:      "windows",
+				Goarch:    "amd64",
+				Mode:      mode,
+				BuildMode: BuildModeExe,
+				LinkOptions: LinkOptions{
+					DWARF: DWARFOmit,
+				},
+			},
+			crossCompile: crosscompile.Export{
+				CC: os.Args[0],
+				Toolchain: crosscompile.NativeToolchain{
+					ObjectFormat: crosscompile.ObjectFormatCOFF,
+				},
+			},
+		}
+	}
+
+	t.Run("build renames driver output", func(t *testing.T) {
+		t.Setenv("LLGO_TEST_LINKER_HELPER", "write")
+		app := filepath.Join(t.TempDir(), "app")
+		if err := linkObjFiles(newContext(ModeBuild), app, nil, nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if data, err := os.ReadFile(app); err != nil || string(data) != "linked" {
+			t.Fatalf("exact output = %q, %v", data, err)
+		}
+		if _, err := os.Stat(app + ".exe"); !os.IsNotExist(err) {
+			t.Fatalf("intermediate executable still exists: %v", err)
+		}
+	})
+
+	t.Run("test keeps executable sibling", func(t *testing.T) {
+		t.Setenv("LLGO_TEST_LINKER_HELPER", "write")
+		app := filepath.Join(t.TempDir(), "test-output")
+		if err := linkObjFiles(newContext(ModeTest), app, nil, nil, false); err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{app, app + ".exe"} {
+			if data, err := os.ReadFile(path); err != nil || string(data) != "linked" {
+				t.Fatalf("output %s = %q, %v", path, data, err)
+			}
+		}
+	})
+
+	t.Run("link error", func(t *testing.T) {
+		t.Setenv("LLGO_TEST_LINKER_HELPER", "fail")
+		if err := linkObjFiles(newContext(ModeBuild), filepath.Join(t.TempDir(), "app"), nil, nil, false); err == nil {
+			t.Fatal("linkObjFiles succeeded with a failing linker")
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		mode Mode
+	}{
+		{name: "copy error", mode: ModeTest},
+		{name: "rename error", mode: ModeBuild},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("LLGO_TEST_LINKER_HELPER", "write")
+			app := filepath.Join(t.TempDir(), "occupied")
+			if err := os.Mkdir(app, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := linkObjFiles(newContext(test.mode), app, nil, nil, false); err == nil {
+				t.Fatal("linkObjFiles published an exact output over a directory")
+			}
+		})
+	}
+}
+
 func TestRewritePrebuiltFuncTabEligibilityAndDiagnostic(t *testing.T) {
 	rewritePrebuiltFuncTab(nil, "missing", true)
 	rewritePrebuiltFuncTab(&context{}, "missing", true)
@@ -629,6 +727,47 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 			} {
 				if !selected[name] {
 					t.Errorf("wasm runtime did not select %s", name)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsRuntimeSyscallVersionSelection(t *testing.T) {
+	runtimeDir := filepath.Join(env.LLGoRuntimeDir(), "internal", "lib", "runtime")
+	releaseTags := func(lastMinor int) []string {
+		tags := make([]string, lastMinor)
+		for minor := 1; minor <= lastMinor; minor++ {
+			tags[minor-1] = fmt.Sprintf("go1.%d", minor)
+		}
+		return tags
+	}
+
+	for _, test := range []struct {
+		name         string
+		lastMinor    int
+		wantPreGo126 bool
+	}{
+		{name: "go1.25", lastMinor: 25, wantPreGo126: true},
+		{name: "go1.26", lastMinor: 26, wantPreGo126: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := gobuild.Default
+			ctx.GOOS = "windows"
+			ctx.GOARCH = "amd64"
+			ctx.BuildTags = []string{"llgo"}
+			ctx.ReleaseTags = releaseTags(test.lastMinor)
+
+			for name, want := range map[string]bool{
+				"syscall_windows_llgo.go":           true,
+				"syscall_windows_pre_go126_llgo.go": test.wantPreGo126,
+			} {
+				got, err := ctx.MatchFile(runtimeDir, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != want {
+					t.Errorf("MatchFile(%q) = %v, want %v", name, got, want)
 				}
 			}
 		})
@@ -1126,6 +1265,9 @@ func TestRunPrintfWithStdioNobuf(t *testing.T) {
 
 func TestTestOutputFileLogic(t *testing.T) {
 	// Test output file path determination logic for test mode
+	outputDir := filepath.Join(t.TempDir(), "output")
+	outputFile := filepath.Join(outputDir, "mytest.test")
+	directoryOutput := outputDir + string(filepath.Separator)
 	tests := []struct {
 		name        string
 		pkgName     string
@@ -1147,10 +1289,10 @@ func TestTestOutputFileLogic(t *testing.T) {
 		{
 			name:        "with -o absolute file path",
 			pkgName:     "mypackage",
-			conf:        &Config{Mode: ModeTest, OutFile: "/tmp/mytest.test", AppExt: ".test"},
+			conf:        &Config{Mode: ModeTest, OutFile: outputFile, AppExt: ".test"},
 			multiPkg:    false,
 			wantBase:    "mytest",
-			wantDir:     "/tmp",
+			wantDir:     outputDir,
 			description: "-o with absolute file path: use specified file",
 		},
 		{
@@ -1165,11 +1307,19 @@ func TestTestOutputFileLogic(t *testing.T) {
 		{
 			name:        "with -o directory",
 			pkgName:     "mypackage.test",
-			conf:        &Config{Mode: ModeTest, OutFile: "/tmp/build/", AppExt: ".test"},
+			conf:        &Config{Mode: ModeTest, OutFile: directoryOutput, AppExt: ".test"},
 			multiPkg:    false,
 			wantBase:    "mypackage.test",
-			wantDir:     "/tmp/build/",
+			wantDir:     directoryOutput,
 			description: "-o with directory: write pkg.test in that directory",
+		},
+		{
+			name:        "with -o Windows directory spelling",
+			pkgName:     "mypackage.test",
+			conf:        &Config{Mode: ModeTest, OutFile: `C:\tmp\build\`, AppExt: ".test"},
+			wantBase:    "mypackage.test",
+			wantDir:     `C:\tmp\build\`,
+			description: "-o ending in a Windows separator: write pkg.test in that directory",
 		},
 		{
 			name:        "default test mode",

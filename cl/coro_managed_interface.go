@@ -606,12 +606,18 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 	if err != nil {
 		panic(fmt.Errorf("managed interface plain dispatch: %w", err))
 	}
-	return b.CallCoroDispatchPlain(method, args, llssa.CoroDispatchCallOptions{
+	result := b.CallCoroDispatchPlain(method, args, llssa.CoroDispatchCallOptions{
 		Version:           coroPlainDispatchVersion,
 		ABIHash:           abi.hash,
 		Result:            p.prog.Type(abi.resultSlotType, llssa.InC),
 		TrustedDescriptor: !callPlan.Open,
-	}), true
+	})
+	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
+	markReflectTypeMethodByNameCall(
+		b, result, reflectCheck, len(args), -1,
+	)
+	b.EmitReflectTypeMethodCheckedLoad(result, reflectCheck)
+	return result, true
 }
 
 func (p *context) compileCoroManagedInterfaceAwait(
@@ -640,6 +646,9 @@ func (p *context) compileCoroManagedInterfaceAwait(
 		b, method, args, instructionPlan.controlSignature, nil, keepaliveSlots,
 		false, instructionPlan.recoverAlias, !callPlan.Open,
 	)
+	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
+	markCoroReflectTypeMethodByNameCalls(b, reflectCheck, result.physicalCalls)
+	b.EmitReflectTypeMethodCheckedLoad(result.value, reflectCheck)
 	p.recordCoroValueAddress(call, result.address)
 	return result.value
 }

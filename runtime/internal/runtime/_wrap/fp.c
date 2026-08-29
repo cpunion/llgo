@@ -1,5 +1,18 @@
 #include <stdint.h>
 
+/* Legacy native and Win32 unwind code consumes the saved caller frame
+ * immediately. Stackless Darwin/Linux code uses the bounded copy/test leaves
+ * below and never carries this native-stack address across a suspension. */
+__attribute__((noinline)) void *llgo_framepointer(void)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    void **frame = (void **)__builtin_frame_address(0);
+    return frame ? *frame : 0;
+#else
+    return 0;
+#endif
+}
+
 /* Copy return PCs while this native frame and the complete chain are still
  * alive. Go must never retain a frame pointer returned from a C frame across a
  * stackless-coroutine safepoint. A zero text range selects the panic-time raw

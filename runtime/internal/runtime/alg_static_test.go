@@ -163,3 +163,24 @@ func TestTypeEqualStaticInterface(t *testing.T) {
 	}()
 	EfaceEqual(u, u)
 }
+
+func TestInterfaceEqualityAcceptsDistinctItabsForSameDynamicType(t *testing.T) {
+	intType := staticTestType(abi.Int, unsafe.Sizeof(int(0)), "int")
+	intType.TFlag = abi.TFlagRegularMemory
+	interfaceType := &abi.InterfaceType{}
+	staticTab := &itab{inter: interfaceType, _type: intType}
+	dynamicTab := &itab{inter: interfaceType, _type: intType}
+	x, y := 17, 17
+	staticValue := iface{tab: staticTab, data: unsafe.Pointer(&x)}
+	dynamicValue := iface{tab: dynamicTab, data: unsafe.Pointer(&y)}
+	if !interequal(unsafe.Pointer(&staticValue), unsafe.Pointer(&dynamicValue)) {
+		t.Fatal("equal interface values with static and dynamic itabs compare unequal")
+	}
+
+	otherType := staticTestType(abi.Int, unsafe.Sizeof(int(0)), "otherInt")
+	otherType.TFlag = abi.TFlagRegularMemory
+	otherValue := iface{tab: &itab{inter: interfaceType, _type: otherType}, data: unsafe.Pointer(&y)}
+	if interequal(unsafe.Pointer(&staticValue), unsafe.Pointer(&otherValue)) {
+		t.Fatal("interface values with different dynamic types compare equal")
+	}
+}

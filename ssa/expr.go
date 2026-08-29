@@ -1367,6 +1367,17 @@ func (b Builder) UnOp(op token.Token, x Expr) (ret Expr) {
 func (b Builder) ChangeType(t Type, x Expr) (ret Expr) {
 	dbgInstrf("ChangeType %v, %v\n", t.RawType(), x.impl)
 	if t.kind == vkClosure {
+		if b.needsStdcallFuncval(x) {
+			return b.stdcallFuncval(t, x)
+		}
+		if b.Prog.isStdcallType(x.raw.Type) {
+			return checkExpr(x, t.raw.Type, b)
+		}
+	}
+	if b.Prog.isStdcallType(t.raw.Type) && !b.Prog.isStdcallType(x.raw.Type) {
+		return b.stdcallCallback(t.raw.Type, x)
+	}
+	if t.kind == vkClosure {
 		switch x.kind {
 		case vkFuncDecl:
 			ret.impl = checkExpr(x, t.raw.Type, b).impl
@@ -1924,6 +1935,7 @@ func (b Builder) call(fn Expr, closureNonNil bool, args ...Expr) (ret Expr) {
 	}
 	ret.Type = b.Prog.retType(sig)
 	ret.impl = llvm.CreateCall(b.impl, ll, fn.impl, llvmParamsEx(data, args, sig.Params(), b))
+	b.setNativeCallConv(ret.impl, fn)
 	b.Prog.markClosureContextCall(ret.impl, sig)
 	if reflectCheck.Kind&ReflectMethodByName != 0 && reflectCheck.Name == "" {
 		nameArgIndex := len(args) - 1
@@ -2621,6 +2633,9 @@ func checkExpr(v Expr, t types.Type, b Builder) Expr {
 	if st, ok := t.Underlying().(*types.Struct); ok && IsClosure(st) {
 		prog := b.Prog
 		tclosure := prog.rawType(t)
+		if b.needsStdcallFuncval(v) {
+			return b.stdcallFuncval(tclosure, v)
+		}
 		if v.kind == vkClosure || v.kind == vkIfaceMethod {
 			// Imethod is a transient callable pair with the same fixed
 			// {code,environment} representation. Assignment, storage, and defer
@@ -2642,6 +2657,9 @@ func checkExpr(v Expr, t types.Type, b Builder) Expr {
 	}
 	if types.Identical(v.raw.Type, t) || !types.AssignableTo(v.raw.Type, t) {
 		return v
+	}
+	if b.Prog.isStdcallType(t) {
+		return b.stdcallCallback(t, v)
 	}
 	dst := b.Prog.Type(t, InGo)
 	// Range and assignment lowering can produce a value whose source type is

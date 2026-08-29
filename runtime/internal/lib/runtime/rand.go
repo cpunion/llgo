@@ -1,4 +1,4 @@
-//go:build !wasip1 && !wasip2 && !wasm_unknown
+//go:build !windows && !wasip1 && !wasip2 && !wasm_unknown
 
 package runtime
 

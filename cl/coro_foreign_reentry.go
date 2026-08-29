@@ -197,11 +197,19 @@ func coroSameMForeignCallSignature() *types.Signature {
 // the frozen call-site shape and therefore of the generated symbol digest.
 func (p *context) coroForeignReentryAdapter(
 	target *ssa.Function,
-	callbackSignature *types.Signature,
+	callbackType types.Type,
 ) llssa.Function {
-	if p == nil || p.emissionUniverse == nil || target == nil ||
-		callbackSignature == nil || callbackSignature.Recv() != nil ||
-		callbackSignature.Variadic() || len(target.FreeVars) != 0 {
+	if p == nil || p.emissionUniverse == nil || target == nil || callbackType == nil ||
+		len(target.FreeVars) != 0 {
+		panic("coroutine foreign reentry adapter requires one exact non-capturing callback")
+	}
+	callbackSignature, signatureOK := types.Unalias(callbackType).Underlying().(*types.Signature)
+	background := p.prog.TypeBackground(callbackType)
+	if !llssa.IsNativeFuncBackground(background) {
+		background = llssa.InC
+	}
+	if !signatureOK || callbackSignature == nil || callbackSignature.Recv() != nil ||
+		callbackSignature.Variadic() {
 		panic("coroutine foreign reentry adapter requires one exact non-capturing callback")
 	}
 	entry := p.mustFunctionSymbol(target)
@@ -209,11 +217,12 @@ func (p *context) coroForeignReentryAdapter(
 		"cl-coro-foreign-reentry-adapter-v1",
 		string(entry.plan.ID),
 		entry.name,
+		strconv.Itoa(int(background)),
 		p.cachedStrictEmissionABITypeKey(callbackSignature),
 		strconv.Itoa(p.prog.PointerSize()),
 	)
 	name := coroForeignReentryAdapterPrefixV1 + emissionDigest(key)
-	return p.coroForeignIngressAdapter(target, callbackSignature, name, true)
+	return p.coroForeignIngressAdapter(target, callbackSignature, background, name, true)
 }
 
 // coroForeignIngressAdapter emits the common exact C-to-managed transaction.
@@ -226,10 +235,12 @@ func (p *context) coroForeignReentryAdapter(
 func (p *context) coroForeignIngressAdapter(
 	target *ssa.Function,
 	physicalSignature *types.Signature,
+	background llssa.Background,
 	name string,
 	linkOnce bool,
 ) llssa.Function {
 	if p == nil || p.emissionUniverse == nil || target == nil || name == "" ||
+		!llssa.IsNativeFuncBackground(background) ||
 		physicalSignature == nil || physicalSignature.Recv() != nil ||
 		physicalSignature.Variadic() || len(target.FreeVars) != 0 {
 		panic("coroutine foreign ingress adapter requires one exact typed target")
@@ -246,7 +257,7 @@ func (p *context) coroForeignIngressAdapter(
 		panic("coroutine foreign ingress target and physical signatures differ")
 	}
 	abi := newCoroPhysicalABI(p, entry, sourceSignature)
-	adapter := p.pkg.NewFuncEx(name, physicalSignature, llssa.InC, false, linkOnce)
+	adapter := p.pkg.NewFuncEx(name, physicalSignature, background, false, linkOnce)
 	if adapter.HasBody() {
 		return adapter
 	}
@@ -337,7 +348,7 @@ func (p *context) compileCoroSameMForeignCall(
 		panic("coroutine same-M foreign lowering escaped its frozen physical operation recipe")
 	}
 	target, _, kind := p.compileFunction(shape.target)
-	if target == nil || kind != cFunc {
+	if target == nil || !isNativeFuncKind(kind) || llssa.Background(kind) != shape.background {
 		panic("coroutine same-M foreign lowering lost its exact C target")
 	}
 	thunk := p.coroWorkerForeignThunk(shape, target)
@@ -350,13 +361,11 @@ func (p *context) compileCoroSameMForeignCall(
 	compiled := make([]llssa.Expr, shape.argc)
 	for index, argument := range shape.arguments {
 		if callback := shape.reentryCallbacks[index]; callback != nil {
-			signature, ok := types.Unalias(
-				shape.signature.Params().At(index).Type(),
-			).Underlying().(*types.Signature)
-			if !ok || signature == nil {
+			callbackType := shape.signature.Params().At(index).Type()
+			if signature, ok := types.Unalias(callbackType).Underlying().(*types.Signature); !ok || signature == nil {
 				panic("coroutine foreign reentry callback lost its exact C signature")
 			}
-			compiled[index] = p.coroForeignReentryAdapter(callback, signature).Expr
+			compiled[index] = p.coroForeignReentryAdapter(callback, callbackType).Expr
 			continue
 		}
 		compiled[index] = p.compileValue(b, argument)
