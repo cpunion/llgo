@@ -90,6 +90,17 @@
     },
     {
       "kind": "branch",
+      "id": "aae2088544eb07c4",
+      "label": "Branch codex/windows-r12-debug-shell-20260831",
+      "path": "series/branch/aae2088544eb07c4/summary.json",
+      "configPath": "series/branch/aae2088544eb07c4/config.json",
+      "commitPath": "commits/c6403edc238c386e1ff483c657b9e533c7ce7ffa.json",
+      "sha": "c6403edc238c386e1ff483c657b9e533c7ce7ffa",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/c6403edc238c386e1ff483c657b9e533c7ce7ffa",
+      "updatedAt": "2026-08-30T22:12:17.914Z"
+    },
+    {
+      "kind": "branch",
       "id": "5fedd9daaf878e96",
       "label": "Branch codex/windows-r9-native-toolchain-20260827",
       "path": "series/branch/5fedd9daaf878e96/summary.json",
@@ -217,6 +228,17 @@
       "sha": "a338a023566acd6290c5cc41d47346789baf0c60",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/a338a023566acd6290c5cc41d47346789baf0c60",
       "updatedAt": "2026-08-30T10:35:17.367Z"
+    },
+    {
+      "kind": "pull",
+      "id": "216",
+      "label": "PR #216",
+      "path": "series/pull/216/summary.json",
+      "configPath": "series/pull/216/config.json",
+      "commitPath": "commits/c6403edc238c386e1ff483c657b9e533c7ce7ffa.json",
+      "sha": "c6403edc238c386e1ff483c657b9e533c7ce7ffa",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/c6403edc238c386e1ff483c657b9e533c7ce7ffa",
+      "updatedAt": "2026-08-30T22:12:17.861Z"
     }
   ]
 }
