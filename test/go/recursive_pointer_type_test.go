@@ -84,5 +84,5 @@ func TestRecursivePointerTypeBuilds(t *testing.T) {
 
 	root := findLLGoRoot(t)
 	t.Setenv("LLGO_ROOT", root)
-	runLLGoTestCommand(t, root, "run", mainFile)
+	runLLGoTestCommand(t, dir, "run", mainFile)
 }

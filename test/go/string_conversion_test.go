@@ -100,7 +100,7 @@ func TestStringConversionFromWideIntegers(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	runStringConversionProbe(t, dir, "go", "run", file)
 	t.Setenv("LLGO_ROOT", repoRoot)
-	runStringConversionProbe(t, repoRoot, acceptanceLLGoBinary(t), "run", file)
+	runStringConversionProbe(t, dir, acceptanceLLGoBinary(t), "run", file)
 }
 
 func TestEmptyStringToByteRuneSlicesNonNil(t *testing.T) {
@@ -112,7 +112,7 @@ func TestEmptyStringToByteRuneSlicesNonNil(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	runStringConversionProbe(t, dir, "go", "run", file)
 	t.Setenv("LLGO_ROOT", repoRoot)
-	runStringConversionProbe(t, repoRoot, acceptanceLLGoBinary(t), "run", file)
+	runStringConversionProbe(t, dir, acceptanceLLGoBinary(t), "run", file)
 }
 
 func runStringConversionProbe(t *testing.T, dir, name string, args ...string) {

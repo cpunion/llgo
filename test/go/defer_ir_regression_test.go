@@ -109,16 +109,24 @@ func llgoIRFromProbe(t *testing.T, name, src string) string {
 
 	commandName := "go"
 	args := []string{"run", "./chore/llgen", filepath.ToSlash(dir)}
+	commandDir := root
+	commandEnv := os.Environ()
 	if tool := configuredLLGoSiblingTool(t, "llgen"); tool != "" {
 		commandName = tool
-		args = []string{filepath.ToSlash(dir)}
+		args = []string{"."}
+		// Run the prebuilt host tool from the probe module. packages.Load
+		// resolves relative to the process working directory; invoking it from
+		// the repository root would incorrectly treat this nested module as a
+		// package of the LLGo module.
+		commandDir = dir
+		// A prebuilt llgen is a host tool even when the test program targets
+		// another architecture. Query GOHOSTOS/GOHOSTARCH instead of
+		// runtime.GOARCH: this test package itself may be an LLGo target binary.
+		commandEnv = hostLLGoToolEnv(t)
 	}
 	cmd := exec.Command(commandName, args...)
-	cmd.Dir = root
-	// llgen is a host tool even when the test program targets another
-	// architecture. Query GOHOSTOS/GOHOSTARCH instead of runtime.GOARCH: this
-	// test package itself may be an LLGo target binary.
-	cmd.Env = hostLLGoToolEnv(t)
+	cmd.Dir = commandDir
+	cmd.Env = commandEnv
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate LLGo IR: %v\n%s", err, output)
 	}
