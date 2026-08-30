@@ -94,10 +94,10 @@
       "label": "Branch codex/windows-r12-debug-shell-20260831",
       "path": "series/branch/aae2088544eb07c4/summary.json",
       "configPath": "series/branch/aae2088544eb07c4/config.json",
-      "commitPath": "commits/c6403edc238c386e1ff483c657b9e533c7ce7ffa.json",
-      "sha": "c6403edc238c386e1ff483c657b9e533c7ce7ffa",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/c6403edc238c386e1ff483c657b9e533c7ce7ffa",
-      "updatedAt": "2026-08-30T22:12:17.914Z"
+      "commitPath": "commits/19ee75529749d20396a66c153a3494b82048a2b5.json",
+      "sha": "19ee75529749d20396a66c153a3494b82048a2b5",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/19ee75529749d20396a66c153a3494b82048a2b5",
+      "updatedAt": "2026-08-30T22:52:36.102Z"
     },
     {
       "kind": "branch",
@@ -235,10 +235,10 @@
       "label": "PR #216",
       "path": "series/pull/216/summary.json",
       "configPath": "series/pull/216/config.json",
-      "commitPath": "commits/c6403edc238c386e1ff483c657b9e533c7ce7ffa.json",
-      "sha": "c6403edc238c386e1ff483c657b9e533c7ce7ffa",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/c6403edc238c386e1ff483c657b9e533c7ce7ffa",
-      "updatedAt": "2026-08-30T22:12:17.861Z"
+      "commitPath": "commits/19ee75529749d20396a66c153a3494b82048a2b5.json",
+      "sha": "19ee75529749d20396a66c153a3494b82048a2b5",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/19ee75529749d20396a66c153a3494b82048a2b5",
+      "updatedAt": "2026-08-30T22:52:36.031Z"
     }
   ]
 }
