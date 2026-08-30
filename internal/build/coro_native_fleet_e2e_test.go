@@ -293,6 +293,127 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetForeignThreadExportIngressE2ESource = `package main
+
+import _ "unsafe"
+
+var Ready chan int32
+var Result int32
+var MainThread uintptr
+var CallbackBefore uintptr
+var CallbackAfter uintptr
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=managed-ingress memory=by-value
+//go:linkname callExportThread C.__llgo_coro_native_fleet_e2e_call_export_thread_v1
+func callExportThread(int32) int32
+
+//go:linkname timerSleep llgo.coroTimerSleep
+func timerSleep(delay int64)
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//export __llgo_coro_native_fleet_e2e_export_v1
+func __llgo_coro_native_fleet_e2e_export_v1(value int32) int32 {
+	CallbackBefore = threadID()
+	value += <-Ready
+	timerSleep(5 * 1000 * 1000)
+	CallbackAfter = threadID()
+	return value
+}
+
+func Setup() {
+	Ready = make(chan int32)
+	Result = 0
+	MainThread = threadID()
+	CallbackBefore = 0
+	CallbackAfter = 0
+}
+
+func sender() {
+	for index := int32(0); index < 8; index++ {
+		timerSleep(10 * 1000 * 1000)
+		Ready <- 10
+	}
+}
+
+func main() {
+	go sender()
+	for index := int32(0); index < 8; index++ {
+		Result += callExportThread(7 + index)
+	}
+}
+
+func Check() int32 {
+	if Result != 164 {
+		return 141
+	}
+	if MainThread == 0 || CallbackBefore == 0 || CallbackAfter == 0 ||
+		CallbackBefore == MainThread || CallbackAfter != CallbackBefore {
+		return 142
+	}
+	return 0
+}
+`
+
+const coroNativeFleetConcurrentForeignThreadExportIngressE2ESource = `package main
+
+import _ "unsafe"
+
+var Ready chan int32
+var Result int32
+var MainThread uintptr
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=managed-ingress memory=by-value
+//go:linkname callExportThreads C.__llgo_coro_native_fleet_e2e_call_export_threads_v1
+func callExportThreads(int32) int32
+
+//go:linkname timerSleep llgo.coroTimerSleep
+func timerSleep(delay int64)
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//export __llgo_coro_native_fleet_e2e_export_v1
+func __llgo_coro_native_fleet_e2e_export_v1(value int32) int32 {
+	before := threadID()
+	value += <-Ready
+	timerSleep(5 * 1000 * 1000)
+	after := threadID()
+	if before == 0 || before == MainThread || after != before {
+		return -10000
+	}
+	return value
+}
+
+func Setup() {
+	Ready = make(chan int32)
+	Result = 0
+	MainThread = threadID()
+}
+
+func sender() {
+	timerSleep(20 * 1000 * 1000)
+	for index := int32(0); index < 16; index++ {
+		Ready <- 10
+	}
+}
+
+func main() {
+	go sender()
+	Result = callExportThreads(7)
+}
+
+func Check() int32 {
+	if Result != 392 {
+		return 143
+	}
+	return 0
+}
+`
+
 const coroNativeFleetSameMForeignE2ESource = `package main
 
 import _ "unsafe"
@@ -2048,6 +2169,46 @@ func TestCoroNativeFleetExportIngressParksByGlobalSymbolE2E(t *testing.T) {
 	)
 }
 
+func TestCoroNativeFleetForeignThreadExportIngressParksE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetForeignThreadExportIngressE2ESource,
+		"foreign-thread-export-ingress",
+		true,
+		1,
+	)
+}
+
+func TestCoroNativeFleetForeignThreadExportIngressParksAcrossRoutesE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetForeignThreadExportIngressE2ESource,
+		"foreign-thread-export-ingress-across-routes",
+		true,
+		4,
+	)
+}
+
+func TestCoroNativeFleetConcurrentForeignThreadExportIngressParksE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetConcurrentForeignThreadExportIngressE2ESource,
+		"concurrent-foreign-thread-export-ingress",
+		true,
+		4,
+	)
+}
+
+func TestCoroNativeFleetConcurrentForeignThreadExportIngressSingleRouteE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetConcurrentForeignThreadExportIngressE2ESource,
+		"concurrent-foreign-thread-export-ingress-single-route",
+		true,
+		1,
+	)
+}
+
 func TestCoroNativeFleetSameMForeignKeepsSchedulerProgressE2E(t *testing.T) {
 	runCoroNativeFleetE2E(
 		t,
@@ -2368,6 +2529,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_timer_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_os_thread_affinity.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_os_thread_foreign_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_foreign_ingress_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_poll_descriptor_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_poll_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_poll_route_native_fleet_llgo.go"),
@@ -2410,6 +2572,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		"github.com/xgo-dev/llgo/runtime/internal/corotimer":    true,
 		"github.com/xgo-dev/llgo/runtime/internal/coroworker":   true,
 		"github.com/xgo-dev/llgo/runtime/internal/runtime/math": true,
+		"github.com/xgo-dev/llgo/runtime/internal/sync":         true,
 		"github.com/xgo-dev/llgo/runtime/internal/thread":       true,
 	}
 	seen := make(map[string]bool, len(allowed))

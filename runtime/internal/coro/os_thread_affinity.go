@@ -16,6 +16,8 @@
 
 package coro
 
+import "unsafe"
+
 const (
 	// Keep the exceptional user-visible LockOSThread nesting and the
 	// scheduler's temporary synchronous-foreign-reentry affinity in one byte.
@@ -138,6 +140,25 @@ func validOSThreadOwnerHeader(p *P) bool {
 	return g.state == GWaiting && g.waiting
 }
 
+// returnableOSThreadSuspendOwner is the one stable boundary at which a run
+// cursor may retain ready debt without exposing a runnable to its current
+// replacement M. The source transaction has made the affined owner runnable,
+// but only the detached predecessor may resume it. The target consumes this
+// state by returning the physical route before another scheduler selection.
+func returnableOSThreadSuspendOwner(p *P) bool {
+	if !validOSThreadOwnerHeader(p) || p == nil || p.current != nil {
+		return false
+	}
+	switch p.osThreadSuspend {
+	case osThreadSuspendPark, osThreadSuspendYieldPeerServiced:
+		owner := p.osThreadLockOwner
+		return owner != nil && owner.queued && owner.state == GRunnable &&
+			!owner.waiting && owner.runP == nil
+	default:
+		return false
+	}
+}
+
 // EnterOSThreadLock binds the currently executing logical G to its current
 // physical P/M ownership island. It is owner-only and may be called only from
 // the exact compiler resume window; no TLS or process-global current-G lookup
@@ -203,6 +224,104 @@ func CurrentOSThreadLocked(g *G) bool {
 	p := g.runP
 	return p != nil && p.current == g && p.osThreadLockOwner == g &&
 		p.osThreadSuspend == osThreadSuspendAttached
+}
+
+// EnqueueForeignIngressRoot gives a newly adopted hard-sync root the same exact
+// physical-thread selection used by LockOSThread without exposing a user lock
+// nesting level. The boundary thread already owns p; a later Park/Yield uses
+// the ordinary replacement-M handoff and can only return this root to that
+// same physical owner.
+//
+// runnableCurrentOwner also keeps this root out of P-neutral transfer. The
+// internal affinity bit is cleared only by ReleaseForeignIngressRoot after the
+// generated root has published its terminal status and run all defers. Binding
+// and queue publication are one owner-only transaction, so no caller can leave
+// a half-bound root when ordinary Enqueue validation fails.
+func EnqueueForeignIngressRoot(p *P, g *G) bool {
+	if p == nil || !ValidG(g) || g.state != GRunnable ||
+		g.root == nil || g.active != g.root || g.frames == nil ||
+		g.queued || g.nextReady != nil || g.waiting || g.runP != nil ||
+		g.osThreadLockDepth != 0 || g.runnableAffinity != runnableAnyOwner ||
+		p.current != nil || p.inResume || p.osThreadLockOwner != nil ||
+		p.osThreadSuspend != osThreadSuspendAttached ||
+		!validRunnableParkState(&g.park) ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		g.transferState != runnableTransferGIdle || !validRunnableRunAction(g) ||
+		!validReadyQueueHeader(p) || !validSchedulerWaitQueues(p) ||
+		p.readyCount == ^uint32(0) {
+		return false
+	}
+	schedule := preemptLoad(&p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested {
+		return false
+	}
+	g.osThreadLockDepth = osThreadForeignReentryBit
+	g.runnableAffinity = runnableCurrentOwner
+	p.osThreadLockOwner = g
+	appendReadyUnchecked(p, g)
+	return validOSThreadOwnerHeader(p)
+}
+
+// ReleaseForeignIngressRoot closes the implicit callback-thread affinity at
+// the final managed suspend. User LockOSThread nesting inside the callback is
+// intentionally consumed with the boundary root: the foreign pthread returns
+// to its C owner rather than becoming a reusable runtime M or being terminated
+// by the unbalanced-lock retirement path.
+func ReleaseForeignIngressRoot(g *G) bool {
+	if !enterCriticalContext(g) || !osThreadForeignReentryAffined(g) {
+		return false
+	}
+	p := g.runP
+	if p == nil || p.current != g || p.osThreadLockOwner != g ||
+		p.osThreadSuspend != osThreadSuspendAttached ||
+		g.runnableAffinity != runnableCurrentOwner {
+		return false
+	}
+	g.osThreadLockDepth = 0
+	p.osThreadLockOwner = nil
+	return validOSThreadOwnerHeader(p)
+}
+
+// ReleaseForeignIngressRootTerminal is the adjacent terminal-suspend variant.
+// Compiler hooks have already changed the active header and installed either
+// pendingComplete or pendingPanic, so the ordinary active-resume critical gate
+// is intentionally no longer valid. This exact staged receipt replaces it and
+// prevents a caller from dropping affinity at an arbitrary scheduler point.
+func ReleaseForeignIngressRootTerminal(g *G) bool {
+	if !ValidG(g) || !resumeGateStructurallyTaken(g) ||
+		!osThreadForeignReentryAffined(g) ||
+		g.transferState != runnableTransferGIdle || g.active == nil ||
+		g.active.owner != g || g.active.handle == nil ||
+		g.active.header == nil || g.active.state != FrameActive ||
+		g.active.header.G != unsafe.Pointer(g) || g.spawnChild != nil {
+		return false
+	}
+	frame := g.active
+	terminal := false
+	switch g.pending.kind {
+	case pendingComplete:
+		terminal = g.pending.from == frame && g.pending.target == nil &&
+			!g.pending.directChannel &&
+			frame.header.SuspendReason == uint16(SuspendFrameComplete) &&
+			frame.header.Lifecycle == uint16(FrameFinalSuspended)
+	case pendingPanic:
+		terminal = g.pending.from == frame && g.pending.target == nil &&
+			!g.pending.directChannel &&
+			frame.header.SuspendReason == uint16(SuspendPanic) &&
+			frame.header.Lifecycle == uint16(FrameFinalSuspended)
+	}
+	if !terminal {
+		return false
+	}
+	p := g.runP
+	if p == nil || p.current != g || p.osThreadLockOwner != g ||
+		p.osThreadSuspend != osThreadSuspendAttached ||
+		g.runnableAffinity != runnableCurrentOwner {
+		return false
+	}
+	g.osThreadLockDepth = 0
+	p.osThreadLockOwner = nil
+	return validOSThreadOwnerHeader(p)
 }
 
 // OSThreadSuspendHandoffCandidate is the target adapter's O(1) negative

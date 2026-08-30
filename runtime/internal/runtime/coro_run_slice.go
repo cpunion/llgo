@@ -106,10 +106,18 @@ const (
 	// callback child to the native boundary adapter. The parent LLVM resume is
 	// already active below C and must not be resumed by the scheduler.
 	coroRunForeignReentryCompleteV1
+	// coroRunForeignIngressCompleteV1 returns one independently owned hard-sync
+	// root after its task allocation and runtime sidecar have been retired. The
+	// physical callback M still owns the route and must hand it back to the
+	// blocked predecessor before the generated C adapter may return.
+	coroRunForeignIngressCompleteV1
 )
 
 type coroRunResultV1 struct {
-	stop        coroRunStopV1
+	stop coroRunStopV1
+	// completion occupies padding before g. It is non-zero only for the cold
+	// foreign-ingress stop and therefore does not enlarge the hot result ABI.
+	completion  coro.CompletionStatus
 	g           *coro.G
 	action      coro.Action
 	deadline    int64
@@ -440,8 +448,22 @@ func coroReduceExecutorRunActionPreparedV1(
 	case coro.ActionComplete:
 		isMain := g == policy.main
 		retireOwner := coro.ActionRetiresPhysicalOwner(next)
+		completion, foreignIngress, completionOK :=
+			coroForeignIngressTerminalStatus(g)
+		if !completionOK || foreignIngress &&
+			completion == coro.CompletionPanic {
+			return false, false
+		}
 		if !coroReleaseCompletedTaskReceipt(g, releaseReceipt) {
 			return false, false
+		}
+		if foreignIngress {
+			if isMain || retireOwner {
+				return false, false
+			}
+			result.stop = coroRunForeignIngressCompleteV1
+			result.completion = completion
+			return true, true
 		}
 		if isMain {
 			result.stop, result.g = coroRunMainDoneV1, policy.main
@@ -451,6 +473,14 @@ func coroReduceExecutorRunActionPreparedV1(
 			return false, false
 		}
 	case coro.ActionPanicComplete:
+		completion, foreignIngress, completionOK :=
+			coroForeignIngressTerminalStatus(g)
+		if !completionOK || foreignIngress && completion != coro.CompletionPanic {
+			return false, false
+		}
+		if foreignIngress {
+			result.completion = completion
+		}
 		result.stop, result.g, result.action = coroRunPanicCompleteV1, g, next
 		return true, true
 	case coro.ActionCommitDestroy:

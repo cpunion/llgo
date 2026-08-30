@@ -74,6 +74,75 @@ int32_t __llgo_coro_native_fleet_e2e_call_export_v1(int32_t value) {
            __llgo_coro_native_fleet_e2e_export_v1(value + 1);
 }
 
+struct llgo_coro_native_fleet_e2e_export_thread_v1 {
+    int32_t value;
+    int32_t result;
+    _Atomic uint32_t *start;
+};
+
+static void *__llgo_coro_native_fleet_e2e_export_thread_main_v1(void *opaque) {
+    struct llgo_coro_native_fleet_e2e_export_thread_v1 *call =
+        (struct llgo_coro_native_fleet_e2e_export_thread_v1 *)opaque;
+    if (call->start != NULL) {
+        while (atomic_load_explicit(call->start, memory_order_seq_cst) == 0) {
+            (void)sched_yield();
+        }
+    }
+    call->result = __llgo_coro_native_fleet_e2e_export_v1(call->value);
+    return NULL;
+}
+
+int32_t __llgo_coro_native_fleet_e2e_call_export_thread_v1(int32_t value) {
+    struct llgo_coro_native_fleet_e2e_export_thread_v1 call = {
+        .value = value,
+        .result = INT32_MIN,
+        .start = NULL,
+    };
+    pthread_t thread;
+    if (pthread_create(
+            &thread,
+            NULL,
+            __llgo_coro_native_fleet_e2e_export_thread_main_v1,
+            &call) != 0 ||
+        pthread_join(thread, NULL) != 0) {
+        return INT32_MIN;
+    }
+    return call.result;
+}
+
+int32_t __llgo_coro_native_fleet_e2e_call_export_threads_v1(int32_t value) {
+    /* Deliberately exceeds the eight-slot ingress rendezvous. The second
+       wave must wait for and reuse slots instead of requiring unbounded
+       process-global callback storage. */
+    enum { thread_count = 16 };
+    struct llgo_coro_native_fleet_e2e_export_thread_v1 calls[thread_count];
+    pthread_t threads[thread_count];
+    _Atomic uint32_t start = 0;
+    uint32_t created = 0;
+    for (; created < thread_count; created++) {
+        calls[created].value = value + (int32_t)created;
+        calls[created].result = INT32_MIN;
+        calls[created].start = &start;
+        if (pthread_create(
+                &threads[created],
+                NULL,
+                __llgo_coro_native_fleet_e2e_export_thread_main_v1,
+                &calls[created]) != 0) {
+            break;
+        }
+    }
+    atomic_store_explicit(&start, 1, memory_order_seq_cst);
+    int32_t result = created == thread_count ? 0 : INT32_MIN;
+    for (uint32_t index = 0; index < created; index++) {
+        if (pthread_join(threads[index], NULL) != 0) {
+            result = INT32_MIN;
+        } else if (result != INT32_MIN) {
+            result += calls[index].result;
+        }
+    }
+    return result;
+}
+
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_active_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_maximum_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_blocked_state_v1;

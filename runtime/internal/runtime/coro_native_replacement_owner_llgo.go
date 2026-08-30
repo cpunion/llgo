@@ -310,6 +310,16 @@ func coroNativeMRunClaimedReplacementOwnerV1(
 		return false
 	}
 	for {
+		if served, ingressOK := coroNativeForeignIngressTryServeV1(
+			domain.pOwnerV1(),
+			domain.driverOwnerV1(),
+		); !ingressOK {
+			return coroNativeFleetPhysicalOwnerFailV1(
+				"native replacement foreign ingress failed",
+			)
+		} else if served {
+			continue
+		}
 		if returned, returnOK := coroNativeReplacementTryReturnV1(
 			slot,
 			owner,

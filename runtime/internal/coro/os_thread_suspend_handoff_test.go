@@ -309,6 +309,9 @@ func TestOSThreadParkHandoffReturnsAfterSourcePromotion(t *testing.T) {
 	if !prepared || !required {
 		t.Fatalf("prepare locked-park handoff = (%t, %t)", required, prepared)
 	}
+	if returnableOSThreadSuspendOwner(p) {
+		t.Fatal("parked OS-thread owner became returnable before source promotion")
+	}
 
 	for reduction := 0; reduction < 64; reduction++ {
 		detached, returnable, valid := OSThreadSuspendHandoffStatus(driver)
@@ -329,6 +332,10 @@ func TestOSThreadParkHandoffReturnsAfterSourcePromotion(t *testing.T) {
 		!detached || !returnable || !owner.g.queued || wait != (WaitSetRecord{}) {
 		t.Fatalf("promoted locked-park status = (%t, %t, %t), queued=%t wait=%+v",
 			detached, returnable, valid, owner.g.queued, wait)
+	}
+	if !returnableOSThreadSuspendOwner(p) ||
+		!validExecutorRunCursor(&driver.run, p) {
+		t.Fatal("promoted OS-thread owner did not satisfy the ready-debt return gate")
 	}
 	if !RestoreOSThreadSuspendHandoff(driver, owner.g) {
 		t.Fatal("restore locked-park owner")

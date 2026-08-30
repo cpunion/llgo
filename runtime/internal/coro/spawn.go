@@ -252,6 +252,43 @@ func BeginSpawnCompilerLocal(
 	return beginSpawnCompiler(parent, child, storage, size, local, true)
 }
 
+// InitOwnedRootCompilerLocal initializes one independently owned root without
+// manufacturing a parent/spawn transaction. It is the private construction
+// lane for a hard-sync foreign/host boundary: the boundary owns the zeroed,
+// scanned allocation until its generated root factory reaches initial suspend,
+// after which AdoptRoot and Enqueue publish it to exactly one executor.
+//
+// No P is touched here. In particular, this is not a general external
+// injection API and cannot make the root runnable by itself.
+func InitOwnedRootCompilerLocal(
+	root *G,
+	storage unsafe.Pointer,
+	size uintptr,
+	local unsafe.Pointer,
+) bool {
+	if root == nil || storage != unsafe.Pointer(root) ||
+		size != TaskStorageSize() || local == nil ||
+		uintptr(storage)%unsafe.Alignof(G{}) != 0 ||
+		root.magic != 0 || !gPreemptStateAtDepthZero(root, preemptDisabled) ||
+		root.state != GNew || root.taskState != taskStorageStatic ||
+		root.taskStorage != nil || root.taskSize != 0 || root.taskLocal != nil {
+		return false
+	}
+	root.magic = gMagic
+	root.taskStorage = storage
+	root.taskSize = size
+	root.taskState = taskStorageOwned
+	root.taskLocal = local
+	// Publish asynchronous preemption only after the complete owned/root
+	// attachment is visible. The generated factory remains the sole consumer
+	// until AdoptRoot commits its initial-suspended frame.
+	return compareAndSwapGPreemptStateAtDepthZero(
+		root,
+		preemptDisabled,
+		preemptIdle,
+	)
+}
+
 // activeSpawnTransaction consumes the reciprocal parent/child/P links
 // published by BeginSpawn as an unforgeable scheduler-owned certificate. The
 // compiler's root factory cannot suspend or run another scheduler reduction,

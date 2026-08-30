@@ -298,6 +298,11 @@ func coroFinishRunSliceCompatibility(
 // preparation and terminal-close boundaries.
 func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1 {
 	for {
+		if served, ok := coroTargetTryServeForeignIngressV1(p, driver); !ok {
+			return coroRunResultV1{}
+		} else if served {
+			continue
+		}
 		result := coroFinishRunSliceCompatibility(
 			p,
 			main,

@@ -67,6 +67,11 @@ func __llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord unsafe.P
 	) {
 		coroRuntimeAbort("invalid coroutine panic handoff")
 	}
+	if (*coro.HeaderV1)(header).Parent == nil {
+		if _, ok := coroStageForeignIngressTerminal(task, coro.CompletionPanic); !ok {
+			coroRuntimeAbort("invalid foreign ingress panic handoff")
+		}
+	}
 	coroReleaseDiscardedPanicTraceV1(task)
 }
 

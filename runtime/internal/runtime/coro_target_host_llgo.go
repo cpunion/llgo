@@ -20,6 +20,10 @@ package runtime
 
 import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
+func coroTargetTryServeForeignIngressV1(*coro.P, *coro.ExecutorDriver) (bool, bool) {
+	return false, true
+}
+
 // The host profile is a pull ABI, not a platform import masquerading as one.
 // JS/WASM wrappers, WASI reactors, RTOS tasks, and embedded main loops consume
 // the same pointer-free actions but provide their own scheduling/alarm glue.

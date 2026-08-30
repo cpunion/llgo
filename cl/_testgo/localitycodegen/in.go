@@ -14,7 +14,7 @@ package main
 // CHECK: call ptr @__llgo_coro_foreign_reentry_acquire_v1(
 // CHECK: call ptr @"ExportedLocality$coro"(
 // CHECK: call ptr @llvm.coro.promise(
-// CHECK: call i32 @__llgo_coro_foreign_reentry_run_v1(
+// CHECK: call i32 @__llgo_coro_foreign_reentry_run_v2(
 // CHECK-DAG: ret ptr
 // CHECK-DAG: call void @__llgo_coro_foreign_reentry_failure_v1(
 // CHECK-LABEL: define ptr @"main.__llgo_local_dispatch_tls_0$coro"(

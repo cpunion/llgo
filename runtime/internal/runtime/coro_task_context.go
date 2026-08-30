@@ -67,7 +67,9 @@ func coroBindRuntimeContextAt(task *coro.G, parentG *g, ctx *coroRuntimeContext,
 	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)
 	gp.localContext = &ctx.local
 	gp.isMain = !embedded
-	gp.coroEmbedded = embedded
+	if embedded {
+		gp.coroState = gCoroEmbeddedFlag
+	}
 	if coro.BindTaskLocal(task, unsafe.Pointer(ctx)) {
 		gp.startarg = unsafe.Pointer(task)
 		return true
@@ -144,15 +146,98 @@ func coroInitializeTaskAllocationRuntimeContextCompiler(
 	}
 
 	if ctx != &(*coroTaskAllocation)(unsafe.Pointer(task)).context ||
-		ctx.g.context != nil || ctx.g.localContext != nil {
+		ctx.g.context != nil || ctx.g.localContext != nil ||
+		ctx.g.coroState != 0 {
 		return false
 	}
 	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)
 	gp.localContext = &ctx.local
 	gp.isMain = false
-	gp.coroEmbedded = true
+	gp.coroState = gCoroEmbeddedFlag
 	gp.startarg = unsafe.Pointer(task)
 	return true
+}
+
+// coroInitializeForeignIngressRuntimeContext initializes the task-allocation
+// sidecar for an independently entered hard-sync root. It deliberately has no
+// logical parent, but remains embedded in the same scanned allocation as every
+// spawned G. The physical callback-thread placeholder stays in pthread TLS and
+// is borrowed only around each managed resume by coroEnterRuntimeContext.
+func coroInitializeForeignIngressRuntimeContext(
+	task *coro.G,
+	ctx *coroRuntimeContext,
+) bool {
+	if task == nil || ctx == nil ||
+		unsafe.Pointer(ctx) != unsafe.Add(unsafe.Pointer(task), coroTaskAllocationContextOffset) ||
+		ctx != &(*coroTaskAllocation)(unsafe.Pointer(task)).context ||
+		ctx.g.context != nil || ctx.g.localContext != nil ||
+		ctx.g.coroState != 0 {
+		return false
+	}
+	gp := initCoroRuntimeContext(ctx, nil, _Grunnable)
+	gp.localContext = &ctx.local
+	gp.isMain = false
+	gp.coroState = gCoroEmbeddedFlag | gCoroForeignIngressFlag
+	gp.startarg = unsafe.Pointer(task)
+	return true
+}
+
+func coroForeignIngressRuntimeG(task *coro.G) (*g, bool) {
+	ctx := (*coroRuntimeContext)(coro.TaskLocal(task))
+	if !validCoroRuntimeTaskContext(task, ctx) ||
+		ctx.g.coroState&gCoroEmbeddedFlag == 0 ||
+		ctx.g.coroState&gCoroForeignIngressFlag == 0 {
+		return nil, false
+	}
+	return &ctx.g, true
+}
+
+// coroStageForeignIngressTerminal records the root outcome before the final
+// LLVM suspend releases its frame-local status. It also closes the implicit
+// callback-thread affinity only after all Go defers have run. The scheduler can
+// then retire the ordinary task allocation while returning the copied status
+// through the boundary record.
+func coroStageForeignIngressTerminal(
+	task *coro.G,
+	status coro.CompletionStatus,
+) (foreign, ok bool) {
+	gp, foreign := coroForeignIngressRuntimeG(task)
+	if !foreign {
+		return false, true
+	}
+	switch status {
+	case coro.CompletionReturn, coro.CompletionPanic, coro.CompletionAbort,
+		coro.CompletionShutdown, coro.CompletionReturnRecovered,
+		coro.CompletionGoexit:
+	default:
+		return true, false
+	}
+	if gp.coroState&gCoroTerminalStatusMask != 0 ||
+		!coro.ReleaseForeignIngressRootTerminal(task) {
+		return true, false
+	}
+	gp.coroState |= uint8(status) << gCoroTerminalStatusShift
+	return true, true
+}
+
+func coroForeignIngressTerminalStatus(
+	task *coro.G,
+) (coro.CompletionStatus, bool, bool) {
+	gp, foreign := coroForeignIngressRuntimeG(task)
+	if !foreign {
+		return coro.CompletionNone, false, true
+	}
+	status := coro.CompletionStatus(
+		(gp.coroState & gCoroTerminalStatusMask) >> gCoroTerminalStatusShift,
+	)
+	switch status {
+	case coro.CompletionReturn, coro.CompletionPanic, coro.CompletionAbort,
+		coro.CompletionShutdown, coro.CompletionReturnRecovered,
+		coro.CompletionGoexit:
+		return status, true, true
+	default:
+		return coro.CompletionNone, true, false
+	}
 }
 
 // validCoroRuntimeContext checks only state which follows the logical G. Its
@@ -239,7 +324,7 @@ func validCoroRuntimeTaskG(task *coro.G, gp *g) bool {
 	// already scheduler-valid and coroEmbedded selects the combined allocation
 	// representation. The command root is the only independently allocated
 	// logical-task context; every dynamic G must match the exact tail address.
-	if gp.coroEmbedded {
+	if gp.coroState&gCoroEmbeddedFlag != 0 {
 		return gp.context == &(*coroTaskAllocation)(unsafe.Pointer(task)).context
 	}
 	return gp.isMain
@@ -347,7 +432,7 @@ func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
 	if gp.m != nil || readgstatus(gp) != _Grunnable {
 		return false
 	}
-	embedded := ctx.g.coroEmbedded
+	embedded := ctx.g.coroState&gCoroEmbeddedFlag != 0
 	if gp.localContext != nil {
 		releaseLocalBlocks(gp.localContext)
 		gp.localContext = nil
@@ -358,7 +443,7 @@ func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
 	}
 	releasePanicPCStore(gp)
 	gp.startarg = nil
-	gp.coroEmbedded = false
+	gp.coroState = 0
 	casgstatus(gp, _Grunnable, _Gdead)
 	gp.context = nil
 	releaseGAndCheckDeadlock()
@@ -378,7 +463,7 @@ func discardCoroRuntimeContext(ctx *coroRuntimeContext, freeContext bool) {
 	}
 	releasePanicPCStore(&ctx.g)
 	ctx.g.context = nil
-	ctx.g.coroEmbedded = false
+	ctx.g.coroState = 0
 	releaseG()
 	if freeContext {
 		FreeRoot(unsafe.Pointer(ctx))

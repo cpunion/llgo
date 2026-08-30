@@ -149,6 +149,44 @@ func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
 	runtime.KeepAlive(root.memory)
 }
 
+func TestCompilerOwnedRootNeedsNoSyntheticParent(t *testing.T) {
+	root := new(G)
+	local := unsafe.Pointer(new(byte))
+	if InitOwnedRootCompilerLocal(root, unsafe.Pointer(root), TaskStorageSize(), nil) ||
+		root.magic != 0 {
+		t.Fatal("owned root accepted nil task-local storage")
+	}
+	if !InitOwnedRootCompilerLocal(
+		root,
+		unsafe.Pointer(root),
+		TaskStorageSize(),
+		local,
+	) {
+		t.Fatal("initialize compiler-owned root")
+	}
+	if root.spawnParent != nil || root.spawnP != nil || root.spawnChild != nil ||
+		root.taskStorage != unsafe.Pointer(root) ||
+		root.taskSize != TaskStorageSize() || root.taskState != taskStorageOwned ||
+		TaskLocal(root) != local || !gPreemptStateAtDepthZero(root, preemptIdle) {
+		t.Fatalf("owned root state = %+v", root)
+	}
+	handle := unsafe.Pointer(new(byte))
+	frame, _ := newSpawnTestFrame(t, root, handle, 0, 1)
+	if !AdoptRoot(root, handle) || root.root == nil || root.active != root.root ||
+		root.state != GRunnable {
+		t.Fatal("adopt compiler-owned root")
+	}
+	if InitOwnedRootCompilerLocal(
+		root,
+		unsafe.Pointer(root),
+		TaskStorageSize(),
+		local,
+	) {
+		t.Fatal("compiler-owned root was initialized twice")
+	}
+	runtime.KeepAlive(frame.memory)
+}
+
 func TestCompilerSpawnRejectsUntakenResumeGateWithoutMutation(t *testing.T) {
 	fixture := newUncheckedResumeGateFixture(t, "compiler-spawn-gate")
 	child := new(G)

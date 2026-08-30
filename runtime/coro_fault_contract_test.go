@@ -33,6 +33,7 @@ func TestCoroImplicitFaultContract(t *testing.T) {
 		"go", "test",
 		"-tags=coro_nil_fault_adapter_test",
 		"coro_nil_fault.go", "coro_panic_trace_release_test_adapter.go",
+		"coro_foreign_ingress_terminal_nil_fault_test_adapter.go",
 		"coro_nil_fault_test.go",
 		"-run", "^TestCoro.*Fault",
 		"-count=1",

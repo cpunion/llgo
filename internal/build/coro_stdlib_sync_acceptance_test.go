@@ -158,6 +158,22 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			requireGoStmt:    true,
 		},
 		{
+			// A pthread created outside LLGo enters the synchronous export twice,
+			// parks on a channel, retains a large collector-visible payload, and
+			// forces collection before each return on that same thread.
+			name: "foreign-gc",
+			dir:  "./_testgo/coro_native_gc_foreign_ingress",
+			wantSource: []string{
+				"import \"C\"", "pthread_create(", "//export llgo_gc_foreign_export_v1",
+				"<-ready", "runtime.GC()", "runtime.KeepAlive(payload)",
+				"defer func()", "go func()",
+			},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+			wantGo:           true,
+			wantChannel:      true,
+			requireGoStmt:    true,
+		},
+		{
 			// P0 readiness/deadline probe: one top-level server G and one-byte
 			// TCP operations. The fixture does not spell a channel operation, but
 			// Go 1.26 net.(*netFD).connect itself uses a nonblocking channel select,
@@ -262,6 +278,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_keyed_registry_atomic_llgo.go":           false,
 		"coro_native_fleet.go":                         false,
 		"coro_native_fleet_owner_llgo.go":              false,
+		"coro_native_foreign_ingress_llgo.go":          false,
 		"coro_native_fleet_program_llgo.go":            false,
 		"coro_native_fleet_reactor.go":                 false,
 		"coro_physical_thread_capacity_native_llgo.go": false,
@@ -281,6 +298,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_worker_native_llgo.go":                   false,
 		"coro_worker_owner_llgo.go":                    false,
 		"coro_worker_result_llgo.go":                   false,
+		"foreign_thread_gc_unix.go":                    false,
 	}
 	forbidden := map[string]bool{
 		"coro_execution_quota_default.go":        false,
@@ -343,12 +361,13 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		t.Fatalf("%s acceptance runtime has no selected llgo runtime patch package", fixture.name)
 	}
 	altRequired := map[string]bool{
-		"gomaxprocs_coro_llgo.go":    false,
-		"notify_coro_llgo.go":        false,
-		"poll_linkname_coro_llgo.go": false,
-		"sema_coro_llgo.go":          false,
-		"signal_coro_llgo.go":        false,
-		"time_coro_go123_llgo.go":    false,
+		"gomaxprocs_coro_llgo.go":     false,
+		"notify_coro_llgo.go":         false,
+		"poll_linkname_coro_llgo.go":  false,
+		"sema_coro_llgo.go":           false,
+		"signal_coro_llgo.go":         false,
+		"time_coro_go123_llgo.go":     false,
+		"runtime_gc_threads_other.go": false,
 	}
 	altForbidden := map[string]bool{
 		"gomaxprocs_legacy.go":  false,
@@ -470,8 +489,8 @@ func TestCoroStdlibSyncAcceptanceFixtures(t *testing.T) {
 
 // TestCoroStdlibSyncAcceptance is deliberately opt-in because every selected
 // program performs a fresh standard-library compile, link, and run. The
-// time,timer,sync,syscall-file,syscall-pipe,file,tcp set is the fast vertical
-// gate; "all" selects all seven. Once selected, a build/runtime failure is a real test
+// time,timer,sync,foreign-gc,syscall-file,syscall-pipe,file,tcp set is the fast
+// vertical gate; "all" selects all eight. Once selected, a build/runtime failure is a real test
 // failure and is never converted into a known-failure pass.
 func TestCoroStdlibSyncAcceptance(t *testing.T) {
 	selected := parseCoroStdlibAcceptanceSelection(t)
@@ -559,10 +578,10 @@ func parseCoroStdlibAcceptanceSelection(t *testing.T) map[string]bool {
 	t.Helper()
 	raw := strings.TrimSpace(os.Getenv(coroStdlibAcceptanceEnv))
 	if raw == "" {
-		t.Skipf("set %s=all or a comma-separated subset of time,timer,sync,file,syscall-file,syscall-pipe,tcp", coroStdlibAcceptanceEnv)
+		t.Skipf("set %s=all or a comma-separated subset of time,timer,sync,foreign-gc,file,syscall-file,syscall-pipe,tcp", coroStdlibAcceptanceEnv)
 	}
 	known := map[string]bool{
-		"time": true, "timer": true, "sync": true, "file": true,
+		"time": true, "timer": true, "sync": true, "foreign-gc": true, "file": true,
 		"syscall-file": true, "syscall-pipe": true, "tcp": true,
 	}
 	selected := make(map[string]bool, len(known))

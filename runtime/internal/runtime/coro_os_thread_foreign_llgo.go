@@ -555,6 +555,9 @@ func __llgo_coro_foreign_reentry_acquire_v1(parentOut *unsafe.Pointer) unsafe.Po
 		coroRuntimeAbort("synchronous foreign callback TLS is unavailable")
 	}
 	boundary := coroNativeForeignBoundaryTLSV1.Get()
+	if boundary == nil {
+		return coroNativeForeignIngressAcquireV1(parentOut)
+	}
 	if parentOut == nil || boundary == nil || !boundary.active ||
 		boundary.landing == nil || boundary.callbackAcquired ||
 		boundary.escape != (coro.CompletionSnapshot{}) ||
@@ -629,23 +632,32 @@ func coroNativeForeignReentryRunV1(
 	}
 }
 
-// __llgo_coro_foreign_reentry_run_v1 drives the exact callback child through
-// the ordinary timer/channel/I/O/cancellation scheduler and returns its
-// parent-owned completion snapshot. A non-return status is left explicit for
-// the generated boundary adapter; it may not be silently converted into a C
-// return.
+// __llgo_coro_foreign_reentry_run_v2 drives the exact callback child through
+// the ordinary timer/channel/I/O/cancellation scheduler. task distinguishes a
+// same-M reentry from an independently owned foreign-pthread root without a
+// code-address lookup or process-global task pointer. A non-return status is
+// left explicit for the generated boundary adapter; it may not be silently
+// converted into a C return.
 //
-//export __llgo_coro_foreign_reentry_run_v1
-func __llgo_coro_foreign_reentry_run_v1(
-	child unsafe.Pointer,
+//export __llgo_coro_foreign_reentry_run_v2
+func __llgo_coro_foreign_reentry_run_v2(
+	task, child unsafe.Pointer,
 	typeOut, dataOut *unsafe.Pointer,
 ) uint32 {
-	if typeOut == nil || dataOut == nil ||
+	if task == nil || typeOut == nil || dataOut == nil ||
 		!coroNativeForeignBoundaryTLSReadyV1 {
 		coroRuntimeAbort("invalid synchronous foreign callback result output")
 	}
 	boundary := coroNativeForeignBoundaryTLSV1.Get()
-	snapshot := coroNativeForeignReentryRunV1(boundary, child)
+	var snapshot coro.CompletionSnapshot
+	if boundary == nil {
+		snapshot = coroNativeForeignIngressRunV1((*coro.G)(task), child)
+	} else {
+		if boundary.task != (*coro.G)(task) {
+			coroRuntimeAbort("synchronous foreign callback task mismatch")
+		}
+		snapshot = coroNativeForeignReentryRunV1(boundary, child)
+	}
 	*typeOut = snapshot.TypeWord
 	*dataOut = snapshot.DataWord
 	return uint32(snapshot.Status)

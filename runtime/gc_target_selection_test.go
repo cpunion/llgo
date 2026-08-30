@@ -14,6 +14,78 @@ import (
 	"testing"
 )
 
+func TestNativeForeignThreadGCRegistrationSelection(t *testing.T) {
+	tests := []struct {
+		name              string
+		goos              string
+		tags              string
+		wantRuntime       string
+		wantStdlibRuntime string
+	}{
+		{name: "linux-gc", goos: "linux", tags: "llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer", wantRuntime: "foreign_thread_gc_unix.go", wantStdlibRuntime: "runtime_gc_threads_other.go"},
+		{name: "darwin-gc", goos: "darwin", tags: "llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer", wantRuntime: "foreign_thread_gc_unix.go", wantStdlibRuntime: "runtime_gc_threads_other.go"},
+		{name: "freebsd-stub", goos: "freebsd", tags: "llgo,llgo_coro", wantRuntime: "foreign_thread_stub_default.go", wantStdlibRuntime: "runtime_gc_threads_stub.go"},
+		{name: "linux-nogc", goos: "linux", tags: "llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc", wantRuntime: "foreign_thread_stub_default.go"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.Command(
+				"go", "list", "-json", "-tags="+test.tags,
+				"./internal/runtime", "./internal/lib/runtime",
+			)
+			cmd.Env = append(
+				os.Environ(), "GOOS="+test.goos, "GOARCH=amd64", "CGO_ENABLED=0",
+			)
+			output, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("go list native foreign-thread GC selection: %v", err)
+			}
+			packages := make(map[string][]string)
+			decoder := json.NewDecoder(bytes.NewReader(output))
+			for {
+				var pkg struct {
+					ImportPath string
+					GoFiles    []string
+				}
+				if err := decoder.Decode(&pkg); errors.Is(err, io.EOF) {
+					break
+				} else if err != nil {
+					t.Fatalf("decode native foreign-thread GC selection: %v", err)
+				}
+				packages[pkg.ImportPath] = pkg.GoFiles
+			}
+			const internalRuntime = "github.com/xgo-dev/llgo/runtime/internal/runtime"
+			if files := packages[internalRuntime]; !slices.Contains(files, test.wantRuntime) {
+				t.Fatalf("%s GoFiles = %v, want %s", internalRuntime, files, test.wantRuntime)
+			}
+			const stdlibRuntime = "github.com/xgo-dev/llgo/runtime/internal/lib/runtime"
+			if test.wantStdlibRuntime != "" {
+				if files := packages[stdlibRuntime]; !slices.Contains(files, test.wantStdlibRuntime) {
+					t.Fatalf("%s GoFiles = %v, want %s", stdlibRuntime, files, test.wantStdlibRuntime)
+				}
+			}
+		})
+	}
+}
+
+func TestPackedCoroGStatePreserves32BitLayout(t *testing.T) {
+	cmd := exec.Command(
+		"go", "list", "-export",
+		"-tags=llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer",
+		"-f={{.Export}}", "./internal/runtime",
+	)
+	cmd.Env = append(
+		os.Environ(), "GOOS=linux", "GOARCH=386", "CGO_ENABLED=0",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compile packed coroutine g state for linux/386: %v\n%s", err, output)
+	}
+	if len(bytes.TrimSpace(output)) == 0 {
+		t.Fatal("linux/386 runtime export archive is absent")
+	}
+}
+
 func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 	targets := []struct {
 		name   string

@@ -151,6 +151,70 @@ func TestOSThreadLockedGCannotCrossPNeutralTransfer(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
+func TestForeignIngressRootUsesInternalPhysicalAffinity(t *testing.T) {
+	p := new(P)
+	task := newYieldingTestG(t, "foreign-ingress-root")
+	if !EnqueueForeignIngressRoot(p, task.g) ||
+		task.g.osThreadLockDepth != osThreadForeignReentryBit ||
+		task.g.runnableAffinity != runnableCurrentOwner ||
+		p.osThreadLockOwner != task.g || p.readyHead != task.g ||
+		p.readyTail != task.g || p.readyCount != 1 {
+		t.Fatalf("foreign ingress enqueue = depth:%#x affinity:%d owner:%p queue:(%p,%p,%d)",
+			task.g.osThreadLockDepth, task.g.runnableAffinity,
+			p.osThreadLockOwner, p.readyHead, p.readyTail, p.readyCount)
+	}
+	next, ok := NextRunnable(p)
+	if !ok || next != task.g {
+		t.Fatalf("select foreign ingress root = (%p, %t)", next, ok)
+	}
+	action, ok := BeginRunG(p, task.g)
+	if !ok {
+		t.Fatal("begin foreign ingress root")
+	}
+	_ = activatePreemptTestFrame(t, p, task, action)
+	if !CurrentOSThreadLocked(task.g) || !EnterOSThreadLock(task.g) ||
+		task.g.osThreadLockDepth != osThreadForeignReentryBit|1 {
+		t.Fatalf("foreign ingress user lock = depth:%#x locked:%t",
+			task.g.osThreadLockDepth, CurrentOSThreadLocked(task.g))
+	}
+	if !ReleaseForeignIngressRoot(task.g) || task.g.osThreadLockDepth != 0 ||
+		p.osThreadLockOwner != nil || CurrentOSThreadLocked(task.g) {
+		t.Fatalf("foreign ingress release = depth:%#x owner:%p locked:%t",
+			task.g.osThreadLockDepth, p.osThreadLockOwner,
+			CurrentOSThreadLocked(task.g))
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestForeignIngressRootReleasesAffinityAtTerminalReceipt(t *testing.T) {
+	p := new(P)
+	task := newYieldingTestG(t, "foreign-ingress-terminal")
+	if !EnqueueForeignIngressRoot(p, task.g) {
+		t.Fatal("enqueue terminal foreign ingress root")
+	}
+	next, ok := NextRunnable(p)
+	if !ok || next != task.g {
+		t.Fatalf("select terminal foreign ingress root = (%p, %t)", next, ok)
+	}
+	action, ok := BeginRunG(p, task.g)
+	if !ok {
+		t.Fatal("begin terminal foreign ingress root")
+	}
+	_ = activatePreemptTestFrame(t, p, task, action)
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) ||
+		!ReleaseForeignIngressRootTerminal(task.g) ||
+		task.g.osThreadLockDepth != 0 || p.osThreadLockOwner != nil {
+		t.Fatalf("terminal foreign ingress release = depth:%#x owner:%p pending:%d",
+			task.g.osThreadLockDepth, p.osThreadLockOwner, task.g.pending.kind)
+	}
+	if ReleaseForeignIngressRootTerminal(task.g) {
+		t.Fatal("terminal foreign ingress affinity released twice")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestOSThreadLockIsReleasedBeforeTerminalGPublication(t *testing.T) {
 	p := new(P)
 	task := newYieldingTestG(t, "os-thread-terminal")

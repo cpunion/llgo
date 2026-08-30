@@ -75,6 +75,7 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 				slices.Contains(pkg.GoFiles, "coro_target_wait_timer_llgo.go") &&
 				slices.Contains(pkg.GoFiles, "coro_timer_owner_llgo.go")
 			foreignFleet := slices.Contains(pkg.GoFiles, "coro_os_thread_foreign_llgo.go")
+			foreignIngress := slices.Contains(pkg.GoFiles, "coro_native_foreign_ingress_llgo.go")
 			foreignPipe := slices.Contains(pkg.GoFiles, "coro_os_thread_foreign_pipe_llgo.go")
 			workerDriver := slices.Contains(pkg.GoFiles, "coro_executor_driver_worker_llgo.go")
 			legacyDriver := slices.Contains(pkg.GoFiles, "coro_executor_driver_legacy.go")
@@ -93,7 +94,8 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			nativeM := slices.Contains(pkg.GoFiles, "coro_physical_thread_capacity_native_llgo.go")
 			singleM := slices.Contains(pkg.GoFiles, "coro_setmaxthreads_single_llgo.go")
 			if native != test.native || timer != test.timer || host != test.host ||
-				foreignFleet != test.timer || foreignPipe != (test.native && !test.timer) ||
+				foreignFleet != test.timer || foreignIngress != (test.timer && !test.adapter) ||
+				foreignPipe != (test.native && !test.timer) ||
 				(profileCount == 1) != test.host || test.profile != "" && !slices.Contains(pkg.GoFiles, test.profile) ||
 				workerDriver != (test.native && !test.timer) ||
 				legacyDriver != (!test.timer && !test.host && !test.native) ||
@@ -101,7 +103,7 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 				adapter != test.adapter || contextAdapter != test.adapter ||
 				fallback != (!test.native && !test.host && !test.adapter) ||
 				nativeM != test.native || singleM != test.singleM {
-				t.Fatalf("GoFiles = %v, native=%t timer=%t host=%t foreign-fleet=%t foreign-pipe=%t worker-driver=%t legacy-driver=%t pipe-wait=%t adapter=%t context-adapter=%t fallback=%t native-M=%t single-M=%t", pkg.GoFiles, native, timer, host, foreignFleet, foreignPipe, workerDriver, legacyDriver, pipeWait, adapter, contextAdapter, fallback, nativeM, singleM)
+				t.Fatalf("GoFiles = %v, native=%t timer=%t host=%t foreign-fleet=%t foreign-ingress=%t foreign-pipe=%t worker-driver=%t legacy-driver=%t pipe-wait=%t adapter=%t context-adapter=%t fallback=%t native-M=%t single-M=%t", pkg.GoFiles, native, timer, host, foreignFleet, foreignIngress, foreignPipe, workerDriver, legacyDriver, pipeWait, adapter, contextAdapter, fallback, nativeM, singleM)
 			}
 			const doorbell = "github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 			if imported := slices.Contains(pkg.Imports, doorbell); imported != test.doorbellOK {
@@ -138,6 +140,7 @@ func TestCoroNativeFleetTargetBuildSelection(t *testing.T) {
 		"coro_native_deferred_replacement_llgo.go",
 		"coro_physical_thread_capacity_native_llgo.go",
 		"coro_native_fleet_owner_llgo.go",
+		"coro_native_foreign_ingress_llgo.go",
 		"coro_native_fleet_program_llgo.go",
 		"coro_native_fleet_reactor.go",
 		"coro_ready_distribution_fleet_llgo.go",

@@ -87,11 +87,40 @@ type g struct {
 	goexit       bool
 	isMain       bool
 	paniconfault bool
-	// coroEmbedded occupies existing tail padding. It distinguishes a runtime
-	// context stored in a spawned task envelope from independently rooted
-	// pthread/bootstrap contexts without retaining a redundant root pointer.
-	coroEmbedded bool
+	// coroState reuses the original one-byte coroEmbedded field. Packing the
+	// two foreign-ingress flags and its three-bit terminal status here keeps g
+	// unchanged on 32-bit targets, where that original byte ended the struct
+	// with no spare tail padding. Logical coroutine Gs and physical foreign-
+	// thread placeholders use disjoint bits and mutate them only on their owner.
+	coroState uint8
 }
+
+const (
+	gCoroEmbeddedFlag uint8 = 1 << iota
+	gCoroForeignIngressFlag
+	gForeignThreadGCRegistrationOwnedFlag
+)
+
+const (
+	gCoroTerminalStatusShift = 3
+	gCoroTerminalStatusMask  = uint8(7 << gCoroTerminalStatusShift)
+)
+
+// Prove that the packed state still occupies exactly the old coroEmbedded byte
+// and leaves g at its pre-feature aligned size on every target architecture.
+const (
+	gBeforePackedCoroStateEnd = unsafe.Offsetof(g{}.coroState) +
+		unsafe.Sizeof(bool(false))
+	gBeforePackedCoroStateSize = (gBeforePackedCoroStateEnd +
+		unsafe.Alignof(g{}) - 1) &^ (unsafe.Alignof(g{}) - 1)
+)
+
+var (
+	_ [unsafe.Sizeof(g{}.coroState) - unsafe.Sizeof(bool(false))]byte
+	_ [unsafe.Sizeof(bool(false)) - unsafe.Sizeof(g{}.coroState)]byte
+	_ [unsafe.Sizeof(g{}) - gBeforePackedCoroStateSize]byte
+	_ [gBeforePackedCoroStateSize - unsafe.Sizeof(g{})]byte
+)
 
 // m represents the host execution resource running Go code. Platform-specific
 // scheduler state is confined to mOS so it does not leak into the common core.

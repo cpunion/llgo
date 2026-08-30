@@ -92,7 +92,7 @@ const (
 	coroOSThreadLockedSymbolV1                                  = "__llgo_coro_os_thread_locked_v1"
 	coroOSThreadForeignCallSymbolV1                             = "__llgo_coro_os_thread_foreign_call_v1"
 	coroForeignReentryAcquireSymbolV1                           = "__llgo_coro_foreign_reentry_acquire_v1"
-	coroForeignReentryRunSymbolV1                               = "__llgo_coro_foreign_reentry_run_v1"
+	coroForeignReentryRunSymbolV2                               = "__llgo_coro_foreign_reentry_run_v2"
 	coroForeignReentryFailureSymbolV1                           = "__llgo_coro_foreign_reentry_failure_v1"
 	coroSameMForeignCallSymbolV1                                = "__llgo_coro_same_m_foreign_call_v1"
 	coroSameMForeignReentryCallSymbolV2                         = "__llgo_coro_same_m_foreign_reentry_call_v2"

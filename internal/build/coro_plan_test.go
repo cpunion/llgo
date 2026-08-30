@@ -559,7 +559,7 @@ func __llgo_coro_os_thread_foreign_call_v1(unsafe.Pointer, uintptr, uintptr, uin
 func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) uint32 { return 0 }
 func __llgo_coro_native_fleet_owner_v2(uint32) uint32 { return 0 }
 func __llgo_coro_foreign_reentry_acquire_v1(*unsafe.Pointer) unsafe.Pointer { return nil }
-func __llgo_coro_foreign_reentry_run_v1(unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_foreign_reentry_run_v2(unsafe.Pointer, unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_foreign_reentry_failure_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_same_m_foreign_call_v1(unsafe.Pointer, uintptr, uintptr) {}
 func __llgo_coro_same_m_foreign_reentry_call_v2(unsafe.Pointer, uintptr, uintptr, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
@@ -860,7 +860,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroNativeWorkerCompleteSymbolV1,
 		coroNativeFleetOwnerSymbolV2,
 		coroForeignReentryAcquireSymbolV1,
-		coroForeignReentryRunSymbolV1,
+		coroForeignReentryRunSymbolV2,
 		coroForeignReentryFailureSymbolV1,
 		coroSameMForeignCallSymbolV1,
 		coroSameMForeignReentryCallSymbolV2,

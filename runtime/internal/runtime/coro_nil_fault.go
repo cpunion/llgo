@@ -323,14 +323,20 @@ func __llgo_coro_wrap_nil_payload_v1(
 func __llgo_coro_fault_prepare_v1(g, handle, header unsafe.Pointer, kind uint32) {
 	typeWord, dataWord := coroFaultPayloadV1(kind)
 	task := (*coro.G)(g)
+	frameHeader := (*coro.HeaderV1)(header)
 	if typeWord == nil || !coro.PreparePanic(
 		task,
 		handle,
-		(*coro.HeaderV1)(header),
+		frameHeader,
 		typeWord,
 		dataWord,
 	) {
 		coroRuntimeAbort("invalid coroutine fault panic handoff")
+	}
+	if frameHeader.Parent == nil {
+		if _, ok := coroStageForeignIngressTerminal(task, coro.CompletionPanic); !ok {
+			coroRuntimeAbort("invalid foreign ingress fault handoff")
+		}
 	}
 	coroReleaseDiscardedPanicTraceV1(task)
 }
@@ -347,14 +353,20 @@ func __llgo_coro_fault_prepare_v2(
 ) {
 	typeWord, dataWord := coroFaultPayloadV2(kind, arg0, arg1)
 	task := (*coro.G)(g)
+	frameHeader := (*coro.HeaderV1)(header)
 	if typeWord == nil || !coro.PreparePanic(
 		task,
 		handle,
-		(*coro.HeaderV1)(header),
+		frameHeader,
 		typeWord,
 		dataWord,
 	) {
 		coroRuntimeAbort("invalid parameterized coroutine fault panic handoff")
+	}
+	if frameHeader.Parent == nil {
+		if _, ok := coroStageForeignIngressTerminal(task, coro.CompletionPanic); !ok {
+			coroRuntimeAbort("invalid parameterized foreign ingress fault handoff")
+		}
 	}
 	coroReleaseDiscardedPanicTraceV1(task)
 }

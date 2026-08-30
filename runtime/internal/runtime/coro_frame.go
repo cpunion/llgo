@@ -109,8 +109,15 @@ func __llgo_coro_yield_prepare_v1(g, handle, header unsafe.Pointer) {
 
 //export __llgo_coro_complete_prepare_v1
 func __llgo_coro_complete_prepare_v1(g, handle, header unsafe.Pointer) {
-	if !coro.PrepareComplete((*coro.G)(g), handle, (*coro.HeaderV1)(header)) {
+	task := (*coro.G)(g)
+	frameHeader := (*coro.HeaderV1)(header)
+	if !coro.PrepareComplete(task, handle, frameHeader) {
 		coroRuntimeAbort("invalid coroutine completion handoff")
+	}
+	if frameHeader.Parent == nil {
+		if _, ok := coroStageForeignIngressTerminal(task, coro.CompletionReturn); !ok {
+			coroRuntimeAbort("invalid foreign ingress completion handoff")
+		}
 	}
 }
 
@@ -126,6 +133,11 @@ func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status ui
 		task, handle, frameHeader, completion,
 	) {
 		coroRuntimeAbort("invalid coroutine terminal completion handoff")
+	}
+	if frameHeader.Parent == nil {
+		if _, ok := coroStageForeignIngressTerminal(task, completion); !ok {
+			coroRuntimeAbort("invalid foreign ingress terminal handoff")
+		}
 	}
 	if completion == coro.CompletionGoexit && frameHeader.Parent == nil &&
 		task == &coroProgramGV1State && !coroProgramCommitMainGoexitV1(task) {

@@ -395,6 +395,22 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer epoch invalid")
 	}
 	*done = false
+	domain, domainOK := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !domainOK {
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer domain invalid")
+	}
+	if served, ingressOK := coroNativeForeignIngressTryServeV1(
+		domain.pOwnerV1(),
+		domain.driverOwnerV1(),
+	); !ingressOK {
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet foreign ingress failed")
+	} else if served {
+		return true
+	}
 	if _, ok := coroNativeFleetCancelOwnerRunnableDemandV1(handle, *epoch); !ok {
 		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer demand cancel failed")
 	}

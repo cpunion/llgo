@@ -42,6 +42,13 @@ type coroNativeFleetTargetStateV1 struct {
 
 var coroNativeFleetTargetV1State coroNativeFleetTargetStateV1
 
+func coroTargetTryServeForeignIngressV1(
+	p *coro.P,
+	driver *coro.ExecutorDriver,
+) (bool, bool) {
+	return coroNativeForeignIngressTryServeV1(p, driver)
+}
+
 func coroNativeFleetActiveDomainForRouteV1(route coro.RouteID) (*coroNativeFleetDomainV1, bool) {
 	fleet := &coroNativeFleetV1State
 	if coroNativeFleetTargetV1State.lifecycle != coroNativeFleetTargetActiveV1 ||
@@ -135,6 +142,11 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	if !coroNativeMDirectoryStartV1(program) {
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		coroRuntimeAbort("native coroutine M directory start failed")
+		return false
+	}
+	if !coroNativeForeignIngressStartV1() {
+		state.lifecycle = coroNativeFleetTargetFailedV1
+		coroRuntimeAbort("native coroutine foreign ingress start failed")
 		return false
 	}
 	if !coroNativeMStartCleanFactoryV1() {
@@ -321,7 +333,8 @@ func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) co
 			}
 		}
 	}
-	if !coroNativeFleetPhysicalOwnersStopV1() {
+	if !coroNativeForeignIngressStopV1() ||
+		!coroNativeFleetPhysicalOwnersStopV1() {
 		return coroTargetDispatchInvalidV1
 	}
 	if _, sealed := coroNativeFleetV1State.execution.Seal(); !sealed ||
@@ -385,7 +398,8 @@ func coroTargetExecutorRetiredV1(handle coro.ExecutorHandle) bool {
 	if state.lifecycle != coroNativeFleetTargetClosingV1 || state.program.Executor != handle ||
 		!coroNativeFleetConfirmExternalDriverCloseV1(state.program) ||
 		!coroNativeFleetAllRetiredV1() ||
-		!coroNativeFleetV1State.execution.CanRelease() {
+		!coroNativeFleetV1State.execution.CanRelease() ||
+		!coroNativeForeignIngressIsRetiredV1() {
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		return false
 	}

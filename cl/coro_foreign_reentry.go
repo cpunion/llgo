@@ -31,7 +31,7 @@ const (
 	coroForeignReentryAdapterPrefixV1   = "__llgo_coro_foreign_reentry_adapter_v1_"
 	coroForeignReentryPlainRampPrefixV1 = "__llgo_coro_foreign_reentry_plain_ramp_v1_"
 	coroForeignReentryAcquireHookV1     = "__llgo_coro_foreign_reentry_acquire_v1"
-	coroForeignReentryRunHookV1         = "__llgo_coro_foreign_reentry_run_v1"
+	coroForeignReentryRunHookV2         = "__llgo_coro_foreign_reentry_run_v2"
 	coroForeignReentryFailureHookV1     = "__llgo_coro_foreign_reentry_failure_v1"
 	coroSameMForeignCallHookV1          = "__llgo_coro_same_m_foreign_call_v1"
 	coroSameMForeignReentryCallHookV2   = "__llgo_coro_same_m_foreign_reentry_call_v2"
@@ -150,8 +150,9 @@ func coroForeignReentryAcquireSignature() *types.Signature {
 	)
 }
 
-func coroForeignReentryRunSignature() *types.Signature {
+func coroForeignReentryRunSignatureV2() *types.Signature {
 	params := []*types.Var{
+		types.NewParam(token.NoPos, nil, "task", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "child", types.Typ[types.UnsafePointer]),
 		types.NewParam(
 			token.NoPos, nil, "typeOut",
@@ -316,11 +317,11 @@ func (p *context) coroForeignIngressAdapter(
 	b.Store(b.FieldAddr(childHeader, coroHeaderParent), b.Load(parentSlot))
 
 	run := p.pkg.NewFunc(
-		coroForeignReentryRunHookV1,
-		coroForeignReentryRunSignature(),
+		coroForeignReentryRunHookV2,
+		coroForeignReentryRunSignatureV2(),
 		llssa.InC,
 	)
-	status := b.Call(run.Expr, child, typeSlot, dataSlot)
+	status := b.Call(run.Expr, task, child, typeSlot, dataSlot)
 	returned := adapter.MakeBlock()
 	failed := adapter.MakeBlock()
 	dispatch := b.Switch(status, failed)

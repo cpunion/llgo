@@ -54,7 +54,8 @@ func validExecutorRunCursor(cursor *executorRunCursor, p *P) bool {
 	default:
 		return false
 	}
-	return cursor.issued != ActionInvalid || !cursor.readyDebt || p.current != nil || runnableForOSThreadOwner(p)
+	return cursor.issued != ActionInvalid || !cursor.readyDebt || p.current != nil ||
+		runnableForOSThreadOwner(p) || returnableOSThreadSuspendOwner(p)
 }
 
 func emptyExecutorRunCursor(driver *ExecutorDriver) bool {

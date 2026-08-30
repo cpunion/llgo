@@ -581,7 +581,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		"coro.ExecutorResumeHandoffContext(&boundary.resume)",
 		"coro.BeginForeignReentry(&record, &boundary.resume, child)",
 		"coro.ConsumeForeignReentryCompletion(&record)",
-		"//export __llgo_coro_foreign_reentry_run_v1",
+		"//export __llgo_coro_foreign_reentry_run_v2",
 		"//export __llgo_coro_foreign_reentry_failure_v1",
 		"c.Siglongjmp(boundary.landing, c.Int(1))",
 		"//export __llgo_coro_same_m_foreign_reentry_call_v2",

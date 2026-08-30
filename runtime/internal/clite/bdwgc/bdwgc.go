@@ -46,15 +46,24 @@ type StackBase struct {
 //go:linkname Init C.GC_init
 func Init()
 
+// These registration operations describe or mutate the calling pthread. They
+// must stay on that exact thread; their synchronous contract cannot be inferred
+// from the C signatures and is therefore one of the remaining bottom leaves.
+// None retains a pointer to its caller's coroutine frame after returning.
+//
+//llgo:coro sync
 //go:linkname AllowRegisterThreads C.GC_allow_register_threads
 func AllowRegisterThreads()
 
+//llgo:coro sync
 //go:linkname GetStackBase C.GC_get_stack_base
 func GetStackBase(base *StackBase) c.Int
 
+//llgo:coro sync
 //go:linkname RegisterMyThread C.GC_register_my_thread
 func RegisterMyThread(base *StackBase) c.Int
 
+//llgo:coro sync
 //go:linkname ThreadIsRegistered C.GC_thread_is_registered
 func ThreadIsRegistered() c.Int
 

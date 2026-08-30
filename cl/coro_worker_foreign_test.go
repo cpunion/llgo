@@ -620,7 +620,7 @@ func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
 	adapterText := adapter.String()
 	for _, symbol := range []string{
 		coroForeignReentryAcquireHookV1,
-		coroForeignReentryRunHookV1,
+		coroForeignReentryRunHookV2,
 		coroForeignReentryFailureHookV1,
 	} {
 		if !strings.Contains(adapterText, "@"+symbol) {

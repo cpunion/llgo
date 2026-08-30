@@ -52,6 +52,8 @@ const (
 	coroNativeMOwnerReplacementActiveV1
 	coroNativeMOwnerSuccessorPublishedV1
 	coroNativeMOwnerSuccessorActiveV1
+	coroNativeMOwnerForeignIngressPublishedV1
+	coroNativeMOwnerForeignIngressActiveV1
 	coroNativeMOwnerRetiringV1
 	coroNativeMOwnerReturnedV1
 	coroNativeMOwnerRetiredV1
@@ -435,6 +437,16 @@ func coroNativeMActiveOwnerInDomainV1(
 			return nil, nil, 0, 0, false
 		}
 		epoch = owner.ownerEpoch
+	case coroNativeMOwnerForeignIngressActiveV1:
+		if owner.parentSlot == 0 || owner.predecessorSlot != 0 ||
+			owner.lineageRootSlot != slot ||
+			coroNativeAtomicLoadV1(&owner.lineageSlot) != slot ||
+			owner.ownerEpoch == 0 || !owner.baton.Valid() ||
+			owner.ownerEpoch != owner.baton.OwnerEpoch ||
+			owner.thread == nil || owner.self == nil || owner.token != 0 {
+			return nil, nil, 0, 0, false
+		}
+		epoch = owner.ownerEpoch
 	case coroNativeMOwnerSuccessorActiveV1:
 		if owner.predecessorSlot == 0 || owner.ownerEpoch == 0 {
 			return nil, nil, 0, 0, false
@@ -707,6 +719,163 @@ func coroNativeMAllocateReplacementV1(
 	return 0, nil, false
 }
 
+// coroNativeMAllocateForeignIngressV1 reserves one directory identity for a
+// pthread which already exists outside corofleet. It participates in the same
+// generation-bound route handoff as a replacement M, but token stays zero:
+// the runtime neither created nor owns the lifetime of this thread.
+func coroNativeMAllocateForeignIngressV1(
+	parentSlot uint32,
+	parent *coroNativeMOwnerV1,
+	baton coro.ExecutionDomainHandoffHandle,
+	thread threadpkg.Thread,
+) (uint32, *coroNativeMOwnerV1, bool) {
+	if parentSlot == 0 || parent == nil || !parent.handle.Valid() ||
+		!baton.Valid() || thread == nil {
+		return 0, nil, false
+	}
+	for slot := uint32(coroNativeFleetDomainCapacityV1 + 1); slot <= coroNativeMDirectoryCapacityV1; slot++ {
+		owner, ownerOK := coroNativeMEnsureOwnerForSlotV1(slot)
+		if !ownerOK {
+			return 0, nil, false
+		}
+		if !coroNativeMOwnerLifecycleCASV1(
+			owner,
+			coroNativeMOwnerUnusedV1,
+			coroNativeMOwnerPreparingV1,
+		) {
+			continue
+		}
+		if owner.thread != nil || owner.self != nil || owner.token != 0 ||
+			owner.handle != (coro.ExecutorFleetHandle{}) ||
+			owner.baton != (coro.ExecutionDomainHandoffHandle{}) ||
+			owner.parentSlot != 0 || owner.predecessorSlot != 0 ||
+			owner.lineageRootSlot != 0 ||
+			coroNativeAtomicLoadV1(&owner.lineageSlot) != 0 ||
+			owner.ownerEpoch != 0 || owner.resume.Detached() ||
+			!owner.handoff.Idle() || !owner.deferred.Idle() {
+			coroNativeAtomicStoreV1(
+				&owner.lifecycle,
+				uint32(coroNativeMOwnerFailedV1),
+			)
+			return 0, nil, false
+		}
+		owner.thread = thread
+		owner.handle = parent.handle
+		owner.baton = baton
+		owner.parentSlot = parentSlot
+		owner.lineageRootSlot = slot
+		coroNativeAtomicStoreV1(&owner.lineageSlot, slot)
+		owner.ownerEpoch = baton.OwnerEpoch
+		coroNativeAtomicStoreV1(
+			&owner.lifecycle,
+			uint32(coroNativeMOwnerForeignIngressPublishedV1),
+		)
+		return slot, owner, true
+	}
+	return 0, nil, false
+}
+
+func coroNativeMClaimForeignIngressV1(
+	slot uint32,
+) (
+	owner, parent *coroNativeMOwnerV1,
+	domain *coroNativeFleetDomainV1,
+	ok bool,
+) {
+	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
+	if !ownerOK ||
+		coroNativeMOwnerLifecycleLoadV1(owner) !=
+			coroNativeMOwnerForeignIngressPublishedV1 ||
+		owner.parentSlot == 0 || owner.predecessorSlot != 0 ||
+		owner.lineageRootSlot != slot ||
+		coroNativeAtomicLoadV1(&owner.lineageSlot) != slot ||
+		!owner.handle.Valid() || !owner.baton.Valid() ||
+		owner.thread == nil || owner.self != nil || owner.token != 0 ||
+		!owner.deferred.Idle() || !owner.handoff.Idle() {
+		return nil, nil, nil, false
+	}
+	self := threadpkg.Self()
+	if self == nil || threadpkg.Equal(owner.thread, self) == 0 {
+		return nil, nil, nil, false
+	}
+	parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
+	domain, domainOK := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		owner.handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !parentOK || !domainOK || parent.handle != owner.handle {
+		return nil, nil, nil, false
+	}
+	released, releasedOK := parent.handoff.Released()
+	if owner.ownerEpoch != owner.baton.OwnerEpoch ||
+		!releasedOK || released != owner.baton ||
+		coroNativeAtomicLoadV1(
+			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
+		) != owner.parentSlot {
+		return nil, nil, nil, false
+	}
+	owner.self = self
+	if !parent.handoff.Claim(owner.baton) ||
+		!coroNativeAtomicCASV1(
+			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
+			owner.parentSlot,
+			slot,
+		) || !coroNativeMOwnerLifecycleCASV1(
+		owner,
+		coroNativeMOwnerForeignIngressPublishedV1,
+		coroNativeMOwnerForeignIngressActiveV1,
+	) {
+		return nil, nil, nil, false
+	}
+	return owner, parent, domain, true
+}
+
+func coroNativeMRecycleForeignIngressV1(
+	slot uint32,
+	owner, parent *coroNativeMOwnerV1,
+) bool {
+	resolved, ownerOK := coroNativeMOwnerForSlotV1(slot)
+	if !ownerOK || resolved != owner || owner == nil || parent == nil ||
+		owner.thread == nil || owner.self == nil || owner.token != 0 ||
+		threadpkg.Equal(owner.thread, owner.self) == 0 ||
+		!owner.handle.Valid() || !owner.baton.Valid() ||
+		owner.parentSlot == 0 || owner.lineageRootSlot != slot ||
+		coroNativeAtomicLoadV1(&owner.lineageSlot) != slot ||
+		owner.ownerEpoch != owner.baton.OwnerEpoch || owner.resume.Detached() ||
+		!owner.handoff.Idle() || !owner.deferred.Idle() ||
+		parent.handle != owner.handle || !parent.handoff.Returned(owner.baton) ||
+		coroNativeAtomicLoadV1(
+			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
+		) != owner.parentSlot ||
+		!coroNativeMOwnerLifecycleCASV1(
+			owner,
+			coroNativeMOwnerReturnedV1,
+			coroNativeMOwnerPreparingV1,
+		) {
+		return false
+	}
+	coroNativeMClearReplacementStorageV1(owner)
+	return true
+}
+
+func coroNativeMReleaseUnclaimedForeignIngressV1(slot uint32) bool {
+	owner, ok := coroNativeMOwnerForSlotV1(slot)
+	if !ok || !coroNativeMOwnerLifecycleCASV1(
+		owner,
+		coroNativeMOwnerForeignIngressPublishedV1,
+		coroNativeMOwnerPreparingV1,
+	) || owner.thread == nil || owner.self != nil || owner.token != 0 ||
+		owner.resume.Detached() || !owner.handoff.Idle() ||
+		!owner.deferred.Idle() || owner.predecessorSlot != 0 ||
+		owner.lineageRootSlot != slot ||
+		coroNativeAtomicLoadV1(&owner.lineageSlot) != slot {
+		return false
+	}
+	coroNativeMClearReplacementStorageV1(owner)
+	return true
+}
+
 func coroNativeMReleaseUnstartedReplacementV1(slot uint32) bool {
 	owner, ok := coroNativeMOwnerForSlotV1(slot)
 	if !ok || !coroNativeMOwnerLifecycleCASV1(
@@ -965,6 +1134,7 @@ func coroNativeMFinishReplacementReturnV1(
 		owner.baton.OwnerEpoch != owner.ownerEpoch ||
 		!owner.deferred.Idle() ||
 		(lifecycle != coroNativeMOwnerReplacementActiveV1 &&
+			lifecycle != coroNativeMOwnerForeignIngressActiveV1 &&
 			(lifecycle != coroNativeMOwnerSuccessorActiveV1 ||
 				!owner.baton.Valid())) ||
 		coroNativeAtomicLoadV1(&coroNativeMDirectoryV1State.active[owner.handle.Route-1]) != slot ||

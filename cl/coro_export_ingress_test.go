@@ -186,7 +186,7 @@ func export_suspend_v1(value int32) int32 { return value + 2 }
 		body := adapter.String()
 		for _, hook := range []string{
 			coroForeignReentryAcquireHookV1,
-			coroForeignReentryRunHookV1,
+			coroForeignReentryRunHookV2,
 			coroForeignReentryFailureHookV1,
 		} {
 			if count := coroExportIngressCallCount(body, hook); count != 1 {

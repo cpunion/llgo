@@ -20,6 +20,10 @@ package runtime
 
 import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
+func coroTargetTryServeForeignIngressV1(*coro.P, *coro.ExecutorDriver) (bool, bool) {
+	return false, true
+}
+
 type coroProgramTestTargetModeV1 uint8
 
 const (

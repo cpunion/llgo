@@ -23,6 +23,10 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 )
 
+func coroTargetTryServeForeignIngressV1(*coro.P, *coro.ExecutorDriver) (bool, bool) {
+	return false, true
+}
+
 type coroNativeTargetStateV1 struct {
 	ingress   coro.TargetIngress
 	doorbell  corodoorbell.Pipe

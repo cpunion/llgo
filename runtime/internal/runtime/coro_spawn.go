@@ -28,6 +28,32 @@ import (
 // and directly destroys ready children deepest-to-root.
 const coroSpawnProductionEnabledV1 = true
 
+func coroForeignIngressRootBeginV1() (*coro.G, bool) {
+	if !coroalloc.Ready() {
+		return nil, false
+	}
+	allocationSize := uintptr(coroTaskAllocationSize)
+	storage := coroalloc.AllocTask(allocationSize)
+	if storage == nil {
+		return nil, false
+	}
+	task, ctx, actualSize, allocationOK := coroTaskAllocationAt(storage)
+	if !allocationOK || actualSize != allocationSize ||
+		!coro.InitOwnedRootCompilerLocal(
+			task,
+			storage,
+			coro.TaskStorageSize(),
+			unsafe.Pointer(ctx),
+		) || !coroInitializeForeignIngressRuntimeContext(task, ctx) {
+		coro.Zero(storage, allocationSize)
+		if !coroalloc.FreeTask(storage, allocationSize) {
+			return nil, false
+		}
+		return nil, false
+	}
+	return task, true
+}
+
 func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 	parent := (*coroG)(parentPointer)
 	// BeginSpawn is the authoritative parent/P validation. The production
