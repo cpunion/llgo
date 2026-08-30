@@ -308,4 +308,3 @@ func TestRuntimeDeferredPanicLine(t *testing.T) {
 		t.Fatalf("deferred panic stack is missing %s:\n%s", want, stack)
 	}
 }
-

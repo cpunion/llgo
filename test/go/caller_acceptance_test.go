@@ -393,7 +393,6 @@ func runLLGoProbeWithFlags(t *testing.T, dir string, flags ...string) (string, e
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
-
 func runCallerAcceptanceProbe(t *testing.T, source, okMarker string, names ...string) {
 	t.Helper()
 	_, dir := prepareCallerAcceptanceProbe(t, source, names...)
@@ -706,4 +705,3 @@ func runLLGoInModule(t *testing.T, dir string, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
-

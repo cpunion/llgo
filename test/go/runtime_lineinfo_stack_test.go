@@ -357,4 +357,3 @@ func markerLine(source, marker string) int {
 	}
 	panic("missing marker " + marker)
 }
-

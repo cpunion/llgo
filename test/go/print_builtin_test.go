@@ -140,4 +140,3 @@ func findBuiltinPrintRepoRoot(t *testing.T) string {
 		dir = parent
 	}
 }
-
