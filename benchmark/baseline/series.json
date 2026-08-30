@@ -83,10 +83,10 @@
       "label": "Branch codex/windows-r11-mingw-arch-20260829",
       "path": "series/branch/a5a208a7a5557d42/summary.json",
       "configPath": "series/branch/a5a208a7a5557d42/config.json",
-      "commitPath": "commits/a67be3141ab2be89b4ccd9e74e6d58dd2fe7042d.json",
-      "sha": "a67be3141ab2be89b4ccd9e74e6d58dd2fe7042d",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/a67be3141ab2be89b4ccd9e74e6d58dd2fe7042d",
-      "updatedAt": "2026-08-30T11:54:11.227Z"
+      "commitPath": "commits/d031f1fc59dc2ce2976bc5a17df45be2986efa1b.json",
+      "sha": "d031f1fc59dc2ce2976bc5a17df45be2986efa1b",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/d031f1fc59dc2ce2976bc5a17df45be2986efa1b",
+      "updatedAt": "2026-08-30T12:48:30.342Z"
     },
     {
       "kind": "branch",
@@ -202,10 +202,10 @@
       "label": "PR #211",
       "path": "series/pull/211/summary.json",
       "configPath": "series/pull/211/config.json",
-      "commitPath": "commits/a67be3141ab2be89b4ccd9e74e6d58dd2fe7042d.json",
-      "sha": "a67be3141ab2be89b4ccd9e74e6d58dd2fe7042d",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/a67be3141ab2be89b4ccd9e74e6d58dd2fe7042d",
-      "updatedAt": "2026-08-30T11:54:11.181Z"
+      "commitPath": "commits/d031f1fc59dc2ce2976bc5a17df45be2986efa1b.json",
+      "sha": "d031f1fc59dc2ce2976bc5a17df45be2986efa1b",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/d031f1fc59dc2ce2976bc5a17df45be2986efa1b",
+      "updatedAt": "2026-08-30T12:48:30.262Z"
     },
     {
       "kind": "pull",
