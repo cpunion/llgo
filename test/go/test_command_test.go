@@ -62,15 +62,6 @@ func commandForTest(t *testing.T, dir, name string, args ...string) *exec.Cmd {
 				args = append([]string{args[0], "-modfile=" + modfile}, args[1:]...)
 			}
 		}
-	} else if name == "go" && len(args) >= 2 && args[0] == "run" && args[1] == "./chore/llgen" {
-		if llgen := configuredTestTool(t, os.Getenv("LLGO_TEST_LLGEN")); llgen != "" {
-			name = llgen
-			args = args[2:]
-			if len(args) != 0 {
-				dir = args[len(args)-1]
-				args[len(args)-1] = "."
-			}
-		}
 	}
 	cmd := exec.Command(name, args...)
 	if dir != "" {

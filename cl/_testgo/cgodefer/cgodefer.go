@@ -57,6 +57,7 @@ import "C"
 // CHECK-NEXT: [[GO_CALLBACK_PTR:%[0-9]+]] = call ptr @main._Cgo_ptr(ptr [[GO_CALLBACK]])
 // CHECK-NEXT: call i32 @main._Cfunc_invoke_callback(ptr [[GO_CALLBACK_PTR]], i32 40)
 // CHECK: call void @"{{.*}}FreeDeferNode"
+// CHECK: call void %{{[-A-Za-z0-9_.$]+}}({{.*}})
 
 // ARM64-LABEL: define void @"main.main$1$1"(ptr swiftself %0){{.*}} {
 // AMD64-LABEL: define void @"main.main$1$1"(ptr nest %0){{.*}} {
