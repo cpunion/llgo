@@ -1,0 +1,55 @@
+name: Windows C archive debug
+
+on:
+  pull_request:
+    branches:
+      - codex/windows-r11-mingw-arch-20260829
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  mingw-386-c-archive:
+    name: MinGW 386 static C consumer
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install MinGW 386 dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 19
+          windows-abi: mingw
+          windows-arch: "386"
+
+      - name: Set up host Go
+        uses: ./.github/actions/setup-go
+        with:
+          architecture: x64
+
+      - name: Build the host LLGo compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install ./...
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Activate the MinGW 386 target
+        uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: mingw
+          windows-arch: "386"
+
+      - name: Build and run the static C archive consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd _demo/go/export/use
+          make LINK_TYPE=static clean
+          make LINK_TYPE=static LLGOFLAGS=-ldflags=-w=false
+          ./main.out

@@ -36,6 +36,20 @@ static void void_callback(void) {
 
 #ifdef _WIN32
 static volatile LONG foreign_fault_count;
+enum { foreign_thread_count = 8, foreign_thread_iterations = 32 };
+
+typedef struct {
+    intptr_t value;
+    volatile LONG progress;
+} foreign_thread_context;
+
+static void trace_foreign_thread(const char *event, intptr_t value,
+                                 LONG progress) {
+    fprintf(stderr, "[c-archive-debug] thread=%" PRIdPTR
+                    " tid=%lu event=%s progress=%ld\n",
+            value, (unsigned long)GetCurrentThreadId(), event, (long)progress);
+    fflush(stderr);
+}
 
 static LONG CALLBACK continue_foreign_fault(EXCEPTION_POINTERS *exception) {
     EXCEPTION_RECORD *record = exception->ExceptionRecord;
@@ -48,41 +62,62 @@ static LONG CALLBACK continue_foreign_fault(EXCEPTION_POINTERS *exception) {
 }
 
 static DWORD WINAPI call_go_export_from_foreign_thread(LPVOID arg) {
-    intptr_t value = (intptr_t)arg;
+    foreign_thread_context *context = (foreign_thread_context *)arg;
+    intptr_t value = context->value;
     ULONG_PTR fault_information[2] = {0, 0};
+    InterlockedExchange(&context->progress, 1);
+    trace_foreign_thread("entered", value, context->progress);
     // The LLGo DLL installs a process-wide vectored exception handler. A
     // fault on a thread that has not entered Go must continue to the next
     // native handler instead of being converted into a Go panic.
     RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 2, fault_information);
-    for (int i = 0; i < 32; i++) {
+    InterlockedExchange(&context->progress, 2);
+    trace_foreign_thread("fault continued", value, context->progress);
+    for (int i = 0; i < foreign_thread_iterations; i++) {
+        InterlockedExchange(&context->progress, 100 + i);
         GoString formatted = FormatValue((GoString){"thread", 6}, value + i);
+        InterlockedExchange(&context->progress, 200 + i);
         if (formatted.n < 8 || memcmp(formatted.p, "thread:", 7) != 0) {
             return 1;
         }
     }
+    InterlockedExchange(&context->progress, 1000);
+    trace_foreign_thread("completed", value, context->progress);
     return 0;
 }
 
 static void test_foreign_thread_exports(void) {
-    enum { thread_count = 8 };
-    HANDLE threads[thread_count];
+    HANDLE threads[foreign_thread_count];
+    foreign_thread_context contexts[foreign_thread_count] = {0};
     PVOID fault_handler = AddVectoredExceptionHandler(0, continue_foreign_fault);
     assert(fault_handler != NULL);
     foreign_fault_count = 0;
-    for (intptr_t i = 0; i < thread_count; i++) {
+    for (intptr_t i = 0; i < foreign_thread_count; i++) {
+        contexts[i].value = i;
         threads[i] = CreateThread(NULL, 0, call_go_export_from_foreign_thread,
-                                  (LPVOID)i, 0, NULL);
+                                  &contexts[i], 0, NULL);
         assert(threads[i] != NULL);
     }
-    assert(WaitForMultipleObjects(thread_count, threads, TRUE, INFINITE) ==
-           WAIT_OBJECT_0);
-    for (int i = 0; i < thread_count; i++) {
+    DWORD wait_result = WaitForMultipleObjects(
+        foreign_thread_count, threads, TRUE, 45000);
+    if (wait_result != WAIT_OBJECT_0) {
+        fprintf(stderr,
+                "[c-archive-debug] foreign threads timed out: wait=%lu error=%lu\n",
+                (unsigned long)wait_result, (unsigned long)GetLastError());
+        for (int i = 0; i < foreign_thread_count; i++) {
+            fprintf(stderr, "[c-archive-debug] thread=%d progress=%ld\n", i,
+                    (long)contexts[i].progress);
+        }
+        fflush(stderr);
+        abort();
+    }
+    for (int i = 0; i < foreign_thread_count; i++) {
         DWORD result;
         assert(GetExitCodeThread(threads[i], &result));
         assert(result == 0);
         assert(CloseHandle(threads[i]));
     }
-    assert(foreign_fault_count == thread_count);
+    assert(foreign_fault_count == foreign_thread_count);
     assert(RemoveVectoredExceptionHandler(fault_handler));
 }
 #endif
