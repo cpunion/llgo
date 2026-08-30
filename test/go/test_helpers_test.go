@@ -30,6 +30,9 @@ func configuredLLGoTestCompiler(t *testing.T) string {
 	t.Helper()
 	compiler := os.Getenv(llgoTestCompilerEnv)
 	if compiler == "" {
+		compiler = os.Getenv("LLGO_TEST_LLGO")
+	}
+	if compiler == "" {
 		return ""
 	}
 	abs, err := filepath.Abs(compiler)
@@ -76,6 +79,8 @@ func runLLGoTestCommand(t *testing.T, dir string, args ...string) []byte {
 }
 
 func TestConfiguredLLGoTestCompiler(t *testing.T) {
+	t.Setenv("LLGO_TEST_LLGO", "")
+	t.Setenv("LLGO", "")
 	t.Setenv(llgoTestCompilerEnv, "")
 	if got := configuredLLGoTestCompiler(t); got != "" {
 		t.Fatalf("empty %s resolved to %q", llgoTestCompilerEnv, got)
@@ -93,6 +98,15 @@ func TestConfiguredLLGoTestCompiler(t *testing.T) {
 	if got := configuredLLGoTestCompiler(t); got != want {
 		t.Fatalf("configured compiler = %q, want %q", got, want)
 	}
+	if got := configuredLLGo(t); got != want {
+		t.Fatalf("configured test llgo fallback = %q, want %q", got, want)
+	}
+
+	t.Setenv(llgoTestCompilerEnv, "")
+	t.Setenv("LLGO_TEST_LLGO", executable)
+	if got := configuredLLGoTestCompiler(t); got != want {
+		t.Fatalf("configured LLGO_TEST_LLGO compiler = %q, want %q", got, want)
+	}
 
 	dir := t.TempDir()
 	ext := filepath.Ext(executable)
@@ -103,6 +117,7 @@ func TestConfiguredLLGoTestCompiler(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Setenv("LLGO_TEST_LLGO", "")
 	t.Setenv(llgoTestCompilerEnv, compiler)
 	if got := configuredLLGoSiblingTool(t, "llgen"); got != tool {
 		t.Fatalf("configured sibling tool = %q, want %q", got, tool)

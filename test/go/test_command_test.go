@@ -26,6 +26,11 @@ func configuredLLGo(t *testing.T) string {
 	t.Helper()
 	name := os.Getenv("LLGO_TEST_LLGO")
 	if name == "" {
+		// Native target activation uses LLGO_TEST_COMPILER, while the
+		// versioned test runner uses LLGO_TEST_LLGO for the same host tool.
+		name = os.Getenv(llgoTestCompilerEnv)
+	}
+	if name == "" {
 		name = os.Getenv("LLGO")
 	}
 	return configuredTestTool(t, name)
