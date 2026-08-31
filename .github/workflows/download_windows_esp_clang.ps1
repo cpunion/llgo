@@ -47,11 +47,22 @@ if ($LASTEXITCODE -ne 0) {
 
 $clang = Join-Path $Destination "bin\clang.exe"
 $llvmConfig = Join-Path $Destination "bin\llvm-config.exe"
+$llvmReadobj = Join-Path $Destination "bin\llvm-readobj.exe"
 $llvmDLL = Join-Path $Destination "bin\libLLVM-19.dll"
-foreach ($required in @($clang, $llvmConfig, $llvmDLL, (Join-Path $Destination "include\llvm-c\Core.h"))) {
+foreach ($required in @($clang, $llvmConfig, $llvmReadobj, $llvmDLL, (Join-Path $Destination "include\llvm-c\Core.h"))) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "The Windows ESP LLVM payload is incomplete: $required was not found"
     }
+}
+
+$expectedMachine = switch ($Arch) {
+    "386" { "IMAGE_FILE_MACHINE_I386" }
+    "amd64" { "IMAGE_FILE_MACHINE_AMD64" }
+    "arm64" { "IMAGE_FILE_MACHINE_ARM64" }
+}
+$headers = (& $llvmReadobj --file-headers $clang) -join "`n"
+if ($headers -notmatch [regex]::Escape($expectedMachine)) {
+    throw "$asset contains a Clang executable for the wrong architecture"
 }
 
 $reportedVersion = (& $llvmConfig --version).Trim()
@@ -68,4 +79,3 @@ foreach ($target in @("X86", "ARM", "AArch64", "AVR", "Mips", "RISCV", "WebAssem
 "ESP_CLANG_ROOT=$Destination" | Add-Content -Encoding utf8 $env:GITHUB_ENV
 "$($Destination.TrimEnd('\'))\bin" | Add-Content -Encoding utf8 $env:GITHUB_PATH
 Write-Host "Installed $asset at $Destination"
-

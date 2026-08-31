@@ -1,9 +1,5 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("386", "amd64", "arm64")]
-    [string]$Arch,
-
-    [Parameter(Mandatory = $true)]
     [string]$ToolchainRoot
 )
 
