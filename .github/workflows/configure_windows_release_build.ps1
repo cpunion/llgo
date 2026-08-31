@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $toolchain = (Resolve-Path -LiteralPath $ToolchainRoot).Path
+$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path.Replace('\', '/')
 $bin = Join-Path $toolchain "bin"
 $clang = Join-Path $bin "clang.exe"
 $clangXX = Join-Path $bin "clang++.exe"
@@ -51,4 +52,9 @@ Add-Content -Encoding utf8 $env:GITHUB_ENV "CXX=$clangXX"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "CGO_ENABLED=1"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "LLGO_GORELEASER_WINDOWS=1"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "PKG_CONFIG=$pkgConfig"
+# GoReleaser renders the existing Darwin/Linux sysroot environment templates
+# before selecting this Windows build ID. Native Windows processes do not
+# normally export PWD, so provide the repository root required by those
+# otherwise-unused templates.
+Add-Content -Encoding utf8 $env:GITHUB_ENV "PWD=$repositoryRoot"
 Add-Content -Encoding utf8 $env:GITHUB_PATH $bin
