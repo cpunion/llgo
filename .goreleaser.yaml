@@ -87,6 +87,45 @@ builds:
     targets:
       - linux_arm64
     mod_timestamp: "{{.CommitTimestamp}}"
+  - id: llgo-windows-amd64
+    main: ./cmd/llgo
+    binary: bin/llgo
+    flags:
+      - -tags=windows,amd64,byollvm
+    ldflags:
+      - -X github.com/xgo-dev/llgo/internal/env.buildVersion=v{{.Version}}
+      - -X github.com/xgo-dev/llgo/internal/env.buildTime={{.Date}}
+    targets:
+      - windows_amd64
+    # Windows CGO builds run with their architecture-native LLVM payload on a
+    # Windows runner. The normal Linux GoReleaser pass uploads their validated
+    # archives as extra files instead of attempting an invalid CGO cross-link.
+    skip: '{{ ne (envOrDefault "LLGO_GORELEASER_WINDOWS" "0") "1" }}'
+    mod_timestamp: "{{.CommitTimestamp}}"
+  - id: llgo-windows-386
+    main: ./cmd/llgo
+    binary: bin/llgo
+    flags:
+      - -tags=windows,386,byollvm
+    ldflags:
+      - -X github.com/xgo-dev/llgo/internal/env.buildVersion=v{{.Version}}
+      - -X github.com/xgo-dev/llgo/internal/env.buildTime={{.Date}}
+    targets:
+      - windows_386
+    skip: '{{ ne (envOrDefault "LLGO_GORELEASER_WINDOWS" "0") "1" }}'
+    mod_timestamp: "{{.CommitTimestamp}}"
+  - id: llgo-windows-arm64
+    main: ./cmd/llgo
+    binary: bin/llgo
+    flags:
+      - -tags=windows,arm64,byollvm
+    ldflags:
+      - -X github.com/xgo-dev/llgo/internal/env.buildVersion=v{{.Version}}
+      - -X github.com/xgo-dev/llgo/internal/env.buildTime={{.Date}}
+    targets:
+      - windows_arm64
+    skip: '{{ ne (envOrDefault "LLGO_GORELEASER_WINDOWS" "0") "1" }}'
+    mod_timestamp: "{{.CommitTimestamp}}"
 
 archives:
   - format: tar.gz
@@ -106,6 +145,8 @@ archives:
           mode: 0755
 checksum:
   name_template: "{{.ProjectName}}{{.Version}}.checksums.txt"
+  extra_files:
+    - glob: .release-windows/*.zip
 
 nfpms:
   - package_name: llgo
@@ -173,3 +214,5 @@ snapshot:
 
 release:
   prerelease: auto
+  extra_files:
+    - glob: .release-windows/*.zip
