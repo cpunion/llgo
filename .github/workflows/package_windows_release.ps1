@@ -97,6 +97,10 @@ $toolchainBinaries = Get-ChildItem -LiteralPath $packagedToolchainBin -File |
     Where-Object { $_.Extension -in @(".exe", ".dll") }
 foreach ($item in $toolchainBinaries) {
     $binary = $item.FullName
+    $headers = (& $readobj --file-headers $binary) -join "`n"
+    if ($headers -notmatch [regex]::Escape($expectedMachine)) {
+        throw "$binary is not native windows/$Arch"
+    }
     $imports = (& $readobj --coff-imports $binary) -join "`n"
     if ($imports -match '(?i:\b(?:msys-2\.0|cygwin1|libwinpthread[^\\/\s]*)\.dll\b)') {
         throw "$binary has an unsupported POSIX-runtime dependency"
