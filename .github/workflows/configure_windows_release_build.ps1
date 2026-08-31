@@ -28,32 +28,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 $ldflags = (($ldflagsOutput -join " ") -replace '\s+', ' ').Trim().Replace('\', '/')
 
-# The compiler host only links LLVM; target runtime libraries such as BDWGC
-# and libffi are not dependencies of cmd/llgo. Provide the exact pkg-config
-# protocol used by the LLVM Go bindings instead of installing an unrelated
-# MSYS2 or vcpkg target environment into the release-build job.
-$nativeTools = Join-Path $env:RUNNER_TEMP "llgo-release-tools"
-New-Item -ItemType Directory -Force $nativeTools | Out-Null
-$pkgConfig = Join-Path $nativeTools "pkg-config.cmd"
-@"
-@echo off
-if /I "%~1"=="--cflags" (
-  echo $cflags
-  exit /b 0
-)
-if /I "%~1"=="--libs" (
-  echo $ldflags
-  exit /b 0
-)
-echo unsupported pkg-config request for the LLVM release build: %* 1>&2
-exit /b 1
-"@ | Set-Content -Encoding ascii $pkgConfig
-
+# The byollvm build tag deliberately omits the binding's platform pkg-config
+# directives. Feed it the exact flags from the architecture-native LLVM while
+# keeping target runtime dependencies such as BDWGC and libffi out of this
+# host-compiler build.
 Add-Content -Encoding utf8 $env:GITHUB_ENV "CC=$clang"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "CXX=$clangXX"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "CGO_ENABLED=1"
+Add-Content -Encoding utf8 $env:GITHUB_ENV "CGO_CPPFLAGS=$cflags"
+Add-Content -Encoding utf8 $env:GITHUB_ENV "CGO_LDFLAGS=$ldflags"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "LLGO_GORELEASER_WINDOWS=1"
-Add-Content -Encoding utf8 $env:GITHUB_ENV "PKG_CONFIG=$pkgConfig"
 # GoReleaser renders the existing Darwin/Linux sysroot environment templates
 # before selecting this Windows build ID. Native Windows processes do not
 # normally export PWD, so provide the repository root required by those
