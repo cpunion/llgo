@@ -17,14 +17,16 @@ foreach ($required in @($clang, $clangXX, $llvmConfig)) {
     }
 }
 
-$cflags = ((& $llvmConfig --cflags) -join " ").Trim().Replace('\', '/')
+$cflagsOutput = & $llvmConfig --cflags
 if ($LASTEXITCODE -ne 0) {
     throw "llvm-config failed to report C flags"
 }
-$ldflags = ((& $llvmConfig --link-shared --ldflags --libs all --system-libs) -join " ").Trim().Replace('\', '/')
+$cflags = (($cflagsOutput -join " ") -replace '\s+', ' ').Trim().Replace('\', '/')
+$ldflagsOutput = & $llvmConfig --link-shared --ldflags --libs all --system-libs
 if ($LASTEXITCODE -ne 0) {
     throw "llvm-config failed to report shared-library link flags"
 }
+$ldflags = (($ldflagsOutput -join " ") -replace '\s+', ' ').Trim().Replace('\', '/')
 
 # The compiler host only links LLVM; target runtime libraries such as BDWGC
 # and libffi are not dependencies of cmd/llgo. Provide the exact pkg-config
