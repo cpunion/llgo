@@ -25,6 +25,17 @@
     },
     {
       "kind": "branch",
+      "id": "8a65e4734759a222",
+      "label": "Branch codex/ci-workflow-simplify-r12-20260901",
+      "path": "series/branch/8a65e4734759a222/summary.json",
+      "configPath": "series/branch/8a65e4734759a222/config.json",
+      "commitPath": "commits/46127506b20b5975a940daa8bbcb350886ff4226.json",
+      "sha": "46127506b20b5975a940daa8bbcb350886ff4226",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/46127506b20b5975a940daa8bbcb350886ff4226",
+      "updatedAt": "2026-08-31T20:01:13.152Z"
+    },
+    {
+      "kind": "branch",
       "id": "0925a687fec25091",
       "label": "Branch codex/closure-env-ffi-call-go",
       "path": "series/branch/0925a687fec25091/history.json",
@@ -239,6 +250,17 @@
       "sha": "5ce14445e7b8f5db32d534c08f24ad12fe7e38e9",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/5ce14445e7b8f5db32d534c08f24ad12fe7e38e9",
       "updatedAt": "2026-08-31T12:57:04.203Z"
+    },
+    {
+      "kind": "pull",
+      "id": "217",
+      "label": "PR #217",
+      "path": "series/pull/217/summary.json",
+      "configPath": "series/pull/217/config.json",
+      "commitPath": "commits/46127506b20b5975a940daa8bbcb350886ff4226.json",
+      "sha": "46127506b20b5975a940daa8bbcb350886ff4226",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/46127506b20b5975a940daa8bbcb350886ff4226",
+      "updatedAt": "2026-08-31T20:01:13.098Z"
     }
   ]
 }
