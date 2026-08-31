@@ -146,7 +146,10 @@ archives:
 checksum:
   name_template: "{{.ProjectName}}{{.Version}}.checksums.txt"
   extra_files:
-    - glob: .release-windows/*.zip
+    # An unmatched extra-file glob is an error. Snapshot builds run before the
+    # native Windows jobs have produced their archives, so only the final
+    # release pass should add those prebuilt artifacts to the shared checksum.
+    - glob: '{{ if eq (envOrDefault "LLGO_GORELEASER_WINDOWS_ARCHIVES" "0") "1" }}.release-windows/*.zip{{ end }}'
 
 nfpms:
   - package_name: llgo
@@ -215,4 +218,4 @@ snapshot:
 release:
   prerelease: auto
   extra_files:
-    - glob: .release-windows/*.zip
+    - glob: '{{ if eq (envOrDefault "LLGO_GORELEASER_WINDOWS_ARCHIVES" "0") "1" }}.release-windows/*.zip{{ end }}'
