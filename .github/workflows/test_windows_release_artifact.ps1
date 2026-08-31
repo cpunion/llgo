@@ -15,8 +15,9 @@ $ErrorActionPreference = "Stop"
 
 $release = (Resolve-Path -LiteralPath $ReleaseRoot).Path
 $llgo = Join-Path $release "bin\llgo.exe"
+$clang = Join-Path $release "crosscompile\clang\bin\clang.exe"
 $readobj = Join-Path $release "crosscompile\clang\bin\llvm-readobj.exe"
-foreach ($required in @($llgo, $readobj)) {
+foreach ($required in @($llgo, $clang, $readobj)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "The extracted release is incomplete: $required was not found"
     }
@@ -24,6 +25,10 @@ foreach ($required in @($llgo, $readobj)) {
 $resolved = (Get-Command llgo.exe -ErrorAction Stop).Source
 if (-not $resolved.Equals($llgo, [StringComparison]::OrdinalIgnoreCase)) {
     throw "PATH resolved llgo.exe to $resolved instead of the release artifact $llgo"
+}
+$resolvedClang = (Get-Command clang.exe -ErrorAction Stop).Source
+if (-not $resolvedClang.Equals($clang, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "PATH resolved clang.exe to $resolvedClang instead of the release artifact $clang"
 }
 
 $source = Join-Path $env:RUNNER_TEMP "llgo-release-smoke-$Profile-$Arch"
