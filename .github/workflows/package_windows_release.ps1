@@ -89,10 +89,14 @@ if ($copied.Count -eq 0) {
     throw "No packaged LLVM runtime DLLs were discovered for $llgo"
 }
 
-foreach ($binary in @(
-    (Join-Path $stage "crosscompile\clang\bin\clang.exe"),
-    (Join-Path $stage "crosscompile\clang\bin\libLLVM-19.dll")
-)) {
+# Audit every executable component, not only clang.exe: Clang normally loads
+# libclang-cpp, which in turn loads LLVM and the C++ runtime. A direct-import
+# check on the driver alone would miss an accidental transitive POSIX ABI.
+$packagedToolchainBin = Join-Path $stage "crosscompile\clang\bin"
+$toolchainBinaries = Get-ChildItem -LiteralPath $packagedToolchainBin -File |
+    Where-Object { $_.Extension -in @(".exe", ".dll") }
+foreach ($item in $toolchainBinaries) {
+    $binary = $item.FullName
     $imports = (& $readobj --coff-imports $binary) -join "`n"
     if ($imports -match '(?i:\b(?:msys-2\.0|cygwin1|libwinpthread[^\\/\s]*)\.dll\b)') {
         throw "$binary has an unsupported POSIX-runtime dependency"
