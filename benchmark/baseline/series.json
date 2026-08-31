@@ -29,10 +29,10 @@
       "label": "Branch codex/ci-workflow-simplify-r12-20260901",
       "path": "series/branch/8a65e4734759a222/summary.json",
       "configPath": "series/branch/8a65e4734759a222/config.json",
-      "commitPath": "commits/46127506b20b5975a940daa8bbcb350886ff4226.json",
-      "sha": "46127506b20b5975a940daa8bbcb350886ff4226",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/46127506b20b5975a940daa8bbcb350886ff4226",
-      "updatedAt": "2026-08-31T20:01:13.152Z"
+      "commitPath": "commits/968de5c4b543860566365eb27c973cc0a9c1e577.json",
+      "sha": "968de5c4b543860566365eb27c973cc0a9c1e577",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/968de5c4b543860566365eb27c973cc0a9c1e577",
+      "updatedAt": "2026-08-31T21:06:08.297Z"
     },
     {
       "kind": "branch",
@@ -257,10 +257,10 @@
       "label": "PR #217",
       "path": "series/pull/217/summary.json",
       "configPath": "series/pull/217/config.json",
-      "commitPath": "commits/46127506b20b5975a940daa8bbcb350886ff4226.json",
-      "sha": "46127506b20b5975a940daa8bbcb350886ff4226",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/46127506b20b5975a940daa8bbcb350886ff4226",
-      "updatedAt": "2026-08-31T20:01:13.098Z"
+      "commitPath": "commits/968de5c4b543860566365eb27c973cc0a9c1e577.json",
+      "sha": "968de5c4b543860566365eb27c973cc0a9c1e577",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/968de5c4b543860566365eb27c973cc0a9c1e577",
+      "updatedAt": "2026-08-31T21:06:08.210Z"
     }
   ]
 }
