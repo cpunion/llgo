@@ -20,11 +20,6 @@ foreach ($required in @($clang, $clangXX, $llvmConfig)) {
     }
 }
 
-# setup-deps supplies architecture-matched BDWGC, libffi, and the remaining
-# runtime dependencies. Replace only its LLVM metadata so cgo links the host
-# compiler against the exact LLVM payload shipped in the release archive.
-$profilePC = Join-Path $env:RUNNER_TEMP "llgo-pkgconfig"
-New-Item -ItemType Directory -Force $profilePC | Out-Null
 $cflags = ((& $llvmConfig --cflags) -join " ").Trim().Replace('\', '/')
 if ($LASTEXITCODE -ne 0) {
     throw "llvm-config failed to report C flags"
@@ -33,27 +28,31 @@ $ldflags = ((& $llvmConfig --link-shared --ldflags --libs all --system-libs) -jo
 if ($LASTEXITCODE -ne 0) {
     throw "llvm-config failed to report shared-library link flags"
 }
-@"
-Name: LLVM 19
-Description: Architecture-native LLVM 19 release payload
-Version: $((& $llvmConfig --version).Trim())
-Cflags: $cflags
-Libs: $ldflags
-"@ | Set-Content -Encoding ascii (Join-Path $profilePC "llvm-19.pc")
 
-# The x86 lane uses an x64 MSYS2 installation only to provision dependencies;
-# its target-local pkg-config wrapper is what keeps every linked library x86.
-if ($Arch -eq "386") {
-    $targetTools = $env:LLGO_MINGW_TARGET_TOOLS
-    if (-not $targetTools -or -not (Test-Path (Join-Path $targetTools "pkg-config.cmd"))) {
-        throw "The Windows 386 pkg-config profile is unavailable"
-    }
-    Add-Content -Encoding utf8 $env:GITHUB_ENV "PKG_CONFIG=$(Join-Path $targetTools 'pkg-config.cmd')"
-    Add-Content -Encoding utf8 $env:GITHUB_PATH $targetTools
-}
+# The compiler host only links LLVM; target runtime libraries such as BDWGC
+# and libffi are not dependencies of cmd/llgo. Provide the exact pkg-config
+# protocol used by the LLVM Go bindings instead of installing an unrelated
+# MSYS2 or vcpkg target environment into the release-build job.
+$nativeTools = Join-Path $env:RUNNER_TEMP "llgo-release-tools"
+New-Item -ItemType Directory -Force $nativeTools | Out-Null
+$pkgConfig = Join-Path $nativeTools "pkg-config.cmd"
+@"
+@echo off
+if /I "%~1"=="--cflags" (
+  echo $cflags
+  exit /b 0
+)
+if /I "%~1"=="--libs" (
+  echo $ldflags
+  exit /b 0
+)
+echo unsupported pkg-config request for the LLVM release build: %* 1>&2
+exit /b 1
+"@ | Set-Content -Encoding ascii $pkgConfig
 
 Add-Content -Encoding utf8 $env:GITHUB_ENV "CC=$clang"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "CXX=$clangXX"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "CGO_ENABLED=1"
 Add-Content -Encoding utf8 $env:GITHUB_ENV "LLGO_GORELEASER_WINDOWS=1"
+Add-Content -Encoding utf8 $env:GITHUB_ENV "PKG_CONFIG=$pkgConfig"
 Add-Content -Encoding utf8 $env:GITHUB_PATH $bin
