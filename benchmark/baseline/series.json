@@ -7,10 +7,10 @@
       "label": "Main",
       "path": "series/main/main/summary.json",
       "configPath": "series/main/main/config.json",
-      "commitPath": "commits/b200f0f8eff673805f6c789546892e65e5171e54.json",
-      "sha": "b200f0f8eff673805f6c789546892e65e5171e54",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/b200f0f8eff673805f6c789546892e65e5171e54",
-      "updatedAt": "2026-09-01T06:48:01.058Z"
+      "commitPath": "commits/ba6b6af4c4dd1920360846eddd3719eb0d959185.json",
+      "sha": "ba6b6af4c4dd1920360846eddd3719eb0d959185",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/ba6b6af4c4dd1920360846eddd3719eb0d959185",
+      "updatedAt": "2026-09-01T08:38:56.620Z"
     },
     {
       "kind": "branch",
