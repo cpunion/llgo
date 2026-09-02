@@ -12,6 +12,14 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # setup-go creates GOPATH/bin, but some hosted images export an unwritable
+    # system path such as /opt/go. Keep the Go workspace private to each job.
+    - name: Configure writable GOPATH
+      shell: bash
+      env:
+        LLGO_CI_GOPATH: ${{ runner.temp }}/go
+      run: echo "GOPATH=${LLGO_CI_GOPATH}" >> "$GITHUB_ENV"
+
     - name: Set up the LLGo build toolchain
       if: inputs.go-version == ''
       uses: actions/setup-go@v7
