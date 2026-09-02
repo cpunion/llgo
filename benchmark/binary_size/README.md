@@ -5,7 +5,9 @@ linker and PCLN packaging changes. The comprehensive linker/PCLN matrix is
 maintained by `xgo-dev/benchmarks`; `benchmark/baseline` reuses the three
 smallest workloads for the per-commit lightweight size and timing gate.
 
-- `cprintf`: the smallest C-library hello world, using only `lib/c.Printf`.
+- `cprintf`: the smallest C-library hello world. LLGo uses only
+  `lib/c.Printf`; the TinyGo-specific file uses an inline-C `printf` wrapper
+  so Wasm size comparisons can exercise the corresponding C-library path.
 - `println`: a hello world using the built-in `println`.
 - `fmtprintf`: a hello world using `fmt.Printf`.
 - `texttemplate`: a heavier standard-library program using `text/template`.
