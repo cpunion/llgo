@@ -542,7 +542,8 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	// R0 preserves the existing collector-free wasm runtime. The named target
 	// metadata therefore declares gc=none as well. A later runtime PR updates
 	// both after suspended roots and safepoints are implemented for each profile.
-	if conf.Target != "" && export.WasmABI != crosscompile.WasmABIUnspecified {
+	if conf.Target != "" && export.WasmABI != crosscompile.WasmABIUnspecified &&
+		!slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo_wasm_gc") {
 		tags += ",nogc"
 	}
 	if conf.PCLNMode == PCLNExternal {
