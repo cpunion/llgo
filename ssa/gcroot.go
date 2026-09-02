@@ -195,8 +195,8 @@ func (b Builder) appendGCRootPointers(roots *[]Expr, value Expr) {
 
 // ClosureContextParam returns the hidden closure context parameter.
 func (p Function) ClosureContextParam() Expr {
-	if p.base == 0 {
+	if p.env == nil {
 		return Nil
 	}
-	return Expr{p.impl.Param(0), p.params[0]}
+	return Expr{p.impl.Param(0), p.env}
 }

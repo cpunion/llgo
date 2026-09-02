@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/llgo/ssa"
-	"github.com/goplus/llgo/ssa/ssatest"
+	"github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -84,8 +84,7 @@ func TestGCRootReservationAndClosureContext(t *testing.T) {
 	}
 
 	context := types.NewParam(token.NoPos, nil, "__llgo_ctx", types.Typ[types.UnsafePointer])
-	closureSig := ssa.FuncAddCtx(context, ssa.NoArgsNoRet)
-	closure := pkg.NewFuncEx("main.closure", closureSig, ssa.InGo, true, false)
+	closure := pkg.NewEnvFunc("main.closure", ssa.NoArgsNoRet, ssa.InGo, context, false)
 	if context := closure.ClosureContextParam(); context.IsNil() {
 		t.Fatal("closure function is missing its hidden context")
 	}
