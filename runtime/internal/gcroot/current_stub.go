@@ -4,4 +4,7 @@ package gcroot
 
 import "unsafe"
 
-var currentRootChain unsafe.Pointer
+var (
+	currentRootChain unsafe.Pointer
+	sjljReplaying    bool
+)

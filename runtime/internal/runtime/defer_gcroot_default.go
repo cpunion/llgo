@@ -13,9 +13,3 @@ type Defer struct {
 	Rund unsafe.Pointer // native block address or wasm continuation selector
 	Args unsafe.Pointer // defer func and args links
 }
-
-// SetDeferGCRoot is omitted by the compiler when root publication is disabled.
-func SetDeferGCRoot(*Defer) {}
-
-// RestoreDeferGCRoot is omitted by the compiler when root publication is disabled.
-func RestoreDeferGCRoot(*Defer) {}

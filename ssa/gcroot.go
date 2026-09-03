@@ -22,7 +22,10 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-const gcRootChainName = "llvm_gc_root_chain"
+const (
+	gcRootChainName         = "llvm_gc_root_chain"
+	gcRootSJLJReplayingName = "llvm_gc_root_sjlj_replaying"
+)
 
 // EnableGCRoots controls compiler-maintained GC roots.
 func (p Program) EnableGCRoots(enable bool) {
@@ -60,9 +63,11 @@ func (p Function) NewGCRoots(count int) []Expr {
 	chain := p.gcRootChain()
 	prev := llvm.CreateLoad(b.impl, voidPtr, chain)
 	nextSlot := llvm.CreateStructGEP(b.impl, frameType, frame, 0)
-	savedPrev := llvm.CreateLoad(b.impl, voidPtr, nextSlot)
 	reentered := llvm.CreateICmp(b.impl, llvm.IntEQ, prev, frame)
-	actualPrev := llvm.CreateSelect(b.impl, reentered, savedPrev, prev)
+	sjljReplaying := llvm.CreateLoad(b.impl, prog.Bool().ll, p.gcRootSJLJReplaying())
+	// SJLJ/Asyncify replays discarded function entries on the way back to a
+	// setjmp. Their stack slots must be reused without publishing dead frames.
+	reusingFrame := b.impl.CreateOr(reentered, sjljReplaying, "")
 
 	frameMap := p.newGCRootMap(count)
 	roots := make([]Expr, count)
@@ -73,7 +78,7 @@ func (p Function) NewGCRoots(count int) []Expr {
 		root := llvm.CreateInBoundsGEP(b.impl, rootArrayType, rootArray, []llvm.Value{zero, index})
 		roots[i] = Expr{root, prog.Pointer(prog.VoidPtr())}
 	}
-	b.impl.CreateCondBr(reentered, originalEntry, initialize)
+	b.impl.CreateCondBr(reusingFrame, originalEntry, initialize)
 
 	b.impl.SetInsertPointAtEnd(initialize)
 	b.impl.CreateStore(prev, nextSlot)
@@ -83,7 +88,8 @@ func (p Function) NewGCRoots(count int) []Expr {
 	}
 	b.impl.CreateStore(frame, chain)
 	b.impl.CreateBr(originalEntry)
-	p.gcRootPrev = Expr{actualPrev, prog.VoidPtr()}
+	p.gcRootFrame = Expr{frame, prog.VoidPtr()}
+	p.gcRootPrev = Expr{nextSlot, prog.Pointer(prog.VoidPtr())}
 	return roots
 }
 
@@ -101,6 +107,25 @@ func (p Function) gcRootChain() llvm.Value {
 	global.SetLinkage(llvm.LinkOnceAnyLinkage)
 	global.SetAlignment(p.Prog.PointerSize())
 	return global
+}
+
+func (p Function) gcRootSJLJReplaying() llvm.Value {
+	global := p.Pkg.mod.NamedGlobal(gcRootSJLJReplayingName)
+	if global.IsNil() {
+		global = llvm.AddGlobal(p.Pkg.mod, p.Prog.Bool().ll, gcRootSJLJReplayingName)
+	}
+	global.SetInitializer(llvm.ConstNull(p.Prog.Bool().ll))
+	global.SetLinkage(llvm.LinkOnceAnyLinkage)
+	global.SetAlignment(1)
+	return global
+}
+
+// currentGCRootChain loads the compiler-maintained chain at the call site.
+// Runtime helpers must not discover this through a Go call: their own root
+// frame is already linked by then and would be mistaken for the caller frame.
+func (b Builder) currentGCRootChain() Expr {
+	chain := b.Func.gcRootChain()
+	return Expr{llvm.CreateLoad(b.impl, b.Prog.tyVoidPtr(), chain), b.Prog.VoidPtr()}
 }
 
 func (p Function) newGCRootMap(count int) llvm.Value {
@@ -129,7 +154,13 @@ func (p Function) endGCRoots(b Builder) {
 			continue
 		}
 		b.impl.SetInsertPointBefore(term)
-		b.impl.CreateStore(p.gcRootPrev.impl, chain)
+		current := llvm.CreateLoad(b.impl, p.Prog.tyVoidPtr(), chain)
+		prev := llvm.CreateLoad(b.impl, p.Prog.tyVoidPtr(), p.gcRootPrev.impl)
+		// A helper replayed during a non-local return can finish without ever
+		// linking its frame. Only the actual chain head owns a pop operation.
+		linked := llvm.CreateICmp(b.impl, llvm.IntEQ, current, p.gcRootFrame.impl)
+		restored := llvm.CreateSelect(b.impl, linked, prev, current)
+		b.impl.CreateStore(restored, chain)
 	}
 }
 

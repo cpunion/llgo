@@ -68,6 +68,15 @@ func TestDeferCapturesGCRootChain(t *testing.T) {
 			t.Fatalf("root-enabled defer did not call %s:\n%s", want, ir)
 		}
 	}
+	call := strings.Index(ir, `.SetDeferGCRoot"(ptr `)
+	lineEnd := -1
+	if call >= 0 {
+		lineEnd = strings.IndexByte(ir[call:], '\n')
+	}
+	if call < 0 || lineEnd < 0 || !strings.Contains(ir, `@llvm_gc_root_chain`) ||
+		!strings.Contains(ir[call:call+lineEnd], `, ptr `) {
+		t.Fatalf("root-enabled defer did not pass the compiler chain explicitly:\n%s", ir)
+	}
 }
 
 func TestExplicitDeferStackFallbackAndNilBuiltin(t *testing.T) {

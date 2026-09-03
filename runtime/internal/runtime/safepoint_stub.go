@@ -1,7 +1,6 @@
-//go:build !llgo || !wasm || !llgo_wasm_gc || (wasip1 && llgo.wasi_threads)
+//go:build !llgo
 
 package runtime
 
-// CooperativeSafepoint is inactive on runtimes without single-worker wasm
-// cooperative scheduling.
+// CooperativeSafepoint keeps compiler-only host tests type-correct.
 func CooperativeSafepoint() {}

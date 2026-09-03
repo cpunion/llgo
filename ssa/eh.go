@@ -383,7 +383,7 @@ func (b Builder) initDeferState(procBlk, rethrowBlk BasicBlock) (*aDefer, Expr, 
 	deferData := Expr{ptr, prog.DeferPtr()}
 	b.Call(b.Pkg.rtFunc("SetThreadDefer"), deferData)
 	if prog.GCRootsEnabled() {
-		b.Call(b.Pkg.rtFunc("SetDeferGCRoot"), deferData)
+		b.Call(b.Pkg.rtFunc("SetDeferGCRoot"), deferData, b.currentGCRootChain())
 	}
 	bitsPtr := b.FieldAddr(deferData, deferBits)
 	rethPtr := b.FieldAddr(deferData, deferRethrow)
