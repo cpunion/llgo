@@ -132,6 +132,40 @@ func classify(p *int) *int { return p }
 	}
 }
 
+func TestMayContainGCRoot(t *testing.T) {
+	ptr := types.NewPointer(types.Typ[types.Int])
+	tests := []struct {
+		name string
+		typ  types.Type
+		want bool
+	}{
+		{name: "integer", typ: types.Typ[types.Int]},
+		{name: "pointer", typ: ptr, want: true},
+		{name: "unsafe pointer", typ: types.Typ[types.UnsafePointer], want: true},
+		{name: "string", typ: types.Typ[types.String], want: true},
+		{name: "scalar array", typ: types.NewArray(types.Typ[types.Uint32], 4)},
+		{name: "pointer array", typ: types.NewArray(ptr, 2), want: true},
+		{name: "scalar struct", typ: types.NewStruct([]*types.Var{
+			types.NewField(token.NoPos, nil, "n", types.Typ[types.Int], false),
+		}, nil)},
+		{name: "pointer struct", typ: types.NewStruct([]*types.Var{
+			types.NewField(token.NoPos, nil, "p", ptr, false),
+		}, nil), want: true},
+		{name: "function", typ: types.NewSignatureType(nil, nil, nil, nil, nil, false), want: true},
+		{name: "pointer tuple", typ: types.NewTuple(types.NewVar(token.NoPos, nil, "p", ptr))},
+		{name: "range tuple with invalid key", typ: types.NewTuple(
+			types.NewVar(token.NoPos, nil, "ok", types.Typ[types.Bool]),
+			types.NewVar(token.NoPos, nil, "key", types.Typ[types.Invalid]),
+			types.NewVar(token.NoPos, nil, "value", ptr),
+		)},
+	}
+	for _, test := range tests {
+		if got := mayContainGCRoot(test.typ); got != test.want {
+			t.Errorf("mayContainGCRoot(%s) = %v, want %v", test.name, got, test.want)
+		}
+	}
+}
+
 func buildGCRootSSAFunction(t *testing.T, src string) *ssa.Function {
 	t.Helper()
 	fset := token.NewFileSet()

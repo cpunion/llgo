@@ -37,11 +37,26 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 		case *ssa.FreeVar:
 			return false
 		}
+		if call, ok := value.(*ssa.Call); ok {
+			if callee, ok := call.Call.Value.(*ssa.Function); ok {
+				if _, _, kind := p.funcOf(callee); kind == llgoFuncAddr {
+					// llgo.funcAddr has an unsafe.Pointer signature but lowers
+					// to a code pointer, not a Go heap pointer.
+					return false
+				}
+			}
+		}
+		if !mayContainGCRoot(value.Type()) {
+			return false
+		}
 		typ := p.type_(value.Type(), llssa.InGo)
 		return p.prog.GCRootCount(typ) != 0
 	}, p.isGCSafepoint)
 	if p.safepointEntry {
 		for _, param := range fn.Params {
+			if !mayContainGCRoot(param.Type()) {
+				continue
+			}
 			typ := p.type_(param.Type(), llssa.InGo)
 			if p.prog.GCRootCount(typ) != 0 {
 				planned[param] = struct{}{}
@@ -97,6 +112,32 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 	if hasClosureRoot {
 		p.gcClosureRoot = allSlots[next]
 	}
+}
+
+func mayContainGCRoot(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	switch typ := types.Unalias(typ).Underlying().(type) {
+	case *types.Basic:
+		return typ.Kind() == types.UnsafePointer || typ.Info()&types.IsString != 0
+	case *types.Pointer, *types.Slice, *types.Map, *types.Chan, *types.Signature, *types.Interface:
+		return true
+	case *types.Array:
+		return mayContainGCRoot(typ.Elem())
+	case *types.Struct:
+		for i := 0; i < typ.NumFields(); i++ {
+			if mayContainGCRoot(typ.Field(i).Type()) {
+				return true
+			}
+		}
+	case *types.Tuple:
+		// SSA tuple results are immediately projected into Extract values. Root
+		// those projections instead; a tuple can also contain the invalid
+		// placeholder type used for an unrequested range key or value.
+		return false
+	}
+	return false
 }
 
 func (p *context) initGCRoots(b llssa.Builder, fn *ssa.Function) {

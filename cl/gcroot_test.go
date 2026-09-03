@@ -122,3 +122,25 @@ func keep(p *int) func() {
 		t.Fatalf("closure context live across a call was not rooted:\n%s", ir)
 	}
 }
+
+func TestCompileFunctionAddressIsNotHeapRoot(t *testing.T) {
+	const src = `package main
+
+import "unsafe"
+
+//go:linkname funcAddr llgo.funcAddr
+func funcAddr(any) unsafe.Pointer
+
+func target() {}
+func use(unsafe.Pointer)
+
+func keep() {
+	address := funcAddr(target)
+	use(address)
+}
+`
+	cltest.CompileIREx(t, src, "gcroot_funcaddr.go", false, func(prog llssa.Program) {
+		prog.EnableGCRoots(true)
+		prog.EnableCooperativeSafepoints(true)
+	})
+}
