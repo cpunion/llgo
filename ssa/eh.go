@@ -398,6 +398,9 @@ func (b Builder) initDeferState(procBlk, rethrowBlk BasicBlock) (*aDefer, Expr, 
 
 	czero := prog.IntVal(0, prog.CInt())
 	retval := b.Sigsetjmp(jb, czero)
+	if prog.GCRootsEnabled() {
+		b.Call(b.Pkg.rtFunc("RestoreDeferGCRoot"), deferData)
+	}
 
 	self.defer_ = &aDefer{
 		data:        deferData,

@@ -39,6 +39,8 @@ func TestGCRootFrameIR(t *testing.T) {
 		`define void @main.keep(ptr %0)`,
 		`@llvm_gc_root_chain`,
 		`[1 x ptr]`,
+		`icmp eq ptr`,
+		`br i1`,
 		`store ptr %0`,
 	} {
 		if !strings.Contains(ir, want) {

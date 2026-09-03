@@ -62,8 +62,11 @@ func TestDeferCapturesGCRootChain(t *testing.T) {
 	b.Return()
 	b.EndBuild()
 
-	if ir := pkg.Module().String(); !strings.Contains(ir, "SetDeferGCRoot") {
-		t.Fatalf("root-enabled defer did not capture its root chain:\n%s", ir)
+	ir := pkg.Module().String()
+	for _, want := range []string{"SetDeferGCRoot", "RestoreDeferGCRoot"} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("root-enabled defer did not call %s:\n%s", want, ir)
+		}
 	}
 }
 
