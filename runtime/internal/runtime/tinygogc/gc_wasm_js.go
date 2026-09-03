@@ -13,7 +13,7 @@ func wasmCalloc(nmemb, size uintptr) unsafe.Pointer {
 }
 
 func wasmMemalign(alignment, size uintptr) unsafe.Pointer {
-	if alignment < unsafe.Sizeof(uintptr(0)) || alignment&(alignment-1) != 0 {
+	if !wasmValidMemalign(alignment) {
 		return nil
 	}
 	if alignment <= bytesPerBlock {
@@ -23,6 +23,10 @@ func wasmMemalign(alignment, size uintptr) unsafe.Pointer {
 		return nil
 	}
 	return unsafe.Pointer(alignUp(uintptr(Alloc(size+alignment-1)), alignment))
+}
+
+func wasmValidMemalign(alignment uintptr) bool {
+	return alignment >= unsafe.Sizeof(uintptr(0)) && alignment&(alignment-1) == 0
 }
 
 //export malloc
@@ -39,6 +43,14 @@ func calloc(nmemb, size uintptr) unsafe.Pointer {
 	return wasmCalloc(nmemb, size)
 }
 
+// Emscripten's musl uses the hidden allocator entry directly in subsystems
+// such as atexit. MALLOC=none leaves it for the embedding allocator to supply.
+//
+//export __libc_calloc
+func libcCalloc(nmemb, size uintptr) unsafe.Pointer {
+	return wasmCalloc(nmemb, size)
+}
+
 //export realloc
 func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 	return Realloc(ptr, size)
@@ -47,6 +59,19 @@ func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 //export memalign
 func memalign(alignment, size uintptr) unsafe.Pointer {
 	return wasmMemalign(alignment, size)
+}
+
+//export posix_memalign
+func posixMemalign(result *unsafe.Pointer, alignment, size uintptr) int32 {
+	if !wasmValidMemalign(alignment) {
+		return 22
+	}
+	ptr := wasmMemalign(alignment, size)
+	if ptr == nil {
+		return 12
+	}
+	*result = ptr
+	return 0
 }
 
 //export emscripten_builtin_malloc

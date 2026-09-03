@@ -759,25 +759,53 @@ func TestDefaultBuildTags(t *testing.T) {
 	}
 }
 
-func TestApplyWasmGCLinkFlags(t *testing.T) {
+func TestConfigureWasmGC(t *testing.T) {
+	t.Setenv("LLGO_WASI_THREADS", "0")
 	tests := []struct {
-		name string
-		conf Config
-		want bool
+		name   string
+		conf   Config
+		abi    crosscompile.WasmABI
+		wantGC bool
+		err    bool
 	}{
-		{name: "wasm32", conf: Config{Goos: "js", Goarch: "wasm", Tags: "llgo_wasm_gc"}, want: true},
-		{name: "comma separated tags", conf: Config{Goos: "js", Goarch: "wasm", Tags: "other,llgo_wasm_gc"}, want: true},
-		{name: "default wasm", conf: Config{Goos: "js", Goarch: "wasm"}},
-		{name: "WASI", conf: Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo_wasm_gc"}},
+		{name: "Emscripten", conf: Config{Goos: "js", Goarch: "wasm"}, abi: crosscompile.WasmABIEmscripten, wantGC: true},
+		{name: "Emscripten Memory64", conf: Config{Goos: "js", Goarch: "wasm"}, abi: crosscompile.WasmABIEmscriptenMemory64, wantGC: true},
+		{name: "WASI", conf: Config{Goos: "wasip1", Goarch: "wasm"}, abi: crosscompile.WasmABIWASIPreview1, wantGC: true},
+		{name: "raw wasm", conf: Config{Goos: "js", Goarch: "wasm"}},
+		{name: "raw wasm explicit", conf: Config{Goos: "js", Goarch: "wasm", Tags: "other,llgo_wasm_gc"}, wantGC: true},
+		{name: "native", conf: Config{Goos: "linux", Goarch: "amd64"}},
+		{name: "native explicit", conf: Config{Goos: "linux", Goarch: "amd64", Tags: "llgo_wasm_gc"}, err: true},
+		{name: "unsupported raw host", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo_wasm_gc"}, err: true},
+		{name: "freestanding explicit", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo_wasm_gc"}, abi: crosscompile.WasmABIFreestanding, err: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			export := crosscompile.Export{}
+			export := crosscompile.Export{WasmABI: test.abi}
+			enabled, err := configureWasmGC(&test.conf, &export)
+			if (err != nil) != test.err {
+				t.Fatalf("configureWasmGC error = %v, want error %v", err, test.err)
+			}
+			if enabled != test.wantGC {
+				t.Fatalf("configureWasmGC enabled = %v, want %v", enabled, test.wantGC)
+			}
 			applyWasmGCLinkFlags(&test.conf, &export)
-			if got := slices.Contains(export.LDFLAGS, "-sMALLOC=none"); got != test.want {
-				t.Fatalf("MALLOC=none present = %v, want %v", got, test.want)
+			if got := slices.Contains(export.LDFLAGS, "-sMALLOC=none"); got != (test.wantGC && test.conf.Goos == "js") {
+				t.Fatalf("MALLOC=none present = %v", got)
+			}
+			if test.wantGC && !slices.Contains(splitSourcePatchBuildTags(test.conf.Tags), "llgo_wasm_gc") {
+				t.Fatalf("internal GC tag missing from %q", test.conf.Tags)
 			}
 		})
+	}
+}
+
+func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
+	t.Setenv("LLGO_WASI_THREADS", "1")
+	for _, abi := range []crosscompile.WasmABI{crosscompile.WasmABIUnspecified, crosscompile.WasmABIWASIPreview1} {
+		conf := Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo_wasm_gc"}
+		if _, err := configureWasmGC(&conf, &crosscompile.Export{WasmABI: abi}); err == nil {
+			t.Fatalf("expected llgo_wasm_gc with WASI threads and ABI %q to fail", abi)
+		}
 	}
 }
 
