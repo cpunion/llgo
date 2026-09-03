@@ -29,7 +29,7 @@ func TestZeroQuantum(t *testing.T) {
 
 func BenchmarkBudgetPoll(b *testing.B) {
 	budget := New(1024)
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		budget.Poll()
 	}
 }
