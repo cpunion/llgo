@@ -36,8 +36,9 @@ type stackEntry struct {
 }
 
 var (
-	contexts *Context
-	active   *Context
+	contexts   *Context
+	active     *Context
+	rebuilding bool
 )
 
 // CurrentChain returns the active execution owner's compiler root chain.
@@ -90,6 +91,36 @@ func SwitchAtBoundary(next *Context) {
 	}
 	active = next
 	currentRootChain = next.chain
+}
+
+// BeginRebuild switches ownership to next but discards its saved stack-root
+// links. Asyncify restores the stack by replaying function entries, which
+// rebuilds those links at the same frame addresses. Reinstalling the saved
+// links before that replay would link each frame to itself.
+//
+// This function runs at a stack-switch boundary. Keep it free of calls and
+// allocations so it cannot acquire a compiler-maintained root frame itself.
+func BeginRebuild(next *Context) {
+	if active == next {
+		return
+	}
+	if active != nil {
+		active.chain = currentRootChain
+	}
+	active = next
+	next.chain = nil
+	currentRootChain = nil
+	rebuilding = true
+}
+
+// FinishRebuild marks an Asyncify stack replay complete.
+func FinishRebuild() {
+	rebuilding = false
+}
+
+// Rebuilding reports whether Asyncify is replaying function entries.
+func Rebuilding() bool {
+	return rebuilding
 }
 
 // AdoptCurrent marks next active after a target-specific stack switch has

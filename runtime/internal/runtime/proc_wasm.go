@@ -138,6 +138,7 @@ func RunWasmMain() {
 }
 
 func wasmMainStart(unsafe.Pointer) {
+	finishWasmGCRootRebuild()
 	gp := getg()
 	wasmMainTask(nil)
 	casgstatus(gp, _Grunning, _Gdead)
@@ -208,6 +209,7 @@ func releaseWasmContext(gp *g) {
 }
 
 func wasmGStart(arg unsafe.Pointer) {
+	finishWasmGCRootRebuild()
 	gp := (*g)(arg)
 	if gp == nil || getg() != gp {
 		fatal("runtime: invalid WebAssembly goroutine entry")

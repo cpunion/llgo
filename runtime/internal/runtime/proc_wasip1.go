@@ -89,7 +89,7 @@ func RunWasmMain() {
 		fatal("runtime: invalid WebAssembly main goroutine")
 		return
 	}
-	if !initWasmContext(gp, wasmcontext.Entry(wasmMainTask), nil, wasmMainStackSize) {
+	if !initWasmContext(gp, wasmcontext.Entry(wasmMainStart), nil, wasmMainStackSize) {
 		panic("runtime: failed to allocate WebAssembly goroutine stack")
 	}
 
@@ -118,6 +118,11 @@ func RunWasmMain() {
 			return
 		}
 	}
+}
+
+func wasmMainStart(arg unsafe.Pointer) unsafe.Pointer {
+	finishWasmGCRootRebuild()
+	return wasmMainTask(arg)
 }
 
 func runWasmContext(gp *g) {
@@ -181,6 +186,7 @@ func releaseWasmContext(gp *g) {
 }
 
 func wasmGStart(arg unsafe.Pointer) unsafe.Pointer {
+	finishWasmGCRootRebuild()
 	gp := (*g)(arg)
 	if gp == nil || getg() != gp {
 		fatal("runtime: invalid WebAssembly goroutine entry")

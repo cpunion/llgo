@@ -113,6 +113,42 @@ func TestAdoptCurrent(t *testing.T) {
 	}
 }
 
+func TestBeginAndFinishRebuild(t *testing.T) {
+	resetForTest()
+	t.Cleanup(resetForTest)
+
+	firstChain := unsafe.Pointer(uintptr(0x11))
+	staleSecondChain := unsafe.Pointer(uintptr(0x22))
+	var first, second Context
+	currentRootChain = firstChain
+	RegisterActive(&first)
+	Register(&second)
+	second.chain = staleSecondChain
+
+	BeginRebuild(&second)
+	if first.chain != firstChain {
+		t.Fatalf("source chain = %p, want %p", first.chain, firstChain)
+	}
+	if active != &second || second.chain != nil || currentRootChain != nil {
+		t.Fatal("BeginRebuild did not switch ownership and clear stale root links")
+	}
+	if !Rebuilding() {
+		t.Fatal("BeginRebuild did not mark the replay active")
+	}
+
+	rebuiltSecondChain := unsafe.Pointer(uintptr(0x33))
+	currentRootChain = rebuiltSecondChain
+	FinishRebuild()
+	if Rebuilding() {
+		t.Fatal("FinishRebuild left the replay active")
+	}
+
+	SwitchAtBoundary(&first)
+	if second.chain != rebuiltSecondChain || currentRootChain != firstChain {
+		t.Fatal("rebuilt root links were not preserved by the next switch")
+	}
+}
+
 func assertPanics(t *testing.T, fn func()) {
 	t.Helper()
 	defer func() {
@@ -126,5 +162,6 @@ func assertPanics(t *testing.T, fn func()) {
 func resetForTest() {
 	contexts = nil
 	active = nil
+	rebuilding = false
 	currentRootChain = nil
 }
