@@ -1,4 +1,4 @@
-//go:build (baremetal && !nogc) || (wasm && llgo_wasm_gc)
+//go:build (baremetal && !nogc) || (wasm && llgo.wasm.gc.linear)
 
 package tinygogc
 
