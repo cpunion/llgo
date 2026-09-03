@@ -16,3 +16,6 @@ type Defer struct {
 
 // SetDeferGCRoot is omitted by the compiler when root publication is disabled.
 func SetDeferGCRoot(*Defer) {}
+
+// RestoreDeferGCRoot is omitted by the compiler when root publication is disabled.
+func RestoreDeferGCRoot(*Defer) {}

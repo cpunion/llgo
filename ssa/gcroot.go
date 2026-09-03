@@ -46,36 +46,44 @@ func (p Function) NewGCRoots(count int) []Expr {
 	b := p.NewBuilder()
 	defer b.Dispose()
 	entry := p.Block(0)
-	if entry.first.FirstInstruction().IsNil() {
-		b.SetBlockEx(entry, AtEnd, false)
-	} else {
-		b.SetBlockEx(entry, AtStart, false)
-	}
 
 	prog := p.Prog
 	voidPtr := prog.tyVoidPtr()
 	rootArrayType := llvm.ArrayType(voidPtr, count)
 	frameType := prog.ctx.StructType([]llvm.Type{voidPtr, voidPtr, rootArrayType}, false)
+	originalEntry := entry.first
+	prologue := prog.ctx.InsertBasicBlock(originalEntry, "gcroot.entry")
+	initialize := prog.ctx.InsertBasicBlock(originalEntry, "gcroot.init")
+	b.impl.SetInsertPointAtEnd(prologue)
 	frame := llvm.CreateAlloca(b.impl, frameType)
 
 	chain := p.gcRootChain()
 	prev := llvm.CreateLoad(b.impl, voidPtr, chain)
-	b.impl.CreateStore(prev, llvm.CreateStructGEP(b.impl, frameType, frame, 0))
+	nextSlot := llvm.CreateStructGEP(b.impl, frameType, frame, 0)
+	savedPrev := llvm.CreateLoad(b.impl, voidPtr, nextSlot)
+	reentered := llvm.CreateICmp(b.impl, llvm.IntEQ, prev, frame)
+	actualPrev := llvm.CreateSelect(b.impl, reentered, savedPrev, prev)
 
 	frameMap := p.newGCRootMap(count)
-	b.impl.CreateStore(frameMap, llvm.CreateStructGEP(b.impl, frameType, frame, 1))
-
 	roots := make([]Expr, count)
 	rootArray := llvm.CreateStructGEP(b.impl, frameType, frame, 2)
 	zero := llvm.ConstInt(prog.tyInt32(), 0, false)
 	for i := range roots {
 		index := llvm.ConstInt(prog.tyInt32(), uint64(i), false)
 		root := llvm.CreateInBoundsGEP(b.impl, rootArrayType, rootArray, []llvm.Value{zero, index})
-		b.impl.CreateStore(llvm.ConstNull(voidPtr), root)
 		roots[i] = Expr{root, prog.Pointer(prog.VoidPtr())}
 	}
+	b.impl.CreateCondBr(reentered, originalEntry, initialize)
+
+	b.impl.SetInsertPointAtEnd(initialize)
+	b.impl.CreateStore(prev, nextSlot)
+	b.impl.CreateStore(frameMap, llvm.CreateStructGEP(b.impl, frameType, frame, 1))
+	for _, root := range roots {
+		b.impl.CreateStore(llvm.ConstNull(voidPtr), root.impl)
+	}
 	b.impl.CreateStore(frame, chain)
-	p.gcRootPrev = Expr{prev, prog.VoidPtr()}
+	b.impl.CreateBr(originalEntry)
+	p.gcRootPrev = Expr{actualPrev, prog.VoidPtr()}
 	return roots
 }
 
