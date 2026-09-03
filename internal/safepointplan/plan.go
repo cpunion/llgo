@@ -35,25 +35,36 @@ func Backedges(fn *ssa.Function) map[ssa.Instruction]struct{} {
 	)
 	state := make([]uint8, len(fn.Blocks))
 	polls := make(map[ssa.Instruction]struct{})
-	var visit func(*ssa.BasicBlock)
-	visit = func(block *ssa.BasicBlock) {
-		state[block.Index] = visiting
-		for _, succ := range block.Succs {
-			switch state[succ.Index] {
-			case unvisited:
-				visit(succ)
-			case visiting:
-				if n := len(block.Instrs); n != 0 {
-					polls[block.Instrs[n-1]] = struct{}{}
-				}
-			}
-		}
-		state[block.Index] = visited
+	type frame struct {
+		block    *ssa.BasicBlock
+		nextSucc int
 	}
 
-	for _, block := range fn.Blocks {
-		if state[block.Index] == unvisited {
-			visit(block)
+	stack := make([]frame, 0, len(fn.Blocks))
+	for _, root := range fn.Blocks {
+		if state[root.Index] != unvisited {
+			continue
+		}
+		state[root.Index] = visiting
+		stack = append(stack, frame{block: root})
+		for len(stack) != 0 {
+			top := &stack[len(stack)-1]
+			if top.nextSucc == len(top.block.Succs) {
+				state[top.block.Index] = visited
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			succ := top.block.Succs[top.nextSucc]
+			top.nextSucc++
+			switch state[succ.Index] {
+			case unvisited:
+				state[succ.Index] = visiting
+				stack = append(stack, frame{block: succ})
+			case visiting:
+				if n := len(top.block.Instrs); n != 0 {
+					polls[top.block.Instrs[n-1]] = struct{}{}
+				}
+			}
 		}
 	}
 	if len(polls) == 0 {

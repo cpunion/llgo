@@ -78,7 +78,8 @@ func Register(ctx *Context) {
 	contexts = ctx
 }
 
-// RegisterActive adds ctx and assigns the existing LLVM root chain to it.
+// RegisterActive adds ctx and marks it active. Visit reads its chain directly
+// from currentRootChain until Switch or BeginRebuild saves it in the context.
 func RegisterActive(ctx *Context) {
 	if active != nil {
 		panic("gcroot: active context already registered")
