@@ -18,9 +18,49 @@ func main() {
 		panic("aligned allocation failed")
 	}
 	testRoots()
+	testRecoveredRootChain()
 	testReclamation()
 	testHeapGrowth()
 	println("wasm gc ok")
+}
+
+//go:noinline
+func usePayload(*payload) {}
+
+//go:noinline
+func panicWithRoot(value *payload) {
+	usePayload(value)
+	panic("root-chain unwind")
+}
+
+//go:noinline
+func clobberStack(depth int, value uint64) uint64 {
+	var words [32]uint64
+	for i := range words {
+		words[i] = value + uint64(i)
+	}
+	if depth != 0 {
+		return words[depth%len(words)] + clobberStack(depth-1, value+1)
+	}
+	return words[0]
+}
+
+func testRecoveredRootChain() {
+	live := &payload{value: 0xabcdef01}
+	func() {
+		defer func() {
+			if recover() == nil {
+				panic("panic was not recovered")
+			}
+		}()
+		panicWithRoot(live)
+	}()
+
+	_ = clobberStack(32, 1)
+	runtime.GC()
+	if live.value != 0xabcdef01 {
+		panic("root chain was not restored after recover")
+	}
 }
 
 func testReadMemStatsNil() {
