@@ -612,6 +612,7 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	prog.EnableGoGlobalDCE(conf.goGlobalDCEEnabled())
 	prog.EnableDeadcodeDrop(conf.deadcodeDropEnabled())
 	prog.EnableGCRoots(wasmGC)
+	prog.EnableThreadLocalGCRoots(wasmGC && wasmWorkers.Enabled())
 	prog.EnableCooperativeSafepoints(wasmGC || wasmWorkers.Enabled())
 	if conf.PthreadStackSize > 0 {
 		prog.SetPthreadStackSize(uint64(conf.PthreadStackSize))
@@ -1136,12 +1137,6 @@ func configureWasmGC(conf *Config, export *crosscompile.Export, wasmWorkers bool
 	defaultEnabled := false
 	switch export.WasmABI {
 	case crosscompile.WasmABIEmscripten, crosscompile.WasmABIEmscriptenMemory64:
-		if wasmWorkers {
-			if explicit {
-				return false, errors.New("llgo.wasm.gc.linear does not yet support multiple WebAssembly workers")
-			}
-			return false, nil
-		}
 		defaultEnabled = true
 	case crosscompile.WasmABIWASIPreview1:
 		if IsWasiThreadsEnabled() {
