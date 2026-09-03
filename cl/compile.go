@@ -1475,9 +1475,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		// on affected Windows hosts, turning the diagnostic into a hardware fault.
 		log.Panicf("unreachable: %T\n", iv)
 	}
-	defer func() {
-		p.publishGCRoot(b, iv, ret)
-	}()
+	if p.gcRoots != nil {
+		defer func() {
+			p.publishGCRoot(b, iv, ret)
+		}()
+	}
 	switch v := iv.(type) {
 	case *ssa.Call:
 		ret = p.call(b, llssa.Call, &v.Call)

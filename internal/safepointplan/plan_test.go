@@ -61,6 +61,25 @@ func TestBackedgesNil(t *testing.T) {
 	}
 }
 
+func TestBackedgesDeepGraphDoesNotUseCallStack(t *testing.T) {
+	const blockCount = 100_000
+	blocks := make([]*ssa.BasicBlock, blockCount)
+	for i := range blocks {
+		blocks[i] = &ssa.BasicBlock{
+			Index:  i,
+			Instrs: []ssa.Instruction{new(ssa.Jump)},
+		}
+		if i != 0 {
+			blocks[i-1].Succs = []*ssa.BasicBlock{blocks[i]}
+		}
+	}
+	blocks[blockCount-1].Succs = []*ssa.BasicBlock{blocks[0]}
+
+	if got := len(Backedges(&ssa.Function{Blocks: blocks})); got != 1 {
+		t.Fatalf("Backedges returned %d polls, want 1", got)
+	}
+}
+
 func buildFunction(t *testing.T, src string) *ssa.Function {
 	t.Helper()
 	fset := token.NewFileSet()
