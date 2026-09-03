@@ -920,18 +920,23 @@ func TestWasmRuntimeBackendSelection(t *testing.T) {
 	}{
 		{
 			name: "raw JS and Emscripten profiles", goos: "js", tags: []string{"llgo", "nogc"},
-			want: []string{"g_wasm.go", "os_wasm.go", "proc_wasm.go", "runqueue_wasm.go", "fatal_emscripten.go"},
-			omit: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go"},
+			want: []string{"g_wasm.go", "os_wasm.go", "proc_wasm.go", "runqueue_wasm.go", "fatal_emscripten.go", "local_context_baremetal.go"},
+			omit: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go", "local_context_tls.go"},
 		},
 		{
 			name: "legacy wasm alias", goos: "js", tags: []string{"llgo", "tinygo.wasm", "nogc"},
-			want: []string{"g_wasm.go", "os_wasm.go", "proc_wasm.go", "runqueue_wasm.go", "fatal_emscripten.go"},
-			omit: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go"},
+			want: []string{"g_wasm.go", "os_wasm.go", "proc_wasm.go", "runqueue_wasm.go", "fatal_emscripten.go", "local_context_baremetal.go"},
+			omit: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go", "local_context_tls.go"},
 		},
 		{
 			name: "single-worker WASI", goos: "wasip1", tags: []string{"llgo", "nogc"},
-			want: []string{"g_wasm.go", "os_wasm.go", "proc_wasip1.go", "runqueue_wasm.go", "fatal_wasip1.go"},
-			omit: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go"},
+			want: []string{"g_wasm.go", "os_wasm.go", "proc_wasip1.go", "runqueue_wasm.go", "fatal_wasip1.go", "local_context_baremetal.go"},
+			omit: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go", "local_context_tls.go"},
+		},
+		{
+			name: "multi-worker WASI", goos: "wasip1", tags: []string{"llgo", "nogc", "llgo.wasi_threads"},
+			want: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go", "local_context_tls.go"},
+			omit: []string{"g_wasm.go", "os_wasm.go", "proc_wasip1.go", "runqueue_wasm.go", "fatal_wasip1.go", "local_context_baremetal.go"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
