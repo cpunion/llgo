@@ -28,6 +28,10 @@ func adoptWasmGCRoot(ctx *wasmGCRootContext) {
 	gcroot.AdoptCurrent(ctx)
 }
 
+func finishWasmGCRootRebuild() {
+	gcroot.FinishRebuild()
+}
+
 func unregisterWasmGCRoot(ctx *wasmGCRootContext) {
 	gcroot.Unregister(ctx)
 }
