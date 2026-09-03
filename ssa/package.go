@@ -354,6 +354,7 @@ func (p Program) NewBackendProgram() Program {
 	backend.localities = p.localities
 	backend.enableGoGlobalDCE = p.enableGoGlobalDCE
 	backend.enableDeadcodeDrop = p.enableDeadcodeDrop
+	backend.enableGCRoots = p.enableGCRoots
 	backend.disableBoundsChecks = p.disableBoundsChecks
 	backend.pthreadStackSize = p.pthreadStackSize
 	backend.enableLTOPluginMarker = p.enableLTOPluginMarker
