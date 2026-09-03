@@ -371,8 +371,42 @@ func Realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 	return newAlloc
 }
 
+// Free releases an allocation owned by the runtime. Ordinary Go heap objects
+// remain sweep-managed; this explicit path is used for scheduler roots such as
+// retired Fiber and Asyncify stacks whose stale words would otherwise remain
+// conservative roots until an arbitrary later collection.
+func Free(ptr unsafe.Pointer) {
+	if ptr == nil || ptr == unsafe.Pointer(&zeroSizedAlloc) {
+		return
+	}
+	lock(&gcMutex)
+	lazyInit()
+	address := uintptr(ptr)
+	if !isOnHeap(address) {
+		unlock(&gcMutex)
+		gcPanic(c.Str("gc: freeing pointer outside heap"))
+		return
+	}
+	block := blockFromAddr(address)
+	if gcStateOf(block) == blockStateFree {
+		unlock(&gcMutex)
+		return
+	}
+	head := gcFindHead(block)
+	end := gcFindNext(head)
+	for block = head; block < end; block++ {
+		gcMarkFree(block)
+	}
+	gcFrees++
+	gcFreedBlocks += uint64(end - head)
+	if head < nextAlloc {
+		nextAlloc = head
+	}
+	unlock(&gcMutex)
+}
+
 func freeObject(ptr unsafe.Pointer) {
-	// TODO: free blocks on request, when the compiler knows they're unused.
+	Free(ptr)
 }
 
 func GC() uintptr {

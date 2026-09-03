@@ -112,10 +112,11 @@ func RunWasmMain() {
 	for {
 		runWasmContext(gp)
 		status := readgstatus(gp)
+		isMain := gp.isMain
 		releaseWasmOwnership(gp)
 		if status == _Gdead {
 			releaseWasmContext(gp)
-			if gp.isMain {
+			if isMain {
 				_, mainExited := gState()
 				if !mainExited {
 					wasmSched.system.Close(FreeRoot)
@@ -201,10 +202,10 @@ func releaseWasmContext(gp *g) {
 		return
 	}
 	ctx := gp.context
-	ctx.platform.context.Close(FreeRoot)
 	if wasmGCRootEnabled {
 		unregisterWasmGCRoot(&ctx.platform.gcRoot)
 	}
+	ctx.platform.context.Close(FreeRoot)
 	freeRuntimeContext(ctx)
 }
 

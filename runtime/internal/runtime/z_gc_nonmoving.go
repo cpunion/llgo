@@ -44,6 +44,7 @@ func AllocRoot(size uintptr) unsafe.Pointer {
 }
 
 func FreeRoot(ptr unsafe.Pointer) {
+	tinygogc.Free(ptr)
 }
 
 // AddCleanupPtr is not implemented by the non-moving collector.
