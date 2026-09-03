@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"runtime"
 	"sync/atomic"
 	"time"
@@ -25,10 +26,66 @@ func main() {
 	testRoots()
 	testCooperativeSafepoint()
 	testSuspendedGRoots()
+	testTimerWaitingRoot()
+	testPanicRoot()
 	testRecoveredRootChain()
+	testMetadataLiveness()
 	testReclamation()
 	testHeapGrowth()
 	println("wasm gc ok")
+}
+
+//go:noinline
+func timerWaitingRootWorker(ready chan<- struct{}, done chan<- uint64) {
+	live := &payload{value: 0x76543210}
+	ready <- struct{}{}
+	time.Sleep(10 * time.Millisecond)
+	done <- live.value
+}
+
+func testTimerWaitingRoot() {
+	ready := make(chan struct{})
+	done := make(chan uint64)
+	go timerWaitingRootWorker(ready, done)
+	<-ready
+	runtime.GC()
+	if value := <-done; value != 0x76543210 {
+		panic("timer-waiting goroutine root was not retained")
+	}
+}
+
+func testPanicRoot() {
+	func() {
+		defer func() {
+			// The payload is reachable only through the active panic record.
+			runtime.GC()
+			value, ok := recover().(*payload)
+			if !ok || value.value != 0x13579bdf {
+				panic("panic root was not retained")
+			}
+		}()
+		panic(&payload{value: 0x13579bdf})
+	}()
+}
+
+//go:noinline
+func metadataLiveness(live *payload) {
+	pc, file, line, ok := runtime.Caller(0)
+	if !ok || pc == 0 || file == "" || line == 0 || runtime.FuncForPC(pc) == nil {
+		panic("runtime caller metadata is unavailable")
+	}
+	value := reflect.ValueOf(live).Elem().FieldByName("value")
+	if value.Uint() != 0x2468ace0 {
+		panic("reflection did not retain the payload")
+	}
+	runtime.GC()
+	if live.value != 0x2468ace0 {
+		panic("metadata safepoint lost a live root")
+	}
+}
+
+func testMetadataLiveness() {
+	metadataLiveness(&payload{value: 0x2468ace0})
 }
 
 type suspendedRoots struct {
