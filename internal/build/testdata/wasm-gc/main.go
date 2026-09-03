@@ -13,7 +13,7 @@ var (
 )
 
 func main() {
-	runtime.ReadMemStats(nil)
+	testReadMemStatsNil()
 	if testAlignedAlloc() == 0 {
 		panic("aligned allocation failed")
 	}
@@ -21,6 +21,19 @@ func main() {
 	testReclamation()
 	testHeapGrowth()
 	println("wasm gc ok")
+}
+
+func testReadMemStatsNil() {
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		runtime.ReadMemStats(nil)
+	}()
+	if !panicked {
+		panic("runtime.ReadMemStats(nil) did not panic")
+	}
 }
 
 func testRoots() {
