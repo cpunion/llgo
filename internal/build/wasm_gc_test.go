@@ -8,7 +8,7 @@ import (
 func TestWasmGCRootFrameLinksRuntimeChain(t *testing.T) {
 	conf := NewDefaultConf(ModeGen)
 	conf.Target = "wasi"
-	conf.Tags = "llgo_wasm_gc"
+	conf.Tags = "llgo.wasm.gc.linear"
 	modules := make(map[string]string)
 	conf.ModuleHook = func(pkg Package) {
 		switch pkg.PkgPath {

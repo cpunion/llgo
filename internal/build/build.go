@@ -551,7 +551,7 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	tags += "," + target.ClosureEnvBuildTag()
 	// Profiles without R2 collector support retain the collector-free runtime.
 	if conf.Target != "" && export.WasmABI != crosscompile.WasmABIUnspecified &&
-		!slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo_wasm_gc") {
+		!slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo.wasm.gc.linear") {
 		tags += ",nogc"
 	}
 	if conf.PCLNMode == PCLNExternal {
@@ -1087,10 +1087,10 @@ func defaultBuildTags(goarch, target string) string {
 }
 
 func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
-	explicit := slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo_wasm_gc")
+	explicit := slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo.wasm.gc.linear")
 	if conf.Goarch != "wasm" {
 		if explicit {
-			return false, fmt.Errorf("llgo_wasm_gc does not support GOARCH=%s", conf.Goarch)
+			return false, fmt.Errorf("llgo.wasm.gc.linear does not support GOARCH=%s", conf.Goarch)
 		}
 		return false, nil
 	}
@@ -1102,7 +1102,7 @@ func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
 	case crosscompile.WasmABIWASIPreview1:
 		if IsWasiThreadsEnabled() {
 			if explicit {
-				return false, errors.New("llgo_wasm_gc requires single-worker WASI (set LLGO_WASI_THREADS=0)")
+				return false, errors.New("llgo.wasm.gc.linear requires single-worker WASI (set LLGO_WASI_THREADS=0)")
 			}
 			return false, nil
 		}
@@ -1112,14 +1112,14 @@ func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
 		// until the official-Go wasm ABI line is complete. The explicit tag is
 		// still available for focused runtime development.
 		if explicit && conf.Goos != "js" && conf.Goos != "wasip1" {
-			return false, fmt.Errorf("llgo_wasm_gc does not support GOOS=%s", conf.Goos)
+			return false, fmt.Errorf("llgo.wasm.gc.linear does not support GOOS=%s", conf.Goos)
 		}
 		if explicit && conf.Goos == "wasip1" && IsWasiThreadsEnabled() {
-			return false, errors.New("llgo_wasm_gc requires single-worker WASI (set LLGO_WASI_THREADS=0)")
+			return false, errors.New("llgo.wasm.gc.linear requires single-worker WASI (set LLGO_WASI_THREADS=0)")
 		}
 	default:
 		if explicit {
-			return false, fmt.Errorf("llgo_wasm_gc does not support WebAssembly ABI %q", export.WasmABI)
+			return false, fmt.Errorf("llgo.wasm.gc.linear does not support WebAssembly ABI %q", export.WasmABI)
 		}
 		return false, nil
 	}
@@ -1129,14 +1129,14 @@ func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
 		if conf.Tags != "" {
 			conf.Tags += ","
 		}
-		conf.Tags += "llgo_wasm_gc"
+		conf.Tags += "llgo.wasm.gc.linear"
 	}
 	return enabled, nil
 }
 
 func applyWasmGCLinkFlags(conf *Config, export *crosscompile.Export) {
 	if conf.Goos != "js" || conf.Goarch != "wasm" ||
-		!slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo_wasm_gc") {
+		!slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo.wasm.gc.linear") {
 		return
 	}
 	if !slices.Contains(export.LDFLAGS, "-sMALLOC=none") {

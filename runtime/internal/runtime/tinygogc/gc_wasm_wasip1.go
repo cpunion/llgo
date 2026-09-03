@@ -1,4 +1,4 @@
-//go:build wasip1 && wasm && llgo_wasm_gc
+//go:build wasip1 && wasm && llgo.wasm.gc.linear
 
 package tinygogc
 

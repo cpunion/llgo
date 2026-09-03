@@ -1,4 +1,4 @@
-//go:build js && wasm && llgo_wasm_gc
+//go:build js && wasm && llgo.wasm.gc.linear
 
 package tinygogc
 

@@ -1,4 +1,4 @@
-//go:build wasm && llgo_wasm_gc
+//go:build wasm && llgo.wasm.gc.linear
 
 package runtime
 

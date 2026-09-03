@@ -772,11 +772,11 @@ func TestConfigureWasmGC(t *testing.T) {
 		{name: "Emscripten Memory64", conf: Config{Goos: "js", Goarch: "wasm"}, abi: crosscompile.WasmABIEmscriptenMemory64, wantGC: true},
 		{name: "WASI", conf: Config{Goos: "wasip1", Goarch: "wasm"}, abi: crosscompile.WasmABIWASIPreview1, wantGC: true},
 		{name: "raw wasm", conf: Config{Goos: "js", Goarch: "wasm"}},
-		{name: "raw wasm explicit", conf: Config{Goos: "js", Goarch: "wasm", Tags: "other,llgo_wasm_gc"}, wantGC: true},
+		{name: "raw wasm explicit", conf: Config{Goos: "js", Goarch: "wasm", Tags: "other,llgo.wasm.gc.linear"}, wantGC: true},
 		{name: "native", conf: Config{Goos: "linux", Goarch: "amd64"}},
-		{name: "native explicit", conf: Config{Goos: "linux", Goarch: "amd64", Tags: "llgo_wasm_gc"}, err: true},
-		{name: "unsupported raw host", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo_wasm_gc"}, err: true},
-		{name: "freestanding explicit", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo_wasm_gc"}, abi: crosscompile.WasmABIFreestanding, err: true},
+		{name: "native explicit", conf: Config{Goos: "linux", Goarch: "amd64", Tags: "llgo.wasm.gc.linear"}, err: true},
+		{name: "unsupported raw host", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo.wasm.gc.linear"}, err: true},
+		{name: "freestanding explicit", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo.wasm.gc.linear"}, abi: crosscompile.WasmABIFreestanding, err: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -792,7 +792,7 @@ func TestConfigureWasmGC(t *testing.T) {
 			if got := slices.Contains(export.LDFLAGS, "-sMALLOC=none"); got != (test.wantGC && test.conf.Goos == "js") {
 				t.Fatalf("MALLOC=none present = %v", got)
 			}
-			if test.wantGC && !slices.Contains(splitSourcePatchBuildTags(test.conf.Tags), "llgo_wasm_gc") {
+			if test.wantGC && !slices.Contains(splitSourcePatchBuildTags(test.conf.Tags), "llgo.wasm.gc.linear") {
 				t.Fatalf("internal GC tag missing from %q", test.conf.Tags)
 			}
 		})
@@ -802,9 +802,9 @@ func TestConfigureWasmGC(t *testing.T) {
 func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
 	t.Setenv("LLGO_WASI_THREADS", "1")
 	for _, abi := range []crosscompile.WasmABI{crosscompile.WasmABIUnspecified, crosscompile.WasmABIWASIPreview1} {
-		conf := Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo_wasm_gc"}
+		conf := Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo.wasm.gc.linear"}
 		if _, err := configureWasmGC(&conf, &crosscompile.Export{WasmABI: abi}); err == nil {
-			t.Fatalf("expected llgo_wasm_gc with WASI threads and ABI %q to fail", abi)
+			t.Fatalf("expected llgo.wasm.gc.linear with WASI threads and ABI %q to fail", abi)
 		}
 	}
 }
@@ -816,7 +816,7 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 			ctx := gobuild.Default
 			ctx.GOOS = goos
 			ctx.GOARCH = "wasm"
-			ctx.BuildTags = []string{"llgo", "nogc", "llgo_wasm_gc"}
+			ctx.BuildTags = []string{"llgo", "nogc", "llgo.wasm.gc.linear"}
 			pkg, err := ctx.ImportDir(runtimeDir, 0)
 			if err != nil {
 				t.Fatal(err)

@@ -1,4 +1,4 @@
-//go:build nogc && (!wasm || !llgo_wasm_gc)
+//go:build nogc && (!wasm || !llgo.wasm.gc.linear)
 
 /*
  * Copyright (c) 2024 The XGo Authors (xgo.dev). All rights reserved.
