@@ -24,10 +24,62 @@ func main() {
 	}
 	testRoots()
 	testCooperativeSafepoint()
+	testSuspendedGRoots()
 	testRecoveredRootChain()
 	testReclamation()
 	testHeapGrowth()
 	println("wasm gc ok")
+}
+
+type suspendedRoots struct {
+	p     *payload
+	slice []byte
+	text  string
+	any   any
+	fn    func() uint64
+	array [2]*payload
+}
+
+//go:noinline
+func suspendedRootWorker(ready chan<- struct{}, resume <-chan struct{}, done chan<- struct{}) {
+	closurePayload := &payload{value: 0x11223344}
+	bytes := []byte{'w', 'a', 's', 'm'}
+	roots := suspendedRoots{
+		p:     &payload{value: 0x55667788},
+		slice: []byte{1, 2, 3, 4},
+		text:  string(bytes),
+		any:   &payload{value: 0x99aabbcc},
+		fn:    func() uint64 { return closurePayload.value },
+		array: [2]*payload{{value: 0xddeeff00}, {value: 0x10203040}},
+	}
+	ready <- struct{}{}
+	<-resume
+
+	if roots.p.value != 0x55667788 ||
+		len(roots.slice) != 4 || roots.slice[0] != 1 || roots.slice[3] != 4 ||
+		roots.text != "wasm" ||
+		roots.any.(*payload).value != 0x99aabbcc ||
+		roots.fn() != 0x11223344 ||
+		roots.array[0].value != 0xddeeff00 || roots.array[1].value != 0x10203040 {
+		panic("suspended goroutine roots were not retained")
+	}
+	done <- struct{}{}
+}
+
+func testSuspendedGRoots() {
+	ready := make(chan struct{})
+	resume := make(chan struct{})
+	done := make(chan struct{})
+	go suspendedRootWorker(ready, resume, done)
+	<-ready
+
+	runtime.GC()
+	for i := 0; i < 4096; i++ {
+		garbage = &payload{value: uint64(i)}
+	}
+	garbage = nil
+	close(resume)
+	<-done
 }
 
 //go:noinline
