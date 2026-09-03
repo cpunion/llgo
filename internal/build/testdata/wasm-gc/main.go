@@ -30,9 +30,30 @@ func main() {
 	testPanicRoot()
 	testRecoveredRootChain()
 	testMetadataLiveness()
+	testExitedGStorageRelease()
 	testReclamation()
 	testHeapGrowth()
 	println("wasm gc ok")
+}
+
+func testExitedGStorageRelease() {
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	done := make(chan struct{})
+	go func() {
+		close(done)
+	}()
+	<-done
+
+	// The scheduler releases the completed G context and its Fiber/Asyncify
+	// storage before resuming this G. Waiting for a later sweep would leave stale
+	// pointer-shaped stack words acting as conservative roots.
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if after.Frees <= before.Frees {
+		panic("exited goroutine storage was not released")
+	}
 }
 
 //go:noinline

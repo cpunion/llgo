@@ -178,10 +178,10 @@ func releaseWasmContext(gp *g) {
 		return
 	}
 	ctx := gp.context
-	ctx.platform.context.Close(FreeRoot)
 	if wasmGCRootEnabled {
 		unregisterWasmGCRoot(&ctx.platform.gcRoot)
 	}
+	ctx.platform.context.Close(FreeRoot)
 	freeRuntimeContext(ctx)
 }
 
