@@ -598,7 +598,9 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	}
 	prog.EnableGoGlobalDCE(conf.goGlobalDCEEnabled())
 	prog.EnableDeadcodeDrop(conf.deadcodeDropEnabled())
-	prog.EnableGCRoots(conf.Goarch == "wasm" && slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo_wasm_gc"))
+	wasmGC := conf.Goarch == "wasm" && slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo_wasm_gc")
+	prog.EnableGCRoots(wasmGC)
+	prog.EnableCooperativeSafepoints(wasmGC)
 	if conf.PthreadStackSize > 0 {
 		prog.SetPthreadStackSize(uint64(conf.PthreadStackSize))
 	}
