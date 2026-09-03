@@ -327,7 +327,8 @@ type aFunction struct {
 	fakeUses   []llvm.Value
 	fakeUseSet map[llvm.Value]struct{}
 
-	gcRootPrev Expr
+	gcRootFrame Expr
+	gcRootPrev  Expr
 
 	diFunc DIFunction
 }

@@ -1,4 +1,4 @@
-//go:build !baremetal && (!wasm || !llgo_wasm_gc)
+//go:build wasm && llgo_wasm_gc
 
 package runtime
 
@@ -7,15 +7,10 @@ import (
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/debug"
+	"github.com/xgo-dev/llgo/runtime/internal/gcroot"
 )
 
-var (
-	printFormatPrefixInt  = c.Str("%lld")
-	printFormatPrefixUInt = c.Str("%llu")
-	printFormatPrefixHex  = c.Str("%llx")
-)
-
-// Rethrow rethrows a panic.
+// Rethrow rethrows a panic after discarding roots owned by skipped frames.
 func Rethrow(link *Defer) {
 	gp := getg()
 	if ptr := gp.panic_; ptr != nil {
@@ -32,14 +27,15 @@ func Rethrow(link *Defer) {
 			c.Free(unsafe.Pointer(node))
 			c.Exit(2)
 		} else {
+			gcroot.BeginSJLJReplay()
+			gcroot.RestoreChain(link.gcRoot)
 			c.Siglongjmp(link.Addr, 1)
 		}
 	} else if gp.goexit {
-		// Goexit must run deferred functions before terminating the current
-		// goroutine through the selected scheduler backend. Reuse the
-		// longjmp-based defer unwinding until the final defer frame is gone.
 		gp.defer_ = link
 		if link != nil {
+			gcroot.BeginSJLJReplay()
+			gcroot.RestoreChain(link.gcRoot)
 			c.Siglongjmp(link.Addr, 1)
 		}
 		if gp.isMain {

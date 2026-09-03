@@ -86,12 +86,12 @@ func TestRestoreChain(t *testing.T) {
 	first := unsafe.Pointer(uintptr(0x11))
 	second := unsafe.Pointer(uintptr(0x22))
 	currentRootChain = first
-	if got := CurrentChain(); got != first {
-		t.Fatalf("CurrentChain() = %p, want %p", got, first)
+	if currentRootChain != first {
+		t.Fatalf("current root chain = %p, want %p", currentRootChain, first)
 	}
 	RestoreChain(second)
-	if got := CurrentChain(); got != second {
-		t.Fatalf("CurrentChain() after restore = %p, want %p", got, second)
+	if currentRootChain != second {
+		t.Fatalf("current root chain after restore = %p, want %p", currentRootChain, second)
 	}
 }
 
@@ -149,6 +149,37 @@ func TestBeginAndFinishRebuild(t *testing.T) {
 	}
 }
 
+func TestBeginAndFinishSJLJReplay(t *testing.T) {
+	resetForTest()
+	t.Cleanup(resetForTest)
+
+	chain := unsafe.Pointer(uintptr(0x11))
+	currentRootChain = chain
+	BeginSJLJReplay()
+	if !sjljReplaying || !Rebuilding() {
+		t.Fatal("BeginSJLJReplay did not mark the replay active")
+	}
+	if currentRootChain != chain {
+		t.Fatal("BeginSJLJReplay changed the destination root chain")
+	}
+
+	FinishSJLJReplay()
+	if sjljReplaying || Rebuilding() {
+		t.Fatal("FinishSJLJReplay left the replay active")
+	}
+}
+
+func TestFinishSJLJReplayDoesNotEndAsyncifyRebuild(t *testing.T) {
+	resetForTest()
+	t.Cleanup(resetForTest)
+
+	rebuilding = true
+	FinishSJLJReplay()
+	if !Rebuilding() {
+		t.Fatal("SJLJ completion ended an unrelated Asyncify rebuild")
+	}
+}
+
 func assertPanics(t *testing.T, fn func()) {
 	t.Helper()
 	defer func() {
@@ -163,5 +194,6 @@ func resetForTest() {
 	contexts = nil
 	active = nil
 	rebuilding = false
+	sjljReplaying = false
 	currentRootChain = nil
 }

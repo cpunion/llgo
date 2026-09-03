@@ -21,9 +21,11 @@ type Defer struct {
 	gcMap  unsafe.Pointer // saved map of the setjmp function's root frame
 }
 
-// SetDeferGCRoot records the chain that longjmp must restore.
-func SetDeferGCRoot(frame *Defer) {
-	frame.gcRoot = gcroot.CurrentChain()
+// SetDeferGCRoot records the caller chain that longjmp must restore. The
+// compiler passes the chain explicitly because this helper's own root frame
+// may already be active while the call executes.
+func SetDeferGCRoot(frame *Defer, chain unsafe.Pointer) {
+	frame.gcRoot = chain
 	if frame.gcRoot != nil {
 		frame.gcNext = *gcRootHeaderField(frame.gcRoot, 0)
 		frame.gcMap = *gcRootHeaderField(frame.gcRoot, 1)
@@ -40,6 +42,7 @@ func RestoreDeferGCRoot(frame *Defer) {
 		*gcRootHeaderField(frame.gcRoot, 1) = frame.gcMap
 	}
 	gcroot.RestoreChain(frame.gcRoot)
+	gcroot.FinishSJLJReplay()
 }
 
 // gcRootHeaderField addresses the compiler-owned {next, map} frame header.

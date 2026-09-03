@@ -41,14 +41,32 @@ var (
 	rebuilding bool
 )
 
-// CurrentChain returns the active execution owner's compiler root chain.
-func CurrentChain() unsafe.Pointer {
-	return currentRootChain
-}
-
 // RestoreChain installs a chain captured before a non-local control transfer.
 func RestoreChain(chain unsafe.Pointer) {
 	currentRootChain = chain
+}
+
+// BeginSJLJReplay marks the non-local return path before siglongjmp. The wasm
+// SJLJ/Asyncify lowering replays function entries while it searches for the
+// destination setjmp. Compiler root frames on that discarded path must not be
+// linked into the destination's saved chain.
+//
+// This function runs at the longjmp boundary. Keep it free of calls and
+// allocations so it cannot acquire a compiler-maintained root frame itself.
+func BeginSJLJReplay() {
+	sjljReplaying = true
+	// Prevent collection or a context switch while the restored stack and its
+	// compiler root chain temporarily describe different call paths.
+	rebuilding = true
+}
+
+// FinishSJLJReplay marks the destination setjmp's root chain usable again.
+func FinishSJLJReplay() {
+	if !sjljReplaying {
+		return
+	}
+	sjljReplaying = false
+	rebuilding = false
 }
 
 // Register adds a suspended context to root enumeration.
