@@ -20,6 +20,7 @@ package build
 
 import (
 	"bytes"
+	stdcontext "context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestRunInEmulatorValidation(t *testing.T) {
@@ -118,6 +120,48 @@ func TestRunInEmulatorUnavailableRunner(t *testing.T) {
 		fmt.Sprintf("runner=%q", missing),
 		`package="example/test"`,
 		"status=unavailable",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("runner error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestRunInEmulatorTimeout(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := commandEnv{dir: t.TempDir(), environ: os.Environ()}
+	artifact := filepath.Join(t.TempDir(), "program.mjs")
+	template := fmt.Sprintf("%q -test.run=^TestRunNativeTestHelper$ -- hang %q", executable, "{}")
+	conf := &Config{Target: "emscripten", RunnerTimeout: 50 * time.Millisecond}
+
+	started := time.Now()
+	err = runInEmulator(commands, template, "emscripten", map[string]string{"": artifact, "out": artifact}, "", "example/main", conf, ModeRun, false)
+	if err == nil {
+		t.Fatal("hanging runner unexpectedly succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("hanging runner took %s to stop", elapsed)
+	}
+
+	var runnerErr *runnerFailure
+	if !errors.As(err, &runnerErr) {
+		t.Fatalf("error type = %T, want *runnerFailure: %v", err, err)
+	}
+	if runnerErr.status != runnerStatusTimeout || runnerErr.exitCode != -1 || runnerErr.timeout != 50*time.Millisecond {
+		t.Fatalf("runner failure = %+v", runnerErr)
+	}
+	if !errors.Is(err, stdcontext.DeadlineExceeded) {
+		t.Fatalf("runner error does not wrap context deadline: %v", err)
+	}
+	for _, want := range []string{
+		"phase=run",
+		"target=emscripten",
+		"profile=emscripten",
+		"status=timeout",
+		"timeout=50ms",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("runner error %q does not contain %q", err, want)
@@ -316,6 +360,8 @@ func TestRunNativeTestHelper(t *testing.T) {
 				t.Fatalf("kill helper: %v", err)
 			}
 			panic("SIGKILL returned without terminating the helper")
+		case "hang":
+			time.Sleep(time.Hour)
 		}
 		return
 	}
