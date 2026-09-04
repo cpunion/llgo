@@ -12,6 +12,7 @@ callback_fixture="${repo_root}/internal/build/testdata/wasm-callback"
 gc_fixture="${repo_root}/internal/build/testdata/wasm-gc"
 lifecycle_fixture="${repo_root}/internal/build/testdata/wasm-lifecycle"
 test_fixture="${repo_root}/internal/build/testdata/wasm-test"
+secondary_test_fixture="${repo_root}/internal/build/testdata/wasm-test-secondary"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/llgo-wasm-single-worker.XXXXXX")"
 trap 'rm -rf "${work_dir}"' EXIT
 export LLGO_WASM_TEST_ENV=wasm-env-ok
@@ -46,15 +47,27 @@ expect_failure() {
 	grep -Fq "${expected}" <<<"${output}"
 }
 
+assert_no_implicit_wasm_artifacts() {
+	local temp_dir="$1"
+	local artifact
+	artifact="$(find "${temp_dir}" -type f \( -name '*.mjs' -o -name '*.wasm' \) -print -quit)"
+	if [[ -n "${artifact}" ]]; then
+		echo "implicit WebAssembly artifact was not removed: ${artifact}" >&2
+		exit 1
+	fi
+}
+
 expect_llgo_runner_failure() {
 	local target="$1"
 	local profile="$2"
 	local runner="$3"
 	local fixture="$4"
 	local output exit_code
+	local temp_dir="${work_dir}/runner-failure-${target}-tmp"
+	mkdir -p "${temp_dir}"
 
 	set +e
-	output="$(run_with_timeout env LLGO_WASM_SCHEDULER_DEADLOCK=1 \
+	output="$(run_with_timeout env TMPDIR="${temp_dir}" LLGO_WASM_SCHEDULER_DEADLOCK=1 \
 		"${llgo_cmd}" run -target "${target}" -emulator "${fixture}" 2>&1)"
 	exit_code=$?
 	set -e
@@ -74,6 +87,7 @@ expect_llgo_runner_failure() {
 		"exit_code=2"; do
 		grep -Fq "${expected}" <<<"${output}"
 	done
+	assert_no_implicit_wasm_artifacts "${temp_dir}"
 }
 
 run_emscripten() {
@@ -110,28 +124,36 @@ run_llgo_run() {
 	local expected="$3"
 	local name="$4"
 	local output="${work_dir}/${name}.out"
+	local temp_dir="${work_dir}/${name}-tmp"
+	mkdir -p "${temp_dir}"
 
 	# Exercise the public command and its target-owned runner. Other fixtures in
 	# this script retain explicit artifacts for wasm-tools validation, while this
 	# path verifies that users do not need to assemble Node or Wasmtime commands.
 	echo "testing public llgo run command for ${target}"
-	run_with_timeout "${llgo_cmd}" run -target "${target}" -emulator "${fixture}" 2>&1 | tee "${output}"
+	run_with_timeout env TMPDIR="${temp_dir}" "${llgo_cmd}" run -target "${target}" -emulator "${fixture}" 2>&1 | tee "${output}"
 	grep -Fq "${expected}" "${output}"
+	assert_no_implicit_wasm_artifacts "${temp_dir}"
 }
 
 run_llgo_test() {
 	local target="$1"
 	local name="$2"
 	local output="${work_dir}/${name}.out"
+	local temp_dir="${work_dir}/${name}-tmp"
+	mkdir -p "${temp_dir}"
 
 	# Binaryen's post-Asyncify processing of this standard-library test takes
 	# about 165 seconds on a local arm64 host and exceeded 180 seconds on the
 	# shared x86-64 runner. Keep execution bounded without treating normal
 	# compiler variance as a scheduler failure.
 	echo "testing public llgo test command for ${target}"
-	run_with_timeout_limit 300s "${llgo_cmd}" test -target "${target}" -emulator \
-		-v -count=1 -timeout=30s "${test_fixture}" 2>&1 | tee "${output}"
+	run_with_timeout_limit 300s env TMPDIR="${temp_dir}" "${llgo_cmd}" test -target "${target}" -emulator \
+		-v -count=1 -timeout=30s "${test_fixture}" "${secondary_test_fixture}" 2>&1 | tee "${output}"
 	grep -Fq "PASS" "${output}"
+	grep -Fq "TestScheduler" "${output}"
+	grep -Fq "wasm secondary package ok" "${output}"
+	assert_no_implicit_wasm_artifacts "${temp_dir}"
 }
 
 run_llgo_test_compile_only() {
