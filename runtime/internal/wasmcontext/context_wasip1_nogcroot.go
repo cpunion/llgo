@@ -1,4 +1,4 @@
-//go:build llgo && wasip1 && wasm && !llgo.wasi_threads && !llgo.wasm.gc.linear
+//go:build llgo && wasip1 && wasm && !llgo.wasm.wasi.threads && !llgo.wasm.gc.linear
 
 package wasmcontext
 

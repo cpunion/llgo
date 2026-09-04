@@ -223,8 +223,11 @@ func TestUseWASIThreadsImportsMemory(t *testing.T) {
 	if !slices.Contains(export.CCFLAGS, "-pthread") {
 		t.Fatalf("CCFLAGS do not enable WASI threads: %v", export.CCFLAGS)
 	}
-	if !slices.Contains(export.BuildTags, "llgo.wasi_threads") {
+	if !slices.Contains(export.BuildTags, "llgo.wasm.wasi.threads") {
 		t.Fatalf("BuildTags do not select the WASI pthread backend: %v", export.BuildTags)
+	}
+	if slices.Contains(export.BuildTags, "llgo.wasi_threads") {
+		t.Fatalf("BuildTags retain the legacy WASI thread tag: %v", export.BuildTags)
 	}
 	if !slices.Contains(export.LDFLAGS, "-Wl,--import-memory") {
 		t.Fatalf("LDFLAGS do not import shared host memory: %v", export.LDFLAGS)

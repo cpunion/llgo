@@ -1,4 +1,4 @@
-//go:build llgo && wasip1 && wasm && !llgo.wasi_threads
+//go:build llgo && wasip1 && wasm && !llgo.wasm.wasi.threads
 
 package runtime
 

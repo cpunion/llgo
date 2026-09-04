@@ -707,7 +707,7 @@ func useWithGOARMAndToolchain(goos, goarch, goarm string, wasiThreads, forceEspC
 		}...)
 		// Add thread support if enabled
 		if wasiThreads {
-			export.BuildTags = append(export.BuildTags, "llgo.wasi_threads")
+			export.BuildTags = append(export.BuildTags, "llgo.wasm.wasi.threads")
 			export.LDFLAGS = append(
 				export.LDFLAGS,
 				"-Wl,--import-memory",

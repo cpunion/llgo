@@ -1,4 +1,4 @@
-//go:build llgo && wasm && !(wasip1 && llgo.wasi_threads) && !llgo.wasm.workers
+//go:build llgo && wasm && !(wasip1 && llgo.wasm.wasi.threads) && !llgo.wasm.workers
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

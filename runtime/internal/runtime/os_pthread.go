@@ -1,4 +1,4 @@
-//go:build !windows && (!llgo || !wasm || (wasip1 && llgo.wasi_threads))
+//go:build !windows && (!llgo || !wasm || (wasip1 && llgo.wasm.wasi.threads))
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
