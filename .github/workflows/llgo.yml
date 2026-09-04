@@ -622,6 +622,11 @@ jobs:
           LLGO_BUILD_CACHE: "1"
         run: dev/test_wasm_runtime_go_versions.sh 1.24 1.27
 
+      - name: Test wasm coverage reporting
+        if: matrix.suite == 'runtime'
+        shell: bash
+        run: dev/wasm_ci_report_test.sh
+
       - name: Test single-worker wasm schedulers
         shell: bash
         env:
