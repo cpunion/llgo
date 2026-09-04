@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 TMPDIR="$(mktemp -d)"
 export TMPDIR
@@ -14,10 +14,11 @@ POPULATE_LINUX_SYSROOT_SCRIPT="$(mktemp)"
 cat > "${POPULATE_LINUX_SYSROOT_SCRIPT}" << EOF
 #!/bin/bash
 
+set -e
+
 export DEBIAN_FRONTEND=noninteractive
 
-apt-get update
-apt-get install -y build-essential zlib1g-dev rsync
+bash /install_debian_packages.sh build-essential zlib1g-dev rsync
 
 error() {
 	echo -e "\$1" >&2
@@ -134,7 +135,8 @@ populate_linux_sysroot() {
 		--rm \
 		--platform "linux/${ARCH}" \
 		-v "$(pwd)/${PREFIX}":/sysroot \
-		-v "${POPULATE_LINUX_SYSROOT_SCRIPT}":/populate_linux_sysroot.sh \
+		-v "$(pwd)/.github/workflows/install_debian_packages.sh":/install_debian_packages.sh:ro \
+		-v "${POPULATE_LINUX_SYSROOT_SCRIPT}":/populate_linux_sysroot.sh:ro \
 		debian:bullseye \
 		/populate_linux_sysroot.sh
 }

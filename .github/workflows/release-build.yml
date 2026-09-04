@@ -26,10 +26,12 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v7
+      - name: Test Debian package installation retries
+        run: bash .github/workflows/install_debian_packages_test.sh
       - name: Calculate cache keys
         id: cache-keys
         run: |
-          LINUX_KEY="linux-sysroot-${{ hashFiles('.github/workflows/populate_linux_sysroot.sh', '.github/workflows/release-build.yml') }}-v1.0.0"
+          LINUX_KEY="linux-sysroot-${{ hashFiles('.github/workflows/install_debian_packages.sh', '.github/workflows/populate_linux_sysroot.sh', '.github/workflows/release-build.yml') }}-v1.0.0"
           echo "linux-key=$LINUX_KEY" >> $GITHUB_OUTPUT
   populate-linux-sysroot:
     runs-on: ubuntu-latest
