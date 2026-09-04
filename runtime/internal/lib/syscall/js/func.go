@@ -153,6 +153,7 @@ func dispatchCallback(handle uintptr) {
 }
 
 func pollCallbacks() {
+	pollEmvalReleases()
 	// The host sets a byte in wasm memory when it enqueues the first event, so
 	// an idle scheduler does not cross the wasm/JavaScript boundary merely to
 	// inspect an empty JavaScript array.
