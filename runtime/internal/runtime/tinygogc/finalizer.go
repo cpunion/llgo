@@ -189,6 +189,10 @@ func finalizerObjectState(record *finalizerRecord) uint8 {
 	return gcStateOf(finalizerObjectBlock(record))
 }
 
+// These lookups intentionally scan the callback list while the allocator is
+// stopped. Building an index here would itself allocate; registered lifecycle
+// callbacks are expected to remain a small set, so preserveFinalizableObjects
+// accepts O(finalizers^2 + finalizers*heapBlocks) work instead.
 func candidateForObject(key uintptr) *finalizerRecord {
 	for record := finalizers; record != nil; record = record.next {
 		if record.candidate && record.objectKey == key {
