@@ -34,7 +34,11 @@ func gcGrowMemory(oldHeapEnd uintptr) uintptr {
 	if current > ^uintptr(0)-growth {
 		return oldHeapEnd
 	}
-	required := alignUp(current+growth, wasmPageSize)
+	required := current + growth
+	if required > ^uintptr(0)-(wasmPageSize-1) {
+		return oldHeapEnd
+	}
+	required = alignUp(required, wasmPageSize)
 	if gcWasmGrowMemory(required) == 0 {
 		return oldHeapEnd
 	}
