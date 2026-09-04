@@ -18,6 +18,7 @@ package build
 
 import (
 	"bytes"
+	stdcontext "context"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/xgo-dev/llgo/internal/shellparse"
 )
@@ -53,6 +55,7 @@ const (
 	runnerStatusUnavailable    = "unavailable"
 	runnerStatusExit           = "exit"
 	runnerStatusStart          = "start-error"
+	runnerStatusTimeout        = "timeout"
 )
 
 // runnerDetails identifies the command boundary that owns a host process.
@@ -65,6 +68,7 @@ type runnerDetails struct {
 	profile     string
 	artifact    string
 	packageName string
+	timeout     time.Duration
 }
 
 // runnerFailure preserves the host-runner outcome while adding enough build
@@ -101,6 +105,9 @@ func (e *runnerFailure) Error() string {
 	}
 	if e.status != "" {
 		fmt.Fprintf(&message, " status=%s", e.status)
+	}
+	if e.status == runnerStatusTimeout && e.timeout > 0 {
+		fmt.Fprintf(&message, " timeout=%s", e.timeout)
 	}
 	if e.exitCode >= 0 {
 		fmt.Fprintf(&message, " exit_code=%d", e.exitCode)
@@ -315,6 +322,7 @@ func runInEmulator(commands commandEnv, emulator, profile string, envMap map[str
 		profile:     profile,
 		artifact:    envMap["out"],
 		packageName: pkgName,
+		timeout:     conf.RunnerTimeout,
 	}
 
 	if emulator == "" {
@@ -372,8 +380,16 @@ func runEmuCmd(commands commandEnv, envMap map[string]string, emulatorTemplate s
 		fmt.Fprintf(os.Stderr, "%s %s\n", cmdParts[0], strings.Join(cmdParts[1:], " "))
 	}
 
-	// Execute the emulator command
-	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+	// Execute the emulator command. The test binary owns its Go-level timeout;
+	// this outer deadline also covers a host runner that stops forwarding exit
+	// or otherwise hangs after the guest should have terminated.
+	var runContext stdcontext.Context = stdcontext.Background()
+	cancel := func() {}
+	if details.timeout > 0 {
+		runContext, cancel = stdcontext.WithTimeout(runContext, details.timeout)
+	}
+	defer cancel()
+	cmd := exec.CommandContext(runContext, cmdParts[0], cmdParts[1:]...)
 	commands.configure(cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -384,6 +400,9 @@ func runEmuCmd(commands commandEnv, envMap map[string]string, emulatorTemplate s
 		exitCode := -1
 		var exitErr *exec.ExitError
 		switch {
+		case errors.Is(runContext.Err(), stdcontext.DeadlineExceeded):
+			status = runnerStatusTimeout
+			err = fmt.Errorf("runner exceeded %s: %w", details.timeout, stdcontext.DeadlineExceeded)
 		case errors.As(err, &exitErr):
 			status = runnerStatusExit
 			exitCode = exitErr.ExitCode()
