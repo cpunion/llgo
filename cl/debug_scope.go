@@ -11,7 +11,7 @@ func debugFunctionScope(fn *ssa.Function) *types.Scope {
 	if fn == nil {
 		return nil
 	}
-	if object, ok := fn.Object().(*types.Func); ok && object.Scope() != nil {
+	if object, ok := fn.Object().(*types.Func); ok && object != nil && object.Scope() != nil {
 		return object.Scope()
 	}
 	for _, param := range fn.Params {

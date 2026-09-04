@@ -302,7 +302,7 @@ func TestWebAssemblyProfileTargets(t *testing.T) {
 		{"wasm", "wasm32-unknown-emscripten", "js", "wasm", "emscripten", []string{"llgo.wasm.emscripten", "tinygo.wasm"}},
 		{"wasi", "wasm32-unknown-wasip1", "wasip1", "wasm", "wasi-preview1", []string{"llgo.wasm.wasi"}},
 		{"wasip1", "wasm32-unknown-wasip1", "wasip1", "wasm", "wasi-preview1", []string{"llgo.wasm.wasi", "tinygo.wasm"}},
-		{"wasm-unknown", "wasm32-unknown-unknown", "linux", "arm", "freestanding", []string{"llgo.wasm.freestanding", "tinygo.wasm", "wasm_unknown"}},
+		{"wasm-unknown", "wasm32-unknown-unknown", "linux", "arm", "freestanding", []string{"baremetal", "llgo.wasm.freestanding", "tinygo.wasm", "wasm_unknown"}},
 		{"wasip2", "wasm32-unknown-wasi", "linux", "arm", "wasi-preview2", []string{"llgo.wasm.wasi", "tinygo.wasm", "wasip2"}},
 	}
 	for _, test := range tests {

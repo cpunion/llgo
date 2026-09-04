@@ -1005,6 +1005,20 @@ func TestNativeWindowsExportFlags(t *testing.T) {
 	}
 }
 
+func TestDirectWasmLinkerFlags(t *testing.T) {
+	flags := []string{"-S", "--icf=none", "-nostdlib", "-L/tmp/lib", "--no-entry"}
+	want := []string{"-S", "-L/tmp/lib", "--no-entry"}
+	if got := directTargetLinkerFlags("/opt/llvm/bin/wasm-ld", flags); !slices.Equal(got, want) {
+		t.Fatalf("directTargetLinkerFlags() = %v, want %v", got, want)
+	}
+	if got := directTargetLinkerFlags("wasm-ld.exe", flags); !slices.Equal(got, want) {
+		t.Fatalf("directTargetLinkerFlags(.exe) = %v, want %v", got, want)
+	}
+	if got := directTargetLinkerFlags("clang", flags); !slices.Equal(got, flags) {
+		t.Fatalf("clang flags = %v, want unchanged %v", got, flags)
+	}
+}
+
 func TestUsesNativePlatformToolchain(t *testing.T) {
 	for _, test := range []struct {
 		name                                   string

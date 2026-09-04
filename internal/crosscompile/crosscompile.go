@@ -1070,9 +1070,23 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	export.CFLAGS = cflags
 	export.CCFLAGS = ccflags
 	expandedLDFlags := env.ExpandEnvSlice(config.LDFlags, envs)
-	export.LDFLAGS = append(ldflags, expandedLDFlags...)
+	export.LDFLAGS = directTargetLinkerFlags(export.Linker, append(ldflags, expandedLDFlags...))
 
 	return export, nil
+}
+
+// directTargetLinkerFlags removes compiler-driver options from direct wasm-ld
+// invocations. wasm-ld neither searches a compiler driver's default libraries
+// nor implements identical-code folding, so these options have no equivalent
+// there and are rejected instead of being harmless.
+func directTargetLinkerFlags(linker string, flags []string) []string {
+	name := strings.TrimSuffix(filepath.Base(linker), ".exe")
+	if name != "wasm-ld" {
+		return flags
+	}
+	return slices.DeleteFunc(slices.Clone(flags), func(flag string) bool {
+		return flag == "-nostdlib" || flag == "--icf=none"
+	})
 }
 
 func useSystemClangForTarget(hostGOOS, targetTriple string, buildTags []string) bool {

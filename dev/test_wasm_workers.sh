@@ -11,6 +11,7 @@ wasm_opt_cmd="${WASMOPT:-wasm-opt}"
 worker_fixture="${repo_root}/internal/build/testdata/wasm-workers"
 hardening_fixture="${repo_root}/internal/build/testdata/wasm-hardening"
 test_fixture="${repo_root}/internal/build/testdata/wasm-test"
+freestanding_fixture="${repo_root}/internal/build/testdata/wasm-freestanding"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/llgo-wasm-workers.XXXXXX")"
 browser_server=
 
@@ -79,6 +80,17 @@ run_worker_llgo_test() {
 		-target "${target}" -emulator -v -count=1 -timeout=30s \
 		"${test_fixture}" 2>&1 | tee "${output}"
 	grep -Fq "PASS" "${output}"
+}
+
+run_freestanding() {
+	local module="${work_dir}/freestanding.wasm"
+
+	"${llgo_cmd}" build -target wasm-unknown -o "${module}" "${freestanding_fixture}"
+	"${wasm_tools_cmd}" validate --features all "${module}"
+	# An explicit invocation proves the module contains linked LLGo startup and
+	# main code; checking only the wasm magic also accepts a fully dead-stripped
+	# module with no executable Go code.
+	run_with_timeout "${wasmtime_cmd}" run --invoke _start "${module}"
 }
 
 find_browser() {
@@ -163,6 +175,10 @@ run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs \
 # Verify that the public test command selects and executes the worker runtime.
 run_worker_llgo_test emscripten test-workers-emscripten
 run_worker_llgo_test emscripten-memory64 test-workers-memory64
+
+# Keep the no-host compatibility profile linkable after the worker runtime has
+# hardened shared defer and target-linker paths.
+run_freestanding
 
 run_browser_acceptance "$(find_browser)"
 
