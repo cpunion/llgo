@@ -339,9 +339,11 @@ func Alloc(size uintptr) unsafe.Pointer {
 			for i := thisAlloc + 1; i != nextAlloc; i++ {
 				gcSetState(i, blockStateTail)
 			}
+			ret := c.Memset(gcPointerOf(thisAlloc), 0, size)
 			unlock(&gcMutex)
+			scheduleFinalizers()
 			// Return a pointer to this allocation.
-			return c.Memset(gcPointerOf(thisAlloc), 0, size)
+			return ret
 		}
 	}
 }
@@ -413,6 +415,7 @@ func GC() uintptr {
 	lock(&gcMutex)
 	freeBytes := gc()
 	unlock(&gcMutex)
+	scheduleFinalizers()
 	return freeBytes
 }
 
@@ -430,6 +433,7 @@ func gc() (freeBytes uintptr) {
 	gcMarkReachable()
 
 	finishMark()
+	preserveFinalizableObjects()
 
 	// If we're using threads, resume all other threads before starting the
 	// sweep.
