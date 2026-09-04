@@ -12,3 +12,7 @@ int llgo_test_scheduler_deadlock(void) {
 int llgo_test_scheduler_main_goexit(void) {
 	return getenv("LLGO_WASM_SCHEDULER_MAIN_GOEXIT") != NULL;
 }
+
+int llgo_test_scheduler_hang(void) {
+	return getenv("LLGO_WASM_SCHEDULER_HANG") != NULL;
+}
