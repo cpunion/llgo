@@ -3,6 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${repo_root}/dev/wasm_ci_report.sh"
 llgo_cmd="${LLGO:-llgo}"
 node_cmd="${NODE:-node}"
 wasmtime_cmd="${WASMTIME:-wasmtime}"
@@ -14,7 +15,18 @@ lifecycle_fixture="${repo_root}/internal/build/testdata/wasm-lifecycle"
 test_fixture="${repo_root}/internal/build/testdata/wasm-test"
 secondary_test_fixture="${repo_root}/internal/build/testdata/wasm-test-secondary"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/llgo-wasm-single-worker.XXXXXX")"
-trap 'rm -rf "${work_dir}"' EXIT
+report_file="${work_dir}/coverage.tsv"
+wasm_ci_report_init "${report_file}"
+
+finish() {
+	local status=$?
+	trap - EXIT
+	set +e
+	wasm_ci_publish_report "${report_file}" "${status}"
+	rm -rf "${work_dir}"
+	exit "${status}"
+}
+trap finish EXIT
 export LLGO_WASM_TEST_ENV=wasm-env-ok
 
 run_with_timeout() {
@@ -217,67 +229,97 @@ run_llgo_test_compile_only() {
 
 # Canonical C-ecosystem profiles exercise the same scheduler semantics under
 # Emscripten wasm32, Emscripten Memory64/LP64, and WASI Preview 1.
-run_emscripten emscripten emscripten-runner.mjs "${scheduler_fixture}" "wasm scheduler ok" "scheduler-emscripten"
-run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${scheduler_fixture}" "wasm scheduler ok" "scheduler-memory64"
-run_wasi wasi "${scheduler_fixture}" "wasm scheduler ok" "scheduler-wasi"
+wasm_ci_run_case EC32/emscripten scheduler 1 0 0 0 0 \
+	run_emscripten emscripten emscripten-runner.mjs "${scheduler_fixture}" "wasm scheduler ok" "scheduler-emscripten"
+wasm_ci_run_case EC64/emscripten-memory64 scheduler 1 0 0 0 0 \
+	run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${scheduler_fixture}" "wasm scheduler ok" "scheduler-memory64"
+wasm_ci_run_case WC32/wasi scheduler 1 0 0 0 0 \
+	run_wasi wasi "${scheduler_fixture}" "wasm scheduler ok" "scheduler-wasi"
 
-expect_failure "fatal error: all goroutines are asleep - deadlock!" \
+wasm_ci_run_case EC32/emscripten scheduler-deadlock 1 1 0 0 0 \
+	expect_failure "fatal error: all goroutines are asleep - deadlock!" \
 	env LLGO_WASM_SCHEDULER_DEADLOCK=1 "${node_cmd}" "${repo_root}/targets/emscripten-runner.mjs" "${work_dir}/scheduler-emscripten.mjs"
-expect_failure "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" \
+wasm_ci_run_case EC32/emscripten scheduler-main-goexit 1 1 0 0 0 \
+	expect_failure "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" \
 	env LLGO_WASM_SCHEDULER_MAIN_GOEXIT=1 "${node_cmd}" "${repo_root}/targets/emscripten-runner.mjs" "${work_dir}/scheduler-emscripten.mjs"
-expect_failure "fatal error: all goroutines are asleep - deadlock!" \
+wasm_ci_run_case EC64/emscripten-memory64 scheduler-deadlock 1 1 0 0 0 \
+	expect_failure "fatal error: all goroutines are asleep - deadlock!" \
 	env LLGO_WASM_SCHEDULER_DEADLOCK=1 "${node_cmd}" "${repo_root}/targets/emscripten-memory64-runner.mjs" "${work_dir}/scheduler-memory64.mjs"
-expect_failure "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" \
+wasm_ci_run_case EC64/emscripten-memory64 scheduler-main-goexit 1 1 0 0 0 \
+	expect_failure "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" \
 	env LLGO_WASM_SCHEDULER_MAIN_GOEXIT=1 "${node_cmd}" "${repo_root}/targets/emscripten-memory64-runner.mjs" "${work_dir}/scheduler-memory64.mjs"
-expect_failure "fatal error: all goroutines are asleep - deadlock!" \
+wasm_ci_run_case WC32/wasi scheduler-deadlock 1 1 0 0 0 \
+	expect_failure "fatal error: all goroutines are asleep - deadlock!" \
 	"${wasmtime_cmd}" run -W exceptions=y --env LLGO_WASM_SCHEDULER_DEADLOCK=1 "${work_dir}/scheduler-wasi.wasm"
-expect_failure "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" \
+wasm_ci_run_case WC32/wasi scheduler-main-goexit 1 1 0 0 0 \
+	expect_failure "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" \
 	"${wasmtime_cmd}" run -W exceptions=y --env LLGO_WASM_SCHEDULER_MAIN_GOEXIT=1 "${work_dir}/scheduler-wasi.wasm"
 
 # Exercise the CLI-level failure boundary in CI, not only the runners in
 # isolation. The other public run calls below cover successful EC32, EC64,
 # WC32, and alias execution through the same path.
-expect_llgo_runner_failure emscripten emscripten node "${scheduler_fixture}"
-expect_llgo_runner_timeout emscripten emscripten node "${scheduler_fixture}"
+wasm_ci_run_case EC32/emscripten public-runner-exit 1 1 0 0 0 \
+	expect_llgo_runner_failure emscripten emscripten node "${scheduler_fixture}"
+wasm_ci_run_case EC32/emscripten public-runner-timeout 1 0 1 0 0 \
+	expect_llgo_runner_timeout emscripten emscripten node "${scheduler_fixture}"
 
 # Timers share the Go-derived heap but use different host-wait backends.
-run_emscripten emscripten emscripten-runner.mjs "${timer_fixture}" "wasm timers ok" "timers-emscripten"
-run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${timer_fixture}" "wasm timers ok" "timers-memory64"
-run_wasi wasi "${timer_fixture}" "wasm timers ok" "timers-wasi"
+wasm_ci_run_case EC32/emscripten timers 1 0 0 0 0 \
+	run_emscripten emscripten emscripten-runner.mjs "${timer_fixture}" "wasm timers ok" "timers-emscripten"
+wasm_ci_run_case EC64/emscripten-memory64 timers 1 0 0 0 0 \
+	run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${timer_fixture}" "wasm timers ok" "timers-memory64"
+wasm_ci_run_case WC32/wasi timers 1 0 0 0 0 \
+	run_wasi wasi "${timer_fixture}" "wasm timers ok" "timers-wasi"
 
 # R2 enables the non-moving collector by default for each canonical
 # single-worker C profile. This fixture covers active and suspended G roots,
 # closures/interfaces/aggregates, panic/recover unwinding, pure-Go loop
 # safepoints, reclamation, aligned allocation, and memory growth.
-run_emscripten emscripten emscripten-runner.mjs "${gc_fixture}" "wasm gc ok" "gc-emscripten"
-run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${gc_fixture}" "wasm gc ok" "gc-memory64"
-run_wasi wasi "${gc_fixture}" "wasm gc ok" "gc-wasi"
+wasm_ci_run_case EC32/emscripten gc 1 0 0 0 0 \
+	run_emscripten emscripten emscripten-runner.mjs "${gc_fixture}" "wasm gc ok" "gc-emscripten"
+wasm_ci_run_case EC64/emscripten-memory64 gc 1 0 0 0 0 \
+	run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${gc_fixture}" "wasm gc ok" "gc-memory64"
+wasm_ci_run_case WC32/wasi gc 1 0 0 0 0 \
+	run_wasi wasi "${gc_fixture}" "wasm gc ok" "gc-wasi"
 
 # Finalizers, cleanups, and weak references share the collector lifecycle but
 # have additional ordering, cancellation, and dynamic-call ABI requirements.
-run_llgo_run emscripten "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-emscripten"
-run_llgo_run emscripten-memory64 "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-memory64"
-run_llgo_run wasi "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-wasi"
+wasm_ci_run_case EC32/emscripten lifecycle 1 0 0 0 0 \
+	run_llgo_run emscripten "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-emscripten"
+wasm_ci_run_case EC64/emscripten-memory64 lifecycle 1 0 0 0 0 \
+	run_llgo_run emscripten-memory64 "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-memory64"
+wasm_ci_run_case WC32/wasi lifecycle 1 0 0 0 0 \
+	run_llgo_run wasi "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-wasi"
 
 # A registered JS callback is a host wake source even when no Go timer exists.
 # This catches treating an empty timer heap as an immediate deadlock.
-run_emscripten emscripten emscripten-runner.mjs "${callback_fixture}" "wasm callback-only wake ok" "callback-emscripten"
-run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${callback_fixture}" "wasm callback-only wake ok" "callback-memory64"
+wasm_ci_run_case EC32/emscripten callback 1 0 0 0 0 \
+	run_emscripten emscripten emscripten-runner.mjs "${callback_fixture}" "wasm callback-only wake ok" "callback-emscripten"
+wasm_ci_run_case EC64/emscripten-memory64 callback 1 0 0 0 0 \
+	run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${callback_fixture}" "wasm callback-only wake ok" "callback-memory64"
 
 # Keep the legacy named aliases executable while raw js/wasm remains the
 # browser/worker-only compatibility path defined by R0.
-run_llgo_run wasm "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasm"
-run_llgo_run wasip1 "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasip1"
+wasm_ci_run_case L32/wasm-alias scheduler 1 0 0 0 0 \
+	run_llgo_run wasm "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasm"
+wasm_ci_run_case LW32/wasip1-alias scheduler 1 0 0 0 0 \
+	run_llgo_run wasip1 "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasip1"
 
 # Exercise test-main generation, process exit, verbose output, and host runners
 # through the public test command. The JS-specific callback case also verifies
 # that host readiness interrupts a longer Go timer wait without re-entering an
 # arbitrary parked G.
-run_llgo_test emscripten "test-emscripten"
-run_llgo_test emscripten-memory64 "test-memory64"
-run_llgo_test wasi "test-wasi"
-run_llgo_test_compile_only emscripten "test-compile-only-emscripten"
-run_llgo_test_compile_only emscripten-memory64 "test-compile-only-memory64"
-run_llgo_test_compile_only wasi "test-compile-only-wasi"
+wasm_ci_run_case EC32/emscripten public-test 2 0 0 0 0 \
+	run_llgo_test emscripten "test-emscripten"
+wasm_ci_run_case EC64/emscripten-memory64 public-test 2 0 0 0 0 \
+	run_llgo_test emscripten-memory64 "test-memory64"
+wasm_ci_run_case WC32/wasi public-test 2 0 0 0 0 \
+	run_llgo_test wasi "test-wasi"
+wasm_ci_run_case EC32/emscripten compile-only 0 0 0 0 0 \
+	run_llgo_test_compile_only emscripten "test-compile-only-emscripten"
+wasm_ci_run_case EC64/emscripten-memory64 compile-only 0 0 0 0 0 \
+	run_llgo_test_compile_only emscripten-memory64 "test-compile-only-memory64"
+wasm_ci_run_case WC32/wasi compile-only 0 0 0 0 0 \
+	run_llgo_test_compile_only wasi "test-compile-only-wasi"
 
 echo "single-worker WebAssembly scheduler and timer checks passed"
