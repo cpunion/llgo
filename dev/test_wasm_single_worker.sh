@@ -10,6 +10,7 @@ scheduler_fixture="${repo_root}/internal/build/testdata/wasm-scheduler"
 timer_fixture="${repo_root}/internal/build/testdata/wasm-timers"
 callback_fixture="${repo_root}/internal/build/testdata/wasm-callback"
 gc_fixture="${repo_root}/internal/build/testdata/wasm-gc"
+lifecycle_fixture="${repo_root}/internal/build/testdata/wasm-lifecycle"
 test_fixture="${repo_root}/internal/build/testdata/wasm-test"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/llgo-wasm-single-worker.XXXXXX")"
 trap 'rm -rf "${work_dir}"' EXIT
@@ -119,6 +120,12 @@ run_wasi wasi "${timer_fixture}" "wasm timers ok" "timers-wasi"
 run_emscripten emscripten emscripten-runner.mjs "${gc_fixture}" "wasm gc ok" "gc-emscripten"
 run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${gc_fixture}" "wasm gc ok" "gc-memory64"
 run_wasi wasi "${gc_fixture}" "wasm gc ok" "gc-wasi"
+
+# Finalizers, cleanups, and weak references share the collector lifecycle but
+# have additional ordering, cancellation, and dynamic-call ABI requirements.
+run_emscripten emscripten emscripten-runner.mjs "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-emscripten"
+run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-memory64"
+run_wasi wasi "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-wasi"
 
 # A registered JS callback is a host wake source even when no Go timer exists.
 # This catches treating an empty timer heap as an immediate deadlock.
