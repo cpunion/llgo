@@ -62,6 +62,11 @@ func checkCurrentG() {
 
 func main() {
 	checkWasmModel()
+	if schedulerHangMode() != 0 {
+		for {
+			runtime.Gosched()
+		}
+	}
 	if schedulerMainGoexitMode() != 0 {
 		testMainGoexit()
 		return
