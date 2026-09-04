@@ -20,6 +20,7 @@ package build
 
 import (
 	"bytes"
+	stdcontext "context"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRunInEmulatorValidation(t *testing.T) {
@@ -123,6 +125,48 @@ func TestRunInEmulatorUnavailableRunner(t *testing.T) {
 	}
 }
 
+func TestRunInEmulatorTimeout(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := commandEnv{dir: t.TempDir(), environ: os.Environ()}
+	artifact := filepath.Join(t.TempDir(), "program.mjs")
+	template := fmt.Sprintf("%q -test.run=^TestRunNativeTestHelper$ -- hang %q", executable, "{}")
+	conf := &Config{Target: "emscripten", RunnerTimeout: 50 * time.Millisecond}
+
+	started := time.Now()
+	err = runInEmulator(commands, template, "emscripten", map[string]string{"": artifact, "out": artifact}, "", "example/main", conf, ModeRun, false)
+	if err == nil {
+		t.Fatal("hanging runner unexpectedly succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("hanging runner took %s to stop", elapsed)
+	}
+
+	var runnerErr *runnerFailure
+	if !errors.As(err, &runnerErr) {
+		t.Fatalf("error type = %T, want *runnerFailure: %v", err, err)
+	}
+	if runnerErr.status != runnerStatusTimeout || runnerErr.exitCode != -1 || runnerErr.timeout != 50*time.Millisecond {
+		t.Fatalf("runner failure = %+v", runnerErr)
+	}
+	if !errors.Is(err, stdcontext.DeadlineExceeded) {
+		t.Fatalf("runner error does not wrap context deadline: %v", err)
+	}
+	for _, want := range []string{
+		"phase=run",
+		"target=emscripten",
+		"profile=emscripten",
+		"status=timeout",
+		"timeout=50ms",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("runner error %q does not contain %q", err, want)
+		}
+	}
+}
+
 func testPrograms(names ...string) []testProgram {
 	programs := make([]testProgram, len(names))
 	for i, name := range names {
@@ -197,6 +241,8 @@ func TestRunNativeTestHelper(t *testing.T) {
 			fmt.Fprint(os.Stderr, "stderr")
 		case "exit":
 			os.Exit(3)
+		case "hang":
+			time.Sleep(time.Hour)
 		}
 		return
 	}
