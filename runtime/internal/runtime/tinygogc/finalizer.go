@@ -36,9 +36,10 @@ type finalizerRecord struct {
 }
 
 var (
-	finalizers             *finalizerRecord
-	readyFinalizers        *finalizerRecord
-	finalizerWorkerRunning bool
+	finalizers              *finalizerRecord
+	readyFinalizers         *finalizerRecord
+	finalizerWorkerRunning  bool
+	finalizerDependencyScan bool
 )
 
 // AddFinalizer registers callback for ptr without retaining the object. The
@@ -119,32 +120,29 @@ func unlinkFinalizer(record *finalizerRecord) {
 // ready queue and marks those objects for one more cycle, so a finalizer may
 // safely inspect or resurrect its argument.
 //
-// A finalizer on A must run before a finalizer on B when A can reach B. Work
-// out that relation before queueing either object: temporarily mark from each
-// candidate, remember the other candidates it reaches, then restore the
-// ordinary root marks. Finalizers are rare, so the extra mark passes favor a
-// simple allocation-free implementation over collector-side graph storage.
+// A finalizer on A must run before a finalizer on B when A can reach B. Extend
+// the ordinary mark graph from every finalizable object once, recording each
+// candidate reached through an object edge as blocked. Accumulating those
+// marks discovers transitive dependencies and cycles without re-marking the
+// complete live heap once per finalizer.
 func preserveFinalizableObjects() {
 	for record := finalizers; record != nil; record = record.next {
 		record.candidate = record.state == finalizerActive && finalizerObjectState(record) == blockStateHead
 		record.blocked = false
 	}
 
+	finalizerDependencyScan = true
 	for record := finalizers; record != nil; record = record.next {
 		if !record.candidate || record.kind != objectFinalizer || earlierFinalizerForObject(record) {
 			continue
 		}
-		startMark(finalizerObjectBlock(record))
-		finishMark()
-		for reached := finalizers; reached != nil; reached = reached.next {
-			if reached.candidate && reached.objectKey != record.objectKey && finalizerObjectState(reached) == blockStateMark {
-				markFinalizerObjectBlocked(reached.objectKey)
-			}
+		block := finalizerObjectBlock(record)
+		if gcStateOf(block) == blockStateHead {
+			startMark(block)
 		}
-		clearAllMarks()
-		gcMarkReachable()
-		finishMark()
 	}
+	finishMark()
+	finalizerDependencyScan = false
 
 	for block := uintptr(0); block < endBlock; block++ {
 		state := gcStateOf(block)
@@ -165,7 +163,9 @@ func preserveFinalizableObjects() {
 				continue
 			}
 		}
-		startMark(block)
+		if state == blockStateHead {
+			startMark(block)
+		}
 	}
 
 	// A cycle of finalizable objects has no valid dependency order. Preserve it
@@ -181,6 +181,20 @@ func preserveFinalizableObjects() {
 	finishMark()
 }
 
+// noteFinalizerReference is called for heap edges encountered by the marker.
+// During dependency discovery, reaching any candidate (including through a
+// cycle back to the starting object) means that candidate cannot be finalized
+// in this collection.
+func noteFinalizerReference(block uintptr) {
+	if !finalizerDependencyScan {
+		return
+	}
+	key := encodeFinalizerAddress(gcAddressOf(block))
+	if candidateForObject(key) != nil {
+		markFinalizerObjectBlocked(key)
+	}
+}
+
 func finalizerObjectBlock(record *finalizerRecord) uintptr {
 	return blockFromAddr(^record.objectKey)
 }
@@ -191,8 +205,7 @@ func finalizerObjectState(record *finalizerRecord) uint8 {
 
 // These lookups intentionally scan the callback list while the allocator is
 // stopped. Building an index here would itself allocate; registered lifecycle
-// callbacks are expected to remain a small set, so preserveFinalizableObjects
-// accepts O(finalizers^2 + finalizers*heapBlocks) work instead.
+// callbacks are expected to remain a small set.
 func candidateForObject(key uintptr) *finalizerRecord {
 	for record := finalizers; record != nil; record = record.next {
 		if record.candidate && record.objectKey == key {
@@ -233,14 +246,6 @@ func markFinalizerObjectBlocked(key uintptr) {
 	for record := finalizers; record != nil; record = record.next {
 		if record.objectKey == key {
 			record.blocked = true
-		}
-	}
-}
-
-func clearAllMarks() {
-	for block := uintptr(0); block < endBlock; block++ {
-		if gcStateOf(block) == blockStateMark {
-			gcUnmark(block)
 		}
 	}
 }
