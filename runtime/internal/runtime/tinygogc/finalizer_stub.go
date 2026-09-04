@@ -5,3 +5,5 @@ package tinygogc
 func preserveFinalizableObjects() {}
 
 func scheduleFinalizers() {}
+
+func noteFinalizerReference(uintptr) {}

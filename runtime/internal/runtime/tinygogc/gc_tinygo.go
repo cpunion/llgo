@@ -497,6 +497,7 @@ func startMark(root uintptr) {
 
 			// Move to the block's head.
 			referencedBlock = gcFindHead(referencedBlock)
+			noteFinalizerReference(referencedBlock)
 
 			if gcStateOf(referencedBlock) == blockStateMark {
 				// The block has already been marked by something else.
