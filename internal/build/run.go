@@ -26,7 +26,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/xgo-dev/llgo/internal/mockable"
 	"github.com/xgo-dev/llgo/internal/shellparse"
 )
 
@@ -324,9 +323,8 @@ func runNative(ctx *context, app, pkgDir, pkgName string, conf *Config, mode Mod
 		if err != nil {
 			return err
 		}
-		if s := cmd.ProcessState; s != nil {
-			mockable.Exit(s.ExitCode())
-		}
+		// A nil Run error already means exit status zero. Return through Build so
+		// caller-owned artifact cleanup and tracing defers can complete.
 	case ModeCmpTest:
 		cmpTest(ctx.commands, pkgDir, pkgName, app, conf.GenExpect, conf.RunArgs)
 	}
@@ -425,7 +423,6 @@ func runEmuCmdTo(commands commandEnv, envMap map[string]string, emulatorTemplate
 		}
 		return newRunnerFailure(details, cmdParts[0], status, exitCode, err)
 	}
-	// A nil Run error is already exit status zero. Returning normally keeps the
-	// caller's cleanup and trace defers reachable.
+	// Returning normally keeps cleanup of implicit modules and target sidecars reachable.
 	return nil
 }
