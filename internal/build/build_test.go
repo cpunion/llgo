@@ -1050,6 +1050,24 @@ func TestBaremetalRuntimeAvoidsLocalityDirectives(t *testing.T) {
 	}
 }
 
+func TestBaremetalRuntimeKeepsSchedulerFreeLifecycleStubs(t *testing.T) {
+	runtimeDir := filepath.Join(env.LLGoRuntimeDir(), "internal", "runtime")
+	ctx := gobuild.Default
+	ctx.GOOS = "linux"
+	ctx.GOARCH = "arm"
+	ctx.BuildTags = []string{"llgo", "baremetal"}
+	pkg, err := ctx.ImportDir(runtimeDir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(pkg.GoFiles, "cleanup_baremetal.go") {
+		t.Fatalf("bare-metal runtime did not select lifecycle stubs; GoFiles=%v", pkg.GoFiles)
+	}
+	if slices.Contains(pkg.GoFiles, "cleanup_wasm.go") {
+		t.Fatalf("bare-metal runtime selected WebAssembly lifecycle implementation; GoFiles=%v", pkg.GoFiles)
+	}
+}
+
 func TestNeedsLinuxExportDynamic(t *testing.T) {
 	t.Setenv(llgoFuncInfo, "")
 	ctx := &context{buildConf: &Config{Goos: "linux"}}
