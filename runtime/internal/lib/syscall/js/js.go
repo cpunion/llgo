@@ -32,6 +32,7 @@ type Value struct {
 }
 
 func floatValue(f float64) Value {
+	ensureEmvalGlobals()
 	if f == 0 {
 		return valueZero
 	}
@@ -42,6 +43,7 @@ func floatValue(f float64) Value {
 }
 
 func intValue(i int) Value {
+	ensureEmvalGlobals()
 	if i == 0 {
 		return valueZero
 	}
@@ -77,6 +79,7 @@ var (
 
 // Equal reports whether v and w are equal according to JavaScript's === operator.
 func (v Value) Equal(w Value) bool {
+	ensureEmvalGlobals()
 	return emval_equals(v, w) && v.ref != valueNaN.ref
 }
 
@@ -102,11 +105,13 @@ func (v Value) IsNull() bool {
 
 // IsNaN reports whether v is the JavaScript value "NaN".
 func (v Value) IsNaN() bool {
+	ensureEmvalGlobals()
 	return v.ref == valueNaN.ref
 }
 
 // Global returns the JavaScript global object, usually "window" or "global".
 func Global() Value {
+	ensureEmvalGlobals()
 	return valueGlobal
 }
 
@@ -125,6 +130,7 @@ func Global() Value {
 //
 // Panics if x is not one of the expected types.
 func ValueOf(x any) Value {
+	ensureEmvalGlobals()
 	switch x := x.(type) {
 	case Value:
 		return x
@@ -538,6 +544,7 @@ func (v Value) New(args ...any) (res Value) {
 // func valueNew(v ref, args []ref) (ref, bool)
 
 func (v Value) isNumber() bool {
+	ensureEmvalGlobals()
 	return v.ref == valueZero.ref ||
 		v.ref == valueNaN.ref ||
 		(v.ref != valueUndefined.ref && emval_is_number(v))
@@ -583,6 +590,7 @@ func (v Value) Bool() bool {
 // false, 0, "", null, undefined, and NaN are "falsy", and everything else is
 // "truthy". See https://developer.mozilla.org/en-US/docs/Glossary/Truthy.
 func (v Value) Truthy() bool {
+	ensureEmvalGlobals()
 	switch v.Type() {
 	case TypeUndefined, TypeNull:
 		return false
@@ -676,6 +684,7 @@ func (e *ValueError) Error() string {
 // It panics if src is not a Uint8Array or Uint8ClampedArray.
 // It returns the number of bytes copied, which will be the minimum of the lengths of src and dst.
 func CopyBytesToGo(dst []byte, src Value) int {
+	ensureEmvalGlobals()
 	if !(emval_instanceof(src, uint8Array) || emval_instanceof(src, uint8ClampedArray)) {
 		return 0
 	}
@@ -721,6 +730,7 @@ func CopyBytesToGo(dst []byte, src Value) int {
 // It panics if dst is not a Uint8Array or Uint8ClampedArray.
 // It returns the number of bytes copied, which will be the minimum of the lengths of src and dst.
 func CopyBytesToJS(dst Value, src []byte) int {
+	ensureEmvalGlobals()
 	if !(emval_instanceof(dst, uint8Array) || emval_instanceof(dst, uint8ClampedArray)) {
 		return 0
 	}
@@ -752,11 +762,6 @@ func CopyBytesToJS(dst Value, src []byte) int {
 		this.mem.setUint8(sp + 48, 1);
 	},
 */
-
-var (
-	uint8Array        = emval_get_global(c.Str("Uint8Array"))
-	uint8ClampedArray = emval_get_global(c.Str("Uint8ClampedArray"))
-)
 
 // copyBytesToJS copies bytes from src to dst.
 //

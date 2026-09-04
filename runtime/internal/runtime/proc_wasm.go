@@ -284,6 +284,12 @@ func SchedulerStateForTesting() (runq uintptr, mid int64, pid int32) {
 	return wasmSched.runq.Len(), wasmSched.m.id, wasmSched.p.id
 }
 
+// SchedulerProcID reports the sole physical scheduler worker for the
+// single-worker Emscripten profile.
+func SchedulerProcID() int {
+	return 0
+}
+
 func GMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, pstatus uint32, linked bool) {
 	gp := getg()
 	if gp == nil || gp.m == nil || gp.m.p == nil {

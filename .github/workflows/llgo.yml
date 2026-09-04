@@ -721,3 +721,10 @@ jobs:
           LLGO: ${{ runner.temp }}/llgo-bin/llgo
           LLGO_BUILD_CACHE: "off"
         run: dev/test_wasm_single_worker.sh
+
+      - name: Test multi-worker wasm runtime
+        shell: bash
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_BUILD_CACHE: "off"
+        run: dev/test_wasm_workers.sh

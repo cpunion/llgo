@@ -14,6 +14,9 @@ func gmpForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, ps
 //llgo:gls
 var workerLocalState *int
 
+//llgo:gls
+var workerInitializedState = new(int)
+
 type workerIdentity struct {
 	mid    int64
 	pid    int32
@@ -26,6 +29,7 @@ func main() {
 	testBoundedWorkerLifecycle()
 	testCrossWorkerChannelHandoffs()
 	testCrossWorkerSynchronization()
+	testMixedSynchronizationWaiters()
 	testInterleavedWorkerLocality()
 	testCrossWorkerTimerWake()
 	testRemoteWorkerGC()
@@ -176,8 +180,67 @@ func testCrossWorkerSynchronization() {
 	}
 }
 
+func testMixedSynchronizationWaiters() {
+	// Mutexes/semaphores and Cond/notifyList use different queue maps but share
+	// the runtime waiter cache. Wake both kinds together so reuse is exercised
+	// while separate physical workers are returning waiter records.
+	const (
+		rounds  = 16
+		waiters = 8
+	)
+	for range rounds {
+		var contended sync.Mutex
+		contended.Lock()
+		started := make(chan struct{}, waiters)
+		done := make(chan struct{}, waiters*2)
+		for range waiters {
+			go func() {
+				started <- struct{}{}
+				contended.Lock()
+				contended.Unlock()
+				done <- struct{}{}
+			}()
+		}
+
+		cond := sync.NewCond(new(sync.Mutex))
+		ready := make(chan struct{})
+		waiting := 0
+		released := false
+		for range waiters {
+			go func() {
+				cond.L.Lock()
+				waiting++
+				if waiting == waiters {
+					close(ready)
+				}
+				for !released {
+					cond.Wait()
+				}
+				cond.L.Unlock()
+				done <- struct{}{}
+			}()
+		}
+
+		for range waiters {
+			<-started
+		}
+		<-ready
+		// Taking cond.L after the ready close guarantees the last waiter has
+		// completed Cond.Wait's atomic enqueue-and-unlock transition.
+		cond.L.Lock()
+		released = true
+		contended.Unlock()
+		cond.Broadcast()
+		cond.L.Unlock()
+		for range waiters * 2 {
+			<-done
+		}
+	}
+}
+
 type localityWaiter struct {
 	mid     int64
+	value   int
 	release chan struct{}
 	done    chan struct{}
 }
@@ -185,21 +248,31 @@ type localityWaiter struct {
 func testInterleavedWorkerLocality() {
 	workerCount := int(configuredWorkerCount())
 	ready := make(chan localityWaiter, workerCount*2)
+	nextValue := 0
 	startBatch := func() {
 		for range workerCount {
+			nextValue++
+			value := nextValue
 			release := make(chan struct{})
 			done := make(chan struct{})
 			go func() {
-				if workerLocalState == nil {
-					value := 1
-					workerLocalState = &value
+				if workerLocalState != nil {
+					panic("goroutine-local state was inherited")
 				}
-				if *workerLocalState != 1 {
-					panic("worker-local state was corrupted")
+				if workerInitializedState == nil || *workerInitializedState != 0 {
+					panic("initialized goroutine-local state was inherited")
 				}
+				workerLocalState = &value
+				*workerInitializedState = value
 				_, _, mid, _, _, _, _ := gmpForTesting()
-				ready <- localityWaiter{mid: mid, release: release, done: done}
+				ready <- localityWaiter{mid: mid, value: value, release: release, done: done}
 				<-release
+				if workerLocalState == nil || *workerLocalState != value {
+					panic("goroutine-local state changed after an interleaved G ran")
+				}
+				if workerInitializedState == nil || *workerInitializedState != value {
+					panic("initialized goroutine-local state changed after an interleaved G ran")
+				}
 				close(done)
 			}()
 		}
@@ -219,6 +292,9 @@ func testInterleavedWorkerLocality() {
 	for _, waiters := range byWorker {
 		if len(waiters) != 2 {
 			panic("locality test did not interleave two goroutines per worker")
+		}
+		if waiters[0].value == waiters[1].value {
+			panic("locality test reused a goroutine value")
 		}
 		close(waiters[0].release)
 		<-waiters[0].done

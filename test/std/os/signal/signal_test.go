@@ -1,4 +1,7 @@
-//go:build !windows && !plan9
+//go:build !windows && !plan9 && !js && !wasip1
+
+// This suite sends Unix process signals. JS and WASI have no process-signal
+// contract; their timer and host-event wakeups are covered separately.
 
 package signal_test
 

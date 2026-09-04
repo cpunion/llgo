@@ -1,4 +1,7 @@
-//go:build llgo && !baremetal && !nogc
+//go:build llgo && !baremetal && !nogc && !wasm
+
+// These controls and timing assertions are specific to BDWGC. WebAssembly's
+// linear-memory collector is exercised through collector-neutral tests.
 
 package gotest
 

@@ -37,9 +37,9 @@ func AllocZ(size uintptr) unsafe.Pointer {
 }
 
 func AllocRoot(size uintptr) unsafe.Pointer {
-	return tinygogc.Alloc(size)
+	return tinygogc.AllocRoot(size)
 }
 
 func FreeRoot(ptr unsafe.Pointer) {
-	tinygogc.Free(ptr)
+	tinygogc.FreeRoot(ptr)
 }

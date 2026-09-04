@@ -101,7 +101,7 @@ EM_VAL llgo_emval_get_module_property(const char *name) {
     return val::module_property(name).release_ownership();
 }
 
-static volatile uint8_t llgo_emval_invoke_pending;
+static _Thread_local volatile uint8_t llgo_emval_invoke_pending;
 
 EM_JS(void, llgo_emval_install_invoke_js, (uint8_t *pending_flag), {
     const pending = [];

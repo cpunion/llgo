@@ -14,11 +14,42 @@ import (
 	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
+// Emscripten owns emval handles and callback queues per JavaScript worker.
+// Keep the Go side of that registry in the matching physical-thread scope.
+//
+//llgo:tls
 var (
 	funcsMu    sync.Mutex
-	funcs             = make(map[uint32]func(Value, []Value) any)
-	nextFuncID uint32 = 1
+	funcs      map[uint32]func(Value, []Value) any
+	nextFuncID uint32
 )
+
+var callbackRegistry struct {
+	sync.Mutex
+	active uint32
+}
+
+func retainCallbackPoll() {
+	callbackRegistry.Lock()
+	if callbackRegistry.active == 0 {
+		llruntime.RegisterWasmCallbackPoll(pollCallbacks)
+	}
+	callbackRegistry.active++
+	callbackRegistry.Unlock()
+}
+
+func releaseCallbackPoll() {
+	callbackRegistry.Lock()
+	if callbackRegistry.active == 0 {
+		callbackRegistry.Unlock()
+		return
+	}
+	callbackRegistry.active--
+	if callbackRegistry.active == 0 {
+		llruntime.RegisterWasmCallbackPoll(nil)
+	}
+	callbackRegistry.Unlock()
+}
 
 // Func is a wrapped Go function to be called by JavaScript.
 type Func struct {
@@ -38,11 +69,17 @@ type Func struct {
 //
 // Func.Release must be called to free up resources when the function will not be invoked any more.
 func FuncOf(fn func(this Value, args []Value) any) Func {
+	ensureEmvalGlobals()
 	funcsMu.Lock()
-	if len(funcs) == 0 {
+	if funcs == nil {
+		funcs = make(map[uint32]func(Value, []Value) any)
+		nextFuncID = 1
+		// Function wrappers retain the installed invoke closure. Replacing its
+		// queue when the registry temporarily becomes empty can strand an event
+		// in the old queue, so install the bridge exactly once per JS worker.
 		emval_install_invoke()
-		llruntime.RegisterWasmCallbackPoll(pollCallbacks)
 	}
+	retainCallbackPoll()
 	id := nextFuncID
 	nextFuncID++
 	funcs[id] = fn
@@ -82,9 +119,10 @@ func itoa(buf []byte, val uint64) []byte {
 // It is allowed to call Release while the function is still running.
 func (c Func) Release() {
 	funcsMu.Lock()
+	_, active := funcs[c.id]
 	delete(funcs, c.id)
-	if len(funcs) == 0 {
-		llruntime.RegisterWasmCallbackPoll(nil)
+	if active {
+		releaseCallbackPoll()
 	}
 	funcsMu.Unlock()
 }

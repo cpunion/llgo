@@ -75,12 +75,13 @@ func (p Function) NewGCRoots(count int) []Expr {
 	frame := llvm.CreateAlloca(b.impl, frameType)
 
 	chain := p.gcRootChain()
-	prev := llvm.CreateLoad(b.impl, voidPtr, chain)
+	prevWord := llvm.CreateLoad(b.impl, prog.Uintptr().ll, chain)
+	prev := llvm.CreateIntToPtr(b.impl, prevWord, voidPtr)
 	nextSlot := llvm.CreateStructGEP(b.impl, frameType, frame, 0)
 	reentered := llvm.CreateICmp(b.impl, llvm.IntEQ, prev, frame)
 	sjljReplaying := llvm.CreateLoad(b.impl, prog.Bool().ll, p.gcRootSJLJReplaying())
-	// SJLJ/Asyncify replays discarded function entries on the way back to a
-	// setjmp. Their stack slots must be reused without publishing dead frames.
+	// SJLJ replays discarded function entries on the way back to a setjmp.
+	// Their stack slots must be reused without publishing dead frames.
 	reusingFrame := b.impl.CreateOr(reentered, sjljReplaying, "")
 
 	frameMap := p.newGCRootMap(count)
@@ -100,7 +101,7 @@ func (p Function) NewGCRoots(count int) []Expr {
 	for _, root := range roots {
 		b.impl.CreateStore(llvm.ConstNull(voidPtr), root.impl)
 	}
-	b.impl.CreateStore(frame, chain)
+	b.impl.CreateStore(llvm.CreatePtrToInt(b.impl, frame, prog.Uintptr().ll), chain)
 	b.impl.CreateBr(originalEntry)
 	p.gcRootFrame = Expr{frame, prog.VoidPtr()}
 	p.gcRootPrev = Expr{nextSlot, prog.Pointer(prog.VoidPtr())}
@@ -119,9 +120,9 @@ func (p Function) gcRootChain() llvm.Value {
 	}
 	global := p.Pkg.mod.NamedGlobal(name)
 	if global.IsNil() {
-		global = llvm.AddGlobal(p.Pkg.mod, p.Prog.tyVoidPtr(), name)
+		global = llvm.AddGlobal(p.Pkg.mod, p.Prog.Uintptr().ll, name)
 	}
-	global.SetInitializer(llvm.ConstNull(p.Prog.tyVoidPtr()))
+	global.SetInitializer(llvm.ConstNull(p.Prog.Uintptr().ll))
 	global.SetLinkage(llvm.LinkOnceAnyLinkage)
 	global.SetThreadLocal(p.Prog.threadLocalGCRoots)
 	global.SetAlignment(p.Prog.PointerSize())
@@ -149,7 +150,8 @@ func (p Function) gcRootSJLJReplaying() llvm.Value {
 // frame is already linked by then and would be mistaken for the caller frame.
 func (b Builder) currentGCRootChain() Expr {
 	chain := b.Func.gcRootChain()
-	return Expr{llvm.CreateLoad(b.impl, b.Prog.tyVoidPtr(), chain), b.Prog.VoidPtr()}
+	word := llvm.CreateLoad(b.impl, b.Prog.Uintptr().ll, chain)
+	return Expr{llvm.CreateIntToPtr(b.impl, word, b.Prog.tyVoidPtr()), b.Prog.VoidPtr()}
 }
 
 func (p Function) newGCRootMap(count int) llvm.Value {
@@ -178,13 +180,14 @@ func (p Function) endGCRoots(b Builder) {
 			continue
 		}
 		b.impl.SetInsertPointBefore(term)
-		current := llvm.CreateLoad(b.impl, p.Prog.tyVoidPtr(), chain)
 		prev := llvm.CreateLoad(b.impl, p.Prog.tyVoidPtr(), p.gcRootPrev.impl)
+		currentWord := llvm.CreateLoad(b.impl, p.Prog.Uintptr().ll, chain)
+		current := llvm.CreateIntToPtr(b.impl, currentWord, p.Prog.tyVoidPtr())
 		// A helper replayed during a non-local return can finish without ever
 		// linking its frame. Only the actual chain head owns a pop operation.
 		linked := llvm.CreateICmp(b.impl, llvm.IntEQ, current, p.gcRootFrame.impl)
 		restored := llvm.CreateSelect(b.impl, linked, prev, current)
-		b.impl.CreateStore(restored, chain)
+		b.impl.CreateStore(llvm.CreatePtrToInt(b.impl, restored, p.Prog.Uintptr().ll), chain)
 	}
 }
 

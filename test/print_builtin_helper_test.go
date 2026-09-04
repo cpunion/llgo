@@ -1,4 +1,10 @@
+//go:build !wasm
+
 package test
+
+// This host-side probe re-executes the current test binary and captures its
+// stderr. WebAssembly has no child-process contract; its builtin print output
+// is asserted by the wasm runtime acceptance fixture instead.
 
 import (
 	"bytes"
