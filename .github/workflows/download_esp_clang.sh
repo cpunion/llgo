@@ -71,7 +71,8 @@ if [[ ! -f "${LLVM_LICENSE}" ]]; then
     exit 1
 fi
 
-for platform in "darwin-amd64" "darwin-arm64" "linux-amd64" "linux-arm64"; do
+# Fork-only Ubuntu sysroot validation: do not download unrelated host toolchains.
+for platform in "linux-amd64" "linux-arm64"; do
     download_and_extract "${platform}"
 done
 

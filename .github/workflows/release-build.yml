@@ -20,7 +20,7 @@ env:
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       linux-cache-key: ${{ steps.cache-keys.outputs.linux-key }}
     steps:
@@ -32,7 +32,7 @@ jobs:
           LINUX_KEY="linux-sysroot-${{ hashFiles('.github/workflows/populate_linux_sysroot.sh', '.github/workflows/release-build.yml') }}-v1.0.0"
           echo "linux-key=$LINUX_KEY" >> $GITHUB_OUTPUT
   populate-linux-sysroot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: setup
     timeout-minutes: 30
     steps:
@@ -55,8 +55,7 @@ jobs:
       - name: Create Linux sysroot tarball
         if: steps.cache-linux-sysroot.outputs.cache-hit != 'true'
         run: tar -czvf .sysroot/linux.tar.gz -C .sysroot linux
-      # Keep the producer lookup-only so a hit does not download this large
-      # archive merely to discard it. A miss therefore needs an explicit save.
+      # A cache miss needs an explicit save for subsequent runs.
       - name: Save Linux sysroot cache
         if: steps.cache-linux-sysroot.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
@@ -76,7 +75,8 @@ jobs:
           compression-level: 0
           retention-days: 3
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     needs: [setup, populate-linux-sysroot]
     steps:
       - name: Check out code
@@ -102,22 +102,6 @@ jobs:
             -w /go/src/llgo \
             "${GORELEASER_CROSS_IMAGE}" \
             release --verbose --skip=publish,nfpm,snapcraft --snapshot --clean
-
-      - name: Upload Darwin AMD64 Artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: llgo-darwin-amd64
-          path: .dist/*darwin-amd64.tar.gz
-          retention-days: 3
-          include-hidden-files: true
-
-      - name: Upload Darwin ARM64 Artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: llgo-darwin-arm64
-          path: .dist/*darwin-arm64.tar.gz
-          retention-days: 3
-          include-hidden-files: true
 
       - name: Upload Linux AMD64 Artifacts
         uses: actions/upload-artifact@v7
@@ -145,18 +129,12 @@ jobs:
 
   test-artifacts:
     needs: build
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
-            goos: darwin
-            goarch: amd64
-            go-mod-version: "1.27"
-          - os: macos-latest
-            goos: darwin
-            goarch: arm64
-            go-mod-version: "1.27"
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             goos: linux
             goarch: amd64
             go-mod-version: "1.27"
@@ -188,10 +166,59 @@ jobs:
           ls -la release-llgo/
           echo "${{ github.workspace }}/release-llgo/bin/" >> $GITHUB_PATH
 
+      - name: Report release bundle ABI requirements
+        run: |
+          bash .github/workflows/report_linux_abi.sh release-llgo abi-report
+          cat abi-report/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # These are observational startup probes, not supported-platform tests.
+      # A failure is recorded explicitly; only Ubuntu 24.04 is required here.
+      - name: Probe older Linux runtimes
+        run: |
+          for distro in ubuntu:22.04 debian:12; do
+            log="abi-report/${distro//:/-}.log"
+            status=0
+            docker run --rm \
+              -v "$PWD/release-llgo:/release:ro" \
+              "$distro" bash -c '
+                set -e
+                apt-get -o Acquire::Retries=3 update
+                apt-get -o Acquire::Retries=3 install -y libstdc++6 zlib1g
+                cat /etc/os-release
+                dpkg-query -W libc6 libstdc++6
+                echo "PROBE_READY"
+                status=0
+                /release/bin/llgo version || status=1
+                /release/crosscompile/clang/bin/clang --version || status=1
+                exit "$status"
+              ' > "$log" 2>&1 || status=$?
+            cat "$log"
+            result="startup passed (not a compile/run compatibility test)"
+            if [ "$status" -ne 0 ]; then
+              result="INCONCLUSIVE: container/setup failed (exit $status)"
+              if grep -qx PROBE_READY "$log"; then
+                result="INCOMPATIBLE: startup failed (exit $status); see attached log"
+              fi
+              echo "::warning::$distro: $result"
+            fi
+            echo "- $distro: $result" >> abi-report/compatibility.md
+          done
+          cat abi-report/compatibility.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Test Hello World
         uses: ./.github/actions/test-helloworld
         with:
           mod-version: ${{ matrix.go-mod-version }}
+          embedded: "false"
+
+      - name: Upload ABI and compatibility reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-abi-${{ matrix.goarch }}
+          path: abi-report
+          if-no-files-found: error
+          retention-days: 14
 
   release:
     permissions:
