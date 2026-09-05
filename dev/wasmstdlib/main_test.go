@@ -113,7 +113,7 @@ func TestDriverReportAndSummary(t *testing.T) {
 				t.Fatal(err)
 			}
 			var r report
-			if err := json.Unmarshal(data, &r); err != nil || r.Result != "pass" || r.GoVersion != "go1.27.0" || len(r.Packages) != 4 {
+			if err := json.Unmarshal(data, &r); err != nil || r.Result != "pass" || r.GoVersion != "go1.27.0" || len(r.Packages) != len(acceptance)+1 {
 				t.Fatalf("invalid report: %+v, %v", r, err)
 			}
 			p, _ := selectProfile(name)
@@ -121,7 +121,7 @@ func TestDriverReportAndSummary(t *testing.T) {
 				t.Fatalf("misclassified compiler: %+v", r)
 			}
 			data, err = os.ReadFile(summary)
-			if err != nil || !strings.Contains(string(data), "Passed packages: 3; failed: 0; not run: 0; source-excluded (unclassified): 1.") {
+			if err != nil || !strings.Contains(string(data), fmt.Sprintf("Passed packages: %d; failed: 0; not run: 0; source-excluded (unclassified): 1.", len(acceptance))) {
 				t.Fatalf("invalid summary: %s, %v", data, err)
 			}
 		})
@@ -135,7 +135,7 @@ func TestDriverReportAndSummary(t *testing.T) {
 				t.Fatal("lost external-command failure")
 			}
 			r := readReport(t, path)
-			if r.Result != "fail" || r.Reason != err.Error() || len(r.Packages) != 4 {
+			if r.Result != "fail" || r.Reason != err.Error() || len(r.Packages) != len(acceptance)+1 {
 				t.Fatalf("missing failure report: %+v, %v", r, err)
 			}
 			if mode != "test-failure" {
@@ -192,7 +192,7 @@ func TestDriverPreflightFailureReplacesPreviousSuccess(t *testing.T) {
 				t.Fatalf("missing executable error = %v", err)
 			}
 			r := readReport(t, path)
-			if r.Result != "fail" || r.Reason != err.Error() || r.Implementation != "go-reference" || len(r.Packages) != 4 {
+			if r.Result != "fail" || r.Reason != err.Error() || r.Implementation != "go-reference" || len(r.Packages) != len(acceptance)+1 {
 				t.Fatalf("preflight failure report = %+v, %v", r, err)
 			}
 			for _, e := range r.Packages {
@@ -306,6 +306,21 @@ func TestValidateExecution(t *testing.T) {
 	for _, text := range []string{"", "PASS\n", "--- PASS: TestOther (0.00s)\nPASS\n", pass + "PASS\n", pass + "    --- SKIP: subtest (0.00s)\n", pass + "--- FAIL: failed (0.00s)\n"} {
 		if _, err := validateOutput([]byte(text), "TestAs"); err == nil {
 			t.Errorf("accepted incomplete/failed execution: %q", text)
+		}
+	}
+	// fmt.Print's lack of a trailing newline must not undercount a passing
+	// test. A nested result must not satisfy the top-level witness instead.
+	output := "=== RUN   TestAs\nuser --- output--- PASS: TestAs (0.00s)\n    --- PASS: TestAs/nested (0.00s)\nPASS\n"
+	if count, err := validateOutput([]byte(output), "TestAs"); err != nil || count != 1 {
+		t.Fatalf("stdout-prefixed result: count %d, error %v", count, err)
+	}
+	for _, bad := range []string{
+		"    --- PASS: TestAs/nested (0.00s)\nPASS\n",
+		output + "user output--- SKIP: TestOther (0.00s)\n",
+		output + "user output--- FAIL: TestOther (0.00s)\n",
+	} {
+		if _, err := validateOutput([]byte(bad), "TestAs"); err == nil {
+			t.Errorf("accepted nested-only, skipped, or failed execution: %q", bad)
 		}
 	}
 }

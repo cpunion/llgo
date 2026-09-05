@@ -1,12 +1,14 @@
 # R4 standard-library behavior and reference hosts
 
-This first acceptance slice runs the complete repository test packages for
-`errors`, `sort`, and `encoding/binary`. It exercises error wrapping/assertion,
-reflection-based sorting, byte-order interfaces, structured encoding, varints,
-and fixed-width integer boundaries. No test-name filter or blanket skip is used;
-the driver clears inherited `GOFLAGS` and sets `GOENV=off` so external or saved
-filters cannot narrow the suite. Persistent `go env -w` settings are ignored;
-explicit process environment such as `GOPROXY` is still available.
+This acceptance slice runs the complete repository test packages for `errors`,
+`sort`, `encoding/binary`, `fmt`, `strconv`, and `io`. It exercises error wrapping
+and assertion, reflection-based sorting, byte-order interfaces, structured
+encoding, varints, fixed-width and native-width integer boundaries, formatting
+and scanning interfaces, readers/writers, and pipe goroutine/timer coordination.
+No test-name filter or blanket skip is used; the driver clears inherited
+`GOFLAGS` and sets `GOENV=off` so external or saved filters cannot narrow the suite.
+Persistent `go env -w` settings are ignored; explicit process environment such as
+`GOPROXY` is still available.
 
 | Profile | Compiler and execution contract |
 | --- | --- |
@@ -32,8 +34,9 @@ go run ./dev/wasmstdlib -profile GJS-reference -report /tmp/go-js.json
 Each package must exit successfully, print exactly one terminal PASS and its
 expected test witness, and contain no failed/skipped test records. A failure
 stops that profile; earlier results remain in the JSON report and later packages
-remain `not-run`. Test binaries have a 60-second test deadline; the CI job bounds
-compilation and execution together to 25 minutes.
+remain `not-run`. Test binaries have a 60-second test deadline; CI bounds
+compilation and execution together to 25 minutes, or 40 minutes for WC32's six
+uncached Binaryen/Asyncify builds.
 
 The driver replaces any prior report before preparing the run. Preparation,
 execution, or summary-writing errors set `slice_result` to `fail` with a top-level
