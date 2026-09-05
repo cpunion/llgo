@@ -64,6 +64,7 @@ type report struct {
 	Contract       string  `json:"contract"`
 	GoVersion      string  `json:"go_version"`
 	Result         string  `json:"slice_result"`
+	Reason         string  `json:"reason,omitempty"`
 	Packages       []entry `json:"packages"`
 }
 
@@ -204,7 +205,10 @@ func subprocess(root string, c command) *exec.Cmd {
 	cmd.Dir = root
 	// Inherited GOFLAGS can filter tests or alter source tags, turning a full
 	// package run into an undocumented subset even when its witness passes.
-	env := map[string]string{"LLGO_ROOT": root, "GOWORK": "off", "GOFLAGS": ""}
+	// An empty GOFLAGS alone falls back to flags saved by go env -w, so also
+	// isolate persistent Go configuration. Explicit process environment such
+	// as GOPROXY remains available for dependency downloads.
+	env := map[string]string{"LLGO_ROOT": root, "GOWORK": "off", "GOENV": "off", "GOFLAGS": ""}
 	for k, v := range c.Env {
 		env[k] = v
 	}
@@ -257,7 +261,7 @@ func runSlice(r *report, cases []testCase, run func(testCase) ([]byte, error), s
 			r.Result = "fail"
 		}
 		if saveErr := save(r); saveErr != nil {
-			return saveErr
+			return errors.Join(err, saveErr)
 		}
 		if err != nil {
 			return fmt.Errorf("%s/%s: %w", r.Profile, tc.Package, err)
@@ -279,21 +283,58 @@ func main() {
 	}
 }
 
-func run(name, reportPath, goCmd, llgo string) error {
+func run(name, reportPath, goCmd, llgo string) (retErr error) {
+	if reportPath == "" {
+		return errors.New("-report is required")
+	}
+	r := &report{Schema: 1, Profile: name, Result: "preparing", Packages: []entry{}}
+	save := func(r *report) error {
+		data, err := json.MarshalIndent(r, "", "  ")
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(reportPath, append(data, '\n'), 0o644)
+	}
+	// Every invocation replaces an earlier result before preparing commands.
+	// Preserve errors from preparation and summary writing as well as tests.
+	defer func() {
+		if retErr != nil {
+			r.Result, r.Reason = "fail", retErr.Error()
+			if err := save(r); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("save failure report: %w", err))
+			}
+		}
+	}()
+	if err := save(r); err != nil {
+		return fmt.Errorf("initialize report: %w", err)
+	}
 	p, err := selectProfile(name)
 	if err != nil {
 		return err
 	}
-	if reportPath == "" {
-		return errors.New("-report is required")
+	r.Implementation, r.Contract = "llgo", "C-profile behavior; not official-Go host compatibility"
+	if p.Reference {
+		r.Implementation, r.Contract = "go-reference", "official Go compiler and host helper; not LLGo output"
 	}
 	root, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 	names, err := discover(root)
+	for _, name := range names {
+		e := entry{Package: name, Status: "not-run", Reason: "source selection not completed; not validated"}
+		for _, tc := range acceptance {
+			if tc.Package == name {
+				e.SelectedForRun = true
+			}
+		}
+		r.Packages = append(r.Packages, e)
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("discover source inventory: %w", err)
+	}
+	if err := save(r); err != nil {
+		return fmt.Errorf("save source inventory: %w", err)
 	}
 	goEnv, err := executeStructured(root, command{goCmd, []string{"env", "-json", "GOROOT", "GOVERSION"}, nil})
 	if err != nil {
@@ -301,8 +342,9 @@ func run(name, reportPath, goCmd, llgo string) error {
 	}
 	var env struct{ GOROOT, GOVERSION string }
 	if err := json.Unmarshal(goEnv, &env); err != nil {
-		return err
+		return fmt.Errorf("decode go env: %w", err)
 	}
+	r.GoVersion = env.GOVERSION
 	args := []string{"list", "-e", "-json"}
 	if !p.Reference {
 		args = append(args, "-tags=llgo")
@@ -314,29 +356,22 @@ func run(name, reportPath, goCmd, llgo string) error {
 	}
 	selected, err := sourceSelection(data)
 	if err != nil {
-		return err
+		return fmt.Errorf("go list source selection: %w", err)
 	}
 	entries, err := inventory(names, selected, acceptance)
 	if err != nil {
 		return err
 	}
-	r := &report{Schema: 1, Profile: name, Implementation: "llgo", Contract: "C-profile behavior; not official-Go host compatibility", GoVersion: env.GOVERSION, Packages: entries}
-	if p.Reference {
-		r.Implementation, r.Contract = "go-reference", "official Go compiler and host helper; not LLGo output"
-	}
-	save := func(r *report) error {
-		data, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(reportPath, append(data, '\n'), 0o644)
-	}
+	r.Packages = entries
 	err = runSlice(r, acceptance, func(tc testCase) ([]byte, error) {
 		fmt.Printf("running %s/%s (%s)\n", name, tc.Package, r.Implementation)
 		out, err := execute(root, testCommand(p, goCmd, llgo, env.GOROOT, tc.Package))
 		fmt.Print(string(out))
 		return out, err
 	}, save)
+	if err != nil {
+		r.Result, r.Reason = "fail", err.Error()
+	}
 	counts := map[string]int{}
 	for _, e := range r.Packages {
 		counts[e.Status]++

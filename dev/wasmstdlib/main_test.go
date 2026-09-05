@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -61,8 +62,9 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestDriverReportAndSummary(t *testing.T) {
-	root := t.TempDir()
+func driverFixture(t *testing.T) (root, program string) {
+	t.Helper()
+	root = t.TempDir()
 	for _, tc := range append(append([]testCase{}, acceptance...), testCase{"syscall", "unused"}) {
 		dir := filepath.Join(root, "test", "std", tc.Package)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -74,11 +76,30 @@ func TestDriverReportAndSummary(t *testing.T) {
 	}
 	t.Chdir(root)
 	t.Setenv("LLGO_WASMSTDLIB_TEST_HELPER", "1")
+	t.Setenv("GITHUB_STEP_SUMMARY", "")
 	t.Setenv("GOFLAGS", "-run=TestAs -tags=unrelated")
 	program, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
+	return root, program
+}
+
+func readReport(t *testing.T, path string) report {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r report
+	if err := json.Unmarshal(data, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestDriverReportAndSummary(t *testing.T) {
+	root, program := driverFixture(t)
 	for _, name := range []string{"EC32", "EC64", "WC32", "GJS-reference", "GWASI-reference"} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(root, name+".json")
@@ -108,8 +129,21 @@ func TestDriverReportAndSummary(t *testing.T) {
 	for _, mode := range []string{"bad-env", "env-failure", "list-failure", "bad-list", "test-failure"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("LLGO_WASMSTDLIB_TEST_MODE", mode)
-			if err := run("EC32", filepath.Join(root, mode+".json"), program, program); err == nil {
+			path := filepath.Join(root, mode+".json")
+			err := run("EC32", path, program, program)
+			if err == nil {
 				t.Fatal("lost external-command failure")
+			}
+			r := readReport(t, path)
+			if r.Result != "fail" || r.Reason != err.Error() || len(r.Packages) != 4 {
+				t.Fatalf("missing failure report: %+v, %v", r, err)
+			}
+			if mode != "test-failure" {
+				for _, e := range r.Packages {
+					if e.Status != "not-run" || e.SourceSelected || e.Tests != 0 || !strings.Contains(e.Reason, "source selection not completed") {
+						t.Fatalf("preparation failure classified an unvalidated package: %+v", e)
+					}
+				}
 			}
 		})
 	}
@@ -117,14 +151,56 @@ func TestDriverReportAndSummary(t *testing.T) {
 		t.Fatal("lost report write failure")
 	}
 	t.Setenv("GITHUB_STEP_SUMMARY", root) // A directory is not appendable.
-	if err := run("EC32", filepath.Join(root, "summary-error.json"), program, program); err == nil {
+	summaryReport := filepath.Join(root, "summary-error.json")
+	err := run("EC32", summaryReport, program, program)
+	if err == nil {
 		t.Fatal("lost summary write failure")
+	}
+	r := readReport(t, summaryReport)
+	if r.Result != "fail" || r.Reason != err.Error() {
+		t.Fatalf("summary failure left a passing report: %+v, %v", r, err)
+	}
+	for _, e := range r.Packages {
+		if e.SelectedForRun && (e.Status != "pass" || e.Tests != 1) {
+			t.Fatalf("summary failure discarded completed tests: %+v", e)
+		}
 	}
 	if err := run("invalid", "unused", program, program); err == nil {
 		t.Fatal("accepted unknown profile")
 	}
 	if err := run("EC32", "", program, program); err == nil {
 		t.Fatal("accepted missing report path")
+	}
+}
+
+func TestDriverPreflightFailureReplacesPreviousSuccess(t *testing.T) {
+	root, program := driverFixture(t)
+	for _, priorSuccess := range []bool{false, true} {
+		t.Run(fmt.Sprint(priorSuccess), func(t *testing.T) {
+			path := filepath.Join(root, fmt.Sprintf("rerun-%v.json", priorSuccess))
+			if priorSuccess {
+				if err := run("GJS-reference", path, program, program); err != nil {
+					t.Fatal(err)
+				}
+				if r := readReport(t, path); r.Result != "pass" {
+					t.Fatalf("initial report did not pass: %+v", r)
+				}
+			}
+			missing := filepath.Join(root, "missing-go")
+			err := run("GJS-reference", path, missing, program)
+			if err == nil || !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("missing executable error = %v", err)
+			}
+			r := readReport(t, path)
+			if r.Result != "fail" || r.Reason != err.Error() || r.Implementation != "go-reference" || len(r.Packages) != 4 {
+				t.Fatalf("preflight failure report = %+v, %v", r, err)
+			}
+			for _, e := range r.Packages {
+				if e.Status != "not-run" || e.SourceSelected || e.Tests != 0 || e.SelectedForRun != (e.Package != "syscall") {
+					t.Fatalf("preflight failure retained old test results: %+v", e)
+				}
+			}
+		})
 	}
 }
 
@@ -278,6 +354,18 @@ func TestRunSliceSuccessAndSaveErrors(t *testing.T) {
 	if err := runSlice(&report{}, cases, run, func(*report) error { return nil }); err == nil {
 		t.Fatal("accepted missing inventory")
 	}
+	runErr := errors.New("compiler failed")
+	saves := 0
+	err := runSlice(r, cases, func(testCase) ([]byte, error) { return nil, runErr }, func(*report) error {
+		saves++
+		if saves == 1 {
+			return nil
+		}
+		return want
+	})
+	if !errors.Is(err, runErr) || !errors.Is(err, want) {
+		t.Fatalf("lost execution or report write failure: %v", err)
+	}
 }
 
 func TestCommandEnvironmentDoesNotInheritSourceProfile(t *testing.T) {
@@ -292,5 +380,29 @@ func TestCommandEnvironmentDoesNotInheritSourceProfile(t *testing.T) {
 	}
 	if strings.Contains(joined, "-run=TestAs") || !strings.Contains(joined, "GOFLAGS=") {
 		t.Fatalf("inherited test filters: %v", cmd.Env)
+	}
+}
+
+func TestCommandIgnoresPersistentGoFlags(t *testing.T) {
+	// Use a real Go command: a fake subprocess cannot detect Go's fallback
+	// from an empty GOFLAGS environment variable to its persistent config.
+	goCmd, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	config := filepath.Join(root, "goenv")
+	if err := os.WriteFile(config, []byte("GOFLAGS=-run=OnlyWitness\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOENV", config)
+	t.Setenv("GOFLAGS", "")
+	output, err := executeStructured(root, command{goCmd, []string{"env", "-json", "GOFLAGS", "GOENV"}, nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env struct{ GOFLAGS, GOENV string }
+	if err := json.Unmarshal(output, &env); err != nil || env.GOFLAGS != "" || env.GOENV != "" {
+		t.Fatalf("persistent configuration affected test selection: %s, %v", output, err)
 	}
 }
