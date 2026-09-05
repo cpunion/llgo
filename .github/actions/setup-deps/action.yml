@@ -34,8 +34,16 @@ runs:
         Add-Content -Encoding utf8 $env:GITHUB_ENV "LLGO_WINDOWS_ABI=${{ inputs.windows-abi }}"
         Add-Content -Encoding utf8 $env:GITHUB_ENV "LLGO_WINDOWS_ARCH=${{ inputs.windows-arch }}"
 
+    - name: Restore full-target Windows LLVM
+      if: runner.os == 'Windows' && inputs.install-llvm == 'true' && inputs.windows-abi == 'msvc' && github.event_name == 'pull_request'
+      id: windows_llvm_restore
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.tool_cache }}\llgo-llvm\clang+llvm-22.1.8-x86_64-pc-windows-msvc
+        key: llgo-llvm-22.1.8-full-target-windows-${{ inputs.windows-arch }}-d96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234
+
     - name: Cache full-target Windows LLVM
-      if: runner.os == 'Windows' && inputs.install-llvm == 'true' && inputs.windows-abi == 'msvc'
+      if: runner.os == 'Windows' && inputs.install-llvm == 'true' && inputs.windows-abi == 'msvc' && github.event_name != 'pull_request'
       id: windows_llvm_cache
       uses: actions/cache@v6
       with:
@@ -45,7 +53,7 @@ runs:
         key: llgo-llvm-22.1.8-full-target-windows-${{ inputs.windows-arch }}-d96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234
 
     - name: Install full-target Windows LLVM
-      if: runner.os == 'Windows' && inputs.install-llvm == 'true' && inputs.windows-abi == 'msvc' && steps.windows_llvm_cache.outputs.cache-hit != 'true'
+      if: runner.os == 'Windows' && inputs.install-llvm == 'true' && inputs.windows-abi == 'msvc' && steps.windows_llvm_restore.outputs.cache-hit != 'true' && steps.windows_llvm_cache.outputs.cache-hit != 'true'
       shell: pwsh
       env:
         # The development archive contains llvm-config, headers, libraries,

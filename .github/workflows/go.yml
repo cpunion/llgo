@@ -62,9 +62,9 @@ jobs:
       - name: Set up LLGo cache
         uses: ./.github/actions/setup-llgo-cache
         with:
-          # Keep the small per-commit build cache for PR retries. Cross-compile
-          # downloads are much larger and content-addressed, so only main
-          # publishes them; otherwise every isolated PR ref stores a duplicate.
+          # Keep the small per-commit build cache for PR retries. Large,
+          # content-addressed toolchain caches are published only by main;
+          # otherwise every isolated PR ref stores a duplicate.
           build-cache-mode: readwrite
           crosscompile-cache-mode: ${{ github.event_name == 'push' && 'readwrite' || 'restore' }}
 
