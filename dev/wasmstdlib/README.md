@@ -34,8 +34,9 @@ go run ./dev/wasmstdlib -profile GJS-reference -report /tmp/go-js.json
 Each package must exit successfully, print exactly one terminal PASS and its
 expected test witness, and contain no failed/skipped test records. A failure
 stops that profile; earlier results remain in the JSON report and later packages
-remain `not-run`. Test binaries have a 60-second test deadline; the CI job bounds
-compilation and execution together to 25 minutes.
+remain `not-run`. Test binaries have a 60-second test deadline; CI bounds
+compilation and execution together to 25 minutes, or 40 minutes for WC32's six
+uncached Binaryen/Asyncify builds.
 
 The driver replaces any prior report before preparing the run. Preparation,
 execution, or summary-writing errors set `slice_result` to `fail` with a top-level
