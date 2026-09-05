@@ -62,10 +62,11 @@ jobs:
       - name: Set up LLGo cache
         uses: ./.github/actions/setup-llgo-cache
         with:
-          # PR caches are isolated from main by GitHub's cache scope. Let the
-          # first run populate its merge-commit snapshot so retries can reuse it.
+          # Keep the small per-commit build cache for PR retries. Cross-compile
+          # downloads are much larger and content-addressed, so only main
+          # publishes them; otherwise every isolated PR ref stores a duplicate.
           build-cache-mode: readwrite
-          crosscompile-cache-mode: readwrite
+          crosscompile-cache-mode: ${{ github.event_name == 'push' && 'readwrite' || 'restore' }}
 
       - name: Install further optional dependencies for demos
         uses: ./.github/actions/setup-demo-deps
