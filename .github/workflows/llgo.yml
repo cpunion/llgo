@@ -731,4 +731,6 @@ jobs:
         env:
           LLGO: ${{ runner.temp }}/llgo-bin/llgo
           LLGO_BUILD_CACHE: "off"
-        run: dev/test_wasm_single_worker.sh
+        run: |
+          dev/wasm_ci_report_test.sh
+          dev/test_wasm_single_worker.sh
