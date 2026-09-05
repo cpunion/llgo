@@ -143,15 +143,19 @@ jobs:
               export LLGO_REQUIRE_MSVC=1
             fi
             export LLGO_STDIO_NOBUF=1
-            # The main batch and the separate test/go batch can expose narrow
-            # hosted-Windows runtime failures. Their wrapper records a
-            # quarantine only for its exact, package-scoped signatures; all
-            # compiler fixture failures remain fail-closed.
+            # Keep the existing exact synctest quarantine on the main batch.
             main_go_test=(bash dev/go_test_windows.sh "${go_test[@]}")
-            test_go=(bash dev/go_test_windows.sh "${go_test[@]}")
           else
             main_go_test=("${go_test[@]}")
-            test_go=("${go_test[@]}")
+          fi
+          test_go=("${go_test[@]}")
+          if [[ "$RUNNER_OS" == Windows && "$RUNNER_ARCH" == X64 && \
+                "${{ matrix.os }}" == windows-2022 && "${{ matrix.windows_abi }}" == mingw ]]; then
+            # Only this lane has the observed standalone test/go access
+            # violation. Retry in a fresh process at most twice, requiring a
+            # real pass; never quarantine it or skip its coverage. Other
+            # platforms, MSVC, compiler fixtures and the main batch are unchanged.
+            test_go=(bash dev/go_test_windows.sh --retry-test-go "${go_test[@]:2}")
           fi
 
           # Keep the direct language-behavior suite in a separate profile so
@@ -171,7 +175,7 @@ jobs:
             -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
             -coverprofile="coverage-compiler.txt" -covermode=atomic \
             -bench '^BenchmarkGo126' -benchtime=1x ./cl
-          "${test_go[@]}" -timeout 45m \
+          "${test_go[@]}" -timeout=45m \
             -coverprofile="coverage-test-go.txt" -covermode=atomic ./test/go
 
       - name: Test with embedded emulator env
