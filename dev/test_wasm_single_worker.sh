@@ -188,12 +188,12 @@ run_llgo_test() {
 	local temp_dir="${work_dir}/${name}-tmp"
 	mkdir -p "${temp_dir}"
 
-	# Binaryen's post-Asyncify processing of this standard-library test takes
-	# about 165 seconds on a local arm64 host and exceeded 180 seconds on the
-	# shared x86-64 runner. Keep execution bounded without treating normal
-	# compiler variance as a scheduler failure.
+	# This command builds and runs two packages. CI spent 258 seconds on the
+	# first WASI package alone, then hit the old 300-second aggregate limit
+	# while building the second. Budget 300 seconds per package; each binary
+	# still has its own 30-second test deadline and bounded host runner.
 	echo "testing public llgo test command for ${target}"
-	run_with_timeout_limit 300s env TMPDIR="${temp_dir}" "${llgo_cmd}" test -target "${target}" -emulator \
+	run_with_timeout_limit 600s env TMPDIR="${temp_dir}" "${llgo_cmd}" test -target "${target}" -emulator \
 		-v -count=1 -timeout=30s "${test_fixture}" "${secondary_test_fixture}" 2>&1 | tee "${output}"
 	grep -Fq "PASS" "${output}"
 	grep -Fq "TestScheduler" "${output}"
