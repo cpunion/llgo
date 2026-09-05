@@ -59,7 +59,7 @@ jobs:
             windows_abi: mingw
             windows_arch: "386"
             host_go_arch: x64
-    runs-on: ${{ matrix.runner || matrix.os }}
+    runs-on: ${{ github.repository == 'xgo-dev/llgo' && matrix.runner || matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
@@ -585,7 +585,7 @@ jobs:
         # artifact smoke tests.
         os: [ubuntu-latest]
         llvm: [22]
-    runs-on: [qiniu, ubuntu-24.04]
+    runs-on: ${{ github.repository == 'xgo-dev/llgo' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
@@ -638,7 +638,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             runner: [qiniu, ubuntu-24.04]
-    runs-on: ${{ matrix.runner || matrix.os }}
+    runs-on: ${{ github.repository == 'xgo-dev/llgo' && matrix.runner || matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
@@ -670,7 +670,7 @@ jobs:
   wasm-runtime:
     name: wasm-runtime (Go 1.24 and 1.27)
     timeout-minutes: 30
-    runs-on: [qiniu, ubuntu-24.04]
+    runs-on: ${{ github.repository == 'xgo-dev/llgo' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
