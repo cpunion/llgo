@@ -46,6 +46,36 @@ expect_failure() {
 	grep -Fq "${expected}" <<<"${output}"
 }
 
+expect_llgo_runner_failure() {
+	local target="$1"
+	local profile="$2"
+	local runner="$3"
+	local fixture="$4"
+	local output exit_code
+
+	set +e
+	output="$(run_with_timeout env LLGO_WASM_SCHEDULER_DEADLOCK=1 \
+		"${llgo_cmd}" run -target "${target}" -emulator "${fixture}" 2>&1)"
+	exit_code=$?
+	set -e
+	printf '%s\n' "${output}"
+	if [[ ${exit_code} -ne 1 ]]; then
+		echo "expected llgo runner failure status 1, got ${exit_code}" >&2
+		exit 1
+	fi
+	for expected in \
+		"phase=run" \
+		"target=${target}" \
+		"profile=${profile}" \
+		'artifact="' \
+		"runner=\"${runner}\"" \
+		'package="github.com/xgo-dev/llgo/internal/build/testdata/wasm-scheduler"' \
+		"status=exit" \
+		"exit_code=2"; do
+		grep -Fq "${expected}" <<<"${output}"
+	done
+}
+
 run_emscripten() {
 	local target="$1"
 	local runner="$2"
@@ -72,6 +102,21 @@ run_wasi() {
 	run_with_timeout "${wasmtime_cmd}" run -W exceptions=y \
 		--env LLGO_WASM_TEST_ENV="${LLGO_WASM_TEST_ENV}" "${module}" 2>&1 | tee "${work_dir}/${name}.out"
 	grep -Fq "${expected}" "${work_dir}/${name}.out"
+}
+
+run_llgo_run() {
+	local target="$1"
+	local fixture="$2"
+	local expected="$3"
+	local name="$4"
+	local output="${work_dir}/${name}.out"
+
+	# Exercise the public command and its target-owned runner. Other fixtures in
+	# this script retain explicit artifacts for wasm-tools validation, while this
+	# path verifies that users do not need to assemble Node or Wasmtime commands.
+	echo "testing public llgo run command for ${target}"
+	run_with_timeout "${llgo_cmd}" run -target "${target}" -emulator "${fixture}" 2>&1 | tee "${output}"
+	grep -Fq "${expected}" "${output}"
 }
 
 run_llgo_test() {
@@ -134,6 +179,11 @@ expect_failure "fatal error: all goroutines are asleep - deadlock!" \
 expect_failure "fatal error: no goroutines (main called runtime.Goexit) - deadlock!" \
 	"${wasmtime_cmd}" run -W exceptions=y --env LLGO_WASM_SCHEDULER_MAIN_GOEXIT=1 "${work_dir}/scheduler-wasi.wasm"
 
+# Exercise the CLI-level failure boundary in CI, not only the runners in
+# isolation. The other public run calls below cover successful EC32, EC64,
+# WC32, and alias execution through the same path.
+expect_llgo_runner_failure emscripten emscripten node "${scheduler_fixture}"
+
 # Timers share the Go-derived heap but use different host-wait backends.
 run_emscripten emscripten emscripten-runner.mjs "${timer_fixture}" "wasm timers ok" "timers-emscripten"
 run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${timer_fixture}" "wasm timers ok" "timers-memory64"
@@ -149,9 +199,9 @@ run_wasi wasi "${gc_fixture}" "wasm gc ok" "gc-wasi"
 
 # Finalizers, cleanups, and weak references share the collector lifecycle but
 # have additional ordering, cancellation, and dynamic-call ABI requirements.
-run_emscripten emscripten emscripten-runner.mjs "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-emscripten"
-run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-memory64"
-run_wasi wasi "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-wasi"
+run_llgo_run emscripten "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-emscripten"
+run_llgo_run emscripten-memory64 "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-memory64"
+run_llgo_run wasi "${lifecycle_fixture}" "wasm lifecycle ok" "lifecycle-wasi"
 
 # A registered JS callback is a host wake source even when no Go timer exists.
 # This catches treating an empty timer heap as an immediate deadlock.
@@ -160,8 +210,8 @@ run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs "${callback_fi
 
 # Keep the legacy named aliases executable while raw js/wasm remains the
 # browser/worker-only compatibility path defined by R0.
-run_emscripten wasm emscripten-runner.mjs "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasm"
-run_wasi wasip1 "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasip1"
+run_llgo_run wasm "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasm"
+run_llgo_run wasip1 "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasip1"
 
 # Exercise test-main generation, process exit, verbose output, and host runners
 # through the public test command. The JS-specific callback case also verifies
