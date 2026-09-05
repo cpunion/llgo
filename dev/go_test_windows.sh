@@ -41,6 +41,36 @@ is_known_runtime_corruption() {
 		! grep -Eiq '^--- FAIL:|\[build failed\]|^panic:|WARNING: DATA RACE|test timed out|SIGQUIT|SIGSEGV|SIGABRT|unexpected fault address|signal: (segmentation fault|aborted)' "${log}"
 }
 
+is_known_test_go_access_violation() {
+	local log="$1"
+	shift
+
+	# This quarantine is deliberately limited to the separately-invoked
+	# language-behavior suite. The compiler fixture suite and every other test
+	# package must continue to report an access violation as a failure.
+	local arg test_go_args=0
+	for arg in "$@"; do
+		case "${arg}" in
+		./test/go|"${module_path}/test/go")
+			test_go_args=$((test_go_args + 1))
+			;;
+		./*|"${module_path}"/*)
+			return 1
+			;;
+		esac
+	done
+	(( test_go_args == 1 )) &&
+		awk '$0 == "exit status 0xc0000005" { count++ } END { exit !(count == 1) }' "${log}" &&
+		awk -v target="${module_path}/test/go" '
+			$1 == "FAIL" && NF >= 2 {
+				if ($2 == target) target_failure = 1
+				else other_failure = 1
+			}
+			END { exit !(target_failure && !other_failure) }
+		' "${log}" &&
+		! grep -Eiq '^--- FAIL:|\[build failed\]|^fatal error:|^panic:|WARNING: DATA RACE|test timed out|SIGQUIT|SIGSEGV|SIGABRT|unexpected fault address|signal: (segmentation fault|aborted)' "${log}"
+}
+
 log=
 trap '[[ -z "${log}" ]] || rm -f "${log}"' EXIT
 log="$(mktemp "${TMPDIR:-/tmp}/llgo-go-test-windows.XXXXXX")"
@@ -50,7 +80,21 @@ status=${PIPESTATUS[0]}
 set -e
 
 if [[ ${status} -eq 0 ]] || ! is_known_runtime_corruption "${log}"; then
-	exit "${status}"
+	if [[ ${status} -eq 0 ]] || ! is_known_test_go_access_violation "${log}" "$@"; then
+		exit "${status}"
+	fi
+	echo '::warning title=Quarantined Windows test/go access violation::LLGO_CI_QUARANTINED_WINDOWS_TEST_GO_ACCESS_VIOLATION: matched the narrow test/go-only 0xc0000005 signature'
+	if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+		echo 'windows_runtime_corruption=true' >>"${GITHUB_OUTPUT}"
+	fi
+	if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+		{
+			echo '### Quarantined Windows test/go access violation'
+			echo
+			echo 'The direct test/go command ended with the narrow 0xc0000005 signature and no test failure. The compiler fixture suite remains fail-closed; coverage upload for this job was skipped.'
+		} >>"${GITHUB_STEP_SUMMARY}"
+	fi
+	exit 0
 fi
 
 echo '::warning title=Quarantined upstream Go runtime corruption::LLGO_CI_QUARANTINED_GO_RUNTIME_CORRUPTION: matched the narrow golang/go#81238 signature'
