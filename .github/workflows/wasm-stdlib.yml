@@ -1,0 +1,86 @@
+name: WebAssembly standard-library reference
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stdlib-slice:
+    name: R4 stdlib slice (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: EC32
+            llgo: true
+            emscripten: true
+            node: true
+          - profile: EC64
+            llgo: true
+            emscripten: true
+            node: true
+          - profile: WC32
+            llgo: true
+            wasmtime: true
+          - profile: GJS-reference
+            node: true
+          - profile: GWASI-reference
+            wasmtime: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install LLGo dependencies
+        if: matrix.llgo
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 19
+      - name: Set up Emscripten
+        if: matrix.emscripten
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: "4.0.21"
+      - name: Set up Node
+        if: matrix.node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Set up Binaryen
+        if: matrix.llgo
+        uses: ./.github/actions/setup-binaryen
+      - name: Set up Wasmtime
+        if: matrix.wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "39.0.1"
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+      - name: Test acceptance accounting
+        run: go test ./dev/wasmstdlib -count=1
+      - name: Build LLGo
+        if: matrix.llgo
+        run: go build -o "$RUNNER_TEMP/llgo-r4" ./cmd/llgo
+      - name: Execute complete packages and classify source inventory
+        env:
+          PROFILE: ${{ matrix.profile }}
+          LLGO_BUILD_CACHE: "off"
+        run: |
+          go run ./dev/wasmstdlib -profile "$PROFILE" \
+            -llgo "$RUNNER_TEMP/llgo-r4" \
+            -report "$RUNNER_TEMP/wasm-stdlib-$PROFILE.json"
+      - name: Upload per-package results, including unvalidated packages
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-stdlib-${{ matrix.profile }}
+          path: ${{ runner.temp }}/wasm-stdlib-${{ matrix.profile }}.json
+          if-no-files-found: warn
