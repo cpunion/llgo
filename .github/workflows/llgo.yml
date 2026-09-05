@@ -669,7 +669,7 @@ jobs:
 
   wasm-runtime:
     name: wasm-runtime (Go 1.24 and 1.27)
-    timeout-minutes: 30
+    timeout-minutes: 45
     runs-on: ${{ github.repository == 'xgo-dev/llgo' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v7
@@ -734,3 +734,15 @@ jobs:
         run: |
           dev/wasm_ci_report_test.sh
           dev/test_wasm_single_worker.sh
+
+      - name: Test wasm standard-library packages
+        # Includes Binaryen/Asyncify compilation of all nine package runs.
+        # Each test binary still has its own 60-second execution deadline.
+        timeout-minutes: 20
+        shell: bash
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_BUILD_CACHE: "off"
+        run: |
+          bash dev/test_wasm_stdlib_test.sh
+          bash dev/test_wasm_stdlib.sh
