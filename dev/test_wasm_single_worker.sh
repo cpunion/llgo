@@ -90,6 +90,39 @@ expect_llgo_runner_failure() {
 	assert_no_implicit_wasm_artifacts "${temp_dir}"
 }
 
+expect_llgo_runner_timeout() {
+	local target="$1"
+	local profile="$2"
+	local runner="$3"
+	local fixture="$4"
+	local output exit_code
+	local temp_dir="${work_dir}/runner-timeout-${target}-tmp"
+	mkdir -p "${temp_dir}"
+
+	set +e
+	output="$(run_with_timeout env TMPDIR="${temp_dir}" LLGO_WASM_SCHEDULER_HANG=1 \
+		"${llgo_cmd}" run -timeout=1s -target "${target}" -emulator "${fixture}" 2>&1)"
+	exit_code=$?
+	set -e
+	printf '%s\n' "${output}"
+	if [[ ${exit_code} -ne 1 ]]; then
+		echo "expected llgo runner timeout status 1, got ${exit_code}" >&2
+		exit 1
+	fi
+	for expected in \
+		"phase=run" \
+		"target=${target}" \
+		"profile=${profile}" \
+		'artifact="' \
+		"runner=\"${runner}\"" \
+		'package="github.com/xgo-dev/llgo/internal/build/testdata/wasm-scheduler"' \
+		"status=timeout" \
+		"timeout=1s"; do
+		grep -Fq "${expected}" <<<"${output}"
+	done
+	assert_no_implicit_wasm_artifacts "${temp_dir}"
+}
+
 run_emscripten() {
 	local target="$1"
 	local runner="$2"
@@ -205,6 +238,7 @@ expect_failure "fatal error: no goroutines (main called runtime.Goexit) - deadlo
 # isolation. The other public run calls below cover successful EC32, EC64,
 # WC32, and alias execution through the same path.
 expect_llgo_runner_failure emscripten emscripten node "${scheduler_fixture}"
+expect_llgo_runner_timeout emscripten emscripten node "${scheduler_fixture}"
 
 # Timers share the Go-derived heap but use different host-wait backends.
 run_emscripten emscripten emscripten-runner.mjs "${timer_fixture}" "wasm timers ok" "timers-emscripten"
