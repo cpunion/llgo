@@ -1,0 +1,52 @@
+name: Verify Windows CPU profiler
+
+on:
+  push:
+    branches: [codex/verify-windows-cpuprof-20260906]
+
+permissions:
+  contents: read
+
+jobs:
+  profiler:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: "22"
+          windows-abi: msvc
+          windows-arch: amd64
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: "1.27.0"
+          architecture: x64
+      - name: Build LLGo
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/llgo-bin/llgo.exe" ./cmd/llgo
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: msvc
+          windows-arch: amd64
+      - name: Test native context capture
+        shell: pwsh
+        run: .\.github\workflows\test_windows_cpuprof.ps1
+      - name: Repeat CPU profile regressions
+        timeout-minutes: 10
+        shell: bash
+        env:
+          LLGO_BUILD_CACHE: "off"
+        run: |
+          set -euo pipefail
+          llgo test -v -count=10 -timeout=3m -run '^(TestCPUProfileWorkload|TestStartStopCPUProfile|TestStartCPUProfileTwice|TestCPUProfileGoroutine)$' ./test/std/runtime/pprof
+      - name: Repeat PR 2506 synchronization regression
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          llgo test -v -count=100 -timeout=2m -run '^TestConcurrentAccess$' ./test/std/sync
