@@ -4,7 +4,9 @@ This first acceptance slice runs the complete repository test packages for
 `errors`, `sort`, and `encoding/binary`. It exercises error wrapping/assertion,
 reflection-based sorting, byte-order interfaces, structured encoding, varints,
 and fixed-width integer boundaries. No test-name filter or blanket skip is used;
-the driver clears inherited `GOFLAGS` so external filters cannot narrow the suite.
+the driver clears inherited `GOFLAGS` and sets `GOENV=off` so external or saved
+filters cannot narrow the suite. Persistent `go env -w` settings are ignored;
+explicit process environment such as `GOPROXY` is still available.
 
 | Profile | Compiler and execution contract |
 | --- | --- |
@@ -32,6 +34,12 @@ expected test witness, and contain no failed/skipped test records. A failure
 stops that profile; earlier results remain in the JSON report and later packages
 remain `not-run`. Test binaries have a 60-second test deadline; the CI job bounds
 compilation and execution together to 25 minutes.
+
+The driver replaces any prior report before preparing the run. Preparation,
+execution, or summary-writing errors set `slice_result` to `fail` with a top-level
+`reason` when the report is writable. If Go environment or source selection fails,
+discovered packages remain `not-run` with an incomplete-selection reason; they are
+not classified as source-excluded. Completed package results survive later errors.
 
 The inventory walks `test/std` independently of profile build constraints, then
 checks the selected source files using `go list`. Its states are:
