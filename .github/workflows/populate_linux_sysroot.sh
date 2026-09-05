@@ -2,9 +2,12 @@
 
 set -e
 
-# Keep both architectures on the same Ubuntu 24.04 image revision. The GCC 13
-# paths in .goreleaser.yaml must match the toolchain installed in this sysroot.
-LINUX_SYSROOT_IMAGE=ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+# Pin the architecture-specific images from the same Ubuntu 24.04 index
+# (sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517).
+# Docker's classic image store cannot retain two platforms under one index
+# digest. The GCC 13 paths in .goreleaser.yaml must match these sysroots.
+LINUX_AMD64_IMAGE=ubuntu:24.04@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
+LINUX_ARM64_IMAGE=ubuntu:24.04@sha256:95fa486768020359141f1318720f43e7982ef926c792891d984aef9aaf05e7ea
 
 TMPDIR="$(mktemp -d)"
 export TMPDIR
@@ -138,14 +141,15 @@ chmod +x "${POPULATE_LINUX_SYSROOT_SCRIPT}"
 populate_linux_sysroot() {
 	local ARCH="$1"
 	local PREFIX="$2"
+	local IMAGE="$3"
 	docker run \
 		--rm \
 		--platform "linux/${ARCH}" \
 		-v "$(pwd)/${PREFIX}":/sysroot \
 		-v "${POPULATE_LINUX_SYSROOT_SCRIPT}":/populate_linux_sysroot.sh:ro \
-		"${LINUX_SYSROOT_IMAGE}" \
+		"${IMAGE}" \
 		/populate_linux_sysroot.sh
 }
 # Populate serially to bound the memory and disk pressure of extraction.
-populate_linux_sysroot amd64 "${LINUX_AMD64_PREFIX}"
-populate_linux_sysroot arm64 "${LINUX_ARM64_PREFIX}"
+populate_linux_sysroot amd64 "${LINUX_AMD64_PREFIX}" "${LINUX_AMD64_IMAGE}"
+populate_linux_sysroot arm64 "${LINUX_ARM64_PREFIX}" "${LINUX_ARM64_IMAGE}"
