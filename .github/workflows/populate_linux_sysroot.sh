@@ -2,6 +2,10 @@
 
 set -e
 
+# Keep both architectures on the same Ubuntu 24.04 image revision. The GCC 13
+# paths in .goreleaser.yaml must match the toolchain installed in this sysroot.
+LINUX_SYSROOT_IMAGE=ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+
 TMPDIR="$(mktemp -d)"
 export TMPDIR
 trap 'rm -rf "${TMPDIR}"' EXIT
@@ -14,10 +18,14 @@ POPULATE_LINUX_SYSROOT_SCRIPT="$(mktemp)"
 cat > "${POPULATE_LINUX_SYSROOT_SCRIPT}" << EOF
 #!/bin/bash
 
+set -e
+
 export DEBIAN_FRONTEND=noninteractive
 
-apt-get update
-apt-get install -y build-essential zlib1g-dev rsync
+apt-get -o Acquire::Retries=3 update
+apt-get -o Acquire::Retries=3 install -y build-essential zlib1g-dev rsync
+dpkg-query -W libc6 libc6-dev gcc g++ libstdc++6
+test -f /usr/include/c++/13/string
 
 error() {
 	echo -e "\$1" >&2
@@ -134,12 +142,10 @@ populate_linux_sysroot() {
 		--rm \
 		--platform "linux/${ARCH}" \
 		-v "$(pwd)/${PREFIX}":/sysroot \
-		-v "${POPULATE_LINUX_SYSROOT_SCRIPT}":/populate_linux_sysroot.sh \
-		debian:bullseye \
+		-v "${POPULATE_LINUX_SYSROOT_SCRIPT}":/populate_linux_sysroot.sh:ro \
+		"${LINUX_SYSROOT_IMAGE}" \
 		/populate_linux_sysroot.sh
 }
-# Docker's classic image store keeps only one platform for a tag. Pulling the
-# same tag for two platforms concurrently can replace the image while the other
-# container is starting. Populate the sysroots serially to keep the tag stable.
+# Populate serially to bound the memory and disk pressure of extraction.
 populate_linux_sysroot amd64 "${LINUX_AMD64_PREFIX}"
 populate_linux_sysroot arm64 "${LINUX_ARM64_PREFIX}"
