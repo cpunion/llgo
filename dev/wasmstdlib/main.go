@@ -25,6 +25,9 @@ var acceptance = []testCase{
 	{"errors", "TestAs"},
 	{"sort", "TestSliceHelpers"},
 	{"encoding/binary", "TestReadWriteStruct"},
+	{"fmt", "TestFormatterInterface"},
+	{"strconv", "TestIntSizeMatchesUintSize"},
+	{"io", "TestPipeWriterAndReaderCloseWithError"},
 }
 
 type profile struct {
@@ -163,18 +166,24 @@ func validateOutput(output []byte, witness string) (int, error) {
 	passes, tests, found := 0, 0, false
 	for _, raw := range strings.Split(string(output), "\n") {
 		line := strings.TrimSuffix(raw, "\r")
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "--- FAIL:") || strings.HasPrefix(trimmed, "--- SKIP:") {
-			return 0, fmt.Errorf("failed or skipped test: %s", trimmed)
-		}
 		if line == "PASS" {
 			passes++
 		}
-		if strings.HasPrefix(line, "--- PASS: ") {
-			tests++
+		// A test may write stdout without a trailing newline (fmt.Print is
+		// tested this way). Its result record then follows user output on the
+		// same line. Subtest names contain '/', regardless of indentation.
+		marker := strings.LastIndex(line, "--- ")
+		if marker < 0 {
+			continue
 		}
-		if strings.HasPrefix(line, "--- PASS: "+witness+" (") {
-			found = true
+		status, rest, ok := strings.Cut(line[marker+4:], ": ")
+		if status == "FAIL" || status == "SKIP" {
+			return 0, fmt.Errorf("failed or skipped test: %s", line[marker:])
+		}
+		fields := strings.Fields(rest)
+		if ok && status == "PASS" && len(fields) == 2 && strings.HasPrefix(fields[1], "(") && strings.HasSuffix(fields[1], ")") && !strings.Contains(fields[0], "/") {
+			tests++
+			found = found || fields[0] == witness
 		}
 	}
 	if passes != 1 || !found {

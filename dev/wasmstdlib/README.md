@@ -1,12 +1,14 @@
 # R4 standard-library behavior and reference hosts
 
-This first acceptance slice runs the complete repository test packages for
-`errors`, `sort`, and `encoding/binary`. It exercises error wrapping/assertion,
-reflection-based sorting, byte-order interfaces, structured encoding, varints,
-and fixed-width integer boundaries. No test-name filter or blanket skip is used;
-the driver clears inherited `GOFLAGS` and sets `GOENV=off` so external or saved
-filters cannot narrow the suite. Persistent `go env -w` settings are ignored;
-explicit process environment such as `GOPROXY` is still available.
+This acceptance slice runs the complete repository test packages for `errors`,
+`sort`, `encoding/binary`, `fmt`, `strconv`, and `io`. It exercises error wrapping
+and assertion, reflection-based sorting, byte-order interfaces, structured
+encoding, varints, fixed-width and native-width integer boundaries, formatting
+and scanning interfaces, readers/writers, and pipe goroutine/timer coordination.
+No test-name filter or blanket skip is used; the driver clears inherited
+`GOFLAGS` and sets `GOENV=off` so external or saved filters cannot narrow the suite.
+Persistent `go env -w` settings are ignored; explicit process environment such as
+`GOPROXY` is still available.
 
 | Profile | Compiler and execution contract |
 | --- | --- |
