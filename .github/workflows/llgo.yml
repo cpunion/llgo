@@ -652,7 +652,7 @@ jobs:
 
   wasm-runtime:
     name: wasm-runtime (${{ matrix.suite }})
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -723,3 +723,16 @@ jobs:
         run: |
           dev/wasm_ci_report_test.sh
           dev/test_wasm_single_worker.sh "${{ matrix.suite }}"
+
+      - name: Test wasm standard-library packages
+        if: matrix.suite == 'runtime'
+        # Includes Binaryen/Asyncify compilation of all nine package runs.
+        # Each test binary still has its own 60-second execution deadline.
+        timeout-minutes: 20
+        shell: bash
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_BUILD_CACHE: "off"
+        run: |
+          bash dev/test_wasm_stdlib_test.sh
+          bash dev/test_wasm_stdlib.sh
