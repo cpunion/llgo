@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  full:
+  classify:
     runs-on: windows-11-arm
-    timeout-minutes: 35
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-deps
@@ -18,6 +18,11 @@ jobs:
           llvm-version: "22"
           windows-abi: mingw
           windows-arch: arm64
+      - uses: ./.github/actions/setup-demo-deps
+        with:
+          windows-abi: mingw
+          windows-arch: arm64
+          install-lldb-python: "true"
       - uses: ./.github/actions/setup-go
         with:
           go-version: "1.27.0"
@@ -46,29 +51,73 @@ jobs:
           cp .github/test-go.sum "$RUNNER_TEMP/test.sum"
           go mod edit -modfile="$modfile" -go=1.27 \
             -replace="github.com/xgo-dev/llgo/runtime=$GITHUB_WORKSPACE/runtime"
-          "$LLGO" test -c -modfile="$modfile" \
+          "$LLGO" test -c -ldflags=-w=false -modfile="$modfile" \
             -o="$RUNNER_TEMP/go-reflect-stress.exe" ./test/go
-      - name: Stress one LLGo binary and capture a crash
-        timeout-minutes: 25
+      - name: Classify and capture the LLGo crash
+        timeout-minutes: 20
         shell: bash
+        env:
+          PYTHONHOME: ${{ env.LLGO_WINDOWS_LLDB_PYTHON_HOME }}
+          PYTHONPATH: ${{ env.LLGO_WINDOWS_LLDB_PYTHONPATH }}
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: |
-          set +e
+          set -euo pipefail
+          PATH="$(cygpath -u "$PYTHONHOME"):$PATH"
+          export PATH
           binary="$RUNNER_TEMP/go-reflect-stress.exe"
-          test_args=(
-            -test.v
-            '-test.run=^TestReflectMakeFuncGoroutineStartup$'
-            -test.count=20
-            -test.timeout=20m
-          )
-          "$binary" "${test_args[@]}"
-          status=$?
-          if (( status == 0 )); then
-            exit 0
-          fi
-          echo "LLGo stress failed with status $status; retrying under LLDB"
-          "$LLGO_LLDB" --batch -o run -k "thread backtrace all" -- \
-            "$binary" "${test_args[@]}"
-          exit "$status"
+
+          run_lldb() {
+            local label=$1
+            local pattern=$2
+            local count=$3
+            local log="$RUNNER_TEMP/${label// /-}.log"
+            echo "::group::$label"
+            set +e
+            "$LLGO_LLDB" --batch -o run -k "thread backtrace all" -- \
+              "$binary" -test.v "-test.run=$pattern" \
+              "-test.count=$count" -test.timeout=3m 2>&1 | tee "$log"
+            local status=${PIPESTATUS[0]}
+            set -e
+            echo "::endgroup::"
+            if grep -Eiq 'stop reason.*(Exception|EXCEPTION_ACCESS_VIOLATION|0xc0000005)' "$log"; then
+              return 86
+            fi
+            return "$status"
+          }
+
+          run_lldb "ordinary goroutine startup with concurrent GC" \
+            '^TestDiagnosticGoroutineStartupGC$' 3
+          run_lldb "reflect goroutine startup without explicit GC" \
+            '^TestDiagnosticReflectMakeFuncGoroutineNoExplicitGC$' 3
+
+          for attempt in $(seq 1 6); do
+            echo "::group::reflect plus GC, fresh process $attempt"
+            "$binary" -test.v \
+              '-test.run=^TestReflectMakeFuncGoroutineStartup/pointer_argument$' \
+              -test.count=1 -test.timeout=3m \
+              >"$RUNNER_TEMP/reflect-load-$attempt.log" 2>&1 &
+            load_pid=$!
+            debug_log="$RUNNER_TEMP/reflect-debug-$attempt.log"
+            set +e
+            "$LLGO_LLDB" --batch -o run -k "thread backtrace all" -- \
+              "$binary" -test.v \
+              '-test.run=^TestReflectMakeFuncGoroutineStartup/pointer_argument$' \
+              -test.count=1 -test.timeout=3m 2>&1 | tee "$debug_log"
+            debug_status=${PIPESTATUS[0]}
+            wait "$load_pid"
+            load_status=$?
+            set -e
+            if grep -Eiq 'stop reason.*(Exception|EXCEPTION_ACCESS_VIOLATION|0xc0000005)' "$debug_log"; then
+              debug_status=86
+            fi
+            cat "$RUNNER_TEMP/reflect-load-$attempt.log"
+            echo "debug status=$debug_status; load status=$load_status"
+            echo "::endgroup::"
+            if (( debug_status != 0 || load_status != 0 )); then
+              exit 1
+            fi
+          done
       - name: Stress the official Go control
         if: always()
         shell: bash
