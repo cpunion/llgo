@@ -37,23 +37,36 @@ func ReadMemStats(m *runtime.MemStats) {
 }
 
 func GC() {
-	collectAndRunFinalizers()
+	collectAndRunFinalizers("first")
 	// Run one extra cycle so weak-pointer cleanup hooks (unique/weak) see
 	// finalized state before we trigger map cleanup callbacks.
-	collectAndRunFinalizers()
+	collectAndRunFinalizers("second")
 	unique_runtime_notifyMapCleanup()
 	if poolCleanup != nil {
 		poolCleanup()
 	}
 }
 
-func collectAndRunFinalizers() {
+func collectAndRunFinalizers(cycle string) {
+	start := runtimeNano()
 	bdwgc.Gcollect()
+	reportSlowGCStage(cycle+" collection", start)
 	// GC_gcollect only discovers unreachable finalizable objects. Explicitly
 	// drain BDWGC's ready queue so runtime.GC does not depend on a later
 	// allocation to invoke the callbacks that feed runFinalizers.
+	start = runtimeNano()
 	bdwgc.InvokeFinalizers()
+	reportSlowGCStage(cycle+" invoke finalizers", start)
+	start = runtimeNano()
 	runFinalizers()
+	reportSlowGCStage(cycle+" run finalizers", start)
+}
+
+func reportSlowGCStage(stage string, start int64) {
+	elapsed := runtimeNano() - start
+	if elapsed >= 100_000_000 {
+		print("llgo GC diagnostic: ", stage, " took ", elapsed/1_000_000, "ms\n")
+	}
 }
 
 func saturatingSub(x, y uintptr) uintptr {
