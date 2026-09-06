@@ -2,7 +2,9 @@ name: Diagnose main Windows ARM64 MinGW failed binaries
 
 on:
   push:
-    branches: [codex/diagnose-main-winarm-mingw-goroot-20260906]
+    branches:
+      - codex/diagnose-main-winarm-mingw-goroot-20260906
+      - codex/diagnose-main-winarm-registration-barrier-20260906
 
 permissions:
   contents: read
