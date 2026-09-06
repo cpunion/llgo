@@ -69,7 +69,7 @@ func runCmd(cmd *base.Command, args []string) {
 	conf.RunArgs = buildTestArgs(testBinaryArgs)
 	conf.TestFailFast = flags.TestFailfast
 	conf.TestJSON = flags.TestJSON
-	conf.TestRunSequential = testRunsMustBeSequential()
+	conf.TestRunSequential = testRunsMustBeSequential() || os.Getenv("LLGO_TEST_RUN_SEQUENTIAL") == "1"
 
 	pkgArgs := cmd.Flag.Args()
 	_, err := build.Do(pkgArgs, conf)
