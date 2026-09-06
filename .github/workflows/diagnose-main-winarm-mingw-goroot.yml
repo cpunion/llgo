@@ -18,10 +18,6 @@ jobs:
           llvm-version: "22"
           windows-abi: mingw
           windows-arch: arm64
-      - uses: ./.github/actions/setup-demo-deps
-        with:
-          windows-abi: mingw
-          windows-arch: arm64
       - uses: ./.github/actions/setup-go
         with:
           go-version: "1.27.0"
