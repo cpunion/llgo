@@ -1,4 +1,4 @@
-name: Diagnose main Windows ARM64 MinGW full tests
+name: Diagnose main Windows ARM64 MinGW serial full tests
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
         with:
           windows-abi: mingw
           windows-arch: arm64
-      - name: Run full test tree with bounded package parallelism
+      - name: Run full test tree serially with per-test output
         timeout-minutes: 45
         shell: bash
         env:
@@ -41,5 +41,6 @@ jobs:
           LLGO_BUILD_CACHE: "1"
           LLGO_GOROOT_HEARTBEAT_SECONDS: "30"
           LLGO_STDIO_NOBUF: "1"
-          LLGO_TEST_JOBS: "2"
+          LLGO_TEST_JOBS: "1"
+          LLGO_TEST_VERBOSE: "1"
         run: dev/test_go_version.sh 1.27
