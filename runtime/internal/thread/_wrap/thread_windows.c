@@ -6,7 +6,9 @@
  */
 #if defined(LLGO_USE_PTHREAD)
 #include <pthread.h>
-#include <gc/gc_pthread_redirects.h>
+
+int GC_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                      void *(*start)(void *), void *arg);
 #endif
 
 typedef __SIZE_TYPE__ llgo_size_t;
