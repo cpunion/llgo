@@ -60,3 +60,19 @@ func TestDiagnosticReflectMakeFuncGoroutineNoExplicitGC(t *testing.T) {
 		}
 	}
 }
+
+func TestDiagnosticSequentialGoroutineLifecycle(t *testing.T) {
+	const n = 2000
+	done := make(chan int)
+	for i := 0; i < n; i++ {
+		go func(value int) {
+			done <- value
+		}(i)
+		if got := <-done; got != i {
+			t.Fatalf("goroutine %d returned %d", i, got)
+		}
+		if i%32 == 31 {
+			runtime.GC()
+		}
+	}
+}
