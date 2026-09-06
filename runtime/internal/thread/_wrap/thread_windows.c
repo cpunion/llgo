@@ -4,6 +4,11 @@
  * declarations local lets the compiler target the MSVC ABI while the SDK is
  * needed only by the final native link.
  */
+#if defined(LLGO_USE_PTHREAD)
+#include <pthread.h>
+#include <gc/gc_pthread_redirects.h>
+#endif
+
 typedef __SIZE_TYPE__ llgo_size_t;
 typedef unsigned long llgo_dword;
 typedef unsigned int llgo_uint;
@@ -69,21 +74,35 @@ typedef struct {
     void *arg;
 } llgo_thread_start_data;
 
+#if defined(LLGO_USE_PTHREAD)
+static void *llgo_thread_start(void *raw)
+#else
 static llgo_dword LLGO_WINAPI llgo_thread_start(void *raw)
+#endif
 {
     llgo_thread_start_data data = *(llgo_thread_start_data *)raw;
     HeapFree(GetProcessHeap(), 0, raw);
-    data.routine(data.arg);
+#if defined(LLGO_USE_PTHREAD)
+    return data.routine(data.arg);
+#else
+    (void)data.routine(data.arg);
     return 0;
+#endif
 }
 
 int llgo_win_thread_create_detached(llgo_size_t stack_size,
                                     llgo_thread_routine routine, void *arg)
 {
     llgo_thread_start_data *data;
+#if defined(LLGO_USE_PTHREAD)
+    pthread_attr_t attr;
+    pthread_t thread;
+    int error;
+#else
     llgo_handle thread;
     llgo_dword flags = 0;
     llgo_dword error;
+#endif
 
     if (routine == 0)
         return 87; /* ERROR_INVALID_PARAMETER */
@@ -93,6 +112,22 @@ int llgo_win_thread_create_detached(llgo_size_t stack_size,
         return llgo_error_not_enough_memory;
     data->routine = routine;
     data->arg = arg;
+#if defined(LLGO_USE_PTHREAD)
+    error = pthread_attr_init(&attr);
+    if (error != 0) {
+        HeapFree(GetProcessHeap(), 0, data);
+        return error;
+    }
+    error = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (error == 0 && stack_size != 0)
+        error = pthread_attr_setstacksize(&attr, stack_size);
+    if (error == 0)
+        error = GC_pthread_create(&thread, &attr, llgo_thread_start, data);
+    (void)pthread_attr_destroy(&attr);
+    if (error != 0)
+        HeapFree(GetProcessHeap(), 0, data);
+    return error;
+#else
     if (stack_size != 0)
         flags |= llgo_stack_size_is_a_reservation;
 #if defined(LLGO_USE_BDWGC)
@@ -107,11 +142,14 @@ int llgo_win_thread_create_detached(llgo_size_t stack_size,
     }
     CloseHandle(thread);
     return 0;
+#endif
 }
 
 void llgo_win_thread_exit(void)
 {
-#if defined(LLGO_USE_BDWGC)
+#if defined(LLGO_USE_PTHREAD)
+    pthread_exit(0);
+#elif defined(LLGO_USE_BDWGC)
     GC_ExitThread(0);
 #else
     ExitThread(0);
