@@ -61,6 +61,29 @@ func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdou
 	if err == nil {
 		return nil
 	}
+	if os.Getenv("LLGO_TEST_RETRY_FAILURE") == "1" {
+		fmt.Fprintf(stderr, "retrying failed test binary: %s\n", program.app)
+		retry := exec.Command(program.app, conf.RunArgs...)
+		commands.configure(retry)
+		retry.Dir = program.pkgDir
+		retry.Stdout = stdout
+		retry.Stderr = stderr
+		retryErr := retry.Run()
+		fmt.Fprintf(stderr, "retry result: %v\n", retryErr)
+		if retryErr != nil && os.Getenv("LLGO_TEST_RETRY_LLDB") == "1" {
+			if lldb := os.Getenv("LLGO_LLDB"); lldb != "" {
+				args := []string{"--batch", "-o", "run", "-k", "thread backtrace all", "--", program.app}
+				args = append(args, conf.RunArgs...)
+				debug := exec.Command(lldb, args...)
+				commands.configure(debug)
+				debug.Dir = program.pkgDir
+				debug.Stdout = stdout
+				debug.Stderr = stderr
+				fmt.Fprintf(stderr, "running failed test binary under LLDB: %s\n", program.app)
+				fmt.Fprintf(stderr, "LLDB result: %v\n", debug.Run())
+			}
+		}
+	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		fmt.Fprintf(stderr, "%s: exit code %d\n", program.app, exitErr.ExitCode())
 	} else {

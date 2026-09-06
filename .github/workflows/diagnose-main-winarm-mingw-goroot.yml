@@ -1,4 +1,4 @@
-name: Diagnose main Windows ARM64 MinGW concurrent build
+name: Diagnose main Windows ARM64 MinGW failed binaries
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
         with:
           windows-abi: mingw
           windows-arch: arm64
-      - name: Run concurrent build with serial test execution
+      - name: Run concurrent build and retry failed binaries
         timeout-minutes: 45
         shell: bash
         env:
@@ -42,6 +42,11 @@ jobs:
           LLGO_GOROOT_HEARTBEAT_SECONDS: "30"
           LLGO_STDIO_NOBUF: "1"
           LLGO_TEST_JOBS: "2"
-          LLGO_TEST_RUN_SEQUENTIAL: "1"
+          LLGO_TEST_RETRY_FAILURE: "1"
+          LLGO_TEST_RETRY_LLDB: "1"
           LLGO_TEST_VERBOSE: "1"
         run: dev/test_go_version.sh 1.27
+      - name: Stress the official Go control
+        if: always()
+        shell: bash
+        run: go test ./test/go -run '^TestReflectMakeFuncGoroutineStartup$' -count=100
