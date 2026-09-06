@@ -122,6 +122,15 @@ jobs:
               exit 1
             fi
           done
+      - name: Run the focused LLGo GOROOT package
+        timeout-minutes: 10
+        shell: bash
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo.exe
+          LLGO_BUILD_CACHE: "1"
+          LLGO_STDIO_NOBUF: "1"
+          LLGO_TEST_TIMEOUT: 8m
+        run: dev/test_go_version.sh 1.27 ./test/goroot
       - name: Stress the official Go control
         if: always()
         shell: bash
