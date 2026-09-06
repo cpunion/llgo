@@ -22,9 +22,15 @@ typedef void(LLGO_WINAPI *llgo_win_fls_callback)(void *value);
 __declspec(dllimport) llgo_handle LLGO_WINAPI CreateThread(
     void *attributes, llgo_size_t stack_size, llgo_win_thread_start start,
     void *arg, llgo_dword flags, llgo_dword *thread_id);
+__declspec(dllimport) llgo_handle LLGO_WINAPI CreateEventW(
+    void *attributes, llgo_bool manual_reset, llgo_bool initial_state,
+    const unsigned short *name);
 __declspec(dllimport) void LLGO_WINAPI ExitThread(llgo_dword exit_code);
 __declspec(dllimport) llgo_bool LLGO_WINAPI CloseHandle(llgo_handle handle);
 __declspec(dllimport) llgo_dword LLGO_WINAPI GetLastError(void);
+__declspec(dllimport) llgo_bool LLGO_WINAPI SetEvent(llgo_handle event);
+__declspec(dllimport) llgo_dword LLGO_WINAPI
+WaitForSingleObject(llgo_handle handle, llgo_dword milliseconds);
 __declspec(dllimport) llgo_handle LLGO_WINAPI GetProcessHeap(void);
 __declspec(dllimport) void *LLGO_WINAPI HeapAlloc(
     llgo_handle heap, llgo_dword flags, llgo_size_t bytes);
@@ -46,6 +52,7 @@ void LLGO_WINAPI GC_ExitThread(llgo_dword exit_code);
 
 enum {
     llgo_error_not_enough_memory = 8,
+    llgo_infinite = 0xffffffffUL,
     llgo_stack_size_is_a_reservation = 0x00010000UL,
 };
 
@@ -67,11 +74,19 @@ typedef void *(*llgo_thread_routine)(void *arg);
 typedef struct {
     llgo_thread_routine routine;
     void *arg;
+#if defined(LLGO_WAIT_FOR_BDWGC_REGISTRATION)
+    llgo_handle registered;
+#endif
 } llgo_thread_start_data;
 
 static llgo_dword LLGO_WINAPI llgo_thread_start(void *raw)
 {
     llgo_thread_start_data data = *(llgo_thread_start_data *)raw;
+#if defined(LLGO_WAIT_FOR_BDWGC_REGISTRATION)
+    /* GC_CreateThread invokes this routine only after registering the child
+     * with BDWGC. Wake the creator before releasing the handoff record. */
+    SetEvent(data.registered);
+#endif
     HeapFree(GetProcessHeap(), 0, raw);
     data.routine(data.arg);
     return 0;
@@ -82,6 +97,9 @@ int llgo_win_thread_create_detached(llgo_size_t stack_size,
 {
     llgo_thread_start_data *data;
     llgo_handle thread;
+#if defined(LLGO_WAIT_FOR_BDWGC_REGISTRATION)
+    llgo_handle registered;
+#endif
     llgo_dword flags = 0;
     llgo_dword error;
 
@@ -93,6 +111,15 @@ int llgo_win_thread_create_detached(llgo_size_t stack_size,
         return llgo_error_not_enough_memory;
     data->routine = routine;
     data->arg = arg;
+#if defined(LLGO_WAIT_FOR_BDWGC_REGISTRATION)
+    registered = CreateEventW(0, 0, 0, 0);
+    if (registered == 0) {
+        error = GetLastError();
+        HeapFree(GetProcessHeap(), 0, data);
+        return (int)error;
+    }
+    data->registered = registered;
+#endif
     if (stack_size != 0)
         flags |= llgo_stack_size_is_a_reservation;
 #if defined(LLGO_USE_BDWGC)
@@ -102,9 +129,19 @@ int llgo_win_thread_create_detached(llgo_size_t stack_size,
 #endif
     if (thread == 0) {
         error = GetLastError();
+#if defined(LLGO_WAIT_FOR_BDWGC_REGISTRATION)
+        CloseHandle(registered);
+#endif
         HeapFree(GetProcessHeap(), 0, data);
         return (int)error;
     }
+#if defined(LLGO_WAIT_FOR_BDWGC_REGISTRATION)
+    /* Once the child reaches llgo_thread_start, GC_win32_start_inner has
+     * completed GC_register_my_thread. Waiting here prevents a fast stream of
+     * creators from outrunning collector registration on MinGW. */
+    (void)WaitForSingleObject(registered, llgo_infinite);
+    CloseHandle(registered);
+#endif
     CloseHandle(thread);
     return 0;
 }
