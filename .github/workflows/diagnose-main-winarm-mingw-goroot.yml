@@ -1,4 +1,4 @@
-name: Diagnose main Windows ARM64 MinGW goroot
+name: Diagnose main Windows ARM64 MinGW full tests
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  goroot:
+  full:
     runs-on: windows-11-arm
     timeout-minutes: 35
     steps:
@@ -33,14 +33,13 @@ jobs:
         with:
           windows-abi: mingw
           windows-arch: arm64
-      - name: Run goroot package with per-test output
-        timeout-minutes: 24
+      - name: Run full test tree with bounded package parallelism
+        timeout-minutes: 45
         shell: bash
         env:
           LLGO: ${{ runner.temp }}/llgo-bin/llgo.exe
           LLGO_BUILD_CACHE: "1"
           LLGO_GOROOT_HEARTBEAT_SECONDS: "30"
           LLGO_STDIO_NOBUF: "1"
-          LLGO_TEST_JOBS: "1"
-          LLGO_TEST_VERBOSE: "1"
-        run: dev/test_go_version.sh 1.27 ./test/goroot
+          LLGO_TEST_JOBS: "2"
+        run: dev/test_go_version.sh 1.27
