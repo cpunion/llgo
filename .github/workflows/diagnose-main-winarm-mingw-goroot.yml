@@ -33,19 +33,42 @@ jobs:
         with:
           windows-abi: mingw
           windows-arch: arm64
-      - name: Run concurrent build and retry failed binaries
-        timeout-minutes: 45
+      - name: Build one LLGo reflect stress binary
         shell: bash
         env:
           LLGO: ${{ runner.temp }}/llgo-bin/llgo.exe
           LLGO_BUILD_CACHE: "1"
-          LLGO_GOROOT_HEARTBEAT_SECONDS: "30"
           LLGO_STDIO_NOBUF: "1"
-          LLGO_TEST_JOBS: "2"
-          LLGO_TEST_RETRY_FAILURE: "1"
-          LLGO_TEST_RETRY_LLDB: "1"
-          LLGO_TEST_VERBOSE: "1"
-        run: dev/test_go_version.sh 1.27
+        run: |
+          set -euo pipefail
+          modfile="$RUNNER_TEMP/test.mod"
+          cp .github/test-go.mod "$modfile"
+          cp .github/test-go.sum "$RUNNER_TEMP/test.sum"
+          go mod edit -modfile="$modfile" -go=1.27 \
+            -replace="github.com/xgo-dev/llgo/runtime=$GITHUB_WORKSPACE/runtime"
+          "$LLGO" test -c -modfile="$modfile" \
+            -o="$RUNNER_TEMP/go-reflect-stress.exe" ./test/go
+      - name: Stress one LLGo binary and capture a crash
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set +e
+          binary="$RUNNER_TEMP/go-reflect-stress.exe"
+          test_args=(
+            -test.v
+            '-test.run=^TestReflectMakeFuncGoroutineStartup$'
+            -test.count=20
+            -test.timeout=20m
+          )
+          "$binary" "${test_args[@]}"
+          status=$?
+          if (( status == 0 )); then
+            exit 0
+          fi
+          echo "LLGo stress failed with status $status; retrying under LLDB"
+          "$LLGO_LLDB" --batch -o run -k "thread backtrace all" -- \
+            "$binary" "${test_args[@]}"
+          exit "$status"
       - name: Stress the official Go control
         if: always()
         shell: bash
