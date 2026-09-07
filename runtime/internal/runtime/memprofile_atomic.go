@@ -2,14 +2,17 @@
 
 package runtime
 
-import "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
+import "sync/atomic"
 
-type memProfileCounter = uint64
+// Reuse the standard library's compiler-recognized align64 marker rather than
+// placing an atomically accessed bare uint64 in a four-byte-aligned wasm32
+// aggregate.
+type memProfileCounter = atomic.Uint64
 
 func memProfileAddObject(p *memProfileCounter) {
-	atomic.Add(p, memProfileCounter(1))
+	p.Add(1)
 }
 
-func memProfileLoadObjects(p *memProfileCounter) memProfileCounter {
-	return atomic.Load(p)
+func memProfileLoadObjects(p *memProfileCounter) uint64 {
+	return p.Load()
 }
