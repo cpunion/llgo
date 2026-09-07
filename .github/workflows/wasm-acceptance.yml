@@ -73,22 +73,6 @@ jobs:
               -max-rss-mib 4096 -rss-warn-mib 1024 \
               -min-memory-free-percent 15 -min-swap-free-mib 512
           ) 2>&1 | tee "$RUNNER_TEMP/goroot-$PROFILE.log"
-      - name: Exercise raw and C-profile modules in a real browser
-        if: ${{ matrix.profile == 'GJS' }}
-        env:
-          LLGO: ${{ runner.temp }}/llgo
-          LLGO_BUILD_CACHE: 'on'
-        run: |
-          set -o pipefail
-          mkdir -p "$RUNNER_TEMP/wasm-browser"
-          dev/test_wasm_browser.sh 2>&1 | tee "$RUNNER_TEMP/wasm-browser/acceptance.log"
-      - name: Preserve browser output and diagnostics
-        if: ${{ always() && matrix.profile == 'GJS' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: wasm-browser
-          path: ${{ runner.temp }}/wasm-browser/
-          if-no-files-found: warn
       - name: Preserve sentinel log
         if: always()
         uses: actions/upload-artifact@v7
@@ -98,6 +82,44 @@ jobs:
             ${{ runner.temp }}/goroot-${{ matrix.profile }}.log
             ${{ runner.temp }}/goroot-smoke-${{ matrix.profile }}.json
           if-no-files-found: error
+
+  browser:
+    name: wasm browser acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: ./.github/actions/setup-go
+      - name: Build LLGo
+        run: go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+      - name: Exercise raw and C-profile modules in a real browser
+        env:
+          LLGO: ${{ runner.temp }}/llgo
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/wasm-browser"
+          dev/test_wasm_browser.sh 2>&1 | tee "$RUNNER_TEMP/wasm-browser/acceptance.log"
+      - name: Preserve browser output and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-browser
+          path: ${{ runner.temp }}/wasm-browser/
+          if-no-files-found: warn
 
   goroot:
     name: wasm GOROOT (${{ matrix.profile }}, ${{ matrix.shard }}/4)

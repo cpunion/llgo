@@ -28,6 +28,14 @@ const print = (...args) => {
     update();
   }
 };
+// wasm_exec.js implements fd 1/2 with console.log in browsers. Mirror that
+// official output into the result document so Go panics and the completion
+// witness are observable by the headless acceptance runner.
+const consoleLog = console.log.bind(console);
+console.log = (...args) => {
+  consoleLog(...args);
+  print(...args);
+};
 const recordExit = status => {
   if (status !== 0) fail(`module exited with status ${status}`);
 };
@@ -52,6 +60,10 @@ setTimeout(() => {
   if (!initialized || !completed) fail("timed out waiting for wasm timers ok");
 }, deadline);
 try {
+  // Use the selected Go toolchain's host contract. Besides the official Go
+  // module runner, wasm_exec.js supplies the js/wasm standard library globals
+  // used by LLGo's Go and Emscripten profiles.
+  await import("./wasm_exec.js");
   const name = query.get("module");
   if (!name || !/^[a-z0-9_.-]+\.mjs$/i.test(name)) {
     throw new Error("invalid module name");
@@ -69,6 +81,7 @@ try {
     preRun: [module => {
       if (module.ENV != null) {
         module.ENV.LLGO_WASM_TEST_ENV = "wasm-env-ok";
+        module.ENV.GOTRACEBACK = "system";
       }
     }],
   });
