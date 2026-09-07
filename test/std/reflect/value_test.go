@@ -45,6 +45,24 @@ func TestValueOperations(t *testing.T) {
 	}
 }
 
+func TestInterfaceOfSecondFourByteAlignedStructField(t *testing.T) {
+	type value struct {
+		Wall uint64
+		Ext  int64
+		Ptr  *int
+	}
+	x := 7
+	want := value{Wall: 0x1020304050607080, Ext: -0x102030405060708, Ptr: &x}
+	pair := struct {
+		First, Second value
+	}{value{}, want}
+
+	got := reflect.ValueOf(pair).Field(1).Interface().(value)
+	if got.Wall != want.Wall || got.Ext != want.Ext || got.Ptr != want.Ptr {
+		t.Fatalf("second reflected field = %#v, want %#v", got, want)
+	}
+}
+
 // Test Value.Set operations
 func TestValueSet(t *testing.T) {
 	// Test SetInt
