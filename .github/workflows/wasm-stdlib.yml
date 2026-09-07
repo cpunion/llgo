@@ -33,7 +33,7 @@ jobs:
           - profile: WC32
             llgo: true
             wasmtime: true
-            # Six uncached WASI builds include the full Binaryen Asyncify
+            # Each of the six WASI links includes the full Binaryen Asyncify
             # transform. Individual test execution still has a 60s deadline.
             timeout: 40
           - profile: GJS-reference
@@ -75,7 +75,7 @@ jobs:
       - name: Execute complete packages and classify source inventory
         env:
           PROFILE: ${{ matrix.profile }}
-          LLGO_BUILD_CACHE: "off"
+          LLGO_BUILD_CACHE: "on"
         run: |
           go run ./dev/wasmstdlib -profile "$PROFILE" \
             -llgo "$RUNNER_TEMP/llgo-r4" \

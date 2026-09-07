@@ -207,10 +207,13 @@ func testCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 	if p.Reference {
 		helper := filepath.Join(goRoot, "lib", "wasm", "go_"+p.GOOS+"_wasm_exec")
 		args = append(args, "-exec="+strconv.Quote(helper), "./test/std/"+pkg)
-		return command{goCmd, args, map[string]string{"GOOS": p.GOOS, "GOARCH": "wasm", "CGO_ENABLED": "0", "GOWASIRUNTIME": "wasmtime"}}
+		return command{goCmd, args, map[string]string{"GOOS": p.GOOS, "GOARCH": "wasm", "CGO_ENABLED": "0", "GOWASIRUNTIME": "wasmtime", "GOMAXPROCS": "1"}}
 	}
 	args = append(args, "-target", p.Target, "-emulator", "./test/std/"+pkg)
-	return command{llgo, args, map[string]string{"LLGO_BUILD_CACHE": "off"}}
+	// Reuse shared dependencies across the six package builds in this job.
+	// This is the compiler cache, not a test-result cache: count=1 above keeps
+	// every package execution mandatory, just as in the full audit.
+	return command{llgo, args, map[string]string{"LLGO_BUILD_CACHE": "on"}}
 }
 
 func subprocess(root string, c command) *exec.Cmd {
