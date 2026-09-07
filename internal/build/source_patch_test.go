@@ -73,6 +73,44 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 	}
 }
 
+func TestWASIHostStatRecordsKeepWireOffsetsOnC32(t *testing.T) {
+	fset := token.NewFileSet()
+	path := filepath.Join(env.LLGoRuntimeDir(), "_patch", "syscall", "stat_wasip1.go")
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliases, err := parser.ParseFile(fset, "aliases.go", "package syscall\ntype filetype = uint8\ntype rights = uint64\n", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizes := &types.StdSizes{WordSize: 4, MaxAlign: 4}
+	conf := types.Config{Sizes: sizes}
+	pkg, err := conf.Check("syscall", fset, []*ast.File{file, aliases}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, fields := range map[string]map[string]int64{
+		"Stat_t": {"Filetype": 16, "Nlink": 24, "Size": 32, "Atime": 40, "Mtime": 48, "Ctime": 56},
+		"fdstat": {"filetype": 0, "fdflags": 2, "rightsBase": 8, "rightsInheriting": 16},
+	} {
+		st := pkg.Scope().Lookup(name).Type().Underlying().(*types.Struct)
+		vars := make([]*types.Var, st.NumFields())
+		for i := range vars {
+			vars[i] = st.Field(i)
+		}
+		offsets := sizes.Offsetsof(vars)
+		for i, field := range vars {
+			if want, ok := fields[field.Name()]; ok && offsets[i] != want {
+				t.Errorf("%s.%s offset=%d, want %d", name, field.Name(), offsets[i], want)
+			}
+		}
+		if name == "fdstat" && sizes.Sizeof(st) != 24 {
+			t.Fatalf("fdstat size=%d, want 24 host-written bytes", sizes.Sizeof(st))
+		}
+	}
+}
+
 func TestJSWasmRuntimeHostImportsUseCABI(t *testing.T) {
 	for _, target := range []string{"", "emscripten"} {
 		t.Run(map[bool]string{true: "GJS", false: "Emscripten"}[target == ""], func(t *testing.T) {
