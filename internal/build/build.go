@@ -1070,17 +1070,24 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 		}
 	case ModeRun, ModeTest, ModeCmpTest:
 		if link.conf.Target == "" {
+			runner, runnerProfile := goCompatibleWasmRunner(link.conf)
 			if link.conf.Mode == ModeTest {
 				program := &testProgram{
-					app:     link.outFmts.Out,
-					pkgDir:  link.pkg.Dir,
-					pkgName: strings.TrimSuffix(link.pkg.PkgPath, ".test"),
+					app:           link.outFmts.Out,
+					pkgDir:        link.pkg.Dir,
+					pkgName:       strings.TrimSuffix(link.pkg.PkgPath, ".test"),
+					runner:        runner,
+					runnerProfile: runnerProfile,
+					runnerEnv:     envMap,
 				}
 				if cleanupTemp {
 					program.temporaryOutputs = link.outFmts
 					cleanupTemp = false // runNativeTest now owns the temporary output.
 				}
 				return program, nil
+			}
+			if runner != "" && link.conf.Mode == ModeRun {
+				return nil, runInEmulator(linkCtx.commands, runner, runnerProfile, envMap, link.pkg.Dir, link.pkg.PkgPath, link.conf, link.conf.Mode, verbose)
 			}
 			return nil, runNative(linkCtx, link.outFmts.Out, link.pkg.Dir, link.pkg.PkgPath, link.conf, link.conf.Mode)
 		}
@@ -1096,6 +1103,29 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 		}, verbose)
 	}
 	return nil, nil
+}
+
+// goCompatibleWasmRunner mirrors cmd/go's host-helper boundary while keeping
+// raw GOOS/GOARCH source selection distinct from the named C ABI profiles.
+func goCompatibleWasmRunner(conf *Config) (runner, profile string) {
+	if conf == nil || conf.Target != "" || conf.Goarch != "wasm" {
+		return "", ""
+	}
+	switch conf.Goos {
+	case "js":
+		return fmt.Sprintf("node %q %q", filepath.Join(env.LLGoROOT(), "targets", "emscripten-runner.mjs"), "{}"), "GJS"
+	case "wasip1":
+		runtimeCommand := WasmRuntime()
+		switch runtimeCommand {
+		case "wasmtime":
+			return `wasmtime --wasm multi-memory=true "{}"`, "GWASI"
+		case "iwasm":
+			return `iwasm --stack-size=819200000 --heap-size=800000000 "{}"`, "GWASI"
+		default:
+			return runtimeCommand + ` "{}"`, "GWASI"
+		}
+	}
+	return "", ""
 }
 
 func newLinkExecutionContext(ctx *context, plan *mainLinkPlan) *context {
