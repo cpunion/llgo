@@ -83,6 +83,40 @@ jobs:
             ${{ runner.temp }}/goroot-smoke-${{ matrix.profile }}.json
           if-no-files-found: error
 
+      - name: Compare GJS host behavior with the official Go helper
+        if: ${{ matrix.profile == 'GJS' }}
+        env:
+          GOOS: js
+          GOARCH: wasm
+          GOMAXPROCS: '1'
+        run: |
+          set -o pipefail
+          timeout 10m go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+            -v -count=1 -timeout=60s ./internal/build/testdata/wasm-test \
+            2>&1 | tee "$RUNNER_TEMP/gjs-go.log"
+          timeout 10m "$RUNNER_TEMP/llgo" test -v -count=1 -timeout=60s \
+            ./internal/build/testdata/wasm-test 2>&1 | tee "$RUNNER_TEMP/gjs-llgo.log"
+          for compiler in go llgo; do
+            log="$RUNNER_TEMP/gjs-$compiler.log"
+            test "$(grep -c '^PASS$' "$log")" = 1
+            ! grep -Eq '^(panic:|fatal error:|--- FAIL:|FAIL([[:space:]]|$))' "$log"
+          done
+
+      - name: Verify Fiber storage alignment and ownership
+        if: ${{ matrix.profile == 'GJS' }}
+        working-directory: runtime
+        run: go test -count=1 -coverprofile="$RUNNER_TEMP/gjs-storage.cover" ./internal/wasmcontext
+
+      - name: Preserve GJS compiler comparison
+        if: ${{ always() && matrix.profile == 'GJS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-gjs-compatibility
+          path: |
+            ${{ runner.temp }}/gjs-*.log
+            ${{ runner.temp }}/gjs-storage.cover
+          if-no-files-found: warn
+
   browser:
     name: wasm browser acceptance
     runs-on: ubuntu-24.04
