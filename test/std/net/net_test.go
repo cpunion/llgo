@@ -1306,29 +1306,21 @@ func TestTCPConnMethods(t *testing.T) {
 	tcpConn := conn.(*net.TCPConn)
 	defer tcpConn.Close()
 
-	if err := tcpConn.SetKeepAlive(true); err != nil {
-		t.Errorf("SetKeepAlive error: %v", err)
-	}
+	checkTCPOption(t, "SetKeepAlive", tcpConn.SetKeepAlive(true))
 
-	if err := tcpConn.SetKeepAlivePeriod(time.Second); err != nil {
-		t.Errorf("SetKeepAlivePeriod error: %v", err)
-	}
+	checkTCPOption(t, "SetKeepAlivePeriod", tcpConn.SetKeepAlivePeriod(time.Second))
 
 	if err := tcpConn.SetLinger(0); err != nil {
 		t.Errorf("SetLinger error: %v", err)
 	}
 
-	if err := tcpConn.SetNoDelay(true); err != nil {
-		t.Errorf("SetNoDelay error: %v", err)
-	}
+	checkTCPOption(t, "SetNoDelay", tcpConn.SetNoDelay(true))
 
 	if err := tcpConn.SetReadBuffer(4096); err != nil {
 		t.Errorf("SetReadBuffer error: %v", err)
 	}
 
-	if err := tcpConn.SetWriteBuffer(4096); err != nil {
-		t.Errorf("SetWriteBuffer error: %v", err)
-	}
+	checkWriteBuffer(t, tcpConn.SetWriteBuffer(4096))
 
 	// CloseRead/CloseWrite may fail on some platforms if connection is not established
 	if err := tcpConn.CloseRead(); err != nil {
@@ -1373,9 +1365,7 @@ func TestUDPConnMethods(t *testing.T) {
 		t.Errorf("SetReadBuffer error: %v", err)
 	}
 
-	if err := conn.SetWriteBuffer(4096); err != nil {
-		t.Errorf("SetWriteBuffer error: %v", err)
-	}
+	checkWriteBuffer(t, conn.SetWriteBuffer(4096))
 }
 
 func TestTCPListenerMethods(t *testing.T) {
@@ -1628,9 +1618,7 @@ func TestTCPConnKeepAliveConfig(t *testing.T) {
 		Enable: true,
 		Idle:   time.Second,
 	}
-	if err := tcpConn.SetKeepAliveConfig(kac); err != nil {
-		t.Errorf("SetKeepAliveConfig error: %v", err)
-	}
+	checkTCPOption(t, "SetKeepAliveConfig", tcpConn.SetKeepAliveConfig(kac))
 }
 
 func TestTCPConnMultipathTCP(t *testing.T) {

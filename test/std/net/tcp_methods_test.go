@@ -61,9 +61,7 @@ func TestTCPConnMethodCoverage(t *testing.T) {
 		if err := (*net.TCPConn).SetReadBuffer(tcpConn, 4096); err != nil {
 			t.Errorf("SetReadBuffer: %v", err)
 		}
-		if err := (*net.TCPConn).SetWriteBuffer(tcpConn, 4096); err != nil {
-			t.Errorf("SetWriteBuffer: %v", err)
-		}
+		checkWriteBuffer(t, (*net.TCPConn).SetWriteBuffer(tcpConn, 4096))
 		if err := (*net.TCPConn).SetDeadline(tcpConn, time.Now().Add(500*time.Millisecond)); err != nil {
 			t.Errorf("SetDeadline: %v", err)
 		}
@@ -132,9 +130,7 @@ func TestTCPConnMethodCoverage(t *testing.T) {
 	if err := (*net.TCPConn).SetReadBuffer(client, 4096); err != nil {
 		t.Errorf("client SetReadBuffer: %v", err)
 	}
-	if err := (*net.TCPConn).SetWriteBuffer(client, 4096); err != nil {
-		t.Errorf("client SetWriteBuffer: %v", err)
-	}
+	checkWriteBuffer(t, (*net.TCPConn).SetWriteBuffer(client, 4096))
 	if err := (*net.TCPConn).SetDeadline(client, time.Now().Add(time.Second)); err != nil {
 		t.Errorf("client SetDeadline: %v", err)
 	}
