@@ -83,6 +83,39 @@ func TestWasmFailureStatusProbeIsMandatory(t *testing.T) {
 	t.Fatal("missing wasm failed-test exit status probe")
 }
 
+func TestWASIPollProbeCoversBothProfiles(t *testing.T) {
+	data, err := os.ReadFile("../workflows/wasm-acceptance.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run, If string
+				Env     map[string]string
+			}
+		}
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range workflow.Jobs["goroot-smoke"].Steps {
+		if !strings.Contains(step.Run, "bash dev/test_wasi_poll.sh") {
+			continue
+		}
+		if step.If != "${{ matrix.profile == 'WC32' || matrix.profile == 'GWASI' }}" || step.Env["PROFILE"] != "${{ matrix.profile }}" {
+			t.Fatal("WASI poll regression must run on WC32 and GWASI")
+		}
+		for _, mapping := range []string{"WC32) args=(-target wasi -emulator)", "GWASI) export GOOS=wasip1 GOARCH=wasm"} {
+			if !strings.Contains(step.Run, mapping) {
+				t.Fatalf("missing WASI poll profile mapping: %s", mapping)
+			}
+		}
+		return
+	}
+	t.Fatal("missing host-held blocked WASI poll regression")
+}
+
 func TestWasmFailureStatusProbeRejectsFalsePositives(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -99,7 +132,8 @@ func TestWasmFailureStatusProbeRejectsFalsePositives(t *testing.T) {
 		name, body string
 		accept     bool
 	}{
-		{"failed test", "printf '%s\\n' 'intentional wasm exit-status probe' '--- FAIL: TestIntentionalHostExitFailure' 'FAIL'\nexit 1\n", true},
+		{"failed test", "printf '%s\\n' 'intentional wasm exit-status probe' '--- FAIL: TestIntentionalHostExitFailure' '--- PASS: TestNilStoreOperandOrder' '--- PASS: TestNilPointerAndFunctionRecovery' 'FAIL'\nexit 1\n", true},
+		{"nil recovery missing", "printf '%s\\n' 'intentional wasm exit-status probe' '--- FAIL: TestIntentionalHostExitFailure' 'FAIL'\nexit 1\n", false},
 		{"false success", "printf '%s\\n' 'intentional wasm exit-status probe' '--- FAIL: TestIntentionalHostExitFailure' 'FAIL'\nexit 0\n", false},
 		{"compiler error", "echo 'compiler failed'\nexit 1\n", false},
 		{"deadline", "exit 124\n", false},
