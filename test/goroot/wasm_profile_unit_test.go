@@ -19,7 +19,7 @@ func TestGOROOTWasmProfiles(t *testing.T) {
 		"EC64":  {"emscripten-memory64", "js", ".mjs", "emscripten-memory64-runner.mjs"},
 		"WC32":  {"wasi", "wasip1", ".wasm", "wasmtime"},
 		"GJS":   {"", "js", ".mjs", "emscripten-runner.mjs"},
-		"GWASI": {"", "wasip1", ".wasm", "wasmtime"},
+		"GWASI": {"", "wasip1", ".wasm", "go_wasip1_wasm_exec"},
 	}
 	for name, expected := range want {
 		got, ok, err := selectGOROOTWasmProfile(name)
@@ -62,8 +62,8 @@ func TestGOROOTWasiRunCommand(t *testing.T) {
 	withGOROOTWasmProfile(t, "GWASI")
 	env := []string{"GOROOT=/go", "LLGO_ROOT=/llgo"}
 	app, args, targetEnv, err := gorootArtifactCommand("/work", "out.wasm", true, env, "arg")
-	want := []string{"run", "-W", "exceptions=y", "--dir=.", "out.wasm", "arg"}
-	if err != nil || app != "wasmtime" || !reflect.DeepEqual(args, want) || envEntry(targetEnv, "GOWASIRUNTIME") != "wasmtime" {
+	want := []string{"out.wasm", "arg"}
+	if err != nil || app != filepath.Join("/go", "lib", "wasm", "go_wasip1_wasm_exec") || !reflect.DeepEqual(args, want) || envEntry(targetEnv, "GOWASIRUNTIME") != "wasmtime" {
 		t.Fatalf("WASI command: %q %v %v %v", app, args, targetEnv, err)
 	}
 }
