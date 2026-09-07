@@ -110,6 +110,29 @@ jobs:
         working-directory: runtime
         run: go test -count=1 -coverprofile="$RUNNER_TEMP/gjs-storage.cover" ./internal/wasmcontext
 
+      - name: Reject failed tests with a successful process status
+        env:
+          PROFILE: ${{ matrix.profile }}
+          LLGO: ${{ runner.temp }}/llgo
+        run: |
+          case "$PROFILE" in
+            EC32) args=(-target emscripten -emulator) ;;
+            EC64) args=(-target emscripten-memory64 -emulator) ;;
+            WC32) args=(-target wasi -emulator) ;;
+            GJS) export GOOS=js GOARCH=wasm CGO_ENABLED=0; args=() ;;
+            GWASI) export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0; args=() ;;
+            *) exit 2 ;;
+          esac
+          bash dev/test_wasm_exit_status.sh "$RUNNER_TEMP/exit-$PROFILE.log" "${args[@]}"
+
+      - name: Preserve process status regression log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-exit-status-${{ matrix.profile }}
+          path: ${{ runner.temp }}/exit-${{ matrix.profile }}.log
+          if-no-files-found: warn
+
       - name: Preserve GJS compiler comparison
         if: ${{ always() && matrix.profile == 'GJS' }}
         uses: actions/upload-artifact@v7
