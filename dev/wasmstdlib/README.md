@@ -133,7 +133,10 @@ expected test witness, and contain no failed/skipped test records. A failure
 stops that profile; earlier results remain in the JSON report and later packages
 remain `not-run`. Test binaries have a 60-second test deadline; CI bounds
 compilation and execution together to 25 minutes, or 40 minutes for WC32's six
-uncached Binaryen/Asyncify builds.
+Binaryen/Asyncify links. LLGo's compiler cache reuses shared dependencies within
+the job, as in the full audit; every test package still links and executes with
+`-count=1`. Official Go reference commands force `GOMAXPROCS=1` so a host's wider
+setting cannot request unsupported OS threads from the Go wasm runtime.
 
 The driver replaces any prior report before preparing the run. Preparation,
 execution, or summary-writing errors set `slice_result` to `fail` with a top-level
