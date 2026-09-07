@@ -20,6 +20,21 @@ jobs:
           llvm-version: "22"
           windows-abi: msvc
           windows-arch: arm64
+      - name: Save cold-built vcpkg before testing
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.tool_cache }}\llgo-vcpkg\${{ hashFiles('.github/windows/vcpkg/vcpkg.json') }}
+          key: llgo-vcpkg-arm64-windows-${{ hashFiles('.github/windows/vcpkg/vcpkg.json') }}
+      - name: Save downloaded LLVM before testing
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.tool_cache }}\llgo-llvm-archives\clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz
+          key: llgo-llvm-archive-22.1.8-x86_64-pc-windows-msvc-d96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234
+      - name: Save native debugger before testing
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.tool_cache }}\llgo-windows-support\22.1.8\arm64
+          key: llgo-windows-support-22.1.8-arm64-msvc-16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c-76f44ef1ba6eeb5a65904e9500f042f588fade49952778ce48f0374daa934396-c68b26561883d5c7f33307aeb2b9b6c188eb705808b3f780dfce0be49f4e835d-native-lldb-v2
       - uses: ./.github/actions/setup-embed-deps
       - uses: ./.github/actions/setup-demo-deps
         with:

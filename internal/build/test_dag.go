@@ -385,6 +385,9 @@ func runNativeTestDAG(ctx *context, allPkgs []*aPackage, roots []*packages.Packa
 		// a run node. Successful runs have already removed the same directories.
 		for _, link := range prepared {
 			if link != nil && link.outFmts.tempDir != "" {
+				if os.Getenv("LLGO_DIAG_GOROOT") != "" && strings.HasSuffix(strings.TrimSuffix(link.pkg.PkgPath, ".test"), "/test/goroot") {
+					continue // Fork-only: retain the exact executable and its debug sidecars.
+				}
 				removeOutFmts(link.outFmts)
 			}
 		}
