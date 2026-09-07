@@ -220,13 +220,16 @@ func TestProfilesAndCommands(t *testing.T) {
 				}
 			}
 			if p.Reference {
+				if c.Env["GOMAXPROCS"] != "1" {
+					t.Fatalf("reference command can inherit unsupported wasm OS threads: %v", c)
+				}
 				if c.Program != "selected-go" || c.Env["GOARCH"] != "wasm" || c.Env["GOOS"] != p.GOOS || strings.Contains(joined, "-emulator") {
 					t.Fatalf("reference command uses wrong compiler/context: %v", c)
 				}
 				if !strings.Contains(joined, "go_"+p.GOOS+"_wasm_exec") || !strings.Contains(joined, "-exec=\"") {
 					t.Fatalf("official helper not quoted: %v", c)
 				}
-			} else if c.Program != "selected-llgo" || c.Env["LLGO_BUILD_CACHE"] != "off" || !strings.Contains(joined, "-target "+p.Target+" -emulator") {
+			} else if c.Program != "selected-llgo" || c.Env["LLGO_BUILD_CACHE"] != "on" || !strings.Contains(joined, "-target "+p.Target+" -emulator") {
 				t.Fatalf("C profile command = %v", c)
 			}
 		})
