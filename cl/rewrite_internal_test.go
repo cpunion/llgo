@@ -57,6 +57,11 @@ func compileWithRewritesModeTarget(t *testing.T, src string, rewrites map[string
 	if target != nil && target.GOARCH != "" {
 		goarch = target.GOARCH
 	}
+	// Match build.effectiveTypeSizes: this backend still uses physical wasm32
+	// pointers, not cmd/compile's eight-byte Go wasm word layout.
+	if goarch == "wasm" && prog.PointerSize() == 4 {
+		goarch = "386"
+	}
 	prog.TypeSizes(types.SizesFor("gc", goarch))
 	ret, _, err := NewPackageEx(prog, nil, rewrites, pkg, []*ast.File{file})
 	if err != nil {
