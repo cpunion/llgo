@@ -35,7 +35,14 @@ var (
 
 func init() {
 	_, callerInitFile, callerInitLine, _ = runtime.Caller(0)
-	if os.Getenv(callerPanicChild) == "1" {
+	panicChild := os.Getenv(callerPanicChild) == "1"
+	// WASI has no guest subprocess creation and does not inherit arbitrary
+	// host environment variables. The host acceptance driver reuses this
+	// package's test binary and requests the same init-time panic via argv.
+	for _, arg := range os.Args[1:] {
+		panicChild = panicChild || arg == "-llgo.caller-panic-child"
+	}
+	if panicChild {
 		callerPanicCaller() // PANIC_INIT_MARK
 	}
 }
@@ -51,6 +58,9 @@ func callerPanicCaller() {
 }
 
 func TestCallerPanicTraceback(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		t.Skip("unrecovered init panic checked by the host wasm acceptance driver")
+	}
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), callerPanicChild+"=1")
 	output, err := cmd.CombinedOutput()
