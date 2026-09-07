@@ -20,10 +20,17 @@ import (
 // and failures remain unresolved until reviewed individually; independently
 // executable host-side suites are named explicitly in the report.
 type fullPackage struct {
-	Package string `json:"package"`
-	Status  string `json:"status"`
-	Reason  string `json:"reason,omitempty"`
-	Tests   int    `json:"passed_top_level_tests"`
+	Package    string          `json:"package"`
+	Status     string          `json:"status"`
+	Reason     string          `json:"reason,omitempty"`
+	Tests      int             `json:"passed_top_level_tests"`
+	HostChecks []fullHostCheck `json:"host_checks,omitempty"`
+}
+
+type fullHostCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type selectedPackage struct {
@@ -298,12 +305,38 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 				break
 			}
 			fmt.Printf("%s %s\n", name, e.Package)
-			out, runErr := run(root, fullCommand(p, goCmd, llgo, goRoot, e.Package))
+			cmd := fullCommand(p, goCmd, llgo, goRoot, e.Package)
+			var panicArtifact string
+			if e.Package == "test/go" {
+				dir, err := os.MkdirTemp("", "llgo-wasm-test-go-")
+				if err != nil {
+					return err
+				}
+				defer os.RemoveAll(dir)
+				panicArtifact = filepath.Join(dir, "test-go.wasm")
+				if p.GOOS == "js" && !p.Reference {
+					panicArtifact = filepath.Join(dir, "test-go.mjs")
+				}
+				cmd.Args = append(cmd.Args[:len(cmd.Args)-1], "-o", panicArtifact, cmd.Args[len(cmd.Args)-1])
+			}
+			out, runErr := run(root, cmd)
 			if err := os.WriteFile(filepath.Join(reportPath+".logs", strings.ReplaceAll(e.Package, "/", "_")+".log"), out, 0644); err != nil {
 				return err
 			}
 			if runErr == nil {
 				e.Tests, runErr = validateOutput(out, witness)
+			}
+			if panicArtifact != "" {
+				childOut, childErr := run(root, fullPanicCommand(p, root, goRoot, panicArtifact))
+				if err := os.WriteFile(filepath.Join(reportPath+".logs", "test_go_panic_child.log"), childOut, 0644); err != nil {
+					return err
+				}
+				check := fullHostCheck{Name: "unrecovered init panic traceback", Status: "pass"}
+				if err := validateFullPanic(root, childOut, childErr); err != nil {
+					check.Status, check.Reason = "fail", err.Error()
+					runErr = errors.Join(runErr, err)
+				}
+				e.HostChecks = append(e.HostChecks, check)
 			}
 			e.Status = "pass"
 			if runErr != nil {
