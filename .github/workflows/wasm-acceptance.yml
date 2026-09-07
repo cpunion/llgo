@@ -29,7 +29,6 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         profile: [EC32, EC64, WC32, GJS, GWASI]
     env:
@@ -107,7 +106,6 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         profile: [EC32, EC64, WC32, GJS, GWASI]
         shard: [0, 1, 2, 3]
@@ -172,7 +170,6 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         profile: [EC32, EC64, WC32, GJS, GWASI, GJS-reference, GWASI-reference]
         shard: [0, 1]
