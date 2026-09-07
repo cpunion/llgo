@@ -328,7 +328,7 @@ func (p *TypeInfoWasm) SkipEmptyParams() bool {
 }
 
 func (p *TypeInfoWasm) IsWrapType(ctx llvm.Context, ftyp llvm.Type, typ llvm.Type, index int) bool {
-	return elementTypesCount(typ) >= 2
+	return (typ.TypeKind() == llvm.StructTypeKind || typ.TypeKind() == llvm.ArrayTypeKind) && elementTypesCount(typ) != 0
 }
 
 func (p *TypeInfoWasm) GetTypeInfo(ctx llvm.Context, ftyp llvm.Type, typ llvm.Type, index int) *TypeInfo {
@@ -344,6 +344,12 @@ func (p *TypeInfoWasm) GetTypeInfo(ctx llvm.Context, ftyp llvm.Type, typ llvm.Ty
 	if n := elementTypesCount(typ); n >= 2 {
 		info.Kind = AttrPointer
 		info.Type1 = llvm.PointerType(typ, 0)
+	} else if n == 1 && (typ.TypeKind() == llvm.StructTypeKind || typ.TypeKind() == llvm.ArrayTypeKind) {
+		// The wasm C ABI passes a single-element aggregate as its scalar.
+		// Go layout wrappers can lower the aggregate alignment, so do not
+		// depend on LLVM implicitly flattening the original aggregate.
+		info.Kind = AttrWidthType
+		info.Type1 = elementTypes(p.td, typ)[0]
 	}
 	return info
 }
