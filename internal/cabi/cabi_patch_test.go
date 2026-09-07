@@ -217,6 +217,33 @@ func TestWindowsCABITargetDetection(t *testing.T) {
 	}
 }
 
+func TestWasmSingleElementAggregateClassification(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	tr := NewTransformer(prog, "wasm32-unknown-wasip1", "", false)
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	for _, scalar := range []llvm.Type{ctx.DoubleType(), ctx.Int64Type(), llvm.PointerType(ctx.Int8Type(), 0)} {
+		// The packed field and zero-length alignment anchor are the shape
+		// emitted by the Go32 layout adapter. Neither changes the scalar ABI.
+		field := ctx.StructType([]llvm.Type{llvm.ArrayType(scalar, 1)}, true)
+		aggregate := ctx.StructType([]llvm.Type{field, llvm.ArrayType(ctx.Int32Type(), 0)}, false)
+		ft := llvm.FunctionType(aggregate, []llvm.Type{aggregate}, false)
+		for _, index := range []int{0, 1} {
+			if !tr.sys.IsWrapType(ctx, ft, aggregate, index) {
+				t.Fatalf("single-element %s was not lowered", aggregate)
+			}
+			info := tr.sys.GetTypeInfo(ctx, ft, aggregate, index)
+			if info.Kind != AttrWidthType || info.Type1 != scalar {
+				t.Fatalf("single-element %s lowered to kind %v, type %s; want scalar %s", aggregate, info.Kind, info.Type1, scalar)
+			}
+		}
+	}
+}
+
 func TestMSVCAggregateClassification(t *testing.T) {
 	llvm.InitializeAllTargets()
 	llvm.InitializeAllTargetMCs()
