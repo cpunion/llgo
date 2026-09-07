@@ -33,7 +33,10 @@ test("real browser observes execution completion and asynchronous failures", asy
 			await t.test(name, async () => {
 				await writeFile(join(directory, `${name}.mjs`), `export default async options => { ${body}; return {}; };`);
 				const url = `http://127.0.0.1:${server.address().port}/browser.html?module=${name}.mjs&deadline=1000`;
-				const result = await runBrowser(process.env.LLGO_BROWSER, url, { wallTime: 15000, virtualTime: 1500 });
+				// Use the runner's normal process budget for Chrome's cold start.
+				// The page still has a 1s execution deadline and a 1.5s virtual
+				// budget; a stalled renderer is tested with its own hard limit below.
+				const result = await runBrowser(process.env.LLGO_BROWSER, url, { virtualTime: 1500 });
 				assert.equal(result.passed, passed, result.html + result.log);
 				assert.match(result.html, passed ? /<body\b[^>]*data-result="pass"/ : /<body\b[^>]*data-result="fail"/);
 				assert.ok(result.html.split("<script")[0].includes(message), result.html + result.log);
