@@ -1,5 +1,30 @@
 # R4 standard-library behavior and reference hosts
 
+## Full test audit (in progress)
+
+`-full` discovers test packages throughout `test/`, independently of build tags,
+and continues after individual package failures. It adds LLGo `GJS` and `GWASI`
+source profiles to the five rows below; these are not the official Go reference
+compiler and do not yet establish official-Go ABI compatibility.
+
+```sh
+go run ./dev/wasmstdlib -full -profile EC32 -llgo /path/to/llgo -report /tmp/full.json
+```
+
+The full audit requires GNU `timeout`. Each package has a five-minute build/run
+budget and a 60-second test deadline. LLGo compilation cache is reused within a
+job, but test execution is uncached. `-shard 0 -shards 2` partitions the sorted
+inventory; `other-shard` is not a pass. CI runs at most two shards concurrently
+and preserves JSON accounting and individual package logs even after failures.
+
+Source-excluded packages and the host-side `test/goroot` driver currently remain
+unresolved and make the audit fail. They require explicit applicability review
+or target-aware integration, not silent skips. Interrupted audits retain an
+`incomplete` result. Passing every shard, reviewing exclusions, and separately
+covering browser execution and GOROOT are prerequisites for R4 completion.
+
+## Initial standard-library slice
+
 This acceptance slice runs the complete repository test packages for `errors`,
 `sort`, `encoding/binary`, `fmt`, `strconv`, and `io`. It exercises error wrapping
 and assertion, reflection-based sorting, byte-order interfaces, structured
