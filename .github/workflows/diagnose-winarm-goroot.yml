@@ -10,7 +10,9 @@ permissions:
 jobs:
   diagnose:
     runs-on: windows-11-arm
-    timeout-minutes: 25
+    # The isolated fork cannot read another PR ref's vcpkg cache. Allow one
+    # cold dependency build; test processes retain their short external limits.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-deps

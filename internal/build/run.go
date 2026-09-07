@@ -68,7 +68,7 @@ func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdou
 		// its unit-test output before Wait returns, without changing deadlines.
 		cmd.Args = append(cmd.Args, "-test.v")
 		cmd.Stdout = io.MultiWriter(stdout, os.Stdout)
-		cmd.Stderr = io.MultiWriter(stderr, os.Stderr)
+		cmd.Stderr = cmd.Stdout
 		_ = os.WriteFile(filepath.Join(diagnosticDir, "binary.txt"), []byte(program.app), 0644)
 		_ = os.WriteFile(filepath.Join(diagnosticDir, "directory.txt"), []byte(program.pkgDir), 0644)
 		fmt.Fprintf(os.Stderr, "GOROOT DIAGNOSTIC starting %s %v\n", program.app, cmd.Args[1:])
