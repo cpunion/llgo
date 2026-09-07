@@ -254,11 +254,36 @@ func TestGoCompatibleWasmRunner(t *testing.T) {
 		t.Fatalf("js runner = %q, profile %q", js, profile)
 	}
 	wasi, profile := goCompatibleWasmRunner(&Config{Goos: "wasip1", Goarch: "wasm"})
-	if profile != "GWASI" || wasi != `wasmtime run -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "{}"` {
+	if profile != "GWASI" || wasi != `wasmtime run --dir=/ --env PWD --env PATH -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "{}"` {
 		t.Fatalf("WASI runner = %q, profile %q", wasi, profile)
 	}
 	if runner, profile := goCompatibleWasmRunner(&Config{Target: "wasi", Goos: "wasip1", Goarch: "wasm"}); runner != "" || profile != "" {
 		t.Fatalf("named target acquired raw runner %q, profile %q", runner, profile)
+	}
+}
+
+func TestWasmTestRunnerUsesPackageDirectory(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	program := testProgram{
+		pkgDir: dir,
+		runner: fmt.Sprintf("%q -test.run=^TestRunNativeTestHelper$ -- cwd", executable),
+	}
+	commands := commandEnv{environ: withEnv(os.Environ(), "PWD=stale-working-directory")}
+	var stdout, stderr bytes.Buffer
+	if err := runNativeTest(commands, program, &Config{}, &stdout, &stderr); err != nil {
+		t.Fatalf("runner: %v; stderr=%s", err, stderr.String())
+	}
+	// TempDir can contain symlinked ancestors (for example /var on macOS).
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), resolved+"\n"+dir+"\n") {
+		t.Fatalf("runner did not use package directory and PWD: %q", stdout.String())
 	}
 }
 
@@ -269,6 +294,17 @@ func TestRunNativeTestHelper(t *testing.T) {
 			continue
 		}
 		switch args[i+1] {
+		case "cwd":
+			dir, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir, err = filepath.EvalSymlinks(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintln(os.Stdout, dir)
+			fmt.Fprintln(os.Stdout, os.Getenv("PWD"))
 		case "success":
 			fmt.Fprint(os.Stdout, "stdout")
 			fmt.Fprint(os.Stdout, os.Getenv("LLGO_RUN_NATIVE_TEST_ENV"))

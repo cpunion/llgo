@@ -1122,7 +1122,10 @@ func goCompatibleWasmRunner(conf *Config) (runner, profile string) {
 			// go_wasip1_wasm_exec helper. LLGo currently also lowers panic and
 			// recover through Wasm EH, so enable that proposal explicitly until
 			// the raw Go profile no longer needs the target-specific lowering.
-			return `wasmtime run -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "{}"`, "GWASI"
+			// Like Go's helper, expose the host filesystem and working directory
+			// for run/test (including testdata and os.TempDir). Without a preopen,
+			// wasi-libc returns EBADF for every filesystem operation.
+			return `wasmtime run --dir=/ --env PWD --env PATH -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "{}"`, "GWASI"
 		case "iwasm":
 			return `iwasm --stack-size=819200000 --heap-size=800000000 "{}"`, "GWASI"
 		default:
@@ -1279,6 +1282,11 @@ func DefaultBuildTags(goarch, target string) string {
 
 func defaultBuildTags(goarch, target string) string {
 	tags := "llgo,math_big_pure_go,purego"
+	if goarch == "wasm" {
+		// Named C profiles enable cgo, but Go's libc-based os/user sources
+		// only support Unix hosts. Select its existing pure-Go wasm fallback.
+		tags += ",osusergo"
+	}
 	// Preserve the collector-free compatibility runtime for raw wasm builds.
 	// Named profiles add this tag after target resolution; R2 replaces it once
 	// suspended roots are visible to the wasm collector.
