@@ -1,6 +1,7 @@
 package test
 
 import (
+	"runtime"
 	"testing"
 	"time"
 )
@@ -125,4 +126,22 @@ func TestSelectRecvCompletionNotOverwrittenByNextRecv(t *testing.T) {
 			t.Fatalf("iteration %d: select receiver did not exit", i)
 		}
 	}
+}
+
+func TestWasmTimerCallbacksStayOnSystemContext(t *testing.T) {
+	if runtime.GOARCH != "wasm" {
+		t.Skip("tests the single-worker WebAssembly scheduler")
+	}
+
+	// The first timer wakes this G while the scheduler is still polling the
+	// remaining callbacks. A safepoint in those callbacks must not try to yield
+	// the suspended G through the scheduler's physical system stack.
+	const callbackCount = 4096
+	wake := time.After(100 * time.Millisecond)
+	callbacks := make([]<-chan time.Time, callbackCount)
+	for i := range callbacks {
+		callbacks[i] = time.After(100 * time.Millisecond)
+	}
+	<-wake
+	runtime.KeepAlive(callbacks)
 }
