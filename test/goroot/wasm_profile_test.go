@@ -138,7 +138,14 @@ func gorootArtifactCommand(dir, artifact string, llgo bool, env []string, progra
 			return "", nil, nil, errors.New("target LLGo GWASI execution requires GOROOT")
 		}
 		runner := filepath.Join(goroot, "lib", "wasm", p.runner)
-		return runner, append([]string{artifact}, programArgs...), gorootRuntimeEnv(env), nil
+		runEnv := gorootRuntimeEnv(env)
+		// Reuse Go's WASI host helper, including its filesystem/environment
+		// contract and stack allowance. LLGo currently emits Wasm EH for this
+		// profile, so supply only the additional engine features through the
+		// helper's documented GOWASIRUNTIMEARGS extension point.
+		runtimeArgs := strings.TrimSpace(envEntry(runEnv, "GOWASIRUNTIMEARGS") + " -W exceptions=y -W multi-memory=y")
+		runEnv = upsertEnv(runEnv, "GOWASIRUNTIMEARGS="+runtimeArgs)
+		return runner, append([]string{artifact}, programArgs...), runEnv, nil
 	}
 	if p.runner == "wasmtime" {
 		args := []string{"run", "-W", "exceptions=y", "--dir=."}

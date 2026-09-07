@@ -922,25 +922,39 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 
 func TestEffectiveWasmTypeSizes(t *testing.T) {
 	base := &types.StdSizes{WordSize: 16, MaxAlign: 16}
+	atomicPkg := types.NewPackage("sync/atomic", "atomic")
+	align64 := types.NewNamed(
+		types.NewTypeName(token.NoPos, atomicPkg, "align64", nil),
+		types.NewStruct(nil, nil), nil,
+	)
+	atomic64 := types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, atomicPkg, "_", align64, false),
+		types.NewField(token.NoPos, atomicPkg, "v", types.Typ[types.Uint64], false),
+	}, nil)
 	for _, test := range []struct {
-		name string
-		arch string
-		abi  crosscompile.WasmABI
-		want int64
+		name        string
+		arch        string
+		abi         crosscompile.WasmABI
+		want        int64
+		atomicAlign int64
 	}{
-		{"unspecified native", "amd64", crosscompile.WasmABIUnspecified, 16},
-		{"raw wasm compatibility", "wasm", crosscompile.WasmABIUnspecified, 4},
-		{"Emscripten wasm32", "wasm", crosscompile.WasmABIEmscripten, 4},
-		{"Emscripten Memory64", "wasm", crosscompile.WasmABIEmscriptenMemory64, 8},
-		{"WASI Preview 1", "wasm", crosscompile.WasmABIWASIPreview1, 4},
-		{"WASI Preview 2", "arm", crosscompile.WasmABIWASIPreview2, 4},
-		{"freestanding wasm32", "arm", crosscompile.WasmABIFreestanding, 4},
-		{"unknown profile", "wasm", crosscompile.WasmABI("unknown"), 16},
+		{"unspecified native", "amd64", crosscompile.WasmABIUnspecified, 16, 8},
+		{"raw wasm compatibility", "wasm", crosscompile.WasmABIUnspecified, 4, 8},
+		{"Emscripten wasm32", "wasm", crosscompile.WasmABIEmscripten, 4, 8},
+		{"Emscripten Memory64", "wasm", crosscompile.WasmABIEmscriptenMemory64, 8, 8},
+		{"WASI Preview 1", "wasm", crosscompile.WasmABIWASIPreview1, 4, 8},
+		{"WASI Preview 2", "arm", crosscompile.WasmABIWASIPreview2, 4, 8},
+		{"freestanding wasm32", "arm", crosscompile.WasmABIFreestanding, 4, 8},
+		{"unknown profile", "wasm", crosscompile.WasmABI("unknown"), 16, 8},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got := effectiveTypeSizes(base, test.arch, test.abi).Sizeof(types.Typ[types.Uintptr])
+			sizes := effectiveTypeSizes(base, test.arch, test.abi)
+			got := sizes.Sizeof(types.Typ[types.Uintptr])
 			if got != test.want {
 				t.Fatalf("uintptr size = %d, want %d", got, test.want)
+			}
+			if got := sizes.Alignof(atomic64); got != test.atomicAlign {
+				t.Fatalf("atomic64 alignment = %d, want %d", got, test.atomicAlign)
 			}
 		})
 	}

@@ -88,7 +88,7 @@ func TestGo386StructPhysicalLayoutDiffersFromC(t *testing.T) {
 func TestWasm32NestedStructLayoutMatchesReflectionOffsets(t *testing.T) {
 	prog := NewProgram(&Target{GOOS: "js", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-unknown"})
 	defer prog.Dispose()
-	prog.TypeSizes(&types.StdSizes{WordSize: 4, MaxAlign: 4})
+	prog.TypeSizes(types.SizesFor("gc", "386"))
 
 	timeFields := []*types.Var{
 		types.NewField(token.NoPos, nil, "Wall", types.Typ[types.Uint64], false),
