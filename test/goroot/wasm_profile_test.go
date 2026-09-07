@@ -30,7 +30,7 @@ func selectGOROOTWasmProfile(name string) (gorootWasmProfile, bool, error) {
 	case "GJS":
 		return gorootWasmProfile{name: name, goos: "js", llgoSuffix: ".mjs", runner: "emscripten-runner.mjs"}, true, nil
 	case "GWASI":
-		return gorootWasmProfile{name: name, goos: "wasip1", llgoSuffix: ".wasm", runner: "wasmtime"}, true, nil
+		return gorootWasmProfile{name: name, goos: "wasip1", llgoSuffix: ".wasm", runner: "go_wasip1_wasm_exec"}, true, nil
 	default:
 		return gorootWasmProfile{}, false, fmt.Errorf("unknown -wasm-profile=%q", name)
 	}
@@ -131,6 +131,14 @@ func gorootArtifactCommand(dir, artifact string, llgo bool, env []string, progra
 	root := envEntry(env, "LLGO_ROOT")
 	if root == "" {
 		return "", nil, nil, errors.New("target LLGo execution requires LLGO_ROOT")
+	}
+	if p.runner == "go_wasip1_wasm_exec" {
+		goroot := envEntry(env, "GOROOT")
+		if goroot == "" {
+			return "", nil, nil, errors.New("target LLGo GWASI execution requires GOROOT")
+		}
+		runner := filepath.Join(goroot, "lib", "wasm", p.runner)
+		return runner, append([]string{artifact}, programArgs...), gorootRuntimeEnv(env), nil
 	}
 	if p.runner == "wasmtime" {
 		args := []string{"run", "-W", "exceptions=y", "--dir=."}
