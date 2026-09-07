@@ -1216,6 +1216,11 @@ flakes:
     case: fixedbugs/issue25897a.go
     reason: reflect-generated goroutines under a single-P continuous-GC loop can complete or exceed the 1m run timeout on darwin/arm64
 xfails:
+  - version: go1.27
+    directive: run
+    case: genmeth1.go
+    wasm: true
+    reason: "x/tools v0.49.0 loses generic method type parameters while constructing SSA wrappers; tracked separately in https://github.com/xgo-dev/llgo/issues/2526"
   - version: go1.26
     directive: errorcheck
     case: fixedbugs/issue4776.go
