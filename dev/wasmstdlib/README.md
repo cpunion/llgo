@@ -48,13 +48,16 @@ fails the shard even if it matches a general expectation. Any future wasm
 exclusion needs an explicit profile-specific justification and separate
 accounting; it must not be counted as a compatibility pass.
 
-Browser acceptance runs the timer/process-state fixture on raw GJS, EC32, and
-EC64 in Chrome within the existing GJS sentinel job. It requires the final
-`wasm timers ok` marker as well as successful module initialization. Asyncify
-success exit signals are handled without ignoring aborts, nonzero exits, or
-asynchronous failures. Harness self-tests include a delayed failure after the
-marker and a blocked renderer with a wall-clock deadline. These self-tests do
-not substitute for execution of the actual LLGo artifacts.
+Browser acceptance runs the timer/process-state fixture on GJS, EC32, and EC64
+in Chrome as an independent job. It copies `lib/wasm/wasm_exec.js` from the
+selected Go toolchain and loads it before each LLGo module, so the `js/wasm`
+standard library sees the same browser `fs`, `process`, and `path` host contract
+as official Go instead of an LLGo-maintained approximation. It requires the
+final `wasm timers ok` marker as well as successful module initialization.
+Asyncify success exit signals are handled without ignoring aborts, nonzero
+exits, or asynchronous failures. Harness self-tests include a delayed failure
+after the marker and a blocked renderer with a wall-clock deadline. These
+self-tests do not substitute for execution of the actual LLGo artifacts.
 
 Interrupted audits retain an `incomplete` result. Passing every package and
 GOROOT shard, reviewing exclusions, and separately covering browser execution
