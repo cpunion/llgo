@@ -189,6 +189,47 @@ func TestNotApplicableMatch(t *testing.T) {
 	}
 }
 
+func TestRepositoryNotApplicableAcrossGoVersions(t *testing.T) {
+	cfg := loadNotApplicableConfig(t, repoRoot(t), filepath.Join("test", "goroot", "notapplicable.yaml"))
+	cases := []struct {
+		path      string
+		directive string
+		platform  string
+	}{
+		{"stack.go", "run", "linux/amd64"},
+		{"maymorestack.go", "run", "windows/amd64"},
+		{"rangegen.go", "runoutput", "darwin/arm64"},
+		{"writebarrier.go", "errorcheck", "linux/amd64"},
+		{"closure3.go", "errorcheckandrundir", "linux/amd64"},
+		{"typeparam/issue50993.go", "compile", "linux/amd64"},
+		{"asmhdr.go", "buildrundir", "darwin/arm64"},
+		{"fixedbugs/issue20014.go", "runindir", "linux/amd64"},
+	}
+	for _, tc := range cases {
+		for _, version := range []string{"go1.24.11", "go1.26.5", "go1.27.0", "go1.28rc1"} {
+			match, reason := cfg.Match(version, tc.platform, testCase{RelPath: tc.path, Directive: tc.directive})
+			if !match || !strings.HasPrefix(reason, "not applicable:") {
+				t.Errorf("%s %s: %s must retain its classification, got (%v, %q)", version, tc.platform, tc.path, match, reason)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		path      string
+		directive string
+		platform  string
+	}{
+		{"rangegen.go", "run", "linux/amd64"},
+		{"writebarrier.go", "run", "linux/amd64"},
+		{"asmhdr.go", "buildrundir", "linux/amd64"},
+		{"genmeth1.go", "run", "linux/amd64"},
+		{"convert5.go", "run", "linux/amd64"},
+	} {
+		if match, _ := cfg.Match("go1.27.0", tc.platform, testCase{RelPath: tc.path, Directive: tc.directive}); match {
+			t.Errorf("not-applicable scope broadened beyond Go version: %+v", tc)
+		}
+	}
+}
+
 func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 	guardTestTimeout(t)
 	repo := repoRoot(t)
@@ -211,6 +252,7 @@ func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 		}
 		xfailSelectors[selector{entry.Version, entry.Platform, entry.Directive, entry.Case}] = struct{}{}
 	}
+	notApplicableSelectors := make(map[selector]struct{}, len(notApplicable.Entries))
 	for _, entry := range notApplicable.Entries {
 		if !strings.HasPrefix(entry.Reason, "not applicable:") {
 			t.Fatalf("not-applicable entry %q has reason %q without the shared prefix", entry.Case, entry.Reason)
@@ -222,6 +264,10 @@ func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 			t.Fatalf("not-applicable entry %q has reason %q without explaining why support is not planned", entry.Case, entry.Reason)
 		}
 		key := selector{entry.Version, entry.Platform, entry.Directive, entry.Case}
+		if _, ok := notApplicableSelectors[key]; ok {
+			t.Fatalf("duplicate not-applicable selector: %+v", key)
+		}
+		notApplicableSelectors[key] = struct{}{}
 		if _, ok := xfailSelectors[key]; ok {
 			t.Fatalf("expectation selector appears in both files: %+v", key)
 		}

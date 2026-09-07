@@ -27,6 +27,11 @@ explicitly host-unsafe cases are skipped. Each not-applicable entry documents
 both the toolchain-specific mechanism under test and why the corresponding
 behavior is not an LLGo compatibility goal.
 
+Version-independent not-applicable entries omit `version`, so upgrading Go does
+not reclassify the same out-of-scope mechanism as a new compatibility failure.
+Case, directive, and platform selectors still apply; this does not broaden
+xfail, flaky, timeout, host-skip, or WebAssembly acceptance rules.
+
 Basic usage:
 
 ```bash
