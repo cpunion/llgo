@@ -71,7 +71,9 @@ func TestManyLiveTimersWithConcurrentStopReset(t *testing.T) {
 				x ^= x << 13
 				x ^= x >> 17
 				x ^= x << 5
-				timer := timers[int(x)%len(timers)]
+				// Reduce before converting: int is 32 bits on the C32 wasm
+				// profiles, so a high PRNG bit must not produce a negative index.
+				timer := timers[int(uint64(x)%uint64(len(timers)))]
 				if operation&3 == 0 {
 					timer.Stop()
 					timer.Reset(time.Hour)
