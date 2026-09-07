@@ -27,6 +27,10 @@ import (
 const finalizerTinyObjectsChildEnv = "LLGO_TEST_FINALIZER_TINY_OBJECTS_CHILD"
 
 func TestRuntimeSetFinalizerTinyObjects(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		testRuntimeSetFinalizerTinyObjects(t)
+		return
+	}
 	if os.Getenv(finalizerTinyObjectsChildEnv) == "" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestRuntimeSetFinalizerTinyObjects$")
 		cmd.Env = append(os.Environ(), finalizerTinyObjectsChildEnv+"=1")
@@ -35,7 +39,10 @@ func TestRuntimeSetFinalizerTinyObjects(t *testing.T) {
 		}
 		return
 	}
+	testRuntimeSetFinalizerTinyObjects(t)
+}
 
+func testRuntimeSetFinalizerTinyObjects(t *testing.T) {
 	const n = 32
 	finalized := make(chan int32, n)
 	created := make(chan struct{})
