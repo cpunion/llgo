@@ -478,9 +478,6 @@ func (p Program) toLLVMFields(raw *types.Struct) (fields []llvm.Type) {
 }
 
 func (p Program) toLLVMTuple(t *types.Tuple) llvm.Type {
-	if p.target.effectiveGOARCH() != "386" {
-		return p.ctx.StructType(p.toLLVMTypes(t, t.Len()), false)
-	}
 	fields := make([]*types.Var, t.Len())
 	for i := range fields {
 		// Tuple result names are not part of their type and may be empty or
@@ -488,9 +485,10 @@ func (p Program) toLLVMTuple(t *types.Tuple) llvm.Type {
 		fields[i] = types.NewField(token.NoPos, nil, fmt.Sprintf("_llgo%d", i), t.At(i).Type(), false)
 	}
 	// Multiple results are represented as an anonymous LLVM aggregate. Keep
-	// its physical layout identical to the equivalent Go struct: on 386,
-	// i64 and double fields are only four-byte aligned. Calls and returns are
-	// otherwise liable to disagree about offsets across package boundaries.
+	// its physical layout identical to the equivalent Go struct: on 32-bit Go
+	// ABIs such as 386 and wasm32, i64 and double fields can be only four-byte
+	// aligned. Calls and returns are otherwise liable to disagree about offsets
+	// across package boundaries.
 	body, layout := p.toLLVMStructBody(types.NewStruct(fields, nil), false)
 	p.setStructLayout(t, layout)
 	return p.ctx.StructType(body, false)
