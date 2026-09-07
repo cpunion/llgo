@@ -63,6 +63,38 @@ Interrupted audits retain an `incomplete` result. Passing every package and
 GOROOT shard, reviewing exclusions, and separately covering browser execution
 are prerequisites for R4 completion.
 
+## GJS source reuse and host compatibility
+
+Raw `GOOS=js GOARCH=wasm` builds retain the selected GOROOT's `syscall/js`
+`js.go` and `func.go`. A source overlay replaces only bodyless host imports
+and event registration; Value conversion, type checks, KeepAlive/finalizer
+calls, the Func registry, and public error behavior are not forked. The host
+bridge uses Go's NaN-boxed reference format and reference accounting, with an
+LLGo-specific fixed-width call frame. Runtime event handling is adapted from
+Go's `runtime/lock_js.go`: nested callbacks remain on the invoking G, drain
+runnable work before returning to JS, and permit Go timer/channel waits.
+Waiting inside a callback for an asynchronous JS event still deadlocks, as
+documented by Go's `syscall/js.FuncOf` contract.
+
+The GJS sentinel job runs the entire `internal/build/testdata/wasm-test` package
+with both official Go and LLGo. It checks process status, the terminal PASS
+marker, and fatal/failure output, and uploads both logs. Regressions include
+Go's interleaved-callback case, Unicode/NUL strings, identity and NaN, JS
+exceptions, typed byte copies, callback results, nested goroutine switching,
+timer waits, and exactly-once JS side effects. The existing GJS browser fixture
+also exercises nested blocking callbacks and NUL strings before its marker.
+It does so during package initialization as well. Fiber storage reserves up
+to 15 padding bytes to satisfy the C ABI's 16-byte stack alignment even when
+the allocator returns an 8-byte-aligned block; only the original allocation
+pointer is freed. Host-side tests cover every alignment residue, rollback,
+and size overflow, with a separate storage coverage report in the GJS job.
+
+This is **source/API compatibility work, not official-Go binary ABI parity**:
+GJS still uses LLGo's wasm32 data layout and Emscripten/Asyncify module loader,
+not Go's 64-bit Go value layout and `gojs` stack-call convention. Named EC32 and
+EC64 profiles retain their Emscripten C-ABI `syscall/js` backend. Their passing
+tests do not substitute for GJS validation.
+
 ## Initial standard-library slice
 
 This acceptance slice runs the complete repository test packages for `errors`,
