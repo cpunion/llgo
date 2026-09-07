@@ -35,6 +35,9 @@ jobs:
       GOMAXPROCS: '2'
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
+      # The temporary llgo binary is outside an installed bin/ tree. Raw
+      # profile comparisons must load this checkout's source patches too.
+      LLGO_ROOT: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-deps
