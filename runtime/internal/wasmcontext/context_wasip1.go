@@ -48,7 +48,7 @@ func (ctx *Context) Init(entry Entry, arg unsafe.Pointer, stackSize uintptr, all
 	ctx.arg = arg
 	ctx.asyncifyStack = asyncifyStack
 	ctx.asyncifyEnd = unsafe.Add(asyncifyStack, asyncifySize)
-	ctx.stackPointer = unsafe.Add(stack, stackSize)
+	ctx.stackPointer = unsafe.Add(alignedStackBase(stack), stackSize)
 	ctx.launched = false
 	ctx.stack = stack
 	return true

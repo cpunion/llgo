@@ -35,12 +35,18 @@ func allocStorage(stackSize uintptr, alloc func(uintptr) unsafe.Pointer, free fu
 		stackSize = defaultStackSize
 	}
 	stackSize = alignStackSize(stackSize)
+	if stackSize == 0 || stackSize > ^uintptr(0)-(stackAlignment-1) {
+		return
+	}
 	asyncifySize = defaultAsyncifyStackSize
 	if customStackSize && stackSize > asyncifySize {
 		asyncifySize = stackSize
 	}
 
-	stack = alloc(stackSize)
+	// wasm32 malloc may provide only 8-byte alignment, but the C ABI requires
+	// a 16-byte stack pointer. Retain this original pointer for freeStorage;
+	// callers pass alignedStackBase(stack) and the full size to the host.
+	stack = alloc(stackSize + stackAlignment - 1)
 	if stack == nil {
 		return
 	}
@@ -64,4 +70,8 @@ func freeStorage(stack, asyncifyStack unsafe.Pointer, free func(unsafe.Pointer))
 
 func alignStackSize(size uintptr) uintptr {
 	return (size + stackAlignment - 1) &^ (stackAlignment - 1)
+}
+
+func alignedStackBase(ptr unsafe.Pointer) unsafe.Pointer {
+	return unsafe.Add(ptr, -uintptr(ptr)&(stackAlignment-1))
 }

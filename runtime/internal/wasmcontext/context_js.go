@@ -44,7 +44,7 @@ func (ctx *Context) Init(entry Entry, arg unsafe.Pointer, stackSize uintptr, all
 		&ctx.fiber,
 		entry,
 		arg,
-		stack,
+		alignedStackBase(stack),
 		stackSize,
 		asyncifyStack,
 		asyncifySize,
