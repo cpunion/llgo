@@ -38,6 +38,7 @@ var (
 	flagGoCmd         = flag.String("go", os.Getenv("LLGO_GO"), "go binary used as baseline (default: <goroot>/bin/go)")
 	flagLLGO          = flag.String("llgo", os.Getenv("LLGO_TEST_LLGO"), "llgo binary used for comparisons (default: build from current checkout)")
 	flagWasmProfile   = flag.String("wasm-profile", "", "target profile for host-driven wasm execution: EC32, EC64, WC32, GJS, or GWASI")
+	flagReport        = flag.String("report", "", "write incremental JSON case results to this file")
 	flagDirs          = flag.String("dirs", strings.Join(defaultGoRootTestDirs, ","), "comma-separated GOROOT/test subdirectories to scan")
 	flagCase          = flag.String("case", os.Getenv("LLGO_GOROOT_CASE"), "regexp selecting cases by relative path")
 	flagLimit         = flag.Int("limit", 0, "maximum number of matching cases to run")
@@ -349,6 +350,10 @@ func TestGoRootRunCases(t *testing.T) {
 		}
 		return
 	}
+	report := newGOROOTReport(envInfo, *flagWasmProfile, *flagShardI, *flagShardN, cases)
+	if err := report.write(*flagReport); err != nil {
+		t.Fatalf("initialize case report: %v", err)
+	}
 	t.Setenv("STDLIB_IMPORTCFG", writeStdlibImportCfg(t, goCmd))
 
 	llgoBin := *flagLLGO
@@ -362,20 +367,26 @@ func TestGoRootRunCases(t *testing.T) {
 	for i, tc := range cases {
 		tc := tc
 		t.Run(tc.RelPath, func(t *testing.T) {
+			result := &report.Cases[i]
+			started := time.Now()
+			result.Status = "running"
+			defer func() {
+				result.DurationSeconds = time.Since(started).Seconds()
+				if t.Failed() {
+					result.Status = "fail"
+				}
+				if err := report.write(*flagReport); err != nil {
+					t.Errorf("save case report: %v", err)
+				}
+			}()
+			if err := report.write(*flagReport); err != nil {
+				t.Fatalf("checkpoint running case: %v", err)
+			}
 			progress.StartCase(i+1, tc.RelPath)
 			defer progress.FinishCase(tc.RelPath)
-			match, reason := xfails.Match(envInfo.GOVERSION, targetPlatform, tc)
-			flaky, flakyReason := xfails.MatchFlaky(envInfo.GOVERSION, targetPlatform, tc)
-			notApply, notApplyReason := notApplicable.Match(envInfo.GOVERSION, targetPlatform, tc)
-			if match && notApply {
-				writeCaseResult(os.Stdout, tc, caseResultConfigurationFail)
-				t.Fatalf("case matches both xfail and not-applicable expectations: xfail=%s; not applicable=%s", reason, notApplyReason)
-			}
-			if notApply {
-				writeCaseResult(os.Stdout, tc, caseResultNotApplicable)
-				t.Skipf("skipping not-applicable case: %s", notApplyReason)
-			}
-			if match, reason := xfails.MatchHostSkip(envInfo.GOVERSION, hostPlatform, tc); match {
+			// Native thread/GC safety exclusions do not describe a wasm guest.
+			if match, reason := xfails.MatchHostSkip(envInfo.GOVERSION, hostPlatform, tc); match && !wasmTarget {
+				result.Status, result.Reason = "host-skip", reason
 				writeCaseResult(os.Stdout, tc, caseResultHostSkip)
 				t.Skipf("skipping host-unsafe case: %s", reason)
 			}
@@ -386,10 +397,31 @@ func TestGoRootRunCases(t *testing.T) {
 			}
 			buildTimeout := effectiveBuildTimeout(*flagBuildTO, runTimeout)
 			err := runCase(t, repoRoot, goroot, goCmd, llgoBin, tc, buildTimeout, runTimeout)
+			if err != nil {
+				result.Error = err.Error()
+			}
 			var resourceErr *resourceLimitError
 			if errors.As(err, &resourceErr) {
 				writeCaseResult(os.Stdout, tc, caseResultResourceFail)
 				t.Fatalf("resource guard stopped case: %v", err)
+			}
+			match, reason := xfails.Match(envInfo.GOVERSION, targetPlatform, tc)
+			flaky, flakyReason := xfails.MatchFlaky(envInfo.GOVERSION, targetPlatform, tc)
+			notApply, notApplyReason := notApplicable.Match(envInfo.GOVERSION, targetPlatform, tc)
+			result.Status, result.Reason = gorootCaseOutcome(wasmTarget, err, match, reason, notApply, notApplyReason, flaky, flakyReason)
+			if wasmTarget {
+				// General expectations include native BDWGC and target-fault
+				// assumptions. They are evidence, not a wasm acceptance waiver.
+				if result.Reason != "" {
+					t.Logf("general expectation (not waived for wasm): %s", result.Reason)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if match && notApply {
+				t.Fatalf("case matches both xfail and not-applicable expectations: xfail=%s; not applicable=%s", reason, notApplyReason)
 			}
 			writeCaseResult(os.Stdout, tc, classifyCaseResult(err, match, flaky))
 			switch {
@@ -398,14 +430,21 @@ func TestGoRootRunCases(t *testing.T) {
 			case err == nil && flaky:
 				t.Logf("flaky case passed: %s", flakyReason)
 			case err != nil && match:
-				t.Logf("expected failure: %s", reason)
+				t.Logf("expected failure: %s\n%v", reason, err)
+			case err != nil && notApply:
+				t.Logf("expected not-applicable failure: %s\n%v", notApplyReason, err)
 			case err != nil && flaky:
-				t.Logf("known flaky failure: %s", flakyReason)
+				t.Logf("known flaky failure: %s\n%v", flakyReason, err)
 			case err != nil:
 				t.Fatal(err)
 			}
 		})
 	}
+	report.Complete = report.finished()
+	if err := report.write(*flagReport); err != nil {
+		t.Errorf("finalize case report: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "goroot results: %v\n", report.counts())
 }
 
 func classifyCaseResult(err error, xfail, flaky bool) caseResult {
