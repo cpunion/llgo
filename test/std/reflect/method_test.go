@@ -99,6 +99,30 @@ func TestValueCallSlice(t *testing.T) {
 	}
 }
 
+// TestMakeFunc is adapted from the standard library's reflect example. It
+// exercises both closure creation and calls using different scalar ABIs.
+func TestMakeFunc(t *testing.T) {
+	swap := func(in []reflect.Value) []reflect.Value {
+		return []reflect.Value{in[1], in[0]}
+	}
+	makeSwap := func(fptr any) {
+		fn := reflect.ValueOf(fptr).Elem()
+		fn.Set(reflect.MakeFunc(fn.Type(), swap))
+	}
+
+	var intSwap func(int, int) (int, int)
+	makeSwap(&intSwap)
+	if a, b := intSwap(0, 1); a != 1 || b != 0 {
+		t.Fatalf("int swap = (%d, %d), want (1, 0)", a, b)
+	}
+
+	var floatSwap func(float64, float64) (float64, float64)
+	makeSwap(&floatSwap)
+	if a, b := floatSwap(2.72, 3.14); a != 3.14 || b != 2.72 {
+		t.Fatalf("float swap = (%g, %g), want (3.14, 2.72)", a, b)
+	}
+}
+
 // Test Method struct
 func TestMethodStruct(t *testing.T) {
 	typ := reflect.TypeOf(MyIntStringer(0))
