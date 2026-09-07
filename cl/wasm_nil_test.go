@@ -27,6 +27,9 @@ func Selected(p, q *int, b bool) int { if b { p = q }; return *p }
 				if !strings.Contains(body, "AssertNilDeref") {
 					t.Errorf("%s relies on a wasm memory/table trap:\n%s", name, body)
 				}
+				if !strings.Contains(body, "br i1") || !strings.Contains(body, "(i1 true)") {
+					t.Errorf("%s calls the nil-panic helper on its successful path:\n%s", name, body)
+				}
 			}
 		})
 	}
