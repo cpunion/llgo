@@ -19,18 +19,24 @@ package wasmcontext
 import "unsafe"
 
 const (
-	defaultStackSize         = uintptr(64 << 10)
+	// LLGo uses fixed-size Fiber stacks. 128 KiB is the smallest default that
+	// accommodates standard-library call depths such as crypto/x509 signing;
+	// 64 KiB reproducibly crosses the Fiber boundary under that workload.
+	defaultStackSize = uintptr(128 << 10)
+	// Asyncify records the native host-call continuation, not the complete Go
+	// call stack, so its independently-tested default can remain smaller.
 	defaultAsyncifyStackSize = uintptr(64 << 10)
 	stackAlignment           = uintptr(16)
 )
 
 func allocStorage(stackSize uintptr, alloc func(uintptr) unsafe.Pointer, free func(unsafe.Pointer)) (stack unsafe.Pointer, normalizedStackSize uintptr, asyncifyStack unsafe.Pointer, asyncifySize uintptr, ok bool) {
+	customStackSize := stackSize != 0
 	if stackSize == 0 {
 		stackSize = defaultStackSize
 	}
 	stackSize = alignStackSize(stackSize)
 	asyncifySize = defaultAsyncifyStackSize
-	if stackSize > asyncifySize {
+	if customStackSize && stackSize > asyncifySize {
 		asyncifySize = stackSize
 	}
 
