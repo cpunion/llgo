@@ -26,8 +26,36 @@ native-only CPU-profiler, BDWGC-finalizer, and signal stress suites; plus
 `test/cgo` on raw profiles where C interop is absent by contract. The same
 `test/cgo` suite remains mandatory on EC32, EC64, and WC32. The host-side
 `test/goroot` package is reported as `separate-suite`: the same workflow
-first executes three directive-mode sentinels on every LLGo wasm profile, then
-unlocks the complete four-shard GOROOT matrix only if all sentinels pass.
+first executes two startup sentinels (`bom.go` and `helloworld.go`) on every
+LLGo wasm profile, then unlocks the four-shard GOROOT matrix only if all
+sentinels pass. The full matrix recursively discovers `run`, `runoutput`,
+`buildrun`, `rundir`, `runindir`, `buildrundir`, and `errorcheckandrundir` cases.
+The last category performs both diagnostic checks and program execution; a
+diagnostic mismatch does not bypass the build/run comparison. It does not claim
+coverage of compiler-diagnostic-only `compile` / `errorcheck` directives.
+The earlier `ci` discovery mode omitted 128 runnable cases per profile in
+Go 1.27; changing the discovery mode preserves the existing shard count and
+concurrency limit.
+
+The seven-directive inventory selects 1,152 cases per profile in Go 1.27.
+
+Each GOROOT shard uploads an incremental JSON report alongside its full log.
+Actual `pass`, `fail`, and `not-run` counts remain distinct, and a timeout
+leaves `complete: false`. Failed build/run diagnostics are retained per case.
+Native host-safety skips and general native GC/known-failure expectations are
+not automatically accepted as wasm exclusions: a selected wasm case failure
+fails the shard even if it matches a general expectation. Any future wasm
+exclusion needs an explicit profile-specific justification and separate
+accounting; it must not be counted as a compatibility pass.
+
+Browser acceptance runs the timer/process-state fixture on raw GJS, EC32, and
+EC64 in Chrome within the existing GJS sentinel job. It requires the final
+`wasm timers ok` marker as well as successful module initialization. Asyncify
+success exit signals are handled without ignoring aborts, nonzero exits, or
+asynchronous failures. Harness self-tests include a delayed failure after the
+marker and a blocked renderer with a wall-clock deadline. These self-tests do
+not substitute for execution of the actual LLGo artifacts.
+
 Interrupted audits retain an `incomplete` result. Passing every package and
 GOROOT shard, reviewing exclusions, and separately covering browser execution
 are prerequisites for R4 completion.
