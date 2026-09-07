@@ -250,6 +250,9 @@ func TestFullSourceContextMatchesCompilerProfiles(t *testing.T) {
 					t.Fatalf("tags %q do not contain %q", tags, want)
 				}
 			}
+			if !p.Reference && !slices.Contains(strings.Split(tags, ","), "osusergo") {
+				t.Fatalf("LLGo wasm source inventory is missing os/user's pure-Go selection: %q", tags)
+			}
 			if len(tt.wantTags) == 0 && tags != "" {
 				t.Fatalf("reference tags = %q", tags)
 			}

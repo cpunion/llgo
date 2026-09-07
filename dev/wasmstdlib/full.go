@@ -125,7 +125,7 @@ func fullSourceContext(p profile) (tags string, cgo string) {
 	if p.Reference {
 		return "", "0"
 	}
-	tags = "llgo"
+	tags = "llgo,osusergo"
 	if p.Target == "" {
 		return tags + ",nogc", "0"
 	}
