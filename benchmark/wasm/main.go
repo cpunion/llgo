@@ -45,6 +45,28 @@ type goWasmProfile struct {
 	goos string
 }
 
+type wasmExample struct {
+	name        string
+	goReference bool
+}
+
+var wasmExamples = []wasmExample{
+	{name: "println", goReference: true},
+	// cprintf calls LLGo's C FFI, which the official Go wasm compiler does not
+	// support. Do not manufacture a Go reference by replacing its source.
+	{name: "cprintf"},
+	{name: "fmtprintf", goReference: true},
+}
+
+func (example wasmExample) metricName(profile string) string {
+	// Preserve the original println series so adding examples does not discard
+	// its existing history. The new examples have explicit name prefixes.
+	if example.name == "println" {
+		return profile
+	}
+	return example.name + "/" + profile
+}
+
 var wasmProfiles = []wasmProfile{
 	// GOOS/GOARCH entries measure the current implementation without
 	// claiming the official-Go ABI contract assigned to the later G1/G2 work.
@@ -91,7 +113,7 @@ func runCLI(ctx context.Context, args []string, runner commandRunner) error {
 	llgo := flags.String("llgo", "llgo", "LLGo command")
 	goCommand := flags.String("go", "go", "Go command")
 	out := flags.String("out", filepath.Join("benchmark", "wasm", "out"), "result directory")
-	buildRuns := flags.Int("build-runs", 3, "build repetitions per profile")
+	buildRuns := flags.Int("build-runs", 3, "build repetitions per example and profile")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -119,22 +141,30 @@ func runCLI(ctx context.Context, args []string, runner commandRunner) error {
 		"LLGO_ROOT="+absRoot,
 		"LLGO_BUILD_CACHE=off",
 	)
-	fixture := filepath.Join(absRoot, "benchmark", "binary_size", "println", "main.go")
-	measurements := make([]measurement, 0, len(wasmProfiles))
-	for _, profile := range wasmProfiles {
-		result, err := measureProfile(ctx, runner, env, absRoot, *llgo, absOut, fixture, profile, *buildRuns)
-		if err != nil {
-			return fmt.Errorf("build %s: %w", profile.name, err)
+	measurements := make([]measurement, 0, len(wasmExamples)*len(wasmProfiles))
+	var goSizes []measurement
+	for _, example := range wasmExamples {
+		fixture := filepath.Join(absRoot, "benchmark", "binary_size", example.name, "main.go")
+		exampleOut := filepath.Join(absOut, example.name)
+		for _, profile := range wasmProfiles {
+			result, err := measureProfile(ctx, runner, env, absRoot, *llgo, exampleOut, fixture, profile, *buildRuns)
+			if err != nil {
+				return fmt.Errorf("build %s/%s: %w", example.name, profile.name, err)
+			}
+			result.name = example.metricName(profile.name)
+			measurements = append(measurements, result)
 		}
-		measurements = append(measurements, result)
-	}
-	goSizes := make([]measurement, 0, len(goWasmProfiles))
-	for _, profile := range goWasmProfiles {
-		result, err := measureGoProfile(ctx, runner, env, absRoot, *goCommand, absOut, fixture, profile)
-		if err != nil {
-			return fmt.Errorf("build official Go %s: %w", profile.name, err)
+		if !example.goReference {
+			continue
 		}
-		goSizes = append(goSizes, result)
+		for _, profile := range goWasmProfiles {
+			result, err := measureGoProfile(ctx, runner, env, absRoot, *goCommand, exampleOut, fixture, profile)
+			if err != nil {
+				return fmt.Errorf("build official Go %s/%s: %w", example.name, profile.name, err)
+			}
+			result.name = example.metricName(profile.name)
+			goSizes = append(goSizes, result)
+		}
 	}
 	return writeResults(filepath.Join(absOut, "benchmark.txt"), measurements, goSizes)
 }
