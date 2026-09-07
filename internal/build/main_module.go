@@ -71,6 +71,15 @@ func needsWasmRuntimeScheduler(ctx *context) bool {
 	if ctx.buildConf.BuildMode != BuildModeExe {
 		return false
 	}
+	// Raw js/wasm keeps the official Go source profile, but its current
+	// physical output is linked by Emscripten with Asyncify. Initialize that
+	// scheduler before package initialization just like the named Emscripten
+	// profiles. Otherwise an init-time host wait unwinds without a current
+	// Fiber and Emscripten traps in asyncify_stop_unwind.
+	if ctx.crossCompile.WasmABI == crosscompile.WasmABIUnspecified &&
+		ctx.buildConf.Goos == "js" && ctx.buildConf.Goarch == "wasm" {
+		return true
+	}
 	if ctx.crossCompile.WasmPostLink.Asyncify {
 		return true
 	}

@@ -356,6 +356,53 @@ func TestGenMainModuleWASIAsyncifyEntry(t *testing.T) {
 	}
 }
 
+func TestGenMainModuleRawJSInitializesPackagesOnFiber(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(nil)
+	installLocalContextTestRuntime(prog)
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode: BuildModeExe,
+			Goos:      "js",
+			Goarch:    "wasm",
+		},
+	}
+	pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
+	ir := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
+		packageInits: []string{"example.com/dependency.init"},
+	}).LPkg.String()
+	taskStart := strings.Index(ir, "define hidden ptr @__llgo_wasm_main(")
+	if taskStart < 0 {
+		t.Fatalf("raw js/wasm main module missing logical main task:\n%s", ir)
+	}
+	task := ir[taskStart:]
+	task = task[:strings.Index(task, "}\n")+2]
+	assertInOrder(t, task,
+		`call void @"example.com/dependency.init"()`,
+		`call void @"example.com/foo.init"()`,
+		`call void @"example.com/foo.main"()`,
+	)
+	entryStart := strings.Index(ir, "define hidden i32 @__main_argc_argv(")
+	if entryStart < 0 {
+		t.Fatalf("raw js/wasm main module missing host entry:\n%s", ir)
+	}
+	entry := ir[entryStart:]
+	entry = entry[:strings.Index(entry, "}\n")+2]
+	assertInOrder(t, entry,
+		"EnterLocalContext",
+		`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.init"()`,
+		`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.RunWasmMain"()`,
+		"LeaveLocalContext",
+	)
+	if strings.Contains(entry, `call void @"example.com/dependency.init"()`) ||
+		strings.Contains(entry, `call void @"example.com/foo.init"()`) ||
+		strings.Contains(entry, `call void @"example.com/foo.main"()`) {
+		t.Fatalf("raw js/wasm host entry calls package main directly:\n%s", entry)
+	}
+}
+
 func TestNeedsWasmRuntimeScheduler(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -385,6 +432,11 @@ func TestNeedsWasmRuntimeScheduler(t *testing.T) {
 			target: crosscompile.Export{
 				WasmPostLink: crosscompile.WasmPostLink{Asyncify: true},
 			},
+			want: true,
+		},
+		{
+			name: "raw_js_wasm",
+			conf: Config{BuildMode: BuildModeExe, Goos: "js", Goarch: "wasm"},
 			want: true,
 		},
 		{
