@@ -12,12 +12,57 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 )
+
+var (
+	testRSAOnce sync.Once
+	testRSAKey  *rsa.PrivateKey
+	testRSAErr  error
+)
+
+// rsaTestKeyPEM is a test-only 1024-bit key. The serialization tests do not
+// depend on key strength, and loading a fixed key avoids expensive prime
+// generation on the fixed-size WebAssembly Fiber stack.
+const rsaTestKeyPEM = `-----BEGIN RSA PRIVATE KEY-----
+MIICXAIBAAKBgQCxoeCUW5KJxNPxMp+KmCxKLc1Zv9Ny+4CFqcUXVUYH69L3mQ7v
+IWrJ9GBfcaA7BPQqUlWxWM+OCEQZH1EZNIuqRMNQVuIGCbz5UQ8w6tS0gcgdeGX7
+J7jgCQ4RK3F/PuCM38QBLaHx988qG8NMc6VKErBjctCXFHQt14lerd5KpQIDAQAB
+AoGAYrf6Hbk+mT5AI33k2Jt1kcweodBP7UkExkPxeuQzRVe0KVJw0EkcFhywKpr1
+V5eLMrILWcJnpyHE5slWwtFHBG6a5fLaNtsBBtcAIfqTQ0Vfj5c6SzVaJv0Z5rOd
+7gQF6isy3t3w9IF3We9wXQKzT6q5ypPGdm6fciKQ8RnzREkCQQDZwppKATqQ41/R
+vhSj90fFifrGE6aVKC1hgSpxGQa4oIdsYYHwMzyhBmWW9Xv/R+fPyr8ZwPxp2c12
+33QwOLPLAkEA0NNUb+z4ebVVHyvSwF5jhfJxigim+s49KuzJ1+A2RaSApGyBZiwS
+rWvWkB471POAKUYt5ykIWVZ83zcceQiNTwJBAMJUFQZX5GDqWFc/zwGoKkeR49Yi
+MTXIvf7Wmv6E++eFcnT461FlGAUHRV+bQQXGsItR/opIG7mGogIkVXa3E1MCQARX
+AAA7eoZ9AEHflUeuLn9QJI/r0hyQQLEtrpwv6rDT1GCWaLII5HJ6NUFVf4TTcqxo
+6vdM4QGKTJoO+SaCyP0CQFdpcxSAuzpFcKv0IlJ8XzS/cy+mweCMwyJ1PFEc4FX6
+wg/HcAJWY60xZTJDFN+Qfx8ZQvBEin6c2/h+zZi5IVY=
+-----END RSA PRIVATE KEY-----`
+
+var certificateTime = time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+
+func rsaTestKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	testRSAOnce.Do(func() {
+		block, _ := pem.Decode([]byte(rsaTestKeyPEM))
+		if block == nil {
+			testRSAErr = errors.New("decode RSA test key")
+			return
+		}
+		testRSAKey, testRSAErr = x509.ParsePKCS1PrivateKey(block.Bytes)
+	})
+	if testRSAErr != nil {
+		t.Fatalf("load RSA test key: %v", testRSAErr)
+	}
+	return testRSAKey
+}
 
 func TestErrorConstants(t *testing.T) {
 	if x509.ErrUnsupportedAlgorithm == nil {
@@ -224,7 +269,7 @@ func TestOID(t *testing.T) {
 }
 
 func generateSelfSignedCert(t *testing.T) (*x509.Certificate, crypto.PrivateKey) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("Failed to generate private key: %v", err)
 	}
@@ -235,9 +280,9 @@ func generateSelfSignedCert(t *testing.T) (*x509.Certificate, crypto.PrivateKey)
 			Organization: []string{"Test Org"},
 			CommonName:   "test.example.com",
 		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		NotBefore:             certificateTime,
+		NotAfter:              certificateTime.Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
@@ -245,7 +290,7 @@ func generateSelfSignedCert(t *testing.T) (*x509.Certificate, crypto.PrivateKey)
 		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, pub, priv)
 	if err != nil {
 		t.Fatalf("Failed to create certificate: %v", err)
 	}
@@ -420,7 +465,7 @@ func TestSystemCertPool(t *testing.T) {
 				t.Log("SystemRootsError.Unwrap() returned nil")
 			}
 		}
-		t.Skipf("SystemCertPool not available: %v", err)
+		return
 	}
 	if pool == nil {
 		t.Error("SystemCertPool returned nil without error")
@@ -433,10 +478,7 @@ func TestSetFallbackRoots(t *testing.T) {
 }
 
 func TestMarshalPKCS1PrivateKey(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	priv := rsaTestKey(t)
 
 	der := x509.MarshalPKCS1PrivateKey(priv)
 	if len(der) == 0 {
@@ -453,10 +495,7 @@ func TestMarshalPKCS1PrivateKey(t *testing.T) {
 }
 
 func TestMarshalPKCS1PublicKey(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	priv := rsaTestKey(t)
 
 	pub := &priv.PublicKey
 	der := x509.MarshalPKCS1PublicKey(pub)
@@ -474,10 +513,7 @@ func TestMarshalPKCS1PublicKey(t *testing.T) {
 }
 
 func TestMarshalPKCS8PrivateKey(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	priv := rsaTestKey(t)
 
 	der, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
@@ -497,10 +533,7 @@ func TestMarshalPKCS8PrivateKey(t *testing.T) {
 }
 
 func TestMarshalPKIXPublicKey(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	priv := rsaTestKey(t)
 
 	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
 	if err != nil {
@@ -578,7 +611,7 @@ func TestEncryptDecryptPEMBlock(t *testing.T) {
 }
 
 func TestCreateCertificateRequest(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,12 +648,12 @@ func TestCreateRevocationList(t *testing.T) {
 
 	template := &x509.RevocationList{
 		Number:     big.NewInt(1),
-		ThisUpdate: time.Now(),
-		NextUpdate: time.Now().Add(24 * time.Hour),
+		ThisUpdate: certificateTime,
+		NextUpdate: certificateTime.Add(24 * time.Hour),
 		RevokedCertificateEntries: []x509.RevocationListEntry{
 			{
 				SerialNumber:   big.NewInt(42),
-				RevocationTime: time.Now(),
+				RevocationTime: certificateTime,
 			},
 		},
 	}
@@ -632,7 +665,7 @@ func TestCreateRevocationList(t *testing.T) {
 
 	crlDER, err := x509.CreateRevocationList(rand.Reader, template, cert, signer)
 	if err != nil {
-		t.Skipf("CreateRevocationList failed: %v", err)
+		t.Fatalf("CreateRevocationList failed: %v", err)
 	}
 
 	revList, err := x509.ParseRevocationList(crlDER)
@@ -657,13 +690,13 @@ func TestParseCRL(t *testing.T) {
 	revokedCerts := []pkix.RevokedCertificate{
 		{
 			SerialNumber:   big.NewInt(42),
-			RevocationTime: time.Now(),
+			RevocationTime: certificateTime,
 		},
 	}
 
-	crlBytes, err := cert.CreateCRL(rand.Reader, priv, revokedCerts, time.Now(), time.Now().Add(24*time.Hour))
+	crlBytes, err := cert.CreateCRL(rand.Reader, priv, revokedCerts, certificateTime, certificateTime.Add(24*time.Hour))
 	if err != nil {
-		t.Skipf("CreateCRL not supported: %v", err)
+		t.Fatalf("CreateCRL: %v", err)
 	}
 
 	crl, err := x509.ParseCRL(crlBytes)
@@ -697,14 +730,12 @@ func TestCheckSignature(t *testing.T) {
 		t.Fatal("Private key does not implement crypto.Signer")
 	}
 
-	hashed := crypto.SHA256.New()
-	hashed.Write(data)
-	signature, err := signer.Sign(rand.Reader, hashed.Sum(nil), crypto.SHA256)
+	signature, err := signer.Sign(rand.Reader, data, crypto.Hash(0))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = cert.CheckSignature(x509.SHA256WithRSA, data, signature)
+	err = cert.CheckSignature(x509.PureEd25519, data, signature)
 	if err != nil {
 		t.Errorf("Certificate.CheckSignature failed: %v", err)
 	}
@@ -719,7 +750,7 @@ func TestVerifyOptions(t *testing.T) {
 	opts := x509.VerifyOptions{
 		Roots:       pool,
 		DNSName:     "test.example.com",
-		CurrentTime: time.Now(),
+		CurrentTime: certificateTime,
 	}
 
 	chains, err := cert.Verify(opts)
@@ -793,8 +824,8 @@ func TestEd25519(t *testing.T) {
 		Subject: pkix.Name{
 			Organization: []string{"Test Org"},
 		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             certificateTime,
+		NotAfter:              certificateTime.Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
 	}
@@ -828,7 +859,7 @@ func TestEd25519(t *testing.T) {
 }
 
 func TestCertificateWithURIs(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -840,14 +871,14 @@ func TestCertificateWithURIs(t *testing.T) {
 		Subject: pkix.Name{
 			Organization: []string{"Test Org"},
 		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             certificateTime,
+		NotAfter:              certificateTime.Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
 		URIs:                  []*url.URL{uri},
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, pub, priv)
 	if err != nil {
 		t.Errorf("CreateCertificate with URIs failed: %v", err)
 	}
