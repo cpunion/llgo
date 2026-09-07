@@ -5,7 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"errors"
 	"testing"
+
+	"github.com/xgo-dev/llgo/test/internal/rsafixture"
 )
 
 func TestGenerateKey(t *testing.T) {
@@ -39,10 +42,7 @@ func TestGenerateMultiPrimeKey(t *testing.T) {
 }
 
 func TestEncryptDecryptPKCS1v15(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 
@@ -62,10 +62,7 @@ func TestEncryptDecryptPKCS1v15(t *testing.T) {
 }
 
 func TestEncryptDecryptOAEP(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 	label := []byte("test label")
@@ -88,10 +85,7 @@ func TestEncryptDecryptOAEP(t *testing.T) {
 }
 
 func TestSignVerifyPKCS1v15(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 	hashed := sha256.Sum256(msg)
@@ -114,10 +108,7 @@ func TestSignVerifyPKCS1v15(t *testing.T) {
 }
 
 func TestSignVerifyPSS(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 	hashed := sha256.Sum256(msg)
@@ -140,10 +131,7 @@ func TestSignVerifyPSS(t *testing.T) {
 }
 
 func TestPrivateKeyValidate(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	if err := priv.Validate(); err != nil {
 		t.Errorf("Validate() error = %v", err)
@@ -161,10 +149,7 @@ func TestPrivateKeyValidate(t *testing.T) {
 }
 
 func TestPrivateKeyPrecompute(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	priv.Precompute()
 
@@ -180,15 +165,9 @@ func TestPrivateKeyPrecompute(t *testing.T) {
 }
 
 func TestPrivateKeyEqual(t *testing.T) {
-	priv1, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv1 := rsafixture.New(0)
 
-	priv2, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv2 := rsafixture.New(1)
 
 	if priv1.Equal(priv2) {
 		t.Error("Different private keys reported as equal")
@@ -205,10 +184,7 @@ func TestPrivateKeyEqual(t *testing.T) {
 }
 
 func TestPrivateKeyPublic(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	pub := priv.Public()
 	if pub == nil {
@@ -229,10 +205,7 @@ func TestPrivateKeyPublic(t *testing.T) {
 }
 
 func TestPrivateKeySign(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 	hashed := sha256.Sum256(msg)
@@ -253,10 +226,7 @@ func TestPrivateKeySign(t *testing.T) {
 }
 
 func TestPrivateKeyDecrypt(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 
@@ -276,15 +246,9 @@ func TestPrivateKeyDecrypt(t *testing.T) {
 }
 
 func TestPublicKeyEqual(t *testing.T) {
-	priv1, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv1 := rsafixture.New(0)
 
-	priv2, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv2 := rsafixture.New(1)
 
 	pub1 := &priv1.PublicKey
 	pub2 := &priv2.PublicKey
@@ -304,10 +268,7 @@ func TestPublicKeyEqual(t *testing.T) {
 }
 
 func TestPublicKeySize(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	size := priv.PublicKey.Size()
 	expectedSize := 2048 / 8
@@ -329,10 +290,7 @@ func TestPSSOptionsHashFunc(t *testing.T) {
 }
 
 func TestDecryptPKCS1v15SessionKey(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	sessionKey := make([]byte, 32)
 	if _, err := rand.Read(sessionKey); err != nil {
@@ -368,10 +326,7 @@ func TestErrors(t *testing.T) {
 }
 
 func TestOAEPOptions(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 	label := []byte("test label")
@@ -381,8 +336,17 @@ func TestOAEPOptions(t *testing.T) {
 		Label: label,
 	}
 
-	ciphertext, err := priv.Decrypt(nil, msg, opts)
-	if err == nil && len(ciphertext) > 0 {
+	ciphertext, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, &priv.PublicKey, msg, label)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := priv.Decrypt(nil, ciphertext, opts)
+	if err != nil || string(plaintext) != string(msg) {
+		t.Fatalf("OAEP options decrypt = %q, %v", plaintext, err)
+	}
+	opts.Label = []byte("wrong label")
+	if _, err := priv.Decrypt(nil, ciphertext, opts); !errors.Is(err, rsa.ErrDecryption) {
+		t.Fatalf("OAEP accepted wrong label: %v", err)
 	}
 }
 
@@ -397,22 +361,17 @@ func TestPKCS1v15DecryptOptions(t *testing.T) {
 }
 
 func TestCRTValue(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	priv.Precompute()
 
-	if len(priv.Precomputed.CRTValues) == 0 {
+	if len(priv.Precomputed.CRTValues) != 0 {
+		t.Fatal("two-prime key has extra CRT values")
 	}
 }
 
 func TestPrecomputedValues(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	priv.Precompute()
 
@@ -428,10 +387,7 @@ func TestPrecomputedValues(t *testing.T) {
 }
 
 func TestPSSWithOptions(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 	hashed := sha256.Sum256(msg)
@@ -453,10 +409,7 @@ func TestPSSWithOptions(t *testing.T) {
 }
 
 func TestPSSSaltLengthEqualsHash(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	msg := []byte("test message")
 	hashed := sha256.Sum256(msg)
@@ -478,14 +431,13 @@ func TestPSSSaltLengthEqualsHash(t *testing.T) {
 }
 
 func TestCRTValueStruct(t *testing.T) {
-	priv, err := rsa.GenerateMultiPrimeKey(rand.Reader, 3, 2048)
-	if err != nil {
-		t.Fatalf("GenerateMultiPrimeKey() error = %v", err)
-	}
+	priv := rsafixture.New(2)
 
 	priv.Precompute()
 
-	if len(priv.Precomputed.CRTValues) > 0 {
+	if len(priv.Precomputed.CRTValues) != 1 {
+		t.Fatalf("three-prime CRT values = %d, want 1", len(priv.Precomputed.CRTValues))
+	} else {
 		crtVal := priv.Precomputed.CRTValues[0]
 		if crtVal.Exp == nil {
 			t.Error("CRTValue.Exp is nil")
@@ -500,10 +452,7 @@ func TestCRTValueStruct(t *testing.T) {
 }
 
 func TestPrecomputedValuesStruct(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	priv := rsafixture.New(0)
 
 	priv.Precompute()
 
