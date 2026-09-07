@@ -26,7 +26,7 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 		abi        crosscompile.WasmABI
 		buildFlags []string
 	}{
-		{name: "raw js wasm32", goos: "js"},
+		{name: "raw js wasm32", goos: "js", buildFlags: []string{"-tags=llgo,nogc"}},
 		{name: "legacy wasm alias", goos: "js", abi: crosscompile.WasmABIEmscripten, buildFlags: []string{"-tags=llgo.wasm.emscripten,tinygo.wasm,nogc"}},
 		{name: "Emscripten wasm32", goos: "js", abi: crosscompile.WasmABIEmscripten, buildFlags: []string{"-tags=llgo.wasm.emscripten,nogc"}},
 		{name: "Emscripten GC wasm32", goos: "js", abi: crosscompile.WasmABIEmscripten, buildFlags: []string{"-tags=llgo,llgo.wasm.emscripten,llgo.wasm.gc.linear"}},
@@ -73,52 +73,57 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 	}
 }
 
-func TestEmscriptenRuntimeHostImportsUseCABI(t *testing.T) {
-	conf := NewDefaultConf(ModeGen)
-	conf.Target = "emscripten"
-	var runtimeIR string
-	var sysrandIR string
-	conf.ModuleHook = func(pkg Package) {
-		if pkg.PkgPath == "runtime" {
-			runtimeIR = pkg.LPkg.String()
-		} else if pkg.PkgPath == "crypto/internal/sysrand" {
-			sysrandIR = pkg.LPkg.String()
-		}
-	}
-	pkgs, err := Do([]string{"./testdata/wasm-host"}, conf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pkgs) != 1 {
-		t.Fatalf("generated %d packages, want 1", len(pkgs))
-	}
-	if runtimeIR == "" {
-		t.Fatal("runtime module was not observed")
-	}
-	if sysrandIR == "" {
-		t.Fatal("crypto/internal/sysrand module was not observed")
-	}
-	marker := "@runtime.getRandomData"
-	at := strings.Index(runtimeIR, marker)
-	if at < 0 {
-		t.Fatalf("runtime module does not contain %s", marker)
-	}
-	lineStart := strings.LastIndex(runtimeIR[:at], "\n") + 1
-	lineEnd := strings.Index(runtimeIR[at:], "\n")
-	if lineEnd < 0 {
-		lineEnd = len(runtimeIR)
-	} else {
-		lineEnd += at
-	}
-	line := runtimeIR[lineStart:lineEnd]
-	if !strings.HasPrefix(line, "define ") {
-		t.Fatalf("runtime.getRandomData is not defined by the Emscripten C-ABI bridge: %s", line)
-	}
-	if !strings.Contains(sysrandIR, marker) {
-		t.Fatalf("crypto/internal/sysrand does not call %s", marker)
-	}
-	if strings.Contains(sysrandIR, `"wasm-import-name"="runtime.getRandomData"`) {
-		t.Fatal("crypto/internal/sysrand retains the official gojs host import in the Emscripten profile")
+func TestJSWasmRuntimeHostImportsUseCABI(t *testing.T) {
+	for _, target := range []string{"", "emscripten"} {
+		t.Run(map[bool]string{true: "GJS", false: "Emscripten"}[target == ""], func(t *testing.T) {
+			conf := NewDefaultConf(ModeGen)
+			conf.Goos, conf.Goarch = "js", "wasm"
+			conf.Target = target
+			var runtimeIR string
+			var sysrandIR string
+			conf.ModuleHook = func(pkg Package) {
+				if pkg.PkgPath == "runtime" {
+					runtimeIR = pkg.LPkg.String()
+				} else if pkg.PkgPath == "crypto/internal/sysrand" {
+					sysrandIR = pkg.LPkg.String()
+				}
+			}
+			pkgs, err := Do([]string{"./testdata/wasm-host"}, conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pkgs) != 1 {
+				t.Fatalf("generated %d packages, want 1", len(pkgs))
+			}
+			if runtimeIR == "" {
+				t.Fatal("runtime module was not observed")
+			}
+			if sysrandIR == "" {
+				t.Fatal("crypto/internal/sysrand module was not observed")
+			}
+			marker := "@runtime.getRandomData"
+			at := strings.Index(runtimeIR, marker)
+			if at < 0 {
+				t.Fatalf("runtime module does not contain %s", marker)
+			}
+			lineStart := strings.LastIndex(runtimeIR[:at], "\n") + 1
+			lineEnd := strings.Index(runtimeIR[at:], "\n")
+			if lineEnd < 0 {
+				lineEnd = len(runtimeIR)
+			} else {
+				lineEnd += at
+			}
+			line := runtimeIR[lineStart:lineEnd]
+			if !strings.HasPrefix(line, "define ") {
+				t.Fatalf("runtime.getRandomData is not defined by the Emscripten C-ABI bridge: %s", line)
+			}
+			if !strings.Contains(sysrandIR, marker) {
+				t.Fatalf("crypto/internal/sysrand does not call %s", marker)
+			}
+			if strings.Contains(sysrandIR, `"wasm-import-name"="runtime.getRandomData"`) {
+				t.Fatal("crypto/internal/sysrand retains the official gojs host import")
+			}
+		})
 	}
 }
 

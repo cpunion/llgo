@@ -204,6 +204,25 @@ func TestRunNativeTest(t *testing.T) {
 		}
 	})
 
+	t.Run("Go-compatible wasm runner", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		program := testProgram{
+			app:              "program.wasm",
+			pkgDir:           t.TempDir(),
+			pkgName:          "wasm",
+			runner:           fmt.Sprintf("%q -test.run=^TestRunNativeTestHelper$ -- success %q", executable, "{}"),
+			runnerProfile:    "GWASI",
+			runnerEnv:        map[string]string{"": "program.wasm"},
+			temporaryOutputs: &OutFmtDetails{},
+		}
+		if err := runNativeTest(commands, program, &Config{PrintCommands: true}, &stdout, &stderr); err != nil {
+			t.Fatalf("runNativeTest with wasm runner: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "PASS") || !strings.Contains(stderr.String(), executable) || !strings.Contains(stderr.String(), "program.wasm") {
+			t.Fatalf("runner output not captured: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	})
+
 	t.Run("exit error", func(t *testing.T) {
 		var stderr bytes.Buffer
 		conf := &Config{RunArgs: append(args, "exit")}
@@ -226,6 +245,21 @@ func TestRunNativeTest(t *testing.T) {
 			t.Fatalf("stderr = %q, want start error", got)
 		}
 	})
+}
+
+func TestGoCompatibleWasmRunner(t *testing.T) {
+	t.Setenv("LLGO_WASM_RUNTIME", "wasmtime")
+	js, profile := goCompatibleWasmRunner(&Config{Goos: "js", Goarch: "wasm"})
+	if profile != "GJS" || !strings.Contains(js, "emscripten-runner.mjs") || !strings.Contains(js, "{}") {
+		t.Fatalf("js runner = %q, profile %q", js, profile)
+	}
+	wasi, profile := goCompatibleWasmRunner(&Config{Goos: "wasip1", Goarch: "wasm"})
+	if profile != "GWASI" || wasi != `wasmtime --wasm multi-memory=true "{}"` {
+		t.Fatalf("WASI runner = %q, profile %q", wasi, profile)
+	}
+	if runner, profile := goCompatibleWasmRunner(&Config{Target: "wasi", Goos: "wasip1", Goarch: "wasm"}); runner != "" || profile != "" {
+		t.Fatalf("named target acquired raw runner %q, profile %q", runner, profile)
+	}
 }
 
 func TestRunNativeTestHelper(t *testing.T) {
