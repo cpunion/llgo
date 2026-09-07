@@ -228,6 +228,8 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 		switch {
 		case e.Package == "test/goroot":
 			e.Status, e.Reason = "separate-suite", "host-side target runner is executed by the wasm GOROOT acceptance jobs"
+		case e.Package == "test/cmd/llgo":
+			e.Status, e.Reason = "separate-suite", "compiler-driver subprocess tests execute in the regular host CI suite"
 		case !exists || len(pkg.TestGoFiles)+len(pkg.XTestGoFiles) == 0:
 			e.Status, e.Reason = "source-excluded", "no tests selected by source context; applicability not yet established"
 		case pkg.Error != nil:
