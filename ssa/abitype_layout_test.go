@@ -122,6 +122,40 @@ func TestWasm32NestedStructLayoutMatchesReflectionOffsets(t *testing.T) {
 	}
 }
 
+func TestWasmLayoutAdapterPreservesOtherAggregateABIs(t *testing.T) {
+	for _, target := range []*Target{
+		{GOOS: "windows", GOARCH: "arm64"},
+		{GOOS: "windows", GOARCH: "amd64"},
+		{GOOS: "linux", GOARCH: "arm"},
+		{GOOS: "js", GOARCH: "wasm", LLVMTarget: "wasm64-unknown-emscripten", WasmABI: "emscripten-memory64"},
+	} {
+		t.Run(target.GOOS+"/"+target.GOARCH, func(t *testing.T) {
+			prog := NewProgram(target)
+			defer prog.Dispose()
+			ptr := types.NewPointer(types.Typ[types.Byte])
+			empty := types.NewStruct(nil, nil)
+			fields := []*types.Var{
+				types.NewField(token.NoPos, nil, "P", ptr, false),
+				types.NewField(token.NoPos, nil, "Q", ptr, false),
+				types.NewField(token.NoPos, nil, "Empty", empty, false),
+			}
+			st := types.NewStruct(fields, nil)
+			for name, raw := range map[string]types.Type{
+				"struct": st,
+				"tuple":  types.NewTuple(fields...),
+			} {
+				typ := prog.Type(raw, InGo)
+				if got, want := prog.SizeOf(typ), uint64(2*prog.PointerSize()); got != want {
+					t.Errorf("%s callable size = %d, want %d", name, got, want)
+				}
+				if _, ok := prog.structLayout(typ); ok {
+					t.Errorf("%s unexpectedly uses the wasm32/386 layout adapter", name)
+				}
+			}
+		})
+	}
+}
+
 func TestGo386StructLayoutEdgeCases(t *testing.T) {
 	prog := NewProgram(&Target{GOOS: "windows", GOARCH: "386"})
 	defer prog.Dispose()
