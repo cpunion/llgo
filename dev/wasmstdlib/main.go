@@ -177,11 +177,15 @@ func validateOutput(output []byte, witness string) (int, error) {
 			continue
 		}
 		status, rest, ok := strings.Cut(line[marker+4:], ": ")
-		if status == "FAIL" || status == "SKIP" {
-			return 0, fmt.Errorf("failed or skipped test: %s", line[marker:])
-		}
 		fields := strings.Fields(rest)
-		if ok && status == "PASS" && len(fields) == 2 && strings.HasPrefix(fields[1], "(") && strings.HasSuffix(fields[1], ")") && !strings.Contains(fields[0], "/") {
+		validRecord := ok && len(fields) == 2 && strings.HasPrefix(fields[1], "(") && strings.HasSuffix(fields[1], ")")
+		if status == "FAIL" || status == "SKIP" && (!validRecord || !strings.Contains(fields[0], "/")) {
+			return 0, fmt.Errorf("failed or skipped top-level test: %s", line[marker:])
+		}
+		// A skipped subtest can itself be the behavior under test (for example,
+		// testing.Run's SkipNow contract). The enclosing top-level test must
+		// still pass and the package witness must still execute.
+		if validRecord && status == "PASS" && !strings.Contains(fields[0], "/") {
 			tests++
 			found = found || fields[0] == witness
 		}
