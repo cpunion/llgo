@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -114,6 +115,50 @@ func TestFullProfileCommandsKeepLLGoAndReferenceDistinct(t *testing.T) {
 		if p.Target == "" && (cmd.Env["GOOS"] != p.GOOS || cmd.Env["GOARCH"] != "wasm") {
 			t.Fatalf("lost raw profile: %+v", cmd)
 		}
+	}
+}
+
+func TestFullSourceContextMatchesCompilerProfiles(t *testing.T) {
+	tests := []struct {
+		name, wantCGO string
+		wantTags      []string
+	}{
+		{"EC32", "1", []string{"llgo", "llgo.wasm.gc.linear", "llgo.wasm.emscripten"}},
+		{"EC64", "1", []string{"llgo", "llgo.wasm.gc.linear", "llgo.wasm.emscripten", "llgo.wasm.emscripten.memory64"}},
+		{"WC32", "1", []string{"llgo", "llgo.wasm.gc.linear", "llgo.wasm.wasi"}},
+		{"GJS", "0", []string{"llgo", "nogc"}},
+		{"GWASI", "0", []string{"llgo", "nogc"}},
+		{"GJS-reference", "0", nil},
+		{"GWASI-reference", "0", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := fullProfile(tt.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tags, cgo := fullSourceContext(p)
+			if cgo != tt.wantCGO {
+				t.Fatalf("CGO_ENABLED=%q, want %q", cgo, tt.wantCGO)
+			}
+			for _, want := range tt.wantTags {
+				if !slices.Contains(strings.Split(tags, ","), want) {
+					t.Fatalf("tags %q do not contain %q", tags, want)
+				}
+			}
+			if len(tt.wantTags) == 0 && tags != "" {
+				t.Fatalf("reference tags = %q", tags)
+			}
+		})
+	}
+}
+
+func TestFullDSATimeoutIsTargeted(t *testing.T) {
+	if got := fullTestTimeout("test/std/crypto/dsa"); got != "3m" {
+		t.Fatalf("DSA timeout = %q", got)
+	}
+	if got := fullTestTimeout("test/std/crypto/aes"); got != "60s" {
+		t.Fatalf("default timeout = %q", got)
 	}
 }
 
