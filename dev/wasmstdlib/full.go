@@ -158,6 +158,10 @@ func fullSourceExclusion(p profile, pkg string) (string, bool) {
 		return "tests select Unix or Windows syscall surfaces, neither of which is the js/wasm or wasip1/wasm ABI", true
 	case "test/windows":
 		return "Windows-only integration suite", true
+	case "test/std/runtime/cgo":
+		if p.Reference {
+			return "official Go runtime/cgo requires native C runtime symbols and cannot link on wasm; LLGo handle tests remain mandatory on every LLGo profile", true
+		}
 	case "test/cgo":
 		if p.Target == "" {
 			return "raw Go-compatible wasm profiles have no C interop; the same suite is mandatory on EC32, EC64, and WC32", true

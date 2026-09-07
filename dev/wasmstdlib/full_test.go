@@ -176,6 +176,19 @@ func TestFullAuditAcceptsReviewedSourceExclusions(t *testing.T) {
 	}
 }
 
+func TestRuntimeCGOExclusionIsReferenceOnly(t *testing.T) {
+	for _, name := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
+		p, err := fullProfile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reason, excluded := fullSourceExclusion(p, "test/std/runtime/cgo")
+		if excluded != p.Reference || excluded && reason == "" {
+			t.Fatalf("%s runtime/cgo exclusion = %q, %v", name, reason, excluded)
+		}
+	}
+}
+
 func TestFullProfileCommandsKeepLLGoAndReferenceDistinct(t *testing.T) {
 	for _, name := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
 		p, err := fullProfile(name)
