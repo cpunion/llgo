@@ -47,6 +47,15 @@ Go 1.27; changing the discovery mode preserves the existing shard count.
 
 The seven-directive inventory selects 1,152 cases per profile in Go 1.27.
 
+Wasm host tests distinguish unsupported OS facilities from implemented APIs.
+Signal tests cover registration, rejection of nil channels and context
+cancellation, not native signal delivery. They do not require reproducing Go's
+zero-length signal-table panic from `Ignored(os.Interrupt)`. CPU profiler tests
+retain Start/Stop/restart and profile metadata checks on wasm, where official
+Go has no CPU sampling timer; native profiles still require sampled symbols.
+Default archive import resolution checks the unavailable host-compiler error,
+and a separate source importer test type-checks real fixture files in the guest.
+
 Each GOROOT shard uploads an incremental JSON report alongside its full log.
 Actual `pass`, `fail`, and `not-run` counts remain distinct, and a timeout
 leaves `complete: false`. Failed build/run diagnostics are retained per case.
