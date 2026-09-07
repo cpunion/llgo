@@ -41,6 +41,11 @@ func cooperativeSafepointSlow() {
 	if currentG == nil || currentG == &wasmSched.systemG {
 		return
 	}
+	// A runtime transition may have changed the G's status before switching
+	// stacks. Only a running G can yield through this scheduling path.
+	if readgstatus(currentG) != _Grunning {
+		return
+	}
 	pollWasmEvents()
 	if wasmSched.runq.Len() != 0 {
 		goschedBackend()
